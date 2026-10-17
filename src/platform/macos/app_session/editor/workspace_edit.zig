@@ -16,6 +16,8 @@ const editor_ops = @import("mod.zig");
 const lsp = maru.session.editor.lsp;
 const delta_mod = maru.session.editor.delta;
 const editor_selection = maru.session.editor.selection;
+const publication = @import("shared_edit.zig");
+const forward = maru.session.editor.history_forward;
 
 pub const FileRecord = struct {
     path: []u8,
@@ -26,13 +28,15 @@ pub const FileRecord = struct {
 
 pub const Record = struct {
     files: []FileRecord,
+    /// 부분 적용 뒤에도 축소 할당 없이 준비한 저장소를 인계한다.
+    allocation: ?[]FileRecord = null,
 
     pub fn deinit(self: *Record, allocator: std.mem.Allocator) void {
         for (self.files) |*f| {
             allocator.free(f.path);
             f.inverse.deinit(allocator);
         }
-        allocator.free(self.files);
+        allocator.free(self.allocation orelse self.files);
         self.* = .{ .files = &.{} };
     }
 };
@@ -114,9 +118,11 @@ pub fn apply(self: *AppSession, parsed: lsp.workspace_edit.Parsed, enc: lsp.rpc.
             return .{ .refused = .{ .outside_root = keepPath(path) } };
         }
         var item: Item = .{ .path = self.allocator.dupe(u8, path) catch return .{ .refused = .out_of_memory } };
-        errdefer item.deinit(self.allocator);
         var opens: std.ArrayList(OpenItem) = .empty;
-        defer opens.deinit(self.allocator);
+        defer {
+            for (opens.items) |*o| o.changes.deinit(self.allocator);
+            opens.deinit(self.allocator);
+        }
         var it = TermIter{ .self = self };
         while (it.next()) |term| {
             if (term.kind != .editor or term.rt.editor_diff != null) continue;
@@ -159,7 +165,6 @@ pub fn apply(self: *AppSession, parsed: lsp.workspace_edit.Parsed, enc: lsp.rpc.
         }
         if (opens.items.len > 0) {
             item.open = opens.toOwnedSlice(self.allocator) catch {
-                for (opens.items) |*o| o.changes.deinit(self.allocator);
                 item.deinit(self.allocator);
                 return .{ .refused = .out_of_memory };
             };
@@ -193,106 +198,176 @@ pub fn apply(self: *AppSession, parsed: lsp.workspace_edit.Parsed, enc: lsp.rpc.
     return applyPlan(self, items.items);
 }
 
-/// 검증을 지난 계획을 적용한다(`apply` 와 `undoLast` 가 같이 쓴다). 열린 Term 은 `applyEditAsOne`(undo 하나), 디스크는 메모리 적용 → 쓰기.
-/// 그 뒤 저장 정책과 기록. 디스크 쓰기가 중간에 실패하면 거기서 멈추고 그때까지의 것을 기록한다(되돌릴 수 있게).
-fn applyPlan(self: *AppSession, items: []Item) Outcome {
-    const st = &self.editor_workspace_edit;
-    var records: std.ArrayList(FileRecord) = .empty;
-    errdefer {
-        for (records.items) |*r| {
-            self.allocator.free(r.path);
-            r.inverse.deinit(self.allocator);
-        }
-        records.deinit(self.allocator);
+// 선택·이력·공유 뷰 게시 자원까지 준비한다. L2 forward가 본문과 Undo를 준비하며,
+// 이 배선은 기존 단일 문서 Undo 계약을 유지한다(연결된 작업을 새로 만들지 않는다).
+const PreparedOpen = struct {
+    session: *AppSession,
+    term: *Term,
+    changes: lsp.text_edits.Changes,
+    sels: editor_selection.Selections = undefined,
+    have_sels: bool = false,
+    model: ?forward.Prepared = null,
+    view: ?publication.Publication = null,
+    no_selection: bool,
+    scroll: ?editor_ops.ScrollAnchor,
+    rows: usize,
+    cols: u16,
+    max_cols: u32,
+    span: ?editor_ops.syntax_color.EditSpan = null,
+
+    fn prepare(self: *PreparedOpen) !void {
+        const a = self.session.allocator;
+        self.sels = editor_ops.snapshotSelections(a, self.term) catch |err| blk: {
+            if (err != error.NoSelection) return err;
+            break :blk editor_selection.Selections.init(try a.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(0)}), 0);
+        };
+        self.have_sels = true;
+        const state = self.term.rt.editorDocument();
+        const targets = [_]forward.Target{.{ .file = &state.opened.?.file, .state = &state.history, .selections = &self.sels, .changes = self.changes.items, .view_id = self.term.surface.id }};
+        self.model = try forward.Prepared.prepareIncludingUnchanged(a, &targets);
+        self.span = editor_ops.syntax_color.spanFromInverse(self.model.?.items.items[0].entry.inverse.changes);
+        self.view = try publication.preparePublication(self.session, self.term, self.changes.delta(), self.sels.items.len, true);
     }
-    var edits_total: usize = 0;
-    var touched: usize = 0;
-    var failed_write: ?[]const u8 = null;
-    for (items) |*item| {
-        var any = false;
-        var inverse: ?lsp.text_edits.Changes = null;
-        var after_hash: u64 = 0;
+    fn deinit(self: *PreparedOpen) void {
+        if (self.view) |*view| view.deinit();
+        if (self.model) |*model| model.deinit();
+        if (self.have_sels) self.session.allocator.free(self.sels.items);
+    }
+    fn commit(self: *PreparedOpen) !void {
+        try self.model.?.commit();
+        self.view.?.publish();
+        editor_ops.completion_client.noteDocumentEdit(self.session, self.term, self.changes.delta());
+        editor_ops.writeBackSelections(self.session, self.term, self.sels);
+        if (self.no_selection) self.term.rt.editor_selection = null;
+        self.view.?.finish(self.span);
+        editor_ops.refreshAfterEdit(self.session, self.term, self.span) catch {};
+        editor_ops.restoreScrollAnchor(self.session, self.term, self.scroll, self.changes.delta());
+        editor_ops.revealPrimaryCaretRows(self.session, self.term, self.rows);
+        editor_ops.revealPrimaryCaretCols(self.session, self.term, self.cols, self.max_cols);
+        self.session.metal_dirty = true;
+    }
+};
+const PreparedFile = struct {
+    open: []PreparedOpen = &.{},
+    initialized: usize = 0,
+    bytes: ?[]u8 = null,
+    record: ?FileRecord = null,
+    fn deinit(self: *PreparedFile, a: std.mem.Allocator) void {
+        for (self.open[0..self.initialized]) |*o| o.deinit();
+        a.free(self.open);
+        if (self.bytes) |bytes| a.free(bytes);
+        if (self.record) |*r| {
+            a.free(r.path);
+            r.inverse.deinit(a);
+        }
+    }
+};
+/// 준비 실패는 모든 정본과 기존 기록을 보존한다. 디스크 쓰기 실패는 기존 정책대로
+/// 그때까지 적용한 파일만 기록하여 되돌릴 수 있게 한다.
+fn applyPlan(self: *AppSession, items: []Item) Outcome {
+    return applyPreparedPlan(self, items) catch |err| {
+        if (err == error.OutOfMemory) return .{ .refused = .out_of_memory };
+        self.editor_workspace_edit.refused_rejected += 1;
+        return .{ .refused = .{ .rejected = keepPath(if (items.len > 0) items[0].path else "") } };
+    };
+}
+fn applyPreparedPlan(self: *AppSession, items: []Item) !Outcome {
+    const a = self.allocator;
+    const st = &self.editor_workspace_edit;
+    const prepared = try a.alloc(PreparedFile, items.len);
+    defer a.free(prepared);
+    @memset(prepared, .{});
+    defer for (prepared) |*p| p.deinit(a);
+    var records: std.ArrayList(FileRecord) = .empty;
+    defer {
+        for (records.items) |*r| {
+            a.free(r.path);
+            r.inverse.deinit(a);
+        }
+        records.deinit(a);
+    }
+    try records.ensureTotalCapacity(a, items.len);
+    // 반영 전에 파일 내용·Undo·뷰 게시·디스크 bytes·경로/역연산 기록을 전부 준비한다.
+    for (items, prepared) |*item, *p| {
+        p.open = try a.alloc(PreparedOpen, item.open.len);
         for (item.open) |o| {
             if (o.changes.items.len == 0) continue;
-            const doc = o.term.rt.editorDocument().opened.?;
-            const inv = lsp.text_edits.inverseOf(self.allocator, doc.file.content, o.changes.items) catch return .{ .refused = .out_of_memory };
-            if (!editor_ops.applyEditAsOne(self, o.term, o.changes.items)) {
-                var i = inv;
-                i.deinit(self.allocator);
-                continue;
-            }
-            any = true;
-            edits_total += o.changes.items.len;
-            // 같은 경로를 든 Term 이 여럿이면 기록은 하나(내용이 같아야 되돌릴 수 있다 — 첫 것 기준).
-            if (inverse) |*old| {
-                old.deinit(self.allocator);
-            }
-            inverse = inv;
-            after_hash = editor_ops.contentHash(o.term.rt.editorDocument().opened.?.file.content);
+            const slot = &p.open[p.initialized];
+            slot.* = .{ .session = self, .term = o.term, .changes = o.changes, .no_selection = editor_ops.selections(o.term).count() == 0, .scroll = editor_ops.captureScrollAnchor(o.term), .rows = editor_ops.drawnDocLines(o.term), .cols = editor_ops.drawnContentCols(o.term), .max_cols = o.term.rt.editor_max_cols };
+            p.initialized += 1;
+            try slot.prepare();
         }
+        const record_changes = if (p.initialized > 0) p.open[p.initialized - 1].changes else if (item.disk) |d| d.changes else continue;
+        if (record_changes.items.len == 0) continue;
+        const before = if (p.initialized > 0) p.open[p.initialized - 1].term.rt.editorDocument().opened.?.file.content else item.disk.?.opened.file.content;
+        var inv = try lsp.text_edits.inverseOf(a, before, record_changes.items);
+        errdefer inv.deinit(a);
+        const path = try a.dupe(u8, item.path);
+        p.record = .{ .path = path, .inverse = inv, .after_hash = 0 };
+        // 이후 실패 정리는 PreparedFile이 소유한다.
+        inv = .{};
         if (item.disk) |*d| {
-            if (d.changes.items.len > 0) {
-                const inv = lsp.text_edits.inverseOf(self.allocator, d.opened.file.content, d.changes.items) catch return .{ .refused = .out_of_memory };
-                var sel_items = [_]editor_selection.Selection{.{ .anchor_start = 0, .anchor_end = 0, .focus = 0 }};
-                var sels = editor_selection.Selections.init(&sel_items, 0);
-                var applied_inv = d.opened.file.apply(d.changes.delta(), &sels) catch {
-                    var i = inv;
-                    i.deinit(self.allocator);
-                    failed_write = keepPath(item.path);
-                    break;
-                };
-                applied_inv.deinit();
-                const bytes = d.opened.file.saveBytes(self.allocator) catch return .{ .refused = .out_of_memory };
-                defer self.allocator.free(bytes);
-                // ⚠️ **일괄 경로는 파일마다 알림을 띄우지 않는다**(§3.9d) — 스무 파일을 고치면 스무
-                // 개가 뜬다. 이유는 여기서 버리고, 그 자리의 요약이 「몇 개가 됐나」로 말한다.
-                editor_ops.writeDocumentBytes(self, item.path, bytes, null) catch {
-                    var i = inv;
-                    i.deinit(self.allocator);
-                    failed_write = keepPath(item.path);
-                    break;
-                };
-                any = true;
-                edits_total += d.changes.items.len;
-                inverse = inv;
-                after_hash = editor_ops.contentHash(d.opened.file.content);
-                st.saved_files += 1;
-            }
-        }
-        if (!any) continue;
-        touched += 1;
-        records.append(self.allocator, .{
-            .path = self.allocator.dupe(u8, item.path) catch return .{ .refused = .out_of_memory },
-            .inverse = inverse.?,
-            .after_hash = after_hash,
-        }) catch return .{ .refused = .out_of_memory };
-    }
-    // 저장 정책 — 관련 파일이 둘 이상이면 열린 Term 도 저장한다(하나면 dirty 로 둔다).
-    if (touched > 1) {
-        for (items) |*item| {
-            for (item.open) |o| {
-                if (o.changes.items.len == 0) continue;
-                // 일괄 경로 — 이유는 여기서 버린다(§3.9d: 파일마다 알림을 띄우지 않는다). 성공만 센다.
-                //
-                // ⚠️ **저쪽 문서는 건너뛴다**(U3). 그 저장은 **왕복**이고 in-flight 가 하나뿐이라, 여기서
-                // 걸면 첫 파일만 나가고 나머지는 「바쁘다」 알림을 **파일마다** 띄운다 — §3.9d 가 이
-                // 경로에서 막으려던 바로 그것이다. 저장이 안 된 문서는 **dirty 로 남아** 표식이 말한다.
-                if (o.term.rt.editorDocument().remote != null) continue;
-                if (editor_ops.isDirty(o.term)) {
-                    if (editor_ops.saveDocument(self, o.term)) |_| {
-                        st.saved_files += 1;
-                    } else |_| {}
-                }
-            }
+            var sel_items = [_]editor_selection.Selection{editor_selection.Selection.at(0)};
+            var sels = editor_selection.Selections.init(&sel_items, 0);
+            var inverse = try d.opened.file.apply(d.changes.delta(), &sels);
+            inverse.deinit();
+            p.bytes = try d.opened.file.saveBytes(a);
+            p.record.?.after_hash = editor_ops.contentHash(d.opened.file.content);
+        } else {
+            p.record.?.after_hash = editor_ops.contentHash(p.open[p.initialized - 1].model.?.items.items[0].next.content);
         }
     }
-    if (st.last) |*old| old.deinit(self.allocator);
-    st.last = if (records.items.len > 0) .{ .files = records.toOwnedSlice(self.allocator) catch return .{ .refused = .out_of_memory } } else null;
+    // URI 철자가 달라도 같은 정본을 가리킬 수 있다. 뒤쪽 결산에서 낡음을
+    // 발견하기 전에 중립 코어의 중복 검사를 전체 대상에 적용한다.
+    var targets: std.ArrayList(forward.Target) = .empty;
+    defer targets.deinit(a);
+    for (prepared) |*p| for (p.open[0..p.initialized]) |*o| {
+        try targets.append(a, o.model.?.items.items[0].target);
+    };
+    try forward.validateDistinct(targets.items);
+    var edits_total: usize = 0;
+    var failed_write: ?[]const u8 = null;
+    // 준비와 결산은 같은 actor에서 진행한다. 본문·이력 교체에는 할당이 없다.
+    for (items, prepared) |*item, *p| {
+        if (p.record == null) continue;
+        for (p.open[0..p.initialized]) |*o| {
+            try o.commit();
+            edits_total += o.changes.items.len;
+        }
+        if (p.bytes) |bytes| {
+            editor_ops.writeDocumentBytes(self, item.path, bytes, null) catch {
+                failed_write = keepPath(item.path);
+                break;
+            };
+            st.saved_files += 1;
+            edits_total += item.disk.?.changes.items.len;
+        }
+        records.appendAssumeCapacity(p.record.?);
+        p.record = null;
+    }
+    const touched = records.items.len;
+    // 기존 여러 파일 자동 저장 정책은 유지한다. 저장 실패는 dirty 문서와 Undo를 남긴다.
+    if (touched > 1) for (items, prepared) |*item, *p| {
+        if (p.record != null) continue; // 쓰기 실패 뒤 아직 적용하지 않은 문서는 저장하지 않는다.
+        for (item.open) |o| {
+            if (o.changes.items.len == 0 or o.term.rt.editorDocument().remote != null) continue;
+            if (editor_ops.isDirty(o.term)) {
+                if (editor_ops.saveDocument(self, o.term)) |_| {
+                    st.saved_files += 1;
+                } else |_| {}
+            }
+        }
+    };
+    if (touched > 0 or failed_write == null) {
+        if (st.last) |*old| old.deinit(a);
+        st.last = if (touched > 0) .{ .files = records.items, .allocation = records.allocatedSlice() } else null;
+        if (touched > 0) records = .empty;
+    }
     st.applied_files += touched;
     st.applied_edits += edits_total;
-    if (failed_write) |p| {
+    if (failed_write) |path| {
         st.refused_rejected += 1;
-        return .{ .refused = .{ .rejected = p } };
+        return .{ .refused = .{ .rejected = path } };
     }
     return .{ .applied = touched };
 }
@@ -317,7 +392,10 @@ pub fn undoLast(self: *AppSession) UndoOutcome {
     for (rec.files) |f| {
         var item: Item = .{ .path = self.allocator.dupe(u8, f.path) catch return .out_of_memory };
         var opens: std.ArrayList(OpenItem) = .empty;
-        defer opens.deinit(self.allocator);
+        defer {
+            for (opens.items) |*o| o.changes.deinit(self.allocator);
+            opens.deinit(self.allocator);
+        }
         var it = TermIter{ .self = self };
         while (it.next()) |term| {
             if (term.kind != .editor or term.rt.editor_diff != null) continue;
@@ -329,6 +407,10 @@ pub fn undoLast(self: *AppSession) UndoOutcome {
                 st.undo_refused += 1;
                 return .{ .changed = keepPath(f.path) };
             }
+            const already_prepared = for (opens.items) |open| {
+                if (open.term.rt.editorDocument() == term.rt.editorDocument()) break true;
+            } else false;
+            if (already_prepared) continue;
             const changes = dupChanges(self.allocator, f.inverse) catch {
                 item.deinit(self.allocator);
                 return .out_of_memory;
@@ -342,7 +424,6 @@ pub fn undoLast(self: *AppSession) UndoOutcome {
         }
         if (opens.items.len > 0) {
             item.open = opens.toOwnedSlice(self.allocator) catch {
-                for (opens.items) |*o| o.changes.deinit(self.allocator);
                 item.deinit(self.allocator);
                 return .out_of_memory;
             };

@@ -1619,3 +1619,11 @@ Mac 화면 잠금·검은 캡처는 통과로 취급하지 않는다. 물리 한
 CMP1~12 제품 판정자와 import 초기화 검사 4개(총 16개)를 실행한다. CMP3는 가득 찬 Undo와
 기존 Redo 상태에서 확정 중 할당 실패를 순회해 본문·선택·revision·이력 보존을 검사한다.
 실제 OS 입력기 화면 검증은 포함하지 않는다.
+
+### LSP WorkspaceEdit 사전 준비
+
+`mise exec -- zig build test-editor-workspace-edit`와 `-Doptimize=ReleaseFast`는
+이름 바꾸기·코드 액션·공유 뷰 제품 회귀와 WEOOM1 실패 주입을 실행한다(총 20개).
+단일/여러 열린 문서·닫힌 파일 혼합, Undo/Redo·선택·revision 보존, 동일 본문 편집,
+선택 없는 뷰, 이력 ID 고갈, 공유 정본의 작업 되돌리기를 검사한다.
+물리 IME·실제 메모리 고갈·전원 손실의 검증을 대신하지 않는다.

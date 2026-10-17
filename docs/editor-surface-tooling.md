@@ -708,13 +708,20 @@ revision 은 `documentChanges` 의 `version` 이 있을 때만 검사한다(clan
 | **입력 상자** | 기존 인라인 rename 의 새 대상 `RenameTarget.symbol{surface, offset, revision}` — caret 아래 **낱말**(식별자: 글자·숫자·`_`·비ASCII)을 씨앗으로, 낱말 첫 글자 셀 아래 팝업(`popup_box` `below_flip_up`, 호버 상자와 같은 간격)에 `input_box`(끝 caret). `Enter` 확정 · `Esc` 취소 · 비었거나 같은 이름이면 요청 없이 닫는다. 모달이라 열린 동안 문서는 안 바뀐다 | `prepareRename` 은 하지 않는다 — 상자를 즉시 띄우고, 못 바꾸는 자리는 서버의 오류 응답을 알림으로 낸다 |
 | **요청** | id `5e8+seq`, `textDocument/rename{position, newName}`. 보내기 전 밀린 didChange 를 먼저(`flushDocument`). 한 번에 하나 — 새 요청이 앞 것을 대체(§8.2e 와 같다) | |
 | **응답 모양** | `changes`(uri → TextEdit[]) 와 `documentChanges`(TextDocumentEdit[] — 같은 uri 는 이어 붙인다) 둘 다 받는다. `CreateFile`·`RenameFile`·`DeleteFile` 이 하나라도 있으면 **전체 거부** + 알림. `file:` 이 아닌 uri 도 전체 거부 | 반만 적용된 rename 은 컴파일되지 않는 코드다 |
-| **검증 → 적용** | 먼저 **모든 파일**을 검증하고 하나라도 틀리면 **아무것도 적용하지 않는다**: root 밖(`withinNavRoot`) · 열린 문서의 revision(그 문서를 든 모든 Term: 서버가 마지막으로 본 `sent_version == notifications.lsp_version`, `documentChanges.version` 이 있으면 그것도 같아야) · 읽기 전용 · `toChanges` 의 겹침/모양 · 열려 있지 않은 파일은 읽어서(§3.5 의 `openPath` — UTF-8·BOM·CRLF 보존, 상한 §8.2a) 같은 검증. 그 다음 적용: 열린 Term 은 `applyEditAsOne`(서로 다른 정본마다 undo 하나; 같은 State의 연결 뷰는 한 번 적용), 열려 있지 않은 파일은 메모리에서 적용해 저장 경로(`writeDocumentBytes` — 외부 변경 검사)로 쓴다 | §3.6 · VS Code 보다 엄격한 revision(`changes` 맵에도 검사) |
+| **검증 → 적용** | 먼저 **모든 파일**을 검증하고 하나라도 틀리면 **아무것도 적용하지 않는다**: root 밖(`withinNavRoot`) · 열린 문서의 revision(그 문서를 든 모든 Term: 서버가 마지막으로 본 `sent_version == notifications.lsp_version`, `documentChanges.version` 이 있으면 그것도 같아야) · 읽기 전용 · `toChanges` 의 겹침/모양 · 열려 있지 않은 파일은 읽어서(§3.5 의 `openPath` — UTF-8·BOM·CRLF 보존, 상한 §8.2a) 같은 검증. 그 다음 적용: 열린 Term 은 L2 `history_forward.Prepared`로 본문·Undo를 준비하고, 공유 뷰 게시와 경로·역연산 기록까지 모든 파일에서 확보한 뒤 반영한다(서로 다른 정본마다 undo 하나; 같은 State의 연결 뷰는 한 번 적용), 열려 있지 않은 파일은 메모리에서 적용해 저장 경로(`writeDocumentBytes` — 외부 변경 검사)로 쓴다 | §3.6 · VS Code 보다 엄격한 revision(`changes` 맵에도 검사) |
 | **저장** | 관련 파일이 **두 개 이상**이면 열린 Term 도 `saveDocument` 로 저장한다(열려 있지 않은 파일은 늘 저장 — 버퍼가 없다). **한 파일**이면 저장하지 않고 dirty 로 둔다 | VS Code `files.refactoring.autoSave` 기본(2026-09-19 사용자 결정) |
 | **기록** | 적용에 성공한 WorkspaceEdit 하나를 세션이 든다: 이름·파일마다 {경로, **역연산**(`delta.apply` 가 돌려준 것, 텍스트 소유), 적용 직후 **내용 해시**}. 새 rename 이 성공하면 갈아 끼운다. 되돌리기는 이 기록 위에 선다 | VS Code 의 역편집 보관과 같은 원리 — 되돌리기는 서버에 다시 묻지 않는다 |
-| **`undo_workspace_edit`** | 팔레트 「Editor: Undo Last Rename」(기본 chord 없음). 기록의 **모든 파일**을 먼저 검증: 열린 Term 은 내용 해시가 기록과 같아야(그 뒤 편집·`⌘Z` 가 있었으면 다르다), 열려 있지 않은 파일은 디스크를 읽어 같아야. 하나라도 다르면 **전체 거부** + 알림(「{0} 이 바뀌어 되돌릴 수 없습니다」). 전부 같으면 역연산을 같은 길로 적용(열린 Term 은 `applyEditAsOne` — 그것도 undo 하나, 파일은 쓰기) + 같은 저장 정책. 성공하면 기록을 비운다 | VS Code 는 어긋난 파일에서 「이 파일만」을 묻는다 — 첫 조각은 보수적 부분집합 |
+| **`undo_workspace_edit`** | 팔레트 「Editor: Undo Last Rename」(기본 chord 없음). 기록의 **모든 파일**을 먼저 검증: 열린 Term 은 내용 해시가 기록과 같아야(그 뒤 편집·`⌘Z` 가 있었으면 다르다), 열려 있지 않은 파일은 디스크를 읽어 같아야. 하나라도 다르면 **전체 거부** + 알림(「{0} 이 바뀌어 되돌릴 수 없습니다」). 전부 같으면 역연산을 같은 길로 적용(열린 Term 은 같은 사전 준비 경로 — 그것도 undo 하나, 파일은 쓰기) + 같은 저장 정책. 성공하면 기록을 비운다 | VS Code 는 어긋난 파일에서 「이 파일만」을 묻는다 — 첫 조각은 보수적 부분집합 |
 | **`⌘Z`** | Term 의 `⌘Z` 는 종전대로 **그 문서만** 되돌린다(§3.3). 그러면 기록의 해시가 어긋나 `Undo Rename` 은 거부된다 — 뜻이 맞다(이미 손으로 되돌린 파일을 다시 되돌리면 두 번 되돌아간다) | |
 | **알림** | 성공 「{0}개 파일에서 이름을 바꿨습니다」 · 서버 오류 「이름을 바꿀 수 없습니다 — {0}」(서버 message) · 낡음 「문서가 바뀌어 결과를 버렸습니다」 · root 밖 「루트 밖 파일이 있어 적용하지 않습니다 — {0}」 · 거부 「적용할 수 없는 편집입니다 — {0}」(파일 연산·겹침·읽기 전용·읽기 실패) · 되돌림 「{0}개 파일의 이름 바꾸기를 되돌렸습니다」 · 되돌릴 것 없음 | |
 | **하지 않는 것** | `prepareRename` · 미리보기 · `⌘Z` 에서 여러 파일 확인창 · 「이 파일만 되돌리기」 · redo · `CreateFile`/`RenameFile`/`DeleteFile` · 서버 발 `workspace/applyEdit`(§8.1 기본 거부 그대로) · code action · `annotations`/`changeAnnotations` | 다음 조각 |
+
+**할당 실패 보존.** 준비 실패는 오류로 반환하며 본문·선택·revision·기존 Undo/Redo와 이전 작업 기록을 보존한다.
+기록 경로·역연산·저장 bytes도 반영 전에 준비하므로, 편집 뒤 기록 할당 실패로 되돌릴 수 없는 적용을 남기지 않는다.
+`undo_workspace_edit`도 같은 정본의 공유 뷰를 한 번만 적용한다. 동일 본문 편집의 revision·Undo 계약은 유지한다.
+디스크 쓰기는 기존대로 파일별이며 전원 손실까지 포함한 원자적 다중 파일 트랜잭션은 아니다.
+쓰기 실패 시 이미 적용한 파일만 기록하고, 미적용 문서의 자동 저장은 시도하지 않는다.
+준비는 문서 사본을 유지하므로 대상 본문 크기에 비례하는 추가 메모리를 사용한다.
 
 **적대적 검증(2026-09-19, 1~4회차 · 변이 44)**: 1회차 순수 12 → 0 · 2회차 적용 규칙·rename 상태 19 → 1 · 3회차 배선 13 → 1 · 4회차 재실행 2 → 1(선언한 등가).
 - **B17** 확정 때의 revision 검사 — 처음엔 「모달이라 닿을 수 없다」고 봤는데 메뉴바 `⌘Z` 는 rename 이 chrome 모달이 아니라 막히지 않는다

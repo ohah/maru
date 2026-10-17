@@ -4134,7 +4134,7 @@ pub fn revealPrimaryCaret(self: *AppSession, term: *Term) void {
 /// **폭은 렌더가 굳힌 것을 쓴다**(§4.1g ②) — 여기서 pane 사각을 다시 구하면 마지막 프레임과 다른
 /// 값이 나온다. 아직 한 프레임도 안 그렸으면(`content_width == 0`) 아무 일도 안 한다: 그때는
 /// 「밖이다」를 판정할 기준이 없고, 다음 프레임이 그리고 나면 다음 이동이 잡는다.
-fn revealPrimaryCaretCols(self: *AppSession, term: *Term, fallback_cols: u16, fallback_max: u32) void {
+pub fn revealPrimaryCaretCols(self: *AppSession, term: *Term, fallback_cols: u16, fallback_max: u32) void {
     const doc = term.rt.editorDocument().opened orelse return;
     const sel = term.rt.editor_selection orelse return;
     const off = @min(sel.focus, doc.file.content.len);
@@ -4207,7 +4207,7 @@ fn revealCaretColumn(self: *AppSession, term: *Term, right: bool, col: u32, visi
 /// 자리를 답하지 않게), 편집 직후의 노출은 늘 "아직 안 그렸다" 갈래로 떨어진다. 그 갈래는 커서
 /// 줄을 **맨 위에 두므로**, 그대로 두면 **한 글자 칠 때마다 화면이 그 줄을 천장으로 끌어올린다**
 /// (적대적 검증 2026-08-26이 잡았다). 편집 전 화면이 몇 줄이었는지는 그 순간에도 알 수 있다.
-fn revealPrimaryCaretRows(self: *AppSession, term: *Term, fallback_rows: usize) void {
+pub fn revealPrimaryCaretRows(self: *AppSession, term: *Term, fallback_rows: usize) void {
     workspace_restore.cancel(term);
     const doc = term.rt.editorDocument().opened orelse return;
     const sel = term.rt.editor_selection orelse return;
@@ -5312,12 +5312,12 @@ pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
 /// 커지므로(같은 줄의 조각들이 이어 붙는다), **값이 바뀌는 횟수**가 곧 줄 수다.
 /// 지금 그려진 **본문 폭**(열). 스냅숏이 비었으면 **마지막으로 그린 폭**이다 — `drawnDocLines` 와
 /// 같은 근거다(편집이 기하를 비우지만 뷰포트 폭은 편집으로 안 바뀐다).
-fn drawnContentCols(term: *const Term) u16 {
+pub fn drawnContentCols(term: *const Term) u16 {
     const w = term.rt.editor_hit_geom.content_width;
     return if (w == 0) term.rt.editor_drawn_content_cols else w;
 }
 
-fn drawnDocLines(term: *const Term) usize {
+pub fn drawnDocLines(term: *const Term) usize {
     const n = term.rt.editor_hit_rows_len;
     // **편집이 비운 스냅숏은 «안 그렸다» 가 아니다.** 뷰포트 크기는 편집으로 안 바뀌므로 직전 값이
     // 그대로 유효하다 — 그 구분이 없어서 프레임 사이에 편집이 둘 오면 화면이 떨었다(위 필드 doc).
@@ -56158,6 +56158,155 @@ test "SHVIEW17 수락한 한 뷰 닫기는 살아 있는 문서 백업을 지우
     const name = try maru.session.editor.recovery_id.fileName(id);
     fx.session.executeClose(.term_or_pane);
     try testing.expectError(error.FileNotFound, dir.dir.statFile(testing.io, &name, .{}));
+}
+
+test "WEOOM1 WorkspaceEdit 준비 실패는 본문·선택·기존 Undo와 Redo를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    for (0..3) |mode| {
+        var complete = false;
+        for (0..512) |failure| {
+            var fx = try PaneFixture.init(a);
+            defer fx.deinit(a);
+            const peer = try sharedViewFixturePeer(&fx);
+            const term = fx.term;
+            const session = fx.session;
+            term.rt.editor_selection = editor_selection.Selection.at(0);
+            try testing.expect(insertText(session, term, "old"));
+            breakUndoGroup(term);
+            try testing.expect(insertText(session, term, "redo"));
+            try testing.expect(undoEdit(session, term));
+            const state = term.rt.editorDocument();
+            try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "second.md", .data = "second\n" });
+            const second_path = try std.fs.path.join(a, &.{ std.fs.path.dirname(state.path.?).?, "second.md" });
+            defer a.free(second_path);
+            const second: ?*Term = if (mode == 1) (try pane_ops.openFileTermInActivePane(session, second_path, .text)).term else null;
+            if (second) |t| t.rt.editor_selection = editor_selection.Selection.at(2);
+            const second_revision = if (second) |t| t.rt.editorDocument().opened.?.file.revision else 0;
+
+            const before = try a.dupe(u8, state.opened.?.file.content);
+            defer a.free(before);
+            const selection = term.rt.editor_selection;
+            const peer_selection = peer.rt.editor_selection;
+            const revision = state.opened.?.file.revision;
+            const version = state.notifications.lsp_version;
+            state.history.undo = try a.realloc(state.history.undo, state.history.undo_len);
+            const undo_len = state.history.undo_len;
+            const redo_len = state.history.redo_len;
+            const uri = try maru.session.editor.lsp.rpc.fileUri(a, state.path.?);
+            defer a.free(uri);
+            var json = try std.json.parseFromSlice(std.json.Value, a, "[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"newText\":\"x\"}]", .{});
+            defer json.deinit();
+            const second_uri = try maru.session.editor.lsp.rpc.fileUri(a, second_path);
+            defer a.free(second_uri);
+            var files = [_]maru.session.editor.lsp.workspace_edit.FileEdits{
+                .{ .uri = uri, .edits = json.value.array.items },
+                .{ .uri = second_uri, .edits = json.value.array.items },
+            };
+            const expected = [_]workspace_edit_client.VersionSnap{
+                .{ .surface_id = term.surface.id, .version = version },
+                .{ .surface_id = peer.surface.id, .version = version },
+                .{ .surface_id = if (second) |t| t.surface.id else 0, .version = if (second) |t| t.rt.editorDocument().notifications.lsp_version else 0 },
+            };
+            var failing = testing.FailingAllocator.init(a, .{ .fail_index = failure, .resize_fail_index = 0 });
+            session.allocator = failing.allocator();
+            state.opened.?.file.allocator = failing.allocator();
+            state.opened.?.file.buf.allocator = failing.allocator();
+            if (second) |t| {
+                t.rt.editorDocument().opened.?.file.allocator = failing.allocator();
+                t.rt.editorDocument().opened.?.file.buf.allocator = failing.allocator();
+            }
+            const result = workspace_edit_client.apply(session, .{ .files = files[0..if (mode == 0) 1 else 2] }, .utf16, &expected);
+            session.allocator = a;
+            state.opened.?.file.allocator = a;
+            state.opened.?.file.buf.allocator = a;
+            if (second) |t| {
+                t.rt.editorDocument().opened.?.file.allocator = a;
+                t.rt.editorDocument().opened.?.file.buf.allocator = a;
+            }
+            if (result == .refused and result.refused == .rejected) {
+                // 디스크 쓰기 실패는 기존 정책대로 이미 적용한 접두 파일의 기록을 남긴다.
+                try testing.expect(mode == 2);
+                if (!std.mem.eql(u8, before, state.opened.?.file.content)) {
+                    try testing.expect(session.editor_workspace_edit.last != null);
+                    try testing.expectEqual(@as(usize, 1), session.editor_workspace_edit.last.?.files.len);
+                    try testing.expect(workspace_edit_client.undoLast(session) == .undone);
+                    try testing.expectEqualStrings(before, state.opened.?.file.content);
+                }
+            } else if (result == .refused) {
+                try testing.expect(result.refused == .out_of_memory);
+                try testing.expectEqualStrings(before, state.opened.?.file.content);
+                try testing.expectEqual(revision, state.opened.?.file.revision);
+                try testing.expectEqual(undo_len, state.history.undo_len);
+                try testing.expectEqual(redo_len, state.history.redo_len);
+                try testing.expectEqualDeep(selection, term.rt.editor_selection);
+                try testing.expectEqualDeep(peer_selection, peer.rt.editor_selection);
+                try testing.expect(session.editor_workspace_edit.last == null);
+                if (second) |t| {
+                    try testing.expectEqualStrings("second\n", t.rt.editorDocument().opened.?.file.content);
+                    try testing.expectEqual(second_revision, t.rt.editorDocument().opened.?.file.revision);
+                    try testing.expectEqual(@as(usize, 0), t.rt.editorDocument().history.undo_len);
+                    try testing.expectEqual(@as(usize, 2), t.rt.editor_selection.?.focus);
+                }
+                const disk_bytes = try fx.dir.dir.readFileAlloc(testing.io, "second.md", a, .limited(1024));
+                defer a.free(disk_bytes);
+                try testing.expectEqualStrings("second\n", disk_bytes);
+            } else {
+                try testing.expectEqual(@as(usize, if (mode == 0) 1 else 2), result.applied);
+                try testing.expectEqual(undo_len + 1, state.history.undo_len);
+                try testing.expect(session.editor_workspace_edit.last != null);
+                try testing.expect(undoEdit(session, peer));
+                try testing.expectEqualStrings(before, state.opened.?.file.content);
+                try testing.expect(redoEdit(session, peer));
+                try testing.expect(workspace_edit_client.undoLast(session) == .undone);
+                try testing.expectEqualStrings(before, state.opened.?.file.content);
+                if (second) |t| try testing.expectEqualStrings("second\n", t.rt.editorDocument().opened.?.file.content);
+            }
+            if (!failing.has_induced_failure) {
+                complete = true;
+                break;
+            }
+        }
+        try testing.expect(complete);
+    }
+    // 선택 없는 뷰와 동일 본문 편집도 기존 revision·Undo 계약을 유지한다.
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const peer = try sharedViewFixturePeer(&fx);
+    const state = fx.term.rt.editorDocument();
+    const uri = try maru.session.editor.lsp.rpc.fileUri(a, state.path.?);
+    defer a.free(uri);
+    var json = try std.json.parseFromSlice(std.json.Value, a, "[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"newText\":\"\"}]", .{});
+    defer json.deinit();
+    var files = [_]maru.session.editor.lsp.workspace_edit.FileEdits{.{ .uri = uri, .edits = json.value.array.items }};
+    fx.term.rt.editor_selection = null;
+    const revision = state.opened.?.file.revision;
+    const result = workspace_edit_client.apply(fx.session, .{ .files = &files }, .utf16, &.{});
+    try testing.expect(result == .applied and result.applied == 1);
+    try testing.expect(fx.term.rt.editor_selection == null);
+    try testing.expectEqual(revision + 1, state.opened.?.file.revision);
+    try testing.expectEqual(@as(usize, 1), state.history.undo_len);
+    const last_files = fx.session.editor_workspace_edit.last.?.files.ptr;
+    const next_id = state.history.next_id;
+    state.history.next_id = std.math.maxInt(u64);
+    const versions = [_]workspace_edit_client.VersionSnap{
+        .{ .surface_id = fx.term.surface.id, .version = state.notifications.lsp_version },
+        .{ .surface_id = peer.surface.id, .version = state.notifications.lsp_version },
+    };
+    const refused = workspace_edit_client.apply(fx.session, .{ .files = &files }, .utf16, &versions);
+    state.history.next_id = next_id;
+    try testing.expect(refused == .refused);
+    try testing.expectEqual(revision + 1, state.opened.?.file.revision);
+    try testing.expectEqual(@as(usize, 1), state.history.undo_len);
+    try testing.expect(fx.session.editor_workspace_edit.last.?.files.ptr == last_files);
+    var duplicates = [_]maru.session.editor.lsp.workspace_edit.FileEdits{ files[0], files[0] };
+    const duplicate = workspace_edit_client.apply(fx.session, .{ .files = &duplicates }, .utf16, &versions);
+    try testing.expect(duplicate == .refused);
+    try testing.expectEqual(revision + 1, state.opened.?.file.revision);
+    try testing.expect(fx.session.editor_workspace_edit.last.?.files.ptr == last_files);
+    try testing.expect(workspace_edit_client.undoLast(fx.session) == .undone);
+    try testing.expectEqual(@as(usize, 2), state.history.undo_len); // 연결된 두 뷰에도 역편집은 하나다.
+
 }
 
 test "SHVIEW18 LSP WorkspaceEdit는 같은 정본에 한 번 적용하고 두 뷰를 갱신한다" {

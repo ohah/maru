@@ -350,7 +350,9 @@ fn applyPreparedPlan(self: *AppSession, items: []Item) !Outcome {
     if (touched > 1) for (items, prepared) |*item, *p| {
         if (p.record != null) continue; // 쓰기 실패 뒤 아직 적용하지 않은 문서는 저장하지 않는다.
         for (item.open) |o| {
-            if (o.changes.items.len == 0 or o.term.rt.editorDocument().remote != null) continue;
+            if (o.changes.items.len == 0) continue;
+            // 원격 저장은 왕복이고 in-flight 가 하나뿐이라 일괄 자동 저장에서 건너뛴다.
+            if (o.term.rt.editorDocument().remote != null) continue;
             if (editor_ops.isDirty(o.term)) {
                 if (editor_ops.saveDocument(self, o.term)) |_| {
                     st.saved_files += 1;

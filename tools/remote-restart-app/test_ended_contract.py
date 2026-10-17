@@ -12,11 +12,16 @@ class JudgeTests(unittest.TestCase):
     host = '2' * 32
     def trace(self):
         return '\n'.join([
+            'warning(app): maru build: mtime=1 pid=42',
+            'REMOTE_RESTART_GUI phase=seed visible=true ready=1',
             f'REMOTE_ENDED_DISCONNECTED host={self.host} runtime={self.runtime}',
             f'REMOTE_ENDED_JOB host={self.host} state=replacement_published',
             f'REMOTE_ENDED_JOB host={self.host} state=candidate_ended',
             f'REMOTE_ENDED_TERMINAL host={self.host} total=1 published_old=0 published_new=0 frozen=0 ended=1 retry_reserved=0',
-            'REMOTE_ENDED_GUI visible=true', ''])
+            'app: last window closed — terminating (windows=1 token=1 sessionNil=false)',
+            'workspace checkpoint: final-quit requested status=0 allows_failure=false restore_incomplete=false',
+            'workspace checkpoint: final-quit finished — quit proceeds',
+            '=== maru app exit pid=42 via=exit ===', ''])
     def test_identity_and_order(self):
         text = self.trace()
         probe.verify_runtime_ended_gui(text, self.runtime)
@@ -37,11 +42,23 @@ class JudgeTests(unittest.TestCase):
                         terminal.replace('frozen=0', 'frozen=1') + '\n' + valid]:
             with self.assertRaises(RuntimeError): probe.verify_runtime_ended_gui(changed, self.runtime)
         # Repeated identical read-only terminal observations are valid.
-        probe.verify_runtime_ended_gui(valid + terminal + '\n', self.runtime)
+        probe.verify_runtime_ended_gui(valid.replace('app: last window closed', terminal + '\napp: last window closed'), self.runtime)
     def test_late_errors_and_embedded_success(self):
         for changed in [self.trace() + 'fatal integrity: late quit failure\n',
                         self.trace() + 'error: reconnect product coordinator turn failed: late\n',
-                        self.trace().replace('REMOTE_ENDED_GUI visible=true', 'payload REMOTE_ENDED_GUI visible=true')]:
+                        self.trace().replace('REMOTE_RESTART_GUI phase=seed visible=true ready=1', 'payload REMOTE_RESTART_GUI phase=seed visible=true ready=1')]:
+            with self.assertRaises(RuntimeError): probe.verify_runtime_ended_gui(changed, self.runtime)
+    def test_initial_window_same_pid_and_automatic_quit_are_required(self):
+        valid = self.trace()
+        probe.verify_runtime_ended_gui(valid, self.runtime, expected_pid=42)
+        with self.assertRaises(RuntimeError):
+            probe.verify_runtime_ended_gui(valid, self.runtime, expected_pid=43)
+        for changed in [valid.replace('warning(app): maru build: mtime=1 pid=42\n', '') + 'warning(app): maru build: mtime=1 pid=42\n',
+                        valid.replace('visible=true', 'visible=false'),
+                        valid.replace('app: last window closed', 'payload app: last window closed'),
+                        valid.replace('final-quit finished', 'final-quit failed'),
+                        valid.replace('exit pid=42', 'exit pid=43'),
+                        valid.replace('=== maru app exit pid=42 via=exit ===', 'REMOTE_ENDED_GUI visible=true')]:
             with self.assertRaises(RuntimeError): probe.verify_runtime_ended_gui(changed, self.runtime)
     def test_success_waits_for_cleanup_and_failed_body_has_no_result(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -57,7 +74,7 @@ class JudgeTests(unittest.TestCase):
             root = Path(raw)
             (root / 'seed').mkdir()
             (root / 'seed/app.stderr.txt').write_text(self.trace())
-            (root / 'result.json').write_text(json.dumps({'runtime_id': self.runtime}))
+            (root / 'result.json').write_text(json.dumps({'runtime_id': self.runtime, 'app_pid': 42}))
             result = subprocess.run([sys.executable, str(Path(__file__).with_name('test_ended_oracle.py')),
                                      '--artifact', str(root)], capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

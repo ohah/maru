@@ -31,11 +31,16 @@ def verify_provider_gui(text, provider):
         raise RuntimeError(provider + ' remote shell turn was not sealed')
     return set(sessions)
 
-def verify_runtime_ended_gui(text, runtime_id):
+def verify_runtime_ended_gui(text, runtime_id, expected_pid=None):
     if not re.fullmatch(r'[0-9a-f]{32}', runtime_id): raise RuntimeError('invalid runtime identity')
     identity = re.search(r'^REMOTE_ENDED_DISCONNECTED host=([0-9a-f]{32}) runtime=' + re.escape(runtime_id) + r'$', text, re.M)
     if not identity: raise RuntimeError('missing runtime-ended target identity')
     host = identity.group(1)
+    startup = re.findall(r'^warning\(app\): maru build: mtime=[0-9]+ pid=([1-9][0-9]*)$', text, re.M)
+    if len(startup) != 1: raise RuntimeError('missing or ambiguous GUI startup PID')
+    app_pid = int(startup[0])
+    if expected_pid is not None and app_pid != expected_pid:
+        raise RuntimeError('foreign GUI startup PID')
     terminal = ('REMOTE_ENDED_TERMINAL host=' + host +
                 ' total=1 published_old=0 published_new=0 frozen=0 ended=1 retry_reserved=0')
     # The read-only observer can repeat a summary. Every observation for this host must agree;
@@ -43,11 +48,16 @@ def verify_runtime_ended_gui(text, runtime_id):
     observations = re.findall(r'^REMOTE_ENDED_TERMINAL host=' + host + r'(?:[ \t].*|$)', text, re.M)
     if any(line != terminal for line in observations):
         raise RuntimeError('contradictory runtime-ended terminal summary')
-    markers = ['^' + re.escape(identity.group(0)) + '$',
+    markers = [r'^warning\(app\): maru build: mtime=[0-9]+ pid=' + str(app_pid) + '$',
+               r'^REMOTE_RESTART_GUI phase=seed visible=true ready=[1-9][0-9]*$',
+               '^' + re.escape(identity.group(0)) + '$',
                r'^REMOTE_ENDED_JOB host=' + host + r' state=replacement_published$',
                r'^REMOTE_ENDED_JOB host=' + host + r' state=candidate_ended$',
                '^' + re.escape(terminal) + '$',
-               r'^REMOTE_ENDED_GUI visible=true$']
+               r'^app: last window closed — terminating \(windows=1 token=[1-9][0-9]* sessionNil=false\)$',
+               r'^workspace checkpoint: final-quit requested status=0 allows_failure=false restore_incomplete=false$',
+               r'^workspace checkpoint: final-quit finished — quit proceeds$',
+               r'^=== maru app exit pid=' + str(app_pid) + r' via=exit ===$']
     cursor = 0
     for marker in markers:
         match = re.search(marker, text[cursor:], re.M)
@@ -80,6 +90,8 @@ def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts, 
                     '\nexec ' + shlex.join([cli, 'ssh', '-F', str(sshconfig), '-T', alias]) + '\n')
     pane.chmod(0o700)
     config.write_text(f'shell.command = {pane}\nshell.args =\nsidebar.agent-hooks = true\nssh.reconnect = false\nsession.keep-alive-after-quit = true\n')
+    if runtime_ended:
+        with config.open('a') as stream: stream.write('window.quit-after-last-window-closed = true\n')
     childenv = {k: v for k, v in env.items() if not k.startswith('MARU_')}
     childenv.update(HOME=str(home), CFFIXED_USER_HOME=str(home), XDG_CACHE_HOME=str(home / '.cache'),
                     MARU_CONFIG=str(config), MARU_SESSION_HOST_ROOT=str(host_root),
@@ -153,21 +165,18 @@ def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts, 
             (artifacts / 'runtime-after-end.stderr').write_bytes(inventory_after.stderr)
             if inventory_after.returncode or json.loads(inventory_after.stdout)['runtimes']:
                 raise RuntimeError('runtime remained after the actual terminate command')
+            app_pid = seed.pid
             (seed_output / 'continue').touch()
-            wait_alive(lambda: 'REMOTE_ENDED_TERMINAL host=' in (seed_output / 'app.stderr.txt').read_text(errors='replace'),
-                       'canonical runtime-ended settlement missing')
-            (seed_output / 'verify-after').touch()
-            wait_alive(lambda: (seed_output / 'after-ready').exists(), 'post-failure GUI frame missing')
+            # Confirmed termination removes the sole pane. With the fixture's explicit default
+            # policy, the product closes its last window and quits without a post-close frame.
+            if seed.wait(timeout=20) != 0: raise RuntimeError('runtime-ended automatic GUI quit failed')
             text = (seed_output / 'app.stderr.txt').read_text(errors='replace')
-            verify_runtime_ended_gui(text, runtime_id)
-            time.sleep(2)
-            if seed.poll() is not None: raise RuntimeError('GUI exited after runtime-ended settlement')
-            quit_phase(seed, seed_output)
-            # The LaunchServices waiter can finish even if the application failed during Quit.
-            verify_runtime_ended_gui((seed_output / 'app.stderr.txt').read_text(errors='replace'), runtime_id)
-            completed_result = dict(runtime_id=runtime_id,
-                actual_windows=True, actual_terminate=True, observer_rejected=True,
-                canonical_settlement=True, normal_quit=True, partial_frame_cause_verified=False)
+            verify_runtime_ended_gui(text, runtime_id, expected_pid=app_pid)
+            seed.close()
+            completed_result = dict(runtime_id=runtime_id, app_pid=app_pid,
+                actual_windows=True, actual_terminate=True, observer_confirmed_ended=True,
+                canonical_settlement=True, normal_quit=True, normal_last_window_quit=True,
+                partial_frame_cause_verified=False)
             return
         if providers:
             (remote / 'provider-start').touch()

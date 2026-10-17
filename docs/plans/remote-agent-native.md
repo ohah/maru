@@ -439,7 +439,7 @@ daemon의 진단은 CLI의 별도 host 로그가 아니라 상속한 stderr의 �
    payload는 Term 종료 시 기존 owner가 회수한다. 현재 job의 ended row는 membership에 남기되 이전
    job에서 정산된 ended runtime은 다음 admission·snapshot·row 수집에서 제외한다. shared transport가
    나중에 실패해도 앞서 확정한 ended row를 frozen으로 되돌리지 않는다.
-   **정책 배선 구현, 실제 GUI 미검증**: 실제 daemon의 첫째·중간·마지막 종료, 모두 종료,
+   **정책 배선과 실제 GUI 검증 완료(현재 채택 순서)**: 실제 daemon의 첫째·중간·마지막 종료, 모두 종료,
    종료 뒤 shared transport 실패, 정상 sibling 입력·화면 텍스트, 두 번째 재접속을 검증한다.
    다음 재접속에서 사용한 Client의 빈 catchup buffer가 capacity를 유지하는 정상 소유 상태를
    adoption용 zero-capacity 검사로 거부하는 결함도 재현했다. retirement 전용 검사는 bounded
@@ -502,11 +502,11 @@ purge 실패 갈래까지 특정했지만 당시 `Stale`과 `PartialFrame`은 �
 첫 close 사유 보존 및 `PartialFrame` fail-close를 유지한다. GUI 재실행과 원래 장애의
 오류 이름 확인은 별도 증거로 남기며, 화면 잠금 동안의 단위 검사를 GUI 검증으로 세지 않는다.
 
-제품 수정 #4448의 다음 검증은 실제 GUI coordinator를 통과한다. 별도 소스 복사본에서만
+제품 수정 #4448 당시 검증은 실제 GUI coordinator를 통과했다. 별도 소스 복사본에서만
 테스트 소유 연결에 실제 `shutdown`을 실행하고, replacement 게시 후 observer 준비 직전에
 짧게 대기한다. 외부 CLI `runtime end --yes`로 동일 runtime을 종료한 뒤 대기를 해제한다.
-daemon의 실제 거부 응답, `candidate_rejected` 관측, canonical terminal 로그, 앱 생존과
-정상 Quit을 요구한다. job·seal·응답을 직접 바꾸거나 제품의 integrity 보호를 끄지 않는다.
+당시에는 daemon의 실제 거부 응답, `candidate_rejected` 관측, canonical terminal 로그, 앱 생존과
+정상 Quit을 요구했다. 현재 종료 확정 동작에 맞춘 변경은 아래 판정기 동기화 절에 기록한다. job·seal·응답을 직접 바꾸거나 제품의 integrity 보호를 끄지 않는다.
 이 fault injection은 연결 종료의 원인 자체나 PartialFrame 정책을 재현했다는 증거는 아니다.
 
 `--gui-runtime-ended`는 provider 턴·정상 복원과 독립된 opt-in 시나리오다. marker 순서,
@@ -544,3 +544,22 @@ published_new=0, frozen=0, ended=1, retry_reserved=0`이다. 기존 `candidate_r
 거부 정산·retry 잔류·GUI frame 누락·늦은 fatal 오류를 거부하는 대조군을 둔다. 합성 trace와
 실제 소유 프로세스 cleanup 검사는 실제 GUI 실행 증거가 아니며, 화면 잠금 중에는 이 둘을
 명확히 구분한다. 실제 artifact 변이 도구 역시 같은 현재 계약을 사용한다.
+
+2026-10-17 실제 단일 runtime GUI 실행에서는 `candidate_ended`와 정확한 종료 summary 뒤
+기본 `window.quit-after-last-window-closed=true` 정책으로 마지막 창과 앱이 정상 종료됐다.
+종료된 창의 사후 frame과 앱 생존을 요구하던 검증기는 이 정상 동작을 실패로 판정했다.
+이 단일 runtime fixture는 설정을 명시적으로 true로 고정하고, 시작 GUI capture와 같은 앱 PID의
+종료 확정 → 마지막 창 종료 → final checkpoint 완료 → 정상 프로세스 종료를 검증한다.
+제품 창/종료 정책은 바꾸지 않는다. 정상 형제가 남는 경우의 입력·Metal frame·Quit은
+실제 PartialFrame GUI 시나리오에서 별도로 검증하며 단일 runtime 자동 종료로 대체하지 않는다.
+
+같은 날 잠금 해제 후 실제 PartialFrame GUI를 서로 다른 host/runtime 신원으로 5회 실행했다.
+각 실행에서 `ended_purge_tracker/PartialFrame`, 628,615 byte snapshot, 종료 대상의 부재,
+정상 터미널의 동일 PID·controller 복구·키 입력 뒤 Metal 제출·화면 연속성 및 정상 Quit과
+전체 소유 자원 정리를 확인했다. 이 결과는 `actual_appkit_gui`이며 비시각 진단과 구분한다.
+현재 채택 순서 하나의 증거이며 반대 채택 순서의 GUI 검증까지 완료한 것은 아니다.
+
+원격 단일 runtime의 실제 GUI 재검증도 종료 확정 summary와 같은 앱 PID의 정상 자동 종료,
+소유 프로세스·host 정리를 확인했다. 그 실제 artifact에 종료 확정 누락·옛 retained 결과·retry
+잔류·초기 GUI 누락·체크포인트 누락·다른 종료 PID 등을 주입한 16개 변이는 모두 거부했다.
+최초 하네스 실패의 로그는 보존했고, 새 실행의 성공으로 과거 실패 기록을 덮어쓰지 않았다.

@@ -36,10 +36,17 @@ def verify_runtime_ended_gui(text, runtime_id):
     identity = re.search(r'^REMOTE_ENDED_DISCONNECTED host=([0-9a-f]{32}) runtime=' + re.escape(runtime_id) + r'$', text, re.M)
     if not identity: raise RuntimeError('missing runtime-ended target identity')
     host = identity.group(1)
+    terminal = ('REMOTE_ENDED_TERMINAL host=' + host +
+                ' total=1 published_old=0 published_new=0 frozen=0 ended=1 retry_reserved=0')
+    # The read-only observer can repeat a summary. Every observation for this host must agree;
+    # a later failure must not be hidden by an earlier matching success line.
+    observations = re.findall(r'^REMOTE_ENDED_TERMINAL host=' + host + r'(?:[ \t].*|$)', text, re.M)
+    if any(line != terminal for line in observations):
+        raise RuntimeError('contradictory runtime-ended terminal summary')
     markers = ['^' + re.escape(identity.group(0)) + '$',
                r'^REMOTE_ENDED_JOB host=' + host + r' state=replacement_published$',
-               r'^REMOTE_ENDED_JOB host=' + host + r' state=candidate_rejected$',
-               r'^REMOTE_ENDED_TERMINAL host=' + host + r' total=1 published_old=0 published_new=0 frozen=1 ended=0 retry_reserved=1$',
+               r'^REMOTE_ENDED_JOB host=' + host + r' state=candidate_ended$',
+               '^' + re.escape(terminal) + '$',
                r'^REMOTE_ENDED_GUI visible=true$']
     cursor = 0
     for marker in markers:

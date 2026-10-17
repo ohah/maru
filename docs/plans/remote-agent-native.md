@@ -524,3 +524,23 @@ daemon의 실제 거부 응답, `candidate_rejected` 관측, canonical terminal 
 timeout됐다. 따라서 소스 복사본의 읽기 전용 관측기가 유효한 job의 실제 terminal summary를
 직접 읽어 `REMOTE_ENDED_TERMINAL`로 기록한다. 기대한 summary 값을 만들거나 제품 로그의
 성공 경로 출력 여부를 실패 경로의 판정 근거로 삼지 않는다.
+
+2026-10-17 continuation 구현의 비시각 AppKit 진단에서는 실제 `ended_purge_tracker/PartialFrame`과
+628,615 byte snapshot을 재현하고 recovery marker=true·recovery failure 없음·정상 Quit을
+확인했다. healthy PID를 유지했고 worker/job/completion/admission/lease/backend runtime과
+Client/FD/child/socket 정리도 확인했다. 이 실행은 `validation_scope=nonvisual_appkit_diagnostic`,
+`gui_continuity_verified=false`이며 화면 잠금 상태였다. 화면·포커스·Metal 연속성 증거가 아니다.
+
+### 종료 확정 GUI 판정기 동기화
+
+positive `runtime_not_found` continuation 뒤 단일 runtime 종료의 현재 계약은
+`replacement_published` → `candidate_ended` → terminal `total=1, published_old=0,
+published_new=0, frozen=0, ended=1, retry_reserved=0`이다. 기존 `candidate_rejected`와
+`frozen=1, ended=0, retry_reserved=1`을 요구하는 원격 GUI 판정기는 정상 결과를 거부하므로
+이 계약에 맞춘다. 제품 상태나 seal을 하네스에서 만들지 않고 기존 읽기 전용 관측을 유지한다.
+
+판정기는 같은 host의 모든 terminal 관측이 종료 확정 summary와 일치하는지도 검사한다.
+앞선 정상 summary 뒤의 모순된 summary를 무시해서는 안 된다. 신원 불일치·순서 역전·옛
+거부 정산·retry 잔류·GUI frame 누락·늦은 fatal 오류를 거부하는 대조군을 둔다. 합성 trace와
+실제 소유 프로세스 cleanup 검사는 실제 GUI 실행 증거가 아니며, 화면 잠금 중에는 이 둘을
+명확히 구분한다. 실제 artifact 변이 도구 역시 같은 현재 계약을 사용한다.

@@ -752,7 +752,7 @@ pub fn mouseDown(self: *AppSession, x_px: f64, y_px: f64) bool {
     return false;
 }
 
-/// 고른 항목을 §3.6 으로 적용한다 — 주 편집 `[start, caret)` → insert + additional(허용될 때) 이 `applyEditAsOne` 하나. caret 은 insert 끝.
+/// 고른 항목을 §3.6 으로 적용한다 — 주 편집 `[start, caret)` → insert + additional(허용될 때) 이 `applyEditAsOneWithUndo` 하나. caret 은 insert 끝.
 pub fn accept(self: *AppSession) void {
     const st = &self.editor_completion;
     defer hide(self);
@@ -779,7 +779,8 @@ pub fn accept(self: *AppSession) void {
     const changes = &plan.changes;
     const ends = plan.ends;
     st.accepting = true;
-    const applied = editor_ops.applyEditAsOne(self, term, changes.items);
+    // 완성 하나는 반드시 Undo 하나다. 이력 공간을 확보하지 못하면 본문도 보존한다.
+    const applied = editor_ops.applyEditAsOneWithUndo(self, term, changes.items);
     st.accepting = false;
     if (!applied) return;
     const new_len = term.rt.editorDocument().opened.?.file.content.len;

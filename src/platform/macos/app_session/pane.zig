@@ -213,9 +213,10 @@ fn openFileTerm(self: *AppSession, path: []const u8, kind: dock_panel.EntryKind,
     term.file_entry = entry;
     entry.surface_id = term.surfaceId();
     self.focusTerm(pane.terms.items.len - 1);
-    // 파일을 열면 탐색기도 함께 나타난다 — 옛 `DockPanel.open`이 세우던 자리다. FP16에서 도크가
-    // 탐색기 전용이 된 뒤에도 "파일을 열면 그 파일이 있는 프로젝트를 볼 수 있어야 한다"는 계약은 같다.
-    self.dock.presented = true;
+    // 파일 콘텐츠는 이미 pane 안에서 열리므로 탐색기를 자동 표시할지는 별도 취향 설정에 맡긴다.
+    if (self.loaded_config.config.file_panel.show_explorer_on_open) {
+        self.dock.presented = true;
+    }
     return .{ .term = term, .created = true, .previous_active_term = previous_active_term };
 }
 

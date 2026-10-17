@@ -223,8 +223,9 @@ build test`·`/repo/src for details` 넷 다 경로만 잡는다.
 | `in-app` | 그 패널에서 연다(재사용) | **새 browser 탭을 열어** 그곳에 띄운다 |
 | `system` | 시스템 기본 브라우저 | 시스템 기본 브라우저(이전 동작) |
 
-- **대상은 http(s) 리터럴만**이다. 파일 경로(`kind=file_path`)와 `mailto:`·`ssh://` 같은 비-HTTP 스킴은 이 설정과
-  무관하게 기존 경로(`NSWorkspace`, `.md`/`.html`은 파일 도크)로 간다. 허용 스킴 판정은 파일 패널 외부 링크와 **같은**
+- **대상은 http(s) 리터럴만**이다. 파일 경로(`kind=file_path`) 중 지원 형식은 file Term으로 열리고 탐색기 자동 표시는
+  `file-panel.show-explorer-on-open`이 정한다. 지원하지 않는 파일 형식과 `mailto:`·`ssh://` 같은 비-HTTP 스킴은 이 설정과
+  무관하게 `NSWorkspace`로 간다. 허용 스킴 판정은 파일 패널 외부 링크와 **같은**
   `isExplicitHttpLink`를 공유한다(단일 출처) — 브라우저 패널에 `file:`·`javascript:`가 실릴 경로를 구조적으로 막는다.
   길이 상한도 그 모듈의 `max_http_link_bytes`(8 KiB)가 단일 출처다. **파일 경로 상한(PATH_MAX=1024)을 쓰면 안 된다** —
   OAuth 콜백·pre-signed URL처럼 1 KB를 넘는 URL이 조용히 거부돼 같은 링크가 길이에 따라 다른 곳에서 열린다.
@@ -279,7 +280,9 @@ build test`·`/repo/src for details` 넷 다 경로만 잡는다.
 ## 보안
 
 - **휴리스틱 파일 경로**(절대/홈/상대/bare)는 명시 제스처(수식키+클릭)에서만, cwd/`$HOME` resolve 후 **존재를
-  확인**한 경로만 연다. `.md`/`.html` regular file은 현재 창 파일 도크로, 그 외는 `NSWorkspace.open`(기본 앱)으로 보낸다. 도크 경로는 ABI에서 종류와 regular-file을 재검증하고, 지원 확장자 검증 실패를 외부 앱으로 우회하지 않는다. `std.fs.path.resolve`는 lexical 정규화라 `../`로
+  확인**한 경로만 연다. `openKindForPath`가 지원하는 regular file은 활성 pane의 file Term으로 연다. 오른쪽 탐색기 도크는
+  `file-panel.show-explorer-on-open = true`일 때만 자동으로 표시·펼친다. 그 외 파일은 `NSWorkspace.open`(기본 앱)으로
+  보낸다. 파일 open 경로는 ABI에서 종류와 regular-file을 재검증하고, 지원 확장자 검증 실패를 외부 앱으로 우회하지 않는다. `std.fs.path.resolve`는 lexical 정규화라 `../`로
   cwd 밖을 가리킬 수 있으나, 결과는 "기본 앱으로 열기"지 **명령 실행이 아니다**(사용자가 직접 `open <path>` 하는
   것과 같은 권한, 권한 상승 없음). 절대 경로도 stat 게이트를 거치므로 Ghostty(절대 경로를 raw로 여는)보다 엄격하다.
 - **스킴 URL·OSC 8 명시 링크**(`file://` 포함)는 존재 검증 없이 `URL(string:)`로 그대로 연다 — 프로그램이 지정한
@@ -354,7 +357,7 @@ build test`·`/repo/src for details` 넷 다 경로만 잡는다.
   (`runtime.link_at`)·`server.zig`. 설계 근거는 위 §원격(host-backed) 세션.
 - 플랫폼: `src/platform/macos/app_session.zig`(`urlAt`·`hoverCursor`·pane 라우팅 `paneTargetAt`·밑줄 `hoverLinkSpanFor`·
   scopes 빌드·kind·`openFilePanelPath`), `app_host_abi.{zig,h}`(`url_at` out_kind·파일 패널 ABI),
-  `MaruAppHost.swift`(`handleUrlClick` — `.md`/`.html`은 도크, 그 외는 `URL(fileURLWithPath:)`/`URL(string:)`). ABI 경계는
+  `MaruAppHost.swift`(`handleUrlClick` — 지원 파일 형식은 file Term, 미지원 파일·일반 URL은 시스템 경로). ABI 경계는
   [macOS 앱 호스트 경계](macos-app-host-boundary.md).
 - 열기 대상 라우팅: `src/platform/macos/app_session.zig`(`openTerminalWebLink` — 정책 단일 출처,
   `visibleBrowserSurfaceId`·`queueExternalLinkAction`[파일 패널과 공유하는 실행 경로]),

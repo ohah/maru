@@ -1,5 +1,24 @@
 # 에이전트 세션 도크 구현 계획 (§2.1.4 · §6)
 
+## 로컬 실제 기록의 GUI 재검증
+
+원격 SSH 이력은 v1 비목표로 유지한다. 격리된 HOME의 실제 Codex 읽기 전용 턴으로
+생성한 JSONL을 원본 신원 그대로 local archive에 제공해 목록·loading·ready detail을
+제품 AppKit pointer 경로와 Metal frame으로 확인한다. 별도의 cold process에서 같은
+파일을 다시 스캔해 같은 session의 한 행만 표시되는지 확인하며, 이전 UI 선택이 영속된다고
+가정하지 않는다. resume 검증에는 계정에 접속하지 않는 argv 판정자를 사용하고 실제
+provider-native resume 성공과 구분한다. 기존 fixture 기반 stale source·선택 재개방·snapshot
+교체·scroll anchor·키보드 action 검증을 함께 실행한다. 실제 transcript 원문·화면·빌드는
+저장소 밖에 보존하며, fixture 통과를 실제 provider 기록의 표시 성공으로 대체하지 않는다.
+
+2026-10-18 준비 중 실제 Codex 0.163.0 JSONL에서 목록 parser의 메시지 수가 0인 결함을
+재현했다. `item_completed`의 typed UserMessage/AgentMessage를 기존 목록 신호로 읽도록
+수정하고 CommandExecution·Reasoning·item_started·빈/잘못된 item 및 response-item 주입은
+제외했다. 실제 파일과 목록/상세 회귀 65개를 Debug·ReleaseFast에서 확인했다. 새 형식 누락,
+구형 호환 제거, command 출력 허용, reasoning 허용, 미완료 메시지 허용의 다섯 변이는
+각각 컴파일 성공 후 테스트가 거부했다. 앱 빌드는 완료했으나 화면 잠금으로 실제 도크
+클릭·캡처·cold 재검색은 아직 실행하지 않았으며 이 항목의 GUI 완료로 세지 않는다.
+
 B1-button 이관 순서와 AS3·AS4 슬라이스의 구현 순서·완료 조건이다. 계약은 [에이전트 세션 기록 도크](../agent-session-list.md)와 그 절별 소유 문서가 가진다.
 
 > **절 번호는 파일을 넘어 이어진다.** 본문이 `§2.1.3`처럼 절만 가리키면 아래에서 소유 파일을 찾는다 — §1~§2·§2.3·§3~§5·§7~§8 [agent-session-list.md](../agent-session-list.md) · §2.1~§2.1.3 [카드 레이아웃](../agent-session-list-layout.md) · §2.2 [선택·확장·geometry](../agent-session-list-interaction.md) · §2.1.4·§6 이 문서

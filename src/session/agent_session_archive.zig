@@ -385,15 +385,24 @@ pub const Parser = struct {
         if (!std.mem.eql(u8, kind, "event_msg")) return;
         const p = payload orelse return;
         const event_kind = string(p.get("type")) orelse "";
-        const text = string(p.get("message")) orelse return;
+        // Codex 0.163 writes the display conversation as completed typed items. Only
+        // these two message kinds are conversation; command output/reasoning stays private.
+        // Keep response_item out of this summary path: it also contains injected context.
+        const completed = std.mem.eql(u8, event_kind, "item_completed");
+        const message = if (completed) object(p.get("item")) orelse return else p;
+        const message_kind = if (completed) string(message.get("type")) orelse return else event_kind;
+        const is_user = std.mem.eql(u8, message_kind, if (completed) "UserMessage" else "user_message");
+        const is_agent = std.mem.eql(u8, message_kind, if (completed) "AgentMessage" else "agent_message");
+        if (!is_user and !is_agent) return;
+        const text = (if (completed) contentText(message) else string(message.get("message"))) orelse return;
         if (text.len == 0) return;
-        if (std.mem.eql(u8, event_kind, "user_message")) {
+        if (is_user) {
             const clean = stripCodexPrefix(text);
             if (clean.len == 0) return;
             self.count +|= 1;
             if (self.first_user.len == 0) self.first_user = copyInto(&self.first_user_buf, clean);
             self.last_user = copyInto(&self.last_user_buf, clean);
-        } else if (std.mem.eql(u8, event_kind, "agent_message")) {
+        } else if (is_agent) {
             self.count +|= 1;
             self.last_assistant = copyInto(&self.last_assistant_buf, text);
         }
@@ -732,6 +741,8 @@ test "Parser 스트리밍: 어떤 청크 경계로 잘라도 전체 파싱과 �
         \\{"type":"turn_context","payload":{"model":"gpt-x"}}
         \\{"type":"event_msg","payload":{"type":"user_message","message":"사용자 요청"}}
         \\{"type":"event_msg","payload":{"type":"agent_message","message":"응답"}}
+        \\{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"새 형식 요청"}]}}}
+        \\{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"type":"Text","text":"새 응답"}]}}}
         },
     };
 
@@ -913,6 +924,26 @@ test "Codex user session parses and worker is rejected" {
 
     const worker = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x\",\"thread_source\":\"subagent\"}}\n";
     try std.testing.expect((try parse(std.testing.allocator, .codex, worker)) == null);
+}
+
+test "Codex completed conversation items preserve messages without admitting tool output" {
+    const input =
+        \\{"type":"session_meta","payload":{"id":"completed-session","thread_source":"user"}}
+        \\{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"request"}]}}}
+        \\{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"type":"Text","text":"working"}],"phase":"commentary"}}}
+        \\{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","aggregated_output":"private output","content":[{"text":"not a message"}]}}}
+        \\{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning","content":[{"text":"private reasoning"}]}}}
+        \\{"type":"event_msg","payload":{"type":"item_completed","item":null}}
+        \\{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[]}}}
+        \\{"type":"event_msg","payload":{"type":"item_started","item":{"type":"AgentMessage","content":[{"text":"unfinished"}]}}}
+        \\{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"type":"Text","text":"done"}],"phase":"final_answer"}}}
+        \\{"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"injected context"}]}}
+    ;
+    var parsed = (try parse(std.testing.allocator, .codex, input)).?;
+    defer parsed.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("request", parsed.title);
+    try std.testing.expectEqualStrings("request", parsed.summary);
+    try std.testing.expectEqual(@as(u32, 3), parsed.message_count);
 }
 
 test "Codex worker 판정: 신호 순서와 마지막 session_meta 우선" {

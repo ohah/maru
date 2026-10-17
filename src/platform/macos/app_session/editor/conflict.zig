@@ -201,16 +201,13 @@ pub fn confirmReload(self: *AppSession, surface_id: u64) void {
     };
     defer fresh.deinit(self.allocator);
 
-    // **커서가 없으면 편집이 들어가지 않는다**(`applyEditAsOne` 이 선택을 요구한다). LSP 일괄 편집이
-    // dirty 로 만든 문서는 사용자가 커서를 둔 적이 없을 수 있어, 그 경우 문서 앞에 세운다.
-    if (term.rt.editor_selection == null) {
-        term.rt.editor_selection = maru.session.editor.selection.Selection.at(0);
-    }
-
     // **바뀐 곳만 고친다**(editor-surface §4 「undo/cursor 를 깨지 않는다」, 결함 14). 문서 전체를 변경 하나로 바꾸면
     // 모든 caret 이 그 변경 안이라 머리(0)로 접혔다 — 같은 앞뒤는 변경 밖에 둔다(L2 `edit_ops.reloadChange`).
     var changes = [_]maru.session.editor.delta.Change{maru.session.editor.edit_ops.reloadChange(doc.file.content, fresh.file.content)};
-    if (!editor_ops.applyEditAsOne(self, term, &changes)) {
+    // 다시 읽기는 Undo로 원래 편집을 복구할 수 있어야 한다. 이력을 나중에 확보하면
+    // 할당 실패 시 본문만 교체되고 기존 Undo도 사라진다. 선택이 없는 뷰의 임시 caret도
+    // 이 사전 준비 경로가 소유하므로 실패 전에 뷰의 선택을 바꾸지 않는다.
+    if (!editor_ops.applyEditAsOneWithUndo(self, term, &changes)) {
         self.showNoticeKey(.editor_reload_failed);
         return;
     }
@@ -221,7 +218,7 @@ pub fn confirmReload(self: *AppSession, surface_id: u64) void {
     // 넣었다는 이유로 dirty 로 남으면 화면이 그 답과 어긋난다.
     app_session_mod.editor_backup_ops.markClean(self, term, fresh.file.content, null);
     term.rt.editorDocument().opened.?.disk_hash = fresh.disk_hash;
-    // 구문 트리·LSP 통지·줄 인덱스는 **편집 경로가 이미 한다** — `applyEditAsOne` 이 `refreshAfterEdit`
+    // 구문 트리·LSP 통지·줄 인덱스는 **편집 경로가 이미 한다** — `applyEditAsOneWithUndo`가 `refreshAfterEdit`
     // 를 지나므로(그 함수 주석: 「제품의 편집 경로 여섯이 전부 이 함수를 지난다」) 여기서 다시 부르면
     // 그 통지가 두 번 간다.
     self.metal_dirty = true;

@@ -5872,6 +5872,12 @@ pub fn build(b: *std.Build) void {
         run_save_pipeline.addArg("--maru-expect-passed=10");
         macos_only_test_step.dependOn(&run_save_pipeline.step);
     }
+    const workspace_edit_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.RNM", ".test.WEOOM", ".test.SHVIEW18", ".test.CA1 ", ".test.CA2 " } });
+    const run_workspace_edit = b.addRunArtifact(workspace_edit_tests);
+    run_workspace_edit.setCwd(b.path("."));
+    run_workspace_edit.addArg("--maru-expect-tests=20");
+    run_workspace_edit.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-workspace-edit", "Run WorkspaceEdit preparation and rename regressions").dependOn(&run_workspace_edit.step);
     const completion_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CMP"} });
     const run_completion = b.addRunArtifact(completion_tests);
     run_completion.setCwd(b.path("."));

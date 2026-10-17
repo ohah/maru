@@ -38,6 +38,12 @@ const Item = struct {
 fn top(entries: []history.Entry, len: usize) u64 {
     return if (len == 0) 0 else entries[len - 1].id;
 }
+/// 개별 준비를 모으는 호출자도 결산 전에 같은 정본의 중복을 거절한다.
+pub fn validateDistinct(targets: []const Target) error{DuplicateTarget}!void {
+    for (targets, 0..) |t, i| {
+        for (targets[0..i]) |other| if (t.file == other.file or t.state == other.state or t.selections == other.selections) return error.DuplicateTarget;
+    }
+}
 pub const Prepared = struct {
     allocator: std.mem.Allocator,
     items: std.ArrayList(Item) = .empty,
@@ -47,14 +53,19 @@ pub const Prepared = struct {
         self.items.deinit(self.allocator);
     }
     pub fn prepare(a: std.mem.Allocator, targets: []const Target) !Prepared {
+        return prepareImpl(a, targets, false);
+    }
+    /// LSP의 동일 본문 편집도 기존 계약대로 revision과 Undo 하나를 남긴다.
+    pub fn prepareIncludingUnchanged(a: std.mem.Allocator, targets: []const Target) !Prepared {
+        return prepareImpl(a, targets, true);
+    }
+    fn prepareImpl(a: std.mem.Allocator, targets: []const Target, allow_unchanged: bool) !Prepared {
         if (targets.len == 0) return error.NoTargets;
         var prepared = Prepared{ .allocator = a };
         errdefer prepared.deinit();
         try prepared.items.ensureTotalCapacity(a, targets.len);
-        for (targets, 0..) |t, i| {
-            for (targets[0..i]) |other| if (t.file == other.file or t.state == other.state or t.selections == other.selections) return error.DuplicateTarget;
-            prepared.items.appendAssumeCapacity(try prepareOne(t));
-        }
+        try validateDistinct(targets);
+        for (targets) |t| prepared.items.appendAssumeCapacity(try prepareOne(t, allow_unchanged));
         return prepared;
     }
     pub fn commit(self: *Prepared) !void {
@@ -91,7 +102,7 @@ pub const Prepared = struct {
         self.committed = true;
     }
 };
-fn prepareOne(t: Target) !Item {
+fn prepareOne(t: Target, allow_unchanged: bool) !Item {
     if (t.file.read_only) return error.ReadOnly;
     if (t.state.next_id == std.math.maxInt(u64) or t.state.epoch == std.math.maxInt(u64)) return error.HistoryIdExhausted;
     if (t.file.revision == std.math.maxInt(u64)) return error.RevisionExhausted;
@@ -109,7 +120,7 @@ fn prepareOne(t: Target) !Item {
     next.revision = t.file.revision;
     var inverse = try next.apply(.{ .changes = t.changes }, &sels);
     errdefer inverse.deinit();
-    if (std.mem.eql(u8, next.content, t.file.content)) return error.NoChanges;
+    if (!allow_unchanged and std.mem.eql(u8, next.content, t.file.content)) return error.NoChanges;
     const history_sels = try a.dupe(selection.Selection, before);
     errdefer a.free(history_sels);
     // 일반 편집과 같은 항목 상한이다. 폐기는 전체 결산 때만 수행한다.

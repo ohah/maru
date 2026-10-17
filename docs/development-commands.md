@@ -1610,3 +1610,10 @@ Mac 화면 잠금·검은 캡처는 통과로 취급하지 않는다. 물리 한
 
 `python3 tools/test-editor-formatter-wait.py`는 격리 저장소에서 EXFB3의 정상·6초 지연·
 5초 조기 실패·복원 대조군을 실행한다. 제품 포매터의 20초 timeout은 바꾸지 않는다.
+
+### 자동완성 확정의 Undo 보존
+
+`mise exec -- zig build test-editor-completion`과 `-Doptimize=ReleaseFast`는
+CMP1~12 제품 판정자와 import 초기화 검사 4개(총 16개)를 실행한다. CMP3는 가득 찬 Undo와
+기존 Redo 상태에서 확정 중 할당 실패를 순회해 본문·선택·revision·이력 보존을 검사한다.
+실제 OS 입력기 화면 검증은 포함하지 않는다.

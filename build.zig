@@ -5872,6 +5872,12 @@ pub fn build(b: *std.Build) void {
         run_save_pipeline.addArg("--maru-expect-passed=10");
         macos_only_test_step.dependOn(&run_save_pipeline.step);
     }
+    const completion_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CMP"} });
+    const run_completion = b.addRunArtifact(completion_tests);
+    run_completion.setCwd(b.path("."));
+    run_completion.addArg("--maru-expect-tests=16");
+    run_completion.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-completion", "Run editor completion product regressions").dependOn(&run_completion.step);
     const save_conflict_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.C0a", ".test.C1a-", ".test.C1b-" } });
     const run_save_conflicts = b.addRunArtifact(save_conflict_tests);
     run_save_conflicts.setCwd(b.path("."));

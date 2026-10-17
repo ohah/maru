@@ -25167,6 +25167,67 @@ test "CMP3 자동완성 ①-b — 서버 없는 파일(markdown)에서도 타이
     try testing.expectEqual(@as(usize, 5), completion_client.rows(s).len);
     try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_completions);
     completion_client.hide(s);
+
+    // 확정 전 모든 할당 실패를 훑는다. 가득 찬 Undo와 기존 Redo를 두어
+    // 본문을 바꾼 다음 이력 확장에 실패하는 경로도 반드시 지난다.
+    var completed = false;
+    for (0..128) |failure| {
+        var oom_fx = try PaneFixture.init(allocator);
+        defer oom_fx.deinit(allocator);
+        var oom_root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const oom_root = oom_root_buf[0..try oom_fx.dir.dir.realPath(testing.io, &oom_root_buf)];
+        const text = "wonderful world\n\n";
+        try oom_fx.dir.dir.writeFile(testing.io, .{ .sub_path = "completion.md", .data = text });
+        const oom_path = try std.fs.path.join(allocator, &.{ oom_root, "completion.md" });
+        defer allocator.free(oom_path);
+        const owner = (try pane_ops.openFileTermInActivePane(oom_fx.session, oom_path, .text)).term;
+        const session = oom_fx.session;
+        session.surface_initialized = true;
+        owner.rt.editor_selection = editor_selection.Selection.at(text.len - 1);
+        try testing.expect(insertText(session, owner, "w"));
+        breakUndoGroup(owner);
+        try testing.expect(insertText(session, owner, "x"));
+        try testing.expect(undoEdit(session, owner));
+        completion_client.hide(session);
+        try testing.expect(completion_client.triggerManual(session));
+        try testing.expect(session.editor_completion.active);
+        const state = owner.rt.editorDocument();
+        const before = try allocator.dupe(u8, state.opened.?.file.content);
+        defer allocator.free(before);
+        const selection = owner.rt.editor_selection;
+        const revision = state.opened.?.file.revision;
+        state.history.undo = try allocator.realloc(state.history.undo, state.history.undo_len);
+        const undo_len = state.history.undo_len;
+        const redo_len = state.history.redo_len;
+        const accepted = session.editor_completion.accepted;
+        var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = failure, .resize_fail_index = 0 });
+        session.allocator = failing.allocator();
+        state.opened.?.file.allocator = failing.allocator();
+        state.opened.?.file.buf.allocator = failing.allocator();
+        completion_client.accept(session);
+        session.allocator = allocator;
+        state.opened.?.file.allocator = allocator;
+        state.opened.?.file.buf.allocator = allocator;
+        try testing.expect(!session.editor_completion.accepting);
+        try testing.expect(!session.editor_completion.active);
+        if (!std.mem.eql(u8, before, state.opened.?.file.content)) {
+            try testing.expectEqual(undo_len + 1, state.history.undo_len);
+            try testing.expectEqual(@as(usize, 0), state.history.redo_len);
+            try testing.expect(undoEdit(session, owner));
+            try testing.expectEqualStrings(before, state.opened.?.file.content);
+        } else {
+            try testing.expectEqual(undo_len, state.history.undo_len);
+            try testing.expectEqual(redo_len, state.history.redo_len);
+            try testing.expectEqual(revision, state.opened.?.file.revision);
+            try testing.expectEqualDeep(selection, owner.rt.editor_selection);
+            try testing.expectEqual(accepted, session.editor_completion.accepted);
+        }
+        if (!failing.has_induced_failure) {
+            completed = true;
+            break;
+        }
+    }
+    try testing.expect(completed);
 }
 
 // 제품 행이 일치 자리를 **행마다 따로** 싣는가(§8.2g-e) — 순수 판정자(`SGB4`·`CPL10`)는 자리를 손으로 주거나 matcher 만 불러, `rebuildRows` 가

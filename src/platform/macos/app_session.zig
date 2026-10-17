@@ -12631,8 +12631,6 @@ pub const AppSession = struct {
     /// 이미 열려 있는 파일 Term을 화면에 올린다 — 필요하면 워크스페이스·pane까지 건너간다(§1: 다른 pane을
     /// target으로 열어도 원래 Term을 반환해 그쪽으로 focus).
     pub fn activateExistingFileTerm(self: *AppSession, target: *Term) FileOpenResult {
-        // 새로 여는 것과 같은 사용자 제스처이므로 탐색기 표시도 같아야 한다(§3.1 — 열기는 프로젝트를 보여 준다).
-        self.dock.presented = true;
         for (self.tabs.items, 0..) |tab, tab_index| {
             for (tab.panes.items, 0..) |pane, pane_index| {
                 for (pane.terms.items, 0..) |term, term_index| {
@@ -12645,6 +12643,10 @@ pub const AppSession = struct {
                         !pane_ops.tryFocusPane(self, pane_index) or
                         !term_ops.tryFocusTerm(self, term_index))
                         return .{ .term = target, .created = false, .previous_active_term = previous_active_term };
+                    // 기존 파일을 찾고 실제 포커스 전환까지 성공한 뒤에만 탐색기를 노출한다.
+                    if (self.loaded_config.config.file_panel.show_explorer_on_open) {
+                        self.dock.presented = true;
+                    }
                     return .{ .term = target, .created = false, .previous_active_term = previous_active_term };
                 }
             }
@@ -56726,6 +56728,7 @@ test "FP9 focus toggle: empty notice and workspace-dock round trip use one confi
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
+    session.loaded_config.config.file_panel.show_explorer_on_open = true;
     _ = try session.resize(1400, 900, 1000);
 
     try std.testing.expect(session.focus_owner == .workspace);
@@ -56909,6 +56912,7 @@ test "FP9 closing a group's final entry collapses the leaf and transfers focus t
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
+    session.loaded_config.config.file_panel.show_explorer_on_open = true;
     _ = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-empty-owner-a.md", .markdown);
     const b_open = try pane_ops.openFileTermInActivePane(session, "/tmp/fp9-empty-owner-b.md", .markdown);
     const b_id = b_open.term.file_entry.?.id;
@@ -56950,6 +56954,7 @@ test "FP9 파일을 다 닫으면 입력은 workspace로 돌아가고 트리 his
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
+    session.loaded_config.config.file_panel.show_explorer_on_open = true;
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, file_path));
     const sid = session.fileEntryAt(0).?.surface_id;
     try std.testing.expect(file_panel_ops.closeFilePanelSurfaceNow(session, sid));
@@ -57263,6 +57268,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    session.loaded_config.config.file_panel.show_explorer_on_open = true;
     _ = try session.resize(1400, 900, 1000);
 
     try pane_ops.newWebTermInActivePane(session, .browser); // 도크 경계에 맞닿는 workspace WKWebView seam도 함께 검증.
@@ -57577,6 +57583,7 @@ test "FP7 file tree watches project root and protects dirty buffers from externa
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
+    session.loaded_config.config.file_panel.show_explorer_on_open = true;
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, dirty_path));
     const watched = session.takeFileTreeWatchRoot().?;
     defer allocator.free(watched);
@@ -57722,6 +57729,7 @@ test "file tree keyboard focus preserves identity navigates scrolls and restores
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
+    session.loaded_config.config.file_panel.show_explorer_on_open = true;
     _ = try pane_ops.openFileTermInActivePane(session, "/repo/docs/a.md", .markdown);
     file_panel_ops.assignDockSurfaceIds(session);
     const sid = session.fileEntryAt(0).?.surface_id;
@@ -57893,6 +57901,7 @@ test "file tree Enter opens existing or new B while Esc restores visible A" {
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
+    session.loaded_config.config.file_panel.show_explorer_on_open = true;
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, a_path));
     const a_sid = session.fileEntryAt(0).?.surface_id;
     try std.testing.expect(session.completePendingDockFocus(a_sid));
@@ -57988,6 +57997,7 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
+    session.loaded_config.config.file_panel.show_explorer_on_open = true;
     try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, anchor));
     const scan = session.file_tree.takeScanRequest().?;
     allocator.free(scan);
@@ -79945,6 +79955,70 @@ test "FP16 영속: 파일 Term이 pane file-term으로 왕복하고 브라우저
     try std.testing.expectEqual(dock_panel.Mode.source_edit, pane.terms.items[1].file_entry.?.mode);
     try std.testing.expectEqual(@as(usize, 2), pane.active_term);
     try std.testing.expectEqual(@as(usize, 2), file_panel_ops.fileEntryCount(session));
+}
+
+test "FP16 Explorer auto reveal setting preserves dock state when off" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "first.md", .data = "# first" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "second.html", .data = "<p>second</p>" });
+    var first_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const first_path = first_path_buf[0..try tmp.dir.realPathFile(io, "first.md", &first_path_buf)];
+    var second_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const second_path = second_path_buf[0..try tmp.dir.realPathFile(io, "second.html", &second_path_buf)];
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.io = io;
+    try std.testing.expect(!session.loaded_config.config.file_panel.show_explorer_on_open);
+
+    // The default-off link/open path preserves a hidden, collapsed Explorer and still keeps
+    // the file WebView publish barrier independent from dock visibility.
+    session.dock.presented = false;
+    session.dock.collapsed = true;
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, first_path));
+    try std.testing.expect(!session.dock.presented);
+    try std.testing.expect(session.dock.collapsed);
+    try std.testing.expect(session.focus_owner == .dock_pending);
+    try std.testing.expect(session.pending_dock_focus != null);
+
+    // Turning the option off must not close a dock the user already had open.
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, first_path));
+    try std.testing.expect(session.dock.presented);
+    try std.testing.expect(!session.dock.collapsed);
+
+    // Re-activating the same file while the dock is hidden must still preserve both states.
+    session.dock.presented = false;
+    session.dock.collapsed = true;
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, first_path));
+    try std.testing.expect(!session.dock.presented);
+    try std.testing.expect(session.dock.collapsed);
+
+    // Opting in restores reveal and expansion for both a new file and an existing file.
+    session.loaded_config.config.file_panel.show_explorer_on_open = true;
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, second_path));
+    try std.testing.expect(session.dock.presented);
+    try std.testing.expect(!session.dock.collapsed);
+    session.dock.presented = false;
+    session.dock.collapsed = true;
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPath(session, first_path));
+    try std.testing.expect(session.dock.presented);
+    try std.testing.expect(!session.dock.collapsed);
+
+    // An unowned Term pointer must not reveal the Explorer just because the option is enabled.
+    const unowned_term = try allocator.create(Term);
+    defer allocator.destroy(unowned_term);
+    session.dock.presented = false;
+    session.dock.collapsed = true;
+    _ = session.activateExistingFileTerm(unowned_term);
+    try std.testing.expect(!session.dock.presented);
+    try std.testing.expect(session.dock.collapsed);
 }
 
 // ── FP16 닫기 계약 회귀 가드 ────────────────────────────────────────────────────────────────────

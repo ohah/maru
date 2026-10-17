@@ -2238,7 +2238,9 @@ pub fn finishOpenFilePanel(self: *AppSession, opened: FileOpenResult) FilePanelO
         // 경로가 있는 MRU/공유 편집 뷰는 entry 없이도 이미 정상적으로 열린 뷰다.
         self.focusWorkspaceInput();
     } else return .failed;
-    self.dock.collapsed = false;
+    if (self.loaded_config.config.file_panel.show_explorer_on_open) {
+        self.dock.collapsed = false;
+    }
     if (self.surface_initialized) {
         for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
         pane_ops.recomputeActivePaneRect(self);

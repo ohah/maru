@@ -8523,7 +8523,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainClipboardAction() // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 복사/붙여넣기를 실행한다.
             drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.
             drainFilePick() // 세팅 window.background-image 행 활성: NSOpenPanel(PNG)을 열어 고른 경로를 config에 적용.
-            drainFilePanelPick() // open_file_panel(Cmd+O/메뉴/팔릿): Markdown/HTML을 현재 창 도크에 연다(FP5).
+            drainFilePanelPick() // open_file_panel(Cmd+O/메뉴/팔릿): 지원 파일을 활성 pane의 file Term으로 연다.
             drainFileTreeRootPick() // Explorer 폴더 열기/작업공간 추가: directory-only picker, 정책 검증은 Zig worker.
             drainFileTreeActions() // FP7 FSEvents roots + clean reload + unsupported external open.
             drainColorSample() // HSV picker `i`(스포이드): NSColorSampler로 화면 색을 추출해 picker에 반영(비동기).
@@ -11374,8 +11374,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard maru_macos_app_session_url_at(session, xPx, yPx, mods, &ptr, &len, &kind) == Self.statusOK,
               let bytes = ptr, len > 0 else { return false }
         let text = String(decoding: UnsafeBufferPointer(start: bytes, count: len), as: UTF8.self)
-        // FP5: 파일 경로 중 .md/.html은 현재 창 도크로 라우팅한다. Zig가 확장자·regular-file·중복 활성화를 단일
-        // 출처로 판정한다. 1=열림, 2=지원 형식이지만 실패(외부 앱 우회 금지)라 둘 다 클릭을 소비한다.
+        // 지원 파일 경로는 pane의 file Term으로 라우팅하고, 탐색기 도크 자동 표시는
+        // file-panel.show-explorer-on-open 설정이 정한다. Zig가 확장자·regular-file·중복 활성화를 단일 출처로
+        // 판정한다. 1=열림, 2=지원 형식이지만 실패(외부 앱 우회 금지)라 둘 다 클릭을 소비한다.
         if kind == 1 {
             let pathBytes = Array(text.utf8)
             let result = pathBytes.withUnsafeBufferPointer { p in

@@ -1603,9 +1603,11 @@ pub const BrowserConfig = struct {
 
 pub const FilePanelConfig = struct {
     external_link_target: ExternalLinkTarget = .in_app,
+    show_explorer_on_open: bool = false,
 
     pub const schema = .{
         .external_link_target = Meta{ .doc = .cfg_filepanel_external_link_target, .widget = .dropdown, .section = .workspace },
+        .show_explorer_on_open = Meta{ .doc = .cfg_filepanel_show_explorer_on_open, .widget = .toggle, .section = .workspace },
     };
 };
 

@@ -3812,6 +3812,9 @@ pub const RemoteRuntime = struct {
 
         pub fn hasBufferedFrameWork(runtime: *RemoteRuntime) client_mod.ClientError!bool {
             try runtime.admitRuntimeOperation();
+            // Maintenance callers usually filter frozen owners, but this facade owns
+            // the payload access and must enforce the same boundary as read RPCs.
+            if (runtime.freezeAction(.read_rpc) != .proceed) return error.AdminBusy;
             const generation = runtime.currentGeneration();
             return switch (generation.connection) {
                 .legacy => false,
@@ -3825,6 +3828,7 @@ pub const RemoteRuntime = struct {
         /// 화면 배치가 없는 tick 에도 돌아오게 한다. 들 수 없는 tick 은 건너뛴다(다음 tick 이 다시 본다).
         pub fn pumpImageChannel(runtime: *RemoteRuntime) void {
             runtime.admitRuntimeOperation() catch return;
+            if (runtime.freezeAction(.pump) != .proceed) return;
             switch (runtime.currentGeneration().connection) {
                 // 협상하지 않은 연결은 비울 채널이 없다 — 울타리에 막힌 펌프를 `channel_refused` 로 매 frame 세지 않게 거른다.
                 .legacy => |client| if (client.imageShmNegotiated()) {
@@ -3838,6 +3842,7 @@ pub const RemoteRuntime = struct {
         /// runtime 이 바빠 들 수 없으면 모른다(null) — 「있음」으로 읽으면 안내가 다시 무장돼 같은 연결에 토스트가 또 뜬다.
         pub fn imageChannelUnavailable(runtime: *RemoteRuntime) ?bool {
             runtime.admitRuntimeOperation() catch return null;
+            if (runtime.freezeAction(.pump) != .proceed) return null;
             return switch (runtime.currentGeneration().connection) {
                 .legacy => |client| client.imageChannelUnavailable(),
                 .generation => |adapter| adapter.imageChannelUnavailable(),
@@ -3846,6 +3851,7 @@ pub const RemoteRuntime = struct {
 
         pub fn hasAnyBufferedFrameWork(runtime: *RemoteRuntime) client_mod.ClientError!bool {
             try runtime.admitRuntimeOperation();
+            if (runtime.freezeAction(.read_rpc) != .proceed) return error.AdminBusy;
             return switch (runtime.currentGeneration().connection) {
                 .legacy => false,
                 .generation => |adapter| adapter.hasAnyBufferedRuntimeWork(),
@@ -22000,4 +22006,110 @@ test "image channel legacy: the legacy transport reads negotiation and resolves 
     try std.testing.expect(pump_at > dedup_at);
     // 사이에는 주석뿐이다 — 다른 문장이 끼면 펌프가 그 조건 아래로 숨을 수 있다.
     try std.testing.expect(std.mem.indexOfScalar(u8, backend[dedup_at + dedup.len .. pump_at], ';') == null);
+}
+
+// Real retirement preparation keeps the lifecycle and stable-screen owners in sync.
+// The queued metadata belongs to that attachment: frozen readers must leave it intact,
+// and aborting retirement must make the same event readable again.
+const FrozenReadCase = enum { buffered, any_buffered, quiet, image_pump, image_availability, public_reads };
+
+fn runFrozenReadFence(selected: FrozenReadCase) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fixture: B4SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    try fixture.runtime.testingClient().bufferGenerationEventForTest(7, b4_metadata_base);
+    const client = fixture.runtime.testingClient();
+    if (selected == .image_pump) {
+        // An unnegotiated channel cannot expose a misplaced pump. Put a real EOF
+        // on a bound side-channel so any receive would visibly drop that channel.
+        var pair: [2]c.fd_t = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &pair));
+        errdefer _ = c.close(pair[0]);
+        _ = c.close(pair[1]);
+        try testing.expect(c.fcntl(pair[0], c.F.SETFL, @as(c_int, @bitCast(c.O{ .NONBLOCK = true }))) >= 0);
+        const segments = try client.allocator.create(@import("client_image_segments.zig").Table);
+        segments.* = .{};
+        client.image_segments = segments;
+        client.image_channel = .{ .fd = pair[0], .state = .bound };
+    }
+    const image_fd_before = client.image_channel.fd;
+    const events_before = client.pending_events.items.len;
+    try testing.expect(events_before > 0);
+    const bytes_before = client.pending_event_bytes;
+    const parser_before = client.parser.bufferedBytes();
+    const request_before = client.next_request_id;
+    const generation_before = fixture.adapter.connectionGeneration();
+    var transaction: u8 = 0;
+    const addr = @intFromPtr(&transaction);
+    try RemoteRuntime.backend_api.prepareHostWideRetirement(&fixture.runtime, &fixture.adapter, addr, 1);
+    var frozen = true;
+    defer if (frozen) RemoteRuntime.backend_api.abortHostWideRetirement(&fixture.runtime, &fixture.adapter, addr, 1) catch unreachable;
+    try testing.expect(!RemoteRuntime.backend_api.attachmentLive(&fixture.runtime));
+    var evidence: client_idle_pump_evidence.Owner = undefined;
+    evidence.initInPlace();
+    try client_idle_pump_evidence.install(&evidence);
+    defer client_idle_pump_evidence.uninstall(&evidence) catch unreachable;
+    switch (selected) {
+        .buffered => try testing.expectError(error.AdminBusy, RemoteRuntime.backend_api.hasBufferedFrameWork(&fixture.runtime)),
+        .any_buffered => try testing.expectError(error.AdminBusy, RemoteRuntime.backend_api.hasAnyBufferedFrameWork(&fixture.runtime)),
+        .quiet => try testing.expect(!RemoteRuntime.backend_api.quietPumpProven(&fixture.runtime)),
+        .image_pump => RemoteRuntime.backend_api.pumpImageChannel(&fixture.runtime),
+        .image_availability => try testing.expectEqual(@as(?bool, null), RemoteRuntime.backend_api.imageChannelUnavailable(&fixture.runtime)),
+        .public_reads => {
+            try testing.expectEqual(RemoteRuntime.PumpResult.idle, try fixture.runtime.pumpDelta());
+            try testing.expectError(error.AdminBusy, fixture.runtime.refreshObservation());
+            try testing.expectError(error.AdminBusy, fixture.runtime.requestResync());
+            try testing.expectError(error.AdminBusy, fixture.runtime.selectedText(.{ .start = .{ .row = 0, .col = 0 }, .end = .{ .row = 0, .col = 0 } }));
+            try testing.expectError(error.AdminBusy, fixture.runtime.linkAt(0, 0, 0));
+            var spans: std.ArrayList(terminal.SelectionSpan) = .empty;
+            defer spans.deinit(testing.allocator);
+            try testing.expectError(error.AdminBusy, fixture.runtime.find("x", 0, false, false, &spans));
+        },
+    }
+    const counters = try evidence.snapshot();
+    try testing.expectEqual(@as(u64, 0), counters.client_slot_registry_visits);
+    try testing.expectEqual(@as(u64, 0), counters.socket_read_attempts);
+    try testing.expectEqual(events_before, client.pending_events.items.len);
+    try testing.expectEqual(bytes_before, client.pending_event_bytes);
+    try testing.expectEqual(parser_before, client.parser.bufferedBytes());
+    try testing.expectEqual(request_before, client.next_request_id);
+    try testing.expectEqual(generation_before, fixture.adapter.connectionGeneration());
+    try testing.expectEqual(@as(u64, 0), fixture.runtime.currentGeneration().observation.revision);
+    try testing.expect(!client.unusable);
+    if (selected == .image_pump) {
+        try testing.expectEqual(@import("client_image_channel.zig").State.bound, client.image_channel.state);
+        try testing.expectEqual(image_fd_before, client.image_channel.fd);
+    }
+    try RemoteRuntime.backend_api.abortHostWideRetirement(&fixture.runtime, &fixture.adapter, addr, 1);
+    frozen = false;
+    try testing.expect(RemoteRuntime.backend_api.attachmentLive(&fixture.runtime));
+    if (selected == .image_pump) {
+        RemoteRuntime.backend_api.pumpImageChannel(&fixture.runtime);
+        try testing.expectEqual(@import("client_image_channel.zig").State.unavailable, client.image_channel.state);
+    }
+    const drained = try fixture.runtime.drainObservationEvents();
+    try testing.expect(drained.metadata);
+    try testing.expectEqual(@as(u64, 4), fixture.runtime.currentGeneration().observation.revision);
+    try testing.expectEqualStrings("/base", fixture.runtime.currentGeneration().observation.cwd.items);
+    try testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
+}
+
+test "reconnect read fence: frozen buffered-work query preserves the attachment" {
+    try runFrozenReadFence(.buffered);
+}
+test "reconnect read fence: frozen host-work query preserves the attachment" {
+    try runFrozenReadFence(.any_buffered);
+}
+test "reconnect read fence: frozen quiet query preserves the attachment" {
+    try runFrozenReadFence(.quiet);
+}
+test "reconnect read fence: frozen image pump preserves the attachment" {
+    try runFrozenReadFence(.image_pump);
+}
+test "reconnect read fence: frozen image availability remains unknown" {
+    try runFrozenReadFence(.image_availability);
+}
+test "reconnect read fence: frozen screen and RPC preserve queued events" {
+    try runFrozenReadFence(.public_reads);
 }

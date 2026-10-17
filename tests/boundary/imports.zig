@@ -13291,7 +13291,7 @@ const image_table_sites = [_]ImageTableSite{
     .{ .path = "src/platform/macos/session_host/client_slot.zig", .count = 10, .thread = "slot 의 선언 다섯과 Client 호출 다섯 — tick 펌프는 `withCurrent` 가 slot 소유 스레드를 확인한다, 나머지는 attachment 적용(아래 adapter)의 스레드" },
     .{ .path = "src/platform/macos/session_host/generation_batch_adapter.zig", .count = 8, .thread = "transport 콜백 넷의 선언과 slot 호출 — `RemoteAttachment` 가 적용할 때 부른다: 앱 메인 스레드의 tick 펌프·관찰자 재접속 단계, 탭을 열 때의 첫 attach" },
     .{ .path = "src/platform/macos/session_host/host_adapter.zig", .count = 2, .thread = "tick 펌프(generation) 선언과 slot 호출 — `backend_api.pumpImageChannel` 에서만, 앱 메인 스레드" },
-    .{ .path = "src/platform/macos/session_host/remote_runtime.zig", .count = 7, .thread = "legacy transport 콜백 넷(generation adapter 와 같은 스레드)과 `backend_api.pumpImageChannel` 의 선언·호출 둘(유지보수 tick, 앱 메인 스레드)" },
+    .{ .path = "src/platform/macos/session_host/remote_runtime.zig", .count = 9, .thread = "legacy transport 콜백 넷(generation adapter 와 같은 스레드)과 `backend_api.pumpImageChannel` 의 선언·호출 둘(유지보수 tick, 앱 메인 스레드), 테스트 전용 runFrozenReadFence의 retirement 전후 펌프 호출 둘(연결을 만든 동일 테스트 소유 스레드)" },
     .{ .path = "src/platform/macos/session_host/remote_term_backend.zig", .count = 1, .thread = "`maintenanceEventTick` — `tickReconnectProductCoordinator` 가 앱 소유 스레드인지 확인한 뒤에만 부른다" },
 };
 

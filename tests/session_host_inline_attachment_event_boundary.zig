@@ -52,6 +52,8 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
         // P5b2b3 adds one test-only invalidation take; the sole product call remains unchanged.
         // The probe-nonce coalescing test takes queued events in order (test-only, +1).
         .{ .path = "platform/macos/session_host/client.zig", .product = 1, .top_level_test = 12 },
+        // Reconnect read-fence socket control consumes only the new Client's event.
+        .{ .path = "platform/macos/session_host/client_slot.zig", .product = 0, .top_level_test = 1 },
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 0, .top_level_test = 3 },
         .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 0, .top_level_test = 2 },
         .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 1, .top_level_test = 0 },
@@ -67,6 +69,7 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
         .{ .path = "platform/macos/session_host/attach_product_resolver.zig", .product = 0, .top_level_test = 1 },
         // P5b2b3 releases the test-only invalidation owner; product ownership remains singular.
         .{ .path = "platform/macos/session_host/client.zig", .product = 1, .top_level_test = 2 },
+        .{ .path = "platform/macos/session_host/client_slot.zig", .product = 0, .top_level_test = 1 },
         .{ .path = "platform/macos/session_host/generation_attachment.zig", .product = 4, .top_level_test = 14 },
         // CR6e-c3b2d mutation denial 표가 buffered revoke 행을 정리하며 test 에서 한 번 더 놓는다.
         .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 6, .top_level_test = 15 },

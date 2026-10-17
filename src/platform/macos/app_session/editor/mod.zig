@@ -51800,6 +51800,59 @@ test "C1a-12 다시 읽기는 바뀐 곳만 고쳐 caret 을 문서 처음으로
     // 되돌리기는 여전히 되살린다.
     try testing.expect(undoEdit(s, c.term));
     try testing.expectEqualStrings("Xone\ntwo\nthree\n", c.term.rt.editorDocument().opened.?.file.content);
+
+    // 외부 본문을 받아들이는 편집은 되돌릴 수 있어야 한다. Undo 배열이 꽉 찬 상태에서
+    // 각 할당을 실패시켜, 본문 변경 뒤 이력만 잃는 경우도 실제 제품 경로로 검사한다.
+    for (0..2) |view_mode| {
+        var complete = false;
+        for (0..128) |failure| {
+            const f = try ConflictFixture.init(allocator, "reload-oom.txt", "old\n");
+            defer f.deinit(allocator);
+            const session = f.fx.session;
+            try testing.expect(insertText(session, f.term, "mine"));
+            breakUndoGroup(f.term);
+            try testing.expect(insertText(session, f.term, "redo"));
+            try testing.expect(undoEdit(session, f.term));
+            const state = f.term.rt.editorDocument();
+            const original = try allocator.dupe(u8, state.opened.?.file.content);
+            defer allocator.free(original);
+            const peer = try openSharedViewInActivePane(session, f.term);
+            peer.rt.editor_selection = editor_selection.Selection.at(2);
+            if (view_mode == 1) f.term.rt.editor_selection = null;
+            const source_selection = f.term.rt.editor_selection;
+            const revision = state.opened.?.file.revision;
+            state.history.undo = try allocator.realloc(state.history.undo, state.history.undo_len);
+            const prior_undo = state.history.undo_len;
+            const prior_redo = state.history.redo_len;
+            try f.writeOutside("reload-oom.txt", "outside\n");
+            var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = failure, .resize_fail_index = 0 });
+            session.allocator = failing.allocator();
+            state.opened.?.file.allocator = failing.allocator();
+            state.opened.?.file.buf.allocator = failing.allocator();
+            app_session_mod.editor_conflict_ops.confirmReload(session, f.term.surface.id);
+            session.allocator = allocator;
+            state.opened.?.file.allocator = allocator;
+            state.opened.?.file.buf.allocator = allocator;
+            if (std.mem.eql(u8, state.opened.?.file.content, "outside\n")) {
+                try testing.expectEqual(prior_undo + 1, state.history.undo_len);
+                if (view_mode == 1) try testing.expect(f.term.rt.editor_selection == null);
+                try testing.expect(undoEdit(session, peer));
+                try testing.expectEqualStrings(original, state.opened.?.file.content);
+            } else {
+                try testing.expectEqualStrings(original, state.opened.?.file.content);
+                try testing.expectEqual(prior_undo, state.history.undo_len);
+                try testing.expectEqual(prior_redo, state.history.redo_len);
+                try testing.expectEqual(revision, state.opened.?.file.revision);
+                try testing.expectEqualDeep(source_selection, f.term.rt.editor_selection);
+                try testing.expectEqual(@as(usize, 2), peer.rt.editor_selection.?.focus);
+            }
+            if (!failing.has_induced_failure) {
+                complete = true;
+                break;
+            }
+        }
+        try testing.expect(complete);
+    }
 }
 
 test "C1a-5 다시 읽기가 실패하면 이유별로 말하고 편집은 남는다" {

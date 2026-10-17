@@ -17,3 +17,7 @@ pub const text = @import("text.zig");
 pub const mailbox = @import("mailbox.zig");
 /// 페이지가 여는 새 탭의 규칙(W6e) — 앞/뒤·주소·자리.
 pub const new_tab = @import("new_tab.zig");
+/// 네트워크 메시지(W9d①)의 닫힌 필드·헤더 덩어리.
+pub const net_fields = @import("net_fields.zig");
+/// 에이전트에게 보이는 네트워크 기록의 규칙(W9d① — 설정이 꺼졌을 때의 투영·헤더 허용 목록·호스트 덮기).
+pub const net_policy = @import("net_policy.zig");

@@ -29,6 +29,7 @@ const mailbox = ws.mailbox;
 const osr_input = maru.session.web_osr_input;
 const dialog_cause = maru.session.web_osr_dialog_cause;
 const console_ring = maru.session.web_osr_console;
+const net_ring = maru.session.web_osr_network;
 
 /// 링 하나(W3c): 받은 IOSurface 셋·제어 페이지와, View 가 보는 세대·mailbox 워드.
 pub const AppRing = struct {
@@ -78,6 +79,10 @@ const Surface = struct {
     /// 마지막으로 이동시킨 주소 — sidecar 가 다시 뜨면 이 주소로 되살린다. 이동을 CEF 가 끝내면 `url` 이 된다.
     last_url: ?[]u8 = null,
     url: ?[]u8 = null,
+    /// `url` 이 옛 것이다(W9d① 적대 리뷰 4 회차 C3) — 주 프레임에 새 문서가 섰는데(`page_started`) 그 주소가 아직 오지 않았다. CEF 는 새 문서마다
+    /// `page_started` 뒤 `url_changed` 를 보내지만(판정 `R9d4-nav-order(obs)`) 32 KiB 를 넘는 주소는 `url_changed` 가 없다(sidecar 가 자른 주소를
+    /// 보내지 않는다 — `R9d4-long-url-no-url-changed(obs)`). 네트워크 판정은 옛 주소의 호스트를 쓰지 않는다(`netKnownUrl` — 덮지 않는 쪽으로).
+    url_stale: bool = false,
     can_go_back: bool = false,
     can_go_forward: bool = false,
     /// Chromium 이 이 탭을 불러오는 중인가(`nav_state.loading` — 이동이 막 시작된 것도 참이다, W9b①b 의 wait --load).
@@ -229,6 +234,30 @@ const Surface = struct {
     /// W9c①: 페이지의 콘솔(sidecar 의 `console_message`) — 늘 켜 둔다. 탭과 함께 사라지고 sidecar 가 다시 떠도 남는다. 문서 경계는
     /// `page_started`·`error_page`.
     console: console_ring.Ring = .{},
+    /// W9d①: 네트워크 기록(sidecar 의 `net_*`) — `browser_network` grant 가 있는 동안만 적는다(`net_on`). 마지막 grant 가 사라지면 지운다.
+    network: net_ring.Ring = .{},
+    /// W9d①: 이 탭을 지켜본다(grant 가 있다) — sidecar 에 `net_watch` 를 켜 두고 오는 `net_*` 를 적는다.
+    net_on: bool = false,
+    /// W9d①: sidecar 에 마지막으로 보낸 지켜보기(같으면 다시 보내지 않는다 — 브라우저가 새로 만들어지면 지운다).
+    net_sent: ?NetWatchKey = null,
+    /// W9d① 적대 리뷰 2 회차 N3: 어느 호스트든 grant 가 있는 탭을 사용자가 처음 몬 때의 사이트(에이전트가 마지막으로 혼자 둔 사이트) — 설정이
+    /// 꺼지면(그때든 나중이든) 그 grant 를 이리로 좁힌다.
+    net_drove_host: ?maru.session.control_pane_grant.GrantHost = null,
+};
+
+/// W9d①: 보낸 `net_watch` 의 값 — 켬·설정·어느 호스트든·grant 호스트(넷까지).
+const NetWatchKey = struct {
+    on: bool = false,
+    full: bool = false,
+    any_host: bool = false,
+    count: u8 = 0,
+    hosts: [ws.message.max_net_watch_hosts]maru.session.control_pane_grant.GrantHost = @splat(.{}),
+
+    fn eql(a: *const NetWatchKey, b: *const NetWatchKey) bool {
+        if (a.on != b.on or a.full != b.full or a.any_host != b.any_host or a.count != b.count) return false;
+        for (a.hosts[0..a.count], b.hosts[0..b.count]) |*x, *y| if (!x.eql(y)) return false;
+        return true;
+    }
 };
 
 /// W9a: 에이전트가 보낸 이동의 끝(계획 공격 3 회차 실측 — sidecar 가 보내는 차례):
@@ -554,6 +583,20 @@ var page_opened_next: usize = 0;
 const ConsoleBirth = struct { surface_id: u64 = 0, who: u64 = 0, seq: u64 = 0 };
 var console_birth_pending: [16]ConsoleBirth = @splat(.{});
 var console_birth_seq: u64 = 0;
+/// W9d①: app 이 마지막으로 알린 `browser_network` grant 들(`networkSync`) — 기록이 아직 없는 탭(첫 배치 전)도 첫 배치에 맞춘다. 사용자가 몬
+/// 탭의 좁히기(적대 리뷰 2 회차 N2)는 app 이 grant 표에 옮기기 전에 여기를 먼저 고친다 — `narrowed` 가 「app 이 아직 옮기지 않았다」 표지다
+/// (3 회차 P1d: 전에는 64 칸 줄에 따로 남겨 넘치면 잃었고, 다음 동기화가 옛 「어느 호스트든」 으로 되돌렸다. 이제 이 사본 자체가 남긴 것이라 잃을
+/// 자리가 없다 — `networkSync` 는 app 이 다 가져간 뒤에만 부른다).
+const NetGrantCopy = struct { tab: u64, who: u64, host: maru.session.control_pane_grant.GrantHost, birth: bool, any_host: bool, pane: u64, narrowed: bool = false };
+var net_grants: [maru.session.control_pane_grant.capacity]NetGrantCopy = undefined;
+var net_grant_count: usize = 0;
+/// W9d①: 네트워크 기록의 앱 전체 예산(32 MiB — 탭들이 함께 쓴다).
+var net_budget: net_ring.Budget = .{};
+/// W9d①: 설정 `browser.agent-network-full`(켜짐이 기본 — 사용자 결정 2026-10-15). 앱 전체 하나 — 마지막으로 읽은 창의 값.
+var net_full: bool = true;
+/// W9d① 적대 리뷰 1 회차 F5: 설정이 꺼졌을 때 사용자가 몬 탭 — 그 탭의 어느 호스트든 grant 를 그때의 사이트로 좁히라고 app 에 알린다
+/// (`takeNetworkNarrows` — app 이 다음 grant 동기화·control 요청 앞에서 grant 표를 고친다. 2 회차 N2 부터 지켜보기는 몰 때 곧 좁힌다).
+pub const NetworkNarrow = struct { tab: u64, host: maru.session.control_pane_grant.GrantHost };
 var hello_nonce: u64 = 0;
 var started_ms: i64 = 0;
 var failures: [restart_budget]?i64 = @splat(null);
@@ -651,6 +694,8 @@ fn testTeardown(gpa: std.mem.Allocator) void {
     outbox_pending.clearAndFree(gpa);
     state = .off;
     test_record_sends = false;
+    net_grant_count = 0; // W9d①
+    net_full = true;
 }
 
 test "closing a tab that is still downloading hides it on about:blank and closes it once the downloads end (W10c)" {
@@ -1684,6 +1729,8 @@ pub fn testDevtoolsReset(gpa: std.mem.Allocator) void {
 
 pub fn testForget(gpa: std.mem.Allocator) void {
     if (!builtin.is_test) @compileError("test only");
+    net_grant_count = 0; // W9d①
+    net_full = true;
     destroyed_ids = @splat(0);
     decided = null;
     state = .off;
@@ -1956,6 +2003,7 @@ pub fn ensure(gpa: std.mem.Allocator, layout: plan.Layout, scale_milli: u32, now
     if (fresh) |record| {
         surfaces.put(gpa, layout.surface_id, .{ .record = record, .stopped_notice_pending = latched != null, .page_opened = takePageOpened(layout.surface_id) }) catch return;
         surfaces.getPtr(layout.surface_id).?.console.latchAtBirth(takeConsoleBirth(layout.surface_id)); // W9c① 3 회차 F1
+        reconcileNetwork(gpa, layout.surface_id, surfaces.getPtr(layout.surface_id).?); // W9d①: 기록보다 먼저 온 grant(에이전트 탭의 태어남)
         // 판정자 전용(`MARU_WEB_OSR_TEST_URL`): 새 탭을 이 주소로 연다 — 스모크가 sidecar 까지의 경로(띄우기·handshake·
         // 생성·이동)를 시험 서버가 받은 요청으로 확인한다. 제품 사용자가 켤 이유는 없다.
         if (std.c.getenv("MARU_WEB_OSR_TEST_URL")) |test_url| navigate(gpa, layout.surface_id, std.mem.span(test_url));
@@ -1992,6 +2040,14 @@ pub fn navigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) void {
     }
 }
 
+/// 사용자가 주소창에서 이 탭을 옮긴다 — 사용자의 몰기를 먼저 적고(`noteUserNavigation` — 설정이 꺼졌으면 네트워크 지켜보기를 그때 좁혀 sidecar 에
+/// 보낸다) 그다음 이동을 보낸다(W9d① 적대 리뷰 3 회차 W2: 주소창 길만 이동을 먼저 보내 좁힌 `net_watch` 가 그 뒤에 갔다 — 누름·키·뒤로·끌기는
+/// 이미 좁히기가 먼저다).
+pub fn userNavigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) void {
+    noteUserNavigation(surface_id);
+    navigate(gpa, surface_id, url);
+}
+
 /// W9a: 에이전트의 `browser.navigate` — 이동을 보내고 그 끝을 지켜본다(`agentNavState`). 사용자의 이동이 아니다(`noteUserNavigation` 을
 /// 부르지 않는다 — 에이전트가 연 다운로드를 사용자의 것으로 치지 않는다). 모르는 탭(한 번도 배치되지 않았다)이면 거짓.
 pub fn agentNavigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) bool {
@@ -2023,6 +2079,7 @@ pub fn noteUserNavigation(surface_id: u64) void {
     s.download_gesture_ms = monotonicNow();
     s.user_action_ms = monotonicNow(); // W9c②: 이동이 부른 떠나기 확인은 사용자 것이다
     s.console.userDrove(); // W9c① 4 회차 D: 사용자가 이 탭으로 다른 곳에 간다 — 태어날 때의 콘솔 묶음을 푼다(첫 읽기 전이면)
+    networkUserDrove(surface_id, s); // W9d①: 같은 까닭으로 네트워크의 태어날 때의 시작점도 첫 읽기로 미룬다
     // W10c: 사용자가 이 탭을 쓴다 — 페이지가 연 빈 탭이어도 이제 사용자의 탭이다(주소창에 친 파일 주소에 그 탭이 닫혔다 — 적대
     // 리뷰 2 회차). 미뤄 둔 닫기도 거둔다(3 회차).
     s.page_opened = false;
@@ -2040,6 +2097,7 @@ pub fn navAction(gpa: std.mem.Allocator, surface_id: u64, action: ws.message.Nav
     const s = surfaces.getPtr(surface_id) orelse return;
     s.user_action_ms = monotonicNow(); // W9c②: 이것이 부른 떠나기 확인은 사용자 것이다
     s.console.userDrove(); // W9c① 4 회차 D: 뒤로 가면 사용자가 그 탭으로 지나온 곳일 수 있다
+    networkUserDrove(surface_id, s); // W9d①
     if (s.created) send(gpa, .{ .nav_action = .{ .browser = surface_id, .action = action } });
 }
 
@@ -2114,7 +2172,10 @@ fn sendInputAs(gpa: std.mem.Allocator, message: Message, from_user: bool) bool {
     // W9c① 4 회차 D: 사용자가 페이지를 누르거나 쳤다 — 에이전트가 연 탭이어도 이제 사용자가 몰 수 있다(링크·검색 칸으로 제 사이트에 간다).
     // 첫 읽기 전이면 태어날 때의 콘솔 묶음을 푼다. 포인터 이동·휠은 빼다 — 에이전트가 하는 일을 지켜보는 사용자의 hover·스크롤로는 다른
     // 사이트에 가지 않는데, 풀면 첫 읽기 전에 페이지가 스스로 옮겨 간 앞 문서의 오류가 사라진다(3 회차 F1).
-    if (from_user and user_made and drivesPage(message)) s.console.userDrove();
+    if (from_user and user_made and drivesPage(message)) {
+        s.console.userDrove();
+        networkUserDrove(browser, s); // W9d①
+    }
     // 앱이 만든 입력은 페이지 입력 시각도 건드리지 않는다 — 조합 마침의 글은 사용자가 칠 때 이미 찍혔다(3 회차).
     const kept_input_ms = s.last_user_input_ms;
     defer if (!from_user) {
@@ -2898,6 +2959,272 @@ fn consoleLevel(level: ws.message.ConsoleLevel) console_ring.Level {
     };
 }
 
+// ── W9d①: 네트워크 기록(`browser.network`·`browser.networkRequest`) ─────────────────────────────────────────────────────
+
+/// app 이 아는 `browser_network` grant 하나 — 탭·읽는 쪽(`consoleAuthorizer` 와 같은 값 — grant 마다 다르다)·grant 를 쥔 pane(적대 리뷰 2 회차
+/// N6 — 한 읽는 쪽이 grant 를 쥔 탭들을 가른다)·grant 호스트(에이전트가 연 탭의 태어날 때 grant 는 비었다 — 어느 사이트든)·태어날 때의
+/// grant 인가. `any_host` — 어느 사이트든 인가하는 grant(에이전트 탭의 태어날 때 grant)다. 거짓이면 `host` 에 묶였다 — 빈 호스트(빈 사이트로
+/// 좁혔다)는 아무것도 덮지 않는다(적대 리뷰 3 회차: 전에는 빈 호스트가 「어느 사이트든」 이라 따로 `bound_empty` 를 달아야 했다 — 빠뜨리면 넓어졌다).
+pub const NetworkGrant = struct { tab: u64, who: u64, host: []const u8 = "", birth: bool = false, any_host: bool = false, pane: u64 = 0 };
+
+/// W9d①: grant 가 바뀔 때마다 app 이 전체 목록을 알린다 — 탭마다 읽는 쪽을 맞추고, grant 가 있으면 sidecar 에 지켜보기를 켜고(호스트·설정),
+/// 마지막 grant 가 사라지면 끄고 기록을 지운다. 넘치는 grant 는 버린다(저장소 상한과 같아 오지 않는다).
+pub fn networkSync(grants: []const NetworkGrant) void {
+    net_grant_count = 0;
+    for (grants) |g| {
+        if (net_grant_count == net_grants.len) break;
+        net_grants[net_grant_count] = .{ .tab = g.tab, .who = g.who, .host = if (g.any_host) .{} else .init(g.host), .birth = g.birth, .any_host = g.any_host, .pane = g.pane };
+        net_grant_count += 1;
+    }
+    // 엔진이 돈 적 없으면(할당자 없음) 기록도 없다 — 목록만 쥐고, 첫 배치가 기록을 만들 때 맞춘다(`ensure`).
+    const gpa = gpa_ref orelse return;
+    var it = surfaces.iterator();
+    while (it.next()) |e| reconcileNetwork(gpa, e.key_ptr.*, e.value_ptr);
+}
+
+/// W9d①: 설정 `browser.agent-network-full` — 바뀌면 지켜보는 탭마다 sidecar 에 다시 알린다(꺼지면 그 뒤로 sidecar 가 값을 덜어 보낸다).
+/// 꺼질 때 사용자가 이미 몬 에이전트 탭의 어느 호스트든 grant 는 곧 몰기 전의 사이트로 좁힌다(적대 리뷰 2 회차 N3 — 켜진 동안 몬 탭은 좁히기를
+/// 남기지 않아, 꺼진 뒤 다음 몰기가 사용자의 사이트(은행)로 좁혔다).
+pub fn setNetworkFull(value: bool) void {
+    if (net_full == value) return;
+    net_full = value;
+    if (!value) {
+        var dit = surfaces.iterator();
+        while (dit.next()) |e| if (e.value_ptr.net_drove_host) |h| narrowNetwork(e.key_ptr.*, e.value_ptr, h);
+    }
+    const gpa = gpa_ref orelse return; // 엔진이 돈 적 없다 — 지켜보는 탭이 없다
+    var it = surfaces.iterator();
+    while (it.next()) |e| if (e.value_ptr.net_on) sendNetWatch(gpa, e.key_ptr.*, e.value_ptr);
+}
+
+pub fn networkFull() bool {
+    return net_full;
+}
+
+fn reconcileNetwork(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
+    var desired: [maru.session.control_pane_grant.capacity]net_ring.Desired = undefined;
+    var n: usize = 0;
+    for (net_grants[0..net_grant_count]) |g| if (g.tab == id) {
+        desired[n] = .{ .who = g.who, .birth = g.birth };
+        n += 1;
+    };
+    if (n == 0) {
+        s.net_drove_host = null;
+        if (s.net_on) {
+            s.net_on = false;
+            s.network.wipe(gpa, &net_budget); // 철회·마지막 grant 가 사라졌다 — 적은 것을 남기지 않는다
+        }
+    } else {
+        s.network.syncReaders(desired[0..n]);
+        s.net_on = true;
+    }
+    sendNetWatch(gpa, id, s);
+}
+
+/// 지금 바라는 지켜보기를 sidecar 에 알린다(브라우저가 있을 때만 — 없으면 `browser_created` 가 부른다). 같은 값이면 다시 보내지 않는다.
+fn sendNetWatch(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
+    var key: NetWatchKey = .{ .on = s.net_on, .full = s.net_on and net_full };
+    if (s.net_on) {
+        // 어느 호스트든 grant 와 묶인 grant 를 함께 싣는다 — sidecar 는 둘을 합쳐 덮는다(W9d① 적대 리뷰 3 회차 P1a: 전에는 묶인 호스트만 실려 에이전트
+        // 제 사이트의 값까지 덜었다). 읽는 쪽마다의 투영은 maru 가 한다. 묶인 호스트가 넷을 넘으면 그 뒤는 싣지 않는다(덮이지 않는 것으로 —
+        // 넓히지 않는다). 빈 사이트로 좁힌 grant 는 아무것도 싣지 않는다 — 빈 목록은 아무것도 덮지 않는다(전의 `invalid` 대신).
+        for (net_grants[0..net_grant_count]) |g| {
+            if (g.tab != id) continue;
+            if (g.any_host) {
+                key.any_host = true;
+                continue;
+            }
+            if (g.host.len == 0 or key.count == key.hosts.len) continue;
+            const dup = for (key.hosts[0..key.count]) |*h| {
+                if (h.eql(&g.host)) break true;
+            } else false;
+            if (dup) continue;
+            ws.net_fields.checkHost(g.host.slice()) catch continue;
+            key.hosts[key.count] = g.host;
+            key.count += 1;
+        }
+    }
+    if (!s.created) return;
+    if (s.net_sent) |*sent| if (sent.eql(&key)) return;
+    // 꺼진 적이 없는 탭에 「끔」 을 보내지 않는다(sidecar 는 처음부터 꺼져 있다).
+    if (s.net_sent == null and !key.on) return;
+    var msg: ws.message.NetWatch = .{ .browser = id, .on = key.on, .full = key.full, .any_host = key.any_host, .host_count = key.count };
+    for (key.hosts[0..key.count], 0..) |*h, i| msg.hosts[i] = h.slice();
+    send(gpa, .{ .net_watch = msg });
+    s.net_sent = key;
+    if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test net-watch {d} on={} full={} any_host={} hosts={d}\n", .{ id, key.on, key.full, key.any_host, key.count });
+}
+
+/// W9d①: 네트워크를 읽는 쪽 — 읽는 쪽 번호(`consoleAuthorizer`), grant 를 쥔 pane(적대 리뷰 2 회차 N6 — null 은 시험만: 읽는 탭만 제 것이다.
+/// `browser_network` 는 cap 으로 발급하지 않아 읽는 쪽은 늘 pane grant 다 — 5 회차 N2), grant 호스트(지금 값 —
+/// 좁혀졌으면 좁힌 사이트), 그 grant 가 그 호스트에 묶였는가(모달로 받은 grant·좁힌 태어날 때 grant), 그 읽는 쪽이 이 탭에 쥔 `browser_storage`
+/// grant 의 호스트(3 회차 D1 — 쿠키 권한: 자격 증명 값은 그 호스트를 덮을 때만, 없으면 빈 글).
+pub const NetReader = struct {
+    who: u64,
+    pane: ?u64 = null,
+    grant_host: []const u8 = "",
+    host_bound: bool = false,
+    cookie_host: []const u8 = "",
+};
+
+/// W9d①: 읽기의 관점 — 설정과 grant 호스트(비었으면 탭의 지금 문서 호스트 — 에이전트 탭의 태어날 때 grant).
+/// `host_bound` 면 읽는 쪽의 grant 가 `grant_host` 에 묶였다(`top_bound` — 적대 리뷰 1 회차 F2: 그 사이트가 아닐 때의 요청은 숨긴다; 빈 호스트로
+/// 좁혀졌으면 모두 숨는다). 아니면(어느 호스트든 grant) 투영은 탭의 지금 호스트로. 설정이 꺼졌으면 이 읽는 쪽(그 pane —
+/// `reader.pane`)이 `browser_network` grant 를 쥔 탭들을 `reader_tabs` 에(읽는 탭 `read_tab` 포함), 그 밖의 탭이 지금
+/// 보이는 출처(F4·2 회차 N6 — 다른 pane 에게만 허락된 탭도 이 읽는 쪽에게는 허락되지 않은 탭이다)를 `shared` 에 담아 싣는다(`origin_buf` 에 쓴다).
+fn netView(s: ?*const Surface, read_tab: u64, reader: NetReader, lists: *NetViewLists, origin_buf: []u8, gpa: std.mem.Allocator) std.mem.Allocator.Error!net_ring.View {
+    var host = reader.grant_host;
+    if (!reader.host_bound and host.len == 0) if (s) |sp| if (netKnownUrl(sp)) |u| {
+        host = maru.session.control_pane_grant.hostOfUrl(u) orelse "";
+    };
+    var shared_unknown = false;
+    if (!net_full) {
+        try lists.tabs.append(gpa, read_tab);
+        if (reader.pane) |pane| for (net_grants[0..net_grant_count]) |g| if (g.pane == pane and std.mem.indexOfScalar(u64, lists.tabs.items, g.tab) == null) {
+            try lists.tabs.append(gpa, g.tab);
+        };
+        var at: usize = 0;
+        var it = surfaces.iterator();
+        while (it.next()) |e| {
+            if (std.mem.indexOfScalar(u64, lists.tabs.items, e.key_ptr.*) != null) continue;
+            // 4 회차 C3: 주소가 옛 것인 탭은 지금 어느 출처인지 모른다 — 어느 출처든 보일 수 있다고 친다(서비스 워커 요청은 수만).
+            if (e.value_ptr.url_stale) shared_unknown = true;
+            const u = netKnownUrl(e.value_ptr) orelse continue;
+            if (at + ws.message.max_net_origin_bytes > origin_buf.len) break; // 넘치면 그 뒤 탭은 요청 때의 표지(`sw_tabs`)만 본다
+            const o = ws.net_policy.originOf(u, origin_buf[at..][0..ws.message.max_net_origin_bytes]);
+            if (o.len == 0) continue;
+            try lists.shared.append(gpa, o);
+            at += o.len;
+        }
+    }
+    return .{ .full = net_full, .grant_host = host, .top_bound = reader.host_bound, .shared_sw_origins = lists.shared.items, .shared_sw_unknown = shared_unknown, .reader_tabs = lists.tabs.items, .cookie_host = reader.cookie_host };
+}
+
+/// W9d① 적대 리뷰 4 회차 C3: 네트워크 판정에 쓸 탭의 지금 주소 — 새 문서의 주소가 아직 오지 않았으면(`url_stale` — 32 KiB 를 넘는 주소는 끝내
+/// 오지 않는다) null. 옛 주소의 호스트로 다른 사이트 iframe 안 요청(첫 사이트가 비어 온다)을 그 사이트의 것으로 치면 묶인 읽는 쪽에게 보였다.
+fn netKnownUrl(s: *const Surface) ?[]const u8 {
+    if (s.url_stale) return null;
+    return s.url;
+}
+
+/// `netView` 가 채우는 목록 둘(읽는 동안만).
+const NetViewLists = struct {
+    shared: std.ArrayList([]const u8) = .empty,
+    tabs: std.ArrayList(u64) = .empty,
+
+    fn deinit(self: *NetViewLists, gpa: std.mem.Allocator) void {
+        self.shared.deinit(gpa);
+        self.tabs.deinit(gpa);
+    }
+};
+
+/// 지켜보지 않는 탭의 출처를 담을 자리(읽을 때 한 번 — 탭이 많으면 앞의 것만).
+const net_shared_origin_bytes = 64 * ws.message.max_net_origin_bytes;
+
+/// W9d①: `browser.network` — 그 읽는 쪽이 볼 수 있는 요청 목록 JSON(`out` 소유). 기록이 없는 탭은 빈 목록.
+pub fn networkList(out: std.mem.Allocator, surface_id: u64, reader: NetReader, q: net_ring.Query) std.mem.Allocator.Error![]u8 {
+    var lists: NetViewLists = .{};
+    defer lists.deinit(out);
+    const origin_buf = try out.alloc(u8, net_shared_origin_bytes);
+    defer out.free(origin_buf);
+    const s = surfaces.getPtr(surface_id) orelse {
+        var empty: net_ring.Ring = .{};
+        return empty.list(out, 0, try netView(null, surface_id, reader, &lists, origin_buf, out), q);
+    };
+    return s.network.list(out, reader.who, try netView(s, surface_id, reader, &lists, origin_buf, out), q);
+}
+
+/// W9d①: `browser.networkRequest` — 그 요청의 자세한 것 JSON(`out` 소유).
+pub fn networkDetail(out: std.mem.Allocator, surface_id: u64, reader: NetReader, req: u64) net_ring.DetailError![]u8 {
+    const s = surfaces.getPtr(surface_id) orelse return error.UnknownRequest;
+    var lists: NetViewLists = .{};
+    defer lists.deinit(out);
+    const origin_buf = try out.alloc(u8, net_shared_origin_bytes);
+    defer out.free(origin_buf);
+    return s.network.detail(out, reader.who, try netView(s, surface_id, reader, &lists, origin_buf, out), req);
+}
+
+/// W9d① 적대 리뷰 1 회차 F2·F4: 요청이 들어올 때 app 이 아는 그 탭의 것 — 맨 위 문서 호스트(지금 주소), 서비스 워커 요청이면 같은 출처를
+/// 보이는 다른 탭들(그 탭이 보낸 요청일 수 있다 — 읽을 때 읽는 쪽에게 허락된 탭인지 본다, 2 회차 N6). `tabs_buf` 에 쓴다.
+fn netBeginContext(s: *const Surface, v: ws.message.NetBegin, tabs_buf: *[net_ring.max_sw_tabs + 1]u64) net_ring.BeginContext {
+    const top = if (netKnownUrl(s)) |u| maru.session.control_pane_grant.hostOfUrl(u) orelse "" else ""; // 옛 주소면 모른다(4 회차 C3)
+    return .{ .top_host = top, .sw_tabs = if (v.flags.service_worker) tabsShowing(v.initiator, v.browser, tabs_buf) else &.{} };
+}
+
+/// `except` 밖의 탭 중 그 출처를 보이는 것들(`out` 이 차면 거기까지 — 하나 넘치면 부른 쪽이 넘침으로 안다).
+fn tabsShowing(origin: []const u8, except: u64, out: []u64) []const u64 {
+    if (origin.len == 0) return out[0..0];
+    var ob: [ws.message.max_net_origin_bytes]u8 = undefined;
+    var n: usize = 0;
+    var it = surfaces.iterator();
+    while (it.next()) |e| {
+        if (e.key_ptr.* == except or n == out.len) continue;
+        // 주소가 옛 것인 탭(4 회차 C3)은 지금 그 출처일 수 있다 — 든 것으로 친다(더 숨기는 쪽).
+        if (!e.value_ptr.url_stale) {
+            const u = e.value_ptr.url orelse continue;
+            if (!std.ascii.eqlIgnoreCase(ws.net_policy.originOf(u, &ob), origin)) continue;
+        }
+        out[n] = e.key_ptr.*;
+        n += 1;
+    }
+    return out[0..n];
+}
+
+/// W9d①: 사용자가 이 탭을 몰았다(누름·키·주소창·뒤로·끌어 놓기·닫힌 팝업 되살리기). 태어날 때의 시작점을 첫 읽기로 미루고(콘솔과 같다),
+/// 그 탭에 어느 호스트든 grant 가 있으면 몰기 전의 사이트를 적는다(처음 것이 이긴다 — 2 회차 N3). 설정이 꺼졌으면 그 grant 를 곧 그 사이트로
+/// 좁힌다(적대 리뷰 1 회차 F5 — 켜져 있으면 사용자 결정 「그대로 둠」).
+fn networkUserDrove(id: u64, s: *Surface) void {
+    s.network.userDrove();
+    const any_host = for (net_grants[0..net_grant_count]) |g| {
+        if (g.tab == id and g.any_host) break true;
+    } else false;
+    if (!any_host) return;
+    if (s.net_drove_host == null) s.net_drove_host = .init(if (netKnownUrl(s)) |u| maru.session.control_pane_grant.hostOfUrl(u) orelse "" else ""); // 옛 주소면 빈 사이트로(4 회차 C3)
+    if (net_full) return;
+    narrowNetwork(id, s, s.net_drove_host.?);
+}
+
+/// 적대 리뷰 2 회차 N2: 그 탭의 어느 호스트든 grant 를 `host` 로 곧 좁힌다 — web_osr 의 사본을 고치고 sidecar 에 다시 알리며(그때부터 그
+/// 사이트 밖의 값을 덜어 낸다 — 전에는 다음 control 요청까지 몇 시간이고 어느 호스트든 지켜보기가 남아 은행의 쿠키 값이 브라우저 프로세스를
+/// 나왔다), app 이 grant 표에 옮기도록 남긴다(`takeNetworkNarrows` — 탭마다 처음 것).
+fn narrowNetwork(id: u64, s: *Surface, host: maru.session.control_pane_grant.GrantHost) void {
+    var changed = false;
+    for (net_grants[0..net_grant_count]) |*g| if (g.tab == id and g.any_host) {
+        g.any_host = false;
+        g.birth = false;
+        g.host = host;
+        g.narrowed = true; // app 이 grant 표에 옮길 때까지(`takeNetworkNarrows`)
+        changed = true;
+    };
+    if (!changed) return;
+    if (gpa_ref) |gpa| sendNetWatch(gpa, id, s);
+}
+
+/// W9d① 적대 리뷰 1 회차 F5: 남긴 좁히기를 탭마다 하나씩 `out` 에 옮기고 표지를 지운다(app 이 grant 표에 적용한다). `out` 이 차면 거기까지 —
+/// 남은 것은 표지가 남아 다음에 가져간다(app 은 빌 때까지 부른다 — 3 회차 P1d: 넘쳐도 잃지 않는다).
+pub fn takeNetworkNarrows(out: []NetworkNarrow) []NetworkNarrow {
+    var n: usize = 0;
+    for (net_grants[0..net_grant_count]) |*g| {
+        if (!g.narrowed) continue;
+        const dup = for (out[0..n]) |o| {
+            if (o.tab == g.tab) break true;
+        } else false;
+        if (!dup) {
+            if (n == out.len) continue; // 다음에(이 표지는 남는다)
+            out[n] = .{ .tab = g.tab, .host = g.host };
+            n += 1;
+        }
+        g.narrowed = false;
+    }
+    return out[0..n];
+}
+
+/// 시험·관측: 그 탭을 지켜보는가.
+pub fn networkWatching(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    return s.net_on;
+}
+
 /// 그 탭의 팝업 가족에 떠 있는 JS 대화상자·파일 선택 — (탭 번호, 도착) 순으로 `out` 에 채운다(넘치면 거기까지). 권한 요청은 싣지 않는다
 /// (사용자가 정한다 — W5b).
 pub fn dialogList(surface_id: u64, out: []DialogEntry) []DialogEntry {
@@ -3144,6 +3471,7 @@ pub fn dragEnter(gpa: std.mem.Allocator, surface_id: u64, payload: DragPayload, 
     if (!s.created) return false;
     s.user_action_ms = monotonicNow(); // dragenter 처리기의 대화상자(W9c② 적대 리뷰 1 회차)
     s.console.userDrove(); // W9c① 4 회차 D: 놓은 링크·파일로 사용자가 이 탭을 몰 수 있다
+    networkUserDrove(surface_id, s); // W9d①
     // maru 의 Chromium 탭에서 시작한 끌기 — 조각 대신 sidecar 가 쥔 그 끌기 데이터를 고른다(W6d②).
     if (payload.source != 0) {
         send(gpa, .{ .drag_target = .{ .browser = surface_id, .kind = .enter, .point = point, .modifiers = modifiers, .allowed = allowed & ws.message.drag_operation_mask, .source = payload.source } });
@@ -3655,7 +3983,10 @@ pub fn revivePageClosed(gpa: std.mem.Allocator, surface_id: u64, by_user: bool) 
     s.popup_opener = 0; // 이제 보통 탭이다 — 나중에 닫혀도 옛 연 탭으로 가지 않는다
     // W9c① 4 회차 D: 사용자가 쓰는 보통 탭이 된다 — 태어날 때의 콘솔 묶음을 푼다(첫 읽기 전이면). 사용자가 고른 닫기일 때만(5 회차 n2) —
     // 에이전트의 닫기·페이지 스스로의 닫기는 사용자가 몬 것이 아니다. 빈 탭을 사용자가 쓰기 시작하면(주소창 등) 그때 풀린다.
-    if (by_user) s.console.userDrove();
+    if (by_user) {
+        s.console.userDrove();
+        networkUserDrove(surface_id, s); // W9d①
+    }
     s.page_opened = false; // W10c: 빈 다운로드 탭으로 닫지 않는다(사용자가 쓰는 보통 탭이다 — 적대 리뷰 2 회차)
     s.download_blank = false;
     s.composing = false; // 닫힌 페이지의 조합은 끝났다(창이 입력기 쪽을 버린다 — `osr_discard_marked`)
@@ -3818,6 +4149,7 @@ fn freeSurface(gpa: std.mem.Allocator, s: *Surface) void {
     dropNotes(gpa, s);
     s.notes.deinit(gpa);
     s.console.deinit(gpa);
+    s.network.deinit(gpa, &net_budget);
 }
 
 /// 답을 기다리던 요청을 모두 버린다 — 답을 보내지 않는다(sidecar 가 죽었거나 브라우저가 사라져 콜백이 없다). 떠 있던
@@ -4633,6 +4965,12 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             s.created = true;
             s.initial_load_pending = true;
             dropPopup(s);
+            // W9d①: 새 브라우저(처음이거나 sidecar 가 다시 떴다)는 지켜보기를 모른다 — 첫 이동보다 **먼저** 알린다(그 이동의 문서 요청부터 적게).
+            // 옛 브라우저에서 진행 중이던 요청의 끝은 오지 않는다 — 끝난 것으로 치고 번호 표를 비운다(적대 리뷰 3 회차 T2: 새 프로세스가 같은 이동
+            // 요청 번호를 다시 써 그 응답이 옛 기록에 붙었다).
+            s.network.abandonLive();
+            s.net_sent = null;
+            sendNetWatch(gpa, id, s);
             if (s.last_url) |u| {
                 send(gpa, .{ .navigate = .{ .browser = id, .url = u } });
                 s.nav_pending = true;
@@ -4697,6 +5035,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             const owned = gpa.dupe(u8, v.url) catch return;
             if (s.url) |old| gpa.free(old);
             s.url = owned;
+            s.url_stale = false;
             s.nav_dirty = true;
             // 다른 사이트로 옮기면 Chromium 이 렌더러를 바꾸고 새 렌더러는 포커스를 모른다 — 키는 닿아도 페이지 `focus`
             // 가 안 오고 입력기 조합이 버려졌다(W4c 실측). 포커스를 줘야 하는 탭이면 다시 준다.
@@ -4714,6 +5053,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         } else if (!parked.contains(id)) send(gpa, .{ .destroy_browser = id }),
         .page_started => |id| if (surfaces.getPtr(id)) |s| {
             s.last_nav_ms = monotonicNow();
+            s.url_stale = true; // 4 회차 C3: 이 문서의 주소가 오기 전까지(32 KiB 를 넘으면 오지 않는다)
             s.console.newDocument(); // W9c①: 묶이지 않은 쪽은 이 문서의 줄부터 본다
             s.nav_uncommitted = false;
             // W9a: 만들어진 직후의 about:blank 문서는 에이전트 이동의 문서가 아니다.
@@ -4805,6 +5145,15 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         // W9c①: 실패한 이동이 오류 페이지로 옛 문서를 바꿨다(`page_started` 가 없다) — 콘솔의 문서 경계로만 쓴다. 다운로드의 몸짓(`last_nav_ms`)·
         // 에이전트 이동(`agent_nav`)은 건드리지 않는다 — 그쪽 판정은 `load_finished` 가 한다.
         .error_page => |id| if (surfaces.getPtr(id)) |s| s.console.newDocument(),
+        // W9d①: 지켜보는 탭의 요청 기록 — 지켜보기를 끈 뒤에 늦게 온 것은 버린다(끌 때 지웠다).
+        .net_begin => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) {
+            var sw_tabs: [net_ring.max_sw_tabs + 1]u64 = undefined;
+            s.network.begin(gpa, &net_budget, v, netBeginContext(s, v, &sw_tabs)) catch {};
+        },
+        .net_redirect => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.redirect(gpa, &net_budget, v) catch {},
+        .net_response => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.response(gpa, &net_budget, v) catch {},
+        .net_end => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.end(v),
+        .net_dropped => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.addDropped(gpa, &net_budget, v.count) catch {},
         // W9a 적대 리뷰 5 회차: 주 프레임 이동이 시작된다 — 확정·끝·불러오기 끝까지 「확정되지 않은 이동 중」.
         .main_frame_navigating => |id| if (surfaces.getPtr(id)) |s| {
             s.nav_uncommitted = true;
@@ -4928,7 +5277,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .net_watch, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
     }
 }
 
@@ -7679,4 +8028,526 @@ test "W9c② 변이 생존 재현(W4): sheet 가 아직 없어도 키 포커스�
     // 포커스를 잃었다(다른 pane) — 보이지 않는다, 도착 뒤 사용자 입력도 없다.
     w9c2MoveKeyTarget(gpa, 7, 0, false);
     _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
+}
+
+// ── W9d①: 네트워크 기록 ─────────────────────────────────────────────────────────────────────────────────────
+
+fn netBegin(id: u64, request: u64, url: []const u8) Message {
+    // 호스트 칸은 sidecar 가 온 주소에서 읽어 싣는다(적대 리뷰 3 회차 T1) — 시험은 주소에서 흉내 낸다.
+    return .{ .net_begin = .{ .browser = id, .request = request, .url = url, .host = ws.net_policy.hostOfUrl(url) orelse "", .time_ms = 1000 + request } };
+}
+
+fn netReqs(id: u64, who: u64) ![]u64 {
+    return netReqsAs(id, who, null);
+}
+
+/// 읽는 쪽의 pane 을 주고 읽는다(적대 리뷰 2 회차 N6 — 그 pane 이 grant 를 쥔 탭).
+fn netReqsAs(id: u64, who: u64, pane: ?u64) ![]u64 {
+    const gpa = std.testing.allocator;
+    const json = try networkList(gpa, id, .{ .who = who, .pane = pane }, .{ .page_size = 200 });
+    defer gpa.free(json);
+    const p = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
+    defer p.deinit();
+    const arr = p.value.object.get("requests").?.array.items;
+    const out = try gpa.alloc(u64, arr.len);
+    for (arr, 0..) |r, i| out[i] = @intCast(r.object.get("req").?.integer);
+    return out;
+}
+
+fn expectNetReqs(id: u64, who: u64, want: []const u64) !void {
+    try expectNetReqsAs(id, who, null, want);
+}
+
+fn expectNetReqsAs(id: u64, who: u64, pane: ?u64, want: []const u64) !void {
+    const got = try netReqsAs(id, who, pane);
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualSlices(u64, want, got);
+}
+
+test "W9d①: grant 가 있는 탭만 지켜본다 — 켜면 net_watch{on, 설정, grant 호스트}, 브라우저가 새로 만들어지면 다시, 같으면 다시 보내지 않는다, 마지막 grant 가 사라지면 끄고 지운다, 설정이 바뀌면 다시" {
+    const gpa = std.testing.allocator;
+    state = .starting; // 보낸 frame 을 outbox 에 쌓게
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 91, 92 });
+    surfaces.getPtr(92).?.created = false; // 아직 브라우저가 없다
+    // 지켜보기 전에 온 것은 적지 않는다.
+    apply(gpa, netBegin(91, 1, "https://a.test/early"), 0);
+    networkSync(&.{ .{ .tab = 91, .who = 7, .host = "a.test" }, .{ .tab = 91, .who = 8, .host = "B.Test" }, .{ .tab = 92, .who = 9, .host = "c.test" } });
+    var sent: [8]Message = undefined;
+    var n = sentFrames(&sent);
+    try std.testing.expectEqual(@as(usize, 1), n); // 92 는 브라우저가 없다
+    const w = sent[0].net_watch;
+    try std.testing.expect(w.browser == 91 and w.on and w.full and w.host_count == 2);
+    try std.testing.expectEqualStrings("a.test", w.hosts[0]);
+    try std.testing.expectEqualStrings("b.test", w.hosts[1]); // grant 호스트는 소문자
+    try std.testing.expect(networkWatching(91) and networkWatching(92));
+    apply(gpa, netBegin(91, 2, "https://a.test/now"), 0);
+    try expectNetReqs(91, 7, &.{1}); // 지켜보기 전의 요청은 없다 — 첫 요청이 번호 1
+    // 같은 목록 — 다시 보내지 않는다. 92 의 브라우저가 생기면 그때 보낸다.
+    outbox_pending.clearRetainingCapacity();
+    networkSync(&.{ .{ .tab = 91, .who = 7, .host = "a.test" }, .{ .tab = 91, .who = 8, .host = "B.Test" }, .{ .tab = 92, .who = 9, .host = "c.test" } });
+    try std.testing.expectEqual(@as(usize, 0), sentFrames(&sent));
+    apply(gpa, .{ .browser_created = 92 }, 0);
+    n = sentFrames(&sent);
+    var saw92 = false;
+    for (sent[0..n]) |m| if (m == .net_watch and m.net_watch.browser == 92) {
+        saw92 = m.net_watch.on and m.net_watch.host_count == 1;
+    };
+    try std.testing.expect(saw92);
+    // 설정이 꺼지면 지켜보는 탭마다 다시 — full 거짓.
+    outbox_pending.clearRetainingCapacity();
+    setNetworkFull(false);
+    n = sentFrames(&sent);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    for (sent[0..n]) |m| try std.testing.expect(m.net_watch.on and !m.net_watch.full);
+    // 91 의 grant 가 모두 사라졌다 — 끄고 지운다(늦게 온 것도 적지 않는다).
+    outbox_pending.clearRetainingCapacity();
+    networkSync(&.{.{ .tab = 92, .who = 9, .host = "c.test" }});
+    n = sentFrames(&sent);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expect(sent[0].net_watch.browser == 91 and !sent[0].net_watch.on and sent[0].net_watch.host_count == 0);
+    try std.testing.expect(!networkWatching(91));
+    try std.testing.expectEqual(@as(usize, 0), surfaces.getPtr(91).?.network.entries.len);
+    apply(gpa, netBegin(91, 3, "https://a.test/late"), 0);
+    try std.testing.expectEqual(@as(usize, 0), surfaces.getPtr(91).?.network.entries.len);
+    // 다시 허락하면 새로 — 지운 번호를 다시 쓰지 않는다.
+    networkSync(&.{ .{ .tab = 91, .who = 10, .host = "a.test" }, .{ .tab = 92, .who = 9, .host = "c.test" } });
+    apply(gpa, netBegin(91, 4, "https://a.test/again"), 0);
+    try expectNetReqs(91, 10, &.{2});
+}
+
+test "W9d①: 에이전트가 연 탭의 태어날 때 grant 는 첫 배치가 기록을 만들 때 맞춘다 — 사용자가 첫 읽기 전에 몰면(누름·주소창·뒤로) 첫 읽기 때부터" {
+    const gpa = std.testing.allocator;
+    gpa_ref = gpa;
+    latched = .version_mismatch; // 배치가 기록만 만들고 sidecar 를 띄우지 않게
+    defer {
+        for (surfaces.values()) |*sp| freeSurface(gpa, sp);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        latched = null;
+        state = .off;
+        net_grant_count = 0;
+    }
+    networkSync(&.{ .{ .tab = 95, .who = 7, .birth = true, .any_host = true }, .{ .tab = 96, .who = 8, .birth = true, .any_host = true }, .{ .tab = 97, .who = 9, .birth = true, .any_host = true } });
+    for ([_]u64{ 95, 96, 97 }) |id| ensure(gpa, .{ .surface_id = id, .width_px = 10, .height_px = 10, .visible = true }, 1000, 0);
+    for ([_]u64{ 95, 96, 97 }) |id| apply(gpa, netBegin(id, 1, "https://agent.test/"), 0);
+    noteUserNavigation(96); // 사용자가 주소창으로 제 은행에
+    navAction(gpa, 97, .back);
+    for ([_]u64{ 95, 96, 97 }) |id| apply(gpa, netBegin(id, 2, "https://bank.test/"), 0);
+    try expectNetReqs(95, 7, &.{ 2, 1 });
+    try expectNetReqs(96, 8, &.{});
+    try expectNetReqs(97, 9, &.{});
+}
+
+test "W9d① 적대 리뷰 1 회차 F4·2 회차 N6: 서비스 워커 요청 — 켜져 있으면 다 보이고(사용자 결정), 꺼져 있으면 이 읽는 쪽에게 허락되지 않은 탭이 같은 출처를 보일 때(그때·지금) 수만" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 91, 92 });
+    apply(gpa, .{ .url_changed = .{ .browser = 91, .url = "https://mail.test/inbox" } }, 0);
+    networkSync(&.{.{ .tab = 91, .who = 7, .host = "mail.test" }});
+    const sw = struct {
+        fn begin(request: u64) Message {
+            return .{ .net_begin = .{ .browser = 91, .request = request, .flags = .{ .service_worker = true }, .url = "https://mail.test/api", .host = "mail.test", .initiator = "https://mail.test", .site = "mail.test", .time_ms = 1 } };
+        }
+    };
+    apply(gpa, sw.begin(1), 0); // 92 는 아직 다른 곳
+    apply(gpa, .{ .url_changed = .{ .browser = 92, .url = "https://MAIL.test/settings" } }, 0); // 사용자의 grant 없는 탭이 같은 출처를 연다
+    apply(gpa, sw.begin(2), 0);
+    try expectNetReqs(91, 7, &.{ 2, 1 }); // 켜짐
+    setNetworkFull(false);
+    try expectNetReqs(91, 7, &.{}); // 지금 92 가 같은 출처 — 둘 다 수만
+    apply(gpa, .{ .url_changed = .{ .browser = 92, .url = "https://other.test/" } }, 0);
+    try expectNetReqs(91, 7, &.{1}); // 92 가 떠났다 — 그때 같은 출처였던 2 는 여전히 수만
+    // 지켜보는 탭이어도 다른 pane(6)에게만 허락된 탭은 pane 5 의 읽는 쪽에게 허락되지 않은 탭이다(적대 리뷰 2 회차 N6) — 수만.
+    networkSync(&.{ .{ .tab = 91, .who = 7, .host = "mail.test", .pane = 5 }, .{ .tab = 92, .who = 8, .host = "mail.test", .pane = 6 } });
+    apply(gpa, .{ .url_changed = .{ .browser = 92, .url = "https://mail.test/" } }, 0);
+    apply(gpa, sw.begin(3), 0);
+    try expectNetReqsAs(91, 7, 5, &.{});
+    // pane 5 가 92 도 쥐면 둘 다 그 읽는 쪽의 탭이다 — 보인다(요청 때 92 가 같은 출처였던 2·3 도).
+    networkSync(&.{ .{ .tab = 91, .who = 7, .host = "mail.test", .pane = 5 }, .{ .tab = 92, .who = 9, .host = "mail.test", .pane = 5 }, .{ .tab = 92, .who = 8, .host = "mail.test", .pane = 6 } });
+    try expectNetReqsAs(91, 7, 5, &.{ 3, 2, 1 });
+    try expectNetReqsAs(91, 7, null, &.{}); // pane 이 없는 읽는 쪽(시험만 — 5 회차 N2)은 읽는 탭만 제 것이다
+}
+
+test "W9d① 적대 리뷰 1 회차 F5: 설정이 꺼졌을 때만 사용자가 몬 에이전트 탭(어느 호스트든 grant)의 좁히기를 남긴다 — 몰기 전의 사이트로, 탭마다 처음 것" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 91, 92 });
+    apply(gpa, .{ .url_changed = .{ .browser = 91, .url = "https://agent.test/a" } }, 0);
+    apply(gpa, .{ .url_changed = .{ .browser = 92, .url = "https://user.test/" } }, 0);
+    networkSync(&.{ .{ .tab = 91, .who = 7, .birth = true, .any_host = true }, .{ .tab = 92, .who = 8, .host = "user.test" } });
+    var buf: [8]NetworkNarrow = undefined;
+    noteUserNavigation(91); // 켜짐 — 사용자 결정 「그대로 둠」
+    try std.testing.expectEqual(@as(usize, 0), takeNetworkNarrows(&buf).len);
+    setNetworkFull(false);
+    noteUserNavigation(92); // 사이트에 묶인 grant 뿐 — 좁힐 것이 없다
+    noteUserNavigation(91);
+    apply(gpa, .{ .url_changed = .{ .browser = 91, .url = "https://bank.test/" } }, 0);
+    navAction(gpa, 91, .back); // 두 번째 몰기 — 처음 것이 이긴다
+    const got = takeNetworkNarrows(&buf);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqual(@as(u64, 91), got[0].tab);
+    try std.testing.expectEqualStrings("agent.test", got[0].host.slice());
+    try std.testing.expectEqual(@as(usize, 0), takeNetworkNarrows(&buf).len); // 가져가면 비운다
+}
+
+// ── W9d① 적대 리뷰 2 회차 재현(리뷰가 남긴 R9d2-W1·W2 — 붙여 실패를 본 뒤 고쳤다) ──
+
+test "W9d① 적대 리뷰 2 회차 재현 W1: 설정이 꺼졌을 때 사용자가 에이전트 탭을 몰면 그 자리에서 지켜보기를 몰기 전의 사이트로 좁혀 sidecar 에 보낸다 — 다음 control 요청을 기다리지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{91});
+    setNetworkFull(false);
+    apply(gpa, .{ .url_changed = .{ .browser = 91, .url = "https://agent.test/" } }, 0);
+    networkSync(&.{.{ .tab = 91, .who = 7, .birth = true, .any_host = true }});
+    outbox_pending.clearRetainingCapacity();
+    noteUserNavigation(91); // 사용자가 이 에이전트 탭의 주소창에 은행을 친다
+    apply(gpa, .{ .url_changed = .{ .browser = 91, .url = "https://bank.test/login" } }, 0);
+    var sent: [8]Message = undefined;
+    const n = sentFrames(&sent);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    const w = sent[0].net_watch;
+    try std.testing.expect(w.browser == 91 and w.on and !w.full and w.host_count == 1);
+    try std.testing.expectEqualStrings("agent.test", w.hosts[0]); // 그때부터 sidecar 가 은행의 값을 덜어 낸다
+    // app 이 grant 표에 옮길 것도 남는다(인가는 표가 기준이다). 옮기기 전에 app 이 옛 목록으로 다시 알려도 app 은 먼저 옮긴다(app 시험).
+    var buf: [8]NetworkNarrow = undefined;
+    const got = takeNetworkNarrows(&buf);
+    try std.testing.expect(got.len == 1 and got[0].tab == 91);
+    try std.testing.expectEqualStrings("agent.test", got[0].host.slice());
+    // 두 번째 몰기는 아무것도 하지 않는다(이미 묶였다).
+    outbox_pending.clearRetainingCapacity();
+    navAction(gpa, 91, .back);
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&sent)); // 뒤로의 nav_action 하나뿐
+    try std.testing.expect(sent[0] == .nav_action);
+    try std.testing.expectEqual(@as(usize, 0), takeNetworkNarrows(&buf).len);
+}
+
+test "W9d① 적대 리뷰 2 회차 재현 W2: 사용자가 이미 몬 에이전트 탭은 설정이 꺼지는 순간 처음 몰기 전의 사이트(에이전트의 것)로 좁힌다 — 다음 몰기의 사용자 사이트(은행)가 아니다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 91, 92 });
+    apply(gpa, .{ .url_changed = .{ .browser = 91, .url = "https://agent.test/" } }, 0);
+    apply(gpa, .{ .url_changed = .{ .browser = 92, .url = "https://agent2.test/" } }, 0);
+    networkSync(&.{ .{ .tab = 91, .who = 7, .birth = true, .any_host = true }, .{ .tab = 92, .who = 8, .birth = true, .any_host = true } });
+    noteUserNavigation(91); // 켜짐 — 아무것도 좁히지 않는다(사용자 결정 「그대로 둠」), 몰기 전의 사이트만 적는다
+    apply(gpa, .{ .url_changed = .{ .browser = 91, .url = "https://bank.test/account" } }, 0);
+    noteUserNavigation(91); // 은행 안에서 또 — 처음 것이 이긴다
+    var buf: [8]NetworkNarrow = undefined;
+    try std.testing.expectEqual(@as(usize, 0), takeNetworkNarrows(&buf).len);
+    outbox_pending.clearRetainingCapacity();
+    setNetworkFull(false); // 사용자가 설정을 끈다
+    const got = takeNetworkNarrows(&buf);
+    try std.testing.expectEqual(@as(usize, 1), got.len); // 몰지 않은 92 는 그대로(어느 호스트든 — 첫 몰기 때 좁힌다)
+    try std.testing.expectEqual(@as(u64, 91), got[0].tab);
+    try std.testing.expectEqualStrings("agent.test", got[0].host.slice());
+    var sent: [8]Message = undefined;
+    const n = sentFrames(&sent);
+    var w91: ?ws.message.NetWatch = null;
+    for (sent[0..n]) |m| if (m == .net_watch and m.net_watch.browser == 91) {
+        w91 = m.net_watch;
+    };
+    try std.testing.expect(w91 != null and !w91.?.full and w91.?.host_count == 1);
+    try std.testing.expectEqualStrings("agent.test", w91.?.hosts[0]);
+    noteUserNavigation(91); // 꺼진 뒤의 몰기 — 이미 묶였다
+    try std.testing.expectEqual(@as(usize, 0), takeNetworkNarrows(&buf).len);
+}
+
+test "W9d① 적대 리뷰 2 회차 N2·3 회차: about:blank 에서 몰아 빈 사이트로 좁힌 grant 는 sidecar 에 호스트도 어느 호스트든도 없이 알린다 — 빈 목록은 아무것도 덮지 않는다(전의 invalid 대신)" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{91});
+    setNetworkFull(false);
+    networkSync(&.{.{ .tab = 91, .who = 7, .birth = true, .any_host = true }}); // 에이전트가 빈 탭을 열었다(주소 없음)
+    outbox_pending.clearRetainingCapacity();
+    noteUserNavigation(91);
+    var sent: [8]Message = undefined;
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&sent));
+    try std.testing.expect(sent[0].net_watch.on and sent[0].net_watch.host_count == 0 and !sent[0].net_watch.any_host);
+    // app 이 grant 표에서 옮겨 다시 알려도(빈 호스트에 묶인 grant) 같다 — 다시 보내지 않는다.
+    outbox_pending.clearRetainingCapacity();
+    networkSync(&.{.{ .tab = 91, .who = 7 }});
+    try std.testing.expectEqual(@as(usize, 0), sentFrames(&sent));
+    // 어느 호스트든 grant(에이전트 탭)는 제 칸으로 알린다(sidecar 가 첫 사이트로 가른다).
+    networkSync(&.{.{ .tab = 91, .who = 8, .birth = true, .any_host = true }});
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&sent));
+    try std.testing.expect(sent[0].net_watch.any_host and sent[0].net_watch.host_count == 0);
+}
+
+// ── W9d① 적대 리뷰 3 회차 재현(리뷰가 남긴 R9d3-W1·W2 — 붙여 실패를 본 뒤 고쳤다) ──
+
+test "W9d① 적대 리뷰 3 회차 재현 W2: 설정이 꺼졌을 때 사용자가 에이전트 탭의 주소창에 은행을 치면 좁힌 net_watch 가 이동보다 먼저 sidecar 에 간다 — 주소창 길(userNavigate)도 누름·키·뒤로처럼 좁히기가 먼저다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    defer setNetworkFull(true);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{94});
+    setNetworkFull(false);
+    apply(gpa, .{ .url_changed = .{ .browser = 94, .url = "https://agent.test/" } }, 0);
+    networkSync(&.{.{ .tab = 94, .who = 7, .birth = true, .any_host = true }});
+    outbox_pending.clearRetainingCapacity();
+    userNavigate(gpa, 94, "https://bank.test/login"); // AppSession.takeWebAddrNavigate 가 부르는 길
+    var sent: [8]Message = undefined;
+    const n = sentFrames(&sent);
+    var watch_at: ?usize = null;
+    var nav_at: ?usize = null;
+    for (sent[0..n], 0..) |m, i| switch (m) {
+        .net_watch => watch_at = watch_at orelse i,
+        .navigate => nav_at = nav_at orelse i,
+        else => {},
+    };
+    try std.testing.expect(watch_at != null and nav_at != null and watch_at.? < nav_at.?);
+    try std.testing.expectEqualStrings("agent.test", sent[watch_at.?].net_watch.hosts[0]);
+    try std.testing.expect(!sent[watch_at.?].net_watch.any_host);
+}
+
+test "W9d① 적대 리뷰 3 회차 재현 W1: sidecar 가 다시 떠(browser_created 가 다시 온다) 새 프로세스가 진행 중이던 요청의 번호를 다시 써도 그 응답은 옛 덮인 기록에 붙지 않는다 — 옛 것은 취소로 끝난다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{93});
+    apply(gpa, .{ .url_changed = .{ .browser = 93, .url = "https://a.test/" } }, 0);
+    networkSync(&.{.{ .tab = 93, .who = 7, .host = "a.test" }});
+    // a.test 의 긴 폴링 — sidecar 프로세스가 죽을 때 아직 진행 중이다(net_end 는 끝내 오지 않는다).
+    apply(gpa, .{ .net_begin = .{ .browser = 93, .request = 5, .url = "https://a.test/longpoll", .host = "a.test", .site = "a.test", .time_ms = 1 } }, 0);
+    // sidecar 가 다시 뜬다: 브라우저가 다시 만들어진다(새 프로세스의 CEF 요청 번호는 처음부터).
+    apply(gpa, .{ .browser_created = 93 }, 0);
+    // 새 프로세스가 5 번을 은행 요청(은행의 페이지·리다이렉트)에 준다.
+    apply(gpa, .{ .net_begin = .{ .browser = 93, .request = 5, .url = "https://bank.test/", .host = "bank.test", .site = "bank.test", .flags = .{ .main_frame = true, .navigation = true }, .resource_type = 0, .time_ms = 2, .headers = .{ .count = 1, .bytes = "\x06Cookie\x00\x0cbank=SECRET1" } } }, 0);
+    apply(gpa, .{ .net_response = .{ .browser = 93, .request = 5, .status = 200, .mime = "text/html", .headers = .{ .count = 1, .bytes = "\x0aSet-Cookie\x00\x12bank_sid=NEWSECRET" } } }, 0);
+    apply(gpa, .{ .net_end = .{ .browser = 93, .request = 5, .received = 10 } }, 0);
+    const reader: NetReader = .{ .who = 7, .grant_host = "a.test", .host_bound = true };
+    const d = try networkDetail(gpa, 93, reader, 1);
+    defer gpa.free(d);
+    try std.testing.expect(std.mem.indexOf(u8, d, "NEWSECRET") == null);
+    try std.testing.expect(std.mem.indexOf(u8, d, "\"state\":\"canceled\"") != null and std.mem.indexOf(u8, d, "\"engine_restarted\":true") != null);
+    try std.testing.expectEqual(@as(usize, 2), surfaces.getPtr(93).?.network.entries.len); // 새 요청은 제 기록(#2 — 은행이라 이 읽는 쪽에게는 숨는다)
+    try std.testing.expectError(error.UnknownRequest, networkDetail(gpa, 93, reader, 2));
+}
+
+// ── W9d① 적대 리뷰 3 회차 ──
+
+test "W9d① 적대 리뷰 3 회차 P1a: 어느 호스트든 grant 와 다른 pane 의 묶인 grant 가 한 탭에 함께면 net_watch 는 둘을 함께 싣는다 — 넷을 넘는 묶인 호스트는 싣지 않는다(넓히지 않는다)" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{91});
+    networkSync(&.{ .{ .tab = 91, .who = 7, .birth = true, .any_host = true }, .{ .tab = 91, .who = 8, .host = "shop.test", .pane = 6 } });
+    var sent: [8]Message = undefined;
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&sent));
+    const w = sent[0].net_watch;
+    try std.testing.expect(w.on and w.any_host and w.host_count == 1);
+    try std.testing.expectEqualStrings("shop.test", w.hosts[0]);
+    // 묶인 grant 다섯(다섯 pane) — 앞의 넷만 싣고 어느 호스트든은 거짓(다섯째 사이트는 sidecar 에서 덮이지 않는다 — 꺼졌을 때 덜어 낸다).
+    outbox_pending.clearRetainingCapacity();
+    networkSync(&.{
+        .{ .tab = 91, .who = 1, .host = "a.test", .pane = 1 }, .{ .tab = 91, .who = 2, .host = "b.test", .pane = 2 }, .{ .tab = 91, .who = 3, .host = "c.test", .pane = 3 },
+        .{ .tab = 91, .who = 4, .host = "d.test", .pane = 4 }, .{ .tab = 91, .who = 5, .host = "e.test", .pane = 5 },
+    });
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&sent));
+    try std.testing.expect(!sent[0].net_watch.any_host and sent[0].net_watch.host_count == 4);
+    for (sent[0].net_watch.hosts) |h| try std.testing.expect(!std.mem.eql(u8, h, "e.test"));
+}
+
+test "W9d① 적대 리뷰 3 회차 P1d: 몰아 좁힌 에이전트 탭이 가져갈 자리(64)보다 많아도 잃지 않는다 — 남은 것은 다음에 가져가고, 다 가져가기 전에는 다시 넓히지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    const count = maru.session.control_pane_grant.max_grants + 6;
+    var ids: [count]u64 = undefined;
+    var grants: [count]NetworkGrant = undefined;
+    for (&ids, &grants, 0..) |*id, *g, i| {
+        id.* = 300 + i;
+        g.* = .{ .tab = id.*, .who = 1000 + i, .birth = true, .any_host = true };
+    }
+    try testSurfaces(gpa, &ids);
+    for (ids) |id| apply(gpa, .{ .url_changed = .{ .browser = id, .url = "https://agent.test/" } }, 0);
+    networkSync(&grants);
+    setNetworkFull(false);
+    defer setNetworkFull(true);
+    for (ids) |id| noteUserNavigation(id); // 사용자가 70 개를 다 몬다(페이지가 연 팝업 — control 요청이 없어 아무도 가져가지 않는다)
+    var buf: [maru.session.control_pane_grant.max_grants]NetworkNarrow = undefined;
+    var seen: usize = 0;
+    var rounds: usize = 0;
+    while (true) : (rounds += 1) {
+        const got = takeNetworkNarrows(&buf);
+        for (got) |nw| try std.testing.expectEqualStrings("agent.test", nw.host.slice());
+        seen += got.len;
+        if (got.len < buf.len) break;
+    }
+    try std.testing.expectEqual(@as(usize, count), seen);
+    try std.testing.expectEqual(@as(usize, 1), rounds); // 둘째 판에 남은 여섯
+    // 다 가져갔으니 비었다.
+    try std.testing.expectEqual(@as(usize, 0), takeNetworkNarrows(&buf).len);
+}
+
+test "W9d① 적대 리뷰 3 회차 D1: 읽는 쪽의 쿠키 권한(NetReader.cookie_host)이 그 요청의 호스트를 덮을 때만 Cookie 값 — 에이전트 탭(어느 호스트든 grant)이어도" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{92});
+    networkSync(&.{.{ .tab = 92, .who = 7, .birth = true, .any_host = true }});
+    apply(gpa, .{ .net_begin = .{ .browser = 92, .request = 1, .url = "https://bank.test/", .host = "bank.test", .site = "bank.test", .flags = .{ .main_frame = true, .navigation = true }, .resource_type = 0, .headers = .{ .count = 1, .bytes = "\x06Cookie\x00\x0cbank=SECRET1" } } }, 0);
+    {
+        const d = try networkDetail(gpa, 92, .{ .who = 7 }, 1);
+        defer gpa.free(d);
+        try std.testing.expect(std.mem.indexOf(u8, d, "SECRET1") == null);
+        try std.testing.expect(std.mem.indexOf(u8, d, "\"needs_cookie_permission\":true") != null);
+    }
+    const d = try networkDetail(gpa, 92, .{ .who = 7, .cookie_host = "bank.test" }, 1);
+    defer gpa.free(d);
+    try std.testing.expect(std.mem.indexOf(u8, d, "bank=SECRET1") != null);
+}
+
+// ── W9d① 적대 리뷰 4 회차 재현(리뷰 후보 C3 — 붙여 실패를 본 뒤 고친다) ──
+
+test "W9d① 적대 리뷰 4 회차 재현 C3: 32 KiB 를 넘는 주소로 옮긴 탭(url_changed 가 오지 않는다)의 다른 사이트 iframe 안 요청은 옛 주소의 호스트로 치지 않는다 — 묶인 읽는 쪽에게 숨는다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{95});
+    apply(gpa, .{ .page_started = 95 }, 0);
+    apply(gpa, .{ .url_changed = .{ .browser = 95, .url = "https://a.test/" } }, 0);
+    networkSync(&.{.{ .tab = 95, .who = 7, .host = "a.test" }});
+    const reader: NetReader = .{ .who = 7, .grant_host = "a.test", .host_bound = true };
+    // a.test 문서의 요청 하나와 그 문서 안 다른 사이트 iframe 의 요청 — 보인다(대조: 주소가 온 뒤에는 app 의 호스트를 쓴다).
+    apply(gpa, .{ .net_begin = .{ .browser = 95, .request = 1, .url = "https://a.test/api", .host = "a.test", .site = "a.test", .flags = .{ .main_frame = true }, .resource_type = 13, .time_ms = 1 } }, 0);
+    apply(gpa, .{ .net_begin = .{ .browser = 95, .request = 9, .url = "https://tracker.test/a", .host = "tracker.test", .site = "", .initiator = "https://tracker.test", .flags = .{ .subframe = true }, .resource_type = 13, .time_ms = 1 } }, 0);
+    // 페이지가 스스로 32 KiB 넘는 주소(evil.test)로 옮긴다 — 새 문서가 시작됐지만(page_started) sidecar 는 주소를 알리지 않는다.
+    apply(gpa, .{ .net_begin = .{ .browser = 95, .request = 2, .url = "https://evil.test/" ++ "q" ** 64, .host = "evil.test", .site = "evil.test", .flags = .{ .main_frame = true, .navigation = true, .url_truncated = true }, .resource_type = 0, .time_ms = 2 } }, 0);
+    apply(gpa, .{ .page_started = 95 }, 0);
+    // 그 문서 안 다른 사이트 iframe 의 요청 — 쿠키의 첫 사이트가 비어 온다(실측). app 의 주소는 아직 a.test 다.
+    apply(gpa, .{ .net_begin = .{ .browser = 95, .request = 3, .url = "https://tracker.test/p", .host = "tracker.test", .site = "", .initiator = "https://tracker.test", .flags = .{ .subframe = true }, .resource_type = 13, .time_ms = 3, .headers = .{ .count = 1, .bytes = "\x07X-Track\x00\x05TRACK" } } }, 0);
+    const json = try networkList(gpa, 95, reader, .{ .page_size = 200 });
+    defer gpa.free(json);
+    const p = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
+    defer p.deinit();
+    const arr = p.value.object.get("requests").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), arr.len); // a.test 문서 때의 요청(#2·#1)만
+    try std.testing.expectEqual(@as(i64, 2), arr[0].object.get("req").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), arr[1].object.get("req").?.integer);
+    try std.testing.expectError(error.UnknownRequest, networkDetail(gpa, 95, reader, 4));
+    // 그 뒤 보통 주소가 오면(url_changed) 다시 그 호스트를 쓴다.
+    apply(gpa, .{ .page_started = 95 }, 0);
+    apply(gpa, .{ .url_changed = .{ .browser = 95, .url = "https://a.test/again" } }, 0);
+    apply(gpa, .{ .net_begin = .{ .browser = 95, .request = 4, .url = "https://tracker.test/b", .host = "tracker.test", .site = "", .initiator = "https://tracker.test", .flags = .{ .subframe = true }, .resource_type = 13, .time_ms = 4 } }, 0);
+    try expectNetReqsAs(95, 7, null, &.{ 5, 4, 3, 2, 1 }); // 어느 호스트든 읽는 쪽(묶이지 않음)은 다 본다
+    const again = try networkDetail(gpa, 95, reader, 5);
+    gpa.free(again);
+}
+
+test "W9d① 적대 리뷰 4 회차 C3: 설정이 꺼졌을 때 주소가 옛 것인 다른 탭(32 KiB 넘는 주소)은 지금 어느 출처든 보일 수 있다고 친다 — 그 서비스 워커 요청은 수만(요청 때·읽을 때)" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 96, 97 });
+    apply(gpa, .{ .url_changed = .{ .browser = 96, .url = "https://mail.test/inbox" } }, 0);
+    apply(gpa, .{ .url_changed = .{ .browser = 97, .url = "https://other.test/" } }, 0);
+    networkSync(&.{.{ .tab = 96, .who = 7, .host = "mail.test" }});
+    setNetworkFull(false);
+    defer setNetworkFull(true);
+    const sw = struct {
+        fn begin(request: u64) Message {
+            return .{ .net_begin = .{ .browser = 96, .request = request, .flags = .{ .service_worker = true }, .url = "https://mail.test/api", .host = "mail.test", .initiator = "https://mail.test", .site = "mail.test", .time_ms = 1 } };
+        }
+    };
+    apply(gpa, sw.begin(1), 0); // 97 은 다른 출처를 보인다 — 보인다
+    try expectNetReqs(96, 7, &.{1});
+    // 사용자의 grant 없는 탭 97 이 32 KiB 넘는 주소로 옮긴다(그 출처를 maru 는 모른다 — mail.test 일 수 있다).
+    apply(gpa, .{ .page_started = 97 }, 0);
+    apply(gpa, sw.begin(2), 0);
+    try expectNetReqs(96, 7, &.{}); // 지금 97 의 출처를 모른다 — 서비스 워커 요청은 모두 수만
+    apply(gpa, .{ .url_changed = .{ .browser = 97, .url = "https://other.test/" } }, 0);
+    try expectNetReqs(96, 7, &.{1}); // 2 가 날 때 97 은 출처를 몰랐다 — 그 요청은 여전히 수만
+}
+
+test "W9d① 적대 리뷰 4 회차 C3: 설정이 꺼졌을 때 사용자가 주소가 옛 것인 에이전트 탭을 몰면 빈 사이트로 좁힌다 — 옛 주소의 사이트로 좁히지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{98});
+    apply(gpa, .{ .url_changed = .{ .browser = 98, .url = "https://agent.test/a" } }, 0);
+    networkSync(&.{.{ .tab = 98, .who = 7, .birth = true, .any_host = true }});
+    setNetworkFull(false);
+    defer setNetworkFull(true);
+    apply(gpa, .{ .page_started = 98 }, 0); // 페이지가 32 KiB 넘는 주소로 옮겼다
+    noteUserNavigation(98);
+    var buf: [8]NetworkNarrow = undefined;
+    const got = takeNetworkNarrows(&buf);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqualStrings("", got[0].host.slice());
+}
+
+// ── W9d① 적대 리뷰 5 회차 재현 ──
+
+test "W9d① 적대 리뷰 5 회차 재현 B1: 덮이지 않는 사이트(은행)의 다른 사이트 iframe 이 떠날 때(pagehide) 보낸 비콘은 새 페이지의 url_changed 뒤에 온다 — 새 사이트(a.test)의 것으로 치면 a.test 에 묶인 읽는 쪽에게 보인다(F2)" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{93});
+    apply(gpa, .{ .page_started = 93 }, 0);
+    apply(gpa, .{ .url_changed = .{ .browser = 93, .url = "https://a.test/" } }, 0);
+    networkSync(&.{.{ .tab = 93, .who = 7, .host = "a.test" }});
+    const reader: NetReader = .{ .who = 7, .grant_host = "a.test", .host_bound = true };
+    // 탭이 은행으로 간다(에이전트의 browser.navigate·사용자) — 은행 문서와 그 안 추적 iframe 의 요청은 숨는다.
+    apply(gpa, .{ .net_begin = .{ .browser = 93, .request = 1, .url = "https://bank.test/", .host = "bank.test", .site = "bank.test", .flags = .{ .main_frame = true, .navigation = true }, .resource_type = 0, .time_ms = 1 } }, 0);
+    apply(gpa, .{ .page_started = 93 }, 0);
+    apply(gpa, .{ .url_changed = .{ .browser = 93, .url = "https://bank.test/" } }, 0);
+    apply(gpa, .{ .net_begin = .{ .browser = 93, .request = 2, .url = "https://trk.test/load", .host = "trk.test", .site = "", .initiator = "https://trk.test", .flags = .{ .subframe = true }, .resource_type = 13, .time_ms = 2 } }, 0);
+    // a.test 로 돌아온다 — CEF 154 차례(판정 R9d5-f2-old-iframe-beacon-after-nav): page_started·url_changed 가 먼저, 그 뒤 옛 문서의 iframe 이
+    // pagehide 에 보낸 비콘(첫 사이트 빈 글, initiator 는 iframe 출처). sidecar 는 그 iframe 이 앞 문서의 것임을 알아 표시한다(`previous_document`).
+    apply(gpa, .{ .net_begin = .{ .browser = 93, .request = 3, .url = "https://a.test/", .host = "a.test", .site = "a.test", .flags = .{ .main_frame = true, .navigation = true }, .resource_type = 0, .time_ms = 3 } }, 0);
+    apply(gpa, .{ .page_started = 93 }, 0);
+    apply(gpa, .{ .url_changed = .{ .browser = 93, .url = "https://a.test/" } }, 0);
+    apply(gpa, .{ .net_begin = .{ .browser = 93, .request = 4, .url = "https://trk.test/beacon?uid=bank-user-42", .host = "trk.test", .site = "", .initiator = "https://trk.test", .flags = .{ .subframe = true, .previous_document = true }, .resource_type = 14, .time_ms = 4 } }, 0);
+    // 대조: 새 문서(a.test)의 다른 사이트 iframe 이 보낸 것은 표시가 없다 — a.test 의 것으로 보인다(사용자 결정 「다 보여 줌」).
+    apply(gpa, .{ .net_begin = .{ .browser = 93, .request = 5, .url = "https://ads.test/p", .host = "ads.test", .site = "", .initiator = "https://ads.test", .flags = .{ .subframe = true }, .resource_type = 13, .time_ms = 5 } }, 0);
+    const json = try networkList(gpa, 93, reader, .{ .page_size = 200 });
+    defer gpa.free(json);
+    const p = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
+    defer p.deinit();
+    const arr = p.value.object.get("requests").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), arr.len); // 새 iframe 의 요청(#5)과 a.test 로 돌아온 이동(#3) — 은행 페이지의 iframe 비콘(#4)은 숨는다
+    try std.testing.expectEqualStrings("https://ads.test/p", arr[0].object.get("url").?.string);
+    try std.testing.expectEqualStrings("https://a.test/", arr[1].object.get("url").?.string);
+}
+
+// ── W9d① 변이 생존(5 회차 뒤 기능 전체 변이) ──
+
+test "W9d① 변이 생존 W2: sidecar 가 다시 떠 이미 지켜보던 탭의 브라우저가 다시 만들어지면 같은 지켜보기도 다시 보낸다 — 새 프로세스는 지켜보기를 모른다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{91});
+    networkSync(&.{.{ .tab = 91, .who = 7, .host = "a.test" }});
+    var sent: [8]Message = undefined;
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&sent));
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 91 }, 0); // 새 sidecar 프로세스의 같은 탭
+    const n = sentFrames(&sent);
+    var again = false;
+    for (sent[0..n]) |m| if (m == .net_watch and m.net_watch.browser == 91) {
+        again = m.net_watch.on and m.net_watch.host_count == 1;
+    };
+    try std.testing.expect(again);
 }

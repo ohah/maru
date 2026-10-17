@@ -8366,6 +8366,7 @@ pub const AppSession = struct {
         if (!builtin.is_test) web_osr.decide(self.loaded_config.config.browser.engine == .chromium);
         if (!builtin.is_test) {
             web_osr.downloads.setAsk(self.loaded_config.config.browser.download_ask); // W10b(새 창의 설정)
+            web_osr.setNetworkFull(self.loaded_config.config.browser.agent_network_full); // W9d①(새 창의 설정)
             self.download_ask_applied = self.loaded_config.config.browser.download_ask;
         }
         if (builtin.is_test and live_app_sessions == 0) {

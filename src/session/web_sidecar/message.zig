@@ -167,6 +167,11 @@ pub const Tag = enum(u8) {
     /// 관이라 그 입력보다 먼저 닿는다). sidecar 는 DevTools 입력에서 장을 짐작하지 않는다 — 짐작하면 사용자 탭에서도 팝업 브라우저를
     /// 만들어 그 페이지가 돌았다(maru 가 장이 없다며 닫기 전에 — 적대 리뷰 1 회차).
     new_tab_credit = 133,
+    /// 그 탭의 네트워크를 지켜보기 시작하거나 그만둔다(W9d① — maru 가 `browser_network` grant 를 넣거나 에이전트 탭이 태어날 때 켜고, 마지막
+    /// grant 가 사라지거나 탭이 닫히면 끈다). `full` 은 설정 `browser.agent-network-full` — 거짓이면 sidecar 가 보내기 전에 헤더 값·주소의
+    /// 사용자 정보를 덜어 낸다(`net_policy`). `any_host` 는 어느 호스트든 grant(에이전트 탭 — 요청의 첫 사이트로 덮는다), `hosts` 는 사이트에
+    /// 묶인 grant 호스트(넷까지 — 둘은 합친다). 둘 다 없으면 아무것도 덮지 않는다.
+    net_watch = 134,
 
     /// 주 프레임의 이동이 시작된다(W9a 적대 리뷰 5 회차 — CEF `on_before_browse`, 리다이렉트마다도). 확정(`page_started`)·끝(`load_finished`)·
     /// 불러오기 끝까지 그 탭은 「확정되지 않은 이동 중」 이다 — 그동안 보낸 DevTools 의 페이지 호출은 Chromium 이 붙잡았다가 새 문서에서 돌렸다.
@@ -178,6 +183,18 @@ pub const Tag = enum(u8) {
     /// 주 프레임의 이동이 실패해 오류 페이지가 옛 문서를 바꿨다(W9c① — CEF `on_load_error`, ERR_ABORTED 는 빼고). 그 이동에는 `page_started` 가
     /// 없다(실측) — maru 는 콘솔의 문서 경계로만 쓴다(다운로드의 몸짓 판정·에이전트 이동은 건드리지 않는다).
     error_page = 68,
+    /// 지켜보는 탭(W9d① — `net_watch`)의 요청 하나가 시작된다(CEF `on_before_resource_load` — 리다이렉트를 넘어 같은 요청 번호). 주소·메서드·
+    /// 종류·요청 헤더(앞부분 — `max_net_*`)와 누가 일으켰나(initiator 출처)·첫 사이트 호스트. 서비스 워커가 대신 보낸 요청(CEF 의 브라우저가
+    /// 없다)은 그 출처를 연 지켜보는 탭마다 하나씩 온다.
+    net_begin = 69,
+    /// 그 요청이 다른 주소로 옮겨 간다(W9d① — `on_resource_redirect`, 홉마다 하나). HSTS 가 바꾼 내부 이동은 `hsts`.
+    net_redirect = 70,
+    /// 그 요청의 응답 머리(W9d① — `on_resource_response`). 401 뒤 다시 보낸 인증 요청은 같은 번호로 다시 온다(뒤의 것이 이긴다).
+    net_response = 71,
+    /// 그 요청의 끝(W9d① — `on_resource_load_complete`): 결과·오류 번호·받은 바이트(압축된 그대로).
+    net_end = 72,
+    /// sidecar 가 그 탭의 요청을 적지 않고 넘긴 수(W9d① — 양동이·동시 요청·넘김 상자 상한).
+    net_dropped = 73,
 
     /// `devtools_call` 결과의 한 조각(W9-0b) — `devtools_result` 앞에 온다. 결과는 CDP 가 준 JSON(`result` 또는 `error` 객체)이다.
     devtools_result_data = 64,
@@ -1136,6 +1153,148 @@ pub const ConsoleMessage = struct {
     text: []const u8 = "",
 };
 
+// ── 네트워크(W9d①) ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// 요청 주소 앞부분 상한(바이트) — 넘는 주소는 sidecar 가 글자 경계에서 자르고 `url_truncated`. 상한 안에서 끝나는 글은 그대로다.
+pub const max_net_url_bytes: usize = 2048;
+/// 메서드 상한 — HTTP 토큰 글자만(`net_fields.checkMethod`).
+pub const max_net_method_bytes: usize = 32;
+/// initiator 출처·첫 사이트 호스트 상한.
+pub const max_net_origin_bytes: usize = 256;
+/// 응답 MIME 상한.
+pub const max_net_mime_bytes: usize = 128;
+/// 헤더 이름 수 상한(넘으면 `headers_truncated`).
+pub const max_net_header_count: usize = 64;
+/// 한 요청(또는 응답·리다이렉트 홉)의 헤더 이름 + 값 바이트 합 상한 — 넘는 헤더는 싣지 않고 `headers_truncated`.
+pub const max_net_headers_bytes: usize = 8 * 1024;
+/// 헤더 이름 하나의 상한(헤더 덩어리 안에서 u8 길이).
+pub const max_net_header_name_bytes: usize = 255;
+/// `net_watch` 가 싣는 grant 호스트 수 상한 — 넘는 호스트는 maru 가 싣지 않는다(덮이지 않는 것으로 — 덜어 내는 쪽, 넓히지 않는다). 한 탭에
+/// 다른 사이트로 묶인 grant 가 다섯 pane 넘게 있는 일은 드물어 늘리지 않았다(W9d① 적대 리뷰 3 회차 P1a).
+pub const max_net_watch_hosts: usize = 4;
+/// 호스트 칸(`net_begin.host`·`net_redirect.host`) 상한 — DNS 이름 상한(RFC 1035).
+pub const max_net_host_bytes: usize = 253;
+/// CEF `cef_resource_type_t` 의 마지막 값(RT_NAVIGATION_PRELOAD_SUB_FRAME). 18 은 비었다(CEF 154 헤더).
+pub const max_net_resource_type: u8 = 20;
+
+/// 요청의 출처(W9d①). `main_frame`·`subframe` 은 CEF 가 준 프레임(없으면 둘 다 거짓 — worker 등), `service_worker` 는 CEF 의 브라우저가
+/// 없는 요청(서비스·공유 워커가 대신 보냈다 — initiator 출처로 탭에 붙였다). `stripped` — 설정이 꺼져 sidecar 가 값을 덜었다.
+/// `previous_document`(W9d① 적대 리뷰 5 회차 B1) — 주 프레임에 새 문서가 시작되기 **전**의 문서에 속한 iframe 이 보낸 요청이다(sidecar 가
+/// 프레임마다 그 프레임이 문서를 연 때의 주 문서 세대를 기억한다 — 떠난 문서의 iframe 이 `pagehide` 에 보낸 비콘이 새 문서의 `page_started`·
+/// `url_changed` 뒤에 온다, 실측). 하위 프레임에만 선다. maru 는 그 요청의 맨 위 문서 호스트를 모른다로 친다(덮지 않는 쪽).
+pub const NetFlags = packed struct(u8) {
+    navigation: bool = false,
+    main_frame: bool = false,
+    subframe: bool = false,
+    service_worker: bool = false,
+    url_truncated: bool = false,
+    headers_truncated: bool = false,
+    stripped: bool = false,
+    previous_document: bool = false,
+};
+
+/// 리다이렉트·응답의 표시(W9d①). `hsts` — `Non-Authoritative-Reason: HSTS` 인 내부 이동(서버가 보낸 것이 아니다).
+pub const NetHopFlags = packed struct(u8) {
+    hsts: bool = false,
+    url_truncated: bool = false,
+    headers_truncated: bool = false,
+    stripped: bool = false,
+    _reserved: u4 = 0,
+};
+
+/// 헤더 덩어리 — `[u8 이름 길이][이름][u16 값 길이][값]` 의 되풀이(`count` 개). frame 을 빌린다(할당 없음). 모양 검사는
+/// `net_fields.checkHeaders`, 읽기는 `net_fields.HeaderIterator`, 만들기는 `net_fields.HeaderBuilder`.
+pub const NetHeaderBlock = struct {
+    count: u8 = 0,
+    bytes: []const u8 = "",
+};
+
+pub const NetBegin = struct {
+    browser: BrowserId,
+    /// CEF 요청 번호(0 아님 — 다운로드의 0 은 sidecar 가 적지 않는다). 프로세스 안에서 유일하고 리다이렉트·인증 재시도에도 같다.
+    request: u64,
+    flags: NetFlags = .{},
+    /// `cef_resource_type_t`(0..20, 18 제외).
+    resource_type: u8 = 0,
+    /// 시작 시각(유닉스 ms).
+    time_ms: u64 = 0,
+    method: []const u8 = "GET",
+    url: []const u8,
+    /// 요청을 일으킨 출처(`scheme://host[:port]` — 없으면 빈 글).
+    initiator: []const u8 = "",
+    /// 첫 사이트(쿠키의 첫 사이트 주소)의 호스트 — 없으면 빈 글.
+    site: []const u8 = "",
+    /// 요청 주소의 호스트(소문자 — http(s) 가 아니거나 모르면 빈 글). sidecar 가 **자르기 전의 온 주소**에서 읽는다(W9d① 적대 리뷰 3 회차 T1 —
+    /// 2 KiB 에서 자른 주소는 긴 사용자 정보 안에서 끊겨 `https://yyy…a.test` 꼴이 되고, 그 호스트가 덮이는 사이트로 읽혀 은행의 쿠키가 보였다).
+    /// 덮이는지는 이 칸으로만 가른다 — 주소(`url`)에서 호스트를 다시 읽지 않는다.
+    host: []const u8 = "",
+    headers: NetHeaderBlock = .{},
+};
+
+pub const NetRedirect = struct {
+    browser: BrowserId,
+    request: u64,
+    /// 리다이렉트 응답의 상태(100..599 — HSTS 내부 이동은 307).
+    status: u16,
+    flags: NetHopFlags = .{},
+    time_ms: u64 = 0,
+    /// 옮겨 갈 주소.
+    url: []const u8,
+    /// 옮겨 갈 주소의 호스트(`NetBegin.host` 와 같은 규칙 — 자르기 전의 온 주소에서).
+    host: []const u8 = "",
+    /// 리다이렉트 응답의 헤더.
+    headers: NetHeaderBlock = .{},
+};
+
+pub const NetResponse = struct {
+    browser: BrowserId,
+    request: u64,
+    /// HTTP 상태(0 은 상태가 없는 응답 — 실패·`file:` 등, 999 까지).
+    status: u16,
+    flags: NetHopFlags = .{},
+    time_ms: u64 = 0,
+    mime: []const u8 = "",
+    headers: NetHeaderBlock = .{},
+};
+
+/// 요청의 끝(W9d — CEF `cef_urlrequest_status_t` 에서): 성공·취소·실패.
+pub const NetOutcome = enum(u8) {
+    success = 0,
+    canceled = 1,
+    failed = 2,
+};
+
+pub const NetEnd = struct {
+    browser: BrowserId,
+    request: u64,
+    outcome: NetOutcome = .success,
+    /// net 오류 번호(0 이하 — 0 은 오류 없음, 예 -3 ERR_ABORTED). 성공이면 0.
+    error_code: i32 = 0,
+    /// 받은 바이트(압축된 그대로 — CEF `received_content_length`).
+    received: u64 = 0,
+    time_ms: u64 = 0,
+};
+
+pub const NetDropped = struct {
+    browser: BrowserId,
+    /// 0 이 아니다.
+    count: u32,
+};
+
+pub const NetWatch = struct {
+    browser: BrowserId,
+    on: bool,
+    /// 설정 `browser.agent-network-full`(켜짐이 기본). `on` 이 거짓이면 거짓.
+    full: bool = false,
+    /// 어느 호스트든 grant 가 있다(에이전트가 연 탭의 태어날 때 grant — 요청의 첫 사이트로 덮는다). `on` 이 거짓이면 거짓. 사이트에 묶인
+    /// `hosts` 와 함께 올 수 있다(둘을 합친다 — 덮는 쪽을 덜지 않게, maru 가 읽는 쪽마다 다시 투영한다). 이 칸 없이는 「호스트 없음」 을
+    /// 「어느 사이트든」 으로 읽어 빈 사이트로 좁힌 grant 에 `invalid` 를 실었다(W9d① 적대 리뷰 3 회차 — 이제 빈 목록은 아무것도 덮지 않는다).
+    any_host: bool = false,
+    host_count: u8 = 0,
+    /// 앞 `host_count` 개만 쓴다(소문자 호스트 — `on` 이 거짓이면 0 개).
+    hosts: [max_net_watch_hosts][]const u8 = @splat(""),
+};
+
 pub const DownloadAction = enum(u8) {
     cancel = 0,
     resume_download = 1,
@@ -1227,9 +1386,15 @@ pub const Message = union(Tag) {
     devtools_call: DevtoolsCall,
     devtools_call_data: DevtoolsData,
     new_tab_credit: BrowserId,
+    net_watch: NetWatch,
     main_frame_navigating: BrowserId,
     console_message: ConsoleMessage,
     error_page: BrowserId,
+    net_begin: NetBegin,
+    net_redirect: NetRedirect,
+    net_response: NetResponse,
+    net_end: NetEnd,
+    net_dropped: NetDropped,
 
     devtools_result_data: DevtoolsData,
     devtools_result: DevtoolsResult,

@@ -30,6 +30,7 @@ const drag = @import("drag.zig");
 const notifications = @import("notifications.zig");
 const new_tab = @import("new_tab.zig");
 const console = @import("console.zig");
+const network = @import("network.zig");
 
 var client_obj: c.cef_client_t = undefined;
 var life_span: c.cef_life_span_handler_t = undefined;
@@ -117,6 +118,9 @@ pub fn get() *c.cef_client_t {
         request.on_render_process_terminated = &onRenderProcessTerminated;
         request.on_open_urlfrom_tab = &new_tab.onOpenUrlFromTab;
         request.on_before_browse = &onBeforeBrowse; // W9a 적대 리뷰 5 회차
+        // W9d①: 지켜보는 탭(maru 의 `net_watch`)의 요청 — IO 스레드에서 불린다. 지켜보는 탭이 없으면 곧 null.
+        network.init();
+        request.get_resource_request_handler = &network.resourceRequestHandler;
         jsdialog.on_jsdialog = &dialogs.onJsDialog;
         jsdialog.on_before_unload_dialog = &dialogs.onBeforeUnloadDialog;
         jsdialog.on_reset_dialog_state = &dialogs.onResetDialogState;
@@ -327,9 +331,12 @@ fn onAddressChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t,
     defer object.releaseArg(frame);
     if (frame == null or frame.*.is_main.?(frame) == 0) return;
     const entry = entryOf(browser) orelse return;
+    // W9d①: 서비스 워커 요청을 붙일 출처 — 온 주소(UTF-16)에서, 길이와 무관하게(적대 리뷰 4 회차 C3: 32 KiB 를 넘는 주소는 아래에서 알리지 않아
+    // 옛 출처가 남았다 — 그 출처의 서비스 워커 요청이 다른 사이트를 보이는 이 탭에 붙었다).
+    network.mainFrameAddress(entry.id, url);
     var buf: [protocol.wire.max_url_bytes]u8 = undefined;
     const text = library.readString(browsers.state.api, url, &buf);
-    if (text.len == 0 or text.len == buf.len) return; // 비었거나 잘렸다(잘린 주소는 다른 주소다)
+    if (text.len == 0 or text.len == buf.len) return; // 비었거나 잘렸다(잘린 주소는 다른 주소다 — maru 는 page_started 로 옛 주소임을 안다)
     browsers.state.writer.send(.{ .url_changed = .{ .browser = entry.id, .url = text } }) catch {};
 }
 
@@ -354,6 +361,8 @@ fn onLoadStart(handler: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, 
             @import("datalist.zig").reset(entry.id); // W6m①: 옛 문서의 제안 목록
             // W9c①: 앞 문서의 버린 수를 먼저 보내고 떠나는 출처를 기억한다(콘솔의 문서 경계 — maru 는 `page_started` 로 가른다).
             console.mainFrameStarted(entry, frame);
+            // W9d① 적대 리뷰 5 회차 B1: 새 문서의 세대 — 이 뒤에 보내는 앞 문서 iframe 의 요청에 표시가 선다(`page_started` 보다 먼저).
+            network.documentStarted(entry.id);
             // W10a: 새 문서 — 그 전의 누름은 이 문서의 사용자 동작이 아니다(maru 가 다운로드의 「사용자가 시작함」을 가른다).
             browsers.state.writer.send(.{ .page_started = entry.id }) catch {};
         }
@@ -361,6 +370,7 @@ fn onLoadStart(handler: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, 
         if (entryOf(browser)) |entry| {
             @import("datalist.zig").closeFrame(entry.id, frame); // W6m③: iframe 의 옛 문서의 목록
             console.subframeStarted(entry, frame); // W9c①: 이 문서가 떠날 때 그 iframe 출처도 기억한다
+            network.subframeDocument(entry.id, frame); // W9d① 5 회차 B1: 이 iframe 은 지금 문서의 것
         }
     }
     dialogs.onLoadStart(handler, browser, frame, transition);

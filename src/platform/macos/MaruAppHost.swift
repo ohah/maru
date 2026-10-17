@@ -8988,7 +8988,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // `MARU_WEB_OSR_TEST_REPORT` 파일에 적는다.
     // 대본 한 줄: `sleep ms` · `mouse kind fx fy dx dy button`(kind 1 누름·2 끌기·3 뗌·4 두 번·5 세 번, button 0 왼·1 가운데·
     // 2 오른) · `hover fx fy dx dy` · `wheel fx fy dx dy lines` · `aux fx fy dx dy buttonNumber` · `action 이름` ·
-    // `waitfile 경로`(그 파일이 생길 때까지 기다린다 — 다른 대본과 때를 맞춘다) ·
+    // `waitfile 경로`(그 파일이 생길 때까지 기다린다 — 다른 대본과 때를 맞춘다) · `revokegrants`(W9d① — 모든 browser grant 철회) ·
     // `key keyCode 글자 [원글자 수식자]`(글자는 U+ 16진, 없으면 -) — 키는 터미널 view 에 NSEvent 를 직접 넣는다(오버레이가
     // 열린 동안 `run_action` 은 무시되므로 Esc 로 닫는 데도 쓴다) · `ime keyCode 단계…`(W4c — 입력기 콜백을 한 트랜잭션
     // 안에서 직접 부른다). 좌표는 창 내용 view 의 (fx×폭 + dx, fy×높이 + dy) pt(왼쪽 위 원점).
@@ -9461,6 +9461,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case "mark" where line.count >= 2:
                 // mark 이름 — 보고에 시각(ms, 페이지의 Date.now() 와 같은 시계)을 남겨 페이지 이벤트를 단계로 가른다.
                 Self.testReport("mark \(line[1]) \(Int64(Date().timeIntervalSince1970 * 1000))")
+            case "revokegrants":
+                // W9d① 스모크: 메뉴 「Revoke All」 과 같은 ABI 로 모든 browser grant 를 철회한다(네트워크 기록이 지켜보기를 끄고 지우는지).
+                _ = maru_macos_control_revoke_all_browser_grants()
             case "overlay":
                 // 오버레이(알림 토스트 포함)가 열려 있는가 — 마우스 게이트가 보는 그 집합.
                 Self.testReport("overlay \(anyOverlayOpen)")
@@ -13646,7 +13649,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     /// grant 한 건의 메뉴 레이블. 대상 web 패널 URL host(있으면)로 "무엇을 제어 중"인지 보이고, scope를 사람 말로
-    /// (browser=제어·browser_storage=쿠키·스토리지). pane은 요청 에이전트 pane surface_id(터미널이라 title 조회 없음=id).
+    /// (browser=제어·browser_storage=쿠키·스토리지·browser_network=네트워크 기록). pane은 요청 에이전트 pane surface_id(터미널이라 title 조회 없음=id).
     private func grantLabel(pane: UInt64, target: UInt64, scope: UInt8) -> String {
         let targetDesc: String
         if let host = surfaceOwning(byId: target)?.webPanels[target]?.webView.url?.host, !host.isEmpty {
@@ -13656,7 +13659,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         // **영어 고정**(계약 §2) — 메뉴바는 찾아서 실행하는 자리라 번역하지 않는다. 이 항목만 한국어면
         // 같은 메뉴 안에서 언어가 섞인다(다른 항목은 전부 영어다).
-        let scopeDesc = scope == 1 ? "cookies & storage" : "control"
+        // W9d①: 2 = browser_network(네트워크 기록 읽기 — 에이전트가 연 탭은 탭과 함께 생긴다).
+        let scopeDesc = scope == 1 ? "cookies & storage" : (scope == 2 ? "network requests" : "control")
         return "Revoke pane #\(pane) → \(targetDesc) · \(scopeDesc)"
     }
 

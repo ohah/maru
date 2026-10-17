@@ -54,6 +54,8 @@ pub const browser_help =
     \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
     \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
     \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
+    \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page)
+    \\  network-request --surface <id> --req <n>  show one request in detail: headers and redirects (Chromium tabs)
     \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
     \\
 ;
@@ -118,6 +120,10 @@ pub const Request = union(enum) {
     handle_dialog: struct { surface_id: u64, accept: bool, text: ?[]const u8, dialog: ?u64 },
     /// `browser upload`(W9c③ — Chromium). 대상(click 과 같은 로케이터)과 파일 1..10 개. 응답 {origin, files:[{name,size}], kept, navigated, dialog}.
     upload: UploadCmd,
+    /// `browser network`(W9d① — Chromium). 거르기·쪽. 응답 {requests:[…], hidden_before_grant, dropped, …, next_page?}.
+    network: NetworkCmd,
+    /// `browser network-request`(W9d① — Chromium). 응답 그 요청의 자세한 것(헤더·리다이렉트·body_state).
+    network_request: struct { surface_id: u64, req: u64 },
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
@@ -136,7 +142,36 @@ pub const Request = union(enum) {
             .dialog => .dialog,
             .handle_dialog => .handle_dialog,
             .upload => .upload,
+            .network => .network,
+            .network_request => .network_request,
         };
+    }
+};
+
+/// W9d①: `browser network` 의 거르기 종류 수 상한(서버 `control_browser.max_network_types` 와 같다).
+pub const max_network_types = 20;
+/// W9d①: 한 쪽 줄 수·쪽 번호 상한(서버와 같다).
+pub const max_network_page_size: u32 = 200;
+pub const max_network_page: u32 = 10_000;
+/// W9d①: 에이전트에게 보일 자원 종류 이름(서버 `net_policy.resourceTypeName` 과 같은 목록 — 시험이 맞춘다).
+pub const network_type_names = [_][]const u8{ "document", "iframe", "stylesheet", "script", "image", "font", "other", "object", "media", "worker", "shared_worker", "prefetch", "favicon", "xhr", "ping", "service_worker", "csp_report", "plugin", "preload" };
+
+pub const NetworkCmd = struct {
+    surface_id: u64,
+    page: ?u32 = null,
+    page_size: ?u32 = null,
+    types: [max_network_types][]const u8 = undefined,
+    type_count: usize = 0,
+    method: ?[]const u8 = null,
+    status: ?u16 = null,
+    status_class: ?u8 = null,
+    url_contains: ?[]const u8 = null,
+    /// 이 번호보다 오래된 요청만(앞 쪽 결과의 `next_before_req` — 새 요청이 와도 다음 쪽이 밀리지 않는다, W9d① 적대 리뷰 1 회차 F7).
+    before_req: ?u64 = null,
+    clear: bool = false,
+
+    pub fn typeNames(self: *const NetworkCmd) []const []const u8 {
+        return self.types[0..self.type_count];
     }
 };
 
@@ -266,6 +301,14 @@ pub const ParseError = error{
     TooManyFiles, // `upload` 에 파일이 10 개 넘게
     ConflictingAnswer, // `handle-dialog` 에 둘 다
     InvalidDialogToken, // `--dialog` 가 1..2^53-1 정수가 아님
+    InvalidNetworkType, // `network --type` 에 모르는 종류(또는 20 개 넘게)
+    InvalidMethod, // `network --method` 가 1..32 자 토큰이 아님
+    InvalidStatus, // `network --status` 가 100..599 또는 `1xx`..`5xx` 가 아님
+    InvalidPage, // `network --page`(0..10000)·`--page-size`(1..200)가 범위 밖
+    InvalidUrlFilter, // `network --url-contains` 가 비었거나 2048 바이트 넘게
+    MissingRequestId, // `network-request` 에 `--req` 없음
+    InvalidRequestId, // `--req` 가 1..2^53-1 정수가 아님
+    InvalidBeforeReq, // `network --before-req` 가 1..2^53-1 정수가 아님
 };
 
 /// `--dialog` 번호의 상한 — JSON 수로 잃지 않고 오가는 가장 큰 정수(번호는 maru 가 1 부터 매긴다).
@@ -445,6 +488,8 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     }
     if (eq(sub, "handle-dialog")) return .{ .request = .{ .handle_dialog = try parseHandleDialogArgs(rest) } };
     if (eq(sub, "upload")) return .{ .request = .{ .upload = try parseUploadArgs(rest) } };
+    if (eq(sub, "network")) return .{ .request = .{ .network = try parseNetworkArgs(rest) } };
+    if (eq(sub, "network-request")) return .{ .request = .{ .network_request = try parseNetworkRequestArgs(rest) } };
     if (eq(sub, "navigate")) {
         const p = try parseSurfaceArg(rest);
         const s = p.surface orelse return error.MissingSurface;
@@ -957,6 +1002,88 @@ const ActArgs = struct {
 };
 const ActExtras = struct { text: bool = false, key: bool = false };
 
+/// `network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--clear]`(W9d①).
+/// `--type` 은 쉼표로 여럿, 되풀이해도 된다. 값은 서버가 다시 본다 — 여기서도 보는 것은 틀린 인자를 연결 전에 알리려고다.
+fn parseNetworkArgs(rest: []const []const u8) ParseError!NetworkCmd {
+    var surface: ?u64 = null;
+    var cmd: NetworkCmd = .{ .surface_id = 0 };
+    var i: usize = 0;
+    while (i < rest.len) {
+        const a = rest[i];
+        if (matchOpt(a, "--surface")) {
+            try assignSurface(&surface, try optValue(rest, &i, "--surface"));
+        } else if (matchOpt(a, "--type")) {
+            var it = std.mem.splitScalar(u8, try optValue(rest, &i, "--type"), ',');
+            while (it.next()) |t| {
+                if (t.len == 0) continue;
+                const known = for (network_type_names) |n| {
+                    if (eq(n, t)) break true;
+                } else false;
+                if (!known or cmd.type_count == max_network_types) return error.InvalidNetworkType;
+                cmd.types[cmd.type_count] = t;
+                cmd.type_count += 1;
+            }
+        } else if (matchOpt(a, "--method")) {
+            const m = try optValue(rest, &i, "--method");
+            if (m.len == 0 or m.len > 32) return error.InvalidMethod;
+            for (m) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return error.InvalidMethod;
+            cmd.method = m;
+        } else if (matchOpt(a, "--status")) {
+            const v = try optValue(rest, &i, "--status");
+            if (v.len == 3 and v[0] >= '1' and v[0] <= '5' and std.ascii.toLower(v[1]) == 'x' and std.ascii.toLower(v[2]) == 'x') {
+                cmd.status_class = v[0] - '0';
+            } else {
+                const n = std.fmt.parseInt(u16, v, 10) catch return error.InvalidStatus;
+                if (n < 100 or n > 599) return error.InvalidStatus;
+                cmd.status = n;
+            }
+        } else if (matchOpt(a, "--url-contains")) {
+            const v = try optValue(rest, &i, "--url-contains");
+            if (v.len == 0 or v.len > 2048) return error.InvalidUrlFilter;
+            cmd.url_contains = v;
+        } else if (matchOpt(a, "--before-req")) {
+            const n = std.fmt.parseInt(u64, try optValue(rest, &i, "--before-req"), 10) catch return error.InvalidBeforeReq;
+            if (n == 0 or n > max_dialog_token) return error.InvalidBeforeReq;
+            cmd.before_req = n;
+        } else if (matchOpt(a, "--page")) {
+            const n = std.fmt.parseInt(u32, try optValue(rest, &i, "--page"), 10) catch return error.InvalidPage;
+            if (n > max_network_page) return error.InvalidPage;
+            cmd.page = n;
+        } else if (matchOpt(a, "--page-size")) {
+            const n = std.fmt.parseInt(u32, try optValue(rest, &i, "--page-size"), 10) catch return error.InvalidPage;
+            if (n == 0 or n > max_network_page_size) return error.InvalidPage;
+            cmd.page_size = n;
+        } else if (eq(a, "--clear")) {
+            cmd.clear = true;
+            i += 1;
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            return error.UnknownOption;
+        } else return error.UnexpectedArgument;
+    }
+    cmd.surface_id = surface orelse return error.MissingSurface;
+    return cmd;
+}
+
+/// `network-request --surface <id> --req <n>`(W9d① — 번호는 `network` 가 준 것).
+fn parseNetworkRequestArgs(rest: []const []const u8) ParseError!@FieldType(Request, "network_request") {
+    var surface: ?u64 = null;
+    var req: ?u64 = null;
+    var i: usize = 0;
+    while (i < rest.len) {
+        const a = rest[i];
+        if (matchOpt(a, "--surface")) {
+            try assignSurface(&surface, try optValue(rest, &i, "--surface"));
+        } else if (matchOpt(a, "--req")) {
+            const n = std.fmt.parseInt(u64, try optValue(rest, &i, "--req"), 10) catch return error.InvalidRequestId;
+            if (n == 0 or n > max_dialog_token) return error.InvalidRequestId;
+            req = n;
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            return error.UnknownOption;
+        } else return error.UnexpectedArgument;
+    }
+    return .{ .surface_id = surface orelse return error.MissingSurface, .req = req orelse return error.MissingRequestId };
+}
+
 /// `upload --surface <id> <로케이터> [--] <file>...`(W9c③) — 로케이터 옵션은 click 과 같고, 위치 인자는 파일이다(`--` 뒤는 `-` 로 시작해도 파일).
 fn parseUploadArgs(rest: []const []const u8) ParseError!UploadCmd {
     var opts: [64][]const u8 = undefined;
@@ -1265,6 +1392,37 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             try obj.put(gpa, "files", .{ .array = files });
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.upload", .params = .{ .object = obj } } });
         },
+        .network => |n| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            var types: std.json.Array = .init(gpa);
+            defer types.deinit();
+            try obj.put(gpa, "id", .{ .integer = @intCast(n.surface_id) });
+            if (n.page) |v| try obj.put(gpa, "page", .{ .integer = v });
+            if (n.page_size) |v| try obj.put(gpa, "page_size", .{ .integer = v });
+            if (n.type_count > 0) {
+                for (n.typeNames()) |t| try types.append(.{ .string = t });
+                try obj.put(gpa, "types", .{ .array = types });
+            }
+            if (n.method) |m| try obj.put(gpa, "method", .{ .string = m });
+            var class_buf: [3]u8 = undefined;
+            if (n.status) |v| try obj.put(gpa, "status", .{ .integer = v });
+            if (n.status_class) |c| {
+                class_buf = .{ '0' + c, 'x', 'x' };
+                try obj.put(gpa, "status", .{ .string = &class_buf });
+            }
+            if (n.url_contains) |u| try obj.put(gpa, "url_contains", .{ .string = u });
+            if (n.before_req) |b| try obj.put(gpa, "before_req", .{ .integer = @intCast(b) });
+            if (n.clear) try obj.put(gpa, "clear", .{ .bool = true });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.network", .params = .{ .object = obj } } });
+        },
+        .network_request => |n| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            try obj.put(gpa, "id", .{ .integer = @intCast(n.surface_id) });
+            try obj.put(gpa, "req", .{ .integer = @intCast(n.req) });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.networkRequest", .params = .{ .object = obj } } });
+        },
         .open => |o| {
             var obj: std.json.ObjectMap = .empty;
             defer obj.deinit(gpa);
@@ -1408,7 +1566,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog, upload };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog, upload, network, network_request };
 
 const unauthorized_code: i64 = -32002;
 const unsupported_by_engine_code: i64 = -32008;
@@ -1668,6 +1826,8 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 try w.writeAll(upload_navigated_note ++ "\n");
             } else if (result.get("kept")) |k| if (k == .bool and !k.bool) try w.writeAll(upload_not_kept_note ++ "\n");
         },
+        .network => return renderNetwork(gpa, result, w),
+        .network_request => return renderNetworkRequest(gpa, result, w),
         .handle_dialog => {
             try w.writeAll("answered ");
             try writePageText(gpa, w, strField(result.get("kind")), false);
@@ -1740,6 +1900,158 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             }
         },
     }
+    return true;
+}
+
+// ── W9d①: 네트워크 기록 ──
+// 주소·헤더 값·MIME 은 페이지와 서버가 고른 글이다 — 모두 `writePageText` 로 걸러 낸다(제어·양방향·줄 구분 글자가 터미널에 가지 않게).
+
+/// `#<req> <METHOD> <상태|-> <종류> <주소> [<ms>] [<바이트>B] [표시…]` 한 줄씩(새것부터), 끝에 숨김·버림 수와 다음 쪽.
+fn renderNetwork(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.Writer) !bool {
+    const reqs = switch (result.get("requests") orelse std.json.Value{ .null = {} }) {
+        .array => |a| a,
+        else => {
+            try w.writeAll("error: malformed network result\n");
+            return false;
+        },
+    };
+    if (reqs.items.len == 0) try w.writeAll("(no requests)\n");
+    for (reqs.items) |item| {
+        const o = switch (item) {
+            .object => |oo| oo,
+            else => continue,
+        };
+        try w.print("#{d} ", .{intField(o.get("req")) orelse 0});
+        try writePageText(gpa, w, strField(o.get("method")), false);
+        if (intField(o.get("status"))) |st| try w.print(" {d} ", .{st}) else try w.writeAll(" - ");
+        try writePageText(gpa, w, strField(o.get("type")), false);
+        try w.writeAll(" ");
+        try writePageText(gpa, w, strField(o.get("url")), false);
+        if (boolField(o.get("url_truncated"))) try w.writeAll("…");
+        if (intField(o.get("duration_ms"))) |d| try w.print(" {d}ms", .{d});
+        if (intField(o.get("size"))) |sz| try w.print(" {d}B", .{sz});
+        const state = strField(o.get("state"));
+        if (!std.mem.eql(u8, state, "done")) {
+            try w.writeAll(" [");
+            try writePageText(gpa, w, state, false);
+            if (intField(o.get("error_code"))) |e| try w.print(" {d}", .{e});
+            try w.writeAll("]");
+        }
+        if (intField(o.get("redirects"))) |n| try w.print(" [{d} redirect{s}]", .{ n, if (n == 1) "" else "s" });
+        if (boolField(o.get("engine_restarted"))) try w.writeAll(" [engine restarted]"); // W9d① 적대 리뷰 3 회차 T2
+        if (boolField(o.get("restarted"))) try w.writeAll(" [restarted]"); // W9d① 적대 리뷰 후 — 같은 번호 다시 시작(다음 시도는 새 줄)
+        if (boolField(o.get("other_site"))) try w.writeAll(" [other site]");
+        if (boolField(o.get("cross_site_iframe"))) try w.writeAll(" [cross-site iframe]");
+        const sw = strField(o.get("service_worker"));
+        if (sw.len > 0) {
+            try w.writeAll(" [");
+            try writePageText(gpa, w, sw, false);
+            try w.writeAll("]");
+        }
+        try w.writeAll("\n");
+    }
+    if (intField(result.get("hidden_before_grant"))) |n| if (n > 0) try w.print("({d} earlier request{s} hidden — made before your permission)\n", .{ n, if (n == 1) "" else "s" });
+    if (intField(result.get("hidden_other_site_pages"))) |n| if (n > 0) try w.print("({d} request{s} hidden — made while the tab showed a site your permission does not cover)\n", .{ n, if (n == 1) "" else "s" });
+    if (intField(result.get("dropped"))) |n| if (n > 0) try w.print("({d} request{s} not recorded — the page made them faster than maru keeps)\n", .{ n, if (n == 1) "" else "s" });
+    if (intField(result.get("cross_site_iframe_hidden"))) |n| if (n > 0) try w.print("({d} request{s} from cross-site iframes hidden — browser.agent-network-full is off)\n", .{ n, if (n == 1) "" else "s" });
+    if (intField(result.get("service_worker_shared_hidden"))) |n| if (n > 0) try w.print("({d} service-worker request{s} hidden — a tab without permission shows the same site and browser.agent-network-full is off)\n", .{ n, if (n == 1) "" else "s" });
+    // 커서가 있으면 그것을 권한다 — 새 요청이 와도 다음 쪽이 밀리지 않는다(F7).
+    if (intField(result.get("next_before_req"))) |b| {
+        try w.print("more: --before-req {d}\n", .{b});
+    } else if (intField(result.get("next_page"))) |p| try w.print("more: --page {d}\n", .{p});
+    return true;
+}
+
+fn renderNetworkHeaders(gpa: std.mem.Allocator, w: *std.Io.Writer, title: []const u8, list: ?std.json.Value, truncated: bool) !void {
+    const arr = switch (list orelse return) {
+        .array => |a| a,
+        else => return,
+    };
+    try w.print("{s}:\n", .{title});
+    for (arr.items) |h| {
+        const o = switch (h) {
+            .object => |oo| oo,
+            else => continue,
+        };
+        try w.writeAll("  ");
+        try writePageText(gpa, w, strField(o.get("name")), false);
+        try w.writeAll(": ");
+        // W9d① 적대 리뷰 3 회차 D1: 자격 증명 값은 그 사이트의 쿠키 권한이 있어야 한다(설정이 켜져 있어도) — 까닭이 다르면 안내도 다르다.
+        if (boolField(o.get("needs_cookie_permission")))
+            try w.writeAll("(hidden — needs this site's cookie permission: maru browser get-cookies asks for it)")
+        else if (boolField(o.get("redacted")))
+            try w.writeAll("(hidden — browser.agent-network-full is off)")
+        else
+            try writeHeaderValue(gpa, w, strField(o.get("value")));
+        try w.writeAll("\n");
+    }
+    if (truncated) try w.writeAll("  … (more headers were not recorded)\n");
+}
+
+/// 헤더 값 — 탭은 빈칸으로 보이게 바꾼 뒤 걸러 낸다(`displaySafe` 는 탭을 지워 낱말이 붙었다 — W9d① 적대 리뷰 1 회차 곁가지,
+/// `writeLinesText` 와 같다). 헤더 값에는 줄바꿈이 오지 않는다(wire 가 거절한다) — 와도 지운다.
+fn writeHeaderValue(gpa: std.mem.Allocator, w: *std.Io.Writer, value: []const u8) !void {
+    const tmp = gpa.dupe(u8, value) catch return w.writeAll("…");
+    defer gpa.free(tmp);
+    std.mem.replaceScalar(u8, tmp, '\t', ' ');
+    try writePageText(gpa, w, tmp, false);
+}
+
+/// 한 요청의 자세한 것 — 머리 줄, 상태 줄, 리다이렉트, 요청·응답 헤더, 본문 상태.
+fn renderNetworkRequest(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.Writer) !bool {
+    try w.print("#{d} ", .{intField(result.get("req")) orelse 0});
+    try writePageText(gpa, w, strField(result.get("method")), false);
+    try w.writeAll(" ");
+    try writePageText(gpa, w, strField(result.get("url")), false);
+    try w.writeAll("\n");
+    try writePageText(gpa, w, strField(result.get("type")), false);
+    try w.writeAll(" · ");
+    try writePageText(gpa, w, strField(result.get("state")), false);
+    if (intField(result.get("status"))) |st| try w.print(" · status {d}", .{st});
+    const mime = strField(result.get("mime"));
+    if (mime.len > 0) {
+        try w.writeAll(" · ");
+        try writePageText(gpa, w, mime, false);
+    }
+    if (intField(result.get("size"))) |sz| try w.print(" · {d} bytes", .{sz});
+    if (intField(result.get("duration_ms"))) |d| try w.print(" · {d} ms", .{d});
+    if (intField(result.get("error_code"))) |e| try w.print(" · net error {d}", .{e});
+    if (boolField(result.get("engine_restarted"))) try w.writeAll(" · ended when the Chromium engine restarted");
+    if (boolField(result.get("restarted"))) try w.writeAll(" · Chromium restarted this request; the retry is a newer req");
+    try w.writeAll("\n");
+    try w.writeAll("initiator ");
+    const initiator = strField(result.get("initiator"));
+    if (initiator.len == 0) try w.writeAll("-") else try writePageText(gpa, w, initiator, false);
+    try w.writeAll(" · frame ");
+    try writePageText(gpa, w, strField(result.get("frame")), false);
+    if (boolField(result.get("other_site"))) try w.writeAll(" · other site");
+    if (boolField(result.get("cross_site_iframe"))) try w.writeAll(" · cross-site iframe");
+    try w.writeAll("\n");
+    const sw = strField(result.get("service_worker"));
+    if (sw.len > 0) {
+        try writePageText(gpa, w, sw, false);
+        try w.writeAll("\n");
+    }
+    if (boolField(result.get("detail_evicted"))) try w.writeAll("(headers and redirects were dropped from maru's record — it keeps 1 MiB of them per tab)\n");
+    if (result.get("redirects")) |rv| if (rv == .array and rv.array.items.len > 0) {
+        try w.writeAll("redirects:\n");
+        for (rv.array.items) |h| {
+            const o = switch (h) {
+                .object => |oo| oo,
+                else => continue,
+            };
+            try w.print("  {d} → ", .{intField(o.get("status")) orelse 0});
+            try writePageText(gpa, w, strField(o.get("url")), false);
+            if (boolField(o.get("hsts"))) try w.writeAll(" (HSTS upgrade inside the browser)");
+            try w.writeAll("\n");
+        }
+    };
+    try renderNetworkHeaders(gpa, w, "request headers", result.get("request_headers"), boolField(result.get("request_headers_truncated")));
+    try renderNetworkHeaders(gpa, w, "response headers", result.get("response_headers"), boolField(result.get("response_headers_truncated")));
+    try w.writeAll("body: ");
+    const body = strField(result.get("body_state"));
+    if (std.mem.eql(u8, body, "not_recorded")) try w.writeAll("not recorded") else try writePageText(gpa, w, body, false);
+    try w.writeAll("\n");
     return true;
 }
 
@@ -2968,6 +3280,8 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
         \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
         \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
+        \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page)
+        \\  network-request --surface <id> --req <n>  show one request in detail: headers and redirects (Chromium tabs)
         \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
         \\
     ,
@@ -3924,4 +4238,146 @@ test "W9c③ 적대 리뷰 3 회차 재현 D1c: upload 결과의 dialog:true —
     try testing.expect(std.mem.indexOf(u8, out.written(), "try again") == null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "handle-dialog") != null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "do not upload again") != null);
+}
+
+// ── W9d①: browser network·network-request ──
+// CLI 의 몫: 인자(거르기·쪽·번호의 범위), 요청 모양, 결과를 줄로 — 페이지·서버가 고른 글(주소·헤더 값·MIME)은 걸러 낸다.
+
+test "W9d①: network 파서 — 종류는 쉼표로 여럿·되풀이, 메서드 토큰, 상태(정수·범주), 주소 조각, 쪽·크기 범위, clear; 틀리면 거절" {
+    const a = (try parse(&.{ "network", "--surface", "9", "--type", "xhr,document", "--type=image", "--method", "POST", "--status", "4xx", "--url-contains", "/api", "--page", "2", "--page-size=200", "--clear" })).request.network;
+    try testing.expectEqual(@as(u64, 9), a.surface_id);
+    try testing.expectEqual(@as(usize, 3), a.type_count);
+    try testing.expectEqualStrings("image", a.typeNames()[2]);
+    try testing.expectEqual(@as(?u8, 4), a.status_class);
+    try testing.expectEqual(@as(?u32, 200), a.page_size);
+    try testing.expect(a.clear);
+    try testing.expectEqual(@as(?u16, 404), (try parse(&.{ "network", "--surface", "1", "--status", "404" })).request.network.status);
+    try testing.expectError(error.InvalidNetworkType, parse(&.{ "network", "--surface", "1", "--type", "fetch" }));
+    try testing.expectError(error.InvalidMethod, parse(&.{ "network", "--surface", "1", "--method", "GE T" }));
+    try testing.expectError(error.InvalidStatus, parse(&.{ "network", "--surface", "1", "--status", "6xx" }));
+    try testing.expectError(error.InvalidStatus, parse(&.{ "network", "--surface", "1", "--status", "99" }));
+    try testing.expectError(error.InvalidPage, parse(&.{ "network", "--surface", "1", "--page-size", "201" }));
+    try testing.expectError(error.InvalidPage, parse(&.{ "network", "--surface", "1", "--page-size", "0" }));
+    try testing.expectError(error.InvalidPage, parse(&.{ "network", "--surface", "1", "--page", "10001" }));
+    try testing.expectError(error.InvalidUrlFilter, parse(&.{ "network", "--surface", "1", "--url-contains", "" }));
+    try testing.expectError(error.MissingSurface, parse(&.{"network"}));
+    try testing.expectError(error.UnknownOption, parse(&.{ "network", "--surface", "1", "--body" }));
+    // 자세히 — 번호는 1..2^53-1.
+    const d = (try parse(&.{ "network-request", "--surface", "3", "--req", "17" })).request.network_request;
+    try testing.expect(d.surface_id == 3 and d.req == 17);
+    try testing.expectError(error.MissingRequestId, parse(&.{ "network-request", "--surface", "3" }));
+    try testing.expectError(error.InvalidRequestId, parse(&.{ "network-request", "--surface", "3", "--req", "0" }));
+    try testing.expectError(error.InvalidRequestId, parse(&.{ "network-request", "--surface", "3", "--req", "9007199254740992" }));
+    // 종류 이름은 서버의 목록과 같다.
+    const policy = @import("../session/web_sidecar/net_policy.zig");
+    for (network_type_names) |n| try testing.expect(policy.knownTypeName(n));
+    var rt: u8 = 0;
+    while (rt <= 20) : (rt += 1) {
+        const name = policy.resourceTypeName(rt);
+        const listed = for (network_type_names) |n| {
+            if (std.mem.eql(u8, n, name)) break true;
+        } else false;
+        try testing.expect(listed);
+    }
+}
+
+test "W9d①: network 요청은 browser.network {id, 거르기} — 범주는 \"4xx\" 글, 자세히는 browser.networkRequest {id, req}" {
+    const cmd = (try parse(&.{ "network", "--surface", "9", "--type", "xhr", "--status", "5xx", "--page", "1" })).request;
+    const bytes = try buildRequestBytes(testing.allocator, cmd, .{ .number = 1 });
+    defer testing.allocator.free(bytes);
+    var pm = try cp.parseMessage(testing.allocator, bytes);
+    defer pm.deinit();
+    const params = pm.message.request.params.?.object;
+    try testing.expectEqualStrings("browser.network", pm.message.request.method);
+    try testing.expectEqualStrings("5xx", params.get("status").?.string);
+    try testing.expectEqualStrings("xhr", params.get("types").?.array.items[0].string);
+    try testing.expectEqual(@as(i64, 1), params.get("page").?.integer);
+    try testing.expect(params.get("clear") == null);
+    const d = try buildRequestBytes(testing.allocator, (try parse(&.{ "network-request", "--surface", "9", "--req", "4" })).request, .{ .number = 2 });
+    defer testing.allocator.free(d);
+    try testing.expect(std.mem.indexOf(u8, d, "\"method\":\"browser.networkRequest\"") != null);
+    try testing.expect(std.mem.indexOf(u8, d, "\"req\":4") != null);
+}
+
+test "W9d①: network 결과 — 줄마다 번호·메서드·상태·종류·주소·표시, 페이지·서버가 고른 글은 제어·양방향 글자를 지운다, 숨김·버림·다음 쪽" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const resp = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[" ++
+        "{\"req\":3,\"method\":\"GET\",\"url\":\"https://a.test/x\\u001b[2J\\u202e\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"duration_ms\":12,\"status\":200,\"mime\":\"application/json\",\"size\":42}," ++
+        "{\"req\":2,\"method\":\"GET\",\"url\":\"https://ads.test/p\",\"type\":\"image\",\"state\":\"pending\",\"start_ms\":1,\"other_site\":true}," ++
+        "{\"req\":1,\"method\":\"GET\",\"url\":\"https://a.test/sw\",\"type\":\"xhr\",\"state\":\"failed\",\"start_ms\":1,\"error_code\":-3,\"redirects\":2,\"service_worker\":\"service worker of https://a.test\"}]," ++
+        "\"hidden_before_grant\":4,\"dropped\":7,\"cross_site_iframe_hidden\":2,\"full_details\":false,\"next_page\":1}}";
+    try testing.expect(try renderResponse(testing.allocator, resp, .network, &out.writer));
+    try testing.expectEqualStrings("#3 GET 200 xhr https://a.test/x[2J 12ms 42B\n" ++
+        "#2 GET - image https://ads.test/p [pending] [other site]\n" ++
+        "#1 GET - xhr https://a.test/sw [failed -3] [2 redirects] [service worker of https://a.test]\n" ++
+        "(4 earlier requests hidden — made before your permission)\n" ++
+        "(7 requests not recorded — the page made them faster than maru keeps)\n" ++
+        "(2 requests from cross-site iframes hidden — browser.agent-network-full is off)\n" ++
+        "more: --page 1\n", out.written());
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[],\"hidden_before_grant\":0,\"dropped\":0,\"full_details\":true}}", .network, &out.writer));
+    try testing.expectEqualStrings("(no requests)\n", out.written());
+    // W9d① 적대 리뷰 3 회차 T2: 엔진이 다시 떠 끝을 받지 못한 요청.
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[{\"req\":4,\"method\":\"GET\",\"url\":\"https://a.test/poll\",\"type\":\"xhr\",\"state\":\"canceled\",\"start_ms\":1,\"error_code\":-3,\"engine_restarted\":true}],\"hidden_before_grant\":0,\"dropped\":0,\"full_details\":true}}", .network, &out.writer));
+    try testing.expectEqualStrings("#4 GET - xhr https://a.test/poll [canceled -3] [engine restarted]\n", out.written());
+    // W9d① 적대 리뷰 후 — 같은 번호 다시 시작: Chromium 이 버린 앞 시도(Cloudflare 확인 페이지의 403)와 새 시도.
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[{\"req\":6,\"method\":\"GET\",\"url\":\"https://so.test/q\",\"type\":\"document\",\"state\":\"done\",\"start_ms\":2,\"status\":200,\"mime\":\"text/html\",\"size\":9},{\"req\":5,\"method\":\"GET\",\"url\":\"https://so.test/q\",\"type\":\"document\",\"state\":\"canceled\",\"start_ms\":1,\"status\":403,\"mime\":\"text/html\",\"size\":0,\"error_code\":-3,\"restarted\":true}],\"hidden_before_grant\":0,\"dropped\":0,\"full_details\":true}}", .network, &out.writer));
+    try testing.expectEqualStrings("#6 GET 200 document https://so.test/q 9B\n#5 GET 403 document https://so.test/q 0B [canceled -3] [restarted]\n", out.written());
+}
+
+test "W9d①: network-request 결과 — 헤더 값은 걸러 내고(줄바꿈으로 다음 헤더를 흉내 내지 못한다), 숨긴 값은 이름만(설정 끔과 쿠키 권한 없음은 안내가 다르다 — 3 회차 D1), 본문은 기록하지 않음(다른 사이트가 보낸 홉은 앱이 싣지 않는다 — 적대 리뷰 2 회차 N7)" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const resp = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"POST\",\"url\":\"https://a.test/login\",\"type\":\"document\",\"state\":\"done\",\"start_ms\":1,\"duration_ms\":30,\"initiator\":\"https://a.test\",\"frame\":\"main\",\"status\":200,\"mime\":\"text/html\",\"size\":9," ++
+        "\"redirects\":[{\"status\":302,\"url\":\"https://sso.test/x\",\"headers\":[]}]," ++
+        "\"request_headers\":[{\"name\":\"Cookie\",\"redacted\":true},{\"name\":\"Authorization\",\"redacted\":true,\"needs_cookie_permission\":true},{\"name\":\"X-Evil\",\"value\":\"a\\nSet-Cookie: x\"}],\"response_headers\":[{\"name\":\"Content-Type\",\"value\":\"text/html\"}],\"body_state\":\"not_recorded\"}}";
+    try testing.expect(try renderResponse(testing.allocator, resp, .network_request, &out.writer));
+    try testing.expectEqualStrings("#5 POST https://a.test/login\n" ++
+        "document · done · status 200 · text/html · 9 bytes · 30 ms\n" ++
+        "initiator https://a.test · frame main\n" ++
+        "redirects:\n" ++
+        "  302 → https://sso.test/x\n" ++
+        "request headers:\n" ++
+        "  Cookie: (hidden — browser.agent-network-full is off)\n" ++
+        "  Authorization: (hidden — needs this site's cookie permission: maru browser get-cookies asks for it)\n" ++
+        "  X-Evil: aSet-Cookie: x\n" ++
+        "response headers:\n" ++
+        "  Content-Type: text/html\n" ++
+        "body: not recorded\n", out.written());
+    // 모르는·버려진 번호 — 서버의 글 그대로(-32603).
+    out.clearRetainingCapacity();
+    try testing.expect(!try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"this request was dropped\",\"data\":{\"reason\":\"evicted\"}}}", .network_request, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "this request was dropped") != null);
+    // W9d① 적대 리뷰 후 — 같은 번호 다시 시작: Chromium 이 버린 앞 시도.
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://so.test/q\",\"type\":\"document\",\"state\":\"canceled\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",\"status\":403,\"mime\":\"text/html\",\"size\":0,\"error_code\":-3,\"restarted\":true,\"body_state\":\"not_recorded\"}}", .network_request, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "document · canceled · status 403 · text/html · 0 bytes · net error -3 · Chromium restarted this request; the retry is a newer req\n") != null);
+}
+
+test "W9d① 적대 리뷰 1 회차: network --before-req 커서(1..2^53-1)는 요청에 실리고, 결과의 next_before_req 를 권한다 — 숨김 수 두 가지, 헤더 값의 탭은 빈칸" {
+    const cmd = (try parse(&.{ "network", "--surface", "9", "--before-req", "11" })).request;
+    try testing.expectEqual(@as(?u64, 11), cmd.network.before_req);
+    const bytes = try buildRequestBytes(testing.allocator, cmd, .{ .number = 1 });
+    defer testing.allocator.free(bytes);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"before_req\":11") != null);
+    try testing.expectError(error.InvalidBeforeReq, parse(&.{ "network", "--surface", "9", "--before-req", "0" }));
+    try testing.expectError(error.InvalidBeforeReq, parse(&.{ "network", "--surface", "9", "--before-req", "9007199254740992" }));
+    try testing.expectError(error.InvalidBeforeReq, parse(&.{ "network", "--surface", "9", "--before-req", "x" }));
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const resp = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[{\"req\":12,\"method\":\"GET\",\"url\":\"https://a.test/\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1}]," ++
+        "\"hidden_before_grant\":0,\"hidden_other_site_pages\":3,\"dropped\":0,\"cross_site_iframe_hidden\":0,\"service_worker_shared_hidden\":1,\"full_details\":false,\"next_page\":1,\"next_before_req\":12}}";
+    try testing.expect(try renderResponse(testing.allocator, resp, .network, &out.writer));
+    try testing.expectEqualStrings("#12 GET - xhr https://a.test/\n" ++
+        "(3 requests hidden — made while the tab showed a site your permission does not cover)\n" ++
+        "(1 service-worker request hidden — a tab without permission shows the same site and browser.agent-network-full is off)\n" ++
+        "more: --before-req 12\n", out.written());
+    out.clearRetainingCapacity();
+    const detail = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://a.test/\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\"," ++
+        "\"request_headers\":[{\"name\":\"X-Pair\",\"value\":\"left\\tright\"}],\"body_state\":\"not_recorded\"}}";
+    try testing.expect(try renderResponse(testing.allocator, detail, .network_request, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "  X-Pair: left right\n") != null);
 }

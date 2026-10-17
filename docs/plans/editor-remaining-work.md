@@ -12,6 +12,12 @@ checkpoint 참조 없이 남은 사본의 수동 복구는 [백업 발견 계획
 
 ## 범위와 판정 방법
 
+2026-10-17 후속 대조에서는 프로젝트 검색·바꾸기의 제품 연결을 다시 확인했다.
+`search/owner.zig`가 열린 모델을 캡처하고 번들 helper 백엔드를 시작하며,
+`search/batch/ui.zig`가 전체 미리보기·적용·파일별 저장 재시도를 연결한다.
+아래 검색 행과 다음 순서만 이를 반영한다. 이 갱신으로 다른 행의 과거 점검 날짜나
+물리 IME·파일시스템·종료 검증 범위를 새로 확인한 것으로 바꾸지 않는다.
+
 [네이티브 편집기 계획](native-editor.md), [에디터 Surface 계획](editor-surface.md),
 [여러 뷰 원장](native-editor-multi-view.md), [이름 없는 문서 계획](editor-untitled.md),
 [도구·LSP 계약](../editor-surface-tooling.md), [병합 계약](../editor-merge-conflicts.md),
@@ -53,7 +59,7 @@ SCM·원격 감시·앱 전체 접근성은 연결되는 경계만 다룬다. �
 |---|---|---|---|
 | 같은 파일 두 pane에서 공유 편집 | 일반 로컬 파일의 같은 창 공유 분할 구현·검증 | [공유 분할 명령](editor-shared-split.md), [공유 문서 계획](editor-shared-document.md), [복원 제품 연결](editor-recovery-integration.md). 편집·Undo·뷰별 검색·선택·스크롤·접힘과 재시작 및 실제 한국어 HID의 검사 범위를 각각 기록한다 | 이름 없는/원격/비교/병합 문서의 공유 분할·창 간 동시 공유·경로 alias 통합은 이 완료 범위 밖이다. 외부 변경의 모든 종료 gate를 닫았다는 뜻도 아니다 |
 | 비교 뷰 좌우 독립 찾기 상자 | 구현·검증 완료 | [독립 찾기 계획](editor-diff-find.md). 두 `find.State`와 열별 결과를 유지한다 | 헤드리스·제품 Metal·실제 AppKit/IME 검증 결과는 해당 계획에 기록 |
-| 프로젝트 전체 검색·바꾸기 미리보기 | 설계·후보 실측, 제품 구현 전 | [검색 설계와 실측](editor-project-search.md). ripgrep과 기존 matcher의 결과 차이·실제 파일 비용을 확인했다 | helper 의존성과 초기 범위 확인 뒤 worker·검색 도크·미저장 내용 연결. CLI 실험은 제품 검색·취소·바꾸기 완료가 아니다 |
+| 프로젝트 전체 검색·바꾸기 | 제품 연결 구현 | [검색 worker](editor-project-search-worker.md)·[앱 owner](editor-project-search-owner.md)·[도크](editor-project-search-dock.md)·[결과 탭](editor-project-search-pane.md)을 연결했다. 번들 rg의 디스크 검색과 열린 모델 우선 검색, [바꾸기 미리보기](editor-project-replace-preview.md), [단일 파일 적용](editor-project-replace-apply.md), [열린 모델·닫힌 파일의 배치 UI와 저장 재시도](editor-project-replace-batch-ui.md)가 있다 | 엔진·인코딩 차이와 전체 OS watcher·지연 I/O 종료·VoiceOver·OS 후보창 픽셀은 각 계획의 검증 경계를 따른다. 제품 연결을 모든 환경 검증 완료로 해석하지 않는다 |
 | 영구 도크 심볼 아웃라인 | 구현 | [도크 아웃라인](editor-outline.md). 활성 문서 계층·접힘·현재 커서 강조, 클릭 이동과 문서/뷰/리비전 교체 검사 | diff/merge, 정렬·필터 설정과 접힘의 재시작 보존은 범위 밖 |
 | 심볼 선택 중 문서 미리보기 | 구현 | [현재 pane 미리보기](editor-symbol-preview.md). 목록 선택은 임시 표시, Enter는 확정, Esc는 원래 화면 | 도크 아웃라인은 별도 목록으로 구현 |
 | Markdown 소스 모드의 편집기 선택 | 계약 밖의 정책 미결 | [네이티브 계약 §12](../native-editor.md), [파일 kind 계약](../file-panel-kinds.md). Markdown 소스는 현재 CM6이며 text/diff의 네이티브 이관과 별개다 | 소스도 네이티브로 할지, 웹 모드와의 전환·문서 소유·편집 경험을 어떻게 통일할지 결정 |
@@ -104,7 +110,7 @@ Markdown 소스 모드 선택은 웹 읽기/리치 이관과 별도의 미결이
 3. **일반 로컬 파일의 같은 창 공유 문서·분할·재시작은 구현했다.** [공유 분할](editor-shared-split.md)과
    [심볼 미리보기](editor-symbol-preview.md)에 현재 범위와 검증을 기록했다. 교차 창 동시 공유,
    이름 없는 문서·원격·diff/merge 분할, Split in Group은 자동으로 범위를 넓히지 않는다.
-4. **도크 아웃라인은 구현했다.** 프로젝트 전체 검색은 [설계·후보 실측](editor-project-search.md)을 진행했다. helper 의존성과 초기 범위 확인 후 검색 도크부터 연결한다. 바꾸기 적용과 외부 도구 자동 실행의 신뢰 정책은 별도 gate다.
+4. **도크 아웃라인과 프로젝트 전체 검색·바꾸기는 제품에 연결됐다.** 검색 도크·결과 탭·미리보기·단일 파일 및 여러 파일 적용·파일별 저장 재시도를 신규 구현 대상으로 다시 세지 않는다. 검색·바꾸기의 추가 검증은 위 개별 계획의 남은 경계에서 선택하고, 외부 도구의 신뢰·실행 gate는 별도로 다룬다.
 5. 버퍼 부족은 재현된 반례에 한해 개선한다. B2의 제품 적용·상한 수치·큰 구조 변경을
    다른 기능의 완료 조건으로 묶거나 자동으로 앞당기지 않는다.
 

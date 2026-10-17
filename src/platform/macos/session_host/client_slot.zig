@@ -1147,6 +1147,16 @@ test "CR3b R2c replacement은 새 Client와 generation을 원자 게시하고 ol
         if (slot.tryDeinit() != .cleaned) @panic("CR3b R2c fixture teardown failed");
     };
 
+    // A late, incomplete event is physically received on the old socket. Reusing
+    // its stream number after replacement must not splice those parser bytes into
+    // a fresh Client, nor let an old-generation read consume the new peer's event.
+    const old_wire = try framing.encodeFrame(std.testing.allocator, .{ .kind = .event, .stream_id = 7 }, "{\"event\":\"snapshot.invalidated\"}");
+    defer std.testing.allocator.free(old_wire);
+    const old_prefix = old_wire[0 .. old_wire.len - 1];
+    try std.testing.expectEqual(@as(isize, @intCast(old_prefix.len)), c.write(old_pair[1], old_prefix.ptr, old_prefix.len));
+    try slot.ingestCurrentReadableEvidence(1);
+    try std.testing.expect(slot.current.client.parser.bufferedBytes() > 0);
+
     var admission: PreparedAdmissionClose = .{};
     try slot.prepareAdmissionClose(1, &admission);
     try slot.commitAdmissionClose(&admission);
@@ -1202,6 +1212,26 @@ test "CR3b R2c replacement은 새 Client와 generation을 원자 게시하고 ol
     try std.testing.expectEqual(@as(u64, 7), replacement_binding.host_adapter_generation);
     try std.testing.expect(!std.mem.eql(u8, &binding_publication.binding_seal, &replacement_binding.seal));
     try std.testing.expectError(error.GenerationMismatch, slot.withCurrent(1, {}, ReadHost.run));
+
+    const new_wire = try framing.encodeFrame(std.testing.allocator, .{ .kind = .event, .stream_id = 7 }, "{\"event\":\"runtime.ended\"}");
+    defer std.testing.allocator.free(new_wire);
+    try std.testing.expectEqual(@as(isize, @intCast(new_wire.len)), c.write(new_pair[1], new_wire.ptr, new_wire.len));
+    try std.testing.expectEqual(@as(usize, 0), slot.current.client.parser.bufferedBytes());
+    try std.testing.expectEqual(@as(usize, 0), old_node.client.parser.bufferedBytes());
+    const ReadEvent = struct {
+        fn run(calls: *usize, client: *client_mod.Client) client_mod.ClientError!bool {
+            calls.* += 1;
+            try client.ingestReadableOutOfBandEvidence();
+            const event = (try client.takeEventForStream(7)) orelse return false;
+            defer client.releaseEvent(event);
+            return std.mem.eql(u8, event.payload, "{\"event\":\"runtime.ended\"}");
+        }
+    };
+    var read_calls: usize = 0;
+    try std.testing.expectError(error.GenerationMismatch, slot.withCurrent(1, &read_calls, ReadEvent.run));
+    try std.testing.expectEqual(@as(usize, 0), read_calls);
+    try std.testing.expect(try try slot.withCurrent(2, &read_calls, ReadEvent.run));
+    try std.testing.expectEqual(@as(usize, 1), read_calls);
 
     var attachment: contract.PreparedAttachmentBinding = .{};
     var attachment_lease: lease_mod.ConnectionLease = .{};

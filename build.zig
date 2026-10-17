@@ -10704,6 +10704,30 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
     });
+    const reconnect_read_fence_step = b.step(
+        "test-session-host-reconnect-read-fence",
+        "Verify frozen runtime reads and old/new Client socket isolation",
+    );
+    if (target.result.os.tag == .macos) {
+        for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |read_fence_optimize| {
+            const read_fence_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+                    .target = target,
+                    .optimize = read_fence_optimize,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                }),
+                .filters = &.{ "reconnect read fence:", "CR3b R2c replacement은 새 Client" },
+            });
+            const run_read_fence_tests = b.addRunArtifact(read_fence_tests);
+            run_read_fence_tests.addArg("--maru-expect-tests=7");
+            run_read_fence_tests.addArg("--maru-expect-passed=7");
+            reconnect_read_fence_step.dependOn(&run_read_fence_tests.step);
+            test_step.dependOn(&run_read_fence_tests.step);
+            macos_only_test_step.dependOn(&run_read_fence_tests.step);
+        }
+    }
     const ended_tracker_diagnostics_step = b.step(
         "test-session-host-ended-tracker-diagnostics",
         "Verify ended tracker close diagnostics and healthy cleanup in Debug and ReleaseFast",

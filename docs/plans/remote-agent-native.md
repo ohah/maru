@@ -598,3 +598,52 @@ published_new=0, frozen=0, ended=1, retry_reserved=0`이다. 기존 `candidate_r
 여섯 필드를 모두 정수 1로 요구한다. 빈 객체나 필드 누락이 values-only 순회로 통과하던
 판정자 구멍도 닫는다. 저장 기록을 다시 판정할 때도 실제 `ended_purge_tracker/PartialFrame`
 진단을 확인하며, 다른 close site/error로 바꾼 기록은 통과하지 않는다.
+
+### 재접속 중 읽기 경로 점검
+
+화면 pump, maintenance의 buffered-work/quiet/image 조회, 일반 RPC의 사전 수신과
+세대별 event/screen transport를 나눠 추적한다. `GenerationAttachment.isLive`와
+ClientSlot의 expected connection generation·registered operation을 기존 단일 출처로 유지한다.
+재접속을 이유로 정상 shared Client의 형제 stream을 비우거나 이전 events를 새 세대에 복사하지 않는다.
+
+먼저 실제 attachment를 retirement-prepared 상태로 만든 뒤 각 외부 진입점을 호출해,
+정해진 idle/AdminBusy/조회 불가 결과인지, payload 접근 abort나 socket/parser/queue 변경이
+있는지 검사한다. 성공 publication 뒤 새 세대 수신 재개와 이전 세대 지연 event 격리는
+실제 socket 대조군으로 확인한다. 제품 결함이 재현되지 않으면 임의로 상태 로직을 바꾸지 않는다.
+PartialFrame GUI의 수신 보류 역시 상위 호출부 몇 개를 건너뛴 사실만으로 모든 read 차단을
+주장하지 않는다. 실제 저수준 수신 경로의 관측과 누락 변이로 증거 범위를 구분한다.
+
+점검 결과와 수정 경계:
+
+| 경로 | 기존 권한 경계와 이번 확인 |
+| --- | --- |
+| 화면 `pumpDelta` | attachment 얼림에서 idle, payload·socket 접근 전 중단 |
+| observation·resync·selection·link·find | `read_rpc` 얼림에서 AdminBusy, RPC 사전 수신 전 중단 |
+| maintenance의 buffered/host-work·image pump/availability | 외부 진입점 자체의 얼림 검사가 빠져 있었다. 실제 retirement 준비 후 buffered 조회가 `payloadConst` panic을 일으키는 것을 재현하고, 동일 freeze gate를 네 진입점에 적용했다 |
+| Client 일반 RPC·polling screen·deadline/blocking 수신 | runtime의 얼림 관문 뒤 generation transport/ClientSlot registered operation을 통과한다. `withCurrent`는 callback 전에 expected connection generation을 검사한다 |
+| quiet 조회 | 기존 `screenPumpDrained`가 non-live에서 false를 반환해 이미 안전했다. 중복 guard를 추가하지 않고 실제 retirement 판정자로 유지한다 |
+| 이미지 side channel | Client/fork-fence 수신 관문을 유지한다. 얼린 runtime에서는 maintenance facade가 호출하지 않고 availability는 unknown으로 남긴다 |
+| 종료 sink EOF probe | runtime 화면/조회 경로가 아닌 prepared execution의 별도 종료 권한 아래 읽는다. 이번 변경에서 의미를 바꾸지 않는다 |
+
+7개 집중 판정자는 실제 retirement 준비·중단과 Client queue/parser/request/generation·registry
+접근·socket read 관측을 사용한다. frozen callback은 이벤트를 소비하지 않고 retirement 중단 뒤
+그 동일 metadata를 적용한다. 별도 실제 socket 대조군은 old Client에 부분 event를 수신시킨 뒤
+retirement cleanup에서 버리고, 새 Client에서 같은 stream 번호의 다른 event를 읽는다.
+옛 connection generation callback은 새 event가 socket에 대기해도 호출되지 않아야 한다.
+이 검사는 native socket/lifecycle 증거이며, 새 GUI 실험이나 모든 저수준 read site에 대한
+PartialFrame 수신 보류 관측을 완료했다고 주장하지 않는다. source-copy 실험의 관측 범위는
+계속 별도로 표시한다. 새 gate는 Debug·ReleaseFast와 `test-macos-only`에 연결한다.
+
+관문은 runtime 단위다. 이미 새 세대를 게시한 정상 형제, candidate 준비 RPC와 host 제어 RPC를
+host 전체의 일괄 수신 차단으로 묶지 않는다. 부작용 없는 캐시 observation/cursor 조회도 socket
+수신과 구분한다. quiet 조회의 guard 제거 변이는 기존 하위 `screenPumpDrained`에서 거절되어
+동작 차이가 없었으므로 중복 수정은 제거했다. 이미지 pump의 음성 대조군은 미협상 채널로는
+호출 누락을 가르지 못했다. 따라서 실제 bound socket의 EOF를 대기시켜 얼린 동안 채널 상태·fd를
+보존하고, retirement 중단 후에만 EOF를 처리해 unavailable로 전환하는 양성 대조군을 추가했다.
+
+이 gate의 CI 배선에는 기존 source-call/module inventory도 함께 맞춘다. 새 ClientSlot socket
+판정자의 event take/release는 top-level-test 항목에만 추가하고 제품 항목은 그대로 유지한다.
+frozen-reader helper의 실제 retirement 준비/중단 호출과 새 gate의 `maru -> maru_mod` 주입도
+각 소유 경계 목록에 반영한다. 이미지 채널의 스레드 목록에도 helper의 freeze 중·중단 후
+pump 호출 둘을 연결을 만든 동일 테스트 소유 스레드로 기록한다. 이 원장 수렴은 gate를
+추가한 동일 커밋에 포함한다.

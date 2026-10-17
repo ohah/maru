@@ -58,11 +58,13 @@ test "CR5b-2a 경계는 all-runtime prepare와 reverse abort만 열고 shared re
         .{ .identifier = "prepareHostReconnectRuntimeRetirements", .backend_count = 10 },
         // CR5c reuses the same prepare/abort pair for already-published rows before its no-fail
         // host-wide unavailable suffix.
-        .{ .identifier = "prepareHostWideRetirement", .backend_count = 2, .runtime_count = 3 },
+        // The test-only frozen-reader fixture prepares once, then aborts through
+        // either its checked suffix or its error cleanup. Product callers are unchanged.
+        .{ .identifier = "prepareHostWideRetirement", .backend_count = 2, .runtime_count = 4 },
         // CR5b-2b adds one whole-set revalidation in its reserved state and two explicit
         // pre-commit mutation-zero assertions in the actual three-runtime fixture.
         .{ .identifier = "hostWideRetirementPreparedExact", .backend_count = 7, .runtime_count = 5 },
-        .{ .identifier = "abortHostWideRetirement", .backend_count = 3, .runtime_count = 3 },
+        .{ .identifier = "abortHostWideRetirement", .backend_count = 3, .runtime_count = 5 },
         // 재접속 은퇴 창 회귀(`remote_term_backend`)가 attachment 를 직접 은퇴로 밀어 두고 펌프가
         // 그것을 고르지 않는지 본다 — 그래서 backend 쪽에 prepare/abort 한 쌍이 각각 하나씩 더 있다.
         .{ .identifier = "prepareHostRetirement", .backend_count = 1, .runtime_count = 1, .attachment_count = 1 },

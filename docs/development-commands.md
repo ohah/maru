@@ -1,5 +1,10 @@
 # 개발 명령
 
+- `zig build test-session-host-reconnect-read-fence`: macOS Debug·ReleaseFast에서 실제 retirement 준비로
+  얼린 runtime의 화면·조회 RPC·maintenance 진입점이 Client를 읽거나 이벤트를 소비하지 않는지 검사한다.
+  실제 socket의 이전 부분 프레임을 retirement에서 버리고 새 연결의 같은 stream 번호를 구분하는지,
+  이전 connection generation의 조회가 새 연결을 소비하지 않는지도 확인한다. `test-macos-only`에 포함된다.
+
 - `python3 tools/test-runtime-end-pressure.py --cli zig-out/bin/maru --output <새 디렉터리>`:
   격리된 실제 daemon·PTY 두 개에서 큰 초기 snapshot의 수신 완료 대조군과 부분 수신 중 runtime 종료를 비교한다.
   실제 `ended_purge_tracker/PartialFrame` 로그·잘린 payload, sibling PID 유지와 새 controller의 입력·화면 복구,

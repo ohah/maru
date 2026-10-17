@@ -189,7 +189,6 @@ const gate_tokens = [_][]const u8{
 /// 관문 없이 위험 읽기에 닿지만 **다른 근거로 얼린 창에 오지 않는** 입구. 이유 없는 항목은 두지 않는다.
 /// 목록이 낡으면(더는 위반이 아니면) 실패한다 — 근거가 사라진 예외가 남아 새 구멍을 가리지 않게.
 const allowlist = [_]struct { name: []const u8, why: []const u8 }{
-    .{ .name = "hasBufferedFrameWork", .why = "유지보수 tick 이 attachmentLive 로 거른 runtime 에만 부른다(remote_term_backend)" },
     .{ .name = "executeReconnectControllerTakeoverUntil", .why = "재접속 job 자신의 전이 — 얼린 쪽이 아니라 후보 세대에 작용" },
     .{ .name = "validateReconnectControllerEvidence", .why = "재접속 job 자신의 전이 — 후보 세대" },
     .{ .name = "abortReconnectControllerEvidence", .why = "재접속 job 자신의 전이 — 후보 세대" },

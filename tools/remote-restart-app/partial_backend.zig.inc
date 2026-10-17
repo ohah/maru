@@ -2,6 +2,34 @@
 var partial_gui_paused = false;
 var partial_gui_resync_sent = false;
 var partial_gui_released = false;
+var partial_gui_observed_job: u64 = 0;
+var partial_gui_gone_observed = false;
+
+// Observe only a validated canonical job; never rewrite rows, cursor, seals, or runtime owners.
+fn partialGuiObserveReconnectOrder(backend: *RemoteTermBackend) void {
+    const job = backend.host_reconnect_job orelse return;
+    if (!job.valid(backend)) return;
+    const rows = job.runtimeRowsSlice() orelse return;
+    if (partial_gui_observed_job != job.job_generation) {
+        for (rows, 0..) |row, index| std.debug.print(
+            "PARTIAL_GUI_ROW host={x:0>32} job={d} index={d} handle={d} runtime={x:0>32}\n",
+            .{ job.host_id, job.job_generation, index, row.identity.runtime_handle, row.identity.runtime_id },
+        );
+        partial_gui_observed_job = job.job_generation;
+        partial_gui_gone_observed = false;
+    }
+    if (!partial_gui_gone_observed and job.state_raw == @intFromEnum(HostReconnectJobState.candidate_ended)) {
+        const index: usize = job.runtime_cursor.next_index;
+        if (index >= rows.len) return;
+        const prior = if (index == 0) "none" else @tagName(std.enums.fromInt(
+            host_reconnect_runtime_ledger.LocalState, rows[index - 1].local_raw,
+        ) orelse return);
+        std.debug.print("PARTIAL_GUI_GONE host={x:0>32} job={d} index={d} runtime={x:0>32} prior={s}\n", .{
+            job.host_id, job.job_generation, index, rows[index].identity.runtime_id, prior,
+        });
+        partial_gui_gone_observed = true;
+    }
+}
 
 fn partialGuiMarker(name: []const u8, write: bool) bool {
     const raw = std.c.getenv("MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT") orelse return false;
@@ -19,7 +47,9 @@ pub fn partialGuiReceivePaused() bool {
 }
 
 pub fn partialGuiBeforeCoordinator(backend: *RemoteTermBackend) bool {
-    if (std.c.getenv("MARU_PARTIAL_GUI") == null or partial_gui_released) return false;
+    if (std.c.getenv("MARU_PARTIAL_GUI") == null) return false;
+    partialGuiObserveReconnectOrder(backend);
+    if (partial_gui_released) return false;
     if (!partial_gui_paused) {
         if (!partialGuiMarker("c3c-disconnect-ready", false)) return false;
         const pool = backend.host_pool orelse return false;

@@ -563,3 +563,38 @@ published_new=0, frozen=0, ended=1, retry_reserved=0`이다. 기존 `candidate_r
 소유 프로세스·host 정리를 확인했다. 그 실제 artifact에 종료 확정 누락·옛 retained 결과·retry
 잔류·초기 GUI 누락·체크포인트 누락·다른 종료 PID 등을 주입한 16개 변이는 모두 거부했다.
 최초 하네스 실패의 로그는 보존했고, 새 실행의 성공으로 과거 실패 기록을 덮어쓰지 않았다.
+
+### 반대 채택 순서의 PartialFrame GUI 검증
+
+외부 소스 복사본 준비 도구에 `--adoption-order healthy-first`를 추가한다. 기본 target-first는
+유지한다. healthy-first는 실제 sidebar 클릭으로 정상 runtime을 먼저 채택하고 종료 대상을
+두 번째로 채택한다. 이어 실제 AppKit 키 이벤트의 `previous_tab` 기본 단축키로 정상 workspace에
+돌아와, 기존 historical marker와 포커스 검증을 통과한 뒤에만 PartialFrame을 유도한다.
+
+판정자는 유효한 canonical job의 두 row를 읽기 전용으로 기록하여 정상 runtime이 index 0,
+종료 대상이 index 1이고 실제 runtime handle이 증가하는지 검사한다. 종료 확정 전이를 처리하기
+직전에도 index 1과 앞 row의 `published_new`를 관측해야 한다. UI 채택 순서나 runtime 생성 순서만으로
+이 순서를 추정하지 않는다. row·상태·seal·controller를 하네스에서 덮어쓰지 않는다.
+
+새 소스 manifest는 v2로 채택 순서와 관측 source/binary hash를 고정한다. 종료 확정의 host/job/runtime
+신원, 순서, 앞선 정상 publication 누락·옛 manifest·중복/모순 관측을 거부하는 합성 대조군을 먼저 둔다.
+실제 GUI에서는 PartialFrame 재현, 같은 정상 PID/controller, AppKit keyDown 이후 Metal frame과
+화면 marker, 정상 Quit·전체 cleanup을 기존 판정과 함께 요구한다. 실제 실행 5회와 그 기록의 변이를
+검증하며 소스 복사본 준비·합성 oracle 통과를 실제 GUI 성공으로 취급하지 않는다.
+
+반대 채택 순서의 실제 GUI에서 발견한 결함(2026-10-17): 정상 runtime이 먼저
+`published_new`가 되고 종료 runtime이 그 다음 `candidate_ended`가 되는 순서는 확인했다.
+그러나 창 resize 후 표시 core는 107×28로 바뀌고 host는 95×27에 남았다.
+`MARU_DEBUG=1`의 `layout resize not delivered: surface=1 error=ProcessExited`로,
+연결 오류가 남긴 Surface 종료 latch가 정상 controller 세대 게시 뒤에도 남는 것을 확인했다.
+새 controller·catch-up 화면·mutation epoch의 성공 게시 지점에서만 running을 복원한다.
+실제 ended·실패·미게시 candidate는 복원하지 않는다. 기존 typed ended 정책은 유지한다.
+검증은 single/multi-runtime 게시에서 이전 exited latch를 재현하는 계약 판정자와
+반대 순서 실제 GUI의 입력·resize·후속 Metal frame·copy·Quit으로 한다.
+
+같은 실험에서 GUI fixture의 기본 PTY echo와 `cat` 출력이 한 입력을 두 번 표시하는 것도
+재현했다. marker를 내기 전에 fixture의 echo를 끄므로 입력 marker는 자식의 소비 결과만 센다.
+입력 marker가 두 번이면 실패하는 기존 조건은 유지한다. 저장된 GUI 기록의 continuity는
+여섯 필드를 모두 정수 1로 요구한다. 빈 객체나 필드 누락이 values-only 순회로 통과하던
+판정자 구멍도 닫는다. 저장 기록을 다시 판정할 때도 실제 `ended_purge_tracker/PartialFrame`
+진단을 확인하며, 다른 close site/error로 바꾼 기록은 통과하지 않는다.

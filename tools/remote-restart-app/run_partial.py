@@ -11,6 +11,10 @@ import hashlib
 import subprocess
 import time
 
+from partial_order import adoption_order, validate_order_evidence
+
+PARTIAL_CLOSE_PATTERN = r'^session host closed client connection: slot=\d+ reason=client_closing why=socket_error site=ended_purge_tracker err=PartialFrame(?: |$)'
+
 
 def validate_quit_evidence(evidence, identities):
     """A normal exit alone is insufficient: verify runtime identity and all cleanup counters."""
@@ -28,6 +32,27 @@ def validate_quit_evidence(evidence, identities):
         raise RuntimeError('owned host cleanup is incomplete')
 
 
+def validate_gui_evidence(evidence, identities, text, order):
+    # Recheck raw reproduction evidence when judging saved artifacts as well as live runs.
+    if not re.search(PARTIAL_CLOSE_PATTERN, text, re.M):
+        raise RuntimeError('missing actual ended-purge PartialFrame diagnosis')
+    if evidence['schema'] != 'maru.session-host-partial-appkit-experiment.v1':
+        raise RuntimeError('baseline or nonvisual artifact cannot prove the partial GUI experiment')
+    validate_quit_evidence(evidence, identities)
+    validate_order_evidence(text, identities, order)
+    required = {'historical_before_count', 'historical_after_count', 'disconnect_after_count',
+                'input_count', 'copy_count', 'resize_count'}
+    continuity = evidence['continuity']
+    if set(continuity) != required or any(type(value) is not int or value != 1 for value in continuity.values()):
+        raise RuntimeError('incomplete AppKit continuity evidence')
+    if evidence['sibling'] != dict(runtime_id=identities['target'], live_before=True, live_after=False,
+                                   controller_before=True, controller_after=False):
+        raise RuntimeError('target termination projection is incomplete')
+    timestamps = evidence['input_frame']
+    if not 0 < timestamps['dispatch_ns'] < timestamps['submit_ns'] or timestamps['latency_ns'] != timestamps['submit_ns'] - timestamps['dispatch_ns']:
+        raise RuntimeError('input did not precede the submitted Metal frame')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--snapshot', required=True)
@@ -41,6 +66,7 @@ def main():
     if not (snapshot / 'partial-source.json').is_file():
         raise RuntimeError('snapshot was not prepared for this experiment')
     manifest = json.loads((snapshot / 'partial-source.json').read_text())
+    order = adoption_order(manifest)
     nonvisual_diagnostic = manifest.get('nonvisual_diagnostic', False)
     for name, digest in manifest.get('source_hashes', {}).items():
         if hashlib.sha256((snapshot / name).read_bytes()).hexdigest() != digest:
@@ -78,7 +104,7 @@ def main():
               'gui_gate_exit': None, 'error': None,
               'validation_scope': 'nonvisual_appkit_diagnostic' if nonvisual_diagnostic else 'actual_appkit_gui',
               'gui_continuity_verified': False,
-              'screen_lock_at_launch': screen.strip()}
+              'screen_lock_at_launch': screen.strip(), 'adoption_order': order, 'canonical_order_verified': False}
     with (output / 'gate.log').open('wb') as log:
         gate = subprocess.Popen(['zig', 'build', 'macos-session-host-cr6e-c3c-appkit',
                                  '-Doptimize=' + manifest.get('build_mode', 'ReleaseFast'), '-j8'], cwd=snapshot, env=env,
@@ -135,8 +161,7 @@ def main():
             # success still requires the real host's exact PartialFrame close diagnosis below.
             time.sleep(.2)
             pressure.terminate(endpoint, identities['target'])
-            close_pattern = r'^session host closed client connection: slot=\d+ reason=client_closing why=socket_error site=ended_purge_tracker err=PartialFrame(?: |$)'
-            wait(lambda: re.search(close_pattern, host_log.read_text(), re.M), 5)
+            wait(lambda: re.search(PARTIAL_CLOSE_PATTERN, host_log.read_text(), re.M), 5)
             shutil.copy2(host_log, output / 'host-at-partial-frame.log')
             result['partial_frame_verified'] = True
             (home / 'partial-release').touch(exist_ok=False)
@@ -172,6 +197,8 @@ def main():
             if evidence['schema'] != 'maru.session-host-partial-nonvisual-diagnostic.v1':
                 raise RuntimeError('wrong nonvisual diagnostic artifact')
             validate_quit_evidence(evidence, identities)
+            validate_order_evidence((output / 'gate.log').read_text(), identities, order)
+            result['canonical_order_verified'] = True
             result['normal_quit_verified'] = True
             result['healthy_pid_preserved_through_quit'] = True
         except Exception as error:
@@ -180,19 +207,8 @@ def main():
     if not nonvisual_diagnostic and result['error'] is None and result['gui_gate_exit'] == 0 and result['partial_frame_verified']:
         try:
             evidence = json.loads((output / 'cr6e-c3c-appkit.json').read_text())
-            if evidence['schema'] != 'maru.session-host-partial-appkit-experiment.v1':
-                raise RuntimeError('baseline artifact cannot prove the partial GUI experiment')
-            validate_quit_evidence(evidence, identities)
-            for field, value in evidence['continuity'].items():
-                if value != 1:
-                    raise RuntimeError('incomplete AppKit continuity evidence: ' + field)
-            sibling = evidence['sibling']
-            if sibling != dict(runtime_id=identities['target'], live_before=True, live_after=False,
-                               controller_before=True, controller_after=False):
-                raise RuntimeError('target termination projection is incomplete')
-            timestamps = evidence['input_frame']
-            if not 0 < timestamps['dispatch_ns'] < timestamps['submit_ns'] or timestamps['latency_ns'] != timestamps['submit_ns'] - timestamps['dispatch_ns']:
-                raise RuntimeError('input did not precede the submitted Metal frame')
+            validate_gui_evidence(evidence, identities, (output / 'gate.log').read_text(), order)
+            result['canonical_order_verified'] = True
             result['gui_continuity_verified'] = True
         except Exception as error:
             result['error'] = str(error)

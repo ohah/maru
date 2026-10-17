@@ -3473,6 +3473,10 @@ pub const RemoteRuntime = struct {
                 ),
                 .legacy => process_seal_service.fatalIntegrity(.proof_loss),
             }
+            // Transport failure latches the old surface exited. Only publication of a
+            // caught-up, promoted controller proves it live again; otherwise ordinary
+            // SurfaceRuntime input/resize keeps rejecting this healthy attachment.
+            runtime.surface.process_state = .running;
             if (retain_shared_client) {
                 runtime.generation_owner.reclaimRetiringGenerationRetainingClientAtTickEnd(adapter) catch
                     process_seal_service.fatalIntegrity(.proof_loss);

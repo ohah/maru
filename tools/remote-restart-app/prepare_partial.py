@@ -12,19 +12,24 @@ from pathlib import Path
 import subprocess
 
 from prepare import replace_once
+from partial_order import configure_adoption_order
 
 
-def write_manifest(repo, snapshot, optimize, nonvisual_diagnostic):
+def write_manifest(repo, snapshot, optimize, nonvisual_diagnostic, adoption_order="target-first"):
     """Fingerprint the finished source copy and signed binaries, including after a rebuild."""
     names = ['src/platform/macos/session_host/remote_term_backend.zig',
              'src/platform/macos/session_host/client_slot.zig',
              'src/platform/macos/session_host/framing.zig',
+             'src/platform/macos/session_host/client.zig',
+             'src/platform/macos/session_host/reconnect_reducer.zig',
+             'src/platform/macos/session_host/host_reconnect_runtime_transaction.zig',
+             'tools/remote-restart-app/partial_order.py',
              'src/platform/macos/session_host/remote_runtime.zig',
              'src/platform/macos/session_host/cr6c_appkit_smoke.zig',
              'src/platform/macos/MaruAppHost.swift', 'src/platform/macos/app_session.zig',
              'build.zig', 'tools/remote-restart-app/partial_target.py']
     manifest = {'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip(),
-                'schema': 'maru.partial-gui-source-copy.v1', 'build_mode': optimize,
+                'schema': 'maru.partial-gui-source-copy.v2', 'adoption_order': adoption_order, 'build_mode': optimize,
                 'nonvisual_diagnostic': nonvisual_diagnostic,
                 'source_hashes': {n: hashlib.sha256((snapshot / n).read_bytes()).hexdigest() for n in names},
                 'binary_hashes': {n: hashlib.sha256((snapshot / 'zig-out/Maru.app/Contents/MacOS' / n).read_bytes()).hexdigest()
@@ -38,6 +43,7 @@ def main():
     ap.add_argument('--dependency-root', required=True)
     ap.add_argument('--optimize', choices=['Debug', 'ReleaseFast'], default='ReleaseFast')
     ap.add_argument('--nonvisual-diagnostic', action='store_true')
+    ap.add_argument('--adoption-order', choices=['target-first', 'healthy-first'], default='target-first')
     args = ap.parse_args()
     repo = Path(__file__).resolve().parents[2]
     snapshot = Path(args.snapshot).resolve()
@@ -125,6 +131,13 @@ while True: time.sleep(1)
     edit(harness, 'sibling_observer_zero = std.mem.indexOf(u8, sibling_live, "\\"observer_count\\":0") != null;',
          'sibling_observer_zero = std.mem.indexOf(u8, sibling_live, "\\"error\\"") != null;')
 
+    # Read-only resize diagnostics distinguish a missed AppKit resize from a backend rejection.
+    edit(backend, '        return rr.resizeWithCell(size.cols, size.rows, cell.width, cell.height);',
+         '''        rr.resizeWithCell(size.cols, size.rows, cell.width, cell.height) catch |err| {
+            std.debug.print("PARTIAL_GUI_RESIZE runtime={s} cols={d} rows={d} error={s}\\n", .{ rr.runtimeIdHex(), size.cols, size.rows, @errorName(err) });
+            return err;
+        };
+        std.debug.print("PARTIAL_GUI_RESIZE runtime={s} cols={d} rows={d} error=none\\n", .{ rr.runtimeIdHex(), size.cols, size.rows });''')
     swift = 'src/platform/macos/MaruAppHost.swift'
     edit(swift, '                guard armSessionHostAutoReconnectDisconnect() else {',
          '                guard window.firstResponder === view, armSessionHostAutoReconnectDisconnect() else {')
@@ -138,6 +151,9 @@ while True: time.sleep(1)
     edit(swift, '''            guard window.makeFirstResponder(view),
                   sendSessionHostAutoReconnectInput(view: view, window: window) else {''', '''            guard window.firstResponder === view,
                   sendSessionHostAutoReconnectInput(view: view, window: window) else {''')
+    edit(swift, '        stage=\(sessionHostRecoverySmokeStage)',
+         '        cols=\(probe.cols) rows=\(probe.rows) before_cols=\(sessionHostAutoReconnectColsBefore) before_rows=\(sessionHostAutoReconnectRowsBefore)\n        stage=\(sessionHostRecoverySmokeStage)')
+    configure_adoption_order(edit, args.adoption_order)
     if args.nonvisual_diagnostic:
         # Keep capture observations false. Only this separately fingerprinted source copy may
         # advance its diagnostic driver without a drawable; it cannot pass the GUI validator.
@@ -170,7 +186,7 @@ while True: time.sleep(1)
          '        session_host_cr6e_c3c_appkit_step.dependOn(&run_session_host_cr6e_c3c.step);')
     # Build only: the actor must be running before the GUI gate is launched.
     subprocess.run(['zig', 'build', 'macos-app-bundle', '-Doptimize=' + args.optimize, '-j8'], cwd=snapshot, check=True)
-    write_manifest(repo, snapshot, args.optimize, args.nonvisual_diagnostic)
+    write_manifest(repo, snapshot, args.optimize, args.nonvisual_diagnostic, args.adoption_order)
 
 
 if __name__ == '__main__':

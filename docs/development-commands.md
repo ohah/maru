@@ -17,6 +17,11 @@
   `normal_quit_verified`와 `validation_scope`를 함께 읽는다. GUI 검증은
   `--nonvisual-diagnostic` 없이 별도 복사본을 준비하여 잠금 해제 상태에서 실행한다.
   기존 결과를 보존한 재실행만 `--reuse-completed-fixture`를 명시한다.
+  반대 채택 순서는 준비 명령에 `--adoption-order healthy-first`를 추가한다(기본 `target-first`).
+  v2 manifest와 실제 canonical row/job/runtime 관측으로 순서를 확인한다.
+  `python3 tools/remote-restart-app/test_partial_order.py`는 합성 계약 검증이고,
+  `python3 tools/remote-restart-app/test_partial_oracle.py --artifact <성공한 실제 결과 디렉터리>`는
+  그 실제 기록에서 publication 순서·입력·resize·copy·frame·cleanup 누락 변이를 거부하는지 검사한다.
 
 ## 에디터 CLI
 

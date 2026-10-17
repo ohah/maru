@@ -12,19 +12,21 @@ probe = importlib.util.module_from_spec(spec); spec.loader.exec_module(probe)
 text = (root / 'seed/app.stderr.txt').read_text()
 runtime = json.loads((root / 'result.json').read_text())['runtime_id']
 probe.verify_runtime_ended_gui(text, runtime)
-rejection = re.findall(r'^REMOTE_ENDED_JOB host=[0-9a-f]{32} state=candidate_rejected$', text, re.M)[0]
+ended = re.findall(r'^REMOTE_ENDED_JOB host=[0-9a-f]{32} state=candidate_ended$', text, re.M)[0]
 mutations = {
     'foreign_runtime': text.replace('runtime=' + runtime, 'runtime=' + 'f' * 32),
     'foreign_host': re.sub(r'(REMOTE_ENDED_TERMINAL host=)[0-9a-f]{32}', r'\g<1>' + 'f' * 32, text),
-    'no_rejection': text.replace('state=candidate_rejected', 'state=candidate_staged'),
+    'no_ended_confirmation': text.replace('state=candidate_ended', 'state=candidate_staged'),
     'no_terminal': text.replace('REMOTE_ENDED_TERMINAL', 'UNRELATED_TERMINAL'),
     'input_open': text.replace('published_new=0', 'published_new=1'),
-    'no_retry': text.replace('retry_reserved=1', 'retry_reserved=0'),
+    'unexpected_retry': text.replace('retry_reserved=0', 'retry_reserved=1'),
+    'not_ended': text.replace('ended=1', 'ended=0'),
+    'old_retained': text.replace('state=candidate_ended', 'state=candidate_rejected').replace('frozen=0 ended=1 retry_reserved=0', 'frozen=1 ended=0 retry_reserved=1'),
     'no_gui_frame': text.replace('REMOTE_ENDED_GUI visible=true', 'REMOTE_ENDED_GUI visible=false'),
     'exit_86': text + '\nfatal integrity: reason=incident_authority\n',
     'unhandled_fault': text + '\nREMOTE_ENDED_FAULT_ERROR result=-1\n',
     'embedded_marker': re.sub(r'^REMOTE_ENDED_GUI visible=true$', 'payload REMOTE_ENDED_GUI visible=true', text, flags=re.M),
-    'rejection_before_connect': rejection + '\n' + text.replace(rejection + '\n', ''),
+    'ended_before_connect': ended + '\n' + text.replace(ended + '\n', ''),
 }
 for name, mutated in mutations.items():
     try: probe.verify_runtime_ended_gui(mutated, runtime)

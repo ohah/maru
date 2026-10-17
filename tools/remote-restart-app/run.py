@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Actual owned GUI quit/restore; invoke inside the existing private SSH carrier."""
 import hashlib, json, os, re, shlex, signal, subprocess, sys, time, uuid
+from collections import Counter
 from pathlib import Path
 
 def settle_cleanup_actions(actions):
@@ -17,6 +18,16 @@ def finish_probe(actions, completed_result, artifacts):
         completed_result['cleanup_verified'] = True
         (artifacts / 'result.json').write_text(json.dumps(completed_result, indent=2) + '\n')
 
+def providers_completed(remote, child):
+    """A done marker cannot hide a failed provider or an exited GUI."""
+    failure = remote / 'provider-failure.json'
+    if failure.exists():
+        record = json.loads(failure.read_text())
+        raise RuntimeError('real provider failed: ' + record['provider'] + ' exit=' + str(record['exit_code']))
+    if child.poll() is not None:
+        raise RuntimeError('GUI exited before real providers completed')
+    return (remote / 'provider-done').exists()
+
 def verify_provider_gui(text, provider):
     """Require the same real session in live hooks, the product badge and the sealed store."""
     sessions = re.findall(r'PROVIDER_APPLIED provider=' + provider + r' event=stop session=(\S+) replay=false', text)
@@ -30,6 +41,22 @@ def verify_provider_gui(text, provider):
     if not any(re.search(r'PROVIDER_CAPTURE session=' + re.escape(sid) + r' capture=[1-9]\d* remote=true shell_calls=[1-9]', text) for sid in sessions):
         raise RuntimeError(provider + ' remote shell turn was not sealed')
     return set(sessions)
+
+def verify_provider_restore(seed, restored, providers):
+    """Match actual provider identities and event multiplicities, not aggregate replay counts."""
+    pattern = r'^PROVIDER_APPLIED provider=(\S+) event=(\S+) session=(\S+) replay=(\S+) state=(\S+)$'
+    sessions = {name: verify_provider_gui(seed, name) for name in providers}
+    def events(text, replay):
+        result = Counter()
+        for name, event, sid, actual_replay, state in re.findall(pattern, text, re.M):
+            if name not in sessions or sid not in sessions[name]: continue
+            if actual_replay != replay:
+                raise RuntimeError('provider restore has wrong replay provenance')
+            result[name, event, sid, state] += 1
+        return result
+    expected = events(seed, 'false')
+    if events(restored, 'true') != expected:
+        raise RuntimeError('provider restore lost, duplicated or changed actual session events')
 
 def verify_runtime_ended_gui(text, runtime_id, expected_pid=None):
     if not re.fullmatch(r'[0-9a-f]{32}', runtime_id): raise RuntimeError('invalid runtime identity')
@@ -67,6 +94,7 @@ def verify_runtime_ended_gui(text, runtime_id, expected_pid=None):
         raise RuntimeError('runtime-ended path reported a fatal or unhandled fault')
 
 def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts, providers=False, runtime_ended=False):
+    provider_names = ["claude", "codex"] if providers is True else (providers or [])
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'shared-restore-app'))
     from gui_launch import GUIApp, process_identity
     app = Path(app).resolve()
@@ -180,13 +208,13 @@ def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts, 
             return
         if providers:
             (remote / 'provider-start').touch()
-            wait_for(lambda: (remote / 'provider-done').exists(), 'real providers did not complete', 140)
+            wait_for(lambda: providers_completed(remote, seed), 'real providers did not complete', 140)
             wait_for(lambda: all('PROVIDER_APPLIED provider=' + name + ' event=stop ' in
-                (seed_output / 'app.stderr.txt').read_text(errors='replace') for name in ['claude', 'codex']),
+                (seed_output / 'app.stderr.txt').read_text(errors='replace') for name in provider_names),
                 'provider exit preceded missing GUI Stop')
             provider_text = (seed_output / 'app.stderr.txt').read_text(errors='replace')
             provider_sessions = {}
-            for provider in ['claude', 'codex']:
+            for provider in provider_names:
                 record = json.loads((remote / ('provider-' + provider + '.json')).read_text())
                 (artifacts / ('provider-' + provider + '.json')).write_text(json.dumps(record) + '\n')
                 provider_sessions[provider] = verify_provider_gui(provider_text, provider)
@@ -205,14 +233,14 @@ def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts, 
                 row = json.loads(line); frame = row.get('frame', {})
                 if frame.get('nonce') != owner['nonce'] or 'line' not in frame: continue
                 name, payload = frame['line'].split('\t', 1); event = json.loads(payload)
-                if name not in ['claude', 'codex']: continue
+                if name not in provider_sessions: continue
                 sid = event.get('session_id', '')
                 if sid in provider_sessions[name]:
                     tool_input = event.get('tool_input') or {}
                     command = tool_input.get('command', tool_input.get('cmd', '')) if isinstance(tool_input, dict) else ''
                     source_events.append({'provider': name, 'session_id': sid, 'format': row['format'],
                         'event': event['hook_event_name'], 'command': command})
-            for name in ['claude', 'codex']:
+            for name in provider_names:
                 events = {e['event'] for e in source_events if e['provider'] == name and e['format'] == 2}
                 if not {'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop'}.issubset(events):
                     raise RuntimeError(name + ' actual provider file oracle lacks expected hooks: ' + repr(events))
@@ -220,7 +248,7 @@ def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts, 
                 if commands != ['pwd']: raise RuntimeError(name + ' did not execute exactly one read-only pwd tool')
             (artifacts / 'provider-hook-oracle.json').write_text(json.dumps(source_events, indent=2) + '\n')
             replay_expected = provider_text.count('REMOTE_RESTART_APPLIED replay=') + 8
-            (artifacts / 'provider-gui.json').write_text(json.dumps({'actual_providers': ['claude', 'codex'], 'live_reader': True, 'remote_sealed_capture': True}) + '\n')
+            (artifacts / 'provider-gui.json').write_text(json.dumps({'actual_providers': provider_names, 'live_reader': True, 'remote_sealed_capture': True}) + '\n')
         quit_phase(seed, seed_output)
         if not all(process_identity(pid) == identity for pid, identity in owned_hosts.items()):
             raise RuntimeError('persistent host did not survive app quit')
@@ -232,6 +260,9 @@ def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts, 
             raise RuntimeError('expected exact detached runtime after normal Quit')
         emit_hooks(remote, 'gui-offline', owner['nonce'])
         restored, restore_output, second = run_phase('restore')
+        if provider_names:
+            verify_provider_restore(provider_text,
+                (restore_output / 'app.stderr.txt').read_text(errors='replace'), provider_names)
         owner_token = first[3].rsplit('_', 1)[-1]
         if len(owner_token) != 32 or first[3] != second[3]:
             raise RuntimeError('restored runtime owner changed')
@@ -247,11 +278,12 @@ def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts, 
             past_notice=False, live_notice=True, actual_windows=True, os_banner_verified=False)
     finally:
         def save_diagnostics():
-            for path in list((host_root / 'session-host').glob('*.log')) + [root / 'trace.jsonl', root / 'sshd.log', remote / 'gui-owner.json', home / 'Library/Application Support/maru/workspace.v1']:
+            for path in list((host_root / 'session-host').glob('*.log')) + list(remote.glob('provider-*')) + [root / 'trace.jsonl', root / 'sshd.log', remote / 'gui-owner.json', home / 'Library/Application Support/maru/workspace.v1']:
                 if path.exists():
                     with path.open('rb') as stream:
                         stream.seek(max(0, path.stat().st_size - 131072))
                         (artifacts / path.name).write_bytes(stream.read(131072))
+                    (artifacts / path.name).chmod(0o600)
         def release_worker():
             (remote / 'gui-release').touch(); (remote / 'gui-hold').unlink(missing_ok=True)
         def close_child(child):

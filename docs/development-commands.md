@@ -134,6 +134,13 @@ sshd로 실제 SSH를 실행해 기존/새 프로세스, 환경 전달 차단, �
 합성 provider 훅의 파일·혼합 wire를 대조한다. 사용자 설정·인증 정보는 수정하지 않는다.
 기본 하네스는 합성 payload를 사용한다. `--providers`는 설치된 Claude/Codex의 읽기 전용 모델 턴을 명시적으로 실행하고 버전을 기록한다. 실제 macOS 창에서는 `tools/remote-restart-app/prepare.py`로 만든 bundle의 CLI와 앱 실행 파일을 `--providers --gui-providers --gui-app <maru-macos-app> --gui-output <새 디렉터리>`에 전달한다. GUI 준비 뒤 실제 provider를 실행하고 원본 훅·session ID·실행 배지·원격 턴 봉인을 대조한다. `python3 tools/remote-restart-app/test_oracle.py --artifact <GUI artifact>`는 그 실제 trace에서 증거를 제거하거나 바꿔 false-positive를 검사한다. `--frames-output`은 실제 SSH wire를 로컬 전용 파일에 저장한다. `zig build test-remote-agent-log-profile -Dremote-native-frames=<private file>`은 그 wire를 제품 GUI의 배지·턴 캡처 경로에 재생한다.
 혼합 CLI는 `maru agent-events --stdio --dir=<home>/.cache/maru --log-format=mixed`다.
+`--providers --provider codex`는 실제 모델 턴을 Codex로 한정한다(생략하면 Claude·Codex 모두).
+GUI 증거에도 실제 실행 대상만 기록하며 제외한 provider의 완료를 주장하지 않는다.
+이 부분 실행의 변조 검사는 `test_oracle.py --artifact <GUI artifact> --provider codex`로 한정한다.
+provider 실패 stdout/stderr는 private GUI 증거 디렉터리에 보존하고 실패 종료 코드 또는
+GUI 조기 종료는 완료 표식을 기다리지 않고 거부한다.
+`python3 tools/remote-restart-app/test_provider_contract.py`는 완료 표식이 있어도
+두 provider의 실패와 GUI의 정상·비정상·신호 종료를 거부하는지 검사한다.
 `--gui-runtime-ended --gui-app <maru-macos-app> --gui-output <새 디렉터리>`는 같은
 복사본 앱에서 실제 연결 단절 후 observer 준비를 잠깐 기다리게 하고, CLI로 runtime을
 종료하여 `candidate_ended`·`ended=1/retry_reserved=0` 정산·시작 GUI 화면·마지막 창의 정상 자동 종료를 검사한다. `--gui-providers`와 동시에 쓰지 않는다.

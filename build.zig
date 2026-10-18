@@ -5718,6 +5718,14 @@ pub fn build(b: *std.Build) void {
     run_document_runtime_tests.setCwd(b.path("."));
     run_document_runtime_tests.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-document-runtime", "Run editor document registration and release judges").dependOn(&run_document_runtime_tests.step);
+    const line_undo_tests = addProjectTest(b, .{
+        .root_module = editor_tests.root_module,
+        .filters = &.{ ".test.LN", ".test.CMT" },
+    });
+    const run_line_undo_tests = b.addRunArtifact(line_undo_tests);
+    run_line_undo_tests.setCwd(b.path("."));
+    run_line_undo_tests.addArg("--maru-expect-tests=32");
+    b.step("test-editor-line-undo", "Run line operations, caret placement and Undo preparation judges").dependOn(&run_line_undo_tests.step);
     const conflict_choice_tests = addProjectTest(b, .{
         .root_module = editor_tests.root_module,
         .filters = &.{".test.CFL"},

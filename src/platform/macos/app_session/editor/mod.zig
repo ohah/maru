@@ -66292,7 +66292,7 @@ const MixedWorkerOptions = struct { last_index: usize = 1, occupied: []const mar
 /// synchronized. The detached worker and caller share the allocator, so serialize every vtable
 /// operation while this one test injects failures across both sides of the handoff.
 const SynchronizedAllocator = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     backing: std.mem.Allocator,
 
     fn allocator(self: *SynchronizedAllocator) std.mem.Allocator {
@@ -66301,29 +66301,29 @@ const SynchronizedAllocator = struct {
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, return_address: usize) ?[*]u8 {
         const self: *SynchronizedAllocator = @ptrCast(@alignCast(ctx));
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(testing.io);
+        defer self.mutex.unlock(testing.io);
         return self.backing.rawAlloc(len, alignment, return_address);
     }
 
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) bool {
         const self: *SynchronizedAllocator = @ptrCast(@alignCast(ctx));
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(testing.io);
+        defer self.mutex.unlock(testing.io);
         return self.backing.rawResize(memory, alignment, new_len, return_address);
     }
 
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) ?[*]u8 {
         const self: *SynchronizedAllocator = @ptrCast(@alignCast(ctx));
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(testing.io);
+        defer self.mutex.unlock(testing.io);
         return self.backing.rawRemap(memory, alignment, new_len, return_address);
     }
 
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, return_address: usize) void {
         const self: *SynchronizedAllocator = @ptrCast(@alignCast(ctx));
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(testing.io);
+        defer self.mutex.unlock(testing.io);
         self.backing.rawFree(memory, alignment, return_address);
     }
 };

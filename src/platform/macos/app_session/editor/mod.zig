@@ -9485,6 +9485,8 @@ pub fn pasteText(self: *AppSession, term: *Term, clipboard: []const u8) bool {
     const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only) return false;
     if (clipboard.len == 0) return false;
+    // 붙여넣기 성공은 Undo 하나를 보장하므로 본문보다 이력 공간을 먼저 준비한다.
+    if (!prepareUndoSlot(self, term)) return false;
 
     // **무엇을 어디에 넣을지는 L2 `edit_ops.planPaste` 가 정한다**(§3.4 — 조각 분배는 문서 순서(결함 12), 줄 단위는 caret
     // 줄의 머리, 겹치면 뒤 것을 버린다(PASTE7), 버린 커서는 caret 을 안 받는다(결함 13)).
@@ -40008,6 +40010,96 @@ test "PASTE10 줄 단위 붙여넣기에서 버린 커서는 제자리를 지키
     // 넣은 커서는 넣은 글 뒤(12 · 23), 버린 커서는 편집을 따라 밀린 제자리(8 → 14).
     var buf: [4]usize = undefined;
     try testing.expectEqualSlices(usize, &.{ 12, 14, 23 }, caretsInOrderForTest(term, &buf));
+}
+
+test "PASTE11 붙여넣기의 준비 실패는 본문·선택·기존 Undo와 Redo를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    for (0..3) |operation| {
+        for (0..3) |mode| {
+            var complete = false;
+            for (0..256) |failure| {
+                var fx = try PaneFixture.init(a);
+                defer fx.deinit(a);
+                const term = try undoFixture(&fx, a, "paste-undo.txt", "aa bb cc\n");
+                term.rt.editor_selection = editor_selection.Selection.at(9);
+                try testing.expect(insertText(fx.session, term, "tail"));
+                breakUndoGroup(term);
+                try testing.expect(insertText(fx.session, term, "redo"));
+                try testing.expect(undoEdit(fx.session, term));
+                if (operation == 1) {
+                    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 2);
+                    term.rt.editor_extra_selections = try a.dupe(editor_selection.Selection, &.{editor_selection.Selection.fromPoints(3, 5)});
+                    try testing.expect(copySelection(fx.session));
+                    clearExtraSelections(fx.session, term);
+                } else if (operation == 2) {
+                    term.rt.editor_selection = editor_selection.Selection.at(0);
+                    try testing.expect(copySelection(fx.session));
+                }
+                // primary를 문서상 뒤에 두어 분배 순서를 잘못 잡는 구현을 구분한다.
+                term.rt.editor_selection = editor_selection.Selection.at(6);
+                term.rt.editor_extra_selections = try a.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(0)});
+                const clipboard: []const u8 = if (operation == 0) "XYZ" else fx.session.chrome_clipboard_write;
+                const peer = try openSharedViewInActivePane(fx.session, term);
+                peer.rt.editor_selection = editor_selection.Selection.at(1);
+                const state = term.rt.editorDocument();
+                if (mode == 1) state.history.next_id = std.math.maxInt(u64);
+                if (mode == 2) state.opened.?.file.read_only = true;
+                const before = try a.dupe(u8, state.opened.?.file.content);
+                defer a.free(before);
+                const selection = term.rt.editor_selection;
+                const extra_before = try a.dupe(editor_selection.Selection, term.rt.editor_extra_selections);
+                defer a.free(extra_before);
+                const revision = state.opened.?.file.revision;
+                state.history.undo = try a.realloc(state.history.undo, state.history.undo_len);
+                const undo_len = state.history.undo_len;
+                const redo_len = state.history.redo_len;
+                const next_id = state.history.next_id;
+                var failing = testing.FailingAllocator.init(a, .{ .fail_index = if (mode != 0) std.math.maxInt(usize) else failure, .resize_fail_index = 0 });
+                fx.session.allocator = failing.allocator();
+                state.opened.?.file.allocator = failing.allocator();
+                state.opened.?.file.buf.allocator = failing.allocator();
+                const applied = pasteText(fx.session, term, clipboard);
+                fx.session.allocator = a;
+                state.opened.?.file.allocator = a;
+                state.opened.?.file.buf.allocator = a;
+                if (!applied) {
+                    try testing.expectEqualStrings(before, state.opened.?.file.content);
+                    try testing.expectEqualDeep(selection, term.rt.editor_selection);
+                    try testing.expectEqualDeep(extra_before, term.rt.editor_extra_selections);
+                    try testing.expectEqual(revision, state.opened.?.file.revision);
+                    try testing.expectEqual(undo_len, state.history.undo_len);
+                    try testing.expectEqual(redo_len, state.history.redo_len);
+                    try testing.expectEqual(next_id, state.history.next_id);
+                    try testing.expectEqual(@as(usize, 1), peer.rt.editor_selection.?.focus);
+                } else {
+                    try testing.expectEqual(@as(usize, 0), mode);
+                    try testing.expectEqual(undo_len + 1, state.history.undo_len);
+                    try testing.expectEqual(@as(usize, 0), state.history.redo_len);
+                    const expected: []const u8 = switch (operation) {
+                        0 => "XYZaa bb XYZcc\ntail",
+                        1 => "aaaa bb bbcc\ntail",
+                        2 => "aa bb cc\naa bb cc\ntail",
+                        else => unreachable,
+                    };
+                    try testing.expectEqualStrings(expected, state.opened.?.file.content);
+                    const after = try a.dupe(u8, state.opened.?.file.content);
+                    defer a.free(after);
+                    try testing.expect(!std.mem.eql(u8, before, after));
+                    try testing.expect(undoEdit(fx.session, peer));
+                    try testing.expectEqualStrings(before, state.opened.?.file.content);
+                    try testing.expect(redoEdit(fx.session, term));
+                    try testing.expectEqualStrings(after, state.opened.?.file.content);
+                }
+                if (!failing.has_induced_failure) {
+                    try testing.expectEqual(mode == 0, applied);
+                    complete = true;
+                    break;
+                }
+            }
+            try testing.expect(complete);
+        }
+    }
 }
 
 test "PASTE5 읽기 전용·비교 뷰는 붙여넣기를 거절한다 (§3.5·§4.1g)" {

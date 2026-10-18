@@ -14848,6 +14848,7 @@ pub const AppSession = struct {
     }
 
     pub fn focusChanged(self: *AppSession, gained: bool) void {
+        if (gained) self.resetCursorBlink();
         self.window_focused = gained; // OSC 전면 표시와 커서 렌더에서 포커스 창의 활성 탭만 "보고 있는" 것으로 친다.
         if (!gained) {
             self.cancelPointerGesture();

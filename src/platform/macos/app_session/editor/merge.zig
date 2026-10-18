@@ -566,6 +566,7 @@ pub fn placePaneCaret(self: *AppSession, term: *Term, x_px: f64, y_px: f64) bool
         self.allocator.free(term.rt.editor_extra_selections);
         term.rt.editor_extra_selections = &.{};
     }
+    editor_ops.noteCaretActivity(self, term);
     self.metal_dirty = true;
     return true;
 }
@@ -645,6 +646,7 @@ pub fn paneMove(self: *AppSession, term: *Term, how: editor_ops.Motion, extend: 
     c.sel = sel;
     scrollResultForPaneCaret(term, side, next.row);
     revealPaneCaretColumn(self, term, side, texts[@min(next.row, texts.len - 1)], next.byte);
+    editor_ops.noteCaretActivity(self, term);
     self.metal_dirty = true;
     return true;
 }

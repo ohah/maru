@@ -947,6 +947,7 @@ GPU 로 그리는 편집기의 가장 가까운 선례(VS Code 실험 GPU 렌더
 | 22 | `applyLineEdit` | 줄 조작 본문 반영 뒤 Undo 확장 실패로 기존 이력이 사라진다 | 기존 Undo/Redo가 있는 공유 문서의 일곱 줄 조작에 순차 할당 실패 주입 | LNOOM1의 이력·본문·선택·ID 고갈·읽기 전용·뷰 간 Undo/Redo 검사 |
 | 23 | `pasteText` | 붙여넣기 본문 반영 뒤 Undo 확장 실패로 기존 이력이 사라진다 | 기존 Undo/Redo·뒤쪽 primary·공유 뷰에서 일반/조각/줄 붙여넣기에 할당 실패 주입 | PASTE11의 본문·전체 선택·이력 보존과 ID 고갈·읽기 전용·뷰 간 Undo/Redo 검사 |
 | 24 | `deleteBy` | 삭제 본문 반영 뒤 Undo 확장 실패로 기존 이력이 사라진다 | 기존 Undo/Redo·다중 커서·공유 뷰에서 여섯 방향/단위 삭제에 할당 실패 주입 | DEL7의 전체 선택·이력·본문 보존과 ID 고갈·읽기 전용·뷰 간 Undo/Redo 검사 |
+| 26 | 커서 활동 배선 | 숨겨진 위상에서 커서를 이동해도 즉시 표시되지 않는다 | CBL1로 방향키 이동 직후 `blink_visible`이 false인 상태 재현 | [커서 활동 조사와 검증](editor-caret-activity.md)의 CBL1~8 및 실제 앱 Metal 캡처 |
 
 결함 16은 수정 전 `expected 2, found 0`으로 재현했다. 다시 읽기는 기존
 `applyEditAsOneWithUndo`를 사용해 본문을 바꾸기 전에 Undo 공간을 확보한다.

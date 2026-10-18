@@ -433,6 +433,7 @@ pub fn focusWorkspaceInput(self: *AppSession) void {
     agent_activity_ops.releaseKeyFocus(self);
     self.agent_session_dock_interaction.capture = null;
     self.focus_owner = .workspace;
+    if (self.editorCaretBlinks()) self.resetCursorBlink();
     self.workspace_focus_pending = false;
     self.file_tree_focus_pending = false;
     self.file_tree_restore_surface_pending = null;

@@ -162,6 +162,7 @@ pub fn editorImeReplacement(self: *AppSession, start_utf16: usize, len_utf16: us
         }
     }
     editor_ops.breakUndoGroup(term);
+    editor_ops.noteCaretActivity(self, term);
     self.metal_dirty = true;
     return true;
 }
@@ -310,6 +311,7 @@ pub fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
         // 편집기로 가고 있었으므로(`sendCommittedText`) 조합만 갈 곳이 없었던 것이다.
         if (editorTermBySurfaceId(self, target_id)) |editor_term| {
             editor_ops.setEditorPreedit(self, editor_term, bytes);
+            editor_ops.noteCaretActivity(self, editor_term);
             self.metal_dirty = true; // 편집기는 출력이 없어 아무도 안 깨운다
             if (bytes.len == 0 and !self.ime_active) self.ime_terminal_target_id = null;
             return;

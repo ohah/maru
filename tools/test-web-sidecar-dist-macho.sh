@@ -197,10 +197,10 @@ esc_case dot "/System/./Volumes/Data$root/libvol.dylib" "시스템 밖으로 빠
 esc_case slashes "/System//Volumes/Data$root/libvol.dylib" "시스템 밖으로 빠지는 경로 /System//Volumes"
 esc_case upper "/System/VOLUMES/Data$root/libvol.dylib" "시스템 밖 경로 라이브러리 /System/VOLUMES"
 
-# ⑭ zig 가 만든 x86_64 host — 서명이 없고 머리 여유가 8 바이트다. 서명을 붙이면 코드를 덮어쓰므로 멈춰야 한다(5 차 실측:
-#    서명 뒤 뜨자마자 SIGSEGV).
+# ⑭ zig 가 만든 x86_64 host — Zig 0.17 의 기본 Mach-O 머리 여유에 기대지 않고 정확히 8 바이트로 고정한다.
+#    서명을 붙이면 코드를 덮어쓰므로 멈춰야 한다(5 차 실측: 서명 뒤 뜨자마자 SIGSEGV).
 printf 'pub fn main() u8 {\n    return 7;\n}\n' > "$root/seven.zig"
-(cd "$root" && "$zig" build-exe seven.zig -target x86_64-macos -O ReleaseFast -femit-bin=seven-nopad)
+(cd "$root" && "$zig" build-exe seven.zig -target x86_64-macos -O ReleaseFast -headerpad 8 -femit-bin=seven-nopad)
 (cd "$root" && "$zig" build-exe seven.zig -target x86_64-macos -O ReleaseFast -headerpad_max_install_names -femit-bin=seven-pad)
 make_dist "$root/nopad"
 cp "$root/seven-nopad" "$root/nopad/maru-web-host"

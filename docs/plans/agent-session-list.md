@@ -45,6 +45,19 @@ GUI launcher의 정지는 테스트 HOME을 Documents 아래에 놓아 생긴 ma
 `not_started` 요약만 보고 시작 실패로 오인하지 않게 해야 한다. 이번 조사는 제품 정책이나
 TCC 설정을 바꾸지 않았으며 원본 로그·스택·원인별 대조군은 저장소 밖에 보존했다.
 
+### 검증 환경·캡처 진단 보완
+
+구현: archive smoke의 private HOME·번들·cwd·summary·캡처를 `/tmp`의 실행별
+디렉터리에 두고 종료 후 부모 shell이 기존 `zig-out/maru-agent-session-archive-smoke`로
+증거를 반출한다. GUI 실행은 같은 격리 경로를 쓰는 opt-in으로 제공하며 서명과 TCC 설정을
+바꾸지 않는다. 실패 시에도 로그·부분 캡처를 보존하고 실패 상태를 성공으로 바꾸지 않는다.
+공유 PPM writer는 최초 실패 단계와 OS 오류를 보존한다. 정상 RGB·stride 대조와
+open/header/pixels/close 실패, 용량 부족 및 하네스 실패 반출을 적대적으로 검증한다.
+native·controlled-child 판정과 최초 오류/close 실패/캡처 오류/private HOME 음성 대조를
+통과했다. 별도 소용량 볼륨은 `stage=pixels errno=28`로 실패하고 공간 복구 뒤 전체 PPM을
+기록했다. 실제 AppKit 재검증은 화면 잠금으로 대기 중이며 native 성공과 구분한다.
+
+
 B1-button 이관 순서와 AS3·AS4 슬라이스의 구현 순서·완료 조건이다. 계약은 [에이전트 세션 기록 도크](../agent-session-list.md)와 그 절별 소유 문서가 가진다.
 
 > **절 번호는 파일을 넘어 이어진다.** 본문이 `§2.1.3`처럼 절만 가리키면 아래에서 소유 파일을 찾는다 — §1~§2·§2.3·§3~§5·§7~§8 [agent-session-list.md](../agent-session-list.md) · §2.1~§2.1.3 [카드 레이아웃](../agent-session-list-layout.md) · §2.2 [선택·확장·geometry](../agent-session-list-interaction.md) · §2.1.4·§6 이 문서

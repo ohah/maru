@@ -4,6 +4,13 @@
 
 이 문서는 Maru의 각 영역이 무엇으로 검증되는지 추적하기 위한 표다. 목표는 "나중에 구현하자"가 아니라, 아직 구현되지 않은 영역도 어떤 자동 테스트와 산출물로 증명할지 먼저 정해 두는 것이다.
 
+### Archive 검증 환경·캡처 진단
+
+| 영역 | 상태 | 현재 증거 | 남은 gate |
+|---|---|---|---|
+| PPM 최초 오류 보존 | 구현·native 검증 | `sh tools/test-macos-capture-diagnostics.sh`: RGB·stride, open/header/pixels/close와 errno 없는 실패 대조. 별도 소용량 볼륨에서 ENOSPC 후 공간 복구 대조 | 실제 제품 앱의 최신 renderer를 포함한 GUI 재실행 |
+| Archive private 실행 경로·실패 반출 | 구현·controlled child 검증 | `python3 tools/test-macos-archive-harness.py`: 실제 서명된 controlled bundle의 private HOME·cwd·번들·summary·캡처, 실패 로그와 부분 파일 반출. GUI 소유권은 `tools/shared-restore-app/test_gui_launch.py` | opt-in GUI 전체 archive smoke는 잠금 해제 후 실행. controlled child를 실제 AppKit 성공으로 세지 않는다 |
+
 ### 프로젝트 검색
 
 | 영역 | 상태 | 현재 증거 | 남은 gate |

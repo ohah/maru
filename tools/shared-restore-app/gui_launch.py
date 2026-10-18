@@ -30,15 +30,24 @@ def process_identity(pid):
     return (uid, birth, str(Path(os.fsdecode(path.value)).resolve()))
 
 
-def stage_app(app):
+def stage_app(app, base=None):
     source = app.parents[2]
     digest = hashlib.sha256(app.read_bytes()).hexdigest()
-    base = Path.home()/'.cache/maru-shared-restore-app'
+    private_stage = base is not None
+    base = base if private_stage else Path.home()/'.cache/maru-shared-restore-app'
     base.mkdir(parents=True, exist_ok=True, mode=0o700)
     target = base/digest/source.name
     if not target.exists():
         target.parent.mkdir(mode=0o700, exist_ok=True)
-        shutil.copytree(source, target, symlinks=True)
+        if private_stage:
+            clone = subprocess.run(['cp', '-cR', str(source), str(target)], capture_output=True, timeout=60)
+            if clone.returncode:
+                # clonefile cannot cross volumes. Remove only our new incomplete destination.
+                if target.exists():
+                    shutil.rmtree(target)
+                shutil.copytree(source, target, symlinks=True)
+        else:
+            shutil.copytree(source, target, symlinks=True)
     binary = target/'Contents/MacOS'/app.name
     if hashlib.sha256(binary.read_bytes()).hexdigest() != digest:
         raise RuntimeError('staged app differs from supplied app')
@@ -48,9 +57,9 @@ def stage_app(app):
 
 class GUIApp:
     """Expose waiter status separately from the actual application's PID and lifetime."""
-    def __init__(self, app, env, output, expected_binaries=None):
+    def __init__(self, app, env, output, expected_binaries=None, stage_root=None):
         self.output = output
-        self.executable = stage_app(app)
+        self.executable = stage_app(app, stage_root)
         if expected_binaries is not None:
             # Validate the reused staged bundle as well as the original build artifact.
             for name, expected in expected_binaries.items():

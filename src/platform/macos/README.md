@@ -33,3 +33,10 @@ native single-glyph rasterizer(`coretext_smoke.m`)는 `CTLineDraw` 경로와 달
 `glyph_texture_smoke.zig`와 `glyph_texture_smoke.m`은 첫 CoreText bitmap -> Metal texture upload smoke다. 이 경로는 창을 만들지 않고 CoreText/CoreGraphics가 만든 CPU glyph bitmap을 Metal texture에 업로드한 뒤 blit readback으로 source bitmap과 같은지 확인한다. 계약 테스트는 `mise run test-macos-glyph-texture-smoke`, 실제 texture smoke는 `mise run macos-glyph-texture-smoke`다. 아직 shader sampling이나 실제 화면 glyph draw 검증은 아니다.
 
 `glyph_text_smoke.zig`와 `appkit_glyph_text_smoke.m`은 첫 glyph texture shader sampling smoke다. 이 경로는 실제 AppKit 창과 CAMetalLayer를 만들고, CoreText/CoreGraphics가 만든 CPU glyph bitmap을 Metal texture로 올린 뒤 fragment shader로 샘플링한다. source glyph의 ink 위치를 drawable 좌표로 변환해 blit readback하고, 선택한 모든 샘플이 clear 색이 아니며 배경과 luma가 충분히 대비되고(light/dark theme 모두) `glyph-text-frame.ppm` screenshot artifact가 쓰였을 때만 성공한다. 색은 하드코딩이 아니라 `config.resolveAppearance`로 검증된 값을 쓴다 — `theme.background`는 Metal clear color로, `theme.foreground`는 CoreText glyph fill로 적용하고, readback 예측자도 같은 resolved background를 기준으로 쓴다(`cursor` 색은 resolve해 `applied_cursor`로 기록만 하고 아직 그리지 않는다). 같은 smoke는 Zig 제품 경로의 `RendererState -> RenderFrame/GlyphQuadFrame/GlyphRasterFrame` probe 통계도 남기지만, 이 probe는 아직 실제 CoreText shaper가 아니라 `renderer_shaper=fake_font_backend` 경로이며 raster bytes도 fake rasterizer 계약이다. 계약 테스트는 `mise run test-macos-glyph-text-smoke`, 실제 화면 smoke는 `mise run macos-glyph-text-smoke`다. 아직 제품 terminal renderer, atlas packing, cell-grid text layout 검증은 아니다.
+
+PPM 저장 실패는 `maru_write_ppm_from_bgra8_buffer_with_error`가 최초 실패 단계
+(`argument`·`open`·`header`·`pixels`·`close`)와 OS 오류를 보존한다. renderer는
+`MARU_SCREENSHOT: PPM 쓰기 실패 stage=… errno=…`를 기록하고 기존처럼 exit 1로 끝난다.
+`fclose` 오류가 먼저 발생한 쓰기 오류를 덮지 않으며, errno 없는 실패는 EIO로 보고한다.
+정상 픽셀 출력과 공유 BOOL wrapper는 유지한다. 검증 명령은
+[개발 명령](../../../docs/development-commands.md)을 따른다.

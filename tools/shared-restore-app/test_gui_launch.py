@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
-from gui_launch import GUIApp, process_identity
+from gui_launch import GUIApp, process_identity, stage_app
 
 
 @unittest.skipUnless(sys.platform == 'darwin', 'libproc identity is macOS-specific')
@@ -101,6 +101,27 @@ class OwnershipTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'staged GUI binary differs.*maru'):
                 GUIApp(staged, {}, self.output, expected_binaries=expected)
             launch.assert_not_called()
+
+
+class StageTests(unittest.TestCase):
+    def test_private_stage_does_not_consult_home_and_clone_failure_falls_back(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as temp:
+            root = Path(temp)
+            app = root / 'source/Maru.app/Contents/MacOS/maru-macos-app'
+            app.parent.mkdir(parents=True)
+            app.write_bytes(b'controlled-byte-identical-app')
+            base = root / 'private-stage'
+            commands = []
+            def execute(command, **kwargs):
+                commands.append(command)
+                return subprocess.CompletedProcess(command, 1 if command[0] == 'cp' else 0)
+            with patch('gui_launch.Path.home', side_effect=AssertionError('protected HOME consulted')), \
+                 patch('gui_launch.subprocess.run', side_effect=execute):
+                binary = stage_app(app, base)
+            self.assertEqual(binary.read_bytes(), app.read_bytes())
+            self.assertTrue(binary.is_relative_to(base))
+            self.assertEqual([command[0] for command in commands], ['cp', 'codesign'])
+            self.assertEqual(base.stat().st_mode & 0o777, 0o700)
 
 
 if __name__ == '__main__': unittest.main()

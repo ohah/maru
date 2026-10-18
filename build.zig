@@ -2591,9 +2591,9 @@ pub fn build(b: *std.Build) void {
     });
     const run_notification_click_state_tests = b.addRunArtifact(notification_click_state_tests);
     run_notification_click_state_tests.setCwd(b.path("."));
-    // 10 behavior judges + 5 module-import sanity tests, including all three M3d-2a-i move judges.
-    run_notification_click_state_tests.addArg("--maru-expect-tests=15");
-    run_notification_click_state_tests.addArg("--maru-expect-passed=15");
+    // 11 behavior judges + 5 module-import sanity tests, including all four M3d-2a-i move judges.
+    run_notification_click_state_tests.addArg("--maru-expect-tests=16");
+    run_notification_click_state_tests.addArg("--maru-expect-passed=16");
     const notification_click_state_step = b.step("test-notification-click-state", "Verify notification source identity, moved/closed targets and hook state isolation");
     notification_click_state_step.dependOn(&run_notification_click_state_tests.step);
 

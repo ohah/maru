@@ -77309,6 +77309,36 @@ test "M3d-2a-i moveWorkspaceToSession: 빈 source(§1.6) — 마지막 워크스
     // 빈 source deinit(0탭 순회)이 패닉 안 함 — defer src.deinit()가 검증.
 }
 
+test "M3d-2a-i moveWorkspaceToSession: 비워진 source 창이 key 를 잃을 때의 hover 가 활성 탭을 찾지 않는다" {
+    // 앱 순서(`finishCrossWindowMove`): Zig 이동이 source 를 0 탭으로 비운다 → 대상 창 `makeKeyAndOrderFront` →
+    // source `windowDidResignKey` 가 `hover(-1, -1)` → 그 뒤에야 source 창을 닫는다. 그 hover 가 스크롤바
+    // hit-test 에서 없는 활성 탭을 꺼내 크래시했다(2026-10-19).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const src = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(src);
+    defer src.deinit();
+    const dst = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(dst);
+    defer dst.deinit();
+
+    var buf: [8]u64 = undefined;
+    const outcome = try workspace_ops.moveWorkspaceToSession(src, dst, 0, &buf);
+    try std.testing.expect(outcome.source_window_closed);
+    try std.testing.expectEqual(@as(usize, 0), src.tabs.items.len);
+    // 실제 앱에서는 마지막 렌더의 pane 자리·셀 크기가 남아 있다 — 이 하니스는 렌더를 안 하므로 그 상태를 손으로
+    // 만든다(둘 중 하나라도 0 이면 hit-test 가 surface 앞에서 돌아가 판정이 비어 버린다).
+    src.cell_width_px = 8;
+    src.cell_height_px = 16;
+    src.active_pane_rect = .{ .x = 0, .y = 0, .w = 80, .h = 80 };
+
+    const inside_x: f64 = 79; // 스크롤바 띠 안
+    const inside_y: f64 = 1;
+    try std.testing.expectEqual(@as(?f32, null), scroll_ops.scrollbarGrabAt(src, inside_x, inside_y));
+    _ = src.hoverCursor(-1, -1, 0); // `windowDidResignKey` 가 보내는 좌표
+    _ = src.hoverCursor(inside_x, inside_y, 0);
+}
+
 test "M3d-2a-i moveWorkspaceToSession: membershipChangeEvents가 movedOut+movedIn 방출(§8A.3 어휘 재사용, from!=to)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

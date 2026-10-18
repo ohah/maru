@@ -56481,11 +56481,12 @@ test "shared editor alternating writers have shared Undo Redo and retain snapsho
     try testing.expectEqualStrings("한aa\nbb\ncc\n", b.rt.editorDocument().opened.?.file.content);
 }
 
-test "shared editor allocation failures preserve all views or commit with a safe history boundary" {
+test "shared editor allocation failures preserve all views and existing Undo" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var saw_precommit_failure = false;
-    var saw_history_failure = false;
-    for (0..32) |failure| {
+    var saw_success = false;
+    var complete = false;
+    for (0..256) |failure| {
         var fx = try SharedEditFixture.init();
         defer fx.deinit();
         const s = fx.base.session;
@@ -56494,35 +56495,59 @@ test "shared editor allocation failures preserve all views or commit with a safe
         a.rt.editor_selection = editor_selection.Selection.at(0);
         try testing.expect(insertText(s, a, "Z"));
         breakUndoGroup(a);
-        const history = &a.rt.editorDocument().history;
+        const doc = a.rt.editorDocument();
+        const history = &doc.history;
         history.undo = try testing.allocator.realloc(history.undo, history.undo_len);
-        const before = try testing.allocator.dupe(u8, a.rt.editorDocument().opened.?.file.content);
+        const before = try testing.allocator.dupe(u8, doc.opened.?.file.content);
         defer testing.allocator.free(before);
-        const revision = a.rt.editorDocument().opened.?.file.revision;
+        const revision = doc.opened.?.file.revision;
         const selection = b.rt.editor_selection.?;
-        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = failure });
+        const source_selection = a.rt.editor_selection;
+        const source_lines = a.rt.editor_lines.ptr;
+        const peer_lines = b.rt.editor_lines.ptr;
+        const next_id = history.next_id;
+        // 제자리 resize 성공으로 준비 실패가 가려지지 않게 한다. 정상 성공 대조군까지 순회한다.
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = failure, .resize_fail_index = 0 });
         s.allocator = failing.allocator();
+        doc.opened.?.file.allocator = failing.allocator();
+        doc.opened.?.file.buf.allocator = failing.allocator();
         const accepted = insertText(s, a, "한\n");
         s.allocator = testing.allocator;
+        doc.opened.?.file.allocator = testing.allocator;
+        doc.opened.?.file.buf.allocator = testing.allocator;
         if (!accepted) {
             saw_precommit_failure = true;
-            try testing.expectEqualStrings(before, a.rt.editorDocument().opened.?.file.content);
-            try testing.expectEqual(revision, a.rt.editorDocument().opened.?.file.revision);
+            try testing.expectEqualStrings(before, doc.opened.?.file.content);
+            try testing.expectEqual(revision, doc.opened.?.file.revision);
             try testing.expectEqualDeep(selection, b.rt.editor_selection.?);
+            try testing.expectEqualDeep(source_selection, a.rt.editor_selection);
+            try testing.expectEqual(source_lines, a.rt.editor_lines.ptr);
+            try testing.expectEqual(peer_lines, b.rt.editor_lines.ptr);
             try testing.expectEqual(@as(usize, 1), history.undo_len);
+            try testing.expectEqual(@as(usize, 0), history.redo_len);
+            try testing.expectEqual(next_id, history.next_id);
         } else {
-            try testing.expectEqual(revision + 1, b.rt.editorDocument().opened.?.file.revision);
+            saw_success = true;
+            try testing.expectEqual(revision + 1, doc.opened.?.file.revision);
             try testing.expectEqualStrings(a.rt.editor_lines[0], b.rt.editor_lines[0]);
-            if (history.undo_len == 0) {
-                saw_history_failure = true;
-                try testing.expect(!undoEdit(s, b));
-                try testing.expectEqual(@as(usize, 0), history.redo_len);
-                try testing.expectEqualStrings("Z한\naa\nbb\ncc\n", b.rt.editorDocument().opened.?.file.content);
-            }
+            try testing.expectEqual(@as(usize, 2), history.undo_len);
+            try testing.expectEqual(@as(usize, 0), history.redo_len);
+            const after = try testing.allocator.dupe(u8, doc.opened.?.file.content);
+            defer testing.allocator.free(after);
+            try testing.expect(undoEdit(s, b));
+            try testing.expectEqualStrings(before, doc.opened.?.file.content);
+            try testing.expect(redoEdit(s, a));
+            try testing.expectEqualStrings(after, doc.opened.?.file.content);
+        }
+        if (!failing.has_induced_failure) {
+            try testing.expect(accepted);
+            complete = true;
+            break;
         }
     }
     try testing.expect(saw_precommit_failure);
-    try testing.expect(saw_history_failure);
+    try testing.expect(saw_success);
+    try testing.expect(complete);
 }
 
 test "shared editor stale revision and outstanding peer composition reject without consuming Undo" {

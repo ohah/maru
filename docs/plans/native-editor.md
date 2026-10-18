@@ -944,6 +944,7 @@ GPU 로 그리는 편집기의 가장 가까운 선례(VS Code 실험 GPU 렌더
 | 19 | `backup.restoreRecovery`·`restoreFromRecord` | 복원 준비 실패에도 임시 커서가 남고, 본문 반영 뒤 Undo 할당 실패 시 복원 Undo가 없다 | 로컬 ID·기존 untitled 복원에 선택 유무·가득 찬 Undo/기존 Redo·할당 실패 주입 | U4b-19의 실패 보존·ID 고갈·읽기 전용·백업 바이트 검사 |
 | 20 | `replaceCurrentMatch`·`replaceAllMatches` | 본문 반영 뒤 Undo 확장 실패로 기존 이력까지 사라진다 | 기존 Undo/Redo가 있는 공유 문서에서 단일·전체 치환에 할당 실패 주입 | EDREG6의 평문·캡처·선택 없음·ID 고갈·읽기 전용 검사 |
 | 21 | `acceptConflict` | 준비 실패에도 임시 커서가 남고 본문 반영 뒤 Undo 확장 실패로 기존 이력을 잃는다 | 기존 Undo/Redo와 공유 뷰를 둔 네 가지 충돌 선택에 할당 실패 주입 | CFL19의 선택 유무·ID 고갈·읽기 전용·뷰 간 Undo/Redo 검사 |
+| 22 | `applyLineEdit` | 줄 조작 본문 반영 뒤 Undo 확장 실패로 기존 이력이 사라진다 | 기존 Undo/Redo가 있는 공유 문서의 일곱 줄 조작에 순차 할당 실패 주입 | LNOOM1의 이력·본문·선택·ID 고갈·읽기 전용·뷰 간 Undo/Redo 검사 |
 
 결함 16은 수정 전 `expected 2, found 0`으로 재현했다. 다시 읽기는 기존
 `applyEditAsOneWithUndo`를 사용해 본문을 바꾸기 전에 Undo 공간을 확보한다.

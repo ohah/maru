@@ -5121,13 +5121,23 @@ fn selectNextMatchAtOrAfter(self: *AppSession, term: *Term, at: usize) void {
 pub fn applyEditAsOne(self: *AppSession, term: *Term, changes: []maru.session.editor.delta.Change) bool {
     return applyEditAsOneImpl(self, term, changes, false);
 }
-/// 프로젝트 적용은 Undo 슬롯도 본문 변경 전에 확보한다.
+/// Undo를 보장하는 명령은 슬롯도 본문 변경 전에 확보한다.
 pub fn applyEditAsOneWithUndo(self: *AppSession, term: *Term, changes: []maru.session.editor.delta.Change) bool {
     return applyEditAsOneImpl(self, term, changes, true);
 }
+// 본문 반영 뒤 pushUndo가 실패하면 기존 이력까지 지운다. 같은 actor 안에서
+// 슬롯과 ID를 먼저 확보하되, 실패한 뒤에도 이전 Undo/Redo 항목은 그대로 둔다.
+fn prepareUndoSlot(self: *AppSession, term: *Term) bool {
+    const history = &term.rt.editorDocument().history;
+    if (history.next_id == std.math.maxInt(u64)) return false;
+    if (history.undo_len == history.undo.len) {
+        const capacity = if (history.undo.len == 0) 16 else std.math.mul(usize, history.undo.len, 2) catch return false;
+        history.undo = self.allocator.realloc(history.undo, capacity) catch return false;
+    }
+    return true;
+}
 fn applyEditAsOneImpl(self: *AppSession, term: *Term, changes: []maru.session.editor.delta.Change, require_undo: bool) bool {
-    // 신원 발급도 strict Undo의 사전 준비다. 편집 뒤 고갈을 발견하면 기존 이력을 잃는다.
-    if (require_undo and term.rt.editorDocument().history.next_id == std.math.maxInt(u64)) return false;
+    if (require_undo and !prepareUndoSlot(self, term)) return false;
     const fallback = require_undo and selections(term).count() == 0;
     var sels = if (fallback) blk: {
         const items = self.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(0)}) catch return false;
@@ -5136,19 +5146,6 @@ fn applyEditAsOneImpl(self: *AppSession, term: *Term, changes: []maru.session.ed
     defer self.allocator.free(sels.items);
     const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
     const before_primary = sels.primary;
-    if (require_undo) {
-        const history = &term.rt.editorDocument().history;
-        if (history.undo_len == history.undo.len) {
-            const capacity = if (history.undo.len == 0) 16 else std.math.mul(usize, history.undo.len, 2) catch {
-                self.allocator.free(before);
-                return false;
-            };
-            history.undo = self.allocator.realloc(history.undo, capacity) catch {
-                self.allocator.free(before);
-                return false;
-            };
-        }
-    }
 
     const scroll_anchor = captureScrollAnchor(term);
     const rows_before = drawnDocLines(term);
@@ -9172,6 +9169,7 @@ pub fn toggleLineComment(self: *AppSession, term: *Term) bool {
 /// 합친다(§3.2) — 같은 블록의 커서들이 한 자리로 모일 수 있다.
 fn applyLineEdit(self: *AppSession, term: *Term, ranges: []const maru.session.editor.delta.Change, after: ?[]const editor_selection.Selection) bool {
     if (ranges.len == 0) return false;
+    if (!prepareUndoSlot(self, term)) return false;
     var sels = selectionsForEdit(self, term) orelse return false;
     defer self.allocator.free(sels.items);
     if (after) |a| {
@@ -41073,6 +41071,84 @@ test "LN6 Enter 가 이전 줄 들여쓰기를 잇는다 — caret 앞까지만 
     term2.rt.editor_selection = editor_selection.Selection.at(1);
     try testing.expect(insertNewlineKeepingIndent(fx.session, term2));
     try testing.expectEqualStrings("x\n\n", term2.rt.editorDocument().opened.?.file.content);
+}
+
+// 줄 계획도 성공한 본문과 Undo가 함께 남아야 한다.
+test "LNOOM1 줄 조작의 준비 실패는 공유 문서의 기존 Undo와 Redo를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    for (0..7) |operation| {
+        for (0..3) |mode| {
+            var complete = false;
+            for (0..256) |failure| {
+                var fx = try PaneFixture.init(a);
+                defer fx.deinit(a);
+                const term = try undoFixture(&fx, a, "line-undo.zig", "  aa\n  bb\n  cc\n");
+                term.rt.editor_selection = editor_selection.Selection.at(15);
+                try testing.expect(insertText(fx.session, term, "tail"));
+                breakUndoGroup(term);
+                try testing.expect(insertText(fx.session, term, "redo"));
+                try testing.expect(undoEdit(fx.session, term));
+                term.rt.editor_selection = editor_selection.Selection.at(2);
+                const peer = try openSharedViewInActivePane(fx.session, term);
+                peer.rt.editor_selection = editor_selection.Selection.at(1);
+                const state = term.rt.editorDocument();
+                if (mode == 1) state.history.next_id = std.math.maxInt(u64);
+                if (mode == 2) state.opened.?.file.read_only = true;
+                const before = try a.dupe(u8, state.opened.?.file.content);
+                defer a.free(before);
+                const selection = term.rt.editor_selection;
+                const revision = state.opened.?.file.revision;
+                state.history.undo = try a.realloc(state.history.undo, state.history.undo_len);
+                const undo_len = state.history.undo_len;
+                const redo_len = state.history.redo_len;
+                const next_id = state.history.next_id;
+                var failing = testing.FailingAllocator.init(a, .{ .fail_index = if (mode != 0) std.math.maxInt(usize) else failure, .resize_fail_index = 0 });
+                fx.session.allocator = failing.allocator();
+                state.opened.?.file.allocator = failing.allocator();
+                state.opened.?.file.buf.allocator = failing.allocator();
+                const applied = switch (operation) {
+                    0 => duplicateLines(fx.session, term),
+                    1 => deleteLines(fx.session, term),
+                    2 => moveLines(fx.session, term, true),
+                    3 => indentLines(fx.session, term, false),
+                    4 => indentLines(fx.session, term, true),
+                    5 => toggleLineComment(fx.session, term),
+                    6 => insertNewlineKeepingIndent(fx.session, term),
+                    else => unreachable,
+                };
+                fx.session.allocator = a;
+                state.opened.?.file.allocator = a;
+                state.opened.?.file.buf.allocator = a;
+                if (!applied) {
+                    try testing.expectEqualStrings(before, state.opened.?.file.content);
+                    try testing.expectEqualDeep(selection, term.rt.editor_selection);
+                    try testing.expectEqual(revision, state.opened.?.file.revision);
+                    try testing.expectEqual(undo_len, state.history.undo_len);
+                    try testing.expectEqual(redo_len, state.history.redo_len);
+                    try testing.expectEqual(next_id, state.history.next_id);
+                    try testing.expectEqual(@as(usize, 1), peer.rt.editor_selection.?.focus);
+                } else {
+                    try testing.expectEqual(@as(usize, 0), mode);
+                    try testing.expectEqual(undo_len + 1, state.history.undo_len);
+                    try testing.expectEqual(@as(usize, 0), state.history.redo_len);
+                    const after = try a.dupe(u8, state.opened.?.file.content);
+                    defer a.free(after);
+                    try testing.expect(!std.mem.eql(u8, before, after));
+                    try testing.expect(undoEdit(fx.session, peer));
+                    try testing.expectEqualStrings(before, state.opened.?.file.content);
+                    try testing.expect(redoEdit(fx.session, term));
+                    try testing.expectEqualStrings(after, state.opened.?.file.content);
+                }
+                if (!failing.has_induced_failure) {
+                    try testing.expectEqual(mode == 0, applied);
+                    complete = true;
+                    break;
+                }
+            }
+            try testing.expect(complete);
+        }
+    }
 }
 
 test "LNM1 줄 복제 — 떨어진 블록마다 caret 이 자기 사본으로 간다 (§3.9a, 결함 1)" {

@@ -1336,6 +1336,11 @@ python3 tools/editor-outline-app/run.py --output /tmp/maru-outline-app-new
 
 Unicode 검색 접기 집중 검증: `mise exec -- zig build test-search-case-fold -Doptimize=ReleaseFast`. `SCF1~3`이 전체 scalar의 표 탐색·편집용 변환 분리·터미널 실제 셀 검색을 확인한다. 표 재생성은 `python3 tools/generate-search-case-fold.py references/unicode/17.0.0/CaseFolding.txt`이며 공식 데이터의 SHA-256이 일치해야 한다.
 
+줄 조작 Undo 집중 검증: `mise exec -- zig build test-editor-line-undo -Doptimize=ReleaseFast`.
+`LN`·`LNM`·`CMT`·`LNOOM1`과 익명 import 판정자 4개, 총 32개다.
+복제·삭제·이동·들여쓰기/내어쓰기·주석·들여쓰기 Enter의 실패 보존과 기존 caret 배치를 검사한다.
+Debug 검증은 `-Doptimize=ReleaseFast`를 생략한다. OS 전체 OOM이나 실제 키 입력 검증은 별도다.
+
 충돌 선택 집중 검증: `mise exec -- zig build test-editor-conflict-choice -Doptimize=ReleaseFast`.
 `CFL1~19`와 익명 import 판정자 4개, 총 23개를 실행한다. 실제 git 충돌·diff3·빈 쪽·여러 구간·
 클릭·기존 커서 유지와, 네 가지 선택의 순차 할당 실패·기존 Undo/Redo 보존을 확인한다.

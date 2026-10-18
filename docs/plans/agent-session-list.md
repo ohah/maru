@@ -55,17 +55,15 @@ TCC 설정을 바꾸지 않았으며 원본 로그·스택·원인별 대조군�
 open/header/pixels/close 실패, 용량 부족 및 하네스 실패 반출을 적대적으로 검증한다.
 native·controlled-child 판정과 최초 오류/close 실패/캡처 오류/private HOME 음성 대조를
 통과했다. 별도 소용량 볼륨은 `stage=pixels errno=28`로 실패하고 공간 복구 뒤 전체 PPM을
-기록했다. 실제 AppKit 재검증은 화면 잠금으로 대기 중이며 native 성공과 구분한다.
+기록했다. 로컬 GUI launcher 재검증은 화면 잠금으로 대기 중이며 native 성공과 구분한다.
 CI의 `capture_list` 실패에서 앱의 기존 artifact allowlist가 `zig-out/maru-agent-session-archive-smoke`
 접미사를 요구하는 것을 확인했다. 임시 루트 안에서도 이 접미사와 HOME의 직접 부모 관계를
 유지하며, AF_UNIX host root는 짧은 별도 sibling으로 둔다. 경로 회귀 판정에 이 관계와
-socket 길이를 추가했다.
+socket 길이를 추가했다. 같은 CI가 드러낸 CR6c·CR6e 실행 파일 root의 Zig 0.17 호환 모듈
+누락은 기존 공유 build helper를 두 root에 연결해 수정하고 namespace boundary에서 고정한다.
 후속 AppKit CI는 통과했다. 남은 AppSession aggregate의 RPMW4 실패는 Zig 0.17의
 in-place realloc 여부가 OOM sweep의 할당 횟수를 바꾸는 문제였다. 인접 RPBW5와 같은
 resize/remap 거부 backing을 RPMW4에도 적용해 OOM 전수 검사와 worker drain을 유지한다.
- 같은 CI가 드러낸 CR6c·CR6e 실행 파일 root의 Zig 0.17 호환 모듈
-누락은 기존 공유 build helper를 두 root에 연결해 수정하고 namespace boundary에서 고정한다.
-
 
 
 B1-button 이관 순서와 AS3·AS4 슬라이스의 구현 순서·완료 조건이다. 계약은 [에이전트 세션 기록 도크](../agent-session-list.md)와 그 절별 소유 문서가 가진다.

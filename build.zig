@@ -3516,6 +3516,8 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
         });
+        // These executable roots import session-host sources directly as well as through maru.
+        // Zig 0.17 compatibility imports must be visible from both module roots.
         support.attachArrayRepeatImports(b, session_host_cr6c_appkit_harness.root_module);
         // A local TCC grant is tied to the exact ad-hoc code requirement. This compile-only
         // escape hatch rebuilds the fixture harness without rebuilding, copying, or resigning

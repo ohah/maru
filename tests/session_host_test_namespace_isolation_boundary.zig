@@ -200,6 +200,13 @@ test "macOS product smoke children bind workspace and session registry to one fi
         defer allocator.free(needle);
         try std.testing.expect(std.mem.indexOf(u8, build, needle) != null);
     }
+    // These executable roots also import session-host sources directly; maru's helper imports
+    // alone cannot satisfy Zig 0.17's named compatibility imports in the executable root.
+    for ([_][]const u8{ "session_host_cr6c_appkit_harness", "session_host_cr6e_recovery_harness" }) |name| {
+        const needle = try std.fmt.allocPrint(allocator, "support.attachArrayRepeatImports(b, {s}.root_module);", .{name});
+        defer allocator.free(needle);
+        try std.testing.expect(std.mem.indexOf(u8, build, needle) != null);
+    }
     // CR6d uses a /tmp artifact HOME to keep Documents TCC out of actual IME testing.
     // Its path is already absolute, but the same isolation owner must still bind the registry.
     try std.testing.expect(std.mem.indexOf(

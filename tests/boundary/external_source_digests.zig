@@ -86,7 +86,9 @@ pub const inventory = [_]Proof{
     // 플랫폼 파일의 진단 변수(`pub var last_hresult` 등)가 표면에 들어오면서 걸렸다. 지금은
     // `@TypeOf(@field(..))` 로 **타입만 보고**, 타입 선언이면 재귀하고 아니면 주소만 잡는다.
     // 세 자리가 각각 그 셋이다. **반사 범위는 똑같다** — 훑는 선언 수 하한 2,000 은 그대로다.
-    .{ .path = "src/cross_target_surface.zig", .count = 3, .digest_hex = "b406e8d88f6962715d19d87b5255c2aa66183a22056794fa0faa74be11b1030a" },
+    // Zig 0.17은 std.meta.declarations(T)에서 이름 문자열을 직접 준다. 기존 `.name` 읽기를 바인딩
+    // 이름으로 바꿨고 반사 대상은 그대로라 count는 3이다.
+    .{ .path = "src/cross_target_surface.zig", .count = 3, .digest_hex = "c2b0818919739f65fba6e6bbc1073345e7cc7b3db21de2f661cf0f07c0867aa1" },
     // P4: 히스토리 탭의 커밋 목록 읽기가 **자기 슬롯**으로 붙는다(`submitLog`·`takeLogResult`·
     // `logWorker`). count는 그대로다 — 새 반사 접근 없이 슬롯 하나와 worker 하나가 늘었다.
     // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.

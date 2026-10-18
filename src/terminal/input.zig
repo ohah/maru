@@ -463,7 +463,7 @@ const KittySeqParts = struct {
 /// 이고 대체 키·텍스트가 없다. 그 키들은 글자를 만들지 않으므로 실을 것도 없다.
 fn encodeKittySeqFull(buffer: *[encoded_key_buffer_len]u8, p: KittySeqParts) ![]const u8 {
     const with_event = p.report_events and p.event != .press;
-    const ev: u8 = @intFromEnum(p.event);
+    const ev: u8 = @backingInt(p.event);
 
     if (p.final != 'u' and p.final != '~') {
         if (with_event) return std.fmt.bufPrint(buffer, "\x1b[1;{d}:{d}{c}", .{ p.mods, ev, p.final });

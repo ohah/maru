@@ -20,6 +20,8 @@
 //! 2. **바이트를 해석하지 않는다.** payload 를 파싱하지 않고 줄 단위로 실어 보낸다. 프레임 조립과 `hello`
 //!    판정은 **소비자 한 곳**에서 한다 — 두 곳에 두면 상한과 배압 규칙이 갈린다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const command = @import("../session/agent_hook_command.zig");
 const hook_event = @import("../session/agent_hook_event.zig");
@@ -533,7 +535,7 @@ test "RA7 isPaneToken: 선에 싣는 모양은 소비자와 같은 상한을 쓴
     // 상한은 소비자에게서 빌려 온다 — 이 단언은 그 «빌려 옴» 이 살아 있는지를 본다(숫자를 베끼면 통과한다).
     try testing.expectEqual(remote_agent_stream.max_pane_bytes, max_pane_wire_bytes);
     // 그 상한에서 한 글자 넘으면 안 싣는다.
-    try testing.expect(!isPaneToken("%" ++ ("1" ** max_pane_wire_bytes)));
+    try testing.expect(!isPaneToken("%" ++ (array_repeat.repeat("1", max_pane_wire_bytes))));
 }
 
 test "RA7.6 서버 세대가 다르면 이름이 같아도 남의 것이다" {
@@ -701,7 +703,7 @@ test "시작 시 정리는 상한을 넘긴 것만 거둔다 — 방금 생긴 �
 
 test "nonceFromFileName: tmux 칸이 붙은 host 소유 이름도 받는다 — nonce 상한으로 재면 통째로 사라진다" {
     // `host_<32hex>_<32hex>` 는 nonce 상한(70)을 꽉 채운다. tmux 안이면 거기에 `_t<pane>` 이 더 붙는다.
-    const host_nonce = "host_" ++ ("0" ** 32) ++ "_" ++ ("0" ** 32);
+    const host_nonce = "host_" ++ (array_repeat.repeat("0", 32)) ++ "_" ++ (array_repeat.repeat("0", 32));
     try testing.expectEqual(command.remote_pane_nonce_max, host_nonce.len);
 
     // 그 이름 그대로는 예전에도 통과했다.
@@ -711,7 +713,7 @@ test "nonceFromFileName: tmux 칸이 붙은 host 소유 이름도 받는다 — 
     try testing.expectEqualStrings(host_nonce ++ "_t12", nonceFromFileName(host_nonce ++ "_t12.ndjson").?);
 
     // 그래도 무한히 받지는 않는다 — 상한은 있다.
-    const too_long = host_nonce ++ "_t" ++ ("1" ** 20);
+    const too_long = host_nonce ++ "_t" ++ (array_repeat.repeat("1", 20));
     try testing.expect(nonceFromFileName(too_long ++ ".ndjson") == null);
 }
 

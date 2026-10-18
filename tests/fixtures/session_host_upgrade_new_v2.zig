@@ -172,7 +172,7 @@ fn runTargetPreflight(
 }
 
 fn writeResult(path: []const u8, text: []const u8, allocator: std.mem.Allocator) !void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     const fd = c.open(path_z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));
     if (fd < 0) return error.OpenFailed;
@@ -288,8 +288,8 @@ const Context = struct {
 fn rollback(ctx: Context) noreturn {
     // Target-created state는 전혀 commit하지 않았으므로 backup offset만 되감아 frozen old image로 돌아간다.
     if (c.lseek(backup_state_slot, 0, c.SEEK.SET) < 0) c._exit(121);
-    const old_z = ctx.allocator.dupeZ(u8, ctx.old_path) catch c._exit(122);
-    const result_z = ctx.allocator.dupeZ(u8, ctx.result_path) catch c._exit(122);
+    const old_z = ctx.allocator.dupeSentinel(u8, ctx.old_path, 0) catch c._exit(122);
+    const result_z = ctx.allocator.dupeSentinel(u8, ctx.result_path, 0) catch c._exit(122);
     const owner_z = std.fmt.allocPrintSentinel(ctx.allocator, "{s}", .{ctx.owner_dir}, 0) catch c._exit(122);
     const actual_rollback = session_host.staged_image.inspect(old_z) catch c._exit(121);
     if (!session_host.staged_image.identityEqual(ctx.rollback_identity, actual_rollback)) c._exit(121);
@@ -297,7 +297,7 @@ fn rollback(ctx: Context) noreturn {
     const rollback_ino_z = std.fmt.allocPrintSentinel(ctx.allocator, "{d}", .{ctx.rollback_identity.ino}, 0) catch c._exit(122);
     const rollback_size_z = std.fmt.allocPrintSentinel(ctx.allocator, "{d}", .{ctx.rollback_identity.size}, 0) catch c._exit(122);
     const rollback_sha_hex = std.fmt.bytesToHex(ctx.rollback_identity.sha256, .lower);
-    const rollback_sha_z = ctx.allocator.dupeZ(u8, &rollback_sha_hex) catch c._exit(122);
+    const rollback_sha_z = ctx.allocator.dupeSentinel(u8, &rollback_sha_hex, 0) catch c._exit(122);
     const rollback_arg: [*:0]const u8 = "--rollback-target";
     const argv = [_:null]?[*:0]const u8{
         old_z.ptr,
@@ -374,7 +374,7 @@ fn upgradeAgain(
     staged_target_identity: session_host.staged_image.Identity,
 ) !void {
     const allocator = ctx.allocator;
-    const owner_dir_z = try allocator.dupeZ(u8, ctx.owner_dir);
+    const owner_dir_z = try allocator.dupeSentinel(u8, ctx.owner_dir, 0);
     defer allocator.free(owner_dir_z);
     const self_path = try std.fmt.allocPrintSentinel(allocator, "{s}/self-current", .{ctx.owner_dir}, 0);
     defer allocator.free(self_path);
@@ -391,7 +391,7 @@ fn upgradeAgain(
         .none,
     );
 
-    const next_path_z = try allocator.dupeZ(u8, ctx.next_path);
+    const next_path_z = try allocator.dupeSentinel(u8, ctx.next_path, 0);
     defer allocator.free(next_path_z);
     var next_image = try session_host.staged_image.stage(allocator, next_path_z, owner_dir_z, "target-current");
     defer next_image.deinit();
@@ -437,9 +437,9 @@ fn upgradeAgain(
     defer allocator.free(backup_readback);
     if (!std.mem.eql(u8, primary_readback, backup_readback)) return error.StateMismatch;
     try validateSecondState(allocator, primary_readback);
-    const scenario_z = try allocator.dupeZ(u8, ctx.scenario);
+    const scenario_z = try allocator.dupeSentinel(u8, ctx.scenario, 0);
     defer allocator.free(scenario_z);
-    const result_z = try allocator.dupeZ(u8, ctx.result_path);
+    const result_z = try allocator.dupeSentinel(u8, ctx.result_path, 0);
     defer allocator.free(result_z);
     const target_dev_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{next_image.identity.dev}, 0);
     defer allocator.free(target_dev_z);
@@ -448,7 +448,7 @@ fn upgradeAgain(
     const target_size_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{next_image.identity.size}, 0);
     defer allocator.free(target_size_z);
     const target_sha_hex = std.fmt.bytesToHex(next_image.identity.sha256, .lower);
-    const target_sha_z = try allocator.dupeZ(u8, &target_sha_hex);
+    const target_sha_z = try allocator.dupeSentinel(u8, &target_sha_hex, 0);
     defer allocator.free(target_sha_z);
     const rollback_dev_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{staged_target_identity.dev}, 0);
     defer allocator.free(rollback_dev_z);
@@ -457,7 +457,7 @@ fn upgradeAgain(
     const rollback_size_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{staged_target_identity.size}, 0);
     defer allocator.free(rollback_size_z);
     const rollback_sha_hex = std.fmt.bytesToHex(staged_target_identity.sha256, .lower);
-    const rollback_sha_z = try allocator.dupeZ(u8, &rollback_sha_hex);
+    const rollback_sha_z = try allocator.dupeSentinel(u8, &rollback_sha_hex, 0);
     defer allocator.free(rollback_sha_z);
     const target_launch: TargetLaunch = .{
         .rollback_path = self_path,

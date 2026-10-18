@@ -24,7 +24,7 @@ fn currentAuthority() current_mod.CurrentReleaseAuthority {
 fn absolute(tmp: *std.testing.TmpDir, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(out, "{s}/work", .{root[0..len]});
+    return std.fmt.bufPrintSentinel(out, "{s}/work", .{root[0..len]}, 0);
 }
 
 const Authority = struct {
@@ -62,7 +62,7 @@ const Attestor = struct {
         try std.testing.expect(budget > 0);
         if (self.mutate) {
             var storage: [std.fs.max_path_bytes:0]u8 = undefined;
-            const z = try std.fmt.bufPrintZ(&storage, "{s}", .{path});
+            const z = try std.fmt.bufPrintSentinel(&storage, "{s}", .{path}, 0);
             if (c.chmod(z.ptr, 0o600) != 0) return error.MutationFailed;
         }
         return .{ .parsed = try std.json.parseFromSlice(std.json.Value, allocator, "null", .{}), .verified = true, .run_id = 333, .run_attempt = 2, .subject_name = "manifest", .subject_sha256 = self.sha };
@@ -223,7 +223,7 @@ test "pre-attestation file and CLI authority drift publish nothing" {
 
     const observed = fixture.file.observation().?;
     var storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&storage, "{s}", .{observed.path});
+    const path = try std.fmt.bufPrintSentinel(&storage, "{s}", .{observed.path}, 0);
     if (c.chmod(path.ptr, 0o600) != 0) return error.MutationFailed;
     authority = .{};
     try std.testing.expectError(error.FileChanged, runWith(std.testing.allocator, context, &fixture, &current, &attestor, &authority, &result));

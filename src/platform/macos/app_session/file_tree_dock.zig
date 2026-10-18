@@ -383,7 +383,7 @@ fn publishFileTreeFrame(self: *AppSession, frame: component.build.Frame, content
 /// 행(빈 자리 안내)은 null 이고, 그런 행은 애초에 action 을 안 든다.
 fn rowIdentityHash(row: file_tree.Row) ?u64 {
     const identity = file_tree.rowIdentity(row) orelse return null;
-    var hasher = std.hash.Wyhash.init(@intFromEnum(identity.kind));
+    var hasher = std.hash.Wyhash.init(@backingInt(identity.kind));
     hasher.update(identity.path);
     return hasher.final();
 }

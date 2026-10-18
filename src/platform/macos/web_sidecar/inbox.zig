@@ -79,7 +79,7 @@ pub fn readLoop(fd: c_int, inbox: *Inbox, wake: *const fn () void, parent: c_int
         var happened: [2]std.c.Kevent = undefined;
         const count = std.c.kevent(kq, &changes, 0, &happened, happened.len, null);
         if (count < 0) {
-            if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+            if (std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
             return;
         }
         for (happened[0..@intCast(count)]) |event| {
@@ -89,7 +89,7 @@ pub fn readLoop(fd: c_int, inbox: *Inbox, wake: *const fn () void, parent: c_int
         if (n > 0) {
             inbox.push(chunk[0..@intCast(n)]);
             wake();
-        } else if (n < 0 and std.c._errno().* == @intFromEnum(std.c.E.INTR)) {
+        } else if (n < 0 and std.c._errno().* == @backingInt(std.c.E.INTR)) {
             continue;
         } else return;
     }

@@ -223,19 +223,19 @@ pub const FileTreeSelectionPaint = struct {
 pub fn classifyFileTreeRows(rows: []file_tree.Row) void {
     for (rows) |*row| switch (row.*) {
         .recent_header => |*v| {
-            v.icon_kind = @intFromEnum(file_tree_icon.classify(.recent_header, "", !v.collapsed));
+            v.icon_kind = @backingInt(file_tree_icon.classify(.recent_header, "", !v.collapsed));
         },
         .recent_file => |*v| {
-            v.icon_kind = @intFromEnum(file_tree_icon.classify(.recent_file, v.label, false));
+            v.icon_kind = @backingInt(file_tree_icon.classify(.recent_file, v.label, false));
         },
         .root => |*v| {
-            v.icon_kind = @intFromEnum(file_tree_icon.classify(.root, v.label, v.expanded));
+            v.icon_kind = @backingInt(file_tree_icon.classify(.root, v.label, v.expanded));
         },
         .directory => |*v| {
-            v.icon_kind = @intFromEnum(file_tree_icon.classify(.directory, v.label, v.expanded));
+            v.icon_kind = @backingInt(file_tree_icon.classify(.directory, v.label, v.expanded));
         },
         .file => |*v| {
-            v.icon_kind = @intFromEnum(file_tree_icon.classify(.file, v.label, false));
+            v.icon_kind = @backingInt(file_tree_icon.classify(.file, v.label, false));
         },
         .empty => {},
     };
@@ -418,8 +418,8 @@ test "titleCols: 그리는 쪽과 같은 칸 수를 낸다" {
 }
 
 test "every semantic file tree icon lowers to a registered synthesized glyph" {
-    inline for (std.meta.fields(file_tree_icon.IconKind)) |field| {
-        const kind: file_tree_icon.IconKind = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").fields(file_tree_icon.IconKind)) |field| {
+        const kind: file_tree_icon.IconKind = @fromBackingInt(@intCast(field.value));
         const cp = file_tree_icon.codepoint(kind);
         if (kind == .none) {
             try std.testing.expect(cp == null);
@@ -572,8 +572,8 @@ test "file tree: 무시된 행은 라벨·아이콘이 함께 흐려지고, 모�
     const fg: terminal.Color = .{ .rgb = .{ .r = 0xC8, .g = 0xC8, .b = 0xC8 } };
     const dim: terminal.Color = .{ .rgb = .{ .r = 0x60, .g = 0x60, .b = 0x60 } };
     const icon_color: terminal.Color = .{ .rgb = .{ .r = 0xAA, .g = 0xBB, .b = 0xCC } };
-    var colors: [std.meta.fields(file_tree_icon.IconKind).len]?terminal.Color = @splat(null);
-    colors[@intFromEnum(file_tree_icon.IconKind.js)] = icon_color;
+    var colors: [@import("type_info_fields").fields(file_tree_icon.IconKind).len]?terminal.Color = @splat(null);
+    colors[@backingInt(file_tree_icon.IconKind.js)] = icon_color;
     const rows = [_]file_tree.Row{.{ .file = .{
         .path = "/w/dist.map.js",
         .label = "dist.map.js",
@@ -584,7 +584,7 @@ test "file tree: 무시된 행은 라벨·아이콘이 함께 흐려지고, 모�
         .dirty = false,
         .external_change = false,
         .symlink = false,
-        .icon_kind = @intFromEnum(file_tree_icon.IconKind.js),
+        .icon_kind = @backingInt(file_tree_icon.IconKind.js),
         .ignored = true,
     } }};
     const icon_cp = file_tree_icon.codepoint(.js).?;
@@ -621,8 +621,8 @@ test "file tree: 아이콘만 종류 색을 쓰고, 선택된 행에서는 대�
     const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
     const on_accent: terminal.Color = .{ .rgb = .{ .r = 0x10, .g = 0x20, .b = 0x30 } };
     const icon_color: terminal.Color = .{ .rgb = .{ .r = 0xAA, .g = 0xBB, .b = 0xCC } };
-    var colors: [std.meta.fields(file_tree_icon.IconKind).len]?terminal.Color = @splat(null);
-    colors[@intFromEnum(file_tree_icon.IconKind.document)] = icon_color;
+    var colors: [@import("type_info_fields").fields(file_tree_icon.IconKind).len]?terminal.Color = @splat(null);
+    colors[@backingInt(file_tree_icon.IconKind.document)] = icon_color;
     const rows = [_]file_tree.Row{.{ .file = .{
         .path = "/tmp/README.md",
         .label = "README.md",
@@ -633,7 +633,7 @@ test "file tree: 아이콘만 종류 색을 쓰고, 선택된 행에서는 대�
         .dirty = false,
         .external_change = false,
         .symlink = false,
-        .icon_kind = @intFromEnum(file_tree_icon.IconKind.document),
+        .icon_kind = @backingInt(file_tree_icon.IconKind.document),
     } }};
 
     {
@@ -681,7 +681,7 @@ test "file tree icons occupy two cells between disclosure and label without stat
         .dirty = true,
         .external_change = true,
         .symlink = false,
-        .icon_kind = @intFromEnum(file_tree_icon.IconKind.document),
+        .icon_kind = @backingInt(file_tree_icon.IconKind.document),
     } }};
     var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, 16, dim, dim, .{
         .index = 0,
@@ -731,7 +731,7 @@ test "file tree disclosure icon label and state cells never overlap at narrow wi
             .dirty = state & 1 != 0,
             .external_change = state & 2 != 0,
             .symlink = false,
-            .icon_kind = @intFromEnum(file_tree_icon.IconKind.code),
+            .icon_kind = @backingInt(file_tree_icon.IconKind.code),
         } }};
         const cols: u16 = @intCast(cols_usize);
         var dl = try buildFileTreeDrawList(allocator, &rows, null, 0, 1, cols, .default, .default, null, null, null);
@@ -1054,7 +1054,7 @@ pub fn buildDockViewBarDrawList(
         // 아이콘이 같은 이유로 이미 `width = 2`다. 슬롯이 화면 밖이면 그리지 않는다.
         const col: u16 = @as(u16, @intCast(index)) *| slot_cols +| icon_offset;
         if (col +| @as(u16, @intCast(dock_view_bar.icon_cols)) > cols) break;
-        const cp = if (dock_panel.View.forSlot(index) == .project_search) icons.codepoint(.search) else file_tree_icon.codepointFromRaw(@intFromEnum(kind)) orelse continue;
+        const cp = if (dock_panel.View.forSlot(index) == .project_search) icons.codepoint(.search) else file_tree_icon.codepointFromRaw(@backingInt(kind)) orelse continue;
         try cells.append(allocator, .{
             // 밴드 가운데 행. 글리프는 행을 넘지 못하므로 세로 중앙은 홀수 행 밴드에서만 정확하다.
             .row = @max(rows, 1) / 2,
@@ -1402,7 +1402,7 @@ test "뷰 바는 슬롯 수만큼 아이콘을 내고, 갤러리 칸은 image �
 
     // 갤러리 칸의 글리프가 image 아이콘이다.
     const activity_slot = dock_panel.View.agent_activity.slot();
-    const want = file_tree_icon.codepointFromRaw(@intFromEnum(file_tree_icon.IconKind.image)).?;
+    const want = file_tree_icon.codepointFromRaw(@backingInt(file_tree_icon.IconKind.image)).?;
     try std.testing.expectEqual(want, list.cells[activity_slot].codepoint);
 
     // 각 아이콘은 자기 슬롯 안에 있다(그린 자리와 눌리는 자리가 갈라지지 않는다).

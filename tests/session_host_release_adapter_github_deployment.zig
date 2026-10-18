@@ -2,6 +2,8 @@
 //! protected `release` environment. These fixtures cover component semantics only; transport,
 //! pagination, workflow wiring, and repository-side policy remain separate gates.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const context_mod = @import("release_adapter_context");
 const github_deployment = @import("release_adapter_github_deployment");
@@ -334,7 +336,7 @@ test "malformed duplicate wrong type trailing and response caps fail closed" {
         expected,
         environment,
     ));
-    const oversized = " " ** (github_deployment.max_response_bytes + 1);
+    const oversized = array_repeat.repeat(" ", (github_deployment.max_response_bytes + 1));
     try std.testing.expectError(error.ResponseTooLarge, github_deployment.parseAndBind(
         std.testing.allocator,
         oversized,

@@ -64,8 +64,8 @@ pub const PendingTermClose = struct {
     request_generation: u64 = 0,
     request_kind_raw: u8 = 0,
     phase_raw: u8 = 0,
-    graph_seal: Seal = [_]u8{0} ** 32,
-    seal: Seal = [_]u8{0} ** 32,
+    graph_seal: Seal = @as([32]u8, @splat(0)),
+    seal: Seal = @as([32]u8, @splat(0)),
 };
 
 pub const PendingTermCloseGraph = struct {
@@ -77,9 +77,9 @@ pub const PendingTermCloseGraph = struct {
     app_session_generation: u64 = 0,
     graph_generation: u64 = 0,
     target_count: u32 = 0,
-    target_digest: Digest = [_]u8{0} ** 32,
+    target_digest: Digest = @as([32]u8, @splat(0)),
     lifecycle_raw: u8 = 0,
-    seal: Seal = [_]u8{0} ** 32,
+    seal: Seal = @as([32]u8, @splat(0)),
 };
 
 pub fn fatalProofLoss() noreturn {
@@ -119,7 +119,7 @@ pub fn prepareGraph(
         .graph_generation = graph_generation,
         .target_count = @intCast(targets.len),
         .target_digest = targetDigest(targets),
-        .lifecycle_raw = @intFromEnum(GraphLifecycle.prepared),
+        .lifecycle_raw = @backingInt(GraphLifecycle.prepared),
     };
     errdefer graph.* = .{};
     graph.seal = try graphSeal(graph);
@@ -146,8 +146,8 @@ pub fn prepareTerm(
         .handle = target.handle,
         .term_close_generation = target.term_close_generation,
         .request_generation = request_generation,
-        .request_kind_raw = @intFromEnum(RequestKind.close_and_detach),
-        .phase_raw = @intFromEnum(TermLifecycle.reserved),
+        .request_kind_raw = @backingInt(RequestKind.close_and_detach),
+        .phase_raw = @backingInt(TermLifecycle.reserved),
         .graph_seal = graph.seal,
     };
     errdefer owner.* = .{};
@@ -157,8 +157,8 @@ pub fn prepareTerm(
 
 pub fn publishGraph(graph: *PendingTermCloseGraph, targets: []const TargetProjection) !void {
     if (!validGraph(graph, graph.app_session_addr, targets) or
-        graph.lifecycle_raw != @intFromEnum(GraphLifecycle.prepared)) return error.InvalidOwner;
-    graph.lifecycle_raw = @intFromEnum(GraphLifecycle.published);
+        graph.lifecycle_raw != @backingInt(GraphLifecycle.prepared)) return error.InvalidOwner;
+    graph.lifecycle_raw = @backingInt(GraphLifecycle.published);
     graph.seal = try graphSeal(graph);
 }
 
@@ -171,7 +171,7 @@ pub fn advanceGraph(graph: *PendingTermCloseGraph, targets: []const TargetProjec
         else => false,
     };
     if (!allowed) return error.InvalidOwner;
-    graph.lifecycle_raw = @intFromEnum(next);
+    graph.lifecycle_raw = @backingInt(next);
     graph.seal = try graphSeal(graph);
 }
 
@@ -185,7 +185,7 @@ pub fn advanceTerm(owner: *PendingTermClose, graph: *const PendingTermCloseGraph
         else => false,
     };
     if (!allowed) return error.InvalidOwner;
-    owner.phase_raw = @intFromEnum(next);
+    owner.phase_raw = @backingInt(next);
     owner.seal = try termSeal(owner);
 }
 
@@ -202,7 +202,7 @@ pub fn validTerm(owner: *const PendingTermClose, graph: *const PendingTermCloseG
         owner.app_session_addr != graph.app_session_addr or owner.app_session_generation != graph.app_session_generation or
         owner.term_addr != target.term_addr or owner.surface_id != target.surface_id or owner.handle != target.handle or
         owner.term_close_generation != target.term_close_generation or owner.request_generation == 0 or
-        owner.request_kind_raw != @intFromEnum(RequestKind.close_and_detach) or
+        owner.request_kind_raw != @backingInt(RequestKind.close_and_detach) or
         !std.mem.eql(u8, &owner.graph_seal, &graph.seal)) return false;
     if (std.enums.fromInt(TermLifecycle, owner.phase_raw) == null) return false;
     const expected = termSeal(owner) catch return false;

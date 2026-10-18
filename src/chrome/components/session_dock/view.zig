@@ -3,6 +3,8 @@
 //! card 배경은 범용 UI painter가 소유하고, 이 파일은 component가 가진 text run만 얹는다. platform에
 //! glyph 위치를 묻지 않으므로 backend는 단방향 ChromeDraw lowerer로 남는다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const icons = @import("../../../icons.zig");
 const i18n = @import("../../../i18n.zig"); // 표시 문자열 단일 출처
@@ -2577,7 +2579,7 @@ test "SessionDock never publishes the sort toggle at a width that erases the hea
 test "drawBufferSizes — 펼친 카드가 상세 상한(turn 셋 · 480 byte · 동작 셋)까지 차도 view 가 버퍼 부족으로 멈추지 않는다 (layering §3.5)" {
     // 두 호스트가 이 예산 하나를 쓴다. 상한에서 재는 이유: 모자라면 그 결과는 「상세만 빠짐」이 아니라 도크 전체 정지다. (상한을 넘는
     // 3000 byte turn 으로 재면 펼침 몫이 없는 옛 Windows 식은 `InsufficientTextBuffer` 로 실패했다 — 지금 상한에서는 버텼다.)
-    const long = "가" ** 160; // 480 byte — L2 가 자르는 상한(`agent_session_archive_detail.max_turn_bytes`)
+    const long = array_repeat.repeat("가", 160); // 480 byte — L2 가 자르는 상한(`agent_session_archive_detail.max_turn_bytes`)
     var turns: [3]types.Turn = undefined; // 카드 하나의 상세 turn 상한(`build` 의 `TooManyTurns`)
     for (&turns, 0..) |*t, i| t.* = .{ .role = if (i % 2 == 0) .user else .assistant, .text = long };
     const props = types.Props{

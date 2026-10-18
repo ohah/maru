@@ -60,7 +60,7 @@ pub const Outcome = enum(u8) {
 
     pub fn fromByte(v: u8) ?Outcome {
         return switch (v) {
-            0...7 => @enumFromInt(v),
+            0...7 => @fromBackingInt(@intCast(v)),
             else => null,
         };
     }
@@ -83,7 +83,7 @@ pub fn appendResult(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocat
         try out.append(allocator, '\n');
     }
     var num2: [8]u8 = undefined;
-    const code_text = std.fmt.bufPrint(&num2, "{d}", .{@intFromEnum(outcome)}) catch return error.OutOfMemory;
+    const code_text = std.fmt.bufPrint(&num2, "{d}", .{@backingInt(outcome)}) catch return error.OutOfMemory;
     try out.appendSlice(allocator, "S ");
     try out.appendSlice(allocator, code_text);
     try out.append(allocator, '\n');

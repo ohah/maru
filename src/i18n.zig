@@ -3915,7 +3915,7 @@ test "언어 테이블은 모든 키를 채운다 — 누락은 컴파일에 잡
     @setEvalBranchQuota(20_000); // 키가 1000 을 넘었다 — `Key` 의 한도와 같은 까닭
     // `Table`에 기본값이 없어 필드를 빠뜨리면 이 파일이 컴파일되지 않는다. 그 구조가 지켜지는 한
     // 런타임에 남는 실패는 "빈 문자열을 넣었다"뿐이라 그것만 본다.
-    inline for (@typeInfo(Table).@"struct".fields) |f| {
+    inline for (@import("type_info_fields").structFields(Table)) |f| {
         try testing.expect(@field(en, f.name).len > 0);
         try testing.expect(@field(ko, f.name).len > 0);
     }
@@ -3947,7 +3947,7 @@ test "언어 테이블은 자리표시자 집합이 같아야 한다 — 번역�
     @setEvalBranchQuota(20_000); // 키가 1000 을 넘었다 — `Key` 의 한도와 같은 까닭
     // 번역자가 `{0}`을 빠뜨리면 값이 사라지고, 없던 `{1}`을 넣으면 원문이 그대로 남는다(§6.3).
     // 둘 다 그 언어에서만 나타나므로 사람이 두 테이블을 나란히 보지 않으면 못 잡는다.
-    inline for (@typeInfo(Table).@"struct".fields) |f| {
+    inline for (@import("type_info_fields").structFields(Table)) |f| {
         var be: [8]u8 = undefined;
         var bk: [8]u8 = undefined;
         const pe = placeholderSet(@field(en, f.name), &be);
@@ -3967,7 +3967,7 @@ test "번역 틀의 중괄호는 전부 `format` 의 `{0}` 꼴이다 — 숫자�
     // (`\u{…}` 이스케이프는 comptime 에 이미 글자로 풀려 여기 오지 않는다.)
     @setEvalBranchQuota(20_000); // 두 겹 `inline for`(키 × 두 언어)를 펼친다 — 기본 한도 1000 을 넘는다
     var placeholders: usize = 0;
-    inline for (@typeInfo(Table).@"struct".fields) |f| {
+    inline for (@import("type_info_fields").structFields(Table)) |f| {
         inline for (.{ en, ko }) |tbl| {
             const v: []const u8 = @field(tbl, f.name);
             var i: usize = 0;
@@ -3992,7 +3992,7 @@ test "번역 틀의 중괄호는 전부 `format` 의 `{0}` 꼴이다 — 숫자�
 test "영어 테이블에 한글이 남아 있지 않다 — 옮기다 만 항목을 잡는다" {
     @setEvalBranchQuota(20_000); // 키가 1000 을 넘었다 — `Key` 의 한도와 같은 까닭
     // 리터럴을 키로 옮길 때 `en` 쪽에 원문을 그대로 붙여 두는 실수가 가장 흔하다.
-    inline for (@typeInfo(Table).@"struct".fields) |f| {
+    inline for (@import("type_info_fields").structFields(Table)) |f| {
         const v = @field(en, f.name);
         var it = std.unicode.Utf8Iterator{ .bytes = v, .i = 0 };
         while (it.nextCodepoint()) |cp| {
@@ -4006,7 +4006,7 @@ test "영어 테이블에 한글이 남아 있지 않다 — 옮기다 만 항�
 
 test "한국어 테이블에는 한글이 있다 — 번역을 빠뜨리고 영어를 복사한 항목을 잡는다" {
     @setEvalBranchQuota(20_000); // 키가 1000 을 넘었다 — `Key` 의 한도와 같은 까닭
-    inline for (@typeInfo(Table).@"struct".fields) |f| {
+    inline for (@import("type_info_fields").structFields(Table)) |f| {
         const v = @field(ko, f.name);
         var has = false;
         var it = std.unicode.Utf8Iterator{ .bytes = v, .i = 0 };
@@ -4211,11 +4211,11 @@ test "setOsLocale: 버퍼보다 긴 태그는 잘려도 언어 판정이 살아�
 test "Preference 는 Lang 과 다른 타입이다 — auto 를 표시 언어로 쓸 수 없다" {
     // `auto`가 `Lang`에 섞이면 `t()`가 "OS에게 물어보라"는 지시를 문자열로 그리려는 상태가
     // 타입으로 표현 가능해진다. 두 enum 의 변형 집합이 갈라져 있는 것이 그 방어다.
-    try testing.expectEqual(@as(usize, 2), @typeInfo(Lang).@"enum".fields.len);
-    try testing.expectEqual(@as(usize, 3), @typeInfo(Preference).@"enum".fields.len);
+    try testing.expectEqual(@as(usize, 2), @import("type_info_fields").enumFields(Lang).len);
+    try testing.expectEqual(@as(usize, 3), @import("type_info_fields").enumFields(Preference).len);
 
     // 이름이 겹치는 둘(`en`·`ko`)은 뜻이 같아야 한다 — 갈리면 설정값과 표시 언어가 어긋난다.
-    inline for (@typeInfo(Lang).@"enum".fields) |f| {
+    inline for (@import("type_info_fields").enumFields(Lang)) |f| {
         try testing.expectEqual(@field(Lang, f.name), resolve(@field(Preference, f.name), null));
     }
 }

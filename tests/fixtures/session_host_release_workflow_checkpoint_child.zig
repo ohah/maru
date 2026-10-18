@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
     const stage_text = args.next();
     if (args.next() != null) return error.TooManyArguments;
     var root_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const root_path_z = std.fmt.bufPrintZ(&root_storage, "{s}", .{root_path}) catch return error.InvalidRoot;
+    const root_path_z = std.fmt.bufPrintSentinel(&root_storage, "{s}", .{root_path}, 0) catch return error.InvalidRoot;
     var root: checkpoint.Root = .{};
     try checkpoint.openRootExpected(&root, root_path_z, expected);
     defer root.deinit() catch {};
@@ -27,8 +27,8 @@ pub fn main(init: std.process.Init) !void {
     }
     if (!std.mem.eql(u8, operation, "advance")) return error.InvalidOperation;
     const text = stage_text orelse return error.MissingStage;
-    const stage: phase.Stage = inline for (@typeInfo(phase.Stage).@"enum".fields) |field| {
-        if (std.mem.eql(u8, text, field.name)) break @enumFromInt(field.value);
+    const stage: phase.Stage = inline for (@import("type_info_fields").enumFields(phase.Stage)) |field| {
+        if (std.mem.eql(u8, text, field.name)) break @fromBackingInt(@intCast(field.value));
     } else return error.InvalidStage;
     _ = try checkpoint.advance(init.gpa, &root, stage, .succeeded, workflow);
 }

@@ -170,7 +170,7 @@ fn publishOwned(allocator: std.mem.Allocator, authority: anytype, output: [:0]co
         overlaps(std.mem.asBytes(result), std.mem.asBytes(authority))) return error.InvalidOwner;
     try validatePath(output);
     var parent_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    const parent = std.fmt.bufPrintZ(&parent_buf, "{s}", .{std.fs.path.dirname(output) orelse return error.InvalidPath}) catch
+    const parent = std.fmt.bufPrintSentinel(&parent_buf, "{s}", .{std.fs.path.dirname(output) orelse return error.InvalidPath}, 0) catch
         return error.InvalidPath;
     const preflight_parent_fd = safe_open.openAbsoluteNoFollow(parent, true) catch return error.UnsafePath;
     defer _ = c.close(preflight_parent_fd);

@@ -7,6 +7,8 @@
 //! 그래서 판정을 **바이트를 보기 전에 크기로**, 그리고 **내용을 보고 binary로** 두 번 한다. 둘 다 typed 결과로
 //! 돌려주고(§6), 호출자는 그 사실을 화면에 말한다 — 잘린 내용을 정상인 척 보여 주지 않는다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 
 /// 한쪽 문서의 바이트 상한. 양쪽 합이 아니라 **한쪽 기준**이다: 원본만 큰 경우(대용량 파일 삭제)와 수정본만
@@ -64,14 +66,14 @@ test "상한 안의 텍스트는 그대로 싣는다" {
 }
 
 test "한쪽만 커도 거른다(합이 아니라 한쪽 기준)" {
-    const big = "x" ** (max_side_bytes + 1);
+    const big = array_repeat.repeat("x", (max_side_bytes + 1));
     try testing.expectEqual(Rejection.too_large, decide(big, "small").reject);
     try testing.expectEqual(Rejection.too_large, decide("small", big).reject);
 }
 
 test "NUL이 있으면 binary다 — 크기 판정보다 뒤에 온다" {
     try testing.expectEqual(Rejection.binary, decide("ok\n", "a\x00b").reject);
-    const big_binary = "\x00" ** (max_side_bytes + 1);
+    const big_binary = array_repeat.repeat("\x00", (max_side_bytes + 1));
     try testing.expectEqual(Rejection.too_large, decide("ok\n", big_binary).reject);
 }
 

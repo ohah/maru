@@ -139,7 +139,7 @@ fn refresh(self: *AppSession) void {
     const q = composed orelse picker.input.query.items;
     const home = std.mem.span(std.c.getenv("HOME") orelse "");
     for (state.items.items, 0..) |it, i| {
-        if (q.len == 0 or std.ascii.indexOfIgnoreCase(it.text, q) != null) {
+        if (q.len == 0 or std.ascii.findIgnoreCase(it.text, q) != null) {
             state.shown.appendAssumeCapacity(i);
             continue;
         }
@@ -150,7 +150,7 @@ fn refresh(self: *AppSession) void {
             lsp_client.trustKeyLabel(.{ .volume = it.volume, .path = it.text, .dest = it.dest }, &shown_buf)
         else
             app_session_mod.homeTilde(it.text, home, &shown_buf);
-        if (std.ascii.indexOfIgnoreCase(shown, q) != null) state.shown.appendAssumeCapacity(i);
+        if (std.ascii.findIgnoreCase(shown, q) != null) state.shown.appendAssumeCapacity(i);
     }
     picker.setResultCount(state.shown.items.len);
     const empty = state.items.items.len == 0;

@@ -5,6 +5,8 @@
 //!
 //! **`kind` 는 안 쓴다.** 실측(2026-09-23): clangd 는 전부 `1`(Text), rust-analyzer 는 **없는 항목**과 `2`(Read) 를 섞어 내고, tsgo 만 `2`/`3` 로
 //! 읽기·쓰기를 가른다. 색으로 가르면 서버에 따라 화면이 달라지므로 한 색이다(§5.1a).
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const position = @import("position.zig");
 const rpc = @import("rpc.zig");
@@ -134,7 +136,7 @@ test "OCH1 응답 → 범위: 문서 순서로 정렬하고 같은 범위는 한
 
 test "OCH2 provider·빈 응답·상한 — bool·객체·거짓·없음, null 과 배열 아님은 강조 없음 (§8.2p)" {
     const a = testing.allocator;
-    const content = "x" ** 600 ++ "\n";
+    const content = array_repeat.repeat("x", 600) ++ "\n";
     var lines = try line_index.build(a, content);
     defer lines.deinit();
     {

@@ -69,9 +69,9 @@ fn anyToolchain() bool {
 /// (정규 파일이면 ENOTDIR로 실패) — app_session.isExecutablePath와 같은 판정이다.
 fn isExecutableFile(path: []const u8) bool {
     var buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return false;
+    const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{path}, 0) catch return false;
     if (std.c.access(z.ptr, std.posix.X_OK) != 0) return false;
-    const dz = std.fmt.bufPrintZ(&buf, "{s}/", .{path}) catch return false;
+    const dz = std.fmt.bufPrintSentinel(&buf, "{s}/", .{path}, 0) catch return false;
     return std.c.access(dz.ptr, std.posix.F_OK) != 0;
 }
 
@@ -2081,7 +2081,7 @@ pub fn takeTurnSnapshot(
             // 실패했으면 임시 index를 **지우고** 시작한다. 이 파일은 턴마다 재사용하므로(그래야 24 ms다),
             // 남겨 두면 지난 턴의 항목이 남아 스냅샷이 "그때 있던 파일 + 지금 파일"이 된다.
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            if (std.fmt.bufPrintZ(&path_buf, "{s}", .{index_file})) |path_z| {
+            if (std.fmt.bufPrintSentinel(&path_buf, "{s}", .{index_file}, 0)) |path_z| {
                 _ = std.c.unlink(path_z.ptr);
             } else |_| {}
         }
@@ -2666,7 +2666,7 @@ fn runArgvWithEnv(
     var built: usize = 0;
     defer for (argv_store[0..built]) |a| allocator.free(a);
     for (argv_slices) |a| {
-        argv_store[built] = allocator.dupeZ(u8, a) catch return error.GitFailed;
+        argv_store[built] = allocator.dupeSentinel(u8, a, 0) catch return error.GitFailed;
         argv[built] = argv_store[built].ptr;
         built += 1;
     }
@@ -2705,7 +2705,7 @@ fn runArgvWithEnv(
         // 사용자 환경의 `GIT_INDEX_FILE`은 **항상 버린다**. 남겨 두면 우리 명령이 그 index에 쓰게 되어, 스냅샷이
         // 아닌 명령까지 남의 index를 건드린다(스냅샷은 아래에서 우리 값을 명시적으로 건다).
         if (std.mem.eql(u8, pair[0..eq], "GIT_INDEX_FILE")) continue :outer;
-        const copy = allocator.dupeZ(u8, pair) catch return error.GitFailed;
+        const copy = allocator.dupeSentinel(u8, pair, 0) catch return error.GitFailed;
         env_store.append(allocator, copy) catch return error.GitFailed;
         env_ptrs.append(allocator, copy.ptr) catch return error.GitFailed;
     }
@@ -3036,7 +3036,7 @@ fn pumpStdinAndDrain(
         const n_fds: std.c.nfds_t = if (write_fd >= 0) 2 else 1;
         const ready = std.c.poll(&fds, n_fds, -1);
         if (ready < 0) {
-            if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+            if (std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
             if (write_fd >= 0) _ = std.c.close(write_fd);
             return error.ReadFailed;
         }
@@ -3352,7 +3352,7 @@ fn runWriteSyncPosix(
     var argv_ptrs: std.ArrayList(?[*:0]const u8) = .empty;
     defer argv_ptrs.deinit(allocator);
     for (argv_slices) |a| {
-        const copy = allocator.dupeZ(u8, a) catch return error.GitFailed;
+        const copy = allocator.dupeSentinel(u8, a, 0) catch return error.GitFailed;
         argv_store.append(allocator, copy) catch return error.GitFailed;
         argv_ptrs.append(allocator, copy.ptr) catch return error.GitFailed;
     }
@@ -3377,7 +3377,7 @@ fn runWriteSyncPosix(
         // 사용자 환경의 `GIT_INDEX_FILE`은 항상 버린다 — 남겨 두면 우리 쓰기가 **남의 index**에 간다.
         // 읽기보다 이쪽이 더 위험하다(읽기는 잘못된 답을 주고, 쓰기는 잘못된 곳을 바꾼다).
         if (std.mem.eql(u8, pair[0..eq], "GIT_INDEX_FILE")) continue :outer;
-        const copy = allocator.dupeZ(u8, pair) catch return error.GitFailed;
+        const copy = allocator.dupeSentinel(u8, pair, 0) catch return error.GitFailed;
         env_store.append(allocator, copy) catch return error.GitFailed;
         env_ptrs.append(allocator, copy.ptr) catch return error.GitFailed;
     }
@@ -3656,11 +3656,11 @@ test "a test `git -C` on a directory without its own .git fails instead of walki
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = tmpRepoPath(&repo_buf, "tmp-no-walk-up") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    const rm_path = std.fmt.bufPrintSentinel(&rm_buf, "{s}", .{repo}, 0) catch return error.SkipZigTest;
     defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     if (!runQuiet(&.{ exe, "init", "-q", "-b", "main", repo })) return error.SkipZigTest;
     var sub_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const sub = std.fmt.bufPrintZ(&sub_buf, "{s}/sub", .{repo}) catch return error.SkipZigTest;
+    const sub = std.fmt.bufPrintSentinel(&sub_buf, "{s}/sub", .{repo}, 0) catch return error.SkipZigTest;
     try testing.expect(runQuiet(&.{ "/bin/mkdir", sub }));
     // 저장소 안의 하위 디렉터리 — 그냥 `git -C` 면 위의 저장소를 찾아 성공한다. 시험의 `git -C` 는 실패해야 한다
     // (겹친 시험이 지운 임시 저장소 자리에서 개발자 워크트리를 건드리지 않게).
@@ -3673,7 +3673,7 @@ fn tmpRepoPath(buf: []u8, name: []const u8) ?[]const u8 {
     var template_buf: [std.fs.max_path_bytes]u8 = undefined;
     // 이름에 pid 를 넣는다 — `tools/clean-tmp-fixtures.sh` 는 이름 속 pid 가 살아 있으면 남긴다(`$TMPDIR` 이 `/tmp` 일 때 도는 중인
     // 시험의 자리를 지우지 않게).
-    const template = std.fmt.bufPrintZ(&template_buf, "{s}/maru-{s}-{d}-XXXXXX", .{ tmp, name, std.c.getpid() }) catch return null;
+    const template = std.fmt.bufPrintSentinel(&template_buf, "{s}/maru-{s}-{d}-XXXXXX", .{ tmp, name, std.c.getpid() }, 0) catch return null;
     const made = mkdtemp(template.ptr) orelse return null;
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
     const real = std.c.realpath(made, &real_buf) orelse return null;
@@ -3692,7 +3692,7 @@ test "진짜 충돌에서 세 판을 읽는다 — :1:·:2:·:3: (S3a end-to-end
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = tmpRepoPath(&repo_buf, "tmp-merge-stages") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    const rm_path = std.fmt.bufPrintSentinel(&rm_buf, "{s}", .{repo}, 0) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     if (!makeStageRepo(exe, repo, .content)) return error.SkipZigTest;
@@ -3748,7 +3748,7 @@ test "조상이 «빈 파일»이어도 3-way 다 — 길이로 가르지 않는
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = tmpRepoPath(&repo_buf, "tmp-merge-stages-empty") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    const rm_path = std.fmt.bufPrintSentinel(&rm_buf, "{s}", .{repo}, 0) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     if (!makeStageRepo(exe, repo, .empty_base)) return error.SkipZigTest;
@@ -3778,7 +3778,7 @@ test "상한을 넘는 판은 «잘린 채로» 도착한다 (S3a end-to-end)" {
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = tmpRepoPath(&repo_buf, "tmp-merge-stages-big") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    const rm_path = std.fmt.bufPrintSentinel(&rm_buf, "{s}", .{repo}, 0) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
 
@@ -3851,7 +3851,7 @@ test "add/add 충돌에는 조상이 «없다» — 2-way 로 저하한다 (S3a 
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = tmpRepoPath(&repo_buf, "tmp-merge-stages-addadd") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    const rm_path = std.fmt.bufPrintSentinel(&rm_buf, "{s}", .{repo}, 0) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     if (!makeStageRepo(exe, repo, .add_add)) return error.SkipZigTest;
@@ -3999,7 +3999,7 @@ test "충돌 파일도 diff가 열린다(HEAD ↔ 작업트리)" {
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = tmpRepoPath(&repo_buf, "tmp-conflict-diff") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    const rm_path = std.fmt.bufPrintSentinel(&rm_buf, "{s}", .{repo}, 0) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
 
@@ -4025,7 +4025,7 @@ test "실제 충돌 저장소: 마커가 남은 동안은 «남음», 지우면 
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = tmpRepoPath(&repo_buf, "tmp-conflict-markers") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    const rm_path = std.fmt.bufPrintSentinel(&rm_buf, "{s}", .{repo}, 0) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     if (!makeConflictRepo(exe, repo)) return error.SkipZigTest;
@@ -4057,10 +4057,9 @@ test "실제 충돌 저장소: 마커가 남은 동안은 «남음», 지우면 
     // ⑶ 그 결과로 모델을 세우면 그 행의 동작이 `+` 다 — 그리고 ⑴ 의 결과로는 `→` 다.
     var rows: [16]maru.session.scm_view.Row = undefined;
     var scratch: [512]u8 = undefined;
-    const sc = maru.session.scm_view.section_count;
-    const m_after = maru.session.scm_view.buildWithMarkers(after.status, after.conflict_markers, "", "", "", .{false} ** sc, .{true} ** sc, false, &rows, &scratch);
+    const m_after = maru.session.scm_view.buildWithMarkers(after.status, after.conflict_markers, "", "", "", @splat(false), @splat(true), false, &rows, &scratch);
     try testing.expectEqual(maru.session.scm_view.RowAction.stage, m_after.rows[1].file.action);
-    const m_before = maru.session.scm_view.buildWithMarkers(before.status, before.conflict_markers, "", "", "", .{false} ** sc, .{true} ** sc, false, &rows, &scratch);
+    const m_before = maru.session.scm_view.buildWithMarkers(before.status, before.conflict_markers, "", "", "", @splat(false), @splat(true), false, &rows, &scratch);
     try testing.expectEqual(maru.session.scm_view.RowAction.resolve, m_before.rows[1].file.action);
 }
 
@@ -4072,7 +4071,7 @@ test "실제 충돌 저장소: 배치보다 많은 충돌 파일 — 한 배치�
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = tmpRepoPath(&repo_buf, "tmp-conflict-markers-many") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    const rm_path = std.fmt.bufPrintSentinel(&rm_buf, "{s}", .{repo}, 0) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     const n = git_command.conflict_markers_batch + 3; // 두 배치 + 꼬리
@@ -4119,7 +4118,7 @@ test "실제 충돌 저장소: grep 이 실패하면 «판정 못 함» — 충�
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = tmpRepoPath(&repo_buf, "tmp-conflict-markers-fail") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    const rm_path = std.fmt.bufPrintSentinel(&rm_buf, "{s}", .{repo}, 0) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     // **배치보다 많은 충돌 파일로** — 첫 배치(꽉 찬 것)의 실패와 꼬리 배치의 실패는 다른 줄이라 둘 다 지나야
@@ -4141,7 +4140,7 @@ test "실제 충돌 저장소: grep 이 실패하면 «판정 못 함» — 충�
     , .{exe});
     try writeFileAt(repo, "fake-git.sh", script);
     var wrapper_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const wrapper = try std.fmt.bufPrintZ(&wrapper_buf, "{s}/fake-git.sh", .{repo});
+    const wrapper = try std.fmt.bufPrintSentinel(&wrapper_buf, "{s}/fake-git.sh", .{repo}, 0);
     if (std.c.chmod(wrapper.ptr, 0o755) != 0) return error.ChmodFailed;
 
     var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
@@ -4153,8 +4152,7 @@ test "실제 충돌 저장소: grep 이 실패하면 «판정 못 함» — 충�
     try testing.expect(!r.conflict_scan_ok);
     var rows: [16]maru.session.scm_view.Row = undefined;
     var scratch: [512]u8 = undefined;
-    const sc = maru.session.scm_view.section_count;
-    const m = maru.session.scm_view.buildWithMarkers(r.status, if (r.conflict_scan_ok) r.conflict_markers else null, "", "", "", .{false} ** sc, .{true} ** sc, false, &rows, &scratch);
+    const m = maru.session.scm_view.buildWithMarkers(r.status, if (r.conflict_scan_ok) r.conflict_markers else null, "", "", "", @splat(false), @splat(true), false, &rows, &scratch);
     try testing.expectEqual(maru.session.scm_view.RowAction.resolve, m.rows[1].file.action);
 
     // **꼬리 배치만 실패해도** 같다(적대적 5회차 E2 — 첫 배치만 죽이는 래퍼로는 꼬리 줄이 안 갈렸다).
@@ -4243,7 +4241,7 @@ fn makeConflictRepo(exe: []const u8, repo: []const u8) bool {
 
 fn writeFileAt(dir: []const u8, name: []const u8, content: []const u8) !void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ dir, name });
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}", .{ dir, name }, 0);
     const fd = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
     if (fd < 0) return error.OpenFailed;
     defer _ = std.c.close(fd);
@@ -4289,14 +4287,14 @@ fn runQuiet(argv: []const []const u8) bool {
     defer for (store[0..built]) |a| testing.allocator.free(a);
     for (argv, 0..) |a, i| {
         if (built >= store.len) return false;
-        store[built] = testing.allocator.dupeZ(u8, a) catch return false;
+        store[built] = testing.allocator.dupeSentinel(u8, a, 0) catch return false;
         c_argv[built] = store[built].ptr;
         built += 1;
         // `git -C <저장소>` 는 그 저장소의 `.git` 만 쓴다 — 없으면 위로 찾아 올라가지 않고 실패한다(겹친 시험이 지운
         // 저장소 대신 개발자 워크트리를 건드리지 않게 — `tmpRepoPath`).
         if (i == 2 and std.mem.eql(u8, argv[1], "-C") and std.mem.endsWith(u8, argv[0], "git")) {
             if (built >= store.len) return false;
-            store[built] = testing.allocator.dupeZ(u8, "--git-dir=.git") catch return false;
+            store[built] = testing.allocator.dupeSentinel(u8, "--git-dir=.git", 0) catch return false;
             c_argv[built] = store[built].ptr;
             built += 1;
         }
@@ -4327,7 +4325,7 @@ test "저장소 밖을 가리키는 symlink는 읽지 않는다" {
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = tmpRepoPath(&repo_buf, "tmp-symlink-escape") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    const rm_path = std.fmt.bufPrintSentinel(&rm_buf, "{s}", .{repo}, 0) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
 
@@ -4336,11 +4334,11 @@ test "저장소 밖을 가리키는 symlink는 읽지 않는다" {
 
     // ⑴ 마지막 요소가 링크: `secret.txt -> /etc/hosts`
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const link = std.fmt.bufPrintZ(&link_buf, "{s}/secret.txt", .{repo}) catch return error.SkipZigTest;
+    const link = std.fmt.bufPrintSentinel(&link_buf, "{s}/secret.txt", .{repo}, 0) catch return error.SkipZigTest;
     if (!runQuiet(&.{ "/bin/ln", "-s", "/etc/hosts", link })) return error.SkipZigTest;
     // ⑵ 중간 요소가 링크: `escape/ -> /etc` (마지막만 막으면 여기로 새어 나간다)
     var dir_link_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_link = std.fmt.bufPrintZ(&dir_link_buf, "{s}/escape", .{repo}) catch return error.SkipZigTest;
+    const dir_link = std.fmt.bufPrintSentinel(&dir_link_buf, "{s}/escape", .{repo}, 0) catch return error.SkipZigTest;
     if (!runQuiet(&.{ "/bin/ln", "-s", "/etc", dir_link })) return error.SkipZigTest;
 
     // 정상 파일은 읽힌다(방어가 기능을 죽이지 않았다는 대조군).
@@ -4364,7 +4362,7 @@ test "턴 스냅샷은 진짜 index와 작업트리를 건드리지 않는다(en
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = tmpRepoPath(&repo_buf, "tmp-turn-snapshot") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    const rm_path = std.fmt.bufPrintSentinel(&rm_buf, "{s}", .{repo}, 0) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
     defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
 
@@ -4383,7 +4381,7 @@ test "턴 스냅샷은 진짜 index와 작업트리를 건드리지 않는다(en
     var index_buf: [std.fs.max_path_bytes]u8 = undefined;
     const index_file = std.fmt.bufPrint(&index_buf, "{s}-index", .{repo}) catch return error.SkipZigTest;
     var idx_rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const idx_rm = std.fmt.bufPrintZ(&idx_rm_buf, "{s}", .{index_file}) catch return error.SkipZigTest;
+    const idx_rm = std.fmt.bufPrintSentinel(&idx_rm_buf, "{s}", .{index_file}, 0) catch return error.SkipZigTest;
     _ = runQuiet(&.{ "/bin/rm", "-f", idx_rm });
     defer _ = runQuiet(&.{ "/bin/rm", "-f", idx_rm });
 
@@ -4466,7 +4464,7 @@ const WriteFixture = struct {
         var ptrs: std.ArrayList(?[*:0]const u8) = .empty;
         defer ptrs.deinit(allocator);
         for (argv.items) |a| {
-            const c = try allocator.dupeZ(u8, a);
+            const c = try allocator.dupeSentinel(u8, a, 0);
             try store.append(allocator, c);
             try ptrs.append(allocator, c.ptr);
         }
@@ -4480,7 +4478,7 @@ const WriteFixture = struct {
     /// hook 스크립트를 실행 가능하게 만든다(안 하면 git이 조용히 건너뛴다).
     fn chmodExec(self: *WriteFixture, sub_path: []const u8) !void {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const full = try std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ self.root, sub_path });
+        const full = try std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ self.root, sub_path }, 0);
         if (std.c.chmod(full, 0o755) != 0) return error.ChmodFailed;
     }
 
@@ -4523,7 +4521,7 @@ const WriteFixture = struct {
         var ptrs: std.ArrayList(?[*:0]const u8) = .empty;
         defer ptrs.deinit(allocator);
         for (argv.items) |a| {
-            const c = try allocator.dupeZ(u8, a);
+            const c = try allocator.dupeSentinel(u8, a, 0);
             try store.append(allocator, c);
             try ptrs.append(allocator, c.ptr);
         }
@@ -5336,13 +5334,13 @@ fn wt6Run(allocator: std.mem.Allocator, git_exe: []const u8, args: []const []con
 
 fn wt6Exists(path: []const u8) bool {
     var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const p = std.fmt.bufPrintZ(&z, "{s}", .{path}) catch return false;
+    const p = std.fmt.bufPrintSentinel(&z, "{s}", .{path}, 0) catch return false;
     return std.c.access(p.ptr, std.c.F_OK) == 0;
 }
 
 fn wt6Remove(path: []const u8) void {
     var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const p = std.fmt.bufPrintZ(&z, "{s}", .{path}) catch return;
+    const p = std.fmt.bufPrintSentinel(&z, "{s}", .{path}, 0) catch return;
     _ = std.c.unlink(p.ptr);
 }
 
@@ -5351,7 +5349,7 @@ fn wt6Script(io: std.Io, path: []const u8, marker: []const u8) !void {
     var body: [std.fs.max_path_bytes + 64]u8 = undefined;
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = try std.fmt.bufPrint(&body, "#!/bin/sh\ntouch '{s}'\necho 'gpg: FAKE' >&2\necho 'gpg: FAKE'\nexit 1\n", .{marker}) });
     var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}", .{path})).ptr, 0o755);
+    _ = std.c.chmod((try std.fmt.bufPrintSentinel(&z, "{s}", .{path}, 0)).ptr, 0o755);
 }
 
 test "WT6a 읽기는 서명 검증 프로그램을 실행하지 않는다 — 저장소의 log.showSignature + gpg.program (계획 workspace-trust)" {
@@ -5522,9 +5520,9 @@ test "WT6b-1a 신뢰 전 partial clone — 읽기는 지연 가져오기를 안 
     // 값보다 앞서면 git 의 getenv 는 그 앞 것을 읽는다(그리고 `file` 은 문을 연다 — 실측). 러너가 상속분을 버려야
     // (`untrustedDropsInherited`) 막힌다. 되돌릴 때 `unsetenv` 를 안 쓴다(std 가 붙잡은 envp 가 낡는다 — `kitty_media_io`
     // 판정자와 같은 이유) — 「없음」이었으면 무해한 값(`0`·모든 프로토콜 이름이 아닌 값)으로 둔다.
-    const saved_lazy = if (std.c.getenv("GIT_NO_LAZY_FETCH")) |v| try allocator.dupeZ(u8, std.mem.span(v)) else null;
+    const saved_lazy = if (std.c.getenv("GIT_NO_LAZY_FETCH")) |v| try allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
     defer if (saved_lazy) |v| allocator.free(v);
-    const saved_allow = if (std.c.getenv("GIT_ALLOW_PROTOCOL")) |v| try allocator.dupeZ(u8, std.mem.span(v)) else null;
+    const saved_allow = if (std.c.getenv("GIT_ALLOW_PROTOCOL")) |v| try allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
     defer if (saved_allow) |v| allocator.free(v);
     _ = setenv("GIT_NO_LAZY_FETCH", "0", 1);
     _ = setenv("GIT_ALLOW_PROTOCOL", "file", 1);
@@ -5709,8 +5707,8 @@ test "WT7b SSH 목록 읽기 — 루트를 먼저 묻고(신뢰 전 규칙) 그 
     // 홈은 심링크로 둔다 — 원격 홈은 심링크를 푼 경로로 와야 한다(저장소 루트와 같은 기준).
     var link_z: [std.fs.max_path_bytes + 1]u8 = undefined;
     var real_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const home_link = try std.fmt.bufPrintZ(&link_z, "{s}/home-link", .{root});
-    if (std.c.symlink((try std.fmt.bufPrintZ(&real_z, "{s}", .{home_real})).ptr, home_link.ptr) != 0) return error.SkipZigTest;
+    const home_link = try std.fmt.bufPrintSentinel(&link_z, "{s}/home-link", .{root}, 0);
+    if (std.c.symlink((try std.fmt.bufPrintSentinel(&real_z, "{s}", .{home_real}, 0)).ptr, home_link.ptr) != 0) return error.SkipZigTest;
     // 가짜 ssh — 인자는 `-o BatchMode=yes -S <ctl> <dest> <cmd>`. 원격 명령 줄을 적고 그대로 이 기계의 sh 로 돌린다(홈은 심링크).
     var script_buf: [4 * std.fs.max_path_bytes]u8 = undefined;
     const script = try std.fmt.bufPrint(&script_buf, "#!/bin/sh\nprintf '%s\\n' \"$6\" >> '{s}'\nHOME='{s}'; export HOME\nexec /bin/sh -c \"$6\"\n", .{ log_path, home_link });
@@ -5718,12 +5716,12 @@ test "WT7b SSH 목록 읽기 — 루트를 먼저 묻고(신뢰 전 규칙) 그 
     const ssh_path = try std.fmt.bufPrint(&ssh_buf, "{s}/ssh", .{bin});
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = ssh_path, .data = script });
     var ssh_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    if (std.c.chmod((try std.fmt.bufPrintZ(&ssh_z, "{s}", .{ssh_path})).ptr, 0o755) != 0) return error.SkipZigTest;
+    if (std.c.chmod((try std.fmt.bufPrintSentinel(&ssh_z, "{s}", .{ssh_path}, 0)).ptr, 0o755) != 0) return error.SkipZigTest;
     // PATH 앞에 가짜 ssh — 원래 값은 복사해 둔다(`getenv` 포인터는 `setenv` 뒤 매달린다).
-    const saved_path: ?[:0]u8 = if (std.c.getenv("PATH")) |p| try allocator.dupeZ(u8, std.mem.span(p)) else null;
+    const saved_path: ?[:0]u8 = if (std.c.getenv("PATH")) |p| try allocator.dupeSentinel(u8, std.mem.span(p), 0) else null;
     defer if (saved_path) |p| allocator.free(p);
     var path_z: [8 * std.fs.max_path_bytes]u8 = undefined;
-    _ = setenv("PATH", (try std.fmt.bufPrintZ(&path_z, "{s}:{s}", .{ bin, if (saved_path) |p| p else "/usr/bin:/bin" })).ptr, 1);
+    _ = setenv("PATH", (try std.fmt.bufPrintSentinel(&path_z, "{s}:{s}", .{ bin, if (saved_path) |p| p else "/usr/bin:/bin" }, 0)).ptr, 1);
     defer if (saved_path) |p| {
         _ = setenv("PATH", p.ptr, 1);
     };
@@ -5807,16 +5805,16 @@ test "WT7c-2 SSH 턴 찍기는 신뢰한 저장소에서만 — 그 왕복의 �
     const ssh_path = try std.fmt.bufPrint(&ssh_buf, "{s}/bin/ssh", .{base});
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = ssh_path, .data = script });
     var ssh_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    if (std.c.chmod((try std.fmt.bufPrintZ(&ssh_z, "{s}", .{ssh_path})).ptr, 0o755) != 0) return error.SkipZigTest;
-    const saved_path: ?[:0]u8 = if (std.c.getenv("PATH")) |p| try allocator.dupeZ(u8, std.mem.span(p)) else null;
+    if (std.c.chmod((try std.fmt.bufPrintSentinel(&ssh_z, "{s}", .{ssh_path}, 0)).ptr, 0o755) != 0) return error.SkipZigTest;
+    const saved_path: ?[:0]u8 = if (std.c.getenv("PATH")) |p| try allocator.dupeSentinel(u8, std.mem.span(p), 0) else null;
     defer if (saved_path) |p| allocator.free(p);
     var path_z: [8 * std.fs.max_path_bytes]u8 = undefined;
-    _ = setenv("PATH", (try std.fmt.bufPrintZ(&path_z, "{s}/bin:{s}", .{ base, if (saved_path) |p| p else "/usr/bin:/bin" })).ptr, 1);
+    _ = setenv("PATH", (try std.fmt.bufPrintSentinel(&path_z, "{s}/bin:{s}", .{ base, if (saved_path) |p| p else "/usr/bin:/bin" }, 0)).ptr, 1);
     defer if (saved_path) |p| {
         _ = setenv("PATH", p.ptr, 1);
     };
     var home_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_WT7C2_HOME", (try std.fmt.bufPrintZ(&home_z, "{s}", .{home})).ptr, 1);
+    _ = setenv("MARU_WT7C2_HOME", (try std.fmt.bufPrintSentinel(&home_z, "{s}", .{home}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_WT7C2_HOME");
     inline for (.{ "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL" }) |name| _ = setenv(name, "maru-test", 1);
     defer inline for (.{ "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL" }) |name| {
@@ -5854,11 +5852,11 @@ test "WT7c-2 SSH 턴 찍기는 신뢰한 저장소에서만 — 그 왕복의 �
 
     // ⑵ 그 루트가 그 기계의 홈이다 — 허용 목록에 있어도 찍지 않는다(묻지 않는 root).
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = log_path, .data = "" });
-    _ = setenv("MARU_WT7C2_HOME", (try std.fmt.bufPrintZ(&home_z, "{s}", .{repo})).ptr, 1);
+    _ = setenv("MARU_WT7C2_HOME", (try std.fmt.bufPrintSentinel(&home_z, "{s}", .{repo}, 0)).ptr, 1);
     try std.testing.expect(backend.submitSnapshot(git_exe, cwd, index_file, 2, remote, try std.fmt.bufPrint(&roots_buf, "/srv/other\n{s}\n", .{repo})));
     try std.testing.expectEqual(@as(usize, 0), try Take.tree(&backend, 2));
     try std.testing.expect(std.mem.indexOf(u8, try std.Io.Dir.cwd().readFile(io, log_path, &log_buf), "'read-tree'") == null);
-    _ = setenv("MARU_WT7C2_HOME", (try std.fmt.bufPrintZ(&home_z, "{s}", .{home})).ptr, 1);
+    _ = setenv("MARU_WT7C2_HOME", (try std.fmt.bufPrintSentinel(&home_z, "{s}", .{home}, 0)).ptr, 1);
 
     // ⑶ 허용 목록에 그 루트가 있다(cwd 는 하위 폴더 — 루트로 대 본다) — 찍는다. 루트 읽기만 신뢰 전 규칙이고 스냅샷 명령은 신뢰 규칙이다
     //    (지연 가져오기 금지 env 가 없다), 임시 index 는 그 자리에 선다.
@@ -5997,12 +5995,12 @@ test "WT6b-1b 신뢰 전 읽기는 저장소가 정의한 필터(local·include�
     const global_file = try std.fmt.bufPrint(&pb[14], "{s}/global.cfg", .{root});
     var global_body: [2 * std.fs.max_path_bytes]u8 = undefined;
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = global_file, .data = try std.fmt.bufPrint(&global_body, "[filter \"lfs\"]\n\tclean = touch '{s}'; cat\n", .{global_marker}) });
-    const saved_global = if (std.c.getenv("GIT_CONFIG_GLOBAL")) |v| try allocator.dupeZ(u8, std.mem.span(v)) else null;
+    const saved_global = if (std.c.getenv("GIT_CONFIG_GLOBAL")) |v| try allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
     defer if (saved_global) |v| allocator.free(v);
     var home_cfg: [std.fs.max_path_bytes + 16]u8 = undefined;
-    const default_global: [:0]const u8 = if (std.c.getenv("HOME")) |h| try std.fmt.bufPrintZ(&home_cfg, "{s}/.gitconfig", .{std.mem.span(h)}) else "/dev/null";
+    const default_global: [:0]const u8 = if (std.c.getenv("HOME")) |h| try std.fmt.bufPrintSentinel(&home_cfg, "{s}/.gitconfig", .{std.mem.span(h)}, 0) else "/dev/null";
     var global_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("GIT_CONFIG_GLOBAL", (try std.fmt.bufPrintZ(&global_z, "{s}", .{global_file})).ptr, 1);
+    _ = setenv("GIT_CONFIG_GLOBAL", (try std.fmt.bufPrintSentinel(&global_z, "{s}", .{global_file}, 0)).ptr, 1);
     defer _ = setenv("GIT_CONFIG_GLOBAL", if (saved_global) |v| v.ptr else default_global.ptr, 1);
 
     var repo_dir = try tmp.dir.openDir(io, "repo", .{});
@@ -6035,16 +6033,16 @@ test "WT6b-1b 신뢰 전 읽기는 저장소가 정의한 필터(local·include�
     // 값(`COUNT=0` 이면 남은 KEY 는 안 읽힌다).
     const env_names = [_][:0]const u8{ "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1" };
     var saved_env: [env_names.len]?[:0]u8 = undefined;
-    for (env_names, 0..) |name, k| saved_env[k] = if (std.c.getenv(name)) |v| try allocator.dupeZ(u8, std.mem.span(v)) else null;
+    for (env_names, 0..) |name, k| saved_env[k] = if (std.c.getenv(name)) |v| try allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
     defer for (env_names, 0..) |name, k| {
         _ = setenv(name, if (saved_env[k]) |v| v.ptr else if (k == 0) "0" else "", 1);
         if (saved_env[k]) |v| allocator.free(v);
     };
     _ = setenv("GIT_CONFIG_COUNT", "2", 1);
     _ = setenv("GIT_CONFIG_KEY_0", "filter.evil.clean", 1);
-    _ = setenv("GIT_CONFIG_VALUE_0", (try std.fmt.bufPrintZ(&inherited_cmd, "touch '{s}'; cat", .{inherited_marker})).ptr, 1);
+    _ = setenv("GIT_CONFIG_VALUE_0", (try std.fmt.bufPrintSentinel(&inherited_cmd, "touch '{s}'; cat", .{inherited_marker}, 0)).ptr, 1);
     _ = setenv("GIT_CONFIG_KEY_1", "filter.userf.clean", 1);
-    _ = setenv("GIT_CONFIG_VALUE_1", (try std.fmt.bufPrintZ(&user_cmd, "touch '{s}'; cat", .{user_marker})).ptr, 1);
+    _ = setenv("GIT_CONFIG_VALUE_1", (try std.fmt.bufPrintSentinel(&user_cmd, "touch '{s}'; cat", .{user_marker}, 0)).ptr, 1);
     var no: Wt6bTrust = .{ .trusted = false };
     var backend = try Backend.initWithTrust(io, .{ .ctx = &no, .trusted = Wt6bTrust.check });
     defer backend.deinit();
@@ -6082,7 +6080,7 @@ test "WT6b-1b 신뢰 전 읽기는 저장소가 정의한 필터(local·include�
     var old_body: [std.fs.max_path_bytes + 96]u8 = undefined;
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = old_git, .data = try std.fmt.bufPrint(&old_body, "#!/bin/sh\ncase \"$*\" in *--show-scope*) echo 'error: unknown option' >&2; exit 129;; esac\nexec '{s}' \"$@\"\n", .{git_exe}) });
     var old_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = std.c.chmod((try std.fmt.bufPrintZ(&old_z, "{s}", .{old_git})).ptr, 0o755);
+    _ = std.c.chmod((try std.fmt.bufPrintSentinel(&old_z, "{s}", .{old_git}, 0)).ptr, 0o755);
     try Force.all(io, repo_dir);
     for (marker_paths) |m| wt6Remove(m);
     try std.testing.expect(backend.submit(old_git, repo, "", 5, null));
@@ -6098,7 +6096,7 @@ test "WT6b-1b 신뢰 전 읽기는 저장소가 정의한 필터(local·include�
     // 대체 조회가 128·129 가 아닌 이유로 실패하면(신호 — 시한·spawn 실패와 같은 갈래) 드라이버가 있는지 모른다 — 읽지 않는다.
     const crash_git = try std.fmt.bufPrint(&pb[15], "{s}/crash-git", .{root});
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = crash_git, .data = try std.fmt.bufPrint(&old_body, "#!/bin/sh\ncase \"$*\" in *--show-scope*) exit 129;; *--worktree*) kill -9 $$;; esac\nexec '{s}' \"$@\"\n", .{git_exe}) });
-    _ = std.c.chmod((try std.fmt.bufPrintZ(&old_z, "{s}", .{crash_git})).ptr, 0o755);
+    _ = std.c.chmod((try std.fmt.bufPrintSentinel(&old_z, "{s}", .{crash_git}, 0)).ptr, 0o755);
     try std.testing.expect(backend.submit(crash_git, sub_src, "", 8, null));
     var crashed = waitForList(&backend) orelse return error.ListNeverCompleted;
     defer crashed.deinit(worker_allocator);
@@ -6185,7 +6183,7 @@ test "원격 커밋: 512 KiB 메시지가 stdin 으로 가고, hook 이 stderr �
     });
     defer std.Io.Dir.cwd().deleteFile(io, hook) catch {};
     // 실행 비트를 세운다 — git 은 실행 가능한 hook 만 부른다.
-    const hook_z = try allocator.dupeZ(u8, hook);
+    const hook_z = try allocator.dupeSentinel(u8, hook, 0);
     defer allocator.free(hook_z);
     if (std.c.chmod(hook_z, 0o755) != 0) return error.SkipZigTest;
 

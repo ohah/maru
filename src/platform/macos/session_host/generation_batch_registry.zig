@@ -50,7 +50,7 @@ const TerminalCleanupLifecycle = terminal_contract.Lifecycle;
 pub const TerminalCleanupHandoff = struct {
     self_addr: usize = 0,
     token_count: u32 = 0,
-    ordered_token_digest: terminal_contract.Digest = [_]u8{0} ** 32,
+    ordered_token_digest: terminal_contract.Digest = @as([32]u8, @splat(0)),
     surviving_descriptor_count: u32 = 0,
     quarantined_descriptor_count: u32 = 0,
     accounting_count: u32 = 0,
@@ -63,7 +63,7 @@ pub const TerminalCleanupHandoff = struct {
     pub fn pristine(self: *const TerminalCleanupHandoff) bool {
         return self.self_addr == 0 and self.token_count == 0 and self.request_generation == 0 and
             self.lifecycle == .pristine and
-            std.mem.eql(u8, &self.ordered_token_digest, &([_]u8{0} ** 32));
+            std.mem.eql(u8, &self.ordered_token_digest, &(@as([32]u8, @splat(0))));
     }
 };
 
@@ -259,7 +259,7 @@ pub const AllocatorScopePurpose = enum(u8) {
     rpc_prepare,
     rpc_execute,
 };
-const allocator_scope_purpose_max: u8 = @intFromEnum(AllocatorScopePurpose.rpc_execute);
+const allocator_scope_purpose_max: u8 = @backingInt(AllocatorScopePurpose.rpc_execute);
 const AllocatorScopeState = enum { idle, active, invalid };
 
 const AllocatorScopeAuthority = struct {
@@ -275,7 +275,7 @@ const AllocatorScopeAuthority = struct {
 
 var allocator_scope_authority_mutex: std.atomic.Mutex = .unlocked;
 var allocator_scope_authorities: [max_entries]AllocatorScopeAuthority =
-    [_]AllocatorScopeAuthority{.{}} ** max_entries;
+    @as([max_entries]AllocatorScopeAuthority, @splat(.{}));
 var allocator_scope_authority_generation: u64 = 0;
 var allocator_scope_authority_process_id: std.atomic.Value(u32) = .init(0);
 
@@ -321,7 +321,7 @@ pub const AccountingLedger = struct {
     allocator_scope_installed: ?std.mem.Allocator = null,
     allocator_scope_authority_slot: u16 = 0,
     allocator_scope_authority_generation: u64 = 0,
-    entries: [max_entries]AccountingEntry = [_]AccountingEntry{.{}} ** max_entries,
+    entries: [max_entries]AccountingEntry = @as([max_entries]AccountingEntry, @splat(.{})),
 
     pub fn initInPlace(out: *AccountingLedger) Error!void {
         if (out.self_addr != 0 or out.lifecycle != .pristine) return error.InvalidState;
@@ -580,7 +580,7 @@ test "CR3a-2c3d C1 allocator authority rejects raw and partial ledger states" {
             1,
             token,
             epoch,
-            @intFromEnum(purpose),
+            @backingInt(purpose),
             previous_allocator,
             installed_allocator,
         );
@@ -588,7 +588,7 @@ test "CR3a-2c3d C1 allocator authority rejects raw and partial ledger states" {
             1,
             token,
             epoch,
-            @intFromEnum(purpose),
+            @backingInt(purpose),
             previous_allocator,
             installed_allocator,
         ));
@@ -596,7 +596,7 @@ test "CR3a-2c3d C1 allocator authority rejects raw and partial ledger states" {
             1,
             token,
             epoch,
-            @intFromEnum(purpose),
+            @backingInt(purpose),
             previous_allocator,
             installed_allocator,
         );
@@ -643,7 +643,7 @@ test "CR3a-2c3d C1 fork child rejects inherited allocator authority before mutex
             1,
             2,
             3,
-            @intFromEnum(AllocatorScopePurpose.rpc_execute),
+            @backingInt(AllocatorScopePurpose.rpc_execute),
             std.testing.allocator,
             std.heap.page_allocator,
         );
@@ -722,7 +722,7 @@ pub const Registry = struct {
     terminal_handoff_active: bool = false,
     terminal_request_generation: u64 = 0,
     terminal_handoff: TerminalCleanupHandoff = .{},
-    entries: [max_entries]Entry = [_]Entry{.{}} ** max_entries,
+    entries: [max_entries]Entry = @as([max_entries]Entry, @splat(.{})),
 
     pub fn initInPlace(out: *Registry, incarnation: u64) Error!void {
         if (incarnation == 0) return error.InvalidIdentity;
@@ -1087,9 +1087,9 @@ pub const Registry = struct {
         }) catch @panic("terminal cleanup identity seal failed");
         self.terminal_handoff.state = .{
             .identity_seal = identity_seal,
-            .lifecycle_raw = @intFromEnum(terminal_contract.Lifecycle.published),
+            .lifecycle_raw = @backingInt(terminal_contract.Lifecycle.published),
             .state_generation = 1,
-            .state_seal = [_]u8{0} ** 32,
+            .state_seal = @as([32]u8, @splat(0)),
         };
         self.terminal_handoff.state.state_seal = process_seal_service.terminalCleanupStateSeal(
             ready.pid,
@@ -1139,7 +1139,7 @@ pub const Registry = struct {
             self.terminal_handoff.identity.self_addr == @intFromPtr(&self.terminal_handoff) and
             self.terminal_handoff.identity.pid == process_identity.currentProcessId() and
             self.terminal_handoff.identity.thread_id == @as(u64, @intCast(std.Thread.getCurrentId())) and
-            self.terminal_handoff.state.lifecycle_raw == @intFromEnum(expected_lifecycle) and
+            self.terminal_handoff.state.lifecycle_raw == @backingInt(expected_lifecycle) and
             self.terminal_handoff.state.state_generation == expected_generation and
             self.terminal_handoff.token_count == self.terminal_handoff.identity.token_count and
             self.terminal_handoff.surviving_descriptor_count == self.terminal_handoff.identity.surviving_descriptor_count and
@@ -1202,7 +1202,7 @@ pub const Registry = struct {
             generation == std.math.maxInt(u64))
             @panic("terminal cleanup state proof was lost");
         self.terminal_handoff.lifecycle = next;
-        self.terminal_handoff.state.lifecycle_raw = @intFromEnum(next);
+        self.terminal_handoff.state.lifecycle_raw = @backingInt(next);
         self.terminal_handoff.state.state_generation = generation + 1;
         self.terminal_handoff.state.state_seal = process_seal_service.terminalCleanupStateSeal(
             self.terminal_handoff.identity.pid,
@@ -1661,17 +1661,17 @@ test "CR3a-2b1 registry commit은 live sibling payload overlap을 publication �
 
 test "CR3a-2d1 registry generation release completed raw는 고정된다" {
     try std.testing.expectEqual(@as(usize, 3), std.enums.values(GenerationReleaseResult).len);
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(GenerationReleaseResult.completed));
+    try std.testing.expectEqual(@as(u8, 0), @backingInt(GenerationReleaseResult.completed));
 }
 
 test "CR3a-2d1 registry generation release retryable raw는 고정된다" {
     try std.testing.expectEqual(@as(usize, 3), std.enums.values(GenerationReleaseResult).len);
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(GenerationReleaseResult.retryable_preserved));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(GenerationReleaseResult.retryable_preserved));
 }
 
 test "CR3a-2d1 registry generation release indeterminate raw는 고정된다" {
     try std.testing.expectEqual(@as(usize, 3), std.enums.values(GenerationReleaseResult).len);
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(GenerationReleaseResult.indeterminate_or_partial));
+    try std.testing.expectEqual(@as(u8, 2), @backingInt(GenerationReleaseResult.indeterminate_or_partial));
 }
 
 test "CR3a-2d1 registry prepared release는 final address 복사와 stale token을 거부한다" {
@@ -1838,7 +1838,7 @@ fn terminalFixtureRelease(registry: *Registry, token: Token) !void {
 }
 
 comptime {
-    for (std.meta.fields(Token)) |field| switch (@typeInfo(field.type)) {
+    for (@import("type_info_fields").fields(Token)) |field| switch (@typeInfo(field.type)) {
         .pointer => @compileError("generation batch token must stay pointer-free"),
         else => {},
     };

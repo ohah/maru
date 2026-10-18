@@ -83,7 +83,7 @@ pub const State = struct {
     pub fn apply(self: *State, intent: component.ids.Intent) bool {
         switch (intent) {
             .toggle_section => |section| {
-                const index = @intFromEnum(sectionOf(section));
+                const index = @backingInt(sectionOf(section));
                 self.collapsed[index] = !self.collapsed[index];
                 // **행 번호가 밀리므로 강조를 내린다** — 안 내리면 엉뚱한 행이 강조된 채 남는다.
                 self.selected = null;
@@ -91,7 +91,7 @@ pub const State = struct {
                 return true;
             },
             .expand_section => |section| {
-                self.expanded[@intFromEnum(sectionOf(section))] = true;
+                self.expanded[@backingInt(sectionOf(section))] = true;
                 self.selected = null;
                 self.generation += 1;
                 return true;
@@ -433,30 +433,30 @@ const testing = std.testing;
 test "접으면 강조가 내려간다 — 행 번호가 밀리기 때문" {
     var state = State{ .selected = 3 };
     try testing.expect(state.apply(.{ .toggle_section = .changes }));
-    try testing.expect(state.collapsed[@intFromEnum(scm_view.Section.changes)]);
+    try testing.expect(state.collapsed[@backingInt(scm_view.Section.changes)]);
     try testing.expectEqual(@as(?usize, null), state.selected);
 }
 
 test "다시 누르면 펴진다" {
     var state = State{};
     _ = state.apply(.{ .toggle_section = .staged });
-    try testing.expect(state.collapsed[@intFromEnum(scm_view.Section.staged)]);
+    try testing.expect(state.collapsed[@backingInt(scm_view.Section.staged)]);
     _ = state.apply(.{ .toggle_section = .staged });
-    try testing.expect(!state.collapsed[@intFromEnum(scm_view.Section.staged)]);
+    try testing.expect(!state.collapsed[@backingInt(scm_view.Section.staged)]);
 }
 
 test "섹션마다 자리가 따로다 — 하나를 접어도 다른 하나는 그대로다" {
     var state = State{};
     _ = state.apply(.{ .toggle_section = .changes });
-    try testing.expect(state.collapsed[@intFromEnum(scm_view.Section.changes)]);
-    try testing.expect(!state.collapsed[@intFromEnum(scm_view.Section.staged)]);
+    try testing.expect(state.collapsed[@backingInt(scm_view.Section.changes)]);
+    try testing.expect(!state.collapsed[@backingInt(scm_view.Section.staged)]);
 }
 
 test "모두 보기는 그 섹션만 편다" {
     var state = State{ .selected = 1 };
     try testing.expect(state.apply(.{ .expand_section = .changes }));
-    try testing.expect(state.expanded[@intFromEnum(scm_view.Section.changes)]);
-    try testing.expect(!state.expanded[@intFromEnum(scm_view.Section.staged)]);
+    try testing.expect(state.expanded[@backingInt(scm_view.Section.changes)]);
+    try testing.expect(!state.expanded[@backingInt(scm_view.Section.staged)]);
     try testing.expectEqual(@as(?usize, null), state.selected);
 }
 
@@ -504,5 +504,5 @@ test "접힘 상태는 목록이 바뀌어도 남는다 — 사용자가 접어 
     var state = State{};
     _ = state.apply(.{ .toggle_section = .staged });
     state.invalidateTree();
-    try testing.expect(state.collapsed[@intFromEnum(scm_view.Section.staged)]);
+    try testing.expect(state.collapsed[@backingInt(scm_view.Section.staged)]);
 }

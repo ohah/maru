@@ -71,7 +71,7 @@ const Document = struct {
     dl_window_calls: u32 = 0,
     dl_hide_calls: u32 = 0,
 };
-var documents: [256]?Document = [_]?Document{null} ** 256;
+var documents: [256]?Document = @as([256]?Document, @splat(null));
 /// iframe 문서는 이만큼까지만 — 광고 iframe 이 표를 다 채워 새 주 프레임 문서(알림 중계)가 밀려나지 않게(W6m③ 적대 검토).
 const max_subframe_documents = 192;
 

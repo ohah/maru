@@ -10,6 +10,8 @@
 //!
 //! 이 폴더는 OS 를 부르지 않는다 — `tests/boundary/editor_ops_sans_io.zig` 가 폴더를 훑어 지킨다
 //! (이식 계획 docs/plans/app-session-portability.md §1.5).
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const delta = @import("../delta.zig");
 const line_index = @import("../line_index.zig");
@@ -725,7 +727,7 @@ test "INDB1 짝 없는 마지막 여는 괄호 — 문자열·줄 주석 안은 
     const plain: EnterContext = .{ .grammar = .none, .brackets = "()[]{}", .unit = c.unit };
     try testing.expectEqual(@as(?u8, '('), enter_rules.lastUnclosedOpener("don't (", plain));
     // 깊게 열린 줄 — 스택 상한을 넘어도 마지막 것이 답이다.
-    try testing.expectEqual(@as(?u8, '['), enter_rules.lastUnclosedOpener("(" ** 100 ++ "[", c));
+    try testing.expectEqual(@as(?u8, '['), enter_rules.lastUnclosedOpener(array_repeat.repeat("(", 100) ++ "[", c));
 }
 
 test "INDB2 planNewline 괄호 Enter — 짝 사이는 가운데 줄을 들여쓰고 닫는 것은 아래(공백은 먹는다), 여는 괄호 뒤는 한 단계, 문맥 없으면 종전 (계획 editor-typing-rules TR2)" {

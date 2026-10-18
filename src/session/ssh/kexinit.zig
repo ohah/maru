@@ -25,6 +25,8 @@
 //! **MAC 목록은 AEAD 라도 비워 보내지 않는다**(계약 §3) — 협상 대상이 아니어도 서버가 그
 //! 자리를 파싱한다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const wire = @import("wire.zig");
 
@@ -233,7 +235,7 @@ const test_server_kexinit = blk: {
         }) ![]const u8 {
             var w = wire.Writer.init(out);
             try w.byte(msg_kexinit);
-            try w.raw(&[_]u8{0} ** cookie_len);
+            try w.raw(&array_repeat.repeat(&[_]u8{0}, cookie_len));
             if (opts.strict) |marker| {
                 var buf: [512]u8 = undefined;
                 const joined = try std.fmt.bufPrint(&buf, "{s},{s}", .{ opts.kex, marker });

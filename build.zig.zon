@@ -2,7 +2,7 @@
     .name = .maru,
     .version = "0.0.0",
     .fingerprint = 0x9c7bcf1233561811, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         // **코어는 crates.io 소스 배포본을 쓴다 — GitHub 태그 tarball이 아니다.** 상류 저장소의
         // `build.zig`가 0.16에서 제거된 API(`Compile.addCSourceFile`)를 부르는데, `lazyDependency`는
@@ -140,9 +140,11 @@
             .url = "https://github.com/google/wuffs/archive/refs/tags/v0.4.0-alpha.10.tar.gz",
             .hash = "N-V-__8AABIA4AF2JRGKJvP_rNz61IYJiWeHLsermvYzO6cR",
         },
-        .pcre2 = .{
-            .url = "https://github.com/PCRE2Project/pcre2/archive/refs/tags/pcre2-10.48.tar.gz",
-            .hash = "pcre2-10.48.0-IZ6r6xbVXgDEFDNJ-plJuG66pvQJIDeYdflXi2zQHoET",
+        // Zig 0.17 removed `@cImport`; the official translator is a build-time dependency only.
+        // Keep its transitive packages pinned and vendored as required by the CI no-network policy.
+        .translate_c = .{
+            .url = "git+https://codeberg.org/ziglang/translate-c#2.0.2",
+            .hash = "translate_c-2.0.2-Q_BUWvBNBwBgPKQJPblip6M7AHNK_IPNPmyv4rSIQMQc",
         },
     },
     .paths = .{

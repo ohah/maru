@@ -24,7 +24,7 @@ const Fixture = struct {
         try pass.freeze(std.testing.allocator, &self.source, &self.frozen);
         var root: [std.fs.max_path_bytes]u8 = undefined;
         const len = try self.tmp.dir.realPath(std.testing.io, &root);
-        _ = try std.fmt.bufPrintZ(&self.path_storage, "{s}/{s}", .{ root[0..len], pass_file.final_name });
+        _ = try std.fmt.bufPrintSentinel(&self.path_storage, "{s}/{s}", .{ root[0..len], pass_file.final_name }, 0);
     }
 
     fn deinit(self: *@This()) void {
@@ -84,7 +84,7 @@ test "wrong basename copied frozen and dirty output fail without residue" {
     var wrong_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
     const path = fixture.path();
     const slash = std.mem.lastIndexOfScalar(u8, path, '/').?;
-    const wrong = try std.fmt.bufPrintZ(&wrong_storage, "{s}/wrong.json", .{path[0..slash]});
+    const wrong = try std.fmt.bufPrintSentinel(&wrong_storage, "{s}/wrong.json", .{path[0..slash]}, 0);
     var published: files.PinnedReleaseFile = .{};
     try std.testing.expectError(error.InvalidPath, pass_file.publish(std.testing.allocator, &fixture.frozen, wrong, &published));
     var copied = fixture.frozen;

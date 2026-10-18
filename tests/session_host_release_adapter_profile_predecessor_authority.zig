@@ -29,7 +29,7 @@ const Operations = struct {
     }
     pub fn childPath(self: *@This(), output: *[std.fs.max_path_bytes:0]u8) ![:0]const u8 {
         try self.record(.child);
-        return std.fmt.bufPrintZ(output, "/private/tmp/predecessor-assets", .{});
+        return std.fmt.bufPrintSentinel(output, "/private/tmp/predecessor-assets", .{}, 0);
     }
     pub fn authenticateAssets(self: *@This(), _: anytype, _: [:0]const u8, result: *assets.AuthenticatedPredecessorAssets) !void {
         try self.record(.assets);

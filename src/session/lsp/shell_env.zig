@@ -10,6 +10,8 @@
 //!
 //! **표식 둘이 다 있어야 성공이다** — 셸 설정이 `exec` 로 다른 프로그램(tmux 등)을 띄우거나 도중에 죽으면 끝 표식이 없다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const inherited_env = @import("../../inherited_env.zig");
 
@@ -308,7 +310,7 @@ pub fn sanitize(allocator: std.mem.Allocator, env: []const []const u8) error{Out
             if (std.mem.eql(u8, inherited_env.key(e).?, k)) break true;
         } else false;
         if (dup) continue;
-        const owned = try allocator.dupeZ(u8, entry);
+        const owned = try allocator.dupeSentinel(u8, entry, 0);
         errdefer allocator.free(owned);
         try list.append(allocator, owned);
     }
@@ -457,7 +459,7 @@ test "shell_env: 결과 읽기 — 표식 둘 사이의 env -0 을 거르고 PAT
         "MARU_ENV_BEGIN_fedcba9876543210PATH=/bin\x00MARU_ENV_END_fedcba9876543210", // 다른 실행의 표식
         "junk" ++ "MARU_ENV_BEGIN_" ++ nonce_a ++ "MARU_ENV_END_" ++ nonce_a, // 앞에 다른 것이 섞였다
         // 끝 표식 없이 긴 출력 — 마지막 항목(끝 표식 길이와 같다)을 잘라 내도 NUL 로 끝나 그럴듯해 보인다.
-        "MARU_ENV_BEGIN_" ++ nonce_a ++ "MARU_RESOLVING_ENVIRONMENT=1\x00A=1\x00" ++ "X=" ++ "y" ** 26 ++ "\x00",
+        "MARU_ENV_BEGIN_" ++ nonce_a ++ "MARU_RESOLVING_ENVIRONMENT=1\x00A=1\x00" ++ "X=" ++ array_repeat.repeat("y", 26) ++ "\x00",
     };
     for (bad) |b| try testing.expectError(error.Malformed, resolve(testing.allocator, b, nonce_a));
     try testing.expectError(error.Malformed, resolve(testing.allocator, data, "nothex"));

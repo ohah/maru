@@ -22,9 +22,9 @@ const Fixture = struct {
         const len = try self.tmp.dir.realPath(std.testing.io, &base);
         base[len] = 0;
         var root: [std.fs.max_path_bytes:0]u8 = @splat(0);
-        const root_path = try std.fmt.bufPrintZ(&root, "{s}/workspace", .{base[0..len]});
-        _ = try std.fmt.bufPrintZ(&self.source_path, "{s}/source", .{base[0..len]});
-        _ = try std.fmt.bufPrintZ(&self.output_path, "{s}/predecessor-executable", .{root_path});
+        const root_path = try std.fmt.bufPrintSentinel(&root, "{s}/workspace", .{base[0..len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.source_path, "{s}/source", .{base[0..len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.output_path, "{s}/predecessor-executable", .{root_path}, 0);
         if (c.chmod(self.source_path[0..].ptr, 0o400) != 0) return error.ChmodFailed;
         if (c.chmod(root_path.ptr, 0o700) != 0) return error.ChmodFailed;
         self.source_fd = c.open(self.source_path[0..].ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true });

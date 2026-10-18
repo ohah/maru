@@ -7,6 +7,8 @@
 //! 아무도 모르는 상태가 되고, 그 증상은 «배지가 가끔 틀림» 이라 재현도 안 된다. 그래서 «어느 모드인가» 를
 //! 값으로 들고 다니며, 소비자는 그 값으로만 갈린다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const event = @import("agent_hook_event.zig");
 const transcript = @import("agent_transcript.zig");
@@ -998,8 +1000,8 @@ test "파서가 아는 모든 이벤트에 전이가 있다 — 한쪽만 늘면
         try testing.expectEqual(State.running, advance(&progress, .idle, evOf(.subagent_start)));
         try testing.expectEqual(@as(usize, 0), progress.childCount());
     }
-    inline for (@typeInfo(event.Kind).@"enum".fields) |field| {
-        const kind: event.Kind = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(event.Kind)) |field| {
+        const kind: event.Kind = @fromBackingInt(@intCast(field.value));
         const moved = next(.unknown, evOf(kind));
         const holds = switch (kind) {
             .notification, .oversized, .unknown => true,
@@ -1068,7 +1070,7 @@ test "예약한 알림은 잘리되 사라지지 않는다" {
     try testing.expectEqualStrings("끝났습니다", notice.text());
 
     // 긴 응답 때문에 «턴이 끝났다» 는 사실 자체를 잃으면 안 된다.
-    const long = "x" ** (PendingNotice.max_text + 64);
+    const long = array_repeat.repeat("x", (PendingNotice.max_text + 64));
     notice.set(.done, long, 1);
     try testing.expectEqual(@as(usize, PendingNotice.max_text), notice.text().len);
 
@@ -1233,7 +1235,7 @@ test "이름도 설명도 없는 도구 이벤트는 멀쩡한 세부를 날리�
 
 test "세부는 글자 경계로 잘린다 — 잘린 바이트를 그리면 U+FFFD 가 뜬다" {
     var label: ToolLabel = .{};
-    const long = "가" ** 100; // 300 바이트, 상한(120)보다 길다
+    const long = array_repeat.repeat("가", 100); // 300 바이트, 상한(120)보다 길다
     label.set(long);
     try testing.expect(label.text().len <= ToolLabel.max_text);
     try testing.expect(std.unicode.utf8ValidateSlice(label.text()));
@@ -1404,7 +1406,7 @@ test "전수: 어떤 순서 뒤에도 «새 턴 → 정상 종료» 는 반드�
     // 새 프롬프트로 시작해 정상으로 끝난 턴은 «대기» 로 보여야 한다. 하나라도 아니면 그 pane 은
     // 사용자가 다시 프롬프트를 넣기 전까지 거짓말을 한다.
     const depth = 3;
-    var seq: [depth]usize = .{0} ** depth;
+    var seq: [depth]usize = @splat(0);
     var total: usize = 0;
     while (true) {
         var progress: Progress = .{};
@@ -1439,7 +1441,7 @@ test "전수: 알림은 턴 문을 건드리지 않는다 — 그것은 «일한
     // (`PermissionRequest` 는 그 인자를 넘겨 자식 것이 자식으로 온다). 이것으로 턴을 열면 lead 가 이미
     // `Stop` 을 보낸 뒤에도 턴이 되살아나 **마지막 자식이 끝나도 배지가 안 풀린다.**
     const depth = 3;
-    var seq: [depth]usize = .{0} ** depth;
+    var seq: [depth]usize = @splat(0);
     while (true) {
         var progress: Progress = .{};
         var state: State = .unknown;
@@ -1467,7 +1469,7 @@ test "전수: 알림은 턴 문을 건드리지 않는다 — 그것은 «일한
 test "전수: 자식 셈은 알파벳 어디를 지나도 실제로 산 자식 수를 넘지 않는다" {
     // 셈이 새면 lead 의 `Stop` 이 영영 붙잡힌다. 상한은 «지금까지 본 `SubagentStart` 수» 다.
     const depth = 3;
-    var seq: [depth]usize = .{0} ** depth;
+    var seq: [depth]usize = @splat(0);
     while (true) {
         var progress: Progress = .{};
         var state: State = .unknown;
@@ -1497,7 +1499,7 @@ test "전수: 자식 셈은 알파벳 어디를 지나도 실제로 산 자식 �
 test "전수: 알림은 «전이가 있을 때만» 나온다 — 같은 상태로 머무는 이벤트는 조용하다" {
     // 「턴 단위 1회」를 세는 코드 없이 얻는다는 계약 §6 의 주장을 순서 전체에서 확인한다.
     const depth = 3;
-    var seq: [depth]usize = .{0} ** depth;
+    var seq: [depth]usize = @splat(0);
     while (true) {
         var progress: Progress = .{};
         var state: State = .unknown;
@@ -1521,7 +1523,7 @@ test "전수: 자식이 떠도 «입력 대기» 는 안 지워진다 — 막힘
     // **사용자가 할 일이 있다는 신호만 골라 사라진다.** 관측 모드가 `visible_blocker` 를 최우선으로 두는
     // 것과 같은 규율이다 — 배지 열거를 공유하듯 그 우선순위도 공유한다.
     const depth = 3;
-    var seq: [depth]usize = .{0} ** depth;
+    var seq: [depth]usize = @splat(0);
     while (true) {
         var progress: Progress = .{};
         var state: State = .unknown;
@@ -1550,7 +1552,7 @@ test "전수: 자식 한 쌍만으로는 배지가 갇히지 않는다" {
     // 풀지 못하면 lead 의 `Stop` 은 이미 지나갔으므로 **풀어 줄 이벤트가 없다**. 「lead 가 끝났다」
     // 플래그로 물으면 «아직 시작 안 함» 과 «이미 끝남» 이 같은 값이 되어 그 자리가 생겼다.
     const depth = 3;
-    var seq: [depth]usize = .{0} ** depth;
+    var seq: [depth]usize = @splat(0);
     while (true) {
         var progress: Progress = .{};
         var state: State = .unknown;
@@ -1666,7 +1668,7 @@ test "세션을 여는 것만으로 «완료» 알림이 나가지 않는다" {
 
 test "전수: «모르다» 에서 나오는 첫 전이는 조용하다" {
     const depth = 2;
-    var seq: [depth]usize = .{0} ** depth;
+    var seq: [depth]usize = @splat(0);
     while (true) {
         var progress: Progress = .{};
         const state = advance(&progress, .unknown, alphabetEvent(seq[0]));
@@ -2382,7 +2384,7 @@ test "retired sessions reject delayed work and fresh sessions may reuse turn ids
 }
 
 test "ID 없는 새 프롬프트는 옛 턴을 은퇴시키고 첫 새 ID는 자식을 보존한다" {
-    for ([_][]const u8{ "", "x" ** 65 }) |missing| {
+    for ([_][]const u8{ "", array_repeat.repeat("x", 65) }) |missing| {
         var p: Progress = .{};
         var state = advance(&p, .idle, .{ .provider = "codex", .kind = .user_prompt_submit, .turn_key = "old" });
         state = advance(&p, state, .{ .provider = "codex", .kind = .user_prompt_submit, .turn_key = missing });
@@ -2421,7 +2423,7 @@ test "모르는 이벤트는 세션 질문 자식 턴 세대를 변경하지 않
 
 test "적대적 R1 ID 없는 경계 뒤 옛 이벤트 3개 순열은 질문과 자식을 보존한다" {
     const kinds = [_]event.Kind{ .pre_tool_use, .post_tool_use, .permission_request, .stop, .stop_failure, .interrupt };
-    for ([_][]const u8{ "", "x" ** 65 }) |missing| {
+    for ([_][]const u8{ "", array_repeat.repeat("x", 65) }) |missing| {
         for (0..kinds.len * kinds.len * kinds.len) |n| {
             var p: Progress = .{};
             var state = advance(&p, .idle, .{ .kind = .user_prompt_submit, .turn_key = "old" });

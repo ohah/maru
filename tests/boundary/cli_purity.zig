@@ -153,7 +153,7 @@ fn topLevelTestTokenMask(allocator: std.mem.Allocator, tree: *const std.zig.Ast)
 /// 토큰이라 토큰 비교로는 접두 매칭을 재구현해야 한다. test 블록의 줄 범위만 마스크에서 얻고 그 밖의
 /// 줄에서 부분 문자열을 세면 같은 답을 훨씬 단순하게 얻는다.
 fn countImpureOutsideTests(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source, .{});
     defer tree.deinit(allocator);
 
     const excluded = try topLevelTestTokenMask(allocator, &tree);

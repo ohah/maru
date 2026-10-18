@@ -25,7 +25,7 @@ pub const Scratch = struct {
     lifecycle: ScratchLifecycle = .empty,
     parse: client_external_mode.RxParseScratch = .{},
     intent: external_rx_intent.ExternalRxIntentHandle = .{},
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 
     pub fn initInPlace(out: *Scratch) bool {
         if (out.saved_self_addr != 0 or out.generation != 0 or
@@ -125,7 +125,7 @@ fn scratchDigest(scratch: *const Scratch) external_owner_seal.Digest {
     var writer = external_owner_seal.Writer.init("MARURXT1");
     writer.writeUsize(scratch.saved_self_addr);
     writer.writeU64(scratch.generation);
-    writer.writeU8(@intFromEnum(scratch.lifecycle));
+    writer.writeU8(@backingInt(scratch.lifecycle));
     return writer.finish();
 }
 
@@ -173,7 +173,7 @@ const MandatoryPayloadGuard = struct {
     ops_descriptor: client_external_mode.PayloadAllocationGuard = undefined,
     saved_self_addr: usize = 0,
     scratch_generation: u64 = 0,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 
     fn seal(self: *MandatoryPayloadGuard) void {
         self.saved_self_addr = @intFromPtr(self);

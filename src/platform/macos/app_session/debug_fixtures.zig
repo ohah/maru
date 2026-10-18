@@ -1691,7 +1691,7 @@ pub fn applyForcedBranchMenu(self: *AppSession) void {
     if (self.branch_menu_open) return;
     if (std.c.getenv("MARU_FORCE_BRANCH_MENU") == null) return;
     for (status_bar_ops.statusBarTree(self).entries) |e| {
-        if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.git_branch)) continue;
+        if (e.id != @backingInt(chrome.components.status_bar.ItemId.git_branch)) continue;
         settings_ops.requestBranchMenu(self, .switch_branch);
         break;
     }
@@ -1729,7 +1729,7 @@ pub fn applyForcedResourceMenu(self: *AppSession) void {
     if (self.resource_menu_open) return;
     if (std.c.getenv("MARU_FORCE_RESOURCE_MENU") == null) return;
     for (status_bar_ops.statusBarTree(self).entries) |e| {
-        if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.resource)) continue;
+        if (e.id != @backingInt(chrome.components.status_bar.ItemId.resource)) continue;
         status_bar_ops.openResourceMenu(self);
         break;
     }
@@ -1744,7 +1744,7 @@ pub fn applyForcedAgentMenu(self: *AppSession) void {
     const want_blocked = std.mem.eql(u8, std.mem.span(raw), "blocked");
     const want_id: chrome.components.status_bar.ItemId = if (want_blocked) .blocked_agents else .running_agents;
     for (status_bar_ops.statusBarTree(self).entries) |e| {
-        if (e.id != @intFromEnum(want_id)) continue;
+        if (e.id != @backingInt(want_id)) continue;
         self.openAgentMenu(want_blocked);
         break;
     }

@@ -685,7 +685,7 @@ pub fn measure(self: *AppSession, text: []const u8, offsets: [3]usize, width: u3
     var values: [3]f64 = undefined;
     const family = self.appearance.font.family;
     const fallback = self.appearance.font.fallback;
-    if (maru_macos_coretext_chrome_offsets(text.ptr, text.len, &offsets, &values, family.ptr, family.len, fallback.ptr, fallback.len, @as(f64, @floatFromInt(token.point_size)) * @as(f64, @floatFromInt(scaleMilli(self))) / 1000.0, @intFromEnum(token.weight), @floatFromInt(width)) != 0) return error.MeasureFailed;
+    if (maru_macos_coretext_chrome_offsets(text.ptr, text.len, &offsets, &values, family.ptr, family.len, fallback.ptr, fallback.len, @as(f64, @floatFromInt(token.point_size)) * @as(f64, @floatFromInt(scaleMilli(self))) / 1000.0, @backingInt(token.weight), @floatFromInt(width)) != 0) return error.MeasureFailed;
     return .{ @floatCast(values[0]), @floatCast(values[1]), @floatCast(values[2]) };
 }
 
@@ -710,7 +710,7 @@ pub fn byteForPoint(self: *AppSession, index: usize, x: f64) !usize {
     const family = self.appearance.font.family;
     const fallback = self.appearance.font.fallback;
     var at: usize = 0;
-    if (maru_macos_coretext_chrome_index(display.text.ptr, display.text.len, family.ptr, family.len, fallback.ptr, fallback.len, @as(f64, @floatFromInt(token.point_size)) * @as(f64, @floatFromInt(scaleMilli(self))) / 1000.0, @intFromEnum(token.weight), @floatFromInt(width), x - rect.x - inset, &at) != 0) return error.MeasureFailed;
+    if (maru_macos_coretext_chrome_index(display.text.ptr, display.text.len, family.ptr, family.len, fallback.ptr, fallback.len, @as(f64, @floatFromInt(token.point_size)) * @as(f64, @floatFromInt(scaleMilli(self))) / 1000.0, @backingInt(token.weight), @floatFromInt(width), x - rect.x - inset, &at) != 0) return error.MeasureFailed;
     if (glyph.len != 0 and at > display.caret) at -|= glyph.len;
     return maru.grapheme.snapToBoundary(field.text.items, @min(at, field.text.items.len));
 }

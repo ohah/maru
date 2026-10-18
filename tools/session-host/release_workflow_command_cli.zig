@@ -166,7 +166,7 @@ pub fn execute(io: std.Io, allocator: std.mem.Allocator, args: []const []const u
 
 fn executeCommand(io: std.Io, allocator: std.mem.Allocator, root_path: []const u8, root_identity: []const u8, validator_args: []const []const u8, workflow: context.Context) Error!void {
     var root_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const root = std.fmt.bufPrintZ(&root_storage, "{s}", .{root_path}) catch return error.InvalidPath;
+    const root = std.fmt.bufPrintSentinel(&root_storage, "{s}", .{root_path}, 0) catch return error.InvalidPath;
     const execution = try allocator.create(command_process.Execution);
     defer allocator.destroy(execution);
     execution.* = .{};

@@ -37,9 +37,9 @@ pub fn main(init: std.process.Init) !void {
     const app = std.c.getenv("MARU_APP_LAUNCH_FIRST_DRAWABLE_EXE") orelse return error.MissingAppExecutable;
     const root = std.c.getenv("MARU_APP_LAUNCH_FIRST_DRAWABLE_ROOT") orelse return error.MissingArtifactRoot;
     const artifact_path = std.c.getenv("MARU_APP_LAUNCH_FIRST_DRAWABLE_ARTIFACT") orelse return error.MissingArtifactPath;
-    const app_path = try allocator.dupeZ(u8, std.mem.span(app));
+    const app_path = try allocator.dupeSentinel(u8, std.mem.span(app), 0);
     defer allocator.free(app_path);
-    const root_path = try allocator.dupeZ(u8, std.mem.span(root));
+    const root_path = try allocator.dupeSentinel(u8, std.mem.span(root), 0);
     defer allocator.free(root_path);
     const final_artifact_path = try allocator.dupe(u8, std.mem.span(artifact_path));
     defer allocator.free(final_artifact_path);
@@ -65,15 +65,15 @@ pub fn main(init: std.process.Init) !void {
         var tmp_buf: [std.fs.max_path_bytes:0]u8 = undefined;
         var host_buf: [std.fs.max_path_bytes:0]u8 = undefined;
         var summary_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-        const home = try std.fmt.bufPrintZ(&home_buf, "{s}/run-{d}/home", .{ root_path, index });
-        const cache = try std.fmt.bufPrintZ(&cache_buf, "{s}/run-{d}/cache", .{ root_path, index });
-        const config = try std.fmt.bufPrintZ(&config_buf, "{s}/run-{d}/home/.config/maru/config", .{ root_path, index });
-        const xdg_config = try std.fmt.bufPrintZ(&xdg_config_buf, "{s}/run-{d}/config", .{ root_path, index });
-        const codex = try std.fmt.bufPrintZ(&codex_buf, "{s}/run-{d}/codex", .{ root_path, index });
-        const claude = try std.fmt.bufPrintZ(&claude_buf, "{s}/run-{d}/claude", .{ root_path, index });
-        const tmp = try std.fmt.bufPrintZ(&tmp_buf, "{s}/run-{d}/tmp", .{ root_path, index });
-        const host = try std.fmt.bufPrintZ(&host_buf, "{s}/run-{d}/session-host", .{ root_path, index });
-        const summary = try std.fmt.bufPrintZ(&summary_buf, "{s}/run-{d}/app.summary.txt", .{ root_path, index });
+        const home = try std.fmt.bufPrintSentinel(&home_buf, "{s}/run-{d}/home", .{ root_path, index }, 0);
+        const cache = try std.fmt.bufPrintSentinel(&cache_buf, "{s}/run-{d}/cache", .{ root_path, index }, 0);
+        const config = try std.fmt.bufPrintSentinel(&config_buf, "{s}/run-{d}/home/.config/maru/config", .{ root_path, index }, 0);
+        const xdg_config = try std.fmt.bufPrintSentinel(&xdg_config_buf, "{s}/run-{d}/config", .{ root_path, index }, 0);
+        const codex = try std.fmt.bufPrintSentinel(&codex_buf, "{s}/run-{d}/codex", .{ root_path, index }, 0);
+        const claude = try std.fmt.bufPrintSentinel(&claude_buf, "{s}/run-{d}/claude", .{ root_path, index }, 0);
+        const tmp = try std.fmt.bufPrintSentinel(&tmp_buf, "{s}/run-{d}/tmp", .{ root_path, index }, 0);
+        const host = try std.fmt.bufPrintSentinel(&host_buf, "{s}/run-{d}/session-host", .{ root_path, index }, 0);
+        const summary = try std.fmt.bufPrintSentinel(&summary_buf, "{s}/run-{d}/app.summary.txt", .{ root_path, index }, 0);
         const fixed_child_env = [_]?[*:0]const u8{
             (try envPair(allocator, "PATH", "/usr/bin:/bin:/usr/sbin:/sbin")).ptr,
             (try envPair(allocator, "HOME", home)).ptr,
@@ -91,10 +91,11 @@ pub fn main(init: std.process.Init) !void {
         defer inline for (fixed_child_env) |entry| allocator.free(std.mem.span(entry.?));
         const pre_fork_ns = monotonicNow(io);
         var start_env_buf: [96]u8 = undefined;
-        const start_env = try std.fmt.bufPrintZ(
+        const start_env = try std.fmt.bufPrintSentinel(
             &start_env_buf,
             "MARU_APP_LAUNCH_FIRST_DRAWABLE_START_NS={d}",
             .{pre_fork_ns},
+            0,
         );
         const child_env = fixed_child_env ++ [_:null]?[*:0]const u8{start_env.ptr};
         const pid = std.c.fork();

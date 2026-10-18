@@ -5,15 +5,15 @@
 //! 호스트키 핀 고정이고, 화면에 실제로 그려지는지·포그라운드 서비스가 사는지는 기기에서 본다.
 //! 다만 그때 실패하면 **남는 후보가 host 배선뿐**이 된다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 const abi = @import("mobile_ssh");
 
-const pump = @cImport({
-    @cInclude("ssh_pump.h");
-});
+const pump = @import("ssh_pump_c");
 
 // **ABI 진입점을 링크에 남긴다.** 펌프(C)가 그 심볼들을 부르는데, 테스트 빌드는 Zig 쪽에서
 // 아무도 안 부르면 export 를 통째로 지운다 — 그러면 "undefined symbol" 로 링크가 깨진다.
@@ -455,7 +455,7 @@ const FakeServer = struct {
                 while (c.read(client, &junk, junk.len) > 0) {}
             },
             .garbage => {
-                const junk = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" ++ ("\x00\xff" ** 64);
+                const junk = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" ++ (array_repeat.repeat("\x00\xff", 64));
                 _ = c.write(client, junk.ptr, junk.len);
             },
             .version_then_close => {
@@ -507,6 +507,7 @@ fn runHostile(script: FakeServer.Script) ![]const u8 {
         .screen = onScreen,
         .take_response = onTakeResponse,
         .state_changed = onState,
+        .control = null,
         .ctx = null,
     };
     try std.testing.expectEqual(@as(c_int, 0), pump.maru_ssh_pump_start(&cfg, &hooks));

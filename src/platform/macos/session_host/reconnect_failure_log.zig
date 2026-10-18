@@ -74,7 +74,7 @@ pub const Streaks = struct {
         first_ns: i128 = 0,
         requeues: u32 = 0,
     };
-    entries: [capacity]Entry = [_]Entry{.{}} ** capacity,
+    entries: [capacity]Entry = @as([capacity]Entry, @splat(.{})),
 
     pub const Summary = struct {
         /// 물리 시도 횟수(첫 시도 + 다시 넣은 횟수). 입장 기록이 없으면 0.

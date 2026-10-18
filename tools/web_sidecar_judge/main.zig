@@ -64,9 +64,9 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--input")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         var profile_buf: [1024]u8 = undefined;
-        const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/e", .{std.mem.span(argv[3])}) catch return 2;
+        const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/e", .{std.mem.span(argv[3])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         inputChecks(host, profile);
         return if (failures == 0) 0 else 1;
@@ -74,7 +74,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--dialogs")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         dialogChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
@@ -82,7 +82,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--popup")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         popupChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
@@ -90,7 +90,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--drag")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         dragChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
@@ -98,7 +98,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--datalist")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         datalistChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
@@ -106,7 +106,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--download")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         downloadChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
@@ -114,7 +114,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--devtools")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         devtoolsChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
@@ -122,7 +122,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--upload")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         uploadChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
@@ -130,7 +130,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--closeask")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         closeAskChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
@@ -138,7 +138,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--media")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         mediaChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
@@ -146,7 +146,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--popupadopt")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         popupAdoptChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
@@ -154,7 +154,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--newtab")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         newTabChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
@@ -162,7 +162,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--contextmenu")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         contextMenuChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
@@ -170,7 +170,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--tooltip")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         tooltipChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
@@ -178,7 +178,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--permissions")) {
         _ = signal(13, 1);
         var host_buf: [1024]u8 = undefined;
-        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         permissionChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
@@ -194,28 +194,28 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     const profile_root = std.mem.span(argv[2]);
 
     var host_path_buf: [1024]u8 = undefined;
-    const host_path = std.fmt.bufPrintZ(&host_path_buf, "{s}/maru-web-host", .{install_dir}) catch return 2;
+    const host_path = std.fmt.bufPrintSentinel(&host_path_buf, "{s}/maru-web-host", .{install_dir}, 0) catch return 2;
     var profile_a_buf: [1024]u8 = undefined;
-    const profile_a = std.fmt.bufPrintZ(&profile_a_buf, "--profile-dir={s}/a", .{profile_root}) catch return 2;
+    const profile_a = std.fmt.bufPrintSentinel(&profile_a_buf, "--profile-dir={s}/a", .{profile_root}, 0) catch return 2;
     var profile_b_buf: [1024]u8 = undefined;
-    const profile_b = std.fmt.bufPrintZ(&profile_b_buf, "--profile-dir={s}/b", .{profile_root}) catch return 2;
+    const profile_b = std.fmt.bufPrintSentinel(&profile_b_buf, "--profile-dir={s}/b", .{profile_root}, 0) catch return 2;
 
     sessionChecks(host_path, profile_a) catch |err| report(false, "session", "{s}", .{@errorName(err)});
     versionMismatch(host_path, profile_a) catch |err| report(false, "version-mismatch", "{s}", .{@errorName(err)});
     var profile_c_dir_buf: [1024]u8 = undefined;
-    const profile_c_dir = std.fmt.bufPrintZ(&profile_c_dir_buf, "{s}/c", .{profile_root}) catch return 2;
+    const profile_c_dir = std.fmt.bufPrintSentinel(&profile_c_dir_buf, "{s}/c", .{profile_root}, 0) catch return 2;
     var profile_c_buf: [1024]u8 = undefined;
-    const profile_c = std.fmt.bufPrintZ(&profile_c_buf, "--profile-dir={s}", .{profile_c_dir}) catch return 2;
+    const profile_c = std.fmt.bufPrintSentinel(&profile_c_buf, "--profile-dir={s}", .{profile_c_dir}, 0) catch return 2;
     if (http.Server.start()) |server| {
         browsers_check.run(&reportText, host_path, profile_c_dir, profile_c, server.port) catch |err| report(false, "browsers", "{s}", .{@errorName(err)});
         var profile_d_buf: [1024]u8 = undefined;
-        const profile_d = std.fmt.bufPrintZ(&profile_d_buf, "--profile-dir={s}/d", .{profile_root}) catch return 2;
+        const profile_d = std.fmt.bufPrintSentinel(&profile_d_buf, "--profile-dir={s}/d", .{profile_root}, 0) catch return 2;
         var frames_log_buf: [1024]u8 = undefined;
-        const frames_log = std.fmt.bufPrintZ(&frames_log_buf, "{s}/frames-host.log", .{profile_root}) catch return 2;
+        const frames_log = std.fmt.bufPrintSentinel(&frames_log_buf, "{s}/frames-host.log", .{profile_root}, 0) catch return 2;
         frames_check.run(&reportText, argv[0], host_path, profile_d, frames_log, server.port) catch |err| report(false, "frames", "{s}", .{@errorName(err)});
     } else |err| report(false, "browsers", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_e_buf: [1024]u8 = undefined;
-    const profile_e = std.fmt.bufPrintZ(&profile_e_buf, "--profile-dir={s}/e", .{profile_root}) catch return 2;
+    const profile_e = std.fmt.bufPrintSentinel(&profile_e_buf, "--profile-dir={s}/e", .{profile_root}, 0) catch return 2;
     inputChecks(host_path, profile_e);
     dialogChecks(host_path, profile_root);
     permissionChecks(host_path, profile_root);
@@ -235,7 +235,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     // 크래시 보고는 ReportCrash 가 몇 초 늦게 쓴다.
     os.sleepMs(5000);
     var helper_path_buf: [1024]u8 = undefined;
-    const helper_path = std.fmt.bufPrintZ(&helper_path_buf, "{s}/maru-web-helper", .{install_dir}) catch return 2;
+    const helper_path = std.fmt.bufPrintSentinel(&helper_path_buf, "{s}/maru-web-helper", .{install_dir}, 0) catch return 2;
     var host_uuid: [36]u8 = undefined;
     var helper_uuid: [36]u8 = undefined;
     if (os.machoUuid(host_path, &host_uuid)) |host_id| {
@@ -359,7 +359,7 @@ fn allGone(pids: []const c_int, timeout_ms: u32) bool {
 fn dialogChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "dialogs", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;
-    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/f", .{profile_root}) catch return report(false, "dialogs", "프로필 경로가 길다", .{});
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/f", .{profile_root}, 0) catch return report(false, "dialogs", "프로필 경로가 길다", .{});
     dialogs_check.run(&reportText, host_path, profile, profile_root, server.port) catch |err| report(false, "dialogs", "{s}", .{@errorName(err)});
 }
 
@@ -367,10 +367,10 @@ fn dialogChecks(host_path: [:0]const u8, profile_root: []const u8) void {
 fn permissionChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "permissions", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;
-    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/g", .{profile_root}) catch return report(false, "permissions", "프로필 경로가 길다", .{});
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/g", .{profile_root}, 0) catch return report(false, "permissions", "프로필 경로가 길다", .{});
     permissions_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "permissions", "{s}", .{@errorName(err)});
     var orphan_buf: [1024]u8 = undefined;
-    const orphan_profile = std.fmt.bufPrintZ(&orphan_buf, "--profile-dir={s}/h", .{profile_root}) catch return report(false, "perm-camera-orphan", "프로필 경로가 길다", .{});
+    const orphan_profile = std.fmt.bufPrintSentinel(&orphan_buf, "--profile-dir={s}/h", .{profile_root}, 0) catch return report(false, "perm-camera-orphan", "프로필 경로가 길다", .{});
     permissions_check.cameraOrphan(&reportText, host_path, orphan_profile, server.port) catch |err| report(false, "perm-camera-orphan", "{s}", .{@errorName(err)});
 }
 
@@ -380,7 +380,7 @@ fn permissionChecks(host_path: [:0]const u8, profile_root: []const u8) void {
 fn warmUp(host_path: [:0]const u8, profile_root: []const u8) void {
     const started = os.nowMs();
     var profile_buf: [1024]u8 = undefined;
-    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/w", .{profile_root}) catch return;
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/w", .{profile_root}, 0) catch return;
     var host = Host.spawn(host_path, profile) catch return;
     var created = false;
     if (browsers_check.handshake(&host)) |_| {
@@ -406,7 +406,7 @@ fn warmUp(host_path: [:0]const u8, profile_root: []const u8) void {
 fn contextMenuChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "contextmenu", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;
-    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/k", .{profile_root}) catch return report(false, "contextmenu", "프로필 경로가 길다", .{});
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/k", .{profile_root}, 0) catch return report(false, "contextmenu", "프로필 경로가 길다", .{});
     contextmenu_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "contextmenu", "{s}", .{@errorName(err)});
 }
 
@@ -414,7 +414,7 @@ fn contextMenuChecks(host_path: [:0]const u8, profile_root: []const u8) void {
 fn dragChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "drag", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;
-    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/m", .{profile_root}) catch return report(false, "drag", "프로필 경로가 길다", .{});
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/m", .{profile_root}, 0) catch return report(false, "drag", "프로필 경로가 길다", .{});
     drag_check.run(&reportText, host_path, profile, profile_root, server.port) catch |err| report(false, "drag", "{s}", .{@errorName(err)});
 }
 
@@ -422,7 +422,7 @@ fn dragChecks(host_path: [:0]const u8, profile_root: []const u8) void {
 fn mediaChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "media", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;
-    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/q", .{profile_root}) catch return report(false, "media", "프로필 경로가 길다", .{});
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/q", .{profile_root}, 0) catch return report(false, "media", "프로필 경로가 길다", .{});
     media_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "media", "{s}", .{@errorName(err)});
 }
 
@@ -430,7 +430,7 @@ fn mediaChecks(host_path: [:0]const u8, profile_root: []const u8) void {
 fn closeAskChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "close-ask", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;
-    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/r", .{profile_root}) catch return report(false, "close-ask", "프로필 경로가 길다", .{});
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/r", .{profile_root}, 0) catch return report(false, "close-ask", "프로필 경로가 길다", .{});
     close_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "close-ask", "{s}", .{@errorName(err)});
 }
 
@@ -438,7 +438,7 @@ fn closeAskChecks(host_path: [:0]const u8, profile_root: []const u8) void {
 fn datalistChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "datalist", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;
-    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/l", .{profile_root}) catch return report(false, "datalist", "프로필 경로가 길다", .{});
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/l", .{profile_root}, 0) catch return report(false, "datalist", "프로필 경로가 길다", .{});
     datalist_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "datalist", "{s}", .{@errorName(err)});
 }
 
@@ -446,7 +446,7 @@ fn datalistChecks(host_path: [:0]const u8, profile_root: []const u8) void {
 fn downloadChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "download", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;
-    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/s", .{profile_root}) catch return report(false, "download", "프로필 경로가 길다", .{});
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/s", .{profile_root}, 0) catch return report(false, "download", "프로필 경로가 길다", .{});
     download_check.run(&reportText, host_path, profile, profile_root, server.port) catch |err| report(false, "download", "{s}", .{@errorName(err)});
 }
 
@@ -454,9 +454,9 @@ fn downloadChecks(host_path: [:0]const u8, profile_root: []const u8) void {
 fn devtoolsChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "devtools", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;
-    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/t", .{profile_root}) catch return report(false, "devtools", "프로필 경로가 길다", .{});
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/t", .{profile_root}, 0) catch return report(false, "devtools", "프로필 경로가 길다", .{});
     var expired_buf: [1024]u8 = undefined;
-    const expired_profile = std.fmt.bufPrintZ(&expired_buf, "--profile-dir={s}/u", .{profile_root}) catch return report(false, "devtools", "프로필 경로가 길다", .{});
+    const expired_profile = std.fmt.bufPrintSentinel(&expired_buf, "--profile-dir={s}/u", .{profile_root}, 0) catch return report(false, "devtools", "프로필 경로가 길다", .{});
     devtools_check.run(&reportText, host_path, profile, expired_profile, server.port) catch |err| report(false, "devtools", "{s}", .{@errorName(err)});
 }
 
@@ -464,7 +464,7 @@ fn devtoolsChecks(host_path: [:0]const u8, profile_root: []const u8) void {
 fn uploadChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "upload", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;
-    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/w", .{profile_root}) catch return report(false, "upload", "프로필 경로가 길다", .{});
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/w", .{profile_root}, 0) catch return report(false, "upload", "프로필 경로가 길다", .{});
     upload_check.run(&reportText, host_path, profile, profile_root, server.port) catch |err| report(false, "upload", "{s}", .{@errorName(err)});
 }
 
@@ -472,7 +472,7 @@ fn uploadChecks(host_path: [:0]const u8, profile_root: []const u8) void {
 fn popupAdoptChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "popupadopt", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;
-    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/o", .{profile_root}) catch return report(false, "popupadopt", "프로필 경로가 길다", .{});
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/o", .{profile_root}, 0) catch return report(false, "popupadopt", "프로필 경로가 길다", .{});
     popupadopt_check.run(&reportText, host_path, profile, profile_root, server.port) catch |err| report(false, "popupadopt", "{s}", .{@errorName(err)});
 }
 
@@ -480,7 +480,7 @@ fn popupAdoptChecks(host_path: [:0]const u8, profile_root: []const u8) void {
 fn newTabChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "newtab", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;
-    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/n", .{profile_root}) catch return report(false, "newtab", "프로필 경로가 길다", .{});
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/n", .{profile_root}, 0) catch return report(false, "newtab", "프로필 경로가 길다", .{});
     newtab_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "newtab", "{s}", .{@errorName(err)});
 }
 
@@ -488,7 +488,7 @@ fn newTabChecks(host_path: [:0]const u8, profile_root: []const u8) void {
 fn tooltipChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "tooltip", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;
-    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/j", .{profile_root}) catch return report(false, "tooltip", "프로필 경로가 길다", .{});
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/j", .{profile_root}, 0) catch return report(false, "tooltip", "프로필 경로가 길다", .{});
     tooltip_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "tooltip", "{s}", .{@errorName(err)});
 }
 
@@ -496,7 +496,7 @@ fn tooltipChecks(host_path: [:0]const u8, profile_root: []const u8) void {
 fn popupChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     const server = http.Server.start() catch |err| return report(false, "popup", "HTTP 서버: {s}", .{@errorName(err)});
     var profile_buf: [1024]u8 = undefined;
-    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/i", .{profile_root}) catch return report(false, "popup", "프로필 경로가 길다", .{});
+    const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/i", .{profile_root}, 0) catch return report(false, "popup", "프로필 경로가 길다", .{});
     popup_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "popup", "{s}", .{@errorName(err)});
 }
 

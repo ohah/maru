@@ -16,6 +16,8 @@
 //! **셸을 거치지 않는다.** argv를 그대로 `execve`하므로 따옴표·이스케이프 규칙이 없다 — 경로에 공백·개행·
 //! 따옴표가 있어도 한 인자다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const path_shape = @import("../path_shape.zig");
 const scm_view = @import("scm_view.zig");
@@ -827,7 +829,7 @@ test "배치: 개수와 바이트 **둘 다**로 자르고, 큰 경로 하나는
     try testing.expectEqual(max_batch_paths, batchEnd(&many, 0));
 
     // 상한을 넘기는 경로 하나 — 안 넣으면 그 파일을 영영 스테이지할 수 없다.
-    const huge = "x" ** (max_batch_bytes + 1);
+    const huge = array_repeat.repeat("x", (max_batch_bytes + 1));
     const one = [_][]const u8{huge};
     try testing.expectEqual(@as(usize, 1), batchEnd(&one, 0));
 
@@ -1031,7 +1033,7 @@ test "원격 쓰기: 로컬 배치가 원격 명령 버퍼를 넘긴다 (RS4a 6�
 test "원격 배치: 한 경로가 상한보다 커도 그 하나는 넣는다 (RS4a 6회차)" {
     // 안 넣으면 진행이 멈춰 그 파일을 **영영** 스테이지할 수 없다. 실제 초과는 `buildRemote` 가
     // null 로 알려 주고, 그것은 §5 의 실패 경로다 — 조용히 빠지는 것과 다르다.
-    const huge = "'" ** 4096; // 인용이 4 배로 부푸는 최악
+    const huge = array_repeat.repeat("'", 4096); // 인용이 4 배로 부푸는 최악
     const paths = [_][]const u8{ huge, "a.txt" };
     try std.testing.expectEqual(@as(usize, 1), remoteBatchEnd(&paths, 0));
     try std.testing.expectEqual(@as(usize, 2), remoteBatchEnd(&paths, 1));

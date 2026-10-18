@@ -85,10 +85,11 @@ fn commandPlan(inputs: Inputs, storage: *CommandStorage) !CommandPlan {
     if (inputs.budget_ns <= 0 or !absolute(inputs.workspace_path) or !absolute(inputs.harness) or
         !absolute(inputs.candidate_cli) or !absolute(inputs.candidate_app_bundle) or !absolute(inputs.attach_product_test) or
         !absolute(inputs.upload_product_test)) return error.InvalidCommand;
-    const workspace_environment = std.fmt.bufPrintZ(
+    const workspace_environment = std.fmt.bufPrintSentinel(
         &storage.workspace_environment,
         "MARU_P5D_WORKSPACE={s}",
         .{inputs.workspace_path},
+        0,
     ) catch return error.InvalidCommand;
     storage.args = .{ shell, inputs.harness, inputs.candidate_cli, inputs.candidate_app_bundle, inputs.attach_product_test, inputs.upload_product_test };
     storage.environment = .{

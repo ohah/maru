@@ -173,10 +173,10 @@ test "icon_glyph: 생성된 이름 registry가 coverage 등록 집합·자산 �
     // (3) 이름으로 고를 수 있는 모든 (아이콘, fit) 조합은 반드시 합성된다 — 아니면 그 자리가 폰트 폴백
     //     (빈 칸 또는 엉뚱한 Nerd Fonts 글리프)이 된다. **fit도 comptime 전수**한다: 배열에 손으로 적으면
     //     새 fit이 미등록 cp를 가리켜도 조용히 통과했다(적대적 검증 실측).
-    inline for (@typeInfo(icons.Icon).@"enum".fields) |field| {
-        const icon: icons.Icon = @enumFromInt(field.value);
-        inline for (@typeInfo(icons.Fit).@"enum".fields) |fit_field| {
-            const fit: icons.Fit = @enumFromInt(fit_field.value);
+    inline for (@import("type_info_fields").enumFields(icons.Icon)) |field| {
+        const icon: icons.Icon = @fromBackingInt(@intCast(field.value));
+        inline for (@import("type_info_fields").enumFields(icons.Fit)) |fit_field| {
+            const fit: icons.Fit = @fromBackingInt(@intCast(fit_field.value));
             try std.testing.expect(isRegisteredIcon(icons.codepointFit(icon, fit)));
         }
     }

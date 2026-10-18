@@ -1,6 +1,8 @@
 //! Proves that the executable boundary reads only the closed GitHub Actions vocabulary and sends
 //! those values through the existing typed parser. This is a component seam, not GitHub API E2E.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const context = @import("release_adapter_context");
 const environment = @import("release_adapter_environment");
@@ -58,7 +60,7 @@ test "captured values cannot bypass the typed context validator" {
 
     var oversized = Lookup{
         .replacement_index = 0,
-        .replacement = "x" ** (context.max_value_bytes + 1),
+        .replacement = array_repeat.repeat("x", (context.max_value_bytes + 1)),
     };
     try std.testing.expectError(error.ValueTooLong, environment.read(&oversized));
 }

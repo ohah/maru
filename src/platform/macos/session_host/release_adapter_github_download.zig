@@ -13,7 +13,7 @@ const safe_open = @import("safe_open");
 const download_command = @import("release_adapter_github_download_command");
 const release_files = @import("release_adapter_files");
 
-const max_assets = @typeInfo(manifest.AssetRole).@"enum".fields.len;
+const max_assets = @import("type_info_fields").enumFields(manifest.AssetRole).len;
 const max_args = 9;
 const max_token_bytes = manifest.max_scalar_string_bytes;
 const ms_sync: i32 = 0x10;
@@ -111,7 +111,7 @@ pub const DownloadedSet = struct {
             return error.FileChanged;
         const work_path = std.mem.sliceTo(&self.work_path, 0);
         var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-        const path_z = std.fmt.bufPrintZ(&path_storage, "{s}", .{work_path}) catch return error.FileChanged;
+        const path_z = std.fmt.bufPrintSentinel(&path_storage, "{s}", .{work_path}, 0) catch return error.FileChanged;
         const reopened = safe_open.openAbsoluteNoFollow(path_z, true) catch return error.FileChanged;
         defer _ = c.close(reopened);
         var path_dir: posix.Stat = undefined;
@@ -210,7 +210,7 @@ pub fn validateExpected(expected: Expected) Error!void {
     var seen: [max_assets]bool = @splat(false);
     for (expected.assets, 0..) |asset, index| {
         if (!validAsset(asset)) return error.InvalidExpected;
-        const role: usize = @intFromEnum(asset.role);
+        const role: usize = @backingInt(asset.role);
         if (seen[role]) return error.InvalidExpected;
         seen[role] = true;
         for (expected.assets[0..index]) |prior| if (std.mem.eql(u8, prior.name, asset.name)) return error.InvalidExpected;
@@ -244,7 +244,7 @@ fn downloadAssets(set: *DownloadedSet, executor: anytype, executable: []const u8
     const token_entry = std.fmt.bufPrint(&token_storage, "GH_TOKEN={s}", .{token}) catch return error.InvalidToken;
     const environment = [_][]const u8{ token_entry, "GH_PROMPT_DISABLED=1" };
     for (0..max_assets) |role_index| {
-        const role: manifest.AssetRole = @enumFromInt(role_index);
+        const role: manifest.AssetRole = @fromBackingInt(@intCast(role_index));
         var selected: ?manifest.Asset = null;
         for (expected.assets) |asset| if (asset.role == role) {
             selected = asset;
@@ -257,9 +257,9 @@ fn downloadAssets(set: *DownloadedSet, executor: anytype, executable: []const u8
 
 fn downloadOne(set: *DownloadedSet, executor: anytype, executable: []const u8, environment: []const []const u8, tag: []const u8, asset: manifest.Asset, budget_ns: i128) Error!void {
     const record = &set.files[set.file_count];
-    const name = std.fmt.bufPrintZ(&record.name, "{s}", .{asset.name}) catch return error.InvalidExpected;
+    const name = std.fmt.bufPrintSentinel(&record.name, "{s}", .{asset.name}, 0) catch return error.InvalidExpected;
     const work_path = std.mem.sliceTo(&set.work_path, 0);
-    _ = std.fmt.bufPrintZ(&record.path, "{s}/{s}", .{ work_path, asset.name }) catch return error.InvalidPath;
+    _ = std.fmt.bufPrintSentinel(&record.path, "{s}/{s}", .{ work_path, asset.name }, 0) catch return error.InvalidPath;
     const fd = c.openat(set.dir_fd, name.ptr, .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0o600));
     if (fd < 0) return if (posix.errno(-1) == .EXIST) error.DestinationExists else error.CreateFailed;
     defer _ = c.close(fd);
@@ -323,10 +323,10 @@ fn createWorkDir(set: *DownloadedSet, path: [:0]const u8) Error!void {
     const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return error.InvalidPath;
     const leaf = path[slash + 1 ..];
     if (!validComponent(leaf)) return error.InvalidPath;
-    _ = std.fmt.bufPrintZ(&set.work_path, "{s}", .{path}) catch return error.InvalidPath;
-    _ = std.fmt.bufPrintZ(&set.dir_name, "{s}", .{leaf}) catch return error.InvalidPath;
+    _ = std.fmt.bufPrintSentinel(&set.work_path, "{s}", .{path}, 0) catch return error.InvalidPath;
+    _ = std.fmt.bufPrintSentinel(&set.dir_name, "{s}", .{leaf}, 0) catch return error.InvalidPath;
     var parent_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const parent = if (slash == 0) "/" else std.fmt.bufPrintZ(&parent_storage, "{s}", .{path[0..slash]}) catch return error.InvalidPath;
+    const parent = if (slash == 0) "/" else std.fmt.bufPrintSentinel(&parent_storage, "{s}", .{path[0..slash]}, 0) catch return error.InvalidPath;
     set.parent_fd = safe_open.openAbsoluteNoFollow(parent, true) catch return error.InvalidPath;
     set.owner = set;
     if (c.mkdirat(set.parent_fd, set.dir_name[0..].ptr, 0o700) != 0) {
@@ -375,14 +375,14 @@ pub const BoundedExecutor = struct {
     io: std.Io,
     pub fn capture(self: *@This(), executable: []const u8, child_args: []const []const u8, environment: []const []const u8, output: []u8, budget_ns: i128) Error![]const u8 {
         var executable_storage: [max_token_bytes + 1]u8 = undefined;
-        const executable_z = std.fmt.bufPrintZ(&executable_storage, "{s}", .{executable}) catch return error.InvalidPath;
+        const executable_z = std.fmt.bufPrintSentinel(&executable_storage, "{s}", .{executable}, 0) catch return error.InvalidPath;
         var args_storage: [max_args][manifest.max_scalar_string_bytes + 1]u8 = undefined;
         var argv: [max_args + 1:null]?[*:0]const u8 = @splat(null);
         argv[0] = executable_z.ptr;
-        for (child_args, 0..) |arg, index| argv[index + 1] = (std.fmt.bufPrintZ(&args_storage[index], "{s}", .{arg}) catch return error.InvalidExpected).ptr;
+        for (child_args, 0..) |arg, index| argv[index + 1] = (std.fmt.bufPrintSentinel(&args_storage[index], "{s}", .{arg}, 0) catch return error.InvalidExpected).ptr;
         var environment_storage: [2]["GH_TOKEN=".len + max_token_bytes + 1]u8 = undefined;
         var envp: [2:null]?[*:0]const u8 = @splat(null);
-        for (environment, 0..) |entry, index| envp[index] = (std.fmt.bufPrintZ(&environment_storage[index], "{s}", .{entry}) catch return error.InvalidToken).ptr;
+        for (environment, 0..) |entry, index| envp[index] = (std.fmt.bufPrintSentinel(&environment_storage[index], "{s}", .{entry}, 0) catch return error.InvalidToken).ptr;
         return process.runCaptureEnvironmentStdout(self.io, executable_z, &argv, &envp, output, budget_ns);
     }
 };

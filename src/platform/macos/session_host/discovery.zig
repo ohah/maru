@@ -68,7 +68,7 @@ pub fn afterStartLock(lock: LockProbe, reconnect: ConnectProbe) Action {
 /// session-host 디렉터리 `<base>/session-host`. base는 caller가 정한다(테스트=격리 tmp, 제품=user cache dir).
 /// control-plane(`<base>/control`)과 **다른 디렉터리**라 두 socket이 섞이지 않는다(§10). NUL 종단(mkdir/chmod용).
 pub fn sessionHostDirPath(buf: []u8, base: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/session-host", .{trimTrailingSlash(base)});
+    return std.fmt.bufPrintSentinel(buf, "{s}/session-host", .{trimTrailingSlash(base)}, 0);
 }
 
 /// current-major 제어 socket. 서로 다른 major host가 drain되는 동안 나란히 살아야 하므로 major가 endpoint identity다.
@@ -77,23 +77,23 @@ pub fn socketPathIn(buf: []u8, dir: []const u8) error{NoSpaceLeft}![:0]u8 {
 }
 
 pub fn socketPathForMajorIn(buf: []u8, dir: []const u8, major: u16) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/control-v{d}.sock", .{ trimTrailingSlash(dir), major });
+    return std.fmt.bufPrintSentinel(buf, "{s}/control-v{d}.sock", .{ trimTrailingSlash(dir), major }, 0);
 }
 
 /// versioned discovery 도입 전 host가 쓰던 endpoint. N-1/current adapter가 기존 runtime을 찾을 때만 probe하며
 /// 새 host는 이 이름으로 bind하지 않는다.
 pub fn legacySocketPathIn(buf: []u8, dir: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/control.sock", .{trimTrailingSlash(dir)});
+    return std.fmt.bufPrintSentinel(buf, "{s}/control.sock", .{trimTrailingSlash(dir)}, 0);
 }
 
 /// 라이브니스/start lock 경로 `<dir>/control.lock`(socket과 별도 regular 파일 — flock 대상, §10).
 pub fn lockPathIn(buf: []u8, dir: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/launch-v{d}.lock", .{ trimTrailingSlash(dir), protocol.version_major });
+    return std.fmt.bufPrintSentinel(buf, "{s}/launch-v{d}.lock", .{ trimTrailingSlash(dir), protocol.version_major }, 0);
 }
 
 /// host process lifetime 전체와 same-PID exec를 관통하는 배타적 owner lease.
 pub fn ownerLockPathIn(buf: []u8, dir: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/owner-v{d}.lock", .{ trimTrailingSlash(dir), protocol.version_major });
+    return std.fmt.bufPrintSentinel(buf, "{s}/owner-v{d}.lock", .{ trimTrailingSlash(dir), protocol.version_major }, 0);
 }
 
 fn trimTrailingSlash(base: []const u8) []const u8 {

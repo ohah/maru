@@ -740,7 +740,7 @@ fn detachedRecordedTarget(
     allocator: std.mem.Allocator,
     state: attempt_record.State,
 ) error{OutOfMemory}!VerifiedTarget {
-    const path = allocator.dupeZ(u8, state.staged_path) catch return error.OutOfMemory;
+    const path = allocator.dupeSentinel(u8, state.staged_path, 0) catch return error.OutOfMemory;
     errdefer allocator.free(path);
     const build_id = allocator.dupe(u8, state.build_id) catch return error.OutOfMemory;
     return .{
@@ -763,7 +763,7 @@ fn testRequest(id: u128, path: []const u8) wire.PrepareRequest {
         .attempt_id = id,
         .target_path = path,
         .target_build_id = "sha256:abababababababababababababababababababababababababababababababab",
-        .target_sha256 = [_]u8{0xAB} ** 32,
+        .target_sha256 = @as([32]u8, @splat(0xAB)),
         .handoff_reader_min = 1,
         .handoff_reader_max = 1,
     };
@@ -777,7 +777,7 @@ fn testRestoreToken(state: attempt_record.State, role: RestoreRole) RestoreToken
 fn testRollbackImage() attempt_record.ImageView {
     return .{
         .path = "/tmp/maru/rollback-current",
-        .sha256 = [_]u8{0xCD} ** 32,
+        .sha256 = @as([32]u8, @splat(0xCD)),
         .dev = 10,
         .ino = 11,
         .size = 12,
@@ -830,7 +830,7 @@ const TestStager = struct {
         allocator: std.mem.Allocator,
         recorded: RecordedTarget,
     ) StageDecision {
-        const path = allocator.dupeZ(u8, recorded.staged_path) catch return .resource_exhausted;
+        const path = allocator.dupeSentinel(u8, recorded.staged_path, 0) catch return .resource_exhausted;
         const build_id = allocator.dupe(u8, recorded.build_id) catch {
             allocator.free(path);
             return .resource_exhausted;

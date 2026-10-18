@@ -226,10 +226,11 @@ test "budget admission durable probe reserves and cleans before quiesce" {
     try std.testing.expect(reservation.matches(4, &.{ 2, 9 }, 64 * 1024));
     try reservation.cancel();
     var attempt_buf: [256]u8 = undefined;
-    const attempt_path = try std.fmt.bufPrintZ(
+    const attempt_path = try std.fmt.bufPrintSentinel(
         &attempt_buf,
         "{s}/attempt-{x:0>32}",
         .{ dir, @as(u128, 0xB7) },
+        0,
     );
     try std.testing.expect(std.c.access(attempt_path.ptr, std.c.F_OK) != 0);
 }

@@ -66,7 +66,7 @@ pub fn wait(pid: c.pid_t) ?c_int {
         var status: c_int = 0;
         const rc = c.waitpid(pid, &status, 0);
         if (rc == pid) return status;
-        if (rc == -1 and c._errno().* == @intFromEnum(c.E.INTR)) continue;
+        if (rc == -1 and c._errno().* == @backingInt(c.E.INTR)) continue;
         return null;
     }
 }
@@ -91,7 +91,7 @@ test "macos spawn: a shell sees only stdio — a parent fd without CLOEXEC is no
     };
     try testing.expectEqual(@as(c_int, 0), c.fcntl(fds[0], c.F.GETFD) & c.FD_CLOEXEC);
     var command_buf: [64]u8 = undefined;
-    const probe = try std.fmt.bufPrintZ(&command_buf, "[ -e /dev/fd/{d} ] && exit 7; exit 3", .{fds[0]});
+    const probe = try std.fmt.bufPrintSentinel(&command_buf, "[ -e /dev/fd/{d} ] && exit 7; exit 3", .{fds[0]}, 0);
     const status = runShell(probe.ptr);
     try testing.expect(c.W.IFEXITED(@bitCast(status)));
     try testing.expectEqual(@as(u8, 3), c.W.EXITSTATUS(@bitCast(status)));

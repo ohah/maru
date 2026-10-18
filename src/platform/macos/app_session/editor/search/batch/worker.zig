@@ -221,7 +221,19 @@ fn allocationProbe(a: std.mem.Allocator) !void {
     try testing.expectEqualStrings("bar", ready.prepared.items.items[0].plan.after);
 }
 test "RPBW5 caller와 worker의 모든 준비 할당 실패를 회수한다" {
-    try testing.checkAllAllocationFailures(testing.allocator, allocationProbe, .{});
+    // ArrayList can satisfy resize in place under Zig 0.17. Reject resize/remap so each
+    // injected allocation failure tests the same operation prefix on every pass.
+    const stable_backing_vtable: std.mem.Allocator.VTable = .{
+        .alloc = testing.allocator.vtable.alloc,
+        .resize = std.mem.Allocator.noResize,
+        .remap = std.mem.Allocator.noRemap,
+        .free = testing.allocator.vtable.free,
+    };
+    const stable_backing: std.mem.Allocator = .{
+        .ptr = testing.allocator.ptr,
+        .vtable = &stable_backing_vtable,
+    };
+    try testing.checkAllAllocationFailures(stable_backing, allocationProbe, .{});
 }
 test "RPBW6 마지막 snapshot의 원문 충돌은 앞 Plan도 반환하지 않는다" {
     var input = try fixture(testing.allocator);

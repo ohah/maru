@@ -520,7 +520,7 @@ fn metadataSemanticDigest(
     hashInt(&hasher, u32, dto.title_generation);
     hashInt(&hasher, u16, dto.cols);
     hashInt(&hasher, u16, dto.rows);
-    hashInt(&hasher, u8, @intFromEnum(dto.semantic_state));
+    hashInt(&hasher, u8, @backingInt(dto.semantic_state));
     hashBool(&hasher, dto.alt_active);
     hashBool(&hasher, dto.app_cursor_keys);
     hashBool(&hasher, dto.app_keypad);
@@ -705,7 +705,7 @@ fn materializePreflight(
     const backing = if (backing_len == 0) null else try allocator.alloc(u8, backing_len);
     errdefer if (backing) |bytes| allocator.free(bytes);
 
-    var processes = [_]Process{.{}} ** max_process_entries;
+    var processes = @as([max_process_entries]Process, @splat(.{}));
     for (metadata.foregroundProcesses(), 0..) |process, index| {
         if (process.name.decoded_len > processes[index].bytes.len) return error.ResourceExhausted;
         processes[index].pid = process.pid;
@@ -930,7 +930,7 @@ fn materializePreparedEventMetadata(
 
     var empty_backing: [0]u8 = .{};
     const destination = backing orelse empty_backing[0..];
-    var processes = [_]Process{.{}} ** max_process_entries;
+    var processes = @as([max_process_entries]Process, @splat(.{}));
     const projection = runtime_event_preparation.fillMetadataRecipe(
         &recipe,
         classification,
@@ -947,7 +947,7 @@ fn materializePreparedEventMetadata(
         .title_generation = recipe.title_generation,
         .cols = recipe.cols,
         .rows = recipe.rows,
-        .semantic_state = @enumFromInt(recipe.semantic_state_raw),
+        .semantic_state = @fromBackingInt(@intCast(recipe.semantic_state_raw)),
         .alt_active = recipe.alt_active_raw == 1,
         .app_cursor_keys = recipe.app_cursor_keys_raw == 1,
         .app_keypad = recipe.app_keypad_raw == 1,
@@ -1090,7 +1090,7 @@ test "runtime metadata seal inventory covers every OwnedMetadataDto field" {
         "ssh_range",           "clipboard_target_range",
         "processes",           "process_count",
     };
-    const fields = @typeInfo(OwnedMetadataDto).@"struct".fields;
+    const fields = @import("type_info_fields").structFields(OwnedMetadataDto);
     try std.testing.expectEqual(expected.len, fields.len);
     inline for (fields, expected) |field, name|
         try std.testing.expectEqualStrings(name, field.name);
@@ -1308,7 +1308,7 @@ test "runtime metadata wire rejects profile mismatch and process resource overfl
 
 test "runtime metadata wire validates unavailable foreground process schema before canonicalizing" {
     const allocator = std.testing.allocator;
-    const long_name = [_]u8{'x'} ** 129;
+    const long_name = @as([129]u8, @splat('x'));
     const process = try std.fmt.allocPrint(
         allocator,
         "{{\"pid\":7,\"name\":\"{s}\"}}",
@@ -1869,34 +1869,34 @@ test "C3-3b2b2 compatibility keeps non-metadata accepted and violation allocatio
         }
     }
 
-    inline for (std.meta.fields(runtime_event_types.FrameViolation)) |field| {
+    inline for (@import("type_info_fields").fields(runtime_event_types.FrameViolation)) |field| {
         try c3b2b2ExpectForwardedViolation(
             &counter,
-            .{ .frame = @enumFromInt(field.value) },
+            .{ .frame = @fromBackingInt(@intCast(field.value)) },
         );
     }
-    inline for (std.meta.fields(runtime_event_types.IdentityViolation)) |field| {
+    inline for (@import("type_info_fields").fields(runtime_event_types.IdentityViolation)) |field| {
         try c3b2b2ExpectForwardedViolation(
             &counter,
-            .{ .identity = @enumFromInt(field.value) },
+            .{ .identity = @fromBackingInt(@intCast(field.value)) },
         );
     }
-    inline for (std.meta.fields(runtime_event_types.AuthorityViolation)) |field| {
+    inline for (@import("type_info_fields").fields(runtime_event_types.AuthorityViolation)) |field| {
         try c3b2b2ExpectForwardedViolation(
             &counter,
-            .{ .authority = @enumFromInt(field.value) },
+            .{ .authority = @fromBackingInt(@intCast(field.value)) },
         );
     }
-    inline for (std.meta.fields(runtime_event_types.CapabilityViolation)) |field| {
+    inline for (@import("type_info_fields").fields(runtime_event_types.CapabilityViolation)) |field| {
         try c3b2b2ExpectForwardedViolation(
             &counter,
-            .{ .capability = @enumFromInt(field.value) },
+            .{ .capability = @fromBackingInt(@intCast(field.value)) },
         );
     }
-    inline for (std.meta.fields(runtime_event_wire.ForeignKind)) |field| {
+    inline for (@import("type_info_fields").fields(runtime_event_wire.ForeignKind)) |field| {
         try c3b2b2ExpectForwardedViolation(
             &counter,
-            .{ .foreign = @enumFromInt(field.value) },
+            .{ .foreign = @fromBackingInt(@intCast(field.value)) },
         );
     }
     try c3b2b2ExpectForwardedViolation(&counter, .stale_preflight);
@@ -2289,7 +2289,7 @@ test "agent log format attach metadata is capability-bound and never guessed" {
         defer a.free(payload);
         var parsed = try decodeAttachEnvelope(a, payload, profile);
         defer parsed.deinit();
-        try std.testing.expectEqual(value, @intFromEnum(parsed.accepted.agent_log_format));
+        try std.testing.expectEqual(value, @backingInt(parsed.accepted.agent_log_format));
         var legacy_profile = profile;
         legacy_profile.agent_log_format_supported = false;
         try std.testing.expectError(error.Malformed, decodeAttachEnvelope(a, payload, legacy_profile));

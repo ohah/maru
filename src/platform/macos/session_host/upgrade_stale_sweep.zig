@@ -88,7 +88,7 @@ fn scan(owner_fd: c.fd_t, out: *[max_candidates]Candidate) Error!usize {
         };
         if (count == out.len) return error.TooManyResidues;
         var name_buf: [80]u8 = undefined;
-        const name_z = std.fmt.bufPrintZ(&name_buf, "{s}", .{name}) catch
+        const name_z = std.fmt.bufPrintSentinel(&name_buf, "{s}", .{name}, 0) catch
             return error.InvalidResidue;
         var stat: posix.Stat = undefined;
         if (c.fstatat(owner_fd, name_z.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW) != 0)
@@ -196,7 +196,7 @@ fn validateAttemptChildren(attempt_fd: c.fd_t) Error!void {
         if (seen & bit != 0) return error.InvalidResidue;
         seen |= bit;
         var name_buf: [32]u8 = undefined;
-        const name_z = std.fmt.bufPrintZ(&name_buf, "{s}", .{name}) catch return error.InvalidResidue;
+        const name_z = std.fmt.bufPrintSentinel(&name_buf, "{s}", .{name}, 0) catch return error.InvalidResidue;
         var stat: posix.Stat = undefined;
         if (c.fstatat(attempt_fd, name_z.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW) != 0 or
             !validLeafStat(stat)) return error.InvalidResidue;
@@ -209,7 +209,7 @@ fn cleanupAttemptChildren(attempt_fd: c.fd_t) Error!void {
     try validateAttemptChildren(attempt_fd);
     for ([_][]const u8{ "primary", "backup", ".sweep-primary", ".sweep-backup" }) |raw| {
         var source_buf: [32]u8 = undefined;
-        const source = std.fmt.bufPrintZ(&source_buf, "{s}", .{raw}) catch unreachable;
+        const source = std.fmt.bufPrintSentinel(&source_buf, "{s}", .{raw}, 0) catch unreachable;
         var stat: posix.Stat = undefined;
         if (c.fstatat(attempt_fd, source.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW) != 0) {
             if (posix.errno(-1) == .NOENT) continue;
@@ -218,7 +218,7 @@ fn cleanupAttemptChildren(attempt_fd: c.fd_t) Error!void {
         const is_tomb = std.mem.startsWith(u8, raw, ".sweep-");
         const base = if (is_tomb) raw[".sweep-".len..] else raw;
         var tomb_buf: [32]u8 = undefined;
-        const tomb = std.fmt.bufPrintZ(&tomb_buf, ".sweep-{s}", .{base}) catch unreachable;
+        const tomb = std.fmt.bufPrintSentinel(&tomb_buf, ".sweep-{s}", .{base}, 0) catch unreachable;
         if (!is_tomb and renameatx_np(attempt_fd, source.ptr, attempt_fd, tomb.ptr, rename_excl) != 0)
             return error.CleanupFailed;
         const fd = openExactFile(attempt_fd, tomb, stat, 0o600) catch return error.CleanupFailed;
@@ -239,13 +239,13 @@ fn childBit(name: []const u8) ?u4 {
 fn candidateName(buf: []u8, kind: Kind, tomb: bool, id: u128) Error![:0]u8 {
     return switch (kind) {
         .attempt => if (tomb)
-            std.fmt.bufPrintZ(buf, ".sweep-attempt-{x:0>32}", .{id})
+            std.fmt.bufPrintSentinel(buf, ".sweep-attempt-{x:0>32}", .{id}, 0)
         else
-            std.fmt.bufPrintZ(buf, "attempt-{x:0>32}", .{id}),
+            std.fmt.bufPrintSentinel(buf, "attempt-{x:0>32}", .{id}, 0),
         .target => if (tomb)
-            std.fmt.bufPrintZ(buf, ".sweep-target-{x:0>32}.image", .{id})
+            std.fmt.bufPrintSentinel(buf, ".sweep-target-{x:0>32}.image", .{id}, 0)
         else
-            std.fmt.bufPrintZ(buf, "target-{x:0>32}.image", .{id}),
+            std.fmt.bufPrintSentinel(buf, "target-{x:0>32}.image", .{id}, 0),
     } catch error.InvalidResidue;
 }
 

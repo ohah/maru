@@ -8,6 +8,8 @@
 //! - 확장자는 이미지 허용 목록에 있어야 한다 — 아니면 파일을 만들지 않는다(주소만 간다).
 //! - 255 바이트(APFS 이름 상한)를 넘으면 확장자를 남기고 앞부분을 글자 경계에서 자른다. 앞부분이 비면 `image`.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 
 /// 이미지 허용 목록(소문자). Chromium 이 이미지 MIME 으로 고르는 확장자들.
@@ -86,7 +88,7 @@ test "image file names keep safe names and refuse executables, paths, hidden nam
     try std.testing.expectEqualStrings("_.png", safeFileName("_ .png", &out).?);
     try std.testing.expect(safeFileName("bad\xffname.png", &out) == null);
     // 255 바이트 — 확장자를 남기고 글자 경계에서 자른다.
-    const long = "가" ** 120 ++ ".png";
+    const long = array_repeat.repeat("가", 120) ++ ".png";
     const cut = safeFileName(long, &out).?;
     try std.testing.expect(cut.len <= max_name_bytes and std.mem.endsWith(u8, cut, ".png") and std.unicode.utf8ValidateSlice(cut));
 }

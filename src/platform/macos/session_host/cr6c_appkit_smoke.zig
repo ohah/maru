@@ -173,12 +173,12 @@ fn runR7Integration(
     const host_id = (@as(u128, @intCast(std.c.getpid())) << 64) | 0xA700_0000_0000_0001;
     var socket_buf: [160]u8 = undefined;
     const socket = try short_endpoint.socketPathUnder(&socket_buf, isolated_root, host_id);
-    const dir_z = try allocator.dupeZ(u8, session_dir);
+    const dir_z = try allocator.dupeSentinel(u8, session_dir, 0);
     defer allocator.free(dir_z);
-    const socket_z = try allocator.dupeZ(u8, socket);
+    const socket_z = try allocator.dupeSentinel(u8, socket, 0);
     defer allocator.free(socket_z);
     var host_buf: [33]u8 = undefined;
-    const host_text = try std.fmt.bufPrintZ(&host_buf, "{x:0>32}", .{host_id});
+    const host_text = try std.fmt.bufPrintSentinel(&host_buf, "{x:0>32}", .{host_id}, 0);
 
     var artifacts_owned = true;
     defer if (artifacts_owned) {
@@ -470,7 +470,7 @@ pub fn main(init: std.process.Init) !void {
         return error.MissingAppExecutable;
     const app_path = std.mem.span(app_raw);
     if (app_path.len == 0 or app_path[0] != '/') return error.InvalidAppExecutable;
-    const app_path_z = try allocator.dupeZ(u8, app_path);
+    const app_path_z = try allocator.dupeSentinel(u8, app_path, 0);
     defer allocator.free(app_path_z);
     if (signed_app_quit) |config| {
         if (std.mem.eql(u8, config.output, app_path_z)) return error.InvalidSignedAppQuitPath;
@@ -504,7 +504,7 @@ pub fn main(init: std.process.Init) !void {
         return error.MissingProductExecutable;
     const product_path = std.mem.span(product_raw);
     if (product_path.len == 0 or product_path[0] != '/') return error.InvalidProductExecutable;
-    const product_path_z = try allocator.dupeZ(u8, product_path);
+    const product_path_z = try allocator.dupeSentinel(u8, product_path, 0);
     defer allocator.free(product_path_z);
     if (std.c.getenv("MARU_SESSION_HOST_R7_INTEGRATION_SMOKE") != null) {
         return runR7Integration(allocator, io, app_path_z, product_path_z);
@@ -525,7 +525,7 @@ pub fn main(init: std.process.Init) !void {
             return error.MissingInputContinuityAppBundle;
         const path = std.mem.span(raw);
         if (path.len == 0 or path[0] != '/') return error.InvalidInputContinuityAppBundle;
-        break :blk try allocator.dupeZ(u8, path);
+        break :blk try allocator.dupeSentinel(u8, path, 0);
     } else null;
     defer if (input_app_bundle_z) |path| allocator.free(path);
     const recovery_baseline_raw = std.c.getenv("MARU_SESSION_HOST_CR6E_RECOVERY_BASELINE_ARTIFACT");
@@ -562,7 +562,7 @@ pub fn main(init: std.process.Init) !void {
             return error.MissingInputSourceRestoreExecutable;
         const helper_path = std.mem.span(helper_raw);
         if (helper_path.len == 0 or helper_path[0] != '/') return error.InvalidInputSourceRestoreExecutable;
-        restore_helper_path_z = try allocator.dupeZ(u8, helper_path);
+        restore_helper_path_z = try allocator.dupeSentinel(u8, helper_path, 0);
         restore_record_path_z = try std.fmt.allocPrintSentinel(
             allocator,
             "{s}/input-source-restore.json",
@@ -596,12 +596,12 @@ pub fn main(init: std.process.Init) !void {
         try short_endpoint.socketPathUnder(&socket_buf, root, host_id)
     else
         try short_endpoint.currentSocketPathIn(&socket_buf, host_id);
-    const dir_z = try allocator.dupeZ(u8, session_dir);
+    const dir_z = try allocator.dupeSentinel(u8, session_dir, 0);
     defer allocator.free(dir_z);
-    const socket_z = try allocator.dupeZ(u8, socket);
+    const socket_z = try allocator.dupeSentinel(u8, socket, 0);
     defer allocator.free(socket_z);
     var host_buf: [33]u8 = undefined;
-    const host_text = try std.fmt.bufPrintZ(&host_buf, "{x:0>32}", .{host_id});
+    const host_text = try std.fmt.bufPrintSentinel(&host_buf, "{x:0>32}", .{host_id}, 0);
 
     // This harness owns exactly this PID-keyed host entry. Cleanup runs only after the later
     // terminateAndReap defer, so no live daemon can recreate files underneath it; sibling/user
@@ -651,7 +651,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (admin == null) return error.DaemonNotReady;
     defer if (admin) |*client| client.deinit();
-    var sibling_runtime_id: [32]u8 = [_]u8{'0'} ** 32;
+    var sibling_runtime_id: [32]u8 = @as([32]u8, @splat('0'));
     if (auto_reconnect) {
         const sibling_spawn = try admin.?.call(
             "runtime.spawn",
@@ -758,7 +758,7 @@ pub fn main(init: std.process.Init) !void {
         _ = std.c.unlink(appSummaryPath().ptr);
         if (recovery_baseline_path != null or signed_app_quit != null) {
             var iteration_buf: [16]u8 = undefined;
-            const iteration_z = try std.fmt.bufPrintZ(&iteration_buf, "{d}", .{iteration});
+            const iteration_z = try std.fmt.bufPrintSentinel(&iteration_buf, "{d}", .{iteration}, 0);
             if (setenv("MARU_SESSION_HOST_CR6E_RECOVERY_ITERATION", iteration_z.ptr, 1) != 0)
                 return error.EnvironmentFailed;
         }
@@ -985,7 +985,7 @@ fn launchInputContinuityApp(app_bundle: [:0]const u8) !c_int {
     const root = std.mem.span(std.c.getenv("MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT") orelse
         return error.MissingArtifactRoot);
     var stderr_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const stderr_path = try std.fmt.bufPrintZ(&stderr_buf, "{s}/app.stderr.txt", .{root});
+    const stderr_path = try std.fmt.bufPrintSentinel(&stderr_buf, "{s}/app.stderr.txt", .{root}, 0);
     const pid = std.c.fork();
     if (pid < 0) return error.ForkFailed;
     if (pid == 0) {
@@ -1007,7 +1007,7 @@ fn waitR7Leaf(path: [:0]const u8, app_pid: c_int, timeout_ms: usize) !void {
     var elapsed: usize = 0;
     while (elapsed < timeout_ms) : (elapsed += 10) {
         if (access(path.ptr, 0) == 0) return;
-        if (std.c.kill(app_pid, @enumFromInt(0)) != 0) return error.AppExitedBeforeCheckpoint;
+        if (std.c.kill(app_pid, @fromBackingInt(@intCast(0))) != 0) return error.AppExitedBeforeCheckpoint;
         _ = usleep(10 * 1000);
     }
     return error.CheckpointReceiptTimedOut;
@@ -1375,9 +1375,9 @@ fn writeStrictArtifact(
     try out.writer.writeByte('\n');
     const temp = try std.fmt.allocPrint(allocator, "{s}.tmp.{d}", .{ path, std.c.getpid() });
     defer allocator.free(temp);
-    const temp_z = try allocator.dupeZ(u8, temp);
+    const temp_z = try allocator.dupeSentinel(u8, temp, 0);
     defer allocator.free(temp_z);
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     defer _ = std.c.unlink(temp_z.ptr);
     const fd = std.c.open(temp_z.ptr, .{
@@ -1440,11 +1440,11 @@ fn readReleaseEvidenceConfig(allocator: std.mem.Allocator, env: ReleaseEvidenceE
         return error.InvalidReleaseEvidencePath;
     const owned_uuid = try allocator.dupe(u8, uuid);
     errdefer allocator.free(owned_uuid);
-    const owned_dmg = try allocator.dupeZ(u8, dmg);
+    const owned_dmg = try allocator.dupeSentinel(u8, dmg, 0);
     errdefer allocator.free(owned_dmg);
-    const owned_frozen = try allocator.dupeZ(u8, frozen);
+    const owned_frozen = try allocator.dupeSentinel(u8, frozen, 0);
     errdefer allocator.free(owned_frozen);
-    const owned_output = try allocator.dupeZ(u8, output);
+    const owned_output = try allocator.dupeSentinel(u8, output, 0);
     return .{
         .test_uuid = owned_uuid,
         .candidate_dmg = owned_dmg,
@@ -1523,7 +1523,7 @@ fn validAbsolutePath(path: []const u8) bool {
 
 fn validatePrivateDirectory(path: []const u8) !void {
     var storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&storage, "{s}", .{path}) catch return error.InvalidReleaseWorkspace;
+    const path_z = std.fmt.bufPrintSentinel(&storage, "{s}", .{path}, 0) catch return error.InvalidReleaseWorkspace;
     var stat: std.posix.Stat = undefined;
     if (std.c.fstatat(std.posix.AT.FDCWD, path_z.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW) != 0 or !std.posix.S.ISDIR(stat.mode) or
         stat.uid != std.c.getuid() or stat.mode & 0o777 != 0o700)
@@ -1810,7 +1810,7 @@ fn cleanupExactHostArtifacts(
         return false;
     std.Io.Dir.cwd().deleteTree(io, host_dir) catch {};
     var log_buf: [768]u8 = undefined;
-    const log_path = std.fmt.bufPrintZ(&log_buf, "{s}/host-{x:0>32}.log", .{ session_dir, host_id }) catch
+    const log_path = std.fmt.bufPrintSentinel(&log_buf, "{s}/host-{x:0>32}.log", .{ session_dir, host_id }, 0) catch
         return false;
     _ = std.c.unlink(log_path.ptr);
 
@@ -1821,9 +1821,9 @@ fn cleanupExactHostArtifacts(
 
 fn cleanupR7IsolatedRoot(session_dir: [:0]const u8, isolated_root: [:0]const u8) bool {
     var hosts_buf: [768]u8 = undefined;
-    const hosts = std.fmt.bufPrintZ(&hosts_buf, "{s}/hosts", .{session_dir}) catch return false;
+    const hosts = std.fmt.bufPrintSentinel(&hosts_buf, "{s}/hosts", .{session_dir}, 0) catch return false;
     var incidents_buf: [768]u8 = undefined;
-    const incidents = std.fmt.bufPrintZ(&incidents_buf, "{s}/incidents", .{session_dir}) catch return false;
+    const incidents = std.fmt.bufPrintSentinel(&incidents_buf, "{s}/incidents", .{session_dir}, 0) catch return false;
     var socket_dir_buf: [96]u8 = undefined;
     const socket_dir = short_endpoint.socketDirPathUnder(&socket_dir_buf, isolated_root) catch return false;
     _ = std.c.rmdir(hosts.ptr);
@@ -1839,8 +1839,8 @@ test "signed app Quit evidence is canonical and contains only durable observatio
     const bytes = try encodeSignedAppQuitArtifact(
         &storage,
         "123e4567-e89b-42d3-a456-426614174000",
-        [_]u8{0xaa} ** 32,
-        [_]u8{0xbb} ** 32,
+        @as([32]u8, @splat(0xaa)),
+        @as([32]u8, @splat(0xbb)),
     );
     try std.testing.expectEqualStrings(
         "{\"schema\":\"maru.session-host-signed-app-quit-reattach.v1\",\"test_uuid\":\"123e4567-e89b-42d3-a456-426614174000\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"candidate_executable_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"runtime_count\":1,\"same_host_pid\":true,\"all_runtime_pids_preserved\":true,\"gui_exact_reattach\":true,\"runtime_screen_before_preserved\":true,\"runtime_screen_after_writable\":true,\"cleanup_complete\":true}\n",
@@ -1853,8 +1853,8 @@ test "signed app Quit evidence rejects noncanonical trusted UUID" {
     try std.testing.expectError(error.InvalidTestUuid, encodeSignedAppQuitArtifact(
         &storage,
         "123E4567-E89B-42D3-A456-426614174000",
-        [_]u8{0xaa} ** 32,
-        [_]u8{0xbb} ** 32,
+        @as([32]u8, @splat(0xaa)),
+        @as([32]u8, @splat(0xbb)),
     ));
 }
 
@@ -1863,8 +1863,8 @@ test "signed app Quit evidence never accepts caller result booleans" {
     const bytes = try encodeSignedAppQuitArtifact(
         &storage,
         "123e4567-e89b-42d3-a456-426614174000",
-        [_]u8{0x11} ** 32,
-        [_]u8{0x22} ** 32,
+        @as([32]u8, @splat(0x11)),
+        @as([32]u8, @splat(0x22)),
     );
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"result\":\"passed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "duration") == null);
@@ -1876,8 +1876,8 @@ test "default false evidence is canonical and contains only derived observations
     const bytes = try encodeDefaultFalseArtifact(
         &storage,
         "123e4567-e89b-42d3-a456-426614174000",
-        [_]u8{0xaa} ** 32,
-        [_]u8{0xbb} ** 32,
+        @as([32]u8, @splat(0xaa)),
+        @as([32]u8, @splat(0xbb)),
     );
     try std.testing.expectEqualStrings(
         "{\"schema\":\"maru.session-host-default-false-baseline.v1\",\"test_uuid\":\"123e4567-e89b-42d3-a456-426614174000\",\"result\":\"passed\",\"candidate_dmg_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"candidate_executable_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"resolved_default\":false,\"explicit_override_present\":false,\"signed_product\":true}\n",
@@ -1890,8 +1890,8 @@ test "default false evidence rejects noncanonical trusted UUID" {
     try std.testing.expectError(error.InvalidTestUuid, encodeDefaultFalseArtifact(
         &storage,
         "123E4567-E89B-42D3-A456-426614174000",
-        [_]u8{0xaa} ** 32,
-        [_]u8{0xbb} ** 32,
+        @as([32]u8, @splat(0xaa)),
+        @as([32]u8, @splat(0xbb)),
     ));
 }
 
@@ -1900,8 +1900,8 @@ test "default false evidence has no caller-controlled result surface" {
     const bytes = try encodeDefaultFalseArtifact(
         &storage,
         "123e4567-e89b-42d3-a456-426614174000",
-        [_]u8{0x11} ** 32,
-        [_]u8{0x22} ** 32,
+        @as([32]u8, @splat(0x11)),
+        @as([32]u8, @splat(0x22)),
     );
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"result\":\"passed\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "config_path") == null);

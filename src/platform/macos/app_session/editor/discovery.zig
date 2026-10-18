@@ -28,7 +28,7 @@ pub const Catalog = struct {
     failure: ?anyerror = null,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Catalog {
-        const copy = try allocator.dupeZ(u8, path);
+        const copy = try allocator.dupeSentinel(u8, path, 0);
         errdefer allocator.free(copy);
         const dir = store.openRoot(io, path, true) catch |err| {
             if (err == error.FileNotFound) return .{ .allocator = allocator, .io = io, .path = copy, .complete = true };
@@ -145,9 +145,9 @@ const Fixture = struct {
     fn put(self: *Fixture, name: []const u8, bytes: []const u8) !void {
         const dir = try store.openRoot(testing.io, self.root, false);
         defer dir.close(testing.io);
-        var file = try dir.createFileAtomic(testing.io, name, .{ .replace = true, .permissions = @enumFromInt(0o600) });
+        var file = try dir.createFileAtomic(testing.io, name, .{ .replace = true, .permissions = @fromBackingInt(@intCast(0o600)) });
         defer file.deinit(testing.io);
-        try file.file.setPermissions(testing.io, @enumFromInt(0o600));
+        try file.file.setPermissions(testing.io, @fromBackingInt(@intCast(0o600)));
         var buffer: [4096]u8 = undefined;
         var writer = file.file.writer(testing.io, &buffer);
         try writer.interface.writeAll(bytes);
@@ -322,9 +322,9 @@ test "editor backup discovery 링크와 잘못된 권한 및 신원을 거절하
     try testing.expectError(error.RecordChanged, source.drop());
     try dir.symLink(testing.io, "u-1.bak", "u-2.bak", .{});
     try testing.expectError(error.OpenFailed, store.Source.open(testing.allocator, testing.io, fixture.root, "u-2.bak"));
-    try dir.setFilePermissions(testing.io, "u-1.bak", @enumFromInt(0o644), .{});
+    try dir.setFilePermissions(testing.io, "u-1.bak", @fromBackingInt(@intCast(0o644)), .{});
     try testing.expectError(error.UnsafeRecord, store.Source.open(testing.allocator, testing.io, fixture.root, "u-1.bak"));
-    try dir.setFilePermissions(testing.io, "u-1.bak", @enumFromInt(0o600), .{});
+    try dir.setFilePermissions(testing.io, "u-1.bak", @fromBackingInt(@intCast(0o600)), .{});
     const wrong = try backup.encode(testing.allocator, .{ .untitled = 9 }, "foreign");
     defer testing.allocator.free(wrong);
     try fixture.put("u-3.bak", wrong);
@@ -359,7 +359,7 @@ test "editor backup discovery 열린 source의 루트와 claim을 교체해도 �
     const moved = try std.fmt.allocPrint(testing.allocator, "{s}-moved", .{fixture.root});
     defer testing.allocator.free(moved);
     try std.Io.Dir.cwd().rename(fixture.root, std.Io.Dir.cwd(), moved, testing.io);
-    try std.Io.Dir.cwd().createDir(testing.io, fixture.root, @enumFromInt(0o700));
+    try std.Io.Dir.cwd().createDir(testing.io, fixture.root, @fromBackingInt(@intCast(0o700)));
     const next = try store.openRoot(testing.io, fixture.root, false);
     defer next.close(testing.io);
     try next.writeFile(testing.io, .{ .sub_path = &name, .data = "unrelated replacement" });

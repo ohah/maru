@@ -20,8 +20,8 @@ pub fn bindWith(reader: anytype, allocator: std.mem.Allocator, context: context_
     try context_mod.validateTrusted(context);
     _ = try assets.remaining();
     const initial = try assets.revalidate();
-    const manifest_asset = initial.assets[@intFromEnum(metadata.Role.manifest)];
-    const evidence_asset = initial.assets[@intFromEnum(metadata.Role.evidence_candidate)];
+    const manifest_asset = initial.assets[@backingInt(metadata.Role.manifest)];
+    const evidence_asset = initial.assets[@backingInt(metadata.Role.evidence_candidate)];
     if (manifest_asset.size > manifest.max_manifest_bytes or evidence_asset.size > evidence.max_evidence_bytes) return error.AssetTooLarge;
 
     const manifest_bytes = try allocator.alloc(u8, @intCast(manifest_asset.size));
@@ -32,8 +32,8 @@ pub fn bindWith(reader: anytype, allocator: std.mem.Allocator, context: context_
     try readRole(reader, assets, .manifest, manifest_bytes);
     try readRole(reader, assets, .evidence_candidate, evidence_bytes);
     const final = try assets.revalidate();
-    if (!sameAsset(manifest_asset, final.assets[@intFromEnum(metadata.Role.manifest)]) or
-        !sameAsset(evidence_asset, final.assets[@intFromEnum(metadata.Role.evidence_candidate)])) return error.FileChanged;
+    if (!sameAsset(manifest_asset, final.assets[@backingInt(metadata.Role.manifest)]) or
+        !sameAsset(evidence_asset, final.assets[@backingInt(metadata.Role.evidence_candidate)])) return error.FileChanged;
     const remote_owner = try assets.metadataOwner();
     try semantics.bind(allocator, context, remote_owner, manifest_bytes, evidence_bytes, result);
     _ = assets.remaining() catch |err| {

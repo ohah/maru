@@ -4,6 +4,8 @@
 //! immutable payload bytes plus optional stream/runtime evidence. The returned spans borrow those
 //! bytes and are valid only while the payload remains unchanged.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const resize_wire = @import("resize_wire.zig");
@@ -31,7 +33,7 @@ pub fn eventPreflightProjectionDigest(value: EventPreflight) Digest {
     var hasher = Sha256.init(.{});
     hasher.update("runtime-event-preflight-projection.v1");
     hasher.update(&value.raw_digest);
-    const tag = @intFromEnum(std.meta.activeTag(value.event));
+    const tag = @backingInt(std.meta.activeTag(value.event));
     hasher.update(std.mem.asBytes(&tag));
     switch (value.event) {
         .revoked => |event| {
@@ -921,8 +923,8 @@ fn attachWireError(payload: []const u8, name: StringSpan) ?protocol.ErrorCode {
     // made valid typed outcomes such as stale_host and payload_too_large unreachable to callers
     // that already map them, while future unknown names still fail because they are not enum
     // fields.
-    inline for (@typeInfo(protocol.ErrorCode).@"enum".fields) |field| {
-        const code: protocol.ErrorCode = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(protocol.ErrorCode)) |field| {
+        const code: protocol.ErrorCode = @fromBackingInt(@intCast(field.value));
         if (spanEquals(payload, name, code.wireName())) return code;
     }
     return null;
@@ -1083,8 +1085,8 @@ fn parseMetadata(
         } else if (spanEquals(payload, key, "semantic_state")) {
             if (metadata.semantic_state != null) return error.Malformed;
             const raw = try readUnsigned(u8, scanner);
-            metadata.semantic_state = if (raw <= @intFromEnum(SemanticPrompt.command))
-                @enumFromInt(raw)
+            metadata.semantic_state = if (raw <= @backingInt(SemanticPrompt.command))
+                @fromBackingInt(@intCast(raw))
             else
                 .unknown;
         } else if (spanEquals(payload, key, "alt_active")) {
@@ -1312,7 +1314,7 @@ fn metadataDigest(view: *const MetadataView, payload: []const u8) Digest {
     hashSpan(&hasher, view.window_title);
     hashBool(&hasher, view.ssh_remote_dest != null);
     if (view.ssh_remote_dest) |value| hashSpan(&hasher, value);
-    hashU64(&hasher, @intFromEnum(view.semantic_state));
+    hashU64(&hasher, @backingInt(view.semantic_state));
     hashBool(&hasher, view.alt_active);
     hashBool(&hasher, view.app_cursor_keys);
     hashBool(&hasher, view.app_keypad);
@@ -1761,7 +1763,7 @@ test "metadata view field inventory forces every manual semantic mapping to be r
         "process_count",
         "semantic_digest",
     };
-    const fields = @typeInfo(MetadataView).@"struct".fields;
+    const fields = @import("type_info_fields").structFields(MetadataView);
     try std.testing.expectEqual(expected.len, fields.len);
     inline for (expected, fields) |expected_name, field|
         try std.testing.expectEqualStrings(expected_name, field.name);
@@ -1852,8 +1854,8 @@ test "attach preflight accepts exact wire errors and frozen controller envelopes
         .wire_error => |code| code,
         else => return error.TestUnexpectedResult,
     });
-    inline for (@typeInfo(protocol.ErrorCode).@"enum".fields) |field| {
-        const code: protocol.ErrorCode = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(protocol.ErrorCode)) |field| {
+        const code: protocol.ErrorCode = @fromBackingInt(@intCast(field.value));
         const payload = try std.fmt.allocPrint(
             std.testing.allocator,
             "{{\"error\":\"{s}\"}}",
@@ -2067,7 +2069,7 @@ test "attach preflight reports metadata and process caps immediately as resource
         "\"app_cursor_keys\":false,\"alternate_scroll\":true,\"observer_generation\":1," ++
         "\"title_generation\":2,\"cols\":80,\"rows\":24,\"foreground_available\":true," ++
         "\"foreground_pgid\":7,\"processes\":[{\"pid\":7,\"name\":\"" ++
-        ("x" ** 129) ++ "\"}]}}}";
+        (array_repeat.repeat("x", 129)) ++ "\"}]}}}";
     try std.testing.expectError(
         error.ResourceExhausted,
         preflightAttachEnvelope(long_process_name, profile),
@@ -2162,17 +2164,17 @@ test "metadata accepts escapes and scalar unknowns and rejects nested unknowns" 
     var decoded_cwd: [5]u8 = undefined;
     try decodeStringExact(valid, metadata.cwd, &decoded_cwd);
     try std.testing.expectEqualStrings("/repo", &decoded_cwd);
-    var oversized = [_]u8{0xa5} ** 6;
+    var oversized = @as([6]u8, @splat(0xa5));
     try std.testing.expectError(
         error.LengthMismatch,
         decodeStringExact(valid, metadata.cwd, &oversized),
     );
-    try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 6), &oversized);
+    try std.testing.expectEqualSlices(u8, &(@as([6]u8, @splat(0xa5))), &oversized);
     var forged = metadata.cwd;
-    forged.digest = [_]u8{0} ** Sha256.digest_length;
-    var unchanged = [_]u8{0x5a} ** 5;
+    forged.digest = @as([Sha256.digest_length]u8, @splat(0));
+    var unchanged = @as([5]u8, @splat(0x5a));
     try std.testing.expectError(error.InvalidSpan, decodeStringExact(valid, forged, &unchanged));
-    try std.testing.expectEqualSlices(u8, &([_]u8{0x5a} ** 5), &unchanged);
+    try std.testing.expectEqualSlices(u8, &(@as([5]u8, @splat(0x5a))), &unchanged);
     try decodeStringExact(valid, metadata.clipboard_read_target, &.{});
 
     const nested = std.mem.replaceOwned(
@@ -2208,7 +2210,7 @@ test "P4 metadata event binds one nonzero observation probe nonce" {
 test "decoded duplicate keys use exact fallback under an injected key digest collision" {
     const Collision = struct {
         fn finish(_: ?*anyopaque, _: Digest) Digest {
-            return [_]u8{0} ** Sha256.digest_length;
+            return @as([Sha256.digest_length]u8, @splat(0));
         }
     };
     const ops: DigestOps = .{ .finish_key = Collision.finish };
@@ -2359,7 +2361,7 @@ test "control-cap strings and strings larger than scratch stream without allocat
 test "semantic digest collision still requires exact replay equality" {
     const Collision = struct {
         fn finish(_: ?*anyopaque, _: Digest) Digest {
-            return [_]u8{0x5a} ** Sha256.digest_length;
+            return @as([Sha256.digest_length]u8, @splat(0x5a));
         }
     };
     const ops: DigestOps = .{ .finish_semantic = Collision.finish };

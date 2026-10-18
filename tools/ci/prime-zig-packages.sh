@@ -16,7 +16,32 @@ set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd -P)
 vendor="$root/vendor/zig-packages"
 
-hashes=$(sed -n 's/.*\.hash = "\([^"]*\)".*/\1/p' "$root/build.zig.zon" | sort -u)
+expand_hashes() {
+    archive_dir=$1
+    pending=$(sed -n 's/.*\.hash = "\([^"]*\)".*/\1/p' "$root/build.zig.zon" | sort -u)
+    expanded=$pending
+    while [ -n "$pending" ]; do
+        hash=$(printf '%s\n' "$pending" | sed -n '1p')
+        pending=$(printf '%s\n' "$pending" | sed -n '2,$p')
+        archive="$archive_dir/$hash.tar.gz"
+        [ -f "$archive" ] || continue
+        manifest_member=$(tar -tzf "$archive" | sed -n -e '/^build\.zig\.zon$/p' -e '/\/build\.zig\.zon$/p' | sed -n '1p')
+        [ -n "$manifest_member" ] || continue
+        nested_hashes=$(tar -xOzf "$archive" "$manifest_member" | sed -n 's/.*\.hash = "\([^"]*\)".*/\1/p' | sort -u)
+        for nested_hash in $nested_hashes; do
+            case " $expanded " in
+                *" $nested_hash "*) ;;
+                *)
+                    expanded="$expanded $nested_hash"
+                    pending="$pending $nested_hash"
+                    ;;
+            esac
+        done
+    done
+    printf '%s\n' "$expanded" | tr ' ' '\n' | sed '/^$/d' | sort -u
+}
+
+hashes=$(expand_hashes "$vendor")
 if [ -z "$hashes" ]; then
     echo "prime-zig-packages: build.zig.zon 에서 의존성 해시를 못 읽었다" >&2
     exit 1
@@ -43,8 +68,22 @@ if [ "$bad" -ne 0 ]; then
 fi
 
 count=$(printf '%s\n' "$hashes" | wc -l | tr -d ' ')
+expected_pcre2_sha=$(cat "$root/vendor/third-party/pcre2-10.48.sha256")
+if command -v sha256sum >/dev/null 2>&1; then
+    actual_pcre2_sha=$(sha256sum "$root/vendor/third-party/pcre2-10.48.tar.gz" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+    actual_pcre2_sha=$(shasum -a 256 "$root/vendor/third-party/pcre2-10.48.tar.gz" | awk '{print $1}')
+else
+    echo "prime-zig-packages: sha256sum 또는 shasum 이 필요하다" >&2
+    exit 1
+fi
+if [ "$actual_pcre2_sha" != "$expected_pcre2_sha" ]; then
+    echo "prime-zig-packages: PCRE2 release archive SHA-256 불일치" >&2
+    exit 1
+fi
+
 if [ "${1:-}" = "--check" ]; then
-    echo "prime-zig-packages: $count 개 사본이 build.zig.zon 과 일치한다"
+    echo "prime-zig-packages: $count 개 Zig 패키지 사본과 PCRE2 archive checksum 이 일치한다"
     exit 0
 fi
 

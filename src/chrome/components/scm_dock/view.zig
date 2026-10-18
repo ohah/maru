@@ -3,6 +3,8 @@
 //! 일반 UI painter가 카드 배경을 소유하고, 이 파일은 **컴포넌트가 소유한 글자와 호버 동작**만 더한다.
 //! platform에 글리프 위치를 묻지 않으므로 backend는 계속 단방향 ChromeDraw lowerer로 남는다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const i18n = @import("../../../i18n.zig"); // 표시 문자열 단일 출처
 const icons = @import("../../../icons.zig");
@@ -2610,7 +2612,7 @@ test "커밋 상자는 글이 넘치면 스크롤바로 그 사실을 말한다"
     // 넘치는데 표시가 없으면 사용자는 **글이 잘렸다**고 읽는다(사용자 요청 2026-08-17).
     var storage: TestStorage = .{};
     const short_text = "한 줄";
-    const long_text = "가나다라마바사아자차카타파하 " ** 40; // 상한(8행)을 확실히 넘긴다
+    const long_text = array_repeat.repeat("가나다라마바사아자차카타파하 ", 40); // 상한(8행)을 확실히 넘긴다
     const short_items = [_]types.Item{
         .{ .commit_box = .{ .repo_index = 0, .rows = 1, .text = short_text } },
     };
@@ -3065,7 +3067,7 @@ test "파일 이름·경로는 증감·상태 문자 자리를 침범하지 않�
     const items = [_]types.Item{
         .{ .file = .{
             .name = "a.zig",
-            .dir = "src/" ++ "very-long-directory-segment/" ** 8,
+            .dir = "src/" ++ array_repeat.repeat("very-long-directory-segment/", 8),
             .status = .modified,
             .letter = 'M',
             .added = 123,
@@ -3485,7 +3487,7 @@ test "마지막 줄이 상자 안에 있다(상자 높이와 줄 간격의 출�
     const m = types.DockMetrics.resolve(1000);
     // 상자 줄의 rect는 목록 항목 0이다(fixture가 상자·버튼 순으로 넣는다).
     const box = storage.entries[boxEntryIndex(&storage)].rect;
-    const bottom: i32 = @intFromEnum(@as(enum(i32) { _ }, @enumFromInt(@as(i32, @intFromFloat(box.y + box.height)))));
+    const bottom: i32 = @backingInt(@as(enum(i32) { _ }, @fromBackingInt(@intCast(@as(i32, @intFromFloat(box.y + box.height))))));
     try testing.expect(last.origin.y + line_h <= bottom);
     try testing.expect(bottom - (last.origin.y + line_h) <= @as(i32, @intCast(m.commit_pad_y)));
     const caret = firstQuad(draws, .cursor) orelse return error.MissingCaret;

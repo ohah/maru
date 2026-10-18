@@ -222,7 +222,7 @@ pub fn publish(
     var count: usize = 0;
     for (slots) |slot| {
         if (slot.index >= ids.len) continue; // 호출자 실수 — 조용히 빼는 편이 잘못된 항목을 실행하는 것보다 낫다
-        const id: u64 = @intFromEnum(ids[slot.index]);
+        const id: u64 = @backingInt(ids[slot.index]);
         // 바 밖으로는 못 나간다 — 첫/마지막 항목이 `edge_pad` 일부를 먹는 것은 의도지만 바를 넘으면 안 된다.
         const left = @max(bar_left, slot.x -| pad_px);
         const right = @min(bar_right, slot.x +| slot.w +| pad_px);
@@ -343,8 +343,8 @@ test "SB1: publish는 슬롯을 button 노드로 내고 **의미**로 식별한�
     const t1 = try publish(metrics(1000), wide.left, &ids, 0, 7, &entries); // pad 0 = 슬롯 그대로
     try testing.expectEqual(@as(usize, 2), t1.entries.len);
     try testing.expectEqual(@as(u64, 7), t1.generation);
-    try testing.expectEqual(@intFromEnum(ItemId.git_branch), t1.entries[0].id);
-    try testing.expectEqual(@intFromEnum(ItemId.cwd), t1.entries[1].id);
+    try testing.expectEqual(@backingInt(ItemId.git_branch), t1.entries[0].id);
+    try testing.expectEqual(@backingInt(ItemId.cwd), t1.entries[1].id);
     for (t1.entries) |e| {
         try testing.expectEqual(tree.NodeKind.button, e.kind); // 아이콘+텍스트+액션 = button
         try testing.expect(e.action != null);
@@ -367,7 +367,7 @@ test "SB1: 앞 항목이 사라져도 남은 항목의 id는 그대로다" {
     const ids = [_]ItemId{.cwd};
     const t = try publish(metrics(1000), only_cwd.left, &ids, 0, 1, &entries);
     try testing.expectEqual(@as(usize, 1), t.entries.len);
-    try testing.expectEqual(@intFromEnum(ItemId.cwd), t.entries[0].id); // 1번(브랜치)이 아니다
+    try testing.expectEqual(@backingInt(ItemId.cwd), t.entries[0].id); // 1번(브랜치)이 아니다
 }
 
 test "SB1: 자리를 못 얻은 항목은 tree에 없다(안 보이면 눌리지도 않는다)" {
@@ -381,7 +381,7 @@ test "SB1: 자리를 못 얻은 항목은 tree에 없다(안 보이면 눌리지
     const ids = [_]ItemId{ .git_branch, .cwd };
     const t = try publish(metrics(300), narrow.left, &ids, 0, 1, &entries);
     try testing.expectEqual(@as(usize, 1), t.entries.len);
-    try testing.expectEqual(@intFromEnum(ItemId.git_branch), t.entries[0].id); // 살아남은 것만
+    try testing.expectEqual(@backingInt(ItemId.git_branch), t.entries[0].id); // 살아남은 것만
 
     // 버퍼가 모자라면 조용히 자르지 않고 에러다.
     var tiny: [0]tree.RectEntry = undefined;

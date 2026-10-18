@@ -493,7 +493,7 @@ fn sameAction(a: Action, b: Action) bool {
 
 test "INDR1 VS Code 규칙 대조 — 핀 커밋의 내장 언어 설정을 원래 의미로 돌린 말뭉치와 같은 갈래, 갈리는 것은 의도한 차이 목록에만 (계획 editor-typing-rules TR3)" {
     // 목록의 항목마다 말뭉치에서 한 번 이상 갈려야 한다 — 같은 `before` 가 뒤 조각만 달리해 여러 번 나올 수 있다(XML `<a>` ⏎ `</a>`·`<a>`).
-    var hit = [_]bool{false} ** intended.len;
+    var hit = @as([intended.len]bool, @splat(false));
     for (vscode.cases) |e| {
         const got = decide(ctxFor(e.grammar), e.before, e.after, if (e.prev.len > 0) e.prev else null);
         const want = fromVscode(e);

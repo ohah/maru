@@ -19,6 +19,8 @@
 //! `write(2, …)` 한 번이면 파일에 그대로 남고, allocator·환경·lock 을 건드리지 않아 어느 시점에서도
 //! 안전하다(`process_seal_service.fatalIntegrity` 가 같은 이유로 같은 방식을 쓴다).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -49,12 +51,12 @@ test "host log formats within the fixed buffer and stays test-silent" {
     // 테스트에서는 아무것도 쓰지 않는다(빌드 러너의 stderr 를 오염시키지 않기 위해).
     line("session host started: pid={d} diagnostics=v1", .{@as(i32, 12345)});
     // 버퍼를 넘기는 인자도 프로세스를 죽이지 않고 조용히 버려진다.
-    line("{s}", .{"x" ** 512});
+    line("{s}", .{array_repeat.repeat("x", 512)});
 }
 
 test "한 줄은 개행까지 max_line_bytes 안에 들어야 하고, 넘치면 통째로 버려진다" {
     var buf: [max_line_bytes]u8 = undefined;
-    const fits = "x" ** (max_line_bytes - 1);
+    const fits = array_repeat.repeat("x", (max_line_bytes - 1));
     const written = formatLine(&buf, "{s}", .{fits}) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, max_line_bytes), written.len);
     try std.testing.expect(std.mem.endsWith(u8, written, "x\n"));

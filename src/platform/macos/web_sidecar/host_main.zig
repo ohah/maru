@@ -51,7 +51,7 @@ var g_dispatcher: dispatch.Dispatcher = undefined;
 var g_task: c.cef_task_t = undefined;
 
 pub fn main(init: std.process.Init) u8 {
-    return @intFromEnum(run(init));
+    return @backingInt(run(init));
 }
 
 /// 메시지 루프가 도는 동안만 읽기 스레드가 task 를 올린다 — `cef_shutdown` 도중·뒤에 올리지 않게.
@@ -105,7 +105,7 @@ fn run(init: std.process.Init) ExitCode {
     // 결정 전 다운로드를 받아 둘 곳 — 프로필 안 0700(W10b, `preferences.zig`). 만들지 못하면 Chromium 기본(~/Downloads)으로 둔다.
     var staging_buf: [1100]u8 = undefined;
     const staging: ?[]const u8 = blk: {
-        const path = std.fmt.bufPrintZ(&staging_buf, "{s}/download-staging", .{profile_dir}) catch break :blk null;
+        const path = std.fmt.bufPrintSentinel(&staging_buf, "{s}/download-staging", .{profile_dir}, 0) catch break :blk null;
         profile.ensurePrivateDir(path) catch break :blk null;
         // 프로필을 잡은 뒤(cef_initialize 가 같은 프로필의 다른 host 를 막았다) 지난번이 남긴 것을 비운다.
         _ = profile.clearFiles(path);

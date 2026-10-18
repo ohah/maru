@@ -29,6 +29,8 @@
 //! 그 턴의 구간은 귀속 근거로 쓰지 않는다(계약 §6.1 「확실히 알 수 없으면 말하지 않는다」). 조용히 잘라
 //! 일부만 들면 그 턴의 `✎` 가 **적게** 뜨는데, 그것은 「안 고쳤다」로 읽힌다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const event = @import("agent_hook_event.zig");
 
@@ -383,7 +385,7 @@ test "상한을 넘기면 확정하지 않는다 — contains 가 언제나 거�
 
     // id 상한 — 잘라서 담지 않고 열지 않는다(잘린 id 는 남의 것과 거짓으로 짝지어진다).
     var d: Brackets = .{};
-    const long = "x" ** (max_id_len + 1);
+    const long = array_repeat.repeat("x", (max_id_len + 1));
     d.openBracket(long, 1000, false);
     try testing.expect(d.overflow);
     try testing.expect(!d.busy());

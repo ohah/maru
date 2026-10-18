@@ -274,7 +274,7 @@ pub const OwnerLease = struct {
         }
         const parent = std.fs.path.dirname(path) orelse return error.CleanupFailed;
         var parent_buf: [1024]u8 = undefined;
-        const parent_z = std.fmt.bufPrintZ(&parent_buf, "{s}", .{parent}) catch return error.CleanupFailed;
+        const parent_z = std.fmt.bufPrintSentinel(&parent_buf, "{s}", .{parent}, 0) catch return error.CleanupFailed;
         const dir_fd = c.open(parent_z.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
         if (dir_fd < 0) return error.CleanupFailed;
         defer _ = c.close(dir_fd);
@@ -316,7 +316,7 @@ pub fn metadataIsValid(stat: posix.Stat, expected_uid: posix.uid_t) bool {
 test "owner lease remains exclusive through inherited-slot adoption" {
     const exec_fd_set = @import("exec_fd_set.zig");
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/tmp/maru-owner-lease-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "/tmp/maru-owner-lease-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     _ = c.unlink(path.ptr);
     defer _ = c.unlink(path.ptr);
 
@@ -341,7 +341,7 @@ test "owner lease remains exclusive through inherited-slot adoption" {
 
 test "owner lease cleanup preserves a replacement inode" {
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/private/tmp/maru-owner-replaced-{d}", .{c.getpid()}) catch
+    const path = std.fmt.bufPrintSentinel(&path_buf, "/private/tmp/maru-owner-replaced-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.unlink(path.ptr);
     defer _ = c.unlink(path.ptr);
@@ -373,7 +373,7 @@ test "owner lease metadata rejects a different uid without privileged chown" {
 
 test "owner lock 감사: 이름이 사라진 것과 다른 inode 로 바뀐 것을 가른다" {
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/tmp/maru-owner-audit-{d}", .{c.getpid()}) catch
+    const path = std.fmt.bufPrintSentinel(&path_buf, "/tmp/maru-owner-audit-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.unlink(path.ptr);
     defer _ = c.unlink(path.ptr);
@@ -394,7 +394,7 @@ test "owner lock 감사: 이름이 사라진 것과 다른 inode 로 바뀐 것�
 
 test "owner lock 치유: 이름을 잃어도 같은 경로에 다시 서고, 그 뒤 observe 가 다시 held 라고 답한다" {
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/tmp/maru-owner-heal-{d}", .{c.getpid()}) catch
+    const path = std.fmt.bufPrintSentinel(&path_buf, "/tmp/maru-owner-heal-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.unlink(path.ptr);
     defer _ = c.unlink(path.ptr);
@@ -420,7 +420,7 @@ test "owner lock 치유: 이름을 잃어도 같은 경로에 다시 서고, 그
 
 test "owner lock 치유: 남이 쥔 이름은 빼앗지 않는다" {
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/tmp/maru-owner-steal-{d}", .{c.getpid()}) catch
+    const path = std.fmt.bufPrintSentinel(&path_buf, "/tmp/maru-owner-steal-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.unlink(path.ptr);
     defer _ = c.unlink(path.ptr);
@@ -443,11 +443,11 @@ test "owner lock 치유: 남이 쥔 이름은 빼앗지 않는다" {
 
 test "owner lock 치유: 되세우기에 실패해도 쥐고 있던 락을 놓지 않는다" {
     var dir_buf: [256]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-owner-keep-{d}", .{c.getpid()}) catch
+    const dir = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-owner-keep-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.chmod(dir.ptr, 0o700);
     var stale_buf: [320]u8 = undefined;
-    const stale = std.fmt.bufPrintZ(&stale_buf, "{s}/owner.lock", .{dir}) catch return error.SkipZigTest;
+    const stale = std.fmt.bufPrintSentinel(&stale_buf, "{s}/owner.lock", .{dir}, 0) catch return error.SkipZigTest;
     _ = c.unlink(stale.ptr);
     _ = c.rmdir(dir.ptr);
     if (c.mkdir(dir.ptr, 0o700) != 0) return error.SkipZigTest;

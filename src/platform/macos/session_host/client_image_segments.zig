@@ -174,8 +174,8 @@ pub const Table = struct {
     /// 의 전후를 비교한다.
     pub fn fingerprint(self: *const Table) [32]u8 {
         // 필드를 더하면 여기도 덮는다.
-        comptime std.debug.assert(std.meta.fields(Table).len == 10);
-        comptime std.debug.assert(std.meta.fields(image_channel_wire.Segment).len == 5);
+        comptime std.debug.assert(@import("type_info_fields").fields(Table).len == 10);
+        comptime std.debug.assert(@import("type_info_fields").fields(image_channel_wire.Segment).len == 5);
         var hasher = std.crypto.hash.Blake3.init(.{});
         hashInt(&hasher, self.len);
         for (self.entriesSlice()) |entry| {
@@ -266,7 +266,7 @@ pub const Table = struct {
         // pipe·socket, 디렉터리)가 오면 크기 하한은 지나도 macOS 의 mmap 이 EINVAL 을 낸다 — 앱을 죽이지 않고 「없음」으로 내린다.
         const raw = c.mmap(null, ref.byte_len, .{ .READ = true }, .{ .TYPE = .SHARED }, entry.fd, 0);
         if (raw == c.MAP_FAILED) {
-            const err: c.E = @enumFromInt(c._errno().*);
+            const err: c.E = @fromBackingInt(@intCast(c._errno().*));
             if (err == .NOMEM) return error.OutOfMemory;
             return miss(.map_failed, stream_id, ref);
         }

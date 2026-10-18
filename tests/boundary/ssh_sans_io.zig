@@ -168,7 +168,9 @@ fn scan(
                 // 없어서 "형제 파일" 로 보이지만 한 줄로 트리의 모든 소켓·파일·시계에 닿는다.
                 // `builtin` 도 이름만으로는 형제처럼 보이므로, **형제는 `.zig` 로 끝나는 것**뿐이라고
                 // 못박는다 — 금지 목록이 아니라 모양 규칙이라 새 특수 이름이 생겨도 막힌다.
-                const sibling = std.mem.endsWith(u8, name, ".zig") and
+                // Compile-time repetition compatibility is pure byte construction, just like a local sibling leaf.
+                const pure_compat = std.mem.eql(u8, name, "array_repeat");
+                const sibling = (std.mem.endsWith(u8, name, ".zig") or pure_compat) and
                     std.mem.indexOfScalar(u8, name, '/') == null and
                     !std.mem.startsWith(u8, name, "..");
                 if (!sibling) {
@@ -203,7 +205,7 @@ fn scan(
 fn readZ(allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {
     const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1 << 22));
     defer allocator.free(text);
-    return allocator.dupeZ(u8, text);
+    return allocator.dupeSentinel(u8, text, 0);
 }
 
 test "SSH 프로토콜 층은 OS 를 안 부른다 (sans-io)" {
@@ -393,6 +395,7 @@ test "판정자는 순수한 것과 주석·문자열을 오탐하지 않는다"
         \\const s = try std.fmt.bufPrint(&out, "{s}", .{name});
         \\try std.testing.expectEqual(@as(usize, 1), n);
         \\const m = std.math.maxInt(usize);
+        \\const repeat = @import("array_repeat");
     ));
     // 주석·doc 주석·문자열 안의 언급은 위반이 아니다 — 계약을 설명하는 자리가 그런 곳이다.
     try std.testing.expectEqual(@as(usize, 0), try countViolations(

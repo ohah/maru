@@ -12,6 +12,8 @@
 //! 성립하기 때문이고, 가로를 나누는 것은 양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이 엉뚱한 곳을
 //! 보기 때문이다(CM6 `diff-layout.ts`가 같은 결론을 적어 두었다).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const draw = @import("../../draw.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
@@ -599,9 +601,9 @@ test "DFM1 변경 위치 마커 — 왼쪽 막대에는 removed 만, 오른쪽 �
     var lines: [80][]const u8 = undefined;
     for (&lines) |*l| l.* = "ok";
     // 왼쪽: 줄 5 removed · 오른쪽: 줄 60 added(이 열의 정렬된 행 축). 서로 다른 줄이라 두 마커의 y 가 갈린다.
-    var left_bands = [_]frame.RowBand{.none} ** 80;
+    var left_bands = @as([80]frame.RowBand, @splat(.none));
     left_bands[5] = .removed;
-    var right_bands = [_]frame.RowBand{.none} ** 80;
+    var right_bands = @as([80]frame.RowBand, @splat(.none));
     right_bands[60] = .added;
     const rect: draw.Rect = .{ .x = 0, .y = 0, .w = 640, .h = 320 }; // 20 행 — 문서(80)가 넘쳐 막대가 선다
     const w = build(.{
@@ -870,8 +872,8 @@ test "B2 비교 뷰 op 분할 — 총량이 충분해도 한쪽 밀집이면 절
     const a = testing.allocator;
     var row_marks: [120]frame.Mark = undefined;
     for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
-    const lines = [_][]const u8{"x" ** 240} ** 80;
-    const marks = [_][]const frame.Mark{&row_marks} ** 80;
+    const lines = @as([80][]const u8, @splat(array_repeat.repeat("x", 240)));
+    const marks = @as([80][]const frame.Mark, @splat(&row_marks));
     const props: Props = .{
         .left = .{ .lines = &lines, .search_marks = &marks },
         .right = .{ .lines = &lines },

@@ -76,7 +76,7 @@ fn isHelpFlag(arg: []const u8) bool {
 /// raw를 닫힌 enum 이름으로 옮긴다. `decodeIncident`가 이미 범위를 검증했지만, 이름 붙이기가 검증을 **다시**
 /// 하도록 두어 표에 정체불명의 숫자가 사실처럼 찍히지 않게 한다.
 fn tagName(comptime E: type, raw: u8) []const u8 {
-    inline for (@typeInfo(E).@"enum".fields) |field| {
+    inline for (@import("type_info_fields").enumFields(E)) |field| {
         if (field.value == raw) return field.name;
     }
     return "?";
@@ -199,13 +199,13 @@ test "CR0b cli incidents 포맷은 raw가 아니라 닫힌 이름을 찍는다" 
         .host_adapter_generation = 2,
         .connection_generation = 1,
         .wire_major = 2,
-        .reason_raw = @intFromEnum(incident.ConnectionReason.local_invariant_violation),
-        .scope_raw = @intFromEnum(incident.Scope.connection),
-        .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
-        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
-        .host_class_raw = @intFromEnum(incident.HostClass.current),
-        .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
-        .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
+        .reason_raw = @backingInt(incident.ConnectionReason.local_invariant_violation),
+        .scope_raw = @backingInt(incident.Scope.connection),
+        .disposition_raw = @backingInt(incident.Disposition.reconnect),
+        .source_site_raw = @backingInt(incident.SourceSite.client_read),
+        .host_class_raw = @backingInt(incident.HostClass.current),
+        .parser_phase_raw = @backingInt(incident.ParserPhase.idle),
+        .outbound_phase_raw = @backingInt(incident.OutboundPhase.idle),
         .last_success_request_id = 0,
         .pending_request_count = 0,
         .pending_stream_count = 0,

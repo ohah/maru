@@ -15,8 +15,8 @@ pub const Stage = enum(u8) {
     retained_close,
 };
 
-const first_local = @intFromEnum(Stage.profile);
-const last_local = @intFromEnum(Stage.timing);
+const first_local = @backingInt(Stage.profile);
+const last_local = @backingInt(Stage.timing);
 
 pub const Transaction = struct {
     owner: ?*Transaction = null,
@@ -57,51 +57,51 @@ pub fn executeWith(steps: anytype, transaction: *Transaction) !void {
     if (!transaction.isPristineForComposition()) return error.InvalidOwner;
     transaction.owner = transaction;
 
-    transaction.live[@intFromEnum(Stage.profile)] = true;
+    transaction.live[@backingInt(Stage.profile)] = true;
     steps.bindProfile() catch |err| return settle(steps, transaction, .profile, err, false);
-    transaction.live[@intFromEnum(Stage.prerequisite)] = true;
+    transaction.live[@backingInt(Stage.prerequisite)] = true;
     steps.runPrerequisite() catch |err| {
         const audit = steps.prerequisiteNeedsAudit();
         if (audit) {
             transaction.remote_commit_observed = true;
-            transaction.live[@intFromEnum(Stage.prerequisite)] = false;
+            transaction.live[@backingInt(Stage.prerequisite)] = false;
             transaction.prerequisite_audit_preserved = true;
         }
         return settle(steps, transaction, .prerequisite, err, audit);
     };
     transaction.remote_commit_observed = true;
-    transaction.live[@intFromEnum(Stage.predecessor_workspace)] = true;
+    transaction.live[@backingInt(Stage.predecessor_workspace)] = true;
     steps.preparePredecessorWorkspace() catch |err| return settle(steps, transaction, .predecessor_workspace, err, true);
-    transaction.live[@intFromEnum(Stage.manifest_input)] = true;
+    transaction.live[@backingInt(Stage.manifest_input)] = true;
     steps.authenticateManifest() catch |err| return settle(steps, transaction, .manifest_input, err, true);
-    transaction.live[@intFromEnum(Stage.upgrade_workspace)] = true;
+    transaction.live[@backingInt(Stage.upgrade_workspace)] = true;
     steps.prepareUpgradeWorkspace() catch |err| return settle(steps, transaction, .upgrade_workspace, err, true);
-    transaction.live[@intFromEnum(Stage.authorities)] = true;
+    transaction.live[@backingInt(Stage.authorities)] = true;
     steps.bindAuthorities() catch |err| return settle(steps, transaction, .authorities, err, true);
-    transaction.live[@intFromEnum(Stage.profile_upgrade)] = true;
+    transaction.live[@backingInt(Stage.profile_upgrade)] = true;
     steps.runProfileUpgrade() catch |err| return settle(steps, transaction, .profile_upgrade, err, true);
 
-    transaction.live[@intFromEnum(Stage.durable)] = true;
+    transaction.live[@backingInt(Stage.durable)] = true;
     steps.prepareDurable() catch |err| {
         if (steps.durableRetained()) transaction.durable_retained = true;
         return settle(steps, transaction, .durable, err, true);
     };
-    transaction.live[@intFromEnum(Stage.durable)] = false;
+    transaction.live[@backingInt(Stage.durable)] = false;
     transaction.durable_retained = true;
-    transaction.live[@intFromEnum(Stage.timing)] = true;
+    transaction.live[@backingInt(Stage.timing)] = true;
     steps.publishTiming() catch |err| {
         if (steps.timingNeedsAudit()) {
-            transaction.live[@intFromEnum(Stage.timing)] = false;
+            transaction.live[@backingInt(Stage.timing)] = false;
             transaction.timing_audit_preserved = true;
         }
         return settle(steps, transaction, .timing, err, true);
     };
     steps.closeTimingRetaining() catch |err| {
-        transaction.live[@intFromEnum(Stage.timing)] = false;
+        transaction.live[@backingInt(Stage.timing)] = false;
         transaction.timing_audit_preserved = true;
         return settle(steps, transaction, .retained_close, err, true);
     };
-    transaction.live[@intFromEnum(Stage.timing)] = false;
+    transaction.live[@backingInt(Stage.timing)] = false;
     transaction.timing_retained = true;
     if (!unwind(steps, transaction)) return settle(steps, transaction, .retained_close, error.CleanupFailed, true);
     transaction.* = .{};
@@ -140,7 +140,7 @@ fn unwind(steps: anytype, transaction: *Transaction) bool {
     while (index > first_local) {
         index -= 1;
         if (!transaction.live[index]) continue;
-        steps.cleanup(@enumFromInt(index)) catch {
+        steps.cleanup(@fromBackingInt(@intCast(index))) catch {
             clean = false;
             continue;
         };

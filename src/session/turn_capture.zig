@@ -11,6 +11,8 @@
 //! **할당자를 받는다.** 그림자 사본은 길이가 무계라 `agent_transcript` 식 고정 버퍼로는 못 든다.
 //! 같은 층의 `agent_session_archive.Parsed` 가 선례다 — 힙을 들되 `deinit` 을 단일 회수점으로 둔다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const diff_payload = @import("diff_payload.zig");
 const shell_bracket = @import("shell_bracket.zig");
@@ -1011,7 +1013,7 @@ test "세션 상한을 넘는 신원은 받지 않는다 — 잘라 담으면 �
     const gpa = testing.allocator;
     var store: Store = .{};
     defer store.deinit(gpa);
-    const too_long = "x" ** (max_session_id_len + 1);
+    const too_long = array_repeat.repeat("x", (max_session_id_len + 1));
     try testing.expect(!store.noteBefore(gpa, too_long, "/r/a.zig", .edit, .empty));
     try testing.expect(store.openTurn(too_long) == null);
 }

@@ -42,10 +42,10 @@ const Fixture = struct {
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tombstone-relaunch.bundle.json", .data = "bundle\n" });
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "gh", .data = "fixture\n" });
         self.root_len = try self.tmp.dir.realPath(std.testing.io, &self.root);
-        _ = try std.fmt.bufPrintZ(&self.cli, "{s}/gh", .{self.root[0..self.root_len]});
-        _ = try std.fmt.bufPrintZ(&self.leaf, "{s}/tombstone-relaunch.json", .{self.root[0..self.root_len]});
-        _ = try std.fmt.bufPrintZ(&self.bundle, "{s}/tombstone-relaunch.bundle.json", .{self.root[0..self.root_len]});
-        _ = try std.fmt.bufPrintZ(&self.output, "{s}/{s}", .{ self.root[0..self.root_len], verifier.final_name });
+        _ = try std.fmt.bufPrintSentinel(&self.cli, "{s}/gh", .{self.root[0..self.root_len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.leaf, "{s}/tombstone-relaunch.json", .{self.root[0..self.root_len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.bundle, "{s}/tombstone-relaunch.bundle.json", .{self.root[0..self.root_len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.output, "{s}/{s}", .{ self.root[0..self.root_len], verifier.final_name }, 0);
     }
     fn deinit(self: *@This()) void {
         self.tmp.cleanup();

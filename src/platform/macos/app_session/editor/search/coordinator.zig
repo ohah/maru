@@ -161,7 +161,7 @@ fn remaining(job: anytype, started: std.Io.Timestamp) !process.Timing {
 fn openVerified(a: std.mem.Allocator, io: std.Io, input: Input) !process.Root {
     var root = try process.openRoot(a, io, input.path);
     errdefer root.deinit(a, io);
-    const device: std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(root.device))) = @bitCast(root.device);
+    const device: @Int(.unsigned, @bitSizeOf(@TypeOf(root.device))) = @bitCast(root.device);
     if (root.stat.inode != input.identity.inode or @as(u64, device) != input.identity.device or input.identity.kind != 2) return error.RootChanged;
     try process.validateRoot(io, &root);
     return root;

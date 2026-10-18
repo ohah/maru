@@ -213,7 +213,7 @@ fn untilOut(w: *Watch, before: u32, ms: u32) bool {
 
 fn writeFile(path: []const u8, body: []const u8) !void {
     var b: [1024]u8 = undefined;
-    const z = try std.fmt.bufPrintZ(&b, "{s}", .{path});
+    const z = try std.fmt.bufPrintSentinel(&b, "{s}", .{path}, 0);
     const fd = std.c.open(z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c_uint, 0o644));
     if (fd < 0) return error.WriteFailed;
     defer _ = std.c.close(fd);
@@ -226,7 +226,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, r
     var dir_buf: [512]u8 = undefined;
     const dir = try std.fmt.bufPrint(&dir_buf, "{s}/drag-files", .{root});
     var dz: [512]u8 = undefined;
-    _ = std.c.mkdir((try std.fmt.bufPrintZ(&dz, "{s}", .{dir})).ptr, 0o700);
+    _ = std.c.mkdir((try std.fmt.bufPrintSentinel(&dz, "{s}", .{dir}, 0)).ptr, 0o700);
     var a_buf: [600]u8 = undefined;
     const file_a = try std.fmt.bufPrint(&a_buf, "{s}/a.txt", .{dir});
     try writeFile(file_a, "DRAG-CONTENT-A");
@@ -235,7 +235,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, r
     try writeFile(file_b, "TWO");
     var folder_buf: [600]u8 = undefined;
     const folder = try std.fmt.bufPrint(&folder_buf, "{s}/folder", .{dir});
-    _ = std.c.mkdir((try std.fmt.bufPrintZ(&dz, "{s}", .{folder})).ptr, 0o700);
+    _ = std.c.mkdir((try std.fmt.bufPrintSentinel(&dz, "{s}", .{folder}, 0)).ptr, 0o700);
     var x_buf: [700]u8 = undefined;
     try writeFile(try std.fmt.bufPrint(&x_buf, "{s}/inner.txt", .{folder}), "IN-FOLDER");
     var h_buf: [600]u8 = undefined;

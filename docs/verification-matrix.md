@@ -554,7 +554,7 @@
 
 | 영역 | 현재 검증 방법 | 산출물 | 의미 |
 | --- | --- | --- | --- |
-| 기본 Zig 빌드 | `mise run build` | 없음 | 프로젝트가 Zig 0.16.0으로 컴파일되는지 확인한다. |
+| 기본 Zig 빌드 | `mise run build` | 없음 | 프로젝트가 Zig 0.17.0으로 컴파일되는지 확인한다. |
 | 단위 테스트 | `mise run test` | 없음 | facade, config, terminal core 같은 작은 단위가 의도대로 동작하는지 확인한다. `PtyEventQueue`의 bounded capacity, close, event ownership, `RuntimeEventPump`의 queue drain/runtime 적용/해제 규칙, `LivePtySession`의 live PTY owner 계약과 `closeAndDetach`의 detach-first close 계약도 여기서 검증한다. 각 facade 배럴(src/*.zig)에 refAllDecls 집계 블록을 두어 구현 파일의 inline 테스트가 모두 빌드에 포함된다. |
 | keybinding/terminal input 계약 | `mise run test` | 없음 | `KeyChord.parse`, app action과 terminal input macro 충돌 검증, unbound Cmd 조합 무시, `send_control`, `send_text`, `send_escape_sequence`, `Ctrl+letter` C0 control, `Alt/Option` meta-ESC 인코딩에 더해, **function key terminal encoding**(Home/End/Insert/Delete/PageUp/PageDown/F1~F12·DECCKM Home/End)과 **빌트인 macOS 줄 편집 바인딩**(`keybinding.default_terminal_bindings` — Cmd+←/→/⌫, Option+←/→; resolve 우선순위 사용자→빌트인→`.ignored`→encodeKey), **login(1) 래핑 구조**(`MacosLogin.build`의 `-flp <user> … exec -l`), **zsh 통합 env 주입**(`EnvStorage`의 `ZDOTDIR`/`MARU_ZDOTDIR_PREV` 덮어쓰기)을 검증한다. 물리 키 매핑(AppKit ABI KeyCode·`normalizedKeyEvent`)은 아래 *macOS Swift/Zig app host ABI* 행에서, login shell·zsh 편집키 통합의 실제 라이브 동작은 *interactive shell smoke* 행에서 본다. 수동 runtime config reload는 구현됐고 자동 파일 감지는 없다(kitty keyboard CSI-u 인코딩은 disambiguate 수준으로 구현됨 — 아래 *modifier/application-cursor 키 인코딩* 행). |
 | headless E2E | `mise run e2e` | `tests/artifacts/e2e/headless/*.screen.txt`, `*.snapshot.txt`, `*.stdout.txt` | 실제 프로세스 stdout이 terminal core 상태로 변환되는지 확인한다. |
@@ -1147,7 +1147,7 @@ HOME/leaf alias, 기존 HOME/leaf와 release harness의 unlink를 거부하고 �
 실제 Developer ID candidate 실행은 trusted release workflow가 이 옵션에 앞선 staging app absolute pathname을 전달할 때 완료된다.
 
 U5 baseline child의 Zig 실행 권위는 protected tag와 같은 source SHA의 GitHub-hosted macOS ARM64 runner가 mise 설치 직후 고정한
-canonical absolute pathname·size·SHA-256과 exact version `0.16.0`이다. final-address `ZigToolchainAuthority`는 held file과 pathname,
+canonical absolute pathname·size·SHA-256과 exact version `0.17.0`이다. final-address `ZigToolchainAuthority`는 held file과 pathname,
 parent identity를 child 실행 직전·직후 재검증하고 raw caller pathname을 baseline executor에 노출하지 않는다.
 `test-session-host-release-adapter-zig-toolchain-authority`는 Debug·ReleaseFast actual filesystem에서 owner와 drift 경계를 검증하고,
 workflow contract gate는 capture가 mise 뒤·baseline 실행 앞에 있으며 version/path/size/digest를 모두 게시하는지 고정한다. macOS에 없는

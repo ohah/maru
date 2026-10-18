@@ -27,8 +27,8 @@ const BrowserId = message.BrowserId;
 
 // 프로토콜 값이 CEF 와 같다 — CEF 를 올려 바뀌면 빌드가 멈춘다.
 comptime {
-    for (std.meta.fields(message.PermissionKind)) |field| {
-        const kind: message.PermissionKind = @enumFromInt(field.value);
+    for (@import("type_info_fields").fields(message.PermissionKind)) |field| {
+        const kind: message.PermissionKind = @fromBackingInt(@intCast(field.value));
         const cef_value: u32 = switch (kind) {
             .ar_session => c.CEF_PERMISSION_TYPE_AR_SESSION,
             .camera_pan_tilt_zoom => c.CEF_PERMISSION_TYPE_CAMERA_PAN_TILT_ZOOM,
@@ -66,10 +66,10 @@ comptime {
     std.debug.assert(c.CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE == message.MediaPermission.camera.bit());
     std.debug.assert(c.CEF_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE == message.MediaPermission.screen_audio.bit());
     std.debug.assert(c.CEF_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE == message.MediaPermission.screen.bit());
-    std.debug.assert(c.CEF_PERMISSION_RESULT_ACCEPT == @intFromEnum(message.PermissionResult.accept));
-    std.debug.assert(c.CEF_PERMISSION_RESULT_DENY == @intFromEnum(message.PermissionResult.deny));
-    std.debug.assert(c.CEF_PERMISSION_RESULT_DISMISS == @intFromEnum(message.PermissionResult.dismiss));
-    std.debug.assert(c.CEF_PERMISSION_RESULT_IGNORE == @intFromEnum(message.PermissionResult.ignore));
+    std.debug.assert(c.CEF_PERMISSION_RESULT_ACCEPT == @backingInt(message.PermissionResult.accept));
+    std.debug.assert(c.CEF_PERMISSION_RESULT_DENY == @backingInt(message.PermissionResult.deny));
+    std.debug.assert(c.CEF_PERMISSION_RESULT_DISMISS == @backingInt(message.PermissionResult.dismiss));
+    std.debug.assert(c.CEF_PERMISSION_RESULT_IGNORE == @backingInt(message.PermissionResult.ignore));
 }
 
 /// `on_show_permission_prompt`. 1 을 돌려주면 우리가 답한다(나중에 콜백으로).
@@ -128,7 +128,7 @@ pub fn geolocation(value: message.Geolocation) void {
 /// 브라우저마다 마지막으로 건 덮어쓰기. 같은 값이면 다시 걸지 않는다 — 다시 걸면 그 탭의 기다리던 위치 요청(돌고 있는
 /// `watchPosition` 포함)이 먼저 오류를 받는다(실측 — 2 차 적대 검증: 1 분 안의 같은 좌표를 되쓰는 경우).
 const Applied = struct { browser: BrowserId, available: bool, latitude: f64, longitude: f64, accuracy: f64 };
-var applied: [dialog_table.capacity]?Applied = [_]?Applied{null} ** dialog_table.capacity;
+var applied: [dialog_table.capacity]?Applied = @as([dialog_table.capacity]?Applied, @splat(null));
 
 fn appliedSlot(id: BrowserId) ?*?Applied {
     var free: ?*?Applied = null;
@@ -300,7 +300,7 @@ pub fn reply(value: message.PermissionReply) void {
         }
         const pending = dialogs.table.take(entry);
         const callback: [*c]c.cef_permission_prompt_callback_t = @ptrCast(@alignCast(pending.callback));
-        callback.*.cont.?(callback, @intFromEnum(value.result));
+        callback.*.cont.?(callback, @backingInt(value.result));
         object.release(callback);
     } else if (dialogs.table.find(value.browser, value.request, .media)) |entry| {
         const pending = dialogs.table.take(entry);

@@ -12,6 +12,8 @@
 //! **토큰 경계를 받아** 그 위에서 최소 차이를 낸다 — 쪼개는 규칙은 위층, 차이는 여기.
 //! 그 덕에 이모지 ZWJ 시퀀스를 반으로 자르는 일이 구조적으로 생기지 않는다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const diff = @import("diff.zig");
 
@@ -244,14 +246,14 @@ test "한쪽이 비면 **할당 전에** 접는다 — 추가된 줄마다 Myers
 test "초장문 줄도 할당 전에 접는다" {
     var buf: [700]Token = undefined;
     for (&buf, 0..) |*t, i| t.* = .{ .start = @intCast(i), .len = 1 };
-    const line = "a" ** 700;
+    const line = array_repeat.repeat("a", 700);
     try testing.expect((try compute(testing.failing_allocator, &buf, line, &buf, line, .{})) == null);
 }
 
 test "초장문 줄은 건너뛴다 — 온통 얼룩이 되고 비용만 든다" {
     const allocator = testing.allocator;
-    const long_a = "a" ** 600;
-    const long_b = "b" ++ ("a" ** 599);
+    const long_a = array_repeat.repeat("a", 600);
+    const long_b = "b" ++ (array_repeat.repeat("a", 599));
     const lt = try codepointTokens(allocator, long_a);
     defer allocator.free(lt);
     const rt = try codepointTokens(allocator, long_b);

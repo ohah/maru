@@ -36,9 +36,9 @@ pub fn validate(context: context_mod.Context, candidate_directory: [:0]const u8)
     var dmg_path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
     var frozen_path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
     var app_main_path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const dmg_path = std.fmt.bufPrintZ(&dmg_path_storage, "{s}/{s}", .{ candidate_directory, dmg_name }) catch return error.InvalidPath;
-    const frozen_path = std.fmt.bufPrintZ(&frozen_path_storage, "{s}/{s}", .{ candidate_directory, frozen_name }) catch return error.InvalidPath;
-    const app_main_path = std.fmt.bufPrintZ(&app_main_path_storage, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{candidate_directory}) catch return error.InvalidPath;
+    const dmg_path = std.fmt.bufPrintSentinel(&dmg_path_storage, "{s}/{s}", .{ candidate_directory, dmg_name }, 0) catch return error.InvalidPath;
+    const frozen_path = std.fmt.bufPrintSentinel(&frozen_path_storage, "{s}/{s}", .{ candidate_directory, frozen_name }, 0) catch return error.InvalidPath;
+    const app_main_path = std.fmt.bufPrintSentinel(&app_main_path_storage, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{candidate_directory}, 0) catch return error.InvalidPath;
     var dmg: files.PinnedReleaseFile = .{};
     defer if (dmg.owner == &dmg) dmg.deinit() catch {};
     var frozen: files.PinnedReleaseFile = .{};

@@ -20,6 +20,8 @@
 //! unlock 뒤 전송한다(docs/io-render-threading.md — snapshot 슬라이스는 core 메모리 alias라 lock 밖으로 새면 안 됨).
 //! 이 함수는 grapheme·색을 전부 소유 버퍼로 복사하므로 반환값은 core와 독립이다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const maru = @import("maru");
 const terminal = maru.terminal;
@@ -31,25 +33,25 @@ const Run = screen_stream.Run;
 comptime {
     // terminal enum을 늘리고 wire codec 범위를 갱신하지 않으면 producer가 새 값을 만들어 current decoder가 거부한다.
     // 두 계층을 직접 import할 수 있는 projection 경계에서 모든 값의 0-based 연속성과 case 수를 함께 고정한다.
-    for (std.meta.fields(terminal.LinkKind), 0..) |field, i|
+    for (@import("type_info_fields").fields(terminal.LinkKind), 0..) |field, i|
         if (field.value != i) @compileError("LinkKind wire values must be contiguous from zero");
-    for (std.meta.fields(terminal.LinkScope), 0..) |field, i|
+    for (@import("type_info_fields").fields(terminal.LinkScope), 0..) |field, i|
         if (field.value != i) @compileError("LinkScope wire values must be contiguous from zero");
-    if (@intFromEnum(terminal.LinkKind.url) != 0 or @intFromEnum(terminal.LinkKind.file_path) != 1)
+    if (@backingInt(terminal.LinkKind.url) != 0 or @backingInt(terminal.LinkKind.file_path) != 1)
         @compileError("LinkKind wire meanings must not be reordered");
-    if (@intFromEnum(terminal.LinkScope.web) != 0 or
-        @intFromEnum(terminal.LinkScope.extra_schemes) != 1 or
-        @intFromEnum(terminal.LinkScope.absolute_path) != 2 or
-        @intFromEnum(terminal.LinkScope.home_path) != 3 or
-        @intFromEnum(terminal.LinkScope.dot_relative) != 4 or
-        @intFromEnum(terminal.LinkScope.bare_relative) != 5 or
-        @intFromEnum(terminal.LinkScope.osc8) != 6)
+    if (@backingInt(terminal.LinkScope.web) != 0 or
+        @backingInt(terminal.LinkScope.extra_schemes) != 1 or
+        @backingInt(terminal.LinkScope.absolute_path) != 2 or
+        @backingInt(terminal.LinkScope.home_path) != 3 or
+        @backingInt(terminal.LinkScope.dot_relative) != 4 or
+        @backingInt(terminal.LinkScope.bare_relative) != 5 or
+        @backingInt(terminal.LinkScope.osc8) != 6)
         @compileError("LinkScope wire meanings must not be reordered");
-    if (@intFromEnum(terminal.LinkKind.file_path) != screen_stream.link_kind_max or
-        std.meta.fields(terminal.LinkKind).len != @as(usize, screen_stream.link_kind_max) + 1)
+    if (@backingInt(terminal.LinkKind.file_path) != screen_stream.link_kind_max or
+        @import("type_info_fields").fields(terminal.LinkKind).len != @as(usize, screen_stream.link_kind_max) + 1)
         @compileError("LinkKind and screen-stream wire range must change together");
-    if (@intFromEnum(terminal.LinkScope.osc8) != screen_stream.link_scope_max or
-        std.meta.fields(terminal.LinkScope).len != @as(usize, screen_stream.link_scope_max) + 1)
+    if (@backingInt(terminal.LinkScope.osc8) != screen_stream.link_scope_max or
+        @import("type_info_fields").fields(terminal.LinkScope).len != @as(usize, screen_stream.link_scope_max) + 1)
         @compileError("LinkScope and screen-stream wire range must change together");
 }
 
@@ -308,7 +310,7 @@ pub fn projectSnapshot(allocator: std.mem.Allocator, core: *terminal.TerminalCor
             .col = snap.cursor.col,
             .row = snap.cursor.row,
             .visible = snap.cursor.visible,
-            .shape = @intFromEnum(snap.cursor_shape),
+            .shape = @backingInt(snap.cursor_shape),
         },
         .modes = composeModes(core),
         // 스크롤바 thumb 근거(§12) — client는 화면만 받으므로 길이/오프셋을 알 방법이 없다.
@@ -707,7 +709,7 @@ fn appendPromptMarks(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanag
     }
     const rows = allocator.alloc(screen_stream.RowPromptWire, snap.prompt_marks.len) catch return error.OutOfMemory;
     defer allocator.free(rows);
-    for (snap.prompt_marks, 0..) |m, i| rows[i] = .{ .kind = @intFromEnum(m.kind), .exit = m.exit };
+    for (snap.prompt_marks, 0..) |m, i| rows[i] = .{ .kind = @backingInt(m.kind), .exit = m.exit };
     const rec = try screen_stream.encodePromptMarks(allocator, .{ .kind = .prompt_marks, .generation = generation }, .{ .rows = rows });
     defer allocator.free(rec);
     try appendProjectedRecord(stream, allocator, rec);
@@ -733,8 +735,8 @@ fn appendLinkSpans(
         .start_col = l.span.start.col,
         .end_row = l.span.end.row,
         .end_col = l.span.end.col,
-        .kind = @intFromEnum(l.kind),
-        .scope = @intFromEnum(l.scope),
+        .kind = @backingInt(l.kind),
+        .scope = @backingInt(l.scope),
     };
     const rec = try screen_stream.encodeLinkSpans(allocator, .{ .kind = .link_spans, .generation = generation }, .{ .spans = spans });
     defer allocator.free(rec);
@@ -748,7 +750,7 @@ fn linkSpansChanged(prev: ?screen_stream.LinkSpans, cur: []const terminal.Viewpo
     for (cur, prev_spans) |c, p| {
         if (c.span.start.row != p.start_row or c.span.start.col != p.start_col or
             c.span.end.row != p.end_row or c.span.end.col != p.end_col or
-            @intFromEnum(c.kind) != p.kind or @intFromEnum(c.scope) != p.scope) return true;
+            @backingInt(c.kind) != p.kind or @backingInt(c.scope) != p.scope) return true;
     }
     return false;
 }
@@ -769,7 +771,7 @@ fn promptMarksChanged(prev: ?screen_stream.PromptMarks, cur: []const terminal.Ro
     if (!cur_any and !prev_any) return false; // 둘 다 마크 없음.
     if (cur.len != prev_rows.len) return true;
     for (cur, prev_rows) |c, p| {
-        if (@intFromEnum(c.kind) != p.kind or c.exit != p.exit) return true;
+        if (@backingInt(c.kind) != p.kind or c.exit != p.exit) return true;
     }
     return false;
 }
@@ -1023,7 +1025,7 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
     errdefer snapshot.deinit(allocator);
 
     // snapshot의 screen_meta(현재 커서/모드) — projectSnapshot과 같은 첫 레코드.
-    const cur_cursor = screen_stream.Cursor{ .col = snap.cursor.col, .row = snap.cursor.row, .visible = snap.cursor.visible, .shape = @intFromEnum(snap.cursor_shape) };
+    const cur_cursor = screen_stream.Cursor{ .col = snap.cursor.col, .row = snap.cursor.row, .visible = snap.cursor.visible, .shape = @backingInt(snap.cursor_shape) };
     {
         const meta_rec = try screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = opts.generation }, .{
             .cols = snap.size.cols,
@@ -1316,7 +1318,7 @@ test "screen snapshot: projects a real TerminalCore screen to decodable records 
 
 test "packColorIntent: default/indexed/rgb intent + OSC4 override는 rgb로 굽는다" {
     const Tag = screen_stream.ColorTag;
-    var palette = [_]?terminal.Rgb{null} ** 256;
+    var palette = @as([256]?terminal.Rgb, @splat(null));
 
     // default → 태그만(0). indexed(override 없음) → 인덱스 intent 유지(client가 config 16색·bold-is-bright 적용). rgb → 그대로.
     try testing.expectEqual(@as(u32, 0), packColorIntent(.default, &palette));
@@ -1354,7 +1356,7 @@ test "screen snapshot: U=1 virtual placement 가 host 스트림에 실린다(그
     // **회귀 판정**: 이 방출이 빠지면 client 는 격자를 못 받아 placeholder 셀이 타일 크기를 못 정한다
     // → host-backed 세션에서 tmux 경유 이미지가 통째로 안 보인다. **client 쪽만 테스트하면 이 결함이
     // 그대로 통과한다** — 적대적 검증에서 실제로 그랬다(방출을 지워도 client 판정자는 초록이었다).
-    var raw = [_]u8{0} ** 16;
+    var raw = @as([16]u8, @splat(0));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [128]u8 = undefined;
@@ -1397,7 +1399,7 @@ test "screen snapshot: kitty image projects image_blob(디코드 픽셀) + image
     defer core.deinit();
 
     // 2x2 RGBA 이미지 transmit+display(a=T, i=7) — renderSnapshot에 image(id 7, 16B) + placement 하나가 생긴다.
-    var raw = [_]u8{0} ** 16; // 2*2*4
+    var raw = @as([16]u8, @splat(0)); // 2*2*4
     raw[0] = 0xAB;
     raw[15] = 0xCD;
     var b64: [32]u8 = undefined;
@@ -1702,7 +1704,7 @@ test "screen snapshot: computeDelta emits image_blob + image_place when an image
     defer allocator.free(base);
 
     // 2x2 이미지 transmit+display(i=3).
-    var raw = [_]u8{0} ** 16;
+    var raw = @as([16]u8, @splat(0));
     raw[0] = 0x7A;
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
@@ -1781,7 +1783,7 @@ test "screen delta: image_ref 를 담은 base 는 그 이미지를 client 가 �
     const allocator = testing.allocator;
     var core = try terminal.TerminalCore.init(allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
-    var raw = [_]u8{0} ** 16;
+    var raw = @as([16]u8, @splat(0));
     raw[0] = 0x7A;
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
@@ -2215,7 +2217,7 @@ test "screen delta: attach 뒤에 등록된 U=1 격자가 delta 로 client 에 �
     // ② 셸이 그 뒤에 이미지를 띄운다 — U=1 등록 + placeholder 셀.
     var b64: [32]u8 = undefined;
     var seq: [96]u8 = undefined;
-    const raw = [_]u8{ 9, 9, 9, 255 } ** 4;
+    const raw = array_repeat.repeat([_]u8{ 9, 9, 9, 255 }, 4);
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7,q=2;{s}\x1b\\", .{b64s}));
     try core.write("\x1b_Ga=p,i=7,U=1,c=2,r=1,q=2\x1b\\");
@@ -2329,7 +2331,7 @@ test "screen delta: attach 뒤 움직인 모든 축이 delta 로 client 에 닿�
         const resolver: screen_assembler.ImageRefResolver = if (segmented) sink.resolver() else .unnegotiated;
         var b64: [32]u8 = undefined;
         var seq: [128]u8 = undefined;
-        const raw = [_]u8{ 3, 4, 5, 255 } ** 4;
+        const raw = array_repeat.repeat([_]u8{ 3, 4, 5, 255 }, 4);
         const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
 
         // attach 시점 사전 상태(축마다 다르다 — 「사라짐」을 보려면 먼저 있어야 한다).
@@ -2748,7 +2750,7 @@ test "TBPROBE 정합 ①: 화면이 안 가리키는 이미지는 픽셀도 plac
     core.setCellMetrics(10, 20);
 
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 9, 9, 9, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 9, 9, 9, 255 }, 4);
     const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [192]u8 = undefined;
     // 두 장을 전송한다 — 1 은 표시(`a=T`)하고 2 는 **격자만 등록**해 화면이 안 가리키게 둔다.
@@ -2789,7 +2791,7 @@ test "TBPROBE 정합 ③: client 가 이미 가진 판은 픽셀을 안 보내�
     core.setCellMetrics(10, 20);
 
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 7, 7, 7, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 7, 7, 7, 255 }, 4);
     const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [192]u8 = undefined;
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=5,c=2,r=1,q=2;{s}\x1b\\", .{encoded}));
@@ -2832,7 +2834,7 @@ test "TBPROBE 정합 ②: 거른 집합끼리 비교한다 — 안 그러면 ful
     core.setCellMetrics(10, 20);
 
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 3, 3, 3, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 3, 3, 3, 255 }, 4);
     const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [192]u8 = undefined;
     // **둘 다 일반 placement 로 만든다.** 안 보이는 쪽을 virtual 격자로 두면 거른 목록이 **비어서**
@@ -2883,7 +2885,7 @@ test "TBPROBE 정합 ④: 한 번 보낸 이미지는 안 보이게 돼도 다�
     core.setCellMetrics(10, 20);
 
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 6, 6, 6, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 6, 6, 6, 255 }, 4);
     const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [192]u8 = undefined;
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=1,c=2,r=1,q=2;{s}\x1b\\", .{encoded}));
@@ -3024,7 +3026,7 @@ fn baseImageGeneration(bytes: []const u8, image_id: u32) !?u64 {
 fn writeVisibleTestImage(core: *terminal.TerminalCore) !void {
     var b64: [32]u8 = undefined;
     var seq: [128]u8 = undefined;
-    const raw = [_]u8{ 3, 4, 5, 255 } ** 4;
+    const raw = array_repeat.repeat([_]u8{ 3, 4, 5, 255 }, 4);
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=9,c=1,r=1,q=2;{s}\x1b\\", .{b64s}));
 }
@@ -3052,7 +3054,7 @@ test "screen image segments: a snapshot carries image_ref with the sink's segmen
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
     try asm_.applySnapshot(snap, sink.resolver());
-    try std.testing.expectEqualSlices(u8, &([_]u8{ 3, 4, 5, 255 } ** 4), asm_.imageById(9).?.pixels);
+    try std.testing.expectEqualSlices(u8, &(array_repeat.repeat([_]u8{ 3, 4, 5, 255 }, 4)), asm_.imageById(9).?.pixels);
     try std.testing.expectEqual(@as(usize, 1), asm_.imagePlacements().len);
 }
 
@@ -3103,7 +3105,7 @@ test "screen image segments: a new frame the sink defers keeps the client's prev
     // 프레임이 둘인 애니메이션 — 프레임이 넘어가면 generation 만 바뀐다.
     var b64: [32]u8 = undefined;
     var seq: [128]u8 = undefined;
-    const raw = [_]u8{ 7, 7, 7, 255 } ** 4;
+    const raw = array_repeat.repeat([_]u8{ 7, 7, 7, 255 }, 4);
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{b64s}));
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=40,q=2;{s}\x1b\\", .{b64s}));

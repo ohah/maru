@@ -350,7 +350,7 @@ fn paletteField(params: std.json.ObjectMap) ?Command.Palette {
         else => return null,
     };
     if (values.len != 16) return null;
-    var palette: Command.Palette = .{null} ** 16;
+    var palette: Command.Palette = @splat(null);
     for (values, 0..) |value, index| {
         palette[index] = switch (value) {
             .null => null,
@@ -374,7 +374,7 @@ fn decodeEncoded(allocator: std.mem.Allocator, stream_id: u64, command: Command)
 
 test "core command wire round-trips every bounded command" {
     const allocator = std.testing.allocator;
-    var palette: Command.Palette = .{null} ** 16;
+    var palette: Command.Palette = @splat(null);
     palette[0] = 0x12_34_56;
     palette[15] = 0xAB_CD_EF;
 

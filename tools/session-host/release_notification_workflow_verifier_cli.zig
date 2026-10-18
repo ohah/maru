@@ -31,9 +31,9 @@ fn mainFallible(init: std.process.Init) !void {
     @memcpy(token_copy[0..token.len], token);
 
     var path_storage: [4][std.fs.max_path_bytes:0]u8 = undefined;
-    const cli_path = try std.fmt.bufPrintZ(&path_storage[0], "{s}", .{values[1]});
-    const evidence_path = try std.fmt.bufPrintZ(&path_storage[1], "{s}", .{values[3]});
-    const bundle_path = try std.fmt.bufPrintZ(&path_storage[2], "{s}", .{values[4]});
-    const output_path = try std.fmt.bufPrintZ(&path_storage[3], "{s}", .{values[5]});
+    const cli_path = try std.fmt.bufPrintSentinel(&path_storage[0], "{s}", .{values[1]}, 0);
+    const evidence_path = try std.fmt.bufPrintSentinel(&path_storage[1], "{s}", .{values[3]}, 0);
+    const bundle_path = try std.fmt.bufPrintSentinel(&path_storage[2], "{s}", .{values[4]}, 0);
+    const output_path = try std.fmt.bufPrintSentinel(&path_storage[3], "{s}", .{values[5]}, 0);
     try verifier.verify(init.io, init.gpa, trusted, .{ .cli_path = cli_path, .cli_sha256 = values[2], .evidence_path = evidence_path, .bundle_path = bundle_path, .output_path = output_path }, token_copy[0..token.len], 5 * std.time.ns_per_min);
 }

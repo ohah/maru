@@ -1,6 +1,8 @@
 //! Proves strict semantic binding of bounded GitHub release REST responses. These component
 //! fixtures do not authenticate transport or the executable that captured the response bytes.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const github_release = @import("release_adapter_github_release");
 
@@ -60,7 +62,7 @@ test "draft and immutable published release responses bind exact identity and st
 }
 
 test "response cap is enforced before parsing" {
-    const oversized = " " ** (github_release.max_response_bytes + 1);
+    const oversized = array_repeat.repeat(" ", (github_release.max_response_bytes + 1));
     try std.testing.expectError(
         error.ResponseTooLarge,
         github_release.parseDraftCollectionAndBind(std.testing.allocator, oversized, draft_expected),
@@ -115,7 +117,7 @@ test "zero and foreign release identity fail closed" {
             github_release.parseDraftCollectionAndBind(std.testing.allocator, "[" ++ draft_valid ++ "]", expected),
         );
     }
-    const oversized_tag = "v" ++ ("1" ** github_release.max_response_bytes) ++ ".2.3";
+    const oversized_tag = "v" ++ (array_repeat.repeat("1", github_release.max_response_bytes)) ++ ".2.3";
     try std.testing.expectError(error.ReleaseMismatch, github_release.parseDraftCollectionAndBind(std.testing.allocator, "[" ++ draft_valid ++ "]", .{
         .id = draft_expected.id,
         .tag = oversized_tag,

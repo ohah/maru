@@ -4,6 +4,8 @@
 //! `ReactorCore.nextReady` round-robin selector. One iteration services at most one client turn, so a readable flood,
 //! blocked writer, or many attached streams cannot monopolize the host owner.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const builtin = @import("builtin");
 const host_log = @import("host_log.zig");
@@ -85,8 +87,8 @@ pub const Owner = struct {
     io: std.Io,
     server: *socket_server.SocketServer,
     reactor: *connection_slot.ReactorCore,
-    clients: [max_clients]?*connection_turn.Client = [_]?*connection_turn.Client{null} ** max_clients,
-    producer_remaining: [max_clients]usize = [_]usize{0} ** max_clients,
+    clients: [max_clients]?*connection_turn.Client = @as([max_clients]?*connection_turn.Client, @splat(null)),
+    producer_remaining: [max_clients]usize = @as([max_clients]usize, @splat(0)),
     next_cadence_ns: u64,
     next_overflow_accept_ns: u64 = 0,
     accept_retry_after_ns: u64 = 0,
@@ -230,7 +232,7 @@ pub const Owner = struct {
 
         // 연결당 fd 둘(주·이미지 채널, 이미지 채널 §3.5). 이미지 fd 는 주 fd 들 뒤에 둔다.
         var poll_fds: [max_clients * 2 + 2]c.pollfd = undefined;
-        var poll_slots: [max_clients]?usize = [_]?usize{null} ** max_clients;
+        var poll_slots: [max_clients]?usize = @as([max_clients]?usize, @splat(null));
         var image_poll_slots: [max_clients]usize = undefined;
         // Once an upgrade closes admission, the listener must leave the readiness set. Accepting
         // and immediately rejecting peers would still consume fd/client budgets while the upgrade
@@ -315,10 +317,10 @@ pub const Owner = struct {
         // 반환이 있었으면(release·채널 상실·지난 반복의 연결 종료) host 상한에 막힌 연결을 깨운다 — 비교 하나라 매 반복 본다.
         self.wakeImageHostBudgetWaiters(now_ns);
 
-        var ready: [max_clients]bool = [_]bool{false} ** max_clients;
-        var read_ready: [max_clients]bool = [_]bool{false} ** max_clients;
-        var write_ready: [max_clients]bool = [_]bool{false} ** max_clients;
-        var peer_broken: [max_clients]bool = [_]bool{false} ** max_clients;
+        var ready: [max_clients]bool = @as([max_clients]bool, @splat(false));
+        var read_ready: [max_clients]bool = @as([max_clients]bool, @splat(false));
+        var write_ready: [max_clients]bool = @as([max_clients]bool, @splat(false));
+        var peer_broken: [max_clients]bool = @as([max_clients]bool, @splat(false));
         var poll_index: usize = 2;
         while (poll_index < main_poll_count) : (poll_index += 1) {
             const slot_index = poll_slots[poll_index - 2].?;
@@ -1325,11 +1327,11 @@ const ShortSocketRoot = struct {
     /// `leaf` 는 소켓 파일 이름이다(예: `"owner.sock"`). 판정자마다 다른 이름을 그대로 유지해
     /// 실패 로그에서 어느 자리인지 읽히게 한다.
     fn init(self: *ShortSocketRoot, leaf: []const u8) !void {
-        const template = std.fmt.bufPrintZ(&self.dir_buf, "/tmp/maru-po-XXXXXX", .{}) catch
+        const template = std.fmt.bufPrintSentinel(&self.dir_buf, "/tmp/maru-po-XXXXXX", .{}, 0) catch
             return error.SkipZigTest;
         if (mkdtemp(template.ptr) == null) return error.SkipZigTest;
         self.dir = template;
-        self.socket = std.fmt.bufPrintZ(&self.socket_buf, "{s}/{s}", .{ template, leaf }) catch
+        self.socket = std.fmt.bufPrintSentinel(&self.socket_buf, "{s}/{s}", .{ template, leaf }, 0) catch
             return error.SkipZigTest;
     }
 
@@ -1555,7 +1557,7 @@ fn fillServerSendBuffer(fd: c.fd_t) !void {
             @sizeOf(c_int),
         ),
     );
-    var bytes: [4096]u8 = [_]u8{'P'} ** 4096;
+    var bytes: [4096]u8 = @as([4096]u8, @splat('P'));
     for (0..4096) |_| {
         const rc = c.send(fd, &bytes, bytes.len, posix.MSG.DONTWAIT);
         if (rc < 0 and posix.errno(rc) == .AGAIN) return;
@@ -3412,7 +3414,7 @@ test "poll owner controller transition converges across old and requester EOF li
     inline for (std.meta.tags(Scenario)) |scenario| {
         var leaf_buf: [64]u8 = undefined;
         var socket_root: ShortSocketRoot = .{};
-        try socket_root.init(try std.fmt.bufPrint(&leaf_buf, "ce{d}.sock", .{@intFromEnum(scenario)}));
+        try socket_root.init(try std.fmt.bufPrint(&leaf_buf, "ce{d}.sock", .{@backingInt(scenario)}));
         defer socket_root.deinit();
         const dir_path = socket_root.dir;
         const socket_path = socket_root.socket;
@@ -4765,7 +4767,7 @@ test "failed accepted upgrade reopens admission and preserves frozen sibling inp
         const client = maybe_client orelse continue;
         if (requester == null) requester = client;
     }
-    var filler: [64 * 1024]u8 = [_]u8{0xA5} ** (64 * 1024);
+    var filler: [64 * 1024]u8 = @as([(64 * 1024)]u8, @splat(0xA5));
     while (true) {
         const rc = c.send(requester.?.fd, &filler, filler.len, posix.MSG.DONTWAIT);
         if (rc < 0 and posix.errno(rc) == .AGAIN) break;
@@ -5825,7 +5827,7 @@ test "image channel owner: 취소한 세그먼트는 원장과 host 예산에서
     defer _ = c.close(channel_fd);
     const client = fx.clientWithChannel().?;
 
-    const pixels = [_]u8{9} ** 64;
+    const pixels = @as([64]u8, @splat(9));
     const prepared = switch (client.prepareImageSegment(7, 3, 9, &pixels, false)) {
         .segment => |segment| segment,
         else => return error.TestUnexpectedResult,
@@ -6058,7 +6060,7 @@ test "image channel owner: 공유 메모리 생성 실패는 host 하나의 백�
     fx.owner.scheduleImageCreateRetry(1_000 * ms);
     try testing.expectEqual(@as(u64, 0), fx.owner.image_create_retry_at_ns);
     // 생성 실패 — 청구를 되돌리고 미루며 그 오류를 적는다. 원장이 빈 정지 화면이라 다른 무엇도 깨우지 않는다.
-    const pixels = [_]u8{1} ** 64;
+    const pixels = @as([64]u8, @splat(1));
     connection_turn.test_image_segment_create_failure = error.OpenFailed;
     defer connection_turn.test_image_segment_create_failure = null;
     try testing.expect(client.prepareImageSegment(1, 7, 1, &pixels, false) == .deferred);
@@ -6126,7 +6128,7 @@ test "image channel owner: host 상한에 막혀 미룬 연결은 다른 연결�
     defer _ = c.close(stage.channel_fd);
     const client = fx.owner.clients[stage.index].?;
     const wake = &client.connection.attachments.getPtr(1).?.image_wake;
-    const pixels = [_]u8{1} ** 64;
+    const pixels = @as([64]u8, @splat(1));
 
     // 다른 연결들이 host 예산을 다 쥐었다 — 미루고 기다린다고 적는다.
     fx.owner.image_host_budget.bytes = image_segment_ledger.image_segment_bytes_per_host;
@@ -6256,7 +6258,7 @@ const ProjectedTerminal = struct {
 
     /// 2x2 RGBA 이미지를 커서 자리에 표시한다(`a=T`). 같은 id 를 다시 보내면 새 판이다.
     fn showImage(self: *ProjectedTerminal, image_id: u32, comptime rgba: [4]u8) !void {
-        const raw = rgba ** 4;
+        const raw = array_repeat.repeat(rgba, 4);
         var b64: [32]u8 = undefined;
         var seq: [128]u8 = undefined;
         const text = std.base64.standard.Encoder.encode(&b64, &raw);
@@ -6509,7 +6511,7 @@ test "image channel owner: 제품 투영 — 미룬 새 프레임이 있는 정�
     try testing.expectEqual(@as(usize, 0), first_images.blobs);
     try testing.expectEqual(@as(usize, 1), first_images.placements);
     const first_ref = first_images.ref orelse return error.TestUnexpectedResult;
-    const first = try pumpTestSegmentPixels(&fx.owner, channel_fd, &([_]u8{ 3, 4, 5, 255 } ** 4));
+    const first = try pumpTestSegmentPixels(&fx.owner, channel_fd, &(array_repeat.repeat([_]u8{ 3, 4, 5, 255 }, 4)));
     try testing.expectEqual(first_ref.segment_id, first.segment_id);
     const client = fx.clientWithChannel() orelse return error.TestUnexpectedResult;
 
@@ -6556,7 +6558,7 @@ test "image channel owner: 제품 투영 — 미룬 새 프레임이 있는 정�
     }
     const second_ref = fresh_ref orelse return error.TestUnexpectedResult;
     try testing.expect(second_ref.generation > first_ref.generation);
-    const second = try pumpTestSegmentPixels(&fx.owner, channel_fd, &([_]u8{ 7, 8, 9, 255 } ** 4));
+    const second = try pumpTestSegmentPixels(&fx.owner, channel_fd, &(array_repeat.repeat([_]u8{ 7, 8, 9, 255 }, 4)));
     try testing.expectEqual(second_ref.segment_id, second.segment_id);
     try testing.expectEqual(second_ref.generation, second.generation);
 

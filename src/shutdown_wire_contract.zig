@@ -3,7 +3,7 @@
 const std = @import("std");
 
 pub const Digest = [32]u8;
-pub const zero_digest = [_]u8{0} ** 32;
+pub const zero_digest = @as([32]u8, @splat(0));
 
 pub const ShutdownOperation = enum(u8) { terminate, inventory };
 pub const InventoryAttempt = enum(u8) { none, initial, retry };
@@ -24,10 +24,10 @@ pub const ShutdownConnectionReceipt = struct {
     attempt_key: ShutdownAttemptKey = .{},
     connection_identity: u64 = 0,
     lease_generation: u64 = 0,
-    operation_raw: u8 = @intFromEnum(ShutdownOperation.terminate),
-    inventory_attempt_raw: u8 = @intFromEnum(InventoryAttempt.none),
+    operation_raw: u8 = @backingInt(ShutdownOperation.terminate),
+    inventory_attempt_raw: u8 = @backingInt(InventoryAttempt.none),
     consumed_raw: u8 = 0,
-    reserved: [5]u8 = [_]u8{0} ** 5,
+    reserved: [5]u8 = @as([5]u8, @splat(0)),
     transcript_digest: Digest = zero_digest,
     seal: Digest = zero_digest,
 };

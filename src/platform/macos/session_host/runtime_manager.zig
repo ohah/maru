@@ -20,6 +20,8 @@
 //! stream demux(e2d), host-backed `TermRuntimeBackend`(e2e)는 후속이다. 그래서 spawn은 output을 core에 반영하는
 //! reader만 시작하고(process_in_reader=true), 화면 stream은 아직 내보내지 않는다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
@@ -323,7 +325,7 @@ test "word separator wire decoder is bounded strict hex and valid UTF-8" {
     try std.testing.expect(decodeWordSeparators("2", &out) == null);
     try std.testing.expect(decodeWordSeparators("zz", &out) == null);
     try std.testing.expect(decodeWordSeparators("ff", &out) == null);
-    try std.testing.expect(decodeWordSeparators("00" ** 65, &out) == null);
+    try std.testing.expect(decodeWordSeparators(array_repeat.repeat("00", 65), &out) == null);
 }
 
 /// host가 소유하는 실 terminal runtime 표. `RuntimeOps`를 통해 server.zig가 이걸 구동한다. self-referential이라
@@ -2031,7 +2033,7 @@ pub const RuntimeManager = struct {
             .cwd_host = cwd_host,
             .window_title = title,
             .ssh_remote_dest = ssh_dest,
-            .semantic_state = @intFromEnum(core.semantic_state),
+            .semantic_state = @backingInt(core.semantic_state),
             .alt_active = core.alt_active,
             .app_cursor_keys = core.application_cursor_keys,
             // §입력 패리티: host-backed 일반 key 인코딩(DECKPAM numpad·kitty keyboard)이 placeholder core 기본값이 아니라
@@ -2040,7 +2042,7 @@ pub const RuntimeManager = struct {
             .kitty_flags = core.kitty_flags.current().int(),
             .alternate_scroll = core.alternate_scroll,
             .mouse_tracking = core.mouse_tracking != .none,
-            .mouse_tracking_mode = @intFromEnum(core.mouse_tracking), // 모드 단일 출처(위 bool은 구 client 미러)
+            .mouse_tracking_mode = @backingInt(core.mouse_tracking), // 모드 단일 출처(위 bool은 구 client 미러)
             .bracketed_paste = core.bracketed_paste,
             .bell_count = bell_count,
             .clipboard_write_seq = clip.write_seq,
@@ -2935,7 +2937,7 @@ pub const RuntimeManager = struct {
         var out: std.Io.Writer.Allocating = .init(allocator);
         defer out.deinit();
         var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
-        js.write(.{ .text = extracted.text, .kind = @intFromEnum(extracted.kind) }) catch return error.OutOfMemory;
+        js.write(.{ .text = extracted.text, .kind = @backingInt(extracted.kind) }) catch return error.OutOfMemory;
         return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
     }
 
@@ -2986,7 +2988,7 @@ pub const RuntimeManager = struct {
     fn unpackLinkScopes(bits: u8) terminal.LinkScopes {
         const bit = struct {
             fn on(v: u8, scope: terminal.LinkScope) bool {
-                return (v & (@as(u8, 1) << @intCast(@intFromEnum(scope)))) != 0;
+                return (v & (@as(u8, 1) << @intCast(@backingInt(scope)))) != 0;
             }
         }.on;
         return .{
@@ -3305,7 +3307,7 @@ fn coreCommandFromWire(command: core_command_wire.Command) error{InvalidCommand}
             .background = rgbFromWire(colors.background),
         } },
         .set_config_palette => |wire_palette| blk: {
-            var palette: [16]?terminal.Rgb = .{null} ** 16;
+            var palette: [16]?terminal.Rgb = @splat(null);
             for (wire_palette, 0..) |maybe_rgb, index| {
                 palette[index] = if (maybe_rgb) |rgb| rgbFromWire(rgb) else null;
             }
@@ -3315,7 +3317,7 @@ fn coreCommandFromWire(command: core_command_wire.Command) error{InvalidCommand}
         .set_ambiguous_wide => |wide| .{ .set_ambiguous_wide = wide },
         .set_emoji_wide => |wide| .{ .set_emoji_wide = wide },
         .set_default_cursor_shape => |shape| if (shape <= 2)
-            .{ .set_default_cursor_shape = @enumFromInt(shape) }
+            .{ .set_default_cursor_shape = @fromBackingInt(@intCast(shape)) }
         else
             return error.InvalidCommand,
         .set_runtime_config => |config| .{
@@ -3335,7 +3337,7 @@ fn coreCommandFromWire(command: core_command_wire.Command) error{InvalidCommand}
                 // wire는 0=block/1=underline/2=bar. decode가 이미 범위를 좁혔지만 여기서도 닫아 둔다 —
                 // 다른 wire 소비처(paletteFromWire·cast)와 같은 fail-close 규율.
                 .default_cursor_shape = if (config.cursor_shape <= 2)
-                    @enumFromInt(config.cursor_shape)
+                    @fromBackingInt(@intCast(config.cursor_shape))
                 else
                     return error.InvalidCommand,
             },
@@ -3628,7 +3630,7 @@ test "P4 N2a outer handoff restores journal before successor publication" {
 }
 
 fn paletteFromWire(wire_palette: core_command_wire.Command.Palette) [16]?terminal.Rgb {
-    var palette: [16]?terminal.Rgb = .{null} ** 16;
+    var palette: [16]?terminal.Rgb = @splat(null);
     for (wire_palette, 0..) |maybe_rgb, index| {
         palette[index] = if (maybe_rgb) |rgb| rgbFromWire(rgb) else null;
     }
@@ -3652,9 +3654,9 @@ test "quiesced capture derives one sorted runtime authority set and rejects dive
         .resources = resources,
         .views = views,
         .notification_handoff = try allocator.alloc(u8, 0),
-        .notification_digest = [_]u8{0} ** 32,
+        .notification_digest = @as([32]u8, @splat(0)),
         .notification_metadata_handoff = try allocator.dupe(u8, "metadata"),
-        .notification_metadata_digest = [_]u8{0} ** 32,
+        .notification_metadata_digest = @as([32]u8, @splat(0)),
     };
     defer capture.deinit();
     var ids: [upgrade_limits.max_runtime_count]u128 = undefined;
@@ -3663,7 +3665,7 @@ test "quiesced capture derives one sorted runtime authority set and rejects dive
 }
 
 test "runtime manager maps every bounded wire command without silent variants" {
-    var wire_palette: core_command_wire.Command.Palette = .{null} ** 16;
+    var wire_palette: core_command_wire.Command.Palette = @splat(null);
     wire_palette[3] = 0x12_34_56;
     const mapped = try coreCommandFromWire(.{ .set_config_palette = wire_palette });
     try std.testing.expect(mapped == .set_config_palette);
@@ -4190,10 +4192,10 @@ test "runtime manager: 훅 신원이 없으면 칸도 안 만든다 — fail-clo
 
     // 로그 디렉터리 자체가 없어야 한다 — 신원이 없으면 그 자식의 훅은 어차피 아무것도 못 쓴다.
     var log_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = try std.fmt.bufPrintZ(&log_dir_buf, "{s}/{s}", .{
+    const log_dir = try std.fmt.bufPrintSentinel(&log_dir_buf, "{s}/{s}", .{
         cache_base,
         maru.session.agent_hook_command.log_dir_rel,
-    });
+    }, 0);
     var st: posix.Stat = undefined;
     try std.testing.expect(c.fstatat(posix.AT.FDCWD, log_dir.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0);
 }
@@ -4228,7 +4230,7 @@ test "runtime manager: 실 자식이 **진짜 훅 커맨드**를 돌리면 우�
     const hook_script_path = try std.fmt.allocPrint(allocator, "{s}/hook.sh", .{cache_base});
     defer allocator.free(hook_script_path);
     {
-        const zpath = try allocator.dupeZ(u8, hook_script_path);
+        const zpath = try allocator.dupeSentinel(u8, hook_script_path, 0);
         defer allocator.free(zpath);
         const fd = c.open(zpath.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o700));
         try std.testing.expect(fd >= 0);
@@ -4258,7 +4260,7 @@ test "runtime manager: 실 자식이 **진짜 훅 커맨드**를 돌리면 우�
         var seg_buf: [std.fs.max_path_bytes]u8 = undefined;
         const seg = try agent_hook_logs.instanceDirPathIn(&seg_buf, cache_base, host_id);
         var marker_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const marker = try std.fmt.bufPrintZ(&marker_buf, "{s}/owner.pid", .{seg});
+        const marker = try std.fmt.bufPrintSentinel(&marker_buf, "{s}/owner.pid", .{seg}, 0);
         _ = c.unlink(marker.ptr);
         try std.testing.expectEqual(@as(c_int, 0), c.rmdir(seg.ptr));
     }
@@ -4929,7 +4931,7 @@ test "runtime manager: initial config is applied before fast first output reache
     mgr.init(allocator, std.testing.io, &host_registry, null);
     defer mgr.deinit();
 
-    var palette: core_command_wire.Command.Palette = .{null} ** 16;
+    var palette: core_command_wire.Command.Palette = @splat(null);
     palette[1] = 0x11_22_33;
     const ops = mgr.runtimeOps();
     const script = "i=0; while [ $i -lt 1100 ]; do echo x; i=$((i+1)); done; sleep 2";
@@ -5029,7 +5031,7 @@ test "runtime manager: bounded core config commands reach the real host reader c
     const handle = mgr.handleFor(rid) orelse return error.TestUnexpectedResult;
     const surface = mgr.backend_impl.surfaceFor(handle) orelse return error.TestUnexpectedResult;
 
-    var wire_palette: core_command_wire.Command.Palette = .{null} ** 16;
+    var wire_palette: core_command_wire.Command.Palette = @splat(null);
     wire_palette[2] = 0x12_34_56;
     try ops.core_command(ops.ctx, rid, .{ .set_runtime_config = .{
         .max_scrollback = 321,
@@ -5480,7 +5482,7 @@ test "P4 E2b runtime manager shares one canonical observation per cadence epoch"
     try std.testing.expectEqualStrings("/tmp/metadata-repo", observation.cwd);
     try std.testing.expectEqualStrings("metadata-title", observation.window_title);
     try std.testing.expectEqualStrings("user@workbox", observation.ssh_remote_dest.?);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(terminal.SemanticPrompt.command)), observation.semantic_state);
+    try std.testing.expectEqual(@as(u8, @backingInt(terminal.SemanticPrompt.command)), observation.semantic_state);
     try std.testing.expect(observation.foreground_available);
 
     const first_cached = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 100 });

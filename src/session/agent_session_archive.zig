@@ -882,7 +882,7 @@ test "clone은 Parsed의 모든 필드를 보존한다" {
     var copy = try origin.clone(a);
     defer copy.deinit(a);
 
-    inline for (@typeInfo(Parsed).@"struct".fields) |field| {
+    inline for (@import("type_info_fields").structFields(Parsed)) |field| {
         const lhs = @field(origin, field.name);
         const rhs = @field(copy, field.name);
         const is_text = comptime blk: {
@@ -1093,12 +1093,12 @@ test "argv 토큰 규칙: 첫 자리는 «허용된 64 개», 그 뒤는 65 개�
 
     // 길이 경계는 **자리마다 다르다**. 각자 상한까지는 통과하고 한 바이트만 넘어도 떨어진다 —
     // 그래야 잘린 값이 플래그로 안 나간다. 상한이 하나로 뭉치면 그 구분이 사라진다.
-    const model_at = [_]u8{'a'} ** max_model_bytes;
-    const model_over = [_]u8{'a'} ** (max_model_bytes + 1);
+    const model_at = @as([max_model_bytes]u8, @splat('a'));
+    const model_over = @as([(max_model_bytes + 1)]u8, @splat('a'));
     try std.testing.expect(isResumableModel(&model_at));
     try std.testing.expect(!isResumableModel(&model_over));
-    const id_at = [_]u8{'a'} ** max_session_id_bytes;
-    const id_over = [_]u8{'a'} ** (max_session_id_bytes + 1);
+    const id_at = @as([max_session_id_bytes]u8, @splat('a'));
+    const id_over = @as([(max_session_id_bytes + 1)]u8, @splat('a'));
     try std.testing.expect(isResumableSessionId(&id_at));
     try std.testing.expect(!isResumableSessionId(&id_over));
     // 세션 id 상한이 모델 상한보다 넓다는 것도 못 박는다 — 하나로 합치려는 변경이 여기서 걸린다.
@@ -1145,7 +1145,7 @@ test "모델 상한은 표시용 절단선 «안»이라야 한다 — 잘린 �
     // **조용히 잘린 이름**이 `--model` 로 나간다 — 표시로는 견딜 만해도 argv 로는 틀린 값이다.
     // 그래서 상한까지의 모델이 파싱 왕복에서 **한 바이트도 안 변하는 것**을 제품 경로로 못 박는다.
     // (`max_model_bytes` 를 `max_title_bytes` 위로 올리면 여기서 깨진다.)
-    const token = [_]u8{'m'} ** max_model_bytes;
+    const token = @as([max_model_bytes]u8, @splat('m'));
     const jsonl = try std.fmt.allocPrint(
         a,
         "{{\"sessionId\":\"c-len\",\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"model\":\"{s}\",\"text\":\"답\"}}}}",
@@ -1308,17 +1308,17 @@ test "Codex 권한 모드: 못 읽은 축은 채워 넣지 않는다" {
 test "권한 모드 표: 모든 값이 왕복하고, 재개 argv 상한을 넘지 않는다" {
     // rollout 철자(하이픈)와 Zig enum 이름(밑줄)이 달라 표가 양방향으로 둘이다. 한쪽만 고치면 그 값만
     // 조용히 재개에서 빠진다 — **허용된 자리 전부**를 세어서 두 방향이 갈리는 것을 막는다.
-    inline for (@typeInfo(CodexApproval).@"enum".fields) |field| {
-        const value: CodexApproval = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(CodexApproval)) |field| {
+        const value: CodexApproval = @fromBackingInt(@intCast(field.value));
         try std.testing.expectEqual(value, CodexApproval.fromTranscript(value.flagValue()).?);
     }
-    inline for (@typeInfo(CodexSandbox).@"enum".fields) |field| {
-        const value: CodexSandbox = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(CodexSandbox)) |field| {
+        const value: CodexSandbox = @fromBackingInt(@intCast(field.value));
         try std.testing.expectEqual(value, CodexSandbox.fromTranscript(value.flagValue()).?);
     }
     // Claude 는 transcript 철자와 CLI 철자가 같으므로 왕복이 enum 이름 자체와 맞는지까지 본다.
-    inline for (@typeInfo(ClaudeMode).@"enum".fields) |field| {
-        const value: ClaudeMode = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(ClaudeMode)) |field| {
+        const value: ClaudeMode = @fromBackingInt(@intCast(field.value));
         try std.testing.expectEqual(value, ClaudeMode.fromTranscript(field.name).?);
         if (value.flagValue()) |flag| try std.testing.expectEqualStrings(field.name, flag);
     }

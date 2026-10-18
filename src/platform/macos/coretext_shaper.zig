@@ -368,7 +368,7 @@ fn emptyNativeDrawGlyphRecord() NativeDrawGlyphRecord {
         .drawable = 0,
         .fallback = 0,
         .color_glyph_kind = 0,
-        .font_name = [_]u8{0} ** coretext_probe.font_name_capacity,
+        .font_name = @as([coretext_probe.font_name_capacity]u8, @splat(0)),
     };
 }
 

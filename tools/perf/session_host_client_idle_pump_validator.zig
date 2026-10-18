@@ -271,9 +271,9 @@ test "P4 E3c validator rejects inferred counter, latency, and cleanup drift" {
         .{ .runtime_count = 100, .frame_count = 60, .observation_ns = std.time.ns_per_s, .cpu_user_delta_ns = 4, .cpu_system_delta_ns = 5, .cpu_total_delta_ns = 9, .selected_owner_count = 960, .pump_delta_count = 60, .quiet_pump_skip_count = 900, .timestamp_seal_count = 60, .client_slot_registry_visit_count = 0, .socket_read_attempt_count = 0 },
     };
     // 전부 1ms — p95 도 max 도 상한 아래다.
-    var latency_samples = [_]u64{std.time.ns_per_ms} ** marker_sample_count;
+    var latency_samples = @as([marker_sample_count]u64, @splat(std.time.ns_per_ms));
     // 회차마다 프레임 하나 — 아래 회계식(`frames - 회차 수`)과 맞는다.
-    var frame_samples = [_]u32{1} ** marker_sample_count;
+    var frame_samples = @as([marker_sample_count]u32, @splat(1));
     var artifact = Artifact{
         .schema = schema_name,
         .scenario = scenario_name,
@@ -399,7 +399,7 @@ test "P4 E3c validator rejects inferred counter, latency, and cleanup drift" {
         // 상한을 넘는 표본을 **셋** 둔다. 40 표본의 p95 는 index 37 이라 둘까지는 버려진다 —
         // 셋이라야 p95 가 실제로 넘는다. (둘만 두면 이 판정자가 조용히 통과한다.)
         var drifted = artifact;
-        var slow = [_]u64{std.time.ns_per_ms} ** marker_sample_count;
+        var slow = @as([marker_sample_count]u64, @splat(std.time.ns_per_ms));
         slow[0] = marker_latency_p95_cap_ns + 1;
         slow[1] = marker_latency_p95_cap_ns + 1;
         slow[2] = marker_latency_p95_cap_ns + 1;
@@ -407,20 +407,20 @@ test "P4 E3c validator rejects inferred counter, latency, and cleanup drift" {
         try std.testing.expectError(error.MarkerLatencyP95OverCap, validateArtifact(drifted));
 
         // 둘만 넘으면 p95 는 통과한다 — 그것이 「가장 나쁜 둘을 버린다」의 뜻이다.
-        var tolerated = [_]u64{std.time.ns_per_ms} ** marker_sample_count;
+        var tolerated = @as([marker_sample_count]u64, @splat(std.time.ns_per_ms));
         tolerated[0] = marker_latency_p95_cap_ns + 1;
         tolerated[1] = marker_latency_p95_cap_ns + 1;
         drifted.marker_latency_samples_ns = &tolerated;
         try validateArtifact(drifted);
 
         // 그러나 **멈춤**은 하나만으로도 잡는다.
-        var hung = [_]u64{std.time.ns_per_ms} ** marker_sample_count;
+        var hung = @as([marker_sample_count]u64, @splat(std.time.ns_per_ms));
         hung[7] = marker_latency_hang_cap_ns + 1;
         drifted.marker_latency_samples_ns = &hung;
         try std.testing.expectError(error.MarkerLatencyHang, validateArtifact(drifted));
 
         // 값이 아예 없는 표본은 「빠르다」가 아니라 **안 쟀다**이다.
-        var missing = [_]u64{std.time.ns_per_ms} ** marker_sample_count;
+        var missing = @as([marker_sample_count]u64, @splat(std.time.ns_per_ms));
         missing[19] = 0;
         drifted.marker_latency_samples_ns = &missing;
         try std.testing.expectError(error.MarkerLatencyMissing, validateArtifact(drifted));
@@ -430,7 +430,7 @@ test "P4 E3c validator rejects inferred counter, latency, and cleanup drift" {
     // 폴링으로 떨어지는 회귀가 정확히 그 모양이다(지연은 러너에 묻히고 턴만 뛴다).
     {
         var drifted = artifact;
-        var slow_turns = [_]u32{1} ** marker_sample_count;
+        var slow_turns = @as([marker_sample_count]u32, @splat(1));
         // 셋을 넘겨야 p95(index 37)가 실제로 넘는다 — 둘까지는 버려진다.
         slow_turns[0] = marker_frame_turns_p95_cap + 1;
         slow_turns[1] = marker_frame_turns_p95_cap + 1;
@@ -445,7 +445,7 @@ test "P4 E3c validator rejects inferred counter, latency, and cleanup drift" {
         try std.testing.expectError(error.MarkerFrameTurnsP95OverCap, validateArtifact(drifted));
 
         // 턴 0 은 「빠르다」가 아니라 그 회차를 안 잰 것이다.
-        var no_turn = [_]u32{1} ** marker_sample_count;
+        var no_turn = @as([marker_sample_count]u32, @splat(1));
         no_turn[5] = 0;
         drifted.marker_frame_samples = &no_turn;
         drifted.marker_frame_count = marker_sample_count;

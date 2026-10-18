@@ -364,7 +364,7 @@ fn styleIsUnsupported(style: terminal.Style) bool {
             "reverse",          "blink",         "conceal",
             "underline_color",
         };
-        for (@typeInfo(terminal.Style).@"struct".fields) |field| {
+        for (@import("type_info_fields").structFields(terminal.Style)) |field| {
             var found = false;
             for (classified) |name| {
                 if (std.mem.eql(u8, field.name, name)) found = true;

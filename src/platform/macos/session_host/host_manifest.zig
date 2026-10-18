@@ -306,19 +306,19 @@ pub const PinnedAdoption = struct {
 };
 
 pub fn hostsRootPathIn(buf: []u8, session_dir: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/hosts", .{trimTrailingSlash(session_dir)});
+    return std.fmt.bufPrintSentinel(buf, "{s}/hosts", .{trimTrailingSlash(session_dir)}, 0);
 }
 
 pub fn hostDirPathIn(buf: []u8, session_dir: []const u8, host_id: u128) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/hosts/{x:0>32}", .{ trimTrailingSlash(session_dir), host_id });
+    return std.fmt.bufPrintSentinel(buf, "{s}/hosts/{x:0>32}", .{ trimTrailingSlash(session_dir), host_id }, 0);
 }
 
 pub fn manifestPathIn(buf: []u8, session_dir: []const u8, host_id: u128) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/hosts/{x:0>32}/host.v1.json", .{ trimTrailingSlash(session_dir), host_id });
+    return std.fmt.bufPrintSentinel(buf, "{s}/hosts/{x:0>32}/host.v1.json", .{ trimTrailingSlash(session_dir), host_id }, 0);
 }
 
 pub fn ownerLockPathIn(buf: []u8, session_dir: []const u8, host_id: u128) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/hosts/{x:0>32}/owner.lock", .{ trimTrailingSlash(session_dir), host_id });
+    return std.fmt.bufPrintSentinel(buf, "{s}/hosts/{x:0>32}/owner.lock", .{ trimTrailingSlash(session_dir), host_id }, 0);
 }
 
 /// Socket bind 전에 host별 lifetime owner lease를 잡을 수 있도록 registry directory만 먼저 준비한다.
@@ -376,11 +376,11 @@ pub fn publish(
     const manifest_path = manifestPathIn(&manifest_buf, session_dir, descriptor.host_id) catch
         return error.InvalidDirectory;
 
-    const owned_hosts_root = allocator.dupeZ(u8, hosts_root) catch return error.OutOfMemory;
+    const owned_hosts_root = allocator.dupeSentinel(u8, hosts_root, 0) catch return error.OutOfMemory;
     errdefer allocator.free(owned_hosts_root);
-    const owned_host_dir = allocator.dupeZ(u8, host_dir) catch return error.OutOfMemory;
+    const owned_host_dir = allocator.dupeSentinel(u8, host_dir, 0) catch return error.OutOfMemory;
     errdefer allocator.free(owned_host_dir);
-    const owned_manifest = allocator.dupeZ(u8, manifest_path) catch return error.OutOfMemory;
+    const owned_manifest = allocator.dupeSentinel(u8, manifest_path, 0) catch return error.OutOfMemory;
     errdefer allocator.free(owned_manifest);
     const identity = try writeAtomic(allocator, host_dir, manifest_path, descriptor, null);
     return .{
@@ -413,11 +413,11 @@ pub fn prepareAdoptRestoring(
     var manifest_buf: [832]u8 = undefined;
     const manifest_path = manifestPathIn(&manifest_buf, session_dir, host_id) catch
         return error.InvalidDirectory;
-    const owned_hosts_root = allocator.dupeZ(u8, hosts_root) catch return error.OutOfMemory;
+    const owned_hosts_root = allocator.dupeSentinel(u8, hosts_root, 0) catch return error.OutOfMemory;
     errdefer allocator.free(owned_hosts_root);
-    const owned_host_dir = allocator.dupeZ(u8, host_dir) catch return error.OutOfMemory;
+    const owned_host_dir = allocator.dupeSentinel(u8, host_dir, 0) catch return error.OutOfMemory;
     errdefer allocator.free(owned_host_dir);
-    const owned_manifest = allocator.dupeZ(u8, manifest_path) catch return error.OutOfMemory;
+    const owned_manifest = allocator.dupeSentinel(u8, manifest_path, 0) catch return error.OutOfMemory;
     return .{
         .publication = .{
             .allocator = allocator,

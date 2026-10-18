@@ -13,6 +13,8 @@
 //! 같이 흔들린다. 다만 **순수 헬퍼 둘**(`sideMetrics`·`sideMetricsWith` — 「한 열의 스크롤바가
 //! 자리를 얼마나 먹나」)은 그쪽에서 빌려 온다. 그것을 베끼면 같은 규칙의 주인이 둘이 된다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const draw = @import("../../draw.zig");
 const frame = @import("frame.zig");
@@ -257,7 +259,7 @@ fn paneSizes(props: Props) [4]frame.BufferSizes {
     const outer = props.background_rect orelse props.rect;
     const panes = [4]?Pane{ props.current, props.result, props.incoming, props.base };
     const rects = [4]?draw.Rect{ lay.current, lay.result, lay.incoming, lay.base };
-    var out = [_]frame.BufferSizes{.{}} ** 4;
+    var out = @as([4]frame.BufferSizes, @splat(.{}));
     for (panes, rects, 0..) |pane_opt, rect_opt, i| {
         const pane = pane_opt orelse continue;
         const rect = rect_opt orelse continue;
@@ -585,7 +587,7 @@ test "RB4 병합 — run·글자를 pane 몫대로 나눈다: base 없는 3-up·
 
 test "B2FW5 병합 pane — Result 만 밀집한 합성 입력을 세션 writer 하나로 순서대로 소비한다" {
     const a = testing.allocator;
-    const lines = [_][]const u8{"x" ** 240} ** 80;
+    const lines = @as([80][]const u8, @splat(array_repeat.repeat("x", 240)));
     const props: Props = .{
         .current = .{ .lines = &lines },
         .result = .{ .lines = &lines },
@@ -607,7 +609,7 @@ test "B2FW5 병합 pane — Result 만 밀집한 합성 입력을 세션 writer 
     for (rects, 0..) |rect, i| panes[i] = paneProps(pane, props, rect, backgroundFor(i, rect, lay, props.rect));
     var singles: [120]frame.Mark = undefined;
     for (&singles, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
-    const marks = [_][]const frame.Mark{&singles} ** 80;
+    const marks = @as([80][]const frame.Mark, @splat(&singles));
     // 제품 merge Pane 에 검색 API 는 아직 없다. 기존 paneProps 의 실제 좌표에 합성 밀집 층을 넣는다.
     panes[1].search_marks = &marks;
     const complete = try frame.B2Experiment.checkPanes(&panes, 16000);

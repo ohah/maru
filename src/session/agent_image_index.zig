@@ -13,6 +13,8 @@
 //! **플랫폼을 모른다.** `std`만 쓰고 파일을 열지 않는다 — 바이트 슬라이스를 받아 위치를 돌려준다.
 //! 그래서 Linux 타깃으로도 컴파일·테스트된다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 
 /// 한 줄의 상한. 넘으면 그 줄을 **버린다**(잘라서 반쪽 JSON을 만들지 않는다). 아카이브 스캐너와 같은 값이며,
@@ -333,7 +335,7 @@ fn sameRecord(a: Hit, b: Hit) bool {
 pub const max_chain: usize = 3;
 
 pub const Chain = struct {
-    files: [max_chain]Source = [_]Source{.{}} ** max_chain,
+    files: [max_chain]Source = @as([max_chain]Source, @splat(.{})),
     len: usize = 0,
 
     pub fn get(self: *const Chain, i: usize) ?[]const u8 {
@@ -2226,7 +2228,7 @@ test "Source: 상한 초과·상대 경로·빈 값은 담지 않고 비운다 �
     _ = src.set("/ok/a.jsonl");
 
     // 자르면 없는 파일이거나 **다른 파일**이 된다.
-    const too_long = "/" ++ ("x" ** max_source_path_bytes);
+    const too_long = "/" ++ (array_repeat.repeat("x", max_source_path_bytes));
     try testing.expect(src.set(too_long)); // 바뀌었다(비워졌다)
     try testing.expect(src.isEmpty());
 
@@ -2455,7 +2457,7 @@ test "긴 줄이 청크로 쪼개져 와도 이월 버퍼를 옮기지 않는다
     var out: std.ArrayList(Hit) = .empty;
     defer out.deinit(allocator);
 
-    const chunk = "x" ** 4096;
+    const chunk = array_repeat.repeat("x", 4096);
     for (0..64) |_| try scanner.feed(allocator, chunk, &out);
     // 아직 한 줄도 안 끝났다 — 옮길 것이 없다.
     try testing.expectEqual(@as(u64, 0), scanner.carry_moves);

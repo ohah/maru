@@ -16,6 +16,8 @@
 //! 가장 낮은 차례로 — 넉넉할 때만 쓴다(4 회차 B). 거기서 버린 수는 새 문서의 수와 따로 세고 가장 앞 문서의 `docs_back` 과 함께 보낸다 —
 //! maru 는 그 문서의 표지로 두어 처음 읽는 쪽에게는 보이지 않는다(4 회차 A: 전에는 세지 않아 묶인 쪽이 빠진 줄을 몰랐다).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
 
@@ -158,7 +160,7 @@ pub const Gate = struct {
     /// 글로 바꾸기 전에 — 지나면 줄 수를 단다(바이트는 바꾼 뒤 `charge`). 못 지나면 버린 수를 센다. `docs_back` 이 0 이 아니면 앞 문서의 줄,
     /// `bound` 는 바꿀 글의 바이트 상한(`textBound` — 앞 문서의 줄의 남길 몫에만 쓴다).
     pub fn admit(self: *Gate, global: *Global, class: Class, docs_back: u8, bound: usize, now: u64) bool {
-        const i = @intFromEnum(class);
+        const i = @backingInt(class);
         const old_document = docs_back != 0;
         global.count.refill(now);
         global.bytes.refill(now);
@@ -202,7 +204,7 @@ pub const Gate = struct {
     /// 바꾼 글의 실제 바이트를 빚으로 단다.
     pub fn charge(self: *Gate, global: *Global, class: Class, old_document: bool, bytes: usize) void {
         global.bytes.take(bytes);
-        if (old_document) self.old_bytes.take(bytes) else self.bytes[@intFromEnum(class)].take(bytes);
+        if (old_document) self.old_bytes.take(bytes) else self.bytes[@backingInt(class)].take(bytes);
     }
 
     pub fn hasDrops(self: *const Gate) bool {
@@ -690,12 +692,12 @@ test "W9c①: text is cleaned (control characters blanked, CRLF and CR to LF), c
     try testing.expect(clamped.len <= max_text);
     try testing.expect(std.mem.endsWith(u8, clamped, "…"));
     try testing.expect(std.unicode.utf8ValidateSlice(clamped));
-    try testing.expectEqualStrings("x" ** 8, clamped[0..8]);
+    try testing.expectEqualStrings(array_repeat.repeat("x", 8), clamped[0..8]);
     // 잡히지 않은 예외 — 꼬리에 source:line, source 는 256 바이트까지.
     var u = "Uncaught Error: boom".*;
     try testing.expectEqualStrings("Uncaught Error: boom (https://a.test/app.js:42)", finishText(&u, false, "https://a.test/app.js", 42, &out));
     var uu = "Uncaught Error: boom".*;
-    const long_src = "https://a.test/" ++ "p" ** 400;
+    const long_src = "https://a.test/" ++ array_repeat.repeat("p", 400);
     const with_long = finishText(&uu, false, long_src, 7, &out);
     try testing.expectEqualStrings("Uncaught Error: boom (" ++ long_src[0..max_suffix_source_bytes] ++ ":7)", with_long);
     // source 가 없으면(eval 등) 꼬리가 없다. 「Uncaught」 가 아니면 붙이지 않는다.

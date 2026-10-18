@@ -138,7 +138,7 @@ pub const Header = struct {
         var buf: [header_size]u8 = undefined;
         @memcpy(buf[0..4], &magic);
         std.mem.writeInt(u16, buf[4..6], self.major, .big);
-        std.mem.writeInt(u16, buf[6..8], @intFromEnum(self.kind), .big);
+        std.mem.writeInt(u16, buf[6..8], @backingInt(self.kind), .big);
         std.mem.writeInt(u32, buf[8..12], self.flags, .big);
         std.mem.writeInt(u64, buf[12..20], self.request_id, .big);
         std.mem.writeInt(u64, buf[20..28], self.stream_id, .big);
@@ -151,7 +151,7 @@ pub const Header = struct {
         if (!std.mem.eql(u8, bytes[0..4], &magic)) return error.BadMagic;
         return .{
             .major = std.mem.readInt(u16, bytes[4..6], .big),
-            .kind = @enumFromInt(std.mem.readInt(u16, bytes[6..8], .big)),
+            .kind = @fromBackingInt(@intCast(std.mem.readInt(u16, bytes[6..8], .big))),
             .flags = std.mem.readInt(u32, bytes[8..12], .big),
             .request_id = std.mem.readInt(u64, bytes[12..20], .big),
             .stream_id = std.mem.readInt(u64, bytes[20..28], .big),
@@ -210,7 +210,7 @@ test "MRSH header round-trips with exact 32-byte big-endian layout" {
 }
 
 test "CR4a host barrier frame kind는 fixed binary 96바이트만 허용한다" {
-    try std.testing.expectEqual(@as(u16, 14), @intFromEnum(Kind.screen_frontier_barrier));
+    try std.testing.expectEqual(@as(u16, 14), @backingInt(Kind.screen_frontier_barrier));
     try std.testing.expect(Kind.screen_frontier_barrier.isKnown());
     try std.testing.expect(!Kind.screen_frontier_barrier.isControlJson());
     try std.testing.expectEqual(@as(usize, 96), maxPayloadForKind(.screen_frontier_barrier));
@@ -244,7 +244,7 @@ test "MRSH kind is an open enum: unknown wire kind decodes but reports not-known
     std.mem.writeInt(u16, bytes[6..8], 60000, .big); // 미래/미지 kind
     const back = try Header.decode(&bytes);
     try std.testing.expect(!back.kind.isKnown()); // 상위가 optional flag로 skip 여부 판정
-    try std.testing.expectEqual(@as(u16, 60000), @intFromEnum(back.kind));
+    try std.testing.expectEqual(@as(u16, 60000), @backingInt(back.kind));
 }
 
 test "MRSH known kinds classify control-json vs binary payloads" {
@@ -267,7 +267,7 @@ test "MRSH known kinds classify control-json vs binary payloads" {
 }
 
 test "P4 async observation probe has a dedicated optional-safe fixed payload kind" {
-    try std.testing.expectEqual(@as(u16, 15), @intFromEnum(Kind.observation_probe));
+    try std.testing.expectEqual(@as(u16, 15), @backingInt(Kind.observation_probe));
     try std.testing.expect(Kind.observation_probe.isKnown());
     try std.testing.expect(!Kind.observation_probe.isControlJson());
     try std.testing.expectEqual(@as(usize, 8), maxPayloadForKind(.observation_probe));
@@ -282,8 +282,8 @@ test "MRSH flags: end_stream/optional/unknown-bit predicates" {
 }
 
 test "MRSH error codes round-trip through wire names" {
-    inline for (@typeInfo(ErrorCode).@"enum".fields) |f| {
-        const code: ErrorCode = @enumFromInt(f.value);
+    inline for (@import("type_info_fields").enumFields(ErrorCode)) |f| {
+        const code: ErrorCode = @fromBackingInt(@intCast(f.value));
         try std.testing.expectEqual(code, ErrorCode.fromWireName(code.wireName()).?);
     }
     try std.testing.expect(ErrorCode.fromWireName("no_such_code") == null); // 모르는 이름 → 호출자가 internal 폴백

@@ -300,7 +300,7 @@ pub const RawTty = struct {
             const count = c.read(self.wake_read_fd, &byte, 1);
             if (count == 1) {
                 for (managed_signals) |signal|
-                    if (byte[0] == @intFromEnum(signal)) {
+                    if (byte[0] == @backingInt(signal)) {
                         _ = @atomicRmw(
                             u32,
                             &active_pending_signal_bits,
@@ -438,7 +438,7 @@ fn wakeSignalHandler(signal: posix.SIG) callconv(.c) void {
     // into the parent's inherited self-pipe. P5c3 additionally keeps the attach CLI single-threaded
     // and fork-free while this process-global handler is installed.
     if (c.getpid() != @atomicLoad(c.pid_t, &active_signal_pid, .seq_cst))
-        c._exit(@intCast(128 + @intFromEnum(signal)));
+        c._exit(@intCast(128 + @backingInt(signal)));
     const fd = @atomicLoad(c.fd_t, &active_signal_write_fd, .seq_cst);
     if (fd < 0) return;
     _ = @atomicRmw(
@@ -448,7 +448,7 @@ fn wakeSignalHandler(signal: posix.SIG) callconv(.c) void {
         signalBit(signal),
         .seq_cst,
     );
-    const byte = [1]u8{@intCast(@intFromEnum(signal))};
+    const byte = [1]u8{@intCast(@backingInt(signal))};
     while (true) {
         const written = c.write(fd, &byte, byte.len);
         if (written == byte.len) return;
@@ -546,8 +546,8 @@ test "raw mode matches cfmakeraw contract without changing the saved value" {
     original.lflag.IEXTEN = true;
     original.cflag.PARENB = true;
     original.cflag.CREAD = false;
-    original.cc[@intFromEnum(posix.V.MIN)] = 7;
-    original.cc[@intFromEnum(posix.V.TIME)] = 9;
+    original.cc[@backingInt(posix.V.MIN)] = 7;
+    original.cc[@backingInt(posix.V.TIME)] = 9;
     const saved = original;
 
     const raw = makeRaw(original);
@@ -570,8 +570,8 @@ test "raw mode matches cfmakeraw contract without changing the saved value" {
     try std.testing.expectEqual(posix.CSIZE.CS8, raw.cflag.CSIZE);
     try std.testing.expect(!raw.cflag.PARENB);
     try std.testing.expect(raw.cflag.CREAD);
-    try std.testing.expectEqual(@as(u8, 1), raw.cc[@intFromEnum(posix.V.MIN)]);
-    try std.testing.expectEqual(@as(u8, 0), raw.cc[@intFromEnum(posix.V.TIME)]);
+    try std.testing.expectEqual(@as(u8, 1), raw.cc[@backingInt(posix.V.MIN)]);
+    try std.testing.expectEqual(@as(u8, 0), raw.cc[@backingInt(posix.V.TIME)]);
 }
 
 test "real openpty enters raw mode, reports initial size, and restores exactly" {
@@ -586,8 +586,8 @@ test "real openpty enters raw mode, reports initial size, and restores exactly" 
     initial.lflag.IEXTEN = true;
     initial.cflag.CREAD = true;
     initial.cflag.CSIZE = .CS8;
-    initial.cc[@intFromEnum(posix.V.MIN)] = 3;
-    initial.cc[@intFromEnum(posix.V.TIME)] = 4;
+    initial.cc[@backingInt(posix.V.MIN)] = 3;
+    initial.cc[@backingInt(posix.V.TIME)] = 4;
     const window: posix.winsize = .{ .row = 37, .col = 113, .xpixel = 0, .ypixel = 0 };
     var master: c.fd_t = -1;
     var slave: c.fd_t = -1;
@@ -612,8 +612,8 @@ test "real openpty enters raw mode, reports initial size, and restores exactly" 
     const during = try posix.tcgetattr(slave);
     try std.testing.expect(!during.lflag.ECHO);
     try std.testing.expect(!during.lflag.ICANON);
-    try std.testing.expectEqual(@as(u8, 1), during.cc[@intFromEnum(posix.V.MIN)]);
-    try std.testing.expectEqual(@as(u8, 0), during.cc[@intFromEnum(posix.V.TIME)]);
+    try std.testing.expectEqual(@as(u8, 1), during.cc[@backingInt(posix.V.MIN)]);
+    try std.testing.expectEqual(@as(u8, 0), during.cc[@backingInt(posix.V.TIME)]);
 
     try owner.restore();
     try owner.restore();
@@ -681,7 +681,7 @@ const FakeOps = struct {
     terminate_requests: usize = 0,
     block_calls: usize = 0,
     restore_mask_calls: usize = 0,
-    restored_by_signal: [managed_signals.len]usize = .{0} ** managed_signals.len,
+    restored_by_signal: [managed_signals.len]usize = @splat(0),
 
     fn ops(self: *FakeOps) Ops {
         return .{
@@ -1066,9 +1066,9 @@ test "SIGWINCH bursts coalesce and termination wins in one wake batch" {
     defer owner.restore() catch {};
 
     const resize_bytes = [_]u8{
-        @intCast(@intFromEnum(posix.SIG.WINCH)),
-        @intCast(@intFromEnum(posix.SIG.WINCH)),
-        @intCast(@intFromEnum(posix.SIG.WINCH)),
+        @intCast(@backingInt(posix.SIG.WINCH)),
+        @intCast(@backingInt(posix.SIG.WINCH)),
+        @intCast(@backingInt(posix.SIG.WINCH)),
     };
     try std.testing.expectEqual(
         @as(isize, resize_bytes.len),
@@ -1079,9 +1079,9 @@ test "SIGWINCH bursts coalesce and termination wins in one wake batch" {
     try std.testing.expectEqual(@as(?posix.SIG, null), resize_only.termination);
 
     const mixed = [_]u8{
-        @intCast(@intFromEnum(posix.SIG.WINCH)),
-        @intCast(@intFromEnum(posix.SIG.TERM)),
-        @intCast(@intFromEnum(posix.SIG.WINCH)),
+        @intCast(@backingInt(posix.SIG.WINCH)),
+        @intCast(@backingInt(posix.SIG.TERM)),
+        @intCast(@backingInt(posix.SIG.WINCH)),
     };
     try std.testing.expectEqual(
         @as(isize, mixed.len),
@@ -1105,7 +1105,7 @@ test "termination survives a SIGWINCH-saturated wake pipe" {
     var owner = try RawTty.enter(slave);
     defer owner.restore() catch {};
 
-    const winch_byte = [1]u8{@intCast(@intFromEnum(posix.SIG.WINCH))};
+    const winch_byte = [1]u8{@intCast(@backingInt(posix.SIG.WINCH))};
     var written: usize = 0;
     while (written < 1024 * 1024) : (written += 1) {
         const result = c.write(owner.wake_write_fd, &winch_byte, winch_byte.len);

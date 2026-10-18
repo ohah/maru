@@ -5,6 +5,8 @@
 //! **서버 → 클라이언트 요청은 전부 거부한다**(§8.2a 「하지 않는 것」): `window/workDoneProgress/create`·`workspace/configuration`·
 //! `client/registerCapability`·`workspace/applyEdit`… 어느 것이든 `MethodNotFound`(-32601) 로 답한다 — 승인 UI 가 없는 동안은 거부만.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const code_action = @import("code_action.zig"); // kind 위계(`kindMatches`·`nextKind`) — `CodeActionCaps.covers`
 
@@ -383,7 +385,7 @@ pub fn signatureHelpRequest(allocator: std.mem.Allocator, seq: u32, uri: []const
         .params = .{
             .textDocument = .{ .uri = uri },
             .position = .{ .line = line, .character = character },
-            .context = .{ .triggerKind = @intFromEnum(kind), .triggerCharacter = tc, .isRetrigger = is_retrigger },
+            .context = .{ .triggerKind = @backingInt(kind), .triggerCharacter = tc, .isRetrigger = is_retrigger },
         },
     }, .{ .emit_null_optional_fields = false });
 }
@@ -1215,11 +1217,11 @@ test "LSJ serverText — 128 바이트에서 글자 경계로 자르고, 개행�
     defer a.free(forged);
     try testing.expectEqualStrings("1.0 Executable: /x  [2J ", forged);
     // 3 바이트 글자 43 개(129 바이트) — 128 에서 자르면 마지막 글자가 갈린다 → 42 개(126 바이트).
-    const long = dupeServerText(a, "가" ** 43).?;
+    const long = dupeServerText(a, array_repeat.repeat("가", 43)).?;
     defer a.free(long);
     try testing.expectEqual(@as(usize, 126), long.len);
     try testing.expect(std.unicode.utf8ValidateSlice(long));
-    const ascii = dupeServerText(a, "v" ** 200).?;
+    const ascii = dupeServerText(a, array_repeat.repeat("v", 200)).?;
     defer a.free(ascii);
     try testing.expectEqual(server_text_cap, ascii.len);
     try testing.expect(dupeServerText(a, "") == null);

@@ -10,9 +10,9 @@ fn expectedSnapshot() post.Snapshot {
         .path = paths[index],
         .name = std.fs.path.basename(paths[index]),
         .size = 100 + index,
-        .sha256 = [_]u8{'a' + @as(u8, @intCast(index))} ** 64,
+        .sha256 = @as([64]u8, @splat('a' + @as(u8, @intCast(index)))),
     };
-    return .{ .release_id = 88, .tag = "v1.2.3", .source_commit = "0123456789abcdef0123456789abcdef01234567", .cli_sha256 = [_]u8{'f'} ** 64, .artifacts = artifacts };
+    return .{ .release_id = 88, .tag = "v1.2.3", .source_commit = "0123456789abcdef0123456789abcdef01234567", .cli_sha256 = @as([64]u8, @splat('f')), .artifacts = artifacts };
 }
 
 const Authority = struct {
@@ -73,7 +73,7 @@ test "tag chain then release and four held assets publish one verified owner" {
     try std.testing.expectEqual(@as(u64, 88), value.release_id);
     try std.testing.expectEqualStrings("fedcba9876543210fedcba9876543210fedcba98", value.tag_ref_sha);
     try std.testing.expectEqual([_]u64{ 1000, 1001, 1002, 1003 }, value.artifact_ids);
-    try std.testing.expectEqual([_]u8{'d'} ** 64, value.artifact_sha256[3]);
+    try std.testing.expectEqual(@as([64]u8, @splat('d')), value.artifact_sha256[3]);
     try std.testing.expectEqual(@as(usize, 6), driver.calls);
     var copied = result;
     try std.testing.expect(copied.value() == null);
@@ -103,10 +103,10 @@ test "verified release seal rejects otherwise-valid field forgery and mutation" 
         .tag_ref_sha = "fedcba9876543210fedcba9876543210fedcba98".*,
         .artifact_ids = .{ 1000, 1001, 1002, 1003 },
         .artifact_sha256 = .{
-            [_]u8{'a'} ** 64,
-            [_]u8{'b'} ** 64,
-            [_]u8{'c'} ** 64,
-            [_]u8{'d'} ** 64,
+            @as([64]u8, @splat('a')),
+            @as([64]u8, @splat('b')),
+            @as([64]u8, @splat('c')),
+            @as([64]u8, @splat('d')),
         },
     };
     @memcpy(forged.tag[0..forged.tag_len], "v1.2.3");

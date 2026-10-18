@@ -1,3 +1,5 @@
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const test_env = @import("test_env.zig"); // 테스트의 환경 변수 되돌리기(값 복사)
 const debug_fixtures = @import("app_session/debug_fixtures.zig");
@@ -654,7 +656,7 @@ fn testCR0bCurrentManagedPublication() !void {
     pool_owns_adapter = true;
     try std.testing.expect(host_pool.get(0xA001) == adapter);
     try std.testing.expectEqual(
-        @intFromEnum(maru.observability.incident_binding_contract.HostClass.current),
+        @backingInt(maru.observability.incident_binding_contract.HostClass.current),
         adapter.slot.logicalClientConst().incident_binding.host_class_raw,
     );
 }
@@ -2176,7 +2178,7 @@ pub const FrameSummary = extern struct {
     glyph_uv_ready: u32 = 0,
     glyph_raster_ready: u32 = 0,
     ended: u32 = 0,
-    last_event_kind: u32 = @intFromEnum(EventKind.none),
+    last_event_kind: u32 = @backingInt(EventKind.none),
     // 현재 retain된 Metal frame의 generation(u64를 u32로 truncate). host는 이 값이 그대로면
     // metalFrame() ABI를 부르지 않고 draw를 건너뛸 수 있다(idle tick 비용 절감). u32 wrap은
     // 사실상 발생하지 않고, 충돌해도 redraw 한 번 누락/추가일 뿐이라 무해하다.
@@ -2898,7 +2900,7 @@ const TermRuntime = struct {
 // `TermRuntimeBackend` 계약만으로 runtime을 다뤄야 하며, `*LivePtySession` 필드가 다시 생기면 이 seam이 무너진다
 // (docs/persistent-session-host.md §13 P2). 컴파일 타임 필드 검사라 회귀가 즉시 실패로 드러난다.
 test "P2-b: TermRuntime는 opaque handle을 들고 *LivePtySession을 직접 참조하지 않는다" {
-    inline for (@typeInfo(TermRuntime).@"struct".fields) |f| {
+    inline for (@import("type_info_fields").structFields(TermRuntime)) |f| {
         if (f.type == *app.LivePtySession) return error.TermRuntimeStillHoldsLivePtyPointer;
     }
     try std.testing.expect(@hasField(TermRuntime, "handle"));
@@ -3729,8 +3731,8 @@ var diag_last_digest_calls: u64 = 0;
 var diag_last_digest_bytes: u64 = 0;
 var diag_last_seals: u64 = 0;
 var diag_last_raw_digest_bytes: u64 = 0;
-var diag_site_last_calls = [_]u64{0} ** session_host.remote_runtime.RemoteRuntime.digest_site_count;
-var diag_site_last_bytes = [_]u64{0} ** session_host.remote_runtime.RemoteRuntime.digest_site_count;
+var diag_site_last_calls = @as([session_host.remote_runtime.RemoteRuntime.digest_site_count]u64, @splat(0));
+var diag_site_last_bytes = @as([session_host.remote_runtime.RemoteRuntime.digest_site_count]u64, @splat(0));
 
 var app_recovered_sessions_launch_attempted: bool = false;
 var app_recovered_session_windows: std.ArrayListUnmanaged(*AppSession) = .empty;
@@ -6188,7 +6190,7 @@ pub const AppSession = struct {
     // 그래서 매 tick paletteOverride()를 이 소유 버퍼로 복사하고 CellColors.palette가 여기를
     // 가리키게 한다(코어 alias 제거). 활성 1개 + split 비활성 pane용 리스트(루프 전 capacity 예약해
     // appendAssumeCapacity로 realloc 없이 → items 포인터 안정).
-    active_palette_copy: [256]?terminal.Rgb = .{null} ** 256,
+    active_palette_copy: [256]?terminal.Rgb = @splat(null),
     pane_palette_copies: std.ArrayList([256]?terminal.Rgb) = .empty,
     // ⌘G/⌘⇧G로 Find 오버레이가 **닫힌 채** 매치를 네비게이션 중인지. true면 오버레이가 닫혀 있어도 매치
     // 하이라이트(현재 매치만)와 출력 시 재검색을 유지한다(findNavigate가 켠다). 오버레이 열기(toggleFind)나
@@ -8024,7 +8026,7 @@ pub const AppSession = struct {
     // ledger가 먼저 byte/action 한도를 승인하고, fixed slot이 그 승인에 대응하는 owned payload를 보관한다.
     user_action_queue: session_host.user_action_queue.Queue = .{},
     user_actions: [session_host.user_action_queue.max_actions]?OwnedUserAction =
-        [_]?OwnedUserAction{null} ** session_host.user_action_queue.max_actions,
+        @as([session_host.user_action_queue.max_actions]?OwnedUserAction, @splat(null)),
     next_user_action_id: u64 = 1,
     /// 마지막 사용자 동작 실패의 진단 한 줄(`formatUserActionFailure`). 아래 `failUserAction` 은 테스트 빌드에서
     /// `std.log` 를 끄므로, E2E 가 「세션 정보를 동기화하지 못했다」로 실패하면 **아홉 사유 중 어느 것인지**가
@@ -8233,7 +8235,7 @@ pub const AppSession = struct {
     /// 할당은 유지된다. 소유는 AppSession 이고 deinit 이 cap 크기로 돌려준다.
     kitty_pixels_buf: []u8 = &.{},
     kitty_pixels_cap: usize = 0,
-    ft_collect_ns: [ft_collect_slots]i128 = .{0} ** ft_collect_slots,
+    ft_collect_ns: [ft_collect_slots]i128 = @splat(0),
     // 리더 청크 적용 통계(직전 tick 창) — pty_reader diag atomic 을 swap 으로 거둔 값.
     ft_hold_ns: u64 = 0,
     ft_hold_max_ns: u64 = 0,
@@ -8265,7 +8267,7 @@ pub const AppSession = struct {
     ft_win_sh_build_ns: i128 = 0,
     ft_win_sh_total_ns: i128 = 0,
     ft_kitty_gen: u32 = 0, // tick 시작 시점의 kitty transmit 세대 — 끝에서 달라졌으면 이 tick 안에 전송이 있었다
-    ft_collect_n: [ft_collect_slots]u32 = .{0} ** ft_collect_slots,
+    ft_collect_n: [ft_collect_slots]u32 = @splat(0),
     ft_sum_place: i128 = 0,
     ft_win_img_bytes: usize = 0, // 이 1초 창에 GPU 로 올린 이미지 픽셀 바이트(planImageUploads 합) — 이미지가 실제로 흐르는지의 양성 신호
     ft_win_img_count: u32 = 0,
@@ -8570,7 +8572,7 @@ pub const AppSession = struct {
         var candidate = dir;
         while (true) {
             var probe: [std.fs.max_path_bytes]u8 = undefined;
-            const dot_git = std.fmt.bufPrintZ(&probe, "{s}/.git", .{candidate}) catch return null;
+            const dot_git = std.fmt.bufPrintSentinel(&probe, "{s}/.git", .{candidate}, 0) catch return null;
             if (std.c.access(dot_git.ptr, @intCast(std.posix.F_OK)) == 0) {
                 if (candidate.len > buf.len) return null;
                 @memcpy(buf[0..candidate.len], candidate);
@@ -13925,8 +13927,8 @@ pub const AppSession = struct {
     /// 표시·순환의 기준 — theme.preset은 저장 필드가 아니라 색에서 derive(loader가 깐 색을 역으로 식별). hex는 대소문자
     /// 무시 비교(#FFFFFF==#ffffff — loader는 사용자 입력 대소문자를 보존하므로, 리뷰 #827).
     pub fn detectThemePreset(t: config_mod.theme.ThemeConfig) ?config_mod.theme.ThemePreset {
-        inline for (@typeInfo(config_mod.theme.ThemePreset).@"enum".fields) |ef| {
-            const p: config_mod.theme.ThemePreset = @enumFromInt(ef.value);
+        inline for (@import("type_info_fields").enumFields(config_mod.theme.ThemePreset)) |ef| {
+            const p: config_mod.theme.ThemePreset = @fromBackingInt(@intCast(ef.value));
             const pc = config_mod.theme.presetColors(p);
             if (std.ascii.eqlIgnoreCase(t.background, pc.background) and std.ascii.eqlIgnoreCase(t.foreground, pc.foreground) and
                 std.ascii.eqlIgnoreCase(t.cursor, pc.cursor) and std.ascii.eqlIgnoreCase(t.selection, pc.selection)) return p;
@@ -14670,9 +14672,9 @@ pub const AppSession = struct {
 
     /// `anyModalOverlayOpen` 에서 `except` 하나를 뺀 것(`null` 이면 같다). 집합은 같은 `modalInputRole` 에서 파생한다.
     pub fn modalOverlayOpenExcept(self: *const AppSession, comptime except: ?ChromeHostField) bool {
-        inline for (std.meta.fields(ChromeHostField)) |field| {
-            if (comptime except != null and @as(ChromeHostField, @enumFromInt(field.value)) == except.?) continue;
-            switch (comptime modalInputRole(@as(ChromeHostField, @enumFromInt(field.value)))) {
+        inline for (@import("type_info_fields").fields(ChromeHostField)) |field| {
+            if (comptime except != null and @as(ChromeHostField, @fromBackingInt(@intCast(field.value))) == except.?) continue;
+            switch (comptime modalInputRole(@as(ChromeHostField, @fromBackingInt(@intCast(field.value))))) {
                 .routes_text, .blocks_without_text => {
                     if (comptime std.mem.eql(u8, field.name, "find")) {
                         if (self.chrome_host.find.open and self.chrome_host.find.input_focused) return true;
@@ -14905,8 +14907,8 @@ pub const AppSession = struct {
         }.pred) orelse return .none;
         const obs = &loc.pane.terms.items[loc.term_index].rt.observation;
         if (obs.availability == .unavailable) return .none;
-        if (obs.mouse_tracking_mode > @intFromEnum(terminal.MouseTracking.any)) return .none; // 손상 방어(범위 밖)
-        return @enumFromInt(obs.mouse_tracking_mode);
+        if (obs.mouse_tracking_mode > @backingInt(terminal.MouseTracking.any)) return .none; // 손상 방어(범위 밖)
+        return @fromBackingInt(@intCast(obs.mouse_tracking_mode));
     }
 
     /// 버튼 없는 마우스 이동(hover)을 먼저 bounded SessionDock tree에, 이어 필요할 때만 mouse reporting으로 PTY에
@@ -19234,7 +19236,7 @@ pub const AppSession = struct {
         var bits: u8 = 0;
         const set = struct {
             fn on(b: *u8, enabled: bool, scope: terminal.LinkScope) void {
-                if (enabled) b.* |= @as(u8, 1) << @intCast(@intFromEnum(scope));
+                if (enabled) b.* |= @as(u8, 1) << @intCast(@backingInt(scope));
             }
         }.on;
         set(&bits, scopes.web, .web);
@@ -19763,9 +19765,9 @@ pub const AppSession = struct {
             const equiv: []const u8 = if (chord) |c| command_catalog.keyEquivalent(c, &equiv_scratch) else "";
             const modifiers: u32 = if (chord) |c| command_catalog.modifierMask(c) else 0;
 
-            const owned_display = try self.allocator.dupeZ(u8, display);
+            const owned_display = try self.allocator.dupeSentinel(u8, display, 0);
             errdefer self.allocator.free(owned_display);
-            const owned_equiv = try self.allocator.dupeZ(u8, equiv);
+            const owned_equiv = try self.allocator.dupeSentinel(u8, equiv, 0);
             errdefer self.allocator.free(owned_equiv);
             // 세 리스트 capacity를 먼저 확보한 뒤 한꺼번에 무오류 append한다. append 중간에 OOM이 나면 이미 리스트에 든
             // owned_display를 errdefer가 다시 free해 dangling/이중-free(다음 rebuild·deinit의 free 루프)가 되던 버그를
@@ -19971,7 +19973,7 @@ pub const AppSession = struct {
         // 여기서 한 곳에서 처리).
         if (!scale_changed and !size_changed and !backing_changed) {
             self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.resize);
+            self.last_summary.last_event_kind = @backingInt(EventKind.resize);
             return self.last_summary;
         }
         // backing/cell geometry가 바뀐 뒤 mouse-down snapshot을 재사용하지 않는다. dedup resize는 실제 기하가
@@ -19986,7 +19988,7 @@ pub const AppSession = struct {
         // 치명적 오류가 아니므로 무시하고 정상으로 닫는다(key와 같은 정책).
         if (self.ended_seen) {
             self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.resize);
+            self.last_summary.last_event_kind = @backingInt(EventKind.resize);
             return self.last_summary;
         }
         // backing 크기를 갱신하고(split leaf rect 계산의 입력) 활성 탭의 각 panel을 자기 leaf rect grid로
@@ -20000,7 +20002,7 @@ pub const AppSession = struct {
             self.last_resize_size = size;
             self.metal_dirty = true;
             self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.resize);
+            self.last_summary.last_event_kind = @backingInt(EventKind.resize);
             return self.last_summary;
         }
         try pane_ops.resizeActiveTabPanes(self);
@@ -20016,7 +20018,7 @@ pub const AppSession = struct {
         // grid가 reflow됐으므로 다음 tick이 Metal frame을 재투영하게 dirty로 표시한다.
         self.metal_dirty = true;
         self.writeSummaryFromState();
-        self.last_summary.last_event_kind = @intFromEnum(EventKind.resize);
+        self.last_summary.last_event_kind = @backingInt(EventKind.resize);
         return self.last_summary;
     }
 
@@ -20077,7 +20079,7 @@ pub const AppSession = struct {
         var anchor_y: f64 = 0;
         var anchored = false;
         for (status_bar_ops.statusBarTree(self).entries) |e| {
-            if (e.id != @intFromEnum(want_id)) continue;
+            if (e.id != @backingInt(want_id)) continue;
             anchor_x = e.rect.x;
             anchor_y = e.rect.y;
             anchored = true;
@@ -20268,7 +20270,7 @@ pub const AppSession = struct {
             if (existing) |perm|
                 file.setPermissions(io, perm) catch {}
             else if (executable)
-                file.setPermissions(io, @enumFromInt(0o755)) catch {};
+                file.setPermissions(io, @fromBackingInt(@intCast(0o755))) catch {};
             // rename만 영속되고 데이터가 비는 것(전원 차단)을 막는다.
             file.sync(io) catch {};
         }
@@ -21478,8 +21480,8 @@ pub const AppSession = struct {
         // (`endAllQuitInFlight` — 승인 frame 은 `quit_decision` 을 한 번 싣고 비운다).
         if (self.quit_decision == .accepted or self.endAllQuitInFlight()) {
             self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(EventKind.frame_tick);
-            self.last_summary.quit_decision = @intFromEnum(self.quit_decision);
+            self.last_summary.last_event_kind = @backingInt(EventKind.frame_tick);
+            self.last_summary.quit_decision = @backingInt(self.quit_decision);
             self.quit_decision = .none;
             self.last_summary.web_surfaces_present = if (web_ops.webSurfacesPresent(self)) 1 else 0;
             return self.last_summary;
@@ -21529,8 +21531,8 @@ pub const AppSession = struct {
             metal_frame.diag_plan_images = 0;
         }
         if (ft_on) {
-            self.ft_collect_ns = .{0} ** ft_collect_slots;
-            self.ft_collect_n = .{0} ** ft_collect_slots;
+            self.ft_collect_ns = @splat(0);
+            self.ft_collect_n = @splat(0);
         }
         const ft_start: i128 = if (ft_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
         var ft_pre: i128 = ft_start;
@@ -21575,10 +21577,10 @@ pub const AppSession = struct {
                 (self.metal_dirty or self.chrome_dirty))
                 self.projectDeferredRecoverySidebar();
             self.writeSummaryFromState();
-            self.last_summary.last_event_kind = @intFromEnum(
+            self.last_summary.last_event_kind = @backingInt(
                 if (self.ended_seen) EventKind.app_should_terminate else EventKind.frame_tick,
             );
-            self.last_summary.quit_decision = @intFromEnum(self.quit_decision);
+            self.last_summary.quit_decision = @backingInt(self.quit_decision);
             self.quit_decision = .none;
             self.last_summary.web_surfaces_present = if (web_ops.webSurfacesPresent(self)) 1 else 0;
             return self.last_summary;
@@ -21710,7 +21712,7 @@ pub const AppSession = struct {
         // 그 탭의 출력은 더 이상 전체 재투영을 일으키지 않는다. 상태바 에이전트 집계가 그 첫 사례다(아래
         // `last_agent_tally`). docs/performance-budget.md «안 보이는 탭 출력» 발견에 적었다.
         const output_redraw = outputRedrawFor(visible_tab_output_events, drain_summary.output_events);
-        self.output_redraw_counts[@intFromEnum(output_redraw)] +%= 1;
+        self.output_redraw_counts[@backingInt(output_redraw)] +%= 1;
         switch (output_redraw) {
             .none => {},
             .sidebar => self.chrome_dirty = true,
@@ -23087,12 +23089,12 @@ pub const AppSession = struct {
         }
         // 세션이 종료되면 host가 frame loop를 멈추고 우아하게 내려가도록 app_should_terminate를
         // 싣는다. ABI의 tick export는 이 ended를 SessionEnded status로 올려준다.
-        self.last_summary.last_event_kind = @intFromEnum(
+        self.last_summary.last_event_kind = @backingInt(
             if (self.ended_seen) EventKind.app_should_terminate else EventKind.frame_tick,
         );
         // Cmd+Q 종료 확인의 결정을 host로 한 번 전달하고 비운다(one-shot). writeSummaryFrom*가 매 tick
         // last_summary를 덮어쓰므로 여기 epilogue가 단일 출처 — 모든 tick 경로(render/tick/idle)를 거친다.
-        self.last_summary.quit_decision = @intFromEnum(self.quit_decision);
+        self.last_summary.quit_decision = @backingInt(self.quit_decision);
         self.quit_decision = .none;
         // 4e-5: 활성 탭 web Term 존재 신호(Swift drain 게이트용). 매 tick 활성 탭 트리에서 계산(유지 카운터 아님 —
         // 창 간 이동 드리프트 없음, collectWebSurfaces와 같은 활성-탭 범위). writeSummaryFromState가 이 필드를 안
@@ -23204,7 +23206,7 @@ pub const AppSession = struct {
     /// 「종료 및 세션 끝내기」가 모든 target 을 끝내 종료 승인을 게시했는가(그 뒤로 진행할 target 은 없다).
     fn endAllComplete(self: *const AppSession) bool {
         return is_macos and self.pending_app_quit_shutdown.lifecycle_raw ==
-            @intFromEnum(session_host.pending_app_quit_shutdown.Lifecycle.complete);
+            @backingInt(session_host.pending_app_quit_shutdown.Lifecycle.complete);
     }
 
     /// 종료 승인을 게시했고 앱이 그 종료를 진행 중인가 — 그동안 tick 은 Term 을 drain 하지 않는다. Swift 가 저장 안 한 파일로
@@ -23277,7 +23279,7 @@ pub const AppSession = struct {
             self.ended_seen = true;
         }
         self.writeSummaryFromState();
-        self.last_summary.last_event_kind = @intFromEnum(EventKind.close_requested);
+        self.last_summary.last_event_kind = @backingInt(EventKind.close_requested);
         return self.last_summary;
     }
 
@@ -23902,7 +23904,7 @@ pub const AppSession = struct {
         const ft_on = diag_gate.maruDebugEnabled();
         const ft_t0: i128 = if (ft_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
         defer if (ft_on) {
-            const slot = @intFromEnum(std.meta.activeTag(dest));
+            const slot = @backingInt(std.meta.activeTag(dest));
             if (slot < ft_collect_slots) {
                 self.ft_collect_ns[slot] += std.Io.Clock.awake.now(self.io).nanoseconds - ft_t0;
                 self.ft_collect_n[slot] += 1;
@@ -25767,9 +25769,9 @@ pub fn isExecutablePath(path: []const u8) bool {
     // 인 유효 경로도 슬래시 판정이 넘치지 않게. bufPrintZ는 안 맞으면 error(조용한 절단 없음)라 과길이는 catch로
     // false(폴백). 같은 버퍼를 두 번 재사용한다 — 첫 결과 z는 아래 access가 소비한 뒤에야 두 번째 bufPrintZ가 덮는다.
     var buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return false;
+    const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{path}, 0) catch return false;
     if (std.c.access(z.ptr, std.posix.X_OK) != 0) return false; // 없는 경로·실행권 없음
-    const dz = std.fmt.bufPrintZ(&buf, "{s}/", .{path}) catch return false;
+    const dz = std.fmt.bufPrintSentinel(&buf, "{s}/", .{path}, 0) catch return false;
     return std.c.access(dz.ptr, std.posix.F_OK) != 0; // 디렉터리면 성공 → false; 정규 파일이면 ENOTDIR → true
 }
 
@@ -25984,7 +25986,7 @@ test "provider files remain unchanged across AppSession.init when the statusline
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     session.deinit();
 
@@ -26045,7 +26047,7 @@ test "provider files remain unchanged across AppSession.init when the statusline
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     fallback_session.deinit();
 
@@ -26166,7 +26168,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     // Check while the app is alive: deinit removes this directory, so checking only
     // after shutdown cannot catch startup cleanup deleting the newly installed queue.
@@ -26190,7 +26192,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         defer second.deinit();
         const kept = try std.Io.Dir.cwd().readFileAlloc(io, event_path, a, .limited(4096));
@@ -26225,7 +26227,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         guarded.deinit();
         const events_dir = try std.fmt.allocPrint(a, "{s}/.cache/maru/agent-turn-events", .{home}); // 훅 로그는 HOME 만 본다(RA8)
@@ -26309,7 +26311,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         again.deinit();
         const twice = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(1 << 20));
@@ -26407,7 +26409,7 @@ test "HN1 hostname 은 한 프레임 안에서만 재사용하고 다음 프레�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const before_tick = hostname_frame_stamp;
@@ -26431,7 +26433,7 @@ test "원격 pane 은 로그 파일 없이도 훅 모드로 선다 — 채널이
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -26467,7 +26469,7 @@ test "원격 이벤트가 배지·알림을 로컬과 같은 자리에 쓴다 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_focused = false; // 전면 배너 억제가 끼어들지 않게
@@ -26519,7 +26521,7 @@ test "원격 채널을 tick 이 직접 드레인한다 — 반 줄로 끊겨 와
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_focused = false;
@@ -26618,7 +26620,7 @@ test "ssh 를 빠져나온 pane 은 채널을 놓는다 — 안 놓으면 소스
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -26664,7 +26666,7 @@ test "에이전트 설치가 되면 재시도 예산을 되돌린다 — 앞선 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -26686,11 +26688,11 @@ test "에이전트 설치가 되면 재시도 예산을 되돌린다 — 앞선 
     // 세운다(그 갈래는 굳히고 돌아간다). 예산은 그보다 **앞에서** 되돌아야 한다.
     const saved_home = std.c.getenv("HOME");
     var saved_buf: [1024]u8 = undefined;
-    const saved: ?[:0]const u8 = if (saved_home) |h| std.fmt.bufPrintZ(&saved_buf, "{s}", .{std.mem.span(h)}) catch null else null;
+    const saved: ?[:0]const u8 = if (saved_home) |h| std.fmt.bufPrintSentinel(&saved_buf, "{s}", .{std.mem.span(h)}, 0) catch null else null;
     defer {
         if (saved) |h| _ = setenv("HOME", h.ptr, 1) else _ = unsetenv("HOME");
     }
-    _ = setenv("HOME", "/tmp/" ++ ("h" ** 120), 1);
+    _ = setenv("HOME", "/tmp/" ++ (array_repeat.repeat("h", 120)), 1);
 
     const reply = "Welcome\n{\"maru-agent-hooks\":1,\"changed\":false}\n";
     try std.testing.expect(std.c.write(fds[1], reply.ptr, reply.len) > 0);
@@ -26721,7 +26723,7 @@ test "원격에 maru 가 없으면 축을 안 열고 사유를 남긴다 — 그
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -26778,7 +26780,7 @@ test "stdout 을 안 닫는 원격은 시한으로 끝낸다 — 안 그러면 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -26852,7 +26854,7 @@ test "설치 출력이 상한을 넘는 원격은 굳힌다 — 시한과 달리
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -26898,7 +26900,7 @@ test "AK2: `pollAgentKinds` 가 종류 전환에서 리셋을 **실제로 부른
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -26944,7 +26946,7 @@ test "AK1: 에이전트 종류가 바뀌면 지난 프로세스의 관측이 통
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const term = pane_ops.activePane(&session).activeTerm();
@@ -27005,7 +27007,7 @@ test "RF3: 원격 Term 에는 로컬 신원을 대신 끼우지 않는다" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27032,7 +27034,7 @@ test "RF3: 세울 수 없는 순간에도 원격 Term 이 들고 있던 nonce �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27063,7 +27065,7 @@ test "RF3: detached 가 뒤에 와도 앞의 «진짜» 미매칭을 덮지 않�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27087,7 +27089,7 @@ test "RF3: 재바인딩 로그는 상한에서 멈추고 셈만 이어간다" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27110,7 +27112,7 @@ test "RF3: detached 이벤트가 실제로 흘러도 orphan 을 말하지 않는
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27158,7 +27160,7 @@ test "RS1: 할당이 실패하면 제품 경로에서도 재시도로 간다 —
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27194,12 +27196,12 @@ test "RS1: 규격을 넘는 경로는 제품 경로에서도 굳는다 — 헬�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
     // 103 바이트 규격을 넘기려면 home 이 길면 된다(`<home>/.cache/maru/ctl-<hash>`).
-    const long_home = "/" ++ ("h" ** 200);
+    const long_home = "/" ++ (array_repeat.repeat("h", 200));
     const saved = test_env.Saved.save("HOME");
     _ = setenv("HOME", long_home, 1);
     defer saved.restore();
@@ -27234,7 +27236,7 @@ test "RS2: 예약이 없으면 설치를 다시 안 띄운다 — 매 tick ssh �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27275,7 +27277,7 @@ test "RS1: 규격을 넘는 경로는 재시도 예산을 쓰지 않는다" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27307,7 +27309,7 @@ test "RF3: 신원이 그대로면 nonce 를 갈아끼우지 않는다" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27337,7 +27339,7 @@ test "RF3: 굳어 있던 옛 nonce 는 지금 신원으로 갈아끼운다" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27373,7 +27375,7 @@ test "RA5: 침묵으로 죽은 채널은 되살리고, 제한 서버로 죽은 �
             .cols = 20,
             .rows = 5,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         defer session.deinit();
 
@@ -27420,7 +27422,7 @@ test "RA5: 침묵으로 죽은 채널은 되살리고, 제한 서버로 죽은 �
             .cols = 20,
             .rows = 5,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         defer session.deinit();
 
@@ -27458,7 +27460,7 @@ test "RA5: 스트리머가 새로 뜨면 비워야 할 것을 다 비운다" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27500,7 +27502,7 @@ test "RA5: 재접속하면 죽은 채널을 버린다 — 백오프가 성공해
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27527,7 +27529,7 @@ test "RA5: 다른 목적지의 채널은 안 건드린다" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27551,7 +27553,7 @@ test "RA5: 이미 hello 를 본 목적지에 뒤늦게 생긴 Term 은 죽은 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27586,7 +27588,7 @@ test "RA5: 아직 hello 전인 목적지에는 예전대로 기다리는 채널�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27661,7 +27663,7 @@ test "RF8: 이벤트를 하나도 못 본 분배에서는 orphan 을 말하지 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27702,7 +27704,7 @@ test "AK3: 훅이 provider 를 말하면 그때부터 훅이 이긴다 — 그 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27738,7 +27740,7 @@ test "RF7: 이벤트를 본 횟수를 센다 — 「비교가 안 일어난다�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27776,7 +27778,7 @@ test "원격 신선도: RF8 미매칭 짝은 분배마다 새로 쓴다 — 옛 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27848,7 +27850,7 @@ test "RF7: 채널이 관문 앞이면 이벤트를 아예 못 본다 — 그것�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27880,7 +27882,7 @@ test "RF6: 잘린 값이 「같아」 보이지 않게 원본 길이를 남긴�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27914,7 +27916,7 @@ test "RF5: 꼬리가 같은 짝을 우선 남긴다 — 엉뚱한 Term 이 덮�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27939,7 +27941,7 @@ test "RF5: 가까운 짝이 없으면 예전대로 마지막을 남긴다" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -27996,7 +27998,7 @@ test "RF2: 이벤트가 왔는데 아무 Term 도 안 가져가면 두 nonce 를
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -28036,7 +28038,7 @@ test "RF2: 주인을 찾으면 셈이 서고, 다시 끊기면 또 말할 수 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -28071,7 +28073,7 @@ test "RF1: 분배가 어느 조건에서 걸렸는지 센다 — 이벤트가 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -28118,7 +28120,7 @@ test "RF1: 같은 모양이 이어지면 다시 말하지 않는다" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -28139,7 +28141,7 @@ test "RF1: EOF 를 알리는 호출은 분배로 세지 않는다" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -28168,7 +28170,7 @@ test "원격 이벤트가 행을 «에이전트 행» 으로 바꾼다 — 상�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_focused = false;
@@ -28237,7 +28239,7 @@ test "훅 원격 프레임: tmux pane 둘은 슬롯 둘 — 배지는 하나라�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_focused = false;
@@ -28365,7 +28367,7 @@ test "훅 원격 프레임: pane 슬롯이 둘이면 사이드바에 pane 행이
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_focused = false;
@@ -28499,7 +28501,7 @@ test "훅 원격 프레임: 살아 있는 pane 목록이 오면 없는 슬롯이
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_focused = false;
@@ -28574,7 +28576,7 @@ test "훅 원격 프레임: 슬롯 상한에 밀린 pane 은 «+N pane 밀림» 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_focused = false;
@@ -28872,7 +28874,7 @@ test "훅 원격 프레임: 원격 Term 둘의 pane 행과 밀림 고지는 서�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_focused = false;
@@ -28971,7 +28973,7 @@ test "훅 원격 프레임: 턴 끝이 봉인과 스냅샷 요청까지 닿는�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_focused = false;
@@ -29052,7 +29054,7 @@ test "훅 원격 프레임: 실제 원격 로그를 통째로 재생해도 봉�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_focused = false;
@@ -29136,7 +29138,7 @@ test "훅 게이트를 끄면 원격 축도 접힌다 — 안 접으면 한 Term
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -29179,7 +29181,7 @@ test "아무것도 안 오는 원격 채널은 시한이 지나면 스스로 닫
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -29226,7 +29228,7 @@ test "원격 nonce 는 로컬 훅 이름과 같은 두 값에서 나온다 — �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -29293,7 +29295,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.loaded_config.config.notifications.osc = true; // OSC 게이트 명시(기본값 의존 안 함)
@@ -29666,7 +29668,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
     {
-        const long_path = "/tmp/ig/" ++ ("z" ** maru.session.agent_image_index.max_source_path_bytes) ++ ".jsonl";
+        const long_path = "/tmp/ig/" ++ (array_repeat.repeat("z", maru.session.agent_image_index.max_source_path_bytes)) ++ ".jsonl";
         const line = "claude\t{\"hook_event_name\":\"SessionStart\",\"transcript_path\":\"" ++ long_path ++ "\"}\n";
         try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = line });
     }
@@ -29720,7 +29722,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     term.agent_hook_cursor_inode = 0;
     try tmp.dir.writeFile(io, .{
         .sub_path = log_rel,
-        .data = "claude\t{\"hook_event_name\":\"Stop\",\"session_id\":\"" ++ ("x" ** 65) ++ "\"}\n",
+        .data = "claude\t{\"hook_event_name\":\"Stop\",\"session_id\":\"" ++ (array_repeat.repeat("x", 65)) ++ "\"}\n",
     });
     agent_ops.pollAgentHookEvents(&session, term, false);
     try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", term.hook.transcript.identity());
@@ -29776,7 +29778,7 @@ test "훅 캡처: PreToolUse 가 before 를 뜨고 Stop 이 봉인한다 (AT3)" 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.git_repo = try allocator.dupe(u8, root);
@@ -29862,7 +29864,7 @@ test "훅 턴 시각: 중단 뒤 새 프롬프트는 옛 턴의 시각을 물려
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -29916,7 +29918,7 @@ test "훅 캡처: 배치 안에서 다음 턴이 시작돼도 사본이 안 섞�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.git_repo = try allocator.dupe(u8, root);
@@ -29982,7 +29984,7 @@ test "턴 스냅샷: 배치 안에서 신원이 갈려도 끝난 턴은 옛 세�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -30026,7 +30028,7 @@ test "훅 캡처: 링에 실리기 전 요청 중인 사본을 sweep 이 지우�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -30067,7 +30069,7 @@ test "훅 캡처: 셸만 쓴 턴도 배선에서 봉인된다 (AT4)" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -30116,7 +30118,7 @@ test "훅 캡처: 셸 구간이 Pre 로 열리고 Post 로 닫히며 턴 끝이 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -30206,7 +30208,7 @@ test "훅 캡처: 셸 호출을 세고, backlog 에서는 안 센다 (AT4)" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.git_repo = try allocator.dupe(u8, root);
@@ -30320,7 +30322,7 @@ test "훅 캡처: 회전본의 Stop 이 진행 중 턴의 사본을 가져가지
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.git_repo = try allocator.dupe(u8, root);
@@ -30380,7 +30382,7 @@ test "훅 캡처: PostToolUse 의 bashEditDiff 가 셸 편집을 캡처에 싣�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.git_repo = try allocator.dupe(u8, root);
@@ -30460,7 +30462,7 @@ test "훅 캡처: Read 없이 Edit 한 파일은 폴링이 편집 뒤에 읽어�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.git_repo = try allocator.dupe(u8, root);
@@ -30544,7 +30546,7 @@ test "훅 캡처: 원격 Term 은 경로만 적고 읽지 않는다 — 봉인�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // **이 기계에는 저장소가 없다** — 원격 Term 의 캡처는 로컬 루트를 요구하면 안 된다(원격 pane 만 띄운 창이
@@ -30638,7 +30640,7 @@ test "훅 캡처: 실측 모양의 ndjson 한 턴이 파서를 지나 셸 구간
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const term = pane_ops.activePane(&session).activeTerm();
@@ -30735,7 +30737,7 @@ test "훅 캡처: 회전본의 Post 와 Stop 이 살아 있는 셸 구간을 닫
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -30785,7 +30787,7 @@ test "훅 캡처: 회전본의 도구 이벤트로는 before 를 뜨지 않는�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.git_repo = try allocator.dupe(u8, root);
@@ -30839,7 +30841,7 @@ test "훅 캡처: 경로의 JSON 이스케이프를 푼다 (AT3)" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.git_repo = try allocator.dupe(u8, root);
@@ -30885,7 +30887,7 @@ test "훅 캡처: Codex 패치의 상대경로를 루트 기준으로 세운다 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.git_repo = try allocator.dupe(u8, root);
@@ -30929,7 +30931,7 @@ test "훅 캡처: /clear 를 아홉 번 해도 캡처가 멈추지 않는다 (AT
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.git_repo = try allocator.dupe(u8, root);
@@ -30976,7 +30978,7 @@ test "훅 캡처: backlog 따라잡기 중에는 before 를 뜨지 않는다 (AT
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.git_repo = try allocator.dupe(u8, root);
@@ -31075,7 +31077,7 @@ test "hook mode fills state and conversation from the event log, and only then" 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -31521,7 +31523,7 @@ test "hook mode fills state and conversation from the event log, and only then" 
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
         term.hook.notice.clear();
-        const long_korean = "가" ** 300; // 900 바이트 — 알림 상한(512)과 대화 상한(512)을 둘 다 넘긴다
+        const long_korean = array_repeat.repeat("가", 300); // 900 바이트 — 알림 상한(512)과 대화 상한(512)을 둘 다 넘긴다
         try tmp.dir.writeFile(io, .{
             .sub_path = log_rel,
             .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"" ++ long_korean ++ "\"}\n" ++
@@ -31723,7 +31725,7 @@ test "turning the agent hooks gate off removes what we installed and nothing els
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         on.deinit();
         const installed_claude = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(1 << 20));
@@ -31747,7 +31749,7 @@ test "turning the agent hooks gate off removes what we installed and nothing els
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         off.deinit();
     }
@@ -31785,7 +31787,7 @@ test "turning the agent hooks gate off removes what we installed and nothing els
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         again.deinit();
         const twice = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(1 << 20));
@@ -31857,7 +31859,7 @@ test "agent hooks install into codex and record trust without touching existing 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     const producer = session.siblingMaruPath(a) orelse return error.TestUnexpectedResult;
     defer a.free(producer);
@@ -31944,7 +31946,7 @@ test "agent hooks install into codex and record trust without touching existing 
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         fresh_both.deinit();
         const made_hooks = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(1 << 20));
@@ -31970,7 +31972,7 @@ test "agent hooks install into codex and record trust without touching existing 
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         fresh_session.deinit();
         const created = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
@@ -32003,7 +32005,7 @@ test "agent hooks install into codex and record trust without touching existing 
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         refreshed.deinit();
 
@@ -32036,7 +32038,7 @@ test "agent hooks install into codex and record trust without touching existing 
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         again.deinit();
         const twice = try tmp.dir.readFileAlloc(io, "codex/config.toml", a, .limited(64 * 1024));
@@ -32098,7 +32100,7 @@ test "codex 신뢰 값이 낡으면 한 번만 고치고, 되돌아오면 알린
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         // 갓 설치한 자리는 어긋남이 아니다 — 여기서 세면 매 설치가 경고를 띄운다.
         try std.testing.expectEqual(@as(u32, 0), first.agent_hook_trust_stale);
@@ -32132,7 +32134,7 @@ test "codex 신뢰 값이 낡으면 한 번만 고치고, 되돌아오면 알린
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -32250,7 +32252,7 @@ test "codex 신뢰 값을 못 썼으면 «고쳤다» 고 말하지 않는다" {
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         first.deinit();
     }
@@ -32280,7 +32282,7 @@ test "codex 신뢰 값을 못 썼으면 «고쳤다» 고 말하지 않는다" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -32340,7 +32342,7 @@ test "agent hooks stay out of provider files while the gate is off" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     session.deinit();
 
@@ -32426,7 +32428,7 @@ test "statusline hook is removed on startup — the wrapped original comes back 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     session.deinit();
 
@@ -32498,7 +32500,7 @@ test "statusline removal leaves someone else's statusLine alone" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     session.deinit();
 
@@ -32523,14 +32525,14 @@ test "macOS app session config rejects unsafe fixed-width ABI input" {
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     }));
     try std.testing.expectError(error.InvalidConfig, normalizeConfig(.{
         .abi_version = abi_version,
         .cols = 0,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     }));
     try std.testing.expectError(error.InvalidConfig, normalizeConfig(.{
         .abi_version = abi_version,
@@ -32547,7 +32549,7 @@ test "macOS app session config defaults queue capacity without changing command 
         .cols = 80,
         .rows = 24,
         .queue_capacity = 0,
-        .command_kind = @intFromEnum(CommandKind.interactive_shell),
+        .command_kind = @backingInt(CommandKind.interactive_shell),
     });
     try std.testing.expectEqual(terminal.Size{ .cols = 80, .rows = 24 }, normalized.size);
     try std.testing.expectEqual(@as(usize, default_queue_capacity), normalized.queue_capacity);
@@ -32563,7 +32565,7 @@ test "macOS app session normalizeConfig carries chrome_minimal and minimal_tabs 
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
         .chrome_minimal = 0,
     });
     try std.testing.expectEqual(false, full.chrome_minimal);
@@ -32573,7 +32575,7 @@ test "macOS app session normalizeConfig carries chrome_minimal and minimal_tabs 
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.quick_interactive_shell),
+        .command_kind = @backingInt(CommandKind.quick_interactive_shell),
     });
     try std.testing.expect(quick.is_quick);
 
@@ -32582,7 +32584,7 @@ test "macOS app session normalizeConfig carries chrome_minimal and minimal_tabs 
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
         .chrome_minimal = 1,
         .minimal_tabs = 1,
     });
@@ -32604,7 +32606,7 @@ test "quickTerminalFrames/quickTerminalConfig: 설정 변경을 라이브로 반
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -32631,8 +32633,8 @@ test "quickTerminalFrames/quickTerminalConfig: 설정 변경을 라이브로 반
     session.loaded_config.config.quick_terminal.chrome = .minimal;
     const cfg = settings_ops.quickTerminalConfig(session);
     try std.testing.expectEqual(@as(u32, 0), cfg.auto_hide);
-    try std.testing.expectEqual(@as(u32, @intFromEnum(config_mod.theme.QuickTerminalChrome.minimal)), cfg.chrome);
-    try std.testing.expectEqual(@as(u32, @intFromEnum(config_mod.theme.QuickTerminalPosition.bottom)), cfg.position);
+    try std.testing.expectEqual(@as(u32, @backingInt(config_mod.theme.QuickTerminalChrome.minimal)), cfg.chrome);
+    try std.testing.expectEqual(@as(u32, @backingInt(config_mod.theme.QuickTerminalPosition.bottom)), cfg.position);
 }
 
 // gridFromBacking·pointInRect·paneDropZone·halfRect 단위 test는 session/layout_math.zig로 이동(b1, 순수 기하).
@@ -32806,7 +32808,7 @@ test "projectRows: group_start가 group_header row를 삽입하고 카드는 dep
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -32844,7 +32846,7 @@ test "SG8a: projectRowsFrom(identity)가 recomputeVisibleTabs와 byte-identical 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0, t1, t2, t3]
@@ -32911,7 +32913,7 @@ test "SG8a: projectRowsFrom가 order 순열을 존중한다(SG8b 프리뷰 토�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try tab_ops.newTab(session); // [t0, t1] — 둘 다 최상위 카드(그룹 없음)
@@ -32943,7 +32945,7 @@ test "GP1: pin-region 경계가 7개 subtree-스캔을 리전에서 멈춘다(�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -33013,7 +33015,7 @@ test "SR1: top_level이 7 파생 경계에서 최상위 복귀 서브파티션�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -33096,7 +33098,7 @@ test "SR2(a·c·e): normalize top_level suffix-exclusion — pin-경계 꼬리 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -33147,7 +33149,7 @@ test "SR2(b): normalize/align 샌드위치 desync 흡수 유지(같은 리전 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -33184,7 +33186,7 @@ test "SR2(d): top_level 0개 byte-identical — suffix-exclusion 꼬리 배제·
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -33219,7 +33221,7 @@ test "CR#1: inheritGroupMarker leaf-only — 단일 카드 그룹 마커 닫기 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
@@ -33251,7 +33253,7 @@ test "CR#2: top카드 제거/이동이 경계를 다음 sticky follower에 재�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -33276,7 +33278,7 @@ test "CR#2: top카드 제거/이동이 경계를 다음 sticky follower에 재�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer s2.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(s2); // [t0..t3]
@@ -33306,7 +33308,7 @@ test "CR#2(tab_ops.togglePin): top_level 카드 pin이 경계를 follower에 재
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -33340,7 +33342,7 @@ test "CR#4: removeFromGroup은 그룹 뒤 top카드에 no-op(tabIsInGroup 가드
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
@@ -33369,7 +33371,7 @@ test "CR#5: sidebarGroupDropBoundary run_hi가 top_level서 정지 — 두 인�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -33395,7 +33397,7 @@ test "code-review #6: accent 색 top_level 경계 리셋 — 색 그룹 뒤 top�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -33440,7 +33442,7 @@ test "SR3(a): createGroup 선택 탭만 그룹 — 마커 뒤 첫 탭 top_level 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -33482,7 +33484,7 @@ test "SR3(b): createGroup top_level write 엣지 — 다음 마커·리스트 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -33504,7 +33506,7 @@ test "SR3(b): createGroup top_level write 엣지 — 다음 마커·리스트 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer s2.deinit();
     _ = try tab_ops.newTab(s2); // [u0, u1]
@@ -33521,7 +33523,7 @@ test "SR3(b): createGroup top_level write 엣지 — 다음 마커·리스트 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer s3.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(s3); // [p0,p1,c0,c1]
@@ -33540,7 +33542,7 @@ test "SR3(b): createGroup top_level write 엣지 — 다음 마커·리스트 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer s4.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(s4); // [w0..w3]
@@ -33562,7 +33564,7 @@ test "SR3(c): promote-in-place — 제자리 top_level·위치·pin 불변(remov
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -33596,7 +33598,7 @@ test "SR3(c): promote-in-place — 제자리 top_level·위치·pin 불변(remov
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer s2.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(s2); // [t0..t3]
@@ -33620,7 +33622,7 @@ test "SR3(d): beginGroupForTab inline depth 리셋 — top_level 뒤 새 그룹�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -33647,7 +33649,7 @@ test "SR3(e): createGroupAbsorb 다중 멤버 byte-identical 재현(회귀 0) + 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
@@ -33667,7 +33669,7 @@ test "SR3(e): createGroupAbsorb 다중 멤버 byte-identical 재현(회귀 0) + 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer s2.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(s2); // [t0..t2]
@@ -33690,7 +33692,7 @@ test "GP2: normalizePinnedFromGroups가 멤버 pinned를 마커 기준 canonical
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
@@ -33732,7 +33734,7 @@ test "GP2: 복원 순서 — 혼합 파일(멤버 pinned=1·마커=0)을 normali
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
@@ -33770,7 +33772,7 @@ test "GP2: inheritGroupMarker pinned 승계 — 고정 그룹 마커 카드 clos
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
@@ -33802,7 +33804,7 @@ test "GP2: 드래그 중 불변 — sidebar_drag_preview!=null이면 normalizePi
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
@@ -33839,7 +33841,7 @@ test "GP3(a): tension 해소 — normalize가 고정그룹 뒤 비고정 top카�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -33877,7 +33879,7 @@ test "GP3(b)/GL2: 카드 pin 라우팅 — 마커 카드=그룹째 고정·비�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
@@ -33934,7 +33936,7 @@ test "GP3(c): toggleGroupPin — 그룹 통째 고정→프리픽스 끝 이동�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -33974,7 +33976,7 @@ test "GP3(c2): toggleGroupPin unpin — 다른 고정 그룹 앞의 그룹을 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -34012,7 +34014,7 @@ test "ungroup-pin: 고정 그룹 ungroup — 그룹째 고정이 멤버에 인�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
@@ -34060,7 +34062,7 @@ test "ungroup-pin(d): 다른 고정 그룹 앞의 고정 그룹 ungroup — 프�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -34099,7 +34101,7 @@ test "ungroup-pin(nested): 고정 중첩 subgroup ungroup — 멤버가 부모 p
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -34138,7 +34140,7 @@ test "ungroup-pin(top-jump): 중첩 subgroup ungroup이 무관 고정 top카드�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -34176,7 +34178,7 @@ test "GP3(d): clampGroupMoveToRegion — 그룹 드래그 plan을 리전 경계�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..5) |_| _ = try tab_ops.newTab(session); // [t0..t5]
@@ -34211,7 +34213,7 @@ test "GP3(e): removeFromGroup 고정 멤버 — unpin 선행 후 비고정 top�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
@@ -34248,7 +34250,7 @@ test "GP4(a): pin_derived·sidebarRowShowsPin — 멤버 📌 억제·헤더 인
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -34307,7 +34309,7 @@ test "GP4(b): assert 확장 tab_ops.pinBoundariesAlignGroups — canonical 정�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -34343,7 +34345,7 @@ test "그룹핀 리뷰 #1: 잃은 mouse-up 뒤 카드 재-arm이 stale 프리뷰
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -34399,7 +34401,7 @@ test "그룹핀 리뷰 #2: beginGroupForTab depth가 pin-region-aware — 고정
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -34428,7 +34430,7 @@ test "그룹핀 리뷰 #3: toggleGroupPin이 중첩 subgroup에서 top-level로 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -34466,7 +34468,7 @@ test "그룹핀 리뷰 #4: inheritGroupMarker same-region 가드 — 단일 고�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try tab_ops.newTab(session); // [t0, t1]
@@ -34496,7 +34498,7 @@ test "그룹핀 리뷰 #5: newWorkspaceHighlightSlot이 비고정 리전 첫 마
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -34528,7 +34530,7 @@ test "그룹핀 리뷰 #6: accent 막대 current_group_color가 핀 경계에서
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -34571,7 +34573,7 @@ test "그룹핀 리뷰 #7: 드래그 중 sidebarMaxScroll이 preview_rows(더 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -34616,7 +34618,7 @@ test "그룹핀 리뷰 #8: 그룹 헤더 드래그 시작이 hovered_slot을 클
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -34669,7 +34671,7 @@ test "그룹핀 리뷰 #9: 그룹 먼저 고정 → 독립 top카드 개별 고�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -34846,7 +34848,7 @@ test "SR4(a): 카드를 그룹 뒤 top카드 옆(gap)으로 드래그 → top_le
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -34914,7 +34916,7 @@ test "SR4(b): 카드를 그룹 안(멤버 카드)으로 드래그 → top_level=
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -34962,7 +34964,7 @@ test "SR4(c): 프리뷰=확정 등가 — 전이(그룹 밖/안)·no-op·none �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -34990,7 +34992,7 @@ test "SR4(d): 고정 리전 인터리빙 — 고정 top카드를 고정 그룹 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -35060,7 +35062,7 @@ test "SR4(e): VirtualLayout.top_level[] 가상화가 projectRowsCore 프리뷰 d
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -35119,7 +35121,7 @@ test "SR5(a): 빈 gap 첫 인터리브 — 마지막 멤버 아래 경계 드롭
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -35187,7 +35189,7 @@ test "SR5(b): 접힌 그룹 헤더 아래 경계 gap drop + skip 엣지(펼친 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -35255,7 +35257,7 @@ test "SR5(c): promote 마커 숨김 — leaf 멤버=여기서 최상위로 분�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
@@ -35296,7 +35298,7 @@ test "SR5(d): pin × local_pinned × top_level 3축 공존 — 고정 그룹 안
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -35358,7 +35360,7 @@ test "SR5(e): 중첩 안 top_level — subgroup 뒤 top카드는 depth 0(부모 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -35397,7 +35399,7 @@ test "SG8b: 카드 드래그 등가 — 넣기/빼기 + ghost 범위 + self.tabs
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0, t1, t2, t3]
@@ -35433,7 +35435,7 @@ test "SG8b: 핀 경계 카드 드롭 — clamp 일치(프리뷰가 핀 경계에
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0, t1, t2, t3]
@@ -35472,7 +35474,7 @@ test "SG8b: 그룹 통째 형제 이동 등가 (SG5-1, simulateDrop == tab_ops.m
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..5) |_| _ = try tab_ops.newTab(session); // [t0..t5] 6개
@@ -35505,7 +35507,7 @@ test "SG8b: 중첩 넣기 등가 (SG5-4, simulateDrop == tab_ops.moveGroupNestin
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..5) |_| _ = try tab_ops.newTab(session); // [t0..t5] 6개
@@ -35541,7 +35543,7 @@ test "SG8b: 형제 빼기 등가 — gap-clamp로 depth 얕아짐 (SG5-4 un-nest
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4] 5개
@@ -35574,7 +35576,7 @@ test "SG8b: none·자기 subtree 제자리 드롭 → identity + self.tabs 불�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0,t1,t2]
@@ -35630,7 +35632,7 @@ test "SG8c: 카드를 접힌 그룹에 드롭 → preview 고스트 존재(원�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0, t1, t2]
@@ -35692,7 +35694,7 @@ test "SG8c: 펼친 그룹 nest 프리뷰 → subtree 고스트 상대 depth(A=2�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..5) |_| _ = try tab_ops.newTab(session); // [t0..t5] 6개
@@ -35744,7 +35746,7 @@ test "SG8c: none plan 프리뷰 → preview_rows == 원본 rows·ghost range 비
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0,t1,t2]
@@ -35794,7 +35796,7 @@ test "code-review #6: 검색 중 접힌 그룹은 헤더도 펼침 표시(collap
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0, t1, t2]
@@ -35840,7 +35842,7 @@ test "SG3c: create_group·헤더 클릭 접기 토글·ungroup·closeTab 마커 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     maru.i18n.setLang(.ko);
@@ -35895,7 +35897,7 @@ test "code-review #1: 그룹 헤더 우클릭(context_menu_target=.group) 중 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0, t1, t2]
@@ -35929,7 +35931,7 @@ test "rename caret 폭은 방출자와 같은 cluster 단위다(NFD 이름에서
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -35959,7 +35961,7 @@ test "code-review #5: 그룹 rename 캐럿이 사이드바 indent_cols를 반영
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try tab_ops.newTab(session); // [t0, t1]
@@ -35995,7 +35997,7 @@ test "remove_from_group: 그룹 소속 카드→최상위(depth0·첫 그룹 앞
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     maru.i18n.setLang(.ko);
@@ -36055,7 +36057,7 @@ test "SG5-3: 2단계 중첩(A>B) — projectRows depth 0/1/2·헤더 depth·memb
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4] 5개
@@ -36103,7 +36105,7 @@ test "SG5-3: 다단계 접기 — 부모 A 접으면 자식 B와 그 카드 통�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3] 4개
@@ -36148,7 +36150,7 @@ test "SG5-3: ungroup 중첩 — 자식 ungroup은 부모로 재소속·부모 un
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -36185,7 +36187,7 @@ test "SG5-3: create_sibling_group(형제 같은 depth) vs create_group(중첩 de
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3] 4개
@@ -36245,7 +36247,7 @@ test "SG4: 카드 드래그 넣기/빼기 — drop row→탭 매핑 + 위치 파
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // 탭 4개: [t0, t1, t2, t3]
@@ -36344,7 +36346,7 @@ test "code-review #2: 접힌 marker-only 그룹에 아래 카드 드롭(from>m) 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0, t1, t2, t3]
@@ -36389,7 +36391,7 @@ test "code-review #3: pane grip을 그룹 헤더에 드롭 → 새 워크스페�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0, t1, t2], 활성=t2(마지막 생성)
@@ -36435,7 +36437,7 @@ test "드래그앤드롭 pane 라우팅: routeDropAtPoint가 떨어뜨린 pane�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // split은 backing이 잡혀야 의미 있다(termRect 입력) — resized 창을 흉내(위 split 테스트와 같은 규율).
@@ -36479,7 +36481,7 @@ test "드롭 라우팅: Term 탭 위 드롭은 **그 Term**까지 활성으로 (
         .cols = 60,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 900;
@@ -36540,7 +36542,7 @@ test "W6l①: 링크를 웹 탭 머리에 놓으면 그 탭에서, 웹 pane 의 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 900;
@@ -36637,7 +36639,7 @@ test "드롭 라우팅 거부: 오버레이/모달 중 + web pane은 refused —
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -36697,7 +36699,7 @@ test "비동기 paste 대상 고정: 확인 모달 중 pane을 옮겨도 확정 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -36749,7 +36751,7 @@ test "SG4/SG5-1: 두 그룹 사이 이동(펼친 헤더 from>M) + 마커 탭 카
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -36849,7 +36851,7 @@ test "GL1: tab_ops.stablePartitionSubtree — 로컬 pin 직접 멤버가 마커
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..5) |_| _ = try tab_ops.newTab(session); // [t0..t5] 6개
@@ -36929,7 +36931,7 @@ test "GL2(a): toggleLocalPin — 멤버가 마커 직후로 float·그룹 연속
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -36981,7 +36983,7 @@ test "GL2(c): 드래그 clamp — 로컬 pin 멤버가 subtree-로컬 프리픽�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -37042,7 +37044,7 @@ test "GL3(a): 렌더 📌 — 로컬 pin 멤버 sidebarRowShowsPin=true·비pin 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -37110,7 +37112,7 @@ test "GL3(a2): 공존 렌더 — 그룹째 고정 그룹 안 로컬 pin 멤버 =
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -37155,7 +37157,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     };
 
     // ── (1) 순서 + hit-test: 로컬 pin 멤버 카드가 마커 자기 카드보다 앞. 각 row.tab은 실제 tab index 그대로 ──
@@ -37326,7 +37328,7 @@ test "GL3(b1): 위생 ungroup — 로컬 pin 멤버가 그룹 해제로 top-leve
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
@@ -37350,7 +37352,7 @@ test "GL3(b2): 위생 removeFromGroup — 빠진 로컬 pin 멤버만 클리어�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
@@ -37378,7 +37380,7 @@ test "GL3(b3): 위생 드래그 out — commitSidebarDragPreview 스윕이 top-l
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // commit clamp가 로컬 pin **멤버**의 실제 그룹 밖 eject를 막으므로(§13.5, GL3(c)), 이 스윕은 top-level 전이한 카드의
@@ -37406,7 +37408,7 @@ test "GL3(b4): 위생 create group — 로컬 pin 멤버로 그룹 생성 시 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
@@ -37435,7 +37437,7 @@ test "GL3(c): 드래그 엣지 — 로컬 pin 멤버를 마커 자기 카드 위
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -37486,7 +37488,7 @@ test "GL4(a): 공존 keystone — 그룹째 고정이 로컬 pin 그룹을 전�
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..5) |_| _ = try tab_ops.newTab(session); // [t0..t5] 6개
@@ -37597,7 +37599,7 @@ test "GL4(b): 중첩 — 자식 subgroup 안 leaf 로컬 pin float(부모→자�
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..5) |_| _ = try tab_ops.newTab(session); // [t0..t5] 6개
@@ -37677,7 +37679,7 @@ test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     };
 
     // ── (1) 그룹 색 + 로컬 pin: setGroupColorForTab이 색만 얹고 float·local_pinned를 안 건드린다 ──
@@ -37855,7 +37857,7 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
     {
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         defer session.deinit();
         inline for (0..1) |_| _ = try tab_ops.newTab(session); // [t0,t1]
         const x = session.tabs.items[0];
@@ -37868,7 +37870,7 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
     {
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         defer session.deinit();
         inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
         tab_ops.createGroupAbsorbForTab(session, session.tabs.items[1]); // G=[t1,t2,t3], t0=최상위
@@ -37883,7 +37885,7 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
     {
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         defer session.deinit();
         inline for (0..1) |_| _ = try tab_ops.newTab(session); // [t0,t1]
         tab_ops.createGroupAbsorbForTab(session, session.tabs.items[0]); // G=[t0,t1]
@@ -37900,7 +37902,7 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
     {
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         defer session.deinit();
         inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
         tab_ops.createGroupAbsorbForTab(session, session.tabs.items[0]); // G=[t0,t1,t2]
@@ -37923,7 +37925,7 @@ test "pin매트릭스 #1(버그1 회귀): 최상위 카드 위치 고정 — 5 �
     {
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         defer session.deinit();
         inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0..t2]
         tab_ops.createGroupAbsorbForTab(session, session.tabs.items[1]); // G=[t1,t2], t0=최상위
@@ -37961,7 +37963,7 @@ test "pin매트릭스 #2(버그2 회귀): 그룹째 고정/해제 — 고정 멤
     {
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         defer session.deinit();
         inline for (0..2) |_| _ = try tab_ops.newTab(session);
         tab_ops.createGroupAbsorbForTab(session, session.tabs.items[0]); // G=[t0,t1,t2]
@@ -37981,7 +37983,7 @@ test "pin매트릭스 #2(버그2 회귀): 그룹째 고정/해제 — 고정 멤
     {
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         defer session.deinit();
         inline for (0..2) |_| _ = try tab_ops.newTab(session);
         tab_ops.createGroupAbsorbForTab(session, session.tabs.items[0]); // G=[t0,t1,t2]
@@ -38005,7 +38007,7 @@ test "pin매트릭스 #3(조합): 최상위 개별 pin + 그룹째 고정 + 멤�
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
-    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 12, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 12, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
     // t0=최상위 개별 pin 카드, A=[t1(마커), t2, t3] 그룹째 고정, t3=로컬 pin 멤버.
@@ -38048,7 +38050,7 @@ test "SG5-1: 그룹 통째 이동(tab_ops.moveGroupRange + sidebarGroupDropBound
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..5) |_| _ = try tab_ops.newTab(session); // [t0..t5] 6개
@@ -38182,7 +38184,7 @@ test "(A) 카드 드래그 실좌표: 고정 탭을 그룹 꼬리로 끌면 top_
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0,t1,t2] 고정 리전
@@ -38238,7 +38240,7 @@ test "(A) 카드 드래그 실좌표: 고정 탭을 그룹 꼬리로 끌면 top_
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer s2.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(s2);
@@ -38278,7 +38280,7 @@ test "SR-PIN1: 고정 탭을 그룹 한복판에 드롭 → 흡수 금지(전체
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3] 4개, 전부 고정 리전
@@ -38348,7 +38350,7 @@ test "SR-PIN2: 비고정 탭을 같은 그룹 한복판에 드롭 → 흡수 유
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3], 전부 **비고정**(기본)
@@ -38393,7 +38395,7 @@ test "SR-PIN3: 고정 그룹은 다른 그룹에 nest 흡수 금지(Cmd nest여�
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         defer session.deinit();
         inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -38427,7 +38429,7 @@ test "SR-PIN3: 고정 그룹은 다른 그룹에 nest 흡수 금지(Cmd nest여�
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         defer session.deinit();
         inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3] 전부 비고정
@@ -38460,7 +38462,7 @@ test "SR-PIN4: 고정 탭을 비고정 리전 위치로 드래그 → 고정 리
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0,t1,t2]
@@ -38503,7 +38505,7 @@ test "SR-PIN5: 프리뷰=확정 등가 — 고정 탭 그룹 한복판 drop plan
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -38531,7 +38533,7 @@ test "(3) 드래그 대상이 접힌 그룹이면 프리뷰=접힌 헤더만 (�
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         defer session.deinit();
         inline for (0..3) |_| _ = try tab_ops.newTab(session); // [t0..t3]
@@ -38570,7 +38572,7 @@ test "(3) 드래그 대상이 접힌 그룹이면 프리뷰=접힌 헤더만 (�
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         defer session.deinit();
         inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0,t1,t2]
@@ -38606,7 +38608,7 @@ test "SR4 그룹드래그(a): [탭X, 그룹A]에서 A를 X 앞으로 → [그룹
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // init 기본 탭 1개 + 2개 = [t0, t1, t2] 3개
@@ -38655,7 +38657,7 @@ test "SR4 그룹드래그(b): [그룹A, 탭X, 그룹B]에서 그룹이 X를 넘�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // init 기본 탭 1개 + 2개 = [t0, t1, t2] 3개
@@ -38701,7 +38703,7 @@ test "SR4 그룹드래그(d): 고정 리전 인터리빙 clamp — 고정 그룹
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4] 5개 사용
@@ -38749,7 +38751,7 @@ test "SG5-1: 헤더 클릭(접기 토글) vs 헤더 드래그(그룹 통째 이�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -38849,7 +38851,7 @@ test "SG5-4: 그룹을 다른 그룹 헤더에 드롭 → 중첩(depth+1) + subt
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..5) |_| _ = try tab_ops.newTab(session); // [t0..t5] 6개
@@ -38918,7 +38920,7 @@ test "SG5-4: 중첩 그룹을 최상위 카드에 드롭 → 빼기(depth 1) (ta
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4] 5개
@@ -38958,7 +38960,7 @@ test "SG5-4: 카드 드래그 — 중첩 자식 그룹 안(자식 depth)·최상
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..4) |_| _ = try tab_ops.newTab(session); // [t0..t4]
@@ -38995,7 +38997,7 @@ test "SG5-4/N2: 그룹 헤더를 다른 그룹 헤더에 Cmd(⌘) 드롭 → 중
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -39060,7 +39062,7 @@ fn makeTwoSiblingGroups(allocator: std.mem.Allocator) !*AppSession {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -39203,7 +39205,7 @@ test "P1: 고정 탭끼리 재정렬 — 둘 다 최상위 유지(enclosing null
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0,t1,t2]
@@ -39256,7 +39258,7 @@ test "P3: 그룹이 고정 탭 위로 못 감 — clampGroupMoveToRegion이 비�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0,t1,t2]
@@ -39278,7 +39280,7 @@ test "P4(음성): 고정 탭을 그룹 뒤로 드래그해도 그룹에 흡수 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..2) |_| _ = try tab_ops.newTab(session); // [t0,t1,t2]
@@ -39735,7 +39737,7 @@ test "사이드바 검색: 폴더도 브랜치와 같은 축으로 매칭한다(
     try std.testing.expect(leaf.len > 0);
     // 이름줄에 우연히 폴더명이 들어 있으면 이 테스트가 **폴더 축을 검증하지 못한다**(이름 매칭으로 통과한다).
     // 그때는 통과시키지 않고 판정 불가로 물러난다.
-    if (std.ascii.indexOfIgnoreCase(workspaceLabel(tab), leaf) != null) return error.SkipZigTest;
+    if (std.ascii.findIgnoreCase(workspaceLabel(tab), leaf) != null) return error.SkipZigTest;
 
     try std.testing.expect(tab_ops.tabMatchesSearch(session, tab, leaf));
     // 브랜치도 같은 cwd에서 파생되므로 함께 매칭된다(저장소 밖이면 판정할 것이 없다).
@@ -40680,7 +40682,7 @@ test "workspaceStatusLine: running=파형, blocked=입력 대기, idle=대기중
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     maru.i18n.setLang(.ko);
@@ -40748,7 +40750,7 @@ test "agentSummaryLine: running만 파형을 뺀 문구, 나머지 상태는 상
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const term = tab_ops.activeTab(session).activePane().activeTerm();
@@ -40842,7 +40844,7 @@ test "도크 뷰 스위처: 실제 hover 는 슬롯 위에서만 포인터를 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -40892,7 +40894,7 @@ test "agentDisplayVisible: 카드·탭바 안 보이면 false (재렌더 게이�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     tab_ops.recomputeVisibleTabs(session);
@@ -40928,7 +40930,7 @@ test "anyAgentRunning: 펼침+보이는 running=true, 접힘·필터아웃=false
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -40961,7 +40963,7 @@ test "advanceAgentSpinner: 출력 독립 + wall-clock 경과 기반 위상 진�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const term = session.tabs.items[0].activePane().activeTerm();
@@ -41015,7 +41017,7 @@ test "activateSurfaceById: surface.id로 (탭·split panel·가로탭)을 역조
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800; // split/resize가 의미 있으려면 backing 필요
@@ -41078,7 +41080,7 @@ test "pendingNotification: 비활성 pane/Term의 OSC 9 알림도 그 surface_id
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800; // split이 의미 있으려면 backing 필요
@@ -41149,7 +41151,7 @@ test "알림 히스토리: push 상한 ring + unread 증감 + markRead + formatR
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -41202,7 +41204,7 @@ test "acceptNotification: 목록 역순 매핑(0=최신) + 클릭 surface 전체
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -41232,7 +41234,7 @@ test "알림 액션: deleteNotification(역순) + markAllNotificationsRead + cle
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -41268,7 +41270,7 @@ test "markNotificationsReadBySurface: 배너 클릭→그 surface 안읽음 모�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -41409,7 +41411,7 @@ test "window padding insets only the cell grid, not chrome (termRect/paneBarRect
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // 결정적 padding(scale 1000 기본이라 appearance 8/4가 그대로 8/4px이지만 명시 고정).
@@ -41462,7 +41464,7 @@ test "asymmetric window padding insets paneTermRect by left/top and grid by left
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // 비대칭: 좌 10·우 20·상 4·하 8.
@@ -41499,7 +41501,7 @@ test "takeBell respects bell.audible; createTerm injects config scrollback" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -42007,7 +42009,7 @@ test "M0a: surface_id는 앱 전역 allocator에서 발급 — 두 창이 id를 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer s1.deinit();
 
@@ -42018,7 +42020,7 @@ test "M0a: surface_id는 앱 전역 allocator에서 발급 — 두 창이 id를 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer s2.deinit();
 
@@ -42048,7 +42050,7 @@ test "M3a: 앱 전역 live registry를 모든 창(AppSession)이 공유 — surf
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer s1.deinit();
 
@@ -42059,7 +42061,7 @@ test "M3a: 앱 전역 live registry를 모든 창(AppSession)이 공유 — surf
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer s2.deinit();
 
@@ -42103,7 +42105,7 @@ test "M3b: 앱-전역 SurfaceRuntime — 두 창이 한 라우팅 표 공유 + �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     // s1.deinit()은 아래에서 **명시** 호출한다(창 격리 검증: s1 close 후 s2가 살아 있는지).
 
@@ -42114,7 +42116,7 @@ test "M3b: 앱-전역 SurfaceRuntime — 두 창이 한 라우팅 표 공유 + �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer s2.deinit();
 
@@ -42206,7 +42208,7 @@ test "훅이 받는 이름과 GUI 가 읽는 이름이 같은 파일을 가리�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -42290,7 +42292,7 @@ test "부재 중 쌓인 로그는 상태만 세우고 알리지 않는다 — �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const term = pane_ops.activePane(&session).activeTerm();
@@ -42388,7 +42390,7 @@ test "in-process Term 은 host 칸을 쳐다보지 않는다 — 그 자식은 G
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const term = pane_ops.activePane(&session).activeTerm();
@@ -42441,24 +42443,24 @@ fn runE4d3SshControl(
     dest: []const u8,
     operation: enum { start, stop },
 ) !void {
-    const env_z = try allocator.dupeZ(u8, "env");
+    const env_z = try allocator.dupeSentinel(u8, "env", 0);
     defer allocator.free(env_z);
-    const ssh_z = try allocator.dupeZ(u8, "ssh");
+    const ssh_z = try allocator.dupeSentinel(u8, "ssh", 0);
     defer allocator.free(ssh_z);
-    const ctl_z = try allocator.dupeZ(u8, ctl);
+    const ctl_z = try allocator.dupeSentinel(u8, ctl, 0);
     defer allocator.free(ctl_z);
-    const dest_z = try allocator.dupeZ(u8, dest);
+    const dest_z = try allocator.dupeSentinel(u8, dest, 0);
     defer allocator.free(dest_z);
-    const flag_s = try allocator.dupeZ(u8, "-S");
+    const flag_s = try allocator.dupeSentinel(u8, "-S", 0);
     defer allocator.free(flag_s);
     const argv = switch (operation) {
         .start => blk: {
-            const flags = try allocator.dupeZ(u8, "-MNf");
+            const flags = try allocator.dupeSentinel(u8, "-MNf", 0);
             // fork 뒤까지 argv backing이 살아 있어야 한다. parent는 waitpid 뒤 해제한다.
             defer allocator.free(flags);
-            const batch = try allocator.dupeZ(u8, "BatchMode=yes");
+            const batch = try allocator.dupeSentinel(u8, "BatchMode=yes", 0);
             defer allocator.free(batch);
-            const option = try allocator.dupeZ(u8, "-o");
+            const option = try allocator.dupeSentinel(u8, "-o", 0);
             defer allocator.free(option);
             const args = [_:null]?[*:0]const u8{
                 env_z.ptr, ssh_z.ptr, flags.ptr, option.ptr, batch.ptr, flag_s.ptr, ctl_z.ptr, dest_z.ptr,
@@ -42466,11 +42468,11 @@ fn runE4d3SshControl(
             break :blk try runE4d3Child(&args);
         },
         .stop => blk: {
-            const quiet_z = try allocator.dupeZ(u8, "-q");
+            const quiet_z = try allocator.dupeSentinel(u8, "-q", 0);
             defer allocator.free(quiet_z);
-            const operation_z = try allocator.dupeZ(u8, "-O");
+            const operation_z = try allocator.dupeSentinel(u8, "-O", 0);
             defer allocator.free(operation_z);
-            const exit_z = try allocator.dupeZ(u8, "exit");
+            const exit_z = try allocator.dupeSentinel(u8, "exit", 0);
             defer allocator.free(exit_z);
             const args = [_:null]?[*:0]const u8{
                 env_z.ptr, ssh_z.ptr, quiet_z.ptr, flag_s.ptr, ctl_z.ptr, operation_z.ptr, exit_z.ptr, dest_z.ptr,
@@ -42549,7 +42551,7 @@ test "P3-e4d-3 actual host-backed file and image uploads reach original surface"
     var failure_stage: []const u8 = "fixture";
     errdefer std.debug.print("P3-e4d-3 failure stage={s}\n", .{failure_stage});
     var base_buf: [192]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(&base_buf, "/tmp/maru-e4d3-{d}", .{std.c.getpid()});
+    const base = try std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-e4d3-{d}", .{std.c.getpid()}, 0);
     try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(base.ptr, 0o700));
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
     var dir_buf: [256]u8 = undefined;
@@ -42600,7 +42602,7 @@ test "P3-e4d-3 actual host-backed file and image uploads reach original surface"
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -42698,7 +42700,7 @@ test "P3-e4d-3 actual host-backed file and image uploads reach original surface"
     failure_stage = "file-upload";
     const file_bytes = "P3-e4d-3-file-proof";
     var local_file_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const local_file = try std.fmt.bufPrintZ(&local_file_buf, "{s}/host-file-proof.bin", .{base});
+    const local_file = try std.fmt.bufPrintSentinel(&local_file_buf, "{s}/host-file-proof.bin", .{base}, 0);
     try writeE4d2aFixtureFile(local_file, file_bytes, 0o600);
     session.handleDroppedFiles(local_file[0 .. local_file.len + 1]);
     try std.testing.expectEqual(@as(usize, 1), session.user_action_queue.len);
@@ -42806,7 +42808,7 @@ test "P3-e4d-3 actual host-backed file and image uploads reach original surface"
     try std.testing.expectEqual(input_events_before_failure, session.total_terminal_input_events);
 
     var failure_file_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const failure_file = try std.fmt.bufPrintZ(&failure_file_buf, "{s}/host-file-failure.bin", .{base});
+    const failure_file = try std.fmt.bufPrintSentinel(&failure_file_buf, "{s}/host-file-failure.bin", .{base}, 0);
     try writeE4d2aFixtureFile(failure_file, failure_bytes, 0o600);
     session.handleDroppedFiles(failure_file[0 .. failure_file.len + 1]);
     var file_failure_visible = false;
@@ -42845,10 +42847,10 @@ fn e4d4SpawnDetachedRuntime(
     // PumpResult 종류별로 센다 — 실패했을 때 «무엇을 봤는지» 말하려고. 폭도 이름도 enum 에서
     // 끌어오므로, 종류가 늘어도 조용히 어긋나지 않는다.
     const Pump = @TypeOf(runtime).PumpResult;
-    var seen = [_]usize{0} ** @typeInfo(Pump).@"enum".fields.len;
+    var seen = @as([@import("type_info_fields").enumFields(Pump).len]usize, @splat(0));
     for (0..e4d_metadata_wait_ticks) |_| {
         const delta = try runtime.pumpDelta();
-        seen[@intFromEnum(delta)] += 1;
+        seen[@backingInt(delta)] += 1;
         // 결과 종류(`.metadata`)가 아니라 적용된 상태로 본다. 메타데이터가 OSC 에코의 화면 배치와 같은
         // 턴에 오면 `pumpDelta` 는 `.screen` 하나만 돌려준다 — 그 뒤로는 `.idle` 뿐이라 결과만 기다리면
         // 이미 적용된 dest 를 끝내 못 본다(부하에서 ~3 %, 실패 순간 클라이언트 revision 2·dest 일치를 실측).
@@ -42865,10 +42867,10 @@ fn e4d4SpawnDetachedRuntime(
                 e4d_metadata_wait_ticks * 20 / 1000,
                 dest,
                 runtime.appliedSshRemoteDest() orelse "(none)",
-                seen[@intFromEnum(Pump.idle)],
-                seen[@intFromEnum(Pump.event_pending)],
-                seen[@intFromEnum(Pump.screen)],
-                seen[@intFromEnum(Pump.ended)],
+                seen[@backingInt(Pump.idle)],
+                seen[@backingInt(Pump.event_pending)],
+                seen[@backingInt(Pump.screen)],
+                seen[@backingInt(Pump.ended)],
             },
         );
         return error.MetadataNotObserved;
@@ -43016,9 +43018,9 @@ test "P3-e4d-4 reconnected destinations and ControlMasters stay isolated" {
     defer if (ctl_a_live) runE4d3SshControl(allocator, ctl_a, dest_a, .stop) catch {};
     try runE4d3SshControl(allocator, ctl_b, dest_b, .start);
     defer runE4d3SshControl(allocator, ctl_b, dest_b, .stop) catch {};
-    const ctl_a_z = try allocator.dupeZ(u8, ctl_a);
+    const ctl_a_z = try allocator.dupeSentinel(u8, ctl_a, 0);
     defer allocator.free(ctl_a_z);
-    const ctl_b_z = try allocator.dupeZ(u8, ctl_b);
+    const ctl_b_z = try allocator.dupeSentinel(u8, ctl_b, 0);
     defer allocator.free(ctl_b_z);
     try std.testing.expectEqual(@as(c_int, 0), std.c.access(ctl_a_z.ptr, std.c.F_OK));
     try std.testing.expectEqual(@as(c_int, 0), std.c.access(ctl_b_z.ptr, std.c.F_OK));
@@ -43032,7 +43034,7 @@ test "P3-e4d-4 reconnected destinations and ControlMasters stay isolated" {
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     session.setPrimaryWindow(true);
     defer {
@@ -43056,12 +43058,12 @@ test "P3-e4d-4 reconnected destinations and ControlMasters stay isolated" {
     try std.testing.expectEqualStrings(dest_a, term_a.rt.observation.ssh_remote_dest.items);
 
     var scratch_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const scratch = try std.fmt.bufPrintZ(&scratch_buf, "/tmp/maru-e4d4-{d}", .{std.c.getpid()});
+    const scratch = try std.fmt.bufPrintSentinel(&scratch_buf, "/tmp/maru-e4d4-{d}", .{std.c.getpid()}, 0);
     try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(scratch.ptr, 0o700));
     defer std.Io.Dir.cwd().deleteTree(io, scratch) catch {};
     const bytes_a = "P3-e4d-4-A-first";
     var local_a_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const local_a = try std.fmt.bufPrintZ(&local_a_buf, "{s}/e4d4-a.bin", .{scratch});
+    const local_a = try std.fmt.bufPrintSentinel(&local_a_buf, "{s}/e4d4-a.bin", .{scratch}, 0);
     try writeE4d2aFixtureFile(local_a, bytes_a, 0o600);
     session.handleDroppedFiles(local_a[0 .. local_a.len + 1]);
     var remote_a_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -43088,7 +43090,7 @@ test "P3-e4d-4 reconnected destinations and ControlMasters stay isolated" {
 
     const bytes_b_after = "P3-e4d-4-B-after-A-stop";
     var local_b_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const local_b = try std.fmt.bufPrintZ(&local_b_buf, "{s}/e4d4-b-after.bin", .{scratch});
+    const local_b = try std.fmt.bufPrintSentinel(&local_b_buf, "{s}/e4d4-b-after.bin", .{scratch}, 0);
     try writeE4d2aFixtureFile(local_b, bytes_b_after, 0o600);
     try std.testing.expect(session.activateSurfaceById(surface_b));
     session.handleDroppedFiles(local_b[0 .. local_b.len + 1]);
@@ -43099,7 +43101,7 @@ test "P3-e4d-4 reconnected destinations and ControlMasters stay isolated" {
     const input_events_before_a_failure = session.total_terminal_input_events;
     const bytes_a_failure = "P3-e4d-4-A-must-fail";
     var local_a_failure_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const local_a_failure = try std.fmt.bufPrintZ(&local_a_failure_buf, "{s}/e4d4-a-failure.bin", .{scratch});
+    const local_a_failure = try std.fmt.bufPrintSentinel(&local_a_failure_buf, "{s}/e4d4-a-failure.bin", .{scratch}, 0);
     try writeE4d2aFixtureFile(local_a_failure, bytes_a_failure, 0o600);
     try std.testing.expect(session.activateSurfaceById(surface_a));
     session.handleDroppedFiles(local_a_failure[0 .. local_a_failure.len + 1]);
@@ -43155,28 +43157,28 @@ test "P3-e4d-2a actual foreground metadata reaches Git agent and SSH consumers" 
     };
 
     var base_buf: [128]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-e4d2a-{d}", .{std.c.getpid()}) catch
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-e4d2a-{d}", .{std.c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = std.c.mkdir(base.ptr, 0o700);
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
 
     var repo_buf: [192]u8 = undefined;
-    const repo = try std.fmt.bufPrintZ(&repo_buf, "{s}/repo", .{base});
+    const repo = try std.fmt.bufPrintSentinel(&repo_buf, "{s}/repo", .{base}, 0);
     try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(repo.ptr, 0o700));
     var git_buf: [224]u8 = undefined;
-    const git_dir = try std.fmt.bufPrintZ(&git_buf, "{s}/.git", .{repo});
+    const git_dir = try std.fmt.bufPrintSentinel(&git_buf, "{s}/.git", .{repo}, 0);
     try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(git_dir.ptr, 0o700));
     var head_buf: [256]u8 = undefined;
-    const head = try std.fmt.bufPrintZ(&head_buf, "{s}/HEAD", .{git_dir});
+    const head = try std.fmt.bufPrintSentinel(&head_buf, "{s}/HEAD", .{git_dir}, 0);
     try writeE4d2aFixtureFile(head, "ref: refs/heads/e4d-fixture\n", 0o600);
     var plain_buf: [192]u8 = undefined;
-    const plain = try std.fmt.bufPrintZ(&plain_buf, "{s}/plain", .{base});
+    const plain = try std.fmt.bufPrintSentinel(&plain_buf, "{s}/plain", .{base}, 0);
     try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(plain.ptr, 0o700));
 
     var fifo_claude_buf: [192]u8 = undefined;
-    const fifo_claude = try std.fmt.bufPrintZ(&fifo_claude_buf, "{s}/claude.next", .{base});
+    const fifo_claude = try std.fmt.bufPrintSentinel(&fifo_claude_buf, "{s}/claude.next", .{base}, 0);
     var fifo_codex_buf: [192]u8 = undefined;
-    const fifo_codex = try std.fmt.bufPrintZ(&fifo_codex_buf, "{s}/codex.next", .{base});
+    const fifo_codex = try std.fmt.bufPrintSentinel(&fifo_codex_buf, "{s}/codex.next", .{base}, 0);
     try std.testing.expectEqual(@as(c_int, 0), TestC.mkfifo(fifo_claude.ptr, 0o600));
     try std.testing.expectEqual(@as(c_int, 0), TestC.mkfifo(fifo_codex.ptr, 0o600));
 
@@ -43220,7 +43222,7 @@ test "P3-e4d-2a actual foreground metadata reaches Git agent and SSH consumers" 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -43547,7 +43549,7 @@ test "P3-e4d-2b actual N-1 metadata consumers fail closed" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     app_keep_alive_after_quit = true;
@@ -43633,7 +43635,7 @@ test "AH7 통합: host-backed Term 의 배지와 대화 줄이 진짜 훅 커맨
         defer prev_home.restore();
 
         var base_buf: [96]u8 = undefined;
-        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-ah7-app-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-ah7-app-{d}", .{std.c.getpid()}, 0) catch return error.SkipZigTest;
         _ = std.c.mkdir(base.ptr, 0o700);
         var dir_buf: [160]u8 = undefined;
         const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
@@ -43673,7 +43675,7 @@ test "AH7 통합: host-backed Term 의 배지와 대화 줄이 진짜 훅 커맨
 
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         defer session.deinit();
 
         const client = session_host.host_connect.connectOrLaunch(allocator, "/unused-maru-helper", base, .{ .connect_attempts = 30, .connect_delay_ms = 10 }) orelse {
@@ -43756,7 +43758,7 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
 
         // 격리된 cache base + 소켓(사용자 실 host와 무관). host는 <base>/session-host/control.sock에 bind.
         var base_buf: [96]u8 = undefined;
-        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-e3-app-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-e3-app-{d}", .{std.c.getpid()}, 0) catch return error.SkipZigTest;
         _ = std.c.mkdir(base.ptr, 0o700); // host는 <base>/session-host만 mkdir하므로 base를 먼저 만든다.
         var dir_buf: [160]u8 = undefined;
         const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
@@ -43797,7 +43799,7 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
         // AppSession 구성(첫 탭 = in-process — 테스트 config는 keep-alive off라 원격 세팅 전 spawn된다).
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         defer session.deinit();
 
         // 격리된 host로 **앱 전역** 원격 backend를 세운다(ensureRemoteBackend와 같은 배선이되 base를 명시해 XDG env 의존 없이).
@@ -43853,7 +43855,7 @@ test "P3-e3 통합: keep-alive AppSession가 새 Term을 host-backed backend로 
         // 한 연결**을 공유한다. 이게 "단일 앱 + 여러 창/workspace가 serial daemon과 충돌 없이 동작"을 참으로 만든다.
         const s2 = try allocator.create(AppSession);
         defer allocator.destroy(s2);
-        try s2.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try s2.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         defer s2.deinit();
         // production과 같은 resolver를 타므로 Window A에서 이미 켠 앱 전역 policy가 B의 stale 빈 test config보다
         // 우선한다. 따라서 B의 **첫 Term부터** 같은 공유 connection/backend의 remote여야 한다.
@@ -43922,7 +43924,7 @@ test "R3 #3: host가 죽으면 createTerm이 in-process로 폴백한다(새 터�
         const io = std.Io.Threaded.global_single_threaded.io();
 
         var base_buf: [96]u8 = undefined;
-        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-r3-hd-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-r3-hd-{d}", .{std.c.getpid()}, 0) catch return error.SkipZigTest;
         _ = std.c.mkdir(base.ptr, 0o700);
         var dir_buf: [160]u8 = undefined;
         const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
@@ -43969,7 +43971,7 @@ test "R3 #3: host가 죽으면 createTerm이 in-process로 폴백한다(새 터�
         }
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         defer session.deinit();
         session.loaded_config.config.session.keep_alive_after_quit = true;
         app_keep_alive_after_quit = true;
@@ -44033,7 +44035,7 @@ test "R3 #3b: pool 모드에서 host가 죽으면 죽은 spawn host를 치우고
         const io = std.Io.Threaded.global_single_threaded.io();
 
         var base_buf: [96]u8 = undefined;
-        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-r3-hp-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-r3-hp-{d}", .{std.c.getpid()}, 0) catch return error.SkipZigTest;
         _ = std.c.mkdir(base.ptr, 0o700);
         var dir_buf: [160]u8 = undefined;
         const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
@@ -44075,7 +44077,7 @@ test "R3 #3b: pool 모드에서 host가 죽으면 죽은 spawn host를 치우고
         defer app_keep_alive_after_quit = previous_keep_alive;
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         defer session.deinit();
         session.loaded_config.config.session.keep_alive_after_quit = true;
         app_keep_alive_after_quit = true;
@@ -44162,7 +44164,7 @@ test "keep-alive가 켜져도 host에 못 붙으면 분할이 그대로 열린�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -44321,8 +44323,8 @@ test "종료 placeholder: 제목·경로가 버퍼를 넘겨도 ⏎ 힌트가 �
     defer session.deinit();
 
     // 고정 버퍼(768B)를 확실히 넘기는 길이 — 한글 제목 480B + 깊은 경로 598B.
-    const long_title = "한글제목" ** 40;
-    const long_cwd = "/very/deep/project/path" ** 26;
+    const long_title = array_repeat.repeat("한글제목", 40);
+    const long_cwd = array_repeat.repeat("/very/deep/project/path", 26);
     const tomb = try pane_ops.createEndedPlaceholderTerm(session, long_title, long_cwd, "/bin/zsh", .{ .cols = 80, .rows = 24 }, "", "");
     try pane_ops.activePane(session).terms.append(a, tomb);
 
@@ -44413,7 +44415,7 @@ test "종료 placeholder 복원: runtime 없는 Term만 묘비가 되고 탭·sp
     const a = std.testing.allocator;
 
     var xdg_buf: [64]u8 = undefined;
-    const xdg = std.fmt.bufPrintZ(&xdg_buf, "/tmp/maru-tomb-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+    const xdg = std.fmt.bufPrintSentinel(&xdg_buf, "/tmp/maru-tomb-{d}", .{std.c.getpid()}, 0) catch return error.SkipZigTest;
     _ = std.c.mkdir(xdg.ptr, 0o700);
     defer _ = std.c.rmdir(xdg.ptr); // 이 경로 아래엔 아무것도 안 만든다(복원은 조회만 한다) — 빈 디렉터리 정리.
     // 이전 값 보존(고정 버퍼 — defer에서 할당하지 않으려고). 다른 테스트의 캐시 경로를 오염시키지 않는다.
@@ -44651,7 +44653,7 @@ const RebootRestoreFixture = struct {
     prev_boot: []const u8 = "",
 
     fn enter(f: *RebootRestoreFixture, boot_now: []const u8) !void {
-        const xdg = std.fmt.bufPrintZ(&f.xdg_buf, "/tmp/maru-rb1-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        const xdg = std.fmt.bufPrintSentinel(&f.xdg_buf, "/tmp/maru-rb1-{d}", .{std.c.getpid()}, 0) catch return error.SkipZigTest;
         _ = std.c.mkdir(xdg.ptr, 0o700);
         if (std.c.getenv("XDG_CACHE_HOME")) |p| {
             const v = std.mem.span(p);
@@ -44698,9 +44700,9 @@ const RebootRestoreFixture = struct {
         {
             var mbuf: [96]u8 = undefined;
             const xdg: [*:0]const u8 = @ptrCast(&f.xdg_buf);
-            if (std.fmt.bufPrintZ(&mbuf, "{s}/maru/reboot-revived", .{std.mem.span(xdg)})) |m| {
+            if (std.fmt.bufPrintSentinel(&mbuf, "{s}/maru/reboot-revived", .{std.mem.span(xdg)}, 0)) |m| {
                 _ = std.c.unlink(m.ptr);
-                if (std.fmt.bufPrintZ(&mbuf, "{s}/maru", .{std.mem.span(xdg)})) |d| _ = std.c.rmdir(d.ptr) else |_| {}
+                if (std.fmt.bufPrintSentinel(&mbuf, "{s}/maru", .{std.mem.span(xdg)}, 0)) |d| _ = std.c.rmdir(d.ptr) else |_| {}
             } else |_| {}
         }
         workspace_ops.test_boot_session = f.prev_boot;
@@ -45022,7 +45024,7 @@ test "RB2-8 재부팅 부활 요청: 대화 파일을 id 로 찾아 기록된 �
         var big: std.ArrayList(u8) = .empty;
         defer big.deinit(a);
         try big.appendSlice(a, "{\"sessionId\":\"" ++ rb2_claude_big_id ++ "\",\"cwd\":\"/tmp\",\"type\":\"user\",\"permissionMode\":\"plan\",\"message\":{\"role\":\"user\",\"text\":\"a\"}}\n");
-        const filler = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"" ++ ("x" ** 1000) ++ "\"}}\n";
+        const filler = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"" ++ (array_repeat.repeat("x", 1000)) ++ "\"}}\n";
         for (0..2200) |_| try big.appendSlice(a, filler);
         try tmp.dir.writeFile(io, .{ .sub_path = "claude/projects/-weird_Dir-x1y2/" ++ rb2_claude_big_id ++ ".jsonl", .data = big.items });
     }
@@ -45035,13 +45037,13 @@ test "RB2-8 재부팅 부활 요청: 대화 파일을 id 로 찾아 기록된 �
     try tmp.dir.createDirPath(io, "home");
 
     var zbuf: [std.fs.max_path_bytes]u8 = undefined;
-    var claude_env = try Rb2EnvGuard.set("CLAUDE_CONFIG_DIR", try std.fmt.bufPrintZ(&zbuf, "{s}/claude", .{root}));
+    var claude_env = try Rb2EnvGuard.set("CLAUDE_CONFIG_DIR", try std.fmt.bufPrintSentinel(&zbuf, "{s}/claude", .{root}, 0));
     defer claude_env.restore();
     var codex_zbuf: [std.fs.max_path_bytes]u8 = undefined;
-    var codex_env = try Rb2EnvGuard.set("CODEX_HOME", try std.fmt.bufPrintZ(&codex_zbuf, "{s}/codexhome", .{root}));
+    var codex_env = try Rb2EnvGuard.set("CODEX_HOME", try std.fmt.bufPrintSentinel(&codex_zbuf, "{s}/codexhome", .{root}, 0));
     defer codex_env.restore();
     var home_zbuf: [std.fs.max_path_bytes]u8 = undefined;
-    var home_env = try Rb2EnvGuard.set("HOME", try std.fmt.bufPrintZ(&home_zbuf, "{s}/home", .{root}));
+    var home_env = try Rb2EnvGuard.set("HOME", try std.fmt.bufPrintSentinel(&home_zbuf, "{s}/home", .{root}, 0));
     defer home_env.restore();
 
     const session = try initSmokeSessionSized(a);
@@ -45124,7 +45126,7 @@ test "RB2-9 재부팅 증명 복원만 이어간다 — 수를 세어 알리고,
         .data = "{\"sessionId\":\"" ++ rb2_claude_id ++ "\",\"type\":\"user\",\"permissionMode\":\"plan\",\"message\":{\"role\":\"user\",\"text\":\"a\"}}\n",
     });
     var zbuf: [std.fs.max_path_bytes]u8 = undefined;
-    var claude_env = try Rb2EnvGuard.set("CLAUDE_CONFIG_DIR", try std.fmt.bufPrintZ(&zbuf, "{s}/claude", .{root}));
+    var claude_env = try Rb2EnvGuard.set("CLAUDE_CONFIG_DIR", try std.fmt.bufPrintSentinel(&zbuf, "{s}/claude", .{root}, 0));
     defer claude_env.restore();
     // 진짜 `claude` 를 띄우면 테스트가 계정 세션을 연다 — 도크 스모크의 가짜 provider 자리를 `/usr/bin/true` 로 둔다.
     var smoke_env = try Rb2EnvGuard.set("MARU_AGENT_SESSION_ARCHIVE_SMOKE", "1");
@@ -45289,7 +45291,7 @@ test "RB2-11 관측 경로(상태줄 파일)로 신원이 바뀌어도 checkpoin
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
     var zbuf: [std.fs.max_path_bytes]u8 = undefined;
-    var xdg_env = try Rb2EnvGuard.set("XDG_CACHE_HOME", try std.fmt.bufPrintZ(&zbuf, "{s}", .{root}));
+    var xdg_env = try Rb2EnvGuard.set("XDG_CACHE_HOME", try std.fmt.bufPrintSentinel(&zbuf, "{s}", .{root}, 0));
     defer xdg_env.restore();
 
     const saved_checkpoint = app_runtime.workspace_checkpoint;
@@ -45415,7 +45417,7 @@ test "RB2-17 작업 디렉터리 판정은 chdir 할 수 있는가다 — 검색
     try tmp.dir.createDirPath(io, "search-only");
     try tmp.dir.writeFile(io, .{ .sub_path = "plain-file", .data = "x" });
     var zbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_z = try std.fmt.bufPrintZ(&zbuf, "{s}/search-only", .{root});
+    const dir_z = try std.fmt.bufPrintSentinel(&zbuf, "{s}/search-only", .{root}, 0);
     try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(dir_z.ptr, 0o311));
     defer _ = std.c.chmod(dir_z.ptr, 0o755);
     var pbuf: [std.fs.max_path_bytes]u8 = undefined;
@@ -45568,7 +45570,7 @@ test "SB-1 사이드바 대화 줄은 대화 파일을 세션 id 로 찾는다 �
             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"reply one\"}]}}\n",
     });
     var zbuf: [std.fs.max_path_bytes]u8 = undefined;
-    var claude_env = try Rb2EnvGuard.set("CLAUDE_CONFIG_DIR", try std.fmt.bufPrintZ(&zbuf, "{s}/claude", .{root}));
+    var claude_env = try Rb2EnvGuard.set("CLAUDE_CONFIG_DIR", try std.fmt.bufPrintSentinel(&zbuf, "{s}/claude", .{root}, 0));
     defer claude_env.restore();
 
     const session = try initSmokeSessionSized(a);
@@ -45864,7 +45866,7 @@ test "P3-e3-5 재접속: restore_runtime_id로 createTerm이 기존 host runtime
         const io = std.Io.Threaded.global_single_threaded.io();
 
         var base_buf: [96]u8 = undefined;
-        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-e3-rc-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-e3-rc-{d}", .{std.c.getpid()}, 0) catch return error.SkipZigTest;
         _ = std.c.mkdir(base.ptr, 0o700);
         var dir_buf: [160]u8 = undefined;
         const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
@@ -45903,7 +45905,7 @@ test "P3-e3-5 재접속: restore_runtime_id로 createTerm이 기존 host runtime
 
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         defer session.deinit();
         session.loaded_config.config.session.keep_alive_after_quit = true;
         app_keep_alive_after_quit = true;
@@ -45998,7 +46000,7 @@ test "P3-e3-6 app-quit: host-backed Term을 detach해 host runtime이 생존하�
         const io = std.Io.Threaded.global_single_threaded.io();
 
         var base_buf: [96]u8 = undefined;
-        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-e3-q-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-e3-q-{d}", .{std.c.getpid()}, 0) catch return error.SkipZigTest;
         _ = std.c.mkdir(base.ptr, 0o700);
         var dir_buf: [160]u8 = undefined;
         const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
@@ -46059,7 +46061,7 @@ test "P3-e3-6 app-quit: host-backed Term을 detach해 host runtime이 생존하�
 
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         const first = try appendTrackedRemoteTermForTest(session);
         try std.testing.expect(first.surface.remote != null); // 첫 탭이 host-backed(backend가 init 전에 세워짐)
         const rid = app_remote_backend.?.runtimeIdFor(first.rt.handle) orelse {
@@ -46108,12 +46110,12 @@ fn runC3B6DetachAppQuit(comptime verification: C3B6AppQuitVerification) !void {
         const io = std.Io.Threaded.global_single_threaded.io();
 
         var base_buf: [96]u8 = undefined;
-        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-r1-cl-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-r1-cl-{d}", .{std.c.getpid()}, 0) catch return error.SkipZigTest;
         _ = std.c.mkdir(base.ptr, 0o700);
         var dir_buf: [160]u8 = undefined;
         const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
         const fixture_host_id = (@as(u128, @intCast(std.c.getpid())) << 64) |
-            0xC3B6_1000 | @intFromEnum(verification);
+            0xC3B6_1000 | @backingInt(verification);
         session_host.short_endpoint.prepareCurrentUserNamespace() catch return error.SkipZigTest;
         var sock_buf: [128]u8 = undefined;
         const socket = session_host.short_endpoint.currentSocketPathIn(&sock_buf, fixture_host_id) catch
@@ -46160,7 +46162,7 @@ fn runC3B6DetachAppQuit(comptime verification: C3B6AppQuitVerification) !void {
 
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
 
         var client = try session_host.client.Client.connect(allocator, socket, .gui);
         const host_id = client.host_id;
@@ -46319,7 +46321,7 @@ test "① host-backed 스크롤은 observation 미가용(재접속 직후)에도
         const io = std.Io.Threaded.global_single_threaded.io();
 
         var base_buf: [96]u8 = undefined;
-        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-scr-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-scr-{d}", .{std.c.getpid()}, 0) catch return error.SkipZigTest;
         _ = std.c.mkdir(base.ptr, 0o700);
         var dir_buf: [160]u8 = undefined;
         const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
@@ -46377,7 +46379,7 @@ test "① host-backed 스크롤은 observation 미가용(재접속 직후)에도
 
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         defer session.deinit();
 
         const term = try appendTrackedRemoteTermForTest(session);
@@ -46500,7 +46502,7 @@ test "C3-3b6 AppSession은 app quit detach가 explicit terminate를 덮지 않�
         const io = std.Io.Threaded.global_single_threaded.io();
 
         var base_buf: [96]u8 = undefined;
-        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-p4-ea-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-p4-ea-{d}", .{std.c.getpid()}, 0) catch return error.SkipZigTest;
         _ = std.c.mkdir(base.ptr, 0o700);
         var dir_buf: [160]u8 = undefined;
         const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
@@ -46578,7 +46580,7 @@ test "C3-3b6 AppSession은 app quit detach가 explicit terminate를 덮지 않�
 
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         const first = try appendTrackedRemoteTermForTest(session);
         try std.testing.expect(first.surface.remote != null);
         const rid = app_remote_backend.?.runtimeIdFor(first.rt.handle) orelse {
@@ -46596,7 +46598,7 @@ test "C3-3b6 AppSession은 app quit detach가 explicit terminate를 덮지 않�
         // terminateLater owner가 exact manifest의 current admin terminate를 실행한 frame에서만 accepted가 host로 나간다.
         // 즉시 승인이나 topology 선파괴는 허용하지 않는다.
         const shutdown_frame = try session.tick();
-        try std.testing.expectEqual(@intFromEnum(QuitDecision.accepted), shutdown_frame.quit_decision);
+        try std.testing.expectEqual(@backingInt(QuitDecision.accepted), shutdown_frame.quit_decision);
         try std.testing.expect(app_quitting);
 
         // shutdown admin이 terminate를 끝낸 뒤에도 generation runtime.ended는 frame pump가 source-zero로
@@ -46750,7 +46752,7 @@ test "P4 keep-alive host 실패: notice pending이 사용자 notice로 표시되
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -46778,7 +46780,7 @@ test "U5 host upgrade 결과는 modal 뒤까지 보존하고 정확히 한 번 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -46817,7 +46819,7 @@ test "P4 §6.32: host-backed Term의 OSC 9/777 알림이 GUI 알림 경로로 su
         const io = std.Io.Threaded.global_single_threaded.io();
 
         var base_buf: [96]u8 = undefined;
-        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-p4-osc-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-p4-osc-{d}", .{std.c.getpid()}, 0) catch return error.SkipZigTest;
         _ = std.c.mkdir(base.ptr, 0o700);
         var dir_buf: [160]u8 = undefined;
         const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
@@ -46856,7 +46858,7 @@ test "P4 §6.32: host-backed Term의 OSC 9/777 알림이 GUI 알림 경로로 su
 
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
-        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
         defer session.deinit();
 
         // backend를 init **뒤**에 세워 첫 탭은 in-process로 두고(원격 Term은 아래 cat 하나만 — round-robin 단순화), cat을 host-backed로.
@@ -46940,7 +46942,7 @@ test "M3a: 번들 이전 후에도 reader의 &live_pty.reader·&surface.core 주
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -47016,7 +47018,7 @@ test "M3a: Term close가 registry 번들을 제거하고 남은 번들은 불변
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -47076,7 +47078,7 @@ test "dispatchBell: 배경(비활성) pane의 BEL도 잡는다 — Dock 배지/�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -47118,14 +47120,14 @@ test "SC8 프리셋을 고르면 구문 색 줄도 제거 예약된다 — 파�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
     settings_ops.persistThemePreset(session, .gruvbox_dark);
 
-    inline for (@typeInfo(config_mod.theme.SyntaxRole).@"enum".fields) |f| {
-        const key = comptime config_mod.theme.syntaxRoleKey(@enumFromInt(f.value));
+    inline for (@import("type_info_fields").enumFields(config_mod.theme.SyntaxRole)) |f| {
+        const key = comptime config_mod.theme.syntaxRoleKey(@fromBackingInt(@intCast(f.value)));
         var found = false;
         for (session.config_removed_keys.items) |k| {
             if (std.mem.eql(u8, k, key)) found = true;
@@ -47159,11 +47161,11 @@ test "SC5 follow-system 이 켜지면 구문 색 override 도 함께 무시되�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
-    const keyword = @intFromEnum(config_mod.theme.SyntaxRole.keyword);
+    const keyword = @backingInt(config_mod.theme.SyntaxRole.keyword);
     session.loaded_config.config.theme = config_mod.theme.presetColors(.maru);
     session.loaded_config.config.theme.syntax[keyword] = "#c678dd";
     session.loaded_config.config.theme_follow_system = true;
@@ -47189,7 +47191,7 @@ test "setSystemAppearance: follow-system on이면 light/dark 프리셋으로 교
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -47224,7 +47226,7 @@ test "follow-system 토글 ON 즉시 적용·OFF 사용자 테마 복귀 + 같�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -47263,7 +47265,7 @@ test "follow-system 중 preset-dark 변경은 라이브 재적용 + user_custom 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -47355,7 +47357,7 @@ fn initRenameCaretTestSession(allocator: std.mem.Allocator) !*AppSession {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     // headless init은 셀·사이드바 픽셀 메트릭이 0이라 renameCaretRect가 조기 null → 테스트용으로 채운다.
     session.cell_width_px = 8;
@@ -48002,7 +48004,7 @@ test "BLINK-E1 편집기 pane 에서도 커서가 깜빡인다 — 게이트가 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -48219,7 +48221,7 @@ test "configCursorShape: config↔terminal CursorShape 멤버 순서가 달라�
     session.appearance.cursor.shape = .underline;
     try std.testing.expectEqual(terminal.CursorShape.underline, settings_ops.configCursorShape(&session));
     // 숫자 재해석이었다면 bar(config 1)가 underline(terminal 1)로 갔을 것 — 그 경로를 명시적으로 배제한다.
-    try std.testing.expect(@intFromEnum(config_mod.theme.CursorShape.bar) != @intFromEnum(terminal.CursorShape.bar));
+    try std.testing.expect(@backingInt(config_mod.theme.CursorShape.bar) != @backingInt(terminal.CursorShape.bar));
 }
 
 test "cursorFadeMilliForPhase: 반주기 끝에서 대칭 램프(사라짐 1000→0·나타남 0→1000)·hold·페이드끔·clamp" {
@@ -48319,7 +48321,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
             .cols = 80,
             .rows = 24,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
             .width_px = 1600,
             .height_px = 900,
             .scale_milli = 1000,
@@ -48340,7 +48342,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
             .cols = 80,
             .rows = 24,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
             .width_px = 1920,
             .height_px = 1200,
             .scale_milli = 2000,
@@ -48359,7 +48361,7 @@ test "init: backing px가 주어지면 셸을 그 창 grid로 spawn(80×24 핸�
             .cols = 100,
             .rows = 30,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
             .width_px = 0,
             .height_px = 0,
             .scale_milli = 0,
@@ -48405,7 +48407,7 @@ test "placeAndDistribute: 멀티 페인 collect를 dest별로 분배 + collected
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -48480,7 +48482,7 @@ test "buildSidebarTitleFrame: 에이전트 심볼(✶/◆) prefix여도 프레�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // 에이전트 없음 → 정상 빌드(baseline).
@@ -48557,7 +48559,7 @@ test "headless ticks toggle the blink phase and bump the metal generation" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -48594,7 +48596,7 @@ test "context menu: workspace=Rename+Pin+배경 항목, accept가 pin 토글·�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const tab = tab_ops.activeTab(session);
@@ -48713,7 +48715,7 @@ test "group header context menu(SG5-2-header): 헤더 우클릭 = Rename+그룹 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try tab_ops.newTab(session);
@@ -48772,7 +48774,7 @@ test "sidebar group color(SG5-2): 그룹 색 → 헤더 밴드 tint·소속 카�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -48827,7 +48829,7 @@ test "right-click menu(F2-5): 터미널 컨텍스트 메뉴 복사/붙여넣기 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -48867,7 +48869,7 @@ test "이미지 채널 없음: 이미지가 빠지는 이유를 notice로 한 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -48936,7 +48938,7 @@ test "observer 강등: 입력이 안 되는 이유를 notice로 알리고 모달
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -48973,7 +48975,7 @@ test "OSC 52 상한 초과 거부: surfaceClipboardWriteRejected가 notice로 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -49012,7 +49014,7 @@ test "파일 저장 실패는 native notice로 표면화하고 close-save 중엔
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -49049,7 +49051,7 @@ test "OSC 52 read(F2-6): 정책 게이트(deny=무응답·allow=true) + base64 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -49104,7 +49106,7 @@ test "moveTab: 고정 탭은 고정 영역 안에서만, 비고정은 비고정 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // 4탭으로(앞 2개 고정, 뒤 2개 비고정). newTab은 끝에 추가.
@@ -49144,7 +49146,7 @@ test "tab_ops.togglePin: pin은 탭을 고정 영역 끝으로, unpin은 비고�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session);
@@ -49227,7 +49229,7 @@ test "tab_ops.togglePin: 경계 탭(from==to)도 토글 즉시 📌 라벨이 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000); // 사이드바 grid 확보(제목 프레임 빌드 가능)
@@ -49257,7 +49259,7 @@ test "사이드바 이름줄 선두에 활성 마커('*')가 붙는다 — 핀�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000); // 사이드바 grid 확보
@@ -49296,7 +49298,7 @@ test "applyWorkspaceWindow: 섞인 [P,u,P,u] 복원을 고정-prefix로 stable-p
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -49342,7 +49344,7 @@ test "사이드바 드래그: 비고정 탭을 위로 끌어도 고정 영역을
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session);
@@ -49383,7 +49385,7 @@ test "사이드바 드래그: 고정 탭끼리 재정렬(고정 영역 내 swap,
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (0..3) |_| _ = try tab_ops.newTab(session);
@@ -49421,7 +49423,7 @@ test "rename: commit writes custom_name, cancel keeps old, empty clears, teardow
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -49475,7 +49477,7 @@ test "rename: ←/→ 로 caret 을 옮겨 가운데에 쓰고, 편집 줄과 IM
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -49524,7 +49526,7 @@ test "double-click on a Term tab or sidebar slot starts rename" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -49561,7 +49563,7 @@ test "right-click opens context menu on a rename target; clicking Rename starts 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -49614,7 +49616,7 @@ test "보이는 패널 안쪽 가장자리를 눌러도 우클릭 메뉴·심볼
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -49694,7 +49696,7 @@ test "참조 피커 위 클릭은 뒤로 내려가지 않는다 — 행은 이�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -49704,7 +49706,7 @@ test "참조 피커 위 클릭은 뒤로 내려가지 않는다 — 행은 이�
     try std.testing.expect(pad > 0 and props.shape.corner_radius_px > 0); // 전제: 제품 모양은 둥근 패널 + 패딩
     const surface = term_ops.activeSurface(session);
     // 화면을 **글자로 채운다** — 빈 칸을 겹클릭하면 낱말이 없어 선택이 안 서서, 「겹클릭이 새지 않았다」가 공회전한다(도크 겹클릭 판정자와 같다).
-    try surface.core.write(("abcdefghij" ** 30 ++ "\r\n") ** 40);
+    try surface.core.write(array_repeat.repeat((array_repeat.repeat("abcdefghij", 30) ++ "\r\n"), 40));
 
     const Plant = struct {
         // 행 둘 — 루트 밖(`outside`)이라 이동은 알림만 내고 파일을 열지 않는다(`goToRow`). 클릭이 `accept` 에 닿았는지만 본다.
@@ -49801,7 +49803,7 @@ test "포커스 없는 찾기 막대 위에서 터미널 선택 드래그를 놓
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -49848,7 +49850,7 @@ test "rename caret blinks (width-stable) and IME caret rect tracks the editor, n
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -49902,7 +49904,7 @@ test "F1: workspace rename caret y follows card line count + sidebar header/scro
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -49980,7 +49982,7 @@ test "review fixes: focus-loss commits rename, body right-click reports, close-z
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -50027,7 +50029,7 @@ test "synchronized output(2026) hold: ESU 누락 시 sync timeout을 넘으면 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -50101,7 +50103,7 @@ test "synchronized output(2026) hold가 스크롤백 탐색 리페인트는 막�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -50158,7 +50160,7 @@ fn setupTwoTabsSettledWithRequest(allocator: std.mem.Allocator, second_request: 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     errdefer session.deinit();
     // newTab derives its grid from the viewport, not the initial PTY size.
@@ -50420,7 +50422,7 @@ test "chrome_minimal session suppresses the pane tab bar and the sidebar" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
         .chrome_minimal = 1,
     });
     defer session.deinit();
@@ -50451,7 +50453,7 @@ test "minimal scratch session blocks new_tab/new_term; minimal_tabs re-enables t
             .cols = 20,
             .rows = 5,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
             .chrome_minimal = 1,
             .minimal_tabs = 0,
         });
@@ -50474,7 +50476,7 @@ test "minimal scratch session blocks new_tab/new_term; minimal_tabs re-enables t
             .cols = 20,
             .rows = 5,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
             .chrome_minimal = 1,
             .minimal_tabs = 1,
         });
@@ -50502,7 +50504,7 @@ test "minimal tab indicator: adaptive dots appear only in minimal with >1 tab" {
             .cols = 40,
             .rows = 5,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
             .chrome_minimal = 1,
             .minimal_tabs = 1,
         });
@@ -50547,7 +50549,7 @@ test "minimal tab indicator: adaptive dots appear only in minimal with >1 tab" {
             .cols = 40,
             .rows = 5,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
             .chrome_minimal = 0,
         });
         defer session.deinit();
@@ -50569,7 +50571,7 @@ test "command catalog: 엔트리·바인딩 표시 + runAction 디스패치" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -50613,7 +50615,7 @@ test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합
         .cols = 40,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000); // 메트릭·backing(palette.view가 chrome props로 씀)
@@ -50705,7 +50707,7 @@ test "command palette IME preedit allocation failure does not retain stale comma
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -50713,8 +50715,8 @@ test "command palette IME preedit allocation failure does not retain stale comma
     input_ops.imeMarked(session, "새 터미널");
     try std.testing.expectEqual(maru.config.Action.new_term, command_palette.actionAt(session.palette_filtered.items, 0).?);
 
-    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    const long_marked = [_]u8{'x'} ** 1024;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
+    const long_marked = @as([1024]u8, @splat('x'));
     session.allocator = failing.allocator();
     input_ops.imeMarked(session, &long_marked);
     session.allocator = allocator;
@@ -50734,7 +50736,7 @@ test "command palette does not accept Enter while IME preedit survives without c
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -50758,7 +50760,7 @@ test "command palette IME owns input over an active sidebar search" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -50794,7 +50796,7 @@ test "TFREG scrollback Find switches literal and PCRE2 through the shared chord"
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -50840,7 +50842,7 @@ test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000); // 메트릭·backing(find.view가 chrome props로 씀)
@@ -50912,7 +50914,7 @@ test "EF1 편집기 pane의 ⌘F는 **문서**를 검색한다 (§5.1)" {
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51008,7 +51010,7 @@ test "EF2 편집기에서 터미널로 돌아오면 편집기 매치를 버린�
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51057,7 +51059,7 @@ test "EF3 편집기에서 편집기로 옮기면 대상이 따라온다 — targ
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51124,7 +51126,7 @@ test "EF4 팔레트를 열면 편집기 강조도 멎는다 — 목록이 둘이
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51168,7 +51170,7 @@ test "EF5 웹으로 옮기면 편집기 매치를 버린다 — 렌더는 활성
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51220,7 +51222,7 @@ test "EF6 ⌘G 네비 중 팔레트를 열면 tick이 강조를 되살리지 않
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51298,7 +51300,7 @@ test "EF7 ⌘F를 다시 열면 빈 상자에 옛 강조가 안 남는다 — `s
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51356,7 +51358,7 @@ test "EF8 낡은 스냅숏으로 놓은 자리는 **다음 프레임이 예약�
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51368,7 +51370,7 @@ test "EF8 낡은 스냅숏으로 놓은 자리는 **다음 프레임이 예약�
     // 랩을 켜면 보이는 줄이 확 줄도록 **긴 줄**로 채운다.
     for (0..60) |i| {
         var buf: [400]u8 = undefined;
-        const filler = "wrap me " ** 20;
+        const filler = array_repeat.repeat("wrap me ", 20);
         try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d} {s}\n", .{ i, filler }));
     }
     try doc.appendSlice(allocator, "MARUFIND far below\n");
@@ -51428,7 +51430,7 @@ test "EF9 터미널에서도 ⌘F를 다시 열면 옛 강조가 안 남는다 �
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51467,7 +51469,7 @@ test "EF11 현재 일치가 primary selection을 옮긴다 — 닫으면 그 자
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51533,7 +51535,7 @@ test "EF12 매치로 옮길 때 멀티커서를 정리한다 (§3.2)" {
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51576,7 +51578,7 @@ test "EF13 검색으로 옮긴 커서는 앞의 타이핑과 한 묶음이 아�
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51619,7 +51621,7 @@ test "EF23 ⌥⌘C·⌥⌘W가 찾기 규칙을 바꾼다 — 키 경로 전체 
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51678,7 +51680,7 @@ test "EF24 규칙 토글은 편집기 찾기가 떠 있을 때만 먹는다 — 
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51738,7 +51740,7 @@ test "EF25 규칙 토글의 가로채기가 사용자 rebind 를 따른다 — c
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51784,7 +51786,7 @@ test "EF26 선택 영역 내에서만 — 범위는 사본이라 Enter 가 파�
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51837,7 +51839,7 @@ test "EF28 범위 경계가 반열린 구간이다 — 걸친 매치는 안 든�
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51881,7 +51883,7 @@ test "EF29 선택 범위 토글도 편집기 찾기일 때만 먹는다 — 팔�
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51922,7 +51924,7 @@ test "ETX5 ⌥Z 가 키 경로로 랩을 토글한다 — 편집기 컨텍스트
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -51976,7 +51978,7 @@ test "ETX6 비교 뷰 종단 — ⌘D 는 분할이고 ⌥Z 는 랩이며 방향
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52042,7 +52044,7 @@ test "CS6 팔레트가 대문자·소문자를 갈라 부른다 — 디스패치
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52079,7 +52081,7 @@ test "EF30 좌우 찾기는 실제 Cmd F·옵션 D·Enter·Esc·Cmd G 경로에�
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52152,7 +52154,7 @@ test "EF27 빈 선택이면 안 켜지고, 편집이 들어오면 범위를 버�
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52226,7 +52228,7 @@ test "EF14 ⌥⌘F가 바꾸기 줄을 연다 — 키 경로 전체 (§5.1)" {
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52266,7 +52268,7 @@ test "EF15 바꾸기 하나 — 되돌리기 하나로 풀리고 다음 매치�
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52326,7 +52328,7 @@ test "EF16 전부 바꾸기는 되돌리기 하나다 (§5.1·§3.3)" {
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52369,7 +52371,7 @@ test "EF30 regex mode searches and replaces named captures with one undo" {
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52430,7 +52432,7 @@ test "EF17 바꿀 문자열이 검색어를 품어도 되풀이하지 않는다 
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52475,7 +52477,7 @@ test "EF18 읽기 전용 문서는 안 바뀐다 (§3.5)" {
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52516,7 +52518,7 @@ test "EF19 바꾼 뒤 가는 곳은 **바꾼 자리 뒤**다 — 앞으로 돌�
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52563,7 +52565,7 @@ test "EF20 바꾼 문자열이 검색어를 품으면 **자란 만큼** 건너�
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52610,7 +52612,7 @@ test "EF21 두 입력의 IME 조합은 서로 독립이다 (§5.1)" {
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52664,7 +52666,7 @@ test "IME6 포커스를 잃으면 편집기 조합이 확정된다 — 유령 �
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52718,7 +52720,7 @@ test "IME Enter commits editor preedit before newline instead of sending it to P
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52782,7 +52784,7 @@ test "editor IME explicit UTF-16 replacement keeps the document unchanged until 
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52872,7 +52874,7 @@ test "IME_MULTI2 포커스를 잃어 확정해도 모든 선택을 대체하고 
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52950,7 +52952,7 @@ test "EF10 모달이 강조를 멎게 해도 ⌘G는 이어진다 — `find_nav`
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -52998,7 +53000,7 @@ test "find ⌘G/⌘⇧G: 오버레이 닫힌 채 다음/이전 매치 네비(보
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -53061,7 +53063,7 @@ test "alt screen에서도 maru Find가 열린다(⌘F 동작·진입해도 tick�
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -53102,7 +53104,7 @@ test "alt screen Find: 실제 쿼리가 현재 화면만 매치하고 ⌘G가 �
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -53141,7 +53143,7 @@ test "find IME 멀티-문자: 커밋이 다음 조합 preedit를 안 지운다(�
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -53305,7 +53307,7 @@ test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회�
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -53361,7 +53363,7 @@ test "command palette(chrome): 한글(wide) query는 atlas slot이 2칸 — ㄱ�
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -53425,7 +53427,7 @@ test "notice through the product overlay painter: a long NFD/emoji message wraps
     };
     const cw: u32 = 8;
     const ch: u32 = 16;
-    const message = "설치된 Chromium 엔진(maru-chromium)이 이 maru 와 맞지 않습니다. maru 와 maru-chromium 을 모두 최신으로 올린 뒤 maru 를 다시 켜 주세요." ++ " /Users/x/" ++ "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}" ** 6 ++ " " ++ "\u{2764}\u{FE0F}" ** 12;
+    const message = "설치된 Chromium 엔진(maru-chromium)이 이 maru 와 맞지 않습니다. maru 와 maru-chromium 을 모두 최신으로 올린 뒤 maru 를 다시 켜 주세요." ++ " /Users/x/" ++ array_repeat.repeat("\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}", 6) ++ " " ++ array_repeat.repeat("\u{2764}\u{FE0F}", 12);
     for ([_]chrome.tokens.Tokens{ chrome.tokens.Tokens.base(theme), chrome.tokens.Tokens.rich(theme) }) |tk| {
         const p = chrome.props.ChromeProps{
             .metrics = .{ .cell_width_px = cw, .cell_height_px = ch, .sidebar_width_px = 0, .backing_width_px = 480, .backing_height_px = 400 },
@@ -53678,7 +53680,7 @@ test "chrome Notice 모달: showNotice → 메시지 소유 복사·오버레이
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000); // 메트릭·backing(buildNoticeFrame이 chrome props로 씀)
@@ -53731,7 +53733,7 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000); // backing px 확정 → grid 산출
@@ -53812,7 +53814,7 @@ test "Session Dock Cmd zoom grows and shrinks one resolved layout/text/scroll sc
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -53853,7 +53855,7 @@ test "Session Dock search owns committed text and IME preedit instead of leaking
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -53899,7 +53901,7 @@ test "reapplyLoadedConfig: GUI 토글이 런타임 줌(⌘+/−)을 보존한다
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000); // backing px 확정 → grid 산출
@@ -53950,7 +53952,7 @@ test "resetAllSettings: 런타임 줌·config 변경을 공장 기본값으로 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000); // backing px 확정 → grid 산출
@@ -54007,7 +54009,7 @@ test "applyAppearance: 새 appearance로 appearance·base_font_size·메트릭�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -54034,7 +54036,7 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -54166,7 +54168,7 @@ test "dock toggle: hover plate (= hit rect) is concentric with the drawn toggle 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -54248,7 +54250,7 @@ test "empty file dock launcher presents explorer and empty content requests the 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -55484,7 +55486,7 @@ test "file tree pixel window is one arithmetic shared by follow, clamp, hit-test
             rows_buf[offset] = .{
                 .kind = .file,
                 .label = session.file_tree_rows.items[window.start + offset].file.label,
-                .icon_kind = @intFromEnum(chrome.file_tree_icon.IconKind.code),
+                .icon_kind = @backingInt(chrome.file_tree_icon.IconKind.code),
             };
         }
         const props = component.types.Props{
@@ -56253,7 +56255,7 @@ test "file tree production hot paths emit bounded counter artifact" {
     try std.testing.expectEqual(file_tree.max_materialized_nodes, counters.row_visits);
     try std.testing.expectEqual(counters.row_visits, counters.classifier_calls);
     for (session.file_tree_rows.items) |row|
-        try std.testing.expectEqual(@intFromEnum(file_panel_ops.file_tree_icon.IconKind.code), file_tree.rowIconKind(row));
+        try std.testing.expectEqual(@backingInt(file_panel_ops.file_tree_icon.IconKind.code), file_tree.rowIconKind(row));
 
     file_panel_ops.refreshDockListScrollbar(session);
     const geometry = dock_ops.dockListScrollbarGeometry(session).?;
@@ -56335,7 +56337,7 @@ test "file tree row staging OOM leaves live root rows and watcher authority unch
     try candidate.resetWatchRequests(&.{"/other-safety"});
     var candidate_rows: std.ArrayList(file_tree.Row) = .empty;
     defer candidate_rows.deinit(allocator);
-    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
     session.allocator = failing.allocator();
     try std.testing.expectError(error.OutOfMemory, file_panel_ops.prepareFileTreeRowStaging(session, &candidate_rows, 0));
     session.allocator = allocator;
@@ -56597,7 +56599,7 @@ test "workspace restore allocation failures preserve the complete live tab dock 
     var restore_clean_pass = false;
     for (0..512) |fail_index| {
         if (restore_clean_pass) break;
-        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index, .resize_fail_index = 0 });
         session.allocator = failing.allocator();
         var apply_error: ?anyerror = null;
         workspace_ops.applyWorkspaceWindow(session, replacement) catch |err| {
@@ -57265,7 +57267,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.loaded_config.config.file_panel.show_explorer_on_open = true;
@@ -57954,19 +57956,19 @@ fn testFileTreeScanIdentity(path: []const u8) !file_tree.ScanIdentity {
     return .{ .value = .{
         .device = @intCast(stat.dev),
         .inode = @intCast(stat.ino),
-        .kind = @intFromEnum(file_tree.IdentityKind.directory),
+        .kind = @backingInt(file_tree.IdentityKind.directory),
     } };
 }
 
 fn testFileTreeIdentity(path: []const u8) !file_tree.Identity {
-    const path_z = try std.testing.allocator.dupeZ(u8, path);
+    const path_z = try std.testing.allocator.dupeSentinel(u8, path, 0);
     defer std.testing.allocator.free(path_z);
     var stat: std.posix.Stat = undefined;
     if (std.c.fstatat(std.posix.AT.FDCWD, path_z.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW) != 0) return error.StatFailed;
     return .{
         .device = @intCast(stat.dev),
         .inode = @intCast(stat.ino),
-        .kind = @intFromEnum(if (std.posix.S.ISREG(stat.mode))
+        .kind = @backingInt(if (std.posix.S.ISREG(stat.mode))
             file_tree.IdentityKind.regular
         else if (std.posix.S.ISDIR(stat.mode))
             file_tree.IdentityKind.directory
@@ -58377,7 +58379,7 @@ test "serializeWorkspaceWindow: 세션-소유 헤더 없는 블록 + 재호출 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit(); // workspace_buffer 해제 — testing.allocator가 leak을 잡는다
     _ = try session.resize(800, 600, 1000);
@@ -58417,7 +58419,7 @@ test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -58487,7 +58489,7 @@ test "하위버전 파일에는 접힘 의도가 없다 — agents-collapsed 없
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -58543,7 +58545,7 @@ test "legacy provider workspace fields are ignored across multi-window parse app
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session0.deinit();
     _ = try session0.resize(800, 600, 1000);
@@ -58554,7 +58556,7 @@ test "legacy provider workspace fields are ignored across multi-window parse app
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session1.deinit();
     _ = try session1.resize(800, 600, 1000);
@@ -58826,7 +58828,7 @@ test "invalidatePositionalPendingClose: 위치성 보류는 무효화, .window�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -58855,7 +58857,7 @@ test "latchSessionEndOrHold: 비정상 시작 사망은 창 유지(held)+re-arm+
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -58907,7 +58909,7 @@ test "handleKeyEvent: 죽은 surface(held 창) 터미널 입력은 fault 없이 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -58952,7 +58954,7 @@ test "setWorkspaceRoot(세팅 GUI 시작 디렉터리): 절대/~ 저장·빈 값
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -58982,7 +58984,7 @@ test "focusedTermCwd/workspaceRootCwd/newSurfaceCwd: 포커스 cwd 상속 + inhe
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -59031,7 +59033,7 @@ test "sidebarCwdPath/sidebarFolderLineShown: 원격 cwd는 host를 붙이고 rep
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -59090,7 +59092,7 @@ test "사이드바 draw list: 원격 cwd 폴더줄이 host 접두와 함께 실�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1200, 800, 1000); // 사이드바가 보일 만큼 넓게
@@ -59125,7 +59127,7 @@ test "linkScopesForTerm: 원격 cwd면 파일 경로 스코프만 끄고 웹·�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -59165,7 +59167,7 @@ test "newSurfaceCwd: 설정된 workspace.root이 세션 배선을 통과 — inh
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -59198,7 +59200,7 @@ test "applyWorkspaceWindow: 없는 cwd여도 복원 성공(기본 cwd 폴백, su
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -59224,7 +59226,7 @@ test "applyWorkspaceWindow: 손상 트리(중복·고아 leaf)는 MalformedTree�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -59381,7 +59383,7 @@ test "no over-bucket quad is appended after the overlay's quads (SV6b)" {
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -59622,7 +59624,7 @@ test "sidebar gets an active-tab highlight band that follows tab create and swit
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // 활성 탭 강조는 rich에서 **GPU quad**(layer 0)로 나간다 — 옛 tui 룩에서만 셀 밴드(`sidebar_cells`)였다.
@@ -59677,7 +59679,7 @@ test "code-review #8: 리스트 아래(past-end) 새-워크스페이스 드롭 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try tab_ops.newTab(session); // [t0, t1]
@@ -59730,7 +59732,7 @@ test "active tab is a single-leaf SplitTree laid out to the full terminal rect" 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -59763,7 +59765,7 @@ test "splitActivePane splits the active leaf, focuses the new panel, and renders
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -59819,7 +59821,7 @@ test "newTab(새 워크스페이스): 직전 활성 탭이 split이어도 새 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800; // split이 의미 있으려면 backing 필요
@@ -59861,7 +59863,7 @@ test "글꼴 크기 변경: resize 가 셀 픽셀을 함께 실어 tick 전에 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -59919,7 +59921,7 @@ test "레이아웃 resize: 자식이 종료된 Term 도 격자와 함께 셀 픽
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -59943,7 +59945,7 @@ test "레이아웃 resize: 자식이 종료된(.exited) Term도 split 후 자기
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800; // split이 의미 있으려면 backing 필요
@@ -59977,7 +59979,7 @@ test "레이아웃 resize: 자식이 종료된 Term 의 크기 통지(DECSET 204
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -60012,7 +60014,7 @@ test "레이아웃 resize: 활성 Term의 runtime 전달 실패가 창 resize �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -60047,7 +60049,7 @@ test "S1 구조-무효화 계약: destroyPane이 해제 Pane 포인터를 표적
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800; // split이 의미 있으려면 backing 필요
@@ -60099,7 +60101,7 @@ test "S1 표적 divider: 무관한 split의 pane이 collapse돼도 divider_drag 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -60142,7 +60144,7 @@ test "promotePaneToNewWorkspace: 활성 pane을 떼어 새 단독 워크스페�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -60187,7 +60189,7 @@ test "promotePaneToNewWorkspace: 단독 pane 워크스페이스면 무동작(빈
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -60211,7 +60213,7 @@ test "promotePaneToNewWorkspace: 그룹이 있으면 새 워크스페이스를 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -60279,7 +60281,7 @@ test "promotePaneToNewWorkspace: 마지막 그룹이 접혀 있어도 새 워크
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -60327,7 +60329,7 @@ test "mergePaneIntoWorkspace: 활성 pane을 다른 워크스페이스에 합친
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -60384,7 +60386,7 @@ test "mergePaneIntoWorkspace: 단독 pane도 대상에 합치고 빈 소스 워�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -60433,7 +60435,7 @@ test "mergePaneIntoWorkspace: 자기 워크스페이스/범위 밖이면 무동�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -60460,7 +60462,7 @@ test "grip 드래그: 사이드바 빈 영역 드롭 → 새 워크스페이스 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -60510,7 +60512,7 @@ test "grip 드래그: 단독 pane을 다른 워크스페이스 카드에 드롭 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -60552,7 +60554,7 @@ test "grip 드래그: 드래그 중 드롭 타겟 하이라이트 슬롯 추적(
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -60604,7 +60606,7 @@ test "move_pane_to_new_workspace 액션: 활성 pane을 새 워크스페이스�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -60635,7 +60637,7 @@ test "move_pane_to_workspace:N 액션: 활성 pane을 N번 워크스페이스에
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -60833,7 +60835,7 @@ test "FP9 active-pane projection rejects partial layout OOM and recovers" {
 
     var saw_partial_oom = false;
     for (0..16) |fail_index| {
-        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index, .resize_fail_index = 0 });
         var partial: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer partial.deinit(failing.allocator());
         if (PaneTree.layout(failing.allocator(), tree, session.termRect(), &partial)) |_| {} else |err| {
@@ -61163,7 +61165,7 @@ test "pane reserves a top tab-bar strip and renders a bar chrome cell" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -61197,7 +61199,7 @@ test "web surface transitions: per-Term batch carries visibility and advances pr
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -61247,7 +61249,7 @@ test "createAdoptedWebTermInActivePane: 활성 pane에 browser web Term 새 탭 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -61289,7 +61291,7 @@ test "W6i: 창을 정리하면(deinit) 그 창의 Chromium 탭 브라우저와 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     var live = true;
     defer if (live) session.deinit();
@@ -61317,7 +61319,7 @@ fn w6jSession(allocator: std.mem.Allocator) !*AppSession {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     return session;
@@ -61445,7 +61447,7 @@ test "activeWebSurfaceIdAnyKind: web term(browser·markdown)이면 id, terminal�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -61486,7 +61488,7 @@ test "new_web_tab dispatch: 활성 pane에 web Term append+활성 + web_surfaces
             .cols = 20,
             .rows = 5,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         defer session.deinit();
         _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -61519,7 +61521,7 @@ test "new_web_tab dispatch: 활성 pane에 web Term append+활성 + web_surfaces
             .cols = 20,
             .rows = 5,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
             .chrome_minimal = 1,
             .minimal_tabs = 0,
         });
@@ -61544,7 +61546,7 @@ test "web_surfaces_present는 창 전체 트리에서 매 tick 파생된다(유�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -61968,7 +61970,7 @@ test "웹 패널 옆 divider는 padding이 노출하든 webview가 통과시키�
             .cols = 20,
             .rows = 5,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         defer session.deinit();
         _ = try session.resize(session.sidebar_width_px + 1600, 1200, case.scale);
@@ -62087,7 +62089,7 @@ test "pane tab bar draws Term-title tabs with an active-Term highlight" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -62151,7 +62153,7 @@ test "U-tab2 rich: active tab is a body-color cutout; focus pane gets amber unde
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.appearance.chrome_tab_style = .connected; // cutout은 connected 스타일만(기본은 이제 underline이라 명시) — resize 전에 고정
@@ -62200,7 +62202,7 @@ test "탭 바: ✕·+ 는 호버한 자리에만 배경 quad 를 얹는다" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -62257,7 +62259,7 @@ test "TS1 chrome.tab-style=underline: no cutout bg quad, only the amber underbar
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.appearance.chrome_tab_style = .underline; // 축: 언더바만(배경 박스 없음) — resize 전에 고정
@@ -62294,7 +62296,7 @@ test "TS2 chrome.tab-style=pill: rounded inset capsule with lifted fill (Warp be
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.appearance.chrome_tab_style = .pill; // 축: 둥근 inset pill + 테두리 — resize 전에 고정
@@ -62333,7 +62335,7 @@ test "U-tab2: pane Term tab title has no number prefix (rename caret sits right 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -62362,7 +62364,7 @@ test "vertical split renders the bottom pane tab bar at its own y (not overlappi
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -62420,7 +62422,7 @@ test "clicking a tab in the pane bar switches to that Term" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -62458,7 +62460,7 @@ test "hovering a tab shows a close X; clicking it closes that Term" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -62528,7 +62530,7 @@ fn initSmokeSessionTwoTerms(allocator: std.mem.Allocator) !*AppSession {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     errdefer session.deinit();
     session.window_padding_px = .{};
@@ -62693,7 +62695,7 @@ test "close-confirm: 브라우저 web term은 실행 중 명령 없이도 확인
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -63309,7 +63311,7 @@ test "못 읽는 config 로는 설정을 버리지 않는다 — 메뉴 Reload �
     try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = kept });
     for (ss) |s| s.reloadConfig();
     const cfg_path = ss[0].config_path_buffer.?;
-    const cz = try allocator.dupeZ(u8, cfg_path);
+    const cz = try allocator.dupeSentinel(u8, cfg_path, 0);
     defer allocator.free(cz);
 
     // ① 권한 없음 — 메뉴 Reload(활성 창 강제 + 다른 창 전파) 뒤에도 두 창 모두 지금 설정이다.
@@ -63349,7 +63351,7 @@ test "못 읽는 config 로는 설정을 버리지 않는다 — 메뉴 Reload �
 test "오버레이 메시지 사본: 버퍼를 넘으면 끝이 「…」이고 UTF-8 이 깨지지 않으며, 안 넘치면 그대로다" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("짧은 문장", AppSession.copyOverlayMessage(&buf, "짧은 문장"));
-    const long = "가" ** 40; // 120 바이트
+    const long = array_repeat.repeat("가", 40); // 120 바이트
     const out = AppSession.copyOverlayMessage(&buf, long);
     try std.testing.expect(out.len <= buf.len);
     try std.testing.expect(std.unicode.utf8ValidateSlice(out));
@@ -63362,7 +63364,7 @@ test "truncateColsInto: 깨진 바이트가 든 이름도 빈칸이 아니고, �
     // 에이전트 메뉴·리소스 팝오버의 이름 칸이 비었다(적대적 검증 실측: 길이 0).
     const oi = chrome.components.overlay_input;
     var buf: [256]u8 = undefined;
-    const broken = "caf\xe9 " ++ "a" ** 60;
+    const broken = "caf\xe9 " ++ array_repeat.repeat("a", 60);
     const shown = truncateColsInto(&buf, broken, 20);
     try std.testing.expect(shown.len > 0);
     try std.testing.expect(oi.displayCols(shown) <= 20);
@@ -63376,7 +63378,7 @@ test "truncateColsInto: 깨진 바이트가 든 이름도 빈칸이 아니고, �
     // 들어가면 그대로다.
     try std.testing.expectEqualStrings("짧은 이름", truncateColsInto(&buf, "짧은 이름", 40));
     // 결합 부호를 떼어 내지 않는다 — 끝이 글자 묶음 경계다.
-    const acc = truncateColsInto(&buf, "e\u{301}" ** 10, 6);
+    const acc = truncateColsInto(&buf, array_repeat.repeat("e\u{301}", 10), 6);
     try std.testing.expect(!std.mem.endsWith(u8, acc[0 .. acc.len - "\u{2026}".len], "e"));
 }
 
@@ -63606,7 +63608,7 @@ fn initSmokeSessionSized(allocator: std.mem.Allocator) !*AppSession {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     errdefer session.deinit();
     session.window_padding_px = .{};
@@ -64043,7 +64045,7 @@ test "reset-confirm: 모달에서 Esc=취소(설정 유지)·Enter=확정(전체
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -64091,7 +64093,7 @@ test "quit-confirm: 진행 중인 다운로드가 있으면 그 수를 넣은 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const lang_before = maru.i18n.lang();
@@ -64130,7 +64132,7 @@ test "quit-confirm: 항상 모달 + Esc=cancelled·Enter=accepted를 quit_decisi
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -64172,7 +64174,7 @@ test "quit-confirm: 보류 중 리셋 모달이 열리면 종료를 cancelled로
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -64238,7 +64240,7 @@ test "터미널 매크로: 추가·편집·삭제 라이브 반영 + write-back 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     var arena_inst = std.heap.ArenaAllocator.init(allocator);
@@ -64306,7 +64308,7 @@ test "config pending: takeConfigDirty/clearConfigDirty가 모든 카테고리를
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const A = session.allocator;
@@ -64359,7 +64361,7 @@ test "기본값 리셋 토스트는 아무 클릭으로나 닫히고 그 뒤 버
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -64426,7 +64428,7 @@ test "리셋 토스트 우클릭은 닫기만 하고 클립보드 paste를 트�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -64457,7 +64459,7 @@ test "기본값 리셋 토스트는 아무 키로나 닫히고 그 뒤 키 입�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -64513,7 +64515,7 @@ test "리셋 토스트를 닫는 키(⌘T)는 소비되어 새 텀을 만들지 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -64547,7 +64549,7 @@ test "notice 토스트와 알림 패널 공존: 입력이 notice를 먼저 닫�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -64771,7 +64773,7 @@ test "close-confirm 마우스 게이트: 확인 버튼 위 우/중클릭 무시�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -64845,7 +64847,7 @@ test "clicking the bar '+' button spawns a new Term in that pane" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // 클릭 좌표는 실제 핸들러와 **같은 입력**(탭 영역 `pb.tabs` · 제품 토큰 `tab_width_cols`)으로 잰다. 예전엔
@@ -64884,7 +64886,7 @@ test "hovering the '+' button does not mark the last tab for close" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -65026,7 +65028,7 @@ fn initTabDragSession(allocator: std.mem.Allocator) !*AppSession {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     errdefer session.deinit();
     session.window_padding_px = .{};
@@ -65444,7 +65446,7 @@ test "dragging a Term tab reorders it within the pane" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -65496,7 +65498,7 @@ test "dragging a tab to another pane moves the Term; emptying the source collaps
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -65553,7 +65555,7 @@ test "④: dropping a tab on a pane body edge creates a new split there (rearran
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -65604,7 +65606,7 @@ test "④b: tab drag tracks the drop target and emits a translucent highlight" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -65667,7 +65669,7 @@ test "floating tab preview frame is built (and positioned) while dragging a tab"
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -65733,7 +65735,7 @@ test "clicking another pane in a split focuses it; clicking the active pane keep
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -65778,7 +65780,7 @@ test "wheel over an inactive pane scrolls that pane (not the active one)" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -65791,8 +65793,8 @@ test "wheel over an inactive pane scrolls that pane (not the active one)" {
     const left_surface = lr.items[0].leaf.activeTerm().surface;
     const right_surface = lr.items[1].leaf.activeTerm().surface;
     // 양쪽에 스크롤백을 만든다(split 후 pane은 창 높이만큼 행이 커서 100줄로 충분히 넘긴다). 비-alt-screen이라 휠=뷰포트.
-    try left_surface.core.write("L\r\n" ** 100);
-    try right_surface.core.write("R\r\n" ** 100);
+    try left_surface.core.write(array_repeat.repeat("L\r\n", 100));
+    try right_surface.core.write(array_repeat.repeat("R\r\n", 100));
     try std.testing.expectEqual(@as(usize, 0), left_surface.core.view_offset);
     try std.testing.expectEqual(@as(usize, 0), right_surface.core.view_offset);
 
@@ -65821,13 +65823,13 @@ test "scroll.multiplier: 세로 휠 배수가 스크롤 줄 수를 키운다 (F1
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     const surface = term_ops.activeSurface(session);
-    try surface.core.write("X\r\n" ** 200); // 스크롤백 충분히(200줄)
+    try surface.core.write(array_repeat.repeat("X\r\n", 200)); // 스크롤백 충분히(200줄)
     const body = pane_ops.paneTermRect(session, session.active_pane_rect);
     const cx: f64 = @floatFromInt(body.x + body.w / 2);
     const cy: f64 = @floatFromInt(body.y + body.h / 2);
@@ -65866,13 +65868,13 @@ test "선택 해제 전이: 리포팅 클릭·휠·타이핑·Esc가 ⌘A 선택
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     const surface = term_ops.activeSurface(session);
-    try surface.core.write("hello\r\n" ** 40); // 선택할 내용 + 스크롤백
+    try surface.core.write(array_repeat.repeat("hello\r\n", 40)); // 선택할 내용 + 스크롤백
     const body = pane_ops.paneTermRect(session, session.active_pane_rect);
     const cx: f64 = @floatFromInt(body.x + body.w / 2);
     const cy: f64 = @floatFromInt(body.y + body.h / 2);
@@ -65981,7 +65983,7 @@ test "링크 클릭·hover는 포인터 아래 pane에서 찾는다(비활성 pa
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -66031,7 +66033,7 @@ test "브라우저(web Term)가 활성이어도 옆 터미널 pane의 링크가 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -66076,7 +66078,7 @@ test "링크 조회는 pane chrome(탭 바·여백)을 셀로 접지 않는다" 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -66127,7 +66129,7 @@ test "비활성 pane hover 밑줄이 실제 프레임 셀까지 실린다" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -66191,7 +66193,7 @@ test "모달 오버레이가 열려 있으면 터미널 링크를 열지 않는�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -66222,7 +66224,7 @@ test "커서가 멈춘 채 split하면 stale 링크 밑줄이 내려간다" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -66263,7 +66265,7 @@ test "openTerminalWebLink(auto): 보이는 브라우저 패널이 있을 때만 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -66326,7 +66328,7 @@ test "openTerminalWebLink(in-app): 보이는 브라우저가 없으면 새 brows
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -66368,7 +66370,7 @@ test "openTerminalWebLink: drain 전 두 번째 요청은 pending을 덮어쓰�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -66395,7 +66397,7 @@ test "wheel routes by the surface under the cursor even when the active pane has
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -66409,8 +66411,8 @@ test "wheel routes by the surface under the cursor even when the active pane has
     const right_surface = lr.items[1].leaf.activeTerm().surface;
     // 활성(오른쪽) pane을 마우스 트래킹 앱으로 둔다 — 옛 동작이면 모든 휠이 여기로 가버렸다. 양쪽에 스크롤백.
     right_surface.core.mouse_tracking = .normal;
-    try left_surface.core.write("L\r\n" ** 100);
-    try right_surface.core.write("R\r\n" ** 100);
+    try left_surface.core.write(array_repeat.repeat("L\r\n", 100));
+    try right_surface.core.write(array_repeat.repeat("R\r\n", 100));
     try std.testing.expectEqual(@as(usize, 0), left_surface.core.view_offset);
     try std.testing.expectEqual(@as(usize, 0), right_surface.core.view_offset);
 
@@ -66440,7 +66442,7 @@ test "horizontal trackpad swipe scrolls the overflowing tab bar of the pane unde
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 400, 300, session.scale_milli);
@@ -66480,7 +66482,7 @@ test "horizontal tab-bar swipe still scrolls even when the pane has mouse tracki
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 400, 300, session.scale_milli);
@@ -66515,7 +66517,7 @@ test "Cmd+Option+arrow moves pane focus directionally through the key path" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -66555,7 +66557,7 @@ test "Cmd+W closes the active pane first and collapses the split, leaving the si
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -66596,7 +66598,7 @@ test "PR6: dragging a split divider resizes the panes via split.ratio" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -66666,7 +66668,7 @@ test "split dividers render as thin lines (reserved 30/31 divider strips), not f
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -66714,7 +66716,7 @@ test "hoverCursor returns region-specific cursor kinds" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -66786,7 +66788,7 @@ test "PR5b: a Term whose shell exits is reaped, the sibling Term survives" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -66825,7 +66827,7 @@ test "PR5b regression: reaping a lower-indexed sibling keeps the middle-active T
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -66880,7 +66882,7 @@ test "close-confirm: reap이 트리를 바꾸면 인덱스/활성 기준 보류�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -66925,7 +66927,7 @@ test "guardrail: 한글 확인 모달 메시지·안내가 오버레이 셀에 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -66988,7 +66990,7 @@ test "PR5b: a split pane whose only Term exits collapses to its sibling" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -67028,7 +67030,7 @@ test "PR5b: a background workspace whose last Term exits is closed; the other su
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.backing_width_px = session.sidebar_width_px + 800;
@@ -67070,7 +67072,7 @@ test "PR5b: the last Term exiting is not reaped (session-end latch owns it)" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -67094,7 +67096,7 @@ test "sidebar click switches tabs and hover adds a hover band via hit-test" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // 2번째 탭 생성 → 활성=1.
@@ -67152,7 +67154,7 @@ test "hovering the sidebar + slot adds a hover band at the plus row" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // 2번째 탭 생성 → 탭 2개, 활성=1. "+"는 row 2(y in [2*slot_h, 3*slot_h)).
@@ -67193,7 +67195,7 @@ test "clicking the hovered slot close zone closes that tab, elsewhere switches" 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try tab_ops.createTab(
@@ -67909,7 +67911,7 @@ test "dragging a sidebar tab reorders the list and active follows the dragged ta
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     inline for (.{ "tab 2", "tab 3" }) |title| {
@@ -67957,7 +67959,7 @@ test "사이드바·탭 라벨이 라이브 OSC 제목을 반영한다(복원된
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -68003,7 +68005,7 @@ test "P4-1 title-generation: syncAutoTitles가 제목 미변경 tick에서 lock/
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const term = session.tabs.items[0].activePane().activeTerm();
@@ -68044,7 +68046,7 @@ test "③a: dragging the sidebar right edge resizes the sidebar width (cursor, c
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -68104,7 +68106,7 @@ test "③a-2: applying config sidebar.width drives the runtime sidebar width (co
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -68134,7 +68136,7 @@ test "③a-3: a no-drag click on the sidebar edge does not write back to config"
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -68174,7 +68176,7 @@ test "③b: clicking the sidebar '+' button opens a new workspace" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
@@ -68211,7 +68213,7 @@ test "sidebar search blurs when clicking outside it (terminal/card) — restores
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리
@@ -68266,7 +68268,7 @@ test "view options menu: ⚙ toggles sidebar show-branch/folder, stays open, sig
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{}; // 레이아웃 기하만 격리
@@ -68321,7 +68323,7 @@ test "SYNSET1 설정 화면에 구문 색 행 열하나가 선다 — 검색으�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -68333,7 +68335,7 @@ test "SYNSET1 설정 화면에 구문 색 행 열하나가 선다 — 검색으�
     };
 
     const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
-    const role_count = @typeInfo(config_mod.theme.SyntaxRole).@"enum".fields.len;
+    const role_count = @import("type_info_fields").enumFields(config_mod.theme.SyntaxRole).len;
     try std.testing.expectEqual(role_count, cf.syntax_roles);
     try std.testing.expect(cf.syntaxRowStart() != null);
     // 팔레트 행은 구문 색 **뒤**에 선다 — 오프셋이 갈리면 클릭이 엉뚱한 행으로 간다.
@@ -68358,7 +68360,7 @@ test "SYNSET2 구문 색 행을 되돌리면 파일 줄도 지운다 — 안 지
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -68375,7 +68377,7 @@ test "SYNSET2 구문 색 행을 되돌리면 파일 줄도 지운다 — 안 지
     session.theme_user_custom = true;
 
     // 값을 넣고(파일에 줄이 생긴 상태를 흉내) 그 행을 고른다.
-    const idx = @intFromEnum(config_mod.theme.SyntaxRole.keyword);
+    const idx = @backingInt(config_mod.theme.SyntaxRole.keyword);
     session.loaded_config.config.theme.syntax[idx] = "#c678dd";
     const cf = try settings_ops.currentSectionFields(session, scratch.allocator());
     const start = cf.syntaxRowStart() orelse return error.NoSyntaxRows;
@@ -68412,7 +68414,7 @@ test "settings exposes chrome.tab-style and no removed chrome key comes back" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -68449,7 +68451,7 @@ test "settings 드롭다운 통합: enum 행 활성→팝업 열림·변형 목�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     settings_ops.toggleSettings(session);
@@ -68509,7 +68511,7 @@ test "settings 숫자 입력 박스 커밋: 편집→파싱→범위 clamp로 co
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     settings_ops.toggleSettings(session);
@@ -68568,7 +68570,7 @@ test "settingsPaletteArrowIntercept: 팔레트 행 폼-포커스 ←→=셀 이�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     settings_ops.toggleSettings(session);
@@ -68625,7 +68627,7 @@ test "settingsPaletteArrowIntercept: 검색 중에도 팔레트 ←→ 셀 이�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     settings_ops.toggleSettings(session);
@@ -68669,7 +68671,7 @@ test "settings 폰트 드롭다운 취소: 커스텀(번들 밖) 폰트 복원 (
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.loaded_config.config.font.family = "Menlo"; // 번들 밖 커스텀(정적 문자열)
@@ -68717,7 +68719,7 @@ test "settings 테마 프리셋 드롭다운 취소: 커스텀 테마 색·잠�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.loaded_config.config.theme_follow_system = false; // theme.preset 행이 보이게
@@ -68774,7 +68776,7 @@ test "settings 테마 프리셋 '사용자 지정' 확정: 미리본 프리셋 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.loaded_config.config.theme_follow_system = false;
@@ -68801,7 +68803,7 @@ test "settings 테마 프리셋 '사용자 지정' 확정: 미리본 프리셋 �
 
     // 열기(현재=사용자 지정 슬롯). 프리셋 프리뷰 → 색 바뀜. 다시 "사용자 지정" 슬롯 선택 후 확정.
     settings_ops.toggleSelectedSetting(session);
-    const n = @typeInfo(config_mod.theme.ThemePreset).@"enum".fields.len;
+    const n = @import("type_info_fields").enumFields(config_mod.theme.ThemePreset).len;
     session.chrome_host.settings.dropdown.selected = 0; // 첫 프리셋 미리보기
     session.applyDropdownPreview();
     try std.testing.expect(!std.mem.eql(u8, session.loaded_config.config.theme.background, orig_bg));
@@ -68825,7 +68827,7 @@ test "settings enum 드롭다운 취소: 안 바뀐 값은 dirty로 영속 안 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     settings_ops.toggleSettings(session);
@@ -68866,7 +68868,7 @@ test "settings toggle: 선택 행 config bool flip + config_dirty_keys persist �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -68923,7 +68925,7 @@ test "settings 항목 리셋(§6.11): 값 변경 시 그 행만 is_default=false
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -68996,7 +68998,7 @@ test "settings notifications.osc toggle requests macOS authorization once" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69036,7 +69038,7 @@ test "settings theme.preset 행: follow-system on이면 숨김, off면 표시 (�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69077,7 +69079,7 @@ test "settings window.background-image: 행 활성→파일 선택창 요청, pr
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69131,7 +69133,7 @@ test "settings HSV picker 스포이드 ABI: settings_eyedropper→pending, take 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69162,7 +69164,7 @@ test "settings palette grid: theme 섹션 마지막 행에서 셀 hex 편집 →
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69226,7 +69228,7 @@ test "settings HSV picker 커밋: theme color 행 Enter→picker 열림, pickerR
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69282,7 +69284,7 @@ test "settings keybind recorder: 입력 섹션 행 녹음→캡처→rebind + �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69338,7 +69340,7 @@ test "settings global hotkey: .global_hotkey 섹션 3행 노출 + rebind가 glob
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69412,7 +69414,7 @@ test "global hotkey live re-register: rebuildGlobalHotkeys가 descriptor 재생�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69487,7 +69489,7 @@ test "reloadConfig: 옛 arena 문자열을 가리키는 write-back 대기열을 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69519,7 +69521,7 @@ test "settings keybind unbind: keybind 행 Backspace → 사용자 바인딩 해
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69581,7 +69583,7 @@ test "settings keybind 충돌: 이미 다른 액션에 묶인 chord로 rebind �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69618,7 +69620,7 @@ test "settings 전역 단축키 등록 불가 키: 폼 상단 배너(세팅 유�
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69658,7 +69660,7 @@ test "settings keybind unbind 다중-chord: 빌트인 chord가 2개인 액션도
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69696,7 +69698,7 @@ test "settings keybind 완전 교체: rebind하면 그 액션 빌트인 chord가
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69739,7 +69741,7 @@ test "settings keybind 녹음: 다른 사용자 바인딩·터미널 매크로�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     defer settings_ops.clearConfigDirty(session);
@@ -69786,7 +69788,7 @@ test "settings keybind stale unbind 정리: unbind한 chord를 다시 바인딩�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69864,7 +69866,7 @@ test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -69886,7 +69888,7 @@ test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 �
     try std.testing.expectEqual(@as(usize, 0), cf.enums.len); // "split" 미매칭
     try std.testing.expect(cf.bools.len >= 1); // 교차 섹션: workspace.split-inherit-cwd(다른 섹션) 매칭
     try std.testing.expectEqual(@as(usize, 6), cf.keybind_entries.len);
-    for (cf.keybind_entries) |e| try std.testing.expect(std.ascii.indexOfIgnoreCase(e.title, "split") != null);
+    for (cf.keybind_entries) |e| try std.testing.expect(std.ascii.findIgnoreCase(e.title, "split") != null);
 
     // keybindRowStart는 앞선 schema 행(여기선 split bool 등) 다음. 그 행 녹음→캡처가 **필터된 첫 keybind 엔트리**(Split Right)를
     // rebind해야 한다(교차 섹션 필터 후에도 인덱스 정합 — keybindRowStart가 정확히 keybind_entries[0]을 가리킨다).
@@ -69917,7 +69919,7 @@ test "mouse-hide-while-typing: IME 확정(글자) 입력 시 takeMouseHide 신�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.loaded_config.config.input.mouse_hide_while_typing = true;
@@ -69953,7 +69955,7 @@ test "settings env 삭제: Backspace로 env.<KEY> 행 삭제 → config.env에�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -70015,7 +70017,7 @@ test "settings env/shell.args: terminal 섹션 synthetic text 행 — shell.args
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -70091,7 +70093,7 @@ test "detectThemePreset / applyThemePreset / resetAllSettings: 테마 프리셋�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -70173,7 +70175,7 @@ test "resetAllSettings: session.keep-alive-after-quit은 초기화 예외로 보
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -70235,7 +70237,7 @@ test "G2 keep-alive row Reset과 Backspace는 live snapshot과 write-back queue�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -70284,7 +70286,7 @@ test "G2 stale Window 전체 Reset은 app-global keep-alive snapshot과 같은 o
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -70323,7 +70325,7 @@ test "G2 전체 Reset atomic replace 실패는 keep-alive provenance와 기존 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -70363,12 +70365,12 @@ test "테마 프리셋 잠금: 사용자 지정 순환 + 프리셋 활성 시 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
     const Preset = config_mod.theme.ThemePreset;
-    const n = @typeInfo(Preset).@"enum".fields.len;
+    const n = @import("type_info_fields").enumFields(Preset).len;
 
     // 프리셋 색 + 사용자 미전환 → 활성(잠금).
     session.loaded_config.config.theme = config_mod.theme.presetColors(.maru);
@@ -70376,7 +70378,7 @@ test "테마 프리셋 잠금: 사용자 지정 순환 + 프리셋 활성 시 �
     try std.testing.expect(session.themePresetActive());
 
     // 마지막 프리셋에서 +1 → "사용자 지정": 색 보존 + theme_user_custom=true + 잠금 해제(색을 안 바꾼다).
-    const last: Preset = @enumFromInt(n - 1);
+    const last: Preset = @fromBackingInt(@intCast(n - 1));
     session.loaded_config.config.theme = config_mod.theme.presetColors(last);
     session.theme_user_custom = false;
     const last_bg = session.loaded_config.config.theme.background;
@@ -70437,7 +70439,7 @@ test "isWindowDragRegion: only empty header area drags the window (not icons/sea
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -70481,7 +70483,7 @@ test "sidebar collapse toggle: hides (width 0, pt preserved) and the top-left bu
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -70537,7 +70539,7 @@ test "metalFrame chrome 기하는 투영 스탬프다 — live 메트릭이 셀�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -70567,7 +70569,7 @@ test "metalFrame chrome 기하는 투영 스탬프다 — live 메트릭이 셀�
     session.dispatchAppAction(.{ .increase_font_size = font_size_step });
     try std.testing.expect(!std.meta.eql(session.chromeGeometrySnapshot(), stamped)); // live 가 실제로 바뀌었다
     const held = session.metalFrame();
-    inline for (@typeInfo(metal_frame.ChromeFrameGeometry).@"struct".fields) |f| {
+    inline for (@import("type_info_fields").structFields(metal_frame.ChromeFrameGeometry)) |f| {
         try std.testing.expectEqual(@field(stamped.frame, f.name), @field(held, f.name));
     }
 
@@ -70575,7 +70577,7 @@ test "metalFrame chrome 기하는 투영 스탬프다 — live 메트릭이 셀�
     _ = try session.tick();
     const live_after = session.chromeGeometrySnapshot();
     const fresh = session.metalFrame();
-    inline for (@typeInfo(metal_frame.ChromeFrameGeometry).@"struct".fields) |f| {
+    inline for (@import("type_info_fields").structFields(metal_frame.ChromeFrameGeometry)) |f| {
         try std.testing.expectEqual(@field(live_after.frame, f.name), @field(fresh, f.name));
     }
     try std.testing.expect(std.meta.eql(live_after, session.metal_buffer.chrome_geometry)); // frame 으로 안 나가는 몫까지 새 값
@@ -70595,7 +70597,7 @@ test "gpu quad 수명: drop은 자기 레이어만·순서 보존, rebuildSideba
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -70661,7 +70663,7 @@ test "SB1: 상태바 높이는 텍스트 행 + 여백을 담고, 하한은 폰�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -70836,7 +70838,7 @@ test "DSB3 비교 뷰에서도 상태바 커서 항목이 뜬다 — 제품 경�
     const Id = chrome.components.status_bar.ItemId;
     var cursor_at: ?usize = null;
     for (status_bar_ops.statusBarTree(session).entries, 0..) |e, i| {
-        if (@as(Id, @enumFromInt(e.id)) == .editor_cursor) cursor_at = i;
+        if (@as(Id, @fromBackingInt(@intCast(e.id))) == .editor_cursor) cursor_at = i;
     }
     // ⑴ **뜬다** — 전에는 `cursorPosition` 이 비교에서 `null` 을 내 이 항목이 없었다.
     try std.testing.expect(cursor_at != null);
@@ -70848,7 +70850,7 @@ test "DSB3 비교 뷰에서도 상태바 커서 항목이 뜬다 — 제품 경�
     status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     var gone = true;
     for (status_bar_ops.statusBarTree(session).entries) |e| {
-        if (@as(Id, @enumFromInt(e.id)) == .editor_cursor) gone = false;
+        if (@as(Id, @fromBackingInt(@intCast(e.id))) == .editor_cursor) gone = false;
     }
     try std.testing.expect(gone);
 }
@@ -70900,7 +70902,7 @@ test "DSB6 숫자가 잘리면 아예 안 낸다 — 비교 뷰 커서 항목의
     status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     var wide_has = false;
     for (status_bar_ops.statusBarTree(session).entries) |e| {
-        if (@as(Id, @enumFromInt(e.id)) == .editor_cursor) wide_has = true;
+        if (@as(Id, @fromBackingInt(@intCast(e.id))) == .editor_cursor) wide_has = true;
     }
     try std.testing.expect(wide_has);
 
@@ -70911,7 +70913,7 @@ test "DSB6 숫자가 잘리면 아예 안 낸다 — 비교 뷰 커서 항목의
     status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     var narrow_has = false;
     for (status_bar_ops.statusBarTree(session).entries) |e| {
-        if (@as(Id, @enumFromInt(e.id)) == .editor_cursor) narrow_has = true;
+        if (@as(Id, @fromBackingInt(@intCast(e.id))) == .editor_cursor) narrow_has = true;
     }
     try std.testing.expect(!narrow_has);
 }
@@ -70946,7 +70948,7 @@ test "SBL4 상태바 LSP 항목 — 서버가 없으면 「설치」 항목이 �
 
     const Id = chrome.components.status_bar.ItemId;
     var lsp_rect: ?chrome.ui.layout.UiRect = null;
-    for (status_bar_ops.statusBarTree(session).entries) |e| if (@as(Id, @enumFromInt(e.id)) == .editor_lsp) {
+    for (status_bar_ops.statusBarTree(session).entries) |e| if (@as(Id, @fromBackingInt(@intCast(e.id))) == .editor_lsp) {
         lsp_rect = e.rect;
     };
     const r = lsp_rect orelse return error.NoLspItem; // ⑴ 뜬다
@@ -70988,7 +70990,7 @@ test "SBL3 상태바 언어 항목 — 뜨고, 자리가 맞고, 표시 전용�
     const Id = chrome.components.status_bar.ItemId;
     var lang_at: ?usize = null;
     var eol_at: ?usize = null;
-    for (status_bar_ops.statusBarTree(session).entries, 0..) |e, i| switch (@as(Id, @enumFromInt(e.id))) {
+    for (status_bar_ops.statusBarTree(session).entries, 0..) |e, i| switch (@as(Id, @fromBackingInt(@intCast(e.id)))) {
         .editor_language => lang_at = i,
         .editor_eol => eol_at = i,
         else => {},
@@ -71016,7 +71018,7 @@ test "SBL3 상태바 언어 항목 — 뜨고, 자리가 맞고, 표시 전용�
     {
         var right_n: usize = 0;
         for (status_bar_ops.statusBarTree(session).entries) |e| {
-            const id = @as(Id, @enumFromInt(e.id));
+            const id = @as(Id, @fromBackingInt(@intCast(e.id)));
             if (id != .git_branch and id != .cwd) right_n += 1;
         }
         try std.testing.expect(right_n <= max_status_bar_right_items);
@@ -71029,7 +71031,7 @@ test "SBL3 상태바 언어 항목 — 뜨고, 자리가 맞고, 표시 전용�
     status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     var lang_after: ?usize = null;
     for (status_bar_ops.statusBarTree(session).entries, 0..) |e, i| {
-        if (@as(Id, @enumFromInt(e.id)) == .editor_language) lang_after = i;
+        if (@as(Id, @fromBackingInt(@intCast(e.id))) == .editor_language) lang_after = i;
     }
     try std.testing.expect(lang_after == null);
 }
@@ -71063,7 +71065,7 @@ test "SB-MAXCOL: 가로 보기가 상한에 걸리면 상태바가 «알린다»
     status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     var capped_seen = false;
     for (status_bar_ops.statusBarTree(session).entries) |e| {
-        const id: chrome.components.status_bar.ItemId = @enumFromInt(e.id);
+        const id: chrome.components.status_bar.ItemId = @fromBackingInt(@intCast(e.id));
         if (id == .editor_degraded) capped_seen = true;
     }
     // 픽스처 자기 검증 — 정말 상한에 걸렸다.
@@ -71079,7 +71081,7 @@ test "SB-MAXCOL: 가로 보기가 상한에 걸리면 상태바가 «알린다»
     status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     var still_seen = false;
     for (status_bar_ops.statusBarTree(session).entries) |e| {
-        const id: chrome.components.status_bar.ItemId = @enumFromInt(e.id);
+        const id: chrome.components.status_bar.ItemId = @fromBackingInt(@intCast(e.id));
         if (id == .editor_degraded) still_seen = true;
     }
     try std.testing.expect(!still_seen);
@@ -71106,7 +71108,7 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
     // ① 터미널이 활성이면 **하나도** 안 나온다.
     status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     for (status_bar_ops.statusBarTree(session).entries) |e| {
-        const id: chrome.components.status_bar.ItemId = @enumFromInt(e.id);
+        const id: chrome.components.status_bar.ItemId = @fromBackingInt(@intCast(e.id));
         try std.testing.expect(id != .editor_readonly and id != .editor_eol and id != .editor_degraded);
     }
 
@@ -71119,7 +71121,7 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
     var readonly_at: ?usize = null;
     var eol_at: ?usize = null;
     for (status_bar_ops.statusBarTree(session).entries, 0..) |e, i| {
-        switch (@as(chrome.components.status_bar.ItemId, @enumFromInt(e.id))) {
+        switch (@as(chrome.components.status_bar.ItemId, @fromBackingInt(@intCast(e.id)))) {
             .editor_readonly => readonly_at = i,
             .editor_eol => eol_at = i,
             else => {},
@@ -71139,7 +71141,7 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
     readonly_at = null;
     eol_at = null;
     for (status_bar_ops.statusBarTree(session).entries, 0..) |e, i| {
-        switch (@as(chrome.components.status_bar.ItemId, @enumFromInt(e.id))) {
+        switch (@as(chrome.components.status_bar.ItemId, @fromBackingInt(@intCast(e.id)))) {
             .editor_readonly => readonly_at = i,
             .editor_eol => eol_at = i,
             else => {},
@@ -71157,7 +71159,7 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
     {
         var lang_at: ?usize = null;
         for (status_bar_ops.statusBarTree(session).entries, 0..) |e, i| {
-            if (@as(chrome.components.status_bar.ItemId, @enumFromInt(e.id)) == .editor_language) lang_at = i;
+            if (@as(chrome.components.status_bar.ItemId, @fromBackingInt(@intCast(e.id))) == .editor_language) lang_at = i;
         }
         // 픽스처가 `selection.zig` 를 열었으므로 문법이 있다 — 항목이 **떠야** 한다.
         try std.testing.expect(lang_at != null);
@@ -71184,7 +71186,7 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
     var cursor_at: ?usize = null;
     var group_x: ?f32 = null; // 커서를 뺀 편집기 항목들의 가장 오른쪽 x
     for (status_bar_ops.statusBarTree(session).entries, 0..) |e, i| {
-        switch (@as(chrome.components.status_bar.ItemId, @enumFromInt(e.id))) {
+        switch (@as(chrome.components.status_bar.ItemId, @fromBackingInt(@intCast(e.id)))) {
             .editor_cursor => cursor_at = i,
             .editor_degraded, .editor_readonly, .editor_eol => {
                 if (group_x == null or e.rect.x > group_x.?) group_x = e.rect.x;
@@ -71224,7 +71226,7 @@ test "SB1: 조립된 우측 항목은 전부 우측 후보 원장 안에 있다"
     const bar_mid = status_bar_ops.statusBarTree(session).entries.len;
     try std.testing.expect(bar_mid > 0); // 아무것도 안 실렸으면 아래가 항진명제다
     for (status_bar_ops.statusBarTree(session).entries) |e| {
-        const id: sb.ItemId = @enumFromInt(e.id);
+        const id: sb.ItemId = @fromBackingInt(@intCast(e.id));
         if (id == .git_branch or id == .cwd) continue; // 좌측 전용
         var found = false;
         for (sb.right_candidates) |c| {
@@ -71244,7 +71246,7 @@ test "SB1: 상태바 경로 항목은 끝이 아니라 중간을 생략한다" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -71262,7 +71264,7 @@ test "SB1: 상태바 경로 항목은 끝이 아니라 중간을 생략한다" {
     // 경로가 실제로 바까지 흐른다(항목이 tree에 선다).
     var cwd_entry: ?chrome.ui.tree.RectEntry = null;
     for (status_bar_ops.statusBarTree(session).entries) |e| {
-        if (e.id == @intFromEnum(chrome.components.status_bar.ItemId.cwd)) cwd_entry = e;
+        if (e.id == @backingInt(chrome.components.status_bar.ItemId.cwd)) cwd_entry = e;
     }
     const entry = cwd_entry orelse return error.CwdItemMissing;
 
@@ -71308,7 +71310,7 @@ test "SB1: reload로 status-bar.show를 끄면 pane 크기도 새 값으로 다�
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config", .data = "status-bar.show = false\n" });
     var cfg_path_buf: [256]u8 = undefined;
-    const cfg_path = try std.fmt.bufPrintZ(&cfg_path_buf, ".zig-cache/tmp/{s}/config", .{tmp.sub_path});
+    const cfg_path = try std.fmt.bufPrintSentinel(&cfg_path_buf, ".zig-cache/tmp/{s}/config", .{tmp.sub_path}, 0);
 
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
@@ -71317,7 +71319,7 @@ test "SB1: reload로 status-bar.show를 끄면 pane 크기도 새 값으로 다�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -71368,7 +71370,7 @@ test "SB1: 브랜치 메뉴는 상태바를 덮지 않는다" {
         .cols = 80,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -71454,7 +71456,7 @@ test "WP-F1: 불변식이 터미널 활성 시 find를 건드리지 않고, 돌�
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -71498,7 +71500,7 @@ test "WP-F1: pane 전환으로 웹이 활성이 돼도 스크롤백 매치가 �
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -71540,7 +71542,7 @@ test "WP-F1: find를 연 채 웹 탭으로 전환하면 대상이 페이지로 �
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -71578,7 +71580,7 @@ test "WP-F1 R9: found/none 표시기가 셀까지 도달한다(긴 검색어와 
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -71647,7 +71649,7 @@ test "WP-F1 R8 프로브: 웹 탭에서 Enter/Shift+Enter가 페이지 다음·�
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -71686,7 +71688,7 @@ test "WP-F1 R7 프로브: 닫아 둔 find는 탭 복귀로 화면을 스크롤�
         .cols = 80,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -71730,7 +71732,7 @@ test "WP-F1 R6 프로브: 닫힌 동안 탭이 바뀌어도 대상이 따라온�
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -71768,7 +71770,7 @@ test "WP-F1 R5 프로브: 웹에 들렀다 터미널로 돌아오면 스크롤�
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -71805,7 +71807,7 @@ test "WP-F1 R4 프로브: 결과는 제출한 탭에만 붙고, 역방향이 전
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -71850,7 +71852,7 @@ test "WP-F1: 전달 실패를 신고하면 다음 tick이 다시 낸다" {
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -71894,7 +71896,7 @@ test "WP-F1 R2 프로브: 다른 웹 탭으로 옮기면 그 탭에도 질의가
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -71951,7 +71953,7 @@ test "WP-F1: 웹 탭 카운터는 0/0이 아니라 found/none이다" {
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -72045,7 +72047,7 @@ test "N1: 편집기 Term을 열고 세션을 닫으면 문서·줄·경로가 �
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -72080,7 +72082,7 @@ test "N1: 컨트롤 플레인이 편집기를 editor detail로 낸다" {
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -72200,7 +72202,7 @@ test "WP-F1: browser도 페이지 검색으로 가고, 활성이 터미널이면
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -72243,7 +72245,7 @@ test "WP-F1: 웹 탭에서 ⌘G는 터미널 검색어로 엉뚱한 동작을 �
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -72278,7 +72280,7 @@ test "WP-F1: 마크다운 웹 탭에서 ⌘F 검색어가 그 탭의 페이지�
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -72333,7 +72335,7 @@ test "SB-R: 리소스 항목은 첫 표본에 안 뜨고 두 번째 표본부터
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -72376,7 +72378,7 @@ test "SB-A: 폴링이 앱 자신을 표본에 넣고 합계에 반영한다" {
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -72419,7 +72421,7 @@ test "SB-R: 같은 표시가 나오면 metal_dirty를 세우지 않는다" {
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -72468,7 +72470,7 @@ test "SB-A: 앱 행은 무거운 순 정렬 밖에서 맨 아래 고정이고 �
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -72531,7 +72533,7 @@ test "SB-T: 팝오버 머리글 합계는 상태바 띠와 같은 tick의 값이
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -72584,7 +72586,7 @@ test "SB-H: 세션 호스트 행도 정렬 밖 고정이고 꼬리 수는 실제
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -72642,7 +72644,7 @@ test "SB-P: 열린 뒤 값이 바뀌어도 행 순서와 개수가 그대로다"
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -72692,7 +72694,7 @@ test "SB-P: 열린 채 상태바가 숨으면 팝오버도 닫힌다" {
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -72727,7 +72729,7 @@ test "SB-P: 두 번째 행을 고르면 그 탭으로 간다(머리글만큼 밀
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -72773,7 +72775,7 @@ test "SB-P: 사라진 탭 행은 숫자 대신 값 없음으로 바뀐다" {
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -72808,7 +72810,7 @@ test "SB-P: 한글 탭 이름이 섞여도 숫자 열이 같은 칸에서 시작
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -72863,7 +72865,7 @@ test "SB-R: 폴링 두 번이면 실제 backend 표본으로 표시가 생긴다
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -72958,7 +72960,7 @@ fn cursorItemPublished(
     }
     status_bar_ops.collectStatusBarItems(session, &collected, pane_ops.paneFrameBuilder(session), colors);
     for (session.status_bar_entry_scratch[0..session.status_bar_entry_count]) |entry| {
-        if (entry.id == @intFromEnum(chrome.components.status_bar.ItemId.editor_cursor)) return true;
+        if (entry.id == @backingInt(chrome.components.status_bar.ItemId.editor_cursor)) return true;
     }
     return false;
 }
@@ -72976,7 +72978,7 @@ test "SB-R: 폭이 모자라면 잘린 숫자 대신 항목을 내린다" {
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -72998,7 +73000,7 @@ test "SB-R: 폭이 모자라면 잘린 숫자 대신 항목을 내린다" {
         status_bar_ops.collectStatusBarItems(session, &collected, pane_ops.paneFrameBuilder(session), colors);
         var resource_published = false;
         for (session.status_bar_entry_scratch[0..session.status_bar_entry_count]) |entry| {
-            if (entry.id == @intFromEnum(chrome.components.status_bar.ItemId.resource)) {
+            if (entry.id == @backingInt(chrome.components.status_bar.ItemId.resource)) {
                 resource_published = true;
                 break;
             }
@@ -73020,7 +73022,7 @@ test "SB-R: 폭이 모자라면 잘린 숫자 대신 항목을 내린다" {
         status_bar_ops.collectStatusBarItems(session, &collected, pane_ops.paneFrameBuilder(session), colors);
         var resource_published = false;
         for (session.status_bar_entry_scratch[0..session.status_bar_entry_count]) |entry| {
-            if (entry.id == @intFromEnum(chrome.components.status_bar.ItemId.resource)) {
+            if (entry.id == @backingInt(chrome.components.status_bar.ItemId.resource)) {
                 resource_published = true;
                 break;
             }
@@ -73041,7 +73043,7 @@ test "SB-R: 상태바가 숨겨져 있으면 표본을 재지 않고 표시도 �
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
@@ -73098,7 +73100,7 @@ test "SB1: 브랜치 목록 요청 중 상태바가 사라지면 메뉴를 열�
         .cols = 80,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -73130,7 +73132,7 @@ test "SB1: 브랜치 목록 버퍼를 비우면 열린 메뉴도 닫힌다(dangl
         .cols = 80,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -73181,7 +73183,7 @@ test "SB1: 브랜치 선택은 git switch를 터미널에 넣기만 한다" {
         .cols = 80,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -73233,7 +73235,7 @@ test "SB1: status-bar.show=false면 바가 사라지고 작업영역이 그만�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -73264,7 +73266,7 @@ test "P4 C3c checkpoint 실패 상태표시줄은 프레임 사이 유지되고 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // 사용자 config와 무관하게 이 테스트가 소유하는 status-bar 전제를 고정한다.
@@ -73273,7 +73275,7 @@ test "P4 C3c checkpoint 실패 상태표시줄은 프레임 사이 유지되고 
 
     session.setWorkspaceCheckpointFailure(2);
     _ = try session.tick();
-    const failure_id = @intFromEnum(chrome.components.status_bar.ItemId.workspace_checkpoint_failure);
+    const failure_id = @backingInt(chrome.components.status_bar.ItemId.workspace_checkpoint_failure);
     var seen = false;
     for (status_bar_ops.statusBarTree(session).entries) |entry| if (entry.id == failure_id) {
         seen = true;
@@ -73317,7 +73319,7 @@ fn soTestSession(allocator: std.mem.Allocator) !*AppSession {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     _ = try session.resize(1200, 700, 1000);
     return session;
@@ -73398,7 +73400,7 @@ test "SO6 실제 PTY — 안 보이는 탭의 출력은 사이드바만 요청�
             const deadline = std.Io.Clock.awake.now(s.io).nanoseconds + 5 * std.time.ns_per_s;
             while (true) {
                 _ = try s.tick();
-                if (s.output_redraw_counts[@intFromEnum(which)] > above) return true;
+                if (s.output_redraw_counts[@backingInt(which)] > above) return true;
                 if (std.Io.Clock.awake.now(s.io).nanoseconds >= deadline) return false;
                 try std.Io.sleep(s.io, std.Io.Duration.fromMilliseconds(1), .awake);
             }
@@ -73411,8 +73413,8 @@ test "SO6 실제 PTY — 안 보이는 탭의 출력은 사이드바만 요청�
             while (i < 60) : (i += 1) _ = try s.tick();
         }
     };
-    const sidebar = @intFromEnum(AppSession.OutputRedraw.sidebar);
-    const full = @intFromEnum(AppSession.OutputRedraw.full);
+    const sidebar = @backingInt(AppSession.OutputRedraw.sidebar);
+    const full = @backingInt(AppSession.OutputRedraw.full);
     const background_tab = tab_ops.activeTab(session);
     const background_id = background_tab.activePane().activeTerm().surface.id;
     _ = try tab_ops.newTab(session);
@@ -73580,8 +73582,8 @@ test "KA1 안 보이는 탭의 kitty 애니메이션은 프레임만 넘기고 �
             const core = &term.surface.core;
             var b64: [64]u8 = undefined;
             var seq: [200]u8 = undefined;
-            const red = [_]u8{ 255, 0, 0, 255 } ** 4;
-            const green = [_]u8{ 0, 255, 0, 255 } ** 4;
+            const red = array_repeat.repeat([_]u8{ 255, 0, 0, 255 }, 4);
+            const green = array_repeat.repeat([_]u8{ 0, 255, 0, 255 }, 4);
             try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &red)}));
             try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=7,z=100,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &green)}));
             try core.write("\x1b_Ga=p,i=7,q=2\x1b\\");
@@ -73654,7 +73656,7 @@ test "SB1: quick terminal(chrome_minimal)에는 상태바가 서지 않는다" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -73685,7 +73687,7 @@ test "SB1: 상태바 높이 변화가 spawn grid padding에 그대로 흡수된�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -73719,7 +73721,7 @@ test "SB1: 실제 크기 변화가 있는 resize는 상태바 호버를 비운�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1200, 700, 1000);
@@ -73728,7 +73730,7 @@ test "SB1: 실제 크기 변화가 있는 resize는 상태바 호버를 비운�
 
     var target: ?chrome.ui.tree.RectEntry = null;
     for (status_bar_ops.statusBarTree(session).entries) |e| {
-        if (e.id == @intFromEnum(chrome.components.status_bar.ItemId.notifications)) target = e;
+        if (e.id == @backingInt(chrome.components.status_bar.ItemId.notifications)) target = e;
     }
     const item = target orelse return error.NotificationItemMissing;
     const cx: f64 = @floatCast(item.rect.x + item.rect.width / 2);
@@ -73758,7 +73760,7 @@ test "SB1: 항목이 없는 상태바 구간은 텍스트 커서를 주지 않�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -73911,7 +73913,7 @@ test "SB1: 상태바로 도크를 열면 pane 레이아웃도 함께 갱신된�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -73948,7 +73950,7 @@ test "SB1: notice가 떠 있으면 상태바 휠이 그것을 닫는 처리를 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -73979,7 +73981,7 @@ test "SB1: 상태바로 들어와도 다른 영역의 hover 해제가 먼저 돈
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -73988,7 +73990,7 @@ test "SB1: 상태바로 들어와도 다른 영역의 hover 해제가 먼저 돈
     _ = try session.tick();
     var target: ?chrome.ui.tree.RectEntry = null;
     for (status_bar_ops.statusBarTree(session).entries) |e| {
-        if (e.id == @intFromEnum(chrome.components.status_bar.ItemId.notifications)) target = e;
+        if (e.id == @backingInt(chrome.components.status_bar.ItemId.notifications)) target = e;
     }
     const item = target orelse return error.NotificationItemMissing;
     const cx: f64 = @floatCast(item.rect.x + item.rect.width / 2);
@@ -74019,7 +74021,7 @@ test "SB1: 확인 모달이 열려 있으면 상태바 클릭이 항목을 실�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -74029,7 +74031,7 @@ test "SB1: 확인 모달이 열려 있으면 상태바 클릭이 항목을 실�
     _ = try session.tick();
     var target: ?chrome.ui.tree.RectEntry = null;
     for (status_bar_ops.statusBarTree(session).entries) |e| {
-        if (e.id == @intFromEnum(chrome.components.status_bar.ItemId.notifications)) target = e;
+        if (e.id == @backingInt(chrome.components.status_bar.ItemId.notifications)) target = e;
     }
     const item = target orelse return error.NotificationItemMissing;
     const cx: f64 = @floatCast(item.rect.x + item.rect.width / 2);
@@ -74060,7 +74062,7 @@ test "SB1: 항목이 tree에서 사라지면 호버도 지워진다" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -74092,7 +74094,7 @@ test "SB1: 에이전트 집계는 비활성 탭까지 센다(안 보이는 곳�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -74135,7 +74137,7 @@ test "SB1: 상태바 hit-test는 그려진 rect와 같은 자리를 가리킨다
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -74184,7 +74186,7 @@ test "SB1-S2b: 상태바 배경이 창 전폭으로 매 프레임 선다(bottom 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -74236,7 +74238,7 @@ test "SB1-S2b: 상태바 상단에 경계선이 서고 배경보다 뒤에 그�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -74284,7 +74286,7 @@ test "SB1-S2b: 상태바 상단에 경계선이 서고 배경보다 뒤에 그�
     status_bar_ops.collectStatusBarItems(session, &collected, pane_ops.paneFrameBuilder(session), .{ .default_fg = session.appearance.theme.foreground });
     const tree = status_bar_ops.statusBarTree(session);
     if (tree.entries.len == 0) return error.StatusBarTreeEmpty;
-    session.status_bar_hovered = @enumFromInt(tree.entries[0].id);
+    session.status_bar_hovered = @fromBackingInt(@intCast(tree.entries[0].id));
     session.metal_dirty = true; // chrome을 다시 짓게 한다(안 그러면 앞 프레임 quad가 그대로 남는다)
     _ = try session.tick();
 
@@ -74314,7 +74316,7 @@ test "SB1-S2a: metalFrame의 상태바 높이는 dock_layout 권위와 같다" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
@@ -74340,7 +74342,7 @@ test "placement_failed: 배치 진입에서 지워진다 — 부분 투영의 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -74379,7 +74381,7 @@ test "collapsed toggle: hover emits a highlight quad centred on the drawn toggle
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -74500,7 +74502,7 @@ test "notification badge circle vertically contains the header icon row the rend
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -74556,7 +74558,7 @@ test "collapsed notification bell: hit-test rect is concentric with the glyph, c
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -74602,7 +74604,7 @@ test "window.opacity → metalFrame.window_opacity_milli ×1000 (F1-1)" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -74631,7 +74633,7 @@ test "two tabs: createTab spawns a second shell and tick drains both (multi-tab)
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
@@ -74681,7 +74683,7 @@ test "Cmd+T opens a new Term in the active pane; Cmd+Shift+T opens a workspace" 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
@@ -74717,7 +74719,7 @@ test "Cmd+1..9 switches to the Nth workspace (out-of-range is a no-op)" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -74753,7 +74755,7 @@ test "handleKeyEvent applies user config keybindings (resolver wired from loaded
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -74784,7 +74786,7 @@ test "web app action dispatch bypasses terminal preprocessing and rejects a stal
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     var user_binds = [_]config_mod.AppBinding{
@@ -74836,7 +74838,7 @@ test "Term lifecycle: Cmd+T adds, Cmd+Opt+]/[ cycle, Cmd+W cascades Term to work
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const cmd: terminal.ModifierSet = .{ .command = true };
@@ -74886,7 +74888,7 @@ test "Cmd bracket keys cycle split panes through the key path" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const cmd: terminal.ModifierSet = .{ .command = true };
@@ -74913,7 +74915,7 @@ test "Cmd+Shift bracket keys cycle tabs through the key path" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.handleKeyEvent(.{ .key = .{ .char = 'T' }, .modifiers = .{ .command = true, .shift = true } }); // ⌘⇧T=새 워크스페이스 → 2탭, 활성 1
@@ -74943,7 +74945,7 @@ test "closeTab tears down a tab and reselects, last tab closes the session" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -75103,7 +75105,7 @@ test "C3-3b5 AppSession은 runtime pending window와 확인 수락을 tick 재�
         try std.testing.expectEqual(@as(usize, 0), session.tabs.items.len);
         try std.testing.expect(session.ended_seen);
         try std.testing.expectEqual(
-            @intFromEnum(session_host.pending_term_close_graph.GraphLifecycle.consumed),
+            @backingInt(session_host.pending_term_close_graph.GraphLifecycle.consumed),
             session.pending_window_close_graph.lifecycle_raw,
         );
         try std.testing.expectEqual(@as(u32, 2), session.pending_window_close_graph.target_count);
@@ -75636,7 +75638,7 @@ test "large paste drains through the non-blocking queue without freezing ticks" 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -75692,7 +75694,7 @@ test "paste protection: 개행 붙여넣기는 확인 모달로 보류, 확인 �
                 .cols = 40,
                 .rows = 10,
                 .queue_capacity = 16,
-                .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+                .command_kind = @backingInt(CommandKind.controlled_smoke),
             });
             // 아래 단언들이 미리보기 요약("…N줄 더")을 **한국어 조각**으로 찾으므로 언어를 고정한다.
             // 반드시 `init` 뒤여야 한다 — init 이 `ui.language` 를 읽어 언어를 세우므로 앞에 걸면 지워진다.
@@ -75781,7 +75783,7 @@ test "imeEnd always closes the transaction even with a null key (no leak) and fa
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -75827,7 +75829,7 @@ test "sendTextAsKeys normalizes newlines to CR and imeBegin snaps to bottom" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const surface = term_ops.activeSurface(session);
@@ -75867,7 +75869,7 @@ test "commitComposition during terminal preedit does not deadlock (회귀: bd5fd
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const surface = term_ops.activeSurface(session);
@@ -75896,7 +75898,7 @@ test "terminal IME preedit replaces the visible cell on every marked transaction
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -75961,7 +75963,7 @@ test "터미널 2031: follow-system 외관 전환이 구독한 자식 PTY 에 CS
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -76045,8 +76047,8 @@ test "터미널 2031: follow-system 외관 전환이 구독한 자식 PTY 에 CS
 // dawn» 이 라이트로, 나머지가 다크로 갈리는지 실측한다 — 한 프리셋이라도 어긋나면 그 테마 사용자는 반대 통지를 받는다.
 test "터미널 2031 실데이터: theme.preset 16개의 배경 밝기 등급이 이름(light/latte/dawn)과 맞는다" {
     const theme_mod = config_mod.theme;
-    inline for (@typeInfo(theme_mod.ThemePreset).@"enum".fields) |f| {
-        const preset: theme_mod.ThemePreset = @enumFromInt(f.value);
+    inline for (@import("type_info_fields").enumFields(theme_mod.ThemePreset)) |f| {
+        const preset: theme_mod.ThemePreset = @fromBackingInt(@intCast(f.value));
         const colors = theme_mod.presetColors(preset);
         const bg = try config_mod.appearance.parseHexColor(colors.background);
         const dark = maru.terminal.core.isDarkBackground(.{ .r = bg.r, .g = bg.g, .b = bg.b });
@@ -76068,7 +76070,7 @@ test "terminal IME pin tombstones a reaped target and never retargets the same t
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try tab_ops.newTab(session); // 두 번째 탭이 active
@@ -76101,7 +76103,7 @@ test "terminal IME pin tombstone survives across key transactions and suppresses
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try tab_ops.newTab(session); // 두 번째 탭이 active
@@ -76143,7 +76145,7 @@ test "terminal IME pin wins over a newly opened palette during commit" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const surface = term_ops.activeSurface(session);
@@ -76176,7 +76178,7 @@ test "commitComposition sends committed text via non-blocking path, not blocking
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const surface = term_ops.activeSurface(session);
@@ -76210,7 +76212,7 @@ test "imeEnd commit + transaction-less imeInsert send via non-blocking path (#10
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -76242,7 +76244,7 @@ test "terminal IME next marked syllable keeps its place until committed cursor e
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -76309,7 +76311,7 @@ test "CR2d1 AppSession batch routing은 remote ownership 뒤 Window queue를 만
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -76351,7 +76353,7 @@ test "imeEnd commit and Enter replay remain ordered in one surface FIFO under ba
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -76383,7 +76385,7 @@ test "IME commit and replay pair admission is atomic on queue allocation failure
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -76393,7 +76395,7 @@ test "IME commit and replay pair admission is atomic on queue allocation failure
     var large: [512]u8 = undefined;
     @memset(&large, 'x');
 
-    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
     session.allocator = failing.allocator();
     const admitted = input_ops.queueInputPair(session, target_id, &large, true, "\r");
     session.allocator = allocator;
@@ -76414,7 +76416,7 @@ test "focus-loss commit preserves preedit and pin when ordered queue admission i
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -76450,7 +76452,7 @@ test "surface별 paste 큐: 대상은 enqueue 시점에 고정되고 큐끼리 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -76662,7 +76664,7 @@ test "appendPaneScrollbars: split 각 pane이 자기 idle_ticks로 독립 fade (
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -77470,14 +77472,14 @@ test "M3d-2a-i 결함[0] moveWorkspaceToSession으로 빈 source: tick()·close(
     // tick(): 0탭이라 readActiveSnapshot/투영/요약의 activeSurface().? deref로 패닉하면 안 된다 → app_should_terminate 보고.
     const s = try src.tick();
     try std.testing.expect(s.ended != 0);
-    try std.testing.expectEqual(@intFromEnum(EventKind.app_should_terminate), s.last_event_kind);
+    try std.testing.expectEqual(@backingInt(EventKind.app_should_terminate), s.last_event_kind);
     // 두 번 tick해도 안전(idempotent — 여전히 0탭).
     _ = try src.tick();
     try std.testing.expectEqual(@as(usize, 0), src.tabs.items.len);
 
     // close(): surface_initialized=true인데 0탭이라 activeSurface().process_state deref로 패닉하면 안 된다.
     const cs = src.close();
-    try std.testing.expectEqual(@intFromEnum(EventKind.close_requested), cs.last_event_kind);
+    try std.testing.expectEqual(@backingInt(EventKind.close_requested), cs.last_event_kind);
     try std.testing.expect(src.ended_seen);
 }
 
@@ -77499,7 +77501,7 @@ test "M3d-2a-i 결함[0] mergeSessionInto로 빈 source: tick()·close()가 0탭
 
     const s = try src.tick(); // 패닉 없이 ended
     try std.testing.expect(s.ended != 0);
-    try std.testing.expectEqual(@intFromEnum(EventKind.app_should_terminate), s.last_event_kind);
+    try std.testing.expectEqual(@backingInt(EventKind.app_should_terminate), s.last_event_kind);
     _ = src.close(); // 패닉 없이 정리(defer deinit이 최종 검증)
 }
 
@@ -78615,7 +78617,7 @@ test "FP16 파일 패널은 eviction하지 않는다 — 열린 entry는 surface
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -79002,7 +79004,7 @@ test "host-backed hover: host가 실어 준 링크로 밑줄과 링크 커서가
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -79057,7 +79059,7 @@ test "host-backed hover: client가 link-detection 프리셋으로 host 목록을
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -79109,8 +79111,8 @@ test "packLinkScopes: config 프리셋을 wire 비트로 굽는다(LinkScope 값
     try std.testing.expectEqual(@as(u8, 0b0000_0001), AppSession.packLinkScopes(terminal.link_scopes_web));
     try std.testing.expectEqual(@as(u8, 0), AppSession.packLinkScopes(terminal.link_scopes_none));
     // 개별 비트 위치가 enum 값과 1:1인지(host unpackLinkScopes의 짝).
-    try std.testing.expectEqual(@as(u8, 1) << @intCast(@intFromEnum(terminal.LinkScope.home_path)), AppSession.packLinkScopes(.{ .home_path = true }));
-    try std.testing.expectEqual(@as(u8, 1) << @intCast(@intFromEnum(terminal.LinkScope.bare_relative)), AppSession.packLinkScopes(.{ .bare_relative = true }));
+    try std.testing.expectEqual(@as(u8, 1) << @intCast(@backingInt(terminal.LinkScope.home_path)), AppSession.packLinkScopes(.{ .home_path = true }));
+    try std.testing.expectEqual(@as(u8, 1) << @intCast(@backingInt(terminal.LinkScope.bare_relative)), AppSession.packLinkScopes(.{ .bare_relative = true }));
 }
 
 // 로컬(in-process) Cmd+hover 회귀 가드. host-backed 분기를 넣으면서 hoverCursor가 두 갈래가 됐으므로, 원격을
@@ -79126,7 +79128,7 @@ test "로컬 hover: client core를 직접 분류해 밑줄과 링크 커서가 �
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -79172,7 +79174,7 @@ test "host-backed motion 리포팅: 관측 모드가 any(1003)면 motion을 보�
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -79218,26 +79220,26 @@ test "host-backed motion 리포팅: 관측 모드가 any(1003)면 motion을 보�
 
     // 트래킹 꺼짐 → motion 무시(dedup 상태도 비운다).
     term.rt.observation.mouse_tracking = false;
-    term.rt.observation.mouse_tracking_mode = @intFromEnum(terminal.MouseTracking.none);
+    term.rt.observation.mouse_tracking_mode = @backingInt(terminal.MouseTracking.none);
     session.mouseMoved(x, y, 0);
     try std.testing.expect(session.last_motion_cell == null);
     try std.testing.expectEqual(@as(usize, 0), report_bytes.items.len);
 
     // button-event(1002)도 버튼 없는 hover는 보내지 않는다.
-    term.rt.observation.mouse_tracking_mode = @intFromEnum(terminal.MouseTracking.button);
+    term.rt.observation.mouse_tracking_mode = @backingInt(terminal.MouseTracking.button);
     session.mouseMoved(x, y, 0);
     try std.testing.expect(session.last_motion_cell == null);
     try std.testing.expectEqual(@as(usize, 0), report_bytes.items.len);
 
     // 클릭 트래킹(1000)만 켜짐 → motion은 여전히 안 보낸다(1000만 켠 앱에 motion을 쏟으면 오작동).
     term.rt.observation.mouse_tracking = true;
-    term.rt.observation.mouse_tracking_mode = @intFromEnum(terminal.MouseTracking.normal);
+    term.rt.observation.mouse_tracking_mode = @backingInt(terminal.MouseTracking.normal);
     session.mouseMoved(x, y, 0);
     try std.testing.expect(session.last_motion_cell == null);
     try std.testing.expectEqual(@as(usize, 0), report_bytes.items.len);
 
     // any-event(1003) → motion을 보낸다. 예전에는 placeholder core(.none)를 읽어 여기서도 null이었다.
-    term.rt.observation.mouse_tracking_mode = @intFromEnum(terminal.MouseTracking.any);
+    term.rt.observation.mouse_tracking_mode = @backingInt(terminal.MouseTracking.any);
     session.mouseMoved(x, y, 0);
     const reported = session.last_motion_cell orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 5), reported.col);
@@ -79279,7 +79281,7 @@ test "host-backed 스크롤바: host가 실어 준 스크롤 상태로 thumb이 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -79368,7 +79370,7 @@ test "host-backed 벨: 관측 카운터 증가로 울리고 리셋은 조용히 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -79432,7 +79434,7 @@ test "host-backed OSC 52 read: 관측 seq로 요청을 받고 정책은 client�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -79489,7 +79491,7 @@ test "host-backed 재접속: 첫 관측은 기준선만 잡고 지난 요청을 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -79693,7 +79695,7 @@ test "browser 전용 판정은 isBrowserTerm 하나가 소유한다 — markdown
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -79746,7 +79748,7 @@ test "FP16b B-1: 파일 entry 조회 API가 그룹 구조를 감춘다" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -80118,7 +80120,7 @@ test "host-backed find: 증분 검색과 네비가 둘 다 host 스크롤을 요
         .cols = 40,
         .rows = 6,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -80175,7 +80177,7 @@ test "도크 뷰: 탐색기 아닌 뷰의 클릭은 폴더 선택·트리 포커
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -80227,7 +80229,7 @@ test "도크 포인터: 도크 위의 더블·트리플 클릭은 터미널 선�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -80235,7 +80237,7 @@ test "도크 포인터: 도크 위의 더블·트리플 클릭은 터미널 선�
     const surface = term_ops.activeSurface(session);
     // 화면을 **꽉 채운다** — 중앙이 빈 줄이면 마지막 단언(터미널 본문 더블클릭은 정상)이 "단어가 없어서"
     // 실패해 게이트를 잘못 의심하게 된다.
-    try surface.core.write("hello world\r\n" ** 80);
+    try surface.core.write(array_repeat.repeat("hello world\r\n", 80));
 
     const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
     session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
@@ -80381,7 +80383,7 @@ test "소스 컨트롤: 대상 저장소는 활성 터미널 cwd가 먼저다(�
     var other_buf: [std.fs.max_path_bytes]u8 = undefined;
     const other = git_backend_mod.testTmpRepoPath(&other_buf, "tmp-scm-priority") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{other}) catch return error.SkipZigTest;
+    const rm_path = std.fmt.bufPrintSentinel(&rm_buf, "{s}", .{other}, 0) catch return error.SkipZigTest;
     _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", rm_path });
     defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", rm_path });
     if (!git_backend_mod.testRunQuiet(&.{ exe, "init", "-q", "-b", "main", other })) return error.SkipZigTest;
@@ -81755,8 +81757,8 @@ test "도크 뷰는 전부 활성 pane 을 따라간다 — 새 뷰는 여기서
     };
     const View = maru.session.dock_panel.View;
     var seen: usize = 0;
-    inline for (@typeInfo(View).@"enum".fields) |field| {
-        const view: View = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(View)) |field| {
+        const view: View = @fromBackingInt(@intCast(field.value));
         const entry: Entry = switch (view) {
             // 탐색기 root 는 활성 pane 터미널의 cwd 를 따라간다(ET-CWD).
             .explorer => .{
@@ -81835,7 +81837,7 @@ test "도크 뷰는 전부 활성 pane 을 따라간다 — 새 뷰는 여기서
     }
     // 뷰가 늘었는데 위 switch 만 채우고 이 숫자를 안 고치는 일은 없다 — switch 가 exhaustive 라
     // 컴파일이 먼저 깨진다. 이 단언은 **분류가 통째로 비는** 경우(필드 0개)를 막는다.
-    try std.testing.expectEqual(@typeInfo(View).@"enum".fields.len, seen);
+    try std.testing.expectEqual(@import("type_info_fields").enumFields(View).len, seen);
     try std.testing.expect(seen >= 4);
 
     // **넷이 같은 자리에서 돈다**(적대적 검증 3회차). `runFramePreHousekeeping` 이 매 프레임 넷을 굴리므로,
@@ -82489,7 +82491,7 @@ test "상태바 브랜치: `.git` 이벤트가 갱신을 앞당기고, 하한과
 
     // ⑷ **저장소가 사라지면 표시도 사라진다**(GUI에서 실제로 stale하던 그 경로).
     var git_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const git_dir = std.fmt.bufPrintZ(&git_dir_buf, "{s}/.git", .{repo}) catch return error.SkipZigTest;
+    const git_dir = std.fmt.bufPrintSentinel(&git_dir_buf, "{s}/.git", .{repo}, 0) catch return error.SkipZigTest;
     _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", git_dir });
     term.git_branch_polled_ns = 0;
     try std.testing.expect(git_ops.termGitBranchForCwd(session, term, repo) == null);
@@ -82606,7 +82608,7 @@ test "소스 컨트롤 스크롤 상한은 그린 목록에서 나온다" {
         .status = try git_backend_mod.worker_allocator.dupe(u8, status.items),
         .ok = true,
     };
-    session.scm_expanded[@intFromEnum(scm_view.Section.changes)] = true;
+    session.scm_expanded[@backingInt(scm_view.Section.changes)] = true;
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -82724,7 +82726,7 @@ test "소스 컨트롤: published tree의 행을 눌러 diff를 연다(component
     const header = rowCenter(session, 3, content.x, content.y);
     session.mouse(1, header.x, header.y, 0, 0);
     session.mouse(3, header.x, header.y, 0, 0);
-    try std.testing.expect(session.scm_collapsed[@intFromEnum(scm_view.Section.changes)]);
+    try std.testing.expect(session.scm_collapsed[@backingInt(scm_view.Section.changes)]);
 }
 
 test "소스 컨트롤: 그룹 헤더는 접기와 일괄 동작이 **서로 클릭을 훔치지 않는다**" {
@@ -86164,7 +86166,7 @@ test "턴 스냅샷이 링에 실리고 base 는 직전 턴의 키·제목을 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // 이 판정자는 신뢰와 무관한 턴 축을 잰다 — 판정 함수 없는 백엔드(판정자에서는 신뢰)를 미리 둔다. 제품 생성
@@ -86255,7 +86257,7 @@ test "AW4 화면이 뒤집은 배지에만 각주 표식이 붙는다 (§1.4 · 
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -86303,7 +86305,7 @@ test "AW1 훅이 blocked 여도 화면에 승인 chrome 이 없으면 배지가 
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -86326,7 +86328,7 @@ test "AW1 훅이 blocked 여도 화면에 승인 chrome 이 없으면 배지가 
 
     // ② 사용자가 승인했다. **훅은 그것을 모른다**(provider 가 해제 이벤트를 안 준다) — 훅 자리는 그대로
     //    `blocked` 다. 화면에서 chrome 이 사라지는 것이 유일한 근거이고, C1 이 그것으로 푼다.
-    try surface.core.write("\r\n" ** 60);
+    try surface.core.write(array_repeat.repeat("\r\n", 60));
     try surface.core.write("● 작업을 시작합니다\r\n  esc to interrupt\r\n");
     term.agent_output_batches +%= 1;
     agent_ops.pollAgentState(session, term, false);
@@ -86350,7 +86352,7 @@ test "AW3 훅 소스가 끊기면 훅 자리도 버린다 — 돌아왔을 때 �
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -86396,7 +86398,7 @@ test "AW5 작업 중(출력이 계속 있음)에는 chrome idle 이 훅의 runni
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -86439,7 +86441,7 @@ test "AW6 관찰기 재스캔 신호는 화면 batch·관측 revision 이고 obs
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -86493,7 +86495,7 @@ test "AW2 훅이 running 에 멈춰도 화면 idle 이 연속 3회면 턴이 닫
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -86554,7 +86556,7 @@ test "에이전트 화면이 running → idle이 되는 순간 작업트리가 �
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // 판정 함수 없는 백엔드(판정자 — 신뢰)를 미리 둔다 — 제품 경로가 게으르게 만들면 세션의 신뢰 판정이 꽂혀, 결정이 없는
@@ -86583,7 +86585,7 @@ test "에이전트 화면이 running → idle이 되는 순간 작업트리가 �
     // ② 턴 종료: footer가 사라지고 입력 프롬프트만 남는다(실측 규칙 `live_prompt` — 수평선 + `❯ `).
     //    화면 지우기로는 부족하다. 판정은 **스크롤백을 포함한 최근 48행**을 보므로, 실제 에이전트가 그러듯
     //    출력이 흘러 지난 footer가 꼬리 밖으로 밀려나야 한다(안 밀면 지운 화면인데도 옛 footer가 계속 잡힌다).
-    try surface.core.write("\r\n" ** 60);
+    try surface.core.write(array_repeat.repeat("\r\n", 60));
     try surface.core.write("───────────────────────────────────────\r\n❯ \r\n");
     term.agent_output_batches +%= 1;
     agent_ops.pollAgentState(session, term, false);
@@ -86631,7 +86633,7 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -86759,7 +86761,7 @@ test "파일 본문 메뉴는 웹뷰 포커스를 뺏지 않는다(다른 모달
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -86900,7 +86902,7 @@ fn initDockedRoutingSession(allocator: std.mem.Allocator, side: dock_panel.Side)
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     errdefer session.deinit();
     session.window_padding_px = .{};
@@ -86928,7 +86930,7 @@ test "divider capture는 split이 사라지면 carry verdict가 취소한다" {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -86978,7 +86980,7 @@ test "드래그 중 탭이 바뀌면 carry verdict가 divider capture를 끊는�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -87020,7 +87022,7 @@ test "divider probe는 move 수가 아니라 tick 수만큼 resize했음을 드�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -87070,7 +87072,7 @@ test "divider capture와 PointerGestureOwner는 같은 stream에 공존하지 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -87994,7 +87996,7 @@ test "Session Dock 검색은 사이드바 검색과 같은 입력 소유 판정�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.window_padding_px = .{};
@@ -88168,8 +88170,8 @@ fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
 test "InputFocus의 모든 값이 terminalOwnsInput 기대와 일치한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    inline for (std.meta.fields(AppSession.InputFocus)) |field| {
-        const focus: AppSession.InputFocus = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").fields(AppSession.InputFocus)) |field| {
+        const focus: AppSession.InputFocus = @fromBackingInt(@intCast(field.value));
         const session = try allocator.create(AppSession);
         defer allocator.destroy(session);
         try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
@@ -88177,7 +88179,7 @@ test "InputFocus의 모든 값이 terminalOwnsInput 기대와 일치한다" {
             .cols = 20,
             .rows = 5,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         defer session.deinit();
         session.window_padding_px = .{};
@@ -88216,7 +88218,7 @@ test "동시 활성일 때 host override는 우선순위 파생이 아니라 합
             .cols = 20,
             .rows = 5,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         defer session.deinit();
         session.window_padding_px = .{};
@@ -88246,7 +88248,7 @@ test "동시 활성일 때 host override는 우선순위 파생이 아니라 합
             .cols = 20,
             .rows = 5,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         defer session.deinit();
         session.window_padding_px = .{};
@@ -88280,8 +88282,8 @@ test "chrome_host 오버레이는 역할대로 입력 소유 두 축에 반영�
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     @setEvalBranchQuota(10_000);
-    inline for (std.meta.fields(ChromeHostField)) |field| {
-        const role = comptime modalInputRole(@as(ChromeHostField, @enumFromInt(field.value)));
+    inline for (@import("type_info_fields").fields(ChromeHostField)) |field| {
+        const role = comptime modalInputRole(@as(ChromeHostField, @fromBackingInt(@intCast(field.value))));
         if (comptime role != .not_an_overlay) {
             const session = try allocator.create(AppSession);
             defer allocator.destroy(session);
@@ -88290,7 +88292,7 @@ test "chrome_host 오버레이는 역할대로 입력 소유 두 축에 반영�
                 .cols = 20,
                 .rows = 5,
                 .queue_capacity = 16,
-                .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+                .command_kind = @backingInt(CommandKind.controlled_smoke),
             });
             defer session.deinit();
             session.window_padding_px = .{};
@@ -88337,7 +88339,7 @@ test "세션 도크 스크롤바 드래그는 move 수가 아니라 tick 수만�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -88413,7 +88415,7 @@ test "세션 도크 스크롤바 드래그는 매 프레임 tree 재발행을 �
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -88499,7 +88501,7 @@ test "도크 view bar는 뷰·터미널 폰트와 무관하고 터미널 탭 바
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1920, 1200, 2000);
@@ -88561,7 +88563,7 @@ test "사이드바 헤더 검색 줄이 폰트 크기와 무관하게 상단 바
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1920, 1200, 2000);
@@ -88692,7 +88694,7 @@ test "사이드바 검색 텍스트는 폰트를 키워도 상단 바 밴드를 
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1920, 1200, 2000);
@@ -88738,7 +88740,7 @@ test "사이드바 검색 줄은 query·preedit·caret을 한 문자열로 합�
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -88886,7 +88888,7 @@ test "CR0b bootstrap 4 GUI child는 실제 bootstrap transcript를 게시한다"
     const runtime = publisher.runtime;
     try session_host.incident_bootstrap_contract.testing_api.writeChildTranscript(.{
         .pid = @intCast(runtime.pid),
-        .role_raw = @intFromEnum(session_host.incident_bootstrap_contract.Role.gui),
+        .role_raw = @backingInt(session_host.incident_bootstrap_contract.Role.gui),
         .reserved = .{ 0, 0, 0 },
         .process_nonce = runtime.process_nonce,
         .service_process_nonce = runtime.service.process_nonce,
@@ -88915,7 +88917,7 @@ test "CR0b AppHost incident ABI prerequisite는 조기 foreign 호출을 거부�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     var live_session_closed = false;
     defer if (!live_session_closed) session.deinit();
@@ -89106,7 +89108,7 @@ test "ui.language: 설정값이 확인 모달 문장의 언어를 정한다" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -89149,7 +89151,7 @@ test "ui.language=auto: 주입한 로케일이 화면 언어를 정한다" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -89588,10 +89590,10 @@ fn runCr6RecoveredSessionRealHostFixture(comptime mode: Cr6RecoveredFixtureMode)
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var base_buf: [128]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-cr6a2-launch-{d}-{d}", .{
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-cr6a2-launch-{d}-{d}", .{
         std.c.getpid(),
-        @intFromEnum(mode),
-    }) catch
+        @backingInt(mode),
+    }, 0) catch
         return error.SkipZigTest;
     std.Io.Dir.cwd().deleteTree(io, base) catch {};
     _ = std.c.mkdir(base.ptr, 0o700);
@@ -89681,7 +89683,7 @@ fn runCr6RecoveredSessionRealHostFixture(comptime mode: Cr6RecoveredFixtureMode)
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
         .defer_initial_surface = 1,
     });
     defer session.deinit();
@@ -89745,7 +89747,7 @@ fn runCr6RecoveredSessionRealHostFixture(comptime mode: Cr6RecoveredFixtureMode)
             .cols = 40,
             .rows = 10,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
             .defer_initial_surface = 1,
         });
         ended_target = target;
@@ -90099,7 +90101,7 @@ test "[측정] 검색 네비게이션이 프레임을 몇 개 만드나 — 재�
         .cols = 40,
         .rows = 12,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -90245,7 +90247,7 @@ test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -90428,7 +90430,7 @@ test "이미지 갤러리: 인덱스가 가리킨 자리를 실제로 디코드�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -90491,7 +90493,7 @@ test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000); // 격자가 들어갈 만한 창
@@ -90600,7 +90602,7 @@ test "[적대] 재사용 버퍼 소유권: 비소유 픽셀을 갤러리에 넘�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -90700,7 +90702,7 @@ test "이미지 갤러리: 격자에 다 안 들어가면 「몇 장 중 몇 장
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -90793,7 +90795,7 @@ test "활동 뷰 펼침: 라벨이 요약이어도 펼침은 명령을 읽는다
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -90865,7 +90867,7 @@ test "활동 뷰 펼침: 줄을 누르면 그때 받은 명령·결과 전문이
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -90978,7 +90980,7 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -91135,7 +91137,7 @@ test "활동 뷰: Tab 으로 종류를 바꾸면 목록이 그것으로 바뀐�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -91233,7 +91235,7 @@ test "활동 뷰: 줄 목록에서는 격자의 클릭·호버가 돌지 않는�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -91320,7 +91322,7 @@ test "활동 뷰: 필터를 되풀이해 돌려도 새는 것이 없다 (적대�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -91393,7 +91395,7 @@ test "활동 뷰: 훑는 중에 필터를 바꿔도 결과가 그 필터를 따�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -91511,7 +91513,7 @@ test "활동 뷰: 썸네일이 다시 훑어도 살아남고, 펼치면 사라�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -91597,7 +91599,7 @@ test "활동 뷰: 좁아지면 썸네일부터 버린다 — 이름이 먼저다
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.dock_initialized = true;
@@ -91675,7 +91677,7 @@ test "활동 뷰: 도크를 접었다 펴도 썸네일이 돌아온다 (AV5 적�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -91784,7 +91786,7 @@ test "활동 뷰: 그림이 여럿이면 각자 제 줄에 붙는다 (AV5 적대
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -91885,7 +91887,7 @@ test "활동 뷰: 그림 결과를 펼치면 「이미지」 한 줄이 선다 (
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -91982,7 +91984,7 @@ test "활동 뷰: 필터를 오가도 그림이 안 사라진다 (AV5 · 사용�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -92090,7 +92092,7 @@ test "활동 뷰: 접힌 줄에만 썸네일이 붙는다 (AV5)" {
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -92188,7 +92190,7 @@ test "활동 뷰: 결과가 이미지인 호출은 「전체」에서 한 줄이
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -92286,7 +92288,7 @@ test "활동 뷰: 입력을 다 못 보면 **명령 조각이라도** 본다 (�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -92362,7 +92364,7 @@ test "활동 뷰 펼침: chunk 껍데기를 벗기고 **종료 코드**를 머�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -92440,7 +92442,7 @@ test "활동 뷰: 입력이 조각 상한을 넘으면 「없다」가 아니라
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -92514,7 +92516,7 @@ test "활동 뷰: `Enter` 가 **입력의 나머지 필드**까지 넓힌다 —
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -92603,7 +92605,7 @@ test "활동 뷰: Enter 가 본문까지 넓힌다 — 라벨에 없는 말이 �
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -92731,7 +92733,7 @@ test "활동 뷰: 본문 검색은 못 걸어도 잃지 않는다 — 예약·�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -93028,7 +93030,7 @@ test "활동 뷰: Codex 결과 배열은 원소를 이어 보여 주고, 거기�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -93185,7 +93187,7 @@ test "활동 뷰: 칩을 눌러 종류를 바꾸고, Tab 은 터미널이 가져
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -93275,7 +93277,7 @@ test "활동 뷰: 펼치면 칩 줄이 자리를 돌려준다 — 그 줄을 눌
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -93345,7 +93347,7 @@ test "활동 뷰: 도크가 좁으면 고른 칩만 남는다 (AV4)" {
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -93407,7 +93409,7 @@ test "활동 뷰: 목록이 실제로 그려진다 — 제품 tick 으로 확인
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -93495,7 +93497,7 @@ test "활동 뷰: 굴린 뒤 목록이 짧아져도 화면이 살아 있다 (적
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -93580,7 +93582,7 @@ test "활동 뷰: 한 줄도 못 그리면 그렇게 말한다 (적대적 C3)" {
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -93669,7 +93671,7 @@ test "활동 뷰: 줄 목록은 끝까지 스크롤된다 (적대적 B3)" {
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -93750,7 +93752,7 @@ test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -93868,7 +93870,7 @@ test "이미지 갤러리: 크게 본 채 도크를 접었다 펴도 그림이 �
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -93991,7 +93993,7 @@ test "이미지 갤러리: 크게 보기에서 휠은 확대하고 드래그는 
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -94112,7 +94114,7 @@ test "이미지 갤러리: 훅이 없으면 자식 env 로 확정한 트랜스�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -94178,7 +94180,7 @@ test "설정 줄이 없으면 내장 기본값이 그대로 정책이 된다 (G3
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -94214,7 +94216,7 @@ test "활동 뷰: 원격 신선도 답이 「자랐을 때만」 다시 훑는�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -94291,7 +94293,7 @@ test "활동 뷰: 원격 신선도 — 이어읽은 답이 앞 목록에 이어 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -94353,7 +94355,7 @@ test "활동 뷰: 원격 신선도 — 병합이 물러나면 그 답도 버린�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -94405,7 +94407,7 @@ test "활동 뷰: 원격 신선도 — 체인이 갈리면 이어 붙이지 않�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -94461,7 +94463,7 @@ test "활동 뷰: 원격 신선도 — 부모 경로가 소비자까지 온다 (
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -94497,7 +94499,7 @@ test "활동 뷰: 원격 신선도 — 체인을 못 푼 답은 경로를 «안 
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -94526,7 +94528,7 @@ test "활동 뷰: 원격 신선도 — 이어읽기가 본문 비트도 잇는�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -94585,7 +94587,7 @@ test "활동 뷰: 원격 신선도 — 저쪽이 준 본문 비트가 검색 결
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -94635,7 +94637,7 @@ test "활동 뷰: 원격 신선도 — 「끝까지 못 봤다」가 「없다�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -94676,7 +94678,7 @@ test "활동 뷰: 원격 신선도 — 안 물었으면 답도 안 세운다 (RA
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -94703,7 +94705,7 @@ test "활동 뷰: 원격 신선도 자국은 체인이 여럿이어도 산다 (R
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -94741,7 +94743,7 @@ test "활동 뷰: 원격 펼침 결말이 로컬과 같은 규칙으로 풀린�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -94877,7 +94879,7 @@ test "이미지 갤러리: 원격 pane 의 대화는 로컬에서 열지 않는�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -94969,7 +94971,7 @@ test "이미지 갤러리: 타일에 「무엇이었는지」가 붙는다 (IG5-
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -95063,7 +95065,7 @@ test "이미지 갤러리: 최신이 먼저 오고, 스크롤로 나머지에 �
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -95193,7 +95195,7 @@ test "이미지 갤러리: 재개 세션은 부모 rollout 까지 훑는다 (IG8
 
     // `buildChain` 은 HOME 아래 `.codex/sessions` 만 본다 — 그 홈을 이 tmp 로 돌려놓는다.
     const saved_home = test_env.Saved.save("HOME");
-    const home_z = try allocator.dupeZ(u8, home);
+    const home_z = try allocator.dupeSentinel(u8, home, 0);
     defer allocator.free(home_z);
     _ = setenv("HOME", home_z.ptr, 1);
     defer saved_home.restore();
@@ -95205,7 +95207,7 @@ test "이미지 갤러리: 재개 세션은 부모 rollout 까지 훑는다 (IG8
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -95279,7 +95281,7 @@ test "이미지 갤러리: 크게 보기에서 ←→ 로 넘기고, 그 밖에�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -95411,7 +95413,7 @@ test "이미지 갤러리: 얹힌 칸을 밝히고 커서를 바꾼다 (IG10)" {
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -95547,7 +95549,7 @@ test "이미지 갤러리: 라벨로 거르고, 지우면 되돌아온다 (IG11)
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -95670,7 +95672,7 @@ test "이미지 갤러리: 라벨과 함께 「언제」도 붙는다 (IG12)" {
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -95756,7 +95758,7 @@ test "이미지 갤러리: 시각 창이 줄을 넘지 않는다 — 다음 항�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -95854,7 +95856,7 @@ test "이미지 갤러리: 같은 세션에 이미지가 붙으면 갤러리도 
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -95973,7 +95975,7 @@ test "이미지 갤러리: 포커스가 옮겨 가면 그 pane 의 세션을 본
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -96083,7 +96085,7 @@ test "이미지 갤러리: 다시 훑어도 검색어를 뺏지 않고, 크게 �
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -96188,7 +96190,7 @@ test "이미지 갤러리: 다시 훑는 동안 화면이 비지 않는다 (IG2 
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -96257,7 +96259,7 @@ test "이미지 갤러리: 못 읽는 파일을 되풀이해 훑지 않는다 (I
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -96332,7 +96334,7 @@ test "이미지 갤러리: 다시 훑어도 썸네일을 버리지 않는다 (IG
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -96417,7 +96419,7 @@ test "이미지 갤러리: 검색이 켜진 채 자동 갱신이 와도 앞뒤�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -96503,7 +96505,7 @@ test "이미지 갤러리: 자동 갱신이 반복돼도 상태가 어긋나지 
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -96599,7 +96601,7 @@ test "이미지 갤러리: 새 활동이 붙어도 보던 항목이 맨 위에 �
         "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" ++
         png_b64 ++ "\"}}]},\"timestamp\":\"2026-08-30T01:00:00.000Z\"}\n";
     // 여러 화면을 넘기는 장수 — 격자도 줄 목록도 실제로 굴러야 이 물음이 선다.
-    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = one ** 120 });
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data = array_repeat.repeat(one, 120) });
 
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
@@ -96613,7 +96615,7 @@ test "이미지 갤러리: 새 활동이 붙어도 보던 항목이 맨 위에 �
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -96762,7 +96764,7 @@ test "활동 뷰: 본문 검색 답이 앞에 줄을 더해도 보던 줄이 맨
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -96848,7 +96850,7 @@ test "이미지 갤러리: 크게 보기가 「그때 무슨 얘기였나」를 
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -96947,7 +96949,7 @@ test "이미지 갤러리: 문맥이 없으면 지어내지 않는다 (IG13)" {
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -97149,7 +97151,7 @@ test "이미지 갤러리: 한 틱에 여러 장을 동시에 건다 (IG14)" {
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -97221,7 +97223,7 @@ test "이미지 갤러리: 취소한 뒤에도 다시 채워진다 (IG14 적대�
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -97346,7 +97348,7 @@ test "이미지 갤러리: 검색으로 걸러도 남의 그림이 안 붙는다
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -97430,7 +97432,7 @@ test "이미지 갤러리: 크게 보기는 뷰포트만큼만 풀고, 확대하
         .cols = 40,
         .rows = 20,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -97515,7 +97517,7 @@ test "linkScopesForSurfaceId: host-backed 경로도 원격 cwd면 파일 경로 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -97598,7 +97600,7 @@ test "원격 커서는 hello 뒤의 줄만 믿는다 — 제한 서버 출력으
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -97650,7 +97652,7 @@ test "원격 채널을 다시 띄우면 죽은 스트림의 반 줄을 안 물�
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -97713,7 +97715,7 @@ test "원격 폴더줄은 훅이 알려 준 cwd 를 쓴다 — OSC 7 이 멈춘 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -97772,7 +97774,7 @@ test "훅 모드를 벗어나면 그 cwd 를 버린다 — 옛 경로에 붙박�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -97804,7 +97806,7 @@ test "보고자 없는 원격도 원격으로 판정한다 — 링크가 로컬 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -97877,7 +97879,7 @@ test "원격 SCM 은 폴더줄과 같은 cwd 를 본다 — 그리고 다른 기
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -98024,7 +98026,7 @@ test "SB1-S11-6: 폰이 좁혀 두면 상태줄에 그 항목이 실제로 조�
     const hasItem = struct {
         fn f(s: *AppSession) bool {
             for (status_bar_ops.statusBarTree(s).entries) |e| {
-                const id: sb.ItemId = @enumFromInt(e.id);
+                const id: sb.ItemId = @fromBackingInt(@intCast(e.id));
                 if (id == .viewport_narrowed) return true;
             }
             return false;
@@ -98060,7 +98062,7 @@ test "원격 탐색기 실패 수직: 대상 적용 → root 행 → 실패 드�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -98106,18 +98108,18 @@ test "원격 탐색기 실패 수직: 대상 적용 → root 행 → 실패 드�
             .path = try a.dupe(u8, root),
             .ok = true,
             .was_remote = true,
-            .identity = .{ .value = .{ .device = 7, .inode = 42, .kind = @intFromEnum(file_tree.IdentityKind.directory) } },
+            .identity = .{ .value = .{ .device = 7, .inode = 42, .kind = @backingInt(file_tree.IdentityKind.directory) } },
             .expected_root_generation = session.remote_explorer.tree.rootGeneration(),
         };
         try ok_result.entries.append(a, .{
             .name = try a.dupe(u8, "sub"),
             .kind = .directory,
-            .identity = .{ .device = 7, .inode = 43, .kind = @intFromEnum(file_tree.IdentityKind.directory) },
+            .identity = .{ .device = 7, .inode = 43, .kind = @backingInt(file_tree.IdentityKind.directory) },
         });
         try ok_result.entries.append(a, .{
             .name = try a.dupe(u8, "nl\nname.txt"),
             .kind = .file,
-            .identity = .{ .device = 7, .inode = 44, .kind = @intFromEnum(file_tree.IdentityKind.regular) },
+            .identity = .{ .device = 7, .inode = 44, .kind = @backingInt(file_tree.IdentityKind.regular) },
         });
         session.file_tree_backend.pushResultForTest(ok_result);
     }
@@ -98312,7 +98314,7 @@ test "원격 탐색기 유지: 파일을 열어도 발행이 원격에 남는다
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -98353,13 +98355,13 @@ test "원격 탐색기 유지: 파일을 열어도 발행이 원격에 남는다
             .path = try a.dupe(u8, root),
             .ok = true,
             .was_remote = true,
-            .identity = .{ .value = .{ .device = 7, .inode = 42, .kind = @intFromEnum(file_tree.IdentityKind.directory) } },
+            .identity = .{ .value = .{ .device = 7, .inode = 42, .kind = @backingInt(file_tree.IdentityKind.directory) } },
             .expected_root_generation = session.remote_explorer.tree.rootGeneration(),
         };
         try ok_result.entries.append(a, .{
             .name = try a.dupe(u8, "over-there.txt"),
             .kind = .file,
-            .identity = .{ .device = 7, .inode = 43, .kind = @intFromEnum(file_tree.IdentityKind.regular) },
+            .identity = .{ .device = 7, .inode = 43, .kind = @backingInt(file_tree.IdentityKind.regular) },
         });
         session.file_tree_backend.pushResultForTest(ok_result);
     }
@@ -98418,7 +98420,7 @@ test "원격 탐색기 파일 열기 수직: 결말→미러→열림→read_onl
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -98546,7 +98548,7 @@ test "원격 탐색기 감시: 트리거가 펼친 디렉터리를 다시 읽게
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -98613,7 +98615,7 @@ test "원격 탐색기 이름 변경 수직: 편집 확정이 헬퍼로 가고, 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -98763,7 +98765,7 @@ test "원격 탐색기 삭제 수직: 확인을 거치고, 굳힌 대상을 지�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(800, 600, 1000);
@@ -98861,7 +98863,7 @@ test "kitty: split 으로 함께 보이는 비활성 pane 의 이미지도 그�
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -98929,7 +98931,7 @@ test "MP: 분할하면 프리뷰 앵커가 **그 pane** 원점을 따른다 — 
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -98988,7 +98990,7 @@ test "MP: 프리뷰는 **뒤판 quad**를 낸다 — 그림 뒤로 터미널 글
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -99052,7 +99054,7 @@ test "MP: 뒤판은 **프레임마다 비워진다** — 안 그러면 프리뷰
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -99110,7 +99112,7 @@ test "MP: **비활성 pane** 의 프리뷰도 그려진다 — 클릭은 그 pan
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -99310,7 +99312,7 @@ test "OVF2 마커 이미지 프리뷰가 「풀 수 없다」로 끝나면 — �
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -99368,7 +99370,7 @@ test "MP: 「풀 수 없다」 프리뷰의 안내 셀이 액자 테두리를 �
             .cols = 80,
             .rows = 24,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
         });
         defer session.deinit();
         _ = try session.resize(cs.backing_w, cs.backing_h, 1000);
@@ -99457,7 +99459,7 @@ test "OVF3 찾기 막대가 열려 있고 입력에 포커스가 없을 때도 �
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -99486,7 +99488,7 @@ test "OVF4 관문을 지나는 오버레이를 하나씩 연다 — 다른 오�
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
     _ = try session.resize(1400, 900, 1000);
@@ -99640,7 +99642,7 @@ test "generation receiver preserves host capability and ids across restart and r
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
     var session: AppSession = .{ .allocator = a, .io = std.testing.io };
-    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
     defer session.deinit();
     const dest = "generation-test";
     const key = try a.dupe(u8, dest);
@@ -99677,7 +99679,7 @@ test "generation receiver spawn binds directory and resume to confirmed profile"
     const io = std.Io.Threaded.global_single_threaded.io();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const old_path = if (std.c.getenv("PATH")) |v| try a.dupeZ(u8, std.mem.span(v)) else null;
+    const old_path = if (std.c.getenv("PATH")) |v| try a.dupeSentinel(u8, std.mem.span(v), 0) else null;
     defer {
         if (old_path) |v| {
             _ = setenv("PATH", v.ptr, 1);
@@ -99742,7 +99744,7 @@ test "generation receiver pipe noise cannot renew retry budget before matching h
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
     var session: AppSession = .{ .allocator = a, .io = std.testing.io };
-    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
     defer session.deinit();
     var fds: [2]c_int = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
@@ -99797,7 +99799,7 @@ test "native local reader keeps generation cursor on contention and reads same-s
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
     var session: AppSession = .{ .allocator = a, .io = std.testing.io };
-    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
     defer session.deinit();
     const term = pane_ops.activePane(&session).activeTerm();
     try std.testing.expectEqual(maru.session.remote_agent_stream.protocol.Profile.v1, term.agent_hook_log_profile);
@@ -99936,10 +99938,10 @@ test "host v2 reader selects confirmed format without SSH nonce and excludes lat
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const control_dir = try std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-v2-reader-{d}-{s}", .{ std.c.getpid(), tmp.sub_path });
+    const control_dir = try std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-v2-reader-{d}-{s}", .{ std.c.getpid(), tmp.sub_path }, 0);
     defer std.Io.Dir.cwd().deleteTree(io, control_dir) catch {};
     var socket_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const socket = try std.fmt.bufPrintZ(&socket_buf, "{s}/control.sock", .{control_dir});
+    const socket = try std.fmt.bufPrintSentinel(&socket_buf, "{s}/control.sock", .{control_dir}, 0);
     const child = std.c.fork();
     if (child < 0) return error.SkipZigTest;
     if (child == 0) {
@@ -99963,7 +99965,7 @@ test "host v2 reader selects confirmed format without SSH nonce and excludes lat
     app_keep_alive_after_quit = false;
     defer app_keep_alive_after_quit = previous_keep_alive;
     var session: AppSession = .{ .allocator = a, .io = std.testing.io };
-    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
     defer session.deinit();
     app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(a, io, &client, session.runtime);
     defer {
@@ -100038,7 +100040,7 @@ test "native local reader default carrier preserves live v1 and consumes install
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
     var session: AppSession = .{ .allocator = a, .io = std.testing.io };
-    try session.init(io, a, .{ .abi_version = abi_version, .cols = 30, .rows = 8, .queue_capacity = 32, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 30, .rows = 8, .queue_capacity = 32, .command_kind = @backingInt(CommandKind.controlled_smoke) });
     defer session.deinit();
     const executable = session.siblingMaruPath(scratch) orelse return error.InvalidTestState;
     try std.testing.expect(isExecutablePath(executable)); // actual bundled CLI, never a PATH probe
@@ -100263,7 +100265,7 @@ test "generation receiver actual mixed SSH frames reach badge and sealed capture
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
     var session: AppSession = .{ .allocator = a, .io = std.testing.io };
-    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
     defer session.deinit();
     session.window_focused = false;
     const term = pane_ops.activePane(&session).activeTerm();
@@ -100301,7 +100303,7 @@ test "remote restart replay must restore badge without old completion notice" {
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
     var session: AppSession = .{ .allocator = a, .io = std.testing.io };
-    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
     defer session.deinit();
     session.window_focused = false;
     const term = pane_ops.activePane(&session).activeTerm();
@@ -100362,7 +100364,7 @@ test "remote automatic reconnect preserves mixed cursor and seals recovered turn
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
     var session: AppSession = .{ .allocator = a, .io = std.testing.io };
-    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
     defer session.deinit();
     session.window_focused = false;
     const term = pane_ops.activePane(&session).activeTerm();
@@ -100705,7 +100707,7 @@ test "remote reconnect failure shutdown releases all mixed cursors and channels"
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
     var session: AppSession = .{ .allocator = a, .io = std.testing.io };
-    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
     defer session.deinit();
     const term = pane_ops.activePane(&session).activeTerm();
     term.agent_remote_channel = maru.session.remote_agent_stream.Channel.initMixed(0, true);
@@ -100769,7 +100771,7 @@ test "remote reconnect failure repeated EOF reaches cap and preserves mixed curs
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
     var session: AppSession = .{ .allocator = a, .io = std.testing.io };
-    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
     defer session.deinit();
     const dest = "failure-fixture";
     const key = try a.dupe(u8, dest);
@@ -100818,7 +100820,7 @@ test "remote reconnect failure repeated recovery advances both cursors and badge
     test_config_text = agent_hooks_on_config;
     defer test_config_text = "";
     var session: AppSession = .{ .allocator = a, .io = std.testing.io };
-    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
     defer session.deinit();
     session.window_focused = false;
     const term = pane_ops.activePane(&session).activeTerm();

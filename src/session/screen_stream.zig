@@ -330,7 +330,7 @@ pub const RecordHeader = struct {
     pub fn encode(self: RecordHeader) [record_header_size]u8 {
         var buf: [record_header_size]u8 = undefined;
         std.mem.writeInt(u16, buf[0..2], self.version, .big);
-        std.mem.writeInt(u16, buf[2..4], @intFromEnum(self.kind), .big);
+        std.mem.writeInt(u16, buf[2..4], @backingInt(self.kind), .big);
         std.mem.writeInt(u64, buf[4..12], self.generation, .big);
         std.mem.writeInt(u64, buf[12..20], self.sequence, .big);
         std.mem.writeInt(u32, buf[20..24], self.chunk_index, .big);
@@ -343,7 +343,7 @@ pub const RecordHeader = struct {
         if (version < reader_min or version > reader_max) return error.BadCodecVersion;
         return .{
             .version = version,
-            .kind = @enumFromInt(std.mem.readInt(u16, bytes[2..4], .big)),
+            .kind = @fromBackingInt(@intCast(std.mem.readInt(u16, bytes[2..4], .big))),
             .generation = std.mem.readInt(u64, bytes[4..12], .big),
             .sequence = std.mem.readInt(u64, bytes[12..20], .big),
             .chunk_index = std.mem.readInt(u32, bytes[20..24], .big),

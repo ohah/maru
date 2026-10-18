@@ -63,7 +63,7 @@ pub fn tryParseFor(
     const Cfg = @typeInfo(@TypeOf(config)).pointer.child;
     // 최상위 스칼라(Cfg.schema — Config 직속 필드, namespace 없음, meta.key로 전체 키).
     if (@hasDecl(Cfg, "schema")) {
-        inline for (@typeInfo(@TypeOf(Cfg.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(Cfg.schema))) |sf| {
             const meta: theme.Meta = @field(Cfg.schema, sf.name);
             const full_key = comptime topKey(sf.name, meta);
             if (std.mem.eql(u8, key, full_key)) {
@@ -73,11 +73,11 @@ pub fn tryParseFor(
         }
     }
     // sub-struct 스칼라(@hasDecl로 schema decl을 가진 sub-struct 자동 발견; namespace=Config 필드명).
-    inline for (@typeInfo(Cfg).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(Cfg)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 const meta: theme.Meta = @field(sch, sf.name);
                 const full_key = comptime keyOf(cf.name, sf.name, meta);
                 if (std.mem.eql(u8, key, full_key)) {
@@ -172,17 +172,17 @@ fn parseAndSet(
 pub fn appendSerialized(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(KeyValue)) !void {
     // 최상위 스칼라(Config.schema) 먼저.
     if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             const meta: theme.Meta = @field(theme.Config.schema, sf.name);
             const full_key = comptime topKey(sf.name, meta);
             try list.append(arena, .{ .key = full_key, .value = try serializeValue(arena, @field(config, sf.name)) });
         }
     }
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 const meta: theme.Meta = @field(sch, sf.name);
                 const full_key = comptime keyOf(cf.name, sf.name, meta);
                 const val = @field(@field(config, cf.name), sf.name);
@@ -230,7 +230,7 @@ pub const BoolField = struct { key: []const u8, doc: []const u8, doc_key: ?@impo
 /// 순서는 parse/serialize와 같은 Config 필드 순회 순. list는 호출자(arena) 소유.
 pub fn appendBoolFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(BoolField)) !void {
     if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             if (@TypeOf(@field(config, sf.name)) == bool) {
                 const meta: theme.Meta = @field(theme.Config.schema, sf.name);
                 if (!meta.hidden) {
@@ -240,11 +240,11 @@ pub fn appendBoolFields(arena: std.mem.Allocator, config: theme.Config, list: *s
             }
         }
     }
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 if (@TypeOf(@field(@field(config, cf.name), sf.name)) == bool) {
                     const meta: theme.Meta = @field(sch, sf.name);
                     if (!meta.hidden) {
@@ -261,7 +261,7 @@ pub fn appendBoolFields(arena: std.mem.Allocator, config: theme.Config, list: *s
 /// 없으면(키 오타·非bool·非스키마) false. parse/serialize와 같은 키 순회라 키 규약이 단일 출처.
 pub fn setBool(config: *theme.Config, key: []const u8, value: bool) bool {
     if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             if (@TypeOf(@field(config, sf.name)) == bool) {
                 const meta: theme.Meta = @field(theme.Config.schema, sf.name);
                 const full_key = comptime topKey(sf.name, meta);
@@ -272,11 +272,11 @@ pub fn setBool(config: *theme.Config, key: []const u8, value: bool) bool {
             }
         }
     }
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 if (@TypeOf(@field(@field(config, cf.name), sf.name)) == bool) {
                     const meta: theme.Meta = @field(sch, sf.name);
                     const full_key = comptime keyOf(cf.name, sf.name, meta);
@@ -300,15 +300,15 @@ pub const NumberField = struct { key: []const u8, doc: []const u8, doc_key: ?@im
 /// range 메타가 커밋 clamp의 min/max를 준다(파서 검증과 같은 출처). 순서는 parse/serialize와 같은 Config 필드 순회 순.
 pub fn appendNumberFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(NumberField)) !void {
     if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             try appendNumberField(arena, config, theme.Config, theme.Config.schema, sf, comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), list);
         }
     }
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 try appendNumberFieldSub(arena, config, cf, Container, sch, sf, comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), list);
             }
         }
@@ -343,15 +343,15 @@ fn appendNumberFieldSub(arena: std.mem.Allocator, config: theme.Config, comptime
 /// 매칭하는 숫자 필드가 있으면 set하고 true. parse/serialize와 같은 키 순회(단일 출처).
 pub fn setNumber(config: *theme.Config, key: []const u8, value: f64) bool {
     if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             if (setNumberField(&@field(config, sf.name), @field(theme.Config.schema, sf.name), comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), key, value)) return true;
         }
     }
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 if (setNumberField(&@field(@field(config, cf.name), sf.name), @field(sch, sf.name), comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), key, value)) return true;
             }
         }
@@ -386,15 +386,15 @@ pub const EnumField = struct { key: []const u8, doc: []const u8, doc_key: ?@impo
 /// 스키마'd **enum 필드**를 전부 dropdown 행으로 emit한다(appendBoolFields의 enum 짝). current=현재 변형 dashed 토큰.
 pub fn appendEnumFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(EnumField)) !void {
     if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             try appendEnumField(arena, @field(config, sf.name), @field(theme.Config.schema, sf.name), comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), list);
         }
     }
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 try appendEnumField(arena, @field(@field(config, cf.name), sf.name), @field(sch, sf.name), comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), list);
             }
         }
@@ -414,15 +414,15 @@ fn appendEnumField(arena: std.mem.Allocator, value: anytype, comptime meta: them
 /// 있으면 변형을 바꾸고 true. 변형 순서는 선언 순(ordinal). default 값 enum(0..n-1)을 가정한다(config enum 전부 해당).
 pub fn cycleEnum(config: *theme.Config, key: []const u8, dir: i8) bool {
     if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             if (cycleEnumField(&@field(config, sf.name), comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), key, dir)) return true;
         }
     }
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 if (cycleEnumField(&@field(@field(config, cf.name), sf.name), comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), key, dir)) return true;
             }
         }
@@ -434,10 +434,10 @@ fn cycleEnumField(ptr: anytype, comptime full_key: []const u8, key: []const u8, 
     const T = @TypeOf(ptr.*);
     if (@typeInfo(T) != .@"enum") return false;
     if (!std.mem.eql(u8, key, full_key)) return false;
-    const n: i64 = @typeInfo(T).@"enum".fields.len;
-    const cur: i64 = @intFromEnum(ptr.*);
+    const n: i64 = @import("type_info_fields").enumFields(T).len;
+    const cur: i64 = @backingInt(ptr.*);
     const next: i64 = @mod(cur + dir + n, n);
-    ptr.* = @enumFromInt(next);
+    ptr.* = @fromBackingInt(@intCast(next));
     return true;
 }
 
@@ -446,15 +446,15 @@ fn cycleEnumField(ptr: anytype, comptime full_key: []const u8, key: []const u8, 
 /// (cycleEnum의 열거 짝). 토큰은 정적 문자열이라 dupe 불요.
 pub fn enumVariants(arena: std.mem.Allocator, config: theme.Config, key: []const u8) !?[]const []const u8 {
     if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             if (try enumVariantsField(arena, @field(config, sf.name), comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), key)) |v| return v;
         }
     }
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 if (try enumVariantsField(arena, @field(@field(config, cf.name), sf.name), comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), key)) |v| return v;
             }
         }
@@ -466,7 +466,7 @@ fn enumVariantsField(arena: std.mem.Allocator, value: anytype, comptime full_key
     const T = @TypeOf(value);
     if (@typeInfo(T) != .@"enum") return null;
     if (!std.mem.eql(u8, key, full_key)) return null;
-    const fields = @typeInfo(T).@"enum".fields;
+    const fields = @import("type_info_fields").enumFields(T);
     const out = try arena.alloc([]const u8, fields.len);
     inline for (fields, 0..) |f, i| out[i] = f.name; // 정적 문자열(comptime) — 슬롯만 arena
     return out;
@@ -476,15 +476,15 @@ fn enumVariantsField(arena: std.mem.Allocator, value: anytype, comptime full_key
 /// 현재값에서 선택을 시작하는 데 쓴다.
 pub fn enumIndex(config: theme.Config, key: []const u8) ?usize {
     if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             if (enumIndexField(@field(config, sf.name), comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), key)) |v| return v;
         }
     }
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 if (enumIndexField(@field(@field(config, cf.name), sf.name), comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), key)) |v| return v;
             }
         }
@@ -498,8 +498,8 @@ fn enumIndexField(value: anytype, comptime full_key: []const u8, key: []const u8
     if (!std.mem.eql(u8, key, full_key)) return null;
     // **선언 순 위치**(enumVariants와 일치) — tag 값이 아니라 필드 index를 돌려준다. 명시/비순차 tag 값이어도
     // 드롭다운 목록·set 인덱스가 어긋나지 않는다(code-review: tag/index 불일치 방지 — 셋이 선언 순으로 일관).
-    inline for (@typeInfo(T).@"enum".fields, 0..) |f, i| {
-        if (@intFromEnum(value) == f.value) return i;
+    inline for (@import("type_info_fields").enumFields(T), 0..) |f, i| {
+        if (@backingInt(value) == f.value) return i;
     }
     return 0;
 }
@@ -508,15 +508,15 @@ fn enumIndexField(value: anytype, comptime full_key: []const u8, key: []const u8
 /// 매칭 enum이 있고 index가 범위 안이면 set하고 true. 범위 밖이거나 비-enum이면 false(무동작).
 pub fn setEnumIndex(config: *theme.Config, key: []const u8, index: usize) bool {
     if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             if (setEnumIndexField(&@field(config, sf.name), comptime topKey(sf.name, @field(theme.Config.schema, sf.name)), key, index)) return true;
         }
     }
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 if (setEnumIndexField(&@field(@field(config, cf.name), sf.name), comptime keyOf(cf.name, sf.name, @field(sch, sf.name)), key, index)) return true;
             }
         }
@@ -528,12 +528,12 @@ fn setEnumIndexField(ptr: anytype, comptime full_key: []const u8, key: []const u
     const T = @TypeOf(ptr.*);
     if (@typeInfo(T) != .@"enum") return false;
     if (!std.mem.eql(u8, key, full_key)) return false;
-    const fields = @typeInfo(T).@"enum".fields;
+    const fields = @import("type_info_fields").enumFields(T);
     if (index >= fields.len) return false;
     // index는 **선언 순 위치**(enumVariants/enumIndex와 일치)라 그 필드의 실제 tag 값으로 set한다 — 비순차 tag여도 정확.
     inline for (fields, 0..) |f, i| {
         if (i == index) {
-            ptr.* = @enumFromInt(f.value);
+            ptr.* = @fromBackingInt(@intCast(f.value));
             return true;
         }
     }
@@ -596,7 +596,7 @@ pub const TextField = struct { key: []const u8, doc: []const u8, doc_key: ?@impo
 /// 옵셔널(?[]const u8 — sidebar 파생색)은 제외. 순서는 Config 필드 순회 순.
 pub fn appendTextFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(TextField)) !void {
     if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             if (@TypeOf(@field(config, sf.name)) == []const u8) {
                 const meta: theme.Meta = @field(theme.Config.schema, sf.name);
                 if (meta.widget == .text and !meta.hidden) { // hidden=설정 GUI 숨김(code-review #8)
@@ -606,11 +606,11 @@ pub fn appendTextFields(arena: std.mem.Allocator, config: theme.Config, list: *s
             }
         }
     }
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 if (@TypeOf(@field(@field(config, cf.name), sf.name)) == []const u8) {
                     const meta: theme.Meta = @field(sch, sf.name);
                     if (meta.widget == .text and !meta.hidden) { // hidden=설정 GUI 숨김(code-review #8)
@@ -640,7 +640,7 @@ pub const color_presets = [_][]const u8{
 /// 스키마'd **색 필드(widget .color)**를 전부 스와치 행으로 emit한다(appendTextFields의 색 짝). value=현재 hex.
 pub fn appendColorFields(arena: std.mem.Allocator, config: theme.Config, list: *std.ArrayList(ColorField)) !void {
     if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             if (@TypeOf(@field(config, sf.name)) == []const u8) {
                 const meta: theme.Meta = @field(theme.Config.schema, sf.name);
                 if (meta.widget == .color and !meta.hidden) { // hidden=설정 GUI 숨김(code-review #8)
@@ -650,11 +650,11 @@ pub fn appendColorFields(arena: std.mem.Allocator, config: theme.Config, list: *
             }
         }
     }
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 if (@TypeOf(@field(@field(config, cf.name), sf.name)) == []const u8) {
                     const meta: theme.Meta = @field(sch, sf.name);
                     if (meta.widget == .color and !meta.hidden) { // hidden=설정 GUI 숨김(code-review #8)
@@ -671,7 +671,7 @@ pub fn appendColorFields(arena: std.mem.Allocator, config: theme.Config, list: *
 /// 다음, 아니면 0번부터. 프리셋은 정적 리터럴이라 dupe 없이 대입(라이브/직렬화가 계속 읽어도 안전). 매칭 시 true.
 pub fn cycleColor(config: *theme.Config, key: []const u8, dir: i8) bool {
     if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             if (@TypeOf(@field(config, sf.name)) == []const u8) {
                 const meta: theme.Meta = @field(theme.Config.schema, sf.name);
                 if (meta.widget == .color and std.mem.eql(u8, key, comptime topKey(sf.name, meta))) {
@@ -681,11 +681,11 @@ pub fn cycleColor(config: *theme.Config, key: []const u8, dir: i8) bool {
             }
         }
     }
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 if (@TypeOf(@field(@field(config, cf.name), sf.name)) == []const u8) {
                     const meta: theme.Meta = @field(sch, sf.name);
                     if (meta.widget == .color and std.mem.eql(u8, key, comptime keyOf(cf.name, sf.name, meta))) {
@@ -755,7 +755,7 @@ fn validatedText(widget: theme.Widget, value: []const u8) ?[]const u8 {
 
 pub fn setText(config: *theme.Config, key: []const u8, value: []const u8) bool {
     if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             if (@TypeOf(@field(config, sf.name)) == []const u8) {
                 const meta: theme.Meta = @field(theme.Config.schema, sf.name);
                 if (meta.widget == .text or meta.widget == .color) {
@@ -768,11 +768,11 @@ pub fn setText(config: *theme.Config, key: []const u8, value: []const u8) bool {
             }
         }
     }
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 if (@TypeOf(@field(@field(config, cf.name), sf.name)) == []const u8) {
                     const meta: theme.Meta = @field(sch, sf.name);
                     if (meta.widget == .text or meta.widget == .color) {
@@ -850,17 +850,17 @@ fn enumTokens(comptime T: type) []const u8 {
 comptime {
     // 최상위(Config.schema) 항목 → Config 필드.
     if (@hasDecl(theme.Config, "schema")) {
-        for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             if (!@hasField(theme.Config, sf.name)) {
                 @compileError("Config.schema 항목 '" ++ sf.name ++ "'는 Config의 필드가 아님");
             }
         }
     }
     // sub-struct schema 항목 → 그 struct 필드.
-    for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
-            for (@typeInfo(@TypeOf(Container.schema)).@"struct".fields) |sf| {
+            for (@import("type_info_fields").structFields(@TypeOf(Container.schema))) |sf| {
                 if (!@hasField(Container, sf.name)) {
                     @compileError("schema 항목 '" ++ sf.name ++ "'는 " ++ @typeName(Container) ++ "의 필드가 아님");
                 }
@@ -1308,7 +1308,7 @@ test "doc 정합성: 모든 스키마 키가 configuration.md 표에 문서화�
     var missing: usize = 0;
     // 최상위(Config.schema)
     if (@hasDecl(theme.Config, "schema")) {
-        inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+        inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
             const full_key = comptime topKey(sf.name, @field(theme.Config.schema, sf.name));
             if (!docHasKeyRow(full_key)) {
                 std.debug.print("미문서 스키마 키: '{s}' (configuration.md 표에 '| `{s}` | …' 행 추가 필요)\n", .{ full_key, full_key });
@@ -1317,10 +1317,10 @@ test "doc 정합성: 모든 스키마 키가 configuration.md 표에 문서화�
         }
     }
     // sub-struct
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
-            inline for (@typeInfo(@TypeOf(Container.schema)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(Container.schema))) |sf| {
                 const full_key = comptime keyOf(cf.name, sf.name, @field(Container.schema, sf.name));
                 if (!docHasKeyRow(full_key)) {
                     std.debug.print("미문서 스키마 키: '{s}'\n", .{full_key});
@@ -1392,16 +1392,16 @@ test "doc range 정합성: 숫자 키 문서 범위가 스키마 parse range와 
     const doc = @embedFile("config_doc_md");
     var mismatches: usize = 0;
     // 최상위(Config.schema)
-    inline for (@typeInfo(@TypeOf(theme.Config.schema)).@"struct".fields) |sf| {
+    inline for (@import("type_info_fields").structFields(@TypeOf(theme.Config.schema))) |sf| {
         const meta = @field(theme.Config.schema, sf.name);
         const eff: ?[2]f64 = comptime if (meta.parse_range != null) meta.parse_range else meta.range;
         if (eff) |r| checkDocRange(doc, comptime topKey(sf.name, meta), r, &mismatches);
     }
     // sub-struct
-    inline for (@typeInfo(theme.Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(theme.Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
-            inline for (@typeInfo(@TypeOf(Container.schema)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(Container.schema))) |sf| {
                 const meta = @field(Container.schema, sf.name);
                 const eff: ?[2]f64 = comptime if (meta.parse_range != null) meta.parse_range else meta.range;
                 if (eff) |r| checkDocRange(doc, comptime keyOf(cf.name, sf.name, meta), r, &mismatches);

@@ -29,7 +29,7 @@ const Authority = struct {
 fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(out, "{s}/{s}", .{ root[0..len], leaf });
+    return std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ root[0..len], leaf }, 0);
 }
 
 fn privateDirectory(tmp: *std.testing.TmpDir) !void {
@@ -157,7 +157,7 @@ test "existing destination and non-private parent publish no owner and preserve 
 }
 
 test "profile timing artifact records actual APFS publication samples without FD or staging leaks" {
-    const samples: usize = if (builtin.mode == .ReleaseFast) 40 else 1;
+    const samples: usize = if (builtin.mode == .fast) 40 else 1;
     var elapsed: [40]u64 = undefined;
     const fd_before = try openFdCount();
     for (0..samples) |index| {

@@ -13,6 +13,8 @@
 //! - 이름은 대소문자를 가리지 않는다(`enter`·`ctrl+a`), `Esc`·`Return` 도 받는다. `Control`·`Alt` + 글자는 macOS 의 뜻(Emacs 줄 이동·
 //!   `Option+a` = `å`)을 만들지 않고 그대로 보낸다(그 글자·modifiers 만 — 적대 리뷰 1 회차).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 
 pub const Modifier = struct {
@@ -304,5 +306,5 @@ test "키 이름: 틀린 이름은 거절한다" {
     for ([_][]const u8{ "", "Hyper+a", "ab", "Enterr", "+a", "Shift+", "Shift+Ctrl", "\x01", "\x7f", "\u{85}", "a+b", "Shift+++", "Return+" }) |bad| {
         try testing.expectError(error.InvalidKey, parse(bad, &p));
     }
-    try testing.expectError(error.InvalidKey, parse("a" ** 65, &p));
+    try testing.expectError(error.InvalidKey, parse(array_repeat.repeat("a", 65), &p));
 }

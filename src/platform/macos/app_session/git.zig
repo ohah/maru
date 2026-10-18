@@ -1073,7 +1073,7 @@ pub fn drainGitStatus(self: *AppSession) void {
                     .tree = snapshot.tree,
                     .surface_id = snapshot.surface_id,
                     .captured_s = captured_s,
-                    .agent_kind = @intFromEnum(agentKindForSurface(self, snapshot.surface_id)),
+                    .agent_kind = @backingInt(agentKindForSurface(self, snapshot.surface_id)),
                     // **요청할 때 붙들어 둔 턴 키**를 쓴다 — 신원·저장소와 같은 이유다. 여기서 Term 의
                     // 진행 상태를 다시 읽으면 그 사이 다음 턴이 시작된 경우 **옛 스냅샷에 새 턴 키**가
                     // 붙는다(계약 §3.1 이 시각 대신 키를 쓰라고 한 이유가 그런 어긋남이다).

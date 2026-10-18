@@ -5,7 +5,7 @@ const seal_types = @import("event_cleanup_seal.zig");
 const process_seal = @import("process_seal_service.zig");
 
 pub const Digest = [32]u8;
-pub const zero_digest = [_]u8{0} ** 32;
+pub const zero_digest = @as([32]u8, @splat(0));
 
 pub const SettlementScratchPreflightProof = struct {
     pid: u32 = 0,
@@ -52,24 +52,24 @@ pub const ReasonProjection = struct {
 };
 pub const EffectRequestTag = enum(u8) { none = 0, poison = 1, revoke_fence = 2 };
 pub const EffectRequestProjection = struct {
-    tag_raw: u8 = @intFromEnum(EffectRequestTag.none),
+    tag_raw: u8 = @backingInt(EffectRequestTag.none),
     requested_reason: ReasonProjection = .{},
     revoke_fence: u64 = 0,
 };
 pub const CanonicalEffectPlan = struct {
     effect_request: EffectRequestProjection = .{},
-    action_raw: u8 = @intFromEnum(EffectAction.none),
+    action_raw: u8 = @backingInt(EffectAction.none),
     first_reason_before: ReasonProjection = .{},
     first_reason_after: ReasonProjection = .{},
     unusable_before_raw: u8 = 0,
     unusable_after_raw: u8 = 0,
     fd_before: i32 = -1,
     fd_after: i32 = -1,
-    fd_disposition_raw: u8 = @intFromEnum(FdDisposition.preserved),
+    fd_disposition_raw: u8 = @backingInt(FdDisposition.preserved),
     close_attempt_count: u8 = 0,
-    outbound_relation_raw: u8 = @intFromEnum(OutboundRelation.absent),
-    outbound_disposition_raw: u8 = @intFromEnum(OutboundDisposition.absent),
-    cleanup_mode_raw: u8 = @intFromEnum(CleanupMode.none),
+    outbound_relation_raw: u8 = @backingInt(OutboundRelation.absent),
+    outbound_disposition_raw: u8 = @backingInt(OutboundDisposition.absent),
+    cleanup_mode_raw: u8 = @backingInt(CleanupMode.none),
     cleanup_count: u8 = 0,
     outbound_offset: u64 = 0,
     outbound_len: u64 = 0,
@@ -95,9 +95,9 @@ pub const EffectPreflightInput = struct {
 
 pub const PreparedEffectPermit = struct {
     self_addr: u64 = 0,
-    lifecycle_raw: u8 = @intFromEnum(AuthorityLifecycle.pristine),
+    lifecycle_raw: u8 = @backingInt(AuthorityLifecycle.pristine),
     consumed_raw: u8 = 0,
-    reserved: [6]u8 = [_]u8{0} ** 6,
+    reserved: [6]u8 = @as([6]u8, @splat(0)),
     pid: u32 = 0,
     reserved_pid: u32 = 0,
     process_nonce: u64 = 0,
@@ -116,23 +116,23 @@ pub const PreparedEffectPermit = struct {
     operation_node_addr: u64 = 0,
     operation_id: u64 = 0,
     operation_registry_index: u16 = 0,
-    reserved_operation: [6]u8 = [_]u8{0} ** 6,
+    reserved_operation: [6]u8 = @as([6]u8, @splat(0)),
     target_stream_id: u64 = 0,
-    action_raw: u8 = @intFromEnum(EffectAction.none),
+    action_raw: u8 = @backingInt(EffectAction.none),
     first_reason_before: ReasonProjection = .{},
     first_reason_after: ReasonProjection = .{},
     unusable_before_raw: u8 = 0,
     unusable_after_raw: u8 = 0,
-    reserved_action: [3]u8 = [_]u8{0} ** 3,
+    reserved_action: [3]u8 = @as([3]u8, @splat(0)),
     fd_before: i32 = -1,
     fd_after: i32 = -1,
-    fd_disposition_raw: u8 = @intFromEnum(FdDisposition.preserved),
+    fd_disposition_raw: u8 = @backingInt(FdDisposition.preserved),
     close_attempt_count: u8 = 0,
-    outbound_relation_raw: u8 = @intFromEnum(OutboundRelation.absent),
-    outbound_disposition_raw: u8 = @intFromEnum(OutboundDisposition.absent),
-    cleanup_mode_raw: u8 = @intFromEnum(CleanupMode.none),
+    outbound_relation_raw: u8 = @backingInt(OutboundRelation.absent),
+    outbound_disposition_raw: u8 = @backingInt(OutboundDisposition.absent),
+    cleanup_mode_raw: u8 = @backingInt(CleanupMode.none),
     cleanup_count: u8 = 0,
-    reserved_outbound: [2]u8 = [_]u8{0} ** 2,
+    reserved_outbound: [2]u8 = @as([2]u8, @splat(0)),
     outbound_offset: u64 = 0,
     outbound_len: u64 = 0,
     outbound_descriptor_digest: Digest = zero_digest,
@@ -190,9 +190,9 @@ pub const PendingSettlementInput = struct {
 
 pub const PreparedPendingSettlementPermit = struct {
     self_addr: u64 = 0,
-    lifecycle_raw: u8 = @intFromEnum(AuthorityLifecycle.pristine),
+    lifecycle_raw: u8 = @backingInt(AuthorityLifecycle.pristine),
     consumed_raw: u8 = 0,
-    reserved: [6]u8 = [_]u8{0} ** 6,
+    reserved: [6]u8 = @as([6]u8, @splat(0)),
     pid: u32 = 0,
     reserved_pid: u32 = 0,
     process_nonce: u64 = 0,
@@ -215,11 +215,11 @@ pub const PreparedPendingSettlementPermit = struct {
 
 pub const EffectCommitEvidence = struct {
     self_addr: u64 = 0,
-    lifecycle_raw: u8 = @intFromEnum(AuthorityLifecycle.pristine),
+    lifecycle_raw: u8 = @backingInt(AuthorityLifecycle.pristine),
     consumed_raw: u8 = 0,
     outcome_raw: u8 = 0,
-    recovery_raw: u8 = @intFromEnum(EffectRecovery.none),
-    reserved: [4]u8 = [_]u8{0} ** 4,
+    recovery_raw: u8 = @backingInt(EffectRecovery.none),
+    reserved: [4]u8 = @as([4]u8, @splat(0)),
     pid: u32 = 0,
     reserved_pid: u32 = 0,
     process_nonce: u64 = 0,
@@ -232,16 +232,16 @@ pub const EffectCommitEvidence = struct {
     first_reason_after: ReasonProjection = .{},
     unusable_before_raw: u8 = 0,
     unusable_after_raw: u8 = 0,
-    fd_disposition_raw: u8 = @intFromEnum(FdDisposition.preserved),
+    fd_disposition_raw: u8 = @backingInt(FdDisposition.preserved),
     close_attempt_count: u8 = 0,
-    outbound_relation_raw: u8 = @intFromEnum(OutboundRelation.absent),
-    outbound_disposition_raw: u8 = @intFromEnum(OutboundDisposition.absent),
-    cleanup_mode_raw: u8 = @intFromEnum(CleanupMode.none),
-    reserved_effect: [1]u8 = [_]u8{0} ** 1,
+    outbound_relation_raw: u8 = @backingInt(OutboundRelation.absent),
+    outbound_disposition_raw: u8 = @backingInt(OutboundDisposition.absent),
+    cleanup_mode_raw: u8 = @backingInt(CleanupMode.none),
+    reserved_effect: [1]u8 = @as([1]u8, @splat(0)),
     fd_before: i32 = -1,
     fd_after: i32 = -1,
     cleanup_count: u8 = 0,
-    reserved_count: [7]u8 = [_]u8{0} ** 7,
+    reserved_count: [7]u8 = @as([7]u8, @splat(0)),
     commit_authority_digest: Digest = zero_digest,
     outbound_descriptor_digest: Digest = zero_digest,
     cleanup_completion_digest: Digest = zero_digest,
@@ -251,10 +251,10 @@ pub const EffectCommitEvidence = struct {
 
 pub const EventReleaseCompletion = struct {
     self_addr: u64 = 0,
-    lifecycle_raw: u8 = @intFromEnum(AuthorityLifecycle.pristine),
+    lifecycle_raw: u8 = @backingInt(AuthorityLifecycle.pristine),
     outcome_raw: u8 = 0,
     detail_raw: u8 = 0,
-    reserved: [5]u8 = [_]u8{0} ** 5,
+    reserved: [5]u8 = @as([5]u8, @splat(0)),
     pid: u32 = 0,
     reserved_pid: u32 = 0,
     process_nonce: u64 = 0,
@@ -270,14 +270,14 @@ pub const EventReleaseCompletion = struct {
     event_owner_addr: u64 = 0,
     source_lease_incarnation: u64 = 0,
     ordering_class_raw: u8 = 0,
-    reserved_ordering: [7]u8 = [_]u8{0} ** 7,
+    reserved_ordering: [7]u8 = @as([7]u8, @splat(0)),
     release_receipt_digest: Digest = zero_digest,
     permit_digest: Digest = zero_digest,
     consumed_blocker_count: u16 = 0,
     freed_payload_count: u8 = 0,
     consumed_pin_count: u8 = 0,
     settled_quarantine_count: u8 = 0,
-    reserved_count: [3]u8 = [_]u8{0} ** 3,
+    reserved_count: [3]u8 = @as([3]u8, @splat(0)),
     post_transcript_digest: Digest = zero_digest,
     authority_digest: Digest = zero_digest,
     seal: Digest = zero_digest,
@@ -290,7 +290,7 @@ pub const PendingRegistryReleaseReceipt = struct {
     source_lease_incarnation: u64 = 0,
     attempt: u64 = 0,
     state_raw: u8 = 0,
-    reserved: [7]u8 = [_]u8{0} ** 7,
+    reserved: [7]u8 = @as([7]u8, @splat(0)),
     release_seal: Digest = zero_digest,
 };
 
@@ -306,9 +306,9 @@ pub const PendingEffectProjection = struct {
 
 pub const PreparedEventReleasePermit = struct {
     self_addr: u64 = 0,
-    lifecycle_raw: u8 = @intFromEnum(AuthorityLifecycle.pristine),
+    lifecycle_raw: u8 = @backingInt(AuthorityLifecycle.pristine),
     consumed_raw: u8 = 0,
-    reserved: [6]u8 = [_]u8{0} ** 6,
+    reserved: [6]u8 = @as([6]u8, @splat(0)),
     pid: u32 = 0,
     reserved_pid: u32 = 0,
     process_nonce: u64 = 0,
@@ -317,7 +317,7 @@ pub const PreparedEventReleasePermit = struct {
     registry_incarnation: u64 = 0,
     binding_reservation_id: u64 = 0,
     entry_index: u16 = 0,
-    reserved_entry: [6]u8 = [_]u8{0} ** 6,
+    reserved_entry: [6]u8 = @as([6]u8, @splat(0)),
     event_node_incarnation: u64 = 0,
     stream_id: u64 = 0,
     event_generation: u64 = 0,
@@ -327,7 +327,7 @@ pub const PreparedEventReleasePermit = struct {
     source_lease_incarnation: u64 = 0,
     attempt: u64 = 0,
     ordering_class_raw: u8 = 0,
-    reserved_ordering: [7]u8 = [_]u8{0} ** 7,
+    reserved_ordering: [7]u8 = @as([7]u8, @splat(0)),
     expected_blocker_count: u64 = 0,
     completion_addr: u64 = 0,
     completion_extent: u64 = 0,
@@ -358,7 +358,7 @@ pub const PreparedEventReleasePermit = struct {
     connection_generation: u64 = 0,
     pin_process_nonce: u64 = 0,
     quarantine_slot_index: u16 = 0,
-    reserved_quarantine: [6]u8 = [_]u8{0} ** 6,
+    reserved_quarantine: [6]u8 = @as([6]u8, @splat(0)),
     quarantine_reservation_generation: u64 = 0,
     source_authority_digest: Digest = zero_digest,
     seal: Digest = zero_digest,
@@ -366,9 +366,9 @@ pub const PreparedEventReleasePermit = struct {
 
 pub const SettlementDisposition = struct {
     self_addr: u64 = 0,
-    lifecycle_raw: u8 = @intFromEnum(AuthorityLifecycle.pristine),
+    lifecycle_raw: u8 = @backingInt(AuthorityLifecycle.pristine),
     disposition_raw: u8 = 0,
-    reserved: [6]u8 = [_]u8{0} ** 6,
+    reserved: [6]u8 = @as([6]u8, @splat(0)),
     pid: u32 = 0,
     reserved_pid: u32 = 0,
     process_nonce: u64 = 0,
@@ -429,7 +429,7 @@ pub const EventReleaseLeafReceipt = struct {
     process_nonce: u64 = 0,
     thread_id: u64 = 0,
     role_raw: u8 = 0,
-    reserved: [7]u8 = [_]u8{0} ** 7,
+    reserved: [7]u8 = @as([7]u8, @splat(0)),
     identity_a: u64 = 0,
     identity_b: u64 = 0,
     identity_c: u64 = 0,
@@ -451,7 +451,7 @@ pub const EventReleasePhaseReceipt = struct {
     lifecycle_before_raw: u8 = 0,
     lifecycle_after_raw: u8 = 0,
     invocation_count: u8 = 0,
-    reserved: [4]u8 = [_]u8{0} ** 4,
+    reserved: [4]u8 = @as([4]u8, @splat(0)),
     event_owner_addr: u64 = 0,
     event_generation: u64 = 0,
     begun_addr: u64 = 0,
@@ -480,7 +480,7 @@ pub fn sealEventReleasePhaseReceipt(v: EventReleasePhaseReceipt) process_seal.Re
     });
 }
 pub fn validEventReleasePhaseReceipt(v: EventReleasePhaseReceipt, role: EventReleasePhaseRole) bool {
-    if (v.pid == 0 or v.process_nonce == 0 or v.thread_id == 0 or v.role_raw != @intFromEnum(role) or
+    if (v.pid == 0 or v.process_nonce == 0 or v.thread_id == 0 or v.role_raw != @backingInt(role) or
         v.event_owner_addr == 0 or v.event_generation == 0 or v.begun_addr == 0 or
         std.mem.allEqual(u8, &v.before_digest, 0) or std.mem.allEqual(u8, &v.after_digest, 0) or
         std.mem.allEqual(u8, &v.permit_seal, 0) or !std.mem.allEqual(u8, &v.reserved, 0)) return false;
@@ -508,7 +508,7 @@ pub fn makeEventReleasePhaseReceipt(
     tls_begun_seal: Digest,
 ) process_seal.ReadyError!EventReleasePhaseReceipt {
     const ready = try process_seal.currentReadyIdentity();
-    var v: EventReleasePhaseReceipt = .{ .pid = ready.pid, .process_nonce = ready.process_nonce, .thread_id = @intCast(std.Thread.getCurrentId()), .role_raw = @intFromEnum(role), .lifecycle_before_raw = lifecycle_before_raw, .lifecycle_after_raw = lifecycle_after_raw, .invocation_count = if (role == .callback) 1 else 0, .event_owner_addr = event_owner_addr, .event_generation = event_generation, .begun_addr = begun_addr, .invocation_ordinal = if (role == .callback) 1 else 0, .before_digest = before_digest, .after_digest = after_digest, .permit_seal = permit_seal, .tls_begun_seal = tls_begun_seal };
+    var v: EventReleasePhaseReceipt = .{ .pid = ready.pid, .process_nonce = ready.process_nonce, .thread_id = @intCast(std.Thread.getCurrentId()), .role_raw = @backingInt(role), .lifecycle_before_raw = lifecycle_before_raw, .lifecycle_after_raw = lifecycle_after_raw, .invocation_count = if (role == .callback) 1 else 0, .event_owner_addr = event_owner_addr, .event_generation = event_generation, .begun_addr = begun_addr, .invocation_ordinal = if (role == .callback) 1 else 0, .before_digest = before_digest, .after_digest = after_digest, .permit_seal = permit_seal, .tls_begun_seal = tls_begun_seal };
     v.seal = try sealEventReleasePhaseReceipt(v);
     return v;
 }
@@ -516,7 +516,7 @@ pub fn makeEventReleasePhaseReceipt(
 pub fn canonicalEventReleasePhaseAfterDigest(role: EventReleasePhaseRole, begun_addr: u64, event_owner_addr: u64, event_generation: u64, lifecycle_after_raw: u8) Digest {
     var h = std.crypto.hash.Blake3.init(.{});
     h.update("maru.event-release-canonical-after-zero.v1\x00");
-    hashInt(&h, u8, @intFromEnum(role));
+    hashInt(&h, u8, @backingInt(role));
     hashInt(&h, u64, begun_addr);
     hashInt(&h, u64, event_owner_addr);
     hashInt(&h, u64, event_generation);
@@ -549,7 +549,7 @@ pub fn sealEventReleaseLeafReceipt(value: EventReleaseLeafReceipt) process_seal.
 
 pub fn validEventReleaseLeafReceipt(value: EventReleaseLeafReceipt, role: EventReleaseLeafRole) bool {
     if (value.pid == 0 or value.process_nonce == 0 or value.thread_id == 0 or
-        value.role_raw != @intFromEnum(role) or !std.mem.allEqual(u8, &value.reserved, 0)) return false;
+        value.role_raw != @backingInt(role) or !std.mem.allEqual(u8, &value.reserved, 0)) return false;
     const incremented_after_a = std.math.add(u64, value.after_a, 1) catch return false;
     const exact_transition = switch (role) {
         .registry => value.identity_a != 0 and value.identity_b != 0 and value.identity_c != 0 and
@@ -693,10 +693,10 @@ pub fn validCanonicalEffectPlanShape(value: *const CanonicalEffectPlan) bool {
         !validOutboundShape(value)) return false;
 
     const action = std.enums.fromInt(EffectAction, value.action_raw) orelse return false;
-    const request: EffectRequestTag = @enumFromInt(value.effect_request.tag_raw);
-    const relation: OutboundRelation = @enumFromInt(value.outbound_relation_raw);
-    const disposition: OutboundDisposition = @enumFromInt(value.outbound_disposition_raw);
-    const fd_disposition: FdDisposition = @enumFromInt(value.fd_disposition_raw);
+    const request: EffectRequestTag = @fromBackingInt(@intCast(value.effect_request.tag_raw));
+    const relation: OutboundRelation = @fromBackingInt(@intCast(value.outbound_relation_raw));
+    const disposition: OutboundDisposition = @fromBackingInt(@intCast(value.outbound_disposition_raw));
+    const fd_disposition: FdDisposition = @fromBackingInt(@intCast(value.fd_disposition_raw));
     const before = value.first_reason_before;
     const after = value.first_reason_after;
     const descriptor_absent = relation == .absent;
@@ -891,8 +891,8 @@ pub fn confirmedOutcomeForAction(action: EffectAction) ConfirmedEffectOutcome {
 
 fn evidenceProjectionMatchesPlan(value: *const EffectCommitEvidence, plan: CanonicalEffectPlan) bool {
     const action = std.enums.fromInt(EffectAction, plan.action_raw) orelse return false;
-    return value.outcome_raw == @intFromEnum(confirmedOutcomeForAction(action)) and
-        value.recovery_raw == @intFromEnum(EffectRecovery.none) and
+    return value.outcome_raw == @backingInt(confirmedOutcomeForAction(action)) and
+        value.recovery_raw == @backingInt(EffectRecovery.none) and
         std.meta.eql(value.first_reason_before, plan.first_reason_before) and
         std.meta.eql(value.first_reason_after, plan.first_reason_after) and
         value.unusable_before_raw == plan.unusable_before_raw and
@@ -928,7 +928,7 @@ pub fn publishEffectCommitEvidenceNoFail(
     );
     out.* = .{
         .self_addr = @intFromPtr(out),
-        .outcome_raw = @intFromEnum(confirmedOutcomeForAction(@enumFromInt(plan.action_raw))),
+        .outcome_raw = @backingInt(confirmedOutcomeForAction(@fromBackingInt(@intCast(plan.action_raw)))),
         .pid = permit.pid,
         .process_nonce = permit.process_nonce,
         .thread_id = permit.thread_id,
@@ -955,7 +955,7 @@ pub fn publishEffectCommitEvidenceNoFail(
     };
     out.seal = sealEffectCommitEvidence(out.*) catch
         @panic("C3-3b3 effect evidence seal service unavailable after admission");
-    out.lifecycle_raw = @intFromEnum(AuthorityLifecycle.prepared);
+    out.lifecycle_raw = @backingInt(AuthorityLifecycle.prepared);
 }
 
 pub fn validEffectCommitEvidenceFor(
@@ -988,7 +988,7 @@ pub fn validEffectCommitEvidenceFor(
 
 pub fn validPreparedEffectPermit(value: *const PreparedEffectPermit) bool {
     const plan = effectPlanFromPermit(value);
-    if (value.self_addr != @intFromPtr(value) or value.lifecycle_raw != @intFromEnum(AuthorityLifecycle.prepared) or
+    if (value.self_addr != @intFromPtr(value) or value.lifecycle_raw != @backingInt(AuthorityLifecycle.prepared) or
         value.consumed_raw != 0 or value.pid == 0 or value.reserved_pid != 0 or value.process_nonce == 0 or
         value.thread_id == 0 or value.pending_owner_addr == 0 or value.owner_incarnation == 0 or value.attempt == 0 or
         value.event_generation == 0 or
@@ -1078,7 +1078,7 @@ pub fn sealPendingSettlementPermit(value: PreparedPendingSettlementPermit) proce
 }
 
 pub fn validPendingSettlementPermit(value: *const PreparedPendingSettlementPermit) bool {
-    if (value.self_addr != @intFromPtr(value) or value.lifecycle_raw != @intFromEnum(AuthorityLifecycle.prepared) or
+    if (value.self_addr != @intFromPtr(value) or value.lifecycle_raw != @backingInt(AuthorityLifecycle.prepared) or
         value.consumed_raw != 0 or value.pid == 0 or value.process_nonce == 0 or value.thread_id == 0 or
         !std.mem.allEqual(u8, &value.reserved, 0)) return false;
     const expected = sealPendingSettlementPermit(value.*) catch return false;
@@ -1117,7 +1117,7 @@ pub fn sealEffectCommitEvidence(value: EffectCommitEvidence) process_seal.ReadyE
 }
 
 pub fn validEffectCommitEvidence(value: *const EffectCommitEvidence) bool {
-    if (value.self_addr != @intFromPtr(value) or value.lifecycle_raw != @intFromEnum(AuthorityLifecycle.prepared) or
+    if (value.self_addr != @intFromPtr(value) or value.lifecycle_raw != @backingInt(AuthorityLifecycle.prepared) or
         value.consumed_raw != 0 or
         value.pid == 0 or value.reserved_pid != 0 or value.process_nonce == 0 or value.thread_id == 0 or
         value.pending_owner_addr == 0 or value.owner_incarnation == 0 or value.attempt == 0 or value.event_generation == 0 or
@@ -1135,8 +1135,8 @@ pub fn validEffectCommitEvidence(value: *const EffectCommitEvidence) bool {
         std.mem.allEqual(u8, &value.commit_authority_digest, 0) or
         !std.mem.allEqual(u8, &value.reserved, 0) or !std.mem.allEqual(u8, &value.reserved_count, 0) or
         !std.mem.allEqual(u8, &value.reserved_effect, 0)) return false;
-    const outcome: ConfirmedEffectOutcome = @enumFromInt(value.outcome_raw);
-    const recovery: EffectRecovery = @enumFromInt(value.recovery_raw);
+    const outcome: ConfirmedEffectOutcome = @fromBackingInt(@intCast(value.outcome_raw));
+    const recovery: EffectRecovery = @fromBackingInt(@intCast(value.recovery_raw));
     if (recovery == .trusted_local_invariant and outcome != .poison_confirmed) return false;
     const expected = sealEffectCommitEvidence(value.*) catch return false;
     return std.crypto.timing_safe.eql(Digest, expected, value.seal);
@@ -1169,7 +1169,7 @@ pub fn sealEventReleaseCompletion(value: EventReleaseCompletion) process_seal.Re
 }
 
 pub fn validEventReleaseCompletion(value: *const EventReleaseCompletion) bool {
-    if (value.self_addr != @intFromPtr(value) or value.lifecycle_raw != @intFromEnum(AuthorityLifecycle.prepared) or
+    if (value.self_addr != @intFromPtr(value) or value.lifecycle_raw != @backingInt(AuthorityLifecycle.prepared) or
         value.pid == 0 or value.reserved_pid != 0 or value.process_nonce == 0 or value.thread_id == 0 or
         value.outcome_raw != 0 or value.detail_raw != 0 or value.registry_incarnation == 0 or
         value.binding_reservation_id == 0 or value.event_node_incarnation == 0 or value.stream_id == 0 or
@@ -1350,7 +1350,7 @@ pub fn validEventReleasePostContext(context: EventReleasePostContext, post: Even
     inline for (.{ context.owner, context.correlation, context.mirror, context.callback }) |receipt|
         if (!std.crypto.timing_safe.eql(Digest, receipt.permit_seal, context.permit_seal) or
             receipt.begun_addr != context.begun_addr or receipt.event_owner_addr != context.event_owner_addr or
-            receipt.event_generation != context.event_generation or !std.crypto.timing_safe.eql(Digest, receipt.after_digest, canonicalEventReleasePhaseAfterDigest(@enumFromInt(receipt.role_raw), receipt.begun_addr, receipt.event_owner_addr, receipt.event_generation, receipt.lifecycle_after_raw))) return false;
+            receipt.event_generation != context.event_generation or !std.crypto.timing_safe.eql(Digest, receipt.after_digest, canonicalEventReleasePhaseAfterDigest(@fromBackingInt(@intCast(receipt.role_raw)), receipt.begun_addr, receipt.event_owner_addr, receipt.event_generation, receipt.lifecycle_after_raw))) return false;
     if (!std.crypto.timing_safe.eql(Digest, context.callback.before_digest, context.callback.tls_begun_seal) or
         context.callback.begun_addr != context.begun_addr) return false;
     return std.crypto.timing_safe.eql(Digest, post.registry_closed_digest, context.registry.seal) and
@@ -1365,7 +1365,7 @@ pub fn validEventReleasePostContext(context: EventReleasePostContext, post: Even
 
 pub fn validPreparedEventReleasePermit(value: *const PreparedEventReleasePermit) bool {
     if (value.self_addr != @intFromPtr(value) or
-        value.lifecycle_raw != @intFromEnum(AuthorityLifecycle.prepared) or value.consumed_raw != 0 or
+        value.lifecycle_raw != @backingInt(AuthorityLifecycle.prepared) or value.consumed_raw != 0 or
         value.pid == 0 or value.reserved_pid != 0 or value.process_nonce == 0 or value.thread_id == 0 or
         value.registry_addr == 0 or value.registry_incarnation == 0 or value.binding_reservation_id == 0 or
         value.event_node_incarnation == 0 or value.stream_id == 0 or value.event_generation == 0 or

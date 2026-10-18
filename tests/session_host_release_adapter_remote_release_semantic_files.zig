@@ -92,7 +92,7 @@ test "every bridge allocation failure unwinds without publishing" {
 
 test "oversized canonical role is rejected before allocation or descriptor IO" {
     var source = FakeAssets.init();
-    source.view.assets[@intFromEnum(metadata.Role.manifest)].size = @import("release_manifest").max_manifest_bytes + 1;
+    source.view.assets[@backingInt(metadata.Role.manifest)].size = @import("release_manifest").max_manifest_bytes + 1;
     var reader = CountingReader{};
     var result: semantics.Owner = .{};
     try std.testing.expectError(error.AssetTooLarge, bridge.bindWith(&reader, std.testing.allocator, asset_tests.context(), &source, &result));
@@ -157,7 +157,7 @@ const FakeAssets = struct {
     fn init() @This() {
         var view: assets.View = undefined;
         for (&view.assets, 0..) |*asset, index| asset.* = .{
-            .role = @enumFromInt(index),
+            .role = @fromBackingInt(@intCast(index)),
             .id = 1000 + index,
             .name = "asset",
             .path = "/tmp/asset",

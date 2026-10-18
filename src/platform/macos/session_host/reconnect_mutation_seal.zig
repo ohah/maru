@@ -168,7 +168,7 @@ pub const MutationOwner = struct {
 
     fn validateOwner(self: *const MutationOwner) !void {
         const lifecycle_raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
-        if (lifecycle_raw > @intFromEnum(MutationLifecycle.sealed_ambiguous) or
+        if (lifecycle_raw > @backingInt(MutationLifecycle.sealed_ambiguous) or
             self.self_addr != @intFromPtr(self) or self.owner_thread == null or
             self.owner_thread.? != std.Thread.getCurrentId() or
             self.shell_generation == 0 or self.input_epoch == 0 or self.next_ordinal == 0 or
@@ -292,7 +292,7 @@ pub const PausedInputMetadata = struct {
     last_sequence: u64,
     total_count: u32,
     total_bytes: u64,
-    kinds: [@typeInfo(SealKind).@"enum".fields.len]KindMetadata,
+    kinds: [@import("type_info_fields").enumFields(SealKind).len]KindMetadata,
 };
 
 pub const PausedPasteProjection = struct {
@@ -495,7 +495,7 @@ pub const PausedPasteStore = struct {
             if (entry.sequence != expected_sequence) return error.InvalidAuthority;
             summary.total_bytes = std.math.add(u64, summary.total_bytes, entry.queued_payload.len) catch
                 return error.InvalidAuthority;
-            const kind = &summary.kinds[@intFromEnum(entry.kind)];
+            const kind = &summary.kinds[@backingInt(entry.kind)];
             kind.count = std.math.add(u32, kind.count, 1) catch return error.InvalidAuthority;
             kind.bytes = std.math.add(u64, kind.bytes, entry.queued_payload.len) catch
                 return error.InvalidAuthority;
@@ -693,7 +693,7 @@ test "CR4b paused paste는 runtime global cap TTL과 secure wipe를 exact 정산
     try store.initInPlace(
         allocator,
         &budget,
-        [_]u8{0x2a} ++ [_]u8{0} ** 15,
+        [_]u8{0x2a} ++ @as([15]u8, @splat(0)),
         2,
         7,
     );
@@ -742,7 +742,7 @@ test "CR4b paused paste는 full resend를 single use로 이동하고 변조를 �
     try store.initInPlace(
         allocator,
         &budget,
-        [_]u8{0x2b} ++ [_]u8{0} ** 15,
+        [_]u8{0x2b} ++ @as([15]u8, @splat(0)),
         3,
         8,
     );

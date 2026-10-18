@@ -90,13 +90,13 @@ fn fixture(byte: u8) struct {
     endpoint: contract.Digest,
     transcript_digest: contract.Digest,
 } {
-    const artifact = [_]u8{byte} ** 32;
-    const endpoint = [_]u8{byte +% 1} ** 32;
+    const artifact = @as([32]u8, @splat(byte));
+    const endpoint = @as([32]u8, @splat(byte +% 1));
     const transcript: FrozenShutdownTranscript = .{
         .artifact_sha256 = artifact,
         .wire_major = 2,
-        .list_semantics_digest = [_]u8{byte +% 2} ** 32,
-        .terminate_semantics_digest = [_]u8{byte +% 3} ** 32,
+        .list_semantics_digest = @as([32]u8, @splat(byte +% 2)),
+        .terminate_semantics_digest = @as([32]u8, @splat(byte +% 3)),
     };
     return .{
         .profile = .{
@@ -169,9 +169,9 @@ test "C3-3b6 N-1 profile은 incompatible target을 request 없이 bounded로 닫
 test "C3-3b6 N-1 profile은 sent ambiguous를 destructive retry 없이 닫는다" {
     const decision = sentAmbiguous(.{
         .close_request_generation = 7,
-        .target_digest = [_]u8{9} ** 32,
+        .target_digest = @as([32]u8, @splat(9)),
         .attempt_generation = 2,
-    }, [_]u8{8} ** 32);
+    }, @as([32]u8, @splat(8)));
     try std.testing.expectEqual(@as(u8, 0), decision.destructive_request_count);
     try std.testing.expectEqual(contract.PostConnectionReason.n1_sent_ambiguous, decision.outcome.post_connection.reason);
 }

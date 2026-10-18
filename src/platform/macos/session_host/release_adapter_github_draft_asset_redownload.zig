@@ -108,10 +108,10 @@ const ProductionDownloader = struct {
     pub fn download(self: *@This(), expected: ExpectedAsset, budget: i128) !ObservedAsset {
         try transport.validateToken(self.token);
         var endpoint_storage: [128:0]u8 = undefined;
-        const endpoint = std.fmt.bufPrintZ(&endpoint_storage, "repos/ohah/maru/releases/assets/{d}", .{expected.id}) catch return error.InvalidRequest;
+        const endpoint = std.fmt.bufPrintSentinel(&endpoint_storage, "repos/ohah/maru/releases/assets/{d}", .{expected.id}, 0) catch return error.InvalidRequest;
         var token_storage: ["GH_TOKEN=".len + transport.max_token_bytes + 1]u8 = undefined;
         defer @memset(&token_storage, 0);
-        const token_entry = std.fmt.bufPrintZ(&token_storage, "GH_TOKEN={s}", .{self.token}) catch return error.InvalidToken;
+        const token_entry = std.fmt.bufPrintSentinel(&token_storage, "GH_TOKEN={s}", .{self.token}, 0) catch return error.InvalidToken;
         const argv = [_:null]?[*:0]const u8{ self.executable.ptr, "api", "--method", "GET", "--hostname", "github.com", "--header", "Accept: application/octet-stream", endpoint.ptr };
         const environment = [_:null]?[*:0]const u8{ token_entry.ptr, "GH_PROMPT_DISABLED=1" };
         const digest = try process.runDigestEnvironmentStdout(self.io, self.executable, &argv, &environment, expected.size, budget);

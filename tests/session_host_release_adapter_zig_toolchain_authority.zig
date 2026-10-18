@@ -27,7 +27,7 @@ fn createExecutable(tmp: *std.testing.TmpDir, storage: []u8) ![:0]const u8 {
     const root = try tmp.dir.realPathFileAlloc(std.testing.io, "zig", std.testing.allocator);
     defer std.testing.allocator.free(root);
     try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(root.ptr, 0o700));
-    return std.fmt.bufPrintZ(storage, "{s}", .{root});
+    return std.fmt.bufPrintSentinel(storage, "{s}", .{root}, 0);
 }
 
 fn bind(tmp: *std.testing.TmpDir, result: *toolchain.ZigToolchainAuthority, storage: []u8) ![:0]const u8 {
@@ -71,7 +71,7 @@ test "rejects invalid capture executable mode and symlink" {
     var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
     const raw = try tmp.dir.realPathFileAlloc(std.testing.io, "zig", std.testing.allocator);
     defer std.testing.allocator.free(raw);
-    const path = try std.fmt.bufPrintZ(&path_storage, "{s}", .{raw});
+    const path = try std.fmt.bufPrintSentinel(&path_storage, "{s}", .{raw}, 0);
     var result: toolchain.ZigToolchainAuthority = .{};
     try std.testing.expectError(error.NotExecutable, toolchain.bind(context(), .{ .workflow_sha = commit.* }, path, .{ .size = 11, .sha256 = digest.* }, &result));
     try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(path.ptr, 0o700));
@@ -79,7 +79,7 @@ test "rejects invalid capture executable mode and symlink" {
     try std.testing.expectError(error.DigestMismatch, toolchain.bind(context(), .{ .workflow_sha = commit.* }, path, .{ .size = 11, .sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".* }, &result));
     try tmp.dir.symLink(std.testing.io, "zig", "alias", .{});
     var alias_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const alias = try std.fmt.bufPrintZ(&alias_storage, "{s}/alias", .{std.fs.path.dirname(path).?});
+    const alias = try std.fmt.bufPrintSentinel(&alias_storage, "{s}/alias", .{std.fs.path.dirname(path).?}, 0);
     try std.testing.expectError(error.UnsafePath, toolchain.bind(context(), .{ .workflow_sha = commit.* }, alias, .{ .size = 11, .sha256 = digest.* }, &result));
 }
 
@@ -98,7 +98,7 @@ test "pathname bytes mode and parent drift fail revalidation" {
             .parent => {
                 const root = std.fs.path.dirname(path).?;
                 var moved_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-                const moved = try std.fmt.bufPrintZ(&moved_storage, "{s}-moved", .{root});
+                const moved = try std.fmt.bufPrintSentinel(&moved_storage, "{s}-moved", .{root}, 0);
                 try std.Io.Dir.renameAbsolute(root, moved, std.testing.io);
                 try std.Io.Dir.createDirAbsolute(std.testing.io, root, .default_dir);
                 try std.testing.expectError(error.ExecutableChanged, result.revalidate());

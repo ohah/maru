@@ -86,7 +86,7 @@ fn tableKeys(allocator: std.mem.Allocator, source: []const u8) ![][]const u8 {
 /// 참조로 안 세어진다. 그 키에 다른 참조가 없으면 **고아가 아닌데 고아로 찍힌다** — 시끄러운 쪽이므로
 /// 사람이 보고 판정한다. 오늘 그런 자리는 없다.
 fn collectEnumLiterals(allocator: std.mem.Allocator, source: [:0]const u8, out: *std.StringHashMapUnmanaged(void)) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source, .{});
     defer tree.deinit(allocator);
     if (tree.errors.len != 0) return error.SourceHasParseErrors;
 

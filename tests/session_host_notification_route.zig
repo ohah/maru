@@ -1,8 +1,6 @@
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("session_host_notification_route.h");
-});
+const c = @import("session_host_notification_route_c");
 
 test "P4 N2b3 canonical notification route identifier matches daemon and GUI contract" {
     var out: [c.MARU_SESSION_HOST_NOTIFICATION_IDENTIFIER_CAP]u8 = undefined;
@@ -22,7 +20,7 @@ test "P4 N2b3 canonical notification route identifier matches daemon and GUI con
 }
 
 test "P4 N2b3 canonical notification route identifier fails closed on short or null output" {
-    var short: [8]u8 = [_]u8{'x'} ** 8;
+    var short: [8]u8 = @as([8]u8, @splat('x'));
     try std.testing.expectEqual(@as(usize, 0), c.maru_session_host_notification_format_identifier(1, 2, 3, 4, 5, @ptrCast(&short), short.len));
     try std.testing.expectEqual(@as(u8, 0), short[0]);
     try std.testing.expectEqual(@as(usize, 0), c.maru_session_host_notification_format_identifier(1, 2, 3, 4, 5, null, 0));

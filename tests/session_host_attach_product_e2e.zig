@@ -26,9 +26,9 @@ test "p5c3d current product owns controller observer takeover detach and reattac
     // P5d runs the same product oracle through a harness-owned OpenSSH wrapper. Keeping the
     // daemon executable separate prevents the SSH gate from replacing the host with a test double.
     const attach_product = if (c.getenv("MARU_SESSION_HOST_ATTACH_EXE")) |raw|
-        try allocator.dupeZ(u8, std.mem.span(raw))
+        try allocator.dupeSentinel(u8, std.mem.span(raw), 0)
     else
-        try allocator.dupeZ(u8, product);
+        try allocator.dupeSentinel(u8, product, 0);
     defer allocator.free(attach_product);
     // attach 를 제품 exe 로 직접 부르는 경우에만 로컬 termios 를 검증한다(SSH 래퍼면 원격이다).
     const verify_local_termios = std.mem.eql(u8, attach_product, product);
@@ -37,7 +37,7 @@ test "p5c3d current product owns controller observer takeover detach and reattac
     c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
     nonce = (nonce & (std.math.maxInt(u64) >> 1)) | 1;
     var xdg_buf: [256]u8 = undefined;
-    const xdg = try std.fmt.bufPrintZ(&xdg_buf, "/tmp/maru-p5c3d-product-{x}", .{nonce});
+    const xdg = try std.fmt.bufPrintSentinel(&xdg_buf, "/tmp/maru-p5c3d-product-{x}", .{nonce}, 0);
     try mkdirExact(xdg);
     var xdg_exists = true;
     defer if (xdg_exists) removeTree(xdg);
@@ -78,7 +78,7 @@ test "p5c3d current product owns controller observer takeover detach and reattac
     var children_before: [64]c.pid_t = undefined;
     const children_before_len = listChildren(host_pid, &children_before);
     var input_probe_buf: [384]u8 = undefined;
-    const input_probe = try std.fmt.bufPrintZ(&input_probe_buf, "{s}/input-probe", .{xdg});
+    const input_probe = try std.fmt.bufPrintSentinel(&input_probe_buf, "{s}/input-probe", .{xdg}, 0);
     const spawn_params = try std.fmt.allocPrint(
         allocator,
         "{{\"argv\":[\"/bin/sh\",\"-c\",\"/bin/stty raw -echo -onlcr; printf 'P5C3D_READY 한글🙂'; exec /usr/bin/tee {s}\"],\"cols\":80,\"rows\":24}}",
@@ -249,7 +249,7 @@ test "p5c3d --stream 은 첫 화면 뒤 delta 를 계속 흘린다" {
     c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
     nonce = (nonce & (std.math.maxInt(u64) >> 1)) | 1;
     var xdg_buf: [256]u8 = undefined;
-    const xdg = try std.fmt.bufPrintZ(&xdg_buf, "/tmp/maru-p5c3d-stream-{x}", .{nonce});
+    const xdg = try std.fmt.bufPrintSentinel(&xdg_buf, "/tmp/maru-p5c3d-stream-{x}", .{nonce}, 0);
     try mkdirExact(xdg);
     defer removeTree(xdg);
     // 위 테스트와 같은 이유로 base 를 **이 프로세스의 격리 root** 로 통일한다. 부모가 socket 을 여는
@@ -289,7 +289,7 @@ test "p5c3d --stream 은 첫 화면 뒤 delta 를 계속 흘린다" {
     const runtime_id = session_host.client.extractRuntimeId(spawn_response) orelse
         return error.RuntimeSpawnFailed;
     var runtime_text: [33]u8 = undefined;
-    const runtime_z = try std.fmt.bufPrintZ(&runtime_text, "{s}", .{&runtime_id});
+    const runtime_z = try std.fmt.bufPrintSentinel(&runtime_text, "{s}", .{&runtime_id}, 0);
 
     // `--stream` 은 pty 가 필요 없다 — **파이프로 돌리는 것이 이 모드의 목적이다**(§8).
     var pipe_fds: [2]c.fd_t = undefined;
@@ -298,7 +298,7 @@ test "p5c3d --stream 은 첫 화면 뒤 delta 를 계속 흘린다" {
     const write_fd = try moveAboveStdio(pipe_fds[1]);
 
     var root_env: [320]u8 = undefined;
-    const root_arg = try std.fmt.bufPrintZ(&root_env, "MARU_SESSION_HOST_ROOT={s}", .{base});
+    const root_arg = try std.fmt.bufPrintSentinel(&root_env, "MARU_SESSION_HOST_ROOT={s}", .{base}, 0);
     const child = c.fork();
     if (child < 0) return error.ForkFailed;
     if (child == 0) {
@@ -364,7 +364,7 @@ const stream_header_bytes: usize = 12;
 /// 제품 없이 돌 수 없으므로 건너뛴다.
 fn productExe(allocator: std.mem.Allocator) ![:0]u8 {
     const raw = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse return error.SkipZigTest;
-    return allocator.dupeZ(u8, std.mem.span(raw));
+    return allocator.dupeSentinel(u8, std.mem.span(raw), 0);
 }
 
 const PtyAttach = struct {
@@ -398,9 +398,9 @@ const PtyAttach = struct {
         const output = try allocator.alloc(u8, 512 * 1024);
         errdefer allocator.free(output);
         var env_buf: [320]u8 = undefined;
-        const env_arg = try std.fmt.bufPrintZ(&env_buf, "MARU_SESSION_HOST_ROOT={s}", .{session_host_root});
+        const env_arg = try std.fmt.bufPrintSentinel(&env_buf, "MARU_SESSION_HOST_ROOT={s}", .{session_host_root}, 0);
         var runtime_buf: [33]u8 = undefined;
-        const runtime_z = try std.fmt.bufPrintZ(&runtime_buf, "{s}", .{runtime_id});
+        const runtime_z = try std.fmt.bufPrintSentinel(&runtime_buf, "{s}", .{runtime_id}, 0);
         const pid = c.fork();
         if (pid < 0) return error.ForkFailed;
         if (pid == 0) {
@@ -734,7 +734,7 @@ fn waitForNewChild(parent: c.pid_t, before: []const c.pid_t) !c.pid_t {
 }
 
 fn expectRuntimeAlive(host_pid: c.pid_t, runtime_pid: c.pid_t) !void {
-    const probe_signal: c.SIG = @enumFromInt(0);
+    const probe_signal: c.SIG = @fromBackingInt(@intCast(0));
     if (c.kill(host_pid, probe_signal) != 0 or c.kill(runtime_pid, probe_signal) != 0)
         return error.ProcessNotAlive;
     var children: [64]c.pid_t = undefined;
@@ -744,7 +744,7 @@ fn expectRuntimeAlive(host_pid: c.pid_t, runtime_pid: c.pid_t) !void {
 }
 
 fn waitForProcessGone(pid: c.pid_t) !void {
-    const probe_signal: c.SIG = @enumFromInt(0);
+    const probe_signal: c.SIG = @fromBackingInt(@intCast(0));
     const started = monotonicNow();
     while (monotonicNow() - started < phase_ns) {
         const rc = c.kill(pid, probe_signal);

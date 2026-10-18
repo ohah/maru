@@ -111,7 +111,7 @@ pub fn validateTarget(session: *host.AppSession, target: disk.Target, proof: ver
 }
 /// 열린 모델의 namespace 별칭도 검사한다. 사라진/비정규 경로의 저장 실패는 기존 CAS 결산에 맡긴다.
 pub fn namespaceIdentity(a: std.mem.Allocator, path: []const u8) !?maru.session.file_tree.Identity {
-    const name = try a.dupeZ(u8, path);
+    const name = try a.dupeSentinel(u8, path, 0);
     defer a.free(name);
     const fd = std.c.open(name, std.c.O{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true });
     if (fd < 0) switch (std.posix.errno(fd)) {
@@ -129,14 +129,14 @@ fn inputReady(session: *host.AppSession) !void {
 fn identity(fd: std.c.fd_t) !maru.session.file_tree.Identity {
     var stat: std.posix.Stat = undefined;
     if (std.c.fstat(fd, &stat) != 0) return error.StatFailed;
-    const device: std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(stat.dev))) = @bitCast(stat.dev);
+    const device: @Int(.unsigned, @bitSizeOf(@TypeOf(stat.dev))) = @bitCast(stat.dev);
     return .{ .device = device, .inode = stat.ino, .kind = if (std.posix.S.ISREG(stat.mode)) 1 else 4 };
 }
 fn occupied(session: *host.AppSession, path: []const u8, absolute: []const u8, proof: verify.Proof) !void {
     const normalized = try std.fs.path.resolve(session.allocator, &.{path});
     defer session.allocator.free(normalized);
     if (std.mem.eql(u8, normalized, absolute)) return error.PathOccupied;
-    const name = try session.allocator.dupeZ(u8, normalized);
+    const name = try session.allocator.dupeSentinel(u8, normalized, 0);
     defer session.allocator.free(name);
     const fd = std.c.open(name, std.c.O{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true });
     if (fd < 0) {
@@ -155,7 +155,7 @@ fn guard(session: *host.AppSession, target: disk.Target, proof: verify.Proof, st
     defer root.deinit(a, session.io);
     const root_id = try identity(root.directory.handle);
     if (root_id.device != target.root_identity.device or root_id.inode != target.root_identity.inode or target.root_identity.kind != 2) return error.RootChanged;
-    const relative = try a.dupeZ(u8, try maru.session.editor.search.request.relativePath(target.path));
+    const relative = try a.dupeSentinel(u8, try maru.session.editor.search.request.relativePath(target.path), 0);
     defer a.free(relative);
     const fd = std.c.openat(root.directory.handle, relative, std.c.O{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true });
     if (fd < 0) return error.FileChanged;

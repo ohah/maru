@@ -460,7 +460,7 @@ test "dispatch §8.3: self caller가 남의 id를 물으면 존재/부재 무관
     const w_absent = try dispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.get\",\"params\":{\"id\":999}}", 10, .self);
     defer testing.allocator.free(w_absent);
     try testing.expectEqualStrings(w_exists, w_absent); // oracle 없음
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w_exists));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(w_exists));
 }
 
 test "dispatch: 인가된 surface가 snapshot에 없으면 process_exited(unauthorized와 다름)" {
@@ -469,7 +469,7 @@ test "dispatch: 인가된 surface가 snapshot에 없으면 process_exited(unauth
     const snap: cs.CollectorSnapshot = .{ .surfaces = &partial, .windows = &fx_windows };
     const wire = try dispatchReadOnly(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.get\",\"params\":{\"id\":11}}", snap, 10, .window);
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.process_exited)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.process_exited)), try errCode(wire));
 }
 
 test "dispatch: 미지 method → method_not_found(-32601)" {
@@ -480,7 +480,7 @@ test "dispatch: 미지 method → method_not_found(-32601)" {
     }) |req| {
         const wire = try dispatch(req, 10, .all);
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.method_not_found)), try errCode(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.method_not_found)), try errCode(wire));
     }
 }
 
@@ -491,7 +491,7 @@ test "dispatch: session.capture는 metadata 라우터에서 read-output 미충�
     for ([_]wm.MetadataScope{ .self, .window, .all }) |scope| {
         const wire = try dispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.capture\",\"params\":{\"id\":10}}", 10, scope);
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
     }
     // §8.3 oracle 방지: target surface_id가 존재하는 10이든 없는 999든 바이트 동일(존재 여부 무누설).
     const w_exists = try dispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.capture\",\"params\":{\"id\":10}}", 10, .all);
@@ -507,7 +507,7 @@ test "dispatch: malformed JSON → parse_error(-32700), id=null" {
         defer testing.allocator.free(wire);
         var pm = try cp.parseMessage(testing.allocator, wire);
         defer pm.deinit();
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.parse_error)), pm.message.response.err.?.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.parse_error)), pm.message.response.err.?.code);
         try testing.expect(pm.message.response.id == .null);
     }
 }
@@ -521,7 +521,7 @@ test "dispatch: 유효 JSON이나 유효 request 아님 → invalid_request(-326
     }) |req| {
         const wire = try dispatch(req, 10, .all);
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_request)), try errCode(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_request)), try errCode(wire));
     }
 }
 
@@ -535,7 +535,7 @@ test "dispatch: session.get params 오류 → invalid_params(-32602)" {
     }) |req| {
         const wire = try dispatch(req, 10, .all);
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(wire));
     }
 }
 
@@ -547,7 +547,7 @@ test "dispatch: sessions.list window params 오류 → invalid_params" {
     }) |req| {
         const wire = try dispatch(req, 10, .all);
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(wire));
     }
 }
 
@@ -572,10 +572,10 @@ test "dispatch: 응답이 request id(number·string)를 echo한다" {
 }
 
 // ══ 1e-core: dispatchAuthenticated(capability 인가 배선) 테스트(헤드리스, 주입 store) ══════════════════════
-const n_all: cap.Nonce = [_]u8{0x01} ** cap.nonce_len;
-const n_win: cap.Nonce = [_]u8{0x02} ** cap.nonce_len;
-const n_browser: cap.Nonce = [_]u8{0x03} ** cap.nonce_len;
-const n_unknown: cap.Nonce = [_]u8{0xEE} ** cap.nonce_len;
+const n_all: cap.Nonce = @as([cap.nonce_len]u8, @splat(0x01));
+const n_win: cap.Nonce = @as([cap.nonce_len]u8, @splat(0x02));
+const n_browser: cap.Nonce = @as([cap.nonce_len]u8, @splat(0x03));
+const n_unknown: cap.Nonce = @as([cap.nonce_len]u8, @splat(0xEE));
 
 // 5f-4a: 단일 nonce(또는 null)를 dispatchAuthenticated의 cap **집합** 슬라이스로(누적 시그니처 어댑터). buf 수명 안 유효.
 fn noncesSlice(buf: *[1]cap.Nonce, nonce: ?cap.Nonce) []const cap.Nonce {
@@ -679,7 +679,7 @@ test "dispatchAuthenticated(§8.3): 셀렉터가 없어도 없는 id 는 여전�
     // `process_exited` 가 새어 나오고, 그때 이 테스트가 잡는다.
     const missing = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.get\",\"params\":{\"id\":9999}}", null, null, &store);
     defer testing.allocator.free(missing);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(missing));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(missing));
 
     // 대조: **있는** id 는 셀렉터 없이도 보인다(그것이 이 변경의 목적이다).
     const present = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.get\",\"params\":{\"id\":20}}", null, null, &store);
@@ -695,7 +695,7 @@ test "dispatchAuthenticated(§8.3): 셀렉터가 없어도 read-output 은 안 �
     // metadata 를 넓힌 것이 capture 까지 넓히면 화면 내용이 새어 나간다. **경계는 metadata 안쪽에서만 움직였다.**
     const wire = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.capture\",\"params\":{\"id\":10}}", null, null, &store);
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
 }
 
 test "dispatchAuthenticated(§9.6): browser.list → cap·selector 없이 web surface만(ungated 발견, 터미널 제외)" {
@@ -847,7 +847,7 @@ test "dispatchAuthenticated(5f-4a): cap 집합 — 하나라도 인가하면 통
     switch (try dispatchAuthenticated(testing.allocator, nav, fx, null, &[_]cap.Nonce{n_all}, &store, &no_grants, 0)) {
         .immediate => |b| {
             defer testing.allocator.free(b);
-            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(b));
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(b));
         },
         .browser => |op| {
             testing.allocator.free(op.arg);
@@ -906,7 +906,7 @@ test "dispatchAuthenticated: read_output cap + session.capture → method_not_fo
         try store.issueForFd(testing.allocator, n_browser, .{ .surface_id = 10, .generation = 0, .scope = .read_output, .expires_at = 1000 });
         const wire = try authDispatch(cap_req, 10, n_browser, &store); // now=0 < 1000 유효
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.method_not_found)), try errCode(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.method_not_found)), try errCode(wire));
     }
     // 대조: metadata cap으로 capture → 구조적 read_output 미충족 → unauthorized.
     {
@@ -915,7 +915,7 @@ test "dispatchAuthenticated: read_output cap + session.capture → method_not_fo
         try store.issueForFd(testing.allocator, n_all, .{ .surface_id = 10, .generation = 0, .scope = .{ .metadata = .all } });
         const wire = try authDispatch(cap_req, 10, n_all, &store);
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
     }
 }
 
@@ -953,7 +953,7 @@ fn expectImmediateCode(d: AuthDispatch, code: cp.ErrorCode) !void {
     switch (d) {
         .immediate => |b| {
             defer testing.allocator.free(b);
-            try testing.expectEqual(@as(i64, @intFromEnum(code)), try errCode(b));
+            try testing.expectEqual(@as(i64, @backingInt(code)), try errCode(b));
         },
         .browser => |b| {
             testing.allocator.free(b.arg);

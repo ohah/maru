@@ -101,7 +101,7 @@ test "매니페스트 경로 갱신은 ctime 을 바꿔 소유자의 withdraw �
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)];
     var dir_z_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_z = try std.fmt.bufPrintZ(&dir_z_buf, "{s}", .{dir});
+    const dir_z = try std.fmt.bufPrintSentinel(&dir_z_buf, "{s}", .{dir}, 0);
 
     // `validateOwnerDir` 는 group/other 비트가 **하나도** 없어야 통과한다(0700). `testing.tmpDir` 은
     // umask 를 따라 0755 로 만들므로, 이걸 안 맞추면 아래가 전부 `SkipZigTest` 로 빠져 **조용히
@@ -118,9 +118,9 @@ test "매니페스트 경로 갱신은 ctime 을 바꿔 소유자의 withdraw �
     _ = c.close(fd);
 
     var socket_buf: [640]u8 = undefined;
-    const socket_path = try std.fmt.bufPrintZ(&socket_buf, "{s}/sock", .{dir});
+    const socket_path = try std.fmt.bufPrintSentinel(&socket_buf, "{s}/sock", .{dir}, 0);
     var lock_buf: [640]u8 = undefined;
-    const lock_path = try std.fmt.bufPrintZ(&lock_buf, "{s}/owner.lock", .{dir});
+    const lock_path = try std.fmt.bufPrintSentinel(&lock_buf, "{s}/owner.lock", .{dir}, 0);
     const subject: Subject = .{
         .session_dir = dir_z,
         .socket_path = socket_path,

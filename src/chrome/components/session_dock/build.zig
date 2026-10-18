@@ -1031,7 +1031,7 @@ test "bufferSizes는 build가 성공하는 최소치이고 한 칸만 줄여도 
     try std.testing.expect(frame.tree.find(NodeIds.sticky_group) != null);
 
     // 어느 하나라도 한 칸 모자라면 실패한다 — 넉넉히 보고하면 호출처가 실패 조건을 영영 못 본다.
-    inline for (@typeInfo(BufferSizes).@"struct".fields) |field| {
+    inline for (@import("type_info_fields").structFields(BufferSizes)) |field| {
         var tight = sizes;
         @field(tight, field.name) -= 1;
         // 어떤 종류의 부족인지는 버퍼마다 다르다(node/action/entry/depth). 중요한 것은 그 크기로는

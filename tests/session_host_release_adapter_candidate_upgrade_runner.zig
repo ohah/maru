@@ -55,7 +55,7 @@ test "workspace cleanup is descriptor confined to the selected signed child" {
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_buf);
     var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const root = try std.fmt.bufPrintZ(&path_storage, "{s}/upgrade", .{root_buf[0..root_len]});
+    const root = try std.fmt.bufPrintSentinel(&path_storage, "{s}/upgrade", .{root_buf[0..root_len]}, 0);
     var workspace: runner.Workspace = .{};
     try runner.prepareWorkspaceForTest(&workspace, root);
     const paths = try workspace.value();

@@ -23,7 +23,7 @@ pub fn pointsPx(points: u16, scale_milli: u32) u32 {
 }
 
 pub fn px(step: Space, scale_milli: u32) u32 {
-    return pointsPx(@intFromEnum(step), scale_milli);
+    return pointsPx(@backingInt(step), scale_milli);
 }
 
 test "spacing resolves logical steps once at backing scale" {

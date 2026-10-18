@@ -228,17 +228,17 @@ test "우리 알고리즘이 아니면 거절한다" {
     // 계약 §3 — ed25519 만 한다. **조용히 다른 것을 받아 주면** 검증이 약해진다.
     var buf: [256]u8 = undefined;
     for ([_][]const u8{ "ssh-rsa", "rsa-sha2-512", "ecdsa-sha2-nistp256", "ssh-ed448", "" }) |alg| {
-        const key_blob = try buildBlob(&buf, alg, &([_]u8{0} ** 32));
+        const key_blob = try buildBlob(&buf, alg, &(@as([32]u8, @splat(0))));
         try std.testing.expectError(Error.UnsupportedAlgorithm, parsePublicKey(key_blob));
         // **서명 쪽도 같이 잰다.** 여기 검사가 빠져도 아무 테스트가 안 잡던 자리다(변이로 확인
         // 했다) — 서버가 다른 알고리즘을 주장하는 서명을 보내도 우리가 ed25519 로 검증하게 된다.
-        const sig_blob = try buildBlob(&buf, alg, &([_]u8{0} ** 64));
+        const sig_blob = try buildBlob(&buf, alg, &(@as([64]u8, @splat(0))));
         try std.testing.expectError(Error.UnsupportedAlgorithm, parseSignature(sig_blob));
     }
     // 접두만 같은 이름도 거절한다(부분 일치가 아니다).
-    const cert = try buildBlob(&buf, "ssh-ed25519-cert-v01@openssh.com", &([_]u8{0} ** 32));
+    const cert = try buildBlob(&buf, "ssh-ed25519-cert-v01@openssh.com", &(@as([32]u8, @splat(0))));
     try std.testing.expectError(Error.UnsupportedAlgorithm, parsePublicKey(cert));
-    const cert_sig = try buildBlob(&buf, "ssh-ed25519-cert-v01@openssh.com", &([_]u8{0} ** 64));
+    const cert_sig = try buildBlob(&buf, "ssh-ed25519-cert-v01@openssh.com", &(@as([64]u8, @splat(0))));
     try std.testing.expectError(Error.UnsupportedAlgorithm, parseSignature(cert_sig));
 
     // **검증 경로에서도 걸린다** — 파싱만 막고 검증이 딴 길로 가면 의미가 없다.
@@ -253,7 +253,7 @@ test "우리 알고리즘이 아니면 거절한다" {
 
 test "길이가 틀린 blob 을 거절한다" {
     var buf: [256]u8 = undefined;
-    const filler = [_]u8{0xAB} ** 128;
+    const filler = @as([128]u8, @splat(0xAB));
     for ([_]usize{ 0, 31, 33, 64 }) |bad| {
         const blob = try buildBlob(&buf, alg_name, filler[0..bad]);
         try std.testing.expectError(Error.MalformedBlob, parsePublicKey(blob));
@@ -270,7 +270,7 @@ test "여분 바이트가 붙은 blob 은 거절한다" {
     // 지문도 `ssh-keygen -lf` 와 달라져 사용자가 그 차이를 알 방법이 없다. 서명은 서버가 보낸
     // 원문을 덮으므로 **그대로 통과한다** — 그래서 이 검사가 유일한 그물이다.
     var buf: [256]u8 = undefined;
-    const canonical = try buildBlob(&buf, alg_name, &([_]u8{0x11} ** 32));
+    const canonical = try buildBlob(&buf, alg_name, &(@as([32]u8, @splat(0x11))));
     _ = try parsePublicKey(canonical); // 정본은 통과한다
 
     var padded: [256]u8 = undefined;
@@ -284,7 +284,7 @@ test "여분 바이트가 붙은 blob 은 거절한다" {
     }
 
     // 서명 blob 도 같다.
-    const sig_canonical = try buildBlob(&buf, alg_name, &([_]u8{0x22} ** 64));
+    const sig_canonical = try buildBlob(&buf, alg_name, &(@as([64]u8, @splat(0x22))));
     _ = try parseSignature(sig_canonical);
     @memcpy(padded[0..sig_canonical.len], sig_canonical);
     padded[sig_canonical.len] = 0;
@@ -307,7 +307,7 @@ test "여분 바이트가 붙은 blob 은 거절한다" {
 test "잘린 blob 은 거절한다" {
     // **네트워크에서 온 바이트다** — 어느 자리에서 끊겨도 안 죽고 거절해야 한다.
     var buf: [256]u8 = undefined;
-    const blob = try buildBlob(&buf, alg_name, &([_]u8{0x11} ** 32));
+    const blob = try buildBlob(&buf, alg_name, &(@as([32]u8, @splat(0x11))));
     var i: usize = 0;
     while (i < blob.len) : (i += 1) {
         if (parsePublicKey(blob[0..i])) |_| return error.TruncatedBlobAccepted else |_| {}

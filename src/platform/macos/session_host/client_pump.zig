@@ -963,7 +963,7 @@ pub const PolicyInput = struct {
     control_ready: bool = false,
     inherited_blocker: bool = false,
     terminal: ?ExternalPumpTerminal = null,
-    deadlines: [5]?i128 = .{null} ** 5,
+    deadlines: [5]?i128 = @splat(null),
 };
 
 /// Decide scheduling only. Mechanics later fill byte/frame counters after performing bounded I/O.

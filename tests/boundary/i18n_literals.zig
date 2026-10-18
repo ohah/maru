@@ -269,7 +269,7 @@ fn hasHangul(bytes: []const u8) bool {
 /// 옆의 `cli_purity.zig` 가 같은 문제를 이미 토크나이저로 풀었다 — 그 방식을 그대로 쓴다.
 /// 파싱 오류가 있는 파일은 **실패**시킨다(조용히 0 을 세면 그 파일이 영원히 감시 밖이 된다).
 fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source, .{});
     defer tree.deinit(allocator);
     if (tree.errors.len != 0) return error.SourceHasParseErrors;
 
@@ -357,7 +357,7 @@ comptime {
 /// 파일 수준 `var` 라 이 파일에 둘째 테스트가 붙으면 첫 테스트의 소비 표시가 새어 나간다. 형제 게이트는
 /// 테스트 지역 배열을 쓴다 — 여기는 `lookup` 이 파일 수준 함수라 그렇게 못 하므로, **테스트 시작에서
 /// 반드시 지운다**.
-var consumed = [_]bool{false} ** inventory.len;
+var consumed = @as([inventory.len]bool, @splat(false));
 
 fn lookup(path: []const u8) ?usize {
     for (inventory, 0..) |e, idx| {

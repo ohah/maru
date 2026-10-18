@@ -362,7 +362,7 @@ test "언어를 박거나 정하는 자리가 원장과 같다 (i18n 계약 §7.
     const allocator = std.testing.allocator;
     var failed = false;
     var scanned: usize = 0;
-    var consumed = [_]bool{false} ** inventory.len;
+    var consumed = @as([inventory.len]bool, @splat(false));
 
     // 찾은 자리의 줄 번호. 진단이 "이 파일에 N 개" 로 끝나면 6만 줄짜리 파일에서 사람이 손으로 찾는다.
     var pinned_lines: std.ArrayList(usize) = .empty;
@@ -427,7 +427,7 @@ test "언어를 박거나 정하는 자리가 원장과 같다 (i18n 계약 §7.
             // 파일이어도 "줄었다" 조차 안 뜬다 — 눈이 먼 상태를 통과로 읽는 것이다.
             // **파일마다 한 번만 파싱한다.** 두 세는 함수가 각자 파싱하던 판은 같은 트리·같은 마스크를
             // 두 번 만들었고, 그것만으로 이 게이트가 14.1 초 중 **7.2 초**를 썼다(실측).
-            var tree = std.zig.Ast.parse(allocator, source, .zig) catch |err| {
+            var tree = std.zig.Ast.parse(allocator, source, .{}) catch |err| {
                 failed = true;
                 std.debug.print("{s}: 파싱하지 못했다({s}) — 이 파일은 검사되지 않았다.\n", .{ path, @errorName(err) });
                 markConsumed(&consumed, path);
@@ -548,7 +548,7 @@ test "스캐너는 박은 호출만 세고, 언어를 도는 것과 테스트 �
     const count = struct {
         fn f(al: std.mem.Allocator, ls: *std.ArrayList(usize), src: [:0]const u8) !usize {
             ls.clearRetainingCapacity();
-            var tree = try std.zig.Ast.parse(al, src, .zig);
+            var tree = try std.zig.Ast.parse(al, src, .{});
             defer tree.deinit(al);
             if (tree.errors.len != 0) return error.SourceHasParseErrors;
             const mask = try testMask(al, &tree);
@@ -638,7 +638,7 @@ test "스캐너는 프로세스의 언어를 정하는 자리를 이름별로 �
     const count = struct {
         fn f(al: std.mem.Allocator, ls: *[Process.names.len]std.ArrayList(usize), src: [:0]const u8) !Process {
             for (ls) |*l| l.clearRetainingCapacity();
-            var tree = try std.zig.Ast.parse(al, src, .zig);
+            var tree = try std.zig.Ast.parse(al, src, .{});
             defer tree.deinit(al);
             if (tree.errors.len != 0) return error.SourceHasParseErrors;
             const mask = try testMask(al, &tree);

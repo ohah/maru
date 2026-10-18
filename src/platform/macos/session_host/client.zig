@@ -294,7 +294,7 @@ const PreparedBlockingRpc = struct {
 /// Client methods below may interpret these bytes.
 pub const PreparedBlockingRpcStorage = struct {
     bytes: [@sizeOf(PreparedBlockingRpc)]u8 align(@alignOf(PreparedBlockingRpc)) =
-        [_]u8{0} ** @sizeOf(PreparedBlockingRpc),
+        @as([@sizeOf(PreparedBlockingRpc)]u8, @splat(0)),
 };
 
 pub const PreparedRequestWireProgress = enum(u8) {
@@ -401,10 +401,10 @@ fn preparedExecutionLeaseSeal(lease: *const PreparedRequestExecutionLease) u64 {
         lease.poison_allocator_source_site_raw,
         lease.ownership_raw,
         lease.io_mode_raw,
-        @as(usize, @intFromEnum(lease.progress)),
-        @as(usize, @intFromEnum(lease.lifecycle)),
+        @as(usize, @backingInt(lease.progress)),
+        @as(usize, @backingInt(lease.lifecycle)),
         @as(usize, lease.fence_held),
-        @as(usize, @intFromEnum(lease.fence_mode)),
+        @as(usize, @backingInt(lease.fence_mode)),
         @as(usize, lease.cleanup_active),
         @as(usize, lease.response_read_started),
     }) |value| hash.update(std.mem.asBytes(&value));
@@ -416,9 +416,9 @@ fn preparedExecutionLeaseRawValid(lease: *const PreparedRequestExecutionLease) b
     const progress_raw = @as(*const u8, @ptrCast(&lease.progress)).*;
     const lifecycle_raw = @as(*const u8, @ptrCast(&lease.lifecycle)).*;
     const fence_mode_raw = @as(*const u8, @ptrCast(&lease.fence_mode)).*;
-    return progress_raw <= @intFromEnum(PreparedRequestWireProgress.request_maybe_written) and
-        lifecycle_raw <= @intFromEnum(PreparedRequestExecutionLeaseLifecycle.active) and
-        fence_mode_raw <= @intFromEnum(PreparedRequestExecutionFenceMode.upgraded_shared) and
+    return progress_raw <= @backingInt(PreparedRequestWireProgress.request_maybe_written) and
+        lifecycle_raw <= @backingInt(PreparedRequestExecutionLeaseLifecycle.active) and
+        fence_mode_raw <= @backingInt(PreparedRequestExecutionFenceMode.upgraded_shared) and
         lease.fence_held <= 1 and lease.cleanup_active <= 1 and lease.response_read_started <= 1;
 }
 
@@ -471,7 +471,7 @@ pub const PreparedBlockingRpcIdentity = struct {
 
 fn preparedLifecycleRawValid(prepared: *const PreparedBlockingRpc) bool {
     const raw = @as(*const u8, @ptrCast(&prepared.lifecycle)).*;
-    return raw <= @intFromEnum(PreparedBlockingRpcLifecycle.terminal);
+    return raw <= @backingInt(PreparedBlockingRpcLifecycle.terminal);
 }
 
 fn preparedDescriptor(
@@ -1293,7 +1293,7 @@ const screen_inbox_field_allowlist = [_][]const u8{
     "recovery",
 };
 comptime {
-    const fields = std.meta.fields(ScreenInbox);
+    const fields = @import("type_info_fields").fields(ScreenInbox);
     if (fields.len != screen_inbox_field_allowlist.len)
         @compileError("update the P4 R3 ScreenInbox schema for every owner field change");
     for (fields, screen_inbox_field_allowlist) |field, expected|
@@ -1792,7 +1792,7 @@ test "CR3a-2c3d C1 ledger admission failure publishes no allocator scope state" 
         @intFromPtr(&client),
         1,
         1,
-        @intFromEnum(Client.GenerationAllocatorPurpose.attachment_batch),
+        @backingInt(Client.GenerationAllocatorPurpose.attachment_batch),
         stable_allocator,
         installed_allocator,
     );
@@ -1800,7 +1800,7 @@ test "CR3a-2c3d C1 ledger admission failure publishes no allocator scope state" 
         @intFromPtr(&client),
         1,
         1,
-        @intFromEnum(Client.GenerationAllocatorPurpose.attachment_batch),
+        @backingInt(Client.GenerationAllocatorPurpose.attachment_batch),
         stable_allocator,
         installed_allocator,
     ) catch unreachable;
@@ -1836,7 +1836,7 @@ test "CR3a-2c3d C1 ledger-only allocator authority blocks Client teardown" {
         @intFromPtr(&client),
         1,
         1,
-        @intFromEnum(Client.GenerationAllocatorPurpose.attachment_batch),
+        @backingInt(Client.GenerationAllocatorPurpose.attachment_batch),
         stable_allocator,
         installed_allocator,
     );
@@ -1846,7 +1846,7 @@ test "CR3a-2c3d C1 ledger-only allocator authority blocks Client teardown" {
         @intFromPtr(&client),
         1,
         1,
-        @intFromEnum(Client.GenerationAllocatorPurpose.attachment_batch),
+        @backingInt(Client.GenerationAllocatorPurpose.attachment_batch),
         stable_allocator,
         installed_allocator,
     );
@@ -1904,7 +1904,7 @@ pub const PreparedGenerationEventTake = struct {
     payload_addr: usize = 0,
     payload_len: usize = 0,
     header: protocol.Header = .{ .kind = .hello },
-    payload_digest: runtime_event_wire.Digest = [_]u8{0} ** 32,
+    payload_digest: runtime_event_wire.Digest = @as([32]u8, @splat(0)),
     kind: GenerationEventTakeKind = .idle,
     lifecycle: GenerationEventTakeLifecycle = .empty,
 
@@ -1944,7 +1944,7 @@ const buffered_event_source_schema_field_allowlist = [_][]const u8{
     "admission_seal",
 };
 comptime {
-    const fields = std.meta.fields(BufferedEvent);
+    const fields = @import("type_info_fields").fields(BufferedEvent);
     if (fields.len != buffered_event_source_schema_field_allowlist.len)
         @compileError("update ClientSourceSealSchema.v1 for every BufferedEvent field change");
     for (fields, buffered_event_source_schema_field_allowlist) |field, expected|
@@ -2044,17 +2044,17 @@ test "external transfer profile field inventory seals every compatibility input"
         "attachment_capabilities",
         "metadata_support",
     };
-    const fields = @typeInfo(ExternalTransferProfile).@"struct".fields;
+    const fields = @import("type_info_fields").structFields(ExternalTransferProfile);
     try testing.expectEqual(expected.len, fields.len);
     inline for (fields, expected) |field, name|
         try testing.expectEqualStrings(name, field.name);
     try testing.expectEqual(
         @as(usize, 3),
-        @typeInfo(AttachmentCapabilities).@"struct".fields.len,
+        @import("type_info_fields").structFields(AttachmentCapabilities).len,
     );
     try testing.expectEqual(
         @as(usize, 6),
-        @typeInfo(compatibility.Profile).@"struct".fields.len,
+        @import("type_info_fields").structFields(compatibility.Profile).len,
     );
 }
 
@@ -2138,9 +2138,9 @@ pub const EndedPurgeScratch = struct {
     batches: [protocol.max_client_screen_items]ExternalBatchDescriptor = undefined,
     stream: [protocol.max_client_screen_items]ExternalFrameDescriptor = undefined,
     events: [max_pending_event_count]ExternalFrameDescriptor = undefined,
-    batch_targets: std.StaticBitSet(protocol.max_client_screen_items) = .initEmpty(),
-    stream_targets: std.StaticBitSet(protocol.max_client_screen_items) = .initEmpty(),
-    event_targets: std.StaticBitSet(max_pending_event_count) = .initEmpty(),
+    batch_targets: std.StaticBitSet(protocol.max_client_screen_items) = .empty,
+    stream_targets: std.StaticBitSet(protocol.max_client_screen_items) = .empty,
+    event_targets: std.StaticBitSet(max_pending_event_count) = .empty,
     partial: ?ExternalPartialDescriptor = null,
     partial_target: bool = false,
     parser_backing: ExternalArrayDescriptor = .{ .address = 0, .len = 0, .capacity = 0 },
@@ -2179,16 +2179,16 @@ pub const PreparedEndedPurgeInventory = struct {
     target_event_count: usize = 0,
     target_payload_bytes: usize = 0,
     demux_owned_extent_bytes: usize = 0,
-    batch_seal: owner_seal.Digest = [_]u8{0} ** 32,
-    stream_seal: owner_seal.Digest = [_]u8{0} ** 32,
-    event_seal: owner_seal.Digest = [_]u8{0} ** 32,
-    partial_seal: owner_seal.Digest = [_]u8{0} ** 32,
-    target_map_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    batch_seal: owner_seal.Digest = @as([32]u8, @splat(0)),
+    stream_seal: owner_seal.Digest = @as([32]u8, @splat(0)),
+    event_seal: owner_seal.Digest = @as([32]u8, @splat(0)),
+    partial_seal: owner_seal.Digest = @as([32]u8, @splat(0)),
+    target_map_seal: owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: EndedPurgePrepareLifecycle = .empty,
 
     pub fn validPreparedAtFinalAddress(self: *const PreparedEndedPurgeInventory) bool {
         const lifecycle_raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
-        return lifecycle_raw == @intFromEnum(EndedPurgePrepareLifecycle.prepared) and
+        return lifecycle_raw == @backingInt(EndedPurgePrepareLifecycle.prepared) and
             self.self_addr == @intFromPtr(self) and
             self.client_addr != 0 and self.scratch_addr != 0 and self.target_stream != 0 and
             self.target_event_count == 1;
@@ -2213,8 +2213,8 @@ pub const PreparedEndedPurgeCommit = struct {
     target_stream: u64 = 0,
     captured_fd: c.fd_t = -1,
     complete_owned_extent_bytes: usize = 0,
-    complete_owner_seal: owner_seal.Digest = [_]u8{0} ** 32,
-    pre_callback_survivor_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    complete_owner_seal: owner_seal.Digest = @as([32]u8, @splat(0)),
+    pre_callback_survivor_seal: owner_seal.Digest = @as([32]u8, @splat(0)),
     batch_plan: ended_purge_transaction.QueuePlan = .{},
     stream_plan: ended_purge_transaction.QueuePlan = .{},
     event_plan: ended_purge_transaction.QueuePlan = .{},
@@ -2223,7 +2223,7 @@ pub const PreparedEndedPurgeCommit = struct {
     stream_cleanup_ordinal: usize = 0,
     event_cleanup_ordinal: usize = 0,
     partial_cleanup_ordinal: usize = 0,
-    finalization_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    finalization_seal: owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: Lifecycle = .pristine,
 };
 
@@ -2647,10 +2647,10 @@ pub const ExternalAdoptionTake = struct {
     partial_seal: ?ExternalPartialDescriptor = null,
     plan_inventory: ?ExternalAdoptionInventory = null,
     cleanup_plan_inventory: ?ExternalAdoptionInventory = null,
-    inventory_cleanup_seal: [32]u8 = [_]u8{0} ** 32,
-    cleanup_inventory_cleanup_seal: [32]u8 = [_]u8{0} ** 32,
-    inventory_backing_seal: [32]u8 = [_]u8{0} ** 32,
-    cleanup_inventory_backing_seal: [32]u8 = [_]u8{0} ** 32,
+    inventory_cleanup_seal: [32]u8 = @as([32]u8, @splat(0)),
+    cleanup_inventory_cleanup_seal: [32]u8 = @as([32]u8, @splat(0)),
+    inventory_backing_seal: [32]u8 = @as([32]u8, @splat(0)),
+    cleanup_inventory_backing_seal: [32]u8 = @as([32]u8, @splat(0)),
     lifecycle: ExternalAdoptionTakeLifecycle = .empty,
 
     pub fn isEmpty(self: *const ExternalAdoptionTake) bool {
@@ -2761,7 +2761,7 @@ pub const ExternalAdoptionTake = struct {
     }
 
     pub fn lifecycleCode(self: *const ExternalAdoptionTake) u8 {
-        return @intFromEnum(self.lifecycle);
+        return @backingInt(self.lifecycle);
     }
 
     /// Deep snapshot of the committed cleanup graph. Canonicalization is the memory-safety gate:
@@ -3857,7 +3857,7 @@ const ExternalSourceSealEncoder = struct {
         writer.writeBool(client.attachment_capabilities.peer_attach_generation);
         writer.writeBool(client.attachment_capabilities.peer_agent_log_format);
         writer.writeBool(client.attachment_capabilities.negotiated_controller_transfer);
-        writer.writeTag(@intFromEnum(client.metadata_support));
+        writer.writeTag(@backingInt(client.metadata_support));
         writer.writeBool(client.admin_one_shot_v1);
         writer.writeBool(client.admin_runtime_end_v1);
         writer.writeU16(client.wire_major);
@@ -3876,7 +3876,7 @@ const ExternalSourceSealEncoder = struct {
         // 주 fd 와 같이 정규화한다 — canonical 골든이 프로세스의 fd 번호에 기대지 않게.
         writer.writeBool(client.image_channel.fd >= 0);
         if (client.image_channel.fd >= 0) writer.writeI32(encoding.fd(client.image_channel.fd));
-        writer.writeTag(@intFromEnum(client.image_channel.state));
+        writer.writeTag(@backingInt(client.image_channel.state));
         // 수립 중 진행(받은 `bind_ack` 바이트·마감)도 상태다.
         writer.writeU64(client.image_channel.bind_ack_got);
         try writer.writeBytes(&client.image_channel.bind_ack);
@@ -3902,7 +3902,7 @@ const ExternalSourceSealEncoder = struct {
             for (segments.liveStreams()) |stream| writer.writeU64(stream);
             writer.writeU64(segments.max_known_stream);
         }
-        writer.writeTag(@intFromEnum(client.connection_profile.?));
+        writer.writeTag(@backingInt(client.connection_profile.?));
         try writeSourceCompatibilityProfile(&writer, client.compatibility_profile.?);
         writer.writeU64(client.attach_instance_id);
         writer.writeU64(client.incident_binding.client_addr);
@@ -3912,10 +3912,10 @@ const ExternalSourceSealEncoder = struct {
         writer.writeU16(client.incident_binding.wire_major);
         writer.writeU8(client.incident_binding.host_class_raw);
         try writer.writeBytes(&client.incident_binding.seal);
-        writer.writeTag(@intFromEnum(client.ownership));
+        writer.writeTag(@backingInt(client.ownership));
         writer.writeBool(client.unusable);
         writer.writeBool(client.first_poison_reason != null);
-        if (client.first_poison_reason) |reason| writer.writeTag(@intFromEnum(reason));
+        if (client.first_poison_reason) |reason| writer.writeTag(@backingInt(reason));
         writer.writeU128(client.first_incident_id.app_instance_nonce);
         writer.writeU64(client.first_incident_id.sequence);
         try writer.writeBytes(std.mem.asBytes(&client.incident_repeat_key));
@@ -4153,13 +4153,13 @@ fn writeSourceCompatibilityProfile(
     writer: *client_source_transcript.Writer,
     profile: compatibility.Profile,
 ) client_source_transcript.Error!void {
-    writer.writeTag(@intFromEnum(profile.kind));
+    writer.writeTag(@backingInt(profile.kind));
     writer.writeU16(profile.wire_major);
     writer.writeU16(profile.screen_codec_version);
     writer.writePresence(profile.required_fingerprint != null);
     if (profile.required_fingerprint) |fingerprint|
         try writer.writeBytes(fingerprint);
-    writer.writeTag(@intFromEnum(profile.attach_schema));
+    writer.writeTag(@backingInt(profile.attach_schema));
 }
 
 fn writeSourceFrame(
@@ -4170,7 +4170,7 @@ fn writeSourceFrame(
     token: usize,
 ) client_source_transcript.Error!void {
     writer.writeU16(header.major);
-    writer.writeU16(@intFromEnum(header.kind));
+    writer.writeU16(@backingInt(header.kind));
     writer.writeU32(header.flags);
     writer.writeU64(header.request_id);
     writer.writeU64(header.stream_id);
@@ -6031,7 +6031,7 @@ pub const RegisteredOperationExecutionCapability = struct {
     owner_thread_incarnation: u64 = 0,
     operation_identity: u64 = 0,
     live: bool = false,
-    seal: owner_seal.Digest = [_]u8{0} ** 32,
+    seal: owner_seal.Digest = @as([32]u8, @splat(0)),
     publication_identity: std.atomic.Value(u64) = .init(0),
 
     fn digest(self: *const @This()) owner_seal.Digest {
@@ -6072,7 +6072,7 @@ pub const RegisteredOperationExecutionCapability = struct {
         self.owner_thread_incarnation = 0;
         self.operation_identity = 0;
         self.live = false;
-        self.seal = [_]u8{0} ** 32;
+        self.seal = @as([32]u8, @splat(0));
         self.publication_identity.store(0, .release);
     }
 };
@@ -7938,7 +7938,7 @@ pub const Client = struct {
         fn firstInvalidAxis(self: GenerationAllocatorScopeIdentity, client: *const Client) ?ScopeInvalidAxis {
             const purpose_raw = @as(*const u8, @ptrCast(&self.purpose)).*;
             const ledger = client.screen_inbox.generation_batch_accounting.ledger orelse return .ledger_absent;
-            if (purpose_raw > @intFromEnum(GenerationAllocatorPurpose.rpc_execute)) return .purpose_out_of_range;
+            if (purpose_raw > @backingInt(GenerationAllocatorPurpose.rpc_execute)) return .purpose_out_of_range;
             if (self.token_addr == 0) return .token_addr_zero;
             if (self.client_addr != @intFromPtr(client)) return .client_addr_mismatch;
             if (self.epoch == 0) return .epoch_zero;
@@ -7987,8 +7987,8 @@ pub const Client = struct {
         fn rawDiscriminatorsValid(self: *const GenerationAllocatorScope) bool {
             const purpose_raw = @as(*const u8, @ptrCast(&self.purpose)).*;
             const lifecycle_raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
-            return purpose_raw <= @intFromEnum(GenerationAllocatorPurpose.rpc_execute) and
-                lifecycle_raw <= @intFromEnum(GenerationAllocatorScopeLifecycle.restored);
+            return purpose_raw <= @backingInt(GenerationAllocatorPurpose.rpc_execute) and
+                lifecycle_raw <= @backingInt(GenerationAllocatorScopeLifecycle.restored);
         }
     };
 
@@ -8062,7 +8062,7 @@ pub const Client = struct {
             @intFromPtr(self),
             out_start,
             epoch,
-            @intFromEnum(purpose),
+            @backingInt(purpose),
             self.allocator,
             allocator,
         );
@@ -8185,7 +8185,7 @@ pub const Client = struct {
             active.client_addr,
             active.token_addr,
             active.epoch,
-            @intFromEnum(active.purpose),
+            @backingInt(active.purpose),
             active.previous_allocator,
             active.installed_allocator,
         );
@@ -8246,10 +8246,10 @@ pub const Client = struct {
         writer.writeUsize(if (self.build_id) |bytes| bytes.len else 0);
         writer.writeUsize(if (self.lifecycle.len == 0) 0 else @intFromPtr(self.lifecycle.ptr));
         writer.writeUsize(self.lifecycle.len);
-        writer.writeU8(@intFromEnum(self.ownership));
+        writer.writeU8(@backingInt(self.ownership));
         writer.writeBool(self.unusable);
         writer.writeBool(self.first_poison_reason != null);
-        if (self.first_poison_reason) |reason| writer.writeU8(@intFromEnum(reason));
+        if (self.first_poison_reason) |reason| writer.writeU8(@backingInt(reason));
         writer.writeU64(self.next_request_id);
         writer.writeUsize(if (self.parser.buf.capacity == 0)
             0
@@ -8276,7 +8276,7 @@ pub const Client = struct {
             writer.writeUsize(self.screen_inbox.recovery.count);
             for (self.screen_inbox.recovery.entries[0..self.screen_inbox.recovery.count]) |entry| {
                 writer.writeU64(entry.stream_id);
-                writer.writeU8(@intFromEnum(entry.state));
+                writer.writeU8(@backingInt(entry.state));
             }
         }
         writer.writeUsize(self.pending_event_bytes);
@@ -8308,7 +8308,7 @@ pub const Client = struct {
             writer.writeUsize(scope.token_addr);
             writer.writeUsize(scope.client_addr);
             writer.writeU64(scope.epoch);
-            writer.writeU8(@intFromEnum(scope.purpose));
+            writer.writeU8(@backingInt(scope.purpose));
             writer.writeUsize(@intFromPtr(scope.previous_allocator.ptr));
             writer.writeUsize(@intFromPtr(scope.previous_allocator.vtable));
             writer.writeUsize(@intFromPtr(scope.installed_allocator.ptr));
@@ -9990,7 +9990,7 @@ pub const Client = struct {
                 capture.client_addr != @intFromPtr(self) or
                 capture.lease_addr != @intFromPtr(lease) or
                 capture.prepared_addr == 0 or capture.operation_id == 0 or
-                capture.lifecycle_raw != @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.armed) or
+                capture.lifecycle_raw != @backingInt(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.armed) or
                 capture.controller_generation == 0 or
                 std.enums.fromInt(connection_incident.SourceSite, capture.source_site_raw) == null or
                 std.enums.fromInt(connection_incident.SourceSite, capture.allocator_source_site_raw) == null or
@@ -10091,8 +10091,8 @@ pub const Client = struct {
             .poison_controller_generation = if (poison_capture) |capture| capture.controller_generation else 0,
             .poison_source_site_raw = if (poison_capture) |capture| capture.source_site_raw else 0,
             .poison_allocator_source_site_raw = if (poison_capture) |capture| capture.allocator_source_site_raw else 0,
-            .ownership_raw = @intFromEnum(self.ownership),
-            .io_mode_raw = @intFromEnum(std.meta.activeTag(self.io_mode)),
+            .ownership_raw = @backingInt(self.ownership),
+            .io_mode_raw = @backingInt(std.meta.activeTag(self.io_mode)),
             .progress = .request_zero_clean,
             .lifecycle = .active,
             .fence_held = @intFromBool(fence_mode != .unbound),
@@ -10156,8 +10156,8 @@ pub const Client = struct {
             ) or
             (if (self.operation_fence) |fence| @intFromPtr(fence) else 0) != lease.operation_fence_addr or
             (if (self.operation_fence) |fence| fence.fence_incarnation else 0) != lease.operation_fence_incarnation or
-            lease.ownership_raw != @intFromEnum(self.ownership) or
-            lease.io_mode_raw != @intFromEnum(std.meta.activeTag(self.io_mode)) or
+            lease.ownership_raw != @backingInt(self.ownership) or
+            lease.io_mode_raw != @backingInt(std.meta.activeTag(self.io_mode)) or
             lease.fence_mode != self.prepared_request_execution_fence_mode or
             lease.seal != preparedExecutionLeaseSeal(lease) or
             self.prepared_request_execution_lease_addr != @intFromPtr(lease)) return false;
@@ -10181,10 +10181,10 @@ pub const Client = struct {
                 (capture.source_site_raw != lease.poison_source_site_raw and
                     capture.source_site_raw != lease.poison_allocator_source_site_raw) or
                 capture.allocator_source_site_raw != lease.poison_allocator_source_site_raw or
-                capture.lifecycle_raw != @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.captured) or
+                capture.lifecycle_raw != @backingInt(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.captured) or
                 std.enums.fromInt(client_poison.ConnectionReason, capture.reason_raw) == null)
                 return error.InvalidPreparedRpc;
-            return @enumFromInt(capture.reason_raw);
+            return @fromBackingInt(@intCast(capture.reason_raw));
         }
         return self.first_poison_reason;
     }
@@ -10244,7 +10244,7 @@ pub const Client = struct {
             active_scope.client_addr,
             active_scope.token_addr,
             active_scope.epoch,
-            @intFromEnum(active_scope.purpose),
+            @backingInt(active_scope.purpose),
             active_scope.previous_allocator,
             active_scope.installed_allocator,
         ) catch @panic("prepared execution recovery allocator authority drifted");
@@ -10573,15 +10573,15 @@ pub const Client = struct {
             // 2026-08-28 실측: `reason drifted` panic 으로 앱이 SIGABRT 로 죽었다(간헐, 같은 세션에서 2 회).
             // session host 는 멀쩡히 살아 있는데 앱만 사라져 사용자가 열어 둔 창을 전부 잃었다. 진단 가치는
             // 남기되(첫 사유와 버린 사유를 함께 기록) 프로세스를 끝내지는 않는다.
-            if (capture.reason_raw != @intFromEnum(reason))
-                logPoisonReasonDrift(capture.reason_raw, @intFromEnum(reason), capture.source_site_raw);
+            if (capture.reason_raw != @backingInt(reason))
+                logPoisonReasonDrift(capture.reason_raw, @backingInt(reason), capture.source_site_raw);
             return true;
         }
         if (capture.source_site_raw != lease.poison_source_site_raw)
             @panic("prepared execution poison source drifted");
         capture.source_site_raw = source_site_raw;
-        capture.reason_raw = @intFromEnum(reason);
-        capture.lifecycle_raw = @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.captured);
+        capture.reason_raw = @backingInt(reason);
+        capture.lifecycle_raw = @backingInt(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.captured);
         logPoisonCaptured("prepared_execution", capture.reason_raw, capture.source_site_raw);
         return true;
     }
@@ -10594,9 +10594,9 @@ pub const Client = struct {
             capture.self_addr != @intFromPtr(capture) or
             capture.client_addr != @intFromPtr(self) or
             capture.timestamp_ns < 0 or capture.controller_generation == 0 or
-            capture.source_site_raw != @intFromEnum(connection_incident.SourceSite.client_read) or
+            capture.source_site_raw != @backingInt(connection_incident.SourceSite.client_read) or
             capture.reason_raw != 0 or capture.reason_present_raw != 0 or
-            capture.lifecycle_raw != @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.armed))
+            capture.lifecycle_raw != @backingInt(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.armed))
             return false;
         read_pump_poison_capture_addr = @intFromPtr(capture);
         return true;
@@ -10609,11 +10609,11 @@ pub const Client = struct {
         if (read_pump_poison_capture_addr != @intFromPtr(capture) or
             capture.self_addr != @intFromPtr(capture) or
             capture.client_addr != @intFromPtr(self) or
-            (capture.lifecycle_raw != @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.armed) and
-                capture.lifecycle_raw != @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.captured)) or
-            (capture.lifecycle_raw == @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.armed) and
+            (capture.lifecycle_raw != @backingInt(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.armed) and
+                capture.lifecycle_raw != @backingInt(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.captured)) or
+            (capture.lifecycle_raw == @backingInt(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.armed) and
                 (capture.reason_present_raw != 0 or capture.reason_raw != 0)) or
-            (capture.lifecycle_raw == @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.captured) and
+            (capture.lifecycle_raw == @backingInt(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.captured) and
                 (capture.reason_present_raw != 1 or
                     std.enums.fromInt(client_poison.ConnectionReason, capture.reason_raw) == null)))
             @panic("read pump poison capture authority drifted");
@@ -10635,7 +10635,7 @@ pub const Client = struct {
             capture.client_addr != @intFromPtr(self) or capture.batch_adapter_addr == 0 or
             capture.slot_addr == 0 or capture.timestamp_ns < 0 or
             capture.controller_generation == 0 or
-            capture.source_site_raw != @intFromEnum(connection_incident.SourceSite.client_read) or
+            capture.source_site_raw != @backingInt(connection_incident.SourceSite.client_read) or
             (lifecycle != .armed and lifecycle != .captured) or
             (lifecycle == .armed and (capture.reason_present_raw != 0 or capture.reason_raw != 0)))
             @panic("read pump poison capture authority drifted");
@@ -10648,13 +10648,13 @@ pub const Client = struct {
             // prepared execution 쪽과 똑같이 정상 경로다. 그쪽은 이 자리에서 죽는 바람에 2026-08-28 에
             // 앱이 SIGABRT 로 사라졌다(같은 세션에서 2 회). 같은 구조를 남겨 두지 않는다 — 첫 사유를 지키고
             // 두 번째는 기록만 하고 버린다.
-            if (capture.reason_raw != @intFromEnum(reason))
-                logReadPumpPoisonReasonDrift(capture.reason_raw, @intFromEnum(reason), capture.source_site_raw);
+            if (capture.reason_raw != @backingInt(reason))
+                logReadPumpPoisonReasonDrift(capture.reason_raw, @backingInt(reason), capture.source_site_raw);
             return true;
         }
-        capture.reason_raw = @intFromEnum(reason);
+        capture.reason_raw = @backingInt(reason);
         capture.reason_present_raw = 1;
-        capture.lifecycle_raw = @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.captured);
+        capture.lifecycle_raw = @backingInt(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.captured);
         logPoisonCaptured("read_pump", capture.reason_raw, capture.source_site_raw);
         return true;
     }
@@ -10978,8 +10978,8 @@ pub const Client = struct {
             // normal terminal unwind is misclassified as caller-token drift and aborts the process.
             switch (err) {
                 error.ConnectionClosed, error.OutOfMemory, error.ProtocolError => {
-                    lease.ownership_raw = @intFromEnum(self.ownership);
-                    lease.io_mode_raw = @intFromEnum(std.meta.activeTag(self.io_mode));
+                    lease.ownership_raw = @backingInt(self.ownership);
+                    lease.io_mode_raw = @backingInt(std.meta.activeTag(self.io_mode));
                     lease.seal = preparedExecutionLeaseSeal(lease);
                 },
                 else => {},
@@ -11007,8 +11007,8 @@ pub const Client = struct {
             }
             response.payload_allocator.free(response.payload);
             self.poisonWhilePreparedExecutionHeld(.frame_malformed);
-            lease.ownership_raw = @intFromEnum(self.ownership);
-            lease.io_mode_raw = @intFromEnum(std.meta.activeTag(self.io_mode));
+            lease.ownership_raw = @backingInt(self.ownership);
+            lease.io_mode_raw = @backingInt(std.meta.activeTag(self.io_mode));
             lease.seal = preparedExecutionLeaseSeal(lease);
             return error.ProtocolError;
         }
@@ -12897,9 +12897,9 @@ pub const Client = struct {
             !ended.acceptedSealMetadataMatches(ended_preflight, event_allocator))
             return error.InvalidHint;
 
-        scratch.batch_targets = .initEmpty();
-        scratch.stream_targets = .initEmpty();
-        scratch.event_targets = .initEmpty();
+        scratch.batch_targets = .empty;
+        scratch.stream_targets = .empty;
+        scratch.event_targets = .empty;
         scratch.partial = null;
         scratch.partial_target = false;
 
@@ -13499,7 +13499,7 @@ pub const Client = struct {
             error.DestinationOccupied => error.DestinationOccupied,
             else => error.Corrupt,
         };
-        var partial_targets = std.StaticBitSet(1).initEmpty();
+        var partial_targets = std.StaticBitSet(1).empty;
         if (scratch.partial_target) partial_targets.set(0);
         const partial_count: usize = @intFromBool(self.screen_inbox.partial_batch != null);
         const partial_bytes = if (self.screen_inbox.partial_batch) |partial| partial.bytes.items.len else 0;
@@ -13794,7 +13794,7 @@ pub const Client = struct {
             prepared.event_cleanup_ordinal,
             prepared.partial_cleanup_ordinal,
         }) |ordinal| writer.writeUsize(ordinal);
-        writer.writeU8(@intFromEnum(prepared.lifecycle));
+        writer.writeU8(@backingInt(prepared.lifecycle));
         writer.writeU64(operation_generation);
         writer.writeUsize(fence.self_addr);
         writer.writeUsize(fence.client_addr);
@@ -13810,7 +13810,7 @@ pub const Client = struct {
         prepared: *const PreparedEndedPurgeCommit,
     ) bool {
         const lifecycle_tag = @as(*const u8, @ptrCast(&prepared.lifecycle)).*;
-        return lifecycle_tag == @intFromEnum(
+        return lifecycle_tag == @backingInt(
             PreparedEndedPurgeCommit.Lifecycle.finalization_pending,
         ) and prepared.batch_plan.state == ended_purge_transaction.QueuePlan.planned_state and
             prepared.stream_plan.state == ended_purge_transaction.QueuePlan.planned_state and
@@ -13955,7 +13955,7 @@ pub const Client = struct {
         ).init(event_plan, &frozen.event_targets) catch
             @panic("ended purge event plan drifted");
         while (event_cursor.next() catch @panic("ended purge event cursor drifted")) |_| {}
-        var partial_targets = std.StaticBitSet(1).initEmpty();
+        var partial_targets = std.StaticBitSet(1).empty;
         if (frozen.partial_target) partial_targets.set(0);
         var partial_cursor = ended_purge_transaction.DispositionCursor(1).init(
             partial_plan,
@@ -16428,7 +16428,7 @@ const client_source_schema_field_allowlist = [_][]const u8{
 };
 comptime {
     @setEvalBranchQuota(2_000);
-    const fields = std.meta.fields(Client);
+    const fields = @import("type_info_fields").fields(Client);
     if (fields.len != client_source_schema_field_allowlist.len)
         @compileError("update ClientSourceSealSchema.v1 for every Client field change");
     for (fields, client_source_schema_field_allowlist) |field, expected|
@@ -16765,8 +16765,8 @@ const PreparedExecutionWriteProbe = struct {
     results: []const PreparedExecutionWriteResult,
     index: usize = 0,
     calls: usize = 0,
-    requested_lengths: [8]usize = [_]usize{0} ** 8,
-    requested_ptrs: [8]usize = [_]usize{0} ** 8,
+    requested_lengths: [8]usize = @as([8]usize, @splat(0)),
+    requested_ptrs: [8]usize = @as([8]usize, @splat(0)),
 
     fn ops(self: *@This()) PreparedExecutionWriteOps {
         return .{ .context = self, .writeFn = write };
@@ -17809,8 +17809,8 @@ test "CR3a-2c3b settled opaque storage rejects every invalid raw lifecycle" {
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         storage = .{};
         @as(*u8, @ptrCast(&prepared.lifecycle)).* = @intCast(raw);
-        const valid = raw == @intFromEnum(PreparedBlockingRpcLifecycle.pristine) or
-            raw == @intFromEnum(PreparedBlockingRpcLifecycle.terminal);
+        const valid = raw == @backingInt(PreparedBlockingRpcLifecycle.pristine) or
+            raw == @backingInt(PreparedBlockingRpcLifecycle.terminal);
         try std.testing.expectEqual(
             valid,
             Client.preparedBlockingRpcStorageSettled(&storage),
@@ -20315,6 +20315,7 @@ test "CR3a-2c2b2 prepare rejects outer list backing aliases before item access" 
     client.screen_inbox.pending_batches = .{
         .items = scratch_start[0..0],
         .capacity = 1,
+        .pointer_stability = .{},
     };
     try std.testing.expectError(
         error.InvalidAlias,
@@ -20367,8 +20368,8 @@ test "CR3a-2c2b2 prepare rejects complete Client owner graph aliases before payl
                 .stream_id = 10,
                 .request_id = 0,
                 .activated_at_ns = 1,
-                .wire_digest = [_]u8{1} ** 32,
-                .descriptor_digest = [_]u8{0} ** 32,
+                .wire_digest = @as([32]u8, @splat(1)),
+                .descriptor_digest = @as([32]u8, @splat(0)),
             });
             state.external_tx.items[0].descriptor_digest =
                 client_external_mode.txFrameDescriptorDigest(state.external_tx.items[0]);
@@ -20391,7 +20392,7 @@ test "CR3a-2c2b2 prepare rejects complete Client owner graph aliases before payl
     // Exact build-id backing alias is rejected before a StreamBatch item can be read.
     const build_batches: [*]align(@alignOf(StreamBatch)) StreamBatch =
         @ptrCast(@alignCast(client.build_id.?.ptr));
-    client.screen_inbox.pending_batches = .{ .items = build_batches[0..0], .capacity = 1 };
+    client.screen_inbox.pending_batches = .{ .items = build_batches[0..0], .capacity = 1, .pointer_stability = .{} };
     try std.testing.expectError(
         error.InvalidAlias,
         client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
@@ -20401,7 +20402,7 @@ test "CR3a-2c2b2 prepare rejects complete Client owner graph aliases before payl
     const lifecycle_inner = client.lifecycle[@alignOf(StreamBatch)..];
     const lifecycle_batches: [*]align(@alignOf(StreamBatch)) StreamBatch =
         @ptrCast(@alignCast(lifecycle_inner.ptr));
-    client.screen_inbox.pending_batches = .{ .items = lifecycle_batches[0..0], .capacity = 1 };
+    client.screen_inbox.pending_batches = .{ .items = lifecycle_batches[0..0], .capacity = 1, .pointer_stability = .{} };
     try std.testing.expectError(
         error.InvalidAlias,
         client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
@@ -20409,7 +20410,7 @@ test "CR3a-2c2b2 prepare rejects complete Client owner graph aliases before payl
 
     const tx_backing_batches: [*]align(@alignOf(StreamBatch)) StreamBatch =
         @ptrCast(@alignCast(tx_backing_bytes.ptr));
-    client.screen_inbox.pending_batches = .{ .items = tx_backing_batches[0..0], .capacity = 1 };
+    client.screen_inbox.pending_batches = .{ .items = tx_backing_batches[0..0], .capacity = 1, .pointer_stability = .{} };
     try std.testing.expectError(
         error.InvalidAlias,
         client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
@@ -20417,7 +20418,7 @@ test "CR3a-2c2b2 prepare rejects complete Client owner graph aliases before payl
 
     const tx_payload_batches: [*]align(@alignOf(StreamBatch)) StreamBatch =
         @ptrCast(@alignCast(tx_payload.ptr));
-    client.screen_inbox.pending_batches = .{ .items = tx_payload_batches[0..0], .capacity = 1 };
+    client.screen_inbox.pending_batches = .{ .items = tx_payload_batches[0..0], .capacity = 1, .pointer_stability = .{} };
     try std.testing.expectError(
         error.InvalidAlias,
         client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
@@ -20908,7 +20909,7 @@ test "CR3a-2c2b3b allocator drift tombstones then consumed proof finalizes termi
         var raw_candidate = prepared;
         @as(*u8, @ptrCast(&raw_candidate.lifecycle)).* = raw;
         try std.testing.expectEqual(
-            raw == @intFromEnum(PreparedEndedPurgeCommit.Lifecycle.finalization_pending),
+            raw == @backingInt(PreparedEndedPurgeCommit.Lifecycle.finalization_pending),
             Client.endedPurgeRawFinalizerStateValid(&raw_candidate),
         );
     }
@@ -22498,9 +22499,9 @@ test "generation allocator scope rejects every invalid raw token discriminator" 
         );
         const canonical = scope;
         const first_invalid: usize = if (std.mem.eql(u8, field_name, "purpose"))
-            @as(usize, @intFromEnum(Client.GenerationAllocatorPurpose.rpc_execute)) + 1
+            @as(usize, @backingInt(Client.GenerationAllocatorPurpose.rpc_execute)) + 1
         else
-            @as(usize, @intFromEnum(Client.GenerationAllocatorScopeLifecycle.restored)) + 1;
+            @as(usize, @backingInt(Client.GenerationAllocatorScopeLifecycle.restored)) + 1;
         const offset: usize = if (std.mem.eql(u8, field_name, "purpose"))
             @offsetOf(Client.GenerationAllocatorScope, "purpose")
         else
@@ -23048,7 +23049,7 @@ test "external mode rejects every legacy socket entry without wire mutation" {
         .attempt_id = 1,
         .target_path = "/tmp/maru",
         .target_build_id = "build",
-        .target_sha256 = [_]u8{0} ** 32,
+        .target_sha256 = @as([32]u8, @splat(0)),
         .handoff_reader_min = 1,
         .handoff_reader_max = 1,
     }));
@@ -24221,8 +24222,8 @@ test "external source owner proof rejects outer and nested aliases in descriptor
     client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
     var source_scratch: ExternalSourceOwnerRangeScratch = .{};
     try std.testing.expectError(error.InvalidAlias, checkedExternalRange(0, 1));
-    try std.testing.expect(!@typeInfo([]u8).pointer.is_allowzero);
-    try std.testing.expect(!@typeInfo([]BufferedEvent).pointer.is_allowzero);
+    try std.testing.expect(!@typeInfo([]u8).pointer.attrs.@"allowzero");
+    try std.testing.expect(!@typeInfo([]BufferedEvent).pointer.attrs.@"allowzero");
 
     {
         const saved = client.parser.buf;
@@ -24423,8 +24424,8 @@ test "external adoption owner alias validation stays n log n at every queue cap"
                 .stream_id = index + 1,
                 .request_id = 0,
                 .activated_at_ns = 1,
-                .wire_digest = [_]u8{1} ** 32,
-                .descriptor_digest = [_]u8{0} ** 32,
+                .wire_digest = @as([32]u8, @splat(1)),
+                .descriptor_digest = @as([32]u8, @splat(0)),
             });
             state.external_tx.items[index].descriptor_digest =
                 client_external_mode.txFrameDescriptorDigest(state.external_tx.items[index]);
@@ -24506,7 +24507,7 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         .connection_generation = 4,
         .wire_major = protocol.version_major,
         .host_class_raw = 1,
-        .seal = [_]u8{0x23} ** 32,
+        .seal = @as([32]u8, @splat(0x23)),
     };
     client.first_poison_reason = .connection_eof;
     client.first_incident_id = .{ .app_instance_nonce = 0x2400, .sequence = 5 };
@@ -24517,10 +24518,10 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         .client_addr = 0x2100,
         .connection_generation = 4,
         .incident_id = client.first_incident_id,
-        .fingerprint = [_]u8{0x26} ** 32,
+        .fingerprint = @as([32]u8, @splat(0x26)),
         .binding_seal = client.incident_binding.seal,
         .lifecycle_raw = 1,
-        .seal = [_]u8{0x27} ** 32,
+        .seal = @as([32]u8, @splat(0x27)),
     };
     client.build_id = try allocator.dupe(u8, "build");
     client.lifecycle = try allocator.dupe(u8, "running");
@@ -24686,7 +24687,7 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.fd = saved_fd;
     // 이미지 채널(fd·상태)도 seal 이 덮는다. 인코더는 하위 필드를 손으로 나열하므로 필드가 늘면 여기서 멈춘다.
-    comptime std.debug.assert(std.meta.fields(client_image_channel.Channel).len == 5);
+    comptime std.debug.assert(@import("type_info_fields").fields(client_image_channel.Channel).len == 5);
     client.image_channel.state = .unavailable;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.image_channel.state = .not_negotiated;
@@ -24703,7 +24704,7 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.image_channel.fd = -1;
     // 세그먼트 표도 덮는다 — 표가 생기기만 해도, 붙은 stream 하나만 달라져도 맞지 않는다.
-    comptime std.debug.assert(std.meta.fields(client_image_segments.Table).len == 10);
+    comptime std.debug.assert(@import("type_info_fields").fields(client_image_segments.Table).len == 10);
     var segments: client_image_segments.Table = .{};
     client.image_segments = &segments;
     // 스택 표다 — 판정이 중간에 실패해도 deinit 이 heap 으로 풀지 않게.
@@ -25443,8 +25444,8 @@ test "external mode failClosed reclaims queued frames exactly once" {
                 .stream_id = 7,
                 .request_id = 0,
                 .activated_at_ns = 1,
-                .wire_digest = [_]u8{1} ** 32,
-                .descriptor_digest = [_]u8{2} ** 32,
+                .wire_digest = @as([32]u8, @splat(1)),
+                .descriptor_digest = @as([32]u8, @splat(2)),
             });
             state.external_tx.items[0].descriptor_digest =
                 client_external_mode.txFrameDescriptorDigest(
@@ -25457,8 +25458,8 @@ test "external mode failClosed reclaims queued frames exactly once" {
                 .stream_id = 7,
                 .request_id = 8,
                 .activated_at_ns = 2,
-                .wire_digest = [_]u8{3} ** 32,
-                .descriptor_digest = [_]u8{4} ** 32,
+                .wire_digest = @as([32]u8, @splat(3)),
+                .descriptor_digest = @as([32]u8, @splat(4)),
             });
             state.external_tx.items[1].descriptor_digest =
                 client_external_mode.txFrameDescriptorDigest(
@@ -25544,15 +25545,15 @@ test "poison 진단은 raw 숫자가 아니라 이름으로 나온다" {
     // 재는 것은 「raw 가 이름으로 나온다」이다. 숫자로 되돌아가면 다음 사람이 같은 데서 막힌다.
     try std.testing.expectEqualStrings(
         "read_timeout",
-        Client.poisonReasonName(@intFromEnum(client_poison.ConnectionReason.read_timeout)),
+        Client.poisonReasonName(@backingInt(client_poison.ConnectionReason.read_timeout)),
     );
     try std.testing.expectEqualStrings(
         "local_invariant_violation",
-        Client.poisonReasonName(@intFromEnum(client_poison.ConnectionReason.local_invariant_violation)),
+        Client.poisonReasonName(@backingInt(client_poison.ConnectionReason.local_invariant_violation)),
     );
     try std.testing.expectEqualStrings(
         "client_read",
-        Client.poisonSourceSiteName(@intFromEnum(connection_incident.SourceSite.client_read)),
+        Client.poisonSourceSiteName(@backingInt(connection_incident.SourceSite.client_read)),
     );
 
     // **범위 밖은 죽지 않고 `?` 로 나온다.** 진단이 제품 경로를 바꾸면 안 된다.
@@ -25562,12 +25563,12 @@ test "poison 진단은 raw 숫자가 아니라 이름으로 나온다" {
     // 두 enum 의 순서가 갈리면 로그가 **조용히 틀린 이름**을 말한다. 실제로 이 값들로 풀었으므로
     // 그 대응을 못 박는다(`connection_incident` 가 u8 태그의 단일 출처다).
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(connection_incident.ConnectionReason.read_timeout)),
-        @as(u8, @intFromEnum(client_poison.ConnectionReason.read_timeout)),
+        @as(u8, @backingInt(connection_incident.ConnectionReason.read_timeout)),
+        @as(u8, @backingInt(client_poison.ConnectionReason.read_timeout)),
     );
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(connection_incident.ConnectionReason.local_invariant_violation)),
-        @as(u8, @intFromEnum(client_poison.ConnectionReason.local_invariant_violation)),
+        @as(u8, @backingInt(connection_incident.ConnectionReason.local_invariant_violation)),
+        @as(u8, @backingInt(client_poison.ConnectionReason.local_invariant_violation)),
     );
 }
 
@@ -26082,9 +26083,9 @@ test "client: absolute-deadline nonblocking connect and hello restore blocking m
     const allocator = testing.allocator;
 
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-client-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-client-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -26176,7 +26177,7 @@ test "client: forked daemon serves ephemeral inventory while canonical GUI stays
     const short_endpoint_mod = @import("short_endpoint.zig");
     const host_manifest_mod = @import("host_manifest.zig");
     var base_buf: [128]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-multifd-{d}", .{c.getpid()}) catch
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-sh-multifd-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.mkdir(base.ptr, 0o700);
     var dir_buf: [256]u8 = undefined;
@@ -26274,7 +26275,7 @@ test "client: forked daemon serves ephemeral inventory while canonical GUI stays
         allocator,
     );
     defer allocator.free(product_path);
-    const product_z = try allocator.dupeZ(u8, product_path);
+    const product_z = try allocator.dupeSentinel(u8, product_path, 0);
     defer allocator.free(product_z);
     const target_identity = try @import("staged_image.zig").inspect(product_z);
     const target_build_id = try host_manifest_mod.buildIdForExecutable(allocator, product_z);
@@ -26346,7 +26347,7 @@ test "client: forked daemon serves ephemeral inventory while canonical GUI stays
     const restored_info = try restored.call("host.info", null);
     defer allocator.free(restored_info);
     try testing.expect(std.mem.indexOf(u8, restored_info, "\"runtime_count\":0") != null);
-    try testing.expectEqual(@as(c_int, 0), c.kill(child, @enumFromInt(0)));
+    try testing.expectEqual(@as(c_int, 0), c.kill(child, @fromBackingInt(@intCast(0))));
 }
 
 extern "c" fn usleep(usec: c_uint) c_int;
@@ -26397,9 +26398,9 @@ test "client: spawns, lists, and terminates a real runtime on a forked host over
     const allocator = testing.allocator;
 
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-spawn-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-spawn-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -26453,16 +26454,18 @@ test "client: sibling attachment converges after explicit terminate and natural 
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(
+    const dir_path = std.fmt.bufPrintSentinel(
         &dir_buf,
         "/tmp/maru-sh-converge-{d}",
         .{c.getpid()},
+        0,
     ) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(
+    const socket_path = std.fmt.bufPrintSentinel(
         &sp_buf,
         "{s}/control.sock",
         .{dir_path},
+        0,
     ) catch return error.SkipZigTest;
 
     const child = c.fork();
@@ -26600,9 +26603,9 @@ test "client: attach, input, resize, and detach a real runtime over the wire" {
     const allocator = testing.allocator;
 
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-attach-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-attach-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -26692,9 +26695,9 @@ test "client: receives a delta_chunk stream reflecting input echoed onto the scr
     const allocator = testing.allocator;
 
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-delta-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-delta-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -26866,11 +26869,11 @@ const FakeImageHost = struct {
     extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
 
     fn start(self: *FakeImageHost) !void {
-        const template = try std.fmt.bufPrintZ(&self.dir_buf, "/tmp/maru-ic-XXXXXX", .{});
+        const template = try std.fmt.bufPrintSentinel(&self.dir_buf, "/tmp/maru-ic-XXXXXX", .{}, 0);
         if (mkdtemp(template.ptr) == null) return error.SkipZigTest;
         self.dir = template;
         errdefer _ = c.rmdir(self.dir.ptr);
-        self.path = try std.fmt.bufPrintZ(&self.path_buf, "{s}/h.sock", .{template});
+        self.path = try std.fmt.bufPrintSentinel(&self.path_buf, "{s}/h.sock", .{template}, 0);
         const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
         if (fd < 0) return error.TestUnexpectedResult;
         errdefer _ = c.close(fd);
@@ -26963,7 +26966,7 @@ const FakeImageHost = struct {
                     },
                     .bad_ack => {
                         var wrong = wire.encodeBindAck();
-                        wrong[4] = @intFromEnum(wire.Kind.release);
+                        wrong[4] = @backingInt(wire.Kind.release);
                         try socket_server.writeAll(channel, &wrong);
                     },
                     else => {},
@@ -27832,10 +27835,14 @@ test "image channel connect: 채널 수립 실패는 connect 오류 집합에 �
     // 이미지 채널을 못 연 것은 연결 실패가 아니다(이미지 채널 §3.2). 이 오류들이 connect 오류 집합에 들어가면 앱 시작·업그레이드·
     // 재접속 판정이 그것을 「이 host 에 못 붙는다」로 읽고 host 를 하나 더 띄울 수 있다 — 집합에 없으면 그 판정에 닿을 길이 없다.
     comptime {
-        for (@typeInfo(client_image_channel.StartError).error_set.?) |open_err|
-            for (@typeInfo(DeadlineClientError).error_set.?) |connect_err|
-                if (std.mem.eql(u8, open_err.name, connect_err.name))
-                    @compileError("image channel open error escapes a connect function: " ++ open_err.name);
+        const open_errors = @typeInfo(client_image_channel.StartError).error_set.error_names.?;
+        const connect_errors = @typeInfo(DeadlineClientError).error_set.error_names.?;
+        for (open_errors) |open_error| {
+            for (connect_errors) |connect_error| {
+                if (std.mem.eql(u8, open_error, connect_error))
+                    @compileError("image channel open error escapes a connect function: " ++ open_error);
+            }
+        }
     }
 }
 

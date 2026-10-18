@@ -11,6 +11,8 @@
 //! **비밀은 호출자가 든다.** 개인키는 인자로 받는다 — 모바일에서는 host 가 Keychain·Keystore 에서
 //! 꺼내 온다(계약 §3.4). 이 층은 파일도 키체인도 모른다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const version = @import("version.zig");
 const kexinit = @import("kexinit.zig");
@@ -321,7 +323,7 @@ pub const Client = struct {
     /// 없어서, 그 사이에 온 요청의 답을 여기 세어 두고 재키잉이 끝나면 내보낸다.
     pending_request_failures: u8 = 0,
     disconnect_len: usize = 0,
-    disconnect_reason: DisconnectReason = @enumFromInt(0),
+    disconnect_reason: DisconnectReason = @fromBackingInt(@intCast(0)),
     disconnected: bool = false,
     /// **셸이 한 번이라도 떴나.** `state` 는 재키잉 중에 `key_exchange` 로 돌아가는데, 그때
     /// `write` 가 `NotReady` 를 내면 **호출자가 재키잉을 알아야** 한다 — 알 필요가 없어야 한다.
@@ -1020,7 +1022,7 @@ pub const Client = struct {
     fn onDisconnect(self: *Client, payload: []const u8) Error!void {
         var r = wire.Reader.init(payload);
         _ = try r.byte();
-        self.disconnect_reason = @enumFromInt(try r.u32be());
+        self.disconnect_reason = @fromBackingInt(@intCast(try r.u32be()));
         const desc = try r.string();
         const clean = userauth.sanitizeBanner(&self.disconnect_buf, desc) catch {
             self.disconnect_len = 0;
@@ -1769,9 +1771,9 @@ test "서버가 거대한 호스트키 blob 을 보내도 버퍼를 안 넘는�
     var payload: [4096]u8 = undefined;
     var w = wire.Writer.init(&payload);
     try w.byte(kex.msg_kex_ecdh_reply);
-    try w.string(&([_]u8{7} ** 1024)); // 512 보다 큰 호스트키
-    try w.string(&([_]u8{8} ** 32));
-    try w.string(&([_]u8{9} ** 64));
+    try w.string(&(@as([1024]u8, @splat(7)))); // 512 보다 큰 호스트키
+    try w.string(&(@as([32]u8, @splat(8))));
+    try w.string(&(@as([64]u8, @splat(9))));
 
     var wire_buf: [8192]u8 = undefined;
     const n = try packet.write(&wire_buf, w.written(), prng.random());
@@ -1792,7 +1794,7 @@ test "거대한 exit-signal 이름은 잘라서 담는다" {
     try wr.u32be(0);
     try wr.string("exit-signal");
     try wr.boolean(false);
-    try wr.string(&([_]u8{'A'} ** 200));
+    try wr.string(&(@as([200]u8, @splat('A'))));
     try wr.boolean(false);
     try wr.string("");
     try wr.string("");
@@ -1980,7 +1982,7 @@ test "지문은 ssh-keygen 과 같은 값이다" {
     var blob: [128]u8 = undefined;
     var w = wire.Writer.init(&blob);
     try w.string(hostkey.alg_name);
-    try w.string(&([_]u8{7} ** 32));
+    try w.string(&(@as([32]u8, @splat(7))));
     const written = w.written();
     @memcpy(c.host_key_buf[0..written.len], written);
     c.host_key_len = written.len;
@@ -2044,14 +2046,14 @@ test "우리 NEWKEYS 와 상대 것 사이에는 아무것도 안 나간다" {
 test "사유 코드는 RFC 4253 §11.1 표 그대로다" {
     // 숫자를 이름으로 옮기는 자리라 표와 직접 맞댄다. 쓰는 쪽과 읽는 쪽에 같은 상수를 쓰면
     // 자기충족이라 오타가 안 잡힌다.
-    try testing.expectEqual(@as(u32, 1), @intFromEnum(DisconnectReason.host_not_allowed_to_connect));
-    try testing.expectEqual(@as(u32, 2), @intFromEnum(DisconnectReason.protocol_error));
-    try testing.expectEqual(@as(u32, 3), @intFromEnum(DisconnectReason.key_exchange_failed));
-    try testing.expectEqual(@as(u32, 7), @intFromEnum(DisconnectReason.service_not_available));
-    try testing.expectEqual(@as(u32, 9), @intFromEnum(DisconnectReason.host_key_not_verifiable));
-    try testing.expectEqual(@as(u32, 11), @intFromEnum(DisconnectReason.by_application));
-    try testing.expectEqual(@as(u32, 14), @intFromEnum(DisconnectReason.no_more_auth_methods_available));
-    try testing.expectEqual(@as(u32, 15), @intFromEnum(DisconnectReason.illegal_user_name));
+    try testing.expectEqual(@as(u32, 1), @backingInt(DisconnectReason.host_not_allowed_to_connect));
+    try testing.expectEqual(@as(u32, 2), @backingInt(DisconnectReason.protocol_error));
+    try testing.expectEqual(@as(u32, 3), @backingInt(DisconnectReason.key_exchange_failed));
+    try testing.expectEqual(@as(u32, 7), @backingInt(DisconnectReason.service_not_available));
+    try testing.expectEqual(@as(u32, 9), @backingInt(DisconnectReason.host_key_not_verifiable));
+    try testing.expectEqual(@as(u32, 11), @backingInt(DisconnectReason.by_application));
+    try testing.expectEqual(@as(u32, 14), @backingInt(DisconnectReason.no_more_auth_methods_available));
+    try testing.expectEqual(@as(u32, 15), @backingInt(DisconnectReason.illegal_user_name));
     try testing.expectEqual(@as(u8, 82), msg_request_failure);
 }
 
@@ -2062,7 +2064,7 @@ test "끊긴 이유를 같은 Step 에서 준다" {
     var buf: [256]u8 = undefined;
     var w = wire.Writer.init(&buf);
     try w.byte(msg_disconnect);
-    try w.u32be(@intFromEnum(DisconnectReason.no_more_auth_methods_available));
+    try w.u32be(@backingInt(DisconnectReason.no_more_auth_methods_available));
     try w.string("No supported authentication methods available");
     try w.string("en");
 
@@ -2096,7 +2098,7 @@ test "모르는 사유 코드도 설명을 잃지 않는다" {
     var scr: [64 * 1024]u8 = undefined;
     const step = try c.feed(pbuf[0..n], &out, &scr);
     const d = step.disconnect orelse return error.TestExpectedDisconnect;
-    try testing.expectEqual(@as(u32, 9999), @intFromEnum(d.reason));
+    try testing.expectEqual(@as(u32, 9999), @backingInt(d.reason));
     try testing.expectEqualStrings("서버가 새로 만든 이유", d.description);
 }
 
@@ -2773,7 +2775,7 @@ test "재키잉에서 호스트키가 바뀌면 끊는다" {
     var key_a: [128]u8 = undefined;
     var wa = wire.Writer.init(&key_a);
     try wa.string(hostkey.alg_name);
-    try wa.string(&([_]u8{7} ** 32));
+    try wa.string(&(@as([32]u8, @splat(7))));
     const blob_a = wa.written();
     @memcpy(c.host_key_buf[0..blob_a.len], blob_a);
     c.host_key_len = blob_a.len;
@@ -2785,10 +2787,10 @@ test "재키잉에서 호스트키가 바뀌면 끊는다" {
     var key_b: [128]u8 = undefined;
     var wb = wire.Writer.init(&key_b);
     try wb.string(hostkey.alg_name);
-    try wb.string(&([_]u8{9} ** 32)); // 다른 키
+    try wb.string(&(@as([32]u8, @splat(9)))); // 다른 키
     try w.string(wb.written());
-    try w.string(&([_]u8{1} ** 32)); // Q_S
-    try w.string(&([_]u8{0} ** 83)); // 서명 — 여기까지 가지 않는다
+    try w.string(&(@as([32]u8, @splat(1)))); // Q_S
+    try w.string(&(@as([83]u8, @splat(0)))); // 서명 — 여기까지 가지 않는다
 
     c.rekeying = true;
     c.state = .key_exchange;
@@ -3037,7 +3039,7 @@ test "채널 열기를 서버가 거절해도 세션은 안 죽는다" {
     var wr = wire.Writer.init(&buf);
     try wr.byte(channel.msg_channel_open_failure);
     try wr.u32be(control_local_id);
-    try wr.u32be(@intFromEnum(channel.OpenFailureReason.administratively_prohibited));
+    try wr.u32be(@backingInt(channel.OpenFailureReason.administratively_prohibited));
     try wr.string("no");
     try wr.string("");
     var scr: [64 * 1024]u8 = undefined;
@@ -3395,7 +3397,7 @@ test "열리는 중인 컨트롤 채널을 닫으면 «열린 뒤에» 닫힘이
     // **세션을 바꾸는 길이 통째로 막혔다**(§4a 「한 번에 control 하나」).
     var c = readyClient();
     var out: [8192]u8 = undefined;
-    _ = try c.openControl("maru attach --stream " ++ ("0" ** 32), &out);
+    _ = try c.openControl("maru attach --stream " ++ (array_repeat.repeat("0", 32)), &out);
     try testing.expectEqual(ControlState.opening, c.controlState());
 
     // **확인이 오기 전에 닫는다** — 여기서 오류가 나면 안 되고, 선에 나갈 것도 아직 없다.
@@ -3452,7 +3454,7 @@ test "열리는 중에 닫으면 그 서버에서 명령이 «돌지 않는다»
     // 우리가 닫은 뒤에 온다. 여는 순간 곧바로 닫는 조작이 그 창이다.
     var c = readyClient();
     var out: [8192]u8 = undefined;
-    _ = try c.openControl("maru attach --stream " ++ ("0" ** 32), &out);
+    _ = try c.openControl("maru attach --stream " ++ (array_repeat.repeat("0", 32)), &out);
     _ = try c.closeControl(&out); // 확인 전 — 미뤄진다
 
     var buf: [64]u8 = undefined;
@@ -3494,7 +3496,7 @@ test "새 컨트롤 채널은 옛 채널의 «닫으려던 뜻» 을 물려받�
     var ctl: [32 * 1024]u8 = undefined;
     var wire_out: [8192]u8 = undefined;
     _ = try feedChannelBuffers(&c, wr.written(), &wire_out, &scr, &ctl);
-    _ = try c.openControl("maru attach --stream " ++ ("0" ** 32), &out);
+    _ = try c.openControl("maru attach --stream " ++ (array_repeat.repeat("0", 32)), &out);
     try testing.expect(!c.control_deferred_close); // 새 채널은 깨끗하다
 
     // 열어 준다 — **닫힘이 나가면 안 된다**(그 뜻은 앞 채널 것이었다).

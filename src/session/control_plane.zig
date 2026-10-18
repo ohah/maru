@@ -24,6 +24,8 @@
 //! 플레인은 frame당 parse→dispatch→free 수명이라 소유 wrapper가 자연스럽다). serialize도 `gpa`를 받아 소유
 //! 슬라이스를 돌려준다(streaming std.json.Stringify → Allocating writer). 둘 다 최소 선택이며 소켓 buffer 전략은 1b.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 
 // ── 상수 ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -396,7 +398,7 @@ pub fn serializeError(
 ) std.mem.Allocator.Error![]u8 {
     return serializeMessage(gpa, .{ .response = .{
         .id = id,
-        .err = .{ .code = @intFromEnum(code), .message = message, .data = data },
+        .err = .{ .code = @backingInt(code), .message = message, .data = data },
     } });
 }
 
@@ -702,7 +704,7 @@ pub fn parseMethod(raw: []const u8) ParsedMethod {
 }
 
 fn coreNamespaceFromName(name: []const u8) ?CoreNamespace {
-    inline for (@typeInfo(CoreNamespace).@"enum".fields) |f| {
+    inline for (@import("type_info_fields").enumFields(CoreNamespace)) |f| {
         if (std.mem.eql(u8, name, f.name)) return @field(CoreNamespace, f.name);
     }
     return null;
@@ -818,19 +820,19 @@ test "id 매칭: response.id가 request.id와 값으로 일치(number·string), 
 
 // ── 3) 에러 모델 ──
 test "에러 코드: 표준 5개 + maru 확장 코드값과 default message" {
-    try testing.expectEqual(@as(i64, -32700), @intFromEnum(ErrorCode.parse_error));
-    try testing.expectEqual(@as(i64, -32600), @intFromEnum(ErrorCode.invalid_request));
-    try testing.expectEqual(@as(i64, -32601), @intFromEnum(ErrorCode.method_not_found));
-    try testing.expectEqual(@as(i64, -32602), @intFromEnum(ErrorCode.invalid_params));
-    try testing.expectEqual(@as(i64, -32603), @intFromEnum(ErrorCode.internal_error));
+    try testing.expectEqual(@as(i64, -32700), @backingInt(ErrorCode.parse_error));
+    try testing.expectEqual(@as(i64, -32600), @backingInt(ErrorCode.invalid_request));
+    try testing.expectEqual(@as(i64, -32601), @backingInt(ErrorCode.method_not_found));
+    try testing.expectEqual(@as(i64, -32602), @backingInt(ErrorCode.invalid_params));
+    try testing.expectEqual(@as(i64, -32603), @backingInt(ErrorCode.internal_error));
     // maru 확장 코드는 전부 impl-defined server-error 범위(-32000~-32099)에 있어야 한다.
     for ([_]ErrorCode{ .payload_too_large, .unauthorized, .process_exited, .timeout }) |ext| {
-        const v = @intFromEnum(ext);
+        const v = @backingInt(ext);
         try testing.expect(v >= -32099 and v <= -32000);
     }
-    try testing.expectEqual(@as(i64, -32002), @intFromEnum(ErrorCode.unauthorized));
-    try testing.expectEqual(@as(i64, -32003), @intFromEnum(ErrorCode.process_exited));
-    try testing.expectEqual(@as(i64, -32004), @intFromEnum(ErrorCode.timeout));
+    try testing.expectEqual(@as(i64, -32002), @backingInt(ErrorCode.unauthorized));
+    try testing.expectEqual(@as(i64, -32003), @backingInt(ErrorCode.process_exited));
+    try testing.expectEqual(@as(i64, -32004), @backingInt(ErrorCode.timeout));
     try testing.expectEqualStrings("Method not found", ErrorCode.method_not_found.defaultMessage());
     try testing.expectEqualStrings("Unauthorized", ErrorCode.unauthorized.defaultMessage());
     try testing.expectEqualStrings("Process exited", ErrorCode.process_exited.defaultMessage());
@@ -843,7 +845,7 @@ test "에러 모델: 각 표준 코드가 에러 응답으로 직렬화된다" {
         defer testing.allocator.free(wire);
         var pm = try parseMessage(testing.allocator, wire);
         defer pm.deinit();
-        try testing.expectEqual(@as(i64, @intFromEnum(code)), pm.message.response.err.?.code);
+        try testing.expectEqual(@as(i64, @backingInt(code)), pm.message.response.err.?.code);
         try testing.expectEqualStrings(code.defaultMessage(), pm.message.response.err.?.message);
     }
 }
@@ -1062,7 +1064,7 @@ test "parseAuthFrame 관대 파싱: 다른 method·잘못된 모양·음수·비
 }
 
 test "auth.grant(5f-4a-2): serialize→parse 왕복 + 관대 파싱(비-auth.grant·비-hex는 null)" {
-    const nonce: [auth_cap_nonce_len]u8 = [_]u8{0x7C} ** auth_cap_nonce_len;
+    const nonce: [auth_cap_nonce_len]u8 = @as([auth_cap_nonce_len]u8, @splat(0x7C));
     const wire = try serializeAuthGrant(testing.allocator, nonce);
     defer testing.allocator.free(wire);
     const parsed = parseAuthGrant(testing.allocator, wire);
@@ -1078,7 +1080,7 @@ test "auth.grant(5f-4a-2): serialize→parse 왕복 + 관대 파싱(비-auth.gra
 
 // ── 5c) auth 프레임 cap_nonce(1e — capability nonce 왕복·관대 파싱) ──
 test "auth.self cap_nonce: 왕복 — serialize(nonce)→parseAuthFrame이 32바이트 nonce 보존 + selector 병존" {
-    const nonce: [auth_cap_nonce_len]u8 = [_]u8{0xAB} ** auth_cap_nonce_len;
+    const nonce: [auth_cap_nonce_len]u8 = @as([auth_cap_nonce_len]u8, @splat(0xAB));
     const wire = try serializeAuthSelf(testing.allocator, 42, nonce);
     defer testing.allocator.free(wire);
     try testing.expect(std.mem.indexOfScalar(u8, wire, '\n') == null);
@@ -1095,7 +1097,7 @@ test "auth.self cap_nonce 관대 파싱: 잘못된 길이·비-hex·비-string�
     try testing.expectEqual(@as(?u64, 7), f_short.selector);
     try testing.expect(f_short.cap_nonce == null);
     // 올바른 길이지만 비-hex 문자(g) → null.
-    const nonhex = "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"cap_nonce\":\"" ++ ("g" ** (2 * auth_cap_nonce_len)) ++ "\"}}";
+    const nonhex = "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"cap_nonce\":\"" ++ (array_repeat.repeat("g", (2 * auth_cap_nonce_len))) ++ "\"}}";
     try testing.expect(parseAuthFrame(testing.allocator, nonhex).cap_nonce == null);
     // 정수 cap_nonce(비-string) → null.
     try testing.expect(parseAuthFrame(testing.allocator, "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"cap_nonce\":123}}").cap_nonce == null);

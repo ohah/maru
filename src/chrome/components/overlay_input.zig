@@ -5,6 +5,8 @@
 //! 복붙돼 있었다(C1 리뷰 cleanup으로 단일 출처화). 의존은 std + sibling chrome(draw/props) + ../../width.zig뿐
 //! (chrome neutral). 단일 출처: docs/chrome-strategy.md §5.4, docs/layering-and-portability.md §5.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const draw = @import("../draw.zig");
 const props = @import("../props.zig");
@@ -133,16 +135,16 @@ fn copyHeadWithEllipsis(buf: []u8, bytes: []const u8, head_end: usize) []const u
 test "elideMiddle·tailWindow: 버퍼가 모자란 경로도 묶음을 가르지 않고, 손상 바이트 뒤 결합 부호를 「…」 뒤에 홀로 두지 않는다" {
     // 버퍼가 모자라면 앞만 남기고 「…」로 마치는 경로(`copyHeadWithEllipsis`)가 코드포인트에서 멈춰 결합 부호를 떼었다.
     var small: [4]u8 = undefined;
-    const head_only = elideMiddle(&small, "e\u{301}" ** 30, 40);
+    const head_only = elideMiddle(&small, array_repeat.repeat("e\u{301}", 30), 40);
     try std.testing.expect(!std.mem.startsWith(u8, head_only, "e…")); // `e` 만 남기고 부호를 떼지 않는다
     try std.testing.expect(std.mem.endsWith(u8, head_only, "…"));
     // 손상 바이트는 1 바이트 묶음이라 그 뒤의 결합 부호가 새 묶음을 시작한다 — 꼬리 맨 앞이면 건너뛴다.
     var buf: [512]u8 = undefined;
-    const out = elideMiddle(&buf, "\xff\u{301}" ** 40, 10);
+    const out = elideMiddle(&buf, array_repeat.repeat("\xff\u{301}", 40), 10);
     const cut = std.mem.indexOf(u8, out, "…").?;
     try std.testing.expect(!std.mem.startsWith(u8, out[cut + "…".len ..], "\u{301}"));
     try std.testing.expect(displayCols(out) <= 10);
-    const tail = tailWindow("\xff\u{301}" ** 40, 5);
+    const tail = tailWindow(array_repeat.repeat("\xff\u{301}", 40), 5);
     try std.testing.expect(tail.truncated and !std.mem.startsWith(u8, tail.text, "\u{301}"));
     try std.testing.expect(displayCols(tail.text) <= 5);
 }
@@ -153,14 +155,14 @@ test "elideMiddle: 앞과 끝을 남기고 가운데를 줄이며, 폭과 UTF-8 
     const short = "https://example.com/";
     try std.testing.expect(elideMiddle(&buf, short, 40).ptr == short.ptr);
     // 넘치면 앞(호스트)과 끝(파일)이 남고 가운데가 「…」.
-    const url = "https://example.com/" ++ "a" ** 300 ++ "/report.pdf";
+    const url = "https://example.com/" ++ array_repeat.repeat("a", 300) ++ "/report.pdf";
     const out = elideMiddle(&buf, url, 40);
     try std.testing.expect(displayCols(out) <= 40);
     try std.testing.expect(std.mem.startsWith(u8, out, "https://example.com/"));
     try std.testing.expect(std.mem.endsWith(u8, out, "report.pdf"));
     try std.testing.expect(std.mem.indexOf(u8, out, "…") != null);
     // 한글(2칸) — 코드포인트를 쪼개지 않고 폭 안이다.
-    const hangul = "가" ** 80;
+    const hangul = array_repeat.repeat("가", 80);
     const h = elideMiddle(&buf, hangul, 21);
     try std.testing.expect(std.unicode.utf8ValidateSlice(h));
     try std.testing.expect(displayCols(h) <= 21);
@@ -767,7 +769,7 @@ test "손상 바이트는 하나당 한 칸이고, 자르기 셋이 같은 셈�
 test "자르기 셋은 글자 묶음을 가르지 않는다 — 결합 부호·ZWJ 이모지·국기·분해형 한글, 폭 상한도 그대로" {
     // 예전에는 코드포인트 경계에서 끊어, 가운데 줄임의 꼬리가 결합 부호로 시작했다(`e\u{301}` × 30 에서 폭 35 개 중 17 개).
     var buf: [256]u8 = undefined;
-    const accents = "e\u{301}" ** 30;
+    const accents = array_repeat.repeat("e\u{301}", 30);
     var m: u32 = 5;
     while (m < 40) : (m += 1) {
         const out = elideMiddle(&buf, accents, m);

@@ -162,15 +162,15 @@ test "CR2e-a reducer는 closed inventory와 forged summary를 전수 거부한�
     try std.testing.expect(!containsPointer(reducer.Event));
     try std.testing.expect(!containsPointer(reducer.Decision));
     try std.testing.expect(!containsPointer(reducer.TerminalSummary));
-    try std.testing.expectEqual(@as(usize, 7), @typeInfo(reducer.JobPhase).@"enum".fields.len);
-    try std.testing.expectEqual(@as(usize, 6), @typeInfo(reducer.RuntimeLedger).@"enum".fields.len);
-    try std.testing.expectEqual(@as(usize, 4), @typeInfo(reducer.LocalState).@"enum".fields.len);
-    try std.testing.expectEqual(@as(usize, 5), @typeInfo(reducer.MutationState).@"enum".fields.len);
-    try std.testing.expectEqual(@as(usize, 4), @typeInfo(reducer.CloseTag).@"enum".fields.len);
-    try std.testing.expectEqual(@as(usize, 4), @typeInfo(reducer.CloseState).@"union".fields.len);
-    try std.testing.expectEqual(@as(usize, 27), @typeInfo(reducer.EventTag).@"enum".fields.len);
-    try std.testing.expectEqual(@as(usize, 27), @typeInfo(reducer.Event).@"union".fields.len);
-    try std.testing.expectEqual(@as(usize, 31), @typeInfo(reducer.Decision).@"enum".fields.len);
+    try std.testing.expectEqual(@as(usize, 7), @import("type_info_fields").enumFields(reducer.JobPhase).len);
+    try std.testing.expectEqual(@as(usize, 6), @import("type_info_fields").enumFields(reducer.RuntimeLedger).len);
+    try std.testing.expectEqual(@as(usize, 4), @import("type_info_fields").enumFields(reducer.LocalState).len);
+    try std.testing.expectEqual(@as(usize, 5), @import("type_info_fields").enumFields(reducer.MutationState).len);
+    try std.testing.expectEqual(@as(usize, 4), @import("type_info_fields").enumFields(reducer.CloseTag).len);
+    try std.testing.expectEqual(@as(usize, 4), @import("type_info_fields").unionFields(reducer.CloseState).len);
+    try std.testing.expectEqual(@as(usize, 27), @import("type_info_fields").enumFields(reducer.EventTag).len);
+    try std.testing.expectEqual(@as(usize, 27), @import("type_info_fields").unionFields(reducer.Event).len);
+    try std.testing.expectEqual(@as(usize, 31), @import("type_info_fields").enumFields(reducer.Decision).len);
 
     var wrong_shell_work = work;
     wrong_shell_work.shell_generation = 8;
@@ -201,7 +201,7 @@ test "CR2e-a reducer는 closed inventory와 forged summary를 전수 거부한�
         .controller_evidenced,
         .authority_conflict,
         .gone_positive,
-        .{ .begin_retry_wait_release = .{ .work = work, .runtime_id = .{1} ** 16 } },
+        .{ .begin_retry_wait_release = .{ .work = work, .runtime_id = @splat(1) } },
         .retry_direct_granted,
         .{ .retry_expired = .{ .now_ns = 100 } },
         .begin_publish,
@@ -271,7 +271,7 @@ test "CR2e-a reducer는 closed inventory와 forged summary를 전수 거부한�
     waiting = (try reducer.reduce(waiting, .authority_conflict)).state;
     waiting = (try reducer.reduce(waiting, .{ .begin_retry_wait_release = .{
         .work = work,
-        .runtime_id = .{1} ** 16,
+        .runtime_id = @splat(1),
     } })).state;
     try std.testing.expectEqual(reducer.JobPhase.retry_wait_release, waiting.phaseTag());
     try std.testing.expectError(
@@ -364,8 +364,8 @@ test "CR2e-a reducer는 canonical authority prefix의 legal event 집합을 exac
 }
 
 fn expectAllowed(state: reducer.State, allowed: []const reducer.EventTag) !void {
-    inline for (@typeInfo(reducer.EventTag).@"enum".fields) |field| {
-        const tag: reducer.EventTag = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(reducer.EventTag)) |field| {
+        const tag: reducer.EventTag = @fromBackingInt(@intCast(field.value));
         const expected = for (allowed) |item| {
             if (item == tag) break true;
         } else false;
@@ -397,7 +397,7 @@ fn canonicalEvent(tag: reducer.EventTag) reducer.Event {
         .gone_positive => .gone_positive,
         .begin_retry_wait_release => .{ .begin_retry_wait_release = .{
             .work = work,
-            .runtime_id = .{1} ** 16,
+            .runtime_id = @splat(1),
         } },
         .retry_direct_granted => .retry_direct_granted,
         .retry_expired => .{ .retry_expired = .{ .now_ns = 100 } },
@@ -442,11 +442,11 @@ fn containsPointer(comptime T: type) bool {
         .optional => |info| containsPointer(info.child),
         .error_union => |info| containsPointer(info.payload),
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field| if (containsPointer(field.type)) break :blk true;
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (containsPointer(field.type)) break :blk true;
             break :blk false;
         },
         .@"union" => |info| blk: {
-            inline for (info.fields) |field| if (containsPointer(field.type)) break :blk true;
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (containsPointer(field.type)) break :blk true;
             break :blk false;
         },
         else => false,

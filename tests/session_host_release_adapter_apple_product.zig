@@ -2,6 +2,8 @@
 //! 실제 command 실행이나 DMG mount를 흉내 내지 않고, executable adapter가 받은 bounded capture를
 //! caller 제작 `Signing` 없이 manifest 타입으로 수렴시키는 component 경계만 고정한다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const product = @import("release_adapter_apple_product");
 
@@ -119,7 +121,7 @@ test "rejects noncanonical digest control scalar and capture cap before allocati
     input.codesign_detail = "Identifier=dev.maru.apphost\nTeamIdentifier=ABCDE\nFGHIJ\n";
     try std.testing.expectError(error.InvalidCodesignDetail, product.parseAndBind(std.testing.allocator, input, "1.2.3"));
     input = captures();
-    input.plist_json = " " ** (product.max_capture_bytes + 1);
+    input.plist_json = array_repeat.repeat(" ", (product.max_capture_bytes + 1));
     try std.testing.expectError(error.CaptureTooLarge, product.parseAndBind(std.testing.allocator, input, "1.2.3"));
 }
 

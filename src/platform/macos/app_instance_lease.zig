@@ -7,12 +7,9 @@
 
 const std = @import("std");
 const owner_lease = @import("session_host/owner_lease.zig");
-const libc = @cImport({
-    @cInclude("stdlib.h");
-});
-
 const c = std.c;
 const posix = std.posix;
+extern "c" fn system(command: [*:0]const u8) c_int;
 
 pub const Error = error{
     AlreadyOwned,
@@ -75,7 +72,7 @@ test "app instance lease is exclusive CLOEXEC and keeps the lock pathname" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
 
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/private/tmp/maru-app-lease-basic-{d}", .{c.getpid()}) catch
+    const path = std.fmt.bufPrintSentinel(&path_buf, "/private/tmp/maru-app-lease-basic-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.unlink(path.ptr);
     defer _ = c.unlink(path.ptr);
@@ -100,7 +97,7 @@ test "fresh app instance lease forces exact mode under a restrictive umask" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
 
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/private/tmp/maru-app-lease-umask-{d}", .{c.getpid()}) catch
+    const path = std.fmt.bufPrintSentinel(&path_buf, "/private/tmp/maru-app-lease-umask-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.unlink(path.ptr);
     defer _ = c.unlink(path.ptr);
@@ -119,7 +116,7 @@ test "two fresh processes racing the same leaf elect exactly one winner" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
 
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/private/tmp/maru-app-lease-race-{d}", .{c.getpid()}) catch
+    const path = std.fmt.bufPrintSentinel(&path_buf, "/private/tmp/maru-app-lease-race-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.unlink(path.ptr);
     defer _ = c.unlink(path.ptr);
@@ -181,16 +178,16 @@ test "app instance lease rejects symlink non-regular and wrong mode" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
 
     var base_buf: [256]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/private/tmp/maru-app-lease-invalid-{d}", .{c.getpid()}) catch
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/private/tmp/maru-app-lease-invalid-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     if (c.mkdir(base.ptr, 0o700) != 0) return error.SkipZigTest;
     if (c.chmod(base.ptr, 0o700) != 0) return error.ChmodFailed;
     defer _ = c.rmdir(base.ptr);
 
     var target_buf: [320]u8 = undefined;
-    const target = try std.fmt.bufPrintZ(&target_buf, "{s}/target", .{base});
+    const target = try std.fmt.bufPrintSentinel(&target_buf, "{s}/target", .{base}, 0);
     var link_buf: [320]u8 = undefined;
-    const link = try std.fmt.bufPrintZ(&link_buf, "{s}/workspace.v1.lock", .{base});
+    const link = try std.fmt.bufPrintSentinel(&link_buf, "{s}/workspace.v1.lock", .{base}, 0);
     try createRegular(target, 0o600);
     defer _ = c.unlink(target.ptr);
     try std.testing.expectEqual(@as(c_int, 0), c.symlink(target.ptr, link.ptr));
@@ -238,12 +235,12 @@ test "manifest atomic replace cannot bypass the sibling lease" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
 
     var lock_buf: [256]u8 = undefined;
-    const lock = std.fmt.bufPrintZ(&lock_buf, "/private/tmp/maru-app-lease-replace-{d}.lock", .{c.getpid()}) catch
+    const lock = std.fmt.bufPrintSentinel(&lock_buf, "/private/tmp/maru-app-lease-replace-{d}.lock", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     var manifest_buf: [256]u8 = undefined;
-    const manifest = try std.fmt.bufPrintZ(&manifest_buf, "/private/tmp/maru-app-lease-replace-{d}.v1", .{c.getpid()});
+    const manifest = try std.fmt.bufPrintSentinel(&manifest_buf, "/private/tmp/maru-app-lease-replace-{d}.v1", .{c.getpid()}, 0);
     var temp_buf: [256]u8 = undefined;
-    const temp = try std.fmt.bufPrintZ(&temp_buf, "/private/tmp/maru-app-lease-replace-{d}.tmp", .{c.getpid()});
+    const temp = try std.fmt.bufPrintSentinel(&temp_buf, "/private/tmp/maru-app-lease-replace-{d}.tmp", .{c.getpid()}, 0);
     _ = c.unlink(lock.ptr);
     _ = c.unlink(manifest.ptr);
     _ = c.unlink(temp.ptr);
@@ -296,7 +293,7 @@ test "SIGKILL releases the winner lease for a new process" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
 
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/private/tmp/maru-app-lease-kill-{d}", .{c.getpid()}) catch
+    const path = std.fmt.bufPrintSentinel(&path_buf, "/private/tmp/maru-app-lease-kill-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.unlink(path.ptr);
     defer _ = c.unlink(path.ptr);
@@ -355,7 +352,7 @@ test "CLOEXEC keeps an exec descendant from retaining the winner lease" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
 
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/private/tmp/maru-app-lease-exec-{d}", .{c.getpid()}) catch
+    const path = std.fmt.bufPrintSentinel(&path_buf, "/private/tmp/maru-app-lease-exec-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.unlink(path.ptr);
     defer _ = c.unlink(path.ptr);
@@ -368,12 +365,13 @@ test "CLOEXEC keeps an exec descendant from retaining the winner lease" {
         _ = c.close(ready[0]);
         var lease = AppInstanceLease.acquire(path) catch c._exit(2);
         var command_buf: [128]u8 = undefined;
-        const command = std.fmt.bufPrintZ(
+        const command = std.fmt.bufPrintSentinel(
             &command_buf,
             "printf '%d\\n' $$ >&{d}; exec /bin/sleep 30",
             .{ready[1]},
+            0,
         ) catch c._exit(3);
-        _ = libc.system(command.ptr);
+        _ = system(command.ptr);
         lease.deinit();
         c._exit(4);
     }
@@ -394,7 +392,7 @@ test "CLOEXEC keeps an exec descendant from retaining the winner lease" {
     const descendant = std.fmt.parseInt(c.pid_t, pid_text[0..pid_len], 10) catch
         return error.InvalidDescendantPid;
     try std.testing.expect(descendant > 0);
-    try std.testing.expectEqual(@as(c_int, 0), c.kill(descendant, @enumFromInt(0)));
+    try std.testing.expectEqual(@as(c_int, 0), c.kill(descendant, @fromBackingInt(@intCast(0))));
 
     try std.testing.expectEqual(@as(c_int, 0), c.kill(holder, posix.SIG.KILL));
     var status: c_int = undefined;

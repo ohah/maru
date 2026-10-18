@@ -28,7 +28,7 @@ pub fn children(pid: c_int, out: []c_int) []c_int {
 }
 
 pub fn alive(pid: c_int) bool {
-    return std.c.kill(pid, @enumFromInt(0)) == 0;
+    return std.c.kill(pid, @fromBackingInt(@intCast(0))) == 0;
 }
 
 /// `pids` 가 사라지기를 `timeout_ms` 까지 100 ms 마다 기다린다 — 끝에 아직 살아 있는 수(0 이면 모두 사라짐).
@@ -155,7 +155,7 @@ pub fn machoUuid(path: [*:0]const u8, out: *[36]u8) ?[]const u8 {
 pub fn crashReportsSince(since: i64, uuids: []const []const u8) usize {
     const home = std.c.getenv("HOME") orelse return 0;
     var path_buf: [1024]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&path_buf, "{s}/Library/Logs/DiagnosticReports", .{std.mem.span(home)}) catch return 0;
+    const dir_path = std.fmt.bufPrintSentinel(&path_buf, "{s}/Library/Logs/DiagnosticReports", .{std.mem.span(home)}, 0) catch return 0;
     const dir = opendir(dir_path) orelse return 0;
     defer _ = closedir(dir);
     var count: usize = 0;
@@ -163,7 +163,7 @@ pub fn crashReportsSince(since: i64, uuids: []const []const u8) usize {
         const name = std.mem.sliceTo(&entry.name, 0);
         if (!std.mem.startsWith(u8, name, "maru-web-") or !std.mem.endsWith(u8, name, ".ips")) continue;
         var file_buf: [1024]u8 = undefined;
-        const file = std.fmt.bufPrintZ(&file_buf, "{s}/{s}", .{ dir_path, name }) catch continue;
+        const file = std.fmt.bufPrintSentinel(&file_buf, "{s}/{s}", .{ dir_path, name }, 0) catch continue;
         const fd = std.c.open(file, .{ .ACCMODE = .RDONLY });
         if (fd < 0) continue;
         defer _ = std.c.close(fd);

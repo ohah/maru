@@ -160,11 +160,11 @@ pub const Screen = struct {
 
     fn apply(self: *Screen, kind_byte: u8, payload: []const u8) !void {
         switch (kind_byte) {
-            @intFromEnum(Kind.snapshot) => {
+            @backingInt(Kind.snapshot) => {
                 try self.inner.applySnapshot(payload, .unnegotiated);
                 self.snapshots += 1;
             },
-            @intFromEnum(Kind.delta) => {
+            @backingInt(Kind.delta) => {
                 // **첫 덩어리가 delta 면 base 가 없다** — 우리 스트림은 snapshot 으로 시작한다.
                 if (self.state != .ready) return error.OutOfOrder;
                 try self.inner.applyDelta(payload, .unnegotiated);
@@ -236,7 +236,7 @@ test "첫 덩어리가 delta 면 받지 않는다 — base 가 없다" {
     defer s.deinit(a);
     var frame = try snapshotFrame(a, "A", 1);
     defer a.free(frame);
-    frame[4] = @intFromEnum(Kind.delta); // snapshot 을 delta 로 위조
+    frame[4] = @backingInt(Kind.delta); // snapshot 을 delta 로 위조
     _ = s.feed(a, frame);
     try std.testing.expectEqual(State.off, s.state);
     try std.testing.expectEqual(OffReason.malformed, s.off_reason);
@@ -277,7 +277,7 @@ fn staleDeltaFrame(a: std.mem.Allocator, base_generation: u64) ![]u8 {
     var out = try a.alloc(u8, header_bytes + body.items.len);
     @memset(out[0..header_bytes], 0);
     @memcpy(out[0..4], magic);
-    out[4] = @intFromEnum(Kind.delta);
+    out[4] = @backingInt(Kind.delta);
     std.mem.writeInt(u32, out[8..12][0..4], @intCast(body.items.len), .little);
     @memcpy(out[header_bytes..], body.items);
     return out;
@@ -304,7 +304,7 @@ fn snapshotFrame(a: std.mem.Allocator, grapheme: []const u8, width: u8) ![]u8 {
     var out = try a.alloc(u8, header_bytes + body.items.len);
     @memset(out[0..header_bytes], 0);
     @memcpy(out[0..4], magic);
-    out[4] = @intFromEnum(Kind.snapshot);
+    out[4] = @backingInt(Kind.snapshot);
     std.mem.writeInt(u32, out[8..12][0..4], @intCast(body.items.len), .little);
     @memcpy(out[header_bytes..], body.items);
     return out;

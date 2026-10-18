@@ -1,3 +1,5 @@
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const builtin = @import("builtin");
 const input = @import("input.zig");
@@ -239,7 +241,7 @@ pub const TerminalCore = struct {
     parser: ParserState = .ground,
     // CSI 파라미터 누적 버퍼. 대부분의 시퀀스는 파라미터가 적으므로 작은 고정 크기로 충분하고,
     // 넘치면 무시한다(악성/비정상 입력 방어).
-    csi_params: [max_csi_params]u16 = [_]u16{0} ** max_csi_params,
+    csi_params: [max_csi_params]u16 = @as([max_csi_params]u16, @splat(0)),
     csi_param_count: usize = 0,
     csi_has_digit: bool = false,
     // CSI의 private marker 바이트(0x3c-0x3f: '<','=','>','?'). 0이면 없음. xterm은 marker별로
@@ -338,7 +340,7 @@ pub const TerminalCore = struct {
     // 각 CSI 파라미터가 ';'(새 파라미터)가 아니라 ':'(sub-parameter)로 들어왔는지 표시한다.
     // ITU colon 형식 38:2:colorspace:r:g:b는 38;2;r;g;b와 달리 colorspace 컴포넌트가 하나 더
     // 있어, 이 구분 없이는 RGB가 한 칸 밀린다.
-    csi_subparam: [max_csi_params]bool = [_]bool{false} ** max_csi_params,
+    csi_subparam: [max_csi_params]bool = @as([max_csi_params]bool, @splat(false)),
     // wrapped(soft-wrap 추적)·prompt_marks(행별 OSC 133 분류)는 활성 grid라 2단계 Screen struct로 이동
     // (self.screen.wrapped / self.screen.prompt_marks — 정의·주석은 screen.zig Screen).
 
@@ -470,11 +472,11 @@ pub const TerminalCore = struct {
     // OSC 4 팔레트 override: 256색 각 인덱스의 앱 재정의(null = 기본 xterm256 팔레트). OSC 4로 설정/질의,
     // OSC 104로 리셋(인덱스 없으면 전부). 렌더러가 `.indexed` 색을 풀 때 이 표를 먼저 본다(app이
     // paletteOverride()를 CellColors.palette로 wiring — 코어는 셀 픽셀/렌더를 모르는 K1 경계 유지). RIS에서 전부 null.
-    palette_override: [256]?types.Rgb = .{null} ** 256,
+    palette_override: [256]?types.Rgb = @splat(null),
     // K1 경계 보강: 코어는 config palette base를 palette_override 옆 별도 레이어로 보관한다 — 렌더(metal_frame)와
     // OSC 4 query 응답이 같은 우선순위(override > config > xterm256)를 공유해 화면·보고가 일치한다. OSC 4가 없을 때의
     // ANSI 16색 base(theme.palette)를 platform이 setConfigPalette로 주입한다. RIS/OSC104는 override만 리셋(config base 유지).
-    config_palette: [16]?types.Rgb = .{null} ** 16,
+    config_palette: [16]?types.Rgb = @splat(null),
     // OSC 52 클립보드 쓰기 요청(디코드된 바이트, pending). platform이 정책(allow) 확인 후 drain → system clipboard.
     clipboard_write: std.ArrayListUnmanaged(u8) = .empty,
     // OSC 52 클립보드 쓰기가 크기 상한(max_clipboard_bytes/max_osc_bytes)을 넘어 **거부**됐다는 1회성 신호.
@@ -1365,7 +1367,7 @@ pub const TerminalCore = struct {
             defer allocator.free(w);
             return GetFileAttributesW(w.ptr) != invalid_file_attributes;
         }
-        const abs_z = try allocator.dupeZ(u8, abs);
+        const abs_z = try allocator.dupeSentinel(u8, abs, 0);
         defer allocator.free(abs_z);
         return std.c.access(abs_z.ptr, std.posix.F_OK) == 0;
     }
@@ -3203,7 +3205,7 @@ test "OSC 7 tolerates unusual authorities without breaking the pair or the local
     try std.testing.expectEqualStrings("h", core.currentCwdHost());
 
     // 매우 긴 authority도 쌍을 유지한다(표시 측 말줄임이 폭을 책임진다).
-    const long_host = "a" ** 300;
+    const long_host = array_repeat.repeat("a", 300);
     try core.write("\x1b]7;file://" ++ long_host ++ "/deep\x07");
     try std.testing.expectEqualStrings("/deep", core.currentCwd());
     try std.testing.expectEqual(@as(usize, 300), core.currentCwdHost().len);
@@ -4069,7 +4071,7 @@ test "reflow: many wide glyphs shrunk to a narrow width does not overflow the sc
     defer core.deinit();
     // 비-커서 줄을 wide glyph로 가득 채운다(soft-wrap). 좁은 폭에서 wide glyph는 줄 끝 한 칸을
     // 낭비하며 wrap돼, 재배치 행 수가 옛 cap_rows(total_content/new_cols) 추정을 초과한다(힙 OOB였음).
-    try core.write("한" ** 80); // 160칸 = 8행의 한(rows 0-7, soft-wrap)
+    try core.write(array_repeat.repeat("한", 80)); // 160칸 = 8행의 한(rows 0-7, soft-wrap)
     try core.write("\r\nx"); // 커서를 짧은 줄(아래)로 옮겨 한 줄이 비-커서가 되게 함
     try core.resize(3, 12); // 3칸으로 축소: 한 1개/행 -> ~80행 -> 옛 cap 초과(크래시 없어야)
     const dump = try core.dumpUtf8(std.testing.allocator);
@@ -4796,7 +4798,7 @@ test "kitty reflow: 긴 줄 가운데 놓인 이미지는 그 셀을 따라 다�
 /// 6 행 화면에서 위 5 행(이미지 둘 + B 셋)이 스크롤백으로 간다.
 fn writeImageAboveLongLine(core: *TerminalCore) !void {
     try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(0, 0, 2));
-    try core.write("\r\n\r\n" ++ ("B" ** 80) ++ "\r\nC");
+    try core.write("\r\n\r\n" ++ (array_repeat.repeat("B", 80)) ++ "\r\nC");
     try core.kitty_placements.append(std.testing.allocator, mkSpanPlacement(4, 0, 1)); // 커서 줄 C 위
 }
 
@@ -5405,7 +5407,7 @@ test "OSC 52: 한 문단 크기(>2KB) 클립보드 쓰기도 통째로 받고, d
     // 둘 다)을 확인한다. 반납 임계치(osc_retain_bytes/clipboard_write_retain_bytes=4096)를 실제로 넘기려면
     // 수집·디코드 버퍼가 모두 4096B를 넘어야 하므로 원문을 넉넉히(~5KB) 잡는다(옛 ~1.7KB는 임계치 미만이라
     // 반납 분기를 안 타 검증이 공허했다).
-    const para = "가나다라마바사아자차카타파하 " ** 120; // ≈5.1KB → base64 ~6.9KB(수집·디코드 버퍼 모두 4096 초과)
+    const para = array_repeat.repeat("가나다라마바사아자차카타파하 ", 120); // ≈5.1KB → base64 ~6.9KB(수집·디코드 버퍼 모두 4096 초과)
     const b64 = try std.testing.allocator.alloc(u8, std.base64.standard.Encoder.calcSize(para.len));
     defer std.testing.allocator.free(b64);
     const enc = std.base64.standard.Encoder.encode(b64, para);
@@ -5461,7 +5463,7 @@ test "OSC 52: abort(ESC+비-`\\`)로 끊긴 대용량 수집도 capacity를 반�
     // 안 탄다 — 옛 고정 2048 시절엔 불가능했던 megabyte 상주. abort 경로가 직접 반납해 상한을 재확립하는지 확인.
     // (참고: 스트림이 종료 없이 완전히 끊기는 truncate는 파서가 .osc에 머물러 아직 '수집 중'이므로 정당하게
     //  버퍼를 든다 — 다음 종료/abort나 deinit이 반납한다.)
-    const filler = "가나다라마바사아자차카타파하 " ** 120; // ~5.1KB → base64 ~6.9KB
+    const filler = array_repeat.repeat("가나다라마바사아자차카타파하 ", 120); // ~5.1KB → base64 ~6.9KB
     const b64 = try std.testing.allocator.alloc(u8, std.base64.standard.Encoder.calcSize(filler.len));
     defer std.testing.allocator.free(b64);
     const enc = std.base64.standard.Encoder.encode(b64, filler);
@@ -5527,7 +5529,7 @@ test "OSC 4 query reflects config_palette base (override > config > xterm256); R
     defer core.deinit();
 
     // platform이 주입하는 config theme.palette base를 흉내(인덱스 1 = {0x12,0x34,0x56}).
-    var cfg: [16]?types.Rgb = .{null} ** 16;
+    var cfg: [16]?types.Rgb = @splat(null);
     cfg[1] = .{ .r = 0x12, .g = 0x34, .b = 0x56 };
     core.setConfigPalette(cfg);
 
@@ -7263,7 +7265,7 @@ test "resolveClickedPath: ~/ expands via $HOME, empty HOME rejected" {
     const orig: ?[]u8 = if (std.c.getenv("HOME")) |h| try A.dupe(u8, std.mem.span(h)) else null;
     defer {
         if (orig) |o| {
-            if (A.dupeZ(u8, o)) |z| {
+            if (A.dupeSentinel(u8, o, 0)) |z| {
                 _ = setenv("HOME", z.ptr, 1);
                 A.free(z);
             } else |_| {}
@@ -7271,7 +7273,7 @@ test "resolveClickedPath: ~/ expands via $HOME, empty HOME rejected" {
         } else _ = unsetenv("HOME");
     }
 
-    const tmp_abs_z = try A.dupeZ(u8, tmp_abs);
+    const tmp_abs_z = try A.dupeSentinel(u8, tmp_abs, 0);
     defer A.free(tmp_abs_z);
     _ = setenv("HOME", tmp_abs_z.ptr, 1);
     { // ~/home.txt → $HOME/home.txt
@@ -8350,7 +8352,7 @@ test "kitty graphics replies (K5): query validates without storing, quiet levels
     core.clearResponse();
     // 정상 transmit은 OK.
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 255, 0, 0, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 255, 0, 0, 255 }, 4);
     const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [128]u8 = undefined;
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\", .{encoded}));
@@ -8406,7 +8408,7 @@ test "kitty I= image number: 번호에 id를 배정하고 같은 번호는 이�
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [160]u8 = undefined;
 
@@ -8461,7 +8463,7 @@ test "kitty relative placement(P/Q/H/V): 부모 기준으로 놓이고 부모와
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
     defer core.deinit();
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 7, 7, 7, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 7, 7, 7, 255 }, 4);
     const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [160]u8 = undefined;
     // 부모 이미지·자식 이미지 각각 전송.
@@ -8550,7 +8552,7 @@ test "TBPROBE 가시성: virtual 격자가 있어도 일반 placement 로 보이
 
     // 2x2 RGBA 한 장을 보내고 **일반 placement** 로 커서 자리에 놓는다(U= 없음).
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 7, 7, 7, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 7, 7, 7, 255 }, 4);
     const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [192]u8 = undefined;
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=5,q=2;{s}\x1b\\", .{encoded}));
@@ -8568,7 +8570,7 @@ test "kitty U=1 unicode placeholder: virtual placement만 등록하고 커서 �
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
     defer core.deinit();
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 9, 9, 9, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 9, 9, 9, 255 }, 4);
     const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [160]u8 = undefined;
     // **회귀 판정**: U=1 을 안 읽던 시절엔 이 명령이 «즉시 커서 자리에 그리기»로 떨어져 엉뚱한 곳에
@@ -8783,7 +8785,7 @@ test "kitty graphics transmit: RGBA 저장 + 같은 id 교체 + delete (audit 5/
     defer core.deinit();
 
     // 2x2 RGBA = 16바이트(0xAB)를 base64로 인코딩해 transmit(a=t, f=32, s=2, v=2, i=7).
-    const raw = [_]u8{0xAB} ** 16;
+    const raw = @as([16]u8, @splat(0xAB));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [80]u8 = undefined;
@@ -8814,7 +8816,7 @@ test "kitty graphics transmit: 크기 불일치·PNG·zlib는 저장 안 함, RI
     var seq: [80]u8 = undefined;
 
     // 크기 불일치(s=2,v=2,f=32 → 16바이트 기대인데 4바이트만) → 거부.
-    const small = [_]u8{1} ** 4;
+    const small = @as([4]u8, @splat(1));
     var sb: [16]u8 = undefined;
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&sb, &small)}));
     try std.testing.expect(!core.kitty_images.map.contains(1));
@@ -8828,7 +8830,7 @@ test "kitty graphics transmit: 크기 불일치·PNG·zlib는 저장 안 함, RI
     try std.testing.expect(!core.kitty_images.map.contains(3));
 
     // 정상 저장 후 RIS(ESC c)는 전부 비운다.
-    const raw = [_]u8{2} ** 16;
+    const raw = @as([16]u8, @splat(2));
     var b64: [32]u8 = undefined;
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=9;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &raw)}));
     try std.testing.expect(core.kitty_images.map.contains(9));
@@ -8844,7 +8846,7 @@ test "kitty graphics display(a=p): 커서 셀에 placement 생성 + 모든 displ
     defer core.deinit();
 
     // 2x2 RGBA 이미지(i=7) 전송(표시 안 함) — transmit만으론 placement가 안 생긴다.
-    const raw = [_]u8{0xCD} ** 16;
+    const raw = @as([16]u8, @splat(0xCD));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [128]u8 = undefined;
@@ -8884,7 +8886,7 @@ test "kitty graphics display(a=p): 커서 셀에 placement 생성 + 모든 displ
 test "kitty graphics display(a=T): transmit+display 한 command로 이미지+placement (K1)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
-    const raw = [_]u8{0x10} ** 16;
+    const raw = @as([16]u8, @splat(0x10));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [128]u8 = undefined;
@@ -8905,7 +8907,7 @@ test "kitty graphics display: 없는 이미지/ i=0은 placement를 만들지 �
     // **양성 대조.** 위 둘은 「안 생긴다」만 재므로, `a=p` 가 통째로 죽어도 초록이다 — 부정 판정자는
     // 그 기능이 **살아 있음**을 같은 자리에서 함께 증명해야 뜻이 있다. 같은 core 에 제대로 된
     // 이미지를 넣고 표시하면 placement 가 생겨야 한다.
-    var raw = [_]u8{ 1, 2, 3, 255 } ** 4;
+    var raw = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [128]u8 = undefined;
@@ -8918,7 +8920,7 @@ test "kitty graphics display: 없는 이미지/ i=0은 placement를 만들지 �
 test "kitty graphics placement: (image_id,placement_id) 같으면 교체, 다르면 별개 (K1)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
-    const raw = [_]u8{0x22} ** 16;
+    const raw = @as([16]u8, @splat(0x22));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [128]u8 = undefined;
@@ -8936,7 +8938,7 @@ test "kitty graphics placement: (image_id,placement_id) 같으면 교체, 다르
 test "kitty graphics display: 커서 이동 정책(C, r) (K1)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 6 });
     defer core.deinit();
-    const raw = [_]u8{0x33} ** 16;
+    const raw = @as([16]u8, @splat(0x33));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [128]u8 = undefined;
@@ -8959,7 +8961,7 @@ test "kitty graphics display: 커서 이동 정책(C, r) (K1)" {
 test "kitty graphics delete: 이미지와 그 placement를 함께 제거 (K1)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
-    const raw = [_]u8{0x44} ** 16;
+    const raw = @as([16]u8, @splat(0x44));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [128]u8 = undefined;
@@ -8976,7 +8978,7 @@ test "kitty graphics delete: 이미지와 그 placement를 함께 제거 (K1)" {
 test "kitty graphics placement: RIS는 placement를 비운다 (K1)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
-    const raw = [_]u8{0x55} ** 16;
+    const raw = @as([16]u8, @splat(0x55));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [128]u8 = undefined;
@@ -8991,7 +8993,7 @@ test "kitty graphics placement: 스크롤백 eviction에 따라 anchor 보정·�
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
     defer core.deinit();
     core.screen.sb.cap = 2; // 작은 스크롤백으로 eviction을 빨리 유발
-    const raw = [_]u8{0x66} ** 16;
+    const raw = @as([16]u8, @splat(0x66));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [128]u8 = undefined;
@@ -9015,7 +9017,7 @@ test "kitty graphics placement: 스크롤백 eviction에 따라 anchor 보정·�
 test "kitty graphics placement: 위로 스크롤하면 뷰포트 상대 row로 환산 (K1)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
     defer core.deinit();
-    const raw = [_]u8{0x77} ** 16;
+    const raw = @as([16]u8, @splat(0x77));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [128]u8 = undefined;
@@ -9042,7 +9044,7 @@ test "kitty graphics placement: 위로 스크롤하면 뷰포트 상대 row로 �
 test "kitty graphics images: transmit이 RenderSnapshot.images로 픽셀·치수·generation 노출 (K2a)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
-    const raw = [_]u8{0x9A} ** 16; // 2x2 RGBA
+    const raw = @as([16]u8, @splat(0x9A)); // 2x2 RGBA
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [80]u8 = undefined;
@@ -9063,7 +9065,7 @@ test "kitty graphics images: transmit이 RenderSnapshot.images로 픽셀·치수
 test "kitty graphics images: 같은 id 재transmit은 generation을 올린다(렌더러 재업로드 신호) (K2a)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
-    const raw = [_]u8{1} ** 16;
+    const raw = @as([16]u8, @splat(1));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [80]u8 = undefined;
@@ -9078,7 +9080,7 @@ test "kitty graphics images: 같은 id 재transmit은 generation을 올린다(�
 test "kitty graphics images: 여러 이미지 노출 + delete/RIS 반영, generation은 RIS에도 단조 (K2a)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
-    const raw = [_]u8{2} ** 16;
+    const raw = @as([16]u8, @splat(2));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [80]u8 = undefined;
@@ -9131,7 +9133,7 @@ test "kitty graphics chunked(m=1): 여러 APC로 쪼갠 전송을 누적해 한 
 test "kitty graphics chunked: 3청크 완성 + RIS가 진행 중 전송을 폐기 (K3a)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
-    const raw = [_]u8{0xAA} ** 12;
+    const raw = @as([12]u8, @splat(0xAA));
     var b64: [16]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [64]u8 = undefined;
@@ -9339,7 +9341,7 @@ test "kitty graphics PNG: s/v 가 거짓말을 해도 PNG 가 말하는 치수�
 
     // **같은 id 를 raw 로 교체**한다. PNG 가 남긴 바이트가 회계에서 빠지고 새것만 남아야 한다 —
     // 안 빠지면 총량이 서서히 부풀어 320MB 한계가 엉뚱한 때에 걸린다.
-    const raw = [_]u8{7} ** 36; // 3x3 RGBA
+    const raw = @as([36]u8, @splat(7)); // 3x3 RGBA
     var b64: [64]u8 = undefined;
     var seq: [160]u8 = undefined;
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=3,v=3,i=1;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &raw)}));
@@ -9429,7 +9431,7 @@ test "kitty graphics PNG: o=z 는 zlib bomb 을 상한에서 끊는다 (푼 크�
     var out: std.Io.Writer = .fixed(raw_buf);
     var comp_storage: [std.compress.flate.max_window_len * 2]u8 = undefined;
     var comp = try std.compress.flate.Compress.init(&out, &comp_storage, .zlib, .default);
-    const zeros = [_]u8{0} ** 4096;
+    const zeros = @as([4096]u8, @splat(0));
     var written: usize = 0;
     while (written < 70 << 20) : (written += zeros.len) try comp.writer.writeAll(&zeros);
     try comp.finish();
@@ -9541,7 +9543,7 @@ test "kitty graphics PNG: 바이트를 흔든 PNG 무더기 — 죽지도 새지
         const zipped = "eNrrDPBz5+WS4mJgYOD19HAJAtJMIMzBDCRdM/6KASm2AJ8Q1/9Axn+GS+3vC4EMHk8Xx5CKW8kJCSxOQB4Ds+g8iT9AcQZPVz+XdU4JTQDaCxNQ";
         // 2x2 전부 파랑 RGBA PNG(프레임용).
         const frame_png = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGNkYPj/n4GBgYEJRIAwAB0ZAgKxZ5H2AAAAAElFTkSuQmCC";
-        const root_px = [_]u8{ 1, 2, 3, 255 } ** 4;
+        const root_px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
         var root_b64: [64]u8 = undefined;
         const root_enc = std.base64.standard.Encoder.encode(&root_b64, &root_px);
 
@@ -9600,7 +9602,7 @@ test "kitty graphics PNG: 바이트를 흔든 PNG 무더기 — 죽지도 새지
 test "kitty graphics delete: d=a(전체 placement만)·d=A(이미지까지) (K4a)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
-    const raw = [_]u8{1} ** 16;
+    const raw = @as([16]u8, @splat(1));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [80]u8 = undefined;
@@ -9636,7 +9638,7 @@ test "kitty graphics delete: d=a(전체 placement만)·d=A(이미지까지) (K4a
 test "kitty graphics delete: d=i(placement만)·d=I(이미지까지)·placement_id 지정 (K4a)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
-    const raw = [_]u8{1} ** 16;
+    const raw = @as([16]u8, @splat(1));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [80]u8 = undefined;
@@ -9663,7 +9665,7 @@ test "kitty graphics delete: d=i(placement만)·d=I(이미지까지)·placement_
 test "kitty graphics delete: d=z(z-index)·d=Z(이미지까지) (K4a)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
-    const raw = [_]u8{1} ** 16;
+    const raw = @as([16]u8, @splat(1));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [80]u8 = undefined;
@@ -9690,7 +9692,7 @@ test "kitty graphics evict: 한도 초과 시 오래된(generation 작은) 이�
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
     core.kitty_images.limit = 32; // 16바이트 이미지 2장까지만
-    const raw = [_]u8{1} ** 16; // 2x2 RGBA = 16바이트
+    const raw = @as([16]u8, @splat(1)); // 2x2 RGBA = 16바이트
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [80]u8 = undefined;
@@ -9709,7 +9711,7 @@ test "kitty graphics evict: placement 있는 이미지는 보호(안 쓰이는 �
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
     core.kitty_images.limit = 32;
-    const raw = [_]u8{1} ** 16;
+    const raw = @as([16]u8, @splat(1));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [80]u8 = undefined;
@@ -9727,7 +9729,7 @@ test "kitty graphics evict: 한 장이 한도보다 크면 거부(저장 안 함
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
     core.kitty_images.limit = 10; // 16바이트 이미지보다 작음
-    const raw = [_]u8{1} ** 16;
+    const raw = @as([16]u8, @splat(1));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [80]u8 = undefined;
@@ -9740,7 +9742,7 @@ test "kitty graphics evict: 모두 화면 표시 중(used)이면 새 transmit을
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
     core.kitty_images.limit = 32; // 16바이트 2장
-    const raw = [_]u8{1} ** 16;
+    const raw = @as([16]u8, @splat(1));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [80]u8 = undefined;
@@ -9762,7 +9764,7 @@ test "kitty graphics: 재transmit이 한도로 거부되면 그 image_id placeme
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
     core.kitty_images.limit = 32;
-    const raw = [_]u8{1} ** 16;
+    const raw = @as([16]u8, @splat(1));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [80]u8 = undefined;
@@ -9773,7 +9775,7 @@ test "kitty graphics: 재transmit이 한도로 거부되면 그 image_id placeme
     try core.write("\x1b_Ga=p,i=2\x1b\\");
     try std.testing.expect(kitty.kittyImageHasPlacement(&core, 1));
     // i=1을 더 큰(32B) 이미지로 재transmit: evict 불가(i=2 used 보호) → add가 old i=1 제거 후 거부.
-    const raw_big = [_]u8{2} ** 32; // 4x2 RGBA = 32
+    const raw_big = @as([32]u8, @splat(2)); // 4x2 RGBA = 32
     var b64b: [44]u8 = undefined;
     const b64bs = std.base64.standard.Encoder.encode(&b64b, &raw_big);
     var seq2: [120]u8 = undefined;
@@ -9787,7 +9789,7 @@ test "kitty graphics: 재transmit이 한도로 거부되면 그 image_id placeme
 test "kitty graphics: chunked 전송 중 독립 명령(delete)이 오면 chunk를 버리고 새 명령을 실행 (code review #3)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
-    const raw = [_]u8{1} ** 16;
+    const raw = @as([16]u8, @splat(1));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [80]u8 = undefined;
@@ -10584,7 +10586,7 @@ test "kitty graphics delete: d=n 이 이미지 번호로 지운다(대문자면 
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 24, .rows = 10 });
     defer core.deinit();
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 9, 9, 9, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 9, 9, 9, 255 }, 4);
     const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [160]u8 = undefined;
 
@@ -10631,7 +10633,7 @@ test "kitty graphics delete: d=c 가 커서를 덮는 placement 만 지운다" {
     defer core.deinit();
     core.setCellMetrics(10, 20); // 셀 span 환산의 단일 출처
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 5, 5, 5, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 5, 5, 5, 255 }, 4);
     const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [200]u8 = undefined;
 
@@ -10667,7 +10669,7 @@ test "kitty I=: 배정하는 image id 는 24비트 안이다 (placeholder 가 �
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [160]u8 = undefined;
 
@@ -10802,7 +10804,7 @@ test "OSC 99: 적대적 입력에 죽지 않는다 (R4 fuzz)" {
         "\x1b]99;d=;x\x1b\\", // d 가 빈 값 — 기본(done)이어야 한다
         "\x1b]99;e=1;!!!not-base64!!!\x1b\\", // 잘못된 base64
         "\x1b]99;e=1;\x1b\\", // base64 인데 payload 가 없다
-        "\x1b]99;i=" ++ "x" ** 500 ++ ";t\x1b\\", // 아주 긴 식별자
+        "\x1b]99;i=" ++ array_repeat.repeat("x", 500) ++ ";t\x1b\\", // 아주 긴 식별자
         "\x1b]99;p=title:p=body:p=icon;x\x1b\\", // 같은 키 반복 — 마지막이 이긴다
         "\x1b]99;d=0;a\x1b\\\x1b]99;d=0;b\x1b\\\x1b]99;;c\x1b\\", // 식별자 없이 이어 붙이기
         "\x1b]99;;\xff\xfe\xfd\x1b\\", // 잘못된 UTF-8 페이로드
@@ -10952,7 +10954,7 @@ test "kitty graphics: 부모 없는 relative placement 는 ENOENT — 그 거부
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
     defer core.deinit();
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [200]u8 = undefined;
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
@@ -10980,7 +10982,7 @@ test "kitty relative placement: 부모가 virtual 이면 저장은 하되 그리
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
     defer core.deinit();
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [200]u8 = undefined;
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
@@ -11016,7 +11018,7 @@ test "kitty graphics: 문서가 미지원이라 적은 갈래는 전부 ENOTSUPP
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 4 });
     defer core.deinit();
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [200]u8 = undefined;
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
@@ -11131,13 +11133,13 @@ test "kitty 애니메이션: a=f 로 프레임을 쌓고 a=a 로 재생하면 �
     var seq: [200]u8 = undefined;
 
     // 2x2 RGBA 루트(빨강) — 프레임 1.
-    const red = [_]u8{ 255, 0, 0, 255 } ** 4;
+    const red = array_repeat.repeat([_]u8{ 255, 0, 0, 255 }, 4);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &red)}));
     try std.testing.expectEqual(@as(u32, 1), core.kitty_images.map.get(1).?.frameCount());
 
     // 프레임 2(초록), 프레임 3(파랑)을 덧붙인다. z= 로 gap 을 준다.
-    const green = [_]u8{ 0, 255, 0, 255 } ** 4;
-    const blue = [_]u8{ 0, 0, 255, 255 } ** 4;
+    const green = array_repeat.repeat([_]u8{ 0, 255, 0, 255 }, 4);
+    const blue = array_repeat.repeat([_]u8{ 0, 0, 255, 255 }, 4);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=100,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &green)}));
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=100,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &blue)}));
     try std.testing.expectEqual(@as(u32, 3), core.kitty_images.map.get(1).?.frameCount());
@@ -11181,7 +11183,7 @@ test "kitty 애니메이션: 반복 수가 다 되면 멈춘다" {
     defer core.deinit();
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=10,q=2;{s}\x1b\\", .{enc}));
@@ -11209,7 +11211,7 @@ test "kitty 애니메이션: 적대적 입력에 죽지 않고 총량 회계가 
     defer core.deinit();
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     const bytes_root = core.kitty_images.total_bytes;
@@ -11246,8 +11248,8 @@ test "kitty 애니메이션: a=c 가 프레임을 합성한다" {
     defer core.deinit();
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const red = [_]u8{ 255, 0, 0, 255 } ** 4;
-    const green = [_]u8{ 0, 255, 0, 255 } ** 4;
+    const red = array_repeat.repeat([_]u8{ 255, 0, 0, 255 }, 4);
+    const green = array_repeat.repeat([_]u8{ 0, 255, 0, 255 }, 4);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &red)}));
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &green)}));
 
@@ -11266,7 +11268,7 @@ test "kitty 애니메이션: 프레임도 총량 한도를 지킨다 — 회계�
     core.kitty_images.limit = 64; // 작게 잡아 경계를 결정적으로 본다(2x2 RGBA = 16B)
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
 
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
@@ -11294,7 +11296,7 @@ test "kitty 애니메이션: 화면에 없는 이미지는 진행하지 않는�
     defer core.deinit();
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
 
     // **회귀 판정**: evict 는 최저 `generation` 을 고르는데, 애니메이션은 매 tick generation 을 올린다.
@@ -11325,8 +11327,8 @@ test "kitty 애니메이션: 프레임 전환이 렌더 뷰까지 도달한다 �
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const red = [_]u8{ 255, 0, 0, 255 } ** 4;
-    const green = [_]u8{ 0, 255, 0, 255 } ** 4;
+    const red = array_repeat.repeat([_]u8{ 255, 0, 0, 255 }, 4);
+    const green = array_repeat.repeat([_]u8{ 0, 255, 0, 255 }, 4);
 
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &red)}));
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=50,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &green)}));
@@ -11362,7 +11364,7 @@ test "kitty 애니메이션: PNG 프레임 — 치수는 PNG 가 말하고, 매�
     defer core.deinit();
     var b64: [64]u8 = undefined;
     var seq: [400]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4; // 2x2 RGBA 루트
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4); // 2x2 RGBA 루트
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     core.clearResponse();
@@ -11373,7 +11375,7 @@ test "kitty 애니메이션: PNG 프레임 — 치수는 PNG 가 말하고, 매�
     core.clearResponse();
     const img = core.kitty_images.map.get(1).?;
     try std.testing.expectEqual(@as(u32, 2), img.frameCount());
-    try std.testing.expectEqualSlices(u8, &([_]u8{ 0, 0, 255, 255 } ** 4), img.framePixels(2));
+    try std.testing.expectEqualSlices(u8, &(array_repeat.repeat([_]u8{ 0, 0, 255, 255 }, 4)), img.framePixels(2));
 
     // **부분 사각형도 된다** — 1x1 초록을 (1,1) 에 얹는다. PNG 치수가 곧 전송 사각형이다.
     try core.write("\x1b_Ga=f,f=100,i=1,c=2,x=1,y=1,X=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg+M/wHwAEAQH/cetH5QAAAABJRU5ErkJggg==\x1b\\");
@@ -11392,14 +11394,14 @@ test "kitty 애니메이션: PNG 프레임 — 치수는 PNG 가 말하고, 매�
     try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
     core.clearResponse();
     // s=1,v=1 을 믿었다면 (0,0) 한 칸만 파랗다. PNG 를 믿으면 네 칸 전부다.
-    try std.testing.expectEqualSlices(u8, &([_]u8{ 0, 0, 255, 255 } ** 4), core.kitty_images.map.get(1).?.framePixels(4));
+    try std.testing.expectEqualSlices(u8, &(array_repeat.repeat([_]u8{ 0, 0, 255, 255 }, 4)), core.kitty_images.map.get(1).?.framePixels(4));
 
     // **PNG 프레임 + o=z** — 두 기능의 조합. 각각 되는 것으로는 이 갈래가 안 증명된다.
     try core.write("\x1b_Ga=f,f=100,o=z,i=1;eNrrDPBz5+WS4mJgYOD19HAJAtJMIMzBBiSLtvGqAClRTxfHkIo5ySkJP/7PbwQCTpcGAwZZSSamjekTvwEVMHi6+rmsc0poAgBkmRMd\x1b\\");
     try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
     core.clearResponse();
     try std.testing.expectEqual(@as(u32, 5), core.kitty_images.map.get(1).?.frameCount());
-    try std.testing.expectEqualSlices(u8, &([_]u8{ 0, 0, 255, 255 } ** 4), core.kitty_images.map.get(1).?.framePixels(5));
+    try std.testing.expectEqualSlices(u8, &(array_repeat.repeat([_]u8{ 0, 0, 255, 255 }, 4)), core.kitty_images.map.get(1).?.framePixels(5));
 
     // **매체 거부는 그대로다** — `t=f` 는 프레임 경로에서도 루트와 같은 답을 한다.
     try core.write("\x1b_Ga=f,f=32,s=2,v=2,t=f,i=1;AAAA\x1b\\");
@@ -11412,7 +11414,7 @@ test "kitty 애니메이션: PNG 프레임 — 치수는 PNG 가 말하고, 매�
     core.clearResponse();
     // 프레임 수는 그대로고(교체지 추가가 아니다) 2번 프레임만 노래진다.
     try std.testing.expectEqual(@as(u32, 5), core.kitty_images.map.get(1).?.frameCount());
-    try std.testing.expectEqualSlices(u8, &([_]u8{ 255, 255, 0, 255 } ** 4), core.kitty_images.map.get(1).?.framePixels(2));
+    try std.testing.expectEqualSlices(u8, &(array_repeat.repeat([_]u8{ 255, 255, 0, 255 }, 4)), core.kitty_images.map.get(1).?.framePixels(2));
 
     // **깨진 PNG 프레임은 graceful 거부** — 프레임 수가 안 늘어야 한다(반쯤 들어간 프레임이 없다).
     try core.write("\x1b_Ga=f,f=100,i=1;AAAAAAAAAAAA\x1b\\");
@@ -11427,7 +11429,7 @@ test "kitty 애니메이션: PNG 프레임이 루트보다 크거나 터무니�
     defer core.deinit();
     var b64: [64]u8 = undefined;
     var seq: [400]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4; // 2x2 RGBA 루트
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4); // 2x2 RGBA 루트
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     core.clearResponse();
@@ -11440,13 +11442,13 @@ test "kitty 애니메이션: PNG 프레임이 루트보다 크거나 터무니�
     try std.testing.expectEqual(@as(u32, 2), img.frameCount());
     // 프레임 버퍼는 **언제나 루트 크기**다 — 큰 PNG 가 버퍼를 늘리지 않는다.
     try std.testing.expectEqual(@as(usize, 16), img.framePixels(2).len);
-    try std.testing.expectEqualSlices(u8, &([_]u8{ 255, 255, 0, 255 } ** 4), img.framePixels(2));
+    try std.testing.expectEqualSlices(u8, &(array_repeat.repeat([_]u8{ 255, 255, 0, 255 }, 4)), img.framePixels(2));
 
     // ② **1x1 을 (3,3)** 에 얹는다 — 루트 밖이라 아무것도 안 바뀌어야 한다(패닉도 없어야 한다).
     try core.write("\x1b_Ga=f,f=100,i=1,c=2,x=3,y=3,X=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\");
     try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
     core.clearResponse();
-    try std.testing.expectEqualSlices(u8, &([_]u8{ 255, 255, 0, 255 } ** 4), core.kitty_images.map.get(1).?.framePixels(3));
+    try std.testing.expectEqualSlices(u8, &(array_repeat.repeat([_]u8{ 255, 255, 0, 255 }, 4)), core.kitty_images.map.get(1).?.framePixels(3));
 
     // ③ **65535×65535 라고 말하는 68 바이트 헤더** — 프레임 경로도 할당 전에 거절한다.
     try core.write("\x1b_Ga=f,f=100,i=1;iVBORw0KGgoAAAANSUhEUgAA//8AAP//CAYAAAC2BdlQAAAAC0lEQVR42mNgQAUAABAAAaoZ+IIAAAAASUVORK5CYII=\x1b\\");
@@ -11461,7 +11463,7 @@ test "kitty 애니메이션: RGB 루트에 PNG 프레임 — 알파를 떨구고
     defer core.deinit();
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 9, 9, 9 } ** 4; // 2x2 RGB 루트
+    const px = array_repeat.repeat([_]u8{ 9, 9, 9 }, 4); // 2x2 RGB 루트
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=24,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     core.clearResponse();
@@ -11473,7 +11475,7 @@ test "kitty 애니메이션: RGB 루트에 PNG 프레임 — 알파를 떨구고
     const img = core.kitty_images.map.get(1).?;
     try std.testing.expectEqual(@as(u32, 2), img.frameCount());
     // 12 바이트(2×2×3)이고 알파가 섞여 들어가지 않았다 — 4바이트 stride 로 복사하면 여기가 깨진다.
-    try std.testing.expectEqualSlices(u8, &([_]u8{ 0, 0, 255 } ** 4), img.framePixels(2));
+    try std.testing.expectEqualSlices(u8, &(array_repeat.repeat([_]u8{ 0, 0, 255 }, 4)), img.framePixels(2));
 }
 
 test "kitty 애니메이션: 합성 네 경로 — x/y 오프셋·알파 블렌드·베이스 프레임·Y 배경색 (적대적 검증)" {
@@ -11481,7 +11483,7 @@ test "kitty 애니메이션: 합성 네 경로 — x/y 오프셋·알파 블렌�
     defer core.deinit();
     var b64: [128]u8 = undefined;
     var seq: [256]u8 = undefined;
-    const red = [_]u8{ 255, 0, 0, 255 } ** 4; // 2x2 빨강 불투명
+    const red = array_repeat.repeat([_]u8{ 255, 0, 0, 255 }, 4); // 2x2 빨강 불투명
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &red)}));
 
     // **네 경로 모두 판정자가 한 번도 안 탔다**(적대적 검증에서 발견). 동작은 맞았지만 그물이
@@ -11496,7 +11498,7 @@ test "kitty 애니메이션: 합성 네 경로 — x/y 오프셋·알파 블렌�
 
     // (2) 알파 블렌드(X 미지정 = source-over): 반투명 초록을 프레임 2 위에 얹는다.
     // (0,0)은 빨강(255,0,0,255) 위에 (0,255,0,128) → R=255*127/255=127, G=255*128/255=128, A=255.
-    const halfgreen = [_]u8{ 0, 255, 0, 128 } ** 4;
+    const halfgreen = array_repeat.repeat([_]u8{ 0, 255, 0, 128 }, 4);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,c=2,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &halfgreen)}));
     const f3 = core.kitty_images.map.get(1).?.framePixels(3);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 127, 128, 0, 255 }, f3[0..4]);
@@ -11518,7 +11520,7 @@ test "kitty 애니메이션: z<0 프레임은 재생에서 건너뛴다 (적대�
     defer core.deinit();
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     var k: usize = 0;
@@ -11553,7 +11555,7 @@ test "kitty 애니메이션: 밀린 시간은 한 프레임분만 남는다 — 
     defer core.deinit();
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     var k: usize = 0;
@@ -11599,7 +11601,7 @@ test "kitty 애니메이션: 뷰포트 밖으로 스크롤되면 멈추고 돌�
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 9, 9, 9, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 9, 9, 9, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
@@ -11648,7 +11650,7 @@ test "kitty 애니메이션: cadence 20ms 위에서 gap 을 정확히 지킨다 
         core.setCellMetrics(10, 20);
         var b64: [64]u8 = undefined;
         var seq: [200]u8 = undefined;
-        const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+        const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
         const enc = std.base64.standard.Encoder.encode(&b64, &px);
         try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
         var k: usize = 0;
@@ -11675,7 +11677,7 @@ test "kitty 애니메이션: s=1 로 멈춘 동안에는 은행도 쌓이지 않
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     var k: usize = 0;
@@ -11705,7 +11707,7 @@ test "kitty 애니메이션: s=1 로 멈춘 동안에는 은행도 쌓이지 않
 fn placeAnimatedImageAtCursor(core: *TerminalCore) !void {
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 4, 4, 4, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 4, 4, 4, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
@@ -11775,7 +11777,7 @@ fn currentScreenPlacementCount(core: *const TerminalCore) usize {
 
 /// 2x2 이미지 `id` 를 전송만 해 둔다.
 fn transmitTinyImage(core: *TerminalCore, id: u32) !void {
-    const raw = [_]u8{0xCD} ** 16;
+    const raw = @as([16]u8, @splat(0xCD));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [128]u8 = undefined;
@@ -11871,7 +11873,7 @@ test "kitty placement: primary 이미지는 alt 화면에 안 보이고 돌아�
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 5, 6, 7, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 5, 6, 7, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write("\x1b_Ga=p,i=1,c=2,r=1,q=2\x1b\\");
@@ -11895,7 +11897,7 @@ test "kitty placement: alt 에서 만든 배치는 alt 를 떠날 때 사라지�
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 5, 6, 7, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 5, 6, 7, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
 
@@ -11922,7 +11924,7 @@ test "kitty placement: 같은 id 라도 화면이 다르면 서로 덮지 않는
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 5, 6, 7, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 5, 6, 7, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write("\x1b[3;5H");
@@ -11949,7 +11951,7 @@ test "kitty placement: alt 화면 동안에는 primary 애니메이션이 돌지
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 5, 6, 7, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 5, 6, 7, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
@@ -11983,7 +11985,7 @@ test "kitty 애니메이션: placeholder 셀이 없는 화면에서는 U=1 애�
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 3, 3, 3, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 3, 3, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
@@ -12094,7 +12096,7 @@ test "kitty placement: alt 의 U=1 등록이 primary 격자를 덮지 않는다 
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
 
@@ -12132,7 +12134,7 @@ test "kitty 애니메이션: 다른 화면에 등록된 U=1 은 전진하지 않
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
@@ -12164,7 +12166,7 @@ test "kitty 애니메이션: 다른 화면에 등록된 U=1 은 전진하지 않
 fn seedDeleteFixture(core: *TerminalCore) !void {
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 5, 6, 7, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 5, 6, 7, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     // 이미지 1·2·3 을 만들고 각각 (행,열) = (1,1) (1,5) (3,1) 에 1x1 로 건다.
     for ([_]struct { id: u32, row: u16, col: u16, z: i32 }{
@@ -12231,7 +12233,7 @@ test "kitty delete: d=r 은 id 범위의 이미지를 지운다 (화면에 없�
     // 화면에 안 걸린 이미지도 하나 만든다 — `d=r` 의 대상은 placement 가 아니라 **이미지**다.
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 9, 9, 9, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 9, 9, 9, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=9,q=2;{s}\x1b\\", .{enc}));
     // **범위 위쪽에도 placement 를 둔다.** 안 두면 「상한을 안 본다」는 결함이 이 판정자를 그냥
@@ -12278,7 +12280,7 @@ test "kitty delete: 대문자여도 다른 자리가 쓰는 이미지는 free �
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 4, 4, 4, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 4, 4, 4, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write("\x1b[1;1H");
@@ -12305,7 +12307,7 @@ test "kitty delete: d=C 도 다른 자리가 쓰는 이미지는 free 하지 않
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 4, 4, 4, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 4, 4, 4, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write("\x1b[1;1H");
@@ -12326,7 +12328,7 @@ test "kitty delete: U=1 격자가 남아 있으면 대문자여도 이미지를 
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 4, 4, 4, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 4, 4, 4, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write("\x1b_Ga=p,i=1,p=9,U=1,c=2,r=2,q=2\x1b\\"); // 가상 격자
@@ -12348,7 +12350,7 @@ test "kitty delete: d=Z 는 그 z-index 의 배치만 지운다 (적대적 검�
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 2, 2, 2, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 2, 2, 2, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write("\x1b[1;1H");
@@ -12372,7 +12374,7 @@ test "kitty delete: d=Z 는 그 z-index 의 배치만 지운다 (적대적 검�
 test "kitty delete: d=I/d=N 에 p= 를 주면 그 배치 하나만 지운다 (적대적 검증)" {
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 2, 2, 2, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 2, 2, 2, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     for ([_]bool{ false, true }) |by_number| {
         var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
@@ -12419,7 +12421,7 @@ test "kitty delete: d=a 는 화면에 보이는 배치만 지운다 (스크롤�
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 6, 6, 6, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 6, 6, 6, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
 
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
@@ -12450,7 +12452,7 @@ test "kitty delete: d=a 는 스크롤백에 걸친 큰 이미지도 지운다 (�
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 6, 6, 6, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 6, 6, 6, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write("\x1b[1;1H");
@@ -12475,7 +12477,7 @@ test "kitty delete: d=a/d=A 는 U=1 격자를 건드리지 않는다 (kitty·Gho
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 6, 6, 6, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 6, 6, 6, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write("\x1b_Ga=p,i=1,p=9,U=1,c=2,r=2,q=2\x1b\\"); // 가상 격자
@@ -12495,7 +12497,7 @@ test "kitty delete: d=A 는 보이는 것만 지우고 참조 없는 이미지�
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 6, 6, 6, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 6, 6, 6, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     // 이미지 1: 스크롤백에 한 자리 + 화면에 한 자리 → 화면 것만 지워지고 데이터는 남아야 한다.
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
@@ -12522,7 +12524,7 @@ test "kitty delete: d=A 는 보이는 것만 지우고 참조 없는 이미지�
 test "kitty delete: alt 에서 보낸 자리 기반 delete 는 primary 배치를 건드리지 않는다 (적대적 검증)" {
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 8, 8, 8, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 8, 8, 8, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     for ([_][]const u8{
         "a=d,d=a,q=2",
@@ -12554,7 +12556,7 @@ test "kitty delete: alt 에서 보낸 자리 기반 delete 는 primary 배치를
 test "kitty delete: 같은 화면에서 보낸 자리 기반 delete 는 정상 동작한다 (양성 대조)" {
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 8, 8, 8, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 8, 8, 8, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     for ([_][]const u8{
         "a=d,d=a,q=2",
@@ -12583,7 +12585,7 @@ test "kitty delete: alt 에서 건 배치는 alt 의 delete 가 지운다 (적�
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 8, 8, 8, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 8, 8, 8, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write("\x1b[1;1H");
@@ -12606,7 +12608,7 @@ test "kitty delete: d=f 는 프레임만 놓아주고 이미지는 남긴다" {
     core.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 3, 3, 3, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 3, 3, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
@@ -12644,7 +12646,7 @@ test "kitty 애니메이션: 루트를 다시 전송하면 프레임도 함께 �
     defer core.deinit();
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
@@ -12696,9 +12698,9 @@ test "kitty APC 무작위 fuzz: 어떤 조합에도 죽지 않고 ground 로 돌
     // 뒤에도 생성기는 옛 값만 뽑고 있었다). 대문자도 넣어 조건부 free 경로까지 밟게 한다.
     const values = [_][]const u8{ "0", "1", "2", "3", "24", "32", "100", "4294967295", "2147483647", "-2147483648", "-1", "999999", "d", "f", "z", "a", "p", "q", "r", "x", "y", "c", "n", "i", "P", "Q", "R", "X", "Y", "Z", "C", "N", "I", "A", "F", "", "x1y", "00000000000000000000" };
     // 더 깊은 곳을 밟게 payload 를 넓힌다 — 큰 프레임(4x4=64B), RGB(3B/px), 잘린 base64.
-    const px64 = "A" ** 84 ++ "=="; // 64B 근처 — 4x4 RGBA
+    const px64 = array_repeat.repeat("A", 84) ++ "=="; // 64B 근처 — 4x4 RGBA
     const px12 = "AAAAAAAAAAAAAAAA"; // 12B — 2x2 RGB(f=24)
-    const payloads = [_][]const u8{ "", "AAAA", px16, px64, px12, "!!!!", "QUJDRA==", "A" ** 400 };
+    const payloads = [_][]const u8{ "", "AAAA", px16, px64, px12, "!!!!", "QUJDRA==", array_repeat.repeat("A", 400) };
 
     var seq: std.ArrayListUnmanaged(u8) = .empty;
     defer seq.deinit(std.testing.allocator);
@@ -12812,7 +12814,7 @@ test "kitty 자원 상한 여섯: placement·virtual·프레임 수와 compose �
     defer core.deinit();
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
 
@@ -12844,7 +12846,7 @@ test "kitty 애니메이션: 프레임 수 상한과 compose 검증 셋 (적대�
     core.kitty_images.limit = 64 * 1024 * 1024; // 바이트 한도가 아니라 **프레임 수** 상한을 보려고 넉넉히
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
 
@@ -12968,7 +12970,7 @@ test "kitty 애니메이션: 안 움직인 이미지의 generation 은 안 올�
     defer core.deinit();
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
 
     // 두 애니메이션을 만든다. 하나는 gap 이 짧아 곧 넘어가고(A), 하나는 아주 길어 안 넘어간다(B).
@@ -13041,7 +13043,7 @@ test "atStreamBoundary: 출력이 시퀀스·글자 중간이면 끼워 넣을 �
 
 /// 2×2 RGBA 를 base64 로. `compress` 면 zlib 한 겹.
 fn kittyDeferTestPayload(alloc: std.mem.Allocator, compress: bool) ![]u8 {
-    const rgba = [_]u8{ 255, 0, 0, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 255, 0, 0, 255 }, 4);
     var zbuf: [256]u8 = undefined;
     var bytes: []const u8 = &rgba;
     if (compress) {
@@ -13217,7 +13219,7 @@ test "kitty 매체 전송: a=f 프레임도 매체로 온다 — 완료가 루�
     defer core.deinit();
     // 루트(2x1 RGBA)는 인라인으로.
     var b64: [64]u8 = undefined;
-    const rgba = [_]u8{ 255, 0, 0, 255 } ** 2;
+    const rgba = array_repeat.repeat([_]u8{ 255, 0, 0, 255 }, 2);
     const enc = std.base64.standard.Encoder.encode(&b64, &rgba);
     var seq: [200]u8 = undefined;
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=1,i=5,q=2;{s}\x1b\\", .{enc}));

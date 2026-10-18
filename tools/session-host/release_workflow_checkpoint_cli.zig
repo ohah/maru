@@ -58,7 +58,7 @@ pub fn execute(
         .commit => |value| value.target,
     };
     var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const root_path = std.fmt.bufPrintZ(&path_storage, "{s}", .{selected.root_path}) catch
+    const root_path = std.fmt.bufPrintSentinel(&path_storage, "{s}", .{selected.root_path}, 0) catch
         return error.InvalidPath;
     switch (command) {
         .admit => try owner.admitActionProcess(allocator, root_path, selected.root_identity, workflow, selected.invocation),

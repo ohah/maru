@@ -61,7 +61,7 @@ const Socket = struct {
     fn read(self: Socket, buf: []u8) !usize {
         const n = c.read(self.fd, buf.ptr, buf.len);
         // `EAGAIN` 은 위 `SO_RCVTIMEO` 가 만든 것이다 — 상대가 우리를 기다리며 멈춘 자리다.
-        if (n < 0) return if (c._errno().* == @intFromEnum(c.E.AGAIN)) error.Stalled else error.ReadFailed;
+        if (n < 0) return if (c._errno().* == @backingInt(c.E.AGAIN)) error.Stalled else error.ReadFailed;
         if (n == 0) return error.Closed;
         return @intCast(n);
     }
@@ -161,7 +161,7 @@ var disconnect_len: usize = 0;
 fn printDisconnect() void {
     if (disconnect_reason) |r| {
         std.debug.print("[ssh-client-smoke]   서버가 끊었다: reason={d} {s}\n", .{
-            @intFromEnum(r), disconnect_seen[0..disconnect_len],
+            @backingInt(r), disconnect_seen[0..disconnect_len],
         });
     }
 }
@@ -271,9 +271,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const r = disconnect_reason orelse return fail("끊겼는데 이유가 없다");
             // 실측(OpenSSH 10.2): `MaxAuthTries 0` 이면 사유 2(`protocol error`)에
             // "Too many authentication failures" 가 실려 온다.
-            if (@intFromEnum(r) != 2) return fail("끊긴 사유가 2 가 아니다");
+            if (@backingInt(r) != 2) return fail("끊긴 사유가 2 가 아니다");
             if (disconnect_len == 0) return fail("끊긴 설명이 비었다");
-            say("{s}: 서버가 끊었다 — 사유 {d}, 설명 {d}B", .{ mode, @intFromEnum(r), disconnect_len });
+            say("{s}: 서버가 끊었다 — 사유 {d}, 설명 {d}B", .{ mode, @backingInt(r), disconnect_len });
             say("OK", .{});
             return;
         }

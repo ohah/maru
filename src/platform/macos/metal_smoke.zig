@@ -159,7 +159,7 @@ pub fn main(init: std.process.Init) !void {
         null,
         null,
         null,
-        @intFromEnum(NativeKeyDownMode.none),
+        @backingInt(NativeKeyDownMode.none),
     );
 
     const smoke_status = deriveSmokeStatus(native);
@@ -550,7 +550,7 @@ fn emptyTestDrawGlyphRecord() coretext_shaper.NativeDrawGlyphRecord {
         .drawable = 0,
         .fallback = 0,
         .color_glyph_kind = 0,
-        .font_name = [_]u8{0} ** coretext_probe.font_name_capacity,
+        .font_name = @as([coretext_probe.font_name_capacity]u8, @splat(0)),
     };
 }
 
@@ -907,7 +907,7 @@ test "ObjC 미러(MaruMetalSmokeCell)가 Zig 필드를 «하나도 빠뜨리지 
 
     // `NativeMetalCell` 의 **모든 필드**가 미러에 있어야 한다 — 이름으로 센다(순서는 아래 offset
     // 판정자가 이미 못박는다).
-    inline for (@typeInfo(NativeMetalCell).@"struct".fields) |f| {
+    inline for (@import("type_info_fields").structFields(NativeMetalCell)) |f| {
         const want = f.name;
         if (std.mem.indexOf(u8, body, want) == null) {
             std.debug.print(
@@ -939,9 +939,9 @@ test "NativeKeyDownSmokeResult ABI keeps Metal terminal key payload visible to Z
     // 이 구조체 크기가 흔들리면 modifier나 codepoint를 잘못 읽어 PTY 입력 검증이 오염된다.
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(NativeKeyDownSmokeResult));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(NativeKeyDownSmokeResult));
-    try std.testing.expectEqual(@as(u32, 0), @intFromEnum(NativeKeyDownMode.none));
-    try std.testing.expectEqual(@as(u32, 1), @intFromEnum(NativeKeyDownMode.synthetic));
-    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(NativeKeyDownMode.manual));
+    try std.testing.expectEqual(@as(u32, 0), @backingInt(NativeKeyDownMode.none));
+    try std.testing.expectEqual(@as(u32, 1), @backingInt(NativeKeyDownMode.synthetic));
+    try std.testing.expectEqual(@as(u32, 2), @backingInt(NativeKeyDownMode.manual));
 }
 
 test "Metal smoke terminal grid requires matched atlas texel samples" {

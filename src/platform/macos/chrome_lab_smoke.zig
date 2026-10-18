@@ -1256,7 +1256,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
 fn allocPathZ(allocator: std.mem.Allocator, comptime format: []const u8, args: anytype) ![:0]u8 {
     const path = try std.fmt.allocPrint(allocator, format, args);
     defer allocator.free(path);
-    return allocator.dupeZ(u8, path);
+    return allocator.dupeSentinel(u8, path, 0);
 }
 
 fn labTokens() chrome.Tokens {

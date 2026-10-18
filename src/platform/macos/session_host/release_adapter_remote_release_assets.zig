@@ -69,7 +69,7 @@ pub const Assets = struct {
         for (&result.assets, 0..) |*asset, index| {
             const file = &self.files[index];
             if (!file.present) return null;
-            asset.* = .{ .role = @enumFromInt(index), .id = file.id, .name = file.name[0..file.name_len], .path = file.path[0..file.path_len :0], .device = file.device, .inode = file.inode, .size = file.size, .sha256 = &file.sha256 };
+            asset.* = .{ .role = @fromBackingInt(@intCast(index)), .id = file.id, .name = file.name[0..file.name_len], .path = file.path[0..file.path_len :0], .device = file.device, .inode = file.inode, .size = file.size, .sha256 = &file.sha256 };
         }
         return result;
     }
@@ -94,7 +94,7 @@ pub const Assets = struct {
 
     pub fn openAssetDescriptor(self: *@This(), role: Role) !c.fd_t {
         _ = try self.revalidate();
-        const file = &self.files[@intFromEnum(role)];
+        const file = &self.files[@backingInt(role)];
         const fd = c.openat(self.dir_fd, file.name[0..].ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
         if (fd < 0) return error.FileChanged;
         errdefer _ = c.close(fd);
@@ -249,14 +249,14 @@ fn prepare(result: *Assets, path: [:0]const u8, release_fence: *const fence_mod.
     const leaf = path[slash + 1 ..];
     if (!validComponent(leaf)) return error.InvalidWorkspace;
     var parent_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const parent = if (slash == 0) "/" else std.fmt.bufPrintZ(&parent_storage, "{s}", .{path[0..slash]}) catch return error.InvalidWorkspace;
+    const parent = if (slash == 0) "/" else std.fmt.bufPrintSentinel(&parent_storage, "{s}", .{path[0..slash]}, 0) catch return error.InvalidWorkspace;
     result.parent_fd = safe_open.openAbsoluteNoFollow(parent, true) catch return error.InvalidWorkspace;
     result.owner = result;
     result.fence_owner = release_fence;
     result.deadline_owner = deadline;
     result.pinned_owner = pinned;
-    _ = std.fmt.bufPrintZ(&result.dir_name, "{s}", .{leaf}) catch return fail(result, error.InvalidWorkspace);
-    const work_path = std.fmt.bufPrintZ(&result.work_path, "{s}", .{path}) catch return fail(result, error.InvalidWorkspace);
+    _ = std.fmt.bufPrintSentinel(&result.dir_name, "{s}", .{leaf}, 0) catch return fail(result, error.InvalidWorkspace);
+    const work_path = std.fmt.bufPrintSentinel(&result.work_path, "{s}", .{path}, 0) catch return fail(result, error.InvalidWorkspace);
     result.work_path_len = work_path.len;
     result.seal = ownerSeal(result);
     if (c.mkdirat(result.parent_fd, result.dir_name[0..].ptr, 0o700) != 0) return fail(result, if (posix.errno(-1) == .EXIST) error.WorkspaceExists else error.CreateFailed);
@@ -275,7 +275,7 @@ fn createFile(result: *Assets, index: usize, expected: metadata.Asset) !void {
     file.id = expected.id;
     file.name_len = expected.name.len;
     @memcpy(file.name[0..file.name_len], expected.name);
-    const path = std.fmt.bufPrintZ(&file.path, "{s}/{s}", .{ result.work_path[0..result.work_path_len], expected.name }) catch return error.InvalidAsset;
+    const path = std.fmt.bufPrintSentinel(&file.path, "{s}/{s}", .{ result.work_path[0..result.work_path_len], expected.name }, 0) catch return error.InvalidAsset;
     file.path_len = path.len;
     file.size = expected.size;
     @memcpy(&file.sha256, expected.sha256);
@@ -460,10 +460,10 @@ const SystemOperations = struct {
         var argv: [max_args + 1:null]?[*:0]const u8 = @splat(null);
         var storage: [max_args][128:0]u8 = undefined;
         argv[0] = executable.ptr;
-        for (args, 0..) |arg, index| argv[index + 1] = (std.fmt.bufPrintZ(&storage[index], "{s}", .{arg}) catch return error.InvalidAsset).ptr;
+        for (args, 0..) |arg, index| argv[index + 1] = (std.fmt.bufPrintSentinel(&storage[index], "{s}", .{arg}, 0) catch return error.InvalidAsset).ptr;
         var token_storage: ["GH_TOKEN=".len + max_token_bytes + 1]u8 = undefined;
         defer @memset(&token_storage, 0);
-        const token_entry = std.fmt.bufPrintZ(&token_storage, "GH_TOKEN={s}", .{token}) catch return error.InvalidToken;
+        const token_entry = std.fmt.bufPrintSentinel(&token_storage, "GH_TOKEN={s}", .{token}, 0) catch return error.InvalidToken;
         const environment: [2:null]?[*:0]const u8 = .{ token_entry.ptr, "GH_PROMPT_DISABLED=1" };
         return process.runWriteEnvironmentStdout(self.io, executable, &argv, &environment, fd, expected_size, budget);
     }

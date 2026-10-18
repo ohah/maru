@@ -67,7 +67,7 @@ pub const View = enum {
 
     /// workspace 텍스트 → 뷰. 모르는 이름은 null이고 호출자가 기본값으로 clamp한다.
     pub fn parse(name: []const u8) ?View {
-        inline for (@typeInfo(View).@"enum".fields) |field| {
+        inline for (@import("type_info_fields").enumFields(View)) |field| {
             if (std.mem.eql(u8, name, field.name)) return @field(View, field.name);
         }
         return null;
@@ -503,8 +503,8 @@ test "entry id allocator: monotonic nonzero and exhaustion fails closed" {
 }
 
 test "dock mode policy keeps HTML read-only and the Markdown source editor dirty-capable" {
-    try std.testing.expectEqual(@as(u32, 0), @intFromEnum(Mode.read));
-    try std.testing.expectEqual(@as(u32, 1), @intFromEnum(Mode.source_edit));
+    try std.testing.expectEqual(@as(u32, 0), @backingInt(Mode.read));
+    try std.testing.expectEqual(@as(u32, 1), @backingInt(Mode.source_edit));
     try std.testing.expect(Mode.read.allowedFor(.markdown));
     try std.testing.expect(Mode.source_edit.allowedFor(.markdown));
     try std.testing.expect(Mode.read.allowedFor(.html));
@@ -512,7 +512,7 @@ test "dock mode policy keeps HTML read-only and the Markdown source editor dirty
     try std.testing.expect(!Mode.read.isEditable());
     try std.testing.expect(Mode.source_edit.isEditable());
     try std.testing.expect(Mode.rich.isEditable()); // 리치도 dirty/save 수명을 소비한다.
-    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(Mode.rich));
+    try std.testing.expectEqual(@as(u32, 2), @backingInt(Mode.rich));
     inline for (std.enums.values(Mode)) |mode| {
         try std.testing.expectEqual(mode, Mode.parseWorkspaceName(mode.workspaceName()).?);
     }
@@ -534,12 +534,12 @@ test "슬롯 순서: forSlot 과 slot 이 서로의 역이다" {
     for (std.enums.values(View)) |v| {
         try std.testing.expectEqual(v, View.forSlot(v.slot()).?);
     }
-    var seen = [_]bool{false} ** @typeInfo(View).@"enum".fields.len;
+    var seen = @as([@import("type_info_fields").enumFields(View).len]bool, @splat(false));
     var i: usize = 0;
     while (i < seen.len) : (i += 1) {
         const v = View.forSlot(i) orelse return error.TestUnexpectedResult;
-        try std.testing.expect(!seen[@intFromEnum(v)]); // 두 칸이 같은 뷰를 가리키지 않는다
-        seen[@intFromEnum(v)] = true;
+        try std.testing.expect(!seen[@backingInt(v)]); // 두 칸이 같은 뷰를 가리키지 않는다
+        seen[@backingInt(v)] = true;
     }
     // 칸 수를 넘으면 없다.
     try std.testing.expectEqual(@as(?View, null), View.forSlot(seen.len));

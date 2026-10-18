@@ -13,6 +13,8 @@
 //!
 //! std 만 쓰는 최상위 잎이다(layering §3.4) — 플랫폼·제품 모듈을 import 하지 않는다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 
 pub const Error = std.Io.File.ReadPositionalError || std.mem.Allocator.Error || error{StreamTooLong};
@@ -88,7 +90,7 @@ test "file_read: 다른 스레드가 덧붙이고 비우는 중에도 죽지 않
         stop: std.atomic.Value(bool) = .init(false),
         writes: std.atomic.Value(usize) = .init(0),
         fn run(self: *@This(), f: std.Io.File) void {
-            const chunk = "x" ** 4096;
+            const chunk = array_repeat.repeat("x", 4096);
             var end: u64 = 0;
             while (!self.stop.load(.acquire)) {
                 _ = f.writePositional(testing.io, &.{chunk}, end) catch return;

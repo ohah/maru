@@ -52,7 +52,7 @@ pub var diag_lock_wait_max_site: usize = 0;
 /// «tick 당 N회」가 정말 tick 의 것인지 가리려고.
 pub const DiagLockSite = struct { site: usize = 0, count: u32 = 0, hold_ns: i128 = 0, hold_max_ns: i128 = 0, in_tick: bool = true };
 pub const diag_lock_sites_cap = 64;
-pub var diag_lock_sites: [diag_lock_sites_cap]DiagLockSite = [_]DiagLockSite{.{}} ** diag_lock_sites_cap;
+pub var diag_lock_sites: [diag_lock_sites_cap]DiagLockSite = @as([diag_lock_sites_cap]DiagLockSite, @splat(.{}));
 pub var diag_lock_sites_overflow: u32 = 0;
 pub var diag_in_tick: bool = false;
 var diag_cur_site: usize = 0;
@@ -60,7 +60,7 @@ var diag_cur_in_tick: bool = false;
 var diag_cur_t_locked: i128 = 0;
 
 pub fn diagLockSitesReset() void {
-    diag_lock_sites = [_]DiagLockSite{.{}} ** diag_lock_sites_cap;
+    diag_lock_sites = @as([diag_lock_sites_cap]DiagLockSite, @splat(.{}));
     diag_lock_sites_overflow = 0;
 }
 

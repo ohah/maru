@@ -148,7 +148,7 @@ fn feedAll(decoder: *StreamingDecoder, bytes: []const u8, count: *usize) Error!v
 }
 
 fn maxCreateFrame(buf: []u8, url_byte: u8) ![]const u8 {
-    const url = [_]u8{url_byte} ** wire.max_url_bytes;
+    const url = @as([wire.max_url_bytes]u8, @splat(url_byte));
     const len = try encode(.{ .create_browser = .{ .browser = 1, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false, .url = &url } }, buf);
     return buf[0..len];
 }
@@ -215,7 +215,7 @@ test "a declared length one past the largest frame is refused before any body ar
 test "end of stream inside the length prefix is an incomplete frame" {
     for (1..prefix_len) |cut| {
         var decoder = StreamingDecoder.init(.to_maru);
-        const zeros = [_]u8{0} ** prefix_len;
+        const zeros = @as([prefix_len]u8, @splat(0));
         _ = try decoder.feed(zeros[0..cut]);
         try std.testing.expect((try decoder.next()) == null);
         try std.testing.expectError(error.IncompleteFrame, decoder.finish());

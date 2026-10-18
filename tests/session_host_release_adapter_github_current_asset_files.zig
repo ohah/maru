@@ -44,7 +44,7 @@ fn upgradeLeaf(allocator: std.mem.Allocator, count: u64, frozen_sha: []const u8)
 fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root[0..len], leaf });
+    return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ root[0..len], leaf }, 0);
 }
 
 const Fixture = struct {
@@ -256,7 +256,7 @@ test "cleanup failure preserves exact retry authority" {
     try composition.compose(&fixture.current, &fixture.product, &fixture.evidence, fixture.paths(), &result);
     const dmg = result.value().?.asset(.universal_dmg).?;
     var moved_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const moved = try std.fmt.bufPrintZ(&moved_storage, "{s}.moved", .{dmg.path});
+    const moved = try std.fmt.bufPrintSentinel(&moved_storage, "{s}.moved", .{dmg.path}, 0);
     try std.Io.Dir.renameAbsolute(dmg.path, moved, std.testing.io);
     try std.testing.expectError(error.CleanupFailed, result.deinit());
     try std.testing.expect(result.value() != null);

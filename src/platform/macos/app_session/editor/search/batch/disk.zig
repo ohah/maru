@@ -59,7 +59,7 @@ const Fixture = struct {
         errdefer testing.allocator.free(root);
         var native: std.posix.Stat = undefined;
         if (std.c.fstat(tmp.dir.handle, &native) != 0) return error.StatFailed;
-        const device: std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(native.dev))) = @bitCast(native.dev);
+        const device: @Int(.unsigned, @bitSizeOf(@TypeOf(native.dev))) = @bitCast(native.dev);
         return .{ .tmp = tmp, .root = root, .identity = .{ .device = device, .inode = native.ino, .kind = 2 } };
     }
     fn deinit(self: *Fixture) void {

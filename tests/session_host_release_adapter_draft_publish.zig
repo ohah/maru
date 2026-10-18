@@ -6,8 +6,8 @@ const names = [_][]const u8{ "Maru-1.2.3-universal.dmg", "maru-session-host-1.2.
 
 fn expectedSnapshot() publication.Snapshot {
     var assets: [4]publication.Asset = undefined;
-    for (&assets, 0..) |*asset, index| asset.* = .{ .id = 1000 + index, .name = names[index], .size = 100 + index, .sha256 = [_]u8{'a' + @as(u8, @intCast(index))} ** 64 };
-    return .{ .release_id = 88, .tag = "v1.2.3", .source_commit = "0123456789abcdef0123456789abcdef01234567", .cli_sha256 = [_]u8{'f'} ** 64, .assets = assets };
+    for (&assets, 0..) |*asset, index| asset.* = .{ .id = 1000 + index, .name = names[index], .size = 100 + index, .sha256 = @as([64]u8, @splat('a' + @as(u8, @intCast(index)))) };
+    return .{ .release_id = 88, .tag = "v1.2.3", .source_commit = "0123456789abcdef0123456789abcdef01234567", .cli_sha256 = @as([64]u8, @splat('f')), .assets = assets };
 }
 
 const Authority = struct {
@@ -194,5 +194,5 @@ test "production mutation sends exact argv and clean token environment" {
 fn temporaryPath(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root[0..root_len], leaf });
+    return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ root[0..root_len], leaf }, 0);
 }

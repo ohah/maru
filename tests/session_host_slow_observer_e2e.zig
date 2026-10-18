@@ -5,11 +5,7 @@
 const std = @import("std");
 const session_host = @import("session_host");
 const probe_wire = @import("slow_observer_probe");
-const mac = @cImport({
-    @cInclude("libproc.h");
-    @cInclude("sys/resource.h");
-    @cInclude("sys/proc_info.h");
-});
+const mac = @import("darwin_perf_c");
 
 const c = std.c;
 const posix = std.posix;
@@ -326,12 +322,18 @@ const IdleSoakArtifact = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
     var stage: []const u8 = "arguments";
-    errdefer |err| std.debug.print(
-        "session-host slow-observer stage '{s}' failed: {s}\n",
-        .{ stage, @errorName(err) },
-    );
+    mainInner(init, &stage) catch |err| {
+        std.debug.print(
+            "session-host slow-observer stage '{s}' failed: {s}\n",
+            .{ stage, @errorName(err) },
+        );
+        return err;
+    };
+}
+
+fn mainInner(init: std.process.Init, stage_ptr: *[]const u8) !void {
+    const allocator = init.gpa;
     var args = try init.minimal.args.iterateAllocator(init.gpa);
     defer args.deinit();
     _ = args.next();
@@ -353,19 +355,20 @@ pub fn main(init: std.process.Init) !void {
     arc4random_buf(&nonce_bytes, nonce_bytes.len);
     const nonce_hex = std.fmt.bytesToHex(nonce_bytes, .lower);
     var dir_buf: [160]u8 = undefined;
-    const session_dir = try std.fmt.bufPrintZ(
+    const session_dir = try std.fmt.bufPrintSentinel(
         &dir_buf,
         "/tmp/maru-slow-observer-{d}-{s}",
         .{ c.getpid(), nonce_hex[0..12] },
+        0,
     );
     if (c.mkdir(session_dir.ptr, 0o700) != 0) return error.SessionDirectoryCreateFailed;
     var socket_buf: [220]u8 = undefined;
-    const socket_path = try std.fmt.bufPrintZ(&socket_buf, "{s}/host.sock", .{session_dir});
+    const socket_path = try std.fmt.bufPrintSentinel(&socket_buf, "{s}/host.sock", .{session_dir}, 0);
     var directory_exists = true;
     defer {
         if (directory_exists) cleanupSessionDirectory(session_dir, socket_path);
     }
-    const host_exe = try allocator.dupeZ(u8, host_exe_raw);
+    const host_exe = try allocator.dupeSentinel(u8, host_exe_raw, 0);
     defer allocator.free(host_exe);
 
     var command_pair: [2]c.fd_t = undefined;
@@ -414,7 +417,7 @@ pub fn main(init: std.process.Init) !void {
         if (!host_reaped) stopAndReap(host_pid);
     }
 
-    stage = "controller connect";
+    stage_ptr.* = "controller connect";
     var controller = try connectRetry(allocator, socket_path, deadline_ns, init.io);
     var controller_open = true;
     defer {
@@ -425,7 +428,7 @@ pub fn main(init: std.process.Init) !void {
     const host_identity = try processIdentity(host_pid, true);
     var sequence: u64 = 1;
 
-    stage = "runtime spawn";
+    stage_ptr.* = "runtime spawn";
     const spawn_response = try controller.call("runtime.spawn",
         \\{"argv":["/bin/sh","-c","if [ -e /dev/fd/3 ] || [ -e /dev/fd/4 ]; then exit 97; fi; /bin/stty -echo -onlcr -icrnl; printf 'MARU_PROBE_FDS_CLOSED\\nMARU_SLOW_OBSERVER_READY\\n'; exec /bin/cat"],"cols":80,"rows":24}
     );
@@ -446,7 +449,7 @@ pub fn main(init: std.process.Init) !void {
     if (pty_identity.ppid != host_pid or pty_identity.uid != host_identity.uid)
         return error.PtyChildIdentityMismatch;
 
-    stage = "controller attach";
+    stage_ptr.* = "controller attach";
     const controller_fd = controller.fd;
     const controller_stream = try attachRuntime(
         allocator,
@@ -459,14 +462,14 @@ pub fn main(init: std.process.Init) !void {
         controller.screen_codec_version,
     );
     defer controller_screen.deinit();
-    stage = "controller snapshot";
+    stage_ptr.* = "controller snapshot";
     const controller_initial = try controller.readSnapshot(controller_stream);
     defer allocator.free(controller_initial);
     try controller_screen.applySnapshot(controller_initial, .unnegotiated);
     var controller_resync_needed = false;
     var controller_drained: u64 = controller_initial.len;
 
-    stage = "slow connect";
+    stage_ptr.* = "slow connect";
     var slow = try connectRetry(allocator, socket_path, deadline_ns, init.io);
     var slow_open = true;
     defer {
@@ -482,33 +485,33 @@ pub fn main(init: std.process.Init) !void {
     ) != 0) return error.SocketBufferConfigurationFailed;
     const effective_slow_receive = try socketBuffer(slow.fd, posix.SO.RCVBUF);
     const slow_fd = slow.fd;
-    stage = "slow attach";
+    stage_ptr.* = "slow attach";
     const slow_stream = try attachRuntime(allocator, &slow, &runtime_id, "observer");
-    stage = "slow snapshot";
+    stage_ptr.* = "slow snapshot";
     const slow_initial = try slow.readSnapshot(slow_stream);
     allocator.free(slow_initial);
 
-    stage = "healthy connect";
+    stage_ptr.* = "healthy connect";
     var healthy = try connectRetry(allocator, socket_path, deadline_ns, init.io);
     var healthy_open = true;
     const healthy_fd = healthy.fd;
     defer {
         if (healthy_open) healthy.deinit();
     }
-    stage = "healthy attach";
+    stage_ptr.* = "healthy attach";
     const healthy_stream = try attachRuntime(allocator, &healthy, &runtime_id, "observer");
     var healthy_screen = session_host.screen_assembler.ScreenAssembler.initForCodec(
         allocator,
         healthy.screen_codec_version,
     );
     defer healthy_screen.deinit();
-    stage = "healthy snapshot";
+    stage_ptr.* = "healthy snapshot";
     const healthy_initial = try healthy.readSnapshot(healthy_stream);
     defer allocator.free(healthy_initial);
     try healthy_screen.applySnapshot(healthy_initial, .unnegotiated);
     var healthy_resync_needed = false;
     var healthy_drained: u64 = healthy_initial.len;
-    stage = "ready marker";
+    stage_ptr.* = "ready marker";
     try waitForMarker(
         &healthy,
         healthy_stream,
@@ -525,7 +528,7 @@ pub fn main(init: std.process.Init) !void {
     );
     if (!pty_probe_fds_closed) return error.ProbeFdLeakEvidenceMissing;
 
-    stage = "output wake source settle";
+    stage_ptr.* = "output wake source settle";
     while (try pumpHealthy(
         &controller,
         controller_stream,
@@ -597,7 +600,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (!settled) return error.ObservationSourceDidNotSettle;
 
-    stage = "output wake idle observation";
+    stage_ptr.* = "output wake idle observation";
     var idle_soak_windows: [idle_soak_window_count]IdleSoakWindow = undefined;
     var idle_soak_windows_written: usize = 0;
     const idle_soak_baseline_fd_count = try countProcessFds(host_pid);
@@ -609,7 +612,7 @@ pub fn main(init: std.process.Init) !void {
     var idle_cpu_after = idle_cpu_before;
     const wanted_idle_windows: usize = if (idle_soak) idle_soak_window_count else 1;
     for (0..wanted_idle_windows) |window_index| {
-        stage = if (idle_soak) "output wake long idle window" else "output wake idle observation";
+        stage_ptr.* = if (idle_soak) "output wake long idle window" else "output wake idle observation";
         const window_cpu_before = try takeIdleCpuSample(host_identity, init.io);
         const window_started_at = monotonicNow(init.io);
         _ = usleep(@intCast((if (idle_soak) idle_soak_window_ms else idle_wake_observation_ms) * std.time.us_per_ms));
@@ -692,7 +695,7 @@ pub fn main(init: std.process.Init) !void {
     var scale_runtime_count: usize = 1;
     var scale_sample_index: usize = 1;
     while (scale_runtime_count < scale_runtime_ids.len) : (scale_runtime_count += 1) {
-        stage = "screen idle scale spawn";
+        stage_ptr.* = "screen idle scale spawn";
         const extra_spawn = try controller.call("runtime.spawn",
             \\{"argv":["/bin/cat"],"cols":80,"rows":24}
         );
@@ -719,7 +722,7 @@ pub fn main(init: std.process.Init) !void {
 
         const reached_count = scale_runtime_count + 1;
         if (reached_count == 10 or reached_count == 100) {
-            stage = if (reached_count == 10)
+            stage_ptr.* = if (reached_count == 10)
                 "screen idle scale 10"
             else
                 "screen idle scale 100";
@@ -768,7 +771,7 @@ pub fn main(init: std.process.Init) !void {
     // Current eager/sequential baseline: one fresh GUI connection reattaches to every already
     // running PTY and consumes each initial snapshot. Runtime creation is intentionally outside
     // the measured interval.
-    stage = "100 runtime reattach connect";
+    stage_ptr.* = "100 runtime reattach connect";
     const reattach_reset = try probe(
         command_pair[0],
         report_pair[0],
@@ -777,7 +780,7 @@ pub fn main(init: std.process.Init) !void {
         deadline_ns,
         init.io,
     );
-    if (@as(probe_wire.ReportKind, @enumFromInt(reattach_reset.kind)) != .reset_ack)
+    if (@as(probe_wire.ReportKind, @fromBackingInt(@intCast(reattach_reset.kind))) != .reset_ack)
         return error.ProbeProtocolError;
     var reattach = try connectRetry(allocator, socket_path, deadline_ns, init.io);
     var reattach_open = true;
@@ -796,7 +799,7 @@ pub fn main(init: std.process.Init) !void {
     var reattach_measured_cumulative_ns: u64 = 0;
     const reattach_started_ns = monotonicNow(init.io);
     for (&scale_runtime_ids, 0..) |*scale_runtime_id, index| {
-        stage = "100 runtime reattach snapshot";
+        stage_ptr.* = "100 runtime reattach snapshot";
         const attach_started_ns = monotonicNow(init.io);
         const stream = try attachRuntime(allocator, &reattach, scale_runtime_id, "observer");
         const attach_completed_ns = monotonicNow(init.io);
@@ -847,7 +850,7 @@ pub fn main(init: std.process.Init) !void {
     reattach.deinit();
     reattach_open = false;
 
-    stage = "metadata change scale 100";
+    stage_ptr.* = "metadata change scale 100";
     const metadata_change_before = try probe(
         command_pair[0],
         report_pair[0],
@@ -891,7 +894,7 @@ pub fn main(init: std.process.Init) !void {
         init.io,
     );
 
-    stage = "screen idle scale cleanup";
+    stage_ptr.* = "screen idle scale cleanup";
     var cleanup_index: usize = scale_runtime_ids.len;
     while (cleanup_index > 1) {
         cleanup_index -= 1;
@@ -905,7 +908,7 @@ pub fn main(init: std.process.Init) !void {
         allocator.free(response);
     }
 
-    stage = "output wake latency";
+    stage_ptr.* = "output wake latency";
     var wake_samples: [wake_sample_count]WakeSample = undefined;
     const wake_stages = [_][]const u8{
         "output wake latency 1/7",
@@ -917,7 +920,7 @@ pub fn main(init: std.process.Init) !void {
         "output wake latency 7/7",
     };
     for (&wake_samples, 0..) |*sample, sample_index| {
-        stage = wake_stages[sample_index];
+        stage_ptr.* = wake_stages[sample_index];
         var wake_marker_buf: [96]u8 = undefined;
         const wake_marker = try std.fmt.bufPrint(
             &wake_marker_buf,
@@ -987,7 +990,7 @@ pub fn main(init: std.process.Init) !void {
         wake_latencies[index] = sample.delivery_latency_ns;
     std.mem.sort(u64, &wake_latencies, {}, std.sort.asc(u64));
 
-    stage = "pressure geometry resize";
+    stage_ptr.* = "pressure geometry resize";
     var resize_buf: [128]u8 = undefined;
     const resize_params = try std.fmt.bufPrint(
         &resize_buf,
@@ -1043,9 +1046,9 @@ pub fn main(init: std.process.Init) !void {
         _ = usleep(target_interval_us);
     }
 
-    stage = "pressure reset";
+    stage_ptr.* = "pressure reset";
     const reset_report = try probe(command_pair[0], report_pair[0], &sequence, .reset_stall, deadline_ns, init.io);
-    if (@as(probe_wire.ReportKind, @enumFromInt(reset_report.kind)) != .reset_ack)
+    if (@as(probe_wire.ReportKind, @fromBackingInt(@intCast(reset_report.kind))) != .reset_ack)
         return error.ProbeProtocolError;
     const baseline_pty_output = reset_report.pty_output_bytes;
     const baseline_ledger = reset_report.resident_bytes;
@@ -1065,10 +1068,10 @@ pub fn main(init: std.process.Init) !void {
     const payload = try allocator.alloc(u8, workload_bytes_per_iteration);
     defer allocator.free(payload);
     fillPayload(payload, nonce_bytes);
-    stage = "pressure";
+    stage_ptr.* = "pressure";
     while (iterations < workload_iterations_max and stall_report == null) {
         if (monotonicNow(init.io) >= deadline_ns) return error.DeadlineExceeded;
-        stage = "pressure input";
+        stage_ptr.* = "pressure input";
         try sendInputBeforeDeadline(
             &controller,
             controller_stream,
@@ -1087,7 +1090,7 @@ pub fn main(init: std.process.Init) !void {
                 &controller_resync_needed,
                 &controller_drained,
             );
-            stage = "pressure healthy drain";
+            stage_ptr.* = "pressure healthy drain";
             if (try pumpHealthy(
                 &healthy,
                 healthy_stream,
@@ -1099,7 +1102,7 @@ pub fn main(init: std.process.Init) !void {
             if (monotonicNow(init.io) >= deadline_ns) return error.DeadlineExceeded;
             _ = usleep(2_000);
         }
-        stage = "pressure probe";
+        stage_ptr.* = "pressure probe";
         const report = try probe(command_pair[0], report_pair[0], &sequence, .snapshot, deadline_ns, init.io);
         if (report.first_stall_ns != 0 and report.pollout_absent_count != 0)
             stall_report = report;
@@ -1107,7 +1110,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const stalled = stall_report orelse return error.SlowObserverDidNotStall;
 
-    stage = "marker progress";
+    stage_ptr.* = "marker progress";
     const controller_input_at = monotonicNow(init.io);
     const marker = nonce_hex ++ "\n";
     try sendInputBeforeDeadline(
@@ -1246,7 +1249,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const stop_report = try probe(command_pair[0], report_pair[0], &sequence, .stop, deadline_ns, init.io);
-    if (@as(probe_wire.ReportKind, @enumFromInt(stop_report.kind)) != .stop_ack)
+    if (@as(probe_wire.ReportKind, @fromBackingInt(@intCast(stop_report.kind))) != .stop_ack)
         return error.ProbeProtocolError;
     _ = c.close(command_pair[0]);
     command_pair_open[0] = false;
@@ -1261,7 +1264,7 @@ pub fn main(init: std.process.Init) !void {
     const socket_access = c.access(socket_path.ptr, c.F_OK);
     const socket_removed = socket_access != 0 and posix.errno(socket_access) == .NOENT;
     if (!socket_removed) return error.SocketCleanupFailed;
-    stage = "directory cleanup";
+    stage_ptr.* = "directory cleanup";
     try unlinkSessionLeaf(session_dir, "owner-v2.lock");
     try removeSessionDirectoryLeaf(session_dir, "incidents");
     if (!removeDirectoryRetry(session_dir, 100)) return error.SessionDirectoryCleanupFailed;
@@ -1308,7 +1311,7 @@ pub fn main(init: std.process.Init) !void {
             .socket_removed = socket_removed,
             .directory_removed = !directory_exists,
         };
-        stage = "idle soak artifact write";
+        stage_ptr.* = "idle soak artifact write";
         try writeArtifactAtomic(allocator, init.io, artifact_path, idle_soak_artifact);
         return;
     }
@@ -1477,7 +1480,7 @@ pub fn main(init: std.process.Init) !void {
         .socket_removed = socket_removed,
         .directory_removed = !directory_exists,
     };
-    stage = "artifact write";
+    stage_ptr.* = "artifact write";
     try writeArtifactAtomic(allocator, init.io, artifact_path, artifact);
 }
 
@@ -1757,7 +1760,7 @@ fn probe(
                 .reset_stall => .reset_ack,
                 .stop => .stop_ack,
             };
-            if (report.kind != @intFromEnum(expected)) return error.ProbeProtocolError;
+            if (report.kind != @backingInt(expected)) return error.ProbeProtocolError;
             return report;
         }
         if (received < 0 and (posix.errno(received) == .AGAIN or
@@ -2028,7 +2031,7 @@ fn removeDirectoryRetry(path: [:0]const u8, attempts: usize) bool {
 
 fn unlinkSessionLeaf(session_dir: [:0]const u8, leaf: []const u8) !void {
     var path_buf: [256]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ session_dir, leaf });
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}", .{ session_dir, leaf }, 0);
     const rc = c.unlink(path.ptr);
     if (rc != 0 and posix.errno(rc) != .NOENT)
         return error.SessionDirectoryCleanupFailed;
@@ -2036,7 +2039,7 @@ fn unlinkSessionLeaf(session_dir: [:0]const u8, leaf: []const u8) !void {
 
 fn removeSessionDirectoryLeaf(session_dir: [:0]const u8, leaf: []const u8) !void {
     var path_buf: [256]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ session_dir, leaf });
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}", .{ session_dir, leaf }, 0);
     if (!removeDirectoryRetry(path, 10)) return error.SessionDirectoryCleanupFailed;
 }
 
@@ -2063,7 +2066,7 @@ fn cleanupSessionDirectory(
 }
 
 fn invalidateArtifact(allocator: std.mem.Allocator, path: []const u8) !void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     const rc = c.unlink(path_z.ptr);
     if (rc != 0 and posix.errno(rc) != .NOENT) return error.ArtifactInvalidationFailed;
@@ -2093,9 +2096,9 @@ fn writeArtifactAtomic(
         .{ path, c.getpid(), artifact.run_nonce_hex[0..12] },
     );
     defer allocator.free(temp);
-    const temp_z = try allocator.dupeZ(u8, temp);
+    const temp_z = try allocator.dupeSentinel(u8, temp, 0);
     defer allocator.free(temp_z);
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     defer _ = c.unlink(temp_z.ptr);
     const fd = c.open(temp_z.ptr, .{
@@ -2131,16 +2134,17 @@ test "failure cleanup removes only the fixture socket lock and directory" {
     arc4random_buf(&nonce, nonce.len);
     const nonce_hex = std.fmt.bytesToHex(nonce, .lower);
     var dir_buf: [192]u8 = undefined;
-    const dir = try std.fmt.bufPrintZ(
+    const dir = try std.fmt.bufPrintSentinel(
         &dir_buf,
         "/tmp/maru-slow-observer-cleanup-test-{d}-{s}",
         .{ c.getpid(), nonce_hex[0..] },
+        0,
     );
     try std.testing.expectEqual(@as(c_int, 0), c.mkdir(dir.ptr, 0o700));
     var socket_buf: [256]u8 = undefined;
-    const socket = try std.fmt.bufPrintZ(&socket_buf, "{s}/host.sock", .{dir});
+    const socket = try std.fmt.bufPrintSentinel(&socket_buf, "{s}/host.sock", .{dir}, 0);
     var lock_buf: [256]u8 = undefined;
-    const lock = try std.fmt.bufPrintZ(&lock_buf, "{s}/owner-v2.lock", .{dir});
+    const lock = try std.fmt.bufPrintSentinel(&lock_buf, "{s}/owner-v2.lock", .{dir}, 0);
     for ([_][*:0]const u8{ socket.ptr, lock.ptr }) |path| {
         const fd = c.open(path, .{
             .ACCMODE = .WRONLY,

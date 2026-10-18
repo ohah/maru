@@ -3,6 +3,8 @@
 //! 이 gate는 GitHub/codesign을 흉내 내지 않는다. 외부 관측을 시작하기 전에 command와 로컬
 //! artifact authority가 닫혀 있어야 shell workflow가 별도 입력 포맷이나 우회 command를 만들 수 없다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const adapter = @import("release_adapter");
 
@@ -445,7 +447,7 @@ test "release adapter rejects empty oversized and aliased path authorities" {
         "--github-cli",                              "/opt/homebrew/bin/gh", "--github-cli-sha256",                       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "--manifest",
         "/tmp/Maru-1.2.3-session-host-release.json", "--work-dir",           "/tmp/Maru-1.2.3-session-host-release.json", "--summary-out",                                                    "audit.json",
     }));
-    const too_long = "x" ** (adapter.max_cli_value_bytes + 1);
+    const too_long = array_repeat.repeat("x", (adapter.max_cli_value_bytes + 1));
     try std.testing.expectError(error.ValueTooLong, adapter.parseArgs(&.{
         "verify-predecessor", "--repo", "ohah/maru",  "--tag",    "v1.2.3",
         "--manifest",         too_long, "--work-dir", "download", "--summary-out",

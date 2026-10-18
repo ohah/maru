@@ -172,7 +172,7 @@ pub fn main(init: std.process.Init) !void {
 
 // 프로브 전용 root 신원이다. 제품은 탐색기 capability 사본을 사용한다.
 fn rootInput(a: std.mem.Allocator, path: []const u8) !api.coordinator.Input {
-    const z = try a.dupeZ(u8, path);
+    const z = try a.dupeSentinel(u8, path, 0);
     defer a.free(z);
     var native: std.posix.Stat = undefined;
     if (std.c.fstatat(std.posix.AT.FDCWD, z, &native, 0) != 0) return error.StatFailed;

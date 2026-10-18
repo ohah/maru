@@ -80,7 +80,7 @@ const Sample = struct { init_ns: u64, stages_ns: u64, total_ns: u64, distinct: b
 
 fn runOnce(io: std.Io, allocator: std.mem.Allocator, child: []const u8, index: usize) !Sample {
     var template_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
-    const template = try std.fmt.bufPrintZ(&template_storage, "/private/tmp/maru-workflow-checkpoint-{d}.XXXXXX", .{index});
+    const template = try std.fmt.bufPrintSentinel(&template_storage, "/private/tmp/maru-workflow-checkpoint-{d}.XXXXXX", .{index}, 0);
     const root_ptr = mkdtemp(template.ptr) orelse return error.TempRootFailed;
     const root: [:0]const u8 = std.mem.span(root_ptr);
     if (c.chmod(root.ptr, 0o700) != 0) return error.TempRootFailed;

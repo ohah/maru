@@ -95,7 +95,7 @@ pub const ResolvedHostDescriptor = struct {
         const build_id = allocator.dupe(u8, source.build_id) catch
             return error.OutOfMemory;
         errdefer allocator.free(build_id);
-        const endpoint = allocator.dupeZ(u8, source.endpoint) catch
+        const endpoint = allocator.dupeSentinel(u8, source.endpoint, 0) catch
             return error.OutOfMemory;
         return .{
             .allocator = allocator,
@@ -394,7 +394,7 @@ const SocketObservation = union(enum) {
 
 fn observeSocket(endpoint: []const u8) SocketObservation {
     var path_buf: [host_manifest.max_endpoint_bytes + 1]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}", .{endpoint}) catch return .denied;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{endpoint}, 0) catch return .denied;
     var stat: posix.Stat = undefined;
     const rc = c.fstatat(posix.AT.FDCWD, path.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW);
     if (rc != 0) return switch (posix.errno(rc)) {
@@ -531,9 +531,9 @@ test "product resolver rejects expired and wrong phases before discovery or conn
 }
 
 test "resolved host descriptor owns discovery strings and pins socket identity" {
-    var build = [_]u8{'b'} ** 71;
+    var build = @as([71]u8, @splat('b'));
     @memcpy(build[0..7], "sha256:");
-    var endpoint = [_]u8{0} ** 32;
+    var endpoint = @as([32]u8, @splat(0));
     @memcpy(endpoint[0..14], "/tmp/test.sock");
     var pinned = try ResolvedHostDescriptor.init(
         std.testing.allocator,
@@ -748,7 +748,7 @@ test "product resolver discovers and pins the one host that owns a live runtime"
     }
     defer if (!terminateAndReapFixtureChild(second_child))
         @panic("failed to reap second resolver fixture host");
-    var blockers = [_]?@import("client.zig").Client{null} ** connection_slot.max_connections;
+    var blockers = @as([connection_slot.max_connections]?@import("client.zig").Client, @splat(null));
     defer for (&blockers) |*blocker| {
         if (blocker.*) |*client| client.deinit();
         blocker.* = null;
@@ -799,10 +799,11 @@ test "product resolver discovers and pins the one host that owns a live runtime"
     // Replace only the pathname socket object while the original daemon and manifest remain live.
     // The pinned positive result must not follow the path to a different inode.
     var old_endpoint_buf: [160]u8 = undefined;
-    const old_endpoint = try std.fmt.bufPrintZ(
+    const old_endpoint = try std.fmt.bufPrintSentinel(
         &old_endpoint_buf,
         "{s}.pinned",
         .{endpoint},
+        0,
     );
     try testing.expectEqual(@as(c_int, 0), c.rename(endpoint.ptr, old_endpoint.ptr));
     var original_restored = false;

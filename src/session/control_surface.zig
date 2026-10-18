@@ -861,7 +861,7 @@ test "session.get §8.3: self scope caller가 남의 id를 물으면 존재/부�
     // 그리고 그 응답은 unauthorized 에러다(process_exited/method 다름 아님).
     var pm = try cp.parseMessage(testing.allocator, wire_exists);
     defer pm.deinit();
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), pm.message.response.err.?.code);
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), pm.message.response.err.?.code);
 }
 
 // ── 11) process_exited: 인가됐으나 snapshot에 없음(unauthorized와 구별) ──
@@ -876,7 +876,7 @@ test "session.get: 인가된 surface가 snapshot에 없으면 process_exited(una
     defer testing.allocator.free(wire);
     var pm = try cp.parseMessage(testing.allocator, wire);
     defer pm.deinit();
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.process_exited)), pm.message.response.err.?.code);
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.process_exited)), pm.message.response.err.?.code);
 
     // 대조: 인가 안 된 id(창 B의 20)를 window scope로 물으면 process_exited가 아니라 **unauthorized**
     // (존재하더라도 — scope 판정이 존재검사보다 먼저라 oracle 없음).

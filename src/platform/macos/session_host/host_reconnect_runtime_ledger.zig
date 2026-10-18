@@ -54,9 +54,9 @@ pub const RuntimeRow = struct {
     ) RuntimeRow {
         return .{
             .identity = identity,
-            .ledger_raw = @intFromEnum(ledger_value),
-            .local_raw = @intFromEnum(local_value),
-            .mutation_raw = @intFromEnum(mutation_value),
+            .ledger_raw = @backingInt(ledger_value),
+            .local_raw = @backingInt(local_value),
+            .mutation_raw = @backingInt(mutation_value),
         };
     }
 
@@ -273,7 +273,7 @@ test "CR5a runtime ledger는 raw enum과 illegal terminal pair를 fail close한�
         @field(hostile, field) = 0xff;
         try std.testing.expect(!validateCanonicalRows(testJob(), &[_]RuntimeRow{hostile}));
     }
-    row.ledger_raw = @intFromEnum(RuntimeLedger.authority_conflict);
+    row.ledger_raw = @backingInt(RuntimeLedger.authority_conflict);
     try std.testing.expectError(error.NonTerminalRuntime, summarizeTerminalRows(testJob(), &[_]RuntimeRow{row}));
     row = RuntimeRow.init(testIdentity(1, 101), .old_valid, .frozen_unavailable, .open);
     try std.testing.expectError(error.NonTerminalRuntime, summarizeTerminalRows(testJob(), &[_]RuntimeRow{row}));

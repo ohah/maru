@@ -1122,7 +1122,7 @@ test "terminal PCRE2 match limit clears earlier results instead of showing a par
     const allocator = std.testing.allocator;
     var c = try core.TerminalCore.init(allocator, .{ .cols = 120, .rows = 3 });
     defer c.deinit();
-    var attack = [_]u8{'a'} ** 80;
+    var attack = @as([80]u8, @splat('a'));
     attack[attack.len - 1] = 'X';
     try c.write("ok\r\n");
     try c.write(&attack);

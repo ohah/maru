@@ -753,7 +753,7 @@ fn publishSummaryOwnedExclusiveParent(
     for (0..8) |_| {
         var nonce: u64 = undefined;
         c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
-        temp = std.fmt.bufPrintZ(&temp_buf, ".maru-release-summary-{x}.tmp", .{nonce}) catch
+        temp = std.fmt.bufPrintSentinel(&temp_buf, ".maru-release-summary-{x}.tmp", .{nonce}, 0) catch
             return error.CreateFailed;
         fd = c.openat(parent_fd, temp.ptr, .{
             .ACCMODE = .RDWR,
@@ -896,12 +896,12 @@ fn openParent(path: [:0]const u8, leaf_buf: *[std.fs.max_name_bytes:0]u8) Error!
     const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return error.UnsafePath;
     const leaf = path[slash + 1 ..];
     if (!validComponent(leaf)) return error.UnsafePath;
-    const leaf_z = std.fmt.bufPrintZ(leaf_buf, "{s}", .{leaf}) catch return error.UnsafePath;
+    const leaf_z = std.fmt.bufPrintSentinel(leaf_buf, "{s}", .{leaf}, 0) catch return error.UnsafePath;
     var parent_buf: [std.fs.max_path_bytes:0]u8 = undefined;
     const parent_path = if (slash == 0)
         "/"
     else
-        std.fmt.bufPrintZ(&parent_buf, "{s}", .{path[0..slash]}) catch return error.UnsafePath;
+        std.fmt.bufPrintSentinel(&parent_buf, "{s}", .{path[0..slash]}, 0) catch return error.UnsafePath;
     return .{
         .fd = safe_open.openAbsoluteNoFollow(parent_path, true) catch return error.UnsafePath,
         .leaf = leaf_z,

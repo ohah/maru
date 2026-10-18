@@ -74,9 +74,9 @@ fn nextCandidate(it: *git_locate.Iterator, exe: []const u8, buf: []u8) ?[]const 
 
 fn isExecutableFile(path: []const u8) bool {
     var buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return false;
+    const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{path}, 0) catch return false;
     if (std.c.access(z.ptr, std.posix.X_OK) != 0) return false;
-    const dz = std.fmt.bufPrintZ(&buf, "{s}/", .{path}) catch return false;
+    const dz = std.fmt.bufPrintSentinel(&buf, "{s}/", .{path}, 0) catch return false;
     return std.c.access(dz.ptr, std.posix.F_OK) != 0;
 }
 
@@ -126,16 +126,16 @@ pub fn spawn(allocator: std.mem.Allocator, exe_path: []const u8, args: []const [
         for (owned.items) |s| allocator.free(s);
         owned.deinit(allocator);
     }
-    const exe_z = try allocator.dupeZ(u8, exe_path);
+    const exe_z = try allocator.dupeSentinel(u8, exe_path, 0);
     try owned.append(allocator, exe_z);
     try argv.append(allocator, exe_z.ptr);
     for (args) |a| {
-        const z = try allocator.dupeZ(u8, a);
+        const z = try allocator.dupeSentinel(u8, a, 0);
         try owned.append(allocator, z);
         try argv.append(allocator, z.ptr);
     }
     try argv.append(allocator, null);
-    const cwd_z = try allocator.dupeZ(u8, cwd);
+    const cwd_z = try allocator.dupeSentinel(u8, cwd, 0);
     defer allocator.free(cwd_z);
 
     const pid = std.c.fork();
@@ -189,7 +189,7 @@ pub fn write(p: *Process, allocator: std.mem.Allocator, bytes: []const u8) error
             continue;
         }
         const err = std.c._errno().*;
-        if (err == @intFromEnum(std.c.E.AGAIN) or err == @intFromEnum(std.c.E.INTR)) return queue(p, allocator, bytes[off..]);
+        if (err == @backingInt(std.c.E.AGAIN) or err == @backingInt(std.c.E.INTR)) return queue(p, allocator, bytes[off..]);
         return false; // EPIPE 등 — 자식이 갔다
     }
     return true;
@@ -227,7 +227,7 @@ pub fn flush(p: *Process, allocator: std.mem.Allocator) error{OutOfMemory}!bool 
             continue;
         }
         const err = std.c._errno().*;
-        if (err == @intFromEnum(std.c.E.AGAIN) or err == @intFromEnum(std.c.E.INTR)) return true;
+        if (err == @backingInt(std.c.E.AGAIN) or err == @backingInt(std.c.E.INTR)) return true;
         return false;
     }
     return true;
@@ -252,7 +252,7 @@ pub fn readInto(p: *Process, allocator: std.mem.Allocator, into: *std.ArrayList(
         }
         if (n == 0) return .eof;
         const err = std.c._errno().*;
-        if (err == @intFromEnum(std.c.E.AGAIN) or err == @intFromEnum(std.c.E.INTR)) break;
+        if (err == @backingInt(std.c.E.AGAIN) or err == @backingInt(std.c.E.INTR)) break;
         return .eof; // 다른 오류도 「끝」으로 본다 — 호출자가 재시작한다
     }
     return if (got_any) .data else .would_block;
@@ -350,7 +350,7 @@ fn reapNoHang(l: *Lowering) bool {
         var status: c_int = 0;
         const r = std.c.waitpid(l.pid, &status, std.c.W.NOHANG);
         if (r == l.pid) break;
-        if (r < 0 and std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+        if (r < 0 and std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
         if (r < 0) break; // ECHILD — 더 기다릴 것이 없다
         return false; // 아직 살아 있다
     }
@@ -382,7 +382,7 @@ pub fn reapBlocking(p: *Process) void {
     if (p.reaped) return;
     var status: c_int = 0;
     // 신호로 끊기면(EINTR) 다시 기다린다 — 거두지 못했는데 거둔 것으로 적지 않게.
-    while (std.c.waitpid(p.pid, &status, 0) == -1 and std.c._errno().* == @intFromEnum(std.c.E.INTR)) {}
+    while (std.c.waitpid(p.pid, &status, 0) == -1 and std.c._errno().* == @backingInt(std.c.E.INTR)) {}
     p.reaped = true;
 }
 

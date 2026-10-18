@@ -197,7 +197,7 @@ comptime {
 // 분류를 **강제**하되 무엇을 안 싣는지는 사람이 정한다.
 fn assertCovered(comptime T: type, comptime carried: []const []const u8, comptime derived: []const []const u8) void {
     @setEvalBranchQuota(10_000);
-    inline for (@typeInfo(T).@"struct".fields) |f| {
+    inline for (@import("type_info_fields").structFields(T)) |f| {
         comptime var seen = false;
         inline for (carried ++ derived) |name| {
             if (comptime std.mem.eql(u8, f.name, name)) seen = true;
@@ -390,9 +390,9 @@ pub fn appendRecord(out: []u8, at: usize, rec: Record) ?usize {
     n = appendField(out, n, h.line_offset) orelse return null;
     n = appendField(out, n, h.data_offset) orelse return null;
     n = appendField(out, n, h.data_len) orelse return null;
-    n = appendField(out, n, @intFromEnum(h.kind)) orelse return null;
-    n = appendField(out, n, @intFromEnum(h.mime)) orelse return null;
-    n = appendField(out, n, @intFromEnum(h.activity)) orelse return null;
+    n = appendField(out, n, @backingInt(h.kind)) orelse return null;
+    n = appendField(out, n, @backingInt(h.mime)) orelse return null;
+    n = appendField(out, n, @backingInt(h.activity)) orelse return null;
     // 판 5(MP1) — 화면의 `[Image #N]` 을 이 이미지에 잇는 키. 원격 **전송 후** 프리뷰가 이것으로 찾는다
     // (docs/agent-image-marker-preview.md §4.4).
     n = appendField(out, n, h.marker_n) orelse return null;
@@ -412,7 +412,7 @@ pub fn appendRecord(out: []u8, at: usize, rec: Record) ?usize {
     n = appendField(out, n, h.result.image_file) orelse return null;
     // 시각은 음수일 수 있다(1970 이전은 안 오지만 `i64` 다) — 부호를 비트로 옮겨 10 진으로 싣는다.
     n = appendField(out, n, @as(u64, @bitCast(rec.label.time_s))) orelse return null;
-    n = appendField(out, n, @intFromEnum(rec.label.source)) orelse return null;
+    n = appendField(out, n, @backingInt(rec.label.source)) orelse return null;
     // **본문에 걸렸나**(판 4 · RAV8b). 라벨 길이 **앞**이다 — 길이 칸이 마지막이라야 그 뒤가 바이트다.
     n = appendField(out, n, rec.body_flags) orelse return null;
     n = appendField(out, n, rec.label.len) orelse return null;
@@ -582,9 +582,9 @@ pub const Parser = struct {
 
     fn takeEnum(self: *Parser, comptime E: type) ParseError!E {
         const v = try self.takeDecimal();
-        const fields = @typeInfo(E).@"enum".fields;
+        const fields = @import("type_info_fields").enumFields(E);
         if (v >= fields.len) return ParseError.UnknownEnum;
-        return @enumFromInt(v);
+        return @fromBackingInt(@intCast(v));
     }
 
     /// 길이 접두 바이트열. 상한을 **호출자가** 준다 — 원격이 주장하는 길이를 믿지 않는다.

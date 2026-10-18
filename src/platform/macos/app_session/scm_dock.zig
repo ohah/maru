@@ -7,6 +7,8 @@
 //! **여기서 행 높이를 다시 곱하지 않는다.** 기하의 단일 출처는 component의 `DockMetrics`이고, 이 파일은
 //! 그 값을 스크롤 투영에 그대로 넘긴다(옛 셀 그리드 경로가 갈려서 "그린 자리와 눌리는 자리"가 어긋났다).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
@@ -3970,8 +3972,8 @@ fn writeErrorText(self: *AppSession, result: git_backend_mod.WriteResult) ?[]u8 
 
 fn sectionIndex(section: component.types.Section) usize {
     return switch (section) {
-        .staged => @intFromEnum(scm_view.Section.staged),
-        .changes => @intFromEnum(scm_view.Section.changes),
+        .staged => @backingInt(scm_view.Section.staged),
+        .changes => @backingInt(scm_view.Section.changes),
     };
 }
 
@@ -3990,8 +3992,8 @@ test "섹션 값은 두 모듈 사이에서 1:1이다" {
     // component는 session 모듈을 import하지 않으므로 이 변환이 유일한 다리다. 값이 갈리면 여기서 걸린다.
     try testing.expectEqual(component.types.Section.staged, scm_items.sectionOf(.staged));
     try testing.expectEqual(component.types.Section.changes, scm_items.sectionOf(.changes));
-    try testing.expectEqual(@intFromEnum(scm_view.Section.staged), sectionIndex(.staged));
-    try testing.expectEqual(@intFromEnum(scm_view.Section.changes), sectionIndex(.changes));
+    try testing.expectEqual(@backingInt(scm_view.Section.staged), sectionIndex(.staged));
+    try testing.expectEqual(@backingInt(scm_view.Section.changes), sectionIndex(.changes));
 }
 
 test "draw 예산은 최악 행 구성을 담는다(모자라면 도크가 통째로 빈다)" {
@@ -4013,7 +4015,7 @@ test "draw 예산은 최악 행 구성을 담는다(모자라면 도크가 통�
                 .name = "some-file-name.zig",
                 // **경로에 상한이 없다** — `name`+`dir`이 곧 git 경로다. 행당 고정 바이트로 예산을 잡으면
                 // 어떤 값을 골라도 그보다 긴 저장소가 있고, 넘치는 순간 도크가 통째로 빈다.
-                .dir = "src/" ++ "very-long-directory-segment/" ** 45,
+                .dir = "src/" ++ array_repeat.repeat("very-long-directory-segment/", 45),
                 .status = .modified,
                 .letter = 'M',
                 .added = 123,
@@ -4490,7 +4492,7 @@ fn commitMessagePath(self: *AppSession, buf: []u8) ?[]const u8 {
     const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
     if (home.len == 0) return null;
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (std.fmt.bufPrintZ(&dir_buf, "{s}/.cache/maru", .{home})) |dir| {
+    if (std.fmt.bufPrintSentinel(&dir_buf, "{s}/.cache/maru", .{home}, 0)) |dir| {
         _ = std.c.mkdir(dir.ptr, 0o700);
     } else |_| {}
     return std.fmt.bufPrint(buf, "{s}/.cache/maru/commit-msg-{d}", .{ home, @intFromPtr(self) }) catch null;
@@ -4613,7 +4615,7 @@ fn runCommit(self: *AppSession, repo_path: []const u8, message_text: []const u8)
 /// 메시지 파일을 쓴다(0600 — 커밋 메시지도 사용자의 글이다).
 fn writeCommitMessageFile(self: *AppSession, path: []const u8, text: []const u8) !void {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path_z = try std.fmt.bufPrintZ(&buf, "{s}", .{path});
+    const path_z = try std.fmt.bufPrintSentinel(&buf, "{s}", .{path}, 0);
     const fd = std.c.open(path_z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
     if (fd < 0) return error.OpenFailed;
     defer _ = std.c.close(fd);
@@ -4633,7 +4635,7 @@ fn writeCommitMessageFile(self: *AppSession, path: []const u8, text: []const u8)
 
 fn deleteCommitMessageFile(path: []const u8) void {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return;
+    const path_z = std.fmt.bufPrintSentinel(&buf, "{s}", .{path}, 0) catch return;
     _ = std.c.unlink(path_z.ptr);
 }
 
@@ -5408,7 +5410,7 @@ test "셸 고지: 썼으면 수를 말하고, 0이거나 모르면 줄이 없다
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -5454,7 +5456,7 @@ test "턴 파일 배지: 절대경로 캡처와 상대경로 목록이 같은 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.git_repo = try allocator.dupe(u8, "/repo");
@@ -5569,7 +5571,7 @@ test "턴 파일 배지: 원격 턴은 겨냥 ∧ 목록으로 ✎ 를 세우고
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // 원격 cwd 는 저장소 **하위** 디렉터리다 — 루트를 아직 모르는 동안은 꼬리 일치로, 루트가 오면 상대화로 맞는다.
@@ -5640,7 +5642,7 @@ test "턴 스냅샷 읽기 대상: 링의 저장소 키가 기계를 정한다 �
     var env_guard = try app_session_mod.workspace_ops.ProviderEnvGuard.capture(allocator);
     defer env_guard.restore();
     var home_buf: [64]u8 = undefined;
-    const home = try std.fmt.bufPrintZ(&home_buf, "/tmp/maru-at3c-{d}", .{std.c.getpid()});
+    const home = try std.fmt.bufPrintSentinel(&home_buf, "/tmp/maru-at3c-{d}", .{std.c.getpid()}, 0);
     try std.Io.Dir.cwd().createDirPath(io, home);
     defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
     try std.testing.expectEqual(@as(c_int, 0), app_session_mod.setenv("HOME", home.ptr, 1));
@@ -5653,7 +5655,7 @@ test "턴 스냅샷 읽기 대상: 링의 저장소 키가 기계를 정한다 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
     session.git_repo = try allocator.dupe(u8, "/local/repo");
@@ -5755,7 +5757,7 @@ test "소스 컨트롤 키보드 스크롤: 한 행을 남기고 · 끝으로 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -5845,7 +5847,7 @@ test "소스 컨트롤 도크: 클릭이 키보드 소유권을 준다 — 그�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 

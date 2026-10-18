@@ -19,6 +19,8 @@
 //!
 //! 명령 항목은 `message.contextMenuAllows` 로 켜고 끈다 — sidecar 도 같은 규칙으로 명령을 거른다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const i18n = @import("../i18n.zig"); // 표시 문자열 단일 출처
 const web_sidecar = @import("web_sidecar/root.zig");
@@ -438,13 +440,13 @@ test "the look up label drops direction overrides and controls, folds line break
     // RLO(U+202E)·PDF(U+202C)·폭 0 글자(U+200B)·제어 문자를 빼고 줄바꿈은 빈칸 하나로, 앞뒤 빈칸은 걷는다.
     try std.testing.expectEqualStrings("'" ++ fsi ++ "ab cd" ++ pdi ++ "' 찾기", lookUpLabel("  \u{202E}a\x07b\n\n\tc\u{202C}\u{200B}d \n", &buf));
     // 「가」 60 자 → 50 자와 「…」.
-    const long = "가" ** 60;
+    const long = array_repeat.repeat("가", 60);
     const label = lookUpLabel(long, &buf);
-    try std.testing.expectEqualStrings("'" ++ fsi ++ "가" ** 50 ++ "\u{2026}" ++ pdi ++ "' 찾기", label);
+    try std.testing.expectEqualStrings("'" ++ fsi ++ array_repeat.repeat("가", 50) ++ "\u{2026}" ++ pdi ++ "' 찾기", label);
     try std.testing.expect(std.unicode.utf8ValidateSlice(label));
     // 줄이는 자리가 빈칸이면 줄임표 앞에 빈칸을 남기지 않는다(49 자 + 빈칸 + 더).
-    const spaced = lookUpLabel("a" ** 49 ++ " bcd", &buf);
-    try std.testing.expectEqualStrings("'" ++ fsi ++ "a" ** 49 ++ "\u{2026}" ++ pdi ++ "' 찾기", spaced);
+    const spaced = lookUpLabel(array_repeat.repeat("a", 49) ++ " bcd", &buf);
+    try std.testing.expectEqualStrings("'" ++ fsi ++ array_repeat.repeat("a", 49) ++ "\u{2026}" ++ pdi ++ "' 찾기", spaced);
     // 잘못된 UTF-8 바이트는 건너뛴다.
     try std.testing.expectEqualStrings("'" ++ fsi ++ "ok" ++ pdi ++ "' 찾기", lookUpLabel("o\xffk", &buf));
     i18n.setLang(.en);

@@ -84,5 +84,5 @@ pub fn canonical(value: Projection, retained_observation: bool) bool {
 }
 
 comptime {
-    if (std.meta.fields(Projection).len != 9) @compileError("decision seal projection ABI drift");
+    if (@import("type_info_fields").fields(Projection).len != 9) @compileError("decision seal projection ABI drift");
 }

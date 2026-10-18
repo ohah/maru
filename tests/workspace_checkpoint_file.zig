@@ -128,7 +128,7 @@ test "P4 C2 typed results identify the failed publication phase" {
 fn tempParentPath(tmp: *std.testing.TmpDir, out: *[std.fs.max_path_bytes:0]u8) ![:0]const u8 {
     var resolved: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &resolved);
-    return std.fmt.bufPrintZ(out, "{s}", .{resolved[0..len]});
+    return std.fmt.bufPrintSentinel(out, "{s}", .{resolved[0..len]}, 0);
 }
 
 fn readLeaf(tmp: *std.testing.TmpDir, leaf: []const u8, out: []u8) ![]const u8 {
@@ -329,7 +329,7 @@ test "P4 C4 loose backup permissions are tightened instead of failing the publis
     var parent_buf: [std.fs.max_path_bytes:0]u8 = undefined;
     const parent = try tempParentPath(&tmp, &parent_buf);
     var bak_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    const bak_path = try std.fmt.bufPrintZ(&bak_buf, "{s}/workspace.v1.bak", .{parent});
+    const bak_path = try std.fmt.bufPrintSentinel(&bak_buf, "{s}/workspace.v1.bak", .{parent}, 0);
     try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(bak_path.ptr, @as(std.c.mode_t, 0o644)));
 
     try std.testing.expectEqual(checkpoint_file.Result.committed, checkpoint_file.publishFinal(parent, "new", true));

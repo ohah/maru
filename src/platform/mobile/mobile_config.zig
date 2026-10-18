@@ -396,7 +396,7 @@ pub const rows: []const Row = blk: {
     // 설정이고 파서가 이미 받으므로, 여기 한 줄만 예외로 둔다 — 예외가 늘면 그때 스키마 쪽에
     // 표현을 만든다.
     var preset_items: []const []const u8 = &.{};
-    for (@typeInfo(theme.ThemePreset).@"enum".fields) |ef| {
+    for (@import("type_info_fields").enumFields(theme.ThemePreset)) |ef| {
         preset_items = preset_items ++ [_][]const u8{dashed(ef.name)};
     }
     var list: []const Row = &[_]Row{.{
@@ -406,11 +406,11 @@ pub const rows: []const Row = blk: {
         .items = preset_items,
         .section = maru.i18n.tIn(.ko, .mob_appearance),
     }};
-    for (@typeInfo(Config).@"struct".fields) |cf| {
+    for (@import("type_info_fields").structFields(Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) != .@"struct" or !@hasDecl(Container, "schema")) continue;
         const sch = Container.schema;
-        for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+        for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
             const meta: theme.Meta = @field(sch, sf.name);
             const FieldT = @TypeOf(@field(@as(Container, .{}), sf.name));
             const seg = meta.key_seg orelse dashed(sf.name);
@@ -420,7 +420,7 @@ pub const rows: []const Row = blk: {
                 .int => Row{ .key = key, .label = mobileDocLabel(meta.doc, key), .kind = .number, .section = sectionOf(cf.name) },
                 .@"enum" => e: {
                     var items: []const []const u8 = &.{};
-                    for (@typeInfo(FieldT).@"enum".fields) |ef| items = items ++ [_][]const u8{dashed(ef.name)};
+                    for (@import("type_info_fields").enumFields(FieldT)) |ef| items = items ++ [_][]const u8{dashed(ef.name)};
                     break :e Row{ .key = key, .label = mobileDocLabel(meta.doc, key), .kind = .choice, .items = items, .section = sectionOf(cf.name) };
                 },
                 // **문자열(색)은 이제 낸다 — 편집 수단이 생겼다.** 이 줄들이 안 나오던 이유는
@@ -489,8 +489,8 @@ pub fn valueOf(cfg: Config, key: []const u8) i64 {
         //
         // 어느 것과도 안 맞으면 **고른 것이 없다**(`preset_none`) — 사용자가 개별 색을 손댔거나
         // 기본값 그대로인 상태다. 그 자리에 아무 프리셋 이름이나 적으면 화면이 거짓말을 한다.
-        inline for (@typeInfo(theme.ThemePreset).@"enum".fields, 0..) |ef, i| {
-            const p: theme.ThemePreset = @enumFromInt(ef.value);
+        inline for (@import("type_info_fields").enumFields(theme.ThemePreset), 0..) |ef, i| {
+            const p: theme.ThemePreset = @fromBackingInt(@intCast(ef.value));
             const c = theme.presetColors(p);
             if (std.mem.eql(u8, c.background, cfg.theme.background) and
                 std.mem.eql(u8, c.foreground, cfg.theme.foreground) and
@@ -499,10 +499,10 @@ pub fn valueOf(cfg: Config, key: []const u8) i64 {
         }
         return preset_none;
     }
-    inline for (@typeInfo(Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
-            inline for (@typeInfo(@TypeOf(Container.schema)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(Container.schema))) |sf| {
                 const meta: theme.Meta = @field(Container.schema, sf.name);
                 const seg = comptime (meta.key_seg orelse dashed(sf.name));
                 const full = comptime (meta.key orelse (cf.name ++ "." ++ seg));
@@ -511,7 +511,7 @@ pub fn valueOf(cfg: Config, key: []const u8) i64 {
                     return switch (@typeInfo(@TypeOf(v))) {
                         .bool => @intFromBool(v),
                         .int => @intCast(v),
-                        .@"enum" => @intFromEnum(v),
+                        .@"enum" => @backingInt(v),
                         else => 0,
                     };
                 }
@@ -524,15 +524,15 @@ pub fn valueOf(cfg: Config, key: []const u8) i64 {
 /// 값을 config 에 쓴다(화면 표기 → 필드). 파일에 적을 문자열은 `textOf` 가 낸다.
 pub fn setValue(cfg: *Config, key: []const u8, v: i64) void {
     if (std.mem.eql(u8, key, "theme.preset")) {
-        inline for (@typeInfo(theme.ThemePreset).@"enum".fields, 0..) |ef, i| {
-            if (v == i) cfg.theme = theme.presetColors(@as(theme.ThemePreset, @enumFromInt(ef.value)));
+        inline for (@import("type_info_fields").enumFields(theme.ThemePreset), 0..) |ef, i| {
+            if (v == i) cfg.theme = theme.presetColors(@as(theme.ThemePreset, @fromBackingInt(@intCast(ef.value))));
         }
         return;
     }
-    inline for (@typeInfo(Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
-            inline for (@typeInfo(@TypeOf(Container.schema)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(Container.schema))) |sf| {
                 const meta: theme.Meta = @field(Container.schema, sf.name);
                 const seg = comptime (meta.key_seg orelse dashed(sf.name));
                 const full = comptime (meta.key orelse (cf.name ++ "." ++ seg));
@@ -542,7 +542,7 @@ pub fn setValue(cfg: *Config, key: []const u8, v: i64) void {
                     switch (@typeInfo(T)) {
                         .bool => ptr.* = v != 0,
                         .int => ptr.* = @intCast(@max(0, v)),
-                        .@"enum" => ptr.* = @enumFromInt(v),
+                        .@"enum" => ptr.* = @fromBackingInt(@intCast(v)),
                         else => {},
                     }
                 }
@@ -566,11 +566,11 @@ pub fn textOf(row: Row, v: i64, buf: []u8) []const u8 {
 
 /// 문자열 줄의 지금 값. **화면이 자기 상태를 들지 않는다** — 값은 config 에서만 읽는다.
 pub fn textValueOf(c: Config, key: []const u8) []const u8 {
-    inline for (@typeInfo(Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
             const sch = Container.schema;
-            inline for (@typeInfo(@TypeOf(sch)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(sch))) |sf| {
                 const meta: theme.Meta = comptime @field(sch, sf.name);
                 const seg = comptime (meta.key_seg orelse dashed(sf.name));
                 const full = comptime (if (meta.key) |k| k else cf.name ++ "." ++ seg);
@@ -735,10 +735,10 @@ test "마지막 서버를 지우면 그 줄이 통째로 사라진다" {
 /// 그 키의 스키마 범위 밖인가. **범위는 스키마가 소유한다** — 화면이 숫자를 따로 적으면
 /// 파일 파싱과 GUI 가 다른 값을 받아들인다.
 pub fn outOfRange(key: []const u8, v: i64) bool {
-    inline for (@typeInfo(Config).@"struct".fields) |cf| {
+    inline for (@import("type_info_fields").structFields(Config)) |cf| {
         const Container = cf.type;
         if (@typeInfo(Container) == .@"struct" and @hasDecl(Container, "schema")) {
-            inline for (@typeInfo(@TypeOf(Container.schema)).@"struct".fields) |sf| {
+            inline for (@import("type_info_fields").structFields(@TypeOf(Container.schema))) |sf| {
                 const meta: theme.Meta = @field(Container.schema, sf.name);
                 const seg = comptime (meta.key_seg orelse dashed(sf.name));
                 const full = comptime (meta.key orelse (cf.name ++ "." ++ seg));

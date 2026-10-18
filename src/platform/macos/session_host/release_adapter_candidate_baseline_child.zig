@@ -124,7 +124,7 @@ const ConcreteAuthority = struct {
         if (!std.mem.endsWith(u8, self.inputs.app_paths.main_executable, suffix)) return error.InvalidAuthority;
         const bundle = self.inputs.app_paths.main_executable[0 .. self.inputs.app_paths.main_executable.len - suffix.len];
         if (!std.mem.eql(u8, std.fs.path.basename(bundle), "Maru.app")) return error.InvalidAuthority;
-        const bundle_z = std.fmt.bufPrintZ(&self.bundle_storage, "{s}", .{bundle}) catch return error.InvalidAuthority;
+        const bundle_z = std.fmt.bufPrintSentinel(&self.bundle_storage, "{s}", .{bundle}, 0) catch return error.InvalidAuthority;
         return .{
             .test_uuid = identity_view.common.test_uuid,
             .candidate_dmg_sha256 = identity_view.common.candidate.dmg_sha256,
@@ -167,18 +167,18 @@ pub const BoundedExecutor = struct {
     pub fn run(self: *@This(), executable: []const u8, args: []const []const u8, env: []const []const u8, directory_fd: c.fd_t, output: []u8, budget_ns: i128) ![]const u8 {
         if (args.len != arg_count or env.len != environment.len) return error.InvalidInput;
         var executable_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-        const executable_z = std.fmt.bufPrintZ(&executable_storage, "{s}", .{executable}) catch return error.InvalidInput;
+        const executable_z = std.fmt.bufPrintSentinel(&executable_storage, "{s}", .{executable}, 0) catch return error.InvalidInput;
         var arg_storage: [arg_count][max_arg_bytes:0]u8 = undefined;
         var argv: [arg_count + 1:null]?[*:0]const u8 = @splat(null);
         argv[0] = executable_z.ptr;
         for (args, 0..) |arg, index| {
-            const value = std.fmt.bufPrintZ(&arg_storage[index], "{s}", .{arg}) catch return error.InvalidInput;
+            const value = std.fmt.bufPrintSentinel(&arg_storage[index], "{s}", .{arg}, 0) catch return error.InvalidInput;
             argv[index + 1] = value.ptr;
         }
         var env_storage: [environment.len][max_arg_bytes:0]u8 = undefined;
         var envp: [environment.len:null]?[*:0]const u8 = @splat(null);
         for (env, 0..) |entry, index| {
-            const value = std.fmt.bufPrintZ(&env_storage[index], "{s}", .{entry}) catch return error.InvalidInput;
+            const value = std.fmt.bufPrintSentinel(&env_storage[index], "{s}", .{entry}, 0) catch return error.InvalidInput;
             envp[index] = value.ptr;
         }
         return bounded.runCaptureEnvironmentStdoutDirectory(self.io, executable_z, &argv, &envp, directory_fd, output, budget_ns);

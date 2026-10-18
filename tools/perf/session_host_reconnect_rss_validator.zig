@@ -139,7 +139,7 @@ test "CR2e-e3a2 RSS validator는 derived delta와 final zero를 독립 재계산
         .schema = expected_schema,
         .build_mode = expected_mode,
         .sample_api = expected_api,
-        .run_nonce = [_]u8{1} ** 16,
+        .run_nonce = @as([16]u8, @splat(1)),
         .executable_path = "/tmp/maru-rss-test",
         .inherited_fd_closed = true,
         .child_pid = 7,
@@ -148,8 +148,8 @@ test "CR2e-e3a2 RSS validator는 derived delta와 final zero를 독립 재계산
         .owner_count = expected_owners,
         .max_entry_bytes = expected_entry_bytes,
         .max_tracked_bytes = expected_tracked_bytes,
-        .baseline_samples = [_]RssSample{.{ .resident = 100, .footprint = 90, .start_abstime = 9 }} ** expected_samples,
-        .pressure_samples = [_]RssSample{.{ .resident = 110, .footprint = 105, .start_abstime = 9 }} ** expected_samples,
+        .baseline_samples = @as([expected_samples]RssSample, @splat(.{ .resident = 100, .footprint = 90, .start_abstime = 9 })),
+        .pressure_samples = @as([expected_samples]RssSample, @splat(.{ .resident = 110, .footprint = 105, .start_abstime = 9 })),
         .baseline_generation_count = expected_owners,
         .pressure_generation_count = expected_owners * 2,
         .baseline_logical_bytes = 10,
@@ -185,7 +185,7 @@ test "CR2e-e3a2 RSS validator는 unknown missing duplicate와 forged delta를 �
         .schema = expected_schema,
         .build_mode = expected_mode,
         .sample_api = expected_api,
-        .run_nonce = [_]u8{1} ** 16,
+        .run_nonce = @as([16]u8, @splat(1)),
         .executable_path = "/tmp/maru-rss-test",
         .inherited_fd_closed = true,
         .child_pid = 7,
@@ -194,8 +194,8 @@ test "CR2e-e3a2 RSS validator는 unknown missing duplicate와 forged delta를 �
         .owner_count = expected_owners,
         .max_entry_bytes = expected_entry_bytes,
         .max_tracked_bytes = expected_tracked_bytes,
-        .baseline_samples = [_]RssSample{.{ .resident = 100, .footprint = 90, .start_abstime = 9 }} ** expected_samples,
-        .pressure_samples = [_]RssSample{.{ .resident = 110, .footprint = 105, .start_abstime = 9 }} ** expected_samples,
+        .baseline_samples = @as([expected_samples]RssSample, @splat(.{ .resident = 100, .footprint = 90, .start_abstime = 9 })),
+        .pressure_samples = @as([expected_samples]RssSample, @splat(.{ .resident = 110, .footprint = 105, .start_abstime = 9 })),
         .baseline_generation_count = expected_owners,
         .pressure_generation_count = expected_owners * 2,
         .baseline_logical_bytes = 10,
@@ -230,6 +230,6 @@ test "CR2e-e3a2 RSS validator는 unknown missing duplicate와 forged delta를 �
     forged.inherited_fd_closed = false;
     try std.testing.expectError(error.InvalidIdentity, validateArtifact(forged));
     forged.inherited_fd_closed = true;
-    forged.run_nonce = [_]u8{0} ** 16;
+    forged.run_nonce = @as([16]u8, @splat(0));
     try std.testing.expectError(error.InvalidIdentity, validateArtifact(forged));
 }

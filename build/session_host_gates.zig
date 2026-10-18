@@ -10,6 +10,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const support = @import("support.zig");
 const addProjectTest = support.addProjectTest;
+const rootPath = support.rootPath;
 const linkSessionHostNotificationAdapter = support.linkSessionHostNotificationAdapter;
 const attachPngCodec = support.attachPngCodec;
 
@@ -17,6 +18,7 @@ const attachPngCodec = support.attachPngCodec;
 /// 필드가 이만큼이라는 사실이 곧 이 덩어리의 결합도다 — 늘어나면 경계를 의심한다.
 pub const Context = struct {
     target: std.Build.ResolvedTarget,
+    macos_sdk: ?[]const u8,
     optimize: std.builtin.OptimizeMode,
     shutdown_wire_contract_mod: *std.Build.Module,
     syntax_mod: *std.Build.Module,
@@ -39,6 +41,7 @@ pub const Context = struct {
 /// 의존하므로 자리를 바꾸지 않는다.
 pub fn register(b: *std.Build, ctx: Context) void {
     const target = ctx.target;
+    const macos_sdk = ctx.macos_sdk;
     const optimize = ctx.optimize;
     const shutdown_wire_contract_mod = ctx.shutdown_wire_contract_mod;
     const syntax_mod = ctx.syntax_mod;
@@ -63,8 +66,8 @@ pub fn register(b: *std.Build, ctx: Context) void {
         "B3-0.4 attach execution transaction focused Debug and ReleaseFast gates",
     );
     const b3_debug_release_modes = .{
-        std.builtin.OptimizeMode.Debug,
-        std.builtin.OptimizeMode.ReleaseFast,
+        std.builtin.OptimizeMode.debug,
+        std.builtin.OptimizeMode.fast,
     };
     const session_host_b3_1_step = b.step(
         "test-session-host-b3-1",
@@ -259,7 +262,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         "CR0b connection incident neutral contract Debug and ReleaseFast gates",
     );
     session_host_cr0b_step.dependOn(session_host_cr3b_r1_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr0b_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr0b_optimize| {
         const cr0b_binding_contract_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/observability/incident_binding_contract.zig"),
@@ -688,14 +691,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr0b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr0b_boundary_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_boundary_tests.step);
-        if (cr0b_optimize == .Debug) boundary_step.dependOn(&run_cr0b_boundary_tests.step);
+        if (cr0b_optimize == .debug) boundary_step.dependOn(&run_cr0b_boundary_tests.step);
     }
     const session_host_cr1_step = b.step(
         "test-session-host-cr1",
         "CR1 reconnect scheduler admission Debug and ReleaseFast gates",
     );
     session_host_cr1_step.dependOn(session_host_cr0b_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr1_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr1_optimize| {
         const cr1_scheduler_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/reconnect_scheduler.zig"),
@@ -727,14 +730,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr1_boundary_tests.setCwd(b.path("."));
         session_host_cr1_step.dependOn(&run_cr1_boundary_tests.step);
-        if (cr1_optimize == .Debug) boundary_step.dependOn(&run_cr1_boundary_tests.step);
+        if (cr1_optimize == .debug) boundary_step.dependOn(&run_cr1_boundary_tests.step);
     }
     const session_host_cr2a_step = b.step(
         "test-session-host-cr2a",
         "CR2a RemoteGeneration extraction Debug and ReleaseFast gates",
     );
     session_host_cr2a_step.dependOn(session_host_cr1_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2a_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2a_optimize| {
         const cr2a_generation_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
@@ -764,14 +767,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2a_boundary_tests.setCwd(b.path("."));
         session_host_cr2a_step.dependOn(&run_cr2a_boundary_tests.step);
-        if (cr2a_optimize == .Debug) boundary_step.dependOn(&run_cr2a_boundary_tests.step);
+        if (cr2a_optimize == .debug) boundary_step.dependOn(&run_cr2a_boundary_tests.step);
     }
     const session_host_cr2b_step = b.step(
         "test-session-host-cr2b",
         "CR2b stable ScreenSource proxy Debug and ReleaseFast gates",
     );
     session_host_cr2b_step.dependOn(session_host_cr2a_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2b_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2b_optimize| {
         const cr2b_proxy_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/stable_screen_source.zig"),
@@ -812,14 +815,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2b_boundary_tests.setCwd(b.path("."));
         session_host_cr2b_step.dependOn(&run_cr2b_boundary_tests.step);
-        if (cr2b_optimize == .Debug) boundary_step.dependOn(&run_cr2b_boundary_tests.step);
+        if (cr2b_optimize == .debug) boundary_step.dependOn(&run_cr2b_boundary_tests.step);
     }
     const session_host_cr2c_step = b.step(
         "test-session-host-cr2c",
         "CR2c local and remote InputOwner facade Debug and ReleaseFast gates",
     );
     session_host_cr2c_step.dependOn(session_host_cr2b_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2c_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2c_optimize| {
         const cr2c_app_module = b.createModule(.{
             .root_source_file = b.path("src/app.zig"),
             .target = target,
@@ -873,14 +876,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2c_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2c_boundary_tests.setCwd(b.path("."));
         session_host_cr2c_step.dependOn(&run_cr2c_boundary_tests.step);
-        if (cr2c_optimize == .Debug) boundary_step.dependOn(&run_cr2c_boundary_tests.step);
+        if (cr2c_optimize == .debug) boundary_step.dependOn(&run_cr2c_boundary_tests.step);
     }
     const session_host_cr2d1_step = b.step(
         "test-session-host-cr2d1",
         "CR2d1 remote paste IME and OSC52 stable queue Debug and ReleaseFast gates",
     );
     session_host_cr2d1_step.dependOn(session_host_cr2c_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2d1_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2d1_optimize| {
         const cr2d1_app_module = b.createModule(.{
             .root_source_file = b.path("src/app.zig"),
             .target = target,
@@ -979,14 +982,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2d1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2d1_boundary_tests.setCwd(b.path("."));
         session_host_cr2d1_step.dependOn(&run_cr2d1_boundary_tests.step);
-        if (cr2d1_optimize == .Debug) boundary_step.dependOn(&run_cr2d1_boundary_tests.step);
+        if (cr2d1_optimize == .debug) boundary_step.dependOn(&run_cr2d1_boundary_tests.step);
     }
     const session_host_cr2d2_step = b.step(
         "test-session-host-cr2d2",
         "CR2d2 ordered key and control stable queue Debug and ReleaseFast gates",
     );
     session_host_cr2d2_step.dependOn(session_host_cr2d1_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2d2_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2d2_optimize| {
         const cr2d2_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
@@ -1014,14 +1017,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2d2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2d2_boundary_tests.setCwd(b.path("."));
         session_host_cr2d2_step.dependOn(&run_cr2d2_boundary_tests.step);
-        if (cr2d2_optimize == .Debug) boundary_step.dependOn(&run_cr2d2_boundary_tests.step);
+        if (cr2d2_optimize == .debug) boundary_step.dependOn(&run_cr2d2_boundary_tests.step);
     }
     const session_host_cr2d3_step = b.step(
         "test-session-host-cr2d3",
         "CR2d3 stable event cursor Debug and ReleaseFast gates",
     );
     session_host_cr2d3_step.dependOn(session_host_cr2d2_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2d3_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2d3_optimize| {
         const cr2d3_cursor_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/app/event_cursor.zig"),
@@ -1093,14 +1096,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2d3_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2d3_boundary_tests.setCwd(b.path("."));
         session_host_cr2d3_step.dependOn(&run_cr2d3_boundary_tests.step);
-        if (cr2d3_optimize == .Debug) boundary_step.dependOn(&run_cr2d3_boundary_tests.step);
+        if (cr2d3_optimize == .debug) boundary_step.dependOn(&run_cr2d3_boundary_tests.step);
     }
     const session_host_cr2d4_step = b.step(
         "test-session-host-cr2d4",
         "CR2d4 cross-Window stable state Debug and ReleaseFast gates",
     );
     session_host_cr2d4_step.dependOn(session_host_cr2d3_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2d4_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2d4_optimize| {
         const cr2d4_app_session_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),
@@ -1144,7 +1147,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2d4_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2d4_boundary_tests.setCwd(b.path("."));
         session_host_cr2d4_step.dependOn(&run_cr2d4_boundary_tests.step);
-        if (cr2d4_optimize == .Debug) boundary_step.dependOn(&run_cr2d4_boundary_tests.step);
+        if (cr2d4_optimize == .debug) boundary_step.dependOn(&run_cr2d4_boundary_tests.step);
     }
 
     const session_host_cr2e_a_step = b.step(
@@ -1152,7 +1155,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         "CR2e-a reconnect reducer Debug and ReleaseFast gates",
     );
     session_host_cr2e_a_step.dependOn(session_host_cr2d4_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_a_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2e_a_optimize| {
         const cr2e_a_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_reconnect_reducer.zig"),
@@ -1183,7 +1186,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2e_a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_a_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_a_step.dependOn(&run_cr2e_a_boundary_tests.step);
-        if (cr2e_a_optimize == .Debug) boundary_step.dependOn(&run_cr2e_a_boundary_tests.step);
+        if (cr2e_a_optimize == .debug) boundary_step.dependOn(&run_cr2e_a_boundary_tests.step);
     }
 
     const session_host_cr2e_b_step = b.step(
@@ -1191,7 +1194,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         "CR2e-b mutation sealing and PausedPaste Debug and ReleaseFast gates",
     );
     session_host_cr2e_b_step.dependOn(session_host_cr2e_a_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_b_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2e_b_optimize| {
         const cr2e_b_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_reconnect_mutation_seal.zig"),
@@ -1222,14 +1225,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2e_b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_b_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_b_step.dependOn(&run_cr2e_b_boundary_tests.step);
-        if (cr2e_b_optimize == .Debug) boundary_step.dependOn(&run_cr2e_b_boundary_tests.step);
+        if (cr2e_b_optimize == .debug) boundary_step.dependOn(&run_cr2e_b_boundary_tests.step);
     }
     const session_host_cr2e_c_step = b.step(
         "test-session-host-cr2e-c",
         "CR2e-c heap-pinned generation slot Debug and ReleaseFast gates",
     );
     session_host_cr2e_c_step.dependOn(session_host_cr2e_b_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_c_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2e_c_optimize| {
         const cr2e_c_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_reconnect_generation_slot.zig"),
@@ -1266,14 +1269,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2e_c_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_c_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_c_step.dependOn(&run_cr2e_c_boundary_tests.step);
-        if (cr2e_c_optimize == .Debug) boundary_step.dependOn(&run_cr2e_c_boundary_tests.step);
+        if (cr2e_c_optimize == .debug) boundary_step.dependOn(&run_cr2e_c_boundary_tests.step);
     }
     const session_host_cr2e_d_step = b.step(
         "test-session-host-cr2e-d",
         "CR2e-d PreparedReconnect product generation Debug and ReleaseFast gates",
     );
     session_host_cr2e_d_step.dependOn(session_host_cr2e_c_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_d_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2e_d_optimize| {
         const cr2e_d_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
@@ -1301,14 +1304,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2e_d_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_d_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_d_step.dependOn(&run_cr2e_d_boundary_tests.step);
-        if (cr2e_d_optimize == .Debug) boundary_step.dependOn(&run_cr2e_d_boundary_tests.step);
+        if (cr2e_d_optimize == .debug) boundary_step.dependOn(&run_cr2e_d_boundary_tests.step);
     }
     const session_host_cr2e_e1_step = b.step(
         "test-session-host-cr2e-e1",
         "CR2e-e1 RemoteRuntime generation accessor Debug and ReleaseFast gates",
     );
     session_host_cr2e_e1_step.dependOn(session_host_cr2e_d_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_e1_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2e_e1_optimize| {
         const cr2e_e1_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
@@ -1336,14 +1339,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2e_e1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e1_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e1_step.dependOn(&run_cr2e_e1_boundary_tests.step);
-        if (cr2e_e1_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e1_boundary_tests.step);
+        if (cr2e_e1_optimize == .debug) boundary_step.dependOn(&run_cr2e_e1_boundary_tests.step);
     }
     const session_host_cr2e_e2a_step = b.step(
         "test-session-host-cr2e-e2a",
         "CR2e-e2a product GenerationSlot storage Debug and ReleaseFast gates",
     );
     session_host_cr2e_e2a_step.dependOn(session_host_cr2e_e1_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_e2a_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2e_e2a_optimize| {
         const cr2e_e2a_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
@@ -1371,14 +1374,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2e_e2a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e2a_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e2a_step.dependOn(&run_cr2e_e2a_boundary_tests.step);
-        if (cr2e_e2a_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e2a_boundary_tests.step);
+        if (cr2e_e2a_optimize == .debug) boundary_step.dependOn(&run_cr2e_e2a_boundary_tests.step);
     }
     const session_host_cr2e_e2b_step = b.step(
         "test-session-host-cr2e-e2b",
         "CR2e-e2b product reconnect executor parity Debug and ReleaseFast gates",
     );
     session_host_cr2e_e2b_step.dependOn(session_host_cr2e_e2a_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_e2b_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2e_e2b_optimize| {
         const cr2e_e2b_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
@@ -1406,7 +1409,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2e_e2b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e2b_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e2b_step.dependOn(&run_cr2e_e2b_boundary_tests.step);
-        if (cr2e_e2b_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e2b_boundary_tests.step);
+        if (cr2e_e2b_optimize == .debug) boundary_step.dependOn(&run_cr2e_e2b_boundary_tests.step);
     }
 
     const session_host_cr2e_e3a1_step = b.step(
@@ -1414,7 +1417,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         "CR2e-e3a1 reconnect resident ledger Debug and ReleaseFast gates",
     );
     session_host_cr2e_e3a1_step.dependOn(session_host_cr2e_e2b_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_e3a1_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2e_e3a1_optimize| {
         const cr2e_e3a1_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
@@ -1442,14 +1445,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2e_e3a1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e3a1_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e3a1_step.dependOn(&run_cr2e_e3a1_boundary_tests.step);
-        if (cr2e_e3a1_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e3a1_boundary_tests.step);
+        if (cr2e_e3a1_optimize == .debug) boundary_step.dependOn(&run_cr2e_e3a1_boundary_tests.step);
     }
     const session_host_cr2e_e3a2_step = b.step(
         "test-session-host-cr2e-e3a2",
         "CR2e-e3a2 reconnect resident budget and RSS workload gates",
     );
     session_host_cr2e_e3a2_step.dependOn(session_host_cr2e_e3a1_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_e3a2_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2e_e3a2_optimize| {
         const cr2e_e3a2_budget_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
@@ -1493,13 +1496,13 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2e_e3a2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e3a2_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e3a2_step.dependOn(&run_cr2e_e3a2_boundary_tests.step);
-        if (cr2e_e3a2_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e3a2_boundary_tests.step);
+        if (cr2e_e3a2_optimize == .debug) boundary_step.dependOn(&run_cr2e_e3a2_boundary_tests.step);
     }
     const cr2e_e3a2_workload_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .link_libc = true,
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
@@ -1513,7 +1516,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
     const cr2e_e3a2_remote_runtime_mod = b.createModule(.{
         .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
         .link_libc = true,
         .imports = &.{.{ .name = "maru", .module = maru_mod }},
     });
@@ -1521,17 +1524,18 @@ pub fn register(b: *std.Build, ctx: Context) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_reconnect_rss.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .link_libc = true,
             .imports = &.{.{ .name = "remote_runtime", .module = cr2e_e3a2_remote_runtime_mod }},
         }),
         .filters = &.{"CR2e-e3a2 RSS child는"},
     });
+    support.attachDarwinPerfCImport(b, cr2e_e3a2_rss_child_tests.root_module);
     const cr2e_e3a2_rss_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_reconnect_rss.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .link_libc = true,
             .imports = &.{.{ .name = "remote_runtime", .module = cr2e_e3a2_remote_runtime_mod }},
         }),
@@ -1541,6 +1545,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .mode = .simple,
         },
     });
+    support.attachDarwinPerfCImport(b, cr2e_e3a2_rss_tests.root_module);
     const run_cr2e_e3a2_rss_tests = b.addRunArtifact(cr2e_e3a2_rss_tests);
     run_cr2e_e3a2_rss_tests.addArtifactArg(cr2e_e3a2_rss_child_tests);
     run_cr2e_e3a2_rss_tests.addArg("--maru-expect-tests=2");
@@ -1554,7 +1559,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 "tools/perf/session_host_reconnect_rss_validator.zig",
             ),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         }),
     });
     const run_cr2e_e3a2_validator = b.addRunArtifact(cr2e_e3a2_validator);
@@ -1570,7 +1575,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         "CR2e-e3b1 reconnect admission policy budget gates",
     );
     session_host_cr2e_e3b1_step.dependOn(session_host_cr2e_e3a2_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_e3b1_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2e_e3b1_optimize| {
         const cr2e_e3b1_budget_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
@@ -1599,14 +1604,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2e_e3b1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e3b1_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e3b1_step.dependOn(&run_cr2e_e3b1_boundary_tests.step);
-        if (cr2e_e3b1_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e3b1_boundary_tests.step);
+        if (cr2e_e3b1_optimize == .debug) boundary_step.dependOn(&run_cr2e_e3b1_boundary_tests.step);
     }
     const session_host_cr2e_e3b2_step = b.step(
         "test-session-host-cr2e-e3b2",
         "CR2e-e3b2 sealed admission drain and stable executor budget gates",
     );
     session_host_cr2e_e3b2_step.dependOn(session_host_cr2e_e3b1_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_e3b2_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2e_e3b2_optimize| {
         const cr2e_e3b2_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
@@ -1649,7 +1654,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2e_e3b2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e3b2_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e3b2_step.dependOn(&run_cr2e_e3b2_boundary_tests.step);
-        if (cr2e_e3b2_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e3b2_boundary_tests.step);
+        if (cr2e_e3b2_optimize == .debug) boundary_step.dependOn(&run_cr2e_e3b2_boundary_tests.step);
     }
     // 🔥 **host 단위 resident charge — runtime 8개 이상인 host 가 재접속을 영영 못 하던 것**(2026-09-29).
     // e3b2 체인과 따로 둔다: 이 판정자는 in-process socketpair fixture 만 써서 실제 host 를 띄우지 않고,
@@ -1658,7 +1663,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         "test-session-host-reconnect-host-charge",
         "Reconnect admission charges one resident lease per host, and reconnect publication re-applies the layout viewport",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |host_charge_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |host_charge_optimize| {
         const host_charge_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
@@ -1678,7 +1683,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_host_charge_tests.addArg("--maru-expect-tests=12");
         run_host_charge_tests.setCwd(b.path("."));
         session_host_reconnect_host_charge_step.dependOn(&run_host_charge_tests.step);
-        if (host_charge_optimize == .Debug) macos_only_test_step.dependOn(&run_host_charge_tests.step);
+        if (host_charge_optimize == .debug) macos_only_test_step.dependOn(&run_host_charge_tests.step);
 
         const host_charge_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -1692,14 +1697,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_host_charge_boundary_tests.addArg("--maru-expect-tests=2");
         run_host_charge_boundary_tests.setCwd(b.path("."));
         session_host_reconnect_host_charge_step.dependOn(&run_host_charge_boundary_tests.step);
-        if (host_charge_optimize == .Debug) boundary_step.dependOn(&run_host_charge_boundary_tests.step);
+        if (host_charge_optimize == .debug) boundary_step.dependOn(&run_host_charge_boundary_tests.step);
     }
     const session_host_cr2e_e3c1_step = b.step(
         "test-session-host-cr2e-e3c1",
         "CR2e-e3c1 reconnect-only SessionHostCoordinator ingress gates",
     );
     session_host_cr2e_e3c1_step.dependOn(session_host_cr2e_e3b2_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_e3c1_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2e_e3c1_optimize| {
         const cr2e_e3c1_coordinator_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/session_host_coordinator.zig"),
@@ -1727,14 +1732,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2e_e3c1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e3c1_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e3c1_step.dependOn(&run_cr2e_e3c1_boundary_tests.step);
-        if (cr2e_e3c1_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e3c1_boundary_tests.step);
+        if (cr2e_e3c1_optimize == .debug) boundary_step.dependOn(&run_cr2e_e3c1_boundary_tests.step);
     }
     const session_host_cr2e_e3c2_step = b.step(
         "test-session-host-cr2e-e3c2",
         "CR2e-e3c2 typed external reconnect receipt gates",
     );
     session_host_cr2e_e3c2_step.dependOn(session_host_cr2e_e3c1_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_e3c2_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2e_e3c2_optimize| {
         const cr2e_e3c2_coordinator_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/session_host_coordinator.zig"),
@@ -1762,14 +1767,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2e_e3c2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e3c2_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e3c2_step.dependOn(&run_cr2e_e3c2_boundary_tests.step);
-        if (cr2e_e3c2_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e3c2_boundary_tests.step);
+        if (cr2e_e3c2_optimize == .debug) boundary_step.dependOn(&run_cr2e_e3c2_boundary_tests.step);
     }
     const session_host_cr2e_e3c3_step = b.step(
         "test-session-host-cr2e-e3c3",
         "CR2e-e3c3 typed close event and mixed reconnect outcome gates",
     );
     session_host_cr2e_e3c3_step.dependOn(session_host_cr2e_e3c2_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_e3c3_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr2e_e3c3_optimize| {
         const cr2e_e3c3_coordinator_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/session_host_coordinator.zig"),
@@ -1797,14 +1802,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr2e_e3c3_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr2e_e3c3_boundary_tests.setCwd(b.path("."));
         session_host_cr2e_e3c3_step.dependOn(&run_cr2e_e3c3_boundary_tests.step);
-        if (cr2e_e3c3_optimize == .Debug) boundary_step.dependOn(&run_cr2e_e3c3_boundary_tests.step);
+        if (cr2e_e3c3_optimize == .debug) boundary_step.dependOn(&run_cr2e_e3c3_boundary_tests.step);
     }
     const session_host_cr3b_r2a_step = b.step(
         "test-session-host-cr3b-r2a",
         "CR3b R2a store-only detach and unavailable placeholder Debug and ReleaseFast gates",
     );
     session_host_cr3b_r2a_step.dependOn(session_host_cr2e_e3c3_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr3b_r2a_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr3b_r2a_optimize| {
         const cr3b_r2a_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
@@ -1861,14 +1866,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr3b_r2a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr3b_r2a_boundary_tests.setCwd(b.path("."));
         session_host_cr3b_r2a_step.dependOn(&run_cr3b_r2a_boundary_tests.step);
-        if (cr3b_r2a_optimize == .Debug) boundary_step.dependOn(&run_cr3b_r2a_boundary_tests.step);
+        if (cr3b_r2a_optimize == .debug) boundary_step.dependOn(&run_cr3b_r2a_boundary_tests.step);
     }
     const session_host_cr3b_r2b_step = b.step(
         "test-session-host-cr3b-r2b",
         "CR3b R2b final-address detached cleanup handle Debug and ReleaseFast gates",
     );
     session_host_cr3b_r2b_step.dependOn(session_host_cr3b_r2a_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr3b_r2b_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr3b_r2b_optimize| {
         const cr3b_r2b_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
@@ -1930,14 +1935,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr3b_r2b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr3b_r2b_boundary_tests.setCwd(b.path("."));
         session_host_cr3b_r2b_step.dependOn(&run_cr3b_r2b_boundary_tests.step);
-        if (cr3b_r2b_optimize == .Debug) boundary_step.dependOn(&run_cr3b_r2b_boundary_tests.step);
+        if (cr3b_r2b_optimize == .debug) boundary_step.dependOn(&run_cr3b_r2b_boundary_tests.step);
     }
     const session_host_cr3b_r2c_step = b.step(
         "test-session-host-cr3b-r2c",
         "CR3b R2c final Client node and atomic current generation publication gates",
     );
     session_host_cr3b_r2c_step.dependOn(session_host_cr3b_r2b_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr3b_r2c_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr3b_r2c_optimize| {
         const cr3b_r2c_client_slot_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/client_slot.zig"),
@@ -1980,14 +1985,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr3b_r2c_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr3b_r2c_boundary_tests.setCwd(b.path("."));
         session_host_cr3b_r2c_step.dependOn(&run_cr3b_r2c_boundary_tests.step);
-        if (cr3b_r2c_optimize == .Debug) boundary_step.dependOn(&run_cr3b_r2c_boundary_tests.step);
+        if (cr3b_r2c_optimize == .debug) boundary_step.dependOn(&run_cr3b_r2c_boundary_tests.step);
     }
     const session_host_cr3b_r3_step = b.step(
         "test-session-host-cr3b-r3",
         "CR3b R3 bounded retired Client tick-end reclaim gates",
     );
     session_host_cr3b_r3_step.dependOn(session_host_cr3b_r2c_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr3b_r3_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr3b_r3_optimize| {
         const cr3b_r3_client_slot_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/client_slot.zig"),
@@ -2030,14 +2035,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr3b_r3_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr3b_r3_boundary_tests.setCwd(b.path("."));
         session_host_cr3b_r3_step.dependOn(&run_cr3b_r3_boundary_tests.step);
-        if (cr3b_r3_optimize == .Debug) boundary_step.dependOn(&run_cr3b_r3_boundary_tests.step);
+        if (cr3b_r3_optimize == .debug) boundary_step.dependOn(&run_cr3b_r3_boundary_tests.step);
     }
     const session_host_cr3c_c1_step = b.step(
         "test-session-host-cr3c-c1",
         "CR3c C1 Client and RemoteGeneration publication integration gates",
     );
     session_host_cr3c_c1_step.dependOn(session_host_cr3b_r3_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr3c_c1_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr3c_c1_optimize| {
         const cr3c_c1_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
@@ -2065,14 +2070,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr3c_c1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr3c_c1_boundary_tests.setCwd(b.path("."));
         session_host_cr3c_c1_step.dependOn(&run_cr3c_c1_boundary_tests.step);
-        if (cr3c_c1_optimize == .Debug) boundary_step.dependOn(&run_cr3c_c1_boundary_tests.step);
+        if (cr3c_c1_optimize == .debug) boundary_step.dependOn(&run_cr3c_c1_boundary_tests.step);
     }
     const session_host_cr3c_c2_step = b.step(
         "test-session-host-cr3c-c2",
         "CR3c C2 ordered RemoteGeneration and retired Client reclaim gates",
     );
     session_host_cr3c_c2_step.dependOn(session_host_cr3c_c1_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr3c_c2_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr3c_c2_optimize| {
         const cr3c_c2_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
@@ -2100,7 +2105,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr3c_c2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr3c_c2_boundary_tests.setCwd(b.path("."));
         session_host_cr3c_c2_step.dependOn(&run_cr3c_c2_boundary_tests.step);
-        if (cr3c_c2_optimize == .Debug) boundary_step.dependOn(&run_cr3c_c2_boundary_tests.step);
+        if (cr3c_c2_optimize == .debug) boundary_step.dependOn(&run_cr3c_c2_boundary_tests.step);
     }
     const session_host_cr4a_step = b.step(
         "test-session-host-cr4a",
@@ -2113,7 +2118,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
     );
     session_host_cr4a_step.dependOn(session_host_cr4a_issuer_step);
     var previous_cr4a_issuer_actual: ?*std.Build.Step = null;
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr4a_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr4a_optimize| {
         const cr4a_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
@@ -2389,14 +2394,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr4a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr4a_boundary_tests.setCwd(b.path("."));
         session_host_cr4a_step.dependOn(&run_cr4a_boundary_tests.step);
-        if (cr4a_optimize == .Debug) boundary_step.dependOn(&run_cr4a_boundary_tests.step);
+        if (cr4a_optimize == .debug) boundary_step.dependOn(&run_cr4a_boundary_tests.step);
     }
     const session_host_cr4b_step = b.step(
         "test-session-host-cr4b",
         "CR4b stable mutation seal and controller takeover gates",
     );
     session_host_cr4b_step.dependOn(session_host_cr4a_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr4b_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr4b_optimize| {
         const cr4b_mutation_contract_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/reconnect_mutation_seal.zig"),
@@ -2478,14 +2483,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr4b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr4b_boundary_tests.setCwd(b.path("."));
         session_host_cr4b_step.dependOn(&run_cr4b_boundary_tests.step);
-        if (cr4b_optimize == .Debug) boundary_step.dependOn(&run_cr4b_boundary_tests.step);
+        if (cr4b_optimize == .debug) boundary_step.dependOn(&run_cr4b_boundary_tests.step);
     }
     const session_host_cr4c_c1_step = b.step(
         "test-session-host-cr4c-c1",
         "CR4c C1 unpublished controller binding promotion gates",
     );
     session_host_cr4c_c1_step.dependOn(session_host_cr4b_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr4c_c1_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr4c_c1_optimize| {
         const cr4c_c1_backend_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
@@ -2513,14 +2518,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr4c_c1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr4c_c1_boundary_tests.setCwd(b.path("."));
         session_host_cr4c_c1_step.dependOn(&run_cr4c_c1_boundary_tests.step);
-        if (cr4c_c1_optimize == .Debug) boundary_step.dependOn(&run_cr4c_c1_boundary_tests.step);
+        if (cr4c_c1_optimize == .debug) boundary_step.dependOn(&run_cr4c_c1_boundary_tests.step);
     }
     const session_host_cr4c_c2_step = b.step(
         "test-session-host-cr4c-c2",
         "CR4c C2 forced resize, generation publication, input and ordered reclaim gates",
     );
     session_host_cr4c_c2_step.dependOn(session_host_cr4c_c1_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr4c_c2_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr4c_c2_optimize| {
         const cr4c_c2_backend_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
@@ -2590,7 +2595,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr4c_c2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr4c_c2_boundary_tests.setCwd(b.path("."));
         session_host_cr4c_c2_step.dependOn(&run_cr4c_c2_boundary_tests.step);
-        if (cr4c_c2_optimize == .Debug) boundary_step.dependOn(&run_cr4c_c2_boundary_tests.step);
+        if (cr4c_c2_optimize == .debug) boundary_step.dependOn(&run_cr4c_c2_boundary_tests.step);
     }
     const session_host_cr4c_step = b.step(
         "test-session-host-cr4c",
@@ -2602,7 +2607,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         "CR5a canonical multi-runtime ledger contract gates",
     );
     session_host_cr5a_step.dependOn(session_host_cr4c_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr5a_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr5a_optimize| {
         const cr5a_contract_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/host_reconnect_runtime_ledger.zig"),
@@ -2629,14 +2634,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5a_boundary_tests.setCwd(b.path("."));
         session_host_cr5a_step.dependOn(&run_cr5a_boundary_tests.step);
-        if (cr5a_optimize == .Debug) boundary_step.dependOn(&run_cr5a_boundary_tests.step);
+        if (cr5a_optimize == .debug) boundary_step.dependOn(&run_cr5a_boundary_tests.step);
     }
     const session_host_cr5b1_step = b.step(
         "test-session-host-cr5b1",
         "CR5b-1 backend-owned final-address runtime-set capture gates",
     );
     session_host_cr5b1_step.dependOn(session_host_cr5a_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr5b1_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr5b1_optimize| {
         const cr5b1_backend_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
@@ -2664,14 +2669,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5b1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5b1_boundary_tests.setCwd(b.path("."));
         session_host_cr5b1_step.dependOn(&run_cr5b1_boundary_tests.step);
-        if (cr5b1_optimize == .Debug) boundary_step.dependOn(&run_cr5b1_boundary_tests.step);
+        if (cr5b1_optimize == .debug) boundary_step.dependOn(&run_cr5b1_boundary_tests.step);
     }
     const session_host_cr5b2a_step = b.step(
         "test-session-host-cr5b2a",
         "CR5b-2a host-wide prepublication retirement preparation gates",
     );
     session_host_cr5b2a_step.dependOn(session_host_cr5b1_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr5b2a_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr5b2a_optimize| {
         const cr5b2a_screen_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/stable_screen_source.zig"),
@@ -2714,14 +2719,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5b2a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5b2a_boundary_tests.setCwd(b.path("."));
         session_host_cr5b2a_step.dependOn(&run_cr5b2a_boundary_tests.step);
-        if (cr5b2a_optimize == .Debug) boundary_step.dependOn(&run_cr5b2a_boundary_tests.step);
+        if (cr5b2a_optimize == .debug) boundary_step.dependOn(&run_cr5b2a_boundary_tests.step);
     }
     const session_host_cr5b2b_step = b.step(
         "test-session-host-cr5b2b",
         "CR5b-2b host-wide shared Client replacement gates",
     );
     session_host_cr5b2b_step.dependOn(session_host_cr5b2a_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr5b2b_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr5b2b_optimize| {
         const cr5b2b_client_slot_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/client_slot.zig"),
@@ -2764,14 +2769,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5b2b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5b2b_boundary_tests.setCwd(b.path("."));
         session_host_cr5b2b_step.dependOn(&run_cr5b2b_boundary_tests.step);
-        if (cr5b2b_optimize == .Debug) boundary_step.dependOn(&run_cr5b2b_boundary_tests.step);
+        if (cr5b2b_optimize == .debug) boundary_step.dependOn(&run_cr5b2b_boundary_tests.step);
     }
     const session_host_cr5b2c_step = b.step(
         "test-session-host-cr5b2c",
         "CR5b-2c ordered runtime transaction and terminal summary gates",
     );
     session_host_cr5b2c_step.dependOn(session_host_cr5b2b_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr5b2c_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr5b2c_optimize| {
         const cr5b2c_contract_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/host_reconnect_runtime_transaction.zig"),
@@ -2814,14 +2819,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5b2c_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5b2c_boundary_tests.setCwd(b.path("."));
         session_host_cr5b2c_step.dependOn(&run_cr5b2c_boundary_tests.step);
-        if (cr5b2c_optimize == .Debug) boundary_step.dependOn(&run_cr5b2c_boundary_tests.step);
+        if (cr5b2c_optimize == .debug) boundary_step.dependOn(&run_cr5b2c_boundary_tests.step);
     }
     const session_host_cr5c_step = b.step(
         "test-session-host-cr5c",
         "CR5c host-wide terminal connection failure gates",
     );
     session_host_cr5c_step.dependOn(session_host_cr5b2c_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr5c_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr5c_optimize| {
         const cr5c_contract_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/host_reconnect_runtime_transaction.zig"),
@@ -2864,14 +2869,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5c_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5c_boundary_tests.setCwd(b.path("."));
         session_host_cr5c_step.dependOn(&run_cr5c_boundary_tests.step);
-        if (cr5c_optimize == .Debug) boundary_step.dependOn(&run_cr5c_boundary_tests.step);
+        if (cr5c_optimize == .debug) boundary_step.dependOn(&run_cr5c_boundary_tests.step);
     }
     const session_host_cr5d1_step = b.step(
         "test-session-host-cr5d1",
         "CR5d-1 two-Window reconnect transaction prerequisite gates",
     );
     session_host_cr5d1_step.dependOn(session_host_cr5c_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr5d1_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr5d1_optimize| {
         const cr5d1_contract_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/host_reconnect_window_transaction.zig"),
@@ -2899,14 +2904,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5d1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5d1_boundary_tests.setCwd(b.path("."));
         session_host_cr5d1_step.dependOn(&run_cr5d1_boundary_tests.step);
-        if (cr5d1_optimize == .Debug) boundary_step.dependOn(&run_cr5d1_boundary_tests.step);
+        if (cr5d1_optimize == .debug) boundary_step.dependOn(&run_cr5d1_boundary_tests.step);
     }
     const session_host_cr5d2_step = b.step(
         "test-session-host-cr5d2",
         "CR5d-2 actual two-Window move and abandon wiring gates",
     );
     session_host_cr5d2_step.dependOn(session_host_cr5d1_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr5d2_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr5d2_optimize| {
         const cr5d2_app_session_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),
@@ -2950,14 +2955,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5d2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5d2_boundary_tests.setCwd(b.path("."));
         session_host_cr5d2_step.dependOn(&run_cr5d2_boundary_tests.step);
-        if (cr5d2_optimize == .Debug) boundary_step.dependOn(&run_cr5d2_boundary_tests.step);
+        if (cr5d2_optimize == .debug) boundary_step.dependOn(&run_cr5d2_boundary_tests.step);
     }
     const session_host_cr6a1_step = b.step(
         "test-session-host-cr6a1",
         "CR6a-1 Recovered Sessions derived projection owner gates",
     );
     session_host_cr6a1_step.dependOn(session_host_cr5d2_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr6a1_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr6a1_optimize| {
         const cr6a1_app_session_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),
@@ -3014,14 +3019,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr6a1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr6a1_boundary_tests.setCwd(b.path("."));
         session_host_cr6a1_step.dependOn(&run_cr6a1_boundary_tests.step);
-        if (cr6a1_optimize == .Debug) boundary_step.dependOn(&run_cr6a1_boundary_tests.step);
+        if (cr6a1_optimize == .debug) boundary_step.dependOn(&run_cr6a1_boundary_tests.step);
     }
     const session_host_cr6a2_step = b.step(
         "test-session-host-cr6a2",
         "CR6a-2 launch recovery collector and primary sidebar gates",
     );
     session_host_cr6a2_step.dependOn(session_host_cr6a1_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr6a2_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr6a2_optimize| {
         const cr6a2_app_session_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),
@@ -3067,6 +3072,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .filters = &.{"CR6a-2 ABI는"},
         });
         cr6a2_abi_tests.root_module.addIncludePath(b.path("src/platform/macos"));
+        support.attachAppHostAbiCImport(b, cr6a2_abi_tests.root_module);
         if (target.result.os.tag == .macos) {
             cr6a2_abi_tests.root_module.addCSourceFile(.{
                 .file = b.path("src/platform/macos/coretext_smoke.m"),
@@ -3095,7 +3101,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr6a2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr6a2_boundary_tests.setCwd(b.path("."));
         session_host_cr6a2_step.dependOn(&run_cr6a2_boundary_tests.step);
-        if (cr6a2_optimize == .Debug) boundary_step.dependOn(&run_cr6a2_boundary_tests.step);
+        if (cr6a2_optimize == .debug) boundary_step.dependOn(&run_cr6a2_boundary_tests.step);
     }
     const session_host_cr6b_step = b.step(
         "test-session-host-cr6b",
@@ -3106,7 +3112,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         "CR6b recovered-session real-host product rows only",
     );
     session_host_cr6b_step.dependOn(session_host_cr6a2_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr6b_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr6b_optimize| {
         const cr6b_contract_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/recovered_session_adopt.zig"),
@@ -3187,7 +3193,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr6b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr6b_boundary_tests.setCwd(b.path("."));
         session_host_cr6b_step.dependOn(&run_cr6b_boundary_tests.step);
-        if (cr6b_optimize == .Debug) boundary_step.dependOn(&run_cr6b_boundary_tests.step);
+        if (cr6b_optimize == .debug) boundary_step.dependOn(&run_cr6b_boundary_tests.step);
     }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
@@ -5826,6 +5832,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
         });
+        support.attachArrayRepeatImports(b, process_runtime_bootstrap_fixture.root_module);
         const run_process_runtime_bootstrap_fixture =
             b.addRunArtifact(process_runtime_bootstrap_fixture);
         run_session_host_tests.step.dependOn(&run_process_runtime_bootstrap_fixture.step);
@@ -5913,7 +5920,8 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 },
             }),
         });
-        linkSessionHostNotificationAdapter(b, session_host_restore_test);
+        support.attachArrayRepeatImports(b, session_host_restore_test.root_module);
+        linkSessionHostNotificationAdapter(b, session_host_restore_test, macos_sdk);
         // 서로 다른 root source의 old/new helper artifact를 실제 exec한다. 테스트 binary를 두 번 같은
         // source로 빌드해 "교체"처럼 보이게 하지 않는다.
         const session_host_fixture_mod = b.createModule(.{
@@ -6019,6 +6027,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .mode = .simple,
             },
         });
+        support.attachArrayRepeatImports(b, session_host_nonempty_rollback_tests.root_module);
         const run_session_host_nonempty_rollback_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_session_host_nonempty_rollback_tests.addPrefixedArtifactArg(
             "MARU_SESSION_HOST_PRODUCT_EXE=",
@@ -6054,6 +6063,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .mode = .simple,
             },
         });
+        support.attachArrayRepeatImports(b, session_host_restore_precommit_tests.root_module);
         const run_session_host_restore_precommit_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_session_host_restore_precommit_tests.addPrefixedArtifactArg(
             "MARU_SESSION_HOST_PRODUCT_EXE=",
@@ -6089,6 +6099,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .mode = .simple,
             },
         });
+        support.attachArrayRepeatImports(b, session_host_restore_postcommit_tests.root_module);
         const run_session_host_restore_postcommit_tests = b.addSystemCommand(&.{"/usr/bin/env"});
         run_session_host_restore_postcommit_tests.addPrefixedArtifactArg(
             "MARU_SESSION_HOST_PRODUCT_EXE=",
@@ -6552,10 +6563,10 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_signed_upgrade_e2e.addArgs(&.{
             signed_n1_exe_option,
             signed_current_exe_option,
-            if (signed_upgrade_output_option.len == 0) b.pathFromRoot("zig-out/session-host-signed-upgrade/summary.json") else signed_upgrade_output_option,
+            if (signed_upgrade_output_option.len == 0) rootPath(b, "zig-out/session-host-signed-upgrade/summary.json") else signed_upgrade_output_option,
             "1",
             signed_release_test_uuid_option,
-            if (signed_upgrade_root_option.len == 0) b.pathFromRoot("zig-out/session-host-signed-upgrade/run-root") else signed_upgrade_root_option,
+            if (signed_upgrade_root_option.len == 0) rootPath(b, "zig-out/session-host-signed-upgrade/run-root") else signed_upgrade_root_option,
         });
         const signed_upgrade_e2e_step = b.step(
             "test-session-host-signed-upgrade",
@@ -6569,10 +6580,10 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_signed_upgrade_near_max_e2e.addArgs(&.{
             signed_n1_exe_option,
             signed_current_exe_option,
-            if (signed_upgrade_output_option.len == 0) b.pathFromRoot("zig-out/session-host-signed-upgrade-near-max/summary.json") else signed_upgrade_output_option,
+            if (signed_upgrade_output_option.len == 0) rootPath(b, "zig-out/session-host-signed-upgrade-near-max/summary.json") else signed_upgrade_output_option,
             "near-max",
             signed_release_test_uuid_option,
-            if (signed_upgrade_root_option.len == 0) b.pathFromRoot("zig-out/session-host-signed-upgrade-near-max/run-root") else signed_upgrade_root_option,
+            if (signed_upgrade_root_option.len == 0) rootPath(b, "zig-out/session-host-signed-upgrade-near-max/run-root") else signed_upgrade_root_option,
         });
         const signed_upgrade_near_max_e2e_step = b.step(
             "test-session-host-signed-upgrade-near-max",
@@ -6586,7 +6597,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const slow_observer_session_host_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .link_libc = true,
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         });
@@ -6595,7 +6606,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 "tests/support/session_host_slow_observer_probe.zig",
             ),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{
                 .{ .name = "session_host", .module = slow_observer_session_host_mod },
             },
@@ -6606,7 +6617,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                     "tests/support/session_host_slow_observer_probe.zig",
                 ),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .imports = &.{
                     .{ .name = "session_host", .module = slow_observer_session_host_mod },
                 },
@@ -6622,7 +6633,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                     "tests/session_host_slow_observer_host.zig",
                 ),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .link_libc = true,
                 .imports = &.{
                     .{ .name = "session_host", .module = slow_observer_session_host_mod },
@@ -6637,7 +6648,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                     "tests/session_host_slow_observer_e2e.zig",
                 ),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .link_libc = true,
                 .imports = &.{
                     .{ .name = "session_host", .module = slow_observer_session_host_mod },
@@ -6645,13 +6656,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 },
             }),
         });
+        support.attachDarwinPerfCImport(b, slow_observer_e2e.root_module);
         const slow_observer_e2e_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "tests/session_host_slow_observer_e2e.zig",
                 ),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .link_libc = true,
                 .imports = &.{
                     .{ .name = "session_host", .module = slow_observer_session_host_mod },
@@ -6659,6 +6671,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 },
             }),
         });
+        support.attachDarwinPerfCImport(b, slow_observer_e2e_tests.root_module);
         const run_slow_observer_e2e_tests = b.addRunArtifact(
             slow_observer_e2e_tests,
         );
@@ -6677,7 +6690,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                     "tools/perf/session_host_slow_observer_validator.zig",
                 ),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .imports = &.{
                     .{
                         .name = "connection_slot",
@@ -6686,7 +6699,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                                 "src/platform/macos/session_host/connection_slot.zig",
                             ),
                             .target = target,
-                            .optimize = .ReleaseFast,
+                            .optimize = .fast,
                         }),
                     },
                 },
@@ -6724,7 +6737,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tools/perf/session_host_cr6f_idle_soak_validator.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
             }),
         });
         const run_cr6f_idle_soak_validator = b.addRunArtifact(cr6f_idle_soak_validator);
@@ -6743,11 +6756,12 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/cr6e_baseline.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .link_libc = true,
                 .imports = &.{.{ .name = "session_host", .module = slow_observer_session_host_mod }},
             }),
         });
+        support.attachDarwinPerfCImport(b, cr6e_baseline.root_module);
         const run_cr6e_baseline = b.addRunArtifact(cr6e_baseline);
         run_cr6e_baseline.addArg("tests/artifacts/perf/session-host-cr6e-baseline-macos.json");
         run_cr6e_baseline.setCwd(b.path("."));
@@ -6758,14 +6772,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tools/perf/session_host_cr6e_baseline_validator.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
             }),
         });
         const cr6e_baseline_validator_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tools/perf/session_host_cr6e_baseline_validator.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
             }),
         });
         const run_cr6e_baseline_validator_tests = b.addRunArtifact(cr6e_baseline_validator_tests);

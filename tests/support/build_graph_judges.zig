@@ -42,12 +42,12 @@ test "빌드 그래프 뷰는 문자열 판정과 같은 값을 낸다 (B3-0.4 �
     );
     // ③ 이름 경로
     try std.testing.expectEqual(
-        countOccurrences(text, "std.builtin.OptimizeMode.Debug"),
-        g.countFieldPath("std.builtin.OptimizeMode.Debug"),
+        countOccurrences(text, "std.builtin.OptimizeMode.debug"),
+        g.countFieldPath("std.builtin.OptimizeMode.debug"),
     );
     try std.testing.expectEqual(
-        countOccurrences(text, "std.builtin.OptimizeMode.ReleaseFast"),
-        g.countFieldPath("std.builtin.OptimizeMode.ReleaseFast"),
+        countOccurrences(text, "std.builtin.OptimizeMode.fast"),
+        g.countFieldPath("std.builtin.OptimizeMode.fast"),
     );
     // ④ 특정 변수의 인자·의존
     try std.testing.expect(g.hasArg("run_b3_0_4_tests", "--maru-expect-tests=8"));
@@ -300,7 +300,7 @@ test "표도 등록이다 — 루프 한 줄 뒤의 스무 건을 세어 둔다"
             explicit_optimize += 1;
         } else default_optimize += 1;
     }
-    try std.testing.expectEqual(@as(usize, 1), explicit_optimize); // imports.zig 만 .ReleaseSafe
+    try std.testing.expectEqual(@as(usize, 1), explicit_optimize); // imports.zig 만 .safe
     try std.testing.expectEqual(@as(usize, 24), default_optimize);
 
     // 모듈을 주입받는 행 다섯. 이름이 `boundary_scan_modules` 에 없으면 빌드가 죽으므로

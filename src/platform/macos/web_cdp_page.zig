@@ -265,7 +265,7 @@ test "W9a navigate: http·https·about:blank 만 받는다" {
     const long = try testing.allocator.alloc(u8, max_url_bytes + 1);
     defer testing.allocator.free(long);
     @memset(long, 'a');
-    @memcpy(long[0..7], "http://");
+    @memcpy(long[0.."http://a.test/".len], "http://a.test/");
     try testing.expect(!navigableUrl(long));
     try testing.expect(navigableUrl(long[0..max_url_bytes]));
     try testing.expectError(error.InvalidUrl, Op.init(testing.allocator, .navigate, "javascript:1"));

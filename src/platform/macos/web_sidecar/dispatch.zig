@@ -49,7 +49,7 @@ pub const Dispatcher = struct {
             }
             if (self.carry_len == 0) {
                 const n = std.c.read(fd, &self.carry, self.carry.len);
-                if (n < 0 and std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+                if (n < 0 and std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
                 if (n <= 0) return error.ChannelClosed;
                 self.carry_len = @intCast(n);
             }

@@ -86,15 +86,15 @@ fn runRestoreActivationChild() u8 {
 }
 
 fn parsePostcommitFault(name: []const u8) ?sh.restore_activation.PostcommitFault {
-    inline for (std.meta.fields(sh.restore_activation.PostcommitFault)) |field| {
-        if (std.mem.eql(u8, name, field.name)) return @enumFromInt(field.value);
+    inline for (@import("type_info_fields").fields(sh.restore_activation.PostcommitFault)) |field| {
+        if (std.mem.eql(u8, name, field.name)) return @fromBackingInt(@intCast(field.value));
     }
     return null;
 }
 
 fn parsePrecommitFault(name: []const u8) ?sh.restore_activation.PrecommitFault {
-    inline for (std.meta.fields(sh.restore_activation.PrecommitFault)) |field| {
-        if (std.mem.eql(u8, name, field.name)) return @enumFromInt(field.value);
+    inline for (@import("type_info_fields").fields(sh.restore_activation.PrecommitFault)) |field| {
+        if (std.mem.eql(u8, name, field.name)) return @fromBackingInt(@intCast(field.value));
     }
     return null;
 }
@@ -119,7 +119,7 @@ test "product rollback preserves one real PTY through exit" {
         std.testing.allocator,
     );
     defer std.testing.allocator.free(product_real);
-    const product = try std.testing.allocator.dupeZ(u8, product_real);
+    const product = try std.testing.allocator.dupeSentinel(u8, product_real, 0);
     defer std.testing.allocator.free(product);
     const product_identity = try sh.staged_image.inspect(product);
     const digest_hex = std.fmt.bytesToHex(product_identity.sha256, .lower);
@@ -135,16 +135,17 @@ test "product rollback preserves one real PTY through exit" {
         @as(u128, @intCast(if (now <= 0) 1 else now));
     const attempt_id: u128 = 0xA11CE;
     var session_buf: [224]u8 = undefined;
-    const session_dir = try std.fmt.bufPrintZ(
+    const session_dir = try std.fmt.bufPrintSentinel(
         &session_buf,
         "/tmp/maru-nr-{d}",
         .{c.getpid()},
+        0,
     );
     if (c.mkdir(session_dir.ptr, 0o700) != 0) return error.TestUnexpectedResult;
     defer std.Io.Dir.cwd().deleteTree(std.testing.io, session_dir) catch {};
 
     const previous_root = if (c.getenv("MARU_SESSION_HOST_ROOT")) |value|
-        try std.testing.allocator.dupeZ(u8, std.mem.span(value))
+        try std.testing.allocator.dupeSentinel(u8, std.mem.span(value), 0)
     else
         null;
     defer {
@@ -191,10 +192,11 @@ test "product rollback preserves one real PTY through exit" {
     _ = c.unlink(socket_path.ptr);
     defer _ = c.unlink(socket_path.ptr);
     var activation_buf: [192]u8 = undefined;
-    const activation_marker = try std.fmt.bufPrintZ(
+    const activation_marker = try std.fmt.bufPrintSentinel(
         &activation_buf,
         "/tmp/maru-restore-activation-{d}",
         .{c.getpid()},
+        0,
     );
     _ = c.unlink(activation_marker.ptr);
     defer _ = c.unlink(activation_marker.ptr);
@@ -345,7 +347,7 @@ fn expectPostcommitVocabularyAbsentFromProduct() !void {
         product,
         "--restore-activation-postcommit-fault",
     ) == null);
-    inline for (std.meta.fields(sh.restore_activation.PostcommitFault)) |field| {
+    inline for (@import("type_info_fields").fields(sh.restore_activation.PostcommitFault)) |field| {
         if (comptime std.mem.eql(u8, field.name, "none")) continue;
         try std.testing.expect(std.mem.indexOf(u8, product, field.name) == null);
     }
@@ -374,10 +376,22 @@ fn runRestoreFaultCase(
     expectation: RestoreFaultExpectation,
 ) !void {
     var checkpoint: []const u8 = "begin";
-    errdefer |err| std.debug.print(
-        "restore_fault_checkpoint fault={s} checkpoint={s} error={s}\n",
-        .{ restoreFaultName(precommit_fault, postcommit_fault), checkpoint, @errorName(err) },
-    );
+    runRestoreFaultCaseInner(precommit_fault, postcommit_fault, case_index, expectation, &checkpoint) catch |err| {
+        std.debug.print(
+            "restore_fault_checkpoint fault={s} checkpoint={s} error={s}\n",
+            .{ restoreFaultName(precommit_fault, postcommit_fault), checkpoint, @errorName(err) },
+        );
+        return err;
+    };
+}
+
+fn runRestoreFaultCaseInner(
+    precommit_fault: ?sh.restore_activation.PrecommitFault,
+    postcommit_fault: ?sh.restore_activation.PostcommitFault,
+    case_index: usize,
+    expectation: RestoreFaultExpectation,
+    checkpoint_ptr: *[]const u8,
+) !void {
     const started = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
     const parent_fd_before = countOpenFds();
     const product_raw = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse
@@ -387,14 +401,14 @@ fn runRestoreFaultCase(
         std.mem.span(product_raw),
         std.testing.allocator,
     );
-    checkpoint = "product-realpath";
+    checkpoint_ptr.* = "product-realpath";
     defer std.testing.allocator.free(product_real);
-    const product = try std.testing.allocator.dupeZ(u8, product_real);
+    const product = try std.testing.allocator.dupeSentinel(u8, product_real, 0);
     defer std.testing.allocator.free(product);
     const self_real = try std.process.executablePathAlloc(std.testing.io, std.testing.allocator);
-    checkpoint = "self-realpath";
+    checkpoint_ptr.* = "self-realpath";
     defer std.testing.allocator.free(self_real);
-    const self = try std.testing.allocator.dupeZ(u8, self_real);
+    const self = try std.testing.allocator.dupeSentinel(u8, self_real, 0);
     defer std.testing.allocator.free(self);
     const product_identity = try sh.staged_image.inspect(product);
     const product_digest = std.fmt.bytesToHex(product_identity.sha256, .lower);
@@ -419,17 +433,18 @@ fn runRestoreFaultCase(
         @as(u128, @intCast(if (now <= 0) case_index + 1 else now));
     const attempt_id: u128 = 0xB000 + case_index;
     var session_buf: [224]u8 = undefined;
-    const session_dir = try std.fmt.bufPrintZ(
+    const session_dir = try std.fmt.bufPrintSentinel(
         &session_buf,
         "/tmp/maru-rf-{d}-{d}",
         .{ c.getpid(), case_index },
+        0,
     );
     if (c.mkdir(session_dir.ptr, 0o700) != 0) return error.TestUnexpectedResult;
-    checkpoint = "session-root";
+    checkpoint_ptr.* = "session-root";
     defer std.Io.Dir.cwd().deleteTree(std.testing.io, session_dir) catch {};
 
     const previous_root = if (c.getenv("MARU_SESSION_HOST_ROOT")) |value|
-        try std.testing.allocator.dupeZ(u8, std.mem.span(value))
+        try std.testing.allocator.dupeSentinel(u8, std.mem.span(value), 0)
     else
         null;
     defer {
@@ -443,12 +458,12 @@ fn runRestoreFaultCase(
     if (setenv("MARU_SESSION_HOST_ROOT", session_dir.ptr, 1) != 0)
         return error.TestUnexpectedResult;
     try sh.short_endpoint.prepareCurrentUserNamespace();
-    checkpoint = "socket-root";
+    checkpoint_ptr.* = "socket-root";
     var socket_dir_buf: [272]u8 = undefined;
     const socket_dir = try sh.short_endpoint.currentSocketDirPathIn(&socket_dir_buf);
     defer _ = c.rmdir(socket_dir.ptr);
     try sh.host_manifest.prepareHostDirectory(session_dir, host_id);
-    checkpoint = "host-root";
+    checkpoint_ptr.* = "host-root";
     var host_dir_buf: [768]u8 = undefined;
     const host_dir = try sh.host_manifest.hostDirPathIn(&host_dir_buf, session_dir, host_id);
     var owner_path_buf: [832]u8 = undefined;
@@ -464,7 +479,7 @@ fn runRestoreFaultCase(
         rollback_identity,
         host_dir,
     );
-    checkpoint = "rollback-image";
+    checkpoint_ptr.* = "rollback-image";
     defer rollback.deinit();
     var target = try sh.staged_image.stageExclusive(
         std.testing.allocator,
@@ -472,7 +487,7 @@ fn runRestoreFaultCase(
         host_dir,
         "restore-fault-target",
     );
-    checkpoint = "target-image";
+    checkpoint_ptr.* = "target-image";
     defer target.deinit();
     const rollback_record = rollback.record();
     const layout = sh.upgrade_product_coordinator.findAvailableLayout(40) orelse
@@ -482,10 +497,11 @@ fn runRestoreFaultCase(
     _ = c.unlink(socket_path.ptr);
     defer _ = c.unlink(socket_path.ptr);
     var activation_buf: [192]u8 = undefined;
-    const activation_marker = try std.fmt.bufPrintZ(
+    const activation_marker = try std.fmt.bufPrintSentinel(
         &activation_buf,
         "/tmp/maru-restore-activation-{d}-{d}",
         .{ c.getpid(), case_index },
+        0,
     );
     _ = c.unlink(activation_marker.ptr);
     defer _ = c.unlink(activation_marker.ptr);
@@ -502,7 +518,7 @@ fn runRestoreFaultCase(
     };
     const source_pid = c.fork();
     if (source_pid < 0) return error.TestUnexpectedResult;
-    checkpoint = "source-fork";
+    checkpoint_ptr.* = "source-fork";
     if (source_pid == 0) {
         _ = c.close(evidence_pipe[0]);
         runSourceHost(
@@ -537,7 +553,7 @@ fn runRestoreFaultCase(
     defer if (!source_reaped) stopChild(source_pid);
     var source_evidence: SourceEvidence = undefined;
     try readExact(evidence_pipe[0], std.mem.asBytes(&source_evidence));
-    checkpoint = "source-evidence";
+    checkpoint_ptr.* = "source-evidence";
     _ = c.close(evidence_pipe[0]);
     read_open = false;
     const runtime_id = (@as(u128, source_evidence.runtime_id_hi) << 64) |
@@ -552,9 +568,9 @@ fn runRestoreFaultCase(
     };
 
     if (expectation == .postcommit_fail_stop) {
-        checkpoint = "wait-source-exit";
+        checkpoint_ptr.* = "wait-source-exit";
         const status = try waitChildStatus(source_pid);
-        checkpoint = "source-exited";
+        checkpoint_ptr.* = "source-exited";
         source_reaped = true;
         try std.testing.expect(c.W.IFEXITED(status));
         try std.testing.expectEqual(@as(u8, 93), c.W.EXITSTATUS(status));
@@ -562,9 +578,9 @@ fn runRestoreFaultCase(
         try std.testing.expect(c.access(activation_marker.ptr, c.F_OK) != 0);
         try std.testing.expect(c.access(owner_path.ptr, c.F_OK) != 0);
         try waitForProcessGone(source_evidence.child_pid);
-        checkpoint = "runtime-gone";
+        checkpoint_ptr.* = "runtime-gone";
         poisoned_runtime_gone = true;
-        checkpoint = "residue-audit";
+        checkpoint_ptr.* = "residue-audit";
         const residue_count = try expectPostcommitResidue(
             host_dir,
             target.path,
@@ -970,9 +986,9 @@ fn runSourceHost(
     var buffers: sh.entrypoint.RestoreArgBuffers = .{};
     const raw = try sh.entrypoint.formatRestoreArgs(invocation, &buffers);
     var owned: [sh.entrypoint.max_invocation_args][:0]u8 = undefined;
-    for (raw, 0..) |arg, index| owned[index] = try allocator.dupeZ(u8, arg);
+    for (raw, 0..) |arg, index| owned[index] = try allocator.dupeSentinel(u8, arg, 0);
     if (fault) |selected| {
-        const fault_name = try allocator.dupeZ(u8, @tagName(selected));
+        const fault_name = try allocator.dupeSentinel(u8, @tagName(selected), 0);
         const argv = [_:null]?[*:0]const u8{
             target.path.ptr,
             "--restore-activation-fault",
@@ -988,7 +1004,7 @@ fn runSourceHost(
         };
         _ = execv(target.path.ptr, &argv);
     } else if (postcommit_fault) |selected| {
-        const fault_name = try allocator.dupeZ(u8, @tagName(selected));
+        const fault_name = try allocator.dupeSentinel(u8, @tagName(selected), 0);
         const argv = [_:null]?[*:0]const u8{
             target.path.ptr,
             "--restore-activation-postcommit-fault",
@@ -1034,10 +1050,11 @@ fn closeExceptRestore(layout: sh.upgrade_fd_layout.Layout, runtime_count: usize)
 
 fn openTruncatedUnlinkedCopy(owner_dir: [:0]const u8, bytes: []const u8) !c.fd_t {
     var path_buf: [1024]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(
+    const path = try std.fmt.bufPrintSentinel(
         &path_buf,
         "{s}/nonempty-corrupt-primary",
         .{owner_dir},
+        0,
     );
     _ = c.unlink(path.ptr);
     const writer = c.open(
@@ -1259,7 +1276,7 @@ fn waitChildStatus(pid: c.pid_t) !u32 {
 }
 
 fn waitForProcessGone(pid: c.pid_t) !void {
-    const probe: c.SIG = @enumFromInt(0);
+    const probe: c.SIG = @fromBackingInt(@intCast(0));
     var attempt: usize = 0;
     while (attempt < 5_000) : (attempt += 1) {
         const rc = c.kill(pid, probe);

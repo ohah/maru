@@ -18,8 +18,8 @@ const Fixture = struct {
         try result.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "child.sh", .data = script_bytes });
         var base: [std.fs.max_path_bytes]u8 = undefined;
         const len = try result.tmp.dir.realPath(std.testing.io, &base);
-        result.workspace_len = (try std.fmt.bufPrintZ(&result.workspace_storage, "{s}/p5d", .{base[0..len]})).len;
-        result.script_len = (try std.fmt.bufPrintZ(&result.script_storage, "{s}/child.sh", .{base[0..len]})).len;
+        result.workspace_len = (try std.fmt.bufPrintSentinel(&result.workspace_storage, "{s}/p5d", .{base[0..len]}, 0)).len;
+        result.script_len = (try std.fmt.bufPrintSentinel(&result.script_storage, "{s}/child.sh", .{base[0..len]}, 0)).len;
         return result;
     }
     fn deinit(self: *Fixture) void {

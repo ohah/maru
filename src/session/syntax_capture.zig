@@ -218,8 +218,8 @@ comptime {
     // 한국어 리터럴은 `tests/boundary/i18n_literals.zig` 원장이 센다(§7.2). 실측으로 걸렸다:
     // `src/session/syntax_capture.zig: 한국어 리터럴 2 개 (원장 0) — 늘었다`.
     const SyntaxColors = @import("syntax_theme.zig").SyntaxColors;
-    const color_fields = @typeInfo(SyntaxColors).@"struct".fields;
-    const roles = @typeInfo(Role).@"enum".fields;
+    const color_fields = @import("type_info_fields").structFields(SyntaxColors);
+    const roles = @import("type_info_fields").enumFields(Role);
     if (color_fields.len != roles.len) @compileError("Role and SyntaxColors must have the same number of entries");
     for (roles) |r| {
         if (!@hasField(SyntaxColors, r.name)) @compileError("Role has no matching SyntaxColors field: " ++ r.name);

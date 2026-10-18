@@ -2488,7 +2488,7 @@ test "readiness client charges skipped optional frame 65 to the next turn before
     defer client.destroy();
 
     const optional = (protocol.Header{
-        .kind = @enumFromInt(55_000),
+        .kind = @fromBackingInt(@intCast(55_000)),
         .flags = protocol.Flags.optional,
     }).encode();
     const hello = try framing.encodeFrame(
@@ -2554,7 +2554,7 @@ test "upgrade reply arms only after EAGAIN tail is fully written and marker is t
     client.writeReady(2);
     try testing.expect(drainNonblocking(fds[1]) != 0);
 
-    var filler: [64 * 1024]u8 = [_]u8{0xA5} ** (64 * 1024);
+    var filler: [64 * 1024]u8 = @as([(64 * 1024)]u8, @splat(0xA5));
     while (true) {
         const rc = c.send(client.fd, &filler, filler.len, posix.MSG.DONTWAIT);
         if (rc < 0 and posix.errno(rc) == .AGAIN) break;
@@ -3454,7 +3454,7 @@ test "completed chunk gives the next queued frame a fresh absolute write deadlin
     const slot = try reactor.get(client.admission);
     for (0..65) |_| try slot.enqueueControl("x");
 
-    const filler: [64 * 1024]u8 = [_]u8{0x5A} ** (64 * 1024);
+    const filler: [64 * 1024]u8 = @as([(64 * 1024)]u8, @splat(0x5A));
     while (true) {
         const rc = c.send(client.fd, &filler, filler.len, posix.MSG.DONTWAIT);
         if (rc < 0 and posix.errno(rc) == .AGAIN) break;
@@ -4406,7 +4406,7 @@ test "reply-and-close waits through EAGAIN and closes only after full typed repl
         .{},
     );
     defer client.destroy();
-    const filler: [64 * 1024]u8 = [_]u8{0xC3} ** (64 * 1024);
+    const filler: [64 * 1024]u8 = @as([(64 * 1024)]u8, @splat(0xC3));
     while (true) {
         const rc = c.send(client.fd, &filler, filler.len, posix.MSG.DONTWAIT);
         if (rc < 0 and posix.errno(rc) == .AGAIN) break;
@@ -4645,7 +4645,7 @@ test "socketpair read partial clock resets at the next frame boundary" {
     );
     defer client.destroy();
     const optional = (protocol.Header{
-        .kind = @enumFromInt(55_000),
+        .kind = @fromBackingInt(@intCast(55_000)),
         .flags = protocol.Flags.optional,
     }).encode();
     const hello = try framing.encodeFrame(testing.allocator, .{ .kind = .hello }, test_hello);

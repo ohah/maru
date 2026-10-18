@@ -46,7 +46,7 @@ const Fixture = struct {
 fn absolute(tmp: *std.testing.TmpDir, suffix: []const u8, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(out, "{s}/{s}", .{ root[0..len], suffix });
+    return std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ root[0..len], suffix }, 0);
 }
 
 test "durable handoff survives source workspace deletion with equal bytes and distinct inode" {
@@ -120,16 +120,16 @@ test "source direct-child and destination outside-workspace rules reject paths" 
     try std.testing.expectError(error.InvalidPath, handoff.promote(std.testing.allocator, &fixture.source, fixture.rootPath(), "relative", fixture.destinationPath(), &durable));
     try std.testing.expectError(error.InvalidPath, handoff.promote(std.testing.allocator, &fixture.source, fixture.rootPath(), fixture.sourcePath(), "relative", &durable));
     var root_as_source: [std.fs.max_path_bytes:0]u8 = @splat(0);
-    const root_as_source_path = try std.fmt.bufPrintZ(&root_as_source, "{s}", .{fixture.rootPath()});
+    const root_as_source_path = try std.fmt.bufPrintSentinel(&root_as_source, "{s}", .{fixture.rootPath()}, 0);
     try std.testing.expectError(error.InvalidPath, handoff.promote(std.testing.allocator, &fixture.source, fixture.rootPath(), root_as_source_path, fixture.destinationPath(), &durable));
     var source_as_destination: [std.fs.max_path_bytes:0]u8 = @splat(0);
-    const source_as_destination_path = try std.fmt.bufPrintZ(&source_as_destination, "{s}", .{fixture.sourcePath()});
+    const source_as_destination_path = try std.fmt.bufPrintSentinel(&source_as_destination, "{s}", .{fixture.sourcePath()}, 0);
     try std.testing.expectError(error.InvalidPath, handoff.promote(std.testing.allocator, &fixture.source, fixture.rootPath(), fixture.sourcePath(), source_as_destination_path, &durable));
     var root_as_destination: [std.fs.max_path_bytes:0]u8 = @splat(0);
-    const root_as_destination_path = try std.fmt.bufPrintZ(&root_as_destination, "{s}", .{fixture.rootPath()});
+    const root_as_destination_path = try std.fmt.bufPrintSentinel(&root_as_destination, "{s}", .{fixture.rootPath()}, 0);
     try std.testing.expectError(error.InvalidPath, handoff.promote(std.testing.allocator, &fixture.source, fixture.rootPath(), fixture.sourcePath(), root_as_destination_path, &durable));
     var nested: [std.fs.max_path_bytes:0]u8 = @splat(0);
-    const nested_path = try std.fmt.bufPrintZ(&nested, "{s}/nested/evidence.json", .{fixture.rootPath()});
+    const nested_path = try std.fmt.bufPrintSentinel(&nested, "{s}/nested/evidence.json", .{fixture.rootPath()}, 0);
     try std.testing.expectError(error.InvalidPath, handoff.promote(std.testing.allocator, &fixture.source, fixture.rootPath(), nested_path, fixture.destinationPath(), &durable));
 }
 

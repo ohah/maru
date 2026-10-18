@@ -191,7 +191,7 @@ const Writer = struct {
                 foregroundFor(r, .list_secondary_fg)
             else
                 // 종류색이 없는 아이콘(폴더 등)은 **라벨과 같은 위계**로 떨어진다.
-                file_tree_icon.colorRole(@enumFromInt(r.icon_kind)) orelse labelRole(r);
+                file_tree_icon.colorRole(@fromBackingInt(@intCast(r.icon_kind))) orelse labelRole(r);
             try self.icon(.{ .x = icon_x, .y = icon_y, .w = m.icon_extent, .h = m.icon_extent }, cp, @intCast(m.icon_extent), role, clip);
         }
 
@@ -506,7 +506,7 @@ test "dirty·conflict 는 우측 슬롯의 둥근 점이고 라벨 폭을 뺀다
 // git이 무시하는 행은 **라벨도 아이콘도** 흐려진다. 아이콘만 종류색이 살아 있으면 오히려 더 눈에 띈다.
 test "무시된 행은 라벨과 아이콘이 함께, 그리고 기본 행보다 더 흐려진다" {
     var h = Harness{};
-    const rows = [_]types.Row{.{ .kind = .file, .label = "dist.js", .icon_kind = @intFromEnum(file_tree_icon.IconKind.js), .ignored = true }};
+    const rows = [_]types.Row{.{ .kind = .file, .label = "dist.js", .icon_kind = @backingInt(file_tree_icon.IconKind.js), .ignored = true }};
     const painted = try h.run(&rows);
     var count: usize = 0;
     for (painted.ops) |op| if (op == .text) {
@@ -518,7 +518,7 @@ test "무시된 행은 라벨과 아이콘이 함께, 그리고 기본 행보다
     // **기본 행과 같은 role 이면 이 테스트는 아무것도 판정하지 않는다.** 옛 경로가 정확히 그 상태였고
     // (게다가 값은 더 밝았다), 그래서 "흐려진다"가 초록인 채로 거짓이었다.
     var h2 = Harness{};
-    const plain = [_]types.Row{.{ .kind = .file, .label = "dist.js", .icon_kind = @intFromEnum(file_tree_icon.IconKind.js) }};
+    const plain = [_]types.Row{.{ .kind = .file, .label = "dist.js", .icon_kind = @backingInt(file_tree_icon.IconKind.js) }};
     const p2 = try h2.run(&plain);
     for (p2.ops) |op| if (op == .text and op.text.placement == .origin) {
         try testing.expect(op.text.role != tokens.ColorRole.list_disabled_fg);
@@ -528,7 +528,7 @@ test "무시된 행은 라벨과 아이콘이 함께, 그리고 기본 행보다
 // 선택 행은 accent 밴드 위에 놓이므로 **아이콘 종류색을 버린다** — 남기면 밝은 면에서 안 읽힌다.
 test "선택 행은 종류색 대신 대비색을 따른다" {
     var h = Harness{};
-    const rows = [_]types.Row{.{ .kind = .file, .label = "a.js", .icon_kind = @intFromEnum(file_tree_icon.IconKind.js), .selected = true }};
+    const rows = [_]types.Row{.{ .kind = .file, .label = "a.js", .icon_kind = @backingInt(file_tree_icon.IconKind.js), .selected = true }};
     const painted = try h.run(&rows);
     for (painted.ops) |op| if (op == .text) {
         try testing.expectEqual(tokens.ColorRole.surface_fg, op.text.role);
@@ -551,7 +551,7 @@ test "chevron 은 expandable 행에만 나오고 상태로 갈린다" {
 
     var h2 = Harness{};
     // `IconKind.none`(=0)은 "그릴 아이콘이 없다"라 종류 아이콘도 안 나온다 — 여기서는 실제 종류를 준다.
-    const leaf = [_]types.Row{.{ .kind = .file, .label = "a", .icon_kind = @intFromEnum(file_tree_icon.IconKind.file) }};
+    const leaf = [_]types.Row{.{ .kind = .file, .label = "a", .icon_kind = @backingInt(file_tree_icon.IconKind.file) }};
     const l = try h2.run(&leaf);
     var icon_count: usize = 0;
     for (l.ops) |op| if (op == .text and op.text.placement == .icon_in_rect) {
@@ -585,8 +585,8 @@ test "op 버퍼가 모자라면 조용히 덜 그리지 않고 실패한다" {
 test "모든 텍스트 op 은 measured 경로 대상이다(wide_icons=false)" {
     var h = Harness{};
     const rows = [_]types.Row{
-        .{ .kind = .root, .label = "maru3", .expandable = true, .expanded = true, .icon_kind = @intFromEnum(file_tree_icon.IconKind.folder_open) },
-        .{ .kind = .file, .label = "build.zig", .depth = 1, .icon_kind = @intFromEnum(file_tree_icon.IconKind.code), .dirty = true },
+        .{ .kind = .root, .label = "maru3", .expandable = true, .expanded = true, .icon_kind = @backingInt(file_tree_icon.IconKind.folder_open) },
+        .{ .kind = .file, .label = "build.zig", .depth = 1, .icon_kind = @backingInt(file_tree_icon.IconKind.code), .dirty = true },
     };
     const painted = try h.run(&rows);
     var text_ops: usize = 0;
@@ -735,7 +735,7 @@ test "최악 조합이 여러 행이어도 예산 안에 든다" {
         .active = true,
         .dirty = true,
         .external_change = true,
-        .icon_kind = @intFromEnum(file_tree_icon.IconKind.code),
+        .icon_kind = @backingInt(file_tree_icon.IconKind.code),
         .selected = true,
     };
     const rows = [_]types.Row{ worst, worst, worst, worst, worst };
@@ -768,8 +768,8 @@ test "아주 긴 라벨도 예산 안에서 그려진다" {
     var long_label: [4096]u8 = undefined;
     @memset(&long_label, 'a');
     const rows = [_]types.Row{
-        .{ .kind = .file, .label = &long_label, .icon_kind = @intFromEnum(file_tree_icon.IconKind.code) },
-        .{ .kind = .file, .label = &long_label, .icon_kind = @intFromEnum(file_tree_icon.IconKind.code) },
+        .{ .kind = .file, .label = &long_label, .icon_kind = @backingInt(file_tree_icon.IconKind.code) },
+        .{ .kind = .file, .label = &long_label, .icon_kind = @backingInt(file_tree_icon.IconKind.code) },
     };
     var h = Harness{};
     const props = types.Props{ .viewport_px = .{ .width = 300, .height = 200 }, .rows = &rows };
@@ -816,9 +816,9 @@ test "FTCLIP 트리가 낸 글자는 라벨도 아이콘도 스크롤 뷰포트�
     // 하나도 없는 채로 초록이었다 — 판정자 제목이 "라벨도 아이콘도" 인데 라벨만 재고 있었다.
     // `expandable` 은 chevron 아이콘까지 낸다.
     const rows = [_]types.Row{
-        .{ .kind = .directory, .label = "src", .expandable = true, .icon_kind = @intFromEnum(file_tree_icon.IconKind.folder) },
-        .{ .kind = .file, .label = "build.zig", .icon_kind = @intFromEnum(file_tree_icon.IconKind.file) },
-        .{ .kind = .file, .label = "AGENTS.md", .icon_kind = @intFromEnum(file_tree_icon.IconKind.file) },
+        .{ .kind = .directory, .label = "src", .expandable = true, .icon_kind = @backingInt(file_tree_icon.IconKind.folder) },
+        .{ .kind = .file, .label = "build.zig", .icon_kind = @backingInt(file_tree_icon.IconKind.file) },
+        .{ .kind = .file, .label = "AGENTS.md", .icon_kind = @backingInt(file_tree_icon.IconKind.file) },
     };
     const painted = try h.run(&rows);
     var labels: usize = 0;

@@ -567,7 +567,7 @@ pub const PtySession = struct {
             if (std.c.ioctl(inherited_slot, std.c.T.IOCGWINSZ, &window_size) < 0 or
                 window_size.col != size.cols or window_size.row != size.rows) return error.InvalidInheritedPty;
             // kill(pid, 0)는 생존/권한 probe일 뿐 waitpid가 아니어서 exit status를 소비하지 않는다.
-            const probe_signal: std.c.SIG = @enumFromInt(0);
+            const probe_signal: std.c.SIG = @fromBackingInt(@intCast(0));
             const probe_rc = std.c.kill(child_pid, probe_signal);
             if (probe_rc != 0 and std.posix.errno(probe_rc) != .PERM) return error.InvalidInheritedPty;
             // kill(pid, 0)는 zombie에도 성공한다. Target pre-commit에서 WNOWAIT로 한 번 더 확인해 old encode의
@@ -659,10 +659,10 @@ pub const PtySession = struct {
         const eff_command: []const u8 = if (login_wrap != null) "/usr/bin/login" else request.command;
         const eff_args: []const []const u8 = if (login_wrap) |lw| lw.args else request.args;
 
-        const command_z = try allocator.dupeZ(u8, eff_command);
+        const command_z = try allocator.dupeSentinel(u8, eff_command, 0);
         defer allocator.free(command_z);
 
-        const cwd_z = if (request.cwd) |cwd| try allocator.dupeZ(u8, cwd) else null;
+        const cwd_z = if (request.cwd) |cwd| try allocator.dupeSentinel(u8, cwd, 0) else null;
         defer if (cwd_z) |cwd| allocator.free(cwd);
 
         var argv_storage = try ArgvStorage.init(allocator, eff_command, eff_args);
@@ -1378,11 +1378,11 @@ const ArgvStorage = struct {
             for (strings[0..initialized]) |owned| allocator.free(owned);
         }
 
-        strings[0] = try allocator.dupeZ(u8, command);
+        strings[0] = try allocator.dupeSentinel(u8, command, 0);
         initialized += 1;
 
         for (args, 0..) |arg, index| {
-            strings[index + 1] = try allocator.dupeZ(u8, arg);
+            strings[index + 1] = try allocator.dupeSentinel(u8, arg, 0);
             initialized += 1;
         }
 
@@ -1420,7 +1420,7 @@ const MacosLogin = struct {
         const hush = if (pw.dir) |dir_ptr| blk: {
             const home = std.mem.span(dir_ptr);
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const path = std.fmt.bufPrintZ(&path_buf, "{s}/.hushlogin", .{home}) catch break :blk false;
+            const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/.hushlogin", .{home}, 0) catch break :blk false;
             break :blk std.c.access(path.ptr, std.posix.F_OK) == 0;
         } else false;
 
@@ -1566,7 +1566,7 @@ const EnvStorage = struct {
             // 제거한다. non-null pane_id면 공통 tail에서 현재 값만 다시 넣는다.
             for (env) |entry| {
                 if (isPaneSelectorEntry(entry)) continue;
-                try appendOwnedEnv(allocator, &entries, try allocator.dupeZ(u8, entry));
+                try appendOwnedEnv(allocator, &entries, try allocator.dupeSentinel(u8, entry, 0));
             }
         }
 
@@ -1631,7 +1631,7 @@ const EnvStorage = struct {
     fn upsertEnv(allocator: std.mem.Allocator, entries: *std.ArrayList([:0]u8), override: []const u8) !void {
         const eq = std.mem.indexOfScalar(u8, override, '=') orelse return;
         const key_prefix = override[0 .. eq + 1]; // "KEY=" (= 포함) — 정확한 키 경계 매칭
-        const owned = try allocator.dupeZ(u8, override);
+        const owned = try allocator.dupeSentinel(u8, override, 0);
         for (entries.items, 0..) |entry, i| {
             if (std.mem.startsWith(u8, entry, key_prefix)) {
                 allocator.free(entry);
@@ -1683,7 +1683,7 @@ const EnvStorage = struct {
             if (ssh_integration_bin != null and
                 (std.mem.startsWith(u8, slice, "MARU_BIN=") or std.mem.startsWith(u8, slice, "MARU_SSH_INTEGRATION="))) continue;
             // append 인자 안에서 dupe하면 OOM 시 새므로(errdefer는 entries.items만 해제) appendOwnedEnv로 묶는다.
-            try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, slice));
+            try appendOwnedEnv(allocator, entries, try allocator.dupeSentinel(u8, slice, 0));
         }
         // 전환 #1: TERM이 xterm-maru면 embed 소스를 캐시에 컴파일하고 TERMINFO를 거기로, 안 되면
         // xterm-256color 폴백(로컬 안 깨짐). 그 외 term은 그대로(사용자 명시값).
@@ -1692,7 +1692,7 @@ const EnvStorage = struct {
         if (resolved.terminfo_dir) |dir| {
             try appendOwnedEnv(allocator, entries, try std.fmt.allocPrintSentinel(allocator, "TERMINFO={s}", .{dir}, 0));
         }
-        try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, "COLORTERM=truecolor"));
+        try appendOwnedEnv(allocator, entries, try allocator.dupeSentinel(u8, "COLORTERM=truecolor", 0));
         // **maru는 자기 이름을 말한다.** 한때 여기서 `ghostty`로 위장했다 — Claude Code/Codex 등 TUI가
         // 데스크톱 알림을 보낼 터미널을 TERM_PROGRAM 화이트리스트(`kitty`/`ghostty`/`wezterm`)로 고르는데
         // maru가 그 명단에 없어 무설정 자동 알림을 못 받기 때문이었다. 그 위장은 **알림 하나를 얻고 신원을
@@ -1736,7 +1736,7 @@ const EnvStorage = struct {
         //
         // **사용자 값이 이긴다** — 위 루프가 부모의 `FORCE_HYPERLINK` 를 안 떨구고, 중복 키는 **첫 항목**이
         // 이긴다. 끈 사람(`FORCE_HYPERLINK=0`)의 뜻이 유지된다.
-        try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, "FORCE_HYPERLINK=1"));
+        try appendOwnedEnv(allocator, entries, try allocator.dupeSentinel(u8, "FORCE_HYPERLINK=1", 0));
         if (zdotdir) |zd| {
             try appendOwnedEnv(allocator, entries, try std.fmt.allocPrintSentinel(allocator, "ZDOTDIR={s}", .{zd}, 0));
             if (old_zdotdir) |prev| {
@@ -1748,7 +1748,7 @@ const EnvStorage = struct {
         // 여기서 dupe해 envp 수명에 맞춘다.
         if (ssh_integration_bin) |bin| {
             try appendOwnedEnv(allocator, entries, try std.fmt.allocPrintSentinel(allocator, "MARU_BIN={s}", .{bin}, 0));
-            try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, "MARU_SSH_INTEGRATION=1"));
+            try appendOwnedEnv(allocator, entries, try allocator.dupeSentinel(u8, "MARU_SSH_INTEGRATION=1", 0));
         }
         // MARU_PANE_ID는 init tail에서 사용자 env override 뒤 최종 upsert한다. 여기서는 부모의 stale 값을
         // 위에서 제거만 해 내부 selector가 정확히 한 번 들어가게 한다.
@@ -2064,7 +2064,7 @@ test "prepared inherited PTY adoption discard never signals or reaps the live ch
 
     var prepared = try PtySession.PreparedAdoption.prepare(slot, session.childPid(), session.canonicalSize());
     prepared.discard();
-    const probe_signal: std.c.SIG = @enumFromInt(0);
+    const probe_signal: std.c.SIG = @fromBackingInt(@intCast(0));
     try std.testing.expect(std.c.kill(session.childPid(), probe_signal) == 0);
     try session.writeInput("still-owned");
 }
@@ -2948,7 +2948,7 @@ test "EnvStorage keeps MARU_PANE_ID as the surface selector" {
 
 test "EnvStorage treats MARU_AGENT_MAPPING_ID as an ordinary environment key" {
     const old_value: ?[:0]u8 = if (std.c.getenv("MARU_AGENT_MAPPING_ID")) |raw|
-        try std.testing.allocator.dupeZ(u8, std.mem.span(raw))
+        try std.testing.allocator.dupeSentinel(u8, std.mem.span(raw), 0)
     else
         null;
     defer if (old_value) |value| {

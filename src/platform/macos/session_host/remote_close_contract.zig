@@ -105,13 +105,13 @@ pub fn recursivelyPointerFree(comptime T: type) bool {
         .pointer, .error_union, .optional => false,
         .array => |info| recursivelyPointerFree(info.child),
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field| {
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| {
                 if (!recursivelyPointerFree(field.type)) break :blk false;
             }
             break :blk true;
         },
         .@"union" => |info| blk: {
-            inline for (info.fields) |field| {
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| {
                 if (!recursivelyPointerFree(field.type)) break :blk false;
             }
             break :blk true;

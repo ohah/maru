@@ -145,7 +145,7 @@ test "릴리스 워크플로: mise 뒤 baseline 앞에서 Zig path size digest v
     try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "command -v zig"));
     try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "/usr/bin/realpath"));
     try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "version=$(\"$canonical\" version)"));
-    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "test \"$version\" = '0.16.0'"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "test \"$version\" = '0.17.0'"));
     try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "/usr/bin/stat -f '%z'"));
     try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "/usr/bin/shasum -a 256"));
     try std.testing.expectEqual(@as(usize, 1), countMatchingLines(block, "path=%s\\n"));

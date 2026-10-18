@@ -145,7 +145,7 @@ pub const Reservation = struct {
             _ = c.close(self.attempt_fd);
         }
         var leaf_buf: [64]u8 = undefined;
-        const leaf = std.fmt.bufPrintZ(&leaf_buf, "attempt-{x:0>32}", .{self.attempt_id}) catch {
+        const leaf = std.fmt.bufPrintSentinel(&leaf_buf, "attempt-{x:0>32}", .{self.attempt_id}, 0) catch {
             if (self.owner_open) _ = c.close(self.owner_fd);
             self.active = false;
             return error.CleanupFailed;
@@ -238,7 +238,7 @@ fn reserveWithFailpoint(
         if (close_owner) _ = c.close(owner_fd);
     }
     var leaf_buf: [64]u8 = undefined;
-    const leaf = std.fmt.bufPrintZ(&leaf_buf, "attempt-{x:0>32}", .{attempt_id}) catch
+    const leaf = std.fmt.bufPrintSentinel(&leaf_buf, "attempt-{x:0>32}", .{attempt_id}, 0) catch
         return error.OpenFailed;
     if (c.mkdirat(owner_fd, leaf.ptr, 0o700) != 0) {
         if (posix.errno(-1) == .EXIST) return error.AlreadyExists;
@@ -367,10 +367,11 @@ fn commitReservedWithFailpoint(
     _ = c.close(reservation.attempt_fd);
     reservation.attempt_open = false;
     var leaf_buf: [64]u8 = undefined;
-    const leaf = std.fmt.bufPrintZ(
+    const leaf = std.fmt.bufPrintSentinel(
         &leaf_buf,
         "attempt-{x:0>32}",
         .{reservation.attempt_id},
+        0,
     ) catch return error.CleanupFailed;
     if (failpoint == .attempt_rmdir) return error.CleanupFailed;
     if (c.unlinkat(reservation.owner_fd, leaf.ptr, at_removedir) != 0) return error.CleanupFailed;
@@ -457,10 +458,11 @@ fn commitWithFailpoint(
     const owner_fd = try openOwnerDir(owner_dir);
     defer _ = c.close(owner_fd);
     var attempt_leaf_buf: [64]u8 = undefined;
-    const attempt_leaf = std.fmt.bufPrintZ(
+    const attempt_leaf = std.fmt.bufPrintSentinel(
         &attempt_leaf_buf,
         "attempt-{x:0>32}",
         .{expected.attempt_id},
+        0,
     ) catch return error.OpenFailed;
     if (c.mkdirat(owner_fd, attempt_leaf.ptr, 0o700) != 0) {
         if (posix.errno(-1) == .EXIST) return error.AlreadyExists;
@@ -579,7 +581,7 @@ fn writeAtomicExclusive(
     fail_after_rename: bool,
 ) Error!c.fd_t {
     var tmp_buf: [96]u8 = undefined;
-    const tmp = std.fmt.bufPrintZ(&tmp_buf, ".{s}.tmp-{d}", .{ leaf, c.getpid() }) catch
+    const tmp = std.fmt.bufPrintSentinel(&tmp_buf, ".{s}.tmp-{d}", .{ leaf, c.getpid() }, 0) catch
         return error.OpenFailed;
     const fd = c.openat(
         dir_fd,
@@ -753,7 +755,7 @@ fn removePinnedLeaf(
     kernel_error: ?*?posix.E,
 ) Error!void {
     var tomb_buf: [128]u8 = undefined;
-    const tomb = std.fmt.bufPrintZ(&tomb_buf, ".{s}.remove-{d}", .{ leaf, c.getpid() }) catch
+    const tomb = std.fmt.bufPrintSentinel(&tomb_buf, ".{s}.remove-{d}", .{ leaf, c.getpid() }, 0) catch
         return error.CleanupFailed;
     if (renameatx_np(dir_fd, leaf.ptr, dir_fd, tomb.ptr, rename_excl) != 0) {
         if (comptime builtin.is_test) {
@@ -830,13 +832,13 @@ fn testAttemptRecord(allocator: std.mem.Allocator, host_id: u128, attempt_id: u1
         .request_path = "/Applications/Maru",
         .staged_path = "/tmp/maru/target",
         .build_id = "sha256:0101010101010101010101010101010101010101010101010101010101010101",
-        .sha256 = [_]u8{1} ** 32,
+        .sha256 = @as([32]u8, @splat(1)),
         .dev = 1,
         .ino = 2,
         .size = 3,
         .rollback_image = .{
             .path = "/tmp/maru/rollback-current",
-            .sha256 = [_]u8{2} ** 32,
+            .sha256 = @as([32]u8, @splat(2)),
             .dev = 4,
             .ino = 5,
             .size = 6,
@@ -858,13 +860,13 @@ fn testExpected(host_id: u128, attempt_id: u128, next_handle: u64) ExpectedAutho
         .request_path = "/Applications/Maru",
         .staged_path = "/tmp/maru/target",
         .build_id = "sha256:0101010101010101010101010101010101010101010101010101010101010101",
-        .sha256 = [_]u8{1} ** 32,
+        .sha256 = @as([32]u8, @splat(1)),
         .dev = 1,
         .ino = 2,
         .size = 3,
         .rollback_image = .{
             .path = "/tmp/maru/rollback-current",
-            .sha256 = [_]u8{2} ** 32,
+            .sha256 = @as([32]u8, @splat(2)),
             .dev = 4,
             .ino = 5,
             .size = 6,
@@ -912,7 +914,7 @@ test "handoff store commits identical primary backup and unlinks secret paths be
     divergent.build_id = "sha256:0202020202020202020202020202020202020202020202020202020202020202";
     try std.testing.expectError(error.InvalidState, validateHandoff(std.testing.allocator, divergent, bytes));
     divergent = testExpected(0xAA, 0x11, 4);
-    divergent.sha256 = [_]u8{2} ** 32;
+    divergent.sha256 = @as([32]u8, @splat(2));
     try std.testing.expectError(error.InvalidState, validateHandoff(std.testing.allocator, divergent, bytes));
     divergent = testExpected(0xAA, 0x11, 4);
     divergent.dev = 9;
@@ -950,7 +952,7 @@ test "handoff store commits identical primary backup and unlinks secret paths be
     try std.testing.expect(c.fcntl(pair.primary_fd, c.F.GETFD, @as(c_int, 0)) & c.FD_CLOEXEC != 0);
     try std.testing.expect(c.fcntl(pair.backup_fd, c.F.GETFD, @as(c_int, 0)) & c.FD_CLOEXEC != 0);
     var attempt_buf: [256]u8 = undefined;
-    const attempt_path = try std.fmt.bufPrintZ(&attempt_buf, "{s}/attempt-{x:0>32}", .{ dir, @as(u128, 0x11) });
+    const attempt_path = try std.fmt.bufPrintSentinel(&attempt_buf, "{s}/attempt-{x:0>32}", .{ dir, @as(u128, 0x11) }, 0);
     try std.testing.expect(c.access(attempt_path.ptr, c.F_OK) != 0);
     const primary_fd = pair.primary_fd;
     const backup_fd = pair.backup_fd;
@@ -989,10 +991,11 @@ test "reserved handoff commits into pre-quiesce files and cleans the private att
     try readbackEqual(pair.primary_fd, bytes, .{ .deadline = deadline });
     try readbackEqual(pair.backup_fd, bytes, .{ .deadline = deadline });
     var attempt_buf: [256]u8 = undefined;
-    const attempt_path = try std.fmt.bufPrintZ(
+    const attempt_path = try std.fmt.bufPrintSentinel(
         &attempt_buf,
         "{s}/attempt-{x:0>32}",
         .{ dir, @as(u128, 0x13) },
+        0,
     );
     try std.testing.expect(c.access(attempt_path.ptr, c.F_OK) != 0);
 }
@@ -1082,10 +1085,11 @@ test "reserved handoff syscall failures publish no pair and leave no attempt res
         try std.testing.expect(c.fcntl(backup_fd, c.F.GETFD, @as(c_int, 0)) < 0);
         try std.testing.expectEqual(posix.E.BADF, posix.errno(-1));
         var attempt_buf: [256]u8 = undefined;
-        const attempt_path = try std.fmt.bufPrintZ(
+        const attempt_path = try std.fmt.bufPrintSentinel(
             &attempt_buf,
             "{s}/attempt-{x:0>32}",
             .{ dir, attempt_id },
+            0,
         );
         try std.testing.expect(c.access(attempt_path.ptr, c.F_OK) != 0);
         try std.testing.expectEqual(fd_count_before, try testOpenFdCount());
@@ -1128,18 +1132,19 @@ test "reservation cleanup identity failure closes descriptors and preserves repl
         try std.testing.expectEqual(posix.E.BADF, posix.errno(-1));
     }
     var attempt_buf: [256]u8 = undefined;
-    const attempt_path = try std.fmt.bufPrintZ(
+    const attempt_path = try std.fmt.bufPrintSentinel(
         &attempt_buf,
         "{s}/attempt-{x:0>32}",
         .{ dir, attempt_id },
+        0,
     );
     try std.testing.expect(c.access(attempt_path.ptr, c.F_OK) == 0);
     var primary_path_buf: [288]u8 = undefined;
-    const primary_path = try std.fmt.bufPrintZ(&primary_path_buf, "{s}/primary", .{attempt_path});
+    const primary_path = try std.fmt.bufPrintSentinel(&primary_path_buf, "{s}/primary", .{attempt_path}, 0);
     var saved_path_buf: [288]u8 = undefined;
-    const saved_path = try std.fmt.bufPrintZ(&saved_path_buf, "{s}/saved", .{attempt_path});
+    const saved_path = try std.fmt.bufPrintSentinel(&saved_path_buf, "{s}/saved", .{attempt_path}, 0);
     var backup_path_buf: [288]u8 = undefined;
-    const backup_path = try std.fmt.bufPrintZ(&backup_path_buf, "{s}/backup", .{attempt_path});
+    const backup_path = try std.fmt.bufPrintSentinel(&backup_path_buf, "{s}/backup", .{attempt_path}, 0);
     try std.testing.expect(c.access(primary_path.ptr, c.F_OK) == 0);
     try std.testing.expect(c.access(saved_path.ptr, c.F_OK) == 0);
     try std.testing.expect(c.access(backup_path.ptr, c.F_OK) != 0);
@@ -1161,10 +1166,11 @@ test "reservation cleanup observes consecutive kernel permission and nonempty fa
     const attempt_fd = reservation.attempt_fd;
     const owner_fd = reservation.owner_fd;
     var attempt_buf: [256]u8 = undefined;
-    const attempt_path = try std.fmt.bufPrintZ(
+    const attempt_path = try std.fmt.bufPrintSentinel(
         &attempt_buf,
         "{s}/attempt-{x:0>32}",
         .{ dir, attempt_id },
+        0,
     );
     if (c.fchmod(attempt_fd, 0o500) != 0) return error.TestUnexpectedResult;
     var permissions_restored = false;
@@ -1197,10 +1203,11 @@ test "partial reservation failure removes the first copy and private attempt" {
         reserveWithFailpoint(dir, 0x14, 4096, deadline, .after_primary),
     );
     var attempt_buf: [256]u8 = undefined;
-    const attempt_path = try std.fmt.bufPrintZ(
+    const attempt_path = try std.fmt.bufPrintSentinel(
         &attempt_buf,
         "{s}/attempt-{x:0>32}",
         .{ dir, @as(u128, 0x14) },
+        0,
     );
     try std.testing.expect(c.access(attempt_path.ptr, c.F_OK) != 0);
 }
@@ -1276,10 +1283,11 @@ test "handoff store rejects malformed or divergent state and removes attempt res
             ),
         );
         var failed_attempt_buf: [256]u8 = undefined;
-        const failed_attempt = try std.fmt.bufPrintZ(
+        const failed_attempt = try std.fmt.bufPrintSentinel(
             &failed_attempt_buf,
             "{s}/attempt-{x:0>32}",
             .{ dir, @as(u128, 2) },
+            0,
         );
         try std.testing.expect(c.access(failed_attempt.ptr, c.F_OK) != 0);
     }
@@ -1320,7 +1328,7 @@ test "handoff store rejects malformed or divergent state and removes attempt res
         ),
     );
     var attempt_buf: [256]u8 = undefined;
-    const attempt_path = try std.fmt.bufPrintZ(&attempt_buf, "{s}/attempt-{x:0>32}", .{ dir, @as(u128, 2) });
+    const attempt_path = try std.fmt.bufPrintSentinel(&attempt_buf, "{s}/attempt-{x:0>32}", .{ dir, @as(u128, 2) }, 0);
     try std.testing.expect(c.access(attempt_path.ptr, c.F_OK) != 0);
 }
 
@@ -1328,7 +1336,7 @@ test "handoff store directory fd stays on the approved generation after path rep
     var owner_buf: [192]u8 = undefined;
     const owner = try test_scratch.open(std.testing.io, &owner_buf, "handoff-dir-pin");
     var pinned_buf: [208]u8 = undefined;
-    const pinned = try std.fmt.bufPrintZ(&pinned_buf, "{s}.pinned", .{owner});
+    const pinned = try std.fmt.bufPrintSentinel(&pinned_buf, "{s}.pinned", .{owner}, 0);
     // `.pinned`는 이 테스트가 rename으로 만드는 **대상**이라 미리 만들지 않는다 — 잔여물만 걷는다.
     test_scratch.close(std.testing.io, pinned);
     const owner_fd = try openOwnerDir(owner);
@@ -1336,7 +1344,7 @@ test "handoff store directory fd stays on the approved generation after path rep
     if (c.rename(owner.ptr, pinned.ptr) != 0) return error.SkipZigTest;
     defer {
         var child_buf: [224]u8 = undefined;
-        if (std.fmt.bufPrintZ(&child_buf, "{s}/child", .{pinned})) |child| {
+        if (std.fmt.bufPrintSentinel(&child_buf, "{s}/child", .{pinned}, 0)) |child| {
             _ = c.rmdir(child.ptr);
         } else |_| {}
         _ = c.rmdir(pinned.ptr);
@@ -1345,9 +1353,9 @@ test "handoff store directory fd stays on the approved generation after path rep
     if (c.mkdir(owner.ptr, 0o700) != 0) return error.SkipZigTest;
     if (c.mkdirat(owner_fd, "child", 0o700) != 0) return error.SkipZigTest;
     var pinned_child_buf: [224]u8 = undefined;
-    const pinned_child = try std.fmt.bufPrintZ(&pinned_child_buf, "{s}/child", .{pinned});
+    const pinned_child = try std.fmt.bufPrintSentinel(&pinned_child_buf, "{s}/child", .{pinned}, 0);
     var replacement_child_buf: [224]u8 = undefined;
-    const replacement_child = try std.fmt.bufPrintZ(&replacement_child_buf, "{s}/child", .{owner});
+    const replacement_child = try std.fmt.bufPrintSentinel(&replacement_child_buf, "{s}/child", .{owner}, 0);
     try std.testing.expect(c.access(pinned_child.ptr, c.F_OK) == 0);
     try std.testing.expect(c.access(replacement_child.ptr, c.F_OK) != 0);
 }

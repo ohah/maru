@@ -446,7 +446,7 @@ fn isKexMessage(msg: u8) bool {
 const test_key: [cipher.key_len]u8 = @splat(0x5a);
 
 fn plainKexInit(out: []u8, rand: std.Random) []const u8 {
-    return out[0..(packet.write(out, &[_]u8{msg_kexinit} ++ [_]u8{0} ** 16, rand) catch unreachable)];
+    return out[0..(packet.write(out, &[_]u8{msg_kexinit} ++ @as([16]u8, @splat(0)), rand) catch unreachable)];
 }
 
 /// 테스트용: 고정 키 `Cipher`. `initMove`/`enable*Keys` 가 원본을 지우므로 매번 새로 만든다.

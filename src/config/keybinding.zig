@@ -1500,10 +1500,10 @@ test "file tree context honors app override and unbind without leaking terminal 
 }
 
 test "web context gives editable defaults to WebKit after user override and unbind" {
-    try std.testing.expectEqual(@as(u32, 0), @intFromEnum(WebKeyRoute.pass_through));
-    try std.testing.expectEqual(@as(u32, 1), @intFromEnum(WebKeyRoute.app_action));
-    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(WebKeyRoute.consume_unbound));
-    try std.testing.expectEqual(@as(u32, 3), @intFromEnum(WebKeyRoute.web_editor));
+    try std.testing.expectEqual(@as(u32, 0), @backingInt(WebKeyRoute.pass_through));
+    try std.testing.expectEqual(@as(u32, 1), @backingInt(WebKeyRoute.app_action));
+    try std.testing.expectEqual(@as(u32, 2), @backingInt(WebKeyRoute.consume_unbound));
+    try std.testing.expectEqual(@as(u32, 3), @backingInt(WebKeyRoute.web_editor));
     const save = terminal.KeyEvent{ .key = .{ .char = 's' }, .modifiers = .{ .command = true } };
     const find = terminal.KeyEvent{ .key = .{ .char = 'f' }, .modifiers = .{ .command = true } };
     const close = terminal.KeyEvent{ .key = .{ .char = 'w' }, .modifiers = .{ .command = true } };

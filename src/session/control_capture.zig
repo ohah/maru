@@ -741,7 +741,7 @@ test "dispatchCaptureAck: read-output 인가 → ack(capture_id·generation·scr
         defer testing.allocator.free(wire);
         var pm = try cp.parseMessage(testing.allocator, wire);
         defer pm.deinit();
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), pm.message.response.err.?.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), pm.message.response.err.?.code);
     }
 }
 
@@ -760,25 +760,25 @@ test "dispatchCaptureAck 오류: 미지 method→method_not_found, params 오류
     {
         const wire = try dispatchCaptureAck(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}", true, 1, 0);
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.method_not_found)), try respErr(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.method_not_found)), try respErr(wire));
     }
     // params id 없음.
     {
         const wire = try dispatchCaptureAck(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.capture\",\"params\":{}}", true, 1, 0);
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try respErr(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try respErr(wire));
     }
     // params id 음수.
     {
         const wire = try dispatchCaptureAck(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.capture\",\"params\":{\"id\":-1}}", true, 1, 0);
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try respErr(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try respErr(wire));
     }
     // scrollback 비-불리언.
     {
         const wire = try dispatchCaptureAck(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.capture\",\"params\":{\"id\":10,\"scrollback\":\"yes\"}}", true, 1, 0);
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try respErr(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try respErr(wire));
     }
     // notification(id 없음) → invalid_request.
     {
@@ -786,7 +786,7 @@ test "dispatchCaptureAck 오류: 미지 method→method_not_found, params 오류
         defer testing.allocator.free(wire);
         var pm = try cp.parseMessage(testing.allocator, wire);
         defer pm.deinit();
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_request)), pm.message.response.err.?.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_request)), pm.message.response.err.?.code);
         try testing.expect(pm.message.response.id == .null);
     }
     // malformed JSON → parse_error, id=null.
@@ -795,7 +795,7 @@ test "dispatchCaptureAck 오류: 미지 method→method_not_found, params 오류
         defer testing.allocator.free(wire);
         var pm = try cp.parseMessage(testing.allocator, wire);
         defer pm.deinit();
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.parse_error)), pm.message.response.err.?.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.parse_error)), pm.message.response.err.?.code);
     }
 }
 

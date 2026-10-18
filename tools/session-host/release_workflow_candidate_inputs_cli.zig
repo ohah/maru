@@ -29,8 +29,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8, workflow:
     const command = try parse(args);
     var root_storage: [std.fs.max_path_bytes:0]u8 = undefined;
     var candidate_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const root = std.fmt.bufPrintZ(&root_storage, "{s}", .{command.root_path}) catch return error.InvalidPath;
-    const candidate = std.fmt.bufPrintZ(&candidate_storage, "{s}", .{command.candidate_directory}) catch return error.InvalidPath;
+    const root = std.fmt.bufPrintSentinel(&root_storage, "{s}", .{command.root_path}, 0) catch return error.InvalidPath;
+    const candidate = std.fmt.bufPrintSentinel(&candidate_storage, "{s}", .{command.candidate_directory}, 0) catch return error.InvalidPath;
     try owner.candidateInputsProcess(allocator, root, command.root_identity, workflow, candidate);
 }
 

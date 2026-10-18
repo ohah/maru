@@ -13,6 +13,8 @@
 //! 에이전트가 연 탭은 태어날 때 그 grant 에 묶인다(`latchAtBirth` — 3 회차 F1) — 첫 읽기가 탭이 생긴 뒤의 모든 줄을 본다. 그 첫 읽기 전에
 //! 사용자가 그 탭을 몰면(`userDrove` — 4 회차 D) 그 묶음은 풀리고 첫 읽기는 다른 쪽처럼 지금 문서의 제 줄만 본다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 
 /// 줄 수준. `maru` 는 maru 가 넣는 표지(버린 수)뿐이다 — 페이지는 이 수준을 만들 수 없다(sidecar 의 수준은 닫힌 enum 이다).
@@ -294,7 +296,7 @@ test "W9c①: the ring drops the oldest lines past 500 lines or 512 KiB of text"
 
     var b: Ring = .{};
     defer b.deinit(testing.allocator);
-    const big = "x" ** 8192;
+    const big = array_repeat.repeat("x", 8192);
     for (0..max_bytes / big.len) |_| try b.add(testing.allocator, .log, big, 0);
     try testing.expectEqual(max_bytes, b.bytes);
     try b.add(testing.allocator, .warn, "tail", 0);
@@ -555,14 +557,14 @@ test "W9c① 적대 리뷰 5 회차 n4: 표지에 수를 더해 글이 길어져
     var r: Ring = .{};
     defer r.deinit(testing.allocator);
     r.newDocument();
-    try r.add(testing.allocator, .log, "x" ** 8192, 0); // 가장 오래된 줄
+    try r.add(testing.allocator, .log, array_repeat.repeat("x", 8192), 0); // 가장 오래된 줄
     try r.addDropped(testing.allocator, 1, 0);
     try r.addDroppedOld(testing.allocator, 1, 1);
     // 상한까지 채운다.
-    while (r.bytes + 8192 <= max_bytes) try r.add(testing.allocator, .log, "y" ** 8192, 0);
-    try r.add(testing.allocator, .log, ("z" ** 8192)[0 .. max_bytes - r.bytes], 0);
+    while (r.bytes + 8192 <= max_bytes) try r.add(testing.allocator, .log, array_repeat.repeat("y", 8192), 0);
+    try r.add(testing.allocator, .log, (array_repeat.repeat("z", 8192))[0 .. max_bytes - r.bytes], 0);
     try testing.expectEqual(max_bytes, r.bytes);
-    try testing.expectEqualStrings("x" ** 8192, r.entries.items[0].text);
+    try testing.expectEqualStrings(array_repeat.repeat("x", 8192), r.entries.items[0].text);
     try r.addDropped(testing.allocator, 1_000_000_000, 0); // 표지의 글이 길어진다
     try testing.expect(r.bytes <= max_bytes);
     try testing.expect(std.mem.startsWith(u8, r.entries.items[0].text, "1000000001 console messages were dropped"));
@@ -576,8 +578,8 @@ test "W9c① 적대 리뷰 5 회차 n4: 표지에 수를 더해 글이 길어져
     var o: Ring = .{};
     defer o.deinit(testing.allocator);
     try o.addDropped(testing.allocator, 1, 0);
-    while (o.bytes + 8192 <= max_bytes) try o.add(testing.allocator, .log, "y" ** 8192, 0);
-    try o.add(testing.allocator, .log, ("z" ** 8192)[0 .. max_bytes - o.bytes], 0);
+    while (o.bytes + 8192 <= max_bytes) try o.add(testing.allocator, .log, array_repeat.repeat("y", 8192), 0);
+    try o.add(testing.allocator, .log, (array_repeat.repeat("z", 8192))[0 .. max_bytes - o.bytes], 0);
     try o.addDropped(testing.allocator, 1_000_000_000, 0);
     try testing.expect(o.bytes <= max_bytes);
     try testing.expect(std.mem.startsWith(u8, o.entries.items[0].text, "1000000001 console messages were dropped"));

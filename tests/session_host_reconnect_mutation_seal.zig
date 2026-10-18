@@ -1,5 +1,7 @@
 //! CR2e-b mutation sealing과 PausedPaste secure owner의 focused TDD.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const mutation = @import("reconnect_mutation_seal");
 
@@ -46,8 +48,8 @@ test "CR2e-b seal은 일반 입력을 지우고 완전한 paste 하나만 quaran
     try budget.initInPlace();
     try std.testing.expectError(error.InvalidAuthority, budget.initInPlace());
     var store: mutation.PausedPasteStore = .{};
-    try store.initInPlace(allocator, &budget, .{1} ** 16, 7, 11);
-    try std.testing.expectError(error.InvalidAuthority, store.initInPlace(allocator, &budget, .{1} ** 16, 7, 11));
+    try store.initInPlace(allocator, &budget, @splat(1), 7, 11);
+    try std.testing.expectError(error.InvalidAuthority, store.initInPlace(allocator, &budget, @splat(1), 7, 11));
     var copied_store = store;
     try std.testing.expectError(error.InvalidAuthority, copied_store.projection());
     defer store.deinit();
@@ -62,20 +64,20 @@ test "CR2e-b seal은 일반 입력을 지우고 완전한 paste 하나만 quaran
         .{ .kind = .paste, .sequence = 3, .queued_payload = &paste_queue, .complete_original = &paste_original },
     };
     const summary = try store.sealEntries(&entries, 100, std.testing.io);
-    try std.testing.expectEqual([_]u8{1} ** 16, summary.runtime_id);
+    try std.testing.expectEqual(@as([16]u8, @splat(1)), summary.runtime_id);
     try std.testing.expectEqual(@as(u64, 7), summary.shell_generation);
     try std.testing.expectEqual(@as(u64, 11), summary.input_epoch);
     try std.testing.expectEqual(@as(u64, 1), summary.first_sequence);
     try std.testing.expectEqual(@as(u64, 3), summary.last_sequence);
     try std.testing.expectEqual(@as(u32, 3), summary.total_count);
     try std.testing.expectEqual(@as(u64, 9), summary.total_bytes);
-    try std.testing.expectEqual(@as(u32, 1), summary.kinds[@intFromEnum(mutation.SealKind.key_bytes)].count);
-    try std.testing.expectEqual(@as(u64, 3), summary.kinds[@intFromEnum(mutation.SealKind.key_bytes)].bytes);
-    try std.testing.expectEqual(@as(u64, 3), summary.kinds[@intFromEnum(mutation.SealKind.paste)].first_sequence);
-    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** key.len, &key);
-    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** ime.len, &ime);
-    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** paste_queue.len, &paste_queue);
-    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** paste_original.len, &paste_original);
+    try std.testing.expectEqual(@as(u32, 1), summary.kinds[@backingInt(mutation.SealKind.key_bytes)].count);
+    try std.testing.expectEqual(@as(u64, 3), summary.kinds[@backingInt(mutation.SealKind.key_bytes)].bytes);
+    try std.testing.expectEqual(@as(u64, 3), summary.kinds[@backingInt(mutation.SealKind.paste)].first_sequence);
+    try std.testing.expectEqualSlices(u8, array_repeat.repeat(&[_]u8{0}, key.len), &key);
+    try std.testing.expectEqualSlices(u8, array_repeat.repeat(&[_]u8{0}, ime.len), &ime);
+    try std.testing.expectEqualSlices(u8, array_repeat.repeat(&[_]u8{0}, paste_queue.len), &paste_queue);
+    try std.testing.expectEqualSlices(u8, array_repeat.repeat(&[_]u8{0}, paste_original.len), &paste_original);
     try std.testing.expect(store.hasPausedPaste());
     const projection = (try store.projection()).?;
     try std.testing.expectEqual(@as(u64, 100), projection.id);
@@ -101,7 +103,7 @@ test "CR2e-b seal은 일반 입력을 지우고 완전한 paste 하나만 quaran
 
     var staging_failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
     var staging_oom: mutation.PausedPasteStore = .{};
-    try staging_oom.initInPlace(staging_failing.allocator(), &budget, .{8} ** 16, 7, 11);
+    try staging_oom.initInPlace(staging_failing.allocator(), &budget, @splat(8), 7, 11);
     defer staging_oom.deinit();
     var staging_source = [_]u8{ 7, 8, 9 };
     try staging_oom.capturePaste(&staging_source, 31, std.testing.io);
@@ -118,14 +120,14 @@ test "CR2e-b PausedPaste cap과 OOM은 source와 budget을 mutation 없이 보�
     var budget: mutation.GlobalPasteBudget = .{};
     try budget.initInPlace();
     var store: mutation.PausedPasteStore = .{};
-    try store.initInPlace(allocator, &budget, .{2} ** 16, 7, 11);
+    try store.initInPlace(allocator, &budget, @splat(2), 7, 11);
     defer store.deinit();
 
     var copied_budget = budget;
     var rejected_store: mutation.PausedPasteStore = .{};
     try std.testing.expectError(
         error.InvalidAuthority,
-        rejected_store.initInPlace(allocator, &copied_budget, .{6} ** 16, 7, 11),
+        rejected_store.initInPlace(allocator, &copied_budget, @splat(6), 7, 11),
     );
     const owner_bytes = std.mem.asBytes(&store);
     try std.testing.expectError(error.InvalidAuthority, store.capturePaste(owner_bytes[0..4], 9, std.testing.io));
@@ -138,7 +140,7 @@ test "CR2e-b PausedPaste cap과 OOM은 source와 budget을 mutation 없이 보�
     try std.testing.expectError(error.InvalidAuthority, store.sealEntries(&overlapping, 8, std.testing.io));
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4 }, &aliased);
 
-    var oversized = [_]u8{0xA5} ** (mutation.max_paste_bytes + 1);
+    var oversized = @as([(mutation.max_paste_bytes + 1)]u8, @splat(0xA5));
     const before = oversized;
     try std.testing.expectError(error.PasteTooLarge, store.capturePaste(&oversized, 1, std.testing.io));
     try std.testing.expectEqualSlices(u8, &before, &oversized);
@@ -146,7 +148,7 @@ test "CR2e-b PausedPaste cap과 OOM은 source와 budget을 mutation 없이 보�
 
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     var oom_store: mutation.PausedPasteStore = .{};
-    try oom_store.initInPlace(failing.allocator(), &budget, .{5} ** 16, 7, 11);
+    try oom_store.initInPlace(failing.allocator(), &budget, @splat(5), 7, 11);
     defer oom_store.deinit();
     var payload = [_]u8{ 3, 4, 5, 6 };
     try std.testing.expectError(error.OutOfMemory, oom_store.capturePaste(&payload, 2, std.testing.io));
@@ -168,7 +170,7 @@ test "CR2e-b PausedPaste cap과 OOM은 source와 budget을 mutation 없이 보�
     for (&peak_stores) |*peak_store| try peak_store.prepareResend(7, 12, std.testing.io);
     try std.testing.expectEqual(mutation.max_global_bytes, budget.reservedBytes());
     var overflow_store: mutation.PausedPasteStore = .{};
-    try overflow_store.initInPlace(allocator, &budget, .{30} ** 16, 7, 11);
+    try overflow_store.initInPlace(allocator, &budget, @splat(30), 7, 11);
     defer overflow_store.deinit();
     var one = [_]u8{0xAA};
     try std.testing.expectError(error.GlobalPasteLimit, overflow_store.capturePaste(&one, 30, std.testing.io));
@@ -184,7 +186,7 @@ test "CR2e-b PausedPaste는 boot-clock TTL과 send discard에서 payload와 stag
     defer mutation.testing_api.disarmWipeTrace();
 
     var store: mutation.PausedPasteStore = .{};
-    try store.initInPlace(allocator, &budget, .{3} ** 16, 7, 11);
+    try store.initInPlace(allocator, &budget, @splat(3), 7, 11);
     defer store.deinit();
     var payload = [_]u8{ 9, 8, 7, 6 };
     try store.capturePaste(&payload, 3, std.testing.io);
@@ -200,7 +202,7 @@ test "CR2e-b PausedPaste는 boot-clock TTL과 send discard에서 payload와 stag
     try std.testing.expectEqual(@as(usize, 12), trace.bytes);
 
     var expiring: mutation.PausedPasteStore = .{};
-    try expiring.initInPlace(allocator, &budget, .{4} ** 16, 7, 11);
+    try expiring.initInPlace(allocator, &budget, @splat(4), 7, 11);
     defer expiring.deinit();
     var later = [_]u8{ 1, 1, 2, 3 };
     try expiring.capturePasteAt(&later, 4, 100);
@@ -209,7 +211,7 @@ test "CR2e-b PausedPaste는 boot-clock TTL과 send discard에서 payload와 stag
     try std.testing.expectEqual(@as(usize, 0), budget.reservedBytes());
 
     var corrupted: mutation.PausedPasteStore = .{};
-    try corrupted.initInPlace(allocator, &budget, .{7} ** 16, 7, 11);
+    try corrupted.initInPlace(allocator, &budget, @splat(7), 7, 11);
     defer corrupted.deinit();
     var corrupt_payload = [_]u8{ 4, 3, 2, 1 };
     try corrupted.capturePaste(&corrupt_payload, 5, std.testing.io);

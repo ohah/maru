@@ -11,13 +11,13 @@ test "immutable published baseline Release becomes one role-ordered sealed owner
     try metadata.bind(std.testing.allocator, baseline(), context(), &result);
     const value = result.value().?;
     try std.testing.expectEqual(@as(u64, 88), value.release_id);
-    try std.testing.expectEqualStrings("baseline-evidence.json", value.assets[@intFromEnum(metadata.Role.evidence_candidate)].name);
+    try std.testing.expectEqualStrings("baseline-evidence.json", value.assets[@backingInt(metadata.Role.evidence_candidate)].name);
     try std.testing.expectEqual([_]u64{ 1000, 1001, 1002, 1003 }, ids(value.assets));
     var copied = result;
     try std.testing.expect(copied.value() == null);
-    result.sizes[@intFromEnum(metadata.Role.dmg)] += 1;
+    result.sizes[@backingInt(metadata.Role.dmg)] += 1;
     try std.testing.expect(result.value() == null);
-    result.sizes[@intFromEnum(metadata.Role.dmg)] -= 1;
+    result.sizes[@backingInt(metadata.Role.dmg)] -= 1;
     try result.deinit();
     try std.testing.expect(result.value() == null);
 }
@@ -26,8 +26,8 @@ test "asset array order is not authority and upgrade filename remains only a can
     var result: metadata.Owner = .{};
     try metadata.bind(std.testing.allocator, upgradeReordered(), context(), &result);
     const value = result.value().?;
-    try std.testing.expectEqualStrings("Maru-1.2.3-universal.dmg", value.assets[@intFromEnum(metadata.Role.dmg)].name);
-    try std.testing.expectEqualStrings("upgrade-evidence.json", value.assets[@intFromEnum(metadata.Role.evidence_candidate)].name);
+    try std.testing.expectEqualStrings("Maru-1.2.3-universal.dmg", value.assets[@backingInt(metadata.Role.dmg)].name);
+    try std.testing.expectEqualStrings("upgrade-evidence.json", value.assets[@backingInt(metadata.Role.evidence_candidate)].name);
     try std.testing.expect(!@hasField(metadata.View, "profile"));
     try result.deinit();
 }

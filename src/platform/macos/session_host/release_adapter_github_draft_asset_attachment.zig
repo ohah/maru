@@ -201,10 +201,10 @@ const ProductionUploader = struct {
         var encoded_storage: [max_asset_name_bytes * 3]u8 = undefined;
         const encoded = try percentEncode(&encoded_storage, expected.name);
         var endpoint_storage: [max_asset_name_bytes * 3 + 128:0]u8 = undefined;
-        const endpoint = std.fmt.bufPrintZ(&endpoint_storage, "repos/ohah/maru/releases/{d}/assets?name={s}", .{ release_id, encoded }) catch return error.InvalidRequest;
+        const endpoint = std.fmt.bufPrintSentinel(&endpoint_storage, "repos/ohah/maru/releases/{d}/assets?name={s}", .{ release_id, encoded }, 0) catch return error.InvalidRequest;
         var token_storage: ["GH_TOKEN=".len + transport.max_token_bytes + 1]u8 = undefined;
         defer @memset(&token_storage, 0);
-        const token_entry = std.fmt.bufPrintZ(&token_storage, "GH_TOKEN={s}", .{self.token}) catch return error.InvalidToken;
+        const token_entry = std.fmt.bufPrintSentinel(&token_storage, "GH_TOKEN={s}", .{self.token}, 0) catch return error.InvalidToken;
         const argv = [_:null]?[*:0]const u8{
             self.executable.ptr,
             "api",

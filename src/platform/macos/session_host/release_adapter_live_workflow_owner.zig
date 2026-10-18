@@ -230,13 +230,13 @@ fn execute(raw: *anyopaque) phase.Result {
 }
 
 comptime {
-    const fields = @typeInfo(Invocation).@"union".fields;
+    const fields = @import("type_info_fields").unionFields(Invocation);
     if (fields.len != inventory.len) @compileError("live workflow invocation inventory drift");
     for (fields, 0..) |field, index| {
         const invocation = inventory[index];
         if (!std.mem.eql(u8, field.name, @tagName(invocation)))
             @compileError("live workflow invocation tag inventory drift");
-        if (@intFromEnum(identity(invocation).stage) != index)
+        if (@backingInt(identity(invocation).stage) != index)
             @compileError("live workflow invocation order drift");
     }
 }

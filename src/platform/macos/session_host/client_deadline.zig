@@ -183,7 +183,7 @@ pub fn connectUnixUntil(
             .failed => return error.ConnectFailed,
         };
         if (socket_error_value == 0) return .{ .fd = fd, .saved_flags = saved_flags };
-        const socket_error: posix.E = @enumFromInt(socket_error_value);
+        const socket_error: posix.E = @fromBackingInt(@intCast(socket_error_value));
         return switch (classifyConnectErrno(socket_error)) {
             .absent => error.EndpointAbsent,
             .denied => error.EndpointDenied,
@@ -602,7 +602,7 @@ test "deadline connector closes exact fd on timeout denial and SO_ERROR" {
     );
     try std.testing.expectEqual(@as(usize, 1), denied.closed);
 
-    var refused = Fake{ .socket_error_result = .{ .value = @intFromEnum(posix.E.CONNREFUSED) } };
+    var refused = Fake{ .socket_error_result = .{ .value = @backingInt(posix.E.CONNREFUSED) } };
     try std.testing.expectError(
         error.EndpointAbsent,
         connectUnixUntil(refused.ops(), "socket", refused.deadline(100)),

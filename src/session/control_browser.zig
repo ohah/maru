@@ -39,6 +39,8 @@
 //! **L2 순수:** std + control_plane(1a) + control_capability(1e) + control_surface(1c) + control_events(5f-0a: browser.subscribe
 //! 이벤트 필터 vocabulary)만 import한다(app/pty/platform/chrome import 0 — tests/boundary/imports.zig가 강제). OS 타입 0.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const cp = @import("control_plane.zig");
 const capmod = @import("control_capability.zig");
@@ -1961,8 +1963,8 @@ fn writeBrowserListResult(s: *std.json.Stringify, id: cp.Id, snapshot: cs.Collec
                 try s.write(w.controllable);
                 try s.objectField("methods");
                 try s.beginArray();
-                inline for (std.meta.fields(BrowserMethod)) |f| {
-                    const m: BrowserMethod = @enumFromInt(f.value);
+                inline for (@import("type_info_fields").fields(BrowserMethod)) |f| {
+                    const m: BrowserMethod = @fromBackingInt(@intCast(f.value));
                     if (surfaceSupports(w, m)) try s.write(browserMethodWireName(m));
                 }
                 try s.endArray();
@@ -2832,7 +2834,7 @@ const req_navigate_11 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navi
 test "dispatchBrowser: cap 없음(null) → 균일 unauthorized(-32002)" {
     const wire = try dispatchErr(req_navigate_11, null);
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
     // oracle: message는 균일 "Unauthorized"(deny 이유 노출 없음).
     const msg = try errMessage(wire);
     defer testing.allocator.free(msg);
@@ -2846,14 +2848,14 @@ test "dispatchBrowser: cap.scope가 browser 아님(metadata/lifecycle) → 균�
         const meta_cap: capmod.Capability = .{ .surface_id = 11, .generation = 0, .scope = .{ .metadata = .self } };
         const wire = try dispatchErr(req_navigate_11, meta_cap);
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
     }
     // lifecycle cap도 마찬가지.
     {
         const life_cap: capmod.Capability = .{ .surface_id = 11, .generation = 0, .scope = .lifecycle };
         const wire = try dispatchErr(req_navigate_11, life_cap);
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
     }
 }
 
@@ -2862,7 +2864,7 @@ test "dispatchBrowser: cap.surface_id != target id → 균일 unauthorized" {
     // browser cap이 surface 99에 묶였는데 target은 11 → authorize surface_mismatch → unauthorized.
     const wire = try dispatchErr(req_navigate_11, browserCap(99));
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
 }
 
 // ── 4) revoked / expired → unauthorized ──
@@ -2871,7 +2873,7 @@ test "dispatchBrowser: revoked cap → 균일 unauthorized" {
     cap.revoked = true;
     const wire = try dispatchErr(req_navigate_11, cap);
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
 }
 
 test "dispatchBrowser: expired cap(now>=exp) → 균일 unauthorized" {
@@ -2881,7 +2883,7 @@ test "dispatchBrowser: expired cap(now>=exp) → 균일 unauthorized" {
     switch (try dispatchBrowser(testing.allocator, req_navigate_11, fx, &[_]capmod.Capability{cap}, null, &no_grants, 100)) {
         .err => |wire| {
             defer testing.allocator.free(wire);
-            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
         },
         .op => |op| {
             testing.allocator.free(op.arg);
@@ -2964,20 +2966,20 @@ test "dispatchBrowser(5f-0b-3b): 유효 browser cap + web surface → .subscribe
 test "dispatchBrowser(5f-0b-3b): subscribe 미지 event 이름 → invalid_params(인가된 caller만 — authz 뒤)" {
     const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":11,\"events\":[\"bogus\"]}}", browserCap(11));
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(wire));
 }
 
 test "dispatchBrowser(5f-0b-3b): subscribe도 cap 없으면 균일 unauthorized(§8.3 — 필터 파싱 이전)" {
     const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":11,\"events\":[\"bogus\"]}}", null);
     defer testing.allocator.free(wire);
     // cap 없음 → authz(step 4)서 unauthorized. bogus event도 안 노출(필터 파싱은 authz 뒤라 도달 안 함) = oracle 방지.
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
 }
 
 test "dispatchBrowser(5f-0b-3b): subscribe events:[] 빈 배열 → invalid_params(silent 무한대기 트랩 방지, 20차 [0])" {
     const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":11,\"events\":[]}}", browserCap(11));
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(wire));
 }
 
 test "dispatchBrowser(5f-0b-3b): subscribe events 중복 이름 → dedup되어 정상 .subscribe(길이 제한 없음, 20차 [1])" {
@@ -3014,7 +3016,7 @@ test "dispatchBrowser(5f-4c) D5 게이트: browser cap은 getCookies 불인가 �
     // D5 핵심: 페이지를 몰 수 있는 cap이 쿠키(인증 토큰)까지 자동으로 새지 않는다.
     const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.getCookies\",\"params\":{\"id\":11}}", browserCap(11));
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
 }
 
 test "dispatchBrowser(5f-4c) D5 대칭: browser_storage cap은 navigate 불인가 → 균일 unauthorized(single-scope)" {
@@ -3022,7 +3024,7 @@ test "dispatchBrowser(5f-4c) D5 대칭: browser_storage cap은 navigate 불인�
     // 세션이 둘 다 쓰려면 cap 2개 누적(§9.5.6 ③ auth.grant — 5f-4a).
     const wire = try dispatchErr(req_navigate_11, browserStorageCap(11));
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
 }
 
 // ── 1e-confirm-1b: pane confirm-grant 합성 — cap 없어도 pane grant가 인가(§9.2 Model B, 가법). ──
@@ -3113,13 +3115,13 @@ test "dispatchBrowser(1e-confirm-1c): 미grant valid 요청은 needs_grant, pane
     {
         const w = (try dispatchGrant(req_navigate_11, null, &grants)).err;
         defer testing.allocator.free(w);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(w));
     }
     // 미grant + **terminal surface(10, 비-web)** → surface 검증서 unauthorized(needs_grant 아님 — 존재하는 web에만 prompt).
     {
         const w = (try dispatchGrant("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":10,\"url\":\"u\"}}", 6, &grants)).err;
         defer testing.allocator.free(w);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(w));
     }
 }
 
@@ -3185,7 +3187,7 @@ test "dispatchBrowser(5f-1) D5: browser_storage cap은 screenshot 불인가 → 
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.screenshot\",\"params\":{\"id\":11}}";
     const wire = try dispatchErr(req, browserStorageCap(11));
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
 }
 
 // 22차 리뷰 [1]: `parseBrowserMethod(rest) orelse method_not_found`(step 5) 경로 — screenshot 구현 후 dispatch 레벨
@@ -3196,7 +3198,7 @@ test "dispatchBrowser: 유효 cap + 미구현 browser 메서드(pdf) → method_
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.pdf\",\"params\":{\"id\":11}}";
     const wire = try dispatchErr(req, browserCap(11));
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.method_not_found)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.method_not_found)), try errCode(wire));
 }
 
 test "dispatchBrowser: WebKit 탭의 back·forward·reload·hover·press 는 cap 이 있어도 -32008(W9b① — Chromium 전용, WebKit 은 걷어낼 예정)" {
@@ -3205,7 +3207,7 @@ test "dispatchBrowser: WebKit 탭의 back·forward·reload·hover·press 는 cap
         const req = try std.fmt.bufPrint(&buf, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.{s}\",\"params\":{{\"id\":11}}}}", .{m});
         const wire = try dispatchErr(req, browserCap(11));
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), try errCode(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(wire));
     }
 }
 
@@ -3214,7 +3216,7 @@ test "dispatchBrowser: 유효 cap + navigate params에 url 없음 → invalid_pa
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11}}";
     const wire = try dispatchErr(req, browserCap(11));
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(wire));
 }
 
 // ── §8.3 oracle: 미인가 caller는 params가 malformed여도 invalid_params가 아니라 균일 unauthorized여야 한다. 위 테스트와
@@ -3226,7 +3228,7 @@ test "dispatchBrowser §8.3: 미인가 caller의 malformed params/args는 invali
     {
         const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11}}", null);
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
         const msg = try errMessage(wire);
         defer testing.allocator.free(msg);
         try testing.expectEqualStrings("Unauthorized", msg); // 균일(deny 사유·존재 미노출)
@@ -3236,7 +3238,7 @@ test "dispatchBrowser §8.3: 미인가 caller의 malformed params/args는 invali
     {
         const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\",\"args\":[-0]}}", null);
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
     }
 }
 
@@ -3247,7 +3249,7 @@ test "dispatchBrowser: target이 terminal surface면 authz 통과해도 surface 
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":10,\"url\":\"https://a/\"}}";
     const wire = try dispatchErr(req, browserCap(10));
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
     // oracle: 여기도 균일 "Unauthorized"(terminal이라는 이유·존재를 노출하지 않음).
     const msg = try errMessage(wire);
     defer testing.allocator.free(msg);
@@ -3272,7 +3274,7 @@ test "dispatchBrowser §8.3: cap 부재·scope 불충족·surface 불일치·rev
     try testing.expectEqualStrings(w_null, w_scope);
     try testing.expectEqualStrings(w_null, w_surface);
     try testing.expectEqualStrings(w_null, w_revoked);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w_null));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(w_null));
 }
 
 // ── 9a) parse/method 파서 단위 ──
@@ -3466,7 +3468,7 @@ test "dispatchBrowser: core != browser 방어 → method_not_found" {
     // 라우터가 browser.* 만 보내지만 방어적으로 확인 — session.get이 여기 오면 method_not_found.
     const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.get\",\"params\":{\"id\":11}}", browserCap(11));
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.method_not_found)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.method_not_found)), try errCode(wire));
 }
 
 test "dispatchBrowser: 비-request(notification)·malformed·id 형식오류" {
@@ -3474,7 +3476,7 @@ test "dispatchBrowser: 비-request(notification)·malformed·id 형식오류" {
     {
         const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"u\"}}", browserCap(11));
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_request)), try errCode(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_request)), try errCode(wire));
     }
     // malformed JSON → parse_error(id=null).
     {
@@ -3482,14 +3484,14 @@ test "dispatchBrowser: 비-request(notification)·malformed·id 형식오류" {
         defer testing.allocator.free(wire);
         var pm = try cp.parseMessage(testing.allocator, wire);
         defer pm.deinit();
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.parse_error)), pm.message.response.err.?.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.parse_error)), pm.message.response.err.?.code);
         try testing.expect(pm.message.response.id == .null);
     }
     // id 형식오류(비정수)는 authz 이전이라 invalid_params(surface oracle 아님). cap 유효여도 형식이 먼저.
     {
         const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":\"x\",\"url\":\"u\"}}", browserCap(11));
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(wire));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(wire));
     }
 }
 
@@ -3533,7 +3535,7 @@ test "serializeBrowserResponse: navigate ok·getUrl url·executeScript result·e
         defer testing.allocator.free(w);
         var pm = try cp.parseMessage(testing.allocator, w);
         defer pm.deinit();
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
     }
     // 요청별 max_result_bytes는 완료 경로에서 실제 JSON bytes에 적용된다.
     {
@@ -3542,7 +3544,7 @@ test "serializeBrowserResponse: navigate ok·getUrl url·executeScript result·e
         var pm = try cp.parseMessage(testing.allocator, w);
         defer pm.deinit();
         const err = pm.message.response.err.?;
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.result_too_large)), err.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.result_too_large)), err.code);
         try testing.expectEqual(@as(i64, 1), err.data.?.object.get("limit_bytes").?.integer);
         try testing.expectEqual(@as(i64, 2), err.data.?.object.get("observed_bytes_at_least").?.integer);
     }
@@ -3552,7 +3554,7 @@ test "serializeBrowserResponse: navigate ok·getUrl url·executeScript result·e
         defer testing.allocator.free(w);
         var pm = try cp.parseMessage(testing.allocator, w);
         defer pm.deinit();
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
         try testing.expectEqualStrings("webView not found", pm.message.response.err.?.message);
     }
     // 5f-4c: getCookies ok → {result:{cookies:[...]}}(Swift JSON 배열을 result 재파싱해 embed).
@@ -3570,7 +3572,7 @@ test "serializeBrowserResponse: navigate ok·getUrl url·executeScript result·e
         defer testing.allocator.free(w);
         var pm = try cp.parseMessage(testing.allocator, w);
         defer pm.deinit();
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
     }
 }
 
@@ -3581,14 +3583,14 @@ test "executeScript length-only errors retain string JSON-RPC id ownership throu
     var parsed_too_large = try cp.parseMessage(testing.allocator, too_large);
     defer parsed_too_large.deinit();
     try testing.expectEqualStrings("req-1", parsed_too_large.message.response.id.string);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.result_too_large)), parsed_too_large.message.response.err.?.code);
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.result_too_large)), parsed_too_large.message.response.err.?.code);
 
     const inline_wire = try serializeExecuteScriptInlineTooLarge(testing.allocator, request);
     defer testing.allocator.free(inline_wire);
     var parsed_inline = try cp.parseMessage(testing.allocator, inline_wire);
     defer parsed_inline.deinit();
     try testing.expectEqualStrings("req-1", parsed_inline.message.response.id.string);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.payload_too_large)), parsed_inline.message.response.err.?.code);
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.payload_too_large)), parsed_inline.message.response.err.?.code);
 }
 
 // ── 9d) screenshot(5f-1) chunk-streaming 직렬화·metadata·감지 단위(§9.5.7) ──
@@ -3702,7 +3704,7 @@ test "executeScript script-error: typed data와 32 KiB frame 상한, malformed f
     try testing.expect(wire.len <= execute_script_error_frame_max_bytes);
     var parsed = try cp.parseMessage(testing.allocator, wire);
     defer parsed.deinit();
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.script_error)), parsed.message.response.err.?.code);
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.script_error)), parsed.message.response.err.?.code);
     try testing.expectEqualStrings("serialization", parsed.message.response.err.?.data.?.object.get("kind").?.string);
 
     const malformed = try serializeExecuteScriptScriptError(testing.allocator, request, "[]");
@@ -3739,7 +3741,7 @@ test "executeScript request id는 bounded diagnostic frame을 위해 1024 bytes�
     defer testing.allocator.free(request);
     const wire = try dispatchErr(request, browserCap(11));
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(wire));
 }
 
 test "serializeExecuteScriptChunkedComplete: 원 request id와 result/seq/bytes를 terminal에 고정" {
@@ -3846,8 +3848,8 @@ const fx_engine_windows = [_]wm.WindowMembershipSnapshot{.{ .window_id = 1, .win
 const fx_engine: cs.CollectorSnapshot = .{ .surfaces = &fx_engine_surfaces, .windows = &fx_engine_windows };
 
 test "browserMethodWireName 은 parseBrowserMethod 의 역이다(모든 메서드)" {
-    inline for (std.meta.fields(BrowserMethod)) |f| {
-        const m: BrowserMethod = @enumFromInt(f.value);
+    inline for (@import("type_info_fields").fields(BrowserMethod)) |f| {
+        const m: BrowserMethod = @fromBackingInt(@intCast(f.value));
         try testing.expectEqual(m, parseBrowserMethod(browserMethodWireName(m)).?);
     }
 }
@@ -3863,7 +3865,7 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     try testing.expect(webkit.get("controllable").?.bool);
     try testing.expectEqualStrings("webkit", webkit.get("engine").?.string);
     // WebKit 은 W9 전의 것만(back·forward·reload·hover·press·open·close·dialog·handleDialog·upload 는 Chromium 전용 — WebKit 은 걷어낼 예정).
-    try testing.expectEqual(@as(usize, std.meta.fields(BrowserMethod).len - 10), webkit.get("methods").?.array.items.len);
+    try testing.expectEqual(@as(usize, @import("type_info_fields").fields(BrowserMethod).len - 10), webkit.get("methods").?.array.items.len);
     try testing.expectEqualStrings("navigate", webkit.get("methods").?.array.items[0].string);
     const chromium = arr.items[1].object;
     try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
@@ -3891,7 +3893,7 @@ test "W9-0: 엔진이 지원하지 않는 메서드는 확인 모달(needs_grant
         switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 6, &grants, 0)) {
             .err => |e| {
                 defer testing.allocator.free(e);
-                try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+                try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
                 try testing.expect(std.mem.indexOf(u8, e, "\"engine\":\"chromium\"") != null);
             },
             else => return error.TestUnexpectedResult,
@@ -3906,7 +3908,7 @@ test "W9-0: 엔진이 지원하지 않는 메서드는 확인 모달(needs_grant
         switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 6, &grants, 0)) {
             .err => |e| {
                 defer testing.allocator.free(e);
-                try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+                try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
                 try testing.expect(std.mem.indexOf(u8, e, "\"engine\":\"webkit\"") != null);
                 try testing.expect(std.mem.indexOf(u8, e, "\"controllable\":false") != null);
             },
@@ -3936,7 +3938,7 @@ test "W9-0: 엔진이 지원하지 않는 메서드는 확인 모달(needs_grant
         switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 6, &grants, 0)) {
             .err => |e| {
                 defer testing.allocator.free(e);
-                try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(e));
+                try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(e));
             },
             else => return error.TestUnexpectedResult,
         }
@@ -3952,7 +3954,7 @@ test "W9b①b-2: Chromium 탭의 hover·press 는 op 으로 — press 는 key �
         .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.press\",\"params\":{\"id\":12,\"key\":\"Meta+a\",\"ref\":\"n5\"}}", .arg = "{\"key\":\"Meta+a\",\"ref\":\"n5\"}" },
         .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.press\",\"params\":{\"id\":12}}", .arg = null },
         .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.press\",\"params\":{\"id\":12,\"key\":\"\"}}", .arg = null },
-        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.press\",\"params\":{\"id\":12,\"key\":\"" ++ "a" ** 65 ++ "\"}}", .arg = null },
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.press\",\"params\":{\"id\":12,\"key\":\"" ++ array_repeat.repeat("a", 65) ++ "\"}}", .arg = null },
         .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.press\",\"params\":{\"id\":12,\"key\":\"a\",\"selector\":\"#a\",\"ref\":\"n1\"}}", .arg = null },
         .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.hover\",\"params\":{\"id\":12}}", .arg = null },
     };
@@ -3964,7 +3966,7 @@ test "W9b①b-2: Chromium 탭의 hover·press 는 op 으로 — press 는 key �
         .err => |e| {
             defer testing.allocator.free(e);
             try testing.expect(c.arg == null);
-            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(e));
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(e));
         },
         else => return error.TestUnexpectedResult,
     };
@@ -4010,7 +4012,7 @@ test "W9b②: role 로케이터는 Chromium 탭에서 op arg 로 — 모양·상
         switch (try dispatchBrowser(testing.allocator, req, fx_engine, capsSlice(&buf, browserCap(12)), null, &no_grants, 0)) {
             .err => |e| {
                 defer testing.allocator.free(e);
-                try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(e));
+                try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(e));
             },
             .op => |op| {
                 testing.allocator.free(op.arg);
@@ -4027,7 +4029,7 @@ test "W9b②: role 로케이터는 Chromium 탭에서 op arg 로 — 모양·상
     }) |req| switch (try dispatchBrowser(testing.allocator, req, fx_engine, &.{}, 6, &grants, 0)) {
         .err => |e| {
             defer testing.allocator.free(e);
-            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
             try testing.expect(std.mem.indexOf(u8, e, "\"param\":\"locator\"") != null);
             try testing.expect(std.mem.indexOf(u8, e, "\"engine\":\"webkit\"") != null);
         },
@@ -4058,7 +4060,7 @@ test "W9-0: 실행 단계의 -32008 은 L2 와 같은 모양이다(원 요청의
     const resp = pm.message.response;
     try testing.expectEqualStrings("req-7", resp.id.string);
     const e = resp.err.?;
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), e.code);
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), e.code);
     try testing.expectEqualStrings("chromium", e.data.?.object.get("engine").?.string);
     try testing.expect(e.data.?.object.get("controllable") == null);
     // L2 응답과 바이트가 같다.
@@ -4155,7 +4157,7 @@ test "dispatchBrowser(cookie write): browser_storage cap + setCookie → op{set_
     // D5: browser cap은 setCookie 불인가(쿠키=browser_storage, laundering-hole 방지).
     const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.setCookie\",\"params\":{\"id\":11,\"name\":\"n\",\"value\":\"v\"}}", browserCap(11));
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
 }
 
 test "serializeBrowserResponse(cookie write): setCookie → {ok:true}, id echo" {
@@ -4229,7 +4231,7 @@ test "dispatchBrowser(localStorage): base browser cap + getLocalStorage → op{a
     try testing.expectEqual(BrowserMethod.clear_storage, op2.method);
     const wire = try dispatchErr("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.clearStorage\",\"params\":{\"id\":11}}", browserCap(11));
     defer testing.allocator.free(wire);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(wire));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(wire));
 }
 
 test "serializeBrowserResponse(localStorage): getLocalStorage → {value}, set/clear → {ok}" {
@@ -4501,24 +4503,24 @@ test "serializeBrowserResponseStatus(wait): success·timeout data·invalid selec
         var pm = try cp.parseMessage(testing.allocator, w);
         defer pm.deinit();
         const e = pm.message.response.err.?;
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.timeout)), e.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.timeout)), e.code);
         try testing.expectEqualStrings("load", e.data.?.object.get("condition").?.string);
         try testing.expectEqual(@as(i64, 125), e.data.?.object.get("timeout_ms").?.integer);
     }
     {
         const w = try serializeBrowserResponseStatus(testing.allocator, request, .invalid_params, "Invalid selector");
         defer testing.allocator.free(w);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(w));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(w));
     }
     {
         const w = try serializeBrowserResponseStatus(testing.allocator, request, .process_exited, "");
         defer testing.allocator.free(w);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.process_exited)), try errCode(w));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.process_exited)), try errCode(w));
     }
     {
         const w = try serializeBrowserResponseStatus(testing.allocator, request, .unauthorized, "");
         defer testing.allocator.free(w);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(w));
     }
 }
 
@@ -4538,7 +4540,7 @@ test "all browser methods preserve typed lifecycle terminal codes" {
     for (requests) |request| for (statuses) |expected| {
         const wire = try serializeBrowserResponseStatus(testing.allocator, request, expected.status, "");
         defer testing.allocator.free(wire);
-        try testing.expectEqual(@as(i64, @intFromEnum(expected.code)), try errCode(wire));
+        try testing.expectEqual(@as(i64, @backingInt(expected.code)), try errCode(wire));
     };
 }
 
@@ -4550,7 +4552,7 @@ test "executeScript lifecycle errors: resource-busy와 timeout은 stable wire co
         var pm = try cp.parseMessage(testing.allocator, wire);
         defer pm.deinit();
         const e = pm.message.response.err.?;
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.resource_busy)), e.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.resource_busy)), e.code);
         try testing.expectEqualStrings("browser-result-bytes", e.data.?.object.get("resource").?.string);
         try testing.expect(e.data.?.object.get("retryable").?.bool);
         try testing.expect(e.data.?.object.get("used_bytes") == null);
@@ -4560,7 +4562,7 @@ test "executeScript lifecycle errors: resource-busy와 timeout은 stable wire co
         defer testing.allocator.free(wire);
         var pm = try cp.parseMessage(testing.allocator, wire);
         defer pm.deinit();
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.timeout)), pm.message.response.err.?.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.timeout)), pm.message.response.err.?.code);
     }
 }
 
@@ -4626,7 +4628,7 @@ test "serializeBrowserResponse(snapshot): 트리 JSON을 {snapshot} 구조화 em
         defer testing.allocator.free(w);
         var pm = try cp.parseMessage(testing.allocator, w);
         defer pm.deinit();
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
     }
 }
 
@@ -4685,7 +4687,7 @@ test "serializeBrowserResponse(console): 배열 JSON을 {console} 구조화 embe
         defer testing.allocator.free(w);
         var pm = try cp.parseMessage(testing.allocator, w);
         defer pm.deinit();
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), pm.message.response.err.?.code);
     }
 }
 
@@ -4729,7 +4731,7 @@ test "W9b②-3: wait visible — selector 면 엔진에 selector 조건으로, �
         switch (try dispatchBrowser(testing.allocator, req, fx_engine, capsSlice(&buf, browserCap(12)), null, &no_grants, 0)) {
             .err => |e| {
                 defer testing.allocator.free(e);
-                try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(e));
+                try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(e));
             },
             .op => |op| {
                 testing.allocator.free(op.arg);
@@ -4743,7 +4745,7 @@ test "W9b②-3: wait visible — selector 면 엔진에 selector 조건으로, �
     switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.wait\",\"params\":{\"id\":11,\"condition\":\"visible\",\"locator\":{\"role\":\"button\"}}}", fx_engine, &.{}, 6, &grants, 0)) {
         .err => |e| {
             defer testing.allocator.free(e);
-            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
             try testing.expect(std.mem.indexOf(u8, e, "\"param\":\"locator\"") != null);
         },
         else => return error.TestUnexpectedResult,
@@ -4763,10 +4765,10 @@ test "W9b②-3: wait visible 의 결과 — 로케이터면 {ok, matched, ambigu
     try testing.expect(std.mem.indexOf(u8, plain, "\"ok\":true") != null);
     const bad = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"ok\":true}");
     defer testing.allocator.free(bad);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), try errCode(bad));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), try errCode(bad));
     const t = try serializeBrowserResponseStatus(testing.allocator, req, .timeout, "{\"hidden\":3}");
     defer testing.allocator.free(t);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.timeout)), try errCode(t));
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.timeout)), try errCode(t));
     try testing.expect(std.mem.indexOf(u8, t, "\"condition\":\"visible\"") != null);
     try testing.expect(std.mem.indexOf(u8, t, "\"hidden\":3") != null);
     const t2 = try serializeBrowserResponseStatus(testing.allocator, req, .timeout, "not json");
@@ -4798,7 +4800,7 @@ test "W9b③: browser.open 은 부른 pane(1g)이 대상 — pane 이 없으면 
     switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"url\":\"file:///etc/passwd\"}}", fx_engine, capsSlice(&buf, browserCap(12)), null, &grants, 0)) {
         .err => |e| {
             defer testing.allocator.free(e);
-            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(e));
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(e));
         },
         else => return error.TestUnexpectedResult,
     }
@@ -4817,7 +4819,7 @@ test "W9b③: browser.open 은 부른 pane(1g)이 대상 — pane 이 없으면 
     for (bad) |bytes| switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 10, &grants, 0)) {
         .err => |e| {
             defer testing.allocator.free(e);
-            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(e));
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(e));
         },
         .op => |op| {
             testing.allocator.free(op.arg);
@@ -4834,7 +4836,7 @@ test "W9b③: browser.close 는 그 탭의 browser grant 가 있어야 op — �
     switch (try dispatchBrowser(testing.allocator, close12, fx_engine, &.{}, 10, &grants, 0)) {
         .err => |e| {
             defer testing.allocator.free(e);
-            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(e));
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(e));
         },
         .op => |op| {
             testing.allocator.free(op.arg);
@@ -4861,7 +4863,7 @@ test "W9b③: browser.close 는 그 탭의 browser grant 가 있어야 op — �
     switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.close\",\"params\":{\"id\":11}}", fx_engine, &.{}, 10, &grants, 0)) {
         .err => |e| {
             defer testing.allocator.free(e);
-            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
         },
         else => return error.TestUnexpectedResult,
     }
@@ -4891,7 +4893,7 @@ test "W9b③: open·close 결과는 엔진이 준 필드만 — 모양이 틀리
     for (bad) |c| {
         const w = try serializeBrowserResponseStatus(testing.allocator, c.req, .success, c.payload);
         defer testing.allocator.free(w);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), try errCode(w));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), try errCode(w));
     }
 }
 
@@ -4956,8 +4958,8 @@ test "W9a 적대 리뷰 2 회차 재현: 진단 메시지의 \\n·\\t 는 2 바�
 // ── W9c②: 에이전트가 JS 대화상자에 답한다(browser.dialog·handleDialog) ─────────────────────────────────────────────
 
 test "W9c②: dialog·handleDialog 는 close 뒤 25·26 — wire 이름은 dialog·handleDialog, Chromium 만(WebKit 은 모달 전 -32008)" {
-    try testing.expectEqual(@as(u8, 25), @as(u8, @intFromEnum(BrowserMethod.dialog)));
-    try testing.expectEqual(@as(u8, 26), @as(u8, @intFromEnum(BrowserMethod.handle_dialog)));
+    try testing.expectEqual(@as(u8, 25), @as(u8, @backingInt(BrowserMethod.dialog)));
+    try testing.expectEqual(@as(u8, 26), @as(u8, @backingInt(BrowserMethod.handle_dialog)));
     try testing.expectEqual(BrowserMethod.dialog, parseBrowserMethod("dialog").?);
     try testing.expectEqual(BrowserMethod.handle_dialog, parseBrowserMethod("handleDialog").?);
     try testing.expect(engineSupports(.chromium, .dialog) and engineSupports(.chromium, .handle_dialog));
@@ -4970,7 +4972,7 @@ test "W9c②: dialog·handleDialog 는 close 뒤 25·26 — wire 이름은 dialo
     }) |bytes| switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 10, &grants, 0)) {
         .err => |e| {
             defer testing.allocator.free(e);
-            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
         },
         .op => |op| {
             testing.allocator.free(op.arg);
@@ -5027,7 +5029,7 @@ test "W9c②: handleDialog params — accept 는 꼭 bool, text·dialog(번호) 
     for (bad) |bytes| switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 10, &grants, 0)) {
         .err => |e| {
             defer testing.allocator.free(e);
-            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(e));
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(e));
         },
         .op => |op| {
             testing.allocator.free(op.arg);
@@ -5067,7 +5069,7 @@ test "W9c②: dialog·handleDialog 결과는 엔진이 준 알려진 필드만 �
     for (bad) |c| {
         const w = try serializeBrowserResponseStatus(testing.allocator, c.req, .success, c.payload);
         defer testing.allocator.free(w);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), try errCode(w));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), try errCode(w));
     }
 }
 
@@ -5076,7 +5078,7 @@ test "W9c②: dialog·handleDialog 결과는 엔진이 준 알려진 필드만 �
 // 실행 계층(app_host_abi)의 시험이 본다(여기서 인가된 것은 「그 탭을 다뤄도 된다」 뿐이다).
 
 test "W9c③: upload 는 handleDialog 뒤 27 — wire 이름 upload, Chromium 만, browser scope, WebKit·파일 뷰·markdown 은 확인 모달 전에 -32008" {
-    try testing.expectEqual(@as(u8, 27), @as(u8, @intFromEnum(BrowserMethod.upload)));
+    try testing.expectEqual(@as(u8, 27), @as(u8, @backingInt(BrowserMethod.upload)));
     try testing.expectEqual(BrowserMethod.upload, parseBrowserMethod("upload").?);
     try testing.expectEqualStrings("upload", browserMethodWireName(.upload));
     try testing.expect(engineSupports(.chromium, .upload));
@@ -5090,7 +5092,7 @@ test "W9c③: upload 는 handleDialog 뒤 27 — wire 이름 upload, Chromium �
         switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 10, &grants, 0)) {
             .err => |e| {
                 defer testing.allocator.free(e);
-                try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+                try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
             },
             .op => |op| {
                 testing.allocator.free(op.arg);
@@ -5146,7 +5148,7 @@ test "W9c③: upload params — 대상 하나와 1..10 개의 절대 경로, 상
         .op => |op| testing.allocator.free(op.arg),
         else => return error.TestUnexpectedResult,
     }
-    const long_path = try std.fmt.allocPrint(testing.allocator, "/{s}", .{"a" ** max_upload_path_bytes});
+    const long_path = try std.fmt.allocPrint(testing.allocator, "/{s}", .{array_repeat.repeat("a", max_upload_path_bytes)});
     defer testing.allocator.free(long_path);
     const long_req = try std.fmt.allocPrint(testing.allocator, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{{\"id\":12,\"selector\":\"#f\",\"files\":[\"{s}\"]}}}}", .{long_path});
     defer testing.allocator.free(long_req);
@@ -5174,7 +5176,7 @@ test "W9c③: upload params — 대상 하나와 1..10 개의 절대 경로, 상
     for (bad) |bytes| switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 10, &grants, 0)) {
         .err => |e| {
             defer testing.allocator.free(e);
-            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(e));
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(e));
         },
         .op => |op| {
             testing.allocator.free(op.arg);
@@ -5191,7 +5193,7 @@ test "W9c③ 적대 리뷰 2 회차 재현 F1: upload 의 파일 목록 -32602 �
     var grants: cpg.PaneGrantStore = .{};
     try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
     const pre = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"selector\":\"#f\",\"files\":";
-    const long_path = try std.fmt.allocPrint(testing.allocator, "/{s}", .{"q" ** max_upload_path_bytes});
+    const long_path = try std.fmt.allocPrint(testing.allocator, "/{s}", .{array_repeat.repeat("q", max_upload_path_bytes)});
     defer testing.allocator.free(long_path);
     const long_req = try std.fmt.allocPrint(testing.allocator, "{s}[\"/tmp/a\",\"{s}\"]}}}}", .{ pre, long_path });
     defer testing.allocator.free(long_req);
@@ -5206,7 +5208,7 @@ test "W9c③ 적대 리뷰 2 회차 재현 F1: upload 의 파일 목록 -32602 �
     }) |c| switch (try dispatchBrowser(testing.allocator, c.bytes, fx_engine, &.{}, 10, &grants, 0)) {
         .err => |e| {
             defer testing.allocator.free(e);
-            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(e));
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(e));
             const m = try errMessage(e);
             defer testing.allocator.free(m);
             try testing.expectEqualStrings(c.want, m);
@@ -5263,12 +5265,12 @@ test "W9c③: upload 결과는 origin·files(name·size) 만 — 모양이 틀�
     }) |payload| {
         const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, payload);
         defer testing.allocator.free(w);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), try errCode(w));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), try errCode(w));
     }
     {
         const w = try serializeBrowserResponseStatus(testing.allocator, req, .unauthorized, "the user declined the upload");
         defer testing.allocator.free(w);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(w));
         const m = try errMessage(w);
         defer testing.allocator.free(m);
         try testing.expectEqualStrings("the user declined the upload", m);
@@ -5312,6 +5314,6 @@ test "W9c③ 적대 리뷰 1 회차 재현 R9b: upload 결과는 kept(페이지�
     }) |payload| {
         const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, payload);
         defer testing.allocator.free(w);
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), try errCode(w));
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), try errCode(w));
     }
 }

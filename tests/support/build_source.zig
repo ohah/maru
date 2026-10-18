@@ -142,7 +142,7 @@ pub fn read(allocator: std.mem.Allocator) ![]u8 {
 pub fn readZ(allocator: std.mem.Allocator) ![:0]u8 {
     const text = try read(allocator);
     defer allocator.free(text);
-    return allocator.dupeZ(u8, text);
+    return allocator.dupeSentinel(u8, text, 0);
 }
 
 fn lessThan(_: void, a: []u8, b: []u8) bool {

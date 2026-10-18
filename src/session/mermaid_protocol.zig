@@ -112,7 +112,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
     try cursor.skip(prefix_len);
     try cursor.writeBytes(&magic);
     try cursor.writeU16(version);
-    try cursor.writeByte(@intFromEnum(message));
+    try cursor.writeByte(@backingInt(message));
 
     switch (message) {
         .hello => |value| try writeHello(&cursor, value),
@@ -131,7 +131,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             if (value.status == .ok and value.body.len > max_svg_bytes) return error.SvgTooLarge;
             if (!std.unicode.utf8ValidateSlice(value.body)) return error.InvalidUtf8;
             try writeCapability(&cursor, value.capability);
-            try cursor.writeByte(@intFromEnum(value.status));
+            try cursor.writeByte(@backingInt(value.status));
             try cursor.writeU32(@intCast(value.body.len));
             try cursor.writeBytes(value.body);
         },
@@ -391,7 +391,7 @@ fn testCapability() JobCapability {
             .renderer_instance = 8,
         },
         .fence_id = 9,
-        .source_hash = [_]u8{0xab} ** 32,
+        .source_hash = @as([32]u8, @splat(0xab)),
     };
 }
 
@@ -545,8 +545,8 @@ test "request source hash mismatch and result unknown status fail closed" {
 test "source and SVG caps reject cap plus one before encoding" {
     var request_buf: [max_request_frame_bytes]u8 = undefined;
     var result_buf: [max_result_frame_bytes]u8 = undefined;
-    const source = [_]u8{'a'} ** (max_source_bytes + 1);
-    const svg = [_]u8{'a'} ** (max_svg_bytes + 1);
+    const source = @as([(max_source_bytes + 1)]u8, @splat('a'));
+    const svg = @as([(max_svg_bytes + 1)]u8, @splat('a'));
     try std.testing.expectError(error.SourceTooLarge, encode(.{ .request = .{ .capability = testCapability(), .source = &source, .palette = testPalette() } }, &request_buf));
     try std.testing.expectError(error.SvgTooLarge, encode(.{ .result = .{ .capability = testCapability(), .status = .ok, .body = &svg } }, &result_buf));
     try std.testing.expectError(error.InvalidRenderErrorBody, encode(.{ .result = .{ .capability = testCapability(), .status = .render_error, .body = "x" } }, &result_buf));

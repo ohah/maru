@@ -676,7 +676,7 @@ fn trustKeyHolds(self: *AppSession, c: *Client) bool {
 ///   한 번의 허락으로 열지 않는다.
 fn refusalFor(root: []const u8, real: []const u8) ?Phase {
     var gbuf: [std.fs.max_path_bytes + 8]u8 = undefined;
-    const git_z = std.fmt.bufPrintZ(&gbuf, "{s}/.git", .{std.mem.trimEnd(u8, root, "/")}) catch return .outside_repo;
+    const git_z = std.fmt.bufPrintSentinel(&gbuf, "{s}/.git", .{std.mem.trimEnd(u8, root, "/")}, 0) catch return .outside_repo;
     if (std.c.access(git_z.ptr, std.c.F_OK) != 0) return .outside_repo; // 디렉터리든 워크트리의 파일이든
     // HOME 을 못 구하면(없다·없는 경로) 홈 판정은 건너뛰고 묻는다 — `.git` 은 이미 있어 저장소 단위의 보통 묻기로 돌아간다. GUI 앱은
     // launchd 가 HOME 을 세운다.
@@ -710,7 +710,7 @@ test "LSPB41 실행 파일의 출처(제품 경로) — 같은 폴더의 rustup 
     var a_z: [std.fs.max_path_bytes + 1]u8 = undefined;
     var b_z: [std.fs.max_path_bytes + 1]u8 = undefined;
     // `~/.cargo/bin` 은 하드 링크, Homebrew rustup 은 심링크로 대리를 둔다.
-    try std.testing.expectEqual(@as(c_int, 0), std.c.link((try std.fmt.bufPrintZ(&a_z, "{s}/cargo/bin/rustup", .{root})).ptr, (try std.fmt.bufPrintZ(&b_z, "{s}/cargo/bin/rust-analyzer", .{root})).ptr));
+    try std.testing.expectEqual(@as(c_int, 0), std.c.link((try std.fmt.bufPrintSentinel(&a_z, "{s}/cargo/bin/rustup", .{root}, 0)).ptr, (try std.fmt.bufPrintSentinel(&b_z, "{s}/cargo/bin/rust-analyzer", .{root}, 0)).ptr));
     try tmp.dir.symLink(std.testing.io, "rustup", "brew/bin/rust-analyzer", .{});
     var p_buf: [std.fs.max_path_bytes]u8 = undefined;
     try std.testing.expectEqual(exe_origin.Origin{ .shim = .rustup }, exeOrigin(try std.fmt.bufPrint(&p_buf, "{s}/cargo/bin/rust-analyzer", .{root}), "", "/nonexistent-root"));
@@ -957,7 +957,7 @@ fn exeOriginIn(path: []const u8, root: []const u8, real_root: []const u8, envp: 
     // 저장소 안인지는 실행 파일의 실제 경로로도 본다(보이는 경로는 PATH 표기 그대로라 root 의 실제 경로와 표기가 갈린다 — 적대적 검증).
     var z: [std.fs.max_path_bytes + 1]u8 = undefined;
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const real_path: ?[]const u8 = if (std.fmt.bufPrintZ(&z, "{s}", .{path})) |pz| (if (std.c.realpath(pz.ptr, &real_buf)) |r| std.mem.sliceTo(r, 0) else null) else |_| null;
+    const real_path: ?[]const u8 = if (std.fmt.bufPrintSentinel(&z, "{s}", .{path}, 0)) |pz| (if (std.c.realpath(pz.ptr, &real_buf)) |r| std.mem.sliceTo(r, 0) else null) else |_| null;
     return exe_origin.classify(path, real_path, &.{ root, real_root }, home, envp, toolEnvValue, proxy);
 }
 
@@ -966,8 +966,8 @@ fn sameFileAsSibling(path: []const u8, name: []const u8) bool {
     const parent = std.fs.path.dirname(path) orelse return false;
     var a_z: [std.fs.max_path_bytes + 1]u8 = undefined;
     var b_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const a = std.fmt.bufPrintZ(&a_z, "{s}", .{path}) catch return false;
-    const b = std.fmt.bufPrintZ(&b_z, "{s}/{s}", .{ std.mem.trimEnd(u8, parent, "/"), name }) catch return false;
+    const a = std.fmt.bufPrintSentinel(&a_z, "{s}", .{path}, 0) catch return false;
+    const b = std.fmt.bufPrintSentinel(&b_z, "{s}/{s}", .{ std.mem.trimEnd(u8, parent, "/"), name }, 0) catch return false;
     var sa: std.c.Stat = undefined;
     var sb: std.c.Stat = undefined;
     if (std.c.fstatat(std.posix.AT.FDCWD, a.ptr, &sa, 0) != 0) return false;
@@ -1164,7 +1164,7 @@ fn configFilesText(exe: []const u8, root: []const u8, doc_path: ?[]const u8, out
 
 fn fileExists(_: void, path: []const u8) bool {
     var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const pz = std.fmt.bufPrintZ(&z, "{s}", .{path}) catch return false;
+    const pz = std.fmt.bufPrintSentinel(&z, "{s}", .{path}, 0) catch return false;
     return std.c.access(pz.ptr, std.c.F_OK) == 0;
 }
 
@@ -1583,7 +1583,7 @@ fn ensureAuxClient(self: *AppSession, root: []const u8, aux: lsp.auxiliary.Auxil
 /// 그 문서의 보조 서버들 — 저장소 설정을 찾은 것(문서마다 처음 한 번 감지해 굳힌다). 설정 파일 경로는 `config_out` 에 도구마다.
 fn auxiliariesFor(self: *AppSession, term: *Term, root: []const u8) std.EnumSet(lsp.auxiliary.Tool) {
     if (term.rt.editor_lsp_aux) |set| return set;
-    var set: std.EnumSet(lsp.auxiliary.Tool) = .initEmpty();
+    var set: std.EnumSet(lsp.auxiliary.Tool) = .empty;
     const path = termPath(term) orelse return set;
     const fs: external_formatter.RealFs = .{ .io = self.io };
     var buf: [std.fs.max_path_bytes]u8 = undefined;

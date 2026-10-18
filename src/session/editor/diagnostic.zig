@@ -15,7 +15,7 @@ pub const Severity = enum(u8) {
     @"error" = 3,
 
     pub fn atLeast(self: Severity, other: Severity) bool {
-        return @intFromEnum(self) >= @intFromEnum(other);
+        return @backingInt(self) >= @backingInt(other);
     }
 };
 
@@ -47,7 +47,7 @@ pub const Diagnostic = struct {
 /// `start` 오름차순, 같으면 severity 높은 것이 앞(줄 접기가 첫 항목을 그대로 쓸 수 있게).
 pub fn lessThan(_: void, a: Diagnostic, b: Diagnostic) bool {
     if (a.start != b.start) return a.start < b.start;
-    return @intFromEnum(a.severity) > @intFromEnum(b.severity);
+    return @backingInt(a.severity) > @backingInt(b.severity);
 }
 
 pub fn sort(items: []Diagnostic) void {

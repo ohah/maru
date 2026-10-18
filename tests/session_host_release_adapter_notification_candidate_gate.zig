@@ -101,15 +101,15 @@ const Fixture = struct {
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "Maru.app/Contents/MacOS/maru", .data = "cli" });
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "Maru.app/Contents/Helpers/maru-session-host-notification-center-helper", .data = "helper" });
         self.root_len = try self.tmp.dir.realPath(std.testing.io, &self.root);
-        _ = try std.fmt.bufPrintZ(&self.app, "{s}/Maru.app", .{self.root[0..self.root_len]});
-        _ = try std.fmt.bufPrintZ(&self.main, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{self.root[0..self.root_len]});
-        _ = try std.fmt.bufPrintZ(&self.cli, "{s}/Maru.app/Contents/MacOS/maru", .{self.root[0..self.root_len]});
-        _ = try std.fmt.bufPrintZ(&self.helper, "{s}/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper", .{self.root[0..self.root_len]});
-        _ = try std.fmt.bufPrintZ(&self.zero_root, "{s}/zero-root", .{self.root[0..self.root_len]});
-        _ = try std.fmt.bufPrintZ(&self.live_root, "{s}/live-root", .{self.root[0..self.root_len]});
-        _ = try std.fmt.bufPrintZ(&self.zero_leaf, "{s}/zero.json", .{self.root[0..self.root_len]});
-        _ = try std.fmt.bufPrintZ(&self.live_leaf, "{s}/live.json", .{self.root[0..self.root_len]});
-        _ = try std.fmt.bufPrintZ(&self.final_leaf, "{s}/final.json", .{self.root[0..self.root_len]});
+        _ = try std.fmt.bufPrintSentinel(&self.app, "{s}/Maru.app", .{self.root[0..self.root_len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.main, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{self.root[0..self.root_len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.cli, "{s}/Maru.app/Contents/MacOS/maru", .{self.root[0..self.root_len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.helper, "{s}/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper", .{self.root[0..self.root_len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.zero_root, "{s}/zero-root", .{self.root[0..self.root_len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.live_root, "{s}/live-root", .{self.root[0..self.root_len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.zero_leaf, "{s}/zero.json", .{self.root[0..self.root_len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.live_leaf, "{s}/live.json", .{self.root[0..self.root_len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.final_leaf, "{s}/final.json", .{self.root[0..self.root_len]}, 0);
         for ([_][:0]const u8{ self.mainPath(), self.cliPath(), self.helperPath() }) |path|
             try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(path.ptr, 0o755));
     }
@@ -297,7 +297,7 @@ test "R2c exclusive publication preserves an occupied final leaf" {
     const deadline: u64 = @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds + std.time.ns_per_min);
     const relative_final = "occupied-final.json";
     try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = relative_final, .data = "foreign" });
-    _ = try std.fmt.bufPrintZ(&fixture.final_leaf, "{s}/{s}", .{ fixture.root[0..fixture.root_len], relative_final });
+    _ = try std.fmt.bufPrintSentinel(&fixture.final_leaf, "{s}/{s}", .{ fixture.root[0..fixture.root_len], relative_final }, 0);
     var gate: subject.Gate = .{};
     try gate.init(std.testing.allocator, std.testing.io, inputs(&fixture, deadline));
     var binder = Binder{ .deadline = deadline };

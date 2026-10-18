@@ -109,7 +109,7 @@ comptime {
         "owner_authority_seal_digest",
         "authority_generation",
     };
-    const actual = std.meta.fields(Seed);
+    const actual = @import("type_info_fields").fields(Seed);
     if (actual.len != expected_seed_fields.len)
         @compileError("Seed schema changed without updating its canonical seal transcript");
     for (actual, expected_seed_fields) |field, expected|
@@ -172,9 +172,9 @@ pub const CleanupLifecycle = enum(u8) {
 };
 
 const domain = [8]u8{ 'M', 'A', 'R', 'U', 'D', '2', 'D', '1' };
-const zero_domain = [_]u8{0} ** 8;
+const zero_domain = @as([8]u8, @splat(0));
 const version: u16 = 1;
-const zero_digest = [_]u8{0} ** 32;
+const zero_digest = @as([32]u8, @splat(0));
 
 pub fn prepare(
     out: *PreparedAuthorityPermit,
@@ -415,7 +415,7 @@ fn sealPermit(permit: *const PreparedAuthorityPermit) external_owner_seal.Digest
     writer.writeUsize(permit.saved_self_addr);
     writer.writeUsize(permit.cleanup_seed_addr);
     writeSeed(&writer, permit.seed);
-    writer.writeU8(@intFromEnum(permit.lifecycle));
+    writer.writeU8(@backingInt(permit.lifecycle));
     return writer.finish();
 }
 
@@ -425,12 +425,12 @@ fn sealCleanup(cleanup: *const FrozenCleanupSeed) external_owner_seal.Digest {
     writer.writeUsize(cleanup.permit_addr);
     writer.writeUsize(cleanup.scratch_addr);
     writeSeed(&writer, cleanup.seed);
-    writer.writeU8(@intFromEnum(cleanup.lifecycle));
+    writer.writeU8(@backingInt(cleanup.lifecycle));
     return writer.finish();
 }
 
 fn writeSeed(writer: *external_owner_seal.Writer, seed: Seed) void {
-    inline for (std.meta.fields(Seed)) |field|
+    inline for (@import("type_info_fields").fields(Seed)) |field|
         writeCanonical(field.type, writer, @field(seed, field.name));
 }
 
@@ -454,7 +454,7 @@ fn writeCanonical(
             },
         }
     } else switch (@typeInfo(T)) {
-        .@"enum" => writer.writeU8(@intCast(@intFromEnum(value))),
+        .@"enum" => writer.writeU8(@intCast(@backingInt(value))),
         .array => |array| {
             if (array.child != u8)
                 @compileError("unsupported authority seed array type");
@@ -548,7 +548,7 @@ fn testSeed(
 }
 
 fn filledDigest(byte: u8) external_owner_seal.Digest {
-    return [1]u8{byte} ** 32;
+    return @as([32]u8, @splat(byte));
 }
 
 const SeedDrift = enum {
@@ -589,8 +589,8 @@ const SeedDrift = enum {
 };
 
 comptime {
-    const seed_fields = std.meta.fields(Seed);
-    const drift_fields = std.meta.fields(SeedDrift);
+    const seed_fields = @import("type_info_fields").fields(Seed);
+    const drift_fields = @import("type_info_fields").fields(SeedDrift);
     if (drift_fields.len + 1 != seed_fields.len)
         @compileError("Seed drift matrix must cover every independently mutable field");
     var drift_index: usize = 0;
@@ -602,7 +602,7 @@ comptime {
     }
     if (drift_index != drift_fields.len)
         @compileError("Seed drift matrix contains an unpaired field");
-    const drain_fields = @typeInfo(FinishedDrainLifecycle).@"enum".fields;
+    const drain_fields = @import("type_info_fields").enumFields(FinishedDrainLifecycle);
     if (drain_fields.len != 1 or
         !std.mem.eql(u8, drain_fields[0].name, "finished") or
         drain_fields[0].value != 0)
@@ -895,8 +895,10 @@ test "permit and cleanup destinations must be overflow-safe disjoint ranges" {
         @sizeOf(PreparedAuthorityPermit) +
             @sizeOf(FrozenCleanupSeed) + alignment
     ]u8 align(alignment) =
-        [_]u8{0} ** (@sizeOf(PreparedAuthorityPermit) +
-            @sizeOf(FrozenCleanupSeed) + alignment);
+        @as([
+            (@sizeOf(PreparedAuthorityPermit) +
+                @sizeOf(FrozenCleanupSeed) + alignment)
+        ]u8, @splat(0));
     const permit: *PreparedAuthorityPermit = @ptrCast(@alignCast(&backing[0]));
     const exact_cleanup: *FrozenCleanupSeed = @ptrCast(@alignCast(&backing[0]));
     var seed = testSeed(permit, exact_cleanup);

@@ -39,6 +39,7 @@ const runtime_event_wire = @import("runtime_event_wire.zig");
 const runtime_event_reducer = @import("runtime_event_reducer.zig");
 const runtime_event_types = @import("runtime_event_types.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
+const type_info_fields = @import("type_info_fields");
 
 comptime {
     _ = external_rx_intent.max_intent_quarantine_bytes;
@@ -645,7 +646,7 @@ const OwnerIncarnationSeal = struct {
     version: u16 = 0,
     storage_addr: usize = 0,
     owner_incarnation: u64 = 0,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 fn ownerIncarnationDigest(seal: OwnerIncarnationSeal) external_owner_seal.Digest {
@@ -698,17 +699,17 @@ const OwnerAuthoritySeal = struct {
     generation_tracked: bool = false,
     generation: u64 = 0,
     flow: OwnerAuthorityFlow = .initial_fence,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 fn ownerAuthoritySealDigest(seal: OwnerAuthoritySeal) external_owner_seal.Digest {
     var writer = external_owner_seal.Writer.init("MARUOAS1");
     writer.writeUsize(seal.storage_addr);
     writer.writeU64(seal.owner_incarnation);
-    writer.writeU8(@intFromEnum(seal.role));
+    writer.writeU8(@backingInt(seal.role));
     writer.writeBool(seal.generation_tracked);
     writer.writeU64(seal.generation);
-    writer.writeU8(@intFromEnum(seal.flow));
+    writer.writeU8(@backingInt(seal.flow));
     return writer.finish();
 }
 
@@ -755,7 +756,7 @@ const ControlCorrelationOwner = struct {
     owner_incarnation: u64 = 0,
     generation: u64 = 0,
     state: client_control_correlation.State = .idle,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const FrozenRevokeCorrelation = struct {
@@ -775,8 +776,8 @@ const FrozenRevokeCorrelation = struct {
     },
     request_id: u64 = 0,
     wire_len: usize = 0,
-    owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    owner_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 fn frozenRevokeCorrelationDigest(
@@ -789,7 +790,7 @@ fn frozenRevokeCorrelationDigest(
     writer.writeBool(frozen.present);
     writer.writeBool(frozen.completed);
     writer.writeBool(frozen.projected_response);
-    writer.writeU8(@intFromEnum(frozen.kind));
+    writer.writeU8(@backingInt(frozen.kind));
     writeControlExpectation(&writer, frozen.expectation);
     writeControlTarget(&writer, frozen.target);
     writer.writeU64(frozen.request_id);
@@ -821,20 +822,20 @@ fn controlCorrelationDigest(
     writer.writeUsize(owner.storage_addr);
     writer.writeU64(owner.owner_incarnation);
     writer.writeU64(owner.generation);
-    writer.writeU8(@intFromEnum(std.meta.activeTag(owner.state)));
+    writer.writeU8(@backingInt(std.meta.activeTag(owner.state)));
     switch (owner.state) {
         .idle, .terminal => {},
         .in_flight => |control| {
-            writer.writeU8(@intFromEnum(control.kind));
+            writer.writeU8(@backingInt(control.kind));
             writeControlExpectation(&writer, control.expectation);
             writeControlTarget(&writer, control.target);
             writer.writeU64(control.request_id);
             writer.writeUsize(control.wire_len);
             writer.writeU128(@bitCast(control.deadline_ns));
-            writer.writeU8(@intFromEnum(control.progress));
+            writer.writeU8(@backingInt(control.progress));
         },
         .completed => |control| {
-            writer.writeU8(@intFromEnum(control.kind));
+            writer.writeU8(@backingInt(control.kind));
             writeControlExpectation(&writer, control.expectation);
             writeControlTarget(&writer, control.target);
             writer.writeU64(control.request_id);
@@ -1071,7 +1072,7 @@ const PreparedAdoptionFinalSeal = struct {
     owner_authority_addr: usize = 0,
     owner_request_ids_addr: usize = 0,
     operation_generation: u64 = 0,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: FinalSealLifecycle = .empty,
 
     fn abort(self: *PreparedAdoptionFinalSeal) void {
@@ -1086,7 +1087,7 @@ const AdoptedCommitPermit = struct {
     saved_self_addr: usize = 0,
     storage_addr: usize = 0,
     operation_generation: u64 = 0,
-    final_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    final_seal_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     consumed: bool = false,
 
     fn validate(
@@ -1526,7 +1527,7 @@ const OwnerEventPermit = struct {
     owner_incarnation: u64 = 0,
     projection_generation: u64 = 0,
     key: OwnerEventKey = .{ .resized = .{ .generation = 0, .cols = 0, .rows = 0 } },
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: OwnerEventPermitLifecycle = .empty,
 };
 
@@ -1604,7 +1605,7 @@ const projection_test = if (builtin.is_test) struct {
         owner_incarnation: u64 = 0,
         authority_generation: u64 = 0,
         final_addr: usize = 0,
-        digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+        digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
         lifecycle: Lifecycle = .empty,
     };
 
@@ -1765,11 +1766,11 @@ threadlocal var active_external_lease_addr: usize = 0;
 threadlocal var active_external_lease_generation: u64 = 0;
 threadlocal var active_external_tx_state_addr: usize = 0;
 threadlocal var active_external_rx_resident_cap: usize = 0;
-threadlocal var active_external_rx_resident_cap_digest: external_owner_seal.Digest = [_]u8{0} ** 32;
+threadlocal var active_external_rx_resident_cap_digest: external_owner_seal.Digest = @as([32]u8, @splat(0));
 threadlocal var active_external_rx_client_addr: usize = 0;
 threadlocal var active_external_rx_parser_addr: usize = 0;
 threadlocal var active_external_rx_provenance: client_external_mode.RxProvenance = .{};
-threadlocal var active_external_rx_authority_digest: external_owner_seal.Digest = [_]u8{0} ** 32;
+threadlocal var active_external_rx_authority_digest: external_owner_seal.Digest = @as([32]u8, @splat(0));
 var cross_owner_quarantine_events: std.atomic.Value(u64) = .init(0);
 var guarded_admit_accounting_prepared_addr: std.atomic.Value(usize) = .init(0);
 var active_storage_addr: std.atomic.Value(usize) = .init(0);
@@ -1788,13 +1789,13 @@ pub const ExternalWholeTurnLease = struct {
     scratch_len: usize = 0,
     operation_generation: u64 = 0,
     rx_resident_cap: usize = 0,
-    rx_resident_cap_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    rx_resident_cap_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     rx_client_addr: usize = 0,
     rx_parser_addr: usize = 0,
     rx_provenance: client_external_mode.RxProvenance = .{},
-    rx_authority_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    rx_authority_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: WholeTurnLeaseLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const WholeTurnReleaseResult = enum {
@@ -1817,7 +1818,7 @@ const ScreenPendingSummarySeal = struct {
     committed: bool = false,
     generation: u64 = 0,
     lifecycle: PendingSummaryLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const MetadataPendingSummarySeal = struct {
@@ -1829,7 +1830,7 @@ const MetadataPendingSummarySeal = struct {
     supported: bool = false,
     generation: u64 = 0,
     lifecycle: PendingSummaryLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const InheritedSnapshotLifecycle = enum {
@@ -1854,8 +1855,8 @@ pub const InheritedRxBlockerSnapshot = struct {
     authority_generation: AuthorityGeneration = .untracked,
     generation: u64 = 0,
     lifecycle: InheritedSnapshotLifecycle = .empty,
-    owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    owner_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 
     pub fn hasBlocker(self: *const InheritedRxBlockerSnapshot) bool {
         return self.lifecycle == .prepared and
@@ -1890,13 +1891,12 @@ const LiveScreenBacklog = struct {
     saved_self_addr: usize = 0,
     storage_addr: usize = 0,
     tokens: [external_inbox_ledger.max_live_mutations]external_inbox_ledger.Token =
-        [_]external_inbox_ledger.Token{.{ .slot = 0, .generation = 0 }} **
-        external_inbox_ledger.max_live_mutations,
+        @as([external_inbox_ledger.max_live_mutations]external_inbox_ledger.Token, @splat(.{ .slot = 0, .generation = 0 })),
     head: u8 = 0,
     len: u8 = 0,
     generation: u64 = 0,
     lifecycle: LiveScreenLifecycle = .empty,
-    owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    owner_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const ResponsePayloadSeal = struct {
@@ -1912,7 +1912,7 @@ const ResponsePayloadSeal = struct {
             .payload_len = 0,
             .allocator_ptr_addr = 0,
             .allocator_vtable_addr = 0,
-            .payload_digest = [_]u8{0} ** 32,
+            .payload_digest = @as([32]u8, @splat(0)),
         };
     }
 
@@ -1980,7 +1980,7 @@ const CompletedControlState = struct {
     source_parser_generation: u64 = 0,
     source_start_absolute: u64 = 0,
     source_end_absolute: u64 = 0,
-    source_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    source_owner_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     generation: u64,
     owner_digest: external_owner_seal.Digest,
 };
@@ -2012,19 +2012,19 @@ const PreparedWholeDrainPermit = struct {
     parser_generation: u64 = 0,
     parser_absolute_start: u64 = 0,
     parser_absolute_end: u64 = 0,
-    parser_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    parser_seal_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     drain_evidence_addr: usize = 0,
-    drain_evidence_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    completed_exception_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    drain_evidence_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    completed_exception_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     sampled_now_ns: i128 = 0,
     authority_generation: AuthorityGeneration = .untracked,
-    authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    authority_seal_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     completed_owner_generation: u64 = 0,
     correlation_generation: u64 = 0,
     tx_queue_generation: u64 = 0,
-    pair_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    pair_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: PreparedWholeDrainPermitLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const ControlSemanticValue = union(enum) {
@@ -2062,15 +2062,15 @@ const PreparedControlSemanticVerdict = struct {
         .controller_generation = 0,
     },
     authority_generation: AuthorityGeneration = .untracked,
-    authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    permit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    pair_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    authority_seal_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    permit_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    pair_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     expectation: control_response_wire.ControlExpectation = .{
         .resize = .{ .client_sequence = 0 },
     },
     value: ControlSemanticValue = .resync_ack,
     lifecycle: PreparedControlSemanticVerdictLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const ControlSemanticTerminalLifecycle = enum { empty, prepared, consumed_tombstone };
@@ -2086,7 +2086,7 @@ const PreparedControlSemanticTerminal = struct {
     completed_payload_seal: ResponsePayloadSeal = ResponsePayloadSeal.empty(),
     reason: client_pump.TerminalReason = .invariant_failure,
     lifecycle: ControlSemanticTerminalLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const ControlSemanticPreparationResult = enum {
@@ -2127,27 +2127,27 @@ const PreparedResyncAckTransition = struct {
     turn_generation: u64 = 0,
     parser_generation: u64 = 0,
     parser_seal: client_external_mode.ParserAuthoritySeal = .{},
-    parser_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    parser_seal_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     sampled_now_ns: i128 = 0,
     recovery_deadline_ns: i128 = 0,
     authority_state: client_pump.AuthorityState = .valid,
     authority_generation: AuthorityGeneration = .untracked,
-    authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    authority_seal_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     permit_addr: usize = 0,
-    permit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    permit_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     verdict_addr: usize = 0,
-    verdict_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    completed_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    correlation_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    verdict_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    completed_owner_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    correlation_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     tx_queue_generation: u64 = 0,
     recovery_barrier_absolute: u64 = 0,
     next_state: client_pump.AuthorityState = .valid,
     response_take_addr: usize = 0,
-    response_take_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    response_take_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     frozen_response_addr: usize = 0,
-    frozen_response_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    frozen_response_pristine_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: ResyncAckTransitionLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 const ConsumeResyncAckUnderHeldLeaseFn = fn (
     storage: *ExternalPumpStorage,
@@ -2219,29 +2219,29 @@ const PreparedResizeSemanticCommit = struct {
     operation_generation: u64 = 0,
     turn_generation: u64 = 0,
     permit_addr: usize = 0,
-    permit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    permit_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     verdict_addr: usize = 0,
-    verdict_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    completed_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    correlation_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    verdict_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    completed_owner_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    correlation_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    authority_seal_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     tx_queue_generation: u64 = 0,
-    evidence_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    evidence_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     runtime_id: u128 = 0,
     stream_id: u64 = 0,
     expected_owner_resize_present: bool = false,
-    expected_owner_resize_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    expected_owner_resize_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     applied_cols: u16 = 0,
     applied_rows: u16 = 0,
     applied_generation: u64 = 0,
     applied_changed: bool = false,
     disposition: ResizeSemanticDisposition = .protocol_terminal,
     response_take_addr: usize = 0,
-    response_take_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    response_take_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     frozen_response_addr: usize = 0,
-    frozen_response_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    frozen_response_pristine_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: ResizeSemanticCommitLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const ProjectedRecoverySnapshotCommitLifecycle = enum {
@@ -2256,22 +2256,21 @@ const ProjectedRecoverySnapshotCommit = struct {
     scratch_addr: usize = 0,
     lease_addr: usize = 0,
     aggregate_addr: usize = 0,
-    projected_state_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    projected_state_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     dispositions_count: u8 = 0,
-    dispositions_root_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    dispositions_root_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     output_addr: usize = 0,
-    output_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    output_pristine_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     binding_addr: usize = 0,
-    binding_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    binding_pristine_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     ledger_candidate: external_inbox_ledger.ProjectedLiveCommitCandidate = .{
-        .dispositions = [_]external_inbox_ledger.LiveCommitDisposition{.unused} **
-            external_inbox_ledger.max_live_mutations,
+        .dispositions = @as([external_inbox_ledger.max_live_mutations]external_inbox_ledger.LiveCommitDisposition, @splat(.unused)),
         .permit = .{},
     },
     recovery_dispositions: RecoverySnapshotDispositionAggregate = .{},
     recovery_commit: PreparedRecoverySnapshotCommit = .{},
     lifecycle: ProjectedRecoverySnapshotCommitLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const ResyncSemanticCommitLifecycle = enum {
@@ -2286,25 +2285,25 @@ const PreparedResyncSemanticCommit = struct {
     scratch_addr: usize = 0,
     lease_addr: usize = 0,
     ack_transition_addr: usize = 0,
-    ack_transition_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    projected_state_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    ack_transition_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    projected_state_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     projected_commit_addr: usize = 0,
-    projected_commit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    projected_commit_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     aggregate_present: bool = false,
     aggregate_addr: usize = 0,
-    aggregate_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    aggregate_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: ResyncSemanticCommitLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const ControlSemanticTakeBranch = union(enum) {
     resize: struct {
         receipt_addr: usize = 0,
-        receipt_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+        receipt_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     },
     resync: struct {
         receipt_addr: usize = 0,
-        receipt_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+        receipt_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     },
 };
 
@@ -2312,7 +2311,7 @@ const PreparedControlSemanticTake = struct {
     saved_self_addr: usize = 0,
     branch: ControlSemanticTakeBranch = .{ .resize = .{} },
     lifecycle: ControlSemanticTakeLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const ConsumeResizeSemanticResult = enum {
@@ -2336,10 +2335,10 @@ const PreparedControlResponseTake = struct {
     completed_generation: u64 = 0,
     correlation_generation: u64 = 0,
     request_id: u64 = 0,
-    owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    owner_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     payload_seal: ResponsePayloadSeal = ResponsePayloadSeal.empty(),
     lifecycle: ControlResponseTakeLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const FrozenControlResponseLifecycle = enum {
@@ -2366,7 +2365,7 @@ const FrozenControlResponse = struct {
     },
     payload_seal: ResponsePayloadSeal = ResponsePayloadSeal.empty(),
     lifecycle: FrozenControlResponseLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const ControlSemanticTerminalBindingLifecycle = enum {
@@ -2385,22 +2384,22 @@ const PreparedControlSemanticTerminalBinding = struct {
     scratch_len: usize = 0,
     turn_generation: u64 = 0,
     terminal_addr: usize = 0,
-    terminal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    completed_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    correlation_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    terminal_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    completed_owner_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    correlation_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     parser_seal: client_external_mode.ParserAuthoritySeal = .{},
     drain_evidence_addr: usize = 0,
-    drain_evidence_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    completed_exception_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    drain_evidence_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    completed_exception_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     authority_generation: AuthorityGeneration = .untracked,
-    authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    authority_seal_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     tx_queue_generation: u64 = 0,
     response_take_addr: usize = 0,
-    response_take_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    response_take_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     frozen_response_addr: usize = 0,
-    frozen_response_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    frozen_response_pristine_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: ControlSemanticTerminalBindingLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const FinishControlResponseResult = enum {
@@ -2422,7 +2421,7 @@ const IntentScratchReservation = struct {
     handle_addr: usize = 0,
     generation: u64 = 0,
     lifecycle: IntentScratchReservationLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const RxAggregateLifecycle = enum {
@@ -2469,7 +2468,7 @@ const PreparedRxAggregateHandle = struct {
     turn_generation: u64 = 0,
     reservation_generation: u64 = 0,
     lifecycle: RxAggregateHandleLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const RxAggregateScratchReservation = struct {
@@ -2479,7 +2478,7 @@ const RxAggregateScratchReservation = struct {
     turn_generation: u64 = 0,
     generation: u64 = 0,
     lifecycle: RxAggregateReservationLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const ScreenTransferLifecycle = enum {
@@ -2506,14 +2505,14 @@ const ScreenTransferOwner = struct {
         .start_absolute = 0,
         .end_absolute = 0,
     },
-    payload_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    payload_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     neutral: external_rx_intent.MovedIntentPayload = .{},
     ledger_payload: external_inbox_ledger.OwnedPayload =
         .{ .allocator = std.heap.page_allocator },
     batch_addr: usize = 0,
     mutation_index: u8 = 0,
     lifecycle: ScreenTransferLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const ScreenDestinationPlanLifecycle = enum {
@@ -2543,7 +2542,7 @@ const EventDestinationLifecycle = enum {
 const FrozenAuthorityDestinationPlan = struct {
     saved_self_addr: usize = 0,
     storage_addr: usize = 0,
-    expected_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    expected_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     expected: runtime_event_types.EventAuthorityView = .{
         .role = .observer,
         .generation = .untracked,
@@ -2553,14 +2552,14 @@ const FrozenAuthorityDestinationPlan = struct {
         .generation = .untracked,
     },
     lifecycle: EventDestinationLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const FrozenResizeDestinationPlan = struct {
     saved_self_addr: usize = 0,
     storage_addr: usize = 0,
     expected_present: bool = false,
-    expected_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    expected_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     next: resize_wire.Event = .{
         .runtime_id = 0,
         .cols = 0,
@@ -2568,7 +2567,7 @@ const FrozenResizeDestinationPlan = struct {
         .resize_generation = 0,
     },
     lifecycle: EventDestinationLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const PreparedEventReduction = struct {
@@ -2586,16 +2585,16 @@ const PreparedEventReduction = struct {
         .role = .observer,
         .generation = .untracked,
     },
-    authority_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    authority_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     event_to_intent: [external_rx_intent.max_intents]u8 =
-        [_]u8{std.math.maxInt(u8)} ** external_rx_intent.max_intents,
+        @as([external_rx_intent.max_intents]u8, @splat(std.math.maxInt(u8))),
     event_count: u8 = 0,
     authority_intent_index: u8 = std.math.maxInt(u8),
     resize_intent_index: u8 = std.math.maxInt(u8),
     metadata_intent_index: u8 = std.math.maxInt(u8),
     outcome: runtime_event_reducer.Outcome = .ended,
     lifecycle: EventReductionLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const FrozenResponseDestinationPlan = struct {
@@ -2613,14 +2612,14 @@ const FrozenResponseDestinationPlan = struct {
     expected_controller_generation: u64 = 0,
     control_wire_len: usize = 0,
     expected_correlation_generation: u64 = 0,
-    expected_correlation_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    expected_correlation_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     source_turn_generation: u64 = 0,
     source_parser_generation: u64 = 0,
     source_start_absolute: u64 = 0,
     source_end_absolute: u64 = 0,
-    source_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    payload_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    response_payload_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    source_owner_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    payload_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    response_payload_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     payload_allocator: std.mem.Allocator = std.heap.page_allocator,
     payload_allocator_ptr_addr: usize = 0,
     payload_allocator_vtable_addr: usize = 0,
@@ -2629,7 +2628,7 @@ const FrozenResponseDestinationPlan = struct {
     expected_generation: u64 = 0,
     next_generation: u64 = 0,
     lifecycle: ResponseDestinationPlanLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const DestinationWriteKind = enum {
@@ -2659,18 +2658,18 @@ const FrozenDestinationWrite = struct {
     },
     target_addr: usize = 0,
     expected_lifecycle: u8 = 0,
-    expected_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    expected_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     prepared_backing_addr: usize = 0,
     prepared_backing_len: usize = 0,
-    prepared_backing_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    prepared_backing_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     retirement_backing_addr: usize = 0,
     retirement_backing_len: usize = 0,
-    retirement_backing_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    retirement_backing_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     retirement_target_addr: usize = 0,
     source_backing_addr: usize = 0,
     source_backing_len: usize = 0,
-    source_backing_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    source_backing_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const ScreenDestinationEntry = struct {
@@ -2682,8 +2681,8 @@ const FrozenScreenDestinationPlan = struct {
     saved_self_addr: usize = 0,
     aggregate_addr: usize = 0,
     storage_addr: usize = 0,
-    live_commit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    expected_screen_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    live_commit_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    expected_screen_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     expected_screen_head: u8 = 0,
     expected_screen_len: u8 = 0,
     expected_screen_generation: u64 = 0,
@@ -2692,15 +2691,15 @@ const FrozenScreenDestinationPlan = struct {
     expected_partial_token: external_inbox_ledger.Token =
         .{ .slot = 0, .generation = 0 },
     expected_partial_generation: u64 = 0,
-    expected_partial_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    expected_partial_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     next_partial_generation: u64 = 0,
     entries: [external_inbox_ledger.max_live_mutations]ScreenDestinationEntry =
-        [_]ScreenDestinationEntry{.{}} ** external_inbox_ledger.max_live_mutations,
+        @as([external_inbox_ledger.max_live_mutations]ScreenDestinationEntry, @splat(.{})),
     entry_count: u8 = 0,
     partial_count: u8 = 0,
     completed_count: u8 = 0,
     lifecycle: ScreenDestinationPlanLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const RecoverySnapshotDisposition = enum(u8) {
@@ -2722,7 +2721,7 @@ const RecoverySnapshotDispositionEntry = struct {
     commit_output_index: u8 = 0,
     token_source: RecoverySnapshotTokenSource = .pending_commit,
     token: external_inbox_ledger.Token = .{ .slot = 0, .generation = 0 },
-    committed_semantic_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    committed_semantic_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     origin: client_pump.RecoveryOrigin = .client,
     recovery_epoch: u64 = 0,
     is_snapshot: bool = false,
@@ -2731,8 +2730,8 @@ const RecoverySnapshotDispositionEntry = struct {
     disposition: RecoverySnapshotDisposition = .unused,
     cleanup_destination_addr: usize = 0,
     cleanup_lifecycle: u8 = 0,
-    cleanup_destination_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    cleanup_destination_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const RecoverySnapshotDispositionAggregate = struct {
@@ -2740,8 +2739,8 @@ const RecoverySnapshotDispositionAggregate = struct {
     owner_aggregate_addr: usize = 0,
     count: u8 = 0,
     entries: [external_inbox_ledger.max_live_mutations]RecoverySnapshotDispositionEntry =
-        [_]RecoverySnapshotDispositionEntry{.{}} ** external_inbox_ledger.max_live_mutations,
-    root_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+        @as([external_inbox_ledger.max_live_mutations]RecoverySnapshotDispositionEntry, @splat(.{})),
+    root_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const RecoveryCommitOutputLifecycle = enum(u8) {
@@ -2756,10 +2755,10 @@ const ImmutableRecoveryCommitOutput = struct {
     ledger_addr: usize = 0,
     storage_addr: usize = 0,
     live_commit_addr: usize = 0,
-    live_commit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    live_commit_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     ledger_output: external_inbox_ledger.CommittedLiveOutput = .{},
     token: external_inbox_ledger.Token = .{ .slot = 0, .generation = 0 },
-    semantic_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    semantic_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     recovery_intent: external_inbox_ledger.RecoveryIntent = .none,
     origin: client_pump.RecoveryOrigin = .client,
     recovery_epoch: u64 = 0,
@@ -2767,20 +2766,20 @@ const ImmutableRecoveryCommitOutput = struct {
     start_absolute: u64 = 0,
     end_absolute: u64 = 0,
     lifecycle: RecoveryCommitOutputLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const RecoverySnapshotCommitSource = union(enum) {
     commit_pending: struct {
         live_commit_addr: usize = 0,
-        live_commit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+        live_commit_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     },
     already_committed: struct {
         /// Final-address ledger output owned by the side-intent/commit transaction. Keeping only
         /// an authenticated reference avoids copying a self-addressed receipt and re-digesting it
         /// into a new token authority.
         output_addr: usize = 0,
-        output_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+        output_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     },
 };
 
@@ -2802,31 +2801,31 @@ const PreparedRecoverySnapshotCommit = struct {
     ledger_addr: usize = 0,
     lease_addr: usize = 0,
     scratch_addr: usize = 0,
-    lease_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lease_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     owner_incarnation: u64 = 0,
     operation_generation: u64 = 0,
     turn_generation: u64 = 0,
     parser_seal: client_external_mode.ParserAuthoritySeal = .{},
     authority_generation: AuthorityGeneration = .untracked,
-    authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    authority_seal_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     authority_state: client_pump.AuthorityState = .valid,
     binding_next_state: client_pump.AuthorityState = .valid,
-    prepared_live_commit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    prepared_live_commit_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     source: RecoverySnapshotCommitSource = .{ .commit_pending = .{} },
     source_discriminator: RecoverySnapshotBindingSource = .later_turn_commit,
     ack_transition_addr: usize = 0,
-    ack_transition_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    ack_transition_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     dispositions_addr: usize = 0,
-    dispositions_root_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    dispositions_root_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     committed_output_addr: usize = 0,
-    committed_output_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    committed_output_pristine_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     binding_destination_addr: usize = 0,
-    binding_destination_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    binding_destination_pristine_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     has_binding: bool = false,
     binding_entry_index: u8 = 0,
     ledger_output_index: u8 = 0,
     lifecycle: RecoverySnapshotCommitLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const RecoverySnapshotBindingLifecycle = enum(u8) {
@@ -2842,19 +2841,19 @@ const CommittedRecoverySnapshotBinding = struct {
     storage_addr: usize = 0,
     ledger_addr: usize = 0,
     lease_addr: usize = 0,
-    lease_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lease_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     owner_incarnation: u64 = 0,
     operation_generation: u64 = 0,
     turn_generation: u64 = 0,
     parser_generation: u64 = 0,
     parser_seal: client_external_mode.ParserAuthoritySeal = .{},
     authority_generation: AuthorityGeneration = .untracked,
-    authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    authority_seal_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     awaiting_state: client_pump.AuthorityState = .valid,
-    awaiting_state_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    ledger_authority_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    awaiting_state_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    ledger_authority_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     token: external_inbox_ledger.Token = .{ .slot = 0, .generation = 0 },
-    semantic_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    semantic_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     recovery_intent: external_inbox_ledger.RecoveryIntent = .none,
     origin: client_pump.RecoveryOrigin = .client,
     recovery_epoch: u64 = 0,
@@ -2862,16 +2861,16 @@ const CommittedRecoverySnapshotBinding = struct {
     start_absolute: u64 = 0,
     end_absolute: u64 = 0,
     source_output_addr: usize = 0,
-    source_output_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    source_output_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     side_intent_addr: usize = 0,
-    side_intent_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    destination_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    side_intent_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    destination_pristine_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     source_discriminator: RecoverySnapshotBindingSource = .later_turn_commit,
-    source_provenance_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    source_provenance_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     ack_transition_addr: usize = 0,
-    ack_transition_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    ack_transition_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: RecoverySnapshotBindingLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const PreparedRxAggregate = struct {
@@ -2980,10 +2979,9 @@ const FrozenAggregateCleanup = struct {
     cleanup_count: u16 = 0,
     total_bytes: usize = 0,
     cleanup: [max_rx_aggregate_cleanup_owners]external_owner_cleanup.FrozenOwnerCleanupDescriptor =
-        [_]external_owner_cleanup.FrozenOwnerCleanupDescriptor{.{}} **
-        max_rx_aggregate_cleanup_owners,
+        @as([max_rx_aggregate_cleanup_owners]external_owner_cleanup.FrozenOwnerCleanupDescriptor, @splat(.{})),
     lifecycle: FrozenAggregateCleanupLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const RevokedCommitAction = enum(u8) { cancel_queued, cleanup_completed };
@@ -3009,16 +3007,16 @@ const PreparedRevokedCommitGraphStorage = struct {
     response_take: PreparedControlResponseTake = .{},
     frozen_response: FrozenControlResponse = .{},
     correlation: FrozenRevokeCorrelation = .{},
-    cleanup_progress: u8 = @intFromEnum(RevokedCleanupProgress.empty),
+    cleanup_progress: u8 = @backingInt(RevokedCleanupProgress.empty),
     cleanup_failure: u8 = 0,
-    cleanup_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    cleanup_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: PreparedRevokedCommitGraphLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const PreparedRevokedCommitGraph = struct {
     bytes: [@sizeOf(PreparedRevokedCommitGraphStorage)]u8 align(@alignOf(PreparedRevokedCommitGraphStorage)) =
-        [_]u8{0} ** @sizeOf(PreparedRevokedCommitGraphStorage),
+        @as([@sizeOf(PreparedRevokedCommitGraphStorage)]u8, @splat(0)),
 
     fn storage(self: *PreparedRevokedCommitGraph) *PreparedRevokedCommitGraphStorage {
         return @ptrCast(@alignCast(&self.bytes));
@@ -3040,9 +3038,9 @@ fn preparedRevokedCommitGraphDigest(
     writer.writeUsize(graph.external_addr);
     writer.writeUsize(graph.aggregate_addr);
     writer.writeBool(graph.projected_response);
-    writer.writeU8(@intFromEnum(graph.action));
+    writer.writeU8(@backingInt(graph.action));
     const binding = graph.binding;
-    writer.writeU8(@intFromEnum(binding.purpose));
+    writer.writeU8(@backingInt(binding.purpose));
     writer.writeUsize(binding.storage_addr);
     writer.writeUsize(binding.storage_len);
     writer.writeUsize(binding.client_addr);
@@ -3065,7 +3063,7 @@ fn preparedRevokedCommitGraphDigest(
     writer.writeU8(graph.cleanup_progress);
     writer.writeU8(graph.cleanup_failure);
     writer.writeBytes(&graph.cleanup_digest);
-    writer.writeU8(@intFromEnum(graph.lifecycle));
+    writer.writeU8(@backingInt(graph.lifecycle));
     return writer.finish();
 }
 
@@ -3151,7 +3149,7 @@ const FrozenRxTurnOps = struct {
     original_ops_addr: usize = 0,
     fd: posix.fd_t = -1,
     ops: RxTurnOps = undefined,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const LiveScreenConsumeLifecycle = enum {
@@ -3174,15 +3172,14 @@ const LiveScreenConsumePermit = struct {
         .stream_id = 0,
         .is_snapshot = false,
     },
-    payload_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    payload_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     live_batch: external_inbox_ledger.PreparedLiveBatch = .{},
     retirement: external_inbox_ledger.PreparedLiveRetirement = .{},
     dispositions: [external_inbox_ledger.max_live_mutations]external_inbox_ledger.LiveCommitDisposition =
-        [_]external_inbox_ledger.LiveCommitDisposition{.unused} **
-        external_inbox_ledger.max_live_mutations,
+        @as([external_inbox_ledger.max_live_mutations]external_inbox_ledger.LiveCommitDisposition, @splat(.unused)),
     live_commit: external_inbox_ledger.PreparedLiveCommit = .{},
     lifecycle: LiveScreenConsumeLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const LiveScreenConsumeResult = enum {
@@ -3211,7 +3208,7 @@ const CallbackRegionToken = struct {
     thread_id: std.Thread.Id = undefined,
     epoch: u64 = 0,
     lifecycle: CallbackRegionLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const CallbackReleaseLifecycle = enum { empty, active, consumed };
@@ -3226,7 +3223,7 @@ const CallbackReleaseAuthority = struct {
     scratch_addr: usize = 0,
     permit_addr: usize = 0,
     lifecycle: CallbackReleaseLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const CallbackReleaseResult = enum { released, quarantined, invalid_authority };
@@ -3243,12 +3240,12 @@ const RxDrainEvidenceLifecycle = enum {
 const RxDrainEvidenceMode = enum { general, completed_control };
 
 const RxDrainEvidence = struct {
-    domain: [8]u8 = [_]u8{0} ** 8,
+    domain: [8]u8 = @as([8]u8, @splat(0)),
     version: u16 = 0,
     saved_self_addr: usize = 0,
     storage_addr: usize = 0,
     owner_incarnation: u64 = 0,
-    owner_incarnation_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    owner_incarnation_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lease_addr: usize = 0,
     lease_generation: u64 = 0,
     operation_generation: u64 = 0,
@@ -3260,11 +3257,11 @@ const RxDrainEvidence = struct {
     permit_addr: usize = 0,
     seed_addr: usize = 0,
     seed_authority_continuity_digest: external_owner_seal.Digest =
-        [_]u8{0} ** 32,
+        @as([32]u8, @splat(0)),
     prepared_seed_authority_digest: external_owner_seal.Digest =
-        [_]u8{0} ** 32,
+        @as([32]u8, @splat(0)),
     consumed_seed_authority_digest: external_owner_seal.Digest =
-        [_]u8{0} ** 32,
+        @as([32]u8, @splat(0)),
     read_attempt_generation: u64 = 0,
     parser_addr: usize = 0,
     parser_seal: client_external_mode.ParserAuthoritySeal = .{},
@@ -3273,16 +3270,16 @@ const RxDrainEvidence = struct {
     rx_read_budget_exhausted: bool = false,
     work_budget_exhausted: bool = false,
     mode: RxDrainEvidenceMode = .general,
-    completed_exception_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    completed_exception_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     owner_inventory_generation: u64 = 0,
-    owner_snapshot_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    owner_snapshot_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     initial_inherited_snapshot_digest: external_owner_seal.Digest =
-        [_]u8{0} ** 32,
+        @as([32]u8, @splat(0)),
     inherited_blocker_snapshot_digest: external_owner_seal.Digest =
-        [_]u8{0} ** 32,
+        @as([32]u8, @splat(0)),
     final_owner_blockers_clear: bool = false,
     lifecycle: RxDrainEvidenceLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 fn rxDrainEvidencePristine(evidence: *const RxDrainEvidence) bool {
@@ -3574,10 +3571,10 @@ const RxOwnerAuthoritySnapshot = struct {
     inventory_addr: usize = 0,
     inventory_count: usize = 0,
     inventory_generation: u64 = 0,
-    inventory_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    inventory_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     reservation_handle_addr: usize = 0,
     reservation_generation: u64 = 0,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const ExternalRxTurnScratch = struct {
@@ -3759,7 +3756,7 @@ fn callbackRegionDigest(
     writer.writeU64(token.operation_generation);
     writer.writeUsize(@intCast(token.thread_id));
     writer.writeU64(token.epoch);
-    writer.writeU8(@intFromEnum(token.lifecycle));
+    writer.writeU8(@backingInt(token.lifecycle));
     return writer.finish();
 }
 
@@ -3794,7 +3791,7 @@ fn callbackReleaseDigest(
     writer.writeUsize(authority.lease_addr);
     writer.writeUsize(authority.scratch_addr);
     writer.writeUsize(authority.permit_addr);
-    writer.writeU8(@intFromEnum(authority.lifecycle));
+    writer.writeU8(@backingInt(authority.lifecycle));
     return writer.finish();
 }
 
@@ -4501,8 +4498,7 @@ const ProductRxReadAuthority = struct {
                     return null;
         }
 
-        var protected = [_]client_external_rx_read.ProtectedRange{.{}} **
-            client_external_rx_read.max_rx_read_protected_ranges;
+        var protected = @as([client_external_rx_read.max_rx_read_protected_ranges]client_external_rx_read.ProtectedRange, @splat(.{}));
         var count: usize = 0;
         protected[count] = .{
             .addr = @intFromPtr(self.read_ops.context),
@@ -4546,7 +4542,7 @@ const ProductRxReadAuthority = struct {
             .owner_snapshot_digest = snapshot.digest,
             .protected_range_count = @intCast(count),
             .protected_ranges = protected,
-            .view_digest = [_]u8{0} ** 32,
+            .view_digest = @as([32]u8, @splat(0)),
         };
         client_external_rx_read.sealAuthorityView(&view);
         return view;
@@ -4648,12 +4644,12 @@ const ProductReplacementAllocationGuard = struct {
     operation_generation: u64 = 0,
     original_seal: client_external_mode.ReplacementAuthoritySeal = .{},
     source_seal: client_external_mode.ParserAuthoritySeal = .{},
-    source_inventory_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    source_inventory_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     replacement_candidate: client_external_mode.ReplacementCandidate =
         .{ .addr = 0, .len = 0 },
     admitted_len: usize = 0,
     phase: ProductReplacementGuardPhase = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 
     fn stateDigest(self: *const @This()) external_owner_seal.Digest {
         var writer = external_owner_seal.Writer.init("MARURGS1");
@@ -4669,7 +4665,7 @@ const ProductReplacementAllocationGuard = struct {
         writer.writeUsize(self.replacement_candidate.addr);
         writer.writeUsize(self.replacement_candidate.len);
         writer.writeUsize(self.admitted_len);
-        writer.writeU8(@intFromEnum(self.phase));
+        writer.writeU8(@backingInt(self.phase));
         return writer.finish();
     }
 
@@ -5136,7 +5132,7 @@ fn liveScreenConsumePermitDigest(
     writer.writeBytes(&permit.live_batch.digest);
     writer.writeUsize(permit.live_commit.saved_self_addr);
     writer.writeBytes(&permit.live_commit.digest);
-    writer.writeU8(@intFromEnum(permit.lifecycle));
+    writer.writeU8(@backingInt(permit.lifecycle));
     return writer.finish();
 }
 
@@ -5165,7 +5161,7 @@ fn liveScreenDigest(
     writer.writeU8(backlog.head);
     writer.writeU8(backlog.len);
     writer.writeU64(backlog.generation);
-    writer.writeU8(@intFromEnum(backlog.lifecycle));
+    writer.writeU8(@backingInt(backlog.lifecycle));
     for (backlog.tokens) |token| {
         writer.writeU16(token.slot);
         writer.writeU64(token.generation);
@@ -5188,7 +5184,7 @@ fn completedControlDigest(
     writer.writeU64(storage.owner_incarnation);
     pending.seal.writeDigest(&writer);
     writer.writeU64(pending.request_id);
-    writer.writeU8(@intFromEnum(pending.control_kind));
+    writer.writeU8(@backingInt(pending.control_kind));
     writeControlExpectation(&writer, pending.expectation);
     writer.writeU64(pending.target_stream_id);
     writer.writeU64(pending.expected_controller_generation);
@@ -5207,7 +5203,7 @@ fn writeAuthorityGeneration(
     writer: *external_owner_seal.Writer,
     generation: AuthorityGeneration,
 ) void {
-    writer.writeU8(@intFromEnum(std.meta.activeTag(generation)));
+    writer.writeU8(@backingInt(std.meta.activeTag(generation)));
     switch (generation) {
         .untracked => {},
         .tracked => |value| writer.writeU64(value),
@@ -5218,20 +5214,20 @@ fn writeControlSemanticValue(
     writer: *external_owner_seal.Writer,
     value: ControlSemanticValue,
 ) void {
-    writer.writeU8(@intFromEnum(std.meta.activeTag(value)));
+    writer.writeU8(@backingInt(std.meta.activeTag(value)));
     switch (value) {
         .resync_ack => {},
         // **결과를 봉인에 싣는다.** 안 실으면 `declared` 와 `invalid` 가 같은 봉인을 내어,
         // 응답이 바뀌어도 무결성 검사가 알아채지 못한다. 거절도 자기 자리를 갖는다.
         .declare_viewport_ack => |ack| {
-            writer.writeU8(@intFromEnum(std.meta.activeTag(ack)));
+            writer.writeU8(@backingInt(std.meta.activeTag(ack)));
             switch (ack) {
-                .accepted => |outcome| writer.writeU8(@intFromEnum(outcome)),
+                .accepted => |outcome| writer.writeU8(@backingInt(outcome)),
                 .refused => {},
             }
         },
         .resize => |reply| {
-            writer.writeU8(@intFromEnum(std.meta.activeTag(reply)));
+            writer.writeU8(@backingInt(std.meta.activeTag(reply)));
             switch (reply) {
                 .stale => {},
                 .applied => |applied| {
@@ -5270,7 +5266,7 @@ fn preparedWholeDrainPermitDigest(
     writer.writeU64(permit.correlation_generation);
     writer.writeU64(permit.tx_queue_generation);
     writer.writeBytes(&permit.pair_digest);
-    writer.writeU8(@intFromEnum(permit.lifecycle));
+    writer.writeU8(@backingInt(permit.lifecycle));
     return writer.finish();
 }
 
@@ -5287,7 +5283,7 @@ fn preparedControlSemanticVerdictDigest(
     writer.writeU64(verdict.correlation_generation);
     verdict.completed_payload_seal.writeDigest(&writer);
     writer.writeU64(verdict.request_id);
-    writer.writeU8(@intFromEnum(verdict.control_kind));
+    writer.writeU8(@backingInt(verdict.control_kind));
     writeControlTarget(&writer, verdict.target);
     writeAuthorityGeneration(&writer, verdict.authority_generation);
     writer.writeBytes(&verdict.authority_seal_digest);
@@ -5295,7 +5291,7 @@ fn preparedControlSemanticVerdictDigest(
     writer.writeBytes(&verdict.pair_digest);
     writeControlExpectation(&writer, verdict.expectation);
     writeControlSemanticValue(&writer, verdict.value);
-    writer.writeU8(@intFromEnum(verdict.lifecycle));
+    writer.writeU8(@backingInt(verdict.lifecycle));
     return writer.finish();
 }
 
@@ -5303,7 +5299,7 @@ fn attachmentEvidenceDigest(evidence: AttachmentEvidence) external_owner_seal.Di
     var writer = external_owner_seal.Writer.init("MARUAEV1");
     writer.writeU128(evidence.runtime_id);
     writer.writeU64(evidence.stream_id);
-    writer.writeU8(@intFromEnum(evidence.initial_role));
+    writer.writeU8(@backingInt(evidence.initial_role));
     writer.writeU64(evidence.initial_controller_generation);
     return writer.finish();
 }
@@ -5336,12 +5332,12 @@ fn preparedResizeSemanticCommitDigest(
     writer.writeU16(receipt.applied_rows);
     writer.writeU64(receipt.applied_generation);
     writer.writeBool(receipt.applied_changed);
-    writer.writeU8(@intFromEnum(receipt.disposition));
+    writer.writeU8(@backingInt(receipt.disposition));
     writer.writeUsize(receipt.response_take_addr);
     writer.writeBytes(&receipt.response_take_digest);
     writer.writeUsize(receipt.frozen_response_addr);
     writer.writeBytes(&receipt.frozen_response_pristine_digest);
-    writer.writeU8(@intFromEnum(receipt.lifecycle));
+    writer.writeU8(@backingInt(receipt.lifecycle));
     return writer.finish();
 }
 
@@ -5364,7 +5360,7 @@ fn projectedRecoverySnapshotCommitDigest(
     writer.writeBytes(&projected.ledger_candidate.permit.digest);
     writer.writeBytes(&projected.recovery_dispositions.root_digest);
     writer.writeBytes(&projected.recovery_commit.digest);
-    writer.writeU8(@intFromEnum(projected.lifecycle));
+    writer.writeU8(@backingInt(projected.lifecycle));
     return writer.finish();
 }
 
@@ -5384,7 +5380,7 @@ fn preparedResyncSemanticCommitDigest(
     writer.writeBool(receipt.aggregate_present);
     writer.writeUsize(receipt.aggregate_addr);
     writer.writeBytes(&receipt.aggregate_digest);
-    writer.writeU8(@intFromEnum(receipt.lifecycle));
+    writer.writeU8(@backingInt(receipt.lifecycle));
     return writer.finish();
 }
 
@@ -5393,7 +5389,7 @@ fn preparedControlSemanticTakeDigest(
 ) external_owner_seal.Digest {
     var writer = external_owner_seal.Writer.init("MARUCST1");
     writer.writeUsize(take.saved_self_addr);
-    writer.writeU8(@intFromEnum(std.meta.activeTag(take.branch)));
+    writer.writeU8(@backingInt(std.meta.activeTag(take.branch)));
     switch (take.branch) {
         .resize => |branch| {
             writer.writeUsize(branch.receipt_addr);
@@ -5404,7 +5400,7 @@ fn preparedControlSemanticTakeDigest(
             writer.writeBytes(&branch.receipt_digest);
         },
     }
-    writer.writeU8(@intFromEnum(take.lifecycle));
+    writer.writeU8(@backingInt(take.lifecycle));
     return writer.finish();
 }
 
@@ -5420,11 +5416,11 @@ fn writeRecoveryAuthorityState(
     writer: *external_owner_seal.Writer,
     state: client_pump.AuthorityState,
 ) void {
-    writer.writeU8(@intFromEnum(std.meta.activeTag(state)));
+    writer.writeU8(@backingInt(std.meta.activeTag(state)));
     switch (state) {
         .valid => {},
         .host_recovery => |phase| {
-            writer.writeU8(@intFromEnum(std.meta.activeTag(phase)));
+            writer.writeU8(@backingInt(std.meta.activeTag(phase)));
             switch (phase) {
                 .ack_unadmitted, .ack_queued => |context| writeRecoveryContext(writer, context),
                 .awaiting_snapshot => |waiting| {
@@ -5439,7 +5435,7 @@ fn writeRecoveryAuthorityState(
             }
         },
         .client_recovery => |phase| {
-            writer.writeU8(@intFromEnum(std.meta.activeTag(phase)));
+            writer.writeU8(@backingInt(std.meta.activeTag(phase)));
             switch (phase) {
                 .control_wait, .control_in_flight => |context| writeRecoveryContext(writer, context),
                 .awaiting_snapshot => |waiting| {
@@ -5487,7 +5483,7 @@ fn preparedResyncAckTransitionDigest(
     writer.writeBytes(&transition.response_take_digest);
     writer.writeUsize(transition.frozen_response_addr);
     writer.writeBytes(&transition.frozen_response_pristine_digest);
-    writer.writeU8(@intFromEnum(transition.lifecycle));
+    writer.writeU8(@backingInt(transition.lifecycle));
     return writer.finish();
 }
 
@@ -5512,8 +5508,8 @@ fn preparedControlSemanticTerminalDigest(
     writer.writeU64(terminal.correlation_generation);
     writer.writeU64(terminal.request_id);
     terminal.completed_payload_seal.writeDigest(&writer);
-    writer.writeU8(@intFromEnum(terminal.reason));
-    writer.writeU8(@intFromEnum(terminal.lifecycle));
+    writer.writeU8(@backingInt(terminal.reason));
+    writer.writeU8(@backingInt(terminal.lifecycle));
     return writer.finish();
 }
 
@@ -5546,7 +5542,7 @@ fn controlSemanticPairDigest(
     writer.writeU64(permit.tx_queue_generation);
     verdict.completed_payload_seal.writeDigest(&writer);
     writer.writeU64(verdict.request_id);
-    writer.writeU8(@intFromEnum(verdict.control_kind));
+    writer.writeU8(@backingInt(verdict.control_kind));
     writeControlTarget(&writer, verdict.target);
     writeControlExpectation(&writer, verdict.expectation);
     writeControlSemanticValue(&writer, verdict.value);
@@ -5567,7 +5563,7 @@ fn preparedControlResponseTakeDigest(
     writer.writeU64(take.request_id);
     writer.writeBytes(&take.owner_digest);
     take.payload_seal.writeDigest(&writer);
-    writer.writeU8(@intFromEnum(take.lifecycle));
+    writer.writeU8(@backingInt(take.lifecycle));
     return writer.finish();
 }
 
@@ -5601,7 +5597,7 @@ fn preparedControlSemanticTerminalBindingDigest(
     writer.writeBytes(&binding.response_take_digest);
     writer.writeUsize(binding.frozen_response_addr);
     writer.writeBytes(&binding.frozen_response_pristine_digest);
-    writer.writeU8(@intFromEnum(binding.lifecycle));
+    writer.writeU8(@backingInt(binding.lifecycle));
     return writer.finish();
 }
 
@@ -5613,14 +5609,14 @@ fn frozenControlResponseDigest(
     writer.writeUsize(response.storage_addr);
     writer.writeU64(response.owner_incarnation);
     writer.writeU64(response.correlation_generation);
-    writer.writeU8(@intFromEnum(response.kind));
+    writer.writeU8(@backingInt(response.kind));
     writeControlExpectation(&writer, response.expectation);
     writer.writeU64(response.target_stream_id);
     writer.writeU64(response.expected_controller_generation);
     writer.writeU64(response.request_id);
     writer.writeUsize(response.wire_len);
     response.payload_seal.writeDigest(&writer);
-    writer.writeU8(@intFromEnum(response.lifecycle));
+    writer.writeU8(@backingInt(response.lifecycle));
     return writer.finish();
 }
 
@@ -5643,7 +5639,7 @@ fn frozenControlResponsePristineProjectionDigest(
     writer.writeUsize(response.storage_addr);
     writer.writeU64(response.owner_incarnation);
     writer.writeU64(response.correlation_generation);
-    writer.writeU8(@intFromEnum(response.kind));
+    writer.writeU8(@backingInt(response.kind));
     writeControlExpectation(&writer, response.expectation);
     writer.writeU64(response.target_stream_id);
     writer.writeU64(response.expected_controller_generation);
@@ -5654,7 +5650,7 @@ fn frozenControlResponsePristineProjectionDigest(
     writer.writeUsize(@intFromPtr(response.payload.allocator.ptr));
     writer.writeUsize(@intFromPtr(response.payload.allocator.vtable));
     response.payload_seal.writeDigest(&writer);
-    writer.writeU8(@intFromEnum(response.lifecycle));
+    writer.writeU8(@backingInt(response.lifecycle));
     writer.writeBytes(&response.digest);
     return writer.finish();
 }
@@ -5911,7 +5907,7 @@ fn intentScratchReservationDigest(
     writer.writeUsize(reservation.storage_addr);
     writer.writeUsize(reservation.handle_addr);
     writer.writeU64(reservation.generation);
-    writer.writeU8(@intFromEnum(reservation.lifecycle));
+    writer.writeU8(@backingInt(reservation.lifecycle));
     return writer.finish();
 }
 
@@ -5927,7 +5923,7 @@ fn rxAggregateHandleDigest(
     writer.writeUsize(handle.storage_addr);
     writer.writeU64(handle.turn_generation);
     writer.writeU64(handle.reservation_generation);
-    writer.writeU8(@intFromEnum(handle.lifecycle));
+    writer.writeU8(@backingInt(handle.lifecycle));
     return writer.finish();
 }
 
@@ -6015,7 +6011,7 @@ fn rxAggregateReservationDigest(
     writer.writeUsize(reservation.aggregate_addr);
     writer.writeU64(reservation.turn_generation);
     writer.writeU64(reservation.generation);
-    writer.writeU8(@intFromEnum(reservation.lifecycle));
+    writer.writeU8(@backingInt(reservation.lifecycle));
     return writer.finish();
 }
 
@@ -6057,7 +6053,7 @@ fn writeReducedStateDigest(
     writer: *external_owner_seal.Writer,
     state: runtime_event_reducer.ReducedState,
 ) void {
-    writer.writeU8(@intFromEnum(state.authority.role));
+    writer.writeU8(@backingInt(state.authority.role));
     switch (state.authority.generation) {
         .untracked => writer.writeU8(0),
         .tracked => |generation| {
@@ -6094,10 +6090,10 @@ fn eventReductionDigest(
     writer.writeUsize(reduction.storage_addr);
     writer.writeUsize(reduction.intent_handle_addr);
     writer.writeU16(reduction.wire_major);
-    writer.writeU8(@intFromEnum(reduction.metadata_support));
+    writer.writeU8(@backingInt(reduction.metadata_support));
     writer.writeU128(reduction.identity.runtime_id);
     writer.writeU64(reduction.identity.stream_id);
-    writer.writeU8(@intFromEnum(reduction.authority.role));
+    writer.writeU8(@backingInt(reduction.authority.role));
     switch (reduction.authority.generation) {
         .untracked => writer.writeU8(0),
         .tracked => |generation| {
@@ -6117,7 +6113,7 @@ fn eventReductionDigest(
             // A terminal reduction is never finalized, but bind its complete discriminated value
             // through the aggregate lifecycle so copied/mutated failure evidence cannot look
             // prepared.
-            writer.writeU64(@intFromEnum(std.meta.activeTag(reason)));
+            writer.writeU64(@backingInt(std.meta.activeTag(reason)));
         },
         .ended => writer.writeU8(1),
         .revoked => |state| {
@@ -6133,7 +6129,7 @@ fn eventReductionDigest(
             writeReducedStateDigest(&writer, state);
         },
     }
-    writer.writeU8(@intFromEnum(reduction.lifecycle));
+    writer.writeU8(@backingInt(reduction.lifecycle));
     return writer.finish();
 }
 
@@ -6144,8 +6140,8 @@ fn authorityDestinationDigest(
     writer.writeUsize(plan.saved_self_addr);
     writer.writeUsize(plan.storage_addr);
     writer.writeBytes(&plan.expected_digest);
-    writer.writeU8(@intFromEnum(plan.expected.role));
-    writer.writeU8(@intFromEnum(plan.next.role));
+    writer.writeU8(@backingInt(plan.expected.role));
+    writer.writeU8(@backingInt(plan.next.role));
     switch (plan.expected.generation) {
         .untracked => writer.writeU8(0),
         .tracked => |generation| {
@@ -6160,7 +6156,7 @@ fn authorityDestinationDigest(
             writer.writeU64(generation);
         },
     }
-    writer.writeU8(@intFromEnum(plan.lifecycle));
+    writer.writeU8(@backingInt(plan.lifecycle));
     return writer.finish();
 }
 
@@ -6176,7 +6172,7 @@ fn resizeDestinationDigest(
     writer.writeU16(plan.next.cols);
     writer.writeU16(plan.next.rows);
     writer.writeU64(plan.next.resize_generation);
-    writer.writeU8(@intFromEnum(plan.lifecycle));
+    writer.writeU8(@backingInt(plan.lifecycle));
     return writer.finish();
 }
 
@@ -6184,7 +6180,7 @@ fn writeRecoveryIntentForPump(
     writer: *external_owner_seal.Writer,
     intent: external_inbox_ledger.RecoveryIntent,
 ) void {
-    writer.writeU8(@intFromEnum(std.meta.activeTag(intent)));
+    writer.writeU8(@backingInt(std.meta.activeTag(intent)));
     switch (intent) {
         .none => {},
         .host, .client => |epoch| writer.writeU64(epoch),
@@ -6198,16 +6194,16 @@ fn recoverySnapshotDispositionEntryDigest(
     writer.writeUsize(entry.transfer_addr);
     writer.writeU8(entry.mutation_index);
     writer.writeU8(entry.commit_output_index);
-    writer.writeU8(@intFromEnum(entry.token_source));
+    writer.writeU8(@backingInt(entry.token_source));
     writer.writeU16(entry.token.slot);
     writer.writeU64(entry.token.generation);
     writer.writeBytes(&entry.committed_semantic_digest);
-    writer.writeU8(@intFromEnum(entry.origin));
+    writer.writeU8(@backingInt(entry.origin));
     writer.writeU64(entry.recovery_epoch);
     writer.writeBool(entry.is_snapshot);
     writer.writeU64(entry.start_absolute);
     writer.writeU64(entry.end_absolute);
-    writer.writeU8(@intFromEnum(entry.disposition));
+    writer.writeU8(@backingInt(entry.disposition));
     writer.writeUsize(entry.cleanup_destination_addr);
     writer.writeU8(entry.cleanup_lifecycle);
     writer.writeBytes(&entry.cleanup_destination_digest);
@@ -6241,12 +6237,12 @@ fn immutableRecoveryCommitOutputDigest(
     writer.writeU64(output.token.generation);
     writer.writeBytes(&output.semantic_digest);
     writeRecoveryIntentForPump(&writer, output.recovery_intent);
-    writer.writeU8(@intFromEnum(output.origin));
+    writer.writeU8(@backingInt(output.origin));
     writer.writeU64(output.recovery_epoch);
     writer.writeBool(output.is_snapshot);
     writer.writeU64(output.start_absolute);
     writer.writeU64(output.end_absolute);
-    writer.writeU8(@intFromEnum(output.lifecycle));
+    writer.writeU8(@backingInt(output.lifecycle));
     return writer.finish();
 }
 
@@ -6270,7 +6266,7 @@ fn preparedRecoverySnapshotCommitDigest(
     writeRecoveryAuthorityState(&writer, prepared.authority_state);
     writeRecoveryAuthorityState(&writer, prepared.binding_next_state);
     writer.writeBytes(&prepared.prepared_live_commit_digest);
-    writer.writeU8(@intFromEnum(std.meta.activeTag(prepared.source)));
+    writer.writeU8(@backingInt(std.meta.activeTag(prepared.source)));
     switch (prepared.source) {
         .commit_pending => |source| {
             writer.writeUsize(source.live_commit_addr);
@@ -6281,7 +6277,7 @@ fn preparedRecoverySnapshotCommitDigest(
             writer.writeBytes(&source.output_digest);
         },
     }
-    writer.writeU8(@intFromEnum(prepared.source_discriminator));
+    writer.writeU8(@backingInt(prepared.source_discriminator));
     writer.writeUsize(prepared.ack_transition_addr);
     writer.writeBytes(&prepared.ack_transition_digest);
     writer.writeUsize(prepared.dispositions_addr);
@@ -6293,7 +6289,7 @@ fn preparedRecoverySnapshotCommitDigest(
     writer.writeBool(prepared.has_binding);
     writer.writeU8(prepared.binding_entry_index);
     writer.writeU8(prepared.ledger_output_index);
-    writer.writeU8(@intFromEnum(prepared.lifecycle));
+    writer.writeU8(@backingInt(prepared.lifecycle));
     return writer.finish();
 }
 
@@ -6322,7 +6318,7 @@ fn committedRecoverySnapshotBindingDigest(
     writer.writeU64(binding.token.generation);
     writer.writeBytes(&binding.semantic_digest);
     writeRecoveryIntentForPump(&writer, binding.recovery_intent);
-    writer.writeU8(@intFromEnum(binding.origin));
+    writer.writeU8(@backingInt(binding.origin));
     writer.writeU64(binding.recovery_epoch);
     writer.writeBool(binding.is_snapshot);
     writer.writeU64(binding.start_absolute);
@@ -6332,11 +6328,11 @@ fn committedRecoverySnapshotBindingDigest(
     writer.writeUsize(binding.side_intent_addr);
     writer.writeBytes(&binding.side_intent_digest);
     writer.writeBytes(&binding.destination_pristine_digest);
-    writer.writeU8(@intFromEnum(binding.source_discriminator));
+    writer.writeU8(@backingInt(binding.source_discriminator));
     writer.writeBytes(&binding.source_provenance_digest);
     writer.writeUsize(binding.ack_transition_addr);
     writer.writeBytes(&binding.ack_transition_digest);
-    writer.writeU8(@intFromEnum(binding.lifecycle));
+    writer.writeU8(@backingInt(binding.lifecycle));
     return writer.finish();
 }
 
@@ -6411,7 +6407,7 @@ fn preparedRxAggregateDigest(
     writer.writeU8(aggregate.destination_write_count);
     for (aggregate.destination_writes) |write|
         writer.writeBytes(&write.digest);
-    writer.writeU8(@intFromEnum(aggregate.lifecycle));
+    writer.writeU8(@backingInt(aggregate.lifecycle));
     return writer.finish();
 }
 
@@ -6445,7 +6441,7 @@ fn screenDestinationPlanDigest(
             .completed => 1,
         });
     }
-    writer.writeU8(@intFromEnum(plan.lifecycle));
+    writer.writeU8(@backingInt(plan.lifecycle));
     return writer.finish();
 }
 
@@ -6459,7 +6455,7 @@ fn responseDestinationPlanDigest(
     writer.writeUsize(plan.neutral_addr);
     writer.writeU8(plan.intent_index);
     writer.writeU64(plan.request_id);
-    writer.writeU8(@intFromEnum(plan.control_kind));
+    writer.writeU8(@backingInt(plan.control_kind));
     writeControlExpectation(&writer, plan.expectation);
     writer.writeU64(plan.target_stream_id);
     writer.writeU64(plan.expected_controller_generation);
@@ -6479,7 +6475,7 @@ fn responseDestinationPlanDigest(
     writer.writeUsize(plan.payload_len);
     writer.writeU64(plan.expected_generation);
     writer.writeU64(plan.next_generation);
-    writer.writeU8(@intFromEnum(plan.lifecycle));
+    writer.writeU8(@backingInt(plan.lifecycle));
     return writer.finish();
 }
 
@@ -6491,7 +6487,7 @@ fn screenTransferDigest(
     writer.writeUsize(transfer.aggregate_addr);
     writer.writeU8(transfer.intent_index);
     writer.writeU16(transfer.header.major);
-    writer.writeU16(@intFromEnum(transfer.header.kind));
+    writer.writeU16(@backingInt(transfer.header.kind));
     writer.writeU64(transfer.header.stream_id);
     writer.writeU64(transfer.header.request_id);
     writer.writeU64(transfer.header.flags);
@@ -6511,7 +6507,7 @@ fn screenTransferDigest(
     writer.writeUsize(transfer.ledger_payload.logical_len);
     writer.writeUsize(transfer.batch_addr);
     writer.writeU8(transfer.mutation_index);
-    writer.writeU8(@intFromEnum(transfer.lifecycle));
+    writer.writeU8(@backingInt(transfer.lifecycle));
     return writer.finish();
 }
 
@@ -6852,8 +6848,7 @@ fn prepareScreenDestinationPlan(
     if (plan.saved_self_addr != 0 or plan.lifecycle != .empty or
         !storage.liveScreenValid() or !storage.livePartialValid())
         return false;
-    var entries = [_]ScreenDestinationEntry{.{}} **
-        external_inbox_ledger.max_live_mutations;
+    var entries = @as([external_inbox_ledger.max_live_mutations]ScreenDestinationEntry, @splat(.{}));
     var entry_count: usize = 0;
     var partial_count: usize = 0;
     var completed_count: usize = 0;
@@ -6924,7 +6919,7 @@ fn prepareScreenDestinationPlan(
         .expected_partial_digest = if (existing_partial) |partial|
             partial.owner_digest
         else
-            [_]u8{0} ** 32,
+            @as([32]u8, @splat(0)),
         .next_partial_generation = next_partial_generation,
         .entries = entries,
         .entry_count = @intCast(entry_count),
@@ -7064,7 +7059,7 @@ fn prepareEventReduction(
     if (identity.runtime_id == 0 or identity.stream_id == 0) return .rejected;
 
     var event_to_intent =
-        [_]u8{std.math.maxInt(u8)} ** external_rx_intent.max_intents;
+        @as([external_rx_intent.max_intents]u8, @splat(std.math.maxInt(u8)));
     var event_count: u8 = 0;
     var accumulator: runtime_event_reducer.Accumulator = .{};
     const seed = storage.owner_metadata.reductionSeed(storage);
@@ -7652,7 +7647,7 @@ fn validateEventScalarDestinations(
     }
     const candidate = expected_resize orelse return false;
     const expected_digest = switch (storage.owner_resize) {
-        .none => [_]u8{0} ** 32,
+        .none => @as([32]u8, @splat(0)),
         .current => |current| current.seal.digest,
     };
     return resize_plan.saved_self_addr == @intFromPtr(resize_plan) and
@@ -7728,7 +7723,7 @@ fn frozenAggregateCleanupDigest(
     writer.writeUsize(cleanup.total_bytes);
     for (cleanup.cleanup[0..cleanup.cleanup_count]) |descriptor|
         writer.writeBytes(&descriptor.digest);
-    writer.writeU8(@intFromEnum(cleanup.lifecycle));
+    writer.writeU8(@backingInt(cleanup.lifecycle));
     return writer.finish();
 }
 
@@ -7802,7 +7797,7 @@ fn prepareEventAggregateCleanup(
     var count: usize = 0;
     var total_bytes: usize = 0;
     var metadata_content_digest: external_owner_cleanup.Digest =
-        [_]u8{0} ** 32;
+        @as([32]u8, @splat(0));
     for (aggregate.intent_commit.slot_kinds[0..aggregate.intent_commit.intent_count], 0..) |
         kind,
         intent_index,
@@ -8235,7 +8230,7 @@ fn destinationWriteDigest(
     writer.writeUsize(write.aggregate_addr);
     writer.writeU8(write.intent_index);
     writer.writeU8(write.mutation_index);
-    writer.writeU8(@intFromEnum(write.kind));
+    writer.writeU8(@backingInt(write.kind));
     writer.writeBool(write.final_for_kind);
     writer.writeU16(write.screen_token.slot);
     writer.writeU64(write.screen_token.generation);
@@ -8276,7 +8271,7 @@ fn expectedDestinationWrite(
                     write.kind = .screen_cleanup;
                     write.target_addr = @intFromPtr(transfer);
                     write.expected_lifecycle =
-                        @intFromEnum(transfer.lifecycle);
+                        @backingInt(transfer.lifecycle);
                     write.expected_digest = transfer.digest;
                 },
                 .final_live => |root| switch (root.phase) {
@@ -8285,8 +8280,8 @@ fn expectedDestinationWrite(
                         write.screen_token = root.token;
                         write.target_addr = @intFromPtr(&storage.live_partial);
                         write.expected_lifecycle =
-                            @intFromEnum(std.meta.activeTag(storage.live_partial));
-                        write.expected_digest = [_]u8{0} ** 32;
+                            @backingInt(std.meta.activeTag(storage.live_partial));
+                        write.expected_digest = @as([32]u8, @splat(0));
                     },
                     .completed => {
                         write.kind = .screen_completed;
@@ -8309,7 +8304,7 @@ fn expectedDestinationWrite(
                         write.target_addr =
                             @intFromPtr(&storage.live_screen.tokens[tail]);
                         write.expected_lifecycle =
-                            @intFromEnum(storage.live_screen.lifecycle);
+                            @backingInt(storage.live_screen.lifecycle);
                         write.expected_digest = storage.live_screen.owner_digest;
                     },
                 },
@@ -8352,7 +8347,7 @@ fn expectedDestinationWrite(
                         write.kind = .metadata_cleanup;
                         write.target_addr =
                             @intFromPtr(&aggregate.metadata_destination.frozen);
-                        write.expected_lifecycle = @intFromEnum(
+                        write.expected_lifecycle = @backingInt(
                             aggregate.metadata_destination.frozen.lifecycle,
                         );
                     },
@@ -8360,13 +8355,13 @@ fn expectedDestinationWrite(
                         write.kind = .metadata_publish_first;
                         write.target_addr = @intFromPtr(&storage.owner_metadata);
                         write.expected_lifecycle =
-                            @intFromEnum(storage.owner_metadata.lifecycle);
+                            @backingInt(storage.owner_metadata.lifecycle);
                     },
                     .replace_newer => {
                         write.kind = .metadata_replace_newer;
                         write.target_addr = @intFromPtr(&storage.owner_metadata);
                         write.expected_lifecycle =
-                            @intFromEnum(storage.owner_metadata.lifecycle);
+                            @backingInt(storage.owner_metadata.lifecycle);
                     },
                 }
                 write.expected_digest =
@@ -8388,7 +8383,7 @@ fn expectedDestinationWrite(
                 write.kind = .resize;
                 write.target_addr = @intFromPtr(&storage.owner_resize);
                 write.expected_lifecycle =
-                    @intFromEnum(std.meta.activeTag(storage.owner_resize));
+                    @backingInt(std.meta.activeTag(storage.owner_resize));
                 write.expected_digest = aggregate.resize_destination.expected_digest;
                 write.prepared_backing_addr =
                     @intFromPtr(&aggregate.resize_destination);
@@ -8403,7 +8398,7 @@ fn expectedDestinationWrite(
                 write.kind = .authority;
                 write.target_addr = @intFromPtr(&storage.owner_authority);
                 write.expected_lifecycle =
-                    @intFromEnum(std.meta.activeTag(storage.owner_authority));
+                    @backingInt(std.meta.activeTag(storage.owner_authority));
                 write.expected_digest =
                     aggregate.authority_destination.expected_digest;
                 write.prepared_backing_addr =
@@ -8416,7 +8411,7 @@ fn expectedDestinationWrite(
                 write.kind = .event_retirement;
                 write.target_addr =
                     @intFromPtr(&aggregate.event_cleanup[intent_index]);
-                write.expected_lifecycle = @intFromEnum(
+                write.expected_lifecycle = @backingInt(
                     aggregate.event_cleanup[intent_index].lifecycle,
                 );
                 write.expected_digest =
@@ -8431,7 +8426,7 @@ fn expectedDestinationWrite(
             write.kind = .response;
             write.target_addr = @intFromPtr(&storage.completed_control);
             write.expected_lifecycle =
-                @intFromEnum(std.meta.activeTag(storage.completed_control));
+                @backingInt(std.meta.activeTag(storage.completed_control));
             write.expected_digest = aggregate.response_destination.digest;
             write.prepared_backing_addr =
                 @intFromPtr(&aggregate.response_destination);
@@ -8761,7 +8756,7 @@ fn wholeTurnLeaseDigest(lease: ExternalWholeTurnLease) external_owner_seal.Diges
     writer.writeUsize(lease.rx_client_addr);
     writer.writeUsize(lease.rx_parser_addr);
     writer.writeBytes(&lease.rx_authority_digest);
-    writer.writeU8(@intFromEnum(lease.lifecycle));
+    writer.writeU8(@backingInt(lease.lifecycle));
     return writer.finish();
 }
 
@@ -8784,7 +8779,7 @@ fn rxAuthorityDigest(
     writer.writeUsize(provenance.resident_cap);
     writer.writeBytes(&provenance.parser_seal.digest);
     writer.writeU64(provenance.parser_seal.generation);
-    writer.writeU8(@intFromEnum(provenance.lifecycle));
+    writer.writeU8(@backingInt(provenance.lifecycle));
     return writer.finish();
 }
 
@@ -8922,7 +8917,7 @@ fn screenPendingSummaryDigest(
     writer.writeUsize(seal.retained_count);
     writer.writeBool(seal.committed);
     writer.writeU64(seal.generation);
-    writer.writeU8(@intFromEnum(seal.lifecycle));
+    writer.writeU8(@backingInt(seal.lifecycle));
     return writer.finish();
 }
 
@@ -8937,7 +8932,7 @@ fn metadataPendingSummaryDigest(
     writer.writeBool(seal.pending);
     writer.writeBool(seal.supported);
     writer.writeU64(seal.generation);
-    writer.writeU8(@intFromEnum(seal.lifecycle));
+    writer.writeU8(@backingInt(seal.lifecycle));
     return writer.finish();
 }
 
@@ -8988,7 +8983,7 @@ fn inheritedSnapshotDigest(
         },
     }
     writer.writeU64(snapshot.generation);
-    writer.writeU8(@intFromEnum(snapshot.lifecycle));
+    writer.writeU8(@backingInt(snapshot.lifecycle));
     writer.writeBytes(&snapshot.owner_digest);
     return writer.finish();
 }
@@ -9026,15 +9021,14 @@ const PreparedLiveOwnerTeardown = struct {
     saved_self_addr: usize = 0,
     storage_addr: usize = 0,
     known_tokens: [external_inbox_ledger.max_live_mutations + 1]external_inbox_ledger.Token =
-        [_]external_inbox_ledger.Token{.{ .slot = 0, .generation = 0 }} **
-        (external_inbox_ledger.max_live_mutations + 1),
+        @as([(external_inbox_ledger.max_live_mutations + 1)]external_inbox_ledger.Token, @splat(.{ .slot = 0, .generation = 0 })),
     known_token_count: u8 = 0,
-    partial_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    screen_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    response_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    partial_owner_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    screen_owner_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    response_owner_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     response_seal: ResponsePayloadSeal = ResponsePayloadSeal.empty(),
     lifecycle: LiveOwnerTeardownLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const FrozenResponsePayloadCleanup = struct {
@@ -9068,7 +9062,7 @@ const FrozenLiveOwnerCleanup = struct {
     saved_self_addr: usize = 0,
     response: FrozenResponsePayloadCleanup = .{},
     lifecycle: LiveOwnerTeardownLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 
     fn finishCallbackHidden(self: *FrozenLiveOwnerCleanup) bool {
         if (self.saved_self_addr != @intFromPtr(self) or
@@ -9096,7 +9090,7 @@ fn preparedLiveOwnerTeardownDigest(
     writer.writeBytes(&prepared.screen_owner_digest);
     writer.writeBytes(&prepared.response_owner_digest);
     prepared.response_seal.writeDigest(&writer);
-    writer.writeU8(@intFromEnum(prepared.lifecycle));
+    writer.writeU8(@backingInt(prepared.lifecycle));
     return writer.finish();
 }
 
@@ -9114,7 +9108,7 @@ fn frozenLiveOwnerDigest(
     writer.writeUsize(frozen.response.payload.logical_len);
     writer.writeUsize(@intFromPtr(frozen.response.payload.allocator.ptr));
     writer.writeUsize(@intFromPtr(frozen.response.payload.allocator.vtable));
-    writer.writeU8(@intFromEnum(frozen.lifecycle));
+    writer.writeU8(@backingInt(frozen.lifecycle));
     return writer.finish();
 }
 
@@ -9344,11 +9338,11 @@ fn releaseActiveStorage(address: usize) void {
 
 pub const ExternalPumpStorage = struct {
     access_claim: std.atomic.Value(u8) =
-        .init(@intFromEnum(StorageClaim.idle)),
+        .init(@backingInt(StorageClaim.idle)),
     lifecycle: StorageLifecycle = .empty,
     saved_self_addr: usize = 0,
     rx_resident_cap: usize = 0,
-    rx_resident_cap_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    rx_resident_cap_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     semantic_state: client_pump.ExternalPumpState = .constructing,
     evidence_snapshot: AttachmentEvidence = .{
         .runtime_id = 0,
@@ -10145,7 +10139,7 @@ pub const ExternalPumpStorage = struct {
             .stream_id = self.evidence_snapshot.stream_id,
             .expected_owner_resize_present = self.owner_resize == .current,
             .expected_owner_resize_digest = switch (self.owner_resize) {
-                .none => [_]u8{0} ** 32,
+                .none => @as([32]u8, @splat(0)),
                 .current => |value| value.seal.digest,
             },
             .applied_cols = applied.cols,
@@ -10224,7 +10218,7 @@ pub const ExternalPumpStorage = struct {
             applied,
         );
         const expected_digest = switch (self.owner_resize) {
-            .none => [_]u8{0} ** 32,
+            .none => @as([32]u8, @splat(0)),
             .current => |value| value.seal.digest,
         };
         return plan.disposition == receipt.disposition and
@@ -10564,7 +10558,7 @@ pub const ExternalPumpStorage = struct {
             .projected_commit_digest = candidate.digest,
             .aggregate_present = aggregate != null,
             .aggregate_addr = if (aggregate) |value| @intFromPtr(value) else 0,
-            .aggregate_digest = if (aggregate) |value| value.digest else [_]u8{0} ** 32,
+            .aggregate_digest = if (aggregate) |value| value.digest else @as([32]u8, @splat(0)),
             .lifecycle = .prepared,
         };
         receipt.digest = preparedResyncSemanticCommitDigest(receipt);
@@ -11661,24 +11655,19 @@ pub const ExternalPumpStorage = struct {
             .live_batch = .{},
             .live_commit = .{},
             .retirement = .{},
-            .dispositions = [_]external_inbox_ledger.LiveCommitDisposition{.unused} **
-                external_inbox_ledger.max_live_mutations,
-            .screen_transfers = [_]ScreenTransferOwner{.{}} ** external_rx_intent.max_intents,
-            .screen_proofs = [_]external_rx_intent.StagedScreenMutationProof{.{}} **
-                external_rx_intent.max_intents,
-            .neutral_payloads = [_]external_rx_intent.MovedIntentPayload{.{}} **
-                external_rx_intent.max_intents,
+            .dispositions = @as([external_inbox_ledger.max_live_mutations]external_inbox_ledger.LiveCommitDisposition, @splat(.unused)),
+            .screen_transfers = @as([external_rx_intent.max_intents]ScreenTransferOwner, @splat(.{})),
+            .screen_proofs = @as([external_rx_intent.max_intents]external_rx_intent.StagedScreenMutationProof, @splat(.{})),
+            .neutral_payloads = @as([external_rx_intent.max_intents]external_rx_intent.MovedIntentPayload, @splat(.{})),
             .intent_commit = .{},
-            .event_retirements = [_]external_rx_intent.PreparedNeutralRetirement{.{}} **
-                external_rx_intent.max_intents,
-            .event_cleanup = [_]external_owner_cleanup.FrozenOwnerCleanupDescriptor{.{}} **
-                external_rx_intent.max_intents,
+            .event_retirements = @as([external_rx_intent.max_intents]external_rx_intent.PreparedNeutralRetirement, @splat(.{})),
+            .event_cleanup = @as([external_rx_intent.max_intents]external_owner_cleanup.FrozenOwnerCleanupDescriptor, @splat(.{})),
             .event_reduction = .{},
             .metadata_destination = .{},
-            .metadata_summary_expected_digest = [_]u8{0} ** 32,
+            .metadata_summary_expected_digest = @as([32]u8, @splat(0)),
             .metadata_summary_next_generation = 0,
             .metadata_summary_next = .{},
-            .metadata_cleanup_content_digest = [_]u8{0} ** 32,
+            .metadata_cleanup_content_digest = @as([32]u8, @splat(0)),
             .authority_destination = .{},
             .resize_destination = .{},
             .screen_destination = .{},
@@ -11687,8 +11676,7 @@ pub const ExternalPumpStorage = struct {
             .recovery_snapshot_commit = .{},
             .recovery_commit_output = .{},
             .recovery_snapshot_binding = .{},
-            .destination_writes = [_]FrozenDestinationWrite{.{}} **
-                external_rx_intent.max_intents,
+            .destination_writes = @as([external_rx_intent.max_intents]FrozenDestinationWrite, @splat(.{})),
             .destination_write_count = 0,
             .lifecycle = .ready,
             .digest = undefined,
@@ -12269,9 +12257,9 @@ pub const ExternalPumpStorage = struct {
             const will_bind = !bound_selected and
                 candidate_plan.disposition == .bound;
             const cleanup_lifecycle: u8 = if (will_bind)
-                @intFromEnum(self.live_screen.lifecycle)
+                @backingInt(self.live_screen.lifecycle)
             else
-                @intFromEnum(
+                @backingInt(
                     aggregate.screen_transfers[transfer_intent_index].lifecycle,
                 );
             entry.* = .{
@@ -12294,7 +12282,7 @@ pub const ExternalPumpStorage = struct {
                     .drop,
                 .cleanup_destination_addr = cleanup_destination_addr,
                 .cleanup_lifecycle = cleanup_lifecycle,
-                .cleanup_destination_digest = [_]u8{0} ** 32,
+                .cleanup_destination_digest = @as([32]u8, @splat(0)),
             };
             entry.digest = recoverySnapshotDispositionEntryDigest(entry);
             if (entry.disposition == .bind) {
@@ -12306,7 +12294,7 @@ pub const ExternalPumpStorage = struct {
             count += 1;
         }
         if (count == 0) return true;
-        var cleanup_selection = [_]bool{false} ** external_inbox_ledger.max_live_mutations;
+        var cleanup_selection = @as([external_inbox_ledger.max_live_mutations]bool, @splat(false));
         for (aggregate.recovery_dispositions.entries[0..count]) |entry| {
             if (entry.disposition == .drop) {
                 cleanup_selection[entry.mutation_index] = true;
@@ -12489,7 +12477,7 @@ pub const ExternalPumpStorage = struct {
             ),
             .owner_aggregate_addr = @intFromPtr(source),
         };
-        var cleanup_selection = [_]bool{false} ** external_inbox_ledger.max_live_mutations;
+        var cleanup_selection = @as([external_inbox_ledger.max_live_mutations]bool, @splat(false));
         var count: u8 = 0;
         var ledger_output_index: u8 = 0;
         var bound_selected = false;
@@ -12580,9 +12568,9 @@ pub const ExternalPumpStorage = struct {
             else
                 .screen_cleanup;
             const expected_lifecycle: u8 = if (will_bind)
-                @intFromEnum(self.live_screen.lifecycle)
+                @backingInt(self.live_screen.lifecycle)
             else
-                @intFromEnum(source.screen_transfers[transfer_intent_index].lifecycle);
+                @backingInt(source.screen_transfers[transfer_intent_index].lifecycle);
             if (destination.kind != expected_kind or
                 destination.expected_lifecycle != expected_lifecycle)
             {
@@ -13182,7 +13170,7 @@ pub const ExternalPumpStorage = struct {
             dispositions.count == 0 or
             dispositions.count > external_inbox_ledger.max_live_mutations)
             return false;
-        var seen = std.StaticBitSet(external_inbox_ledger.max_live_mutations).initEmpty();
+        var seen = std.StaticBitSet(external_inbox_ledger.max_live_mutations).empty;
         var bind_count: u8 = 0;
         const expected_token_source: RecoverySnapshotTokenSource = switch (aggregate.recovery_snapshot_commit.source) {
             .commit_pending => .pending_commit,
@@ -13599,7 +13587,7 @@ pub const ExternalPumpStorage = struct {
                 .same_drain_side_intent)
                 output.ledger_output.digest
             else
-                [_]u8{0} ** 32,
+                @as([32]u8, @splat(0)),
             .destination_pristine_digest = prepared.binding_destination_pristine_digest,
             .source_discriminator = prepared.source_discriminator,
             .source_provenance_digest = switch (prepared.source_discriminator) {
@@ -13984,7 +13972,7 @@ pub const ExternalPumpStorage = struct {
         };
         if (progress == .empty) {
             progress = if (tx_prepared) .tx_abort_pending else .rx_abort_pending;
-            graph.cleanup_progress = @intFromEnum(progress);
+            graph.cleanup_progress = @backingInt(progress);
             graph.cleanup_failure = switch (failure) {
                 .protocol_terminal, .protocol_terminal_cleaned => 1,
                 else => 2,
@@ -14014,7 +14002,7 @@ pub const ExternalPumpStorage = struct {
                 return .quarantined;
             }
             progress = .tx_reset_pending;
-            graph.cleanup_progress = @intFromEnum(progress);
+            graph.cleanup_progress = @backingInt(progress);
             graph.cleanup_digest = revokedCleanupProgressDigest(graph);
         }
         if (progress == .tx_reset_pending) {
@@ -14031,7 +14019,7 @@ pub const ExternalPumpStorage = struct {
                 return .quarantined;
             }
             progress = .rx_abort_pending;
-            graph.cleanup_progress = @intFromEnum(progress);
+            graph.cleanup_progress = @backingInt(progress);
             graph.cleanup_digest = revokedCleanupProgressDigest(graph);
         }
         if (progress != .rx_abort_pending) {
@@ -14434,11 +14422,11 @@ pub const ExternalPumpStorage = struct {
         );
         expected_frozen.lifecycle = .cleaned_tombstone;
         expected_frozen.digest = frozenControlResponseDigest(&expected_frozen);
-        var aggregate_digest = [_]u8{0} ** 32;
-        var aggregate_recovery_commit_digest = [_]u8{0} ** 32;
-        var aggregate_recovery_output_digest = [_]u8{0} ** 32;
-        var aggregate_recovery_binding_digest = [_]u8{0} ** 32;
-        var aggregate_recovery_dispositions_digest = [_]u8{0} ** 32;
+        var aggregate_digest = @as([32]u8, @splat(0));
+        var aggregate_recovery_commit_digest = @as([32]u8, @splat(0));
+        var aggregate_recovery_output_digest = @as([32]u8, @splat(0));
+        var aggregate_recovery_binding_digest = @as([32]u8, @splat(0));
+        var aggregate_recovery_dispositions_digest = @as([32]u8, @splat(0));
         if (aggregate) |value| {
             // Predict the sole callback-owned mutation without copying the pointer-bearing
             // aggregate. The original retirement is restored before any allocator callback.
@@ -15154,8 +15142,7 @@ pub const ExternalPumpStorage = struct {
             return .invalid_state;
 
         var transfer_cleanup =
-            [_]external_owner_cleanup.FrozenOwnerCleanupDescriptor{.{}} **
-            external_rx_intent.max_intents;
+            @as([external_rx_intent.max_intents]external_owner_cleanup.FrozenOwnerCleanupDescriptor, @splat(.{}));
         var transfer_cleanup_count: usize = 0;
         for (&aggregate.screen_transfers) |*transfer| {
             switch (transfer.lifecycle) {
@@ -15207,9 +15194,7 @@ pub const ExternalPumpStorage = struct {
         }
 
         var descriptors =
-            [_]*const external_owner_cleanup.FrozenOwnerCleanupDescriptor{
-                undefined,
-            } ** max_rx_aggregate_cleanup_owners;
+            @as([max_rx_aggregate_cleanup_owners]*const external_owner_cleanup.FrozenOwnerCleanupDescriptor, @splat(undefined));
         var descriptor_count: usize = 0;
         for (ledger_abort.cleanup[0..ledger_abort.cleanup_count]) |*descriptor| {
             descriptors[descriptor_count] = descriptor;
@@ -16269,14 +16254,14 @@ pub const ExternalPumpStorage = struct {
 
     fn snapshotTerminalReason(self: *ExternalPumpStorage) client_pump.TerminalReason {
         if (self.access_claim.cmpxchgStrong(
-            @intFromEnum(StorageClaim.idle),
-            @intFromEnum(StorageClaim.operation),
+            @backingInt(StorageClaim.idle),
+            @backingInt(StorageClaim.operation),
             .acq_rel,
             .acquire,
         ) != null)
             return .invariant_failure;
         defer self.access_claim.store(
-            @intFromEnum(StorageClaim.idle),
+            @backingInt(StorageClaim.idle),
             .release,
         );
         if (self.lifecycle != .live) return .invariant_failure;
@@ -16299,19 +16284,19 @@ pub const ExternalPumpStorage = struct {
             return error.TransactionBusy;
         }
         if (self.access_claim.cmpxchgStrong(
-            @intFromEnum(StorageClaim.idle),
-            @intFromEnum(StorageClaim.operation),
+            @backingInt(StorageClaim.idle),
+            @backingInt(StorageClaim.operation),
             .acq_rel,
             .acquire,
         )) |observed|
-            return if (observed == @intFromEnum(StorageClaim.dead))
+            return if (observed == @backingInt(StorageClaim.dead))
                 error.Terminal
             else
                 error.TransactionBusy;
         var storage_claim_owned = true;
         errdefer if (storage_claim_owned)
             self.access_claim.store(
-                @intFromEnum(StorageClaim.idle),
+                @backingInt(StorageClaim.idle),
                 .release,
             );
         const tx_state = blk: {
@@ -16655,11 +16640,11 @@ pub const ExternalPumpStorage = struct {
 
     fn clearActiveWholeTurnRxAuthority() void {
         active_external_rx_resident_cap = 0;
-        active_external_rx_resident_cap_digest = [_]u8{0} ** 32;
+        active_external_rx_resident_cap_digest = @as([32]u8, @splat(0));
         active_external_rx_client_addr = 0;
         active_external_rx_parser_addr = 0;
         active_external_rx_provenance = .{};
-        active_external_rx_authority_digest = [_]u8{0} ** 32;
+        active_external_rx_authority_digest = @as([32]u8, @splat(0));
     }
 
     fn releaseActiveWholeTurnTxClaim() ?bool {
@@ -16695,7 +16680,7 @@ pub const ExternalPumpStorage = struct {
             if (close_for_callback_quarantine) {
                 self.quarantinePublishedStorageAfterCallbackDrift();
                 self.access_claim.store(
-                    @intFromEnum(StorageClaim.dead),
+                    @backingInt(StorageClaim.dead),
                     .release,
                 );
                 return .aborted_terminal;
@@ -16706,7 +16691,7 @@ pub const ExternalPumpStorage = struct {
                     .fd_disposition = .owner_cleanup,
                 } };
             self.access_claim.store(
-                @intFromEnum(StorageClaim.idle),
+                @backingInt(StorageClaim.idle),
                 .release,
             );
             return if (close_requested) .aborted_terminal else .released;
@@ -16731,7 +16716,7 @@ pub const ExternalPumpStorage = struct {
         _ = releaseActiveWholeTurnTxClaim() orelse
             @panic("external whole-turn TX claim release failed");
         self.access_claim.store(
-            @intFromEnum(StorageClaim.idle),
+            @backingInt(StorageClaim.idle),
             .release,
         );
         return .aborted_terminal;
@@ -17037,7 +17022,7 @@ pub const ExternalPumpStorage = struct {
         rx_read_budget_exhausted: bool = false,
         work_budget_exhausted: bool = false,
         terminal: ?client_pump.ExternalPumpTerminal = null,
-        deadlines: [5]?i128 = .{null} ** 5,
+        deadlines: [5]?i128 = @splat(null),
     };
 
     const RxPreparedSummary = struct {
@@ -17397,18 +17382,18 @@ pub const ExternalPumpStorage = struct {
             &writer,
             &evidence.parser_seal,
         );
-        writer.writeU8(@intFromEnum(evidence.final_readiness));
+        writer.writeU8(@backingInt(evidence.final_readiness));
         writer.writeBool(evidence.rx_frame_budget_exhausted);
         writer.writeBool(evidence.rx_read_budget_exhausted);
         writer.writeBool(evidence.work_budget_exhausted);
-        writer.writeU8(@intFromEnum(evidence.mode));
+        writer.writeU8(@backingInt(evidence.mode));
         writer.writeBytes(&evidence.completed_exception_digest);
         writer.writeU64(evidence.owner_inventory_generation);
         writer.writeBytes(&evidence.owner_snapshot_digest);
         writer.writeBytes(&evidence.initial_inherited_snapshot_digest);
         writer.writeBytes(&evidence.inherited_blocker_snapshot_digest);
         writer.writeBool(evidence.final_owner_blockers_clear);
-        writer.writeU8(@intFromEnum(evidence.lifecycle));
+        writer.writeU8(@backingInt(evidence.lifecycle));
         return writer.finish();
     }
 
@@ -17432,7 +17417,7 @@ pub const ExternalPumpStorage = struct {
         digest: external_owner_seal.Digest,
         all_clear: bool,
         mode: RxDrainEvidenceMode = .general,
-        completed_exception_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+        completed_exception_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     };
 
     const RxDrainFinalState = struct {
@@ -17491,7 +17476,7 @@ pub const ExternalPumpStorage = struct {
             .none => false,
             .current => |current| current.pending,
         };
-        var completed_exception_digest: external_owner_seal.Digest = [_]u8{0} ** 32;
+        var completed_exception_digest: external_owner_seal.Digest = @as([32]u8, @splat(0));
         const response_clear = switch (mode) {
             .general => !live.response_pending,
             .completed_control => blk: {
@@ -17517,7 +17502,7 @@ pub const ExternalPumpStorage = struct {
         writer.writeBool(live.response_pending);
         writer.writeBool(resize_pending);
         writer.writeBytes(&self.inheritedOwnerDigest());
-        writer.writeU8(@intFromEnum(mode));
+        writer.writeU8(@backingInt(mode));
         writer.writeBytes(&completed_exception_digest);
         return .{
             .digest = writer.finish(),
@@ -20889,7 +20874,7 @@ pub const ExternalPumpStorage = struct {
             },
             .terminal => writer.writeU8(2),
         }
-        writer.writeU8(@intFromEnum(self.live_screen.lifecycle));
+        writer.writeU8(@backingInt(self.live_screen.lifecycle));
         writer.writeBytes(&self.live_screen.owner_digest);
         switch (self.completed_control) {
             .none => writer.writeU8(0),
@@ -23236,12 +23221,12 @@ pub const ExternalPumpStorage = struct {
         cleanup_scratch: *ExternalPumpCleanupScratch,
     ) TeardownResult {
         if (self.access_claim.cmpxchgStrong(
-            @intFromEnum(StorageClaim.idle),
-            @intFromEnum(StorageClaim.cleanup),
+            @backingInt(StorageClaim.idle),
+            @backingInt(StorageClaim.cleanup),
             .acq_rel,
             .acquire,
         )) |observed| {
-            if (observed == @intFromEnum(StorageClaim.dead))
+            if (observed == @backingInt(StorageClaim.dead))
                 return .already_dead;
             if (active_external_operation_addr == @intFromPtr(self))
                 self.operation_reentry_latched = true;
@@ -23250,7 +23235,7 @@ pub const ExternalPumpStorage = struct {
         var storage_claim_owned = true;
         defer if (storage_claim_owned)
             self.access_claim.store(
-                @intFromEnum(if (self.lifecycle == .dead)
+                @backingInt(if (self.lifecycle == .dead)
                     StorageClaim.dead
                 else
                     StorageClaim.idle),
@@ -23268,7 +23253,7 @@ pub const ExternalPumpStorage = struct {
             .dead => {
                 storage_claim_owned = false;
                 self.access_claim.store(
-                    @intFromEnum(StorageClaim.dead),
+                    @backingInt(StorageClaim.dead),
                     .release,
                 );
                 return .already_dead;
@@ -23280,7 +23265,7 @@ pub const ExternalPumpStorage = struct {
         if (self.callback_quarantine_pending) {
             storage_claim_owned = false;
             self.quarantinePublishedStorageAfterCallbackDrift();
-            self.access_claim.store(@intFromEnum(StorageClaim.dead), .release);
+            self.access_claim.store(@backingInt(StorageClaim.dead), .release);
             return .quarantined;
         }
         var cap_invariant = false;
@@ -23304,7 +23289,7 @@ pub const ExternalPumpStorage = struct {
         else
             .idle;
         storage_claim_owned = false;
-        self.access_claim.store(@intFromEnum(claim_state), .release);
+        self.access_claim.store(@backingInt(claim_state), .release);
         return final_result;
     }
 
@@ -23557,7 +23542,7 @@ pub const ExternalPumpStorage = struct {
         } else {
             cleanup_scratch.screen_plan.initInPlace(
                 &.{},
-                std.StaticBitSet(external_inbox_ledger.max_items).initEmpty(),
+                std.StaticBitSet(external_inbox_ledger.max_items).empty,
             ) catch return self.quarantineOwnerTeardown(cleanup_scratch, true);
         }
         cleanup_scratch.screen_plan.appendRetainedTokens(
@@ -23840,7 +23825,7 @@ pub const ExternalPumpStorage = struct {
         self.owner_incarnation_seal = .{};
         self.owner_event_projection_generation = 0;
         self.rx_resident_cap = 0;
-        self.rx_resident_cap_digest = [_]u8{0} ** 32;
+        self.rx_resident_cap_digest = @as([32]u8, @splat(0));
         self.operation_generation = operation_generation;
         self.owner_teardown_generation = next_generation;
         self.intent_scratch_reservation = .{};
@@ -24010,7 +23995,7 @@ pub const ExternalPumpStorage = struct {
             };
         const ledger_result = self.inbox_ledger.finish();
         self.rx_resident_cap = 0;
-        self.rx_resident_cap_digest = [_]u8{0} ** 32;
+        self.rx_resident_cap_digest = @as([32]u8, @splat(0));
         self.lifecycle = .dead;
         releaseActiveStorage(@intFromPtr(self));
         if (drain_report.drained_active_count != 0 or
@@ -24021,8 +24006,8 @@ pub const ExternalPumpStorage = struct {
 };
 
 fn exactCr3aOwnerSchema(comptime Actual: type, comptime Expected: type) bool {
-    const actual = std.meta.fields(Actual);
-    const expected = std.meta.fields(Expected);
+    const actual = type_info_fields.fields(Actual);
+    const expected = type_info_fields.fields(Expected);
     if (actual.len != expected.len) return false;
     inline for (actual, expected) |a, e| {
         if (!std.mem.eql(u8, a.name, e.name) or a.type != e.type) return false;
@@ -24307,8 +24292,7 @@ fn seedSyntheticLiveOwnersForTest(
     var partial_retirement =
         external_inbox_ledger.PreparedLiveRetirement.init(allocator);
     var partial_dispositions =
-        [_]external_inbox_ledger.LiveCommitDisposition{.unused} **
-        external_inbox_ledger.max_live_mutations;
+        @as([external_inbox_ledger.max_live_mutations]external_inbox_ledger.LiveCommitDisposition, @splat(.unused));
     _ = try storage.inbox_ledger.commitPreparedLiveBatch(
         &partial_batch,
         &partial_retirement,
@@ -24350,8 +24334,7 @@ fn seedSyntheticLiveOwnersForTest(
     var screen_retirement =
         external_inbox_ledger.PreparedLiveRetirement.init(allocator);
     var screen_dispositions =
-        [_]external_inbox_ledger.LiveCommitDisposition{.unused} **
-        external_inbox_ledger.max_live_mutations;
+        @as([external_inbox_ledger.max_live_mutations]external_inbox_ledger.LiveCommitDisposition, @splat(.unused));
     _ = try storage.inbox_ledger.commitPreparedLiveBatch(
         &screen_batch,
         &screen_retirement,
@@ -24365,8 +24348,7 @@ fn seedSyntheticLiveOwnersForTest(
         screen_retirement.retire(),
     );
     var screen_tokens =
-        [_]external_inbox_ledger.Token{.{ .slot = 0, .generation = 0 }} **
-        external_inbox_ledger.max_live_mutations;
+        @as([external_inbox_ledger.max_live_mutations]external_inbox_ledger.Token, @splat(.{ .slot = 0, .generation = 0 }));
     for (0..external_inbox_ledger.max_live_mutations) |index|
         screen_tokens[index] =
             screen_dispositions[index].final_live.token;
@@ -24594,28 +24576,28 @@ fn adoptionFinalSealDigest(
     const plan = &storage.prepared_adoption;
     // Preparation temporarily publishes `.adoption_preparing`; the sealed commit state is the
     // stable `.adopting` lifecycle observed after the callback window closes.
-    writer.writeU8(@intFromEnum(StorageLifecycle.adopting));
-    writer.writeU8(@intFromEnum(plan.lifecycle));
-    writer.writeU8(@intFromEnum(plan.branch));
+    writer.writeU8(@backingInt(StorageLifecycle.adopting));
+    writer.writeU8(@backingInt(plan.lifecycle));
+    writer.writeU8(@backingInt(plan.branch));
     writer.writeU8(plan.screen_take.lifecycleCode());
     writer.writeU8(plan.metadata_take.lifecycleCode());
-    writer.writeU8(@intFromEnum(plan.scalar_take.lifecycle));
+    writer.writeU8(@backingInt(plan.scalar_take.lifecycle));
     writer.writeU8(storage.client_cleanup_take.lifecycleCode());
-    writer.writeU8(@intFromEnum(storage.committed_screen.lifecycle));
-    writer.writeU8(@intFromEnum(storage.owner_metadata.lifecycle));
-    writer.writeU8(@intFromEnum(std.meta.activeTag(storage.owner_resize)));
-    writer.writeU8(@intFromEnum(std.meta.activeTag(storage.owner_authority)));
+    writer.writeU8(@backingInt(storage.committed_screen.lifecycle));
+    writer.writeU8(@backingInt(storage.owner_metadata.lifecycle));
+    writer.writeU8(@backingInt(std.meta.activeTag(storage.owner_resize)));
+    writer.writeU8(@backingInt(std.meta.activeTag(storage.owner_authority)));
     writer.writeBool(storage.owner_request_ids != null);
     writer.writeU128(storage.evidence_snapshot.runtime_id);
     writer.writeU64(storage.evidence_snapshot.stream_id);
-    writer.writeU8(@intFromEnum(storage.evidence_snapshot.initial_role));
+    writer.writeU8(@backingInt(storage.evidence_snapshot.initial_role));
     writer.writeU64(
         storage.evidence_snapshot.initial_controller_generation,
     );
     if (storage.owned_evidence) |evidence| {
         writer.writeU64(evidence.attach_instance_id);
         writer.writeUsize(evidence.saved_self_addr);
-        writer.writeU8(@intFromEnum(evidence.lifecycle));
+        writer.writeU8(@backingInt(evidence.lifecycle));
     } else {
         writer.writeU64(0);
         writer.writeUsize(0);
@@ -24657,7 +24639,7 @@ fn adoptionFinalSealDigest(
         .empty => writer.writeU8(0),
         .current => |authority| {
             writer.writeU8(1);
-            writer.writeU8(@intFromEnum(authority.role));
+            writer.writeU8(@backingInt(authority.role));
             switch (authority.generation) {
                 .untracked => writer.writeU8(0),
                 .tracked => |generation| {
@@ -24665,7 +24647,7 @@ fn adoptionFinalSealDigest(
                     writer.writeU64(generation);
                 },
             }
-            writer.writeU8(@intFromEnum(authority.flow));
+            writer.writeU8(@backingInt(authority.flow));
         },
     }
     switch (plan.scalar_take.request_ids) {
@@ -27272,7 +27254,7 @@ test "d2b1 whole-turn lease snapshots inherited blockers once at final addresses
 
     var turn_scratch = struct {
         snapshot: InheritedRxBlockerSnapshot = .{},
-        padding: [64]u8 = [_]u8{0} ** 64,
+        padding: [64]u8 = @as([64]u8, @splat(0)),
     }{};
     var lease: ExternalWholeTurnLease = .{};
     try storage.acquireWholeTurnLease(
@@ -27379,8 +27361,7 @@ test "d2b3d partial continuation is sealed without becoming a consumer blocker" 
     var release_retirement =
         external_inbox_ledger.PreparedLiveRetirement.init(std.testing.allocator);
     var release_dispositions =
-        [_]external_inbox_ledger.LiveCommitDisposition{.unused} **
-        external_inbox_ledger.max_live_mutations;
+        @as([external_inbox_ledger.max_live_mutations]external_inbox_ledger.LiveCommitDisposition, @splat(.unused));
     _ = try storage.inbox_ledger.commitPreparedLiveBatch(
         &release_batch,
         &release_retirement,
@@ -27400,7 +27381,7 @@ test "d2b3d partial continuation is sealed without becoming a consumer blocker" 
 
     var turn_scratch = struct {
         snapshot: InheritedRxBlockerSnapshot = .{},
-        padding: [64]u8 = [_]u8{0} ** 64,
+        padding: [64]u8 = @as([64]u8, @splat(0)),
     }{};
     var lease: ExternalWholeTurnLease = .{};
     try storage.acquireWholeTurnLease(
@@ -27435,7 +27416,7 @@ test "d2b3d partial continuation is sealed without becoming a consumer blocker" 
 test "d2b3d product partial continues across turns and publishes one completed FIFO owner" {
     const ApplyProbe = struct {
         calls: usize = 0,
-        bytes: [2]u8 = [_]u8{0} ** 2,
+        bytes: [2]u8 = @as([2]u8, @splat(0)),
 
         fn apply(
             raw: *anyopaque,
@@ -27957,7 +27938,7 @@ test "d2b3d live screen consume retries without mutation then retires one FIFO h
 
     var scratch = struct {
         permit: LiveScreenConsumePermit = .{},
-        padding: [64]u8 = [_]u8{0} ** 64,
+        padding: [64]u8 = @as([64]u8, @splat(0)),
     }{};
     var lease: ExternalWholeTurnLease = .{};
     try storage.acquireWholeTurnLease(
@@ -28132,7 +28113,7 @@ const QuarantineAllocationTracker = struct {
     const Record = struct { addr: usize = 0, len: usize = 0, live: bool = false };
 
     parent: std.mem.Allocator,
-    records: [max_records]Record = [_]Record{.{}} ** max_records,
+    records: [max_records]Record = @as([max_records]Record, @splat(.{})),
     record_count: usize = 0,
     free_count: usize = 0,
     invalid_free: bool = false,
@@ -32515,7 +32496,7 @@ test "f3b corrupt persisted cleanup tags fail closed before pointer recovery" {
         graph.lease_addr = @intFromPtr(&lease);
         graph.aggregate_addr = 1;
         graph.cleanup_progress = if (corrupt_failure)
-            @intFromEnum(RevokedCleanupProgress.tx_abort_pending)
+            @backingInt(RevokedCleanupProgress.tx_abort_pending)
         else
             std.math.maxInt(u8);
         graph.cleanup_failure = if (corrupt_failure) std.math.maxInt(u8) else 2;
@@ -33979,7 +33960,7 @@ test "f1c TX callback RX authority drift stops before a second socket write" {
 test "d2b3d product facade traverses the adopted Client parser and consumes its live FIFO" {
     const ApplyProbe = struct {
         calls: usize = 0,
-        bytes: [6]u8 = [_]u8{0} ** 6,
+        bytes: [6]u8 = @as([6]u8, @splat(0)),
 
         fn apply(
             raw: *anyopaque,
@@ -34217,7 +34198,7 @@ test "d2b3d product facade preserves incomplete parser tails after committed and
             std.testing.allocator,
             if (skip_first)
                 .{
-                    .kind = @enumFromInt(55001),
+                    .kind = @fromBackingInt(@intCast(55001)),
                     .flags = protocol.Flags.optional,
                 }
             else
@@ -34696,7 +34677,7 @@ test "d2b3d late protocol terminals abort accepted screen and response prefixes"
             switch (case) {
                 .screen_then_move_terminal => .{ .kind = .ping },
                 .screen_then_unknown_required => .{
-                    .kind = @enumFromInt(55001),
+                    .kind = @fromBackingInt(@intCast(55001)),
                 },
                 .screen_then_bad_major, .response_then_bad_major => .{
                     .major = protocol.version_major + 1,
@@ -35895,7 +35876,7 @@ test "d2b1 whole-turn lease rejects copy alias stale snapshot and nested operati
 
     var turn_scratch = struct {
         snapshot: InheritedRxBlockerSnapshot = .{},
-        padding: [64]u8 = [_]u8{0} ** 64,
+        padding: [64]u8 = @as([64]u8, @splat(0)),
     }{};
     var lease: ExternalWholeTurnLease = .{};
     try storage.acquireWholeTurnLease(
@@ -35975,7 +35956,7 @@ test "d2b1 canonical lease drift aborts terminal and releases the operation rese
         try std.testing.expect(storage.commitAdoption() == .adopted);
         var turn_scratch = struct {
             snapshot: InheritedRxBlockerSnapshot = .{},
-            padding: [64]u8 = [_]u8{0} ** 64,
+            padding: [64]u8 = @as([64]u8, @splat(0)),
         }{};
         var lease: ExternalWholeTurnLease = .{};
         try storage.acquireWholeTurnLease(
@@ -36511,7 +36492,7 @@ test "d2b3a response range rejects storage scratch and sibling ledger alias" {
             .payload_len = 16,
             .allocator_ptr_addr = 1,
             .allocator_vtable_addr = 1,
-            .payload_digest = [_]u8{1} ** 32,
+            .payload_digest = @as([32]u8, @splat(1)),
         },
     };
     var ranges: external_owner_range.Scratch = .{};
@@ -38830,7 +38811,7 @@ test "c3c-3 aggregate teardown overwrites allocator callback mutation from hidde
     try std.testing.expect(std.mem.eql(
         u8,
         &storage.rx_resident_cap_digest,
-        &([_]u8{0} ** 32),
+        &(@as([32]u8, @splat(0))),
     ));
     try std.testing.expect(cleanup_scratch.isReady());
 }
@@ -38872,7 +38853,7 @@ test "C1 aggregate teardown overwrites callback-mutated resident cap" {
     try std.testing.expect(std.mem.eql(
         u8,
         &storage.rx_resident_cap_digest,
-        &([_]u8{0} ** 32),
+        &(@as([32]u8, @splat(0))),
     ));
 }
 
@@ -39899,7 +39880,7 @@ test "external pump teardown ignores forged prepared lifecycle tombstones" {
     );
     try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     storage.prepared_adoption.lifecycle = .committed_tombstone;
-    storage.prepared_adoption.backlog.client_disarm.lifecycle = @enumFromInt(3);
+    storage.prepared_adoption.backlog.client_disarm.lifecycle = @fromBackingInt(@intCast(3));
     try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
     try std.testing.expectEqual(TeardownResult.already_dead, teardownForTest(&storage));
 }
@@ -40790,7 +40771,7 @@ test "C1 teardown restores paired storage cap drift from Client authority" {
     try std.testing.expect(std.mem.eql(
         u8,
         &storage.rx_resident_cap_digest,
-        &([_]u8{0} ** 32),
+        &(@as([32]u8, @splat(0))),
     ));
 }
 
@@ -44741,7 +44722,7 @@ test "S3-D read attempt budget cannot publish drain evidence" {
     try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     try std.testing.expect(storage.commitAdoption() == .adopted);
 
-    const payload = [_]u8{'x'} ** (client_external_rx_read.max_rx_read_attempts_per_turn * 2);
+    const payload = @as([(client_external_rx_read.max_rx_read_attempts_per_turn * 2)]u8, @splat('x'));
     const wire = try framing.encodeFrame(
         std.testing.allocator,
         .{

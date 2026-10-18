@@ -44,9 +44,9 @@ pub fn main(init: std.process.Init) !void {
     const fingerprint_path = args.next() orelse return error.MissingFingerprintPath;
     const app_path_raw = args.next() orelse return error.MissingAppExecutable;
     const product_path_raw = args.next() orelse return error.MissingProductExecutable;
-    const app_path = try allocator.dupeZ(u8, app_path_raw);
+    const app_path = try allocator.dupeSentinel(u8, app_path_raw, 0);
     defer allocator.free(app_path);
-    const product_path = try allocator.dupeZ(u8, product_path_raw);
+    const product_path = try allocator.dupeSentinel(u8, product_path_raw, 0);
     defer allocator.free(product_path);
     if (!std.fs.path.isAbsolute(app_path) or !std.fs.path.isAbsolute(product_path))
         return error.InvalidExecutablePath;

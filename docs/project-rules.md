@@ -4,7 +4,7 @@ Maru에서 작업하는 모든 에이전트와 개발자는 이 규칙을 따른
 
 ## 기본 규칙
 
-- `.mise.toml`에 지정된 Zig 0.16.0을 사용한다.
+- `.mise.toml`에 지정된 Zig 0.17.0을 사용한다.
 - 외부 터미널/파서(Ghostty, GNOME vte, Alacritty, libvterm, xterm, kitty, WezTerm 등)는 `references/` 아래 read-only 참고 자료로만 사용한다. `references/`는 git에 커밋하지 않는 로컬 체크아웃이며, 레퍼런스 소스를 읽는 일은 이 경로에서만 한다. 공개 명세와 오라클을 무엇을 어디서 받는지는 [레퍼런스와 공개 명세](references.md)를 단일 출처로 둔다(`sh tools/fetch-references.sh`).
 - 어떤 레퍼런스의 소스코드도 Maru에 복사하지 않는다. 특히 GNOME vte, kitty처럼 copyleft(LGPL/GPL) 라이선스인 레퍼런스는 구현 유도를 위해 소스를 열람하지 말고 최종 화면 동작 비교(오라클)로만 사용한다.
 - Maru 터미널 코어의 "clean-room"은 공개 명세 기반 독립 재구현을 뜻한다. 구현은 ECMA-48, vt100.net DEC ANSI state machine, xterm ctlseqs 같은 공개 명세에서 유도하며, 레퍼런스의 코드 표현(자료구조 레이아웃, 함수/이터레이터 구조)을 그대로 옮기지 않는다. 이 원칙은 VT/parser뿐 아니라 renderer, storage, platform interop에도 적용한다. 레퍼런스별 허용 상호작용은 [오라클 비교 테스트 전략](oracle-testing.md#레퍼런스-라이선스와-허용-상호작용)을 따른다.
@@ -23,7 +23,7 @@ Maru에서 작업하는 모든 에이전트와 개발자는 이 규칙을 따른
   - **예외 ③: PCRE2**(편집기 정규식 찾기·바꾸기 — 2026-09-28 사용자 논의를 거친 결정, [시각 매핑 §5.1](native-editor-visual-mapping.md)). lookaround·역참조와 캡처 바꾸기를 자체 엔진 없이 제공한다. 8-bit 정적 링크·JIT 비활성·매치 한도를 적용하며, 배포 라이선스는 [third-party 라이선스](third-party-licenses.md)가 소유한다.
   - **예외 ④: ripgrep**(프로젝트 디스크 검색 — 2026-10-07 사용자 승인: “VS Code와 동일하게, ripgrep 사용”). 공식 15.2.0 macOS 배포물을 버전·해시로 고정하고 `vendor/ripgrep/`에 저장한다. 디스크는 rg `--engine=auto`·JSON, 열린 문서는 기존 편집기 모델을 우선하는 구성이며 별도 실행 파일이다. 번들·서명·attribution은 [제3자 라이선스](third-party-licenses.md), 단계와 검증은 [프로젝트 검색 계획](plans/editor-project-search.md)이 소유한다. 사용자 PATH의 rg를 자동 실행하지 않는다.
   - **예외 ⑤: CEF(Chromium Embedded Framework)**(웹 OSR 백엔드 — 2026-09-24 사용자 논의를 거친 결정, [웹 OSR 백엔드 구현 계획](plans/web-osr-backend.md)). `build.zig.zon` 의존성은 아니지만(배포본이 `.tar.bz2` 라 `zig fetch` 가 못 푼다 — 실측) 사용자 기계에 설치되는 외부 코드라 이 규칙의 취지에 든다. **maru 앱에는 링크하지 않고** 별도 sidecar 프로세스(`maru-web-host`·`maru-web-helper`)만 쓴다. 빌드는 **opt-in** 이다 — SDK 는 받기 스크립트가 해시를 확인해 캐시에 두고, 기본 `zig build`·`mise run check` 는 CEF 없이 돈다. 헤더도 저장소에 넣지 않는다. 버전은 154.0.23 에 고정하고 올릴 때 회귀 시험을 다시 돈다. 대가는 설치 크기(프레임워크 약 323MB)와 브라우저당 메모리(약 66MB)다. 라이선스·attribution 은 배포 단계(W7)에서 [third-party 라이선스](third-party-licenses.md)가 소유한다. **"기본 0"의 규율은 그대로다.**
-- **CI 는 의존성을 내려받지 않는다.** `build.zig.zon` 의 모든 의존성 tarball 은 `vendor/zig-packages/<hash>.tar.gz` 로 저장소에 있고, Zig 를 설치하는 모든 CI 스텝 바로 다음에 `tools/ci/prime-zig-packages.sh` 가 그것을 Zig 전역 패키지 캐시에 채운다(Zig 0.16 은 `<global_cache>/p/<hash>.tar.gz` 가 있으면 받지 않는다). 외부 다운로드가 끊겨 잡이 빨개지는 일(2026-09-29 `HttpConnectionClosing`)을 원리상 없애기 위해서다. 의존성을 추가·변경·삭제하면 `sh tools/ci/vendor-zig-packages.sh` 로 사본을 맞춘다 — 빠지거나 남으면 check-boundaries(`ci_zig_package_prime_boundary`)와 CI 의 채우기 스텝이 실패한다.
+- **CI 는 의존성을 내려받지 않는다.** `build.zig.zon` 의 모든 의존성 tarball 은 `vendor/zig-packages/<hash>.tar.gz` 로 저장소에 있고, Zig 를 설치하는 모든 CI 스텝 바로 다음에 `tools/ci/prime-zig-packages.sh` 가 그것을 Zig 전역 패키지 캐시에 채운다. 외부 다운로드가 끊겨 잡이 빨개지는 일(2026-09-29 `HttpConnectionClosing`)을 원리상 없애기 위해서다. 의존성을 추가·변경·삭제하면 `sh tools/ci/vendor-zig-packages.sh` 로 사본을 맞춘다 — 빠지거나 남으면 check-boundaries(`ci_zig_package_prime_boundary`)와 CI 의 채우기 스텝이 실패한다.
 - dev/test/CI 의존성(외부 오라클의 libvterm, Ghostty libghostty-vt, Alacritty alacritty_terminal 등)은 opt-in으로만 쓰고 기본 `mise run check` 경로에 넣지 않는다.
 - 외부 reference를 추가하거나 필수 의존성으로 승격하는 규칙은 [레퍼런스와 공개 명세](references.md)·[오라클 비교 테스트 전략](oracle-testing.md)을 단일 출처로 둔다.
 - 배포물(`.app`/`.dmg`)에 **번들·재배포하는 제3자 자산**(폰트 등)은 재배포·임베드가 허용된 라이선스만 쓰고, 라이선스 파일 동봉·원본 무수정·RFN 처리·attribution 갱신 규칙은 [third-party 라이선스](third-party-licenses.md)를 단일 출처로 둔다.
@@ -141,7 +141,7 @@ Maru에서 작업하는 모든 에이전트와 개발자는 이 규칙을 따른
   쓰므로, 그렇게 묻는 대상에서는 **`is_test` 갈림 자체를 금지**하는 편이 낫다 — 물음이 한 가지여야 답이
   하나다.
 
-  단, 무엇을 묻느냐에 따라 이 위험이 아예 없기도 하다. **`@hasDecl` 은 선언의 존재만 보는데 Zig 0.16 에는
+  단, 무엇을 묻느냐에 따라 이 위험이 아예 없기도 하다. **`@hasDecl` 은 선언의 존재만 보는데 현재 Zig 에는
   `usingnamespace` 가 없어 선언 자체를 컴파일 모드로 가를 길이 없다** — 값만 가르는
   `pub const x = if (is_test) A else B;` 는 어느 모드에서든 `@hasDecl` 이 참이다(실측). 그래서 그 판으로
   좁힌 뒤에는 `is_test` 금지가 필요 없어 걷어냈다. 규율은 "금지하라" 가 아니라 **"묻는 것이 컴파일 모드에

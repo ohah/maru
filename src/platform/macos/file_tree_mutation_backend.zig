@@ -362,7 +362,7 @@ fn identityOfDir(io: std.Io, dir: std.Io.Dir) !Identity {
     return .{
         .device = 0,
         .inode = @intCast(stat.inode),
-        .kind = @intFromEnum(file_tree.IdentityKind.directory),
+        .kind = @backingInt(file_tree.IdentityKind.directory),
     };
 }
 
@@ -504,7 +504,7 @@ fn identityAt(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, leaf: [
         const stat = try dir.statFile(io, leaf, .{ .follow_symlinks = false });
         return identityFromIoStat(stat);
     }
-    const leaf_z = try allocator.dupeZ(u8, leaf);
+    const leaf_z = try allocator.dupeSentinel(u8, leaf, 0);
     defer allocator.free(leaf_z);
     var stat: std.posix.Stat = undefined;
     if (std.c.fstatat(dir.handle, leaf_z.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW) != 0) return error.StatFailed;
@@ -518,7 +518,7 @@ fn identityFromIoStat(stat: std.Io.File.Stat) Identity {
         .sym_link => .symlink,
         else => .other,
     };
-    return .{ .device = 0, .inode = @intCast(stat.inode), .kind = @intFromEnum(kind) };
+    return .{ .device = 0, .inode = @intCast(stat.inode), .kind = @backingInt(kind) };
 }
 
 fn identityFromStat(stat: std.posix.Stat) Identity {
@@ -530,7 +530,7 @@ fn identityFromStat(stat: std.posix.Stat) Identity {
         .symlink
     else
         .other;
-    return .{ .device = @intCast(stat.dev), .inode = @intCast(stat.ino), .kind = @intFromEnum(kind) };
+    return .{ .device = @intCast(stat.dev), .inode = @intCast(stat.ino), .kind = @backingInt(kind) };
 }
 
 fn testIdentityForAbsolute(allocator: std.mem.Allocator, path: []const u8) !file_tree.Identity {
@@ -539,7 +539,7 @@ fn testIdentityForAbsolute(allocator: std.mem.Allocator, path: []const u8) !file
         const identity = identityFromIoStat(stat);
         return .{ .device = identity.device, .inode = identity.inode, .kind = @intCast(identity.kind) };
     }
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     var stat: std.posix.Stat = undefined;
     if (std.c.fstatat(std.posix.AT.FDCWD, path_z.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW) != 0) return error.StatFailed;

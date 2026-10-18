@@ -23,7 +23,7 @@ test "CR5b-1 경계는 runtime set capture를 actual connect보다 먼저 backen
     inline for (.{
         "runtime_row_count: u32 = 0,",
         "runtime_rows: [host_reconnect_runtime_ledger.max_runtime_rows]host_reconnect_runtime_ledger.RuntimeRow = undefined,",
-        "runtime_rows_digest: process_seal.CleanupSeal = [_]u8{0} ** 32,",
+        "runtime_rows_digest: process_seal.CleanupSeal = @as([32]u8, @splat(0)),",
         "fn prepareForConnect(",
         "fn validateRuntimeSet(",
         "fn runtimeRowsDigest(",

@@ -17,6 +17,8 @@
 //!
 //! **grant 대기**: browser 요청은 세션 cap이 없어 needs_grant→서버 held→확인 모달이다. 아래 read들이 사용자가
 //! 모달을 클릭할 때까지 블록한다(§9.2 Model B) — 짧은 타임아웃을 걸면 안 된다.
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const builtin = @import("builtin");
 const browser = @import("../browser.zig");
@@ -717,7 +719,7 @@ test "W9f LineReader: 줄·줄바꿈으로 끝나지 않는 마지막 줄·상�
     var fds: [2]std.c.fd_t = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
     defer _ = std.c.close(fds[0]);
-    const big = "x" ** 40;
+    const big = array_repeat.repeat("x", 40);
     const input = "a b\n\n" ++ big ++ big ++ "\nafter\n" ++ big ++ "\nlast";
     try std.testing.expectEqual(@as(isize, input.len), std.c.write(fds[1], input, input.len));
     _ = std.c.close(fds[1]);
@@ -783,7 +785,7 @@ test "W9f 적대 리뷰 1 회차: 정확히 상한 길이의 줄은 받는다(�
     var fds: [2]std.c.fd_t = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
     defer _ = std.c.close(fds[0]);
-    const exact = "z" ** 64;
+    const exact = array_repeat.repeat("z", 64);
     const input = exact ++ "\n" ++ exact ++ "z\n";
     try std.testing.expectEqual(@as(isize, input.len), std.c.write(fds[1], input, input.len));
     _ = std.c.close(fds[1]);

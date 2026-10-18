@@ -323,7 +323,7 @@ fn objectForFd(fd: c.fd_t) Error!ObjectIdentity {
 /// replacement generation을 지우지 않으며, content/mode가 손상돼도 우리가 만든 dev/ino면 회수한다.
 fn removeOwnedExact(path: [:0]const u8, expected_dev: i64, expected_ino: u64) void {
     var tomb_buf: [2048]u8 = undefined;
-    const tomb = std.fmt.bufPrintZ(&tomb_buf, "{s}.delete-{d}", .{ path, c.getpid() }) catch return;
+    const tomb = std.fmt.bufPrintSentinel(&tomb_buf, "{s}.delete-{d}", .{ path, c.getpid() }, 0) catch return;
     _ = c.unlink(tomb.ptr);
     if (renamex_np(path.ptr, tomb.ptr, rename_excl) != 0) return;
     const actual = inspectObject(tomb) catch {
@@ -359,15 +359,15 @@ fn writeFixture(path: [:0]const u8, bytes: []const u8) !void {
 
 test "staged image copies hashes and atomically rotates two consecutive versions" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-stage-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-stage-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     _ = c.mkdir(dir.ptr, 0o700);
     defer _ = c.rmdir(dir.ptr);
     var source_buf: [224]u8 = undefined;
-    const source = try std.fmt.bufPrintZ(&source_buf, "{s}/source", .{dir});
+    const source = try std.fmt.bufPrintSentinel(&source_buf, "{s}/source", .{dir}, 0);
     var current_buf: [224]u8 = undefined;
-    const current = try std.fmt.bufPrintZ(&current_buf, "{s}/self-current", .{dir});
+    const current = try std.fmt.bufPrintSentinel(&current_buf, "{s}/self-current", .{dir}, 0);
     var previous_buf: [224]u8 = undefined;
-    const previous = try std.fmt.bufPrintZ(&previous_buf, "{s}/self-previous", .{dir});
+    const previous = try std.fmt.bufPrintSentinel(&previous_buf, "{s}/self-previous", .{dir}, 0);
     defer {
         _ = c.unlink(source.ptr);
         _ = c.unlink(current.ptr);
@@ -405,13 +405,13 @@ test "staged image copies hashes and atomically rotates two consecutive versions
 
 test "staged image rejects symlink sources and unsafe owner directories" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-stage-sec-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-stage-sec-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     _ = c.mkdir(dir.ptr, 0o700);
     defer _ = c.rmdir(dir.ptr);
     var source_buf: [224]u8 = undefined;
-    const source = try std.fmt.bufPrintZ(&source_buf, "{s}/source", .{dir});
+    const source = try std.fmt.bufPrintSentinel(&source_buf, "{s}/source", .{dir}, 0);
     var link_buf: [224]u8 = undefined;
-    const link = try std.fmt.bufPrintZ(&link_buf, "{s}/link", .{dir});
+    const link = try std.fmt.bufPrintSentinel(&link_buf, "{s}/link", .{dir}, 0);
     defer {
         _ = c.unlink(source.ptr);
         _ = c.unlink(link.ptr);
@@ -424,11 +424,11 @@ test "staged image rejects symlink sources and unsafe owner directories" {
 
 test "staged image enforces cap and cap plus one during copy" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-stage-cap-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-stage-cap-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     _ = c.mkdir(dir.ptr, 0o700);
     defer _ = c.rmdir(dir.ptr);
     var source_buf: [224]u8 = undefined;
-    const source = try std.fmt.bufPrintZ(&source_buf, "{s}/source", .{dir});
+    const source = try std.fmt.bufPrintSentinel(&source_buf, "{s}/source", .{dir}, 0);
     defer _ = c.unlink(source.ptr);
 
     try writeFixture(source, "12345678");
@@ -443,26 +443,26 @@ test "staged image enforces cap and cap plus one during copy" {
 
 test "staged image cleanup removes corrupted owned inode but preserves replacement generation" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-stage-cleanup-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-stage-cleanup-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     _ = c.mkdir(dir.ptr, 0o700);
     defer _ = c.rmdir(dir.ptr);
     var source_buf: [224]u8 = undefined;
-    const source = try std.fmt.bufPrintZ(&source_buf, "{s}/source", .{dir});
+    const source = try std.fmt.bufPrintSentinel(&source_buf, "{s}/source", .{dir}, 0);
     defer _ = c.unlink(source.ptr);
     try writeFixture(source, "owned-image");
 
     var corrupted = try stageExclusive(std.testing.allocator, source, dir, "corrupted");
-    const corrupted_path = try std.testing.allocator.dupeZ(u8, corrupted.path);
+    const corrupted_path = try std.testing.allocator.dupeSentinel(u8, corrupted.path, 0);
     defer std.testing.allocator.free(corrupted_path);
     try std.testing.expect(c.chmod(corrupted.path.ptr, 0o600) == 0);
     corrupted.deinit();
     try std.testing.expect(c.access(corrupted_path.ptr, c.F_OK) != 0);
 
     var replaced = try stageExclusive(std.testing.allocator, source, dir, "replaced");
-    const replaced_path = try std.testing.allocator.dupeZ(u8, replaced.path);
+    const replaced_path = try std.testing.allocator.dupeSentinel(u8, replaced.path, 0);
     defer std.testing.allocator.free(replaced_path);
     var original_buf: [256]u8 = undefined;
-    const original = try std.fmt.bufPrintZ(&original_buf, "{s}.original", .{replaced_path});
+    const original = try std.fmt.bufPrintSentinel(&original_buf, "{s}.original", .{replaced_path}, 0);
     defer _ = c.unlink(original.ptr);
     defer _ = c.unlink(replaced_path.ptr);
     try std.testing.expect(c.rename(replaced.path.ptr, original.ptr) == 0);
@@ -473,15 +473,15 @@ test "staged image cleanup removes corrupted owned inode but preserves replaceme
 
 test "verified-source stage 는 복사하는 fd 와 복사한 바이트로 대조하고, 어긋나면 아무것도 남기지 않는다" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-stage-verified-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-stage-verified-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     _ = c.mkdir(dir.ptr, 0o700);
     defer _ = c.rmdir(dir.ptr);
     var source_buf: [224]u8 = undefined;
-    const source = try std.fmt.bufPrintZ(&source_buf, "{s}/source", .{dir});
+    const source = try std.fmt.bufPrintSentinel(&source_buf, "{s}/source", .{dir}, 0);
     var final_buf: [224]u8 = undefined;
-    const final = try std.fmt.bufPrintZ(&final_buf, "{s}/rollback-current", .{dir});
+    const final = try std.fmt.bufPrintSentinel(&final_buf, "{s}/rollback-current", .{dir}, 0);
     var tmp_buf: [256]u8 = undefined;
-    const tmp = try std.fmt.bufPrintZ(&tmp_buf, "{s}/.rollback-current.tmp-{d}", .{ dir, c.getpid() });
+    const tmp = try std.fmt.bufPrintSentinel(&tmp_buf, "{s}/.rollback-current.tmp-{d}", .{ dir, c.getpid() }, 0);
     defer {
         _ = c.unlink(source.ptr);
         _ = c.unlink(final.ptr);

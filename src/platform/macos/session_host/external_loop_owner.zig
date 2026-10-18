@@ -1358,7 +1358,7 @@ test "p5c3c-3b actual openpty integrated owner commits raw and restores exact AN
             .suppressed => c._exit(162),
             .backpressure => c._exit(163),
             .busy => c._exit(164),
-            .terminal => |reason| c._exit(180 + @as(c_int, @intFromEnum(reason))),
+            .terminal => |reason| c._exit(180 + @as(c_int, @backingInt(reason))),
         }
         if (owner.pending_resize or owner.pending_resize_request != null) c._exit(161);
         if (!owner.socket_write_interest) c._exit(166);
@@ -1619,7 +1619,7 @@ test "p5c3c-3b actual openpty stdin reaches one MRSH input frame without byte lo
                 else => c._exit(188),
             };
             if (turn.terminal) |terminal|
-                c._exit(190 + @as(c_int, @intFromEnum(terminal.reason)));
+                c._exit(190 + @as(c_int, @backingInt(terminal.reason)));
             if (turn.tx_bytes != 0) {
                 sent = true;
                 break;

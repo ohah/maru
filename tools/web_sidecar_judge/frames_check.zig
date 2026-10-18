@@ -174,7 +174,7 @@ pub fn rogueMain(service: []const u8, real_token_hex: []const u8) u8 {
 /// `maru-web-judge --attack <종류> <이름>` 을 띄우고 끝날 때까지 받는 쪽을 계속 비운다(maru 처럼).
 fn runAttack(self_path: [*:0]const u8, kind: [*:0]const u8, service: []const u8, view: *View, receiver: *Receiver, rejected: *u32, drain: bool) bool {
     var service_z: [128:0]u8 = undefined;
-    const s = std.fmt.bufPrintZ(&service_z, "{s}", .{service}) catch return false;
+    const s = std.fmt.bufPrintSentinel(&service_z, "{s}", .{service}, 0) catch return false;
     const pid = os.fork();
     if (pid == 0) {
         const argv = [_:null]?[*:0]const u8{ self_path, "--attack", kind, s };
@@ -192,9 +192,9 @@ fn runAttack(self_path: [*:0]const u8, kind: [*:0]const u8, service: []const u8,
 
 fn spawnRogue(self_path: [*:0]const u8, service: []const u8, token: [16]u8) c_int {
     var service_z: [128:0]u8 = undefined;
-    const s = std.fmt.bufPrintZ(&service_z, "{s}", .{service}) catch return -1;
+    const s = std.fmt.bufPrintSentinel(&service_z, "{s}", .{service}, 0) catch return -1;
     var hex_z: [33:0]u8 = undefined;
-    const h = std.fmt.bufPrintZ(&hex_z, "{x}", .{&token}) catch return -1;
+    const h = std.fmt.bufPrintSentinel(&hex_z, "{x}", .{&token}, 0) catch return -1;
     const pid = os.fork();
     if (pid == 0) {
         const argv = [_:null]?[*:0]const u8{ self_path, "--rogue", s, h };
@@ -369,7 +369,7 @@ pub fn run(report: Report, self_path: [*:0]const u8, host_path: [:0]const u8, pr
     _ = host.wait(wait_ms);
 
     var name_buf: [128:0]u8 = undefined;
-    const name = std.fmt.bufPrintZ(&name_buf, "{s}", .{receiver.serviceName()}) catch unreachable;
+    const name = std.fmt.bufPrintSentinel(&name_buf, "{s}", .{receiver.serviceName()}, 0) catch unreachable;
     receiver.close();
     var probe: mach.Port = mach.null_port;
     const lookup = mach.bootstrap_look_up(mach.bootstrap_port, name, &probe);

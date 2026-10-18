@@ -257,9 +257,9 @@ test "t=t: 임시 디렉터리 + 표식이 있는 파일만 읽은 뒤 지운다
     defer tmp.cleanup();
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
-    const rootz = try a.dupeZ(u8, root);
+    const rootz = try a.dupeSentinel(u8, root, 0);
     defer a.free(rootz);
-    const saved = if (std.c.getenv("TMPDIR")) |v| try a.dupeZ(u8, std.mem.span(v)) else null;
+    const saved = if (std.c.getenv("TMPDIR")) |v| try a.dupeSentinel(u8, std.mem.span(v), 0) else null;
     defer if (saved) |v| a.free(v);
     _ = setenv("TMPDIR", rootz.ptr, 1);
     // 되돌릴 때 `unsetenv` 를 안 쓴다 — std 가 붙잡은 envp 조각이 stale 이 되어 다음 `std.log` 가 죽는다
@@ -318,7 +318,7 @@ test "삭제 판정: 정규화된 루트로 비교한다(/tmp 심링크) — 접
     defer tmp.cleanup();
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
-    const rootz = try testing.allocator.dupeZ(u8, root);
+    const rootz = try testing.allocator.dupeSentinel(u8, root, 0);
     defer testing.allocator.free(rootz);
     var in_buf: [std.fs.max_path_bytes]u8 = undefined;
     const inside = try std.fmt.bufPrint(&in_buf, "{s}/kitty-tty-graphics-protocol-9", .{root});
@@ -333,7 +333,7 @@ test "t=s: 공유메모리를 [O, O+S) 로 읽고 unlink 한다; 없는 이름�
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = testing.allocator;
     var name_buf: [64]u8 = undefined;
-    const name = try std.fmt.bufPrintZ(&name_buf, "/maru-kmt-{d}", .{std.c.getpid()});
+    const name = try std.fmt.bufPrintSentinel(&name_buf, "/maru-kmt-{d}", .{std.c.getpid()}, 0);
     _ = std.c.shm_unlink(name.ptr);
     const fd = std.c.shm_open(name.ptr, @as(c_int, @bitCast(std.c.O{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true })), @as(std.c.mode_t, 0o600));
     if (fd < 0) return error.SkipZigTest;

@@ -298,7 +298,7 @@ test "host authority owns wire build and endpoint strings" {
     var server: socket_server.SocketServer = .{
         .listen_fd = -1,
         .server_uid = std.c.getuid(),
-        .socket_path = try allocator.dupeZ(u8, "/tmp/unused-authority.sock"),
+        .socket_path = try allocator.dupeSentinel(u8, "/tmp/unused-authority.sock", 0),
         .allocator = allocator,
         .host_id = 1,
         .registry = &registry,
@@ -331,7 +331,7 @@ test "host authority adapter CASes restoring and rollback through one disk and w
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-host-authority-{d}", .{std.c.getpid()}) catch
+    const dir = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-host-authority-{d}", .{std.c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = std.c.mkdir(dir.ptr, 0o700);
     defer _ = std.c.rmdir(dir.ptr);
@@ -357,7 +357,7 @@ test "host authority adapter CASes restoring and rollback through one disk and w
     var server: socket_server.SocketServer = .{
         .listen_fd = -1,
         .server_uid = std.c.getuid(),
-        .socket_path = try allocator.dupeZ(u8, endpoint),
+        .socket_path = try allocator.dupeSentinel(u8, endpoint, 0),
         .allocator = allocator,
         .host_id = host_id,
         .registry = &registry,
@@ -468,10 +468,11 @@ test "prepared host authority activates a stable restoring manifest after all al
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(
+    const dir = std.fmt.bufPrintSentinel(
         &dir_buf,
         "/tmp/maru-host-authority-adopt-{d}",
         .{std.c.getpid()},
+        0,
     ) catch return error.SkipZigTest;
     _ = std.c.mkdir(dir.ptr, 0o700);
     defer _ = std.c.rmdir(dir.ptr);
@@ -506,7 +507,7 @@ test "prepared host authority activates a stable restoring manifest after all al
     var server: socket_server.SocketServer = .{
         .listen_fd = -1,
         .server_uid = std.c.getuid(),
-        .socket_path = try allocator.dupeZ(u8, endpoint),
+        .socket_path = try allocator.dupeSentinel(u8, endpoint, 0),
         .allocator = allocator,
         .host_id = host_id,
         .registry = &registry,

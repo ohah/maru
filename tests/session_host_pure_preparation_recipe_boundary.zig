@@ -159,13 +159,13 @@ test "C3-3b2b2 pure preparation recipe boundary" {
     // pointer-only recursive predicate is insufficient because function and allocator fields can
     // otherwise enter the supposedly value-only recipe without changing the test count.
     inline for (.{
-        "std.meta.fields(StringRecipe)",
-        "std.meta.fields(ProcessRecipe)",
-        "std.meta.fields(MetadataPreparationRecipe)",
-        "std.meta.fields(AcceptedPreparationRecipe)",
-        "std.meta.fields(EventPreparationRecipe)",
-        "std.meta.fields(FilledRange)",
-        "std.meta.fields(MetadataFillProjection)",
+        "@import(\"type_info_fields\").fields(StringRecipe)",
+        "@import(\"type_info_fields\").fields(ProcessRecipe)",
+        "@import(\"type_info_fields\").fields(MetadataPreparationRecipe)",
+        "@import(\"type_info_fields\").fields(AcceptedPreparationRecipe)",
+        "@import(\"type_info_fields\").fields(EventPreparationRecipe)",
+        "@import(\"type_info_fields\").fields(FilledRange)",
+        "@import(\"type_info_fields\").fields(MetadataFillProjection)",
         ".@\"fn\" => true",
     }) |shape_proof| try std.testing.expectEqual(
         @as(usize, 1),
@@ -192,9 +192,9 @@ test "C3-3b2b2 pure preparation recipe boundary" {
         "error.DestinationOverlap",
         "std.math.maxInt(usize)",
         "final digest",
-        "std.meta.fields(runtime_event_types.FrameViolation)",
-        "std.meta.fields(runtime_event_types.IdentityViolation)",
-        "std.meta.fields(runtime_event_types.AuthorityViolation)",
+        "@import(\"type_info_fields\").fields(runtime_event_types.FrameViolation)",
+        "@import(\"type_info_fields\").fields(runtime_event_types.IdentityViolation)",
+        "@import(\"type_info_fields\").fields(runtime_event_types.AuthorityViolation)",
     }) |semantic_sentinel| try std.testing.expect(
         count(recipe_tests, semantic_sentinel) > 0,
     );

@@ -50,7 +50,7 @@ fn manifestValue(assets: []const manifest.Asset) manifest.Manifest {
 fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(out, "{s}/{s}", .{ root[0..len], leaf });
+    return std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ root[0..len], leaf }, 0);
 }
 
 const Fixture = struct {
@@ -241,7 +241,7 @@ test "shared deadline brackets frozen pin observer and final publication" {
     try std.testing.expectError(error.InvalidOwner, product.observeUntilWith(&observer, current_deadline, std.testing.allocator, std.testing.io, &fixture.current, fixture.paths(), &result));
 
     var path_deadline_storage: [@sizeOf(SharedDeadline) + 1]u8 align(@alignOf(SharedDeadline)) =
-        .{0} ** (@sizeOf(SharedDeadline) + 1);
+        @splat(0);
     const path_deadline: *SharedDeadline = @ptrCast(&path_deadline_storage);
     path_deadline.* = .{ .values = &.{100} };
     var aliased_paths = fixture.paths();
@@ -257,7 +257,7 @@ test "shared deadline brackets frozen pin observer and final publication" {
     // 포인터의 주소 범위를 deadline·current·result 와 비교한다 — 그 쓰레기 값이 어디를 가리키는지는 컴파일
     // 단위마다 달라, 다른 테스트 파일과 한 바이너리에 묶이자 Debug 에서만 `InvalidOwner` 가 먼저 났다(실측).
     // 이 테스트의 물음은 「빈 current 는 InvalidCurrent」이고, 그 답은 storage 의 주소와 무관해야 한다.
-    const StorageType = std.meta.Child(@typeInfo(@TypeOf(product.observeUntil)).@"fn".params[4].type.?);
+    const StorageType = std.meta.Child(@typeInfo(@TypeOf(product.observeUntil)).@"fn".param_types[4].?);
     var storage: StorageType = undefined;
     try std.testing.expectError(error.InvalidCurrent, product.observeUntil(std.testing.allocator, std.testing.io, &empty, fixture.paths(), &storage, &real_deadline, &result));
 }

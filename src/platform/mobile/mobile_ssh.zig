@@ -234,7 +234,7 @@ fn absorb(s: *Slot, step: client.Step) void {
     // `tests/boundary/i18n_literals.zig` 원장이 그 사실과 함께 이 한 개를 적어 둔다.
     s.control_len += step.control.len;
     comptime {
-        const fields = @typeInfo(client.Step).@"struct".fields.len;
+        const fields = @import("type_info_fields").structFields(client.Step).len;
         if (fields != 9) @compileError(
             "client.Step 의 필드 수가 바뀌었다 — 새 필드를 absorb 가 흘리고 있지 않은지 보고 이 숫자를 고쳐라",
         );
@@ -247,7 +247,7 @@ fn absorb(s: *Slot, step: client.Step) void {
     if (step.exit_status) |code| s.exit_status = code;
     if (step.exit_signal) |sig| copyZ(&s.exit_signal, sig);
     if (step.disconnect) |d| {
-        s.disconnect_reason = @intFromEnum(d.reason);
+        s.disconnect_reason = @backingInt(d.reason);
         copyZ(&s.disconnect_desc, d.description);
     }
 }

@@ -635,7 +635,7 @@ pub fn sidebarSearchActivateFirst(self: *AppSession) void {
     const query = self.sidebar_search_input.query.items;
     if (query.len == 0) return;
     for (self.recoveredSessionsRows(self.is_primary_window), 0..) |row, index| {
-        if (std.ascii.indexOfIgnoreCase(&row.label, query) == null) continue;
+        if (std.ascii.findIgnoreCase(&row.label, query) == null) continue;
         self.activateRecoveredSessionAt(index) catch {
             self.showNoticeKey(.app_recovered_session_failed);
             return;
@@ -2089,7 +2089,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
     const cw2 = self.cell_width_px;
     const group_indent_cols: u16 = if (sp.group_indent_px > 0 and cw2 > 0) @intCast(@min((@as(u32, sp.group_indent_px) + cw2 - 1) / cw2, @as(u32, std.math.maxInt(u16)))) else 0;
     // 들여쓰기 공백 버퍼(카드 depth·중첩 헤더 depth-1 공유). depth×group_indent_cols가 24를 넘으면 clamp(오버플로 없음).
-    const indent_buf = [_]u8{' '} ** 24;
+    const indent_buf = @as([24]u8, @splat(' '));
     var active_row: ?usize = null;
     // 닫기 ✕는 **호버 전용이 아니라 행별 고정 표시**다(사용자 요청) — 카드는 그 워크스페이스를, 에이전트 행은
     // 그 Term을 닫는다. row별 bool로 실어 여러 행이 동시에 ✕를 가질 수 있게 한다.
@@ -3360,7 +3360,7 @@ test "사이드바 키보드 스크롤 게이트: 검색이 열렸을 때만 · 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 

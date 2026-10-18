@@ -53,7 +53,7 @@ pub const PreparedAggregateScreenCleanup = struct {
     copies: []client_mod.ExternalScreenCopy = &.{},
     wrappers: []ledger_mod.OwnedPayload = &.{},
     tokens: []ledger_mod.Token = &.{},
-    payloads: [ledger_mod.max_items][]u8 = [_][]u8{&.{}} ** ledger_mod.max_items,
+    payloads: [ledger_mod.max_items][]u8 = @as([ledger_mod.max_items][]u8, @splat(&.{})),
     payload_count: usize = 0,
     has_transfer: bool = false,
     committed_cleanup: bool = false,
@@ -128,7 +128,7 @@ const ScreenCanonicalAuthority = struct {
     tokens_len: usize = 0,
     cleanup_tokens_addr: usize = 0,
     cleanup_tokens_len: usize = 0,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const LedgerFinishedPermit = struct {
@@ -338,7 +338,7 @@ pub const PreparedCommittedScreenTake = struct {
     }
 
     pub fn lifecycleCode(self: *const PreparedCommittedScreenTake) u8 {
-        return @intFromEnum(self.lifecycle);
+        return @backingInt(self.lifecycle);
     }
 };
 
@@ -393,7 +393,7 @@ pub const CommittedScreenBacklog = struct {
     tokens_len: usize = 0,
     retained_count: usize = 0,
     released: std.StaticBitSet(ledger_mod.max_items) =
-        std.StaticBitSet(ledger_mod.max_items).initEmpty(),
+        std.StaticBitSet(ledger_mod.max_items).empty,
     primary: ScreenBackingAuthority = .{},
     cleanup: ScreenBackingAuthority = .{},
     primary_seal: ?ScreenBackingSeal = null,
@@ -661,7 +661,7 @@ fn writeProjectionTransfer(
         for (copies) |copy| {
             writer.writeUsize(@intFromPtr(copy.allocator.ptr));
             writer.writeUsize(@intFromPtr(copy.allocator.vtable));
-            writer.writeU8(@intFromEnum(copy.semantic));
+            writer.writeU8(@backingInt(copy.semantic));
             switch (copy.semantic) {
                 .completed => |value| {
                     writer.writeU64(value.stream_id);
@@ -2286,7 +2286,7 @@ test "prepared external adoption cleanup uses sealed owners after persistent fie
     prepared.seed_plan.allocator = std.heap.page_allocator;
     prepared.inventory.?.batch_descriptors = &.{};
     prepared.inventory.?.sealed_allocator = std.heap.page_allocator;
-    prepared.client_disarm.lifecycle = @enumFromInt(3);
+    prepared.client_disarm.lifecycle = @fromBackingInt(@intCast(3));
     prepared.lifecycle = .committed;
     prepared.allocator_ptr_addr += 1;
     prepared.transfer = null;
@@ -2755,6 +2755,7 @@ test "prepared external adoption distinguishes exact screen byte cap from cap pl
         .bytes = .{
             .items = partial_backing[0..partial_len],
             .capacity = partial_backing.len,
+            .pointer_stability = .{},
         },
         .chunk_count = 2,
     };

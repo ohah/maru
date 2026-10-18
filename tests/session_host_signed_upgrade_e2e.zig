@@ -64,7 +64,7 @@ const Evidence = struct {
     gui_exact_reattach: bool = false,
     all_runtime_pids_preserved: bool = false,
     runtime_count: usize = 1,
-    runtime_set_sha256: [32]u8 = [_]u8{0} ** 32,
+    runtime_set_sha256: [32]u8 = @as([32]u8, @splat(0)),
     duration_ms: u64 = 0,
 };
 
@@ -123,9 +123,9 @@ fn parseConfig(init: std.process.Init, stderr: *std.Io.Writer) !Config {
     defer allocator.free(current_real);
     if (!std.fs.path.isAbsolute(n1_real) or !std.fs.path.isAbsolute(current_real))
         return error.AbsoluteExecutableRequired;
-    const n1_executable = try allocator.dupeZ(u8, n1_real);
+    const n1_executable = try allocator.dupeSentinel(u8, n1_real, 0);
     errdefer allocator.free(n1_executable);
-    const current_executable = try allocator.dupeZ(u8, current_real);
+    const current_executable = try allocator.dupeSentinel(u8, current_real, 0);
     errdefer allocator.free(current_executable);
     const test_uuid = try allocator.dupe(u8, test_uuid_raw);
     errdefer allocator.free(test_uuid);
@@ -193,7 +193,7 @@ fn run(
     defer allocator.free(target_build_id);
 
     var base_buf: [std.fs.max_path_bytes:0]u8 = @splat(0);
-    const base = try std.fmt.bufPrintZ(&base_buf, "{s}", .{config.isolated_root});
+    const base = try std.fmt.bufPrintSentinel(&base_buf, "{s}", .{config.isolated_root}, 0);
     const parent_path = std.fs.path.dirname(base) orelse return error.InvalidIsolatedRoot;
     const leaf = std.fs.path.basename(base);
     var parent = try std.Io.Dir.openDirAbsolute(io, parent_path, .{});
@@ -201,7 +201,7 @@ fn run(
     try parent.createDir(io, leaf, .default_dir);
     if (c.chmod(base.ptr, 0o700) != 0) return error.TempDirectoryFailed;
     var session_dir_buf: [std.fs.max_path_bytes:0]u8 = @splat(0);
-    const session_dir = try std.fmt.bufPrintZ(&session_dir_buf, "{s}/session-host", .{base});
+    const session_dir = try std.fmt.bufPrintSentinel(&session_dir_buf, "{s}/session-host", .{base}, 0);
     if (c.mkdir(session_dir.ptr, 0o700) != 0) return error.TempDirectoryFailed;
 
     var host_id = randomNonZeroU128();
@@ -706,7 +706,7 @@ fn randomNonZeroU128() u128 {
 }
 
 fn requireAbsentArtifact(allocator: std.mem.Allocator, path: []const u8) !void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     var stat: posix.Stat = undefined;
     const result = c.fstatat(posix.AT.FDCWD, path_z.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW);
@@ -836,10 +836,11 @@ test "signed upgrade runtime count derives near-max from the product cap" {
 test "signed upgrade artifact rejects stale success and emits canonical release evidence" {
     const allocator = std.testing.allocator;
     var path_buf: [160]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(
+    const path = try std.fmt.bufPrintSentinel(
         &path_buf,
         "/tmp/maru-signed-upgrade-artifact-{d}.json",
         .{c.getpid()},
+        0,
     );
     defer _ = c.unlink(path.ptr);
     const fd = c.open(
@@ -857,7 +858,7 @@ test "signed upgrade artifact rejects stale success and emits canonical release 
     try writeArtifact(allocator, std.testing.io, path, .{
         .test_uuid = "11111111-2222-4333-8444-555555555555",
         .host_id = 1,
-        .runtime_id = [_]u8{'a'} ** 32,
+        .runtime_id = @as([32]u8, @splat('a')),
         .attempt_id = 2,
         .host_pid_before = 10,
         .host_pid_after = 10,
@@ -865,13 +866,13 @@ test "signed upgrade artifact rejects stale success and emits canonical release 
         .runtime_pid_after = 11,
         .epoch_before = 3,
         .epoch_after = 4,
-        .old_sha256 = [_]u8{0x11} ** 32,
-        .current_sha256 = [_]u8{0x22} ** 32,
-        .signer_requirement_sha256 = [_]u8{0x33} ** 32,
+        .old_sha256 = @as([32]u8, @splat(0x11)),
+        .current_sha256 = @as([32]u8, @splat(0x22)),
+        .signer_requirement_sha256 = @as([32]u8, @splat(0x33)),
         .gui_exact_reattach = true,
         .all_runtime_pids_preserved = true,
         .runtime_count = 255,
-        .runtime_set_sha256 = [_]u8{0x44} ** 32,
+        .runtime_set_sha256 = @as([32]u8, @splat(0x44)),
         .duration_ms = 5,
     });
     const bytes = try std.Io.Dir.cwd().readFileAlloc(

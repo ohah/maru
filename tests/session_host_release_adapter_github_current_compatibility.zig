@@ -173,7 +173,7 @@ test "shared deadline brackets product authority probe and final publication" {
     try std.testing.expectEqual(@as(usize, 0), output_deadline.cursor);
 
     var path_deadline_storage: [@sizeOf(SharedDeadline) + 1]u8 align(@alignOf(SharedDeadline)) =
-        .{0} ** (@sizeOf(SharedDeadline) + 1);
+        @splat(0);
     const path_deadline: *SharedDeadline = @ptrCast(&path_deadline_storage);
     path_deadline.* = .{ .values = &.{100} };
     try std.testing.expectError(error.InvalidOwner, composition.composeUntilWith(&probe, path_deadline, std.testing.io, &current, &product, path_deadline_storage[0..@sizeOf(SharedDeadline) :0], &output, &result));

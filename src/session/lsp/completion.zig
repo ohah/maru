@@ -348,7 +348,7 @@ pub fn changesFor(allocator: std.mem.Allocator, item: Item, content: []const u8,
     defer extra.deinit(allocator);
     if (allow_additional) {
         if (item.additional) |ad| {
-            extra = try text_edits.toChanges(allocator, .{ .array = .{ .items = ad, .capacity = ad.len, .allocator = allocator } }, content, lines, enc);
+            extra = try text_edits.toChanges(allocator, .{ .array = .{ .items = ad, .capacity = ad.len, .allocator = allocator, .pointer_stability = .{} } }, content, lines, enc);
         }
     }
     return merge(allocator, extra.items, start, caret, item.insert);

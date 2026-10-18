@@ -75,10 +75,10 @@ test "CR2a 경계는 generation field 열두 개와 stable shell exclusion을 �
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "@fieldParentPtr(\"generation\", generation)"));
     // 네 값은 `RemoteRuntime` 이 커질 때마다 함께 움직인다. macOS 둘은 **실측**이고, linux 둘은 이
     // 모듈이 macOS 전용이라(session_host.zig 배럴) 이 트리에서 컴파일되지 않아 잴 수 없다.
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 11920,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11856,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 11328,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11280,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".debug => 12272,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".fast => 11856,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".debug => 11328,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".fast => 11280,"));
 }
 
 test "CR2b 경계는 stable proxy와 sole runtime wiring을 고정한다" {
@@ -849,8 +849,8 @@ test "CR2e-e3a1 경계는 candidate base resident ledger와 final zero를 고정
     );
     try std.testing.expectEqual(@as(usize, 0), count(runtime, "pub const ReconnectResidentLedger"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "fn reconnectCandidateResidentBytes() !usize"));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".Debug => 3648,"));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".ReleaseFast => 3632,"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".debug => 3728,"));
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".fast => 3632,"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "else => error.SkipZigTest,"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, "test \"CR2e-e3a1"));
     const e3a_tests = between(
@@ -1159,10 +1159,10 @@ test "CR6e-c3b2c 경계는 host admission 하나에 resident charge 하나만 �
     inline for (.{
         "const session_host_reconnect_host_charge_step = b.step(",
         "run_host_charge_tests.addArg(\"--maru-expect-tests=12\")",
-        "if (host_charge_optimize == .Debug) macos_only_test_step.dependOn(&run_host_charge_tests.step);",
+        "if (host_charge_optimize == .debug) macos_only_test_step.dependOn(&run_host_charge_tests.step);",
         ".filters = &.{ \"CR6e-c3b2c host charge\", \"CR6e-c3b2d reconnect viewport\", \"CR6e-c3b2d mutation denial\" },",
         "run_host_charge_boundary_tests.addArg(\"--maru-expect-tests=2\")",
-        "if (host_charge_optimize == .Debug) boundary_step.dependOn(&run_host_charge_boundary_tests.step);",
+        "if (host_charge_optimize == .debug) boundary_step.dependOn(&run_host_charge_boundary_tests.step);",
     }) |phrase| try std.testing.expectEqual(@as(usize, 1), count(build, phrase));
 }
 

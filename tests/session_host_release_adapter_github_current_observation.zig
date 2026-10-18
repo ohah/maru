@@ -11,6 +11,7 @@ const evidence_mod = @import("release_adapter_github_current_evidence");
 const files_mod = @import("release_adapter_github_current_asset_files");
 const attestations_mod = @import("release_adapter_github_current_asset_attestation");
 const compatibility_mod = @import("release_adapter_github_current_compatibility");
+const failure_stable_allocator = @import("support/failure_stable_allocator.zig");
 
 test "production final observation owner graph compiles as one closed composition" {
     var current: current_input.CurrentManifestInput = .{};
@@ -361,5 +362,6 @@ test "every successful allocation prefix either publishes one owner or unwinds" 
     var fixture = try Fixture.init(std.testing.allocator);
     defer fixture.deinit(std.testing.allocator);
     fixture.current_manifest.predecessor.?.manifest_sha256 = &fixture.predecessor_sha;
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationHarness, .{&fixture});
+    var backing = failure_stable_allocator.State{ .backing = std.testing.allocator };
+    try std.testing.checkAllAllocationFailures(backing.allocator(), allocationHarness, .{&fixture});
 }

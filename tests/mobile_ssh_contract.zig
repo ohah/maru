@@ -15,7 +15,7 @@ const header = @embedFile("mobile_ssh_abi_for_test");
 /// **헤더를 C 로 읽어 그대로 부른다.** 이름과 개수는 `tools/mobile-harness/abi_types.py` 가
 /// 보지만 그것은 정규식이라 **인자 타입**까지는 못 본다 — `unsigned int` 자리에 `u64` 를 두면
 /// C 는 컴파일되고 값만 조용히 깨진다. 여기서 부르면 컴파일·링크가 그것을 대신 잡는다.
-const c = @cImport(@cInclude("mobile_host_abi.h"));
+const c = @import("mobile_host_abi_c");
 
 /// `#define NAME VALUE` 를 찾는다. 값은 `(-1)` 처럼 괄호가 붙거나 `0xFFFFFFFFu` 처럼 접미사가
 /// 붙는다 — 헤더의 표기를 그대로 읽는 것이 요점이라 여기서 벗겨 낸다.
@@ -370,7 +370,7 @@ test "상태 열넷이 전부 헤더 값으로 나온다" {
 
     const State = @TypeOf(s.cl.state);
     var checked: usize = 0;
-    inline for (@typeInfo(State).@"enum".fields) |f| {
+    inline for (@import("type_info_fields").enumFields(State)) |f| {
         s.cl.state = @field(State, f.name);
         var name_buf: [64]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buf, "MARU_SSH_STATE_{s}", .{f.name});
@@ -435,8 +435,8 @@ test "오류는 하나도 빠짐없이 실패 코드로 내려온다" {
     const Error = @TypeOf(ssh.statusOf);
     _ = Error;
     var seen: usize = 0;
-    inline for (@typeInfo(@typeInfo(@TypeOf(ssh.statusOf)).@"fn".params[0].type.?).error_set.?) |e| {
-        const status = ssh.statusOf(@field(anyerror, e.name));
+    inline for (@typeInfo(@typeInfo(@TypeOf(ssh.statusOf)).@"fn".param_types[0].?).error_set.error_names.?) |e| {
+        const status = ssh.statusOf(@field(anyerror, e));
         try testing.expect(status < 0);
         // **범위는 가장 작은 코드로 넓힌다** — 코드가 하나 늘 때 이 줄을 안 고치면 새 코드가
         // "범위 밖" 으로 걸린다(비밀번호 변경 -9 가 그랬다).
@@ -546,10 +546,10 @@ test "C 선언 그대로 불러도 같은 것이 나온다" {
 fn sameShape(comptime CFn: type, comptime ZFn: type) bool {
     const ci = @typeInfo(CFn).@"fn";
     const zi = @typeInfo(ZFn).@"fn";
-    if (ci.params.len != zi.params.len) return false;
+    if (ci.param_types.len != zi.param_types.len) return false;
     if (@sizeOf(ci.return_type.?) != @sizeOf(zi.return_type.?)) return false;
-    inline for (ci.params, zi.params) |cp, zp| {
-        if (@sizeOf(cp.type.?) != @sizeOf(zp.type.?)) return false;
+    inline for (ci.param_types, zi.param_types) |cp, zp| {
+        if (@sizeOf(cp.?) != @sizeOf(zp.?)) return false;
     }
     return true;
 }

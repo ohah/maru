@@ -25,7 +25,7 @@ pub const Channel = struct {
 
     pub fn connect(service: []const u8, token: [16]u8) error{LookupFailed}!Channel {
         var name: [128:0]u8 = undefined;
-        const z = std.fmt.bufPrintZ(&name, "{s}", .{service}) catch return error.LookupFailed;
+        const z = std.fmt.bufPrintSentinel(&name, "{s}", .{service}, 0) catch return error.LookupFailed;
         var port: mach.Port = mach.null_port;
         if (mach.bootstrap_look_up(mach.bootstrap_port, z, &port) != 0 or port == mach.null_port) return error.LookupFailed;
         return .{ .port = port, .token = token };
@@ -255,7 +255,7 @@ test "a failed announce to a full queue hands back every right — no port name 
     var fill: mach.Header = .{ .bits = mach.bits(mach.type_copy_send, 0), .size = @sizeOf(mach.Header), .remote = port, .local = mach.null_port, .id = 1 };
     try std.testing.expectEqual(@as(i32, 0), mach.mach_msg(&fill, mach.msg_send | mach.msg_send_timeout, @sizeOf(mach.Header), 0, mach.null_port, 0, mach.null_port));
 
-    const channel: Channel = .{ .port = port, .token = [_]u8{3} ** 16 };
+    const channel: Channel = .{ .port = port, .token = @as([16]u8, @splat(3)) };
     var producer: Producer = .{ .browser = 1, .scale = 2 };
     const source = try iosurface.create(32, 16);
     defer iosurface.release(source);

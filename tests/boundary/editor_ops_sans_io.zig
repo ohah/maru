@@ -114,6 +114,8 @@ fn resolve(buf: []u8, file: []const u8, rel: []const u8) ?[]const u8 {
 }
 
 fn importAllowed(file: []const u8, name: []const u8) bool {
+    // Zig 0.17 compatibility helper: compile-time array repetition only, no I/O or global state.
+    if (std.mem.eql(u8, name, "array_repeat")) return true;
     if (!std.mem.endsWith(u8, name, ".zig")) return false; // root·builtin·모듈 이름
     var buf: [512]u8 = undefined;
     const at = resolve(&buf, file, name) orelse return false;
@@ -177,7 +179,7 @@ fn scan(allocator: std.mem.Allocator, text: [:0]const u8, path: []const u8, out:
 fn readZ(allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {
     const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(1 << 22));
     defer allocator.free(text);
-    return allocator.dupeZ(u8, text);
+    return allocator.dupeSentinel(u8, text, 0);
 }
 
 test "편집기 순수 판정 폴더는 OS 를 안 부른다 (sans-io)" {
@@ -255,6 +257,7 @@ test "판정자는 허용한 import·순수한 std·주석을 오탐하지 않�
         \\const case = @import("../../../terminal/selection.zig");
         \\const term = @import("../../../terminal.zig");
         \\const sib = @import("other.zig");
+        \\const repeat = @import("array_repeat");
         \\_ = std.meta.eql(a, b);
         \\var list: std.ArrayList(u8) = .empty;
         \\std.mem.sort(usize, xs, {}, std.sort.asc(usize));

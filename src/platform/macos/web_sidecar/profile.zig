@@ -3,6 +3,8 @@
 //! 쿠키를 푸는 키가 공개값인 자리라(D7 — mock keychain) 소유자만 읽게 0700 으로 만들고, Time Machine 백업에서
 //! 뺀다 — 백업에 풀 수 있는 로그인 쿠키가 실리지 않게.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 
 pub const Error = error{ MkdirFailed, NotPrivate };
@@ -31,7 +33,7 @@ fn clearFilesOnce(path: [:0]const u8) usize {
         if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
         if (entry.type == 4) continue; // DT_DIR
         var buf: [2048]u8 = undefined;
-        const full = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ path, name }) catch continue;
+        const full = std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ path, name }, 0) catch continue;
         if (std.c.unlink(full) == 0) removed += 1;
     }
     return removed;
@@ -42,17 +44,17 @@ extern "c" fn setxattr(path: [*:0]const u8, name: [*:0]const u8, value: *const a
 /// Time Machine 이 백업에서 빼는 표시. 값은 문자열 `com.apple.backupd` 의 binary plist 로, `tmutil addexclusion` 이
 /// 다는 값과 바이트 단위로 같다(실측 — 이 값을 단 디렉터리를 `tmutil isexcluded` 가 `[Excluded]` 로 본다).
 const backup_exclude_name = "com.apple.metadata:com_apple_backup_excludeItem";
-const backup_exclude_value = "bplist00_\x10\x11com.apple.backupd\x08" ++ "\x00" ** 6 ++ "\x01\x01" ++ "\x00" ** 7 ++ "\x01" ++ "\x00" ** 15 ++ "\x1c";
+const backup_exclude_value = "bplist00_\x10\x11com.apple.backupd\x08" ++ array_repeat.repeat("\x00", 6) ++ "\x01\x01" ++ array_repeat.repeat("\x00", 7) ++ "\x01" ++ array_repeat.repeat("\x00", 15) ++ "\x1c";
 
 /// 없으면 0700 으로 만들고, 있든 없든 **남이 못 읽는 자리인지** 본다 — 마지막 경로 요소가 심볼릭 링크가 아니고,
 /// 소유자가 나이며, 권한이 소유자 전용이고, ACL 에 허용 항목이 없어야 한다(0700 이어도 ACL 이 남에게 읽기를 줄 수 있다).
 /// 방금 만든 디렉터리도 본다 — 만들고 여는 사이에 남이 바꿔 둘 수 있다.
 pub fn ensurePrivateDir(path: [:0]const u8) Error!void {
-    if (std.c.mkdir(path, 0o700) != 0 and std.c._errno().* != @intFromEnum(std.c.E.EXIST)) return error.MkdirFailed;
+    if (std.c.mkdir(path, 0o700) != 0 and std.c._errno().* != @backingInt(std.c.E.EXIST)) return error.MkdirFailed;
     // Zig 0.16 의 `std.c.stat` 은 macOS arm64 에서 없는 선언을 가리킨다 — 열어서 `fstat` 으로 본다. NOFOLLOW 라 링크면
     // 열기가 실패한다.
     const fd = std.c.open(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true });
-    if (fd < 0) return if (std.c._errno().* == @intFromEnum(std.c.E.LOOP)) error.NotPrivate else error.MkdirFailed;
+    if (fd < 0) return if (std.c._errno().* == @backingInt(std.c.E.LOOP)) error.NotPrivate else error.MkdirFailed;
     defer _ = std.c.close(fd);
     var st: std.c.Stat = undefined;
     if (std.c.fstat(fd, &st) != 0) return error.MkdirFailed;

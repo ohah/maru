@@ -1,6 +1,8 @@
 //! Public admin CLI의 existing-current-host connector.
 //! Secure manifest registry를 읽기만 하며 host spawn, lock acquisition, manifest publication을 하지 않는다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const c = std.c;
 const posix = std.posix;
@@ -116,7 +118,7 @@ pub fn connectCurrent(
         },
     };
     const exact = manifest orelse return .{ .unavailable = .protocol_error };
-    const endpoint = allocator.dupeZ(u8, exact.endpoint) catch
+    const endpoint = allocator.dupeSentinel(u8, exact.endpoint, 0) catch
         return .{ .unavailable = .out_of_memory };
     defer allocator.free(endpoint);
     var client = client_mod.Client.connectAdmin(allocator, endpoint) catch |err|
@@ -375,7 +377,7 @@ fn runProductCliInput(
         0,
     );
     defer allocator.free(env_arg);
-    var argv: [8:null]?[*:0]const u8 = [_:null]?[*:0]const u8{null} ** 8;
+    var argv: [8:null]?[*:0]const u8 = array_repeat.repeat([_:null]?[*:0]const u8{null}, 8);
     argv[0] = "env";
     argv[1] = env_arg.ptr;
     argv[2] = product_exe.ptr;
@@ -435,7 +437,7 @@ fn startControlledProductCli(
         0,
     );
     defer allocator.free(env_arg);
-    var argv: [8:null]?[*:0]const u8 = [_:null]?[*:0]const u8{null} ** 8;
+    var argv: [8:null]?[*:0]const u8 = array_repeat.repeat([_:null]?[*:0]const u8{null}, 8);
     argv[0] = "env";
     argv[1] = env_arg.ptr;
     argv[2] = product_exe.ptr;
@@ -522,7 +524,7 @@ fn spawnProductHost(
     if (child < 0) return error.TestUnexpectedResult;
     if (child == 0) {
         var env_buf: [320]u8 = undefined;
-        const env_arg = std.fmt.bufPrintZ(&env_buf, "MARU_SESSION_HOST_ROOT={s}", .{session_host_root}) catch c._exit(127);
+        const env_arg = std.fmt.bufPrintSentinel(&env_buf, "MARU_SESSION_HOST_ROOT={s}", .{session_host_root}, 0) catch c._exit(127);
         const argv = [_:null]?[*:0]const u8{
             "env",
             "-u",
@@ -614,7 +616,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
         return error.TestUnexpectedResult;
     const product_exe = std.mem.span(product_raw);
     const allocator = std.testing.allocator;
-    const product_z = try allocator.dupeZ(u8, product_exe);
+    const product_z = try allocator.dupeSentinel(u8, product_exe, 0);
     defer allocator.free(product_z);
     const pid_bits: u128 = @intCast(c.getpid());
     // 실패로 남은 /tmp fixture와 PID가 재사용돼도 다음 run이 과거 hosts/socket을 자기 것으로 오인하지 않게
@@ -626,10 +628,11 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var xdg_buf: [224]u8 = undefined;
     // registry 를 이 프로세스만의 자리로 돌린다 — 안 그러면 테스트가 **사용자의 진짜 세션**과
     // 같은 registry 를 쓴다(base 가 uid 로 고정이라 그렇다).
-    const xdg = try std.fmt.bufPrintZ(
+    const xdg = try std.fmt.bufPrintSentinel(
         &xdg_buf,
         "/tmp/maru-admin-cli-{d}-{x}",
         .{ c.getpid(), nonce },
+        0,
     );
     _ = c.mkdir(xdg.ptr, 0o700);
     // base 를 **이 프로세스의 격리 root** 로 통일한다. registry(`{base}/session-host`)·socket(`{base}/sh`)·
@@ -649,7 +652,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var socket_buf: [128]u8 = undefined;
     const socket_path = try short_endpoint.currentSocketPathIn(&socket_buf, host_id);
     var host_buf: [33]u8 = undefined;
-    const host_text = try std.fmt.bufPrintZ(&host_buf, "{x:0>32}", .{host_id});
+    const host_text = try std.fmt.bufPrintSentinel(&host_buf, "{x:0>32}", .{host_id}, 0);
 
     var absent = try runProductCli(
         allocator,
@@ -766,7 +769,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var second_socket_buf: [128]u8 = undefined;
     const second_socket = try short_endpoint.currentSocketPathIn(&second_socket_buf, second_host_id);
     var second_host_buf: [33]u8 = undefined;
-    const second_host_text = try std.fmt.bufPrintZ(&second_host_buf, "{x:0>32}", .{second_host_id});
+    const second_host_text = try std.fmt.bufPrintSentinel(&second_host_buf, "{x:0>32}", .{second_host_id}, 0);
     const second_child = try spawnProductHost(
         product_raw,
         base,
@@ -822,7 +825,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     const SpawnWire = struct { result: struct { runtime_id: []const u8 } };
     var spawn = try std.json.parseFromSlice(SpawnWire, allocator, spawn_response, .{});
     defer spawn.deinit();
-    const runtime_id = try allocator.dupeZ(u8, spawn.value.result.runtime_id);
+    const runtime_id = try allocator.dupeSentinel(u8, spawn.value.result.runtime_id, 0);
     defer allocator.free(runtime_id);
 
     var list_result = try runProductCli(
@@ -918,7 +921,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     defer allocator.free(end_spawn_response);
     var end_spawn = try std.json.parseFromSlice(SpawnWire, allocator, end_spawn_response, .{});
     defer end_spawn.deinit();
-    const ended_runtime_id = try allocator.dupeZ(u8, end_spawn.value.result.runtime_id);
+    const ended_runtime_id = try allocator.dupeSentinel(u8, end_spawn.value.result.runtime_id, 0);
     defer allocator.free(ended_runtime_id);
     var ended = try runProductCli(
         allocator,
@@ -957,7 +960,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     defer allocator.free(interactive_spawn_response);
     var interactive_spawn = try std.json.parseFromSlice(SpawnWire, allocator, interactive_spawn_response, .{});
     defer interactive_spawn.deinit();
-    const interactive_runtime_id = try allocator.dupeZ(u8, interactive_spawn.value.result.runtime_id);
+    const interactive_runtime_id = try allocator.dupeSentinel(u8, interactive_spawn.value.result.runtime_id, 0);
     defer allocator.free(interactive_runtime_id);
     const attach_params = try std.fmt.allocPrint(
         allocator,
@@ -1026,7 +1029,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     defer allocator.free(observer_spawn_response);
     var observer_spawn = try std.json.parseFromSlice(SpawnWire, allocator, observer_spawn_response, .{});
     defer observer_spawn.deinit();
-    const observer_runtime_id = try allocator.dupeZ(u8, observer_spawn.value.result.runtime_id);
+    const observer_runtime_id = try allocator.dupeSentinel(u8, observer_spawn.value.result.runtime_id, 0);
     defer allocator.free(observer_runtime_id);
     var observer_gui = try client_mod.Client.connect(allocator, socket_path, .gui);
     defer observer_gui.deinit();
@@ -1064,7 +1067,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     defer allocator.free(eof_spawn_response);
     var eof_spawn = try std.json.parseFromSlice(SpawnWire, allocator, eof_spawn_response, .{});
     defer eof_spawn.deinit();
-    const eof_runtime_id = try allocator.dupeZ(u8, eof_spawn.value.result.runtime_id);
+    const eof_runtime_id = try allocator.dupeSentinel(u8, eof_spawn.value.result.runtime_id, 0);
     defer allocator.free(eof_runtime_id);
     var eof_process = try startControlledProductCli(
         allocator,
@@ -1106,7 +1109,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     defer allocator.free(race_spawn_response);
     var race_spawn = try std.json.parseFromSlice(SpawnWire, allocator, race_spawn_response, .{});
     defer race_spawn.deinit();
-    const race_runtime_id = try allocator.dupeZ(u8, race_spawn.value.result.runtime_id);
+    const race_runtime_id = try allocator.dupeSentinel(u8, race_spawn.value.result.runtime_id, 0);
     defer allocator.free(race_runtime_id);
     var race_process = try startControlledProductCli(
         allocator,
@@ -1164,10 +1167,11 @@ test "product read CLI connects to an existing daemon without spawning and emits
     var replacement_socket_buf: [128]u8 = undefined;
     const replacement_socket = try short_endpoint.currentSocketPathIn(&replacement_socket_buf, replacement_host_id);
     var replacement_host_buf: [33]u8 = undefined;
-    const replacement_host_text = try std.fmt.bufPrintZ(
+    const replacement_host_text = try std.fmt.bufPrintSentinel(
         &replacement_host_buf,
         "{x:0>32}",
         .{replacement_host_id},
+        0,
     );
     const replacement_child = try spawnProductHost(
         product_raw,
@@ -1194,7 +1198,7 @@ test "product read CLI connects to an existing daemon without spawning and emits
     defer allocator.free(replacement_spawn_response);
     var replacement_spawn = try std.json.parseFromSlice(SpawnWire, allocator, replacement_spawn_response, .{});
     defer replacement_spawn.deinit();
-    const replacement_runtime_id = try allocator.dupeZ(u8, replacement_spawn.value.result.runtime_id);
+    const replacement_runtime_id = try allocator.dupeSentinel(u8, replacement_spawn.value.result.runtime_id, 0);
     defer allocator.free(replacement_runtime_id);
 
     try std.testing.expectEqual(@as(isize, 4), c.write(swap_process.master, "yes\n", 4));

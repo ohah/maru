@@ -11,7 +11,32 @@ vendor=vendor/zig-packages
 
 zig build --fetch
 cache=$(zig env | sed -n 's/^ *\.global_cache_dir = "\(.*\)",$/\1/p')
-hashes=$(sed -n 's/.*\.hash = "\([^"]*\)".*/\1/p' build.zig.zon | sort -u)
+expand_hashes() {
+    archive_dir=$1
+    pending=$(sed -n 's/.*\.hash = "\([^"]*\)".*/\1/p' build.zig.zon | sort -u)
+    expanded=$pending
+    while [ -n "$pending" ]; do
+        hash=$(printf '%s\n' "$pending" | sed -n '1p')
+        pending=$(printf '%s\n' "$pending" | sed -n '2,$p')
+        archive="$archive_dir/$hash.tar.gz"
+        [ -f "$archive" ] || continue
+        manifest_member=$(tar -tzf "$archive" | sed -n -e '/^build\.zig\.zon$/p' -e '/\/build\.zig\.zon$/p' | sed -n '1p')
+        [ -n "$manifest_member" ] || continue
+        nested_hashes=$(tar -xOzf "$archive" "$manifest_member" | sed -n 's/.*\.hash = "\([^"]*\)".*/\1/p' | sort -u)
+        for nested_hash in $nested_hashes; do
+            case " $expanded " in
+                *" $nested_hash "*) ;;
+                *)
+                    expanded="$expanded $nested_hash"
+                    pending="$pending $nested_hash"
+                    ;;
+            esac
+        done
+    done
+    printf '%s\n' "$expanded" | tr ' ' '\n' | sed '/^$/d' | sort -u
+}
+
+hashes=$(expand_hashes "$cache/p")
 mkdir -p "$vendor"
 for h in $hashes; do
     if [ ! -f "$cache/p/$h.tar.gz" ]; then
@@ -26,4 +51,23 @@ for f in "$vendor"/*.tar.gz; do
     h=$(basename "$f" .tar.gz)
     printf '%s\n' "$hashes" | grep -qxF "$h" || rm -f "$f"
 done
+
+pcre2_archive=vendor/third-party/pcre2-10.48.tar.gz
+pcre2_url=https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.48/pcre2-10.48.tar.gz
+pcre2_expected_sha=$(cat vendor/third-party/pcre2-10.48.sha256)
+pcre2_tmp="$pcre2_archive.tmp"
+rm -f "$pcre2_tmp"
+curl --fail --location --silent --show-error "$pcre2_url" --output "$pcre2_tmp"
+if command -v sha256sum >/dev/null 2>&1; then
+    pcre2_actual_sha=$(sha256sum "$pcre2_tmp" | awk '{print $1}')
+else
+    pcre2_actual_sha=$(shasum -a 256 "$pcre2_tmp" | awk '{print $1}')
+fi
+if [ "$pcre2_actual_sha" != "$pcre2_expected_sha" ]; then
+    rm -f "$pcre2_tmp"
+    echo "vendor-zig-packages: PCRE2 release archive SHA-256 불일치" >&2
+    exit 1
+fi
+mv "$pcre2_tmp" "$pcre2_archive"
+
 sh tools/ci/prime-zig-packages.sh --check

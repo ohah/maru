@@ -64,14 +64,14 @@ pub fn verify(
         attestation_output.len == 0 or attestation_output.len > attestation.max_response_bytes) return error.InvalidBuffer;
 
     var cli_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const cli_path = std.fmt.bufPrintZ(&cli_storage, "{s}", .{command.cli_path}) catch return error.InvalidPath;
+    const cli_path = std.fmt.bufPrintSentinel(&cli_storage, "{s}", .{command.cli_path}, 0) catch return error.InvalidPath;
     var timing_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const timing_workspace = std.fmt.bufPrintZ(&timing_storage, "{s}", .{command.timing_workspace}) catch return error.InvalidPath;
+    const timing_workspace = std.fmt.bufPrintSentinel(&timing_storage, "{s}", .{command.timing_workspace}, 0) catch return error.InvalidPath;
     var release_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const release_workspace = std.fmt.bufPrintZ(&release_storage, "{s}", .{command.release_workspace}) catch return error.InvalidPath;
+    const release_workspace = std.fmt.bufPrintSentinel(&release_storage, "{s}", .{command.release_workspace}, 0) catch return error.InvalidPath;
     var record_storage: [std.fs.max_path_bytes:0]u8 = undefined;
     const record_path: ?[:0]const u8 = if (command.record_path) |path|
-        std.fmt.bufPrintZ(&record_storage, "{s}", .{path}) catch return error.InvalidPath
+        std.fmt.bufPrintSentinel(&record_storage, "{s}", .{path}, 0) catch return error.InvalidPath
     else
         null;
     const pinned = try cli_authority.pin(allocator, cli_path, command.cli_sha256);

@@ -267,7 +267,7 @@ fn locateInPath(name: []const u8, path: []const u8, buf: *[std.fs.max_path_bytes
 
 pub fn isExecutableFile(p: []const u8) bool {
     var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const pz = std.fmt.bufPrintZ(&z, "{s}", .{p}) catch return false;
+    const pz = std.fmt.bufPrintSentinel(&z, "{s}", .{p}, 0) catch return false;
     var st: std.c.Stat = undefined;
     if (std.c.fstatat(std.c.AT.FDCWD, pz.ptr, &st, 0) != 0) return false;
     if ((st.mode & std.c.S.IFMT) != std.c.S.IFREG) return false;
@@ -280,7 +280,7 @@ pub const RealFs = struct {
 
     pub fn exists(_: RealFs, p: []const u8) bool {
         var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-        const pz = std.fmt.bufPrintZ(&z, "{s}", .{p}) catch return false;
+        const pz = std.fmt.bufPrintSentinel(&z, "{s}", .{p}, 0) catch return false;
         return std.c.access(pz.ptr, std.c.F_OK) == 0;
     }
     pub fn isExecutable(_: RealFs, p: []const u8) bool {

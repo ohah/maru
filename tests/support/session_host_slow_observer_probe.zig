@@ -26,10 +26,10 @@ pub const CommandPacket = extern struct {
     length: u16 = @sizeOf(CommandPacket),
     sequence: u64,
     action: u8,
-    reserved: [7]u8 = [_]u8{0} ** 7,
+    reserved: [7]u8 = @as([7]u8, @splat(0)),
 
     pub fn init(sequence: u64, action: Command) CommandPacket {
-        return .{ .sequence = sequence, .action = @intFromEnum(action) };
+        return .{ .sequence = sequence, .action = @backingInt(action) };
     }
 
     pub fn command(self: CommandPacket) ?Command {
@@ -46,7 +46,7 @@ pub const Report = extern struct {
     length: u16 = @sizeOf(Report),
     sequence: u64,
     kind: u8,
-    reserved: [7]u8 = [_]u8{0} ** 7,
+    reserved: [7]u8 = @as([7]u8, @splat(0)),
     resident_bytes: u64,
     shared_bytes: u64,
     prepared_base_bytes: u64,
@@ -104,7 +104,7 @@ pub const Report = extern struct {
         const a = telemetry.accounting;
         return .{
             .sequence = sequence,
-            .kind = @intFromEnum(kind),
+            .kind = @backingInt(kind),
             .resident_bytes = a.resident_bytes,
             .shared_bytes = a.shared_bytes,
             .prepared_base_bytes = a.prepared_base_bytes,
@@ -322,9 +322,9 @@ test "exact packet decodes and exact plus one datagram is rejected" {
     });
     try std.testing.expectEqual(
         ReportKind.stop_ack,
-        @as(ReportKind, @enumFromInt(decodeReportDatagram(
+        @as(ReportKind, @fromBackingInt(@intCast(decodeReportDatagram(
             std.mem.asBytes(&report),
-        ).?.kind)),
+        ).?.kind))),
     );
     var oversized_report: [@sizeOf(Report) + 1]u8 = undefined;
     @memcpy(oversized_report[0..@sizeOf(Report)], std.mem.asBytes(&report));

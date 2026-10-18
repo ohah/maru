@@ -36,7 +36,7 @@ fn runDaemonCleanupFailStop(fault: Fault) !void {
         allocator,
     );
     defer allocator.free(product_path);
-    const product_z = try allocator.dupeZ(u8, product_path);
+    const product_z = try allocator.dupeSentinel(u8, product_path, 0);
     defer allocator.free(product_z);
     const target_identity = try sh.staged_image.inspect(product_z);
     const target_build_id = try sh.host_manifest.buildIdForExecutable(allocator, product_z);
@@ -48,7 +48,7 @@ fn runDaemonCleanupFailStop(fault: Fault) !void {
     };
     const attempt_id: u128 = host_id ^ 0x434c45414e555046;
     var base_buf: [160]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-daemon-fail-stop-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-daemon-fail-stop-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     _ = c.mkdir(base.ptr, 0o700);
     var session_buf: [256]u8 = undefined;
     const session_dir = sh.discovery.sessionHostDirPath(&session_buf, base) catch return error.SkipZigTest;
@@ -61,10 +61,11 @@ fn runDaemonCleanupFailStop(fault: Fault) !void {
     var host_dir_buf: [768]u8 = undefined;
     const host_dir = try sh.host_manifest.hostDirPathIn(&host_dir_buf, session_dir, host_id);
     var attempt_buf: [896]u8 = undefined;
-    const attempt_path = try std.fmt.bufPrintZ(
+    const attempt_path = try std.fmt.bufPrintSentinel(
         &attempt_buf,
         "{s}/attempt-{x:0>32}",
         .{ host_dir, attempt_id },
+        0,
     );
 
     const child = c.fork();

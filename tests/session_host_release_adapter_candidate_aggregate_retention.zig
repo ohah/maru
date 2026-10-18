@@ -14,13 +14,13 @@ fn expectedSnapshot() post.Snapshot {
         .path = paths[index],
         .name = std.fs.path.basename(paths[index]),
         .size = 100 + index,
-        .sha256 = [_]u8{'a' + @as(u8, @intCast(index))} ** 64,
+        .sha256 = @as([64]u8, @splat('a' + @as(u8, @intCast(index)))),
     };
     return .{
         .release_id = 88,
         .tag = "v1.2.3",
         .source_commit = "0123456789abcdef0123456789abcdef01234567",
-        .cli_sha256 = [_]u8{'f'} ** 64,
+        .cli_sha256 = @as([64]u8, @splat('f')),
         .artifacts = artifacts,
     };
 }
@@ -105,7 +105,7 @@ const Driver = struct {
     }
 
     pub fn unlink(self: *@This(), _: *retention.Deletion, index: usize) !void {
-        try self.record(@enumFromInt(@intFromEnum(Op.unlink_5) + (5 - index)));
+        try self.record(@fromBackingInt(@intCast(@backingInt(Op.unlink_5) + (5 - index))));
     }
 
     pub fn syncDirectory(self: *@This(), _: *retention.Deletion) !void {

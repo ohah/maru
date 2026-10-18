@@ -449,6 +449,7 @@ pub const FrameParser = struct {
         const final_buf: std.ArrayListUnmanaged(u8) = if (replacement) |owned| .{
             .items = owned,
             .capacity = owned.len,
+            .pointer_stability = .{},
         } else .empty;
         // Publish and tombstone every ownership header before the old-backing free callback.
         // The caller validates normalized content and immutable parser metadata again after this
@@ -462,7 +463,7 @@ pub const FrameParser = struct {
         prepared.lifecycle = .committed;
         const final_allocator = self.allocator;
         const final_expected_major = self.expected_major;
-        var final_digest = [_]u8{0} ** 32;
+        var final_digest = @as([32]u8, @splat(0));
         if (final_buf.items.len != 0)
             std.crypto.hash.Blake3.hash(final_buf.items, &final_digest, .{});
         old.deinit(allocator);
@@ -475,7 +476,7 @@ pub const FrameParser = struct {
             self.buf.items.len == final_buf.items.len and
             (self.buf.capacity == 0 or
                 @intFromPtr(self.buf.items.ptr) == @intFromPtr(final_buf.items.ptr));
-        var observed_digest = [_]u8{0} ** 32;
+        var observed_digest = @as([32]u8, @splat(0));
         if (descriptor_matches and final_buf.items.len != 0)
             std.crypto.hash.Blake3.hash(final_buf.items, &observed_digest, .{});
         const content_matches = descriptor_matches and
@@ -660,7 +661,7 @@ test "framing: rejects non-MRSH magic" {
     const allocator = std.testing.allocator;
     var parser = FrameParser.init(allocator);
     defer parser.deinit();
-    var junk = [_]u8{0} ** protocol.header_size;
+    var junk = @as([protocol.header_size]u8, @splat(0));
     @memcpy(junk[0..4], "XXXX");
     try parser.push(&junk);
     try std.testing.expectError(error.BadMagic, parser.next());
@@ -682,7 +683,7 @@ test "framing: unknown required kind closes; unknown optional kind is skipped" {
     {
         var parser = FrameParser.init(allocator);
         defer parser.deinit();
-        const skipped = try encodeFrame(allocator, .{ .kind = @enumFromInt(55001), .flags = protocol.Flags.optional }, "ignore me");
+        const skipped = try encodeFrame(allocator, .{ .kind = @fromBackingInt(@intCast(55001)), .flags = protocol.Flags.optional }, "ignore me");
         defer allocator.free(skipped);
         const real = try encodeFrame(allocator, .{ .kind = .response, .request_id = 9 }, "ok");
         defer allocator.free(real);
@@ -701,7 +702,7 @@ test "framing: reactor step charges every optional frame instead of skipping wit
     var parser = FrameParser.init(allocator);
     defer parser.deinit();
     const header = (protocol.Header{
-        .kind = @enumFromInt(55_000),
+        .kind = @fromBackingInt(@intCast(55_000)),
         .flags = protocol.Flags.optional,
     }).encode();
     for (0..65) |_| try parser.push(&header);
@@ -722,7 +723,7 @@ test "framing: large optional backlog advances a cursor without per-frame memmov
     var parser = FrameParser.init(allocator);
     defer parser.deinit();
     const header = (protocol.Header{
-        .kind = @enumFromInt(55_000),
+        .kind = @fromBackingInt(@intCast(55_000)),
         .flags = protocol.Flags.optional,
     }).encode();
     for (0..32 * 1024) |_| try parser.push(&header);
@@ -745,7 +746,7 @@ test "framing: optional unknown frame cannot bypass exact header major" {
     defer parser.deinit();
     const header = (protocol.Header{
         .major = protocol.version_major - 1,
-        .kind = @enumFromInt(55_000),
+        .kind = @fromBackingInt(@intCast(55_000)),
         .flags = protocol.Flags.optional,
     }).encode();
     try parser.push(&header);
@@ -951,6 +952,7 @@ test "framing: prepared normalize rejects parser backing that aliases its owner"
     parser.buf = .{
         .items = self_bytes[0..1],
         .capacity = @sizeOf(FrameParser),
+        .pointer_stability = .{},
     };
     var prepared: PreparedNormalizeExact = .{};
     defer prepared.deinit();

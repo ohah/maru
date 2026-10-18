@@ -1,5 +1,7 @@
 //! External URLs must not reinterpret paths or consume startup requests twice.
 //! These independent literals protect file identity and navigation before OS wiring.
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const url = @import("editor_app_url.zig");
 
@@ -77,7 +79,7 @@ test "editor app URL allocation failures release every queued path" {
 }
 
 test "editor app URL path and aggregate byte limits and ring reuse" {
-    const raw = "maru://open?path=/" ++ ("%41" ** 4095);
+    const raw = "maru://open?path=/" ++ (array_repeat.repeat("%41", 4095));
     var queue: url.Queue = .{};
     defer queue.stop(std.testing.allocator);
     for (0..5) |_| try queue.offer(std.testing.allocator, raw);
@@ -95,8 +97,8 @@ test "editor app URL path and aggregate byte limits and ring reuse" {
         item.deinit(std.testing.allocator);
     }
     try std.testing.expectEqual(@as(usize, 0), queue.raw_bytes);
-    try std.testing.expectError(error.TooLong, url.parse(std.testing.allocator, "maru://open?path=/" ++ ("a" ** 4096)));
-    try std.testing.expectError(error.TooLong, url.parse(std.testing.allocator, "x" ** 16385));
+    try std.testing.expectError(error.TooLong, url.parse(std.testing.allocator, "maru://open?path=/" ++ (array_repeat.repeat("a", 4096))));
+    try std.testing.expectError(error.TooLong, url.parse(std.testing.allocator, array_repeat.repeat("x", 16385)));
 }
 
 test "editor app URL independent encoder corpus five deterministic seeds" {

@@ -191,9 +191,9 @@ pub fn buildWithMarkers(
             n += 1;
             var it = git_status.iterate(status_text);
             var shown: usize = 0;
-            const limit = if (expanded[@intFromEnum(section)]) count else @min(count, default_section_rows);
+            const limit = if (expanded[@backingInt(section)]) count else @min(count, default_section_rows);
             // 접힌 섹션은 헤더만 낸다(반복문을 아예 안 돈다 — inline for 안이라 continue를 쓰지 않는다).
-            while (!collapsed[@intFromEnum(section)]) {
+            while (!collapsed[@backingInt(section)]) {
                 if (shown >= limit) break;
                 const entry = it.next() orelse break;
                 if (n >= out.len) break;
@@ -227,7 +227,7 @@ pub fn buildWithMarkers(
                 shown += 1;
             }
             // 남은 게 있으면 그 사실을 행으로 말한다(조용히 자르지 않는다).
-            if (!collapsed[@intFromEnum(section)] and shown < count) {
+            if (!collapsed[@backingInt(section)] and shown < count) {
                 if (n < out.len) {
                     out[n] = .{ .more = .{ .section = section, .hidden = count - shown } };
                     n += 1;
@@ -458,7 +458,7 @@ const fixture_worktree = "-\t-\tblob.bin\n1\t0\tkeep.txt\n";
 const fixture_total = "-\t-\tblob.bin\n2\t0\tkeep.txt\n0\t0\tgone.txt => renamed.txt\n";
 
 fn buildFixture(out: []Row, scratch: []u8) Model {
-    return build(fixture_status, fixture_staged, fixture_worktree, fixture_total, .{false} ** section_count, .{true} ** section_count, false, out, scratch);
+    return build(fixture_status, fixture_staged, fixture_worktree, fixture_total, @splat(false), @splat(true), false, out, scratch);
 }
 
 test "탭의 파일 수는 목록이 세운 섹션 배지의 합과 같다 — 합치는 방식이 둘이어도 답은 하나다" {
@@ -537,7 +537,7 @@ test "행의 상태 문자는 그 행이 선 섹션의 축을 말한다" {
     // `AM` — index에는 새 파일, 작업트리에는 그 뒤 수정. 위 행은 `A`, 아래 행은 `M`이어야 한다.
     var out: [8]Row = undefined;
     var scratch: [64]u8 = undefined;
-    const model = build("# branch.head main\n1 AM N... 1 2 3 a b f.txt\n", "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    const model = build("# branch.head main\n1 AM N... 1 2 3 a b f.txt\n", "", "", "", @splat(false), @splat(true), false, &out, &scratch);
     try testing.expectEqual(@as(u8, 'A'), model.rows[1].file.letter);
     try testing.expectEqual(Section.staged, model.rows[1].file.section);
     try testing.expectEqual(@as(u8, 'M'), model.rows[3].file.letter);
@@ -550,7 +550,7 @@ test "충돌 행은 스테이지가 아니라 «해결»이고 변경 사항에�
     var out: [16]Row = undefined;
     var scratch: [256]u8 = undefined;
     const status = "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt\n";
-    const model = build(status, "", "0\t0\tf.txt\n", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    const model = build(status, "", "0\t0\tf.txt\n", "", @splat(false), @splat(true), false, &out, &scratch);
     try testing.expectEqual(Section.changes, model.rows[0].section.section); // 스테이지 그룹에는 안 든다
     // **머리 줄은 그대로 `.none`이다.** 「모두 해결」은 없는 동작이라 `.resolve`가 여기로 새면 안 된다 —
     // 전부 충돌인 섹션에 **무엇을 열지 말할 수 없는 일괄 버튼**이 선다.
@@ -570,12 +570,12 @@ test "마커가 없어진 충돌 행에는 `+` 가 돌아온다 — 판정이 �
     var scratch: [256]u8 = undefined;
     const status = "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt\nu UU N... 100644 100644 100644 100644 aaa bbb ccc g.txt\n";
     // ⑴ 판정 없음(`null`) → 둘 다 `→`.
-    const none = build(status, "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    const none = build(status, "", "", "", @splat(false), @splat(true), false, &out, &scratch);
     try testing.expectEqual(RowAction.resolve, none.rows[1].file.action);
     try testing.expectEqual(RowAction.resolve, none.rows[2].file.action);
     // ⑵ f.txt 만 마커가 남았다 → f 는 `→`, g 는 `+`. 둘 다 여전히 충돌 행(`U`, 비교는 HEAD↔작업트리)이다.
     const markers = "f.txt\x00";
-    const m = buildWithMarkers(status, markers, "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    const m = buildWithMarkers(status, markers, "", "", "", @splat(false), @splat(true), false, &out, &scratch);
     try testing.expectEqual(RowAction.resolve, m.rows[1].file.action);
     try testing.expectEqual(RowAction.stage, m.rows[2].file.action);
     try testing.expect(m.rows[2].file.conflicted);
@@ -583,15 +583,15 @@ test "마커가 없어진 충돌 행에는 `+` 가 돌아온다 — 판정이 �
     // **머리 줄은 그대로 `.none`이다** — 해결된 행도 「모두 스테이지」에는 안 센다(옆의 미해결 행과 한 버튼 아래 놓인다).
     try testing.expectEqual(RowAction.none, m.rows[0].section.action);
     // ⑶ 빈 목록 = 전부 해결 → 둘 다 `+`. 그리고 접두 일치가 아니다: `f.txt.orig` 가 남았다고 `f.txt` 가 `→` 가 되지 않는다.
-    const all = buildWithMarkers(status, "", "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    const all = buildWithMarkers(status, "", "", "", "", @splat(false), @splat(true), false, &out, &scratch);
     try testing.expectEqual(RowAction.stage, all.rows[1].file.action);
     try testing.expectEqual(RowAction.stage, all.rows[2].file.action);
-    const prefix = buildWithMarkers(status, "f.txt.orig\x00", "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    const prefix = buildWithMarkers(status, "f.txt.orig\x00", "", "", "", @splat(false), @splat(true), false, &out, &scratch);
     try testing.expectEqual(RowAction.stage, prefix.rows[1].file.action);
     // **반대 방향도**(적대적 1회차 A2 — 한 방향만 재서 `startsWith(path, item)` 이 살았다): 목록에 `f.txt` 가
     // 남았다고 `f.txt.orig` 행이 `→` 가 되지 않는다.
     const status2 = "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt.orig\n";
-    const rev = buildWithMarkers(status2, "f.txt\x00", "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    const rev = buildWithMarkers(status2, "f.txt\x00", "", "", "", @splat(false), @splat(true), false, &out, &scratch);
     try testing.expectEqual(RowAction.stage, rev.rows[1].file.action);
 }
 
@@ -630,7 +630,7 @@ test "충돌과 평범한 변경이 섞인 섹션 — 머리 줄은 `+`, 충돌 
     var out: [16]Row = undefined;
     var scratch: [256]u8 = undefined;
     const status = "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc c.txt\n1 .M N... 100644 100644 100644 aaa bbb m.txt\n";
-    const model = build(status, "", "1\t1\tm.txt\n", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    const model = build(status, "", "1\t1\tm.txt\n", "", @splat(false), @splat(true), false, &out, &scratch);
     try testing.expectEqual(RowAction.stage, model.rows[0].section.action); // 걸 수 있는 행이 하나 있다
     var saw_conflict = false;
     var saw_plain = false;
@@ -650,7 +650,7 @@ test "충돌과 평범한 변경이 섞인 섹션 — 머리 줄은 `+`, 충돌 
 test "하위 모듈은 숫자를 비운다(커밋 포인터라 줄 수가 의미 없다)" {
     var out: [16]Row = undefined;
     var scratch: [256]u8 = undefined;
-    const model = build("# branch.head main\n1 AM S.M. 000000 160000 160000 000 0b4 vendor\n", "1\t0\tvendor\n", "1\t0\tvendor\n", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    const model = build("# branch.head main\n1 AM S.M. 000000 160000 160000 000 0b4 vendor\n", "1\t0\tvendor\n", "1\t0\tvendor\n", "", @splat(false), @splat(true), false, &out, &scratch);
     var saw = false;
     for (model.rows) |row| switch (row) {
         .file => |f| if (f.submodule) {
@@ -668,18 +668,18 @@ test "출력이 잘리면 그 사실을 행으로 말한다(빈 화면과 구별
     // 이 행을 만들었다.
     var out: [16]Row = undefined;
     var scratch: [64]u8 = undefined;
-    const model = build("# branch.head main\n1 .M N... 1 2 3 a b a.txt\n", "", "1\t0\ta.txt\n", "1\t0\ta.txt\n", .{false} ** section_count, .{true} ** section_count, true, &out, &scratch);
+    const model = build("# branch.head main\n1 .M N... 1 2 3 a b a.txt\n", "", "1\t0\ta.txt\n", "1\t0\ta.txt\n", @splat(false), @splat(true), true, &out, &scratch);
     try testing.expectEqual(Notice.output_truncated, model.rows[model.rows.len - 1].notice);
     try testing.expect(model.rows[0] == .section); // 앞선 목록은 그대로 남는다(있는 것까지는 보여 준다)
 
-    const clean = build("# branch.head main\n1 .M N... 1 2 3 a b a.txt\n", "", "1\t0\ta.txt\n", "1\t0\ta.txt\n", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    const clean = build("# branch.head main\n1 .M N... 1 2 3 a b a.txt\n", "", "1\t0\ta.txt\n", "1\t0\ta.txt\n", @splat(false), @splat(true), false, &out, &scratch);
     for (clean.rows) |row| try testing.expect(row != .notice);
 }
 
 test "개수가 0인 섹션은 헤더도 내지 않는다" {
     var out: [16]Row = undefined;
     var scratch: [64]u8 = undefined;
-    const model = build("# branch.head main\n? only.txt\n", "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    const model = build("# branch.head main\n? only.txt\n", "", "", "", @splat(false), @splat(true), false, &out, &scratch);
     try testing.expectEqual(@as(usize, 2), model.rows.len); // 변경 사항 헤더 + 1행뿐
     try testing.expectEqual(Section.changes, model.rows[0].section.section);
     try testing.expect(!model.has_staged); // 커밋할 것이 없다
@@ -688,7 +688,7 @@ test "개수가 0인 섹션은 헤더도 내지 않는다" {
 test "변경이 없으면 empty다(빈 안내를 대신 그린다)" {
     var out: [8]Row = undefined;
     var scratch: [64]u8 = undefined;
-    const model = build("# branch.head main\n", "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    const model = build("# branch.head main\n", "", "", "", @splat(false), @splat(true), false, &out, &scratch);
     try testing.expect(model.empty);
     try testing.expectEqual(@as(usize, 0), model.rows.len);
     try testing.expectEqualStrings("main", model.head.branch.?);
@@ -712,23 +712,23 @@ test "out이 모자라면 마지막 줄로 '더 있다'를 말한다(조용히 �
 test "numstat에 없는 파일은 숫자를 비운다(0으로 채우지 않는다)" {
     var out: [8]Row = undefined;
     var scratch: [256]u8 = undefined;
-    const model = build("1 .M N... 1 2 3 a b lonely.txt\n", "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    const model = build("1 .M N... 1 2 3 a b lonely.txt\n", "", "", "", @splat(false), @splat(true), false, &out, &scratch);
     try testing.expect(model.rows[1].file.unknown_delta);
     try testing.expectEqual(@as(u32, 0), model.rows[1].file.added);
 }
 
 test "접힌 섹션은 헤더만 내고 개수·일괄 동작은 그대로 보여 준다" {
-    var collapsed = [_]bool{false} ** section_count;
-    collapsed[@intFromEnum(Section.staged)] = true;
+    var collapsed = @as([section_count]bool, @splat(false));
+    collapsed[@backingInt(Section.staged)] = true;
     var out: [32]Row = undefined;
     var scratch: [256]u8 = undefined;
-    const model = build(fixture_status, fixture_staged, fixture_worktree, fixture_total, collapsed, .{true} ** section_count, false, &out, &scratch);
+    const model = build(fixture_status, fixture_staged, fixture_worktree, fixture_total, collapsed, @splat(true), false, &out, &scratch);
     try testing.expectEqual(Section.staged, model.rows[0].section.section);
     try testing.expectEqual(@as(usize, 3), model.rows[0].section.count); // 개수는 접혀도 그대로
     try testing.expectEqual(RowAction.unstage, model.rows[0].section.action); // 접어도 일괄 동작은 남는다
     try testing.expectEqual(Section.changes, model.rows[1].section.section); // 바로 다음 섹션이 온다
 
-    const all = build(fixture_status, fixture_staged, fixture_worktree, fixture_total, .{true} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    const all = build(fixture_status, fixture_staged, fixture_worktree, fixture_total, @splat(true), @splat(true), false, &out, &scratch);
     try testing.expectEqual(@as(usize, 2), all.rows.len);
     try testing.expect(!all.empty); // 변경이 없는 것과 접은 것은 다르다
 }
@@ -743,7 +743,7 @@ test "섹션은 기본 상한까지만 보여 주고 남은 개수를 말한다"
     }
     var out: [64]Row = undefined;
     var scratch: [256]u8 = undefined;
-    const capped = build(status.items, "", "", "", .{false} ** section_count, .{false} ** section_count, false, &out, &scratch);
+    const capped = build(status.items, "", "", "", @splat(false), @splat(false), false, &out, &scratch);
     try testing.expectEqual(default_section_rows + 2, capped.rows.len); // 헤더 + 10행 + "모두 보기"
     try testing.expectEqual(@as(usize, 25), capped.rows[0].section.count);
     try testing.expectEqual(@as(usize, 25 - default_section_rows), capped.rows[capped.rows.len - 1].more.hidden);
@@ -791,7 +791,7 @@ test "무작위 status 입력에도 불변식이 깨지지 않는다" {
         for (model.rows) |row| switch (row) {
             .section => |sec| {
                 seen_section = sec.section;
-                counts[@intFromEnum(sec.section)] = sec.count;
+                counts[@backingInt(sec.section)] = sec.count;
             },
             // **파일 행은 항상 자기 섹션 헤더 뒤에 온다.** 헤더가 잘려 나갔는데 파일만 남으면 화면에서 그 행이
             // 어느 그룹인지 알 수 없다.
@@ -801,8 +801,8 @@ test "무작위 status 입력에도 불변식이 깨지지 않는다" {
         };
         // 섹션 헤더가 말한 개수는 그 섹션의 실제 항목 수와 같아야 한다(화면에 몇 개를 그렸는지와 무관하게).
         inline for (.{ Section.staged, Section.changes }) |section| {
-            if (counts[@intFromEnum(section)] > 0)
-                try testing.expectEqual(countFor(status.items, section), counts[@intFromEnum(section)]);
+            if (counts[@backingInt(section)] > 0)
+                try testing.expectEqual(countFor(status.items, section), counts[@backingInt(section)]);
         }
     }
 }

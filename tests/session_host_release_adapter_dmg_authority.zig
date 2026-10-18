@@ -13,7 +13,7 @@ const candidate_bytes = "not-a-real-dmg-but-staging-is-real";
 fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(out, "{s}/{s}", .{ root[0..len], leaf });
+    return std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ root[0..len], leaf }, 0);
 }
 
 fn expected() authority.ExpectedDmg {
@@ -96,10 +96,10 @@ fn applyProductFault(mount_dir: []const u8, fault: FakeOps.ProductFault) !void {
     if (fault == .none) return;
     var executable_buf: [std.fs.max_path_bytes:0]u8 = undefined;
     var sibling_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    const executable = try std.fmt.bufPrintZ(&executable_buf, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{mount_dir});
-    const sibling = try std.fmt.bufPrintZ(&sibling_buf, "{s}/Maru.app/Contents/MacOS/product-sibling", .{mount_dir});
+    const executable = try std.fmt.bufPrintSentinel(&executable_buf, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{mount_dir}, 0);
+    const sibling = try std.fmt.bufPrintSentinel(&sibling_buf, "{s}/Maru.app/Contents/MacOS/product-sibling", .{mount_dir}, 0);
     var helper_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    const helper = try std.fmt.bufPrintZ(&helper_buf, "{s}/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper", .{mount_dir});
+    const helper = try std.fmt.bufPrintSentinel(&helper_buf, "{s}/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper", .{mount_dir}, 0);
     switch (fault) {
         .none => unreachable,
         .executable_symlink => {

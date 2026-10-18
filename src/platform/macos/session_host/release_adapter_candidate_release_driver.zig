@@ -380,7 +380,7 @@ fn toolchainPristine(toolchain: *const zig_authority.ZigToolchainAuthority) bool
 }
 
 fn pathsPristine(paths: *const Paths) bool {
-    inline for (std.meta.fields(Paths)) |field| {
+    inline for (@import("type_info_fields").fields(Paths)) |field| {
         const path = &@field(paths, field.name);
         if (path.len != 0 or !allZero(&path.bytes)) return false;
     }
@@ -389,7 +389,7 @@ fn pathsPristine(paths: *const Paths) bool {
 
 fn pathsDigest(paths: *const Paths) ![32]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    inline for (std.meta.fields(Paths)) |field| {
+    inline for (@import("type_info_fields").fields(Paths)) |field| {
         const path = &@field(paths, field.name);
         if (path.len == 0 or path.len >= path.bytes.len or path.bytes[path.len] != 0)
             return error.InvalidPath;

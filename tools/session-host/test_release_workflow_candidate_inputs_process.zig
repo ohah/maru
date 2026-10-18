@@ -76,7 +76,7 @@ const Sample = struct { duration_ns: u64, checkpoint_residue: usize, candidate_r
 
 fn runOnce(io: std.Io, allocator: std.mem.Allocator, bootstrap: []const u8, candidate: []const u8, environment: *const std.process.Environ.Map, index: usize, expect_failure: bool) !Sample {
     var template_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
-    const template = try std.fmt.bufPrintZ(&template_storage, "/private/tmp/maru-candidate-inputs-{d}.XXXXXX", .{index});
+    const template = try std.fmt.bufPrintSentinel(&template_storage, "/private/tmp/maru-candidate-inputs-{d}.XXXXXX", .{index}, 0);
     const root: [:0]const u8 = std.mem.span(mkdtemp(template.ptr) orelse return error.TempRootFailed);
     var root_present = true;
     defer if (root_present) std.Io.Dir.cwd().deleteTree(io, root) catch {};
@@ -91,10 +91,10 @@ fn runOnce(io: std.Io, allocator: std.mem.Allocator, bootstrap: []const u8, cand
     var candidate_storage: [std.fs.max_path_bytes:0]u8 = undefined;
     var frozen_storage: [std.fs.max_path_bytes:0]u8 = undefined;
     var app_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const checkpoint_path = try std.fmt.bufPrintZ(&checkpoint_storage, "{s}/checkpoint", .{root});
-    const candidate_path = try std.fmt.bufPrintZ(&candidate_storage, "{s}/session-host-candidate-1.2.3", .{root});
-    const frozen_path = try std.fmt.bufPrintZ(&frozen_storage, "{s}/maru-session-host-1.2.3", .{candidate_path});
-    const app_path = try std.fmt.bufPrintZ(&app_storage, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{candidate_path});
+    const checkpoint_path = try std.fmt.bufPrintSentinel(&checkpoint_storage, "{s}/checkpoint", .{root}, 0);
+    const candidate_path = try std.fmt.bufPrintSentinel(&candidate_storage, "{s}/session-host-candidate-1.2.3", .{root}, 0);
+    const frozen_path = try std.fmt.bufPrintSentinel(&frozen_storage, "{s}/maru-session-host-1.2.3", .{candidate_path}, 0);
+    const app_path = try std.fmt.bufPrintSentinel(&app_storage, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{candidate_path}, 0);
     if (c.chmod(checkpoint_path.ptr, 0o700) != 0 or c.chmod(candidate_path.ptr, 0o700) != 0) return error.PrivateRootFailed;
     const dmg = try allocator.alloc(u8, dmg_bytes);
     defer allocator.free(dmg);

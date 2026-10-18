@@ -56,7 +56,7 @@ pub const Segment = struct {
 
 fn writeHeader(out: []u8, kind: Kind) void {
     @memcpy(out[0..4], &magic);
-    out[4] = @intFromEnum(kind);
+    out[4] = @backingInt(kind);
     @memset(out[5..header_len], 0);
 }
 
@@ -65,7 +65,7 @@ pub fn decodeHeader(bytes: []const u8) DecodeError!Kind {
     if (bytes.len < header_len) return error.Malformed;
     if (!std.mem.eql(u8, bytes[0..4], &magic)) return error.Malformed;
     for (bytes[5..header_len]) |b| if (b != 0) return error.Malformed;
-    const kind: Kind = @enumFromInt(bytes[4]);
+    const kind: Kind = @fromBackingInt(@intCast(bytes[4]));
     return switch (kind) {
         .bind_ack, .segment, .release => kind,
         _ => error.Malformed,
@@ -196,7 +196,7 @@ test "image channel wire: 세 메시지가 왕복하고 머리가 어긋나면 �
     bad_kind[4] = 9;
     try testing.expectError(error.Malformed, decodeHeader(&bad_kind));
     try testing.expectEqual(@as(?usize, segment_len), messageLen(try decodeHeader(&encoded)));
-    try testing.expectEqual(@as(?usize, null), messageLen(@enumFromInt(9)));
+    try testing.expectEqual(@as(?usize, null), messageLen(@fromBackingInt(@intCast(9))));
 }
 
 test "image channel wire: segment_id 0 과 0 B 세그먼트는 어느 방향으로도 실리지 않는다" {

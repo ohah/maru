@@ -16,6 +16,8 @@
 //! - **네트워크·프롬프트 없음**: `GIT_TERMINAL_PROMPT=0` + credential helper 제거. status/diff는 원래 로컬이지만,
 //!   설정으로 원격을 건드리게 만드는 경로를 명시적으로 닫는다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const remote_shell = @import("remote_shell.zig");
 const git_log = @import("git_log.zig"); // 커밋 목록 `--format`의 단일 출처(파싱과 같은 상수)
@@ -1299,8 +1301,8 @@ test "원격으로 나가는 토큰에는 제어문자가 없다 — 명령 종�
     // 가려진다**.
     var buf: [max_argv][]const u8 = undefined;
     const printable_arg = "aaaa1111 bbbb2222"; // 모든 kind 가 받아도 되는 인쇄 가능한 값(hex 쌍 · 공백)
-    inline for (@typeInfo(Kind).@"enum".fields) |field| {
-        const kind: Kind = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(Kind)) |field| {
+        const kind: Kind = @fromBackingInt(@intCast(field.value));
         const argv = build(kind, "/usr/bin/git", "/repo", printable_arg, &buf);
         for (argv) |token| {
             if (!remoteTokenIsSafe(token)) {
@@ -2202,7 +2204,7 @@ test "WT6b-1b 원격 명령은 필터 덮어쓰기를 env 토큰으로 싣고 �
     const bad = [_]ConfigPair{.{ .key = "filter.x.clean", .value = "a\nb" }};
     try testing.expect(buildRemoteWithConfig(local, remote, null, &bad, true, &b2, &cmd) == null);
     var many: [max_filter_drivers * 4]ConfigPair = undefined;
-    const long_value = "v" ** 200;
+    const long_value = array_repeat.repeat("v", 200);
     for (&many) |*p| p.* = .{ .key = "filter.some-long-driver-name.process", .value = long_value };
     try testing.expect(buildRemoteWithConfig(local, remote, null, &many, true, &b2, &cmd) == null);
     try testing.expectEqual(ConfigEnvName.count, configEnvName("GIT_CONFIG_COUNT").?);

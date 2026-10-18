@@ -17,6 +17,8 @@
 //! - sidecar 가 죽으면 진행 중이던 것을 「엔진이 다시 시작됨」으로 끝내고 임시 파일을 지운다. 다운로드 번호는 sidecar 마다 1 부터라
 //!   세대로 가린다(옛 행의 취소가 새 sidecar 의 다른 다운로드를 취소하지 않게).
 
+const array_repeat = @import("array_repeat");
+
 const builtin = @import("builtin");
 const std = @import("std");
 const maru = @import("maru");
@@ -464,19 +466,19 @@ fn exists(path_z: [*:0]const u8) bool {
 /// 다운로드 폴더(없으면 만든다)에 겹치지 않는 최종 이름을 고르고 그 임시 파일을 O_EXCL 로 만든다.
 pub fn prepare(dir: []const u8, file_name: []const u8, out: *Prepared) void {
     var dir_z_buf: [max_path_bytes + 1]u8 = undefined;
-    const dir_z = std.fmt.bufPrintZ(&dir_z_buf, "{s}", .{dir}) catch return;
+    const dir_z = std.fmt.bufPrintSentinel(&dir_z_buf, "{s}", .{dir}, 0) catch return;
     _ = std.c.mkdir(dir_z, 0o755);
     var n: u32 = 0;
     while (n < 100) : (n += 1) {
         var name_buf: [max_name_bytes + 16]u8 = undefined;
         const candidate = numberedName(file_name, n, &name_buf);
         if (candidate.len == 0 or candidate.len + part_suffix.len > max_name_bytes) return;
-        const final = std.fmt.bufPrintZ(&out.final_buf, "{s}/{s}", .{ dir, candidate }) catch return;
+        const final = std.fmt.bufPrintSentinel(&out.final_buf, "{s}/{s}", .{ dir, candidate }, 0) catch return;
         if (exists(final)) continue;
-        const part = std.fmt.bufPrintZ(&out.part_buf, "{s}{s}", .{ final, part_suffix }) catch return;
+        const part = std.fmt.bufPrintSentinel(&out.part_buf, "{s}{s}", .{ final, part_suffix }, 0) catch return;
         const fd = std.c.open(part, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o644));
         if (fd < 0) {
-            if (std.c._errno().* == @intFromEnum(std.c.E.EXIST)) continue;
+            if (std.c._errno().* == @backingInt(std.c.E.EXIST)) continue;
             return;
         }
         _ = std.c.close(fd);
@@ -503,7 +505,7 @@ pub fn prepareChosen(dir: []const u8, file_name: []const u8, key: u64, replace: 
             const candidate = numberedFit(file_name, n, &final_name_buf);
             if (candidate.len == 0) return;
             var probe_buf: [max_path_bytes + 1]u8 = undefined;
-            const probe = std.fmt.bufPrintZ(&probe_buf, "{s}/{s}", .{ dir, candidate }) catch {
+            const probe = std.fmt.bufPrintSentinel(&probe_buf, "{s}/{s}", .{ dir, candidate }, 0) catch {
                 out.too_long = true;
                 return;
             };
@@ -513,24 +515,24 @@ pub fn prepareChosen(dir: []const u8, file_name: []const u8, key: u64, replace: 
             }
         } else return;
     }
-    const final = std.fmt.bufPrintZ(&out.final_buf, "{s}/{s}", .{ dir, final_name }) catch {
+    const final = std.fmt.bufPrintSentinel(&out.final_buf, "{s}/{s}", .{ dir, final_name }, 0) catch {
         out.too_long = true;
         return;
     };
     var m: u32 = 0;
     while (m < 100) : (m += 1) {
         const part = (if (m == 0)
-            std.fmt.bufPrintZ(&out.part_buf, "{s}/.maru-{d}.part", .{ dir, key })
+            std.fmt.bufPrintSentinel(&out.part_buf, "{s}/.maru-{d}.part", .{ dir, key }, 0)
         else
-            std.fmt.bufPrintZ(&out.part_buf, "{s}/.maru-{d}-{d}.part", .{ dir, key, m })) catch {
+            std.fmt.bufPrintSentinel(&out.part_buf, "{s}/.maru-{d}-{d}.part", .{ dir, key, m }, 0)) catch {
             out.too_long = true;
             return;
         };
         const fd = std.c.open(part, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o644));
         if (fd < 0) {
             const err = std.c._errno().*;
-            if (err == @intFromEnum(std.c.E.EXIST)) continue;
-            out.too_long = err == @intFromEnum(std.c.E.NAMETOOLONG); // 폴더 경로가 파일 시스템의 상한을 넘었다
+            if (err == @backingInt(std.c.E.EXIST)) continue;
+            out.too_long = err == @backingInt(std.c.E.NAMETOOLONG); // 폴더 경로가 파일 시스템의 상한을 넘었다
             return; // 쓸 수 없는 폴더(권한·읽기 전용·TCC 거절) — 다시 묻는다
         }
         _ = std.c.close(fd);
@@ -555,13 +557,13 @@ const Move = enum { moved, taken, failed };
 fn moveExclusive(part: [*:0]const u8, target: [*:0]const u8) Move {
     if (renameatx_np(at_fdcwd, part, at_fdcwd, target, rename_excl) == 0) return .moved;
     const err = std.c._errno().*;
-    if (err == @intFromEnum(std.c.E.EXIST)) return .taken;
-    if (err != @intFromEnum(std.c.E.OPNOTSUPP) and err != @intFromEnum(std.c.E.INVAL)) return .failed;
+    if (err == @backingInt(std.c.E.EXIST)) return .taken;
+    if (err != @backingInt(std.c.E.OPNOTSUPP) and err != @backingInt(std.c.E.INVAL)) return .failed;
     if (link(part, target) == 0) {
         _ = std.c.unlink(part);
         return .moved;
     }
-    if (std.c._errno().* == @intFromEnum(std.c.E.EXIST) or exists(target)) return .taken;
+    if (std.c._errno().* == @backingInt(std.c.E.EXIST) or exists(target)) return .taken;
     return if (std.c.rename(part, target) == 0) .moved else .failed;
 }
 
@@ -569,13 +571,13 @@ fn moveExclusive(part: [*:0]const u8, target: [*:0]const u8) Move {
 /// `e` 에 적는다. 못 옮기면 받은 데이터는 임시 파일에 있다 — 행이 그 파일을 가리키게 한다(Finder 에서 찾을 수 있게).
 fn finalize(e: *Entry) bool {
     var part_z: [max_path_bytes + 1]u8 = undefined;
-    const part = std.fmt.bufPrintZ(&part_z, "{s}", .{e.partPath()}) catch return false;
+    const part = std.fmt.bufPrintSentinel(&part_z, "{s}", .{e.partPath()}, 0) catch return false;
     const dir_end = std.mem.lastIndexOfScalar(u8, e.finalPath(), '/') orelse return false;
     const dir = e.finalPath()[0..dir_end];
     if (e.replace) {
         // 사용자가 저장 창에서 바꾸기를 골랐다(W10b) — 고른 그 이름에 덮어쓴다(번호를 붙이지 않는다).
         var target_buf: [max_path_bytes + 1]u8 = undefined;
-        const target = std.fmt.bufPrintZ(&target_buf, "{s}", .{e.finalPath()}) catch return false;
+        const target = std.fmt.bufPrintSentinel(&target_buf, "{s}", .{e.finalPath()}, 0) catch return false;
         if (std.c.rename(part, target) == 0) {
             e.part_len = 0;
             return true;
@@ -589,7 +591,7 @@ fn finalize(e: *Entry) bool {
         const candidate = if (e.chosen) numberedFit(e.name(), n, &name_buf) else numberedName(e.name(), n, &name_buf);
         if (candidate.len == 0) break;
         var target_buf: [max_path_bytes + 1]u8 = undefined;
-        const target = std.fmt.bufPrintZ(&target_buf, "{s}/{s}", .{ dir, candidate }) catch break;
+        const target = std.fmt.bufPrintSentinel(&target_buf, "{s}/{s}", .{ dir, candidate }, 0) catch break;
         switch (moveExclusive(part, target)) {
             .moved => {
                 @memcpy(e.final_buf[0..target.len], target);
@@ -612,7 +614,7 @@ fn finalize(e: *Entry) bool {
 fn unlinkPart(e: *const Entry) void {
     if (e.part_len == 0 or e.finalizing) return; // 옮기는 중이면 작업 스레드가 끝낸다(W10d)
     var part_z: [max_path_bytes + 1]u8 = undefined;
-    const part = std.fmt.bufPrintZ(&part_z, "{s}", .{e.partPath()}) catch return;
+    const part = std.fmt.bufPrintSentinel(&part_z, "{s}", .{e.partPath()}, 0) catch return;
     // 고른 폴더(외장·망 볼륨일 수 있다)는 작업 스레드에서 지운다(W10d) — 메인 스레드를 막지 않게.
     if (e.chosen) chosen: {
         const job = allocator().create(PartUnlink) catch break :chosen;
@@ -782,7 +784,7 @@ pub fn reapPrepared() void {
             const e = entryOfKey(p.key) orelse {
                 if (p.ok) {
                     var part_z: [max_path_bytes + 1]u8 = undefined;
-                    if (std.fmt.bufPrintZ(&part_z, "{s}", .{p.part_buf[0..p.part_len]})) |z| _ = std.c.unlink(z) else |_| {}
+                    if (std.fmt.bufPrintSentinel(&part_z, "{s}", .{p.part_buf[0..p.part_len]}, 0)) |z| _ = std.c.unlink(z) else |_| {}
                 }
                 continue;
             };
@@ -914,14 +916,14 @@ fn unlinkInDir(path: []const u8, dev: i64, ino: u64) UnlinkResult {
     const base = path[slash + 1 ..];
     if (base.len == 0) return .failed;
     var dir_z: [max_path_bytes + 1]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_z, "{s}", .{if (slash == 0) "/" else path[0..slash]}) catch return .failed;
+    const dir = std.fmt.bufPrintSentinel(&dir_z, "{s}", .{if (slash == 0) "/" else path[0..slash]}, 0) catch return .failed;
     var base_z: [max_name_bytes + 32]u8 = undefined;
-    const base0 = std.fmt.bufPrintZ(&base_z, "{s}", .{base}) catch return .failed;
+    const base0 = std.fmt.bufPrintSentinel(&base_z, "{s}", .{base}, 0) catch return .failed;
     const dfd = std.c.open(dir, .{ .DIRECTORY = true, .CLOEXEC = true }, @as(std.c.mode_t, 0));
-    if (dfd < 0) return if (std.c._errno().* == @intFromEnum(std.c.E.NOENT)) .gone else .failed;
+    if (dfd < 0) return if (std.c._errno().* == @backingInt(std.c.E.NOENT)) .gone else .failed;
     defer _ = std.c.close(dfd);
     var st: std.c.Stat = undefined;
-    if (std.c.fstatat(dfd, base0, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) return if (std.c._errno().* == @intFromEnum(std.c.E.NOENT)) .gone else .failed;
+    if (std.c.fstatat(dfd, base0, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) return if (std.c._errno().* == @backingInt(std.c.E.NOENT)) .gone else .failed;
     if (@as(i64, @intCast(st.dev)) != dev or @as(u64, @intCast(st.ino)) != ino) return .other;
     if (std.c.unlinkat(dfd, base0, 0) != 0) return .failed;
     return .removed;
@@ -986,7 +988,7 @@ fn isPartName(base: []const u8) bool {
 pub fn sweepPartJournal() usize {
     const jp = journalPath() orelse return 0;
     var old_buf: [max_path_bytes + 16]u8 = undefined;
-    const old = std.fmt.bufPrintZ(&old_buf, "{s}.sweeping", .{jp}) catch return 0;
+    const old = std.fmt.bufPrintSentinel(&old_buf, "{s}.sweeping", .{jp}, 0) catch return 0;
     var st: std.c.Stat = undefined;
     // 지난 정리가 중간에 끝났으면 그 남은 것부터(새로 옮기지 않는다 — 덮어쓰면 잃는다).
     {
@@ -1004,7 +1006,7 @@ pub fn sweepPartJournal() usize {
     var complete = false;
     while (true) {
         const n = std.c.read(fd, &chunk, chunk.len);
-        if (n < 0 and std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+        if (n < 0 and std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
         if (n <= 0) {
             complete = n == 0; // 끝까지 읽었을 때만 비운다(읽기 오류면 다음에 다시 — 2 회차)
             break;
@@ -1049,7 +1051,7 @@ fn volumeMissing(path: []const u8) bool {
     const rest = path["/Volumes/".len..];
     const end = std.mem.indexOfScalar(u8, rest, '/') orelse return false;
     var root_z: [max_path_bytes + 1]u8 = undefined;
-    const root = std.fmt.bufPrintZ(&root_z, "/Volumes/{s}", .{rest[0..end]}) catch return false;
+    const root = std.fmt.bufPrintSentinel(&root_z, "/Volumes/{s}", .{rest[0..end]}, 0) catch return false;
     var st: std.c.Stat = undefined;
     return std.c.fstatat(at_fdcwd, root, &st, 0) != 0;
 }
@@ -1441,7 +1443,7 @@ test "download names are sanitized, keep their extension when cut, and number be
     try std.testing.expectEqualStrings("hidden", sanitizeName("..hidden. ", 0, &buf));
     try std.testing.expectEqualStrings("download", sanitizeName(" . ", 0, &buf));
     try std.testing.expectEqualStrings("download", sanitizeName("\xff", 0, &buf));
-    const long = sanitizeName(("가" ** 100) ++ ".pdf", 20, &buf);
+    const long = sanitizeName((array_repeat.repeat("가", 100)) ++ ".pdf", 20, &buf);
     try std.testing.expect(long.len <= max_name_bytes - 20);
     try std.testing.expect(std.mem.endsWith(u8, long, ".pdf"));
     try std.testing.expect(std.unicode.utf8ValidateSlice(long));
@@ -1460,7 +1462,7 @@ extern "c" fn symlink(target: [*:0]const u8, path: [*:0]const u8) c_int;
 
 // 시험의 파일은 libc 로 다룬다(임시 디렉터리의 절대 경로 그대로 — 제품 코드가 쓰는 길).
 fn testPath(dir: []const u8, file_name: []const u8, buf: *[max_path_bytes + 1]u8) [*:0]const u8 {
-    return (std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, file_name }) catch unreachable).ptr;
+    return (std.fmt.bufPrintSentinel(buf, "{s}/{s}", .{ dir, file_name }, 0) catch unreachable).ptr;
 }
 
 fn testWrite(dir: []const u8, file_name: []const u8, data: []const u8) !void {
@@ -1669,14 +1671,14 @@ test "asking rows: one claim, cancel, dismissal back to held, and replace only f
     var chosen_buf: [max_name_bytes]u8 = undefined;
     try std.testing.expectEqualStrings(".env", sanitizeChosenName(".env", &chosen_buf));
     try std.testing.expectEqualStrings("download", sanitizeChosenName("..", &chosen_buf));
-    const long_chosen = sanitizeChosenName(("가" ** 100) ++ ".pdf", &chosen_buf); // 300 바이트 — 확장자를 지키며
+    const long_chosen = sanitizeChosenName((array_repeat.repeat("가", 100)) ++ ".pdf", &chosen_buf); // 300 바이트 — 확장자를 지키며
     try std.testing.expect(long_chosen.len <= max_name_bytes and std.mem.endsWith(u8, long_chosen, ".pdf"));
     try std.testing.expect(std.unicode.utf8ValidateSlice(long_chosen));
-    const odd = sanitizeChosenName("a" ++ ("가" ** 100) ++ ".pdf", &chosen_buf); // 글자 경계가 255 에 맞지 않는다(3 회차)
+    const odd = sanitizeChosenName("a" ++ (array_repeat.repeat("가", 100)) ++ ".pdf", &chosen_buf); // 글자 경계가 255 에 맞지 않는다(3 회차)
     try std.testing.expect(odd.len <= max_name_bytes and std.mem.endsWith(u8, odd, ".pdf") and std.unicode.utf8ValidateSlice(odd));
-    try std.testing.expect(std.mem.endsWith(u8, sanitizeChosenName(("가" ** 100) ++ ".p:f", &chosen_buf), ".p_f")); // 확장자도 다듬는다
+    try std.testing.expect(std.mem.endsWith(u8, sanitizeChosenName((array_repeat.repeat("가", 100)) ++ ".p:f", &chosen_buf), ".p_f")); // 확장자도 다듬는다
     var fit_buf: [max_name_bytes + 16]u8 = undefined;
-    const numbered = numberedFit("n" ** 251 ++ ".txt", 12, &fit_buf); // 255 꽉 찬 이름에 번호 — 줄기를 줄인다
+    const numbered = numberedFit(array_repeat.repeat("n", 251) ++ ".txt", 12, &fit_buf); // 255 꽉 찬 이름에 번호 — 줄기를 줄인다
     try std.testing.expect(numbered.len <= max_name_bytes and std.mem.endsWith(u8, numbered, " (12).txt"));
     // 띄운 준비 스레드 넷(행 2·3·9·4 — 없는 폴더라 곧 실패)이 끝나기를 기다렸다 비운다(다음 시험으로 새지 않게).
     var waited: u32 = 0;
@@ -1692,7 +1694,7 @@ test "asking rows: one claim, cancel, dismissal back to held, and replace only f
     // 1024 바이트를 넘는 경로도 다시 묻는다(맡은 채 남지 않게 — 9 회차).
     try entries.append(allocator(), rowForTest(10, 10, .asking));
     _ = claimAsk(10);
-    try std.testing.expect(answerAsk(10, .{ .path = .{ .path = "/" ++ "d" ** 1100 ++ "/x.txt", .existed = false } }));
+    try std.testing.expect(answerAsk(10, .{ .path = .{ .path = "/" ++ array_repeat.repeat("d", 1100) ++ "/x.txt", .existed = false } }));
     try std.testing.expect(entryOfKey(10).?.state == .asking and entryOfKey(10).?.ask_retry and !entryOfKey(10).?.ask_claimed);
     var long_line: [256]u8 = undefined;
     try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_asking_too_long), statusText(entryOfKey(10).?, &long_line)); // 까닭은 길이(W10c)
@@ -1729,11 +1731,11 @@ test "a chosen path past the length limits says so, a folder that can't be writt
     const root = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
     var out: Prepared = .{ .key = 1, .ok = false };
     // maru 의 경로 상한(1024 바이트)을 넘는 폴더.
-    prepareChosen("/" ++ "d" ** 1100, "a.txt", 1, false, &out);
+    prepareChosen("/" ++ array_repeat.repeat("d", 1100), "a.txt", 1, false, &out);
     try std.testing.expect(!out.ok and out.too_long);
     // 파일 시스템의 상한(이름 하나 255 바이트)을 넘는 폴더 이름 — 열기가 `ENAMETOOLONG`.
     var long_buf: [max_path_bytes]u8 = undefined;
-    const long_dir = try std.fmt.bufPrint(&long_buf, "{s}/{s}", .{ root, "e" ** 300 });
+    const long_dir = try std.fmt.bufPrint(&long_buf, "{s}/{s}", .{ root, array_repeat.repeat("e", 300) });
     out = .{ .key = 2, .ok = false };
     prepareChosen(long_dir, "a.txt", 2, true, &out);
     try std.testing.expect(!out.ok and out.too_long);
@@ -1824,7 +1826,7 @@ test "the part journal deletes only leftover part files it recorded, by name sha
     var link_buf: [max_path_bytes + 1]u8 = undefined;
     const linked = std.mem.span(testPath(dir, "linked", &link_buf));
     var dir_z: [max_path_bytes + 1]u8 = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink((std.fmt.bufPrintZ(&dir_z, "{s}", .{dir}) catch unreachable).ptr, linked.ptr));
+    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink((std.fmt.bufPrintSentinel(&dir_z, "{s}", .{dir}, 0) catch unreachable).ptr, linked.ptr));
     try testWrite(dir, "d.bin.maru-part", "x");
     var st: std.c.Stat = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.fstatat(at_fdcwd, testPath(dir, "d.bin.maru-part", &p_buf), &st, std.c.AT.SYMLINK_NOFOLLOW));
@@ -1857,12 +1859,12 @@ test "a chosen location keeps the chosen name with a short hidden part file, num
     prepareChosen(dir, "x.txt", 8, false, &numbered);
     try std.testing.expect(std.mem.endsWith(u8, numbered.final_buf[0..numbered.final_len], "/x (1).txt"));
     // 고른 이름이 길어도 임시 파일 이름 때문에 잘리지 않는다.
-    const long = "n" ** 250 ++ ".txt";
+    const long = array_repeat.repeat("n", 250) ++ ".txt";
     var long_prep: Prepared = .{ .key = 9, .ok = false };
     prepareChosen(dir, long, 9, false, &long_prep);
     try std.testing.expect(long_prep.ok and std.mem.endsWith(u8, long_prep.final_buf[0..long_prep.final_len], "/" ++ long));
     // 255 꽉 찬 고른 이름이 이미 있으면 번호를 붙이되 255 안에(줄기를 줄인다 — 넘치면 엉뚱한 「저장할 수 없음」이 되풀이됐다).
-    const full = "f" ** 251 ++ ".txt";
+    const full = array_repeat.repeat("f", 251) ++ ".txt";
     try testWrite(dir, full, "old");
     var full_prep: Prepared = .{ .key = 11, .ok = false };
     prepareChosen(dir, full, 11, false, &full_prep);
@@ -2029,7 +2031,7 @@ test "status lines are Zig sentences with Finder-style sizes (W10a)" {
     try std.testing.expectEqualStrings("", originOf("data:text/plain,x", &host_buf));
     try std.testing.expectEqualStrings("a?b", originOf("http://a\x01b/", &host_buf));
     // 긴 호스트는 끝(등록 도메인)을 남긴다.
-    const long_host = originOf("https://accounts.google.com." ++ "x" ** 200 ++ ".evil.example/f.zip", &e.origin_buf);
+    const long_host = originOf("https://accounts.google.com." ++ array_repeat.repeat("x", 200) ++ ".evil.example/f.zip", &e.origin_buf);
     try std.testing.expect(std.mem.startsWith(u8, long_host, "...") and std.mem.endsWith(u8, long_host, ".evil.example"));
     try std.testing.expect(long_host.len <= e.origin_buf.len);
     var name_buf2: [max_name_bytes]u8 = undefined;

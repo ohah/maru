@@ -487,7 +487,7 @@ test "host pool rejects a descriptor key that differs from adapter handshake hos
     const FakeAdapter = struct {
         host_id: u128,
         deinit_count: *usize,
-        fn hostId(self: *const @This()) u128 {
+        pub fn hostId(self: *const @This()) u128 {
             return self.host_id;
         }
         fn deinit(self: *@This()) void {

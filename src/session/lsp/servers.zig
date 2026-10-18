@@ -111,8 +111,8 @@ test "LSI1 이름표 — zig·c·cpp·objc·ts·tsx·js·rust·python·go 는 �
     try testing.expectEqual(@as(usize, 0), forGrammar(.zig).?.args.len);
     try testing.expect(forGrammar(.none) == null and forGrammar(.markdown) == null and forGrammar(.json) == null);
     // 설치 명령은 전부 있고 개행이 없다(한 줄을 입력한다).
-    inline for (@typeInfo(language.Grammar).@"enum".fields) |f| {
-        const g: language.Grammar = @enumFromInt(f.value);
+    inline for (@import("type_info_fields").enumFields(language.Grammar)) |f| {
+        const g: language.Grammar = @fromBackingInt(@intCast(f.value));
         if (forGrammar(g)) |s| {
             try testing.expect(s.install.len > 0);
             try testing.expect(std.mem.indexOfScalar(u8, s.install, '\n') == null);

@@ -868,12 +868,12 @@ pub const RemoteAttachment = struct {
 
 fn failedReleaseStateRawValid(state: *const FailedReleaseState) bool {
     const raw = @as(*const u8, @ptrCast(state)).*;
-    return raw <= @intFromEnum(FailedReleaseState.indeterminate);
+    return raw <= @backingInt(FailedReleaseState.indeterminate);
 }
 
 fn exactOwnerSchema(comptime Actual: type, comptime Expected: type) bool {
-    const actual = std.meta.fields(Actual);
-    const expected = std.meta.fields(Expected);
+    const actual = @import("type_info_fields").fields(Actual);
+    const expected = @import("type_info_fields").fields(Expected);
     if (actual.len != expected.len) return false;
     inline for (actual, expected) |a, e| {
         if (!std.mem.eql(u8, a.name, e.name) or a.type != e.type) return false;

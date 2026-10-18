@@ -1056,7 +1056,7 @@ pub fn ungroupTab(self: *AppSession, tab: *Tab) void {
     sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
     self.workspaceChanged(.topology);
-    if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // ungroup 후 프리픽스·정렬 불변식(toggleGroupPin과 동형)
+    if (builtin.mode == .debug) assertPinnedPrefixRuntime(self); // ungroup 후 프리픽스·정렬 불변식(toggleGroupPin과 동형)
 }
 
 /// tab이 어느 그룹에 속하는가(§2.1 소속 파생: 자기 위 가장 가까운 마커에 소속, 없으면 최상위). 우클릭
@@ -1273,9 +1273,9 @@ pub fn tabMatchesSearch(self: *AppSession, tab: *Tab, query: []const u8) bool {
     // 실제로 그리고 있는 Term인데도 그 폴더 이름으로는 검색이 안 되는 반쪽 필터가 된다(브랜치로는 된다).
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const folder = git_ops.termCwdForDisplay(self, term, &cwd_buf) orelse "";
-    return std.ascii.indexOfIgnoreCase(name, query) != null or
-        std.ascii.indexOfIgnoreCase(branch, query) != null or
-        std.ascii.indexOfIgnoreCase(folder, query) != null;
+    return std.ascii.findIgnoreCase(name, query) != null or
+        std.ascii.findIgnoreCase(branch, query) != null or
+        std.ascii.findIgnoreCase(folder, query) != null;
 }
 
 /// 가로 스와이프(delta_x→cols)를 커서 아래 pane의 탭 바 가로 스크롤로 바꾼다(#2b). 그 pane이 탭 넘침(has_scroll)이
@@ -2515,7 +2515,7 @@ pub fn toggleGroupPin(self: *AppSession, marker: *Tab) void {
     sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
     self.workspaceChanged(.appearance);
-    if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 토글 후 프리픽스 불변식(디버그)
+    if (builtin.mode == .debug) assertPinnedPrefixRuntime(self); // 토글 후 프리픽스 불변식(디버그)
 }
 
 /// 그룹 안 **멤버** 카드의 그룹-로컬 pin을 토글한다(그룹 내 위치 고정, GL §13 GL2). 전역 pin(togglePin, 리스트 앞

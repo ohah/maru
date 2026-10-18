@@ -14,7 +14,7 @@ fn expectedAssets() [4]draft_assets.ExpectedAsset {
     for (&result, 0..) |*asset, index| asset.* = .{
         .name = names[index],
         .size = 100 + index,
-        .sha256 = [_]u8{'a' + @as(u8, @intCast(index))} ** 64,
+        .sha256 = @as([64]u8, @splat('a' + @as(u8, @intCast(index)))),
         .device = 7,
         .inode = 20 + index,
         .fd = 40 + @as(std.c.fd_t, @intCast(index)),
@@ -34,7 +34,7 @@ const Authority = struct {
         if (self.drift_after) |call| {
             if (self.calls >= call) assets[2].size += 1;
         }
-        return .{ .release_id = self.release_id, .cli_sha256 = [_]u8{'f'} ** 64, .assets = assets };
+        return .{ .release_id = self.release_id, .cli_sha256 = @as([64]u8, @splat('f')), .assets = assets };
     }
 };
 
@@ -241,5 +241,5 @@ test "production uploader sends exact argv environment and held fd body" {
 fn temporaryPath(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root[0..root_len], leaf });
+    return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ root[0..root_len], leaf }, 0);
 }

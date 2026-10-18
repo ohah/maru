@@ -171,7 +171,7 @@ const ConcreteDriver = struct {
         if (deletion.tomb_len != 0 or deletion.source_address != @intFromPtr(self.aggregate)) return error.InvalidOwner;
         var nonce: u64 = undefined;
         c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
-        const tomb = std.fmt.bufPrintZ(&deletion.tomb, ".maru-aggregate-cleanup-{x}", .{nonce}) catch return error.CleanupFailed;
+        const tomb = std.fmt.bufPrintSentinel(&deletion.tomb, ".maru-aggregate-cleanup-{x}", .{nonce}, 0) catch return error.CleanupFailed;
         deletion.tomb_len = tomb.len;
         const source = directoryLeaf(self.aggregate) orelse return error.InvalidOwner;
         if (renameatx_np(self.aggregate.parent_fd, source.ptr, self.aggregate.parent_fd, tomb.ptr, rename_excl) != 0) {

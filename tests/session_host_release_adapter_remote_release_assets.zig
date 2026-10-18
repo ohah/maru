@@ -30,7 +30,7 @@ test "four exact-ID downloads publish immutable held assets in canonical role or
     for (view.assets, 0..) |asset, index| {
         try std.testing.expectEqual(@as(u64, 1000 + index), asset.id);
         try std.testing.expectEqual(@as(u64, contents[index].len), asset.size);
-        const fd = try fixture.result.openAssetDescriptor(@enumFromInt(index));
+        const fd = try fixture.result.openAssetDescriptor(@fromBackingInt(@intCast(index)));
         defer _ = c.close(fd);
     }
 }
@@ -275,7 +275,7 @@ fn makeMetadata(allocator: std.mem.Allocator, payloads: [4][]const u8, evidence_
 fn temporaryPath(tmp: *std.testing.TmpDir, name: []const u8, storage: *[std.fs.max_path_bytes:0]u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root[0..root_len], name });
+    return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ root[0..root_len], name }, 0);
 }
 
 fn pathExists(path: [:0]const u8) !bool {

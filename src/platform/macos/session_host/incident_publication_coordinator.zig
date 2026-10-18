@@ -186,10 +186,10 @@ pub fn publishCanonical(
         });
     }
     owner.publication.self_addr = @intFromPtr(&owner.publication);
-    owner.publication.kind_raw = @intFromEnum(if (first) publication.PublicationKind.first else .repeat);
+    owner.publication.kind_raw = @backingInt(if (first) publication.PublicationKind.first else .repeat);
     owner.publication.publisher = projection;
     owner.publication.input_digest = input_digest;
-    owner.publication.lifecycle_raw = @intFromEnum(publication.PublicationLifecycle.held);
+    owner.publication.lifecycle_raw = @backingInt(publication.PublicationLifecycle.held);
     owner.publication.seal = compositeSeal(&owner.publication);
     appendLeafStage(.composite_held);
     return if (first)
@@ -229,10 +229,10 @@ fn prepareFirst(
         commit.authority.connection_generation +%= 1;
     try client_slot.bindIncidentClientPublication(&owner.publication.client, commit);
     owner.publication.self_addr = @intFromPtr(&owner.publication);
-    owner.publication.kind_raw = @intFromEnum(publication.PublicationKind.first);
+    owner.publication.kind_raw = @backingInt(publication.PublicationKind.first);
     owner.publication.publisher = lease_projection;
     owner.publication.input_digest = input_digest;
-    owner.publication.lifecycle_raw = @intFromEnum(publication.PublicationLifecycle.held);
+    owner.publication.lifecycle_raw = @backingInt(publication.PublicationLifecycle.held);
     owner.publication.seal = compositeSeal(&owner.publication);
     appendLeafStage(.composite_held);
 }
@@ -254,17 +254,17 @@ fn commitFirst(
     runtime.commitPreparedEvidenceChecked(registry, &owner.lease, &owner.publication.service);
     client_slot.commitFirstIncidentClientPublicationNoFail(&owner.publication.client, commit);
     appendLeafStage(.client_committed);
-    owner.publication.lifecycle_raw = @intFromEnum(publication.PublicationLifecycle.evidence_committed);
+    owner.publication.lifecycle_raw = @backingInt(publication.PublicationLifecycle.evidence_committed);
     owner.publication.seal = compositeSeal(&owner.publication);
     runtime.publishPreparedPendingAndUnlockChecked(registry, &owner.lease, &owner.publication.service);
-    owner.publication.lifecycle_raw = @intFromEnum(publication.PublicationLifecycle.wake_ready);
+    owner.publication.lifecycle_raw = @backingInt(publication.PublicationLifecycle.wake_ready);
     owner.publication.seal = compositeSeal(&owner.publication);
     const wake = runtime.wakeCommittedPublication(registry, &owner.lease, &owner.publication);
     registry.release(&owner.lease) catch process_seal.fatalIntegrity(.incident_authority);
     client_slot.finishIncidentClientOperationNoFail(&owner.publication.client);
-    owner.publication.lifecycle_raw = @intFromEnum(publication.PublicationLifecycle.published);
+    owner.publication.lifecycle_raw = @backingInt(publication.PublicationLifecycle.published);
     owner.publication.seal = compositeSeal(&owner.publication);
-    return .{ .publication = owner.publication.service.result, .wake = wake, .kind_raw = @intFromEnum(publication.PublicationKind.first) };
+    return .{ .publication = owner.publication.service.result, .wake = wake, .kind_raw = @backingInt(publication.PublicationKind.first) };
 }
 
 fn abortPreparedFirst(
@@ -312,10 +312,10 @@ fn prepareRepeat(
     };
     try client_slot.bindIncidentClientRepeatPublication(&owner.publication.client, commit);
     owner.publication.self_addr = @intFromPtr(&owner.publication);
-    owner.publication.kind_raw = @intFromEnum(publication.PublicationKind.repeat);
+    owner.publication.kind_raw = @backingInt(publication.PublicationKind.repeat);
     owner.publication.publisher = lease_projection;
     owner.publication.input_digest = input_digest;
-    owner.publication.lifecycle_raw = @intFromEnum(publication.PublicationLifecycle.held);
+    owner.publication.lifecycle_raw = @backingInt(publication.PublicationLifecycle.held);
     owner.publication.seal = compositeSeal(&owner.publication);
     appendLeafStage(.composite_held);
 }
@@ -336,17 +336,17 @@ fn commitRepeat(
     runtime.commitPreparedRepeatEvidenceChecked(registry, &owner.lease, &owner.publication.service);
     client_slot.commitRepeatIncidentClientPublicationNoFail(&owner.publication.client, commit);
     appendLeafStage(.client_committed);
-    owner.publication.lifecycle_raw = @intFromEnum(publication.PublicationLifecycle.evidence_committed);
+    owner.publication.lifecycle_raw = @backingInt(publication.PublicationLifecycle.evidence_committed);
     owner.publication.seal = compositeSeal(&owner.publication);
     runtime.publishPreparedPendingAndUnlockChecked(registry, &owner.lease, &owner.publication.service);
-    owner.publication.lifecycle_raw = @intFromEnum(publication.PublicationLifecycle.wake_ready);
+    owner.publication.lifecycle_raw = @backingInt(publication.PublicationLifecycle.wake_ready);
     owner.publication.seal = compositeSeal(&owner.publication);
     const wake = runtime.wakeCommittedPublication(registry, &owner.lease, &owner.publication);
     registry.release(&owner.lease) catch process_seal.fatalIntegrity(.incident_authority);
     client_slot.finishIncidentClientOperationNoFail(&owner.publication.client);
-    owner.publication.lifecycle_raw = @intFromEnum(publication.PublicationLifecycle.published);
+    owner.publication.lifecycle_raw = @backingInt(publication.PublicationLifecycle.published);
     owner.publication.seal = compositeSeal(&owner.publication);
-    return .{ .publication = owner.publication.service.result, .wake = wake, .kind_raw = @intFromEnum(publication.PublicationKind.repeat) };
+    return .{ .publication = owner.publication.service.result, .wake = wake, .kind_raw = @backingInt(publication.PublicationKind.repeat) };
 }
 
 fn abortService(
@@ -387,8 +387,8 @@ fn compositeSeal(value: *const publication.PreparedIncidentPublication) [32]u8 {
 }
 
 fn validComposite(value: *const publication.PreparedIncidentPublication, kind: publication.PublicationKind) bool {
-    return value.self_addr == @intFromPtr(value) and value.kind_raw == @intFromEnum(kind) and
-        value.lifecycle_raw == @intFromEnum(publication.PublicationLifecycle.held) and
+    return value.self_addr == @intFromPtr(value) and value.kind_raw == @backingInt(kind) and
+        value.lifecycle_raw == @backingInt(publication.PublicationLifecycle.held) and
         std.mem.eql(u8, &value.seal, &compositeSeal(value));
 }
 
@@ -408,13 +408,13 @@ fn fixtureInput(slot: *client_slot.ClientSlot) publication.IncidentInput {
         .host_adapter_generation = slot.current.client.incident_binding.host_adapter_generation,
         .connection_generation = slot.current.connection_generation,
         .wire_major = slot.current.client.wire_major,
-        .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),
-        .scope_raw = @intFromEnum(incident.Scope.connection),
-        .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
-        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
-        .host_class_raw = @intFromEnum(incident.HostClass.current),
-        .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
-        .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
+        .reason_raw = @backingInt(incident.ConnectionReason.connection_eof),
+        .scope_raw = @backingInt(incident.Scope.connection),
+        .disposition_raw = @backingInt(incident.Disposition.reconnect),
+        .source_site_raw = @backingInt(incident.SourceSite.client_read),
+        .host_class_raw = @backingInt(incident.HostClass.current),
+        .parser_phase_raw = @backingInt(incident.ParserPhase.idle),
+        .outbound_phase_raw = @backingInt(incident.OutboundPhase.idle),
     };
 }
 
@@ -709,7 +709,7 @@ test "CR0b composite coordinator는 다른 fingerprint repeat를 mutation 없이
     const ring_before = fixture.runtime.service.ring;
     var mismatch = first_input;
     mismatch.timestamp_ns = 2;
-    mismatch.source_site_raw = @intFromEnum(incident.SourceSite.client_event);
+    mismatch.source_site_raw = @backingInt(incident.SourceSite.client_event);
     try std.testing.expectError(
         error.InvalidOwner,
         publishRepeat(&fixture.registry, fixture.runtime, fixture.query(), mismatch),

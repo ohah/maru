@@ -35,7 +35,7 @@ pub const Completion = struct {
     /// 시도를 시작한 순간 데드라인까지 남은 ms(음수면 이미 지남). `deadline_measured` 가 거짓이면 의미 없다.
     deadline_remaining_ms: i64 = 0,
     deadline_measured: bool = false,
-    seal: [32]u8 = [_]u8{0} ** 32,
+    seal: [32]u8 = @as([32]u8, @splat(0)),
     lifecycle: Lifecycle = .pristine,
 
     pub fn outcome(self: *const Completion) !Outcome {
@@ -261,11 +261,11 @@ fn completionSeal(completion: *const Completion) [32]u8 {
     hasher.update(std.mem.asBytes(&completion.order.snapshot.incident_app_instance_nonce));
     hasher.update(std.mem.asBytes(&completion.order.snapshot.incident_sequence));
     hasher.update(std.mem.asBytes(&completion.order.snapshot.absolute_deadline_ns));
-    const result_raw: u8 = @intFromEnum(completion.result);
+    const result_raw: u8 = @backingInt(completion.result);
     hasher.update(std.mem.asBytes(&result_raw));
-    const detail_raw: u8 = @intFromEnum(completion.detail);
+    const detail_raw: u8 = @backingInt(completion.detail);
     hasher.update(std.mem.asBytes(&detail_raw));
-    const failure_raw: u16 = if (completion.connect_failure) |reason| @as(u16, @intFromEnum(reason)) + 1 else 0;
+    const failure_raw: u16 = if (completion.connect_failure) |reason| @as(u16, @backingInt(reason)) + 1 else 0;
     hasher.update(std.mem.asBytes(&failure_raw));
     hasher.update(std.mem.asBytes(&completion.deadline_remaining_ms));
     const measured_raw: u8 = @intFromBool(completion.deadline_measured);
@@ -292,7 +292,7 @@ fn consumedSeal(completion: *const Completion) [32]u8 {
     hasher.update(std.mem.asBytes(&completion.order.snapshot.incident_app_instance_nonce));
     hasher.update(std.mem.asBytes(&completion.order.snapshot.incident_sequence));
     hasher.update(std.mem.asBytes(&completion.order.snapshot.absolute_deadline_ns));
-    const result_raw: u8 = @intFromEnum(completion.result);
+    const result_raw: u8 = @backingInt(completion.result);
     hasher.update(std.mem.asBytes(&result_raw));
     var digest: [32]u8 = undefined;
     hasher.final(&digest);

@@ -36,7 +36,7 @@ test "P4 R3 screen inbox has one aggregate owner and no parallel Client fields" 
     );
     try std.testing.expectEqual(
         @as(usize, 1),
-        count(source, "std.meta.fields(ScreenInbox)"),
+        count(source, "@import(\"type_info_fields\").fields(ScreenInbox)"),
     );
     for ([_][]const u8{
         "fn byteCount(self: *const ScreenInbox)",

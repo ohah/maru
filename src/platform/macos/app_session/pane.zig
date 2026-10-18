@@ -408,7 +408,7 @@ pub fn restoreCwdReachable(cwd: []const u8) bool {
     const path = usableRestoreCwd(cwd) orelse return false;
     var z: [std.fs.max_path_bytes + 2]u8 = undefined;
     // 끝 `/` 는 「디렉터리여야 한다」를 커널이 판정하게 한다(파일이면 ENOTDIR).
-    const zpath = std.fmt.bufPrintZ(&z, "{s}/", .{path}) catch return false;
+    const zpath = std.fmt.bufPrintSentinel(&z, "{s}/", .{path}, 0) catch return false;
     return std.c.access(zpath.ptr, std.posix.X_OK) == 0;
 }
 
@@ -2341,7 +2341,7 @@ test "탭 제목 batch는 원본이 해제돼도 유효한 소유 복사본을 �
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 

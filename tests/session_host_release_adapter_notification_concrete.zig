@@ -48,7 +48,7 @@ test "R2b2 workspace removes only exact app and session roots" {
     defer tmp.cleanup();
     var path: [std.fs.max_path_bytes:0]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &path);
-    const root = try std.fmt.bufPrintZ(path[len..], "/scenario", .{});
+    const root = try std.fmt.bufPrintSentinel(path[len..], "/scenario", .{}, 0);
     const absolute = path[0 .. len + root.len :0];
     var owned: workspace.Workspace = .{};
     try workspace.prepare(&owned, absolute);
@@ -64,7 +64,7 @@ test "R2b2 workspace fails closed on an unexpected sibling" {
     defer tmp.cleanup();
     var path: [std.fs.max_path_bytes:0]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &path);
-    const root = try std.fmt.bufPrintZ(path[len..], "/scenario", .{});
+    const root = try std.fmt.bufPrintSentinel(path[len..], "/scenario", .{}, 0);
     const absolute = path[0 .. len + root.len :0];
     var owned: workspace.Workspace = .{};
     try workspace.prepare(&owned, absolute);
@@ -81,7 +81,7 @@ test "R2c successful scenario receipt is consumed exactly once" {
     defer tmp.cleanup();
     var path: [std.fs.max_path_bytes:0]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &path);
-    const suffix = try std.fmt.bufPrintZ(path[len..], "/receipt.json", .{});
+    const suffix = try std.fmt.bufPrintSentinel(path[len..], "/receipt.json", .{}, 0);
     const absolute = path[0 .. len + suffix.len :0];
 
     var execution: concrete.Execution = .{};

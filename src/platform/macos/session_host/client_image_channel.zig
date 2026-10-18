@@ -281,7 +281,7 @@ test "client image channel: 수립 중 채널은 bind_ack 를 나눠 와도 남�
         _ = c.write(pair.fds[1], &ack, 3);
         try testing.expectEqual(BindProgress.pending, advanceBind(&channel));
         try testing.expectEqual(State.binding, channel.state);
-        const tail = [_]u8{0xEE} ** 4;
+        const tail = @as([4]u8, @splat(0xEE));
         _ = c.write(pair.fds[1], ack[3..].ptr, ack.len - 3);
         _ = c.write(pair.fds[1], &tail, tail.len);
         try testing.expectEqual(BindProgress.bound, advanceBind(&channel));
@@ -295,7 +295,7 @@ test "client image channel: 수립 중 채널은 bind_ack 를 나눠 와도 남�
         defer pair.deinit();
         var channel = bindingChannel(pair.fds[0]);
         var wrong = ack;
-        wrong[4] = @intFromEnum(image_channel_wire.Kind.release);
+        wrong[4] = @backingInt(image_channel_wire.Kind.release);
         _ = c.write(pair.fds[1], &wrong, wrong.len);
         try testing.expectEqual(BindProgress.refused, advanceBind(&channel));
     }

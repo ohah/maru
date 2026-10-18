@@ -8,6 +8,8 @@
 //! `session.editor.diff.compute`가 정한다 — 이 파일은 그 결과를 Term 수명에 맞춰 들고 있을 뿐이다.
 //! 그래야 규칙이 화면 없이 검사된다(둘 다 순수 모듈이고 테스트가 붙어 있다).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const test_env = @import("../../test_env.zig"); // 테스트의 환경 변수 되돌리기(값 복사)
 const maru = @import("maru");
@@ -640,7 +642,7 @@ const Fixture = struct {
             .cols = 80,
             .rows = 24,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+            .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
         });
         errdefer session.deinit();
         session.cell_width_px = 8;
@@ -1022,7 +1024,7 @@ test "훅이 켜지면 비교가 편집기 Term으로 열린다 — 꺼져 있�
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -1072,7 +1074,7 @@ test "init이 훅을 읽는다 — 안 읽으면 MARU_NATIVE_DIFF가 아무 일�
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // init이 그것을 읽어 들었는가. 안 읽으면 여기서 false다.
@@ -1325,7 +1327,19 @@ test "강조 계산이 어디서 할당에 실패해도 새지 않는다 — 실
         }
     };
     // 여러 줄이 짝을 이루고 각 줄에 강조가 여러 덩어리 — 할당 지점이 가장 많은 모양이다.
-    try testing.checkAllAllocationFailures(testing.allocator, Case.run, .{
+    // Zig 0.17's ArrayList can satisfy realloc in-place. The standard helper only injects
+    // alloc failures, so make its backing allocator reject resize/remap to keep prefixes stable.
+    const stable_backing_vtable: std.mem.Allocator.VTable = .{
+        .alloc = testing.allocator.vtable.alloc,
+        .resize = std.mem.Allocator.noResize,
+        .remap = std.mem.Allocator.noRemap,
+        .free = testing.allocator.vtable.free,
+    };
+    const stable_backing: std.mem.Allocator = .{
+        .ptr = testing.allocator.ptr,
+        .vtable = &stable_backing_vtable,
+    };
+    try testing.checkAllAllocationFailures(stable_backing, Case.run, .{
         "a=1 and b=2\nkeep\nx=3 or y=4\n",
         "a=9 and b=8\nkeep\nx=7 or y=6\n",
     });
@@ -4510,8 +4524,8 @@ test "DRB1 제품 경로 — 촘촘한 zig 비교 뷰 68행에서 좌우 줄 번
     var fx = try Fixture.init(allocator);
     defer fx.deinit(allocator);
     const line = "    x(a, \"s\", b, \"t\", c, \"u\", d, \"v\", e, \"w\", f, \"y\", g, \"z\", h, \"q\");\n";
-    const original = line ** 150;
-    const modified = line ** 149 ++ "    done();\n";
+    const original = array_repeat.repeat(line, 150);
+    const modified = array_repeat.repeat(line, 149) ++ "    done();\n";
     var entry = testEntry(original, modified);
     entry.path = @constCast("/tmp/t.zig");
     // 68행 이상 서는 높이 — 제보 화면과 같은 촘촘함.

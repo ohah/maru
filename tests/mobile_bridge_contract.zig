@@ -3,6 +3,8 @@
 //! 브리지는 OS 를 안 부르는 순수 Zig 라(docs/mobile-platform.md §3) 시뮬레이터 없이 돈다.
 //! 여기 있는 것은 전부 **실제로 앱을 죽이거나 화면을 지웠던** 결함의 재발 방지다 — 기기에서
 //! 잡느라 오래 걸린 것들이라, 값이 싼 자리로 내려 둔다.
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const bridge = @import("mobile_bridge");
 /// 화면 문구의 단일 출처.
@@ -10,7 +12,7 @@ const maru = @import("maru");
 /// 서버 목록의 타입은 config 쪽이 소유한다 — 테스트가 목록을 직접 만들 때 쓴다.
 const mobile_config = bridge.mobile_config;
 /// 헤더를 C 로 읽어 그대로 부른다 — 정규식 게이트가 못 보는 **인자 타입**을 컴파일이 잡는다.
-const c_abi = @cImport(@cInclude("mobile_host_abi.h"));
+const c_abi = @import("mobile_host_abi_c");
 
 /// 단일 코드포인트 등록. 계약은 **열**을 받지만(`❤` 와 `❤️` 를 갈라야 해서) 대부분의 테스트는
 /// 클러스터를 안 쓴다.
@@ -4275,7 +4277,7 @@ test "칸이 넘치면 조용히 버리지 않는다" {
     bridge.maru_mobile_pointer(2, 1, 200, ty, now());
     bridge.maru_mobile_clear_error();
 
-    const long = "0123456789" ** 8; // 80바이트 — 칸(64)보다 길다
+    const long = array_repeat.repeat("0123456789", 8); // 80바이트 — 칸(64)보다 길다
     _ = bridge.maru_mobile_input(long, long.len);
     try std.testing.expectEqualStrings("settings_text_overflow", std.mem.span(bridge.maru_mobile_last_error()));
     bridge.maru_mobile_clear_error();
@@ -5520,7 +5522,7 @@ test "칸에 안 들어가는 값은 조용히 잘리지 않는다" {
     bridge.maru_mobile_clear_error();
 
     // 이름 칸(48바이트)에 50바이트를 친다.
-    const long_name = "0123456789" ** 5;
+    const long_name = array_repeat.repeat("0123456789", 5);
     typeServerField(402, h, 0, long_name);
     try std.testing.expectEqualStrings("server_field_invalid", std.mem.span(bridge.maru_mobile_last_error()));
     bridge.maru_mobile_clear_error();
@@ -5631,7 +5633,7 @@ test "자리가 모자라면 반쪽 공개키를 안 준다" {
 }
 
 test "너무 긴 공개키는 안 받는다 — 자르지 않는다" {
-    const long = "x" ** 300;
+    const long = array_repeat.repeat("x", 300);
     bridge.maru_mobile_clear_error();
     bridge.maru_mobile_set_public_key(long, long.len);
     try std.testing.expectEqualStrings("public_key_too_long", std.mem.span(bridge.maru_mobile_last_error()));
@@ -5822,7 +5824,7 @@ test "자리보다 긴 지문은 안 받는다 — 반쪽을 보여 주지 않�
     var pops: u32 = 0;
     while (pops < 6) : (pops += 1) _ = bridge.maru_mobile_pop_screen();
     bridge.maru_mobile_clear_error();
-    const long = "S" ** 200;
+    const long = array_repeat.repeat("S", 200);
     bridge.maru_mobile_set_host_key_prompt(long, long.len);
     try std.testing.expectEqualStrings("host_key_fp_too_long", std.mem.span(bridge.maru_mobile_last_error()));
     try std.testing.expect(!std.mem.eql(u8, "host_key", bridge.currentScreenName()));
@@ -7055,7 +7057,7 @@ test "U2a 다른 세션을 봤다 돌아와도 «빈 화면부터» 다시 쌓�
     var wire: std.ArrayListUnmanaged(u8) = .empty;
     defer wire.deinit(T.allocator);
     try wire.appendSlice(T.allocator, bridge.screen_frame_magic);
-    try wire.append(T.allocator, @intFromEnum(bridge.ScreenFrameKind.snapshot));
+    try wire.append(T.allocator, @backingInt(bridge.ScreenFrameKind.snapshot));
     try wire.appendSlice(T.allocator, &.{ 0, 0, 0 });
     var len_le: [4]u8 = undefined;
     std.mem.writeInt(u32, &len_le, @intCast(frame.items.len), .little);
@@ -7551,7 +7553,7 @@ fn sessionListWireLong(allocator: std.mem.Allocator, n: usize) ![]const u8 {
         const txt = try std.fmt.bufPrint(
             &row,
             "{{\"id\":{{\"surface_id\":{d}}},\"title\":\"{s}\",\"cwd\":\"{s}\",\"git\":\"{s}\",\"agent\":\"{s}\",\"runtime_id\":\"{d:0>32}\"}}",
-            .{ i + 1, "t" ** 60, "/" ++ "d" ** 120, "b" ** 40, "a" ** 40, i + 1 },
+            .{ i + 1, array_repeat.repeat("t", 60), "/" ++ array_repeat.repeat("d", 120), array_repeat.repeat("b", 40), array_repeat.repeat("a", 40), i + 1 },
         );
         try buf.appendSlice(allocator, txt);
     }
@@ -8317,7 +8319,7 @@ test "M9 본문: 화면이 가득 차도 글자 자리가 안 넘친다" {
         var pos: [16]u8 = undefined;
         const seq = std.fmt.bufPrint(&pos, "\x1b[{d};1H", .{row}) catch continue;
         _ = bridge.maru_mobile_input(seq.ptr, seq.len);
-        const line = "0123456789" ** 20; // 200칸
+        const line = array_repeat.repeat("0123456789", 20); // 200칸
         _ = bridge.maru_mobile_input(line, line.len);
     }
     _ = bridge.maru_mobile_build(1200, 900, now());
@@ -8344,7 +8346,7 @@ test "M9 본문: 화면이 가득 차도 글자 자리가 안 넘친다" {
         const seq2 = std.fmt.bufPrint(&pos2, "\x1b[{d};1H", .{row}) catch continue;
         _ = bridge.maru_mobile_input(seq2.ptr, seq2.len);
         // e + 결합 악센트 셋 = 칸 하나에 10바이트
-        const heavy = "e\u{0301}\u{0302}\u{0303}" ** 40;
+        const heavy = array_repeat.repeat("e\u{0301}\u{0302}\u{0303}", 40);
         _ = bridge.maru_mobile_input(heavy, heavy.len);
     }
     _ = bridge.maru_mobile_build(1200, 900, now());
@@ -9409,10 +9411,7 @@ test "M14a 저전력: 평소 주기는 «헤더가» 정한 그 값이다" {
     const T = std.testing;
     bridge.resetLowPowerForTest();
     defer bridge.resetLowPowerForTest();
-    const abi = @cImport({
-        @cInclude("mobile_host_abi.h");
-    });
-    try T.expectEqual(@as(u32, abi.MARU_FRAME_TARGET_HZ), bridge.maru_mobile_frame_target_hz());
+    try T.expectEqual(@as(u32, c_abi.MARU_FRAME_TARGET_HZ), bridge.maru_mobile_frame_target_hz());
 }
 
 test "M9c 선택: 줄 단위 동작으로 «만들 수 있다»" {

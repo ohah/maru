@@ -54,7 +54,7 @@ fn initialFreeSlots() [max_receipts]u16 {
 }
 
 var receipt_mutex: std.atomic.Mutex = .unlocked;
-var receipts: [max_receipts]ReceiptEntry = [_]ReceiptEntry{.{}} ** max_receipts;
+var receipts: [max_receipts]ReceiptEntry = @as([max_receipts]ReceiptEntry, @splat(.{}));
 var free_slots: [max_receipts]u16 = initialFreeSlots();
 var free_count: usize = max_receipts;
 var next_receipt_key: u64 = 1;
@@ -374,12 +374,12 @@ const ReaderPinEntry = struct {
 };
 
 var capability_mutex: std.atomic.Mutex = .unlocked;
-var capabilities: [max_capabilities]CapabilityEntry = [_]CapabilityEntry{.{}} ** max_capabilities;
+var capabilities: [max_capabilities]CapabilityEntry = @as([max_capabilities]CapabilityEntry, @splat(.{}));
 var capability_free_slots: [max_capabilities]u16 = initialFreeSlots();
 var capability_free_count: usize = max_capabilities;
 var next_capability_key: u64 = 1;
 const max_reader_pins = 4096;
-var reader_pins: [max_reader_pins]ReaderPinEntry = [_]ReaderPinEntry{.{}} ** max_reader_pins;
+var reader_pins: [max_reader_pins]ReaderPinEntry = @as([max_reader_pins]ReaderPinEntry, @splat(.{}));
 var reader_free_slots: [max_reader_pins]u16 = initialFreeSlots();
 var reader_free_count: usize = max_reader_pins;
 var next_reader_key: u64 = 1;

@@ -579,7 +579,7 @@ pub fn updateFileTree(self: *AppSession) !void {
                 defer self.file_tree_root_auto_follow = restore_auto;
                 if (pending.request_id != result.request_id or
                     pending.expected_root_generation != result.expected_root_generation or
-                    @intFromEnum(pending.operation) != result.root_operation or
+                    @backingInt(pending.operation) != result.root_operation or
                     pending.round != result.root_validation_round) break :root_result;
                 if (self.file_tree.rootGeneration() != pending.expected_root_generation) {
                     self.file_tree_root_validation = null;
@@ -606,7 +606,7 @@ pub fn updateFileTree(self: *AppSession) !void {
                         canonical,
                         pending.request_id,
                         pending.expected_root_generation,
-                        @intFromEnum(pending.operation),
+                        @backingInt(pending.operation),
                         1,
                     )) {
                         self.allocator.free(canonical);
@@ -2578,7 +2578,7 @@ pub fn openedFileIdentity(self: *AppSession, file: std.Io.File) FilePanelReadErr
         return .{
             .device = @intCast(stat.dev),
             .inode = @intCast(stat.ino),
-            .kind = @intFromEnum(if (std.posix.S.ISREG(stat.mode))
+            .kind = @backingInt(if (std.posix.S.ISREG(stat.mode))
                 file_tree.IdentityKind.regular
             else if (std.posix.S.ISDIR(stat.mode))
                 file_tree.IdentityKind.directory
@@ -2592,7 +2592,7 @@ pub fn openedFileIdentity(self: *AppSession, file: std.Io.File) FilePanelReadErr
     return .{
         .device = 0,
         .inode = @intCast(stat.inode),
-        .kind = @intFromEnum(switch (stat.kind) {
+        .kind = @backingInt(switch (stat.kind) {
             .file => file_tree.IdentityKind.regular,
             .directory => file_tree.IdentityKind.directory,
             .sym_link => file_tree.IdentityKind.symlink,
@@ -4997,7 +4997,7 @@ pub const max_file_panel_close_request_id = maru.session.control_bridge.max_js_s
 
 pub const DeletedSurfaceSet = struct {
     const slot_count = dock_panel.max_entries * 2;
-    keys: [slot_count]u64 = [_]u64{0} ** slot_count,
+    keys: [slot_count]u64 = @as([slot_count]u64, @splat(0)),
 
     fn start(surface_id: u64) usize {
         return @as(usize, @truncate(surface_id *% 0x9e3779b97f4a7c15)) & (slot_count - 1);
@@ -5076,7 +5076,7 @@ pub fn provideFileTreeRootPick(self: *AppSession, path: []const u8) void {
         owned,
         pending.request_id,
         pending.expected_root_generation,
-        @intFromEnum(operation),
+        @backingInt(operation),
         0,
     )) {
         self.allocator.free(owned);

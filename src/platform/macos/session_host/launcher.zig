@@ -547,17 +547,18 @@ test "launcher: readiness envp is completed before fork and replaces ambient sta
 test "launcher: signed E2E supervised child has an exact waitpid owner" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var root_buf: [96]u8 = undefined;
-    const root = try std.fmt.bufPrintZ(
+    const root = try std.fmt.bufPrintSentinel(
         &root_buf,
         "/tmp/maru-supervised-test-isolated-{d}",
         .{c.getpid()},
+        0,
     );
     if (c.mkdir(root.ptr, 0o700) != 0) return error.IsolatedFixtureUnavailable;
     defer _ = c.rmdir(root.ptr);
     var session_buf: [128]u8 = undefined;
-    const session_dir = try std.fmt.bufPrintZ(&session_buf, "{s}/session-host", .{root});
+    const session_dir = try std.fmt.bufPrintSentinel(&session_buf, "{s}/session-host", .{root}, 0);
     var socket_buf: [160]u8 = undefined;
-    const socket_path = try std.fmt.bufPrintZ(&socket_buf, "{s}/sh/unused.sock", .{root});
+    const socket_path = try std.fmt.bufPrintSentinel(&socket_buf, "{s}/sh/unused.sock", .{root}, 0);
     const pid = try spawnSessionHostSupervisedForTest(
         testing.allocator,
         root,
@@ -576,53 +577,57 @@ test "launcher: product-child fixture rejects traversal and symlink aliases of t
     const shared = try short_endpoint.userRootPathIn(&shared_buf, c.getuid());
 
     var traversal_buf: [96]u8 = undefined;
-    const traversal = try std.fmt.bufPrintZ(
+    const traversal = try std.fmt.bufPrintSentinel(
         &traversal_buf,
         "/tmp/maru-launcher-alias/../maru-{d}",
         .{c.getuid()},
+        0,
     );
     var traversal_session_buf: [128]u8 = undefined;
-    const traversal_session = try std.fmt.bufPrintZ(&traversal_session_buf, "{s}/session-host", .{traversal});
+    const traversal_session = try std.fmt.bufPrintSentinel(&traversal_session_buf, "{s}/session-host", .{traversal}, 0);
     var traversal_socket_buf: [160]u8 = undefined;
-    const traversal_socket = try std.fmt.bufPrintZ(&traversal_socket_buf, "{s}/sh/test.sock", .{traversal});
+    const traversal_socket = try std.fmt.bufPrintSentinel(&traversal_socket_buf, "{s}/sh/test.sock", .{traversal}, 0);
     try std.testing.expectError(
         error.SharedUserNamespace,
         validateIsolatedTestNamespace(traversal, traversal_session, traversal_socket),
     );
 
     var isolated_buf: [96]u8 = undefined;
-    const isolated = try std.fmt.bufPrintZ(
+    const isolated = try std.fmt.bufPrintSentinel(
         &isolated_buf,
         "/tmp/maru-launcher-isolated-{d}",
         .{c.getpid()},
+        0,
     );
     if (c.mkdir(isolated.ptr, 0o700) != 0) return error.IsolatedFixtureUnavailable;
     defer _ = c.rmdir(isolated.ptr);
     var child_traversal_buf: [160]u8 = undefined;
-    const child_traversal = try std.fmt.bufPrintZ(
+    const child_traversal = try std.fmt.bufPrintSentinel(
         &child_traversal_buf,
         "{s}/../maru-{d}/session-host",
         .{ isolated, c.getuid() },
+        0,
     );
     var isolated_socket_buf: [160]u8 = undefined;
-    const isolated_socket = try std.fmt.bufPrintZ(&isolated_socket_buf, "{s}/sh/test.sock", .{isolated});
+    const isolated_socket = try std.fmt.bufPrintSentinel(&isolated_socket_buf, "{s}/sh/test.sock", .{isolated}, 0);
     try std.testing.expectError(
         error.SharedUserNamespace,
         validateIsolatedTestNamespace(isolated, child_traversal, isolated_socket),
     );
 
     var alias_buf: [96]u8 = undefined;
-    const alias = try std.fmt.bufPrintZ(
+    const alias = try std.fmt.bufPrintSentinel(
         &alias_buf,
         "/tmp/maru-launcher-live-alias-{d}",
         .{c.getpid()},
+        0,
     );
     if (c.symlink(shared.ptr, alias) != 0) return error.SymlinkFixtureFailed;
     defer _ = c.unlink(alias.ptr);
     var alias_session_buf: [128]u8 = undefined;
-    const alias_session = try std.fmt.bufPrintZ(&alias_session_buf, "{s}/session-host", .{alias});
+    const alias_session = try std.fmt.bufPrintSentinel(&alias_session_buf, "{s}/session-host", .{alias}, 0);
     var alias_socket_buf: [160]u8 = undefined;
-    const alias_socket = try std.fmt.bufPrintZ(&alias_socket_buf, "{s}/sh/test.sock", .{alias});
+    const alias_socket = try std.fmt.bufPrintSentinel(&alias_socket_buf, "{s}/sh/test.sock", .{alias}, 0);
     try std.testing.expectError(
         error.SharedUserNamespace,
         validateIsolatedTestNamespace(alias, alias_session, alias_socket),
@@ -645,12 +650,12 @@ test "launcher: spawnDetached runs a detached child without blocking the parent 
     const allocator = testing.allocator;
 
     var marker_buf: [128]u8 = undefined;
-    const marker = std.fmt.bufPrintZ(&marker_buf, "/tmp/maru-sh-launch-{d}.marker", .{c.getpid()}) catch return error.SkipZigTest;
+    const marker = std.fmt.bufPrintSentinel(&marker_buf, "/tmp/maru-sh-launch-{d}.marker", .{c.getpid()}, 0) catch return error.SkipZigTest;
     _ = c.unlink(marker.ptr); // 이전 잔해 제거.
 
     // detached로 `/bin/sh -c 'touch <marker>'`를 띄운다. 부모(테스트)는 즉시 반환하고, 손자가 marker를 만든다.
     var cmd_buf: [256]u8 = undefined;
-    const cmd = std.fmt.bufPrintZ(&cmd_buf, "touch {s}", .{marker}) catch return error.SkipZigTest;
+    const cmd = std.fmt.bufPrintSentinel(&cmd_buf, "touch {s}", .{marker}, 0) catch return error.SkipZigTest;
     const dash_c: [:0]const u8 = "-c";
     try spawnDetached(allocator, "/bin/sh", &.{ dash_c, cmd }, false);
 
@@ -680,7 +685,7 @@ test "launcher: exec 실패를 부모가 즉시 안다 — 예전엔 알 방법�
 
     // 파일은 있는데 실행이 안 되는 상태 = 부분 설치·격리된 바이너리의 모양이다.
     var path_buf: [128]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/tmp/maru-sh-noexec-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "/tmp/maru-sh-noexec-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     _ = c.unlink(path.ptr);
     const fd = c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o644));
     if (fd < 0) return error.SkipZigTest;
@@ -708,10 +713,11 @@ test "launcher: product daemon pre-ready failure is reported through startup cha
     const product_exe: [:0]const u8 = std.mem.span(product_raw);
 
     var host_dir_buf: [160]u8 = undefined;
-    const host_dir = std.fmt.bufPrintZ(
+    const host_dir = std.fmt.bufPrintSentinel(
         &host_dir_buf,
         "/tmp/maru-sh-startup-file-{d}",
         .{c.getpid()},
+        0,
     ) catch return error.SkipZigTest;
     _ = c.unlink(host_dir.ptr);
     const file_fd = c.open(

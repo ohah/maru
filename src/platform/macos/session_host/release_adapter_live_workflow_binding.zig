@@ -67,7 +67,7 @@ fn actionUses(identity: owner.Identity) ?[]const u8 {
 comptime {
     if (step_ids.len != owner.inventory.len) @compileError("workflow step inventory drift");
     for (bindings, 0..) |item, index| {
-        if (@intFromEnum(item.identity.stage) != index)
+        if (@backingInt(item.identity.stage) != index)
             @compileError("workflow binding stage order drift");
         if (item.action_uses) |uses| {
             if (!std.mem.startsWith(u8, uses, "./.github/actions/") or

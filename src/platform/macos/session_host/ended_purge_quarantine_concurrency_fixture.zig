@@ -24,8 +24,8 @@ fn reserveConcurrent(
 
 fn runWorker() !void {
     var registry = quarantine.Registry.init();
-    var reservations = [_]quarantine.Reservation{.{}} ** worker_count;
-    var won = [_]bool{false} ** worker_count;
+    var reservations = @as([worker_count]quarantine.Reservation, @splat(.{}));
+    var won = @as([worker_count]bool, @splat(false));
     var threads: [worker_count]std.Thread = undefined;
     var started: usize = 0;
     errdefer for (threads[0..started]) |*thread| thread.join();
@@ -99,9 +99,9 @@ pub fn main(init: std.process.Init) !void {
 
     // Prepare every child input before fork. The child path below performs only async-signal-safe
     // libc calls until exec replaces the inherited process image.
-    const executable = try init.gpa.dupeZ(u8, executable_raw);
+    const executable = try init.gpa.dupeSentinel(u8, executable_raw, 0);
     defer init.gpa.free(executable);
-    const worker = try init.gpa.dupeZ(u8, worker_argument);
+    const worker = try init.gpa.dupeSentinel(u8, worker_argument, 0);
     defer init.gpa.free(worker);
     const child_argv = [_:null]?[*:0]const u8{ executable.ptr, worker.ptr };
 

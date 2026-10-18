@@ -16,6 +16,8 @@
 //!   `Runtime.terminateExecution` 을 보내고(`terminated`), 그 뒤 온 답은 결과가 아니다. 대화상자 중에는 terminate 를 보내지 않는다(답한
 //!   뒤 나머지 스크립트를 죽였다 — 3 회차).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const ops = @import("web_cdp_ops.zig");
 
@@ -958,9 +960,9 @@ test "W9a② 던진 값: 객체면 두 번째 호출로 이름·메시지·stack
 
 test "W9a② 진단 payload 상한: 이름 258·메시지 16 KiB·stack 은 24 KiB 의 남는 자리 — 잘리면 diagnostics_truncated, 코드 포인트 경계에서" {
     const gpa = testing.allocator;
-    const long_name = "n" ** 300;
-    const korean = "한" ** 6000; // 18 000 바이트
-    const stack = "s" ** 30000;
+    const long_name = array_repeat.repeat("n", 300);
+    const korean = array_repeat.repeat("한", 6000); // 18 000 바이트
+    const stack = array_repeat.repeat("s", 30000);
     const p = try errorPayload(gpa, "execution", long_name, korean, stack);
     defer gpa.free(p);
     try testing.expect(p.len <= max_error_payload_bytes);

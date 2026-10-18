@@ -54,7 +54,7 @@ const Key = enum {
     ref_protected,
 };
 
-const key_count = @typeInfo(Key).@"enum".fields.len;
+const key_count = @import("type_info_fields").enumFields(Key).len;
 
 /// The executable leaf is allowed to read only this closed environment vocabulary.
 pub const required_names = [_][:0]const u8{
@@ -82,37 +82,37 @@ pub fn parse(entries: []const Entry) Error!Context {
     var values: [key_count]?[]const u8 = @splat(null);
     for (entries) |entry| {
         const key = keyForName(entry.name) orelse return error.UnknownKey;
-        const slot = &values[@intFromEnum(key)];
+        const slot = &values[@backingInt(key)];
         if (slot.* != null) return error.DuplicateKey;
         try validateScalar(entry.value);
         slot.* = entry.value;
     }
     for (values) |value| if (value == null) return error.MissingKey;
 
-    const repository = values[@intFromEnum(Key.repository)].?;
+    const repository = values[@backingInt(Key.repository)].?;
     if (!std.mem.eql(u8, repository, "ohah/maru")) return error.InvalidRepository;
     const repository_id = parseCanonicalU64(
-        values[@intFromEnum(Key.repository_id)].?,
+        values[@backingInt(Key.repository_id)].?,
         error.InvalidRepository,
     ) catch return error.InvalidRepository;
 
-    const tag = values[@intFromEnum(Key.ref_name)].?;
-    const ref = values[@intFromEnum(Key.ref)].?;
-    if (!std.mem.eql(u8, values[@intFromEnum(Key.ref_type)].?, "tag") or
+    const tag = values[@backingInt(Key.ref_name)].?;
+    const ref = values[@backingInt(Key.ref)].?;
+    if (!std.mem.eql(u8, values[@backingInt(Key.ref_type)].?, "tag") or
         !identity.canonicalTag(tag) or
         ref.len != "refs/tags/".len + tag.len or
         !std.mem.startsWith(u8, ref, "refs/tags/") or
         !std.mem.eql(u8, ref["refs/tags/".len..], tag)) return error.InvalidRef;
 
-    if (!std.mem.eql(u8, values[@intFromEnum(Key.event_name)].?, "push"))
+    if (!std.mem.eql(u8, values[@backingInt(Key.event_name)].?, "push"))
         return error.UntrustedTrigger;
-    if (!std.mem.eql(u8, values[@intFromEnum(Key.ref_protected)].?, "true"))
+    if (!std.mem.eql(u8, values[@backingInt(Key.ref_protected)].?, "true"))
         return error.UnprotectedRef;
 
-    const source_commit = values[@intFromEnum(Key.sha)].?;
+    const source_commit = values[@backingInt(Key.sha)].?;
     if (!identity.lowerHex(source_commit, 40)) return error.InvalidSource;
 
-    const workflow_ref = values[@intFromEnum(Key.workflow_ref)].?;
+    const workflow_ref = values[@backingInt(Key.workflow_ref)].?;
     var expected_workflow: [max_value_bytes]u8 = undefined;
     const expected = std.fmt.bufPrint(
         &expected_workflow,
@@ -122,11 +122,11 @@ pub fn parse(entries: []const Entry) Error!Context {
     if (!std.mem.eql(u8, workflow_ref, expected)) return error.InvalidWorkflow;
 
     const run_id = parseCanonicalU64(
-        values[@intFromEnum(Key.run_id)].?,
+        values[@backingInt(Key.run_id)].?,
         error.InvalidBuild,
     ) catch return error.InvalidBuild;
     const run_attempt = parseCanonicalU64(
-        values[@intFromEnum(Key.run_attempt)].?,
+        values[@backingInt(Key.run_attempt)].?,
         error.InvalidBuild,
     ) catch return error.InvalidBuild;
 
@@ -172,7 +172,7 @@ pub fn bindManifest(context: Context, manifest: release_manifest.Manifest) Error
 
 fn keyForName(name: []const u8) ?Key {
     for (required_names, 0..) |candidate, index| {
-        if (std.mem.eql(u8, name, candidate)) return @enumFromInt(index);
+        if (std.mem.eql(u8, name, candidate)) return @fromBackingInt(@intCast(index));
     }
     return null;
 }

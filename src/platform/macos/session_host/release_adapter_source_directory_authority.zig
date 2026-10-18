@@ -7,10 +7,7 @@ const std = @import("std");
 const safe_open = @import("safe_open");
 const bootstrap_mod = @import("release_adapter_executable_bootstrap");
 const c = std.c;
-const libc = @cImport({
-    @cInclude("sys/stat.h");
-});
-const Stat = libc.struct_stat;
+const Stat = c.Stat;
 
 pub const Bootstrap = bootstrap_mod.Bootstrap;
 pub const required_name: [:0]const u8 = "GITHUB_WORKSPACE";
@@ -80,10 +77,10 @@ pub const SourceDirectory = struct {
         const descriptor_flags = c.fcntl(self.fd, c.F.GETFD, @as(c_int, 0));
         var observed: Stat = undefined;
         if (descriptor_flags < 0 or descriptor_flags & c.FD_CLOEXEC == 0 or
-            fstat(self.fd, &observed) != 0 or observed.st_mode & libc.S_IFMT != libc.S_IFDIR or
-            observed.st_uid != c.geteuid() or @as(u64, @intCast(observed.st_dev)) != self.identity.device or
-            @as(u64, @intCast(observed.st_ino)) != self.identity.inode or
-            @as(u32, @intCast(observed.st_uid)) != self.identity.uid) return error.DirectoryChanged;
+            fstat(self.fd, &observed) != 0 or !std.posix.S.ISDIR(observed.mode) or
+            observed.uid != c.geteuid() or @as(u64, @intCast(observed.dev)) != self.identity.device or
+            @as(u64, @intCast(observed.ino)) != self.identity.inode or
+            @as(u32, @intCast(observed.uid)) != self.identity.uid) return error.DirectoryChanged;
     }
 };
 
@@ -121,15 +118,15 @@ pub fn prepare(
         !std.mem.eql(u8, view.context.source_commit, &view.runner.workflow_sha)) return error.SourceMismatch;
 
     var path_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
-    const path = std.fmt.bufPrintZ(&path_storage, "{s}", .{requested_path}) catch
+    const path = std.fmt.bufPrintSentinel(&path_storage, "{s}", .{requested_path}, 0) catch
         return error.InvalidPath;
     const fd = safe_open.openAbsoluteNoFollow(path, true) catch return error.OpenFailed;
     errdefer _ = c.close(fd);
     var observed: Stat = undefined;
     const descriptor_flags = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
     if (descriptor_flags < 0 or descriptor_flags & c.FD_CLOEXEC == 0 or
-        fstat(fd, &observed) != 0 or observed.st_mode & libc.S_IFMT != libc.S_IFDIR or
-        observed.st_uid != c.geteuid()) return error.UnsafeDirectory;
+        fstat(fd, &observed) != 0 or !std.posix.S.ISDIR(observed.mode) or
+        observed.uid != c.geteuid()) return error.UnsafeDirectory;
 
     var source_commit: [40]u8 = undefined;
     @memcpy(&source_commit, view.context.source_commit);
@@ -139,9 +136,9 @@ pub fn prepare(
         .owner = result,
         .fd = fd,
         .identity = .{
-            .device = @intCast(observed.st_dev),
-            .inode = @intCast(observed.st_ino),
-            .uid = @intCast(observed.st_uid),
+            .device = @intCast(observed.dev),
+            .inode = @intCast(observed.ino),
+            .uid = @intCast(observed.uid),
         },
         .path_len = requested_path.len,
         .path_sha256 = path_sha256,
@@ -152,7 +149,7 @@ pub fn prepare(
 }
 
 fn fstat(fd: c.fd_t, observed: *Stat) c_int {
-    return libc.fstat(fd, observed);
+    return c.fstat(fd, observed);
 }
 
 pub fn prepareCurrent(

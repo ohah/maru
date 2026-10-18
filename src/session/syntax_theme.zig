@@ -58,8 +58,8 @@ fn readable(c: color.Rgb, bg_lum: f32, target: f32) color.Rgb {
 // 하나만** 게이트가 읽으므로(실측: `theme.palette.0`~`.15` 중 `.0`만 검사된다), 한 행에 열하나를 적으면
 // 열은 어느 게이트도 안 본다. 그 구멍을 이 블록이 막는다.
 comptime {
-    const role_fields = @typeInfo(theme_config.SyntaxRole).@"enum".fields;
-    const color_fields = @typeInfo(SyntaxColors).@"struct".fields;
+    const role_fields = @import("type_info_fields").enumFields(theme_config.SyntaxRole);
+    const color_fields = @import("type_info_fields").structFields(SyntaxColors);
     if (role_fields.len != color_fields.len) {
         @compileError("SyntaxRole and SyntaxColors must have the same number of entries");
     }
@@ -87,7 +87,7 @@ fn roleColor(
     bg_lum: f32,
     target: f32,
 ) color.Rgb {
-    if (theme.syntax[@intFromEnum(role)]) |explicit| return explicit;
+    if (theme.syntax[@backingInt(role)]) |explicit| return explicit;
     return readable(derived, bg_lum, target);
 }
 
@@ -376,8 +376,8 @@ test "fromTheme keeps every syntax color readable on a dark terminal background"
     var theme: appearance.ResolvedTheme = undefined;
     theme.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
     theme.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 }; // 기본 다크
-    theme.palette = .{null} ** 16;
-    theme.syntax = .{null} ** theme_config.syntax_role_count; // 새 필드도 채운다 — undefined 로 두면 optional 이 쓰레기를 non-null 로 읽는다
+    theme.palette = @splat(null);
+    theme.syntax = @splat(null); // 새 필드도 채운다 — undefined 로 두면 optional 이 쓰레기를 non-null 로 읽는다
     const c = fromTheme(theme);
     const bg_lum = color.relativeLuminance(theme.background);
     // 회귀 가드(하이라이트 불가시 버그): 모든 본문 토큰이 배경 대비 4.0 이상. 밝은 ANSI + contrastFloor라 성립.
@@ -400,8 +400,8 @@ test "fromTheme darkens vivid colors on a light background" {
     var theme: appearance.ResolvedTheme = undefined;
     theme.foreground = .{ .r = 0x20, .g = 0x20, .b = 0x20 };
     theme.background = .{ .r = 0xff, .g = 0xff, .b = 0xff }; // 라이트
-    theme.palette = .{null} ** 16;
-    theme.syntax = .{null} ** theme_config.syntax_role_count; // 새 필드도 채운다 — undefined 로 두면 optional 이 쓰레기를 non-null 로 읽는다
+    theme.palette = @splat(null);
+    theme.syntax = @splat(null); // 새 필드도 채운다 — undefined 로 두면 optional 이 쓰레기를 non-null 로 읽는다
     const c = fromTheme(theme);
     const bg_lum = color.relativeLuminance(theme.background);
     // bright green(0,255,0)은 흰 배경에 저대비 → contrastFloor가 어둡게 보정해 4.0 이상.
@@ -416,8 +416,8 @@ test "syntax colors follow the terminal theme instead of a fixed palette" {
     var dark: appearance.ResolvedTheme = undefined;
     dark.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
     dark.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
-    dark.palette = .{null} ** 16;
-    dark.syntax = .{null} ** theme_config.syntax_role_count;
+    dark.palette = @splat(null);
+    dark.syntax = @splat(null);
     dark.selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 };
 
     var light = dark;
@@ -456,8 +456,8 @@ test "writeCssVarsJs emits all vars as hex and fails closed on small buffer" {
     var theme: appearance.ResolvedTheme = undefined;
     theme.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
     theme.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
-    theme.palette = .{null} ** 16;
-    theme.syntax = .{null} ** theme_config.syntax_role_count; // 새 필드도 채운다 — undefined 로 두면 optional 이 쓰레기를 non-null 로 읽는다
+    theme.palette = @splat(null);
+    theme.syntax = @splat(null); // 새 필드도 채운다 — undefined 로 두면 optional 이 쓰레기를 non-null 로 읽는다
     theme.selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 };
     const c = fromTheme(theme);
     var buf: [1024]u8 = undefined;
@@ -489,8 +489,8 @@ test "diff 색은 터미널 팔레트에서 파생되고 테마를 따라 바뀐
     var theme: appearance.ResolvedTheme = undefined;
     theme.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
     theme.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
-    theme.palette = .{null} ** 16;
-    theme.syntax = .{null} ** theme_config.syntax_role_count; // 새 필드도 채운다 — undefined 로 두면 optional 이 쓰레기를 non-null 로 읽는다
+    theme.palette = @splat(null);
+    theme.syntax = @splat(null); // 새 필드도 채운다 — undefined 로 두면 optional 이 쓰레기를 non-null 로 읽는다
     theme.selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 };
 
     const base = diffFromTheme(theme);
@@ -512,8 +512,8 @@ test "DGC1 진단 색은 ANSI 9·3·4·8 에서 파생돼 다크 배경에서 �
     var theme: appearance.ResolvedTheme = undefined;
     theme.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
     theme.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
-    theme.palette = .{null} ** 16;
-    theme.syntax = .{null} ** theme_config.syntax_role_count;
+    theme.palette = @splat(null);
+    theme.syntax = @splat(null);
     const d = diagnosticsFromTheme(theme);
     const bg_lum = color.relativeLuminance(theme.background);
     // 얇은 지그재그가 배경에 묻히지 않게 본문 토큰과 같은 4.0 — hint(bright black)는 기본값이 3.0 근처라 바닥이 실제로 든다(8회차 H1).
@@ -546,8 +546,8 @@ test "SC2 역할 override 가 파생을 이기고, 안 정한 역할은 파생�
     };
     const derived = fromTheme(t);
 
-    t.syntax[@intFromEnum(theme_config.SyntaxRole.keyword)] = .{ .r = 0x12, .g = 0x34, .b = 0x56 };
-    t.syntax[@intFromEnum(theme_config.SyntaxRole.comment)] = .{ .r = 0x65, .g = 0x43, .b = 0x21 };
+    t.syntax[@backingInt(theme_config.SyntaxRole.keyword)] = .{ .r = 0x12, .g = 0x34, .b = 0x56 };
+    t.syntax[@backingInt(theme_config.SyntaxRole.comment)] = .{ .r = 0x65, .g = 0x43, .b = 0x21 };
     const with_override = fromTheme(t);
 
     // ⑴ 정한 둘은 정확히 그 색이다.
@@ -587,12 +587,12 @@ test "SC7 명시한 색은 보정하지 않고, 파생은 보정한다" {
     };
     // 배경과 거의 같은 색이어도 **그대로** 나온다 — 사용자가 그렇게 골랐다.
     const invisible: color.Rgb = .{ .r = 0x14, .g = 0x14, .b = 0x14 };
-    t.syntax[@intFromEnum(theme_config.SyntaxRole.keyword)] = invisible;
+    t.syntax[@backingInt(theme_config.SyntaxRole.keyword)] = invisible;
     try std.testing.expectEqual(invisible, fromTheme(t).keyword);
 
     // 반대로 **파생**은 보정을 받는다. 라이트 배경에 어두운 팔레트를 두면 그 자리가 움직인다.
     var light = t;
-    light.syntax = .{null} ** theme_config.syntax_role_count;
+    light.syntax = @splat(null);
     light.background = .{ .r = 0xfd, .g = 0xf6, .b = 0xe3 };
     light.foreground = .{ .r = 0x30, .g = 0x30, .b = 0x30 };
     const bright_magenta = color.xterm256(13);
@@ -603,8 +603,8 @@ test "SC8 property 는 function 과, attribute 는 keyword 와 갈린다 — 기
     var dark: appearance.ResolvedTheme = undefined;
     dark.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
     dark.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
-    dark.palette = .{null} ** 16;
-    dark.syntax = .{null} ** theme_config.syntax_role_count;
+    dark.palette = @splat(null);
+    dark.syntax = @splat(null);
     dark.selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 };
     var light = dark;
     light.foreground = .{ .r = 0x20, .g = 0x20, .b = 0x20 };

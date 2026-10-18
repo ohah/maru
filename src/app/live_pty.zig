@@ -1,3 +1,5 @@
+const array_repeat = @import("array_repeat");
+
 const builtin = @import("builtin");
 const std = @import("std");
 const pty = @import("../pty.zig");
@@ -909,7 +911,7 @@ test "입력 fence 뒤에 밀린 옛 셀 픽셀 명령은 더 새 레이아웃 r
     defer surface.deinit();
 
     var path_buf: [96]u8 = undefined;
-    const out_path = try std.fmt.bufPrintZ(&path_buf, "/tmp/maru-cellrace-{d}.bin", .{std.c.getpid()});
+    const out_path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/maru-cellrace-{d}.bin", .{std.c.getpid()}, 0);
     defer _ = std.c.unlink(out_path.ptr);
     var cmd_buf: [192]u8 = undefined;
     // 자식은 raw 로 바꾼 뒤 표식(`RAW`)을 내고 1 초 동안 stdin 을 안 읽는다 — 그동안 넣은 입력이 PTY 버퍼를 채워 그 뒤의
@@ -943,7 +945,7 @@ test "입력 fence 뒤에 밀린 옛 셀 픽셀 명령은 더 새 레이아웃 r
         _ = usleep(1000);
     }
     // ⑴ 자식이 안 읽는 동안 입력을 — raw PTY 입력 버퍼(실측 약 1 KiB)를 넘겨 나머지가 큐에 남는다.
-    const flood = "a" ** 4096;
+    const flood = array_repeat.repeat("a", 4096);
     const flood_count = 2;
     for (0..flood_count) |_| try runtime.writeInput(80, .{ .bytes = flood });
     // ⑵ 옛 결정 B — 그 입력 fence 뒤에 밀린다.
@@ -995,7 +997,7 @@ test "낡은 셀 픽셀 명령을 건너뛰는 reader 는 PTY 격자까지 코�
     defer surface.deinit();
 
     var path_buf: [96]u8 = undefined;
-    const out_path = try std.fmt.bufPrintZ(&path_buf, "/tmp/maru-cellgrid-{d}.bin", .{std.c.getpid()});
+    const out_path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/maru-cellgrid-{d}.bin", .{std.c.getpid()}, 0);
     defer _ = std.c.unlink(out_path.ptr);
     var cmd_buf: [192]u8 = undefined;
     const cmd = try std.fmt.bufPrint(&cmd_buf, "stty raw -echo; printf RAW; sleep 1; exec cat -u > {s}", .{out_path});
@@ -1023,7 +1025,7 @@ test "낡은 셀 픽셀 명령을 건너뛰는 reader 는 PTY 격자까지 코�
         if (std.mem.indexOf(u8, dump, "RAW") != null) break;
         _ = usleep(1000);
     }
-    const flood = "a" ** 4096;
+    const flood = array_repeat.repeat("a", 4096);
     for (0..2) |_| try runtime.writeInput(81, .{ .bytes = flood });
     // 옛 결정 B 가 입력 fence 뒤에 밀린다.
     try runtime.enqueueCoreCommand(81, .{ .set_cell_metrics = .{ .width = 11, .height = 22 } }, std.testing.io);

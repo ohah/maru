@@ -4,6 +4,8 @@
 //! 틀은 http·https 이고 `%s` 가 꼭 하나 있어야 쓴다(`javascript:`·`file:` 같은 틀로 페이지 글을 실행·열지 않게). 아니면 기본 틀을
 //! 쓴다. 메뉴 문구의 엔진 이름은 틀의 호스트에서 정한다(잘 알려진 엔진은 그 이름, 아니면 `www.` 를 뺀 호스트).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const web_sidecar = @import("web_sidecar/root.zig");
 
@@ -163,7 +165,7 @@ test "the engine name comes from the template host — known engines by name, ot
     try std.testing.expectEqualStrings("Google", engineName("https://www.google.co.kr/search?q=%s"));
     try std.testing.expectEqualStrings("[::1]", engineName("http://[::1]/?q=%s"));
     try std.testing.expectEqualStrings("[::1]", engineName("http://[::1]:8080/?q=%s"));
-    const long_host = "https://" ++ "a" ** 100 ++ ".example/?q=%s";
+    const long_host = "https://" ++ array_repeat.repeat("a", 100) ++ ".example/?q=%s";
     try std.testing.expectEqual(@as(usize, max_engine_name_bytes), engineName(long_host).len);
 }
 
@@ -178,7 +180,7 @@ test "the search url percent-encodes the selection, folds whitespace, drops cont
     try std.testing.expect(buildUrl(default_template, " \n\t ", &buf) == null);
     try std.testing.expectEqualStrings("https://www.google.com/search?q=x", buildUrl("javascript:%s", "x", &buf).?);
     // 긴 글은 글자 경계에서 줄인다 — 결과는 상한 안이고 깨진 퍼센트 인코딩이 없다.
-    const long = "가" ** 2000;
+    const long = array_repeat.repeat("가", 2000);
     const url = buildUrl(default_template, long, &buf).?;
     try std.testing.expect(url.len <= max_url_bytes);
     try std.testing.expect(std.mem.endsWith(u8, url, "%EA%B0%80")); // 「가」 = EA B0 80 — 마지막 글자가 온전하다
@@ -186,7 +188,7 @@ test "the search url percent-encodes the selection, folds whitespace, drops cont
     // 뒤가 있는 틀과 빈칸이 섞인 긴 글 — 빈칸의 `%20` 까지 셈해 상한 안에서 끝나고 뒤가 온전하다(출력 버퍼가 딱 상한이어도).
     var exact: [max_url_bytes]u8 = undefined;
     const tail = "https://duckduckgo.com/?q=%s&ia=web";
-    const spaced = buildUrl(tail, "a " ** 20000, &exact).?;
+    const spaced = buildUrl(tail, array_repeat.repeat("a ", 20000), &exact).?;
     try std.testing.expect(spaced.len <= max_url_bytes);
     try std.testing.expect(std.mem.endsWith(u8, spaced, "&ia=web"));
     try std.testing.expect(!std.mem.endsWith(u8, spaced, "%20&ia=web"));

@@ -297,7 +297,7 @@ fn testFold(
             .screen_payload_bytes = screen_bytes,
             .event_count = 0,
             .event_payload_bytes = 0,
-            .digest = [_]u8{0} ** @sizeOf(runtime_event_wire.Digest),
+            .digest = @as([@sizeOf(runtime_event_wire.Digest)]u8, @splat(0)),
         },
         .outcome = outcome,
     };
@@ -444,9 +444,9 @@ test "decision rejects forged metadata binding and leaves input unchanged" {
     var forged_state = testState();
     forged_state.metadata = .{
         .origin = .initial,
-        .raw_digest = [_]u8{0} ** @sizeOf(runtime_event_wire.Digest),
+        .raw_digest = @as([@sizeOf(runtime_event_wire.Digest)]u8, @splat(0)),
         .semantic_digest = .{
-            .initial_seed = [_]u8{0} ** @sizeOf(runtime_event_wire.Digest),
+            .initial_seed = @as([@sizeOf(runtime_event_wire.Digest)]u8, @splat(0)),
         },
         .proof = .{ .initial = .{ .revision = 1 } },
     };
@@ -457,8 +457,8 @@ test "decision rejects forged metadata binding and leaves input unchanged" {
 }
 
 test "decision derives initial and event metadata winners only from sealed fold evidence" {
-    const initial_raw = [_]u8{0x11} ** @sizeOf(runtime_event_wire.Digest);
-    const initial_semantic = [_]u8{0x22} ** @sizeOf(runtime_event_wire.Digest);
+    const initial_raw = @as([@sizeOf(runtime_event_wire.Digest)]u8, @splat(0x11));
+    const initial_semantic = @as([@sizeOf(runtime_event_wire.Digest)]u8, @splat(0x22));
     var initial_state = testState();
     initial_state.metadata = .{
         .origin = .initial,

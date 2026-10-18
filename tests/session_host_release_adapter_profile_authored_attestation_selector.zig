@@ -187,7 +187,7 @@ const Fixture = struct {
 fn absolute(tmp: *std.testing.TmpDir, suffix: []const u8, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(out, "{s}/{s}", .{ root[0..len], suffix });
+    return std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ root[0..len], suffix }, 0);
 }
 
 test "baseline selector fresh-reopens the exact evidence and manifest pair" {
@@ -311,13 +311,13 @@ test "path graph preflight runs before environment and environment drift leaves 
     var environment: Environment = .{ .document = baseline_document };
     var paths = fixture.paths();
     var nested_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    paths.timing = try std.fmt.bufPrintZ(&nested_storage, "{s}/profile-upgrade-timing.json", .{paths.preparation});
+    paths.timing = try std.fmt.bufPrintSentinel(&nested_storage, "{s}/profile-upgrade-timing.json", .{paths.preparation}, 0);
     var plan: selector.Plan = .{};
     try std.testing.expectError(error.InvalidPath, selector.select(std.testing.allocator, trustedContext(), environment.value(), paths, &plan));
     try std.testing.expectEqual(@as(usize, 0), environment.calls);
     paths = fixture.paths();
     var injected_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
-    paths.timing = try std.fmt.bufPrintZ(&injected_storage, "{s}/profile-upgrade-timing.json\nforged=true", .{std.fs.path.dirname(paths.timing).?});
+    paths.timing = try std.fmt.bufPrintSentinel(&injected_storage, "{s}/profile-upgrade-timing.json\nforged=true", .{std.fs.path.dirname(paths.timing).?}, 0);
     try std.testing.expectError(error.InvalidPath, selector.select(std.testing.allocator, trustedContext(), environment.value(), paths, &plan));
     try std.testing.expectEqual(@as(usize, 0), environment.calls);
     environment.drift_at = 3;

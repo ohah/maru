@@ -330,7 +330,7 @@ pub const State = struct {
     /// 대기). 여럿이 동시에 돌면 「이 결과가 어느 칸 것인가」를 그 둘로는 못 가르므로 집합으로 든다.
     ///
     /// 상한이 `max_inflight` 라 고정 배열로 충분하다 — 힙을 잡을 이유가 없다.
-    pending: [decode_backend.max_inflight]Pending = [_]Pending{.{}} ** decode_backend.max_inflight,
+    pending: [decode_backend.max_inflight]Pending = @as([decode_backend.max_inflight]Pending, @splat(.{})),
     pending_len: usize = 0,
     /// 크게 보고 있는 이미지. `null` 이면 격자다. **격자와 배타적**이다 — 둘을 겹쳐 그리면
     /// 어느 것을 누르는지 알 수 없다.
@@ -2962,7 +2962,7 @@ pub fn collectOpenContext(
 /// 문맥을 몇 줄에 어떻게 나눌까 — **순수 결정**. 화면 없이 시험할 수 있다.
 pub const ContextLayout = struct {
     pub const Span = struct { start: usize, len: usize };
-    lines: [max_context_rows]Span = [_]Span{.{ .start = 0, .len = 0 }} ** max_context_rows,
+    lines: [max_context_rows]Span = @as([max_context_rows]Span, @splat(.{ .start = 0, .len = 0 })),
     count: u32 = 0,
     /// 자리가 모자라 남는 글자가 있다 — 마지막 줄 끝에 «…» 를 붙일 근거다.
     ellipsis: bool = false,

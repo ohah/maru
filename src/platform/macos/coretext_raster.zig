@@ -90,7 +90,7 @@ pub const CoreTextGlyphRasterizer = struct {
             request.run.glyph_id,
             // 어느 글리프를 cover-fit·ink 중앙에 둘지는 중립이 정한다(`width.rasterFitFor`) — 예전에는 `.m` 이
             // 같은 범위·codepoint 를 주석-동기로 다시 적었다.
-            @intFromEnum(maru.width.rasterFitFor(request.run.codepoint)),
+            @backingInt(maru.width.rasterFitFor(request.run.codepoint)),
             request.slot.width_px,
             request.slot.height_px,
             request.bytes_per_row,
@@ -231,7 +231,7 @@ test "CoreText rasterizer calls native bridge with registry font identity" {
     const font_id = try registry.intern(.{ .postscript_name = "Menlo-Regular" });
     const run = testRun(font_id, 42);
     const slot = testSlot(run.cache_key);
-    var pixels = [_]u8{0} ** 16;
+    var pixels = @as([16]u8, @splat(0));
 
     const rasterizer = CoreTextGlyphRasterizer{
         .appearance = try config.resolveAppearance(.{}),
@@ -265,7 +265,7 @@ test "CoreText rasterizer honors a rich text role size override" {
     var run = testRun(font_id, 42);
     run.cache_key.raster_font_size_milli = 18_000;
     const slot = testSlot(run.cache_key);
-    var pixels = [_]u8{0} ** 16;
+    var pixels = @as([16]u8, @splat(0));
     const rasterizer = CoreTextGlyphRasterizer{
         .appearance = try config.resolveAppearance(.{}),
         .font_registry = &registry,
@@ -300,10 +300,10 @@ test "CoreText rasterizer passes the neutral raster fit role to the native bridg
         var run = testRun(font_id, 42);
         run.codepoint = c.cp;
         const slot = testSlot(run.cache_key);
-        var pixels = [_]u8{0} ** 16;
+        var pixels = @as([16]u8, @splat(0));
         _ = try rasterizer.rasterize(.{ .run = run, .slot = slot, .pixels = &pixels, .bytes_per_row = 8 });
         try std.testing.expectEqual(@as(usize, 1), test_bridge_capture.call_count); // 폰트 경로를 실제로 탔다
-        try std.testing.expectEqual(@as(u32, @intFromEnum(c.want)), test_bridge_capture.raster_fit);
+        try std.testing.expectEqual(@as(u32, @backingInt(c.want)), test_bridge_capture.raster_fit);
     }
 }
 
@@ -316,7 +316,7 @@ test "CoreText rasterizer fails closed when font identity is missing" {
     defer registry.deinit();
     const run = testRun(99, 42);
     const slot = testSlot(run.cache_key);
-    var pixels = [_]u8{0} ** 16;
+    var pixels = @as([16]u8, @splat(0));
 
     const rasterizer = CoreTextGlyphRasterizer{
         .appearance = try config.resolveAppearance(.{}),
@@ -351,7 +351,7 @@ test "CoreText rasterizer maps native zero-ink to a successful zero-ink upload" 
     const font_id = try registry.intern(.{ .postscript_name = "Menlo-Regular" });
     const run = testRun(font_id, 42);
     const slot = testSlot(run.cache_key);
-    var pixels = [_]u8{0} ** 16;
+    var pixels = @as([16]u8, @splat(0));
 
     const rasterizer = CoreTextGlyphRasterizer{
         .appearance = try config.resolveAppearance(.{}),
@@ -379,7 +379,7 @@ test "CoreText rasterizer maps native failure to renderer raster skip error" {
     const font_id = try registry.intern(.{ .postscript_name = "Menlo-Regular" });
     const run = testRun(font_id, 42);
     const slot = testSlot(run.cache_key);
-    var pixels = [_]u8{0} ** 16;
+    var pixels = @as([16]u8, @splat(0));
 
     const rasterizer = CoreTextGlyphRasterizer{
         .appearance = try config.resolveAppearance(.{}),

@@ -1,5 +1,7 @@
 //! 웹 OSR sidecar 제어 채널의 frame 조립·해체(W1a). 방향 확인은 받는 쪽 `stream.zig` 가 한다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const wire = @import("wire.zig");
 const message_mod = @import("message.zig");
@@ -69,7 +71,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
     try cursor.skip(prefix_len);
     try cursor.writeBytes(&magic);
     try cursor.writeU16(version);
-    try cursor.writeByte(@intFromEnum(message));
+    try cursor.writeByte(@backingInt(message));
 
     switch (message) {
         .hello, .hello_ack => |value| {
@@ -103,13 +105,13 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         },
         .nav_action => |value| {
             try writeBrowser(&cursor, value.browser);
-            try cursor.writeByte(@intFromEnum(value.action));
+            try cursor.writeByte(@backingInt(value.action));
         },
         .mouse => |value| {
             if (!fields.validClickCount(value)) return error.InvalidClickCount;
             try writeBrowser(&cursor, value.browser);
-            try cursor.writeByte(@intFromEnum(value.kind));
-            try cursor.writeByte(@intFromEnum(value.button));
+            try cursor.writeByte(@backingInt(value.kind));
+            try cursor.writeByte(@backingInt(value.button));
             try writePoint(&cursor, value.point);
             try writeModifiers(&cursor, value.modifiers);
             try cursor.writeByte(value.click_count);
@@ -123,7 +125,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         },
         .key => |value| {
             try writeBrowser(&cursor, value.browser);
-            try cursor.writeByte(@intFromEnum(value.kind));
+            try cursor.writeByte(@backingInt(value.kind));
             try writeModifiers(&cursor, value.modifiers);
             try cursor.writeByte(value.windows_key_code);
             try cursor.writeByte(value.native_key_code);
@@ -148,11 +150,11 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .ime_cancel_composition, .capture_lost => |browser| try writeBrowser(&cursor, browser),
         .edit_command => |value| {
             try writeBrowser(&cursor, value.browser);
-            try cursor.writeByte(@intFromEnum(value.command));
+            try cursor.writeByte(@backingInt(value.command));
         },
         .cursor_changed => |value| {
             try writeBrowser(&cursor, value.browser);
-            try cursor.writeByte(@intFromEnum(value.cursor));
+            try cursor.writeByte(@backingInt(value.cursor));
         },
         .ime_range => |value| {
             try writeBrowser(&cursor, value.browser);
@@ -185,7 +187,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         },
         .js_dialog => |value| {
             try writeRequest(&cursor, value.browser, value.request);
-            try cursor.writeByte(@intFromEnum(value.kind));
+            try cursor.writeByte(@backingInt(value.kind));
             try cursor.writeByte(@intFromBool(value.offer_suppress));
             try writeOrigin(&cursor, value.origin);
             try writeDialogText(&cursor, value.message);
@@ -193,7 +195,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         },
         .file_dialog => |value| {
             try writeRequest(&cursor, value.browser, value.request);
-            try cursor.writeByte(@intFromEnum(value.mode));
+            try cursor.writeByte(@backingInt(value.mode));
             try writeDialogText(&cursor, value.title);
             try writeDialogText(&cursor, value.default_path);
             try writeDialogText(&cursor, value.accept);
@@ -209,7 +211,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         },
         .permission_reply => |value| {
             try writeRequest(&cursor, value.browser, value.request);
-            try cursor.writeByte(@intFromEnum(value.result));
+            try cursor.writeByte(@backingInt(value.result));
         },
         .web_notification => |value| {
             try writeBrowser(&cursor, value.browser);
@@ -257,7 +259,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try fields.checkDownloadUpdate(value);
             try writeBrowser(&cursor, value.browser);
             try cursor.writeU32(value.download);
-            try cursor.writeByte(@intFromEnum(value.state));
+            try cursor.writeByte(@backingInt(value.state));
             try cursor.writeU64(@bitCast(value.received));
             try cursor.writeU64(@bitCast(value.total));
             try cursor.writeU16(value.reason);
@@ -272,7 +274,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try writeBrowser(&cursor, value.browser);
             if (value.download == 0) return error.InvalidDownload;
             try cursor.writeU32(value.download);
-            try cursor.writeByte(@intFromEnum(value.action));
+            try cursor.writeByte(@backingInt(value.action));
         },
         .context_menu => |value| {
             try fields.checkContextMenu(value.menu, value.flags, value.selection);
@@ -291,7 +293,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             if (value.menu == 0) return error.InvalidContextMenu;
             try writeBrowser(&cursor, value.browser);
             try cursor.writeU32(value.menu);
-            try cursor.writeByte(@intFromEnum(value.command));
+            try cursor.writeByte(@backingInt(value.command));
         },
         .drag_data => |value| {
             try writeBrowser(&cursor, value.browser);
@@ -300,7 +302,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .drag_target => |value| {
             try fields.checkDragTarget(value);
             try writeBrowser(&cursor, value.browser);
-            try cursor.writeByte(@intFromEnum(value.kind));
+            try cursor.writeByte(@backingInt(value.kind));
             try writePoint(&cursor, value.point);
             try writeModifiers(&cursor, value.modifiers);
             try cursor.writeU32(value.allowed);
@@ -330,7 +332,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             if (value.opener == value.browser or value.placement == .new_window) return error.InvalidPopupAdopt;
             try writeBrowser(&cursor, value.opener);
             try writeBrowser(&cursor, value.browser);
-            try cursor.writeByte(@intFromEnum(value.placement));
+            try cursor.writeByte(@backingInt(value.placement));
             try writeUrl(&cursor, value.url);
         },
         .devtools_call => |value| {
@@ -346,7 +348,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try fields.checkDevtoolsResult(value);
             try writeBrowser(&cursor, value.browser);
             try cursor.writeU32(value.call);
-            try cursor.writeByte(@intFromEnum(value.status));
+            try cursor.writeByte(@backingInt(value.status));
             try cursor.writeU32(value.size);
         },
         .drag_file_request => |value| {
@@ -380,7 +382,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         },
         .open_tab => |value| {
             try writeBrowser(&cursor, value.browser);
-            try cursor.writeByte(@intFromEnum(value.placement));
+            try cursor.writeByte(@backingInt(value.placement));
             try writeUrl(&cursor, value.url);
         },
         .nav_state => |value| {
@@ -399,12 +401,12 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         },
         .renderer_gone => |value| {
             try writeBrowser(&cursor, value.browser);
-            try cursor.writeByte(@intFromEnum(value.reason));
+            try cursor.writeByte(@backingInt(value.reason));
         },
         .failure => |value| {
             // 브라우저에 묶이지 않은 실패는 0 을 싣는다 — 여기만 0 을 허용한다.
             try cursor.writeU64(value.browser);
-            try cursor.writeByte(@intFromEnum(value.code));
+            try cursor.writeByte(@backingInt(value.code));
             try writeText(&cursor, value.detail);
         },
     }
@@ -1027,8 +1029,8 @@ test "view size bounds and NaN scale are rejected both ways" {
 
 test "url and text caps reject cap plus one, empty url and zero browser on encode" {
     var buf: [max_frame_bytes + 64]u8 = undefined;
-    const long_url = [_]u8{'a'} ** (max_url_bytes + 1);
-    const long_text = [_]u8{'a'} ** (max_text_bytes + 1);
+    const long_url = @as([(max_url_bytes + 1)]u8, @splat('a'));
+    const long_text = @as([(max_text_bytes + 1)]u8, @splat('a'));
     try std.testing.expectError(error.UrlTooLarge, encode(.{ .navigate = .{ .browser = 1, .url = &long_url } }, &buf));
     try std.testing.expectError(error.EmptyUrl, encode(.{ .navigate = .{ .browser = 1, .url = "" } }, &buf));
     try std.testing.expectError(error.TextTooLarge, encode(.{ .title_changed = .{ .browser = 1, .text = &long_text } }, &buf));
@@ -1043,7 +1045,7 @@ fn handFrame(out: []u8, tag: Tag, body: []const u8) []const u8 {
     std.mem.writeInt(u32, out[0..prefix_len], @intCast(common_len + body.len), .big);
     @memcpy(out[prefix_len..][0..magic.len], &magic);
     std.mem.writeInt(u16, out[prefix_len + magic.len ..][0..2], version, .big);
-    out[prefix_len + magic.len + 2] = @intFromEnum(tag);
+    out[prefix_len + magic.len + 2] = @backingInt(tag);
     @memcpy(out[prefix_len + common_len ..][0..body.len], body);
     return out[0 .. prefix_len + common_len + body.len];
 }
@@ -1149,13 +1151,13 @@ test "frame_channel carries the service name and the 128-bit token, and refuses 
     try std.testing.expectEqualSlices(u8, &token, &got.frame_channel.token);
 
     var buf: [256]u8 = undefined;
-    const long = [_]u8{'a'} ** 128;
+    const long = @as([128]u8, @splat('a'));
     for ([_][]const u8{ "", "has space", "탭\t", &long }) |bad| {
         try std.testing.expectError(error.InvalidServiceName, encode(.{ .frame_channel = .{ .service = bad, .token = token } }, &buf));
     }
     // 손으로 지은 frame 의 이름에 제어 문자가 섞이면 decode 도 거절한다.
     var frame: [256]u8 = undefined;
-    const body = [_]u8{ 3, 'a', 0x01, 'b' } ++ [_]u8{0} ** 16;
+    const body = [_]u8{ 3, 'a', 0x01, 'b' } ++ @as([16]u8, @splat(0));
     try std.testing.expectError(error.InvalidServiceName, decodeExact(handFrame(&frame, .frame_channel, &body)));
 }
 
@@ -1235,10 +1237,10 @@ test "drag messages round trip, flow the right way, and refuse empty pieces, bad
     try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_operation = .{ .browser = 7, .operation = 64 } }, &buf));
     // 조각 상한: 글은 IME 글 상한, 주소는 URL 상한.
     var big: [max_frame_bytes]u8 = undefined;
-    const long = [_]u8{'a'} ** (max_ime_text_bytes + 1);
+    const long = @as([(max_ime_text_bytes + 1)]u8, @splat('a'));
     _ = try encode(.{ .drag_data = .{ .browser = 7, .kind = .text, .bytes = long[0..max_ime_text_bytes] } }, &big);
     try std.testing.expectError(error.TextTooLarge, encode(.{ .drag_data = .{ .browser = 7, .kind = .text, .bytes = &long } }, &big));
-    const long_url = ("https://a.b/" ++ [_]u8{'x'} ** (max_url_bytes - 12)).*;
+    const long_url = ("https://a.b/" ++ @as([(max_url_bytes - 12)]u8, @splat('x'))).*;
     _ = try encode(.{ .drag_data = .{ .browser = 7, .kind = .url, .bytes = &long_url } }, &big);
     // decode 도 같은 규칙: 알 수 없는 종류 바이트.
     const len = try encode(.{ .drag_target = .{ .browser = 7, .kind = .over, .point = .{ .x = 1, .y = 1 }, .allowed = 1 } }, &buf);
@@ -1287,7 +1289,7 @@ test "drag-out messages round trip, flow the right way, and refuse drag 0, unuse
     try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_source_end = .{ .browser = 7, .drag = 1, .point = .{ .x = 0, .y = 0 }, .operation = 3 } }, &buf));
     try std.testing.expectError(error.InvalidDrag, encode(.{ .drag_target = .{ .browser = 7, .kind = .over, .source = 3 } }, &buf));
     var big: [max_frame_bytes]u8 = undefined;
-    const long = [_]u8{0} ** (max_ime_text_bytes + 1);
+    const long = @as([(max_ime_text_bytes + 1)]u8, @splat(0));
     _ = try encode(.{ .drag_out_data = .{ .browser = 7, .drag = 1, .kind = .image_png, .bytes = long[0..max_ime_text_bytes] } }, &big);
     try std.testing.expectError(error.TextTooLarge, encode(.{ .drag_out_data = .{ .browser = 7, .drag = 1, .kind = .image_png, .bytes = &long } }, &big));
 }
@@ -1479,7 +1481,7 @@ test "input closed fields fail closed both ways" {
     // IME 글: 탭·줄바꿈(받아쓰기)은 받고 다른 제어 문자는 거절한다. 상한은 제목보다 크다.
     try std.testing.expectError(error.ControlCharacter, encode(.{ .ime_commit_text = .{ .browser = 1, .text = "a\x1b" } }, &buf));
     try std.testing.expectEqualStrings("줄\n바꿈\t탭\r", (try roundTrip(.{ .ime_commit_text = .{ .browser = 1, .text = "줄\n바꿈\t탭\r" } })).ime_commit_text.text);
-    const long_ime = [_]u8{'a'} ** (max_ime_text_bytes + 1);
+    const long_ime = @as([(max_ime_text_bytes + 1)]u8, @splat('a'));
     _ = try roundTrip(.{ .ime_commit_text = .{ .browser = 1, .text = long_ime[0..max_ime_text_bytes] } });
     var big: [max_frame_bytes]u8 = undefined;
     try std.testing.expectError(error.TextTooLarge, encode(.{ .ime_commit_text = .{ .browser = 1, .text = &long_ime } }, &big));
@@ -1492,9 +1494,9 @@ test "W9-0b JSON 중첩 깊이 — 문자열 안 괄호는 세지 않는다" {
     try std.testing.expect(fields.jsonDepthWithin("{\"a\":[1,{\"b\":2}]}", 3));
     try std.testing.expect(!fields.jsonDepthWithin("{\"a\":[1,{\"b\":2}]}", 2));
     try std.testing.expect(fields.jsonDepthWithin("{\"a\":\"[[[[\\\"{{{\"}", 1));
-    const deep = "[" ** 65 ++ "]" ** 65;
+    const deep = array_repeat.repeat("[", 65) ++ array_repeat.repeat("]", 65);
     try std.testing.expect(!fields.jsonDepthWithin("{\"a\":" ++ deep ++ "}", message_mod.max_devtools_params_depth));
-    try std.testing.expect(fields.jsonDepthWithin("{\"a\":" ++ "[" ** 63 ++ "]" ** 63 ++ "}", message_mod.max_devtools_params_depth));
+    try std.testing.expect(fields.jsonDepthWithin("{\"a\":" ++ array_repeat.repeat("[", 63) ++ array_repeat.repeat("]", 63) ++ "}", message_mod.max_devtools_params_depth));
 }
 
 test "W9-0b DevTools 호출: 왕복과 닫힌 필드" {
@@ -1893,7 +1895,7 @@ test "datalist closed fields fail closed" {
     try std.testing.expectEqual(message_mod.max_datalist_items, builder.count);
     try std.testing.expect(!builder.add("y", ""));
     // 긴 글은 글자 경계에서 자르고(건너뛰지 않는다 — 번호가 어긋나지 않게), 제어 문자는 공백, 다듬어 값과 같아진 레이블은 비운다.
-    const long = "가" ** (message_mod.max_datalist_text_bytes / 3 + 1);
+    const long = array_repeat.repeat("가", (message_mod.max_datalist_text_bytes / 3 + 1));
     var room: [2 * message_mod.max_datalist_text_bytes + 8]u8 = undefined;
     var clamp: fields.DatalistBuilder = .{ .buf = &room };
     try std.testing.expect(clamp.add(long, "a\x01b"));
@@ -1950,7 +1952,7 @@ test "download messages round trip, flow the right way, and fail closed (W10a)" 
     bad.total = -2;
     try std.testing.expectError(error.InvalidDownload, encode(.{ .download_begin = bad }, &buf));
     bad = ok;
-    bad.name = "a" ** (message_mod.max_download_name_bytes + 1);
+    bad.name = array_repeat.repeat("a", (message_mod.max_download_name_bytes + 1));
     try std.testing.expectError(error.InvalidDownload, encode(.{ .download_begin = bad }, &buf));
     try std.testing.expectError(error.InvalidDownload, encode(.{ .download_update = .{ .browser = 1, .download = 1, .state = .complete, .received = -1, .total = 0, .reason = 0 } }, &buf));
     try std.testing.expectError(error.InvalidPath, encode(.{ .download_decide = .{ .browser = 1, .download = 1, .path = "relative" } }, &buf));
@@ -1985,7 +1987,7 @@ test "W9c①: console_message round-trips level, docs_back, the drop counts (old
 
 test "W9c①: console text has its own 8192-byte cap (not the 4 KiB title cap), must be UTF-8 and refuses control characters" {
     var buf: [max_frame_bytes]u8 = undefined;
-    const full = "가" ** (wire.max_console_text_bytes / 3) ++ "ab"; // 정확히 8192 바이트
+    const full = array_repeat.repeat("가", (wire.max_console_text_bytes / 3)) ++ "ab"; // 정확히 8192 바이트
     try std.testing.expectEqual(wire.max_console_text_bytes, full.len);
     try std.testing.expect(full.len > max_text_bytes);
     try std.testing.expectEqual(full.len, (try roundTrip(.{ .console_message = .{ .browser = 1, .text = full } })).console_message.text.len);

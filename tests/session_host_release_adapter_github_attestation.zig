@@ -207,7 +207,7 @@ test "same-run bundle uses exact absolute paths in a real token-free child" {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);
     var script_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const script_path = try std.fmt.bufPrintZ(&script_storage, "{s}/gh", .{root[0..root_len]});
+    const script_path = try std.fmt.bufPrintSentinel(&script_storage, "{s}/gh", .{root[0..root_len]}, 0);
     if (c.chmod(script_path.ptr, 0o755) != 0) return error.FixtureFailed;
     var artifact_storage: [std.fs.max_path_bytes]u8 = undefined;
     const artifact_path = try std.fmt.bufPrint(&artifact_storage, "{s}/artifact.dmg", .{root[0..root_len]});
@@ -332,10 +332,10 @@ test "held-directory artifact verification uses the exact directory vnode in a r
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);
     var script_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const script_path = try std.fmt.bufPrintZ(&script_storage, "{s}/gh", .{root[0..root_len]});
+    const script_path = try std.fmt.bufPrintSentinel(&script_storage, "{s}/gh", .{root[0..root_len]}, 0);
     if (c.chmod(script_path.ptr, 0o755) != 0) return error.FixtureFailed;
     var root_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const root_path = try std.fmt.bufPrintZ(&root_storage, "{s}", .{root[0..root_len]});
+    const root_path = try std.fmt.bufPrintSentinel(&root_storage, "{s}", .{root[0..root_len]}, 0);
     const directory_fd = c.open(root_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true }, @as(c.mode_t, 0));
     if (directory_fd < 0) return error.FixtureFailed;
     defer _ = c.close(directory_fd);

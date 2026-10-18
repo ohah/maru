@@ -44,14 +44,14 @@ test "actual DMG authority mounts read-only fixed product and leaves zero residu
     var expected_sha: [64]u8 = undefined;
     @memcpy(&expected_sha, sha);
     var candidate_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    const candidate_z = try std.fmt.bufPrintZ(&candidate_buf, "{s}", .{candidate});
+    const candidate_z = try std.fmt.bufPrintSentinel(&candidate_buf, "{s}", .{candidate}, 0);
     const expected = authority.ExpectedDmg{
         .size = try std.fmt.parseInt(u64, std.mem.span(size_raw), 10),
         .sha256 = expected_sha,
     };
     for ([_]?usize{ null, 3 }) |fail_at| {
         var work_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-        const work_z = try std.fmt.bufPrintZ(&work_buf, "{s}-{s}", .{ work_root, if (fail_at == null) "success" else "failure" });
+        const work_z = try std.fmt.bufPrintSentinel(&work_buf, "{s}-{s}", .{ work_root, if (fail_at == null) "success" else "failure" }, 0);
         var fake = FakeApple{ .fail_at = fail_at };
         var storage: apple_transport.Storage = undefined;
         if (fail_at == null) {

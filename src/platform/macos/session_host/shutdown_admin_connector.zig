@@ -56,7 +56,7 @@ pub fn connectExactCurrent(
     exact: host_manifest.Descriptor,
 ) Outcome {
     if (!eligibleCurrent(exact)) return .{ .unavailable = .invalid_manifest };
-    const endpoint = allocator.dupeZ(u8, exact.endpoint) catch
+    const endpoint = allocator.dupeSentinel(u8, exact.endpoint, 0) catch
         return .{ .unavailable = .out_of_memory };
     defer allocator.free(endpoint);
 
@@ -76,7 +76,7 @@ pub fn connectExactCurrentUntil(
     deadline: client_deadline.AbsoluteDeadline,
 ) Outcome {
     if (!eligibleCurrent(exact)) return .{ .unavailable = .invalid_manifest };
-    const endpoint = allocator.dupeZ(u8, exact.endpoint) catch
+    const endpoint = allocator.dupeSentinel(u8, exact.endpoint, 0) catch
         return .{ .unavailable = .out_of_memory };
     defer allocator.free(endpoint);
     var client = client_mod.Client.connectAdminUntil(allocator, endpoint, deadline) catch |err|
@@ -102,7 +102,7 @@ fn connectExactPreviousUntil(
         return .{ .unavailable = .invalid_manifest };
     if (!eligiblePrevious(exact, profile, shutdown))
         return .{ .unavailable = .invalid_manifest };
-    const endpoint = allocator.dupeZ(u8, exact.endpoint) catch
+    const endpoint = allocator.dupeSentinel(u8, exact.endpoint, 0) catch
         return .{ .unavailable = .out_of_memory };
     defer allocator.free(endpoint);
     var client = client_mod.Client.connectFrozenShutdownUntil(
@@ -382,7 +382,7 @@ test "C3-3b6 실제 이전 wire 기준은 ambiguous 뒤 destructive retry를 하
         allocator,
     );
     defer allocator.free(baseline);
-    const baseline_z = try allocator.dupeZ(u8, baseline);
+    const baseline_z = try allocator.dupeSentinel(u8, baseline, 0);
     defer allocator.free(baseline_z);
     const identity = try staged_image.inspect(baseline_z);
     try std.testing.expectEqualSlices(u8, &shutdown_n1_baseline.artifact_sha256, &identity.sha256);
@@ -399,7 +399,7 @@ test "C3-3b6 실제 이전 wire 기준은 ambiguous 뒤 destructive retry를 하
     try std.testing.expectEqualSlices(u8, &shutdown_n1_baseline.source_patch_sha256, &source_patch_digest);
 
     var base_buf: [192]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(&base_buf, "/tmp/maru-c3b6-n1-{d}", .{c.getpid()});
+    const base = try std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-c3b6-n1-{d}", .{c.getpid()}, 0);
     std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
     _ = c.mkdir(base.ptr, 0o700);
     var session_buf: [256]u8 = undefined;
@@ -597,7 +597,7 @@ fn runActualTerminate(inject_response_proof_loss: bool) !void {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var base_buf: [192]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(&base_buf, "/tmp/maru-c3b6-admin-{d}", .{c.getpid()});
+    const base = try std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-c3b6-admin-{d}", .{c.getpid()}, 0);
     std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
     _ = c.mkdir(base.ptr, 0o700);
     var session_buf: [256]u8 = undefined;
@@ -765,7 +765,7 @@ test "C3-3b6 actual socket은 detach host EOF 뒤 fresh GUI 재접속을 증명�
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var base_buf: [192]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(&base_buf, "/tmp/maru-c3b6-reconnect-{d}", .{c.getpid()});
+    const base = try std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-c3b6-reconnect-{d}", .{c.getpid()}, 0);
     std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
     _ = c.mkdir(base.ptr, 0o700);
     var session_buf: [256]u8 = undefined;

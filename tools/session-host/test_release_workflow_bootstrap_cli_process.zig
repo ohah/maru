@@ -16,7 +16,7 @@ pub fn main(init: std.process.Init) !void {
     var environment = try trustedEnvironment(init.gpa);
     defer environment.deinit();
     var root_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const template = try std.fmt.bufPrintZ(&root_storage, "/private/tmp/maru-workflow-bootstrap.XXXXXX", .{});
+    const template = try std.fmt.bufPrintSentinel(&root_storage, "/private/tmp/maru-workflow-bootstrap.XXXXXX", .{}, 0);
     const root: [:0]const u8 = std.mem.span(mkdtemp(template.ptr) orelse return error.TempRootFailed);
     defer std.Io.Dir.cwd().deleteTree(init.io, root) catch {};
     if (c.chmod(root.ptr, 0o700) != 0) return error.PrivateRootFailed;
@@ -69,7 +69,7 @@ fn expectSilentFailure(io: std.Io, allocator: std.mem.Allocator, executable: []c
 }
 
 fn childPath(storage: *[std.fs.max_path_bytes:0]u8, root: []const u8, leaf: []const u8) ![:0]const u8 {
-    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root, leaf });
+    return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ root, leaf }, 0);
 }
 
 fn trustedEnvironment(allocator: std.mem.Allocator) !std.process.Environ.Map {

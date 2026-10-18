@@ -90,7 +90,7 @@ pub const EventFilter = struct {
     }
 
     fn bit(k: EventKind) u8 {
-        return @as(u8, 1) << @intCast(@intFromEnum(k));
+        return @as(u8, 1) << @intCast(@backingInt(k));
     }
 };
 

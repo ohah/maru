@@ -884,7 +884,7 @@ pub const Rasterizer = struct {
         // 루트다. 이 자리가 공격자 것이 되려면 **maru 를 적대적 트리 안에서 빌드**해야 하는데,
         // 그 지경이면 폰트가 문제가 아니다.
         const cwd: []const u8 = if (builtin.is_test) "." else "";
-        const up_levels: usize = if (builtin.mode == .Debug or builtin.is_test) 2 else 0;
+        const up_levels: usize = if (builtin.mode == .debug or builtin.is_test) 2 else 0;
         for (maru.path_shape.assetSearchRoots(exe_dir, cwd, up_levels, &roots)) |root| {
             const joined = std.fmt.bufPrint(out, "{s}/{s}", .{ root, rel }) catch continue;
             // **열어 봐야 안다.** `CreateFontFileReference` 는 없는 경로에도 `hr=0` 이라 존재 확인이

@@ -301,9 +301,9 @@ fn promoteCore(allocator: std.mem.Allocator, sources: Sources, destination: [:0]
     var stage_path: [std.fs.max_path_bytes:0]u8 = undefined;
     const destination_parent = std.fs.path.dirname(destination) orelse return error.InvalidPath;
     const stage_path_value = if (std.mem.eql(u8, destination_parent, "/"))
-        std.fmt.bufPrintZ(&stage_path, "/{s}", .{stage_name}) catch unreachable
+        std.fmt.bufPrintSentinel(&stage_path, "/{s}", .{stage_name}, 0) catch unreachable
     else
-        std.fmt.bufPrintZ(&stage_path, "{s}/{s}", .{ destination_parent, stage_name }) catch unreachable;
+        std.fmt.bufPrintSentinel(&stage_path, "{s}/{s}", .{ destination_parent, stage_name }, 0) catch unreachable;
     const directory_fd = c.openat(parent.fd, stage_name.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
     if (directory_fd < 0) {
         _ = c.unlinkat(parent.fd, stage_name.ptr, posix.AT.REMOVEDIR);
@@ -338,13 +338,13 @@ fn completePromotion(allocator: std.mem.Allocator, sources: Sources, observation
     const caps = [_]usize{ evidence_mod.max_evidence_bytes, manifest_mod.max_manifest_bytes };
     const stage_path_value: [:0]const u8 = working.stage_path[0..working.stage_path_len :0];
     for (0..role_count) |index| {
-        const source = sources.at(@enumFromInt(index));
+        const source = sources.at(@fromBackingInt(@intCast(index)));
         const name = role_names[index];
         if (!validComponent(name) or name.len >= working.names[index].len) return error.InvalidPath;
         @memcpy(working.names[index][0..name.len], name);
         working.names[index][name.len] = 0;
         working.name_lens[index] = name.len;
-        const path = std.fmt.bufPrintZ(&working.paths[index], "{s}/{s}", .{ stage_path_value, name }) catch return error.InvalidPath;
+        const path = std.fmt.bufPrintSentinel(&working.paths[index], "{s}/{s}", .{ stage_path_value, name }, 0) catch return error.InvalidPath;
         working.path_lens[index] = path.len;
         var input = source.file.readHeldAlloc(allocator, source.path, caps[index]) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -401,7 +401,7 @@ fn adoptAfterRename(working: *Working, destination: [:0]const u8, final_leaf: [:
     adopted.directory_leaf[final_leaf.len] = 0;
     for (0..role_count) |index| {
         const name = working.names[index][0..working.name_lens[index]];
-        const final_path = std.fmt.bufPrintZ(&adopted.paths[index], "{s}/{s}", .{ destination, name }) catch unreachable;
+        const final_path = std.fmt.bufPrintSentinel(&adopted.paths[index], "{s}/{s}", .{ destination, name }, 0) catch unreachable;
         adopted.path_lens[index] = final_path.len;
         @memcpy(adopted.names[index][0..name.len], name);
         adopted.names[index][name.len] = 0;
@@ -429,7 +429,7 @@ fn validateInputs(sources: Sources, destination: [:0]const u8, result: *const Du
     const result_bytes = std.mem.asBytes(result);
     var identities: [role_count]files.Identity = undefined;
     for (0..role_count) |index| {
-        const source = sources.at(@enumFromInt(index));
+        const source = sources.at(@fromBackingInt(@intCast(index)));
         const observed = source.file.value() orelse return error.InvalidOwner;
         identities[index] = observed.identity;
         if (!canonicalAbsolute(source.root) or !canonicalAbsolute(source.path) or !directChild(source.root, source.path) or
@@ -437,7 +437,7 @@ fn validateInputs(sources: Sources, destination: [:0]const u8, result: *const Du
         if (overlaps(result_bytes, std.mem.asBytes(source.file)) or overlaps(result_bytes, source.root) or
             overlaps(result_bytes, source.path) or overlaps(result_bytes, destination)) return error.InvalidOwner;
         for (0..index) |prior| {
-            const previous = sources.at(@enumFromInt(prior));
+            const previous = sources.at(@fromBackingInt(@intCast(prior)));
             if (overlaps(std.mem.asBytes(source.file), std.mem.asBytes(previous.file))) return error.InvalidOwner;
         }
     }
@@ -530,7 +530,7 @@ pub fn validateHeldSemantic(allocator: std.mem.Allocator, sources: Sources, obse
     if (!std.mem.eql(u8, asset.name, expected_name) or asset.size != observations[0].size or
         !std.mem.eql(u8, asset.sha256, &observations[0].sha256)) return error.InvalidBinding;
     var semantic: Semantic = .{ .profile = profile, .manifest_name = undefined, .manifest_name_len = 0 };
-    const name = std.fmt.bufPrintZ(&semantic.manifest_name, "Maru-{s}-session-host-release.json", .{authored.release.version}) catch return error.InvalidPath;
+    const name = std.fmt.bufPrintSentinel(&semantic.manifest_name, "Maru-{s}-session-host-release.json", .{authored.release.version}, 0) catch return error.InvalidPath;
     semantic.manifest_name_len = name.len;
     if (!std.mem.eql(u8, std.fs.path.basename(sources.evidence.path), expected_name) or
         !std.mem.eql(u8, std.fs.path.basename(sources.manifest.path), name)) return error.InvalidPath;
@@ -540,7 +540,7 @@ pub fn validateHeldSemantic(allocator: std.mem.Allocator, sources: Sources, obse
 fn sourceObservations(sources: Sources) Error![role_count]files.ExecutableObservation {
     var result: [role_count]files.ExecutableObservation = undefined;
     for (0..role_count) |index| {
-        const source = sources.at(@enumFromInt(index));
+        const source = sources.at(@fromBackingInt(@intCast(index)));
         result[index] = source.file.revalidate(source.path) catch return error.SourceChanged;
     }
     return result;
@@ -642,9 +642,9 @@ fn openParent(path: [:0]const u8, leaf_storage: *[std.fs.max_name_bytes:0]u8) Er
     const parent_path = std.fs.path.dirname(path) orelse return error.InvalidPath;
     const leaf = std.fs.path.basename(path);
     if (!canonicalAbsolute(path) or !validComponent(leaf)) return error.InvalidPath;
-    const leaf_z = std.fmt.bufPrintZ(leaf_storage, "{s}", .{leaf}) catch return error.InvalidPath;
+    const leaf_z = std.fmt.bufPrintSentinel(leaf_storage, "{s}", .{leaf}, 0) catch return error.InvalidPath;
     var parent_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const parent_z = std.fmt.bufPrintZ(&parent_storage, "{s}", .{parent_path}) catch return error.InvalidPath;
+    const parent_z = std.fmt.bufPrintSentinel(&parent_storage, "{s}", .{parent_path}, 0) catch return error.InvalidPath;
     return .{ .fd = safe_open.openAbsoluteNoFollow(parent_z, true) catch return error.InvalidPath, .leaf = leaf_z };
 }
 
@@ -652,7 +652,7 @@ fn createStage(parent_fd: c.fd_t, storage: *[std.fs.max_name_bytes:0]u8) Error![
     for (0..8) |_| {
         var nonce: u64 = undefined;
         c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
-        const name = std.fmt.bufPrintZ(storage, ".maru-preparation-{x}", .{nonce}) catch return error.CreateFailed;
+        const name = std.fmt.bufPrintSentinel(storage, ".maru-preparation-{x}", .{nonce}, 0) catch return error.CreateFailed;
         if (c.mkdirat(parent_fd, name.ptr, 0o700) == 0) return name;
         if (posix.errno(-1) != .EXIST) return error.CreateFailed;
     }
@@ -662,7 +662,7 @@ fn createStage(parent_fd: c.fd_t, storage: *[std.fs.max_name_bytes:0]u8) Error![
 fn cleanupName(storage: *[std.fs.max_name_bytes:0]u8) Error![:0]const u8 {
     var nonce: u64 = undefined;
     c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
-    return std.fmt.bufPrintZ(storage, ".maru-preparation-cleanup-{x}", .{nonce}) catch error.CleanupFailed;
+    return std.fmt.bufPrintSentinel(storage, ".maru-preparation-cleanup-{x}", .{nonce}, 0) catch error.CleanupFailed;
 }
 
 fn unlinkExact(parent_fd: c.fd_t, name: [:0]const u8, held_fd: c.fd_t) bool {

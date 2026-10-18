@@ -3,9 +3,7 @@
 pub const delivery_api = @import("notification_os_delivery.zig");
 const delivery = delivery_api;
 
-const c = @cImport({
-    @cInclude("session_host_notification_adapter.h");
-});
+const c = @import("session_host_notification_c");
 
 pub const State = struct {
     pub fn adapter(self: *State) delivery.Adapter {

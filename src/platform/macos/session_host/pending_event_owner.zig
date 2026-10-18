@@ -17,7 +17,7 @@ const lifetime = @import("runtime_lifetime_owner.zig");
 
 const RuntimeObservation = maru.app.RuntimeObservation;
 const CloseProgress = maru.app.term_runtime_backend.CloseProgress;
-const zero_digest = [_]u8{0} ** 32;
+const zero_digest = @as([32]u8, @splat(0));
 
 pub const PendingLifecycle = enum(u8) {
     idle = 0,
@@ -70,8 +70,8 @@ pub const PendingEventIdentity = struct {
 // dependency. Its wire-independent scalar schema must nevertheless remain exactly identical to the
 // cleanup transcript identity used by the seal service.
 comptime {
-    const owner_fields = std.meta.fields(PendingEventIdentity);
-    const cleanup_fields = std.meta.fields(cleanup.PendingEventIdentity);
+    const owner_fields = @import("type_info_fields").fields(PendingEventIdentity);
+    const cleanup_fields = @import("type_info_fields").fields(cleanup.PendingEventIdentity);
     if (owner_fields.len != cleanup_fields.len)
         @compileError("PendingEventIdentity field count drifted from cleanup SSOT");
     for (owner_fields, cleanup_fields) |owner_field, cleanup_field| {
@@ -85,7 +85,7 @@ pub const RawPreparedEventStorage = struct {
     effect_tag_raw: u8 = 0,
     failure_raw: u8 = 0,
     connection_reason_raw: u8 = 0,
-    reserved: [4]u8 = [_]u8{0} ** 4,
+    reserved: [4]u8 = @as([4]u8, @splat(0)),
     cols: u16 = 0,
     rows: u16 = 0,
     semantic_generation: u64 = 0,
@@ -117,8 +117,8 @@ pub const PendingSourceLeaseState = enum(u8) {
 
 pub const PendingEventSourceLease = struct {
     receipt: PendingEventSourceReceipt = .{},
-    state_raw: u8 = @intFromEnum(PendingSourceLeaseState.pristine),
-    reserved: [7]u8 = [_]u8{0} ** 7,
+    state_raw: u8 = @backingInt(PendingSourceLeaseState.pristine),
+    reserved: [7]u8 = @as([7]u8, @splat(0)),
     attempt: u64 = 0,
     lease_seal: cleanup.CleanupSeal = zero_digest,
 };
@@ -135,8 +135,8 @@ pub const PendingEventReleaseReceipt = struct {
     pending_owner_incarnation: u64 = 0,
     source_lease_incarnation: u64 = 0,
     attempt: u64 = 0,
-    state_raw: u8 = @intFromEnum(PendingReleaseState.pristine),
-    reserved: [7]u8 = [_]u8{0} ** 7,
+    state_raw: u8 = @backingInt(PendingReleaseState.pristine),
+    reserved: [7]u8 = @as([7]u8, @splat(0)),
     release_seal: cleanup.CleanupSeal = zero_digest,
 };
 
@@ -170,14 +170,14 @@ pub const SemanticCommitDecision = struct {
     prepared_tag_raw: u8,
     publish_raw: u8,
     disposition_raw: u8,
-    reserved: [5]u8 = [_]u8{0} ** 5,
+    reserved: [5]u8 = @as([5]u8, @splat(0)),
     cols: u16 = 0,
     rows: u16 = 0,
     resize_generation: u64 = 0,
     revoke_fence: u64 = 0,
     observation_probe_nonce: u64 = 0,
     failure_raw: u8 = 0,
-    reserved_tail: [7]u8 = [_]u8{0} ** 7,
+    reserved_tail: [7]u8 = @as([7]u8, @splat(0)),
 };
 
 pub const PreparedSemanticCommit = struct {
@@ -197,9 +197,9 @@ pub const PreparedSemanticCommit = struct {
         .publish_raw = 0,
         .disposition_raw = 0,
     },
-    phase_raw: u8 = @intFromEnum(SemanticCommitPhase.pristine),
+    phase_raw: u8 = @backingInt(SemanticCommitPhase.pristine),
     observation_moved_raw: u8 = 0,
-    reserved: [6]u8 = [_]u8{0} ** 6,
+    reserved: [6]u8 = @as([6]u8, @splat(0)),
     semantic_post_digest: cleanup.CleanupSeal = zero_digest,
     seal: cleanup.CleanupSeal = zero_digest,
 };
@@ -218,8 +218,8 @@ pub const OwnerError = error{
 };
 
 pub const PendingEventOwner = struct {
-    lifecycle_raw: u8 = @intFromEnum(PendingLifecycle.idle),
-    reserved: [7]u8 = [_]u8{0} ** 7,
+    lifecycle_raw: u8 = @backingInt(PendingLifecycle.idle),
+    reserved: [7]u8 = @as([7]u8, @splat(0)),
     self_addr: u64 = 0,
     owner_incarnation: u64 = 0,
     next_attempt: u64 = 1,
@@ -247,7 +247,7 @@ pub const PendingEventOwner = struct {
     /// Burns the attempt before any later allocation can fail.
     pub fn beginPrepare(self: *PendingEventOwner, identity: PendingEventIdentity) OwnerError!u64 {
         try self.validateAddress();
-        if (self.lifecycle_raw != @intFromEnum(PendingLifecycle.idle)) return error.Busy;
+        if (self.lifecycle_raw != @backingInt(PendingLifecycle.idle)) return error.Busy;
         if (self.next_attempt == 0 or self.next_attempt == std.math.maxInt(u64))
             return error.InvalidOwner;
         if (!rawStoragePristine(&self.prepared) or self.active_attempt != 0)
@@ -257,13 +257,13 @@ pub const PendingEventOwner = struct {
         self.next_attempt += 1;
         self.active_attempt = attempt;
         self.event_identity = identity;
-        self.lifecycle_raw = @intFromEnum(PendingLifecycle.preparing);
+        self.lifecycle_raw = @backingInt(PendingLifecycle.preparing);
         return attempt;
     }
 
     pub fn nextSourceLeaseIncarnation(self: *const PendingEventOwner) OwnerError!u64 {
         try self.validateAddress();
-        if (self.lifecycle_raw != @intFromEnum(PendingLifecycle.idle)) return error.Busy;
+        if (self.lifecycle_raw != @backingInt(PendingLifecycle.idle)) return error.Busy;
         if (self.source_lease_incarnation == std.math.maxInt(u64)) return error.InvalidOwner;
         return std.math.add(u64, self.source_lease_incarnation, 1) catch error.InvalidOwner;
     }
@@ -337,7 +337,7 @@ pub const PendingEventOwner = struct {
         try self.publish(attempt, value, next_observation, evidence, false);
         self.source_lease = prepared_source[0];
         self.release_receipt = prepared_source[1];
-        self.lifecycle_raw = @intFromEnum(PendingLifecycle.prepared);
+        self.lifecycle_raw = @backingInt(PendingLifecycle.prepared);
     }
 
     /// Called only after scratch has been cleaned under exact proof and immediately before the
@@ -359,7 +359,7 @@ pub const PendingEventOwner = struct {
                 process_seal.fatalIntegrity(.proof_loss);
             if (state == .active) {
                 var aborted = self.source_lease;
-                aborted.state_raw = @intFromEnum(PendingSourceLeaseState.aborted);
+                aborted.state_raw = @backingInt(PendingSourceLeaseState.aborted);
                 aborted.lease_seal = process_seal.pendingSourceLeaseSeal(
                     aborted.receipt.pid,
                     aborted.receipt.process_nonce,
@@ -382,11 +382,11 @@ pub const PendingEventOwner = struct {
         const effect_request: settlement.EffectRequestProjection = switch (borrowed.effect) {
             .none => .{},
             .poison => |reason| .{
-                .tag_raw = @intFromEnum(settlement.EffectRequestTag.poison),
-                .requested_reason = .{ .present_raw = 1, .reason_raw = @intFromEnum(reason) },
+                .tag_raw = @backingInt(settlement.EffectRequestTag.poison),
+                .requested_reason = .{ .present_raw = 1, .reason_raw = @backingInt(reason) },
             },
             .revoke_fence => |fence| .{
-                .tag_raw = @intFromEnum(settlement.EffectRequestTag.revoke_fence),
+                .tag_raw = @backingInt(settlement.EffectRequestTag.revoke_fence),
                 .revoke_fence = fence,
             },
         };
@@ -419,7 +419,7 @@ pub const PendingEventOwner = struct {
         out: *settlement.PreparedPendingSettlementPermit,
     ) OwnerError!void {
         try self.validateAddress();
-        if (self.lifecycle_raw != @intFromEnum(PendingLifecycle.prepared)) return error.Busy;
+        if (self.lifecycle_raw != @backingInt(PendingLifecycle.prepared)) return error.Busy;
         if (!std.meta.eql(out.*, settlement.PreparedPendingSettlementPermit{}) or
             !std.meta.eql(self.settlement_disposition, settlement.SettlementDisposition{}))
             return error.InvalidOwner;
@@ -464,7 +464,7 @@ pub const PendingEventOwner = struct {
         permit.seal = settlement.sealPendingSettlementPermit(permit) catch return error.InvalidOwner;
         out.* = permit;
         // lifecycle byte만 ready marker이며 일부만 기록된 permit은 항상 invalid다.
-        out.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.prepared);
+        out.lifecycle_raw = @backingInt(settlement.AuthorityLifecycle.prepared);
     }
 
     pub fn armSettlementNoFail(
@@ -481,7 +481,7 @@ pub const PendingEventOwner = struct {
         lifetime_owner.admitSettlementNoFail(lease, binding);
         if (!lifetime_owner.validateAdmittedSettlementBinding(lease, binding))
             process_seal.fatalIntegrity(.proof_loss);
-        self.lifecycle_raw = @intFromEnum(PendingLifecycle.settling);
+        self.lifecycle_raw = @backingInt(PendingLifecycle.settling);
     }
 
     fn settlementArmPreflightValid(
@@ -510,7 +510,7 @@ pub const PendingEventOwner = struct {
         release: *settlement.EventReleaseCompletion,
     ) void {
         if (!lifetime_owner.validateAdmittedSettlementBinding(lease, binding) or
-            self.lifecycle_raw != @intFromEnum(PendingLifecycle.settling) or
+            self.lifecycle_raw != @backingInt(PendingLifecycle.settling) or
             !self.pendingSettlementPermitMatches(permit, binding) or
             permit.pending_owner_addr != self.self_addr or permit.owner_incarnation != self.owner_incarnation or
             permit.attempt != self.active_attempt or permit.effect_out_addr != @intFromPtr(effect) or
@@ -537,7 +537,7 @@ pub const PendingEventOwner = struct {
         else
             .publish_prepared;
         var consumed = self.release_receipt;
-        consumed.state_raw = @intFromEnum(PendingReleaseState.consumed);
+        consumed.state_raw = @backingInt(PendingReleaseState.consumed);
         consumed.release_seal = process_seal.pendingReleaseSeal(
             consumed.event_identity.pid,
             consumed.event_identity.process_nonce,
@@ -546,7 +546,7 @@ pub const PendingEventOwner = struct {
 
         var disposition: settlement.SettlementDisposition = .{
             .self_addr = @intFromPtr(&self.settlement_disposition),
-            .disposition_raw = @intFromEnum(disposition_tag),
+            .disposition_raw = @backingInt(disposition_tag),
             .pid = self.event_identity.pid,
             .process_nonce = self.event_identity.process_nonce,
             .thread_id = @intCast(std.Thread.getCurrentId()),
@@ -566,11 +566,11 @@ pub const PendingEventOwner = struct {
 
         self.release_receipt = consumed;
         self.settlement_disposition = disposition;
-        self.settlement_disposition.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.prepared);
+        self.settlement_disposition.lifecycle_raw = @backingInt(settlement.AuthorityLifecycle.prepared);
         permit.consumed_raw = 1;
-        permit.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.consumed);
+        permit.lifecycle_raw = @backingInt(settlement.AuthorityLifecycle.consumed);
         effect_permit.consumed_raw = 1;
-        effect_permit.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.consumed);
+        effect_permit.lifecycle_raw = @backingInt(settlement.AuthorityLifecycle.consumed);
     }
 
     /// b3가 게시한 disposition과 prepared bytes를 한 번 검증해 b4 의미 commit 권위로 바꾼다.
@@ -587,9 +587,9 @@ pub const PendingEventOwner = struct {
             self.settlement_disposition.disposition_raw,
         ) orelse return error.InvalidOwner;
         const decision: SemanticCommitDecision = .{
-            .prepared_tag_raw = @intFromEnum(std.meta.activeTag(borrowed.event)),
+            .prepared_tag_raw = @backingInt(std.meta.activeTag(borrowed.event)),
             .publish_raw = @intFromBool(disposition == .publish_prepared),
-            .disposition_raw = @intFromEnum(disposition),
+            .disposition_raw = @backingInt(disposition),
             .cols = switch (borrowed.event) {
                 .resize_commit => |resize| resize.size.cols,
                 else => 0,
@@ -608,7 +608,7 @@ pub const PendingEventOwner = struct {
             },
             .observation_probe_nonce = borrowed.observation_probe_nonce,
             .failure_raw = switch (borrowed.event) {
-                .failure => |failure| @intFromEnum(failure),
+                .failure => |failure| @backingInt(failure),
                 else => 0,
             },
         };
@@ -624,12 +624,12 @@ pub const PendingEventOwner = struct {
             .disposition_seal = self.settlement_disposition.seal,
             .prepared_seal = self.progress_seal,
             .decision = decision,
-            .phase_raw = @intFromEnum(SemanticCommitPhase.prepared),
+            .phase_raw = @backingInt(SemanticCommitPhase.prepared),
         };
         prepared.seal = semanticCommitSeal(prepared) catch return error.InvalidOwner;
 
-        self.lifecycle_raw = @intFromEnum(PendingLifecycle.committed_cleanup);
-        self.settlement_disposition.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.consumed);
+        self.lifecycle_raw = @backingInt(PendingLifecycle.committed_cleanup);
+        self.settlement_disposition.lifecycle_raw = @backingInt(settlement.AuthorityLifecycle.consumed);
         out.* = prepared;
         return decision;
     }
@@ -641,13 +641,13 @@ pub const PendingEventOwner = struct {
         out: *RuntimeObservation,
     ) void {
         if (!self.validSemanticCommit(permit, .prepared) or
-            permit.decision.prepared_tag_raw != @intFromEnum(prepared_types.PreparedEventTag.metadata_commit) or
+            permit.decision.prepared_tag_raw != @backingInt(prepared_types.PreparedEventTag.metadata_commit) or
             !observationIsCanonicalEmpty(out) or permit.observation_moved_raw != 0)
             process_seal.fatalIntegrity(.proof_loss);
         out.* = self.prepared.next_observation;
         self.prepared.next_observation = .{};
         permit.observation_moved_raw = 1;
-        permit.phase_raw = @intFromEnum(SemanticCommitPhase.observation_moved);
+        permit.phase_raw = @backingInt(SemanticCommitPhase.observation_moved);
         permit.seal = semanticCommitSeal(permit.*) catch process_seal.fatalIntegrity(.proof_loss);
     }
 
@@ -667,7 +667,7 @@ pub const PendingEventOwner = struct {
             std.mem.allEqual(u8, &semantic_post_digest, 0))
             process_seal.fatalIntegrity(.proof_loss);
         permit.semantic_post_digest = semantic_post_digest;
-        permit.phase_raw = @intFromEnum(SemanticCommitPhase.post_recorded);
+        permit.phase_raw = @backingInt(SemanticCommitPhase.post_recorded);
         permit.seal = semanticCommitSeal(permit.*) catch process_seal.fatalIntegrity(.proof_loss);
     }
 
@@ -695,14 +695,14 @@ pub const PendingEventOwner = struct {
         self.active_attempt = 0;
         self.operation_incarnation = 0;
         self.event_identity = .{};
-        self.lifecycle_raw = @intFromEnum(PendingLifecycle.idle);
-        permit.phase_raw = @intFromEnum(SemanticCommitPhase.consumed);
+        self.lifecycle_raw = @backingInt(PendingLifecycle.idle);
+        permit.phase_raw = @backingInt(SemanticCommitPhase.consumed);
         permit.seal = semanticCommitSeal(permit.*) catch process_seal.fatalIntegrity(.proof_loss);
     }
 
     fn validSettlementDisposition(self: *const PendingEventOwner) bool {
         const value = self.settlement_disposition;
-        if (value.lifecycle_raw != @intFromEnum(settlement.AuthorityLifecycle.prepared) or
+        if (value.lifecycle_raw != @backingInt(settlement.AuthorityLifecycle.prepared) or
             std.enums.fromInt(settlement.SettlementDispositionTag, value.disposition_raw) == null or
             !std.mem.allEqual(u8, &value.reserved, 0) or value.reserved_pid != 0 or
             value.self_addr != @intFromPtr(&self.settlement_disposition) or
@@ -722,13 +722,13 @@ pub const PendingEventOwner = struct {
         permit: *const PreparedSemanticCommit,
         expected_phase: SemanticCommitPhase,
     ) bool {
-        if (self.lifecycle_raw != @intFromEnum(PendingLifecycle.committed_cleanup) or
+        if (self.lifecycle_raw != @backingInt(PendingLifecycle.committed_cleanup) or
             permit.self_addr != @intFromPtr(permit) or permit.pid != self.event_identity.pid or
             permit.process_nonce != self.event_identity.process_nonce or permit.reserved_pid != 0 or
             permit.thread_id != @as(u64, @intCast(std.Thread.getCurrentId())) or
             permit.pending_owner_addr != self.self_addr or permit.owner_incarnation != self.owner_incarnation or
             permit.attempt != self.active_attempt or permit.event_generation != self.event_identity.event_generation or
-            permit.phase_raw != @intFromEnum(expected_phase) or !std.mem.allEqual(u8, &permit.reserved, 0) or
+            permit.phase_raw != @backingInt(expected_phase) or !std.mem.allEqual(u8, &permit.reserved, 0) or
             !std.mem.allEqual(u8, &permit.decision.reserved, 0) or
             !std.mem.allEqual(u8, &permit.decision.reserved_tail, 0) or
             !std.crypto.timing_safe.eql(cleanup.CleanupSeal, permit.disposition_seal, self.settlement_disposition.seal) or
@@ -769,7 +769,7 @@ pub const PendingEventOwner = struct {
         expected_lifecycle: PendingLifecycle,
     ) OwnerError!BorrowedPrepared {
         try self.validateAddress();
-        if (self.lifecycle_raw != @intFromEnum(expected_lifecycle))
+        if (self.lifecycle_raw != @backingInt(expected_lifecycle))
             return error.InvalidOwner;
         if (self.active_attempt == 0) return error.InvalidOwner;
         if (!allZero(&self.reserved) or !allZero(&self.prepared.reserved))
@@ -904,8 +904,8 @@ pub const PendingEventOwner = struct {
             return error.InvalidOwner;
 
         var raw: RawPreparedEventStorage = .{};
-        raw.prepared_tag_raw = @intFromEnum(std.meta.activeTag(value.projection));
-        raw.effect_tag_raw = @intFromEnum(std.meta.activeTag(value.effect));
+        raw.prepared_tag_raw = @backingInt(std.meta.activeTag(value.projection));
+        raw.effect_tag_raw = @backingInt(std.meta.activeTag(value.effect));
         raw.observation_probe_nonce = value.observation_probe_nonce;
         switch (value.projection) {
             .resize_commit => |resize| {
@@ -914,7 +914,7 @@ pub const PendingEventOwner = struct {
                 raw.semantic_generation = resize.resize_generation;
             },
             .revoked => |fence| raw.semantic_generation = fence,
-            .failure => |failure_value| raw.failure_raw = @intFromEnum(failure_value),
+            .failure => |failure_value| raw.failure_raw = @backingInt(failure_value),
             .metadata_commit => {
                 const observation = next_observation orelse return error.InvalidOwner;
                 raw.next_observation = observation.*;
@@ -924,7 +924,7 @@ pub const PendingEventOwner = struct {
         }
         switch (value.effect) {
             .none => {},
-            .poison => |reason| raw.connection_reason_raw = @intFromEnum(reason),
+            .poison => |reason| raw.connection_reason_raw = @backingInt(reason),
             .revoke_fence => |fence| {
                 if (raw.semantic_generation != fence) return error.InvalidOwner;
             },
@@ -939,7 +939,7 @@ pub const PendingEventOwner = struct {
             !std.mem.allEqual(u8, &self.transcript_seal, 0) or
             !std.mem.allEqual(u8, &self.progress_seal, 0)) return error.InvalidOwner;
         self.prepared = raw;
-        if (publish_ready) self.lifecycle_raw = @intFromEnum(PendingLifecycle.prepared);
+        if (publish_ready) self.lifecycle_raw = @backingInt(PendingLifecycle.prepared);
     }
 
     fn validatePublicationEvidence(
@@ -1037,7 +1037,7 @@ pub const PendingEventOwner = struct {
 
     fn validatePreparing(self: *const PendingEventOwner, attempt: u64) OwnerError!void {
         try self.validateAddress();
-        if (self.lifecycle_raw != @intFromEnum(PendingLifecycle.preparing) or
+        if (self.lifecycle_raw != @backingInt(PendingLifecycle.preparing) or
             attempt == 0 or self.active_attempt != attempt)
             return error.InvalidOwner;
     }
@@ -1063,7 +1063,7 @@ pub const PendingEventOwner = struct {
         if (!sourceLeaseValid(self, attempt, &self.source_lease) or
             !releaseReceiptPristine(&self.release_receipt)) return error.InvalidOwner;
         var consumed = self.source_lease;
-        consumed.state_raw = @intFromEnum(PendingSourceLeaseState.consumed);
+        consumed.state_raw = @backingInt(PendingSourceLeaseState.consumed);
         consumed.lease_seal = process_seal.pendingSourceLeaseSeal(
             consumed.receipt.pid,
             consumed.receipt.process_nonce,
@@ -1076,7 +1076,7 @@ pub const PendingEventOwner = struct {
             .pending_owner_incarnation = self.owner_incarnation,
             .source_lease_incarnation = self.source_lease_incarnation,
             .attempt = attempt,
-            .state_raw = @intFromEnum(PendingReleaseState.live),
+            .state_raw = @backingInt(PendingReleaseState.live),
         };
         release.release_seal = process_seal.pendingReleaseSeal(
             consumed.receipt.pid,
@@ -1145,7 +1145,7 @@ pub const testing = if (builtin.is_test) struct {
             .observation_revision = 0,
             .observer_generation = 0,
             .title_generation = 0,
-            .observation_digest = [_]u8{0x71 +% seed} ** 32,
+            .observation_digest = @as([32]u8, @splat(0x71 +% seed)),
             .preparation_attempt = attempt,
             .pending_lifecycle = .preparing,
             .plan = .{ .preparation = .{ .dto_backing = .{}, .next_observation = .{} } },
@@ -1181,7 +1181,7 @@ pub const testing = if (builtin.is_test) struct {
         );
         owner.source_lease = .{
             .receipt = source_receipt,
-            .state_raw = @intFromEnum(PendingSourceLeaseState.consumed),
+            .state_raw = @backingInt(PendingSourceLeaseState.consumed),
             .attempt = attempt,
         };
         owner.source_lease.lease_seal = try process_seal.pendingSourceLeaseSeal(
@@ -1195,7 +1195,7 @@ pub const testing = if (builtin.is_test) struct {
             .pending_owner_incarnation = owner.owner_incarnation,
             .source_lease_incarnation = 1,
             .attempt = attempt,
-            .state_raw = @intFromEnum(PendingReleaseState.live),
+            .state_raw = @backingInt(PendingReleaseState.live),
         };
         owner.release_receipt.release_seal = try process_seal.pendingReleaseSeal(
             identity.pid,
@@ -1246,7 +1246,7 @@ pub const testing = if (builtin.is_test) struct {
         owner.active_attempt = 0;
         owner.operation_incarnation = 0;
         owner.event_identity = .{};
-        owner.lifecycle_raw = @intFromEnum(PendingLifecycle.idle);
+        owner.lifecycle_raw = @backingInt(PendingLifecycle.idle);
     }
 } else struct {};
 
@@ -1321,7 +1321,7 @@ fn sourceLeaseValidState(
     lease: *const PendingEventSourceLease,
     expected_state: PendingSourceLeaseState,
 ) bool {
-    if (lease.state_raw != @intFromEnum(expected_state) or
+    if (lease.state_raw != @backingInt(expected_state) or
         lease.attempt != attempt or !allZero(&lease.reserved) or
         lease.receipt.pending_owner_addr != owner.self_addr or
         lease.receipt.pending_owner_incarnation != owner.owner_incarnation or
@@ -1357,7 +1357,7 @@ fn releaseReceiptValidState(
     receipt: *const PendingEventReleaseReceipt,
     state: PendingReleaseState,
 ) bool {
-    if (receipt.state_raw != @intFromEnum(state) or receipt.attempt != attempt or
+    if (receipt.state_raw != @backingInt(state) or receipt.attempt != attempt or
         !allZero(&receipt.reserved) or receipt.pending_owner_addr != owner.self_addr or
         receipt.pending_owner_incarnation != owner.owner_incarnation or
         receipt.source_lease_incarnation != owner.source_lease_incarnation or
@@ -1398,7 +1398,7 @@ fn sourceReceiptSealInput(receipt: PendingEventSourceReceipt) cleanup.PendingSou
 
 fn identityForSeal(value: PendingEventIdentity) cleanup.PendingEventIdentity {
     var out: cleanup.PendingEventIdentity = undefined;
-    inline for (std.meta.fields(cleanup.PendingEventIdentity)) |field|
+    inline for (@import("type_info_fields").fields(cleanup.PendingEventIdentity)) |field|
         @field(out, field.name) = @field(value, field.name);
     return out;
 }
@@ -1513,7 +1513,7 @@ fn rawDecisionMatchesProgress(
 /// resize generation과 revoke fence는 서로 배타적인 tag가 쓰는 `semantic_generation` 하나를 공유한다.
 fn projectionFromRaw(raw: RawPreparedEventStorage) prepared_types.DecisionSealProjection {
     var projection: prepared_types.DecisionSealProjection = .{ .bound_raw = 1 };
-    inline for (std.meta.fields(prepared_types.DecisionSealProjection)) |field| {
+    inline for (@import("type_info_fields").fields(prepared_types.DecisionSealProjection)) |field| {
         if (comptime !std.mem.eql(u8, field.name, "bound_raw")) {
             if (!@hasField(RawPreparedEventStorage, field.name))
                 @compileError("raw prepared decision field missing: " ++ field.name);
@@ -1539,11 +1539,11 @@ fn testIdentity() PendingEventIdentity {
 }
 
 test "C3-3b2b3 owner identity exact projection and lifecycle ABI" {
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(PendingLifecycle.idle));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(PendingLifecycle.preparing));
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(PendingLifecycle.prepared));
+    try std.testing.expectEqual(@as(u8, 0), @backingInt(PendingLifecycle.idle));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(PendingLifecycle.preparing));
+    try std.testing.expectEqual(@as(u8, 2), @backingInt(PendingLifecycle.prepared));
     const names = .{ "expected_major", "metadata_support_raw", "correlation_binding_digest", "payload_digest", "admission_projection_digest", "wire_major", "admission_tag", "registry_incarnation", "binding_reservation_id", "event_node_incarnation", "stream_id", "event_generation", "event_owner_addr", "slot_incarnation", "owner_node_incarnation", "transport_incarnation", "host_id", "runtime_id", "connection_generation", "pid", "process_nonce" };
-    inline for (std.meta.fields(PendingEventIdentity), names) |field, name|
+    inline for (@import("type_info_fields").fields(PendingEventIdentity), names) |field, name|
         try std.testing.expectEqualStrings(name, field.name);
 
     const source_fields = .{
@@ -1554,7 +1554,7 @@ test "C3-3b2b3 owner identity exact projection and lifecycle ABI" {
         .{ "pid", u32 },                             .{ "process_nonce", u64 },
         .{ "thread_id", u64 },                       .{ "receipt_seal", cleanup.CleanupSeal },
     };
-    inline for (std.meta.fields(PendingEventSourceReceipt), source_fields) |field, expected| {
+    inline for (@import("type_info_fields").fields(PendingEventSourceReceipt), source_fields) |field, expected| {
         try std.testing.expectEqualStrings(expected[0], field.name);
         try std.testing.expect(field.type == expected[1]);
     }
@@ -1564,7 +1564,7 @@ test "C3-3b2b3 owner identity exact projection and lifecycle ABI" {
         .{ "attempt", u64 },                         .{ "state_raw", u8 },
         .{ "reserved", [7]u8 },                      .{ "release_seal", cleanup.CleanupSeal },
     };
-    inline for (std.meta.fields(PendingEventReleaseReceipt), release_fields) |field, expected| {
+    inline for (@import("type_info_fields").fields(PendingEventReleaseReceipt), release_fields) |field, expected| {
         try std.testing.expectEqualStrings(expected[0], field.name);
         try std.testing.expect(field.type == expected[1]);
     }
@@ -1578,7 +1578,7 @@ test "C3-3b2b3 owner initializes pristine at its final address" {
     try std.testing.expect(rawStoragePristine(&owner.prepared));
     try std.testing.expect(@alignOf(PendingEventOwner) <= 16);
     try std.testing.expect(@sizeOf(PendingEventOwner) <= 4096);
-    try std.testing.expectEqual(@as(usize, 17), std.meta.fields(PendingEventOwner).len);
+    try std.testing.expectEqual(@as(usize, 17), @import("type_info_fields").fields(PendingEventOwner).len);
 }
 
 test "C3-3b2b3 owner burns attempts and rejects busy begin" {
@@ -1661,8 +1661,8 @@ const SettlementFixture = struct {
         identity.slot_incarnation = 0x5060 + @as(u64, seed);
         identity.owner_node_incarnation = 0x5070 + @as(u64, seed);
         identity.transport_incarnation = 0x5080 + @as(u64, seed);
-        identity.correlation_binding_digest = [_]u8{0x59 +% seed} ** 32;
-        identity.payload_digest = [_]u8{0x69 +% seed} ** 32;
+        identity.correlation_binding_digest = @as([32]u8, @splat(0x59 +% seed));
+        identity.payload_digest = @as([32]u8, @splat(0x69 +% seed));
         identity.registry_incarnation = 0x5100 + @as(u64, seed);
         identity.binding_reservation_id = 0x5200 + @as(u64, seed);
         identity.event_node_incarnation = 0x5300 + @as(u64, seed);
@@ -1698,7 +1698,7 @@ const SettlementFixture = struct {
             .observation_revision = 0,
             .observer_generation = 0,
             .title_generation = 0,
-            .observation_digest = [_]u8{0x58 +% seed} ** 32,
+            .observation_digest = @as([32]u8, @splat(0x58 +% seed)),
             .preparation_attempt = attempt,
             .pending_lifecycle = .preparing,
             .plan = .{ .preparation = .{ .dto_backing = .{}, .next_observation = .{} } },
@@ -1744,7 +1744,7 @@ const SettlementFixture = struct {
         );
         self.owner.source_lease = .{
             .receipt = source_receipt,
-            .state_raw = @intFromEnum(PendingSourceLeaseState.consumed),
+            .state_raw = @backingInt(PendingSourceLeaseState.consumed),
             .attempt = attempt,
         };
         self.owner.source_lease.lease_seal = try process_seal.pendingSourceLeaseSeal(
@@ -1758,7 +1758,7 @@ const SettlementFixture = struct {
             .pending_owner_incarnation = self.owner.owner_incarnation,
             .source_lease_incarnation = 1,
             .attempt = attempt,
-            .state_raw = @intFromEnum(PendingReleaseState.live),
+            .state_raw = @backingInt(PendingReleaseState.live),
         };
         self.owner.release_receipt.release_seal = try process_seal.pendingReleaseSeal(
             identity.pid,
@@ -1776,8 +1776,8 @@ const SettlementFixture = struct {
             .pid = identity.pid,
             .process_nonce = identity.process_nonce,
             .thread_id = @intCast(std.Thread.getCurrentId()),
-            .ranges_digest = [_]u8{seed +% 1} ** 32,
-            .pristine_digest = [_]u8{seed +% 2} ** 32,
+            .ranges_digest = @as([32]u8, @splat(seed +% 1)),
+            .pristine_digest = @as([32]u8, @splat(seed +% 2)),
         };
         proof.proof_seal = try settlement.sealScratchPreflightProof(proof);
         self.binding = try self.lifetime_owner.acquireSettlement(&self.lease, proof);
@@ -1800,8 +1800,8 @@ const SettlementFixture = struct {
 
     fn replaceDecision(self: *SettlementFixture, decision: prepared_types.PreparedDecision) !void {
         self.owner.prepared = .{};
-        self.owner.prepared.prepared_tag_raw = @intFromEnum(std.meta.activeTag(decision.projection));
-        self.owner.prepared.effect_tag_raw = @intFromEnum(std.meta.activeTag(decision.effect));
+        self.owner.prepared.prepared_tag_raw = @backingInt(std.meta.activeTag(decision.projection));
+        self.owner.prepared.effect_tag_raw = @backingInt(std.meta.activeTag(decision.effect));
         self.owner.prepared.observation_probe_nonce = decision.observation_probe_nonce;
         switch (decision.projection) {
             .resize_commit => |resize| {
@@ -1810,13 +1810,13 @@ const SettlementFixture = struct {
                 self.owner.prepared.semantic_generation = resize.resize_generation;
             },
             .revoked => |fence| self.owner.prepared.semantic_generation = fence,
-            .failure => |failure| self.owner.prepared.failure_raw = @intFromEnum(failure),
+            .failure => |failure| self.owner.prepared.failure_raw = @backingInt(failure),
             .metadata_commit => self.owner.prepared.next_observation.revision = 17,
             else => {},
         }
         switch (decision.effect) {
             .none => {},
-            .poison => |reason| self.owner.prepared.connection_reason_raw = @intFromEnum(reason),
+            .poison => |reason| self.owner.prepared.connection_reason_raw = @backingInt(reason),
             .revoke_fence => |fence| self.owner.prepared.semantic_generation = fence,
         }
         var progress = self.owner.progress_input.?;
@@ -1880,14 +1880,14 @@ const SettlementFixture = struct {
         self.effect_permit.effect_out_addr = @intFromPtr(&self.effect);
         self.effect_permit.effect_out_extent = @sizeOf(settlement.EffectCommitEvidence);
         self.effect_permit.effect_out_alignment = @alignOf(settlement.EffectCommitEvidence);
-        self.effect_permit.effect_out_pristine_digest = [_]u8{0x91} ** 32;
+        self.effect_permit.effect_out_pristine_digest = @as([32]u8, @splat(0x91));
         self.effect_permit.scratch_ranges_digest = self.binding.ranges_digest;
         self.effect_permit.scratch_pristine_digest = self.binding.pristine_digest;
         self.effect_permit.preflight_proof_seal_digest = self.binding.preflight_proof_seal_digest;
         self.effect_permit.lease_seal_digest = self.binding.lease_seal_digest;
-        self.effect_permit.preflight_authority_digest = [_]u8{0x92} ** 32;
+        self.effect_permit.preflight_authority_digest = @as([32]u8, @splat(0x92));
         self.effect_permit.seal = try settlement.sealPreparedEffectPermit(self.effect_permit);
-        self.effect_permit.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.prepared);
+        self.effect_permit.lifecycle_raw = @backingInt(settlement.AuthorityLifecycle.prepared);
         if (disposition != .suppress_local_invariant) {
             settlement.publishEffectCommitEvidenceNoFail(
                 &self.effect_permit,
@@ -1896,8 +1896,8 @@ const SettlementFixture = struct {
             );
         } else self.effect = .{
             .self_addr = @intFromPtr(&self.effect),
-            .outcome_raw = @intFromEnum(settlement.ConfirmedEffectOutcome.poison_confirmed),
-            .recovery_raw = @intFromEnum(settlement.EffectRecovery.trusted_local_invariant),
+            .outcome_raw = @backingInt(settlement.ConfirmedEffectOutcome.poison_confirmed),
+            .recovery_raw = @backingInt(settlement.EffectRecovery.trusted_local_invariant),
             .pid = common.pid,
             .process_nonce = common.process_nonce,
             .thread_id = common.thread_id,
@@ -1905,13 +1905,13 @@ const SettlementFixture = struct {
             .owner_incarnation = common.owner_incarnation,
             .attempt = common.attempt,
             .event_generation = common.event_generation,
-            .commit_authority_digest = [_]u8{0xa1} ** 32,
-            .cleanup_completion_digest = [_]u8{0xa2} ** 32,
-            .confirmed_effect_digest = [_]u8{0xa3} ** 32,
+            .commit_authority_digest = @as([32]u8, @splat(0xa1)),
+            .cleanup_completion_digest = @as([32]u8, @splat(0xa2)),
+            .confirmed_effect_digest = @as([32]u8, @splat(0xa3)),
         };
         if (disposition == .suppress_local_invariant) {
             self.effect.seal = try settlement.sealEffectCommitEvidence(self.effect);
-            self.effect.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.prepared);
+            self.effect.lifecycle_raw = @backingInt(settlement.AuthorityLifecycle.prepared);
         }
         self.completion = .{
             .self_addr = @intFromPtr(&self.completion),
@@ -1935,11 +1935,11 @@ const SettlementFixture = struct {
             .freed_payload_count = 1,
             .consumed_pin_count = 1,
             .settled_quarantine_count = 1,
-            .post_transcript_digest = [_]u8{0xb3} ** 32,
+            .post_transcript_digest = @as([32]u8, @splat(0xb3)),
         };
         self.completion.authority_digest = settlement.eventReleaseCompletionAuthorityDigest(self.completion);
         self.completion.seal = try settlement.sealEventReleaseCompletion(self.completion);
-        self.completion.lifecycle_raw = @intFromEnum(settlement.AuthorityLifecycle.prepared);
+        self.completion.lifecycle_raw = @backingInt(settlement.AuthorityLifecycle.prepared);
     }
 };
 
@@ -1954,16 +1954,16 @@ fn expectSemanticCommit(
     try fixture.settle(disposition);
     var permit: PreparedSemanticCommit = .{};
     const commit = try fixture.owner.beginSemanticCommit(&permit);
-    try std.testing.expectEqual(@intFromEnum(std.meta.activeTag(decision.projection)), commit.prepared_tag_raw);
+    try std.testing.expectEqual(@backingInt(std.meta.activeTag(decision.projection)), commit.prepared_tag_raw);
     try std.testing.expectEqual(@intFromBool(disposition == .publish_prepared), commit.publish_raw);
     try std.testing.expectEqual(decision.observation_probe_nonce, commit.observation_probe_nonce);
     var moved: RuntimeObservation = .{};
     if (std.meta.activeTag(decision.projection) == .metadata_commit)
         fixture.owner.moveCommittedObservationNoFail(&permit, &moved);
-    fixture.owner.recordSemanticPostNoFail(&permit, [_]u8{seed +% 0xd0} ** 32);
+    fixture.owner.recordSemanticPostNoFail(&permit, @as([32]u8, @splat(seed +% 0xd0)));
     fixture.owner.finishSemanticCommitNoFail(&permit);
-    try std.testing.expectEqual(@intFromEnum(PendingLifecycle.idle), fixture.owner.lifecycle_raw);
-    try std.testing.expectEqual(@intFromEnum(SemanticCommitPhase.consumed), permit.phase_raw);
+    try std.testing.expectEqual(@backingInt(PendingLifecycle.idle), fixture.owner.lifecycle_raw);
+    try std.testing.expectEqual(@backingInt(SemanticCommitPhase.consumed), permit.phase_raw);
     moved.deinit(std.testing.allocator);
 }
 
@@ -2046,19 +2046,19 @@ test "C3-3b4 Pending semantic commit은 failure를 suppress disposition에 맞�
 
 fn fixtureEffectPermit(disposition: settlement.SettlementDispositionTag) settlement.PreparedEffectPermit {
     if (disposition != .suppress_terminal) return .{
-        .action_raw = @intFromEnum(settlement.EffectAction.none),
+        .action_raw = @backingInt(settlement.EffectAction.none),
         .fd_before = 9,
         .fd_after = 9,
     };
     return .{
-        .action_raw = @intFromEnum(settlement.EffectAction.terminal_cleanup),
+        .action_raw = @backingInt(settlement.EffectAction.terminal_cleanup),
         .first_reason_before = .{ .present_raw = 1, .reason_raw = 0 },
         .first_reason_after = .{ .present_raw = 1, .reason_raw = 0 },
         .unusable_before_raw = 1,
         .unusable_after_raw = 1,
         .fd_before = -1,
         .fd_after = -1,
-        .fd_disposition_raw = @intFromEnum(settlement.FdDisposition.already_detached),
+        .fd_disposition_raw = @backingInt(settlement.FdDisposition.already_detached),
     };
 }
 
@@ -2092,10 +2092,10 @@ test "C3-3b3 authority receipt는 pending release projection을 봉인한다" {
     var replay = fixture.permit;
     replay.release_receipt_digest[0] ^= 1;
     try std.testing.expect(!settlement.validPendingSettlementPermit(&replay));
-    try std.testing.expectEqual(@intFromEnum(PendingReleaseState.live), fixture.owner.release_receipt.state_raw);
+    try std.testing.expectEqual(@backingInt(PendingReleaseState.live), fixture.owner.release_receipt.state_raw);
     try fixture.prepareEvidence(.publish_prepared);
-    fixture.effect.recovery_raw = @intFromEnum(settlement.EffectRecovery.trusted_local_invariant);
-    fixture.effect.outcome_raw = @intFromEnum(settlement.ConfirmedEffectOutcome.none_confirmed);
+    fixture.effect.recovery_raw = @backingInt(settlement.EffectRecovery.trusted_local_invariant);
+    fixture.effect.outcome_raw = @backingInt(settlement.ConfirmedEffectOutcome.none_confirmed);
     fixture.effect.seal = try settlement.sealEffectCommitEvidence(fixture.effect);
     try std.testing.expect(!settlement.validEffectCommitEvidence(&fixture.effect));
 }
@@ -2128,7 +2128,7 @@ test "C3-3b3 authority receipt는 exact event release completion만 허용한다
         &fixture.effect,
         &fixture.completion,
     );
-    try std.testing.expectEqual(@intFromEnum(PendingReleaseState.consumed), fixture.owner.release_receipt.state_raw);
+    try std.testing.expectEqual(@backingInt(PendingReleaseState.consumed), fixture.owner.release_receipt.state_raw);
     try std.testing.expectEqual(@as(u16, 1), fixture.completion.consumed_blocker_count);
 }
 
@@ -2146,8 +2146,8 @@ test "C3-3b3 authority receipt는 disposition을 마지막에 ready로 게시한
         &fixture.effect,
         &fixture.completion,
     );
-    try std.testing.expectEqual(@intFromEnum(settlement.AuthorityLifecycle.prepared), fixture.owner.settlement_disposition.lifecycle_raw);
-    try std.testing.expectEqual(@intFromEnum(settlement.SettlementDispositionTag.suppress_terminal), fixture.owner.settlement_disposition.disposition_raw);
+    try std.testing.expectEqual(@backingInt(settlement.AuthorityLifecycle.prepared), fixture.owner.settlement_disposition.lifecycle_raw);
+    try std.testing.expectEqual(@backingInt(settlement.SettlementDispositionTag.suppress_terminal), fixture.owner.settlement_disposition.disposition_raw);
 }
 
 test "C3-3b3 authority receipt는 copy splice replay를 거부한다" {
@@ -2165,8 +2165,8 @@ test "C3-3b3 authority receipt는 copy splice replay를 거부한다" {
         .pid = fixture.owner.event_identity.pid,
         .process_nonce = fixture.owner.event_identity.process_nonce,
         .thread_id = @intCast(std.Thread.getCurrentId()),
-        .ranges_digest = [_]u8{0xc1} ** 32,
-        .pristine_digest = [_]u8{0xc2} ** 32,
+        .ranges_digest = @as([32]u8, @splat(0xc1)),
+        .pristine_digest = @as([32]u8, @splat(0xc2)),
     };
     next_proof.proof_seal = try settlement.sealScratchPreflightProof(next_proof);
     const next_binding = try fixture.lifetime_owner.acquireSettlement(&fixture.lease, next_proof);
@@ -2196,7 +2196,7 @@ test "C3-3b3 authority receipt는 protected range alias를 거부한다" {
         &occupied,
     ));
     try std.testing.expect(std.meta.eql(occupied, settlement.PreparedPendingSettlementPermit{}));
-    fixture.owner.lifecycle_raw = @intFromEnum(PendingLifecycle.preparing);
+    fixture.owner.lifecycle_raw = @backingInt(PendingLifecycle.preparing);
     try std.testing.expect(!fixture.owner.settlementArmPreflightValid(&fixture.permit, fixture.binding));
     try std.testing.expect(fixture.lifetime_owner.validatePreparedSettlementBinding(&fixture.lease, fixture.binding));
 }

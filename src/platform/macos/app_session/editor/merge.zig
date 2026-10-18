@@ -886,7 +886,7 @@ fn smokeSession(allocator: std.mem.Allocator) !*AppSession {
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     return session;
 }
@@ -1308,7 +1308,7 @@ test "MRG12 진짜 충돌 저장소에서 세 판이 «병합 Term 까지» 온�
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = git_backend_mod.testTmpRepoPath(&repo_buf, "tmp-merge-mode") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    const rm_path = std.fmt.bufPrintSentinel(&rm_buf, "{s}", .{repo}, 0) catch return error.SkipZigTest;
     _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", rm_path });
     defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", rm_path });
     if (!git_backend_mod.testMakeStageRepo(exe, repo, .content)) return error.SkipZigTest;
@@ -1818,7 +1818,7 @@ test "MRG23 「모두 스테이지」는 마커가 남은 충돌 파일을 비�
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = git_backend_mod.testTmpRepoPath(&repo_buf, "tmp-stage-all-skip") orelse return error.SkipZigTest;
     var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    const rm_path = std.fmt.bufPrintSentinel(&rm_buf, "{s}", .{repo}, 0) catch return error.SkipZigTest;
     _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", rm_path });
     defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", rm_path });
     if (!git_backend_mod.testMakeStageRepo(exe, repo, .content)) return error.SkipZigTest;

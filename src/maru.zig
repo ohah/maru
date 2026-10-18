@@ -79,8 +79,8 @@ test {
 // 못 박는다. 한쪽에만 변형을 추가하면 이 테스트가 깨진다.
 test "WindowsShell(config)과 WindowsShellKind(pty)는 같은 변형 집합이다" {
     const std = @import("std");
-    const a = @typeInfo(config.theme.WindowsShell).@"enum".fields;
-    const b = @typeInfo(pty.types.WindowsShellKind).@"enum".fields;
+    const a = @import("type_info_fields").enumFields(config.theme.WindowsShell);
+    const b = @import("type_info_fields").enumFields(pty.types.WindowsShellKind);
     try std.testing.expectEqual(a.len, b.len);
     inline for (a, b) |fa, fb| try std.testing.expectEqualStrings(fa.name, fb.name);
 }
@@ -101,7 +101,7 @@ pub fn windowsShellKindOf(shell: config.theme.WindowsShell) pty.WindowsShellKind
 
 test "windowsShellKindOf: 모든 변형이 같은 이름으로 옮겨진다" {
     const std = @import("std");
-    inline for (@typeInfo(config.theme.WindowsShell).@"enum".fields) |f| {
+    inline for (@import("type_info_fields").enumFields(config.theme.WindowsShell)) |f| {
         const got = windowsShellKindOf(@field(config.theme.WindowsShell, f.name));
         try std.testing.expectEqualStrings(f.name, @tagName(got));
     }

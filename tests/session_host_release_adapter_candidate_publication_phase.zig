@@ -261,4 +261,4 @@ const Steps = struct {
     }
 };
 
-const oversized_audit_bytes = [_]u8{1} ** (phase.max_audit_bytes + 1);
+const oversized_audit_bytes = @as([(phase.max_audit_bytes + 1)]u8, @splat(1));

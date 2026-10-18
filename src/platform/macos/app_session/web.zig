@@ -631,7 +631,7 @@ fn permissionMessage(buf: []u8, kinds: u32, media: u8) []const u8 {
     const t = maru.i18n.t;
     var len: usize = 0;
     // 두 비트가 한 이름으로 이어진다(저장소 접근 둘·로컬 네트워크 둘) — 같은 줄을 두 번 쓰지 않는다.
-    var written = std.EnumSet(maru.i18n.Key).initEmpty();
+    var written: std.EnumSet(maru.i18n.Key) = .empty;
     const Line = struct {
         fn add(out: []u8, at: *usize, name: []const u8) void {
             const bullet = "• ";
@@ -647,15 +647,15 @@ fn permissionMessage(buf: []u8, kinds: u32, media: u8) []const u8 {
             at.* += name.len;
         }
     };
-    inline for (std.meta.fields(ws.message.MediaPermission)) |field| {
-        const which: ws.message.MediaPermission = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").fields(ws.message.MediaPermission)) |field| {
+        const which: ws.message.MediaPermission = @fromBackingInt(@intCast(field.value));
         if (media & which.bit() != 0 and !written.contains(mediaName(which))) {
             written.insert(mediaName(which));
             Line.add(buf, &len, t(mediaName(which)));
         }
     }
-    inline for (std.meta.fields(ws.message.PermissionKind)) |field| {
-        const which: ws.message.PermissionKind = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").fields(ws.message.PermissionKind)) |field| {
+        const which: ws.message.PermissionKind = @fromBackingInt(@intCast(field.value));
         if (kinds & which.bit() != 0 and !written.contains(permissionName(which))) {
             written.insert(permissionName(which));
             Line.add(buf, &len, t(permissionName(which)));

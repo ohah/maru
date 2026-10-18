@@ -172,7 +172,7 @@ test "P4 N2b2 notification OS delivery async polls do not spend the retry budget
     try journal.initInPlace(std.testing.allocator, host_id, limits);
     defer journal.deinit() catch unreachable;
     _ = try journal.admit(0xaa, 7, "first", "body", "left");
-    var outcomes = [_]delivery.AdapterResult{.pending} ** 201;
+    var outcomes = @as([201]delivery.AdapterResult, @splat(.pending));
     var scripted = ScriptedAdapter{ .outcomes = &outcomes };
     var machine: delivery.Machine = undefined;
     machine.initInPlace();

@@ -47,10 +47,10 @@ pub const PreparedDecision = struct {
 };
 
 comptime {
-    if (@intFromEnum(client_poison.ConnectionReason.local_resource_exhausted) !=
+    if (@backingInt(client_poison.ConnectionReason.local_resource_exhausted) !=
         decision_seal.local_resource_exhausted_reason_raw)
         @compileError("local resource poison wire mapping drift");
-    if (@intFromEnum(client_poison.ConnectionReason.peer_contract_violation) !=
+    if (@backingInt(client_poison.ConnectionReason.peer_contract_violation) !=
         decision_seal.peer_contract_violation_reason_raw)
         @compileError("peer contract poison wire mapping drift");
 }
@@ -58,8 +58,8 @@ comptime {
 pub fn sealProjection(value: PreparedDecision) DecisionSealProjection {
     var out: DecisionSealProjection = .{
         .bound_raw = 1,
-        .prepared_tag_raw = @intFromEnum(std.meta.activeTag(value.projection)),
-        .effect_tag_raw = @intFromEnum(std.meta.activeTag(value.effect)),
+        .prepared_tag_raw = @backingInt(std.meta.activeTag(value.projection)),
+        .effect_tag_raw = @backingInt(std.meta.activeTag(value.effect)),
         .observation_probe_nonce = value.observation_probe_nonce,
     };
     switch (value.projection) {
@@ -69,12 +69,12 @@ pub fn sealProjection(value: PreparedDecision) DecisionSealProjection {
             out.semantic_generation = resize.resize_generation;
         },
         .revoked => |fence| out.semantic_generation = fence,
-        .failure => |failure_value| out.failure_raw = @intFromEnum(failure_value),
+        .failure => |failure_value| out.failure_raw = @backingInt(failure_value),
         else => {},
     }
     switch (value.effect) {
         .none, .revoke_fence => {},
-        .poison => |reason| out.connection_reason_raw = @intFromEnum(reason),
+        .poison => |reason| out.connection_reason_raw = @backingInt(reason),
     }
     return out;
 }
@@ -250,12 +250,12 @@ fn typeContainsForbidden(comptime T: type) bool {
         .pointer, .optional, .error_union, .@"fn" => true,
         .array => |info| typeContainsForbidden(info.child),
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field|
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field|
                 if (typeContainsForbidden(field.type)) break :blk true;
             break :blk false;
         },
         .@"union" => |info| blk: {
-            inline for (info.fields) |field|
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field|
                 if (typeContainsForbidden(field.type)) break :blk true;
             break :blk false;
         },
@@ -270,12 +270,12 @@ test "C3-3b2b3 prepared tag ABI is stable" {
         .{ PreparedEventTag.resize_commit, 4 },   .{ PreparedEventTag.metadata_noop, 5 },
         .{ PreparedEventTag.metadata_commit, 6 }, .{ PreparedEventTag.revoked, 7 },
         .{ PreparedEventTag.failure, 8 },
-    }) |case| try std.testing.expectEqual(@as(u8, case[1]), @intFromEnum(case[0]));
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(EffectTag.none));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(EffectTag.poison));
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(EffectTag.revoke_fence));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(PreparationFailure.out_of_memory));
-    try std.testing.expectEqual(@as(u8, 4), @intFromEnum(PreparationFailure.connection_closed));
+    }) |case| try std.testing.expectEqual(@as(u8, case[1]), @backingInt(case[0]));
+    try std.testing.expectEqual(@as(u8, 0), @backingInt(EffectTag.none));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(EffectTag.poison));
+    try std.testing.expectEqual(@as(u8, 2), @backingInt(EffectTag.revoke_fence));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(PreparationFailure.out_of_memory));
+    try std.testing.expectEqual(@as(u8, 4), @backingInt(PreparationFailure.connection_closed));
 }
 
 test "C3-3b2b3 prepared values recursively contain no pointers or ownership" {
@@ -323,8 +323,8 @@ test "C3-3b2b3 prepared budget accepts cap and rejects cap plus one" {
     var input = PreparationBudgetInput{
         .payload_len = cap,
         .dto_capacity = cap,
-        .next_capacity = [_]u64{0} ** owner_count,
-        .old_capacity = [_]u64{0} ** owner_count,
+        .next_capacity = @as([owner_count]u64, @splat(0)),
+        .old_capacity = @as([owner_count]u64, @splat(0)),
         .old_owner_exact = true,
     };
     input.next_capacity[0] = cap;
@@ -341,8 +341,8 @@ test "C3-3b2b3 prepared budget rejects component sum overflow and inexact old ow
     var input = PreparationBudgetInput{
         .payload_len = 0,
         .dto_capacity = 0,
-        .next_capacity = [_]u64{0} ** owner_count,
-        .old_capacity = [_]u64{0} ** owner_count,
+        .next_capacity = @as([owner_count]u64, @splat(0)),
+        .old_capacity = @as([owner_count]u64, @splat(0)),
         .old_owner_exact = true,
     };
     input.next_capacity[0] = std.math.maxInt(u64);

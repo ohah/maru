@@ -4,6 +4,8 @@
 //! 항목이 선택됐는지(selected)와 어디에 떠야 하는지(anchor)만 안다(chrome 중립: config.Action·라이브 포인터 모름).
 //! 우클릭 위치(anchor)에 박스를 띄우되 화면(backing) 안으로 clamp한다. 단일 출처: docs/chrome-strategy.md §5.4.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
@@ -705,7 +707,7 @@ test "상태바 앵커 메뉴도 창 폭으로 잘린다 — 좌단 경계가 �
         .workspace_width_px = 280,
         .workspace_height_px = 600 - bar_h,
     } };
-    const items = [_][]const u8{"x" ** 120};
+    const items = [_][]const u8{array_repeat.repeat("x", 120)};
     var s: State = .{};
     s.show(10, @intCast(600 - bar_h), items.len); // 상태바 왼쪽 항목
     const rect = menuRect(&s, &items, p) orelse return error.TestUnexpectedResult;

@@ -54,7 +54,7 @@ const wait_ms = 15_000;
 extern "c" fn getxattr(path: [*:0]const u8, name: [*:0]const u8, value: ?*anyopaque, size: usize, position: u32, options: c_int) isize;
 
 /// 브라우저마다 받은 `page_started` 수(판정의 번호는 128 아래).
-var page_starts = [_]u32{0} ** 128;
+var page_starts = @as([128]u32, @splat(0));
 
 fn countPageStart(message: protocol.message.Message) void {
     if (message == .page_started and message.page_started < page_starts.len) page_starts[message.page_started] += 1;
@@ -208,17 +208,17 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
     var detail_buf: [400]u8 = undefined;
     var u: [256]u8 = undefined;
     var dir_buf: [1024]u8 = undefined;
-    const dir = try std.fmt.bufPrintZ(&dir_buf, "{s}/dl-out", .{out_root});
+    const dir = try std.fmt.bufPrintSentinel(&dir_buf, "{s}/dl-out", .{out_root}, 0);
     _ = std.c.mkdir(dir, 0o700);
     // 지난번 sidecar 가 남긴 것 — host 가 프로필을 잡은 뒤 비워야 한다.
     var staging_buf: [1100]u8 = undefined;
     var leftover_buf: [1200]u8 = undefined;
     const leftover = blk: {
-        const profile_dir = try std.fmt.bufPrintZ(&staging_buf, "{s}/s", .{out_root});
+        const profile_dir = try std.fmt.bufPrintSentinel(&staging_buf, "{s}/s", .{out_root}, 0);
         _ = std.c.mkdir(profile_dir, 0o700);
-        const staging = try std.fmt.bufPrintZ(&staging_buf, "{s}/s/download-staging", .{out_root});
+        const staging = try std.fmt.bufPrintSentinel(&staging_buf, "{s}/s/download-staging", .{out_root}, 0);
         _ = std.c.mkdir(staging, 0o700);
-        const path = try std.fmt.bufPrintZ(&leftover_buf, "{s}/..leftover", .{staging});
+        const path = try std.fmt.bufPrintSentinel(&leftover_buf, "{s}/..leftover", .{staging}, 0);
         const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
         if (fd >= 0) _ = std.c.close(fd);
         break :blk path;
@@ -254,7 +254,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
     // ── 첨부: 결정 → 완료 ──
     check: {
         var path_buf: [1100]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/report.txt", .{dir});
+        const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/report.txt", .{dir}, 0);
         try open(&host, 61, &u, port, "/dlp?a=attach");
         const begin = waitBegin(&host, 61, 5000) orelse {
             report(false, "dl-attach", "download_begin 이 오지 않았다");
@@ -294,7 +294,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         const declined = watch(&host, 62, begin.download, 3000, true, 0);
         const after = watch(&host, 62, begin.download, 1000, false, 0);
         var listing_buf: [1100]u8 = undefined;
-        const listing = try std.fmt.bufPrintZ(&listing_buf, "{s}/{s}", .{ dir, begin.name() });
+        const listing = try std.fmt.bufPrintSentinel(&listing_buf, "{s}/{s}", .{ dir, begin.name() }, 0);
         const created = exists(listing);
         report(declined.last == .canceled and after.updates == 0 and !created, "dl-decline", std.fmt.bufPrint(&detail_buf, "끝 {s} · 그 뒤 1 초 갱신 {d} · 파일 생김 {}", .{ if (declined.last) |s| @tagName(s) else "없음", after.updates, created }) catch "");
     }
@@ -311,7 +311,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
     // ── 느린 다운로드: 진행 갱신 → 엉뚱한 취소 → 취소 ──
     check: {
         var path_buf: [1100]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/slow-cancel.bin", .{dir});
+        const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/slow-cancel.bin", .{dir}, 0);
         try open(&host, 64, &u, port, "/dlp?a=slow");
         const begin = waitBegin(&host, 64, 5000) orelse {
             report(false, "dl-progress", "download_begin 이 오지 않았다");
@@ -340,7 +340,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
     // ── 받는 중 브라우저 닫기 ──
     check: {
         var path_buf: [1100]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/slow-close.bin", .{dir});
+        const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/slow-close.bin", .{dir}, 0);
         try open(&host, 65, &u, port, "/dlp?a=slow");
         const begin = waitBegin(&host, 65, 5000) orelse {
             report(false, "dl-closed", "download_begin 이 오지 않았다");
@@ -370,7 +370,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         const id: BrowserId = if (decided) 80 else 81;
         const name = if (decided) "dl-park" else "dl-park-held";
         var path_buf: [1100]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/park-{d}.bin", .{ dir, id });
+        const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/park-{d}.bin", .{ dir, id }, 0);
         try open(&host, id, &u, port, "/dlp?a=slow");
         const begin = waitBegin(&host, id, 5000) orelse {
             report(false, name, "download_begin 이 오지 않았다");
@@ -418,7 +418,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
     // ── 다운로드를 시작한 뒤 스스로 닫는 페이지(W10d) ──
     check: {
         var path_buf: [1100]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/selfclose.bin", .{dir});
+        const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/selfclose.bin", .{dir}, 0);
         try open(&host, 82, &u, port, "/dlp?a=selfclose");
         const begin = waitBegin(&host, 82, 5000) orelse {
             report(false, "dl-selfclose", "download_begin 이 오지 않았다");
@@ -516,7 +516,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
     // ── 미리 만든 파일에 그대로 받는가 ──
     check: {
         var slow_buf: [1100]u8 = undefined;
-        const slow_path = try std.fmt.bufPrintZ(&slow_buf, "{s}/same-slow.bin.maru-part", .{dir});
+        const slow_path = try std.fmt.bufPrintSentinel(&slow_buf, "{s}/same-slow.bin.maru-part", .{dir}, 0);
         const slow_ino = precreate(slow_path) orelse {
             report(false, "dl-same-file", "미리 만들지 못했다");
             break :check;
@@ -532,7 +532,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         // 받는 동안 그 폴더 — 미리 만든 파일의 크기와 Chromium 이 ` (1)` 을 붙여 받는 형제(W10d 실측: 데이터는 형제에 있다).
         const placeholder_size = fileSize(slow_path);
         var sibling_buf: [1100]u8 = undefined;
-        const sibling = try std.fmt.bufPrintZ(&sibling_buf, "{s}/same-slow.bin (1).maru-part", .{dir});
+        const sibling = try std.fmt.bufPrintSentinel(&sibling_buf, "{s}/same-slow.bin (1).maru-part", .{dir}, 0);
         const sibling_size = fileSize(sibling);
         try host.send(.{ .download_control = .{ .browser = 67, .download = slow.download, .action = .cancel } });
         _ = watch(&host, 67, slow.download, 3000, true, 0);
@@ -540,7 +540,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         const after_cancel = inodeOf(slow_path);
 
         var done_buf: [1100]u8 = undefined;
-        const done_path = try std.fmt.bufPrintZ(&done_buf, "{s}/same-done.txt.maru-part", .{dir});
+        const done_path = try std.fmt.bufPrintSentinel(&done_buf, "{s}/same-done.txt.maru-part", .{dir}, 0);
         const done_ino = precreate(done_path) orelse {
             report(false, "dl-same-file", "미리 만들지 못했다");
             break :check;
@@ -562,7 +562,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
     // ── 늦은 결정 ──
     check: {
         var late_buf: [1100]u8 = undefined;
-        const late_path = try std.fmt.bufPrintZ(&late_buf, "{s}/late.bin.maru-part", .{dir});
+        const late_path = try std.fmt.bufPrintSentinel(&late_buf, "{s}/late.bin.maru-part", .{dir}, 0);
         try open(&host, 70, &u, port, "/dlp?a=slow");
         const late = waitBegin(&host, 70, 5000) orelse {
             report(false, "dl-late-decide", "download_begin 이 오지 않았다");
@@ -595,13 +595,13 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         };
         const held = watch(&host, 71, wait.download, 10_000, false, 0);
         var lsof_buf: [1100]u8 = undefined;
-        const lsof_path = try std.fmt.bufPrintZ(&lsof_buf, "{s}/lsof.txt", .{dir});
+        const lsof_path = try std.fmt.bufPrintSentinel(&lsof_buf, "{s}/lsof.txt", .{dir}, 0);
         var cmd_buf: [1300]u8 = undefined;
-        const cmd = try std.fmt.bufPrintZ(&cmd_buf, "/usr/sbin/lsof -p {d} > '{s}' 2>/dev/null", .{ host.pid, lsof_path });
+        const cmd = try std.fmt.bufPrintSentinel(&cmd_buf, "/usr/sbin/lsof -p {d} > '{s}' 2>/dev/null", .{ host.pid, lsof_path }, 0);
         _ = os.run(&.{ "/bin/sh", "-c", cmd.ptr });
         // 메모리(RSS)와 판정 뿌리 아래 1 MiB 넘는 새 파일 — 받아 둔 데이터가 어디에 있나.
         var rss_cmd_buf: [1400]u8 = undefined;
-        const rss_cmd = try std.fmt.bufPrintZ(&rss_cmd_buf, "(ps -o rss= -p {d}; for c in $(pgrep -P {d}); do ps -o rss=,command= -p $c | cut -c1-90; done; find '{s}' /private/var/folders -newer '{s}' -size +1M -type f 2>/dev/null | head -5) >> '{s}'", .{ host.pid, host.pid, out_root, lsof_path, lsof_path });
+        const rss_cmd = try std.fmt.bufPrintSentinel(&rss_cmd_buf, "(ps -o rss= -p {d}; for c in $(pgrep -P {d}); do ps -o rss=,command= -p $c | cut -c1-90; done; find '{s}' /private/var/folders -newer '{s}' -size +1M -type f 2>/dev/null | head -5) >> '{s}'", .{ host.pid, host.pid, out_root, lsof_path, lsof_path }, 0);
         _ = os.run(&.{ "/bin/sh", "-c", rss_cmd.ptr });
         var temp_files: u32 = 0;
         var temp_name_buf: [200]u8 = undefined;
@@ -628,9 +628,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         }
         // 받아 둔 곳 — 프로필(`<뿌리>/s`) 안 `download-staging` 의 항목 수(Chromium 의 숨은 임시 파일).
         var staged_buf: [1100]u8 = undefined;
-        const staged_path = try std.fmt.bufPrintZ(&staged_buf, "{s}/staged.txt", .{dir});
+        const staged_path = try std.fmt.bufPrintSentinel(&staged_buf, "{s}/staged.txt", .{dir}, 0);
         var ls_buf: [2400]u8 = undefined;
-        const ls_cmd = try std.fmt.bufPrintZ(&ls_buf, "ls -A '{s}/s/download-staging' > '{s}' 2>/dev/null", .{ out_root, staged_path });
+        const ls_cmd = try std.fmt.bufPrintSentinel(&ls_buf, "ls -A '{s}/s/download-staging' > '{s}' 2>/dev/null", .{ out_root, staged_path }, 0);
         _ = os.run(&.{ "/bin/sh", "-c", ls_cmd.ptr });
         var staged: usize = 0;
         {
@@ -643,7 +643,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
             }
         }
         var path_buf: [1100]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/ask-wait.bin", .{dir});
+        const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/ask-wait.bin", .{dir}, 0);
         try host.send(.{ .download_decide = .{ .browser = 71, .download = wait.download, .path = path } });
         const finished = watch(&host, 71, wait.download, 15_000, true, 0);
         // 결정 전에 받아 둔 것은 프로필 안에 있어야 한다(사용자의 ~/Downloads 가 아니라 — `preferences.zig`).
@@ -688,7 +688,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
     // ── 다른 볼륨(환경으로만) ──
     if (std.c.getenv("MARU_JUDGE_XVOL_DIR")) |xvol| check: {
         var slow_buf: [1100]u8 = undefined;
-        const slow_path = try std.fmt.bufPrintZ(&slow_buf, "{s}/xvol-slow.bin.maru-part", .{std.mem.span(xvol)});
+        const slow_path = try std.fmt.bufPrintSentinel(&slow_buf, "{s}/xvol-slow.bin.maru-part", .{std.mem.span(xvol)}, 0);
         const slow_ino = precreate(slow_path) orelse {
             report(false, "dl-cross-volume", "미리 만들지 못했다");
             break :check;
@@ -707,7 +707,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         os.sleepMs(300);
         const after_cancel = inodeOf(slow_path);
         var done_buf: [1100]u8 = undefined;
-        const done_path = try std.fmt.bufPrintZ(&done_buf, "{s}/xvol-done.bin.maru-part", .{std.mem.span(xvol)});
+        const done_path = try std.fmt.bufPrintSentinel(&done_buf, "{s}/xvol-done.bin.maru-part", .{std.mem.span(xvol)}, 0);
         _ = precreate(done_path);
         try open(&host, 74, &u, port, "/dlp?a=slow");
         const done = waitBegin(&host, 74, 5000) orelse {
@@ -729,13 +729,13 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
     // ── 받는 도중 host 를 SIGKILL 한 뒤 같은 프로필로 다시 띄우면 Chromium 이 자기 ` (1)` 형제를 지운다(W10d) ──
     check: {
         var path_buf: [1100]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/killed.bin.maru-part", .{dir});
+        const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/killed.bin.maru-part", .{dir}, 0);
         _ = precreate(path) orelse {
             report(false, "dl-crash-restart", "미리 만들지 못했다");
             break :check;
         };
         var sib_buf: [1100]u8 = undefined;
-        const sib = try std.fmt.bufPrintZ(&sib_buf, "{s}/killed.bin (1).maru-part", .{dir});
+        const sib = try std.fmt.bufPrintSentinel(&sib_buf, "{s}/killed.bin (1).maru-part", .{dir}, 0);
         var a = try Host.spawn(host_path, profile_arg);
         try browsers_check.handshake(&a);
         open(&a, 90, &u, port, "/dlp?a=slow") catch {

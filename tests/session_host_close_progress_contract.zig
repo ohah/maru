@@ -10,19 +10,19 @@ fn red() !void {
 
 test "C3-3b5 중립 계약 CloseProgress는 complete와 event_pending만 허용한다" {
     const Progress = maru.app.term_runtime_backend.CloseProgress;
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(Progress.complete));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(Progress.event_pending));
-    try std.testing.expectEqual(@as(usize, 2), @typeInfo(Progress).@"enum".fields.len);
+    try std.testing.expectEqual(@as(u8, 0), @backingInt(Progress.complete));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(Progress.event_pending));
+    try std.testing.expectEqual(@as(usize, 2), @import("type_info_fields").enumFields(Progress).len);
 }
 test "C3-3b5 중립 계약 RemoveProgress는 removed와 event_pending과 invalid만 허용한다" {
     const Progress = maru.app.term_runtime_backend.RemoveProgress;
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(Progress.removed));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(Progress.event_pending));
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(Progress.invalid));
-    try std.testing.expectEqual(@as(usize, 3), @typeInfo(Progress).@"enum".fields.len);
+    try std.testing.expectEqual(@as(u8, 0), @backingInt(Progress.removed));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(Progress.event_pending));
+    try std.testing.expectEqual(@as(u8, 2), @backingInt(Progress.invalid));
+    try std.testing.expectEqual(@as(usize, 3), @import("type_info_fields").enumFields(Progress).len);
 }
 test "C3-3b5 중립 계약 CloseScanReceipt는 재귀 pointer-free exact schema다" {
-    const fields = @typeInfo(close_contract.CloseScanReceipt).@"struct".fields;
+    const fields = @import("type_info_fields").structFields(close_contract.CloseScanReceipt);
     try std.testing.expectEqual(@as(usize, 4), fields.len);
     try std.testing.expectEqualStrings("handle", fields[0].name);
     try std.testing.expectEqualStrings("runtime_generation", fields[1].name);
@@ -31,7 +31,7 @@ test "C3-3b5 중립 계약 CloseScanReceipt는 재귀 pointer-free exact schema�
     try std.testing.expect(close_contract.recursivelyPointerFree(close_contract.CloseScanReceipt));
 }
 test "C3-3b5 중립 계약 CloseSweep active shape는 max ticket과 cursor만 봉인한다" {
-    const active_fields = @typeInfo(close_contract.CloseSweep.Active).@"struct".fields;
+    const active_fields = @import("type_info_fields").structFields(close_contract.CloseSweep.Active);
     try std.testing.expectEqual(@as(usize, 2), active_fields.len);
     try std.testing.expectEqualStrings("max_ticket", active_fields[0].name);
     try std.testing.expectEqualStrings("cursor_after_ticket", active_fields[1].name);
@@ -47,7 +47,7 @@ test "C3-3b5 중립 계약 close ticket은 1과 max를 허용하고 0과 exhaust
 }
 test "C3-3b5 중립 계약 VTable은 InputOwner와 close 반환형의 field 순서를 고정한다" {
     const Backend = maru.app.term_runtime_backend;
-    const fields = @typeInfo(Backend.VTable).@"struct".fields;
+    const fields = @import("type_info_fields").structFields(Backend.VTable);
     // 21: main 의 `resize_with_cell`(셀 크기와 함께 — 이 판정자는 그때 19 그대로였다) + base 의 `session_leader_pid`(1g — 붙은
     // 프로세스의 출처로 pane 을 찾는다). main 기준 rebase 에서 맞췄다(적대 리뷰 4 회차가 찾은 cr6a2 링크를 풀자 드러났다).
     try std.testing.expectEqual(@as(usize, 21), fields.len);
@@ -70,19 +70,19 @@ test "C3-3b5 중립 계약 VTable은 InputOwner와 close 반환형의 field 순�
 }
 
 test "C3-3b5 close readiness idle은 complete다" {
-    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.complete, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.idle)));
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.complete, pending_owner.closeReadinessRaw(@backingInt(pending_owner.PendingLifecycle.idle)));
 }
 test "C3-3b5 close readiness preparing은 event_pending이다" {
-    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.preparing)));
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@backingInt(pending_owner.PendingLifecycle.preparing)));
 }
 test "C3-3b5 close readiness prepared는 event_pending이다" {
-    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.prepared)));
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@backingInt(pending_owner.PendingLifecycle.prepared)));
 }
 test "C3-3b5 close readiness settling은 event_pending이다" {
-    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.settling)));
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@backingInt(pending_owner.PendingLifecycle.settling)));
 }
 test "C3-3b5 close readiness committed_cleanup은 event_pending이다" {
-    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.committed_cleanup)));
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@backingInt(pending_owner.PendingLifecycle.committed_cleanup)));
 }
 test "C3-3b5 close readiness invalid raw는 전용 fatal leaf로 닫힌다" {
     const child = std.c.fork();
@@ -143,7 +143,7 @@ test "C3-3b5 close authority는 routing을 먼저 tombstone하고 callback 재�
     try close_authority.acquirePin(&owner, &pin, 0xB500, &authority);
     var nested: close_authority.CloseOperationPin = .{};
     try std.testing.expectError(error.Busy, close_authority.acquirePin(&owner, &nested, 0xB500, &authority));
-    try std.testing.expectEqual(@intFromEnum(close_authority.Lifecycle.routing_tombstoned), authority.lifecycle_raw);
+    try std.testing.expectEqual(@backingInt(close_authority.Lifecycle.routing_tombstoned), authority.lifecycle_raw);
 }
 test "C3-3b5 close authority operation pin은 same target과 cross target 재진입을 보류하고 exact once 해제된다" {
     var first: close_authority.CloseAuthority = .{};
@@ -165,12 +165,12 @@ test "C3-3b5 close authority는 pending readiness와 shutdown outcome 뒤에만 
     try prepareCloseAuthority(&authority, .close_and_detach, .terminate_host, 12);
     try close_authority.advance(&authority, .open, .routing_tombstoned);
     try close_authority.advance(&authority, .routing_tombstoned, .settling);
-    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.prepared)));
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.event_pending, pending_owner.closeReadinessRaw(@backingInt(pending_owner.PendingLifecycle.prepared)));
     try std.testing.expect(!try close_authority.publishReadyRemove(&authority, false));
-    try std.testing.expectEqual(@intFromEnum(close_authority.Lifecycle.settling), authority.lifecycle_raw);
-    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.complete, pending_owner.closeReadinessRaw(@intFromEnum(pending_owner.PendingLifecycle.idle)));
+    try std.testing.expectEqual(@backingInt(close_authority.Lifecycle.settling), authority.lifecycle_raw);
+    try std.testing.expectEqual(maru.app.term_runtime_backend.CloseProgress.complete, pending_owner.closeReadinessRaw(@backingInt(pending_owner.PendingLifecycle.idle)));
     try std.testing.expect(try close_authority.publishReadyRemove(&authority, true));
-    try std.testing.expectEqual(@intFromEnum(close_authority.Lifecycle.ready_remove), authority.lifecycle_raw);
+    try std.testing.expectEqual(@backingInt(close_authority.Lifecycle.ready_remove), authority.lifecycle_raw);
 }
 test "C3-3b5 close authority receipt는 backend absence를 증명하며 exact once 소비된다" {
     const scan = receiptWithGeneration(19, 7, 13);
@@ -244,7 +244,7 @@ test "C3-3b5 close sweep은 owner 17개를 두 tick에 16과 1로 방문한다" 
 test "C3-3b5 close sweep은 owner 4096개를 256 tick 안에 한 번씩 방문한다" {
     var receipts: [4096]close_contract.CloseScanReceipt = undefined;
     for (&receipts, 0..) |*item, i| item.* = receipt(@intCast(i + 1), @intCast(i + 1));
-    var visited = [_]bool{false} ** 4096;
+    var visited = @as([4096]bool, @splat(false));
     var sweep: close_contract.CloseSweep = .inactive;
     var out: [16]close_contract.CloseScanReceipt = undefined;
     for (0..256) |_| {
@@ -276,7 +276,7 @@ test "C3-3b5 close sweep은 무한 신규 churn에서도 기존 frozen set을 �
     var len: usize = 32;
     var sweep: close_contract.CloseSweep = .inactive;
     var out: [16]close_contract.CloseScanReceipt = undefined;
-    var original_seen = [_]bool{false} ** 32;
+    var original_seen = @as([32]bool, @splat(false));
     for (0..2) |_| {
         const count = close_contract.selectCloseSweep(&sweep, receipts[0..len], &out);
         try std.testing.expectEqual(@as(usize, 16), count);

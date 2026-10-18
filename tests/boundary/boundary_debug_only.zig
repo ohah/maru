@@ -7,8 +7,8 @@
 //! 20 개는 다시 걸렀고, 나머지 18 개는 동작 테스트였다 — 그중 macOS 전용 17 개도 뒤에 걸렀다, 아래). 이 판정자가
 //! 그 되돌아감을 실패로 만든다.
 //!
-//! **규칙**: `for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |x| { … }` 안의
-//! `boundary_step.dependOn(&run.step)` 은 `if (x == .Debug)` 로 걸러야 한다. 예외는 아래 `behavior_runs` 하나 —
+//! **규칙**: `for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |x| { … }` 안의
+//! `boundary_step.dependOn(&run.step)` 은 `if (x == .debug)` 로 걸러야 한다. 예외는 아래 `behavior_runs` 하나 —
 //! 소스를 세는 판정자가 아니라 제품 모듈을 import 해 **동작을 돌리는** 테스트이고, **모든 OS 에 등록돼** CI 의
 //! check-boundaries(ubuntu)에서 실제로 ReleaseFast 로 돈다. `session host macOS (ReleaseFast)` 잡은 수동 실행 전용이라
 //! PR 에서 그 사본이 도는 자리는 여기뿐이다. 목록은 **줄어들기만** 한다.
@@ -31,7 +31,7 @@ const behavior_runs = [_][]const u8{
     "run_live_workflow_aggregate_event_tests",
 };
 
-const loop_prefix = "for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |";
+const loop_prefix = "for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |";
 const attach_prefix = "boundary_step.dependOn(&";
 
 fn indentOf(line: []const u8) usize {
@@ -85,7 +85,7 @@ test "두 모드 루프 안의 boundary 등록은 Debug 로 거르거나 동작 
         const end = std.mem.indexOf(u8, after, ".step)") orelse return error.MalformedAttach;
         const run = after[0..end];
         const loop_var = loop_vars.items[loop_vars.items.len - 1];
-        const guard = try std.fmt.allocPrint(arena, "if ({s} == .Debug) ", .{loop_var});
+        const guard = try std.fmt.allocPrint(arena, "if ({s} == .debug) ", .{loop_var});
         if (std.mem.startsWith(u8, trimmed, guard)) {
             guarded += 1;
         } else if (isBehaviorRun(run)) {

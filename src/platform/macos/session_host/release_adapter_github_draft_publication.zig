@@ -109,10 +109,10 @@ const ProductionMutator = struct {
     pub fn publish(self: *@This(), expected: Snapshot, budget: i128) !ObservedRelease {
         try transport.validateToken(self.token);
         var endpoint_storage: [128:0]u8 = undefined;
-        const endpoint = std.fmt.bufPrintZ(&endpoint_storage, "repos/ohah/maru/releases/{d}", .{expected.release_id}) catch return error.InvalidRequest;
+        const endpoint = std.fmt.bufPrintSentinel(&endpoint_storage, "repos/ohah/maru/releases/{d}", .{expected.release_id}, 0) catch return error.InvalidRequest;
         var token_storage: ["GH_TOKEN=".len + transport.max_token_bytes + 1]u8 = undefined;
         defer @memset(&token_storage, 0);
-        const token_entry = std.fmt.bufPrintZ(&token_storage, "GH_TOKEN={s}", .{self.token}) catch return error.InvalidToken;
+        const token_entry = std.fmt.bufPrintSentinel(&token_storage, "GH_TOKEN={s}", .{self.token}, 0) catch return error.InvalidToken;
         const argv = [_:null]?[*:0]const u8{ self.executable.ptr, "api", "--method", "PATCH", "--hostname", "github.com", "--header", "Accept: application/vnd.github+json", "--header", "X-GitHub-Api-Version: 2022-11-28", endpoint.ptr, "-F", "draft=false", "-F", "prerelease=false" };
         const environment = [_:null]?[*:0]const u8{ token_entry.ptr, "GH_PROMPT_DISABLED=1" };
         const captured = try process.runCaptureEnvironmentStdout(self.io, self.executable, &argv, &environment, self.output, budget);
@@ -292,8 +292,8 @@ fn observeExpected(expected: Snapshot) ObservedRelease {
     return result;
 }
 fn testSnapshot(release_id: u64) Snapshot {
-    const empty_asset = Asset{ .id = 1, .name = "x", .size = 1, .sha256 = [_]u8{'a'} ** 64 };
-    return .{ .release_id = release_id, .tag = "v1.2.3", .source_commit = "0123456789abcdef0123456789abcdef01234567", .cli_sha256 = [_]u8{'f'} ** 64, .assets = @splat(empty_asset) };
+    const empty_asset = Asset{ .id = 1, .name = "x", .size = 1, .sha256 = @as([64]u8, @splat('a')) };
+    return .{ .release_id = release_id, .tag = "v1.2.3", .source_commit = "0123456789abcdef0123456789abcdef01234567", .cli_sha256 = @as([64]u8, @splat('f')), .assets = @splat(empty_asset) };
 }
 fn pristine(result: *const PublishedRelease) bool {
     return result.owner == null and result.status == .empty and result.release_id == 0 and result.tag_len == 0 and std.mem.allEqual(u8, &result.tag, 0) and std.mem.allEqual(u8, &result.source_commit, 0) and std.mem.allEqual(u64, &result.asset_ids, 0);

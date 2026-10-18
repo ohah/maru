@@ -71,7 +71,7 @@ fn fixtureResult(sequence: u64, wake: publication.WakeOutcome) publication.Incid
             .aggregate_generation = 1,
         },
         .wake = wake,
-        .kind_raw = @intFromEnum(publication.PublicationKind.first),
+        .kind_raw = @backingInt(publication.PublicationKind.first),
     };
 }
 
@@ -82,18 +82,18 @@ fn fixtureInput(host_id: u128, generation: u64, reason: incident.ConnectionReaso
         .host_adapter_generation = 3,
         .connection_generation = generation,
         .wire_major = 1,
-        .reason_raw = @intFromEnum(reason),
-        .scope_raw = @intFromEnum(incident.Scope.connection),
-        .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
-        .source_site_raw = @intFromEnum(source),
-        .host_class_raw = @intFromEnum(incident.HostClass.current),
-        .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
-        .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
+        .reason_raw = @backingInt(reason),
+        .scope_raw = @backingInt(incident.Scope.connection),
+        .disposition_raw = @backingInt(incident.Disposition.reconnect),
+        .source_site_raw = @backingInt(source),
+        .host_class_raw = @backingInt(incident.HostClass.current),
+        .parser_phase_raw = @backingInt(incident.ParserPhase.idle),
+        .outbound_phase_raw = @backingInt(incident.OutboundPhase.idle),
     };
     if (reason == .outbound_partial_write or reason == .outbound_write_ambiguous) {
         value.pending_request_count = 1;
         value.queue_bytes = 8;
-        value.outbound_phase_raw = @intFromEnum(incident.OutboundPhase.partial);
+        value.outbound_phase_raw = @backingInt(incident.OutboundPhase.partial);
         value.outbound_offset = 2;
         value.outbound_length = 10;
     }

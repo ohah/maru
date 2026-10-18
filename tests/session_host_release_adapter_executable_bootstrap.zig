@@ -1,6 +1,8 @@
 //! The executable bootstrap closes command, process identity, runner, and checkout-prepinned CLI
 //! authority before either release phase may perform network or output side effects.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const bootstrap = @import("release_adapter_executable_bootstrap");
 const context_mod = @import("release_adapter_context");
@@ -234,7 +236,7 @@ test "all commands bind context and pin only after identity authority" {
     var runners = RunnerReader{ .trace = &trace };
     var pinner = Pinner{ .trace = &trace };
     var result = bootstrap.Bootstrap{};
-    const maximum_path = "/" ++ ("g" ** (bootstrap.max_cli_path_bytes - 1));
+    const maximum_path = "/" ++ (array_repeat.repeat("g", (bootstrap.max_cli_path_bytes - 1)));
     const args = predecessorArgs(maximum_path);
     try bootstrap.bootstrapWith(std.testing.allocator, &args, &contexts, &runners, &pinner, &result);
     try std.testing.expectEqual(bootstrap.max_cli_path_bytes, result.value().?.github_cli.len);
@@ -300,7 +302,7 @@ test "actual CLI authority rejects non executable and digest drift" {
     ));
     try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(path.ptr, 0o700));
     var digest_drift = prePublishArgs(path);
-    digest_drift[8] = "0" ** 64;
+    digest_drift[8] = array_repeat.repeat("0", 64);
     var second_trace = Trace{};
     var second_contexts = ContextReader{ .trace = &second_trace };
     var second_runners = RunnerReader{ .trace = &second_trace };

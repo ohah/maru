@@ -62,10 +62,10 @@ const Fixture = struct {
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "Maru.app/Contents/Helpers/maru-session-host-notification-center-helper", .data = "helper" });
         var root: [std.fs.max_path_bytes]u8 = undefined;
         const len = try self.tmp.dir.realPath(std.testing.io, &root);
-        _ = try std.fmt.bufPrintZ(&self.app, "{s}/Maru.app", .{root[0..len]});
-        _ = try std.fmt.bufPrintZ(&self.main, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{root[0..len]});
-        _ = try std.fmt.bufPrintZ(&self.cli, "{s}/Maru.app/Contents/MacOS/maru", .{root[0..len]});
-        _ = try std.fmt.bufPrintZ(&self.helper, "{s}/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper", .{root[0..len]});
+        _ = try std.fmt.bufPrintSentinel(&self.app, "{s}/Maru.app", .{root[0..len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.main, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{root[0..len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.cli, "{s}/Maru.app/Contents/MacOS/maru", .{root[0..len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.helper, "{s}/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper", .{root[0..len]}, 0);
         const paths = [_][:0]const u8{ self.mainPath(), self.cliPath(), self.helperPath() };
         for (paths) |path|
             try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(path.ptr, 0o755));

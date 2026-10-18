@@ -885,7 +885,7 @@ test "ML5 뒤 오버레이의 패널은 그 아래 앞 오버레이의 글자·c
         .{ .layer = .modal, .ops = &menu_ops },
     }, &tk, 8, 16, false);
     defer raster.deinit(std.testing.allocator);
-    var seen_f = [_]bool{false} ** 10;
+    var seen_f = @as([10]bool, @splat(false));
     var seen_m: usize = 0;
     for (raster.cells.items) |c| {
         if (c.codepoint == 'F' and c.row == 0 and c.col < 10) seen_f[c.col] = true;
@@ -915,7 +915,7 @@ test "ML5b 뒤 패널이 닿지 않는 앞 오버레이 글자·caret 은 그대
         .{ .layer = .modal, .ops = &menu_ops },
     }, &tk, 8, 16, false);
     defer raster.deinit(std.testing.allocator);
-    var seen = [_]bool{false} ** 20;
+    var seen = @as([20]bool, @splat(false));
     for (raster.cells.items) |c| if (c.codepoint == 'F' and c.row == 0 and c.col < 20) {
         seen[c.col] = true;
     };
@@ -996,8 +996,8 @@ test "알림 패널: 걸친 카드의 강조 배경은 헤더·뷰포트 밖을 
                     const vp_bottom = sv.viewport.y + @as(i32, @intCast(sv.viewport.h));
                     const first_row = @divTrunc(sv.viewport.y - oy, ch_i); // 헤더 바로 아래 행
                     const end_row = @divTrunc(vp_bottom - oy, ch_i);
-                    var lit_rows = std.StaticBitSet(64).initEmpty();
-                    var text_rows = std.StaticBitSet(64).initEmpty();
+                    var lit_rows = std.StaticBitSet(64).empty;
+                    var text_rows = std.StaticBitSet(64).empty;
                     // 카드별로 출력에 실제로 놓인 제목·본문 행(없으면 null).
                     var title_row: [count]?u16 = @splat(null);
                     var body_row: [count]?u16 = @splat(null);
@@ -1154,7 +1154,7 @@ test "오버레이 셀 경로: 깨진 UTF-8 은 건너뛰지 않고 U+FFFD 로 �
     };
     var raster = try lower(std.testing.allocator, &.{.{ .layer = .modal, .ops = &ops }}, &tk, 8, 16, false);
     defer raster.deinit(std.testing.allocator);
-    var at: [10]u21 = .{0} ** 10;
+    var at: [10]u21 = @splat(0);
     for (raster.cells.items) |c| if (c.row == 0 and c.col < at.len) {
         at[c.col] = c.codepoint;
     };
@@ -1321,7 +1321,7 @@ test "ML14 패널마다 패딩 — 그림·그림자·앞 글자 가림이 모�
     }, &tk, 8, 16, false);
     defer raster.deinit(std.testing.allocator);
     // 찾기 글자 열 c 의 중심 x = 8c+4 — c=2(20)…c=11(92) 만 덮이고, c=1(12)·c=12(100) 은 남는다(토큰 12 면 c=1…13 이 덮였다).
-    var seen = [_]bool{false} ** 20;
+    var seen = @as([20]bool, @splat(false));
     for (raster.cells.items) |c| if (c.codepoint == 'F' and c.row == 0 and c.col < 20) {
         seen[c.col] = true;
     };
@@ -1358,7 +1358,7 @@ test "ML8 위상이 다른 뒤 패널도 앞 오버레이의 글자·caret 을 �
     defer raster.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), raster.extra_parts.items.len);
     // 메뉴 보이는 상자 x[7..111) y[-7..49): 찾기 글자 열 c 의 중심 x = 8c+4 — c=1(12)…c=13(108) 이 덮이고 c=0(4)·c≥14(116) 는 남는다.
-    var seen = [_]bool{false} ** 20;
+    var seen = @as([20]bool, @splat(false));
     for (raster.cells.items) |c| if (c.codepoint == 'F' and c.row == 0 and c.col < 20) {
         seen[c.col] = true;
     };

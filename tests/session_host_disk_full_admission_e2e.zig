@@ -22,7 +22,7 @@ test "actual disk full admission resumes before quiesce and keeps daemon live" {
         allocator,
     );
     defer allocator.free(product_path);
-    const product_z = try allocator.dupeZ(u8, product_path);
+    const product_z = try allocator.dupeSentinel(u8, product_path, 0);
     defer allocator.free(product_z);
     const target_identity = try sh.staged_image.inspect(product_z);
     const target_build_id = try sh.host_manifest.buildIdForExecutable(allocator, product_z);
@@ -31,10 +31,11 @@ test "actual disk full admission resumes before quiesce and keeps daemon live" {
     const host_id: u128 = (@as(u128, @intCast(c.getpid())) << 64) | 0x4449534b46554c4c;
     const attempt_id: u128 = host_id ^ 0x41444d495353494f;
     var base_buf: [1024]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(
+    const base = try std.fmt.bufPrintSentinel(
         &base_buf,
         "{s}/maru-disk-full-{d}",
         .{ std.mem.span(mount_raw), c.getpid() },
+        0,
     );
     try std.Io.Dir.cwd().createDir(std.testing.io, base, .default_dir);
     var session_buf: [1152]u8 = undefined;
@@ -46,16 +47,18 @@ test "actual disk full admission resumes before quiesce and keeps daemon live" {
     var host_dir_buf: [1280]u8 = undefined;
     const host_dir = try sh.host_manifest.hostDirPathIn(&host_dir_buf, session_dir, host_id);
     var attempt_buf: [1408]u8 = undefined;
-    const attempt_path = try std.fmt.bufPrintZ(
+    const attempt_path = try std.fmt.bufPrintSentinel(
         &attempt_buf,
         "{s}/attempt-{x:0>32}",
         .{ host_dir, attempt_id },
+        0,
     );
     var filler_buf: [1408]u8 = undefined;
-    const filler_path = try std.fmt.bufPrintZ(
+    const filler_path = try std.fmt.bufPrintSentinel(
         &filler_buf,
         "{s}/.disk-full-fixture-{x:0>32}",
         .{ host_dir, attempt_id },
+        0,
     );
 
     const child = c.fork();

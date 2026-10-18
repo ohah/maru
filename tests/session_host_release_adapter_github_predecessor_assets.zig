@@ -59,7 +59,7 @@ const Executor = struct {
         @memcpy(output[0..self.response.len], self.response);
         if (self.mutate_on_asset and std.mem.eql(u8, args[1], "verify-asset")) {
             var storage: [std.fs.max_path_bytes:0]u8 = undefined;
-            const z = try std.fmt.bufPrintZ(&storage, "{s}", .{args[3]});
+            const z = try std.fmt.bufPrintSentinel(&storage, "{s}", .{args[3]}, 0);
             if (c.chmod(z.ptr, 0o600) != 0) return error.MutationFailed;
             self.mutate_on_asset = false;
         }
@@ -91,7 +91,7 @@ const FakeAuthenticated = struct {
 fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(out, "{s}/{s}", .{ root[0..len], leaf });
+    return std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ root[0..len], leaf }, 0);
 }
 
 test "lightweight tag publishes exact authenticated predecessor assets" {

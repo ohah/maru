@@ -181,7 +181,7 @@ pub fn open(allocator: std.mem.Allocator, context: context_mod.Context, director
     const leaf = std.fs.path.basename(directory);
     copyZ(working.directory_leaf.len, &working.directory_leaf, &working.directory_leaf_len, leaf) catch return error.InvalidPath;
     var parent_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const parent_z = std.fmt.bufPrintZ(&parent_storage, "{s}", .{parent_path}) catch return error.InvalidPath;
+    const parent_z = std.fmt.bufPrintSentinel(&parent_storage, "{s}", .{parent_path}, 0) catch return error.InvalidPath;
     working.parent_fd = safe_open.openAbsoluteNoFollow(parent_z, true) catch return error.InvalidPath;
     working.directory_fd = safe_open.openAbsoluteNoFollow(directory, true) catch return error.InvalidPath;
     var directory_stat: posix.Stat = undefined;
@@ -202,7 +202,7 @@ pub fn open(allocator: std.mem.Allocator, context: context_mod.Context, director
     for (0..handoff.role_count) |index| {
         const name = discovered_names[index][0..discovered_lens[index]];
         var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&path_storage, "{s}/{s}", .{ directory, name }) catch return error.InvalidPath;
+        const path = std.fmt.bufPrintSentinel(&path_storage, "{s}/{s}", .{ directory, name }, 0) catch return error.InvalidPath;
         switch (try classifyArtifact(allocator, path)) {
             .evidence => {
                 if (evidence_index != null) return error.InvalidInventory;
@@ -218,7 +218,7 @@ pub fn open(allocator: std.mem.Allocator, context: context_mod.Context, director
     for (ordered, 0..) |source_index, destination_index|
         copyZ(working.names[destination_index].len, &working.names[destination_index], &working.name_lens[destination_index], discovered_names[source_index][0..discovered_lens[source_index]]) catch return error.InvalidInventory;
     for (0..handoff.role_count) |index| {
-        const path = std.fmt.bufPrintZ(&working.paths[index], "{s}/{s}", .{ directory, working.names[index][0..working.name_lens[index]] }) catch return error.InvalidPath;
+        const path = std.fmt.bufPrintSentinel(&working.paths[index], "{s}/{s}", .{ directory, working.names[index][0..working.name_lens[index]] }, 0) catch return error.InvalidPath;
         working.path_lens[index] = path.len;
         try files.pinReleaseFileObserved(&working.entries[index], path, false, if (index == 0) evidence_mod.max_evidence_bytes else manifest_mod.max_manifest_bytes);
         const observation = working.entries[index].value() orelse return error.InvalidOwner;

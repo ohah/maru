@@ -130,7 +130,7 @@ const RealFetcher = struct {
     io: std.Io,
     fn fetch(self: *@This(), allocator: std.mem.Allocator, executable: []const u8, token: []const u8, request: transport.Request, output: []u8, budget: i128) ![]const u8 {
         var executable_storage: [context_mod.max_value_bytes + 1]u8 = undefined;
-        const executable_z = std.fmt.bufPrintZ(&executable_storage, "{s}", .{executable}) catch return error.InvalidInput;
+        const executable_z = std.fmt.bufPrintSentinel(&executable_storage, "{s}", .{executable}, 0) catch return error.InvalidInput;
         return transport_macos.fetch(self.io, allocator, executable_z, token, request, output, budget);
     }
 };

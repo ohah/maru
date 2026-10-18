@@ -61,7 +61,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2, .mise.toml 의 zig 0.16
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2, .mise.toml 의 zig 0.17
         with:
           # PR에서는 캐시를 **쓰지 않는다**(읽기는 유지). GitHub 캐시는 ref 스코프라 `refs/pull/N/merge`에
           # 저장된 툴체인 캐시는 그 PR만 읽을 수 있고, PR이 닫히면 영영 못 읽으면서 한도(10GB)만 먹는다.
@@ -87,7 +87,7 @@ jobs:
           test "$(/usr/bin/stat -f '%HT' "$canonical")" = 'Regular File'
           test -x "$canonical"
           version=$("$canonical" version)
-          test "$version" = '0.16.0'
+          test "$version" = '0.17.0'
           size=$(/usr/bin/stat -f '%z' "$canonical")
           case "$size" in
             ''|0|*[!0-9]*) exit 1 ;;

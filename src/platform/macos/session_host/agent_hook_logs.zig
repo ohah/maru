@@ -73,14 +73,14 @@ pub fn instanceDirPathIn(buf: []u8, cache_base: []const u8, host_id: u128) error
 pub fn instanceDirPathForProfileIn(buf: []u8, cache_base: []const u8, host_id: u128, profile: @import("runtime_metadata_types.zig").AgentLogFormat) error{NoSpaceLeft}![:0]u8 {
     var token_buf: [hook_command.instance_token_max]u8 = undefined;
     const token = hook_command.formatHostInstance(&token_buf, host_id);
-    return std.fmt.bufPrintZ(buf, "{s}/{s}/{s}", .{
+    return std.fmt.bufPrintSentinel(buf, "{s}/{s}/{s}", .{
         std.mem.trimEnd(u8, cache_base, "/"),
         hook_command.log_profile.localCacheSubdir(switch (profile) {
             .v1 => .v1,
             .v2 => .v2,
         }),
         token,
-    });
+    }, 0);
 }
 
 /// 그 runtime 의 로그 파일 경로(`<칸>/<32 hex runtime_id>.ndjson`).
@@ -98,7 +98,7 @@ pub fn runtimeLogPathForProfileIn(buf: []u8, cache_base: []const u8, host_id: u1
     const dir = try instanceDirPathForProfileIn(&dir_buf, cache_base, host_id, profile);
     var pane_buf: [hook_command.pane_token_max]u8 = undefined;
     const pane = hook_command.formatRuntimePane(&pane_buf, runtime_id);
-    return std.fmt.bufPrintZ(buf, "{s}/{s}.ndjson", .{ dir, pane });
+    return std.fmt.bufPrintSentinel(buf, "{s}/{s}.ndjson", .{ dir, pane }, 0);
 }
 
 /// 칸을 만든다(0700). 이미 있으면 그대로 둔다.
@@ -116,13 +116,13 @@ pub fn ensureInstanceDirForProfile(io: std.Io, cache_base: []const u8, host_id: 
     // 통째로 비운 경우다. mkdir 한 번으로 끝내면 그때 조용히 실패하고 **그 host 의 훅이 통째로 꺼진다**
     // (테스트가 이 결함을 잡았다). 그래서 재귀 생성 뒤 우리 두 칸의 권한을 좁힌다.
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = std.fmt.bufPrintZ(&log_buf, "{s}/{s}", .{
+    const log_dir = std.fmt.bufPrintSentinel(&log_buf, "{s}/{s}", .{
         std.mem.trimEnd(u8, cache_base, "/"),
         hook_command.log_profile.localCacheSubdir(switch (profile) {
             .v1 => .v1,
             .v2 => .v2,
         }),
-    }) catch return;
+    }, 0) catch return;
     std.Io.Dir.cwd().createDirPath(io, log_dir) catch return;
     // 재귀 생성은 기본 권한을 쓰므로 **로그 디렉터리는 우리가 좁힌다**(GUI 도 같은 규율이다 — 이미 있던
     // 0755 도 0700 으로 좁힌다). payload 에 소스와 셸 명령 원문이 실린다(계약 §7).
@@ -149,10 +149,10 @@ pub fn removeRuntimeLogForProfile(cache_base: []const u8, host_id: u128, runtime
     const path = runtimeLogPathForProfileIn(&buf, cache_base, host_id, runtime_id, profile) catch return;
     _ = c.unlink(path.ptr);
     var rotated_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rotated = std.fmt.bufPrintZ(&rotated_buf, "{s}{s}", .{
+    const rotated = std.fmt.bufPrintSentinel(&rotated_buf, "{s}{s}", .{
         path,
         maru.session.agent_hook_event.rotated_suffix,
-    }) catch return;
+    }, 0) catch return;
     _ = c.unlink(rotated.ptr);
 }
 
@@ -186,13 +186,13 @@ pub fn sweepDeadHostDirs(io: std.Io, cache_base: []const u8, own_host_id: u128) 
 fn sweepDeadHostDirsForProfile(io: std.Io, cache_base: []const u8, own_host_id: u128, profile: @import("runtime_metadata_types.zig").AgentLogFormat) void {
     if (builtin.os.tag != .macos) return;
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = std.fmt.bufPrintZ(&log_buf, "{s}/{s}", .{
+    const log_dir = std.fmt.bufPrintSentinel(&log_buf, "{s}/{s}", .{
         std.mem.trimEnd(u8, cache_base, "/"),
         hook_command.log_profile.localCacheSubdir(switch (profile) {
             .v1 => .v1,
             .v2 => .v2,
         }),
-    }) catch return;
+    }, 0) catch return;
     var handle = std.Io.Dir.openDirAbsolute(io, log_dir, .{ .iterate = true }) catch return;
     defer handle.close(io);
 
@@ -214,7 +214,7 @@ fn sweepDeadHostDirsForProfile(io: std.Io, cache_base: []const u8, own_host_id: 
         // host_id 라 그대로다). 이름으로 먼저 거르지 않으면 그 순간 자기 칸을 지운다.
         if (std.mem.eql(u8, entry.name, own_token)) continue;
         var owner_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const seg = std.fmt.bufPrintZ(&owner_buf, "{s}/{s}", .{ log_dir, entry.name }) catch continue;
+        const seg = std.fmt.bufPrintSentinel(&owner_buf, "{s}/{s}", .{ log_dir, entry.name }, 0) catch continue;
         if (segmentOwnerAlive(seg)) continue; // 살아 있는 host 의 칸(또는 주인을 모르는 칸)
         @memcpy(doomed[count][0..entry.name.len], entry.name);
         doomed_len[count] = entry.name.len;
@@ -222,7 +222,7 @@ fn sweepDeadHostDirsForProfile(io: std.Io, cache_base: []const u8, own_host_id: 
     }
     for (doomed[0..count], doomed_len[0..count]) |*name_buf, len| {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ log_dir, name_buf[0..len] }) catch continue;
+        const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}", .{ log_dir, name_buf[0..len] }, 0) catch continue;
         removeSegment(io, path);
     }
 }
@@ -270,7 +270,7 @@ fn segmentOwnerAlive(segment_dir: [:0]const u8) bool {
     // 살아 있는 칸을 지운다. 죽은 칸은 어차피 다음 실행이 거두므로 늦게 거두는 쪽이 안전하다.
     if (recentlyTouched(segment_dir)) return true;
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ segment_dir, owner_marker_name }) catch return true;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}", .{ segment_dir, owner_marker_name }, 0) catch return true;
     const fd = c.open(path.ptr, .{ .ACCMODE = .RDONLY }, @as(c.mode_t, 0));
     if (fd < 0) return true; // 마커 없음 — 모르면 남긴다
     defer _ = c.close(fd);
@@ -287,7 +287,7 @@ fn segmentOwnerAlive(segment_dir: [:0]const u8) bool {
 fn writeOwnerMarker(segment_dir: [:0]const u8) void {
     if (!ownedDirectory(segment_dir)) return; // 우리 칸이 아닌 자리에 우리 신원을 적지 않는다
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ segment_dir, owner_marker_name }) catch return;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}", .{ segment_dir, owner_marker_name }, 0) catch return;
     const fd = c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
     if (fd < 0) return;
     defer _ = c.close(fd);
@@ -354,7 +354,7 @@ test "테스트 빌드는 실제 사용자 홈의 캐시에 host 칸 경로를 �
     };
 
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const real_z = try std.fmt.bufPrintZ(&real_buf, "{s}", .{real_home});
+    const real_z = try std.fmt.bufPrintSentinel(&real_buf, "{s}", .{real_home}, 0);
     try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", real_z.ptr, 1));
     try std.testing.expect(resolveCacheBase(allocator) == null);
 
@@ -421,7 +421,7 @@ test "sweep 은 주인이 살아 있는 칸을 남기고 죽은 칸만 거둔다
     {
         const seg = try instanceDirPathIn(&buf, cache_base, dead_other);
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/owner.pid", .{seg});
+        const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/owner.pid", .{seg}, 0);
         const fd = c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
         try testing.expect(fd >= 0);
         const text = "999999\n";
@@ -435,7 +435,7 @@ test "sweep 은 주인이 살아 있는 칸을 남기고 죽은 칸만 거둔다
     {
         const seg = try instanceDirPathIn(&buf, cache_base, own);
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/owner.pid", .{seg});
+        const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/owner.pid", .{seg}, 0);
         const fd = c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
         try testing.expect(fd >= 0);
         const text = "999998\n";
@@ -447,7 +447,7 @@ test "sweep 은 주인이 살아 있는 칸을 남기고 죽은 칸만 거둔다
     {
         const seg = try instanceDirPathIn(&buf, cache_base, unmarked_other);
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/owner.pid", .{seg});
+        const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/owner.pid", .{seg}, 0);
         _ = c.unlink(path.ptr);
         testAgeSegment(seg, sweep_grace_seconds * 2);
     }
@@ -489,7 +489,7 @@ test "죽은 칸은 안에 파일이 남아 있어도 거둔다" {
     _ = c.close(fd);
     {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const marker = try std.fmt.bufPrintZ(&path_buf, "{s}/owner.pid", .{std.fs.path.dirname(log).?});
+        const marker = try std.fmt.bufPrintSentinel(&path_buf, "{s}/owner.pid", .{std.fs.path.dirname(log).?}, 0);
         const mfd = c.open(marker.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
         try testing.expect(mfd >= 0);
         const text = "999999\n";
@@ -527,7 +527,7 @@ test "주인이 죽어도 방금 손댄 칸은 남긴다 — 업그레이드 직
     const seg = try instanceDirPathIn(&buf, cache_base, fresh_dead);
     {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const marker = try std.fmt.bufPrintZ(&path_buf, "{s}/owner.pid", .{seg});
+        const marker = try std.fmt.bufPrintSentinel(&path_buf, "{s}/owner.pid", .{seg}, 0);
         const fd = c.open(marker.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
         try testing.expect(fd >= 0);
         const text = "999999\n"; // 죽은 pid
@@ -574,7 +574,7 @@ test "심링크로 바꿔친 칸에는 우리 신원을 적지 않는다" {
 
     // 심링크가 가리키는 곳에 우리 신원이 생기면 안 된다.
     var marker_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const marker = try std.fmt.bufPrintZ(&marker_buf, "{s}/owner.pid", .{victim});
+    const marker = try std.fmt.bufPrintSentinel(&marker_buf, "{s}/owner.pid", .{victim}, 0);
     var st: posix.Stat = undefined;
     try testing.expect(c.fstatat(posix.AT.FDCWD, marker.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0);
 }

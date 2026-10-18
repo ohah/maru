@@ -324,7 +324,7 @@ fn applyKey(
             return;
         };
         const validated = try dupValidColor(a, diags, line_no, key, value, "");
-        if (validated.len != 0) config.theme.syntax[@intFromEnum(role)] = validated;
+        if (validated.len != 0) config.theme.syntax[@backingInt(role)] = validated;
     } else if (std.mem.startsWith(u8, key, "theme.palette.")) {
         // ANSI 16색 override: theme.palette.0~.15 = #RRGGBB. suffix를 u8로 파싱해 0~15 범위 검사. 인덱스가 비정수·
         // 범위 밖이면 forgiving(diagnostic + 무시), 색은 dupValidColor가 검증(틀린 색도 forgiving). OSC4가 없을 때의
@@ -2571,9 +2571,9 @@ test "parse: theme.preset 신규 프리셋(rose-pine·tokyo-night·nord·one-dar
 test "presetColors: 모든 프리셋이 resolve에 성공(유효 hex 가드 — 새 프리셋 오타 즉시 검출)" {
     // 새 프리셋의 색·16팔레트에 오타 hex(#zzz 등)가 있으면 resolve가 ResolveError를 던져 이 테스트가 깨진다.
     // enum을 inline for로 돌아 모든 변형을 자동 커버한다(프리셋 추가 시 이 테스트는 손대지 않아도 새 프리셋을 검증).
-    inline for (@typeInfo(theme.ThemePreset).@"enum".fields) |f| {
+    inline for (@import("type_info_fields").enumFields(theme.ThemePreset)) |f| {
         var cfg = theme.Config{};
-        cfg.theme = theme.presetColors(@enumFromInt(f.value));
+        cfg.theme = theme.presetColors(@fromBackingInt(@intCast(f.value)));
         _ = try appearance.resolve(cfg);
     }
 }
@@ -2597,18 +2597,18 @@ test "theme.preset_names_joined: comptime 목록이 enum과 일치(diagnostic dr
     for (theme.preset_names_joined) |c| {
         if (c == '|') pipes += 1;
     }
-    try std.testing.expectEqual(@typeInfo(theme.ThemePreset).@"enum".fields.len - 1, pipes);
+    try std.testing.expectEqual(@import("type_info_fields").enumFields(theme.ThemePreset).len - 1, pipes);
 }
 
 test "presetColors: 모든 프리셋의 주 색 4-tuple(bg/fg/cursor/selection)이 유일(detectThemePreset 라운드트립 가드)" {
     // detectThemePreset이 주 색 4개로 프리셋을 역식별하므로(first-match-wins), 두 프리셋이 4-tuple을 공유하면 뒤 프리셋이
     // 앞으로 alias돼 GUI 드롭다운 표시·←→ 순환이 깨진다. 새 프리셋이 기존과 4-tuple을 겹치지 않는지 O(n²)로 검사한다.
-    const fields = @typeInfo(theme.ThemePreset).@"enum".fields;
+    const fields = @import("type_info_fields").enumFields(theme.ThemePreset);
     inline for (fields, 0..) |fa, ia| {
-        const a = theme.presetColors(@enumFromInt(fa.value));
+        const a = theme.presetColors(@fromBackingInt(@intCast(fa.value)));
         inline for (fields, 0..) |fb, ib| {
             if (ib > ia) {
-                const b = theme.presetColors(@enumFromInt(fb.value));
+                const b = theme.presetColors(@fromBackingInt(@intCast(fb.value)));
                 const same = std.ascii.eqlIgnoreCase(a.background, b.background) and
                     std.ascii.eqlIgnoreCase(a.foreground, b.foreground) and
                     std.ascii.eqlIgnoreCase(a.cursor, b.cursor) and
@@ -3212,12 +3212,12 @@ test "SC3 theme.syntax.<역할>: 유효 색은 실리고, 틀린 색·모르는 
     );
     defer parsed.deinit();
     const t = parsed.config.theme;
-    try std.testing.expectEqualStrings("#c678dd", t.syntax[@intFromEnum(theme.SyntaxRole.keyword)].?);
-    try std.testing.expectEqualStrings("#5c6370", t.syntax[@intFromEnum(theme.SyntaxRole.comment)].?);
+    try std.testing.expectEqualStrings("#c678dd", t.syntax[@backingInt(theme.SyntaxRole.keyword)].?);
+    try std.testing.expectEqualStrings("#5c6370", t.syntax[@backingInt(theme.SyntaxRole.comment)].?);
     // 사용자 키는 `type`이고 필드는 `type_name`이다 — 그 사상이 여기서도 성립한다.
-    try std.testing.expectEqualStrings("#56b6c2", t.syntax[@intFromEnum(theme.SyntaxRole.type_name)].?);
+    try std.testing.expectEqualStrings("#56b6c2", t.syntax[@backingInt(theme.SyntaxRole.type_name)].?);
     // 틀린 색은 그 역할을 **파생인 채로** 둔다(끄지 않는다).
-    try std.testing.expect(t.syntax[@intFromEnum(theme.SyntaxRole.string)] == null);
+    try std.testing.expect(t.syntax[@backingInt(theme.SyntaxRole.string)] == null);
     // 진단이 둘(틀린 색·모르는 역할) — 조용히 삼키지 않는다.
     try std.testing.expect(parsed.diagnostics.len >= 2);
 }
@@ -3265,7 +3265,7 @@ test "SC6 theme.preset 이 뒤 줄에 오면 구문 색 override 가 지워진�
         \\theme.preset = dracula
     );
     defer after.deinit();
-    try std.testing.expect(after.config.theme.syntax[@intFromEnum(theme.SyntaxRole.keyword)] == null);
+    try std.testing.expect(after.config.theme.syntax[@backingInt(theme.SyntaxRole.keyword)] == null);
 
     // 앞 줄에 오면 살아남는다(나중 줄 우선).
     var before = try parse(a,
@@ -3273,7 +3273,7 @@ test "SC6 theme.preset 이 뒤 줄에 오면 구문 색 override 가 지워진�
         \\theme.syntax.keyword = #c678dd
     );
     defer before.deinit();
-    try std.testing.expectEqualStrings("#c678dd", before.config.theme.syntax[@intFromEnum(theme.SyntaxRole.keyword)].?);
+    try std.testing.expectEqualStrings("#c678dd", before.config.theme.syntax[@backingInt(theme.SyntaxRole.keyword)].?);
 }
 
 test "PAL1 팔레트는 문서가 광고하는 범위와 로더가 받는 범위가 같다" {

@@ -240,5 +240,17 @@ fn allocationFailures(a: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 0), state.model.rows.items.len);
 }
 test "project search dock every presentation allocation failure unwinds owned rows" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFailures, .{});
+    // Zig 0.17 ArrayList can satisfy growth in place. The helper injects allocation
+    // failures, so prevent resize/remap from changing the allocation prefix sequence.
+    const stable_backing_vtable: std.mem.Allocator.VTable = .{
+        .alloc = std.testing.allocator.vtable.alloc,
+        .resize = std.mem.Allocator.noResize,
+        .remap = std.mem.Allocator.noRemap,
+        .free = std.testing.allocator.vtable.free,
+    };
+    const stable_backing: std.mem.Allocator = .{
+        .ptr = std.testing.allocator.ptr,
+        .vtable = &stable_backing_vtable,
+    };
+    try std.testing.checkAllAllocationFailures(stable_backing, allocationFailures, .{});
 }

@@ -41,7 +41,7 @@ const Recorder = struct {
     fn add(self: *@This(), event: Event) !void {
         self.events[self.len] = event;
         self.len += 1;
-        if (@intFromEnum(event) <= @intFromEnum(Event.validate_final_deadline)) {
+        if (@backingInt(event) <= @backingInt(Event.validate_final_deadline)) {
             const index = self.calls;
             self.calls += 1;
             if (self.fail_call == index) return error.StepFailed;

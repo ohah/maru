@@ -192,7 +192,7 @@ pub fn fingerprint(session: *app.AppSession) u64 {
         if (term.rt.editor_search_report != null) continue;
         // 나머지 surface 삽입·닫기는 순회를 무효화해야 빠진 문서가 없다.
         hash.update(std.mem.asBytes(&term.surface.id));
-        const kind: u8 = @intCast(@intFromEnum(term.kind));
+        const kind: u8 = @intCast(@backingInt(term.kind));
         hash.update(std.mem.asBytes(&kind));
         if (term.kind != .editor) {
             if (term.file_entry) |entry| if (entry.usesEditorBridge()) {
@@ -355,7 +355,7 @@ pub fn validateRoots(session: *app.AppSession) !void {
         const cap = session.file_tree.rootCapabilityForPath(path) orelse return error.RootChanged;
         var actual = try @import("process.zig").openRoot(session.allocator, session.io, path);
         defer actual.deinit(session.allocator, session.io);
-        const device: std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(actual.device))) = @bitCast(actual.device);
+        const device: @Int(.unsigned, @bitSizeOf(@TypeOf(actual.device))) = @bitCast(actual.device);
         if (@as(u64, device) != cap.identity.device or actual.stat.inode != cap.identity.inode or cap.identity.kind != 2) return error.RootChanged;
         try @import("process.zig").validateRoot(session.io, &actual);
     }

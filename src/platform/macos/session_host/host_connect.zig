@@ -958,7 +958,7 @@ fn connectExistingHostWith(
     var exact = manifest;
     defer exact.deinit();
     if (exact.lifecycle == .restoring) return .{ .failed = .startup_timeout };
-    const endpoint = allocator.dupeZ(u8, exact.endpoint) catch return .{ .failed = .out_of_memory };
+    const endpoint = allocator.dupeSentinel(u8, exact.endpoint, 0) catch return .{ .failed = .out_of_memory };
     defer allocator.free(endpoint);
     const outcome = connectExactWithBackoffKind(
         allocator,
@@ -1161,7 +1161,7 @@ fn connectDiscoveredHostProfileWithObserved(
         logStaleManifest("manifest", host_manifest.firstDescriptorMismatch(current.descriptor(), expected));
         return .{ .failed = .stale_manifest };
     }
-    const endpoint = allocator.dupeZ(u8, expected.endpoint) catch return .{ .failed = .out_of_memory };
+    const endpoint = allocator.dupeSentinel(u8, expected.endpoint, 0) catch return .{ .failed = .out_of_memory };
     defer allocator.free(endpoint);
     const outcome = switch (io) {
         .blocking => connectExactWithBackoffKind(
@@ -1245,7 +1245,7 @@ test "실측: 콜드런치가 얼마나 막는가 (문서의 110 ms 재확인)" 
     for (&ms, 0..) |*slot, i| {
         // 이 파일의 다른 test 들과 같은 관례로 만든다(`c.mkdir` — 1620·1650 행).
         var base_buf: [96]u8 = undefined;
-        const base = try std.fmt.bufPrintZ(&base_buf, "/tmp/maru-coldm-{d}-{d}", .{ std.c.getpid(), i });
+        const base = try std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-coldm-{d}-{d}", .{ std.c.getpid(), i }, 0);
         _ = c.mkdir(base.ptr, 0o700);
         defer std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
 
@@ -1938,7 +1938,7 @@ test "P3-e4d-2b frozen GUI rejects a peer build ID that differs from the atteste
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var base_buf: [128]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-v1-build-mismatch-{d}", .{c.getpid()}) catch
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-sh-v1-build-mismatch-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.mkdir(base.ptr, 0o700);
     var dir_buf: [256]u8 = undefined;
@@ -1968,7 +1968,7 @@ test "host_connect finds an existing frozen N-1 major without spawning and prese
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var base_buf: [128]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-v1-{d}", .{c.getpid()}) catch
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-sh-v1-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.mkdir(base.ptr, 0o700);
     var dir_buf: [256]u8 = undefined;
@@ -2197,7 +2197,7 @@ test "CR4a actual issuer는 bounded connectExistingHostUntil로 existing host에
     const io = testing.io;
 
     var base_buf: [128]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-hc-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-sh-hc-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     _ = c.mkdir(base.ptr, 0o700); // 제품에선 base=user cache dir(이미 존재). host bind는 <base>/session-host만 mkdir하므로 base를 먼저 만든다.
     // discovery 경로와 동일하게 host별 short endpoint + cache manifest를 띄운다.
     var dir_buf: [256]u8 = undefined;
@@ -2252,7 +2252,7 @@ test "CR4a actual issuer는 bounded connectExistingHostUntil로 existing host에
 
     const current_exe_raw = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(current_exe_raw);
-    const current_exe = try allocator.dupeZ(u8, current_exe_raw);
+    const current_exe = try allocator.dupeSentinel(u8, current_exe_raw, 0);
     defer allocator.free(current_exe);
     {
         var client = connectOrLaunch(allocator, current_exe, base, .{ .connect_attempts = 5, .connect_delay_ms = 10 }) orelse {
@@ -2309,7 +2309,7 @@ test "host_connect: falls back to null when no host exists and spawn cannot bind
     const allocator = testing.allocator;
 
     var base_buf: [128]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-hcf-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-sh-hcf-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     _ = c.mkdir(base.ptr, 0o700); // base 존재 → spawn_host 경로를 실제로 탄다(lock 취득→spawn 실패→backoff→null).
     defer {
         // 테스트가 만든 dir/lock 정리(host는 안 떴다).
@@ -2336,7 +2336,7 @@ test "host_connect: manifest도 endpoint도 없는 host_id는 host_gone으로 �
     const allocator = testing.allocator;
 
     var base_buf: [128]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-gone-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-sh-gone-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     _ = c.mkdir(base.ptr, 0o700);
     var dir_buf: [256]u8 = undefined;
     const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
@@ -2362,7 +2362,7 @@ test "host_connect: recovery descriptor replacement는 legacy probe 없이 stale
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var base_buf: [128]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-discovered-{d}", .{c.getpid()}) catch
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-sh-discovered-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.mkdir(base.ptr, 0o700);
     var dir_buf: [256]u8 = undefined;
@@ -2404,7 +2404,7 @@ test "host_connect: owner lease는 부재(free)와 판정 불가(unknown)를 구
     if (builtin.os.tag != .macos) return error.SkipZigTest;
 
     var base_buf: [128]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-lease-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-sh-lease-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     _ = c.mkdir(base.ptr, 0o700);
     var dir_buf: [256]u8 = undefined;
     const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
@@ -2463,7 +2463,7 @@ test "host_connect: legacy 경로의 미확정 probe는 host_gone으로 승격�
     const allocator = testing.allocator;
 
     var base_buf: [128]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-ind-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-sh-ind-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     _ = c.mkdir(base.ptr, 0o700);
     var dir_buf: [256]u8 = undefined;
     const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
@@ -2526,7 +2526,7 @@ test "host_connect: 복원 중 host 의 hello 실패는 재연결 예산을 소�
     const allocator = testing.allocator;
 
     var base_buf: [128]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-restoring-{d}", .{c.getpid()}) catch
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-sh-restoring-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.mkdir(base.ptr, 0o700);
     var dir_buf: [256]u8 = undefined;
@@ -2596,7 +2596,7 @@ test "host_connect: launches the product maru session host and completes host.in
     var nonce: u64 = undefined;
     arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
     var base_buf: [160]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-product-{d}-{x}", .{ c.getpid(), nonce }) catch return error.SkipZigTest;
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-sh-product-{d}-{x}", .{ c.getpid(), nonce }, 0) catch return error.SkipZigTest;
     try testing.expectEqual(@as(c_int, 0), c.mkdir(base.ptr, 0o700));
 
     var dir_buf: [256]u8 = undefined;
@@ -2752,9 +2752,9 @@ test "뿌리가 통째로 사라져도 lock 자리를 자력으로 되살린다"
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     // `/tmp/maru-<uid>` 가 청소 도구에 지워진 상태를 그대로 만든다 — 뿌리도, 그 아래도 없다.
     var root_buf: [128]u8 = undefined;
-    const root = try std.fmt.bufPrintZ(&root_buf, "/tmp/maru-ensuredir-{d}", .{c.getpid()});
+    const root = try std.fmt.bufPrintSentinel(&root_buf, "/tmp/maru-ensuredir-{d}", .{c.getpid()}, 0);
     var dir_buf: [160]u8 = undefined;
-    const dir = try std.fmt.bufPrintZ(&dir_buf, "{s}/session-host", .{root});
+    const dir = try std.fmt.bufPrintSentinel(&dir_buf, "{s}/session-host", .{root}, 0);
     var lock_buf: [256]u8 = undefined;
     const lock = try discovery.lockPathIn(&lock_buf, dir);
     _ = c.unlink(lock.ptr);
@@ -2846,7 +2846,7 @@ test "image channel host_connect: 제품 GUI 연결(새 탭·복원·재접속)�
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var base_buf: [128]u8 = undefined;
-    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-advert-{d}", .{c.getpid()}) catch
+    const base = std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-sh-advert-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.mkdir(base.ptr, 0o700);
     var dir_buf: [256]u8 = undefined;

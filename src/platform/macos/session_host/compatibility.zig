@@ -10,14 +10,14 @@ const shutdown_n1_baseline = @import("shutdown_n1_baseline.zig");
 const metadata_n1_baseline = @import("metadata_n1_baseline.zig");
 
 pub const ShutdownProfile = struct {
-    artifact_sha256: [32]u8 = [_]u8{0} ** 32,
+    artifact_sha256: [32]u8 = @as([32]u8, @splat(0)),
     wire_major: u32 = 0,
     gui_runtime_list: bool = false,
     gui_runtime_terminate: bool = false,
     cross_connection_admin_barrier: bool = false,
 
     pub fn complete(self: ShutdownProfile) bool {
-        return !std.mem.eql(u8, &self.artifact_sha256, &([_]u8{0} ** 32)) and
+        return !std.mem.eql(u8, &self.artifact_sha256, &(@as([32]u8, @splat(0)))) and
             self.wire_major != 0 and
             self.gui_runtime_list and
             self.gui_runtime_terminate and
@@ -106,7 +106,7 @@ pub fn artifactBuildIdMatches(build_id: []const u8, digest: [32]u8) bool {
 }
 
 test "P3-e4d-2b artifact build ID attestation is exact" {
-    const digest = [_]u8{0xAB} ** 32;
+    const digest = @as([32]u8, @splat(0xAB));
     try std.testing.expect(artifactBuildIdMatches(
         "sha256:abababababababababababababababababababababababababababababababab",
         digest,

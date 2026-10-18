@@ -95,9 +95,9 @@ pub const Source = struct {
         if (!candidateName(name)) return error.InvalidName;
         const root = try openRoot(io, root_path, false);
         errdefer root.close(io);
-        const root_z = try allocator.dupeZ(u8, root_path);
+        const root_z = try allocator.dupeSentinel(u8, root_path, 0);
         errdefer allocator.free(root_z);
-        const name_z = try allocator.dupeZ(u8, name);
+        const name_z = try allocator.dupeSentinel(u8, name, 0);
         errdefer allocator.free(name_z);
         var lock: ?OwnerLease = null;
         errdefer if (lock) |*lease| lease.deinit();
@@ -325,7 +325,7 @@ const Reservation = struct {
 
     fn init(allocator: std.mem.Allocator, io: std.Io, root_path: []const u8, id: Id, path: []const u8, fresh: bool) !Reservation {
         if (!std.fs.path.isAbsolute(root_path) or std.mem.indexOfScalar(u8, root_path, 0) != null) return error.InvalidRoot;
-        const root_z = try allocator.dupeZ(u8, root_path);
+        const root_z = try allocator.dupeSentinel(u8, root_path, 0);
         errdefer allocator.free(root_z);
         const path_copy = try allocator.dupe(u8, path);
         errdefer allocator.free(path_copy);
@@ -336,7 +336,7 @@ const Reservation = struct {
             try std.Io.Dir.cwd().createDirPath(io, parent);
             if (c.mkdir(root_z.ptr, 0o700) == 0) {
                 // mkdir도 umask를 따른다. 방금 생성한 루트만 보정한다.
-                try std.Io.Dir.cwd().setFilePermissions(io, root_path, @enumFromInt(0o700), .{ .follow_symlinks = false });
+                try std.Io.Dir.cwd().setFilePermissions(io, root_path, @fromBackingInt(@intCast(0o700)), .{ .follow_symlinks = false });
             } else if (posix.errno(-1) != .EXIST) return error.CreateFailed;
         }
         const root = try std.Io.Dir.cwd().openDir(io, root_path, .{ .follow_symlinks = false });
@@ -421,9 +421,9 @@ const Reservation = struct {
         errdefer self.allocator.free(next_path);
         const bytes = try backup.encodeRecovery(self.allocator, self.id, .{ .path = path, .disk_hash = disk_hash }, content);
         defer self.allocator.free(bytes);
-        var atomic = try self.root.createFileAtomic(self.io, &self.name, .{ .replace = true, .permissions = @enumFromInt(0o600) });
+        var atomic = try self.root.createFileAtomic(self.io, &self.name, .{ .replace = true, .permissions = @fromBackingInt(@intCast(0o600)) });
         defer atomic.deinit(self.io);
-        try atomic.file.setPermissions(self.io, @enumFromInt(0o600));
+        try atomic.file.setPermissions(self.io, @fromBackingInt(@intCast(0o600)));
         var buffer: [4096]u8 = undefined;
         var writer = atomic.file.writer(self.io, &buffer);
         try writer.interface.writeAll(bytes);

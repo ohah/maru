@@ -125,15 +125,15 @@ const BoundedExecutor = struct {
     io: std.Io,
     fn capture(self: *@This(), executable: []const u8, args: []const []const u8, environment: []const []const u8, output: []u8, budget_ns: i128) ![]const u8 {
         var exe_storage: [context_mod.max_value_bytes + 1]u8 = undefined;
-        const exe = std.fmt.bufPrintZ(&exe_storage, "{s}", .{executable}) catch return error.InvalidExecutable;
+        const exe = std.fmt.bufPrintSentinel(&exe_storage, "{s}", .{executable}, 0) catch return error.InvalidExecutable;
         var arg_storage: [22][context_mod.max_value_bytes + 32]u8 = undefined;
         var argv: [24:null]?[*:0]const u8 = @splat(null);
         argv[0] = exe.ptr;
-        for (args, 0..) |arg, index| argv[index + 1] = (std.fmt.bufPrintZ(&arg_storage[index], "{s}", .{arg}) catch return error.InvalidArgument).ptr;
+        for (args, 0..) |arg, index| argv[index + 1] = (std.fmt.bufPrintSentinel(&arg_storage[index], "{s}", .{arg}, 0) catch return error.InvalidArgument).ptr;
         var env_storage: [2]["GH_TOKEN=".len + transport.max_token_bytes + 1]u8 = undefined;
         defer @memset(std.mem.asBytes(&env_storage), 0);
         var envp: [2:null]?[*:0]const u8 = @splat(null);
-        for (environment, 0..) |entry, index| envp[index] = (std.fmt.bufPrintZ(&env_storage[index], "{s}", .{entry}) catch return error.InvalidToken).ptr;
+        for (environment, 0..) |entry, index| envp[index] = (std.fmt.bufPrintSentinel(&env_storage[index], "{s}", .{entry}, 0) catch return error.InvalidToken).ptr;
         return process.runCaptureEnvironmentStdout(self.io, exe, &argv, &envp, output, budget_ns);
     }
 };

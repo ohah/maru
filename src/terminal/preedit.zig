@@ -322,7 +322,7 @@ fn baseSnapshot(cells: []const types.Cell, cols: u16, rows: u16, cursor: types.C
 }
 
 test "preedit overlay inserts Hangul without mutating base and preserves snapshot metadata" {
-    var cells = [_]types.Cell{.{}} ** 8;
+    var cells = @as([8]types.Cell, @splat(.{}));
     cells[0].codepoint = 'a';
     cells[1].codepoint = 'b';
     cells[2].codepoint = 'c';
@@ -343,7 +343,7 @@ test "preedit overlay inserts Hangul without mutating base and preserves snapsho
 }
 
 test "preedit overlay replaces all-dim ghost instead of shifting it" {
-    var cells = [_]types.Cell{.{}} ** 6;
+    var cells = @as([6]types.Cell, @splat(.{}));
     cells[0].codepoint = '>';
     cells[1] = .{ .codepoint = 'g', .style = .{ .dim = true } };
     cells[2] = .{ .codepoint = 'h', .style = .{ .dim = true } };
@@ -382,7 +382,7 @@ test "preedit overlay compose returns canonical base and retains state on scratc
     defer overlay.deinit();
     try overlay.replace("한");
 
-    var cells = [_]types.Cell{.{}} ** 4;
+    var cells = @as([4]types.Cell, @splat(.{}));
     cells[0].codepoint = 'a';
     const base = baseSnapshot(&cells, 4, 1, .{ .row = 0, .col = 1 });
     const out = overlay.compose(base);
@@ -392,7 +392,7 @@ test "preedit overlay compose returns canonical base and retains state on scratc
 }
 
 test "preedit anchor keeps the next Hangul syllable after an admitted unreflected commit" {
-    var cells = [_]types.Cell{.{}} ** 8;
+    var cells = @as([8]types.Cell, @splat(.{}));
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();
     try overlay.replace("글");
@@ -408,7 +408,7 @@ test "preedit anchor keeps the next Hangul syllable after an admitted unreflecte
 }
 
 test "preedit anchor is consumed by partial and complete base cursor echo" {
-    var cells = [_]types.Cell{.{}} ** 10;
+    var cells = @as([10]types.Cell, @splat(.{}));
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();
     try overlay.replace("x");
@@ -424,7 +424,7 @@ test "preedit anchor is consumed by partial and complete base cursor echo" {
 }
 
 test "preedit anchor wraps to the next row" {
-    var cells = [_]types.Cell{.{}} ** 8;
+    var cells = @as([8]types.Cell, @splat(.{}));
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();
     try overlay.replace("x");
@@ -436,7 +436,7 @@ test "preedit anchor wraps to the next row" {
 }
 
 test "preedit anchor clears with composition and on non-monotonic cursor movement" {
-    var cells = [_]types.Cell{.{}} ** 8;
+    var cells = @as([8]types.Cell, @splat(.{}));
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();
     try overlay.replace("x");
@@ -454,8 +454,8 @@ test "preedit anchor clears with composition and on non-monotonic cursor movemen
 }
 
 test "preedit anchor fails closed when geometry changes" {
-    var cells8 = [_]types.Cell{.{}} ** 8;
-    var cells6 = [_]types.Cell{.{}} ** 6;
+    var cells8 = @as([8]types.Cell, @splat(.{}));
+    var cells6 = @as([6]types.Cell, @splat(.{}));
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();
     try overlay.replace("x");
@@ -467,7 +467,7 @@ test "preedit anchor fails closed when geometry changes" {
 }
 
 test "preedit anchor never survives an unproven live viewport" {
-    var cells = [_]types.Cell{.{}} ** 8;
+    var cells = @as([8]types.Cell, @splat(.{}));
     var overlay = Overlay.init(std.testing.allocator);
     defer overlay.deinit();
     try overlay.replace("x");

@@ -25,7 +25,7 @@ pub const IncidentBinding = struct {
     connection_generation: u64 = 0,
     wire_major: u16 = 0,
     host_class_raw: u8 = 0,
-    seal: [32]u8 = [_]u8{0} ** 32,
+    seal: [32]u8 = @as([32]u8, @splat(0)),
 };
 
 pub const PreparedHostPublication = struct {
@@ -38,12 +38,12 @@ pub const PreparedHostPublication = struct {
     adapter_generation: u64 = 0,
     owned_raw: u8 = 0,
     lifecycle_raw: u8 = 0,
-    seal: [32]u8 = [_]u8{0} ** 32,
+    seal: [32]u8 = @as([32]u8, @splat(0)),
 };
 
 pub const IncidentBindingPublication = struct {
     client_addr: u64 = 0,
-    binding_seal: [32]u8 = [_]u8{0} ** 32,
+    binding_seal: [32]u8 = @as([32]u8, @splat(0)),
 };
 
 pub fn validBindingShape(value: IncidentBinding) bool {
@@ -56,8 +56,8 @@ pub fn validPreparedShape(value: PreparedHostPublication, expected_addr: usize) 
     return value.self_addr == expected_addr and value.pid != 0 and value.process_nonce != 0 and
         value.pool_addr != 0 and value.host_id != 0 and value.adapter_addr != 0 and
         value.adapter_generation != 0 and value.owned_raw == 1 and
-        (value.lifecycle_raw == @intFromEnum(PublicationLifecycle.prepared) or
-            value.lifecycle_raw == @intFromEnum(PublicationLifecycle.bound)) and !allZero(value.seal);
+        (value.lifecycle_raw == @backingInt(PublicationLifecycle.prepared) or
+            value.lifecycle_raw == @backingInt(PublicationLifecycle.bound)) and !allZero(value.seal);
 }
 
 pub fn validPublicationShape(value: IncidentBindingPublication) bool {
@@ -75,11 +75,11 @@ fn recursivelyPointerFree(comptime T: type) bool {
         .optional => |info| recursivelyPointerFree(info.child),
         .error_union => |info| recursivelyPointerFree(info.payload),
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field| if (!recursivelyPointerFree(field.type)) break :blk false;
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (!recursivelyPointerFree(field.type)) break :blk false;
             break :blk true;
         },
         .@"union" => |info| blk: {
-            inline for (info.fields) |field| if (!recursivelyPointerFree(field.type)) break :blk false;
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (!recursivelyPointerFree(field.type)) break :blk false;
             break :blk true;
         },
         else => true,
@@ -88,17 +88,17 @@ fn recursivelyPointerFree(comptime T: type) bool {
 
 test "CR0b binding 계약은 managed Client identity의 exact scalar schema를 고정한다" {
     try std.testing.expectEqual(@as(usize, 80), @sizeOf(IncidentBinding));
-    try std.testing.expectEqual(@as(usize, 7), std.meta.fields(IncidentBinding).len);
+    try std.testing.expectEqual(@as(usize, 7), @import("type_info_fields").fields(IncidentBinding).len);
 }
 
 test "CR0b binding 계약은 HostPool publication permit의 exact scalar schema를 고정한다" {
     try std.testing.expectEqual(@as(usize, 96), @sizeOf(PreparedHostPublication));
-    try std.testing.expectEqual(@as(usize, 10), std.meta.fields(PreparedHostPublication).len);
+    try std.testing.expectEqual(@as(usize, 10), @import("type_info_fields").fields(PreparedHostPublication).len);
 }
 
 test "CR0b binding 계약은 publication evidence의 exact scalar schema를 고정한다" {
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(IncidentBindingPublication));
-    try std.testing.expectEqual(@as(usize, 2), std.meta.fields(IncidentBindingPublication).len);
+    try std.testing.expectEqual(@as(usize, 2), @import("type_info_fields").fields(IncidentBindingPublication).len);
 }
 
 test "CR0b binding 계약은 세 DTO를 재귀 pointer-free로 유지한다" {
@@ -108,8 +108,8 @@ test "CR0b binding 계약은 세 DTO를 재귀 pointer-free로 유지한다" {
 }
 
 test "CR0b binding 계약은 host class와 publication lifecycle raw를 닫힌 값으로만 허용한다" {
-    try std.testing.expectEqual(@as(usize, 3), std.meta.fields(HostClass).len);
-    try std.testing.expectEqual(@as(usize, 4), std.meta.fields(PublicationLifecycle).len);
+    try std.testing.expectEqual(@as(usize, 3), @import("type_info_fields").fields(HostClass).len);
+    try std.testing.expectEqual(@as(usize, 4), @import("type_info_fields").fields(PublicationLifecycle).len);
     try std.testing.expect(std.enums.fromInt(HostClass, 0) == null);
     try std.testing.expect(std.enums.fromInt(PublicationLifecycle, 4) == null);
 }

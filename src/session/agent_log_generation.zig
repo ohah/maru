@@ -1,5 +1,7 @@
 //! Shared generation/position contract. OS writers supply random bytes; this codec
 //! never invents an identity from a PID, clock, file size, or allocation failure.
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const command = @import("agent_hook_command.zig");
 
@@ -110,7 +112,7 @@ pub fn resumeBytesBound(count: usize) error{Overflow}!usize {
 
 const testing = std.testing;
 const first: Generation = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff };
-const second: Generation = .{0x7e} ** 16;
+const second: Generation = @splat(0x7e);
 const first_hex = "00112233445566778899aabbccddeeff";
 
 test "generation header has independent golden bytes and preserves the payload" {
@@ -127,7 +129,7 @@ test "generation header has independent golden bytes and preserves the payload" 
 
 test "generation hex validates every byte position and round trips all byte values" {
     for (0..256) |value| {
-        const expected: Generation = .{@as(u8, @intCast(value))} ** 16;
+        const expected: Generation = @splat(@as(u8, @intCast(value)));
         const encoded = encodeGeneration(expected);
         // std's formatter supplies an independent oracle, so matching encoder/decoder
         // mistakes cannot hide behind a successful round trip.
@@ -159,7 +161,7 @@ test "generation resume grammar bounds and legacy distinction" {
     try testing.expectEqualStrings("aa:0", try encodeResumeEntry(&buffer, legacy));
     for ([_][]const u8{ "", "a", ":0", "../a:0", "a/b:0", "a:-1", "a:+1", "a:1_0", "a: 1", "a:18446744073709551616", "a:0:", "a:0:" ++ first_hex ++ ":0", "a:0:" ++ first_hex ++ ",b:0" }) |invalid|
         try testing.expectError(error.InvalidResume, decodeResumeEntry(invalid));
-    const name = "a" ** command.remote_log_name_max;
+    const name = array_repeat.repeat("a", command.remote_log_name_max);
     const maximum = try decodeResumeEntry(name ++ ":18446744073709551615:" ++ first_hex);
     const encoded = try encodeResumeEntry(&buffer, maximum);
     try testing.expectEqual(max_resume_entry_bytes, encoded.len);

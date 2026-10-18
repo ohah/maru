@@ -31,7 +31,7 @@ test "P3-e4d-2b metadata N-1 baseline is capability-less and nonzero" {
     try std.testing.expectEqual(@as(u16, 1), wire_major);
     try std.testing.expectEqual(@as(u16, 1), screen_codec_version);
     try std.testing.expect(!runtime_metadata_v1);
-    try std.testing.expect(!std.mem.eql(u8, &artifact_sha256, &([_]u8{0} ** 32)));
-    try std.testing.expect(!std.mem.eql(u8, &source_patch_sha256, &([_]u8{0} ** 32)));
-    try std.testing.expect(!std.mem.eql(u8, &manifest_sha256, &([_]u8{0} ** 32)));
+    try std.testing.expect(!std.mem.eql(u8, &artifact_sha256, &(@as([32]u8, @splat(0)))));
+    try std.testing.expect(!std.mem.eql(u8, &source_patch_sha256, &(@as([32]u8, @splat(0)))));
+    try std.testing.expect(!std.mem.eql(u8, &manifest_sha256, &(@as([32]u8, @splat(0)))));
 }

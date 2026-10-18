@@ -3,6 +3,8 @@
 //! The WindowServer producer must submit complete bounded snapshots.  Selection lives here so
 //! the product producer and the artifact verifier cannot quietly use different heuristics.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 
 pub const max_windows: usize = 256;
@@ -589,12 +591,12 @@ test "v2b0b publisher reduces five complete triplets and refuses overwrite" {
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(testing.io, &root_buf);
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/observation.json", .{root_buf[0..root_len]});
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/observation.json", .{root_buf[0..root_len]}, 0);
     const collision_name = try std.fmt.allocPrint(testing.allocator, "collision.json.tmp.{d}", .{std.c.getpid()});
     defer testing.allocator.free(collision_name);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = collision_name, .data = "foreign temporary" });
     var collision_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const collision_path = try std.fmt.bufPrintZ(&collision_path_buf, "{s}/collision.json", .{root_buf[0..root_len]});
+    const collision_path = try std.fmt.bufPrintSentinel(&collision_path_buf, "{s}/collision.json", .{root_buf[0..root_len]}, 0);
     try testing.expectError(error.ArtifactCreateFailed, publishObservation(testing.allocator, transcript.written(), collision_path));
     const preserved = try tmp.dir.readFileAlloc(testing.io, collision_name, testing.allocator, .limited(64));
     defer testing.allocator.free(preserved);
@@ -617,7 +619,7 @@ test "v2b0b publisher reduces five complete triplets and refuses overwrite" {
         .rows = &raw_rows,
     });
     var drift_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const drift_path = try std.fmt.bufPrintZ(&drift_path_buf, "{s}/drift.json", .{root_buf[0..root_len]});
+    const drift_path = try std.fmt.bufPrintSentinel(&drift_path_buf, "{s}/drift.json", .{root_buf[0..root_len]}, 0);
     try testing.expectError(error.AnchorDrift, publishObservation(testing.allocator, drifted.written(), drift_path));
 
     // Exercise the published app-hosted schema as well as the pure reducer. A capture cannot
@@ -628,7 +630,7 @@ test "v2b0b publisher reduces five complete triplets and refuses overwrite" {
     for (&raw_rows, 0..) |*row, index| {
         candidate_windows[index][1].owner = .{ .pid = 999, .bundle_id = "dev.maru.apphost", .signing_id = "dev.maru.apphost", .apple_signed = false };
         candidate_windows[index][1].layer = 20;
-        proofs[index] = .{ .window_id = @intCast(100 + index), .capture_basename = try std.fmt.bufPrint(&names[index], "candidate-{d}-{d}.png", .{ index, 100 + index }), .sha256 = "a" ** 64, .width = 204, .height = 590, .hanja_rows = 6 };
+        proofs[index] = .{ .window_id = @intCast(100 + index), .capture_basename = try std.fmt.bufPrint(&names[index], "candidate-{d}-{d}.png", .{ index, 100 + index }), .sha256 = array_repeat.repeat("a", 64), .width = 204, .height = 590, .hanja_rows = 6 };
         row.opened.app_captures = proofs[index .. index + 1];
     }
     var hosted: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -636,7 +638,7 @@ test "v2b0b publisher reduces five complete triplets and refuses overwrite" {
     var hosted_json: std.json.Stringify = .{ .writer = &hosted.writer, .options = .{} };
     try hosted_json.write(RawTranscript{ .schema = "maru.session-host-cr6d-ime-candidate-transcript.v1", .app_pid = 999, .source_id = "com.apple.inputmethod.Korean.2SetKorean", .rows = &raw_rows });
     var hosted_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const hosted_path = try std.fmt.bufPrintZ(&hosted_path_buf, "{s}/hosted.json", .{root_buf[0..root_len]});
+    const hosted_path = try std.fmt.bufPrintSentinel(&hosted_path_buf, "{s}/hosted.json", .{root_buf[0..root_len]}, 0);
     try publishObservation(testing.allocator, hosted.written(), hosted_path);
     const hosted_artifact = try tmp.dir.readFileAlloc(testing.io, "hosted.json", testing.allocator, .limited(max_artifact_bytes));
     defer testing.allocator.free(hosted_artifact);
@@ -650,7 +652,7 @@ test "v2b0b publisher rejects unknown schema and transcript cap before publicati
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_buf);
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/absent.json", .{root_buf[0..root_len]});
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/absent.json", .{root_buf[0..root_len]}, 0);
     try std.testing.expectError(
         error.InvalidTranscript,
         publishObservation(std.testing.allocator, "{\"schema\":\"wrong\"}", path),
@@ -669,7 +671,7 @@ test "v2b0 app hosted path requires bound capture and rejects unrelated popup am
     var own = candidate_fixture;
     own.owner = .{ .pid = 999, .bundle_id = "dev.maru.apphost", .signing_id = "dev.maru.apphost", .apple_signed = false };
     own.layer = 20;
-    var proof: AppCapture = .{ .window_id = own.id, .capture_basename = "candidate-0-100.png", .sha256 = "a" ** 64, .width = 204, .height = 590, .hanja_rows = 6 };
+    var proof: AppCapture = .{ .window_id = own.id, .capture_basename = "candidate-0-100.png", .sha256 = array_repeat.repeat("a", 64), .width = 204, .height = 590, .hanja_rows = 6 };
     var t = validTriplet();
     t.opened = &.{ stable, own };
     try std.testing.expectError(error.CandidateMissing, reduceTriplet(999, t));

@@ -208,8 +208,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, f
     const gpa = std.heap.c_allocator;
     var a_buf: [1024]u8 = undefined;
     var b_buf: [1024]u8 = undefined;
-    const a = try std.fmt.bufPrintZ(&a_buf, "{s}/up-a.txt", .{files_dir});
-    const b = try std.fmt.bufPrintZ(&b_buf, "{s}/up-b.txt", .{files_dir});
+    const a = try std.fmt.bufPrintSentinel(&a_buf, "{s}/up-a.txt", .{files_dir}, 0);
+    const b = try std.fmt.bufPrintSentinel(&b_buf, "{s}/up-b.txt", .{files_dir}, 0);
     try writeFile(a, "alpha\n");
     try writeFile(b, "bravo\n");
 

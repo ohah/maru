@@ -157,8 +157,8 @@ test "fresh publication delegates the remote policy to this suffix exactly once"
 
 const Point = enum { none, first_fence, attach_empty, attach_terminal, after_attach_fence, redownload, after_redownload_fence, publish, after_publish_fence, verify, final_fence };
 const Cleanup = enum { none, attachment, redownload, publication, verification };
-const seal = [_]u8{7} ** 32;
-const zero_seal = [_]u8{0} ** 32;
+const seal = @as([32]u8, @splat(7));
+const zero_seal = @as([32]u8, @splat(0));
 
 const Steps = struct {
     events: [512]u8 = undefined,

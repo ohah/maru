@@ -149,7 +149,7 @@ const Job = struct {
         };
         defer root.deinit(self.a, self.io);
         if (self.budget.expected_root) |expected| {
-            const device: std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(root.device))) = @bitCast(root.device);
+            const device: @Int(.unsigned, @bitSizeOf(@TypeOf(root.device))) = @bitCast(root.device);
             if (root.stat.inode != expected.inode or @as(u64, device) != expected.device or expected.kind != 2) {
                 self.failure = error.RootChanged;
                 self.finish(.failed);

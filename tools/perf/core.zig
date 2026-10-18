@@ -125,7 +125,7 @@ pub fn main(init: std.process.Init) !void {
     // 배포와 3~256배 갈린다(같은 기계 실측). 호출자(.mise.toml·CI)에 맡기면 한 줄만 지워도 다시
     // 그 상태가 되므로, **여기서** 거절한다. CR6e 기준선 하네스가 산출물의 `build_mode` 를
     // 검증기로 확인하는 것과 같은 결이다 — 재는 쪽이 자기 조건을 증명한다.
-    if (builtin.mode == .Debug) {
+    if (builtin.mode == .debug) {
         try stdout.writeAll(
             \\maru.perf.v1
             \\error=debug_build
@@ -340,7 +340,7 @@ fn measureKittyImagePipeline(allocator: std.mem.Allocator, io: std.Io) !Budget {
     // 본다. 많은 placement·image(findImage가 O(placements×images))의 최악에 가까운 시나리오로 상한.
     const n_images = 50;
     const n_placements = 200; // cap(1024) 미만, dashboard식 다중 이미지 가정
-    var dummy_pixels: [16]u8 = .{0} ** 16; // 2x2 RGBA 더미(픽셀 복사는 dedup으로 frame당 1회만)
+    var dummy_pixels: [16]u8 = @splat(0); // 2x2 RGBA 더미(픽셀 복사는 dedup으로 frame당 1회만)
     var images: [n_images]maru.terminal.KittyImageView = undefined;
     for (&images, 0..) |*img, i| {
         img.* = .{ .image_id = @intCast(i + 1), .width = 2, .height = 2, .bpp = 4, .generation = 1, .pixels = &dummy_pixels };

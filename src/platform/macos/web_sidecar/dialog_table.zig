@@ -50,7 +50,7 @@ pub const Entry = struct {
 };
 
 pub const Table = struct {
-    entries: [capacity]?Entry = [_]?Entry{null} ** capacity,
+    entries: [capacity]?Entry = @as([capacity]?Entry, @splat(null)),
     next: RequestId = 1,
 
     /// 새 요청을 적고 번호를 돌려준다. 가득 차면 null.

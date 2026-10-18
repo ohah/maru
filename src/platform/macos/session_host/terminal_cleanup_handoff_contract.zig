@@ -148,12 +148,12 @@ fn containsPointer(comptime T: type) bool {
         .optional => |info| containsPointer(info.child),
         .error_union => |info| containsPointer(info.payload),
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field|
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field|
                 if (containsPointer(field.type)) break :blk true;
             break :blk false;
         },
         .@"union" => |info| blk: {
-            inline for (info.fields) |field|
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field|
                 if (containsPointer(field.type)) break :blk true;
             break :blk false;
         },
@@ -181,7 +181,7 @@ test "CR3a-2d2 terminal handoff identity는 final address와 exact owner scalar�
         .connection_generation = 37,
         .stream_id = 41,
         .token_count = 2,
-        .ordered_token_digest = [_]u8{43} ** 32,
+        .ordered_token_digest = @as([32]u8, @splat(43)),
         .surviving_descriptor_count = 1,
         .quarantined_descriptor_count = 1,
         .accounting_count = 2,
@@ -219,11 +219,11 @@ test "CR3a-2d3 terminal drain continuation은 final address와 row accounting id
         .node_addr = 13,
         .node_incarnation = 17,
         .registry_incarnation = 19,
-        .handoff_identity_seal = [_]u8{23} ** 32,
-        .handoff_state_seal = [_]u8{29} ** 32,
+        .handoff_identity_seal = @as([32]u8, @splat(23)),
+        .handoff_state_seal = @as([32]u8, @splat(29)),
         .handoff_state_generation = 31,
         .row_slot = 37,
-        .row_kind_raw = @intFromEnum(TerminalRowKind.surviving_descriptor),
+        .row_kind_raw = @backingInt(TerminalRowKind.surviving_descriptor),
         .row_generation = 41,
         .accounting_client_addr = 43,
         .accounting_transfer_id = 47,

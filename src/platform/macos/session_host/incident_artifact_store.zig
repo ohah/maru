@@ -27,7 +27,7 @@ pub const max_files: usize = 128;
 pub const retention_ns: i128 = 7 * 24 * 60 * 60 * std.time.ns_per_s;
 
 const Candidate = struct {
-    name: [160]u8 = [_]u8{0} ** 160,
+    name: [160]u8 = @as([160]u8, @splat(0)),
     name_len: u8 = 0,
     size: u64 = 0,
     mtime_ns: i128 = 0,
@@ -134,7 +134,7 @@ pub const IncidentArtifactStore = struct {
                 return;
             }
             var name_z_buf: [160]u8 = undefined;
-            const name_z = std.fmt.bufPrintZ(&name_z_buf, "{s}", .{oldest.view()}) catch return error.InvalidDirectory;
+            const name_z = std.fmt.bufPrintSentinel(&name_z_buf, "{s}", .{oldest.view()}, 0) catch return error.InvalidDirectory;
             var current: posix.Stat = undefined;
             if (c.fstatat(self.dir_fd, name_z.ptr, &current, posix.AT.SYMLINK_NOFOLLOW) != 0)
                 return error.InvalidDirectory;
@@ -167,7 +167,7 @@ pub const IncidentArtifactStore = struct {
             const name = std.mem.sliceTo(entry.name[0..], 0);
             if (!validFilename(name) or name.len >= @sizeOf(@FieldType(Candidate, "name"))) continue;
             var name_z_buf: [160]u8 = undefined;
-            const name_z = std.fmt.bufPrintZ(&name_z_buf, "{s}", .{name}) catch continue;
+            const name_z = std.fmt.bufPrintSentinel(&name_z_buf, "{s}", .{name}, 0) catch continue;
             var stat: posix.Stat = undefined;
             if (c.fstatat(self.dir_fd, name_z.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW) != 0 or
                 !posix.S.ISREG(stat.mode) or stat.uid != c.getuid() or stat.mode & 0o777 != 0o600 or
@@ -252,16 +252,18 @@ fn filename(buffer: *[160]u8, receipt: incident.IncidentWriterReceipt) Error![:0
         return error.InvalidRecord;
     if (receipt.slot_index < incident.incident_slot_count) {
         if (receipt.incident_sequence == 0) return error.InvalidRecord;
-        return std.fmt.bufPrintZ(
+        return std.fmt.bufPrintSentinel(
             buffer,
             "i-{x:0>32}-{x:0>16}.incident",
             .{ receipt.app_instance_nonce, receipt.incident_sequence },
+            0,
         ) catch error.InvalidRecord;
     }
-    return std.fmt.bufPrintZ(
+    return std.fmt.bufPrintSentinel(
         buffer,
         "a-{x:0>32}-{x:0>16}-{s}.incident",
         .{ receipt.app_instance_nonce, receipt.record_generation, std.fmt.bytesToHex(receipt.digest, .lower) },
+        0,
     ) catch error.InvalidRecord;
 }
 
@@ -437,7 +439,7 @@ test "CR0b 저장소 정리는 엄격한 이름의 파일만 오래된 순서로
     var store: IncidentArtifactStore = .{};
     try store.initInPlace(pid, 9, @intFromPtr(&service), 0x1234, fd);
     defer store.deinit();
-    var block = [_]u8{0} ** max_file_bytes;
+    var block = @as([max_file_bytes]u8, @splat(0));
     for (1..18) |sequence| {
         const input = try fixtureInput();
         _ = try service.publish(pid, 9, input);
@@ -456,10 +458,11 @@ test "CR0b 저장소 정리는 엄격한 이름의 파일만 오래된 순서로
         _ = c.close(file_fd);
     }
     var foreign_name_buf: [160]u8 = undefined;
-    const foreign_name = std.fmt.bufPrintZ(
+    const foreign_name = std.fmt.bufPrintSentinel(
         &foreign_name_buf,
         "i-00000000000000000000000000001234-{x:0>16}.incident",
         .{99},
+        0,
     ) catch unreachable;
     const foreign_fd = c.openat(
         store.dir_fd,
@@ -468,18 +471,18 @@ test "CR0b 저장소 정리는 엄격한 이름의 파일만 오래된 순서로
         @as(c.mode_t, 0o600),
     );
     if (foreign_fd < 0) return error.SkipZigTest;
-    if (c.fchmod(foreign_fd, 0o600) != 0 or c.write(foreign_fd, &([_]u8{0} ** max_file_bytes), max_file_bytes) != max_file_bytes) {
+    if (c.fchmod(foreign_fd, 0o600) != 0 or c.write(foreign_fd, &(@as([max_file_bytes]u8, @splat(0))), max_file_bytes) != max_file_bytes) {
         _ = c.close(foreign_fd);
         return error.SkipZigTest;
     }
     _ = c.close(foreign_fd);
     try store.prune(@intCast(c.getpid()), std.time.ns_per_s);
     var first_buf: [160]u8 = undefined;
-    const first = std.fmt.bufPrintZ(&first_buf, "i-00000000000000000000000000001234-{x:0>16}.incident", .{1}) catch unreachable;
+    const first = std.fmt.bufPrintSentinel(&first_buf, "i-00000000000000000000000000001234-{x:0>16}.incident", .{1}, 0) catch unreachable;
     var stat: posix.Stat = undefined;
     try std.testing.expect(c.fstatat(store.dir_fd, first.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW) != 0);
     var last_buf: [160]u8 = undefined;
-    const last = std.fmt.bufPrintZ(&last_buf, "i-00000000000000000000000000001234-{x:0>16}.incident", .{17}) catch unreachable;
+    const last = std.fmt.bufPrintSentinel(&last_buf, "i-00000000000000000000000000001234-{x:0>16}.incident", .{17}, 0) catch unreachable;
     try std.testing.expectEqual(@as(c_int, 0), c.fstatat(store.dir_fd, last.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW));
     try std.testing.expectEqual(@as(c_int, 0), c.fstatat(store.dir_fd, foreign_name.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW));
 }

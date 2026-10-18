@@ -1031,7 +1031,7 @@ fn labelOrigin(layout: chrome.draw.TextPlacement, fallback: chrome.draw.Px, adva
 // 예전과 **한 픽셀도 다르지 않아야** 한다(합자가 아닌 모든 글자가 그 경우다).
 test "합자처럼 왼쪽으로 넘치는 글리프는 슬롯이 넓어지고 그 만큼 왼쪽에서 그려진다" {
     const allocator = std.testing.allocator;
-    var font_name = [_]u8{0} ** 128;
+    var font_name = @as([128]u8, @splat(0));
     @memcpy(font_name[0..6], "System");
     const make = struct {
         fn glyph(x_px: f32, advance: f32, overhang: f32, name: [128]u8) UnresolvedGlyph {
@@ -1087,7 +1087,7 @@ test "합자처럼 왼쪽으로 넘치는 글리프는 슬롯이 넓어지고 �
 
 test "이어 붙이는 run 은 앞 run 의 실측 advance 만큼 밀린다(같은 origin 에서 겹치지 않는다)" {
     const allocator = std.testing.allocator;
-    var font_name = [_]u8{0} ** 128;
+    var font_name = @as([128]u8, @splat(0));
     @memcpy(font_name[0..6], "System");
     const glyph = struct {
         // 글리프의 색은 **그 run 의 색**이다(`shapeUnresolvedRun` 이 `run.foreground` 를 싣는다) —
@@ -1145,7 +1145,7 @@ test "이어 붙이는 run 은 앞 run 의 실측 advance 만큼 밀린다(같�
 // 지나 카드 밖까지 뻗은 캡처를 봤다. 넘는 글리프는 버려야 옆 요소를 덮지 않는다.
 test "이어 붙인 run 이 폭 예산을 넘으면 그 글리프는 버려진다" {
     const allocator = std.testing.allocator;
-    var font_name = [_]u8{0} ** 128;
+    var font_name = @as([128]u8, @splat(0));
     @memcpy(font_name[0..6], "System");
     const make = struct {
         fn glyph(x_px: f32, advance: f32, run_index: u16, name: [128]u8) UnresolvedGlyph {
@@ -1196,7 +1196,7 @@ test "이어 붙인 run 이 폭 예산을 넘으면 그 글리프는 버려진�
 
 test "leading icon group resolves measured label and SVG to one final-pixel artifact" {
     const allocator = std.testing.allocator;
-    var font_name = [_]u8{0} ** 128;
+    var font_name = @as([128]u8, @splat(0));
     @memcpy(font_name[0..6], "System");
     const glyphs = try allocator.dupe(UnresolvedGlyph, &.{.{
         .glyph_id = 12,

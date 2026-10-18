@@ -17,6 +17,8 @@
 //! ⚠️ **한 곳만 정반대다.** 그쪽은 stdin 을 `/dev/null` 로 막지만 감시자는 **파이프**를 받는다 —
 //! 조용한 자식이라 EPIPE 로는 안 죽고, 부모가 쓰기 끝을 닫는 EOF 만이 정상 종료 신호다(계획 §5).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
@@ -379,8 +381,8 @@ test "무엇을 보고 있는지 기억한다 — 같은 호스트에서 저장�
 
     // **추적할 수 있는지는 띄우기 전에 답한다** — 못 하면 안 띄우므로 `rememberRoot` 에 안 온다.
     try testing.expect(canTrack("/srv/app"));
-    try testing.expect(canTrack("x" ** max_root_bytes));
-    try testing.expect(!canTrack("x" ** (max_root_bytes + 1)));
+    try testing.expect(canTrack(array_repeat.repeat("x", max_root_bytes)));
+    try testing.expect(!canTrack(array_repeat.repeat("x", (max_root_bytes + 1))));
 }
 
 test "«다시 시도해도 소용없는» 종료만 포기로 읽는다" {

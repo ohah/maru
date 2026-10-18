@@ -286,12 +286,12 @@ fn expectIdentifierCountInFunction(
     identifier: []const u8,
     expected: usize,
 ) !void {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source, .{});
     defer tree.deinit(allocator);
     if (tree.errors.len != 0) return error.TestUnexpectedResult;
     var found: ?std.zig.Ast.Node.Index = null;
     for (0..tree.nodes.len) |raw_node| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_node));
         if (tree.nodeTag(node) != .fn_decl) continue;
         var buffer: [1]std.zig.Ast.Node.Index = undefined;
         const proto = tree.fullFnProto(&buffer, node) orelse continue;
@@ -335,14 +335,14 @@ fn countEventOwnerPointerInventory(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
 ) !EventOwnerPointerInventory {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source, .{});
     defer tree.deinit(allocator);
     if (tree.errors.len != 0) return error.TestUnexpectedResult;
     const excluded = try topLevelTestTokenMask(allocator, &tree);
     defer allocator.free(excluded);
     var result: EventOwnerPointerInventory = .{};
     for (0..tree.nodes.len) |raw_node| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_node));
         const pointer = tree.fullPtrType(node) orelse continue;
         const child = pointer.ast.child_type;
         if (!nodeContainsIdentifier(&tree, child, "EventOwner")) continue;
@@ -485,12 +485,12 @@ fn countUnauthorizedEventOwnerAliases(
     path: []const u8,
     source: [:0]const u8,
 ) !usize {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source, .{});
     defer tree.deinit(allocator);
     if (tree.errors.len != 0) return error.TestUnexpectedResult;
     var result: usize = 0;
     for (0..tree.nodes.len) |raw_node| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_node));
         const variable = tree.fullVarDecl(node) orelse continue;
         const init = variable.ast.init_node.unwrap() orelse continue;
         if (!nodeContainsIdentifier(&tree, init, "EventOwner")) continue;

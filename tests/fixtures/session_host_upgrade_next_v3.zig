@@ -97,16 +97,16 @@ fn parseContext(
 
 fn rollback(ctx: Context) noreturn {
     if (c.lseek(backup_state_slot, 0, c.SEEK.SET) < 0) c._exit(131);
-    const rollback_z = ctx.allocator.dupeZ(u8, ctx.rollback_path) catch c._exit(132);
-    const result_z = ctx.allocator.dupeZ(u8, ctx.result_path) catch c._exit(132);
-    const owner_z = ctx.allocator.dupeZ(u8, ctx.owner_dir) catch c._exit(132);
+    const rollback_z = ctx.allocator.dupeSentinel(u8, ctx.rollback_path, 0) catch c._exit(132);
+    const result_z = ctx.allocator.dupeSentinel(u8, ctx.result_path, 0) catch c._exit(132);
+    const owner_z = ctx.allocator.dupeSentinel(u8, ctx.owner_dir, 0) catch c._exit(132);
     const actual_rollback = session_host.staged_image.inspect(rollback_z) catch c._exit(131);
     if (!session_host.staged_image.identityEqual(ctx.rollback_identity, actual_rollback)) c._exit(131);
     const rollback_dev_z = std.fmt.allocPrintSentinel(ctx.allocator, "{d}", .{ctx.rollback_identity.dev}, 0) catch c._exit(132);
     const rollback_ino_z = std.fmt.allocPrintSentinel(ctx.allocator, "{d}", .{ctx.rollback_identity.ino}, 0) catch c._exit(132);
     const rollback_size_z = std.fmt.allocPrintSentinel(ctx.allocator, "{d}", .{ctx.rollback_identity.size}, 0) catch c._exit(132);
     const rollback_sha_hex = std.fmt.bytesToHex(ctx.rollback_identity.sha256, .lower);
-    const rollback_sha_z = ctx.allocator.dupeZ(u8, &rollback_sha_hex) catch c._exit(132);
+    const rollback_sha_z = ctx.allocator.dupeSentinel(u8, &rollback_sha_hex, 0) catch c._exit(132);
     const rollback_arg: [*:0]const u8 = "--rollback-target-v2";
     const argv = [_:null]?[*:0]const u8{
         rollback_z.ptr,

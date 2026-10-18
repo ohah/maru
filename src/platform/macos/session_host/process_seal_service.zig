@@ -187,13 +187,13 @@ var integrity_evidence: std.atomic.Value(u8) = .init(0);
 /// 호출처 중 어디였는지를 산다. 실패해도 사유 한 줄은 이미 나간 뒤다. 동작은 그대로 —
 /// 여전히 즉시 `_exit(86)` 하고 아무 정리도 복구도 하지 않는다.
 pub fn fatalIntegrity(reason: IntegrityReason) noreturn {
-    _ = integrity_evidence.cmpxchgStrong(0, @intFromEnum(reason), .acq_rel, .acquire);
+    _ = integrity_evidence.cmpxchgStrong(0, @backingInt(reason), .acq_rel, .acquire);
     if (!builtin.is_test) {
         var buf: [96]u8 = undefined;
         const line = std.fmt.bufPrint(
             &buf,
             "fatal integrity: reason={s}({d}) — process exits with 86\n",
-            .{ @tagName(reason), @intFromEnum(reason) },
+            .{ @tagName(reason), @backingInt(reason) },
         ) catch "fatal integrity: reason=<unformattable> — process exits with 86\n";
         _ = std.c.write(2, line.ptr, line.len);
         std.debug.dumpCurrentStackTrace(.{});
@@ -243,20 +243,20 @@ const PauseHook = struct {
 };
 
 const Service = struct {
-    state: std.atomic.Value(u8) = .init(@intFromEnum(State.uninitialized)),
+    state: std.atomic.Value(u8) = .init(@backingInt(State.uninitialized)),
     owner_pid: u32 = 0,
     owner_nonce: u64 = 0,
     incarnation: u64 = 0,
     receipt_token: u64 = 0,
-    secret: [secret_len]u8 = [_]u8{0} ** secret_len,
+    secret: [secret_len]u8 = @as([secret_len]u8, @splat(0)),
     pause_hook: if (builtin.is_test) ?*PauseHook else void = if (builtin.is_test) null else {},
 
     fn loadState(self: *const Service, comptime order: std.builtin.AtomicOrder) State {
-        return @enumFromInt(self.state.load(order));
+        return @fromBackingInt(@intCast(self.state.load(order)));
     }
 
     fn publishTerminal(self: *Service) void {
-        self.state.store(@intFromEnum(State.terminal), .release);
+        self.state.store(@backingInt(State.terminal), .release);
     }
 
     fn secureEntropy(destination: []u8) PrepareError!void {
@@ -309,8 +309,8 @@ const Service = struct {
         if (observed == .terminal) return error.Terminal;
         if (observed != .uninitialized) return error.ProcessDomainMismatch;
         if (self.state.cmpxchgStrong(
-            @intFromEnum(State.uninitialized),
-            @intFromEnum(State.initializing),
+            @backingInt(State.uninitialized),
+            @backingInt(State.initializing),
             .acq_rel,
             .acquire,
         )) |_| return error.ProcessDomainMismatch;
@@ -370,7 +370,7 @@ const Service = struct {
             receipt.token == 0 or receipt.token != self.receipt_token)
             fatalInvalidReceipt();
         self.receipt_token = 0;
-        self.state.store(@intFromEnum(State.ready), .release);
+        self.state.store(@backingInt(State.ready), .release);
     }
 
     fn validateReady(self: *const Service, pid: u32, process_nonce: u64) ReadyError!void {
@@ -500,9 +500,9 @@ fn updateInt(hasher: *std.crypto.hash.Blake3, comptime T: type, value: T) void {
 fn updateCleanupProgress(hasher: *std.crypto.hash.Blake3, input: CleanupProgressInput) void {
     updateCleanupTranscript(hasher, input.transcript_input);
     hasher.update(&input.transcript_seal);
-    updateInt(hasher, u8, @intFromEnum(input.phase));
-    updateInt(hasher, u8, @intFromEnum(input.step));
-    updateInt(hasher, u8, @intFromEnum(input.next_role));
+    updateInt(hasher, u8, @backingInt(input.phase));
+    updateInt(hasher, u8, @backingInt(input.step));
+    updateInt(hasher, u8, @backingInt(input.next_role));
     updateInt(hasher, u8, input.completed_mask);
     hasher.update(&input.retained_observation_digest);
     updateFixedValue(hasher, input.decision);
@@ -517,7 +517,7 @@ fn updateFixedValue(hasher: *std.crypto.hash.Blake3, value: anytype) void {
             if (array.child != u8) @compileError("seal arrays must contain bytes");
             hasher.update(&value);
         },
-        .@"struct" => inline for (std.meta.fields(T)) |field|
+        .@"struct" => inline for (@import("type_info_fields").fields(T)) |field|
             updateFixedValue(hasher, @field(value, field.name)),
         else => @compileError("pending seal inputs must remain pointer-free fixed values"),
     }
@@ -534,12 +534,12 @@ fn updateDescriptor(hasher: *std.crypto.hash.Blake3, value: cleanup_seal.Cleanup
 }
 
 fn updateGraph(hasher: *std.crypto.hash.Blake3, graph: cleanup_seal.ObservationCleanupGraph) void {
-    inline for (std.meta.fields(cleanup_seal.ObservationCleanupGraph)) |field|
+    inline for (@import("type_info_fields").fields(cleanup_seal.ObservationCleanupGraph)) |field|
         updateDescriptor(hasher, @field(graph, field.name));
 }
 
 fn updatePlan(hasher: *std.crypto.hash.Blake3, plan: cleanup_seal.CleanupPlanInput) void {
-    updateInt(hasher, u8, @intFromEnum(std.meta.activeTag(plan)));
+    updateInt(hasher, u8, @backingInt(std.meta.activeTag(plan)));
     switch (plan) {
         .preparation => |value| {
             updateDescriptor(hasher, value.dto_backing);
@@ -582,7 +582,7 @@ fn updateCleanupTranscript(
     updateInt(hasher, u32, input.title_generation);
     hasher.update(&input.observation_digest);
     updateInt(hasher, u64, input.preparation_attempt);
-    updateInt(hasher, u8, @intFromEnum(input.pending_lifecycle));
+    updateInt(hasher, u8, @backingInt(input.pending_lifecycle));
     updatePlan(hasher, input.plan);
 }
 
@@ -969,9 +969,9 @@ fn testCleanupTranscript() CleanupTranscriptInput {
         .expected_major = 2,
         .metadata_support_raw = 1,
         .admission_tag = 1,
-        .correlation_binding_digest = [_]u8{1} ** 32,
-        .payload_digest = [_]u8{2} ** 32,
-        .admission_projection_digest = [_]u8{3} ** 32,
+        .correlation_binding_digest = @as([32]u8, @splat(1)),
+        .payload_digest = @as([32]u8, @splat(2)),
+        .admission_projection_digest = @as([32]u8, @splat(3)),
         .pending_owner_addr = 0x3000,
         .pending_owner_incarnation = 12,
         .cleanup_plan_addr = 0x4000,
@@ -980,7 +980,7 @@ fn testCleanupTranscript() CleanupTranscriptInput {
         .observation_revision = 13,
         .observer_generation = 14,
         .title_generation = 15,
-        .observation_digest = [_]u8{4} ** 32,
+        .observation_digest = @as([32]u8, @splat(4)),
         .preparation_attempt = 16,
         .pending_lifecycle = .preparing,
         .plan = .{ .preparation = .{
@@ -991,7 +991,7 @@ fn testCleanupTranscript() CleanupTranscriptInput {
 }
 
 fn testEncodedTranscript(input: CleanupTranscriptInput) CleanupSeal {
-    var hasher = std.crypto.hash.Blake3.init(.{ .key = [_]u8{0x5a} ** 32 });
+    var hasher = std.crypto.hash.Blake3.init(.{ .key = @as([32]u8, @splat(0x5a)) });
     hasher.update(cleanup_transcript_domain);
     updateInt(&hasher, u32, 1234);
     updateInt(&hasher, u64, 906);
@@ -1002,7 +1002,7 @@ fn testEncodedTranscript(input: CleanupTranscriptInput) CleanupSeal {
 }
 
 fn testEncodedProgress(input: CleanupProgressInput) CleanupSeal {
-    var hasher = std.crypto.hash.Blake3.init(.{ .key = [_]u8{0x5a} ** 32 });
+    var hasher = std.crypto.hash.Blake3.init(.{ .key = @as([32]u8, @splat(0x5a)) });
     hasher.update(cleanup_progress_domain);
     updateInt(&hasher, u32, 1234);
     updateInt(&hasher, u64, 906);
@@ -1096,7 +1096,7 @@ test "C3-3b2b1 cleanup seal unknown admission has a canonical zero projection" {
     service.commitReady(receipt);
     var input = testCleanupTranscript();
     input.admission_tag = 0;
-    input.admission_projection_digest = [_]u8{0} ** 32;
+    input.admission_projection_digest = @as([32]u8, @splat(0));
     _ = try service.cleanupTranscriptSeal(pid, 905, input);
 }
 
@@ -1130,7 +1130,7 @@ test "C3-3b2b1 cleanup seal transcript fixed encoding has a golden digest" {
 test "C3-3b2b1 cleanup seal transcript encoder binds every declared field" {
     const baseline_input = testCleanupTranscript();
     const baseline = testEncodedTranscript(baseline_input);
-    inline for (std.meta.fields(CleanupTranscriptInput)) |field| {
+    inline for (@import("type_info_fields").fields(CleanupTranscriptInput)) |field| {
         var changed = baseline_input;
         if (comptime std.mem.eql(u8, field.name, "pending_lifecycle")) {
             changed.pending_lifecycle = .prepared;
@@ -1158,7 +1158,7 @@ test "C3-3b2b1 cleanup seal transcript encoder binds every declared field" {
         .completed_mask = progress_state.completed_mask,
     };
     const progress_baseline = testEncodedProgress(progress_input);
-    inline for (std.meta.fields(CleanupProgressInput)) |field| {
+    inline for (@import("type_info_fields").fields(CleanupProgressInput)) |field| {
         var changed = progress_input;
         if (comptime std.mem.eql(u8, field.name, "transcript_input")) {
             changed.transcript_input.host_id +%= 1;
@@ -1167,9 +1167,9 @@ test "C3-3b2b1 cleanup seal transcript encoder binds every declared field" {
         } else switch (@typeInfo(field.type)) {
             .int => @field(changed, field.name) +%= 1,
             .array => @field(changed, field.name)[0] ^= 1,
-            .@"enum" => @field(changed, field.name) = @enumFromInt(
-                @intFromEnum(@field(changed, field.name)) +% 1,
-            ),
+            .@"enum" => @field(changed, field.name) = @fromBackingInt(@intCast(
+                @backingInt(@field(changed, field.name)) +% 1,
+            )),
             else => @compileError("unhandled cleanup progress field type: " ++ field.name),
         }
         try std.testing.expect(!std.mem.eql(
@@ -1178,7 +1178,7 @@ test "C3-3b2b1 cleanup seal transcript encoder binds every declared field" {
             &testEncodedProgress(changed),
         ));
     }
-    inline for (std.meta.fields(@TypeOf(progress_input.decision))) |field| {
+    inline for (@import("type_info_fields").fields(@TypeOf(progress_input.decision))) |field| {
         var changed = progress_input;
         @field(changed.decision, field.name) +%= 1;
         try std.testing.expect(!std.mem.eql(
@@ -1192,13 +1192,13 @@ test "C3-3b2b1 cleanup seal transcript encoder binds every declared field" {
 test "C3-3b2b1 cleanup seal transcript encoder binds every nested cleanup descriptor" {
     const baseline_input = testCleanupTranscript();
     const baseline = testEncodedTranscript(baseline_input);
-    inline for (std.meta.fields(cleanup_seal.CleanupDescriptor)) |descriptor_field| {
+    inline for (@import("type_info_fields").fields(cleanup_seal.CleanupDescriptor)) |descriptor_field| {
         var changed = baseline_input;
         @field(changed.plan.preparation.dto_backing, descriptor_field.name) +%= 1;
         try std.testing.expect(!std.mem.eql(u8, &baseline, &testEncodedTranscript(changed)));
     }
-    inline for (std.meta.fields(cleanup_seal.ObservationCleanupGraph)) |owner_field| {
-        inline for (std.meta.fields(cleanup_seal.CleanupDescriptor)) |descriptor_field| {
+    inline for (@import("type_info_fields").fields(cleanup_seal.ObservationCleanupGraph)) |owner_field| {
+        inline for (@import("type_info_fields").fields(cleanup_seal.CleanupDescriptor)) |descriptor_field| {
             var changed = baseline_input;
             @field(
                 @field(changed.plan.preparation.next_observation, owner_field.name),
@@ -1216,8 +1216,8 @@ test "C3-3b2b1 cleanup seal transcript encoder binds every nested cleanup descri
         .old_observation = baseline_input.plan.preparation.next_observation,
     } };
     const committed_baseline = testEncodedTranscript(committed_input);
-    inline for (std.meta.fields(cleanup_seal.ObservationCleanupGraph)) |owner_field| {
-        inline for (std.meta.fields(cleanup_seal.CleanupDescriptor)) |descriptor_field| {
+    inline for (@import("type_info_fields").fields(cleanup_seal.ObservationCleanupGraph)) |owner_field| {
+        inline for (@import("type_info_fields").fields(cleanup_seal.CleanupDescriptor)) |descriptor_field| {
             var changed = committed_input;
             @field(
                 @field(changed.plan.committed_observation.old_observation, owner_field.name),
@@ -1261,7 +1261,7 @@ test "C3-3b2b1 cleanup seal invalid transcript and progress fail-stop" {
                 2 => progress.completed_mask = 0,
                 3 => {
                     transcript_input.admission_tag = 1;
-                    transcript_input.admission_projection_digest = [_]u8{0} ** 32;
+                    transcript_input.admission_projection_digest = @as([32]u8, @splat(0));
                 },
                 else => unreachable,
             }

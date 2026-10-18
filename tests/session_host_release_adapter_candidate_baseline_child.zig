@@ -112,7 +112,7 @@ const ExpiredDeadline = struct {
 fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root[0..len], leaf });
+    return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ root[0..len], leaf }, 0);
 }
 
 fn view(kind: child.Kind, home: [:0]const u8, output: [:0]const u8) child.View {
@@ -269,8 +269,8 @@ test "real bounded executor uses held cwd closed environment and private leaf" {
     var output_storage: [std.fs.max_path_bytes:0]u8 = undefined;
     var root_bytes: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_bytes);
-    const root = try std.fmt.bufPrintZ(&root_storage, "{s}", .{root_bytes[0..root_len]});
-    const executable = try std.fmt.bufPrintZ(&script_storage, "{s}/runner", .{root});
+    const root = try std.fmt.bufPrintSentinel(&root_storage, "{s}", .{root_bytes[0..root_len]}, 0);
+    const executable = try std.fmt.bufPrintSentinel(&script_storage, "{s}/runner", .{root}, 0);
     const home = try absolute(&tmp, "default-false", &home_storage);
     const output = try absolute(&tmp, "default-false.json", &output_storage);
     const directory_fd = std.c.open(root.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, @as(std.c.mode_t, 0));

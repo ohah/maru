@@ -47,11 +47,11 @@ pub fn main(init: std.process.Init) !void {
         .limited(16 * 1024 * 1024),
     );
     defer allocator.free(snapshot);
-    const socket_z = try allocator.dupeZ(u8, socket_path);
+    const socket_z = try allocator.dupeSentinel(u8, socket_path, 0);
     defer allocator.free(socket_z);
-    const report_z = try allocator.dupeZ(u8, report_path);
+    const report_z = try allocator.dupeSentinel(u8, report_path, 0);
     defer allocator.free(report_z);
-    const owner_z = try allocator.dupeZ(u8, owner_path);
+    const owner_z = try allocator.dupeSentinel(u8, owner_path, 0);
     defer allocator.free(owner_z);
     const owner_fd = c.open(owner_z.ptr, .{ .ACCMODE = .RDWR, .CREAT = true, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0o600));
     if (owner_fd < 0 or c.fchmod(owner_fd, 0o600) != 0 or

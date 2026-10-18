@@ -25,5 +25,5 @@ pub fn executableDir(out: *PathBuf) error{PathTooLong}![]const u8 {
 
 /// `dir` 아래 `name` 의 경로를 0 종료 문자열로 만든다.
 pub fn join(out: *PathBuf, dir: []const u8, name: []const u8) error{PathTooLong}![:0]const u8 {
-    return std.fmt.bufPrintZ(out, "{s}/{s}", .{ dir, name }) catch error.PathTooLong;
+    return std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ dir, name }, 0) catch error.PathTooLong;
 }

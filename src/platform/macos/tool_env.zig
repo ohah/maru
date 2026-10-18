@@ -580,7 +580,7 @@ const Login = struct { shell: []const u8, home: []const u8 };
 fn usableHome(h: []const u8) bool {
     if (h.len == 0 or h[0] != '/') return false;
     var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const hz = std.fmt.bufPrintZ(&z, "{s}", .{h}) catch return false;
+    const hz = std.fmt.bufPrintSentinel(&z, "{s}", .{h}, 0) catch return false;
     var st: std.c.Stat = undefined;
     if (std.c.fstatat(std.posix.AT.FDCWD, hz.ptr, &st, 0) != 0) return false;
     return (st.mode & std.c.S.IFMT) == std.c.S.IFDIR;
@@ -619,9 +619,9 @@ const Job = struct {
     fn create(shell: []const u8, home: []const u8, kind: shell_env.Shell, gen: u64, dir: ?[]const u8) error{OutOfMemory}!*Job {
         const job = try gpa.create(Job);
         errdefer gpa.destroy(job);
-        const s = try gpa.dupeZ(u8, shell);
+        const s = try gpa.dupeSentinel(u8, shell, 0);
         errdefer gpa.free(s);
-        const h = try gpa.dupeZ(u8, home);
+        const h = try gpa.dupeSentinel(u8, home, 0);
         errdefer gpa.free(h);
         var env: std.ArrayList([]u8) = .empty;
         errdefer {
@@ -716,12 +716,12 @@ fn run(job: *Job) Outcome {
     const tmp = job.tmp;
     if (tmp.len == 0) return .{ .failed = .unsafe_path };
     var tmpl_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const tmpl = std.fmt.bufPrintZ(&tmpl_buf, "{s}/maru-env.XXXXXX", .{std.mem.trimEnd(u8, tmp, "/")}) catch return .{ .failed = .unsafe_path };
+    const tmpl = std.fmt.bufPrintSentinel(&tmpl_buf, "{s}/maru-env.XXXXXX", .{std.mem.trimEnd(u8, tmp, "/")}, 0) catch return .{ .failed = .unsafe_path };
     const dir_z = mkdtemp(tmpl.ptr) orelse return .{ .failed = .spawn };
     const dir = std.mem.span(dir_z);
     defer _ = std.c.rmdir(dir_z);
     var out_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const out_path = std.fmt.bufPrintZ(&out_buf, "{s}/out", .{dir}) catch return .{ .failed = .unsafe_path };
+    const out_path = std.fmt.bufPrintSentinel(&out_buf, "{s}/out", .{dir}, 0) catch return .{ .failed = .unsafe_path };
     const created = std.c.open(out_path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
     if (created < 0) return .{ .failed = .spawn };
     _ = std.c.close(created);
@@ -746,14 +746,14 @@ fn run(job: *Job) Outcome {
     build: {
         argv.append(gpa, job.shell.ptr) catch break :build;
         for (shell_env.flags(job.kind)) |f| {
-            const z = gpa.dupeZ(u8, f) catch break :build;
+            const z = gpa.dupeSentinel(u8, f, 0) catch break :build;
             owned.append(gpa, z) catch {
                 gpa.free(z);
                 break :build;
             };
             argv.append(gpa, z.ptr) catch break :build;
         }
-        const cz = gpa.dupeZ(u8, cmd) catch break :build;
+        const cz = gpa.dupeSentinel(u8, cmd, 0) catch break :build;
         owned.append(gpa, cz) catch {
             gpa.free(cz);
             break :build;
@@ -765,7 +765,7 @@ fn run(job: *Job) Outcome {
         const borrowed: []const []const u8 = @ptrCast(job.env);
         shell_env.probeEnv(gpa, borrowed, &probe) catch break :build;
         for (probe.items) |e| {
-            const z = gpa.dupeZ(u8, e) catch break :build;
+            const z = gpa.dupeSentinel(u8, e, 0) catch break :build;
             owned.append(gpa, z) catch {
                 gpa.free(z);
                 break :build;
@@ -829,7 +829,7 @@ fn run(job: *Job) Outcome {
     var dirs_buf: [2][]const u8 = undefined;
     const dirs: []const []const u8 = if (job.dir) |d| blk: {
         dirs_buf[0] = d;
-        const dz = std.fmt.bufPrintZ(&root_z, "{s}", .{d}) catch break :blk dirs_buf[0..1];
+        const dz = std.fmt.bufPrintSentinel(&root_z, "{s}", .{d}, 0) catch break :blk dirs_buf[0..1];
         const real = std.c.realpath(dz.ptr, &real_buf) orelse break :blk dirs_buf[0..1];
         dirs_buf[1] = std.mem.sliceTo(real, 0);
         break :blk dirs_buf[0..2];
@@ -909,16 +909,16 @@ fn writeFakeShell(dir: std.Io.Dir, name: []const u8, body: []const u8, out: []u8
     try dir.writeFile(testing.io, .{ .sub_path = name, .data = text });
     const p = try std.fmt.bufPrint(out, "{s}/{s}", .{ root, name });
     var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}", .{p})).ptr, 0o755);
+    _ = std.c.chmod((try std.fmt.bufPrintSentinel(&z, "{s}", .{p}, 0)).ptr, 0o755);
     return p;
 }
 
 const HomeGuard = struct {
     saved: ?[:0]u8,
     fn set(home: []const u8) !HomeGuard {
-        const old: ?[:0]u8 = if (std.c.getenv("HOME")) |h| try testing.allocator.dupeZ(u8, std.mem.span(h)) else null;
+        const old: ?[:0]u8 = if (std.c.getenv("HOME")) |h| try testing.allocator.dupeSentinel(u8, std.mem.span(h), 0) else null;
         var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-        _ = setenv("HOME", (try std.fmt.bufPrintZ(&z, "{s}", .{home})).ptr, 1);
+        _ = setenv("HOME", (try std.fmt.bufPrintSentinel(&z, "{s}", .{home}, 0)).ptr, 1);
         return .{ .saved = old };
     }
     fn restore(self: *HomeGuard) void {
@@ -937,7 +937,7 @@ const VarGuard = struct {
     name: [:0]const u8,
     saved: ?[:0]u8,
     fn set(name: [:0]const u8, value: [:0]const u8) !VarGuard {
-        const old: ?[:0]u8 = if (std.c.getenv(name.ptr)) |v| try testing.allocator.dupeZ(u8, std.mem.span(v)) else null;
+        const old: ?[:0]u8 = if (std.c.getenv(name.ptr)) |v| try testing.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
         _ = setenv(name.ptr, value.ptr, 1);
         return .{ .name = name, .saved = old };
     }
@@ -1014,8 +1014,8 @@ test "tool_env: 가짜 로그인 셸 — -l -i -c 로 홈에서, 제어 터미�
     defer resetForTest();
     // 앱이 CLOEXEC 없이 연 fd(컨트롤 소켓 잠금 같은 것) — 셸에 넘어가면 안 된다.
     var leak_path: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const leak_a = std.c.open((try std.fmt.bufPrintZ(&leak_path, "{s}/leak-a", .{root})).ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o600));
-    const leak_b = std.c.open((try std.fmt.bufPrintZ(&leak_path, "{s}/leak-b", .{root})).ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o600));
+    const leak_a = std.c.open((try std.fmt.bufPrintSentinel(&leak_path, "{s}/leak-a", .{root}, 0)).ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o600));
+    const leak_b = std.c.open((try std.fmt.bufPrintSentinel(&leak_path, "{s}/leak-b", .{root}, 0)).ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o600));
     defer _ = std.c.close(leak_a);
     defer _ = std.c.close(leak_b);
     try testing.expect(leak_b > 3);
@@ -1062,7 +1062,7 @@ test "tool_env: 시한을 넘기면 셸을 그룹째 끝내고 앱 환경(거른
     var gone = false;
     var ms: u64 = 0;
     while (ms < 2000) : (ms += 10) {
-        if (std.c.kill(child, @enumFromInt(0)) != 0) {
+        if (std.c.kill(child, @fromBackingInt(@intCast(0))) != 0) {
             gone = true;
             break;
         }

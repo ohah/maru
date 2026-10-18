@@ -111,7 +111,7 @@ pub fn marks(self: *AppSession, term: *Term) ?[]const []const Mark {
     h.update(std.mem.asBytes(&@intFromPtr(content.ptr)));
     h.update(std.mem.asBytes(&content.len));
     h.update(std.mem.asBytes(&doc.file.revision));
-    h.update(std.mem.asBytes(&@intFromEnum(mode)));
+    h.update(std.mem.asBytes(&@backingInt(mode)));
     const tree = treeOf(term);
     const indexed = editor_syntax.bracketSource(&term.rt.editor_syntax);
     // 프레임은 목록 작성을 예산으로 나눈다. 아직 완성되지 않았으면 강조를 생략한다 —

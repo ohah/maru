@@ -3,6 +3,8 @@
 //! host ABI와 visible Metal smoke가 같은 cell/upload 표현을 공유할 수 있다. ABI가 "smoke"
 //! 모듈에 결합되지 않도록 투영 책임만 여기에 둔다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 // metal_frame은 renderer(L1) 중립 frame 계약의 일부다 — 이름만 "Metal"이고 실제 OS(Metal/CoreText) 의존은 없는
 // 투영 DTO(NativeMetalCell·MetalFrame extern struct). 같은 renderer 모듈의 형제는 barrel로 참조한다(파일 순환이지만
@@ -2389,7 +2391,7 @@ test "hollow cursor overlay projects four edge-strip cells outlining the cell (F
 
     // 정확히 4 cell(상·하·좌·우 변), 전부 커서 col·커서 색·부분-사각형 reserved kind.
     try std.testing.expectEqual(@as(usize, 4), cells.len);
-    var seen_edges: [6]bool = .{false} ** 6;
+    var seen_edges: [6]bool = @splat(false);
     for (cells) |c| {
         try std.testing.expectEqual(@as(u16, 1), c.col);
         try std.testing.expectEqual(@as(u32, 0xFF00FF00), c.background); // cursor.block 색
@@ -2900,7 +2902,7 @@ test "G9 DECSCNM screen_reverse swaps fg/bg globally (XOR with SGR reverse)" {
 }
 
 test "OSC 4 palette override: indexed colors resolve to override before xterm256" {
-    var palette: [256]?color.Rgb = .{null} ** 256;
+    var palette: [256]?color.Rgb = @splat(null);
     palette[5] = .{ .r = 0x12, .g = 0x34, .b = 0x56 }; // 인덱스 5만 재정의
     const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .palette = &palette };
     // override된 인덱스 5는 그 색으로, override 없는 인덱스 6은 기본 xterm256으로(폴백).
@@ -2914,7 +2916,7 @@ test "config palette base resolves between OSC4 override and xterm256 (OSC4 > co
     //   OSC4 override(palette) → config_palette[index](index<16) → xterm256.
     const cfg_red: color.Rgb = .{ .r = 0xAA, .g = 0xBB, .b = 0xCC }; // config가 인덱스 1을 재정의
     const cfg_blue: color.Rgb = .{ .r = 0x11, .g = 0x22, .b = 0x33 }; // config가 인덱스 4를 재정의
-    var config_palette: [16]?color.Rgb = .{null} ** 16;
+    var config_palette: [16]?color.Rgb = @splat(null);
     config_palette[1] = cfg_red;
     config_palette[4] = cfg_blue;
 
@@ -2930,7 +2932,7 @@ test "config palette base resolves between OSC4 override and xterm256 (OSC4 > co
 
     // (b) OSC4 override도 있으면 OSC4가 config보다 우선이다(같은 인덱스 1을 둘 다 정의).
     {
-        var osc4: [256]?color.Rgb = .{null} ** 256;
+        var osc4: [256]?color.Rgb = @splat(null);
         const osc4_green: color.Rgb = .{ .r = 0x01, .g = 0x99, .b = 0x01 };
         osc4[1] = osc4_green; // OSC4가 인덱스 1을 재정의 — config(cfg_red)를 덮는다
         const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .palette = &osc4, .config_palette = &config_palette };
@@ -3366,7 +3368,7 @@ test "planImageUploads: 신규는 업로드+상태 기록, 같은 generation은 
     const alloc = std.testing.allocator;
     var uploaded: std.AutoHashMapUnmanaged(u32, u64) = .{};
     defer uploaded.deinit(alloc);
-    const px = [_]u8{0xAB} ** 16;
+    const px = @as([16]u8, @splat(0xAB));
     const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 2, .height = 2, .bpp = 4, .generation = 5, .pixels = &px }};
     const gpu = [_]GpuImage{.{ .image_id = 7, .dest_x = 0, .dest_y = 0, .dest_w = 10, .dest_h = 10, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 }};
 
@@ -3393,7 +3395,7 @@ test "planImageUploads: 신규는 업로드+상태 기록, 같은 generation은 
 test "buildGpuImages: blob 없는 placement 는 여기서 걸러지고 그 자리에서 센다 — 제품이 실제로 타는 경로" {
     const alloc = std.testing.allocator;
     const recon = image_reconciliation;
-    const px = [_]u8{0xAB} ** 16;
+    const px = @as([16]u8, @splat(0xAB));
     const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 2, .height = 2, .bpp = 4, .generation = 5, .pixels = &px }};
     // 7 은 blob 이 있고 9 는 없다. 라이브 양성 대조에서 드러난 자리 — planImageUploads 는 9 를 아예 못 본다.
     const placements = [_]terminal.KittyPlacement{
@@ -3420,7 +3422,7 @@ test "planImageUploads: 업로드와 캐시 적중을 각각 세고, 크기 계�
     const recon = image_reconciliation;
     var uploaded: std.AutoHashMapUnmanaged(u32, u64) = .{};
     defer uploaded.deinit(alloc);
-    const px = [_]u8{0xAB} ** 16;
+    const px = @as([16]u8, @splat(0xAB));
     const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 2, .height = 2, .bpp = 4, .generation = 5, .pixels = &px }};
     const gpu = [_]GpuImage{.{ .image_id = 7, .dest_x = 0, .dest_y = 0, .dest_w = 10, .dest_h = 10, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 }};
     var buf: []u8 = &.{};
@@ -3448,7 +3450,7 @@ test "planImageUploads: generation 바뀌면 재업로드, 같은 frame 중복 i
     var uploaded: std.AutoHashMapUnmanaged(u32, u64) = .{};
     defer uploaded.deinit(alloc);
     try uploaded.put(alloc, 7, 5); // gen 5를 이미 업로드한 상태
-    const px = [_]u8{1} ** 16;
+    const px = @as([16]u8, @splat(1));
     const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 2, .height = 2, .bpp = 4, .generation = 6, .pixels = &px }};
     const gpu = [_]GpuImage{
         .{ .image_id = 7, .dest_x = 0, .dest_y = 0, .dest_w = 10, .dest_h = 10, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 },
@@ -3468,8 +3470,8 @@ test "planImageUploads: 두 이미지의 pixels_offset/len이 각 구간을 가�
     const alloc = std.testing.allocator;
     var uploaded: std.AutoHashMapUnmanaged(u32, u64) = .{};
     defer uploaded.deinit(alloc);
-    const a = [_]u8{0xA} ** 12; // 3x1 RGBA
-    const b = [_]u8{0xB} ** 16; // 2x2 RGBA
+    const a = @as([12]u8, @splat(0xA)); // 3x1 RGBA
+    const b = @as([16]u8, @splat(0xB)); // 2x2 RGBA
     const images = [_]terminal.KittyImageView{
         .{ .image_id = 1, .width = 3, .height = 1, .bpp = 4, .generation = 1, .pixels = &a },
         .{ .image_id = 2, .width = 2, .height = 2, .bpp = 4, .generation = 1, .pixels = &b },
@@ -3979,27 +3981,27 @@ test "ChromeGeometry.frame 의 모든 필드가 view()로 나가고, sidebar_pla
     defer buffer.deinit(std.testing.allocator);
 
     // 몫은 이 둘뿐이다 — 셋째 몫이 생기면 그것이 frame 으로 가는지 아닌지를 여기서 정해야 한다.
-    comptime std.debug.assert(@typeInfo(ChromeGeometry).@"struct".fields.len == 2);
-    inline for (@typeInfo(SidebarPlacementGeometry).@"struct".fields) |field| {
+    comptime std.debug.assert(@import("type_info_fields").structFields(ChromeGeometry).len == 2);
+    inline for (@import("type_info_fields").structFields(SidebarPlacementGeometry)) |field| {
         if (@hasField(MetalFrame, field.name)) @compileError("렌더러가 안 읽는 ChromeGeometry.sidebar_placement." ++ field.name ++ " 이 MetalFrame 에 되살아났다");
     }
 
     // 필드마다 서로 다른 값을 넣어야 "옆 필드를 실었는데 우연히 통과"를 배제할 수 있다. placement 몫에도 값을
     // 넣어 그것이 frame 의 어느 필드로도 새지 않음을 함께 본다.
     var geometry: ChromeGeometry = .{};
-    inline for (@typeInfo(ChromeFrameGeometry).@"struct".fields, 0..) |field, i| {
+    inline for (@import("type_info_fields").structFields(ChromeFrameGeometry), 0..) |field, i| {
         if (!@hasField(MetalFrame, field.name)) {
             @compileError("ChromeGeometry.frame." ++ field.name ++ "에 대응하는 MetalFrame 필드가 없다 — view()가 실을 수 없다");
         }
         @field(geometry.frame, field.name) = @as(u32, @intCast((i + 1) * 7));
     }
-    inline for (@typeInfo(SidebarPlacementGeometry).@"struct".fields, 0..) |field, i| {
+    inline for (@import("type_info_fields").structFields(SidebarPlacementGeometry), 0..) |field, i| {
         @field(geometry.sidebar_placement, field.name) = @as(u32, @intCast(1000 + i));
     }
     buffer.stampChromeGeometry(geometry);
 
     const frame = buffer.view();
-    inline for (@typeInfo(ChromeFrameGeometry).@"struct".fields) |field| {
+    inline for (@import("type_info_fields").structFields(ChromeFrameGeometry)) |field| {
         try std.testing.expectEqual(@field(geometry.frame, field.name), @field(frame, field.name));
     }
 }
@@ -4128,7 +4130,7 @@ test "[적대] planImageUploads 재사용: 길이가 0 ↔ 큰 값으로 요동�
     var cap: usize = 0;
     defer if (cap > 0) alloc.free(buf.ptr[0..cap]);
 
-    const px = [_]u8{0xCD} ** 64;
+    const px = @as([64]u8, @splat(0xCD));
     var images = [_]terminal.KittyImageView{.{ .image_id = 3, .width = 4, .height = 4, .bpp = 4, .generation = 1, .pixels = &px }};
     const gpu = [_]GpuImage{.{ .image_id = 3, .dest_x = 0, .dest_y = 0, .dest_w = 4, .dest_h = 4, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 }};
 
@@ -4165,8 +4167,8 @@ test "[적대] planImageUploads 재사용: 더 큰 이미지가 오면 방을 �
     var cap: usize = 0;
     defer if (cap > 0) alloc.free(buf.ptr[0..cap]);
 
-    const small = [_]u8{0x11} ** 16;
-    const big = [_]u8{0x22} ** 256;
+    const small = @as([16]u8, @splat(0x11));
+    const big = @as([256]u8, @splat(0x22));
     const gpu = [_]GpuImage{.{ .image_id = 9, .dest_x = 0, .dest_y = 0, .dest_w = 2, .dest_h = 2, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 }};
 
     var img_small = [_]terminal.KittyImageView{.{ .image_id = 9, .width = 2, .height = 2, .bpp = 4, .generation = 1, .pixels = &small }};
@@ -4193,8 +4195,8 @@ test "[적대] planImageUploads 재사용: 두 이미지의 offset/len 이 한 �
     var cap: usize = 0;
     defer if (cap > 0) alloc.free(buf.ptr[0..cap]);
 
-    const a = [_]u8{0xAA} ** 16;
-    const b = [_]u8{0xBB} ** 32;
+    const a = @as([16]u8, @splat(0xAA));
+    const b = @as([32]u8, @splat(0xBB));
     const images = [_]terminal.KittyImageView{
         .{ .image_id = 1, .width = 2, .height = 2, .bpp = 4, .generation = 1, .pixels = &a },
         .{ .image_id = 2, .width = 4, .height = 2, .bpp = 4, .generation = 1, .pixels = &b },
@@ -4220,7 +4222,7 @@ test "[적대] planImageUploads 재사용: 실린 픽셀이 입력과 바이트�
     // 재사용 버퍼에 쌓는 경로가 「빠른 대신 다른 것을 싣지」 않는지 — 알려진 입력에 알려진 출력을 못 박는다.
     // (한때 옛 비-재사용 판과 결과를 대조했으나, 그 판이 사라져 절대값 단언으로 바꿨다.)
     const alloc = std.testing.allocator;
-    const px = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 }, 4);
     const images = [_]terminal.KittyImageView{.{ .image_id = 5, .width = 4, .height = 2, .bpp = 4, .generation = 3, .pixels = &px }};
     const gpu = [_]GpuImage{.{ .image_id = 5, .dest_x = 0, .dest_y = 0, .dest_w = 4, .dest_h = 2, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 }};
 
@@ -4249,8 +4251,8 @@ test "[적대] replace 이미지 버퍼 재사용: 길이가 요동쳐도 방을
     const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
     const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } };
 
-    const big = [_]u8{0xEE} ** 512;
-    const small = [_]u8{0x77} ** 64;
+    const big = @as([512]u8, @splat(0xEE));
+    const small = @as([64]u8, @splat(0x77));
 
     {
         var buf: MetalFrameBuffer = .{};
@@ -4286,8 +4288,8 @@ test "[적대] replace 이미지 버퍼 재사용: 방을 재사용해도 내용
     const allocator = std.testing.allocator;
     const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
     const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } };
-    const first = [_]u8{ 3, 1, 4, 1, 5, 9, 2, 6 } ** 8;
-    const second = [_]u8{ 2, 7, 1, 8, 2, 8, 1, 8 } ** 8;
+    const first = array_repeat.repeat([_]u8{ 3, 1, 4, 1, 5, 9, 2, 6 }, 8);
+    const second = array_repeat.repeat([_]u8{ 2, 7, 1, 8, 2, 8, 1, 8 }, 8);
 
     var buf: MetalFrameBuffer = .{};
     defer buf.deinit(allocator);
@@ -4399,8 +4401,8 @@ test "[적대] replace 원자성: 재사용 경로에서 뒤 단계가 OOM 이�
     // 옛 것 그대로, 성공하면 새 것」 둘 중 하나만 일어남을 고정한다.
     const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
     const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } };
-    const first = [_]u8{0xA1} ** 128;
-    const second = [_]u8{0xB2} ** 128; // 같은 길이 → capacity 재사용 경로
+    const first = @as([128]u8, @splat(0xA1));
+    const second = @as([128]u8, @splat(0xB2)); // 같은 길이 → capacity 재사용 경로
     const live = [_]u32{ 7, 8, 9 }; // live_ids dupe 가 재사용 경로의 memcpy 앞에 있던 fallible 단계
 
     var fail_index: usize = 0;

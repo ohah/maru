@@ -266,7 +266,7 @@ fn buildDiagnosticLines(self: *AppSession, term: *Term, offset: u32) error{OutOf
     }
     std.mem.sort(diagnostic.Diagnostic, covering[0..n], {}, struct {
         fn f(_: void, a: diagnostic.Diagnostic, b: diagnostic.Diagnostic) bool {
-            return @intFromEnum(a.severity) > @intFromEnum(b.severity);
+            return @backingInt(a.severity) > @backingInt(b.severity);
         }
     }.f);
     for (covering[0..n]) |d| {

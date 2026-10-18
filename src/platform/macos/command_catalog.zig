@@ -446,7 +446,7 @@ test "global catalog action_key가 parseGlobalAction으로 round-trip된다(양�
         try std.testing.expectEqual(parsed, entry.action);
     }
     // 카탈로그가 GlobalAction enum 전체를 덮는지(빠진 액션이 없게).
-    try std.testing.expectEqual(@typeInfo(GlobalAction).@"enum".fields.len, global_entries.len);
+    try std.testing.expectEqual(@import("type_info_fields").enumFields(GlobalAction).len, global_entries.len);
 }
 
 test "chordForGlobalAction: 사용자 global_bindings만 스캔(빌트인 기본 없음)" {

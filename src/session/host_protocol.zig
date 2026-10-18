@@ -33,16 +33,16 @@ pub const ErrorCode = enum {
     }
 
     pub fn fromWireName(name: []const u8) ?ErrorCode {
-        inline for (@typeInfo(ErrorCode).@"enum".fields) |field|
+        inline for (@import("type_info_fields").enumFields(ErrorCode)) |field|
             if (std.mem.eql(u8, name, field.name))
-                return @enumFromInt(field.value);
+                return @fromBackingInt(@intCast(field.value));
         return null;
     }
 };
 
 test "session host error wire names round trip exhaustively" {
-    inline for (@typeInfo(ErrorCode).@"enum".fields) |field| {
-        const code: ErrorCode = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(ErrorCode)) |field| {
+        const code: ErrorCode = @fromBackingInt(@intCast(field.value));
         try std.testing.expectEqual(code, ErrorCode.fromWireName(code.wireName()).?);
     }
     try std.testing.expect(ErrorCode.fromWireName("future_error") == null);

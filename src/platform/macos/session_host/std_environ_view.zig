@@ -82,8 +82,8 @@ test "unsetenv 만 하면 std 의 조각 끝에 null 이 생기고, 갱신하면
     var name_buf: [512]u8 = undefined;
     var value_buf: [4096]u8 = undefined;
     if (eq >= name_buf.len or pair.len - eq - 1 >= value_buf.len) return error.SkipZigTest;
-    const name = try std.fmt.bufPrintZ(&name_buf, "{s}", .{pair[0..eq]});
-    const value = try std.fmt.bufPrintZ(&value_buf, "{s}", .{pair[eq + 1 ..]});
+    const name = try std.fmt.bufPrintSentinel(&name_buf, "{s}", .{pair[0..eq]}, 0);
+    const value = try std.fmt.bufPrintSentinel(&value_buf, "{s}", .{pair[eq + 1 ..]}, 0);
     defer {
         _ = setenv(name.ptr, value.ptr, 1);
         refreshStdDebugView();
@@ -116,8 +116,8 @@ test "unsetenvKeepingStdView 는 변수를 실제로 지우고 조각도 함께 
     var name_buf: [512]u8 = undefined;
     var value_buf: [4096]u8 = undefined;
     if (eq >= name_buf.len or pair.len - eq - 1 >= value_buf.len) return error.SkipZigTest;
-    const name = try std.fmt.bufPrintZ(&name_buf, "{s}", .{pair[0..eq]});
-    const value = try std.fmt.bufPrintZ(&value_buf, "{s}", .{pair[eq + 1 ..]});
+    const name = try std.fmt.bufPrintSentinel(&name_buf, "{s}", .{pair[0..eq]}, 0);
+    const value = try std.fmt.bufPrintSentinel(&value_buf, "{s}", .{pair[eq + 1 ..]}, 0);
     defer {
         _ = setenv(name.ptr, value.ptr, 1);
         refreshStdDebugView();
@@ -149,8 +149,8 @@ test "앞서 setenv 로 libc 가 사본으로 갈아탄 뒤에도 같은 대조�
     var name_buf: [512]u8 = undefined;
     var value_buf: [4096]u8 = undefined;
     if (eq >= name_buf.len or pair.len - eq - 1 >= value_buf.len) return error.SkipZigTest;
-    const name = try std.fmt.bufPrintZ(&name_buf, "{s}", .{pair[0..eq]});
-    const value = try std.fmt.bufPrintZ(&value_buf, "{s}", .{pair[eq + 1 ..]});
+    const name = try std.fmt.bufPrintSentinel(&name_buf, "{s}", .{pair[0..eq]}, 0);
+    const value = try std.fmt.bufPrintSentinel(&value_buf, "{s}", .{pair[eq + 1 ..]}, 0);
     defer {
         _ = setenv(name.ptr, value.ptr, 1);
         refreshStdDebugView();

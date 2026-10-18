@@ -16,7 +16,7 @@ pub const Writer = struct {
             const n = std.c.write(self.fd, self.buf[sent..len].ptr, len - sent);
             if (n > 0) {
                 sent += @intCast(n);
-            } else if (n < 0 and std.c._errno().* == @intFromEnum(std.c.E.INTR)) {
+            } else if (n < 0 and std.c._errno().* == @backingInt(std.c.E.INTR)) {
                 continue;
             } else {
                 // maru 가 읽는 쪽을 닫았다(EPIPE) — 더 알릴 곳이 없다.

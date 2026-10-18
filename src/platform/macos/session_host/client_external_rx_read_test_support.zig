@@ -114,8 +114,7 @@ fn exerciseCompletion(
 const ReadProbe = struct {
     scratch: *read.ExternalRxReadScratch,
     outcomes: [read.max_rx_read_attempts_per_turn]read.RxReadOutcome =
-        [_]read.RxReadOutcome{.would_block} **
-        read.max_rx_read_attempts_per_turn,
+        @as([read.max_rx_read_attempts_per_turn]read.RxReadOutcome, @splat(.would_block)),
     outcome_count: usize = 1,
     calls: usize = 0,
     byte: u8 = 'x',
@@ -225,7 +224,7 @@ fn exerciseCollector(
         .accepted_bytes = 0,
         .attempts = 0,
         .stop = .would_block,
-        .digest = [_]u8{0} ** 32,
+        .digest = @as([32]u8, @splat(0)),
     };
     switch (collected) {
         .stopped => |stopped| receipt = stopped,
@@ -309,10 +308,9 @@ fn initializeFixture(
                 .resident_cap = authority_probe.parser_backing.len,
                 .generation = 1,
             },
-            .owner_snapshot_digest = [_]u8{1} ** 32,
+            .owner_snapshot_digest = @as([32]u8, @splat(1)),
             .protected_range_count = 3,
-            .protected_ranges = [_]read.ProtectedRange{.{}} **
-                read.max_rx_read_protected_ranges,
+            .protected_ranges = @as([read.max_rx_read_protected_ranges]read.ProtectedRange, @splat(.{})),
             .view_digest = undefined,
         },
         .scratch = scratch,
@@ -785,7 +783,7 @@ test "C3 collector stops after exactly 64 reads without a 65th callback" {
     for (&read_probe.outcomes) |*outcome| outcome.* = .{ .bytes = 1 };
     read_probe.outcome_count = read_probe.outcomes.len;
     const expected: [read.max_rx_read_attempts_per_turn]u8 =
-        [_]u8{'x'} ** read.max_rx_read_attempts_per_turn;
+        @as([read.max_rx_read_attempts_per_turn]u8, @splat('x'));
 
     const result = exerciseCollector(
         scratch,

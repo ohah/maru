@@ -131,7 +131,7 @@ test "publication path alias is rejected before authority access" {
     var scratch: [4096]u8 = undefined;
     var value = inputs(&cli, &toolchain);
     var manifest_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    value.publication.manifest = try std.fmt.bufPrintZ(&manifest_storage, "{s}", .{value.prerequisite.paths.dmg});
+    value.publication.manifest = try std.fmt.bufPrintSentinel(&manifest_storage, "{s}", .{value.prerequisite.paths.dmg}, 0);
     try std.testing.expectError(error.InvalidPath, product.run(std.testing.io, std.testing.allocator, value, "token", &scratch, std.time.ns_per_s, &execution));
     try std.testing.expect(execution.isPristineForComposition());
 }

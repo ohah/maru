@@ -82,7 +82,7 @@ test "modifier flags map one to one and every defined modifier sets a distinct b
     try std.testing.expectEqual(@as(u32, 0), flags(.{}));
     try std.testing.expectEqual(event_flag.control_down | event_flag.left_mouse_button, flags(.{ .control = true, .left_button = true }));
     var seen: u32 = 0;
-    inline for (std.meta.fields(message.Modifiers)) |field| {
+    inline for (@import("type_info_fields").fields(message.Modifiers)) |field| {
         if (field.type != bool) continue;
         var modifiers: message.Modifiers = .{};
         @field(modifiers, field.name) = true;

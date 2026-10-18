@@ -9,7 +9,7 @@ const std = @import("std");
 const cleanup = @import("event_cleanup_seal.zig");
 
 const RuntimeObservation = maru.app.RuntimeObservation;
-const zero_digest = [_]u8{0} ** 32;
+const zero_digest = @as([32]u8, @splat(0));
 
 pub const Error = error{InvalidObservation};
 
@@ -65,14 +65,14 @@ pub fn input(
         @memcpy(processes.entries[index].bytes[0..process.len], process.bytes[0..process.len]);
     }
     return .{
-        .availability = @intFromEnum(observation.availability),
+        .availability = @backingInt(observation.availability),
         .revision = observation.revision,
         .observer_generation = observation.observer_generation,
         .title_generation = observation.title_generation,
         .cols = observation.size.cols,
         .rows = observation.size.rows,
         .ssh_remote_dest_present = @intFromBool(observation.ssh_remote_dest_present),
-        .semantic_state = @intFromEnum(observation.semantic_state),
+        .semantic_state = @backingInt(observation.semantic_state),
         .alt_active = @intFromBool(observation.alt_active),
         .app_cursor_keys = @intFromBool(observation.app_cursor_keys),
         .app_keypad = @intFromBool(observation.app_keypad),

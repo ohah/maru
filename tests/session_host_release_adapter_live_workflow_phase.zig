@@ -28,7 +28,7 @@ test "live workflow accepts only the exact eight-stage success order" {
 
 test "every successful prefix publishes only its derived authority" {
     var state: phase.State = .{};
-    for (stages, 0..) |stage, index| {
+    inline for (stages, 0..) |stage, index| {
         try std.testing.expectEqual(stage, state.expectedStage().?);
         try phase.apply(&state, .{ .stage = stage, .result = .succeeded });
         try std.testing.expectEqual(index >= 4 and index < 7, state.aggregateRetained());
@@ -150,10 +150,10 @@ test "workflow state is pointer-free value data" {
 }
 
 test "stage inventory and canonical order cannot drift independently" {
-    const fields = @typeInfo(phase.Stage).@"enum".fields;
+    const fields = @import("type_info_fields").enumFields(phase.Stage);
     try std.testing.expectEqual(stages.len, fields.len);
-    for (stages, 0..) |stage, index| {
-        try std.testing.expectEqual(index, @intFromEnum(stage));
+    inline for (stages, 0..) |stage, index| {
+        try std.testing.expectEqual(index, @backingInt(stage));
         try std.testing.expectEqualStrings(fields[index].name, @tagName(stage));
     }
 }
@@ -168,10 +168,10 @@ fn expectPointerFree(comptime T: type) !void {
             try expectPointerFree(info.child);
         },
         .@"struct" => |info| {
-            inline for (info.fields) |field| try expectPointerFree(field.type);
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| try expectPointerFree(field.type);
         },
         .@"union" => |info| {
-            inline for (info.fields) |field| try expectPointerFree(field.type);
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| try expectPointerFree(field.type);
         },
         else => {},
     }

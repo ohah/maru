@@ -977,7 +977,7 @@ test "app host builds frames from the scrolled viewport, not just the active scr
     var frame = try buildFrame(allocator, &app_window, &pump, &renderer_state, renderer.FakeFontBackend{});
     defer frame.deinit(allocator);
 
-    var row0: [8]u21 = .{' '} ** 8;
+    var row0: [8]u21 = @splat(' ');
     for (frame.render_frame.draw_list.cells) |cell| {
         if (cell.row == 0 and cell.col < 8) row0[cell.col] = cell.codepoint;
     }

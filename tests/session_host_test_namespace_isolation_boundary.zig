@@ -104,7 +104,7 @@ test "common runner binds session registry and app workspace to the same pid roo
     const app_home = std.c.getenv("CFFIXED_USER_HOME") orelse
         return error.MissingFixedUserHome;
     var expected_buf: [64]u8 = undefined;
-    const expected = try std.fmt.bufPrintZ(&expected_buf, "/tmp/maru-t{d}", .{std.c.getpid()});
+    const expected = try std.fmt.bufPrintSentinel(&expected_buf, "/tmp/maru-t{d}", .{std.c.getpid()}, 0);
 
     try std.testing.expectEqualStrings(expected, std.mem.span(session_root));
     try std.testing.expectEqualStrings(expected, std.mem.span(app_home));
@@ -145,7 +145,7 @@ test "common runner never leaves the real user HOME to tests or their product ch
     if (std.mem.startsWith(u8, home, prefix)) {
         try std.testing.expect(home.len > prefix.len + 1 and home[prefix.len] == '-');
         var home_z_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-        const home_z = try std.fmt.bufPrintZ(&home_z_buf, "{s}", .{home});
+        const home_z = try std.fmt.bufPrintSentinel(&home_z_buf, "{s}", .{home}, 0);
         var info: std.posix.Stat = undefined;
         try std.testing.expectEqual(@as(c_int, 0), std.c.fstatat(std.posix.AT.FDCWD, home_z.ptr, &info, std.posix.AT.SYMLINK_NOFOLLOW));
         try std.testing.expect(std.posix.S.ISDIR(info.mode));
@@ -194,7 +194,7 @@ test "macOS product smoke children bind workspace and session registry to one fi
     for (product_smokes) |name| {
         const needle = try std.fmt.allocPrint(
             allocator,
-            "isolateMacosProductTest(b, {s}, b.pathFromRoot(",
+            "isolateMacosProductTest(b, {s}, rootPath(b,",
             .{name},
         );
         defer allocator.free(needle);

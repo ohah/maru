@@ -1,5 +1,7 @@
 //! CR6d-v2a의 두 제품 PPM이 같은 복구 surface의 실제 preedit 변화를 증명하는지 검증한다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const subject = @import("support/session_host_preedit_pixel_verdict.zig");
 
@@ -19,8 +21,8 @@ fn capture(ppm: []const u8, generation: u64) subject.Capture {
 }
 
 test "CR6d-v2a accepts a same-surface marked pixel beginning in the cursor cell" {
-    const before = "P6\n4 2\n255\n" ++ black ** 8;
-    const marked = "P6\n4 2\n255\n" ++ black ++ white ** 2 ++ black ** 5;
+    const before = "P6\n4 2\n255\n" ++ array_repeat.repeat(black, 8);
+    const marked = "P6\n4 2\n255\n" ++ black ++ array_repeat.repeat(white, 2) ++ array_repeat.repeat(black, 5);
     const result = try subject.validate(std.testing.allocator, capture(before, 10), capture(marked, 11));
     try std.testing.expectEqualStrings("0123456789abcdef0123456789abcdef", &result.runtime_id);
     try std.testing.expectEqual(@as(u64, 7), result.surface_id);
@@ -32,9 +34,9 @@ test "CR6d-v2a accepts a same-surface marked pixel beginning in the cursor cell"
 }
 
 test "CR6d-v2a rejects identity generation anchor and off-interest substitutions" {
-    const before = "P6\n4 2\n255\n" ++ black ** 8;
-    const in_cell = "P6\n4 2\n255\n" ++ black ++ white ++ black ** 6;
-    const outside = "P6\n4 2\n255\n" ++ black ** 3 ++ white ++ black ** 4;
+    const before = "P6\n4 2\n255\n" ++ array_repeat.repeat(black, 8);
+    const in_cell = "P6\n4 2\n255\n" ++ black ++ white ++ array_repeat.repeat(black, 6);
+    const outside = "P6\n4 2\n255\n" ++ array_repeat.repeat(black, 3) ++ white ++ array_repeat.repeat(black, 4);
 
     var foreign = capture(in_cell, 11);
     foreign.surface_id = 8;
@@ -48,7 +50,7 @@ test "CR6d-v2a rejects identity generation anchor and off-interest substitutions
 }
 
 test "CR6d-v2a rejects missing pixels malformed captures and oversized identities" {
-    const before = "P6\n4 2\n255\n" ++ black ** 8;
+    const before = "P6\n4 2\n255\n" ++ array_repeat.repeat(black, 8);
     const same = capture(before, 11);
     try std.testing.expectError(error.NoMarkedPixelChange, subject.validate(std.testing.allocator, capture(before, 10), same));
 
@@ -64,8 +66,8 @@ test "CR6d-v2a rejects missing pixels malformed captures and oversized identitie
 }
 
 fn allocationCase(allocator: std.mem.Allocator) !void {
-    const before = "P6\n4 2\n255\n" ++ black ** 8;
-    const marked = "P6\n4 2\n255\n" ++ black ++ white ** 2 ++ black ** 5;
+    const before = "P6\n4 2\n255\n" ++ array_repeat.repeat(black, 8);
+    const marked = "P6\n4 2\n255\n" ++ black ++ array_repeat.repeat(white, 2) ++ array_repeat.repeat(black, 5);
     _ = try subject.validate(allocator, capture(before, 10), capture(marked, 11));
 }
 

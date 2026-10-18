@@ -185,7 +185,7 @@ pub const Tag = enum(u8) {
     devtools_result = 65,
 
     pub fn direction(self: Tag) Direction {
-        const v = @intFromEnum(self);
+        const v = @backingInt(self);
         return if (v < 32 or (v >= 128 and v < 192)) .to_sidecar else .to_maru;
     }
 };
@@ -318,7 +318,7 @@ pub const PermissionKind = enum(u5) {
     sensors = 28,
 
     pub fn bit(self: PermissionKind) u32 {
-        return @as(u32, 1) << @intFromEnum(self);
+        return @as(u32, 1) << @backingInt(self);
     }
 };
 
@@ -329,7 +329,7 @@ pub const MediaPermission = enum(u2) {
     screen = 3,
 
     pub fn bit(self: MediaPermission) u8 {
-        return @as(u8, 1) << @intFromEnum(self);
+        return @as(u8, 1) << @backingInt(self);
     }
 };
 
@@ -1236,8 +1236,8 @@ pub const Message = union(Tag) {
 };
 
 test "tags split by direction — 0..31 and 128..191 go to the sidecar" {
-    inline for (std.meta.fields(Tag)) |field| {
-        const tag: Tag = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").fields(Tag)) |field| {
+        const tag: Tag = @fromBackingInt(@intCast(field.value));
         const expected: Direction = if (field.value < 32 or (field.value >= 128 and field.value < 192)) .to_sidecar else .to_maru;
         try std.testing.expectEqual(expected, tag.direction());
     }

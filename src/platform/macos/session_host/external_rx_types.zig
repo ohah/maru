@@ -23,7 +23,7 @@ pub const RxWatermark = struct {
 test "external RX DTOs stay pointer-free observations" {
     const std = @import("std");
     try std.testing.expect(!@typeInfo(RxIdentity).@"struct".is_tuple);
-    try std.testing.expectEqual(@as(usize, 2), @typeInfo(RxIdentity).@"struct".fields.len);
-    try std.testing.expectEqual(@as(usize, 3), @typeInfo(RxRange).@"struct".fields.len);
-    try std.testing.expectEqual(@as(usize, 2), @typeInfo(RxWatermark).@"struct".fields.len);
+    try std.testing.expectEqual(@as(usize, 2), @import("type_info_fields").structFields(RxIdentity).len);
+    try std.testing.expectEqual(@as(usize, 3), @import("type_info_fields").structFields(RxRange).len);
+    try std.testing.expectEqual(@as(usize, 2), @import("type_info_fields").structFields(RxWatermark).len);
 }

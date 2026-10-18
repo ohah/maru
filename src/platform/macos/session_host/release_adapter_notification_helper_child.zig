@@ -81,8 +81,8 @@ fn runInternal(
 
     storage.in_use = true;
     defer if (storage.in_use) clear(storage);
-    const nonce = std.fmt.bufPrintZ(&storage.nonce, "{s}", .{expected.visible_nonce}) catch return error.InvalidInput;
-    const deadline = std.fmt.bufPrintZ(&storage.deadline, "{d}", .{expected.deadline_ns}) catch return error.InvalidInput;
+    const nonce = std.fmt.bufPrintSentinel(&storage.nonce, "{s}", .{expected.visible_nonce}, 0) catch return error.InvalidInput;
+    const deadline = std.fmt.bufPrintSentinel(&storage.deadline, "{d}", .{expected.deadline_ns}, 0) catch return error.InvalidInput;
     storage.argv = .{ executable.ptr, "click", nonce.ptr, deadline.ptr, null };
     const observation = try executor.observe(.{
         .executable = executable,

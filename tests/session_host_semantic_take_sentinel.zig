@@ -43,7 +43,7 @@ pub fn main() !void {
         .limited(4 * 1024 * 1024),
     );
     defer std.heap.page_allocator.free(source);
-    const source_z = try std.heap.page_allocator.dupeZ(u8, source);
+    const source_z = try std.heap.page_allocator.dupeSentinel(u8, source, 0);
     defer std.heap.page_allocator.free(source_z);
     const intent_source = try std.Io.Dir.cwd().readFileAlloc(
         std.Io.Threaded.global_single_threaded.io(),
@@ -72,7 +72,7 @@ pub fn main() !void {
         "semantic take maximum resync correlation retires without wrap and blocks next admission",
         "semantic take maximum request ID succeeds on wire then next admission emits no wire",
     };
-    var required_behavior_found = [_]bool{false} ** required_behavior_names.len;
+    var required_behavior_found = @as([required_behavior_names.len]bool, @splat(false));
     var tokenizer = std.zig.Tokenizer.init(source_z);
     var behavior_tests: usize = 0;
     while (true) {

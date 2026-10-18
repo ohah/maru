@@ -223,7 +223,7 @@ pub fn scan(provider: command.Provider, scope: command.Scope, hooks_value: ?std.
     };
     const set = command.eventsFor(provider, scope);
     // 세트 크기는 provider 마다 다르므로 최대치로 잡고 앞부분만 쓴다(순수 층이라 할당하지 않는다).
-    var covered = [_]bool{false} ** max_events;
+    var covered = @as([max_events]bool, @splat(false));
     for (hooks.keys(), hooks.values()) |name, groups_value| {
         const groups = switch (groups_value) {
             .array => |arr| arr,
@@ -552,7 +552,7 @@ test "세트 크기는 호출자가 넘기지 않는다" {
 test "Known 의 필드가 늘면 판정 누락을 잡는다" {
     // 필드를 더하고 판정에 안 넣으면 **조용히 무시**된다. 개수로 못 박아 그 드리프트를 컴파일이 아니라
     // 테스트에서 잡는다 — 새 필드를 넣는 사람이 여기서 «이 필드는 판정에 어떻게 쓰이나» 를 묻게 된다.
-    const fields = @typeInfo(Known).@"struct".fields;
+    const fields = @import("type_info_fields").structFields(Known);
     try testing.expectEqual(@as(usize, 5), fields.len);
 
     // 각 필드가 실제로 계획을 움직이는지(또는 의도적으로 안 움직이는지) 하나씩 흔들어 본다.

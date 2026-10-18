@@ -78,7 +78,7 @@ fn refresh(self: *AppSession) void {
     state.shown.clearRetainingCapacity();
     for (catalog.candidates.items, 0..) |*candidate, i| {
         if (self.editor_documents.usesBackupName(candidate.name())) continue;
-        if (query.len == 0 or std.ascii.indexOfIgnoreCase(candidate.label, query) != null or std.ascii.indexOfIgnoreCase(candidate.name(), query) != null)
+        if (query.len == 0 or std.ascii.findIgnoreCase(candidate.label, query) != null or std.ascii.findIgnoreCase(candidate.name(), query) != null)
             state.shown.appendAssumeCapacity(i);
     }
     picker.setResultCount(state.shown.items.len);

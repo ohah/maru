@@ -80,8 +80,8 @@ const max_body_bytes = 1024;
 const rate_window_ms: i64 = 10_000;
 const rate_limit = 5;
 
-const Recent = struct { browser: BrowserId, at: [rate_limit]i64 = [_]i64{0} ** rate_limit };
-var recent: [64]?Recent = [_]?Recent{null} ** 64;
+const Recent = struct { browser: BrowserId, at: [rate_limit]i64 = @as([rate_limit]i64, @splat(0)) };
+var recent: [64]?Recent = @as([64]?Recent, @splat(null));
 
 /// 넘긴 알림 → (브라우저, 프레임 식별자, 문서 표식, 페이지 번호) — 누를 때 찾는다. 최근 64 개.
 const max_frame_id_bytes = 128;
@@ -93,7 +93,7 @@ const Shown = struct {
     token_buf: [16]u8 = undefined,
     page: i32,
 };
-var shown: [64]?Shown = [_]?Shown{null} ** 64;
+var shown: [64]?Shown = @as([64]?Shown, @splat(null));
 var shown_next: usize = 0;
 var next_notification: u32 = 1;
 

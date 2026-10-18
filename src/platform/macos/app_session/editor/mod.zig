@@ -8,6 +8,8 @@
 //! **빈 파일을 `null`로 돌려주고 1 MiB에서 끊는다**. 편집기는 둘 다 어긋난다: 빈 파일도 열려야 하고
 //! (§3.5 — 여는 것을 막는 이유는 UTF-8 아님 하나뿐이다), 로그·생성 파일을 못 여는 편집기는 쓸 수 없다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const test_env = @import("../../test_env.zig"); // 테스트의 환경 변수 되돌리기(값 복사)
 const maru = @import("maru");
@@ -10597,7 +10599,7 @@ test "IME5 랩된 줄의 한자 후보창은 실제로 그린 글자에 붙는�
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
 
-    const line = ("a" ** 180) ++ "Z\n";
+    const line = (array_repeat.repeat("a", 180)) ++ "Z\n";
     try fx.dir.dir.writeFile(io, .{ .sub_path = "ime5-wrap.txt", .data = line });
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
@@ -13277,7 +13279,7 @@ test "MPN20 가로는 Result 의 것이다 — 휠이 Result 열에서 듣고, �
     // 변이가 2회차 B15 에서 살았다). 그 줄의 폭 = 탭 폭 + 60.
     const t_body = try mk(allocator, 40, 'T', 35, '.', 0);
     defer allocator.free(t_body);
-    const t_text = try std.mem.concat(allocator, u8, &.{ "\t" ++ ("." ** 60) ++ "\n", t_body });
+    const t_text = try std.mem.concat(allocator, u8, &.{ "\t" ++ (array_repeat.repeat(".", 60)) ++ "\n", t_body });
     defer allocator.free(t_text);
     const b_text = try mk(allocator, 200, 'B', 30, 'Y', 190);
     defer allocator.free(b_text);
@@ -13712,7 +13714,7 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     // 가짜 서버를 끼운다(이름과 무관). 끝나면 뗀다.
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     // 신뢰 파일은 이 픽스처의 임시 디렉터리에(`state/` 를 앱 전역 저장소 자리로 주입 — 계획 WT2).
@@ -13722,7 +13724,7 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
     trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
     defer trust_store.setDirForTest(null);
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -13929,7 +13931,7 @@ test "LSPB9 TS 계열 후보 셋 — PATH 에 typescript-language-server 만 있
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -13939,9 +13941,9 @@ test "LSPB9 TS 계열 후보 셋 — PATH 에 typescript-language-server 만 있
     _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     try fx.dir.dir.createDirPath(testing.io, "bin");
     var path_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const pz = try std.fmt.bufPrintZ(&path_z, "{s}/bin", .{root});
+    const pz = try std.fmt.bufPrintSentinel(&path_z, "{s}/bin", .{root}, 0);
     // **PATH 를 복사해 둔다** — `getenv` 가 준 포인터는 `setenv` 뒤 libc 가 환경을 갈아 끼우면 매달린다(집계 샤드에서 뒤 판정자가 segfault 로 죽었다).
-    const saved_path: ?[:0]u8 = if (std.c.getenv("PATH")) |p| try allocator.dupeZ(u8, std.mem.span(p)) else null;
+    const saved_path: ?[:0]u8 = if (std.c.getenv("PATH")) |p| try allocator.dupeSentinel(u8, std.mem.span(p), 0) else null;
     defer if (saved_path) |p| allocator.free(p);
     _ = setenv("PATH", pz.ptr, 1);
     defer if (saved_path) |p| {
@@ -13970,7 +13972,7 @@ test "LSPB9 TS 계열 후보 셋 — PATH 에 typescript-language-server 만 있
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "bin/typescript-language-server", .data = wrapper.items });
     {
         var wz: [std.fs.max_path_bytes + 1]u8 = undefined;
-        const w = try std.fmt.bufPrintZ(&wz, "{s}/bin/typescript-language-server", .{root});
+        const w = try std.fmt.bufPrintSentinel(&wz, "{s}/bin/typescript-language-server", .{root}, 0);
         _ = std.c.chmod(w.ptr, 0o755);
     }
     const Ctx = struct { fx: *PaneFixture, term: *Term };
@@ -14005,7 +14007,7 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
     defer trust_store.setDirForTest(null);
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -14041,7 +14043,7 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     _ = tab_ops.switchTab(fx.session, 0);
     lsp_client.pump(fx.session);
@@ -14166,7 +14168,7 @@ test "WT6b-1a git 읽기의 신뢰 판정은 언어 서버와 같은 표다(허�
     trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
     defer trust_store.setDirForTest(null);
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root})).ptr, 1);
+    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
     fx.session.config_path_buffer = null; // `MARU_CONFIG` 를 다시 읽게
@@ -14210,7 +14212,7 @@ test "WT6b-1a git 읽기의 신뢰 판정은 언어 서버와 같은 표다(허�
     try testing.expect(trust_store.decide(testing.io, test_trust_origin, key, .allow));
     try testing.expect(check.trusted(check.ctx, root));
     var git_z: [std.fs.max_path_bytes + 8]u8 = undefined;
-    try testing.expectEqual(@as(c_int, 0), std.c.rmdir((try std.fmt.bufPrintZ(&git_z, "{s}/.git", .{root})).ptr));
+    try testing.expectEqual(@as(c_int, 0), std.c.rmdir((try std.fmt.bufPrintSentinel(&git_z, "{s}/.git", .{root}, 0)).ptr));
     try testing.expect(!check.trusted(check.ctx, root));
 
     // partial clone 안내는 신뢰를 정할 수 없는 원격(루트·홈을 아직 모름)에서 「신뢰하면 받아 온다」를 말하지 않는다(적대적 검증 2회차; 물을 수 있는 원격은 WT7b 판정자).
@@ -14232,7 +14234,7 @@ test "WT6b-2a 도크 신뢰 줄 — 신뢰 전 로컬 저장소는 맨 위에 �
     trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
     defer trust_store.setDirForTest(null);
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root})).ptr, 1);
+    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
     fx.session.config_path_buffer = null;
@@ -14367,9 +14369,9 @@ test "WT6b-2a 도크 신뢰 줄 — 신뢰 전 로컬 저장소는 맨 위에 �
     var home_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
     const home = try std.fmt.bufPrint(&home_buf, "{s}/home", .{root});
     var saved_home_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const saved_home: ?[:0]const u8 = if (std.c.getenv("HOME")) |h| try std.fmt.bufPrintZ(&saved_home_buf, "{s}", .{std.mem.span(h)}) else null;
+    const saved_home: ?[:0]const u8 = if (std.c.getenv("HOME")) |h| try std.fmt.bufPrintSentinel(&saved_home_buf, "{s}", .{std.mem.span(h)}, 0) else null;
     var home_z: [std.fs.max_path_bytes + 17]u8 = undefined;
-    _ = setenv("HOME", (try std.fmt.bufPrintZ(&home_z, "{s}", .{home})).ptr, 1);
+    _ = setenv("HOME", (try std.fmt.bufPrintSentinel(&home_z, "{s}", .{home}, 0)).ptr, 1);
     defer _ = if (saved_home) |h| setenv("HOME", h.ptr, 1) else unsetenv("HOME");
     git_ops.rememberGitRepo(fx.session, home);
     const refused = (try Probe.first(fx.session, arena_state.allocator())) orelse return error.TrustLineMissing;
@@ -14391,7 +14393,7 @@ test "WT6b-2a 팔레트 「이 저장소 신뢰…」는 도크가 숨어 있으
     trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
     defer trust_store.setDirForTest(null);
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root})).ptr, 1);
+    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
     fx.session.config_path_buffer = null;
@@ -14536,9 +14538,9 @@ test "WT6b-2b-i 신뢰 전 로컬 저장소의 쓰기는 신뢰 시트부터 —
     // 메시지 경로는 `.cache` 가 있다고 본다(한 단계만 만든다).
     try std.Io.Dir.cwd().createDirPath(testing.io, try std.fmt.bufPrint(&cache_buf, "{s}/.cache", .{home}));
     var saved_home_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const saved_home: ?[:0]const u8 = if (std.c.getenv("HOME")) |h| try std.fmt.bufPrintZ(&saved_home_buf, "{s}", .{std.mem.span(h)}) else null;
+    const saved_home: ?[:0]const u8 = if (std.c.getenv("HOME")) |h| try std.fmt.bufPrintSentinel(&saved_home_buf, "{s}", .{std.mem.span(h)}, 0) else null;
     var home_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("HOME", (try std.fmt.bufPrintZ(&home_z, "{s}", .{home})).ptr, 1);
+    _ = setenv("HOME", (try std.fmt.bufPrintSentinel(&home_z, "{s}", .{home}, 0)).ptr, 1);
     defer _ = if (saved_home) |h| setenv("HOME", h.ptr, 1) else unsetenv("HOME");
     // 커밋이 실제로 서야 끝난 뒤의 정리(`finishCommit`)를 잰다 — 빈 홈엔 사용자 이름이 없어 env 로 준다.
     inline for (.{ "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL" }) |name| _ = setenv(name, "maru-test", 1);
@@ -14557,7 +14559,7 @@ test "WT6b-2b-i 신뢰 전 로컬 저장소의 쓰기는 신뢰 시트부터 —
     trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
     defer trust_store.setDirForTest(null);
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root})).ptr, 1);
+    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
     fx.session.config_path_buffer = null;
@@ -14883,9 +14885,9 @@ test "WT6b-2b-ii 홈 폴더가 저장소면(묻지 않는 root — 신뢰를 정
     var home_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
     const home = try std.fmt.bufPrint(&home_buf, "{s}/home", .{root});
     var saved_home_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const saved_home: ?[:0]const u8 = if (std.c.getenv("HOME")) |h| try std.fmt.bufPrintZ(&saved_home_buf, "{s}", .{std.mem.span(h)}) else null;
+    const saved_home: ?[:0]const u8 = if (std.c.getenv("HOME")) |h| try std.fmt.bufPrintSentinel(&saved_home_buf, "{s}", .{std.mem.span(h)}, 0) else null;
     var home_z: [std.fs.max_path_bytes + 17]u8 = undefined;
-    _ = setenv("HOME", (try std.fmt.bufPrintZ(&home_z, "{s}", .{home})).ptr, 1);
+    _ = setenv("HOME", (try std.fmt.bufPrintSentinel(&home_z, "{s}", .{home}, 0)).ptr, 1);
     defer _ = if (saved_home) |h| setenv("HOME", h.ptr, 1) else unsetenv("HOME");
     const pane = pane_ops.activePane(fx.session);
     pane.active_term = for (pane.terms.items, 0..) |t, i| {
@@ -14933,7 +14935,7 @@ test "WT6b-2b-i 쓰기 시트를 취소한 바로 그 tick 에 같은 창의 언
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
@@ -14975,7 +14977,7 @@ test "WT6b-2a SCM 시트에 합류한 언어 서버 클라이언트는 그 시�
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
@@ -15073,9 +15075,9 @@ const LifeFx = struct {
     fn init(self: *LifeFx, allocator: std.mem.Allocator, text: []const u8, knobs: []const [2][:0]const u8) !void {
         var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
         const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
-        _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&self.fake_z, "{s}", .{fake})).ptr, 1);
+        _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&self.fake_z, "{s}", .{fake}, 0)).ptr, 1);
         self.root = self.root_buf[0..try self.fx.dir.dir.realPath(testing.io, &self.root_buf)];
-        _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintZ(&self.cfg_z, "{s}/config", .{self.root})).ptr, 1);
+        _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintSentinel(&self.cfg_z, "{s}/config", .{self.root}, 0)).ptr, 1);
         if (self.fx.session.config_path_buffer) |b| allocator.free(b);
         self.fx.session.config_path_buffer = null;
         self.fx.session.editor_lsp.auto_trust_answer = .allow;
@@ -15145,7 +15147,7 @@ fn openFdCount() usize {
 fn processGone(pid: std.c.pid_t) bool {
     var tries: usize = 0;
     while (tries < 300) : (tries += 1) {
-        if (std.c.kill(pid, @enumFromInt(0)) != 0) return true;
+        if (std.c.kill(pid, @fromBackingInt(@intCast(0))) != 0) return true;
         _ = usleep(10_000);
     }
     return false;
@@ -15157,7 +15159,7 @@ test "LSPB11 서버를 내리면 그 프로세스 그룹째 내려 서버가 띄
     var lf: LifeFx = .{ .fx = try PaneFixture.init(allocator) };
     var gc_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     var root_probe: [std.fs.max_path_bytes]u8 = undefined;
-    const gc_dir = try std.fmt.bufPrintZ(&gc_buf, "{s}", .{root_probe[0..try lf.fx.dir.dir.realPath(testing.io, &root_probe)]});
+    const gc_dir = try std.fmt.bufPrintSentinel(&gc_buf, "{s}", .{root_probe[0..try lf.fx.dir.dir.realPath(testing.io, &root_probe)]}, 0);
     const knobs = [_][2][:0]const u8{.{ "MARU_FAKE_LSP_GRANDCHILD", gc_dir }};
     defer lf.deinit(allocator, &knobs);
     try lf.init(allocator, "int x;\n", &knobs);
@@ -15305,7 +15307,7 @@ test "LSPB14 lsp.enabled 를 끄면 떠 있는 서버를 내리고 그 진단을
     var lf: LifeFx = .{ .fx = try PaneFixture.init(allocator) };
     var gc_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     var root_probe: [std.fs.max_path_bytes]u8 = undefined;
-    const gc_dir = try std.fmt.bufPrintZ(&gc_buf, "{s}", .{root_probe[0..try lf.fx.dir.dir.realPath(testing.io, &root_probe)]});
+    const gc_dir = try std.fmt.bufPrintSentinel(&gc_buf, "{s}", .{root_probe[0..try lf.fx.dir.dir.realPath(testing.io, &root_probe)]}, 0);
     const knobs = [_][2][:0]const u8{.{ "MARU_FAKE_LSP_GRANDCHILD", gc_dir }};
     defer lf.deinit(allocator, &knobs);
     try lf.init(allocator, "int x;\n", &knobs);
@@ -15566,7 +15568,7 @@ test "LSPB20 신뢰는 앱 전역이다 — 두 창이 같은 저장소를 열�
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     // 두 픽스처의 문서는 둘 다 이 저장소의 tmp 아래다 — 가장 가까운 `.git` 이 같아 **같은 저장소**다(임시 디렉터리는 서로 다르다).
     focusOnly(&a, &.{&b}); // key 창은 하나다
@@ -15664,7 +15666,7 @@ test "LSPB21 한 저장소는 한 창만, 지금 보고 있는 창이 묻는다 
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     focusOnly(&a, &.{ &b, &c });
 
@@ -15751,7 +15753,7 @@ test "LSPB22 신뢰 키는 실제 경로다 — 같은 저장소를 심링크 �
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
@@ -15865,7 +15867,7 @@ test "LSPB26 같은 root 를 다른 키로 다시 풀면(심링크 대상이 바
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
@@ -15937,7 +15939,7 @@ test "LSPB43 서버가 읽는 자리의 설정 파일 — 신뢰 시트에 한 �
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
@@ -16031,7 +16033,7 @@ test "LSPB24 「다시 묻기」는 문서가 닫힌 같은 저장소의 서버�
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
@@ -16094,7 +16096,7 @@ test "LSPB25 신뢰 키를 못 구하면(root 가 사라졌다) 묻지도 띄우
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
@@ -16127,7 +16129,7 @@ test "LSPB27 옛 키를 묻는 모달이 떠 있는 사이 그 root 의 새 키�
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
@@ -16171,7 +16173,7 @@ test "LSPB28 묻지 않는 root — 홈(dotfiles `.git`) 아래 파일과 git �
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
@@ -16186,14 +16188,14 @@ test "LSPB28 묻지 않는 root — 홈(dotfiles `.git`) 아래 파일과 git �
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/notes/s.zig", .data = "const s = 1;\n" });
     const saved_home = std.c.getenv("HOME");
     var saved_home_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const saved_home_z: ?[:0]const u8 = if (saved_home) |h| try std.fmt.bufPrintZ(&saved_home_buf, "{s}", .{std.mem.span(h)}) else null;
+    const saved_home_z: ?[:0]const u8 = if (saved_home) |h| try std.fmt.bufPrintSentinel(&saved_home_buf, "{s}", .{std.mem.span(h)}, 0) else null;
     defer if (saved_home_z) |h| {
         _ = setenv("HOME", h.ptr, 1);
     } else {
         _ = unsetenv("HOME");
     };
     var home_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("HOME", (try std.fmt.bufPrintZ(&home_z, "{s}/home", .{root})).ptr, 1);
+    _ = setenv("HOME", (try std.fmt.bufPrintSentinel(&home_z, "{s}/home", .{root}, 0)).ptr, 1);
     var p_buf: [std.fs.max_path_bytes]u8 = undefined;
     // 서버가 **없어도** 「설치」가 아니라 이유가 먼저다 — 어차피 띄우지 않을 곳에 설치를 권하지 않는다.
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", "/nonexistent-dir-for-lsp-test/clangd", 1);
@@ -16205,7 +16207,7 @@ test "LSPB28 묻지 않는 root — 홈(dotfiles `.git`) 아래 파일과 git �
     fx.session.chrome_host.notice.dismiss();
     lsp_client.pump(fx.session);
     lsp_client.pump(fx.session);
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     try testing.expect(fx.session.pending_confirm == .none);
     try testing.expect(std.mem.endsWith(u8, t_home.rt.editor_lsp_root.?, "/home"));
     // 정보 명령(계획 WT5a) — 묻지 않는 root 에서는 상태(이유)와 버전 두 줄뿐: 홈을 「저장소」라 하지 않고, 읽지 않을 셸 환경을 기다리지 않는다.
@@ -16311,7 +16313,7 @@ test "LSPB29 떠 있던 서버를 다시 띄울 때 root 의 심링크가 저장
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
@@ -16360,7 +16362,7 @@ test "LSPB30 키가 바뀌어 판정을 기다리는 클라이언트에는 이 �
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
@@ -16423,7 +16425,7 @@ test "LSPB31 「꺼짐」을 누르면 root 의 키도 다시 푼다 — 심링�
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
@@ -16434,14 +16436,14 @@ test "LSPB31 「꺼짐」을 누르면 root 의 키도 다시 푼다 — 심링�
     try fx.dir.dir.symLink(testing.io, "home", "alias", .{ .is_directory = true });
     const saved_home = std.c.getenv("HOME");
     var saved_home_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const saved_home_z: ?[:0]const u8 = if (saved_home) |h| try std.fmt.bufPrintZ(&saved_home_buf, "{s}", .{std.mem.span(h)}) else null;
+    const saved_home_z: ?[:0]const u8 = if (saved_home) |h| try std.fmt.bufPrintSentinel(&saved_home_buf, "{s}", .{std.mem.span(h)}, 0) else null;
     defer if (saved_home_z) |h| {
         _ = setenv("HOME", h.ptr, 1);
     } else {
         _ = unsetenv("HOME");
     };
     var home_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("HOME", (try std.fmt.bufPrintZ(&home_z, "{s}/home", .{root})).ptr, 1);
+    _ = setenv("HOME", (try std.fmt.bufPrintSentinel(&home_z, "{s}/home", .{root}, 0)).ptr, 1);
     lsp_client.pump(fx.session); // 픽스처의 doc.zig(바깥 저장소)는 먼저 거부로 넘긴다
     fx.session.chrome_host.confirm.dismiss();
     fx.session.dispatchChromeAction(.confirm_cancel);
@@ -16476,7 +16478,7 @@ test "LSPB32 신뢰 관리 — 목록에서 고른 저장소를 잊으면 모든
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try a.dir.dir.realPath(testing.io, &root_buf)];
@@ -16593,7 +16595,7 @@ test "LSPB33 「이 저장소」 신뢰 명령은 할 것이 없으면 상자 �
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var state_root_buf: [std.fs.max_path_bytes]u8 = undefined;
     var state_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -16666,7 +16668,7 @@ test "LSPB34 「결정 없음 — 묻기」를 누르면 묻는 동안 문서가
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var state_root_buf: [std.fs.max_path_bytes]u8 = undefined;
     var state_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -16732,14 +16734,14 @@ test "LSPB35 신뢰 목록 — 넘치면 휠·막대로 굴리고 굴린 뒤 클
     // 목록은 화면의 경로(`~/…`)를 보인다 — 홈을 픽스처 root 로 둔다.
     const saved_home = std.c.getenv("HOME");
     var saved_home_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const saved_home_z: ?[:0]const u8 = if (saved_home) |h| try std.fmt.bufPrintZ(&saved_home_buf, "{s}", .{std.mem.span(h)}) else null;
+    const saved_home_z: ?[:0]const u8 = if (saved_home) |h| try std.fmt.bufPrintSentinel(&saved_home_buf, "{s}", .{std.mem.span(h)}, 0) else null;
     defer if (saved_home_z) |h| {
         _ = setenv("HOME", h.ptr, 1);
     } else {
         _ = unsetenv("HOME");
     };
     var home_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("HOME", (try std.fmt.bufPrintZ(&home_z, "{s}", .{root})).ptr, 1);
+    _ = setenv("HOME", (try std.fmt.bufPrintSentinel(&home_z, "{s}", .{root}, 0)).ptr, 1);
     // 결정 열둘 — 한 화면(`palette.max_visible`)을 넘친다.
     const n = maru.chrome.components.palette.max_visible + 2;
     for (0..n) |i| {
@@ -16807,8 +16809,8 @@ test "LSPB35 신뢰 목록 — 넘치면 휠·막대로 굴리고 굴린 뒤 클
     try testing.expectEqual(gen, trust_store.generation()); // 거부가 새로 서지 않았다
     fx.session.chrome_host.notice.dismiss();
     // ⑺ 표 파일에 못 쓴다(읽기 전용) — 철회는 이번 실행에 먹되 「저장하지 못했다」고 말한다(다음 실행은 허용을 읽는다).
-    try fx.dir.dir.setFilePermissions(testing.io, "state/lsp-trust", @enumFromInt(0o400), .{});
-    defer fx.dir.dir.setFilePermissions(testing.io, "state/lsp-trust", @enumFromInt(0o600), .{}) catch {};
+    try fx.dir.dir.setFilePermissions(testing.io, "state/lsp-trust", @fromBackingInt(@intCast(0o400)), .{});
+    defer fx.dir.dir.setFilePermissions(testing.io, "state/lsp-trust", @fromBackingInt(@intCast(0o600)), .{}) catch {};
     fx.session.dispatchAppAction(.lsp_trusted_repositories);
     fx.session.chrome_host.trust_picker.selected = 0;
     const picked = list.items.items[list.shown.items[0]];
@@ -16830,7 +16832,7 @@ test "LSPB36 「결정 없음 — 묻기」를 누르면 묻지 않는 root 판�
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
@@ -16876,7 +16878,7 @@ test "LSPB37 신뢰 시트는 거부에 포커스를 두고 글자 단축키를 
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
@@ -16948,7 +16950,7 @@ fn writeFakeLoginShell(dir: std.Io.Dir, root: []const u8, name: []const u8, body
     try dir.writeFile(testing.io, .{ .sub_path = name, .data = try std.fmt.bufPrint(&script, "#!/bin/sh\nfor a; do cmd=$a; done\n{s}\n", .{body}) });
     const p = try std.fmt.bufPrint(out, "{s}/{s}", .{ root, name });
     var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}", .{p})).ptr, 0o755);
+    _ = std.c.chmod((try std.fmt.bufPrintSentinel(&z, "{s}", .{p}, 0)).ptr, 0o755);
     return p;
 }
 
@@ -16977,10 +16979,10 @@ const EnvGuard = struct {
     name: [:0]const u8,
     saved: ?[:0]u8,
     fn set(name: [:0]const u8, value: ?[]const u8) !EnvGuard {
-        const old: ?[:0]u8 = if (std.c.getenv(name.ptr)) |v| try testing.allocator.dupeZ(u8, std.mem.span(v)) else null;
+        const old: ?[:0]u8 = if (std.c.getenv(name.ptr)) |v| try testing.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
         if (value) |v| {
             var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-            _ = setenv(name.ptr, (try std.fmt.bufPrintZ(&z, "{s}", .{v})).ptr, 1);
+            _ = setenv(name.ptr, (try std.fmt.bufPrintSentinel(&z, "{s}", .{v}, 0)).ptr, 1);
         } else _ = unsetenv(name.ptr);
         return .{ .name = name, .saved = old };
     }
@@ -17018,7 +17020,7 @@ test "LSPE15 실행 파일의 출처는 사용자 셸 환경의 자리 변수로
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/vh/bin/zls", .data = try std.fmt.bufPrint(&wrapper_buf, "#!/bin/sh\nexec {s} \"$@\"\n", .{fake}) });
     {
         var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/home/vh/bin/zls", .{root})).ptr, 0o755);
+        _ = std.c.chmod((try std.fmt.bufPrintSentinel(&z, "{s}/home/vh/bin/zls", .{root}, 0)).ptr, 0o755);
     }
     var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
     // 처음엔 `go` 를, 두 번째(다시 읽기)엔 `go2` 를 기다린다 — 시간이 아니라 순서로.
@@ -17109,7 +17111,7 @@ test "LSPE19 저장소 셸 환경 — 신뢰한 저장소는 그 루트로 cd �
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "proj/devbin/zls", .data = try std.fmt.bufPrint(&wrapper_buf, "#!/bin/sh\n/usr/bin/env > \"$HOME/server.env\"\nexec {s} \"$@\"\n", .{fake}) });
     {
         var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/proj/devbin/zls", .{root})).ptr, 0o755);
+        _ = std.c.chmod((try std.fmt.bufPrintSentinel(&z, "{s}/proj/devbin/zls", .{root}, 0)).ptr, 0o755);
     }
     // `cd` 를 함수로 덮어 chpwd 훅을 흉내 낸다 — 그 폴더로 들어가면 변수와 PATH 를 세운다(direnv 처럼).
     var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -17200,7 +17202,7 @@ test "LSPE20 홈 환경에도 있는 서버도 신뢰한 저장소에선 그 저
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/fakebin/zls", .data = try std.fmt.bufPrint(&wrapper_buf, "#!/bin/sh\n/usr/bin/env > \"$HOME/server.env\"\nexec {s} \"$@\"\n", .{fake}) });
     {
         var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/home/fakebin/zls", .{root})).ptr, 0o755);
+        _ = std.c.chmod((try std.fmt.bufPrintSentinel(&z, "{s}/home/fakebin/zls", .{root}, 0)).ptr, 0o755);
     }
     // 그 저장소로 `cd` 하면 훅이 변수를 세운다 — 관문 파일(`$HOME/go`)을 기다린 뒤에.
     var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -17269,7 +17271,7 @@ test "LSPE21 심링크 루트의 대상이 바뀌면 그 루트의 저장소 셸
         const sub = try std.fmt.bufPrint(&sp, "home/fakebin/{s}", .{name});
         try fx.dir.dir.writeFile(testing.io, .{ .sub_path = sub, .data = try std.fmt.bufPrint(&wrapper_buf, "#!/bin/sh\n/usr/bin/env > \"$HOME/{s}.env\"\nexec {s} \"$@\"\n", .{ name, fake }) });
         var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/{s}", .{ root, sub })).ptr, 0o755);
+        _ = std.c.chmod((try std.fmt.bufPrintSentinel(&z, "{s}/{s}", .{ root, sub }, 0)).ptr, 0o755);
     }
     // 그 저장소로 `cd` 하면 훅이 그 **실제 경로**를 변수로 세운다(어느 대상의 환경인지 가른다).
     var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -17344,7 +17346,7 @@ test "LSPE16 환경 제외 목록 — gate 가 창의 설정으로 목록을 정
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/fakebin/zls", .data = try std.fmt.bufPrint(&wrapper_buf, "#!/bin/sh\n/usr/bin/env > \"$HOME/server.env\"\nexec {s} \"$@\"\n", .{fake}) });
     {
         var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/home/fakebin/zls", .{root})).ptr, 0o755);
+        _ = std.c.chmod((try std.fmt.bufPrintSentinel(&z, "{s}/home/fakebin/zls", .{root}, 0)).ptr, 0o755);
     }
     fx.session.loaded_config.config.lsp.environment_exclude = " SECRET_*, AWS_KEY ";
     var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -17544,7 +17546,7 @@ test "LSPE17 제외 목록은 앱 전역 — 세팅 화면 커밋이 전역을 �
         try testing.expectEqual(@as(usize, 0), std.mem.count(u8, src, "tool_env." ++ "setExcluded("));
     }
     // 편집 칸보다 긴 값은 편집에 들이지 않는다 — 들이면 잘린 채 저장되어 뒤쪽 이름이 서버로 간다(적대적 검증).
-    const long = "A_" ++ ("X" ** 140);
+    const long = "A_" ++ (array_repeat.repeat("X", 140));
     b.session.loaded_config.config.lsp.environment_exclude = long;
     lsp_client.setEnvironmentExclude(long);
     b.session.chrome_host.settings.selected = try Row.find(b.session, scratch.allocator());
@@ -17579,7 +17581,7 @@ test "LSPE1 사용자 셸 환경을 읽는 동안은 「없음」이 아니라 �
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/fakebin/zls", .data = try std.fmt.bufPrint(&wrapper_buf, "#!/bin/sh\n/usr/bin/env > \"$HOME/server.env\"\nexec {s} \"$@\"\n", .{fake}) });
     {
         var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/home/fakebin/zls", .{root})).ptr, 0o755);
+        _ = std.c.chmod((try std.fmt.bufPrintSentinel(&z, "{s}/home/fakebin/zls", .{root}, 0)).ptr, 0o755);
     }
     var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
     const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "while [ ! -f \"$HOME/go\" ]; do /bin/sleep 0.02; done\nexport PATH=\"$HOME/fakebin:$PATH\"\nexec /bin/sh -c \"$cmd\"", &shell_buf);
@@ -17828,7 +17830,7 @@ test "LSPE9 후보가 여럿인 언어(TS·JS) — 셸 환경을 읽는 동안 �
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/fakebin/typescript-language-server", .data = "#!/bin/sh\nexit 0\n" });
     {
         var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/home/fakebin/typescript-language-server", .{root})).ptr, 0o755);
+        _ = std.c.chmod((try std.fmt.bufPrintSentinel(&z, "{s}/home/fakebin/typescript-language-server", .{root}, 0)).ptr, 0o755);
     }
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "proj/t.ts", .data = "const a = 1;\n" });
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "proj/u.js", .data = "const b = 2;\n" });
@@ -17882,7 +17884,7 @@ test "LSPE10 다시 읽는 동안 처음 보는 문법의 서버는 이미 담�
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/fakebin/typescript-language-server", .data = "#!/bin/sh\nexit 0\n" });
     {
         var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/home/fakebin/typescript-language-server", .{root})).ptr, 0o755);
+        _ = std.c.chmod((try std.fmt.bufPrintSentinel(&z, "{s}/home/fakebin/typescript-language-server", .{root}, 0)).ptr, 0o755);
     }
     // 처음은 바로 담고, 다시 읽기는 판정자가 놓아 줄 때까지 붙잡힌다.
     var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -18044,7 +18046,7 @@ test "LSPE13 서버를 설치하고 셸 환경을 다시 읽는 사이 다른 �
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/fakebin/typescript-language-server", .data = "#!/bin/sh\nexit 0\n" });
     {
         var z: [std.fs.max_path_bytes + 1]u8 = undefined;
-        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/home/fakebin/typescript-language-server", .{root})).ptr, 0o755);
+        _ = std.c.chmod((try std.fmt.bufPrintSentinel(&z, "{s}/home/fakebin/typescript-language-server", .{root}, 0)).ptr, 0o755);
     }
     lsp_client.reloadShellEnvironment(fx.session);
     a_term = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/proj/a.ts", .{root}));
@@ -18286,7 +18288,7 @@ test "LSPB23 신뢰 부여는 사용자의 답으로만 — 표에 쓰는 자리
     // 컨트롤 플레인(WT4b)의 wire 는 조회·철회·잊기와 감사 기록 조회(TA2 — 읽기만) 넷뿐이고, ABI 는 표를 모른 채 편집기 LSP 모듈의 한
     // 자리로 넘긴다(즉시 답 하나 — 확인 재구동 갈래는 닿지 않아 표를 안 고치고 unauthorized 로 닫는다). 기록을 고치는 길도 없다 — 기록에
     // 닿는 것은 읽기(`readLog`) 하나다.
-    try testing.expectEqual(@as(usize, 4), @typeInfo(maru.session.control_lsp_trust.Op).@"enum".fields.len);
+    try testing.expectEqual(@as(usize, 4), @import("type_info_fields").enumFields(maru.session.control_lsp_trust.Op).len);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "trust_store.readLog("));
     try testing.expectEqual(@as(usize, 0), std.mem.count(u8, lsp_src, "appendLog"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, abi_src, "editor_lsp_ops.controlTrust("));
@@ -18356,7 +18358,7 @@ fn controlTrustCall(session: ?*AppSession, method: []const u8, params_json: ?[]c
     defer pm.deinit();
     const r = pm.message.response;
     if (r.err) |e| {
-        if (e.code == @intFromEnum(maru.session.control_plane.ErrorCode.invalid_params)) return error.InvalidParams;
+        if (e.code == @backingInt(maru.session.control_plane.ErrorCode.invalid_params)) return error.InvalidParams;
         return error.RpcError;
     }
     // 결과를 소유 사본으로 돌려준다(응답 arena 는 여기서 풀린다).
@@ -18439,7 +18441,7 @@ test "WT7b 원격 신뢰 묻기 — 원격 목록의 도크 줄을 누르면 `�
     trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
     defer trust_store.setDirForTest(null);
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root})).ptr, 1);
+    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
     fx.session.config_path_buffer = null;
@@ -18630,16 +18632,16 @@ test "WT7c-1 원격 쓰기도 같은 관문 — 루트·홈을 모르면 실행�
     const ssh_path = try std.fmt.bufPrint(&ssh_buf, "{s}/ssh", .{bin});
     try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = ssh_path, .data = script });
     var ssh_z: [129]u8 = undefined;
-    if (std.c.chmod((try std.fmt.bufPrintZ(&ssh_z, "{s}", .{ssh_path})).ptr, 0o755) != 0) return error.SkipZigTest;
+    if (std.c.chmod((try std.fmt.bufPrintSentinel(&ssh_z, "{s}", .{ssh_path}, 0)).ptr, 0o755) != 0) return error.SkipZigTest;
     var saved_home_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const saved_home: ?[:0]const u8 = if (std.c.getenv("HOME")) |h| try std.fmt.bufPrintZ(&saved_home_buf, "{s}", .{std.mem.span(h)}) else null;
+    const saved_home: ?[:0]const u8 = if (std.c.getenv("HOME")) |h| try std.fmt.bufPrintSentinel(&saved_home_buf, "{s}", .{std.mem.span(h)}, 0) else null;
     var home_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("HOME", (try std.fmt.bufPrintZ(&home_z, "{s}", .{home})).ptr, 1);
+    _ = setenv("HOME", (try std.fmt.bufPrintSentinel(&home_z, "{s}", .{home}, 0)).ptr, 1);
     defer _ = if (saved_home) |h| setenv("HOME", h.ptr, 1) else unsetenv("HOME");
-    const saved_path: ?[:0]u8 = if (std.c.getenv("PATH")) |p| try allocator.dupeZ(u8, std.mem.span(p)) else null;
+    const saved_path: ?[:0]u8 = if (std.c.getenv("PATH")) |p| try allocator.dupeSentinel(u8, std.mem.span(p), 0) else null;
     defer if (saved_path) |p| allocator.free(p);
     var path_z: [8 * std.fs.max_path_bytes]u8 = undefined;
-    _ = setenv("PATH", (try std.fmt.bufPrintZ(&path_z, "{s}:{s}", .{ bin, if (saved_path) |p| p else "/usr/bin:/bin" })).ptr, 1);
+    _ = setenv("PATH", (try std.fmt.bufPrintSentinel(&path_z, "{s}:{s}", .{ bin, if (saved_path) |p| p else "/usr/bin:/bin" }, 0)).ptr, 1);
     defer if (saved_path) |p| {
         _ = setenv("PATH", p.ptr, 1);
     };
@@ -18661,7 +18663,7 @@ test "WT7c-1 원격 쓰기도 같은 관문 — 루트·홈을 모르면 실행�
     trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
     defer trust_store.setDirForTest(null);
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root})).ptr, 1);
+    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
     fx.session.config_path_buffer = null;
@@ -18891,16 +18893,16 @@ test "LSPB38 컨트롤 플레인의 신뢰 조회·철회·잊기(계획 WT4b) �
     };
     var tmpl_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     const tmpdir_env = std.mem.trimEnd(u8, if (std.c.getenv("TMPDIR")) |t| std.mem.span(t) else "/tmp", "/");
-    const tmpl = try std.fmt.bufPrintZ(&tmpl_buf, "{s}/maru-wt4b-XXXXXX", .{tmpdir_env});
+    const tmpl = try std.fmt.bufPrintSentinel(&tmpl_buf, "{s}/maru-wt4b-XXXXXX", .{tmpdir_env}, 0);
     const outside_dir = std.mem.span(Tmp.mkdtemp(tmpl.ptr) orelse return error.NoTmpDir);
     defer _ = std.c.rmdir(outside_dir.ptr); // 아래 단언이 실패해도 남지 않게 만든 즉시 정리를 건다(링크가 먼저 풀린다 — defer 는 역순)
     var link_buf: [std.fs.max_path_bytes]u8 = undefined;
     const link = try std.fmt.bufPrint(&link_buf, "{s}/repo", .{outside_dir});
     var link_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const lz = try std.fmt.bufPrintZ(&link_z, "{s}", .{link});
+    const lz = try std.fmt.bufPrintSentinel(&link_z, "{s}", .{link}, 0);
     {
         var tz: [std.fs.max_path_bytes + 1]u8 = undefined;
-        try testing.expectEqual(@as(c_int, 0), std.c.symlink((try std.fmt.bufPrintZ(&tz, "{s}", .{key.path})).ptr, lz.ptr));
+        try testing.expectEqual(@as(c_int, 0), std.c.symlink((try std.fmt.bufPrintSentinel(&tz, "{s}", .{key.path}, 0)).ptr, lz.ptr));
     }
     defer _ = std.c.unlink(lz.ptr);
     {
@@ -19399,7 +19401,7 @@ test "LSPB40 「Language Server: Show Server Info」 — 상태·서버가 알�
     // ⑶d 알림 상한을 넘는 실행 파일 경로(한글) — 글자 경계에서 자르고 「…」로 잘렸음을 보인다(조용히 끊지 않는다). 경로의 개행(폴더
     // 이름에 들 수 있다)은 공백이라 줄을 늘리지 못한다.
     {
-        var long = ("/x\ny" ++ ("가" ** 300)).*;
+        var long = ("/x\ny" ++ (array_repeat.repeat("가", 300))).*;
         const saved = c.launched_path;
         c.launched_path = &long;
         defer c.launched_path = saved;
@@ -19417,7 +19419,7 @@ test "LSPB40 「Language Server: Show Server Info」 — 상태·서버가 알�
     {
         var name_env = try EnvGuard.set("MARU_FAKE_LSP_SERVERINFO_NAME", "evil\nRepository: ~/x (Allowed)");
         defer name_env.restore();
-        var ver_env = try EnvGuard.set("MARU_FAKE_LSP_SERVERINFO_VERSION", "v" ** 200);
+        var ver_env = try EnvGuard.set("MARU_FAKE_LSP_SERVERINFO_VERSION", array_repeat.repeat("v", 200));
         defer ver_env.restore();
         _ = std.c.kill((c.proc orelse return error.NoProc).pid, std.c.SIG.KILL);
         try testing.expect(waitPhase(&fx, .restarting));
@@ -19614,13 +19616,13 @@ test "HOVB1 호버 박스 — 포인터가 낱말에 머물면 지연 뒤 요청
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -19982,7 +19984,7 @@ test "GOTO2 정의로 이동 — utf-16 서버에는 character 를 utf-16 단위
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     _ = setenv("MARU_FAKE_LSP_UTF16", "1", 1);
@@ -19990,7 +19992,7 @@ test "GOTO2 정의로 이동 — utf-16 서버에는 character 를 utf-16 단위
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -20045,13 +20047,13 @@ test "REF1 참조 피커 — ⇧F12 가 caret 자리의 참조를 묻고 응답�
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -20336,13 +20338,13 @@ test "LATE2 참조 응답이 오기 전에 사용자가 오버레이를 열면 �
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -21434,7 +21436,7 @@ test "SSEL15 선택 확장의 1층은 여는 파싱이 끊긴 동안 트리를 �
     const allocator = testing.allocator;
     _ = setenv("MARU_FAKE_LSP_NOSRCAP", "1", 1);
     defer _ = unsetenv("MARU_FAKE_LSP_NOSRCAP");
-    var f = (try SmtFixture.open(allocator, "n6.c", smart_src ++ "int z;\n" ** 400)) orelse return error.SkipZigTest;
+    var f = (try SmtFixture.open(allocator, "n6.c", smart_src ++ array_repeat.repeat("int z;\n", 400))) orelse return error.SkipZigTest;
     defer f.close(allocator);
     const term = f.term;
     try testing.expect(f.ready());
@@ -21588,7 +21590,7 @@ test "SSEL19 선택 확장은 primary caret 을 드러낸다 — 화면 밖 줄�
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
-    const term = try undoFixture(&fx, allocator, "sr.txt", "alpha beta\n" ** 300);
+    const term = try undoFixture(&fx, allocator, "sr.txt", array_repeat.repeat("alpha beta\n", 300));
     fx.session.surface_initialized = true;
     fx.session.backing_width_px = 1200;
     fx.session.backing_height_px = 800;
@@ -21664,7 +21666,7 @@ fn paneRowText(self: *AppSession, term: *Term, row: u16, buf: []u8) ![]const u8 
 
 /// sticky 판정자 문서 — `A`(0~103) 안에 `f`(1~102), 본문 100 줄. **화면보다 길어야 한다** — 다 들어가면 스크롤 상한이 0 이라
 /// `setEditorTop` 이 프레임에서 0 으로 되돌아가, 0·1 행이 머리줄이 아니라 **본문 1·2 줄**로 같은 글자를 보여 판정자가 헛초록이었다(처음 판).
-const sticky_src = "const A = struct {\n    pub fn f() void {\n" ++ ("        _ = 1;\n" ** 100) ++ "    }\n};\n";
+const sticky_src = "const A = struct {\n    pub fn f() void {\n" ++ (array_repeat.repeat("        _ = 1;\n", 100)) ++ "    }\n};\n";
 
 test "STK7 sticky scroll 1층 — 스크롤하면 바깥부터 머리줄이 실제로 그려지고, caret 을 덮을 칸부터 걷히며, 고정 행을 누르면 그 줄로 가 자기 칸에 온다; 호버·⌘클릭은 고정 행에서 안 뜨고 설정으로 끈다 (제품 경계, §4.1i)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -21789,7 +21791,7 @@ test "STK8 sticky scroll — 심볼이 없으면 접힘 범위(들여쓰기)로 
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
     // 접힘 스코프는 머리 0 · 숨는 마지막 1..100 → 끝 줄 101(`end` — 닫는 줄, VS Code 와 같다). 뒤에 평문 100 줄을 둬 끝 근처까지 굴릴 수 있게 한다.
-    const term = try undoFixture(&fx, allocator, "st.txt", "section:\n" ++ ("  item\n" ** 100) ++ "end\n" ++ ("tail\n" ** 100));
+    const term = try undoFixture(&fx, allocator, "st.txt", "section:\n" ++ (array_repeat.repeat("  item\n", 100)) ++ "end\n" ++ (array_repeat.repeat("tail\n", 100)));
     fx.session.surface_initialized = true;
     fx.session.backing_width_px = 1200;
     fx.session.backing_height_px = 800;
@@ -21865,7 +21867,7 @@ test "STK14 ⌘클릭은 고정 행에서 정의로 가지 않는다 — 흘려�
     const allocator = testing.allocator;
     _ = setenv("MARU_FAKE_LSP_NOSYMCAP", "1", 1);
     defer _ = unsetenv("MARU_FAKE_LSP_NOSYMCAP");
-    var f = (try SmtFixture.open(allocator, "sd.c", "int f(int a) {\n" ++ ("  a = a + 1;\n" ** 100) ++ "}\n")) orelse return error.SkipZigTest;
+    var f = (try SmtFixture.open(allocator, "sd.c", "int f(int a) {\n" ++ (array_repeat.repeat("  a = a + 1;\n", 100)) ++ "}\n")) orelse return error.SkipZigTest;
     defer f.close(allocator);
     try testing.expect(f.ready());
     const s = f.fx.session;
@@ -22083,13 +22085,13 @@ test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목�
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -22235,13 +22237,13 @@ test "SIG1 시그니처 힌트 — `(` 를 치면 열리고 첫 파라미터가 
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -22456,13 +22458,13 @@ test "FMT1 문서 포맷 — ⇧⌥F 로 두 줄이 한 응답에 바뀌고 되�
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -22620,7 +22622,7 @@ const test_formatter_timeout_ms: u32 = 20_000;
 fn installFakePrettier(fx: *PaneFixture) !void {
     try fx.dir.dir.createDirPath(testing.io, "node_modules/.bin");
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "node_modules/.bin/prettier", .data = fake_prettier_script });
-    try fx.dir.dir.setFilePermissions(testing.io, "node_modules/.bin/prettier", @enumFromInt(0o755), .{});
+    try fx.dir.dir.setFilePermissions(testing.io, "node_modules/.bin/prettier", @fromBackingInt(@intCast(0o755)), .{});
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = ".prettierrc", .data = "{}\n" });
 }
 
@@ -22947,7 +22949,7 @@ const fake_formatter_script =
 fn installFakeFormatter(fx: *PaneFixture, sub_path: []const u8) !void {
     if (std.fs.path.dirname(sub_path)) |d| try fx.dir.dir.createDirPath(testing.io, d);
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = sub_path, .data = fake_formatter_script });
-    try fx.dir.dir.setFilePermissions(testing.io, sub_path, @enumFromInt(0o755), .{});
+    try fx.dir.dir.setFilePermissions(testing.io, sub_path, @fromBackingInt(@intCast(0o755)), .{});
 }
 
 test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이면 고르지 않고 알리며(⌘S 는 문서마다 한 번) 설정으로 고르면 그것(Biome argv), Python 은 포맷 설정의 ruff 를 .venv 에서, 언어 서버가 못 하면 zig fmt·rustfmt(Cargo edition)를 PATH 에서, 사용자 명령은 {path} 를 바꿔 PATH 에서" {
@@ -23166,7 +23168,7 @@ test "ASB1 보조 언어 서버 (tooling §8.2u) — 설정이 있는 문서에�
         const bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, fake, allocator, .limited(64 << 20));
         defer allocator.free(bytes);
         try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "pkg/.venv/bin/ruff", .data = bytes });
-        try f.fx.dir.dir.setFilePermissions(testing.io, "pkg/.venv/bin/ruff", @enumFromInt(0o755), .{});
+        try f.fx.dir.dir.setFilePermissions(testing.io, "pkg/.venv/bin/ruff", @fromBackingInt(@intCast(0o755)), .{});
     }
     try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "pkg/b.py", .data = "import os\nprint(x)\nMUTEHOVER\n" });
     var b_path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -23273,7 +23275,7 @@ test "ASB2 보조 언어 서버 (tooling §8.2u) — 저장소 밖 문서의 roo
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0)).ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
@@ -23502,7 +23504,7 @@ fn installFakeLspCopy(fx: *PaneFixture, sub_path: []const u8) !void {
     defer testing.allocator.free(bytes);
     if (std.fs.path.dirname(sub_path)) |d| try fx.dir.dir.createDirPath(testing.io, d);
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = sub_path, .data = bytes });
-    try fx.dir.dir.setFilePermissions(testing.io, sub_path, @enumFromInt(0o755), .{});
+    try fx.dir.dir.setFilePermissions(testing.io, sub_path, @fromBackingInt(@intCast(0o755)), .{});
 }
 
 test "ASB4 보조 언어 서버 ESLint (tooling §8.2u) — 설정이 있으면 저장소의 ESLint 가 떠 workspace/configuration 에 고정 설정으로 답하고, 문서를 보낼 때마다 pull 진단을 물어 그 칸에 세우며(빈 목록·refresh·문서마다 languageId), ⌘.·저장 시 fixAll 도 그 서버에서" {
@@ -24318,7 +24320,7 @@ test "FMT2 문서 포맷 — 서버가 documentFormattingProvider 를 안 내면
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     _ = setenv("MARU_FAKE_LSP_NOFMTCAP", "1", 1);
@@ -24326,7 +24328,7 @@ test "FMT2 문서 포맷 — 서버가 documentFormattingProvider 를 안 내면
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -24371,10 +24373,10 @@ const RenameFx = struct {
     fn init(self: *RenameFx, allocator: std.mem.Allocator) !void {
         var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
         const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
-        const fz = try std.fmt.bufPrintZ(&self.fake_z, "{s}", .{fake});
+        const fz = try std.fmt.bufPrintSentinel(&self.fake_z, "{s}", .{fake}, 0);
         _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
         self.root = self.root_buf[0..try self.fx.dir.dir.realPath(testing.io, &self.root_buf)];
-        const cz = try std.fmt.bufPrintZ(&self.cfg_z, "{s}/config", .{self.root});
+        const cz = try std.fmt.bufPrintSentinel(&self.cfg_z, "{s}/config", .{self.root}, 0);
         _ = setenv("MARU_CONFIG", cz.ptr, 1);
         if (self.fx.session.config_path_buffer) |b| allocator.free(b);
         self.fx.session.config_path_buffer = null;
@@ -24734,13 +24736,13 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -25076,13 +25078,13 @@ test "CMP2 자동완성 — 서버가 completionProvider 를 안 내면 타이�
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -25291,7 +25293,7 @@ test "CMP7 자동완성 ①-e — 제품 행이 일치 자리를 행마다 싣�
     {
         var prep = (try s.buildChromeOverlayPrep()) orelse return error.SuggestNotDrawn;
         defer prep.deinit(allocator);
-        const icon_cp: u21 = @intFromEnum(maru.icons.Icon.kind_word);
+        const icon_cp: u21 = @backingInt(maru.icons.Icon.kind_word);
         var icon_cells: usize = 0;
         for (prep.dl.cells) |c| if (c.codepoint == icon_cp) {
             try testing.expectEqual(@as(u2, 2), c.width);
@@ -25450,13 +25452,13 @@ test "CMP10 자동완성 ①-f — 서버 + 멀티 커서: 기다리는 동안·
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -25619,13 +25621,13 @@ test "CMP11 자동완성 ①-f — 응답 전에 같은 줄 앞을 (치지 않�
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -25697,13 +25699,13 @@ test "CMP12 자동완성 ①-f — 버린 응답은 같은 트리거로 다시 �
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -25816,13 +25818,13 @@ test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(add
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -26014,13 +26016,13 @@ test "CMP5 자동완성 ①-c — labelDetails: 행에 꼬리(label_detail)가 �
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -26118,11 +26120,11 @@ const SmtFixture = struct {
         if (own_repo) try out.fx.dir.dir.createDirPath(testing.io, ".git");
         var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
         const fake = (try fakeLspAbs(&abs_buf)) orelse return null;
-        const fz = try std.fmt.bufPrintZ(&out.fake_z, "{s}", .{fake});
+        const fz = try std.fmt.bufPrintSentinel(&out.fake_z, "{s}", .{fake}, 0);
         _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
         out.root_len = try out.fx.dir.dir.realPath(testing.io, &out.root_buf);
         const root = out.root_buf[0..out.root_len];
-        const cz = try std.fmt.bufPrintZ(&out.cfg_z, "{s}/config", .{root});
+        const cz = try std.fmt.bufPrintSentinel(&out.cfg_z, "{s}/config", .{root}, 0);
         _ = setenv("MARU_CONFIG", cz.ptr, 1);
         if (out.fx.session.config_path_buffer) |b| allocator.free(b);
         out.fx.session.config_path_buffer = null;
@@ -26834,13 +26836,13 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -27124,13 +27126,13 @@ test "CA1 code action — ⌘. 로 진단 자리의 fix 와 lazy 가 메뉴에(c
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -27359,13 +27361,13 @@ test "LATE1 빠른 수정 응답이 오기 전에 사용자가 오버레이를 �
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -27447,13 +27449,13 @@ test "CA2 code action — 서버가 codeActionProvider 를 안 내면 ⌘. 가 �
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| allocator.free(b);
@@ -28299,7 +28301,7 @@ const PaneFixture = struct {
             .cols = 80,
             .rows = 24,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+            .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
         });
         errdefer session.deinit();
         session.cell_width_px = 8;
@@ -28793,7 +28795,7 @@ test "쓸 수 없는 파일도 열리고 읽기 전용으로 표시된다" {
     const path = try std.fs.path.join(testing.allocator, &.{ root, "ro.txt" });
     defer testing.allocator.free(path);
 
-    const pathz = try testing.allocator.dupeZ(u8, path);
+    const pathz = try testing.allocator.dupeSentinel(u8, path, 0);
     defer testing.allocator.free(pathz);
     if (std.c.chmod(pathz.ptr, 0o444) != 0) return error.SkipZigTest;
     // **root는 W_OK를 통과한다.** 그 환경에서는 이 테스트가 증명할 것이 없으므로 비켜난다.
@@ -29364,7 +29366,7 @@ test "파일 열기가 어디서 할당에 실패해도 새지 않는다 — ini
             .cols = 80,
             .rows = 24,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+            .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
         });
         defer session.deinit();
         const before_open = probe.allocations;
@@ -29408,7 +29410,7 @@ test "파일 열기가 어디서 할당에 실패해도 새지 않는다 — ini
             .cols = 80,
             .rows = 24,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+            .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
         });
         defer session.deinit(); // 누수·이중 해제는 backing(=testing.allocator)이 잡는다
 
@@ -30867,7 +30869,7 @@ test "[측정] 드래그를 놓는 순간 — 점진 계수가 그 값을 프레
 
         const lines = try allocator.alloc([]const u8, n);
         defer allocator.free(lines);
-        for (lines) |*l| l.* = "const x = 1; // " ++ ("긴 줄이라 랩이 일어난다 " ** 6);
+        for (lines) |*l| l.* = "const x = 1; // " ++ (array_repeat.repeat("긴 줄이라 랩이 일어난다 ", 6));
         fx.term.rt.editor_lines = lines;
         fx.term.rt.editor_wrap = true;
         fx.term.rt.editor_max_cols = 0;
@@ -31012,7 +31014,7 @@ test "가로 막대를 끌면 열이 움직인다 — 세로와 축이 다르다
     const saved = fx.term.rt.editor_lines;
     defer fx.term.rt.editor_lines = saved;
     // 랩을 끄고 아주 긴 줄을 준다 — 그래야 가로 막대가 선다(랩이면 축 자체가 없다).
-    const wide = "const value = compute(index); // " ++ ("가로로 아주 긴 줄이다 " ** 20);
+    const wide = "const value = compute(index); // " ++ (array_repeat.repeat("가로로 아주 긴 줄이다 ", 20));
     const lines = try allocator.alloc([]const u8, 40);
     defer allocator.free(lines);
     for (lines) |*l| l.* = wide;
@@ -31064,7 +31066,7 @@ test "[측정] 폭을 라이브로 끄는 드래그 — 캐시가 매 프레임 
 
         const lines = try allocator.alloc([]const u8, n);
         defer allocator.free(lines);
-        for (lines) |*l| l.* = "const x = 1; // " ++ ("긴 줄이라 랩이 일어난다 " ** 6);
+        for (lines) |*l| l.* = "const x = 1; // " ++ (array_repeat.repeat("긴 줄이라 랩이 일어난다 ", 6));
         fx.term.rt.editor_lines = lines;
         fx.term.rt.editor_wrap = true;
         fx.term.rt.editor_max_cols = 0;
@@ -31130,7 +31132,7 @@ test "[측정] 랩 켠 문서의 프레임 비용 — 계수 캐시가 그것을
         const lines = try allocator.alloc([]const u8, n);
         defer allocator.free(lines);
         // 랩이 실제로 일어나게 본문보다 긴 줄을 준다(짧으면 조각이 하나라 셈이 싸다).
-        for (lines) |*l| l.* = "const x = 1; // " ++ ("긴 줄이라 랩이 일어난다 " ** 6);
+        for (lines) |*l| l.* = "const x = 1; // " ++ (array_repeat.repeat("긴 줄이라 랩이 일어난다 ", 6));
         fx.term.rt.editor_lines = lines;
         fx.term.rt.editor_wrap = true;
         fx.term.rt.editor_max_cols = 0;
@@ -31263,7 +31265,7 @@ test "[측정] 큰 파일을 여는 값 — 가장 긴 줄 세기가 열기에 �
     const t1 = monotonicMsForTest();
     const cpu = threadCpuMsForTest() - c0;
     const steps = chrome_editor.content.total_steps;
-    const line_ms: u64 = if (builtin.mode == .Debug) 2000 else 300;
+    const line_ms: u64 = if (builtin.mode == .debug) 2000 else 300;
     // 단언보다 **먼저** 찍는다 — 빨개진 CI 로그에서 그 값이 있어야 어느 판정이 왜 걸렸는지 읽힌다.
     std.debug.print("\n[측정] {d}줄 열기의 가장 긴 줄 세기: {d}ms (CPU {d}ms, 선 {d}ms, 걸음 {d}/{d}, max_cols={d})\n", .{ n, t1 - t0, cpu, line_ms, steps, want_steps, fx.term.rt.editor_max_cols });
     try testing.expectEqual(longest_cols, fx.term.rt.editor_max_cols); // 답이 맞아야 걸음 수가 뜻을 갖는다
@@ -32479,7 +32481,7 @@ test "텍스트 파일이 편집기 Term으로 열린다 — 되돌리면 지금
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -32528,7 +32530,7 @@ test "init이 MARU_NATIVE_TEXT를 읽는다 — 안 읽으면 훅이 아무 일�
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
     try testing.expect(session.native_text);
@@ -33676,7 +33678,7 @@ test "TAB1: config의 탭 폭이 문서를 열 때와 재적용 때 편집기에
         try fx.dir.dir.writeFile(io, .{ .sub_path = "cfg.toml", .data = "editor.tab-width = 8\n" });
         const cfg = try std.fs.path.join(allocator, &.{ root, "cfg.toml" });
         defer allocator.free(cfg);
-        const cfg_z = try allocator.dupeZ(u8, cfg);
+        const cfg_z = try allocator.dupeSentinel(u8, cfg, 0);
         defer allocator.free(cfg_z);
 
         const had = test_env.Saved.save("MARU_CONFIG");
@@ -37383,7 +37385,7 @@ fn colorDigest(self: *AppSession, term: *Term, out: *std.ArrayList(u8), allocato
     for (rows, 0..) |row, i| {
         var buf: [64]u8 = undefined;
         try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d}:", .{i}));
-        for (row) |sp| try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d},{d},{d};", .{ sp.start_col, sp.end_col, @intFromEnum(sp.role) }));
+        for (row) |sp| try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d},{d},{d};", .{ sp.start_col, sp.end_col, @backingInt(sp.role) }));
         try out.append(allocator, '\n');
     }
 }
@@ -39249,7 +39251,7 @@ test "DHS11 줄 끝 너머 몫은 설정이 정한다 — 키·기본값·끄기
     try fx.dir.dir.writeFile(io, .{ .sub_path = "cfg11.toml", .data = "editor.scroll-beyond-last-column = 9\n" });
     const cfg = try std.fs.path.join(allocator, &.{ root, "cfg11.toml" });
     defer allocator.free(cfg);
-    const cfg_z = try allocator.dupeZ(u8, cfg);
+    const cfg_z = try allocator.dupeSentinel(u8, cfg, 0);
     defer allocator.free(cfg_z);
     const had = test_env.Saved.save("MARU_CONFIG");
     defer had.restore();
@@ -40180,7 +40182,7 @@ test "DIRTY4 저장이 실패하면 dirty가 남는다 — 실패를 성공으�
     {
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
         const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
-        const root_z = try allocator.dupeZ(u8, root);
+        const root_z = try allocator.dupeSentinel(u8, root, 0);
         defer allocator.free(root_z);
         if (std.c.chmod(root_z, 0o500) != 0) return error.SkipZigTest; // 권한을 못 바꾸면 이 축을 못 잰다
         defer _ = std.c.chmod(root_z, 0o700); // 픽스처 정리가 지울 수 있게 되돌린다
@@ -43934,7 +43936,7 @@ test "TIG6 질의는 활성 탭·pane 의 Term 을 본다 — 첫 번째가 아�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
     // split 은 backing 이 잡혀야 의미 있다(termRect 입력) — 기존 split 판정자와 같은 규율.
@@ -44638,7 +44640,7 @@ test "EM7 랩에서도 화면 밖 매치로 굴러간다 — 시각 행과 논�
     defer doc.deinit(allocator);
     for (0..60) |i| {
         var buf: [400]u8 = undefined;
-        const filler = "wrap me " ** 20; // 160자 — 본문 폭보다 훨씬 길다
+        const filler = array_repeat.repeat("wrap me ", 20); // 160자 — 본문 폭보다 훨씬 길다
         try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d} {s}\n", .{ i, filler }));
     }
     try doc.appendSlice(allocator, "needle at the end\n");
@@ -44682,7 +44684,7 @@ test "EM8 매치로 점프하면 조각 offset을 지운다 (§4.1d)" {
     defer fx.deinit(allocator);
     var doc: std.ArrayList(u8) = .empty;
     defer doc.deinit(allocator);
-    for (0..40) |_| try doc.appendSlice(allocator, "long " ** 60 ++ "\n");
+    for (0..40) |_| try doc.appendSlice(allocator, array_repeat.repeat("long ", 60) ++ "\n");
     try doc.appendSlice(allocator, "needle\n");
     try fx.dir.dir.writeFile(io, .{ .sub_path = "p.txt", .data = doc.items });
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -44822,7 +44824,7 @@ test "EM10 랩에서 가시성 판정도 두 축을 안 섞는다 — EM7이 못
     defer doc.deinit(allocator);
     for (0..80) |i| {
         var buf: [400]u8 = undefined;
-        const filler = "wrap me " ** 20;
+        const filler = array_repeat.repeat("wrap me ", 20);
         try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d} {s}\n", .{ i, filler }));
     }
     try fx.dir.dir.writeFile(io, .{ .sub_path = "b.txt", .data = doc.items });
@@ -44919,7 +44921,7 @@ test "EM12 조각 축 스냅숏 낡음도 잡는다 — 긴 줄 안을 굴린 �
     // 아래 전제(줄 30에서 그렸다)가 성립하지 않는다.
     for (0..200) |i| {
         var buf: [800]u8 = undefined;
-        const filler = "long " ** 100; // 500자 — 한 줄이 여러 조각
+        const filler = array_repeat.repeat("long ", 100); // 500자 — 한 줄이 여러 조각
         try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d} {s}\n", .{ i, filler }));
     }
     try fx.dir.dir.writeFile(io, .{ .sub_path = "pc.txt", .data = doc.items });
@@ -44986,7 +44988,7 @@ test "EM13 배치가 바뀌면 스냅숏을 안 믿는다 — 랩을 켜고 프�
     defer doc.deinit(allocator);
     for (0..40) |i| {
         var buf: [400]u8 = undefined;
-        const filler = "wrap me " ** 20;
+        const filler = array_repeat.repeat("wrap me ", 20);
         try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d} {s}\n", .{ i, filler }));
     }
     try fx.dir.dir.writeFile(io, .{ .sub_path = "wr.txt", .data = doc.items });
@@ -45491,7 +45493,7 @@ test "ES41 여는 파싱이 끊긴 채 편집이 오면 처음부터 다시 판�
     defer fx.deinit(allocator);
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
-    _ = insertText(fx.session, fx.term, "pub fn f() void { const s = \"abc\"; _ = s; }\n" ** 200);
+    _ = insertText(fx.session, fx.term, array_repeat.repeat("pub fn f() void { const s = \"abc\"; _ = s; }\n", 200));
     const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     // 여는 경로를 **1ns 예산**으로 다시 태운다 — 끊긴 상태를 기계 속도와 무관하게 만든다(`openBudgeted` 가 판정자에 여는 문).
     fx.term.rt.editor_syntax.deinit(allocator);
@@ -45545,7 +45547,7 @@ test "ES42 여는 파싱이 끊긴 채 범위를 모르는 편집이 오면 — 
     defer fx.deinit(allocator);
 
     fx.term.rt.editor_selection = editor_selection.Selection.at(0);
-    _ = insertText(fx.session, fx.term, "pub fn f() void { const s = \"abc\"; _ = s; }\n" ** 200);
+    _ = insertText(fx.session, fx.term, array_repeat.repeat("pub fn f() void { const s = \"abc\"; _ = s; }\n", 200));
     const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.openBudgeted(doc.file.content, .zig, 1);
@@ -45608,7 +45610,7 @@ test "ES21 큰 파일은 여는 프레임에 다 안 판다 — 이어 파고 �
     // 6,000 줄을 **한 번에** 넣는다. 한 줄씩 6,000 번 넣던 때는 증분 경로가 매번 돌아 이 test 하나가
     // 45 초(CI)였다 — 「예산을 한 번에 못 끝낼 만큼 조밀하다」는 조건에 몇 번에 넣었는지는 없다.
     const dense_line = "pub fn f() void { const s = \"abc\"; _ = s; }\n";
-    _ = insertText(fx.session, fx.term, dense_line ** 6000);
+    _ = insertText(fx.session, fx.term, array_repeat.repeat(dense_line, 6000));
 
     // 여는 경로를 다시 태운다 — 위 삽입은 증분 경로라 열기와 다르다.
     const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
@@ -45652,7 +45654,7 @@ test "ES22 파싱이 남아 있으면 다음 프레임을 부른다 — idle ski
     // 6,000 줄을 **한 번에** 넣는다. 한 줄씩 6,000 번 넣던 때는 증분 경로가 매번 돌아 이 test 하나가
     // 45 초(CI)였다 — 「예산을 한 번에 못 끝낼 만큼 조밀하다」는 조건에 몇 번에 넣었는지는 없다.
     const dense_line = "pub fn f() void { const s = \"abc\"; _ = s; }\n";
-    _ = insertText(fx.session, fx.term, dense_line ** 6000);
+    _ = insertText(fx.session, fx.term, array_repeat.repeat(dense_line, 6000));
     const doc = fx.term.rt.editorDocument().opened orelse return error.NoDoc;
     fx.term.rt.editor_syntax.deinit(allocator);
     fx.term.rt.editor_syntax = syntax_color.open(doc.file.content, .zig);
@@ -49504,7 +49506,7 @@ const BigEditorFixture = struct {
             .cols = 80,
             .rows = 24,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+            .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
         });
         errdefer session.deinit();
         session.cell_width_px = 8;
@@ -49729,7 +49731,7 @@ const UntitledFixture = struct {
             .cols = 80,
             .rows = 24,
             .queue_capacity = 16,
-            .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+            .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
         });
         errdefer session.deinit();
         session.cell_width_px = 8;
@@ -50053,7 +50055,7 @@ test "U1l 창이 둘이어도 이름이 겹치지 않는다 — 발급기가 앱
                 .cols = 80,
                 .rows = 24,
                 .queue_capacity = 16,
-                .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+                .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
             });
             return s;
         }
@@ -51173,7 +51175,7 @@ test "U2y 「이미 열림」은 이 창만 본다 — 다른 창은 검사 범�
                 .cols = 80,
                 .rows = 24,
                 .queue_capacity = 16,
-                .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+                .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
             });
             s.loaded_config.config.workspace.root = r;
             return s;
@@ -52767,7 +52769,7 @@ const backup_rules = maru.session.editor.backup;
 /// 백업 디렉터리를 이 테스트 전용으로 박고, 그 절대 경로를 돌려준다.
 fn pinBackupDir(buf: []u8, dir: *std.testing.TmpDir) ![]const u8 {
     const root = buf[0..try dir.dir.realPath(std.testing.io, buf)];
-    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, root, @enumFromInt(0o700), .{});
+    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, root, @fromBackingInt(@intCast(0o700)), .{});
     app_session_mod.editor_backup_ops.setDirForTest(root);
     return root;
 }
@@ -53158,7 +53160,7 @@ fn plantBackup(allocator: std.mem.Allocator, root: []const u8, doc: backup_rules
     const name = backup_rules.fileName(&name_buf, doc);
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ root, name });
-    var af = try std.Io.Dir.cwd().createFileAtomic(std.testing.io, path, .{ .replace = true, .make_path = true, .permissions = @enumFromInt(0o600) });
+    var af = try std.Io.Dir.cwd().createFileAtomic(std.testing.io, path, .{ .replace = true, .make_path = true, .permissions = @fromBackingInt(@intCast(0o600)) });
     defer af.deinit(std.testing.io);
     var buf: [4096]u8 = undefined;
     var w = af.file.writer(std.testing.io, &buf);
@@ -54587,7 +54589,7 @@ test "IGP5 굴린 화면 — 창이 맨 위 줄부터다; 행마다 그 줄의 �
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
-    const src = "a\n    b\n" ** 600;
+    const src = array_repeat.repeat("a\n    b\n", 600);
     // **sticky 를 끈다** — 들여쓰기 접힘이 `a`·`    b`·다음 `a` 를 세 줄 스코프로 세워 그 머리줄이 0 행을 덮고, 덮인 행의 선은 걷어내기가 지운다
     // (§4.1i — 처음에 그것 때문에 0 행이 비어 빨갰다). 이 판정자가 재는 것은 창의 시작이다.
     fx.session.loaded_config.config.editor.sticky_scroll = false;
@@ -55318,7 +55320,7 @@ test "SHVIEW6 Undo 준비 실패는 본문과 이력을 유지하고 재시도�
     const state = fx.term.rt.editorDocument();
     const undo_len = state.history.undo_len;
     const revision = state.opened.?.file.revision;
-    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
     fx.session.allocator = failing.allocator();
     const changed = undoEdit(fx.session, peer);
     fx.session.allocator = testing.allocator;
@@ -56150,13 +56152,13 @@ test "SHVIEW16 실제 LSP 서버는 공유 문서를 한 번 열고 한 번 변�
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const fake = (try fakeLspAbs(&abs_buf)) orelse return error.MissingFakeServer;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    const fz = try std.fmt.bufPrintSentinel(&fake_z, "{s}", .{fake}, 0);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
     var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    const cz = try std.fmt.bufPrintSentinel(&cfg_z, "{s}/config", .{root}, 0);
     _ = setenv("MARU_CONFIG", cz.ptr, 1);
     defer _ = unsetenv("MARU_CONFIG");
     if (fx.session.config_path_buffer) |b| testing.allocator.free(b);
@@ -58573,7 +58575,7 @@ test "U4b-18 successful save leaves an older backup when directory permissions d
     try dir.dir.createDir(std.testing.io, "backups", .default_dir);
     var backup_buf: [std.fs.max_path_bytes]u8 = undefined;
     const backup_root = try std.fmt.bufPrint(&backup_buf, "{s}/backups", .{root});
-    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, backup_root, @enumFromInt(0o700), .{});
+    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, backup_root, @fromBackingInt(@intCast(0o700)), .{});
     app_session_mod.editor_backup_ops.setDirForTest(backup_root);
     try dir.dir.writeFile(std.testing.io, .{ .sub_path = "doc.txt", .data = "disk\n" });
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -58591,8 +58593,8 @@ test "U4b-18 successful save leaves an older backup when directory permissions d
         defer allocator.free(previous);
         term.rt.editor_selection = editor_selection.Selection.at(0);
         try testing.expect(insertText(fx.session, term, "new:"));
-        try std.Io.Dir.cwd().setFilePermissions(std.testing.io, backup_root, @enumFromInt(0o500), .{});
-        defer std.Io.Dir.cwd().setFilePermissions(std.testing.io, backup_root, @enumFromInt(0o700), .{}) catch {};
+        try std.Io.Dir.cwd().setFilePermissions(std.testing.io, backup_root, @fromBackingInt(@intCast(0o500)), .{});
+        defer std.Io.Dir.cwd().setFilePermissions(std.testing.io, backup_root, @fromBackingInt(@intCast(0o700)), .{}) catch {};
         try saveDocument(fx.session, term);
         try testing.expect(!isDirty(term));
         try testing.expect(!term.rt.editorDocument().notifications.backup_on_disk);
@@ -58629,7 +58631,7 @@ test "editor recovery restore 독립 A B와 공유 A 뷰를 실제 백업과 che
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const root = try pinBackupDir(&root_buffer, &dir);
     defer app_session_mod.editor_backup_ops.setDirForTest(null);
-    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, root, @enumFromInt(0o700), .{});
+    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, root, @fromBackingInt(@intCast(0o700)), .{});
     try dir.dir.writeFile(std.testing.io, .{ .sub_path = "document.txt", .data = "disk\nsecond\nthird\n" });
     const path = try std.fs.path.join(a, &.{ root, "document.txt" });
     defer a.free(path);
@@ -58734,7 +58736,7 @@ test "editor recovery restore 손상 백업은 기존 창과 원본을 보존한
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const root = try pinBackupDir(&root_buffer, &dir);
     defer app_session_mod.editor_backup_ops.setDirForTest(null);
-    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, root, @enumFromInt(0o700), .{});
+    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, root, @fromBackingInt(@intCast(0o700)), .{});
     try dir.dir.writeFile(std.testing.io, .{ .sub_path = "document.txt", .data = "disk\n" });
     const path = try std.fs.path.join(a, &.{ root, "document.txt" });
     defer a.free(path);
@@ -58773,7 +58775,7 @@ test "editor recovery restore 더 최신 백업은 본문만 복원하고 오래
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const root = try pinBackupDir(&root_buffer, &dir);
     defer app_session_mod.editor_backup_ops.setDirForTest(null);
-    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, root, @enumFromInt(0o700), .{});
+    try std.Io.Dir.cwd().setFilePermissions(std.testing.io, root, @fromBackingInt(@intCast(0o700)), .{});
     try dir.dir.writeFile(std.testing.io, .{ .sub_path = "document.txt", .data = "disk\nsecond\n" });
     const path = try std.fs.path.join(a, &.{ root, "document.txt" });
     defer a.free(path);
@@ -58973,7 +58975,7 @@ test "editor recovery restore 접힘 표를 재구성해도 가로 위치와 랩
     for ([_]bool{ false, true }) |wrap| {
         var fx = try PaneFixture.init(a);
         defer fx.deinit(a);
-        const content = ("abcdefghijklmnopqrstuvwxyz" ** 20 ++ "\n") ** 60;
+        const content = array_repeat.repeat((array_repeat.repeat("abcdefghijklmnopqrstuvwxyz", 20) ++ "\n"), 60);
         const term = try undoFixture(&fx, a, "restore-scroll.txt", content);
         const value: editor.workspace_state.View = .{
             .index = 0,
@@ -59002,7 +59004,7 @@ test "editor recovery restore 늦은 접힘 provider가 같은 맨 위 줄의 �
     const a = testing.allocator;
     var fx = try PaneFixture.init(a);
     defer fx.deinit(a);
-    const content = ("abcdefghijklmnopqrstuvwxyz" ** 20 ++ "\n") ** 60;
+    const content = array_repeat.repeat((array_repeat.repeat("abcdefghijklmnopqrstuvwxyz", 20) ++ "\n"), 60);
     const term = try undoFixture(&fx, a, "restore-provider.txt", content);
     _ = try openSharedViewInActivePane(fx.session, term);
     try restoreViewState(fx.session, term, .{
@@ -59034,7 +59036,7 @@ test "editor recovery restore 접힌 배열 대신 원문 줄을 저장하고 �
     const a = testing.allocator;
     var fx = try PaneFixture.init(a);
     defer fx.deinit(a);
-    const term = try undoFixture(&fx, a, "restore-anchor.txt", "head\n    one\n    two\nend\n" ++ "row\n" ** 60);
+    const term = try undoFixture(&fx, a, "restore-anchor.txt", "head\n    one\n    two\nend\n" ++ array_repeat.repeat("row\n", 60));
     try testing.expect(toggleFoldHead(fx.session, term, 0));
     restoreTop(term, 20);
     var arena = std.heap.ArenaAllocator.init(a);
@@ -59059,7 +59061,7 @@ test "editor recovery restore 늦은 provider와 재저장이 저장된 접힘 �
     const a = testing.allocator;
     var fx = try PaneFixture.init(a);
     defer fx.deinit(a);
-    const term = try undoFixture(&fx, a, "restore-deferred.txt", "head\n    one\n    two\nend\n" ++ ("abcdefghijklmnopqrstuvwxyz" ** 20 ++ "\n") ** 60);
+    const term = try undoFixture(&fx, a, "restore-deferred.txt", "head\n    one\n    two\nend\n" ++ array_repeat.repeat((array_repeat.repeat("abcdefghijklmnopqrstuvwxyz", 20) ++ "\n"), 60));
     try restoreViewState(fx.session, term, .{
         .index = 0,
         .document = 0,
@@ -59090,7 +59092,7 @@ test "editor recovery restore 사용자의 스크롤과 펼치기가 늦은 응�
     const a = testing.allocator;
     var fx = try PaneFixture.init(a);
     defer fx.deinit(a);
-    const term = try undoFixture(&fx, a, "restore-interaction.txt", "head\n    one\n    two\nend\n" ++ "row\n" ** 100);
+    const term = try undoFixture(&fx, a, "restore-interaction.txt", "head\n    one\n    two\nend\n" ++ array_repeat.repeat("row\n", 100));
     try restoreViewState(fx.session, term, .{
         .index = 0,
         .document = 0,
@@ -59116,7 +59118,7 @@ test "editor recovery restore 막대와 랩 및 키보드 명령을 늦은 응�
     for (std.enums.values(Action)) |action| {
         var fx = try PaneFixture.init(a);
         defer fx.deinit(a);
-        const term = try undoFixture(&fx, a, "restore-actions.txt", "head\n    one\n    two\nend\n" ++ ("abcdefghijklmnopqrstuvwxyz" ** 20 ++ "\n") ** 100);
+        const term = try undoFixture(&fx, a, "restore-actions.txt", "head\n    one\n    two\nend\n" ++ array_repeat.repeat((array_repeat.repeat("abcdefghijklmnopqrstuvwxyz", 20) ++ "\n"), 100));
         try restoreViewState(fx.session, term, .{
             .index = 0,
             .document = 0,
@@ -59158,7 +59160,7 @@ test "editor recovery restore 임시 provider가 선택을 숨기지 않고 실�
     const a = testing.allocator;
     var fx = try PaneFixture.init(a);
     defer fx.deinit(a);
-    const term = try undoFixture(&fx, a, "restore-selection.txt", "head\n    one\n    two\nend\n" ++ "row\n" ** 60);
+    const term = try undoFixture(&fx, a, "restore-selection.txt", "head\n    one\n    two\nend\n" ++ array_repeat.repeat("row\n", 60));
     const selected = term.rt.editorDocument().opened.?.file.lines.line(3).?.start;
     try restoreViewState(fx.session, term, .{
         .index = 0,
@@ -59196,7 +59198,7 @@ test "editor recovery restore 공유 뷰는 대기를 독립 소유하고 공유
     const a = testing.allocator;
     var fx = try PaneFixture.init(a);
     defer fx.deinit(a);
-    const term = try undoFixture(&fx, a, "restore-shared.txt", "head\n    one\n    two\nend\n" ++ "row\n" ** 60);
+    const term = try undoFixture(&fx, a, "restore-shared.txt", "head\n    one\n    two\nend\n" ++ array_repeat.repeat("row\n", 60));
     try restoreViewState(fx.session, term, .{
         .index = 0,
         .document = 0,
@@ -59227,7 +59229,7 @@ test "editor recovery restore provider 적용 중 할당 실패도 다음 프레
     for (0..8) |index| {
         var fx = try PaneFixture.init(a);
         defer fx.deinit(a);
-        const term = try undoFixture(&fx, a, "restore-oom.txt", "head\n    one\n    two\nend\n" ++ ("abcdefghijklmnopqrstuvwxyz" ** 20 ++ "\n") ** 60);
+        const term = try undoFixture(&fx, a, "restore-oom.txt", "head\n    one\n    two\nend\n" ++ array_repeat.repeat((array_repeat.repeat("abcdefghijklmnopqrstuvwxyz", 20) ++ "\n"), 60));
         try restoreViewState(fx.session, term, .{
             .index = 0,
             .document = 0,
@@ -59576,7 +59578,7 @@ test "editor backup discovery 재백업은 제한적인 umask에서도 다시 �
     _ = std.c.umask(previous_umask);
     const name = backup_rules.fileName(&name_buffer, current);
     const stat = try dir.dir.statFile(testing.io, name, .{});
-    defer dir.dir.setFilePermissions(testing.io, name, @enumFromInt(0o600), .{}) catch {};
+    defer dir.dir.setFilePermissions(testing.io, name, @fromBackingInt(@intCast(0o600)), .{}) catch {};
     try testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(stat.permissions.toMode() & 0o777)));
     var saved = try recovery_store.Source.open(allocator, testing.io, root, name);
     defer saved.deinit();
@@ -59828,7 +59830,7 @@ test "shared editor split 공유 뷰가 다른 창으로 갈라지는 이동은 
         const moving_tab = s.tabs.items[index];
         const target_tab = dst.session.tabs.items[0];
         s.chrome_host.notice = .{};
-        var out = [_]u64{0xaabb} ** 16;
+        var out = @as([16]u64, @splat(0xaabb));
         try testing.expectError(error.UnsupportedMove, AppSession.moveWorkspaceToSession(s, dst.session, index, &out));
         try testing.expect(s.chrome_host.notice.open);
         try testing.expectEqualStrings(maru.i18n.t(.ws_move_shared_editor), s.chrome_host.notice.message);
@@ -60737,9 +60739,9 @@ test "EDPSD2 확정과 취소는 표시 신원을 갱신하고 질의를 회수�
     fx.session.ime_active = false;
     fx.session.editor_search.fields[0].selectAll();
     d.setPreedit(fx.session, "나");
-    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
     fx.session.allocator = failing.allocator();
-    const huge = [_]u8{'x'} ** 4096;
+    const huge = @as([4096]u8, @splat('x'));
     const accepted = d.commitText(fx.session, &huge);
     d.setPreedit(fx.session, &huge);
     fx.session.allocator = testing.allocator;
@@ -60751,7 +60753,7 @@ test "EDPSD2 확정과 취소는 표시 신원을 갱신하고 질의를 회수�
     d.setPreedit(fx.session, &huge);
     fx.session.editor_search.expanded = true;
     fx.session.surface_initialized = true;
-    var commit_failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var commit_failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
     fx.session.allocator = commit_failing.allocator();
     defer fx.session.allocator = testing.allocator;
     try testing.expect(!fx.session.tryCommitComposition());
@@ -61555,7 +61557,7 @@ test "LATE5 늦게 온 응답의 알림 자리는 전부 showResponseNotice 다 
 fn workspaceSearchRoots(fx: *PaneFixture, roots: []const []const u8) !void {
     try fx.session.file_tree.replaceExplicitRoots(roots);
     for (roots) |root| {
-        const z = try testing.allocator.dupeZ(u8, root);
+        const z = try testing.allocator.dupeSentinel(u8, root, 0);
         defer testing.allocator.free(z);
         var native: std.posix.Stat = undefined;
         try testing.expectEqual(@as(c_int, 0), std.c.fstatat(std.posix.AT.FDCWD, z, &native, 0));
@@ -62225,10 +62227,10 @@ const HelperFx = struct {
     fn init(self: *HelperFx, allocator: std.mem.Allocator, text: []const u8) !void {
         var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
         const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
-        const fz = try std.fmt.bufPrintZ(&self.fake_z, "{s}", .{fake});
+        const fz = try std.fmt.bufPrintSentinel(&self.fake_z, "{s}", .{fake}, 0);
         _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
         const root = self.root_buf[0..try self.fx.dir.dir.realPath(testing.io, &self.root_buf)];
-        const cz = try std.fmt.bufPrintZ(&self.cfg_z, "{s}/config", .{root});
+        const cz = try std.fmt.bufPrintSentinel(&self.cfg_z, "{s}/config", .{root}, 0);
         _ = setenv("MARU_CONFIG", cz.ptr, 1);
         if (self.fx.session.config_path_buffer) |b| allocator.free(b);
         self.fx.session.config_path_buffer = null;
@@ -63041,7 +63043,7 @@ test "FINDH7 포커스 없는 찾기 막대를 누르면(패딩 띠 포함) — 
     const allocator = testing.allocator;
     var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
     defer h.deinit(allocator);
-    const long = "int " ++ ("abcdefghij" ** 30) ++ ";\n"; // 긴 줄 — 막대(pane 오른쪽 위) 아래에도 글자가 있다
+    const long = "int " ++ (array_repeat.repeat("abcdefghij", 30)) ++ ";\n"; // 긴 줄 — 막대(pane 오른쪽 위) 아래에도 글자가 있다
     try h.init(allocator, long ++ long ++ long ++ long ++ long ++ long ++ "int y;\n");
     const s = h.fx.session;
     const find_at = try openUnfocusedFindBar(&h);
@@ -63114,7 +63116,7 @@ test "FINDH6 포커스 없는 찾기 막대가 가린 자리(아래 패딩)에 �
     const allocator = testing.allocator;
     var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
     defer h.deinit(allocator);
-    const long = "int " ++ ("abcdefghij" ** 30) ++ ";\n"; // 긴 줄 — 찾기 막대(pane 오른쪽 위) 아래에도 낱말이 있다
+    const long = "int " ++ (array_repeat.repeat("abcdefghij", 30)) ++ ";\n"; // 긴 줄 — 찾기 막대(pane 오른쪽 위) 아래에도 낱말이 있다
     try h.init(allocator, long ++ long ++ long ++ long ++ long ++ long ++ "int y;\n");
     const s = h.fx.session;
     const find_at = try openUnfocusedFindBar(&h);
@@ -63729,7 +63731,7 @@ test "RPA20 worker 완료 뒤 다른 창의 정본과 읽기 전용 문서는 �
             try testing.expectEqualStrings("external view original", doc.opened.?.file.content);
             try testing.expectEqual(@as(usize, 0), doc.history.undo_len);
         } else {
-            const path_z = try testing.allocator.dupeZ(u8, path);
+            const path_z = try testing.allocator.dupeSentinel(u8, path, 0);
             defer testing.allocator.free(path_z);
             try testing.expectEqual(@as(c_int, 0), std.c.chmod(path_z, 0o444));
             defer _ = std.c.chmod(path_z, 0o644);
@@ -63907,7 +63909,7 @@ test "RPA26 재검증 대상이 FIFO 비UTF8 상한 초과 파일로 바뀌어�
         _ = try diskApplyReady(&fx, "foo original", true);
         const before = pane_ops.activePane(fx.session).terms.items.len;
         if (mode == 0) {
-            const path = try testing.allocator.dupeZ(u8, fx.session.editor_search.preview.disk_target.?.absolute);
+            const path = try testing.allocator.dupeSentinel(u8, fx.session.editor_search.preview.disk_target.?.absolute, 0);
             defer testing.allocator.free(path);
             try fx.dir.dir.deleteFile(testing.io, "disk.txt");
             const posix_fixture = struct {
@@ -65492,7 +65494,7 @@ const BatchLoadFixture = struct {
         errdefer a.free(root);
         var actual = try @import("search/process.zig").openRoot(a, testing.io, root);
         defer actual.deinit(a, testing.io);
-        const device: std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(actual.device))) = @bitCast(actual.device);
+        const device: @Int(.unsigned, @bitSizeOf(@TypeOf(actual.device))) = @bitCast(actual.device);
         const id: maru.session.file_tree.Identity = .{ .device = device, .inode = actual.stat.inode, .kind = 2 };
         var hash: [32]u8 = undefined;
         const body = if (std.mem.startsWith(u8, text, editor.document.utf8_bom)) text[3..] else text;
@@ -67185,7 +67187,7 @@ test "LSAVEA6 외부 포매터 진단과 시간 초과 안내는 결과 해제 �
         term.rt.editor_selection = editor_selection.Selection.at(3);
         try testing.expect(insertText(fx.session, term, "!"));
         fx.session.dismissMessageOverlays();
-        var why = [_]u8{'x'} ** 160;
+        var why = @as([160]u8, @splat('x'));
         @memcpy(why[0..7], "failure");
         var formatter_name = "tool-one".*;
         const message = maru.editor_save_notice.Success.external(.fmt_external_failed_saved, &formatter_name, why[0..7]);

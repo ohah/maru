@@ -380,24 +380,24 @@ pub fn refreshSettingsFieldCount(self: *AppSession) void {
 /// 때문이다. 부수 효과로 **영어 이름으로도 찾을 수 있다**(한국어 화면에서 `language` 로 `ui.language` 를).
 pub fn settingsRowMatches(doc_key: ?maru.i18n.Key, label: []const u8, key: []const u8, query: []const u8) bool {
     if (query.len == 0) return true;
-    if (std.ascii.indexOfIgnoreCase(key, query) != null) return true;
+    if (std.ascii.findIgnoreCase(key, query) != null) return true;
     // 키가 있으면 **모든 언어**를 본다. 없으면(환경변수 이름·chord 표기처럼 번역 대상이 아닌 라벨) 그 라벨
     // 하나만 보는데, 그런 라벨은 애초에 언어를 안 타므로 판정도 언어 독립이다.
     if (doc_key) |dk| {
-        inline for (@typeInfo(maru.i18n.Lang).@"enum".fields) |lf| {
+        inline for (@import("type_info_fields").enumFields(maru.i18n.Lang)) |lf| {
             const sentence = maru.i18n.tIn(@field(maru.i18n.Lang, lf.name), dk);
-            if (std.ascii.indexOfIgnoreCase(sentence, query) != null) return true;
+            if (std.ascii.findIgnoreCase(sentence, query) != null) return true;
         }
         return false;
     }
-    return std.ascii.indexOfIgnoreCase(label, query) != null;
+    return std.ascii.findIgnoreCase(label, query) != null;
 }
 
 /// 언어 드롭다운의 표시 목록. **`Preference` 선언 순서 그대로** 만든다 — 팝업 선택은 인덱스로
 /// 적용되므로(`enumIndex`·`dropdown.show(len, cur_idx)`) 이 순서가 스키마의 변형 순서와 어긋나면
 /// **다른 언어가 저장된다.** enum 을 한 바퀴 도는 것이 그 어긋남을 정의상 불가능하게 만든다.
 fn uiLanguageVariants(arena: std.mem.Allocator) ![]const []const u8 {
-    const fields = @typeInfo(maru.i18n.Preference).@"enum".fields;
+    const fields = @import("type_info_fields").enumFields(maru.i18n.Preference);
     const out = try arena.alloc([]const u8, fields.len);
     inline for (fields, 0..) |f, i| out[i] = maru.i18n.preferenceLabel(@field(maru.i18n.Preference, f.name));
     return out;
@@ -544,8 +544,8 @@ pub fn buildSettingsFields(self: *AppSession, arena: std.mem.Allocator) ![]chrom
     // 없을 때 참이므로, 안 정한 역할에는 ↺ 가 안 뜬다.
     if (cf.syntax_roles > 0) {
         const derived = maru.session.syntax_theme.fromTheme(self.appearance.theme);
-        inline for (@typeInfo(config_mod.theme.SyntaxRole).@"enum".fields) |f| {
-            const role: config_mod.theme.SyntaxRole = @enumFromInt(f.value);
+        inline for (@import("type_info_fields").enumFields(config_mod.theme.SyntaxRole)) |f| {
+            const role: config_mod.theme.SyntaxRole = @fromBackingInt(@intCast(f.value));
             const label_text = maru.session.syntax_theme.roleLabel(role);
             // **마스크가 정본이다** — 여기서 검색 일치를 다시 계산하면 `keyAtRow`·핸들러와 갈릴 수 있다.
             if (cf.syntax_mask & (@as(u32, 1) << @intCast(f.value)) != 0) {
@@ -833,7 +833,7 @@ pub fn toggleSelectedSetting(self: *AppSession) void {
         // 색 행과 같은 규율: 프리셋 잠금이면 "사용자 지정" 으로 전환한 뒤 편집한다.
         if (self.themePresetActive()) self.theme_user_custom = true;
         const derived = maru.session.syntax_theme.fromTheme(self.appearance.theme);
-        const cur = self.loaded_config.config.theme.syntax[@intFromEnum(role)];
+        const cur = self.loaded_config.config.theme.syntax[@backingInt(role)];
         const rgb = if (cur) |hex|
             (config_mod.appearance.parseHexColor(hex) catch maru.session.syntax_theme.colorFor(derived, role))
         else
@@ -968,7 +968,7 @@ pub fn resetSelectedSettingRow(self: *AppSession) void {
     // 가 `removeConfigLines` 로 그 줄을 지운다 — 팔레트 셀 되돌리기가 같은 규율을 쓴다.
     if (syntaxRoleAt(cf, sel)) |role| {
         if (self.themePresetActive()) return; // 잠금 행은 ↺가 안 뜨므로 Backspace로도 금지(위 색 행과 같다)
-        const idx = @intFromEnum(role);
+        const idx = @backingInt(role);
         if (self.loaded_config.config.theme.syntax[idx] != null) {
             self.loaded_config.config.theme.syntax[idx] = null;
             reapplyLoadedConfig(self);
@@ -1797,7 +1797,7 @@ pub fn openBranchMenu(self: *AppSession) void {
     var anchor_y: f64 = 0;
     var anchored = false;
     for (status_bar_ops.statusBarTree(self).entries) |e| {
-        if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.git_branch)) continue;
+        if (e.id != @backingInt(chrome.components.status_bar.ItemId.git_branch)) continue;
         anchor_x = e.rect.x;
         anchor_y = e.rect.y;
         anchored = true;
@@ -2563,9 +2563,9 @@ pub fn clearConfigDirty(self: *AppSession) void {
 /// 통째로 펼친다; 옛 "주 색 4개만 영속" 한계 해소, 팔레트 영속 리뷰). search/sidebar 색은 그 테마에서 derive돼 자동 복원.
 pub fn applyThemePreset(self: *AppSession, dir: i8) void {
     const Preset = config_mod.theme.ThemePreset;
-    const n: i64 = @typeInfo(Preset).@"enum".fields.len; // 프리셋 수; 슬롯 인덱스 n = "사용자 지정"
+    const n: i64 = @import("type_info_fields").enumFields(Preset).len; // 프리셋 수; 슬롯 인덱스 n = "사용자 지정"
     const detected = detectThemePreset(self.loaded_config.config.theme);
-    const cur: i64 = if (self.theme_user_custom or detected == null) n else @intFromEnum(detected.?);
+    const cur: i64 = if (self.theme_user_custom or detected == null) n else @backingInt(detected.?);
     const slots = n + 1;
     const next = @mod(cur + @as(i64, dir) + slots, slots);
     if (next == n) {
@@ -2575,7 +2575,7 @@ pub fn applyThemePreset(self: *AppSession, dir: i8) void {
         return;
     }
     self.theme_user_custom = false;
-    const preset: config_mod.theme.ThemePreset = @enumFromInt(@as(usize, @intCast(next)));
+    const preset: config_mod.theme.ThemePreset = @fromBackingInt(@intCast(@as(usize, @intCast(next))));
     self.loaded_config.config.theme = config_mod.theme.presetColors(preset);
     reapplyLoadedConfig(self);
     persistThemePreset(self, preset);
@@ -2583,7 +2583,7 @@ pub fn applyThemePreset(self: *AppSession, dir: i8) void {
 
 /// 테마 프리셋 드롭다운의 변형 라벨 — 16 프리셋 @tagName(underscore, viewPopup이 dash 변환) + "사용자 지정"(마지막 슬롯).
 pub fn themePresetVariants(_: *AppSession, arena: std.mem.Allocator) ![]const []const u8 {
-    const fields = @typeInfo(config_mod.theme.ThemePreset).@"enum".fields;
+    const fields = @import("type_info_fields").enumFields(config_mod.theme.ThemePreset);
     const out = try arena.alloc([]const u8, fields.len + 1);
     inline for (fields, 0..) |f, i| out[i] = f.name;
     out[fields.len] = maru.i18n.t(.set_custom);
@@ -2592,9 +2592,9 @@ pub fn themePresetVariants(_: *AppSession, arena: std.mem.Allocator) ![]const []
 
 /// 테마 프리셋 드롭다운의 현재 선택 인덱스 — 활성 프리셋의 ordinal, 아니면 "사용자 지정" 슬롯(=프리셋 수).
 pub fn themePresetCurrentIndex(self: *AppSession) usize {
-    const n = @typeInfo(config_mod.theme.ThemePreset).@"enum".fields.len;
+    const n = @import("type_info_fields").enumFields(config_mod.theme.ThemePreset).len;
     const detected = detectThemePreset(self.loaded_config.config.theme);
-    return if (self.theme_user_custom or detected == null) n else @intFromEnum(detected.?);
+    return if (self.theme_user_custom or detected == null) n else @backingInt(detected.?);
 }
 
 /// follow-system을 끌 때(세팅 토글 OFF) 호출 — 덮기 전 스냅샷한 사용자(파일) 테마로 config.theme를 복귀하고
@@ -2718,7 +2718,7 @@ fn keyAtRow(cf: SettingsSectionFields, i: usize, buf: []u8) ?[]const u8 {
     if (cf.syntax_roles > 0) {
         if (n < cf.syntax_roles) {
             const ri = cf.syntaxRoleIndexAt(n) orelse return null;
-            return syntaxRoleKeyOf(@enumFromInt(ri));
+            return syntaxRoleKeyOf(@fromBackingInt(@intCast(ri)));
         }
         n -= cf.syntax_roles;
     }
@@ -3173,9 +3173,9 @@ pub fn quickTerminalConfig(self: *const AppSession) QuickTerminalConfig {
     return .{
         .height_milli = @intFromFloat(@round(qt.height_fraction * 1000.0)),
         .auto_hide = if (qt.auto_hide) 1 else 0,
-        .screen = @intFromEnum(qt.screen),
-        .position = @intFromEnum(qt.position),
-        .chrome = @intFromEnum(qt.chrome),
+        .screen = @backingInt(qt.screen),
+        .position = @backingInt(qt.position),
+        .chrome = @backingInt(qt.chrome),
         .minimal_tabs = if (qt.minimal_tabs) 1 else 0,
         .width_milli = @intFromFloat(@round(qt.width_fraction * 1000.0)),
     };
@@ -3236,8 +3236,8 @@ pub fn buildSectionList(self: *AppSession, arena: std.mem.Allocator) ![]Settings
     var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
     try config_mod.schema.appendColorFields(arena, self.loaded_config.config, &colors);
     var list: std.ArrayList(SettingsSectionEntry) = .empty;
-    inline for (@typeInfo(config_mod.Section).@"enum".fields) |ef| {
-        const sec: config_mod.Section = @enumFromInt(ef.value);
+    inline for (@import("type_info_fields").enumFields(config_mod.Section)) |ef| {
+        const sec: config_mod.Section = @fromBackingInt(@intCast(ef.value));
         if (settingsSectionHasField(bools.items, nums.items, enums.items, texts.items, colors.items, sec))
             try list.append(arena, .{ .section = sec, .label = settingsSectionLabel(sec) });
     }
@@ -3427,8 +3427,8 @@ pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !Settin
     var syntax_rows: usize = 0;
     var syntax_mask: u32 = 0;
     if (cross or sel_sec == .theme) {
-        inline for (@typeInfo(config_mod.theme.SyntaxRole).@"enum".fields) |f| {
-            const role: config_mod.theme.SyntaxRole = @enumFromInt(f.value);
+        inline for (@import("type_info_fields").enumFields(config_mod.theme.SyntaxRole)) |f| {
+            const role: config_mod.theme.SyntaxRole = @fromBackingInt(@intCast(f.value));
             if (settingsRowMatches(.set_syntax_color, maru.session.syntax_theme.roleLabel(role), comptime config_mod.theme.syntaxRoleKey(role), q)) {
                 syntax_rows += 1;
                 syntax_mask |= @as(u32, 1) << @intCast(f.value);
@@ -3641,7 +3641,7 @@ fn syntaxRoleAt(cf: anytype, sel: usize) ?config_mod.theme.SyntaxRole {
     const start = cf.syntaxRowStart() orelse return null;
     if (sel < start or sel >= start + cf.syntax_roles) return null;
     const ri = cf.syntaxRoleIndexAt(sel - start) orelse return null;
-    return @enumFromInt(ri);
+    return @fromBackingInt(@intCast(ri));
 }
 
 pub fn commitPickerColor(self: *AppSession) void {
@@ -3657,7 +3657,7 @@ pub fn commitPickerColor(self: *AppSession) void {
     // 구문 색 행에서 열린 picker — schema 키가 아니라 `theme.syntax[role]` 슬롯에 담는다.
     if (syntaxRoleAt(cf, sel)) |role| {
         const hex = rgbToHex(self.loaded_config.arena.allocator(), self.chrome_host.settings.pickerRgb()) catch return;
-        self.loaded_config.config.theme.syntax[@intFromEnum(role)] = hex;
+        self.loaded_config.config.theme.syntax[@backingInt(role)] = hex;
         // 키는 `syntaxRoleKey` 단일 출처다 — 손으로 적으면 로더와 갈린다.
         markConfigKeyDirty(self, syntaxRoleKeyOf(role));
         reapplyLoadedConfig(self);
@@ -3766,7 +3766,7 @@ pub fn addTerminalMacro(self: *AppSession, text: []const u8) void {
 /// (="사용자 지정")이면 **열 때 스냅샷한 원본 커스텀 색으로 복원** + 잠금 해제(예전엔 잠금만 풀어 미리본 프리셋 색이
 /// 남던 데이터 손실 — code-review high 수정). idx<n이면 그 프리셋 색을 깔고 라이브 적용, persist=true일 때만 파일 영속.
 pub fn applyThemePresetIndex(self: *AppSession, idx: usize, persist: bool) void {
-    const n = @typeInfo(config_mod.theme.ThemePreset).@"enum".fields.len;
+    const n = @import("type_info_fields").enumFields(config_mod.theme.ThemePreset).len;
     if (idx >= n) {
         // "사용자 지정" — 원본 커스텀 색(스냅샷)으로 되돌리고 잠금 해제. 커스텀은 theme.preset 줄을 안 남기므로 별도 영속 없음
         // (미리보기가 persist를 안 했으니 파일의 커스텀 색 줄이 그대로라, 여기선 인메모리 복원만 하면 파일도 정합).
@@ -3776,7 +3776,7 @@ pub fn applyThemePresetIndex(self: *AppSession, idx: usize, persist: bool) void 
         return;
     }
     self.theme_user_custom = false;
-    const preset: config_mod.theme.ThemePreset = @enumFromInt(idx);
+    const preset: config_mod.theme.ThemePreset = @fromBackingInt(@intCast(idx));
     self.loaded_config.config.theme = config_mod.theme.presetColors(preset);
     reapplyLoadedConfig(self);
     if (persist) persistThemePreset(self, preset); // 확정에서만 파일에 theme.preset 예약(미리보기는 인메모리만)
@@ -3802,8 +3802,8 @@ pub fn persistThemePreset(self: *AppSession, preset: config_mod.theme.ThemePrese
     // 프리셋이 색을 가져가는데(applyThemePresetIndex가 `config.theme`를 통째로 간다) 파일에는 옛 줄이
     // 남아, 다음에 열 때 **줄 순서에 따라** 되살아나거나 안 되살아난다 — 위 주석이 말한 "반쪽만 적용"이다.
     // 키는 `syntaxRoleKey` 단일 출처라 역할이 늘어도 여기서 빠지지 않는다.
-    inline for (@typeInfo(config_mod.theme.SyntaxRole).@"enum".fields) |f| {
-        markConfigKeyRemoved(self, comptime config_mod.theme.syntaxRoleKey(@enumFromInt(f.value)));
+    inline for (@import("type_info_fields").enumFields(config_mod.theme.SyntaxRole)) |f| {
+        markConfigKeyRemoved(self, comptime config_mod.theme.syntaxRoleKey(@fromBackingInt(@intCast(f.value))));
     }
 }
 
@@ -3835,7 +3835,7 @@ test "ui.language 는 세팅 좌측 네비의 app 섹션에 뜬다" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -3878,7 +3878,7 @@ test "세팅 네비의 첫 섹션은 app 이다 — 읽을 수 없는 화면에�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -3967,7 +3967,7 @@ test "keyAtRow 는 모든 섹션의 모든 행에 앵커를 준다 (행 종류�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -4011,7 +4011,7 @@ test "앵커를 못 잡아도 행 수는 다시 알린다" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -4086,7 +4086,7 @@ test "Reload Config 는 시작과 같이 config 진단을 앱 로그에 찍는�
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
     config_log_last = .{}; // 다른 판정자가 방금 찍은 보고에 가려지지 않게(프로세스 전역 표식)
@@ -4143,7 +4143,7 @@ test "파일이 행을 더해도 선택은 같은 설정에 남는다 (reload �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -4192,7 +4192,7 @@ test "통과 행 집합과 순서는 화면 언어에 의존하지 않는다 (i1
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -4304,7 +4304,7 @@ test "재적용은 config 미러를 되쓰지 않는다" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -4333,7 +4333,7 @@ test "앵커 행이 끝내 사라지면 편집·고르기·녹음을 거둔다 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 
@@ -4368,7 +4368,7 @@ test "앵커 행이 사라지면 그 키가 살던 섹션으로 옮겨 다시 �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 

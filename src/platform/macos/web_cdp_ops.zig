@@ -19,6 +19,8 @@
 //!   WebKit 과 같이 `{ok:false}`.
 //! - 결과의 status 숫자는 `control_browser.BrowserCompletionStatus` 계약이다(성공 = 0 + "true"/"false", 실패 = 1 + 메시지).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const web_cdp_snapshot = @import("web_cdp_snapshot.zig");
 const web_cdp_keys = @import("web_cdp_keys.zig");
@@ -2941,7 +2943,7 @@ fn costlyPage(method: []const u8, params: []const u8) Reply {
 }
 
 fn longNamePage(method: []const u8, params: []const u8) Reply {
-    if (std.mem.eql(u8, method, "Accessibility.queryAXTree")) return .{ .ok = "{\"nodes\":[{\"ignored\":false,\"name\":{\"value\":\"" ++ "é" ** 200 ++ "\"},\"backendDOMNodeId\":31}]}" };
+    if (std.mem.eql(u8, method, "Accessibility.queryAXTree")) return .{ .ok = "{\"nodes\":[{\"ignored\":false,\"name\":{\"value\":\"" ++ array_repeat.repeat("é", 200) ++ "\"},\"backendDOMNodeId\":31}]}" };
     return rolePage(method, params);
 }
 

@@ -52,7 +52,7 @@ pub fn xdgNeedsMove(value: ?[]const u8, home: []const u8) bool {
 
 /// `home` 아래의 XDG 경로(`<home>/<sub>`)를 `buf` 에 쓴다 — 끝 `/` 를 떼고 잇는다(`HOME=/` 이면 `/.cache`).
 pub fn xdgPath(buf: []u8, home: []const u8, sub: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/{s}", .{ std.mem.trimEnd(u8, home, "/"), sub });
+    return std.fmt.bufPrintSentinel(buf, "{s}/{s}", .{ std.mem.trimEnd(u8, home, "/"), sub }, 0);
 }
 
 // 「`HOME=/` 이면 무한 self-exec」는 결과가 아니라 **판정 함수**에서 났다(2026-10-07 재현: 같은 pid 가 출력 없이 2 분 넘게 돌았다). 그 함수를 직접 부른다.

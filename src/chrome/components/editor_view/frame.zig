@@ -12,6 +12,8 @@
 //!
 //! **할당하지 않는다.** L3 컴포넌트 계약대로 저장소는 호출자가 준다(`Scratch`).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const draw = @import("../../draw.zig");
 const tokens = @import("../../tokens.zig");
@@ -1712,7 +1714,7 @@ fn paintIndentGuides(props: Props, layout: geometry.Layout, visual: []const visu
 /// 들여쓰기 깊은 화면에서 op 저장소가 먼저 바닥나 아래 행의 기호가 사라진다).
 const whitespace_run_max = 64;
 const whitespace_dots = blk: {
-    const dots = "\u{b7}" ** whitespace_run_max;
+    const dots = array_repeat.repeat("\u{b7}", whitespace_run_max);
     var runs: [whitespace_run_max]draw.Run = undefined;
     for (&runs, 0..) |*r, k| r.* = .{ .text = dots[0 .. (k + 1) * "\u{b7}".len] };
     break :blk runs;
@@ -2211,8 +2213,8 @@ test "WID2w 랩이 켜져도 위젯을 «센다» — 계수 길이 셋이고 �
     // 안 쓴다) · 랩 + 전개 길. 랩을 끈 판정자(WID2)만 두면 **뒤의 둘이 무판정**으로 남고, 실제로
     // 적대적 검증 1회차에서 그 둘을 지운 변이가 **살아남았다**.
     var bufs: TestBuffers = .{};
-    const plain_long = "x" ** 200; // 탭도 위험문자도 없다 → 빠른 길
-    const tabbed_long = "\t" ++ ("y" ** 200); // 탭이 있다 → 전개 길
+    const plain_long = array_repeat.repeat("x", 200); // 탭도 위험문자도 없다 → 빠른 길
+    const tabbed_long = "\t" ++ (array_repeat.repeat("y", 200)); // 탭이 있다 → 전개 길
     const lines = [_][]const u8{ plain_long, tabbed_long, "tail" };
     var props = testProps(&lines, true);
     props.visible_rows = 4;
@@ -2231,7 +2233,7 @@ test "WID2w 랩이 켜져도 위젯을 «센다» — 계수 길이 셋이고 �
 
 test "WID3 랩과 섞여도 위젯이 «맨 앞»이고 건너뛰기가 그 몫을 센다" {
     var bufs: TestBuffers = .{};
-    const long = "x" ** 200; // 여러 조각으로 접힌다
+    const long = array_repeat.repeat("x", 200); // 여러 조각으로 접힌다
     const lines = [_][]const u8{ long, "tail" };
     var props = testProps(&lines, true);
     const widgets = [_]?content.Widget{.{ .text = "위" }};
@@ -2473,7 +2475,7 @@ test "WID10 위젯의 `piece` 는 0 이고, 글자는 본문 폭에서 잘리고
     // ⑶ **위젯 글자도 본문 폭에서 잘린다.** 안 자르면 랩이 꺼진 화면에서 gutter 옆 창 밖까지 그려진다
     //    (글자 행이 `max_cols` 로 막아 둔 그 자리다).
     var wide = testProps(&lines, false);
-    const long_widget = [_]?content.Widget{.{ .text = "x" ** 300 }};
+    const long_widget = [_]?content.Widget{.{ .text = array_repeat.repeat("x", 300) }};
     wide.line_widgets = &long_widget;
     const drawn = build(wide, bufs.scratch());
     //    **위젯 op 을 글자로 찾는다.** 처음에는 `max_cols` 로 걸렀는데, 그 필터가 **지우려던 변이를
@@ -2497,13 +2499,13 @@ test "CM1 변경 위치 마커는 랩에서 시각 행 축이다 — 같은 줄�
     // (적대적 1회차 A7: 프레임이 캐시를 안 넘겨도 초록이었다).
     var bufs: TestBuffers = .{};
     var lines: [40][]const u8 = undefined;
-    const long = "x" ** 120;
+    const long = array_repeat.repeat("x", 120);
     for (&lines, 0..) |*l, i| l.* = if (i < 20) long else "y";
     var prefix: [64]u32 = @splat(0);
     var cache: RowCache = .{ .prefix = &prefix };
     var props = testProps(&lines, true);
     props.row_cache = &cache;
-    var bands = [_]RowBand{.none} ** 40;
+    var bands = @as([40]RowBand, @splat(.none));
     bands[30] = .added;
     props.row_bands = &bands;
     props.change_marker_kind = .added;
@@ -2616,7 +2618,7 @@ test "DGF1 진단 밑줄은 셀마다 지그재그 조각 둘, severity 색, 검
     try std.testing.expect(last_search < first_diag);
 
     // 랩: 두 행으로 이어진 줄의 글리프는 **첫 행에만** — 이어짐 행(번호 없음)에 또 찍으면 한 줄이 두 오류로 보인다(적대적 3회차 C6).
-    const long = "x" ** 120;
+    const long = array_repeat.repeat("x", 120);
     const wl = [_][]const u8{ long, "y" };
     var pw = testProps(&wl, true);
     const wm = [_]?diagnostic.Level{ .err, null };
@@ -2713,7 +2715,7 @@ test "WID4 위젯 표가 갈리면 캐시를 다시 센다 — 옛 접두합은 
 
 test "캐시를 켜도 답이 같다 — 캐시는 빠르게 할 뿐 값을 바꾸지 않는다" {
     var bufs: TestBuffers = .{};
-    const long = "x" ** 200; // 뷰 폭보다 길어 여러 조각으로 접힌다
+    const long = array_repeat.repeat("x", 200); // 뷰 폭보다 길어 여러 조각으로 접힌다
     const lines = [_][]const u8{ long, "short", long, "tail" };
 
     const without = build(testProps(&lines, true), bufs.scratch());
@@ -2732,7 +2734,7 @@ test "캐시를 켜도 답이 같다 — 캐시는 빠르게 할 뿐 값을 바�
 
 test "폭이 바뀌면 캐시를 다시 센다 — 랩이 갈리는 값이다" {
     var bufs: TestBuffers = .{};
-    const long = "x" ** 200;
+    const long = array_repeat.repeat("x", 200);
     const lines = [_][]const u8{ long, long };
     var prefix: [lines.len + 1]u32 = undefined;
     var cache: RowCache = .{ .prefix = &prefix };
@@ -2753,7 +2755,7 @@ test "폭이 바뀌면 캐시를 다시 센다 — 랩이 갈리는 값이다" {
 
 test "랩을 끄면 캐시를 다시 센다 — 조각이 사라진다" {
     var bufs: TestBuffers = .{};
-    const long = "x" ** 200;
+    const long = array_repeat.repeat("x", 200);
     const lines = [_][]const u8{ long, long };
     var prefix: [lines.len + 1]u32 = undefined;
     var cache: RowCache = .{ .prefix = &prefix };
@@ -2786,7 +2788,7 @@ test "캐시 자리가 모자라면 예전 경로로 내려간다 — 없는 것
 
 test "hold를 켜면 폭이 바뀌어도 다시 세지 않는다 — §2.1 저하 동작" {
     var bufs: TestBuffers = .{};
-    const long = "x" ** 200;
+    const long = array_repeat.repeat("x", 200);
     const lines = [_][]const u8{ long, long };
     var prefix: [lines.len + 1]u32 = undefined;
     var cache: RowCache = .{ .prefix = &prefix };
@@ -2812,7 +2814,7 @@ test "hold를 켜면 폭이 바뀌어도 다시 세지 않는다 — §2.1 저�
 
 test "hold여도 아직 안 채워진 캐시는 센다 — 보여 줄 직전 값이 없다" {
     var bufs: TestBuffers = .{};
-    const long = "x" ** 200;
+    const long = array_repeat.repeat("x", 200);
     const lines = [_][]const u8{ long, long };
     var prefix: [lines.len + 1]u32 = undefined;
     var cache: RowCache = .{ .prefix = &prefix, .hold = true };
@@ -2826,7 +2828,7 @@ test "hold여도 아직 안 채워진 캐시는 센다 — 보여 줄 직전 값
 
 test "hold 중 문서가 짧아지면 저하하지 않는다 — 옛 접두합이 지금 문서를 못 덮는다" {
     var bufs: TestBuffers = .{};
-    const long = "x" ** 200;
+    const long = array_repeat.repeat("x", 200);
     const four = [_][]const u8{ long, long, long, long };
     var prefix: [four.len + 1]u32 = undefined;
     var cache: RowCache = .{ .prefix = &prefix };
@@ -2847,7 +2849,7 @@ test "hold 중 문서가 짧아지면 저하하지 않는다 — 옛 접두합�
 
 test "막대 위치도 캐시에서 나온다 — 문서 중간에서도 같은 답이다" {
     var bufs: TestBuffers = .{};
-    const long = "x" ** 200;
+    const long = array_repeat.repeat("x", 200);
     // **문서가 화면보다 확실히 커야 한다** — 다 들어가면 막대가 아예 없어(`scrollbar == null`) 이
     // 테스트가 아무것도 비교하지 못한다.
     const lines = [_][]const u8{ long, long, long, long, long, long, long, long, "tail" };
@@ -2872,7 +2874,7 @@ test "막대 위치도 캐시에서 나온다 — 문서 중간에서도 같은 
 
 test "점진 계수: 한 프레임에 다 세지 않고 이어서 완성한다 (§2.1)" {
     var bufs: TestBuffers = .{};
-    const long = "x" ** 200;
+    const long = array_repeat.repeat("x", 200);
     // chunk보다 확실히 긴 문서라야 나뉘는 것이 보인다.
     const n = count_chunk_lines + 100;
     var lines_buf: [count_chunk_lines + 100][]const u8 = undefined;
@@ -2900,7 +2902,7 @@ test "점진 계수: 한 프레임에 다 세지 않고 이어서 완성한다 (
 
 test "점진 계수: 조건이 갈리면 진행도를 0으로 되돌리고 다시 시작한다" {
     var bufs: TestBuffers = .{};
-    const long = "x" ** 200;
+    const long = array_repeat.repeat("x", 200);
     const n = count_chunk_lines + 100;
     var lines_buf: [count_chunk_lines + 100][]const u8 = undefined;
     for (&lines_buf) |*l| l.* = long;
@@ -2925,7 +2927,7 @@ test "점진 계수: 조건이 갈리면 진행도를 0으로 되돌리고 다�
 
 test "점진 계수: hold 중에는 진행하지 않는다 — 드래그가 끝나야 센다" {
     var bufs: TestBuffers = .{};
-    const long = "x" ** 200;
+    const long = array_repeat.repeat("x", 200);
     const n = count_chunk_lines + 100;
     var lines_buf: [count_chunk_lines + 100][]const u8 = undefined;
     for (&lines_buf) |*l| l.* = long;
@@ -2969,7 +2971,7 @@ test "랩된 줄 다음의 번호가 본문과 같은 행에 선다 — gutter�
     //
     // **`visual_rows` 배열을 직접 보면 안 된다** — 그것은 본문이 채운 것이라 gutter를 망가뜨려도
     // 그대로다(적대적 검증이 그 뮤턴트를 통과시켰다). gutter가 실제로 그린 op의 y를 본다.
-    const long = "x" ** 200;
+    const long = array_repeat.repeat("x", 200);
     const props = testProps(&.{ long, "second" }, true);
     const w = build(props, bufs.scratch());
     try testing.expect(w.visual_rows > 2); // 앞 줄이 실제로 접혔다
@@ -3011,7 +3013,7 @@ test "긴 줄이 저장소를 다 써도 줄 번호가 남는다 — gutter 몫�
     // 예약을 지워도 캡처가 같다 — 그 상태로는 이 테스트가 아무것도 판정하지 못한다.
     s.text_bytes = s.text_bytes[0..256];
     // 탭이 섞인 긴 줄들. `expandTabs`가 원본을 빌리지 못해 scratch를 실제로 소비한다.
-    const heavy = "\t" ** 40 ++ "y" ** 300;
+    const heavy = array_repeat.repeat("\t", 40) ++ array_repeat.repeat("y", 300);
     const props = testProps(&.{ heavy, heavy, heavy }, true);
     const w = build(props, s);
 
@@ -3181,7 +3183,7 @@ test "저장소가 좁아도 죽지 않는다 — 잘린 사실을 알린다" {
     // 절단은 사실 **gutter 쪽**이었고, 그것은 `build`가 줄마다 20바이트 여유를 요구하던 결함이었다
     // (적대적 검증 2026-08-17에 고쳤다). 그 결함을 고치자 이 케이스가 통과할 수 없게 됐다 —
     // 이름이 말하는 계약을 실제로 재현하도록 입력을 고친다.
-    const long = "\t" ++ ("z" ** 500);
+    const long = "\t" ++ (array_repeat.repeat("z", 500));
     const w = build(testProps(&.{ long, long }, true), s);
     try testing.expect(w.ops >= 1); // 배경은 나온다
     try testing.expect(w.truncated);
@@ -3219,7 +3221,7 @@ test "B2 제품 재현 — 떨어진 검색 표식은 2560 op 저장소를 넘�
     var row_marks: [60]Mark = undefined;
     for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
     for (&lines, &marks) |*line, *line_marks| {
-        line.* = "x" ** 120;
+        line.* = array_repeat.repeat("x", 120);
         line_marks.* = &row_marks;
     }
     var props = testProps(&lines, false);
@@ -3263,7 +3265,7 @@ test "B2 제품 재현 — 떨어진 검색 표식은 2560 op 저장소를 넘�
 
 test "[측정] B2 붙은 검색 표식과 흩어진 표식의 op 수요" {
     const a = testing.allocator;
-    const lines = [_][]const u8{"x" ** 120} ** 80;
+    const lines = @as([80][]const u8, @splat(array_repeat.repeat("x", 120)));
     var dense: [120]Mark = undefined;
     var spaced: [60]Mark = undefined;
     var groups: [96]Mark = undefined;
@@ -3295,7 +3297,7 @@ test "[측정] B2 붙은 검색 표식과 흩어진 표식의 op 수요" {
         const written = build(props, bufs.scratch(runs, text_bytes));
         try testing.expect(!written.truncated);
         var search_ops: usize = 0;
-        var covered = [_]bool{false} ** (80 * 120);
+        var covered = @as([(80 * 120)]bool, @splat(false));
         for (ops[0..written.ops]) |op| {
             if (op != .quad or op.quad.fill_role != .search_match) continue;
             search_ops += 1;
@@ -3432,10 +3434,10 @@ test "B2 인접한 현재 매치는 일반 검색 강조에 흡수되지 않는�
 test "B2 재그리기 반례 — 첫 절단 호출이 RowCache 계수를 전진시킨다" {
     // 2048줄만 한 프레임에 센다. 절단 후 같은 props로 다시 build하면 마지막
     // 줄까지 세어 버려, 충분한 op으로 한 번만 그린 프레임과 scrollbar 축이 달라진다.
-    const lines = [_][]const u8{"x" ** 120} ** (count_chunk_lines + 1);
-    var one_prefix = [_]u32{0} ** (count_chunk_lines + 2);
-    var retry_prefix = [_]u32{0} ** (count_chunk_lines + 2);
-    var rollback_prefix = [_]u32{0} ** (count_chunk_lines + 2);
+    const lines = @as([(count_chunk_lines + 1)][]const u8, @splat(array_repeat.repeat("x", 120)));
+    var one_prefix = @as([(count_chunk_lines + 2)]u32, @splat(0));
+    var retry_prefix = @as([(count_chunk_lines + 2)]u32, @splat(0));
+    var rollback_prefix = @as([(count_chunk_lines + 2)]u32, @splat(0));
     var one_cache: RowCache = .{ .prefix = &one_prefix };
     var retry_cache: RowCache = .{ .prefix = &retry_prefix };
     var rollback_cache: RowCache = .{ .prefix = &rollback_prefix };
@@ -3659,17 +3661,17 @@ fn b2CheckStagedFrame(props_arg: Props) !void {
 }
 
 test "B2FW1 staged writer 전체 출력 — 랩·가로 이동·sticky·계수 캐시를 한 번만 지난다" {
-    const lines = [_][]const u8{"x" ** 120} ** (count_chunk_lines + 2);
+    const lines = @as([(count_chunk_lines + 2)][]const u8, @splat(array_repeat.repeat("x", 120)));
     var singles: [60]Mark = undefined;
     for (&singles, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
-    const search = [_][]const Mark{&singles} ** lines.len;
+    const search = @as([lines.len][]const Mark, @splat(&singles));
     const diagnostics = [_]diagnostic.Mark{.{ .start = 0, .len = 120, .level = .err }};
-    const diag_rows = [_][]const diagnostic.Mark{&diagnostics} ** lines.len;
+    const diag_rows = @as([lines.len][]const diagnostic.Mark, @splat(&diagnostics));
     const caret = [_]u32{1};
-    const carets = [_][]const u32{&caret} ** lines.len;
+    const carets = @as([lines.len][]const u32, @splat(&caret));
     const selection = [_]Mark{.{ .start = 3, .len = 12 }};
-    const selections = [_][]const Mark{&selection} ** lines.len;
-    const sticky = [_]StickyLine{.{ .number = 1, .bytes = "sticky" }} ** 8;
+    const selections = @as([lines.len][]const Mark, @splat(&selection));
+    const sticky = @as([8]StickyLine, @splat(.{ .number = 1, .bytes = "sticky" }));
     for (0..4) |case| {
         var props = testProps(&lines, case >= 2);
         props.search_marks = &search;
@@ -3728,12 +3730,12 @@ fn b2RoleCount(ops: []const draw.Op, role: tokens.ColorRole) usize {
 
 test "B2FW2 상한·OOM — 기본 표시 보존과 현재 검색 보장의 경계를 구분한다" {
     const a = testing.allocator;
-    const lines = [_][]const u8{"x" ** 120} ** 100;
+    const lines = @as([100][]const u8, @splat(array_repeat.repeat("x", 120)));
     var singles: [60]Mark = undefined;
     for (&singles, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
-    const search = [_][]const Mark{&singles} ** lines.len;
+    const search = @as([lines.len][]const Mark, @splat(&singles));
     const caret = [_]u32{0};
-    const carets = [_][]const u32{&caret} ** lines.len;
+    const carets = @as([lines.len][]const u32, @splat(&caret));
     var props = testProps(&lines, false);
     props.search_marks = &search;
     props.search_current = .{ .line = 79, .start = 0 };
@@ -3796,11 +3798,11 @@ test "B2FW2 상한·OOM — 기본 표시 보존과 현재 검색 보장의 경�
 
 test "B2FW8 두 번째 성장 실패 — 랩된 현재 검색의 모든 조각을 기본 층에서 보존한다" {
     const a = testing.allocator;
-    const lines = [_][]const u8{"x" ** 120} ** 100;
+    const lines = @as([100][]const u8, @splat(array_repeat.repeat("x", 120)));
     const mark = [_]Mark{.{ .start = 0, .len = 120 }};
-    const marks = [_][]const Mark{&mark} ** 100;
+    const marks = @as([100][]const Mark, @splat(&mark));
     const caret = [_]u32{0};
-    const carets = [_][]const u32{&caret} ** 100;
+    const carets = @as([100][]const u32, @splat(&caret));
     var props = testProps(&lines, true);
     props.visible_rows = 80;
     props.total_cols = 40;
@@ -3917,7 +3919,7 @@ fn b2MeasureStaged(name: []const u8, props: Props) !void {
     const retry_first = try b2BuildWithGrowingOps(a, props, right.scratch(writer_runs, writer_text), &retry, 200000);
     try testing.expect(!retry_first.written.truncated);
     const samples: u64 = 20;
-    var elapsed = [_]u64{0} ** 5;
+    var elapsed = @as([5]u64, @splat(0));
     var cold_growths: usize = 0;
     var cold_attempts: usize = 0;
     for (0..5) |variant| {
@@ -3962,23 +3964,23 @@ fn b2MeasureStaged(name: []const u8, props: Props) !void {
 
 test "[측정] B2FW3 실제 전체 프레임 — 소형·흩어진 검색·검색과 진단의 cold warm 비교" {
     if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest;
-    const small_lines = [_][]const u8{"ordinary code"} ** 20;
+    const small_lines = @as([20][]const u8, @splat("ordinary code"));
     var small = testProps(&small_lines, false);
     small.visible_rows = 20;
     try b2MeasureStaged("small", small);
     var marks: [150]Mark = undefined;
     for (&marks, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
-    const lines = [_][]const u8{"x" ** 300} ** 200;
-    const search = [_][]const Mark{marks[0..60]} ** 200;
+    const lines = @as([200][]const u8, @splat(array_repeat.repeat("x", 300)));
+    const search = @as([200][]const Mark, @splat(marks[0..60]));
     var spaced = testProps(&lines, false);
     spaced.search_marks = &search;
     spaced.visible_rows = 80;
     spaced.total_cols = 160;
     spaced.rect = .{ .x = 0, .y = 0, .w = 1280, .h = 1280 };
     try b2MeasureStaged("spaced", spaced);
-    const dense_search = [_][]const Mark{&marks} ** 200;
+    const dense_search = @as([200][]const Mark, @splat(&marks));
     const diag = [_]diagnostic.Mark{.{ .start = 0, .len = 300, .level = .err }};
-    const diag_rows = [_][]const diagnostic.Mark{&diag} ** 200;
+    const diag_rows = @as([200][]const diagnostic.Mark, @splat(&diag));
     spaced.search_marks = &dense_search;
     spaced.diag_marks = &diag_rows;
     spaced.visible_rows = 200;
@@ -3989,15 +3991,15 @@ test "[측정] B2FW3 실제 전체 프레임 — 소형·흩어진 검색·검�
 
 test "B2 전체 프레임 재시도 — 저장소 성장과 RowCache 복원이 한 번 그리기와 같다" {
     const a = testing.allocator;
-    const lines = [_][]const u8{"x" ** 120} ** (count_chunk_lines + 1);
+    const lines = @as([(count_chunk_lines + 1)][]const u8, @splat(array_repeat.repeat("x", 120)));
     const row_marks = blk: {
         var result: [60]Mark = undefined;
         for (&result, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
         break :blk result;
     };
-    const marks = [_][]const Mark{&row_marks} ** (count_chunk_lines + 1);
-    var baseline_prefix = [_]u32{0} ** (count_chunk_lines + 2);
-    var retry_prefix = [_]u32{0} ** (count_chunk_lines + 2);
+    const marks = @as([(count_chunk_lines + 1)][]const Mark, @splat(&row_marks));
+    var baseline_prefix = @as([(count_chunk_lines + 2)]u32, @splat(0));
+    var retry_prefix = @as([(count_chunk_lines + 2)]u32, @splat(0));
     var baseline_cache: RowCache = .{ .prefix = &baseline_prefix };
     var retry_cache: RowCache = .{ .prefix = &retry_prefix };
     var props = testProps(&lines, true);
@@ -4060,9 +4062,9 @@ test "B2 전체 프레임 재시도 — 저장소 성장과 RowCache 복원이 �
 
 test "B2 재시도 — 이미 일부 채운 RowCache의 다음 계수 구간도 복원한다" {
     const a = testing.allocator;
-    const lines = [_][]const u8{"x" ** 120} ** (count_chunk_lines + 101);
-    var baseline_prefix = [_]u32{0} ** (count_chunk_lines + 102);
-    var retry_prefix = [_]u32{0} ** (count_chunk_lines + 102);
+    const lines = @as([(count_chunk_lines + 101)][]const u8, @splat(array_repeat.repeat("x", 120)));
+    var baseline_prefix = @as([(count_chunk_lines + 102)]u32, @splat(0));
+    var retry_prefix = @as([(count_chunk_lines + 102)]u32, @splat(0));
     var props = testProps(&lines, true);
     props.total_cols = 20;
     props.visible_rows = 10;
@@ -4111,8 +4113,8 @@ test "B2 전체 프레임 상한과 할당 실패는 절단을 보고하며 부�
         for (&result, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
         break :blk result;
     };
-    const lines = [_][]const u8{"x" ** 120} ** 80;
-    const all_marks = [_][]const Mark{&marks} ** 80;
+    const lines = @as([80][]const u8, @splat(array_repeat.repeat("x", 120)));
+    const all_marks = @as([80][]const Mark, @splat(&marks));
     var props = testProps(&lines, false);
     props.search_marks = &all_marks;
     props.visible_rows = 80;
@@ -4156,9 +4158,9 @@ test "B2 상한의 우선순위 반례 — 밀집 검색이 caret 저장소를 �
     const a = testing.allocator;
     var row_marks: [60]Mark = undefined;
     for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
-    const lines = [_][]const u8{"x" ** 120} ** 80;
-    const marks = [_][]const Mark{&row_marks} ** 80;
-    const caret_rows = [_][]const u32{&.{1}} ** 80;
+    const lines = @as([80][]const u8, @splat(array_repeat.repeat("x", 120)));
+    const marks = @as([80][]const Mark, @splat(&row_marks));
+    const caret_rows = @as([80][]const u32, @splat(&.{1}));
     var props = testProps(&lines, false);
     props.search_marks = &marks;
     props.carets = &caret_rows;
@@ -4213,8 +4215,8 @@ test "[측정] B2 전체 프레임 재사용 op 저장소와 성장 재시도의
     const a = testing.allocator;
     var row_marks: [60]Mark = undefined;
     for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
-    const lines = [_][]const u8{"x" ** 120} ** 80;
-    const marks = [_][]const Mark{&row_marks} ** 80;
+    const lines = @as([80][]const u8, @splat(array_repeat.repeat("x", 120)));
+    const marks = @as([80][]const Mark, @splat(&row_marks));
     var props = testProps(&lines, false);
     props.search_marks = &marks;
     props.visible_rows = 80;
@@ -4316,12 +4318,12 @@ test "[측정] B2 캐시가 완성된 큰 문서는 접두합 복사를 건너�
 test "[측정] B2 큰 화면의 겹친 검색·진단은 op 메모리를 함께 요구한다" {
     if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest;
     const a = testing.allocator;
-    const lines = [_][]const u8{"x" ** 300} ** 200;
+    const lines = @as([200][]const u8, @splat(array_repeat.repeat("x", 300)));
     var find_row: [300]Mark = undefined;
     for (&find_row, 0..) |*m, i| m.* = .{ .start = @intCast(i), .len = 1 };
     const diag_row = [_]diagnostic.Mark{.{ .start = 0, .len = 300, .level = .err }};
-    const find_rows = [_][]const Mark{&find_row} ** 200;
-    const diag_rows = [_][]const diagnostic.Mark{&diag_row} ** 200;
+    const find_rows = @as([200][]const Mark, @splat(&find_row));
+    const diag_rows = @as([200][]const diagnostic.Mark, @splat(&diag_row));
     var props = testProps(&lines, false);
     props.visible_rows = 200;
     props.total_cols = 300;
@@ -4367,7 +4369,7 @@ const GrowMarkSink = struct {
 };
 
 test "B2 가변 writer의 할당 실패는 부분 결과와 실패 신호를 남긴다" {
-    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1, .resize_fail_index = 0 });
     var sink: GrowMarkSink = .{ .allocator = failing.allocator() };
     defer sink.list.deinit(sink.allocator);
     try sink.list.ensureTotalCapacityPrecise(sink.allocator, 1);
@@ -4393,7 +4395,7 @@ test "[측정] B2 검색 표식의 실제 고정·가변 writer가 같은 op을 
         for (&m, 0..) |*slot, i| slot.* = .{ .start = @intCast(i), .len = 1 };
         break :blk m;
     };
-    var props = testProps(&.{"x" ** 120}, false);
+    var props = testProps(&.{array_repeat.repeat("x", 120)}, false);
     props.total_cols = 160;
     props.visible_rows = 80;
     props.rect = .{ .x = 0, .y = 0, .w = 1280, .h = 1280 };
@@ -4407,7 +4409,7 @@ test "[측정] B2 검색 표식의 실제 고정·가변 writer가 같은 op을 
     try grow.list.ensureTotalCapacity(a, 2560);
     var columns: [4096]u8 = undefined;
     for (0..80) |row| {
-        const p: RowMarkPaint = .{ .line = "x" ** 120, .row_start_col = 0, .y = @intCast(row * 16), .marks = &marks, .role = .search_match, .alpha = search_alpha };
+        const p: RowMarkPaint = .{ .line = array_repeat.repeat("x", 120), .row_start_col = 0, .y = @intCast(row * 16), .marks = &marks, .role = .search_match, .alpha = search_alpha };
         paintRowMarksInto(props, layout, p, &columns, &fixed);
         paintRowMarksInto(props, layout, p, &columns, &grow);
     }
@@ -4420,7 +4422,7 @@ test "[측정] B2 검색 표식의 실제 고정·가변 writer가 같은 op을 
     for (0..samples) |_| {
         var sink: FixedMarkSink = .{ .out = fixed_ops, .truncated = &truncated };
         for (0..80) |row| {
-            const p: RowMarkPaint = .{ .line = "x" ** 120, .row_start_col = 0, .y = @intCast(row * 16), .marks = &marks, .role = .search_match, .alpha = search_alpha };
+            const p: RowMarkPaint = .{ .line = array_repeat.repeat("x", 120), .row_start_col = 0, .y = @intCast(row * 16), .marks = &marks, .role = .search_match, .alpha = search_alpha };
             paintRowMarksInto(props, layout, p, &columns, &sink);
         }
         try testing.expectEqual(fixed.n, sink.n);
@@ -4433,7 +4435,7 @@ test "[측정] B2 검색 표식의 실제 고정·가변 writer가 같은 op을 
         defer sink.list.deinit(a);
         try sink.list.ensureTotalCapacity(a, 2560);
         for (0..80) |row| {
-            const p: RowMarkPaint = .{ .line = "x" ** 120, .row_start_col = 0, .y = @intCast(row * 16), .marks = &marks, .role = .search_match, .alpha = search_alpha };
+            const p: RowMarkPaint = .{ .line = array_repeat.repeat("x", 120), .row_start_col = 0, .y = @intCast(row * 16), .marks = &marks, .role = .search_match, .alpha = search_alpha };
             paintRowMarksInto(props, layout, p, &columns, &sink);
         }
         try testing.expect(!sink.oom);
@@ -4446,14 +4448,14 @@ test "[측정] B2 검색 표식의 실제 고정·가변 writer가 같은 op을 
     defer reused.list.deinit(a);
     try reused.list.ensureTotalCapacity(a, 2560);
     for (0..80) |row| {
-        const p: RowMarkPaint = .{ .line = "x" ** 120, .row_start_col = 0, .y = @intCast(row * 16), .marks = &marks, .role = .search_match, .alpha = search_alpha };
+        const p: RowMarkPaint = .{ .line = array_repeat.repeat("x", 120), .row_start_col = 0, .y = @intCast(row * 16), .marks = &marks, .role = .search_match, .alpha = search_alpha };
         paintRowMarksInto(props, layout, p, &columns, &reused);
     }
     const warm_capacity = reused.list.capacity;
     for (0..samples) |_| {
         reused.list.clearRetainingCapacity();
         for (0..80) |row| {
-            const p: RowMarkPaint = .{ .line = "x" ** 120, .row_start_col = 0, .y = @intCast(row * 16), .marks = &marks, .role = .search_match, .alpha = search_alpha };
+            const p: RowMarkPaint = .{ .line = array_repeat.repeat("x", 120), .row_start_col = 0, .y = @intCast(row * 16), .marks = &marks, .role = .search_match, .alpha = search_alpha };
             paintRowMarksInto(props, layout, p, &columns, &reused);
         }
         try testing.expectEqual(fixed.n, reused.list.items.len);
@@ -4482,7 +4484,7 @@ test "[측정] B2 밀집 화면의 한 번 그리기·절단 뒤 재그리기·�
     var row_marks: [60]Mark = undefined;
     for (&row_marks, 0..) |*m, i| m.* = .{ .start = @intCast(i * 2), .len = 1 };
     for (&lines, &marks) |*line, *line_marks| {
-        line.* = "x" ** 120;
+        line.* = array_repeat.repeat("x", 120);
         line_marks.* = &row_marks;
     }
     var props = testProps(&lines, false);
@@ -5862,7 +5864,7 @@ test "CRT2 커서가 많아도 스크롤바가 살아남는다 (예약이 실제
     // 그러면 세로는 문서가 다 들어가서, 가로는 `showsHorizontalBar`가 `content_max_cols`를 요구해서
     // **둘 다 애초에 안 그려진다** — 판정자가 "굶었다"와 "원래 없다"를 구분하지 못했다(실측:
     // 예약으로 남은 자리 2칸이 멀쩡히 비어 있는데 `bar_n == 0`이었다).
-    const lines = [_][]const u8{ "x" ** 400, "y" ** 400, "z" ** 400, "w" ** 400 };
+    const lines = [_][]const u8{ array_repeat.repeat("x", 400), array_repeat.repeat("y", 400), array_repeat.repeat("z", 400), array_repeat.repeat("w", 400) };
     var many: [400]u32 = undefined;
     for (&many, 0..) |*c, i| c.* = @intCast(i);
     const carets = [_][]const u32{ &many, &.{}, &.{}, &.{} };
@@ -6444,7 +6446,7 @@ test "LHL2 gutter·all — gutter 상자는 선택과 무관하고, all 이면 g
 
 test "LHL3 커서가 여럿이면 줄마다, 랩이면 caret 이 선 그 조각만 — caret 과 같은 행 (§5.1b)" {
     // 랩: 본문 폭을 넘는 줄 하나 — caret 을 **가운데 조각**에 둔다(첫·끝 조각이면 「첫 행」·「마지막 행」 규칙과 겹친다).
-    const long = "a" ** 120;
+    const long = array_repeat.repeat("a", 120);
     const lines = [_][]const u8{ "top", long, "end" };
     var props = testProps(&lines, true);
     const layout = geometry.compute(props.total_cols, props.total_lines, .{});
@@ -6477,7 +6479,7 @@ test "LHL3 커서가 여럿이면 줄마다, 랩이면 caret 이 선 그 조각�
 }
 
 test "LHL4 가로 스크롤 — 굴렸으면 왼쪽 변 없음, 긴 줄 끝까지 안 굴렸으면 오른쪽 변 없음; caret 이 가로로 밖이어도 줄은 강조 (§5.1b ③)" {
-    const long = "b" ** 200;
+    const long = array_repeat.repeat("b", 200);
     const lines = [_][]const u8{ "x", long };
     const caret_rows = [_][]const u32{ &.{}, &.{0} }; // 줄 머리 — 굴리면 화면 밖
     var props = testProps(&lines, false);
@@ -6658,7 +6660,7 @@ test "IGF1 단계마다 (k−1)×간격 열의 1px 선 — 줄의 단계 수만�
 
 test "IGF2 랩은 첫 조각에만 · 위젯 행 없음 · 가로로 굴리면 화면 밖 선은 건너뛰고 본문 폭에서 멈춘다 (§5.1c)" {
     // 랩: 긴 줄의 이어짐 조각에는 선이 없다(우리 이어짐 행은 0 열에서 시작 — VS Code `BlockSubsequent`)
-    const long = "  " ++ "x" ** 120;
+    const long = "  " ++ array_repeat.repeat("x", 120);
     const lines = [_][]const u8{ long, "  y" };
     var props = testProps(&lines, true);
     const rows = [_]GuideLine{ .{ .count = 1 }, .{ .count = 1 } };
@@ -6674,7 +6676,7 @@ test "IGF2 랩은 첫 조각에만 · 위젯 행 없음 · 가로로 굴리면 �
 
     // **들여쓰기가 한 행 폭보다 깊어도** 이어짐 조각에는 없다 — 보통은 이어짐의 시작 열이 들여쓰기보다 뒤라 「화면 왼쪽 밖」 검사가 대신 걸러
     // 조각 검사를 지워도 초록이었다(적대적 1회차 F1). 70 칸 들여쓰기는 첫 행 폭을 넘어 둘째 행으로 이어진다.
-    const deep_indent = " " ** 70 ++ "x";
+    const deep_indent = array_repeat.repeat(" ", 70) ++ "x";
     const dl = [_][]const u8{deep_indent};
     var pd = testProps(&dl, true);
     const drow = [_]GuideLine{.{ .count = 35 }};
@@ -6700,7 +6702,7 @@ test "IGF2 랩은 첫 조각에만 · 위젯 행 없음 · 가로로 굴리면 �
     try testing.expectEqual(@as(i32, 2 * 16), wq[0].rect.y); // 행 1 = 위젯, 행 2 = `  b`
 
     // 가로 스크롤: 첫 열 3 이면 열 0·2 는 화면 밖, 열 4·6 이 화면 1·3 에
-    const deep = [_][]const u8{"        z" ++ "q" ** 200};
+    const deep = [_][]const u8{"        z" ++ array_repeat.repeat("q", 200)};
     var ph = testProps(&deep, false);
     ph.content_max_cols = 209;
     ph.first_col = 3;
@@ -6899,7 +6901,7 @@ test "WSF2 공백 기호는 저장소를 맨 나중에 받는다 — 모자라�
 
 test "WSF3 공백이 작업 칸보다 많은 긴 줄 — 가로로 민 창과 랩의 뒤 조각에도 기호가 선다 (§5.1e)" {
     // 공백 700 개 — 판정자 작업 칸(4096 byte = 자리·열 쌍 512)을 넘는다. 줄 앞에서부터 담으면 뒤쪽 창이 빈다.
-    const line = "a " ** 700;
+    const line = array_repeat.repeat("a ", 700);
     const lines = [_][]const u8{line};
     var props = testProps(&lines, false);
     props.render_whitespace = .all;
@@ -6925,7 +6927,7 @@ test "WSF3 공백이 작업 칸보다 많은 긴 줄 — 가로로 민 창과 �
     const rows = b2.visual_rows[0..w2.visual_rows];
     try testing.expectEqual(@as(usize, 4), rows.len);
     try testing.expectEqual(@as(u32, 25), rows[0].piece);
-    var per_row = [_]usize{0} ** 4;
+    var per_row = @as([4]usize, @splat(0));
     for (g2) |g| {
         try testing.expect((g[0] + rows[g[1]].start_col) % 2 == 1);
         per_row[g[1]] += 1;
@@ -6938,7 +6940,7 @@ test "WSF3 공백이 작업 칸보다 많은 긴 줄 — 가로로 민 창과 �
     // ⑶ **작업 칸이 한 묶음을 못 담으면 묶음을 끊는다** — 작업 칸 256 byte(쌍 32)에 `a ` × 98 을 49 열로 접은 네 행(행마다 공백 24~25).
     // 묶음을 안 끊으면 첫 행이 24 를 쓰고 둘째 행이 남은 8 만, 셋째·넷째는 0 이다.
     {
-        const short = "a " ** 98;
+        const short = array_repeat.repeat("a ", 98);
         const short_lines = [_][]const u8{short};
         var p3 = testProps(&short_lines, true);
         p3.render_whitespace = .all;
@@ -6949,7 +6951,7 @@ test "WSF3 공백이 작업 칸보다 많은 긴 줄 — 가로로 민 창과 �
         const rows3 = b3.visual_rows[0..w3.visual_rows];
         try testing.expectEqual(@as(usize, 4), rows3.len);
         const g3 = whitespaceGlyphs(p3, b3.ops[0..w3.ops], &got_buf);
-        var per3 = [_]usize{0} ** 4;
+        var per3 = @as([4]usize, @splat(0));
         for (g3) |g| per3[g[1]] += 1;
         for (rows3, per3) |v, c| {
             const from = v.start_col;
@@ -6987,9 +6989,9 @@ test "WSF4 공백 표시의 열 — 스크롤한 줄 · 탭 폭 · 인레이 · 
         try testing.expectEqualSlices([3]u32, &.{.{ 4, 0, 0xB7 }}, whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf));
         // **인레이가 공백을 화면 오른쪽 밖으로 민다** — 창 끝을 인레이까지 세어 걸으므로(`WSF7`) 밖의 공백은 모으지도 않는다. `a` + 공백 10 에
         // 힌트 45 칸: 공백은 46..55 열, 폭 49 라 46·47·48 셋만.
-        const long_hint = [_]content.Inlay{.{ .at = 1, .text = "x" ** 45 }};
+        const long_hint = [_]content.Inlay{.{ .at = 1, .text = array_repeat.repeat("x", 45) }};
         const rows2 = [_][]const content.Inlay{&long_hint};
-        const lines2 = [_][]const u8{"a" ++ " " ** 10};
+        const lines2 = [_][]const u8{"a" ++ array_repeat.repeat(" ", 10)};
         props.lines = &lines2;
         props.line_inlays = .{ .rows = &rows2 };
         const w2 = build(props, b.scratch());
@@ -7008,7 +7010,7 @@ test "WSF4 공백 표시의 열 — 스크롤한 줄 · 탭 폭 · 인레이 · 
     }
     // ⑷ **선택 + 랩 · 선택 + 가로 스크롤** — `ab ` × 40 에서 [40, 60) 를 골랐다. 공백(3k + 2)마다 그 행의 열에.
     {
-        const line = "ab " ** 40;
+        const line = array_repeat.repeat("ab ", 40);
         const lines = [_][]const u8{line};
         const sel_row = [_]Mark{.{ .start = 40, .len = 20 }};
         const sels = [_][]const Mark{&sel_row};
@@ -7037,7 +7039,7 @@ test "WSF4 공백 표시의 열 — 스크롤한 줄 · 탭 폭 · 인레이 · 
     // ⑸ **랩 행의 trailing** — `b` + 공백 100 을 49 열로 접으면 [0, 49) · [49, 98) · [98, 101). 이어지는 두 행에는 없고(VS Code 는 이어지는
     // 랩 행에 뒤 공백을 안 그린다), 공백뿐인 끝 행은 전부. 줄 전체로 가르면 세 행 모두 선다.
     {
-        const line = "b" ++ " " ** 100;
+        const line = "b" ++ array_repeat.repeat(" ", 100);
         const lines = [_][]const u8{line};
         var props = testProps(&lines, true);
         props.render_whitespace = .trailing;
@@ -7048,7 +7050,7 @@ test "WSF4 공백 표시의 열 — 스크롤한 줄 · 탭 폭 · 인레이 · 
     }
     // ⑹ **이어진 공백은 op 하나** — 4 칸 · 3 칸 덩이는 op 둘, 탭은 따로. 70 칸 덩이는 run 상한(64)에서 둘로 갈린다.
     {
-        const lines = [_][]const u8{ "    a   b\t c", " " ** 70 };
+        const lines = [_][]const u8{ "    a   b\t c", array_repeat.repeat(" ", 70) };
         var props = testProps(&lines, false);
         props.render_whitespace = .all;
         var b: TestBuffers = .{};
@@ -7182,7 +7184,7 @@ test "WSF7 인레이 + 랩 — 행 창은 인레이 폭까지 세어 걷는다: 
         if (wrap) props.first_piece = rnd.uintAtMost(u32, 3) else props.first_col = rnd.uintAtMost(u32, 40);
         const mode = modes[rnd.uintLessThan(usize, modes.len)];
         props.render_whitespace = mode;
-        const sel_rows = [_][]const Mark{&.{.{ .start = 0, .len = 96 }}} ** 3;
+        const sel_rows = @as([3][]const Mark, @splat(&.{.{ .start = 0, .len = 96 }}));
         props.selection_marks = &sel_rows;
         var b: TestBuffers = .{};
         var sc = b.scratch();
@@ -7515,7 +7517,7 @@ test "RB7 글자가 한 칸 추정치를 넘는 줄에서도 번호 글자 몫�
     const ops = try a.alloc(draw.Op, 4000);
     defer a.free(ops);
     var bufs: WideBuffers = .{ .ops = ops };
-    const heavy = "\t" ++ ("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}" ** 30);
+    const heavy = "\t" ++ (array_repeat.repeat("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}", 30));
     var lines: [40][]const u8 = undefined;
     for (&lines) |*l| l.* = heavy;
     var props = testProps(&lines, false);
@@ -7581,7 +7583,7 @@ test "RB8 공백 표시는 run·글자 몫을 쓰지 않는다 — 본문 위에
     // 인레이 힌트도 섞는다 — 힌트 칸은 본문 run 을 쓰고, 탭 뒤 힌트가 랩 경계에 탭을 걸치게 한다(이 판정자를 세우다 찾은 공백 표시 결함의
     // 모양 — `WSF7`).
     const a = testing.allocator;
-    const lines = [_][]const u8{ " \t a  \t  b\t\t c   d", "\t\t\t\t", "   x   y   z   ", "a\tb\tc\td\te" } ** 10;
+    const lines = array_repeat.repeat([_][]const u8{ " \t a  \t  b\t\t c   d", "\t\t\t\t", "   x   y   z   ", "a\tb\tc\td\te" }, 10);
     const hints = [_]content.Inlay{ .{ .at = 1, .text = ": u32" }, .{ .at = 3, .text = ": T" } };
     var hint_rows: [lines.len][]const content.Inlay = undefined;
     for (&hint_rows, 0..) |*h, i| h.* = if (i % 2 == 1) &hints else &.{};

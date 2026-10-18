@@ -1,12 +1,14 @@
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const builtin = @import("builtin");
 
 const child_fd: std.c.fd_t = 198;
 
 const ChildPaths = if (builtin.is_test) struct {
-    pub export var maru_cr0b_gui_bootstrap_child_path: [1024]u8 = [_]u8{0} ** 1024;
+    pub export var maru_cr0b_gui_bootstrap_child_path: [1024]u8 = @as([1024]u8, @splat(0));
     pub export var maru_cr0b_gui_bootstrap_child_path_len: usize = 0;
-    pub export var maru_cr0b_daemon_bootstrap_child_path: [1024]u8 = [_]u8{0} ** 1024;
+    pub export var maru_cr0b_daemon_bootstrap_child_path: [1024]u8 = @as([1024]u8, @splat(0));
     pub export var maru_cr0b_daemon_bootstrap_child_path_len: usize = 0;
 } else struct {};
 
@@ -25,7 +27,7 @@ pub const Transcript = extern struct {
 
     pub fn valid(value: Transcript) bool {
         return value.pid != 0 and (value.role_raw == 1 or value.role_raw == 2) and
-            std.mem.eql(u8, &value.reserved, &[_]u8{0} ** 3) and value.process_nonce != 0 and
+            std.mem.eql(u8, &value.reserved, &array_repeat.repeat(&[_]u8{0}, 3)) and value.process_nonce != 0 and
             value.service_process_nonce == value.process_nonce and value.app_instance_nonce != 0 and
             value.runtime_generation != 0 and value.service_generation != 0 and
             value.runtime_generation != value.service_generation and value.last_issued_sequence == 0;
@@ -131,7 +133,7 @@ fn runChild(path: [:0]const u8, expected_tests: [*:0]const u8, expected_role: Ro
     }
     const status_raw: u32 = @bitCast(status);
     if (!std.c.W.IFEXITED(status_raw) or std.c.W.EXITSTATUS(status_raw) != 0 or
-        !Transcript.valid(value) or value.role_raw != @intFromEnum(expected_role))
+        !Transcript.valid(value) or value.role_raw != @backingInt(expected_role))
         return error.TestUnexpectedResult;
     return value;
 }
@@ -140,7 +142,7 @@ test "CR0b bootstrap transcript 계약은 pointer-free scalar domain만 보존�
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(Transcript));
     try std.testing.expect(Transcript.valid(.{
         .pid = 1,
-        .role_raw = @intFromEnum(Role.gui),
+        .role_raw = @backingInt(Role.gui),
         .reserved = .{ 0, 0, 0 },
         .process_nonce = 2,
         .service_process_nonce = 2,
@@ -161,7 +163,7 @@ test "CR0b bootstrap transcript 계약은 pointer-free scalar domain만 보존�
         .last_issued_sequence = 0,
     };
     try std.testing.expect(!Transcript.valid(wrong_role));
-    wrong_role.role_raw = @intFromEnum(Role.daemon);
+    wrong_role.role_raw = @backingInt(Role.daemon);
     wrong_role.reserved[1] = 1;
     try std.testing.expect(!Transcript.valid(wrong_role));
 }

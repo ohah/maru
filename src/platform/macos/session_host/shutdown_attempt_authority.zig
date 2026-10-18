@@ -50,8 +50,8 @@ pub fn prepare(
         .thread_id = thread_id,
         .close_request_generation = close_request_generation,
         .target_digest = target_digest,
-        .disposition_raw = @intFromEnum(disposition),
-        .lifecycle_raw = @intFromEnum(Lifecycle.ready),
+        .disposition_raw = @backingInt(disposition),
+        .lifecycle_raw = @backingInt(Lifecycle.ready),
         .deadline_ns = deadline_ns,
     };
     out.seal = try authoritySeal(out);
@@ -60,11 +60,11 @@ pub fn prepare(
 pub fn valid(authority: *const ShutdownAttemptAuthority) bool {
     if (authority.pid == 0 or authority.process_nonce == 0 or authority.thread_id != @as(u64, @intCast(std.Thread.getCurrentId()))) return false;
     _ = switch (authority.lifecycle_raw) {
-        1...3 => @as(Lifecycle, @enumFromInt(authority.lifecycle_raw)),
+        1...3 => @as(Lifecycle, @fromBackingInt(@intCast(authority.lifecycle_raw))),
         else => return false,
     };
     _ = switch (authority.disposition_raw) {
-        1...2 => @as(close_authority.CloseDisposition, @enumFromInt(authority.disposition_raw)),
+        1...2 => @as(close_authority.CloseDisposition, @fromBackingInt(@intCast(authority.disposition_raw))),
         else => return false,
     };
     const expected = authoritySeal(authority) catch return false;
@@ -80,7 +80,7 @@ pub fn issueConnection(
     inventory_attempt: contract.InventoryAttempt,
     transcript_digest: contract.Digest,
 ) Error!void {
-    if (!valid(authority) or authority.lifecycle_raw != @intFromEnum(Lifecycle.ready) or
+    if (!valid(authority) or authority.lifecycle_raw != @backingInt(Lifecycle.ready) or
         !std.meta.eql(out.*, contract.ShutdownConnectionReceipt{})) return error.InvalidOwner;
     if (now_ns >= authority.deadline_ns) return error.Deadline;
     if (connection_identity == 0 or std.mem.allEqual(u8, &transcript_digest, 0) or !validOperation(operation, inventory_attempt))
@@ -104,27 +104,27 @@ pub fn issueConnection(
         .attempt_key = attempt_key,
         .connection_identity = connection_identity,
         .lease_generation = authority.connection_lease_generation,
-        .operation_raw = @intFromEnum(operation),
-        .inventory_attempt_raw = @intFromEnum(inventory_attempt),
+        .operation_raw = @backingInt(operation),
+        .inventory_attempt_raw = @backingInt(inventory_attempt),
         .transcript_digest = transcript_digest,
     };
     out.seal = try receiptSeal(out);
-    authority.lifecycle_raw = @intFromEnum(Lifecycle.connection_live);
+    authority.lifecycle_raw = @backingInt(Lifecycle.connection_live);
     authority.seal = try authoritySeal(authority);
 }
 
 pub fn validReceipt(authority: *const ShutdownAttemptAuthority, receipt: *const contract.ShutdownConnectionReceipt) bool {
-    if (!valid(authority) or authority.lifecycle_raw != @intFromEnum(Lifecycle.connection_live) or
+    if (!valid(authority) or authority.lifecycle_raw != @backingInt(Lifecycle.connection_live) or
         receipt.self_addr != @intFromPtr(receipt) or receipt.authority_addr != @intFromPtr(authority) or
         receipt.pid != authority.pid or receipt.process_nonce != authority.process_nonce or receipt.thread_id != authority.thread_id or
         receipt.lease_generation != authority.connection_lease_generation or receipt.consumed_raw != 0 or
         !std.meta.eql(receipt.attempt_key, key(authority))) return false;
     const operation: contract.ShutdownOperation = switch (receipt.operation_raw) {
-        0...1 => @enumFromInt(receipt.operation_raw),
+        0...1 => @fromBackingInt(@intCast(receipt.operation_raw)),
         else => return false,
     };
     const inventory: contract.InventoryAttempt = switch (receipt.inventory_attempt_raw) {
-        0...2 => @enumFromInt(receipt.inventory_attempt_raw),
+        0...2 => @fromBackingInt(@intCast(receipt.inventory_attempt_raw)),
         else => return false,
     };
     if (!validOperation(operation, inventory)) return false;
@@ -139,13 +139,13 @@ pub fn consumeConnection(
 ) Error!void {
     if (!validReceipt(authority, receipt)) {
         // 게시된 connection 권위가 살아 있는 동안의 drift는 어느 row도 추측해 회수할 수 없다.
-        if (valid(authority) and authority.lifecycle_raw == @intFromEnum(Lifecycle.connection_live))
+        if (valid(authority) and authority.lifecycle_raw == @backingInt(Lifecycle.connection_live))
             process_seal.fatalIntegrity(.proof_loss);
         return error.InvalidOwner;
     }
     receipt.consumed_raw = 1;
     receipt.seal = contract.zero_digest;
-    authority.lifecycle_raw = @intFromEnum(if (terminal) Lifecycle.terminal else Lifecycle.ready);
+    authority.lifecycle_raw = @backingInt(if (terminal) Lifecycle.terminal else Lifecycle.ready);
     authority.outcome_digest = receipt.transcript_digest;
     authority.seal = try authoritySeal(authority);
 }
@@ -155,10 +155,10 @@ pub fn publishOutcome(
     attempt_key: contract.ShutdownAttemptKey,
     outcome_digest: contract.Digest,
 ) Error!void {
-    if (!valid(authority) or authority.lifecycle_raw != @intFromEnum(Lifecycle.ready) or
+    if (!valid(authority) or authority.lifecycle_raw != @backingInt(Lifecycle.ready) or
         !std.meta.eql(attempt_key, key(authority)) or std.mem.allEqual(u8, &outcome_digest, 0)) return error.InvalidOwner;
     authority.outcome_digest = outcome_digest;
-    authority.lifecycle_raw = @intFromEnum(Lifecycle.terminal);
+    authority.lifecycle_raw = @backingInt(Lifecycle.terminal);
     authority.seal = try authoritySeal(authority);
 }
 
@@ -211,7 +211,7 @@ fn receiptSeal(receipt: *const contract.ShutdownConnectionReceipt) process_seal.
 
 fn applyProofLossStage(authority: *ShutdownAttemptAuthority, stage: ProofLossStage) void {
     if (!builtin.is_test or proof_loss_authority_addr != @intFromPtr(authority) or
-        proof_loss_stage_raw != @intFromEnum(stage)) return;
+        proof_loss_stage_raw != @backingInt(stage)) return;
     proof_loss_authority_addr = 0;
     proof_loss_stage_raw = 0;
     switch (stage) {
@@ -239,14 +239,14 @@ pub const testing = if (@import("builtin").is_test) struct {
     pub fn armProofLoss(authority: *ShutdownAttemptAuthority, stage: ProofLossStage) void {
         std.debug.assert(proof_loss_authority_addr == 0 and proof_loss_stage_raw == 0);
         proof_loss_authority_addr = @intFromPtr(authority);
-        proof_loss_stage_raw = @intFromEnum(stage);
+        proof_loss_stage_raw = @backingInt(stage);
     }
 } else struct {};
 
 fn fixture() !ShutdownAttemptAuthority {
     try ensureReady();
     var authority: ShutdownAttemptAuthority = .{};
-    try prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     return authority;
 }
 
@@ -257,41 +257,41 @@ test "C3-3b6 attempt 권위는 copied target key를 거부한다" {
 
 test "C3-3b6 attempt 권위는 cross-target outcome을 거부한다" {
     var authority: ShutdownAttemptAuthority = .{};
-    try prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     var wrong = key(&authority);
     wrong.target_digest[0] ^= 1;
-    try std.testing.expectError(error.InvalidOwner, publishOutcome(&authority, wrong, [_]u8{4} ** 32));
+    try std.testing.expectError(error.InvalidOwner, publishOutcome(&authority, wrong, @as([32]u8, @splat(4))));
 }
 
 test "C3-3b6 attempt 권위는 old connection receipt replay를 거부한다" {
     var authority: ShutdownAttemptAuthority = .{};
-    try prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     var receipt: contract.ShutdownConnectionReceipt = .{};
-    try issueConnection(&authority, &receipt, 1, 9, .terminate, .none, [_]u8{5} ** 32);
+    try issueConnection(&authority, &receipt, 1, 9, .terminate, .none, @as([32]u8, @splat(5)));
     try consumeConnection(&authority, &receipt, false);
     try std.testing.expectError(error.InvalidOwner, consumeConnection(&authority, &receipt, false));
 }
 
 test "C3-3b6 attempt 권위는 detach와 terminate disposition 우선순위를 보존한다" {
     var authority: ShutdownAttemptAuthority = .{};
-    try prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
-    try std.testing.expectEqual(@intFromEnum(close_authority.CloseDisposition.terminate_host), authority.disposition_raw);
+    try prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
+    try std.testing.expectEqual(@backingInt(close_authority.CloseDisposition.terminate_host), authority.disposition_raw);
 }
 
 test "C3-3b6 attempt 권위는 inventory operation과 attempt 종류를 exact 결속한다" {
     var authority: ShutdownAttemptAuthority = .{};
-    try prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     var receipt: contract.ShutdownConnectionReceipt = .{};
-    try std.testing.expectError(error.InvalidRequest, issueConnection(&authority, &receipt, 1, 9, .terminate, .retry, [_]u8{5} ** 32));
-    try issueConnection(&authority, &receipt, 1, 9, .inventory, .initial, [_]u8{5} ** 32);
+    try std.testing.expectError(error.InvalidRequest, issueConnection(&authority, &receipt, 1, 9, .terminate, .retry, @as([32]u8, @splat(5))));
+    try issueConnection(&authority, &receipt, 1, 9, .inventory, .initial, @as([32]u8, @splat(5)));
 }
 
 test "C3-3b6 attempt 권위는 initial과 retry connection을 exact once 소비한다" {
     var authority: ShutdownAttemptAuthority = .{};
-    try prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     inline for (.{ contract.InventoryAttempt.initial, contract.InventoryAttempt.retry }) |attempt| {
         var receipt: contract.ShutdownConnectionReceipt = .{};
-        try issueConnection(&authority, &receipt, 1, 9, .inventory, attempt, [_]u8{5} ** 32);
+        try issueConnection(&authority, &receipt, 1, 9, .inventory, attempt, @as([32]u8, @splat(5)));
         try consumeConnection(&authority, &receipt, false);
     }
     try std.testing.expectEqual(@as(u64, 2), authority.connection_lease_generation);
@@ -299,10 +299,10 @@ test "C3-3b6 attempt 권위는 initial과 retry connection을 exact once 소비�
 
 test "C3-3b6 attempt 권위는 terminate 세 번까지만 destructive request를 허용한다" {
     var authority: ShutdownAttemptAuthority = .{};
-    try prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     for (0..3) |_| {
         var receipt: contract.ShutdownConnectionReceipt = .{};
-        try issueConnection(&authority, &receipt, 1, 9, .terminate, .none, [_]u8{5} ** 32);
+        try issueConnection(&authority, &receipt, 1, 9, .terminate, .none, @as([32]u8, @splat(5)));
         try consumeConnection(&authority, &receipt, false);
     }
     try std.testing.expectEqual(@as(u64, 3), authority.attempt_generation);
@@ -310,32 +310,32 @@ test "C3-3b6 attempt 권위는 terminate 세 번까지만 destructive request를
 
 test "C3-3b6 attempt 권위는 네 번째 destructive request를 보내지 않는다" {
     var authority: ShutdownAttemptAuthority = .{};
-    try prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     for (0..3) |_| {
         var receipt: contract.ShutdownConnectionReceipt = .{};
-        try issueConnection(&authority, &receipt, 1, 9, .terminate, .none, [_]u8{5} ** 32);
+        try issueConnection(&authority, &receipt, 1, 9, .terminate, .none, @as([32]u8, @splat(5)));
         try consumeConnection(&authority, &receipt, false);
     }
     var fourth: contract.ShutdownConnectionReceipt = .{};
-    try std.testing.expectError(error.AttemptCap, issueConnection(&authority, &fourth, 1, 10, .terminate, .none, [_]u8{6} ** 32));
+    try std.testing.expectError(error.AttemptCap, issueConnection(&authority, &fourth, 1, 10, .terminate, .none, @as([32]u8, @splat(6))));
     try std.testing.expect(std.meta.eql(fourth, contract.ShutdownConnectionReceipt{}));
 }
 
 test "C3-3b6 attempt 권위는 global deadline 뒤 sibling을 bounded 결과로 진행한다" {
     var authority: ShutdownAttemptAuthority = .{};
-    try prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     var receipt: contract.ShutdownConnectionReceipt = .{};
-    try std.testing.expectError(error.Deadline, issueConnection(&authority, &receipt, 100, 9, .terminate, .none, [_]u8{5} ** 32));
-    try std.testing.expectEqual(@intFromEnum(Lifecycle.ready), authority.lifecycle_raw);
+    try std.testing.expectError(error.Deadline, issueConnection(&authority, &receipt, 100, 9, .terminate, .none, @as([32]u8, @splat(5))));
+    try std.testing.expectEqual(@backingInt(Lifecycle.ready), authority.lifecycle_raw);
 }
 
 test "C3-3b6 attempt 권위는 max attempt에서 outcome 없이 cap을 반환한다" {
     var authority: ShutdownAttemptAuthority = .{};
-    try prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     authority.attempt_generation = std.math.maxInt(u64);
     authority.seal = try authoritySeal(&authority);
     var receipt: contract.ShutdownConnectionReceipt = .{};
-    try std.testing.expectError(error.AttemptCap, issueConnection(&authority, &receipt, 1, 9, .terminate, .none, [_]u8{5} ** 32));
+    try std.testing.expectError(error.AttemptCap, issueConnection(&authority, &receipt, 1, 9, .terminate, .none, @as([32]u8, @splat(5))));
     try std.testing.expectEqual(contract.zero_digest, authority.outcome_digest);
 }
 
@@ -344,11 +344,11 @@ const ProofLossCase = enum { receipt_seal_drift, attempt_generation_overflow, le
 fn runProofLossChild(case: ProofLossCase, marker_fd: std.c.fd_t) noreturn {
     ensureReady() catch std.c._exit(121);
     var authority: ShutdownAttemptAuthority = .{};
-    prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100) catch std.c._exit(122);
+    prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100) catch std.c._exit(122);
     var receipt: contract.ShutdownConnectionReceipt = .{};
     switch (case) {
         .receipt_seal_drift => {
-            issueConnection(&authority, &receipt, 1, 9, .inventory, .initial, [_]u8{5} ** 32) catch std.c._exit(123);
+            issueConnection(&authority, &receipt, 1, 9, .inventory, .initial, @as([32]u8, @splat(5))) catch std.c._exit(123);
             receipt.seal[0] ^= 1;
             if (std.c.write(marker_fd, &[_]u8{0x61}, 1) != 1) std.c._exit(125);
             consumeConnection(&authority, &receipt, false) catch std.c._exit(124);
@@ -356,12 +356,12 @@ fn runProofLossChild(case: ProofLossCase, marker_fd: std.c.fd_t) noreturn {
         .attempt_generation_overflow => {
             testing.armProofLoss(&authority, .attempt_generation_overflow);
             if (std.c.write(marker_fd, &[_]u8{0x62}, 1) != 1) std.c._exit(125);
-            issueConnection(&authority, &receipt, 1, 9, .terminate, .none, [_]u8{5} ** 32) catch std.c._exit(124);
+            issueConnection(&authority, &receipt, 1, 9, .terminate, .none, @as([32]u8, @splat(5))) catch std.c._exit(124);
         },
         .lease_generation_overflow => {
             testing.armProofLoss(&authority, .lease_generation_overflow);
             if (std.c.write(marker_fd, &[_]u8{0x63}, 1) != 1) std.c._exit(125);
-            issueConnection(&authority, &receipt, 1, 9, .inventory, .initial, [_]u8{5} ** 32) catch std.c._exit(124);
+            issueConnection(&authority, &receipt, 1, 9, .inventory, .initial, @as([32]u8, @splat(5))) catch std.c._exit(124);
         },
     }
     std.c._exit(126);

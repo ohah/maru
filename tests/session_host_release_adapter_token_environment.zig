@@ -1,6 +1,8 @@
 //! The official Release executable reads one credential name and delegates value policy to the
 //! existing transport validator. Fixtures use inert bytes and never inspect a real credential.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const token_environment = @import("release_adapter_token_environment");
 const transport = @import("release_adapter_github_transport");
@@ -40,7 +42,7 @@ test "empty control NUL and cap plus one reuse transport invalid-token policy" {
         "line\nfeed",
         "delete\x7fbyte",
         "nul\x00byte",
-        "x" ** (transport.max_token_bytes + 1),
+        array_repeat.repeat("x", (transport.max_token_bytes + 1)),
     };
     for (invalid) |value| {
         var lookup = Lookup{ .value = value };
@@ -50,7 +52,7 @@ test "empty control NUL and cap plus one reuse transport invalid-token policy" {
 }
 
 test "the transport maximum remains accepted without allocation or copying" {
-    const maximum = "t" ** transport.max_token_bytes;
+    const maximum = array_repeat.repeat("t", transport.max_token_bytes);
     var lookup = Lookup{ .value = maximum };
     const token = try token_environment.read(&lookup);
     try std.testing.expectEqual(transport.max_token_bytes, token.len);

@@ -66,7 +66,7 @@ pub const Registration = struct {
     root: ?[]const u8 = null,
     /// `.filters = &.{ "A", "B" }` 의 원소.
     filters: []const []const u8 = &.{},
-    /// `.optimize = …` 의 **표현식 텍스트**(`optimize`·`.ReleaseFast`·`b3_optimize` 등).
+    /// `.optimize = …` 의 **표현식 텍스트**(`optimize`·`.fast`·`b3_optimize` 등).
     /// 값으로 접지 않는 이유는 빌드 스크립트가 변수를 거쳐 넘기기 때문이다.
     optimize: ?[]const u8 = null,
     /// `.imports = &.{ .{ .name = "maru", .module = maru_mod } }` 의 **이름과 모듈 표현식**.
@@ -125,7 +125,7 @@ pub const Row = struct {
 pub const Field = struct {
     name: []const u8,
     /// 문자열 리터럴이면 따옴표를 벗긴 값, 아니면 **표현식 텍스트 그대로**
-    /// (`&.{ "build_source" }` · `.ReleaseSafe`).
+    /// (`&.{ "build_source" }` · `.safe`).
     value: []const u8,
 };
 
@@ -145,7 +145,7 @@ pub const Graph = struct {
     vars: []const VarCalls,
     /// 빌드 소스의 **모든 메서드 호출**(이름 + 첫 문자열 인자). `countCall` 이 쓴다.
     calls: []const Call,
-    /// `std.builtin.OptimizeMode.Debug` 처럼 **점으로 이어진 이름 경로**의 등장. 판정자가
+    /// `std.builtin.OptimizeMode.debug` 처럼 **점으로 이어진 이름 경로**의 등장. 판정자가
     /// 그 문자열을 세던 자리를 받는다.
     field_paths: []const []const u8,
     /// 파일 스코프 **표**의 모든 행. `countTableRows` · `tableHas` 가 쓴다.
@@ -345,8 +345,8 @@ pub fn parse(gpa: std.mem.Allocator) !Graph {
     for (files) |path| {
         const owned_path = try a.dupe(u8, path);
         const raw = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(max_bytes));
-        const src = try a.dupeZ(u8, raw);
-        var tree = try std.zig.Ast.parse(a, src, .zig);
+        const src = try a.dupeSentinel(u8, raw, 0);
+        var tree = try std.zig.Ast.parse(a, src, .{});
         if (tree.errors.len != 0) return error.BuildSourceParseFailed;
 
         try scanFile(a, &tree, owned_path, .{
@@ -460,7 +460,7 @@ fn scanFile(
     const field_paths = sink.field_paths;
     const calls = sink.calls;
 
-    // ① 점으로 이어진 이름 경로 — `std.builtin.OptimizeMode.Debug`
+    // ① 점으로 이어진 이름 경로 — `std.builtin.OptimizeMode.debug`
     //    토큰열로 모은다(AST 노드로는 조각이 흩어져 오히려 복잡하다).
     var i: std.zig.Ast.TokenIndex = 0;
     while (i < tree.tokens.len) : (i += 1) {
@@ -483,7 +483,7 @@ fn scanFile(
 
     // ② 호출 노드
     for (0..tree.nodes.len) |node_i| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(node_i);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(node_i));
         var buf: [1]std.zig.Ast.Node.Index = undefined;
         const call = tree.fullCall(&buf, node) orelse continue;
         const callee = calleeName(tree, node) orelse continue;
@@ -556,7 +556,7 @@ fn scanFile(
     // ④ **표** — `const boundary_scans: []const BoundaryScan = &.{ .{ … }, … }`.
     //    등록이 호출에서 행으로 옮겨 가면 ② 는 루프 한 번만 보고 스무 건을 놓친다.
     for (0..tree.nodes.len) |node_i| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(node_i);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(node_i));
         const decl = tree.fullVarDecl(node) orelse continue;
         const init_node = decl.ast.init_node.unwrap() orelse continue;
         const name_tok = decl.ast.mut_token + 1;

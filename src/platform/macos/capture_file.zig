@@ -47,7 +47,7 @@ pub fn underNestedRepo(root: []const u8, abs_path: []const u8) bool {
             continue;
         }
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const dot_git = std.fmt.bufPrintZ(&buf, "{s}/{s}/.git", .{ root, dir_rel[0..end] }) catch return false;
+        const dot_git = std.fmt.bufPrintSentinel(&buf, "{s}/{s}/.git", .{ root, dir_rel[0..end] }, 0) catch return false;
         var st: std.posix.Stat = undefined;
         if (std.c.fstatat(std.posix.AT.FDCWD, dot_git.ptr, &st, std.posix.AT.SYMLINK_NOFOLLOW) == 0) return true;
         end += 1;
@@ -275,7 +275,7 @@ test "readSide: FIFO 는 UI 를 붙잡지 않고 «모름» 으로 떨어진다"
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
     const abs = try std.fmt.bufPrint(&abs_buf, "{s}/pipe", .{fx.root()});
     var z_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const abs_z = try std.fmt.bufPrintZ(&z_buf, "{s}", .{abs});
+    const abs_z = try std.fmt.bufPrintSentinel(&z_buf, "{s}", .{abs}, 0);
     if (mkfifo(abs_z.ptr, 0o600) != 0) return error.SkipZigTest;
 
     // 이 호출이 **돌아온다는 것 자체**가 판정의 절반이다(막히면 테스트가 타임아웃으로 죽는다).

@@ -24,9 +24,9 @@ pub fn audit(io: std.Io, allocator: std.mem.Allocator, trusted: context_mod.Cont
     if (!absoluteScalar(command.cli_path) or !absoluteScalar(command.workspace_path)) return error.InvalidPath;
     if (!lowerHex(command.cli_sha256, 64)) return error.InvalidSha256;
     var cli_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const cli_path = std.fmt.bufPrintZ(&cli_storage, "{s}", .{command.cli_path}) catch return error.InvalidPath;
+    const cli_path = std.fmt.bufPrintSentinel(&cli_storage, "{s}", .{command.cli_path}, 0) catch return error.InvalidPath;
     var workspace_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const workspace_path = std.fmt.bufPrintZ(&workspace_storage, "{s}", .{command.workspace_path}) catch return error.InvalidPath;
+    const workspace_path = std.fmt.bufPrintSentinel(&workspace_storage, "{s}", .{command.workspace_path}, 0) catch return error.InvalidPath;
     const pinned = try cli_authority.pin(allocator, cli_path, command.cli_sha256);
     var deadline: deadline_mod.Deadline = .{};
     try deadline_mod.start(budget_ns, &deadline);

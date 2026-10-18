@@ -79,31 +79,31 @@ pub const RuntimeControl = extern struct {
 
     pub fn scrollToBottom() RuntimeControl {
         var result: RuntimeControl = std.mem.zeroes(RuntimeControl);
-        result.tag = @intFromEnum(RuntimeControlTag.scroll_to_bottom);
+        result.tag = @backingInt(RuntimeControlTag.scroll_to_bottom);
         return result;
     }
 
     pub fn coreCommand(command: CoreCommandRequest) RuntimeControl {
         var result: RuntimeControl = std.mem.zeroes(RuntimeControl);
-        result.tag = @intFromEnum(RuntimeControlTag.core_command);
+        result.tag = @backingInt(RuntimeControlTag.core_command);
         encodeRawCoreCommandInto(&result.payload.core_command, command);
         return result;
     }
 
     pub fn observationProbe(nonce: u64) RuntimeControl {
         var result: RuntimeControl = std.mem.zeroes(RuntimeControl);
-        result.tag = @intFromEnum(RuntimeControlTag.observation_probe);
+        result.tag = @backingInt(RuntimeControlTag.observation_probe);
         result.payload.nonce = nonce;
         return result;
     }
 
     pub fn decode(self: *const RuntimeControl) ?ValidatedRuntimeControl {
         return switch (self.tag) {
-            @intFromEnum(RuntimeControlTag.scroll_to_bottom) => .scroll_to_bottom,
-            @intFromEnum(RuntimeControlTag.core_command) => .{
+            @backingInt(RuntimeControlTag.scroll_to_bottom) => .scroll_to_bottom,
+            @backingInt(RuntimeControlTag.core_command) => .{
                 .core_command = decodeRawCoreCommand(&self.payload.core_command) orelse return null,
             },
-            @intFromEnum(RuntimeControlTag.observation_probe) => if (self.payload.nonce != 0)
+            @backingInt(RuntimeControlTag.observation_probe) => if (self.payload.nonce != 0)
                 .{ .observation_probe = self.payload.nonce }
             else
                 null,
@@ -148,52 +148,52 @@ pub fn encodeRawCoreCommandInto(out: *RawCoreCommand, value: CoreCommandRequest)
     const Tag = std.meta.Tag(CoreCommandRequest);
     switch (value) {
         .scroll => |arg| {
-            out.tag = @intFromEnum(Tag.scroll);
+            out.tag = @backingInt(Tag.scroll);
             out.payload.scroll = arg;
         },
-        .scroll_to_bottom => out.tag = @intFromEnum(Tag.scroll_to_bottom),
+        .scroll_to_bottom => out.tag = @backingInt(Tag.scroll_to_bottom),
         .scroll_to_abs => |arg| {
-            out.tag = @intFromEnum(Tag.scroll_to_abs);
+            out.tag = @backingInt(Tag.scroll_to_abs);
             out.payload.unsigned = arg;
         },
         .scroll_to_offset => |arg| {
-            out.tag = @intFromEnum(Tag.scroll_to_offset);
+            out.tag = @backingInt(Tag.scroll_to_offset);
             out.payload.unsigned = arg;
         },
         .report_focus => |flag| {
-            out.tag = @intFromEnum(Tag.report_focus);
+            out.tag = @backingInt(Tag.report_focus);
             out.payload.flag = @intFromBool(flag);
         },
         .set_cell_metrics => |v| {
-            out.tag = @intFromEnum(Tag.set_cell_metrics);
+            out.tag = @backingInt(Tag.set_cell_metrics);
             out.payload.cell_metrics = .{ .width = v.width, .height = v.height };
         },
         .set_default_colors => |v| {
-            out.tag = @intFromEnum(Tag.set_default_colors);
+            out.tag = @backingInt(Tag.set_default_colors);
             out.payload.colors = .{ .foreground = v.foreground, .background = v.background };
         },
         .set_config_palette => |v| {
-            out.tag = @intFromEnum(Tag.set_config_palette);
+            out.tag = @backingInt(Tag.set_config_palette);
             out.payload.palette = encodeRawPalette(v);
         },
         .set_max_scrollback => |v| {
-            out.tag = @intFromEnum(Tag.set_max_scrollback);
+            out.tag = @backingInt(Tag.set_max_scrollback);
             out.payload.unsigned = v;
         },
         .set_ambiguous_wide => |v| {
-            out.tag = @intFromEnum(Tag.set_ambiguous_wide);
+            out.tag = @backingInt(Tag.set_ambiguous_wide);
             out.payload.flag = @intFromBool(v);
         },
         .set_emoji_wide => |v| {
-            out.tag = @intFromEnum(Tag.set_emoji_wide);
+            out.tag = @backingInt(Tag.set_emoji_wide);
             out.payload.flag = @intFromBool(v);
         },
         .set_default_cursor_shape => |v| {
-            out.tag = @intFromEnum(Tag.set_default_cursor_shape);
+            out.tag = @backingInt(Tag.set_default_cursor_shape);
             out.payload.shape = v;
         },
         .set_runtime_config => |v| {
-            out.tag = @intFromEnum(Tag.set_runtime_config);
+            out.tag = @backingInt(Tag.set_runtime_config);
             out.payload.runtime_config = .{
                 .max_scrollback = v.max_scrollback,
                 .ambiguous_wide = @intFromBool(v.ambiguous_wide),
@@ -207,28 +207,28 @@ pub fn encodeRawCoreCommandInto(out: *RawCoreCommand, value: CoreCommandRequest)
             };
         },
         .jump_to_prompt => |v| {
-            out.tag = @intFromEnum(Tag.jump_to_prompt);
+            out.tag = @backingInt(Tag.jump_to_prompt);
             out.payload.direction = v;
         },
-        .clear_screen => out.tag = @intFromEnum(Tag.clear_screen),
-        .reset_input_modes => out.tag = @intFromEnum(Tag.reset_input_modes),
+        .clear_screen => out.tag = @backingInt(Tag.clear_screen),
+        .reset_input_modes => out.tag = @backingInt(Tag.reset_input_modes),
         .selection_start => |v| {
-            out.tag = @intFromEnum(Tag.selection_start);
+            out.tag = @backingInt(Tag.selection_start);
             out.payload.selection = .{ .row = v.row, .col = v.col, .block = @intFromBool(v.block) };
         },
         .selection_extend => |v| {
-            out.tag = @intFromEnum(Tag.selection_extend);
+            out.tag = @backingInt(Tag.selection_extend);
             out.payload.selection = .{ .row = v.row, .col = v.col, .block = 0 };
         },
         .selection_extend_or_collapse => |v| {
-            out.tag = @intFromEnum(Tag.selection_extend_or_collapse);
+            out.tag = @backingInt(Tag.selection_extend_or_collapse);
             out.payload.selection = .{ .row = v.row, .col = v.col, .block = 0 };
         },
         .selection_scroll_and_extend => |v| {
-            out.tag = @intFromEnum(Tag.selection_scroll_and_extend);
+            out.tag = @backingInt(Tag.selection_scroll_and_extend);
             out.payload.selection_scroll = .{ .row = v.row, .col = v.col, .delta = v.delta };
         },
-        .selection_clear => out.tag = @intFromEnum(Tag.selection_clear),
+        .selection_clear => out.tag = @backingInt(Tag.selection_clear),
     }
 }
 
@@ -241,19 +241,19 @@ pub fn encodeRawCoreCommand(value: CoreCommandRequest) RawCoreCommand {
 pub fn decodeRawCoreCommand(raw: *const RawCoreCommand) ?CoreCommandRequest {
     const Tag = std.meta.Tag(CoreCommandRequest);
     return switch (raw.tag) {
-        @intFromEnum(Tag.scroll) => .{ .scroll = raw.payload.scroll },
-        @intFromEnum(Tag.scroll_to_bottom) => .scroll_to_bottom,
-        @intFromEnum(Tag.scroll_to_abs) => .{ .scroll_to_abs = raw.payload.unsigned },
-        @intFromEnum(Tag.scroll_to_offset) => .{ .scroll_to_offset = raw.payload.unsigned },
-        @intFromEnum(Tag.report_focus) => if (raw.payload.flag <= 1) .{ .report_focus = raw.payload.flag == 1 } else null,
-        @intFromEnum(Tag.set_cell_metrics) => .{ .set_cell_metrics = .{ .width = raw.payload.cell_metrics.width, .height = raw.payload.cell_metrics.height } },
-        @intFromEnum(Tag.set_default_colors) => .{ .set_default_colors = .{ .foreground = raw.payload.colors.foreground, .background = raw.payload.colors.background } },
-        @intFromEnum(Tag.set_config_palette) => .{ .set_config_palette = decodeRawPalette(&raw.payload.palette) orelse return null },
-        @intFromEnum(Tag.set_max_scrollback) => .{ .set_max_scrollback = raw.payload.unsigned },
-        @intFromEnum(Tag.set_ambiguous_wide) => if (raw.payload.flag <= 1) .{ .set_ambiguous_wide = raw.payload.flag == 1 } else null,
-        @intFromEnum(Tag.set_emoji_wide) => if (raw.payload.flag <= 1) .{ .set_emoji_wide = raw.payload.flag == 1 } else null,
-        @intFromEnum(Tag.set_default_cursor_shape) => .{ .set_default_cursor_shape = raw.payload.shape },
-        @intFromEnum(Tag.set_runtime_config) => blk: {
+        @backingInt(Tag.scroll) => .{ .scroll = raw.payload.scroll },
+        @backingInt(Tag.scroll_to_bottom) => .scroll_to_bottom,
+        @backingInt(Tag.scroll_to_abs) => .{ .scroll_to_abs = raw.payload.unsigned },
+        @backingInt(Tag.scroll_to_offset) => .{ .scroll_to_offset = raw.payload.unsigned },
+        @backingInt(Tag.report_focus) => if (raw.payload.flag <= 1) .{ .report_focus = raw.payload.flag == 1 } else null,
+        @backingInt(Tag.set_cell_metrics) => .{ .set_cell_metrics = .{ .width = raw.payload.cell_metrics.width, .height = raw.payload.cell_metrics.height } },
+        @backingInt(Tag.set_default_colors) => .{ .set_default_colors = .{ .foreground = raw.payload.colors.foreground, .background = raw.payload.colors.background } },
+        @backingInt(Tag.set_config_palette) => .{ .set_config_palette = decodeRawPalette(&raw.payload.palette) orelse return null },
+        @backingInt(Tag.set_max_scrollback) => .{ .set_max_scrollback = raw.payload.unsigned },
+        @backingInt(Tag.set_ambiguous_wide) => if (raw.payload.flag <= 1) .{ .set_ambiguous_wide = raw.payload.flag == 1 } else null,
+        @backingInt(Tag.set_emoji_wide) => if (raw.payload.flag <= 1) .{ .set_emoji_wide = raw.payload.flag == 1 } else null,
+        @backingInt(Tag.set_default_cursor_shape) => .{ .set_default_cursor_shape = raw.payload.shape },
+        @backingInt(Tag.set_runtime_config) => blk: {
             const v = raw.payload.runtime_config;
             if (v.ambiguous_wide > 1 or v.emoji_wide > 1) break :blk null;
             break :blk .{ .set_runtime_config = .{
@@ -268,28 +268,28 @@ pub fn decodeRawCoreCommand(raw: *const RawCoreCommand) ?CoreCommandRequest {
                 .cursor_shape = v.cursor_shape,
             } };
         },
-        @intFromEnum(Tag.jump_to_prompt) => .{ .jump_to_prompt = raw.payload.direction },
-        @intFromEnum(Tag.clear_screen) => .clear_screen,
-        @intFromEnum(Tag.reset_input_modes) => .reset_input_modes,
-        @intFromEnum(Tag.selection_start) => if (raw.payload.selection.block <= 1) .{ .selection_start = .{
+        @backingInt(Tag.jump_to_prompt) => .{ .jump_to_prompt = raw.payload.direction },
+        @backingInt(Tag.clear_screen) => .clear_screen,
+        @backingInt(Tag.reset_input_modes) => .reset_input_modes,
+        @backingInt(Tag.selection_start) => if (raw.payload.selection.block <= 1) .{ .selection_start = .{
             .row = raw.payload.selection.row,
             .col = raw.payload.selection.col,
             .block = raw.payload.selection.block == 1,
         } } else null,
-        @intFromEnum(Tag.selection_extend) => .{ .selection_extend = .{
+        @backingInt(Tag.selection_extend) => .{ .selection_extend = .{
             .row = raw.payload.selection.row,
             .col = raw.payload.selection.col,
         } },
-        @intFromEnum(Tag.selection_extend_or_collapse) => .{ .selection_extend_or_collapse = .{
+        @backingInt(Tag.selection_extend_or_collapse) => .{ .selection_extend_or_collapse = .{
             .row = raw.payload.selection.row,
             .col = raw.payload.selection.col,
         } },
-        @intFromEnum(Tag.selection_scroll_and_extend) => if (raw.payload.selection_scroll.delta == -1 or raw.payload.selection_scroll.delta == 1) .{ .selection_scroll_and_extend = .{
+        @backingInt(Tag.selection_scroll_and_extend) => if (raw.payload.selection_scroll.delta == -1 or raw.payload.selection_scroll.delta == 1) .{ .selection_scroll_and_extend = .{
             .row = raw.payload.selection_scroll.row,
             .col = raw.payload.selection_scroll.col,
             .delta = raw.payload.selection_scroll.delta,
         } } else null,
-        @intFromEnum(Tag.selection_clear) => .selection_clear,
+        @backingInt(Tag.selection_clear) => .selection_clear,
         else => null,
     };
 }
@@ -312,7 +312,7 @@ test "C3-3b2b3 integration runtime control raw discriminators fail closed and en
         if (nested.decode() != null) valid_nested += 1;
     }
     // selection_scroll_and_extend의 zeroed delta는 semantic invalid이므로 raw tag sweep 한 건은 fail-closed다.
-    try std.testing.expectEqual(@as(usize, @typeInfo(CoreCommandRequest).@"union".fields.len - 1), valid_nested);
+    try std.testing.expectEqual(@as(usize, @import("type_info_fields").unionFields(CoreCommandRequest).len - 1), valid_nested);
 
     const zeroed = RuntimeControl.coreCommand(.scroll_to_bottom);
     const bytes = std.mem.asBytes(&zeroed);
@@ -339,11 +339,11 @@ fn containsPointer(comptime T: type) bool {
         .array => |a| containsPointer(a.child),
         .optional => |o| containsPointer(o.child),
         .@"struct" => |s| blk: {
-            inline for (s.fields) |field| if (containsPointer(field.type)) break :blk true;
+            inline for (@import("type_info_fields").fieldsFromInfo(s)) |field| if (containsPointer(field.type)) break :blk true;
             break :blk false;
         },
         .@"union" => |u| blk: {
-            inline for (u.fields) |field| if (containsPointer(field.type)) break :blk true;
+            inline for (@import("type_info_fields").fieldsFromInfo(u)) |field| if (containsPointer(field.type)) break :blk true;
             break :blk false;
         },
         else => false,

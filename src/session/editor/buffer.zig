@@ -24,6 +24,8 @@
 //!
 //! **L2다 — filesystem도 뷰도 모른다.** 열기·저장은 `document.zig`와 저장 경로가, 화면 행은 L3가 맡는다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 
 /// 잎 하나가 담는 최대 byte. 이 값이 하는 일 둘:
@@ -756,7 +758,7 @@ test "BUF7: 무작위 편집 2천 번을 배열 모델과 대조한다" {
 
     // 잎 상한(1 KiB)을 넘겨 **가지를 건너는 분할·이음**을 실제로 만들려면 긴 것도 섞어야 한다.
     // 짧은 것만 넣고 지우면 문서가 잎 하나 안에 머물러 트리가 서지 않는다(실측: 369 byte, 깊이 1).
-    const long_line = "L" ** 200 ++ "\n";
+    const long_line = array_repeat.repeat("L", 200) ++ "\n";
     const words = [_][]const u8{ "a", "bc", "def\n", "\n", "ghij", "한글", "x\ny\nz", long_line };
 
     var i: usize = 0;

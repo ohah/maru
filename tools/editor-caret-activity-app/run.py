@@ -35,7 +35,8 @@ def main():
              "src/platform/macos/app_session/input.zig", "src/platform/macos/app_session/term.zig",
              "src/platform/macos/app_session/workspace.zig", "src/platform/macos/app_session/editor_ime.zig",
              "src/platform/macos/app_session/editor/smart_select.zig", "src/platform/macos/app_session/editor/sticky.zig",
-             "src/platform/macos/app_session/editor/merge.zig", "src/platform/macos/app_session/editor/diff.zig")
+             "src/platform/macos/app_session/editor/merge.zig", "src/platform/macos/app_session/editor/diff.zig",
+             "src/platform/macos/app_session/pane.zig", "src/platform/macos/app_session/tab.zig")
     print(root, flush=True)
     if args.app:
         app = args.app.resolve()

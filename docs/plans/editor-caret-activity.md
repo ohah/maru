@@ -26,13 +26,23 @@
 | 비교 뷰의 클릭·낱말/줄 선택·드래그·이동·좌우 전환 | `beginDiffBodySelection`, `selectWordOrLineInDiff`, `dragDiffBodySelection`, `diffMove`, `diffSwitchSide` | 비교 행 좌표를 게시한 뒤 표시 |
 | 병합 Current/Incoming/Base 판 | `merge.placePaneCaret`, `merge.paneMove` | Result 선택과 별도인 읽기 전용 판 커서도 표시 |
 | IME 조합/명시적 범위/부분 조합 | `setEditorPreedit`, `input.imeMarked`, `input.editorImeReplacement`, `editor_ime.marked` | 조합 범위·선택 갱신 후 표시; 직접 확정은 본문 편집 경로 사용 |
+| 닫기·이동·분리·결합에 따른 자동 포커스 전환 | `caretFocusId` / `noteCaretFocusChange` | 구조 변경 전후 Surface ID를 비교; 같은 활성 뷰의 백그라운드 닫기/순서 변경은 비초기화 |
 | pane·pane 안 탭·워크스페이스 탭 | `term.noteEditorFocus` | 승인된 포커스 전환 후 표시 |
+| 비교 커서의 타이머/재투영 | `AppSession.editorCaretBlinks` | `.compare`는 일반 문서 없이도 표시 가능; loading/오류는 제외 |
 | 본문 입력 소유권·창 복귀 | `workspace.focusWorkspaceInput`, `AppSession.focusChanged` | 포커스를 돌려받을 때 주기 초기화 |
 | 주소창·검색·rename 등 기존 입력 필드 | 기존 `handleKeyEvent`의 입력별 reset | 기존 경로 유지; 편집기 커서 누락을 고치기 위해 전체 키/렌더를 무조건 reset하지 않음 |
 
 공통 시각 출구 `editor.noteCaretActivity`는 활성 편집기 Term만 확인하고 기존 `resetCursorBlink`와
-`metal_dirty`를 세운다. 새 할당·커서 사본·프레임별 커서 해시/비교를 추가하지 않는다.
+`metal_dirty`를 세운다. 새 할당·커서 사본·프레임별 커서 해시/비교를 추가하지 않는다. 구조 변경은 호출 스택에 이전 Surface ID만
+보관하고 종료 시 비교한다. 해제될 Surface 포인터와 별도 영속 포커스 캐시는 만들지 않는다.
 새 편집 판정은 없고 기존 L2 이동/선택/편집 계획을 그대로 사용한다.
+
+구조 변경의 종료 관측은 다음 진입점에 연결한다. 각 호출의 전후 ID가 같으면 기존 주기를 유지한다.
+
+- `term`: `closeTermAt`, `abandonTermAt`, `closeActiveTerm`.
+- `pane`: `moveTermToPane`, `detachPaneFromTab`, `closeActivePane`, `mergePaneIntoWorkspace`, `moveTermToNewSplit`, `promotePaneToNewWorkspace`.
+- `tab`: `createTab`, `closeTab`, `detachTabForMove`, `adoptTab`, `moveTab`, `reorderTabs`.
+
 
 ## 제외한 직접 대입
 
@@ -43,13 +53,15 @@
 
 ## 검증
 
-집중 게이트 12개와 기존 회귀 109개를 Debug·ReleaseFast에서 통과했다. 실제 다른 Term·분할 pane
-복귀, primary 게시 뒤 추가 선택 병합 준비 OOM, 자연 깜빡임 후 실제 앱 키 입력도 확인했다.
+집중 게이트 12개와 기존 회귀 110개를 Debug·ReleaseFast에서 통과했다. 실제 다른 Term·분할 pane
+복귀·활성 탭/분할 닫기의 자동 전환·백그라운드 닫기 비초기화, 문서 버퍼가 없는 비교 뷰로의 본문 포커스 복귀, primary 게시 뒤 추가 선택 병합 준비 OOM,
+자연 깜빡임 후 실제 앱 키 입력도 확인했다.
 
 - CBL1: 수정 전 숨은 커서 이동 뒤 `blink_visible == false` 재현, 수정 후 즉시 표시.
 - CBL2~3: 이동·선택·추가/열 커서·편집·Undo/Redo·IME·탐색·포인터 경로. primary 변경 후 추가 병합 할당 실패도 포함.
 - CBL4: 스크롤·렌더·노출용 임시 선택·무관한 백그라운드 문서 편집이 기존 주기를 보존.
-- CBL5~8: 창/뷰 포커스, 공유 뷰 매핑, 비교 좌우, 병합 판 커서.
+- CBL5~8: 창/뷰 포커스, 공유 뷰 매핑, 비교 좌우·본문 복귀·타이머 게이트, 병합 판 커서.
+  일반 문서가 없는 비교 화면도 위상이 진행되며 loading에서는 진행하지 않는지 확인한다.
 - 실제 앱 하네스는 타이머가 스스로 숨긴 커서에 AppKit 키를 주고, 즉시 표시된 이동/멀티커서/Shift 선택과
   이후 다시 숨는 상태를 Metal로 캡처한다. 물리 HID·한국어 입력기 검증을 대신하지 않는다.
 

@@ -107,18 +107,17 @@ pub fn linkSessionHostNotificationAdapter(
         compile.root_module.addSystemFrameworkPath(.{
             .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}),
         });
+        // Foundation.tbd 가 부르는 `/usr/lib/libobjc.A.dylib` — build.zig 의 SDK 주석 (3).
+        compile.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}) });
     }
     compile.root_module.addIncludePath(b.path("src/platform/macos"));
+    // `-isysroot` 는 build.zig 의 `objc_macos_flags` 주석과 같은 이유다(Zig 0.17 에는 `b.sysroot` 가 없다).
     compile.root_module.addCSourceFile(.{
         .file = b.path("src/platform/macos/session_host_notification_adapter.m"),
-        .flags = &.{
-            "-fobjc-arc",
-            "-fno-sanitize=undefined",
-            "-iframeworkwithsysroot",
-            "/System/Library/Frameworks",
-            "-iwithsysroot",
-            "/usr/include",
-        },
+        .flags = if (macos_sdk) |sdk|
+            b.allocator.dupe([]const u8, &.{ "-fobjc-arc", "-fno-sanitize=undefined", "-isysroot", sdk, "-iframeworkwithsysroot", "/System/Library/Frameworks", "-iwithsysroot", "/usr/include" }) catch @panic("OOM")
+        else
+            &.{ "-fobjc-arc", "-fno-sanitize=undefined", "-iframeworkwithsysroot", "/System/Library/Frameworks", "-iwithsysroot", "/usr/include" },
     });
     compile.root_module.addCSourceFile(.{
         .file = b.path("src/platform/macos/session_host_notification_route.c"),

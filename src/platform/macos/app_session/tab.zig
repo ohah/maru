@@ -397,6 +397,8 @@ pub fn createTab(
     title: []const u8,
     command: []const u8,
 ) !*Tab {
+    const caret_focus_before = editor_ops.caretFocusId(self);
+    defer editor_ops.noteCaretFocusChange(self, caret_focus_before);
     const tab = try self.allocator.create(Tab);
     errdefer self.allocator.destroy(tab);
     tab.* = .{};
@@ -543,6 +545,8 @@ pub fn tabHasWebBrowser(tab: *Tab) bool {
 /// → Tab heap 해제) 후 tabs/surface_ptrs에서 빼고 app_window.tabs를 재바인딩하고 active_tab을 clamp한다
 /// (reselectAfterClose). 범위 밖 index면 무동작.
 pub fn closeTab(self: *AppSession, index: usize) void {
+    const caret_focus_before = editor_ops.caretFocusId(self);
+    defer editor_ops.noteCaretFocusChange(self, caret_focus_before);
     if (index >= self.tabs.items.len) return;
     // sidebar tab/group payload는 index/marker를 mouse-down 시점에 고정한다. source close 뒤 late drag/up이
     // 당겨진 index의 다른 workspace를 움직이지 않도록 collection mutation보다 먼저 공용 gesture를 끊는다.
@@ -662,6 +666,8 @@ pub fn clearStaleUiTargetsForMovedTab(self: *AppSession, tab: *Tab, clear_pendin
 /// `defer_rebuild`=true면 src 사이드바 재빌드를 caller가 배치(mergeSessionInto 끝 1회, code-review [4]) — merge의
 /// 중간 detach마다 양-창 사이드바를 재빌드하던 O(K²)를 피한다. 단일 이동(moveWorkspaceToSession)은 false=즉시 재빌드.
 pub fn detachTabForMove(self: *AppSession, index: usize, defer_rebuild: bool, clear_pending_pastes: bool) ?*Tab {
+    const caret_focus_before = editor_ops.caretFocusId(self);
+    defer editor_ops.noteCaretFocusChange(self, caret_focus_before);
     if (index >= self.tabs.items.len) return null;
     self.cancelPointerGesture();
     // closeTab tail과 동일한 src-측 그룹 위생: 마커 승계 + top_level 경계 재확립. 범위(M3d-2a-i)가 비-그룹이라 이동
@@ -722,6 +728,8 @@ pub fn resizeAdoptedTabAndCaptureActiveRect(self: *AppSession, tab: *Tab) void {
 
 /// `defer_rebuild`=true면 dst 사이드바 재빌드를 caller가 배치(mergeSessionInto 끝 1회, code-review [4]).
 pub fn adoptTab(self: *AppSession, tab: *Tab, defer_rebuild: bool) !void {
+    const caret_focus_before = editor_ops.caretFocusId(self);
+    defer editor_ops.noteCaretFocusChange(self, caret_focus_before);
     // 1) fallible 먼저(원자성) — 두 병렬 배열 capacity 예약. 실패하면 tab은 안 붙고 dst 불변(caller가 전파).
     try self.tabs.ensureUnusedCapacity(self.allocator, 1);
     try self.surface_ptrs.ensureUnusedCapacity(self.allocator, 1);
@@ -801,6 +809,8 @@ pub fn countPinnedTabs(self: *const AppSession) usize {
 /// clamp으로 확정된 **최종 안착 인덱스**를 반환한다(no-op·범위 밖이면 from) — 드래그 핫패스가 pre-clamp를
 /// 따로 안 하고 이 반환값을 단일 출처로 쓴다(countPinnedTabs O(n)가 drag당 1회로 준다). 반환값 무시도 호환된다.
 pub fn moveTab(self: *AppSession, from: usize, raw_to: usize) usize {
+    const caret_focus_before = editor_ops.caretFocusId(self);
+    defer editor_ops.noteCaretFocusChange(self, caret_focus_before);
     const len = self.tabs.items.len;
     if (from >= len or raw_to >= len) return from;
     const to = clampMoveToGroup(raw_to, self.tabs.items[from].pinned, countPinnedTabs(self), len);
@@ -852,6 +862,8 @@ pub fn reorderTabs(
     context: anytype,
     comptime fill: fn (@TypeOf(context), *AppSession, []*Tab, []*maru.session.Surface) usize,
 ) ?usize {
+    const caret_focus_before = editor_ops.caretFocusId(self);
+    defer editor_ops.noteCaretFocusChange(self, caret_focus_before);
     const len = self.tabs.items.len;
     if (len == 0) return null;
     const active_ptr: ?*Tab = if (self.app_window.active_tab < len) self.tabs.items[self.app_window.active_tab] else null;

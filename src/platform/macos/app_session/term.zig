@@ -364,6 +364,8 @@ pub fn closeOwnedByOtherRequest(term: *const Term) bool {
 /// 제거하고: pane에 Term이 남으면 active_term clamp, 비면 split이면 collapse, 단일 pane이면 워크스페이스(탭)를
 /// close한다. 활성/배경 탭 모두 대상이라 closeActiveTerm(활성 전용)과 달리 위치를 인자로 받는다.
 pub fn closeTermAt(self: *AppSession, tab_index: usize, pane: *Pane, term_index: usize) void {
+    const caret_focus_before = editor_ops.caretFocusId(self);
+    defer editor_ops.noteCaretFocusChange(self, caret_focus_before);
     const tab = self.tabs.items[tab_index];
     const target = pane.terms.items[term_index];
     // job 이 붙든 runtime 이면 여기서 닫기를 보내지 않는다 — 「아직」으로 돌아가면 ✕ 가 무시되고 다시 부를 자리도
@@ -399,6 +401,8 @@ pub fn abandonTermAt(
     term_index: usize,
     backend: *app_session_mod.session_host.remote_term_backend.RemoteTermBackend,
 ) void {
+    const caret_focus_before = editor_ops.caretFocusId(self);
+    defer editor_ops.noteCaretFocusChange(self, caret_focus_before);
     if (tab_index >= self.tabs.items.len or term_index >= pane.terms.items.len)
         app_session_mod.session_host.pending_term_close_graph.fatalProofLoss();
     const target = pane.terms.items[term_index];
@@ -1171,6 +1175,8 @@ pub fn totalSurfaceCount(self: *AppSession) usize {
 /// terms에서 빼고 active_term을 보정한 뒤 새 활성 Term surface로 재바인딩한다. Term이 1개뿐이면 무동작
 /// (closeActiveTermOrPane이 pane/워크스페이스 close로 보낸다). tree leaf는 pane이라 Term close엔 안 바뀐다.
 pub fn closeActiveTerm(self: *AppSession) void {
+    const caret_focus_before = editor_ops.caretFocusId(self);
+    defer editor_ops.noteCaretFocusChange(self, caret_focus_before);
     const pane = pane_ops.activePane(self);
     if (pane.terms.items.len <= 1) return;
     const idx = pane.active_term;

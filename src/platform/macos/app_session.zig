@@ -14813,8 +14813,13 @@ pub const AppSession = struct {
         const pane = tab.panes.items[tab.active_pane];
         if (pane.active_term >= pane.terms.items.len) return false;
         const term = pane.terms.items[pane.active_term];
-        // **문서가 있어야 caret 이 그려진다** — `editor_view/frame.zig` 의 `paintCarets` 가 그 자리다.
-        return term.kind == .editor and term.rt.editorDocument().opened != null;
+        if (term.kind != .editor) return false;
+        // 비교 커서는 일반 문서 버퍼 없이도 그린다. loading/오류 화면에는 아직 커서가 없다.
+        if (term.rt.editor_diff) |state| return switch (state.view) {
+            .compare => true,
+            else => false,
+        };
+        return term.rt.editorDocument().opened != null;
     }
 
     /// Phase 4g-1 후속(14차 리뷰 [0][3]): 입력이 **터미널 뷰→Zig handleKeyEvent 경로**로 가야 하는가 — 모달(notice 제외,

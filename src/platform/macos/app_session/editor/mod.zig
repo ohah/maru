@@ -3710,6 +3710,20 @@ pub fn noteCaretActivity(self: *AppSession, term: *Term) void {
     self.metal_dirty = true;
 }
 
+/// 포커스 이동 전의 안정된 ID만 기억한다. 닫힐 Surface 포인터를 보관하면 반환 때 이미 해제돼 있다.
+pub fn caretFocusId(self: *AppSession) u64 {
+    if (!self.surface_initialized or self.tabs.items.len == 0) return 0;
+    return if (self.app_window.active()) |surface| surface.id else 0;
+}
+
+/// 닫기·이동·분리 같은 구조 변경의 마지막에 실제 입력 대상이 바뀐 경우만 표시한다.
+/// 백그라운드 형제 제거와 순서만 바뀌는 동작은 같은 ID라 기존 깜빡임 주기를 보존한다.
+pub fn noteCaretFocusChange(self: *AppSession, before: u64) void {
+    if (before == caretFocusId(self) or !self.editorCaretBlinks()) return;
+    self.resetCursorBlink();
+    self.metal_dirty = true;
+}
+
 /// 이 Term의 커서 전부.
 pub fn selections(term: *Term) SelectionIter {
     return .{ .primary = term.rt.editor_selection, .extras = term.rt.editor_extra_selections };
@@ -34370,6 +34384,13 @@ test "CBL4 스크롤·렌더·노출 계산과 무관한 문서 편집은 주기
     var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
     drawn.dl.deinit(a);
     try testing.expect(insertText(fx.session, background, "X"));
+    const pane = pane_ops.activePane(fx.session);
+    for (pane.terms.items, 0..) |candidate, index| {
+        if (candidate == background) {
+            term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, index);
+            break;
+        }
+    }
     try testing.expect(!fx.session.blink_visible);
     try testing.expectEqual(@as(i128, 123), fx.session.blink_phase_ns);
     try testing.expectEqual(@as(u32, 0), fx.session.metal_buffer.cursor_fade_milli);
@@ -34400,10 +34421,16 @@ test "CBL5 창·pane·탭과 본문 포커스 복귀는 새 주기를 시작한�
     _ = fx.session.activateExistingFileTerm(term);
     try testing.expect(pane_ops.activePane(fx.session).activeTerm() == term);
     try expectCaretActivityForTest(fx.session);
+    hideCaretForActivityTest(fx.session);
+    term_ops.closeActiveTerm(fx.session);
+    try expectCaretActivityForTest(fx.session);
     try testing.expect(fx.session.runAction("split_editor_right"));
     try testing.expectEqual(@as(usize, 2), tab_ops.activeTab(fx.session).panes.items.len);
     hideCaretForActivityTest(fx.session);
     try testing.expect(pane_ops.tryFocusPane(fx.session, 0));
+    try expectCaretActivityForTest(fx.session);
+    hideCaretForActivityTest(fx.session);
+    pane_ops.closeActivePane(fx.session);
     try expectCaretActivityForTest(fx.session);
 }
 

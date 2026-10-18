@@ -2502,7 +2502,14 @@ test "CBL7 비교 뷰 이동·선택 확장·열 전환은 깜빡임을 초기�
     defer fx.deinit(testing.allocator);
     var entry = testEntry("alpha\nbeta\n", "alpha\nBETA\n");
     try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
-    for (0..3) |operation| {
+    try testing.expect(fx.session.editorCaretBlinks());
+    {
+        const saved_view = fx.term.rt.editor_diff.?.view;
+        defer fx.term.rt.editor_diff.?.view = saved_view;
+        fx.term.rt.editor_diff.?.view = .loading;
+        try testing.expect(!fx.session.editorCaretBlinks());
+    }
+    for (0..4) |operation| {
         fx.session.blink_visible = false;
         fx.session.blink_phase_ns = 123;
         fx.session.metal_buffer.setCursorFadeMilli(0);
@@ -2510,6 +2517,7 @@ test "CBL7 비교 뷰 이동·선택 확장·열 전환은 깜빡임을 초기�
             0 => try testing.expect(editor_ops.diffMove(fx.session, fx.term, .char_right, false)),
             1 => try testing.expect(editor_ops.diffMove(fx.session, fx.term, .char_right, true)),
             2 => try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term)),
+            3 => @import("../workspace.zig").focusWorkspaceInput(fx.session),
             else => unreachable,
         }
         try testing.expect(fx.session.blink_visible);

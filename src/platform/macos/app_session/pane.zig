@@ -991,6 +991,8 @@ pub fn appendPaneScrollbars(self: *AppSession) void {
 /// resize + 좌표 재계산. insert 실패는 src로 원복한다. src==dst거나 인덱스 밖이면 무동작. Term은 heap-pin
 /// (`*Term`)이라 pane 사이를 포인터로 옮겨도 surface/reader 주소가 안 움직인다(runtime link도 그대로).
 pub fn moveTermToPane(self: *AppSession, src: *Pane, src_idx: usize, dst: *Pane, dst_idx: usize) void {
+    const caret_focus_before = editor_ops.caretFocusId(self);
+    defer editor_ops.noteCaretFocusChange(self, caret_focus_before);
     if (src == dst or src_idx >= src.terms.items.len) return;
     const term = src.terms.orderedRemove(src_idx);
     const idx = @min(dst_idx, dst.terms.items.len);
@@ -1206,6 +1208,8 @@ pub fn publishDividerTree(self: *AppSession) ?chrome.ui.tree.UiRectTree {
 /// 살아 있으므로 invalidateForFreedPane은 부르지 않는다(포인터가 유효 — destroy 경로인 collapsePaneIn만 부른다).
 /// divider_drag가 이 split이면 destroy 전에 표적 null한다(무관 드래그는 보존 — removeLeaf가 freed split을 surface).
 pub fn detachPaneFromTab(self: *AppSession, tab: *Tab, pane: *Pane) bool {
+    const caret_focus_before = editor_ops.caretFocusId(self);
+    defer editor_ops.noteCaretFocusChange(self, caret_focus_before);
     if (tab.panes.items.len <= 1) return false;
     const freed_split = PaneTree.removeLeaf(&tab.tree, pane) orelse return false;
     invalidateForFreedSplit(self, freed_split);
@@ -1419,6 +1423,8 @@ pub fn fileHeaderBandForPane(self: *AppSession, pane: *Pane, rect: maru.session.
 /// pump를 새 활성 panel로 재바인딩하고, 남은 panel을 collapse된 트리의 새 leaf rect로 resize한다. panel이
 /// 1개뿐이면 무동작(그 경우 resolveWorkspaceScope가 .tab/.session으로 보내 closeTab/latch가 맡는다). 활성 탭에만 적용한다.
 pub fn closeActivePane(self: *AppSession) void {
+    const caret_focus_before = editor_ops.caretFocusId(self);
+    defer editor_ops.noteCaretFocusChange(self, caret_focus_before);
     const tab = tab_ops.activeTab(self);
     if (tab.panes.items.len <= 1) return; // 단일 panel은 탭 close 경로
     const idx = tab.active_pane;
@@ -1691,6 +1697,8 @@ pub fn createPane(
 /// 이되 새 pane을 만들지 않고 떼어온 pane을 재사용한다. 소스의 마지막 pane이면 빈 소스 워크스페이스를 함께
 /// 제거한다. target이 자기 워크스페이스거나 범위 밖이면 무동작. 단일 출처: docs/tabs-splits-layout.md.
 pub fn mergePaneIntoWorkspace(self: *AppSession, pane: *Pane, target_index: usize) void {
+    const caret_focus_before = editor_ops.caretFocusId(self);
+    defer editor_ops.noteCaretFocusChange(self, caret_focus_before);
     const src_tab = tab_ops.activeTab(self);
     const src_index = self.app_window.active_tab;
     if (target_index == src_index or target_index >= self.tabs.items.len) return; // 자기/범위 밖 — 무동작
@@ -2007,6 +2015,8 @@ pub fn dividerCaptureActive(self: *const AppSession) bool {
 /// 안 건드린다(Term은 src에 남는다). 성공 후 새 pane으로 포커스, src가 비면 collapse, 전 panel resize.
 /// target==src인데 src Term이 1개뿐이면(자기를 자기로 split) 무의미 — 무동작.
 pub fn moveTermToNewSplit(self: *AppSession, src: *Pane, src_idx: usize, target: *Pane, zone: layout_math.PaneDropZone) void {
+    const caret_focus_before = editor_ops.caretFocusId(self);
+    defer editor_ops.noteCaretFocusChange(self, caret_focus_before);
     if (src_idx >= src.terms.items.len) return;
     if (target == src and src.terms.items.len <= 1) return;
     const tab = tab_ops.activeTab(self);
@@ -2120,6 +2130,8 @@ pub fn computePaneDropDest(self: *AppSession, x_px: f64, y_px: f64) ?PaneDropDes
 /// 워크스페이스만 남으므로 **무동작**(단독 워크스페이스를 옮기는 건 사이드바 카드 재정렬의 몫). 새 탭을 끝에
 /// 붙이고 활성으로 만든다(사이드바 빈 영역 = 목록 아래 = 끝). 단일 출처: docs/tabs-splits-layout.md.
 pub fn promotePaneToNewWorkspace(self: *AppSession, pane: *Pane) void {
+    const caret_focus_before = editor_ops.caretFocusId(self);
+    defer editor_ops.noteCaretFocusChange(self, caret_focus_before);
     const src_tab = tab_ops.activeTab(self);
     if (src_tab.panes.items.len <= 1) return; // 단독 pane — 무동작
     const src_index = self.app_window.active_tab;

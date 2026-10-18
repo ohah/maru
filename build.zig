@@ -5889,11 +5889,11 @@ pub fn build(b: *std.Build) void {
     b.step("test-editor-caret-activity", "Run editor caret blink activity judges").dependOn(&run_caret_activity_tests.step);
     const caret_activity_regression_tests = addProjectTest(b, .{
         .root_module = editor_tests.root_module,
-        .filters = &.{ ".test.EDIT", ".test.UNDO", ".test.SEL", ".test.COL", ".test.OPT", ".test.SSEL", ".test.DCARET", ".test.MPN", ".test.IME_DIRECT_MULTI", ".test.IME_RETRY", ".test.FIND" },
+        .filters = &.{ ".test.EDIT", ".test.UNDO", ".test.SEL", ".test.COL", ".test.OPT", ".test.SSEL", ".test.DCARET", ".test.MPN", ".test.IME_DIRECT_MULTI", ".test.IME_RETRY", ".test.FIND", ".test.BLINK-E1" },
     });
     const run_caret_activity_regression_tests = b.addRunArtifact(caret_activity_regression_tests);
     run_caret_activity_regression_tests.setCwd(b.path("."));
-    run_caret_activity_regression_tests.addArg("--maru-expect-tests=109");
+    run_caret_activity_regression_tests.addArg("--maru-expect-tests=110");
     run_caret_activity_regression_tests.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-caret-activity-regressions", "Run cursor, selection, diff, find and IME regression judges").dependOn(&run_caret_activity_regression_tests.step);
     const delete_undo_tests = addProjectTest(b, .{

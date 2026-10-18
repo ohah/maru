@@ -44,6 +44,10 @@ def run(app, output, mode):
         path.chmod(0o700)
     config = root / 'config'
     shutil.copy2(fixtures / 'font-size-14.config', config)
+    # Match the existing actual-IME gate: Option-Return must reach the input method
+    # rather than the terminal's default Option-as-Meta shortcut route.
+    with config.open('a') as stream:
+        stream.write('\ninput.option-as-meta = false\n')
     env = dict(os.environ, HOME=str(home), CFFIXED_USER_HOME=str(home),
         XDG_CONFIG_HOME=str(home / '.config'), XDG_DATA_HOME=str(home / '.local/share'),
         XDG_STATE_HOME=str(home / '.local/state'), XDG_CACHE_HOME=str(home / '.cache'),

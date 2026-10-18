@@ -563,3 +563,43 @@ content 크기를 `agent_session_archive_smoke_content_size`로 summary에 남�
 
 이 fixture는 provider-native binary가 실제 계정 세션을 재개한다는 보장은 아니다. 그 수동 검증은 사용자가 명시적으로
 승인한 실제 이력에서만 하며, CI evidence와 섞지 않는다.
+
+#### 실제 한자 후보창 문맥 확장 제안 (사용자 논의 전 · 미착수)
+
+권한을 모두 통과한 실제 HID 실행에서 `ㅎ → 하 → 한` marked text와 검색 owner는 정상으로
+관측됐다. 처음 한 실행의 `ㅎ` 즉시 commit은 다음 실행에서 재현되지 않았으므로 원인이
+확정된 제품 결함으로 분류하지 않는다. 초기 테스트 config의 Option-as-Meta 우회는 기존
+CR6d와 같은 `input.option-as-meta=false`로 제거한다. 이 설정으로도 Option-Return이
+`setMarkedText(한)` → `insertText(한)` → `insertNewlineIgnoringFieldEditor`를 발생시키고
+후보창은 열리지 않았다. 같은 transaction의 `selectedRange`는 계속 `{0,0}`이다.
+현재 검색창은 editor 문서 context가 아니므로 host의 terminal fallback을 사용한다.
+즉, 검색어의 실제 선택 위치·주변 문자열·replacement range를 입력기에 제공하지 않는다.
+이것은 anchor 위치 수정이나 test-only 임시 문자열로 대신할 수 없는 별도 입력 계약이다.
+
+확장안은 다음과 같다. 기존 문서 context/키 정책을 바꾸므로 구현 전에 사용자와 논의한다.
+
+1. `OverlayInput`의 canonical query/preedit를 권위로 유지하고, UTF-16 선택·marked 범위·
+   substring 및 replacement의 순수 계산을 L3 중립 모델에 둔다. Swift에 검색어 사본이나
+   test-only 후보 문맥을 제품 권위로 추가하지 않는다.
+2. AppSession의 명시적 search owner와 입력 세대를 고정한 읽기/쓰기 adapter로 AppKit을
+   연결한다. `imeEnd` 전 확정 대기 문자열도 같은 transaction의 문맥 질의에 일관되게
+   투영한다. 필요 시 ABI를 확장하고 기존 export의 호환성·버전을 함께 관리한다.
+3. `selectedRange`, `markedRange`, `attributedSubstring`, `insertText`의 replacement를
+   같은 문서 축으로 해석한다. 범위 밖·surrogate 중간·UTF-8 한계·OOM은 query를 훼손하거나
+   다른 owner/terminal로 재지정하지 않는다. marked만 바뀌는 동안 필터를 확정하지 않는다.
+4. 검색창의 후보 요청·탐색·취소/선택 키 소유권을 명시하고, terminal의 기본 Meta 키 및
+   Enter 정책과 섞지 않는다. Escape의 후보 취소와 검색 전체 지우기, blur의 원 검색어
+   확정, 늦은 callback의 세대 폐기를 각각 검증한다.
+5. 현재 live 도구가 재사용하는 CR6d candidate reducer는 terminal의 PTY·확정 callback·
+   화면 세대 불변 계약이다. 검색/재변환에서는 입력기의 정상적인 `insertText`가 candidate
+   요청 중 발생할 수 있으므로 그대로 재사용할 수 있는지 먼저 실측한다. terminal 판정자를
+   느슨하게 바꾸지 않고 검색창의 정상 전이를 구분한 관측 계약을 별도로 정한다.
+6. native 범위/실패-원자성 테스트와 실제 HID·새 후보창 ownership/lifecycle·PNG/OCR·
+   anchor·선택 후 exact-once query·취소·terminal 복귀를 함께 확인한다. 고정된 서명 앱으로
+   실제 후보창 5개가 검증되기 전에는 live gate를 완료로 바꾸지 않는다.
+
+근거: Apple `NSTextInputClient`의 selectedRange는 실제 text storage 안의 선택이고,
+substring과 replacement도 같은 storage 범위다. 공개 계약:
+[selectedRange](https://developer.apple.com/documentation/appkit/nstextinputclient/selectedrange()),
+[attributedSubstring](https://developer.apple.com/documentation/appkit/nstextinputclient/attributedsubstring(forproposedrange:actualrange:)),
+[insertText](https://developer.apple.com/documentation/appkit/nstextinputclient/inserttext(_:replacementrange:)).

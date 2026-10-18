@@ -1305,6 +1305,7 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        support.attachArrayRepeatImports(b, macos_chrome_lab_smoke.root_module);
         macos_chrome_lab_smoke.root_module.addIncludePath(b.path("src/platform/macos"));
         macos_chrome_lab_smoke.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/chrome_lab_smoke.m"),

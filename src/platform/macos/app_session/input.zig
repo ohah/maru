@@ -568,6 +568,23 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
     if (self.ime_terminal_target_tombstoned) return;
     // OOM으로 누적이 잘렸으면 통째로 버린다 — 반쪽 문자열을 PTY에 보내지 않는다(#14).
     if (self.ime_insert_failed) return;
+    // AppKit commits plain printable keys through insertText, bypassing the ordinary
+    // key route. Preserve the dock-owned slash action only for this exact unmarked
+    // key transaction; IME text, paste and terminal-owned slashes remain text.
+    if (!composing and !self.ime_did_delete and
+        agent_dock.agentSessionDockOwnsKeys(self) and
+        std.mem.eql(u8, self.ime_inserted.items, "/"))
+    {
+        if (event) |ev| {
+            if (!ev.modifiers.command and !ev.modifiers.control and !ev.modifiers.option and switch (ev.key) {
+                .char => |cp| cp == '/',
+                else => false,
+            }) {
+                _ = self.handleKeyEvent(ev) catch return;
+                return;
+            }
+        }
+    }
     var decision = imeDecide(composing, self.ime_inserted.items, self.ime_marked_changed, self.ime_did_delete);
     if (decision == .ignore) {
         if (self.ime_terminal_target_id) |target_id| {

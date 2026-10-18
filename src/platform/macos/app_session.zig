@@ -88019,17 +88019,72 @@ test "Session Dock 검색은 사이드바 검색과 같은 입력 소유 판정�
     try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
 
     // 도크가 키보드를 갖기 전의 `/`는 터미널 입력이다 — 도크 검색을 열지 않는다(경로·정규식 타이핑 보호).
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = '/' }, .modifiers = .{} });
+    const terminal_before_slash = session.total_terminal_input_bytes;
+    input_ops.imeBegin(session);
+    input_ops.imeMarked(session, ""); // insert_with_range fallback clears the marked buffer.
+    input_ops.imeInsert(session, "/");
+    input_ops.imeEnd(session, .{ .key = .{ .char = '/' }, .modifiers = .{} });
+    try std.testing.expectEqual(terminal_before_slash + 1, session.total_terminal_input_bytes);
     try std.testing.expect(!session.agent_session_archive_search_active);
     try std.testing.expect(!session.terminalOwnsInput());
 
     // 제품에서는 도크 안 primary down이 이 소유권을 준다(`agent_dock.takeAgentSessionDockKeyFocus`). 이 테스트는
     // 입력 소유 판정만 보므로 그 결과 상태만 세우고 같은 `/` 제품 키 경로로 검색을 연다.
     session.agent_session_dock_key_focus = true;
-    _ = try session.handleKeyEvent(.{ .key = .{ .char = '/' }, .modifiers = .{} });
+    // Callback-only commits, multi-character text, different physical keys, modifiers,
+    // and a composing transaction must not be reinterpreted as the dock shortcut.
+    for ([_]struct { bytes: []const u8, event: ?terminal.KeyEvent, composing: bool = false }{
+        .{ .bytes = "/", .event = null },
+        .{ .bytes = "/tmp", .event = .{ .key = .{ .char = '/' }, .modifiers = .{} } },
+        .{ .bytes = "/", .event = .{ .key = .{ .char = 'z' }, .modifiers = .{} } },
+        .{ .bytes = "/", .event = .{ .key = .{ .char = '/' }, .modifiers = .{ .option = true } } },
+        .{ .bytes = "/", .event = .{ .key = .{ .char = '/' }, .modifiers = .{} }, .composing = true },
+    }) |case| {
+        const before = session.total_terminal_input_bytes;
+        input_ops.imeBegin(session);
+        if (case.composing) input_ops.imeMarked(session, "한");
+        input_ops.imeMarked(session, "");
+        input_ops.imeInsert(session, case.bytes);
+        input_ops.imeEnd(session, case.event);
+        try std.testing.expect(!session.agent_session_archive_search_active);
+        try std.testing.expectEqual(before + case.bytes.len, session.total_terminal_input_bytes);
+    }
+    input_ops.imeBegin(session);
+    input_ops.imeMarked(session, "");
+    input_ops.imeInsert(session, "/");
+    const before_slash = session.total_terminal_input_bytes;
+    input_ops.imeEnd(session, .{ .key = .{ .char = '/' }, .modifiers = .{} });
+    try std.testing.expectEqual(before_slash, session.total_terminal_input_bytes);
     try std.testing.expect(session.agent_session_archive_search_active);
     try std.testing.expect(session.terminalOwnsInput());
     try std.testing.expectEqual(AppSession.InputFocus.agent_session_search, session.inputFocus());
+
+    // Candidate anchors must stay inside the published search box with balanced top/bottom
+    // gaps. This catches the missing-parentheses regression even when text ownership is right.
+    const prior_scale = session.scale_milli;
+    defer session.scale_milli = prior_scale;
+    for ([_]u32{ 1000, 2000 }) |scale| {
+        session.scale_milli = scale;
+        for ([_]f32{ 48, 49, 96, 97 }) |height| {
+            session.agent_session_dock_entries.clearRetainingCapacity();
+            try session.agent_session_dock_entries.append(allocator, .{
+                .id = chrome.components.session_dock.build.NodeIds.search,
+                .parent_index = null,
+                .kind = .button,
+                .rect = .{ .x = 20, .y = 100, .width = 600, .height = height },
+                .effective_clip = null,
+                .action = null,
+            });
+            const rect = agent_dock.agentSessionDockSearchCaretRect(session) orelse return error.MissingSearchCaret;
+            const content = dock_ops.dockGeometry(session).tree_content;
+            const top_gap = rect.y - @as(i32, @intCast(content.y)) - 100;
+            const bottom_gap = @as(i32, @intFromFloat(height)) - top_gap - @as(i32, @intCast(rect.h));
+            try std.testing.expect(top_gap >= 0 and bottom_gap >= 0);
+            try std.testing.expect(@abs(top_gap - bottom_gap) <= 1);
+        }
+    }
+    session.scale_milli = prior_scale;
+    session.agent_session_dock_entries.clearRetainingCapacity();
 
     // 타이핑도 같은 경로로 들어가고, override는 유지된다.
     for ("maru") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });

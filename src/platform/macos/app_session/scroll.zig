@@ -876,9 +876,10 @@ pub fn scrollbarGrabAt(self: *const AppSession, x_px: f64, y_px: f64) ?f32 {
     // 호출자(hoverCursor·mouse)가 락 밖에서 부르는 hit-test라 **여기서 잡는다** — `scrollStateOf`의 계약이
     // "호출자가 lockCore 보유"다. 옛 주석은 "스칼라 두 개뿐이라 괜찮다"고 적었지만 그 판단은 계약이 할 몫이고,
     // 원격 backing이면 이 락이 곧 RemoteScreen mutex라 delta-apply와의 직렬화가 실제로 필요하다.
-    const grab_surface = term_ops.activeSurface(
-        @constCast(self),
-    );
+    // 탭이 0 개인 세션도 여기에 온다 — 창 이동·병합이 원래 창을 비운 **뒤** 그 창이 key 를 잃으며
+    // `windowDidResignKey` 가 hover 를 보낸다(창은 그다음에 닫힌다). `activeSurface` 의 `.?` 는 그때 null 이라
+    // ReleaseFast 에서 0 근처 주소를 읽었다(2026-10-19 크래시 3 건, `lockCore` +152 · 0xba8).
+    const grab_surface = @constCast(self).app_window.active() orelse return null;
     const scroll_state = blk: {
         grab_surface.lockCore(self.io);
         defer grab_surface.unlockCore(self.io);

@@ -9834,7 +9834,7 @@ fn visibleIndexOf(term: *Term, doc_line: u32, axis_len: usize) ?usize {
 ///
 /// **편집이 하나인 것이 계약이다.** 「마커 세 줄을 지우고 한쪽을 남긴다」를 여러 편집으로 쪼개면
 /// 사용자가 **여러 번 되돌려야** 하고, 그 중간 상태(마커 반쪽만 남은 파일)가 되돌리기 스택에 남는다.
-/// `applyEditAsOne` 이 그 묶음을 소유한다(§3.3).
+/// `applyEditAsOneWithUndo` 이 그 묶음을 소유한다(§3.3).
 ///
 /// **지우는 범위는 마커 줄까지다.** `<<<<<<<` 줄의 시작부터 `>>>>>>>` 줄의 **줄바꿈까지** — 줄바꿈을
 /// 빼면 고른 뒤 빈 줄이 하나 남고, 더 먹으면 다음 줄이 붙어 올라온다.
@@ -9855,17 +9855,21 @@ pub fn acceptConflict(self: *AppSession, term: *Term, region_index: usize, choic
     defer plan.deinit(self.allocator);
 
     // **커서가 없으면 구간 머리에 놓는다.** 편집 경로는 커서 집합을 통해 문서를 고치는데
-    // (`applyEditAsOne`), 위젯을 누르는 것은 **본문을 한 번도 안 누른 상태**에서도 일어난다 —
+    // (`applyEditAsOneWithUndo`), 위젯을 누르는 것은 **본문을 한 번도 안 누른 상태**에서도 일어난다 —
     // 파일을 열자마자 고르는 것이 흔한 흐름이다. 그때 커서가 없다고 아무 일도 안 하면 사용자에게는
     // 「눌렀는데 안 된다」로만 보인다(실측: 방금 연 문서에서 그랬다).
     //
     // **이미 있으면 안 건드린다** — 누르는 것은 CodeLens 를 누르는 일이고, 그것이 커서를 옮기는
-    // 동작은 아니다. 있는 커서는 `applyEditAsOne` 이 편집을 지나 옮겨 준다.
+    // 동작은 아니다. 있는 커서는 `applyEditAsOneWithUndo` 이 편집을 지나 옮겨 준다.
+    // 실패한 선택은 문서뿐 아니라 위젯을 누르기 전 커서 상태도 보존해야 한다.
+    const before_selection = term.rt.editor_selection;
     if (term.rt.editor_selection == null) {
         term.rt.editor_selection = editor_selection.Selection.at(plan.change.start);
     }
     var changes = [_]maru.session.editor.delta.Change{plan.change};
-    return applyEditAsOne(self, term, &changes);
+    if (applyEditAsOneWithUndo(self, term, &changes)) return true;
+    term.rt.editor_selection = before_selection;
+    return false;
 }
 
 /// 한 문서에서 인식할 충돌 구간의 상한. **§3.8 규율** — 초장문·극단 입력에서 기능을 줄인다.
@@ -34743,6 +34747,88 @@ test "CFL2 고르기는 «편집 하나»다 — 되돌리기 한 번에 마커�
         try testing.expect(undoEdit(fx.session, term));
         try testing.expectEqualStrings(conflict_fixture, term.rt.editorDocument().opened.?.file.content);
         try testing.expect(maru.session.editor.conflict.hasUnresolved(term.rt.editor_lines));
+    }
+}
+
+// 준비 실패는 새 커서나 본문만 남기는 부분 성공이 아니어야 한다.
+test "CFL19 충돌 선택의 Undo 준비 실패는 본문·선택·기존 이력을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    for ([_]AppSession.ConflictChoice{ .current, .incoming, .both, .both_incoming_first }) |choice| {
+        for (0..5) |mode| {
+            var complete = false;
+            for (0..256) |failure| {
+                var fx = try PaneFixture.init(a);
+                defer fx.deinit(a);
+                const term = try undoFixture(&fx, a, "conflict-undo.txt", conflict_fixture);
+                term.rt.editor_selection = editor_selection.Selection.at(0);
+                try testing.expect(insertText(fx.session, term, "prior\n"));
+                breakUndoGroup(term);
+                try testing.expect(insertText(fx.session, term, "redo\n"));
+                try testing.expect(undoEdit(fx.session, term));
+                const peer = try openSharedViewInActivePane(fx.session, term);
+                peer.rt.editor_selection = editor_selection.Selection.at(1);
+                ensureConflicts(fx.session, term);
+                try testing.expectEqual(@as(usize, 1), term.rt.editor_conflicts.len);
+                const state = term.rt.editorDocument();
+                if (mode == 0 or mode == 4) term.rt.editor_selection = null;
+                if (mode == 2 or mode == 4) state.history.next_id = std.math.maxInt(u64);
+                if (mode == 3) state.opened.?.file.read_only = true;
+                const before = try a.dupe(u8, state.opened.?.file.content);
+                defer a.free(before);
+                const selection = term.rt.editor_selection;
+                const revision = state.opened.?.file.revision;
+                state.history.undo = try a.realloc(state.history.undo, state.history.undo_len);
+                const undo_len = state.history.undo_len;
+                const redo_len = state.history.redo_len;
+                const next_id = state.history.next_id;
+                const admission = mode >= 2;
+                var failing = testing.FailingAllocator.init(a, .{ .fail_index = if (admission) std.math.maxInt(usize) else failure, .resize_fail_index = 0 });
+                fx.session.allocator = failing.allocator();
+                state.opened.?.file.allocator = failing.allocator();
+                state.opened.?.file.buf.allocator = failing.allocator();
+                const applied = acceptConflict(fx.session, term, 0, choice);
+                fx.session.allocator = a;
+                state.opened.?.file.allocator = a;
+                state.opened.?.file.buf.allocator = a;
+                if (!applied) {
+                    try testing.expectEqualStrings(before, state.opened.?.file.content);
+                    try testing.expectEqualDeep(selection, term.rt.editor_selection);
+                    try testing.expectEqual(revision, state.opened.?.file.revision);
+                    try testing.expectEqual(undo_len, state.history.undo_len);
+                    try testing.expectEqual(redo_len, state.history.redo_len);
+                    try testing.expectEqual(next_id, state.history.next_id);
+                    try testing.expectEqual(@as(usize, 1), peer.rt.editor_selection.?.focus);
+                } else {
+                    try testing.expect(!admission);
+                    try testing.expectEqual(undo_len + 1, state.history.undo_len);
+                    try testing.expectEqual(@as(usize, 0), state.history.redo_len);
+                    const body: []const u8 = switch (choice) {
+                        .current => "  return \"ours\";\n",
+                        .incoming => "  return \"theirs\";\n",
+                        .both => "  return \"ours\";\n  return \"theirs\";\n",
+                        .both_incoming_first => "  return \"theirs\";\n  return \"ours\";\n",
+                    };
+                    const expected = try std.fmt.allocPrint(a, "prior\nfn greet() {{\n{s}}}\n", .{body});
+                    defer a.free(expected);
+                    try testing.expectEqualStrings(expected, state.opened.?.file.content);
+                    const after = try a.dupe(u8, state.opened.?.file.content);
+                    defer a.free(after);
+                    try testing.expect(!maru.session.editor.conflict.hasUnresolved(term.rt.editor_lines));
+                    try testing.expect(undoEdit(fx.session, peer));
+                    try testing.expectEqualStrings(before, state.opened.?.file.content);
+                    try testing.expect(redoEdit(fx.session, term));
+                    try testing.expectEqualStrings(after, state.opened.?.file.content);
+                }
+                if (!failing.has_induced_failure) {
+                    // 항상 거절하는 구현은 정상 대조군에서 검출한다.
+                    try testing.expectEqual(!admission, applied);
+                    complete = true;
+                    break;
+                }
+            }
+            try testing.expect(complete);
+        }
     }
 }
 

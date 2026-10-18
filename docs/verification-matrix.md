@@ -8,8 +8,8 @@
 
 | 영역 | 상태 | 현재 증거 | 남은 gate |
 |---|---|---|---|
-| PPM 최초 오류 보존 | 구현·native 검증 | `sh tools/test-macos-capture-diagnostics.sh`: RGB·stride, open/header/pixels/close와 errno 없는 실패 대조. 별도 소용량 볼륨에서 ENOSPC 후 공간 복구 대조 | 직접 실행 AppKit CI 통과. 로컬 opt-in GUI launcher는 잠금 해제 후 실행 |
-| Archive private 실행 경로·실패 반출 | 구현·controlled child 검증 | `python3 tools/test-macos-archive-harness.py`: 실제 서명된 controlled bundle의 private HOME·cwd·번들·summary·캡처, 실패 로그와 부분 파일 반출. GUI 소유권은 `tools/shared-restore-app/test_gui_launch.py` | opt-in GUI 전체 archive smoke는 잠금 해제 후 실행. controlled child를 실제 AppKit 성공으로 세지 않는다 |
+| PPM 최초 오류 보존 | 구현·native/GUI 검증 | `sh tools/test-macos-capture-diagnostics.sh`: RGB·stride, open/header/pixels/close와 errno 없는 실패 대조. 별도 소용량 볼륨에서 ENOSPC 후 공간 복구 대조 | 직접 실행 AppKit CI와 동일 서명 앱의 로컬 GUI launcher 전체 묶음 통과. 실제 GUI의 용량 부족 주입은 native writer 볼륨 대조와 구분한다 |
+| Archive private 실행 경로·실패 반출 | 구현·controlled child/GUI 검증 | `python3 tools/test-macos-archive-harness.py`: 실제 서명된 controlled bundle의 private HOME·cwd·번들·summary·캡처, 실패 로그와 부분 파일 반출. GUI 소유권은 `tools/shared-restore-app/test_gui_launch.py` | 실제 opt-in GUI 전체 16개 시나리오 × 5회 통과. 80개 GUI job/앱과 private root 정리 확인. synthetic transcript와 fake provider 범위이며 provider-native resume/Finder 실행은 별도다 |
 
 ### 프로젝트 검색
 

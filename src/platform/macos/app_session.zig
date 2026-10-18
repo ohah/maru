@@ -18778,6 +18778,11 @@ pub const AppSession = struct {
 
     pub fn hoverCursor(self: *AppSession, x_px: f64, y_px: f64, mods: i32) CursorKind {
         if (!self.surface_initialized) return .text;
+        // 0 탭 세션에도 hover 가 온다 — 창 이동·병합이 원래 창을 비운 **뒤** 그 창이 key 를 잃으며
+        // `windowDidResignKey` 가 `hover(-1, -1)` 을 보낸다(창은 그다음에 닫힌다). 아래 본문은 여러 곳에서 활성 탭을
+        // 전제한다(`scrollbarGrabAt` 의 `activeSurface`, `navButtonHoverAt` 의 `activeTab`) — 2026-10-19 크래시 3 건.
+        // 0 탭이면 tick 도 그리지 않으므로 hover 할 것이 없다.
+        if (self.tabs.items.len == 0) return .default;
         if (!dock_ops.dockVisible(self) or self.dock.view != .outline or !layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content)) outline_ops.clearHover(self);
         // 호버 박스의 포인터 추적(tooling §8.2b) — 정지 시간은 tick 이 잰다. 열려 있으면 sticky 판정(낱말·상자 밖이면 닫힘).
         editor_ops.hover_client.notePointer(self, x_px, y_px);
@@ -77340,9 +77345,14 @@ test "M3d-2a-i moveWorkspaceToSession: 비워진 source 창이 key 를 잃을 �
 
     const inside_x: f64 = 79; // 스크롤바 띠 안
     const inside_y: f64 = 1;
+    // `windowDidResignKey` 의 순서 그대로: focus 보고 → hover(-1, -1) → datalist 닫기. focus 쪽은 같은 크래시를
+    // 이미 한 번 막았고(`focusChanged` 의 빈 세션 가드), W4b 가 이 경로에 hover 를 더하며 가드를 따라 넣지 않았다.
+    src.focusChanged(false);
+    try std.testing.expectEqual(CursorKind.default, src.hoverCursor(-1, -1, 0));
+    web_ops.datalistShown(src, 0);
+    // 마우스 경로도 같은 hit-test 를 지난다 — 뿌리에서도 null 이다.
+    try std.testing.expectEqual(CursorKind.default, src.hoverCursor(inside_x, inside_y, 0));
     try std.testing.expectEqual(@as(?f32, null), scroll_ops.scrollbarGrabAt(src, inside_x, inside_y));
-    _ = src.hoverCursor(-1, -1, 0); // `windowDidResignKey` 가 보내는 좌표
-    _ = src.hoverCursor(inside_x, inside_y, 0);
 }
 
 test "M3d-2a-i moveWorkspaceToSession: membershipChangeEvents가 movedOut+movedIn 방출(§8A.3 어휘 재사용, from!=to)" {

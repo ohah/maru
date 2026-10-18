@@ -6485,6 +6485,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
         });
+        support.attachArrayRepeatImports(b, signed_app_quit_evidence_harness.root_module);
         signed_app_quit_evidence_harness_step.dependOn(&signed_app_quit_evidence_harness.step);
         const signed_app_quit_evidence_unit_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

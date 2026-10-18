@@ -2539,6 +2539,7 @@ pub fn build(b: *std.Build) void {
     support.attachAppHostAbiCImport(b, macos_app_host_abi_lib.root_module);
     // build_options 모듈(위에서 생성)을 app host lib에도 주입 — 계약 테스트 모듈과 같은 모듈을 공유한다.
     macos_app_host_abi_lib.root_module.addImport("build_options", build_options_mod);
+    support.attachArrayRepeatImports(b, macos_app_host_abi_lib.root_module);
     if (target.result.os.tag == .macos) {
         macos_app_host_abi_lib.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/session_host_notification_route.c"),

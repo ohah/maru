@@ -142,7 +142,7 @@ test "bounded process closes ambient descriptors when no inheritance is requeste
     try std.testing.expect(ambient_fd >= 3);
     defer _ = c.close(ambient_fd);
     var fd_storage: [32]u8 = undefined;
-    const fd_entry = try std.fmt.bufPrintZ(&fd_storage, "AMBIENT_FD={d}", .{ambient_fd});
+    const fd_entry = try std.fmt.bufPrintSentinel(&fd_storage, "AMBIENT_FD={d}", .{ambient_fd}, 0);
     const environment = [_:null]?[*:0]const u8{fd_entry.ptr};
     const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "if [ -e /dev/fd/$AMBIENT_FD ]; then printf leaked; else printf closed; fi" };
     var output: [16]u8 = undefined;
@@ -175,7 +175,7 @@ test "bounded process binds one directory as child cwd without mutating parent a
     try tmp.dir.createDir(std.testing.io, "held", .default_dir);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "held/leaf", .data = "replacement" });
     var fd_storage: [32]u8 = undefined;
-    const fd_entry = try std.fmt.bufPrintZ(&fd_storage, "AMBIENT_FD={d}", .{ambient_fd});
+    const fd_entry = try std.fmt.bufPrintSentinel(&fd_storage, "AMBIENT_FD={d}", .{ambient_fd}, 0);
     const environment = [_:null]?[*:0]const u8{fd_entry.ptr};
     const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf '%s|' \"$(/bin/cat ./leaf)\"; if [ -e /dev/fd/$AMBIENT_FD ]; then printf leaked; else printf closed; fi" };
     var output: [32]u8 = undefined;
@@ -268,7 +268,7 @@ test "bounded process streams one held regular fd as exact child stdin" {
 fn temporaryPath(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root[0..root_len], leaf });
+    return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ root[0..root_len], leaf }, 0);
 }
 
 test "bounded process treats a child that exits before setpgid as grouped" {
@@ -352,7 +352,7 @@ test "bounded inherited pipe rejects copied owners and closes every ambient desc
     try std.testing.expect(ambient_fd >= 4);
     defer _ = c.close(ambient_fd);
     var fd_storage: [32]u8 = undefined;
-    const fd_entry = try std.fmt.bufPrintZ(&fd_storage, "AMBIENT_FD={d}", .{ambient_fd});
+    const fd_entry = try std.fmt.bufPrintSentinel(&fd_storage, "AMBIENT_FD={d}", .{ambient_fd}, 0);
     const environment = [_:null]?[*:0]const u8{fd_entry.ptr};
     const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "if [ -e /dev/fd/$AMBIENT_FD ]; then printf leaked >&3; else printf closed >&3; fi" };
     var child: process.InheritedPipeChild = .{};
@@ -460,7 +460,7 @@ test "bounded observation preserves signal and child-side exec failure" {
         &stderr,
         run_budget_ns,
     );
-    try std.testing.expectEqual(process.Termination{ .signal = @intFromEnum(c.SIG.TERM) }, signal_result.termination);
+    try std.testing.expectEqual(process.Termination{ .signal = @backingInt(c.SIG.TERM) }, signal_result.termination);
     try std.testing.expectEqual(@as(usize, 0), signal_result.stdout.len);
     try std.testing.expectEqual(@as(usize, 0), signal_result.stderr.len);
 
@@ -538,7 +538,7 @@ test "bounded observation replaces environment and closes ambient descriptors" {
     try std.testing.expect(ambient_fd >= 3);
     defer _ = c.close(ambient_fd);
     var fd_storage: [32]u8 = undefined;
-    const fd_entry = try std.fmt.bufPrintZ(&fd_storage, "AMBIENT_FD={d}", .{ambient_fd});
+    const fd_entry = try std.fmt.bufPrintSentinel(&fd_storage, "AMBIENT_FD={d}", .{ambient_fd}, 0);
     const environment = [_:null]?[*:0]const u8{ "ONLY_CHILD=present", fd_entry.ptr };
     const argv = [_:null]?[*:0]const u8{
         shell.ptr,
@@ -558,7 +558,7 @@ test "bounded observation rejects aliased buffers and repeated runs leak no desc
     var marker_path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
     const marker_path = try temporaryPath(&tmp, "must-not-exist", &marker_path_storage);
     var marker_environment_storage: [std.fs.max_path_bytes + 16]u8 = undefined;
-    const marker_environment = try std.fmt.bufPrintZ(&marker_environment_storage, "MARKER={s}", .{marker_path});
+    const marker_environment = try std.fmt.bufPrintSentinel(&marker_environment_storage, "MARKER={s}", .{marker_path}, 0);
     var aliased: [16]u8 = undefined;
     const alias_environment = [_:null]?[*:0]const u8{marker_environment.ptr};
     const alias_argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "/usr/bin/touch \"$MARKER\"" };

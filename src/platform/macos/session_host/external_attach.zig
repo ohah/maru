@@ -238,8 +238,8 @@ const Attached = struct {
 };
 
 fn exactOwnerSchema(comptime Actual: type, comptime Expected: type) bool {
-    const actual = std.meta.fields(Actual);
-    const expected = std.meta.fields(Expected);
+    const actual = @import("type_info_fields").fields(Actual);
+    const expected = @import("type_info_fields").fields(Expected);
     if (actual.len != expected.len) return false;
     inline for (actual, expected) |a, e| {
         if (!std.mem.eql(u8, a.name, e.name) or a.type != e.type) return false;
@@ -977,7 +977,7 @@ test "external attach maps resource-exhausting metadata to busy and closes befor
         attach_phase_deadline.PhaseDeadline.fromAbsolute(.attach_snapshot, absolute),
     );
     try std.testing.expectEqual(attach_cli.ExitCode.busy, stage.failed);
-    try std.testing.expectEqual(@as(u8, 6), @intFromEnum(stage.failed));
+    try std.testing.expectEqual(@as(u8, 6), @backingInt(stage.failed));
     peer.join();
     try std.testing.expect(peer_state.response_sent);
     try std.testing.expect(peer_state.eof_seen);
@@ -1165,10 +1165,11 @@ test "external attach product transaction resolves connects and assembles one li
     const allocator = std.testing.allocator;
     const host_id = (@as(u128, @intCast(c.getpid())) << 64) | 0xe771;
     var base_buf: [192]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(
+    const base = try std.fmt.bufPrintSentinel(
         &base_buf,
         "/tmp/maru-external-attach-{d}",
         .{c.getpid()},
+        0,
     );
     // The fixture namespace is PID-derived, so a crashed prior run followed by PID reuse can
     // leave owner.lock/manifest/socket residue. Starting a daemon on that tree then exits before

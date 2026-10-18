@@ -927,7 +927,7 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
         "workspace restore accounting: dropped={d} demoted={d} revived={d} latch={s}",
         .{ dropped, demoted, revived, if (dropped > 0) "set" else "clear" },
     );
-    if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 복원 후 불변식 확인(디버그)
+    if (builtin.mode == .debug) assertPinnedPrefixRuntime(self); // 복원 후 불변식 확인(디버그)
     // 창이 확정됐다 — 내용이 살아 있는 Term 으로 옮겨 갔으니 미룬 레코드를 이제 지운다.
     app_session_mod.editor_backup_ops.commitDeferredDrops(self);
     if (editors.restored_content) self.showNoticeKey(.editor_backup_restored);
@@ -1065,12 +1065,12 @@ pub const ProviderEnvGuard = struct {
     const names = [_][:0]const u8{ "HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "MARU_CONFIG" };
 
     a: std.mem.Allocator,
-    saved: [names.len]?[:0]u8 = .{null} ** names.len,
+    saved: [names.len]?[:0]u8 = @splat(null),
 
     pub fn capture(a: std.mem.Allocator) !ProviderEnvGuard {
         var self = ProviderEnvGuard{ .a = a };
         for (names, &self.saved) |name, *slot| {
-            if (std.c.getenv(name.ptr)) |raw| slot.* = try a.dupeZ(u8, std.mem.span(raw));
+            if (std.c.getenv(name.ptr)) |raw| slot.* = try a.dupeSentinel(u8, std.mem.span(raw), 0);
         }
         return self;
     }

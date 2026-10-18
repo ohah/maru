@@ -149,7 +149,7 @@ fn scanFile(allocator: std.mem.Allocator, path: []const u8, used: *[allowed.len]
 test "TAB-UAF 탭·pane·Term 을 푸는 루프가 푼 것을 살아 있는 목록에 남기지 않는다" {
     const a = std.testing.allocator;
     var bad: usize = 0;
-    var used = [_]bool{false} ** allowed.len;
+    var used = @as([allowed.len]bool, @splat(false));
     bad += try scanFile(a, "src/platform/macos/app_session.zig", &used);
 
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src/platform/macos/app_session", .{ .iterate = true });

@@ -77,7 +77,7 @@ pub fn resolve(tokens: []const Token, independent: bool, out: []Info, partner: [
 
     // ② 단계. 스택에는 열린 여는 괄호, `cur` 은 그중 **색을 받는** 것의 수(종류별은 `per_kind`).
     var cur: u16 = 0;
-    var per_kind = [_]u16{0} ** max_kinds;
+    var per_kind = @as([max_kinds]u16, @splat(0));
     sp = 0;
     for (tokens, 0..) |t, i| {
         if (t.open) {

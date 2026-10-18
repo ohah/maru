@@ -338,5 +338,5 @@ fn rangesOverlap(left: []const u8, right: []const u8) bool {
 
 fn copyPath(storage: *[std.fs.max_path_bytes:0]u8, value: []const u8) ![:0]const u8 {
     if (value.len == 0 or std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidBootstrap;
-    return std.fmt.bufPrintZ(storage, "{s}", .{value}) catch return error.InvalidBootstrap;
+    return std.fmt.bufPrintSentinel(storage, "{s}", .{value}, 0) catch return error.InvalidBootstrap;
 }

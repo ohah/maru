@@ -109,8 +109,8 @@ pub fn classify(selection: Selection, observation: Observation) phase.Result {
 }
 
 fn classifyStage3(code: u8, stderr: []const u8) phase.Result {
-    inline for (@typeInfo(outcome.Stage3).@"enum".fields) |field| {
-        const value: outcome.Stage3 = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(outcome.Stage3)) |field| {
+        const value: outcome.Stage3 = @fromBackingInt(@intCast(field.value));
         if (matches(code, stderr, outcome.stage3ExitCode(value), outcome.stage3StderrLine(value))) return switch (value) {
             .success => .succeeded,
             .local_failure => .failed_before_remote_mutation,
@@ -122,8 +122,8 @@ fn classifyStage3(code: u8, stderr: []const u8) phase.Result {
 }
 
 fn classifyAggregate(code: u8, stderr: []const u8) phase.Result {
-    inline for (@typeInfo(outcome.Aggregate).@"enum".fields) |field| {
-        const value: outcome.Aggregate = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(outcome.Aggregate)) |field| {
+        const value: outcome.Aggregate = @fromBackingInt(@intCast(field.value));
         if (matches(code, stderr, outcome.aggregateExitCode(value), outcome.aggregateStderrLine(value))) return switch (value) {
             .success => .succeeded,
             .audit_required => .failed,
@@ -134,8 +134,8 @@ fn classifyAggregate(code: u8, stderr: []const u8) phase.Result {
 }
 
 fn classifyPublication(code: u8, stderr: []const u8) phase.Result {
-    inline for (@typeInfo(outcome.Publication).@"enum".fields) |field| {
-        const value: outcome.Publication = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(outcome.Publication)) |field| {
+        const value: outcome.Publication = @fromBackingInt(@intCast(field.value));
         if (matches(code, stderr, outcome.publicationExitCode(value), outcome.publicationStderrLine(value))) return switch (value) {
             .success => .succeeded,
             .audit_required => .failed,
@@ -146,8 +146,8 @@ fn classifyPublication(code: u8, stderr: []const u8) phase.Result {
 }
 
 fn classifyCleanup(code: u8, stderr: []const u8) phase.Result {
-    inline for (@typeInfo(outcome.Cleanup).@"enum".fields) |field| {
-        const value: outcome.Cleanup = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(outcome.Cleanup)) |field| {
+        const value: outcome.Cleanup = @fromBackingInt(@intCast(field.value));
         if (matches(code, stderr, outcome.cleanupExitCode(value), outcome.cleanupStderrLine(value))) return switch (value) {
             .success => .succeeded,
             .audit_required => .failed,

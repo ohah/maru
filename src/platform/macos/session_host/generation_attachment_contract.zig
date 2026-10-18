@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const runtime_control_types = @import("runtime_control_types.zig");
+const type_info_fields = @import("type_info_fields");
 
 pub const PurgeEndedOutcome = enum { not_ended, purged };
 pub const PurgeEndedError = error{ Busy, InvalidOwner, Corrupt, Terminal };
@@ -81,7 +82,7 @@ pub const AttachmentRole = enum(u8) {
 
 pub fn attachmentRoleRawValid(value: *const AttachmentRole) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
-    return raw <= @intFromEnum(AttachmentRole.observer);
+    return raw <= @backingInt(AttachmentRole.observer);
 }
 
 /// Immutable, storage-neutral half of a prepared attachment binding. The
@@ -249,7 +250,7 @@ pub const TransportOwnerSeal = struct {
 
     fn lifecycleRawValid(self: *const TransportOwnerSeal) bool {
         const raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
-        return raw <= @intFromEnum(TransportOwnerLifecycle.terminal);
+        return raw <= @backingInt(TransportOwnerLifecycle.terminal);
     }
 
     fn ownerRangeValid(self: *const TransportOwnerSeal) bool {
@@ -378,7 +379,7 @@ pub const ExecutedResponseOwnerSeal = struct {
 
     pub fn lifecycleRawValid(self: *const @This()) bool {
         const raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
-        return raw <= @intFromEnum(ExecutedResponseOwnerLifecycle.terminal);
+        return raw <= @backingInt(ExecutedResponseOwnerLifecycle.terminal);
     }
 
     pub fn initInPlace(
@@ -473,7 +474,7 @@ pub const RuntimeRequestTag = enum(u8) {
 
 pub fn runtimeRequestTagRawValid(value: *const RuntimeRequestTag) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
-    return raw <= @intFromEnum(RuntimeRequestTag.notification_config_update);
+    return raw <= @backingInt(RuntimeRequestTag.notification_config_update);
 }
 
 /// Decoder는 응답 bytes를 빌린 호출 안에서 이 두 종료 의미 중 하나만 선택한다. bytes나
@@ -484,7 +485,7 @@ pub const RpcDecodeDisposition = enum(u8) {
 };
 
 pub fn rpcDecodeDispositionRawValid(value: *const RpcDecodeDisposition) bool {
-    return @as(*const u8, @ptrCast(value)).* <= @intFromEnum(RpcDecodeDisposition.protocol_failure);
+    return @as(*const u8, @ptrCast(value)).* <= @backingInt(RpcDecodeDisposition.protocol_failure);
 }
 
 pub const RpcDecoder = *const fn (
@@ -515,11 +516,11 @@ fn typeContainsPointer(comptime T: type) bool {
         .array => |info| typeContainsPointer(info.child),
         .error_union => |info| typeContainsPointer(info.payload),
         .@"struct" => |info| blk: {
-            for (info.fields) |field| if (typeContainsPointer(field.type)) break :blk true;
+            for (type_info_fields.fieldsFromInfo(info)) |field| if (typeContainsPointer(field.type)) break :blk true;
             break :blk false;
         },
         .@"union" => |info| blk: {
-            for (info.fields) |field| if (typeContainsPointer(field.type)) break :blk true;
+            for (type_info_fields.fieldsFromInfo(info)) |field| if (typeContainsPointer(field.type)) break :blk true;
             break :blk false;
         },
         else => false,
@@ -548,8 +549,8 @@ test "2c3e C1 중립 계약의 decoder 결과에는 pointer authority가 없다"
 }
 
 test "2c3e C1 중립 계약은 reusable과 protocol failure를 서로 다른 raw 값으로 보존한다" {
-    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(RpcDecodeDisposition.reusable));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(RpcDecodeDisposition.protocol_failure));
+    try std.testing.expectEqual(@as(u8, 0), @backingInt(RpcDecodeDisposition.reusable));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(RpcDecodeDisposition.protocol_failure));
 }
 
 pub const RequestFamily = enum(u8) {
@@ -562,7 +563,7 @@ pub const RequestFamily = enum(u8) {
 
 pub fn requestFamilyRawValid(value: *const RequestFamily) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
-    return raw <= @intFromEnum(RequestFamily.bound_terminal);
+    return raw <= @backingInt(RequestFamily.bound_terminal);
 }
 
 pub fn requestFamilyForTag(tag: RuntimeRequestTag) RequestFamily {
@@ -631,7 +632,7 @@ pub const SelectedTextRequest = struct {
 pub const LinkAtRequest = extern struct { row: u16, col: u16, scopes: u8 };
 pub const FindRequest = struct {
     pub const max_query_bytes: usize = 256;
-    query: [max_query_bytes]u8 = [_]u8{0} ** max_query_bytes,
+    query: [max_query_bytes]u8 = @as([max_query_bytes]u8, @splat(0)),
     query_len: u16 = 0,
     current: u32,
     scroll: bool,
@@ -668,7 +669,7 @@ pub const SelectRequest = struct {
     kind: SelectKind,
     row: u16,
     col: u16,
-    separators: [64]u8 = [_]u8{0} ** 64,
+    separators: [64]u8 = @as([64]u8, @splat(0)),
     separators_len: u8 = 0,
 
     pub fn bytes(self: *const SelectRequest) ?[]const u8 {
@@ -724,7 +725,7 @@ pub const NotificationConfigUpdateRequest = struct {
     expected_controller_generation: u64,
     config_generation: u64,
     notifications_osc: bool,
-    display_label: [256]u8 = [_]u8{0} ** 256,
+    display_label: [256]u8 = @as([256]u8, @splat(0)),
     display_label_len: u16 = 0,
 
     pub fn init(
@@ -782,7 +783,7 @@ pub const RuntimeRequest = extern struct {
     payload: RuntimeRequestPayload,
 
     fn empty(comptime tag: RuntimeRequestTag) RuntimeRequest {
-        return .{ .tag = @intFromEnum(tag), .payload = .{ .empty = 0 } };
+        return .{ .tag = @backingInt(tag), .payload = .{ .empty = 0 } };
     }
 
     pub fn spawnFull() RuntimeRequest {
@@ -795,13 +796,13 @@ pub const RuntimeRequest = extern struct {
         return empty(.attach_observer);
     }
     pub fn resize(value: ResizeRequest) RuntimeRequest {
-        return .{ .tag = @intFromEnum(RuntimeRequestTag.resize), .payload = .{ .resize = value } };
+        return .{ .tag = @backingInt(RuntimeRequestTag.resize), .payload = .{ .resize = value } };
     }
     pub fn observation() RuntimeRequest {
         return empty(.observation);
     }
     pub fn selectedText(value: SelectedTextRequest) RuntimeRequest {
-        return .{ .tag = @intFromEnum(RuntimeRequestTag.selected_text), .payload = .{ .selected_text = .{
+        return .{ .tag = @backingInt(RuntimeRequestTag.selected_text), .payload = .{ .selected_text = .{
             .start_row = value.start_row,
             .start_col = value.start_col,
             .end_row = value.end_row,
@@ -812,13 +813,13 @@ pub const RuntimeRequest = extern struct {
         } } };
     }
     pub fn linkAt(value: LinkAtRequest) RuntimeRequest {
-        return .{ .tag = @intFromEnum(RuntimeRequestTag.link_at), .payload = .{ .link_at = value } };
+        return .{ .tag = @backingInt(RuntimeRequestTag.link_at), .payload = .{ .link_at = value } };
     }
     pub fn clipboardWrite() RuntimeRequest {
         return empty(.clipboard_write);
     }
     pub fn find(value: FindRequest) RuntimeRequest {
-        return .{ .tag = @intFromEnum(RuntimeRequestTag.find), .payload = .{ .find = .{
+        return .{ .tag = @backingInt(RuntimeRequestTag.find), .payload = .{ .find = .{
             .query = value.query,
             .query_len = value.query_len,
             .current = value.current,
@@ -827,8 +828,8 @@ pub const RuntimeRequest = extern struct {
         } } };
     }
     pub fn selectOp(value: SelectRequest) RuntimeRequest {
-        return .{ .tag = @intFromEnum(RuntimeRequestTag.select_op), .payload = .{ .select_op = .{
-            .kind = @intFromEnum(value.kind),
+        return .{ .tag = @backingInt(RuntimeRequestTag.select_op), .payload = .{ .select_op = .{
+            .kind = @backingInt(value.kind),
             .row = value.row,
             .col = value.col,
             .separators = value.separators,
@@ -836,12 +837,12 @@ pub const RuntimeRequest = extern struct {
         } } };
     }
     pub fn coreCommand(value: CoreCommandRequest) RuntimeRequest {
-        return .{ .tag = @intFromEnum(RuntimeRequestTag.core_command), .payload = .{
+        return .{ .tag = @backingInt(RuntimeRequestTag.core_command), .payload = .{
             .core_command = runtime_control_types.encodeRawCoreCommand(value),
         } };
     }
     pub fn reportMouse(value: MouseReportRequest) RuntimeRequest {
-        return .{ .tag = @intFromEnum(RuntimeRequestTag.report_mouse), .payload = .{ .report_mouse = .{
+        return .{ .tag = @backingInt(RuntimeRequestTag.report_mouse), .payload = .{ .report_mouse = .{
             .button = value.button,
             .col = value.col,
             .row = value.row,
@@ -856,7 +857,7 @@ pub const RuntimeRequest = extern struct {
         return empty(.notification);
     }
     pub fn notificationConfigUpdate(value: NotificationConfigUpdateRequest) RuntimeRequest {
-        return .{ .tag = @intFromEnum(RuntimeRequestTag.notification_config_update), .payload = .{
+        return .{ .tag = @backingInt(RuntimeRequestTag.notification_config_update), .payload = .{
             .notification_config_update = .{
                 .expected_controller_generation = value.expected_controller_generation,
                 .config_generation = value.config_generation,
@@ -875,17 +876,17 @@ pub const RuntimeRequest = extern struct {
 
     pub fn decode(self: *const RuntimeRequest) ?ValidatedRuntimeRequest {
         return switch (self.tag) {
-            @intFromEnum(RuntimeRequestTag.spawn_full) => .spawn_full,
-            @intFromEnum(RuntimeRequestTag.attach_controller) => .attach_controller,
-            @intFromEnum(RuntimeRequestTag.attach_observer) => .attach_observer,
-            @intFromEnum(RuntimeRequestTag.resize) => blk: {
+            @backingInt(RuntimeRequestTag.spawn_full) => .spawn_full,
+            @backingInt(RuntimeRequestTag.attach_controller) => .attach_controller,
+            @backingInt(RuntimeRequestTag.attach_observer) => .attach_observer,
+            @backingInt(RuntimeRequestTag.resize) => blk: {
                 const value = self.payload.resize;
                 if (value.cols == 0 or value.rows == 0 or value.client_sequence == 0)
                     break :blk null;
                 break :blk .{ .resize = value };
             },
-            @intFromEnum(RuntimeRequestTag.observation) => .observation,
-            @intFromEnum(RuntimeRequestTag.selected_text) => blk: {
+            @backingInt(RuntimeRequestTag.observation) => .observation,
+            @backingInt(RuntimeRequestTag.selected_text) => blk: {
                 const value = self.payload.selected_text;
                 if (value.block > 1 or value.all > 1 or value.authoritative > 1) break :blk null;
                 break :blk .{ .selected_text = .{
@@ -898,9 +899,9 @@ pub const RuntimeRequest = extern struct {
                     .authoritative = value.authoritative == 1,
                 } };
             },
-            @intFromEnum(RuntimeRequestTag.link_at) => .{ .link_at = self.payload.link_at },
-            @intFromEnum(RuntimeRequestTag.clipboard_write) => .clipboard_write,
-            @intFromEnum(RuntimeRequestTag.find) => blk: {
+            @backingInt(RuntimeRequestTag.link_at) => .{ .link_at = self.payload.link_at },
+            @backingInt(RuntimeRequestTag.clipboard_write) => .clipboard_write,
+            @backingInt(RuntimeRequestTag.find) => blk: {
                 const value = self.payload.find;
                 if (value.scroll > 1 or value.regex > 1 or value.query_len > value.query.len) break :blk null;
                 break :blk .{ .find = .{
@@ -911,12 +912,12 @@ pub const RuntimeRequest = extern struct {
                     .regex = value.regex == 1,
                 } };
             },
-            @intFromEnum(RuntimeRequestTag.select_op) => blk: {
+            @backingInt(RuntimeRequestTag.select_op) => blk: {
                 const value = self.payload.select_op;
                 const kind: SelectKind = switch (value.kind) {
-                    @intFromEnum(SelectKind.word) => .word,
-                    @intFromEnum(SelectKind.line) => .line,
-                    @intFromEnum(SelectKind.all) => .all,
+                    @backingInt(SelectKind.word) => .word,
+                    @backingInt(SelectKind.line) => .line,
+                    @backingInt(SelectKind.all) => .all,
                     else => break :blk null,
                 };
                 if (value.separators_len > value.separators.len) break :blk null;
@@ -928,10 +929,10 @@ pub const RuntimeRequest = extern struct {
                     .separators_len = value.separators_len,
                 } };
             },
-            @intFromEnum(RuntimeRequestTag.core_command) => .{
+            @backingInt(RuntimeRequestTag.core_command) => .{
                 .core_command = runtime_control_types.decodeRawCoreCommand(&self.payload.core_command) orelse return null,
             },
-            @intFromEnum(RuntimeRequestTag.report_mouse) => blk: {
+            @backingInt(RuntimeRequestTag.report_mouse) => blk: {
                 const value = self.payload.report_mouse;
                 if (value.pressed > 1 or value.motion > 1) break :blk null;
                 break :blk .{ .report_mouse = .{
@@ -945,8 +946,8 @@ pub const RuntimeRequest = extern struct {
                     .mods = value.mods,
                 } };
             },
-            @intFromEnum(RuntimeRequestTag.notification) => .notification,
-            @intFromEnum(RuntimeRequestTag.notification_config_update) => blk: {
+            @backingInt(RuntimeRequestTag.notification) => .notification,
+            @backingInt(RuntimeRequestTag.notification_config_update) => blk: {
                 const value = self.payload.notification_config_update;
                 if (value.expected_controller_generation == 0 or value.config_generation == 0 or
                     value.notifications_osc > 1 or value.display_label_len > value.display_label.len)
@@ -959,8 +960,8 @@ pub const RuntimeRequest = extern struct {
                     .display_label_len = value.display_label_len,
                 } };
             },
-            @intFromEnum(RuntimeRequestTag.terminate) => .terminate,
-            @intFromEnum(RuntimeRequestTag.detach) => .detach,
+            @backingInt(RuntimeRequestTag.terminate) => .terminate,
+            @backingInt(RuntimeRequestTag.detach) => .detach,
             else => null,
         };
     }
@@ -1035,8 +1036,8 @@ comptime {
         runtime_selected_text: bool,
         runtime_selection_state: bool,
     };
-    const actual = std.meta.fields(GenerationCapabilities);
-    const expected = std.meta.fields(Expected);
+    const actual = type_info_fields.fields(GenerationCapabilities);
+    const expected = type_info_fields.fields(Expected);
     if (actual.len != expected.len)
         @compileError("GenerationCapabilities schema changed without updating CR3a SSOT");
     for (actual, expected) |a, e| {
@@ -1061,13 +1062,13 @@ fn containsPointer(comptime T: type) bool {
         .array => |info| containsPointer(info.child),
         .optional => |info| containsPointer(info.child),
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field| {
+            inline for (type_info_fields.fieldsFromInfo(info)) |field| {
                 if (containsPointer(field.type)) break :blk true;
             }
             break :blk false;
         },
         .@"union" => |info| blk: {
-            inline for (info.fields) |field| {
+            inline for (type_info_fields.fieldsFromInfo(info)) |field| {
                 if (containsPointer(field.type)) break :blk true;
             }
             break :blk false;
@@ -1156,7 +1157,7 @@ test "CR3a-2c3a binding identity rejects every invalid raw attachment role" {
         .process_nonce = 10,
     };
     const role_raw: *u8 = @ptrCast(&identity.role);
-    var raw: u16 = @intFromEnum(AttachmentRole.observer) + 1;
+    var raw: u16 = @backingInt(AttachmentRole.observer) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         role_raw.* = @intCast(raw);
         try std.testing.expect(!identity.valid());
@@ -1169,10 +1170,10 @@ test "CR3a-2a neutral lifecycle and request vocabularies are closed" {
     try std.testing.expectEqual(@as(usize, 5), std.enums.values(ExecutedResponseLifecycle).len);
     // CR4a splits observer attach from controller attach, and N2b1 adds one typed notification
     // config mutation; the transport encoder cannot infer either role or config payload.
-    try std.testing.expectEqual(@as(usize, 16), std.meta.fields(RuntimeRequestTag).len);
-    try std.testing.expectEqual(@as(u8, 13), @intFromEnum(RuntimeRequestTag.detach));
-    try std.testing.expectEqual(@as(u8, 14), @intFromEnum(RuntimeRequestTag.attach_observer));
-    try std.testing.expectEqual(@as(u8, 15), @intFromEnum(RuntimeRequestTag.notification_config_update));
+    try std.testing.expectEqual(@as(usize, 16), type_info_fields.fields(RuntimeRequestTag).len);
+    try std.testing.expectEqual(@as(u8, 13), @backingInt(RuntimeRequestTag.detach));
+    try std.testing.expectEqual(@as(u8, 14), @backingInt(RuntimeRequestTag.attach_observer));
+    try std.testing.expectEqual(@as(u8, 15), @backingInt(RuntimeRequestTag.notification_config_update));
     try std.testing.expectEqual(@as(usize, 5), std.enums.values(RequestFamily).len);
     try std.testing.expectEqual(@as(usize, 3), std.enums.values(ExecuteOutcome).len);
 }
@@ -1284,7 +1285,7 @@ test "CR3a-2c3b request raw discriminators fail closed before semantic reads" {
     request.payload.select_op.kind = 0xff;
     try std.testing.expect(request.decode() == null);
 
-    var raw: u16 = @intFromEnum(RuntimeRequestTag.attach_observer) + 1;
+    var raw: u16 = @backingInt(RuntimeRequestTag.attach_observer) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         request.tag = @intCast(raw);
         try std.testing.expect(request.decode() == null);
@@ -1293,7 +1294,7 @@ test "CR3a-2c3b request raw discriminators fail closed before semantic reads" {
     request = RuntimeRequest.coreCommand(.{ .report_focus = true });
     request.payload.core_command.payload.flag = 2;
     try std.testing.expect(request.decode() == null);
-    request = RuntimeRequest.coreCommand(.{ .set_config_palette = [_]?u32{null} ** 16 });
+    request = RuntimeRequest.coreCommand(.{ .set_config_palette = @as([16]?u32, @splat(null)) });
     request.payload.core_command.payload.palette[7].present = 2;
     try std.testing.expect(request.decode() == null);
     request = RuntimeRequest.coreCommand(.reset_input_modes);
@@ -1332,7 +1333,7 @@ test "CR3a-2c3c control raw discriminators fail closed before semantic reads" {
         if (nested.decode() != null) valid_nested += 1;
     }
     // selection_scroll_and_extend의 zeroed delta는 semantic invalid이므로 raw tag sweep 한 건은 fail-closed다.
-    try std.testing.expectEqual(@as(usize, @typeInfo(CoreCommandRequest).@"union".fields.len - 1), valid_nested);
+    try std.testing.expectEqual(@as(usize, type_info_fields.unionFields(CoreCommandRequest).len - 1), valid_nested);
 
     const dedicated = RuntimeControl.scrollToBottom().decode().?;
     try std.testing.expectEqual(RuntimeControlTag.scroll_to_bottom, std.meta.activeTag(dedicated));

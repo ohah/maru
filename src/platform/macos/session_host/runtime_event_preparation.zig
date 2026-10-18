@@ -3,6 +3,8 @@
 //! This leaf owns no source or destination storage. It canonicalizes the classifier result into
 //! a fixed value and can later fill caller-owned metadata scratch after rebinding the payload.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const builtin = @import("builtin");
 const protocol = @import("protocol.zig");
@@ -19,18 +21,18 @@ pub const FilledProcess = runtime_metadata_types.ProcessValue;
 pub const StringRecipe = struct {
     destination_start: u32 = 0,
     decoded_len: u32 = 0,
-    digest: Digest = [_]u8{0} ** 32,
+    digest: Digest = @as([32]u8, @splat(0)),
 };
 
 pub const ProcessRecipe = struct {
     pid: i32 = 0,
     name_len: u8 = 0,
-    name_digest: Digest = [_]u8{0} ** 32,
+    name_digest: Digest = @as([32]u8, @splat(0)),
 };
 
 pub const MetadataPreparationRecipe = struct {
-    payload_digest: Digest = [_]u8{0} ** 32,
-    semantic_digest: Digest = [_]u8{0} ** 32,
+    payload_digest: Digest = @as([32]u8, @splat(0)),
+    semantic_digest: Digest = @as([32]u8, @splat(0)),
     /// Correlates a fresh metadata snapshot with one fire-and-forget observation probe. This is
     /// Transport settlement evidence, not part of the semantic observation contents.
     observation_probe_nonce: u64 = 0,
@@ -65,7 +67,7 @@ pub const MetadataPreparationRecipe = struct {
     ssh_remote_dest_present_raw: u8 = 0,
     ssh_remote_dest: StringRecipe = .{},
     clipboard_read_target: StringRecipe = .{},
-    processes: [max_process_entries]ProcessRecipe = [_]ProcessRecipe{.{}} ** max_process_entries,
+    processes: [max_process_entries]ProcessRecipe = @as([max_process_entries]ProcessRecipe, @splat(.{})),
     process_count: u8 = 0,
 };
 
@@ -185,7 +187,7 @@ pub fn fillMetadataRecipe(
     };
     try validateFillPlan(recipe, payload, &metadata);
 
-    processes.* = [_]FilledProcess{.{}} ** max_process_entries;
+    processes.* = @as([max_process_entries]FilledProcess, @splat(.{}));
     try decodeInto(payload, metadata.cwd, recipe.cwd, backing);
     try decodeInto(payload, metadata.cwd_host, recipe.cwd_host, backing);
     try decodeInto(payload, metadata.window_title, recipe.window_title, backing);
@@ -277,7 +279,7 @@ fn buildMetadataRecipe(
         .title_generation = metadata.title_generation,
         .cols = metadata.cols,
         .rows = metadata.rows,
-        .semantic_state_raw = @intFromEnum(metadata.semantic_state),
+        .semantic_state_raw = @backingInt(metadata.semantic_state),
         .alt_active_raw = @intFromBool(metadata.alt_active),
         .app_cursor_keys_raw = @intFromBool(metadata.app_cursor_keys),
         .app_keypad_raw = @intFromBool(metadata.app_keypad),
@@ -360,7 +362,7 @@ fn validateFillPlan(
     payload: []const u8,
     metadata: *const runtime_event_wire.MetadataView,
 ) FillError!void {
-    if (recipe.semantic_state_raw > @intFromEnum(runtime_metadata_types.SemanticPrompt.command) or
+    if (recipe.semantic_state_raw > @backingInt(runtime_metadata_types.SemanticPrompt.command) or
         recipe.alt_active_raw > 1 or recipe.app_cursor_keys_raw > 1 or
         recipe.app_keypad_raw > 1 or recipe.kitty_flags_raw > std.math.maxInt(u5) or
         recipe.alternate_scroll_raw > 1 or recipe.mouse_tracking_raw > 1 or
@@ -525,12 +527,12 @@ fn typeContainsForbidden(comptime T: type) bool {
         .array => |array| typeContainsForbidden(array.child),
         .optional => |optional| typeContainsForbidden(optional.child),
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field|
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field|
                 if (typeContainsForbidden(field.type)) break :blk true;
             break :blk false;
         },
         .@"union" => |info| blk: {
-            inline for (info.fields) |field|
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field|
                 if (typeContainsForbidden(field.type)) break :blk true;
             break :blk false;
         },
@@ -538,7 +540,7 @@ fn typeContainsForbidden(comptime T: type) bool {
     };
 }
 
-fn expectExactFields(comptime fields: []const std.builtin.Type.StructField, comptime expected: anytype) !void {
+fn expectExactFields(comptime fields: []const @import("type_info_fields").Field, comptime expected: anytype) !void {
     try std.testing.expectEqual(expected.len, fields.len);
     inline for (fields, expected) |field, wanted| {
         try std.testing.expectEqualStrings(wanted[0], field.name);
@@ -546,7 +548,7 @@ fn expectExactFields(comptime fields: []const std.builtin.Type.StructField, comp
     }
 }
 
-fn expectExactUnionFields(comptime fields: []const std.builtin.Type.UnionField, comptime expected: anytype) !void {
+fn expectExactUnionFields(comptime fields: []const @import("type_info_fields").Field, comptime expected: anytype) !void {
     try std.testing.expectEqual(expected.len, fields.len);
     inline for (fields, expected) |field, wanted| {
         try std.testing.expectEqualStrings(wanted[0], field.name);
@@ -555,13 +557,13 @@ fn expectExactUnionFields(comptime fields: []const std.builtin.Type.UnionField, 
 }
 
 test "C3-3b2b2 recipe projects all five accepted event arms" {
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(AcceptedPreparationTag.revoked));
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(AcceptedPreparationTag.invalidated));
-    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(AcceptedPreparationTag.resized));
-    try std.testing.expectEqual(@as(u8, 4), @intFromEnum(AcceptedPreparationTag.metadata));
-    try std.testing.expectEqual(@as(u8, 5), @intFromEnum(AcceptedPreparationTag.ended));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(EventPreparationTag.accepted));
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(EventPreparationTag.violation));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(AcceptedPreparationTag.revoked));
+    try std.testing.expectEqual(@as(u8, 2), @backingInt(AcceptedPreparationTag.invalidated));
+    try std.testing.expectEqual(@as(u8, 3), @backingInt(AcceptedPreparationTag.resized));
+    try std.testing.expectEqual(@as(u8, 4), @backingInt(AcceptedPreparationTag.metadata));
+    try std.testing.expectEqual(@as(u8, 5), @backingInt(AcceptedPreparationTag.ended));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(EventPreparationTag.accepted));
+    try std.testing.expectEqual(@as(u8, 2), @backingInt(EventPreparationTag.violation));
 
     const cases = .{
         .{ "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}", .revoked },
@@ -590,16 +592,16 @@ test "C3-3b2b2 recipe preserves every closed violation arm without parsing paylo
             try std.testing.expect(std.meta.eql(violation, recipe.violation));
         }
     }.run;
-    inline for (std.meta.fields(runtime_event_types.FrameViolation)) |field|
-        try expectViolationRecipe(.{ .frame = @enumFromInt(field.value) });
-    inline for (std.meta.fields(runtime_event_types.IdentityViolation)) |field|
-        try expectViolationRecipe(.{ .identity = @enumFromInt(field.value) });
-    inline for (std.meta.fields(runtime_event_types.AuthorityViolation)) |field|
-        try expectViolationRecipe(.{ .authority = @enumFromInt(field.value) });
-    inline for (std.meta.fields(runtime_event_types.CapabilityViolation)) |field|
-        try expectViolationRecipe(.{ .capability = @enumFromInt(field.value) });
-    inline for (std.meta.fields(runtime_event_wire.ForeignKind)) |field|
-        try expectViolationRecipe(.{ .foreign = @enumFromInt(field.value) });
+    inline for (@import("type_info_fields").fields(runtime_event_types.FrameViolation)) |field|
+        try expectViolationRecipe(.{ .frame = @fromBackingInt(@intCast(field.value)) });
+    inline for (@import("type_info_fields").fields(runtime_event_types.IdentityViolation)) |field|
+        try expectViolationRecipe(.{ .identity = @fromBackingInt(@intCast(field.value)) });
+    inline for (@import("type_info_fields").fields(runtime_event_types.AuthorityViolation)) |field|
+        try expectViolationRecipe(.{ .authority = @fromBackingInt(@intCast(field.value)) });
+    inline for (@import("type_info_fields").fields(runtime_event_types.CapabilityViolation)) |field|
+        try expectViolationRecipe(.{ .capability = @fromBackingInt(@intCast(field.value)) });
+    inline for (@import("type_info_fields").fields(runtime_event_wire.ForeignKind)) |field|
+        try expectViolationRecipe(.{ .foreign = @fromBackingInt(@intCast(field.value)) });
     inline for (.{
         runtime_event_types.Violation.stale_preflight,
         runtime_event_types.Violation.unknown_event,
@@ -612,13 +614,13 @@ test "C3-3b2b2 metadata recipe is pointer free and records decoded destination l
     try std.testing.expect(!typeContainsForbidden(EventPreparationRecipe));
     try std.testing.expect(!typeContainsForbidden(MetadataFillProjection));
 
-    try expectExactFields(std.meta.fields(StringRecipe), .{
+    try expectExactFields(&@import("type_info_fields").fields(StringRecipe), .{
         .{ "destination_start", u32 }, .{ "decoded_len", u32 }, .{ "digest", Digest },
     });
-    try expectExactFields(std.meta.fields(ProcessRecipe), .{
+    try expectExactFields(&@import("type_info_fields").fields(ProcessRecipe), .{
         .{ "pid", i32 }, .{ "name_len", u8 }, .{ "name_digest", Digest },
     });
-    try expectExactFields(std.meta.fields(MetadataPreparationRecipe), .{
+    try expectExactFields(&@import("type_info_fields").fields(MetadataPreparationRecipe), .{
         .{ "payload_digest", Digest },        .{ "semantic_digest", Digest },             .{ "observation_probe_nonce", u64 },
         .{ "backing_bytes", u32 },            .{ "revision", u64 },                       .{ "observer_generation", u64 },
         .{ "title_generation", u32 },         .{ "cols", u16 },                           .{ "rows", u16 },
@@ -632,17 +634,17 @@ test "C3-3b2b2 metadata recipe is pointer free and records decoded destination l
         .{ "ssh_remote_dest", StringRecipe }, .{ "clipboard_read_target", StringRecipe }, .{ "processes", [max_process_entries]ProcessRecipe },
         .{ "process_count", u8 },
     });
-    try expectExactUnionFields(std.meta.fields(AcceptedPreparationRecipe), .{
+    try expectExactUnionFields(&@import("type_info_fields").fields(AcceptedPreparationRecipe), .{
         .{ "revoked", u64 },                        .{ "invalidated", void }, .{ "resized", resize_wire.Event },
         .{ "metadata", MetadataPreparationRecipe }, .{ "ended", void },
     });
-    try expectExactUnionFields(std.meta.fields(EventPreparationRecipe), .{
+    try expectExactUnionFields(&@import("type_info_fields").fields(EventPreparationRecipe), .{
         .{ "accepted", AcceptedPreparationRecipe }, .{ "violation", runtime_event_types.Violation },
     });
-    try expectExactFields(std.meta.fields(FilledRange), .{
+    try expectExactFields(&@import("type_info_fields").fields(FilledRange), .{
         .{ "start", u32 }, .{ "len", u32 },
     });
-    try expectExactFields(std.meta.fields(MetadataFillProjection), .{
+    try expectExactFields(&@import("type_info_fields").fields(MetadataFillProjection), .{
         .{ "cwd", FilledRange },                .{ "cwd_host", FilledRange },        .{ "window_title", FilledRange },
         .{ "ssh_remote_dest_present_raw", u8 }, .{ "ssh_remote_dest", FilledRange }, .{ "clipboard_read_target", FilledRange },
         .{ "process_count", u8 },
@@ -665,8 +667,8 @@ test "C3-3b2b2 metadata recipe is pointer free and records decoded destination l
 test "C3-3b2b2 metadata fill decodes strings and process values into caller storage" {
     const classification = testClassification(test_metadata_payload);
     const recipe = try buildEventPreparationRecipe(classification, test_metadata_payload);
-    var backing: [36]u8 = [_]u8{0xcc} ** 36;
-    var processes = [_]FilledProcess{.{}} ** max_process_entries;
+    var backing: [36]u8 = @as([36]u8, @splat(0xcc));
+    var processes = @as([max_process_entries]FilledProcess, @splat(.{}));
     const projection = try fillMetadataRecipe(
         testMetadataRecipe(&recipe),
         classification,
@@ -720,15 +722,15 @@ test "C3-3b2b2 unavailable foreground canonicalizes pgid count and process tail"
 test "C3-3b2b2 process name 128 is accepted and 129 is a resource violation before recipe fill" {
     const prefix = "{\"event\":\"runtime.metadata\",\"metadata_revision\":1,\"metadata\":{\"cwd\":\"\",\"window_title\":\"\",\"ssh_remote_dest\":null,\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false,\"alternate_scroll\":false,\"observer_generation\":1,\"title_generation\":1,\"cols\":80,\"rows\":24,\"foreground_available\":true,\"foreground_pgid\":7,\"processes\":[{\"pid\":7,\"name\":\"";
     const suffix = "\"}]}}";
-    const accepted_payload = prefix ++ ("x" ** 128) ++ suffix;
-    const rejected_payload = prefix ++ ("x" ** 129) ++ suffix;
+    const accepted_payload = prefix ++ (array_repeat.repeat("x", 128)) ++ suffix;
+    const rejected_payload = prefix ++ (array_repeat.repeat("x", 129)) ++ suffix;
     const accepted = try buildEventPreparationRecipe(
         testClassification(accepted_payload),
         accepted_payload,
     );
     try std.testing.expectEqual(@as(u8, 128), testMetadataRecipe(&accepted).processes[0].name_len);
     var accepted_backing: [0]u8 = .{};
-    var accepted_processes = [_]FilledProcess{.{}} ** max_process_entries;
+    var accepted_processes = @as([max_process_entries]FilledProcess, @splat(.{}));
     _ = try fillMetadataRecipe(
         testMetadataRecipe(&accepted),
         testClassification(accepted_payload),
@@ -737,21 +739,21 @@ test "C3-3b2b2 process name 128 is accepted and 129 is a resource violation befo
         &accepted_processes,
     );
     try std.testing.expectEqual(@as(u8, 128), accepted_processes[0].len);
-    try std.testing.expectEqualStrings("x" ** 128, accepted_processes[0].slice());
+    try std.testing.expectEqualStrings(array_repeat.repeat("x", 128), accepted_processes[0].slice());
     const rejected = try buildEventPreparationRecipe(
         testClassification(rejected_payload),
         rejected_payload,
     );
     try std.testing.expectEqual(.resource_exhausted, std.meta.activeTag(rejected.violation));
 
-    const escaped_payload = prefix ++ ("\\u0078" ** 128) ++ suffix;
+    const escaped_payload = prefix ++ (array_repeat.repeat("\\u0078", 128)) ++ suffix;
     const escaped = try buildEventPreparationRecipe(
         testClassification(escaped_payload),
         escaped_payload,
     );
     try std.testing.expectEqual(@as(u8, 128), testMetadataRecipe(&escaped).processes[0].name_len);
-    const utf8_128_payload = prefix ++ ("é" ** 64) ++ suffix;
-    const utf8_129_payload = prefix ++ ("é" ** 63) ++ "€" ++ suffix;
+    const utf8_128_payload = prefix ++ (array_repeat.repeat("é", 64)) ++ suffix;
+    const utf8_129_payload = prefix ++ (array_repeat.repeat("é", 63)) ++ "€" ++ suffix;
     const utf8_128 = try buildEventPreparationRecipe(
         testClassification(utf8_128_payload),
         utf8_128_payload,
@@ -767,8 +769,8 @@ test "C3-3b2b2 process name 128 is accepted and 129 is a resource violation befo
     const comma_process = process ++ ",";
     const count_prefix = "{\"event\":\"runtime.metadata\",\"metadata_revision\":1,\"metadata\":{\"cwd\":\"\",\"window_title\":\"\",\"ssh_remote_dest\":null,\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false,\"alternate_scroll\":false,\"observer_generation\":1,\"title_generation\":1,\"cols\":80,\"rows\":24,\"foreground_available\":true,\"foreground_pgid\":7,\"processes\":[";
     const count_suffix = "]}}";
-    const count_64_payload = count_prefix ++ (comma_process ** 63) ++ process ++ count_suffix;
-    const count_65_payload = count_prefix ++ (comma_process ** 64) ++ process ++ count_suffix;
+    const count_64_payload = count_prefix ++ (array_repeat.repeat(comma_process, 63)) ++ process ++ count_suffix;
+    const count_65_payload = count_prefix ++ (array_repeat.repeat(comma_process, 64)) ++ process ++ count_suffix;
     const count_64 = try buildEventPreparationRecipe(
         testClassification(count_64_payload),
         count_64_payload,
@@ -806,8 +808,8 @@ test "C3-3b2b2 accepted metadata cannot be paired with different payload bytes" 
         post_copy_classification,
         &post_copy_payload,
     );
-    var post_copy_backing: [36]u8 = [_]u8{0xa5} ** 36;
-    var post_copy_processes = [_]FilledProcess{.{}} ** max_process_entries;
+    var post_copy_backing: [36]u8 = @as([36]u8, @splat(0xa5));
+    var post_copy_processes = @as([max_process_entries]FilledProcess, @splat(.{}));
     var mutation: PostCopyMutation = .{
         .payload = &post_copy_payload,
         .index = std.mem.indexOf(u8, &post_copy_payload, "metadata_revision\":9").? +
@@ -837,8 +839,8 @@ test "C3-3b2b2 accepted metadata cannot be paired with different payload bytes" 
 test "C3-3b2b2 fill rejects wrong destination size before changing either scratch" {
     const classification = testClassification(test_metadata_payload);
     const recipe = try buildEventPreparationRecipe(classification, test_metadata_payload);
-    var backing: [37]u8 = [_]u8{0xa5} ** 37;
-    var processes = [_]FilledProcess{.{}} ** max_process_entries;
+    var backing: [37]u8 = @as([37]u8, @splat(0xa5));
+    var processes = @as([max_process_entries]FilledProcess, @splat(.{}));
     const backing_before = backing;
     const processes_before = processes;
     try std.testing.expectError(
@@ -861,8 +863,8 @@ test "C3-3b2b2 fill rejects wrong destination size before changing either scratc
         .accepted => |*accepted| &accepted.metadata,
         .violation => unreachable,
     };
-    var ordinary_backing: [36]u8 = [_]u8{0xa5} ** 36;
-    var ordinary_processes = [_]FilledProcess{.{}} ** max_process_entries;
+    var ordinary_backing: [36]u8 = @as([36]u8, @splat(0xa5));
+    var ordinary_processes = @as([max_process_entries]FilledProcess, @splat(.{}));
 
     const payload_backing = mutable_payload[0..36];
     try std.testing.expectError(
@@ -936,8 +938,8 @@ test "C3-3b2b2 fill rejects noncanonical raw recipe state before changing scratc
         .violation => unreachable,
     };
     metadata.alt_active_raw = 2;
-    var backing: [36]u8 = [_]u8{0xa5} ** 36;
-    var processes = [_]FilledProcess{.{}} ** max_process_entries;
+    var backing: [36]u8 = @as([36]u8, @splat(0xa5));
+    var processes = @as([max_process_entries]FilledProcess, @splat(.{}));
     const backing_before = backing;
     const processes_before = processes;
     try std.testing.expectError(
@@ -973,8 +975,8 @@ test "C3-3b2b2 fill rejects noncanonical raw recipe state before changing scratc
             .process_tail => candidate_metadata.processes[1].pid = 1,
             .digest => candidate_metadata.semantic_digest[0] ^= 1,
         }
-        var candidate_backing: [36]u8 = [_]u8{0xa5} ** 36;
-        var candidate_processes = [_]FilledProcess{.{}} ** max_process_entries;
+        var candidate_backing: [36]u8 = @as([36]u8, @splat(0xa5));
+        var candidate_processes = @as([max_process_entries]FilledProcess, @splat(.{}));
         const candidate_backing_before = candidate_backing;
         const candidate_processes_before = candidate_processes;
         try std.testing.expectError(

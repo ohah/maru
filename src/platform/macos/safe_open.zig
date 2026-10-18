@@ -17,7 +17,7 @@ const std = @import("std");
 /// (`Write` 로 새 파일을 만드는 흐름이 전자다).
 pub fn openNoFollow(root: []const u8, rel_path: []const u8) !c_int {
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root_z = std.fmt.bufPrintZ(&root_buf, "{s}", .{root}) catch return error.PathTooLong;
+    const root_z = std.fmt.bufPrintSentinel(&root_buf, "{s}", .{root}, 0) catch return error.PathTooLong;
     // 루트 자체는 사용자가 연 폴더라 따라가도 된다(그 경로를 고른 것이 사용자다) — 그 **아래**부터 막는다.
     var dir_fd = std.c.open(root_z.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true });
     if (dir_fd < 0) return error.OpenFailed;
@@ -27,7 +27,7 @@ pub fn openNoFollow(root: []const u8, rel_path: []const u8) !c_int {
     while (pending) |segment| {
         const next = it.next();
         var seg_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const seg_z = std.fmt.bufPrintZ(&seg_buf, "{s}", .{segment}) catch {
+        const seg_z = std.fmt.bufPrintSentinel(&seg_buf, "{s}", .{segment}, 0) catch {
             _ = std.c.close(dir_fd);
             return error.PathTooLong;
         };
@@ -53,7 +53,7 @@ pub fn openNoFollow(root: []const u8, rel_path: []const u8) !c_int {
             // 「막았다」이지 「없다」가 아니다. 접으면 캡처가 **차단된 경로를 «그때 없었다»(`.absent`)로
             // 적어**, 그 파일이 «새로 생겼다» 로 둔갑한다. (실제로 `git_backend` 의 심링크 테스트가 이
             // 오분류를 잡았다 — 적대적 검증 5회차.)
-            return if (err == @intFromEnum(std.c.E.NOENT)) error.NotFound else error.OpenFailed;
+            return if (err == @backingInt(std.c.E.NOENT)) error.NotFound else error.OpenFailed;
         }
         if (is_last) return opened;
         dir_fd = opened;
@@ -85,7 +85,7 @@ pub fn openAbsoluteNoFollow(path: [:0]const u8, final_directory: bool) !c_int {
         }
         if (!validAbsoluteComponent(component)) return error.UnsafePath;
         var name_buf: [std.fs.max_name_bytes:0]u8 = undefined;
-        const name = std.fmt.bufPrintZ(&name_buf, "{s}", .{component}) catch return error.UnsafePath;
+        const name = std.fmt.bufPrintSentinel(&name_buf, "{s}", .{component}, 0) catch return error.UnsafePath;
         const is_last = iterator.peek() == null;
         const flags: std.c.O = if (!is_last or final_directory)
             .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }

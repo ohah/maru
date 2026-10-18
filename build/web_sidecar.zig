@@ -6,8 +6,10 @@
 //!    `tools/cef-sdk-fetch.sh` 가 해시를 확인해 캐시에 푼다(`zig fetch` 는 .tar.bz2 를 못 푼다 — 실측).
 
 const std = @import("std");
+const Translator = @import("translate_c").Translator;
 const support = @import("support.zig");
 const addProjectTest = support.addProjectTest;
+const installPath = support.installPath;
 
 pub const Context = struct {
     target: std.Build.ResolvedTarget,
@@ -51,12 +53,12 @@ pub fn register(b: *std.Build, ctx: Context) void {
     const host_protocol_mod = b.createModule(.{
         .root_source_file = b.path("src/session/web_sidecar/root.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
     });
     const manifest_mod = b.createModule(.{
         .root_source_file = b.path("tools/web_sidecar_manifest.zig"),
         .target = b.graph.host,
-        .optimize = .Debug,
+        .optimize = .debug,
         .imports = &.{.{ .name = "web_sidecar_protocol", .module = host_protocol_mod }},
     });
     const manifest_tests = addProjectTest(b, .{ .root_module = manifest_mod });
@@ -97,6 +99,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .imports = &.{.{ .name = "web_sidecar_protocol", .module = protocol_mod }},
         }),
     });
+    support.attachArrayRepeatImports(b, judge.root_module);
     // 판정자는 host 의 창 수(CGWindowList)를 세고, maru 역할로 픽셀 링을 받는다(IOSurface).
     linkMacosFrameworks(b, ctx, judge, &.{ "CoreGraphics", "CoreFoundation", "IOSurface", "AppKit" });
     // W6c: host 가 판정자 전용 이름의 클립보드에 쓴 것을 읽는다(`MARU_WEB_TEST_PASTEBOARD`).
@@ -129,7 +132,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
     const dist: std.Build.InstallDir = .{ .custom = "maru-chromium" };
     // 옛 빌드가 남긴 파일(이름이 바뀐 것 등)이 설치물에 섞이지 않게 먼저 비운다 — 아래 설치는 모두 이 뒤에 온다.
     const clean_dist = b.addSystemCommand(&.{ "/bin/rm", "-rf" });
-    clean_dist.addArg(b.getInstallPath(dist, ""));
+    clean_dist.addDirectoryArg2(installPath(b, dist, ""), .{ .make_absolute = true });
     var dist_installs: [5]*std.Build.Step = undefined;
     for ([_]*std.Build.Step.Compile{ host, helper }, 0..) |artifact, i| {
         dist_installs[i] = &b.addInstallArtifact(artifact, .{ .dest_dir = .{ .override = dist } }).step;
@@ -154,7 +157,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
     // — Homebrew 의 소스 설치 relocation 이 CEF dylib 에서 중간에 실패해 프레임워크 서명을 깨뜨렸다(9 차 적대 검증 실측).
     const fix_macho = b.addSystemCommand(&.{ "/bin/sh", "tools/web-sidecar-dist-macho.sh" });
     fix_macho.setCwd(b.path("."));
-    fix_macho.addArg(b.getInstallPath(dist, ""));
+    fix_macho.addDirectoryArg2(installPath(b, dist, ""), .{ .make_absolute = true });
     fix_macho.has_side_effects = true;
     for (dist_installs ++ [_]*std.Build.Step{install_manifest}) |install| {
         install.dependOn(&clean_dist.step);
@@ -168,7 +171,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 fn copyFramework(b: *std.Build, sdk: []const u8, dest: std.Build.InstallDir) *std.Build.Step {
     const framework_name = "Chromium Embedded Framework.framework";
     const copy_framework = b.addSystemCommand(&.{ "/bin/sh", "-c", "rm -rf \"$1\" && mkdir -p \"$(dirname \"$1\")\" && cp -Rc \"$2\" \"$1\"", "sh" });
-    copy_framework.addArg(b.getInstallPath(dest, framework_name));
+    copy_framework.addDirectoryArg2(installPath(b, dest, framework_name), .{ .make_absolute = true });
     copy_framework.addArg(b.fmt("{s}/Release/{s}", .{ sdk, framework_name }));
     return &copy_framework.step;
 }
@@ -191,6 +194,43 @@ fn sidecarExe(
             .imports = &.{.{ .name = "web_sidecar_protocol", .module = protocol_mod }},
         }),
     });
+    const cef_header = b.addWriteFiles().add("maru_cef_translate.h",
+        \\#define CEF_API_VERSION 15400
+        \\#include "include/cef_api_hash.h"
+        \\#include "include/capi/cef_app_capi.h"
+        \\#include "include/capi/cef_command_line_capi.h"
+        \\#include "include/capi/cef_task_capi.h"
+        \\#include "include/capi/cef_browser_capi.h"
+        \\#include "include/capi/cef_client_capi.h"
+        \\#include "include/capi/cef_life_span_handler_capi.h"
+        \\#include "include/capi/cef_render_handler_capi.h"
+        \\#include "include/capi/cef_display_handler_capi.h"
+        \\#include "include/capi/cef_load_handler_capi.h"
+        \\#include "include/capi/cef_request_handler_capi.h"
+        \\#include "include/capi/cef_browser_process_handler_capi.h"
+        \\#include "include/capi/cef_frame_capi.h"
+        \\#include "include/capi/cef_context_menu_handler_capi.h"
+        \\#include "include/capi/cef_parser_capi.h"
+        \\#include "include/capi/cef_render_process_handler_capi.h"
+        \\#include "include/capi/cef_v8_capi.h"
+        \\#include "include/capi/cef_process_message_capi.h"
+        \\
+    );
+    const target = exe.root_module.resolved_target.?;
+    const cef_api = Translator.init(b.dependency("translate_c", .{}), .{
+        .name = b.fmt("maru-cef-api-{s}-{s}-{s}", .{
+            @tagName(target.result.cpu.arch),
+            @tagName(target.result.os.tag),
+            @tagName(ctx.optimize),
+        }),
+        .c_source_file = cef_header,
+        .target = target,
+        .optimize = ctx.optimize,
+        .link_libc = true,
+    });
+    cef_api.addIncludePath(.{ .cwd_relative = sdk });
+    cef_api.addIncludePath(b.path("src/platform/macos/web_sidecar/shim"));
+    exe.root_module.addImport("cef_c", cef_api.mod);
     // 헤더만 쓴다 — 함수는 실행 중에 dlopen 한 프레임워크에서 찾으므로 프레임워크를 링크하지 않는다.
     exe.root_module.addIncludePath(.{ .cwd_relative = sdk });
     exe.root_module.addIncludePath(b.path("src/platform/macos/web_sidecar/shim"));

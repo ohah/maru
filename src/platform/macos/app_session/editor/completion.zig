@@ -355,7 +355,7 @@ fn ownedFrom(allocator: std.mem.Allocator, it: completion.Item, content: []const
     errdefer if (documentation.len > 0) allocator.free(documentation);
     var additional: lsp.text_edits.Changes = .{};
     if (it.additional) |ad| {
-        additional = lsp.text_edits.toChanges(allocator, .{ .array = .{ .items = ad, .capacity = ad.len, .allocator = allocator } }, content, lines, enc) catch |err| switch (err) {
+        additional = lsp.text_edits.toChanges(allocator, .{ .array = .{ .items = ad, .capacity = ad.len, .allocator = allocator, .pointer_stability = .{} } }, content, lines, enc) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => .{},
         };
@@ -419,7 +419,7 @@ pub fn onResolveResponse(self: *AppSession, seq: u32, result: ?std.json.Value, e
         completion.applyResolved(&view, r);
         if (view.additional) |ad| {
             item.additional.deinit(self.allocator);
-            item.additional = lsp.text_edits.toChanges(self.allocator, .{ .array = .{ .items = ad, .capacity = ad.len, .allocator = self.allocator } }, doc.file.content, doc.file.lines, enc) catch .{};
+            item.additional = lsp.text_edits.toChanges(self.allocator, .{ .array = .{ .items = ad, .capacity = ad.len, .allocator = self.allocator, .pointer_stability = .{} } }, doc.file.content, doc.file.lines, enc) catch .{};
         }
         if (!std.mem.eql(u8, view.insert, item.insert)) {
             if (self.allocator.dupe(u8, view.insert)) |ni| {

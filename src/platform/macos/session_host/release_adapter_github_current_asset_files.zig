@@ -242,10 +242,10 @@ fn createDirectory(result: *CurrentAssetFiles, path: [:0]const u8) Error!void {
     const leaf = path[slash + 1 ..];
     if (leaf.len == 0 or leaf.len > std.fs.max_name_bytes or std.mem.eql(u8, leaf, ".") or std.mem.eql(u8, leaf, ".."))
         return error.InvalidPath;
-    _ = std.fmt.bufPrintZ(&result.work_path, "{s}", .{path}) catch return error.InvalidPath;
-    _ = std.fmt.bufPrintZ(&result.dir_name, "{s}", .{leaf}) catch return error.InvalidPath;
+    _ = std.fmt.bufPrintSentinel(&result.work_path, "{s}", .{path}, 0) catch return error.InvalidPath;
+    _ = std.fmt.bufPrintSentinel(&result.dir_name, "{s}", .{leaf}, 0) catch return error.InvalidPath;
     var parent_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const parent_path = if (slash == 0) "/" else std.fmt.bufPrintZ(&parent_storage, "{s}", .{path[0..slash]}) catch return error.InvalidPath;
+    const parent_path = if (slash == 0) "/" else std.fmt.bufPrintSentinel(&parent_storage, "{s}", .{path[0..slash]}, 0) catch return error.InvalidPath;
     result.parent_fd = safe_open.openAbsoluteNoFollow(parent_path, true) catch return error.InvalidPath;
     result.owner = result;
     var parent_stat: posix.Stat = undefined;
@@ -318,8 +318,8 @@ fn createLeaf(result: *CurrentAssetFiles, index: usize, asset: manifest.Asset) E
         !std.mem.eql(u8, std.fs.path.basename(asset.name), asset.name)) return error.InvalidAsset;
     var file = &result.private_files[index];
     file.role = asset.role;
-    _ = std.fmt.bufPrintZ(&file.name, "{s}", .{asset.name}) catch return error.InvalidAsset;
-    _ = std.fmt.bufPrintZ(&file.path, "{s}/{s}", .{ std.mem.sliceTo(&result.work_path, 0), asset.name }) catch return error.InvalidPath;
+    _ = std.fmt.bufPrintSentinel(&file.name, "{s}", .{asset.name}, 0) catch return error.InvalidAsset;
+    _ = std.fmt.bufPrintSentinel(&file.path, "{s}/{s}", .{ std.mem.sliceTo(&result.work_path, 0), asset.name }, 0) catch return error.InvalidPath;
     const fd = c.openat(result.dir_fd, file.name[0..].ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0o400));
     if (fd < 0) return if (posix.errno(-1) == .EXIST) error.DestinationExists else error.CreateFailed;
     file.present = true;

@@ -330,7 +330,7 @@ test "cwd 축: 직독은 재고에 적힌 함수에서만, 별칭은 적힌 개�
     }
 
     var failed = false;
-    var seen: [inventory.len]bool = .{false} ** inventory.len;
+    var seen: [inventory.len]bool = @splat(false);
     for (paths.items) |path| {
         const source = try readZigFileZ(allocator, io, path);
         defer allocator.free(source);

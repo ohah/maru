@@ -4,6 +4,8 @@
 //! `core_fields_v1`의 명시적 stable tag가 v1 schema다. U0 inventory는 이 목록의 coverage만 검증한다.
 //! decode는 새 candidate core를 완성·검증한 뒤 반환하므로 live owner를 부분 mutate하지 않는다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const maru = @import("maru");
 const inventory = @import("handoff_inventory.zig");
@@ -307,11 +309,11 @@ const Writer = struct {
 
     fn integer(self: *Writer, comptime T: type, value: T) Error!void {
         const info = @typeInfo(T).int;
-        const U = std.meta.Int(.unsigned, info.bits);
-        const Storage = std.meta.Int(.unsigned, @max(info.bits, 8));
+        const U = @Int(.unsigned, info.bits);
+        const Storage = @Int(.unsigned, @max(info.bits, 8));
         const unsigned: U = if (info.signedness == .signed) @bitCast(value) else value;
         const stored: Storage = unsigned;
-        const n = (info.bits + 7) / 8;
+        const n: usize = (info.bits + 7) / 8;
         var buf: [n]u8 = undefined;
         inline for (0..n) |index| {
             const shift = (n - 1 - index) * 8;
@@ -399,9 +401,10 @@ const Reader = struct {
 
     fn integer(self: *Reader, comptime T: type) Error!T {
         const info = @typeInfo(T).int;
-        const U = std.meta.Int(.unsigned, info.bits);
-        const Storage = std.meta.Int(.unsigned, @max(info.bits, 8));
-        const n = (info.bits + 7) / 8;
+        const U = @Int(.unsigned, info.bits);
+        const Storage = @Int(.unsigned, @max(info.bits, 8));
+        const n: usize = (@as(usize, info.bits) + 7) / 8;
+        if (n == 0) return @as(T, 0);
         const data = try self.take(n);
         var stored: Storage = 0;
         for (data, 0..) |b, index| {
@@ -424,8 +427,13 @@ const Reader = struct {
 fn isArrayList(comptime T: type) bool {
     const info = @typeInfo(T);
     if (info != .@"struct") return false;
-    const fields = info.@"struct".fields;
-    return fields.len == 2 and
+    const fields = @import("type_info_fields").structFields(T);
+    // Zig 0.17 adds `pointer_stability` after the two payload fields on ArrayListUnmanaged.
+    // Keep recognizing the owned payload as a list so handoff encodes its elements and capacity
+    // rather than serializing the debug-only safety lock as an ordinary struct field.
+    const has_pointer_stability = fields.len == 3 and std.mem.eql(u8, fields[2].name, "pointer_stability");
+    return (fields.len == 2 or has_pointer_stability) and
+        @hasDecl(T, "empty") and @hasDecl(T, "deinit") and
         std.mem.eql(u8, fields[0].name, "items") and
         std.mem.eql(u8, fields[1].name, "capacity") and
         @typeInfo(fields[0].type) == .pointer and
@@ -434,7 +442,7 @@ fn isArrayList(comptime T: type) bool {
 }
 
 fn arrayListChild(comptime T: type) type {
-    return @typeInfo(@typeInfo(T).@"struct".fields[0].type).pointer.child;
+    return @typeInfo(@import("type_info_fields").structFields(T)[0].type).pointer.child;
 }
 
 fn encodeLength(writer: *Writer, len: usize, elem_size: usize) Error!void {
@@ -620,10 +628,10 @@ fn encodeValue(writer: *Writer, comptime T: type, value: *const T) Error!void {
         .bool => try writer.byte(@intFromBool(value.*)),
         .int => try writer.integer(T, value.*),
         .float => {
-            const U = std.meta.Int(.unsigned, @bitSizeOf(T));
+            const U = @Int(.unsigned, @bitSizeOf(T));
             try writer.integer(U, @bitCast(value.*));
         },
-        .@"enum" => |info| try writer.integer(info.tag_type, @intFromEnum(value.*)),
+        .@"enum" => |info| try writer.integer(info.tag_type, @backingInt(value.*)),
         .array => |info| {
             if (info.child == u8) {
                 try writer.append(value);
@@ -650,7 +658,7 @@ fn encodeValue(writer: *Writer, comptime T: type, value: *const T) Error!void {
             } else try writer.byte(0);
         },
         .@"struct" => |info| {
-            inline for (info.fields) |field| {
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| {
                 const field_value = @field(value.*, field.name);
                 try encodeValue(writer, field.type, &field_value);
             }
@@ -658,8 +666,8 @@ fn encodeValue(writer: *Writer, comptime T: type, value: *const T) Error!void {
         .@"union" => |info| {
             const Tag = info.tag_type orelse @compileError("handoff v1 requires tagged unions");
             const tag = std.meta.activeTag(value.*);
-            try writer.integer(@typeInfo(Tag).@"enum".tag_type, @intFromEnum(tag));
-            inline for (info.fields) |field| {
+            try writer.integer(@typeInfo(Tag).@"enum".tag_type, @backingInt(tag));
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| {
                 if (tag == @field(Tag, field.name)) {
                     try encodeValue(writer, field.type, &@field(value.*, field.name));
                     return;
@@ -709,7 +717,7 @@ fn decodeValue(reader: *Reader, comptime T: type, allocator: std.mem.Allocator) 
         },
         .int => try reader.integer(T),
         .float => blk: {
-            const U = std.meta.Int(.unsigned, @bitSizeOf(T));
+            const U = @Int(.unsigned, @bitSizeOf(T));
             break :blk @bitCast(try reader.integer(U));
         },
         .@"enum" => |info| std.enums.fromInt(T, try reader.integer(info.tag_type)) orelse return error.InvalidValue,
@@ -758,11 +766,11 @@ fn decodeValue(reader: *Reader, comptime T: type, allocator: std.mem.Allocator) 
             var result: T = undefined;
             var initialized: usize = 0;
             errdefer if (comptime info.layout != .@"packed") {
-                inline for (info.fields, 0..) |field, index| {
+                inline for (@import("type_info_fields").fieldsFromInfo(info), 0..) |field, index| {
                     if (index < initialized) deinitValue(field.type, &@field(result, field.name), allocator);
                 }
             };
-            inline for (info.fields) |field| {
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| {
                 @field(result, field.name) = try decodeValue(reader, field.type, allocator);
                 initialized += 1;
             }
@@ -772,7 +780,7 @@ fn decodeValue(reader: *Reader, comptime T: type, allocator: std.mem.Allocator) 
             const Tag = info.tag_type orelse @compileError("handoff v1 requires tagged unions");
             const tag_int = try reader.integer(@typeInfo(Tag).@"enum".tag_type);
             const tag = std.enums.fromInt(Tag, tag_int) orelse return error.InvalidValue;
-            inline for (info.fields) |field| {
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| {
                 if (tag == @field(Tag, field.name)) {
                     const payload = try decodeValue(reader, field.type, allocator);
                     break :blk @unionInit(T, field.name, payload);
@@ -827,12 +835,12 @@ fn deinitValue(comptime T: type, value: *T, allocator: std.mem.Allocator) void {
         .optional => |info| if (value.*) |*payload| deinitValue(info.child, payload, allocator),
         .array => |info| for (value) |*item| deinitValue(info.child, item, allocator),
         .@"struct" => |info| if (info.layout != .@"packed") {
-            inline for (info.fields) |field| deinitValue(field.type, &@field(value.*, field.name), allocator);
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| deinitValue(field.type, &@field(value.*, field.name), allocator);
         },
         .@"union" => |info| {
             const Tag = info.tag_type orelse return;
             const tag = std.meta.activeTag(value.*);
-            inline for (info.fields) |field| if (tag == @field(Tag, field.name))
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (tag == @field(Tag, field.name))
                 deinitValue(field.type, &@field(value.*, field.name), allocator);
         },
         else => {},
@@ -1053,7 +1061,7 @@ pub fn encodeCoreWithScrollbackBudget(
     if (core.response.items.len != 0) return error.InvalidValue;
     var writer: Writer = .{ .allocator = allocator, .scrollback_budget = scrollback_budget };
     errdefer writer.deinit();
-    try writer.append(&([_]u8{0} ** envelope_header_len));
+    try writer.append(&(@as([envelope_header_len]u8, @splat(0))));
     const section_start = try writer.beginTlv(section_terminal_core, 0);
     try encodeCoreFields(&writer, core);
     try writer.endTlv(section_start);
@@ -1081,7 +1089,7 @@ pub fn decodeCore(allocator: std.mem.Allocator, bytes: []const u8) Error!Termina
         if (tag == section_terminal_core) {
             if (saw_core) return error.DuplicateField;
             saw_core = true;
-            var seen: [core_fields_v1.len]bool = .{false} ** core_fields_v1.len;
+            var seen: [core_fields_v1.len]bool = @splat(false);
             while (section.pos < section.bytes.len) {
                 const field_tag = try section.integer(u32);
                 const field_flags = try section.integer(u16);
@@ -1308,7 +1316,7 @@ pub fn encodeHostWithMaxBytes(
     }
     var writer: Writer = .{ .allocator = allocator, .max_bytes = @intCast(max_bytes) };
     errdefer writer.deinit();
-    try writer.append(&([_]u8{0} ** envelope_header_len));
+    try writer.append(&(@as([envelope_header_len]u8, @splat(0))));
 
     const host_start = try writer.beginTlv(section_host_meta, 0);
     try encodeTaggedValue(&writer, 1, u128, &host.host_id);
@@ -1360,7 +1368,7 @@ pub fn encodeHostWithMaxBytes(
         // Old v1 bytes remain unchanged. A v2 runtime must never be restored
         // by an old reader that would silently discard its immutable format.
         if (runtime.agent_log_format == .v2) {
-            const value: u8 = @intFromEnum(runtime.agent_log_format);
+            const value: u8 = @backingInt(runtime.agent_log_format);
             try encodeTaggedValue(&writer, 13, u8, &value);
         }
         // 태그 12 는 **반드시 optional** 이다. 구 host 의 디코더는 모르는 태그를 optional 일 때만
@@ -1386,7 +1394,7 @@ fn trimFixture(core: *TerminalCore) !void {
         var line_buf: [24]u8 = undefined;
         try core.write(try std.fmt.bufPrint(&line_buf, "line{d:0>3}\r\n", .{i}));
     }
-    const raw = [_]u8{0xCD} ** 16;
+    const raw = @as([16]u8, @splat(0xCD));
     var b64: [32]u8 = undefined;
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [128]u8 = undefined;
@@ -1567,7 +1575,7 @@ fn readTagged(comptime T: type, field: *Reader, allocator: std.mem.Allocator) Er
 }
 
 fn decodeHostMeta(section: *Reader, host_id: *u128, epoch: *u64, authority_generation: *u64, membership_generation: *u64, next_handle: *u64, runtime_count: *u16) Error!void {
-    var seen: [6]bool = .{false} ** 6;
+    var seen: [6]bool = @splat(false);
     while (section.pos < section.bytes.len) {
         const tag = try section.integer(u32);
         const flags = try section.integer(u16);
@@ -1597,7 +1605,7 @@ fn decodeHostMeta(section: *Reader, host_id: *u128, epoch: *u64, authority_gener
 
 fn decodeRuntime(allocator: std.mem.Allocator, section: *Reader) Error!RuntimeState {
     var result: RuntimeState = undefined;
-    var seen: [11]bool = .{false} ** 11;
+    var seen: [11]bool = @splat(false);
     var core_initialized = false;
     var layout_blob: []u8 = &.{};
     var layout_seen = false;
@@ -1850,7 +1858,7 @@ fn observeOomParserFixture(
     defer candidate.deinit();
 
     switch (kind) {
-        .osc52 => try candidate.write("\x1b]52;" ++ "a" ** 2048),
+        .osc52 => try candidate.write("\x1b]52;" ++ array_repeat.repeat("a", 2048)),
         .notification => try candidate.write("\x1b]777;notify;title;body"),
         .apc => try candidate.write("\x1b_Gpartial"),
     }
@@ -1880,7 +1888,7 @@ fn observeOomParserFixture(
 
 test "handoff v1 exhaustive valid fixtures cover every stable core field and reencode canonically" {
     const allocator = std.testing.allocator;
-    var coverage: [core_fields_v1.len]bool = .{false} ** core_fields_v1.len;
+    var coverage: [core_fields_v1.len]bool = @splat(false);
 
     var seed = try TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
     defer seed.deinit();
@@ -1899,7 +1907,7 @@ test "handoff v1 exhaustive valid fixtures cover every stable core field and ree
     candidate.emoji_wide = true; // set_emoji_wide core command의 제품 적용과 같은 mutation.
     candidate.setCellMetrics(8, 16);
     candidate.setDefaultColors(.{ .r = 1, .g = 2, .b = 3 }, .{ .r = 4, .g = 5, .b = 6 });
-    var config_palette: [16]?maru.terminal.Rgb = .{null} ** 16;
+    var config_palette: [16]?maru.terminal.Rgb = @splat(null);
     config_palette[1] = .{ .r = 7, .g = 8, .b = 9 };
     candidate.setConfigPalette(config_palette);
     candidate.setDefaultCursorShape(.bar);
@@ -1931,7 +1939,7 @@ test "handoff v1 exhaustive valid fixtures cover every stable core field and ree
     try observeNonDefaultCoreFields(&coverage, &baseline, &candidate);
     try expectCanonicalCoreRoundTrip(&candidate);
 
-    const rgba = [_]u8{ 9, 8, 7, 255 } ** 4;
+    const rgba = array_repeat.repeat([_]u8{ 9, 8, 7, 255 }, 4);
     var b64: [64]u8 = undefined;
     const encoded_rgba = std.base64.standard.Encoder.encode(&b64, &rgba);
     var kitty_seq: [192]u8 = undefined;
@@ -1966,7 +1974,7 @@ test "handoff v1 exhaustive valid fixtures cover every stable core field and ree
     try observeWriteFixture(&coverage, "\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;17;");
     try observeWriteFixture(&coverage, "\x1b[?2026h");
     try observeWriteFixture(&coverage, "\x1b]2;partial");
-    try observeWriteFixture(&coverage, "\x1bP" ++ "q" ** 65);
+    try observeWriteFixture(&coverage, "\x1bP" ++ array_repeat.repeat("q", 65));
     try observeWriteFixture(&coverage, "\x1b_Ga=t,f=32,s=1,v=1,i=7,m=1;AAAA\x1b\\");
     try observeWriteFixture(&coverage, "\x1b_Gpartial");
     try observeOomParserFixture(&coverage, .osc52);
@@ -2644,8 +2652,8 @@ test "handoff v1 이 애니메이션 프레임과 재생 상태를 나른다 (�
     defer before.deinit();
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const red = [_]u8{ 255, 0, 0, 255 } ** 4;
-    const green = [_]u8{ 0, 255, 0, 255 } ** 4;
+    const red = array_repeat.repeat([_]u8{ 255, 0, 0, 255 }, 4);
+    const green = array_repeat.repeat([_]u8{ 0, 255, 0, 255 }, 4);
     try before.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &red)}));
     try before.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,z=70,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &green)}));
     try before.write("\x1b_Ga=p,i=1,q=2\x1b\\");
@@ -2748,7 +2756,7 @@ test "스크롤백 바이트 예산: 측정 비용이 pause 예산을 위협하�
     // 실사용 규모: 세션 하나의 스크롤백 약 800 줄.
     for (0..900) |i| {
         var buf: [220]u8 = undefined;
-        const line = try std.fmt.bufPrint(&buf, "row{d:0>4} " ++ ("x" ** 180) ++ "\r\n", .{i});
+        const line = try std.fmt.bufPrint(&buf, "row{d:0>4} " ++ (array_repeat.repeat("x", 180)) ++ "\r\n", .{i});
         try core.write(line);
     }
     const rows = core.screen.sb.count;
@@ -2900,7 +2908,7 @@ test "handoff v1 이 재생 상태와 은행까지 나른다 — exec 뒤 위상
     before.setCellMetrics(10, 20);
     var b64: [64]u8 = undefined;
     var seq: [200]u8 = undefined;
-    const px = [_]u8{ 7, 7, 7, 255 } ** 4;
+    const px = array_repeat.repeat([_]u8{ 7, 7, 7, 255 }, 4);
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try before.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try before.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));

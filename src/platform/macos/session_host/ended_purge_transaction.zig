@@ -5,6 +5,7 @@
 //! owning transaction must revalidate its own authority before it mutates a queue.
 
 const std = @import("std");
+const type_info_fields = @import("type_info_fields");
 
 pub const max_supported_items: usize = 4096;
 
@@ -262,7 +263,7 @@ fn expectStep(
 
 test "CR3a-2c2b3a empty input publishes a planned empty result" {
     const Bits = std.StaticBitSet(1);
-    const targets: Bits = .initEmpty();
+    const targets: Bits = .empty;
     var out: QueuePlan = .{};
     try buildQueuePlan(1, &targets, .{
         .source_count = 0,
@@ -287,17 +288,17 @@ test "CR3a-2c2b3a stable projection covers none all edges and alternating target
         claimed: usize,
         target_bytes: usize,
     }{
-        .{ .targets = .initEmpty(), .claimed = 0, .target_bytes = 0 },
-        .{ .targets = .initFull(), .claimed = 8, .target_bytes = 36 },
+        .{ .targets = .empty, .claimed = 0, .target_bytes = 0 },
+        .{ .targets = .full, .claimed = 8, .target_bytes = 36 },
         .{ .targets = blk: {
-            var bits: Bits = .initEmpty();
+            var bits: Bits = .empty;
             bits.set(0);
             bits.set(3);
             bits.set(7);
             break :blk bits;
         }, .claimed = 3, .target_bytes = 12 },
         .{ .targets = blk: {
-            var bits: Bits = .initEmpty();
+            var bits: Bits = .empty;
             inline for (.{ 0, 2, 4, 6 }) |index| bits.set(index);
             break :blk bits;
         }, .claimed = 4, .target_bytes = 16 },
@@ -332,20 +333,20 @@ test "CR3a-2c2b3a stable projection covers none all edges and alternating target
 
 test "CR3a-2c2b3a invalid inputs preserve the pristine destination" {
     const Bits = std.StaticBitSet(4);
-    var outside: Bits = .initEmpty();
+    var outside: Bits = .empty;
     outside.set(3);
     const cases = [_]struct {
         bits: Bits,
         input: QueueInput,
         expected: PlanError,
     }{
-        .{ .bits = .initEmpty(), .input = .{
+        .{ .bits = .empty, .input = .{
             .source_count = 5,
             .claimed_target_count = 0,
             .source_bytes = 0,
             .target_bytes = 0,
         }, .expected = error.InvalidCount },
-        .{ .bits = .initEmpty(), .input = .{
+        .{ .bits = .empty, .input = .{
             .source_count = 3,
             .claimed_target_count = 4,
             .source_bytes = 0,
@@ -357,13 +358,13 @@ test "CR3a-2c2b3a invalid inputs preserve the pristine destination" {
             .source_bytes = 3,
             .target_bytes = 1,
         }, .expected = error.InvalidTargetMap },
-        .{ .bits = .initEmpty(), .input = .{
+        .{ .bits = .empty, .input = .{
             .source_count = 4,
             .claimed_target_count = 1,
             .source_bytes = 4,
             .target_bytes = 1,
         }, .expected = error.InvalidTargetMap },
-        .{ .bits = .initEmpty(), .input = .{
+        .{ .bits = .empty, .input = .{
             .source_count = 4,
             .claimed_target_count = 0,
             .source_bytes = 3,
@@ -382,7 +383,7 @@ test "CR3a-2c2b3a invalid inputs preserve the pristine destination" {
 
 test "CR3a-2c2b3a occupied destination rejects without replacement" {
     const Bits = std.StaticBitSet(1);
-    const targets: Bits = .initEmpty();
+    const targets: Bits = .empty;
     const original = QueueScalars{
         .source_count = 1,
         .target_count = 0,
@@ -404,7 +405,7 @@ test "CR3a-2c2b3a occupied destination rejects without replacement" {
 test "CR3a-2c2b3a maximum target map is linear and deterministic" {
     const max_items = 4096;
     const Bits = std.StaticBitSet(max_items);
-    const targets: Bits = .initFull();
+    const targets: Bits = .full;
     var first: QueuePlan = .{};
     var second: QueuePlan = .{};
     const input: QueueInput = .{
@@ -432,7 +433,7 @@ test "CR3a-2c2b3a maximum target map is linear and deterministic" {
 
 test "CR3a-2c2b3a forged cursor arithmetic overflow is rejected" {
     const Bits = std.StaticBitSet(1);
-    const targets: Bits = .initEmpty();
+    const targets: Bits = .empty;
     const count_overflow = QueueScalars{
         .source_count = 1,
         .target_count = std.math.maxInt(usize),
@@ -461,7 +462,7 @@ test "CR3a-2c2b3a forged cursor arithmetic overflow is rejected" {
 
 test "CR3a-2c2b3a forged cursor state fails closed before indexing or wrapping" {
     const Bits = std.StaticBitSet(1);
-    const targets: Bits = .initEmpty();
+    const targets: Bits = .empty;
     const Cursor = DispositionCursor(1);
     var past_end = Cursor{
         .targets = &targets,
@@ -503,7 +504,7 @@ test "CR3a-2c2b3a forged cursor state fails closed before indexing or wrapping" 
 
 test "CR3a-2c2b3a validation error precedence is deterministic" {
     const Bits = std.StaticBitSet(2);
-    var outside: Bits = .initEmpty();
+    var outside: Bits = .empty;
     outside.set(1);
     var occupied: QueuePlan = .{ .state = QueuePlan.planned_state, .scalars = .{
         .source_count = 0,
@@ -532,7 +533,7 @@ test "CR3a-2c2b3a validation error precedence is deterministic" {
         .{ .source_count = 1, .claimed_target_count = 1, .source_bytes = 0, .target_bytes = 1 },
         &out,
     ));
-    const empty: Bits = .initEmpty();
+    const empty: Bits = .empty;
     try std.testing.expectError(error.ArithmeticOverflow, buildQueuePlan(
         2,
         &empty,
@@ -560,7 +561,7 @@ test "CR3a-2c2b3a unknown raw plan states fail before scalar interpretation" {
         try std.testing.expectError(error.InvalidState, plan.rawPlannedScalars());
     }
 
-    const targets = std.StaticBitSet(1).initEmpty();
+    const targets = std.StaticBitSet(1).empty;
     var destination = QueuePlan{ .state = 2 };
     try std.testing.expectError(error.InvalidState, buildQueuePlan(
         1,
@@ -577,11 +578,11 @@ fn typeContainsPointer(comptime T: type) bool {
         .array => |array| typeContainsPointer(array.child),
         .optional => |optional| typeContainsPointer(optional.child),
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field| if (typeContainsPointer(field.type)) break :blk true;
+            inline for (type_info_fields.fieldsFromInfo(info)) |field| if (typeContainsPointer(field.type)) break :blk true;
             break :blk false;
         },
         .@"union" => |info| blk: {
-            inline for (info.fields) |field| if (typeContainsPointer(field.type)) break :blk true;
+            inline for (type_info_fields.fieldsFromInfo(info)) |field| if (typeContainsPointer(field.type)) break :blk true;
             break :blk false;
         },
         else => false,

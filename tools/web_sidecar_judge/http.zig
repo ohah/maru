@@ -42,6 +42,8 @@
 //!   /keys?칸      특수 키 판정(W4c) — textarea(t)·폼 입력칸 둘(j·k). 칸(`t`·`j`)을 누르면 준비. 초점 칸·값(줄바꿈은 `NL`)·
 //!                 캐럿을 제목으로(`focus=… val=… caret=…`)
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 
 const AF_INET: c_int = 2;
@@ -171,7 +173,7 @@ fn handle(conn: c_int) void {
 }
 
 /// W10a 판정의 받을 파일(`download_check.zig`) — 첨부로 내려 보낸다.
-pub const download_body = "maru-download-report\n" ** 40;
+pub const download_body = array_repeat.repeat("maru-download-report\n", 40);
 /// `slow` 의 크기와 조각 — 64 KiB 를 0.1 초마다(약 5 초). 받는 동안 진행 갱신·취소·닫기를 본다.
 pub const slow_bytes: usize = 50 * slow_chunk;
 const slow_chunk: usize = 64 * 1024;
@@ -218,7 +220,7 @@ fn slowDownload(conn: c_int, huge: bool) void {
     const total = if (huge) huge_bytes else slow_bytes;
     const head = std.fmt.bufPrint(&hb, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nContent-Disposition: attachment; filename=\"slow.bin\"\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{total}) catch return;
     _ = std.c.write(conn, head.ptr, head.len);
-    const chunk = [_]u8{'s'} ** slow_chunk;
+    const chunk = @as([slow_chunk]u8, @splat('s'));
     var sent: usize = 0;
     while (sent < total) : (sent += slow_chunk) {
         const last = slow_generation.load(.seq_cst) == mine;
@@ -234,7 +236,7 @@ fn slowDownload(conn: c_int, huge: bool) void {
 /// W6h② 판정의 소리 — 0.2 초 무음 WAV(8 kHz 모노 16 비트).
 fn tone(conn: c_int) void {
     const samples = 1600;
-    var wav: [44 + samples * 2]u8 = [_]u8{0} ** (44 + samples * 2);
+    var wav: [44 + samples * 2]u8 = @as([(44 + samples * 2)]u8, @splat(0));
     @memcpy(wav[0..4], "RIFF");
     std.mem.writeInt(u32, wav[4..8], 36 + samples * 2, .little);
     @memcpy(wav[8..16], "WAVEfmt ");
@@ -572,7 +574,7 @@ const drag_page =
     "<div id=d draggable=true style='left:360px;top:20px;width:120px;height:50px;background:#ccf'>drag me</div>" ++
     "<a id=a href='/title?t=linked' title='link title' style='left:360px;top:300px;width:120px;height:24px'>a link</a>" ++
     "<p id=p style='left:20px;top:330px;width:300px;height:24px'>select these words</p>" ++
-    "<div id=g style='left:20px;top:380px;width:300px;height:40px;overflow:hidden;font-size:4px'>" ++ ("가" ** 6000) ++ "</div>" ++
+    "<div id=g style='left:20px;top:380px;width:300px;height:40px;overflow:hidden;font-size:4px'>" ++ (array_repeat.repeat("가", 6000)) ++ "</div>" ++
     "<img style='left:520px;top:20px;width:48px;height:48px' src='/img/png/cat.png'>" ++
     "<img style='left:520px;top:100px;width:48px;height:48px' src='/img/pngcd/plain.png'>" ++
     "<img style='left:520px;top:180px;width:48px;height:48px' src='/img/big6/six.svg'>" ++

@@ -166,7 +166,7 @@ pub const SocketServer = struct {
         if (c.fstatat(posix.AT.FDCWD, dir_path.ptr, &dst, posix.AT.SYMLINK_NOFOLLOW) != 0) return error.ControlDirFailed;
         if (!posix.S.ISDIR(dst.mode) or dst.uid != server_uid) return error.OwnershipCheckFailed;
 
-        const owned_path = allocator.dupeZ(u8, socket_path) catch return error.SocketCreateFailed;
+        const owned_path = allocator.dupeSentinel(u8, socket_path, 0) catch return error.SocketCreateFailed;
         errdefer allocator.free(owned_path);
 
         // 기존 socket 잔해 unlink(우리 uid dir이라 안전). bind → chmod 0600 → listen.
@@ -376,9 +376,9 @@ test "socket server: accepted client fd is CLOEXEC before protocol dispatch" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-cloexec-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-cloexec-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer registry.deinit();
     var srv = try SocketServer.bind(allocator, dir_path, socket_path, 1, &registry);
@@ -406,10 +406,10 @@ test "socket server: listener is CLOEXEC and nonblocking; empty accept yields" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-listener-flags-{d}", .{c.getpid()}) catch
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-listener-flags-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch
         return error.SkipZigTest;
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer registry.deinit();
@@ -512,10 +512,10 @@ test "socket server: injected other UID is rejected before fd admission" {
 
     const allocator = testing.allocator;
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-other-uid-{d}", .{c.getpid()}) catch
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-other-uid-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch
         return error.SkipZigTest;
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer registry.deinit();
@@ -554,10 +554,11 @@ test "socket server: kernel credentials reject an actual root peer before fd adm
         mkdtemp(&dir_template) orelse return error.CrossUidTempRootFailed,
     );
     var socket_buf: [320]u8 = undefined;
-    const socket_path = try std.fmt.bufPrintZ(
+    const socket_path = try std.fmt.bufPrintSentinel(
         &socket_buf,
         "{s}/control.sock",
         .{dir_path},
+        0,
     );
     var registry = reg.TerminalRuntimeRegistry.init(allocator);
     defer registry.deinit();

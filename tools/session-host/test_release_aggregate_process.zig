@@ -71,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
     const verifier_sha = std.fmt.bytesToHex(verifier_digest, .lower);
 
     var root_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
-    const root_template = try std.fmt.bufPrintZ(&root_storage, "/private/tmp/maru-release-aggregate-process.XXXXXX", .{});
+    const root_template = try std.fmt.bufPrintSentinel(&root_storage, "/private/tmp/maru-release-aggregate-process.XXXXXX", .{}, 0);
     const root_ptr = mkdtemp(root_template.ptr) orelse return error.TempRootFailed;
     const root: [:0]const u8 = std.mem.span(root_ptr);
     defer std.Io.Dir.cwd().deleteTree(init.io, root) catch {};
@@ -179,7 +179,7 @@ const Scenario = enum { success, existing_destination, inventory_drift, verifier
 fn runPair(io: std.Io, allocator: std.mem.Allocator, validator: []const u8, verifier_bytes: []const u8, verifier_sha: []const u8, root: []const u8, index: usize, scenario: Scenario, profile: Profile) !?Sample {
     const active_count: usize = if (profile == .upgrade_b) 6 else 5;
     var pair_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
-    const pair = try std.fmt.bufPrintZ(&pair_storage, "{s}/pair-{d}", .{ root, index });
+    const pair = try std.fmt.bufPrintSentinel(&pair_storage, "{s}/pair-{d}", .{ root, index }, 0);
     try std.Io.Dir.createDirAbsolute(io, pair, .default_dir);
     defer std.Io.Dir.cwd().deleteTree(io, pair) catch {};
     var source_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
@@ -418,7 +418,7 @@ fn trustedEnvironment(allocator: std.mem.Allocator) !std.process.Environ.Map {
 }
 
 fn childPath(storage: *[std.fs.max_path_bytes:0]u8, parent: []const u8, leaf: []const u8) ![:0]const u8 {
-    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ parent, leaf });
+    return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ parent, leaf }, 0);
 }
 
 fn expectSuccess(term: std.process.Child.Term) !void {

@@ -10,6 +10,7 @@ const files = @import("release_adapter_files");
 const handoff = @import("release_adapter_candidate_preparation_handoff");
 const reopen = @import("release_adapter_candidate_preparation_reopen");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const failure_stable_allocator = @import("support/failure_stable_allocator.zig");
 
 const uuid = "123e4567-e89b-42d3-a456-426614174000";
 const dmg_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -155,7 +156,7 @@ const Fixture = struct {
 fn absolute(tmp: *std.testing.TmpDir, suffix: []const u8, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(out, "{s}/{s}", .{ root[0..len], suffix });
+    return std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ root[0..len], suffix }, 0);
 }
 
 test "retained preparation reopens in a fresh final-address owner" {
@@ -291,7 +292,8 @@ test "full fence rejects byte and directory pathname replacement" {
 }
 
 test "allocation failure cannot publish or consume retained bytes" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationOpen, .{});
+    var backing = failure_stable_allocator.State{ .backing = std.testing.allocator };
+    try std.testing.checkAllAllocationFailures(backing.allocator(), allocationOpen, .{});
 }
 
 fn allocationOpen(allocator: std.mem.Allocator) !void {

@@ -89,7 +89,7 @@ pub const Owner = struct {
     pid: u32 = 0,
     process_nonce: u64 = 0,
     owner_thread: ?std.Thread.Id = null,
-    slots: [max_jobs]Slot = [_]Slot{.{}} ** max_jobs,
+    slots: [max_jobs]Slot = @as([max_jobs]Slot, @splat(.{})),
     ready: bool = false,
 
     pub fn initInPlace(self: *Owner, process_nonce: u64) !void {

@@ -175,11 +175,11 @@ pub const StoppedBorrow = struct {
     scratch_addr: usize = 0,
     scratch_generation: u64 = 0,
     receipt_addr: usize = 0,
-    receipt_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    receipt_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     bytes_addr: usize = 0,
     bytes_len: usize = 0,
     lifecycle: BorrowLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const BorrowUseGuardOps = struct {
@@ -192,18 +192,18 @@ pub const WouldBlockSeed = struct {
     saved_self_addr: usize = 0,
     scratch_addr: usize = 0,
     scratch_generation: u64 = 0,
-    receipt_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    receipt_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     borrow_addr: usize = 0,
     attempt_generation: u64 = 0,
     lifecycle: WouldBlockSeedLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const BorrowUsePermit = struct {
     saved_self_addr: usize = 0,
     scratch_addr: usize = 0,
     scratch_generation: u64 = 0,
-    receipt_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    receipt_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     borrow_addr: usize = 0,
     authorized_seed_addr: usize = 0,
     authorized_seed_len: usize = 0,
@@ -214,9 +214,9 @@ pub const BorrowUsePermit = struct {
         scratch_addr: usize,
     ) ?bool = undefined,
     seed_lifecycle: PermitSeedLifecycle = .unminted,
-    seed_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    seed_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: BorrowUseLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const PreparedAdmitUsePermit = struct {
@@ -227,13 +227,13 @@ pub const PreparedAdmitUsePermit = struct {
     borrow_addr: usize = 0,
     use_permit_addr: usize = 0,
     seed_addr: usize = 0,
-    frozen_outer_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    frozen_outer_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     frozen_receipt: CollectReceipt = undefined,
     frozen_borrow: StoppedBorrow = .{},
     frozen_use_permit: BorrowUsePermit = .{},
     frozen_seed: WouldBlockSeed = .{},
     lifecycle: PreparedAdmitUseLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const StoppedDisposition = struct {
@@ -258,7 +258,7 @@ pub const StoppedGraphTerminalizeResult = enum {
 const ChunkSeal = struct {
     start: usize = 0,
     len: usize = 0,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const AttemptLifecycle = enum {
@@ -283,13 +283,13 @@ const ReadAttemptPermit = struct {
         destination: []u8,
     ) RxReadOutcome = undefined,
     lifecycle: AttemptLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const RawWouldBlockObservation = struct {
     attempt_generation: u64 = 0,
     lifecycle: enum { empty, observed, consumed, aborted } = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const ExternalRxReadScratch = struct {
@@ -301,21 +301,21 @@ pub const ExternalRxReadScratch = struct {
     chunk_count: u8 = 0,
     consecutive_interrupts: u8 = 0,
     chunks: [max_rx_read_attempts_per_turn]ChunkSeal =
-        [_]ChunkSeal{.{}} ** max_rx_read_attempts_per_turn,
+        @as([max_rx_read_attempts_per_turn]ChunkSeal, @splat(.{})),
     prepared_admit: client_external_mode.PreparedRxAppend = .{},
     attempt: ReadAttemptPermit = .{},
     would_block: RawWouldBlockObservation = .{},
-    spent_receipt_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    spent_receipt_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     active_borrow_addr: usize = 0,
-    active_borrow_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    active_borrow_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     active_use_permit_addr: usize = 0,
-    active_use_permit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    active_use_permit_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     active_prepared_use_permit_addr: usize = 0,
     active_prepared_use_permit_digest: external_owner_seal.Digest =
-        [_]u8{0} ** 32,
+        @as([32]u8, @splat(0)),
     validation_bytes_checked: usize = 0,
     backing: [max_rx_read_bytes_per_turn]u8 = undefined,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 
     pub fn initInPlace(out: *ExternalRxReadScratch) bool {
         if (out.saved_self_addr != 0 or out.generation != 0 or
@@ -328,17 +328,17 @@ pub const ExternalRxReadScratch = struct {
         out.attempt_count = 0;
         out.chunk_count = 0;
         out.consecutive_interrupts = 0;
-        out.chunks = [_]ChunkSeal{.{}} ** max_rx_read_attempts_per_turn;
+        out.chunks = @as([max_rx_read_attempts_per_turn]ChunkSeal, @splat(.{}));
         out.prepared_admit = .{};
         out.attempt = .{};
         out.would_block = .{};
-        out.spent_receipt_digest = [_]u8{0} ** 32;
+        out.spent_receipt_digest = @as([32]u8, @splat(0));
         out.active_borrow_addr = 0;
-        out.active_borrow_digest = [_]u8{0} ** 32;
+        out.active_borrow_digest = @as([32]u8, @splat(0));
         out.active_use_permit_addr = 0;
-        out.active_use_permit_digest = [_]u8{0} ** 32;
+        out.active_use_permit_digest = @as([32]u8, @splat(0));
         out.active_prepared_use_permit_addr = 0;
-        out.active_prepared_use_permit_digest = [_]u8{0} ** 32;
+        out.active_prepared_use_permit_digest = @as([32]u8, @splat(0));
         out.validation_bytes_checked = 0;
         out.digest = scratchDigest(out);
         return true;
@@ -394,7 +394,7 @@ fn scratchDigest(
     var writer = external_owner_seal.Writer.init("MARURDS1");
     writer.writeUsize(scratch.saved_self_addr);
     writer.writeU64(scratch.generation);
-    writer.writeU8(@intFromEnum(scratch.lifecycle));
+    writer.writeU8(@backingInt(scratch.lifecycle));
     writer.writeUsize(@intFromPtr(&scratch.backing));
     writer.writeUsize(scratch.backing.len);
     writer.writeUsize(scratch.staged_len);
@@ -409,16 +409,16 @@ fn scratchDigest(
     writer.writeUsize(scratch.prepared_admit.saved_self_addr);
     writer.writeUsize(scratch.prepared_admit.state_addr);
     writer.writeUsize(scratch.prepared_admit.parser_addr);
-    writer.writeU8(@intFromEnum(scratch.prepared_admit.lifecycle));
+    writer.writeU8(@backingInt(scratch.prepared_admit.lifecycle));
     writer.writeUsize(scratch.attempt.saved_self_addr);
     writer.writeU64(scratch.attempt.attempt_generation);
     writer.writeUsize(scratch.attempt.destination_addr);
     writer.writeUsize(scratch.attempt.destination_len);
     writer.writeUsize(scratch.attempt.ops_addr);
-    writer.writeU8(@intFromEnum(scratch.attempt.lifecycle));
+    writer.writeU8(@backingInt(scratch.attempt.lifecycle));
     writer.writeBytes(&scratch.attempt.digest);
     writer.writeU64(scratch.would_block.attempt_generation);
-    writer.writeU8(@intFromEnum(scratch.would_block.lifecycle));
+    writer.writeU8(@backingInt(scratch.would_block.lifecycle));
     writer.writeBytes(&scratch.would_block.digest);
     writer.writeBytes(&scratch.spent_receipt_digest);
     writer.writeUsize(scratch.active_borrow_addr);
@@ -441,7 +441,7 @@ fn receiptDigest(receipt: *const CollectReceipt) external_owner_seal.Digest {
     writer.writeBool(receipt.allowance.counter_limited);
     writer.writeUsize(receipt.accepted_bytes);
     writer.writeU8(receipt.attempts);
-    writer.writeU8(@intFromEnum(receipt.stop));
+    writer.writeU8(@backingInt(receipt.stop));
     return writer.finish();
 }
 
@@ -454,7 +454,7 @@ fn borrowDigest(borrow: *const StoppedBorrow) external_owner_seal.Digest {
     writer.writeBytes(&borrow.receipt_digest);
     writer.writeUsize(borrow.bytes_addr);
     writer.writeUsize(borrow.bytes_len);
-    writer.writeU8(@intFromEnum(borrow.lifecycle));
+    writer.writeU8(@backingInt(borrow.lifecycle));
     return writer.finish();
 }
 
@@ -468,7 +468,7 @@ fn wouldBlockSeedDigest(
     writer.writeBytes(&seed.receipt_digest);
     writer.writeUsize(seed.borrow_addr);
     writer.writeU64(seed.attempt_generation);
-    writer.writeU8(@intFromEnum(seed.lifecycle));
+    writer.writeU8(@backingInt(seed.lifecycle));
     return writer.finish();
 }
 
@@ -486,9 +486,9 @@ fn borrowUsePermitDigest(
     writer.writeUsize(@intFromPtr(permit.guard_context));
     writer.writeUsize(permit.guard_context_len);
     writer.writeUsize(@intFromPtr(permit.guard_current));
-    writer.writeU8(@intFromEnum(permit.seed_lifecycle));
+    writer.writeU8(@backingInt(permit.seed_lifecycle));
     writer.writeBytes(&permit.seed_digest);
-    writer.writeU8(@intFromEnum(permit.lifecycle));
+    writer.writeU8(@backingInt(permit.lifecycle));
     return writer.finish();
 }
 
@@ -498,7 +498,7 @@ fn scratchPreparedOuterDigest(
     var writer = external_owner_seal.Writer.init("MARURPO1");
     writer.writeUsize(scratch.saved_self_addr);
     writer.writeU64(scratch.generation);
-    writer.writeU8(@intFromEnum(scratch.lifecycle));
+    writer.writeU8(@backingInt(scratch.lifecycle));
     writer.writeUsize(@intFromPtr(&scratch.backing));
     writer.writeUsize(scratch.backing.len);
     writer.writeUsize(scratch.staged_len);
@@ -515,10 +515,10 @@ fn scratchPreparedOuterDigest(
     writer.writeUsize(scratch.attempt.destination_addr);
     writer.writeUsize(scratch.attempt.destination_len);
     writer.writeUsize(scratch.attempt.ops_addr);
-    writer.writeU8(@intFromEnum(scratch.attempt.lifecycle));
+    writer.writeU8(@backingInt(scratch.attempt.lifecycle));
     writer.writeBytes(&scratch.attempt.digest);
     writer.writeU64(scratch.would_block.attempt_generation);
-    writer.writeU8(@intFromEnum(scratch.would_block.lifecycle));
+    writer.writeU8(@backingInt(scratch.would_block.lifecycle));
     writer.writeBytes(&scratch.would_block.digest);
     writer.writeBytes(&scratch.spent_receipt_digest);
     writer.writeUsize(scratch.active_borrow_addr);
@@ -545,7 +545,7 @@ fn preparedAdmitUsePermitDigest(
     writer.writeBytes(&borrowDigest(&permit.frozen_borrow));
     writer.writeBytes(&borrowUsePermitDigest(&permit.frozen_use_permit));
     writer.writeBytes(&wouldBlockSeedDigest(&permit.frozen_seed));
-    writer.writeU8(@intFromEnum(permit.lifecycle));
+    writer.writeU8(@backingInt(permit.lifecycle));
     return writer.finish();
 }
 
@@ -773,7 +773,7 @@ fn attemptDigest(attempt: *const ReadAttemptPermit) external_owner_seal.Digest {
     var authority = attempt.authority;
     sealAuthorityView(&authority);
     writer.writeBytes(&authority.view_digest);
-    writer.writeU8(@intFromEnum(attempt.lifecycle));
+    writer.writeU8(@backingInt(attempt.lifecycle));
     return writer.finish();
 }
 
@@ -808,7 +808,7 @@ fn wouldBlockDigest(
 ) external_owner_seal.Digest {
     var writer = external_owner_seal.Writer.init("MARURWB1");
     writer.writeU64(observation.attempt_generation);
-    writer.writeU8(@intFromEnum(observation.lifecycle));
+    writer.writeU8(@backingInt(observation.lifecycle));
     return writer.finish();
 }
 
@@ -1651,7 +1651,7 @@ pub fn finishPreparedAdmitUse(
     permit.lifecycle = .finished;
     permit.digest = preparedAdmitUsePermitDigest(permit);
     scratch.active_prepared_use_permit_addr = 0;
-    scratch.active_prepared_use_permit_digest = [_]u8{0} ** 32;
+    scratch.active_prepared_use_permit_digest = @as([32]u8, @splat(0));
     scratch.digest = scratchDigest(scratch);
     return true;
 }
@@ -1889,7 +1889,7 @@ pub fn terminalizeStoppedGraphNoCallback(
         prepared_use.lifecycle = .aborted;
         prepared_use.digest = preparedAdmitUsePermitDigest(prepared_use);
         scratch.active_prepared_use_permit_addr = 0;
-        scratch.active_prepared_use_permit_digest = [_]u8{0} ** 32;
+        scratch.active_prepared_use_permit_digest = @as([32]u8, @splat(0));
     }
 
     if (seed.lifecycle == .prepared) {
@@ -1904,12 +1904,12 @@ pub fn terminalizeStoppedGraphNoCallback(
     use_permit.lifecycle = .aborted;
     use_permit.digest = borrowUsePermitDigest(use_permit);
     scratch.active_use_permit_addr = 0;
-    scratch.active_use_permit_digest = [_]u8{0} ** 32;
+    scratch.active_use_permit_digest = @as([32]u8, @splat(0));
 
     borrow.lifecycle = .aborted;
     borrow.digest = borrowDigest(borrow);
     scratch.active_borrow_addr = 0;
-    scratch.active_borrow_digest = [_]u8{0} ** 32;
+    scratch.active_borrow_digest = @as([32]u8, @splat(0));
 
     scratch.lifecycle = .terminal;
     scratch.digest = scratchDigest(scratch);
@@ -2307,7 +2307,7 @@ pub fn snapshotDrainSeedAuthority(
     continuity_writer.writeU64(seed.attempt_generation);
     const continuity = continuity_writer.finish();
     var digest_writer = external_owner_seal.Writer.init("MARUDSP1");
-    digest_writer.writeU8(@intFromEnum(phase));
+    digest_writer.writeU8(@backingInt(phase));
     digest_writer.writeBytes(&continuity);
     digest_writer.writeBytes(&receipt.digest);
     digest_writer.writeBytes(&borrow.digest);
@@ -2388,7 +2388,7 @@ pub fn endStoppedUse(
     permit.lifecycle = .released;
     permit.digest = borrowUsePermitDigest(permit);
     scratch.active_use_permit_addr = 0;
-    scratch.active_use_permit_digest = [_]u8{0} ** 32;
+    scratch.active_use_permit_digest = @as([32]u8, @splat(0));
     scratch.digest = scratchDigest(scratch);
     return true;
 }
@@ -3008,7 +3008,7 @@ test "settled stopped graph terminalization authenticates every tombstone" {
             .would_block_seed_absent => {
                 seed = .{};
                 use_permit.seed_lifecycle = .unminted;
-                use_permit.seed_digest = [_]u8{0} ** 32;
+                use_permit.seed_digest = @as([32]u8, @splat(0));
                 use_permit.digest = borrowUsePermitDigest(&use_permit);
             },
             .non_would_block_seed_present => {
@@ -3355,7 +3355,7 @@ test "C4c no-callback stopped graph terminalizer accepts sealed closed lifecycle
             .seed_empty => {
                 seed = .{};
                 use_permit.seed_lifecycle = .unminted;
-                use_permit.seed_digest = [_]u8{0} ** 32;
+                use_permit.seed_digest = @as([32]u8, @splat(0));
                 use_permit.digest = borrowUsePermitDigest(&use_permit);
             },
             .use_released => {

@@ -431,9 +431,9 @@ pub fn resolveAny(
 const testing = std.testing;
 
 // 고정 테스트 nonce(§ "테스트는 고정 nonce"). 실 crypto-random 생성은 1e 범위 밖.
-const nonce_a: Nonce = [_]u8{0xA1} ** nonce_len;
-const nonce_b: Nonce = [_]u8{0xB2} ** nonce_len;
-const nonce_unknown: Nonce = [_]u8{0xFF} ** nonce_len;
+const nonce_a: Nonce = @as([nonce_len]u8, @splat(0xA1));
+const nonce_b: Nonce = @as([nonce_len]u8, @splat(0xB2));
+const nonce_unknown: Nonce = @as([nonce_len]u8, @splat(0xFF));
 
 fn metaCap(sid: u64, gen: u64, sub: wm.MetadataScope) Capability {
     return .{ .surface_id = sid, .generation = gen, .scope = .{ .metadata = sub } };
@@ -773,7 +773,7 @@ test "metadata sub-scope: self/window/all이 발급→resolve까지 그대로 �
     for (subs, 0..) |sub, i| {
         var store: CapabilityStore = .{};
         defer store.deinit(testing.allocator);
-        const n: Nonce = [_]u8{@intCast(i + 1)} ** nonce_len;
+        const n: Nonce = @as([nonce_len]u8, @splat(@intCast(i + 1)));
         try store.issueForFd(testing.allocator, n, metaCap(10, 0, sub));
         const r = resolve(&store, n, 10, 0, "sessions.list", 0);
         try testing.expect(r == .granted);

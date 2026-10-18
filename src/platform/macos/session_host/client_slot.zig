@@ -176,9 +176,9 @@ const RpcSubstrateFailStopTestHook = struct {
         if (self.lifecycle == .pristine) return;
         var bytes: [record_size]u8 = undefined;
         bytes[0] = version;
-        bytes[1] = @intFromEnum(self.case);
+        bytes[1] = @backingInt(self.case);
         std.mem.writeInt(u64, bytes[2..10], self.nonce, .little);
-        bytes[10] = @intFromEnum(stage);
+        bytes[10] = @backingInt(stage);
         var offset: usize = 0;
         while (offset < bytes.len) {
             const written = c.write(self.stage_fd, bytes[offset..].ptr, bytes.len - offset);
@@ -354,17 +354,17 @@ pub const testing = if (builtin.is_test) struct {
             .slot_pid = slot.pid,
             .slot_incarnation = slot.incarnation.tagged,
             .node_incarnation = node.incarnation.tagged,
-            .slot_lifecycle_raw = @intFromEnum(slot.lifecycle),
+            .slot_lifecycle_raw = @backingInt(slot.lifecycle),
             .fd = client.fd,
             .unusable = client.unusable,
             .first_reason_present = client.first_poison_reason != null,
-            .first_reason_raw = if (client.first_poison_reason) |reason| @intCast(@intFromEnum(reason)) else 0,
+            .first_reason_raw = if (client.first_poison_reason) |reason| @intCast(@backingInt(reason)) else 0,
             .outbound_addr = 0,
             .outbound_len = 0,
             .outbound_offset = 0,
             .outbound_stream_id = 0,
             .outbound_byte_len = 0,
-            .outbound_bytes = [_]u8{0} ** 64,
+            .outbound_bytes = @as([64]u8, @splat(0)),
             .pin_count = node.pin_owner.cleanup_pin_count,
             .pin_active_cleanup = node.pin_owner.active_cleanup,
             .registry_live_count = node.cleanup_registry.live_count,
@@ -558,8 +558,8 @@ const GenerationGuardedAllocator = struct {
         poison_before_execute: bool = false,
         drift_request_before_execute: bool = false,
         force_not_executed: bool = false,
-        registered_operation_begin_receipts: [8]u128 = [_]u128{0} ** 8,
-        registered_operation_end_receipts: [8]u128 = [_]u128{0} ** 8,
+        registered_operation_begin_receipts: [8]u128 = @as([8]u128, @splat(0)),
+        registered_operation_end_receipts: [8]u128 = @as([8]u128, @splat(0)),
         registered_operation_begin_count: usize = 0,
         registered_operation_end_count: usize = 0,
         registered_operation_active_receipt: u128 = 0,
@@ -586,8 +586,8 @@ const GenerationGuardedAllocator = struct {
     slot_end: usize,
     source_start: usize,
     source_end: usize,
-    retired_node_starts: [max_retired_clients]usize = .{0} ** max_retired_clients,
-    retired_node_ends: [max_retired_clients]usize = .{0} ** max_retired_clients,
+    retired_node_starts: [max_retired_clients]usize = @splat(0),
+    retired_node_ends: [max_retired_clients]usize = @splat(0),
     snapshot_owner_start: usize = 0,
     snapshot_owner_end: usize = 0,
     snapshot_out_start: usize = 0,
@@ -805,8 +805,8 @@ pub const RpcFreeEvidenceState = enum(u8) {
 pub const RpcFreeEvidenceRecord = struct {
     state: RpcFreeEvidenceState = .empty,
     response_epoch: u64 = 0,
-    evidence_digest: owner_seal.Digest = [_]u8{0} ** 32,
-    seal: owner_seal.Digest = [_]u8{0} ** 32,
+    evidence_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
+    seal: owner_seal.Digest = @as([32]u8, @splat(0)),
 
     pub fn emptyExact(self: *const @This()) bool {
         return rpcFreeEvidenceStateRawValid(&self.state) and self.state == .empty and
@@ -888,8 +888,8 @@ const PreparedRpcFreeEvidenceRetirePermit = struct {
     self_addr: usize = 0,
     record_addr: usize = 0,
     response_epoch: u64 = 0,
-    evidence_digest: owner_seal.Digest = [_]u8{0} ** 32,
-    free_call_committed_record_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    evidence_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
+    free_call_committed_record_seal: owner_seal.Digest = @as([32]u8, @splat(0)),
     consumed_raw: u8 = 0,
 
     pub fn pristineExact(self: *const @This()) bool {
@@ -906,12 +906,12 @@ const PreparedRpcFreeEvidenceRetirePermit = struct {
 
 fn rpcFreeEvidenceStateRawValid(value: *const RpcFreeEvidenceState) bool {
     return @as(*const u8, @ptrCast(value)).* <=
-        @intFromEnum(RpcFreeEvidenceState.terminal_freed_once);
+        @backingInt(RpcFreeEvidenceState.terminal_freed_once);
 }
 
 fn rpcFreeEvidenceSeal(record: *const RpcFreeEvidenceRecord) owner_seal.Digest {
     var writer = owner_seal.Writer.init("maru.rpc-free-evidence.v1");
-    writer.writeU8(@intFromEnum(record.state));
+    writer.writeU8(@backingInt(record.state));
     writer.writeU64(record.response_epoch);
     writer.writeBytes(&record.evidence_digest);
     return writer.finish();
@@ -964,7 +964,7 @@ pub const PreparedAdmissionClose = struct {
     expected_connection_generation: u64 = 0,
     request_generation: u64 = 0,
     lifecycle: PreparedAdmissionClose.Lifecycle = .pristine,
-    seal: process_seal_service.CleanupSeal = [_]u8{0} ** 32,
+    seal: process_seal_service.CleanupSeal = @as([32]u8, @splat(0)),
 };
 
 pub const PreparedRetirementCleanup = struct {
@@ -990,7 +990,7 @@ pub const PreparedRetirementCleanup = struct {
     pending_offset: usize = 0,
     external_deinit_reserved_raw: u8 = 0,
     lifecycle: PreparedRetirementCleanup.Lifecycle = .pristine,
-    seal: process_seal_service.CleanupSeal = [_]u8{0} ** 32,
+    seal: process_seal_service.CleanupSeal = @as([32]u8, @splat(0)),
 };
 
 pub const PreparedClientReplacement = struct {
@@ -1008,10 +1008,10 @@ pub const PreparedClientReplacement = struct {
     new_node_incarnation: u64 = 0,
     expected_connection_generation: u64 = 0,
     next_connection_generation: u64 = 0,
-    cleanup_seal: process_seal_service.CleanupSeal = [_]u8{0} ** 32,
-    candidate_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    cleanup_seal: process_seal_service.CleanupSeal = @as([32]u8, @splat(0)),
+    candidate_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: PreparedClientReplacement.Lifecycle = .pristine,
-    seal: process_seal_service.CleanupSeal = [_]u8{0} ** 32,
+    seal: process_seal_service.CleanupSeal = @as([32]u8, @splat(0)),
 };
 
 pub const max_retired_clients: usize = 2;
@@ -1029,32 +1029,32 @@ pub const PreparedRetiredClientReclaim = struct {
     node_addr: usize = 0,
     node_incarnation: u64 = 0,
     connection_generation: u64 = 0,
-    node_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    node_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: PreparedRetiredClientReclaim.Lifecycle = .pristine,
-    seal: process_seal_service.CleanupSeal = [_]u8{0} ** 32,
+    seal: process_seal_service.CleanupSeal = @as([32]u8, @splat(0)),
 };
 
 fn admissionLifecycleRawValid(value: *const AdmissionLifecycle) bool {
     return switch (@as(*const u8, @ptrCast(value)).*) {
-        @intFromEnum(AdmissionLifecycle.open), @intFromEnum(AdmissionLifecycle.closed) => true,
+        @backingInt(AdmissionLifecycle.open), @backingInt(AdmissionLifecycle.closed) => true,
         else => false,
     };
 }
 
 fn retirementLifecycleRawValid(value: *const RetirementLifecycle) bool {
     return switch (@as(*const u8, @ptrCast(value)).*) {
-        @intFromEnum(RetirementLifecycle.live), @intFromEnum(RetirementLifecycle.detached) => true,
+        @backingInt(RetirementLifecycle.live), @backingInt(RetirementLifecycle.detached) => true,
         else => false,
     };
 }
 
 fn preparedAdmissionCloseLifecycleRawValid(value: *const PreparedAdmissionClose.Lifecycle) bool {
     return switch (@as(*const u8, @ptrCast(value)).*) {
-        @intFromEnum(PreparedAdmissionClose.Lifecycle.pristine),
-        @intFromEnum(PreparedAdmissionClose.Lifecycle.prepared),
-        @intFromEnum(PreparedAdmissionClose.Lifecycle.committed),
-        @intFromEnum(PreparedAdmissionClose.Lifecycle.cancelled),
-        @intFromEnum(PreparedAdmissionClose.Lifecycle.consumed),
+        @backingInt(PreparedAdmissionClose.Lifecycle.pristine),
+        @backingInt(PreparedAdmissionClose.Lifecycle.prepared),
+        @backingInt(PreparedAdmissionClose.Lifecycle.committed),
+        @backingInt(PreparedAdmissionClose.Lifecycle.cancelled),
+        @backingInt(PreparedAdmissionClose.Lifecycle.consumed),
         => true,
         else => false,
     };
@@ -1062,12 +1062,12 @@ fn preparedAdmissionCloseLifecycleRawValid(value: *const PreparedAdmissionClose.
 
 fn preparedRetirementCleanupLifecycleRawValid(value: *const PreparedRetirementCleanup.Lifecycle) bool {
     return switch (@as(*const u8, @ptrCast(value)).*) {
-        @intFromEnum(PreparedRetirementCleanup.Lifecycle.pristine),
-        @intFromEnum(PreparedRetirementCleanup.Lifecycle.prepared),
-        @intFromEnum(PreparedRetirementCleanup.Lifecycle.committed),
-        @intFromEnum(PreparedRetirementCleanup.Lifecycle.cleaning),
-        @intFromEnum(PreparedRetirementCleanup.Lifecycle.cancelled),
-        @intFromEnum(PreparedRetirementCleanup.Lifecycle.consumed),
+        @backingInt(PreparedRetirementCleanup.Lifecycle.pristine),
+        @backingInt(PreparedRetirementCleanup.Lifecycle.prepared),
+        @backingInt(PreparedRetirementCleanup.Lifecycle.committed),
+        @backingInt(PreparedRetirementCleanup.Lifecycle.cleaning),
+        @backingInt(PreparedRetirementCleanup.Lifecycle.cancelled),
+        @backingInt(PreparedRetirementCleanup.Lifecycle.consumed),
         => true,
         else => false,
     };
@@ -1075,11 +1075,11 @@ fn preparedRetirementCleanupLifecycleRawValid(value: *const PreparedRetirementCl
 
 fn preparedClientReplacementLifecycleRawValid(value: *const PreparedClientReplacement.Lifecycle) bool {
     return switch (@as(*const u8, @ptrCast(value)).*) {
-        @intFromEnum(PreparedClientReplacement.Lifecycle.pristine),
-        @intFromEnum(PreparedClientReplacement.Lifecycle.reserved),
-        @intFromEnum(PreparedClientReplacement.Lifecycle.prepared),
-        @intFromEnum(PreparedClientReplacement.Lifecycle.published),
-        @intFromEnum(PreparedClientReplacement.Lifecycle.cancelled),
+        @backingInt(PreparedClientReplacement.Lifecycle.pristine),
+        @backingInt(PreparedClientReplacement.Lifecycle.reserved),
+        @backingInt(PreparedClientReplacement.Lifecycle.prepared),
+        @backingInt(PreparedClientReplacement.Lifecycle.published),
+        @backingInt(PreparedClientReplacement.Lifecycle.cancelled),
         => true,
         else => false,
     };
@@ -1087,9 +1087,9 @@ fn preparedClientReplacementLifecycleRawValid(value: *const PreparedClientReplac
 
 fn preparedRetiredClientReclaimLifecycleRawValid(value: *const PreparedRetiredClientReclaim.Lifecycle) bool {
     return switch (@as(*const u8, @ptrCast(value)).*) {
-        @intFromEnum(PreparedRetiredClientReclaim.Lifecycle.pristine),
-        @intFromEnum(PreparedRetiredClientReclaim.Lifecycle.prepared),
-        @intFromEnum(PreparedRetiredClientReclaim.Lifecycle.reclaimed),
+        @backingInt(PreparedRetiredClientReclaim.Lifecycle.pristine),
+        @backingInt(PreparedRetiredClientReclaim.Lifecycle.prepared),
+        @backingInt(PreparedRetiredClientReclaim.Lifecycle.reclaimed),
         => true,
         else => false,
     };
@@ -1720,7 +1720,7 @@ test "CR3b R3 reclaim은 copied handle과 readiness digest drift를 destroy 전�
 
     {
         var alias_storage: [@sizeOf(PreparedRetiredClientReclaim)]u8 align(@alignOf(PreparedRetiredClientReclaim)) =
-            [_]u8{0} ** @sizeOf(PreparedRetiredClientReclaim);
+            @as([@sizeOf(PreparedRetiredClientReclaim)]u8, @splat(0));
         retired.client.lifecycle = alias_storage[0..];
         defer retired.client.lifecycle = &.{};
         const alias_out: *PreparedRetiredClientReclaim = @ptrCast(&alias_storage);
@@ -1730,7 +1730,7 @@ test "CR3b R3 reclaim은 copied handle과 readiness digest drift를 destroy 전�
         );
         try std.testing.expectEqualSlices(
             u8,
-            &([_]u8{0} ** @sizeOf(PreparedRetiredClientReclaim)),
+            &(@as([@sizeOf(PreparedRetiredClientReclaim)]u8, @splat(0))),
             &alias_storage,
         );
     }
@@ -2199,7 +2199,7 @@ test "B3-4/5 RPC free evidence terminal record is absorbing and cannot retire" {
     try std.testing.expect(!record.retireFreeCall(13, digest));
     try std.testing.expectEqualDeep(terminal, record);
     const state_raw: *u8 = @ptrCast(&record.state);
-    var raw: u16 = @intFromEnum(RpcFreeEvidenceState.terminal_freed_once) + 1;
+    var raw: u16 = @backingInt(RpcFreeEvidenceState.terminal_freed_once) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         state_raw.* = @intCast(raw);
         try std.testing.expect(!record.retireFreeCall(13, digest));
@@ -2559,12 +2559,12 @@ pub const EndedPurgePreparation = struct {
     target_stream: u64 = 0,
     permit: StreamOperationPermit = undefined,
     inventory: client_mod.PreparedEndedPurgeInventory = .{},
-    authority_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    authority_seal: owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: EndedPurgePreparationLifecycle = .empty,
 
     fn rawTagsValid(self: *const EndedPurgePreparation) bool {
         const lifecycle_raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
-        return lifecycle_raw <= @intFromEnum(EndedPurgePreparationLifecycle.aborted) and
+        return lifecycle_raw <= @backingInt(EndedPurgePreparationLifecycle.aborted) and
             ClientSlot.streamOperationPermitRawTagsValid(&self.permit) and
             self.inventory.validPreparedAtFinalAddress();
     }
@@ -2592,7 +2592,7 @@ pub const EndedPurgePreparation = struct {
             self.self_addr != @intFromPtr(self) or
             !std.mem.eql(u8, &self.authority_seal, &endedPurgePreparationSeal(self)) or
             entry.state.load(.acquire) !=
-                @intFromEnum(StreamOperationRegistryEntry.State.consume_reserved) or
+                @backingInt(StreamOperationRegistryEntry.State.consume_reserved) or
             entry.id != self.permit.registry_id or
             !std.meta.eql(entry.permit, self.permit) or
             self.permit.slot != slot or
@@ -2622,7 +2622,7 @@ pub const EndedPurgePreparation = struct {
             self.self_addr != @intFromPtr(self) or
             !std.mem.eql(u8, &self.authority_seal, &endedPurgePreparationSeal(self)) or
             entry.state.load(.acquire) !=
-                @intFromEnum(StreamOperationRegistryEntry.State.consumed) or
+                @backingInt(StreamOperationRegistryEntry.State.consumed) or
             entry.id != self.permit.registry_id or
             !std.meta.eql(entry.permit, self.permit) or
             slot.current.active_operation_generation != 0 or
@@ -2634,8 +2634,8 @@ pub const EndedPurgePreparation = struct {
         self.lifecycle = .consumed;
         self.authority_seal = endedPurgePreparationSeal(self);
         if (entry.state.cmpxchgStrong(
-            @intFromEnum(StreamOperationRegistryEntry.State.consumed),
-            @intFromEnum(StreamOperationRegistryEntry.State.empty),
+            @backingInt(StreamOperationRegistryEntry.State.consumed),
+            @backingInt(StreamOperationRegistryEntry.State.empty),
             .acq_rel,
             .acquire,
         ) != null) @panic("ended purge transport receipt reclaim drifted");
@@ -2652,7 +2652,7 @@ fn endedPurgePreparationSeal(prepared: *const EndedPurgePreparation) owner_seal.
     writer.writeU64(prepared.permit.slot_incarnation);
     writer.writeU64(prepared.permit.node_incarnation);
     writer.writeU64(prepared.permit.generation);
-    writer.writeU8(@intFromEnum(prepared.permit.kind));
+    writer.writeU8(@backingInt(prepared.permit.kind));
     writer.writeU64(prepared.permit.owner_thread_incarnation);
     writer.writeUsize(prepared.permit.owner_addr);
     writer.writeU64(prepared.permit.transport_incarnation);
@@ -2665,7 +2665,7 @@ fn endedPurgePreparationSeal(prepared: *const EndedPurgePreparation) owner_seal.
     writer.writeU128(prepared.permit.binding.host_id);
     writer.writeU64(prepared.permit.binding.connection_generation);
     writer.writeU128(prepared.permit.binding.runtime_id);
-    writer.writeU8(@intFromEnum(prepared.permit.binding.role));
+    writer.writeU8(@backingInt(prepared.permit.binding.role));
     writer.writeU64(prepared.permit.binding.pid);
     writer.writeU64(prepared.permit.binding.process_nonce);
     writer.writeUsize(prepared.inventory.self_addr);
@@ -2696,8 +2696,8 @@ fn endedPurgePreparationSeal(prepared: *const EndedPurgePreparation) owner_seal.
     writer.writeBytes(&prepared.inventory.event_seal);
     writer.writeBytes(&prepared.inventory.partial_seal);
     writer.writeBytes(&prepared.inventory.target_map_seal);
-    writer.writeU8(@intFromEnum(prepared.inventory.lifecycle));
-    writer.writeU8(@intFromEnum(prepared.lifecycle));
+    writer.writeU8(@backingInt(prepared.inventory.lifecycle));
+    writer.writeU8(@backingInt(prepared.lifecycle));
     return writer.finish();
 }
 
@@ -2883,7 +2883,7 @@ const EventCorrelationInternal = extern struct {
 /// cleanup capability: every view and release still revalidates the exact registry receipt first.
 pub const EventCorrelation = extern struct {
     storage: [@sizeOf(EventCorrelationInternal)]u8 align(@alignOf(EventCorrelationInternal)) =
-        [_]u8{0} ** @sizeOf(EventCorrelationInternal),
+        @as([@sizeOf(EventCorrelationInternal)]u8, @splat(0)),
 };
 
 const EventCorrelationInput = struct {
@@ -2905,7 +2905,7 @@ pub fn pendingEventCorrelationDigest(correlation: *const EventCorrelation) ?owne
     const value = eventCorrelationInternalConst(correlation);
     if (std.mem.allEqual(u8, &value.digest, 0) or value.expected_major == 0 or
         value.metadata_support_raw > 1 or
-        value.ordering_class_raw > @intFromEnum(cleanup_registry_mod.EventOrderingClass.controller_revoke) or
+        value.ordering_class_raw > @backingInt(cleanup_registry_mod.EventOrderingClass.controller_revoke) or
         !std.mem.allEqual(u8, &value.reserved, 0)) return null;
     return value.digest;
 }
@@ -2927,14 +2927,14 @@ fn eventCorrelationDigest(input: EventCorrelationInput) owner_seal.Digest {
     writer.writeU128(owner.reservation.identity.runtime_id);
     writer.writeU16(input.expected_major);
     writer.writeU8(input.metadata_support_raw);
-    writer.writeU8(@intFromEnum(input.ordering_class));
+    writer.writeU8(@backingInt(input.ordering_class));
     writer.writeU64(@intCast(owner.pid));
     writer.writeU64(owner.process_nonce);
     return writer.finish();
 }
 
 fn eventCorrelationInputValid(input: EventCorrelationInput) bool {
-    const metadata_max = @intFromEnum(contract.MetadataSupport.supported);
+    const metadata_max = @backingInt(contract.MetadataSupport.supported);
     return input.identity.receipt.registry_incarnation != 0 and
         input.identity.receipt.binding_reservation_id != 0 and
         input.identity.receipt.node_incarnation != 0 and
@@ -2959,8 +2959,8 @@ fn mintEventCorrelation(input: EventCorrelationInput) EventCorrelation {
         .digest = eventCorrelationDigest(input),
         .expected_major = input.expected_major,
         .metadata_support_raw = input.metadata_support_raw,
-        .ordering_class_raw = @intFromEnum(input.ordering_class),
-        .reserved = [_]u8{0} ** 4,
+        .ordering_class_raw = @backingInt(input.ordering_class),
+        .reserved = @as([4]u8, @splat(0)),
     };
     return correlation;
 }
@@ -2970,7 +2970,7 @@ fn eventCorrelationMatches(correlation: EventCorrelation, input: EventCorrelatio
     const state = eventCorrelationInternalConst(&correlation);
     return state.expected_major == input.expected_major and
         state.metadata_support_raw == input.metadata_support_raw and
-        state.ordering_class_raw == @intFromEnum(input.ordering_class) and
+        state.ordering_class_raw == @backingInt(input.ordering_class) and
         std.mem.allEqual(u8, &state.reserved, 0) and
         std.mem.eql(u8, &state.digest, &eventCorrelationDigest(input));
 }
@@ -3064,8 +3064,8 @@ fn projectionFieldPointerFree(comptime T: type) bool {
 }
 
 comptime {
-    const actual = std.meta.fields(GenerationEventPreparationProjection);
-    const expected = std.meta.fields(GenerationEventPreparationProjectionContract);
+    const actual = @import("type_info_fields").fields(GenerationEventPreparationProjection);
+    const expected = @import("type_info_fields").fields(GenerationEventPreparationProjectionContract);
     if (actual.len != expected.len)
         @compileError("generation event preparation projection field count drifted");
     for (actual, expected) |actual_field, expected_field| {
@@ -3132,7 +3132,7 @@ const PreparedEventReleaseInternal = struct {
 pub const prepared_event_release_storage_size = 1280;
 pub const PreparedGenerationEventRelease = extern struct {
     storage: [prepared_event_release_storage_size]u8 align(@alignOf(PreparedEventReleaseInternal)) =
-        [_]u8{0} ** prepared_event_release_storage_size,
+        @as([prepared_event_release_storage_size]u8, @splat(0)),
 
     pub fn pristineExact(self: *const PreparedGenerationEventRelease) bool {
         return std.mem.allEqual(u8, &self.storage, 0);
@@ -3194,7 +3194,7 @@ threadlocal var init_active: bool = false;
 threadlocal var batch_release_callback_active: bool = false;
 const TerminalDrainCallbackBinding = struct {
     continuation_addr: usize = 0,
-    continuation_seal: terminal_contract.Digest = [_]u8{0} ** 32,
+    continuation_seal: terminal_contract.Digest = @as([32]u8, @splat(0)),
     node_addr: usize = 0,
     row_slot: u16 = 0,
     callback_ordinal: u32 = 0,
@@ -3266,11 +3266,11 @@ fn terminalDrainContinuationCurrent(
         continuation.identity.registry_incarnation == 0 or continuation.identity.row_generation == 0 or
         continuation.identity.accounting_client_addr == 0 or continuation.identity.accounting_transfer_id == 0 or
         continuation.identity.accounting_byte_count == 0 or continuation.identity.callback_ordinal == 0 or
-        continuation.state.lifecycle_raw != @intFromEnum(expected) or
+        continuation.state.lifecycle_raw != @backingInt(expected) or
         continuation.state.state_generation != expected_generation) return false;
     const kind: terminal_contract.TerminalRowKind = switch (continuation.identity.row_kind_raw) {
-        @intFromEnum(terminal_contract.TerminalRowKind.surviving_descriptor) => .surviving_descriptor,
-        @intFromEnum(terminal_contract.TerminalRowKind.quarantined_no_free) => .quarantined_no_free,
+        @backingInt(terminal_contract.TerminalRowKind.surviving_descriptor) => .surviving_descriptor,
+        @backingInt(terminal_contract.TerminalRowKind.quarantined_no_free) => .quarantined_no_free,
         else => return false,
     };
     if (kind != continuation.descriptor.kind or continuation.descriptor.row_generation != continuation.identity.row_generation or
@@ -3299,7 +3299,7 @@ fn advanceTerminalDrainContinuationNoFail(
     if (!terminalDrainContinuationCurrent(continuation, expected, continuation.state.state_generation) or
         continuation.state.state_generation == std.math.maxInt(u64))
         terminalDrainProofLoss("terminal drain lifecycle preimage drifted");
-    continuation.state.lifecycle_raw = @intFromEnum(next);
+    continuation.state.lifecycle_raw = @backingInt(next);
     continuation.state.state_generation += 1;
     continuation.state.state_seal = process_seal_service.terminalDrainStateSeal(
         continuation.identity.pid,
@@ -3335,7 +3335,7 @@ var client_slot_registry_mutex: std.atomic.Mutex = .unlocked;
 /// 이미지 부하 프로파일에서 «미해석 29%» 로 남아 있던 것도 이것이다). `tests/client_slot_scan_boundary.zig` 가
 /// 값 순회가 다시 생기지 않게 센다. `registered_node_operations` 도 같은 규칙이다.
 var client_slot_registry: [max_live_client_slots]ClientSlotRegistryEntry =
-    [_]ClientSlotRegistryEntry{.{}} ** max_live_client_slots;
+    @as([max_live_client_slots]ClientSlotRegistryEntry, @splat(.{}));
 
 fn registerClientSlot(entry: ClientSlotRegistryEntry) error{IdentityExhausted}!void {
     while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
@@ -3431,13 +3431,13 @@ const max_stream_operation_permits = 4096;
 const StreamOperationRegistryEntry = struct {
     const State = enum(u8) { empty, live, consume_reserved, consumed };
 
-    state: std.atomic.Value(u8) = .init(@intFromEnum(State.empty)),
+    state: std.atomic.Value(u8) = .init(@backingInt(State.empty)),
     id: u64 = 0,
     permit: StreamOperationPermit = undefined,
 };
 var stream_operation_registry_mutex: std.atomic.Mutex = .unlocked;
 var stream_operation_registry: [max_stream_operation_permits]StreamOperationRegistryEntry =
-    [_]StreamOperationRegistryEntry{.{}} ** max_stream_operation_permits;
+    @as([max_stream_operation_permits]StreamOperationRegistryEntry, @splat(.{}));
 var next_stream_operation_registry_id: u64 = 1;
 
 fn registerStreamOperationPermit(fields: StreamOperationPermit) error{ AdminBusy, IdentityExhausted }!StreamOperationPermit {
@@ -3446,7 +3446,7 @@ fn registerStreamOperationPermit(fields: StreamOperationPermit) error{ AdminBusy
     var index: usize = 0;
     while (index < stream_operation_registry.len and
         stream_operation_registry[index].state.load(.acquire) !=
-            @intFromEnum(StreamOperationRegistryEntry.State.empty)) : (index += 1)
+            @backingInt(StreamOperationRegistryEntry.State.empty)) : (index += 1)
     {}
     if (index == stream_operation_registry.len) return error.AdminBusy;
     const id = next_stream_operation_registry_id;
@@ -3458,7 +3458,7 @@ fn registerStreamOperationPermit(fields: StreamOperationPermit) error{ AdminBusy
     const entry = &stream_operation_registry[index];
     entry.id = id;
     entry.permit = permit;
-    entry.state.store(@intFromEnum(StreamOperationRegistryEntry.State.live), .release);
+    entry.state.store(@backingInt(StreamOperationRegistryEntry.State.live), .release);
     return permit;
 }
 
@@ -3468,7 +3468,7 @@ fn streamOperationPermitRegistryLive(permit: StreamOperationPermit) bool {
     while (!stream_operation_registry_mutex.tryLock()) std.atomic.spinLoopHint();
     defer stream_operation_registry_mutex.unlock();
     const entry = &stream_operation_registry[index];
-    return entry.state.load(.acquire) == @intFromEnum(StreamOperationRegistryEntry.State.live) and
+    return entry.state.load(.acquire) == @backingInt(StreamOperationRegistryEntry.State.live) and
         entry.id == permit.registry_id and std.meta.eql(entry.permit, permit);
 }
 
@@ -3479,12 +3479,12 @@ fn unregisterStreamOperationPermit(permit: StreamOperationPermit) error{InvalidS
     while (!stream_operation_registry_mutex.tryLock()) std.atomic.spinLoopHint();
     defer stream_operation_registry_mutex.unlock();
     const entry = &stream_operation_registry[index];
-    if (entry.state.load(.acquire) != @intFromEnum(StreamOperationRegistryEntry.State.live) or
+    if (entry.state.load(.acquire) != @backingInt(StreamOperationRegistryEntry.State.live) or
         entry.id != permit.registry_id or !std.meta.eql(entry.permit, permit))
         return error.InvalidStreamOperationPermit;
     if (entry.state.cmpxchgStrong(
-        @intFromEnum(StreamOperationRegistryEntry.State.live),
-        @intFromEnum(StreamOperationRegistryEntry.State.empty),
+        @backingInt(StreamOperationRegistryEntry.State.live),
+        @backingInt(StreamOperationRegistryEntry.State.empty),
         .acq_rel,
         .acquire,
     ) != null) return error.InvalidStreamOperationPermit;
@@ -3513,7 +3513,7 @@ fn currentPid() u32 {
 
 fn streamOperationNodeIdle(node: *const ClientNode) bool {
     const kind_raw = @as(*const u8, @ptrCast(&node.active_operation_kind)).*;
-    return kind_raw <= @intFromEnum(StreamOperationKind.event) and
+    return kind_raw <= @backingInt(StreamOperationKind.event) and
         node.active_operation_generation == 0 and node.active_operation_kind == .none and
         node.active_operation_owner_thread_incarnation == 0 and
         node.active_operation_owner_addr == 0 and
@@ -3729,7 +3729,7 @@ fn prepareManagedPoisonRequestPinned(
     const client = &node.client;
     const binding = client.incident_binding;
     if (!incident_binding_contract.validBindingShape(binding)) return error.InvalidOwner;
-    const reason: connection_incident.ConnectionReason = @enumFromInt(request.reason_raw);
+    const reason: connection_incident.ConnectionReason = @fromBackingInt(@intCast(request.reason_raw));
     const decision = connection_incident.decisionForReason(reason);
     const pending_stream_count = std.math.cast(u32, client.screen_inbox.pending_stream.items.len) orelse
         return error.InvalidInput;
@@ -3766,8 +3766,8 @@ fn prepareManagedPoisonRequestPinned(
         .connection_generation = binding.connection_generation,
         .wire_major = binding.wire_major,
         .reason_raw = request.reason_raw,
-        .scope_raw = @intFromEnum(connection_incident.Scope.connection),
-        .disposition_raw = @intFromEnum(decision.disposition),
+        .scope_raw = @backingInt(connection_incident.Scope.connection),
+        .disposition_raw = @backingInt(decision.disposition),
         .source_site_raw = request.source_site_raw,
         .host_class_raw = binding.host_class_raw,
         .parser_phase_raw = incidentParserPhase(client),
@@ -3787,21 +3787,21 @@ fn prepareManagedPoisonRequestPinned(
 }
 
 fn incidentParserPhase(client: *const client_mod.Client) u8 {
-    if (client.unusable) return @intFromEnum(connection_incident.ParserPhase.terminal);
+    if (client.unusable) return @backingInt(connection_incident.ParserPhase.terminal);
     const pending = client.parser.buf.items[client.parser.head..];
-    if (pending.len == 0) return @intFromEnum(connection_incident.ParserPhase.idle);
-    if (pending.len < protocol.header_size) return @intFromEnum(connection_incident.ParserPhase.header);
+    if (pending.len == 0) return @backingInt(connection_incident.ParserPhase.idle);
+    if (pending.len < protocol.header_size) return @backingInt(connection_incident.ParserPhase.header);
     const header_bytes: *const [protocol.header_size]u8 = @ptrCast(pending.ptr);
     _ = protocol.Header.decode(header_bytes) catch
-        return @intFromEnum(connection_incident.ParserPhase.header);
-    return @intFromEnum(connection_incident.ParserPhase.payload);
+        return @backingInt(connection_incident.ParserPhase.header);
+    return @backingInt(connection_incident.ParserPhase.payload);
 }
 
 fn incidentOutboundPhase(client: *const client_mod.Client) u8 {
     const pending = client.pending_outbound orelse
-        return @intFromEnum(connection_incident.OutboundPhase.idle);
-    if (client.unusable) return @intFromEnum(connection_incident.OutboundPhase.terminal);
-    return @intFromEnum(if (pending.offset == 0)
+        return @backingInt(connection_incident.OutboundPhase.idle);
+    if (client.unusable) return @backingInt(connection_incident.OutboundPhase.terminal);
+    return @backingInt(if (pending.offset == 0)
         connection_incident.OutboundPhase.queued
     else
         connection_incident.OutboundPhase.partial);
@@ -3835,7 +3835,7 @@ fn prepareManagedPoisonPinned(
         .node_generation = node.incarnation.tagged,
         .binding_seal = binding.seal,
         .input = input,
-        .lifecycle_raw = @intFromEnum(incident_publication_contract.ManagedPoisonLifecycle.prepared),
+        .lifecycle_raw = @backingInt(incident_publication_contract.ManagedPoisonLifecycle.prepared),
     };
     candidate.seal = managedPoisonSeal(candidate, input_digest);
     out.* = candidate;
@@ -3880,7 +3880,7 @@ pub fn consumeManagedPoison(
     _ = try managedPoisonQuery(self, prepared);
     const digest = incident_publication_contract.inputDigest(prepared.input) catch return error.InvalidInput;
     var consumed = prepared.*;
-    consumed.lifecycle_raw = @intFromEnum(incident_publication_contract.ManagedPoisonLifecycle.consumed);
+    consumed.lifecycle_raw = @backingInt(incident_publication_contract.ManagedPoisonLifecycle.consumed);
     consumed.seal = managedPoisonSeal(consumed, digest);
     prepared.* = consumed;
 }
@@ -3906,7 +3906,7 @@ pub fn terminalizeManagedPoisonNoFail(
     result: incident_publication_contract.IncidentCommitResult,
 ) ?std.c.fd_t {
     const query = managedPoisonQuery(self, prepared) catch incidentOperationProofLoss("managed terminal query");
-    if (result.kind_raw != @intFromEnum(incident_publication_contract.PublicationKind.first) or
+    if (result.kind_raw != @backingInt(incident_publication_contract.PublicationKind.first) or
         result.publication.incident_id.app_instance_nonce == 0 or result.publication.incident_id.sequence == 0)
         incidentOperationProofLoss("managed terminal result");
     var operation: incident_publication_contract.PreparedIncidentClientOperation = .{};
@@ -3915,7 +3915,7 @@ pub fn terminalizeManagedPoisonNoFail(
     const client: *client_mod.Client = @ptrFromInt(operation.authority.client_addr);
     if (!std.meta.eql(client.first_incident_id, result.publication.incident_id) or
         client.first_poison_reason == null or
-        @intFromEnum(client.first_poison_reason.?) != prepared.input.reason_raw)
+        @backingInt(client.first_poison_reason.?) != prepared.input.reason_raw)
         incidentOperationProofLoss("managed terminal commit");
     return client.terminalizePublishedIncidentChecked(client.first_poison_reason.?) catch
         incidentOperationProofLoss("managed terminal leaf");
@@ -3989,7 +3989,7 @@ pub fn beginIncidentClientOperation(
         .registry_index = operation.registry_index,
         .pid = operation.pid,
         .owner_thread = @intCast(std.Thread.getCurrentId()),
-        .lifecycle_raw = @intFromEnum(incident_publication_contract.ClientOperationLifecycle.held),
+        .lifecycle_raw = @backingInt(incident_publication_contract.ClientOperationLifecycle.held),
     };
     candidate.authority_digest = incidentAuthorityDigest(candidate.authority);
     candidate.seal = incidentOperationSeal(candidate, slot.process_nonce);
@@ -4002,8 +4002,8 @@ fn resolveIncidentClientOperation(
 ) ?RegisteredNodeOperation {
     if (prepared.self_addr != @intFromPtr(prepared) or prepared.pid != currentPid() or
         prepared.owner_thread != @as(u64, @intCast(std.Thread.getCurrentId())) or
-        (prepared.lifecycle_raw != @intFromEnum(incident_publication_contract.ClientOperationLifecycle.held) and
-            prepared.lifecycle_raw != @intFromEnum(incident_publication_contract.ClientOperationLifecycle.bound)) or
+        (prepared.lifecycle_raw != @backingInt(incident_publication_contract.ClientOperationLifecycle.held) and
+            prepared.lifecycle_raw != @backingInt(incident_publication_contract.ClientOperationLifecycle.bound)) or
         prepared.registry_index >= registered_node_operations.len)
         return null;
     const operation: RegisteredNodeOperation = .{
@@ -4056,10 +4056,10 @@ pub fn bindIncidentClientPublication(
         .incident_id = commit.incident_id,
         .fingerprint = commit.fingerprint,
         .binding_seal = prepared.authority.binding_seal,
-        .lifecycle_raw = @intFromEnum(incident_publication_contract.RepeatKeyLifecycle.published),
+        .lifecycle_raw = @backingInt(incident_publication_contract.RepeatKeyLifecycle.published),
     };
     prepared.repeat_key_seal = incidentRepeatKeySeal(prepared.pid, key.process_nonce, key);
-    prepared.lifecycle_raw = @intFromEnum(incident_publication_contract.ClientOperationLifecycle.bound);
+    prepared.lifecycle_raw = @backingInt(incident_publication_contract.ClientOperationLifecycle.bound);
     const slot: *const ClientSlot = @ptrFromInt(prepared.authority.slot_addr);
     prepared.seal = incidentOperationSeal(prepared.*, slot.process_nonce);
     traceIncidentPublication(2); // Client publication bound
@@ -4090,7 +4090,7 @@ pub fn bindIncidentClientRepeatPublication(
         return error.InvalidOwner;
     prepared.commit_digest = incidentRepeatCommitDigest(commit);
     prepared.repeat_key_seal = key.seal;
-    prepared.lifecycle_raw = @intFromEnum(incident_publication_contract.ClientOperationLifecycle.bound);
+    prepared.lifecycle_raw = @backingInt(incident_publication_contract.ClientOperationLifecycle.bound);
     prepared.seal = incidentOperationSeal(prepared.*, slot.process_nonce);
     traceIncidentPublication(2);
 }
@@ -4101,7 +4101,7 @@ pub fn commitFirstIncidentClientPublicationNoFail(
 ) void {
     const operation = resolveIncidentClientOperation(prepared) orelse
         incidentOperationProofLoss("commit resolve");
-    if (prepared.lifecycle_raw != @intFromEnum(incident_publication_contract.ClientOperationLifecycle.bound) or
+    if (prepared.lifecycle_raw != @backingInt(incident_publication_contract.ClientOperationLifecycle.bound) or
         !std.mem.eql(u8, &prepared.commit_digest, &incidentCommitDigest(commit)))
         incidentOperationProofLoss("commit digest");
     const client = &operation.node.client;
@@ -4117,7 +4117,7 @@ pub fn commitFirstIncidentClientPublicationNoFail(
         .incident_id = commit.incident_id,
         .fingerprint = commit.fingerprint,
         .binding_seal = prepared.authority.binding_seal,
-        .lifecycle_raw = @intFromEnum(incident_publication_contract.RepeatKeyLifecycle.published),
+        .lifecycle_raw = @backingInt(incident_publication_contract.RepeatKeyLifecycle.published),
         .seal = prepared.repeat_key_seal,
     };
     if (!std.mem.eql(u8, &key.seal, &incidentRepeatKeySeal(prepared.pid, key.process_nonce, key)))
@@ -4133,7 +4133,7 @@ pub fn commitFirstIncidentClientPublicationNoFail(
     if (builtin.is_test and IncidentPublicationTestHook.enabled)
         IncidentPublicationTestHook.id_and_key = client.first_incident_id.sequence != 0 and
             client.incident_repeat_key.incident_id.sequence != 0 and client.first_poison_reason == null;
-    client.first_poison_reason = @enumFromInt(commit.reason_raw);
+    client.first_poison_reason = @fromBackingInt(@intCast(commit.reason_raw));
     traceIncidentPublication(5); // first reason stored
     if (builtin.is_test and IncidentPublicationTestHook.enabled)
         IncidentPublicationTestHook.complete = client.first_incident_id.sequence != 0 and
@@ -4147,7 +4147,7 @@ pub fn commitRepeatIncidentClientPublicationNoFail(
 ) void {
     const operation = resolveIncidentClientOperation(prepared) orelse
         incidentOperationProofLoss("repeat commit resolve");
-    if (prepared.lifecycle_raw != @intFromEnum(incident_publication_contract.ClientOperationLifecycle.bound) or
+    if (prepared.lifecycle_raw != @backingInt(incident_publication_contract.ClientOperationLifecycle.bound) or
         !std.mem.eql(u8, &prepared.commit_digest, &incidentRepeatCommitDigest(commit)))
         incidentOperationProofLoss("repeat commit digest");
     const client = &operation.node.client;
@@ -4168,7 +4168,7 @@ pub fn finishIncidentClientOperationNoFail(
         incidentOperationProofLoss("finish resolve");
     const slot: *const ClientSlot = @ptrFromInt(prepared.authority.slot_addr);
     var consumed = prepared.*;
-    consumed.lifecycle_raw = @intFromEnum(incident_publication_contract.ClientOperationLifecycle.consumed);
+    consumed.lifecycle_raw = @backingInt(incident_publication_contract.ClientOperationLifecycle.consumed);
     consumed.seal = incidentOperationSeal(consumed, slot.process_nonce);
     endRegisteredNodeOperation(operation);
     traceIncidentPublication(6); // Client operation released
@@ -4193,7 +4193,7 @@ const RegisteredNodeOperationEntry = struct {
 };
 var registered_node_operation_mutex: std.atomic.Mutex = .unlocked;
 var registered_node_operations: [max_registered_node_operations]RegisteredNodeOperationEntry =
-    [_]RegisteredNodeOperationEntry{.{}} ** max_registered_node_operations;
+    @as([max_registered_node_operations]RegisteredNodeOperationEntry, @splat(.{}));
 var registered_node_operation_free_stack: [max_registered_node_operations]u16 = blk: {
     @setEvalBranchQuota(max_registered_node_operations * 2);
     var indices: [max_registered_node_operations]u16 = undefined;
@@ -4435,7 +4435,7 @@ fn finalAdmissionOwnershipRawValid(raw: u8) bool {
 }
 
 fn finalAdmissionLifecycleRawValid(raw: u8) bool {
-    return raw <= @intFromEnum(FinalAdmissionTransaction.Lifecycle.consumed);
+    return raw <= @backingInt(FinalAdmissionTransaction.Lifecycle.consumed);
 }
 
 fn finalAdmissionTransactionBindingStatus(
@@ -4530,12 +4530,12 @@ const FinalAdmissionTransaction = struct {
     execution_capability: client_mod.RegisteredOperationExecutionCapability = .{},
     execution_handle: ?client_mod.RegisteredOperationExecutionHandle = null,
     owns_registered_operation_raw: u8 = 0,
-    lifecycle_raw: u8 = @intFromEnum(FinalAdmissionTransaction.Lifecycle.pristine),
-    seal: owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle_raw: u8 = @backingInt(FinalAdmissionTransaction.Lifecycle.pristine),
+    seal: owner_seal.Digest = @as([32]u8, @splat(0)),
 
     fn pristineExact(self: *const @This()) bool {
         return self.self_addr == 0 and self.owns_registered_operation_raw == 0 and
-            self.lifecycle_raw == @intFromEnum(FinalAdmissionTransaction.Lifecycle.pristine) and
+            self.lifecycle_raw == @backingInt(FinalAdmissionTransaction.Lifecycle.pristine) and
             self.mint_receipt.pristineExact() and
             self.execution_capability.pristineExact() and self.execution_handle == null;
     }
@@ -4562,7 +4562,7 @@ const FinalAdmissionTransaction = struct {
         }
         if (!finalAdmissionOwnershipRawValid(self.owns_registered_operation_raw) or
             !finalAdmissionLifecycleRawValid(self.lifecycle_raw) or
-            self.lifecycle_raw != @intFromEnum(FinalAdmissionTransaction.Lifecycle.active) or
+            self.lifecycle_raw != @backingInt(FinalAdmissionTransaction.Lifecycle.active) or
             !std.mem.eql(u8, &self.seal, &finalAdmissionTransactionSeal(self)))
             @panic("active final admission transaction content drifted");
         const operation = self.operation;
@@ -4573,7 +4573,7 @@ const FinalAdmissionTransaction = struct {
             @intFromPtr(self),
             self.owns_registered_operation_raw,
         );
-        self.lifecycle_raw = @intFromEnum(FinalAdmissionTransaction.Lifecycle.consumed);
+        self.lifecycle_raw = @backingInt(FinalAdmissionTransaction.Lifecycle.consumed);
         if (owns_registered_operation) endRegisteredNodeOperation(operation);
     }
 };
@@ -4582,14 +4582,14 @@ const EventTakeActivationTransaction = struct {
     const Lifecycle = enum(u8) { pristine, active, consumed };
 
     self_addr: usize = 0,
-    lifecycle_raw: u8 = @intFromEnum(EventTakeActivationTransaction.Lifecycle.pristine),
+    lifecycle_raw: u8 = @backingInt(EventTakeActivationTransaction.Lifecycle.pristine),
     admission: FinalAdmissionTransaction = .{},
     prepared_addr: usize = 0,
     permit_registry_id: u64 = 0,
     quarantine_live: bool = false,
     pin_live: bool = false,
     authority_live: bool = false,
-    seal: owner_seal.Digest = [_]u8{0} ** 32,
+    seal: owner_seal.Digest = @as([32]u8, @splat(0)),
 
     fn digest(self: *const @This()) owner_seal.Digest {
         var writer = owner_seal.Writer.init("maru.event-take-activation.v1");
@@ -4633,7 +4633,7 @@ const EventTakeActivationTransaction = struct {
 
     fn finish(self: *@This()) void {
         if (self.self_addr != @intFromPtr(self) or self.lifecycle_raw !=
-            @intFromEnum(EventTakeActivationTransaction.Lifecycle.active) or
+            @backingInt(EventTakeActivationTransaction.Lifecycle.active) or
             !std.mem.eql(u8, &self.seal, &self.digest()) or self.quarantine_live or
             self.pin_live or self.authority_live)
             @panic("event take activation authority drifted");
@@ -4641,7 +4641,7 @@ const EventTakeActivationTransaction = struct {
             @panic("event take activation settlement failed");
         if (builtin.is_test and EventTakeActivationTestHook.probe_contention)
             EventTakeActivationTestHook.suffix_stage = 4;
-        self.lifecycle_raw = @intFromEnum(EventTakeActivationTransaction.Lifecycle.consumed);
+        self.lifecycle_raw = @backingInt(EventTakeActivationTransaction.Lifecycle.consumed);
         self.reseal();
     }
 };
@@ -4653,7 +4653,7 @@ fn beginEventTakeActivationTransaction(
     permit: StreamOperationPermit,
     protected_ranges: []const FinalAdmissionProtectedRange,
 ) error{ InvalidOwner, Busy }!void {
-    if (out.self_addr != 0 or out.lifecycle_raw != @intFromEnum(EventTakeActivationTransaction.Lifecycle.pristine) or
+    if (out.self_addr != 0 or out.lifecycle_raw != @backingInt(EventTakeActivationTransaction.Lifecycle.pristine) or
         !out.admission.pristineExact()) return error.InvalidOwner;
     const node = resolveRegisteredNodeOperation(operation.*) orelse return error.InvalidOwner;
     const operation_owner = registeredNodeOperationOwnerEntry(operation.*) orelse
@@ -4682,10 +4682,10 @@ fn beginEventTakeActivationTransaction(
     out.admission.self_addr = @intFromPtr(&out.admission);
     out.admission.operation = operation.*;
     out.admission.owns_registered_operation_raw = 0;
-    out.admission.lifecycle_raw = @intFromEnum(FinalAdmissionTransaction.Lifecycle.active);
+    out.admission.lifecycle_raw = @backingInt(FinalAdmissionTransaction.Lifecycle.active);
     out.admission.seal = finalAdmissionTransactionSeal(&out.admission);
     out.self_addr = @intFromPtr(out);
-    out.lifecycle_raw = @intFromEnum(EventTakeActivationTransaction.Lifecycle.active);
+    out.lifecycle_raw = @backingInt(EventTakeActivationTransaction.Lifecycle.active);
     out.prepared_addr = @intFromPtr(prepared);
     out.permit_registry_id = permit.registry_id;
     out.reseal();
@@ -4778,7 +4778,7 @@ fn beginFinalAdmissionTransactionCore(
     out.self_addr = @intFromPtr(out);
     out.operation = operation;
     out.owns_registered_operation_raw = @intFromBool(owns_registered_operation);
-    out.lifecycle_raw = @intFromEnum(FinalAdmissionTransaction.Lifecycle.active);
+    out.lifecycle_raw = @backingInt(FinalAdmissionTransaction.Lifecycle.active);
     out.seal = finalAdmissionTransactionSeal(out);
     if (queued or blockers.queued or blockers.aggregate_count != 0) {
         out.finish() catch @panic("validated blocked final admission settlement failed");
@@ -5063,8 +5063,8 @@ pub fn projectGenerationCapabilities(
     const profile = node.client.compatibility_profile orelse return error.InvalidOwner;
     const attach_schema_raw = @as(*const u8, @ptrCast(&profile.attach_schema)).*;
     const metadata_support_raw = @as(*const u8, @ptrCast(&node.client.metadata_support)).*;
-    if (attach_schema_raw > @intFromEnum(compatibility.AttachSchema.granted_roles) or
-        metadata_support_raw > @intFromEnum(contract.MetadataSupport.supported))
+    if (attach_schema_raw > @backingInt(compatibility.AttachSchema.granted_roles) or
+        metadata_support_raw > @backingInt(contract.MetadataSupport.supported))
         return error.InvalidOwner;
     return .{
         .wire_major = node.client.wire_major,
@@ -5533,7 +5533,7 @@ test "CR3a-2c3b typed request encoder injects only canonical binding identities"
 }
 
 test "CR3a-2c3c every valid core command fits the bounded canonical encoder" {
-    const palette = [_]?u32{@as(?u32, 0xFFFFFF)} ** 16;
+    const palette = @as([16]?u32, @splat(@as(?u32, 0xFFFFFF)));
     const commands = [_]contract.CoreCommandRequest{
         .{ .scroll = std.math.maxInt(i64) },
         .scroll_to_bottom,
@@ -5568,7 +5568,7 @@ test "CR3a-2c3c every valid core command fits the bounded canonical encoder" {
         .selection_clear,
     };
     try std.testing.expectEqual(
-        @as(usize, @typeInfo(contract.CoreCommandRequest).@"union".fields.len),
+        @as(usize, @import("type_info_fields").unionFields(contract.CoreCommandRequest).len),
         commands.len,
     );
     var buffer: [4096]u8 = undefined;
@@ -5788,11 +5788,11 @@ const PreparedExecutionSettlement = struct {
 
     fn rawValid(self: *const @This()) bool {
         const tag_raw = @as(*const u8, @ptrCast(&self.tag)).*;
-        if (tag_raw > @intFromEnum(PreparedExecutionSettlementTag.fail_stop_required)) return false;
+        if (tag_raw > @backingInt(PreparedExecutionSettlementTag.fail_stop_required)) return false;
         return switch (self.tag) {
             .pending, .reusable => self.reason_raw == 0,
-            .terminal => self.reason_raw < std.meta.fields(client_poison.ConnectionReason).len,
-            .fail_stop_required => self.reason_raw < std.meta.fields(FailStopReason).len,
+            .terminal => self.reason_raw < @import("type_info_fields").fields(client_poison.ConnectionReason).len,
+            .fail_stop_required => self.reason_raw < @import("type_info_fields").fields(FailStopReason).len,
         };
     }
 
@@ -5802,12 +5802,12 @@ const PreparedExecutionSettlement = struct {
 
     fn terminalReason(self: *const @This()) ?client_poison.ConnectionReason {
         if (!self.rawValid() or self.tag != .terminal) return null;
-        return @enumFromInt(self.reason_raw);
+        return @fromBackingInt(@intCast(self.reason_raw));
     }
 
     fn failStopReason(self: *const @This()) ?FailStopReason {
         if (!self.rawValid() or self.tag != .fail_stop_required) return null;
-        return @enumFromInt(self.reason_raw);
+        return @fromBackingInt(@intCast(self.reason_raw));
     }
 
     fn reusable() @This() {
@@ -5815,11 +5815,11 @@ const PreparedExecutionSettlement = struct {
     }
 
     fn terminal(reason: client_poison.ConnectionReason) @This() {
-        return .{ .tag = .terminal, .reason_raw = @intFromEnum(reason) };
+        return .{ .tag = .terminal, .reason_raw = @backingInt(reason) };
     }
 
     fn failStop(reason: FailStopReason) @This() {
-        return .{ .tag = .fail_stop_required, .reason_raw = @intFromEnum(reason) };
+        return .{ .tag = .fail_stop_required, .reason_raw = @backingInt(reason) };
     }
 };
 
@@ -6321,7 +6321,7 @@ const PreparedExecutionTxn = struct {
 
     fn rawTagsValid(self: *const PreparedExecutionTxn) bool {
         const phase_raw = @as(*const u8, @ptrCast(&self.phase)).*;
-        return phase_raw <= @intFromEnum(PreparedExecutionPhase.settled) and
+        return phase_raw <= @backingInt(PreparedExecutionPhase.settled) and
             self.settlement.rawValid() and self.rawEmbeddedTagsValid();
     }
 
@@ -6826,7 +6826,7 @@ fn rpcTerminalEvidence(
     writer.writeU64(canonical.request_digest);
     writer.writeU64(canonical.response_epoch);
     writer.writeUsize(canonical.destination_addr);
-    writer.writeU8(@intFromEnum(reason));
+    writer.writeU8(@backingInt(reason));
     return writer.finish();
 }
 
@@ -7124,7 +7124,7 @@ const RpcPublicationPayloadCleanup = struct {
     failure_release: response_payload_allocation.Ledger.PreparedFailureRelease = .{},
     test_pre_release_stage_drift: if (builtin.is_test) u8 else void = if (builtin.is_test) 0 else {},
     armed: u8 = 0,
-    seal: owner_seal.Digest = [_]u8{0} ** 32,
+    seal: owner_seal.Digest = @as([32]u8, @splat(0)),
 
     fn arm(self: *@This(), receipt: response_payload_allocation.Receipt) !void {
         if (self.self_addr != 0 or self.armed != 0 or
@@ -7175,7 +7175,7 @@ fn rpcPublicationFailureFreeEvidence(
     writer.writeU16(receipt.index);
     writer.writeUsize(receipt.addr);
     writer.writeUsize(receipt.len);
-    writer.writeU8(@intFromEnum(reason));
+    writer.writeU8(@backingInt(reason));
     return writer.finish();
 }
 
@@ -7190,7 +7190,7 @@ const RpcPublicationFailureByteDisposition = enum {
 const RpcPublicationFailureByteOutcome = struct {
     disposition: RpcPublicationFailureByteDisposition,
     response_epoch: u64,
-    free_evidence: owner_seal.Digest = [_]u8{0} ** 32,
+    free_evidence: owner_seal.Digest = @as([32]u8, @splat(0)),
     retire_clean_evidence: bool = false,
 };
 
@@ -7403,7 +7403,7 @@ const PreparedExecutionCleanup = struct {
             prepared_execution_cleanup_active_addr == @intFromPtr(self))
         {
             if (self.first_failure_raw == 0)
-                self.first_failure_raw = @intFromEnum(CleanupFailure.reentry) + 1;
+                self.first_failure_raw = @backingInt(CleanupFailure.reentry) + 1;
             return .deferred_reentry;
         }
 
@@ -7437,7 +7437,7 @@ const PreparedExecutionCleanup = struct {
         };
         self.revalidateFinishing(expected_stage, &first);
         if (first) |failure| {
-            self.first_failure_raw = @intFromEnum(failure) + 1;
+            self.first_failure_raw = @backingInt(failure) + 1;
             self.lifecycle = .fail_stop;
             return .{ .fail_stop = failure };
         }
@@ -7509,8 +7509,8 @@ const PreparedExecutionCleanup = struct {
         }
         if (self.first_failure_raw != 0) {
             const raw = self.first_failure_raw - 1;
-            if (raw < std.meta.fields(CleanupFailure).len and first.* == null)
-                first.* = @enumFromInt(raw);
+            if (raw < @import("type_info_fields").fields(CleanupFailure).len and first.* == null)
+                first.* = @fromBackingInt(@intCast(raw));
             self.first_failure_raw = 0;
         }
     }
@@ -7518,9 +7518,9 @@ const PreparedExecutionCleanup = struct {
     fn rawValid(self: *const PreparedExecutionCleanup) bool {
         const lifecycle_raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
         const stage_raw = @as(*const u8, @ptrCast(&self.stage)).*;
-        return lifecycle_raw <= @intFromEnum(CleanupLifecycle.fail_stop) and
-            stage_raw <= @intFromEnum(CleanupStage.ledger) and
-            self.first_failure_raw <= std.meta.fields(CleanupFailure).len;
+        return lifecycle_raw <= @backingInt(CleanupLifecycle.fail_stop) and
+            stage_raw <= @backingInt(CleanupStage.ledger) and
+            self.first_failure_raw <= @import("type_info_fields").fields(CleanupFailure).len;
     }
 };
 
@@ -7636,7 +7636,7 @@ fn finalizePreparedExecutionPoisonCaptureNoFail(
     const reason = (node.client.preparedRequestExecutionPoisonReason(lease) catch
         failStopPreparedExecution(.authority_drift)) orelse
         failStopPreparedExecution(.authority_drift);
-    if (capture.reason_raw != @intFromEnum(reason))
+    if (capture.reason_raw != @backingInt(reason))
         failStopPreparedExecution(.authority_drift);
     const slot: *ClientSlot = @ptrFromInt(request.slot_addr);
     const prepared: *incident_publication_contract.PreparedManagedPoison =
@@ -7652,7 +7652,7 @@ fn finalizePreparedExecutionPoisonCaptureNoFail(
         },
         prepared,
     ) catch failStopPreparedExecution(.authority_drift);
-    capture.lifecycle_raw = @intFromEnum(
+    capture.lifecycle_raw = @backingInt(
         incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.finalized,
     );
     return true;
@@ -7797,7 +7797,7 @@ fn executePreparedRpcPrivate(
             .controller_generation = capture_request.controller_generation,
             .source_site_raw = capture_request.source_site_raw,
             .allocator_source_site_raw = capture_request.allocator_source_site_raw,
-            .lifecycle_raw = @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.armed),
+            .lifecycle_raw = @backingInt(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.armed),
         };
         break :blk capture;
     } else null;
@@ -8009,7 +8009,7 @@ fn publishPreparedRpcResponse(
                 failStopRpcPublication(node, payload_cleanup, .ledger_drift);
             txn.request.finishOrFailStop(operation, outcome);
             if (poison_capture) |capture| {
-                if (capture.reason_raw != @intFromEnum(reason) or
+                if (capture.reason_raw != @backingInt(reason) or
                     !finalizePreparedExecutionPoisonCaptureNoFail(
                         request,
                         operation,
@@ -9643,7 +9643,7 @@ fn armRegisteredOperationPoisonCapture(
         .timestamp_ns = input.timestamp_ns,
         .controller_generation = input.controller_generation,
         .source_site_raw = input.source_site_raw,
-        .lifecycle_raw = @intFromEnum(incident_publication_contract.RegisteredOperationPoisonCaptureLifecycle.armed),
+        .lifecycle_raw = @backingInt(incident_publication_contract.RegisteredOperationPoisonCaptureLifecycle.armed),
     };
     return capture;
 }
@@ -9661,10 +9661,10 @@ fn captureRegisteredOperationPoison(
     if (active.self_addr != @intFromPtr(active) or
         active.client_addr != @intFromPtr(&operation.node.client) or
         active.operation_id != operation.operation_id or active.prepared_addr == 0 or
-        active.lifecycle_raw != @intFromEnum(incident_publication_contract.RegisteredOperationPoisonCaptureLifecycle.armed))
+        active.lifecycle_raw != @backingInt(incident_publication_contract.RegisteredOperationPoisonCaptureLifecycle.armed))
         process_seal_service.fatalIntegrity(.incident_authority);
-    active.reason_raw = @intFromEnum(reason);
-    active.lifecycle_raw = @intFromEnum(incident_publication_contract.RegisteredOperationPoisonCaptureLifecycle.captured);
+    active.reason_raw = @backingInt(reason);
+    active.lifecycle_raw = @backingInt(incident_publication_contract.RegisteredOperationPoisonCaptureLifecycle.captured);
     const prepared: *incident_publication_contract.PreparedManagedPoison = @ptrFromInt(active.prepared_addr);
     prepareManagedPoisonRequestPinned(
         slot,
@@ -9677,7 +9677,7 @@ fn captureRegisteredOperationPoison(
         },
         prepared,
     ) catch return error.Corrupt;
-    active.lifecycle_raw = @intFromEnum(incident_publication_contract.RegisteredOperationPoisonCaptureLifecycle.finalized);
+    active.lifecycle_raw = @backingInt(incident_publication_contract.RegisteredOperationPoisonCaptureLifecycle.finalized);
     return error.Corrupt;
 }
 
@@ -9859,7 +9859,7 @@ pub fn takeGenerationEvent(
         },
         .unknown => .{
             .tag = 0,
-            .digest = [_]u8{0} ** 32,
+            .digest = @as([32]u8, @splat(0)),
             .ordering = .non_revoke_effect,
         },
         else => {
@@ -11084,7 +11084,7 @@ pub fn poisonGenerationConnection(
 
 fn reasonProjection(reason: ?client_poison.ConnectionReason) settlement_contract.ReasonProjection {
     return if (reason) |value|
-        .{ .present_raw = 1, .reason_raw = @intFromEnum(value) }
+        .{ .present_raw = 1, .reason_raw = @backingInt(value) }
     else
         .{};
 }
@@ -11112,7 +11112,7 @@ fn deriveCanonicalEffectPlan(
     if (client.ownership == .moved or client.io_mode != .blocking or
         std.enums.fromInt(settlement_contract.EffectRequestTag, request.tag_raw) == null)
         return error.InvalidOwner;
-    const request_tag: settlement_contract.EffectRequestTag = @enumFromInt(request.tag_raw);
+    const request_tag: settlement_contract.EffectRequestTag = @fromBackingInt(@intCast(request.tag_raw));
     if ((request_tag == .none and (request.requested_reason.present_raw != 0 or request.revoke_fence != 0)) or
         (request_tag == .poison and (request.requested_reason.present_raw != 1 or request.revoke_fence != 0 or
             std.enums.fromInt(client_poison.ConnectionReason, request.requested_reason.reason_raw) == null)) or
@@ -11132,11 +11132,11 @@ fn deriveCanonicalEffectPlan(
     };
     if (client.pending_outbound) |pending| {
         if (pending.frame.len == 0 or pending.offset >= pending.frame.len) return error.InvalidOwner;
-        plan.outbound_relation_raw = @intFromEnum(if (pending.stream_id == target_stream_id)
+        plan.outbound_relation_raw = @backingInt(if (pending.stream_id == target_stream_id)
             settlement_contract.OutboundRelation.target
         else
             settlement_contract.OutboundRelation.sibling);
-        plan.outbound_disposition_raw = @intFromEnum(settlement_contract.OutboundDisposition.preserved);
+        plan.outbound_disposition_raw = @backingInt(settlement_contract.OutboundDisposition.preserved);
         plan.outbound_offset = pending.offset;
         plan.outbound_len = pending.frame.len;
         plan.outbound_descriptor_digest = settlementDigest("maru.effect-outbound-descriptor.v1", &.{
@@ -11145,34 +11145,34 @@ fn deriveCanonicalEffectPlan(
         });
     }
 
-    const relation: settlement_contract.OutboundRelation = @enumFromInt(plan.outbound_relation_raw);
+    const relation: settlement_contract.OutboundRelation = @fromBackingInt(@intCast(plan.outbound_relation_raw));
     if (client.unusable) {
         if (client.first_poison_reason == null) return error.InvalidOwner;
-        plan.action_raw = @intFromEnum(settlement_contract.EffectAction.terminal_cleanup);
+        plan.action_raw = @backingInt(settlement_contract.EffectAction.terminal_cleanup);
         plan.fd_after = -1;
         if (client.fd < 0) {
-            plan.fd_disposition_raw = @intFromEnum(settlement_contract.FdDisposition.already_detached);
+            plan.fd_disposition_raw = @backingInt(settlement_contract.FdDisposition.already_detached);
         } else {
-            plan.fd_disposition_raw = @intFromEnum(settlement_contract.FdDisposition.detached_close_attempted);
+            plan.fd_disposition_raw = @backingInt(settlement_contract.FdDisposition.detached_close_attempted);
             plan.close_attempt_count = 1;
         }
         if (relation != .absent) setPlanAllocatorCleanup(client, &plan, .freed);
     } else switch (request_tag) {
-        .none => plan.action_raw = @intFromEnum(settlement_contract.EffectAction.none),
+        .none => plan.action_raw = @backingInt(settlement_contract.EffectAction.none),
         .poison => {
-            plan.action_raw = @intFromEnum(settlement_contract.EffectAction.poison);
+            plan.action_raw = @backingInt(settlement_contract.EffectAction.poison);
             if (plan.first_reason_before.present_raw == 0)
                 plan.first_reason_after = request.requested_reason;
             setPlanTerminalFd(&plan);
             if (relation != .absent) setPlanAllocatorCleanup(client, &plan, .freed);
         },
         .revoke_fence => if (relation != .target) {
-            plan.action_raw = @intFromEnum(settlement_contract.EffectAction.revoke_clean);
+            plan.action_raw = @backingInt(settlement_contract.EffectAction.revoke_clean);
         } else if (plan.outbound_offset == 0) {
-            plan.action_raw = @intFromEnum(settlement_contract.EffectAction.revoke_cancel);
+            plan.action_raw = @backingInt(settlement_contract.EffectAction.revoke_cancel);
             setPlanAllocatorCleanup(client, &plan, .cancelled);
         } else {
-            plan.action_raw = @intFromEnum(settlement_contract.EffectAction.revoke_partial_poison);
+            plan.action_raw = @backingInt(settlement_contract.EffectAction.revoke_partial_poison);
             if (plan.first_reason_before.present_raw == 0)
                 plan.first_reason_after = reasonProjection(.outbound_partial_write);
             setPlanTerminalFd(&plan);
@@ -11186,7 +11186,7 @@ fn deriveCanonicalEffectPlan(
 fn setPlanTerminalFd(plan: *settlement_contract.CanonicalEffectPlan) void {
     plan.unusable_after_raw = 1;
     plan.fd_after = -1;
-    plan.fd_disposition_raw = @intFromEnum(settlement_contract.FdDisposition.detached_close_attempted);
+    plan.fd_disposition_raw = @backingInt(settlement_contract.FdDisposition.detached_close_attempted);
     plan.close_attempt_count = 1;
 }
 
@@ -11195,12 +11195,12 @@ fn setPlanAllocatorCleanup(
     plan: *settlement_contract.CanonicalEffectPlan,
     disposition: settlement_contract.OutboundDisposition,
 ) void {
-    plan.outbound_disposition_raw = @intFromEnum(disposition);
-    plan.cleanup_mode_raw = @intFromEnum(settlement_contract.CleanupMode.allocator_free);
+    plan.outbound_disposition_raw = @backingInt(disposition);
+    plan.cleanup_mode_raw = @backingInt(settlement_contract.CleanupMode.allocator_free);
     plan.cleanup_count = 1;
     plan.cleanup_callback_provenance_digest = settlementDigest("maru.effect-cleanup-callback.v1", &.{
-        @intFromPtr(client.allocator.ptr),             @intFromPtr(client.allocator.vtable),
-        @as(u64, @intCast(@intFromEnum(disposition))),
+        @intFromPtr(client.allocator.ptr),            @intFromPtr(client.allocator.vtable),
+        @as(u64, @intCast(@backingInt(disposition))),
     });
 }
 
@@ -11210,7 +11210,7 @@ fn descriptorMatchesPlan(
     plan: settlement_contract.CanonicalEffectPlan,
     target_stream_id: u64,
 ) bool {
-    const relation: settlement_contract.OutboundRelation = @enumFromInt(plan.outbound_relation_raw);
+    const relation: settlement_contract.OutboundRelation = @fromBackingInt(@intCast(plan.outbound_relation_raw));
     const expected_relation: settlement_contract.OutboundRelation = if (pending.stream_id == target_stream_id) .target else .sibling;
     if (relation != expected_relation or pending.frame.len != plan.outbound_len or pending.offset != plan.outbound_offset)
         return false;
@@ -11230,7 +11230,7 @@ fn validateCanonicalEffectPrestate(
         !std.meta.eql(reasonProjection(client.first_poison_reason), plan.first_reason_before) or
         @intFromBool(client.unusable) != plan.unusable_before_raw or client.fd != plan.fd_before)
         return false;
-    const relation: settlement_contract.OutboundRelation = @enumFromInt(plan.outbound_relation_raw);
+    const relation: settlement_contract.OutboundRelation = @fromBackingInt(@intCast(plan.outbound_relation_raw));
     if (client.pending_outbound) |pending|
         return relation != .absent and descriptorMatchesPlan(client, pending, plan, target_stream_id);
     return relation == .absent and std.mem.allEqual(u8, &plan.outbound_descriptor_digest, 0);
@@ -11244,7 +11244,7 @@ fn validateCanonicalEffectPoststate(
     if (!std.meta.eql(reasonProjection(client.first_poison_reason), plan.first_reason_after) or
         @intFromBool(client.unusable) != plan.unusable_after_raw or client.fd != plan.fd_after)
         return false;
-    const disposition: settlement_contract.OutboundDisposition = @enumFromInt(plan.outbound_disposition_raw);
+    const disposition: settlement_contract.OutboundDisposition = @fromBackingInt(@intCast(plan.outbound_disposition_raw));
     return switch (disposition) {
         .absent, .freed, .cancelled, .partial_poisoned => client.pending_outbound == null,
         .preserved => if (client.pending_outbound) |pending|
@@ -11262,7 +11262,7 @@ fn executeCanonicalEffectPlanNoFail(
     if (!validateCanonicalEffectPrestate(plan, client, target_stream_id))
         @panic("C3-3b3 effect PRE state drifted after admission");
 
-    const disposition: settlement_contract.OutboundDisposition = @enumFromInt(plan.outbound_disposition_raw);
+    const disposition: settlement_contract.OutboundDisposition = @fromBackingInt(@intCast(plan.outbound_disposition_raw));
     const releases_outbound = switch (disposition) {
         .freed, .cancelled, .partial_poisoned => true,
         .absent, .preserved => false,
@@ -11271,10 +11271,10 @@ fn executeCanonicalEffectPlanNoFail(
 
     // 첫 external close/free 전에 모든 semantic/store-only publication을 끝낸다.
     if (plan.first_reason_after.present_raw == 1 and client.first_poison_reason == null)
-        client.first_poison_reason = @enumFromInt(plan.first_reason_after.reason_raw);
+        client.first_poison_reason = @fromBackingInt(@intCast(plan.first_reason_after.reason_raw));
     client.unusable = plan.unusable_after_raw == 1;
     if (releases_outbound) client.pending_outbound = null;
-    const detached_fd = if (plan.fd_disposition_raw == @intFromEnum(settlement_contract.FdDisposition.detached_close_attempted))
+    const detached_fd = if (plan.fd_disposition_raw == @backingInt(settlement_contract.FdDisposition.detached_close_attempted))
         client.fd
     else
         -1;
@@ -11382,7 +11382,7 @@ pub fn preflightPendingEffect(
         input.effect_out_pristine_digest,
     );
     out.seal = settlement_contract.sealPreparedEffectPermit(out.*) catch return error.InvalidOwner;
-    out.lifecycle_raw = @intFromEnum(settlement_contract.AuthorityLifecycle.prepared);
+    out.lifecycle_raw = @backingInt(settlement_contract.AuthorityLifecycle.prepared);
     if (!settlement_contract.validPreparedEffectPermit(out)) return error.InvalidOwner;
     operation_live = false;
 }
@@ -11554,7 +11554,7 @@ pub fn preflightPendingEventReleaseUnderEffect(
     permit_out.seal = settlement_contract.sealPreparedEventReleasePermit(permit_out.*) catch return error.InvalidOwner;
     // seal은 lifecycle을 제외한다. registry/payload/pin/quarantine 필드가 모두 final address에
     // 고정된 뒤에만 완성된 composite를 게시한다.
-    permit_out.lifecycle_raw = @intFromEnum(settlement_contract.AuthorityLifecycle.prepared);
+    permit_out.lifecycle_raw = @backingInt(settlement_contract.AuthorityLifecycle.prepared);
     if (!settlement_contract.validPreparedEventReleasePermit(permit_out)) return error.InvalidOwner;
 }
 
@@ -11590,7 +11590,7 @@ pub const PendingEventReleaseBegun = struct {
     correlation_tombstone_receipt: settlement_contract.EventReleasePhaseReceipt = .{},
     mirror_tombstone_receipt: settlement_contract.EventReleasePhaseReceipt = .{},
     callback_returned_receipt: settlement_contract.EventReleasePhaseReceipt = .{},
-    lifecycle_raw: u8 = @intFromEnum(PendingEventReleaseBegunLifecycle.pristine),
+    lifecycle_raw: u8 = @backingInt(PendingEventReleaseBegunLifecycle.pristine),
     callback_active_raw: u8 = 0,
     seal: settlement_contract.Digest = settlement_contract.zero_digest,
 
@@ -11604,7 +11604,7 @@ pub fn pristinePendingEventReleaseBegunDigest() settlement_contract.Digest {
     hasher.update("maru.pending-event-release-begun.pristine.v1\x00");
     hashInt(&hasher, u64, @sizeOf(PendingEventReleaseBegun));
     hashInt(&hasher, u64, @alignOf(PendingEventReleaseBegun));
-    hashInt(&hasher, u64, std.meta.fields(PendingEventReleaseBegun).len);
+    hashInt(&hasher, u64, @import("type_info_fields").fields(PendingEventReleaseBegun).len);
     var result: settlement_contract.Digest = undefined;
     hasher.final(&result);
     return result;
@@ -11645,17 +11645,17 @@ fn validPendingEventReleaseBegun(value: *const PendingEventReleaseBegun) bool {
         value.callback_active_raw != @intFromBool(lifecycle == .callback_active)) return false;
     const expected = pendingEventReleaseBegunSeal(value.*);
     if (!std.crypto.timing_safe.eql(settlement_contract.Digest, expected, value.seal)) return false;
-    const ordinal = @intFromEnum(lifecycle);
-    if (ordinal >= @intFromEnum(PendingEventReleaseBegunLifecycle.owner_tombstoned) and
+    const ordinal = @backingInt(lifecycle);
+    if (ordinal >= @backingInt(PendingEventReleaseBegunLifecycle.owner_tombstoned) and
         !settlement_contract.validEventReleasePhaseReceipt(value.owner_tombstone_receipt, .owner)) return false;
-    if (ordinal >= @intFromEnum(PendingEventReleaseBegunLifecycle.resources_begun)) {
+    if (ordinal >= @backingInt(PendingEventReleaseBegunLifecycle.resources_begun)) {
         if (!settlement_contract.validEventReleaseLeafReceipt(value.pin_receipt, .pin)) return false;
     }
-    if (ordinal >= @intFromEnum(PendingEventReleaseBegunLifecycle.correlation_tombstoned) and
+    if (ordinal >= @backingInt(PendingEventReleaseBegunLifecycle.correlation_tombstoned) and
         !settlement_contract.validEventReleasePhaseReceipt(value.correlation_tombstone_receipt, .correlation)) return false;
-    if (ordinal >= @intFromEnum(PendingEventReleaseBegunLifecycle.mirror_tombstoned) and
+    if (ordinal >= @backingInt(PendingEventReleaseBegunLifecycle.mirror_tombstoned) and
         !settlement_contract.validEventReleasePhaseReceipt(value.mirror_tombstone_receipt, .mirror)) return false;
-    if (ordinal >= @intFromEnum(PendingEventReleaseBegunLifecycle.callback_returned) and
+    if (ordinal >= @backingInt(PendingEventReleaseBegunLifecycle.callback_returned) and
         !settlement_contract.validEventReleasePhaseReceipt(value.callback_returned_receipt, .callback)) return false;
     return true;
 }
@@ -11665,9 +11665,9 @@ fn advancePendingEventReleaseBegunNoFail(
     expected: PendingEventReleaseBegunLifecycle,
     next: PendingEventReleaseBegunLifecycle,
 ) void {
-    if (!validPendingEventReleaseBegun(value) or value.lifecycle_raw != @intFromEnum(expected))
+    if (!validPendingEventReleaseBegun(value) or value.lifecycle_raw != @backingInt(expected))
         effectProofLoss();
-    value.lifecycle_raw = @intFromEnum(next);
+    value.lifecycle_raw = @backingInt(next);
     value.callback_active_raw = @intFromBool(next == .callback_active);
     value.seal = pendingEventReleaseBegunSeal(value.*);
 }
@@ -11769,7 +11769,7 @@ pub fn preparePendingEventReleaseBegunNoFail(
         .correlation_digest = effect_permit.correlation_digest,
         .effect_permit_seal = effect_permit.seal,
         .release_permit_seal = release_permit.seal,
-        .lifecycle_raw = @intFromEnum(PendingEventReleaseBegunLifecycle.prepared),
+        .lifecycle_raw = @backingInt(PendingEventReleaseBegunLifecycle.prepared),
     };
     begun.seal = pendingEventReleaseBegunSeal(begun.*);
     if (!validPendingEventReleaseBegun(begun)) effectProofLoss();
@@ -11788,7 +11788,7 @@ pub fn beginPendingEventReleaseResourcesNoFail(
     begun: *PendingEventReleaseBegun,
 ) void {
     if (!validPendingEventReleaseBegun(begun) or
-        begun.lifecycle_raw != @intFromEnum(PendingEventReleaseBegunLifecycle.owner_tombstoned) or
+        begun.lifecycle_raw != @backingInt(PendingEventReleaseBegunLifecycle.owner_tombstoned) or
         begun.effect_permit_addr != @intFromPtr(effect_permit) or
         begun.release_permit_addr != @intFromPtr(release_permit) or
         !std.crypto.timing_safe.eql(settlement_contract.Digest, begun.effect_permit_seal, effect_permit.seal) or
@@ -11859,7 +11859,7 @@ pub fn finishPendingEventReleaseNoFail(
         begun.release_permit_addr != @intFromPtr(release_permit) or
         begun.operation_id != effect_permit.operation_id or
         !validPendingEventReleaseBegun(begun) or
-        begun.lifecycle_raw != @intFromEnum(PendingEventReleaseBegunLifecycle.mirror_tombstoned) or
+        begun.lifecycle_raw != @backingInt(PendingEventReleaseBegunLifecycle.mirror_tombstoned) or
         !std.crypto.timing_safe.eql(settlement_contract.Digest, begun.effect_permit_seal, effect_permit.seal) or
         !std.crypto.timing_safe.eql(settlement_contract.Digest, begun.release_permit_seal, release_permit.seal) or
         !std.meta.eql(completion_out.*, settlement_contract.EventReleaseCompletion{})) effectProofLoss();
@@ -11899,13 +11899,13 @@ pub fn finishPendingEventReleaseNoFail(
     pending_event_release_callback_binding = .{};
     begun.callback_returned_receipt = settlement_contract.makeEventReleasePhaseReceipt(
         .callback,
-        @intFromEnum(PendingEventReleaseBegunLifecycle.callback_active),
-        @intFromEnum(PendingEventReleaseBegunLifecycle.callback_returned),
+        @backingInt(PendingEventReleaseBegunLifecycle.callback_active),
+        @backingInt(PendingEventReleaseBegunLifecycle.callback_returned),
         begun.event_owner_addr,
         begun.event_generation,
         @intFromPtr(begun),
         returned_binding.begun_seal,
-        settlement_contract.canonicalEventReleasePhaseAfterDigest(.callback, @intFromPtr(begun), begun.event_owner_addr, begun.event_generation, @intFromEnum(PendingEventReleaseBegunLifecycle.callback_returned)),
+        settlement_contract.canonicalEventReleasePhaseAfterDigest(.callback, @intFromPtr(begun), begun.event_owner_addr, begun.event_generation, @backingInt(PendingEventReleaseBegunLifecycle.callback_returned)),
         begun.release_permit_seal,
         returned_binding.begun_seal,
     ) catch effectProofLoss();
@@ -11962,7 +11962,7 @@ pub fn finishPendingEventReleaseNoFail(
     const post_transcript_digest = settlement_contract.eventReleasePostTranscriptDigest(permit_seal, post) orelse
         effectProofLoss();
     release_permit.consumed_raw = 1;
-    release_permit.lifecycle_raw = @intFromEnum(settlement_contract.AuthorityLifecycle.consumed);
+    release_permit.lifecycle_raw = @backingInt(settlement_contract.AuthorityLifecycle.consumed);
     var completion: settlement_contract.EventReleaseCompletion = .{
         .self_addr = @intFromPtr(completion_out),
         .pid = release_permit.pid,
@@ -12028,7 +12028,7 @@ pub fn finishPendingEventReleaseNoFail(
     };
     if (builtin.is_test and event_release_death_stage_raw != 0) writeEventReleaseDeathMarker(0x4A);
     completion_out.* = completion;
-    completion_out.lifecycle_raw = @intFromEnum(settlement_contract.AuthorityLifecycle.prepared);
+    completion_out.lifecycle_raw = @backingInt(settlement_contract.AuthorityLifecycle.prepared);
     advancePendingEventReleaseBegunNoFail(begun, .sources_settled, .finished);
     endRegisteredNodeOperation(operation);
 }
@@ -12090,7 +12090,7 @@ test "C3-3b3 pending payload callback 중 동일 대상과 형제 release는 Bus
         .payload_len = 0,
         .wire_major = 0,
         .admission_tag = 0,
-        .owner_seal = [_]u8{0} ** 32,
+        .owner_seal = @as([32]u8, @splat(0)),
         .valid = false,
     };
     try std.testing.expectError(error.Busy, prepareGenerationEventRelease(.{
@@ -12121,34 +12121,34 @@ test "C3-3b3 begun authority는 copied address와 unsealed phase를 거부한다
         .event_owner_addr = 0xC33B_3D03,
         .event_generation = 11,
         .pin_count_before = 1,
-        .correlation_digest = [_]u8{0x41} ** 32,
-        .effect_permit_seal = [_]u8{0x42} ** 32,
-        .release_permit_seal = [_]u8{0x43} ** 32,
-        .lifecycle_raw = @intFromEnum(PendingEventReleaseBegunLifecycle.prepared),
+        .correlation_digest = @as([32]u8, @splat(0x41)),
+        .effect_permit_seal = @as([32]u8, @splat(0x42)),
+        .release_permit_seal = @as([32]u8, @splat(0x43)),
+        .lifecycle_raw = @backingInt(PendingEventReleaseBegunLifecycle.prepared),
     };
     begun.self_addr = @intFromPtr(&begun);
     begun.seal = pendingEventReleaseBegunSeal(begun);
     try std.testing.expect(validPendingEventReleaseBegun(&begun));
     var copied = begun;
     try std.testing.expect(!validPendingEventReleaseBegun(&copied));
-    begun.lifecycle_raw = @intFromEnum(PendingEventReleaseBegunLifecycle.owner_tombstoned);
+    begun.lifecycle_raw = @backingInt(PendingEventReleaseBegunLifecycle.owner_tombstoned);
     try std.testing.expect(!validPendingEventReleaseBegun(&begun));
-    begun.lifecycle_raw = @intFromEnum(PendingEventReleaseBegunLifecycle.prepared);
+    begun.lifecycle_raw = @backingInt(PendingEventReleaseBegunLifecycle.prepared);
     try std.testing.expect(validPendingEventReleaseBegun(&begun));
     begun.owner_tombstone_receipt = try settlement_contract.makeEventReleasePhaseReceipt(
         .owner,
-        @intFromEnum(PendingEventReleaseBegunLifecycle.prepared),
-        @intFromEnum(PendingEventReleaseBegunLifecycle.owner_tombstoned),
+        @backingInt(PendingEventReleaseBegunLifecycle.prepared),
+        @backingInt(PendingEventReleaseBegunLifecycle.owner_tombstoned),
         begun.event_owner_addr,
         begun.event_generation,
         begun.self_addr,
-        [_]u8{0x51} ** 32,
+        @as([32]u8, @splat(0x51)),
         settlement_contract.canonicalEventReleasePhaseAfterDigest(
             .owner,
             begun.self_addr,
             begun.event_owner_addr,
             begun.event_generation,
-            @intFromEnum(PendingEventReleaseBegunLifecycle.owner_tombstoned),
+            @backingInt(PendingEventReleaseBegunLifecycle.owner_tombstoned),
         ),
         begun.release_permit_seal,
         settlement_contract.zero_digest,
@@ -12164,37 +12164,37 @@ test "C3-3b3 canonical effect plan은 닫힌 Client PRE matrix를 모두 검증�
     client.fd = 17;
 
     const none = try deriveCanonicalEffectPlan(&client, .{}, 41);
-    try std.testing.expectEqual(settlement_contract.EffectAction.none, @as(settlement_contract.EffectAction, @enumFromInt(none.action_raw)));
+    try std.testing.expectEqual(settlement_contract.EffectAction.none, @as(settlement_contract.EffectAction, @fromBackingInt(@intCast(none.action_raw))));
 
     const poison_request: settlement_contract.EffectRequestProjection = .{
-        .tag_raw = @intFromEnum(settlement_contract.EffectRequestTag.poison),
-        .requested_reason = .{ .present_raw = 1, .reason_raw = @intFromEnum(client_poison.ConnectionReason.local_resource_exhausted) },
+        .tag_raw = @backingInt(settlement_contract.EffectRequestTag.poison),
+        .requested_reason = .{ .present_raw = 1, .reason_raw = @backingInt(client_poison.ConnectionReason.local_resource_exhausted) },
     };
     const poison = try deriveCanonicalEffectPlan(&client, poison_request, 41);
-    try std.testing.expectEqual(settlement_contract.EffectAction.poison, @as(settlement_contract.EffectAction, @enumFromInt(poison.action_raw)));
+    try std.testing.expectEqual(settlement_contract.EffectAction.poison, @as(settlement_contract.EffectAction, @fromBackingInt(@intCast(poison.action_raw))));
     try std.testing.expectEqual(@as(u8, 1), poison.unusable_after_raw);
     try std.testing.expectEqual(@as(i32, -1), poison.fd_after);
 
     const pending = try std.testing.allocator.dupe(u8, "pending-outbound");
     client.pending_outbound = .{ .frame = pending, .stream_id = 99 };
     const revoke_request: settlement_contract.EffectRequestProjection = .{
-        .tag_raw = @intFromEnum(settlement_contract.EffectRequestTag.revoke_fence),
+        .tag_raw = @backingInt(settlement_contract.EffectRequestTag.revoke_fence),
         .revoke_fence = 71,
     };
     const sibling = try deriveCanonicalEffectPlan(&client, revoke_request, 41);
-    try std.testing.expectEqual(settlement_contract.EffectAction.revoke_clean, @as(settlement_contract.EffectAction, @enumFromInt(sibling.action_raw)));
-    try std.testing.expectEqual(settlement_contract.OutboundDisposition.preserved, @as(settlement_contract.OutboundDisposition, @enumFromInt(sibling.outbound_disposition_raw)));
+    try std.testing.expectEqual(settlement_contract.EffectAction.revoke_clean, @as(settlement_contract.EffectAction, @fromBackingInt(@intCast(sibling.action_raw))));
+    try std.testing.expectEqual(settlement_contract.OutboundDisposition.preserved, @as(settlement_contract.OutboundDisposition, @fromBackingInt(@intCast(sibling.outbound_disposition_raw))));
     const cancel = try deriveCanonicalEffectPlan(&client, revoke_request, 99);
-    try std.testing.expectEqual(settlement_contract.EffectAction.revoke_cancel, @as(settlement_contract.EffectAction, @enumFromInt(cancel.action_raw)));
+    try std.testing.expectEqual(settlement_contract.EffectAction.revoke_cancel, @as(settlement_contract.EffectAction, @fromBackingInt(@intCast(cancel.action_raw))));
     client.pending_outbound.?.offset = 1;
     const partial = try deriveCanonicalEffectPlan(&client, revoke_request, 99);
-    try std.testing.expectEqual(settlement_contract.EffectAction.revoke_partial_poison, @as(settlement_contract.EffectAction, @enumFromInt(partial.action_raw)));
+    try std.testing.expectEqual(settlement_contract.EffectAction.revoke_partial_poison, @as(settlement_contract.EffectAction, @fromBackingInt(@intCast(partial.action_raw))));
 
     client.unusable = true;
     client.first_poison_reason = .connection_eof;
     const terminal = try deriveCanonicalEffectPlan(&client, .{}, 41);
-    try std.testing.expectEqual(settlement_contract.EffectAction.terminal_cleanup, @as(settlement_contract.EffectAction, @enumFromInt(terminal.action_raw)));
-    try std.testing.expectEqual(settlement_contract.OutboundDisposition.freed, @as(settlement_contract.OutboundDisposition, @enumFromInt(terminal.outbound_disposition_raw)));
+    try std.testing.expectEqual(settlement_contract.EffectAction.terminal_cleanup, @as(settlement_contract.EffectAction, @fromBackingInt(@intCast(terminal.action_raw))));
+    try std.testing.expectEqual(settlement_contract.OutboundDisposition.freed, @as(settlement_contract.OutboundDisposition, @fromBackingInt(@intCast(terminal.outbound_disposition_raw))));
     client.pending_outbound = null;
     std.testing.allocator.free(pending);
     client.fd = -1;
@@ -12211,8 +12211,8 @@ test "C3-3b3 canonical effect executor는 poison을 적용하고 exact 한 번 �
     const pending = try std.testing.allocator.dupe(u8, "effect-executor-pending");
     client.pending_outbound = .{ .frame = pending, .stream_id = 51 };
     const request: settlement_contract.EffectRequestProjection = .{
-        .tag_raw = @intFromEnum(settlement_contract.EffectRequestTag.poison),
-        .requested_reason = .{ .present_raw = 1, .reason_raw = @intFromEnum(client_poison.ConnectionReason.local_resource_exhausted) },
+        .tag_raw = @backingInt(settlement_contract.EffectRequestTag.poison),
+        .requested_reason = .{ .present_raw = 1, .reason_raw = @backingInt(client_poison.ConnectionReason.local_resource_exhausted) },
     };
     const plan = try deriveCanonicalEffectPlan(&client, request, 51);
     executeCanonicalEffectPlanNoFail(&client, plan, 51);
@@ -12367,13 +12367,13 @@ pub const ClientSlot = struct {
         slot_incarnation: u64 = 0,
         node_incarnation: u64 = 0,
         operation_generation: u64 = 0,
-        permit_seal: owner_seal.Digest = [_]u8{0} ** 32,
+        permit_seal: owner_seal.Digest = @as([32]u8, @splat(0)),
         lifecycle: PreparedStreamOperationPermitConsume.Lifecycle = .pristine,
     };
 
     self_addr: usize,
     current: *ClientNode,
-    retired: [max_retired_clients]?*ClientNode = .{null} ** max_retired_clients,
+    retired: [max_retired_clients]?*ClientNode = @splat(null),
     node_allocator: std.mem.Allocator,
     incarnation: lease_mod.Identity,
     pid: u32,
@@ -12398,8 +12398,8 @@ pub const ClientSlot = struct {
     fn streamOperationPermitRawTagsValid(permit: *const StreamOperationPermit) bool {
         const kind_raw = @as(*const u8, @ptrCast(&permit.kind)).*;
         const role_raw = @as(*const u8, @ptrCast(&permit.binding.role)).*;
-        return kind_raw <= @intFromEnum(StreamOperationKind.event) and
-            role_raw <= @intFromEnum(contract.AttachmentRole.observer);
+        return kind_raw <= @backingInt(StreamOperationKind.event) and
+            role_raw <= @backingInt(contract.AttachmentRole.observer);
     }
 
     fn streamOperationPermitSeal(permit: StreamOperationPermit) owner_seal.Digest {
@@ -12410,7 +12410,7 @@ pub const ClientSlot = struct {
         writer.writeU64(permit.slot_incarnation);
         writer.writeU64(permit.node_incarnation);
         writer.writeU64(permit.generation);
-        writer.writeU8(@intFromEnum(permit.kind));
+        writer.writeU8(@backingInt(permit.kind));
         writer.writeU64(permit.owner_thread_incarnation);
         writer.writeUsize(permit.owner_addr);
         writer.writeU64(permit.transport_incarnation);
@@ -12423,7 +12423,7 @@ pub const ClientSlot = struct {
         writer.writeU128(permit.binding.host_id);
         writer.writeU64(permit.binding.connection_generation);
         writer.writeU128(permit.binding.runtime_id);
-        writer.writeU8(@intFromEnum(permit.binding.role));
+        writer.writeU8(@backingInt(permit.binding.role));
         writer.writeU64(permit.binding.pid);
         writer.writeU64(permit.binding.process_nonce);
         return writer.finish();
@@ -12513,7 +12513,7 @@ pub const ClientSlot = struct {
             .host_adapter_generation = host_adapter_generation,
             .connection_generation = out.current.connection_generation,
             .wire_major = client.wire_major,
-            .host_class_raw = @intFromEnum(host_class),
+            .host_class_raw = @backingInt(host_class),
         };
         binding.seal = process_seal_service.incidentBindingSeal(out.pid, out.process_nonce, .{
             .client_addr = binding.client_addr,
@@ -13135,7 +13135,7 @@ pub const ClientSlot = struct {
             .node_incarnation = permit.current_node_incarnation,
             .connection_generation = permit.expected_connection_generation,
             .request_generation = permit.request_generation,
-            .lifecycle_raw = @intFromEnum(permit.lifecycle),
+            .lifecycle_raw = @backingInt(permit.lifecycle),
         }) catch @panic("CR3b R1 admission close seal service unavailable");
     }
 
@@ -13182,7 +13182,7 @@ pub const ClientSlot = struct {
             .pending_stream_id = cleanup.pending_stream_id,
             .pending_offset = @intCast(cleanup.pending_offset),
             .external_deinit_reserved_raw = cleanup.external_deinit_reserved_raw,
-            .lifecycle_raw = @intFromEnum(cleanup.lifecycle),
+            .lifecycle_raw = @backingInt(cleanup.lifecycle),
         }) catch @panic("CR3b R2b retirement cleanup seal service unavailable");
     }
 
@@ -13249,7 +13249,7 @@ pub const ClientSlot = struct {
             .next_connection_generation = prepared.next_connection_generation,
             .cleanup_seal = prepared.cleanup_seal,
             .candidate_digest = prepared.candidate_digest,
-            .lifecycle_raw = @intFromEnum(prepared.lifecycle),
+            .lifecycle_raw = @backingInt(prepared.lifecycle),
         }) catch @panic("CR3b R2c client replacement seal service unavailable");
     }
 
@@ -14099,8 +14099,8 @@ pub const ClientSlot = struct {
         const old_start = @intFromPtr(self.current);
         const old_end = std.math.add(usize, old_start, @sizeOf(ClientNode)) catch
             process_seal_service.fatalIntegrity(.proof_loss);
-        var protected_retired_starts: [max_retired_clients]usize = .{0} ** max_retired_clients;
-        var protected_retired_ends: [max_retired_clients]usize = .{0} ** max_retired_clients;
+        var protected_retired_starts: [max_retired_clients]usize = @splat(0);
+        var protected_retired_ends: [max_retired_clients]usize = @splat(0);
         var protected_index: usize = 0;
         for (self.retired) |entry| if (entry) |retired| {
             protected_retired_starts[protected_index] = @intFromPtr(retired);
@@ -14234,8 +14234,8 @@ pub const ClientSlot = struct {
         const old_start = @intFromPtr(self.current);
         const old_end = std.math.add(usize, old_start, @sizeOf(ClientNode)) catch
             return error.AliasedAllocation;
-        var protected_retired_starts: [max_retired_clients]usize = .{0} ** max_retired_clients;
-        var protected_retired_ends: [max_retired_clients]usize = .{0} ** max_retired_clients;
+        var protected_retired_starts: [max_retired_clients]usize = @splat(0);
+        var protected_retired_ends: [max_retired_clients]usize = @splat(0);
         var protected_index: usize = 0;
         for (self.retired) |entry| if (entry) |retired| {
             protected_retired_starts[protected_index] = @intFromPtr(retired);
@@ -14530,7 +14530,7 @@ pub const ClientSlot = struct {
             .next_connection_generation = prepared.next_connection_generation,
             .cleanup_seal = prepared.cleanup_seal,
             .candidate_digest = prepared.candidate_digest,
-            .lifecycle_raw = @intFromEnum(prepared.lifecycle),
+            .lifecycle_raw = @backingInt(prepared.lifecycle),
         }) catch @panic("CR3b R2c published replacement seal service unavailable");
     }
 
@@ -14554,7 +14554,7 @@ pub const ClientSlot = struct {
             .node_incarnation = prepared.node_incarnation,
             .connection_generation = prepared.connection_generation,
             .node_digest = prepared.node_digest,
-            .lifecycle_raw = @intFromEnum(prepared.lifecycle),
+            .lifecycle_raw = @backingInt(prepared.lifecycle),
         }) catch @panic("CR3b R3 retired reclaim seal service unavailable");
     }
 
@@ -15249,12 +15249,12 @@ pub const ClientSlot = struct {
         defer stream_operation_registry_mutex.unlock();
         const entry = &stream_operation_registry[index];
         if (entry.state.load(.acquire) !=
-            @intFromEnum(StreamOperationRegistryEntry.State.live) or
+            @backingInt(StreamOperationRegistryEntry.State.live) or
             entry.id != permit.registry_id or !std.meta.eql(entry.permit, permit))
             return error.InvalidStreamOperationPermit;
         if (entry.state.cmpxchgStrong(
-            @intFromEnum(StreamOperationRegistryEntry.State.live),
-            @intFromEnum(StreamOperationRegistryEntry.State.consume_reserved),
+            @backingInt(StreamOperationRegistryEntry.State.live),
+            @backingInt(StreamOperationRegistryEntry.State.consume_reserved),
             .acq_rel,
             .acquire,
         ) != null) return error.InvalidStreamOperationPermit;
@@ -15281,7 +15281,7 @@ pub const ClientSlot = struct {
         const index: usize = prepared.registry_index;
         const lifecycle_raw = @as(*const u8, @ptrCast(&prepared.lifecycle)).*;
         if (index >= stream_operation_registry.len or
-            lifecycle_raw != @intFromEnum(PreparedStreamOperationPermitConsume.Lifecycle.prepared) or
+            lifecycle_raw != @backingInt(PreparedStreamOperationPermitConsume.Lifecycle.prepared) or
             prepared.self_addr != @intFromPtr(prepared) or
             prepared.registry_id == 0 or prepared.slot_addr != @intFromPtr(self) or
             prepared.slot_incarnation != self.incarnation.tagged or
@@ -15291,7 +15291,7 @@ pub const ClientSlot = struct {
             return false;
         const entry = &stream_operation_registry[index];
         if (entry.state.load(.acquire) !=
-            @intFromEnum(StreamOperationRegistryEntry.State.consume_reserved) or
+            @backingInt(StreamOperationRegistryEntry.State.consume_reserved) or
             entry.id != prepared.registry_id or
             !streamOperationPermitRawTagsValid(&entry.permit) or
             !std.mem.eql(
@@ -15312,8 +15312,8 @@ pub const ClientSlot = struct {
             !std.meta.eql(entry.permit.binding, self.current.active_operation_binding))
             return false;
         if (entry.state.cmpxchgStrong(
-            @intFromEnum(StreamOperationRegistryEntry.State.consume_reserved),
-            @intFromEnum(StreamOperationRegistryEntry.State.consumed),
+            @backingInt(StreamOperationRegistryEntry.State.consume_reserved),
+            @backingInt(StreamOperationRegistryEntry.State.consumed),
             .acq_rel,
             .acquire,
         ) != null) return false;
@@ -16158,7 +16158,7 @@ pub const ClientSlot = struct {
                     .handoff_state_seal = node.batch_registry.terminal_handoff.state.state_seal,
                     .handoff_state_generation = node.batch_registry.terminal_handoff.state.state_generation,
                     .row_slot = descriptor.row_slot,
-                    .row_kind_raw = @intFromEnum(descriptor.kind),
+                    .row_kind_raw = @backingInt(descriptor.kind),
                     .row_generation = descriptor.row_generation,
                     .accounting_client_addr = descriptor.accounting.client_addr,
                     .accounting_transfer_id = descriptor.accounting.transfer_id,
@@ -16170,10 +16170,10 @@ pub const ClientSlot = struct {
                     .callback_ordinal = @intCast(index + 1),
                 },
                 .state = .{
-                    .identity_seal = [_]u8{0} ** 32,
-                    .lifecycle_raw = @intFromEnum(terminal_contract.TerminalDrainLifecycle.prepared),
+                    .identity_seal = @as([32]u8, @splat(0)),
+                    .lifecycle_raw = @backingInt(terminal_contract.TerminalDrainLifecycle.prepared),
                     .state_generation = 1,
-                    .state_seal = [_]u8{0} ** 32,
+                    .state_seal = @as([32]u8, @splat(0)),
                 },
                 .descriptor = descriptor,
                 .accounting = accounting,
@@ -16988,7 +16988,7 @@ fn runTerminalDrainProofChild(stage: TerminalDrainProofStage, expected: []const 
     const nonblocking: c_int = @bitCast(std.posix.O{ .NONBLOCK = true });
     if (flags < 0 or std.c.fcntl(pipe_fds[0], std.c.F.SETFL, flags | nonblocking) < 0)
         return error.TestUnexpectedResult;
-    var transcript: [12]u8 = [_]u8{0} ** 12;
+    var transcript: [12]u8 = @as([12]u8, @splat(0));
     var transcript_len: usize = 0;
     var status: c_int = 0;
     var reaped = false;
@@ -17030,10 +17030,10 @@ fn runTerminalDrainProofChild(stage: TerminalDrainProofStage, expected: []const 
 
 fn dispatchTerminalDrainProofChild(stage: TerminalDrainProofStage) !void {
     if (!terminalDrainMarkerIsFifo(terminal_drain_marker_fd)) return;
-    testing.armTerminalDrainProofLoss(terminal_drain_marker_fd, @intFromEnum(stage), 1);
+    testing.armTerminalDrainProofLoss(terminal_drain_marker_fd, @backingInt(stage), 1);
     writeEventReleaseDeathMarker(0x41);
     try ClientSlot.initializeProcessRuntime();
-    terminal_drain_subprocess_stage_raw = @intFromEnum(stage);
+    terminal_drain_subprocess_stage_raw = @backingInt(stage);
     const allocator = std.testing.allocator;
     var probe: TerminalDrainReentryProbe = .{ .parent = allocator };
     var source = fixtureClient(allocator, 0xD3F0);
@@ -17747,7 +17747,7 @@ test "CR3a-2c1 snapshot allocation rejects owner alias before the first payload 
     defer allocator.free(wire);
     try slot.current.client.parser.push(wire);
 
-    var owner_storage: [256]u8 align(16) = [_]u8{0xA5} ** 256;
+    var owner_storage: [256]u8 align(16) = @as([256]u8, @splat(0xA5));
     var hostile = SnapshotOwnerAliasAllocator{ .target = owner_storage[0..] };
     slot.current.guarded_allocator.parent = hostile.allocator();
     try std.testing.expectError(
@@ -17800,7 +17800,7 @@ test "CR3a-2c3b attachment batch allocator rejects scope-token and parser backin
     const Case = enum { token_exact, token_partial, parser_backing };
     inline for (std.enums.values(Case)) |case| {
         const allocator = std.testing.allocator;
-        const case_offset: u128 = @intFromEnum(case);
+        const case_offset: u128 = @backingInt(case);
         var source = fixtureClient(allocator, 0x2C3B30 + case_offset);
         var slot: ClientSlot = undefined;
         try ClientSlot.initInPlace(&slot, allocator, &source, 0x2C3B30 + case_offset);
@@ -18143,7 +18143,7 @@ test "CR0b Client incident operation은 held owner에서 id key reason을 순서
     var commit: incident_publication_contract.FirstPublicationCommit = .{
         .authority = operation.authority,
         .incident_id = .{ .app_instance_nonce = 11, .sequence = 13 },
-        .reason_raw = @intFromEnum(client_poison.ConnectionReason.connection_eof),
+        .reason_raw = @backingInt(client_poison.ConnectionReason.connection_eof),
     };
     commit.input_digest[0] = 1;
     commit.fingerprint[0] = 2;
@@ -18165,7 +18165,7 @@ test "CR0b Client incident operation은 held owner에서 id key reason을 순서
     finishIncidentClientOperationNoFail(&operation);
     try std.testing.expectEqual(
         incident_publication_contract.ClientOperationLifecycle.consumed,
-        @as(incident_publication_contract.ClientOperationLifecycle, @enumFromInt(operation.lifecycle_raw)),
+        @as(incident_publication_contract.ClientOperationLifecycle, @fromBackingInt(@intCast(operation.lifecycle_raw))),
     );
     var second: incident_publication_contract.PreparedIncidentClientOperation = .{};
     try beginIncidentClientOperation(.{
@@ -18192,13 +18192,13 @@ test "CR0b Client incident operation은 managed poison handoff를 pin 아래 봉
         .host_adapter_generation = binding.host_adapter_generation,
         .connection_generation = binding.connection_generation,
         .wire_major = binding.wire_major,
-        .reason_raw = @intFromEnum(client_poison.ConnectionReason.connection_eof),
-        .scope_raw = @intFromEnum(incident.Scope.connection),
-        .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
-        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
+        .reason_raw = @backingInt(client_poison.ConnectionReason.connection_eof),
+        .scope_raw = @backingInt(incident.Scope.connection),
+        .disposition_raw = @backingInt(incident.Disposition.reconnect),
+        .source_site_raw = @backingInt(incident.SourceSite.client_read),
         .host_class_raw = binding.host_class_raw,
-        .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
-        .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
+        .parser_phase_raw = @backingInt(incident.ParserPhase.idle),
+        .outbound_phase_raw = @backingInt(incident.OutboundPhase.idle),
         .last_success_request_id = 103,
         .pending_request_count = 2,
         .pending_stream_count = 3,
@@ -18310,8 +18310,8 @@ test "CR0b Client incident operation은 managed request를 Client 상태의 cano
     const binding = client.incident_binding;
     var prepared: incident_publication_contract.PreparedManagedPoison = .{};
     try prepareManagedPoisonRequest(&slot, 101, .{
-        .reason_raw = @intFromEnum(connection_incident.ConnectionReason.connection_eof),
-        .source_site_raw = @intFromEnum(connection_incident.SourceSite.client_response),
+        .reason_raw = @backingInt(connection_incident.ConnectionReason.connection_eof),
+        .source_site_raw = @backingInt(connection_incident.SourceSite.client_response),
         .controller_generation = 47,
     }, &prepared);
     const expected: incident_publication_contract.IncidentInput = .{
@@ -18320,13 +18320,13 @@ test "CR0b Client incident operation은 managed request를 Client 상태의 cano
         .host_adapter_generation = binding.host_adapter_generation,
         .connection_generation = binding.connection_generation,
         .wire_major = binding.wire_major,
-        .reason_raw = @intFromEnum(connection_incident.ConnectionReason.connection_eof),
-        .scope_raw = @intFromEnum(connection_incident.Scope.connection),
-        .disposition_raw = @intFromEnum(connection_incident.Disposition.reconnect),
-        .source_site_raw = @intFromEnum(connection_incident.SourceSite.client_response),
+        .reason_raw = @backingInt(connection_incident.ConnectionReason.connection_eof),
+        .scope_raw = @backingInt(connection_incident.Scope.connection),
+        .disposition_raw = @backingInt(connection_incident.Disposition.reconnect),
+        .source_site_raw = @backingInt(connection_incident.SourceSite.client_response),
         .host_class_raw = binding.host_class_raw,
-        .parser_phase_raw = @intFromEnum(connection_incident.ParserPhase.payload),
-        .outbound_phase_raw = @intFromEnum(connection_incident.OutboundPhase.partial),
+        .parser_phase_raw = @backingInt(connection_incident.ParserPhase.payload),
+        .outbound_phase_raw = @backingInt(connection_incident.OutboundPhase.partial),
         .last_success_request_id = 41,
         .pending_request_count = 1,
         .pending_stream_count = 1,
@@ -18429,7 +18429,7 @@ test "CR0b Client incident operation은 copied authority와 bind drift를 거부
     var commit: incident_publication_contract.FirstPublicationCommit = .{
         .authority = copied.authority,
         .incident_id = .{ .app_instance_nonce = 17, .sequence = 19 },
-        .reason_raw = @intFromEnum(client_poison.ConnectionReason.connection_eof),
+        .reason_raw = @backingInt(client_poison.ConnectionReason.connection_eof),
     };
     commit.input_digest[0] = 1;
     commit.fingerprint[0] = 2;
@@ -18452,7 +18452,7 @@ test "CR0b Client incident operation은 copied authority와 bind drift를 거부
     try std.testing.expectError(error.InvalidOwner, bindIncidentClientPublication(&operation, commit));
     try std.testing.expectEqual(
         incident_publication_contract.ClientOperationLifecycle.held,
-        @as(incident_publication_contract.ClientOperationLifecycle, @enumFromInt(operation.lifecycle_raw)),
+        @as(incident_publication_contract.ClientOperationLifecycle, @fromBackingInt(@intCast(operation.lifecycle_raw))),
     );
     try std.testing.expect(slot.current.client.first_poison_reason == null);
     finishIncidentClientOperationNoFail(&operation);
@@ -18567,7 +18567,7 @@ test "C3-3a3 product client slot activation transaction seal covers final addres
     }, 0..) |fault, index| try runC3a3ProductTakeFaultCase(fault, 0xA310 + index * 8);
     var transaction: EventTakeActivationTransaction = .{};
     transaction.self_addr = @intFromPtr(&transaction);
-    transaction.lifecycle_raw = @intFromEnum(EventTakeActivationTransaction.Lifecycle.active);
+    transaction.lifecycle_raw = @backingInt(EventTakeActivationTransaction.Lifecycle.active);
     transaction.prepared_addr = 0xA301;
     transaction.permit_registry_id = 0xA302;
     transaction.reseal();
@@ -18619,7 +18619,7 @@ test "C3-3a3 product client slot activation transaction seal covers final addres
         }
     }
     transaction.authority_live = false;
-    transaction.lifecycle_raw = @intFromEnum(EventTakeActivationTransaction.Lifecycle.consumed);
+    transaction.lifecycle_raw = @backingInt(EventTakeActivationTransaction.Lifecycle.consumed);
     transaction.reseal();
     try std.testing.expect(!std.mem.eql(u8, &baseline, &transaction.seal));
 }
@@ -19249,7 +19249,7 @@ test "C3-3a3 product client slot direct lease Busy resets prepared under retaine
 test "C3-3a3 product client slot held validation rejects invalid corrupt and terminal without queue consumption" {
     const Case = enum { invalid, corrupt, terminal };
     inline for (std.enums.values(Case)) |case| {
-        var source = fixtureClient(std.testing.allocator, 0xA304 + @as(u128, @intFromEnum(case)));
+        var source = fixtureClient(std.testing.allocator, 0xA304 + @as(u128, @backingInt(case)));
         var slot: ClientSlot = undefined;
         try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, source.host_id);
         defer slot.deinit();
@@ -19438,7 +19438,7 @@ test "C3-3a2 final-address transaction rejects copy and replay without canonical
         const raw: u8 = @intCast(raw_value);
         try std.testing.expectEqual(raw <= 1, finalAdmissionOwnershipRawValid(raw));
         try std.testing.expectEqual(
-            raw <= @intFromEnum(FinalAdmissionTransaction.Lifecycle.consumed),
+            raw <= @backingInt(FinalAdmissionTransaction.Lifecycle.consumed),
             finalAdmissionLifecycleRawValid(raw),
         );
     }
@@ -19449,7 +19449,7 @@ test "C3-3a2 final-address transaction rejects copy and replay without canonical
     var operation = try beginRegisteredNodeOperation(.{ .slot_addr = @intFromPtr(&slot), .slot_incarnation = slot.incarnation.tagged, .node = .{ .incarnation = slot.current.incarnation.tagged }, .owner_thread_incarnation = slot.operation_owner_thread_incarnation });
     var transaction: FinalAdmissionTransaction = .{};
     defer {
-        if (transaction.lifecycle_raw == @intFromEnum(FinalAdmissionTransaction.Lifecycle.active)) transaction.finish() catch
+        if (transaction.lifecycle_raw == @backingInt(FinalAdmissionTransaction.Lifecycle.active)) transaction.finish() catch
             @panic("C3-3a2 transaction cleanup failed");
         endRegisteredNodeOperation(operation);
     }
@@ -19598,7 +19598,7 @@ test "C3-3a2 queued blocker settles without retaining execution authority" {
         try finalAdmissionTransactionWithOperation(&operation, &transaction, .{ .queued = true }, &.{}),
     );
     try std.testing.expectEqual(
-        @intFromEnum(FinalAdmissionTransaction.Lifecycle.consumed),
+        @backingInt(FinalAdmissionTransaction.Lifecycle.consumed),
         transaction.lifecycle_raw,
     );
     var next: FinalAdmissionTransaction = .{};
@@ -20467,7 +20467,7 @@ test "CR3a-2c3a canonical authority entrypoints reject foreign thread and fork c
 
     var corrupt_reservation = reservation;
     const role_raw: *u8 = @ptrCast(&corrupt_reservation.identity.role);
-    var raw: u16 = @intFromEnum(contract.AttachmentRole.observer) + 1;
+    var raw: u16 = @backingInt(contract.AttachmentRole.observer) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         role_raw.* = @intCast(raw);
         try std.testing.expectError(
@@ -20567,7 +20567,7 @@ test "CR3a-2c2b3b B3b-O atomic permit receipt is exact once and delays index reu
     try slot.prepareStreamOperationPermitConsume(permit, &receipt);
     const entry = &stream_operation_registry[permit.registry_index];
     try std.testing.expectEqual(
-        @intFromEnum(StreamOperationRegistryEntry.State.consume_reserved),
+        @backingInt(StreamOperationRegistryEntry.State.consume_reserved),
         entry.state.load(.acquire),
     );
     try std.testing.expect(!slot.streamOperationPermitLive(permit));
@@ -20597,7 +20597,7 @@ test "CR3a-2c2b3b B3b-O atomic permit receipt is exact once and delays index reu
     try std.testing.expect(!foreign_seal_result);
     try std.testing.expect(!foreign_consume_result);
     try std.testing.expectEqual(
-        @intFromEnum(StreamOperationRegistryEntry.State.consume_reserved),
+        @backingInt(StreamOperationRegistryEntry.State.consume_reserved),
         entry.state.load(.acquire),
     );
 
@@ -20625,28 +20625,28 @@ test "CR3a-2c2b3b B3b-O atomic permit receipt is exact once and delays index reu
     try std.testing.expect(sibling_slot.streamOperationPermitIdle());
 
     const preparation_lifecycle_raw: *u8 = @ptrCast(&preparation.lifecycle);
-    var raw_tag: u16 = @intFromEnum(EndedPurgePreparationLifecycle.aborted) + 1;
+    var raw_tag: u16 = @backingInt(EndedPurgePreparationLifecycle.aborted) + 1;
     while (raw_tag <= std.math.maxInt(u8)) : (raw_tag += 1) {
         preparation_lifecycle_raw.* = @intCast(raw_tag);
         try std.testing.expect(!preparation.sealForCommit(&slot));
     }
-    preparation_lifecycle_raw.* = @intFromEnum(EndedPurgePreparationLifecycle.prepared);
+    preparation_lifecycle_raw.* = @backingInt(EndedPurgePreparationLifecycle.prepared);
 
     const permit_kind_raw: *u8 = @ptrCast(&preparation.permit.kind);
-    raw_tag = @intFromEnum(StreamOperationKind.event) + 1;
+    raw_tag = @backingInt(StreamOperationKind.event) + 1;
     while (raw_tag <= std.math.maxInt(u8)) : (raw_tag += 1) {
         permit_kind_raw.* = @intCast(raw_tag);
         try std.testing.expect(!preparation.sealForCommit(&slot));
     }
-    permit_kind_raw.* = @intFromEnum(StreamOperationKind.ended_purge);
+    permit_kind_raw.* = @backingInt(StreamOperationKind.ended_purge);
 
     const binding_role_raw: *u8 = @ptrCast(&preparation.permit.binding.role);
-    raw_tag = @intFromEnum(contract.AttachmentRole.observer) + 1;
+    raw_tag = @backingInt(contract.AttachmentRole.observer) + 1;
     while (raw_tag <= std.math.maxInt(u8)) : (raw_tag += 1) {
         binding_role_raw.* = @intCast(raw_tag);
         try std.testing.expect(!preparation.sealForCommit(&slot));
     }
-    binding_role_raw.* = @intFromEnum(permit.binding.role);
+    binding_role_raw.* = @backingInt(permit.binding.role);
 
     const inventory_lifecycle_raw: *u8 = @ptrCast(&preparation.inventory.lifecycle);
     raw_tag = 3;
@@ -20661,23 +20661,23 @@ test "CR3a-2c2b3b B3b-O atomic permit receipt is exact once and delays index reu
     var copied = receipt;
     try std.testing.expect(!slot.consumeStreamOperationPermitUnchecked(&copied));
     const receipt_lifecycle_raw: *u8 = @ptrCast(&receipt.lifecycle);
-    raw_tag = @intFromEnum(ClientSlot.PreparedStreamOperationPermitConsume.Lifecycle.consumed) + 1;
+    raw_tag = @backingInt(ClientSlot.PreparedStreamOperationPermitConsume.Lifecycle.consumed) + 1;
     while (raw_tag <= std.math.maxInt(u8)) : (raw_tag += 1) {
         receipt_lifecycle_raw.* = @intCast(raw_tag);
         try std.testing.expect(!slot.consumeStreamOperationPermitUnchecked(&receipt));
     }
     receipt_lifecycle_raw.* =
-        @intFromEnum(ClientSlot.PreparedStreamOperationPermitConsume.Lifecycle.prepared);
+        @backingInt(ClientSlot.PreparedStreamOperationPermitConsume.Lifecycle.prepared);
     try std.testing.expect(slot.consumeStreamOperationPermitUnchecked(&receipt));
     try std.testing.expectEqual(
-        @intFromEnum(StreamOperationRegistryEntry.State.consumed),
+        @backingInt(StreamOperationRegistryEntry.State.consumed),
         entry.state.load(.acquire),
     );
     try std.testing.expect(slot.streamOperationPermitIdle());
     try std.testing.expect(!slot.consumeStreamOperationPermitUnchecked(&receipt));
     preparation.consumeAfterPermit(&slot);
     try std.testing.expectEqual(
-        @intFromEnum(StreamOperationRegistryEntry.State.empty),
+        @backingInt(StreamOperationRegistryEntry.State.empty),
         entry.state.load(.acquire),
     );
 
@@ -20699,7 +20699,7 @@ test "CR3a-2c2b3b B3b-O atomic permit receipt is exact once and delays index reu
         try std.testing.expect(!slot.streamOperationPermitLive(reused));
         try std.testing.expect(!slot.consumeStreamOperationPermitUnchecked(&receipt));
     }
-    entry.state.store(@intFromEnum(StreamOperationRegistryEntry.State.empty), .release);
+    entry.state.store(@backingInt(StreamOperationRegistryEntry.State.empty), .release);
 }
 
 test "CR3a-2c2b3b B3b-O validated suffix mismatch fail-stops in a subprocess" {
@@ -20746,7 +20746,7 @@ test "CR3a-2c2b3b B3b-O validated suffix mismatch fail-stops in a subprocess" {
     defer if (consume_pending) {
         _ = slot.consumeStreamOperationPermitUnchecked(&receipt);
         stream_operation_registry[permit.registry_index].state.store(
-            @intFromEnum(StreamOperationRegistryEntry.State.empty),
+            @backingInt(StreamOperationRegistryEntry.State.empty),
             .release,
         );
     };
@@ -20809,13 +20809,13 @@ test "CR3a-2c2b3b B3b-O validated suffix mismatch fail-stops in a subprocess" {
     consume_pending = false; // 성공 경로가 직접 소비했다 — defer가 두 번 하지 않게 한다.
     const entry = &stream_operation_registry[permit.registry_index];
     try std.testing.expectEqual(
-        @intFromEnum(StreamOperationRegistryEntry.State.consumed),
+        @backingInt(StreamOperationRegistryEntry.State.consumed),
         entry.state.load(.acquire),
     );
     // This hostile test consumes the raw permit without the production preparation
     // completion path, so it must retire the matching node operation before fixture drop.
     slot.clearStreamOperationPermit();
-    entry.state.store(@intFromEnum(StreamOperationRegistryEntry.State.empty), .release);
+    entry.state.store(@backingInt(StreamOperationRegistryEntry.State.empty), .release);
     reached_end = true; // 여기까지 왔으면 permit이 소비됐다 — 이제 binding 정리가 실패하면 진짜 드리프트다.
 }
 
@@ -20926,7 +20926,7 @@ test "CR3a-2c2b3b B3b-O isolated marker executes drift and aggregate marker only
     try std.testing.expect(probe.drifted);
     try std.testing.expect(slot.streamOperationPermitIdle());
     try std.testing.expectEqual(
-        @intFromEnum(EndedPurgePreparationLifecycle.consumed),
+        @backingInt(EndedPurgePreparationLifecycle.consumed),
         @as(*const u8, @ptrCast(&preparation.lifecycle)).*,
     );
     try std.testing.expectEqual(@as(c.fd_t, -1), slot.current.client.fd);
@@ -21599,7 +21599,7 @@ test "B3-3 private product wrapper composite failures settle both authorities" {
             defer {
                 if (peer_open) _ = c.close(wire_fds[1]);
             }
-            const ordinal: u64 = @as(u64, @intFromEnum(scenario)) + 1;
+            const ordinal: u64 = @as(u64, @backingInt(scenario)) + 1;
             var source = fixtureClient(allocator, 0xB33C0 + ordinal);
             source.fd = wire_fds[0];
             var slot: ClientSlot = undefined;
@@ -21854,7 +21854,20 @@ test "B3-3 private product wrapper writes exact request then terminal-settles bo
         .receipt = prepared.receipt,
     };
 
-    const frame_alias: *RpcExecutedResponse = @ptrFromInt(prepared.canonical.descriptor.frame_addr);
+    // The wire frame is byte-aligned. Use an aligned address inside its byte range so Zig 0.17's
+    // runtime alignment check does not trap before the product overlap guard rejects the alias.
+    const frame_alias_addr = std.mem.alignForward(
+        usize,
+        prepared.canonical.descriptor.frame_addr,
+        @alignOf(RpcExecutedResponse),
+    );
+    try std.testing.expect(byteRangesOverlap(
+        frame_alias_addr,
+        @sizeOf(RpcExecutedResponse),
+        prepared.canonical.descriptor.frame_addr,
+        prepared.canonical.descriptor.frame_len,
+    ));
+    const frame_alias: *RpcExecutedResponse = @ptrFromInt(frame_alias_addr);
     try std.testing.expectError(
         error.InvalidOwner,
         executePreparedRpcTerminalSink(request, 77, frame_alias, .none),
@@ -22499,7 +22512,7 @@ test "B3-0.4 guarded allocator rejects exact partial and overflow execution auth
     inline for (std.enums.values(Authority)) |authority| {
         inline for (std.enums.values(Shape)) |shape| {
             const allocator = std.testing.allocator;
-            const case_id: u128 = @as(u128, @intFromEnum(authority)) * 4 + @intFromEnum(shape);
+            const case_id: u128 = @as(u128, @backingInt(authority)) * 4 + @backingInt(shape);
             var source = fixtureClient(allocator, 0x2C3BD8 + case_id);
             var slot: ClientSlot = undefined;
             try ClientSlot.initInPlace(&slot, allocator, &source, 0x2C3BD8 + case_id);
@@ -22550,13 +22563,13 @@ test "B3-0.3 forged cleanup completion states cannot skip canonical guard cleanu
     try ClientSlot.initializeProcessRuntime();
     inline for ([_]PreparedExecutionCleanup.CleanupLifecycle{ .settled, .finishing }) |forged| {
         const allocator = std.testing.allocator;
-        var source = fixtureClient(allocator, 0x2C3BDC + @as(u128, @intFromEnum(forged)));
+        var source = fixtureClient(allocator, 0x2C3BDC + @as(u128, @backingInt(forged)));
         var slot: ClientSlot = undefined;
         try ClientSlot.initInPlace(
             &slot,
             allocator,
             &source,
-            0x2C3BDC + @as(u128, @intFromEnum(forged)),
+            0x2C3BDC + @as(u128, @backingInt(forged)),
         );
         defer slot.deinit();
 
@@ -22694,7 +22707,7 @@ test "B3-0.1 pre-wire issuer exhaustion settles request terminal with exact firs
         try ClientSlot.initializeProcessRuntime();
         const allocator = std.testing.allocator;
         var request_free = PreparedRequestFreeProbe{ .parent = allocator };
-        const case_offset: u128 = @intFromEnum(case);
+        const case_offset: u128 = @backingInt(case);
         var wire_fds: [2]c.fd_t = undefined;
         try std.testing.expectEqual(
             @as(c_int, 0),
@@ -23000,7 +23013,7 @@ test "B3-0.2 prepared execution transaction is final-address linear and rolls ba
         error.InvalidOwner,
         occupied_settlement.initBeforeBeginExecute(operation, request, identity, prepared.canonical),
     );
-    var raw_value: u16 = @intFromEnum(PreparedExecutionPhase.settled) + 1;
+    var raw_value: u16 = @backingInt(PreparedExecutionPhase.settled) + 1;
     while (raw_value <= std.math.maxInt(u8)) : (raw_value += 1) {
         var invalid_phase: PreparedExecutionTxn = .{};
         @as(*u8, @ptrCast(&invalid_phase.phase)).* = @intCast(raw_value);
@@ -23009,7 +23022,7 @@ test "B3-0.2 prepared execution transaction is final-address linear and rolls ba
             invalid_phase.initBeforeBeginExecute(operation, request, identity, prepared.canonical),
         );
     }
-    raw_value = @intFromEnum(PreparedExecutionSettlementTag.fail_stop_required) + 1;
+    raw_value = @backingInt(PreparedExecutionSettlementTag.fail_stop_required) + 1;
     while (raw_value <= std.math.maxInt(u8)) : (raw_value += 1) {
         var invalid_settlement: PreparedExecutionTxn = .{};
         @as(*u8, @ptrCast(&invalid_settlement.settlement.tag)).* = @intCast(raw_value);
@@ -23030,8 +23043,8 @@ test "B3-0.2 prepared execution transaction is final-address linear and rolls ba
         }
     }
     inline for (.{
-        .{ PreparedExecutionSettlementTag.terminal, std.meta.fields(client_poison.ConnectionReason).len },
-        .{ PreparedExecutionSettlementTag.fail_stop_required, std.meta.fields(FailStopReason).len },
+        .{ PreparedExecutionSettlementTag.terminal, @import("type_info_fields").fields(client_poison.ConnectionReason).len },
+        .{ PreparedExecutionSettlementTag.fail_stop_required, @import("type_info_fields").fields(FailStopReason).len },
     }) |case| {
         var reason: u16 = case[1];
         while (reason <= std.math.maxInt(u8)) : (reason += 1) {
@@ -23542,7 +23555,7 @@ test "B3-0.2 every explicit settlement method closes one exact lifecycle" {
     inline for (std.enums.values(Case)) |case| {
         try ClientSlot.initializeProcessRuntime();
         const allocator = std.testing.allocator;
-        const offset: u128 = @intFromEnum(case);
+        const offset: u128 = @backingInt(case);
         var source = fixtureClient(allocator, 0x2C3B40 + offset);
         var slot: ClientSlot = undefined;
         try ClientSlot.initInPlace(&slot, allocator, &source, 0x2C3B40 + offset);
@@ -23675,7 +23688,7 @@ test "B3-0.2 every explicit settlement method closes one exact lifecycle" {
 test "CR3a-2c2b2 Client owned backing aliases reject before permit generation" {
     const allocator = std.testing.allocator;
     var source = fixtureClient(allocator, 0xFD);
-    try source.parser.buf.appendSlice(allocator, &([_]u8{0} ** 64));
+    try source.parser.buf.appendSlice(allocator, &(@as([64]u8, @splat(0))));
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, allocator, &source, 0xFD);
     defer slot.deinit();
@@ -23726,7 +23739,7 @@ test "CR3a-2c2b2 ClientSlot registry enforces exact cap and address ABA reuse" {
     defer {
         while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
         defer client_slot_registry_mutex.unlock();
-        client_slot_registry = [_]ClientSlotRegistryEntry{.{}} ** max_live_client_slots;
+        client_slot_registry = @as([max_live_client_slots]ClientSlotRegistryEntry, @splat(.{}));
     }
 
     for (0..max_live_client_slots) |index| try registerClientSlot(.{
@@ -23780,7 +23793,7 @@ test "CR3a-2c2b2 ClientSlot registry serializes bounded concurrent reuse" {
     defer {
         while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
         defer client_slot_registry_mutex.unlock();
-        client_slot_registry = [_]ClientSlotRegistryEntry{.{}} ** max_live_client_slots;
+        client_slot_registry = @as([max_live_client_slots]ClientSlotRegistryEntry, @splat(.{}));
     }
     var failed: std.atomic.Value(bool) = .init(false);
     const Worker = struct {
@@ -23858,16 +23871,23 @@ test "post snapshot 은 그것을 쓴 판정자 안에서만 꺼내진다 — �
     const own = @atomicLoad(u64, &root.maru_test_generation, .monotonic);
     defer @atomicStore(u64, &root.maru_test_generation, own, .monotonic);
     defer event_release_post_snapshot = null;
+    const snapshot: EventReleasePostSnapshot = .{
+        .permit_seal = settlement_contract.zero_digest,
+        .post = .{},
+        .transcript_digest = settlement_contract.zero_digest,
+        .completion = .{},
+        .context = std.mem.zeroes(settlement_contract.EventReleasePostContext),
+    };
 
     // 같은 판정자 안에서 쓰면 그대로 꺼내진다(제품 이벤트 해제 완료가 하는 일 — 번호와 값을 함께 적는다).
     event_release_post_snapshot_test_generation = client_mod.currentTestGeneration();
-    event_release_post_snapshot = undefined;
+    event_release_post_snapshot = snapshot;
     try std.testing.expect(testing.takeEventReleasePostSnapshot() != null);
     try std.testing.expect(testing.takeEventReleasePostSnapshot() == null);
 
     // 다음 판정자인 척 번호만 바꾼다 — 값은 앞 판정자가 남긴 그대로. 이제 「없음」 이고, 꺼내면서 비워진다.
     event_release_post_snapshot_test_generation = client_mod.currentTestGeneration();
-    event_release_post_snapshot = undefined;
+    event_release_post_snapshot = snapshot;
     @atomicStore(u64, &root.maru_test_generation, own +% 1, .monotonic);
     try std.testing.expect(testing.takeEventReleasePostSnapshot() == null);
     try std.testing.expect(event_release_post_snapshot == null);

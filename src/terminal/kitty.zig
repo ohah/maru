@@ -2291,7 +2291,7 @@ pub fn completeKittyTransmit(self: *TerminalCore, job: *KittyPendingJob, decoded
     // payload 버퍼 되돌리기: 통째로 옮겨 온 누적 버퍼는 코어의 `kitty_chunk` 가 비어 있으면 그대로 다시 쓴다(할당·복사 0).
     // 다음 이미지의 청크는 이 완료 뒤에야 파싱되므로(리더가 조각마다 job 을 끝낸다) 그 사이 버퍼가 필요한 곳이 없다.
     if (job.payload_cap != 0 and self.kitty_chunk.capacity == 0) {
-        self.kitty_chunk = .{ .items = job.payload.ptr[0..0], .capacity = job.payload_cap };
+        self.kitty_chunk = .{ .items = job.payload.ptr[0..0], .capacity = job.payload_cap, .pointer_stability = .{} };
     } else {
         freeJobPayload(self.allocator, job.payload, job.payload_cap);
     }

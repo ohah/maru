@@ -12,6 +12,8 @@
 //!   - 초기 d1 read command 뒤 spawn/attach와 same-UID admin mutation이 추가됐다. canonical `RequestPolicy`가
 //!     admin read/mutation과 GUI privileged command를 한 곳에서 분류한다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const framing = @import("framing.zig");
@@ -2323,7 +2325,7 @@ pub const Connection = struct {
                 .controller_busy = outcome.controller_busy,
                 .metadata_revision = metadata_revision,
                 .metadata = initial_observation,
-                .agent_log_format = @intFromEnum(hook_entry.agent_log_format),
+                .agent_log_format = @backingInt(hook_entry.agent_log_format),
             } })
         else if (self.runtime_metadata_v1)
             try self.stringify(.{ .result = .{
@@ -4876,9 +4878,9 @@ test "server: 완료된 attempt replay는 preflight를 거치지 않는다" {
             if (request.attempt_id != 0xAABB) return .requires_preflight;
             const exact = std.mem.eql(u8, request.target_path, "/Applications/Maru.app/Contents/MacOS/maru") and
                 std.mem.eql(u8, request.target_build_id, "sha256:build") and
-                std.mem.eql(u8, &request.target_sha256, &([_]u8{
+                std.mem.eql(u8, &request.target_sha256, &(array_repeat.repeat([_]u8{
                     0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
-                } ** 4)) and
+                }, 4))) and
                 request.handoff_reader_min == 1 and request.handoff_reader_max == 1;
             return if (exact)
                 .{ .completed = .{ .status = .committed, .reason = .none } }
@@ -5609,7 +5611,7 @@ test "server: hex128 parse rejects malformed runtime ids" {
     try testing.expectEqual(@as(?u128, 0xabc), parseHex128("abc"));
     try testing.expectEqual(@as(?u128, null), parseHex128("")); // 빈 문자열
     try testing.expectEqual(@as(?u128, null), parseHex128("xyz")); // hex 아님
-    try testing.expectEqual(@as(?u128, null), parseHex128("0" ** 33)); // 32자 초과
+    try testing.expectEqual(@as(?u128, null), parseHex128(array_repeat.repeat("0", 33))); // 32자 초과
 }
 
 /// dispatch가 실 runtime 소유를 위임하는 계약(RuntimeOps)을 검증하는 fake. spawn/terminate에 더해 write_input/resize도
@@ -8829,7 +8831,7 @@ test "runtime.list 만 title 을 싣고, runtime.get 은 6필드를 지킨다" {
 
     // get 모양은 6필드 그대로다. 필드를 세어 고정한다 — 늘면 attach 가 진다.
     const meta = runtimeMetaValue("000000000000000000000000000000aa", &entry);
-    try std.testing.expectEqual(@as(usize, 6), @typeInfo(@TypeOf(meta)).@"struct".fields.len);
+    try std.testing.expectEqual(@as(usize, 6), @import("type_info_fields").structFields(@TypeOf(meta)).len);
 }
 
 test "title 은 상한에서 UTF-8 경계로 잘린다" {

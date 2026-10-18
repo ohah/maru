@@ -7,6 +7,8 @@
 //! **프레임 조립과 `hello` 판정이 여기 한 곳에 있다.** 스트리머는 «바이트를 해석하지 않는다» 는 규율을
 //! 지키므로(RA4 머리말), 그 판정을 두 곳에 두면 상한과 배압 규칙이 갈린다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const command = @import("agent_hook_command.zig");
 const hook_event = @import("agent_hook_event.zig");
@@ -452,7 +454,7 @@ test "RA7 pane 목록: 읽을 게 하나도 없으면 «모른다» 다 — «�
     // 길이를 안 보므로, 이 검사가 빠지면 `%111…1` 하나가 `any` 를 켜서 **실재하는 pane 이 하나도 없는
     // 목록이 «유효» 가 된다** — 그 목록으로 가지치기하면 그 surface 의 행이 전부 사라진다.
     // (슬롯 이름은 `max_pane_len` 을 넘을 수 없으므로 그 토큰과 같은 이름의 슬롯은 존재하지 않는다.)
-    try std.testing.expect(parseFrame("{\"panes\":\"%" ++ ("1" ** max_pane_bytes) ++ "\"}") == .ignored);
+    try std.testing.expect(parseFrame("{\"panes\":\"%" ++ (array_repeat.repeat("1", max_pane_bytes)) ++ "\"}") == .ignored);
     try std.testing.expect(parseFrame("{\"panes\":}") == .ignored);
 }
 

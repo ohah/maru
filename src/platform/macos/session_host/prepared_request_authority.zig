@@ -74,13 +74,13 @@ pub const Authority = struct {
     lifecycle: Lifecycle = .idle,
     prepared_present: u8 = 0,
     prepared: Prepared = std.mem.zeroes(Prepared),
-    seal: owner_seal.Digest = [_]u8{0} ** 32,
+    seal: owner_seal.Digest = @as([32]u8, @splat(0)),
 
     pub const Error = error{ InvalidState, InvalidPrepared };
 
     pub fn rawLifecycleValid(self: *const Authority) bool {
         const raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
-        return raw <= @intFromEnum(Lifecycle.terminal);
+        return raw <= @backingInt(Lifecycle.terminal);
     }
 
     fn rawPreparedPresenceValid(self: *const Authority) bool {
@@ -304,15 +304,15 @@ test "prepared request authority rejects splice and settles exact" {
 }
 
 test "prepared request authority raw lifecycle sweep fails closed" {
-    var raw: [@sizeOf(Authority)]u8 align(@alignOf(Authority)) = [_]u8{0} ** @sizeOf(Authority);
+    var raw: [@sizeOf(Authority)]u8 align(@alignOf(Authority)) = @as([@sizeOf(Authority)]u8, @splat(0));
     const authority: *Authority = @ptrCast(&raw);
     for (0..256) |value| {
         raw[@offsetOf(Authority, "lifecycle")] = @intCast(value);
-        const expected = value <= @intFromEnum(Lifecycle.terminal);
+        const expected = value <= @backingInt(Lifecycle.terminal);
         try std.testing.expectEqual(expected, authority.rawLifecycleValid());
         if (!expected) try std.testing.expect(!authority.settledExact());
     }
-    raw[@offsetOf(Authority, "lifecycle")] = @intFromEnum(Lifecycle.idle);
+    raw[@offsetOf(Authority, "lifecycle")] = @backingInt(Lifecycle.idle);
     for (2..256) |value| {
         raw[@offsetOf(Authority, "prepared_present")] = @intCast(value);
         try std.testing.expect(!authority.settledExact());

@@ -94,7 +94,7 @@ pub fn Registry(
         pid: u32 = 0,
         owner_thread_id: u64 = 0,
         next_reservation_generation: u64 = 1,
-        entries: [capacity]Entry = [_]Entry{.{}} ** capacity,
+        entries: [capacity]Entry = @as([capacity]Entry, @splat(.{})),
         occupied_slots: usize = 0,
         transferred_slots: usize = 0,
         retained_bytes: usize = 0,
@@ -222,7 +222,7 @@ pub fn Registry(
                 .pid = ready.pid,
                 .process_nonce = ready.process_nonce,
                 .thread_id = current_thread_id,
-                .role_raw = @intFromEnum(settlement.EventReleaseLeafRole.quarantine),
+                .role_raw = @backingInt(settlement.EventReleaseLeafRole.quarantine),
                 .identity_a = reservation.slot_index,
                 .identity_b = reservation.reservation_generation,
                 .identity_c = reservation.node_incarnation,
@@ -387,7 +387,7 @@ pub fn Registry(
 
         fn lifecycleRawValid(value: *const Lifecycle) bool {
             return @as(*const u8, @ptrCast(value)).* <=
-                @intFromEnum(Lifecycle.transferred_no_free);
+                @backingInt(Lifecycle.transferred_no_free);
         }
 
         comptime {
@@ -424,8 +424,8 @@ test "CR3a-2c3d C2 quarantine enforces 4096 slots and logical byte cap then reus
         reservations[index] = try registry.reserveUnbound(41, 42, 7, owner_addr, .{
             .payload_addr = 0x200000 + scalar,
             .payload_len = 256 * 1024,
-            .payload_digest = [_]u8{0xA5} ** 32,
-            .admission_projection_digest = [_]u8{0x5A} ** 32,
+            .payload_digest = @as([32]u8, @splat(0xA5)),
+            .admission_projection_digest = @as([32]u8, @splat(0x5A)),
             .wire_major = 1,
             .expected_major = 1,
             .admission_tag = 1,
@@ -462,8 +462,8 @@ test "CR3a-2c3d C2 quarantine enforces 4096 slots and logical byte cap then reus
         .{
             .payload_addr = 0x900001,
             .payload_len = 1,
-            .payload_digest = [_]u8{0} ** 32,
-            .admission_projection_digest = [_]u8{0} ** 32,
+            .payload_digest = @as([32]u8, @splat(0)),
+            .admission_projection_digest = @as([32]u8, @splat(0)),
             .wire_major = 1,
             .expected_major = 1,
             .admission_tag = 0,
@@ -499,8 +499,8 @@ test "CR3a-2c3d C2 quarantine enforces 4096 slots and logical byte cap then reus
     const zero_context_mirror: TestRegistry.CleanupMirror = .{
         .payload_addr = 0x9F0001,
         .payload_len = 1,
-        .payload_digest = [_]u8{0} ** 32,
-        .admission_projection_digest = [_]u8{0} ** 32,
+        .payload_digest = @as([32]u8, @splat(0)),
+        .admission_projection_digest = @as([32]u8, @splat(0)),
         .wire_major = 1,
         .expected_major = 1,
         .admission_tag = 1,
@@ -535,8 +535,8 @@ test "CR3a-2c3d C2 quarantine enforces 4096 slots and logical byte cap then reus
     const reused = try registry.reserveUnbound(41, 42, 7, 0xA00000, .{
         .payload_addr = 0xA00001,
         .payload_len = 1,
-        .payload_digest = [_]u8{0} ** 32,
-        .admission_projection_digest = [_]u8{0} ** 32,
+        .payload_digest = @as([32]u8, @splat(0)),
+        .admission_projection_digest = @as([32]u8, @splat(0)),
         .wire_major = 1,
         .expected_major = 1,
         .admission_tag = 0,
@@ -570,8 +570,8 @@ test "CR3a-2c3d C2 quarantine enforces 4096 slots and logical byte cap then reus
         .{
             .payload_addr = 0xB00001,
             .payload_len = 1,
-            .payload_digest = [_]u8{0} ** 32,
-            .admission_projection_digest = [_]u8{0} ** 32,
+            .payload_digest = @as([32]u8, @splat(0)),
+            .admission_projection_digest = @as([32]u8, @splat(0)),
             .wire_major = 1,
             .expected_major = 1,
             .admission_tag = 0,
@@ -599,8 +599,8 @@ test "CR3a-2c3d C2 quarantine enforces 4096 slots and logical byte cap then reus
     const transferred_reservation = try transfer_registry.reserveUnbound(41, 42, 7, 0xC00000, .{
         .payload_addr = 0xC00001,
         .payload_len = 17,
-        .payload_digest = [_]u8{0} ** 32,
-        .admission_projection_digest = [_]u8{0} ** 32,
+        .payload_digest = @as([32]u8, @splat(0)),
+        .admission_projection_digest = @as([32]u8, @splat(0)),
         .wire_major = 1,
         .expected_major = 1,
         .admission_tag = 0,

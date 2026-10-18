@@ -580,7 +580,7 @@ export fn vt_set_default_colors(h: *anyopaque, fg: u32, bg: u32) void {
     );
 }
 /// 16색 팔레트(테마). rgb는 0xRRGGBB, present=0이면 그 자리는 기본값.
-var palette_slots: [16]?terminal.types.Rgb = .{null} ** 16;
+var palette_slots: [16]?terminal.types.Rgb = @splat(null);
 export fn vt_palette_slot(idx: u32, rgb: u32, present: u32) void {
     if (idx >= 16) return;
     palette_slots[idx] = if (present != 0)
@@ -655,7 +655,7 @@ export fn vt_modes(h: *anyopaque) u32 {
     if (core.application_cursor_keys) m |= 2;
     if (core.application_keypad) m |= 4;
     if (core.ambiguous_wide) m |= 8;
-    m |= @as(u32, @intFromEnum(core.mouse_tracking)) << 8;
+    m |= @as(u32, @backingInt(core.mouse_tracking)) << 8;
     return m;
 }
 /// 커서 표현: shape(0=block,1=underline,2=bar) | blink<<8 | visible<<9

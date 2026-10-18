@@ -1081,7 +1081,8 @@ generation의 resize wire sequence·baseline과 pump summary를 뜻한다. paylo
 `pending_controls`, `blocking_flush_active`는 stable `InputOwner`로 이관될 상태이므로 `RemoteGeneration`에 넣지 않는다.
 allocator/io/runtime ID, `Surface`, pending-event/close/shutdown/lifetime owner도 stable shell에 남는다. nested aggregate의
 CR3c2의 process/slot/node incarnation 결속, CR4a staged receipt owner와 CR4b stable mutation owner까지 포함한 현재
-`RemoteGeneration`/`RemoteRuntime` 크기는 Debug `3,456/11,312`, ReleaseFast `3,440/11,264`다.
+Zig 0.17의 `ArrayListUnmanaged.pointer_stability`는 Debug 빌드에만 안전 잠금을 추가한다. 현재
+`RemoteGeneration`/`RemoteRuntime` 크기는 Debug `3,680/12,272`, ReleaseFast `3,584/11,856`다.
 CR3c2의 authority seal 128 KiB와 screen sequence 64 KiB에 더해 staged receipt owner는
 runtime당 304바이트, 4,096 runtime 상한에서 1,216 KiB를 추가한다. CR5b-2a retirement preparation
 authority는 runtime당 32바이트, 4,096 runtime 상한에서 128 KiB를 추가한다. CR6d의 event payload
@@ -2697,9 +2698,11 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    두 role을 삭제하지 않는다. 각 callback 직전 base13+그 시점의 live scratch 최대8을 다시 canonicalize해 allocator가 이전 allocation과
    exact/left-partial/right-partial alias를 반환하는 모든 role을 write/adopt/free 0으로 거부한다.
 
-   `PendingEventOwner`는 현재 2,720 bytes이고 `@alignOf <= 16`, `@sizeOf <= 4096`; 4,096 runtime product budget은
-   11,141,120 bytes다. `RemoteRuntime` 전체는 macOS Debug 11,312/ReleaseFast 11,264 bytes이며
-   `PendingEventOwner` 외 remainder는 각각 8,592/8,544 bytes다. CR4b가 stable shell에 inline으로 둔
+   `PendingEventOwner`는 현재 Debug 2,800/ReleaseFast 2,736 bytes이고 `@alignOf <= 16`, `@sizeOf <= 4096`이다.
+   4,096 runtime product budget은 Debug 11,468,800/ReleaseFast 11,206,656 bytes다. `RemoteRuntime` 전체는
+   macOS Debug 12,272/ReleaseFast 11,856 bytes이며 `PendingEventOwner` 외 remainder는 각각 9,472/9,120 bytes다.
+   Debug 증가는 Zig 0.17의 `ArrayListUnmanaged.pointer_stability` 잠금에서 왔고 ReleaseFast 레이아웃에는 없다.
+   CR4b가 stable shell에 inline으로 둔
    `MutationOwner` 576/560 bytes는 reconnect freeze 중 active lease와 generation을 보존하는 제품 권위이고,
    paused input metadata와 final-address paste store는 추가 464/480 bytes(runtime 상한에서 1,856/1,920 KiB)로
    원문 key/IME/control을 남기지 않고 완전한 paste 하나의 bounded owner만 결속한다.

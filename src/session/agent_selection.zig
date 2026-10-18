@@ -159,7 +159,7 @@ pub const Candidate = struct {
 pub fn orderCandidates(items: []Candidate) void {
     std.mem.sort(Candidate, items, {}, struct {
         fn lessThan(_: void, a: Candidate, b: Candidate) bool {
-            if (a.kind != b.kind) return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+            if (a.kind != b.kind) return @backingInt(a.kind) < @backingInt(b.kind);
             return a.order < b.order;
         }
     }.lessThan);
@@ -381,7 +381,7 @@ test "같은 입력은 언제나 같은 순서를 낸다 — 정렬의 안정성
     var prev_order: u32 = 0;
     for (a) |c| {
         if (prev_kind) |pk| {
-            try testing.expect(@intFromEnum(pk) <= @intFromEnum(c.kind));
+            try testing.expect(@backingInt(pk) <= @backingInt(c.kind));
             if (pk == c.kind) try testing.expect(c.order > prev_order);
         }
         prev_kind = c.kind;

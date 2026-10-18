@@ -69,7 +69,7 @@ pub fn main() !void {
         .limited(4 * 1024 * 1024),
     );
     defer std.heap.page_allocator.free(source);
-    const source_z = try std.heap.page_allocator.dupeZ(u8, source);
+    const source_z = try std.heap.page_allocator.dupeSentinel(u8, source, 0);
     defer std.heap.page_allocator.free(source_z);
     var tokenizer = std.zig.Tokenizer.init(source_z);
     var behavior_tests: usize = 0;

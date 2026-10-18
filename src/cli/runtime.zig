@@ -392,9 +392,9 @@ fn decodeRuntimeEnd(
 }
 
 fn parseRemoteError(name: []const u8) ?RemoteError {
-    inline for (std.meta.fields(RemoteError)) |field|
+    inline for (@import("type_info_fields").fields(RemoteError)) |field|
         if (std.mem.eql(u8, name, field.name))
-            return @enumFromInt(field.value);
+            return @fromBackingInt(@intCast(field.value));
     return null;
 }
 
@@ -882,8 +882,8 @@ test "runtime CLI maps typed remote errors to stable exits" {
         .busy, // resource_exhausted
         .protocol, // internal
     };
-    inline for (std.meta.fields(RemoteError)) |field| {
-        const code: RemoteError = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").fields(RemoteError)) |field| {
+        const code: RemoteError = @fromBackingInt(@intCast(field.value));
         try std.testing.expectEqual(expected[field.value], remoteExitCode(code));
     }
 }

@@ -124,7 +124,7 @@ const JobSlot = struct {
     job_id: u64 = 0,
     renderer: RendererCapability = std.mem.zeroes(RendererCapability),
     fence_id: u64 = 0,
-    source_hash: [32]u8 = [_]u8{0} ** 32,
+    source_hash: [32]u8 = @as([32]u8, @splat(0)),
     source_len: usize = 0,
     revoked: bool = false,
     palette: protocol.Palette = std.mem.zeroes(protocol.Palette),
@@ -147,7 +147,7 @@ const JobSlot = struct {
         self.job_id = 0;
         self.renderer = std.mem.zeroes(RendererCapability);
         self.fence_id = 0;
-        self.source_hash = [_]u8{0} ** 32;
+        self.source_hash = @as([32]u8, @splat(0));
         self.source_len = 0;
         self.revoked = false;
     }
@@ -163,7 +163,7 @@ const Accepted = struct {
 /// Queue storage is fixed (pending source 1 MiB + accepted SVG 2 MiB), so cap+1 can fail before
 /// allocation and repeated hostile input cannot grow the app heap. This is an app-lifetime L4-owned value.
 pub const MermaidCoordinatorState = struct {
-    slots: [slot_count]JobSlot = [_]JobSlot{.{}} ** slot_count,
+    slots: [slot_count]JobSlot = @as([slot_count]JobSlot, @splat(.{})),
     pending_jobs: usize = 0,
     pending_source_bytes: usize = 0,
     in_flight_index: ?usize = null,
@@ -188,7 +188,7 @@ pub const MermaidCoordinatorState = struct {
     action_lease_helper: u64 = 0,
     action_lease_job: u64 = 0,
 
-    failure_times: [failure_limit]u64 = [_]u64{0} ** failure_limit,
+    failure_times: [failure_limit]u64 = @as([failure_limit]u64, @splat(0)),
     failure_count: usize = 0,
     disabled: bool = false,
 
@@ -542,7 +542,7 @@ pub const MermaidCoordinatorState = struct {
     }
 
     fn recordFailure(self: *MermaidCoordinatorState, now_ms: u64) bool {
-        var kept: [failure_limit]u64 = [_]u64{0} ** failure_limit;
+        var kept: [failure_limit]u64 = @as([failure_limit]u64, @splat(0));
         var kept_len: usize = 0;
         for (self.failure_times[0..self.failure_count]) |timestamp| {
             if (now_ms >= timestamp and now_ms - timestamp <= failure_window_ms) {
@@ -881,7 +881,7 @@ test "late superseded job revoke cannot cancel a same-identity replacement" {
 
 test "queue and source cap plus one do not copy or mutate admission" {
     var state: MermaidCoordinatorState = .{};
-    const long_source = [_]u8{'a'} ** (protocol.max_source_bytes + 1);
+    const long_source = @as([(protocol.max_source_bytes + 1)]u8, @splat('a'));
     try std.testing.expectError(error.SourceTooLarge, state.admit(testRequest(1, 1, &long_source)));
     try std.testing.expectEqual(@as(u64, 0), state.snapshot().admission_copies);
     try std.testing.expectEqual(@as(usize, 0), state.snapshot().pending_jobs);
@@ -896,7 +896,7 @@ test "queue and source cap plus one do not copy or mutate admission" {
 
 test "admission rejects overlong lines and invalid UTF-8 before copying" {
     var state: MermaidCoordinatorState = .{};
-    const long_line = [_]u8{'a'} ** (max_line_bytes + 1);
+    const long_line = @as([(max_line_bytes + 1)]u8, @splat('a'));
     try std.testing.expectError(error.LineTooLong, state.admit(testRequest(1, 1, &long_line)));
     try std.testing.expectError(error.InvalidUtf8, state.admit(testRequest(1, 2, &.{ 0xc3, 0x28 })));
     try std.testing.expectEqual(@as(u64, 0), state.snapshot().admission_copies);
@@ -906,11 +906,11 @@ test "admission rejects overlong lines and invalid UTF-8 before copying" {
 // 정확히 512바이트 줄은 통과하고 513바이트부터 LineTooLong이다. 짧은 줄이 아무리 많아도(줄 개수는 여기서
 // 안 본다) 각 줄이 512바이트 이하면 통과한다 — 줄 개수 강등은 Web 계약이 소유한다.
 test "hasLongLine brackets max_line_bytes on the per-line byte axis" {
-    const at_cap = [_]u8{'a'} ** max_line_bytes;
+    const at_cap = @as([max_line_bytes]u8, @splat('a'));
     try std.testing.expect(!hasLongLine(&at_cap));
-    const over_cap = [_]u8{'a'} ** (max_line_bytes + 1);
+    const over_cap = @as([(max_line_bytes + 1)]u8, @splat('a'));
     try std.testing.expect(hasLongLine(&over_cap));
-    const many_short_lines = [_]u8{'\n'} ** 1000;
+    const many_short_lines = @as([1000]u8, @splat('\n'));
     try std.testing.expect(!hasLongLine(&many_short_lines));
 }
 

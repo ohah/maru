@@ -194,7 +194,7 @@ pub fn reconcile(
 }
 
 fn validateBindings(bindings: []const Binding) Error!void {
-    var manifest_indices = [_]bool{false} ** max_runtime_bindings;
+    var manifest_indices = @as([max_runtime_bindings]bool, @splat(false));
     for (bindings, 0..) |binding, i| {
         if (binding.runtime_id == 0 or
             (binding.exact and binding.host_id == 0) or

@@ -763,7 +763,7 @@ test "ES5 언어 축을 옮기는 자리가 하나다 — 새 열거 값이 조�
     // **번들 목록에 없는 확장자만 무색이다.** 예전에는 zig 하나만 grammar 가 있어 "zig 아니면 전부
     // other"였는데, 이제 열여덟이 실린다 — 그래서 `.none` 하나만 other 다.
     try testing.expectEqual(syntax.Language.other, syntaxLanguage(.none));
-    inline for (@typeInfo(editor_language.Grammar).@"enum".fields) |f| {
+    inline for (@import("type_info_fields").enumFields(editor_language.Grammar)) |f| {
         const got = syntaxLanguage(@field(editor_language.Grammar, f.name));
         if (!std.mem.eql(u8, f.name, "none")) try testing.expect(got != .other);
     }

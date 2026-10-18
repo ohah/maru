@@ -80,17 +80,17 @@ pub fn formatInstanceKey(buf: []u8, pid: i32, nonce: u64) error{NoSpaceLeft}![]u
 /// 컨트롤 디렉터리 경로 `<base>/control`(§4.2 "~/.cache/maru/control/"). base는 caller가 정한다(테스트=격리 tmp,
 /// 제품=~/.cache/maru). 이 순수 함수는 base를 모르는 채 조합만 한다(OS 상태 없음). NUL 종단(mkdir/chmod/fstatat용).
 pub fn controlDirPath(buf: []u8, base: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/control", .{maru.path_shape.trimTrailingSep(base)});
+    return std.fmt.bufPrintSentinel(buf, "{s}/control", .{maru.path_shape.trimTrailingSep(base)}, 0);
 }
 
 /// 소켓 경로 `<dir>/<key>.sock`(NUL 종단 — bind가 C 문자열을 요구).
 pub fn socketPathIn(buf: []u8, dir: []const u8, key: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/{s}.sock", .{ maru.path_shape.trimTrailingSep(dir), key });
+    return std.fmt.bufPrintSentinel(buf, "{s}/{s}.sock", .{ maru.path_shape.trimTrailingSep(dir), key }, 0);
 }
 
 /// 라이브니스 lock 경로 `<dir>/<key>.lock`(소켓과 별도 regular 파일 — flock 대상).
 pub fn lockPathIn(buf: []u8, dir: []const u8, key: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/{s}.lock", .{ maru.path_shape.trimTrailingSep(dir), key });
+    return std.fmt.bufPrintSentinel(buf, "{s}/{s}.lock", .{ maru.path_shape.trimTrailingSep(dir), key }, 0);
 }
 
 // ══ L4 소켓 서버 ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -209,9 +209,9 @@ pub const Server = struct {
         const lp = try lockPathIn(&lp_buf, dir, key);
 
         // 소유 복사본(Server 수명). 이후 실패는 errdefer로 해제.
-        const socket_path = try gpa.dupeZ(u8, sp);
+        const socket_path = try gpa.dupeSentinel(u8, sp, 0);
         errdefer gpa.free(socket_path);
-        const lock_path = try gpa.dupeZ(u8, lp);
+        const lock_path = try gpa.dupeSentinel(u8, lp, 0);
         errdefer gpa.free(lock_path);
 
         // ── 1. 컨트롤 dir 0700 보장 + 소유자/타입 검증(§8.2) ──
@@ -544,7 +544,7 @@ test "policy: path 파생 — controlDir/socketPath/lockPath + trailing slash �
 var tmp_counter: std.atomic.Value(u64) = .init(0);
 fn makeTmpBase(buf: []u8, tag: []const u8) [:0]u8 {
     const n = tmp_counter.fetchAdd(1, .monotonic);
-    const p = std.fmt.bufPrintZ(buf, "/tmp/maru-ct-{d}-{s}-{d}", .{ c.getpid(), tag, n }) catch unreachable;
+    const p = std.fmt.bufPrintSentinel(buf, "/tmp/maru-ct-{d}-{s}-{d}", .{ c.getpid(), tag, n }, 0) catch unreachable;
     _ = c.mkdir(p.ptr, 0o700);
     return p;
 }

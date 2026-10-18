@@ -89,10 +89,10 @@ pub const DeinitOutcome = enum {
 
 fn catchupStageLifecycleRawValid(value: *const catchup_stage_contract.Lifecycle) bool {
     return switch (@as(*const u8, @ptrCast(value)).*) {
-        @intFromEnum(catchup_stage_contract.Lifecycle.pristine),
-        @intFromEnum(catchup_stage_contract.Lifecycle.staged),
-        @intFromEnum(catchup_stage_contract.Lifecycle.consumed),
-        @intFromEnum(catchup_stage_contract.Lifecycle.aborted),
+        @backingInt(catchup_stage_contract.Lifecycle.pristine),
+        @backingInt(catchup_stage_contract.Lifecycle.staged),
+        @backingInt(catchup_stage_contract.Lifecycle.consumed),
+        @backingInt(catchup_stage_contract.Lifecycle.aborted),
         => true,
         else => false,
     };
@@ -141,12 +141,12 @@ pub const GenerationAttachment = struct {
         fn stateRawValid(self: *const CatchupStageOwner) bool {
             const raw = @as(*const u8, @ptrCast(&self.state)).*;
             return switch (raw) {
-                @intFromEnum(State.idle),
-                @intFromEnum(State.building),
-                @intFromEnum(State.staged),
-                @intFromEnum(State.controller_committing),
-                @intFromEnum(State.controller_evidenced),
-                @intFromEnum(State.controller_promoted),
+                @backingInt(State.idle),
+                @backingInt(State.building),
+                @backingInt(State.staged),
+                @backingInt(State.controller_committing),
+                @backingInt(State.controller_evidenced),
+                @backingInt(State.controller_promoted),
                 => true,
                 else => false,
             };
@@ -196,7 +196,7 @@ pub const GenerationAttachment = struct {
                 stage.accounting.encoded_bytes,
                 stage.accounting.decoded_cells,
                 stage.deadline_expires_at_ns,
-                @intFromEnum(stage.lifecycle),
+                @backingInt(stage.lifecycle),
             }) |value| seal = std.hash.Wyhash.hash(seal, std.mem.asBytes(&value));
             return seal;
         }
@@ -1048,7 +1048,7 @@ pub const GenerationAttachment = struct {
         effect_permit: *settlement.PreparedEffectPermit,
         release_permit: *settlement.PreparedEventReleasePermit,
     ) void {
-        if (release_permit.lifecycle_raw == @intFromEnum(settlement.AuthorityLifecycle.prepared))
+        if (release_permit.lifecycle_raw == @backingInt(settlement.AuthorityLifecycle.prepared))
             release_permit.* = .{};
         self.transport.abortPendingEffectPreAdmissionNoFail(effect_permit);
     }
@@ -2005,7 +2005,7 @@ fn panicNotLive(self: *const GenerationAttachment, site: []const u8) noreturn {
 
 fn rawLifecycleValid(value: *const Lifecycle) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
-    return raw <= @intFromEnum(Lifecycle.retirement_prepared);
+    return raw <= @backingInt(Lifecycle.retirement_prepared);
 }
 
 fn recursivelyContainsPointer(comptime T: type) bool {
@@ -2015,11 +2015,11 @@ fn recursivelyContainsPointer(comptime T: type) bool {
         .optional => |info| recursivelyContainsPointer(info.child),
         .error_union => |info| recursivelyContainsPointer(info.payload),
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field| if (recursivelyContainsPointer(field.type)) break :blk true;
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (recursivelyContainsPointer(field.type)) break :blk true;
             break :blk false;
         },
         .@"union" => |info| blk: {
-            inline for (info.fields) |field| if (recursivelyContainsPointer(field.type)) break :blk true;
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (recursivelyContainsPointer(field.type)) break :blk true;
             break :blk false;
         },
         else => false,
@@ -2179,15 +2179,15 @@ pub const testing_api = if (builtin.is_test) struct {
         const client = host_adapter_mod.HostAdapter.testing.rawClient(adapter);
         var result: EffectStateSnapshot = .{
             .first_reason_present = client.first_poison_reason != null,
-            .first_reason_raw = if (client.first_poison_reason) |reason| @intCast(@intFromEnum(reason)) else 0,
+            .first_reason_raw = if (client.first_poison_reason) |reason| @intCast(@backingInt(reason)) else 0,
             .unusable = client.unusable,
             .outbound_addr = 0,
             .outbound_len = 0,
             .outbound_offset = 0,
             .outbound_stream_id = 0,
             .outbound_byte_len = 0,
-            .outbound_bytes = [_]u8{0} ** 64,
-            .outbound_digest = [_]u8{0} ** 32,
+            .outbound_bytes = @as([64]u8, @splat(0)),
+            .outbound_digest = @as([32]u8, @splat(0)),
         };
         if (client.pending_outbound) |pending| {
             result.outbound_addr = @intFromPtr(pending.frame.ptr);
@@ -2377,7 +2377,7 @@ test "CR3a-2c3a attachment facade raw lifecycle sweep is fail closed in ReleaseF
         try std.testing.expectEqual(DeinitOutcome.busy, attachment.tryDeinit(&adapter));
     }
     attachment = .{};
-    var owner_raw: u16 = @intFromEnum(OwnerState.controller_promoted) + 1;
+    var owner_raw: u16 = @backingInt(OwnerState.controller_promoted) + 1;
     while (owner_raw <= std.math.maxInt(u8)) : (owner_raw += 1) {
         owner_state_raw.* = @intCast(owner_raw);
         try std.testing.expectError(

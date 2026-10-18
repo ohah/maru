@@ -123,7 +123,7 @@ fn DeadlineGuarded(comptime Authority: type, comptime Executor: type, comptime D
         pub fn capture(self: *@This(), executable: []const u8, args: []const []const u8, environment: []const []const u8, output: []u8, _: i128) ![]const u8 {
             _ = try self.deadline.remaining();
             var storage: [std.fs.max_path_bytes:0]u8 = undefined;
-            const executable_z = std.fmt.bufPrintZ(&storage, "{s}", .{executable}) catch return error.InvalidPath;
+            const executable_z = std.fmt.bufPrintSentinel(&storage, "{s}", .{executable}, 0) catch return error.InvalidPath;
             try self.authority.revalidate(self.allocator, executable_z);
             const budget_ns = try self.deadline.remaining();
             return self.executor.capture(executable, args, environment, output, budget_ns);
@@ -170,7 +170,7 @@ fn Guarded(comptime Authority: type, comptime Executor: type) type {
         allocator: std.mem.Allocator,
         pub fn capture(self: *@This(), executable: []const u8, args: []const []const u8, environment: []const []const u8, output: []u8, budget_ns: i128) ![]const u8 {
             var storage: [std.fs.max_path_bytes:0]u8 = undefined;
-            const executable_z = std.fmt.bufPrintZ(&storage, "{s}", .{executable}) catch return error.InvalidPath;
+            const executable_z = std.fmt.bufPrintSentinel(&storage, "{s}", .{executable}, 0) catch return error.InvalidPath;
             try self.authority.revalidate(self.allocator, executable_z);
             return self.executor.capture(executable, args, environment, output, budget_ns);
         }

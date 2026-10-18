@@ -61,7 +61,7 @@ pub const ExecutedResponse = struct {
 
     pub fn lifecycleRawValid(self: *const ExecutedResponse) bool {
         const raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
-        return raw <= @intFromEnum(contract.ExecutedResponseLifecycle.terminal);
+        return raw <= @backingInt(contract.ExecutedResponseLifecycle.terminal);
     }
 
     pub fn pristine(self: *const ExecutedResponse) bool {
@@ -115,7 +115,7 @@ pub const ExecutedResponse = struct {
             .incarnation = incarnation,
             .lifecycle = .accepted,
             .result_present = 1,
-            .result_tag = @intFromEnum(contract.ExecuteOutcome.accepted),
+            .result_tag = @backingInt(contract.ExecuteOutcome.accepted),
             .executed_transport_incarnation = correlated.executed_call.prepared_call.transport_incarnation,
             .executed_request_id = correlated.executed_call.prepared_call.request_id,
             .executed_request_digest = correlated.executed_call.prepared_call.request_digest,
@@ -179,7 +179,7 @@ pub const ExecutedResponse = struct {
             .incarnation = incarnation,
             .lifecycle = lifecycle,
             .result_present = 1,
-            .result_tag = @intFromEnum(std.meta.activeTag(result)),
+            .result_tag = @backingInt(std.meta.activeTag(result)),
             .executed_transport_incarnation = executed.prepared_call.transport_incarnation,
             .executed_request_id = executed.prepared_call.request_id,
             .executed_request_digest = executed.prepared_call.request_digest,
@@ -207,7 +207,7 @@ pub const ExecutedResponse = struct {
         if (!owner_seal.valid(self.incarnation)) return error.Corrupt;
         if (self.lifecycle != .accepted) return error.NotAccepted;
         if (!self.transcriptMatchesOwner(owner_seal) or self.result_present != 1 or
-            self.result_tag != @intFromEnum(contract.ExecuteOutcome.accepted) or
+            self.result_tag != @backingInt(contract.ExecuteOutcome.accepted) or
             !self.resultScalarsValid(true) or
             self.allocator_present != 1 or self.allocator_ptr == 0 or
             self.allocator_vtable == 0 or self.owned_addr == 0 or self.owned_len == 0 or
@@ -267,8 +267,8 @@ pub const ExecutedResponse = struct {
             },
             .typed_reject, .uncertain_or_connection_failure => {
                 const expected_result_tag: u8 = switch (self.lifecycle) {
-                    .typed_reject => @intFromEnum(contract.ExecuteOutcome.typed_reject),
-                    .uncertain_or_connection_failure => @intFromEnum(contract.ExecuteOutcome.uncertain_or_connection_failure),
+                    .typed_reject => @backingInt(contract.ExecuteOutcome.typed_reject),
+                    .uncertain_or_connection_failure => @backingInt(contract.ExecuteOutcome.uncertain_or_connection_failure),
                     else => unreachable,
                 };
                 if (!self.transcriptMatchesOwner(owner_seal) or self.result_present != 1 or
@@ -356,7 +356,7 @@ pub const ExecutedResponse = struct {
 
 fn responseTranscriptDigest(response: *const ExecutedResponse) u64 {
     var hasher = std.hash.Wyhash.init(0x4d_52_53_48_52_45_53_50);
-    inline for (std.meta.fields(ExecutedResponse)) |field|
+    inline for (@import("type_info_fields").fields(ExecutedResponse)) |field|
         hasher.update(std.mem.asBytes(&@field(response, field.name)));
     const digest = hasher.final();
     return if (digest == 0) 1 else digest;
@@ -387,7 +387,7 @@ comptime {
         .{ .name = "allocation_generation", .field_type = u64 },
         .{ .name = "terminal_digest", .field_type = u64 },
     };
-    const actual_fields = std.meta.fields(ExecutedResponse);
+    const actual_fields = @import("type_info_fields").fields(ExecutedResponse);
     if (actual_fields.len != expected_fields.len)
         @compileError("ExecutedResponse schema changed without lifecycle review");
     for (actual_fields, expected_fields) |actual, expected|
@@ -597,15 +597,15 @@ test "CR3a-2a accepted response owner rejects control cap plus one without takin
 
 test "CR3a-2a response and owner lifecycle raw discriminators fail closed exhaustively" {
     var response_raw: [@sizeOf(ExecutedResponse)]u8 align(@alignOf(ExecutedResponse)) =
-        [_]u8{0} ** @sizeOf(ExecutedResponse);
+        @as([@sizeOf(ExecutedResponse)]u8, @splat(0));
     const response: *ExecutedResponse = @ptrCast(&response_raw);
     var owner_raw: [@sizeOf(contract.ExecutedResponseOwnerSeal)]u8 align(@alignOf(contract.ExecutedResponseOwnerSeal)) =
-        [_]u8{0} ** @sizeOf(contract.ExecutedResponseOwnerSeal);
+        @as([@sizeOf(contract.ExecutedResponseOwnerSeal)]u8, @splat(0));
     const owner: *contract.ExecutedResponseOwnerSeal = @ptrCast(&owner_raw);
 
     for (0..256) |value| {
         response_raw[@offsetOf(ExecutedResponse, "lifecycle")] = @intCast(value);
-        const response_valid = value <= @intFromEnum(contract.ExecutedResponseLifecycle.terminal);
+        const response_valid = value <= @backingInt(contract.ExecutedResponseLifecycle.terminal);
         try std.testing.expectEqual(response_valid, response.lifecycleRawValid());
         if (!response_valid) {
             try std.testing.expect(!response.canInitializeWithOwner(owner));
@@ -614,10 +614,10 @@ test "CR3a-2a response and owner lifecycle raw discriminators fail closed exhaus
         }
     }
 
-    response_raw = [_]u8{0} ** @sizeOf(ExecutedResponse);
+    response_raw = @as([@sizeOf(ExecutedResponse)]u8, @splat(0));
     for (0..256) |value| {
         owner_raw[@offsetOf(contract.ExecutedResponseOwnerSeal, "lifecycle")] = @intCast(value);
-        const owner_valid = value <= @intFromEnum(contract.ExecutedResponseOwnerLifecycle.terminal);
+        const owner_valid = value <= @backingInt(contract.ExecutedResponseOwnerLifecycle.terminal);
         try std.testing.expectEqual(owner_valid, owner.lifecycleRawValid());
         if (!owner_valid) {
             try std.testing.expect(!response.canInitializeWithOwner(owner));
@@ -630,7 +630,7 @@ test "CR3a-2a response and owner lifecycle raw discriminators fail closed exhaus
 
 test "CR3a-2a pristine response rejects every nonzero storage byte without typed projection" {
     var raw: [@sizeOf(ExecutedResponse)]u8 align(@alignOf(ExecutedResponse)) =
-        [_]u8{0} ** @sizeOf(ExecutedResponse);
+        @as([@sizeOf(ExecutedResponse)]u8, @splat(0));
     const response: *ExecutedResponse = @ptrCast(&raw);
     var owner: contract.ExecutedResponseOwnerSeal = .{};
     for (0..raw.len) |offset| {

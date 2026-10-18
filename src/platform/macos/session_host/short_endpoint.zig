@@ -18,7 +18,7 @@ pub const Error = error{
 };
 
 pub fn userRootPathIn(buf: []u8, uid: posix.uid_t) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "/tmp/maru-{d}", .{uid});
+    return std.fmt.bufPrintSentinel(buf, "/tmp/maru-{d}", .{uid}, 0);
 }
 
 /// registry 를 다른 자리로 돌리는 **테스트 격리 전용** 변수. 제품에서는 아무도 안 쓴다.
@@ -92,13 +92,13 @@ pub fn sharedLegacySocketPathIn(buf: []u8, host_id: u128) error{ NoSpaceLeft, In
 /// 뿌리가 갈리면 남의 자리를 지키면서 정작 자기 socket 을 잃는다. 격리는 양쪽을 다 옮겨야 격리다.
 pub fn currentUserRootPathIn(buf: []u8) error{NoSpaceLeft}![:0]u8 {
     if (overrideRoot(if (std.c.getenv(root_override_env)) |v| std.mem.span(v) else null)) |root|
-        return std.fmt.bufPrintZ(buf, "{s}", .{root});
+        return std.fmt.bufPrintSentinel(buf, "{s}", .{root}, 0);
     // **테스트 빌드는 공용 자리를 절대 쓰지 않는다.** override 를 걸지 않은 테스트가 하나라도 있으면
     // 그 하나가 사용자의 `/tmp/maru-<uid>/sh` 에 가짜 host 를 남기고, 그 가짜가 `host status` 를
     // ambiguous 로 만들어 **실행 중인 앱을 죽인다**(2026-08-27 에 두 번). 주입을 build 쪽 규율에
     // 맡기면 새 run 스텝이 생길 때마다 같은 구멍이 다시 열리므로, 기본값 자체를 프로세스별로 가른다.
     // pid 를 쓰므로 병렬 실행도 서로 밟지 않는다. 길이도 uid 형태보다 길지 않아 `sun_path` 여유가 그대로다.
-    if (builtin.is_test) return std.fmt.bufPrintZ(buf, "/tmp/maru-t{d}", .{std.c.getpid()});
+    if (builtin.is_test) return std.fmt.bufPrintSentinel(buf, "/tmp/maru-t{d}", .{std.c.getpid()}, 0);
     return userRootPathIn(buf, std.c.getuid());
 }
 
@@ -116,23 +116,23 @@ test "override 는 값이 있을 때만 base 를 바꾼다 — 빈 값은 미설
 }
 
 pub fn socketDirPathIn(buf: []u8, uid: posix.uid_t) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "/tmp/maru-{d}/sh", .{uid});
+    return std.fmt.bufPrintSentinel(buf, "/tmp/maru-{d}/sh", .{uid}, 0);
 }
 
 pub fn socketPathIn(buf: []u8, uid: posix.uid_t, host_id: u128) error{ NoSpaceLeft, InvalidHostId }![:0]u8 {
     if (host_id == 0) return error.InvalidHostId;
-    return std.fmt.bufPrintZ(buf, "/tmp/maru-{d}/sh/{x:0>32}.sock", .{ uid, host_id });
+    return std.fmt.bufPrintSentinel(buf, "/tmp/maru-{d}/sh/{x:0>32}.sock", .{ uid, host_id }, 0);
 }
 
 /// 임의의 runtime base 아래 socket 디렉터리. `userRootPathIn` 과 짝이며, override 가 걸린
 /// 자리에서도 registry 와 같은 뿌리를 쓰게 하는 단일 출처다.
 pub fn socketDirPathUnder(buf: []u8, root: []const u8) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/sh", .{root});
+    return std.fmt.bufPrintSentinel(buf, "{s}/sh", .{root}, 0);
 }
 
 pub fn socketPathUnder(buf: []u8, root: []const u8, host_id: u128) error{ NoSpaceLeft, InvalidHostId }![:0]u8 {
     if (host_id == 0) return error.InvalidHostId;
-    return std.fmt.bufPrintZ(buf, "{s}/sh/{x:0>32}.sock", .{ root, host_id });
+    return std.fmt.bufPrintSentinel(buf, "{s}/sh/{x:0>32}.sock", .{ root, host_id }, 0);
 }
 
 /// 이 프로세스가 실제로 쓸 socket 디렉터리. **registry 와 같은 뿌리**를 본다.
@@ -198,7 +198,7 @@ test "short endpoint is host-id keyed, bounded, and under the current UID namesp
 // 격리는 **양쪽을 다 옮겨야** 격리다 — 이 계약을 환경변수 없이 순수 함수로 고정한다.
 test "격리 root 아래에서 registry 와 socket 은 같은 뿌리를 쓴다" {
     var root_buf: [64]u8 = undefined;
-    const root = try std.fmt.bufPrintZ(&root_buf, "/tmp/maru-iso-test", .{});
+    const root = try std.fmt.bufPrintSentinel(&root_buf, "/tmp/maru-iso-test", .{}, 0);
 
     var dir_buf: [128]u8 = undefined;
     try std.testing.expectEqualStrings("/tmp/maru-iso-test/sh", try socketDirPathUnder(&dir_buf, root));

@@ -206,7 +206,7 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
     const prompt_marks: []terminal.RowPrompt = if (src_pm.len == 0) &.{} else pm: {
         const arr = try allocator.alloc(terminal.RowPrompt, src_pm.len);
         for (src_pm, 0..) |w, i| arr[i] = .{
-            .kind = if (w.kind <= 3) @enumFromInt(w.kind) else .unknown,
+            .kind = if (w.kind <= 3) @fromBackingInt(@intCast(w.kind)) else .unknown,
             .exit = w.exit,
         };
         break :pm arr;
@@ -230,8 +230,8 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
                 .end = .{ .row = w.end_row, .col = w.end_col },
                 .block = false, // 링크 밑줄은 항상 선형(types.zig §SelectionSpan.block 주석).
             },
-            .kind = @enumFromInt(w.kind),
-            .scope = @enumFromInt(w.scope),
+            .kind = @fromBackingInt(@intCast(w.kind)),
+            .scope = @fromBackingInt(@intCast(w.scope)),
         };
         break :ln arr;
     };
@@ -247,7 +247,7 @@ pub fn build(allocator: std.mem.Allocator, asm_: *const screen_assembler.ScreenA
         .graphemes = graphemes,
         .size = .{ .cols = cols, .rows = rows },
         .cursor = .{ .col = asm_.cursor.col, .row = asm_.cursor.row, .visible = asm_.cursor.visible },
-        .cursor_shape = if (asm_.cursor.shape <= 2) @enumFromInt(asm_.cursor.shape) else .block, // 0=block/1=underline/2=bar.
+        .cursor_shape = if (asm_.cursor.shape <= 2) @fromBackingInt(@intCast(asm_.cursor.shape)) else .block, // 0=block/1=underline/2=bar.
         .viewport_scrolled = (asm_.modes & screen_stream.ModeBit.viewport_scrolled) != 0,
         .ambiguous_wide = (asm_.modes & screen_stream.ModeBit.ambiguous_wide) != 0,
         .placements = placements,
@@ -1099,7 +1099,7 @@ fn expectSnapshotParity(local_core: *const terminal.TerminalCore, local: termina
         // 필드 × (compared + dropped) 의 문자열 비교가 기본 한도(1000)에 정확히 걸려 있었다 — 필드 하나를
         // 더하자 넘쳤다. 필드가 더 늘어도 이 표가 계속 강제되게 넉넉히 준다.
         @setEvalBranchQuota(4000);
-        for (@typeInfo(terminal.RenderSnapshot).@"struct".fields) |f| {
+        for (@import("type_info_fields").structFields(terminal.RenderSnapshot)) |f| {
             var classified = false;
             for (compared) |c| {
                 if (std.mem.eql(u8, f.name, c)) classified = true;

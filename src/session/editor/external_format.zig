@@ -832,7 +832,7 @@ test "EXF8 argv — 도구마다 공식 모양(stdin→stdout), 사용자 명령
 }
 
 test "EXF4 설정의 언어 칸은 편집기 문법 이름과 같다(`none` 빼고) — 문법을 더하면 설정 칸도; 칸으로 그 문법의 값을 찾는다; 설정 값 읽기" {
-    const fields = @typeInfo(language.Grammar).@"enum".fields;
+    const fields = @import("type_info_fields").enumFields(language.Grammar);
     try testing.expectEqual(fields.len - 1, config_theme.formatter_languages.len);
     inline for (fields) |f| {
         if (comptime std.mem.eql(u8, f.name, "none")) continue;
@@ -853,8 +853,8 @@ test "EXF4 설정의 언어 칸은 편집기 문법 이름과 같다(`none` 빼�
     try testing.expectEqual(Choice.biome, ps(" biome ").?.choice);
     try testing.expect(ps("Biome") == null);
     // 선택지 ↔ 종류.
-    inline for (@typeInfo(Kind).@"enum".fields) |f| {
-        const k: Kind = @enumFromInt(f.value);
+    inline for (@import("type_info_fields").enumFields(Kind)) |f| {
+        const k: Kind = @fromBackingInt(@intCast(f.value));
         const c = std.meta.stringToEnum(Choice, f.name).?;
         try testing.expectEqual(k, Kind.fromChoice(c).?);
     }

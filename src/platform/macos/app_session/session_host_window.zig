@@ -110,7 +110,7 @@ pub fn prepareCloseWithBackend(
     var storage: [max_bindings]backend_mod.WindowBindingDraft = undefined;
     const drafts = try collectDrafts(first, second, &storage);
     const prepared = try backend.prepareHostReconnectWindowTransaction(drafts, .{
-        .kind_raw = @intFromEnum(transaction_mod.ActionKind.close),
+        .kind_raw = @backingInt(transaction_mod.ActionKind.close),
         .target_window_addr = @intFromPtr(location.session),
         .target_runtime_handle = target.rt.handle,
         .target_surface_id = target_surface_id,
@@ -137,7 +137,7 @@ pub fn commitCloseWithBackend(
     now_ns: u64,
     backend: *backend_mod.RemoteTermBackend,
 ) !void {
-    if (transaction.lifecycle_raw != @intFromEnum(transaction_mod.Lifecycle.prepared))
+    if (transaction.lifecycle_raw != @backingInt(transaction_mod.Lifecycle.prepared))
         return error.InvalidWindowBinding;
     const location = locateSurface(first, second, transaction.action.target_surface_id) orelse {
         revokePreparedOrFatal(backend, transaction);

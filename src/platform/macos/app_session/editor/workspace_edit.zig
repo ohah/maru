@@ -150,7 +150,7 @@ pub fn apply(self: *AppSession, parsed: lsp.workspace_edit.Parsed, enc: lsp.rpc.
                 if (open.term.rt.editorDocument() == term.rt.editorDocument()) break true;
             } else false;
             if (already_prepared) continue;
-            const changes = lsp.text_edits.toChanges(self.allocator, .{ .array = .{ .items = f.edits, .capacity = f.edits.len, .allocator = self.allocator } }, doc.file.content, doc.file.lines, enc) catch |err| {
+            const changes = lsp.text_edits.toChanges(self.allocator, .{ .array = .{ .items = f.edits, .capacity = f.edits.len, .allocator = self.allocator, .pointer_stability = .{} } }, doc.file.content, doc.file.lines, enc) catch |err| {
                 item.deinit(self.allocator);
                 if (err == error.OutOfMemory) return .{ .refused = .out_of_memory };
                 st.refused_rejected += 1;
@@ -181,7 +181,7 @@ pub fn apply(self: *AppSession, parsed: lsp.workspace_edit.Parsed, enc: lsp.rpc.
                 st.refused_rejected += 1;
                 return .{ .refused = .{ .rejected = keepPath(path) } };
             }
-            const changes = lsp.text_edits.toChanges(self.allocator, .{ .array = .{ .items = f.edits, .capacity = f.edits.len, .allocator = self.allocator } }, opened.file.content, opened.file.lines, enc) catch |err| {
+            const changes = lsp.text_edits.toChanges(self.allocator, .{ .array = .{ .items = f.edits, .capacity = f.edits.len, .allocator = self.allocator, .pointer_stability = .{} } }, opened.file.content, opened.file.lines, enc) catch |err| {
                 opened.deinit(self.allocator);
                 item.deinit(self.allocator);
                 if (err == error.OutOfMemory) return .{ .refused = .out_of_memory };

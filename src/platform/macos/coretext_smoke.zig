@@ -45,7 +45,7 @@ pub fn main(init: std.process.Init) !void {
 
     const appearance = try config.resolveAppearance(.{});
     var native: NativeCoreTextSmokeResult = emptyNativeResult();
-    var glyph_records = [_]NativeGlyphRecord{emptyGlyphRecord()} ** coretext_probe.glyph_record_capacity;
+    var glyph_records = @as([coretext_probe.glyph_record_capacity]NativeGlyphRecord, @splat(emptyGlyphRecord()));
     maru_macos_coretext_smoke_run(
         appearance.font.family.ptr,
         appearance.font.family.len,
@@ -217,9 +217,7 @@ fn shapeOnceForProbe(appearance: config.ResolvedAppearance, ligatures: bool) c_i
     const grapheme_pool: []const u32 = &.{};
     // 셀 수보다 넉넉히 잡는다. record 가 넘치면 native 가 status 7 로 셀 루프를 중단해 뒤쪽 style 조합이
     // 아예 셰이핑되지 않는다.
-    var records = [_]coretext_shaper.NativeDrawGlyphRecord{
-        std.mem.zeroes(coretext_shaper.NativeDrawGlyphRecord),
-    } ** 32;
+    var records = @as([32]coretext_shaper.NativeDrawGlyphRecord, @splat(std.mem.zeroes(coretext_shaper.NativeDrawGlyphRecord)));
     var native = std.mem.zeroes(coretext_shaper.NativeDrawListShapeResult);
     native.status = -1;
     maru_macos_coretext_shape_draw_list(

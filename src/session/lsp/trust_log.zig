@@ -5,6 +5,8 @@
 //! 무시해 결정을 잃는다(2026-10-12 사용자 결정). 줄마다 `‹unix ms›\t‹동사›\t‹출처›\t‹상대›\t‹키›` 이고, 키는 신뢰 파일과 같은 칸이다 —
 //! 로컬 `‹볼륨 16진›\t‹실제 경로›`, 원격 `ssh\t‹목적지›\t‹원격 실제 경로›`. **개행으로 끝나지 않은 줄은 읽지 않는다**(신뢰 파일과 같다).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const trust = @import("trust.zig");
 
@@ -239,9 +241,9 @@ test "TAL1b 상대 이름 다듬기 — 빈 이름은 `?`, 상한은 UTF-8 글�
     try testing.expectEqualStrings("?", cleanPeerName("", &out));
     try testing.expectEqualStrings("node", cleanPeerName("node", &out));
     // 63 바이트 + 3 바이트 한글 하나 — 64 에서 끊으면 글자 가운데다. 63 에서 끊는다.
-    const long = "a" ** 63 ++ "가";
-    try testing.expectEqualStrings("a" ** 63, cleanPeerName(long, &out));
-    const exact = "b" ** max_peer_name_bytes;
+    const long = array_repeat.repeat("a", 63) ++ "가";
+    try testing.expectEqualStrings(array_repeat.repeat("a", 63), cleanPeerName(long, &out));
+    const exact = array_repeat.repeat("b", max_peer_name_bytes);
     try testing.expectEqualStrings(exact, cleanPeerName(exact ++ "c", &out));
 }
 

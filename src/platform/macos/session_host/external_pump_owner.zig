@@ -1884,10 +1884,11 @@ test "p5c3c-2b3 actual external attach prepare drives one owner pump control and
     const allocator = std.testing.allocator;
     const host_id = (@as(u128, @intCast(c.getpid())) << 64) | 0x2b3;
     var base_buf: [192]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(
+    const base = try std.fmt.bufPrintSentinel(
         &base_buf,
         "/tmp/maru-external-owner-2b3-{d}",
         .{c.getpid()},
+        0,
     );
     std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
     _ = c.mkdir(base.ptr, 0o700);
@@ -2255,7 +2256,7 @@ fn exerciseD3SocketpairRevokePosition(
     const optional_unknown = try framing.encodeFrame(
         std.testing.allocator,
         .{
-            .kind = @enumFromInt(55001),
+            .kind = @fromBackingInt(@intCast(55001)),
             .flags = protocol.Flags.optional,
         },
         "ignored",
@@ -2663,7 +2664,7 @@ test "D3 product socketpair runtime ended terminalizes before lower authority" {
 test "d2c product owner maps readiness to POSIX RX before any writable work" {
     const Apply = struct {
         calls: usize = 0,
-        bytes: [5]u8 = [_]u8{0} ** 5,
+        bytes: [5]u8 = @as([5]u8, @splat(0)),
         order: ?*ProductRxOrderRecorder = null,
 
         fn run(
@@ -3259,7 +3260,7 @@ test "S11-6 controller 없는 세션의 observer 도 선언을 낸다 — 실 ho
     const allocator = std.testing.allocator;
     const host_id = (@as(u128, @intCast(c.getpid())) << 64) | 0x11d;
     var base_buf: [192]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(&base_buf, "/tmp/maru-s11d-{d}", .{c.getpid()});
+    const base = try std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-s11d-{d}", .{c.getpid()}, 0);
     std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
     _ = c.mkdir(base.ptr, 0o700);
     var session_buf: [256]u8 = undefined;

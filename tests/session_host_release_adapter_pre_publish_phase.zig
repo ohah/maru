@@ -49,7 +49,7 @@ const Recorder = struct {
     fn add(self: *@This(), event: Event) !void {
         self.events[self.len] = event;
         self.len += 1;
-        if (@intFromEnum(event) <= @intFromEnum(Event.observation)) {
+        if (@backingInt(event) <= @backingInt(Event.observation)) {
             const index = self.setup_calls;
             self.setup_calls += 1;
             if (self.fail_setup == index) return error.StepFailed;

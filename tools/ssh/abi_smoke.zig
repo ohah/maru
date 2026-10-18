@@ -47,7 +47,7 @@ const Socket = struct {
 
     fn read(self: Socket, buf: []u8) !usize {
         const n = c.read(self.fd, buf.ptr, buf.len);
-        if (n < 0) return if (c._errno().* == @intFromEnum(c.E.AGAIN)) error.Stalled else error.ReadFailed;
+        if (n < 0) return if (c._errno().* == @backingInt(c.E.AGAIN)) error.Stalled else error.ReadFailed;
         if (n == 0) return error.Closed;
         return @intCast(n);
     }

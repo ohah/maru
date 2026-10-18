@@ -1437,7 +1437,7 @@ pub fn parseIso8601(raw: []const u8) i64 {
     while (y < year) : (y += 1) days += if (std.time.epoch.isLeapYear(y)) 366 else 365;
     var mo: u16 = 1;
     while (mo < month) : (mo += 1) {
-        days += std.time.epoch.getDaysInMonth(year, @enumFromInt(@as(u4, @intCast(mo))));
+        days += std.time.epoch.getDaysInMonth(year, @fromBackingInt(@intCast(@as(u4, @intCast(mo)))));
     }
     days += @as(i64, day) - 1;
     return days * std.time.s_per_day + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + @as(i64, second);

@@ -70,8 +70,8 @@ pub const GenerationBatchAdapter = struct {
             .client_addr = @intFromPtr(&slot.current.client),
             .timestamp_ns = timestamp_ns,
             .controller_generation = controller_generation,
-            .source_site_raw = @intFromEnum(@import("maru").observability.connection_incident.SourceSite.client_read),
-            .lifecycle_raw = @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.armed),
+            .source_site_raw = @backingInt(@import("maru").observability.connection_incident.SourceSite.client_read),
+            .lifecycle_raw = @backingInt(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.armed),
         };
         read_pump_poison_binding = .{
             .adapter_addr = @intFromPtr(self),
@@ -92,14 +92,14 @@ pub const GenerationBatchAdapter = struct {
             read_pump_poison_binding.capture_addr != @intFromPtr(capture) or
             capture.self_addr != @intFromPtr(capture) or
             capture.batch_adapter_addr != @intFromPtr(self) or
-            (capture.lifecycle_raw != @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.armed) and
-                capture.lifecycle_raw != @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.captured)))
+            (capture.lifecycle_raw != @backingInt(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.armed) and
+                capture.lifecycle_raw != @backingInt(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.captured)))
             @panic("read pump poison binding authority drifted");
         const slot = self.borrowLiveOrDraining() orelse
             @panic("read pump poison slot authority lost");
         slot.endReadPumpPoisonCapture(capture);
         read_pump_poison_binding = .{};
-        capture.lifecycle_raw = @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.finalized);
+        capture.lifecycle_raw = @backingInt(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.finalized);
     }
 
     pub fn initPreparedInPlace(
@@ -497,7 +497,7 @@ pub const GenerationBatchAdapter = struct {
 };
 
 comptime {
-    if (@typeInfo(generation_batch_registry.Token).@"struct".fields.len == 0)
+    if (@import("type_info_fields").structFields(generation_batch_registry.Token).len == 0)
         @compileError("generation batch token unexpectedly lost its sealed identity");
 }
 

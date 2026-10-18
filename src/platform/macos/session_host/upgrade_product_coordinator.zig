@@ -196,10 +196,11 @@ fn diskFullFixturePath(
     owner_dir: [:0]const u8,
     attempt_id: u128,
 ) error{HookFailed}![:0]const u8 {
-    return std.fmt.bufPrintZ(
+    return std.fmt.bufPrintSentinel(
         buffer,
         "{s}/.disk-full-fixture-{x:0>32}",
         .{ owner_dir, attempt_id },
+        0,
     ) catch error.HookFailed;
 }
 
@@ -343,8 +344,8 @@ fn processArmedWithDeadlineHooks(
         var occupied_slot: i32 = -1;
         var occupied_mode: u32 = 0;
         var occupied_count: u32 = 0;
-        var occupied_list: [8]i32 = .{-1} ** 8;
-        var occupied_modes: [8]u32 = .{0} ** 8;
+        var occupied_list: [8]i32 = @splat(-1);
+        var occupied_modes: [8]u32 = @splat(0);
         for (requested) |slot| {
             if (!exec_fd_set.isOpen(slot)) continue;
             var mode: u32 = 0;
@@ -741,7 +742,7 @@ test "preclosed retryable failure reopens admission before runtime freeze" {
         .attempt_id = attempt_id,
         .target_path = "/Applications/Maru.app/Contents/MacOS/maru",
         .target_build_id = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-        .target_sha256 = [_]u8{0xDD} ** 32,
+        .target_sha256 = @as([32]u8, @splat(0xDD)),
         .handoff_reader_min = 1,
         .handoff_reader_max = 1,
     }));
@@ -834,7 +835,7 @@ test "preclosed target revalidation failure reopens admission through product en
         .attempt_id = attempt_id,
         .target_path = "/Applications/Maru.app/Contents/MacOS/maru",
         .target_build_id = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-        .target_sha256 = [_]u8{0xEE} ** 32,
+        .target_sha256 = @as([32]u8, @splat(0xEE)),
         .handoff_reader_min = 1,
         .handoff_reader_max = 1,
     }));
@@ -1549,19 +1550,20 @@ fn runProductCoordinatorTest(cleanup_collision: bool) !void {
         allocator,
     );
     defer allocator.free(product_raw_path);
-    const product = try allocator.dupeZ(u8, product_raw_path);
+    const product = try allocator.dupeSentinel(u8, product_raw_path, 0);
     defer allocator.free(product);
     const product_identity = try @import("staged_image.zig").inspect(product);
     var dir_buf: [192]u8 = undefined;
-    const owner_dir = std.fmt.bufPrintZ(
+    const owner_dir = std.fmt.bufPrintSentinel(
         &dir_buf,
         "/tmp/maru-product-coordinator-{d}-{d}",
         .{ c.getpid(), std.Io.Clock.awake.now(std.testing.io).nanoseconds },
+        0,
     ) catch return error.SkipZigTest;
     _ = c.rmdir(owner_dir.ptr);
     if (c.mkdir(owner_dir.ptr, 0o700) != 0) return error.TestUnexpectedResult;
     var owner_path_buf: [224]u8 = undefined;
-    const owner_path = try std.fmt.bufPrintZ(&owner_path_buf, "{s}/owner.lock", .{owner_dir});
+    const owner_path = try std.fmt.bufPrintSentinel(&owner_path_buf, "{s}/owner.lock", .{owner_dir}, 0);
     var lifetime_owner = owner_lease.OwnerLease.acquire(owner_path) catch return error.SkipZigTest;
     defer {
         _ = lifetime_owner.unlinkOwnedWhileLocked(owner_path) catch {};
@@ -1598,7 +1600,7 @@ fn runProductCoordinatorTest(cleanup_collision: bool) !void {
         .attempt_id = attempt_id,
         .target_path = "/Applications/Maru.app/Contents/MacOS/maru",
         .target_build_id = "sha256:abababababababababababababababababababababababababababababababab",
-        .target_sha256 = [_]u8{0xAB} ** 32,
+        .target_sha256 = @as([32]u8, @splat(0xAB)),
         .handoff_reader_min = 1,
         .handoff_reader_max = 1,
     };

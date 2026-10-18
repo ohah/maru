@@ -156,7 +156,7 @@ test "CR6b recovered adopt stale authority와 사라진 runtime은 topology muta
         .adapter_generation = 3,
         .adapter_host_id = 1,
     };
-    inline for (@typeInfo(CurrentAuthority).@"struct".fields) |field| {
+    inline for (@import("type_info_fields").structFields(CurrentAuthority)) |field| {
         var drift = current;
         @field(drift, field.name) +%= 1;
         try std.testing.expectError(

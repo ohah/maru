@@ -2,6 +2,8 @@
 //! URL·글 상한과 UTF-8, 제어 문자 거절. encode 와 decode 가 **같은 검사 함수**(`validSize`·`checkUrl`·`checkText`)를
 //! 지나야 한쪽만 느슨해지지 않는다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const wire = @import("wire.zig");
 const message = @import("message.zig");
@@ -211,7 +213,7 @@ pub fn checkConsoleMessage(value: message.ConsoleMessage) Error!void {
 pub fn writeConsoleMessage(cursor: *Cursor, value: message.ConsoleMessage) Error!void {
     try checkConsoleMessage(value);
     try writeBrowser(cursor, value.browser);
-    try cursor.writeByte(@intFromEnum(value.level));
+    try cursor.writeByte(@backingInt(value.level));
     try cursor.writeByte(value.docs_back);
     try cursor.writeU32(value.dropped_errors);
     try cursor.writeU32(value.dropped_other);
@@ -566,7 +568,7 @@ fn dragDataLimit(kind: message.DragDataKind) usize {
 
 pub fn writeDragData(cursor: *Cursor, kind: message.DragDataKind, bytes: []const u8) Error!void {
     try checkDragData(kind, bytes);
-    try cursor.writeByte(@intFromEnum(kind));
+    try cursor.writeByte(@backingInt(kind));
     try cursor.writeU32(@intCast(bytes.len));
     try cursor.writeBytes(bytes);
 }
@@ -619,7 +621,7 @@ pub fn writeDragOutData(cursor: *Cursor, value: message.DragOutData) Error!void 
     try checkDragOutData(value.kind, value.bytes);
     try writeBrowser(cursor, value.browser);
     try cursor.writeU32(value.drag);
-    try cursor.writeByte(@intFromEnum(value.kind));
+    try cursor.writeByte(@backingInt(value.kind));
     try cursor.writeU32(@intCast(value.bytes.len));
     try cursor.writeBytes(value.bytes);
 }
@@ -798,7 +800,7 @@ test "download names are tidied into one file name (W10a)" {
     try std.testing.expectEqualStrings("download", tidyDownloadName("..", &buf));
     try std.testing.expectEqualStrings("download", tidyDownloadName("", &buf));
     try std.testing.expectEqualStrings("download", tidyDownloadName("\xff\xfe", &buf)); // 고칠 수 없는 UTF-8
-    const long = "가" ** 100; // 300 바이트 — 글자 경계(255 → 255 = 85 글자)에서
+    const long = array_repeat.repeat("가", 100); // 300 바이트 — 글자 경계(255 → 255 = 85 글자)에서
     try std.testing.expectEqual(@as(usize, 255), tidyDownloadName(long, &buf).len);
     try checkDownloadBegin(.{ .browser = 1, .download = 1, .url = "", .name = tidyDownloadName("x/y", &buf), .mime = "", .total = -1 });
 }

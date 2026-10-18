@@ -73,7 +73,7 @@ const SlotTable = struct {
         retired: bool = false,
     };
 
-    entries: [max_connections]Entry = [_]Entry{.{}} ** max_connections,
+    entries: [max_connections]Entry = @as([max_connections]Entry, @splat(.{})),
     keys: KeyAllocator = .{},
     active_count: usize = 0,
     cursor: usize = 0,
@@ -316,7 +316,7 @@ pub const Slot = struct {
     base_resident_bytes: usize = 0,
     control_resident_bytes: usize = 0,
     screen_trackers: [max_screen_trackers_per_slot]ScreenTrackerEntry =
-        [_]ScreenTrackerEntry{.{}} ** max_screen_trackers_per_slot,
+        @as([max_screen_trackers_per_slot]ScreenTrackerEntry, @splat(.{})),
     read_partial_started_ns: ?u64 = null,
     read_partial_progress_ns: ?u64 = null,
     write_partial_started_ns: ?u64 = null,
@@ -1300,7 +1300,7 @@ pub const ReactorCore = struct {
     allocator: std.mem.Allocator,
     table: SlotTable = .{},
     budget: GlobalBudget = .{},
-    slots: [max_connections]?*Slot = [_]?*Slot{null} ** max_connections,
+    slots: [max_connections]?*Slot = @as([max_connections]?*Slot, @splat(null)),
     next_mixed_batch_reservation_id: u64 = 1,
     active_mixed_batch_reservation_id: ?u64 = null,
 
@@ -1631,7 +1631,7 @@ pub const ReactorCore = struct {
             screen_chunks: usize = 0,
             control_charge: usize = 0,
             control_chunks: usize = 0,
-            seen_trackers: [4]u64 = .{0} ** 4,
+            seen_trackers: [4]u64 = @splat(0),
         };
         var deltas: [max_connections]SlotDelta = undefined;
         var delta_len: usize = 0;
@@ -2067,7 +2067,7 @@ test "connection slot table enforces 32 cap, generation ABA, and round-robin fai
     for (&admissions) |*item| item.* = try table.admit();
     try std.testing.expectError(error.Full, table.admit());
 
-    var ready = [_]bool{true} ** max_connections;
+    var ready = @as([max_connections]bool, @splat(true));
     for (admissions) |expected| {
         const selected = table.nextReady(&ready).?;
         try std.testing.expectEqual(expected.index, selected.index);
@@ -3029,7 +3029,7 @@ test "reactor normal close purges queued accounting and stale admission" {
     try slot.enqueueControl("control");
     try std.testing.expectError(error.Busy, slot.destroyScreenTracker(tracker));
 
-    var ready = [_]bool{false} ** max_connections;
+    var ready = @as([max_connections]bool, @splat(false));
     ready[admission.index] = true;
     try std.testing.expectEqual(admission.index, reactor.nextReady(&ready).?.index);
     try reactor.closeConnection(admission);

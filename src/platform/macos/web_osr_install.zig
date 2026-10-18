@@ -185,16 +185,16 @@ pub const Opened = union(enum) { ok: c_int, bad: Problem };
 /// 안 전체를 본다.
 pub fn openBrewSource(dir: []const u8, prefix: []const u8) Opened {
     var dir_z_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_z = std.fmt.bufPrintZ(&dir_z_buf, "{s}", .{dir}) catch return .{ .bad = .too_large };
+    const dir_z = std.fmt.bufPrintSentinel(&dir_z_buf, "{s}", .{dir}, 0) catch return .{ .bad = .too_large };
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
     const real = std.mem.span(std.c.realpath(dir_z, &real_buf) orelse return .{ .bad = .unreadable });
     var prefix_z_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const prefix_z = std.fmt.bufPrintZ(&prefix_z_buf, "{s}", .{prefix}) catch return .{ .bad = .too_large };
+    const prefix_z = std.fmt.bufPrintSentinel(&prefix_z_buf, "{s}", .{prefix}, 0) catch return .{ .bad = .too_large };
     var prefix_real_buf: [std.fs.max_path_bytes]u8 = undefined;
     const prefix_real = std.c.realpath(prefix_z, &prefix_real_buf) orelse return .{ .bad = .unreadable };
     const version = kegVersion(real, std.mem.span(prefix_real)) orelse return .{ .bad = .not_in_keg };
     var version_buf: [256]u8 = undefined;
-    const version_z = std.fmt.bufPrintZ(&version_buf, "{s}", .{version}) catch return .{ .bad = .too_large };
+    const version_z = std.fmt.bufPrintSentinel(&version_buf, "{s}", .{version}, 0) catch return .{ .bad = .too_large };
 
     const prefix_fd = std.c.open(prefix_real, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true });
     if (prefix_fd < 0) return .{ .bad = .unreadable };
@@ -233,7 +233,7 @@ pub fn openBrewSource(dir: []const u8, prefix: []const u8) Opened {
 /// 개발 디렉터리(`MARU_WEB_OSR_DIR`)를 연다 — 검사하지 않는다(빌드 디렉터리다).
 pub fn openDevSource(dir: []const u8) ?c_int {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{dir}) catch return null;
+    const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{dir}, 0) catch return null;
     const fd = std.c.open(z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true });
     return if (fd < 0) null else fd;
 }
@@ -243,7 +243,7 @@ pub fn openDevSource(dir: []const u8) ?c_int {
 pub fn verifyRunDir(dir: []const u8, require_manifest: bool) ?Problem {
     for ([_][]const u8{ "maru-web-host", "maru-web-helper" }) |name| {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ dir, name }) catch return .too_large;
+        const path = std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ dir, name }, 0) catch return .too_large;
         const st = statNoFollow(path) orelse return .unreadable;
         if (st.mode & s_ifmt != s_ifreg) return .not_regular;
         if (signatureProblem(signature(path))) |p| return p;
@@ -253,7 +253,7 @@ pub fn verifyRunDir(dir: []const u8, require_manifest: bool) ?Problem {
 
 fn manifestProblem(dir: []const u8, require_manifest: bool) ?Problem {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/maru-chromium.json", .{dir}) catch return .too_large;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/maru-chromium.json", .{dir}, 0) catch return .too_large;
     // FIFO 면 열기에서 멈추지 않게 NONBLOCK 으로 열고 일반 파일인지 본다(W7a2 적대 검증 1 차).
     const fd = std.c.open(path, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .NONBLOCK = true, .CLOEXEC = true });
     if (fd < 0) return if (require_manifest) .no_manifest else null;
@@ -336,14 +336,14 @@ fn waitWithin(pid: std.c.pid_t, timeout_ms: u32) ?c_int {
             const changes: []const std.c.Kevent = if (registered) &.{} else (&change)[0..1];
             const n = std.c.kevent(kq, changes.ptr, @intCast(changes.len), @ptrCast(&event), 1, &ts);
             if (n < 0) {
-                if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+                if (std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
                 break :state pollChild(pid, deadline);
             }
             registered = true;
             if (n == 0) continue; // 기한은 위에서 UPTIME_RAW 로 다시 본다
             if (event.flags & std.c.EV.ERROR != 0) {
                 // 등록 전에 이미 끝난 자식(좀비)이면 ESRCH(실측) — 다만 남이 거둔 pid 도 ESRCH 라 엿봐서 가른다.
-                if (event.data == @intFromEnum(std.c.E.SRCH)) break :state peekChild(pid);
+                if (event.data == @backingInt(std.c.E.SRCH)) break :state peekChild(pid);
                 break :state pollChild(pid, deadline);
             }
             break :state .exited;
@@ -375,7 +375,7 @@ fn reap(pid: std.c.pid_t) ?c_int {
     while (true) {
         const r = std.c.waitpid(pid, &status, 0);
         if (r == pid) return status;
-        if (r == -1 and std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+        if (r == -1 and std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
         return null;
     }
 }
@@ -395,7 +395,7 @@ fn peekChild(pid: std.c.pid_t) ChildState {
         var info = std.mem.zeroes(std.c.siginfo_t);
         const rc = waitid(waitid_pid, @intCast(pid), &info, waitid_exited | waitid_nohang | waitid_nowait);
         if (rc == 0) return if (info.pid == pid) .exited else .running;
-        if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+        if (std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
         return .not_child;
     }
 }
@@ -459,14 +459,14 @@ pub const RunCopy = struct {
     pub fn release(self: *RunCopy) void {
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
         var name_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const root = std.fmt.bufPrintZ(&root_buf, "{s}", .{self.path_buf[0 .. self.name_at - 1]}) catch return self.unlock();
-        const name = std.fmt.bufPrintZ(&name_buf, "{s}", .{self.path_buf[self.name_at..self.path_len]}) catch return self.unlock();
+        const root = std.fmt.bufPrintSentinel(&root_buf, "{s}", .{self.path_buf[0 .. self.name_at - 1]}, 0) catch return self.unlock();
+        const name = std.fmt.bufPrintSentinel(&name_buf, "{s}", .{self.path_buf[self.name_at..self.path_len]}, 0) catch return self.unlock();
         const root_fd = std.c.open(root, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true });
         if (root_fd >= 0) {
             defer closeFd(root_fd);
             removeTreeAt(root_fd, name, 0);
             var lock_buf: [std.fs.max_path_bytes]u8 = undefined;
-            if (std.fmt.bufPrintZ(&lock_buf, "{s}.lock", .{name})) |lock| _ = std.c.unlinkat(root_fd, lock, 0) else |_| {}
+            if (std.fmt.bufPrintSentinel(&lock_buf, "{s}.lock", .{name}, 0)) |lock| _ = std.c.unlinkat(root_fd, lock, 0) else |_| {}
         }
         self.unlock();
     }
@@ -500,9 +500,9 @@ pub fn cloneForRun(source: c_int, cache_root: []const u8) Cloned {
         copy.path_len = path.len;
         copy.name_at = cache_root.len + 1;
         var name_buf: [64]u8 = undefined;
-        const name = std.fmt.bufPrintZ(&name_buf, "{s}", .{path[copy.name_at..]}) catch return .{ .bad = .too_large };
+        const name = std.fmt.bufPrintSentinel(&name_buf, "{s}", .{path[copy.name_at..]}, 0) catch return .{ .bad = .too_large };
         var lock_buf: [80]u8 = undefined;
-        const lock = std.fmt.bufPrintZ(&lock_buf, "{s}.lock", .{name}) catch return .{ .bad = .too_large };
+        const lock = std.fmt.bufPrintSentinel(&lock_buf, "{s}.lock", .{name}, 0) catch return .{ .bad = .too_large };
         // 잠금을 **먼저** 만들고 쥔다 — 다른 maru 의 청소가 복제 중인 사본을 지우지 않게.
         copy.lock_fd = std.c.openat(root_fd, lock, .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true, .SHLOCK = true }, @as(std.c.mode_t, 0o600));
         if (copy.lock_fd < 0) return .{ .bad = .clone_failed };
@@ -540,7 +540,7 @@ fn lockStillNamed(root_fd: c_int, lock: [*:0]const u8, fd: c_int) bool {
 fn openCacheRoot(cache_root: []const u8) error{ unreadable, not_owned, writable_by_others, too_large }!c_int {
     if (!mkdirs(cache_root)) return error.unreadable;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{cache_root}) catch return error.too_large;
+    const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{cache_root}, 0) catch return error.too_large;
     const fd = std.c.open(z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true });
     if (fd < 0) return error.unreadable;
     errdefer closeFd(fd);
@@ -553,7 +553,7 @@ fn openCacheRoot(cache_root: []const u8) error{ unreadable, not_owned, writable_
 /// 엔진을 정할 때 — 사본을 만들지 않아도(WebKit 으로 돌아갔어도) 잠기지 않은 옛 사본을 지운다. 캐시 뿌리가 없으면 무동작.
 pub fn sweepRunCopies(cache_root: []const u8) void {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{cache_root}) catch return;
+    const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{cache_root}, 0) catch return;
     const st = statNoFollow(z) orelse return;
     if (st.mode & s_ifmt != s_ifdir) return;
     const fd = openCacheRoot(cache_root) catch return;
@@ -571,7 +571,7 @@ fn sweepAt(root_fd: c_int) void {
         if (!std.mem.startsWith(u8, name, "run-")) continue;
         if (std.mem.endsWith(u8, name, ".lock")) {
             var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const dir_name = std.fmt.bufPrintZ(&dir_buf, "{s}", .{name[0 .. name.len - ".lock".len]}) catch continue;
+            const dir_name = std.fmt.bufPrintSentinel(&dir_buf, "{s}", .{name[0 .. name.len - ".lock".len]}, 0) catch continue;
             var st: std.c.Stat = undefined;
             if (std.c.fstatat(root_fd, dir_name, &st, std.c.AT.SYMLINK_NOFOLLOW) == 0) continue; // 사본 쪽에서 다룬다
             const fd = std.c.openat(root_fd, name_z, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .CLOEXEC = true });
@@ -581,7 +581,7 @@ fn sweepAt(root_fd: c_int) void {
             continue;
         }
         var lock_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const lock = std.fmt.bufPrintZ(&lock_buf, "{s}.lock", .{name}) catch continue;
+        const lock = std.fmt.bufPrintSentinel(&lock_buf, "{s}.lock", .{name}, 0) catch continue;
         const fd = std.c.openat(root_fd, lock, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .CLOEXEC = true });
         if (fd >= 0) {
             defer closeFd(fd);
@@ -589,7 +589,7 @@ fn sweepAt(root_fd: c_int) void {
             if (std.c.flock(fd, lock_ex | lock_nb) != 0) continue;
             removeTreeAt(root_fd, name_z, 0);
             _ = std.c.unlinkat(root_fd, lock, 0);
-        } else if (std.c._errno().* == @intFromEnum(std.c.E.NOENT)) {
+        } else if (std.c._errno().* == @backingInt(std.c.E.NOENT)) {
             removeTreeAt(root_fd, name_z, 0); // 잠금이 정말 없을 때만(fd 가 바닥나 못 연 것이면 남의 사본일 수 있다)
         }
     }
@@ -621,8 +621,8 @@ fn removeTreePath(path: []const u8) void {
     const parent = std.fs.path.dirname(path) orelse return;
     var parent_buf: [std.fs.max_path_bytes]u8 = undefined;
     var name_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const parent_z = std.fmt.bufPrintZ(&parent_buf, "{s}", .{parent}) catch return;
-    const name_z = std.fmt.bufPrintZ(&name_buf, "{s}", .{std.fs.path.basename(path)}) catch return;
+    const parent_z = std.fmt.bufPrintSentinel(&parent_buf, "{s}", .{parent}, 0) catch return;
+    const name_z = std.fmt.bufPrintSentinel(&name_buf, "{s}", .{std.fs.path.basename(path)}, 0) catch return;
     const fd = std.c.open(parent_z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true });
     if (fd < 0) return;
     defer closeFd(fd);
@@ -638,7 +638,7 @@ fn mkdirs(path: []const u8) bool {
         @memcpy(buf[0..i], path[0..i]);
         buf[i] = 0;
         const z: [*:0]const u8 = @ptrCast(&buf);
-        if (std.c.mkdir(z, 0o700) != 0 and std.c._errno().* != @intFromEnum(std.c.E.EXIST)) return false;
+        if (std.c.mkdir(z, 0o700) != 0 and std.c._errno().* != @backingInt(std.c.E.EXIST)) return false;
     }
     return true;
 }
@@ -765,7 +765,7 @@ test "the run cache follows HOME only in development builds" {
     const release = runCacheRoot(&pw_buf, true) orelse return error.NoCache;
     try std.testing.expect(std.mem.endsWith(u8, release, "/Library/Caches/maru/web-osr-run"));
     // 계정 정보의 홈 — HOME 을 바꿔도 따라가지 않는다.
-    const saved = try std.testing.allocator.dupeZ(u8, home);
+    const saved = try std.testing.allocator.dupeSentinel(u8, home, 0);
     defer std.testing.allocator.free(saved);
     defer _ = setenv("HOME", saved, 1);
     try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", "/tmp/maru-not-home", 1));
@@ -790,7 +790,7 @@ const Fake = struct {
     fn make(self: *Fake, wire: u16) !void {
         const tmp = if (std.c.getenv("TMPDIR")) |t| std.mem.trimEnd(u8, std.mem.span(t), "/") else "/tmp";
         var template_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const template = try std.fmt.bufPrintZ(&template_buf, "{s}/maru-install-{d}-XXXXXX", .{ if (tmp.len > 0 and tmp[0] == '/') tmp else "/tmp", std.c.getpid() });
+        const template = try std.fmt.bufPrintSentinel(&template_buf, "{s}/maru-install-{d}-XXXXXX", .{ if (tmp.len > 0 and tmp[0] == '/') tmp else "/tmp", std.c.getpid() }, 0);
         const made = mkdtemp(template.ptr) orelse return error.NoTemp;
         const real = std.c.realpath(made, &self.root_buf) orelse {
             removeTreePath(std.mem.span(made));
@@ -806,7 +806,7 @@ const Fake = struct {
         var json_buf: [128]u8 = undefined;
         const json = try std.fmt.bufPrint(&json_buf, "{{\"format\":1,\"wire_version\":{d}}}\n", .{wire});
         var manifest_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const manifest = try std.fmt.bufPrintZ(&manifest_buf, "{s}/maru-chromium.json", .{self.libexec});
+        const manifest = try std.fmt.bufPrintSentinel(&manifest_buf, "{s}/maru-chromium.json", .{self.libexec}, 0);
         const fd = std.c.open(manifest, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
         try std.testing.expect(fd >= 0);
         _ = std.c.write(fd, json.ptr, json.len);
@@ -827,11 +827,11 @@ const Fake = struct {
         var store: [8][:0]u8 = undefined;
         var c_argv: [9:null]?[*:0]const u8 = @splat(null);
         for (argv, 0..) |a, i| {
-            store[i] = try std.testing.allocator.dupeZ(u8, a);
+            store[i] = try std.testing.allocator.dupeSentinel(u8, a, 0);
             c_argv[i] = store[i].ptr;
         }
         defer for (store[0..argv.len]) |a| std.testing.allocator.free(a);
-        const cwd_z = try std.testing.allocator.dupeZ(u8, cwd);
+        const cwd_z = try std.testing.allocator.dupeSentinel(u8, cwd, 0);
         defer std.testing.allocator.free(cwd_z);
         const pid = std.c.fork();
         if (pid == 0) {
@@ -847,7 +847,7 @@ const Fake = struct {
 
     fn exists(self: *const Fake, rel: []const u8) bool {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const z = std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ self.root, rel }) catch return false;
+        const z = std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ self.root, rel }, 0) catch return false;
         return statNoFollow(z) != null;
     }
 
@@ -971,7 +971,7 @@ test "the clone comes from the keg that was checked, even if the rack is swapped
     defer copy.release();
     try std.testing.expectEqual(@as(?Problem, null), verifyRunDir(copy.dir(), true));
     var evil_buf: [std.fs.max_path_bytes]u8 = undefined;
-    try std.testing.expect(statNoFollow(try std.fmt.bufPrintZ(&evil_buf, "{s}/evil", .{copy.dir()})) == null);
+    try std.testing.expect(statNoFollow(try std.fmt.bufPrintSentinel(&evil_buf, "{s}/evil", .{copy.dir()}, 0)) == null);
 }
 
 test "each start runs from a fresh clone held until release; unlocked leftovers are swept, another maru's clone is kept" {
@@ -993,7 +993,7 @@ test "each start runs from a fresh clone held until release; unlocked leftovers 
     try fake.sh(&.{ "/bin/mkdir", "-p", "run-1-other" }, cache);
     try fake.sh(&.{ "/usr/bin/touch", "run-1-other.lock" }, cache);
     var other_lock_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const other_lock = try std.fmt.bufPrintZ(&other_lock_buf, "{s}/run-1-other.lock", .{cache});
+    const other_lock = try std.fmt.bufPrintSentinel(&other_lock_buf, "{s}/run-1-other.lock", .{cache}, 0);
     const other_fd = std.c.open(other_lock, .{ .ACCMODE = .RDONLY, .SHLOCK = true });
     try std.testing.expect(other_fd >= 0);
     defer closeFd(other_fd);
@@ -1005,7 +1005,7 @@ test "each start runs from a fresh clone held until release; unlocked leftovers 
     // 다른 maru 가 방금 잠금을 만들고 아직 복제하지 않은 것(쥐고 있다) — 지우면 안 된다.
     try fake.sh(&.{ "/usr/bin/touch", "run-5-cloning.lock" }, cache);
     var cloning_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cloning_fd = std.c.open(try std.fmt.bufPrintZ(&cloning_buf, "{s}/run-5-cloning.lock", .{cache}), .{ .ACCMODE = .RDONLY, .SHLOCK = true });
+    const cloning_fd = std.c.open(try std.fmt.bufPrintSentinel(&cloning_buf, "{s}/run-5-cloning.lock", .{cache}, 0), .{ .ACCMODE = .RDONLY, .SHLOCK = true });
     try std.testing.expect(cloning_fd >= 0);
     defer closeFd(cloning_fd);
     // 잠금을 열 수 없는 사본(권한 — fd 가 바닥난 것과 같이 「잠금 없음」이 아니다)은 남긴다.
@@ -1025,19 +1025,19 @@ test "each start runs from a fresh clone held until release; unlocked leftovers 
     try std.testing.expect(fake.exists("cache/run-5-cloning.lock"));
     try std.testing.expect(fake.exists("cache/run-6-unreadable"));
     var z_buf: [std.fs.max_path_bytes]u8 = undefined;
-    try std.testing.expect(statNoFollow(try std.fmt.bufPrintZ(&z_buf, "{s}", .{first.dir()})) != null);
+    try std.testing.expect(statNoFollow(try std.fmt.bufPrintSentinel(&z_buf, "{s}", .{first.dir()}, 0)) != null);
     // 놓으면 사본과 잠금이 지워진다.
     first.release();
     first_released = true;
-    try std.testing.expect(statNoFollow(try std.fmt.bufPrintZ(&z_buf, "{s}", .{first.dir()})) == null);
-    try std.testing.expect(statNoFollow(try std.fmt.bufPrintZ(&z_buf, "{s}.lock", .{first.dir()})) == null);
-    try std.testing.expect(statNoFollow(try std.fmt.bufPrintZ(&z_buf, "{s}", .{second.dir()})) != null);
+    try std.testing.expect(statNoFollow(try std.fmt.bufPrintSentinel(&z_buf, "{s}", .{first.dir()}, 0)) == null);
+    try std.testing.expect(statNoFollow(try std.fmt.bufPrintSentinel(&z_buf, "{s}.lock", .{first.dir()}, 0)) == null);
+    try std.testing.expect(statNoFollow(try std.fmt.bufPrintSentinel(&z_buf, "{s}", .{second.dir()}, 0)) != null);
     // 엔진을 정할 때의 청소도 남의 사본은 남긴다.
     try fake.sh(&.{ "/bin/mkdir", "-p", "run-4-orphan" }, cache);
     sweepRunCopies(cache);
     try std.testing.expect(!fake.exists("cache/run-4-orphan"));
     try std.testing.expect(fake.exists("cache/run-1-other"));
-    try std.testing.expect(statNoFollow(try std.fmt.bufPrintZ(&z_buf, "{s}", .{second.dir()})) != null);
+    try std.testing.expect(statNoFollow(try std.fmt.bufPrintSentinel(&z_buf, "{s}", .{second.dir()}, 0)) != null);
 }
 
 test "a lock file removed or replaced between create and lock is noticed" {
@@ -1096,7 +1096,7 @@ test "a lock taken away between create and lock makes the clone retry under a ne
     defer copy.release();
     try std.testing.expectEqual(@as(u32, 2), Hook.calls);
     var lock_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const lock = try std.fmt.bufPrintZ(&lock_buf, "{s}.lock", .{copy.dir()});
+    const lock = try std.fmt.bufPrintSentinel(&lock_buf, "{s}.lock", .{copy.dir()}, 0);
     try std.testing.expect(lockStillNamed(std.c.AT.FDCWD, lock, copy.lock_fd));
 }
 

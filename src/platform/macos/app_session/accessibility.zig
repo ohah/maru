@@ -142,7 +142,7 @@ pub const Snapshot = struct {
                 .y = entry.rect.y,
                 .width = entry.rect.width,
                 .height = entry.rect.height,
-                .role = @intFromEnum(Role.from(semantics.role)),
+                .role = @backingInt(Role.from(semantics.role)),
                 .flags = flags,
                 .level = semantics.level,
                 .position_in_set = semantics.position_in_set,
@@ -246,7 +246,7 @@ test "상태 비트: 펼침 개념 없음과 접힘을 가른다" {
 
     const off = snapshot.elements.items[3];
     try testing.expect(off.flags & flag_enabled == 0);
-    try testing.expectEqual(@as(u32, @intFromEnum(Role.text)), off.role);
+    try testing.expectEqual(@as(u32, @backingInt(Role.text)), off.role);
 }
 
 test "다시 굳히면 앞 스냅숏의 문자열이 남지 않는다" {

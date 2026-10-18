@@ -233,7 +233,7 @@ fn applyToDoc(self: *AppSession, c: *editor_lsp.Client, term: *Term, edit: std.j
     if (parsed.files.len == 0) return;
     const f = parsed.files[0];
     const doc = term.rt.editorDocument().opened orelse return;
-    var changes = lsp.text_edits.toChanges(self.allocator, .{ .array = .{ .items = f.edits, .capacity = f.edits.len, .allocator = self.allocator } }, doc.file.content, doc.file.lines, c.encoding) catch |err| switch (err) {
+    var changes = lsp.text_edits.toChanges(self.allocator, .{ .array = .{ .items = f.edits, .capacity = f.edits.len, .allocator = self.allocator, .pointer_stability = .{} } }, doc.file.content, doc.file.lines, c.encoding) catch |err| switch (err) {
         error.Overlap, error.Malformed => {
             st.rejected += 1;
             self.showResponseNotice(.csa_rejected, &.{.{ .s = st.kind() }});

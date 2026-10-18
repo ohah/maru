@@ -340,9 +340,9 @@ fn promoteCore(allocator: std.mem.Allocator, sources: Sources, destination: [:0]
     var stage_path: [std.fs.max_path_bytes:0]u8 = undefined;
     const destination_parent = std.fs.path.dirname(destination) orelse return error.InvalidPath;
     const stage_path_value = if (std.mem.eql(u8, destination_parent, "/"))
-        std.fmt.bufPrintZ(&stage_path, "/{s}", .{stage_name}) catch unreachable
+        std.fmt.bufPrintSentinel(&stage_path, "/{s}", .{stage_name}, 0) catch unreachable
     else
-        std.fmt.bufPrintZ(&stage_path, "{s}/{s}", .{ destination_parent, stage_name }) catch unreachable;
+        std.fmt.bufPrintSentinel(&stage_path, "{s}/{s}", .{ destination_parent, stage_name }, 0) catch unreachable;
     const directory_fd = c.openat(parent.fd, stage_name.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
     if (directory_fd < 0) {
         _ = c.unlinkat(parent.fd, stage_name.ptr, posix.AT.REMOVEDIR);
@@ -379,7 +379,7 @@ fn completePromotion(allocator: std.mem.Allocator, sources: Sources, observation
     const evidence_name = std.fs.path.basename(sources.evidence.path);
     const stage_path_value: [:0]const u8 = working.stage_path[0..working.stage_path_len :0];
     for (0..working.active_count) |index| {
-        const role: Role = @enumFromInt(index);
+        const role: Role = @fromBackingInt(@intCast(index));
         const source = sources.at(role).?;
         const name = destinationName(role, evidence_name);
         if (!validComponent(name) or name.len >= working.names[index].len) return error.InvalidPath;
@@ -387,7 +387,7 @@ fn completePromotion(allocator: std.mem.Allocator, sources: Sources, observation
         @memcpy(working.names[index][0..name.len], name);
         working.names[index][name.len] = 0;
         working.name_lens[index] = name.len;
-        const path = std.fmt.bufPrintZ(&working.paths[index], "{s}/{s}", .{ stage_path_value, name }) catch return error.InvalidPath;
+        const path = std.fmt.bufPrintSentinel(&working.paths[index], "{s}/{s}", .{ stage_path_value, name }, 0) catch return error.InvalidPath;
         working.path_lens[index] = path.len;
         const cap: usize = if (index == 0) evidence_mod.max_evidence_bytes else @intCast(max_attestation_bundle_bytes);
         var input = source.file.readHeldAlloc(allocator, source.path, cap) catch |err| switch (err) {
@@ -399,11 +399,11 @@ fn completePromotion(allocator: std.mem.Allocator, sources: Sources, observation
         if (!sameObservation(observations[index], .{ .identity = input.identity, .size = input.size, .mode = input.mode, .sha256 = input.sha256 })) return error.SourceChanged;
         try writeLeaf(working.directory_fd, working.names[index][0..name.len :0], input.bytes);
         working.present[index] = true;
-        try injector.hit(@enumFromInt(@intFromEnum(TestCheckpoint.evidence_written) + index * 2));
+        try injector.hit(@fromBackingInt(@intCast(@backingInt(TestCheckpoint.evidence_written) + index * 2)));
         try files.pinReleaseFileObserved(&working.files[index], path, false, cap);
         const copied = working.files[index].value().?;
         if (sameIdentity(observations[index].identity, copied.identity) or observations[index].size != copied.size or !std.mem.eql(u8, &observations[index].sha256, &copied.sha256)) return error.FileChanged;
-        try injector.hit(@enumFromInt(@intFromEnum(TestCheckpoint.evidence_copied) + index * 2));
+        try injector.hit(@fromBackingInt(@intCast(@backingInt(TestCheckpoint.evidence_copied) + index * 2)));
     }
     var copied_identities: [role_count]files.Identity = undefined;
     for (working.files[0..working.active_count], 0..) |*file, index| copied_identities[index] = file.value().?.identity;
@@ -441,7 +441,7 @@ fn adoptAfterRename(working: *Working, destination: [:0]const u8, final_leaf: [:
     adopted.directory_leaf[final_leaf.len] = 0;
     for (0..working.active_count) |index| {
         const name = working.names[index][0..working.name_lens[index]];
-        const final_path = std.fmt.bufPrintZ(&adopted.paths[index], "{s}/{s}", .{ destination, name }) catch unreachable;
+        const final_path = std.fmt.bufPrintSentinel(&adopted.paths[index], "{s}/{s}", .{ destination, name }, 0) catch unreachable;
         adopted.path_lens[index] = final_path.len;
         @memcpy(adopted.names[index][0..name.len], name);
         adopted.names[index][name.len] = 0;
@@ -471,20 +471,20 @@ fn validateInputs(sources: Sources, destination: [:0]const u8, result: *const Du
     if ((sources.profile == .baseline_a and sources.timing_bundle != null) or
         (sources.profile == .upgrade_b and sources.timing_bundle == null)) return error.InvalidPath;
     for (0..active_count) |index| {
-        const name = destinationName(@enumFromInt(index), evidence_name);
+        const name = destinationName(@fromBackingInt(@intCast(index)), evidence_name);
         if (!validComponent(name) or destination.len + 1 + name.len >= std.fs.max_path_bytes) return error.InvalidPath;
-        for (0..index) |prior| if (std.mem.eql(u8, name, destinationName(@enumFromInt(prior), evidence_name))) return error.InvalidPath;
+        for (0..index) |prior| if (std.mem.eql(u8, name, destinationName(@fromBackingInt(@intCast(prior)), evidence_name))) return error.InvalidPath;
     }
     const result_bytes = std.mem.asBytes(result);
     var identities: [role_count]files.Identity = undefined;
     for (0..active_count) |index| {
-        const source = sources.at(@enumFromInt(index)).?;
+        const source = sources.at(@fromBackingInt(@intCast(index))).?;
         const observation = source.file.value() orelse return error.InvalidOwner;
         identities[index] = observation.identity;
         if (!canonicalAbsolute(source.root) or !canonicalAbsolute(source.path) or !directChild(source.root, source.path) or sameOrDescendant(source.root, destination)) return error.InvalidPath;
         if (overlaps(result_bytes, std.mem.asBytes(source.file)) or overlaps(result_bytes, source.root) or overlaps(result_bytes, source.path) or overlaps(result_bytes, destination)) return error.InvalidOwner;
         for (0..index) |prior| {
-            const previous = sources.at(@enumFromInt(prior)).?;
+            const previous = sources.at(@fromBackingInt(@intCast(prior))).?;
             if (overlaps(std.mem.asBytes(source.file), std.mem.asBytes(previous.file))) return error.InvalidOwner;
         }
     }
@@ -494,7 +494,7 @@ fn validateInputs(sources: Sources, destination: [:0]const u8, result: *const Du
 fn sourceObservations(sources: Sources, active_count: usize) Error![role_count]files.ExecutableObservation {
     var result: [role_count]files.ExecutableObservation = undefined;
     for (0..active_count) |index| {
-        const source = sources.at(@enumFromInt(index)).?;
+        const source = sources.at(@fromBackingInt(@intCast(index))).?;
         result[index] = source.file.revalidate(source.path) catch return error.SourceChanged;
     }
     return result;
@@ -549,9 +549,9 @@ fn openParent(path: [:0]const u8, leaf_storage: *[std.fs.max_name_bytes:0]u8) Er
     const parent_path = std.fs.path.dirname(path) orelse return error.InvalidPath;
     const leaf = std.fs.path.basename(path);
     if (!canonicalAbsolute(path) or !validComponent(leaf)) return error.InvalidPath;
-    const leaf_z = std.fmt.bufPrintZ(leaf_storage, "{s}", .{leaf}) catch return error.InvalidPath;
+    const leaf_z = std.fmt.bufPrintSentinel(leaf_storage, "{s}", .{leaf}, 0) catch return error.InvalidPath;
     var parent_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const parent_z = std.fmt.bufPrintZ(&parent_storage, "{s}", .{parent_path}) catch return error.InvalidPath;
+    const parent_z = std.fmt.bufPrintSentinel(&parent_storage, "{s}", .{parent_path}, 0) catch return error.InvalidPath;
     return .{ .fd = safe_open.openAbsoluteNoFollow(parent_z, true) catch return error.InvalidPath, .leaf = leaf_z };
 }
 
@@ -559,7 +559,7 @@ fn createStage(parent_fd: c.fd_t, storage: *[std.fs.max_name_bytes:0]u8) Error![
     for (0..8) |_| {
         var nonce: u64 = undefined;
         c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
-        const name = std.fmt.bufPrintZ(storage, ".maru-aggregate-{x}", .{nonce}) catch return error.CreateFailed;
+        const name = std.fmt.bufPrintSentinel(storage, ".maru-aggregate-{x}", .{nonce}, 0) catch return error.CreateFailed;
         if (c.mkdirat(parent_fd, name.ptr, 0o700) == 0) return name;
         if (posix.errno(-1) != .EXIST) return error.CreateFailed;
     }
@@ -569,7 +569,7 @@ fn createStage(parent_fd: c.fd_t, storage: *[std.fs.max_name_bytes:0]u8) Error![
 fn cleanupName(storage: *[std.fs.max_name_bytes:0]u8) Error![:0]const u8 {
     var nonce: u64 = undefined;
     c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
-    return std.fmt.bufPrintZ(storage, ".maru-aggregate-cleanup-{x}", .{nonce}) catch error.CleanupFailed;
+    return std.fmt.bufPrintSentinel(storage, ".maru-aggregate-cleanup-{x}", .{nonce}, 0) catch error.CleanupFailed;
 }
 
 fn unlinkExact(parent_fd: c.fd_t, name: [:0]const u8, held_fd: c.fd_t) bool {
@@ -601,7 +601,7 @@ fn validStorage(value: *const DurableAggregate) bool {
             value.paths[index][value.path_lens[index]] != 0 or value.names[index][value.name_lens[index]] != 0 or
             !std.mem.eql(u8, std.fs.path.basename(value.paths[index][0..value.path_lens[index]]), value.names[index][0..value.name_lens[index]]) or
             !std.mem.eql(u8, std.fs.path.dirname(value.paths[index][0..value.path_lens[index]]) orelse return false, value.destination[0..value.destination_len]) or
-            !std.mem.eql(u8, value.names[index][0..value.name_lens[index]], destinationName(@enumFromInt(index), evidence_name))) return false;
+            !std.mem.eql(u8, value.names[index][0..value.name_lens[index]], destinationName(@fromBackingInt(@intCast(index)), evidence_name))) return false;
     }
     for (value.active_count..role_count) |index| if (value.path_lens[index] != 0 or value.name_lens[index] != 0 or value.present[index] or
         value.files[index].owner != null or value.files[index].fd != -1 or value.files[index].parent_fd != -1) return false;

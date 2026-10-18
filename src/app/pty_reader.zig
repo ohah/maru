@@ -1,3 +1,5 @@
+const array_repeat = @import("array_repeat");
+
 const builtin = @import("builtin");
 const std = @import("std");
 const pty = @import("../pty.zig");
@@ -1877,9 +1879,9 @@ test "kitty 매체 전송(리더): a=q(t=t)·a=q(t=s 없음)·DA1 한 청크 —
     defer tmp.cleanup();
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
-    const rootz = try allocator.dupeZ(u8, root);
+    const rootz = try allocator.dupeSentinel(u8, root, 0);
     defer allocator.free(rootz);
-    const saved = if (std.c.getenv("TMPDIR")) |v| try allocator.dupeZ(u8, std.mem.span(v)) else null;
+    const saved = if (std.c.getenv("TMPDIR")) |v| try allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
     defer if (saved) |v| allocator.free(v);
     _ = setenv("TMPDIR", rootz.ptr, 1);
     defer _ = setenv("TMPDIR", if (saved) |v| v.ptr else "", 1);
@@ -2002,7 +2004,7 @@ test "sync(2026): 끝나지 않는 프레임은 상한에서 접어 스트림을
     // BSU 만 보내고 ESU 를 안 준다 — 상한을 넘길 때까지 본문만 흘린다.
     reader.applySyncFramed(&core, &mutex, sync_frame_split.bsu, &out_buf, &out_head);
     try std.testing.expect(reader.sync_held_len > 0); // 들고 있다
-    const filler = "x" ** 4096;
+    const filler = array_repeat.repeat("x", 4096);
     var sent: usize = 0;
     while (sent <= PtyReader.sync_held_max) : (sent += filler.len) {
         reader.applySyncFramed(&core, &mutex, filler, &out_buf, &out_head);

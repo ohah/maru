@@ -44,7 +44,7 @@ pub const ProductExecutor = struct {
         var built: usize = 0;
         defer for (owned[0..built]) |arg| self.allocator.free(arg);
         for (args, 0..) |arg, index| {
-            owned[index] = self.allocator.dupeZ(u8, arg) catch
+            owned[index] = self.allocator.dupeSentinel(u8, arg, 0) catch
                 return error.ExecFailed;
             built += 1;
         }

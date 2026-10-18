@@ -13,7 +13,7 @@ const testing = std.testing;
 
 // 전용 C3-3b3 runner가 값을 채우지 않는 일반 test artifact도 링크될 수 있도록 pristine 채널을 제공한다.
 pub export var maru_c3b3_death_stage_raw: u8 = 0;
-pub export var maru_c3b3_death_child_path: [1024]u8 = [_]u8{0} ** 1024;
+pub export var maru_c3b3_death_child_path: [1024]u8 = @as([1024]u8, @splat(0));
 pub export var maru_c3b3_death_child_path_len: usize = 0;
 
 pub const std_options: std.Options = .{
@@ -116,7 +116,7 @@ fn isolateSessionHostRoot() error{IsolationFailed}!void {
     // 잡이 그렇게 깨졌다). `comptime` 분기라 그 대상에서는 아래 코드와 심볼 참조가 통째로 사라진다.
     if (comptime builtin.os.tag != .macos) return;
     var buf: [64]u8 = undefined;
-    const root = std.fmt.bufPrintZ(&buf, "/tmp/maru-t{d}", .{std.c.getpid()}) catch
+    const root = std.fmt.bufPrintSentinel(&buf, "/tmp/maru-t{d}", .{std.c.getpid()}, 0) catch
         return error.IsolationFailed;
     if (setenv("MARU_SESSION_HOST_ROOT", root.ptr, 1) != 0)
         return error.IsolationFailed;
@@ -162,7 +162,7 @@ fn isolationFail(comptime why: []const u8) error{IsolationFailed} {
 fn reexecWithIsolatedHome(replace_home: bool) error{IsolationFailed}!void {
     var home_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     const home: [:0]const u8 = if (replace_home) blk: {
-        const template = std.fmt.bufPrintZ(&home_buf, "/tmp/maru-home-{d}-XXXXXX", .{std.c.getpid()}) catch
+        const template = std.fmt.bufPrintSentinel(&home_buf, "/tmp/maru-home-{d}-XXXXXX", .{std.c.getpid()}, 0) catch
             return isolationFail("temp home template too long");
         // 셸이 `cd ~` 하고 제품이 `~/.cache/maru` 를 만들 수 있게 미리 세운다.
         const made = mkdtemp(template.ptr) orelse return isolationFail("mkdtemp");
@@ -172,7 +172,7 @@ fn reexecWithIsolatedHome(replace_home: bool) error{IsolationFailed}!void {
     } else blk: {
         // **복사해 둔다** — 아래 `setenv` 가 환경 배열을 재할당해도 기준 홈이 흔들리지 않게.
         const current = std.mem.span(getenv("HOME") orelse return isolationFail("HOME unset"));
-        break :blk std.fmt.bufPrintZ(&home_buf, "{s}", .{current}) catch return isolationFail("HOME too long");
+        break :blk std.fmt.bufPrintSentinel(&home_buf, "{s}", .{current}, 0) catch return isolationFail("HOME too long");
     };
     for (runner_home.xdg_vars) |x| {
         const current: ?[]const u8 = if (getenv(x.name)) |v| std.mem.span(v) else null;
@@ -410,14 +410,14 @@ pub fn main(init: std.process.Init.Minimal) void {
             other_shard += 1;
             continue;
         }
-        testing.allocator_instance = .{};
+        testing.allocator_instance = .init(std.heap.page_allocator, .{});
         testing.io_instance = .init(testing.allocator, .{
             .argv0 = .init(init.args),
             .environ = init.environ,
         });
         defer {
             testing.io_instance.deinit();
-            if (testing.allocator_instance.deinit() == .leak) leaked += 1;
+            if (testing.allocator_instance.deinit() != 0) leaked += 1;
         }
         testing.log_level = .warn;
         testing.environ = init.environ;
@@ -516,9 +516,9 @@ pub fn log(
     args: anytype,
 ) void {
     @disableInstrumentation();
-    if (@intFromEnum(message_level) <= @intFromEnum(std.log.Level.err))
+    if (@backingInt(message_level) <= @backingInt(std.log.Level.err))
         _ = log_err_count.fetchAdd(1, .monotonic);
-    if (@intFromEnum(message_level) <= @intFromEnum(testing.log_level)) {
+    if (@backingInt(message_level) <= @backingInt(testing.log_level)) {
         std.debug.print("[" ++ @tagName(scope) ++ "] (" ++ @tagName(message_level) ++ "): " ++ format ++ "\n", args);
     }
 }

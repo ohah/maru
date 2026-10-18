@@ -117,12 +117,12 @@ const CompletionStorage = struct {
     lifecycle: CompletionLifecycle = .empty,
     count: usize = 0,
     completions: [client_external_mode.max_tx_frames]TxCompletion = undefined,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const PreparedTxWrite = struct {
     bytes: [@sizeOf(CompletionStorage)]u8 align(@alignOf(CompletionStorage)) =
-        [_]u8{0} ** @sizeOf(CompletionStorage),
+        @as([@sizeOf(CompletionStorage)]u8, @splat(0)),
 
     fn storage(self: *PreparedTxWrite) *CompletionStorage {
         return @ptrCast(@alignCast(&self.bytes));
@@ -200,7 +200,7 @@ const CancellationSnapshot = struct {
     queue_generation: u64 = 0,
     queue_address: usize = 0,
     queue_capacity: usize = 0,
-    queue_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    queue_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     queue_len: usize = 0,
     queued_bytes: usize = 0,
     cancelled_bytes: usize = 0,
@@ -209,17 +209,17 @@ const CancellationSnapshot = struct {
     projected_queued_bytes: usize = 0,
     projected_head_progress_ns: ?i128 = null,
     projected_immediate_pending: bool = false,
-    projected_queue_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    projected_queue_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     cancel_mask: [client_external_mode.max_tx_frames]bool =
-        [_]bool{false} ** client_external_mode.max_tx_frames,
+        @as([client_external_mode.max_tx_frames]bool, @splat(false)),
     frames: [client_external_mode.max_tx_frames]FrameScalarSnapshot = undefined,
     lifecycle: CancellationLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const PreparedTxCancellation = struct {
     bytes: [@sizeOf(CancellationSnapshot)]u8 align(@alignOf(CancellationSnapshot)) =
-        [_]u8{0} ** @sizeOf(CancellationSnapshot),
+        @as([@sizeOf(CancellationSnapshot)]u8, @splat(0)),
 
     fn storage(self: *PreparedTxCancellation) *CancellationSnapshot {
         return @ptrCast(@alignCast(&self.bytes));
@@ -235,12 +235,12 @@ const CancellationPermitStorage = struct {
     owner_incarnation: u64 = 0,
     operation_generation: u64 = 0,
     lifecycle: enum { empty, armed, consumed, aborted } = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const TxCancellationCommitPermit = struct {
     bytes: [@sizeOf(CancellationPermitStorage)]u8 align(@alignOf(CancellationPermitStorage)) =
-        [_]u8{0} ** @sizeOf(CancellationPermitStorage),
+        @as([@sizeOf(CancellationPermitStorage)]u8, @splat(0)),
 
     fn storage(self: *TxCancellationCommitPermit) *CancellationPermitStorage {
         return @ptrCast(@alignCast(&self.bytes));
@@ -254,20 +254,20 @@ const CancellationCleanupStorage = struct {
     allocator_ptr_addr: usize = 0,
     allocator_vtable_addr: usize = 0,
     binding: OwnerBinding = undefined,
-    binding_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    binding_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     count: usize = 0,
     total_bytes: usize = 0,
     post_queue_generation: u64 = 0,
     post_queued_bytes: usize = 0,
-    post_queue_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    post_queue_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     frames: [client_external_mode.max_tx_frames]client_external_mode.ExternalTxFrame = undefined,
     lifecycle: enum { empty, owned, cleaned, quarantined } = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const FrozenTxCancellationCleanup = struct {
     bytes: [@sizeOf(CancellationCleanupStorage)]u8 align(@alignOf(CancellationCleanupStorage)) =
-        [_]u8{0} ** @sizeOf(CancellationCleanupStorage),
+        @as([@sizeOf(CancellationCleanupStorage)]u8, @splat(0)),
 
     fn storage(self: *FrozenTxCancellationCleanup) *CancellationCleanupStorage {
         return @ptrCast(@alignCast(&self.bytes));
@@ -349,7 +349,7 @@ const PreparedStorage = struct {
 
 pub const PreparedTxAdmission = struct {
     bytes: [@sizeOf(PreparedStorage)]u8 align(@alignOf(PreparedStorage)) =
-        [_]u8{0} ** @sizeOf(PreparedStorage),
+        @as([@sizeOf(PreparedStorage)]u8, @splat(0)),
 
     fn storage(self: *PreparedTxAdmission) *PreparedStorage {
         return @ptrCast(@alignCast(&self.bytes));
@@ -564,14 +564,14 @@ fn cancellationSnapshotDigest(snapshot: *const CancellationSnapshot) ?external_o
     writer.writeU128(@bitCast(snapshot.projected_head_progress_ns orelse std.math.minInt(i128)));
     writer.writeU8(@intFromBool(snapshot.projected_immediate_pending));
     writer.writeBytes(&snapshot.projected_queue_digest);
-    writer.writeU8(@intFromEnum(snapshot.lifecycle));
+    writer.writeU8(@backingInt(snapshot.lifecycle));
     for (0..snapshot.queue_len) |index| {
         writer.writeU8(@intFromBool(snapshot.cancel_mask[index]));
         const frame = snapshot.frames[index];
         writer.writeUsize(frame.bytes_addr);
         writer.writeUsize(frame.bytes_len);
         writer.writeUsize(frame.offset);
-        writer.writeU16(@intFromEnum(frame.kind));
+        writer.writeU16(@backingInt(frame.kind));
         writer.writeU64(frame.stream_id);
         writer.writeU64(frame.request_id);
         writer.writeU128(@bitCast(frame.activated_at_ns));
@@ -590,7 +590,7 @@ fn cancellationPermitDigest(permit: *const CancellationPermitStorage) external_o
     writer.writeU64(permit.queue_generation);
     writer.writeU64(permit.owner_incarnation);
     writer.writeU64(permit.operation_generation);
-    writer.writeU8(@intFromEnum(permit.lifecycle));
+    writer.writeU8(@backingInt(permit.lifecycle));
     return writer.finish();
 }
 
@@ -610,7 +610,7 @@ fn cancellationCleanupDigest(cleanup: *const CancellationCleanupStorage) ?extern
     writer.writeU64(cleanup.post_queue_generation);
     writer.writeUsize(cleanup.post_queued_bytes);
     writer.writeBytes(&cleanup.post_queue_digest);
-    writer.writeU8(@intFromEnum(cleanup.lifecycle));
+    writer.writeU8(@backingInt(cleanup.lifecycle));
     for (cleanup.frames[0..cleanup.count]) |frame|
         writer.writeBytes(&frame.descriptor_digest);
     return writer.finish();
@@ -618,7 +618,7 @@ fn cancellationCleanupDigest(cleanup: *const CancellationCleanupStorage) ?extern
 
 fn ownerBindingDigest(binding: OwnerBinding) external_owner_seal.Digest {
     var writer = external_owner_seal.Writer.init("MARUTXOB");
-    writer.writeU8(@intFromEnum(binding.purpose));
+    writer.writeU8(@backingInt(binding.purpose));
     writer.writeUsize(binding.storage_addr);
     writer.writeUsize(binding.storage_len);
     writer.writeUsize(binding.client_addr);
@@ -1535,14 +1535,14 @@ const PostCancellationReceiptStorage = struct {
     cleanup_addr: usize = 0,
     queue_generation: u64 = 0,
     queued_bytes: usize = 0,
-    queue_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    queue_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: PostCancellationReceiptLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const PostCancellationReceipt = struct {
     bytes: [@sizeOf(PostCancellationReceiptStorage)]u8 align(@alignOf(PostCancellationReceiptStorage)) =
-        [_]u8{0} ** @sizeOf(PostCancellationReceiptStorage),
+        @as([@sizeOf(PostCancellationReceiptStorage)]u8, @splat(0)),
 
     fn storage(self: *PostCancellationReceipt) *PostCancellationReceiptStorage {
         return @ptrCast(@alignCast(&self.bytes));
@@ -1565,7 +1565,7 @@ fn postCancellationReceiptDigest(
     writer.writeU64(receipt.queue_generation);
     writer.writeUsize(receipt.queued_bytes);
     writer.writeBytes(&receipt.queue_digest);
-    writer.writeU64(@intFromEnum(receipt.lifecycle));
+    writer.writeU64(@backingInt(receipt.lifecycle));
     return writer.finish();
 }
 
@@ -2093,10 +2093,10 @@ fn completionDigest(storage: *const CompletionStorage) external_owner_seal.Diges
     writer.writeUsize(storage.saved_self_addr);
     writer.writeU64(storage.owner_incarnation);
     writer.writeU64(storage.operation_generation);
-    writer.writeU64(@intFromEnum(storage.lifecycle));
+    writer.writeU64(@backingInt(storage.lifecycle));
     writer.writeUsize(storage.count);
     for (storage.completions[0..storage.count]) |completion| {
-        writer.writeU16(@intFromEnum(completion.kind));
+        writer.writeU16(@backingInt(completion.kind));
         writer.writeU64(completion.stream_id);
         writer.writeU64(completion.request_id);
         writer.writeUsize(completion.wire_len);
@@ -2709,8 +2709,8 @@ fn initState() !client_external_mode.State {
 var test_owner_incarnation: u64 = 7;
 var test_operation_generation: u64 = 11;
 var test_reentry_latched: bool = false;
-var test_lease_digest: external_owner_seal.Digest = [_]u8{0x11} ** 32;
-var test_owner_digest: external_owner_seal.Digest = [_]u8{0x22} ** 32;
+var test_lease_digest: external_owner_seal.Digest = @as([32]u8, @splat(0x11));
+var test_owner_digest: external_owner_seal.Digest = @as([32]u8, @splat(0x22));
 
 fn testBinding(
     storage: *[64]u8,
@@ -2719,8 +2719,8 @@ fn testBinding(
     test_owner_incarnation = 7;
     test_operation_generation = 11;
     test_reentry_latched = false;
-    test_lease_digest = [_]u8{0x11} ** 32;
-    test_owner_digest = [_]u8{0x22} ** 32;
+    test_lease_digest = @as([32]u8, @splat(0x11));
+    test_owner_digest = @as([32]u8, @splat(0x22));
     return .{
         .purpose = .admission,
         .storage_addr = @intFromPtr(storage),
@@ -3395,7 +3395,7 @@ test "f1a allocator alias is never written or freed and charges quarantine once"
     var state = try initState();
     defer state.deinit(std.testing.allocator);
     var request_ids = client_pump.RequestIdState{ .available = 1 };
-    var storage: [64]u8 = [_]u8{0xa5} ** 64;
+    var storage: [64]u8 = @as([64]u8, @splat(0xa5));
     const storage_before = storage;
     var client: [64]u8 = undefined;
     var alias = AliasAllocator{
@@ -3448,7 +3448,7 @@ test "f1a allocator partial alias is rejected before write and free" {
     var state = try initState();
     defer state.deinit(std.testing.allocator);
     var request_ids = client_pump.RequestIdState{ .available = 1 };
-    var storage: [128]u8 = [_]u8{0xa5} ** 128;
+    var storage: [128]u8 = @as([128]u8, @splat(0xa5));
     const storage_before = storage;
     var client: [64]u8 = undefined;
     var alias = AliasAllocator{
@@ -3769,7 +3769,7 @@ test "f1a allocator cannot alias an immutable queued frame backing" {
         .{
             .kind = .input_bytes,
             .stream_id = 7,
-            .payload = &([_]u8{0x5a} ** 64),
+            .payload = &(@as([64]u8, @splat(0x5a))),
             .request_policy = .zero,
         },
         100,
@@ -3826,11 +3826,11 @@ test "f1a allocator cannot alias an immutable queued frame backing" {
 }
 
 const WriteProbe = struct {
-    outcomes: [128]WriteOutcome = [_]WriteOutcome{.would_block} ** 128,
+    outcomes: [128]WriteOutcome = @as([128]WriteOutcome, @splat(.would_block)),
     outcome_count: usize = 0,
     next: usize = 0,
     calls: usize = 0,
-    offered: [128]usize = [_]usize{0} ** 128,
+    offered: [128]usize = @as([128]usize, @splat(0)),
 
     fn ops(self: *WriteProbe) WriteOps {
         return .{ .context = self, .write = write };
@@ -4071,7 +4071,7 @@ test "f1b deadline is checked before write and EINTR ninth attempt terminalizes"
     state.tx_last_observed_now_ns = 100;
     state.tx_head_progress_baseline_ns = 100;
     var interrupted_probe = WriteProbe{
-        .outcomes = [_]WriteOutcome{.interrupted} ** 128,
+        .outcomes = @as([128]WriteOutcome, @splat(.interrupted)),
         .outcome_count = 128,
     };
     const interrupted = writeTurnFromExternalPump(
@@ -5399,7 +5399,7 @@ test "f3b post cancellation receipt alias preflight is mutation free" {
     var owner_storage: [64]u8 = undefined;
     var owner_client: [64]u8 = undefined;
     const binding = testBinding(&owner_storage, &owner_client);
-    const payload = [_]u8{'x'} ** 256;
+    const payload = @as([256]u8, @splat('x'));
     try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, binding, .{
         .kind = .input_bytes,
         .stream_id = 7,
@@ -5649,7 +5649,7 @@ test "f3b cancellation cleanup quarantines remaining backing after allocator dri
     client_external_mode.resetTxQuarantineForTest();
     var state = try initState();
     defer {
-        test_owner_digest = [_]u8{0x22} ** 32;
+        test_owner_digest = @as([32]u8, @splat(0x22));
         state.external_tx_quarantined_bytes = 0;
         state.external_tx_retiring_bytes = 0;
         state.tx_lifecycle = .live;
@@ -6176,7 +6176,7 @@ test "f3b cancellation scratch ranges are pairwise disjoint and protected" {
     const base = testBinding(&owner_storage, &owner_client);
     var prepared: PreparedTxCancellation = .{};
     var shared: [@sizeOf(FrozenTxCancellationCleanup)]u8 align(@alignOf(FrozenTxCancellationCleanup)) =
-        [_]u8{0} ** @sizeOf(FrozenTxCancellationCleanup);
+        @as([@sizeOf(FrozenTxCancellationCleanup)]u8, @splat(0));
     const permit: *TxCancellationCommitPermit = @ptrCast(@alignCast(&shared));
     const cleanup: *FrozenTxCancellationCleanup = @ptrCast(@alignCast(&shared));
     const binding = cancellationBinding(base, &prepared);

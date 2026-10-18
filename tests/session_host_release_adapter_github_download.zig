@@ -23,7 +23,7 @@ fn expected() download.Expected {
 fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(out, "{s}/{s}", .{ root[0..len], leaf });
+    return std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ root[0..len], leaf }, 0);
 }
 
 const Mode = enum { success, short, corrupt, foreign, too_long, timeout };

@@ -118,7 +118,7 @@ pub fn reusedPreviousBuild(reused_build_id: ?[]const u8, current_build_id: ?[]co
 }
 
 fn stronger(a: SpawnReason, b: SpawnReason) SpawnReason {
-    return if (@intFromEnum(b) > @intFromEnum(a)) b else a;
+    return if (@backingInt(b) > @backingInt(a)) b else a;
 }
 
 /// 같은 build 가 먼저, 그다음 마지막 게시가 **최신인** host 부터(방금 교체됐거나 새로 뜬 host 가 가장 새 이미지다).

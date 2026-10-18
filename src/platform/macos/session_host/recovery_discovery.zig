@@ -373,7 +373,7 @@ test "recovery discovery는 held exact manifest만 정렬하고 filesystem을 �
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const testing = std.testing;
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-recovery-discovery-{d}", .{c.getpid()}) catch
+    const dir = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-recovery-discovery-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.mkdir(dir.ptr, 0o700);
     defer _ = c.rmdir(dir.ptr);
@@ -490,7 +490,7 @@ test "recovery discovery: 죽은 entry가 max_hosts를 넘겨도 살아 있는 h
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const testing = std.testing;
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-recovery-dead-cap-{d}", .{c.getpid()}) catch
+    const dir = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-recovery-dead-cap-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.mkdir(dir.ptr, 0o700);
     defer _ = c.rmdir(dir.ptr);

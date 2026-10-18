@@ -171,7 +171,7 @@ pub fn derivePaths(candidate_root: []const u8, work_root: []const u8, storage: *
 }
 
 fn path(storage: *[max_path_bytes:0]u8, root: []const u8, leaf: []const u8) ![:0]const u8 {
-    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root, leaf }) catch error.PathTooLong;
+    return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ root, leaf }, 0) catch error.PathTooLong;
 }
 
 fn validateRoot(value: []const u8) !void {

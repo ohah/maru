@@ -328,9 +328,9 @@ fn rewrite(io: std.Io, dir: []const u8, path: []const u8) bool {
     if (!ensureDir(io, dir)) return false;
     const text = store.serialize(gpa) catch return false;
     defer gpa.free(text);
-    var af = std.Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true, .permissions = @enumFromInt(0o600) }) catch return false;
+    var af = std.Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true, .permissions = @fromBackingInt(@intCast(0o600)) }) catch return false;
     defer af.deinit(io);
-    af.file.setPermissions(io, @enumFromInt(0o600)) catch return false;
+    af.file.setPermissions(io, @fromBackingInt(@intCast(0o600))) catch return false;
     var buf: [4096]u8 = undefined;
     var w = af.file.writer(io, &buf);
     w.interface.writeAll(text) catch return false;
@@ -355,7 +355,7 @@ fn readSmall(io: std.Io, path: []const u8) Read {
 /// 붙지 않는다.
 fn appendSmall(path: []const u8, line: []const u8) bool {
     var zbuf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&zbuf, "{s}", .{path}) catch return false;
+    const z = std.fmt.bufPrintSentinel(&zbuf, "{s}", .{path}, 0) catch return false;
     const fd = std.c.open(z.ptr, .{ .ACCMODE = .RDWR, .CREAT = true, .APPEND = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
     if (fd < 0) return false;
     defer _ = std.c.close(fd);
@@ -449,7 +449,7 @@ test "LST7 테스트 빌드는 주입 없이 사용자 자리로 떨어지지 �
     const dir = try std.fmt.bufPrint(&dir_buf, "{s}/state/maru", .{root});
     // 저장소 자리는 이미 있다 — 제품의 `Application Support/maru` 처럼 작업 공간·웹 데이터와 함께 쓰는 자리라 그 권한(0755)을 건드리면 안 된다.
     try tmp.dir.createDirPath(testing.io, "state/maru");
-    try tmp.dir.setFilePermissions(testing.io, "state/maru", @enumFromInt(0o755), .{});
+    try tmp.dir.setFilePermissions(testing.io, "state/maru", @fromBackingInt(@intCast(0o755)), .{});
     const gen_before = generation();
     setDirForTest(dir);
     try testing.expect(get(.{ .volume = 1, .path = "/never/written" }) == null); // 주입을 바꾸면 표가 빈다
@@ -461,9 +461,9 @@ test "LST7 테스트 빌드는 주입 없이 사용자 자리로 떨어지지 �
     defer testing.allocator.free(text);
     try testing.expectEqualStrings("deny\t7\t/r\n", text);
     const dst = try tmp.dir.statFile(testing.io, "state/maru", .{}); // 함께 쓰는 자리의 권한은 그대로다
-    try testing.expectEqual(@as(u32, 0o755), @as(u32, @intCast(@intFromEnum(dst.permissions) & 0o777)));
+    try testing.expectEqual(@as(u32, 0o755), @as(u32, @intCast(@backingInt(dst.permissions) & 0o777)));
     const fst = try tmp.dir.statFile(testing.io, "state/maru/" ++ file_name, .{});
-    try testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(@intFromEnum(fst.permissions) & 0o777)));
+    try testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(@backingInt(fst.permissions) & 0o777)));
 }
 
 test "LST8 옛 자리 이관 — 새 파일이 없으면 합쳐 쓴 뒤 옛 파일을 지우고, 거부가 이기며, 사라진 root 는 버린다; 다시 읽어도 같다" {
@@ -522,8 +522,8 @@ test "LST9 새 자리에 못 쓰면 옛 파일을 지우지 않는다 — 다음
     try tmp.dir.createDirPath(io, "Repo");
     try tmp.dir.createDirPath(io, "ro");
     // 쓸 수 없는 부모 아래의 아직 없는 자리 — 새 파일은 「없음」이라 이관을 하는데 새 자리를 못 만든다.
-    try tmp.dir.setFilePermissions(io, "ro", @enumFromInt(0o500), .{});
-    defer tmp.dir.setFilePermissions(io, "ro", @enumFromInt(0o700), .{}) catch {};
+    try tmp.dir.setFilePermissions(io, "ro", @fromBackingInt(@intCast(0o500)), .{});
+    defer tmp.dir.setFilePermissions(io, "ro", @fromBackingInt(@intCast(0o700)), .{}) catch {};
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
     var text_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
@@ -586,8 +586,8 @@ test "LST11 새 표를 못 읽으면(권한) 옛 파일을 이관하지도, 새 
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
     try tmp.dir.writeFile(io, .{ .sub_path = "state/" ++ file_name, .data = "deny\t1\t/kept\n" });
-    try tmp.dir.setFilePermissions(io, "state/" ++ file_name, @enumFromInt(0o000), .{});
-    defer tmp.dir.setFilePermissions(io, "state/" ++ file_name, @enumFromInt(0o600), .{}) catch {};
+    try tmp.dir.setFilePermissions(io, "state/" ++ file_name, @fromBackingInt(@intCast(0o000)), .{});
+    defer tmp.dir.setFilePermissions(io, "state/" ++ file_name, @fromBackingInt(@intCast(0o600)), .{}) catch {};
     var old_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
     try tmp.dir.writeFile(io, .{ .sub_path = "legacy", .data = try std.fmt.bufPrint(&old_buf, "allow\t{s}/Repo\n", .{root}) });
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -598,7 +598,7 @@ test "LST11 새 표를 못 읽으면(권한) 옛 파일을 이관하지도, 새 
     _ = try tmp.dir.statFile(io, "legacy", .{});
     try testing.expect(!decide(io, test_origin, .{ .volume = 1, .path = "/new" }, .allow)); // 메모리에만 — 그렇다고 말한다
     try testing.expectEqual(@as(?trust.Decision, .allow), get(.{ .volume = 1, .path = "/new" }));
-    try tmp.dir.setFilePermissions(io, "state/" ++ file_name, @enumFromInt(0o600), .{});
+    try tmp.dir.setFilePermissions(io, "state/" ++ file_name, @fromBackingInt(@intCast(0o600)), .{});
     const after = try tmp.dir.readFileAlloc(io, "state/" ++ file_name, testing.allocator, .limited(4096));
     defer testing.allocator.free(after);
     try testing.expectEqualStrings("deny\t1\t/kept\n", after); // 그대로다
@@ -694,7 +694,7 @@ test "TAB1 감사 기록 — 바뀐 결정·잊기만 출처와 함께 남고(�
             text,
         );
         const st = try tmp.dir.statFile(io, "state/" ++ log_name, .{});
-        try testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(@intFromEnum(st.permissions) & 0o777)));
+        try testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(@backingInt(st.permissions) & 0o777)));
     }
 
     // 끊긴 끝(디스크가 찼다) — 닫고 붙인다. 잘린 경로가 부모의 기록으로 읽히지 않는다.

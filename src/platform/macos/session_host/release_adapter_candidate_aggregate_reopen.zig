@@ -493,7 +493,7 @@ fn storeInputs(result: *ReopenedAggregate, context: context_mod.Context, paths: 
 fn openDirectory(result: *ReopenedAggregate, path: [:0]const u8) Error!void {
     const parent_path = std.fs.path.dirname(path) orelse return error.InvalidPath;
     var parent_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const parent_z = std.fmt.bufPrintZ(&parent_storage, "{s}", .{parent_path}) catch return error.InvalidPath;
+    const parent_z = std.fmt.bufPrintSentinel(&parent_storage, "{s}", .{parent_path}, 0) catch return error.InvalidPath;
     result.parent_fd = safe_open.openAbsoluteNoFollow(parent_z, true) catch return error.InvalidPath;
     result.directory_fd = safe_open.openAbsoluteNoFollow(path, true) catch return error.InvalidInventory;
     const leaf = std.fs.path.basename(path);
@@ -527,7 +527,7 @@ fn discoverNames(result: *ReopenedAggregate) Error!void {
         if (count > handoff.role_count or !validComponent(name)) return error.InvalidInventory;
         var role: ?usize = null;
         for (0..verification_count) |index| {
-            if (std.mem.eql(u8, name, handoff.destinationName(@enumFromInt(index + 1), ""))) {
+            if (std.mem.eql(u8, name, handoff.destinationName(@fromBackingInt(@intCast(index + 1)), ""))) {
                 role = index;
                 break;
             }
@@ -549,7 +549,7 @@ fn discoverNames(result: *ReopenedAggregate) Error!void {
     for (found[result.active_count - 1 ..]) |present| if (present) return error.InvalidInventory;
     result.name_lens[0] = try storeName(&result.names[0], evidence_name[0..evidence_len]);
     for (1..result.active_count) |index| {
-        result.name_lens[index] = try storeName(&result.names[index], handoff.destinationName(@enumFromInt(index), ""));
+        result.name_lens[index] = try storeName(&result.names[index], handoff.destinationName(@fromBackingInt(@intCast(index)), ""));
     }
 }
 
@@ -557,7 +557,7 @@ fn pinEntries(allocator: std.mem.Allocator, result: *ReopenedAggregate) Error!vo
     const directory: [:0]const u8 = result.directory[0..result.directory_len :0];
     for (0..result.active_count) |index| {
         const name = result.names[index][0..result.name_lens[index]];
-        const path = std.fmt.bufPrintZ(&result.paths[index], "{s}/{s}", .{ directory, name }) catch return error.InvalidPath;
+        const path = std.fmt.bufPrintSentinel(&result.paths[index], "{s}/{s}", .{ directory, name }, 0) catch return error.InvalidPath;
         result.path_lens[index] = path.len;
         files.pinReleaseFileObserved(&result.entries[index], path, false, if (index == 0) release_manifest.max_evidence_bytes else handoff.max_attestation_bundle_bytes) catch return error.InvalidInventory;
         const observation = result.entries[index].value().?;

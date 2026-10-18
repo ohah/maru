@@ -39,7 +39,7 @@ pub const Identity = struct {
     tagged: u64,
 
     pub fn kind(self: Identity) IdentityKind {
-        return @enumFromInt(self.tagged & 1);
+        return @fromBackingInt(@intCast(self.tagged & 1));
     }
 };
 
@@ -74,7 +74,7 @@ pub const IdentityIssuer = struct {
                 continue;
             }
             if (observed == max_ordinal) self.exhausted.store(true, .release);
-            return .{ .tagged = (observed << 1) | @intFromEnum(kind_value) };
+            return .{ .tagged = (observed << 1) | @backingInt(kind_value) };
         }
     }
 };
@@ -314,7 +314,7 @@ pub fn consumeCanonicalPinWithReceiptUnchecked(
         .pid = ready.pid,
         .process_nonce = ready.process_nonce,
         .thread_id = @intCast(std.Thread.getCurrentId()),
-        .role_raw = @intFromEnum(settlement.EventReleaseLeafRole.pin),
+        .role_raw = @backingInt(settlement.EventReleaseLeafRole.pin),
         .identity_a = projection.pin_owner_addr,
         .identity_b = projection.lease_addr,
         .identity_c = projection.node_incarnation,
@@ -401,7 +401,7 @@ pub const ConnectionLease = struct {
         current_pid: u32,
     ) ?CanonicalPinProjection {
         const lifecycle_raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
-        if (lifecycle_raw > @intFromEnum(LeaseLifecycle.terminal) or
+        if (lifecycle_raw > @backingInt(LeaseLifecycle.terminal) or
             self.lifecycle != .live or self.self_addr != @intFromPtr(self) or
             self.owner_addr == 0 or self.owner_addr != self.canonical_owner_addr or
             self.slot_addr == 0 or self.node_addr == 0 or
@@ -735,7 +735,7 @@ const FinishResult = enum {
 /// transitions rather than instantiate a second cleanup ledger.
 const CleanupOwner = struct {
     self_addr: usize = 0,
-    entries: [cleanup_owner_capacity]CleanupEntry = [_]CleanupEntry{.{}} ** cleanup_owner_capacity,
+    entries: [cleanup_owner_capacity]CleanupEntry = @as([cleanup_owner_capacity]CleanupEntry, @splat(.{})),
     next_reservation_id: u64 = 1,
     reservation_exhausted: bool = false,
     quarantined: bool = false,

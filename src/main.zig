@@ -14012,9 +14012,9 @@ fn runSessionHostDaemon(io: std.Io, std_allocator: std.mem.Allocator, args: anyt
                 // argv/path allocation부터 poll owner publication까지 어느 실패도 parent를 connect backoff에
                 // 남겨 두지 않는다. ready 뒤에는 notifier가 이미 consumed라 이 errdefer는 no-op이다.
                 errdefer startup.failed();
-                const dir_z = try allocator.dupeZ(u8, daemon.session_dir);
+                const dir_z = try allocator.dupeSentinel(u8, daemon.session_dir, 0);
                 defer allocator.free(dir_z);
-                const socket_z = try allocator.dupeZ(u8, daemon.socket_path);
+                const socket_z = try allocator.dupeSentinel(u8, daemon.socket_path, 0);
                 defer allocator.free(socket_z);
                 var notification_adapter_state: session_host.notification_macos_adapter.State = .{};
                 session_host.daemon.runSessionHostWithIdentityStartupAndNotificationAdapter(
@@ -14051,7 +14051,7 @@ fn runNotificationReleaseRuntimeChild(
     const operation = args.next() orelse return error.UnknownCommand;
     const root_raw = args.next() orelse return error.UnknownCommand;
     if (!notificationReleaseRoot(root_raw)) return error.UnknownCommand;
-    const root = try allocator.dupeZ(u8, root_raw);
+    const root = try allocator.dupeSentinel(u8, root_raw, 0);
     defer allocator.free(root);
     try requirePrivateDirectory(root);
 
@@ -14093,7 +14093,7 @@ fn notificationReleasePrepare(
     var host_id: u128 = 0;
     while (host_id == 0) std.c.arc4random_buf(std.mem.asBytes(&host_id).ptr, @sizeOf(u128));
     var base_storage: [128]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(&base_storage, "{s}/s", .{root});
+    const base = try std.fmt.bufPrintSentinel(&base_storage, "{s}/s", .{root}, 0);
     // The one-shot parent starts with an intentionally empty environment. The detached daemon
     // inherits only this exact isolated namespace; without it short-endpoint validation rejects
     // the explicit socket before startup readiness can become ready.
@@ -14101,12 +14101,12 @@ fn notificationReleasePrepare(
         return error.SessionRootEnvironmentFailed;
     try requirePrivateDirectory(base);
     var helper_root_storage: [128]u8 = undefined;
-    const helper_root = try std.fmt.bufPrintZ(&helper_root_storage, "{s}/h", .{root});
+    const helper_root = try std.fmt.bufPrintSentinel(&helper_root_storage, "{s}/h", .{root}, 0);
     try requirePrivateDirectory(helper_root);
     var session_storage: [160]u8 = undefined;
-    const session_dir = try std.fmt.bufPrintZ(&session_storage, "{s}/session-host", .{base});
+    const session_dir = try std.fmt.bufPrintSentinel(&session_storage, "{s}/session-host", .{base}, 0);
     var socket_dir_storage: [160]u8 = undefined;
-    const socket_dir = try std.fmt.bufPrintZ(&socket_dir_storage, "{s}/sh", .{base});
+    const socket_dir = try std.fmt.bufPrintSentinel(&socket_dir_storage, "{s}/sh", .{base}, 0);
     try createNotificationReleaseLeaf(session_dir);
     errdefer _ = std.c.rmdir(session_dir.ptr);
     try createNotificationReleaseLeaf(socket_dir);
@@ -14217,7 +14217,7 @@ fn notificationReleaseCleanup(io: std.Io, allocator: std.mem.Allocator, root: [:
     const session_host = @import("platform/macos/session_host.zig");
     const host_id = try std.fmt.parseInt(u128, host_text, 16);
     var base_storage: [128]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(&base_storage, "{s}/s", .{root});
+    const base = try std.fmt.bufPrintSentinel(&base_storage, "{s}/s", .{root}, 0);
     try requirePrivateDirectory(base);
     var socket_storage: [192]u8 = undefined;
     const socket = try session_host.short_endpoint.socketPathUnder(&socket_storage, base, host_id);
@@ -14233,7 +14233,7 @@ fn notificationReleaseCleanup(io: std.Io, allocator: std.mem.Allocator, root: [:
     const expires_at = std.math.add(i128, std.Io.Clock.awake.now(io).nanoseconds, 5 * std.time.ns_per_s) catch
         std.math.maxInt(i128);
     while (std.Io.Clock.awake.now(io).nanoseconds < expires_at) {
-        const alive = std.c.kill(host_pid, @enumFromInt(0));
+        const alive = std.c.kill(host_pid, @fromBackingInt(@intCast(0)));
         if (alive != 0 and std.posix.errno(alive) == .SRCH) return;
         _ = usleep(10_000);
     }
@@ -14852,11 +14852,11 @@ fn runShellCapture(allocator: std.mem.Allocator, script: []const u8) ![]u8 {
     // pty 다 — Windows 에 옮길 대상이 아니다. `std.c` 의 이 선언들은 그 타깃에서 **컴파일이
     // 안 되므로**(실측: `check-targets` 가 x86_64-windows 에서 잡았다) 본문을 통째로 가지치기한다.
     if (builtin.os.tag != .windows) {
-        const c_sh = try allocator.dupeZ(u8, "/bin/sh");
+        const c_sh = try allocator.dupeSentinel(u8, "/bin/sh", 0);
         defer allocator.free(c_sh);
-        const c_flag = try allocator.dupeZ(u8, "-c");
+        const c_flag = try allocator.dupeSentinel(u8, "-c", 0);
         defer allocator.free(c_flag);
-        const c_script = try allocator.dupeZ(u8, script);
+        const c_script = try allocator.dupeSentinel(u8, script, 0);
         defer allocator.free(c_script);
         const argv = [_:null]?[*:0]const u8{ c_sh.ptr, c_flag.ptr, c_script.ptr };
 
@@ -15582,7 +15582,7 @@ fn runEditorCli(io: std.Io, allocator: std.mem.Allocator, args: anytype, stdout:
         return error.UnknownCommand;
     };
     defer allocator.free(url);
-    const terminated = try allocator.dupeZ(u8, url);
+    const terminated = try allocator.dupeSentinel(u8, url, 0);
     defer allocator.free(terminated);
     // No shell or PATH lookup: metacharacters remain filename bytes, and open's
     // exit status reaches the caller without claiming an application-level ACK.
@@ -15684,7 +15684,7 @@ fn runSsh(io: std.Io, allocator: std.mem.Allocator, args: anytype, stderr: *std.
     var built: usize = 0;
     defer for (c_strings[0..built]) |s| allocator.free(s);
     for (argv, 0..) |s, i| {
-        c_strings[i] = try allocator.dupeZ(u8, s);
+        c_strings[i] = try allocator.dupeSentinel(u8, s, 0);
         built += 1;
     }
 
@@ -16154,7 +16154,7 @@ fn persistentCliExit(
 ) noreturn {
     stderr.flush() catch {};
     stdout.flush() catch {};
-    std.process.exit(@intFromEnum(code));
+    std.process.exit(@backingInt(code));
 }
 
 fn runAttachCli(
@@ -16199,7 +16199,7 @@ fn attachCliExit(
 ) noreturn {
     stderr.flush() catch {};
     stdout.flush() catch {};
-    std.process.exit(@intFromEnum(code));
+    std.process.exit(@backingInt(code));
 }
 
 fn runSessionCli(

@@ -13,6 +13,8 @@
 //! session-host 잡에만 들어간다. 적대적 검증(2026-09-29)이 바로 그 틈으로 값을 뒤집는 돌연변이
 //! 여럿을 통과시켰다. std 와 `host_log` 만 쓰는 leaf 로 두어 `check-boundaries` 에서 돌게 한다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const host_log = @import("host_log.zig");
 
@@ -167,7 +169,7 @@ test "가장 긴 값도 host_log 한 줄에 들고, 넘치면 숫자를 버려�
     // `host_log` 가 **실제로 쓰는 모양**(`formatLine`)을 통과하는지 본다. 1 B 더 길면 숫자를 버린다.
     const prefix = "session host collect failed: site=";
     const tail = " err=- runtime=0935886dc61898048f9fd1e194dee150 seq=41->42 gen=7->8 snapshot=0 send=512";
-    const exact_site = "s" ** (line_capacity - prefix.len - tail.len);
+    const exact_site = array_repeat.repeat("s", (line_capacity - prefix.len - tail.len));
     const exact = render(&buf, .{ .site = exact_site, .frontier = sample });
     try std.testing.expectEqualStrings(prefix ++ exact_site ++ tail, exact);
     var log_buf: [host_log.max_line_bytes]u8 = undefined;
@@ -176,11 +178,11 @@ test "가장 긴 값도 host_log 한 줄에 들고, 넘치면 숫자를 버려�
     try std.testing.expectEqualStrings(prefix ++ exact_site ++ "s err=-", over);
 
     // 숫자가 안 들어갈 만큼 이름이 길면 **이름만** — 줄 전체를 잃지 않는다.
-    const long_site = "s" ** 200;
+    const long_site = array_repeat.repeat("s", 200);
     const clipped = render(&buf, .{ .site = long_site, .frontier = sample });
     try std.testing.expectEqualStrings("session host collect failed: site=" ++ long_site ++ " err=-", clipped);
     // 이름조차 안 들어가면 그렇다고 말한다.
-    try std.testing.expectEqualStrings(head_overflow, render(&buf, .{ .site = "s" ** 300 }));
+    try std.testing.expectEqualStrings(head_overflow, render(&buf, .{ .site = array_repeat.repeat("s", 300) }));
     try std.testing.expect(std.mem.startsWith(u8, head_overflow, "session host collect failed: site="));
 }
 

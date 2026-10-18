@@ -2,9 +2,7 @@ const std = @import("std");
 const artifacts = @import("test_support");
 const maru = @import("maru");
 
-const c = @cImport({
-    @cInclude("ghostty_shim.h");
-});
+const c = @import("ghostty_oracle_c");
 
 // 외부 오라클(Ghostty): 동일한 fixture를 Ghostty의 VT 엔진(libghostty-vt)에 먹여
 // 최종 화면을 덤프하고, 커밋된 golden과 비교한다. libvterm 오라클(external.zig)과

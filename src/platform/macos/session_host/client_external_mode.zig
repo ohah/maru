@@ -184,7 +184,7 @@ pub fn txFrameDescriptorDigest(frame: ExternalTxFrame) owner_seal.Digest {
     writer.writeUsize(@intFromPtr(frame.bytes.ptr));
     writer.writeUsize(frame.bytes.len);
     writer.writeUsize(frame.offset);
-    writer.writeU16(@intFromEnum(frame.kind));
+    writer.writeU16(@backingInt(frame.kind));
     writer.writeU64(frame.stream_id);
     writer.writeU64(frame.request_id);
     writer.writeU128(@bitCast(frame.activated_at_ns));
@@ -197,7 +197,7 @@ pub const RxProvenanceLifecycle = enum { unbound, bound, terminal };
 pub const RxIdentity = external_rx_types.RxIdentity;
 
 pub const ParserAuthoritySeal = struct {
-    domain: [8]u8 = [_]u8{0} ** 8,
+    domain: [8]u8 = @as([8]u8, @splat(0)),
     version: u16 = 0,
     seal_addr: usize = 0,
     parser_addr: usize = 0,
@@ -214,7 +214,7 @@ pub const ParserAuthoritySeal = struct {
     rx_absolute_next: u64 = 0,
     resident_cap: usize = 0,
     generation: u64 = 0,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const RxProvenance = struct {
@@ -294,7 +294,7 @@ pub const State = struct {
     tx_head_progress_baseline_ns: ?i128 = null,
     tx_last_observed_now_ns: ?i128 = null,
     tx_immediate_pending: bool = false,
-    tx_claim: std.atomic.Value(u8) = .init(@intFromEnum(TxClaim.idle)),
+    tx_claim: std.atomic.Value(u8) = .init(@backingInt(TxClaim.idle)),
     tx_cleanup_id: u64 = 0,
     tx_cleanup_owner_addr: usize = 0,
     rx_provenance: RxProvenance = .{},
@@ -322,14 +322,14 @@ pub const State = struct {
         if (active_tx_operation != null or active_tx_cleanup != null)
             return false;
         if (self.tx_claim.cmpxchgStrong(
-            @intFromEnum(TxClaim.idle),
-            @intFromEnum(TxClaim.operation),
+            @backingInt(TxClaim.idle),
+            @backingInt(TxClaim.operation),
             .acq_rel,
             .acquire,
         ) != null)
             return false;
         if (self.tx_cleanup_id != 0 or self.tx_cleanup_owner_addr != 0) {
-            self.tx_claim.store(@intFromEnum(TxClaim.idle_close), .release);
+            self.tx_claim.store(@backingInt(TxClaim.idle_close), .release);
             return false;
         }
         active_tx_operation = self;
@@ -339,10 +339,10 @@ pub const State = struct {
     pub fn requestTxClose(self: *State) void {
         while (true) {
             const observed = self.tx_claim.load(.acquire);
-            const desired = if (observed == @intFromEnum(TxClaim.idle))
-                @intFromEnum(TxClaim.idle_close)
-            else if (observed == @intFromEnum(TxClaim.operation))
-                @intFromEnum(TxClaim.operation_close)
+            const desired = if (observed == @backingInt(TxClaim.idle))
+                @backingInt(TxClaim.idle_close)
+            else if (observed == @backingInt(TxClaim.operation))
+                @backingInt(TxClaim.operation_close)
             else
                 return;
             if (self.tx_claim.cmpxchgWeak(
@@ -356,17 +356,17 @@ pub const State = struct {
 
     pub fn txCloseRequested(self: *const State) bool {
         const claim = self.tx_claim.load(.acquire);
-        return claim == @intFromEnum(TxClaim.operation_close) or
-            claim == @intFromEnum(TxClaim.idle_close) or
-            claim == @intFromEnum(TxClaim.reserving) or
-            claim == @intFromEnum(TxClaim.cleanup);
+        return claim == @backingInt(TxClaim.operation_close) or
+            claim == @backingInt(TxClaim.idle_close) or
+            claim == @backingInt(TxClaim.reserving) or
+            claim == @backingInt(TxClaim.cleanup);
     }
 
     pub fn txOperationHeldByCurrentThread(self: *const State) bool {
         if (active_tx_operation != self) return false;
         const claim = self.tx_claim.load(.acquire);
-        return claim == @intFromEnum(TxClaim.operation) or
-            claim == @intFromEnum(TxClaim.operation_close);
+        return claim == @backingInt(TxClaim.operation) or
+            claim == @backingInt(TxClaim.operation_close);
     }
 
     /// Releases a successfully acquired operation. The release store is the final access to
@@ -389,11 +389,11 @@ pub const State = struct {
         var hook_called = false;
         while (true) {
             const observed = self.tx_claim.load(.acquire);
-            const desired = if (observed == @intFromEnum(TxClaim.operation))
-                @intFromEnum(TxClaim.idle)
-            else if (observed == @intFromEnum(TxClaim.operation_close)) blk: {
+            const desired = if (observed == @backingInt(TxClaim.operation))
+                @backingInt(TxClaim.idle)
+            else if (observed == @backingInt(TxClaim.operation_close)) blk: {
                 close_requested = true;
-                break :blk @intFromEnum(TxClaim.idle_close);
+                break :blk @backingInt(TxClaim.idle_close);
             } else return null;
             if (!hook_called) {
                 hook_called = true;
@@ -434,10 +434,10 @@ pub const State = struct {
     ) DeinitReservationResult {
         while (true) {
             const observed = self.tx_claim.load(.acquire);
-            if (observed == @intFromEnum(TxClaim.dead))
+            if (observed == @backingInt(TxClaim.dead))
                 return .already_dead;
-            if (observed != @intFromEnum(TxClaim.idle) and
-                observed != @intFromEnum(TxClaim.idle_close))
+            if (observed != @backingInt(TxClaim.idle) and
+                observed != @backingInt(TxClaim.idle_close))
             {
                 if (active_tx_cleanup != null)
                     tx_cleanup_reentry_events = std.math.add(
@@ -451,24 +451,24 @@ pub const State = struct {
             }
             if (self.tx_claim.cmpxchgWeak(
                 observed,
-                @intFromEnum(TxClaim.reserving),
+                @backingInt(TxClaim.reserving),
                 .acq_rel,
                 .acquire,
             ) == null) break;
         }
         if (hook) |callback| callback(hook_context);
         if (self.tx_cleanup_id != 0 or self.tx_cleanup_owner_addr != 0) {
-            self.tx_claim.store(@intFromEnum(TxClaim.idle_close), .release);
+            self.tx_claim.store(@backingInt(TxClaim.idle_close), .release);
             return .busy;
         }
         if (self.tx_lifecycle == .completion_callback or
             self.tx_lifecycle == .tearing_down)
         {
-            self.tx_claim.store(@intFromEnum(TxClaim.idle_close), .release);
+            self.tx_claim.store(@backingInt(TxClaim.idle_close), .release);
             return .busy;
         }
         if (self.tx_lifecycle == .dead) {
-            self.tx_claim.store(@intFromEnum(TxClaim.dead), .release);
+            self.tx_claim.store(@backingInt(TxClaim.dead), .release);
             return .already_dead;
         }
         if (active_tx_cleanup != null) {
@@ -477,7 +477,7 @@ pub const State = struct {
                 tx_cleanup_reentry_events,
                 1,
             ) catch @panic("external TX cleanup reentry counter exhausted");
-            self.tx_claim.store(@intFromEnum(TxClaim.idle_close), .release);
+            self.tx_claim.store(@backingInt(TxClaim.idle_close), .release);
             return .busy;
         }
         active_tx_cleanup = self;
@@ -487,7 +487,7 @@ pub const State = struct {
         self.tx_cleanup_id = reservation_id;
         self.tx_cleanup_owner_addr = @intFromPtr(self);
         active_tx_cleanup_id = reservation_id;
-        self.tx_claim.store(@intFromEnum(TxClaim.cleanup), .release);
+        self.tx_claim.store(@backingInt(TxClaim.cleanup), .release);
         return .reserved;
     }
 
@@ -498,9 +498,9 @@ pub const State = struct {
             self.tx_cleanup_id != active_tx_cleanup_id or
             self.tx_cleanup_owner_addr != @intFromPtr(self) or
             self.tx_claim.load(.acquire) !=
-                @intFromEnum(TxClaim.cleanup) or
+                @backingInt(TxClaim.cleanup) or
             destination.tx_claim.load(.acquire) !=
-                @intFromEnum(TxClaim.cleanup) or
+                @backingInt(TxClaim.cleanup) or
             destination.tx_cleanup_id != self.tx_cleanup_id or
             destination.tx_cleanup_owner_addr != @intFromPtr(self) or
             destination.tx_cleanup_id == 0)
@@ -516,13 +516,13 @@ pub const State = struct {
             self.tx_cleanup_id != active_tx_cleanup_id or
             self.tx_cleanup_owner_addr != @intFromPtr(self) or
             self.tx_claim.load(.acquire) !=
-                @intFromEnum(TxClaim.cleanup))
+                @backingInt(TxClaim.cleanup))
             return false;
         active_tx_cleanup = null;
         active_tx_cleanup_id = 0;
         self.tx_cleanup_id = 0;
         self.tx_cleanup_owner_addr = 0;
-        self.tx_claim.store(@intFromEnum(TxClaim.idle_close), .release);
+        self.tx_claim.store(@backingInt(TxClaim.idle_close), .release);
         return true;
     }
 
@@ -531,14 +531,14 @@ pub const State = struct {
         allocator: std.mem.Allocator,
     ) DeinitResult {
         if (active_tx_cleanup == null and
-            self.tx_claim.load(.acquire) == @intFromEnum(TxClaim.dead))
+            self.tx_claim.load(.acquire) == @backingInt(TxClaim.dead))
             return .already_dead;
         if (active_tx_cleanup != self or
             active_tx_cleanup_id == 0 or
             self.tx_cleanup_id != active_tx_cleanup_id or
             self.tx_cleanup_owner_addr != @intFromPtr(self) or
             self.tx_claim.load(.acquire) !=
-                @intFromEnum(TxClaim.cleanup))
+                @backingInt(TxClaim.cleanup))
             return .busy;
         const cleanup_id = active_tx_cleanup_id;
         const cleanup_owner_addr = @intFromPtr(self);
@@ -777,7 +777,7 @@ pub const State = struct {
         self.tx_immediate_pending = false;
         self.tx_cleanup_id = 0;
         self.tx_cleanup_owner_addr = 0;
-        self.tx_claim.store(@intFromEnum(TxClaim.dead), .release);
+        self.tx_claim.store(@backingInt(TxClaim.dead), .release);
         if (builtin.is_test) if (tx_deinit_test_receipt) |receipt| {
             receipt.* = .{
                 .observed = true,
@@ -787,7 +787,7 @@ pub const State = struct {
                 .retiring_bytes = self.external_tx_retiring_bytes,
                 .lifecycle = self.tx_lifecycle,
                 .claim_dead = self.tx_claim.load(.acquire) ==
-                    @intFromEnum(TxClaim.dead),
+                    @backingInt(TxClaim.dead),
             };
         };
         return .cleaned;
@@ -881,8 +881,8 @@ pub const PreparedRxBind = struct {
     expected_major: u16 = 0,
     resident_cap: usize = 0,
     unread_len: u64 = 0,
-    unread_digest: owner_seal.Digest = [_]u8{0} ** 32,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    unread_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: PreparedLifecycle = .empty,
 
     pub fn deinit(self: *PreparedRxBind) void {
@@ -933,9 +933,9 @@ pub const PreparedRxAppend = struct {
     expected_start: u64 = 0,
     bytes_addr: usize = 0,
     bytes_len: usize = 0,
-    bytes_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    bytes_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     source_seal: ParserAuthoritySeal = .{},
-    unread_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    unread_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     allocator: std.mem.Allocator = pristine_rx_append_allocator,
     allocator_ptr_addr: usize = 0,
     allocator_vtable_addr: usize = 0,
@@ -947,8 +947,8 @@ pub const PreparedRxAppend = struct {
     cleanup_replacement: ?[]u8 = null,
     replacement_guard: ?ReplacementAllocationGuard = null,
     replacement_authority_seal: ReplacementAuthoritySeal = .{},
-    cleanup_digest: owner_seal.Digest = [_]u8{0} ** 32,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    cleanup_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: PreparedAppendLifecycle = .empty,
     completion: PreparedAdmitCompletion = .pristine,
     quarantine_outcome_tag: GuardedQuarantineOutcomeTag =
@@ -989,7 +989,7 @@ pub const RxParseScratch = struct {
     frame_start_absolute: u64 = 0,
     frame_end_absolute: u64 = 0,
     header: ?protocol.Header = null,
-    frame_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    frame_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     allocator: std.mem.Allocator = std.heap.page_allocator,
     allocator_ptr_addr: usize = 0,
     allocator_vtable_addr: usize = 0,
@@ -997,7 +997,7 @@ pub const RxParseScratch = struct {
     payload_len: usize = 0,
     payload: ?[]u8 = null,
     cleanup_payload: ?[]u8 = null,
-    cleanup_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    cleanup_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: PreparedLifecycle = .empty,
 
     pub fn deinit(self: *RxParseScratch) void {
@@ -1057,7 +1057,7 @@ pub const PayloadAllocationGuard = struct {
 
 pub const ReplacementAuthoritySeal = struct {
     generation: u64 = 0,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const ReplacementGuardPhase = enum {
@@ -1219,7 +1219,7 @@ pub const testing = if (builtin.is_test) struct {
         const SyntheticGuard = struct {
             seal: ReplacementAuthoritySeal = .{
                 .generation = 1,
-                .digest = [_]u8{0x39} ** 32,
+                .digest = @as([32]u8, @splat(0x39)),
             },
 
             fn check(
@@ -1430,10 +1430,10 @@ fn appendDigest(prepared: *const PreparedRxAppend) owner_seal.Digest {
     writer.writeU64(prepared.replacement_authority_seal.generation);
     writer.writeBytes(&prepared.replacement_authority_seal.digest);
     writer.writeBytes(&prepared.cleanup_digest);
-    writer.writeU8(@intFromEnum(prepared.lifecycle));
-    writer.writeU8(@intFromEnum(prepared.completion));
-    writer.writeU8(@intFromEnum(prepared.quarantine_outcome_tag));
-    writer.writeU8(@intFromEnum(prepared.quarantine_phase));
+    writer.writeU8(@backingInt(prepared.lifecycle));
+    writer.writeU8(@backingInt(prepared.completion));
+    writer.writeU8(@backingInt(prepared.quarantine_outcome_tag));
+    writer.writeU8(@backingInt(prepared.quarantine_phase));
     writer.writeUsize(prepared.quarantine_upper_bound);
     return writer.finish();
 }
@@ -1736,7 +1736,7 @@ pub const GuardedQuarantineAccountingReceipt = struct {
     quarantined_bytes_upper_bound: usize = 0,
     latch_generation: u64 = 0,
     lifecycle: GuardedQuarantineReceiptLifecycle = .empty,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub fn guardedQuarantineReceiptPristine(
@@ -1756,11 +1756,11 @@ fn guardedQuarantineReceiptDigest(
     var writer = owner_seal.Writer.init("MARUGQR1");
     writer.writeUsize(receipt.saved_self_addr);
     writer.writeUsize(receipt.prepared_addr);
-    writer.writeU8(@intFromEnum(receipt.outcome_tag));
-    writer.writeU8(@intFromEnum(receipt.phase));
+    writer.writeU8(@backingInt(receipt.outcome_tag));
+    writer.writeU8(@backingInt(receipt.phase));
     writer.writeUsize(receipt.quarantined_bytes_upper_bound);
     writer.writeU64(receipt.latch_generation);
-    writer.writeU8(@intFromEnum(receipt.lifecycle));
+    writer.writeU8(@backingInt(receipt.lifecycle));
     return writer.finish();
 }
 
@@ -2396,8 +2396,8 @@ fn appendPreparedValid(
         return false;
     return prepared.cleanup_replacement == null and
         prepared.replacement_addr == 0 and prepared.replacement_len == 0 and
-        std.mem.eql(u8, &prepared.bytes_digest, &([_]u8{0} ** 32)) and
-        std.mem.eql(u8, &prepared.unread_digest, &([_]u8{0} ** 32)) and
+        std.mem.eql(u8, &prepared.bytes_digest, &(@as([32]u8, @splat(0)))) and
+        std.mem.eql(u8, &prepared.unread_digest, &(@as([32]u8, @splat(0)))) and
         next_items_len <= parser.buf.capacity;
 }
 
@@ -3029,7 +3029,7 @@ const GuardedSourceSnapshot = struct {
         writer.writeU64(self.provenance.rx_absolute_next);
         writer.writeU64(self.provenance.buffer_start_absolute);
         writer.writeUsize(self.provenance.resident_cap);
-        writer.writeUsize(@intFromEnum(self.provenance.lifecycle));
+        writer.writeUsize(@backingInt(self.provenance.lifecycle));
         writer.writeBytes(&self.provenance.parser_seal.digest);
         writer.writeUsize(@intFromPtr(self.allocator.ptr));
         writer.writeUsize(@intFromPtr(self.allocator.vtable));
@@ -3513,6 +3513,7 @@ pub fn commitPreparedAdmitGuarded(
     parser.buf = .{
         .items = frozen.replacement[0..final_items_len],
         .capacity = frozen.replacement.len,
+        .pointer_stability = .{},
     };
     parser.head = 0;
     state.rx_provenance.rx_absolute_next = next_absolute;
@@ -4370,7 +4371,7 @@ const TestReplacementGuard = struct {
     fault: Fault = .none,
     seal: ReplacementAuthoritySeal = .{
         .generation = 1,
-        .digest = [_]u8{0x5a} ** 32,
+        .digest = @as([32]u8, @splat(0x5a)),
     },
 
     fn check(
@@ -4390,7 +4391,7 @@ const TestReplacementGuard = struct {
             self.prepared.?.replacement = null;
             self.prepared.?.cleanup_replacement = null;
             self.prepared.?.allocator = pristine_rx_append_allocator;
-            self.prepared.?.digest = [_]u8{0} ** 32;
+            self.prepared.?.digest = @as([32]u8, @splat(0));
         }
         if (self.reject_phase == phase) return .quarantined;
         if (self.fault == .wrong_capture_tag and
@@ -4524,7 +4525,7 @@ fn exactParserForGuardedAdmitTest(
     if (bytes.len == 0) return parser;
     const backing = try allocator.alloc(u8, bytes.len);
     @memcpy(backing, bytes);
-    parser.buf = .{ .items = backing, .capacity = backing.len };
+    parser.buf = .{ .items = backing, .capacity = backing.len, .pointer_stability = .{} };
     return parser;
 }
 
@@ -4967,7 +4968,7 @@ test "guarded RX admit rejects every local owner alias before typed conversion" 
         try bindParserForTest(
             &state,
             &parser,
-            @as(u64, 321) + @as(u64, @intFromEnum(target)),
+            @as(u64, 321) + @as(u64, @backingInt(target)),
             &destination_slot,
         );
         try setResidentCapForTest(&state, &parser, 6);
@@ -5075,7 +5076,7 @@ test "guarded RX admit rejects wrong guard tags and invalid authority seals" {
         try bindParserForTest(
             &state,
             &parser,
-            @as(u64, 317) + @as(u64, @intFromEnum(fault)),
+            @as(u64, 317) + @as(u64, @backingInt(fault)),
             &destination_slot,
         );
         try setResidentCapForTest(&state, &parser, 6);
@@ -5456,7 +5457,7 @@ test "corrupted replacement classification charges the hard cap exactly once" {
                 &parser,
                 338 +
                     @as(usize, @intFromBool(commits)) * 2 +
-                    @as(usize, @intFromEnum(corruption)),
+                    @as(usize, @backingInt(corruption)),
                 &destination_slot,
             );
             try setResidentCapForTest(&state, &parser, 6);
@@ -5701,7 +5702,7 @@ test "guarded RX admit rejects independently corrupted cleanup authorities" {
         try bindParserForTest(
             &state,
             &parser,
-            @as(u64, 329) + @as(u64, @intFromEnum(mutation)),
+            @as(u64, 329) + @as(u64, @backingInt(mutation)),
             &destination_slot,
         );
         try setResidentCapForTest(&state, &parser, 6);
@@ -5898,8 +5899,8 @@ test "prepared RX append uses callback-free spare capacity commit without conten
         &prepared,
     );
     try std.testing.expect(prepared.replacement == null);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &prepared.bytes_digest);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &prepared.unread_digest);
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &prepared.bytes_digest);
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &prepared.unread_digest);
     try commitPreparedAdmit(&state, &parser, &read_buffer, &prepared);
     try std.testing.expectEqual(backing, parser.buf.items.ptr);
     try std.testing.expectEqualStrings("xy", parser.buf.items);
@@ -6068,7 +6069,7 @@ test "range-aware RX parser charges optional skipped frame one exact range" {
     const allocator = std.testing.allocator;
     const wire = try framing.encodeFrame(
         allocator,
-        .{ .kind = @enumFromInt(55001), .flags = protocol.Flags.optional },
+        .{ .kind = @fromBackingInt(@intCast(55001)), .flags = protocol.Flags.optional },
         "ignored",
     );
     defer allocator.free(wire);
@@ -6211,7 +6212,7 @@ test "RX parser readiness treats exact 32-byte terminal outcomes as ready" {
         else if (std.mem.eql(u8, scenario, "wrong-major"))
             protocol.Header{ .kind = .ping, .major = protocol.version_major + 1 }
         else if (std.mem.eql(u8, scenario, "required-unknown"))
-            protocol.Header{ .kind = @enumFromInt(55002) }
+            protocol.Header{ .kind = @fromBackingInt(@intCast(55002)) }
         else
             protocol.Header{
                 .kind = .response,
@@ -6308,7 +6309,7 @@ test "TX teardown callback drift stops remaining frees and charges one sealed tr
             .stream_id = @intCast(index + 1),
             .request_id = 0,
             .activated_at_ns = 10,
-            .wire_digest = [_]u8{0} ** 32,
+            .wire_digest = @as([32]u8, @splat(0)),
             .descriptor_digest = undefined,
         };
         frame.descriptor_digest = txFrameDescriptorDigest(frame);
@@ -6458,7 +6459,7 @@ test "TX teardown matrix stops at first or last scalar descriptor allocator and 
                         .stream_id = @intCast(index + 1),
                         .request_id = 0,
                         .activated_at_ns = 10,
-                        .wire_digest = [_]u8{0} ** 32,
+                        .wire_digest = @as([32]u8, @splat(0)),
                         .descriptor_digest = undefined,
                     };
                     frame.descriptor_digest =
@@ -6627,7 +6628,7 @@ test "TX teardown permits unrelated states to clean concurrently without quarant
             .stream_id = @intCast(index + 1),
             .request_id = 0,
             .activated_at_ns = 10,
-            .wire_digest = [_]u8{0} ** 32,
+            .wire_digest = @as([32]u8, @splat(0)),
             .descriptor_digest = undefined,
         };
         frame.descriptor_digest = txFrameDescriptorDigest(frame);
@@ -6747,7 +6748,7 @@ test "TX teardown serializes the same state across threads without double free" 
         .stream_id = 1,
         .request_id = 0,
         .activated_at_ns = 10,
-        .wire_digest = [_]u8{0} ** 32,
+        .wire_digest = @as([32]u8, @splat(0)),
         .descriptor_digest = undefined,
     };
     frame.descriptor_digest = txFrameDescriptorDigest(frame);
@@ -7114,7 +7115,7 @@ test "TX teardown detects queue-backing free callback drift after exact cleanup"
         .stream_id = 1,
         .request_id = 0,
         .activated_at_ns = 10,
-        .wire_digest = [_]u8{0} ** 32,
+        .wire_digest = @as([32]u8, @splat(0)),
         .descriptor_digest = undefined,
     };
     frame.descriptor_digest = txFrameDescriptorDigest(frame);
@@ -7223,7 +7224,7 @@ test "TX teardown rejects exact and partial-overlap frozen graphs without a fram
                 .stream_id = @intCast(index + 1),
                 .request_id = 0,
                 .activated_at_ns = 10,
-                .wire_digest = [_]u8{0} ** 32,
+                .wire_digest = @as([32]u8, @splat(0)),
                 .descriptor_digest = undefined,
             };
             frame.descriptor_digest = txFrameDescriptorDigest(frame);
@@ -7324,7 +7325,7 @@ test "TX teardown at exhausted generation frees one and sixty-four frames exactl
                 .stream_id = @intCast(index + 1),
                 .request_id = 0,
                 .activated_at_ns = 10,
-                .wire_digest = [_]u8{0} ** 32,
+                .wire_digest = @as([32]u8, @splat(0)),
                 .descriptor_digest = undefined,
             };
             frame.descriptor_digest = txFrameDescriptorDigest(frame);

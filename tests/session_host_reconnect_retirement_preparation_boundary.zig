@@ -94,8 +94,8 @@ test "CR5b-2a 경계는 all-runtime prepare와 reverse abort만 열고 shared re
     try std.testing.expectEqual(@as(usize, 0), count(prepare, "publishHostReconnectReplacement("));
     const shared_state = between(
         backend,
-        "@intFromEnum(HostReconnectJobState.shared_replacement_reserved) => {",
-        "@intFromEnum(HostReconnectJobState.replacement_published) => {",
+        "@backingInt(HostReconnectJobState.shared_replacement_reserved) => {",
+        "@backingInt(HostReconnectJobState.replacement_published) => {",
     ) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(
         @as(usize, 1),

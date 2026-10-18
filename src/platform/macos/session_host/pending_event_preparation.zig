@@ -50,7 +50,7 @@ pub const ProtectedRole = enum(u8) {
 
 pub const ProtectedRange = struct {
     role_raw: u8 = 0,
-    reserved: [7]u8 = [_]u8{0} ** 7,
+    reserved: [7]u8 = @as([7]u8, @splat(0)),
     start: u64 = 0,
     end_exclusive: u64 = 0,
 };
@@ -58,9 +58,9 @@ pub const ProtectedRange = struct {
 pub const RangeError = error{ InvalidRole, DuplicateRole, Overflow, Capacity, InvalidAlignment };
 
 pub const ProtectedRangeBuilder = struct {
-    inputs: [max_protected_inputs]ProtectedRange = [_]ProtectedRange{.{}} ** max_protected_inputs,
+    inputs: [max_protected_inputs]ProtectedRange = @as([max_protected_inputs]ProtectedRange, @splat(.{})),
     input_count: u8 = 0,
-    segments: [max_protected_inputs]ProtectedRange = [_]ProtectedRange{.{}} ** max_protected_inputs,
+    segments: [max_protected_inputs]ProtectedRange = @as([max_protected_inputs]ProtectedRange, @splat(.{})),
     segment_count: u8 = 0,
 
     pub fn add(self: *ProtectedRangeBuilder, role: ProtectedRole, start: u64, len: u64) RangeError!void {
@@ -69,10 +69,10 @@ pub const ProtectedRangeBuilder = struct {
         const end = std.math.add(u64, start, len) catch return error.Overflow;
         if (end == 0) return error.Overflow;
         for (self.inputs[0..self.input_count]) |value|
-            if (value.role_raw == @intFromEnum(role)) return error.DuplicateRole;
+            if (value.role_raw == @backingInt(role)) return error.DuplicateRole;
         if (self.input_count == max_protected_inputs) return error.Capacity;
         self.inputs[self.input_count] = .{
-            .role_raw = @intFromEnum(role),
+            .role_raw = @backingInt(role),
             .start = start,
             .end_exclusive = end,
         };
@@ -80,7 +80,7 @@ pub const ProtectedRangeBuilder = struct {
     }
 
     pub fn canonicalize(self: *ProtectedRangeBuilder) void {
-        self.segments = [_]ProtectedRange{.{}} ** max_protected_inputs;
+        self.segments = @as([max_protected_inputs]ProtectedRange, @splat(.{}));
         self.segment_count = 0;
         var ordered = self.inputs;
         std.mem.sort(ProtectedRange, ordered[0..self.input_count], {}, lessRange);
@@ -148,7 +148,7 @@ pub fn snapshotBytes(list: anytype) SnapshotError!BufferSnapshot {
     const capacity = std.math.mul(u64, list.capacity, @sizeOf(T)) catch return error.InvalidDescriptor;
     if (list.items.len > list.capacity)
         return error.InvalidDescriptor;
-    var digest: cleanup.Digest = [_]u8{0} ** 32;
+    var digest: cleanup.Digest = @as([32]u8, @splat(0));
     if (len != 0) std.crypto.hash.Blake3.hash(std.mem.sliceAsBytes(list.items), &digest, .{});
     return .{
         .address = if (capacity == 0) 0 else @intFromPtr(list.items.ptr),
@@ -265,7 +265,7 @@ pub fn recipeFromSourceView(view: generation_event.PreparationEventView) event_p
 pub const PreparationScratch = struct {
     dto_backing: std.ArrayListUnmanaged(u8) = .empty,
     next_observation: RuntimeObservation = .{},
-    descriptors: [allocation_role_count]cleanup.CleanupDescriptor = [_]cleanup.CleanupDescriptor{.{}} ** allocation_role_count,
+    descriptors: [allocation_role_count]cleanup.CleanupDescriptor = @as([allocation_role_count]cleanup.CleanupDescriptor, @splat(.{})),
     live_mask: u8 = 0,
     tombstone_mask: u8 = 0,
 
@@ -353,11 +353,11 @@ pub const PreparationAllocatorContext = struct {
     allocator: std.mem.Allocator,
     expected_role_raw: u8 = 0,
     callback_active_raw: u8 = 0,
-    reserved: [6]u8 = [_]u8{0} ** 6,
+    reserved: [6]u8 = @as([6]u8, @splat(0)),
     requested_len: u64 = 0,
     alignment_log2: u8 = 0,
     callback_ordinal: u8 = 0,
-    reserved_tail: [6]u8 = [_]u8{0} ** 6,
+    reserved_tail: [6]u8 = @as([6]u8, @splat(0)),
 
     fn guardedAllocator(self: *PreparationAllocatorContext) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &guarded_allocator_vtable };
@@ -383,7 +383,7 @@ fn guardedAlloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, r
     frame.validateOrFatal();
     if (allocator_context.callback_active_raw != 1 or
         allocator_context.requested_len != len or
-        allocator_context.alignment_log2 != @intFromEnum(alignment))
+        allocator_context.alignment_log2 != @backingInt(alignment))
         process_seal.fatalIntegrity(.callback_drift);
     const candidate_or_null = allocator_context.allocator.rawAlloc(len, alignment, return_address);
     // The allocator is hostile: re-establish the sealed frame before reading any callback-visible
@@ -393,7 +393,7 @@ fn guardedAlloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, r
     if (!frame.protected_ranges.candidateAllowed(
         @intFromPtr(candidate),
         len,
-        @intFromEnum(alignment),
+        @backingInt(alignment),
     )) process_seal.fatalIntegrity(.callback_drift);
     const external_allowed = generation_event.preparationCandidateAllowed(
         frame.context.source_owner,
@@ -418,11 +418,11 @@ fn guardedFree(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, 
     const frame = allocatorFrame(context);
     frame.validateOrFatal();
     if (allocator_context.callback_active_raw != 1 or allocator_context.expected_role_raw >= allocation_role_count or
-        allocator_context.requested_len != memory.len or allocator_context.alignment_log2 != @intFromEnum(alignment))
+        allocator_context.requested_len != memory.len or allocator_context.alignment_log2 != @backingInt(alignment))
         process_seal.fatalIntegrity(.callback_drift);
     const descriptor = frame.scratch.descriptors[allocator_context.expected_role_raw];
     if (descriptor.present != 1 or descriptor.address != @intFromPtr(memory.ptr) or
-        descriptor.capacity_bytes != memory.len or descriptor.alignment_log2 != @intFromEnum(alignment) or
+        descriptor.capacity_bytes != memory.len or descriptor.alignment_log2 != @backingInt(alignment) or
         descriptor.allocator_ptr != @intFromPtr(allocator_context.allocator.ptr) or
         descriptor.allocator_vtable != @intFromPtr(allocator_context.allocator.vtable))
         process_seal.fatalIntegrity(.callback_drift);
@@ -575,9 +575,9 @@ pub fn mintSourceLease(receipt: PendingEventSourceReceipt, attempt: u64) SourceE
     var result: PendingEventSourceLease = .{
         .receipt = receipt,
         .state_raw = 1,
-        .reserved = [_]u8{0} ** 7,
+        .reserved = @as([7]u8, @splat(0)),
         .attempt = attempt,
-        .lease_seal = [_]u8{0} ** 32,
+        .lease_seal = @as([32]u8, @splat(0)),
     };
     result.lease_seal = process_seal.pendingSourceLeaseSeal(
         receipt.pid,
@@ -668,14 +668,14 @@ fn receiptInput(receipt: PendingEventSourceReceipt) cleanup.PendingSourceReceipt
 
 fn pendingIdentity(value: cleanup.PendingEventIdentity) pending_owner.PendingEventIdentity {
     var result: pending_owner.PendingEventIdentity = .{};
-    inline for (std.meta.fields(cleanup.PendingEventIdentity)) |field|
+    inline for (@import("type_info_fields").fields(cleanup.PendingEventIdentity)) |field|
         @field(result, field.name) = @field(value, field.name);
     return result;
 }
 
 fn cleanupIdentity(value: pending_owner.PendingEventIdentity) cleanup.PendingEventIdentity {
     var result: cleanup.PendingEventIdentity = std.mem.zeroes(cleanup.PendingEventIdentity);
-    inline for (std.meta.fields(cleanup.PendingEventIdentity)) |field|
+    inline for (@import("type_info_fields").fields(cleanup.PendingEventIdentity)) |field|
         @field(result, field.name) = @field(value, field.name);
     return result;
 }
@@ -750,7 +750,7 @@ pub const PreparationFrame = struct {
     /// 포인터 경유 변경을 못 본다. 이 대조가 그 구멍을 닫고, ReleaseFast 에는 남지 않아 이 최적화가
     /// 없애려던 비용이 되살아나지 않는다.
     fn recipeDigestChecked(self: *const PreparationFrame) cleanup.Digest {
-        if (builtin.mode == .Debug or builtin.is_test) {
+        if (builtin.mode == .debug or builtin.is_test) {
             const now = rawDigest(.seal_recipe, recipe_digest_domain, std.mem.asBytes(&self.recipe));
             if (!std.crypto.timing_safe.eql(cleanup.Digest, now, self.recipe_digest_cache))
                 process_seal.fatalIntegrity(.callback_drift);
@@ -790,7 +790,7 @@ pub const PreparationFrame = struct {
     fn runtimeExtent(self: *const PreparationFrame) ?u64 {
         if (self.protected_ranges.input_count == 0) return null;
         const range = self.protected_ranges.inputs[0];
-        if (range.role_raw != @intFromEnum(ProtectedRole.remote_runtime) or
+        if (range.role_raw != @backingInt(ProtectedRole.remote_runtime) or
             range.start != self.context.runtime_addr or range.end_exclusive <= range.start) return null;
         return range.end_exclusive - range.start;
     }
@@ -819,11 +819,11 @@ pub fn initFrameInPlace(frame: *PreparationFrame, input: FrameInitInput, runtime
     frame.recipe = input.recipe;
     frame.recipe_digest_cache = rawDigest(.recipe_probe, recipe_digest_domain, std.mem.asBytes(&frame.recipe));
     frame.scratch = .{};
-    frame.dto_content_digest = [_]u8{0} ** 32;
+    frame.dto_content_digest = @as([32]u8, @splat(0));
     frame.transfer_projection_mask = 0;
-    frame.transfer_observation_digest = [_]u8{0} ** 32;
-    frame.transcript_mirror = [_]u8{0} ** 32;
-    frame.progress_mirror = [_]u8{0} ** 32;
+    frame.transfer_observation_digest = @as([32]u8, @splat(0));
+    frame.transcript_mirror = @as([32]u8, @splat(0));
+    frame.progress_mirror = @as([32]u8, @splat(0));
     frame.cleanup_descriptor = .{};
     frame.protected_ranges = .{};
     frame.protected_ranges.add(.remote_runtime, input.context.runtime_addr, runtime_extent) catch
@@ -833,7 +833,7 @@ pub fn initFrameInPlace(frame: *PreparationFrame, input: FrameInitInput, runtime
         .self_addr = @intFromPtr(&frame.allocator_context),
         .allocator = input.context.allocator,
     };
-    frame.frame_seal = [_]u8{0} ** 32;
+    frame.frame_seal = @as([32]u8, @splat(0));
     frame.seal();
 }
 
@@ -1038,7 +1038,7 @@ fn cleanupProgressInput(frame: *const PreparationFrame, transcript: cleanup.Clea
         if (frame.scratch.descriptors[role].present == 1 and
             completed & (@as(u8, 1) << @intCast(role)) == 0)
         {
-            next_role = @enumFromInt(role + 1);
+            next_role = @fromBackingInt(@intCast(role + 1));
             break;
         }
     }
@@ -1145,7 +1145,7 @@ fn roleAlignment(role: usize) std.mem.Alignment {
 }
 
 fn scratchProtectedRole(role: usize) ProtectedRole {
-    return @enumFromInt(@intFromEnum(ProtectedRole.dto_backing) + role);
+    return @fromBackingInt(@intCast(@backingInt(ProtectedRole.dto_backing) + role));
 }
 
 fn allocateFrameRole(frame: *PreparationFrame, role: usize, count: usize) AllocationError!void {
@@ -1155,7 +1155,7 @@ fn allocateFrameRole(frame: *PreparationFrame, role: usize, count: usize) Alloca
     frame.allocator_context.expected_role_raw = @intCast(role);
     frame.allocator_context.callback_active_raw = 1;
     frame.allocator_context.requested_len = bytes;
-    frame.allocator_context.alignment_log2 = @intFromEnum(alignment);
+    frame.allocator_context.alignment_log2 = @backingInt(alignment);
     frame.allocator_context.callback_ordinal = std.math.add(u8, frame.allocator_context.callback_ordinal, 1) catch
         process_seal.fatalIntegrity(.counter_exhausted);
     refreshCleanupEvidence(frame);
@@ -1167,7 +1167,7 @@ fn allocateFrameRole(frame: *PreparationFrame, role: usize, count: usize) Alloca
         return err;
     };
     const descriptor = descriptorForRole(&frame.scratch, frame.context.allocator, role);
-    if (descriptor.capacity_bytes != bytes or descriptor.alignment_log2 != @intFromEnum(alignment) or
+    if (descriptor.capacity_bytes != bytes or descriptor.alignment_log2 != @backingInt(alignment) or
         !frame.protected_ranges.candidateAllowed(descriptor.address, descriptor.capacity_bytes, descriptor.alignment_log2))
         process_seal.fatalIntegrity(.callback_drift);
     const external_allowed = generation_event.preparationCandidateAllowed(
@@ -1193,7 +1193,7 @@ fn freeFrameRole(frame: *PreparationFrame, role: usize) void {
     // fields inside the allocator callback. Its descriptor and allocator authority remain sealed.
     const live = frame.scratch.live_mask & (@as(u8, 1) << @intCast(role)) != 0;
     if (role == 0 and !std.mem.allEqual(u8, &frame.dto_content_digest, 0)) {
-        frame.dto_content_digest = [_]u8{0} ** 32;
+        frame.dto_content_digest = @as([32]u8, @splat(0));
         // The empty DTO has no allocator callback below, so publish the changed content-seal state
         // here. Allocated role 0 is resealed by the normal callback evidence refresh.
         if (!live) {
@@ -1297,7 +1297,7 @@ fn finishPublished(frame: *PreparationFrame, attempt: u64, decision: prepared_ty
             frame.scratch.descriptors[role] = .{};
         }
         frame.transfer_projection_mask = 0;
-        frame.transfer_observation_digest = [_]u8{0} ** 32;
+        frame.transfer_observation_digest = @as([32]u8, @splat(0));
     }
     settleSourceLease(&frame.source_lease_mirror, true);
     frame.context.lifetime_owner.consume(&frame.operation_lease);
@@ -1328,7 +1328,7 @@ fn metadataEqualsCurrent(
         current.observer_generation != metadata.observer_generation or current.title_generation != metadata.title_generation or
         current.size.cols != metadata.cols or current.size.rows != metadata.rows or
         current.ssh_remote_dest_present != (metadata.ssh_remote_dest_present_raw == 1) or
-        @intFromEnum(current.semantic_state) != metadata.semantic_state_raw or
+        @backingInt(current.semantic_state) != metadata.semantic_state_raw or
         current.alt_active != (metadata.alt_active_raw == 1) or current.app_cursor_keys != (metadata.app_cursor_keys_raw == 1) or
         current.app_keypad != (metadata.app_keypad_raw == 1) or @as(u8, current.kitty_flags) != metadata.kitty_flags_raw or
         current.alternate_scroll != (metadata.alternate_scroll_raw == 1) or current.mouse_tracking != (metadata.mouse_tracking_raw == 1) or
@@ -1390,7 +1390,7 @@ fn prepareMetadata(frame: *PreparationFrame, attempt: u64, metadata: event_prepa
     @memset(frame.scratch.dto_backing.items, 0);
     frame.seal();
     var processes: [event_preparation.max_process_entries]event_preparation.FilledProcess =
-        [_]event_preparation.FilledProcess{.{}} ** event_preparation.max_process_entries;
+        @as([event_preparation.max_process_entries]event_preparation.FilledProcess, @splat(.{}));
     const classification = classificationFromSourceView(frame.context.source_view);
     const fill = event_preparation.fillMetadataRecipe(
         &metadata,
@@ -1445,7 +1445,7 @@ fn prepareMetadata(frame: *PreparationFrame, attempt: u64, metadata: event_prepa
     next.title_generation = metadata.title_generation;
     next.size = .{ .cols = metadata.cols, .rows = metadata.rows };
     next.ssh_remote_dest_present = metadata.ssh_remote_dest_present_raw == 1;
-    next.semantic_state = @enumFromInt(metadata.semantic_state_raw);
+    next.semantic_state = @fromBackingInt(@intCast(metadata.semantic_state_raw));
     next.alt_active = metadata.alt_active_raw == 1;
     next.app_cursor_keys = metadata.app_cursor_keys_raw == 1;
     next.app_keypad = metadata.app_keypad_raw == 1;
@@ -1595,11 +1595,11 @@ const DigestSite = enum {
     recipe_probe,
 };
 
-var digest_site_calls = [_]u64{0} ** @typeInfo(DigestSite).@"enum".fields.len;
-var digest_site_bytes = [_]u64{0} ** @typeInfo(DigestSite).@"enum".fields.len;
+var digest_site_calls = @as([@import("type_info_fields").enumFields(DigestSite).len]u64, @splat(0));
+var digest_site_bytes = @as([@import("type_info_fields").enumFields(DigestSite).len]u64, @splat(0));
 
 fn noteDigestSite(site: DigestSite, bytes: usize) void {
-    const index = @intFromEnum(site);
+    const index = @backingInt(site);
     _ = @atomicRmw(u64, &digest_site_calls[index], .Add, 1, .monotonic);
     _ = @atomicRmw(u64, &digest_site_bytes[index], .Add, bytes, .monotonic);
 }
@@ -1611,10 +1611,10 @@ pub const DigestSiteSample = struct {
 };
 
 /// 자리별 누적을 그대로 낸다(차분은 호출부가 낸다 — 여기서 상태를 더 들면 소유자가 둘이 된다).
-pub const digest_site_count = @typeInfo(DigestSite).@"enum".fields.len;
+pub const digest_site_count = @import("type_info_fields").enumFields(DigestSite).len;
 
 pub fn digestSiteSamples(out: *[digest_site_count]DigestSiteSample) void {
-    inline for (@typeInfo(DigestSite).@"enum".fields, 0..) |field, i| {
+    inline for (@import("type_info_fields").enumFields(DigestSite), 0..) |field, i| {
         out[i] = .{
             .name = field.name,
             .calls = @atomicLoad(u64, &digest_site_calls[i], .monotonic),
@@ -1661,7 +1661,7 @@ pub const admission_rows = 23;
 fn baseBuilder(base_count: usize) !ProtectedRangeBuilder {
     var builder: ProtectedRangeBuilder = .{};
     for (0..base_count) |index|
-        try builder.add(@enumFromInt(index), 0x1000 + index * 0x100, 0x40);
+        try builder.add(@fromBackingInt(@intCast(index)), 0x1000 + index * 0x100, 0x40);
     builder.canonicalize();
     return builder;
 }
@@ -1721,7 +1721,7 @@ test "C3-3b2b3 preparation pending control digest uses semantic canonical bytes"
 
 test "C3-3b2b3 preparation allocation schedule visits all ordinals" {
     var scratch: PreparationScratch = .{};
-    try allocateSchedule(&scratch, std.testing.allocator, [_]usize{1} ** 8);
+    try allocateSchedule(&scratch, std.testing.allocator, @as([8]usize, @splat(1)));
     try std.testing.expectEqual(@as(u8, 0xff), scratch.live_mask);
     scratch.cleanupReverse(std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0xff), scratch.tombstone_mask);
@@ -1731,14 +1731,14 @@ test "C3-3b2b3 preparation every allocation ordinal OOM rolls back" {
     for (0..allocation_role_count) |fail_index| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
         var scratch: PreparationScratch = .{};
-        try std.testing.expectError(error.OutOfMemory, allocateSchedule(&scratch, failing.allocator(), [_]usize{1} ** 8));
+        try std.testing.expectError(error.OutOfMemory, allocateSchedule(&scratch, failing.allocator(), @as([8]usize, @splat(1))));
         try std.testing.expectEqual(@as(u8, 0), scratch.live_mask);
     }
 }
 
 test "C3-3b2b3 preparation reverse cleanup is idempotent after empty" {
     var scratch: PreparationScratch = .{};
-    try allocateSchedule(&scratch, std.testing.allocator, [_]usize{1} ** 8);
+    try allocateSchedule(&scratch, std.testing.allocator, @as([8]usize, @splat(1)));
     scratch.cleanupReverse(std.testing.allocator);
     scratch.cleanupReverse(std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), scratch.live_mask);
@@ -1747,7 +1747,7 @@ test "C3-3b2b3 preparation reverse cleanup is idempotent after empty" {
 test "C3-3b2b3 preparation frame owns exact protected substrate" {
     try std.testing.expectEqual(
         @as(usize, 21),
-        @typeInfo(@typeInfo(ProtectedRangeBuilder).@"struct".fields[0].type).array.len,
+        @typeInfo(@import("type_info_fields").structFields(ProtectedRangeBuilder)[0].type).array.len,
     );
     try std.testing.expect(@sizeOf(PreparationFrame) > @sizeOf(PreparationScratch));
     const expected_snapshot_fields = .{
@@ -1756,7 +1756,7 @@ test "C3-3b2b3 preparation frame owns exact protected substrate" {
         "pending_controls",   "blocking_flush_active_raw", "resize_generation",   "resize_baseline_present_raw",
         "operation_identity", "source_identity",
     };
-    const actual_snapshot_fields = std.meta.fields(RuntimeSemanticSnapshot);
+    const actual_snapshot_fields = @import("type_info_fields").fields(RuntimeSemanticSnapshot);
     try std.testing.expectEqual(expected_snapshot_fields.len, actual_snapshot_fields.len);
     inline for (expected_snapshot_fields, 0..) |name, index|
         try std.testing.expectEqualStrings(name, actual_snapshot_fields[index].name);
@@ -1765,7 +1765,7 @@ test "C3-3b2b3 preparation frame owns exact protected substrate" {
         "direct_input",            "direct_input_offset", "pending_controls", "blocking_flush_active", "resize_generation",
         "resize_baseline_present", "source_owner",        "source_view",      "correlation",
     };
-    const actual_context_fields = std.meta.fields(RuntimePreparationContext);
+    const actual_context_fields = @import("type_info_fields").fields(RuntimePreparationContext);
     try std.testing.expectEqual(expected_context_fields.len, actual_context_fields.len);
     inline for (expected_context_fields, 0..) |name, index|
         try std.testing.expectEqualStrings(name, actual_context_fields[index].name);
@@ -1805,7 +1805,7 @@ test "C3-3b2b3 preparation frame owns exact protected substrate" {
         std.mem.zeroes(cleanup.RuntimeOperationIdentity),
         std.mem.zeroes(cleanup.PendingEventIdentity),
     );
-    inline for (std.meta.fields(RuntimeSemanticSnapshot)) |field| {
+    inline for (@import("type_info_fields").fields(RuntimeSemanticSnapshot)) |field| {
         var changed = canonical;
         std.mem.asBytes(&@field(changed, field.name))[0] ^= 1;
         try std.testing.expect(!std.meta.eql(canonical, changed));
@@ -1822,7 +1822,7 @@ test "C3-3b2b3 preparation frame owns exact protected substrate" {
         .owner_incarnation = 0,
         .operation_incarnation = 0,
         .operation_kind_raw = 0,
-        .operation_seal = [_]u8{0} ** 32,
+        .operation_seal = @as([32]u8, @splat(0)),
     }, std.mem.zeroes(cleanup.PendingEventIdentity))));
     var identity_view = context.source_view;
     identity_view.trusted.wire_major = identity_view.event.wire_major;
@@ -1838,8 +1838,8 @@ test "C3-3b2b3 preparation budget delegates four and three part limits" {
     const result = try prepared.checkBudget(.{
         .payload_len = 1,
         .dto_capacity = 1,
-        .next_capacity = [_]u64{0} ** 7,
-        .old_capacity = [_]u64{0} ** 7,
+        .next_capacity = @as([7]u64, @splat(0)),
+        .old_capacity = @as([7]u64, @splat(0)),
         .old_owner_exact = true,
     });
     try std.testing.expectEqual(@as(u64, 2), result.prepare_peak);
@@ -1890,7 +1890,7 @@ test "C3-3b2b3 preparation budget delegates four and three part limits" {
     };
     for (decisions) |decision| {
         var progress: cleanup.CleanupProgressInput = undefined;
-        progress.retained_observation_digest = [_]u8{0} ** 32;
+        progress.retained_observation_digest = @as([32]u8, @splat(0));
         progress.decision = .{};
         if (std.meta.activeTag(decision.projection) == .metadata_commit)
             progress.retained_observation_digest[0] = 1;
@@ -1990,9 +1990,9 @@ test "C3-3b2b3 hostile source lease table executes all 12 authority attacks" {
     const event_identity: cleanup.PendingEventIdentity = .{
         .expected_major = 2,
         .metadata_support_raw = 1,
-        .correlation_binding_digest = [_]u8{1} ** 32,
+        .correlation_binding_digest = @as([32]u8, @splat(1)),
         .payload_digest = runtime_event_wire.payloadDigest(&payload),
-        .admission_projection_digest = [_]u8{2} ** 32,
+        .admission_projection_digest = @as([32]u8, @splat(2)),
         .wire_major = 2,
         .admission_tag = 1,
         .registry_incarnation = 1,
@@ -2141,9 +2141,9 @@ fn childFrameFailStop(
     const identity: cleanup.PendingEventIdentity = .{
         .expected_major = 2,
         .metadata_support_raw = 1,
-        .correlation_binding_digest = [_]u8{1} ** 32,
+        .correlation_binding_digest = @as([32]u8, @splat(1)),
         .payload_digest = payload_digest,
-        .admission_projection_digest = [_]u8{2} ** 32,
+        .admission_projection_digest = @as([32]u8, @splat(2)),
         .wire_major = 2,
         .admission_tag = 1,
         .registry_incarnation = 1,
@@ -2234,12 +2234,12 @@ fn childFrameFailStop(
         .recipe = .{ .violation = .stale_preflight },
     }, 0x100);
     if (frame.protected_ranges.input_count != 1 or
-        frame.protected_ranges.inputs[0].role_raw != @intFromEnum(ProtectedRole.remote_runtime) or
+        frame.protected_ranges.inputs[0].role_raw != @backingInt(ProtectedRole.remote_runtime) or
         frame.protected_ranges.inputs[0].start != 0x1000 or
         frame.protected_ranges.inputs[0].end_exclusive != 0x1100) std.c._exit(125);
     rebuildBaseProtectedRanges(&frame);
     if (frame.protected_ranges.input_count < 4 or
-        frame.protected_ranges.inputs[0].role_raw != @intFromEnum(ProtectedRole.remote_runtime)) std.c._exit(125);
+        frame.protected_ranges.inputs[0].role_raw != @backingInt(ProtectedRole.remote_runtime)) std.c._exit(125);
     // Non-test topology sentinel: analyze the complete dormant orchestration without consuming the
     // authority used by the fork/proof-loss subprocess cases below.
     if (@intFromPtr(&frame) == 0) prepare(&frame) catch std.c._exit(125);
@@ -2292,8 +2292,8 @@ fn childFrameFailStop(
             if (attempt != 1) std.c._exit(125);
             pending.bindSourceLease(attempt, source_lease) catch std.c._exit(125);
             pending_owner.testing.retainAbortEvidenceForFixture(&pending, attempt);
-            if (pending.lifecycle_raw != @intFromEnum(pending_owner.PendingLifecycle.preparing) or
-                pending.source_lease.state_raw != @intFromEnum(pending_owner.PendingSourceLeaseState.aborted) or
+            if (pending.lifecycle_raw != @backingInt(pending_owner.PendingLifecycle.preparing) or
+                pending.source_lease.state_raw != @backingInt(pending_owner.PendingSourceLeaseState.aborted) or
                 !validateSourceLease(pending.source_lease))
                 std.c._exit(125);
             if (pending.beginPrepare(pendingIdentity(identity))) |_| {

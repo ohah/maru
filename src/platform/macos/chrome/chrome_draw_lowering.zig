@@ -221,7 +221,7 @@ pub fn richTextFingerprint(
             fingerprintMixValue(&state, @as(u32, @bitCast(text.origin.x)));
             fingerprintMixValue(&state, @as(u32, @bitCast(scrollRelativeY(text.origin.y, text.scroll_clipped, scroll_origin_y_px))));
             fingerprintMixValue(&state, packRgb(tk.get(text.role)));
-            fingerprintMixValue(&state, @intFromEnum(text.text_role));
+            fingerprintMixValue(&state, @backingInt(text.text_role));
             fingerprintMixValue(&state, @intFromBool(text.wide_icons));
             fingerprintMixValue(&state, @intFromBool(text.scroll_clipped));
             // 떠 있는 op은 절대 y와 자기 clip으로 그려진다. 둘 다 키에 있어야 밀려 나가는 동안
@@ -464,7 +464,7 @@ pub fn appendBackgroundQuadsWithTerminalOpacity(
             // 않는다 — 두 벌이 되면 방향이 조용히 뒤집힌다.
             const gradient_end: ?chrome.tokens.ColorRole = if (quad.gradient == .solid) null else quad.fill_role_end;
             const fill_end = if (gradient_end) |role| packRgba(tk.get(role), fill_alpha) else fill;
-            const gradient_kind: u32 = if (gradient_end == null) 0 else @intFromEnum(quad.gradient);
+            const gradient_kind: u32 = if (gradient_end == null) 0 else @backingInt(quad.gradient);
             // **색 없는 테두리는 폭도 0이다.** 여기서 null 역할을 RGBA 0으로 packing하는데 폭을 그대로
             // 넘기면, 셰이더가 그 띠를 투명하게 칠해 **그 자리가 뚫려 뒤가 비친다**. 버튼 배경이 아래
             // 표면과 같은 색이면 안 보이다가, 그 위에 호버 밴드처럼 다른 색이 깔리는 순간 어두운 링으로

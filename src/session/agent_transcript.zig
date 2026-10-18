@@ -22,6 +22,8 @@
 //!
 //! OS 중립이다 — `std.fs`만 쓰고 macOS 타입에 닿지 않는다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 
 /// 한 번에 읽는 파일 꼬리 크기. 실측(§7.4): 이 크기 안에 last-prompt 7건·assistant 텍스트 11건이 들어 있었다.
@@ -786,7 +788,7 @@ test "clampUtf8: 상한을 넘으면 글자 경계에서 자른다" {
 
 test "Owned: 상한을 넘겨도 넘치지 않고 앞부분을 남긴다" {
     var owned: Owned = .{};
-    const long = "x" ** (max_text_bytes * 2);
+    const long = array_repeat.repeat("x", (max_text_bytes * 2));
     owned.setReply(long);
     try testing.expectEqual(max_text_bytes, owned.reply().len);
 }
@@ -800,7 +802,7 @@ test "Owned: 같은 버퍼에 거듭 써도 값이 사라지지 않는다" {
     // **자리마다 따로 본다.** 섞어 쓰는 순서만 확인하면 셋 중 **하나만** 압축을 되돌려도 통과한다 —
     // 다른 자리의 압축이 `used`를 리셋해 주기 때문이다(실제로 그 약한 테스트를 먼저 썼고, 뮤테이션이
     // 그것을 드러냈다).
-    const long = "x" ** 400;
+    const long = array_repeat.repeat("x", 400);
     {
         var owned: Owned = .{};
         var i: usize = 0;
@@ -822,7 +824,7 @@ test "Owned: 같은 버퍼에 거듭 써도 값이 사라지지 않는다" {
 
     // 훅 모드의 실제 순서(프롬프트 → 지난 응답 비우기 → 새 응답)로도 셋이 함께 살아 있어야 한다.
     var owned: Owned = .{};
-    const reply = "x" ** 300;
+    const reply = array_repeat.repeat("x", 300);
     var turn: usize = 0;
     while (turn < 20) : (turn += 1) {
         owned.setPrompt("배포 스크립트 고쳐줘 — 사용자가 친 문장이 이만큼 길 수 있다");

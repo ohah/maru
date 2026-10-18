@@ -91,7 +91,7 @@ test "R2b2 actual publication is absent 0600 and never replaces an existing leaf
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);
     var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_storage, "{s}/receipt.json", .{root[0..root_len]});
+    const path = try std.fmt.bufPrintSentinel(&path_storage, "{s}/receipt.json", .{root[0..root_len]}, 0);
     _ = try receipt.parseAndPublish(std.testing.allocator, canonical_zero, expected(.gui_zero), path);
     const bytes = try tmp.dir.readFileAlloc(std.testing.io, "receipt.json", std.testing.allocator, .limited(receipt.max_receipt_bytes));
     defer std.testing.allocator.free(bytes);

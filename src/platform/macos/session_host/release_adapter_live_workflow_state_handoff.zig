@@ -140,13 +140,13 @@ fn hashU64(hash: *std.crypto.hash.Blake3, value: u64) void {
 }
 
 comptime {
-    if (@typeInfo(phase.Outcome).@"enum".fields.len != v1_outcomes.len)
+    if (@import("type_info_fields").enumFields(phase.Outcome).len != v1_outcomes.len)
         @compileError("workflow state v1 outcome inventory drift");
-    if (@typeInfo(phase.State).@"struct".fields.len != 5)
+    if (@import("type_info_fields").structFields(phase.State).len != 5)
         @compileError("workflow state v1 field inventory drift");
     for (v1_outcomes, 0..) |outcome, index| {
-        const field = @typeInfo(phase.Outcome).@"enum".fields[index];
-        if (@intFromEnum(outcome) != field.value or !std.mem.eql(u8, @tagName(outcome), field.name))
+        const field = @import("type_info_fields").enumFields(phase.Outcome)[index];
+        if (@backingInt(outcome) != field.value or !std.mem.eql(u8, @tagName(outcome), field.name))
             @compileError("workflow state v1 outcome order drift");
     }
 }

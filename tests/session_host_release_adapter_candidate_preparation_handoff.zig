@@ -162,7 +162,7 @@ const Fixture = struct {
 fn absolute(tmp: *std.testing.TmpDir, suffix: []const u8, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(out, "{s}/{s}", .{ root[0..len], suffix });
+    return std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ root[0..len], suffix }, 0);
 }
 
 test "preparation promotion is atomic semantically bound and survives source removal" {

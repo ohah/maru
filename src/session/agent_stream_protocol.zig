@@ -1,4 +1,6 @@
 //! Negotiated log profile and bounded metadata. Payload events remain opaque.
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const codec = @import("agent_log_generation.zig");
 const command = @import("agent_hook_command.zig");
@@ -123,7 +125,7 @@ test "generation cursor keeps full u64 and rejects absent invalid duplicate and 
 test "32 maximum generation cursors fit the shared budget without stripping ids" {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(testing.allocator);
-    var name = ("a" ** command.remote_log_name_max).*;
+    var name = (array_repeat.repeat("a", command.remote_log_name_max)).*;
     for (0..cursor_max) |i| {
         name[0] = "abcdefghijklmnopqrstuvwxyz012345"[i];
         try appendResume(&out, testing.allocator, &name, .{ .offset = std.math.maxInt(u64), .generation = try codec.decodeGeneration(gen) }, .v2);

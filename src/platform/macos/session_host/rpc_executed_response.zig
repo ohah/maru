@@ -104,10 +104,10 @@ pub const RpcExecutedResponse = struct {
     allocator_vtable: usize = 0,
     payload_addr: usize = 0,
     payload_len: usize = 0,
-    payload_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    payload_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     settlement: ByteSettlement = .pristine,
-    terminal_evidence: owner_seal.Digest = [_]u8{0} ** 32,
-    seal: owner_seal.Digest = [_]u8{0} ** 32,
+    terminal_evidence: owner_seal.Digest = @as([32]u8, @splat(0)),
+    seal: owner_seal.Digest = @as([32]u8, @splat(0)),
 
     pub const Error = error{
         DestinationOccupied,
@@ -424,8 +424,8 @@ pub const PreparedReusableRearmPermit = struct {
     response_addr: usize = 0,
     old_identity: Identity = std.mem.zeroes(Identity),
     old_epoch: u64 = 0,
-    expected_terminal_clean_owner_seal: owner_seal.Digest = [_]u8{0} ** 32,
-    expected_consumed_finish_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    expected_terminal_clean_owner_seal: owner_seal.Digest = @as([32]u8, @splat(0)),
+    expected_consumed_finish_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     consumed_raw: u8 = 0,
 
     pub fn pristineExact(self: *const @This()) bool {
@@ -491,8 +491,8 @@ pub const PreparedBorrowInit = struct {
     response_addr: usize = 0,
     borrow_addr: usize = 0,
     identity: Identity = std.mem.zeroes(Identity),
-    payload_digest: owner_seal.Digest = [_]u8{0} ** 32,
-    seal: owner_seal.Digest = [_]u8{0} ** 32,
+    payload_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
+    seal: owner_seal.Digest = @as([32]u8, @splat(0)),
 
     pub fn pristineExact(self: *const @This()) bool {
         return std.mem.eql(u8, std.mem.asBytes(self), std.mem.asBytes(&PreparedBorrowInit{}));
@@ -523,9 +523,9 @@ pub const RpcResponseBorrow = struct {
     request_id: u64 = 0,
     request_digest: u64 = 0,
     response_epoch: u64 = 0,
-    payload_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    payload_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     live: u8 = 0,
-    seal: owner_seal.Digest = [_]u8{0} ** 32,
+    seal: owner_seal.Digest = @as([32]u8, @splat(0)),
 
     pub fn pristineExact(self: *const @This()) bool {
         return std.mem.eql(u8, std.mem.asBytes(self), std.mem.asBytes(&RpcResponseBorrow{}));
@@ -554,11 +554,11 @@ pub const RpcResponseFinishTxn = struct {
     allocator_vtable: usize = 0,
     payload_addr: usize = 0,
     payload_len: usize = 0,
-    payload_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    payload_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     provenance: AllocationProvenance = std.mem.zeroes(AllocationProvenance),
     stage: FinishStage = .pristine,
-    terminal_evidence: owner_seal.Digest = [_]u8{0} ** 32,
-    seal: owner_seal.Digest = [_]u8{0} ** 32,
+    terminal_evidence: owner_seal.Digest = @as([32]u8, @splat(0)),
+    seal: owner_seal.Digest = @as([32]u8, @splat(0)),
 
     pub fn pristineExact(self: *const @This()) bool {
         return std.mem.eql(u8, std.mem.asBytes(self), std.mem.asBytes(&RpcResponseFinishTxn{}));
@@ -630,11 +630,11 @@ pub const RpcResponseFinishTxn = struct {
 };
 
 fn byteSettlementRawValid(value: *const ByteSettlement) bool {
-    return @as(*const u8, @ptrCast(value)).* <= @intFromEnum(ByteSettlement.terminal_no_free);
+    return @as(*const u8, @ptrCast(value)).* <= @backingInt(ByteSettlement.terminal_no_free);
 }
 
 fn finishStageRawValid(value: *const FinishStage) bool {
-    return @as(*const u8, @ptrCast(value)).* <= @intFromEnum(FinishStage.consumed);
+    return @as(*const u8, @ptrCast(value)).* <= @backingInt(FinishStage.consumed);
 }
 
 /// 응답 payload는 이 호출 동안에만 빌려 준다. callback 복귀 뒤 owner와 borrow를 다시
@@ -702,7 +702,7 @@ fn responseSeal(response: *const RpcExecutedResponse) owner_seal.Digest {
     writer.writeUsize(response.payload_addr);
     writer.writeUsize(response.payload_len);
     writer.writeBytes(&response.payload_digest);
-    writer.writeU8(@intFromEnum(response.settlement));
+    writer.writeU8(@backingInt(response.settlement));
     writer.writeBytes(&response.terminal_evidence);
     return writer.finish();
 }
@@ -750,7 +750,7 @@ fn finishSeal(txn: *const RpcResponseFinishTxn) owner_seal.Digest {
     writer.writeU64(txn.provenance.operation_incarnation);
     writer.writeU16(txn.provenance.index);
     writer.writeU64(txn.provenance.generation);
-    writer.writeU8(@intFromEnum(txn.stage));
+    writer.writeU8(@backingInt(txn.stage));
     writer.writeBytes(&txn.terminal_evidence);
     return writer.finish();
 }
@@ -777,8 +777,8 @@ fn writeIdentity(writer: *owner_seal.Writer, identity: Identity) void {
     writeBinding(writer, identity.binding);
     writer.writeUsize(identity.transport_addr);
     writer.writeU64(identity.transport_incarnation);
-    writer.writeU8(@intFromEnum(identity.family));
-    writer.writeU8(@intFromEnum(identity.tag));
+    writer.writeU8(@backingInt(identity.family));
+    writer.writeU8(@backingInt(identity.tag));
     writer.writeU64(identity.request_id);
     writer.writeU64(identity.request_digest);
     writer.writeU64(identity.response_epoch);
@@ -795,7 +795,7 @@ fn writeBinding(writer: *owner_seal.Writer, binding: contract.BindingIdentity) v
     writer.writeU128(binding.host_id);
     writer.writeU64(binding.connection_generation);
     writer.writeU128(binding.runtime_id);
-    writer.writeU8(@intFromEnum(binding.role));
+    writer.writeU8(@backingInt(binding.role));
     writer.writeU64(binding.pid);
     writer.writeU64(binding.process_nonce);
 }
@@ -1299,7 +1299,7 @@ test "B3-4/5 RPC owner rejects same-address epoch replay" {
         ),
     );
     const settlement_raw: *u8 = @ptrCast(&response.settlement);
-    var raw: u16 = @intFromEnum(ByteSettlement.terminal_no_free) + 1;
+    var raw: u16 = @backingInt(ByteSettlement.terminal_no_free) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         settlement_raw.* = @intCast(raw);
         try std.testing.expectError(

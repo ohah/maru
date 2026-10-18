@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const Translator = @import("translate_c").Translator;
 // build.zig.zon의 .version을 버전 단일 출처로 읽는다(인앱 새 버전 안내가 이 값과 GitHub
 // releases/latest tag를 비교 — distribution.md). 릴리스 시 .version만 올리면 앱 버전도 따라간다.
 const build_zig_zon = @import("build.zig.zon");
@@ -30,6 +31,8 @@ fn parseBoundaryShard(raw: ?[]const u8) ?BoundaryShard {
 /// 예전 이름 그대로 별칭을 둔다 — `build()` 본문은 한 글자도 바뀌지 않는다.
 const support = @import("build/support.zig");
 const addProjectTest = support.addProjectTest;
+const rootPath = support.rootPath;
+const addRunWithArtifactEnv = support.addRunWithArtifactEnv;
 const linkSessionHostNotificationAdapter = support.linkSessionHostNotificationAdapter;
 const attachPngCodec = support.attachPngCodec;
 const session_host_gates = @import("build/session_host_gates.zig");
@@ -64,6 +67,7 @@ fn isolateMacosProductTestAtRoot(run: *std.Build.Step.Run, home: []const u8, ses
 /// the product platform adapter. Product and macOS-host builds always use the Objective-C
 /// implementation above; this stub is never installed or executed.
 fn linkSessionHostNotificationCompileStub(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    support.attachSessionHostNotificationCImport(b, compile.root_module);
     compile.root_module.addIncludePath(b.path("src/platform/macos"));
     compile.root_module.addCSourceFile(.{
         .file = b.path("tests/fixtures/session_host_notification_adapter_compile_stub.c"),
@@ -106,7 +110,7 @@ const boundary_scans: []const BoundaryScan = &.{
     // 84개 판정자가 소스 트리를 걷고 스캔한다 — 실행이 시간의 본체라(로컬 Debug 40초 → ReleaseSafe 7초,
     // CI 84초) 안전 검사는 유지한 채 최적화한다. 제품 코드를 컴파일하지 않는 std 전용 판정자라 모드가 검사
     // 의미를 바꾸지 않는다(빌드 모드로 분기하는 코드 없음, 실측 2026-09-06).
-    .{ .root = "tests/boundary/imports.zig", .deps = &.{"build_graph"}, .optimize = .ReleaseSafe },
+    .{ .root = "tests/boundary/imports.zig", .deps = &.{"build_graph"}, .optimize = .safe },
 
     // chrome 셀 텍스트의 grapheme cluster 규율(CG1) — 셀을 만드는 함수가 문자열을 codepoint 단위로 디코드하면
     // NFD가 자모로 흩어진다(docs/grapheme-clustering.md §3.1a). import 경계와 같은 결의 소스 스캔이라 같은 step에 건다.
@@ -196,7 +200,7 @@ const boundary_scans: []const BoundaryScan = &.{
 
     // check-boundaries 가 두 모드 루프 안의 판정자를 **Debug 로만** 도는가. 규칙은 2026-08-17 에 섰지만
     // (`boundary_step` 선언 위 주석) 적어만 둔 탓에 루프 안 등록 38 개가 두 모드로 붙어 있었다(2026-09-25). 소스를 세는
-    // 판정자는 `if (x == .Debug)` 로 거르고, 제품을 돌리는 동작 테스트만 이름을 올려 예외로 둔다.
+    // 판정자는 `if (x == .debug)` 로 거르고, 제품을 돌리는 동작 테스트만 이름을 올려 예외로 둔다.
     .{ .root = "tests/boundary/boundary_debug_only.zig", .deps = &.{"build_graph"} },
 
     // 머지 충돌 마커가 커밋되지 않는가. 코드였다면 `zig build` 가 즉시 잡지만(문법 오류), 문서·스크립트는
@@ -275,6 +279,14 @@ pub fn build(b: *std.Build) void {
         .{};
     const target = b.standardTargetOptions(.{ .default_target = default_target_query });
     const optimize = b.standardOptimizeOption(.{});
+    // Zig 0.17 removed `value ** count`; sources use this named compatibility module
+    // so the same file is not imported as a relative source by several module roots.
+    support.setArrayRepeatModule(b.createModule(.{
+        .root_source_file = b.path("src/compat/array_repeat.zig"),
+    }));
+    support.setTypeInfoFieldsModule(b.createModule(.{
+        .root_source_file = b.path("src/compat/type_info_fields.zig"),
+    }));
 
     // **가짜 언어 서버**(tooling §8.2a 관측점) — `LSPB*` 가 `zig-out/bin/maru-fake-lsp` 를 `MARU_LSP_SERVER_OVERRIDE` 로 끼운다.
     // 그 판정자를 돌리는 run 스텝마다(`test-editor`·macOS 집계 샤드) 이 설치 단계에 의존해 판정자가 돌 때 늘 그 자리에 있다.
@@ -336,8 +348,17 @@ pub fn build(b: *std.Build) void {
     // `LICENSE` 한 파일에 MIT·Apache-2.0 전문이 둘 다 들어 있어 그것만 동봉하면 의무가 끝난다.
     const wuffs_license: ?std.Build.LazyPath =
         if (b.lazyDependency("wuffs", .{})) |dep| dep.path("LICENSE") else null;
-    const pcre2_license: ?std.Build.LazyPath =
-        if (b.lazyDependency("pcre2", .{})) |dep| dep.path("LICENCE.md") else null;
+    // PCRE2 10.48's upstream build.zig uses `Build.build_root`, removed in Zig
+    // 0.17. Use the separately pinned release archive so Zig does not compile
+    // that incompatible upstream build script; only C sources and license enter the build cache.
+    const pcre2_archive = b.path("vendor/third-party/pcre2-10.48.tar.gz");
+    const pcre2_extract = b.addSystemCommand(&.{ "tar", "-C" });
+    const pcre2_source_root = pcre2_extract.addOutputDirectoryArg2("pcre2-source", .{});
+    pcre2_extract.addArgs(&.{"-xzf"});
+    pcre2_extract.addFileArg2(pcre2_archive, .{});
+    pcre2_extract.addArg("--strip-components=1");
+    const pcre2_source_dir = pcre2_source_root.path(b, "src");
+    const pcre2_license: ?std.Build.LazyPath = pcre2_source_root.path(b, "LICENCE.md");
     var ts_core_license: ?std.Build.LazyPath = null;
     const GrammarLicense = struct { dep: []const u8, file: []const u8, path: std.Build.LazyPath };
     var grammar_licenses: std.ArrayList(GrammarLicense) = .empty;
@@ -348,7 +369,20 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const tree_sitter_api_header = b.addWriteFiles().add("tree_sitter_api_wrapper.h",
+        \\#include <tree_sitter/api.h>
+        \\
+    );
     if (b.lazyDependency("tree_sitter", .{})) |ts_dep| {
+        const tree_sitter_api = Translator.init(b.dependency("translate_c", .{}), .{
+            .name = "maru-tree-sitter-api",
+            .c_source_file = tree_sitter_api_header,
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        tree_sitter_api.addIncludePath(ts_dep.path("include"));
+        syntax_mod.addImport("tree_sitter_c", tree_sitter_api.mod);
         ts_core_license = ts_dep.path("LICENSE");
         // **세 경로를 다 준다 — 상류 자신의 레시피다**(`build.zig`의 `addIncludePath` 셋,
         // `binding_rust/build.rs`의 `.include()` 셋이 같은 목록이다). `include`만 주면 코어의
@@ -495,12 +529,126 @@ pub fn build(b: *std.Build) void {
     // 직접 못 읽는다. 빌드 import로 등록해 cli/ssh.zig가 @embedFile("maru_terminfo")로 바이너리에 심는다
     // (maru ssh 자기완결성 — 로컬 설치 없이 원격 전파). 파일을 옮기지 않아 참조 중복이 없다.
     attachPngCodec(b, maru_mod);
-    const pcre2_dep = b.lazyDependency("pcre2", .{ .target = target, .optimize = optimize, .linkage = .static, .support_jit = false });
-    const pcre2_lib: ?*std.Build.Step.Compile = if (pcre2_dep) |dep| dep.artifact("pcre2-8") else null;
-    if (pcre2_dep) |dep| {
-        maru_mod.addIncludePath(dep.path("src"));
-        maru_mod.linkLibrary(pcre2_lib.?);
+    const pcre2_header_dir = b.addWriteFiles();
+    const pcre2_header = pcre2_header_dir.addCopyFile(
+        pcre2_source_dir.path(b, "pcre2.h.generic"),
+        "pcre2.h",
+    );
+    const pcre2_config = b.addConfigHeader(.{
+        .style = .{ .cmake = pcre2_source_dir.path(b, "config-cmake.h.in") },
+        .include_path = "config.h",
+    }, .{
+        .HAVE_ASSERT_H = true,
+        .HAVE_DIRENT_H = target.result.os.tag != .windows or target.result.isMinGW(),
+        .HAVE_SYS_STAT_H = true,
+        .HAVE_SYS_TYPES_H = true,
+        .HAVE_UNISTD_H = target.result.os.tag != .windows or target.result.isMinGW(),
+        .HAVE_WINDOWS_H = target.result.os.tag == .windows,
+        .HAVE_MEMFD_CREATE = target.result.isMuslLibC() or target.result.isGnuLibC() or target.result.isFreeBSDLibC(),
+        .HAVE_SECURE_GETENV = target.result.isMuslLibC() or target.result.isGnuLibC() or target.result.isFreeBSDLibC(),
+        .HAVE_SETRLIMIT = target.result.os.tag != .windows and !target.result.isMinGW(),
+        .HAVE_BUILTIN_ASSUME = null,
+        .HAVE_BUILTIN_MUL_OVERFLOW = true,
+        .HAVE_BUILTIN_UNREACHABLE = true,
+        .HAVE_ATTRIBUTE_UNINITIALIZED = true,
+        .SUPPORT_PCRE2_8 = true,
+        .SUPPORT_PCRE2_16 = false,
+        .SUPPORT_PCRE2_32 = false,
+        .SUPPORT_UNICODE = true,
+        .SUPPORT_JIT = false,
+        .PCRE2_EXPORT = "__attribute__ ((visibility (\"default\")))",
+        .PCRE2_LINK_SIZE = 2,
+        .PCRE2_PARENS_NEST_LIMIT = 250,
+        .PCRE2_HEAP_LIMIT = 20000000,
+        .PCRE2_MAX_VARLOOKBEHIND = 255,
+        .PCRE2_MATCH_LIMIT = 10000000,
+        .PCRE2_MATCH_LIMIT_DEPTH = "MATCH_LIMIT",
+        .PCRE2GREP_BUFSIZE = 20480,
+        .PCRE2GREP_MAX_BUFSIZE = 1048576,
+        .NEWLINE_DEFAULT = 2,
+    });
+    const pcre2_module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    pcre2_module.addCMacro("HAVE_CONFIG_H", "");
+    pcre2_module.addCMacro("PCRE2_CODE_UNIT_WIDTH", "8");
+    pcre2_module.addCMacro("PCRE2_STATIC", "");
+    pcre2_module.addConfigHeader(pcre2_config);
+    pcre2_module.addIncludePath(pcre2_header_dir.getDirectory());
+    pcre2_module.addIncludePath(pcre2_source_dir);
+    const pcre2_chartables = b.addWriteFiles().addCopyFile(
+        pcre2_source_dir.path(b, "pcre2_chartables.c.dist"),
+        "pcre2_chartables.c",
+    );
+    pcre2_module.addCSourceFile(.{ .file = pcre2_chartables, .flags = &.{ "-fvisibility=hidden", "-fno-sanitize=undefined" } });
+    const pcre2_sources = [_][]const u8{
+        "pcre2_auto_possess.c",
+        "pcre2_chkdint.c",
+        "pcre2_compile.c",
+        "pcre2_compile_cgroup.c",
+        "pcre2_compile_class.c",
+        "pcre2_config.c",
+        "pcre2_context.c",
+        "pcre2_convert.c",
+        "pcre2_dfa_match.c",
+        "pcre2_error.c",
+        "pcre2_extuni.c",
+        "pcre2_find_bracket.c",
+        "pcre2_jit_compile.c",
+        "pcre2_maketables.c",
+        "pcre2_match.c",
+        "pcre2_match_data.c",
+        "pcre2_match_next.c",
+        "pcre2_newline.c",
+        "pcre2_ord2utf.c",
+        "pcre2_pattern_info.c",
+        "pcre2_script_run.c",
+        "pcre2_serialize.c",
+        "pcre2_string_utils.c",
+        "pcre2_study.c",
+        "pcre2_substitute.c",
+        "pcre2_substring.c",
+        "pcre2_tables.c",
+        "pcre2_ucd.c",
+        "pcre2_valid_utf.c",
+        "pcre2_xclass.c",
+    };
+    for (pcre2_sources) |source| {
+        pcre2_module.addCSourceFile(.{
+            .file = pcre2_source_dir.path(b, source),
+            .flags = &.{ "-fvisibility=hidden", "-fno-sanitize=undefined" },
+        });
     }
+    const pcre2_lib = b.addLibrary(.{
+        .name = "pcre2-8",
+        .root_module = pcre2_module,
+        .linkage = .static,
+    });
+    pcre2_lib.installHeader(pcre2_header, "pcre2.h");
+    maru_mod.addIncludePath(pcre2_source_dir);
+    maru_mod.linkLibrary(pcre2_lib);
+    const pcre2_translate_header = b.addWriteFiles().add("maru_pcre2_translate.h",
+        \\#define PCRE2_CODE_UNIT_WIDTH 8
+        \\#define PCRE2_STATIC 1
+        \\#include "pcre2.h.generic"
+        \\
+    );
+    const pcre2_api = Translator.init(b.dependency("translate_c", .{}), .{
+        .name = "maru-pcre2-api",
+        .c_source_file = pcre2_translate_header,
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    pcre2_api.defineCMacro("HAVE_CONFIG_H", null);
+    pcre2_api.defineCMacro("PCRE2_CODE_UNIT_WIDTH", "8");
+    pcre2_api.defineCMacro("PCRE2_STATIC", "1");
+    pcre2_api.addIncludePath(pcre2_source_dir);
+    pcre2_api.addIncludePath(pcre2_header_dir.getDirectory());
+    pcre2_api.addConfigHeader(pcre2_config);
+    maru_mod.addImport("pcre2_c", pcre2_api.mod);
     maru_mod.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
 
     // docs/configuration.md도 src/ 밖이라 @embedFile이 직접 못 읽는다. config 스키마 doc-drift 가드(CS-3,
@@ -519,7 +667,6 @@ pub fn build(b: *std.Build) void {
         //      또 주면 sysroot prefix와 이중 결합돼(…/SDK/…/SDK/usr/lib) 깨진다.
         // universal 빌드(arm64 + x86_64 lipo)에 필요하고, native에도 무해하다.
         maru_mod.addSystemFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}) });
-        if (b.sysroot == null) b.sysroot = sdk;
     }
     const test_support_mod = b.addModule("test_support", .{
         .root_source_file = b.path("tests/support/artifacts.zig"),
@@ -636,6 +783,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    support.attachArrayRepeatImports(b, exe.root_module);
 
     // W7.1: Win32 창은 user32/gdi32를 부른다. `extern "user32"`만으로는 이 exe에 import가 안 붙어
     // 호출이 조용히 실패한다(실측: `RegisterClassExW`도 시스템 `STATIC` 클래스 `CreateWindowExW`도
@@ -653,7 +801,7 @@ pub fn build(b: *std.Build) void {
         exe.root_module.linkSystemLibrary("imm32", .{});
     }
     if (target.result.os.tag == .macos) {
-        linkSessionHostNotificationAdapter(b, exe);
+        linkSessionHostNotificationAdapter(b, exe, macos_sdk);
     }
 
     b.installArtifact(exe);
@@ -669,10 +817,10 @@ pub fn build(b: *std.Build) void {
         const dll = "assets/windows/conpty/x64/conpty.dll";
         const host = "assets/windows/conpty/x64/OpenConsole.exe";
         const io = b.graph.io;
-        if (b.build_root.handle.access(io, dll, .{})) |_| {
+        if (b.root.access(io, dll, .{})) |_| {
             b.getInstallStep().dependOn(&b.addInstallBinFile(b.path(dll), "conpty.dll").step);
         } else |_| {}
-        if (b.build_root.handle.access(io, host, .{})) |_| {
+        if (b.root.access(io, host, .{})) |_| {
             b.getInstallStep().dependOn(&b.addInstallBinFile(b.path(host), "x64/OpenConsole.exe").step);
         } else |_| {}
     }
@@ -680,9 +828,7 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the development CLI");
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
     run_step.dependOn(&run_cmd.step);
 
     const demo_step = b.step("demo", "Run the headless PTY demo");
@@ -771,7 +917,7 @@ pub fn build(b: *std.Build) void {
         const wasm_maru_mod = b.createModule(.{
             .root_source_file = b.path("src/maru.zig"),
             .target = wasm_target,
-            .optimize = .ReleaseSmall,
+            .optimize = .small,
         });
         attachPngCodec(b, wasm_maru_mod);
         const wasm = b.addExecutable(.{
@@ -779,7 +925,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/wasm/wasm_bridge.zig"),
                 .target = wasm_target,
-                .optimize = .ReleaseSmall,
+                .optimize = .small,
                 .imports = &.{.{ .name = "maru", .module = wasm_maru_mod }},
             }),
         });
@@ -938,20 +1084,20 @@ pub fn build(b: *std.Build) void {
         const watch_activity_mod = b.createModule(.{
             .root_source_file = b.path("src/session/remote_activity_wire.zig"),
             .target = watch_target,
-            .optimize = .ReleaseSmall,
+            .optimize = .small,
         });
         // 폴링 갈래의 신뢰 전 필터 덮어쓰기(WT6b-1b-ii) — 앱 읽기와 같은 순수 모듈(`std` 만 문다).
         const watch_filter_mod = b.createModule(.{
             .root_source_file = b.path("src/session/git_filter_override.zig"),
             .target = watch_target,
-            .optimize = .ReleaseSmall,
+            .optimize = .small,
         });
         const watch_exe = b.addExecutable(.{
             .name = "maru-remote-watch",
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tools/remote-watch/main.zig"),
                 .target = watch_target,
-                .optimize = .ReleaseSmall, // 원격에 실어 나르는 것이라 크기가 곧 비용이다
+                .optimize = .small, // 원격에 실어 나르는 것이라 크기가 곧 비용이다
                 .link_libc = true, // kqueue·inotify 를 libc 경유로 부른다
                 .imports = &.{
                     .{ .name = "remote_activity_wire", .module = watch_activity_mod },
@@ -959,6 +1105,7 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        support.attachArrayRepeatImports(b, watch_exe.root_module);
         // **이름을 손으로 적는 자리다**(RW2b) — `Variant.assetName` 과 어긋나면 앱이 빌드가 만들지
         // 않은 자리를 뒤진다. 경계 test 가 두 목록을 **개수까지** 대조한다(한쪽에만 더해도 걸린다).
         //
@@ -1525,10 +1672,10 @@ pub fn build(b: *std.Build) void {
     const editor_document_regex_step = b.step("test-editor-document-regex", "Run whole-document regex judges");
     const document_regex_tests = addProjectTest(b, .{
         .root_module = maru_mod,
-        .filters = &.{ "FND35 문서", "FND36 문서", "FND37 문서", "FND38 비교", "FND39 현재", "FND40 검색", "FND41 정규식" },
+        .filters = &.{ "FND35 문서", "FND36 문서", "FND37 문서", "FND38 비교", "FND39 현재", "FND40 검색", "FND41 정규식", "PCRE2 matches and replaces an empty subject" },
     });
     const run_document_regex_tests = b.addRunArtifact(document_regex_tests);
-    run_document_regex_tests.addArg("--maru-expect-tests=30"); // FND35~41과 익명 import 판정자 23개.
+    run_document_regex_tests.addArg("--maru-expect-tests=31"); // FND35~41, 익명 import 판정자 22개, 빈 subject PCRE2 경계.
     editor_document_regex_step.dependOn(&run_document_regex_tests.step);
     // The editor-only fast suite does not import terminal.selection tests. Keep an explicit,
     // counted path for the regex cell-mapping judges instead of assuming test-editor ran them.
@@ -1538,7 +1685,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"terminal PCRE2"},
     });
     const run_terminal_regex_core_tests = b.addRunArtifact(terminal_regex_core_tests);
-    run_terminal_regex_core_tests.addArg("--maru-expect-tests=27"); // 6 named judges + 21 root-module anonymous blocks
+    run_terminal_regex_core_tests.addArg("--maru-expect-tests=29"); // 6 named judges + 23 root-module anonymous blocks
     run_terminal_regex_core_tests.setCwd(b.path("."));
     terminal_regex_step.dependOn(&run_terminal_regex_core_tests.step);
 
@@ -1607,6 +1754,19 @@ pub fn build(b: *std.Build) void {
     for ([_][]const u8{ "aarch64-macos", "x86_64-linux", "x86_64-windows" }) |triple| {
         const query = std.Target.Query.parse(.{ .arch_os_abi = triple }) catch @panic("bad triple");
         const cross_target = b.resolveTargetQuery(query);
+        const cross_pcre2_api = Translator.init(b.dependency("translate_c", .{}), .{
+            .name = b.fmt("maru-pcre2-api-{s}", .{triple}),
+            .c_source_file = pcre2_translate_header,
+            .target = cross_target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        cross_pcre2_api.defineCMacro("HAVE_CONFIG_H", null);
+        cross_pcre2_api.defineCMacro("PCRE2_CODE_UNIT_WIDTH", "8");
+        cross_pcre2_api.defineCMacro("PCRE2_STATIC", "1");
+        cross_pcre2_api.addIncludePath(pcre2_source_dir);
+        cross_pcre2_api.addIncludePath(pcre2_header_dir.getDirectory());
+        cross_pcre2_api.addConfigHeader(pcre2_config);
         const cross_mod = b.createModule(.{
             .root_source_file = b.path("src/maru.zig"),
             .target = cross_target,
@@ -1615,7 +1775,8 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
         });
         attachPngCodec(b, cross_mod);
-        if (b.lazyDependency("pcre2", .{})) |dep| cross_mod.addIncludePath(dep.path("src"));
+        cross_mod.addIncludePath(pcre2_source_dir);
+        cross_mod.addImport("pcre2_c", cross_pcre2_api.mod);
         cross_mod.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
         cross_mod.addAnonymousImport("config_doc_md", .{ .root_source_file = b.path("docs/configuration.md") });
         const cross_tests = addProjectTest(b, .{ .root_module = cross_mod });
@@ -1640,7 +1801,8 @@ pub fn build(b: *std.Build) void {
         // `maru.zig` 는 아니지만 **같은 그래프를 자기 루트로 다시 세운다** — 그래서 PNG 코덱도
         // 여기 있어야 `@import("png_codec")` 이 풀린다(실측: 안 주면 세 타깃이 다 빨개진다).
         attachPngCodec(b, surface_mod);
-        if (b.lazyDependency("pcre2", .{})) |dep| surface_mod.addIncludePath(dep.path("src"));
+        surface_mod.addIncludePath(pcre2_source_dir);
+        surface_mod.addImport("pcre2_c", cross_pcre2_api.mod);
         surface_mod.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
         surface_mod.addAnonymousImport("config_doc_md", .{ .root_source_file = b.path("docs/configuration.md") });
         const surface_tests = addProjectTest(b, .{ .root_module = surface_mod });
@@ -1664,6 +1826,15 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         if (b.lazyDependency("tree_sitter", .{})) |ts_dep| {
+            const cross_tree_sitter_api = Translator.init(b.dependency("translate_c", .{}), .{
+                .name = b.fmt("maru-tree-sitter-api-{s}", .{triple}),
+                .c_source_file = tree_sitter_api_header,
+                .target = cross_target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            cross_tree_sitter_api.addIncludePath(ts_dep.path("include"));
+            cross_syntax_mod.addImport("tree_sitter_c", cross_tree_sitter_api.mod);
             cross_syntax_mod.addIncludePath(ts_dep.path("include"));
             cross_syntax_mod.addIncludePath(ts_dep.path("src"));
         }
@@ -1689,11 +1860,10 @@ pub fn build(b: *std.Build) void {
         // 오류를 심고 테스트 빌드로 돌리면 **통과한다.** 실행 파일은 `main`이 진입점이라 반드시 분석된다.
         const cross_exe = b.addExecutable(.{ .name = b.fmt("maru-check-{s}", .{triple}), .root_module = cross_exe_mod });
         if (cross_target.result.os.tag == .macos) {
-            if (builtin.os.tag == .macos or b.sysroot != null) {
-                linkSessionHostNotificationAdapter(b, cross_exe);
-            } else {
-                linkSessionHostNotificationCompileStub(b, cross_exe);
-            }
+            // `check-targets` 검사 범위는 Zig의 타깃별 API 표면이다. 빌드 호스트에 Apple SDK가
+            // 설치돼 있어도 이 compile-only 게이트는 Linux와 같은 ABI stub을 사용한다. 실제
+            // Objective-C adapter는 제품 macOS 빌드와 네이티브 macOS 게이트에서 검사한다.
+            linkSessionHostNotificationCompileStub(b, cross_exe);
         }
         check_targets_step.dependOn(&cross_exe.step);
 
@@ -1809,6 +1979,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     macos_app_host_abi_tests.root_module.addIncludePath(b.path("src/platform/macos"));
+    support.attachAppHostAbiCImport(b, macos_app_host_abi_tests.root_module);
     const objc_macos_flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined", "-iframeworkwithsysroot", "/System/Library/Frameworks", "-iwithsysroot", "/usr/include" };
     if (target.result.os.tag == .macos) {
         // macOS에서는 app session이 실제 CoreText로 frame을 만들므로 계약 테스트도 그
@@ -1975,7 +2146,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{
                 .{ .name = "maru", .module = maru_mod },
                 .{ .name = "syntax", .module = syntax_mod },
@@ -1983,7 +2154,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    if (target.result.os.tag == .macos) linkSessionHostNotificationAdapter(b, upgrade_target_release_exe);
+    support.attachArrayRepeatImports(b, upgrade_target_release_exe.root_module);
+    if (target.result.os.tag == .macos) linkSessionHostNotificationAdapter(b, upgrade_target_release_exe, macos_sdk);
 
     const macos_upgrade_multifd_fresh_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
@@ -2364,6 +2536,7 @@ pub fn build(b: *std.Build) void {
     // compiler-rt 보조 심볼을 archive에 포함해야 Swift linker가 별도 Zig runtime을 추측하지 않는다.
     macos_app_host_abi_lib.bundle_compiler_rt = true;
     macos_app_host_abi_lib.root_module.addIncludePath(b.path("src/platform/macos"));
+    support.attachAppHostAbiCImport(b, macos_app_host_abi_lib.root_module);
     // build_options 모듈(위에서 생성)을 app host lib에도 주입 — 계약 테스트 모듈과 같은 모듈을 공유한다.
     macos_app_host_abi_lib.root_module.addImport("build_options", build_options_mod);
     if (target.result.os.tag == .macos) {
@@ -2507,6 +2680,7 @@ pub fn build(b: *std.Build) void {
         // smoke ABI도 Swift가 직접 링크하므로 제품 ABI와 같은 compiler-rt 소유 규칙을 따른다.
         macos_mermaid_smoke_abi_lib.bundle_compiler_rt = true;
         macos_mermaid_smoke_abi_lib.root_module.addIncludePath(b.path("src/platform/macos"));
+        support.attachAppHostAbiCImport(b, macos_mermaid_smoke_abi_lib.root_module);
         macos_mermaid_smoke_abi_lib.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = objc_macos_flags,
@@ -2567,7 +2741,7 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
         // swiftc is the final linker; a Zig static archive does not absorb its dependent archive.
-        macos_app_compile.addFileArg((pcre2_lib orelse @panic("pcre2 library missing")).getEmittedBin());
+        macos_app_compile.addFileArg(pcre2_lib.getEmittedBin());
         macos_app_compile.addArgs(&.{
             "-framework",
             "AppKit",
@@ -2667,7 +2841,7 @@ pub fn build(b: *std.Build) void {
         macos_mermaid_helper_compile.addFileArg(mermaid_digest_swift);
         macos_mermaid_helper_compile.addFileArg(b.path("src/platform/macos/MaruMermaidRenderer.swift"));
         macos_mermaid_helper_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
-        macos_mermaid_helper_compile.addFileArg((pcre2_lib orelse @panic("pcre2 library missing")).getEmittedBin());
+        macos_mermaid_helper_compile.addFileArg(pcre2_lib.getEmittedBin());
         macos_mermaid_helper_compile.addArgs(&.{
             "-framework", "AppKit",
             "-framework", "CoreText",
@@ -2740,7 +2914,7 @@ pub fn build(b: *std.Build) void {
         macos_mermaid_smoke_compile.addFileArg(b.path("src/platform/macos/MermaidProductTick.swift"));
         macos_mermaid_smoke_compile.addFileArg(b.path("tests/macos_mermaid_helper_smoke.swift"));
         macos_mermaid_smoke_compile.addFileArg(macos_mermaid_smoke_abi_lib.getEmittedBin());
-        macos_mermaid_smoke_compile.addFileArg((pcre2_lib orelse @panic("pcre2 library missing")).getEmittedBin());
+        macos_mermaid_smoke_compile.addFileArg(pcre2_lib.getEmittedBin());
         macos_mermaid_smoke_compile.addArgs(&.{
             "-framework", "AppKit",
             "-framework", "CoreText",
@@ -2761,9 +2935,9 @@ pub fn build(b: *std.Build) void {
 
         const macos_mermaid_smoke_run = b.addSystemCommand(&.{"./zig-out/bin/maru-mermaid-helper-smoke"});
         macos_mermaid_smoke_run.setCwd(b.path("."));
-        macos_mermaid_smoke_run.setEnvironmentVariable("MARU_MERMAID_HELPER_PATH", b.pathFromRoot("zig-out/MaruMermaidRenderer.app/Contents/MacOS/maru-mermaid-renderer"));
-        macos_mermaid_smoke_run.setEnvironmentVariable("MARU_MERMAID_DIGEST_MISMATCH_HELPER_PATH", b.pathFromRoot("zig-out/maru-macos-mermaid-helper-smoke/fixtures/MaruMermaidRendererDigestMismatch.app/Contents/MacOS/maru-mermaid-renderer"));
-        macos_mermaid_smoke_run.setEnvironmentVariable("MARU_MERMAID_RENDERER_SCRIPT", b.pathFromRoot("web/dist/mermaid-helper.js"));
+        macos_mermaid_smoke_run.setEnvironmentVariable("MARU_MERMAID_HELPER_PATH", rootPath(b, "zig-out/MaruMermaidRenderer.app/Contents/MacOS/maru-mermaid-renderer"));
+        macos_mermaid_smoke_run.setEnvironmentVariable("MARU_MERMAID_DIGEST_MISMATCH_HELPER_PATH", rootPath(b, "zig-out/maru-macos-mermaid-helper-smoke/fixtures/MaruMermaidRendererDigestMismatch.app/Contents/MacOS/maru-mermaid-renderer"));
+        macos_mermaid_smoke_run.setEnvironmentVariable("MARU_MERMAID_RENDERER_SCRIPT", rootPath(b, "web/dist/mermaid-helper.js"));
         macos_mermaid_smoke_run.step.dependOn(&macos_mermaid_helper_bundle.step);
         macos_mermaid_smoke_run.step.dependOn(&macos_mermaid_digest_mismatch_fixture.step);
         macos_mermaid_smoke_run.step.dependOn(&macos_mermaid_smoke_compile.step);
@@ -2814,7 +2988,7 @@ pub fn build(b: *std.Build) void {
         macos_editor_smoke_compile.addFileArg(b.path("tests/macos_editor_smoke.swift"));
         macos_editor_smoke_compile.addFileArg(b.path("tests/macos_editor_resources.swift"));
         macos_editor_smoke_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
-        macos_editor_smoke_compile.addFileArg((pcre2_lib orelse @panic("pcre2 library missing")).getEmittedBin());
+        macos_editor_smoke_compile.addFileArg(pcre2_lib.getEmittedBin());
         macos_editor_smoke_compile.addArgs(&.{
             "-framework", "AppKit",
             "-framework", "CoreText",
@@ -2833,8 +3007,8 @@ pub fn build(b: *std.Build) void {
 
         const macos_editor_smoke_run = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-editor-smoke"});
         macos_editor_smoke_run.setCwd(b.path("."));
-        macos_editor_smoke_run.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("zig-out/maru-macos-editor-smoke/assets"));
-        macos_editor_smoke_run.setEnvironmentVariable("MARU_EDITOR_SMOKE_OUT", b.pathFromRoot("zig-out/maru-macos-editor-smoke"));
+        macos_editor_smoke_run.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "zig-out/maru-macos-editor-smoke/assets"));
+        macos_editor_smoke_run.setEnvironmentVariable("MARU_EDITOR_SMOKE_OUT", rootPath(b, "zig-out/maru-macos-editor-smoke"));
         macos_editor_smoke_run.has_side_effects = true;
         macos_editor_smoke_run.step.dependOn(&macos_editor_smoke_compile.step);
         macos_editor_smoke_run.step.dependOn(&macos_editor_smoke_assets.step);
@@ -2847,9 +3021,9 @@ pub fn build(b: *std.Build) void {
         // 대상 뷰를 보유하는 대조군도 포함해 회수 검사를 무력화한 false-green을 막는다.
         const editor_resource_cases = b.addSystemCommand(&.{ "python3", "tools/test-editor-webcontent-attribution.py" });
         editor_resource_cases.addArgs(&.{
-            "--binary", b.pathFromRoot("zig-out/bin/maru-macos-editor-smoke"),
-            "--assets", b.pathFromRoot("zig-out/maru-macos-editor-smoke/assets"),
-            "--output", b.pathFromRoot("zig-out/editor-webcontent-attribution"),
+            "--binary", rootPath(b, "zig-out/bin/maru-macos-editor-smoke"),
+            "--assets", rootPath(b, "zig-out/maru-macos-editor-smoke/assets"),
+            "--output", rootPath(b, "zig-out/editor-webcontent-attribution"),
         });
         editor_resource_cases.setCwd(b.path("."));
         editor_resource_cases.has_side_effects = true;
@@ -2861,8 +3035,8 @@ pub fn build(b: *std.Build) void {
         // 눈으로 볼 때만 창을 띄운다(기본은 accessory라 CI에서 창이 뜨지 않는다).
         const macos_editor_smoke_display = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-editor-smoke"});
         macos_editor_smoke_display.setCwd(b.path("."));
-        macos_editor_smoke_display.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("zig-out/maru-macos-editor-smoke/assets"));
-        macos_editor_smoke_display.setEnvironmentVariable("MARU_EDITOR_SMOKE_OUT", b.pathFromRoot("zig-out/maru-macos-editor-smoke"));
+        macos_editor_smoke_display.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "zig-out/maru-macos-editor-smoke/assets"));
+        macos_editor_smoke_display.setEnvironmentVariable("MARU_EDITOR_SMOKE_OUT", rootPath(b, "zig-out/maru-macos-editor-smoke"));
         macos_editor_smoke_display.setEnvironmentVariable("MARU_EDITOR_SMOKE_DISPLAY", "1");
         macos_editor_smoke_display.has_side_effects = true;
         macos_editor_smoke_display.step.dependOn(&macos_editor_smoke_compile.step);
@@ -3167,7 +3341,8 @@ pub fn build(b: *std.Build) void {
             "sh",
             "tools/test-macos-app-instance-lease.sh",
         });
-        macos_app_instance_lease_smoke.addArg(b.pathFromRoot(
+        macos_app_instance_lease_smoke.addArg(rootPath(
+            b,
             "zig-out/Maru.app/Contents/MacOS/maru-macos-app",
         ));
         macos_app_instance_lease_smoke.setCwd(b.path("."));
@@ -3196,8 +3371,8 @@ pub fn build(b: *std.Build) void {
         // 웹 패널을 여는 fixture가 필요하다 — seam pass-through는 WKWebView가 실제로 divider에
         // 맞닿아 있을 때만 판정할 수 있다.
         macos_divider_smoke.setEnvironmentVariable("MARU_WEB_PANEL", "1");
-        macos_divider_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
-        isolateMacosProductTest(b, macos_divider_smoke, b.pathFromRoot("zig-out/maru-macos-app/divider-home"), "divider");
+        macos_divider_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "web/dist"));
+        isolateMacosProductTest(b, macos_divider_smoke, rootPath(b, "zig-out/maru-macos-app/divider-home"), "divider");
         macos_divider_smoke.step.dependOn(&macos_app_bundle.step);
         macos_divider_smoke.step.dependOn(&file_panel_web_build.step);
         macos_divider_smoke.step.dependOn(&macos_divider_smoke_fixture.step);
@@ -3251,9 +3426,9 @@ pub fn build(b: *std.Build) void {
         macos_scrollbar_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "20000");
         macos_scrollbar_smoke.setEnvironmentVariable("MARU_SCROLLBAR_SMOKE", "1");
         // 도크가 present돼야 탐색기가 열린다. 그 훅이 파일 패널 경로다.
-        macos_scrollbar_smoke.setEnvironmentVariable("MARU_FILE_PANEL", b.pathFromRoot("zig-out/maru-macos-app/scroll-fixture.md"));
-        isolateMacosProductTest(b, macos_scrollbar_smoke, b.pathFromRoot("zig-out/maru-macos-app/scroll-home"), "scrollbar");
-        macos_scrollbar_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        macos_scrollbar_smoke.setEnvironmentVariable("MARU_FILE_PANEL", rootPath(b, "zig-out/maru-macos-app/scroll-fixture.md"));
+        isolateMacosProductTest(b, macos_scrollbar_smoke, rootPath(b, "zig-out/maru-macos-app/scroll-home"), "scrollbar");
+        macos_scrollbar_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "web/dist"));
         macos_scrollbar_smoke.step.dependOn(&macos_app_bundle.step);
         macos_scrollbar_smoke.step.dependOn(&file_panel_web_build.step);
         macos_scrollbar_smoke.step.dependOn(&macos_scrollbar_smoke_fixture.step);
@@ -3291,8 +3466,8 @@ pub fn build(b: *std.Build) void {
         macos_tab_drag_smoke.setCwd(b.path("."));
         macos_tab_drag_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "20000");
         macos_tab_drag_smoke.setEnvironmentVariable("MARU_TAB_DRAG_SMOKE", "1");
-        isolateMacosProductTest(b, macos_tab_drag_smoke, b.pathFromRoot("zig-out/maru-macos-app/tab-drag-home"), "tab-drag");
-        macos_tab_drag_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        isolateMacosProductTest(b, macos_tab_drag_smoke, rootPath(b, "zig-out/maru-macos-app/tab-drag-home"), "tab-drag");
+        macos_tab_drag_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "web/dist"));
         macos_tab_drag_smoke.step.dependOn(&macos_app_bundle.step);
         macos_tab_drag_smoke.step.dependOn(&file_panel_web_build.step);
         macos_tab_drag_smoke.step.dependOn(&macos_tab_drag_smoke_fixture.step);
@@ -3389,10 +3564,10 @@ pub fn build(b: *std.Build) void {
         );
         run_session_host_r2a_checkpoint.setEnvironmentVariable(
             "MARU_SESSION_HOST_R2A_CHECKPOINT_MARKER",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-r2a-home/restore.marker"),
+            rootPath(b, "zig-out/maru-macos-app/session-host-r2a-home/restore.marker"),
         );
-        isolateMacosProductTest(b, run_session_host_r2a_checkpoint, b.pathFromRoot("zig-out/maru-macos-app/session-host-r2a-home"), "r2a");
-        run_session_host_r2a_checkpoint.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        isolateMacosProductTest(b, run_session_host_r2a_checkpoint, rootPath(b, "zig-out/maru-macos-app/session-host-r2a-home"), "r2a");
+        run_session_host_r2a_checkpoint.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "web/dist"));
         run_session_host_r2a_checkpoint.step.dependOn(&macos_app_bundle.step);
         run_session_host_r2a_checkpoint.step.dependOn(&file_panel_web_build.step);
         run_session_host_r2a_checkpoint.step.dependOn(&session_host_r2a_checkpoint_fixture.step);
@@ -3444,8 +3619,8 @@ pub fn build(b: *std.Build) void {
             "MARU_SESSION_HOST_R1_TOMBSTONE_SMOKE",
             "maru-test-only-v1",
         );
-        isolateMacosProductTest(b, run_session_host_r1_tombstone, b.pathFromRoot("zig-out/maru-macos-app/session-host-r1-home"), "r1");
-        run_session_host_r1_tombstone.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        isolateMacosProductTest(b, run_session_host_r1_tombstone, rootPath(b, "zig-out/maru-macos-app/session-host-r1-home"), "r1");
+        run_session_host_r1_tombstone.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "web/dist"));
         run_session_host_r1_tombstone.step.dependOn(&macos_app_bundle.step);
         run_session_host_r1_tombstone.step.dependOn(&file_panel_web_build.step);
         run_session_host_r1_tombstone.step.dependOn(&session_host_r1_tombstone_fixture.step);
@@ -3529,13 +3704,13 @@ pub fn build(b: *std.Build) void {
         );
         run_session_host_c4_quit_cancel.setEnvironmentVariable(
             "HOME",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-c4-home"),
+            rootPath(b, "zig-out/maru-macos-app/session-host-c4-home"),
         );
         run_session_host_c4_quit_cancel.setEnvironmentVariable(
             "CFFIXED_USER_HOME",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-c4-home"),
+            rootPath(b, "zig-out/maru-macos-app/session-host-c4-home"),
         );
-        run_session_host_c4_quit_cancel.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        run_session_host_c4_quit_cancel.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "web/dist"));
         run_session_host_c4_quit_cancel.step.dependOn(&macos_app_bundle.step);
         run_session_host_c4_quit_cancel.step.dependOn(&file_panel_web_build.step);
         run_session_host_c4_quit_cancel.step.dependOn(&session_host_c4_quit_cancel_fixture.step);
@@ -3557,25 +3732,25 @@ pub fn build(b: *std.Build) void {
         run_session_host_cr6c_appkit.setCwd(b.path("."));
         run_session_host_cr6c_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_APP_EXE",
-            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+            rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
         );
         run_session_host_cr6c_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
-            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"),
+            rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru"),
         );
         run_session_host_cr6c_appkit.setEnvironmentVariable("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", "1");
         run_session_host_cr6c_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6c-home"),
+            rootPath(b, "zig-out/maru-macos-app/session-host-cr6c-home"),
         );
         run_session_host_cr6c_appkit.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
         run_session_host_cr6c_appkit.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
-        isolateMacosProductTest(b, run_session_host_cr6c_appkit, b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6c-home"), "cr6c");
+        isolateMacosProductTest(b, run_session_host_cr6c_appkit, rootPath(b, "zig-out/maru-macos-app/session-host-cr6c-home"), "cr6c");
         run_session_host_cr6c_appkit.setEnvironmentVariable(
             "MARU_CONFIG",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6c-home/.config/maru/config"),
+            rootPath(b, "zig-out/maru-macos-app/session-host-cr6c-home/.config/maru/config"),
         );
-        run_session_host_cr6c_appkit.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        run_session_host_cr6c_appkit.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "web/dist"));
         run_session_host_cr6c_appkit.step.dependOn(&macos_app_bundle.step);
         run_session_host_cr6c_appkit.step.dependOn(&file_panel_web_build.step);
         run_session_host_cr6c_appkit.step.dependOn(&session_host_cr6c_fixture.step);
@@ -3617,23 +3792,23 @@ pub fn build(b: *std.Build) void {
         run_session_host_r7_integration.setCwd(b.path("."));
         run_session_host_r7_integration.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_APP_EXE",
-            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+            rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
         );
         run_session_host_r7_integration.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
-            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"),
+            rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru"),
         );
         run_session_host_r7_integration.setEnvironmentVariable("MARU_SESSION_HOST_R7_INTEGRATION_SMOKE", "1");
         run_session_host_r7_integration.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-r7-home"),
+            rootPath(b, "zig-out/maru-macos-app/session-host-r7-home"),
         );
-        isolateMacosProductTest(b, run_session_host_r7_integration, b.pathFromRoot("zig-out/maru-macos-app/session-host-r7-home"), "r7");
+        isolateMacosProductTest(b, run_session_host_r7_integration, rootPath(b, "zig-out/maru-macos-app/session-host-r7-home"), "r7");
         run_session_host_r7_integration.setEnvironmentVariable(
             "MARU_CONFIG",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-r7-home/.config/maru/config"),
+            rootPath(b, "zig-out/maru-macos-app/session-host-r7-home/.config/maru/config"),
         );
-        run_session_host_r7_integration.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        run_session_host_r7_integration.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "web/dist"));
         run_session_host_r7_integration.step.dependOn(&macos_app_bundle.step);
         run_session_host_r7_integration.step.dependOn(&file_panel_web_build.step);
         run_session_host_r7_integration.step.dependOn(&session_host_r7_fixture.step);
@@ -3786,7 +3961,7 @@ pub fn build(b: *std.Build) void {
         run_session_host_cr6d_appkit.setCwd(b.path("."));
         run_session_host_cr6d_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_APP_EXE",
-            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+            rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
         );
         run_session_host_cr6d_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6D_APP_BUNDLE",
@@ -3794,7 +3969,7 @@ pub fn build(b: *std.Build) void {
         );
         run_session_host_cr6d_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
-            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"),
+            rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru"),
         );
         run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", "1");
         run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE", "1");
@@ -3804,7 +3979,7 @@ pub fn build(b: *std.Build) void {
         );
         run_session_host_cr6d_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6D_INPUT_SOURCE_RESTORE_EXE",
-            b.pathFromRoot("zig-out/bin/maru-session-host-input-source-restore"),
+            rootPath(b, "zig-out/bin/maru-session-host-input-source-restore"),
         );
         run_session_host_cr6d_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT",
@@ -3880,26 +4055,27 @@ pub fn build(b: *std.Build) void {
         const session_host_cr6d_pixel_verify_mod = b.createModule(.{
             .root_source_file = b.path("tools/session-host/cr6d_pixel_verify.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         });
         session_host_cr6d_pixel_verify_mod.addImport("cr6d_pixel", b.createModule(.{
             .root_source_file = b.path("tests/support/session_host_preedit_pixel_verdict.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         }));
         const session_host_cr6d_pixel_verify = b.addExecutable(.{
             .name = "maru-session-host-cr6d-pixel-verify",
             .root_module = session_host_cr6d_pixel_verify_mod,
         });
+        support.attachArrayRepeatImports(b, session_host_cr6d_pixel_verify.root_module);
         const session_host_cr6d_pixel_verify_test_mod = b.createModule(.{
             .root_source_file = b.path("tools/session-host/cr6d_pixel_verify.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         });
         session_host_cr6d_pixel_verify_test_mod.addImport("cr6d_pixel", b.createModule(.{
             .root_source_file = b.path("tests/support/session_host_preedit_pixel_verdict.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         }));
         const session_host_cr6d_pixel_verify_tests = addProjectTest(b, .{
             .root_module = session_host_cr6d_pixel_verify_test_mod,
@@ -3965,7 +4141,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/cr6c_appkit_smoke.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .link_libc = true,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
@@ -3974,29 +4150,29 @@ pub fn build(b: *std.Build) void {
         run_session_host_cr6e_recovery.setCwd(b.path("."));
         run_session_host_cr6e_recovery.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_APP_EXE",
-            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+            rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
         );
         run_session_host_cr6e_recovery.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
-            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"),
+            rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru"),
         );
         run_session_host_cr6e_recovery.setEnvironmentVariable("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", "1");
         run_session_host_cr6e_recovery.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6E_RECOVERY_BASELINE_ARTIFACT",
-            b.pathFromRoot("tests/artifacts/perf/session-host-cr6e-recovery-baseline-macos.json"),
+            rootPath(b, "tests/artifacts/perf/session-host-cr6e-recovery-baseline-macos.json"),
         );
         run_session_host_cr6e_recovery.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-home"),
+            rootPath(b, "zig-out/maru-macos-app/session-host-cr6e-home"),
         );
         run_session_host_cr6e_recovery.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
         run_session_host_cr6e_recovery.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
-        isolateMacosProductTest(b, run_session_host_cr6e_recovery, b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-home"), "cr6e");
+        isolateMacosProductTest(b, run_session_host_cr6e_recovery, rootPath(b, "zig-out/maru-macos-app/session-host-cr6e-home"), "cr6e");
         run_session_host_cr6e_recovery.setEnvironmentVariable(
             "MARU_CONFIG",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-home/.config/maru/config"),
+            rootPath(b, "zig-out/maru-macos-app/session-host-cr6e-home/.config/maru/config"),
         );
-        run_session_host_cr6e_recovery.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        run_session_host_cr6e_recovery.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "web/dist"));
         run_session_host_cr6e_recovery.step.dependOn(&macos_app_bundle.step);
         run_session_host_cr6e_recovery.step.dependOn(&file_panel_web_build.step);
         run_session_host_cr6e_recovery.step.dependOn(&session_host_cr6e_recovery_fixture.step);
@@ -4006,14 +4182,14 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tools/perf/session_host_cr6e_recovery_validator.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
             }),
         });
         const session_host_cr6e_recovery_validator_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tools/perf/session_host_cr6e_recovery_validator.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
             }),
         });
         const run_session_host_cr6e_recovery_validator_tests = b.addRunArtifact(
@@ -4047,29 +4223,29 @@ pub fn build(b: *std.Build) void {
         run_session_host_cr6e_c3c.setCwd(b.path("."));
         run_session_host_cr6e_c3c.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_APP_EXE",
-            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+            rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
         );
         run_session_host_cr6e_c3c.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
-            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"),
+            rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru"),
         );
         run_session_host_cr6e_c3c.setEnvironmentVariable("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", "1");
         run_session_host_cr6e_c3c.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6E_C3C_AUTO_RECONNECT_ARTIFACT",
-            b.pathFromRoot("tests/artifacts/session-host/cr6e-c3c-appkit.json"),
+            rootPath(b, "tests/artifacts/session-host/cr6e-c3c-appkit.json"),
         );
         run_session_host_cr6e_c3c.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-c3c-home"),
+            rootPath(b, "zig-out/maru-macos-app/session-host-cr6e-c3c-home"),
         );
         run_session_host_cr6e_c3c.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
         run_session_host_cr6e_c3c.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
-        isolateMacosProductTest(b, run_session_host_cr6e_c3c, b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-c3c-home"), "cr6e-c3c");
+        isolateMacosProductTest(b, run_session_host_cr6e_c3c, rootPath(b, "zig-out/maru-macos-app/session-host-cr6e-c3c-home"), "cr6e-c3c");
         run_session_host_cr6e_c3c.setEnvironmentVariable(
             "MARU_CONFIG",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6e-c3c-home/.config/maru/config"),
+            rootPath(b, "zig-out/maru-macos-app/session-host-cr6e-c3c-home/.config/maru/config"),
         );
-        run_session_host_cr6e_c3c.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        run_session_host_cr6e_c3c.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "web/dist"));
         run_session_host_cr6e_c3c.step.dependOn(&macos_app_bundle.step);
         run_session_host_cr6e_c3c.step.dependOn(&file_panel_web_build.step);
         run_session_host_cr6e_c3c.step.dependOn(&session_host_cr6e_c3c_fixture.step);
@@ -4078,14 +4254,14 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tools/perf/session_host_cr6e_c3c_validator.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
             }),
         });
         const session_host_cr6e_c3c_validator_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tools/perf/session_host_cr6e_c3c_validator.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
             }),
         });
         const run_session_host_cr6e_c3c_validator_tests = b.addRunArtifact(
@@ -4120,14 +4296,14 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/cr6e_c3c_sample_set_fingerprint.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .link_libc = true,
                 .imports = &.{.{
                     .name = "measurement_fingerprint",
                     .module = b.createModule(.{
                         .root_source_file = b.path("src/platform/macos/measurement_fingerprint.zig"),
                         .target = target,
-                        .optimize = .ReleaseFast,
+                        .optimize = .fast,
                         .link_libc = true,
                     }),
                 }},
@@ -4136,8 +4312,8 @@ pub fn build(b: *std.Build) void {
         const run_c3c_sample_fingerprint = b.addRunArtifact(c3c_sample_fingerprint);
         run_c3c_sample_fingerprint.setCwd(b.path("."));
         run_c3c_sample_fingerprint.addArg(c3c_sample_fingerprint_path);
-        run_c3c_sample_fingerprint.addArg(b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"));
-        run_c3c_sample_fingerprint.addArg(b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"));
+        run_c3c_sample_fingerprint.addArg(rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru-macos-app"));
+        run_c3c_sample_fingerprint.addArg(rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru"));
         run_c3c_sample_fingerprint.step.dependOn(&macos_app_bundle.step);
         run_c3c_sample_fingerprint.step.dependOn(&file_panel_web_build.step);
         run_c3c_sample_fingerprint.step.dependOn(&c3c_sample_fixture.step);
@@ -4160,34 +4336,34 @@ pub fn build(b: *std.Build) void {
             run_sample.setCwd(b.path("."));
             run_sample.setEnvironmentVariable(
                 "MARU_SESSION_HOST_CR6C_APP_EXE",
-                b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+                rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
             );
             run_sample.setEnvironmentVariable(
                 "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
-                b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"),
+                rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru"),
             );
             run_sample.setEnvironmentVariable("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", "1");
             run_sample.setEnvironmentVariable(
                 "MARU_SESSION_HOST_CR6E_C3C_AUTO_RECONNECT_ARTIFACT",
-                b.pathFromRoot(raw_path),
+                rootPath(b, raw_path),
             );
             run_sample.setEnvironmentVariable(
                 "MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT",
-                b.pathFromRoot(home_path),
+                rootPath(b, home_path),
             );
             run_sample.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
             run_sample.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
             isolateMacosProductTest(
                 b,
                 run_sample,
-                b.pathFromRoot(home_path),
+                rootPath(b, home_path),
                 b.fmt("cr6e-c3c-sample-{d}", .{sample_index}),
             );
             run_sample.setEnvironmentVariable(
                 "MARU_CONFIG",
-                b.pathFromRoot(b.fmt("{s}/.config/maru/config", .{home_path})),
+                rootPath(b, b.fmt("{s}/.config/maru/config", .{home_path})),
             );
-            run_sample.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+            run_sample.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "web/dist"));
             run_sample.step.dependOn(&prepare_sample.step);
             const validate_sample = b.addRunArtifact(session_host_cr6e_c3c_validator);
             validate_sample.setCwd(b.path("."));
@@ -4199,14 +4375,14 @@ pub fn build(b: *std.Build) void {
         const c3c_sample_validator_mod = b.createModule(.{
             .root_source_file = b.path("tools/perf/session_host_cr6e_c3c_sample_set_validator.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         });
         const c3c_sample_collector = b.addExecutable(.{
             .name = "maru-session-host-cr6e-c3c-sample-set",
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/cr6e_c3c_sample_set.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .link_libc = true,
                 .imports = &.{
                     .{ .name = "sample_set_validator", .module = c3c_sample_validator_mod },
@@ -4215,7 +4391,7 @@ pub fn build(b: *std.Build) void {
                         .module = b.createModule(.{
                             .root_source_file = b.path("src/platform/macos/measurement_fingerprint.zig"),
                             .target = target,
-                            .optimize = .ReleaseFast,
+                            .optimize = .fast,
                             .link_libc = true,
                         }),
                     },
@@ -4226,8 +4402,8 @@ pub fn build(b: *std.Build) void {
         run_c3c_sample_collector.setCwd(b.path("."));
         run_c3c_sample_collector.addArg(c3c_sample_artifact);
         run_c3c_sample_collector.addArg(c3c_sample_fingerprint_path);
-        run_c3c_sample_collector.addArg(b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"));
-        run_c3c_sample_collector.addArg(b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"));
+        run_c3c_sample_collector.addArg(rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru-macos-app"));
+        run_c3c_sample_collector.addArg(rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru"));
         for (0..20) |sample_index| {
             run_c3c_sample_collector.addArg(
                 b.fmt("{s}/raw/run-{d}.json", .{ c3c_sample_base, sample_index }),
@@ -4266,7 +4442,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/app_launch_first_drawable.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .link_libc = true,
             }),
         });
@@ -4274,15 +4450,15 @@ pub fn build(b: *std.Build) void {
         run_app_launch_harness.setCwd(b.path("."));
         run_app_launch_harness.setEnvironmentVariable(
             "MARU_APP_LAUNCH_FIRST_DRAWABLE_EXE",
-            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+            rootPath(b, "zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
         );
         run_app_launch_harness.setEnvironmentVariable(
             "MARU_APP_LAUNCH_FIRST_DRAWABLE_ROOT",
-            b.pathFromRoot(app_launch_root),
+            rootPath(b, app_launch_root),
         );
         run_app_launch_harness.setEnvironmentVariable(
             "MARU_APP_LAUNCH_FIRST_DRAWABLE_ARTIFACT",
-            b.pathFromRoot(app_launch_artifact),
+            rootPath(b, app_launch_artifact),
         );
         run_app_launch_harness.step.dependOn(&macos_app_bundle.step);
         run_app_launch_harness.step.dependOn(&file_panel_web_build.step);
@@ -4292,14 +4468,14 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tools/perf/macos_app_launch_first_drawable_validator.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
             }),
         });
         const app_launch_validator_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tools/perf/macos_app_launch_first_drawable_validator.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
             }),
         });
         const run_app_launch_validator_tests = b.addRunArtifact(app_launch_validator_tests);
@@ -4330,13 +4506,13 @@ pub fn build(b: *std.Build) void {
         // 예산을 넉넉히 준다. 15초는 cold helper가 느린 러너에서 편집 단계를 잘라 false-fail을 낸다.
         macos_app_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "30000");
         macos_app_smoke.setEnvironmentVariable("MARU_FILE_PANEL_EDIT_SMOKE", "1");
-        isolateMacosProductTest(b, macos_app_smoke, b.pathFromRoot("zig-out/maru-macos-app/home"), "file-panel");
-        macos_app_smoke.setEnvironmentVariable("MARU_FILE_PANEL", b.pathFromRoot("zig-out/maru-macos-app/markdown-preview.md"));
+        isolateMacosProductTest(b, macos_app_smoke, rootPath(b, "zig-out/maru-macos-app/home"), "file-panel");
+        macos_app_smoke.setEnvironmentVariable("MARU_FILE_PANEL", rootPath(b, "zig-out/maru-macos-app/markdown-preview.md"));
         // 5c-2c: bare 실행파일(비-번들)은 Bundle.main.resourceURL/web가 없으므로, maru-app:// resolve 정책 C-ABI 링크를
         // 소스 asset root로 검증하게 override를 준다(스킴 핸들러 정책은 root 무관하게 그 아래로 샌드박스). docs/web-panel.md §7.1 ⑤.
         // **절대 경로**로 준다(리뷰11 [4]) — resolveAppAsset는 cwd 기준으로 realpath하므로 상대 경로는 실행 cwd가 repo
         // 루트가 아니면 404가 된다. b.pathFromRoot가 build 루트 기준 절대 경로를 만든다(스모크 cwd와 무관하게 견고).
-        macos_app_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        macos_app_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "web/dist"));
         macos_app_smoke.step.dependOn(&macos_app_bundle.step);
         macos_app_smoke.step.dependOn(&file_panel_web_build.step);
         macos_app_smoke.step.dependOn(&macos_app_smoke_fixture.step);
@@ -4400,11 +4576,11 @@ pub fn build(b: *std.Build) void {
         const macos_app_html_smoke = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-app"});
         macos_app_html_smoke.setCwd(b.path("."));
         macos_app_html_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "6000");
-        macos_app_html_smoke.setEnvironmentVariable("MARU_FILE_PANEL", b.pathFromRoot("tests/fixtures/file-panel/fp5-viewer.html"));
-        macos_app_html_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        macos_app_html_smoke.setEnvironmentVariable("MARU_FILE_PANEL", rootPath(b, "tests/fixtures/file-panel/fp5-viewer.html"));
+        macos_app_html_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "web/dist"));
         // markdown 스모크와 같은 이유로 전용 HOME에 가둔다 — 사용자 workspace가 복원되면 그 창의 파일
         // 패널이 함께 열려 probe가 스모크 대상이 아닌 패널을 본다.
-        isolateMacosProductTest(b, macos_app_html_smoke, b.pathFromRoot("zig-out/maru-macos-app/home"), "html-panel");
+        isolateMacosProductTest(b, macos_app_html_smoke, rootPath(b, "zig-out/maru-macos-app/home"), "html-panel");
         macos_app_html_smoke.step.dependOn(&macos_app_smoke_assert.step);
         const macos_app_html_smoke_assert = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
@@ -4496,7 +4672,7 @@ pub fn build(b: *std.Build) void {
         const macos_browser_bounded_smoke_step = b.step("macos-browser-bounded-smoke", "Run and assert the bounded browser.executeScript WKWebView/socket smoke");
         const macos_browser_bounded_smoke = b.addSystemCommand(&.{ "sh", "tools/test-macos-browser-bounded-smoke.sh" });
         macos_browser_bounded_smoke.setCwd(b.path("."));
-        macos_browser_bounded_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        macos_browser_bounded_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", rootPath(b, "web/dist"));
         macos_browser_bounded_smoke.step.dependOn(&macos_app_compile.step);
         macos_browser_bounded_smoke.step.dependOn(&file_panel_web_build.step);
         macos_browser_bounded_smoke_step.dependOn(&macos_browser_bounded_smoke.step);
@@ -4710,7 +4886,7 @@ pub fn build(b: *std.Build) void {
     //
     // 등록을 빠뜨리면 그 게이트는 다시 CI 밖이 된다. `tests/boundary/imports.zig` 가 짝을 센다.
     // **이 집계 step 은 두 모드 루프 안의 판정자를 Debug 로만 돈다** (check-boundaries 와 같은 규칙, 2026-09-06).
-    // 루프 안에서 등록되는 부착은 `if (<loop>_optimize == .Debug) macos_only_test_step.dependOn(…)` 로 걸러
+    // 루프 안에서 등록되는 부착은 `if (<loop>_optimize == .debug) macos_only_test_step.dependOn(…)` 로 걸러
     // 붙는다. 이유: CI 의 macOS 잡에서 이 step 이 ~15 분이었고 그 대부분이 같은 판정자를 ReleaseFast 로 한 번 더
     // 컴파일·실행하는 값이었다. ReleaseFast 는 (1) 가족의 전용 스텝(`test-session-host-*`)이 두 모드를 그대로
     // 돌리고, (2) posix 집계는 리눅스 `check` 잡의 `zig build test` 가 두 모드로 돈다. 판정자 내용은 같다.
@@ -5107,9 +5283,7 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
-        const install_native_watch = b.addInstallArtifact(native_remote_watch, .{
-            .dest_dir = .{ .override = .{ .custom = "test-helpers" } },
-        });
+        support.attachArrayRepeatImports(b, native_remote_watch.root_module);
         const listing_roundtrip_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/remote_file_listing_roundtrip.zig"),
@@ -5118,17 +5292,12 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
         });
-        const run_listing_roundtrip = b.addRunArtifact(listing_roundtrip_tests);
+        const run_listing_roundtrip = addRunWithArtifactEnv(b, "MARU_REMOTE_WATCH_BIN", native_remote_watch, listing_roundtrip_tests);
         run_listing_roundtrip.addArg("--maru-expect-tests=3");
         // ⚠️ env 가 빠지면 셋 다 `SkipZigTest` 로 **조용히 초록**이 된다 — 실행 수까지 센다
         // (`test-remote-scm` 이 하네스 침묵에 대해 세운 그 규율).
         run_listing_roundtrip.addArg("--maru-expect-passed=3");
         run_listing_roundtrip.setCwd(b.path("."));
-        run_listing_roundtrip.step.dependOn(&install_native_watch.step);
-        run_listing_roundtrip.setEnvironmentVariable(
-            "MARU_REMOTE_WATCH_BIN",
-            b.getInstallPath(.{ .custom = "test-helpers" }, "maru-remote-watch-native"),
-        );
         test_step.dependOn(&run_listing_roundtrip.step);
         b.step(
             "test-remote-file-listing",
@@ -5146,16 +5315,11 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
         });
-        const run_watch_filters = b.addRunArtifact(watch_filter_tests);
+        const run_watch_filters = addRunWithArtifactEnv(b, "MARU_REMOTE_WATCH_BIN", native_remote_watch, watch_filter_tests);
         run_watch_filters.addArg("--maru-expect-tests=1");
         if (builtin.os.tag == .macos) run_watch_filters.addArg("--maru-expect-passed=1"); // env 가 빠져 조용히 skip 되는 것을 막는다
         run_watch_filters.setCwd(b.path("."));
         run_watch_filters.has_side_effects = true;
-        run_watch_filters.step.dependOn(&install_native_watch.step);
-        run_watch_filters.setEnvironmentVariable(
-            "MARU_REMOTE_WATCH_BIN",
-            b.getInstallPath(.{ .custom = "test-helpers" }, "maru-remote-watch-native"),
-        );
         test_step.dependOn(&run_watch_filters.step);
         // macOS CI 잡은 `test` 가 아니라 `test-macos-only` 를 돈다 — 거기 안 붙이면 이 판정자는 CI 어디서도 실제로 안 돈다(리눅스
         // 잡에선 폴링 갈래가 없어 건너뛴다 — 적대적 검증 2회차).
@@ -5177,15 +5341,10 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
         });
-        const run_activity_roundtrip = b.addRunArtifact(activity_roundtrip_tests);
+        const run_activity_roundtrip = addRunWithArtifactEnv(b, "MARU_REMOTE_WATCH_BIN", native_remote_watch, activity_roundtrip_tests);
         run_activity_roundtrip.addArg("--maru-expect-tests=15");
         run_activity_roundtrip.addArg("--maru-expect-passed=15"); // env 가 빠지면 조용히 초록이 된다
         run_activity_roundtrip.setCwd(b.path("."));
-        run_activity_roundtrip.step.dependOn(&install_native_watch.step);
-        run_activity_roundtrip.setEnvironmentVariable(
-            "MARU_REMOTE_WATCH_BIN",
-            b.getInstallPath(.{ .custom = "test-helpers" }, "maru-remote-watch-native"),
-        );
         test_step.dependOn(&run_activity_roundtrip.step);
         b.step(
             "test-remote-activity",
@@ -5203,15 +5362,10 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
         });
-        const run_mutation_roundtrip = b.addRunArtifact(mutation_roundtrip_tests);
+        const run_mutation_roundtrip = addRunWithArtifactEnv(b, "MARU_REMOTE_WATCH_BIN", native_remote_watch, mutation_roundtrip_tests);
         run_mutation_roundtrip.addArg("--maru-expect-tests=5");
         run_mutation_roundtrip.addArg("--maru-expect-passed=5"); // env 가 빠지면 조용히 초록이 된다
         run_mutation_roundtrip.setCwd(b.path("."));
-        run_mutation_roundtrip.step.dependOn(&install_native_watch.step);
-        run_mutation_roundtrip.setEnvironmentVariable(
-            "MARU_REMOTE_WATCH_BIN",
-            b.getInstallPath(.{ .custom = "test-helpers" }, "maru-remote-watch-native"),
-        );
         test_step.dependOn(&run_mutation_roundtrip.step);
         b.step(
             "test-remote-file-mutation",
@@ -5308,6 +5462,7 @@ pub fn build(b: *std.Build) void {
     mobile_bridge_tests.root_module.addAnonymousImport("mobile_host_abi_for_test", .{
         .root_source_file = b.path("src/platform/mobile/mobile_host_abi.h"),
     });
+    support.attachMobileHostAbiCImport(b, mobile_bridge_tests.root_module);
     // 헤더를 C 로도 읽어 **인자 타입**까지 컴파일이 대조하게 한다(정규식 게이트의 사각지대).
     mobile_bridge_tests.root_module.addIncludePath(b.path("src/platform/mobile"));
     mobile_bridge_tests.root_module.link_libc = true;
@@ -5338,6 +5493,7 @@ pub fn build(b: *std.Build) void {
     mobile_ssh_tests.root_module.addAnonymousImport("mobile_ssh_abi_for_test", .{
         .root_source_file = b.path("src/platform/mobile/mobile_host_abi.h"),
     });
+    support.attachMobileHostAbiCImport(b, mobile_ssh_tests.root_module);
     // **헤더를 C 로도 읽는다.** 이름·개수는 `abi_types.py` 가 정규식으로 보지만 인자 타입은
     // 못 본다 — `@cImport` 로 부르면 컴파일이 그것을 잡는다.
     mobile_ssh_tests.root_module.addIncludePath(b.path("src/platform/mobile"));
@@ -5434,7 +5590,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/ime_candidate_evidence.zig"),
             .target = target,
-            .optimize = .Debug,
+            .optimize = .debug,
             .link_libc = true,
         }),
     });
@@ -5444,7 +5600,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/ime_candidate_evidence.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .link_libc = true,
         }),
     });
@@ -5611,8 +5767,9 @@ pub fn build(b: *std.Build) void {
     run_search_dock.addArg("--maru-expect-tests=30");
     b.step("test-editor-project-search-dock", "Run project search grouping and dock geometry judges").dependOn(&run_search_dock.step);
     const replace_preview_module = b.createModule(.{ .root_source_file = b.path("src/project_replace_preview_test.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    replace_preview_module.addIncludePath(pcre2_dep.?.path("src"));
-    replace_preview_module.linkLibrary(pcre2_lib.?);
+    replace_preview_module.addImport("pcre2_c", pcre2_api.mod);
+    replace_preview_module.addIncludePath(pcre2_source_dir);
+    replace_preview_module.linkLibrary(pcre2_lib);
     const replace_preview_tests = addProjectTest(b, .{ .root_module = replace_preview_module, .filters = &.{".test.project replace preview"} });
     const run_replace_preview = b.addRunArtifact(replace_preview_tests);
     run_replace_preview.addArg("--maru-expect-tests=10");
@@ -6169,7 +6326,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_notification_app_scenario_boundary.zig"),
                 .target = target,
-                .optimize = .Debug,
+                .optimize = .debug,
             }),
         });
         const run_notification_app_scenario_boundary_tests = b.addRunArtifact(notification_app_scenario_boundary_tests);
@@ -6404,7 +6561,7 @@ pub fn build(b: *std.Build) void {
     const boundary_build_graph_mod = b.createModule(.{
         .root_source_file = b.path("tests/support/build_graph.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
     });
 
     // **뷰 자신의 판정자를 돌린다.** 모듈로 «주입만» 하면 그 파일의 test 는 실행되지 않는다
@@ -6418,7 +6575,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/support/build_graph_judges.zig"),
             .target = target,
-            .optimize = .ReleaseSafe,
+            .optimize = .safe,
         }),
     });
     const run_build_graph_tests = b.addRunArtifact(build_graph_tests);
@@ -6446,7 +6603,7 @@ pub fn build(b: *std.Build) void {
     );
 
     // **이 집계 step 은 boundary 테스트를 Debug 로만 돈다.** 아래 optimize 루프 안에서 등록되는 것들은
-    // `if (<loop>_optimize == .Debug)` 로 걸러 붙는다. 이유는 boundary 테스트가 하는 일 자체다 —
+    // `if (<loop>_optimize == .debug)` 로 걸러 붙는다. 이유는 boundary 테스트가 하는 일 자체다 —
     // 46개 중 44개가 `readSource` 로 소스 파일을 문자열로 읽어 선언 수·제품 caller 수를 세고, `maru`
     // 모듈을 import 하는 것은 0개다. 세는 결과는 최적화 모드에 따라 달라질 수 없으므로 ReleaseFast
     // 사본은 같은 답을 내려고 바이너리를 한 번 더 링크하는 비용일 뿐이다.
@@ -6515,7 +6672,7 @@ pub fn build(b: *std.Build) void {
         "test-client-poison-names",
         "Poison diagnostics name the reason and site instead of raw enum values",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |poison_name_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |poison_name_optimize| {
         const poison_name_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/client.zig"),
@@ -6538,7 +6695,7 @@ pub fn build(b: *std.Build) void {
         "test-session-host-p4-r3-screen-inbox",
         "P4 R3 single-owner screen inbox boundary gates",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |p4_r3_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |p4_r3_optimize| {
         const p4_r3_client_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/client.zig"),
@@ -6581,7 +6738,7 @@ pub fn build(b: *std.Build) void {
         run_p4_r3_boundary_tests.addArg("--maru-expect-tests=1");
         run_p4_r3_boundary_tests.setCwd(b.path("."));
         session_host_p4_r3_screen_inbox_step.dependOn(&run_p4_r3_boundary_tests.step);
-        if (p4_r3_optimize == .Debug) boundary_step.dependOn(&run_p4_r3_boundary_tests.step);
+        if (p4_r3_optimize == .debug) boundary_step.dependOn(&run_p4_r3_boundary_tests.step);
     }
     const session_host_cr6d_global_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
@@ -6800,7 +6957,7 @@ pub fn build(b: *std.Build) void {
         "test-session-host-e2a",
         "Verify P4 E2a runtime observation cache transaction in Debug and ReleaseFast",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |e2a_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |e2a_optimize| {
         const session_host_e2a_cache_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/runtime_observation_cache.zig"),
@@ -6830,7 +6987,7 @@ pub fn build(b: *std.Build) void {
         "test-session-host-e2b",
         "Verify P4 E2b runtime-shared observation cache product wiring",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |e2b_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |e2b_optimize| {
         const session_host_e2b_manager_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/runtime_manager.zig"),
@@ -6865,7 +7022,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/runtime_manager.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
         .filters = &.{"P4 E2c"},
@@ -6892,7 +7049,7 @@ pub fn build(b: *std.Build) void {
         "test-metadata-output-revision",
         "Output alone must not advance the metadata change token; a real metadata change must",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
         const metadata_output_revision_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/runtime_manager.zig"),
@@ -6911,7 +7068,7 @@ pub fn build(b: *std.Build) void {
         "test-session-host-e3a",
         "Verify P4 E3a screen-change token gating in Debug and ReleaseFast",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |e3a_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |e3a_optimize| {
         const session_host_e3a_server_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/server.zig"),
@@ -6951,7 +7108,7 @@ pub fn build(b: *std.Build) void {
     run_session_host_e3a_boundary_tests.setCwd(b.path("."));
     session_host_e3a_step.dependOn(&run_session_host_e3a_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e3a_boundary_tests.step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |e3a_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |e3a_optimize| {
         const session_host_e3a_remote_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host.zig"),
@@ -6973,7 +7130,7 @@ pub fn build(b: *std.Build) void {
         "Verify P4 E3b runtime-scoped metadata source tokens in Debug and ReleaseFast",
     );
     session_host_e3b_step.dependOn(session_host_e3a_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |e3b_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |e3b_optimize| {
         const session_host_e3b_sampler_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/runtime_metadata_sampler.zig"),
@@ -7035,7 +7192,7 @@ pub fn build(b: *std.Build) void {
         "test-session-host-attach-isolation",
         "Oversized initial attach is typed and preserves the shared connection",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |attach_isolation_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |attach_isolation_optimize| {
         const attach_isolation_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/server.zig"),
@@ -7068,7 +7225,7 @@ pub fn build(b: *std.Build) void {
         "test-snapshot-cap-refusal",
         "A projection refused by the ceiling is distinguishable from real allocator exhaustion",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cap_refusal_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cap_refusal_optimize| {
         const cap_refusal_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/screen_snapshot.zig"),
@@ -7098,7 +7255,7 @@ pub fn build(b: *std.Build) void {
         "test-delta-base-generation",
         "A delta base from an older generation is sent as a snapshot, not a delta",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |base_gen_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |base_gen_optimize| {
         const base_gen_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/screen_snapshot.zig"),
@@ -7138,7 +7295,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/screen_snapshot.zig"),
             .target = target,
-            .optimize = .Debug,
+            .optimize = .debug,
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
         // base 파서 1, 생산자의 세그먼트 방출(IC5a — image_ref·미룸 표현·hwm) 4, 「attach 뒤 움직인 모든 축이 delta 로」 전수 1.
@@ -7148,7 +7305,7 @@ pub fn build(b: *std.Build) void {
     run_image_ref_base_tests.addArg("--maru-expect-tests=6");
     run_image_ref_base_tests.addArg("--maru-expect-passed=6");
     image_channel_step.dependOn(&run_image_ref_base_tests.step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |ledger_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |ledger_optimize| {
         const ledger_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/image_segment_ledger.zig"),
@@ -7190,7 +7347,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/screen_assembler_test_root.zig"),
             .target = target,
-            .optimize = .Debug,
+            .optimize = .debug,
         }),
         .filters = &.{"screen assembler image ref:"},
     });
@@ -7203,7 +7360,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/server.zig"),
             .target = target,
-            .optimize = .Debug,
+            .optimize = .debug,
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
         // hello·abandon 7, 투영 ↔ 세그먼트 배선(IC5b-2 — 발급·취소·투영 실패·resync·미룸·미협상·제품 attach) 4, 용량 사건 깨움(IC5c-1) 1,
@@ -7506,7 +7663,7 @@ pub fn build(b: *std.Build) void {
         "test-upgrade-scan-policy",
         "The upgrade scan continues past a resumed failure and stops on uncertain or in-flight hosts",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |scan_policy_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |scan_policy_optimize| {
         const scan_policy_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/upgrade_scan_policy.zig"),
@@ -7541,7 +7698,7 @@ pub fn build(b: *std.Build) void {
         "test-reconnect-failure-log",
         "Every reconnect job that ends without retry or is requeued leaves one diagnostic line",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |failure_log_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |failure_log_optimize| {
         const failure_log_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/reconnect_failure_log.zig"),
@@ -7575,7 +7732,7 @@ pub fn build(b: *std.Build) void {
         "test-reconnect-retry-policy",
         "Requeued reconnect jobs back off and carry a fresh connect deadline",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |retry_policy_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |retry_policy_optimize| {
         const retry_policy_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/reconnect_retry_policy.zig"),
@@ -7737,7 +7894,7 @@ pub fn build(b: *std.Build) void {
         "test-single-host-policy",
         "An upgrade failure reuses a live compatible session host and spawns only when none can take new tabs",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |single_host_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |single_host_optimize| {
         const single_host_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/single_host_policy.zig"),
@@ -7772,7 +7929,7 @@ pub fn build(b: *std.Build) void {
         "test-codex-daemon-attribution",
         "Codex shared-daemon hook events are attributed by session id, never by the inherited pane file name",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |codex_daemon_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |codex_daemon_optimize| {
         const codex_daemon_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/session/codex_daemon_attribution.zig"),
@@ -7786,7 +7943,7 @@ pub fn build(b: *std.Build) void {
         run_codex_daemon_tests.addArg("--maru-expect-passed=6");
         codex_daemon_step.dependOn(&run_codex_daemon_tests.step);
         // check-boundaries 는 Debug 로만 돈다(`boundary_step` 선언 위 규칙) — ReleaseFast 사본은 이 전용 step 에만 남는다.
-        if (codex_daemon_optimize == .Debug) boundary_step.dependOn(&run_codex_daemon_tests.step);
+        if (codex_daemon_optimize == .debug) boundary_step.dependOn(&run_codex_daemon_tests.step);
     }
     // 훅이 싣는 칸과 파서가 읽는 칸은 같은 상수에서 나온다 — 두 파일의 판정자를 함께 돌린다.
     const codex_daemon_hook_tests = addProjectTest(b, .{
@@ -7876,7 +8033,7 @@ pub fn build(b: *std.Build) void {
         "test-session-host-handoff-exhaustive",
         "Verify every stable handoff core field with valid non-default canonical round trips",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |handoff_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |handoff_optimize| {
         const handoff_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/handoff_codec.zig"),
@@ -7884,10 +8041,10 @@ pub fn build(b: *std.Build) void {
                 .optimize = handoff_optimize,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            .filters = &.{"handoff v1 exhaustive valid fixtures"},
+            .filters = &.{ "handoff v1 exhaustive valid fixtures", "예산 트림은 좌표 상태도 옮긴다" },
         });
         const run_handoff_tests = b.addRunArtifact(handoff_tests);
-        run_handoff_tests.addArg("--maru-expect-tests=1");
+        run_handoff_tests.addArg("--maru-expect-tests=2");
         session_host_handoff_exhaustive_step.dependOn(&run_handoff_tests.step);
         if (handoff_optimize == optimize) session_host_step.dependOn(&run_handoff_tests.step);
     }
@@ -7974,7 +8131,7 @@ pub fn build(b: *std.Build) void {
         "test-session-host-kernel-cwd-k1",
         "Verify K1 paired cwd authority wire ownership without enabling kernel cwd parity",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |k1_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |k1_optimize| {
         const session_host_kernel_cwd_k1_wire_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/runtime_metadata_wire.zig"),
@@ -8009,7 +8166,7 @@ pub fn build(b: *std.Build) void {
         "Verify K2 bounded host-side kernel cwd sampling and authority precedence",
     );
     session_host_kernel_cwd_k2_step.dependOn(session_host_kernel_cwd_k1_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |k2_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |k2_optimize| {
         const session_host_kernel_cwd_k2_wire_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/runtime_metadata_wire.zig"),
@@ -8075,7 +8232,7 @@ pub fn build(b: *std.Build) void {
     session_host_step.dependOn(&run_session_host_kernel_cwd_k3_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_kernel_cwd_k3_boundary_tests.step);
     if (target.result.os.tag == .macos) {
-        for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |k3_optimize| {
+        for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |k3_optimize| {
             const session_host_kernel_cwd_k3_product_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
                     .root_source_file = b.path("src/platform/macos/session_host.zig"),
@@ -8116,7 +8273,7 @@ pub fn build(b: *std.Build) void {
     session_host_step.dependOn(&run_session_host_upgrade_budget_admission_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_upgrade_budget_admission_boundary_tests.step);
     if (target.result.os.tag == .macos) {
-        for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |budget_optimize| {
+        for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |budget_optimize| {
             const session_host_upgrade_budget_admission_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
                     .root_source_file = b.path(
@@ -8467,7 +8624,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/daemon.zig"),
                 .target = target,
-                .optimize = .Debug,
+                .optimize = .debug,
                 .link_libc = true,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
@@ -8481,7 +8638,7 @@ pub fn build(b: *std.Build) void {
             &run_session_host_upgrade_stale_sweep_product_tests.step,
         );
         session_host_step.dependOn(&run_session_host_upgrade_stale_sweep_product_tests.step);
-        for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |sweep_optimize| {
+        for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |sweep_optimize| {
             const session_host_upgrade_stale_sweep_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
                     .root_source_file = b.path(
@@ -9313,14 +9470,14 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_client_idle_pump_e2e.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .link_libc = true,
                 .imports = &.{
                     .{ .name = "maru", .module = maru_mod },
                     .{ .name = "session_host", .module = b.createModule(.{
                         .root_source_file = b.path("src/platform/macos/session_host.zig"),
                         .target = target,
-                        .optimize = .ReleaseFast,
+                        .optimize = .fast,
                         .link_libc = true,
                         .imports = &.{.{ .name = "maru", .module = maru_mod }},
                     }) },
@@ -9328,6 +9485,7 @@ pub fn build(b: *std.Build) void {
             }),
             .filters = &.{"P4 E3c actual generation-backed"},
         });
+        support.attachDarwinPerfCImport(b, session_host_e3c_product_tests.root_module);
         const run_session_host_e3c_product_tests = b.addRunArtifact(session_host_e3c_product_tests);
         run_session_host_e3c_product_tests.addArg("--maru-expect-tests=1");
         run_session_host_e3c_product_tests.setCwd(b.path("."));
@@ -9336,7 +9494,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tools/perf/session_host_client_idle_pump_validator.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
             }),
         });
         const run_session_host_e3c_validator_tests = b.addRunArtifact(session_host_e3c_validator_tests);
@@ -9345,7 +9503,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tools/perf/session_host_client_idle_pump_validator.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
             }),
         });
         const run_session_host_e3c_validator = b.addRunArtifact(session_host_e3c_validator);
@@ -9377,7 +9535,7 @@ pub fn build(b: *std.Build) void {
     );
     boundary_step.dependOn(&run_session_host_metadata_reattach_boundary_tests.step);
     if (target.result.os.tag == .macos) {
-        for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |metadata_parity_optimize| {
+        for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |metadata_parity_optimize| {
             const session_host_metadata_reattach_product_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
                     .root_source_file = b.path("src/platform/macos/session_host.zig"),
@@ -9426,7 +9584,7 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/fixtures/session_host_metadata_foreground_fixture.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .link_libc = true,
             }),
         });
@@ -9435,11 +9593,11 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/fixtures/session_host_metadata_foreground_fixture.zig"),
                 .target = target,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
                 .link_libc = true,
             }),
         });
-        for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |metadata_consumers_optimize| {
+        for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |metadata_consumers_optimize| {
             const session_host_metadata_consumers_product_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
                     .root_source_file = b.path("src/platform/macos/app_session.zig"),
@@ -9566,7 +9724,7 @@ pub fn build(b: *std.Build) void {
     session_host_step.dependOn(&run_session_host_legacy_metadata_consumers_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_legacy_metadata_consumers_boundary_tests.step);
     if (target.result.os.tag == .macos) {
-        for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |legacy_metadata_optimize| {
+        for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |legacy_metadata_optimize| {
             const session_host_legacy_metadata_consumers_product_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
                     .root_source_file = b.path("src/platform/macos/app_session.zig"),
@@ -9626,7 +9784,7 @@ pub fn build(b: *std.Build) void {
         "Verify P4 host-backed DECSET 1003 motion and authoritative selection autoscroll",
     );
     session_host_input_parity_step.dependOn(session_host_e2c_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |input_parity_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |input_parity_optimize| {
         const input_parity_app_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),
@@ -9687,14 +9845,14 @@ pub fn build(b: *std.Build) void {
         run_input_parity_boundary_tests.addArg("--maru-expect-tests=1");
         run_input_parity_boundary_tests.setCwd(b.path("."));
         session_host_input_parity_step.dependOn(&run_input_parity_boundary_tests.step);
-        if (input_parity_optimize == .Debug) boundary_step.dependOn(&run_input_parity_boundary_tests.step);
+        if (input_parity_optimize == .debug) boundary_step.dependOn(&run_input_parity_boundary_tests.step);
     }
     const session_host_notification_journal_step = b.step(
         "test-session-host-notification-journal",
         "Verify P4 N1 bounded host notification journal",
     );
     session_host_notification_journal_step.dependOn(session_host_input_parity_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |journal_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |journal_optimize| {
         const journal_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/notification_journal.zig"),
@@ -9719,14 +9877,14 @@ pub fn build(b: *std.Build) void {
         run_journal_boundary_tests.addArg("--maru-expect-tests=1");
         run_journal_boundary_tests.setCwd(b.path("."));
         session_host_notification_journal_step.dependOn(&run_journal_boundary_tests.step);
-        if (journal_optimize == .Debug) boundary_step.dependOn(&run_journal_boundary_tests.step);
+        if (journal_optimize == .debug) boundary_step.dependOn(&run_journal_boundary_tests.step);
     }
     const session_host_notification_admission_step = b.step(
         "test-session-host-notification-admission",
         "Verify P4 N2a host notification sanitizer and product admission",
     );
     session_host_notification_admission_step.dependOn(session_host_notification_journal_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |admission_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |admission_optimize| {
         const notification_admission_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/notification_admission.zig"),
             .target = target,
@@ -9792,7 +9950,7 @@ pub fn build(b: *std.Build) void {
         "Verify P4 N2b notification metadata and delivery",
     );
     session_host_notification_delivery_step.dependOn(session_host_notification_admission_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |delivery_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |delivery_optimize| {
         const notification_delivery_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/notification_delivery.zig"),
             .target = target,
@@ -9904,6 +10062,7 @@ pub fn build(b: *std.Build) void {
                 "P4 N3 persisted notification route decoder",
             },
         });
+        support.attachNotificationRouteCImport(b, notification_route_tests.root_module);
         notification_route_tests.root_module.addIncludePath(b.path("src/platform/macos"));
         notification_route_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/session_host_notification_route.c"),
@@ -9920,6 +10079,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = delivery_optimize,
             });
             notification_macos_adapter_mod.addIncludePath(b.path("src/platform/macos"));
+            support.attachSessionHostNotificationCImport(b, notification_macos_adapter_mod);
             const macos_adapter_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
                     .root_source_file = b.path("tests/session_host_notification_macos_adapter.zig"),
@@ -10000,7 +10160,7 @@ pub fn build(b: *std.Build) void {
         "test-session-host-config-provenance",
         "Verify session default G1 config and file provenance",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |provenance_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |provenance_optimize| {
         const provenance_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/config.zig"),
@@ -10031,13 +10191,13 @@ pub fn build(b: *std.Build) void {
         run_provenance_boundary_tests.addArg("--maru-expect-tests=1");
         run_provenance_boundary_tests.setCwd(b.path("."));
         session_host_config_provenance_step.dependOn(&run_provenance_boundary_tests.step);
-        if (provenance_optimize == .Debug) boundary_step.dependOn(&run_provenance_boundary_tests.step);
+        if (provenance_optimize == .debug) boundary_step.dependOn(&run_provenance_boundary_tests.step);
     }
     const session_host_config_override_retention_step = b.step(
         "test-session-host-config-override-retention",
         "Verify session default G2 bootstrap and reset override retention",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |retention_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |retention_optimize| {
         const retention_config_mod = b.createModule(.{
             .root_source_file = b.path("src/config.zig"),
             .target = target,
@@ -10079,7 +10239,7 @@ pub fn build(b: *std.Build) void {
         run_retention_boundary_tests.addArg("--maru-expect-tests=1");
         run_retention_boundary_tests.setCwd(b.path("."));
         session_host_config_override_retention_step.dependOn(&run_retention_boundary_tests.step);
-        if (retention_optimize == .Debug) boundary_step.dependOn(&run_retention_boundary_tests.step);
+        if (retention_optimize == .debug) boundary_step.dependOn(&run_retention_boundary_tests.step);
 
         if (target.result.os.tag == .macos) {
             const retention_app_tests = addProjectTest(b, .{
@@ -10126,7 +10286,7 @@ pub fn build(b: *std.Build) void {
             run_retention_app_tests.setCwd(b.path("."));
             session_host_config_override_retention_step.dependOn(&run_retention_app_tests.step);
             test_step.dependOn(&run_retention_app_tests.step);
-            if (retention_optimize == .Debug) macos_only_test_step.dependOn(&run_retention_app_tests.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
+            if (retention_optimize == .debug) macos_only_test_step.dependOn(&run_retention_app_tests.step); // test-macos-only 는 Debug 만 — ReleaseFast 는 전용 스텝이 돈다
         }
     }
     const session_host_cr6e_budget_validator_tests = addProjectTest(b, .{
@@ -10207,7 +10367,7 @@ pub fn build(b: *std.Build) void {
         "test-session-host-reconnect-worker-owner",
         "Verify the bounded CR6e-c1 reconnect worker handoff owner",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |reconnect_worker_owner_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |reconnect_worker_owner_optimize| {
         const reconnect_worker_owner_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/reconnect_worker_owner.zig"),
@@ -10232,14 +10392,14 @@ pub fn build(b: *std.Build) void {
         run_reconnect_worker_owner_boundary_tests.addArg("--maru-expect-tests=1");
         run_reconnect_worker_owner_boundary_tests.setCwd(b.path("."));
         session_host_reconnect_worker_owner_step.dependOn(&run_reconnect_worker_owner_boundary_tests.step);
-        if (reconnect_worker_owner_optimize == .Debug) boundary_step.dependOn(&run_reconnect_worker_owner_boundary_tests.step);
+        if (reconnect_worker_owner_optimize == .debug) boundary_step.dependOn(&run_reconnect_worker_owner_boundary_tests.step);
     }
     const session_host_reconnect_worker_issuer_step = b.step(
         "test-session-host-reconnect-worker-issuer",
         "Verify the blocking CR6e-c2 exact-host worker issuer",
     );
     session_host_reconnect_worker_issuer_step.dependOn(session_host_reconnect_worker_owner_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |reconnect_worker_issuer_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |reconnect_worker_issuer_optimize| {
         const reconnect_worker_issuer_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/reconnect_worker_issuer.zig"),
@@ -10265,14 +10425,14 @@ pub fn build(b: *std.Build) void {
         run_reconnect_worker_issuer_boundary_tests.addArg("--maru-expect-tests=1");
         run_reconnect_worker_issuer_boundary_tests.setCwd(b.path("."));
         session_host_reconnect_worker_issuer_step.dependOn(&run_reconnect_worker_issuer_boundary_tests.step);
-        if (reconnect_worker_issuer_optimize == .Debug) boundary_step.dependOn(&run_reconnect_worker_issuer_boundary_tests.step);
+        if (reconnect_worker_issuer_optimize == .debug) boundary_step.dependOn(&run_reconnect_worker_issuer_boundary_tests.step);
     }
     const session_host_cr6e_c3a_step = b.step(
         "test-session-host-cr6e-c3a",
         "Verify main-owner adoption of an exact CR6e-c2 worker candidate",
     );
     session_host_cr6e_c3a_step.dependOn(session_host_reconnect_worker_issuer_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr6e_c3a_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr6e_c3a_optimize| {
         const cr6e_c3a_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
@@ -10300,14 +10460,14 @@ pub fn build(b: *std.Build) void {
         run_cr6e_c3a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr6e_c3a_boundary_tests.setCwd(b.path("."));
         session_host_cr6e_c3a_step.dependOn(&run_cr6e_c3a_boundary_tests.step);
-        if (cr6e_c3a_optimize == .Debug) boundary_step.dependOn(&run_cr6e_c3a_boundary_tests.step);
+        if (cr6e_c3a_optimize == .debug) boundary_step.dependOn(&run_cr6e_c3a_boundary_tests.step);
     }
     const session_host_cr6e_c3b_step = b.step(
         "test-session-host-cr6e-c3b",
         "Verify the app-global CR6e-c3b reconnect worker runtime",
     );
     session_host_cr6e_c3b_step.dependOn(session_host_cr6e_c3a_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr6e_c3b_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr6e_c3b_optimize| {
         const cr6e_c3b_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/reconnect_worker_runtime.zig"),
@@ -10362,14 +10522,14 @@ pub fn build(b: *std.Build) void {
         run_cr6e_c3b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr6e_c3b_boundary_tests.setCwd(b.path("."));
         session_host_cr6e_c3b_step.dependOn(&run_cr6e_c3b_boundary_tests.step);
-        if (cr6e_c3b_optimize == .Debug) boundary_step.dependOn(&run_cr6e_c3b_boundary_tests.step);
+        if (cr6e_c3b_optimize == .debug) boundary_step.dependOn(&run_cr6e_c3b_boundary_tests.step);
     }
     const session_host_cr6e_c3c_step = b.step(
         "test-session-host-cr6e-c3c",
         "Verify the CR6e-c3c app-global frame and termination wiring",
     );
     session_host_cr6e_c3c_step.dependOn(session_host_cr6e_c3b_step);
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr6e_c3c_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |cr6e_c3c_optimize| {
         const cr6e_c3c_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/reconnect_product_coordinator.zig"),
@@ -10396,7 +10556,7 @@ pub fn build(b: *std.Build) void {
         run_cr6e_c3c_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr6e_c3c_boundary_tests.setCwd(b.path("."));
         session_host_cr6e_c3c_step.dependOn(&run_cr6e_c3c_boundary_tests.step);
-        if (cr6e_c3c_optimize == .Debug) boundary_step.dependOn(&run_cr6e_c3c_boundary_tests.step);
+        if (cr6e_c3c_optimize == .debug) boundary_step.dependOn(&run_cr6e_c3c_boundary_tests.step);
     }
 
     // **판정 스캐폴딩이 제품 경로에서 돌지 않는가.** 합성 앱 루프를 제품과 스모크가 같이 쓰는데,
@@ -10418,7 +10578,7 @@ pub fn build(b: *std.Build) void {
     // 뒤에 있어 **배포가 쓰는 ReleaseFast 에서 사라지는데**, `zig build test` 는 Debug 라 CI 가
     // 영영 못 본다 — 실제로 개인키 공개키 대조가 그렇게 빠져 있었다(docs/ssh-client.md §4.4.4).
     const ssh_mode_step = b.step("check-ssh-modes", "Run the SSH core in Debug/ReleaseSafe/ReleaseFast");
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseSafe, .ReleaseFast }) |mode| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .safe, .fast }) |mode| {
         const ssh_modes = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/session/ssh/ssh.zig"),
@@ -10510,6 +10670,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{.{ .name = "mobile_ssh", .module = mobile_ssh_mod }},
         });
+        support.attachSshPumpCImport(b, ssh_pump_mod);
         ssh_pump_mod.addIncludePath(b.path("src/platform/mobile_host"));
         ssh_pump_mod.addIncludePath(b.path("src/platform/mobile"));
         ssh_pump_mod.addCSourceFile(.{ .file = b.path("src/platform/mobile_host/ssh_pump.c"), .flags = &.{"-std=c11"} });
@@ -10537,7 +10698,7 @@ pub fn build(b: *std.Build) void {
         .name = "ssh-pump-linux",
         .root_module = b.createModule(.{
             .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu }),
-            .optimize = .Debug,
+            .optimize = .debug,
             .link_libc = true,
         }),
     });
@@ -10732,7 +10893,7 @@ pub fn build(b: *std.Build) void {
         "Verify frozen runtime reads and old/new Client socket isolation",
     );
     if (target.result.os.tag == .macos) {
-        for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |read_fence_optimize| {
+        for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |read_fence_optimize| {
             const read_fence_tests = addProjectTest(b, .{
                 .root_module = b.createModule(.{
                     .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
@@ -10755,7 +10916,7 @@ pub fn build(b: *std.Build) void {
         "test-session-host-ended-tracker-diagnostics",
         "Verify ended tracker close diagnostics and healthy cleanup in Debug and ReleaseFast",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |diagnostics_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |diagnostics_optimize| {
         const diagnostics_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/connection_turn.zig"),
@@ -10774,7 +10935,7 @@ pub fn build(b: *std.Build) void {
         "test-session-host-p5b2b3",
         "Verify same-connection partial screen-batch pressure isolation",
     );
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |p5b2b3_optimize| {
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |p5b2b3_optimize| {
         const p5b2b3_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/connection_turn.zig"),
@@ -10858,6 +11019,7 @@ pub fn build(b: *std.Build) void {
     // 그 6,545줄이 여기 있었다. 위에서 만든 값 중 그쪽이 읽는 것만 Context 로 넘긴다.
     session_host_gates.register(b, .{
         .target = target,
+        .macos_sdk = macos_sdk,
         .optimize = optimize,
         .shutdown_wire_contract_mod = shutdown_wire_contract_mod,
         .syntax_mod = syntax_mod,
@@ -10916,6 +11078,7 @@ pub fn build(b: *std.Build) void {
     oracle_ext_mod.linkSystemLibrary("vterm", .{});
     oracle_ext_mod.addIncludePath(b.path("tests/oracle"));
     oracle_ext_mod.addCSourceFile(.{ .file = b.path("tests/oracle/vterm_shim.c") });
+    support.attachLibvtermCImport(b, oracle_ext_mod);
     const oracle_ext_tests = addProjectTest(b, .{ .root_module = oracle_ext_mod });
     const run_oracle_ext_tests = b.addRunArtifact(oracle_ext_tests);
     run_oracle_ext_tests.setCwd(b.path("."));
@@ -10941,6 +11104,7 @@ pub fn build(b: *std.Build) void {
     oracle_ghostty_mod.addIncludePath(b.path("tests/oracle"));
     oracle_ghostty_mod.addCSourceFile(.{ .file = b.path("tests/oracle/ghostty_shim.c") });
     oracle_ghostty_mod.addObjectFile(b.path("references/ghostty/zig-out/lib/libghostty-vt.a"));
+    support.attachGhosttyOracleCImport(b, oracle_ghostty_mod);
     const oracle_ghostty_tests = addProjectTest(b, .{ .root_module = oracle_ghostty_mod });
     const run_oracle_ghostty_tests = b.addRunArtifact(oracle_ghostty_tests);
     run_oracle_ghostty_tests.setCwd(b.path("."));
@@ -11048,9 +11212,10 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    support.attachArrayRepeatImports(b, shape_run_probe_exe.root_module);
     const run_shape_run_probe = b.addRunArtifact(shape_run_probe_exe);
     run_shape_run_probe.setCwd(b.path("."));
-    if (b.args) |args| run_shape_run_probe.addArgs(args);
+    run_shape_run_probe.addPassthruArgs();
 
     const shape_run_probe_step = b.step("shape-run-probe", "Measure shaping run distribution (measure-first)");
     shape_run_probe_step.dependOn(&run_shape_run_probe.step);
@@ -11094,17 +11259,16 @@ fn swiftMacOSTarget(b: *std.Build, target: std.Target) []const u8 {
 /// "돌았다" 고 읽는다 — 이 저장소가 이미 밟은 함정이다(체크가 0 개인데 전부 초록으로 본 사고).
 /// 실패시키지는 않는다: 그 호스트에 소비자가 없어서 빠지는 것이지 무언가 깨진 것이 아니다.
 fn noteSkippedStep(b: *std.Build, step_name: []const u8, reason: []const u8) *std.Build.Step {
-    const Note = struct {
-        fn make(step: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
-            std.debug.print("{s}\n", .{step.name});
-        }
-    };
-    const s = b.allocator.create(std.Build.Step) catch @panic("OOM");
-    s.* = std.Build.Step.init(.{
-        .id = .custom,
-        .name = b.fmt("[skip] {s}: {s}", .{ step_name, reason }),
-        .owner = b,
-        .makeFn = Note.make,
+    const notice = b.addExecutable(.{
+        .name = b.fmt("maru-skip-notice-{s}", .{step_name}),
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/skip_notice.zig"),
+            .target = b.graph.host,
+            .optimize = .debug,
+        }),
     });
-    return s;
+    const run = b.addRunArtifact(notice);
+    run.addArg(b.fmt("[skip] {s}: {s}", .{ step_name, reason }));
+    run.setName(b.fmt("[skip] {s}", .{step_name}));
+    return &run.step;
 }

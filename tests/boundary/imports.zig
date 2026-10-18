@@ -1148,8 +1148,9 @@ test "CR3a-2c2b3a ended purge plan remains a neutral test-only leaf" {
         "src/platform/macos/session_host/ended_purge_transaction.zig",
     );
     defer allocator.free(leaf);
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(leaf, "@import("));
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(leaf, "@import("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(leaf, "@import(\"std\")"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(leaf, "@import(\"type_info_fields\")"));
     const forbidden = [_][]const u8{
         "@import(\"client.zig\")",
         "@import(\"client_slot.zig\")",
@@ -1273,7 +1274,7 @@ test "B3b-S reflection digest excludes top-level tests with a lexical token mask
     try std.testing.expectEqual(@as(usize, 1), retained_after_count);
 
     const malformed: [:0]const u8 = "const broken = ;";
-    var malformed_tree = try std.zig.Ast.parse(allocator, malformed, .zig);
+    var malformed_tree = try std.zig.Ast.parse(allocator, malformed, .{});
     defer malformed_tree.deinit(allocator);
     try std.testing.expect(malformed_tree.errors.len != 0);
     try std.testing.expectError(
@@ -2402,7 +2403,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         "__forbidden__",
     );
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(client_slot, "const State = enum(u8) { empty, live, consume_reserved, consumed };"));
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(client_slot, "state: std.atomic.Value(u8) = .init(@intFromEnum(State.empty)),"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(client_slot, "state: std.atomic.Value(u8) = .init(@backingInt(State.empty)),"));
     try expectPreparedEndedPurgeCommitSchema(allocator, client);
     try expectPreparedStreamOperationPermitConsumeSchema(allocator, client_slot);
     inline for (.{
@@ -2777,9 +2778,10 @@ test "CR3a-2a generation attachment contract remains a neutral authority leaf" {
     defer allocator.free(source);
     // The leaf carries scalar identities only. In particular, a stored address is never turned
     // back into an owner pointer here; only the node-specific adapter may access backing owners.
-    try std.testing.expectEqual(@as(usize, 2), countOccurrences(source, "@import("));
+    try std.testing.expectEqual(@as(usize, 3), countOccurrences(source, "@import("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import(\"std\")"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import(\"runtime_control_types.zig\")"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import(\"type_info_fields\")"));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, "@ptrFromInt"));
     const forbidden = [_][]const u8{
         "@import(\"client.zig\")",
@@ -2816,8 +2818,8 @@ test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
         "src/platform/macos/session_host/attachment_cleanup_registry.zig",
     );
     defer allocator.free(source);
-    // 기존 다섯 import에 settlement receipt 계약과 process seal leaf만 추가된다.
-    try std.testing.expectEqual(@as(usize, 7), countOccurrences(source, "@import("));
+    // 기존 다섯 import에 settlement receipt 계약, process seal leaf, Zig 0.17 reflection shim만 추가된다.
+    try std.testing.expectEqual(@as(usize, 8), countOccurrences(source, "@import("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import(\"std\")"));
     try std.testing.expectEqual(
         @as(usize, 1),
@@ -2838,6 +2840,10 @@ test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
     try std.testing.expectEqual(
         @as(usize, 1),
         countOccurrences(source, "@import(\"process_seal_service.zig\")"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(source, "@import(\"type_info_fields\")"),
     );
     const forbidden = [_][]const u8{
         "@import(\"client.zig\")",
@@ -3562,8 +3568,8 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
 
     try std.testing.expect(graph.step("test-session-host-b3-0-4") != null);
     try std.testing.expectEqual(@as(usize, 1), graph.countRegistrationsWithFilter("B3-0.4"));
-    try std.testing.expectEqual(@as(usize, 1), graph.countFieldPath("std.builtin.OptimizeMode.Debug"));
-    try std.testing.expectEqual(@as(usize, 1), graph.countFieldPath("std.builtin.OptimizeMode.ReleaseFast"));
+    try std.testing.expectEqual(@as(usize, 1), graph.countFieldPath("std.builtin.OptimizeMode.debug"));
+    try std.testing.expectEqual(@as(usize, 1), graph.countFieldPath("std.builtin.OptimizeMode.fast"));
     try std.testing.expect(graph.hasArg("run_b3_0_4_tests", "--maru-expect-tests=8"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_source, "const B3Scenario = enum {"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_source, "const b3_expected_rows = [_]B3Expected{"));
@@ -3857,7 +3863,7 @@ test "d2d RX preparation leaf cannot publish scheduling policy" {
             \\        rx_read_budget_exhausted: bool = false,
             \\        work_budget_exhausted: bool = false,
             \\        terminal: ?client_pump.ExternalPumpTerminal = null,
-            \\        deadlines: [5]?i128 = .{null} ** 5,
+            \\        deadlines: [5]?i128 = @splat(null),
             \\    };
         ),
     );
@@ -4052,7 +4058,7 @@ test "session host owner projection capability stays in its reviewed mechanics f
         const source = try readZigFileZ(allocator, path);
         defer allocator.free(source);
         var tokenizer = TokenSource.init(source); // 캐시된 토큰 — 같은 소스면 다시 토큰화하지 않는다
-        var protected_counts = [_]usize{0} ** protected.len;
+        var protected_counts = @as([protected.len]usize, @splat(0));
         while (true) {
             const token = tokenizer.next();
             if (token.tag == .eof) break;
@@ -4849,7 +4855,7 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
     // 트리를 **한 번** 걷고 파일마다 심볼 전부를 센다. 처음엔 심볼마다 트리를 다시 걸어
     // (49 × 720 = 35,577 번 읽기) 이 테스트 하나가 16 초였다(실측 2026-09-05). 판정은 같다 —
     // (심볼, 파일) 쌍마다 같은 수를 같은 규칙으로 보고, 펌프 파일의 합계는 심볼별로 모아 끝에 확인한다.
-    var pump_references = [_]usize{0} ** symbols.len;
+    var pump_references = @as([symbols.len]usize, @splat(0));
     {
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
         defer dir.close(std.testing.io);
@@ -5003,7 +5009,7 @@ test "generation batch Client ownership mutations have one node-bound production
         "fn executeCanonicalEffectPlanNoFail(",
         "fn effectProofLoss() noreturn",
     ) orelse return error.TestUnexpectedResult;
-    const effect_executor_z = try allocator.dupeZ(u8, effect_executor);
+    const effect_executor_z = try allocator.dupeSentinel(u8, effect_executor, 0);
     defer allocator.free(effect_executor_z);
     try std.testing.expectEqual(@as(usize, 1), countIdentifierOutsideTopLevelTests(effect_executor_z, "enterGenerationAllocatorCallback"));
     try std.testing.expectEqual(@as(usize, 1), countIdentifierOutsideTopLevelTests(effect_executor_z, "leaveGenerationAllocatorCallbackUnchecked"));
@@ -5309,7 +5315,7 @@ const SourceCache = struct {
     fn load(self: *SourceCache, source: [:0]const u8) !void {
         if (self.copy) |c| if (c.len == source.len and std.mem.eql(u8, c, source)) return;
         self.reset();
-        self.copy = try gpa.dupeZ(u8, source);
+        self.copy = try gpa.dupeSentinel(u8, source, 0);
     }
 
     fn reset(self: *SourceCache) void {
@@ -5323,7 +5329,7 @@ const SourceCache = struct {
 
     fn ast(self: *SourceCache, source: [:0]const u8) !*const std.zig.Ast {
         try self.load(source);
-        if (self.tree == null) self.tree = try std.zig.Ast.parse(gpa, self.copy.?, .zig);
+        if (self.tree == null) self.tree = try std.zig.Ast.parse(gpa, self.copy.?, .{});
         return &self.tree.?;
     }
 
@@ -5784,7 +5790,7 @@ test "session host runtime event wire stays below framing and product ownership"
     );
 }
 
-test "session host source transcript encoder imports only std" {
+test "session host source transcript encoder imports std and compile-time compatibility helpers" {
     const allocator = std.testing.allocator;
     const source = try readZigFileZ(
         allocator,
@@ -5793,11 +5799,17 @@ test "session host source transcript encoder imports only std" {
     defer allocator.free(source);
 
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 3),
         std.mem.count(u8, source, "@import("),
     );
     try std.testing.expect(
         std.mem.indexOf(u8, source, "@import(\"std\")") != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, source, "@import(\"array_repeat\")") != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(u8, source, "@import(\"type_info_fields\")") != null,
     );
     inline for (.{
         "client.zig",
@@ -8174,7 +8186,7 @@ test "session host has zero raw untyped Client invalidation callsites" {
             ) orelse return error.TestUnexpectedResult;
             try std.testing.expectEqual(@as(usize, 8), countFieldAssignments(source, "unusable"));
             try std.testing.expectEqual(@as(usize, 4), countFieldAssignments(source, "first_poison_reason"));
-            const confirmed_z = try allocator.dupeZ(u8, confirmed);
+            const confirmed_z = try allocator.dupeSentinel(u8, confirmed, 0);
             defer allocator.free(confirmed_z);
             try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(confirmed_z, "unusable"));
             try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(confirmed_z, "first_poison_reason"));
@@ -8183,7 +8195,7 @@ test "session host has zero raw untyped Client invalidation callsites" {
                 "fn executeCanonicalEffectPlanNoFail(",
                 "fn effectProofLoss() noreturn",
             ) orelse return error.TestUnexpectedResult;
-            const effect_executor_z = try allocator.dupeZ(u8, effect_executor);
+            const effect_executor_z = try allocator.dupeSentinel(u8, effect_executor, 0);
             defer allocator.free(effect_executor_z);
             try std.testing.expectEqual(@as(usize, 2), countFieldAssignments(effect_executor_z, "unusable"));
             try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(effect_executor_z, "first_poison_reason"));
@@ -8192,7 +8204,7 @@ test "session host has zero raw untyped Client invalidation callsites" {
                 "pub fn commitFirstIncidentClientPublicationNoFail(",
                 "pub fn finishIncidentClientOperationNoFail(",
             ) orelse return error.TestUnexpectedResult;
-            const incident_suffix_z = try allocator.dupeZ(u8, incident_suffix);
+            const incident_suffix_z = try allocator.dupeSentinel(u8, incident_suffix, 0);
             defer allocator.free(incident_suffix_z);
             try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(incident_suffix_z, "first_poison_reason"));
             const retirement_cleanup_suffix = betweenMarkers(
@@ -8200,7 +8212,7 @@ test "session host has zero raw untyped Client invalidation callsites" {
                 "pub fn commitRetirementCleanupNoFail(",
                 "pub fn finishRetirementCleanup(",
             ) orelse return error.TestUnexpectedResult;
-            const retirement_cleanup_suffix_z = try allocator.dupeZ(u8, retirement_cleanup_suffix);
+            const retirement_cleanup_suffix_z = try allocator.dupeSentinel(u8, retirement_cleanup_suffix, 0);
             defer allocator.free(retirement_cleanup_suffix_z);
             try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(retirement_cleanup_suffix_z, "unusable"));
             try std.testing.expectEqual(@as(usize, 0), countFieldAssignments(retirement_cleanup_suffix_z, "first_poison_reason"));
@@ -8210,11 +8222,12 @@ test "session host has zero raw untyped Client invalidation callsites" {
                 "pub const testing_api = if (builtin.is_test) struct {",
                 "} else struct {};",
             ) orelse return error.TestUnexpectedResult;
-            const testing_facade_z = try allocator.dupeZ(u8, testing_facade);
+            const testing_facade_z = try allocator.dupeSentinel(u8, testing_facade, 0);
             defer allocator.free(testing_facade_z);
-            const product_prefix_z = try allocator.dupeZ(
+            const product_prefix_z = try allocator.dupeSentinel(
                 u8,
                 source[0 .. @intFromPtr(testing_facade.ptr) - @intFromPtr(source.ptr)],
+                0,
             );
             defer allocator.free(product_prefix_z);
             try std.testing.expectEqual(@as(usize, 1), countFieldAssignments(testing_facade_z, "unusable"));
@@ -8258,7 +8271,7 @@ test "session host has zero raw untyped Client invalidation callsites" {
         betweenMarkers(source, "test \"client poison reason participates in projection authority", "test \"external transfer normalize quarantine") orelse return error.TestUnexpectedResult,
     };
     for (reason_assignment_owners, 0..) |slice, index| {
-        const sentinel_slice = try allocator.dupeZ(u8, slice);
+        const sentinel_slice = try allocator.dupeSentinel(u8, slice, 0);
         defer allocator.free(sentinel_slice);
         try std.testing.expectEqual(
             @as(usize, if (index == 2) 3 else 1),
@@ -10141,8 +10154,8 @@ fn expectEndedPurgeScratchDelta(
         "lifecycle",
         "pending_outbound",
     };
-    var counts = [_]usize{0} ** names.len;
-    var nodes = [_]?std.zig.Ast.Node.Index{null} ** names.len;
+    var counts = @as([names.len]usize, @splat(0));
+    var nodes = @as([names.len]?std.zig.Ast.Node.Index, @splat(null));
     for (members) |member| {
         const tuple = declarationTuple(&tree, "EndedPurgeScratch", member);
         for (names, 0..) |name, index| {
@@ -10443,7 +10456,7 @@ fn expectClientConstructionPolicies(
         defer allocator.free(path);
         const source = try readZigFileZ(allocator, path);
         defer allocator.free(source);
-        var tree = try std.zig.Ast.parse(allocator, source, .zig);
+        var tree = try std.zig.Ast.parse(allocator, source, .{});
         defer tree.deinit(allocator);
         try scanClientConstructionSource(&tree, path, proofs, observed, &unreviewed, true);
     }
@@ -10474,7 +10487,7 @@ fn expectClientConstructionCategories(proofs: []const ClientConstructionProof) !
 }
 
 fn clientConstructionCategoriesValid(proofs: []const ClientConstructionProof) bool {
-    var counts = [_]usize{0} ** 4;
+    var counts = @as([4]usize, @splat(0));
     for (proofs) |proof| {
         const expected: ClientConstructionKind = if (stringInSet(proof.receiver, &.{
             "canMoveToGenerationNode",
@@ -10504,7 +10517,7 @@ fn clientConstructionCategoriesValid(proofs: []const ClientConstructionProof) bo
         else
             .external_adoption;
         if (expected != proof.kind) return false;
-        counts[@intFromEnum(proof.kind)] += 1;
+        counts[@backingInt(proof.kind)] += 1;
     }
     return std.mem.eql(usize, &.{ 7, 4, 22, 5 }, &counts);
 }
@@ -10524,13 +10537,13 @@ fn scanClientConstructionSource(
 ) !void {
     const top_level_test_tokens = try source_digest.topLevelTestTokenMask(std.testing.allocator, tree);
     defer std.testing.allocator.free(top_level_test_tokens);
-    var reflection_observed = [_]usize{0} ** client_reflection_owners.len;
+    var reflection_observed = @as([client_reflection_owners.len]usize, @splat(0));
     // **digest 와 count 는 `source_digest` 가 소유한다.** 아래 루프는 session_host 반사 심사(닫힌 세계
     // 계약)를 계속 하지만, 원장에 들어가는 두 값은 여기서 손으로 세지 않는다 — 규칙이 두 곳에 있으면
     // 그 둘이 갈리는 순간 조용히 어긋난다.
     const external = try source_digest.compute(std.testing.allocator, tree, path);
     for (0..tree.nodes.len) |raw_node| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_node));
         var buffer: [1]std.zig.Ast.Node.Index = undefined;
         const proto = tree.fullFnProto(&buffer, node) orelse continue;
         const name_token = proto.name_token orelse continue;
@@ -10945,7 +10958,7 @@ fn innermostFunctionOwner(tree: *const std.zig.Ast, token: std.zig.Ast.TokenInde
     var function_last: std.zig.Ast.TokenIndex = 0;
     var result_span: usize = std.math.maxInt(usize);
     for (0..tree.nodes.len) |raw_node| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_node));
         const first = tree.firstToken(node);
         const last = tree.lastToken(node);
         if (token < first or token > last) continue;
@@ -10963,7 +10976,7 @@ fn innermostFunctionOwner(tree: *const std.zig.Ast, token: std.zig.Ast.TokenInde
     var container: []const u8 = "<root>";
     var container_span: usize = std.math.maxInt(usize);
     for (0..tree.nodes.len) |raw_node| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_node));
         const variable = tree.fullVarDecl(node) orelse continue;
         const init = variable.ast.init_node.unwrap() orelse continue;
         var buffer: [2]std.zig.Ast.Node.Index = undefined;
@@ -10990,7 +11003,7 @@ fn containerPathIdentity(tree: *const std.zig.Ast, token: std.zig.Ast.TokenIndex
     var containers: [16]Container = undefined;
     var count: usize = 0;
     for (0..tree.nodes.len) |raw_node| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_node));
         const variable = tree.fullVarDecl(node) orelse continue;
         const init = variable.ast.init_node.unwrap() orelse continue;
         var buffer: [2]std.zig.Ast.Node.Index = undefined;
@@ -11618,7 +11631,7 @@ fn syntheticTrustedSharedGuardValid(
     gate_name: []const u8,
 ) bool {
     const allocator = std.testing.allocator;
-    var tree = std.zig.Ast.parse(allocator, source, .zig) catch return false;
+    var tree = std.zig.Ast.parse(allocator, source, .{}) catch return false;
     defer tree.deinit(allocator);
     const members = findRootContainerMembers(&tree, "Client") orelse return false;
     const node = findContainerMethod(&tree, members, "Client", method_name) orelse return false;
@@ -11628,7 +11641,7 @@ fn syntheticTrustedSharedGuardValid(
 
 fn syntheticDelegateValid(source: [:0]const u8) bool {
     const allocator = std.testing.allocator;
-    var tree = std.zig.Ast.parse(allocator, source, .zig) catch return false;
+    var tree = std.zig.Ast.parse(allocator, source, .{}) catch return false;
     defer tree.deinit(allocator);
     const members = findRootContainerMembers(&tree, "Client") orelse return false;
     const node = findContainerMethod(&tree, members, "Client", "sample") orelse return false;
@@ -11639,7 +11652,7 @@ fn syntheticDelegateValid(source: [:0]const u8) bool {
 
 fn syntheticTrustedLeafValid(source: [:0]const u8, method_name: []const u8) bool {
     const allocator = std.testing.allocator;
-    var tree = std.zig.Ast.parse(allocator, source, .zig) catch return false;
+    var tree = std.zig.Ast.parse(allocator, source, .{}) catch return false;
     defer tree.deinit(allocator);
     const members = findRootContainerMembers(&tree, "Client") orelse return false;
     const node = findContainerMethod(&tree, members, "Client", method_name) orelse return false;
@@ -11653,7 +11666,7 @@ fn syntheticTrustedLeafValid(source: [:0]const u8, method_name: []const u8) bool
 
 fn syntheticExclusiveGuardValid(source: [:0]const u8) bool {
     const allocator = std.testing.allocator;
-    var tree = std.zig.Ast.parse(allocator, source, .zig) catch return false;
+    var tree = std.zig.Ast.parse(allocator, source, .{}) catch return false;
     defer tree.deinit(allocator);
     const members = findRootContainerMembers(&tree, "Client") orelse return false;
     const node = findContainerMethod(&tree, members, "Client", "tryDeinit") orelse return false;
@@ -12044,7 +12057,7 @@ fn expectFileFnMarkerCount(
 fn tokenizeMarker(allocator: std.mem.Allocator, marker: []const u8) ![]std.zig.Token.Loc {
     var tokens: std.ArrayList(std.zig.Token.Loc) = .empty;
     errdefer tokens.deinit(allocator);
-    const terminated = try allocator.dupeZ(u8, marker);
+    const terminated = try allocator.dupeSentinel(u8, marker, 0);
     defer allocator.free(terminated);
     var tokenizer = std.zig.Tokenizer.init(terminated);
     while (true) {
@@ -12286,7 +12299,7 @@ fn readZigFileZ(allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {
         return err;
     };
     defer allocator.free(text);
-    return allocator.dupeZ(u8, text);
+    return allocator.dupeSentinel(u8, text, 0);
 }
 
 fn readOptionalZigFileZ(allocator: std.mem.Allocator, path: []const u8) !?[:0]u8 {
@@ -12300,7 +12313,7 @@ fn readOptionalZigFileZ(allocator: std.mem.Allocator, path: []const u8) !?[:0]u8
         else => return err,
     };
     defer allocator.free(text);
-    return @as(?[:0]u8, try allocator.dupeZ(u8, text));
+    return @as(?[:0]u8, try allocator.dupeSentinel(u8, text, 0));
 }
 
 fn checkFile(

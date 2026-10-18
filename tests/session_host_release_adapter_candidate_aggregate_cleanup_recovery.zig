@@ -88,7 +88,7 @@ const Model = struct {
         return .{ .present = self.present, .active_count = self.active_count, .foreign = self.foreign, .unexpected = self.unexpected };
     }
     pub fn unlink(self: *@This(), index: usize) !void {
-        const op: Op = @enumFromInt(@intFromEnum(Op.unlink_5) + (recovery.entry_count - 1 - index));
+        const op: Op = @fromBackingInt(@intCast(@backingInt(Op.unlink_5) + (recovery.entry_count - 1 - index)));
         try self.hit(op);
         if (!self.tomb or !self.present[index]) return error.InvalidState;
         self.present[index] = false;

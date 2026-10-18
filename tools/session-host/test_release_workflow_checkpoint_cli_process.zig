@@ -29,7 +29,7 @@ fn runScenario(
     result: phase.Result,
 ) !void {
     var root_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const template = try std.fmt.bufPrintZ(&root_storage, "/private/tmp/maru-workflow-checkpoint-cli-{s}.XXXXXX", .{@tagName(result)});
+    const template = try std.fmt.bufPrintSentinel(&root_storage, "/private/tmp/maru-workflow-checkpoint-cli-{s}.XXXXXX", .{@tagName(result)}, 0);
     const root_path: [:0]const u8 = std.mem.span(mkdtemp(template.ptr) orelse return error.TempRootFailed);
     defer std.Io.Dir.cwd().deleteTree(io, root_path) catch {};
     if (c.chmod(root_path.ptr, 0o700) != 0) return error.PrivateRootFailed;

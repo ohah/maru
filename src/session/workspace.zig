@@ -1329,7 +1329,7 @@ fn parseFileTerm(encoded: []const u8) DockEntryParseError!FileTerm {
 fn parseEntryKindName(raw: []const u8) ?dock_panel.EntryKind {
     // writer가 절대 쓰지 않는 값은 reader도 받지 않는다 — 손으로 쓴 파일이 복원 못 할 상태를 만들지 못하게.
     if (std.mem.eql(u8, raw, "diff")) return null;
-    inline for (@typeInfo(dock_panel.EntryKind).@"enum".fields) |field| {
+    inline for (@import("type_info_fields").enumFields(dock_panel.EntryKind)) |field| {
         if (std.mem.eql(u8, raw, field.name)) return @field(dock_panel.EntryKind, field.name);
     }
     return null;
@@ -2971,7 +2971,7 @@ test "workspace Explorer v137: malformed packed roots degrade only explorer meta
 }
 
 test "workspace Explorer v137: root count path and raw caps fail closed" {
-    var too_many: [max_explorer_roots + 1][]const u8 = .{"/same"} ** (max_explorer_roots + 1);
+    var too_many: [max_explorer_roots + 1][]const u8 = @splat("/same");
     const too_many_windows = [_]Window{.{ .explorer = .{ .roots = &too_many }, .tabs = &.{} }};
     try std.testing.expectError(error.InvalidExplorerState, serialize(std.testing.allocator, .{ .windows = &too_many_windows }));
 

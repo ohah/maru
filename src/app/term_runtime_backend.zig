@@ -285,7 +285,7 @@ pub const RuntimeObservation = struct {
             .foreground_processes = self.foreground_processes.items,
             .agent_progress = self.agent_progress.items,
         };
-        inline for (@typeInfo(RuntimeObservationView).@"struct".fields) |field| {
+        inline for (@import("type_info_fields").structFields(RuntimeObservationView)) |field| {
             if (@hasField(RuntimeObservation, field.name)) {
                 const Src = @TypeOf(@field(self, field.name));
                 if (Src == field.type) @field(out, field.name) = @field(self, field.name);
@@ -1158,7 +1158,7 @@ test "RuntimeObservation.view: 모든 관측 필드가 view로 전달된다(자�
     // comptime 전수: View의 모든 필드가 기본값과 달라야 한다(= view가 실제로 채웠다). 표현이 다른 필드도 위에서
     // 값을 넣었으므로 같은 규칙으로 검사된다. 새 필드를 추가하고 값을 안 채우면 여기서 실패해 누락을 알린다.
     const defaults: RuntimeObservationView = .{};
-    inline for (@typeInfo(RuntimeObservationView).@"struct".fields) |field| {
+    inline for (@import("type_info_fields").structFields(RuntimeObservationView)) |field| {
         if (field.type == []const u8) {
             try std.testing.expect(@field(v, field.name).len > 0);
         } else if (field.type == ?[]const u8 or field.type == []const pty.types.ForegroundProcessName) {

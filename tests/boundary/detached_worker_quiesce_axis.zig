@@ -90,7 +90,7 @@ fn readFileZ(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]u8
 
 /// test 블록 **밖에서** 이 토큰이 나오는지 본다. 판정자가 자기 안에서 띄우는 probe 스레드는 이 축이 아니다.
 fn hasProductToken(allocator: std.mem.Allocator, source: [:0]const u8, token: []const u8) !bool {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source, .{});
     defer tree.deinit(allocator);
     const mask = try source_digest.anyDepthTestTokenMask(allocator, &tree);
     defer allocator.free(mask);
@@ -148,7 +148,7 @@ test "정지 축: detached worker 를 띄우는 backend 는 자기 deinit 이나
 
     var failed = false;
     var found: usize = 0;
-    var seen_in_deinit: [in_deinit.len]bool = .{false} ** in_deinit.len;
+    var seen_in_deinit: [in_deinit.len]bool = @splat(false);
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
         const name = std.fs.path.basename(entry.path);

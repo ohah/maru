@@ -244,12 +244,12 @@ const SystemOperations = struct {
         var arg_storage: [max_args][512:0]u8 = undefined;
         argv_storage[0] = executable.ptr;
         for (args, 0..) |arg, index| {
-            const value = std.fmt.bufPrintZ(&arg_storage[index], "{s}", .{arg}) catch return error.InvalidInput;
+            const value = std.fmt.bufPrintSentinel(&arg_storage[index], "{s}", .{arg}, 0) catch return error.InvalidInput;
             argv_storage[index + 1] = value.ptr;
         }
         var environment_storage: ["GH_TOKEN=".len + max_token_bytes + 1]u8 = undefined;
         defer @memset(&environment_storage, 0);
-        const token_entry = std.fmt.bufPrintZ(&environment_storage, "GH_TOKEN={s}", .{token}) catch return error.InvalidToken;
+        const token_entry = std.fmt.bufPrintSentinel(&environment_storage, "GH_TOKEN={s}", .{token}, 0) catch return error.InvalidToken;
         const environment: [2:null]?[*:0]const u8 = .{ token_entry.ptr, "GH_PROMPT_DISABLED=1" };
         return process.runCaptureEnvironmentStdout(self.io, executable, &argv_storage, &environment, output, budget_ns);
     }
@@ -259,12 +259,12 @@ const SystemOperations = struct {
         var arg_storage: [max_args][512:0]u8 = undefined;
         argv_storage[0] = executable.ptr;
         for (args, 0..) |arg, index| {
-            const value = std.fmt.bufPrintZ(&arg_storage[index], "{s}", .{arg}) catch return error.InvalidInput;
+            const value = std.fmt.bufPrintSentinel(&arg_storage[index], "{s}", .{arg}, 0) catch return error.InvalidInput;
             argv_storage[index + 1] = value.ptr;
         }
         var environment_storage: ["GH_TOKEN=".len + max_token_bytes + 1]u8 = undefined;
         defer @memset(&environment_storage, 0);
-        const token_entry = std.fmt.bufPrintZ(&environment_storage, "GH_TOKEN={s}", .{token}) catch return error.InvalidToken;
+        const token_entry = std.fmt.bufPrintSentinel(&environment_storage, "GH_TOKEN={s}", .{token}, 0) catch return error.InvalidToken;
         const environment: [2:null]?[*:0]const u8 = .{ token_entry.ptr, "GH_PROMPT_DISABLED=1" };
         return process.runWriteEnvironmentStdout(self.io, executable, &argv_storage, &environment, output_fd, expected_size, budget_ns);
     }
@@ -293,9 +293,9 @@ const Workspace = struct {
         if (leaf.len == 0 or std.mem.eql(u8, leaf, ".") or std.mem.eql(u8, leaf, "..") or leaf.len > std.fs.max_name_bytes)
             return error.InvalidWorkspace;
         var parent_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-        const parent = if (slash == 0) "/" else std.fmt.bufPrintZ(&parent_storage, "{s}", .{path[0..slash]}) catch return error.InvalidWorkspace;
+        const parent = if (slash == 0) "/" else std.fmt.bufPrintSentinel(&parent_storage, "{s}", .{path[0..slash]}, 0) catch return error.InvalidWorkspace;
         self.parent_fd = safe_open.openAbsoluteNoFollow(parent, true) catch return error.InvalidWorkspace;
-        _ = std.fmt.bufPrintZ(&self.dir_name, "{s}", .{leaf}) catch return error.InvalidWorkspace;
+        _ = std.fmt.bufPrintSentinel(&self.dir_name, "{s}", .{leaf}, 0) catch return error.InvalidWorkspace;
         if (c.mkdirat(self.parent_fd, self.dir_name[0..].ptr, 0o700) != 0) {
             const err: anyerror = if (posix.errno(-1) == .EXIST) error.WorkspaceExists else error.CreateFailed;
             _ = c.close(self.parent_fd);

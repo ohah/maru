@@ -61,7 +61,7 @@ test "CR4c C1 경계는 evidenced observer binding만 unpublished controller로 
     );
     try std.testing.expect(
         index(backend_promote, "RemoteRuntime.backend_api.promoteReconnectControllerEvidence(") <
-            index(backend_promote, "job.state_raw = @intFromEnum(HostReconnectJobState.controller_promoted);"),
+            index(backend_promote, "job.state_raw = @backingInt(HostReconnectJobState.controller_promoted);"),
     );
 
     const inventories = .{

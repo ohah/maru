@@ -33,7 +33,7 @@ pub fn main(init: std.process.Init) !void {
     defer init.gpa.free(bundle);
     if (bundle.len == 0) return error.InvalidBundle;
     var marker_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
-    const marker = try std.fmt.bufPrintZ(&marker_storage, "{s}.verified", .{observed[4]});
+    const marker = try std.fmt.bufPrintSentinel(&marker_storage, "{s}.verified", .{observed[4]}, 0);
     const marker_fd = c.open(marker.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0o600));
     if (marker_fd < 0) return error.DuplicateVerification;
     if (c.close(marker_fd) != 0) return error.MarkerCloseFailed;

@@ -60,13 +60,13 @@ const Internal = struct {
     payload: []u8 = undefined,
     admission_tag: AdmissionTag = .unknown,
     lease: connection_lease.ConnectionLease = .{},
-    seal: owner_seal.Digest = [_]u8{0} ** 32,
+    seal: owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: Lifecycle = .pristine,
 };
 
 pub const EventOwner = extern struct {
     storage: [owner_storage_size]u8 align(@alignOf(Internal)) =
-        [_]u8{0} ** owner_storage_size,
+        @as([owner_storage_size]u8, @splat(0)),
 
     pub fn view(self: *const EventOwner) EventViewError!EventView {
         return viewOwner(self);
@@ -83,12 +83,12 @@ fn internalConst(owner: *const EventOwner) *const Internal {
 
 fn admissionRawValid(admission: *const AdmissionTag) bool {
     const raw = @as(*const u8, @ptrCast(admission)).*;
-    return raw <= @intFromEnum(AdmissionTag.accepted);
+    return raw <= @backingInt(AdmissionTag.accepted);
 }
 
 fn lifecycleRawValid(lifecycle: *const Lifecycle) bool {
     const raw = @as(*const u8, @ptrCast(lifecycle)).*;
-    return raw <= @intFromEnum(Lifecycle.terminal);
+    return raw <= @backingInt(Lifecycle.terminal);
 }
 
 pub fn pristineExact(owner: *const EventOwner) bool {
@@ -359,7 +359,7 @@ fn viewOwnerWithTrusted(
     const digest = runtime_event_wire.payloadDigest(state.payload);
     if (!std.mem.eql(u8, &digest, &payload_digest) or
         wire_major != state.wire_major or
-        admission_tag != @intFromEnum(state.admission_tag))
+        admission_tag != @backingInt(state.admission_tag))
         return error.Terminal;
     const admission: EventAdmission = switch (state.admission_tag) {
         // Admission identity was sealed at ingress; replay only reconstructs the allocation-free
@@ -489,21 +489,21 @@ comptime {
         @compileError("EventOwner opaque storage budget exhausted");
     if (max_inline_owner_bytes != 2 * 1024 * 1024)
         @compileError("EventOwner maximum inline product budget drifted");
-    const outcome_fields = std.meta.fields(EventTakeOutcome);
+    const outcome_fields = @import("type_info_fields").fields(EventTakeOutcome);
     const expected_outcomes = [_][]const u8{ "idle", "ended_pending", "taken" };
     if (outcome_fields.len != expected_outcomes.len)
         @compileError("EventTakeOutcome tag set drifted from 2c3d C1 SSOT");
     for (outcome_fields, expected_outcomes) |actual, expected|
         if (!std.mem.eql(u8, actual.name, expected))
             @compileError("EventTakeOutcome tag order drifted from 2c3d C1 SSOT");
-    const admission_fields = std.meta.fields(EventAdmission);
+    const admission_fields = @import("type_info_fields").fields(EventAdmission);
     const expected_admissions = [_][]const u8{ "accepted", "unknown" };
     if (admission_fields.len != expected_admissions.len)
         @compileError("EventAdmission tag set drifted from 2c3d C1 SSOT");
     for (admission_fields, expected_admissions) |actual, expected|
         if (!std.mem.eql(u8, actual.name, expected))
             @compileError("EventAdmission tag order drifted from 2c3d C1 SSOT");
-    const view_fields = std.meta.fields(EventView);
+    const view_fields = @import("type_info_fields").fields(EventView);
     const expected_view = [_][]const u8{ "wire_major", "payload", "admission" };
     if (view_fields.len != expected_view.len)
         @compileError("EventView field set drifted from 2c3d C1 SSOT");

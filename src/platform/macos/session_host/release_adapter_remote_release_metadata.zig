@@ -98,10 +98,10 @@ pub fn bind(allocator: std.mem.Allocator, bytes: []const u8, context: context_mo
     var expected_storage: [asset_count][max_name_bytes]u8 = @splat(@splat(0));
     var expected: [asset_count][]const u8 = undefined;
     const version = context.tag[1..];
-    expected[@intFromEnum(Role.dmg)] = std.fmt.bufPrint(&expected_storage[@intFromEnum(Role.dmg)], "Maru-{s}-universal.dmg", .{version}) catch return error.InvalidResponse;
-    expected[@intFromEnum(Role.frozen_host)] = std.fmt.bufPrint(&expected_storage[@intFromEnum(Role.frozen_host)], "maru-session-host-{s}", .{version}) catch return error.InvalidResponse;
-    expected[@intFromEnum(Role.manifest)] = std.fmt.bufPrint(&expected_storage[@intFromEnum(Role.manifest)], "Maru-{s}-session-host-release.json", .{version}) catch return error.InvalidResponse;
-    expected[@intFromEnum(Role.evidence_candidate)] = "";
+    expected[@backingInt(Role.dmg)] = std.fmt.bufPrint(&expected_storage[@backingInt(Role.dmg)], "Maru-{s}-universal.dmg", .{version}) catch return error.InvalidResponse;
+    expected[@backingInt(Role.frozen_host)] = std.fmt.bufPrint(&expected_storage[@backingInt(Role.frozen_host)], "maru-session-host-{s}", .{version}) catch return error.InvalidResponse;
+    expected[@backingInt(Role.manifest)] = std.fmt.bufPrint(&expected_storage[@backingInt(Role.manifest)], "Maru-{s}-session-host-release.json", .{version}) catch return error.InvalidResponse;
+    expected[@backingInt(Role.evidence_candidate)] = "";
 
     var staged: Owner = .{};
     staged.release_id = release.id.value;
@@ -111,7 +111,7 @@ pub fn bind(allocator: std.mem.Allocator, bytes: []const u8, context: context_mo
     var seen: [asset_count]bool = @splat(false);
     for (release.assets) |asset| {
         const role = roleForName(asset.name, expected) orelse return error.InvalidResponse;
-        const index = @intFromEnum(role);
+        const index = @backingInt(role);
         if (seen[index] or asset.id.value == 0 or asset.size.value == 0 or asset.size.value > identity.max_release_asset_bytes or asset.name.len > max_name_bytes or
             !std.mem.eql(u8, asset.state, "uploaded") or !std.mem.eql(u8, asset.content_type, "application/octet-stream") or
             asset.digest.len != "sha256:".len + 64 or !std.mem.startsWith(u8, asset.digest, "sha256:") or
@@ -136,10 +136,10 @@ pub fn bind(allocator: std.mem.Allocator, bytes: []const u8, context: context_mo
 }
 
 fn roleForName(name: []const u8, expected: [asset_count][]const u8) ?Role {
-    if (std.mem.eql(u8, name, expected[@intFromEnum(Role.dmg)])) return .dmg;
-    if (std.mem.eql(u8, name, expected[@intFromEnum(Role.frozen_host)])) return .frozen_host;
+    if (std.mem.eql(u8, name, expected[@backingInt(Role.dmg)])) return .dmg;
+    if (std.mem.eql(u8, name, expected[@backingInt(Role.frozen_host)])) return .frozen_host;
     if (std.mem.eql(u8, name, "baseline-evidence.json") or std.mem.eql(u8, name, "upgrade-evidence.json")) return .evidence_candidate;
-    if (std.mem.eql(u8, name, expected[@intFromEnum(Role.manifest)])) return .manifest;
+    if (std.mem.eql(u8, name, expected[@backingInt(Role.manifest)])) return .manifest;
     return null;
 }
 

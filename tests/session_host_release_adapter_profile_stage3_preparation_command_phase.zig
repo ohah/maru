@@ -61,7 +61,7 @@ const Mock = struct {
         try self.run(.retained_close, 11);
     }
     pub fn cleanup(self: *@This(), stage: phase.Stage) !void {
-        try self.push(100 + @intFromEnum(stage));
+        try self.push(100 + @backingInt(stage));
         if (self.cleanup_fail_once == stage) {
             self.cleanup_fail_once = .none;
             return error.InjectedCleanup;
@@ -133,7 +133,7 @@ test "prerequisite failure preserves its own remote audit signal" {
     try std.testing.expectEqual(phase.Stage.prerequisite, transaction.audit_stage);
     try std.testing.expect(transaction.prerequisite_audit_preserved);
     try std.testing.expect(transaction.localCleanupComplete());
-    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, mock.events[0..mock.len], &.{100 + @intFromEnum(phase.Stage.prerequisite)}));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, mock.events[0..mock.len], &.{100 + @backingInt(phase.Stage.prerequisite)}));
 }
 
 test "timing owner established before publisher failure is preserved without deletion" {
@@ -143,14 +143,14 @@ test "timing owner established before publisher failure is preserved without del
     try std.testing.expect(transaction.needsAudit());
     try std.testing.expect(transaction.timing_audit_preserved);
     try std.testing.expect(transaction.localCleanupComplete());
-    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, mock.events[0..mock.len], &.{100 + @intFromEnum(phase.Stage.timing)}));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, mock.events[0..mock.len], &.{100 + @backingInt(phase.Stage.timing)}));
 }
 
 test "timing failure before ownership cleans the attempted leaf before earlier owners" {
     var mock = Mock{ .fail = .timing };
     var transaction: phase.Transaction = .{};
     try std.testing.expectError(error.AuditRequired, phase.executeWith(&mock, &transaction));
-    const timing_cleanup = std.mem.indexOfScalar(u8, mock.events[0..mock.len], 100 + @intFromEnum(phase.Stage.timing)) orelse return error.TestUnexpectedResult;
-    const upgrade_cleanup = std.mem.indexOfScalar(u8, mock.events[0..mock.len], 100 + @intFromEnum(phase.Stage.profile_upgrade)) orelse return error.TestUnexpectedResult;
+    const timing_cleanup = std.mem.indexOfScalar(u8, mock.events[0..mock.len], 100 + @backingInt(phase.Stage.timing)) orelse return error.TestUnexpectedResult;
+    const upgrade_cleanup = std.mem.indexOfScalar(u8, mock.events[0..mock.len], 100 + @backingInt(phase.Stage.profile_upgrade)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(timing_cleanup < upgrade_cleanup);
 }

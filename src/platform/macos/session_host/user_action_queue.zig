@@ -24,7 +24,7 @@ pub const TargetIdentity = struct {
     surface_id: u64 = 0,
     runtime_handle: u64 = 0,
     host_id: u128 = 0,
-    runtime_id: [32]u8 = [_]u8{0} ** 32,
+    runtime_id: [32]u8 = @as([32]u8, @splat(0)),
     runtime_generation: u64 = 0,
 };
 
@@ -247,7 +247,7 @@ test "completion applies only to the exact original target identity" {
         .surface_id = 3,
         .runtime_handle = 9,
         .host_id = 11,
-        .runtime_id = [_]u8{'a'} ** 32,
+        .runtime_id = @as([32]u8, @splat('a')),
         .runtime_generation = 4,
     };
     var queue: Queue = .{};

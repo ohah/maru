@@ -886,6 +886,7 @@ pub const TerminalRuntimeRegistry = struct {
                 entry.observers = .{
                     .items = replacement,
                     .capacity = replacement.len,
+                    .pointer_stability = .{},
                 };
                 prepared.release_observers = null;
                 entry.controller = null;

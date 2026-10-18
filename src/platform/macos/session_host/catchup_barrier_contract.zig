@@ -285,7 +285,7 @@ test "CR4a host pending은 retry admission spent expiry를 닫힌 전이로 고�
     try std.testing.expectEqual(HostState.ArmResult.spent, state.arm(identity, 13, 30));
     try std.testing.expectEqual(HostState.ArmResult.busy, state.arm(foreign, 13, 30));
 
-    var binding_drifts = [_]CatchupIdentity{identity} ** 5;
+    var binding_drifts = @as([5]CatchupIdentity, @splat(identity));
     binding_drifts[0].host_id += 1;
     binding_drifts[1].subscription.value += 1;
     binding_drifts[2].runtime_id += 1;

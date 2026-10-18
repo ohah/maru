@@ -292,14 +292,14 @@ pub fn syntaxRoleKey(comptime role: SyntaxRole) []const u8 {
 
 /// 키 suffix(`theme.syntax.` 뒤)를 역할로. 모르는 이름은 null(loader가 forgiving 진단을 단다).
 pub fn parseSyntaxRole(name: []const u8) ?SyntaxRole {
-    inline for (@typeInfo(SyntaxRole).@"enum".fields) |f| {
-        const role: SyntaxRole = @enumFromInt(f.value);
+    inline for (@import("type_info_fields").enumFields(SyntaxRole)) |f| {
+        const role: SyntaxRole = @fromBackingInt(@intCast(f.value));
         if (std.mem.eql(u8, name, comptime syntaxRoleKey(role)["theme.syntax.".len..])) return role;
     }
     return null;
 }
 
-pub const syntax_role_count = @typeInfo(SyntaxRole).@"enum".fields.len;
+pub const syntax_role_count = @import("type_info_fields").enumFields(SyntaxRole).len;
 
 pub const ThemeConfig = struct {
     background: []const u8 = "#101010",
@@ -327,7 +327,7 @@ pub const ThemeConfig = struct {
     // `theme.palette.0`~`.15` 키로 파싱한다. 이 값은 OSC 4 동적 override가 *없을 때*의 base다 — 렌더 폴백 우선순위는
     // OSC4 override → config palette → xterm256(color.zig)이라, OSC4/OSC104/RIS는 OSC4 레이어만 건드리고 config base는
     // 살아남는다(per-core OSC4에 pre-seed하면 RIS가 지우므로 별도 레이어로 둔다). `ls`/`vim`/프롬프트 색 테마 완성용.
-    palette: [16]?[]const u8 = .{null} ** 16,
+    palette: [16]?[]const u8 = @splat(null),
 
     // 구문 색 역할별 override(선택, 각 #RRGGBB). null=그 역할은 팔레트에서 파생한다(`syntax_theme.fromTheme`).
     // loader가 `theme.syntax.<역할>` 키로 파싱하고, 색인은 `SyntaxRole`이다.
@@ -335,7 +335,7 @@ pub const ThemeConfig = struct {
     // **이 필드가 `ThemeConfig` 안에 있는 것이 설계다**(native-editor-ui.md §9.0). 그 자리 하나가 규칙 둘을
     // 공짜로 성립시킨다 — `theme.follow-system`이 켜지면 무시되고(applyFollowSystemTheme이 이 struct를 통째로
     // 프리셋 색으로 간다), `theme.preset`이 뒤 줄에 오면 지워진다(순차 적용). 밖으로 빼면 둘 다 조용히 깨진다.
-    syntax: [syntax_role_count]?[]const u8 = .{null} ** syntax_role_count,
+    syntax: [syntax_role_count]?[]const u8 = @splat(null),
 
     // 스키마-주도 색(CS-2). search_match*/sidebar_*는 config 키가 없어(preset 전용) 제외, palette는 특수(palette.N) 유지.
     pub const schema = .{
@@ -393,7 +393,7 @@ pub fn parseDashedEnum(comptime T: type, value: []const u8) ?T {
 /// 이 함수에 위임하고, preset_names_joined도 이걸 쓴다(과거 3중 복제였던 underscore→dash join을 한 곳으로).
 pub fn enumNamesJoined(comptime T: type) []const u8 {
     var out: []const u8 = "";
-    for (@typeInfo(T).@"enum".fields, 0..) |f, i| {
+    for (@import("type_info_fields").enumFields(T), 0..) |f, i| {
         var seg: []const u8 = "";
         for (f.name) |c| seg = seg ++ &[_]u8{if (c == '_') '-' else c};
         out = if (i == 0) seg else out ++ "|" ++ seg;
@@ -1910,8 +1910,8 @@ test "SC1 구문 색 열한 키가 모두 문서 표에 있다 — 압축 행의
     // 아니라 **키 문자열**을 찾는다(압축 행이라 셀 경계가 없다).
     const doc = @embedFile("config_doc_md");
     var missing: usize = 0;
-    inline for (@typeInfo(SyntaxRole).@"enum".fields) |f| {
-        const key = comptime syntaxRoleKey(@enumFromInt(f.value));
+    inline for (@import("type_info_fields").enumFields(SyntaxRole)) |f| {
+        const key = comptime syntaxRoleKey(@fromBackingInt(@intCast(f.value)));
         if (std.mem.indexOf(u8, doc, "`" ++ key ++ "`") == null) {
             std.debug.print("미문서 구문 색 키: '{s}' (configuration.md 표에 추가 필요)\n", .{key});
             missing += 1;
@@ -1923,8 +1923,8 @@ test "SC1 구문 색 열한 키가 모두 문서 표에 있다 — 압축 행의
 test "SC1b 역할 이름과 키가 어긋나지 않는다 — type 만 예외다" {
     // 키 생성이 한 함수이므로 왕복이 성립해야 한다. `type_name`↔`type` 예외가 한쪽에만 반영되면
     // 사용자가 적은 줄이 조용히 무시된다(로더가 모르는 역할로 보고 진단만 남긴다).
-    inline for (@typeInfo(SyntaxRole).@"enum".fields) |f| {
-        const role: SyntaxRole = @enumFromInt(f.value);
+    inline for (@import("type_info_fields").enumFields(SyntaxRole)) |f| {
+        const role: SyntaxRole = @fromBackingInt(@intCast(f.value));
         const key = comptime syntaxRoleKey(role);
         const suffix = key["theme.syntax.".len..];
         try std.testing.expectEqual(role, parseSyntaxRole(suffix).?);

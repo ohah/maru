@@ -225,7 +225,7 @@ pub fn handleMetalKeyEvent(self: *AppSession, event: terminal.KeyEvent) !FrameSu
 /// 그 경로의 요약이 이전 이벤트 값을 물고 나간다. 종결을 한 곳에 모아 그 실수를 구조적으로 막는다.
 pub fn settleKeyEventSummary(self: *AppSession) void {
     self.writeSummaryFromState();
-    self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+    self.last_summary.last_event_kind = @backingInt(EventKind.key_down);
 }
 
 /// PTY write 없이 여기서 종결되는 모든 경로 — chrome 오버레이·rename·주소창·사이드바 검색·도크·
@@ -1039,7 +1039,7 @@ pub fn rebuildGlobalHotkeys(self: *AppSession) !void {
             try self.global_hotkeys.append(self.allocator, .{
                 .virtual_key_code = d.virtual_key_code,
                 .carbon_modifiers = d.carbon_modifiers,
-                .action = @intFromEnum(d.action),
+                .action = @backingInt(d.action),
             });
         }
     }

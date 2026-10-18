@@ -31,7 +31,7 @@ pub const Level = enum(u8) {
     }
 
     pub fn atLeast(self: Level, other: Level) bool {
-        return @intFromEnum(self) >= @intFromEnum(other);
+        return @backingInt(self) >= @backingInt(other);
     }
 };
 

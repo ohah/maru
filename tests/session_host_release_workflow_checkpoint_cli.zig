@@ -84,7 +84,7 @@ const Fixture = struct {
         try result.tmp.dir.createDir(std.testing.io, "root", .default_dir);
         var parent: [std.fs.max_path_bytes]u8 = undefined;
         const len = try result.tmp.dir.realPath(std.testing.io, &parent);
-        const path_value = try std.fmt.bufPrintZ(&result.path_storage, "{s}/root", .{parent[0..len]});
+        const path_value = try std.fmt.bufPrintSentinel(&result.path_storage, "{s}/root", .{parent[0..len]}, 0);
         result.path_len = path_value.len;
         try std.testing.expectEqual(@as(c_int, 0), c.chmod(path_value.ptr, 0o700));
         var root: checkpoint.Root = .{};

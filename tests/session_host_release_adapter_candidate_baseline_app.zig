@@ -93,8 +93,8 @@ const Fixture = struct {
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "Maru.app/Contents/MacOS/maru", .data = "cli" });
         var root: [std.fs.max_path_bytes]u8 = undefined;
         const len = try self.tmp.dir.realPath(std.testing.io, &root);
-        _ = try std.fmt.bufPrintZ(&self.main_path, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{root[0..len]});
-        _ = try std.fmt.bufPrintZ(&self.cli_path, "{s}/Maru.app/Contents/MacOS/maru", .{root[0..len]});
+        _ = try std.fmt.bufPrintSentinel(&self.main_path, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{root[0..len]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.cli_path, "{s}/Maru.app/Contents/MacOS/maru", .{root[0..len]}, 0);
         if (c.chmod(self.main().ptr, 0o755) != 0 or c.chmod(self.cli().ptr, 0o755) != 0) return error.FixtureFailed;
     }
     fn deinit(self: *@This()) void {

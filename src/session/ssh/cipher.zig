@@ -376,7 +376,7 @@ test "인증됐어도 패딩 규칙을 어긴 패킷은 거절한다" {
     // 메시지 뒤에 붙은 쓰레기를 파싱한다. 키를 우리가 쥐고 있으니 그런 패킷을 만들어 확인한다.
     var cipher = testCipher(vector.key);
     for ([_]u8{ 0, 1, 3 }) |bad_pad| {
-        var body = [_]u8{0} ** 16;
+        var body = @as([16]u8, @splat(0));
         body[0] = bad_pad;
         body[1] = 21; // SSH_MSG_NEWKEYS — 그럴듯한 메시지 번호
         var buf: [length_len + 16 + tag_len]u8 = undefined;
@@ -516,7 +516,7 @@ test "payload 가 0바이트인 패킷은 거절한다" {
     // `packet.read` 와 같은 이유 — SSH 메시지는 전부 메시지 번호로 시작한다. 몸통 8바이트에
     // 패딩 7 이면 payload 가 0 이 되는데, 다른 가드는 전부 통과한다.
     var cipher = testCipher(vector.key);
-    var body = [_]u8{0} ** 8;
+    var body = @as([8]u8, @splat(0));
     body[0] = 7; // 패딩 7 → payload 0
     var wire_bytes: [length_len + 8 + tag_len]u8 = undefined;
     const nonce = nonceFor(4);
@@ -535,8 +535,8 @@ test "payload 가 0바이트인 패킷은 거절한다" {
 test "키를 지운다" {
     var cipher = testCipher(vector.key);
     cipher.clear();
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &cipher.payload_key);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &cipher.length_key);
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &cipher.payload_key);
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &cipher.length_key);
 }
 
 test "상수는 명세 값 그대로다" {

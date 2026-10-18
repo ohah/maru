@@ -42,9 +42,9 @@ pub const Cursor = struct {
 
     pub fn initial(job: ledger.HostJobIdentity, rows: []const ledger.RuntimeRow) !Cursor {
         if (!ledger.validateCanonicalRows(job, rows)) return error.InvalidRuntimeSet;
-        for (rows) |row| if (row.ledger_raw != @intFromEnum(ledger.RuntimeLedger.old_valid) or
-            row.local_raw != @intFromEnum(ledger.LocalState.published_old) or
-            row.mutation_raw != @intFromEnum(ledger.MutationState.open))
+        for (rows) |row| if (row.ledger_raw != @backingInt(ledger.RuntimeLedger.old_valid) or
+            row.local_raw != @backingInt(ledger.LocalState.published_old) or
+            row.mutation_raw != @backingInt(ledger.MutationState.open))
             return error.InvalidRuntimeSet;
         return .{ .job = job, .next_index = 0, .terminal_count = 0, .failed_raw = 0 };
     }
@@ -56,10 +56,10 @@ pub const Cursor = struct {
             return false;
         for (rows, 0..) |row, index| {
             if (index < self.next_index) {
-                if (row.local_raw == @intFromEnum(ledger.LocalState.published_old)) return false;
-            } else if (row.ledger_raw != @intFromEnum(ledger.RuntimeLedger.old_valid) or
-                row.local_raw != @intFromEnum(ledger.LocalState.published_old) or
-                row.mutation_raw != @intFromEnum(ledger.MutationState.open)) return false;
+                if (row.local_raw == @backingInt(ledger.LocalState.published_old)) return false;
+            } else if (row.ledger_raw != @backingInt(ledger.RuntimeLedger.old_valid) or
+                row.local_raw != @backingInt(ledger.LocalState.published_old) or
+                row.mutation_raw != @backingInt(ledger.MutationState.open)) return false;
         }
         if (self.next_index != 0) {
             _ = ledger.summarizeTerminalRows(self.job, rows[0..self.next_index]) catch return false;
@@ -156,7 +156,7 @@ pub const Cursor = struct {
             self.next_index == rows.len)
             return error.InvalidRuntimeSet;
         for (rows, 0..) |*row, index| {
-            if (row.local_raw == @intFromEnum(ledger.LocalState.ended)) continue;
+            if (row.local_raw == @backingInt(ledger.LocalState.ended)) continue;
             row.* = ledger.RuntimeRow.init(
                 row.identity,
                 if (index < self.next_index) .new_controller_evidenced else .old_valid,
@@ -286,11 +286,11 @@ test "CR5c cursor는 shared Client terminal에서 앞선 publication까지 모�
     try std.testing.expectEqual(@as(u32, 3), summary.frozen_unavailable);
     try std.testing.expectEqual(@as(u32, 3), summary.retry_reserved);
     try std.testing.expectEqual(
-        @intFromEnum(ledger.RuntimeLedger.new_controller_evidenced),
+        @backingInt(ledger.RuntimeLedger.new_controller_evidenced),
         rows[0].ledger_raw,
     );
     try std.testing.expectEqual(
-        @intFromEnum(ledger.RuntimeLedger.old_valid),
+        @backingInt(ledger.RuntimeLedger.old_valid),
         rows[1].ledger_raw,
     );
     try std.testing.expect(cursor.valid(&rows));

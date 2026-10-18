@@ -95,7 +95,7 @@ pub const NativeChromeTextGlyphRecord = extern struct {
     /// ink 가 자기 자리 **왼쪽으로 넘치는 px**(합자만 양수). 호출자가 래스터 슬롯을 그만큼 넓히고 그린
     /// 자리를 당긴다 — 터미널의 `left_overhang_cells`(칸 수)와 같은 사실을 셀 없는 chrome 좌표로 옮긴 값이다.
     left_overhang_px: f32 = 0,
-    font_name: [128]u8 = [_]u8{0} ** 128,
+    font_name: [128]u8 = @as([128]u8, @splat(0)),
 };
 
 /// `font_family`가 빈 슬라이스면 system UI face(레거시 동작 — resolved appearance가 없는 Lab/테스트 호출자).

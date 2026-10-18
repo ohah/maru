@@ -581,7 +581,7 @@ test "안쪽 개인키 구역의 검사들" {
     }
 
     // **길이가 명세와 달라도 거절한다.** 짧은 값을 받아 주면 그 뒤 슬라이스가 엉뚱한 자리를 가리킨다.
-    const filler = [_]u8{0xAB} ** 128;
+    const filler = @as([128]u8, @splat(0xAB));
     for ([_]usize{ 0, 31, 33 }) |bad| {
         try std.testing.expectError(
             Error.MalformedKey,
@@ -673,7 +673,7 @@ test "rounds 상한을 본다" {
         try w.string(opt.written());
         try w.u32be(1);
         try w.string("pub");
-        try w.string(&([_]u8{0} ** 16));
+        try w.string(&(@as([16]u8, @splat(0))));
         const blob = buf[0 .. magic.len + w.written().len];
         try std.testing.expectError(case.want, parse(blob, "pw", &scratch, .{}));
         // 호출자는 **얼마나 드는지**를 KDF 를 안 돌리고 물어볼 수 있다 — 그것이 없으면 할 수 있는
@@ -714,7 +714,7 @@ test "clear 는 개인키를 지운다" {
     const before = got.secret;
     got.clear();
     try std.testing.expect(!std.mem.eql(u8, &before, &got.secret));
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 64), &got.secret);
+    try std.testing.expectEqualSlices(u8, &(@as([64]u8, @splat(0))), &got.secret);
     // 공개키는 안 지운다 — 지우면 호출자가 blob 을 못 만든다.
     try std.testing.expectEqualSlices(u8, &want_public, &got.public);
 }
@@ -744,7 +744,7 @@ test "호출자가 허락하면 라운드가 큰 정상 키도 열린다" {
     try w.string(opt.written());
     try w.u32be(1);
     try w.string("pub");
-    try w.string(&([_]u8{0} ** 16));
+    try w.string(&(@as([16]u8, @splat(0))));
     const blob = buf[0 .. magic.len + w.written().len];
 
     // 기본 정책으로는 비용을 이유로 거절한다.

@@ -47,9 +47,9 @@ test "disk full admission gate uses real ENOSPC before product budget prepare" {
 
     // Resolve the actual function body, so a declaration or a neighboring helper cannot satisfy
     // the ordering gate. The ENOSPC fixture must finish before the unchanged product clock starts.
-    const coordinator_z = try allocator.dupeZ(u8, coordinator);
+    const coordinator_z = try allocator.dupeSentinel(u8, coordinator, 0);
     defer allocator.free(coordinator_z);
-    var tree = try std.zig.Ast.parse(allocator, coordinator_z, .zig);
+    var tree = try std.zig.Ast.parse(allocator, coordinator_z, .{});
     defer tree.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
     const fixture = fixture: {

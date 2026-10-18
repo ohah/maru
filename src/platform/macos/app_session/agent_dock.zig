@@ -1715,7 +1715,7 @@ pub fn agentSessionDockRefreshSmokeProbe(self: *const AppSession) AgentSessionAr
 /// 기록 내용이 아니다. 좁은 도크에서는 토글을 발행하지 않으므로 그때는 `present = false`.
 pub fn agentSessionDockSortToggleSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
     var probe = headerActionSmokeProbe(self, .toggle_sort) orelse return .{};
-    probe.state = @intFromEnum(self.agent_session_archive_sort);
+    probe.state = @backingInt(self.agent_session_archive_sort);
     return probe;
 }
 
@@ -2225,7 +2225,7 @@ test "fade alpha 가 바뀌어도 발행 tree 는 불변이다(계약 §7 — �
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const tk = session.buildChromeTokens();

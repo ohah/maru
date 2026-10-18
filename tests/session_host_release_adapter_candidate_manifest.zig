@@ -77,8 +77,8 @@ const Fixture = struct {
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "evidence.json", .data = bytes });
         var root: [std.fs.max_path_bytes]u8 = undefined;
         const n = try self.tmp.dir.realPath(std.testing.io, &root);
-        _ = try std.fmt.bufPrintZ(&self.evidence_path, "{s}/evidence.json", .{root[0..n]});
-        _ = try std.fmt.bufPrintZ(&self.output_path, "{s}/Maru-1.2.3-session-host-release.json", .{root[0..n]});
+        _ = try std.fmt.bufPrintSentinel(&self.evidence_path, "{s}/evidence.json", .{root[0..n]}, 0);
+        _ = try std.fmt.bufPrintSentinel(&self.output_path, "{s}/Maru-1.2.3-session-host-release.json", .{root[0..n]}, 0);
     }
     fn deinit(self: *@This()) void {
         self.tmp.cleanup();
@@ -168,7 +168,7 @@ test "malformed evidence existing output and allocation failure publish nothing"
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const n = try f.tmp.dir.realPath(std.testing.io, &root);
     var bad_path_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    const bad_path = try std.fmt.bufPrintZ(&bad_path_buf, "{s}/bad.json", .{root[0..n]});
+    const bad_path = try std.fmt.bufPrintSentinel(&bad_path_buf, "{s}/bad.json", .{root[0..n]}, 0);
     var bad_held: files.PinnedReleaseFile = .{};
     try files.pinReleaseFileObserved(&bad_held, bad_path, false, evidence.max_evidence_bytes);
     defer bad_held.deinit() catch {};
@@ -250,7 +250,7 @@ test "evidence replacement during final authority check publishes nothing" {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const n = try f.tmp.dir.realPath(std.testing.io, &root);
     var swap_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    const swap_path = try std.fmt.bufPrintZ(&swap_buf, "{s}/swap.json", .{root[0..n]});
+    const swap_path = try std.fmt.bufPrintSentinel(&swap_buf, "{s}/swap.json", .{root[0..n]}, 0);
     var held: files.PinnedReleaseFile = .{};
     try files.pinReleaseFileObserved(&held, f.paths().evidence, false, evidence.max_evidence_bytes);
     defer held.deinit() catch {};

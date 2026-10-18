@@ -82,7 +82,7 @@ pub const ManifestFile = struct {
         const work_path = std.mem.sliceTo(&self.work_path, 0);
         const slash = std.mem.lastIndexOfScalar(u8, work_path, '/') orelse return error.ChangedDuringWrite;
         var parent_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-        const parent_path = if (slash == 0) "/" else std.fmt.bufPrintZ(&parent_storage, "{s}", .{work_path[0..slash]}) catch return error.ChangedDuringWrite;
+        const parent_path = if (slash == 0) "/" else std.fmt.bufPrintSentinel(&parent_storage, "{s}", .{work_path[0..slash]}, 0) catch return error.ChangedDuringWrite;
         const current_parent = safe_open.openAbsoluteNoFollow(parent_path, true) catch return error.ChangedDuringWrite;
         defer _ = c.close(current_parent);
         var parent_stat: posix.Stat = undefined;
@@ -186,10 +186,10 @@ fn createWorkDir(file: *ManifestFile, path: [:0]const u8) Error!void {
     const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return error.InvalidPath;
     const leaf = path[slash + 1 ..];
     if (!validComponent(leaf)) return error.InvalidPath;
-    _ = std.fmt.bufPrintZ(&file.work_path, "{s}", .{path}) catch return error.InvalidPath;
-    _ = std.fmt.bufPrintZ(&file.dir_name, "{s}", .{leaf}) catch return error.InvalidPath;
+    _ = std.fmt.bufPrintSentinel(&file.work_path, "{s}", .{path}, 0) catch return error.InvalidPath;
+    _ = std.fmt.bufPrintSentinel(&file.dir_name, "{s}", .{leaf}, 0) catch return error.InvalidPath;
     var parent_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const parent = if (slash == 0) "/" else std.fmt.bufPrintZ(&parent_storage, "{s}", .{path[0..slash]}) catch return error.InvalidPath;
+    const parent = if (slash == 0) "/" else std.fmt.bufPrintSentinel(&parent_storage, "{s}", .{path[0..slash]}, 0) catch return error.InvalidPath;
     file.parent_fd = safe_open.openAbsoluteNoFollow(parent, true) catch return error.InvalidPath;
     file.owner = file;
     var parent_stat: posix.Stat = undefined;
@@ -216,8 +216,8 @@ fn createWorkDir(file: *ManifestFile, path: [:0]const u8) Error!void {
 }
 
 fn writeManifest(file: *ManifestFile, observed: Input) Error!void {
-    const name = std.fmt.bufPrintZ(&file.file_name, "{s}", .{observed.name}) catch return error.InvalidObserved;
-    _ = std.fmt.bufPrintZ(&file.file_path, "{s}/{s}", .{ std.mem.sliceTo(&file.work_path, 0), observed.name }) catch return error.InvalidPath;
+    const name = std.fmt.bufPrintSentinel(&file.file_name, "{s}", .{observed.name}, 0) catch return error.InvalidObserved;
+    _ = std.fmt.bufPrintSentinel(&file.file_path, "{s}/{s}", .{ std.mem.sliceTo(&file.work_path, 0), observed.name }, 0) catch return error.InvalidPath;
     const fd = c.openat(file.dir_fd, name.ptr, .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0o600));
     if (fd < 0) return if (posix.errno(-1) == .EXIST) error.DestinationExists else error.CreateFailed;
     defer _ = c.close(fd);

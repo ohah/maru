@@ -154,7 +154,7 @@ pub const testing_api = if (@import("builtin").is_test) struct {
 /// 교체된 slot 모두를 닫는다.
 pub const SlotReservation = struct {
     slots: [max_slots]c.fd_t = undefined,
-    replaced: [max_slots]bool = .{false} ** max_slots,
+    replaced: [max_slots]bool = @splat(false),
     len: usize = 0,
     sentinel_fd: c.fd_t = -1,
 
@@ -252,7 +252,7 @@ pub fn collectNonCloexec(out: []c.fd_t) Error!usize {
 /// 정확히 같아야 한다.
 pub fn assertExactOpen(allowed: []const c.fd_t) Error!void {
     const max_fd = getdtablesize();
-    var seen: [max_slots]bool = .{false} ** max_slots;
+    var seen: [max_slots]bool = @splat(false);
     if (allowed.len > seen.len) return error.TooManyOpenFds;
     var fd: c.fd_t = 3;
     while (fd < max_fd) : (fd += 1) {

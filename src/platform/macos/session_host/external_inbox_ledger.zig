@@ -106,7 +106,7 @@ pub const LedgerExternalIdentitySeal = struct {
     identity: ?external_rx_types.RxIdentity = null,
     generation: u64 = 0,
     lifecycle: LedgerExternalIdentityLifecycle = .empty,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 fn writeRecoveryIntent(writer: *owner_seal.Writer, intent: RecoveryIntent) void {
@@ -170,7 +170,7 @@ fn externalIdentityDigest(
         writer.writeBool(false);
     }
     writer.writeU64(generation);
-    writer.writeU8(@intFromEnum(lifecycle));
+    writer.writeU8(@backingInt(lifecycle));
     return writer.finish();
 }
 
@@ -308,7 +308,7 @@ const PayloadFingerprint = struct {
     allocator: std.mem.Allocator,
     address: usize,
     logical_len: usize,
-    content_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    content_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const PlannedSeed = struct {
@@ -593,7 +593,7 @@ const PreparedLiveAdmission = struct {
     },
     reserved_token: ?Token = null,
     lifecycle: LiveMutationLifecycle = .empty,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const PreparedLiveMergeSource = union(enum) {
@@ -625,7 +625,7 @@ const PreparedLiveMerge = struct {
         .logical_len = 0,
     },
     incoming_range: ?external_rx_types.RxRange = null,
-    expected_source_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    expected_source_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     replacement: PreparedLiveReplacement = .coalesced,
     replacement_fingerprint: PayloadFingerprint = .{
         .allocator = std.heap.page_allocator,
@@ -633,8 +633,8 @@ const PreparedLiveMerge = struct {
         .logical_len = 0,
     },
     coalesced_replacement_index: ?u8 = null,
-    expected_accounting_digest: owner_seal.Digest = [_]u8{0} ** 32,
-    expected_destination_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    expected_accounting_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
+    expected_destination_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     expected_destination_fingerprint: PayloadFingerprint = .{
         .allocator = std.heap.page_allocator,
         .address = 0,
@@ -642,7 +642,7 @@ const PreparedLiveMerge = struct {
     },
     result_token: ?Token = null,
     lifecycle: LiveMutationLifecycle = .empty,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const PreparedLiveRelease = struct {
@@ -652,15 +652,15 @@ const PreparedLiveRelease = struct {
     token: LiveTokenRef = .{ .planned = 0 },
     expected_phase: PayloadPhase = .frame,
     expected_token_generation: u64 = 0,
-    expected_accounting_digest: owner_seal.Digest = [_]u8{0} ** 32,
-    expected_token_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    expected_accounting_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
+    expected_token_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     expected_token_fingerprint: PayloadFingerprint = .{
         .allocator = std.heap.page_allocator,
         .address = 0,
         .logical_len = 0,
     },
     lifecycle: LiveMutationLifecycle = .empty,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const FinalLiveRoot = struct {
@@ -693,7 +693,7 @@ pub const CommittedLiveOutputEntry = struct {
         .stream_id = 0,
         .is_snapshot = false,
     } },
-    semantic_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    semantic_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     cleanup_only: bool = false,
 };
 
@@ -703,23 +703,23 @@ pub const CommittedLiveOutput = struct {
     saved_self_addr: usize = 0,
     ledger_addr: usize = 0,
     permit_addr: usize = 0,
-    permit_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    permit_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     mutation_epoch: u64 = 0,
-    authority_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    authority_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     count: u8 = 0,
     entries: [max_live_mutations]CommittedLiveOutputEntry =
-        [_]CommittedLiveOutputEntry{.{}} ** max_live_mutations,
+        @as([max_live_mutations]CommittedLiveOutputEntry, @splat(.{})),
     lifecycle: CommittedLiveOutputLifecycle = .empty,
     claim_owner_addr: usize = 0,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const FrozenPayloadCleanup = struct {
     allocator: std.mem.Allocator = std.heap.page_allocator,
     addr: usize = 0,
     len: usize = 0,
-    content_digest: owner_seal.Digest = [_]u8{0} ** 32,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    content_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const FrozenPayloadRange = struct {
@@ -743,18 +743,17 @@ pub const RetireLiveResult = enum {
 pub const PreparedLiveRetirement = struct {
     saved_self_addr: usize = 0,
     cleanup_owners: [max_live_cleanup_owners]OwnedPayload =
-        [_]OwnedPayload{.{ .allocator = std.heap.page_allocator }} **
-        max_live_cleanup_owners,
+        @as([max_live_cleanup_owners]OwnedPayload, @splat(.{ .allocator = std.heap.page_allocator })),
     cleanup_plans: [max_live_cleanup_owners]FrozenPayloadCleanup =
-        [_]FrozenPayloadCleanup{.{}} ** max_live_cleanup_owners,
+        @as([max_live_cleanup_owners]FrozenPayloadCleanup, @splat(.{})),
     cleanup_count: u8 = 0,
     cleanup_bytes: usize = 0,
     published_replacements: [max_live_mutations]FrozenPayloadRange =
-        [_]FrozenPayloadRange{.{}} ** max_live_mutations,
+        @as([max_live_mutations]FrozenPayloadRange, @splat(.{})),
     replacement_count: u8 = 0,
     replacement_bytes: usize = 0,
     lifecycle: LiveRetirementLifecycle = .empty,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
 
     pub fn init(allocator: std.mem.Allocator) PreparedLiveRetirement {
         _ = allocator;
@@ -778,12 +777,11 @@ pub const FrozenLiveBatchAbort = struct {
     ledger_addr: usize = 0,
     batch_addr: usize = 0,
     cleanup: [max_live_cleanup_owners]owner_cleanup.FrozenOwnerCleanupDescriptor =
-        [_]owner_cleanup.FrozenOwnerCleanupDescriptor{.{}} **
-        max_live_cleanup_owners,
+        @as([max_live_cleanup_owners]owner_cleanup.FrozenOwnerCleanupDescriptor, @splat(.{})),
     cleanup_count: u8 = 0,
     cleanup_bytes: usize = 0,
     lifecycle: LiveBatchAbortLifecycle = .empty,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const PreparedLiveMutation = union(enum) {
@@ -816,34 +814,33 @@ pub const PreparedLiveBatch = struct {
     allocator: std.mem.Allocator = std.heap.page_allocator,
     sealed_allocator: std.mem.Allocator = std.heap.page_allocator,
     expected_mutation_epoch: u64 = 0,
-    expected_accounting_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    expected_accounting_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     expected_external_identity: ?external_rx_types.RxIdentity = null,
     cleanup_only: bool = false,
     mutations: [max_live_mutations]PreparedLiveMutation =
-        [_]PreparedLiveMutation{.empty} ** max_live_mutations,
+        @as([max_live_mutations]PreparedLiveMutation, @splat(.empty)),
     mutation_count: u8 = 0,
     coalesced_replacements: [max_live_mutations]OwnedPayload =
-        [_]OwnedPayload{.{ .allocator = std.heap.page_allocator }} **
-        max_live_mutations,
+        @as([max_live_mutations]OwnedPayload, @splat(.{ .allocator = std.heap.page_allocator })),
     coalesced_replacement_fingerprints: [max_live_mutations]PayloadFingerprint =
-        [_]PayloadFingerprint{.{
+        @as([max_live_mutations]PayloadFingerprint, @splat(.{
             .allocator = std.heap.page_allocator,
             .address = 0,
             .logical_len = 0,
-        }} ** max_live_mutations,
+        })),
     replacement_count: u8 = 0,
     replacement_bytes: usize = 0,
     accepted_source_bytes: usize = 0,
     working_simulation: LiveSimulation = .{},
-    working_simulation_digest: owner_seal.Digest = [_]u8{0} ** 32,
-    progress_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    working_simulation_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
+    progress_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     expected_next_generation: u64 = 0,
     expected_generation_exhausted: bool = false,
     expected_next_slot_hint: usize = 0,
     expected_charged_bytes: usize = 0,
     expected_charged_items: usize = 0,
     lifecycle: PreparedLiveBatchLifecycle = .empty,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const PreparedLiveCommit = struct {
@@ -867,11 +864,11 @@ pub const PreparedLiveCommit = struct {
     expected_cleanup_count: usize = 0,
     expected_cleanup_bytes: usize = 0,
     simulation: LiveSimulation = .{},
-    simulation_digest: owner_seal.Digest = [_]u8{0} ** 32,
-    dispositions_digest: owner_seal.Digest = [_]u8{0} ** 32,
-    retirement_digest: owner_seal.Digest = [_]u8{0} ** 32,
+    simulation_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
+    dispositions_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
+    retirement_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: PreparedLiveCommitLifecycle = .empty,
-    digest: owner_seal.Digest = [_]u8{0} ** 32,
+    digest: owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 /// A non-owning value projection for a future final-address live commit.
@@ -978,7 +975,7 @@ fn liveRetirementDigest(
     writer.writeUsize(retirement.cleanup_bytes);
     writer.writeU8(retirement.replacement_count);
     writer.writeUsize(retirement.replacement_bytes);
-    writer.writeU8(@intFromEnum(retirement.lifecycle));
+    writer.writeU8(@backingInt(retirement.lifecycle));
     for (retirement.cleanup_plans[0..retirement.cleanup_count]) |plan| {
         writer.writeUsize(@intFromPtr(plan.allocator.ptr));
         writer.writeUsize(@intFromPtr(plan.allocator.vtable));
@@ -1010,7 +1007,7 @@ fn isCanonicalEmptyLiveRetirement(
         !std.mem.eql(
             u8,
             &retirement.digest,
-            &([_]u8{0} ** 32),
+            &(@as([32]u8, @splat(0))),
         ))
         return false;
     for (retirement.cleanup_owners) |owner| {
@@ -1018,8 +1015,8 @@ fn isCanonicalEmptyLiveRetirement(
     }
     for (retirement.cleanup_plans) |plan| {
         if (plan.addr != 0 or plan.len != 0 or
-            !std.mem.eql(u8, &plan.content_digest, &([_]u8{0} ** 32)) or
-            !std.mem.eql(u8, &plan.digest, &([_]u8{0} ** 32)))
+            !std.mem.eql(u8, &plan.content_digest, &(@as([32]u8, @splat(0)))) or
+            !std.mem.eql(u8, &plan.digest, &(@as([32]u8, @splat(0)))))
             return false;
     }
     for (retirement.published_replacements) |range|
@@ -1205,9 +1202,9 @@ const ScreenTokenDisposition = enum {
 /// Callback-free, final-address token classification produced by the committed screen owner.
 pub const FrozenScreenTokenPlan = struct {
     saved_self_addr: usize = 0,
-    tokens: [max_items]Token = [_]Token{.{ .slot = 0, .generation = 0 }} ** max_items,
+    tokens: [max_items]Token = @as([max_items]Token, @splat(.{ .slot = 0, .generation = 0 })),
     dispositions: [max_items]ScreenTokenDisposition =
-        [_]ScreenTokenDisposition{.unused} ** max_items,
+        @as([max_items]ScreenTokenDisposition, @splat(.unused)),
     len: usize = 0,
 
     pub fn initInPlace(
@@ -1319,7 +1316,7 @@ pub const FrozenLedgerCleanupFinishResult = enum {
 pub const FrozenLedgerCleanup = struct {
     saved_self_addr: usize = 0,
     payloads: [max_items]OwnedPayload =
-        [_]OwnedPayload{.{ .allocator = std.heap.page_allocator }} ** max_items,
+        @as([max_items]OwnedPayload, @splat(.{ .allocator = std.heap.page_allocator })),
     count: usize = 0,
     lifecycle: FrozenLedgerCleanupLifecycle = .empty,
 
@@ -1456,7 +1453,7 @@ const LiveVirtualNode = struct {
 
 const LiveSimulation = struct {
     nodes: [max_live_mutations]LiveVirtualNode =
-        [_]LiveVirtualNode{.{}} ** max_live_mutations,
+        @as([max_live_mutations]LiveVirtualNode, @splat(.{})),
     charged_bytes: usize = 0,
     charged_items: usize = 0,
     next_generation: u64 = 1,
@@ -1466,9 +1463,9 @@ const LiveSimulation = struct {
     cleanup_count: usize = 0,
     cleanup_bytes: usize = 0,
     cleared_slots: std.StaticBitSet(max_items) =
-        std.StaticBitSet(max_items).initEmpty(),
+        std.StaticBitSet(max_items).empty,
     occupied_slots: std.StaticBitSet(max_items) =
-        std.StaticBitSet(max_items).initEmpty(),
+        std.StaticBitSet(max_items).empty,
 };
 
 fn pureSlot(
@@ -2045,7 +2042,7 @@ fn writePayloadSemantic(
     writer: *owner_seal.Writer,
     semantic: PayloadSemantic,
 ) void {
-    writer.writeU8(@intFromEnum(std.meta.activeTag(semantic)));
+    writer.writeU8(@backingInt(std.meta.activeTag(semantic)));
     switch (semantic) {
         .frame => |header| {
             const encoded = header.encode();
@@ -2104,12 +2101,12 @@ fn committedLiveOutputDigest(
     for (output.entries[0..output.count]) |entry| {
         writer.writeU16(entry.token.slot);
         writer.writeU64(entry.token.generation);
-        writer.writeU8(@intFromEnum(entry.phase));
+        writer.writeU8(@backingInt(entry.phase));
         writer.writeBytes(&entry.semantic_digest);
         writer.writeBool(entry.cleanup_only);
     }
     writer.writeUsize(output.claim_owner_addr);
-    writer.writeU8(@intFromEnum(output.lifecycle));
+    writer.writeU8(@backingInt(output.lifecycle));
     return writer.finish();
 }
 
@@ -2283,12 +2280,12 @@ fn liveDispositionsDigest(
 ) owner_seal.Digest {
     var writer = owner_seal.Writer.init("MARULDP1");
     for (dispositions) |disposition| {
-        writer.writeU8(@intFromEnum(std.meta.activeTag(disposition)));
+        writer.writeU8(@backingInt(std.meta.activeTag(disposition)));
         switch (disposition) {
             .final_live, .cleanup_final => |root| {
                 writer.writeU16(root.token.slot);
                 writer.writeU64(root.token.generation);
-                writer.writeU8(@intFromEnum(root.phase));
+                writer.writeU8(@backingInt(root.phase));
             },
             .unused, .superseded_tombstone => {},
         }
@@ -2320,7 +2317,7 @@ fn preparedLiveCommitDigest(
     writer.writeBytes(&permit.simulation_digest);
     writer.writeBytes(&permit.dispositions_digest);
     writer.writeBytes(&permit.retirement_digest);
-    writer.writeU8(@intFromEnum(permit.lifecycle));
+    writer.writeU8(@backingInt(permit.lifecycle));
     return writer.finish();
 }
 
@@ -2333,7 +2330,7 @@ fn frozenLiveBatchAbortDigest(
     writer.writeUsize(permit.batch_addr);
     writer.writeU8(permit.cleanup_count);
     writer.writeUsize(permit.cleanup_bytes);
-    writer.writeU8(@intFromEnum(permit.lifecycle));
+    writer.writeU8(@backingInt(permit.lifecycle));
     for (permit.cleanup[0..permit.cleanup_count]) |descriptor|
         writer.writeBytes(&descriptor.digest);
     return writer.finish();
@@ -2380,7 +2377,7 @@ fn liveMutationDigest(
                 writer.writeU64(token.slot);
                 writer.writeU64(token.generation);
             } else writer.writeBool(false);
-            writer.writeU8(@intFromEnum(value.lifecycle));
+            writer.writeU8(@backingInt(value.lifecycle));
         },
         .merge => |value| {
             writer.writeU8(2);
@@ -2430,7 +2427,7 @@ fn liveMutationDigest(
                 writer.writeU64(token.slot);
                 writer.writeU64(token.generation);
             } else writer.writeBool(false);
-            writer.writeU8(@intFromEnum(value.lifecycle));
+            writer.writeU8(@backingInt(value.lifecycle));
         },
         .release => |value| {
             writer.writeU8(3);
@@ -2438,12 +2435,12 @@ fn liveMutationDigest(
             writer.writeUsize(value.ledger_addr);
             writer.writeUsize(value.batch_addr);
             writeTokenRef(&writer, value.token);
-            writer.writeU8(@intFromEnum(value.expected_phase));
+            writer.writeU8(@backingInt(value.expected_phase));
             writer.writeU64(value.expected_token_generation);
             writer.writeBytes(&value.expected_accounting_digest);
             writer.writeBytes(&value.expected_token_digest);
             writePayloadFingerprint(&writer, value.expected_token_fingerprint);
-            writer.writeU8(@intFromEnum(value.lifecycle));
+            writer.writeU8(@backingInt(value.lifecycle));
         },
         else => writer.writeU8(0),
     }
@@ -2609,7 +2606,7 @@ fn batchDigest(
     writer.writeUsize(batch.expected_next_slot_hint);
     writer.writeUsize(batch.expected_charged_bytes);
     writer.writeUsize(batch.expected_charged_items);
-    writer.writeU8(@intFromEnum(batch.lifecycle));
+    writer.writeU8(@backingInt(batch.lifecycle));
     for (0..batch.mutation_count) |index|
         writer.writeBytes(&liveMutationDigest(batch, index));
     for (batch.coalesced_replacement_fingerprints[0..batch.replacement_count]) |sealed|
@@ -2779,7 +2776,7 @@ fn validateLiveCommitAliases(
     for (fixed[1..fixed_count]) |range|
         if (rangeOverlapsActive(range, ledger)) return error.InvalidAlias;
     var owned_ranges: [max_live_mutations * 3]ByteRange =
-        [_]ByteRange{.{ .start = 0, .end = 0 }} ** (max_live_mutations * 3);
+        @as([(max_live_mutations * 3)]ByteRange, @splat(.{ .start = 0, .end = 0 }));
     var count: usize = 0;
     for (batch.mutations[0..batch.mutation_count]) |*mutation| {
         switch (mutation.*) {
@@ -2825,7 +2822,7 @@ fn validateIncomingLiveOwners(
     source: *const PreparedLiveMergeSource,
     replacement: *const PreparedLiveReplacement,
 ) error{InvalidAlias}!void {
-    var ranges: [4]ByteRange = [_]ByteRange{.{ .start = 0, .end = 0 }} ** 4;
+    var ranges: [4]ByteRange = @as([4]ByteRange, @splat(.{ .start = 0, .end = 0 }));
     var count: usize = 0;
     switch (source.*) {
         .owned => |*payload| {
@@ -2874,7 +2871,7 @@ fn batchOwnedAbortValid(
         !std.mem.eql(u8, &batch.digest, &batchDigest(batch)))
         return false;
     var ranges: [max_live_mutations * 3]ByteRange =
-        [_]ByteRange{.{ .start = 0, .end = 0 }} ** (max_live_mutations * 3);
+        @as([(max_live_mutations * 3)]ByteRange, @splat(.{ .start = 0, .end = 0 }));
     var count: usize = 0;
     for (batch.mutations[0..batch.mutation_count], 0..) |*mutation, index| {
         const sealed_digest = switch (mutation.*) {
@@ -2961,7 +2958,7 @@ fn hasCanonicalLiveBatchTails(batch: *const PreparedLiveBatch) bool {
 }
 
 pub const ExternalInboxLedger = struct {
-    slots: [max_items]Slot = [_]Slot{.{}} ** max_items,
+    slots: [max_items]Slot = @as([max_items]Slot, @splat(.{})),
     external_identity_seal: LedgerExternalIdentitySeal = .{},
     charged_bytes: usize = 0,
     charged_items: usize = 0,
@@ -3239,7 +3236,7 @@ pub const ExternalInboxLedger = struct {
             )).payload_fingerprint,
         };
         const expected_source_digest = switch (source.*) {
-            .owned => [_]u8{0} ** 32,
+            .owned => @as([32]u8, @splat(0)),
             .existing => |source_ref| liveNodeDigest(try resolveVirtualRef(
                 self,
                 batch,
@@ -3405,10 +3402,10 @@ pub const ExternalInboxLedger = struct {
             logical_len: usize,
         };
         var allocation_plans =
-            [_]ReplacementAllocationPlan{.{
+            @as([max_live_mutations]ReplacementAllocationPlan, @splat(.{
                 .mutation_index = 0,
                 .logical_len = 0,
-            }} ** max_live_mutations;
+            }));
         var allocation_plan_count: u8 = 0;
         var allocation_plan_bytes: usize = 0;
         for (batch.mutations[0..batch.mutation_count], 0..) |mutation, index| {
@@ -3436,8 +3433,7 @@ pub const ExternalInboxLedger = struct {
             }
         }
         var pending_replacements =
-            [_]OwnedPayload{OwnedPayload.empty(allocation_allocator)} **
-            max_live_mutations;
+            @as([max_live_mutations]OwnedPayload, @splat(OwnedPayload.empty(allocation_allocator)));
         var pending_replacement_count: u8 = 0;
         defer for (pending_replacements[0..pending_replacement_count]) |*pending|
             pending.deinit();
@@ -4230,7 +4226,7 @@ pub const ExternalInboxLedger = struct {
             return error.InvalidAlias;
 
         var owners =
-            [_]?*OwnedPayload{null} ** max_live_cleanup_owners;
+            @as([max_live_cleanup_owners]?*OwnedPayload, @splat(null));
         var count: usize = 0;
         var bytes: usize = 0;
         for (batch.mutations[0..batch.mutation_count]) |*mutation| switch (mutation.*) {
@@ -4377,8 +4373,7 @@ pub const ExternalInboxLedger = struct {
             ))
             return .ignored_untrusted;
         var local =
-            [_]owner_cleanup.FrozenOwnerCleanupDescriptor{.{}} **
-            max_live_cleanup_owners;
+            @as([max_live_cleanup_owners]owner_cleanup.FrozenOwnerCleanupDescriptor, @splat(.{}));
         const count = permit.cleanup_count;
         for (permit.cleanup[0..count], 0..) |*descriptor, index|
             owner_cleanup.moveFrozen(descriptor, &local[index]) catch
@@ -4724,7 +4719,7 @@ pub const ExternalInboxLedger = struct {
         var summary: LedgerTeardownSummary = .{
             .had_invariant = self.invariant_failed,
         };
-        var matched = std.StaticBitSet(max_items).initEmpty();
+        var matched = std.StaticBitSet(max_items).empty;
         for (self.slots, 0..) |slot, slot_index| {
             if (!slot.active and !slot.retired) {
                 if (slot.payload.allocation_ptr != null or
@@ -5308,7 +5303,7 @@ pub const ExternalInboxLedger = struct {
             else => return error.InvalidPlan,
         }
         var dispositions =
-            [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+            @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
         const final_count = try self.commitPreparedLiveBatch(
             batch,
             retirement,
@@ -5334,7 +5329,7 @@ pub const ExternalInboxLedger = struct {
             return mapPrepareToCommitLive(err);
         if (simulation.nodes[0].live) return error.InvalidPlan;
         var dispositions =
-            [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+            @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
         const final_count = try self.commitPreparedLiveBatch(
             batch,
             retirement,
@@ -5602,7 +5597,7 @@ pub const ExternalInboxLedger = struct {
             writer.writeBool(false);
         }
         writer.writeU64(self.external_identity_seal.generation);
-        writer.writeU8(@intFromEnum(self.external_identity_seal.lifecycle));
+        writer.writeU8(@backingInt(self.external_identity_seal.lifecycle));
         writer.writeBytes(&self.external_identity_seal.digest);
         writer.writeUsize(self.charged_bytes);
         writer.writeUsize(self.charged_items);
@@ -5620,7 +5615,7 @@ pub const ExternalInboxLedger = struct {
             writer.writeBool(slot.active);
             writer.writeBool(slot.retired);
             writer.writeU64(slot.generation);
-            writer.writeU8(@intFromEnum(std.meta.activeTag(slot.semantic)));
+            writer.writeU8(@backingInt(std.meta.activeTag(slot.semantic)));
             switch (loadSemantic(slot.semantic)) {
                 .frame => |header| {
                     const encoded = header.encode();
@@ -6359,7 +6354,7 @@ fn releaseExternalLiveForTest(
     try ledger.finishLiveBatch(&batch);
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     try std.testing.expectEqual(
         @as(u8, 0),
         try ledger.commitPreparedLiveBatch(
@@ -7436,7 +7431,7 @@ test "legacy merge and release wrappers match direct live batch authority result
     try direct.finishLiveBatch(&direct_batch);
     var direct_retirement = PreparedLiveRetirement.init(allocator);
     var direct_dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     try std.testing.expectEqual(
         @as(u8, 1),
         try direct.commitPreparedLiveBatch(
@@ -7471,7 +7466,7 @@ test "legacy merge and release wrappers match direct live batch authority result
     try direct.finishLiveBatch(&release_batch);
     var release_retirement = PreparedLiveRetirement.init(allocator);
     var release_dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     try std.testing.expectEqual(
         @as(u8, 0),
         try direct.commitPreparedLiveBatch(
@@ -7647,7 +7642,7 @@ test "live batch binds external identity and publishes one partial root atomical
     try ledger.finishLiveBatch(&batch);
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     try std.testing.expectEqual(
         @as(u8, 1),
         try ledger.commitPreparedLiveBatch(
@@ -7708,7 +7703,7 @@ test "live commit permit previews without mutation and consumes exact once" {
     const charged_before = ledger.charged_bytes;
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     var permit: PreparedLiveCommit = .{};
     const ledger_before = ledger;
     try ledger.prepareLiveCommit(
@@ -7789,7 +7784,7 @@ test "2b2e integration retired final is never live and remains immutable commit 
     );
     try ledger.finishLiveBatch(&batch);
     var retirement = PreparedLiveRetirement.init(allocator);
-    var dispositions = [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    var dispositions = @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     var permit: PreparedLiveCommit = .{};
     try ledger.prepareLiveCommit(
         &batch,
@@ -7801,7 +7796,7 @@ test "2b2e integration retired final is never live and remains immutable commit 
         &permit,
     );
     const token = dispositions[0].final_live.token;
-    var cleanup_selection = [_]bool{false} ** max_live_mutations;
+    var cleanup_selection = @as([max_live_mutations]bool, @splat(false));
     cleanup_selection[0] = true;
     cleanup_selection[1] = true;
     const permit_before_invalid = permit;
@@ -7906,7 +7901,7 @@ test "projected final-root cleanup planner is pure and seals only disjoint final
     );
     try ledger.finishLiveBatch(&batch);
     var retirement = PreparedLiveRetirement.init(allocator);
-    var dispositions = [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    var dispositions = @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     var permit: PreparedLiveCommit = .{};
     try ledger.prepareLiveCommit(
         &batch,
@@ -7917,9 +7912,9 @@ test "projected final-root cleanup planner is pure and seals only disjoint final
         43,
         &permit,
     );
-    var final_dispositions = [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    var final_dispositions = @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     var final_permit: PreparedLiveCommit = .{};
-    var selection = [_]bool{false} ** max_live_mutations;
+    var selection = @as([max_live_mutations]bool, @splat(false));
     selection[0] = true;
 
     const ledger_before = ledger;
@@ -7946,7 +7941,7 @@ test "projected final-root cleanup planner is pure and seals only disjoint final
     try std.testing.expect(std.meta.eql(permit_before, permit));
     try std.testing.expect(std.meta.eql(
         final_dispositions,
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations,
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused)),
     ));
     try std.testing.expect(std.meta.eql(final_permit, PreparedLiveCommit{}));
     try std.testing.expect(candidate.dispositions[0] == .cleanup_final);
@@ -8068,7 +8063,7 @@ test "projected final-root cleanup planner accepts exact mutation cap and reject
     }
     try ledger.finishLiveBatch(&batch);
     var retirement = PreparedLiveRetirement.init(allocator);
-    var dispositions = [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    var dispositions = @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     var permit: PreparedLiveCommit = .{};
     try ledger.prepareLiveCommit(
         &batch,
@@ -8079,9 +8074,9 @@ test "projected final-root cleanup planner accepts exact mutation cap and reject
         44,
         &permit,
     );
-    var final_dispositions = [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    var final_dispositions = @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     var final_permit: PreparedLiveCommit = .{};
-    const selection = [_]bool{true} ** max_live_mutations;
+    const selection = @as([max_live_mutations]bool, @splat(true));
     const candidate = try ledger.planPreparedFinalRootsForCleanup(
         &batch,
         &retirement,
@@ -8162,7 +8157,7 @@ test "live commit permit rejects copied moved and authority drift before mutatio
     try ledger.finishLiveBatch(&batch);
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     var permit: PreparedLiveCommit = .{};
     _ = try ledger.prepareLiveCommit(
         &batch,
@@ -8294,7 +8289,7 @@ test "live commit abort rejects hostile drift without partial mutation" {
     try ledger.finishLiveBatch(&batch);
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     var permit: PreparedLiveCommit = .{};
     try ledger.prepareLiveCommit(
         &batch,
@@ -8541,7 +8536,7 @@ test "live commit permit rejects active payload alias before output write" {
     try ledger.finishLiveBatch(&batch);
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     try std.testing.expectError(
         error.InvalidAlias,
         ledger.prepareLiveCommit(
@@ -8592,7 +8587,7 @@ test "legacy release rejects external provenance and preserves live token" {
     try ledger.finishLiveBatch(&batch);
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     _ = try ledger.commitPreparedLiveBatch(
         &batch,
         &retirement,
@@ -8667,7 +8662,7 @@ test "two-mutation live chain allocates one final replacement and retires source
     try std.testing.expectEqual(@as(u8, 1), batch.replacement_count);
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     _ = try ledger.commitPreparedLiveBatch(
         &batch,
         &retirement,
@@ -8769,7 +8764,7 @@ test "three-chunk chain allocates no intermediate replacement" {
     try std.testing.expectEqual(@as(u8, 1), batch.replacement_count);
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     _ = try ledger.commitPreparedLiveBatch(
         &batch,
         &retirement,
@@ -8900,7 +8895,7 @@ test "external identity remains bound at zero live slots and rejects A-B-A reuse
     try ledger.finishLiveBatch(&first_batch);
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     _ = try ledger.commitPreparedLiveBatch(
         &first_batch,
         &retirement,
@@ -8956,7 +8951,7 @@ test "drain advances bound external identity to canonical tombstone" {
     try ledger.finishLiveBatch(&batch);
     var retirement = PreparedLiveRetirement.init(std.testing.allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     _ = try ledger.commitPreparedLiveBatch(
         &batch,
         &retirement,
@@ -9009,7 +9004,7 @@ test "owner teardown commits and restores canonical external identity tombstone"
     try ledger.finishLiveBatch(&batch);
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     _ = try ledger.commitPreparedLiveBatch(
         &batch,
         &retirement,
@@ -9023,7 +9018,7 @@ test "owner teardown commits and restores canonical external identity tombstone"
     var token_plan: FrozenScreenTokenPlan = .{};
     try token_plan.initInPlace(
         &.{token},
-        std.StaticBitSet(max_items).initEmpty(),
+        std.StaticBitSet(max_items).empty,
     );
     var prepared: PreparedLedgerTeardown = .{};
     var frozen: FrozenLedgerCleanup = .{};
@@ -9103,7 +9098,7 @@ test "live batch accepts exact 64 mutations and rejects cap plus one before take
     try ledger.finishLiveBatch(&batch);
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     try std.testing.expectEqual(
         @as(u8, max_live_mutations),
         try ledger.commitPreparedLiveBatch(
@@ -9149,7 +9144,7 @@ test "stale checked live commit publishes nothing and canonical abort cleans sou
     );
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     try std.testing.expectError(
         error.StalePlan,
         ledger.commitPreparedLiveBatch(
@@ -9193,7 +9188,7 @@ test "checked live merge rejects existing payload content drift" {
     try ledger.finishLiveBatch(&first_batch);
     var first_retirement = PreparedLiveRetirement.init(allocator);
     var first_dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     _ = try ledger.commitPreparedLiveBatch(
         &first_batch,
         &first_retirement,
@@ -9230,7 +9225,7 @@ test "checked live merge rejects existing payload content drift" {
     ledger.slots[token.slot].payload.allocation_ptr.?[0] = 'z';
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     try std.testing.expectError(
         error.StalePlan,
         ledger.commitPreparedLiveBatch(
@@ -9282,7 +9277,7 @@ test "live replacement allocation callback cannot rewrite existing payload autho
     try ledger.finishLiveBatch(&admission);
     var admission_retirement = PreparedLiveRetirement.init(allocator);
     var admission_dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     _ = try ledger.commitPreparedLiveBatch(
         &admission,
         &admission_retirement,
@@ -9491,7 +9486,7 @@ test "checked live release rejects existing allocator semantic and provenance dr
     try ledger.finishLiveBatch(&admission);
     var admission_retirement = PreparedLiveRetirement.init(allocator);
     var admission_dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     _ = try ledger.commitPreparedLiveBatch(
         &admission,
         &admission_retirement,
@@ -9523,7 +9518,7 @@ test "checked live release rejects existing allocator semantic and provenance dr
         }
         var retirement = PreparedLiveRetirement.init(allocator);
         var dispositions =
-            [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+            @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
         try std.testing.expectError(
             error.StalePlan,
             ledger.commitPreparedLiveBatch(
@@ -9577,7 +9572,7 @@ test "copied live batch cannot commit or abort and canonical batch remains usabl
     var copied = batch;
     var copied_retirement = PreparedLiveRetirement.init(allocator);
     var copied_dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     try std.testing.expectError(
         error.InvalidPlan,
         ledger.commitPreparedLiveBatch(
@@ -9593,7 +9588,7 @@ test "copied live batch cannot commit or abort and canonical batch remains usabl
 
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     _ = try ledger.commitPreparedLiveBatch(
         &batch,
         &retirement,
@@ -9705,7 +9700,7 @@ test "checked live commit validates count bounds before digest slices" {
     try ledger.finishLiveBatch(&batch);
     var retirement = PreparedLiveRetirement.init(std.testing.allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
 
     batch.mutation_count = @intCast(max_live_mutations + 1);
     try std.testing.expectError(
@@ -9742,7 +9737,7 @@ test "checked live commit rejects noncanonical hidden retirement tail" {
     var retirement = PreparedLiveRetirement.init(std.testing.allocator);
     retirement.cleanup_owners[max_live_cleanup_owners - 1].logical_len = 1;
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     try std.testing.expectError(
         error.InvalidPlan,
         ledger.commitPreparedLiveBatch(
@@ -9825,7 +9820,7 @@ test "live replacement allocation fail index preserves ledger and aborts both so
             try ledger.finishLiveBatch(&batch);
             var retirement = PreparedLiveRetirement.init(allocator);
             var dispositions =
-                [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+                @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
             _ = try ledger.commitPreparedLiveBatch(
                 &batch,
                 &retirement,
@@ -9923,7 +9918,7 @@ test "64-mutation live batch sweeps every replacement allocation fail index" {
             try ledger.finishLiveBatch(&batch);
             var retirement = PreparedLiveRetirement.init(allocator);
             var dispositions =
-                [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+                @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
             try std.testing.expectEqual(
                 @as(u8, allocation_count),
                 try ledger.commitPreparedLiveBatch(
@@ -9974,7 +9969,7 @@ test "live batch reaches exact 128 cleanup and 64 replacement retirement caps" {
     try ledger.finishLiveBatch(&admissions);
     var admission_retirement = PreparedLiveRetirement.init(allocator);
     var admission_dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     _ = try ledger.commitPreparedLiveBatch(
         &admissions,
         &admission_retirement,
@@ -10016,7 +10011,7 @@ test "live batch reaches exact 128 cleanup and 64 replacement retirement caps" {
     );
     var retirement = PreparedLiveRetirement.init(allocator);
     var dispositions =
-        [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+        @as([max_live_mutations]LiveCommitDisposition, @splat(.unused));
     try std.testing.expectEqual(
         @as(u8, max_live_mutations),
         try ledger.commitPreparedLiveBatch(
@@ -10331,7 +10326,7 @@ test "owner teardown prepare is mutation-free and rejects copied authority" {
     try ledger.beginOwnerTeardown(1, &permit);
     var copied_permit = permit;
     var token_plan: FrozenScreenTokenPlan = .{};
-    try token_plan.initInPlace(&.{}, std.StaticBitSet(max_items).initEmpty());
+    try token_plan.initInPlace(&.{}, std.StaticBitSet(max_items).empty);
     var prepared: PreparedLedgerTeardown = .{};
     var frozen: FrozenLedgerCleanup = .{};
 
@@ -10367,7 +10362,7 @@ test "owner teardown rejects structural aliases before dereferencing outputs" {
     var permit: OwnerTeardownPermit = .{};
     try ledger.beginOwnerTeardown(1, &permit);
     var token_plan: FrozenScreenTokenPlan = .{};
-    try token_plan.initInPlace(&.{}, std.StaticBitSet(max_items).initEmpty());
+    try token_plan.initInPlace(&.{}, std.StaticBitSet(max_items).empty);
     const aliased_prepared: *PreparedLedgerTeardown = @ptrCast(@alignCast(&ledger));
     var frozen: FrozenLedgerCleanup = .{};
     const permit_before = permit;
@@ -10385,7 +10380,7 @@ test "owner teardown rejects structural aliases before dereferencing outputs" {
 }
 
 test "screen teardown token plan rejects tail bits and same-slot ABA" {
-    var tail = std.StaticBitSet(max_items).initEmpty();
+    var tail = std.StaticBitSet(max_items).empty;
     tail.set(1);
     var tail_plan: FrozenScreenTokenPlan = .{};
     try std.testing.expectError(
@@ -10405,7 +10400,7 @@ test "screen teardown token plan rejects tail bits and same-slot ABA" {
                 .{ .slot = 0, .generation = 1 },
                 .{ .slot = 0, .generation = 2 },
             },
-            std.StaticBitSet(max_items).initEmpty(),
+            std.StaticBitSet(max_items).empty,
         ),
     );
     try std.testing.expectEqual(@as(usize, 0), aba_plan.saved_self_addr);
@@ -10413,7 +10408,7 @@ test "screen teardown token plan rejects tail bits and same-slot ABA" {
 
 test "screen teardown token plan appends live owners atomically" {
     var plan: FrozenScreenTokenPlan = .{};
-    var released = std.StaticBitSet(max_items).initEmpty();
+    var released = std.StaticBitSet(max_items).empty;
     released.set(1);
     try plan.initInPlace(
         &.{
@@ -10460,7 +10455,7 @@ test "owner teardown freezes all payloads before cleanup and closes ordinary API
     var token_plan: FrozenScreenTokenPlan = .{};
     try token_plan.initInPlace(
         &.{first},
-        std.StaticBitSet(max_items).initEmpty(),
+        std.StaticBitSet(max_items).empty,
     );
     var prepared: PreparedLedgerTeardown = .{};
     var frozen: FrozenLedgerCleanup = .{};
@@ -10521,7 +10516,7 @@ test "frozen cleanup never rereads descriptors mutated by the first free callbac
     var permit: OwnerTeardownPermit = .{};
     try ledger.beginOwnerTeardown(1, &permit);
     var token_plan: FrozenScreenTokenPlan = .{};
-    try token_plan.initInPlace(&.{}, std.StaticBitSet(max_items).initEmpty());
+    try token_plan.initInPlace(&.{}, std.StaticBitSet(max_items).empty);
     var prepared: PreparedLedgerTeardown = .{};
     var frozen: FrozenLedgerCleanup = .{};
     try ledger.prepareFreezeAllForOwnerTeardown(
@@ -10564,7 +10559,7 @@ test "frozen cleanup rejects callback resurrection and re-tombstones on return" 
     var permit: OwnerTeardownPermit = .{};
     try ledger.beginOwnerTeardown(1, &permit);
     var token_plan: FrozenScreenTokenPlan = .{};
-    try token_plan.initInPlace(&.{}, std.StaticBitSet(max_items).initEmpty());
+    try token_plan.initInPlace(&.{}, std.StaticBitSet(max_items).empty);
     var prepared: PreparedLedgerTeardown = .{};
     var frozen: FrozenLedgerCleanup = .{};
     try ledger.prepareFreezeAllForOwnerTeardown(
@@ -10606,7 +10601,7 @@ test "owner teardown classifies stale retained token without mutating prepare in
     var token_plan: FrozenScreenTokenPlan = .{};
     try token_plan.initInPlace(
         &.{.{ .slot = token.slot, .generation = token.generation + 1 }},
-        std.StaticBitSet(max_items).initEmpty(),
+        std.StaticBitSet(max_items).empty,
     );
     var prepared: PreparedLedgerTeardown = .{};
     var frozen: FrozenLedgerCleanup = .{};

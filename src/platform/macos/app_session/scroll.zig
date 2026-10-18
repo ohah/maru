@@ -1261,7 +1261,7 @@ test "도크 ScrollArea 스크롤바 fade: 굴리면 선명 · 두면 흐려짐 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
 

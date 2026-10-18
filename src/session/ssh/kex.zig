@@ -24,6 +24,8 @@
 //!     서버 것과 같다는 뜻이다. 그 왕복은 S8 스모크가 돈다. 그때까지 이 층은 "아직 상호운용이
 //!     확인되지 않았다" 로 읽는다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const wire = @import("wire.zig");
 
@@ -67,7 +69,7 @@ pub const Ephemeral = struct {
 
     /// 씨앗을 그대로 받는다 — **테스트가 키를 고정**하는 문이고, `generate` 도 이것을 부른다.
     pub fn fromSeed(seed: [X25519.seed_length]u8) Error!Ephemeral {
-        const pair = X25519.KeyPair.generateDeterministic(seed) catch return Error.BadSeed;
+        const pair = X25519.KeyPair.generateDeterministic(seed);
         return .{ .secret = pair.secret_key, .public = pair.public_key };
     }
 
@@ -210,7 +212,7 @@ pub fn deriveKey(
         hasher.update(k_mpint);
         hasher.update(&h);
         if (produced == 0) {
-            hasher.update(&[_]u8{@intFromEnum(letter)});
+            hasher.update(&[_]u8{@backingInt(letter)});
             hasher.update(session_id);
         } else {
             hasher.update(out[0..produced]); // 지금까지 만든 것 **전부**
@@ -253,11 +255,11 @@ test "REPLY 를 읽는다" {
     var w = wire.Writer.init(&out);
     try w.byte(msg_kex_ecdh_reply);
     try w.string("K_S blob");
-    try w.string(&[_]u8{0xAB} ** public_len);
+    try w.string(&array_repeat.repeat(&[_]u8{0xAB}, public_len));
     try w.string("signature bytes");
     const reply = try parseReply(w.written());
     try std.testing.expectEqualStrings("K_S blob", reply.host_key);
-    try std.testing.expectEqualSlices(u8, &[_]u8{0xAB} ** public_len, reply.q_s);
+    try std.testing.expectEqualSlices(u8, &array_repeat.repeat(&[_]u8{0xAB}, public_len), reply.q_s);
     try std.testing.expectEqualStrings("signature bytes", reply.signature);
 }
 
@@ -272,7 +274,7 @@ test "REPLY 가 아닌 것과 잘린 것은 거절한다" {
     var full = wire.Writer.init(&out);
     try full.byte(msg_kex_ecdh_reply);
     try full.string("K_S");
-    try full.string(&[_]u8{0xAB} ** public_len);
+    try full.string(&array_repeat.repeat(&[_]u8{0xAB}, public_len));
     try full.string("sig");
     const bytes = full.written();
     var i: usize = 1;
@@ -284,7 +286,7 @@ test "REPLY 가 아닌 것과 잘린 것은 거절한다" {
 
 test "Q_S 길이가 32 가 아니면 거절한다" {
     // **RFC 8731 §3 이 끊으라고 한다.** 짧은 값을 받아 주면 상대가 고른 점으로 계산하게 된다.
-    const filler = [_]u8{0xAB} ** 64;
+    const filler = @as([64]u8, @splat(0xAB));
     for ([_]usize{ 0, 31, 33, 64 }) |bad_len| {
         var out: [256]u8 = undefined;
         var w = wire.Writer.init(&out);
@@ -357,7 +359,7 @@ test "임시 키는 연결마다 달라야 한다" {
     // **공개키가 그 개인키에서 나온 것인지** 확인한다. 둘이 따로 놀면 서버는 우리가 안 가진
     // 개인키로 계산하게 되고, KEX 는 "서명 위조" 로 실패해 원인을 짚기 어렵다.
     for ([_]Ephemeral{ a, b, c, d }) |eph| {
-        try std.testing.expectEqualSlices(u8, &eph.public, &(try X25519.recoverPublicKey(eph.secret)));
+        try std.testing.expectEqualSlices(u8, &eph.public, &X25519.recoverPublicKey(eph.secret));
     }
 }
 
@@ -394,7 +396,7 @@ test "작은 위수 점은 거절한다" {
     const good = try Ephemeral.fromSeed(@splat(4));
     _ = try eph.sharedSecret(&good.public);
     // 길이가 틀린 것은 다른 오류다 — 둘을 뭉뚱그리면 진단이 흐려진다.
-    try std.testing.expectError(Error.BadPublicKeyLength, eph.sharedSecret(&[_]u8{0} ** 31));
+    try std.testing.expectError(Error.BadPublicKeyLength, eph.sharedSecret(&array_repeat.repeat(&[_]u8{0}, 31)));
 }
 
 test "개인키를 지운다" {
@@ -402,9 +404,9 @@ test "개인키를 지운다" {
     const before = eph.secret;
     eph.clear();
     try std.testing.expect(!std.mem.eql(u8, &before, &eph.secret));
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &eph.secret);
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &eph.secret);
     // 공개키는 안 지운다 — 교환 해시에 `Q_C` 로 다시 들어간다.
-    try std.testing.expect(!std.mem.eql(u8, &([_]u8{0} ** 32), &eph.public));
+    try std.testing.expect(!std.mem.eql(u8, &(@as([32]u8, @splat(0))), &eph.public));
 }
 
 test "교환 해시는 재료 순서와 mpint 규칙을 지킨다" {
@@ -415,8 +417,8 @@ test "교환 해시는 재료 순서와 mpint 규칙을 지킨다" {
         .i_c = "client kexinit payload",
         .i_s = "server kexinit payload",
         .k_s = "host key blob",
-        .q_c = &([_]u8{0x11} ** 32),
-        .q_s = &([_]u8{0x22} ** 32),
+        .q_c = &(@as([32]u8, @splat(0x11))),
+        .q_s = &(@as([32]u8, @splat(0x22))),
         .k = @splat(0x33),
     };
 
@@ -429,7 +431,7 @@ test "교환 해시는 재료 순서와 mpint 규칙을 지킨다" {
     }
     // K = 0x3333…33 은 최상위 비트가 0 이라 덧대지 않는다 — 길이 32 의 mpint.
     expect.update(&[_]u8{ 0, 0, 0, 32 });
-    expect.update(&([_]u8{0x33} ** 32));
+    expect.update(&(@as([32]u8, @splat(0x33))));
     var want: [32]u8 = undefined;
     expect.final(&want);
 
@@ -445,8 +447,8 @@ test "K 의 최상위 비트가 서면 mpint 에 0 을 덧댄다" {
         .i_c = "I_C",
         .i_s = "I_S",
         .k_s = "K_S",
-        .q_c = &([_]u8{1} ** 32),
-        .q_s = &([_]u8{2} ** 32),
+        .q_c = &(@as([32]u8, @splat(1))),
+        .q_s = &(@as([32]u8, @splat(2))),
         .k = @splat(0x80), // 최상위 비트가 선다
     };
     var expect = Sha256.init(.{});
@@ -458,7 +460,7 @@ test "K 의 최상위 비트가 서면 mpint 에 0 을 덧댄다" {
     }
     expect.update(&[_]u8{ 0, 0, 0, 33 }); // 33 — 앞에 0 이 하나 붙는다
     expect.update(&[_]u8{0});
-    expect.update(&([_]u8{0x80} ** 32));
+    expect.update(&(@as([32]u8, @splat(0x80))));
     var want: [32]u8 = undefined;
     expect.final(&want);
     try std.testing.expectEqualSlices(u8, &want, &(try exchangeHash(in)));
@@ -490,8 +492,8 @@ test "재료 하나만 달라도 H 가 달라진다" {
         .i_c = "I_C",
         .i_s = "I_S",
         .k_s = "K_S",
-        .q_c = &([_]u8{1} ** 32),
-        .q_s = &([_]u8{2} ** 32),
+        .q_c = &(@as([32]u8, @splat(1))),
+        .q_s = &(@as([32]u8, @splat(2))),
         .k = @splat(0x05),
     };
     var moved = base;
@@ -508,7 +510,7 @@ test "재료 하나만 달라도 H 가 달라진다" {
 test "키 유도는 RFC 4253 §7.2 를 따른다" {
     const k: [32]u8 = @splat(0x41);
     const h: [32]u8 = @splat(0x42);
-    const session_id = &[_]u8{0x43} ** 32;
+    const session_id = array_repeat.repeat(&[_]u8{0x43}, 32);
 
     var mp: [37]u8 = undefined;
     var w = wire.Writer.init(&mp);
@@ -520,17 +522,17 @@ test "키 유도는 RFC 4253 §7.2 를 따른다" {
     first.update(k_mpint);
     first.update(&h);
     first.update("C");
-    first.update(session_id);
+    first.update(&session_id);
     var k1: [32]u8 = undefined;
     first.final(&k1);
 
     var got: [32]u8 = undefined;
-    try deriveKey(&got, k, h, .enc_c2s, session_id);
+    try deriveKey(&got, k, h, .enc_c2s, &session_id);
     try std.testing.expectEqualSlices(u8, &k1, &got);
 
     // 짧게 달라고 하면 **앞에서** 잘라 준다("Key data MUST be taken from the beginning").
     var short: [16]u8 = undefined;
-    try deriveKey(&short, k, h, .enc_c2s, session_id);
+    try deriveKey(&short, k, h, .enc_c2s, &session_id);
     try std.testing.expectEqualSlices(u8, k1[0..16], &short);
 }
 
@@ -539,7 +541,7 @@ test "64바이트 키는 K2 = HASH(K || H || K1) 로 잇는다" {
     // 첫 32바이트는 맞고 뒤 32바이트만 어긋나 — 길이 필드만 안 풀리는 이상한 실패가 된다.
     const k: [32]u8 = @splat(0x41);
     const h: [32]u8 = @splat(0x42);
-    const session_id = &[_]u8{0x43} ** 32;
+    const session_id = array_repeat.repeat(&[_]u8{0x43}, 32);
 
     var mp: [37]u8 = undefined;
     var w = wire.Writer.init(&mp);
@@ -550,7 +552,7 @@ test "64바이트 키는 K2 = HASH(K || H || K1) 로 잇는다" {
     first.update(k_mpint);
     first.update(&h);
     first.update("D");
-    first.update(session_id);
+    first.update(&session_id);
     var k1: [32]u8 = undefined;
     first.final(&k1);
 
@@ -562,7 +564,7 @@ test "64바이트 키는 K2 = HASH(K || H || K1) 로 잇는다" {
     second.final(&k2);
 
     var got: [64]u8 = undefined;
-    try deriveKey(&got, k, h, .enc_s2c, session_id);
+    try deriveKey(&got, k, h, .enc_s2c, &session_id);
     try std.testing.expectEqualSlices(u8, &k1, got[0..32]);
     try std.testing.expectEqualSlices(u8, &k2, got[32..64]);
 
@@ -576,12 +578,12 @@ test "64바이트 키는 K2 = HASH(K || H || K1) 로 잇는다" {
     third.final(&k3);
 
     var long: [96]u8 = undefined;
-    try deriveKey(&long, k, h, .enc_s2c, session_id);
+    try deriveKey(&long, k, h, .enc_s2c, &session_id);
     try std.testing.expectEqualSlices(u8, &k3, long[64..96]);
 
     // 경계에 안 맞는 길이(40)도 앞에서 자른다.
     var odd: [40]u8 = undefined;
-    try deriveKey(&odd, k, h, .enc_s2c, session_id);
+    try deriveKey(&odd, k, h, .enc_s2c, &session_id);
     try std.testing.expectEqualSlices(u8, long[0..40], &odd);
 }
 
@@ -630,18 +632,18 @@ test "글자마다 다른 키가 나온다" {
     // **방향이 글자에 실린다.** 두 글자가 같은 값을 내면 양쪽이 같은 키로 암호화해 버린다.
     const k: [32]u8 = @splat(1);
     const h: [32]u8 = @splat(2);
-    const sid = &[_]u8{3} ** 32;
+    const sid = array_repeat.repeat(&[_]u8{3}, 32);
     const letters = [_]KeyLetter{ .iv_c2s, .iv_s2c, .enc_c2s, .enc_s2c, .mac_c2s, .mac_s2c };
     var seen: [letters.len][32]u8 = undefined;
-    for (letters, 0..) |letter, i| try deriveKey(&seen[i], k, h, letter, sid);
+    for (letters, 0..) |letter, i| try deriveKey(&seen[i], k, h, letter, &sid);
     for (0..letters.len) |i| {
         for (i + 1..letters.len) |j| {
             try std.testing.expect(!std.mem.eql(u8, &seen[i], &seen[j]));
         }
     }
     // 글자 값이 명세 그대로인지도 못박는다 — 상수를 바꾸면 서버와 다른 키가 나온다.
-    try std.testing.expectEqual(@as(u8, 'A'), @intFromEnum(KeyLetter.iv_c2s));
-    try std.testing.expectEqual(@as(u8, 'F'), @intFromEnum(KeyLetter.mac_s2c));
+    try std.testing.expectEqual(@as(u8, 'A'), @backingInt(KeyLetter.iv_c2s));
+    try std.testing.expectEqual(@as(u8, 'F'), @backingInt(KeyLetter.mac_s2c));
 }
 
 test "session_id 가 다르면 키가 다르다" {
@@ -651,7 +653,7 @@ test "session_id 가 다르면 키가 다르다" {
     const h: [32]u8 = @splat(2);
     var a: [32]u8 = undefined;
     var b: [32]u8 = undefined;
-    try deriveKey(&a, k, h, .enc_c2s, &[_]u8{3} ** 32);
-    try deriveKey(&b, k, h, .enc_c2s, &[_]u8{4} ** 32);
+    try deriveKey(&a, k, h, .enc_c2s, &array_repeat.repeat(&[_]u8{3}, 32));
+    try deriveKey(&b, k, h, .enc_c2s, &array_repeat.repeat(&[_]u8{4}, 32));
     try std.testing.expect(!std.mem.eql(u8, &a, &b));
 }

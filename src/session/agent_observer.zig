@@ -526,14 +526,14 @@ comptime {
 }
 
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    return std.ascii.indexOfIgnoreCase(haystack, needle) != null;
+    return std.ascii.findIgnoreCase(haystack, needle) != null;
 }
 
 fn lastIndexOfIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
     var offset: usize = 0;
     var latest: ?usize = null;
     while (offset <= haystack.len) {
-        const relative = std.ascii.indexOfIgnoreCase(haystack[offset..], needle) orelse break;
+        const relative = std.ascii.findIgnoreCase(haystack[offset..], needle) orelse break;
         latest = offset + relative;
         offset += relative + @max(needle.len, 1);
     }

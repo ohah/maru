@@ -57,7 +57,7 @@ pub fn decide(live: bool, op: Op) Action {
 }
 
 test "재접속 얼림 관문: live 면 어떤 연산이든 진행한다" {
-    inline for (std.meta.fields(Op)) |field| {
+    inline for (@import("type_info_fields").fields(Op)) |field| {
         try std.testing.expectEqual(Action.proceed, decide(true, @field(Op, field.name)));
     }
 }
@@ -73,7 +73,7 @@ test "재접속 얼림 관문: live 가 아니면 비변경 RPC 는 바쁨으로
 }
 
 test "재접속 얼림 관문: live 가 아닌데 진행하는 연산은 없다" {
-    inline for (std.meta.fields(Op)) |field| {
+    inline for (@import("type_info_fields").fields(Op)) |field| {
         try std.testing.expect(decide(false, @field(Op, field.name)) != .proceed);
     }
 }

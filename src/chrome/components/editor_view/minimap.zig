@@ -9,6 +9,8 @@
 //! 이 배치에서 사라졌다.
 //!
 //! 이 파일은 순수 컴포넌트다 — 세션·문서 모델을 모르고, 받은 줄 배열과 색 표만 읽는다.
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const draw = @import("../../draw.zig");
 const tokens = @import("../../tokens.zig");
@@ -276,7 +278,7 @@ test "MM2 run 의 색은 첫 글자의 구문 역할 — 스팬 밖 run 은 무�
 
 test "MM3 스트립 폭을 넘는 글자는 잘리고, 스트립 행 수를 넘는 줄은 안 그린다" {
     var ops: [16]draw.Op = undefined;
-    const long = "x" ** 60;
+    const long = array_repeat.repeat("x", 60);
     const lines = [_][]const u8{ long, "a", "b", "c" };
     // 폭 10px = 10 글자, 높이 4px = 2 줄
     const w = build(.{ .rect = .{ .x = 0, .y = 0, .w = 10, .h = 4 }, .lines = &lines, .top = 0, .slider_first = 0, .slider_len = 0, .tab_width = 4 }, &ops);

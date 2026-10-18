@@ -15,7 +15,7 @@ const builtin = @import("builtin");
 
 pub const CoreOwner = struct {
     /// 디버그 빌드에서만 추적한다. release(ReleaseFast/Small)에선 0비용.
-    pub const enabled = builtin.mode == .Debug;
+    pub const enabled = builtin.mode == .debug;
 
     /// 현재 락을 보유한 스레드 id(0 = unowned). 보유 스레드는 enter/exit로 쓰고, 다른 스레드는
     /// lock 직전 isOwnedBySelf로 읽으므로(곧 자신이 블록될지 판정) atomic으로 data race를 피한다.

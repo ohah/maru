@@ -309,14 +309,14 @@ pub const BoundedExecutor = struct {
 
     fn captureOptionalDirectory(self: *@This(), executable: []const u8, child_args: []const []const u8, environment: []const []const u8, directory_fd: ?std.c.fd_t, output: []u8, budget_ns: i128) Error![]const u8 {
         var executable_storage: [max_token_bytes + 1]u8 = undefined;
-        const executable_z = std.fmt.bufPrintZ(&executable_storage, "{s}", .{executable}) catch return error.InvalidPath;
+        const executable_z = std.fmt.bufPrintSentinel(&executable_storage, "{s}", .{executable}, 0) catch return error.InvalidPath;
         var args_storage: [max_args][arg_bytes]u8 = undefined;
         var argv: [max_args + 1:null]?[*:0]const u8 = @splat(null);
         argv[0] = executable_z.ptr;
-        for (child_args, 0..) |arg, index| argv[index + 1] = (std.fmt.bufPrintZ(&args_storage[index], "{s}", .{arg}) catch return error.InvalidExpected).ptr;
+        for (child_args, 0..) |arg, index| argv[index + 1] = (std.fmt.bufPrintSentinel(&args_storage[index], "{s}", .{arg}, 0) catch return error.InvalidExpected).ptr;
         var environment_bytes: [2]["GH_TOKEN=".len + max_token_bytes + 1]u8 = undefined;
         var envp: [2:null]?[*:0]const u8 = @splat(null);
-        for (environment, 0..) |entry, index| envp[index] = (std.fmt.bufPrintZ(&environment_bytes[index], "{s}", .{entry}) catch return error.InvalidToken).ptr;
+        for (environment, 0..) |entry, index| envp[index] = (std.fmt.bufPrintSentinel(&environment_bytes[index], "{s}", .{entry}, 0) catch return error.InvalidToken).ptr;
         return if (directory_fd) |fd|
             process.runCaptureEnvironmentStdoutDirectory(self.io, executable_z, &argv, &envp, fd, output, budget_ns)
         else

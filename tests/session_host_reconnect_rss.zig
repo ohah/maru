@@ -2,13 +2,11 @@
 //! 측정 대상은 test runner 부모가 아니라 exec 뒤 실제 reconnect generation workload를
 //! 소유하는 별도 PID다. FD 198은 고정 scalar transcript와 one-byte command만 운반한다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const remote_runtime = @import("remote_runtime");
-const mac = @cImport({
-    @cInclude("libproc.h");
-    @cInclude("sys/resource.h");
-    @cInclude("sys/proc_info.h");
-});
+const mac = @import("darwin_perf_c");
 
 const c = std.c;
 extern "c" fn usleep(usec: c_uint) c_int;
@@ -25,7 +23,7 @@ const sol_local: c_int = 0;
 const local_peerpid: c_int = 2;
 
 const ChildArtifact = if (@import("builtin").is_test) struct {
-    pub export var maru_cr2e_e3a2_rss_child_path: [1024]u8 = [_]u8{0} ** 1024;
+    pub export var maru_cr2e_e3a2_rss_child_path: [1024]u8 = @as([1024]u8, @splat(0));
     pub export var maru_cr2e_e3a2_rss_child_path_len: usize = 0;
 } else struct {};
 
@@ -45,9 +43,9 @@ const Report = extern struct {
 
     fn valid(self: Report, expected: Stage, nonce: [16]u8) bool {
         return std.mem.eql(u8, &self.run_nonce, &nonce) and self.pid != 0 and
-            self.stage_raw == @intFromEnum(expected) and
+            self.stage_raw == @backingInt(expected) and
             self.inherited_fd_closed == 1 and
-            std.mem.eql(u8, &self.reserved, &[_]u8{0} ** 2) and
+            std.mem.eql(u8, &self.reserved, array_repeat.repeat(&[_]u8{0}, 2)) and
             self.peak_bytes >= self.live_bytes and
             self.peak_allocations >= self.live_allocations;
     }
@@ -121,7 +119,7 @@ fn writeExact(fd: c.fd_t, bytes: []const u8) !void {
 }
 
 fn unlinkArtifact() !void {
-    const artifact_z = try std.testing.allocator.dupeZ(u8, artifact_path);
+    const artifact_z = try std.testing.allocator.dupeSentinel(u8, artifact_path, 0);
     defer std.testing.allocator.free(artifact_z);
     const result = c.unlink(artifact_z.ptr);
     if (result != 0 and std.posix.errno(result) != .NOENT)
@@ -191,7 +189,7 @@ fn writeReport(nonce: [16]u8, stage: Stage, snapshot: remote_runtime.rss_testing
     const report = Report{
         .run_nonce = nonce,
         .pid = @intCast(c.getpid()),
-        .stage_raw = @intFromEnum(stage),
+        .stage_raw = @backingInt(stage),
         .inherited_fd_closed = @intFromBool(c.fcntl(sentinel_fd, c.F.GETFD, @as(c_int, 0)) < 0 and
             std.posix.errno(-1) == .BADF),
         .reserved = .{ 0, 0 },
@@ -303,9 +301,9 @@ fn writeArtifact(artifact: Artifact) !void {
         .{ artifact_path, c.getpid() },
     );
     defer std.testing.allocator.free(temp);
-    const temp_z = try std.testing.allocator.dupeZ(u8, temp);
+    const temp_z = try std.testing.allocator.dupeSentinel(u8, temp, 0);
     defer std.testing.allocator.free(temp_z);
-    const path_z = try std.testing.allocator.dupeZ(u8, artifact_path);
+    const path_z = try std.testing.allocator.dupeSentinel(u8, artifact_path, 0);
     defer std.testing.allocator.free(path_z);
     defer _ = c.unlink(temp_z.ptr);
     const fd = c.open(temp_z.ptr, .{
@@ -356,7 +354,7 @@ test "CR2e-e3a2 RSS child는 baseline pressure final zero transcript를 exact �
 
 test "CR2e-e3a2 RSS watchdog은 열린 무응답 transcript를 absolute deadline으로 거부한다" {
     try unlinkArtifact();
-    const artifact_z = try std.testing.allocator.dupeZ(u8, artifact_path);
+    const artifact_z = try std.testing.allocator.dupeSentinel(u8, artifact_path, 0);
     defer std.testing.allocator.free(artifact_z);
     const stale_fd = c.open(artifact_z.ptr, .{
         .ACCMODE = .WRONLY,
@@ -398,7 +396,7 @@ test "CR2e-e3a2 RSS watchdog은 열린 무응답 transcript를 absolute deadline
 }
 
 test "CR2e-e3a2 RSS parent는 별도 ReleaseFast PID의 logical delta와 측정 tolerance를 고정한다" {
-    if (@import("builtin").mode != .ReleaseFast or @import("builtin").os.tag != .macos)
+    if (@import("builtin").mode != .fast or @import("builtin").os.tag != .macos)
         return error.SkipZigTest;
     if (ChildArtifact.maru_cr2e_e3a2_rss_child_path_len == 0)
         return error.TestUnexpectedResult;
@@ -429,7 +427,7 @@ test "CR2e-e3a2 RSS parent는 별도 ReleaseFast PID의 logical delta와 측정 
     var nonce_hex: [32]u8 = undefined;
     _ = std.fmt.bufPrint(&nonce_hex, "{x}", .{nonce}) catch return error.TestUnexpectedResult;
     var env_storage: [marker_name.len + 1 + 32 + 1]u8 = undefined;
-    const env_value = try std.fmt.bufPrintZ(&env_storage, "{s}={s}", .{ marker_name, nonce_hex });
+    const env_value = try std.fmt.bufPrintSentinel(&env_storage, "{s}={s}", .{ marker_name, nonce_hex }, 0);
     const pid = c.fork();
     if (pid < 0) return error.TestUnexpectedResult;
     if (pid == 0) {

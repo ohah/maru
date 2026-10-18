@@ -3,6 +3,8 @@
 //! This module owns synthetic UI inputs and recorded actions only. It deliberately does not
 //! import AppSession, session, PTY, provider, filesystem, or a platform window host.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const maru = @import("maru");
 const syntax = @import("syntax");
@@ -512,7 +514,7 @@ pub fn buildFrame(
 /// 길이가 Lab의 `text_bytes`(2048)를 넘도록 잡았다: 상한이 없으면 이 줄 하나가 저장소를 삼켜
 /// `build` **전체**가 OutOfSpace로 죽고 **편집기가 통째로 안 그려진다**(그 줄만이 아니다).
 /// 상한이 있으면 화면 폭까지만 만들고 나머지는 애초에 만들지 않는다.
-const long_line = "\t" ++ ("longline " ** 260); // 2340자
+const long_line = "\t" ++ (array_repeat.repeat("longline ", 260)); // 2340자
 
 /// `editor_selection` 픽스처. **줄을 걸친 선택**을 보여야 하므로 짧고 뚜렷한 줄로 짠다 —
 /// 첫 줄은 중간부터, 가운데 줄은 통째로, 끝 줄은 머리부터 칠해지는 세 모양이 한 화면에 든다.
@@ -710,7 +712,7 @@ const editor_fixture_lines = [_][]const u8{
     // **시작** 열만 보므로 걸친 글자가 통째로 들어가고, 자르는 것은 렌더러의 픽셀 예산이다 —
     // 그 결과가 반쪽인지 통째인지 빈칸인지는 **캡처로만** 보인다. 본문이 50열이므로 z를 49개 두면
     // 한글이 열 49~50을 요구하는데 50은 화면 밖이다 — 정확히 걸치는 자리다(폭이 바뀌면 함께 옮긴다).
-    ("z" ** 49) ++ "한글",
+    (array_repeat.repeat("z", 49)) ++ "한글",
 };
 
 /// §3.8 적대적 입력 fixture. **실제 Trojan Source 패턴을 담는다.**
@@ -735,10 +737,10 @@ const editor_hazard_lines = [_][]const u8{
     // 표기를 통째로 빼면 앞뒤가 붙어 위험 문자의 존재가 사라진다 — 적대적 검증이 실제로 그 상태를
     // 만들었다(`ab<U+202E>cd` → `abcd`). 잘려서라도 남아야 §3.8의 불변식이 선다. 그것을 **캡처로**
     // 고정하는 것이 이 줄의 몫이다(단위 테스트는 문자열만 보고 화면을 보지 않는다).
-    ("x" ** 46) ++ "\u{202E}end",
+    (array_repeat.repeat("x", 46)) ++ "\u{202E}end",
     // 한 cluster에 hazard cp와 정상 cp가 함께 있는 경우(ZWJ가 앞 글자에 흡수된다). 이 모양이
     // **정수 언더플로 패닉**을 만들었다 — 캡처가 만들어진다는 것 자체가 그 회귀의 가드다.
-    ("y" ** 42) ++ "a\u{200D}\u{200D}b\u{200D}c",
+    (array_repeat.repeat("y", 42)) ++ "a\u{200D}\u{200D}b\u{200D}c",
 };
 
 /// §4.2 표시 폭 fixture. **라벨은 모두 8칸, 내용은 4칸 또는 6칸, `|`는 20열**이 되도록 짰다 —
@@ -780,7 +782,7 @@ const editor_folded_marks = [_]chrome.components.editor_view.gutter.Fold{ .colla
 ///   선다(2026-09-29 실측). 힌트가 5칸(`: u32`)이면 겹침이 같은 값 하나라 이 폭에서는 안 드러났다 — 처음 픽스처가 그랬다.
 /// - 둘째·셋째 줄은 타입 힌트가 선 코드다 — 힌트 뒤의 공백·탭이 랩된 둘째 행에 온다.
 const editor_whitespace_lines = [_][]const u8{
-    "\t" ** 14 ++ "x",
+    array_repeat.repeat("\t", 14) ++ "x",
     "    let total = items.iter().map(|item| item.price * item.qty).sum();",
     "\tfor (index, row) in rows.iter().enumerate() {\tprint(index,\trow);\t}",
 };
@@ -798,7 +800,7 @@ const editor_wrap_lines = [_][]const u8{
     // **주기가 7인 이유**: 본문 폭(50)과 서로소여야 행마다 시작 숫자가 달라진다. 10주기를 쓰다가
     // 스크롤바가 자리를 먹어 폭이 50이 되자 주기와 정확히 맞아떨어져 **모든 행이 `0`으로 시작**했고,
     // 그러면 랩이 통째로 깨져도 그림이 같아 자가 아무것도 판정하지 못한다(실제로 그 상태가 됐다).
-    "0123456" ** 18,
+    array_repeat.repeat("0123456", 18),
     "fn wrap(text: []const u8) void {",
     "    // This ASCII comment is deliberately longer than the content width so it folds onto the next visual row.",
     "    // 한글 주석도 본문 폭을 넘도록 길게 씁니다. 두 칸짜리 글자는 행 끝에 한 칸을 남기므로 나눗셈 근사와 어긋납니다.",
@@ -814,14 +816,14 @@ const editor_wrap_lines = [_][]const u8{
     // 이 줄이 없으면 "2칸 글자를 쪼개지 않는다"는 계약에 **가드가 없다.** 자연스러운 한글 문장은
     // `col`이 짝수로만 늘어 52에서 정확히 떨어지므로, 경계 판정을 `col + w > 폭`에서 `col >= 폭`으로
     // 바꿔도 그림이 같다(적대적 검증이 실제로 그 상태를 통과시켰다).
-    ("x" ** 49) ++ "가나다",
+    (array_repeat.repeat("x", 49)) ++ "가나다",
     // **왼쪽 경계에 2칸 글자가 걸치는 줄.** `editor-hscroll`이 20열을 밀므로, 19칸 뒤의 한글이
     // 열 19~20을 요구해 **첫 칸이 화면 밖**이 된다 — 반쪽을 그릴 수 없으니 통째로 빼야 한다.
     //
     // 위 `x*51` 줄로는 이것을 못 본다. 그 줄의 한글은 열 51부터라 경계와 무관하고, **1칸 글자에서는
     // `col >= start`와 `col + w > start`가 같은 결과를 내기** 때문이다(적대적 검증이 그 반증을
     // 통과시켰다). 오른쪽 경계(랩)와 정확히 대칭인 상황이다.
-    ("y" ** 19) ++ "가나다",
+    (array_repeat.repeat("y", 19)) ++ "가나다",
     // **랩 + 초장문.** 적대적 검증이 잡은 결함의 회귀 가드다 — 랩은 한 줄에 `남은 행 × 뷰 열수`만큼
     // 저장소를 쓸 수 있어서, 이 줄이 저장소를 다 삼키면 `expandTabs`가 `OutOfSpace`를 올리고
     // **캡처가 통째로 안 만들어졌다**(#2086이 고친 결함이 랩에서 되살아났던 것이다).
@@ -2081,18 +2083,18 @@ fn buildFileTreeFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers:
     const K = chrome.file_tree_icon.IconKind;
     const rows = [_]file_tree.types.Row{
         // 루트 줄 — 깊이 0, 안내선이 없어야 한다.
-        .{ .kind = .root, .label = "maru3", .depth = 0, .expandable = true, .expanded = true, .icon_kind = @intFromEnum(K.folder), .model_index = 0 },
+        .{ .kind = .root, .label = "maru3", .depth = 0, .expandable = true, .expanded = true, .icon_kind = @backingInt(K.folder), .model_index = 0 },
         // 펼친 폴더와 접힌 폴더 — chevron 방향이 서로 달라야 한다.
-        .{ .kind = .directory, .label = "src", .depth = 1, .expandable = true, .expanded = true, .icon_kind = @intFromEnum(K.folder), .model_index = 1 },
-        .{ .kind = .file, .label = "main.zig", .depth = 2, .icon_kind = @intFromEnum(K.code), .model_index = 2 },
+        .{ .kind = .directory, .label = "src", .depth = 1, .expandable = true, .expanded = true, .icon_kind = @backingInt(K.folder), .model_index = 1 },
+        .{ .kind = .file, .label = "main.zig", .depth = 2, .icon_kind = @backingInt(K.code), .model_index = 2 },
         // **선택된 행.** 밴드가 가장 진하고 글자가 surface 전경으로 올라온다.
-        .{ .kind = .file, .label = "app_session.zig", .depth = 2, .icon_kind = @intFromEnum(K.code), .active = true, .selected = true, .model_index = 3 },
+        .{ .kind = .file, .label = "app_session.zig", .depth = 2, .icon_kind = @backingInt(K.code), .active = true, .selected = true, .model_index = 3 },
         // dirty 점이 오른쪽 슬롯에 선다(라벨과 겹치면 그 결함은 픽셀로만 보인다).
-        .{ .kind = .file, .label = "renderer.zig", .depth = 2, .icon_kind = @intFromEnum(K.code), .dirty = true, .model_index = 4 },
+        .{ .kind = .file, .label = "renderer.zig", .depth = 2, .icon_kind = @backingInt(K.code), .dirty = true, .model_index = 4 },
         // 무시된 행 — 한 단 흐린 전경이다(색 위계가 뒤집히면 이 캡처가 잡는다).
-        .{ .kind = .directory, .label = "zig-out", .depth = 1, .expandable = true, .ignored = true, .icon_kind = @intFromEnum(K.folder), .model_index = 5 },
-        .{ .kind = .directory, .label = "docs", .depth = 1, .expandable = true, .icon_kind = @intFromEnum(K.folder), .model_index = 6 },
-        .{ .kind = .file, .label = "README.md", .depth = 1, .icon_kind = @intFromEnum(K.document), .model_index = 7 },
+        .{ .kind = .directory, .label = "zig-out", .depth = 1, .expandable = true, .ignored = true, .icon_kind = @backingInt(K.folder), .model_index = 5 },
+        .{ .kind = .directory, .label = "docs", .depth = 1, .expandable = true, .icon_kind = @backingInt(K.folder), .model_index = 6 },
+        .{ .kind = .file, .label = "README.md", .depth = 1, .icon_kind = @backingInt(K.document), .model_index = 7 },
     };
     const props = file_tree.types.Props{
         // **제품 도크 폭을 쓴다**(Lab 캡처 폭 480 이 아니라). 트리는 사이드바 도크 안에 살고 라벨은

@@ -58,7 +58,7 @@ fn publishedContext() context_mod.Context {
 fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(out, "{s}/{s}", .{ root[0..len], leaf });
+    return std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ root[0..len], leaf }, 0);
 }
 
 const Never = struct {
@@ -97,7 +97,7 @@ const Attesting = struct {
         @memcpy(output[offset .. offset + 64], self.sha);
         if (self.mutate_after) {
             var path: [std.fs.max_path_bytes:0]u8 = undefined;
-            const path_z = try std.fmt.bufPrintZ(&path, "{s}", .{args[2]});
+            const path_z = try std.fmt.bufPrintSentinel(&path, "{s}", .{args[2]}, 0);
             if (c.chmod(path_z.ptr, 0o600) != 0) return error.MutationFailed;
         }
         return output[0..valid_attestation.len];
@@ -205,7 +205,7 @@ test "manifest revalidation detects content drift before attestation" {
     try manifest_file.materialize(&file, try absolute(&tmp, "work", &path), .{ .name = "Maru-1.2.3-session-host-release.json", .sha256 = &sha, .bytes = bytes });
     const observed = file.observation().?;
     var observed_path: [std.fs.max_path_bytes:0]u8 = undefined;
-    const observed_z = try std.fmt.bufPrintZ(&observed_path, "{s}", .{observed.path});
+    const observed_z = try std.fmt.bufPrintSentinel(&observed_path, "{s}", .{observed.path}, 0);
     try std.testing.expectEqual(@as(c_int, 0), c.chmod(observed_z.ptr, 0o600));
     var fake = Never{};
     var authority = Authority{};
@@ -350,7 +350,7 @@ test "post-attestation file drift publishes nothing and preserves cleanup author
     try manifest_file.materialize(&file, try absolute(&tmp, "work", &path), .{ .name = "Maru-1.2.3-session-host-release.json", .sha256 = &sha, .bytes = bytes });
     const observed = file.observation().?;
     var observed_path: [std.fs.max_path_bytes:0]u8 = undefined;
-    const observed_z = try std.fmt.bufPrintZ(&observed_path, "{s}", .{observed.path});
+    const observed_z = try std.fmt.bufPrintSentinel(&observed_path, "{s}", .{observed.path}, 0);
     var authority = Authority{};
     var executor = Attesting{ .sha = &sha, .mutate_after = true };
     var output: [8192]u8 = undefined;

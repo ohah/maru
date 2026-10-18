@@ -267,17 +267,17 @@ fn write(self: *AppSession, doc: backup.Doc, content: []const u8) bool {
         error.PathAlreadyExists => {},
         else => return false,
     };
-    std.Io.Dir.cwd().setFilePermissions(self.io, dir, @enumFromInt(0o700), .{}) catch {};
+    std.Io.Dir.cwd().setFilePermissions(self.io, dir, @fromBackingInt(@intCast(0o700)), .{}) catch {};
 
     // **임시 이름 → 원자 교체는 std 가 소유한다** — 우리가 그 순서를 또 적으면 같은 지식이 두 벌이
     // 된다(`settings.zig` 의 config 쓰기가 쓰는 그 부품).
     var af = std.Io.Dir.cwd().createFileAtomic(self.io, path, .{
         .replace = true,
-        .permissions = @enumFromInt(0o600),
+        .permissions = @fromBackingInt(@intCast(0o600)),
     }) catch return false;
     defer af.deinit(self.io);
     // 생성 권한은 umask로 줄어든다. 새 백업을 다시 읽을 수 있어야 복구 원본을 정리해도 안전하다.
-    af.file.setPermissions(self.io, @enumFromInt(0o600)) catch return false;
+    af.file.setPermissions(self.io, @fromBackingInt(@intCast(0o600))) catch return false;
     var buf: [4096]u8 = undefined;
     var w = af.file.writer(self.io, &buf);
     w.interface.writeAll(bytes) catch return false;

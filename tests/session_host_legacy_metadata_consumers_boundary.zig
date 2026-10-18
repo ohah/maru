@@ -22,9 +22,9 @@ fn count(haystack: []const u8, needle: []const u8) usize {
 }
 
 fn countProductConnectFrozenGui(allocator: std.mem.Allocator, source: []const u8) !usize {
-    const source_z = try allocator.dupeZ(u8, source);
+    const source_z = try allocator.dupeSentinel(u8, source, 0);
     defer allocator.free(source_z);
-    var tree = try std.zig.Ast.parse(allocator, source_z, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source_z, .{});
     defer tree.deinit(allocator);
     const test_tokens = try source_digest.anyDepthTestTokenMask(allocator, &tree);
     defer allocator.free(test_tokens);

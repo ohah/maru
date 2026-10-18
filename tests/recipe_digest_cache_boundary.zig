@@ -111,14 +111,14 @@ test "캐시한 recipe 다이제스트: 대입은 한 번뿐이고 debug 가 값
     const fn_at = std.mem.indexOf(u8, src, "fn recipeDigestChecked(") orelse return error.AccessorMissing;
     const fn_end = std.mem.indexOfPos(u8, src, fn_at, "\n    }\n") orelse src.len;
     const body = src[fn_at..fn_end];
-    for ([_][]const u8{ "builtin.mode == .Debug", "builtin.is_test", "rawDigest(", "fatalIntegrity" }) |needle| {
+    for ([_][]const u8{ "builtin.mode == .debug", "builtin.is_test", "rawDigest(", "fatalIntegrity" }) |needle| {
         if (std.mem.indexOf(u8, body, needle) == null) {
             std.debug.print("recipeDigestChecked 에 «{s}» 이 없다 — 캐시가 조용히 상할 수 있다\n", .{needle});
             return error.DriftCheckMissing;
         }
     }
     // ⑤ **ReleaseFast 에는 재계산이 없어야** 이 최적화가 의미를 갖는다 — 대조가 가드 밖으로 나가면 빨개진다.
-    const guard_at = std.mem.indexOf(u8, body, "if (builtin.mode == .Debug") orelse return error.DriftCheckMissing;
+    const guard_at = std.mem.indexOf(u8, body, "if (builtin.mode == .debug") orelse return error.DriftCheckMissing;
     const hash_at = std.mem.indexOf(u8, body, "rawDigest(") orelse return error.DriftCheckMissing;
     try std.testing.expect(guard_at < hash_at);
 }

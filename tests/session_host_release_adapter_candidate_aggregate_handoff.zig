@@ -101,7 +101,7 @@ const Fixture = struct {
 fn absolute(tmp: *std.testing.TmpDir, suffix: []const u8, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(out, "{s}/{s}", .{ root[0..len], suffix });
+    return std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ root[0..len], suffix }, 0);
 }
 
 test "aggregate promotion is atomic and survives source removal" {
@@ -123,8 +123,8 @@ test "aggregate promotion is atomic and survives source removal" {
     const initial = try durable.revalidate();
     try std.testing.expectEqual(@as(usize, handoff.baseline_role_count), initial.active_count);
     for (initial.entries[0..initial.active_count], 0..) |entry, index| {
-        try std.testing.expectEqualStrings(handoff.destinationName(@enumFromInt(index), source_names[0]), std.fs.path.basename(entry.path));
-        try std.testing.expectEqualStrings(&sources.at(@enumFromInt(index)).?.file.value().?.sha256, &entry.observation.sha256);
+        try std.testing.expectEqualStrings(handoff.destinationName(@fromBackingInt(@intCast(index)), source_names[0]), std.fs.path.basename(entry.path));
+        try std.testing.expectEqualStrings(&sources.at(@fromBackingInt(@intCast(index))).?.file.value().?.sha256, &entry.observation.sha256);
     }
     try fixture.closeSources();
     try fixture.tmp.dir.deleteTree(std.testing.io, "workspace");
@@ -148,7 +148,7 @@ test "retained close preserves the complete aggregate and revokes old authority"
     try std.testing.expectError(error.InvalidOwner, durable.closeRetaining());
     try std.testing.expectError(error.InvalidOwner, handoff.promote(std.testing.allocator, fixture.sources(), fixture.destinationPath(), &durable));
     for (0..handoff.baseline_role_count) |index| {
-        const name = handoff.destinationName(@enumFromInt(index), source_names[0]);
+        const name = handoff.destinationName(@fromBackingInt(@intCast(index)), source_names[0]);
         var path: [std.fs.max_path_bytes]u8 = undefined;
         const sub_path = try std.fmt.bufPrint(&path, "durable/handoff/{s}", .{name});
         _ = try fixture.tmp.dir.statFile(std.testing.io, sub_path, .{});

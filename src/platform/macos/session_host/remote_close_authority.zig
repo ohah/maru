@@ -54,8 +54,8 @@ pub const CloseAuthority = struct {
     disposition_raw: u8 = 0,
     lifecycle_raw: u8 = 0,
     state_generation: u64 = 0,
-    identity_seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
-    state_seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+    identity_seal: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
+    state_seal: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
 };
 
 pub const CloseOperationOwner = struct {
@@ -82,8 +82,8 @@ pub const CloseOperationPin = struct {
     expected_state_generation: u64 = 0,
     expected_lifecycle_raw: u8 = 0,
     lifecycle_raw: u8 = 0,
-    authority_identity_seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
-    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+    authority_identity_seal: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
+    seal: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
 };
 
 pub const Error = error{ InvalidOwner, InvalidRequest, Busy, Exhausted } || process_seal.ReadyError;
@@ -113,9 +113,9 @@ pub fn prepare(out: *CloseAuthority, ready: process_seal.ReadyIdentity, params: 
         .host_id = params.host_id,
         .close_request_generation = params.close_request_generation,
         .close_schedule_ticket = params.close_schedule_ticket,
-        .request_kind_raw = @intFromEnum(params.request_kind),
-        .disposition_raw = @intFromEnum(params.disposition),
-        .lifecycle_raw = @intFromEnum(Lifecycle.open),
+        .request_kind_raw = @backingInt(params.request_kind),
+        .disposition_raw = @backingInt(params.disposition),
+        .lifecycle_raw = @backingInt(Lifecycle.open),
         .state_generation = 1,
     };
     out.identity_seal = try identitySeal(out);
@@ -131,16 +131,16 @@ pub fn valid(authority: *const CloseAuthority) bool {
     if (@intFromPtr(authority) == 0 or authority.pid == 0 or authority.process_nonce == 0 or
         authority.thread_id != @as(u64, @intCast(std.Thread.getCurrentId())) or authority.state_generation == 0) return false;
     const lifecycle: Lifecycle = switch (authority.lifecycle_raw) {
-        0...5 => @enumFromInt(authority.lifecycle_raw),
+        0...5 => @fromBackingInt(@intCast(authority.lifecycle_raw)),
         else => return false,
     };
     if (lifecycle == .pristine or !contract.validCloseScheduleTicket(authority.close_schedule_ticket)) return false;
     const kind: CloseRequestKind = switch (authority.request_kind_raw) {
-        1...3 => @enumFromInt(authority.request_kind_raw),
+        1...3 => @fromBackingInt(@intCast(authority.request_kind_raw)),
         else => return false,
     };
     const disposition: CloseDisposition = switch (authority.disposition_raw) {
-        1...2 => @enumFromInt(authority.disposition_raw),
+        1...2 => @fromBackingInt(@intCast(authority.disposition_raw)),
         else => return false,
     };
     if (!validRequestPair(kind, disposition)) return false;
@@ -151,9 +151,9 @@ pub fn valid(authority: *const CloseAuthority) bool {
 }
 
 pub fn advance(authority: *CloseAuthority, expected: Lifecycle, next: Lifecycle) Error!void {
-    if (!valid(authority) or authority.lifecycle_raw != @intFromEnum(expected) or !validTransition(expected, next))
+    if (!valid(authority) or authority.lifecycle_raw != @backingInt(expected) or !validTransition(expected, next))
         return error.InvalidOwner;
-    authority.lifecycle_raw = @intFromEnum(next);
+    authority.lifecycle_raw = @backingInt(next);
     authority.state_generation = std.math.add(u64, authority.state_generation, 1) catch return error.Exhausted;
     authority.state_seal = try stateSeal(authority);
 }
@@ -190,7 +190,7 @@ pub fn acquirePin(
         .close_schedule_ticket = authority.close_schedule_ticket,
         .expected_state_generation = authority.state_generation,
         .expected_lifecycle_raw = authority.lifecycle_raw,
-        .lifecycle_raw = @intFromEnum(PinLifecycle.active),
+        .lifecycle_raw = @backingInt(PinLifecycle.active),
         .authority_identity_seal = authority.identity_seal,
     };
     out.seal = try pinSeal(out);
@@ -198,7 +198,7 @@ pub fn acquirePin(
 }
 
 pub fn validPin(owner: *const CloseOperationOwner, pin: *const CloseOperationPin, authority: *const CloseAuthority) bool {
-    if (!owner.active or !valid(authority) or pin.lifecycle_raw != @intFromEnum(PinLifecycle.active) or
+    if (!owner.active or !valid(authority) or pin.lifecycle_raw != @backingInt(PinLifecycle.active) or
         pin.operation_generation != owner.operation_generation or pin.handle != owner.target_handle or
         pin.runtime_generation != owner.target_runtime_generation or
         pin.close_request_generation != owner.target_close_request_generation or
@@ -210,8 +210,8 @@ pub fn validPin(owner: *const CloseOperationOwner, pin: *const CloseOperationPin
 
 pub fn consumePin(owner: *CloseOperationOwner, pin: *CloseOperationPin, authority: *const CloseAuthority) Error!void {
     if (!validPin(owner, pin, authority)) return error.InvalidOwner;
-    pin.lifecycle_raw = @intFromEnum(PinLifecycle.consumed);
-    pin.seal = [_]u8{0} ** 32;
+    pin.lifecycle_raw = @backingInt(PinLifecycle.consumed);
+    pin.seal = @as([32]u8, @splat(0));
     owner.active = false;
     owner.target_handle = 0;
     owner.target_runtime_generation = 0;
@@ -237,11 +237,11 @@ fn pinStateMatches(pin: *const CloseOperationPin, authority: *const CloseAuthori
     var raw = pin.expected_lifecycle_raw;
     while (raw < authority.lifecycle_raw) : (raw += 1) {
         const expected: Lifecycle = switch (raw) {
-            0...5 => @enumFromInt(raw),
+            0...5 => @fromBackingInt(@intCast(raw)),
             else => return false,
         };
         const next: Lifecycle = switch (raw + 1) {
-            0...5 => @enumFromInt(raw + 1),
+            0...5 => @fromBackingInt(@intCast(raw + 1)),
             else => return false,
         };
         if (!validTransition(expected, next)) return false;

@@ -204,7 +204,7 @@ test "셸 통합: 파일이 사라져도 setupZsh가 다시 만든다(멱등)" {
 
     // 사용자 캐시를 건드리지 않도록 XDG_CACHE_HOME을 임시 디렉터리로 돌린다.
     var tmp_buf: [128]u8 = undefined;
-    const tmp = try std.fmt.bufPrintZ(&tmp_buf, "/tmp/maru-shellint-test-{d}", .{std.c.getpid()});
+    const tmp = try std.fmt.bufPrintSentinel(&tmp_buf, "/tmp/maru-shellint-test-{d}", .{std.c.getpid()}, 0);
     const saved = test_env.Saved.save("XDG_CACHE_HOME");
     if (setenv("XDG_CACHE_HOME", tmp.ptr, 1) != 0) return error.SkipZigTest;
     defer saved.restore();
@@ -212,9 +212,9 @@ test "셸 통합: 파일이 사라져도 setupZsh가 다시 만든다(멱등)" {
     const dir = setupZsh(io, allocator) orelse return error.SkipZigTest;
     defer allocator.free(dir);
     var path_buf: [256]u8 = undefined;
-    const zshenv = try std.fmt.bufPrintZ(&path_buf, "{s}/.zshenv", .{dir});
+    const zshenv = try std.fmt.bufPrintSentinel(&path_buf, "{s}/.zshenv", .{dir}, 0);
     var dirz_buf: [256]u8 = undefined;
-    const dirz = try std.fmt.bufPrintZ(&dirz_buf, "{s}", .{dir});
+    const dirz = try std.fmt.bufPrintSentinel(&dirz_buf, "{s}", .{dir}, 0);
     defer {
         _ = std.c.unlink(zshenv.ptr);
         _ = std.c.rmdir(dirz.ptr);

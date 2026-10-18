@@ -117,7 +117,7 @@ pub const ConnectionIncident = struct {
     occurrence_count: u64 = 1,
     first_timestamp_ns: i128,
     last_timestamp_ns: i128,
-    reserved_tail: [18]u8 = [_]u8{0} ** 18,
+    reserved_tail: [18]u8 = @as([18]u8, @splat(0)),
 };
 
 pub const IncidentAggregate = struct {
@@ -132,7 +132,7 @@ pub const IncidentAggregate = struct {
     detail_dropped_count: u64,
     first_timestamp_ns: i128,
     last_timestamp_ns: i128,
-    reserved: [152]u8 = [_]u8{0} ** 152,
+    reserved: [152]u8 = @as([152]u8, @splat(0)),
 };
 
 pub const ValidationError = error{InvalidIncident};
@@ -151,8 +151,8 @@ const PreparedRingPublication = struct {
     detail_slot: u8 = 0,
     aggregate_slot: u8 = 0,
     aggregate_generation: u64 = 0,
-    detail_envelope: Envelope = [_]u8{0} ** envelope_size,
-    aggregate_envelope: Envelope = [_]u8{0} ** envelope_size,
+    detail_envelope: Envelope = @as([envelope_size]u8, @splat(0)),
+    aggregate_envelope: Envelope = @as([envelope_size]u8, @splat(0)),
 };
 
 /// Client의 마지막 reason store 전까지 pending bit을 숨기기 위한 service-local transaction이다.
@@ -174,7 +174,7 @@ pub const PreparedServicePublication = struct {
     },
     plan: PreparedRingPublication = .{},
     lifecycle_raw: u8 = 0,
-    seal: [32]u8 = [_]u8{0} ** 32,
+    seal: [32]u8 = @as([32]u8, @splat(0)),
 };
 
 pub const ServiceError = PublishError || error{ InvalidAuthority, CounterExhausted };
@@ -191,13 +191,13 @@ pub const IncidentWriterReceipt = struct {
     slot_index: u8 = 0,
     record_generation: u64 = 0,
     incident_sequence: u64 = 0,
-    digest: [32]u8 = [_]u8{0} ** 32,
-    receipt_digest: [32]u8 = [_]u8{0} ** 32,
+    digest: [32]u8 = @as([32]u8, @splat(0)),
+    receipt_digest: [32]u8 = @as([32]u8, @splat(0)),
 };
 
 pub const IncidentWriterHandoff = struct {
     receipt: IncidentWriterReceipt = .{},
-    record: [envelope_size]u8 = [_]u8{0} ** envelope_size,
+    record: [envelope_size]u8 = @as([envelope_size]u8, @splat(0)),
 };
 
 pub const WriterTakeResult = enum(u8) { taken = 1, inactive = 2 };
@@ -213,15 +213,15 @@ pub const ConnectionIncidentService = struct {
     last_issued_sequence: u64 = 0,
     next_lock_generation: u64 = 1,
     active_publication_addr: usize = 0,
-    active_publication_seal: [32]u8 = [_]u8{0} ** 32,
+    active_publication_seal: [32]u8 = @as([32]u8, @splat(0)),
     pending_slots: u128 = 0,
     writer_inflight_slots: u128 = 0,
     writer_inflight_generations: [incident_slot_count + aggregate_slot_count]u64 =
-        [_]u64{0} ** (incident_slot_count + aggregate_slot_count),
+        @as([(incident_slot_count + aggregate_slot_count)]u64, @splat(0)),
     disk_generations: [incident_slot_count + aggregate_slot_count]u64 =
-        [_]u64{0} ** (incident_slot_count + aggregate_slot_count),
+        @as([(incident_slot_count + aggregate_slot_count)]u64, @splat(0)),
     disk_status: [incident_slot_count + aggregate_slot_count]IncidentDiskStatus =
-        [_]IncidentDiskStatus{.pristine} ** (incident_slot_count + aggregate_slot_count),
+        @as([(incident_slot_count + aggregate_slot_count)]IncidentDiskStatus, @splat(.pristine)),
     lifecycle_raw: u8 = 0,
     // ring 내부 record를 hostile alias fixture와 writer handoff가 같은 정렬 계약으로 해석한다.
     ring: EmergencyRing align(@alignOf(IncidentWriterHandoff)) = .{},
@@ -427,7 +427,7 @@ pub const ConnectionIncidentService = struct {
         if (prepared.result.detail_slot) |slot| self.pending_slots |= @as(u128, 1) << @intCast(slot);
         self.pending_slots |= @as(u128, 1) << @intCast(incident_slot_count + prepared.result.aggregate_slot);
         self.active_publication_addr = 0;
-        self.active_publication_seal = [_]u8{0} ** 32;
+        self.active_publication_seal = @as([32]u8, @splat(0));
         prepared.lifecycle_raw = 3;
         tracePublication(3); // pending bits published before unlock
         self.mutex.unlock();
@@ -442,7 +442,7 @@ pub const ConnectionIncidentService = struct {
     ) ServiceError!void {
         if (!self.validPrepared(current_pid, current_process_nonce, prepared, 1)) return error.InvalidAuthority;
         self.active_publication_addr = 0;
-        self.active_publication_seal = [_]u8{0} ** 32;
+        self.active_publication_seal = @as([32]u8, @splat(0));
         prepared.lifecycle_raw = 3;
         tracePublication(4); // pristine service transaction aborted
         self.mutex.unlock();
@@ -691,10 +691,10 @@ const Envelope = [envelope_size]u8;
 
 pub const EmergencyRing = struct {
     records: [incident_slot_count + aggregate_slot_count]Envelope =
-        [_]Envelope{[_]u8{0} ** envelope_size} ** (incident_slot_count + aggregate_slot_count),
+        @as([(incident_slot_count + aggregate_slot_count)]Envelope, @splat(@as([envelope_size]u8, @splat(0)))),
     incident_count: u8 = 0,
-    named_aggregate_used: [7]bool = [_]bool{false} ** 7,
-    aggregate_generations: [aggregate_slot_count]u64 = [_]u64{0} ** aggregate_slot_count,
+    named_aggregate_used: [7]bool = @as([7]bool, @splat(false)),
+    aggregate_generations: [aggregate_slot_count]u64 = @as([aggregate_slot_count]u64, @splat(0)),
 
     pub fn publish(self: *EmergencyRing, incident: ConnectionIncident) PublishError!PublishResult {
         const plan = try self.prepareFirst(incident);
@@ -822,23 +822,23 @@ pub fn validateIncident(value: ConnectionIncident) ValidationError!void {
         value.parser_phase_raw < 1 or value.parser_phase_raw > 4 or
         value.outbound_phase_raw < 1 or value.outbound_phase_raw > 4)
         return error.InvalidIncident;
-    if (value.reason_raw > @intFromEnum(ConnectionReason.attachment_cleanup_failed) or
-        value.scope_raw != @intFromEnum(Scope.connection)) return error.InvalidIncident;
-    const decision = decisionForReason(@enumFromInt(value.reason_raw));
+    if (value.reason_raw > @backingInt(ConnectionReason.attachment_cleanup_failed) or
+        value.scope_raw != @backingInt(Scope.connection)) return error.InvalidIncident;
+    const decision = decisionForReason(@fromBackingInt(@intCast(value.reason_raw)));
     if ((value.flags & 1 != 0) != decision.expected or value.flags & 2 != 0 or
-        value.disposition_raw != @intFromEnum(decision.disposition)) return error.InvalidIncident;
+        value.disposition_raw != @backingInt(decision.disposition)) return error.InvalidIncident;
     if (value.outbound_offset > value.outbound_length or value.occurrence_count != 1 or
         value.first_timestamp_ns != value.timestamp_ns or value.last_timestamp_ns != value.timestamp_ns or
         value.reserved0 != 0 or !allZero(&value.reserved_tail))
         return error.InvalidIncident;
-    const outbound_idle = value.outbound_phase_raw == @intFromEnum(OutboundPhase.idle);
+    const outbound_idle = value.outbound_phase_raw == @backingInt(OutboundPhase.idle);
     if (outbound_idle != (value.outbound_offset == 0 and value.outbound_length == 0))
         return error.InvalidIncident;
 }
 
 pub fn encodeIncident(value: ConnectionIncident) ValidationError![payload_size]u8 {
     try validateIncident(value);
-    var result = [_]u8{0} ** payload_size;
+    var result = @as([payload_size]u8, @splat(0));
     var writer = std.Io.Writer.fixed(&result);
     writeInt(&writer, u16, value.version);
     writer.writeByte(value.record_kind) catch unreachable;
@@ -874,7 +874,7 @@ pub fn encodeAggregate(value: IncidentAggregate) ValidationError![payload_size]u
         (if (other) !other_identity_valid else !named_identity_valid) or value.count == 0 or value.detail_dropped_count > value.count or
         value.first_timestamp_ns < 0 or value.last_timestamp_ns < value.first_timestamp_ns or !allZero(&value.reserved))
         return error.InvalidIncident;
-    var result = [_]u8{0} ** payload_size;
+    var result = @as([payload_size]u8, @splat(0));
     var writer = std.Io.Writer.fixed(&result);
     writeInt(&writer, u16, value.version);
     inline for (.{ value.kind, value.flags, value.reason_raw, value.scope_raw, value.source_site_raw, value.host_class_raw }) |byte|
@@ -1021,7 +1021,7 @@ fn decodeAggregatePayload(payload: []const u8) ValidationError!IncidentAggregate
 }
 
 fn publishEnvelope(destination: *Envelope, kind: u8, generation: u64, payload: *const [payload_size]u8) void {
-    destination.* = [_]u8{0} ** envelope_size;
+    destination.* = @as([envelope_size]u8, @splat(0));
     std.mem.writeInt(u16, destination[0..2], encoding_version, .little);
     destination[2] = kind;
     std.mem.writeInt(u16, destination[4..6], payload_size, .little);
@@ -1067,11 +1067,11 @@ fn containsPointer(comptime T: type) bool {
         .optional => |info| containsPointer(info.child),
         .error_union => |info| containsPointer(info.payload),
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field| if (containsPointer(field.type)) break :blk true;
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (containsPointer(field.type)) break :blk true;
             break :blk false;
         },
         .@"union" => |info| blk: {
-            inline for (info.fields) |field| if (containsPointer(field.type)) break :blk true;
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (containsPointer(field.type)) break :blk true;
             break :blk false;
         },
         else => false,
@@ -1091,13 +1091,13 @@ fn fixture() ConnectionIncident {
         .host_adapter_generation = 3,
         .connection_generation = 4,
         .wire_major = 1,
-        .reason_raw = @intFromEnum(ConnectionReason.connection_eof),
-        .scope_raw = @intFromEnum(Scope.connection),
-        .disposition_raw = @intFromEnum(Disposition.reconnect),
-        .source_site_raw = @intFromEnum(SourceSite.client_read),
-        .host_class_raw = @intFromEnum(HostClass.current),
-        .parser_phase_raw = @intFromEnum(ParserPhase.idle),
-        .outbound_phase_raw = @intFromEnum(OutboundPhase.idle),
+        .reason_raw = @backingInt(ConnectionReason.connection_eof),
+        .scope_raw = @backingInt(Scope.connection),
+        .disposition_raw = @backingInt(Disposition.reconnect),
+        .source_site_raw = @backingInt(SourceSite.client_read),
+        .host_class_raw = @backingInt(HostClass.current),
+        .parser_phase_raw = @backingInt(ParserPhase.idle),
+        .outbound_phase_raw = @backingInt(OutboundPhase.idle),
         .last_success_request_id = 0,
         .pending_request_count = 0,
         .pending_stream_count = 0,
@@ -1169,22 +1169,22 @@ test "CR0b core incident payload는 canonical encoding 208바이트다" {
         },
         blk: {
             var value = original;
-            value.source_site_raw = @intFromEnum(SourceSite.client_write);
+            value.source_site_raw = @backingInt(SourceSite.client_write);
             break :blk value;
         },
         blk: {
             var value = original;
-            value.host_class_raw = @intFromEnum(HostClass.previous);
+            value.host_class_raw = @backingInt(HostClass.previous);
             break :blk value;
         },
         blk: {
             var value = original;
-            value.parser_phase_raw = @intFromEnum(ParserPhase.header);
+            value.parser_phase_raw = @backingInt(ParserPhase.header);
             break :blk value;
         },
         blk: {
             var value = original;
-            value.outbound_phase_raw = @intFromEnum(OutboundPhase.queued);
+            value.outbound_phase_raw = @backingInt(OutboundPhase.queued);
             value.outbound_length = 1;
             break :blk value;
         },
@@ -1230,14 +1230,14 @@ test "CR0b core incident payload는 canonical encoding 208바이트다" {
         },
         blk: {
             var value = original;
-            value.reason_raw = @intFromEnum(ConnectionReason.frame_malformed);
+            value.reason_raw = @backingInt(ConnectionReason.frame_malformed);
             value.flags &= ~@as(u8, 1);
             break :blk value;
         },
         blk: {
             var value = original;
-            value.reason_raw = @intFromEnum(ConnectionReason.capability_incompatible);
-            value.disposition_raw = @intFromEnum(Disposition.no_retry);
+            value.reason_raw = @backingInt(ConnectionReason.capability_incompatible);
+            value.disposition_raw = @backingInt(Disposition.no_retry);
             break :blk value;
         },
     };
@@ -1256,7 +1256,7 @@ test "CR0b core ring 산술은 256바이트 record 128개로 정확히 32 KiB다
 test "CR0b core SourceSite는 1부터 16까지 빈 raw 값 없이 닫혀 있다" {
     const tags = std.meta.tags(SourceSite);
     try std.testing.expectEqual(@as(usize, 16), tags.len);
-    inline for (tags, 1..) |tag, raw| try std.testing.expectEqual(raw, @intFromEnum(tag));
+    inline for (tags, 1..) |tag, raw| try std.testing.expectEqual(raw, @backingInt(tag));
 }
 
 test "CR0b core incident는 불완전한 host identity를 거부한다" {
@@ -1274,7 +1274,7 @@ test "CR0b core incident는 outbound phase와 descriptor를 함께 검증한다"
     var value = fixture();
     value.outbound_length = 4;
     try std.testing.expectError(error.InvalidIncident, validateIncident(value));
-    value.outbound_phase_raw = @intFromEnum(OutboundPhase.partial);
+    value.outbound_phase_raw = @backingInt(OutboundPhase.partial);
     value.outbound_offset = 5;
     try std.testing.expectError(error.InvalidIncident, validateIncident(value));
 }
@@ -1284,23 +1284,23 @@ test "CR0b core incident는 CR0a reason decision 조합만 허용한다" {
     value.flags &= ~@as(u8, 1);
     try std.testing.expectError(error.InvalidIncident, validateIncident(value));
     value.flags |= 1;
-    value.reason_raw = @intFromEnum(ConnectionReason.local_invariant_violation);
+    value.reason_raw = @backingInt(ConnectionReason.local_invariant_violation);
     try std.testing.expectError(error.InvalidIncident, validateIncident(value));
     value.flags &= ~@as(u8, 1);
     try validateIncident(value);
-    value.reason_raw = @intFromEnum(ConnectionReason.capability_incompatible);
+    value.reason_raw = @backingInt(ConnectionReason.capability_incompatible);
     value.flags |= 1;
-    value.disposition_raw = @intFromEnum(Disposition.reconnect);
+    value.disposition_raw = @backingInt(Disposition.reconnect);
     try std.testing.expectError(error.InvalidIncident, validateIncident(value));
 }
 
 test "CR0b core aggregate canonical schema도 payload 208바이트를 정확히 채운다" {
     const encoded = try encodeAggregate(.{
         .flags = 0,
-        .reason_raw = @intFromEnum(ConnectionReason.connection_eof),
-        .scope_raw = @intFromEnum(Scope.connection),
-        .source_site_raw = @intFromEnum(SourceSite.client_read),
-        .host_class_raw = @intFromEnum(HostClass.current),
+        .reason_raw = @backingInt(ConnectionReason.connection_eof),
+        .scope_raw = @backingInt(Scope.connection),
+        .source_site_raw = @backingInt(SourceSite.client_read),
+        .host_class_raw = @backingInt(HostClass.current),
         .count = 2,
         .detail_dropped_count = 1,
         .first_timestamp_ns = 7,

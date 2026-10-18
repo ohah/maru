@@ -58,7 +58,7 @@ pub fn open(io: std.Io, buf: []u8, comptime tag: []const u8) OpenError![:0]u8 {
                 @compileError("scratch tag는 [a-zA-Z0-9-]만 쓴다(경로 조작 방지): " ++ tag);
         }
     }
-    const path = std.fmt.bufPrintZ(buf, "/tmp/maru-{s}-{d}", .{ tag, c.getpid() }) catch
+    const path = std.fmt.bufPrintSentinel(buf, "/tmp/maru-{s}-{d}", .{ tag, c.getpid() }, 0) catch
         return error.ScratchUnavailable;
     // 죽은 실행의 잔여물을 상속하지 않는다(파일 머리말 3·4번 고리). 없으면 no-op다.
     std.Io.Dir.cwd().deleteTree(io, path) catch {};
@@ -90,10 +90,10 @@ test "scratch: 이전 실행이 남긴 하위 트리를 상속하지 않는다" 
     // 1회차 — 하위 트리를 만들어 둔 채로 **닫지 않는다**(테스트가 죽은 상황을 그대로 만든다).
     const first = try open(io, &buf, "test-scratch-inherit");
     var nested_buf: [256]u8 = undefined;
-    const nested = try std.fmt.bufPrintZ(&nested_buf, "{s}/hosts", .{first});
+    const nested = try std.fmt.bufPrintSentinel(&nested_buf, "{s}/hosts", .{first}, 0);
     try std.testing.expectEqual(@as(c_int, 0), c.mkdir(nested.ptr, 0o700));
     var residue_buf: [320]u8 = undefined;
-    const residue = try std.fmt.bufPrintZ(&residue_buf, "{s}/host.v1.json", .{nested});
+    const residue = try std.fmt.bufPrintSentinel(&residue_buf, "{s}/host.v1.json", .{nested}, 0);
     {
         const fd = c.open(residue.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
         try std.testing.expect(fd >= 0);
@@ -121,7 +121,7 @@ test "scratch: close는 하위 트리가 있어도 지운다" {
     var buf: [192]u8 = undefined;
     const dir = try open(io, &buf, "test-scratch-close");
     var nested_buf: [256]u8 = undefined;
-    const nested = try std.fmt.bufPrintZ(&nested_buf, "{s}/hosts", .{dir});
+    const nested = try std.fmt.bufPrintSentinel(&nested_buf, "{s}/hosts", .{dir}, 0);
     try std.testing.expectEqual(@as(c_int, 0), c.mkdir(nested.ptr, 0o700));
 
     close(io, dir);

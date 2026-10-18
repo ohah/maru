@@ -123,7 +123,7 @@ pub fn composeUntilWith(
     var relative_storage: [std.fs.max_name_bytes + 3:0]u8 = undefined;
     const basename = std.fs.path.basename(frozen_path);
     if (basename.len == 0 or basename.len > std.fs.max_name_bytes) return error.FrozenChanged;
-    const relative_executable = std.fmt.bufPrintZ(&relative_storage, "./{s}", .{basename}) catch return error.FrozenChanged;
+    const relative_executable = std.fmt.bufPrintSentinel(&relative_storage, "./{s}", .{basename}, 0) catch return error.FrozenChanged;
     const path_seal = product.pathMutationSeal() catch return error.FrozenChanged;
     const budget_ns = try deadline.remaining();
     const probe_bytes = try probe.run(io, frozen_path, directory_fd, relative_executable, output, budget_ns);

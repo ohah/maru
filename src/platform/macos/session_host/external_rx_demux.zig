@@ -274,7 +274,7 @@ test "external RX demux rejects foreign and structurally invalid frames" {
         .{ .kind = .response, .request_id = 1, .flags = protocol.Flags.end_stream },
         .{ .kind = .request, .request_id = 1 },
         .{ .kind = .input_bytes, .stream_id = 9 },
-        .{ .kind = @enumFromInt(60000), .stream_id = 9 },
+        .{ .kind = @fromBackingInt(@intCast(60000)), .stream_id = 9 },
     };
     for (headers) |header| {
         const candidate = makeFrame(header, &payload);

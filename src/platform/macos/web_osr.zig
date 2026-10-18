@@ -10,6 +10,8 @@
 //! 60 초 안에 세 번 죽으면 멈추고 안내한다(Mermaid 와 같은 예산). 같은 프로필을 다른 maru 가 쓰면(`profile_in_use`)
 //! 다시 띄우지 않는다. **메인 스레드 전용**(창 tick 과 ABI 가 모두 메인).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
@@ -313,7 +315,7 @@ pub const DialogKind = enum(u32) {
     permission = 20,
 
     pub fn isFile(self: DialogKind) bool {
-        return @intFromEnum(self) >= 10 and @intFromEnum(self) <= 13;
+        return @backingInt(self) >= 10 and @backingInt(self) <= 13;
     }
 
     /// W9c②: 컨트롤 플레인이 싣는 종류 이름 — 파일 선택은 모두 `file`(모드·경로는 싣지 않는다).
@@ -384,7 +386,7 @@ const max_notes_per_surface = 8;
 var next_note_token: u64 = 0;
 /// 내보낸 알림 → (탭, sidecar 번호) — 누를 때 찾는다. 최근 64 개.
 const ShownNote = struct { token: u64, surface_id: u64, notification: u32 };
-var shown_notes: [64]?ShownNote = [_]?ShownNote{null} ** 64;
+var shown_notes: [64]?ShownNote = @as([64]?ShownNote, @splat(null));
 var shown_notes_next: usize = 0;
 
 fn queueNote(gpa: std.mem.Allocator, v: ws.message.WebNotification) void {
@@ -1089,7 +1091,7 @@ test "a hardened (release) build ignores the development env overrides" {
         value: ?[:0]u8,
     };
     var saved = [_]Saved{ .{ .name = "MARU_WEB_OSR_DIR", .value = null }, .{ .name = "HOMEBREW_PREFIX", .value = null } };
-    for (&saved) |*e| e.value = if (std.c.getenv(e.name)) |v| try allocator.dupeZ(u8, std.mem.span(v)) else null;
+    for (&saved) |*e| e.value = if (std.c.getenv(e.name)) |v| try allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
     defer for (saved) |e| {
         if (e.value) |v| {
             _ = setenv(e.name, v, 1);
@@ -1099,24 +1101,24 @@ test "a hardened (release) build ignores the development env overrides" {
     // 가짜 prefix 에 실행 파일이 있는 설치(모양만 — 검사는 `start` 에서).
     var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
     const tmp_base = if (std.c.getenv("TMPDIR")) |t| std.mem.trimEnd(u8, std.mem.span(t), "/") else "/tmp";
-    const template = try std.fmt.bufPrintZ(&tmp_buf, "{s}/maru-prefix-{d}-XXXXXX", .{ if (tmp_base.len > 0 and tmp_base[0] == '/') tmp_base else "/tmp", std.c.getpid() });
+    const template = try std.fmt.bufPrintSentinel(&tmp_buf, "{s}/maru-prefix-{d}-XXXXXX", .{ if (tmp_base.len > 0 and tmp_base[0] == '/') tmp_base else "/tmp", std.c.getpid() }, 0);
     const made = std.mem.span(mkdtemp(template.ptr) orelse return error.NoTemp);
     defer {
         var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
-        if (std.fmt.bufPrintZ(&rm_buf, "{s}/opt/maru-chromium/libexec/maru-web-host", .{made})) |f| _ = std.c.unlink(f) else |_| {}
+        if (std.fmt.bufPrintSentinel(&rm_buf, "{s}/opt/maru-chromium/libexec/maru-web-host", .{made}, 0)) |f| _ = std.c.unlink(f) else |_| {}
         for ([_][]const u8{ "/opt/maru-chromium/libexec", "/opt/maru-chromium", "/opt", "" }) |rel| {
-            if (std.fmt.bufPrintZ(&rm_buf, "{s}{s}", .{ made, rel })) |d| _ = std.c.rmdir(d) else |_| {}
+            if (std.fmt.bufPrintSentinel(&rm_buf, "{s}{s}", .{ made, rel }, 0)) |d| _ = std.c.rmdir(d) else |_| {}
         }
     }
     var host_buf: [std.fs.max_path_bytes]u8 = undefined;
     const libexec = try std.fmt.bufPrint(&host_buf, "{s}/opt/maru-chromium/libexec", .{made});
     try std.testing.expect(mkdirs(libexec));
     var host_z_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const host = try std.fmt.bufPrintZ(&host_z_buf, "{s}/maru-web-host", .{libexec});
+    const host = try std.fmt.bufPrintSentinel(&host_z_buf, "{s}/maru-web-host", .{libexec}, 0);
     const fd = std.c.open(host, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o755));
     try std.testing.expect(fd >= 0);
     _ = std.c.close(fd);
-    const made_z = try allocator.dupeZ(u8, made);
+    const made_z = try allocator.dupeSentinel(u8, made, 0);
     defer allocator.free(made_z);
     try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_WEB_OSR_DIR", "/dev/build", 1));
     try std.testing.expectEqual(@as(c_int, 0), setenv("HOMEBREW_PREFIX", made_z, 1));
@@ -1144,7 +1146,7 @@ const TestCopy = struct {
         if (self.root.len == 0) {
             const tmp_base = if (std.c.getenv("TMPDIR")) |t| std.mem.trimEnd(u8, std.mem.span(t), "/") else "/tmp";
             var template_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const template = try std.fmt.bufPrintZ(&template_buf, "{s}/maru-runcopy-{d}-XXXXXX", .{ if (tmp_base.len > 0 and tmp_base[0] == '/') tmp_base else "/tmp", std.c.getpid() });
+            const template = try std.fmt.bufPrintSentinel(&template_buf, "{s}/maru-runcopy-{d}-XXXXXX", .{ if (tmp_base.len > 0 and tmp_base[0] == '/') tmp_base else "/tmp", std.c.getpid() }, 0);
             const made = mkdtemp(template.ptr) orelse return error.NoTemp;
             self.root = std.mem.span(std.c.realpath(made, &self.root_buf) orelse return error.NoTemp);
         }
@@ -1163,7 +1165,7 @@ const TestCopy = struct {
 
     fn exists(path: []const u8) bool {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return false;
+        const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{path}, 0) catch return false;
         return std.c.access(z, std.c.F_OK) == 0;
     }
 
@@ -1171,7 +1173,7 @@ const TestCopy = struct {
         if (self.root.len == 0) return;
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         for ([_][]const u8{ "/src", "/cache", "" }) |rel| {
-            if (std.fmt.bufPrintZ(&buf, "{s}{s}", .{ self.root, rel })) |d| _ = std.c.rmdir(d) else |_| {}
+            if (std.fmt.bufPrintSentinel(&buf, "{s}{s}", .{ self.root, rel }, 0)) |d| _ = std.c.rmdir(d) else |_| {}
         }
     }
 };
@@ -1231,7 +1233,7 @@ test "a sidecar whose channel ended but which is still alive is killed and reape
     // 거뒀다 — 그 pid 는 이제 이 프로세스의 자식이 아니다(좀비면 waitpid 가 거둘 수 있다).
     var status: c_int = 0;
     try std.testing.expectEqual(@as(std.c.pid_t, -1), std.c.waitpid(pid, &status, std.c.W.NOHANG));
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(std.c.E.CHILD)), std.c._errno().*);
+    try std.testing.expectEqual(@as(c_int, @backingInt(std.c.E.CHILD)), std.c._errno().*);
 }
 
 test "a sidecar whose writes stalled (pending cap or out of memory) is treated as crashed — later commands are not dropped silently" {
@@ -1526,7 +1528,7 @@ fn findInstallFor(hardened: bool) ?[]const u8 {
         const prefix = maybe orelse continue;
         if (prefix.len == 0) continue;
         const dir = std.fmt.bufPrint(&S.dir_buf, "{s}/opt/maru-chromium/libexec", .{prefix}) catch continue;
-        const host = std.fmt.bufPrintZ(&path_buf, "{s}/maru-web-host", .{dir}) catch continue;
+        const host = std.fmt.bufPrintSentinel(&path_buf, "{s}/maru-web-host", .{dir}, 0) catch continue;
         if (std.c.access(host, std.c.X_OK) == 0) {
             // 띄울 때 그 prefix 의 keg 인지 본다(`start` → `install.openBrewSource`).
             const n = @min(prefix.len, install_prefix_buf.len);
@@ -3872,7 +3874,7 @@ fn mkdirs(path: []const u8) bool {
         buf[i] = 0;
         const z: [*:0]const u8 = @ptrCast(&buf);
         // 프로필과 그 위(maru/web/<번들 ID>)는 소유자 전용 — sidecar 가 프로필 권한을 검사한다(0700).
-        if (std.c.mkdir(z, 0o700) != 0 and std.c._errno().* != @intFromEnum(std.c.E.EXIST)) return false;
+        if (std.c.mkdir(z, 0o700) != 0 and std.c._errno().* != @backingInt(std.c.E.EXIST)) return false;
     }
     return true;
 }
@@ -4101,7 +4103,7 @@ fn clearDownloadStaging(held: bool) void {
     var profile_buf: [std.fs.max_path_bytes]u8 = undefined;
     const profile = profileDir(&profile_buf) orelse return;
     var dir_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "{s}/download-staging", .{profile}) catch return;
+    const dir = std.fmt.bufPrintSentinel(&dir_buf, "{s}/download-staging", .{profile}, 0) catch return;
     // 순회하며 지우면 항목을 건너뛸 수 있다 — 지운 것이 있으면 몇 번 더 돈다(9 회차).
     var pass: u8 = 0;
     while (pass < 4) : (pass += 1) {
@@ -4117,7 +4119,7 @@ fn clearDirOnce(dir: [:0]const u8) usize {
         const name = entry.name[0..@min(entry.namlen, entry.name.len)];
         if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..") or entry.type == 4) continue;
         var file_buf: [std.fs.max_path_bytes + 300]u8 = undefined;
-        const file = std.fmt.bufPrintZ(&file_buf, "{s}/{s}", .{ dir, name }) catch continue;
+        const file = std.fmt.bufPrintSentinel(&file_buf, "{s}/{s}", .{ dir, name }, 0) catch continue;
         if (std.c.unlink(file) == 0) removed += 1;
     }
     return removed;
@@ -4467,7 +4469,7 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
     web_downloads.sidecarLost(); // 받던 다운로드는 끝났다(W10a) — 임시 파일을 지우고 새 sidecar 의 번호와 섞이지 않게
     clearDownloadStaging(profile_held); // W10b: 죽은 sidecar 가 결정 전에 받아 둔 것(다시 뜨지 않으면 다음 실행까지 남았다 — 4 회차)
     profile_held = false;
-    shown_notes = [_]?ShownNote{null} ** shown_notes.len;
+    shown_notes = @as([shown_notes.len]?ShownNote, @splat(null));
 }
 
 /// sidecar 가 죽었다 — 예산 안이면 다시 띄워 살아 있던 브라우저를 되살린다.
@@ -5220,7 +5222,7 @@ test "web notifications queue per tab, drop the oldest past the cap, and a click
         surfaces = .empty;
         outbox_pending.deinit(gpa);
         outbox_pending = .empty;
-        shown_notes = [_]?ShownNote{null} ** shown_notes.len;
+        shown_notes = @as([shown_notes.len]?ShownNote, @splat(null));
         state = .off;
     }
     try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
@@ -5327,7 +5329,7 @@ test "drags send their pieces before enter, split long text at character boundar
     try std.testing.expect(!dragEnter(gpa, 7, .{ .paths = &.{"/a"} }, at, .{}, 1));
     surfaces.getPtr(7).?.created = true;
     // 상대·제어 문자 경로는 빠지고, 글은 조각마다 상한 안·글자 경계(3 바이트 「가」)로 나뉘며 제어 문자는 공백이 된다.
-    const long = "가" ** (ws.wire.max_ime_text_bytes / 3 + 1);
+    const long = array_repeat.repeat("가", (ws.wire.max_ime_text_bytes / 3 + 1));
     try std.testing.expect(dragEnter(gpa, 7, .{ .paths = &.{ "/ok", "rel", "/bad\nname" }, .text = long ++ "\x07끝", .url = "https://a.b/", .url_title = "제목\x1b" }, at, .{}, 0xFF));
     const n = sentFrames(&frames);
     try std.testing.expectEqual(@as(usize, 6), n);
@@ -5812,7 +5814,7 @@ test "a prompt answer is trimmed to the dialog text rules instead of being dropp
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .prompt, .origin = "", .message = "", .offer_suppress = true } }, 0);
     const d = nextDialog(7).?;
     try std.testing.expect(d.offer_suppress);
-    const long = "가" ** 2000; // 6000 바이트 — 상한(4 KiB)을 넘는다
+    const long = array_repeat.repeat("가", 2000); // 6000 바이트 — 상한(4 KiB)을 넘는다
     replyDialog(gpa, 7, d.token, true, long ++ "\x1b", true);
     var frames: [2]Message = undefined;
     try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames));
@@ -5910,7 +5912,7 @@ test "W9-0b DevTools 호출: 인자는 조각으로 나가고, 결과는 모아 
     try std.testing.expectError(error.InvalidMethod, devtoolsCall(gpa, 7, "Runtime.evaluate\",\"id\":1", "", rec.sink()));
     try std.testing.expectError(error.InvalidParams, devtoolsCall(gpa, 7, "A.b", "1},\"id\":7", rec.sink()));
     try std.testing.expectError(error.InvalidParams, devtoolsCall(gpa, 7, "A.b", "[1]", rec.sink()));
-    try std.testing.expectError(error.InvalidParams, devtoolsCall(gpa, 7, "A.b", "{\"a\":" ++ "[" ** 65 ++ "]" ** 65 ++ "}", rec.sink()));
+    try std.testing.expectError(error.InvalidParams, devtoolsCall(gpa, 7, "A.b", "{\"a\":" ++ array_repeat.repeat("[", 65) ++ array_repeat.repeat("]", 65) ++ "}", rec.sink()));
     try std.testing.expectError(error.NotReady, devtoolsCall(gpa, 8, "A.b", "", rec.sink()));
     try std.testing.expectError(error.NotReady, devtoolsCall(gpa, 9, "A.b", "", rec.sink()));
     try std.testing.expectEqual(@as(usize, 0), sentFrames(&frames));
@@ -7342,7 +7344,7 @@ test "W9c② 적대 리뷰 1 회차 재현 B: 사용자가 maru 알림을 누른
     const gpa = std.testing.allocator;
     try w9c2ReviewSetup(gpa);
     defer {
-        shown_notes = [_]?ShownNote{null} ** shown_notes.len;
+        shown_notes = @as([shown_notes.len]?ShownNote, @splat(null));
         testTeardown(gpa);
     }
     var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };

@@ -27,11 +27,11 @@ fn recursivelyPointerFree(comptime T: type) bool {
         .pointer, .optional, .error_union, .@"fn" => false,
         .array => |info| recursivelyPointerFree(info.child),
         .@"struct" => |info| blk: {
-            for (info.fields) |field| if (!recursivelyPointerFree(field.type)) break :blk false;
+            for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (!recursivelyPointerFree(field.type)) break :blk false;
             break :blk true;
         },
         .@"union" => |info| blk: {
-            for (info.fields) |field| if (!recursivelyPointerFree(field.type)) break :blk false;
+            for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (!recursivelyPointerFree(field.type)) break :blk false;
             break :blk true;
         },
         else => true,
@@ -39,8 +39,8 @@ fn recursivelyPointerFree(comptime T: type) bool {
 }
 
 test "C3-3b6 중립 계약의 operation과 inventory 조합은 닫힌 enum만 허용한다" {
-    try std.testing.expectEqual(2, @typeInfo(ShutdownOperation).@"enum".fields.len);
-    try std.testing.expectEqual(3, @typeInfo(InventoryAttempt).@"enum".fields.len);
+    try std.testing.expectEqual(2, @import("type_info_fields").enumFields(ShutdownOperation).len);
+    try std.testing.expectEqual(3, @import("type_info_fields").enumFields(InventoryAttempt).len);
 }
 
 test "C3-3b6 중립 계약의 ShutdownAttemptKey는 exact target과 attempt만 담는 포인터 없는 값이다" {
@@ -54,24 +54,24 @@ test "C3-3b6 중립 계약의 ShutdownConnectionReceipt는 connection과 GUI lea
 }
 
 test "C3-3b6 중립 계약의 bounded_unconfirmed은 connection 전후 evidence를 서로 바꾸지 못한다" {
-    try std.testing.expectEqual(3, @typeInfo(PreConnectionReason).@"enum".fields.len);
-    try std.testing.expectEqual(4, @typeInfo(PostConnectionReason).@"enum".fields.len);
-    try std.testing.expectEqual(2, @typeInfo(BoundedUnconfirmed).@"union".fields.len);
+    try std.testing.expectEqual(3, @import("type_info_fields").enumFields(PreConnectionReason).len);
+    try std.testing.expectEqual(4, @import("type_info_fields").enumFields(PostConnectionReason).len);
+    try std.testing.expectEqual(2, @import("type_info_fields").unionFields(BoundedUnconfirmed).len);
 }
 
 test "C3-3b6 중립 계약의 ShutdownAdminOutcome은 여덟 terminal과 진행 상태만 허용한다" {
-    try std.testing.expectEqual(8, @typeInfo(ShutdownAdminOutcome).@"union".fields.len);
+    try std.testing.expectEqual(8, @import("type_info_fields").unionFields(ShutdownAdminOutcome).len);
     try std.testing.expect(comptime recursivelyPointerFree(ShutdownAdminOutcome));
 }
 
 test "C3-3b6 중립 계약의 N-1 shutdown profile은 artifact와 capability boolean을 exact field로 고정한다" {
-    try std.testing.expectEqual(5, @typeInfo(ShutdownProfile).@"struct".fields.len);
+    try std.testing.expectEqual(5, @import("type_info_fields").structFields(ShutdownProfile).len);
     try std.testing.expect(comptime recursivelyPointerFree(ShutdownProfile));
 }
 
 test "C3-3b6 중립 계약의 shutdown diagnostic은 식별자와 문자열을 싣지 않는 포인터 없는 DTO다" {
     try std.testing.expect(comptime recursivelyPointerFree(ShutdownDiagnostic));
-    try std.testing.expectEqual(5, @typeInfo(ShutdownDiagnostic).@"struct".fields.len);
+    try std.testing.expectEqual(5, @import("type_info_fields").structFields(ShutdownDiagnostic).len);
 }
 
 test "C3-3b6 중립 계약의 elapsed bucket은 다섯 경계 전후와 clock regression을 닫는다" {

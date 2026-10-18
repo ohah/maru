@@ -54,7 +54,7 @@ pub const Receiver = struct {
         mach.randomBytes(&receiver.token);
         var suffix: [8]u8 = undefined;
         mach.randomBytes(&suffix);
-        const name = std.fmt.bufPrintZ(&receiver.service, "dev.maru.web.{d}.{x}", .{ std.c.getpid(), std.mem.readInt(u64, &suffix, .little) }) catch return error.MachFailed;
+        const name = std.fmt.bufPrintSentinel(&receiver.service, "dev.maru.web.{d}.{x}", .{ std.c.getpid(), std.mem.readInt(u64, &suffix, .little) }, 0) catch return error.MachFailed;
         receiver.service_len = name.len;
         if (mach.bootstrap_check_in(mach.bootstrap_port, name, &receiver.port) != 0) return error.MachFailed;
         // 누가 넘치게 넣어도 진짜 sidecar 의 알림이 설 자리가 있게 대기열을 최대로 늘린다(기본 5).
@@ -190,14 +190,14 @@ fn testMessage(token: [16]u8) ring_message.Message {
 }
 
 fn testAudit(pid: c_int, version: c_int) mach.AuditTrailer {
-    var audit = [_]u32{0} ** 8;
+    var audit = @as([8]u32, @splat(0));
     audit[5] = @bitCast(pid);
     audit[7] = @bitCast(version);
     return .{ .kind = mach.trailer_format_0, .size = @sizeOf(mach.AuditTrailer), .seqno = 0, .sender = .{ 0, 0 }, .audit = audit };
 }
 
 fn testReceiver(pid: c_int) Receiver {
-    return .{ .port = mach.null_port, .service = undefined, .service_len = 0, .token = [_]u8{7} ** 16, .expected_pid = pid };
+    return .{ .port = mach.null_port, .service = undefined, .service_len = 0, .token = @as([16]u8, @splat(7)), .expected_pid = pid };
 }
 
 test "the spawned sidecar with the right token is accepted, and its pid version is pinned" {
@@ -216,7 +216,7 @@ test "another pid is refused even with the right token" {
 
 test "the right pid with a wrong token is refused — a process that reused the pid does not know the token" {
     var receiver = testReceiver(500);
-    const message = testMessage([_]u8{8} ** 16);
+    const message = testMessage(@as([16]u8, @splat(8)));
     try std.testing.expectEqual(@as(?Rejection, .wrong_token), receiver.check(&message, testAudit(500, 41)));
     try std.testing.expectEqual(@as(?c_int, null), receiver.pinned_pid_version);
 }

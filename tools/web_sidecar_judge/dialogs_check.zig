@@ -23,6 +23,8 @@
 //!                        자체로 답하면 페이지에 아무것도 안 온다 — 실측)
 //!   file-cancel          취소하면 페이지는 아무것도 받지 않고, 다시 누르면 선택이 또 온다(멈추지 않는다)
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
 const os = @import("os.zig");
@@ -331,15 +333,15 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, s
     var a_buf: [1024]u8 = undefined;
     var b_buf: [1024]u8 = undefined;
     var dir_buf: [1024]u8 = undefined;
-    const a = try std.fmt.bufPrintZ(&a_buf, "{s}/pick-a.txt", .{scratch});
-    const b = try std.fmt.bufPrintZ(&b_buf, "{s}/pick-b.txt", .{scratch});
-    const dir = try std.fmt.bufPrintZ(&dir_buf, "{s}/pick-dir", .{scratch});
-    try writeFile(a, "maru reads this through the sandbox" ** 10);
+    const a = try std.fmt.bufPrintSentinel(&a_buf, "{s}/pick-a.txt", .{scratch}, 0);
+    const b = try std.fmt.bufPrintSentinel(&b_buf, "{s}/pick-b.txt", .{scratch}, 0);
+    const dir = try std.fmt.bufPrintSentinel(&dir_buf, "{s}/pick-dir", .{scratch}, 0);
+    try writeFile(a, array_repeat.repeat("maru reads this through the sandbox", 10));
     try writeFile(b, "second");
     _ = std.c.mkdir(dir, 0o755);
     var inner_buf: [1100]u8 = undefined;
-    try writeFile(try std.fmt.bufPrintZ(&inner_buf, "{s}/one.txt", .{dir}), "1");
-    try writeFile(try std.fmt.bufPrintZ(&inner_buf, "{s}/two.txt", .{dir}), "22");
+    try writeFile(try std.fmt.bufPrintSentinel(&inner_buf, "{s}/one.txt", .{dir}, 0), "1");
+    try writeFile(try std.fmt.bufPrintSentinel(&inner_buf, "{s}/two.txt", .{dir}, 0), "22");
 
     try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(&u, port, "/file") } });
     if (!waitTitle(&host, "file-ready", wait_ms)) return error.PageNotReady;
@@ -375,7 +377,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, s
 
     // ── 긴 호스트 출처 — 맨 끝(이 페이지 뒤의 이동이 가끔 늦다 — 다른 판정에 번지지 않게) ──
     // 255 바이트를 넘는 호스트(`*.localhost` 는 127.0.0.1 로 풀린다) — 잘린 앞부분이 출처로 가면 안 된다(빈 출처).
-    const label = "a" ** 60;
+    const label = array_repeat.repeat("a", 60);
     var long_url_buf: [512]u8 = undefined;
     const long_url = std.fmt.bufPrint(&long_url_buf, "http://" ++ label ++ "." ++ label ++ "." ++ label ++ "." ++ label ++ ".localhost:{d}/dialog-hold", .{port}) catch unreachable;
     try host.send(.{ .navigate = .{ .browser = id, .url = long_url } });

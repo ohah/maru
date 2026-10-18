@@ -59,7 +59,7 @@ const Slot = struct {
 
 /// 동시에 쥐는 다운로드 상한 — 넘치면 받지 않는다(maru 의 동시 상한보다 넉넉히).
 const max_slots = 64;
-var slots: [max_slots]?Slot = [_]?Slot{null} ** max_slots;
+var slots: [max_slots]?Slot = @as([max_slots]?Slot, @splat(null));
 
 fn slotOf(download: u32) ?*Slot {
     for (&slots) |*slot| {

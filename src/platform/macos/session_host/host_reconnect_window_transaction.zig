@@ -53,9 +53,9 @@ pub const Owner = struct {
     active_transaction_addr: u64 = 0,
     active_action_generation: u64 = 0,
     spent_action_generation: u64 = 0,
-    spent_action_digest: process_seal.CleanupSeal = [_]u8{0} ** 32,
-    lifecycle_raw: u8 = @intFromEnum(OwnerLifecycle.pristine),
-    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+    spent_action_digest: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
+    lifecycle_raw: u8 = @backingInt(OwnerLifecycle.pristine),
+    seal: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
 
     pub fn initInPlace(self: *Owner, owner_generation: u64) !void {
         if (!std.meta.eql(self.*, Owner{}) or owner_generation == 0) return error.InvalidAuthority;
@@ -66,7 +66,7 @@ pub const Owner = struct {
             .process_nonce = ready.process_nonce,
             .thread_id = @intCast(std.Thread.getCurrentId()),
             .owner_generation = owner_generation,
-            .lifecycle_raw = @intFromEnum(OwnerLifecycle.ready),
+            .lifecycle_raw = @backingInt(OwnerLifecycle.ready),
         };
         next.seal = try ownerSeal(&next, @intFromPtr(self));
         self.* = next;
@@ -87,9 +87,9 @@ pub const Transaction = struct {
         .pool_membership_generation = 0,
         .expected_connection_generation = 0,
     },
-    summary_digest: process_seal.CleanupSeal = [_]u8{0} ** 32,
-    rows_digest: process_seal.CleanupSeal = [_]u8{0} ** 32,
-    bindings_digest: process_seal.CleanupSeal = [_]u8{0} ** 32,
+    summary_digest: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
+    rows_digest: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
+    bindings_digest: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
     binding_count: u32 = 0,
     action: ActionRequest = .{
         .kind_raw = 0,
@@ -99,8 +99,8 @@ pub const Transaction = struct {
         .action_generation = 0,
         .expires_at_ns = 0,
     },
-    lifecycle_raw: u8 = @intFromEnum(Lifecycle.pristine),
-    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+    lifecycle_raw: u8 = @backingInt(Lifecycle.pristine),
+    seal: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
 };
 
 pub const Error = error{
@@ -141,7 +141,7 @@ pub fn prepare(
         .bindings_digest = bindingsDigest(bindings),
         .binding_count = @intCast(bindings.len),
         .action = action,
-        .lifecycle_raw = @intFromEnum(Lifecycle.prepared),
+        .lifecycle_raw = @backingInt(Lifecycle.prepared),
     };
     next_transaction.seal = try transactionSeal(&next_transaction, @intFromPtr(out));
     var next_owner = owner.*;
@@ -161,7 +161,7 @@ pub fn validate(
     bindings: []const WindowBinding,
     now_ns: u64,
 ) bool {
-    if (!validOwner(owner) or transaction.lifecycle_raw != @intFromEnum(Lifecycle.prepared) or
+    if (!validOwner(owner) or transaction.lifecycle_raw != @backingInt(Lifecycle.prepared) or
         transaction.self_addr != @intFromPtr(transaction) or transaction.pid != process_seal.currentProcessId() or
         transaction.owner_addr != @intFromPtr(owner) or transaction.owner_generation != owner.owner_generation or
         owner.active_transaction_addr != @intFromPtr(transaction) or
@@ -211,17 +211,17 @@ pub fn consumedExact(owner: *const Owner, transaction: *const Transaction) bool 
         transaction.self_addr == @intFromPtr(transaction) and transaction.owner_addr == @intFromPtr(owner) and
         transaction.owner_generation == owner.owner_generation and transaction.pid == owner.pid and
         transaction.process_nonce == owner.process_nonce and transaction.thread_id == owner.thread_id and
-        transaction.lifecycle_raw == @intFromEnum(Lifecycle.consumed) and
+        transaction.lifecycle_raw == @backingInt(Lifecycle.consumed) and
         transaction.action.action_generation == owner.spent_action_generation and
         std.mem.eql(u8, &digest, &owner.spent_action_digest) and
-        std.mem.eql(u8, &transaction.seal, &([_]u8{0} ** 32));
+        std.mem.eql(u8, &transaction.seal, &(@as([32]u8, @splat(0))));
 }
 
 /// Retires an exact prepared gesture after its external Window/job projection became stale.  It
 /// intentionally does not validate those moving projections; the internal final-address owner and
 /// transaction seal are sufficient to prove which one-shot action is being revoked.
 pub fn revokeStale(owner: *Owner, transaction: *Transaction) Error!void {
-    if (!validOwner(owner) or transaction.lifecycle_raw != @intFromEnum(Lifecycle.prepared) or
+    if (!validOwner(owner) or transaction.lifecycle_raw != @backingInt(Lifecycle.prepared) or
         transaction.self_addr != @intFromPtr(transaction) or transaction.owner_addr != @intFromPtr(owner) or
         transaction.owner_generation != owner.owner_generation or transaction.pid != owner.pid or
         transaction.process_nonce != owner.process_nonce or transaction.thread_id != owner.thread_id or
@@ -242,8 +242,8 @@ fn consumeNoFail(owner: *Owner, transaction: *Transaction) void {
     next_owner.spent_action_digest = actionIdentityDigest(transaction.action);
     next_owner.seal = ownerSeal(&next_owner, @intFromPtr(owner)) catch
         process_seal.fatalIntegrity(.proof_loss);
-    transaction.lifecycle_raw = @intFromEnum(Lifecycle.consumed);
-    transaction.seal = [_]u8{0} ** 32;
+    transaction.lifecycle_raw = @backingInt(Lifecycle.consumed);
+    transaction.seal = @as([32]u8, @splat(0));
     owner.* = next_owner;
 }
 
@@ -308,8 +308,8 @@ fn transactionSeal(transaction: *const Transaction, self_addr: u64) process_seal
 }
 
 fn validOwner(owner: *const Owner) bool {
-    const empty_digest = [_]u8{0} ** 32;
-    if (owner.lifecycle_raw != @intFromEnum(OwnerLifecycle.ready) or owner.self_addr != @intFromPtr(owner) or
+    const empty_digest = @as([32]u8, @splat(0));
+    if (owner.lifecycle_raw != @backingInt(OwnerLifecycle.ready) or owner.self_addr != @intFromPtr(owner) or
         owner.pid != process_seal.currentProcessId() or owner.thread_id != @as(u64, @intCast(std.Thread.getCurrentId())) or
         owner.owner_generation == 0 or
         ((owner.active_transaction_addr == 0) != (owner.active_action_generation == 0)) or
@@ -416,7 +416,7 @@ fn testBindings() [2]WindowBinding {
 }
 
 fn testAction() ActionRequest {
-    return .{ .kind_raw = @intFromEnum(ActionKind.take_control), .target_window_addr = 1001, .target_runtime_handle = 1, .target_surface_id = 61, .action_generation = 71, .expires_at_ns = 100 };
+    return .{ .kind_raw = @backingInt(ActionKind.take_control), .target_window_addr = 1001, .target_runtime_handle = 1, .target_surface_id = 61, .action_generation = 71, .expires_at_ns = 100 };
 }
 
 fn ensureReady() !void {
@@ -450,7 +450,7 @@ test "CR5d-1 Window transaction은 terminal summary와 two-window binding을 exa
     try std.testing.expectError(error.InvalidAuthority, consume(&owner, &transaction, summary, &rows, &bindings, 99));
     try std.testing.expectError(error.InvalidAuthority, prepare(&owner, &duplicate, summary, &rows, &bindings, testAction(), 99));
     const sibling_action: ActionRequest = .{
-        .kind_raw = @intFromEnum(ActionKind.close),
+        .kind_raw = @backingInt(ActionKind.close),
         .target_window_addr = 1002,
         .target_runtime_handle = 2,
         .target_surface_id = 62,
@@ -481,7 +481,7 @@ test "CR5d-1 Window transaction은 copy와 binding summary action drift를 mutat
         try std.testing.expectEqualDeep(owner_before, owner);
     }
     for (0..256) |raw| {
-        if (raw == @intFromEnum(OwnerLifecycle.ready)) continue;
+        if (raw == @backingInt(OwnerLifecycle.ready)) continue;
         var hostile_owner = owner;
         hostile_owner.lifecycle_raw = @intCast(raw);
         try std.testing.expect(!validate(&hostile_owner, &transaction, summary, &rows, &bindings, 1));
@@ -520,7 +520,7 @@ test "CR5d-1 Window transaction은 copy와 binding summary action drift를 mutat
         try std.testing.expect(!validate(&owner, &hostile_action, summary, &rows, &bindings, 1));
     }
     for (0..256) |raw| {
-        if (raw == @intFromEnum(ActionKind.take_control) or raw == @intFromEnum(ActionKind.close)) continue;
+        if (raw == @backingInt(ActionKind.take_control) or raw == @backingInt(ActionKind.close)) continue;
         hostile_action = transaction;
         hostile_action.action.kind_raw = @intCast(raw);
         try std.testing.expect(!validate(&owner, &hostile_action, summary, &rows, &bindings, 1));
@@ -552,7 +552,7 @@ test "CR5d-1 Window transaction은 deadline exact와 double consume을 닫는다
         var transaction: Transaction = .{};
         try prepare(&owner, &transaction, summary, &rows, &bindings, testAction(), 99);
         try std.testing.expectError(error.Expired, consume(&owner, &transaction, summary, &rows, &bindings, now_ns));
-        try std.testing.expectEqual(@intFromEnum(Lifecycle.consumed), transaction.lifecycle_raw);
+        try std.testing.expectEqual(@backingInt(Lifecycle.consumed), transaction.lifecycle_raw);
         try std.testing.expectEqual(@as(u64, 71), owner.spent_action_generation);
     }
 }

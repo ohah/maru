@@ -89,7 +89,7 @@ const Counts = struct { assigns: usize, notes: usize };
 /// **구조로 찾는다**(문자열 부분 일치가 아니라 토큰 이웃으로). `file_tree_rows_dirty` 같은 다른 필드나
 /// `.file_tree_rows => "…"` 같은 switch 갈래가 걸리지 않는 이유가 그것이다.
 fn countOutsideTests(allocator: std.mem.Allocator, source: [:0]const u8) !Counts {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source, .{});
     defer tree.deinit(allocator);
     const mask = try source_digest.anyDepthTestTokenMask(allocator, &tree);
     defer allocator.free(mask);
@@ -136,7 +136,7 @@ test "발행 축: 목록을 갈아 끼우는 자리는 출처 기록 함수를 �
     try std.testing.expect(paths.items.len > 0);
 
     var failed = false;
-    var seen: [inventory.len]bool = .{false} ** inventory.len;
+    var seen: [inventory.len]bool = @splat(false);
     var total_assigns: usize = 0;
     for (paths.items) |path| {
         // **못 읽거나 못 파싱하면 조용히 건너뛰지 않는다.** `catch continue` 로 두면 파싱이 깨진 파일

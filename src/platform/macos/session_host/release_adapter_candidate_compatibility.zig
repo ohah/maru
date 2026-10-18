@@ -107,7 +107,7 @@ fn composeOwned(probe: anytype, deadline: anytype, io: std.Io, authority: anytyp
     var relative_storage: [std.fs.max_name_bytes + 3:0]u8 = undefined;
     const basename = std.fs.path.basename(frozen_path);
     if (basename.len == 0 or basename.len > std.fs.max_name_bytes) return error.InvalidCandidate;
-    const relative = std.fmt.bufPrintZ(&relative_storage, "./{s}", .{basename}) catch return error.InvalidCandidate;
+    const relative = std.fmt.bufPrintSentinel(&relative_storage, "./{s}", .{basename}, 0) catch return error.InvalidCandidate;
     const budget = try deadline.remaining();
     const bytes = try probe.run(io, frozen_path, directory_fd, relative, output, budget);
     if (bytes.ptr != output.ptr or bytes.len > output.len) return error.InvalidProbe;

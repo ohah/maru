@@ -3,11 +3,7 @@
 const std = @import("std");
 const posix = std.posix;
 const c = std.c;
-const mac = @cImport({
-    @cInclude("libproc.h");
-    @cInclude("sys/resource.h");
-    @cInclude("sys/proc_info.h");
-});
+const mac = @import("darwin_perf_c");
 const session_host = @import("session_host");
 
 const deadline_ms: u64 = 250;
@@ -72,7 +68,7 @@ pub fn main(init: std.process.Init) !void {
 
     try session_host.short_endpoint.prepareCurrentUserNamespace();
     var base_buf: [192]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(&base_buf, "/tmp/maru-session-host-cr6e-{d}", .{c.getpid()});
+    const base = try std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-session-host-cr6e-{d}", .{c.getpid()}, 0);
     if (c.mkdir(base.ptr, 0o700) != 0 and posix.errno(-1) != .EXIST) return error.BaseDirectoryCreateFailed;
     defer _ = c.rmdir(base.ptr);
     var dir_buf: [256]u8 = undefined;
@@ -379,9 +375,9 @@ fn writeArtifactAtomic(allocator: std.mem.Allocator, io: std.Io, path: []const u
     try out.writer.writeByte('\n');
     const temp = try std.fmt.allocPrint(allocator, "{s}.tmp.{d}", .{ path, c.getpid() });
     defer allocator.free(temp);
-    const temp_z = try allocator.dupeZ(u8, temp);
+    const temp_z = try allocator.dupeSentinel(u8, temp, 0);
     defer allocator.free(temp_z);
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     defer _ = c.unlink(temp_z.ptr);
     const fd = c.open(temp_z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0o600));

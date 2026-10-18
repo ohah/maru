@@ -494,8 +494,8 @@ const Fixture = struct {
         self.tmp = std.testing.tmpDir(.{});
         var root: [std.fs.max_path_bytes]u8 = undefined;
         const root_len = try self.tmp.dir.realPath(std.testing.io, &root);
-        self.executable = try std.fmt.bufPrintZ(&self.executable_storage, "{s}/validator-fixture", .{root[0..root_len]});
-        const marker = try std.fmt.bufPrintZ(&self.marker_storage, "{s}/invoked", .{root[0..root_len]});
+        self.executable = try std.fmt.bufPrintSentinel(&self.executable_storage, "{s}/validator-fixture", .{root[0..root_len]}, 0);
+        const marker = try std.fmt.bufPrintSentinel(&self.marker_storage, "{s}/invoked", .{root[0..root_len]}, 0);
         var script_storage: [4096]u8 = undefined;
         const script = try std.fmt.bufPrint(&script_storage,
             \\#!/bin/sh

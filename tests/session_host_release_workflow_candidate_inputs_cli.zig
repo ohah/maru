@@ -94,17 +94,17 @@ const Fixture = struct {
         try result.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "session-host-candidate-1.2.3/Maru.app/Contents/MacOS/maru-macos-app", .data = "signed frozen bytes" });
         var root: [std.fs.max_path_bytes]u8 = undefined;
         const root_len = try result.tmp.dir.realPath(std.testing.io, &root);
-        const checkpoint_path = try std.fmt.bufPrintZ(&result.checkpoint_path, "{s}/checkpoint", .{root[0..root_len]});
+        const checkpoint_path = try std.fmt.bufPrintSentinel(&result.checkpoint_path, "{s}/checkpoint", .{root[0..root_len]}, 0);
         result.checkpoint_len = checkpoint_path.len;
-        const candidate_path = try std.fmt.bufPrintZ(&result.candidate_path, "{s}/session-host-candidate-1.2.3", .{root[0..root_len]});
+        const candidate_path = try std.fmt.bufPrintSentinel(&result.candidate_path, "{s}/session-host-candidate-1.2.3", .{root[0..root_len]}, 0);
         result.candidate_len = candidate_path.len;
-        const frozen_path = try std.fmt.bufPrintZ(&result.frozen_path, "{s}/maru-session-host-1.2.3", .{candidate_path});
+        const frozen_path = try std.fmt.bufPrintSentinel(&result.frozen_path, "{s}/maru-session-host-1.2.3", .{candidate_path}, 0);
         result.frozen_len = frozen_path.len;
         try std.testing.expectEqual(@as(c_int, 0), c.chmod(checkpoint_path.ptr, 0o700));
         try std.testing.expectEqual(@as(c_int, 0), c.chmod(candidate_path.ptr, 0o700));
         try std.testing.expectEqual(@as(c_int, 0), c.chmod(frozen_path.ptr, 0o755));
         var app_main_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-        const app_main = try std.fmt.bufPrintZ(&app_main_storage, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{candidate_path});
+        const app_main = try std.fmt.bufPrintSentinel(&app_main_storage, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{candidate_path}, 0);
         try std.testing.expectEqual(@as(c_int, 0), c.chmod(app_main.ptr, 0o755));
         return result;
     }

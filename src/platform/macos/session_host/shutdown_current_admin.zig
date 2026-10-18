@@ -145,7 +145,7 @@ fn terminateTranscript(authority: *const attempt.ShutdownAttemptAuthority) contr
 }
 
 fn inventoryTranscript(authority: *const attempt.ShutdownAttemptAuthority, kind: contract.InventoryAttempt) contract.Digest {
-    return transcript(authority, @intFromEnum(kind) + 1);
+    return transcript(authority, @backingInt(kind) + 1);
 }
 
 fn transcript(authority: *const attempt.ShutdownAttemptAuthority, kind: u8) contract.Digest {
@@ -161,14 +161,14 @@ fn transcript(authority: *const attempt.ShutdownAttemptAuthority, kind: u8) cont
 fn fixture() !attempt.ShutdownAttemptAuthority {
     try attempt.testing.ensureSealReady();
     var authority: attempt.ShutdownAttemptAuthority = .{};
-    try attempt.prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try attempt.prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     return authority;
 }
 
 test "C3-3b6 current admin model은 terminate reply를 confirmed outcome으로 소비한다" {
     var authority_storage: attempt.ShutdownAttemptAuthority = .{};
     _ = try fixture();
-    try attempt.prepare(&authority_storage, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try attempt.prepare(&authority_storage, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     var coordinator: CurrentAdminCoordinator = .{};
     var receipt: contract.ShutdownConnectionReceipt = .{};
     try coordinator.beginTerminate(&authority_storage, &receipt, 1, 11);
@@ -179,7 +179,7 @@ test "C3-3b6 current admin model은 terminate reply를 confirmed outcome으로 �
 test "C3-3b6 current admin model은 ambiguous 뒤 새 barrier의 absence만 확정한다" {
     var authority: attempt.ShutdownAttemptAuthority = .{};
     _ = try fixture();
-    try attempt.prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try attempt.prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     var coordinator: CurrentAdminCoordinator = .{};
     var terminate_receipt: contract.ShutdownConnectionReceipt = .{};
     try coordinator.beginTerminate(&authority, &terminate_receipt, 1, 11);
@@ -193,7 +193,7 @@ test "C3-3b6 current admin model은 ambiguous 뒤 새 barrier의 absence만 확�
 test "C3-3b6 current admin model은 membership present 뒤 새 attempt를 발급한다" {
     var authority: attempt.ShutdownAttemptAuthority = .{};
     _ = try fixture();
-    try attempt.prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try attempt.prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     var coordinator: CurrentAdminCoordinator = .{};
     var first: contract.ShutdownConnectionReceipt = .{};
     try coordinator.beginTerminate(&authority, &first, 1, 11);
@@ -209,7 +209,7 @@ test "C3-3b6 current admin model은 membership present 뒤 새 attempt를 발급
 test "C3-3b6 current admin model은 barrier busy에서 request를 보내지 않는다" {
     var authority: attempt.ShutdownAttemptAuthority = .{};
     _ = try fixture();
-    try attempt.prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try attempt.prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     var coordinator: CurrentAdminCoordinator = .{ .phase = .awaiting_barrier };
     var receipt: contract.ShutdownConnectionReceipt = .{};
     try std.testing.expectError(error.Busy, coordinator.beginInventory(&authority, &receipt, 1, 11, false));
@@ -219,21 +219,21 @@ test "C3-3b6 current admin model은 barrier busy에서 request를 보내지 않�
 test "C3-3b6 current admin model은 initial inventory ambiguity 뒤 read-only retry만 허용한다" {
     var authority: attempt.ShutdownAttemptAuthority = .{};
     _ = try fixture();
-    try attempt.prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try attempt.prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     var coordinator: CurrentAdminCoordinator = .{ .phase = .awaiting_barrier };
     var initial: contract.ShutdownConnectionReceipt = .{};
     try coordinator.beginInventory(&authority, &initial, 1, 11, true);
     try std.testing.expect(try coordinator.inventoryAmbiguous(&authority, &initial));
     var retry: contract.ShutdownConnectionReceipt = .{};
     try coordinator.beginInventory(&authority, &retry, 2, 12, true);
-    try std.testing.expectEqual(@intFromEnum(contract.InventoryAttempt.retry), retry.inventory_attempt_raw);
+    try std.testing.expectEqual(@backingInt(contract.InventoryAttempt.retry), retry.inventory_attempt_raw);
     try std.testing.expectEqual(@as(u8, 0), coordinator.request_count);
 }
 
 test "C3-3b6 current admin model은 retry inventory ambiguity를 bounded로 닫는다" {
     var authority: attempt.ShutdownAttemptAuthority = .{};
     _ = try fixture();
-    try attempt.prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try attempt.prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     var coordinator: CurrentAdminCoordinator = .{ .phase = .awaiting_barrier, .inventory_retry_used = true };
     var retry: contract.ShutdownConnectionReceipt = .{};
     try coordinator.beginInventory(&authority, &retry, 1, 11, true);
@@ -244,7 +244,7 @@ test "C3-3b6 current admin model은 retry inventory ambiguity를 bounded로 닫�
 test "C3-3b6 current admin model은 malformed reply와 host drift를 absence로 쓰지 않는다" {
     var authority: attempt.ShutdownAttemptAuthority = .{};
     _ = try fixture();
-    try attempt.prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try attempt.prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     var coordinator: CurrentAdminCoordinator = .{ .phase = .awaiting_barrier };
     var receipt: contract.ShutdownConnectionReceipt = .{};
     try coordinator.beginInventory(&authority, &receipt, 1, 11, true);
@@ -255,7 +255,7 @@ test "C3-3b6 current admin model은 malformed reply와 host drift를 absence로 
 test "C3-3b6 current admin model은 target connection을 순차로 열고 닫는다" {
     var authority: attempt.ShutdownAttemptAuthority = .{};
     _ = try fixture();
-    try attempt.prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try attempt.prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     var coordinator: CurrentAdminCoordinator = .{};
     var receipt: contract.ShutdownConnectionReceipt = .{};
     try coordinator.beginTerminate(&authority, &receipt, 1, 11);
@@ -268,7 +268,7 @@ test "C3-3b6 current admin model은 target connection을 순차로 열고 닫는
 test "C3-3b6 current admin model은 one-shot admin lease를 canonical deinit에서만 반환한다" {
     var authority: attempt.ShutdownAttemptAuthority = .{};
     _ = try fixture();
-    try attempt.prepare(&authority, 7, [_]u8{3} ** 32, .terminate_host, 100);
+    try attempt.prepare(&authority, 7, @as([32]u8, @splat(3)), .terminate_host, 100);
     var coordinator: CurrentAdminCoordinator = .{};
     var receipt: contract.ShutdownConnectionReceipt = .{};
     try coordinator.beginTerminate(&authority, &receipt, 1, 11);

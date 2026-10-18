@@ -11,6 +11,8 @@
 //! 사용: `zig build shape-run-probe -- <ansi-file> [ansi-file ...]`
 //! 인자가 없으면 내장 합성 화면만 잰다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const maru = @import("maru");
 
@@ -108,7 +110,7 @@ pub fn main(init: std.process.Init) !void {
     const out = &stdout_file_writer.interface;
 
     try out.print("shape run 분포 (격자 {d}x{d})\n", .{ default_cols, default_rows });
-    try out.print("{s}\n", .{"-" ** 78});
+    try out.print("{s}\n", .{array_repeat.repeat("-", 78)});
 
     // 합성 기준선: 장식 없는 가득 찬 화면. run 묶기의 상한(행 하나가 통째로 한 run)을 보여준다.
     {

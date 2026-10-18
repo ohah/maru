@@ -2966,7 +2966,7 @@ test "Codex 질문 훅은 제품 배지를 입력 대기로 세우고 답변 뒤
         .cols = 110,
         .rows = 32,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const term = tab_ops.activeTab(session).activeTerm();

@@ -1,6 +1,8 @@
 //! Proves strict semantic parsing of GitHub Git ref/tag REST responses without claiming that the
 //! bytes came from GitHub or choosing a maximum annotated-tag traversal depth.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const github_git = @import("release_adapter_github_git");
 
@@ -72,7 +74,7 @@ test "annotated tag binds its own object identity and returns the next typed tar
 }
 
 test "shared response cap is enforced before endpoint parsing" {
-    const oversized = " " ** (github_git.max_response_bytes + 1);
+    const oversized = array_repeat.repeat(" ", (github_git.max_response_bytes + 1));
     try std.testing.expectError(error.ResponseTooLarge, github_git.parseRef(std.testing.allocator, oversized, tag));
     try std.testing.expectError(error.ResponseTooLarge, github_git.parseTag(std.testing.allocator, oversized, .{
         .tag = tag,
@@ -130,7 +132,7 @@ test "foreign noncanonical and unknown ref identities fail closed" {
         try std.testing.expectError(error.IdentityMismatch, github_git.parseRef(std.testing.allocator, bytes, tag));
     }
     try std.testing.expectError(error.IdentityMismatch, github_git.parseRef(std.testing.allocator, direct_ref, "v01.2.3"));
-    const oversized_tag = "v" ++ ("1" ** github_git.max_response_bytes) ++ ".2.3";
+    const oversized_tag = "v" ++ (array_repeat.repeat("1", github_git.max_response_bytes)) ++ ".2.3";
     try std.testing.expectError(error.IdentityMismatch, github_git.parseRef(std.testing.allocator, direct_ref, oversized_tag));
 }
 

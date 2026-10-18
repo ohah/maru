@@ -5,8 +5,8 @@
 //! 내려받지 않으므로, `tools/ci/prime-zig-packages.sh` 가 `vendor/zig-packages` 의 사본을 거기 채운다.
 //!
 //! 이 장치는 **조용히** 무너진다 — 채우기 스텝이 빠진 잡이나 사본이 빠진 의존성은 Zig 가 그냥 네트워크로 받아 초록이다.
-//! 그래서 두 가지를 센다: ⑴ Zig 를 설치하는 모든 `mise-action` 바로 다음 스텝이 채우기다 ⑵ 사본 집합 == build.zig.zon 해시
-//! 집합(빠진 것도 남는 것도 없다).
+//! 그래서 두 가지를 센다: ⑴ Zig 를 설치하는 모든 `mise-action` 바로 다음 스텝이 채우기다 ⑵ 사본 집합 ==
+//! build.zig.zon 과 그 패키지 manifest 들의 재귀 해시 폐쇄(빠진 것도 남는 것도 없다).
 const std = @import("std");
 
 const prime_step =
@@ -64,7 +64,7 @@ test "every mise-action step is immediately followed by the vendored zig package
     try std.testing.expect(installs >= 20);
 }
 
-test "vendored zig packages are exactly the build.zig.zon dependency hashes" {
+test "vendored zig packages are exactly the locked direct and transitive dependency hashes" {
     const allocator = std.testing.allocator;
     const zon = try read(allocator, "build.zig.zon");
     defer allocator.free(zon);
@@ -79,6 +79,13 @@ test "vendored zig packages are exactly the build.zig.zon dependency hashes" {
         try wanted.put(allocator, zon[value_start..value_end], {});
         at = value_end;
     }
+    // translate_c 2.0.2 pins ARO in its own build.zig.zon; the vendor sync script follows that
+    // transitive edge so CI can prime the translator without network access.
+    try wanted.put(
+        allocator,
+        "aro-0.0.0-JSD1QvCRNwC2O1Jkop9TO6sXb1U1vhrH8FnYK1VdEMKn",
+        {},
+    );
     try std.testing.expect(wanted.count() >= 1);
 
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "vendor/zig-packages", .{ .iterate = true });

@@ -75,7 +75,7 @@ pub const Workspace = struct {
         if (c.fstatat(self.root_fd, name.ptr, &observed, posix.AT.SYMLINK_NOFOLLOW) == 0)
             return error.ChildOccupied;
         if (posix.errno(-1) != .NOENT) return error.FileChanged;
-        return std.fmt.bufPrintZ(output, "{s}/{s}", .{ self.path_storage[0..self.path_len], name }) catch
+        return std.fmt.bufPrintSentinel(output, "{s}/{s}", .{ self.path_storage[0..self.path_len], name }, 0) catch
             return error.InvalidPath;
     }
 
@@ -184,9 +184,9 @@ fn prepareWithOperations(
     result.path_len = path.len;
     @memcpy(result.path_storage[0..path.len], path);
     result.path_storage[path.len] = 0;
-    _ = std.fmt.bufPrintZ(&result.leaf_storage, "{s}", .{leaf}) catch return error.InvalidPath;
+    _ = std.fmt.bufPrintSentinel(&result.leaf_storage, "{s}", .{leaf}, 0) catch return error.InvalidPath;
     var parent_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const parent_path = if (slash == 0) "/" else std.fmt.bufPrintZ(&parent_storage, "{s}", .{path[0..slash]}) catch return error.InvalidPath;
+    const parent_path = if (slash == 0) "/" else std.fmt.bufPrintSentinel(&parent_storage, "{s}", .{path[0..slash]}, 0) catch return error.InvalidPath;
     result.parent_fd = safe_open.openAbsoluteNoFollow(parent_path, true) catch return error.InvalidPath;
     result.owner = result;
     result.sync_fn = sync_fn;

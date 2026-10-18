@@ -26,9 +26,9 @@ class MaruChromium < Formula
   # maru(MIT)·CEF(BSD-3-Clause)·Chromium 안 FFmpeg 등(LGPL) — 구성요소별 전문은 libexec/licenses(docs/third-party-licenses.md).
   license all_of: ["MIT", "BSD-3-Clause", "LGPL-2.1-or-later"]
 
-  # zig 는 minor 마다 빌드 API 가 깨진다 — maru 가 쓰는 판에 고정한다(0.17 이 나오면 `zig@0.16` 이 따로 남는다). 지금은
+  # zig 는 minor 마다 빌드 API 가 깨진다 — maru 가 쓰는 판에 고정한다. 지금은
   # `zig` 의 별칭이다 — `brew audit` 의 별칭 검사는 homebrew/core 에만 걸려 이 tap 에서는 조용하다(`--strict` 실측).
-  depends_on "zig@0.16" => :build
+  depends_on "zig@0.17" => :build
   # CEF 154 프레임워크의 최소 macOS 가 13.0 이다(Mach-O minos 실측) — 더 낮으면 설치는 돼도 엔진이 뜨지 않는다.
   depends_on macos: :ventura
 

@@ -127,11 +127,11 @@ test "붙지 못한 이유는 코드와 단계 둘 다 적는다 — 조용한 �
 
 test "어떤 코드와 단계 조합도 그 버퍼 안에 들어간다" {
     var buf: [prepare_failure_line_max]u8 = undefined;
-    inline for (@typeInfo(attach_cli.ExitCode).@"enum".fields) |code_field| {
-        inline for (@typeInfo(external_attach.Stage).@"enum".fields) |stage_field| {
+    inline for (@import("type_info_fields").enumFields(attach_cli.ExitCode)) |code_field| {
+        inline for (@import("type_info_fields").enumFields(external_attach.Stage)) |stage_field| {
             const line = prepareFailureLine(&buf, .{
-                .code = @enumFromInt(code_field.value),
-                .stage = @enumFromInt(stage_field.value),
+                .code = @fromBackingInt(@intCast(code_field.value)),
+                .stage = @fromBackingInt(@intCast(stage_field.value)),
             });
             // 잘린 줄은 다른 말이다 — 개행으로 끝나는지까지 본다.
             try std.testing.expect(std.mem.endsWith(u8, line, ")\n"));
@@ -418,7 +418,7 @@ const StdoutStreamSink = struct {
         }
         var header: [stream_header_bytes]u8 = @splat(0);
         @memcpy(header[0..stream_magic.len], stream_magic);
-        header[stream_magic.len] = @intFromEnum(kind);
+        header[stream_magic.len] = @backingInt(kind);
         std.mem.writeInt(u32, header[stream_magic.len + 4 ..][0..4], @intCast(bytes.len), .little);
         if (!self.writeAll(&header)) return;
         _ = self.writeAll(bytes);
@@ -671,7 +671,7 @@ test "흘린 프레임은 소비자의 조립기로 그대로 되살아난다" {
     defer framed.deinit(allocator);
     var header: [stream_header_bytes]u8 = @splat(0);
     @memcpy(header[0..stream_magic.len], stream_magic);
-    header[stream_magic.len] = @intFromEnum(remote_screen.ScreenByteKind.snapshot);
+    header[stream_magic.len] = @backingInt(remote_screen.ScreenByteKind.snapshot);
     std.mem.writeInt(u32, header[stream_magic.len + 4 ..][0..4], @intCast(payload.len), .little);
     try framed.appendSlice(allocator, &header);
     try framed.appendSlice(allocator, payload);
@@ -679,7 +679,7 @@ test "흘린 프레임은 소비자의 조립기로 그대로 되살아난다" {
     // 소비자: 헤더를 풀고 payload 만 조립기에 먹인다.
     try std.testing.expectEqualStrings(stream_magic, framed.items[0..stream_magic.len]);
     try std.testing.expectEqual(
-        @as(u8, @intFromEnum(remote_screen.ScreenByteKind.snapshot)),
+        @as(u8, @backingInt(remote_screen.ScreenByteKind.snapshot)),
         framed.items[stream_magic.len],
     );
     const len = std.mem.readInt(u32, framed.items[stream_magic.len + 4 ..][0..4], .little);

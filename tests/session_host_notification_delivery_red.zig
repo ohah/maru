@@ -1,3 +1,5 @@
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const delivery = @import("notification_delivery");
 
@@ -77,7 +79,7 @@ test "P4 N2b1 notification metadata update is allocation-atomic and bounded" {
     var store = delivery.MetadataStore.init(std.testing.allocator);
     defer store.deinit();
     try store.install(0xaa, .{ .config_generation = 1, .notifications_osc = true, .display_label = "owned" });
-    const too_long = "x" ** (delivery.max_display_label_bytes + 1);
+    const too_long = array_repeat.repeat("x", (delivery.max_display_label_bytes + 1));
     try std.testing.expectError(error.DisplayLabelTooLong, store.update(0xaa, 1, .{
         .expected_controller_generation = 1,
         .config_generation = 2,

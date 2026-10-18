@@ -104,9 +104,9 @@ pub fn main(init: std.process.Init) !void {
     const dir_raw = args.next() orelse return error.MissingSessionDirectory;
     const socket_raw = args.next() orelse return error.MissingSocketPath;
     if (args.next() != null) return error.UnexpectedArgument;
-    const dir = try init.gpa.dupeZ(u8, dir_raw);
+    const dir = try init.gpa.dupeSentinel(u8, dir_raw, 0);
     defer init.gpa.free(dir);
-    const socket = try init.gpa.dupeZ(u8, socket_raw);
+    const socket = try init.gpa.dupeSentinel(u8, socket_raw, 0);
     defer init.gpa.free(socket);
 
     var probe: Probe = .{};

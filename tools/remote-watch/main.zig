@@ -373,7 +373,7 @@ fn putMvResult(outcome: MvOutcome, message: ?[]const u8) void {
         if (!putAll("\n")) return;
     }
     var tail: [16]u8 = undefined;
-    const t = std.fmt.bufPrint(&tail, "S {d}\n", .{@intFromEnum(outcome)}) catch return;
+    const t = std.fmt.bufPrint(&tail, "S {d}\n", .{@backingInt(outcome)}) catch return;
     _ = putAll(t);
 }
 
@@ -408,9 +408,9 @@ fn runRename(
     };
     defer dir.close(io);
 
-    const old_z = gpa.dupeZ(u8, old_name) catch return putMvResult(.io, "out of memory");
+    const old_z = gpa.dupeSentinel(u8, old_name, 0) catch return putMvResult(.io, "out of memory");
     defer gpa.free(old_z);
-    const new_z = gpa.dupeZ(u8, new_name) catch return putMvResult(.io, "out of memory");
+    const new_z = gpa.dupeSentinel(u8, new_name, 0) catch return putMvResult(.io, "out of memory");
     defer gpa.free(new_z);
 
     // 신원 재확인. 링크는 **링크 자신**을 본다(로컬의 `identityAt` 과 같은 축 — `SYMLINK_NOFOLLOW`).
@@ -454,7 +454,7 @@ fn runCreate(
     if (parent_stat.dev != want_dev or parent_stat.ino != want_ino)
         return putMvResult(.stale, "parent identity changed");
 
-    const name_z = gpa.dupeZ(u8, name) catch return putMvResult(.io, "out of memory");
+    const name_z = gpa.dupeSentinel(u8, name, 0) catch return putMvResult(.io, "out of memory");
     defer gpa.free(name_z);
 
     if (want_dir) {
@@ -528,7 +528,7 @@ fn runWrite(
     var tmp_buf: [rfls_max_name_bytes]u8 = undefined;
     const tmp_name = std.fmt.bufPrint(&tmp_buf, ".maru-write-{d}.tmp", .{std.c.getpid()}) catch
         return putMvResult(.io, "temp name too long");
-    const tmp_z = gpa.dupeZ(u8, tmp_name) catch return putMvResult(.io, "out of memory");
+    const tmp_z = gpa.dupeSentinel(u8, tmp_name, 0) catch return putMvResult(.io, "out of memory");
     defer gpa.free(tmp_z);
 
     const tmp_fd = std.c.openat(dir.handle, tmp_z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, @as(std.c.mode_t, 0o644));
@@ -573,7 +573,7 @@ fn runWrite(
         _ = std.c.unlinkat(dir.handle, tmp_z.ptr, 0);
     };
 
-    const name_z = gpa.dupeZ(u8, name) catch return putMvResult(.io, "out of memory");
+    const name_z = gpa.dupeSentinel(u8, name, 0) catch return putMvResult(.io, "out of memory");
     defer gpa.free(name_z);
 
     if (overwrite) {
@@ -675,7 +675,7 @@ fn runDelete(
     };
     defer dir.close(io);
 
-    const name_z = gpa.dupeZ(u8, name) catch return putMvResult(.io, "out of memory");
+    const name_z = gpa.dupeSentinel(u8, name, 0) catch return putMvResult(.io, "out of memory");
     defer gpa.free(name_z);
 
     const st = rawFstatAt(dir.handle, name_z.ptr, std.posix.AT.SYMLINK_NOFOLLOW) orelse
@@ -900,7 +900,7 @@ fn armLinux(gpa: std.mem.Allocator, ifd: i32, dirs: []const []u8) error{ OutOfMe
     const mask: u32 = linux.IN.MODIFY | linux.IN.CREATE | linux.IN.DELETE |
         linux.IN.MOVED_TO | linux.IN.MOVED_FROM | linux.IN.ATTRIB;
     for (dirs) |d| {
-        const z = try gpa.dupeZ(u8, d);
+        const z = try gpa.dupeSentinel(u8, d, 0);
         defer gpa.free(z);
         const wd: isize = @bitCast(linux.inotify_add_watch(ifd, z, mask));
         // ENOSPC = `max_user_watches` 소진. **일부만 보고 계속하지 않는다** — 폴링으로 내려간다.
@@ -1027,7 +1027,7 @@ fn runCommand(gpa: std.mem.Allocator, argv: []const []const u8, hasher: *std.has
         zargs.deinit(gpa);
     }
     for (argv) |a| {
-        const z = gpa.dupeZ(u8, a) catch return .failed;
+        const z = gpa.dupeSentinel(u8, a, 0) catch return .failed;
         zargs.append(gpa, z.ptr) catch {
             gpa.free(z);
             return .failed;
@@ -1106,7 +1106,7 @@ fn runCommand(gpa: std.mem.Allocator, argv: []const []const u8, hasher: *std.has
     } else if (std.c.W.IFSIGNALED(us)) {
         last_exit = -1;
         // `TERMSIG` 는 이 zig 판에서 enum 을 돌려준다 — 정수로 바꿔야 `{d}` 로 찍힌다.
-        last_signal = @intCast(@intFromEnum(std.c.W.TERMSIG(us)));
+        last_signal = @intCast(@backingInt(std.c.W.TERMSIG(us)));
     }
     if (!(std.c.W.IFEXITED(us) and std.c.W.EXITSTATUS(us) == 0)) return .failed;
     return .ok;
@@ -1361,7 +1361,7 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8, want_f
     // **실제로 어디부터 읽었나**(판 3 · 계획 §20.3). 요청을 못 지키면 0 이고, 그때 답은 파일
     // 처음부터의 것이다 — 받는 쪽이 그 차이로 「이어읽기가 먹혔나」를 안다.
     var resumed_from: u64 = 0;
-    var opened: [activity_wire.max_chain]?std.Io.File = .{null} ** activity_wire.max_chain;
+    var opened: [activity_wire.max_chain]?std.Io.File = @splat(null);
     defer for (&opened) |*maybe| {
         if (maybe.*) |f| f.close(io);
     };
@@ -1640,7 +1640,7 @@ const ChainSlot = struct {
 };
 
 const Chain = struct {
-    slots: [activity_wire.max_chain]ChainSlot = [_]ChainSlot{.{}} ** activity_wire.max_chain,
+    slots: [activity_wire.max_chain]ChainSlot = @as([activity_wire.max_chain]ChainSlot, @splat(.{})),
     len: usize = 0,
 
     fn append(self: *Chain, value: []const u8) bool {

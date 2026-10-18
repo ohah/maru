@@ -1038,7 +1038,7 @@ fn emptyNativeDrawGlyphRecord() coretext_shaper.NativeDrawGlyphRecord {
         .drawable = 0,
         .fallback = 0,
         .color_glyph_kind = 0,
-        .font_name = [_]u8{0} ** coretext_probe.font_name_capacity,
+        .font_name = @as([coretext_probe.font_name_capacity]u8, @splat(0)),
     };
 }
 
@@ -1870,7 +1870,7 @@ test "buildPaneLabelDrawList tail 앵커: 정확한 열 배치(선두 … + 우�
     var dl = try buildPaneLabelDrawList(allocator, "abcdefghij|", 8, .default, .tail);
     defer dl.deinit(allocator);
     // 열→코드포인트 맵으로 정확히 검증.
-    var at: [8]?u21 = .{null} ** 8;
+    var at: [8]?u21 = @splat(null);
     for (dl.cells) |c| {
         try std.testing.expect(c.col >= 1 and c.col <= 6); // col0(좌패딩)·col7(=end_col 우간격) 비움 — 경계 넘침 없음
         at[c.col] = c.codepoint;
@@ -1911,7 +1911,7 @@ test "buildPaneLabelDrawList tail 앵커: 한글(EAW 2칸)은 온전한 글자 �
     // "가나다라마|" = 한글 5자(각 2칸=10) + caret 1칸 = 11칸. cols=8 → [1,7)=6칸(lead 1 + tail 5).
     var dl = try buildPaneLabelDrawList(allocator, "가나다라마|", 8, .default, .tail);
     defer dl.deinit(allocator);
-    var at: [8]?u21 = .{null} ** 8;
+    var at: [8]?u21 = @splat(null);
     var hangul_w2 = false;
     for (dl.cells) |c| {
         try std.testing.expect(c.col >= 1 and c.col <= 6); // 경계 넘침 없음

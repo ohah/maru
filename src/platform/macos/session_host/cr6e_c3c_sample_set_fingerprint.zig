@@ -19,9 +19,9 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.next();
     const output_path = args.next() orelse return error.MissingOutputPath;
-    const app_path = try allocator.dupeZ(u8, args.next() orelse return error.MissingAppExecutable);
+    const app_path = try allocator.dupeSentinel(u8, args.next() orelse return error.MissingAppExecutable, 0);
     defer allocator.free(app_path);
-    const product_path = try allocator.dupeZ(u8, args.next() orelse return error.MissingProductExecutable);
+    const product_path = try allocator.dupeSentinel(u8, args.next() orelse return error.MissingProductExecutable, 0);
     defer allocator.free(product_path);
     if (args.next() != null) return error.TooManyArguments;
     if (!std.fs.path.isAbsolute(app_path) or !std.fs.path.isAbsolute(product_path))

@@ -162,9 +162,9 @@ pub const PreparedOwnedMetadataAbort = struct {
     allocator_vtable_addr: usize = 0,
     backing_addr: usize = 0,
     backing_len: usize = 0,
-    content_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    content_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: PreparedOwnedMetadataAbortLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 fn preparedOwnedMetadataAbortDigest(
@@ -179,7 +179,7 @@ fn preparedOwnedMetadataAbortDigest(
     writer.writeUsize(prepared.backing_addr);
     writer.writeUsize(prepared.backing_len);
     writer.writeBytes(&prepared.content_digest);
-    writer.writeU8(@intFromEnum(prepared.lifecycle));
+    writer.writeU8(@backingInt(prepared.lifecycle));
     return writer.finish();
 }
 
@@ -978,7 +978,7 @@ pub const PreparedOwnerMetadataTake = struct {
     }
 
     pub fn lifecycleCode(self: *const PreparedOwnerMetadataTake) u8 {
-        return @intFromEnum(self.lifecycle);
+        return @backingInt(self.lifecycle);
     }
 };
 
@@ -1020,11 +1020,11 @@ pub const PreparedOwnerMetadataReplacement = struct {
     frozen_out_addr: usize = 0,
     payload_addr: usize = 0,
     destination_authority_digest: external_owner_seal.Digest =
-        [_]u8{0} ** @sizeOf(external_owner_seal.Digest),
+        @as([@sizeOf(external_owner_seal.Digest)]u8, @splat(0)),
     disposition: OwnerMetadataReplacementDisposition = .cleanup_only_older,
     incoming_revision: u64 = 0,
     incoming_semantic_digest: runtime_event_wire.Digest =
-        [_]u8{0} ** @sizeOf(runtime_event_wire.Digest),
+        @as([@sizeOf(runtime_event_wire.Digest)]u8, @splat(0)),
     payload: OwnerMetadataReplacementPayloadState = .none,
     old_cleanup: PreparedOwnerMetadataCleanup = .{},
     lifecycle: PreparedOwnerMetadataReplacementLifecycle = .empty,
@@ -1053,7 +1053,7 @@ pub const PreparedOwnerMetadataReplacement = struct {
         };
         if (self.payload_addr != @intFromPtr(payload)) return false;
         const zero_digest =
-            [_]u8{0} ** @sizeOf(external_owner_seal.Digest);
+            @as([@sizeOf(external_owner_seal.Digest)]u8, @splat(0));
         const current_authority_digest = switch (destination.metadata) {
             .current => |*current| &current.owner_seal.authority_digest,
             .unavailable => &zero_digest,
@@ -1193,7 +1193,7 @@ pub fn prepareOwnerMetadataReplacement(
         .payload_addr = 0,
         .destination_authority_digest = switch (destination.metadata) {
             .current => |current| current.owner_seal.authority_digest,
-            .unsupported, .unavailable => [_]u8{0} ** @sizeOf(external_owner_seal.Digest),
+            .unsupported, .unavailable => @as([@sizeOf(external_owner_seal.Digest)]u8, @splat(0)),
         },
         .disposition = disposition,
         .incoming_revision = incoming_dto.revision,
@@ -1342,7 +1342,7 @@ pub fn preparedReplacementCleanupRange(
         .publish_first => .{
             .address = 0,
             .len = 0,
-            .content_digest = [_]u8{0} ** 32,
+            .content_digest = @as([32]u8, @splat(0)),
         },
         .cleanup_only_older, .cleanup_only_duplicate => if (incoming.logical.?.backing) |backing| .{
             .address = @intFromPtr(backing.ptr),
@@ -1351,7 +1351,7 @@ pub fn preparedReplacementCleanupRange(
         } else .{
             .address = 0,
             .len = 0,
-            .content_digest = [_]u8{0} ** 32,
+            .content_digest = @as([32]u8, @splat(0)),
         },
         .replace_newer => if (destination.metadata.current.logical.backing) |backing|
             .{
@@ -1363,7 +1363,7 @@ pub fn preparedReplacementCleanupRange(
             .{
                 .address = 0,
                 .len = 0,
-                .content_digest = [_]u8{0} ** 32,
+                .content_digest = @as([32]u8, @splat(0)),
             },
     };
 }
@@ -1441,7 +1441,7 @@ pub fn preparedLiveMetadataDestinationAuthorityDigest(
     writeOptionalOwnedMetadataSeal(&writer, staged.cleanup_seal);
     writer.writeUsize(staged.footprint.resident_delta);
     writer.writeUsize(staged.footprint.prepare_peak_delta);
-    writer.writeU8(@intFromEnum(staged.lifecycle));
+    writer.writeU8(@backingInt(staged.lifecycle));
 
     const replacement = &destination.replacement;
     writer.writeUsize(replacement.saved_self_addr);
@@ -1451,7 +1451,7 @@ pub fn preparedLiveMetadataDestinationAuthorityDigest(
     writer.writeUsize(replacement.frozen_out_addr);
     writer.writeUsize(replacement.payload_addr);
     writer.writeBytes(&replacement.destination_authority_digest);
-    writer.writeU8(@intFromEnum(replacement.disposition));
+    writer.writeU8(@backingInt(replacement.disposition));
     writer.writeU64(replacement.incoming_revision);
     writer.writeBytes(&replacement.incoming_semantic_digest);
     switch (replacement.payload) {
@@ -1466,10 +1466,10 @@ pub fn preparedLiveMetadataDestinationAuthorityDigest(
     writer.writeUsize(replacement.old_cleanup.owner_addr);
     writer.writeUsize(replacement.old_cleanup.storage_addr);
     writer.writeUsize(replacement.old_cleanup.frozen_out_addr);
-    writer.writeU8(@intFromEnum(replacement.old_cleanup.selection));
+    writer.writeU8(@backingInt(replacement.old_cleanup.selection));
     writer.writeBool(replacement.old_cleanup.had_invariant);
-    writer.writeU8(@intFromEnum(replacement.old_cleanup.lifecycle));
-    writer.writeU8(@intFromEnum(replacement.lifecycle));
+    writer.writeU8(@backingInt(replacement.old_cleanup.lifecycle));
+    writer.writeU8(@backingInt(replacement.lifecycle));
 
     writer.writeUsize(destination.frozen.saved_self_addr);
     switch (destination.frozen.selected) {
@@ -1487,7 +1487,7 @@ pub fn preparedLiveMetadataDestinationAuthorityDigest(
         },
     }
     writer.writeBool(destination.frozen.had_invariant);
-    writer.writeU8(@intFromEnum(destination.frozen.lifecycle));
+    writer.writeU8(@backingInt(destination.frozen.lifecycle));
     writer.writeBytes(&destination.abort.digest);
     writer.writeBytes(&destination.abort_cleanup.digest);
     return writer.finish();

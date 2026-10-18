@@ -149,8 +149,8 @@ fn materialize(inputs: *const Inputs, candidate: dmg.MountedCandidate) gate_mod.
 
 fn captureInputs(allocator: std.mem.Allocator, source: Inputs) !Inputs {
     return .{
-        .candidate_dmg = try allocator.dupeZ(u8, source.candidate_dmg),
-        .private_dmg_work = try allocator.dupeZ(u8, source.private_dmg_work),
+        .candidate_dmg = try allocator.dupeSentinel(u8, source.candidate_dmg, 0),
+        .private_dmg_work = try allocator.dupeSentinel(u8, source.private_dmg_work, 0),
         .expected_dmg = source.expected_dmg,
         .expected_version = try allocator.dupe(u8, source.expected_version),
         .test_uuid = try allocator.dupe(u8, source.test_uuid),
@@ -158,7 +158,7 @@ fn captureInputs(allocator: std.mem.Allocator, source: Inputs) !Inputs {
         .designated_requirement_sha256 = try allocator.dupe(u8, source.designated_requirement_sha256),
         .gui_zero = try captureScenario(allocator, source.gui_zero),
         .gui_live_then_quit = try captureScenario(allocator, source.gui_live_then_quit),
-        .output_path = try allocator.dupeZ(u8, source.output_path),
+        .output_path = try allocator.dupeSentinel(u8, source.output_path, 0),
         .budget_ns = source.budget_ns,
     };
 }
@@ -166,8 +166,8 @@ fn captureInputs(allocator: std.mem.Allocator, source: Inputs) !Inputs {
 fn captureScenario(allocator: std.mem.Allocator, source: Scenario) !Scenario {
     return .{
         .runner_nonce = try allocator.dupe(u8, source.runner_nonce),
-        .runner_root = try allocator.dupeZ(u8, source.runner_root),
-        .output_path = try allocator.dupeZ(u8, source.output_path),
+        .runner_root = try allocator.dupeSentinel(u8, source.runner_root, 0),
+        .output_path = try allocator.dupeSentinel(u8, source.output_path, 0),
         .app_expected = .{
             .scenario = source.app_expected.scenario,
             .request_identifier = try allocator.dupe(u8, source.app_expected.request_identifier),

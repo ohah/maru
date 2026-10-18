@@ -30,10 +30,10 @@ fn mainFallible(init: std.process.Init) !void {
     @memcpy(token_copy[0..token.len], token);
     var paths: [4][std.fs.max_path_bytes:0]u8 = undefined;
     try verifier.verify(init.io, init.gpa, trusted, .{
-        .cli_path = try std.fmt.bufPrintZ(&paths[0], "{s}", .{values[1]}),
+        .cli_path = try std.fmt.bufPrintSentinel(&paths[0], "{s}", .{values[1]}, 0),
         .cli_sha256 = values[2],
-        .evidence_path = try std.fmt.bufPrintZ(&paths[1], "{s}", .{values[3]}),
-        .bundle_path = try std.fmt.bufPrintZ(&paths[2], "{s}", .{values[4]}),
-        .output_path = try std.fmt.bufPrintZ(&paths[3], "{s}", .{values[5]}),
+        .evidence_path = try std.fmt.bufPrintSentinel(&paths[1], "{s}", .{values[3]}, 0),
+        .bundle_path = try std.fmt.bufPrintSentinel(&paths[2], "{s}", .{values[4]}, 0),
+        .output_path = try std.fmt.bufPrintSentinel(&paths[3], "{s}", .{values[5]}, 0),
     }, token_copy[0..token.len], 5 * std.time.ns_per_min);
 }

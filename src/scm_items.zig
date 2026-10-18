@@ -46,7 +46,7 @@ pub fn itemFor(
                 .repo_index = repo_index,
                 .section = sectionOf(section.section),
                 .count = @intCast(section.count),
-                .collapsed = collapsed[@intFromEnum(section.section)],
+                .collapsed = collapsed[@backingInt(section.section)],
                 // 섹션 헤더의 일괄 동작. 모델이 "대상이 하나도 없으면(전부 충돌) `.none`"까지 판정해 둔다.
                 .action = actionOf(section.action),
             },

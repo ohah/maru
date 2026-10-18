@@ -148,7 +148,7 @@ pub fn handshake(host: *Host) !void {
 /// 이 프로필로 host 를 띄우면 쓰지 않고 exit 12(bad_arguments)로 끝나는가.
 fn refuses(host_path: [:0]const u8, dir: [:0]const u8) bool {
     var arg_buf: [1100]u8 = undefined;
-    const arg = std.fmt.bufPrintZ(&arg_buf, "--profile-dir={s}", .{dir}) catch return false;
+    const arg = std.fmt.bufPrintSentinel(&arg_buf, "--profile-dir={s}", .{dir}, 0) catch return false;
     var host = Host.spawn(host_path, arg) catch return false;
     handshake(&host) catch return false;
     var failed = false;
@@ -164,9 +164,9 @@ fn profileRefusals(report: Report, host_path: [:0]const u8, root: []const u8) vo
     var open_buf: [1024]u8 = undefined;
     var acl_buf: [1024]u8 = undefined;
     var link_buf: [1024]u8 = undefined;
-    const open_dir = std.fmt.bufPrintZ(&open_buf, "{s}/refuse-0755", .{root}) catch return;
-    const acl_dir = std.fmt.bufPrintZ(&acl_buf, "{s}/refuse-acl", .{root}) catch return;
-    const link_dir = std.fmt.bufPrintZ(&link_buf, "{s}/refuse-link", .{root}) catch return;
+    const open_dir = std.fmt.bufPrintSentinel(&open_buf, "{s}/refuse-0755", .{root}, 0) catch return;
+    const acl_dir = std.fmt.bufPrintSentinel(&acl_buf, "{s}/refuse-acl", .{root}, 0) catch return;
+    const link_dir = std.fmt.bufPrintSentinel(&link_buf, "{s}/refuse-link", .{root}, 0) catch return;
     _ = std.c.mkdir(open_dir, 0o755);
     _ = std.c.chmod(open_dir, 0o755);
     _ = std.c.mkdir(acl_dir, 0o700);
@@ -185,7 +185,7 @@ fn profileRefusals(report: Report, host_path: [:0]const u8, root: []const u8) vo
 fn gpuRefusal(report: Report, host_path: [:0]const u8, root: []const u8, port: u16) void {
     var detail_buf: [256]u8 = undefined;
     var arg_buf: [1100]u8 = undefined;
-    const arg = std.fmt.bufPrintZ(&arg_buf, "--profile-dir={s}/gpu", .{root}) catch return;
+    const arg = std.fmt.bufPrintSentinel(&arg_buf, "--profile-dir={s}/gpu", .{root}, 0) catch return;
     var host = Host.spawnWith(host_path, arg, null, &.{"MARU_WEB_TEST_CPU_PAINT=1"}) catch return report(false, "gpu-refused", "spawn");
     handshake(&host) catch return report(false, "gpu-refused", "handshake");
     var u: [256]u8 = undefined;

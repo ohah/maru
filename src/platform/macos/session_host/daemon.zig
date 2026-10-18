@@ -466,10 +466,10 @@ test "tmp 정리 회피: touch 가 endpoint 와 **owner.lock** 시각을 함께 
     // 판정 함수만 테스트하면 `utimensat` 호출이 런타임에 무효여도(잘못된 인자·경로) 통과한다. 그러면 host는
     // 매시간 아무 일도 하지 않고 3일 뒤 endpoint를 잃는다 — 정확히 막으려던 그 상태다.
     var dir_buf: [128]u8 = undefined;
-    const dir = try std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-touch-test-{d}", .{c.getpid()});
+    const dir = try std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-touch-test-{d}", .{c.getpid()}, 0);
     _ = c.mkdir(dir.ptr, 0o700);
     var sock_buf: [192]u8 = undefined;
-    const fake_socket = try std.fmt.bufPrintZ(&sock_buf, "{s}/endpoint.sock", .{dir});
+    const fake_socket = try std.fmt.bufPrintSentinel(&sock_buf, "{s}/endpoint.sock", .{dir}, 0);
     defer {
         _ = c.unlink(fake_socket.ptr);
         _ = c.rmdir(dir.ptr);
@@ -486,7 +486,7 @@ test "tmp 정리 회피: touch 가 endpoint 와 **owner.lock** 시각을 함께 
     // `owner.lock` 도 같은 운명이다 — 갱신 목록에서 빠져 있으면 **이것만** tmp 정리에 지워진다
     // (2026-09-27 실측: 8일 된 host 의 디렉터리에 manifest 만 남고 lock 은 사라졌다).
     var lock_buf: [512]u8 = undefined;
-    const fake_lock = try std.fmt.bufPrintZ(&lock_buf, "{s}/owner.lock", .{dir});
+    const fake_lock = try std.fmt.bufPrintSentinel(&lock_buf, "{s}/owner.lock", .{dir}, 0);
     defer _ = c.unlink(fake_lock.ptr);
     const lock_fd = c.open(fake_lock.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
     if (lock_fd < 0) return error.SkipZigTest;
@@ -571,10 +571,11 @@ test "tmp 정리 회피 주기는 tmp_cleaner의 3일 한계보다 충분히 짧
 fn redirectStderrToHostLog(session_dir: [:0]const u8, host_id: ?u128) void {
     const id = host_id orelse return;
     var path_buf: [1024]u8 = undefined;
-    const path = std.fmt.bufPrintZ(
+    const path = std.fmt.bufPrintSentinel(
         &path_buf,
         "{s}/host-{x:0>32}.log",
         .{ std.mem.sliceTo(session_dir, 0), id },
+        0,
     ) catch return;
     const fd = c.open(
         path.ptr,
@@ -740,7 +741,7 @@ fn runSessionHostImpl(
     defer server.deinit();
     const executable_path_raw = std.process.executablePathAlloc(io, allocator) catch return error.ManifestFailed;
     defer allocator.free(executable_path_raw);
-    const executable_path = allocator.dupeZ(u8, executable_path_raw) catch return error.OutOfMemory;
+    const executable_path = allocator.dupeSentinel(u8, executable_path_raw, 0) catch return error.OutOfMemory;
     defer allocator.free(executable_path);
     // 실행 파일은 **한 번만** 읽는다 — build id 와 아래 rollback self-image 가 같은 identity 를 쓴다. 예전에는
     // build id 계산·rollback 전 재검사·`prepare` 안 재검사가 각자 경로를 다시 열어 해시했고(시작 한 번에 source 네 번),
@@ -1052,9 +1053,9 @@ test "daemon: forked host survives parent-independent (setsid) and answers hello
 
     var dir_buf: [256]u8 = undefined;
     const pid0 = c.getpid();
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-daemon-{d}", .{pid0}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-daemon-{d}", .{pid0}, 0) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -1074,7 +1075,7 @@ test "daemon: forked host survives parent-independent (setsid) and answers hello
         _ = c.waitpid(child, &status, 0);
         _ = c.unlink(socket_path.ptr);
         var incidents_buf: [320]u8 = undefined;
-        if (std.fmt.bufPrintZ(&incidents_buf, "{s}/incidents", .{dir_path})) |incidents| _ = c.rmdir(incidents.ptr) else |_| {}
+        if (std.fmt.bufPrintSentinel(&incidents_buf, "{s}/incidents", .{dir_path}, 0)) |incidents| _ = c.rmdir(incidents.ptr) else |_| {}
         std.Io.Dir.cwd().deleteTree(testing.io, dir_path) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
     }
 
@@ -1103,9 +1104,9 @@ test "daemon: forked host survives parent-independent (setsid) and answers hello
 test "daemon: competing host is rejected before it can unlink the live owner socket" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-owner-race-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-owner-race-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     var socket_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&socket_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&socket_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
     if (child == 0) {
@@ -1121,7 +1122,7 @@ test "daemon: competing host is rejected before it can unlink the live owner soc
         var owner_buf: [320]u8 = undefined;
         if (discovery.ownerLockPathIn(&owner_buf, dir_path)) |path| _ = c.unlink(path.ptr) else |_| {}
         var incidents_buf: [320]u8 = undefined;
-        if (std.fmt.bufPrintZ(&incidents_buf, "{s}/incidents", .{dir_path})) |incidents| _ = c.rmdir(incidents.ptr) else |_| {}
+        if (std.fmt.bufPrintSentinel(&incidents_buf, "{s}/incidents", .{dir_path}, 0)) |incidents| _ = c.rmdir(incidents.ptr) else |_| {}
         std.Io.Dir.cwd().deleteTree(testing.io, dir_path) catch {}; // 루트 통째로 — daemon 잔재가 남아 rmdir 은 실패한다
     }
     const first = waitConnect(socket_path, 3000) orelse return error.TestUnexpectedResult;
@@ -1167,7 +1168,7 @@ test "daemon 시작이 죽은 host 의 rollback 사본과 7 일 지난 로그를
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var base_buf: [128]u8 = undefined;
-    const base = try std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-residue-{d}", .{c.getpid()});
+    const base = try std.fmt.bufPrintSentinel(&base_buf, "/tmp/maru-sh-residue-{d}", .{c.getpid()}, 0);
     std.Io.Dir.cwd().deleteTree(testing.io, base) catch {};
     _ = c.mkdir(base.ptr, 0o700);
     var session_buf: [320]u8 = undefined;
@@ -1186,7 +1187,7 @@ test "daemon 시작이 죽은 host 의 rollback 사본과 7 일 지난 로그를
     var dead_dir_buf: [768]u8 = undefined;
     const dead_dir = try host_manifest.hostDirPathIn(&dead_dir_buf, session_dir, dead_id);
     var rollback_buf: [1024]u8 = undefined;
-    const rollback = try std.fmt.bufPrintZ(&rollback_buf, "{s}/rollback-current", .{dead_dir});
+    const rollback = try std.fmt.bufPrintSentinel(&rollback_buf, "{s}/rollback-current", .{dead_dir}, 0);
     try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = rollback, .data = "MACHO" });
     var dead_log_buf: [1024]u8 = undefined;
     const dead_log = try dead_host_residue.logPathIn(&dead_log_buf, session_dir, dead_id);
@@ -1243,10 +1244,11 @@ test "daemon stale sweep product path removes valid residue and disables only up
     for ([_]bool{ false, true }) |hostile| {
         const allocator = testing.allocator;
         var base_buf: [256]u8 = undefined;
-        const base = try std.fmt.bufPrintZ(
+        const base = try std.fmt.bufPrintSentinel(
             &base_buf,
             "/tmp/maru-sh-stale-sweep-{d}-{s}",
             .{ c.getpid(), if (hostile) "hostile" else "valid" },
+            0,
         );
         _ = c.mkdir(base.ptr, 0o700);
         var session_buf: [320]u8 = undefined;
@@ -1380,7 +1382,7 @@ test "CR0b daemon incident bootstrap prerequisite는 실제 daemon process owner
     defer tmp.cleanup();
     try std.testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const path = try std.fmt.bufPrintSentinel(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
     const runtime = try bootstrapIncidentRuntime(std.testing.allocator, path);
     var runtime_settled = false;
     defer if (!runtime_settled) {
@@ -1412,7 +1414,7 @@ test "CR0b bootstrap 4 daemon child는 실제 bootstrap transcript를 게시한�
     defer tmp.cleanup();
     try std.testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const path = try std.fmt.bufPrintSentinel(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
     const runtime = try bootstrapIncidentRuntime(std.testing.allocator, path);
     var settled = false;
     defer if (!settled) {
@@ -1420,7 +1422,7 @@ test "CR0b bootstrap 4 daemon child는 실제 bootstrap transcript를 게시한�
     };
     try incident_bootstrap_contract.testing_api.writeChildTranscript(.{
         .pid = @intCast(runtime.pid),
-        .role_raw = @intFromEnum(incident_bootstrap_contract.Role.daemon),
+        .role_raw = @backingInt(incident_bootstrap_contract.Role.daemon),
         .reserved = .{ 0, 0, 0 },
         .process_nonce = runtime.process_nonce,
         .service_process_nonce = runtime.service.process_nonce,

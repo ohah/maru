@@ -1087,7 +1087,7 @@ pub const CleanupProgressInput = struct {
     step: CleanupStep,
     next_role: CleanupRole,
     completed_mask: u8,
-    retained_observation_digest: Digest = [_]u8{0} ** 32,
+    retained_observation_digest: Digest = @as([32]u8, @splat(0)),
     decision: decision_seal.Projection = .{},
 };
 
@@ -1103,13 +1103,13 @@ pub const ObservationStringRole = enum(u8) {
 pub const ForegroundProcessDigestInput = struct {
     pid: i32 = 0,
     len: u8 = 0,
-    bytes: [128]u8 = [_]u8{0} ** 128,
+    bytes: [128]u8 = @as([128]u8, @splat(0)),
 };
 
 pub const ForegroundProcessesDigestInput = struct {
     count: u8 = 0,
     entries: [64]ForegroundProcessDigestInput =
-        [_]ForegroundProcessDigestInput{.{}} ** 64,
+        @as([64]ForegroundProcessDigestInput, @splat(.{})),
 };
 
 pub const ObservationCleanupDigestInput = struct {
@@ -1264,7 +1264,7 @@ fn decisionProjectionCanonical(input: CleanupProgressInput) bool {
 }
 
 pub fn observationStringDigest(role: ObservationStringRole, bytes: []const u8) Digest {
-    var hasher = hashDomain(string_domains[@intFromEnum(role) - 1]);
+    var hasher = hashDomain(string_domains[@backingInt(role) - 1]);
     hasher.update(bytes);
     return finish(&hasher);
 }
@@ -1345,7 +1345,7 @@ fn writeDescriptor(hasher: *std.crypto.hash.Blake3, value: CleanupDescriptor) vo
 }
 
 fn writeGraph(hasher: *std.crypto.hash.Blake3, graph: ObservationCleanupGraph) void {
-    inline for (std.meta.fields(ObservationCleanupGraph)) |field|
+    inline for (@import("type_info_fields").fields(ObservationCleanupGraph)) |field|
         writeDescriptor(hasher, @field(graph, field.name));
 }
 
@@ -1426,14 +1426,14 @@ fn descriptorPresentMask(plan: CleanupPlanInput) u8 {
     switch (plan) {
         .preparation => |value| {
             if (value.dto_backing.present == 1) mask |= 1 << 0;
-            inline for (std.meta.fields(ObservationCleanupGraph), 1..) |field, bit| {
+            inline for (@import("type_info_fields").fields(ObservationCleanupGraph), 1..) |field, bit| {
                 if (@field(value.next_observation, field.name).present == 1) {
                     mask |= @as(u8, 1) << @intCast(bit);
                 }
             }
         },
         .committed_observation => |value| {
-            inline for (std.meta.fields(ObservationCleanupGraph), 0..) |field, bit| {
+            inline for (@import("type_info_fields").fields(ObservationCleanupGraph), 0..) |field, bit| {
                 if (@field(value.old_observation, field.name).present == 1) {
                     mask |= @as(u8, 1) << @intCast(bit);
                 }
@@ -1459,8 +1459,8 @@ fn phaseFor(plan: CleanupPlanInput) CleanupPhase {
 
 fn roleForBit(plan: CleanupPlanInput, bit: u3) CleanupRole {
     return switch (plan) {
-        .preparation => @enumFromInt(@as(u8, bit) + 1),
-        .committed_observation => @enumFromInt(@as(u8, bit) + 2),
+        .preparation => @fromBackingInt(@intCast(@as(u8, bit) + 1)),
+        .committed_observation => @fromBackingInt(@intCast(@as(u8, bit) + 2)),
     };
 }
 
@@ -1495,7 +1495,7 @@ pub fn initialProgress(plan: CleanupPlanInput) CleanupProgressState {
 }
 
 fn bitForRole(plan: CleanupPlanInput, role: CleanupRole) ?u3 {
-    const raw = @intFromEnum(role);
+    const raw = @backingInt(role);
     return switch (plan) {
         .preparation => if (raw >= 1 and raw <= 8) @intCast(raw - 1) else null,
         .committed_observation => if (raw >= 2 and raw <= 8) @intCast(raw - 2) else null,

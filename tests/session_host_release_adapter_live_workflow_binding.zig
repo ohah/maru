@@ -21,7 +21,7 @@ test "U5 live binding derives all eight ordered steps from the invocation owner"
     const bindings = binding.all();
     try std.testing.expectEqual(@as(usize, 8), bindings.len);
     for (bindings, 0..) |item, index| {
-        try std.testing.expectEqual(index, @intFromEnum(item.identity.stage));
+        try std.testing.expectEqual(index, @backingInt(item.identity.stage));
         try std.testing.expectEqualStrings(expected_steps[index], item.step_id);
         try std.testing.expectEqual(owner.identity(item.invocation), item.identity);
         if (index == 0) {

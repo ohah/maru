@@ -25,9 +25,9 @@ pub const FrozenOwnerCleanupDescriptor = struct {
     allocation_addr: usize = 0,
     allocation_len: usize = 0,
     allocation_alignment: std.mem.Alignment = .@"1",
-    content_digest: Digest = [_]u8{0} ** 32,
+    content_digest: Digest = @as([32]u8, @splat(0)),
     lifecycle: Lifecycle = .empty,
-    digest: Digest = [_]u8{0} ** 32,
+    digest: Digest = @as([32]u8, @splat(0)),
 };
 
 pub const Error = error{
@@ -239,9 +239,9 @@ fn descriptorDigest(
     writer.writeUsize(descriptor.allocator_vtable_addr);
     writer.writeUsize(descriptor.allocation_addr);
     writer.writeUsize(descriptor.allocation_len);
-    writer.writeU8(@intFromEnum(descriptor.allocation_alignment));
+    writer.writeU8(@backingInt(descriptor.allocation_alignment));
     writer.writeBytes(&descriptor.content_digest);
-    writer.writeU8(@intFromEnum(descriptor.lifecycle));
+    writer.writeU8(@backingInt(descriptor.lifecycle));
     return writer.finish();
 }
 

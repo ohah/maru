@@ -39,9 +39,9 @@ pub fn colorRole(r: Role) ColorRole {
     comptime {
         // `ColorRole` 은 chrome 의 색 역할을 전부 담아 갈래가 많다 — 중첩 순회라 기본 예산을 넘는다.
         @setEvalBranchQuota(50_000);
-        for (@typeInfo(Role).@"enum".fields) |f| {
+        for (@import("type_info_fields").enumFields(Role)) |f| {
             var found = false;
-            for (@typeInfo(ColorRole).@"enum".fields) |c| {
+            for (@import("type_info_fields").enumFields(ColorRole)) |c| {
                 if (std.mem.eql(u8, c.name, "syntax_" ++ f.name)) found = true;
             }
             if (!found) @compileError("Role 과 ColorRole 의 이름이 갈렸다: " ++ f.name);
@@ -64,12 +64,12 @@ pub fn colorRole(r: Role) ColorRole {
 
 test "모든 Role 이 같은 이름의 ColorRole 로 간다" {
     @setEvalBranchQuota(50_000);
-    inline for (@typeInfo(Role).@"enum".fields) |f| {
-        const r: Role = @enumFromInt(f.value);
+    inline for (@import("type_info_fields").enumFields(Role)) |f| {
+        const r: Role = @fromBackingInt(@intCast(f.value));
         // 이름으로 다시 찾아 대조한다 — 위 갈래를 그대로 베끼면 아무것도 안 재는 판정이 된다.
         var want: ?ColorRole = null;
-        inline for (@typeInfo(ColorRole).@"enum".fields) |c| {
-            if (comptime std.mem.eql(u8, c.name, "syntax_" ++ f.name)) want = @as(ColorRole, @enumFromInt(c.value));
+        inline for (@import("type_info_fields").enumFields(ColorRole)) |c| {
+            if (comptime std.mem.eql(u8, c.name, "syntax_" ++ f.name)) want = @as(ColorRole, @fromBackingInt(@intCast(c.value)));
         }
         try std.testing.expectEqual(want.?, colorRole(r));
     }

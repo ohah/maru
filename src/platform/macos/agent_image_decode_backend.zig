@@ -104,7 +104,7 @@ const State = struct {
     /// 두었더니 `submit` 이 `inflight` 를 올린 **뒤에** 거두는 바람에 조건이 영영 참이 안 돼 핸들이
     /// 무한히 쌓였다(적대적 검증). 상한이 `max_inflight` 이므로 자리를 재사용하면 그 문제가 없고,
     /// 각 워커가 끝나며 자기 자리를 표시하면 **끝난 것만 골라** join 할 수 있다.
-    slots: [max_inflight]Slot = [_]Slot{.{}} ** max_inflight,
+    slots: [max_inflight]Slot = @as([max_inflight]Slot, @splat(.{})),
 
     fn release(self: *State) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
@@ -465,7 +465,7 @@ test "원격 왕복 장부: 실패 갈래마다 이름이 다르다 — 하나�
     // **이름이 겹치면 갈래를 나눈 뜻이 사라진다.** 열 곳에서 서로 다른 값을 세우는지는 글자
     // 판정자가 보고(각 이름 1 건), 여기서는 **이름 자체가 서로 구별되는지**와 기본값이 `.none`
     // 인지를 잰다 — 기본값이 다른 것이면 성공한 장까지 실패로 기록된다.
-    const fields = @typeInfo(RemoteFetchFailure).@"enum".fields;
+    const fields = @import("type_info_fields").enumFields(RemoteFetchFailure);
     try std.testing.expect(fields.len >= 11); // none + 열 갈래
     try std.testing.expectEqualStrings("none", @tagName(RemoteFetchFailure.none));
     try std.testing.expectEqual(RemoteFetchFailure.none, (Result{}).remote_failure);

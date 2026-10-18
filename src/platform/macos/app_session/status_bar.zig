@@ -251,7 +251,7 @@ pub fn openResourceMenu(self: *AppSession) void {
     var anchor_y: f64 = 0;
     var anchored = false;
     for (statusBarTree(self).entries) |e| {
-        if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.resource)) continue;
+        if (e.id != @backingInt(chrome.components.status_bar.ItemId.resource)) continue;
         anchor_x = e.rect.x;
         anchor_y = e.rect.y;
         anchored = true;
@@ -449,8 +449,8 @@ pub fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(Collec
 
     // 좌측 항목을 **순서대로** 만든다. 폭이 모자라면 `status_bar.compute`가 **뒤쪽부터** 버리므로,
     // 배열 순서가 곧 우선순위다 — 브랜치가 경로보다 짧고 자주 바뀌므로 앞에 둔다.
-    var frames: [max_status_bar_left_items]?renderer.DrawList = .{null} ** max_status_bar_left_items;
-    var widths: [max_status_bar_left_items]u32 = .{0} ** max_status_bar_left_items;
+    var frames: [max_status_bar_left_items]?renderer.DrawList = @splat(null);
+    var widths: [max_status_bar_left_items]u32 = @splat(0);
     // 폭 배열과 **같은 순서**의 의미 id. 슬롯의 `index`로 되짚어 발행한다 — 인덱스를 id로 쓰면 항목이
     // 하나 빠질 때 남은 것의 id가 밀려 "누른 것과 실행된 것"이 갈린다.
     var left_ids: [max_status_bar_left_items]chrome.components.status_bar.ItemId = undefined;
@@ -489,8 +489,8 @@ pub fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(Collec
     // 우측 — 안 읽은 알림 수. 0이면 항목 자체가 없다(사이드바 종 배지와 같은 전제).
     // 좌측과 **독립 배열**이다: `status_bar.compute`가 우측을 먼저 배치하고 좌측이 그 좌단을 넘지 않게
     // 자른다(S3a "부딪히면 우측을 먼저 지킨다"). 이 항목이 붙는 순간 그 규칙이 처음으로 실제로 작동한다.
-    var right_frames: [max_status_bar_right_items]?renderer.DrawList = .{null} ** max_status_bar_right_items;
-    var right_widths: [max_status_bar_right_items]u32 = .{0} ** max_status_bar_right_items;
+    var right_frames: [max_status_bar_right_items]?renderer.DrawList = @splat(null);
+    var right_widths: [max_status_bar_right_items]u32 = @splat(0);
     var right_ids: [max_status_bar_right_items]chrome.components.status_bar.ItemId = undefined;
     var rn: usize = 0;
     defer for (right_frames[0..rn]) |*maybe| {
@@ -921,7 +921,7 @@ fn publishStatusBarTree(
     if (self.status_bar_hovered) |id| {
         var still_there = false;
         for (statusBarTree(self).entries) |entry| {
-            if (entry.id == @intFromEnum(id)) still_there = true;
+            if (entry.id == @backingInt(id)) still_there = true;
         }
         if (!still_there) self.status_bar_hovered = null;
     }
@@ -941,7 +941,7 @@ pub fn statusBarItemAt(self: *const AppSession, x_px: f64, y_px: f64) ?chrome.co
     for (statusBarTree(self).entries) |entry| {
         const r = entry.rect;
         if (x_px >= r.x and x_px < r.x + r.width and y_px >= r.y and y_px < r.y + r.height) {
-            return @enumFromInt(entry.id);
+            return @fromBackingInt(@intCast(entry.id));
         }
     }
     return null;
@@ -952,7 +952,7 @@ pub fn statusBarItemAt(self: *const AppSession, x_px: f64, y_px: f64) ?chrome.co
 pub fn appendStatusBarHover(self: *AppSession) void {
     const id = self.status_bar_hovered orelse return;
     for (statusBarTree(self).entries) |entry| {
-        if (entry.id != @intFromEnum(id)) continue;
+        if (entry.id != @backingInt(id)) continue;
         self.appendSolidQuad(
             entry.rect.x,
             entry.rect.y,

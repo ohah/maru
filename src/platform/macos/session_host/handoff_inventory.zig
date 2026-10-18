@@ -37,7 +37,7 @@ pub const Group = struct {
 };
 
 fn fieldExists(comptime T: type, comptime wanted: []const u8) bool {
-    inline for (@typeInfo(T).@"struct".fields) |field| {
+    inline for (@import("type_info_fields").structFields(T)) |field| {
         if (std.mem.eql(u8, field.name, wanted)) return true;
     }
     return false;
@@ -58,7 +58,7 @@ pub fn validate(comptime T: type, comptime type_name: []const u8, comptime group
     const info = @typeInfo(T);
     if (info != .@"struct") @compileError(type_name ++ " handoff inventory requires a struct");
 
-    inline for (info.@"struct".fields) |field| {
+    inline for (@import("type_info_fields").structFields(T)) |field| {
         const count = occurrences(groups, field.name);
         if (count == 0) @compileError(type_name ++ "." ++ field.name ++ " is missing from handoff inventory");
         if (count != 1) @compileError(type_name ++ "." ++ field.name ++ " appears more than once in handoff inventory");
@@ -827,5 +827,5 @@ comptime {
 
 test "handoff inventory classifies every owner field exactly once" {
     // The compile-time block is the assertion. Keep a runtime test so the dedicated session-host test output names the gate.
-    try std.testing.expect(@typeInfo(TerminalCore).@"struct".fields.len > 0);
+    try std.testing.expect(@import("type_info_fields").structFields(TerminalCore).len > 0);
 }

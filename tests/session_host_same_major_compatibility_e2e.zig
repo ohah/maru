@@ -30,7 +30,7 @@ test "p5c3d frozen same-major host permits observer detach and rejects takeover 
     c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
     nonce = (nonce & (std.math.maxInt(u64) >> 1)) | 1;
     var xdg_buf: [256]u8 = undefined;
-    const xdg = try std.fmt.bufPrintZ(&xdg_buf, "/tmp/maru-p5c3d-{x}", .{nonce});
+    const xdg = try std.fmt.bufPrintSentinel(&xdg_buf, "/tmp/maru-p5c3d-{x}", .{nonce}, 0);
     try mkdirExact(xdg);
     defer _ = c.rmdir(xdg.ptr);
     // base 를 **이 프로세스의 격리 root** 로 통일한다. registry(`{base}/session-host`)·socket(`{base}/sh`)·
@@ -51,9 +51,9 @@ test "p5c3d frozen same-major host permits observer detach and rejects takeover 
     const host_id: u128 = (@as(u128, nonce) << 64) | 0x503562337632;
     const runtime_id: u128 = (@as(u128, nonce) << 64) | 0x72756e74696d65;
     var host_text_buf: [33]u8 = undefined;
-    const host_text = try std.fmt.bufPrintZ(&host_text_buf, "{x:0>32}", .{host_id});
+    const host_text = try std.fmt.bufPrintSentinel(&host_text_buf, "{x:0>32}", .{host_id}, 0);
     var runtime_text_buf: [33]u8 = undefined;
-    const runtime_text = try std.fmt.bufPrintZ(&runtime_text_buf, "{x:0>32}", .{runtime_id});
+    const runtime_text = try std.fmt.bufPrintSentinel(&runtime_text_buf, "{x:0>32}", .{runtime_id}, 0);
     var socket_buf: [128]u8 = undefined;
     const socket_path = try session_host.short_endpoint.currentSocketPathIn(&socket_buf, host_id);
     defer _ = c.unlink(socket_path.ptr);
@@ -62,18 +62,18 @@ test "p5c3d frozen same-major host permits observer detach and rejects takeover 
     const owner_path = try session_host.host_manifest.ownerLockPathIn(&owner_buf, session_dir, host_id);
     defer _ = c.unlink(owner_path.ptr);
     var snapshot_buf: [384]u8 = undefined;
-    const snapshot_path = try std.fmt.bufPrintZ(&snapshot_buf, "{s}/snapshot.bin", .{xdg});
+    const snapshot_path = try std.fmt.bufPrintSentinel(&snapshot_buf, "{s}/snapshot.bin", .{xdg}, 0);
     defer _ = c.unlink(snapshot_path.ptr);
     var report_buf: [384]u8 = undefined;
-    const report_path = try std.fmt.bufPrintZ(&report_buf, "{s}/report.txt", .{xdg});
+    const report_path = try std.fmt.bufPrintSentinel(&report_buf, "{s}/report.txt", .{xdg}, 0);
     defer _ = c.unlink(report_path.ptr);
     try writeSnapshot(allocator, snapshot_path);
 
-    const fixture_z = try allocator.dupeZ(u8, fixture);
+    const fixture_z = try allocator.dupeSentinel(u8, fixture, 0);
     defer allocator.free(fixture_z);
     const build_id = try session_host.host_manifest.buildIdForExecutable(allocator, fixture_z);
     defer allocator.free(build_id);
-    const build_id_z = try allocator.dupeZ(u8, build_id);
+    const build_id_z = try allocator.dupeSentinel(u8, build_id, 0);
     defer allocator.free(build_id_z);
     const fixture_pid = try spawnFixture(fixture, socket_path, host_text, runtime_text, snapshot_path, report_path, owner_path, build_id_z);
     defer killAndReap(fixture_pid);
@@ -236,9 +236,9 @@ fn runProductAttach(product: []const u8, session_host_root: [:0]const u8, runtim
     var before: c.termios = undefined;
     if (c.tcgetattr(slave, &before) != 0) return error.TermiosFailed;
     var env_buf: [320]u8 = undefined;
-    const env_arg = try std.fmt.bufPrintZ(&env_buf, "MARU_SESSION_HOST_ROOT={s}", .{session_host_root});
+    const env_arg = try std.fmt.bufPrintSentinel(&env_buf, "MARU_SESSION_HOST_ROOT={s}", .{session_host_root}, 0);
     var product_buf: [1024]u8 = undefined;
-    const product_z = try std.fmt.bufPrintZ(&product_buf, "{s}", .{product});
+    const product_z = try std.fmt.bufPrintSentinel(&product_buf, "{s}", .{product}, 0);
     const child = c.fork();
     if (child < 0) return error.ForkFailed;
     if (child == 0) {
@@ -327,7 +327,7 @@ fn verifyFrozenSource(allocator: std.mem.Allocator) !void {
 
 fn spawnFixture(fixture: []const u8, socket: [:0]const u8, host: [:0]const u8, runtime: [:0]const u8, snapshot: [:0]const u8, report: [:0]const u8, owner: [:0]const u8, build_id: [:0]const u8) !c.pid_t {
     var fixture_buf: [1024]u8 = undefined;
-    const fixture_z = try std.fmt.bufPrintZ(&fixture_buf, "{s}", .{fixture});
+    const fixture_z = try std.fmt.bufPrintSentinel(&fixture_buf, "{s}", .{fixture}, 0);
     const pid = c.fork();
     if (pid < 0) return error.ForkFailed;
     if (pid == 0) {

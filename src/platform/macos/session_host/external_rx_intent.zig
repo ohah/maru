@@ -98,7 +98,7 @@ const ClassifiedIntentOwner = struct {
     frame: framing.Frame = .{
         .header = .{
             .major = 0,
-            .kind = @enumFromInt(0),
+            .kind = @fromBackingInt(@intCast(0)),
             .stream_id = 0,
             .request_id = 0,
             .flags = 0,
@@ -111,18 +111,18 @@ const ClassifiedIntentOwner = struct {
         .start_absolute = 0,
         .end_absolute = 0,
     },
-    pair_seal: client_external_mode.ExternalRxFrameSeal = [_]u8{0} ** 32,
+    pair_seal: client_external_mode.ExternalRxFrameSeal = @as([32]u8, @splat(0)),
     payload_addr: usize = 0,
     payload_len: usize = 0,
-    payload_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    payload_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     classification: external_rx_demux.ExternalWireClass = .protocol_terminal,
     allocator: std.mem.Allocator = std.heap.page_allocator,
     allocator_ptr_addr: usize = 0,
     allocator_vtable_addr: usize = 0,
     cleanup_payload: ?[]u8 = null,
-    cleanup_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    cleanup_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: IntentLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const MovedIntentPayload = struct {
@@ -134,9 +134,9 @@ pub const MovedIntentPayload = struct {
     allocator_vtable_addr: usize = 0,
     allocation_addr: usize = 0,
     allocation_len: usize = 0,
-    content_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    content_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: MovedIntentPayloadLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const BorrowedMovedPayloadView = struct {
@@ -171,9 +171,9 @@ pub const StagedScreenMutationProof = struct {
     batch_addr: usize = 0,
     intent_index: u8 = 0,
     mutation_index: u8 = 0,
-    payload_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    payload_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: ScreenMutationProofLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const IntentCommitLifecycle = enum {
@@ -203,22 +203,22 @@ pub const PreparedIntentCommit = struct {
     final_parser_generation: u64 = 0,
     final_end_absolute: u64 = 0,
     slot_kinds: [max_intents]IntentCommitSlotKind =
-        [_]IntentCommitSlotKind{.unused} ** max_intents,
-    response_request_ids: [max_intents]u64 = [_]u64{0} ** max_intents,
-    source_parser_generations: [max_intents]u64 = [_]u64{0} ** max_intents,
-    source_start_absolutes: [max_intents]u64 = [_]u64{0} ** max_intents,
-    source_end_absolutes: [max_intents]u64 = [_]u64{0} ** max_intents,
+        @as([max_intents]IntentCommitSlotKind, @splat(.unused)),
+    response_request_ids: [max_intents]u64 = @as([max_intents]u64, @splat(0)),
+    source_parser_generations: [max_intents]u64 = @as([max_intents]u64, @splat(0)),
+    source_start_absolutes: [max_intents]u64 = @as([max_intents]u64, @splat(0)),
+    source_end_absolutes: [max_intents]u64 = @as([max_intents]u64, @splat(0)),
     source_owner_digests: [max_intents]external_owner_seal.Digest =
-        [_]external_owner_seal.Digest{[_]u8{0} ** 32} ** max_intents,
+        @as([max_intents]external_owner_seal.Digest, @splat(@as([32]u8, @splat(0)))),
     payload_digests: [max_intents]external_owner_seal.Digest =
-        [_]external_owner_seal.Digest{[_]u8{0} ** 32} ** max_intents,
+        @as([max_intents]external_owner_seal.Digest, @splat(@as([32]u8, @splat(0)))),
     destination_plan_addr: usize = 0,
     destination_plan_len: usize = 0,
-    destination_plan_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    destination_plan_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: IntentCommitLifecycle = .empty,
-    proofs_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    neutral_outputs_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    proofs_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    neutral_outputs_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const NeutralRetirementLifecycle = enum {
@@ -245,10 +245,10 @@ pub const PreparedNeutralRetirement = struct {
     allocator_vtable_addr: usize = 0,
     allocation_addr: usize = 0,
     allocation_len: usize = 0,
-    content_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
-    source_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    content_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
+    source_owner_digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
     lifecycle: NeutralRetirementLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const StagedScreenIntent = struct {
@@ -308,7 +308,7 @@ pub const ExternalRxIntentHandle = struct {
     storage_addr: usize = 0,
     reservation_generation: u64 = 0,
     lifecycle: HandleLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const CreateResult = enum {
@@ -384,12 +384,11 @@ pub const FrozenIntentAbort = struct {
     scratch_addr: usize = 0,
     aggregate_addr: usize = 0,
     cleanup: [max_intents]external_owner_cleanup.FrozenOwnerCleanupDescriptor =
-        [_]external_owner_cleanup.FrozenOwnerCleanupDescriptor{.{}} **
-        max_intents,
+        @as([max_intents]external_owner_cleanup.FrozenOwnerCleanupDescriptor, @splat(.{})),
     cleanup_count: u8 = 0,
     intent_count: u8 = 0,
     lifecycle: IntentAbortLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 const DestroyLifecycle = enum { empty, prepared, consumed };
@@ -402,10 +401,10 @@ pub const PreparedDestroy = struct {
     reservation_generation: u64 = 0,
     allocator: std.mem.Allocator = std.heap.page_allocator,
     cleanup: [max_intents]FrozenPayloadCleanup =
-        [_]FrozenPayloadCleanup{.{}} ** max_intents,
+        @as([max_intents]FrozenPayloadCleanup, @splat(.{})),
     cleanup_count: u8 = 0,
     lifecycle: DestroyLifecycle = .empty,
-    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = @as([32]u8, @splat(0)),
 };
 
 pub const FrozenDestroy = struct {
@@ -490,7 +489,7 @@ pub fn allocate(
         .parser_generation_at_start = before.parser_generation,
         .last_parser_generation = before.parser_generation,
         .last_moved_end_absolute = before.buffer_start_absolute,
-        .intents = [_]PreparedRxIntent{.empty} ** max_intents,
+        .intents = @as([max_intents]PreparedRxIntent, @splat(.empty)),
         .intent_count = 0,
         .lifecycle = .allocated,
         .digest = undefined,
@@ -669,7 +668,7 @@ pub fn moveFrame(
         return .authority_drift;
     if (classification == .protocol_terminal) {
         var cleanup =
-            [_]FrozenPayloadCleanup{.{}} ** (max_intents + 1);
+            @as([(max_intents + 1)]FrozenPayloadCleanup, @splat(.{}));
         if (!freezeClassifiedCleanup(scratch, cleanup[0..max_intents])) {
             _ = poison(scratch, handle);
             return .poisoned;
@@ -1061,7 +1060,7 @@ pub fn commitMovedIntentPayloadTransferUnchecked(
     payload.allocator_vtable_addr = 0;
     payload.allocation_addr = 0;
     payload.allocation_len = 0;
-    payload.content_digest = [_]u8{0} ** 32;
+    payload.content_digest = @as([32]u8, @splat(0));
     payload.lifecycle = .moved;
     payload.digest = movedIntentPayloadDigest(payload);
 }
@@ -1178,15 +1177,15 @@ pub fn prepareIntentCommit(
         @sizeOf(@TypeOf(neutral_outputs.*)),
     ))
         return error.InvalidAlias;
-    var slot_kinds = [_]IntentCommitSlotKind{.unused} ** max_intents;
-    var response_request_ids = [_]u64{0} ** max_intents;
-    var source_parser_generations = [_]u64{0} ** max_intents;
-    var source_start_absolutes = [_]u64{0} ** max_intents;
-    var source_end_absolutes = [_]u64{0} ** max_intents;
+    var slot_kinds = @as([max_intents]IntentCommitSlotKind, @splat(.unused));
+    var response_request_ids = @as([max_intents]u64, @splat(0));
+    var source_parser_generations = @as([max_intents]u64, @splat(0));
+    var source_start_absolutes = @as([max_intents]u64, @splat(0));
+    var source_end_absolutes = @as([max_intents]u64, @splat(0));
     var source_owner_digests =
-        [_]external_owner_seal.Digest{[_]u8{0} ** 32} ** max_intents;
+        @as([max_intents]external_owner_seal.Digest, @splat(@as([32]u8, @splat(0))));
     var payload_digests =
-        [_]external_owner_seal.Digest{[_]u8{0} ** 32} ** max_intents;
+        @as([max_intents]external_owner_seal.Digest, @splat(@as([32]u8, @splat(0))));
     var proof_count: usize = 0;
     for (&scratch.intents, 0..) |*intent, index| {
         if (!movedIntentPayloadPristine(&neutral_outputs[index]))
@@ -1817,7 +1816,7 @@ pub fn prepareIntentAbort(
     ))
         return error.InvalidAlias;
 
-    var owners = [_]?*ClassifiedIntentOwner{null} ** max_intents;
+    var owners = @as([max_intents]?*ClassifiedIntentOwner, @splat(null));
     var cleanup_count: usize = 0;
     for (scratch.intents[0..scratch.intent_count], 0..) |*intent, index| {
         switch (intent.*) {
@@ -1955,8 +1954,7 @@ pub fn finishFrozenIntentAbort(
         ))
         return .poisoned;
     var local =
-        [_]external_owner_cleanup.FrozenOwnerCleanupDescriptor{.{}} **
-        max_intents;
+        @as([max_intents]external_owner_cleanup.FrozenOwnerCleanupDescriptor, @splat(.{}));
     const count = permit.cleanup_count;
     for (permit.cleanup[0..count], 0..) |*descriptor, index|
         external_owner_cleanup.moveFrozen(
@@ -2045,7 +2043,7 @@ pub fn resetForNextTurn(
     for (scratch.intents) |intent|
         if (intent != .empty and intent != .aborted and intent != .committed)
             return .invalid_state;
-    scratch.intents = [_]PreparedRxIntent{.empty} ** max_intents;
+    scratch.intents = @as([max_intents]PreparedRxIntent, @splat(.empty));
     scratch.intent_count = 0;
     scratch.turn_generation = authority.operation_generation;
     scratch.lifecycle = .ready;
@@ -2102,7 +2100,7 @@ pub fn prepareDestroy(
             handle.allocator_vtable_addr,
         ))
         return false;
-    var cleanup = [_]FrozenPayloadCleanup{.{}} ** max_intents;
+    var cleanup = @as([max_intents]FrozenPayloadCleanup, @splat(.{}));
     switch (scratch.lifecycle) {
         .ready => if (!freezeClassifiedCleanup(scratch, &cleanup))
             return false,
@@ -2152,7 +2150,7 @@ pub fn validatePreparedDestroy(
         return false;
     switch (scratch.lifecycle) {
         .ready => {
-            var expected = [_]FrozenPayloadCleanup{.{}} ** max_intents;
+            var expected = @as([max_intents]FrozenPayloadCleanup, @splat(.{}));
             if (!freezeClassifiedCleanup(scratch, &expected)) return false;
             for (expected[0..scratch.intent_count], prepared.cleanup[0..prepared.cleanup_count]) |a, b|
                 if (!std.meta.eql(a, b)) return false;
@@ -2804,7 +2802,7 @@ fn ownerDigest(owner: *const ClassifiedIntentOwner) external_owner_seal.Digest {
     writer.writeUsize(owner.allocator_ptr_addr);
     writer.writeUsize(owner.allocator_vtable_addr);
     writer.writeBytes(&owner.cleanup_digest);
-    writer.writeU8(@intFromEnum(owner.lifecycle));
+    writer.writeU8(@backingInt(owner.lifecycle));
     return writer.finish();
 }
 
@@ -2820,7 +2818,7 @@ fn movedIntentPayloadDigest(
     writer.writeUsize(payload.allocation_addr);
     writer.writeUsize(payload.allocation_len);
     writer.writeBytes(&payload.content_digest);
-    writer.writeU8(@intFromEnum(payload.lifecycle));
+    writer.writeU8(@backingInt(payload.lifecycle));
     return writer.finish();
 }
 
@@ -2930,7 +2928,7 @@ fn screenMutationProofDigest(
     writer.writeU8(proof.intent_index);
     writer.writeU8(proof.mutation_index);
     writer.writeBytes(&proof.payload_digest);
-    writer.writeU8(@intFromEnum(proof.lifecycle));
+    writer.writeU8(@backingInt(proof.lifecycle));
     return writer.finish();
 }
 
@@ -3020,7 +3018,7 @@ fn preparedNeutralRetirementDigest(
     writer.writeUsize(permit.allocation_len);
     writer.writeBytes(&permit.content_digest);
     writer.writeBytes(&permit.source_owner_digest);
-    writer.writeU8(@intFromEnum(permit.lifecycle));
+    writer.writeU8(@backingInt(permit.lifecycle));
     return writer.finish();
 }
 
@@ -3089,7 +3087,7 @@ fn preparedIntentCommitDigest(
     writer.writeU8(permit.intent_count);
     writer.writeU64(permit.final_parser_generation);
     writer.writeU64(permit.final_end_absolute);
-    for (permit.slot_kinds) |kind| writer.writeU8(@intFromEnum(kind));
+    for (permit.slot_kinds) |kind| writer.writeU8(@backingInt(kind));
     for (permit.response_request_ids) |request_id|
         writer.writeU64(request_id);
     for (permit.source_parser_generations) |generation|
@@ -3103,7 +3101,7 @@ fn preparedIntentCommitDigest(
     writer.writeUsize(permit.destination_plan_addr);
     writer.writeUsize(permit.destination_plan_len);
     writer.writeBytes(&permit.destination_plan_digest);
-    writer.writeU8(@intFromEnum(permit.lifecycle));
+    writer.writeU8(@backingInt(permit.lifecycle));
     writer.writeBytes(&permit.proofs_digest);
     writer.writeBytes(&permit.neutral_outputs_digest);
     return writer.finish();
@@ -3178,7 +3176,7 @@ fn scratchDigest(
         .committed => writer.writeU8(3),
         .aborted => writer.writeU8(4),
     };
-    writer.writeU8(@intFromEnum(scratch.lifecycle));
+    writer.writeU8(@backingInt(scratch.lifecycle));
     return writer.finish();
 }
 
@@ -3201,7 +3199,7 @@ fn handleDigest(handle: *const ExternalRxIntentHandle) external_owner_seal.Diges
     }
     writer.writeUsize(handle.storage_addr);
     writer.writeU64(handle.reservation_generation);
-    writer.writeU8(@intFromEnum(handle.lifecycle));
+    writer.writeU8(@backingInt(handle.lifecycle));
     return writer.finish();
 }
 
@@ -3226,7 +3224,7 @@ fn preparedDestroyDigest(
             @intFromPtr(item.payload.ptr));
         writer.writeUsize(item.payload.len);
     }
-    writer.writeU8(@intFromEnum(prepared.lifecycle));
+    writer.writeU8(@backingInt(prepared.lifecycle));
     return writer.finish();
 }
 
@@ -3240,7 +3238,7 @@ fn frozenIntentAbortDigest(
     writer.writeUsize(permit.aggregate_addr);
     writer.writeU8(permit.cleanup_count);
     writer.writeU8(permit.intent_count);
-    writer.writeU8(@intFromEnum(permit.lifecycle));
+    writer.writeU8(@backingInt(permit.lifecycle));
     for (permit.cleanup[0..permit.cleanup_count]) |descriptor|
         writer.writeBytes(&descriptor.digest);
     return writer.finish();
@@ -3251,7 +3249,7 @@ fn writeHeader(
     header: protocol.Header,
 ) void {
     writer.writeU16(header.major);
-    writer.writeU16(@intFromEnum(header.kind));
+    writer.writeU16(@backingInt(header.kind));
     writer.writeU64(header.stream_id);
     writer.writeU64(header.request_id);
     writer.writeU64(header.flags);
@@ -3531,7 +3529,7 @@ fn testIdentity() external_rx_types.RxIdentity {
 test "d2b3d intent allocation rejects misaligned operation scratch before write or free" {
     var storage_marker: u8 = 0;
     var caller_scratch =
-        [_]u8{0x5a} ** (@sizeOf(ExternalRxIntentScratch) + 2);
+        @as([(@sizeOf(ExternalRxIntentScratch) + 2)]u8, @splat(0x5a));
     const before = caller_scratch;
     var allocator = HostileAddressAllocator{
         .target = @ptrCast(&caller_scratch[1]),
@@ -3821,9 +3819,9 @@ test "d2b3c mixed event and response intents move into sealed neutral slots once
 
     const CommitAggregate = struct {
         proofs: [max_intents]StagedScreenMutationProof =
-            [_]StagedScreenMutationProof{.{}} ** max_intents,
+            @as([max_intents]StagedScreenMutationProof, @splat(.{})),
         neutral: [max_intents]MovedIntentPayload =
-            [_]MovedIntentPayload{.{}} ** max_intents,
+            @as([max_intents]MovedIntentPayload, @splat(.{})),
         permit: PreparedIntentCommit = .{},
         event_retirement: PreparedNeutralRetirement = .{},
         event_cleanup: external_owner_cleanup.FrozenOwnerCleanupDescriptor = .{},
@@ -4288,8 +4286,10 @@ test "d2b3b hostile allocator cannot place scratch in sealed owner range" {
         @sizeOf(ExternalRxIntentScratch) +
             @alignOf(ExternalRxIntentScratch)
     ]u8 align(@alignOf(ExternalRxIntentScratch)) =
-        [_]u8{0xa5} ** (@sizeOf(ExternalRxIntentScratch) +
-            @alignOf(ExternalRxIntentScratch));
+        @as([
+            (@sizeOf(ExternalRxIntentScratch) +
+                @alignOf(ExternalRxIntentScratch))
+        ]u8, @splat(0xa5));
     var fixed = std.heap.FixedBufferAllocator.init(&backing);
     var counting = FreeCountingAllocator{ .parent = fixed.allocator() };
     const ranges = [_]external_owner_range.Range{.{
@@ -4325,8 +4325,10 @@ test "d2b3d hostile allocator cannot place intent scratch in whole-turn scratch"
         @sizeOf(ExternalRxIntentScratch) +
             @alignOf(ExternalRxIntentScratch)
     ]u8 align(@alignOf(ExternalRxIntentScratch)) =
-        [_]u8{0xa5} ** (@sizeOf(ExternalRxIntentScratch) +
-            @alignOf(ExternalRxIntentScratch));
+        @as([
+            (@sizeOf(ExternalRxIntentScratch) +
+                @alignOf(ExternalRxIntentScratch))
+        ]u8, @splat(0xa5));
     var fixed = std.heap.FixedBufferAllocator.init(&operation_scratch);
     var counting = FreeCountingAllocator{ .parent = fixed.allocator() };
     var authority = TestAuthority{ .view = .{

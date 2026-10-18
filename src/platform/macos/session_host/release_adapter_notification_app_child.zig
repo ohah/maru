@@ -191,15 +191,15 @@ const RealExecutor = struct {
 };
 
 fn env(storage: anytype, name: []const u8, value: []const u8) ![:0]const u8 {
-    return std.fmt.bufPrintZ(storage, "{s}={s}", .{ name, value }) catch error.InvalidInput;
+    return std.fmt.bufPrintSentinel(storage, "{s}={s}", .{ name, value }, 0) catch error.InvalidInput;
 }
 
 fn envInt(storage: anytype, name: []const u8, value: u64) ![:0]const u8 {
-    return std.fmt.bufPrintZ(storage, "{s}={d}", .{ name, value }) catch error.InvalidInput;
+    return std.fmt.bufPrintSentinel(storage, "{s}={d}", .{ name, value }, 0) catch error.InvalidInput;
 }
 
 fn childEnv(storage: anytype, name: []const u8, root: []const u8, suffix: []const u8) ![:0]const u8 {
-    return std.fmt.bufPrintZ(storage, "{s}={s}{s}", .{ name, root, suffix }) catch error.InvalidInput;
+    return std.fmt.bufPrintSentinel(storage, "{s}={s}{s}", .{ name, root, suffix }, 0) catch error.InvalidInput;
 }
 
 fn validAbsolute(value: []const u8) bool {

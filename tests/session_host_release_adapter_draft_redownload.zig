@@ -10,7 +10,7 @@ fn assets() [4]redownload.ExpectedAsset {
         .id = 1000 + index,
         .name = names[index],
         .size = 100 + index,
-        .sha256 = [_]u8{'a' + @as(u8, @intCast(index))} ** 64,
+        .sha256 = @as([64]u8, @splat('a' + @as(u8, @intCast(index)))),
         .device = 7,
         .inode = 20 + index,
         .fd = 40 + @as(c.fd_t, @intCast(index)),
@@ -30,7 +30,7 @@ const Authority = struct {
         if (self.drift_after) |call| {
             if (self.calls >= call) value[2].size += 1;
         }
-        return .{ .release_id = 88, .cli_sha256 = [_]u8{'f'} ** 64, .assets = value };
+        return .{ .release_id = 88, .cli_sha256 = @as([64]u8, @splat('f')), .assets = value };
     }
 };
 
@@ -179,5 +179,5 @@ test "production downloader rejects short and oversized bodies" {
 fn temporaryPath(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root[0..root_len], leaf });
+    return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ root[0..root_len], leaf }, 0);
 }

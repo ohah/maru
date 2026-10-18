@@ -2263,7 +2263,7 @@ flowchart TD
   아니라 candidate identity의 첫 revalidation view에서 유도하며, app·DMG·frozen executable·HOME·leaf pathname은 각 authority가
   봉인한 경로만 argv에 들어간다. cwd는 caller가 held directory fd로 보존한 source root이다. Zig executable은 raw pathname이
   아니라 trusted tag workflow가 mise 설치 직후 만든 final-address `ZigToolchainAuthority`에서만 온다. workflow는 canonical absolute
-  pathname, regular/executable mode, size, SHA-256과 exact version `0.16.0`을 먼저 고정하고, adapter는 같은 pathname object와 held
+  pathname, regular/executable mode, size, SHA-256과 exact version `0.17.0`을 먼저 고정하고, adapter는 같은 pathname object와 held
   file identity·size·mode·digest를 child 실행 직전과 직후 다시 검증한다. child environment는
   `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, `HOME=/var/empty`,
   `ZIG_GLOBAL_CACHE_DIR=.zig-cache`의 closed 목록이며 cache 상대경로는 held source cwd 안에서만 해석된다. adapter는 하나의 남은
@@ -2455,7 +2455,7 @@ flowchart TD
   전환한다.
 - `upgrade_bootstrap`은 별도 실행된 staged target에서 fd 3 외 descriptor를 거부하고, primary handoff와 embedded
   attempt record를 같은 decoder로 전량 읽어 host/epoch/sorted runtime 집합과 `std.process.openExecutable`이 연
-  현재 process executable pathname object의 recorded inode/dev/size/SHA-256을 교차검증한다. Zig 0.16의 macOS
+  현재 process executable pathname object의 recorded inode/dev/size/SHA-256을 교차검증한다. Zig 0.17의 macOS
   구현은 `_NSGetExecutablePath` 결과를 다시 open하므로 이는 kernel-loaded image pin 증거가 아니다. 경로 문자열은 macOS의
   `/tmp`→`/private/tmp` 해소처럼 같은 vnode를 다른 철자로 표현할 수 있으므로 image 권위로 사용하지 않는다.
   `ProductPreflight`는 child stdio를 `/dev/null`로 고정하고 primary만 fd

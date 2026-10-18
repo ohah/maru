@@ -62,17 +62,17 @@ pub fn uploadBytes(
     // null-term C argv: env ssh -S <ctl> <dest> <cmd>. 0.16 std엔 execvp(PATH 검색)가 없어 /usr/bin/env를
     // execve해 env(1)가 PATH에서 ssh를 찾게 한다(현재 env 상속 — SSH_AUTH_SOCK·ControlMaster 등; maru
     // wrapper도 env로 ssh를 실행해 일관). 문자열은 fork/exec까지 유효해야 하므로 dupeZ로 보관한다.
-    const c_env0 = try allocator.dupeZ(u8, "env"); // execve argv[0](프로그램 이름)
+    const c_env0 = try allocator.dupeSentinel(u8, "env", 0); // execve argv[0](프로그램 이름)
     defer allocator.free(c_env0);
-    const c_ssh = try allocator.dupeZ(u8, "ssh");
+    const c_ssh = try allocator.dupeSentinel(u8, "ssh", 0);
     defer allocator.free(c_ssh);
-    const c_flag = try allocator.dupeZ(u8, "-S");
+    const c_flag = try allocator.dupeSentinel(u8, "-S", 0);
     defer allocator.free(c_flag);
-    const c_ctl = try allocator.dupeZ(u8, ctl);
+    const c_ctl = try allocator.dupeSentinel(u8, ctl, 0);
     defer allocator.free(c_ctl);
-    const c_dest = try allocator.dupeZ(u8, dest);
+    const c_dest = try allocator.dupeSentinel(u8, dest, 0);
     defer allocator.free(c_dest);
-    const c_cmd = try allocator.dupeZ(u8, cmd);
+    const c_cmd = try allocator.dupeSentinel(u8, cmd, 0);
     defer allocator.free(c_cmd);
     const argv = [_:null]?[*:0]const u8{
         c_env0.ptr, c_ssh.ptr,
@@ -156,17 +156,17 @@ pub fn runRemoteScript(
     const cmd = try remote_shell.wrapAlloc(allocator, script, args);
     defer allocator.free(cmd);
 
-    const c_env0 = try allocator.dupeZ(u8, "env");
+    const c_env0 = try allocator.dupeSentinel(u8, "env", 0);
     defer allocator.free(c_env0);
-    const c_ssh = try allocator.dupeZ(u8, "ssh");
+    const c_ssh = try allocator.dupeSentinel(u8, "ssh", 0);
     defer allocator.free(c_ssh);
-    const c_flag = try allocator.dupeZ(u8, "-S");
+    const c_flag = try allocator.dupeSentinel(u8, "-S", 0);
     defer allocator.free(c_flag);
-    const c_ctl = try allocator.dupeZ(u8, ctl);
+    const c_ctl = try allocator.dupeSentinel(u8, ctl, 0);
     defer allocator.free(c_ctl);
-    const c_dest = try allocator.dupeZ(u8, dest);
+    const c_dest = try allocator.dupeSentinel(u8, dest, 0);
     defer allocator.free(c_dest);
-    const c_cmd = try allocator.dupeZ(u8, cmd);
+    const c_cmd = try allocator.dupeSentinel(u8, cmd, 0);
     defer allocator.free(c_cmd);
     const argv = [_:null]?[*:0]const u8{
         c_env0.ptr, c_ssh.ptr,
@@ -224,7 +224,7 @@ pub fn runArgvCapped(
         for (argv_z.items) |maybe| if (maybe) |ptr| allocator.free(std.mem.span(ptr));
         argv_z.deinit(allocator);
     }
-    for (argv) |arg| try argv_z.append(allocator, (try allocator.dupeZ(u8, arg)).ptr);
+    for (argv) |arg| try argv_z.append(allocator, (try allocator.dupeSentinel(u8, arg, 0)).ptr);
     try argv_z.append(allocator, null);
 
     var out_pipe: [2]c_int = undefined;
@@ -324,17 +324,17 @@ pub fn runRemoteCappedCancelable(
     const cmd = try remote_shell.wrapAlloc(allocator, script, args);
     defer allocator.free(cmd);
 
-    const c_env0 = try allocator.dupeZ(u8, "env");
+    const c_env0 = try allocator.dupeSentinel(u8, "env", 0);
     defer allocator.free(c_env0);
-    const c_ssh = try allocator.dupeZ(u8, "ssh");
+    const c_ssh = try allocator.dupeSentinel(u8, "ssh", 0);
     defer allocator.free(c_ssh);
-    const c_flag = try allocator.dupeZ(u8, "-S");
+    const c_flag = try allocator.dupeSentinel(u8, "-S", 0);
     defer allocator.free(c_flag);
-    const c_ctl = try allocator.dupeZ(u8, ctl);
+    const c_ctl = try allocator.dupeSentinel(u8, ctl, 0);
     defer allocator.free(c_ctl);
-    const c_dest = try allocator.dupeZ(u8, dest);
+    const c_dest = try allocator.dupeSentinel(u8, dest, 0);
     defer allocator.free(c_dest);
-    const c_cmd = try allocator.dupeZ(u8, cmd);
+    const c_cmd = try allocator.dupeSentinel(u8, cmd, 0);
     defer allocator.free(c_cmd);
     const argv = [_:null]?[*:0]const u8{
         c_env0.ptr, c_ssh.ptr,
@@ -420,7 +420,7 @@ pub fn runRemoteCappedCancelable(
 /// 불리므로 `std.Io` 를 안 만지는 것이 규율이다(`uploadWorker` 의 전제) — 번들에서 감시자 바이트를
 /// 집는 것도 그 스레드에서 해야 UI 틱에 ssh 왕복이 안 남는다.
 pub fn readFileNoIo(allocator: std.mem.Allocator, path: []const u8, max: usize) ![]u8 {
-    const z = try allocator.dupeZ(u8, path);
+    const z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(z);
     const fd = std.c.open(z.ptr, .{ .ACCMODE = .RDONLY });
     if (fd < 0) return error.OpenFailed;
@@ -537,17 +537,17 @@ pub fn spawnRemoteCommand(
     dest: []const u8,
     shell_command: []const u8,
 ) !Stream {
-    const c_env0 = try allocator.dupeZ(u8, "env");
+    const c_env0 = try allocator.dupeSentinel(u8, "env", 0);
     defer allocator.free(c_env0);
-    const c_ssh = try allocator.dupeZ(u8, "ssh");
+    const c_ssh = try allocator.dupeSentinel(u8, "ssh", 0);
     defer allocator.free(c_ssh);
-    const c_flag = try allocator.dupeZ(u8, "-S");
+    const c_flag = try allocator.dupeSentinel(u8, "-S", 0);
     defer allocator.free(c_flag);
-    const c_ctl = try allocator.dupeZ(u8, ctl);
+    const c_ctl = try allocator.dupeSentinel(u8, ctl, 0);
     defer allocator.free(c_ctl);
-    const c_dest = try allocator.dupeZ(u8, dest);
+    const c_dest = try allocator.dupeSentinel(u8, dest, 0);
     defer allocator.free(c_dest);
-    const c_cmd = try allocator.dupeZ(u8, shell_command);
+    const c_cmd = try allocator.dupeSentinel(u8, shell_command, 0);
     defer allocator.free(c_cmd);
     const argv = [_:null]?[*:0]const u8{
         c_env0.ptr, c_ssh.ptr,
@@ -712,17 +712,17 @@ pub fn spawnAgentEventsReplayMode(
         try remote_shell.wrapAlloc(allocator, stream_resume_script, &.{ remote_maru, remote_dir_rel, safe_resume });
     defer allocator.free(cmd);
 
-    const c_env0 = try allocator.dupeZ(u8, "env");
+    const c_env0 = try allocator.dupeSentinel(u8, "env", 0);
     defer allocator.free(c_env0);
-    const c_ssh = try allocator.dupeZ(u8, "ssh");
+    const c_ssh = try allocator.dupeSentinel(u8, "ssh", 0);
     defer allocator.free(c_ssh);
-    const c_flag = try allocator.dupeZ(u8, "-S");
+    const c_flag = try allocator.dupeSentinel(u8, "-S", 0);
     defer allocator.free(c_flag);
-    const c_ctl = try allocator.dupeZ(u8, ctl);
+    const c_ctl = try allocator.dupeSentinel(u8, ctl, 0);
     defer allocator.free(c_ctl);
-    const c_dest = try allocator.dupeZ(u8, dest);
+    const c_dest = try allocator.dupeSentinel(u8, dest, 0);
     defer allocator.free(c_dest);
-    const c_cmd = try allocator.dupeZ(u8, cmd);
+    const c_cmd = try allocator.dupeSentinel(u8, cmd, 0);
     defer allocator.free(c_cmd);
     const argv = [_:null]?[*:0]const u8{
         c_env0.ptr, c_ssh.ptr,
@@ -840,17 +840,17 @@ pub fn spawnRemoteWatch(
     const cmd = try remote_shell.wrapAlloc(allocator, watch_script, watchArgs(root, &env_tokens, &args));
     defer allocator.free(cmd);
 
-    const c_env0 = try allocator.dupeZ(u8, "env");
+    const c_env0 = try allocator.dupeSentinel(u8, "env", 0);
     defer allocator.free(c_env0);
-    const c_ssh = try allocator.dupeZ(u8, "ssh");
+    const c_ssh = try allocator.dupeSentinel(u8, "ssh", 0);
     defer allocator.free(c_ssh);
-    const c_flag = try allocator.dupeZ(u8, "-S");
+    const c_flag = try allocator.dupeSentinel(u8, "-S", 0);
     defer allocator.free(c_flag);
-    const c_ctl = try allocator.dupeZ(u8, ctl);
+    const c_ctl = try allocator.dupeSentinel(u8, ctl, 0);
     defer allocator.free(c_ctl);
-    const c_dest = try allocator.dupeZ(u8, dest);
+    const c_dest = try allocator.dupeSentinel(u8, dest, 0);
     defer allocator.free(c_dest);
-    const c_cmd = try allocator.dupeZ(u8, cmd);
+    const c_cmd = try allocator.dupeSentinel(u8, cmd, 0);
     defer allocator.free(c_cmd);
     const argv = [_:null]?[*:0]const u8{
         c_env0.ptr, c_ssh.ptr,

@@ -145,7 +145,7 @@ fn runTargetPreflight(
 }
 
 fn writeResult(path: []const u8, text: []const u8, allocator: std.mem.Allocator) !void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     const fd = c.open(path_z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));
     if (fd < 0) return error.OpenFailed;
@@ -254,7 +254,7 @@ pub fn main(init: std.process.Init) !void {
     const scenario = args.next() orelse "success";
     const owner_dir = args.next() orelse return error.MissingArgument;
     const next_path = args.next() orelse return error.MissingArgument;
-    const owner_dir_z = try allocator.dupeZ(u8, owner_dir);
+    const owner_dir_z = try allocator.dupeSentinel(u8, owner_dir, 0);
     defer allocator.free(owner_dir_z);
     var self_image = try session_host.staged_image.stage(allocator, executable_path, owner_dir_z, "self-current");
     defer self_image.deinit();
@@ -304,7 +304,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer allocator.free(bytes);
 
-    const state_z = try allocator.dupeZ(u8, state_path);
+    const state_z = try allocator.dupeSentinel(u8, state_path, 0);
     defer allocator.free(state_z);
     const backup_z = try std.fmt.allocPrintSentinel(allocator, "{s}.backup", .{state_path}, 0);
     defer allocator.free(backup_z);
@@ -354,11 +354,11 @@ pub fn main(init: std.process.Init) !void {
     defer _ = c.close(backup_read_fd);
     try setCloseOnExec(primary_read_fd);
     try setCloseOnExec(backup_read_fd);
-    const scenario_z = try allocator.dupeZ(u8, scenario);
+    const scenario_z = try allocator.dupeSentinel(u8, scenario, 0);
     defer allocator.free(scenario_z);
-    const next_path_z = try allocator.dupeZ(u8, next_path);
+    const next_path_z = try allocator.dupeSentinel(u8, next_path, 0);
     defer allocator.free(next_path_z);
-    const result_z = try allocator.dupeZ(u8, result_path);
+    const result_z = try allocator.dupeSentinel(u8, result_path, 0);
     defer allocator.free(result_z);
     const target_dev_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{target_image.identity.dev}, 0);
     defer allocator.free(target_dev_z);
@@ -367,7 +367,7 @@ pub fn main(init: std.process.Init) !void {
     const target_size_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{target_image.identity.size}, 0);
     defer allocator.free(target_size_z);
     const target_sha_hex = std.fmt.bytesToHex(target_image.identity.sha256, .lower);
-    const target_sha_z = try allocator.dupeZ(u8, &target_sha_hex);
+    const target_sha_z = try allocator.dupeSentinel(u8, &target_sha_hex, 0);
     defer allocator.free(target_sha_z);
     const rollback_dev_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{self_image.identity.dev}, 0);
     defer allocator.free(rollback_dev_z);
@@ -376,7 +376,7 @@ pub fn main(init: std.process.Init) !void {
     const rollback_size_z = try std.fmt.allocPrintSentinel(allocator, "{d}", .{self_image.identity.size}, 0);
     defer allocator.free(rollback_size_z);
     const rollback_sha_hex = std.fmt.bytesToHex(self_image.identity.sha256, .lower);
-    const rollback_sha_z = try allocator.dupeZ(u8, &rollback_sha_hex);
+    const rollback_sha_z = try allocator.dupeSentinel(u8, &rollback_sha_hex, 0);
     defer allocator.free(rollback_sha_z);
     const target_launch: TargetLaunch = .{
         .old_path = self_image.path,

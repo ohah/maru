@@ -80,11 +80,11 @@ pub const AbortError = error{
 };
 
 fn errorSetMatches(comptime ErrorSet: type, comptime expected: []const []const u8) bool {
-    const errors = @typeInfo(ErrorSet).error_set orelse return false;
+    const errors = @typeInfo(ErrorSet).error_set.error_names orelse return false;
     if (errors.len != expected.len) return false;
     inline for (expected) |name| {
         var found = false;
-        inline for (errors) |entry| if (std.mem.eql(u8, entry.name, name)) {
+        inline for (errors) |entry| if (std.mem.eql(u8, entry, name)) {
             found = true;
         };
         if (!found) return false;
@@ -1217,7 +1217,7 @@ fn mapGenerationExecuteToLegacyError(err: client_slot_mod.GenerationExecuteError
 
 fn rawLifecycleValid(value: *const Lifecycle) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
-    return raw <= @intFromEnum(Lifecycle.terminal);
+    return raw <= @backingInt(Lifecycle.terminal);
 }
 
 fn bindingRoleRawValid(value: *const contract.AttachmentRole) bool {
@@ -1804,7 +1804,7 @@ fn runReusableResponseCorrection(cycles: usize, hostile_alias_case: ?u8) !void {
     defer slot.deinit();
 
     const Lease = @typeInfo(
-        @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".params[2].type.?,
+        @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".param_types[2].?,
     ).pointer.child;
     const Owner = struct {
         transport: GenerationTransport = .{},
@@ -1923,7 +1923,7 @@ fn runScopedDecoderSocket(case: ScopedDecoderSocketCase) !void {
     defer slot.deinit();
 
     const Lease = @typeInfo(
-        @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".params[2].type.?,
+        @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".param_types[2].?,
     ).pointer.child;
     const Owner = struct {
         transport: GenerationTransport = .{},
@@ -2144,22 +2144,25 @@ fn runScopedDecoderProofLoss(case_id: u8) !void {
     if (child == 0) {
         _ = c.close(stage_pipe[0]);
         var case_buffer: [64]u8 = undefined;
-        const case_env = std.fmt.bufPrintZ(
+        const case_env = std.fmt.bufPrintSentinel(
             &case_buffer,
             "MARU_2C3E_C1_PROOF_CASE={d}",
             .{case_id},
+            0,
         ) catch c._exit(126);
         var fd_buffer: [64]u8 = undefined;
-        const fd_env = std.fmt.bufPrintZ(
+        const fd_env = std.fmt.bufPrintSentinel(
             &fd_buffer,
             "MARU_2C3E_C1_PROOF_FD={d}",
             .{stage_pipe[1]},
+            0,
         ) catch c._exit(126);
         var nonce_buffer: [96]u8 = undefined;
-        const nonce_env = std.fmt.bufPrintZ(
+        const nonce_env = std.fmt.bufPrintSentinel(
             &nonce_buffer,
             "MARU_2C3E_C1_PROOF_NONCE={d}",
             .{nonce},
+            0,
         ) catch c._exit(126);
         const argv = [_:null]?[*:0]const u8{executable.ptr};
         const env = [_:null]?[*:0]const u8{ case_env.ptr, fd_env.ptr, nonce_env.ptr };
@@ -2277,11 +2280,11 @@ test "CR3a-2c3b internal rpc substrate peer matrix is non-crashing and fail-clos
         try B3ExecutionHarness.initInPlace(
             &harness,
             allocator,
-            0x2C3B_6000 + @as(u128, @intFromEnum(peer_case)),
+            0x2C3B_6000 + @as(u128, @backingInt(peer_case)),
             .alloc,
         );
         defer harness.deinit();
-        try prepareB36RpcHarness(&harness, allocator, @intFromEnum(peer_case));
+        try prepareB36RpcHarness(&harness, allocator, @backingInt(peer_case));
 
         var header = (protocol.Header{
             .kind = .response,
@@ -2551,22 +2554,25 @@ test "CR3a-2c3b internal rpc substrate local invariant fail-stop is authenticate
                     _ = c.close(inherited_fd);
             }
             var cap_fd_buf: [96]u8 = undefined;
-            const cap_fd_env = std.fmt.bufPrintZ(
+            const cap_fd_env = std.fmt.bufPrintSentinel(
                 &cap_fd_buf,
                 "MARU_SESSION_HOST_RPC_SUBSTRATE_CAP_FD={d}",
                 .{capability_pipe[0]},
+                0,
             ) catch c._exit(126);
             var stage_fd_buf: [96]u8 = undefined;
-            const stage_fd_env = std.fmt.bufPrintZ(
+            const stage_fd_env = std.fmt.bufPrintSentinel(
                 &stage_fd_buf,
                 "MARU_SESSION_HOST_RPC_SUBSTRATE_STAGE_FD={d}",
                 .{stage_pipe[1]},
+                0,
             ) catch c._exit(126);
             var case_buf: [96]u8 = undefined;
-            const case_env = std.fmt.bufPrintZ(
+            const case_env = std.fmt.bufPrintSentinel(
                 &case_buf,
                 "MARU_SESSION_HOST_RPC_SUBSTRATE_CASE={d}",
                 .{case_id},
+                0,
             ) catch c._exit(126);
             const argv = [_:null]?[*:0]const u8{self_path_z.ptr};
             const child_env = [_:null]?[*:0]const u8{
@@ -2761,22 +2767,25 @@ test "CR3a-2c3b reusable response correction forbids work after rearm before ope
                 if (inherited_fd != capability_pipe[0]) _ = c.close(inherited_fd);
             }
             var fd_env_buf: [96]u8 = undefined;
-            const fd_env = std.fmt.bufPrintZ(
+            const fd_env = std.fmt.bufPrintSentinel(
                 &fd_env_buf,
                 "MARU_SESSION_HOST_RPC_REUSE_CAP_FD={d}",
                 .{capability_pipe[0]},
+                0,
             ) catch c._exit(126);
             var cap_env_buf: [96]u8 = undefined;
-            const cap_env = std.fmt.bufPrintZ(
+            const cap_env = std.fmt.bufPrintSentinel(
                 &cap_env_buf,
                 "MARU_SESSION_HOST_RPC_REUSE_CAP={x}",
                 .{capability},
+                0,
             ) catch c._exit(126);
             var case_env_buf: [96]u8 = undefined;
-            const case_env = std.fmt.bufPrintZ(
+            const case_env = std.fmt.bufPrintSentinel(
                 &case_env_buf,
                 "MARU_SESSION_HOST_RPC_REUSE_CASE={d}",
                 .{hostile_case},
+                0,
             ) catch c._exit(126);
             const argv = [_:null]?[*:0]const u8{self_path_z.ptr};
             const child_env = [_:null]?[*:0]const u8{
@@ -2907,11 +2916,11 @@ fn isForbiddenFacadeType(comptime T: type) bool {
         .array => |info| isForbiddenFacadeType(info.child),
         .error_union => |info| isForbiddenFacadeType(info.payload),
         .@"struct" => |info| blk: {
-            for (info.fields) |field| if (isForbiddenFacadeType(field.type)) break :blk true;
+            for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (isForbiddenFacadeType(field.type)) break :blk true;
             break :blk false;
         },
         .@"union" => |info| blk: {
-            for (info.fields) |field| if (isForbiddenFacadeType(field.type)) break :blk true;
+            for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (isForbiddenFacadeType(field.type)) break :blk true;
             break :blk false;
         },
         else => false,
@@ -2982,7 +2991,7 @@ comptime {
         "cancelled_before_write",
         "partial_frame_requires_close",
     };
-    const actual_revoke_fields = std.meta.fields(RevokeFence);
+    const actual_revoke_fields = @import("type_info_fields").fields(RevokeFence);
     if (actual_revoke_fields.len != expected_revoke_fields.len)
         @compileError("GenerationTransport RevokeFence changed without updating SSOT");
     for (actual_revoke_fields, expected_revoke_fields) |actual, expected|
@@ -3005,9 +3014,9 @@ comptime {
     };
     for (methods) |method| {
         const info = @typeInfo(@TypeOf(method)).@"fn";
-        for (info.params, 0..) |param, index| {
+        for (info.param_types, 0..) |param_type, index| {
             if (index == 0) continue; // final-address self is the facade, not an escaped Client owner.
-            if (param.type) |Param| if (isForbiddenFacadeType(Param))
+            if (param_type) |Param| if (isForbiddenFacadeType(Param))
                 @compileError("GenerationTransport public facade exposes Client-owned backing");
         }
         if (info.return_type) |Return| if (isForbiddenFacadeType(Return))
@@ -3056,7 +3065,7 @@ test "CR3a-2c3d C1 generation event take is reusable and burns same-address ABA"
     defer slot.deinit();
 
     const Lease = @typeInfo(
-        @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".params[2].type.?,
+        @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".param_types[2].?,
     ).pointer.child;
     const Owner = struct {
         transport: GenerationTransport = .{},
@@ -3381,7 +3390,7 @@ test "CR3a-2c3d C2 public release frees once drops the event pin and reuses the 
     try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3D21);
     defer slot.deinit();
     const Lease = @typeInfo(
-        @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".params[2].type.?,
+        @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".param_types[2].?,
     ).pointer.child;
     const Owner = struct {
         transport: GenerationTransport = .{},
@@ -3604,7 +3613,7 @@ test "CR3a-2c3d C2 owner lease payload seal and same-address stale owner transfe
             try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3D31);
             defer slot.deinit();
             const Lease = @typeInfo(
-                @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".params[2].type.?,
+                @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".param_types[2].?,
             ).pointer.child;
             const Owner = struct {
                 transport: GenerationTransport = .{},
@@ -3773,7 +3782,7 @@ test "CR3a-2c3d C2 owner lease payload seal and same-address stale owner transfe
 test "CR3a-2c3d C1 event destination rejects canonical owner aliases and overflow" {
     const Owner = struct {
         transport: GenerationTransport = .{},
-        sibling: [@sizeOf(EventOwner)]u8 = [_]u8{0} ** @sizeOf(EventOwner),
+        sibling: [@sizeOf(EventOwner)]u8 = @as([@sizeOf(EventOwner)]u8, @splat(0)),
         event: EventOwner = .{},
     };
     var owner: Owner = .{};
@@ -4057,7 +4066,7 @@ test "CR3a-2a copied generation transport cannot prepare or mutate Client" {
     try std.testing.expectEqual(Lifecycle.live, transport.lifecycle);
     try std.testing.expectEqualSlices(
         u8,
-        &([_]u8{0} ** @sizeOf(client_mod.PreparedBlockingRpcStorage)),
+        &(@as([@sizeOf(client_mod.PreparedBlockingRpcStorage)]u8, @splat(0))),
         &transport.prepared_storage.bytes,
     );
     const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
@@ -4172,7 +4181,7 @@ test "CR3a-2c3b capability projection is exact and rejects stale or busy ownersh
     slot.current.active_operation_transport_incarnation = 0;
     const operation_kind_raw: *u8 = @ptrCast(&slot.current.active_operation_kind);
     var operation_kind_value: u16 =
-        @as(u16, @intFromEnum(client_slot_mod.StreamOperationKind.event)) + 1;
+        @as(u16, @backingInt(client_slot_mod.StreamOperationKind.event)) + 1;
     while (operation_kind_value <= std.math.maxInt(u8)) : (operation_kind_value += 1) {
         operation_kind_raw.* = @intCast(operation_kind_value);
         try std.testing.expectError(error.Busy, transport.capabilities());
@@ -4192,7 +4201,7 @@ test "CR3a-2c3b capability projection is exact and rejects stale or busy ownersh
     const canonical_owner_seal = try slot.transportOwnerSeal(reservation);
     const owner_lifecycle_raw: *u8 = @ptrCast(&canonical_owner_seal.lifecycle);
     var owner_lifecycle_value: u16 =
-        @as(u16, @intFromEnum(contract.TransportOwnerLifecycle.terminal)) + 1;
+        @as(u16, @backingInt(contract.TransportOwnerLifecycle.terminal)) + 1;
     while (owner_lifecycle_value <= std.math.maxInt(u8)) : (owner_lifecycle_value += 1) {
         owner_lifecycle_raw.* = @intCast(owner_lifecycle_value);
         try std.testing.expectError(error.InvalidOwner, transport.capabilities());
@@ -4201,7 +4210,7 @@ test "CR3a-2c3b capability projection is exact and rejects stale or busy ownersh
 
     if (canonical_client.compatibility_profile) |*profile| {
         const schema_raw: *u8 = @ptrCast(&profile.attach_schema);
-        var raw: u16 = @as(u16, @intFromEnum(test_compatibility.AttachSchema.granted_roles)) + 1;
+        var raw: u16 = @as(u16, @backingInt(test_compatibility.AttachSchema.granted_roles)) + 1;
         while (raw <= std.math.maxInt(u8)) : (raw += 1) {
             schema_raw.* = @intCast(raw);
             try std.testing.expectError(error.InvalidOwner, transport.capabilities());
@@ -4209,7 +4218,7 @@ test "CR3a-2c3b capability projection is exact and rejects stale or busy ownersh
         profile.attach_schema = .frozen_controller_only;
     }
     const metadata_raw: *u8 = @ptrCast(&canonical_client.metadata_support);
-    var metadata_value: u16 = @as(u16, @intFromEnum(contract.MetadataSupport.supported)) + 1;
+    var metadata_value: u16 = @as(u16, @backingInt(contract.MetadataSupport.supported)) + 1;
     while (metadata_value <= std.math.maxInt(u8)) : (metadata_value += 1) {
         metadata_raw.* = @intCast(metadata_value);
         try std.testing.expectError(error.InvalidOwner, transport.capabilities());
@@ -4267,7 +4276,7 @@ test "CR3a-2c3a CR3a-2c3c facade rejects every invalid lifecycle and role byte b
     const lifecycle_raw: *u8 = @ptrCast(&transport.lifecycle);
     var raw: u16 = 0;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
-        if (raw == @intFromEnum(Lifecycle.live)) continue;
+        if (raw == @backingInt(Lifecycle.live)) continue;
         lifecycle_raw.* = @intCast(raw);
         try std.testing.expectError(error.InvalidOwner, transport.capabilities());
         try std.testing.expectError(error.InvalidOwner, transport.sendInput("x"));
@@ -4277,10 +4286,10 @@ test "CR3a-2c3a CR3a-2c3c facade rejects every invalid lifecycle and role byte b
         try std.testing.expectError(error.InvalidOwner, transport.fenceRevoke());
         try std.testing.expect(slot.logicalClient().pending_outbound == null);
     }
-    lifecycle_raw.* = @intFromEnum(Lifecycle.live);
+    lifecycle_raw.* = @backingInt(Lifecycle.live);
 
     const role_raw: *u8 = @ptrCast(&transport.binding_reservation.identity.role);
-    raw = @intFromEnum(contract.AttachmentRole.observer) + 1;
+    raw = @backingInt(contract.AttachmentRole.observer) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         role_raw.* = @intCast(raw);
         try std.testing.expectError(error.InvalidOwner, transport.capabilities());
@@ -4290,7 +4299,7 @@ test "CR3a-2c3a CR3a-2c3c facade rejects every invalid lifecycle and role byte b
         try std.testing.expectError(error.InvalidOwner, transport.fenceRevoke());
         try std.testing.expect(slot.logicalClient().pending_outbound == null);
     }
-    role_raw.* = @intFromEnum(contract.AttachmentRole.controller);
+    role_raw.* = @backingInt(contract.AttachmentRole.controller);
 
     var invalid_control = contract.RuntimeControl.scrollToBottom();
     invalid_control.tag = 255;
@@ -6008,7 +6017,7 @@ test "CR3a-2c3b request allocation exact and partial transport-owner aliases are
             var lease: @import("connection_lease.zig").ConnectionLease = .{};
             const Owner = struct {
                 prefix: [@alignOf(GenerationTransport)]u8 =
-                    [_]u8{0} ** @alignOf(GenerationTransport),
+                    @as([@alignOf(GenerationTransport)]u8, @splat(0)),
                 transport: GenerationTransport = .{},
             };
             var owner: Owner = .{};
@@ -6099,22 +6108,25 @@ test "CR3a-2c3b response allocation alias is rejected before destination write" 
                 if (inherited_fd != capability_pipe[0]) _ = c.close(inherited_fd);
             }
             var capability_fd_env_buf: [96]u8 = undefined;
-            const capability_fd_env = std.fmt.bufPrintZ(
+            const capability_fd_env = std.fmt.bufPrintSentinel(
                 &capability_fd_env_buf,
                 "MARU_SESSION_HOST_RESPONSE_ALIAS_CAP_FD={d}",
                 .{capability_pipe[0]},
+                0,
             ) catch c._exit(126);
             var capability_env_buf: [96]u8 = undefined;
-            const capability_env = std.fmt.bufPrintZ(
+            const capability_env = std.fmt.bufPrintSentinel(
                 &capability_env_buf,
                 "MARU_SESSION_HOST_RESPONSE_ALIAS_CAP={x}",
                 .{capability},
+                0,
             ) catch c._exit(126);
             var case_env_buf: [128]u8 = undefined;
-            const case_env = std.fmt.bufPrintZ(
+            const case_env = std.fmt.bufPrintSentinel(
                 &case_env_buf,
                 "MARU_SESSION_HOST_RESPONSE_ALIAS_CASE={s}",
                 .{strict_case},
+                0,
             ) catch c._exit(126);
             const argv = [_:null]?[*:0]const u8{self_path_z.ptr};
             const child_env = [_:null]?[*:0]const u8{
@@ -6754,7 +6766,7 @@ const B3OrdinalAllocator = struct {
     drift_request_addr: usize = 0,
     drift_request_len: usize = 0,
     request_drifted: bool = false,
-    free_receipts: [256]FreeReceipt = [_]FreeReceipt{.{}} ** 256,
+    free_receipts: [256]FreeReceipt = @as([256]FreeReceipt, @splat(.{})),
     free_receipt_count: usize = 0,
     free_receipt_overflow: bool = false,
 
@@ -6941,7 +6953,7 @@ const b3_expected_rows = [_]B3Expected{
 
 const B3ExecutionHarness = struct {
     const Lease = @typeInfo(
-        @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".params[2].type.?,
+        @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".param_types[2].?,
     ).pointer.child;
     const Owner = struct {
         transport: GenerationTransport = .{},
@@ -7319,8 +7331,8 @@ const B3ExecutionHarness = struct {
             self.transport_live = false;
             self.binding_cleaned = true;
             const operation = &self.slot.current.guarded_allocator.request_free_test_observer;
-            operation.registered_operation_begin_receipts = [_]u128{0} ** 8;
-            operation.registered_operation_end_receipts = [_]u128{0} ** 8;
+            operation.registered_operation_begin_receipts = @as([8]u128, @splat(0));
+            operation.registered_operation_end_receipts = @as([8]u128, @splat(0));
             operation.registered_operation_begin_count = 0;
             operation.registered_operation_end_count = 0;
             operation.registered_operation_active_receipt = 0;
@@ -7557,7 +7569,7 @@ test "B3-0.4 actual socket uncertain settlement follows full request then EOF bo
         try B3ExecutionHarness.initInPlace(
             &harness,
             allocator,
-            0xB30400 + @as(u128, @intFromEnum(scenario)),
+            0xB30400 + @as(u128, @backingInt(scenario)),
             .alloc,
         );
         defer harness.deinit();
@@ -7740,10 +7752,10 @@ test "B3-0.4 execute allocation fail index settles every actual socket attempt" 
 
 test "B3-0.4 closed thirteen-row execution table is exhaustive and internally consistent" {
     const b3_issuer_oracle = @import("b3_issuer_oracle.zig");
-    try std.testing.expectEqual(std.meta.fields(B3Scenario).len, b3_expected_rows.len);
-    var seen = [_]bool{false} ** std.meta.fields(B3Scenario).len;
+    try std.testing.expectEqual(@import("type_info_fields").fields(B3Scenario).len, b3_expected_rows.len);
+    var seen = @as([@import("type_info_fields").fields(B3Scenario).len]bool, @splat(false));
     for (b3_expected_rows) |expected| {
-        const index = @intFromEnum(expected.scenario);
+        const index = @backingInt(expected.scenario);
         try std.testing.expect(!seen[index]);
         seen[index] = true;
         if (expected.outcome == .accepted) {
@@ -7961,7 +7973,7 @@ test "B3-0.4 closed thirteen-row execution table is exhaustive and internally co
             try B3ExecutionHarness.initInPlace(
                 &terminal_not_executed,
                 std.testing.allocator,
-                0xB30485 + @as(u128, @intFromEnum(case)),
+                0xB30485 + @as(u128, @backingInt(case)),
                 .alloc,
             );
             defer terminal_not_executed.deinit();

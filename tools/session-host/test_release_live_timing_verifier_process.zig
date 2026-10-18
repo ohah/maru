@@ -18,7 +18,7 @@ pub fn main(init: std.process.Init) !void {
     defer init.gpa.free(executable);
 
     var root_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const template = try std.fmt.bufPrintZ(&root_storage, "/private/tmp/maru-live-timing-verifier.XXXXXX", .{});
+    const template = try std.fmt.bufPrintSentinel(&root_storage, "/private/tmp/maru-live-timing-verifier.XXXXXX", .{}, 0);
     const root: [:0]const u8 = std.mem.span(mkdtemp(template.ptr) orelse return error.TempRootFailed);
     defer std.Io.Dir.cwd().deleteTree(init.io, root) catch {};
     if (c.chmod(root.ptr, 0o700) != 0) return error.PrivateRootFailed;
@@ -152,7 +152,7 @@ fn makeStoredArchive(allocator: std.mem.Allocator, content: []const u8) ![]u8 {
 }
 
 fn childPath(root: []const u8, leaf: []const u8, storage: []u8) ![:0]const u8 {
-    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root, leaf });
+    return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ root, leaf }, 0);
 }
 
 fn expectMissing(io: std.Io, path: []const u8) !void {

@@ -12,9 +12,7 @@ const release_files = @import("release_adapter_files");
 const bounded_process = @import("bounded_process");
 const apple_product = @import("release_adapter_apple_product");
 const apple_transport = @import("release_adapter_apple_transport");
-const darwin = @cImport({
-    @cInclude("sys/mount.h");
-});
+const darwin = @import("release_adapter_dmg_c");
 
 pub const max_dmg_bytes = release_files.max_release_asset_bytes;
 pub const max_path_bytes: usize = 4 * 1024;
@@ -238,7 +236,7 @@ pub fn observeWithGate(
     var executable_path_buf: [max_path_bytes:0]u8 = undefined;
     var mounted_cli_path_buf: [max_path_bytes:0]u8 = undefined;
     var helper_path_buf: [max_path_bytes:0]u8 = undefined;
-    const app_path = std.fmt.bufPrintZ(&app_path_buf, "{s}/Maru.app", .{staged.mountPath()}) catch {
+    const app_path = std.fmt.bufPrintSentinel(&app_path_buf, "{s}/Maru.app", .{staged.mountPath()}, 0) catch {
         product.close();
         product_open = false;
         detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
@@ -252,21 +250,21 @@ pub fn observeWithGate(
         cleanup_needed = false;
         return error.InvalidPath;
     };
-    const executable_path = std.fmt.bufPrintZ(&executable_path_buf, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{staged.mountPath()}) catch {
+    const executable_path = std.fmt.bufPrintSentinel(&executable_path_buf, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{staged.mountPath()}, 0) catch {
         product.close();
         product_open = false;
         detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
         cleanup_needed = false;
         return error.InvalidPath;
     };
-    const mounted_cli_path = std.fmt.bufPrintZ(&mounted_cli_path_buf, "{s}/Maru.app/Contents/MacOS/maru", .{staged.mountPath()}) catch {
+    const mounted_cli_path = std.fmt.bufPrintSentinel(&mounted_cli_path_buf, "{s}/Maru.app/Contents/MacOS/maru", .{staged.mountPath()}, 0) catch {
         product.close();
         product_open = false;
         detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
         cleanup_needed = false;
         return error.InvalidPath;
     };
-    const helper_path = std.fmt.bufPrintZ(&helper_path_buf, "{s}/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper", .{staged.mountPath()}) catch {
+    const helper_path = std.fmt.bufPrintSentinel(&helper_path_buf, "{s}/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper", .{staged.mountPath()}, 0) catch {
         product.close();
         product_open = false;
         detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
@@ -486,7 +484,7 @@ fn observeUntilInner(
             return self.inner.capture(executable, args, environment, output, try self.deadline.remaining());
         }
 
-        fn captureCleanup(self: *@This(), executable: []const u8, args: []const []const u8, environment: []const []const u8, output: []u8, _: i128) ![]const u8 {
+        pub fn captureCleanup(self: *@This(), executable: []const u8, args: []const []const u8, environment: []const []const u8, output: []u8, _: i128) ![]const u8 {
             return self.inner.capture(executable, args, environment, output, cleanup_budget_ns);
         }
 
@@ -651,9 +649,9 @@ const Staged = struct {
         result.work_stat = work_stat;
         result.mount_stat = mount_stat;
         result.cleanup_started = false;
-        result.private_len = (std.fmt.bufPrintZ(&result.private_buf, "{s}/candidate.dmg", .{work}) catch
+        result.private_len = (std.fmt.bufPrintSentinel(&result.private_buf, "{s}/candidate.dmg", .{work}, 0) catch
             return error.InvalidPath).len;
-        result.mount_len = (std.fmt.bufPrintZ(&result.mount_buf, "{s}/mount", .{work}) catch
+        result.mount_len = (std.fmt.bufPrintSentinel(&result.mount_buf, "{s}/mount", .{work}, 0) catch
             return error.InvalidPath).len;
         result.extracted_len = 0;
         result.extracted_fd = -1;
@@ -722,7 +720,7 @@ const Staged = struct {
         hashFd(held, &digest) catch return error.CopyFailed;
         const actual: [64]u8 = std.fmt.bytesToHex(digest, .lower);
         if (!std.mem.eql(u8, &actual, expected_sha256)) return error.SourceMismatch;
-        self.extracted_len = (std.fmt.bufPrintZ(&self.extracted_buf, "{s}/candidate-cli", .{self.mount_buf[0 .. self.mount_len - "/mount".len]}) catch return error.InvalidPath).len;
+        self.extracted_len = (std.fmt.bufPrintSentinel(&self.extracted_buf, "{s}/candidate-cli", .{self.mount_buf[0 .. self.mount_len - "/mount".len]}, 0) catch return error.InvalidPath).len;
         self.extracted_fd = held;
         self.extracted_stat = held_stat;
     }
@@ -785,7 +783,7 @@ const Product = struct {
     helper_stat: posix.Stat,
     fn open(mount_path: []const u8) Error!Product {
         var mount_buf: [max_path_bytes:0]u8 = undefined;
-        const mount_z = std.fmt.bufPrintZ(&mount_buf, "{s}", .{mount_path}) catch return error.InvalidPath;
+        const mount_z = std.fmt.bufPrintSentinel(&mount_buf, "{s}", .{mount_path}, 0) catch return error.InvalidPath;
         const mount_fd = safe_open.openAbsoluteNoFollow(mount_z, true) catch return error.InvalidProduct;
         defer _ = c.close(mount_fd);
         var root_stat: posix.Stat = undefined;
@@ -920,7 +918,7 @@ fn openParent(path: [:0]const u8) Error!Parent {
     result.leaf_buf[leaf.len] = 0;
     result.leaf_len = leaf.len;
     var parent_buf: [max_path_bytes:0]u8 = undefined;
-    const parent = if (slash == 0) "/" else std.fmt.bufPrintZ(&parent_buf, "{s}", .{path[0..slash]}) catch return error.InvalidPath;
+    const parent = if (slash == 0) "/" else std.fmt.bufPrintSentinel(&parent_buf, "{s}", .{path[0..slash]}, 0) catch return error.InvalidPath;
     result.fd = safe_open.openAbsoluteNoFollow(parent, true) catch return error.InvalidPath;
     return result;
 }

@@ -75,7 +75,7 @@ const Reservation = struct {
             .data_identity = root_identity,
             .lock = undefined,
         };
-        const leaf = try std.fmt.bufPrintZ(&result.leaf, "d-{s}{s}", .{ id.hex(), if (candidate == .claim) ".claim" else "" });
+        const leaf = try std.fmt.bufPrintSentinel(&result.leaf, "d-{s}{s}", .{ id.hex(), if (candidate == .claim) ".claim" else "" }, 0);
         result.leaf_len = leaf.len;
         const record = try session.editor.recovery_id.fileName(id);
         @memcpy(result.record[0..record.len], &record);
@@ -85,7 +85,7 @@ const Reservation = struct {
                 if (c.mkdirat(root.handle, leaf.ptr, 0o700) != 0)
                     return if (posix.errno(-1) == .EXIST) error.Reserved else error.CreateFailed;
                 // mkdir의 mode도 umask를 탄다. 우리가 방금 만든 디렉터리만 보정한다.
-                try root.setFilePermissions(io, leaf, @enumFromInt(0o700), .{ .follow_symlinks = false });
+                try root.setFilePermissions(io, leaf, @fromBackingInt(@intCast(0o700)), .{ .follow_symlinks = false });
             }
             result.data = try root.openDir(io, leaf, .{ .iterate = true, .follow_symlinks = false });
             result.data_identity = statFd(result.data.handle) catch |err| {
@@ -104,7 +104,7 @@ const Reservation = struct {
             if (c.fchmod(fd, 0o600) != 0) return error.CreateFailed;
         }
         errdefer if (candidate == .directory) result.data.close(io);
-        const lock_path = try std.fmt.bufPrintZ(&result.lock_path, "{s}/{s}{s}", .{ root_path, leaf, if (candidate == .directory) "/owner.lock" else "" });
+        const lock_path = try std.fmt.bufPrintSentinel(&result.lock_path, "{s}/{s}{s}", .{ root_path, leaf, if (candidate == .directory) "/owner.lock" else "" }, 0);
         result.lock_path_len = lock_path.len;
         // Resume는 기존 객체만 재획득한다. 없어졌다가 생긴 새 inode를 같은 owner로 받아들이지 않는다.
         const before = if (mode == .reopen) try statAt(result.data, if (candidate == .claim) leaf else "owner.lock") else null;
@@ -154,10 +154,10 @@ const Reservation = struct {
         if (base != null and self.mode == .fresh and !self.published) return error.RecordCollision;
         const bytes = try backup.encodeRecovery(allocator, self.id, .{ .path = document_path, .disk_hash = 1 }, body);
         defer allocator.free(bytes);
-        var af = try self.data.createFileAtomic(self.io, self.recordName(), .{ .replace = true, .permissions = @enumFromInt(0o600) });
+        var af = try self.data.createFileAtomic(self.io, self.recordName(), .{ .replace = true, .permissions = @fromBackingInt(@intCast(0o600)) });
         errdefer af.deinit(self.io);
         // .permissions만 넘기면 umask 0777에서 mode 000이 게시됨을 실제 파일로 재현했다.
-        try af.file.setPermissions(self.io, @enumFromInt(0o600));
+        try af.file.setPermissions(self.io, @fromBackingInt(@intCast(0o600)));
         var buffer: [4096]u8 = undefined;
         var writer = af.file.writer(self.io, &buffer);
         try writer.interface.writeAll(bytes);

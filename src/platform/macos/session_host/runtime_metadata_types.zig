@@ -15,7 +15,7 @@ pub const max_process_name_bytes: usize = 128;
 pub const ProcessValue = struct {
     pid: i32 = 0,
     len: u8 = 0,
-    bytes: [max_process_name_bytes]u8 = [_]u8{0} ** max_process_name_bytes,
+    bytes: [max_process_name_bytes]u8 = @as([max_process_name_bytes]u8, @splat(0)),
 
     pub fn slice(self: *const ProcessValue) []const u8 {
         return self.bytes[0..self.len];
@@ -36,6 +36,6 @@ test "runtime metadata primitive caps and semantic tags stay wire-stable" {
     try testing.expectEqual(@as(usize, 8), max_process_fields);
     try testing.expectEqual(@as(usize, 128), max_process_name_bytes);
     try testing.expectEqual(@as(usize, 136), @sizeOf(ProcessValue));
-    try testing.expectEqual(@as(u8, 0), @intFromEnum(SemanticPrompt.unknown));
-    try testing.expectEqual(@as(u8, 3), @intFromEnum(SemanticPrompt.command));
+    try testing.expectEqual(@as(u8, 0), @backingInt(SemanticPrompt.unknown));
+    try testing.expectEqual(@as(u8, 3), @backingInt(SemanticPrompt.command));
 }

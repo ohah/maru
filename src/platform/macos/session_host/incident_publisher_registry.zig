@@ -8,7 +8,7 @@ const process_seal = @import("process_seal_service.zig");
 const publication = @import("maru").observability.incident_publication_contract;
 
 const PublisherTestChannel = if (@import("builtin").is_test) struct {
-    pub export var maru_cr0b_publisher_child_path: [1024]u8 = [_]u8{0} ** 1024;
+    pub export var maru_cr0b_publisher_child_path: [1024]u8 = @as([1024]u8, @splat(0));
     pub export var maru_cr0b_publisher_child_path_len: usize = 0;
 } else struct {};
 
@@ -58,7 +58,7 @@ pub const IncidentPublisherAuthority = struct {
     owner_thread: u64 = 0,
     app_instance_nonce: u128 = 0,
     lifecycle_raw: u8 = 0,
-    seal: [32]u8 = [_]u8{0} ** 32,
+    seal: [32]u8 = @as([32]u8, @splat(0)),
 };
 
 pub const IncidentPublisherLease = struct {
@@ -75,7 +75,7 @@ pub const IncidentPublisherLease = struct {
     owner_thread: u64 = 0,
     lease_generation: u64 = 0,
     consumed_raw: u8 = 0,
-    seal: [32]u8 = [_]u8{0} ** 32,
+    seal: [32]u8 = @as([32]u8, @splat(0)),
 };
 
 pub const Registry = struct {
@@ -87,7 +87,7 @@ pub const Registry = struct {
     next_registry_generation: u64 = 1,
     next_lease_generation: u64 = 1,
     active_lease_count: u64 = 0,
-    active_leases: [max_active_leases]ActiveLease = [_]ActiveLease{.{}} ** max_active_leases,
+    active_leases: [max_active_leases]ActiveLease = @as([max_active_leases]ActiveLease, @splat(.{})),
     lifecycle_raw: u8 = 0,
     authority: IncidentPublisherAuthority = .{},
 
@@ -107,11 +107,11 @@ pub const Registry = struct {
         lock(&self.mutex);
         defer self.mutex.unlock();
         if (!self.validOwner()) return error.InvalidOwner;
-        if (self.lifecycle_raw == @intFromEnum(Lifecycle.ready)) {
+        if (self.lifecycle_raw == @backingInt(Lifecycle.ready)) {
             if (projectionMatches(self.authority, projection)) return;
             return error.Busy;
         }
-        if (self.lifecycle_raw != @intFromEnum(Lifecycle.pristine)) return error.Closing;
+        if (self.lifecycle_raw != @backingInt(Lifecycle.pristine)) return error.Closing;
         const generation = self.next_registry_generation;
         if (generation == 0 or generation == std.math.maxInt(u64))
             process_seal.fatalIntegrity(.counter_exhausted);
@@ -128,13 +128,13 @@ pub const Registry = struct {
             .service_process_nonce = projection.service_process_nonce,
             .owner_thread = self.owner_thread,
             .app_instance_nonce = projection.app_instance_nonce,
-            .lifecycle_raw = @intFromEnum(Lifecycle.ready),
+            .lifecycle_raw = @backingInt(Lifecycle.ready),
         };
         authority.seal = process_seal.incidentPublisherAuthoritySeal(self.pid, self.process_nonce, authoritySealInput(authority)) catch
             return error.InvalidOwner;
         self.authority = authority;
         self.next_registry_generation = generation + 1;
-        self.lifecycle_raw = @intFromEnum(Lifecycle.ready);
+        self.lifecycle_raw = @backingInt(Lifecycle.ready);
     }
 
     pub fn acquire(self: *Registry, out: *IncidentPublisherLease) Error!void {
@@ -143,7 +143,7 @@ pub const Registry = struct {
         lock(&self.mutex);
         defer self.mutex.unlock();
         if (!self.validOwner() or !self.validAuthority()) return error.InvalidOwner;
-        if (self.lifecycle_raw != @intFromEnum(Lifecycle.ready)) return error.Closing;
+        if (self.lifecycle_raw != @backingInt(Lifecycle.ready)) return error.Closing;
         const generation = self.next_lease_generation;
         if (generation == 0 or generation == std.math.maxInt(u64))
             process_seal.fatalIntegrity(.counter_exhausted);
@@ -226,17 +226,17 @@ pub const Registry = struct {
         lock(&self.mutex);
         defer self.mutex.unlock();
         if (!self.validOwner() or !self.validAuthority()) return error.InvalidOwner;
-        if (self.lifecycle_raw == @intFromEnum(Lifecycle.closing)) return self.active_lease_count == 0;
-        if (self.lifecycle_raw != @intFromEnum(Lifecycle.ready)) return error.InvalidOwner;
+        if (self.lifecycle_raw == @backingInt(Lifecycle.closing)) return self.active_lease_count == 0;
+        if (self.lifecycle_raw != @backingInt(Lifecycle.ready)) return error.InvalidOwner;
         var closing_authority = self.authority;
-        closing_authority.lifecycle_raw = @intFromEnum(Lifecycle.closing);
+        closing_authority.lifecycle_raw = @backingInt(Lifecycle.closing);
         closing_authority.seal = process_seal.incidentPublisherAuthoritySeal(
             self.pid,
             self.process_nonce,
             authoritySealInput(closing_authority),
         ) catch return error.InvalidOwner;
         self.authority = closing_authority;
-        self.lifecycle_raw = @intFromEnum(Lifecycle.closing);
+        self.lifecycle_raw = @backingInt(Lifecycle.closing);
         return self.active_lease_count == 0;
     }
 

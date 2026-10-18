@@ -670,7 +670,7 @@ pub const SubscriberRegistry = struct {
     /// coalescible 이벤트의 큐 coalesce_key: 같은 (surface,kind)면 같은 값(최신이 옛것 대체), 다르면 다른 값. surface_id는
     /// 앱-전역 순차 소형 정수라 3비트 kind와 겹쳐도 충돌 없다(surface_id ≥ 2^61이면 이론상 충돌이나 도달 불가).
     fn coalesceKey(surface_id: u64, kind: cev.EventKind) u64 {
-        return (surface_id << 3) | @intFromEnum(kind);
+        return (surface_id << 3) | @backingInt(kind);
     }
 };
 
@@ -1799,7 +1799,7 @@ const wm = maru.session.window_membership;
 var srv_tmp_counter: std.atomic.Value(u64) = .init(0);
 fn srvTmpBase(buf: []u8, tag: []const u8) [:0]u8 {
     const n = srv_tmp_counter.fetchAdd(1, .monotonic);
-    const p = std.fmt.bufPrintZ(buf, "/tmp/maru-cs-{d}-{s}-{d}", .{ c.getpid(), tag, n }) catch unreachable;
+    const p = std.fmt.bufPrintSentinel(buf, "/tmp/maru-cs-{d}-{s}-{d}", .{ c.getpid(), tag, n }, 0) catch unreachable;
     _ = c.mkdir(p.ptr, 0o700);
     return p;
 }
@@ -2259,7 +2259,7 @@ test "server 왕복(1e): auth 프레임 cap_nonce(metadata:all) → sessions.lis
     try server.start(std.testing.io, std.heap.c_allocator, testing.allocator, base, "k1", "0.1.0-test", &test_caps, 8);
     defer server.stop();
 
-    const cap_nonce: [cap.nonce_len]u8 = [_]u8{0x5A} ** cap.nonce_len;
+    const cap_nonce: [cap.nonce_len]u8 = @as([cap.nonce_len]u8, @splat(0x5A));
     const ClientT = struct {
         base: []const u8,
         nonce: [cap.nonce_len]u8,
@@ -2310,7 +2310,7 @@ test "server 왕복(5f-4a-2): auth.grant로 metadata cap 누적 → sessions.lis
     try server.start(std.testing.io, gpa, testing.allocator, base, "k1", "0.1.0-test", &test_caps, 8);
     defer server.stop();
 
-    const meta_nonce: [cap.nonce_len]u8 = [_]u8{0x3A} ** cap.nonce_len;
+    const meta_nonce: [cap.nonce_len]u8 = @as([cap.nonce_len]u8, @splat(0x3A));
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);
     try store.issueForFd(testing.allocator, meta_nonce, .{ .surface_id = 10, .generation = 0, .scope = .{ .metadata = .all } });
@@ -2395,7 +2395,7 @@ test "server 왕복(5f-0b-3b): browser.subscribe → subscriber_id 응답 + 연�
     defer server.stop();
 
     // 주입 store: surface 30(web_snapshot의 web surface)에 묶인 browser cap.
-    const cap_nonce: [cap.nonce_len]u8 = [_]u8{0x3C} ** cap.nonce_len;
+    const cap_nonce: [cap.nonce_len]u8 = @as([cap.nonce_len]u8, @splat(0x3C));
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);
     try store.issueForFd(testing.allocator, cap_nonce, .{ .surface_id = 30, .generation = 0, .scope = .browser });
@@ -2505,7 +2505,7 @@ test "server 왕복(5f-0b-3c): 구독 client가 pushEvent(navigated)를 browser.
     try server.start(std.testing.io, gpa, testing.allocator, base, "k1", "0.1.0-test", &test_caps, 8);
     defer server.stop();
 
-    const cap_nonce: [cap.nonce_len]u8 = [_]u8{0x3E} ** cap.nonce_len;
+    const cap_nonce: [cap.nonce_len]u8 = @as([cap.nonce_len]u8, @splat(0x3E));
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);
     try store.issueForFd(testing.allocator, cap_nonce, .{ .surface_id = 30, .generation = 0, .scope = .browser });
@@ -2664,5 +2664,5 @@ test "readFrame(#3): oversize 프레임 → payload_too_large를 outbound에 pus
     var pm = try cp.parseMessage(gpa, resp_line.?);
     defer pm.deinit();
     try testing.expect(pm.message == .response);
-    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.payload_too_large)), pm.message.response.err.?.code);
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.payload_too_large)), pm.message.response.err.?.code);
 }

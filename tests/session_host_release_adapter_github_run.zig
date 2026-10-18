@@ -1,6 +1,8 @@
 //! Binds one bounded GitHub workflow-run REST response to the already validated Actions context.
 //! Transport authority and protected-environment deployment evidence remain separate seams.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const context_mod = @import("release_adapter_context");
 const github_run = @import("release_adapter_github_run");
@@ -42,7 +44,7 @@ test "workflow run response binds current push run source workflow and same repo
 }
 
 test "workflow run response cap is enforced before parsing" {
-    const oversized = " " ** (github_run.max_response_bytes + 1);
+    const oversized = array_repeat.repeat(" ", (github_run.max_response_bytes + 1));
     try std.testing.expectError(
         error.ResponseTooLarge,
         github_run.parseAndBind(std.testing.allocator, oversized, expected),

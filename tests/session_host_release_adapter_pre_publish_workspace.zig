@@ -1,5 +1,7 @@
 //! Pre-publish private workspace ownership and cleanup are exercised on the actual filesystem.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const workspace = @import("release_adapter_pre_publish_workspace");
 
@@ -20,7 +22,7 @@ fn failRootStat(_: std.c.fd_t, _: [*:0]const u8, _: *std.posix.Stat) bool {
 fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root[0..len], leaf });
+    return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ root[0..len], leaf }, 0);
 }
 
 test "workspace creates one private root and exact absent child paths" {
@@ -95,7 +97,7 @@ test "replacement and invalid destinations never release foreign roots" {
     const moved = try absolute(&tmp, "moved", &moved_storage);
     var owner: workspace.Workspace = .{};
     try std.testing.expectError(error.InvalidPath, workspace.prepare(&owner, "relative"));
-    const too_long = "/" ++ ("x" ** std.fs.max_path_bytes);
+    const too_long = "/" ++ (array_repeat.repeat("x", std.fs.max_path_bytes));
     try std.testing.expectError(error.InvalidPath, workspace.prepare(&owner, too_long));
     try std.testing.expectError(error.InvalidPath, workspace.prepare(&owner, "/tmp/bad\x00tail"));
     try workspace.prepare(&owner, root);

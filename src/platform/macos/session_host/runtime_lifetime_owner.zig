@@ -36,8 +36,8 @@ pub const RuntimeOperationLease = struct {
     operation_incarnation: u64 = 0,
     operation_kind_raw: u8 = 0,
     consumed_raw: u8 = 0,
-    reserved: [6]u8 = [_]u8{0} ** 6,
-    operation_seal: seal_types.CleanupSeal = [_]u8{0} ** 32,
+    reserved: [6]u8 = @as([6]u8, @splat(0)),
+    operation_seal: seal_types.CleanupSeal = @as([32]u8, @splat(0)),
 
     pub fn identity(self: RuntimeOperationLease) seal_types.RuntimeOperationIdentity {
         return .{
@@ -59,7 +59,7 @@ pub const RuntimeOperationLease = struct {
 pub const RuntimeSettlementLease = struct {
     self_addr: u64 = 0,
     lifecycle_raw: u8 = 0,
-    reserved: [7]u8 = [_]u8{0} ** 7,
+    reserved: [7]u8 = @as([7]u8, @splat(0)),
     operation: RuntimeOperationLease = .{},
     ranges_digest: settlement.Digest = settlement.zero_digest,
     pristine_digest: settlement.Digest = settlement.zero_digest,
@@ -73,7 +73,7 @@ pub const RuntimeLifetimeOwner = struct {
     state_raw: u8 = 0,
     operation_kind_raw: u8 = 0,
     reader_count: u16 = 0,
-    reserved: [4]u8 = [_]u8{0} ** 4,
+    reserved: [4]u8 = @as([4]u8, @splat(0)),
     self_addr: u64 = 0,
     runtime_addr: u64 = 0,
     pending_owner_addr: u64 = 0,
@@ -85,7 +85,7 @@ pub const RuntimeLifetimeOwner = struct {
     next_operation_incarnation: u64 = 0,
     active_operation_incarnation: u64 = 0,
     close_generation: u64 = 0,
-    operation_seal: seal_types.CleanupSeal = [_]u8{0} ** 32,
+    operation_seal: seal_types.CleanupSeal = @as([32]u8, @splat(0)),
 
     pub fn currentProcessDomainMatches(self: *const RuntimeLifetimeOwner) bool {
         return self.pid == process_seal.currentProcessId() and
@@ -124,7 +124,7 @@ pub const RuntimeLifetimeOwner = struct {
 
     pub fn preflightPreparation(self: *const RuntimeLifetimeOwner) AcquireError!seal_types.RuntimeOperationPreflight {
         if (!self.validRawAndSeal()) return error.InvalidOwner;
-        if (self.state_raw != @intFromEnum(State.idle)) return error.Busy;
+        if (self.state_raw != @backingInt(State.idle)) return error.Busy;
         if (self.next_operation_incarnation == std.math.maxInt(u64))
             process_seal.fatalIntegrity(.counter_exhausted);
         return .{
@@ -146,14 +146,14 @@ pub const RuntimeLifetimeOwner = struct {
         preflight: seal_types.RuntimeOperationPreflight,
     ) AcquireError!RuntimeOperationLease {
         if (!self.validRawAndSeal() or !preflightMatches(self, preflight)) return error.InvalidOwner;
-        if (self.state_raw != @intFromEnum(State.idle)) return error.Busy;
+        if (self.state_raw != @backingInt(State.idle)) return error.Busy;
         const incarnation = self.next_operation_incarnation;
         if (incarnation == 0 or incarnation == std.math.maxInt(u64))
             process_seal.fatalIntegrity(.counter_exhausted);
         self.next_operation_incarnation = incarnation + 1;
         self.active_operation_incarnation = incarnation;
-        self.state_raw = @intFromEnum(State.exclusive_active);
-        self.operation_kind_raw = @intFromEnum(OperationKind.preparation);
+        self.state_raw = @backingInt(State.exclusive_active);
+        self.operation_kind_raw = @backingInt(OperationKind.preparation);
         self.operation_seal = process_seal.pendingOperationSeal(
             self.pid,
             self.process_nonce,
@@ -168,7 +168,7 @@ pub const RuntimeLifetimeOwner = struct {
             .thread_id = self.thread_id,
             .owner_incarnation = self.owner_incarnation,
             .operation_incarnation = incarnation,
-            .operation_kind_raw = @intFromEnum(OperationKind.preparation),
+            .operation_kind_raw = @backingInt(OperationKind.preparation),
             .operation_seal = self.operation_seal,
         };
     }
@@ -194,15 +194,15 @@ pub const RuntimeLifetimeOwner = struct {
             !settlement.validScratchPreflightProof(proof) or proof.pid != self.pid or
             proof.process_nonce != self.process_nonce or proof.thread_id != self.thread_id)
             return error.InvalidOwner;
-        if (self.state_raw != @intFromEnum(State.idle)) return error.Busy;
+        if (self.state_raw != @backingInt(State.idle)) return error.Busy;
         const incarnation = self.next_operation_incarnation;
         if (incarnation == 0 or incarnation == std.math.maxInt(u64))
             process_seal.fatalIntegrity(.counter_exhausted);
 
         self.next_operation_incarnation = incarnation + 1;
         self.active_operation_incarnation = incarnation;
-        self.state_raw = @intFromEnum(State.exclusive_active);
-        self.operation_kind_raw = @intFromEnum(OperationKind.settlement);
+        self.state_raw = @backingInt(State.exclusive_active);
+        self.operation_kind_raw = @backingInt(OperationKind.settlement);
         self.operation_seal = process_seal.pendingOperationSeal(
             self.pid,
             self.process_nonce,
@@ -225,7 +225,7 @@ pub const RuntimeLifetimeOwner = struct {
             out.pristine_digest,
             out.preflight_proof_seal_digest,
         ) catch process_seal.fatalIntegrity(.invalid_runtime_lifetime);
-        out.lifecycle_raw = @intFromEnum(SettlementLifecycle.prepared);
+        out.lifecycle_raw = @backingInt(SettlementLifecycle.prepared);
 
         var binding: settlement.RuntimeSettlementLeaseBinding = .{
             .lease_addr = out.self_addr,
@@ -268,7 +268,7 @@ pub const RuntimeLifetimeOwner = struct {
     ) void {
         if (!self.validateSettlementBindingAtLifecycle(lease, binding, .prepared))
             process_seal.fatalIntegrity(.invalid_runtime_lifetime);
-        lease.lifecycle_raw = @intFromEnum(SettlementLifecycle.admitted);
+        lease.lifecycle_raw = @backingInt(SettlementLifecycle.admitted);
     }
 
     pub fn validateAdmittedSettlementBinding(
@@ -285,10 +285,10 @@ pub const RuntimeLifetimeOwner = struct {
         lifecycle: SettlementLifecycle,
     ) bool {
         if (!self.validRawAndSeal() or lease.self_addr != @intFromPtr(lease) or
-            lease.lifecycle_raw != @intFromEnum(lifecycle) or
+            lease.lifecycle_raw != @backingInt(lifecycle) or
             !std.mem.allEqual(u8, &lease.reserved, 0) or lease.operation.consumed_raw != 0 or
             !std.mem.allEqual(u8, &lease.operation.reserved, 0) or
-            self.operation_kind_raw != @intFromEnum(OperationKind.settlement) or
+            self.operation_kind_raw != @backingInt(OperationKind.settlement) or
             !operationReceiptMatches(self, &lease.operation, .settlement)) return false;
         const expected = settlement.sealRuntimeSettlementLease(
             self.pid,
@@ -328,8 +328,8 @@ pub const RuntimeLifetimeOwner = struct {
         if (process_seal.currentProcessId() != lease.pid) return false;
         if (!self.validRawAndSeal() or lease.consumed_raw != 0 or
             !std.mem.allEqual(u8, &lease.reserved, 0)) return false;
-        return self.state_raw == @intFromEnum(State.exclusive_active) and
-            self.operation_kind_raw == @intFromEnum(OperationKind.preparation) and
+        return self.state_raw == @backingInt(State.exclusive_active) and
+            self.operation_kind_raw == @backingInt(OperationKind.preparation) and
             lease.lifetime_owner_addr == self.self_addr and lease.runtime_addr == self.runtime_addr and
             lease.pending_owner_addr == self.pending_owner_addr and lease.pid == self.pid and
             lease.reserved_pid == 0 and lease.process_nonce == self.process_nonce and
@@ -351,8 +351,8 @@ pub const RuntimeLifetimeOwner = struct {
     fn finish(self: *RuntimeLifetimeOwner, lease: *RuntimeOperationLease) void {
         if (!self.validateAfterCallback(lease))
             process_seal.fatalIntegrity(.invalid_runtime_lifetime);
-        self.state_raw = @intFromEnum(State.idle);
-        self.operation_kind_raw = @intFromEnum(OperationKind.none);
+        self.state_raw = @backingInt(State.idle);
+        self.operation_kind_raw = @backingInt(OperationKind.none);
         self.active_operation_incarnation = 0;
         self.operation_seal = process_seal.pendingOperationSeal(
             self.pid,
@@ -370,12 +370,12 @@ pub const RuntimeLifetimeOwner = struct {
         if (!self.validateSettlementAtLifecycle(lease, lifecycle))
             process_seal.fatalIntegrity(.invalid_runtime_lifetime);
         self.finishOperation(&lease.operation);
-        lease.lifecycle_raw = @intFromEnum(SettlementLifecycle.consumed);
+        lease.lifecycle_raw = @backingInt(SettlementLifecycle.consumed);
     }
 
     fn finishOperation(self: *RuntimeLifetimeOwner, lease: *RuntimeOperationLease) void {
-        self.state_raw = @intFromEnum(State.idle);
-        self.operation_kind_raw = @intFromEnum(OperationKind.none);
+        self.state_raw = @backingInt(State.idle);
+        self.operation_kind_raw = @backingInt(OperationKind.none);
         self.active_operation_incarnation = 0;
         self.operation_seal = process_seal.pendingOperationSeal(
             self.pid,
@@ -395,7 +395,7 @@ pub const RuntimeLifetimeOwner = struct {
             .thread_id = self.thread_id,
             .owner_incarnation = self.owner_incarnation,
             .operation_incarnation = incarnation,
-            .operation_kind_raw = @intFromEnum(kind),
+            .operation_kind_raw = @backingInt(kind),
             .operation_seal = self.operation_seal,
         };
     }
@@ -442,8 +442,8 @@ pub const RuntimeLifetimeOwner = struct {
             self.operation_kind_raw > 3) return false;
         const shape_ok = (self.state_raw == 0 and self.operation_kind_raw == 0 and self.active_operation_incarnation == 0) or
             (self.state_raw == 1 and
-                (self.operation_kind_raw == @intFromEnum(OperationKind.preparation) or
-                    self.operation_kind_raw == @intFromEnum(OperationKind.settlement)) and
+                (self.operation_kind_raw == @backingInt(OperationKind.preparation) or
+                    self.operation_kind_raw == @backingInt(OperationKind.settlement)) and
                 self.active_operation_incarnation != 0);
         // 이 owner는 closing/close를 authorize하지 못하며 이후 lifecycle owner가 따로 mint해야 한다.
         if (!shape_ok) return false;
@@ -498,14 +498,14 @@ fn operationReceiptMatches(
     kind: OperationKind,
 ) bool {
     return process_seal.currentProcessId() == lease.pid and
-        owner.state_raw == @intFromEnum(State.exclusive_active) and
+        owner.state_raw == @backingInt(State.exclusive_active) and
         lease.lifetime_owner_addr == owner.self_addr and lease.runtime_addr == owner.runtime_addr and
         lease.pending_owner_addr == owner.pending_owner_addr and lease.pid == owner.pid and
         lease.reserved_pid == 0 and lease.process_nonce == owner.process_nonce and
         lease.thread_id == owner.thread_id and lease.thread_id == @as(u64, @intCast(std.Thread.getCurrentId())) and
         lease.owner_incarnation == owner.owner_incarnation and
         lease.operation_incarnation == owner.active_operation_incarnation and
-        lease.operation_kind_raw == @intFromEnum(kind) and lease.operation_kind_raw == owner.operation_kind_raw and
+        lease.operation_kind_raw == @backingInt(kind) and lease.operation_kind_raw == owner.operation_kind_raw and
         std.crypto.timing_safe.eql(seal_types.CleanupSeal, lease.operation_seal, owner.operation_seal);
 }
 
@@ -613,7 +613,7 @@ test "C3-3b2b3 runtime lifetime owner seals exclusive preparation exact once" {
         .state_raw = 0,
         .operation_kind_raw = 0,
         .reader_count = 0,
-        .reserved = [_]u8{0} ** 4,
+        .reserved = @as([4]u8, @splat(0)),
         .self_addr = 0,
         .runtime_addr = 0,
         .pending_owner_addr = 0,

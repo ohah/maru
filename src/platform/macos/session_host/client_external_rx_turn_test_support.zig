@@ -484,7 +484,7 @@ test "d2c pre-entry traversal charges optional skip before an incomplete tail" {
     try appendFrame(
         &bytes,
         .{
-            .kind = @enumFromInt(55001),
+            .kind = @fromBackingInt(@intCast(55001)),
             .flags = protocol.Flags.optional,
         },
         "ignored",
@@ -523,7 +523,7 @@ test "d2c pre-entry no-intents budget can reset and consume the remaining frame"
         try appendFrame(
             &bytes,
             .{
-                .kind = @enumFromInt(55001),
+                .kind = @fromBackingInt(@intCast(55001)),
                 .flags = protocol.Flags.optional,
             },
             "ignored",

@@ -211,7 +211,7 @@ fn scanQuoted(text: []const u8, registered: []const u32, allow_escapes: bool) ?u
 /// 한 파일에서 첫 위반의 (줄 번호, cp)를 찾는다. 토크나이저가 주석을 아예 토큰으로 내지 않으므로 주석
 /// 안의 cp 표기(문서)는 자연히 제외되고, 문자열 안의 `//`도 더 이상 스캔을 끊지 않는다.
 fn scanSource(allocator: std.mem.Allocator, source: []const u8, registered: []const u32) !?Hit {
-    const sentinel = try allocator.dupeZ(u8, source);
+    const sentinel = try allocator.dupeSentinel(u8, source, 0);
     defer allocator.free(sentinel);
     var tokenizer = std.zig.Tokenizer.init(sentinel);
     while (true) {
@@ -570,7 +570,7 @@ const ink_consumers = [_][]const u8{
 };
 
 fn countIdentifiers(allocator: std.mem.Allocator, source: []const u8, names: []const []const u8) !usize {
-    const z = try allocator.dupeZ(u8, source);
+    const z = try allocator.dupeSentinel(u8, source, 0);
     defer allocator.free(z);
     var tokenizer = std.zig.Tokenizer.init(z);
     var n: usize = 0;

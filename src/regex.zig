@@ -1,11 +1,7 @@
 //! 터미널 논리 줄과 편집기 문서 전체가 공유하는 PCRE2 컴파일·매치·치환 경계다.
 //! 문서 모드는 줄 앵커와 줄바꿈 정책을 명시하며, 평문 검색은 별도 경로를 유지한다.
 const std = @import("std");
-const c = @cImport({
-    @cDefine("PCRE2_CODE_UNIT_WIDTH", "8");
-    @cDefine("PCRE2_STATIC", "1");
-    @cInclude("pcre2.h.generic");
-});
+const c = @import("pcre2_c");
 
 pub const Error = error{ InvalidPattern, InvalidUtf8, MatchLimit, EngineFailure, OutOfMemory };
 pub const Span = struct { start: usize, end: usize };
@@ -87,9 +83,14 @@ pub const Pattern = struct {
     }
 
     fn matchWithOptions(self: *Pattern, line: []const u8, from: usize, options_extra: u32) Error!?Span {
+        var empty_subject_storage: [2]u8 = .{ 0, 0 };
+        return self.matchWithSubject(line, from, options_extra, pcreSubject(line, &empty_subject_storage));
+    }
+
+    fn matchWithSubject(self: *Pattern, line: []const u8, from: usize, options_extra: u32, subject: [*]const u8) Error!?Span {
         if (from > line.len) return null;
         const options: u32 = c.PCRE2_NO_UTF_CHECK | options_extra;
-        const rc = c.pcre2_match_8(self.code, line.ptr, line.len, from, options, self.data, self.context);
+        const rc = c.pcre2_match_8(self.code, subject, line.len, from, options, self.data, self.context);
         if (rc == c.PCRE2_ERROR_NOMATCH) return null;
         if (rc == c.PCRE2_ERROR_MATCHLIMIT or rc == c.PCRE2_ERROR_DEPTHLIMIT or rc == c.PCRE2_ERROR_HEAPLIMIT)
             return error.MatchLimit;
@@ -120,12 +121,17 @@ pub const Pattern = struct {
     }
 
     fn expandInternal(self: *Pattern, allocator: std.mem.Allocator, line: []const u8, span: Span, replacement: []const u8, from: usize, anchored: bool) Error![]u8 {
-        var found = (try self.matchValidated(line, from, anchored)) orelse return error.EngineFailure;
+        // PCRE2_SUBSTITUTE_MATCHED requires the exact same subject pointer used by pcre2_match.
+        // Empty Zig slices need a local backing byte, so keep that byte alive and reuse its pointer
+        // for both calls instead of creating a second temporary subject inside matchValidated.
+        var empty_subject_storage: [2]u8 = .{ 0, 0 };
+        const subject = pcreSubject(line, &empty_subject_storage);
+        var found = (try self.matchWithSubject(line, from, if (anchored) c.PCRE2_ANCHORED else 0, subject)) orelse return error.EngineFailure;
         var match_from = from;
         var match_anchored = anchored;
         var nonempty_retry = false;
         if (found.end != span.end and found.start == found.end) {
-            found = (try self.matchNonEmptyAtStart(line, span.start)) orelse return error.EngineFailure;
+            found = (try self.matchWithSubject(line, span.start, c.PCRE2_ANCHORED | c.PCRE2_NOTEMPTY_ATSTART, subject)) orelse return error.EngineFailure;
             nonempty_retry = true;
             match_from = span.start;
             match_anchored = true;
@@ -139,15 +145,22 @@ pub const Pattern = struct {
             (if (nonempty_retry) @as(u32, c.PCRE2_NOTEMPTY_ATSTART) else 0) |
             c.PCRE2_SUBSTITUTE_MATCHED | c.PCRE2_SUBSTITUTE_REPLACEMENT_ONLY |
             c.PCRE2_SUBSTITUTE_OVERFLOW_LENGTH;
-        var rc = c.pcre2_substitute_8(self.code, line.ptr, line.len, match_from, options, self.data, self.context, replacement.ptr, replacement.len, output.ptr, &capacity);
+        var rc = c.pcre2_substitute_8(self.code, subject, line.len, match_from, options, self.data, self.context, replacement.ptr, replacement.len, output.ptr, &capacity);
         if (rc == c.PCRE2_ERROR_NOMEMORY) {
             output = try allocator.realloc(output, capacity);
-            rc = c.pcre2_substitute_8(self.code, line.ptr, line.len, match_from, options, self.data, self.context, replacement.ptr, replacement.len, output.ptr, &capacity);
+            rc = c.pcre2_substitute_8(self.code, subject, line.len, match_from, options, self.data, self.context, replacement.ptr, replacement.len, output.ptr, &capacity);
         }
         if (rc < 0) return error.EngineFailure;
         return try allocator.realloc(output, capacity);
     }
 };
+
+/// PCRE2 inspects the code unit before an empty match. A zero-length Zig slice can use the
+/// non-dereferenceable sentinel pointer 0x1, whose predecessor is null. Keep the logical subject
+/// empty while backing its pointer with an in-bounds byte for the C implementation's lookbehind.
+fn pcreSubject(line: []const u8, empty_storage: *[2]u8) [*]const u8 {
+    return if (line.len == 0) empty_storage[1..].ptr else line.ptr;
+}
 
 fn utf8Boundary(line: []const u8, offset: usize) bool {
     return offset <= line.len and (offset == 0 or offset == line.len or line[offset] & 0xc0 != 0x80);
@@ -171,6 +184,16 @@ test "PCRE2 replacement can expand consuming alternative after empty assertion" 
     const output = try pattern.expand(std.testing.allocator, line, span, "${word}!");
     defer std.testing.allocator.free(output);
     try std.testing.expectEqualStrings("foo!", output);
+}
+
+test "PCRE2 matches and replaces an empty subject" {
+    var pattern = try Pattern.initDocument("^$", true, .anycrlf);
+    defer pattern.deinit();
+    const span = (try pattern.match("", 0, false)).?;
+    try std.testing.expectEqual(Span{ .start = 0, .end = 0 }, span);
+    const output = try pattern.expand(std.testing.allocator, "", span, "empty");
+    defer std.testing.allocator.free(output);
+    try std.testing.expectEqualStrings("empty", output);
 }
 
 test "PCRE2 byte-unit pattern cannot produce a partial UTF-8 editor selection" {

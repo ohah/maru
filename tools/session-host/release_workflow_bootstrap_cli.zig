@@ -31,7 +31,7 @@ pub fn execute(
 ) Error![:0]const u8 {
     const command = try parse(args);
     var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const root_path = std.fmt.bufPrintZ(&path_storage, "{s}", .{command.root_path}) catch return error.InvalidPath;
+    const root_path = std.fmt.bufPrintSentinel(&path_storage, "{s}", .{command.root_path}, 0) catch return error.InvalidPath;
     return owner.bootstrapProcess(allocator, root_path, workflow, token_storage);
 }
 

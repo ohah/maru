@@ -154,7 +154,7 @@ test "HL6 구문 색이 테마에서 토큰으로 흐른다 — 11개 전부, �
     const tk = tokensFor(app);
     const sc = session.syntax_theme.fromTheme(app.theme);
 
-    inline for (@typeInfo(chrome.tokens.SyntaxPalette).@"struct".fields) |f| {
+    inline for (@import("type_info_fields").structFields(chrome.tokens.SyntaxPalette)) |f| {
         const role = @field(chrome.tokens.ColorRole, "syntax_" ++ f.name);
         try testing.expectEqual(@field(sc, f.name), tk.get(role));
     }
@@ -180,7 +180,7 @@ test "HL7 구문 색이 본문색과 다르다 — 흐르기만 하고 안 보�
     const body = tk.get(.surface_fg);
 
     var differ: usize = 0;
-    inline for (@typeInfo(chrome.tokens.SyntaxPalette).@"struct".fields) |f| {
+    inline for (@import("type_info_fields").structFields(chrome.tokens.SyntaxPalette)) |f| {
         if (!std.meta.eql(body, tk.get(@field(chrome.tokens.ColorRole, "syntax_" ++ f.name)))) differ += 1;
     }
     // 전부 다를 필요는 없다(`punctuation`은 본문색을 살짝 흐린 것이라 가까울 수 있다). 다만
@@ -202,7 +202,7 @@ test "HL8 색을 안 얹으면 무색이다 — 픽스처 수십 곳이 거짓 �
     // 않은 강조가 화면에 뜬다. 둘 다 아니고 **본문색**이어야 한다 — §5의 "무색"이 그것이다.
     const tk = chrome.tokens.Tokens.rich(std.mem.zeroes(chrome.tokens.ThemeColors));
     const body = tk.get(.surface_fg);
-    inline for (@typeInfo(chrome.tokens.SyntaxPalette).@"struct".fields) |f| {
+    inline for (@import("type_info_fields").structFields(chrome.tokens.SyntaxPalette)) |f| {
         try testing.expectEqual(body, tk.get(@field(chrome.tokens.ColorRole, "syntax_" ++ f.name)));
     }
 }

@@ -362,7 +362,7 @@ fn buildLivePtyFixture(
         appPtyNativeCloseCallback,
         &close_context,
         null,
-        @intFromEnum(metal_smoke.NativeKeyDownMode.none),
+        @backingInt(metal_smoke.NativeKeyDownMode.none),
     );
     const close_lifecycle = try verifyCloseLifecycle(io, &live_pty, &runtime, &live_registry, active.id, live_pty.pty_id, native.*);
 
@@ -634,7 +634,7 @@ fn runNativeTerminalKeyDownSmoke(
         null,
         null,
         &native_keydown,
-        @intFromEnum(nativeKeyDownMode(source)),
+        @backingInt(nativeKeyDownMode(source)),
     );
     if (native.status != 0 or native_keydown.status != 0) return error.NativeKeyDownSmokeFailed;
     if (native_keydown.key_down_received == 0 or native_keydown.codepoint == 0) {

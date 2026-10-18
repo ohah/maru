@@ -117,7 +117,7 @@ fn snapshotAside(parent_path: [:0]const u8) Result {
     // **덮이는 파일 자신의 mtime 으로 이름 짓는다.** 사본 이름이 「어느 시점의 레이아웃인지」를 그대로
     // 가리키고, 별도 시계 의존도 없다. 같은 초에 두 번 덮이면 `O_EXCL` 이 두 번째를 거절하는데, 그때
     // 남아 있는 것이 **더 이른 쪽**(더 온전한 쪽)이라 그대로 옳다.
-    const leaf = std.fmt.bufPrintZ(&leaf_buf, "{s}{d}", .{ aside_prefix, source_stat.mtimespec.sec }) catch
+    const leaf = std.fmt.bufPrintSentinel(&leaf_buf, "{s}{d}", .{ aside_prefix, source_stat.mtimespec.sec }, 0) catch
         return .backup_failed;
     const aside_fd = c.openat(parent_fd, leaf.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0o600));
     if (aside_fd < 0) return .backup_failed;

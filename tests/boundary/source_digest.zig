@@ -210,7 +210,7 @@ test "digest 는 test 블록을 빼고, count 는 @field 만 센다" {
         \\    _ = y;
         \\}
     ;
-    var tree = try std.zig.Ast.parse(a, src, .zig);
+    var tree = try std.zig.Ast.parse(a, src, .{});
     defer tree.deinit(a);
 
     const r = try compute(a, &tree, "src/x.zig");
@@ -229,7 +229,7 @@ test "digest 는 test 블록을 빼고, count 는 @field 만 센다" {
         \\    _ = z;
         \\}
     ;
-    var tree2 = try std.zig.Ast.parse(a, src2, .zig);
+    var tree2 = try std.zig.Ast.parse(a, src2, .{});
     defer tree2.deinit(a);
     const r2 = try compute(a, &tree2, "src/x.zig");
     try std.testing.expectEqual(r.digest, r2.digest);
@@ -243,7 +243,7 @@ test "digest 는 test 블록을 빼고, count 는 @field 만 센다" {
         \\}
         \\pub fn unrelatedFn() void {}
     ;
-    var tree_u = try std.zig.Ast.parse(a, unrelated, .zig);
+    var tree_u = try std.zig.Ast.parse(a, unrelated, .{});
     defer tree_u.deinit(a);
     try std.testing.expectEqual(r.digest, (try compute(a, &tree_u, "src/x.zig")).digest);
 
@@ -255,7 +255,7 @@ test "digest 는 test 블록을 빼고, count 는 @field 만 센다" {
         \\    _ = x;
         \\}
     ;
-    var tree_t = try std.zig.Ast.parse(a, retargeted, .zig);
+    var tree_t = try std.zig.Ast.parse(a, retargeted, .{});
     defer tree_t.deinit(a);
     const rt = try compute(a, &tree_t, "src/x.zig");
     try std.testing.expectEqual(r.reflection_count, rt.reflection_count); // 개수는 같다
@@ -270,7 +270,7 @@ test "digest 는 test 블록을 빼고, count 는 @field 만 센다" {
         \\    _ = w;
         \\}
     ;
-    var tree3 = try std.zig.Ast.parse(a, src3, .zig);
+    var tree3 = try std.zig.Ast.parse(a, src3, .{});
     defer tree3.deinit(a);
     const r3 = try compute(a, &tree3, "src/x.zig");
     try std.testing.expect(!std.mem.eql(u8, &r.digest, &r3.digest));

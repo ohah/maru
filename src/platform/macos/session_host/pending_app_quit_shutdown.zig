@@ -16,7 +16,7 @@ pub const PendingAppQuitShutdown = struct {
     target_count: u32 = 0,
     target_cursor: u32 = 0,
     lifecycle_raw: u8 = 0,
-    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+    seal: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
 };
 
 pub const Error = error{ InvalidOwner, InvalidRequest } || process_seal.ReadyError;
@@ -42,7 +42,7 @@ pub fn prepare(
         .started_at_ns = started_at_ns,
         .deadline_ns = deadline_ns,
         .target_count = target_count,
-        .lifecycle_raw = @intFromEnum(Lifecycle.active),
+        .lifecycle_raw = @backingInt(Lifecycle.active),
     };
     out.seal = try authoritySeal(out);
 }
@@ -54,7 +54,7 @@ pub fn valid(owner: *const PendingAppQuitShutdown, app_session_addr: u64, backen
         owner.started_at_ns == 0 or owner.deadline_ns <= owner.started_at_ns or
         owner.target_count == 0 or owner.target_cursor > owner.target_count) return false;
     const lifecycle: Lifecycle = switch (owner.lifecycle_raw) {
-        1...2 => @enumFromInt(owner.lifecycle_raw),
+        1...2 => @fromBackingInt(@intCast(owner.lifecycle_raw)),
         else => return false,
     };
     if ((lifecycle == .active) != (owner.target_cursor < owner.target_count)) return false;
@@ -63,12 +63,12 @@ pub fn valid(owner: *const PendingAppQuitShutdown, app_session_addr: u64, backen
 }
 
 pub fn advance(owner: *PendingAppQuitShutdown, app_session_addr: u64, backend_addr: u64) Error!bool {
-    if (!valid(owner, app_session_addr, backend_addr) or owner.lifecycle_raw != @intFromEnum(Lifecycle.active))
+    if (!valid(owner, app_session_addr, backend_addr) or owner.lifecycle_raw != @backingInt(Lifecycle.active))
         return error.InvalidOwner;
     owner.target_cursor += 1;
-    if (owner.target_cursor == owner.target_count) owner.lifecycle_raw = @intFromEnum(Lifecycle.complete);
+    if (owner.target_cursor == owner.target_count) owner.lifecycle_raw = @backingInt(Lifecycle.complete);
     owner.seal = try authoritySeal(owner);
-    return owner.lifecycle_raw == @intFromEnum(Lifecycle.complete);
+    return owner.lifecycle_raw == @backingInt(Lifecycle.complete);
 }
 
 pub fn deadlineReached(owner: *const PendingAppQuitShutdown, app_session_addr: u64, backend_addr: u64, now_ns: u64) Error!bool {
@@ -118,6 +118,6 @@ test "C3-3b6 app quit owner는 tick마다 target 하나를 진행하고 마지�
     try std.testing.expect(!(try advance(&owner, 11, 22)));
     try std.testing.expectEqual(@as(u32, 1), owner.target_cursor);
     try std.testing.expect(try advance(&owner, 11, 22));
-    try std.testing.expectEqual(@intFromEnum(Lifecycle.complete), owner.lifecycle_raw);
+    try std.testing.expectEqual(@backingInt(Lifecycle.complete), owner.lifecycle_raw);
     try std.testing.expectError(error.InvalidOwner, advance(&owner, 11, 22));
 }

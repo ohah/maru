@@ -57,10 +57,10 @@ pub const PreparedManagedPoison = struct {
     slot_generation: u64 = 0,
     node_addr: u64 = 0,
     node_generation: u64 = 0,
-    binding_seal: Digest = [_]u8{0} ** 32,
+    binding_seal: Digest = @as([32]u8, @splat(0)),
     input: IncidentInput = .{},
     lifecycle_raw: u8 = 0,
-    seal: Digest = [_]u8{0} ** 32,
+    seal: Digest = @as([32]u8, @splat(0)),
 };
 
 pub const ManagedPoisonLifecycle = enum(u8) { pristine = 0, prepared = 1, consumed = 2 };
@@ -147,7 +147,7 @@ pub const ReconnectAdmission = struct {
     incident_id: incident.IncidentId = .{ .app_instance_nonce = 0, .sequence = 0 },
     disposition_raw: u8 = 0,
     lifecycle_raw: u8 = 0,
-    seal: Digest = [_]u8{0} ** 32,
+    seal: Digest = @as([32]u8, @splat(0)),
 };
 
 pub const ReconnectAdmissionLifecycle = enum(u8) { pristine = 0, admitted = 1, consumed = 2 };
@@ -159,10 +159,10 @@ pub const IncidentRepeatKey = struct {
     client_addr: u64 = 0,
     connection_generation: u64 = 0,
     incident_id: incident.IncidentId = .{ .app_instance_nonce = 0, .sequence = 0 },
-    fingerprint: Digest = [_]u8{0} ** 32,
-    binding_seal: Digest = [_]u8{0} ** 32,
+    fingerprint: Digest = @as([32]u8, @splat(0)),
+    binding_seal: Digest = @as([32]u8, @splat(0)),
     lifecycle_raw: u8 = 0,
-    seal: Digest = [_]u8{0} ** 32,
+    seal: Digest = @as([32]u8, @splat(0)),
 };
 
 pub const RepeatKeyLifecycle = enum(u8) { pristine = 0, published = 1, consumed = 2 };
@@ -175,15 +175,15 @@ pub const IncidentOperationAuthority = struct {
     client_addr: u64 = 0,
     connection_generation: u64 = 0,
     operation_id: u64 = 0,
-    operation_receipt_seal: Digest = [_]u8{0} ** 32,
-    binding_seal: Digest = [_]u8{0} ** 32,
+    operation_receipt_seal: Digest = @as([32]u8, @splat(0)),
+    binding_seal: Digest = @as([32]u8, @splat(0)),
 };
 
 pub const FirstPublicationCommit = struct {
     authority: IncidentOperationAuthority = .{},
-    input_digest: Digest = [_]u8{0} ** 32,
+    input_digest: Digest = @as([32]u8, @splat(0)),
     incident_id: incident.IncidentId = .{ .app_instance_nonce = 0, .sequence = 0 },
-    fingerprint: Digest = [_]u8{0} ** 32,
+    fingerprint: Digest = @as([32]u8, @splat(0)),
     reason_raw: u8 = 0,
 };
 
@@ -191,9 +191,9 @@ pub const FirstPublicationCommit = struct {
 /// Client first 필드는 바꾸지 않으며 service-issued ID와 canonical fingerprint를 재검증한다.
 pub const RepeatPublicationCommit = struct {
     authority: IncidentOperationAuthority = .{},
-    input_digest: Digest = [_]u8{0} ** 32,
+    input_digest: Digest = @as([32]u8, @splat(0)),
     incident_id: incident.IncidentId = .{ .app_instance_nonce = 0, .sequence = 0 },
-    fingerprint: Digest = [_]u8{0} ** 32,
+    fingerprint: Digest = @as([32]u8, @splat(0)),
 };
 
 pub const ClientOperationLifecycle = enum(u8) { pristine = 0, held = 1, bound = 2, consumed = 3 };
@@ -204,11 +204,11 @@ pub const PreparedIncidentClientOperation = struct {
     registry_index: u16 = 0,
     pid: u32 = 0,
     owner_thread: u64 = 0,
-    authority_digest: Digest = [_]u8{0} ** 32,
-    commit_digest: Digest = [_]u8{0} ** 32,
-    repeat_key_seal: Digest = [_]u8{0} ** 32,
+    authority_digest: Digest = @as([32]u8, @splat(0)),
+    commit_digest: Digest = @as([32]u8, @splat(0)),
+    repeat_key_seal: Digest = @as([32]u8, @splat(0)),
     lifecycle_raw: u8 = 0,
-    seal: Digest = [_]u8{0} ** 32,
+    seal: Digest = @as([32]u8, @splat(0)),
 };
 
 pub const PublicationKind = enum(u8) { first = 1, repeat = 2 };
@@ -227,7 +227,7 @@ pub const PublisherLeaseProjection = struct {
     process_nonce: u64 = 0,
     owner_thread: u64 = 0,
     lease_generation: u64 = 0,
-    seal: Digest = [_]u8{0} ** 32,
+    seal: Digest = @as([32]u8, @splat(0)),
 };
 
 pub const WakeOutcome = enum(u8) { queued = 1, coalesced = 2, degraded = 3 };
@@ -246,9 +246,9 @@ pub const PreparedIncidentPublication = struct {
     publisher: PublisherLeaseProjection = .{},
     service: incident.PreparedServicePublication = .{},
     client: PreparedIncidentClientOperation = .{},
-    input_digest: Digest = [_]u8{0} ** 32,
+    input_digest: Digest = @as([32]u8, @splat(0)),
     lifecycle_raw: u8 = 0,
-    seal: Digest = [_]u8{0} ** 32,
+    seal: Digest = @as([32]u8, @splat(0)),
 };
 
 pub const InputError = error{InvalidInput};
@@ -257,7 +257,7 @@ pub const InputError = error{InvalidInput};
 /// 별도 변환기가 flags나 timestamp 복제 규칙을 다시 추론하면 Client seal과 ring evidence가 갈라질 수 있다.
 pub fn serviceInput(value: IncidentInput) InputError!incident.ConnectionIncident {
     if (!validInputShape(value)) return error.InvalidInput;
-    const decision = incident.decisionForReason(@enumFromInt(value.reason_raw));
+    const decision = incident.decisionForReason(@fromBackingInt(@intCast(value.reason_raw)));
     var result: incident.ConnectionIncident = .{
         .flags = 0x04 | @as(u8, @intFromBool(decision.expected)),
         .incident_id = .{ .app_instance_nonce = 1, .sequence = 1 },
@@ -333,7 +333,7 @@ pub fn validRepeatKeyShape(value: IncidentRepeatKey, expected_addr: usize) bool 
         value.client_addr != 0 and value.connection_generation != 0 and
         value.incident_id.app_instance_nonce != 0 and value.incident_id.sequence != 0 and
         !std.mem.allEqual(u8, &value.fingerprint, 0) and !std.mem.allEqual(u8, &value.binding_seal, 0) and
-        value.lifecycle_raw == @intFromEnum(RepeatKeyLifecycle.published) and
+        value.lifecycle_raw == @backingInt(RepeatKeyLifecycle.published) and
         !std.mem.allEqual(u8, &value.seal, 0);
 }
 
@@ -342,7 +342,7 @@ pub fn validManagedPoisonShape(value: PreparedManagedPoison, expected_addr: usiz
         value.owner_thread != 0 and value.slot_addr != 0 and value.slot_generation != 0 and
         value.node_addr != 0 and value.node_generation != 0 and
         !std.mem.allEqual(u8, &value.binding_seal, 0) and validInputShape(value.input) and
-        value.lifecycle_raw == @intFromEnum(ManagedPoisonLifecycle.prepared) and
+        value.lifecycle_raw == @backingInt(ManagedPoisonLifecycle.prepared) and
         !std.mem.allEqual(u8, &value.seal, 0);
 }
 
@@ -351,7 +351,7 @@ pub fn validManagedPoisonConsumedShape(value: PreparedManagedPoison, expected_ad
         value.owner_thread != 0 and value.slot_addr != 0 and value.slot_generation != 0 and
         value.node_addr != 0 and value.node_generation != 0 and
         !std.mem.allEqual(u8, &value.binding_seal, 0) and validInputShape(value.input) and
-        value.lifecycle_raw == @intFromEnum(ManagedPoisonLifecycle.consumed) and
+        value.lifecycle_raw == @backingInt(ManagedPoisonLifecycle.consumed) and
         !std.mem.allEqual(u8, &value.seal, 0);
 }
 
@@ -360,8 +360,8 @@ pub fn validReconnectAdmissionShape(value: ReconnectAdmission, expected_addr: us
         value.owner_thread != 0 and value.host_id != 0 and value.host_adapter_generation != 0 and
         value.connection_generation != 0 and value.incident_id.app_instance_nonce != 0 and
         value.incident_id.sequence != 0 and
-        value.disposition_raw == @intFromEnum(incident.Disposition.reconnect) and
-        value.lifecycle_raw == @intFromEnum(ReconnectAdmissionLifecycle.admitted) and
+        value.disposition_raw == @backingInt(incident.Disposition.reconnect) and
+        value.lifecycle_raw == @backingInt(ReconnectAdmissionLifecycle.admitted) and
         !std.mem.allEqual(u8, &value.seal, 0);
 }
 
@@ -372,11 +372,11 @@ fn recursivelyPointerFree(comptime T: type) bool {
         .optional => |info| recursivelyPointerFree(info.child),
         .error_union => |info| recursivelyPointerFree(info.payload),
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field| if (!recursivelyPointerFree(field.type)) break :blk false;
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (!recursivelyPointerFree(field.type)) break :blk false;
             break :blk true;
         },
         .@"union" => |info| blk: {
-            inline for (info.fields) |field| if (!recursivelyPointerFree(field.type)) break :blk false;
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (!recursivelyPointerFree(field.type)) break :blk false;
             break :blk true;
         },
         else => true,
@@ -398,15 +398,15 @@ test "CR0b poison publication 계약은 입력과 repeat key를 재귀 pointer-f
     try std.testing.expect(recursivelyPointerFree(PublisherLeaseProjection));
     try std.testing.expect(recursivelyPointerFree(PreparedIncidentPublication));
     try std.testing.expect(validManagedPoisonRequest(.{
-        .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),
-        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
+        .reason_raw = @backingInt(incident.ConnectionReason.connection_eof),
+        .source_site_raw = @backingInt(incident.SourceSite.client_read),
     }));
     try std.testing.expect(!validManagedPoisonRequest(.{
         .reason_raw = 0xff,
-        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
+        .source_site_raw = @backingInt(incident.SourceSite.client_read),
     }));
     try std.testing.expect(!validManagedPoisonRequest(.{
-        .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),
+        .reason_raw = @backingInt(incident.ConnectionReason.connection_eof),
         .source_site_raw = 0,
     }));
 }
@@ -420,17 +420,17 @@ test "CR0b poison publication 계약은 reconnect admission을 first incident와
         .host_adapter_generation = 5,
         .connection_generation = 6,
         .incident_id = .{ .app_instance_nonce = 7, .sequence = 8 },
-        .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
-        .lifecycle_raw = @intFromEnum(ReconnectAdmissionLifecycle.admitted),
+        .disposition_raw = @backingInt(incident.Disposition.reconnect),
+        .lifecycle_raw = @backingInt(ReconnectAdmissionLifecycle.admitted),
     };
     admission.self_addr = @intFromPtr(&admission);
     admission.seal[0] = 1;
     try std.testing.expect(validReconnectAdmissionShape(admission, @intFromPtr(&admission)));
     try std.testing.expect(!validReconnectAdmissionShape(admission, @intFromPtr(&admission) + 1));
-    admission.disposition_raw = @intFromEnum(incident.Disposition.no_retry);
+    admission.disposition_raw = @backingInt(incident.Disposition.no_retry);
     try std.testing.expect(!validReconnectAdmissionShape(admission, @intFromPtr(&admission)));
-    admission.disposition_raw = @intFromEnum(incident.Disposition.reconnect);
-    admission.lifecycle_raw = @intFromEnum(ReconnectAdmissionLifecycle.consumed);
+    admission.disposition_raw = @backingInt(incident.Disposition.reconnect);
+    admission.lifecycle_raw = @backingInt(ReconnectAdmissionLifecycle.consumed);
     try std.testing.expect(!validReconnectAdmissionShape(admission, @intFromPtr(&admission)));
 }
 
@@ -448,15 +448,15 @@ test "CR0b poison publication 계약은 managed poison handoff의 final address�
             .host_adapter_generation = 9,
             .connection_generation = 10,
             .wire_major = 1,
-            .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),
-            .scope_raw = @intFromEnum(incident.Scope.connection),
-            .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
-            .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
-            .host_class_raw = @intFromEnum(incident.HostClass.current),
-            .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
-            .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
+            .reason_raw = @backingInt(incident.ConnectionReason.connection_eof),
+            .scope_raw = @backingInt(incident.Scope.connection),
+            .disposition_raw = @backingInt(incident.Disposition.reconnect),
+            .source_site_raw = @backingInt(incident.SourceSite.client_read),
+            .host_class_raw = @backingInt(incident.HostClass.current),
+            .parser_phase_raw = @backingInt(incident.ParserPhase.idle),
+            .outbound_phase_raw = @backingInt(incident.OutboundPhase.idle),
         },
-        .lifecycle_raw = @intFromEnum(ManagedPoisonLifecycle.prepared),
+        .lifecycle_raw = @backingInt(ManagedPoisonLifecycle.prepared),
     };
     prepared.self_addr = @intFromPtr(&prepared);
     prepared.binding_seal[0] = 1;
@@ -469,7 +469,7 @@ test "CR0b poison publication 계약은 managed poison handoff의 final address�
 
 test "CR0b poison publication 계약은 composite kind와 lifecycle raw를 닫힌 값으로 유지한다" {
     inline for (.{ PublicationKind.first, PublicationKind.repeat }) |kind|
-        try std.testing.expect(std.enums.fromInt(PublicationKind, @intFromEnum(kind)) != null);
+        try std.testing.expect(std.enums.fromInt(PublicationKind, @backingInt(kind)) != null);
     try std.testing.expect(std.enums.fromInt(PublicationKind, 0) == null);
     inline for (.{
         PublicationLifecycle.pristine,
@@ -477,7 +477,7 @@ test "CR0b poison publication 계약은 composite kind와 lifecycle raw를 닫�
         PublicationLifecycle.evidence_committed,
         PublicationLifecycle.wake_ready,
         PublicationLifecycle.published,
-    }) |lifecycle| try std.testing.expect(std.enums.fromInt(PublicationLifecycle, @intFromEnum(lifecycle)) != null);
+    }) |lifecycle| try std.testing.expect(std.enums.fromInt(PublicationLifecycle, @backingInt(lifecycle)) != null);
     try std.testing.expect(std.enums.fromInt(PublicationLifecycle, 5) == null);
 }
 
@@ -487,18 +487,18 @@ test "CR0b poison publication 계약은 입력의 closed raw 값과 outbound 범
         .host_adapter_generation = 2,
         .connection_generation = 3,
         .wire_major = 1,
-        .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),
-        .scope_raw = @intFromEnum(incident.Scope.connection),
-        .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
-        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
-        .host_class_raw = @intFromEnum(incident.HostClass.current),
-        .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
-        .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
+        .reason_raw = @backingInt(incident.ConnectionReason.connection_eof),
+        .scope_raw = @backingInt(incident.Scope.connection),
+        .disposition_raw = @backingInt(incident.Disposition.reconnect),
+        .source_site_raw = @backingInt(incident.SourceSite.client_read),
+        .host_class_raw = @backingInt(incident.HostClass.current),
+        .parser_phase_raw = @backingInt(incident.ParserPhase.idle),
+        .outbound_phase_raw = @backingInt(incident.OutboundPhase.idle),
     };
     try std.testing.expect(validInputShape(value));
     value.source_site_raw = 0;
     try std.testing.expect(!validInputShape(value));
-    value.source_site_raw = @intFromEnum(incident.SourceSite.client_read);
+    value.source_site_raw = @backingInt(incident.SourceSite.client_read);
     value.outbound_offset = 2;
     value.outbound_length = 1;
     try std.testing.expect(!validInputShape(value));
@@ -514,7 +514,7 @@ test "CR0b poison publication 계약은 repeat key의 final address와 nonzero l
     key.incident_id = .{ .app_instance_nonce = 5, .sequence = 6 };
     key.fingerprint[0] = 1;
     key.binding_seal[0] = 2;
-    key.lifecycle_raw = @intFromEnum(RepeatKeyLifecycle.published);
+    key.lifecycle_raw = @backingInt(RepeatKeyLifecycle.published);
     key.seal[0] = 3;
     try std.testing.expect(validRepeatKeyShape(key, @intFromPtr(&key)));
     try std.testing.expect(!validRepeatKeyShape(key, @intFromPtr(&key) + 1));
@@ -527,13 +527,13 @@ test "CR0b poison publication 계약은 입력을 canonical service record와 di
         .host_adapter_generation = 2,
         .connection_generation = 3,
         .wire_major = 1,
-        .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),
-        .scope_raw = @intFromEnum(incident.Scope.connection),
-        .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
-        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
-        .host_class_raw = @intFromEnum(incident.HostClass.current),
-        .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
-        .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
+        .reason_raw = @backingInt(incident.ConnectionReason.connection_eof),
+        .scope_raw = @backingInt(incident.Scope.connection),
+        .disposition_raw = @backingInt(incident.Disposition.reconnect),
+        .source_site_raw = @backingInt(incident.SourceSite.client_read),
+        .host_class_raw = @backingInt(incident.HostClass.current),
+        .parser_phase_raw = @backingInt(incident.ParserPhase.idle),
+        .outbound_phase_raw = @backingInt(incident.OutboundPhase.idle),
         .last_success_request_id = 8,
         .pending_request_count = 9,
         .pending_stream_count = 10,
@@ -584,13 +584,13 @@ test "CR0b poison publication 계약은 입력을 canonical service record와 di
 
     const base_digest = try inputDigest(value);
     const base_fingerprint = try fingerprint(value);
-    var non_identity_cases = [_]IncidentInput{value} ** 14;
+    var non_identity_cases = @as([14]IncidentInput, @splat(value));
     non_identity_cases[0].timestamp_ns += 1;
     non_identity_cases[1].host_id += 1;
     non_identity_cases[2].host_adapter_generation += 1;
     non_identity_cases[3].connection_generation += 1;
     non_identity_cases[4].wire_major += 1;
-    non_identity_cases[5].parser_phase_raw = @intFromEnum(incident.ParserPhase.header);
+    non_identity_cases[5].parser_phase_raw = @backingInt(incident.ParserPhase.header);
     non_identity_cases[6].last_success_request_id += 1;
     non_identity_cases[7].pending_request_count += 1;
     non_identity_cases[8].pending_stream_count += 1;
@@ -605,11 +605,11 @@ test "CR0b poison publication 계약은 입력을 canonical service record와 di
     }
 
     var outbound_base = value;
-    outbound_base.outbound_phase_raw = @intFromEnum(incident.OutboundPhase.queued);
+    outbound_base.outbound_phase_raw = @backingInt(incident.OutboundPhase.queued);
     outbound_base.outbound_length = 1;
     const outbound_base_digest = try inputDigest(outbound_base);
-    var outbound_cases = [_]IncidentInput{outbound_base} ** 3;
-    outbound_cases[0].outbound_phase_raw = @intFromEnum(incident.OutboundPhase.partial);
+    var outbound_cases = @as([3]IncidentInput, @splat(outbound_base));
+    outbound_cases[0].outbound_phase_raw = @backingInt(incident.OutboundPhase.partial);
     outbound_cases[1].outbound_offset = 1;
     outbound_cases[2].outbound_length = 2;
     for (outbound_cases) |changed| {
@@ -617,11 +617,11 @@ test "CR0b poison publication 계약은 입력을 canonical service record와 di
         try std.testing.expectEqualSlices(u8, &base_fingerprint, &(try fingerprint(changed)));
     }
 
-    var identity_cases = [_]IncidentInput{value} ** 4;
-    identity_cases[0].reason_raw = @intFromEnum(incident.ConnectionReason.read_timeout);
-    identity_cases[1].source_site_raw = @intFromEnum(incident.SourceSite.client_write);
-    identity_cases[2].host_class_raw = @intFromEnum(incident.HostClass.previous);
-    identity_cases[3].scope_raw = @intFromEnum(incident.Scope.host);
+    var identity_cases = @as([4]IncidentInput, @splat(value));
+    identity_cases[0].reason_raw = @backingInt(incident.ConnectionReason.read_timeout);
+    identity_cases[1].source_site_raw = @backingInt(incident.SourceSite.client_write);
+    identity_cases[2].host_class_raw = @backingInt(incident.HostClass.previous);
+    identity_cases[3].scope_raw = @backingInt(incident.Scope.host);
     for (identity_cases[0..3]) |changed| {
         try std.testing.expect(!std.mem.eql(u8, &base_digest, &(try inputDigest(changed))));
         try std.testing.expect(!std.mem.eql(u8, &base_fingerprint, &(try fingerprint(changed))));
@@ -651,18 +651,18 @@ test "CR0b poison publication 계약은 입력을 canonical service record와 di
         .{ .reason = .external_transfer_quarantined, .expected = false, .disposition = .reconnect },
         .{ .reason = .attachment_cleanup_failed, .expected = false, .disposition = .reconnect },
     };
-    try std.testing.expectEqual(std.meta.fields(incident.ConnectionReason).len, decision_cases.len);
+    try std.testing.expectEqual(@import("type_info_fields").fields(incident.ConnectionReason).len, decision_cases.len);
     for (decision_cases) |case| {
         const reason = case.reason;
         var decision_case = value;
-        decision_case.reason_raw = @intFromEnum(reason);
+        decision_case.reason_raw = @backingInt(reason);
         const decision = incident.decisionForReason(reason);
         try std.testing.expectEqual(case.expected, decision.expected);
         try std.testing.expectEqual(case.disposition, decision.disposition);
-        decision_case.disposition_raw = @intFromEnum(case.disposition);
+        decision_case.disposition_raw = @backingInt(case.disposition);
         const decision_record = try serviceInput(decision_case);
         try std.testing.expectEqual(case.expected, decision_record.flags & 1 != 0);
-        try std.testing.expectEqual(@intFromEnum(case.disposition), decision_record.disposition_raw);
+        try std.testing.expectEqual(@backingInt(case.disposition), decision_record.disposition_raw);
         try std.testing.expect(!std.mem.allEqual(u8, &(try inputDigest(decision_case)), 0));
         try std.testing.expect(!std.mem.allEqual(u8, &(try fingerprint(decision_case)), 0));
     }

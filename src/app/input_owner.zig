@@ -189,9 +189,9 @@ test "CR2d1 InputOwner batch는 closed kind와 backend ownership 결과를 그�
     );
     try std.testing.expectEqual(@as(u64, 0xD101), fixture.last_handle);
     try std.testing.expectEqual(InputBatchKind.ime_commit, fixture.batch_kind.?);
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(InputBatchKind.paste));
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(InputBatchKind.ime_commit));
-    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(InputBatchKind.osc52_response));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(InputBatchKind.paste));
+    try std.testing.expectEqual(@as(u8, 2), @backingInt(InputBatchKind.ime_commit));
+    try std.testing.expectEqual(@as(u8, 3), @backingInt(InputBatchKind.osc52_response));
 }
 
 test "CR2d1 InputOwner batch 오류는 caller ownership 결과로 laundering하지 않는다" {

@@ -3,6 +3,8 @@
 //! leaf parser와 aggregate writer/parser를 함께 통과시켜 테스트 결과 파일 이름이나 caller bool이
 //! publication 권위로 승격되지 못하게 한다. 실제 signed 제품 실행과 GitHub attestation은 이 gate의 범위가 아니다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const evidence = @import("release_evidence");
 
@@ -239,15 +241,15 @@ test "upgrade leaves cannot exchange one and near-max roles or A and B images" {
 }
 
 test "evidence and scalar caps reject before publication" {
-    const oversized = "x" ** (evidence.max_evidence_bytes + 1);
+    const oversized = array_repeat.repeat("x", (evidence.max_evidence_bytes + 1));
     try std.testing.expectError(error.EvidenceTooLarge, evidence.parseCanonical(std.testing.allocator, oversized));
     var bad = common();
-    bad.repository.owner = "x" ** (evidence.max_scalar_string_bytes + 1);
+    bad.repository.owner = array_repeat.repeat("x", (evidence.max_scalar_string_bytes + 1));
     try std.testing.expectError(error.ScalarTooLarge, evidence.assembleBaseline(std.testing.allocator, bad, cliLeaf(), defaultLeaf(), quitLeaf()));
 
     const bytes = try evidence.assembleBaseline(std.testing.allocator, common(), cliLeaf(), defaultLeaf(), quitLeaf());
     defer std.testing.allocator.free(bytes);
-    const long_owner = "x" ** (evidence.max_scalar_string_bytes + 1);
+    const long_owner = array_repeat.repeat("x", (evidence.max_scalar_string_bytes + 1));
     const oversized_scalar = try std.mem.replaceOwned(u8, std.testing.allocator, bytes, "ohah", long_owner);
     defer std.testing.allocator.free(oversized_scalar);
     try std.testing.expectError(error.ScalarTooLarge, evidence.parseCanonical(std.testing.allocator, oversized_scalar));

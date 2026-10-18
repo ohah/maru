@@ -11,6 +11,8 @@
 //!   (`devtools.zig` 가 주기적으로). 탭마다 상한이 있어 멈춘 페이지 하나가 다른 탭의 호출을 막지 못한다.
 //! - 인자 중첩 깊이도 본다 — CDP 파서의 깊이 한도를 넘으면 번호 없는 오류가 나 그 호출은 답을 받지 못한다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
 const message = protocol.message;
@@ -305,7 +307,7 @@ test "탭마다 상한 — 멈춘 탭 하나가 다른 탭의 자리를 막지 �
 test "인자 중첩이 깊으면 보내지 않는다(CDP 가 번호 없이 오류를 내 답이 오지 않는다)" {
     var t: Table = .{};
     defer t.deinit(testing.allocator);
-    const deep = "{\"a\":" ++ "[" ** 65 ++ "]" ** 65 ++ "}";
+    const deep = "{\"a\":" ++ array_repeat.repeat("[", 65) ++ array_repeat.repeat("]", 65) ++ "}";
     const c = try t.begin(callOf(3, 1, "A.b", deep.len), 0);
     _ = t.addData(testing.allocator, .{ .browser = 3, .call = 1, .bytes = deep });
     try testing.expectError(error.InvalidParams, t.buildMessage(testing.allocator, c));

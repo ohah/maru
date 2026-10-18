@@ -347,7 +347,7 @@ fn cleanupWorkspaceChild(io: std.Io, workspace: *Workspace, kind: CleanupKind, l
     const root_fd = workspace.root.root_fd;
     if (root_fd < 0) return error.CleanupFailed;
     var name_storage: [std.fs.max_name_bytes:0]u8 = undefined;
-    const name = std.fmt.bufPrintZ(&name_storage, "{s}", .{std.fs.path.basename(leaf)}) catch return error.CleanupFailed;
+    const name = std.fmt.bufPrintSentinel(&name_storage, "{s}", .{std.fs.path.basename(leaf)}, 0) catch return error.CleanupFailed;
     if (c.unlinkat(root_fd, name.ptr, 0) != 0 and posix.errno(-1) != .NOENT) return error.CleanupFailed;
     if (kind != .evidence) {
         const home = if (kind == .default_false) paths.default_false_home else paths.signed_app_quit_home;

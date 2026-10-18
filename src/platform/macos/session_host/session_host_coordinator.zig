@@ -35,7 +35,7 @@ pub const DirectReleaseReceipt = struct {
     backend_generation: u64 = 0,
     target: backend_mod.DirectReleaseTarget = .{},
     lifecycle_raw: u8 = 0,
-    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+    seal: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
 };
 
 pub const CloseEventEvidence = struct {
@@ -54,7 +54,7 @@ pub const CloseEventReceipt = struct {
     backend_generation: u64 = 0,
     target: backend_mod.CloseTransitionTarget = .{},
     lifecycle_raw: u8 = 0,
-    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+    seal: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
 };
 
 pub const SessionHostCoordinator = struct {
@@ -63,7 +63,7 @@ pub const SessionHostCoordinator = struct {
     process_nonce: u64 = 0,
     owner_thread: u64 = 0,
     lifecycle_raw: u8 = 0,
-    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+    seal: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
 
     pub fn initInPlace(self: *SessionHostCoordinator, process_nonce: u64) !void {
         if (!std.meta.eql(self.*, SessionHostCoordinator{}) or process_nonce == 0)
@@ -77,14 +77,14 @@ pub const SessionHostCoordinator = struct {
             .pid = identity.pid,
             .process_nonce = identity.process_nonce,
             .owner_thread = thread_id,
-            .lifecycle_raw = @intFromEnum(Lifecycle.ready),
+            .lifecycle_raw = @backingInt(Lifecycle.ready),
         };
         self.seal = try self.expectedSeal();
         try self.validate();
     }
 
     pub fn ensureReady(self: *SessionHostCoordinator, process_nonce: u64) !void {
-        if (self.lifecycle_raw == @intFromEnum(Lifecycle.pristine))
+        if (self.lifecycle_raw == @backingInt(Lifecycle.pristine))
             return self.initInPlace(process_nonce);
         try self.validate();
         if (self.process_nonce != process_nonce) return error.InvalidAuthority;
@@ -130,7 +130,7 @@ pub const SessionHostCoordinator = struct {
             .backend_addr = @intFromPtr(backend),
             .backend_generation = try backend.singletonGenerationForCoordinator(),
             .target = target,
-            .lifecycle_raw = @intFromEnum(ReceiptLifecycle.prepared),
+            .lifecycle_raw = @backingInt(ReceiptLifecycle.prepared),
         };
         errdefer out.* = .{};
         out.seal = try self.expectedReceiptSeal(out);
@@ -148,10 +148,10 @@ pub const SessionHostCoordinator = struct {
         if (now_ns >= receipt.target.projection.deadline_ns)
             return error.ExpiredExternalEvent;
         var consumed = receipt.*;
-        consumed.lifecycle_raw = @intFromEnum(ReceiptLifecycle.consumed);
+        consumed.lifecycle_raw = @backingInt(ReceiptLifecycle.consumed);
         const consumed_seal = try self.expectedReceiptSeal(&consumed);
         try backend.applyDirectReleaseTarget(receipt.target);
-        receipt.lifecycle_raw = @intFromEnum(ReceiptLifecycle.consumed);
+        receipt.lifecycle_raw = @backingInt(ReceiptLifecycle.consumed);
         receipt.seal = consumed_seal;
     }
 
@@ -193,7 +193,7 @@ pub const SessionHostCoordinator = struct {
             .backend_addr = @intFromPtr(backend),
             .backend_generation = try backend.singletonGenerationForCoordinator(),
             .target = target,
-            .lifecycle_raw = @intFromEnum(ReceiptLifecycle.prepared),
+            .lifecycle_raw = @backingInt(ReceiptLifecycle.prepared),
         };
         errdefer out.* = .{};
         out.seal = try self.expectedCloseReceiptSeal(out);
@@ -215,10 +215,10 @@ pub const SessionHostCoordinator = struct {
             .reconnect_quiesced, .abandon_to_inventory => {},
         }
         var consumed = receipt.*;
-        consumed.lifecycle_raw = @intFromEnum(ReceiptLifecycle.consumed);
+        consumed.lifecycle_raw = @backingInt(ReceiptLifecycle.consumed);
         const consumed_seal = try self.expectedCloseReceiptSeal(&consumed);
         try backend.applyCloseTransitionTarget(receipt.target);
-        receipt.lifecycle_raw = @intFromEnum(ReceiptLifecycle.consumed);
+        receipt.lifecycle_raw = @backingInt(ReceiptLifecycle.consumed);
         receipt.seal = consumed_seal;
     }
 
@@ -226,7 +226,7 @@ pub const SessionHostCoordinator = struct {
         const thread_id: u64 = @intCast(std.Thread.getCurrentId());
         if (self.self_addr != @intFromPtr(self) or self.pid == 0 or self.process_nonce == 0 or
             self.owner_thread == 0 or self.owner_thread != thread_id or
-            self.lifecycle_raw != @intFromEnum(Lifecycle.ready)) return error.InvalidAuthority;
+            self.lifecycle_raw != @backingInt(Lifecycle.ready)) return error.InvalidAuthority;
         const identity = try process_seal.currentReadyIdentity();
         if (identity.pid != self.pid or identity.process_nonce != self.process_nonce)
             return error.InvalidAuthority;
@@ -253,7 +253,7 @@ pub const SessionHostCoordinator = struct {
             receipt.process_nonce != self.process_nonce or receipt.owner_thread != self.owner_thread or
             receipt.backend_addr != @intFromPtr(backend) or
             receipt.backend_generation != try backend.singletonGenerationForCoordinator() or
-            receipt.lifecycle_raw != @intFromEnum(ReceiptLifecycle.prepared))
+            receipt.lifecycle_raw != @backingInt(ReceiptLifecycle.prepared))
             return error.InvalidAuthority;
         const expected = try self.expectedReceiptSeal(receipt);
         if (!std.crypto.timing_safe.eql(process_seal.CleanupSeal, receipt.seal, expected))
@@ -298,7 +298,7 @@ pub const SessionHostCoordinator = struct {
             receipt.process_nonce != self.process_nonce or receipt.owner_thread != self.owner_thread or
             receipt.backend_addr != @intFromPtr(backend) or
             receipt.backend_generation != try backend.singletonGenerationForCoordinator() or
-            receipt.lifecycle_raw != @intFromEnum(ReceiptLifecycle.prepared))
+            receipt.lifecycle_raw != @backingInt(ReceiptLifecycle.prepared))
             return error.InvalidAuthority;
         const expected = try self.expectedCloseReceiptSeal(receipt);
         if (!std.crypto.timing_safe.eql(process_seal.CleanupSeal, receipt.seal, expected))
@@ -346,11 +346,11 @@ fn recursivelyContainsPointer(comptime T: type) bool {
         .optional => |info| recursivelyContainsPointer(info.child),
         .error_union => |info| recursivelyContainsPointer(info.payload),
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field| if (recursivelyContainsPointer(field.type)) break :blk true;
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (recursivelyContainsPointer(field.type)) break :blk true;
             break :blk false;
         },
         .@"union" => |info| blk: {
-            inline for (info.fields) |field| if (recursivelyContainsPointer(field.type)) break :blk true;
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field| if (recursivelyContainsPointer(field.type)) break :blk true;
             break :blk false;
         },
         else => false,
@@ -473,7 +473,7 @@ test "CR2e-e3c2 typed direct release receipt는 exact runtime에 one-shot 적용
         &fixture.runtime,
         &budget,
         admission,
-        [_]u8{0xA5} ** 16,
+        @as([16]u8, @splat(0xA5)),
         1,
     );
     var executor_reset = false;
@@ -527,7 +527,7 @@ test "CR2e-e3c2 typed direct release receipt는 exact runtime에 one-shot 적용
         &fixture.runtime,
         &budget,
         admission,
-        [_]u8{0xA5} ** 16,
+        @as([16]u8, @splat(0xA5)),
         std.math.maxInt(u64),
     );
     const state_before = try @import("remote_runtime.zig").testing_api.directReleaseProjection(&fixture.runtime);
@@ -655,7 +655,7 @@ fn runCloseCompetitionCase(case: @import("remote_runtime.zig").testing_api.Close
 
     const before_request = try @import("remote_runtime.zig").testing_api.closeSnapshot(&fixture.runtime);
     const request_event: @import("remote_runtime.zig").CloseEvent = .{
-        .tag_raw = @intFromEnum(@import("remote_runtime.zig").CloseEventTag.termination_requested),
+        .tag_raw = @backingInt(@import("remote_runtime.zig").CloseEventTag.termination_requested),
         .intent_generation = 11,
         .shell_generation = before_request.state.shell_generation,
         .deadline_ns = 100,
@@ -753,7 +753,7 @@ fn runCloseCompetitionCase(case: @import("remote_runtime.zig").testing_api.Close
 
     const retry = case == .freeze_with_retry;
     const quiesced_event: @import("remote_runtime.zig").CloseEvent = .{
-        .tag_raw = @intFromEnum(@import("remote_runtime.zig").CloseEventTag.reconnect_quiesced),
+        .tag_raw = @backingInt(@import("remote_runtime.zig").CloseEventTag.reconnect_quiesced),
         .old_transport_usable = if (case == .preserve_old or case == .preserve_old_with_paused_notice) 1 else 0,
         .retry_present = if (retry) 1 else 0,
         .retry_row_id = if (retry) 21 else 0,
@@ -794,7 +794,7 @@ fn runCloseCompetitionCase(case: @import("remote_runtime.zig").testing_api.Close
 
     if (case == .preserve_old) {
         const timeout_event: @import("remote_runtime.zig").CloseEvent = .{
-            .tag_raw = @intFromEnum(@import("remote_runtime.zig").CloseEventTag.termination_timed_out),
+            .tag_raw = @backingInt(@import("remote_runtime.zig").CloseEventTag.termination_timed_out),
         };
         const pre_timeout_snapshot = try @import("remote_runtime.zig").testing_api.closeSnapshot(&fixture.runtime);
         const pre_timeout_budget = try budget.snapshot();

@@ -1050,7 +1050,7 @@ fn drainObservedStream(
 fn decodeTermination(status: c_int) Termination {
     const unsigned: u32 = @bitCast(status);
     if (c.W.IFEXITED(unsigned)) return .{ .exited = @intCast(c.W.EXITSTATUS(unsigned)) };
-    if (c.W.IFSIGNALED(unsigned)) return .{ .signal = @intFromEnum(c.W.TERMSIG(unsigned)) };
+    if (c.W.IFSIGNALED(unsigned)) return .{ .signal = @backingInt(c.W.TERMSIG(unsigned)) };
     return .{ .unknown = unsigned };
 }
 

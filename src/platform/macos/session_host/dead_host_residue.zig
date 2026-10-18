@@ -138,7 +138,7 @@ fn removeHeavyResidue(io: std.Io, dir: [:0]const u8, report: *Report) void {
     }
     for (names[0..count], lens[0..count]) |*name_buf, len| {
         var path_buf: [1024]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ dir, name_buf[0..len] }) catch continue;
+        const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}", .{ dir, name_buf[0..len] }, 0) catch continue;
         var st: posix.Stat = undefined;
         if (c.fstatat(posix.AT.FDCWD, path.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0) continue;
         if (!posix.S.ISREG(st.mode) or st.uid != c.getuid()) continue;
@@ -207,7 +207,7 @@ fn sweepHostLogs(io: std.Io, session_dir: [:0]const u8, own_host_id: u128, now_s
         const id = hostIdFromLogName(entry.name) orelse continue;
         if (id == own_host_id) continue;
         var log_buf: [1024]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&log_buf, "{s}/{s}", .{ session_dir, entry.name }) catch continue;
+        const path = std.fmt.bufPrintSentinel(&log_buf, "{s}/{s}", .{ session_dir, entry.name }, 0) catch continue;
         var st: posix.Stat = undefined;
         if (c.fstatat(posix.AT.FDCWD, path.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0) continue;
         if (!posix.S.ISREG(st.mode) or st.uid != c.getuid()) continue;
@@ -230,7 +230,7 @@ fn sweepHostLogs(io: std.Io, session_dir: [:0]const u8, own_host_id: u128, now_s
 
 /// `daemon.redirectStderrToHostLog` 와 같은 이름 규칙. 그쪽이 단일 출처이고 여기는 읽기만 한다.
 pub fn logPathIn(buf: []u8, session_dir: []const u8, id: u128) error{NoSpaceLeft}![:0]u8 {
-    return std.fmt.bufPrintZ(buf, "{s}/host-{x:0>32}.log", .{ session_dir, id });
+    return std.fmt.bufPrintSentinel(buf, "{s}/host-{x:0>32}.log", .{ session_dir, id }, 0);
 }
 
 pub const log_prefix = "host-";
@@ -241,13 +241,13 @@ pub const preflight_log_rotated_leaf = "preflight.log.1";
 /// `preflight.log` 가 문턱을 넘으면 `.1` 로 옮긴다(없으면·작으면 아무 일도 없다).
 fn rotatePreflightLog(session_dir: [:0]const u8) bool {
     var path_buf: [1024]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ session_dir, preflight_log_leaf }) catch return false;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}", .{ session_dir, preflight_log_leaf }, 0) catch return false;
     var st: posix.Stat = undefined;
     if (c.fstatat(posix.AT.FDCWD, path.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0) return false;
     if (!posix.S.ISREG(st.mode) or st.uid != c.getuid()) return false;
     if (@as(u64, @intCast(st.size)) <= preflight_log_max_bytes) return false;
     var rotated_buf: [1024]u8 = undefined;
-    const rotated = std.fmt.bufPrintZ(&rotated_buf, "{s}/{s}", .{ session_dir, preflight_log_rotated_leaf }) catch return false;
+    const rotated = std.fmt.bufPrintSentinel(&rotated_buf, "{s}/{s}", .{ session_dir, preflight_log_rotated_leaf }, 0) catch return false;
     // rename 은 원자적이고, 열려 있는 쓰기 fd(살아 있는 preflight 자식)는 옮겨진 inode 에 계속 쓴다 —
     // 잃는 줄이 없다. 다음 preflight 는 새 파일을 만든다(O_CREAT|O_APPEND).
     return c.rename(path.ptr, rotated.ptr) == 0;
@@ -276,10 +276,10 @@ const Fixture = struct {
     dir_buf: [256]u8 = undefined,
 
     fn init(self: *Fixture, tag: []const u8) !void {
-        self.base = try std.fmt.bufPrintZ(&self.base_buf, "/tmp/maru-sh-dhr-{s}-{d}", .{ tag, c.getpid() });
+        self.base = try std.fmt.bufPrintSentinel(&self.base_buf, "/tmp/maru-sh-dhr-{s}-{d}", .{ tag, c.getpid() }, 0);
         _ = std.Io.Dir.cwd().deleteTree(testing.io, self.base) catch {};
         _ = c.mkdir(self.base.ptr, 0o700);
-        self.session_dir = try std.fmt.bufPrintZ(&self.dir_buf, "{s}/session-host", .{self.base});
+        self.session_dir = try std.fmt.bufPrintSentinel(&self.dir_buf, "{s}/session-host", .{self.base}, 0);
         _ = c.mkdir(self.session_dir.ptr, 0o700);
     }
 
@@ -336,7 +336,7 @@ fn fileInHostDirExists(session_dir: [:0]const u8, id: u128, leaf: []const u8) bo
     var buf: [768]u8 = undefined;
     const dir = host_manifest.hostDirPathIn(&buf, session_dir, id) catch return false;
     var path_buf: [1024]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ dir, leaf }) catch return false;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}", .{ dir, leaf }, 0) catch return false;
     return exists(path);
 }
 
@@ -380,7 +380,7 @@ test "죽은 host 의 이미지만 지우고 신호(manifest·lock)는 남긴다
     try setMtime(try host_manifest.hostDirPathIn(&live_dir_buf, fx.session_dir, live), now_s - 30 * day_s);
     // 우리 모양이 아닌 이름은 세지도 지우지도 않는다.
     var stray_buf: [768]u8 = undefined;
-    const stray = try std.fmt.bufPrintZ(&stray_buf, "{s}/hosts/not-a-host", .{fx.session_dir});
+    const stray = try std.fmt.bufPrintSentinel(&stray_buf, "{s}/hosts/not-a-host", .{fx.session_dir}, 0);
     _ = c.mkdir(stray.ptr, 0o700);
     try setMtime(stray, now_s - 30 * day_s);
 
@@ -445,7 +445,7 @@ test "로그: 죽은 host 의 7 일 지난 것만 지운다 — 최근 죽음·�
     try writeIn(fx.session_dir, "host-notahost.log", "x");
     try writeIn(fx.session_dir, "launch-v2.lock", "");
     var other_buf: [1024]u8 = undefined;
-    const other = try std.fmt.bufPrintZ(&other_buf, "{s}/host-notahost.log", .{fx.session_dir});
+    const other = try std.fmt.bufPrintSentinel(&other_buf, "{s}/host-notahost.log", .{fx.session_dir}, 0);
     try setMtime(other, now_s - 30 * day_s);
 
     const report = sweep(testing.io, fx.session_dir, own, now_s);
@@ -492,9 +492,9 @@ test "preflight.log 는 문턱을 넘을 때만 .1 로 회전하고, 두 번째 
     try writeIn(fx.session_dir, preflight_log_leaf, big);
     try testing.expect(sweep(testing.io, fx.session_dir, 0, now_s).preflight_rotated);
     var buf: [1024]u8 = undefined;
-    try testing.expect(!exists(try std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ fx.session_dir, preflight_log_leaf })));
+    try testing.expect(!exists(try std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ fx.session_dir, preflight_log_leaf }, 0)));
     var rotated_buf: [1024]u8 = undefined;
-    const rotated = try std.fmt.bufPrintZ(&rotated_buf, "{s}/{s}", .{ fx.session_dir, preflight_log_rotated_leaf });
+    const rotated = try std.fmt.bufPrintSentinel(&rotated_buf, "{s}/{s}", .{ fx.session_dir, preflight_log_rotated_leaf }, 0);
     try testing.expect(exists(rotated));
 
     // 정확히 문턱은 안 넘는다.

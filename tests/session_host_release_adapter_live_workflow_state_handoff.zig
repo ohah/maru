@@ -8,8 +8,8 @@ const phase = @import("release_adapter_live_workflow_phase");
 test "every canonical active prefix and terminal state round trips exactly" {
     const current = workflowContext();
     var bytes: [handoff.max_document_bytes]u8 = undefined;
-    inline for (@typeInfo(phase.Outcome).@"enum".fields) |field| {
-        const outcome: phase.Outcome = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(phase.Outcome)) |field| {
+        const outcome: phase.Outcome = @fromBackingInt(@intCast(field.value));
         for (0..10) |next_index| {
             for (0..8) |flags| {
                 const state: phase.State = .{
@@ -193,5 +193,5 @@ fn workflowContext() context.Context {
 fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(out, "{s}/{s}", .{ root[0..len], leaf });
+    return std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ root[0..len], leaf }, 0);
 }

@@ -305,7 +305,7 @@ test "재접속 얼림 관문: 수명 입구 뒤 관문 없이 payload 에 닿�
 
     // 3. 입구 — 어떤 수신자든.
     var offenders: usize = 0;
-    var allow_hits = [_]bool{false} ** allowlist.len;
+    var allow_hits = @as([allowlist.len]bool, @splat(false));
     inline for (.{ ".admitRuntimeOperation()", ".admitDestructiveRuntimeOperation()" }) |entry| {
         var at: usize = 0;
         while (std.mem.indexOfPos(u8, src, at, entry)) |found| : (at = found + entry.len) {

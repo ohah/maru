@@ -69,7 +69,7 @@ test "workspace cleanup removes only the selected child and leaf" {
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_buf);
     var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const root = try std.fmt.bufPrintZ(&path_storage, "{s}/baseline", .{root_buf[0..root_len]});
+    const root = try std.fmt.bufPrintSentinel(&path_storage, "{s}/baseline", .{root_buf[0..root_len]}, 0);
     var workspace: runner.Workspace = .{};
     try runner.prepareWorkspaceForTest(&workspace, root);
     const paths = try workspace.value();
@@ -110,7 +110,7 @@ test "production cleanup accepts successful runner after input borrows are scrub
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_buf);
     var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const root = try std.fmt.bufPrintZ(&path_storage, "{s}/baseline", .{root_buf[0..root_len]});
+    const root = try std.fmt.bufPrintSentinel(&path_storage, "{s}/baseline", .{root_buf[0..root_len]}, 0);
     var workspace: runner.Workspace = .{};
     try runner.prepareWorkspaceForTest(&workspace, root);
     defer workspace.cleanup() catch {};

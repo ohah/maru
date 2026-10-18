@@ -879,7 +879,7 @@ pub export fn maru_mobile_input_kind() u32 {
     // 그리고 **"안 하는 중" 과 "글자 칸" 은 다른 값이어야 한다** — 같은 0 으로 말하면 host 가
     // 하드웨어 키보드로 친 글자를 어디로 보낼지 못 고른다(터미널 vs 설정 칸).
     if (edit_target == .server_field) {
-        const f: ServerField = @enumFromInt(srv_edit_field);
+        const f: ServerField = @fromBackingInt(@intCast(srv_edit_field));
         return if (f == .port) 1 else 2;
     }
     const i = set_edit orelse return 0; // 0=글자(터미널) · 1=숫자 칸 · 2=글자 칸
@@ -1690,15 +1690,15 @@ pub export fn maru_mobile_control_tick(ssh_ready: c_int, channel_state: u32, now
     }
     if (takeControlClose() != 0) {
         control_opened_at_ms = null;
-        return @intFromEnum(ControlAction.close);
+        return @backingInt(ControlAction.close);
     }
     // **열 수 있을 때만 집는다.** 이 요청은 take-once 가 아니다 — 채널이 아직 안 닫혔는데
     // 가져가면 그 뜻이 사라져 축이 영영 안 선다.
-    if (ssh_ready == 0) return @intFromEnum(ControlAction.none);
+    if (ssh_ready == 0) return @backingInt(ControlAction.none);
     if (channel_state != ssh_control_none and channel_state != ssh_control_closed)
-        return @intFromEnum(ControlAction.none);
-    if (takeControlOpen() == 0) return @intFromEnum(ControlAction.none);
-    return @intFromEnum(ControlAction.open);
+        return @backingInt(ControlAction.none);
+    if (takeControlOpen() == 0) return @backingInt(ControlAction.none);
+    return @backingInt(ControlAction.open);
 }
 
 /// 열기의 결과를 알린다. **「아직 때가 아니다」와 「졌다」를 여기서 가른다** — 그 분류가 host 에
@@ -2212,7 +2212,7 @@ pub export fn maru_mobile_input(ptr: [*]const u8, len: usize) u32 {
             return @intCast(delivered_len);
         }
         if (edit_target == .server_field) {
-            const f: ServerField = @enumFromInt(srv_edit_field);
+            const f: ServerField = @fromBackingInt(@intCast(srv_edit_field));
             if (f == .port) editNumberInput(ptr[0..len]) else editTextInput(ptr[0..len]);
             return @intCast(delivered_len);
         }
@@ -6538,7 +6538,7 @@ fn drawServersEntry(win: SetRect, tk: *const tokens.Tokens, row_h: f32, y: f32) 
 /// 편집 화면의 칸. **순서가 곧 화면 순서**다(주소를 먼저 묻는 것이 아니라, 사람이 부르는
 /// 이름부터 묻는다 — 목록에 보이는 것이 그것이다).
 const ServerField = enum { name, host, port, user, fingerprint };
-const server_field_n = @typeInfo(ServerField).@"enum".fields.len;
+const server_field_n = @import("type_info_fields").enumFields(ServerField).len;
 
 /// 편집 중인 서버의 **사본**. config 의 문자열은 파싱 arena 것이라 다음 읽기에서 사라지므로,
 /// 화면이 들고 있으려면 자기 자리에 복사해야 한다. 저장할 때 이 값으로 목록을 다시 적는다.
@@ -6784,7 +6784,7 @@ fn commitServerFieldEdit() void {
         set_edit_len = 0;
     }
     if (set_edit_len == 0) return; // 아무것도 안 치고 확정 — 값을 안 바꾼다
-    const f: ServerField = @enumFromInt(srv_edit_field);
+    const f: ServerField = @fromBackingInt(@intCast(srv_edit_field));
     const text = set_edit_buf[0..set_edit_len];
     if (f == .port) {
         // **파싱은 여기서 한다** — 어떤 칸인지 아는 자리가 여기고, 실패를 이름 있는 오류로
@@ -7246,8 +7246,8 @@ fn drawServerEdit(win: SetRect, tk: *const tokens.Tokens) void {
 
     srv_edit_rects = @splat(.{});
     var y = win.y + set_head_h + 1;
-    inline for (@typeInfo(ServerField).@"enum".fields, 0..) |f, i| {
-        const field: ServerField = @enumFromInt(f.value);
+    inline for (@import("type_info_fields").enumFields(ServerField), 0..) |f, i| {
+        const field: ServerField = @fromBackingInt(@intCast(f.value));
         const rect: SetRect = .{ .x = win.x, .y = y, .w = win.w, .h = set_row_h };
         srv_edit_rects[i] = rect;
         if (uiPressed(registerAction(rect, .{ .server_edit_row = i }))) push(.{ .x = @intFromFloat(rect.x), .y = @intFromFloat(rect.y), .w = @intFromFloat(rect.w), .h = @intFromFloat(rect.h) }, tk.get(.tab_hover_bg), 0xFF, 0, 0);
@@ -8578,7 +8578,7 @@ pub fn keybarArmedDrawn() u32 {
 /// 플랫폼이 부른다: UI 를 조립하고 quad 개수를 돌려준다.
 /// 마지막 오류 이름. 0 quads 가 나왔을 때 **무엇이 실패했는지** 플랫폼이 볼 수 있어야 한다 —
 /// catch 로 삼키면 화면이 비어 있는 이유를 알 수 없다(실측: 처음에 그렇게 짰다가 헤맸다).
-var last_error: [64]u8 = [_]u8{0} ** 64;
+var last_error: [64]u8 = @as([64]u8, @splat(0));
 
 /// 플랫폼이 `maru_mobile_last_error` 로 읽는 자리. 조용한 실패를 남기지 않기 위한 것이라
 /// **덮어쓰지 않는다** — 먼저 난 원인이 더 쓸모 있다.
@@ -8701,7 +8701,7 @@ pub fn diagnosticText(buf: []u8) []const u8 {
         frame_seq,
     });
     put(buf, &w, "ssh state={d} control state={d} sessions={d} servers={d}\n", .{
-        conn_state, @intFromEnum(control_client.state), control_row_count, servers().len,
+        conn_state, @backingInt(control_client.state), control_row_count, servers().len,
     });
     put(buf, &w, "errors={d} dropped={d}\n", .{ diag_error_used, diag_errors_dropped });
     for (diagErrors()) |*e| {
@@ -9322,7 +9322,7 @@ const WireRole = enum(u32) {
 /// 역할(`mobile_host_abi.h` 의 `MARU_MOBILE_A11Y_ROLE_*`). 없는 index 는 0xFFFF_FFFF.
 pub export fn maru_mobile_a11y_role(index: u32) u32 {
     if (index >= a11y_count) return 0xFFFF_FFFF;
-    return @intFromEnum(WireRole.from(a11y_nodes[index].sem.role));
+    return @backingInt(WireRole.from(a11y_nodes[index].sem.role));
 }
 
 /// 상태 비트. **한 번에 읽어 간다** — 항목마다 호출을 넷 하면 host 코드가 그만큼 길어지고,
@@ -9621,9 +9621,9 @@ pub fn setScreenForTest(name: []const u8) void {
     // **판정자가 자리를 정했으면 앱은 다시 안 고른다**(M16a). 안 그러면 첫 프레임의
     // `landFirstScreen` 이 이 지정을 덮어, 판정자는 옮겼다고 믿은 채 다른 화면을 잰다.
     first_landing_done = true;
-    inline for (@typeInfo(Screen).@"enum".fields) |f| {
+    inline for (@import("type_info_fields").enumFields(Screen)) |f| {
         if (std.mem.eql(u8, f.name, name)) {
-            const s: Screen = @enumFromInt(f.value);
+            const s: Screen = @fromBackingInt(@intCast(f.value));
             if (s == .sessions) {
                 nav_len = 1; // 뿌리는 목록이다
             } else {

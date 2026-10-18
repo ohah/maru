@@ -206,7 +206,7 @@ pub fn writeOpenFailure(out: []u8, sender_channel: u32, reason: OpenFailureReaso
     var w = wire.Writer.init(out);
     try w.byte(msg_channel_open_failure);
     try w.u32be(sender_channel);
-    try w.u32be(@intFromEnum(reason));
+    try w.u32be(@backingInt(reason));
     try w.string("maru opens no channels");
     try w.string(""); // language tag (RFC 3066) — 비워 둔다
     return w.written();
@@ -550,7 +550,7 @@ pub const Channel = struct {
 
     fn recvOpenFailure(self: *Channel, r: *wire.Reader) Error!Event {
         try self.expectOurChannel(r, &.{.opening});
-        const reason: OpenFailureReason = @enumFromInt(try r.u32be());
+        const reason: OpenFailureReason = @fromBackingInt(@intCast(try r.u32be()));
         const description = try r.string();
         const language = try r.string();
         self.state = .open_failed;
@@ -629,8 +629,8 @@ test "상수는 RFC 4250·4254 그대로다" {
     try testing.expectEqual(@as(u8, 99), msg_channel_success);
     try testing.expectEqual(@as(u8, 100), msg_channel_failure);
     try testing.expectEqual(@as(u32, 1), extended_data_stderr);
-    try testing.expectEqual(@as(u32, 1), @intFromEnum(OpenFailureReason.administratively_prohibited));
-    try testing.expectEqual(@as(u32, 3), @intFromEnum(OpenFailureReason.unknown_channel_type));
+    try testing.expectEqual(@as(u32, 1), @backingInt(OpenFailureReason.administratively_prohibited));
+    try testing.expectEqual(@as(u32, 3), @backingInt(OpenFailureReason.unknown_channel_type));
     try testing.expectEqualStrings("session", channel_type_session);
     try testing.expectEqualStrings("pty-req", request_pty);
     try testing.expectEqualStrings("shell", request_shell);
@@ -1053,7 +1053,7 @@ test "열기 거절은 사유와 설명을 준다" {
     var w = wire.Writer.init(&buf);
     try w.byte(msg_channel_open_failure);
     try w.u32be(7);
-    try w.u32be(@intFromEnum(OpenFailureReason.administratively_prohibited));
+    try w.u32be(@backingInt(OpenFailureReason.administratively_prohibited));
     try w.string("open failed");
     try w.string("en");
     const ev = try ch.receive(w.written());
@@ -1080,7 +1080,7 @@ test "모르는 실패 사유도 값을 잃지 않는다" {
     try w.string("모르는 사유");
     try w.string("");
     const ev = try ch.receive(w.written());
-    try testing.expectEqual(@as(u32, 9999), @intFromEnum(ev.open_failed.reason));
+    try testing.expectEqual(@as(u32, 9999), @backingInt(ev.open_failed.reason));
 }
 
 test "채널 메시지가 아니면 거절한다" {

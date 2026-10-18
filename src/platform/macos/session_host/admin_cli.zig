@@ -22,7 +22,7 @@ pub fn runRequest(
         return exit(stdout, stderr, .protocol);
     };
     defer allocator.free(exe_raw);
-    const exe = allocator.dupeZ(u8, exe_raw) catch return error.OutOfMemory;
+    const exe = allocator.dupeSentinel(u8, exe_raw, 0) catch return error.OutOfMemory;
     defer allocator.free(exe);
     // **캐시가 아니라 런타임 base 다**(계약 §10). 앱이 host 를 그 자리에 등록하므로 CLI 도 같은
     // 자리를 봐야 한다 — `XDG_CACHE_HOME`/`~/.cache` 를 보던 때는 앱이 띄운 host 를 **한 번도
@@ -271,7 +271,7 @@ fn exit(
 ) noreturn {
     stderr.flush() catch {};
     stdout.flush() catch {};
-    std.process.exit(@intFromEnum(code));
+    std.process.exit(@backingInt(code));
 }
 
 test "post-discovery endpoint races are transport failures, not absent hosts" {

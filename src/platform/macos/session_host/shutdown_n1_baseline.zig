@@ -37,6 +37,6 @@ test "C3-3b6 N-1 기준 manifest는 wire와 capability를 닫힌 값으로 고�
     try std.testing.expectEqual(@as(u16, 1), screen_codec_version);
     try std.testing.expect(gui_runtime_list and gui_runtime_terminate);
     try std.testing.expect(!cross_connection_admin_barrier);
-    try std.testing.expect(!std.mem.eql(u8, &source_patch_sha256, &([_]u8{0} ** 32)));
-    try std.testing.expect(!std.mem.eql(u8, &artifact_sha256, &([_]u8{0} ** 32)));
+    try std.testing.expect(!std.mem.eql(u8, &source_patch_sha256, &(@as([32]u8, @splat(0)))));
+    try std.testing.expect(!std.mem.eql(u8, &artifact_sha256, &(@as([32]u8, @splat(0)))));
 }

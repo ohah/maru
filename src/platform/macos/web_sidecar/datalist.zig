@@ -48,7 +48,7 @@ const Shown = struct {
     /// 주 프레임의 목록인가(아니면 iframe — 최상위 스크롤에 닫는다).
     main: bool = true,
 };
-var shown: [64]?Shown = [_]?Shown{null} ** 64;
+var shown: [64]?Shown = @as([64]?Shown, @splat(null));
 var next_list: u32 = 1;
 
 /// 브라우저마다 마지막으로 들은 문서 표식과, 주 프레임에 새 문서가 온 때 그 표식(떠난 문서). 떠난 문서가 이동 직전에 보낸 보이기가
@@ -62,7 +62,7 @@ const Heard = struct {
     retired: [16]u8 = undefined,
     retired_at_ms: i64 = 0,
 };
-var heard: [64]?Heard = [_]?Heard{null} ** 64;
+var heard: [64]?Heard = @as([64]?Heard, @splat(null));
 const retired_ms: i64 = 1000;
 
 fn heardOf(id: BrowserId) ?*Heard {

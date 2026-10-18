@@ -75,7 +75,7 @@ const corner_tri = [4][6]f32{
 fn fillCorner(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, corner: Corner, alpha: u8) u32 {
     const fw = @as(f32, @floatFromInt(w));
     const fh = @as(f32, @floatFromInt(h));
-    const c = corner_tri[@intFromEnum(corner)];
+    const c = corner_tri[@backingInt(corner)];
     return gp.fillTriangleAlpha(pixels, bytes_per_row, w, h, c[0] * fw, c[1] * fh, c[2] * fw, c[3] * fh, c[4] * fw, c[5] * fh, false, alpha);
 }
 
@@ -91,7 +91,7 @@ const edge_base = [4][4]f32{
 fn fillWedge(pixels: []u8, bytes_per_row: usize, w: u32, h: u32, edge: Edge, invert: bool) u32 {
     const fw = @as(f32, @floatFromInt(w));
     const fh = @as(f32, @floatFromInt(h));
-    const e = edge_base[@intFromEnum(edge)];
+    const e = edge_base[@backingInt(edge)];
     return gp.fillTriangle(pixels, bytes_per_row, w, h, fw / 2.0, fh / 2.0, e[0] * fw, e[1] * fh, e[2] * fw, e[3] * fh, invert);
 }
 

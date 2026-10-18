@@ -59,10 +59,11 @@ const exit_exec_failed: u8 = 125;
 pub fn noteChildOutcome(ok: bool, detail: []const u8) void {
     if (builtin.is_test) return;
     var path_buf: [128]u8 = undefined;
-    const path = std.fmt.bufPrintZ(
+    const path = std.fmt.bufPrintSentinel(
         &path_buf,
         "/tmp/maru-{d}/session-host/preflight.log",
         .{c.getuid()},
+        0,
     ) catch return;
     const fd = c.open(
         path.ptr,
@@ -136,7 +137,7 @@ fn waitPreflight(
             else if (std.c.W.IFSIGNALED(us))
                 host_log.line(
                     "upgrade preflight rejected target: signal={d}",
-                    .{@intFromEnum(std.c.W.TERMSIG(us))},
+                    .{@backingInt(std.c.W.TERMSIG(us))},
                 )
             else
                 host_log.line("upgrade preflight rejected target: raw_status=0x{x}", .{us});
@@ -243,10 +244,11 @@ test "product preflight execs the staged maru reader with only primary handoff f
     defer std.testing.allocator.free(handoff);
 
     var path_buf: [192]u8 = undefined;
-    const state_path = std.fmt.bufPrintZ(
+    const state_path = std.fmt.bufPrintSentinel(
         &path_buf,
         "/tmp/maru-product-preflight-{d}",
         .{c.getpid()},
+        0,
     ) catch return error.SkipZigTest;
     _ = c.unlink(state_path.ptr);
     defer _ = c.unlink(state_path.ptr);

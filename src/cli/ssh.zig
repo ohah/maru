@@ -18,6 +18,8 @@
 //! 파일을 지워 비운다). 호스트 설치 캐시·terminfo 소스 embed(자기완결)·단일 연결(ControlMaster)·원격
 //! command 안전 처리(bootstrapEligible)는 했다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const remote_shell = @import("../session/remote_shell.zig");
 const builtin = @import("builtin");
@@ -652,7 +654,7 @@ fn expectNotifyLifecycle(body: []const u8, signal: ?std.c.SIG, expected_exit: u3
         .{ notify_lifecycle, body },
     );
     defer allocator.free(script);
-    const script_z = try allocator.dupeZ(u8, script);
+    const script_z = try allocator.dupeSentinel(u8, script, 0);
     defer allocator.free(script_z);
     const spawned = spawnShell(script_z, false) orelse return error.SkipZigTest;
     const child = spawned.pid;
@@ -868,7 +870,7 @@ test "controlSocketPath: home 끝 슬래시를 정규화한다" {
 
 test "controlSocketPath: sun_path 한도를 넘으면 ControlPathTooLong" {
     const a = std.testing.allocator;
-    const long_home = "/" ++ ("x" ** 120); // 경로가 sun_path(104B)를 넘는다
+    const long_home = "/" ++ (array_repeat.repeat("x", 120)); // 경로가 sun_path(104B)를 넘는다
     try std.testing.expectError(error.ControlPathTooLong, controlSocketPath(a, long_home, "host"));
 }
 
@@ -990,7 +992,7 @@ fn runSessionLoop(allocator: std.mem.Allocator, setup: []const u8, out: []u8) ![
         .{ notify_lifecycle, session_loop, setup },
     );
     defer allocator.free(script);
-    const script_z = try allocator.dupeZ(u8, script);
+    const script_z = try allocator.dupeSentinel(u8, script, 0);
     defer allocator.free(script_z);
 
     // stderr까지 모은다 — 재접속 안내는 CLI 진단 관례대로 stderr로 나가고, 그 문구가 판정 대상이다.

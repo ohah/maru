@@ -666,10 +666,10 @@ fn validateSigning(signing: Signing) ParseError!void {
 }
 
 fn validateAssets(assets: []const Asset) ParseError!void {
-    var counts = [_]u8{0} ** @typeInfo(AssetRole).@"enum".fields.len;
+    var counts = @as([@import("type_info_fields").enumFields(AssetRole).len]u8, @splat(0));
     var total: u64 = 0;
     for (assets, 0..) |asset, asset_index| {
-        const index = @intFromEnum(asset.role);
+        const index = @backingInt(asset.role);
         counts[index] = std.math.add(u8, counts[index], 1) catch return error.InvalidAsset;
         if (asset.size == 0 or !lowerHex(asset.sha256, 64) or !basename(asset.name))
             return error.InvalidAsset;

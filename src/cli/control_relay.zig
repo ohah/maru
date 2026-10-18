@@ -140,7 +140,7 @@ pub fn relayFds(in_fd: std.c.fd_t, out_fd: std.c.fd_t, sock_fd: std.c.fd_t) End 
         const ready = c.poll(&fds, fds.len, -1);
         if (ready < 0) {
             // 신호로 깬 것은 실패가 아니다 — 다시 본다.
-            if (c._errno().* == @intFromEnum(c.E.INTR)) continue;
+            if (c._errno().* == @backingInt(c.E.INTR)) continue;
             return .io_error;
         }
 

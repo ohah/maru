@@ -144,7 +144,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     var name_buf: [64]u8 = undefined;
     const board = std.fmt.bufPrint(&name_buf, "maru-web-judge-media-{d}", .{std.c.getpid()}) catch unreachable;
     var env_buf: [128]u8 = undefined;
-    const env = std.fmt.bufPrintZ(&env_buf, "MARU_WEB_TEST_PASTEBOARD={s}", .{board}) catch unreachable;
+    const env = std.fmt.bufPrintSentinel(&env_buf, "MARU_WEB_TEST_PASTEBOARD={s}", .{board}, 0) catch unreachable;
     defer pasteboard.dispose(board);
 
     var host = try Host.spawnWith(host_path, profile_arg, null, &.{env.ptr});

@@ -6,6 +6,8 @@
 //! owns the blocking open/stat/read/JSON work; AppSession only drains immutable
 //! results on its frame path.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const detached_worker_wait = @import("detached_worker_wait.zig");
 const builtin = @import("builtin");
@@ -267,7 +269,7 @@ test "상세 backend: 게이트에 세워 둔 워커는 deinit 이 거두고 나
     defer tmp.cleanup();
     // 게이트를 지난 뒤의 일감을 실제로 만든다 — 빈 경로면 워커가 곧장 끝나 거둠이 있으나 없으나 같다.
     var line_buf: [512]u8 = undefined;
-    const line = std.fmt.bufPrint(&line_buf, "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"{s}\"}}}}\n", .{"x" ** 200}) catch unreachable;
+    const line = std.fmt.bufPrint(&line_buf, "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"{s}\"}}}}\n", .{array_repeat.repeat("x", 200)}) catch unreachable;
     {
         var file = try tmp.dir.createFile(io, "detail.jsonl", .{});
         defer file.close(io);

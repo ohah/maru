@@ -22,6 +22,8 @@
 //!
 //! **이 파일은 순수하다.** 프로세스도 화면도 읽지 않는다 — 호출자가 모은 사실로 판정만 한다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 
 /// 훅이 자기를 띄운 프로세스 pid(`$PPID`)를 적는 JSON 키. 훅은 이 키를 payload **맨 앞**에 끼운다
@@ -93,9 +95,9 @@ pub fn isManagedDaemonArgs(procargs: []const u8) bool {
 /// 지금 그 pid 의 시작 시각을 못 읽으면(이미 사라졌다) 호출자가 «아니다»(= 예전 규칙)로 접는다.
 pub const ParentVerdicts = struct {
     pub const capacity = 8;
-    pids: [capacity]u32 = [_]u32{0} ** capacity,
-    starts: [capacity]u64 = [_]u64{0} ** capacity,
-    daemon: [capacity]bool = [_]bool{false} ** capacity,
+    pids: [capacity]u32 = @as([capacity]u32, @splat(0)),
+    starts: [capacity]u64 = @as([capacity]u64, @splat(0)),
+    daemon: [capacity]bool = @as([capacity]bool, @splat(false)),
     next: usize = 0,
 
     pub fn lookup(self: *const ParentVerdicts, pid: u32, start_us: u64) ?bool {
@@ -126,7 +128,7 @@ pub const ParentVerdicts = struct {
 /// 버려질 때 이벤트마다 한 줄씩 쌓인다. 고정 크기, 가득 차면 돌아가며 덮는다.
 pub const DropLog = struct {
     pub const capacity = 16;
-    keys: [capacity]u64 = [_]u64{0} ** capacity,
+    keys: [capacity]u64 = @as([capacity]u64, @splat(0)),
     next: usize = 0,
 
     /// 처음 보는 키면 기억하고 `true`(= 남겨라).
@@ -290,7 +292,7 @@ pub const Bindings = struct {
         used: u64 = 0,
     };
 
-    entries: [capacity]Entry = [_]Entry{.{}} ** capacity,
+    entries: [capacity]Entry = @as([capacity]Entry, @splat(.{})),
     clock: u64 = 0,
 
     pub fn lookup(self: *Bindings, session: []const u8) ?u64 {
@@ -429,8 +431,8 @@ test "codex 데몬 귀속: 묶음은 세션마다 하나, Term 이 떠나면 풀
     b.dropTarget(91);
     try testing.expectEqual(@as(?u64, null), b.lookup("01a105dd"));
     // 담을 수 없는 길이는 묶지 않는다(자르면 앞부분이 같은 두 세션이 섞인다).
-    b.bind("x" ** (Bindings.max_session_bytes + 1), 1);
-    try testing.expectEqual(@as(?u64, null), b.lookup("x" ** Bindings.max_session_bytes));
+    b.bind(array_repeat.repeat("x", (Bindings.max_session_bytes + 1)), 1);
+    try testing.expectEqual(@as(?u64, null), b.lookup(array_repeat.repeat("x", Bindings.max_session_bytes)));
 
     var f: Bindings = .{};
     var name: [8]u8 = undefined;

@@ -6,6 +6,8 @@
 //! 보류한 동작을 실행, cancelled면 버린다. chrome 계약: State(순수 데이터+전이) + view(순수) + handle(intent 반환).
 //! 박스 기하·중앙배치·폭 clamp는 modal_box 프리미티브(단일 출처)에 위임한다. 단일 출처: docs/chrome-strategy.md §5.4.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
@@ -1489,7 +1491,7 @@ test "confirm wrap: 공백 없는 긴 토큰은 글자 경계에서 자르고, �
     const arena = arena_state.allocator();
 
     // (1) 한글만 이어진 긴 토큰 — 2칸 글자 경계에서 자른다(코드포인트를 쪼개지 않는다).
-    const hangul = "가" ** 100; // 200칸
+    const hangul = array_repeat.repeat("가", 100); // 200칸
     var s = State{};
     s.show(hangul, .{ .confirm = "ok", .cancel = "no" });
     var g = buttonGeom(&s, p, &tk).?;
@@ -1503,7 +1505,7 @@ test "confirm wrap: 공백 없는 긴 토큰은 글자 경계에서 자르고, �
     try std.testing.expectEqual(hangul.len, total); // 잃은 글자가 없다
 
     // (2) 끝없이 긴 URL — 상한 줄 수에서 멈추고 마지막 줄이 「…」로 끝나며, 그 줄도 안쪽 폭 안이다.
-    const url = "Allow access to https://example.com/" ++ "a" ** 2000 ++ " ?";
+    const url = "Allow access to https://example.com/" ++ array_repeat.repeat("a", 2000) ++ " ?";
     s.show(url, .{ .confirm = "ok", .cancel = "no" });
     g = buttonGeom(&s, p, &tk).?;
     try std.testing.expectEqual(modal_box.max_wrap_rows, g.msg_rows);
@@ -1558,7 +1560,7 @@ test "낮은 창에서도 버튼 행은 화면 안이다 — 미리보기부터,
     const msg = "This paste contains multiple lines and may run commands as soon as it is pasted into the terminal. Paste anyway?";
     const body = [_][]const u8{ "line1", "line2", "line3", "line4", "line5", "line6", "line7" };
     // 공백 없는 긴 토큰은 줄을 안쪽 폭까지 **꽉** 채운다 — 줄인 마지막 줄에 「…」를 그냥 붙이면 한 칸 넘친다.
-    const full_lines = "x" ** 500;
+    const full_lines = array_repeat.repeat("x", 500);
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     for ([_][]const u8{ msg, full_lines }) |message| for ([_]u32{ 120, 160, 200, 240, 272, 360 }) |h| {
@@ -1622,9 +1624,9 @@ test "확인 모달 성질: 어떤 창·글꼴·메시지·버튼·미리보기�
     var prng = std.Random.DefaultPrng.init(0xBEEF);
     const r = prng.random();
     const pieces = [_][]const u8{ "a", "abc ", "한", "글자 ", "🙂", " ", "\n", "e\u{301}", "\xff", "\xe2", "…", "ｗ", "/opt/x/y" };
-    const labels = [_][]const u8{ "OK", "실행", "덮어쓰기", "다시 읽기", "계속 편집", "Overwrite anyway", "x" ** 30, "한" ** 12 };
-    const preview = [_][]const u8{ "echo hi", "rm -rf ./build && make " ++ "y" ** 60, "한글 줄", "" };
-    const note_pool = [_]Note{ .{ .text = "• 서버는 사용자 권한으로 격리 없이 실행되며, 저장소 밖 파일에 닿을 수 있습니다." }, .{ .text = "~/a/b/c/" ++ "d" ** 40 ++ "/leaf", .fit = .path }, .{ .text = "x" ** 90 }, .{ .text = "" }, .{ .text = "한 🙂 \xff" } };
+    const labels = [_][]const u8{ "OK", "실행", "덮어쓰기", "다시 읽기", "계속 편집", "Overwrite anyway", array_repeat.repeat("x", 30), array_repeat.repeat("한", 12) };
+    const preview = [_][]const u8{ "echo hi", "rm -rf ./build && make " ++ array_repeat.repeat("y", 60), "한글 줄", "" };
+    const note_pool = [_]Note{ .{ .text = "• 서버는 사용자 권한으로 격리 없이 실행되며, 저장소 밖 파일에 닿을 수 있습니다." }, .{ .text = "~/a/b/c/" ++ array_repeat.repeat("d", 40) ++ "/leaf", .fit = .path }, .{ .text = array_repeat.repeat("x", 90) }, .{ .text = "" }, .{ .text = "한 🙂 \xff" } };
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     var short_windows: usize = 0;
@@ -1640,14 +1642,14 @@ test "확인 모달 성질: 어떤 창·글꼴·메시지·버튼·미리보기�
         const p = props.ChromeProps{ .metrics = .{ .cell_width_px = cw, .cell_height_px = ch, .sidebar_width_px = r.intRangeAtMost(u32, 0, bw / 2), .backing_width_px = bw, .backing_height_px = bh } };
         var st: State = .{};
         const pick = struct {
-            fn f(rr: std.Random) []const u8 {
-                return labels[rr.intRangeLessThan(usize, 0, labels.len)];
+            fn f(rr: std.Random, choices: []const []const u8) []const u8 {
+                return choices[rr.intRangeLessThan(usize, 0, choices.len)];
             }
         }.f;
         if (r.boolean()) {
-            st.show(b.items, .{ .confirm = pick(r), .cancel = pick(r) });
+            st.show(b.items, .{ .confirm = pick(r, labels[0..]), .cancel = pick(r, labels[0..]) });
         } else {
-            st.showChoices(b.items, .{ .primary = pick(r), .alternate = pick(r), .extra = if (r.boolean()) pick(r) else null, .cancel = pick(r) });
+            st.showChoices(b.items, .{ .primary = pick(r, labels[0..]), .alternate = pick(r, labels[0..]), .extra = if (r.boolean()) pick(r, labels[0..]) else null, .cancel = pick(r, labels[0..]) });
         }
         st.body = preview[0..r.intRangeAtMost(usize, 0, preview.len)];
         st.notes = note_pool[0..r.intRangeAtMost(usize, 0, note_pool.len)];
@@ -1858,7 +1860,7 @@ test "confirm notes_must_fit: 안내 줄이 다 보이면 확정되고, 낮은 �
     s.notes_must_fit = false;
     try std.testing.expect(confirmAllowed(&s, testProps(800, 128), &tk));
     // 한 줄이 줄바꿈 상한을 넘는다(아주 긴 경로) — 줄 수가 남아도 그 줄이 잘렸다.
-    const long_path = "1. /" ++ "a" ** 4000;
+    const long_path = "1. /" ++ array_repeat.repeat("a", 4000);
     const one = [_]Note{.{ .text = long_path }};
     s.show("Upload?", .{ .confirm = "Allow", .cancel = "Deny" });
     try std.testing.expect(!s.notes_must_fit); // show 가 끈다(앞 상자의 요구가 새 상자에 새지 않게)
@@ -1873,7 +1875,7 @@ test "confirm notes_must_fit: 막힌 확정 버튼은 흐린 글자(muted_fg)로
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const long_path = "1. /" ++ "a" ** 4000;
+    const long_path = "1. /" ++ array_repeat.repeat("a", 4000);
     const one = [_]Note{.{ .text = long_path }};
     var s = State{};
     s.show("Upload?", .{ .confirm = "Allow", .cancel = "Deny" });

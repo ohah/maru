@@ -44,7 +44,7 @@ comptime {
 
 fn lookUp(service: []const u8) ?mach.Port {
     var name: [128:0]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&name, "{s}", .{service}) catch return null;
+    const z = std.fmt.bufPrintSentinel(&name, "{s}", .{service}, 0) catch return null;
     var port: mach.Port = mach.null_port;
     if (mach.bootstrap_look_up(mach.bootstrap_port, z, &port) != 0) return null;
     return port;

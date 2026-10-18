@@ -230,7 +230,7 @@ test "RPBU9 많은 한 줄 범위도 순서와 중복에 의존하지 않고 원
         .{ .start = .{ .line = 0, .byte = 20_001 }, .end = .{ .line = 0, .byte = 20_001 } },
         .{ .start = .{ .line = 0, .byte = 1 }, .end = .{ .line = 0, .byte = 1 } },
     };
-    var flags = [_]bool{false} ** 4;
+    var flags = @as([4]bool, @splat(false));
     markRanges(&expected, &flags, ranges);
     try std.testing.expectEqualSlices(bool, &.{ true, true, false, true }, &flags);
     // 독립 선형 oracle은 포함된 범위만 true임을 대조한다.

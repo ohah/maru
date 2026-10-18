@@ -19,6 +19,8 @@
 //! 느린 볼륨(죽은 망 마운트)의 `open`·`stat`·읽기는 멈출 수 있다 — 이 함수들은 **작업 스레드**에서 부른다(`app_host_abi` 의 업로드 작업).
 //! 이 파일은 스레드를 띄우지 않는다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const builtin = @import("builtin");
 const display = @import("maru").session.web_upload_display;
@@ -136,18 +138,18 @@ pub fn prepare(gpa: std.mem.Allocator, path: []const u8) !PrepareResult {
 /// 해시 예산(`hash_cap_per_call` 에서 시작, 잰 만큼 준다).
 pub fn prepareWith(gpa: std.mem.Allocator, path: []const u8, hash_budget: *u64) !PrepareResult {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return .{ .refused = .too_long };
+    const path_z = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{path}, 0) catch return .{ .refused = .too_long };
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
     const real = std.c.realpath(path_z.ptr, &real_buf) orelse {
         const e = std.c._errno().*;
-        return .{ .refused = if (e == @intFromEnum(std.c.E.NOENT) or e == @intFromEnum(std.c.E.NOTDIR)) .not_found else .unreadable };
+        return .{ .refused = if (e == @backingInt(std.c.E.NOENT) or e == @backingInt(std.c.E.NOTDIR)) .not_found else .unreadable };
     };
     if (builtin.is_test) if (test_after_realpath) |hook| hook(real);
     // 정규 경로를 정한 뒤 열기 전에 그 자리가 링크로 바뀌면(남이 바꿔치기) 따라가지 않는다 — 「바뀌었다」(`swapped`).
     const fd = std.c.open(real, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true }, @as(std.c.mode_t, 0));
     if (fd < 0) {
         const e = std.c._errno().*;
-        return .{ .refused = if (e == @intFromEnum(std.c.E.LOOP)) .swapped else if (e == @intFromEnum(std.c.E.NOENT)) .not_found else if (e == darwin_eopnotsupp or e == @intFromEnum(std.c.E.OPNOTSUPP) or e == @intFromEnum(std.c.E.NXIO)) .not_regular else .unreadable };
+        return .{ .refused = if (e == @backingInt(std.c.E.LOOP)) .swapped else if (e == @backingInt(std.c.E.NOENT)) .not_found else if (e == darwin_eopnotsupp or e == @backingInt(std.c.E.OPNOTSUPP) or e == @backingInt(std.c.E.NXIO)) .not_regular else .unreadable };
     }
     var keep = false;
     defer if (!keep) {
@@ -262,7 +264,7 @@ fn hashFd(fd: c_int, limit: u64, buf: []u8, h: *Sha256, sink: anytype) ?u64 {
         const want: usize = @intCast(@min(limit - off, buf.len));
         const n = std.c.pread(fd, buf.ptr, want, @intCast(off));
         if (n < 0) {
-            if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+            if (std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
             return null;
         }
         if (n == 0) break;
@@ -298,8 +300,8 @@ pub fn sameFileBefore(files: []const Prepared, i: usize) bool {
 /// 사본의 뿌리 — `<base>/upload-staging` 을 만들고(0700) 정규 경로로 돌려준다(소유).
 pub fn ensureRoot(gpa: std.mem.Allocator, base: []const u8) ![]u8 {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = std.fmt.bufPrintZ(&buf, "{s}/upload-staging", .{base}) catch return error.PathTooLong;
-    if (std.c.mkdir(root.ptr, 0o700) != 0 and std.c._errno().* != @intFromEnum(std.c.E.EXIST)) return error.CreateFailed;
+    const root = std.fmt.bufPrintSentinel(&buf, "{s}/upload-staging", .{base}, 0) catch return error.PathTooLong;
+    if (std.c.mkdir(root.ptr, 0o700) != 0 and std.c._errno().* != @backingInt(std.c.E.EXIST)) return error.CreateFailed;
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
     const real = std.c.realpath(root.ptr, &real_buf) orelse return error.CreateFailed;
     // 링크로 된 뿌리는 받지 않는다(남이 놓은 링크를 따라 다른 곳에 쓰지 않게) — 정규 경로의 마지막 이름이 그대로여야 한다.
@@ -329,7 +331,7 @@ pub const StageResult = union(enum) {
 };
 
 fn mkdirOwned(path: [:0]const u8) bool {
-    return std.c.mkdir(path.ptr, 0o700) == 0 or std.c._errno().* == @intFromEnum(std.c.E.EXIST);
+    return std.c.mkdir(path.ptr, 0o700) == 0 or std.c._errno().* == @backingInt(std.c.E.EXIST);
 }
 
 /// 승인 뒤 — 쥔 fd 에서 `<root>/<tab>/<op>/<index>/<이름>` 으로 사본을 만든다(복제, 안 되면 복사 — `copy_budget` 안에서, 쓴 만큼 줄인다).
@@ -347,17 +349,17 @@ pub fn stageFileWith(gpa: std.mem.Allocator, root: []const u8, tab: u64, op: u64
             1 => .{ root, tab, op },
             else => .{ root, tab, op, index },
         };
-        const d = std.fmt.bufPrintZ(&dir_buf, fmt, args) catch return .{ .failed = .io };
+        const d = std.fmt.bufPrintSentinel(&dir_buf, fmt, args, 0) catch return .{ .failed = .io };
         if (!mkdirOwned(d)) return .{ .failed = .io };
     }
     var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrintZ(&dest_buf, "{s}/{d}/{d}/{d}/{s}", .{ root, tab, op, index, p.name() }) catch return .{ .failed = .io };
+    const dest = std.fmt.bufPrintSentinel(&dest_buf, "{s}/{d}/{d}/{d}/{s}", .{ root, tab, op, index, p.name() }, 0) catch return .{ .failed = .io };
     var made = false;
     defer if (!made) unlinkUnlocked(dest);
     if (!try_clone or fclonefileat(p.fd, std.c.AT.FDCWD, dest.ptr, 0) != 0) {
         const e = std.c._errno().*;
         // 같은 볼륨이 아니거나(EXDEV) 복제를 모르는 파일 시스템(ENOTSUP) — 복사한다. 그 밖의 실패는 그대로.
-        if (try_clone and e != @intFromEnum(std.c.E.XDEV) and e != @intFromEnum(std.c.E.OPNOTSUPP)) return .{ .failed = .io };
+        if (try_clone and e != @backingInt(std.c.E.XDEV) and e != @backingInt(std.c.E.OPNOTSUPP)) return .{ .failed = .io };
         if (p.size > copy_budget.*) return .{ .failed = .too_large };
         if (!try copyFromFd(p.fd, dest, p.size)) return .{ .failed = .io };
         copy_budget.* -= p.size;
@@ -410,7 +412,7 @@ fn copyFromFd(src: c_int, dest: [:0]const u8, size: u64) !bool {
         const want: usize = @intCast(@min(size - off, buf.len));
         const n = std.c.pread(src, &buf, want, @intCast(off));
         if (n < 0) {
-            if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+            if (std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
             return false;
         }
         if (n == 0) return false; // 짧아졌다 — 바뀐 것이다(부른 쪽의 비교가 아니라 여기서 멈춘다)
@@ -419,7 +421,7 @@ fn copyFromFd(src: c_int, dest: [:0]const u8, size: u64) !bool {
         while (done < got) {
             const w = std.c.write(out, buf[done..].ptr, got - done);
             if (w < 0) {
-                if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+                if (std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
                 return false;
             }
             done += @intCast(w);
@@ -432,12 +434,12 @@ fn copyFromFd(src: c_int, dest: [:0]const u8, size: u64) !bool {
 /// `<root>/<sub>` 를 지운다(링크를 따라가지 않는다 — 폴더는 `O_NOFOLLOW|O_DIRECTORY` 로 열어 그 안을 지운다). 없으면 그냥 끝.
 pub fn removeUnder(root: []const u8, sub: []const u8) void {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root_z = std.fmt.bufPrintZ(&buf, "{s}", .{root}) catch return;
+    const root_z = std.fmt.bufPrintSentinel(&buf, "{s}", .{root}, 0) catch return;
     const dir = std.c.open(root_z.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
     if (dir < 0) return;
     defer _ = std.c.close(dir);
     var name_buf: [256]u8 = undefined;
-    const name = std.fmt.bufPrintZ(&name_buf, "{s}", .{sub}) catch return;
+    const name = std.fmt.bufPrintSentinel(&name_buf, "{s}", .{sub}, 0) catch return;
     removeAt(dir, name, 0);
 }
 
@@ -467,7 +469,7 @@ fn removeAt(dir: c_int, name: [:0]const u8, depth: u8) void {
             const n = entry.name[0..@min(entry.namlen, entry.name.len)];
             if (std.mem.eql(u8, n, ".") or std.mem.eql(u8, n, "..")) continue;
             var nb: [256]u8 = undefined;
-            const nz = std.fmt.bufPrintZ(&nb, "{s}", .{n}) catch continue;
+            const nz = std.fmt.bufPrintSentinel(&nb, "{s}", .{n}, 0) catch continue;
             removeAt(sub, nz, depth + 1);
             removed += 1;
         }
@@ -501,11 +503,11 @@ const Tmp = struct {
     fn init() !Tmp {
         var tmpl_buf: [std.fs.max_path_bytes]u8 = undefined;
         const base = std.c.getenv("TMPDIR");
-        const tmpl = try std.fmt.bufPrintZ(&tmpl_buf, "{s}/maru-upload-XXXXXX", .{if (base) |b| std.mem.trimEnd(u8, std.mem.span(b), "/") else "/tmp"});
+        const tmpl = try std.fmt.bufPrintSentinel(&tmpl_buf, "{s}/maru-upload-XXXXXX", .{if (base) |b| std.mem.trimEnd(u8, std.mem.span(b), "/") else "/tmp"}, 0);
         const made = mkdtemp(tmpl.ptr) orelse return error.TempFailed;
         var real_buf: [std.fs.max_path_bytes]u8 = undefined;
         const real = std.c.realpath(made, &real_buf) orelse return error.TempFailed;
-        return .{ .path = try testing.allocator.dupeZ(u8, std.mem.sliceTo(real, 0)) };
+        return .{ .path = try testing.allocator.dupeSentinel(u8, std.mem.sliceTo(real, 0), 0) };
     }
 
     fn deinit(self: *Tmp) void {
@@ -515,7 +517,7 @@ const Tmp = struct {
     }
 
     fn join(self: *const Tmp, buf: []u8, name: []const u8) [:0]u8 {
-        return std.fmt.bufPrintZ(buf, "{s}/{s}", .{ self.path, name }) catch unreachable;
+        return std.fmt.bufPrintSentinel(buf, "{s}/{s}", .{ self.path, name }, 0) catch unreachable;
     }
 
     fn write(self: *const Tmp, name: []const u8, bytes: []const u8) !void {
@@ -608,7 +610,7 @@ test "W9c③ 사본: 쥔 fd 에서 <뿌리>/<탭>/<op>/<i>/<이름> 으로, 폴�
     var want_buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "{s}/7/42/0/a.txt", .{root}), staged);
     var zb: [std.fs.max_path_bytes]u8 = undefined;
-    const z = try std.fmt.bufPrintZ(&zb, "{s}", .{staged});
+    const z = try std.fmt.bufPrintSentinel(&zb, "{s}", .{staged}, 0);
     const sfd = std.c.open(z.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
     defer _ = std.c.close(sfd);
     var got: [8]u8 = undefined;
@@ -618,7 +620,7 @@ test "W9c③ 사본: 쥔 fd 에서 <뿌리>/<탭>/<op>/<i>/<이름> 으로, 폴�
     try testing.expectEqual(@as(u16, 0o400), st.mode & 0o777);
     inline for (.{ "{s}/7", "{s}/7/42", "{s}/7/42/0" }) |fmt| {
         var db: [std.fs.max_path_bytes]u8 = undefined;
-        const d = try std.fmt.bufPrintZ(&db, fmt, .{root});
+        const d = try std.fmt.bufPrintSentinel(&db, fmt, .{root}, 0);
         const dst = statPath(d.ptr) orelse return error.TestUnexpectedResult;
         try testing.expectEqual(@as(u16, 0o700), dst.mode & 0o777);
     }
@@ -647,7 +649,7 @@ test "W9c③ 사본: 모달 뒤 원본이 바뀌었으면(크기·mtime) 사본�
     const r = try stageFile(testing.allocator, root, 1, 2, 0, &p, &budget);
     try testing.expectEqual(StageError.changed, r.failed);
     var db: [std.fs.max_path_bytes]u8 = undefined;
-    const d = try std.fmt.bufPrintZ(&db, "{s}/1/2/0/a.txt", .{root});
+    const d = try std.fmt.bufPrintSentinel(&db, "{s}/1/2/0/a.txt", .{root}, 0);
     try testing.expect(statPath(d.ptr) == null); // 사본은 지웠다
 }
 
@@ -660,7 +662,7 @@ test "W9c③ 사본: 복사(다른 볼륨의 길)는 예산 안에서만 — 예
     var p = (try prepare(testing.allocator, t.join(&b1, "a.txt"))).ok;
     defer p.deinit(testing.allocator);
     var db: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = try std.fmt.bufPrintZ(&db, "{s}/copy.txt", .{t.path});
+    const dest = try std.fmt.bufPrintSentinel(&db, "{s}/copy.txt", .{t.path}, 0);
     try testing.expect(try copyFromFd(p.fd, dest, p.size));
     const sfd = std.c.open(dest.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
     defer _ = std.c.close(sfd);
@@ -679,7 +681,7 @@ test "W9c③ 사본: 복사(다른 볼륨의 길)는 예산 안에서만 — 예
     try testing.expectEqual(@as(u64, 15), big);
     // 원본이 그사이 짧아졌으면 복사가 멈춘다.
     var db2: [std.fs.max_path_bytes]u8 = undefined;
-    const dest2 = try std.fmt.bufPrintZ(&db2, "{s}/copy2.txt", .{t.path});
+    const dest2 = try std.fmt.bufPrintSentinel(&db2, "{s}/copy2.txt", .{t.path}, 0);
     try testing.expect(!try copyFromFd(p.fd, dest2, p.size + 5));
 }
 
@@ -692,14 +694,14 @@ test "W9c③ 지우기: wipeRoot 는 upload-staging 전체를 지우고, 링크�
     defer testing.allocator.free(root);
     var b1: [std.fs.max_path_bytes]u8 = undefined;
     var b2: [std.fs.max_path_bytes]u8 = undefined;
-    const inner = try std.fmt.bufPrintZ(&b2, "{s}/9", .{root});
+    const inner = try std.fmt.bufPrintSentinel(&b2, "{s}/9", .{root}, 0);
     try testing.expectEqual(@as(c_int, 0), std.c.mkdir(inner.ptr, 0o700));
     var lb: [std.fs.max_path_bytes]u8 = undefined;
-    const link = try std.fmt.bufPrintZ(&lb, "{s}/9/out", .{root});
+    const link = try std.fmt.bufPrintSentinel(&lb, "{s}/9/out", .{root}, 0);
     try testing.expectEqual(@as(c_int, 0), std.c.symlink(t.path.ptr, link.ptr));
     wipeRoot(t.path);
     var rb: [std.fs.max_path_bytes]u8 = undefined;
-    const rz = try std.fmt.bufPrintZ(&rb, "{s}", .{root});
+    const rz = try std.fmt.bufPrintSentinel(&rb, "{s}", .{root}, 0);
     try testing.expect(statPath(rz.ptr) == null);
     try testing.expect(statPath(t.join(&b1, "outside.txt").ptr) != null);
 }
@@ -749,7 +751,7 @@ test "W9c③ 적대 리뷰 1 회차 재현 R2: Finder 로 잠근(uchg) 원본도
     var budget: u64 = copy_cap_per_call;
     const r = try stageFile(testing.allocator, root, 7, 8, 0, &p, &budget);
     var zb: [std.fs.max_path_bytes]u8 = undefined;
-    const staged_z = try std.fmt.bufPrintZ(&zb, "{s}/7/8/0/locked.txt", .{root});
+    const staged_z = try std.fmt.bufPrintSentinel(&zb, "{s}/7/8/0/locked.txt", .{root}, 0);
     // 실패했어도 남은 것을 풀어 시험 폴더를 지울 수 있게 한다(고치기 전 — 잠긴 사본이 남았다).
     defer _ = chflags(staged_z.ptr, 0);
     switch (r) {
@@ -771,9 +773,9 @@ test "W9c③ 적대 리뷰 1 회차 재현 R2b: 지우기는 잠금(uchg)이 걸
     const root = try ensureRoot(testing.allocator, t.path);
     defer testing.allocator.free(root);
     var db: [std.fs.max_path_bytes]u8 = undefined;
-    try testing.expectEqual(@as(c_int, 0), std.c.mkdir((try std.fmt.bufPrintZ(&db, "{s}/5", .{root})).ptr, 0o700));
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir((try std.fmt.bufPrintSentinel(&db, "{s}/5", .{root}, 0)).ptr, 0o700));
     var fb: [std.fs.max_path_bytes]u8 = undefined;
-    const f = try std.fmt.bufPrintZ(&fb, "{s}/5/x.txt", .{root});
+    const f = try std.fmt.bufPrintSentinel(&fb, "{s}/5/x.txt", .{root}, 0);
     const fd = std.c.open(f.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o400));
     try testing.expect(fd >= 0);
     _ = std.c.close(fd);
@@ -819,7 +821,7 @@ test "W9c③ 적대 리뷰 2 회차 재현 S1: 투명 압축(UF_COMPRESSED) 원�
     for (&body, 0..) |*b, i| b.* = "hello compressed world\n"[i % 23];
     try t.write("plain.txt", &body);
     var cmd_buf: [3 * std.fs.max_path_bytes]u8 = undefined;
-    const cmd = try std.fmt.bufPrintZ(&cmd_buf, "/usr/bin/ditto --hfsCompression '{s}/plain.txt' '{s}/comp.txt'", .{ t.path, t.path });
+    const cmd = try std.fmt.bufPrintSentinel(&cmd_buf, "/usr/bin/ditto --hfsCompression '{s}/plain.txt' '{s}/comp.txt'", .{ t.path, t.path }, 0);
     try testing.expectEqual(@as(c_int, 0), libc.system(cmd.ptr));
     var b1: [std.fs.max_path_bytes]u8 = undefined;
     const src = t.join(&b1, "comp.txt");
@@ -849,7 +851,7 @@ test "W9c③ 적대 리뷰 2 회차 재현 S1: 투명 압축(UF_COMPRESSED) 원�
         }
         try testing.expectEqual(copy_cap_per_call, budget); // 복제였다(복사 예산을 쓰지 않았다)
         var zb: [std.fs.max_path_bytes]u8 = undefined;
-        const staged_z = try std.fmt.bufPrintZ(&zb, "{s}/3/4/{d}/comp.txt", .{ root, index });
+        const staged_z = try std.fmt.bufPrintSentinel(&zb, "{s}/3/4/{d}/comp.txt", .{ root, index }, 0);
         const st = statPath(staged_z.ptr) orelse return error.TestUnexpectedResult;
         try testing.expectEqual(@as(i64, 46000), st.size);
         try testing.expectEqual(@as(u32, 0), @as(u32, st.flags) & uf_lock_flags); // 잠금은 풀렸다
@@ -980,7 +982,7 @@ test "W9c③ 적대 리뷰 3 회차 재현 M1: 엿보기를 읽은 뒤 공유 �
         }
         try testing.expectEqual(StageError.changed, r.failed);
         var db: [std.fs.max_path_bytes]u8 = undefined;
-        const d = try std.fmt.bufPrintZ(&db, "{s}/1/{d}/0/report.txt", .{ root, @as(u8, if (clone) 1 else 2) });
+        const d = try std.fmt.bufPrintSentinel(&db, "{s}/1/{d}/0/report.txt", .{ root, @as(u8, if (clone) 1 else 2) }, 0);
         try testing.expect(statPath(d.ptr) == null); // 사본은 지웠다
     }
 }
@@ -1070,7 +1072,7 @@ test "W9c③ 적대 리뷰 5 회차 변이 PRctime: 해시 예산 밖의 바이�
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var t = try Tmp.init();
     defer t.deinit();
-    const body = "x" ** (2 * display.head_bytes);
+    const body = array_repeat.repeat("x", (2 * display.head_bytes));
     try t.write("big.txt", body);
     var b1: [std.fs.max_path_bytes]u8 = undefined;
     const root = try ensureRoot(testing.allocator, t.path);

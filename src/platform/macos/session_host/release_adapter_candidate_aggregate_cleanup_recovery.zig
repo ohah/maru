@@ -263,7 +263,7 @@ const ConcreteDriver = struct {
         var self = try initCommon(allocator, context, original);
         const parent_path = std.fs.path.dirname(original) orelse return error.InvalidPath;
         var parent_z: [std.fs.max_path_bytes:0]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&parent_z, "{s}", .{parent_path}) catch return error.InvalidPath;
+        const path = std.fmt.bufPrintSentinel(&parent_z, "{s}", .{parent_path}, 0) catch return error.InvalidPath;
         self.parent_fd = safe_open.openAbsoluteNoFollow(path, true) catch return error.InvalidPath;
         return self;
     }
@@ -571,9 +571,9 @@ fn deriveNames(context: context_mod.Context, original: []const u8, result: *Name
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     const key = std.fmt.bytesToHex(digest, .lower);
-    result.intent_len = (std.fmt.bufPrintZ(&result.intent, ".maru-aggregate-cleanup-{s}.json", .{&key}) catch return error.InvalidPath).len;
-    result.completion_len = (std.fmt.bufPrintZ(&result.completion, ".maru-aggregate-cleanup-{s}.done.json", .{&key}) catch return error.InvalidPath).len;
-    result.tomb_len = (std.fmt.bufPrintZ(&result.tomb, ".maru-aggregate-cleanup-{s}.tomb", .{&key}) catch return error.InvalidPath).len;
+    result.intent_len = (std.fmt.bufPrintSentinel(&result.intent, ".maru-aggregate-cleanup-{s}.json", .{&key}, 0) catch return error.InvalidPath).len;
+    result.completion_len = (std.fmt.bufPrintSentinel(&result.completion, ".maru-aggregate-cleanup-{s}.done.json", .{&key}, 0) catch return error.InvalidPath).len;
+    result.tomb_len = (std.fmt.bufPrintSentinel(&result.tomb, ".maru-aggregate-cleanup-{s}.tomb", .{&key}, 0) catch return error.InvalidPath).len;
 }
 
 fn hashU64(hasher: *std.crypto.hash.Blake3, value: u64) void {
@@ -591,8 +591,8 @@ fn deriveAttemptTempNames(result: *Names) !void {
     var entropy: [16]u8 = undefined;
     c.arc4random_buf(&entropy, entropy.len);
     const suffix = std.fmt.bytesToHex(entropy, .lower);
-    result.intent_temp_len = (std.fmt.bufPrintZ(&result.intent_temp, "{s}.tmp-{s}", .{ result.intentValue(), &suffix }) catch return error.InvalidPath).len;
-    result.completion_temp_len = (std.fmt.bufPrintZ(&result.completion_temp, "{s}.tmp-{s}", .{ result.completionValue(), &suffix }) catch return error.InvalidPath).len;
+    result.intent_temp_len = (std.fmt.bufPrintSentinel(&result.intent_temp, "{s}.tmp-{s}", .{ result.intentValue(), &suffix }, 0) catch return error.InvalidPath).len;
+    result.completion_temp_len = (std.fmt.bufPrintSentinel(&result.completion_temp, "{s}.tmp-{s}", .{ result.completionValue(), &suffix }, 0) catch return error.InvalidPath).len;
 }
 
 fn wireEntries(record: *const StoredRecord) [entry_count]WireEntry {
@@ -918,7 +918,7 @@ fn sameFileIdentity(a: posix.Stat, b: posix.Stat) bool {
 fn readOptionalAt(allocator: std.mem.Allocator, parent_fd: c.fd_t, name: [:0]const u8, cap: usize, identity: ?*posix.Stat) ![]u8 {
     const fd = c.openat(parent_fd, name.ptr, posix.O{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
     if (fd < 0) {
-        if (c._errno().* == @intFromEnum(posix.E.NOENT)) return error.FileNotFound;
+        if (c._errno().* == @backingInt(posix.E.NOENT)) return error.FileNotFound;
         return error.InvalidRecord;
     }
     var open = true;
@@ -958,7 +958,7 @@ fn writeAllFd(fd: c.fd_t, bytes: []const u8) !void {
 fn statOptionalAt(parent_fd: c.fd_t, name: [:0]const u8) !?posix.Stat {
     var stat: posix.Stat = undefined;
     if (c.fstatat(parent_fd, name.ptr, &stat, posix.AT.SYMLINK_NOFOLLOW) == 0) return stat;
-    if (c._errno().* == @intFromEnum(posix.E.NOENT)) return null;
+    if (c._errno().* == @backingInt(posix.E.NOENT)) return null;
     return error.InvalidRecord;
 }
 
@@ -1099,6 +1099,6 @@ pub const testing_api = if (builtin.is_test) struct {
         var names: Names = .{};
         try deriveNames(context, original, &names);
         const parent = std.fs.path.dirname(original) orelse return error.InvalidPath;
-        return std.fmt.bufPrintZ(output, "{s}/{s}", .{ parent, names.completionValue() }) catch error.InvalidPath;
+        return std.fmt.bufPrintSentinel(output, "{s}/{s}", .{ parent, names.completionValue() }, 0) catch error.InvalidPath;
     }
 } else struct {};

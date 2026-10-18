@@ -45,7 +45,7 @@ pub const ConnectionIncidentRuntime = struct {
     wake_write_fd: c.fd_t = -1,
     completion_read_fd: c.fd_t = -1,
     completion_write_fd: c.fd_t = -1,
-    lifecycle: std.atomic.Value(u8) = .init(@intFromEnum(Lifecycle.pristine)),
+    lifecycle: std.atomic.Value(u8) = .init(@backingInt(Lifecycle.pristine)),
     writer_started: std.atomic.Value(u8) = .init(0),
     writer_completed: std.atomic.Value(u8) = .init(0),
     writer_failed: std.atomic.Value(u8) = .init(0),
@@ -146,7 +146,7 @@ pub const ConnectionIncidentRuntime = struct {
             return err;
         };
         errdefer self.store.deinit();
-        self.lifecycle.store(@intFromEnum(Lifecycle.ready), .release);
+        self.lifecycle.store(@backingInt(Lifecycle.ready), .release);
         self.thread = std.Thread.spawn(.{}, writerMain, .{self}) catch return error.ThreadFailed;
         return self;
     }
@@ -291,7 +291,7 @@ pub const ConnectionIncidentRuntime = struct {
     ) publication.WakeOutcome {
         const projection = registry.projectValidatedLease(lease) catch process_seal.fatalIntegrity(.incident_authority);
         if (!self.validatesPublisherLease(projection) or prepared.self_addr != @intFromPtr(prepared) or
-            prepared.lifecycle_raw != @intFromEnum(publication.PublicationLifecycle.wake_ready) or
+            prepared.lifecycle_raw != @backingInt(publication.PublicationLifecycle.wake_ready) or
             !std.meta.eql(prepared.publisher, projection) or !validPreparedCompositeSeal(prepared))
             process_seal.fatalIntegrity(.incident_authority);
         const outcome = self.wakeOutcome();
@@ -319,7 +319,7 @@ pub const ConnectionIncidentRuntime = struct {
 
     fn shutdown(self: *ConnectionIncidentRuntime) Error!ShutdownResult {
         if (!self.valid(.ready)) return error.InvalidAuthority;
-        self.lifecycle.store(@intFromEnum(Lifecycle.stopping), .release);
+        self.lifecycle.store(@backingInt(Lifecycle.stopping), .release);
         // wake pipe가 이미 깨졌어도 completion pipe는 writer 종료를 증명할 수 있다. 여기서 일찍 반환하면
         // joinable thread와 backing을 무기한 남기므로 실패를 기록하되 같은 bounded shutdown을 계속한다.
         self.wake() catch self.writer_failed.store(1, .release);
@@ -390,7 +390,7 @@ pub const ConnectionIncidentRuntime = struct {
                     break;
                 };
             }
-            const state: Lifecycle = @enumFromInt(self.lifecycle.load(.acquire));
+            const state: Lifecycle = @fromBackingInt(@intCast(self.lifecycle.load(.acquire)));
             if (state == .stopping or state == .detached) break;
         }
         self.writer_completed.store(1, .release);
@@ -430,7 +430,7 @@ pub const ConnectionIncidentRuntime = struct {
 
     fn valid(self: *const ConnectionIncidentRuntime, expected: Lifecycle) bool {
         return self.self_addr == @intFromPtr(self) and self.pid == @as(u64, @intCast(c.getpid())) and
-            self.process_nonce != 0 and self.lifecycle.load(.acquire) == @intFromEnum(expected);
+            self.process_nonce != 0 and self.lifecycle.load(.acquire) == @backingInt(expected);
     }
 
     fn destroyJoined(self: *ConnectionIncidentRuntime) void {
@@ -446,7 +446,7 @@ pub const ConnectionIncidentRuntime = struct {
     fn detachWriter(self: *ConnectionIncidentRuntime) ShutdownResult {
         const thread = self.thread orelse process_seal.fatalIntegrity(.incident_authority);
         self.thread = null;
-        self.lifecycle.store(@intFromEnum(Lifecycle.detached), .release);
+        self.lifecycle.store(@backingInt(Lifecycle.detached), .release);
         thread.detach();
         return if (self.writer_failed.load(.acquire) != 0) .degraded_detached else .detached;
     }
@@ -508,13 +508,13 @@ fn fixtureInput() incident.ConnectionIncident {
         .host_adapter_generation = 1,
         .connection_generation = 1,
         .wire_major = 1,
-        .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),
-        .scope_raw = @intFromEnum(incident.Scope.connection),
-        .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
-        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
-        .host_class_raw = @intFromEnum(incident.HostClass.current),
-        .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
-        .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
+        .reason_raw = @backingInt(incident.ConnectionReason.connection_eof),
+        .scope_raw = @backingInt(incident.Scope.connection),
+        .disposition_raw = @backingInt(incident.Disposition.reconnect),
+        .source_site_raw = @backingInt(incident.SourceSite.client_read),
+        .host_class_raw = @backingInt(incident.HostClass.current),
+        .parser_phase_raw = @backingInt(incident.ParserPhase.idle),
+        .outbound_phase_raw = @backingInt(incident.OutboundPhase.idle),
         .reserved0 = 0,
         .last_success_request_id = 0,
         .pending_request_count = 0,
@@ -529,7 +529,7 @@ fn fixtureInput() incident.ConnectionIncident {
         .occurrence_count = 1,
         .first_timestamp_ns = 1,
         .last_timestamp_ns = 1,
-        .reserved_tail = [_]u8{0} ** 18,
+        .reserved_tail = @as([18]u8, @splat(0)),
     };
 }
 
@@ -574,7 +574,7 @@ test "CR0b 기록기 수명은 stopping clock 실패를 degraded detach로 보�
     runtime.testing_block_writer.store(1, .release);
     ConnectionIncidentRuntime.testing_api.failNextShutdownClock(runtime);
     try std.testing.expectEqual(ShutdownResult.degraded_detached, try runtime.shutdown());
-    try std.testing.expectEqual(@intFromEnum(Lifecycle.detached), runtime.lifecycle.load(.acquire));
+    try std.testing.expectEqual(@backingInt(Lifecycle.detached), runtime.lifecycle.load(.acquire));
     runtime.testing_block_writer.store(0, .release);
     try waitAtomic(&runtime.writer_completed, 1);
     tmp.cleanup();
@@ -590,7 +590,7 @@ test "CR0b 기록기 수명은 completion poll 오류를 degraded detach로 보�
     runtime.testing_block_writer.store(1, .release);
     _ = c.close(runtime.completion_read_fd);
     try std.testing.expectEqual(ShutdownResult.degraded_detached, try runtime.shutdown());
-    try std.testing.expectEqual(@intFromEnum(Lifecycle.detached), runtime.lifecycle.load(.acquire));
+    try std.testing.expectEqual(@backingInt(Lifecycle.detached), runtime.lifecycle.load(.acquire));
     runtime.testing_block_writer.store(0, .release);
     try waitAtomic(&runtime.writer_completed, 1);
     tmp.cleanup();
@@ -607,7 +607,7 @@ test "CR0b 기록기 수명은 막힌 스레드를 200 ms 뒤 detach하고 backi
     runtime.testing_block_writer.store(1, .release);
     _ = try runtime.publish(fixtureInput());
     try std.testing.expectEqual(ShutdownResult.detached, try runtime.shutdown());
-    try std.testing.expectEqual(@intFromEnum(Lifecycle.detached), runtime.lifecycle.load(.acquire));
+    try std.testing.expectEqual(@backingInt(Lifecycle.detached), runtime.lifecycle.load(.acquire));
     runtime.testing_block_writer.store(0, .release);
     try waitAtomic(&runtime.writer_completed, 1);
     tmp.cleanup();

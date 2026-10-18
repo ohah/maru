@@ -64,15 +64,15 @@ pub fn bind(allocator: std.mem.Allocator, context: context_mod.Context, remote_o
     try context_mod.validateTrusted(context);
     if (remote.release_id == 0 or !std.mem.eql(u8, remote.tag, context.tag) or !std.mem.eql(u8, remote.source_commit, context.source_commit))
         return error.MetadataMismatch;
-    try bindBytes(remote.assets[@intFromEnum(metadata.Role.manifest)], manifest_input, manifest.max_manifest_bytes);
-    try bindBytes(remote.assets[@intFromEnum(metadata.Role.evidence_candidate)], evidence_input, evidence.max_evidence_bytes);
+    try bindBytes(remote.assets[@backingInt(metadata.Role.manifest)], manifest_input, manifest.max_manifest_bytes);
+    try bindBytes(remote.assets[@backingInt(metadata.Role.evidence_candidate)], evidence_input, evidence.max_evidence_bytes);
 
     var staged: Owner = .{};
     errdefer cleanup(&staged, allocator);
     staged.manifest_bytes = try allocator.dupe(u8, manifest_input);
     staged.evidence_bytes = try allocator.dupe(u8, evidence_input);
-    try bindBytes(remote.assets[@intFromEnum(metadata.Role.manifest)], staged.manifest_bytes.?, manifest.max_manifest_bytes);
-    try bindBytes(remote.assets[@intFromEnum(metadata.Role.evidence_candidate)], staged.evidence_bytes.?, evidence.max_evidence_bytes);
+    try bindBytes(remote.assets[@backingInt(metadata.Role.manifest)], staged.manifest_bytes.?, manifest.max_manifest_bytes);
+    try bindBytes(remote.assets[@backingInt(metadata.Role.evidence_candidate)], staged.evidence_bytes.?, evidence.max_evidence_bytes);
     staged.parsed_manifest = try manifest.parseCanonical(allocator, staged.manifest_bytes.?);
     staged.parsed_evidence = try evidence.parseCanonical(allocator, staged.evidence_bytes.?);
     const parsed_manifest = staged.parsed_manifest.?.value();
@@ -109,11 +109,11 @@ fn bindSemantic(context: context_mod.Context, remote: metadata.View, m: *const m
     const remote_roles = [_]metadata.Role{ .dmg, .frozen_host, .evidence_candidate };
     const manifest_roles = [_]manifest.AssetRole{ .universal_dmg, .frozen_product_executable, .evidence_summary };
     for (remote_roles, manifest_roles, m.assets) |remote_role, manifest_role, local| {
-        const asset = remote.assets[@intFromEnum(remote_role)];
+        const asset = remote.assets[@backingInt(remote_role)];
         if (local.role != manifest_role or local.size != asset.size or !std.mem.eql(u8, local.name, asset.name) or
             !std.mem.eql(u8, local.sha256, asset.sha256)) return error.BindingMismatch;
     }
-    const evidence_asset = remote.assets[@intFromEnum(metadata.Role.evidence_candidate)];
+    const evidence_asset = remote.assets[@backingInt(metadata.Role.evidence_candidate)];
     if (!std.mem.eql(u8, m.evidence.summary_name, evidence_asset.name) or
         !std.mem.eql(u8, m.evidence.summary_sha256, evidence_asset.sha256)) return error.BindingMismatch;
 
@@ -197,7 +197,7 @@ fn ownerSeal(value: *const Owner) [32]u8 {
     hash.update(&value.evidence_sha256);
     hash.update(&value.remote_snapshot_seal);
     if (value.profile) |stored_profile| {
-        const profile: u8 = @intFromEnum(stored_profile);
+        const profile: u8 = @backingInt(stored_profile);
         hash.update(std.mem.asBytes(&profile));
     }
     var result: [32]u8 = undefined;

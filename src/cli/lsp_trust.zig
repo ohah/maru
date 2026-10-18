@@ -208,7 +208,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         },
     };
     if (resp.err) |e| {
-        if (e.code == @intFromEnum(cp.ErrorCode.method_not_found))
+        if (e.code == @backingInt(cp.ErrorCode.method_not_found))
             try w.print("error: this Maru does not support language server trust commands ({d})\n", .{e.code})
         else
             try w.print("error: {s} ({d})\n", .{ e.message, e.code });

@@ -122,7 +122,7 @@ const Authenticator = struct {
 fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, output: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(output, "{s}/{s}", .{ root[0..len], leaf });
+    return std.fmt.bufPrintSentinel(output, "{s}/{s}", .{ root[0..len], leaf }, 0);
 }
 
 fn run(profile: *Profile, downloader: *Downloader, authenticator: *Authenticator, deadline: *Deadline, workspace: *workspace_mod.Workspace, output: []u8, attestation: []u8, result: *composition.ProfileManifestInput) !void {

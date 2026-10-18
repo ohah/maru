@@ -289,7 +289,7 @@ test "chrome 셀을 만드는 함수는 cluster 경로에 위임하거나 이유
         for (violations.items) |v| allocator.free(v.text);
         violations.deinit(allocator);
     }
-    var seen = [_]bool{false} ** allowlist.len;
+    var seen = @as([allowlist.len]bool, @splat(false));
 
     // **`src/` 전체를 재귀 스캔한다** — 대상 파일을 열거하면 새 파일에 만든 방출자가 사각지대가 된다.
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });

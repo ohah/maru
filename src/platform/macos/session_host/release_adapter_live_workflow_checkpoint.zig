@@ -52,9 +52,9 @@ const root_identity_prefix = "maru-root-v1:";
 
 pub fn encodeRootIdentity(storage: *[max_root_identity_token_bytes:0]u8, value: RootIdentity) Error![:0]const u8 {
     if (!validRootIdentity(value)) return error.UnsafeRoot;
-    return std.fmt.bufPrintZ(storage, root_identity_prefix ++ "{x:0>16}-{x:0>16}-{x:0>8}-{x:0>8}", .{
+    return std.fmt.bufPrintSentinel(storage, root_identity_prefix ++ "{x:0>16}-{x:0>16}-{x:0>8}-{x:0>8}", .{
         value.device, value.inode, value.uid, value.mode,
-    }) catch return error.UnsafeRoot;
+    }, 0) catch return error.UnsafeRoot;
 }
 
 pub fn decodeRootIdentity(token: []const u8) Error!RootIdentity {
@@ -253,7 +253,7 @@ pub fn advance(
     try phase.apply(&state, .{ .stage = stage, .result = result });
     var storage: [handoff.max_document_bytes]u8 = undefined;
     const bytes = try handoff.encode(&storage, state, workflow);
-    try files.publishSummaryExclusiveAt(root.fd, leaf_names[@intFromEnum(stage) + 1], bytes);
+    try files.publishSummaryExclusiveAt(root.fd, leaf_names[@backingInt(stage) + 1], bytes);
     try root.revalidate();
     return state;
 }
@@ -268,7 +268,7 @@ pub fn admit(
     workflow: context.Context,
 ) Error!phase.State {
     if (root.invocation_active) return error.InvocationBusy;
-    const index: usize = @intFromEnum(stage);
+    const index: usize = @backingInt(stage);
     if (index >= stages.len or stages[index] != stage) return error.UnexpectedStage;
     try root.revalidate();
     var existing: posix.Stat = undefined;
@@ -320,6 +320,6 @@ fn matchesIdentity(stat: posix.Stat, expected: RootIdentity) bool {
 comptime {
     if (leaf_names.len != stages.len + 1) @compileError("workflow checkpoint inventory drift");
     for (stages, 0..) |stage, index| {
-        if (@intFromEnum(stage) != index) @compileError("workflow stage order drift");
+        if (@backingInt(stage) != index) @compileError("workflow stage order drift");
     }
 }

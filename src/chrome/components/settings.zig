@@ -10,6 +10,8 @@
 //! Enter/hex 클릭으로 그 칸 편집 — State.grid_cell). 레이아웃은 좌측 Section 네비(섹션 목록, platform이 settings.section
 //! 으로 필터해 폼 주입) + 우측 폼(선택 섹션 필드, 길면 스크롤 윈도잉) — config-gui §4·§6.5. 폼 검색은 후속.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const icons = @import("../../icons.zig");
 const i18n = @import("../../i18n.zig"); // 표시 문자열 단일 출처
@@ -2343,7 +2345,7 @@ test "settings 검색 IME 조합(preedit): query 뒤에 조합 글자 표시 + c
 
     // 조합이 preedit 버퍼(32B)를 넘겨도 UTF-8 코드포인트 경계로 잘라 손상 UTF-8을 안 남긴다(finding 2).
     s.startSearch();
-    s.setSearchPreedit("\xea\xb0\x80" ** 20); // "가"×20 = 60B > 32B cap
+    s.setSearchPreedit(array_repeat.repeat("\xea\xb0\x80", 20)); // "가"×20 = 60B > 32B cap
     try std.testing.expect(std.unicode.utf8ValidateSlice(s.searchPreedit())); // 멀티바이트 중간에서 안 잘림
     try std.testing.expect(s.searchPreedit().len <= 32);
 }

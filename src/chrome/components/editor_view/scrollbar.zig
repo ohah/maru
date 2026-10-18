@@ -125,7 +125,7 @@ pub fn build(props: Props, out: []draw.Op) Written {
         const usable = @max(track_h - marker_h_px, 0);
         const slots = @min(@as(usize, @intCast(@max(@divTrunc(usable, marker_h_px), 1))), marker_budget);
 
-        var hit = [_]u8{0} ** marker_budget; // 0=없음 1=매치 2=현재 3=변경 띠 4..7=진단(4 + severity)
+        var hit = @as([marker_budget]u8, @splat(0)); // 0=없음 1=매치 2=현재 3=변경 띠 4..7=진단(4 + severity)
         // **변경 띠를 먼저 깐다** — 검색 마커가 같은 슬롯에 오면 그것이 이긴다(§4.1a 「검색 마커가 위에 선다」).
         if (props.change_kind != .none) {
             for (props.change_bands, 0..) |band, line| {
@@ -140,7 +140,7 @@ pub fn build(props: Props, out: []draw.Op) Written {
         // **진단은 변경 띠 위, 검색 아래**(§5.4). 같은 슬롯에 진단이 여럿이면 severity 높은 것.
         for (props.diag_rows) |dr| {
             const slot = @min((@as(usize, dr.row) * slots) / @as(usize, props.total_visual_rows), slots - 1);
-            const v: u8 = 4 + @intFromEnum(dr.level);
+            const v: u8 = 4 + @backingInt(dr.level);
             if (hit[slot] == 0 or hit[slot] == 3 or (hit[slot] >= 4 and hit[slot] < v)) hit[slot] = v;
         }
         for (props.match_rows, 0..) |row, i| {
@@ -176,7 +176,7 @@ pub fn build(props: Props, out: []draw.Op) Written {
                 .fill_role = switch (mark) {
                     2 => marker_current_role,
                     3 => changeMarkerRole(props.change_kind),
-                    4...7 => @as(diagnostic.Level, @enumFromInt(mark - 4)).role(),
+                    4...7 => @as(diagnostic.Level, @fromBackingInt(@intCast(mark - 4))).role(),
                     else => marker_role,
                 },
             } };
@@ -536,7 +536,7 @@ test "SBM8 변경 위치 마커 — kind 인 줄만, 본문 띠의 role, 검색 
     var ops: [16]draw.Op = undefined;
     var p = testProps(100, 0);
     // 줄 10 = added, 줄 50 = removed, 줄 90 = added. 왼쪽 막대(removed)는 50 만, 오른쪽(added)은 10·90 만.
-    var bands = [_]frame.RowBand{.none} ** 100;
+    var bands = @as([100]frame.RowBand, @splat(.none));
     bands[10] = .added;
     bands[50] = .removed;
     bands[90] = .added;
@@ -594,7 +594,7 @@ test "SBM9 진단 마커 — severity 색, 같은 슬롯은 높은 severity, 변
     try testing.expectEqual(tokens.ColorRole.diagnostic_hint, ops[1].quad.fill_role);
     try testing.expectEqual(tokens.ColorRole.diagnostic_info, ops[2].quad.fill_role);
     // 변경 띠와 겹치면 진단이 이긴다; 검색과 겹치면 검색이 이긴다.
-    var bands = [_]frame.RowBand{.none} ** 100;
+    var bands = @as([100]frame.RowBand, @splat(.none));
     bands[10] = .added;
     bands[50] = .added;
     p.change_bands = &bands;

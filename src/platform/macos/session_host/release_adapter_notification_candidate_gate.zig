@@ -344,19 +344,19 @@ fn captureInputs(allocator: std.mem.Allocator, source: Inputs) !Inputs {
         .designated_requirement_sha256 = try allocator.dupe(u8, source.designated_requirement_sha256),
         .gui_zero = try captureScenario(allocator, source.gui_zero),
         .gui_live_then_quit = try captureScenario(allocator, source.gui_live_then_quit),
-        .output_path = try allocator.dupeZ(u8, source.output_path),
+        .output_path = try allocator.dupeSentinel(u8, source.output_path, 0),
         .budget_ns = source.budget_ns,
     };
 }
 
 fn captureScenario(allocator: std.mem.Allocator, source: concrete.Inputs) !concrete.Inputs {
     return .{
-        .app_executable = try allocator.dupeZ(u8, source.app_executable),
-        .helper_executable = try allocator.dupeZ(u8, source.helper_executable),
-        .runtime_preparation_executable = if (source.runtime_preparation_executable) |value| try allocator.dupeZ(u8, value) else null,
+        .app_executable = try allocator.dupeSentinel(u8, source.app_executable, 0),
+        .helper_executable = try allocator.dupeSentinel(u8, source.helper_executable, 0),
+        .runtime_preparation_executable = if (source.runtime_preparation_executable) |value| try allocator.dupeSentinel(u8, value, 0) else null,
         .runner_nonce = try allocator.dupe(u8, source.runner_nonce),
-        .runner_root = try allocator.dupeZ(u8, source.runner_root),
-        .output_path = try allocator.dupeZ(u8, source.output_path),
+        .runner_root = try allocator.dupeSentinel(u8, source.runner_root, 0),
+        .output_path = try allocator.dupeSentinel(u8, source.output_path, 0),
         .app_expected = .{
             .scenario = source.app_expected.scenario,
             .request_identifier = try allocator.dupe(u8, source.app_expected.request_identifier),

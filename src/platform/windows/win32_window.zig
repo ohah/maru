@@ -324,7 +324,7 @@ extern "kernel32" fn GetModuleHandleW(?[*:0]const u16) callconv(abi.winapi) ?HIN
 /// **std의 것을 쓴다.** 직접 `extern`으로 선언하면 Zig가 사이에 끼우는 코드가 스레드 오류 값을 덮어
 /// 0으로 읽힐 수 있다(실측: 세 호출 지점에서 전부 0이 나왔다). std는 그 규약을 알고 있다.
 fn GetLastError() u32 {
-    return @intFromEnum(std.os.windows.GetLastError());
+    return @backingInt(std.os.windows.GetLastError());
 }
 
 // 스레드 오류 코드를 **그대로 노출하지 않는다.** 호출 시점의 값이라 중간에 다른 Win32 호출이 하나만 끼어도

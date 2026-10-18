@@ -1,3 +1,5 @@
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const editor_app_url = @import("editor_app_url.zig");
 
@@ -56,9 +58,7 @@ const control_capability = maru.session.control_capability; // 1e: capability fd
 const control_pane_grant = maru.session.control_pane_grant; // 1e-confirm: pane-bound confirm-grant store(Model B, §9.2)
 const build_options = @import("build_options");
 
-const c = @cImport({
-    @cInclude("app_host_abi.h");
-});
+const c = @import("app_host_abi_c");
 
 /// Zig 0.16 의 `std.c` 에는 `atexit` 바인딩이 없어 직접 선언한다.
 extern fn atexit(handler: *const fn () callconv(.c) void) c_int;
@@ -205,30 +205,30 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
     try std.testing.expectEqual(@as(u32, 230), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
-    try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
-    try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
-    try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_BLOCKED), @intFromEnum(Location.blocked));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @backingInt(Location.position));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @backingInt(Location.unavailable));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_BLOCKED), @backingInt(Location.blocked));
     // W5a·W5b: Swift 가 쓰는 대화상자 종류·권한 답 상수가 Zig 열거형과 같다.
     const web_osr_mod = session_mod.web_osr;
-    try std.testing.expectEqual(@as(u32, c.MARU_OSR_DIALOG_PROMPT), @intFromEnum(web_osr_mod.DialogKind.prompt));
-    try std.testing.expectEqual(@as(u32, c.MARU_OSR_DIALOG_FILE_OPEN), @intFromEnum(web_osr_mod.DialogKind.file_open));
-    try std.testing.expectEqual(@as(u32, c.MARU_OSR_DIALOG_FILE_SAVE), @intFromEnum(web_osr_mod.DialogKind.file_save));
-    try std.testing.expectEqual(@as(u32, c.MARU_OSR_DIALOG_PERMISSION), @intFromEnum(web_osr_mod.DialogKind.permission));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_DIALOG_PROMPT), @backingInt(web_osr_mod.DialogKind.prompt));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_DIALOG_FILE_OPEN), @backingInt(web_osr_mod.DialogKind.file_open));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_DIALOG_FILE_SAVE), @backingInt(web_osr_mod.DialogKind.file_save));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_DIALOG_PERMISSION), @backingInt(web_osr_mod.DialogKind.permission));
     const Result = maru.session.web_sidecar.message.PermissionResult;
-    try std.testing.expectEqual(@as(u32, c.MARU_OSR_PERMISSION_ACCEPT), @intFromEnum(Result.accept));
-    try std.testing.expectEqual(@as(u32, c.MARU_OSR_PERMISSION_DENY), @intFromEnum(Result.deny));
-    try std.testing.expectEqual(@as(u32, c.MARU_OSR_PERMISSION_DISMISS), @intFromEnum(Result.dismiss));
-    try std.testing.expectEqual(@as(u32, c.MARU_OSR_PERMISSION_IGNORE), @intFromEnum(Result.ignore));
-    try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
-    try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
-    try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
-    try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_IO_FAILURE), @intFromEnum(AppInstanceLeaseResult.io_failure));
-    try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_INVALID_PATH), @intFromEnum(AppInstanceLeaseResult.invalid_path));
-    try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_READY), @intFromEnum(SessionConfigBootstrapResult.ready));
-    try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_NO_LEASE), @intFromEnum(SessionConfigBootstrapResult.no_lease));
-    try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_ALREADY_INITIALIZED), @intFromEnum(SessionConfigBootstrapResult.already_initialized));
-    try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_LOAD_FAILURE), @intFromEnum(SessionConfigBootstrapResult.load_failure));
-    try std.testing.expectEqual(@as(u32, c.MARU_SESSION_DEFAULT_FALSE_OBSERVATION_MATCHED), @intFromEnum(SessionDefaultFalseObservation.matched));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_PERMISSION_ACCEPT), @backingInt(Result.accept));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_PERMISSION_DENY), @backingInt(Result.deny));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_PERMISSION_DISMISS), @backingInt(Result.dismiss));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_PERMISSION_IGNORE), @backingInt(Result.ignore));
+    try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @backingInt(AppInstanceLeaseResult.acquired));
+    try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @backingInt(AppInstanceLeaseResult.held));
+    try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @backingInt(AppInstanceLeaseResult.unsafe));
+    try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_IO_FAILURE), @backingInt(AppInstanceLeaseResult.io_failure));
+    try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_INVALID_PATH), @backingInt(AppInstanceLeaseResult.invalid_path));
+    try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_READY), @backingInt(SessionConfigBootstrapResult.ready));
+    try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_NO_LEASE), @backingInt(SessionConfigBootstrapResult.no_lease));
+    try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_ALREADY_INITIALIZED), @backingInt(SessionConfigBootstrapResult.already_initialized));
+    try std.testing.expectEqual(@as(u32, c.MARU_SESSION_CONFIG_BOOTSTRAP_LOAD_FAILURE), @backingInt(SessionConfigBootstrapResult.load_failure));
+    try std.testing.expectEqual(@as(u32, c.MARU_SESSION_DEFAULT_FALSE_OBSERVATION_MATCHED), @backingInt(SessionDefaultFalseObservation.matched));
 }
 
 test "workspace restore toggle reads workspace.restore from the default config before any session" {
@@ -251,7 +251,7 @@ test "workspace restore toggle reads workspace.restore from the default config b
     };
 
     var path_buf: [256]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "/private/tmp/maru-workspace-restore-{d}.config", .{std.c.getpid()});
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "/private/tmp/maru-workspace-restore-{d}.config", .{std.c.getpid()}, 0);
     defer _ = std.c.unlink(path.ptr);
     try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", path.ptr, 1));
 
@@ -285,7 +285,7 @@ test "app instance LeaseSlot acquires exactly once and preserves typed failure" 
     if (builtin.os.tag != .macos) return error.SkipZigTest;
 
     var path_buf: [256]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "/private/tmp/maru-app-abi-lease-{d}", .{std.c.getpid()}) catch
+    const path = std.fmt.bufPrintSentinel(&path_buf, "/private/tmp/maru-app-abi-lease-{d}", .{std.c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = std.c.unlink(path.ptr);
     defer _ = std.c.unlink(path.ptr);
@@ -302,12 +302,12 @@ test "app instance LeaseSlot acquires exactly once and preserves typed failure" 
 
 test "app instance lease ABI rejects invalid paths without mutating the global slot" {
     try std.testing.expectEqual(
-        @intFromEnum(AppInstanceLeaseResult.invalid_path),
+        @backingInt(AppInstanceLeaseResult.invalid_path),
         maru_macos_app_instance_lease_acquire(null, 1),
     );
     const embedded_nul = [_]u8{ 'a', 0, 'b' };
     try std.testing.expectEqual(
-        @intFromEnum(AppInstanceLeaseResult.invalid_path),
+        @backingInt(AppInstanceLeaseResult.invalid_path),
         maru_macos_app_instance_lease_acquire(&embedded_nul, embedded_nul.len),
     );
 }
@@ -991,15 +991,15 @@ test "P4 C4 checkpoint ABI exposes final capture cancel and detach effects" {
 }
 
 test "ABI file panel mode, key route, and asset role values match the C header" {
-    try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_READ), @intFromEnum(maru.session.dock_panel.Mode.read));
-    try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_SOURCE_EDIT), @intFromEnum(maru.session.dock_panel.Mode.source_edit));
-    try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_RICH), @intFromEnum(maru.session.dock_panel.Mode.rich));
-    try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_PASS_THROUGH), @intFromEnum(maru.config.keybinding.WebKeyRoute.pass_through));
-    try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_APP_ACTION), @intFromEnum(maru.config.keybinding.WebKeyRoute.app_action));
-    try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_CONSUME_UNBOUND), @intFromEnum(maru.config.keybinding.WebKeyRoute.consume_unbound));
-    try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_WEB_EDITOR), @intFromEnum(maru.config.keybinding.WebKeyRoute.web_editor));
-    try std.testing.expectEqual(@as(u32, c.MARU_APP_ASSET_ROLE_APP), @intFromEnum(maru.session.app_scheme.AppAssetRole.app));
-    try std.testing.expectEqual(@as(u32, c.MARU_APP_ASSET_ROLE_RENDER), @intFromEnum(maru.session.app_scheme.AppAssetRole.render));
+    try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_READ), @backingInt(maru.session.dock_panel.Mode.read));
+    try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_SOURCE_EDIT), @backingInt(maru.session.dock_panel.Mode.source_edit));
+    try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_RICH), @backingInt(maru.session.dock_panel.Mode.rich));
+    try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_PASS_THROUGH), @backingInt(maru.config.keybinding.WebKeyRoute.pass_through));
+    try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_APP_ACTION), @backingInt(maru.config.keybinding.WebKeyRoute.app_action));
+    try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_CONSUME_UNBOUND), @backingInt(maru.config.keybinding.WebKeyRoute.consume_unbound));
+    try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_WEB_EDITOR), @backingInt(maru.config.keybinding.WebKeyRoute.web_editor));
+    try std.testing.expectEqual(@as(u32, c.MARU_APP_ASSET_ROLE_APP), @backingInt(maru.session.app_scheme.AppAssetRole.app));
+    try std.testing.expectEqual(@as(u32, c.MARU_APP_ASSET_ROLE_RENDER), @backingInt(maru.session.app_scheme.AppAssetRole.render));
 }
 
 pub const KeyCode = enum(u32) {
@@ -1104,9 +1104,9 @@ pub export fn maru_macos_app_host_abi_version() u32 {
 }
 
 pub export fn maru_macos_app_host_capabilities(out_capabilities: ?*Capabilities) c_int {
-    const out = out_capabilities orelse return @intFromEnum(Status.null_out);
+    const out = out_capabilities orelse return @backingInt(Status.null_out);
     out.* = defaultCapabilities();
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 /// OS 로케일 식별자를 중립 층에 넘긴다 — **platform 은 읽어서 전달만 하고 해석하지 않는다**
@@ -1192,35 +1192,35 @@ pub export fn maru_macos_app_set_ui_locale(tag_ptr: ?[*]const u8, tag_len: usize
 }
 
 pub export fn maru_macos_app_instance_lease_acquire(path_ptr: ?[*]const u8, path_len: usize) u32 {
-    const ptr = path_ptr orelse return @intFromEnum(AppInstanceLeaseResult.invalid_path);
-    if (path_len == 0 or path_len > 4095) return @intFromEnum(AppInstanceLeaseResult.invalid_path);
+    const ptr = path_ptr orelse return @backingInt(AppInstanceLeaseResult.invalid_path);
+    if (path_len == 0 or path_len > 4095) return @backingInt(AppInstanceLeaseResult.invalid_path);
     const path = ptr[0..path_len];
     if (std.mem.indexOfScalar(u8, path, 0) != null)
-        return @intFromEnum(AppInstanceLeaseResult.invalid_path);
+        return @backingInt(AppInstanceLeaseResult.invalid_path);
 
     var path_buf: [4096]u8 = undefined;
     @memcpy(path_buf[0..path.len], path);
     path_buf[path.len] = 0;
     const path_z: [:0]const u8 = path_buf[0..path.len :0];
-    return @intFromEnum(app_instance_lease_slot.acquire(path_z));
+    return @backingInt(app_instance_lease_slot.acquire(path_z));
 }
 
 pub export fn maru_macos_session_config_bootstrap() u32 {
-    if (!app_instance_lease_slot.isHeld()) return @intFromEnum(SessionConfigBootstrapResult.no_lease);
+    if (!app_instance_lease_slot.isHeld()) return @backingInt(SessionConfigBootstrapResult.no_lease);
     session_mod.bootstrapSessionKeepAliveConfig(
         std.Io.Threaded.global_single_threaded.io(),
         std.heap.page_allocator,
-    ) catch |err| return @intFromEnum(switch (err) {
+    ) catch |err| return @backingInt(switch (err) {
         error.AlreadyInitialized => SessionConfigBootstrapResult.already_initialized,
         else => SessionConfigBootstrapResult.load_failure,
     });
-    return @intFromEnum(SessionConfigBootstrapResult.ready);
+    return @backingInt(SessionConfigBootstrapResult.ready);
 }
 
 pub export fn maru_macos_session_default_false_observation() u32 {
     if (!app_instance_lease_slot.isHeld())
-        return @intFromEnum(SessionDefaultFalseObservation.not_bootstrapped);
-    return @intFromEnum(classifyDefaultFalseSnapshot(session_mod.appKeepAliveSnapshotIfBootstrapped()));
+        return @backingInt(SessionDefaultFalseObservation.not_bootstrapped);
+    return @backingInt(classifyDefaultFalseSnapshot(session_mod.appKeepAliveSnapshotIfBootstrapped()));
 }
 
 fn classifyDefaultFalseSnapshot(snapshot_optional: ?session_mod.config_mod.SessionKeepAliveSnapshot) SessionDefaultFalseObservation {
@@ -1265,19 +1265,19 @@ test "default false observation classifies every bootstrap state without caller 
 }
 
 pub export fn maru_macos_incident_owner_shutdown() u32 {
-    return @intFromEnum(session_mod.shutdownProcessIncidentOwner());
+    return @backingInt(session_mod.shutdownProcessIncidentOwner());
 }
 
 pub export fn maru_macos_remote_backend_settle() u32 {
-    return @intFromEnum(session_mod.settleProcessRemoteBackendForTermination());
+    return @backingInt(session_mod.settleProcessRemoteBackendForTermination());
 }
 
 pub export fn maru_macos_reconnect_product_tick() u32 {
-    return @intFromEnum(session_mod.tickReconnectProductCoordinator());
+    return @backingInt(session_mod.tickReconnectProductCoordinator());
 }
 
 pub export fn maru_macos_reconnect_product_shutdown() u32 {
-    return @intFromEnum(session_mod.shutdownReconnectProductCoordinator());
+    return @backingInt(session_mod.shutdownReconnectProductCoordinator());
 }
 
 pub const ReconnectProductSmokeProbe = extern struct {
@@ -1295,7 +1295,7 @@ pub const ReconnectProductSmokeProbe = extern struct {
 };
 
 pub export fn maru_macos_reconnect_product_smoke_probe(out_probe: ?*ReconnectProductSmokeProbe) c_int {
-    const out = out_probe orelse return @intFromEnum(Status.null_out);
+    const out = out_probe orelse return @backingInt(Status.null_out);
     const probe = session_mod.reconnectProductSmokeProbe();
     out.* = .{
         .coordinator_ready = @intFromBool(probe.coordinator_ready),
@@ -1310,7 +1310,7 @@ pub export fn maru_macos_reconnect_product_smoke_probe(out_probe: ?*ReconnectPro
         .admission_count = probe.admission_count,
         .resident_entries = probe.resident_entries,
     };
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 pub const SessionHostWakeSource = extern struct {
@@ -1357,7 +1357,7 @@ fn openAppLogFd(base: [:0]const u8) c_int {
     _ = std.c.mkdir(base.ptr, @as(std.c.mode_t, 0o700));
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/app.log", .{base}) catch return -1;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/app.log", .{base}, 0) catch return -1;
 
     const fd = std.c.open(
         path.ptr,
@@ -1562,7 +1562,7 @@ fn exitSignalHandler(
     writeMarker(formatSignalExitMarker(
         &buf,
         @intCast(std.c.getpid()),
-        @intFromEnum(sig),
+        @backingInt(sig),
         info.code,
         info.pid,
     ));
@@ -1675,22 +1675,22 @@ pub export fn maru_macos_app_session_create(
     // 이미지 채널이 묶이기(받은 fd 가 생기기) 전에 fork 울타리를 걸고 열린 fd 상한을 올린다(docs/session-host-image-channel.md §7).
     fork_fd_fence.install();
     fork_fd_fence.raiseOpenFileLimit();
-    const raw_config = (config orelse return @intFromEnum(Status.null_out)).*;
-    const out = out_session orelse return @intFromEnum(Status.null_out);
+    const raw_config = (config orelse return @backingInt(Status.null_out)).*;
+    const out = out_session orelse return @backingInt(Status.null_out);
     out.* = null;
 
     _ = session_mod.normalizeConfig(raw_config) catch |err| switch (err) {
-        error.UnsupportedAbi => return @intFromEnum(Status.unsupported_abi),
-        error.InvalidConfig => return @intFromEnum(Status.invalid_config),
+        error.UnsupportedAbi => return @backingInt(Status.unsupported_abi),
+        error.InvalidConfig => return @backingInt(Status.invalid_config),
     };
 
-    const session = allocator.create(AppSession) catch return @intFromEnum(Status.create_failed);
+    const session = allocator.create(AppSession) catch return @backingInt(Status.create_failed);
     // 이 함수는 c_int를 반환해 정상 return(@intFromEnum)으로 끝나므로 errdefer가 발화하지 않는다 — init 실패 시
     // 바깥 struct를 catch 안에서 직접 해제해야 누수가 안 난다. (init 내부 errdefer self.deinit()는 내부 할당만
     // 정리하지 이 create로 잡은 struct 자체는 못 푼다. 호스트는 실패 시 핸들이 없어 destroy도 못 한다.)
     session.init(std.Io.Threaded.global_single_threaded.io(), allocator, raw_config) catch {
         allocator.destroy(session);
-        return @intFromEnum(Status.create_failed);
+        return @backingInt(Status.create_failed);
     };
     // AppSession의 terminal/web Term teardown 단일 훅을 컨트롤 수명에 연결한다. terminal pane이 닫힐 때도 그 pane이
     // 발급한 grant-origin wait를 즉시 unauthorized로 끝내야 하므로 WKWebView destroy 전이만 관찰해서는 부족하다.
@@ -1700,7 +1700,7 @@ pub export fn maru_macos_app_session_create(
     session.agent_pane_known_callback = onAgentPaneKnown;
 
     out.* = session;
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 pub export fn maru_macos_app_session_tick(
@@ -1708,8 +1708,8 @@ pub export fn maru_macos_app_session_tick(
     frame_loop_rate_hz: u32,
     out_summary: ?*AppFrameSummary,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const out = out_summary orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const out = out_summary orelse return @backingInt(Status.null_out);
     app_session.setFrameLoopRateHz(frame_loop_rate_hz);
     app_session.maybeDebugOpenSettings(); // MARU_OPEN_SETTINGS 시각 확인 훅 — tick(렌더) 전에 열어야 이 frame에 모달이 든다(env 미설정이면 무동작)
     app_session.maybeDebugOpenWebPanel(); // MARU_WEB_PANEL 시각 확인 훅 — 활성 pane에 web Term을 열고 활성화(4e-2, 본문 blank·크래시 0; env 미설정이면 무동작)
@@ -1719,11 +1719,11 @@ pub export fn maru_macos_app_session_tick(
     app_session.maybeDebugOpenFind(); // 찾기 캡처 훅 — 카운터 앞의 규칙 표시를 잰다
     app_session.maybeDebugEditOp(); // 편집 연산 캡처 훅 — 화면에 남는 결과를 잰다(§3.9a·§3.9b)
     app_session.maybeDebugDiffCaretKeys(); // 비교 뷰 caret 캡처 훅 — 키가 caret 에 닿는지 화면으로 잰다
-    out.* = app_session.tick() catch return @intFromEnum(Status.tick_failed);
+    out.* = app_session.tick() catch return @backingInt(Status.tick_failed);
     // PTY 세션이 종료되면 ok가 아니라 session_ended를 올려, host가 죽은 세션을 무한 tick하지
     // 않고 frame loop를 멈춰 우아하게 내려가게 한다. ended는 latch라 이후 tick도 동일 신호다.
-    if (out.ended != 0) return @intFromEnum(Status.session_ended);
-    return @intFromEnum(Status.ok);
+    if (out.ended != 0) return @backingInt(Status.session_ended);
+    return @backingInt(Status.ok);
 }
 
 pub export fn maru_macos_app_session_key_down(
@@ -1731,14 +1731,14 @@ pub export fn maru_macos_app_session_key_down(
     event: ?*const KeyEvent,
     out_summary: ?*AppFrameSummary,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const raw_event = (event orelse return @intFromEnum(Status.null_out)).*;
-    const out = out_summary orelse return @intFromEnum(Status.null_out);
-    const key_event = keyEventFromAbi(raw_event) catch return @intFromEnum(Status.invalid_config);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const raw_event = (event orelse return @backingInt(Status.null_out)).*;
+    const out = out_summary orelse return @backingInt(Status.null_out);
+    const key_event = keyEventFromAbi(raw_event) catch return @backingInt(Status.invalid_config);
     // 이 export는 MaruMetalTerminalView 전용이다. WebView app shortcut은 surface-aware
     // dispatch_web_app_action을 쓰므로, Metal provenance를 잃지 않는 별도 funnel로 보낸다.
-    out.* = app_session.handleMetalKeyEvent(key_event) catch return @intFromEnum(Status.key_failed);
-    return @intFromEnum(Status.ok);
+    out.* = app_session.handleMetalKeyEvent(key_event) catch return @backingInt(Status.key_failed);
+    return @backingInt(Status.ok);
 }
 
 /// AS4-c fixture-only synchronization.  This never opens a tab, reads a
@@ -1748,10 +1748,10 @@ pub export fn maru_macos_app_session_set_agent_session_archive_detail_smoke_gate
     session: ?*AppSession,
     blocked: u32,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    if (blocked > 1) return @intFromEnum(Status.invalid_config);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    if (blocked > 1) return @backingInt(Status.invalid_config);
     app_session.setAgentSessionArchiveDetailSmokeGate(blocked != 0);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 /// Read-only companion for the fixture's bounded wait.  A false result means
@@ -1769,10 +1769,10 @@ pub export fn maru_macos_app_session_set_agent_session_archive_smoke_gate(
     session: ?*AppSession,
     blocked: u32,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    if (blocked > 1) return @intFromEnum(Status.invalid_config);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    if (blocked > 1) return @backingInt(Status.invalid_config);
     app_session.setAgentSessionArchiveSmokeGate(blocked != 0);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 /// Read-only companion for the fixture's bounded wait. A false result means an unarmed gate or
@@ -1911,8 +1911,8 @@ pub export fn maru_macos_app_session_recovered_session_smoke_probe(
     session: ?*AppSession,
     out_probe: ?*RecoveredSessionSmokeProbe,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const out = out_probe orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const out = out_probe orelse return @backingInt(Status.null_out);
     const probe = app_session.recoveredSessionAppKitSmokeProbe();
     out.* = .{
         .row_present = @intFromBool(probe.row_present),
@@ -1941,7 +1941,7 @@ pub export fn maru_macos_app_session_recovered_session_smoke_probe(
         .live_session_count = probe.live_session_count,
         .target_activation_dispatched = @intFromBool(probe.target_activation_dispatched),
     };
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 /// CR6d actual-AppKit smoke의 exact recovered-runtime screen counter projection.
@@ -1950,8 +1950,8 @@ pub export fn maru_macos_app_session_input_smoke_probe(
     session: ?*AppSession,
     out_probe: ?*SessionHostInputSmokeProbe,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const out = out_probe orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const out = out_probe orelse return @backingInt(Status.null_out);
     const probe = app_session.sessionHostInputSmokeProbe();
     out.* = .{
         .active_remote = @intFromBool(probe.active_remote),
@@ -1961,7 +1961,7 @@ pub export fn maru_macos_app_session_input_smoke_probe(
         .terminal_input_bytes = probe.terminal_input_bytes,
         .base_screen_generation = probe.base_screen_generation,
     };
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 /// CR6d-v2b0b의 exact-once 판정/게시 leaf. Swift는 complete raw transcript를 동기 호출 동안만
@@ -1972,14 +1972,14 @@ pub export fn maru_macos_session_host_ime_candidate_observation_publish(
     output_path_ptr: ?[*]const u8,
     output_path_len: usize,
 ) u32 {
-    const transcript = transcript_ptr orelse return @intFromEnum(IMECandidateObservationResult.failed);
-    const output = output_path_ptr orelse return @intFromEnum(IMECandidateObservationResult.failed);
+    const transcript = transcript_ptr orelse return @backingInt(IMECandidateObservationResult.failed);
+    const output = output_path_ptr orelse return @backingInt(IMECandidateObservationResult.failed);
     if (transcript_len == 0 or transcript_len > ime_candidate_evidence.max_transcript_bytes or
         output_path_len == 0 or output_path_len >= std.fs.max_path_bytes)
-        return @intFromEnum(IMECandidateObservationResult.failed);
+        return @backingInt(IMECandidateObservationResult.failed);
     const output_bytes = output[0..output_path_len];
     if (std.mem.indexOfScalar(u8, output_bytes, 0) != null)
-        return @intFromEnum(IMECandidateObservationResult.failed);
+        return @backingInt(IMECandidateObservationResult.failed);
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     @memcpy(path_buf[0..output_path_len], output_bytes);
     path_buf[output_path_len] = 0;
@@ -1991,14 +1991,14 @@ pub export fn maru_macos_session_host_ime_candidate_observation_publish(
         // Only the typed failure name crosses this diagnostic boundary, never the borrowed
         // transcript or another application's window inventory. The strict verdict is unchanged.
         std.debug.print("session_host_ime_candidate_publish_error={s}\n", .{@errorName(err)});
-        return @intFromEnum(IMECandidateObservationResult.failed);
+        return @backingInt(IMECandidateObservationResult.failed);
     };
-    return @intFromEnum(IMECandidateObservationResult.passed);
+    return @backingInt(IMECandidateObservationResult.passed);
 }
 
 test "CR6d-v2b0b observation ABI rejects invalid borrows and publishes no partial artifact" {
-    try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateObservationPassed), @intFromEnum(IMECandidateObservationResult.passed));
-    try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateObservationFailed), @intFromEnum(IMECandidateObservationResult.failed));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateObservationPassed), @backingInt(IMECandidateObservationResult.passed));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateObservationFailed), @backingInt(IMECandidateObservationResult.failed));
     try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateObservationFailed), maru_macos_session_host_ime_candidate_observation_publish(null, 1, null, 1));
 
     const transcript = "{}";
@@ -2035,8 +2035,8 @@ pub export fn maru_macos_app_session_divider_smoke_probe(
     session: ?*AppSession,
     out_probe: ?*DividerSmokeProbe,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const out = out_probe orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const out = out_probe orelse return @backingInt(Status.null_out);
     const probe = app_session.dividerSmokeProbe();
     out.* = .{
         .x_px = probe.x_px,
@@ -2069,7 +2069,7 @@ pub export fn maru_macos_app_session_divider_smoke_probe(
         .tab_visible_first_id = probe.tab_visible_first_id,
         .tab_model_first_id = probe.tab_model_first_id,
     };
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 /// Reads one already-published archive capability for the dedicated AppKit smoke fixture.
@@ -2080,8 +2080,8 @@ pub export fn maru_macos_app_session_agent_session_archive_smoke_probe(
     target: u32,
     out_probe: ?*AgentSessionArchiveSmokeProbe,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const out = out_probe orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const out = out_probe orelse return @backingInt(Status.null_out);
     const typed_target: session_mod.AgentSessionArchiveSmokeProbeTarget = switch (target) {
         c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_CARD => .session_dock_card,
         c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_RESUME => .archive_resume,
@@ -2095,7 +2095,7 @@ pub export fn maru_macos_app_session_agent_session_archive_smoke_probe(
         c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SEARCH => .archive_search,
         c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_CARD => .archive_expanded_card,
         c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SORT_TOGGLE => .archive_sort_toggle,
-        else => return @intFromEnum(Status.invalid_config),
+        else => return @backingInt(Status.invalid_config),
     };
     const probe = app_session.agentSessionArchiveSmokeProbe(typed_target);
     out.* = .{
@@ -2109,7 +2109,7 @@ pub export fn maru_macos_app_session_agent_session_archive_smoke_probe(
         .present = @intFromBool(probe.present),
         .enabled = @intFromBool(probe.enabled),
     };
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 pub export fn maru_macos_app_session_resize(
@@ -2117,26 +2117,26 @@ pub export fn maru_macos_app_session_resize(
     event: ?*const ResizeEvent,
     out_summary: ?*AppFrameSummary,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const raw_event = (event orelse return @intFromEnum(Status.null_out)).*;
-    const out = out_summary orelse return @intFromEnum(Status.null_out);
-    if (raw_event.width_px == 0 or raw_event.height_px == 0) return @intFromEnum(Status.invalid_config);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const raw_event = (event orelse return @backingInt(Status.null_out)).*;
+    const out = out_summary orelse return @backingInt(Status.null_out);
+    if (raw_event.width_px == 0 or raw_event.height_px == 0) return @backingInt(Status.invalid_config);
     // grid(cols/rows)는 app session이 backing 픽셀 + 자기 cell 메트릭으로 직접 계산한다. Swift는
     // 창의 backing 픽셀과 scale만 넘기고 cols/rows를 계산하지 않는다(event.cols/rows는 무시).
     // app session이 분수 scale로 cell 메트릭을 device 해상도에 맞춘 뒤 grid를 잡으므로, Swift가
     // 메트릭 준비 전 placeholder로 grid를 잘못 잡던(창과 grid가 어긋나던) 문제가 사라진다.
-    out.* = app_session.resize(raw_event.width_px, raw_event.height_px, raw_event.scale_milli) catch return @intFromEnum(Status.resize_failed);
-    return @intFromEnum(Status.ok);
+    out.* = app_session.resize(raw_event.width_px, raw_event.height_px, raw_event.scale_milli) catch return @backingInt(Status.resize_failed);
+    return @backingInt(Status.ok);
 }
 
 pub export fn maru_macos_app_session_close(
     session: ?*AppSession,
     out_summary: ?*AppFrameSummary,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const out = out_summary orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const out = out_summary orelse return @backingInt(Status.null_out);
     out.* = app_session.close();
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 /// 빨간 닫기 버튼/창 단위 닫기 요청(windowShouldClose). 닫힐 창(세션)에 실행 중인 명령이 있으면 Zig가 확인 모달을
@@ -2202,27 +2202,27 @@ pub export fn maru_macos_app_session_prepare_recovered_sessions(
     text_len: usize,
     has_workspace: u32,
 ) u32 {
-    const app_session = session orelse return @intFromEnum(AppSession.RecoveredSessionsLaunchOutcome.unavailable);
+    const app_session = session orelse return @backingInt(AppSession.RecoveredSessionsLaunchOutcome.unavailable);
     const text: ?[]const u8 = if (has_workspace != 0) blk: {
-        const ptr = text_ptr orelse return @intFromEnum(AppSession.RecoveredSessionsLaunchOutcome.unavailable);
+        const ptr = text_ptr orelse return @backingInt(AppSession.RecoveredSessionsLaunchOutcome.unavailable);
         break :blk ptr[0..text_len];
     } else null;
-    return @intFromEnum(app_session.prepareRecoveredSessionsAtLaunch(text));
+    return @backingInt(app_session.prepareRecoveredSessionsAtLaunch(text));
 }
 
 pub export fn maru_macos_app_session_finish_deferred_initial_surface(session: ?*AppSession) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    app_session.finishDeferredInitialSurface() catch return @intFromEnum(Status.create_failed);
-    return @intFromEnum(Status.ok);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    app_session.finishDeferredInitialSurface() catch return @backingInt(Status.create_failed);
+    return @backingInt(Status.ok);
 }
 
 test "CR6a-2 ABI는 recovery launch 인자의 null 경계를 fail closed한다" {
     try std.testing.expectEqual(
-        @intFromEnum(AppSession.RecoveredSessionsLaunchOutcome.unavailable),
+        @backingInt(AppSession.RecoveredSessionsLaunchOutcome.unavailable),
         maru_macos_app_session_prepare_recovered_sessions(null, @ptrFromInt(1), std.math.maxInt(usize), 1),
     );
     try std.testing.expectEqual(
-        @as(c_int, @intFromEnum(Status.null_out)),
+        @as(c_int, @backingInt(Status.null_out)),
         maru_macos_app_session_finish_deferred_initial_surface(null),
     );
     maru_macos_app_session_set_primary_window(null, 1);
@@ -2233,19 +2233,19 @@ test "CR6a-2 ABI는 recovery launch 인자의 null 경계를 fail closed한다" 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+        .command_kind = @backingInt(AppCommandKind.controlled_smoke),
         .defer_initial_surface = 1,
     };
     var session: ?*AppSession = null;
     try std.testing.expectEqual(
-        @as(c_int, @intFromEnum(Status.ok)),
+        @as(c_int, @backingInt(Status.ok)),
         maru_macos_app_session_create(&config, &session),
     );
     defer maru_macos_app_session_destroy(session);
     try std.testing.expect(session.?.tabs.items.len == 0);
 
     try std.testing.expectEqual(
-        @intFromEnum(AppSession.RecoveredSessionsLaunchOutcome.unavailable),
+        @backingInt(AppSession.RecoveredSessionsLaunchOutcome.unavailable),
         maru_macos_app_session_prepare_recovered_sessions(session, null, 1, 1),
     );
     try std.testing.expect(session.?.tabs.items.len == 0);
@@ -2261,8 +2261,8 @@ pub const MoveResult = extern struct {
 
 // 이동 에러(InvalidCoordinate/OutOfMemory/UnsupportedMove)를 MoveResult로 접는다 — 셋 다 move_failed(세션 유지, 이 event만 거부).
 fn moveResultError(out: *MoveResult) c_int {
-    out.* = .{ .status = @intFromEnum(Status.move_failed), .source_window_closed = 0, .moved_count = 0 };
-    return @intFromEnum(Status.move_failed);
+    out.* = .{ .status = @backingInt(Status.move_failed), .source_window_closed = 0, .moved_count = 0 };
+    return @backingInt(Status.move_failed);
 }
 
 // moved_count는 **참 이동 개수**(code-review [6]) — caller가 넘긴다. outcome.moved_surfaces는 아래 export의 [256]u64
@@ -2270,11 +2270,11 @@ fn moveResultError(out: *MoveResult) c_int {
 // totalSurfaceCount)을 쓴다.
 fn moveResultOk(out: *MoveResult, outcome: maru.session.MoveOutcome, moved_count: usize) c_int {
     out.* = .{
-        .status = @intFromEnum(Status.ok),
+        .status = @backingInt(Status.ok),
         .source_window_closed = @intFromBool(outcome.source_window_closed),
         .moved_count = @intCast(moved_count),
     };
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 /// M3d-2a-i cross-window workspace 이동(docs/window-surface-mobility.md §8A.8) — src 세션의 src_index 워크스페이스를 dst
@@ -2287,9 +2287,9 @@ pub export fn maru_macos_app_session_move_workspace_to(
     src_index: usize,
     out: ?*MoveResult,
 ) c_int {
-    const s = src orelse return @intFromEnum(Status.null_out);
-    const d = dst orelse return @intFromEnum(Status.null_out);
-    const o = out orelse return @intFromEnum(Status.null_out);
+    const s = src orelse return @backingInt(Status.null_out);
+    const d = dst orelse return @backingInt(Status.null_out);
+    const o = out orelse return @backingInt(Status.null_out);
     // 참 이동 개수를 수술 **전에** 센다(버퍼 절단과 무관, code-review [6]). idx 범위 밖이면 0 — 이동 자체도 아래서 실패.
     const moved_count = s.workspaceSurfaceCount(src_index);
     var buf: [256]u64 = undefined; // moved surface_id 버퍼(초과분은 조용히 절단 — MoveOutcome 계약, moved_count는 참값 별도 보고)
@@ -2305,9 +2305,9 @@ pub export fn maru_macos_app_session_merge_window(
     dst: ?*AppSession,
     out: ?*MoveResult,
 ) c_int {
-    const s = src orelse return @intFromEnum(Status.null_out);
-    const d = dst orelse return @intFromEnum(Status.null_out);
-    const o = out orelse return @intFromEnum(Status.null_out);
+    const s = src orelse return @backingInt(Status.null_out);
+    const d = dst orelse return @backingInt(Status.null_out);
+    const o = out orelse return @backingInt(Status.null_out);
     // 참 이동 개수(버퍼 절단과 무관, [6]): self-merge(s==d)는 no-op이라 0, 아니면 src 전체 surface. 수술 전에 센다.
     const moved_count: usize = if (s == d) 0 else s.totalSurfaceCount();
     var buf: [256]u64 = undefined;
@@ -2338,9 +2338,9 @@ pub export fn maru_macos_app_session_scroll_wheel(
     x_px: f64,
     y_px: f64,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     app_session.scrollWheel(delta_y, delta_x, precise != 0, x_px, y_px);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 마우스 선택(kind 1=down/2=drag/3=up/4=더블클릭 단어/5=트리플클릭 줄, backing px). 셀 변환·선택 모델은 Zig가 소유한다.
@@ -2352,9 +2352,9 @@ pub export fn maru_macos_app_session_mouse(
     button: i32,
     mods: i32,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     app_session.mouse(kind, x_px, y_px, button, mods);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 버튼 없는 마우스 이동(hover, backing px). Zig가 트래킹 모드를 확인해 any-event(DECSET 1003)일 때만 mouse
@@ -2380,11 +2380,11 @@ pub export fn maru_macos_app_session_paste_text(
     len: usize,
     escape_each: u32,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    if (len == 0) return @intFromEnum(Status.ok);
-    const ptr = bytes orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    if (len == 0) return @backingInt(Status.ok);
+    const ptr = bytes orelse return @backingInt(Status.null_out);
     app_session.pasteText(ptr[0..len], escape_each != 0);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 드래그앤드롭 지점(backing px)의 pane/Term으로 포커스를 옮긴다 — 드롭이 **활성 pane이 아니라 떨어뜨린 pane**으로
@@ -2404,7 +2404,7 @@ pub export fn maru_macos_app_session_route_drop(
     y_px: f64,
 ) c_int {
     const app_session = session orelse return 0;
-    return @intFromEnum(app_session.routeDropAtPoint(x_px, y_px));
+    return @backingInt(app_session.routeDropAtPoint(x_px, y_px));
 }
 
 // W6l①(v216): 링크(파일 아님)를 놓았다 — 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠면 그 탭에서 열거나 새 웹 탭으로 연다.
@@ -2418,7 +2418,7 @@ pub export fn maru_macos_app_session_drop_url(
 ) c_int {
     const app_session = session orelse return 0;
     if (url_ptr == null or url_len == 0) return 0;
-    return @intFromEnum(session_mod.web_ops.dropUrlAt(app_session, x_px, y_px, url_ptr[0..url_len]));
+    return @backingInt(session_mod.web_ops.dropUrlAt(app_session, x_px, y_px, url_ptr[0..url_len]));
 }
 
 // 시험 전용(W6l① 스모크 — 대본 `droplink`): 활성 pane 의 웹 탭 머리·빈 탭 막대·주소 띠 한 점(backing px, 없으면 -1) 여섯 값.
@@ -2437,11 +2437,11 @@ pub export fn maru_macos_app_session_drop_files(
     bytes: ?[*]const u8,
     len: usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    if (len == 0) return @intFromEnum(Status.ok);
-    const ptr = bytes orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    if (len == 0) return @backingInt(Status.ok);
+    const ptr = bytes orelse return @backingInt(Status.null_out);
     app_session.handleDroppedFiles(ptr[0..len]);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 클립보드 이미지(Cmd+V): Swift가 먼저 만든 임시 PNG 경로와 같은 PNG 바이트를 넘긴다.
@@ -2475,20 +2475,20 @@ pub export fn maru_macos_app_session_show_notice(
     bytes: ?[*]const u8,
     len: usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    if (len == 0) return @intFromEnum(Status.ok);
-    const ptr = bytes orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    if (len == 0) return @backingInt(Status.ok);
+    const ptr = bytes orelse return @backingInt(Status.null_out);
     app_session.showNotice(ptr[0..len]);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // IME 키 트랜잭션(v20). Swift keyDown은 begin -> interpretKeyEvents -> end 순서로 부르고,
 // 입력기 콜백은 insert/marked로 쌓는다. 판정(전송/무시/인코딩)은 전부 Zig가 한다 — Swift엔
 // IME 분기 로직이 없다(unit 테스트 가능).
 pub export fn maru_macos_app_session_ime_begin(session: ?*AppSession) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     app_session.imeBegin();
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 입력기가 확정한 텍스트(insertText, UTF-8). 누적만 — 전송 판정은 ime_end가 한다.
@@ -2497,31 +2497,31 @@ pub export fn maru_macos_app_session_ime_insert(
     bytes: ?[*]const u8,
     len: usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     const slice: []const u8 = if (bytes) |ptr| ptr[0..len] else &.{};
     app_session.imeInsert(slice);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 /// NSTextInputClient ranges are UTF-16, with UINT64_MAX denoting NSNotFound.
 /// Legacy terminal and chrome-field input retain their existing transaction and preedit semantics.
 pub export fn maru_macos_app_session_ime_insert_with_range(session: ?*AppSession, bytes: ?[*]const u8, len: usize, location: u64, length: u64) c_int {
-    const self = session orelse return @intFromEnum(Status.null_out);
+    const self = session orelse return @backingInt(Status.null_out);
     const text: []const u8 = if (bytes) |ptr| ptr[0..len] else &.{};
     const replacement: ?editor_ime_ops.Range = if (location == std.math.maxInt(u64)) null else .{ .location = location, .length = length };
     if (!editor_ime_ops.insert(self, text, replacement)) {
         self.imeMarked("");
         self.imeInsert(text);
     }
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 pub export fn maru_macos_app_session_ime_marked_with_ranges(session: ?*AppSession, bytes: ?[*]const u8, len: usize, selected_location: u64, selected_length: u64, replacement_location: u64, replacement_length: u64) c_int {
-    const self = session orelse return @intFromEnum(Status.null_out);
+    const self = session orelse return @backingInt(Status.null_out);
     const text: []const u8 = if (bytes) |ptr| ptr[0..len] else &.{};
     const replacement: ?editor_ime_ops.Range = if (replacement_location == std.math.maxInt(u64)) null else .{ .location = replacement_location, .length = replacement_length };
     if (!editor_ime_ops.marked(self, text, .{ .location = selected_location, .length = selected_length }, replacement)) self.imeMarked(text);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 pub export fn maru_macos_app_session_editor_ime_state(session: ?*AppSession, selected_location: ?*u64, selected_length: ?*u64, marked_location: ?*u64, marked_length: ?*u64) c_int {
@@ -2586,10 +2586,10 @@ pub export fn maru_macos_app_session_ime_marked(
     bytes: ?[*]const u8,
     len: usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     const slice: []const u8 = if (bytes) |ptr| ptr[0..len] else &.{};
     app_session.imeMarked(slice);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 pub export fn maru_macos_app_session_ime_editor_ranges(
@@ -2598,15 +2598,15 @@ pub export fn maru_macos_app_session_ime_editor_ranges(
     out_selected_len: ?*usize,
     out_marked_start: ?*usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const start = out_selected_start orelse return @intFromEnum(Status.null_out);
-    const len = out_selected_len orelse return @intFromEnum(Status.null_out);
-    const mark = out_marked_start orelse return @intFromEnum(Status.null_out);
-    const ranges = session_mod.input_ops.editorImeRanges(app_session) orelse return @intFromEnum(Status.invalid_config);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const start = out_selected_start orelse return @backingInt(Status.null_out);
+    const len = out_selected_len orelse return @backingInt(Status.null_out);
+    const mark = out_marked_start orelse return @backingInt(Status.null_out);
+    const ranges = session_mod.input_ops.editorImeRanges(app_session) orelse return @backingInt(Status.invalid_config);
     start.* = ranges.selected_start;
     len.* = ranges.selected_len;
     mark.* = ranges.marked_start;
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 pub export fn maru_macos_app_session_ime_editor_replacement(
@@ -2614,11 +2614,11 @@ pub export fn maru_macos_app_session_ime_editor_replacement(
     location: usize,
     length: usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     return if (session_mod.input_ops.editorImeReplacement(app_session, location, length))
-        @intFromEnum(Status.ok)
+        @backingInt(Status.ok)
     else
-        @intFromEnum(Status.invalid_config);
+        @backingInt(Status.invalid_config);
 }
 
 pub export fn maru_macos_app_session_ime_editor_substring(
@@ -2629,15 +2629,15 @@ pub export fn maru_macos_app_session_ime_editor_substring(
     cap: usize,
     out_len: ?*usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const size = out_len orelse return @intFromEnum(Status.null_out);
-    const bytes = session_mod.input_ops.editorImeSubstring(app_session, location, length) orelse return @intFromEnum(Status.invalid_config);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const size = out_len orelse return @backingInt(Status.null_out);
+    const bytes = session_mod.input_ops.editorImeSubstring(app_session, location, length) orelse return @backingInt(Status.invalid_config);
     size.* = bytes.len;
-    if (cap == 0) return @intFromEnum(Status.ok);
-    const ptr = out_bytes orelse return @intFromEnum(Status.null_out);
-    if (cap < bytes.len) return @intFromEnum(Status.invalid_config);
+    if (cap == 0) return @backingInt(Status.ok);
+    const ptr = out_bytes orelse return @backingInt(Status.null_out);
+    if (cap < bytes.len) return @backingInt(Status.invalid_config);
     @memcpy(ptr[0..bytes.len], bytes);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // IME 키 트랜잭션 종료 — 일괄 판정(확정 텍스트 전송 / 조합 조작 무시 / 일반 키 인코딩).
@@ -2645,16 +2645,16 @@ pub export fn maru_macos_app_session_ime_end(
     session: ?*AppSession,
     event: ?*const KeyEvent,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     // W4c: Chromium 탭 트랜잭션은 키 변환이 필요 없다 — 변환 실패로 트랜잭션이 안 닫히지 않게 먼저 닫는다.
-    if (session_mod.web_ops.osrImeEnd(app_session)) return @intFromEnum(Status.ok);
+    if (session_mod.web_ops.osrImeEnd(app_session)) return @backingInt(Status.ok);
     // event가 null이면 정규화 불가 키 — 트랜잭션은 닫되 일반 키 인코딩은 생략한다(imeEnd가 처리).
     const key_event: ?terminal.KeyEvent = if (event) |e|
-        (keyEventFromAbi(e.*) catch return @intFromEnum(Status.invalid_config))
+        (keyEventFromAbi(e.*) catch return @backingInt(Status.invalid_config))
     else
         null;
     app_session.imeEnd(key_event);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // IME 후보창 배치용 커서 셀 사각형(backing px, 좌상단 원점). Swift가 화면 좌표로 변환해
@@ -2666,31 +2666,31 @@ pub export fn maru_macos_app_session_ime_cursor_rect(
     out_w: ?*f64,
     out_h: ?*f64,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const rx = out_x orelse return @intFromEnum(Status.null_out);
-    const ry = out_y orelse return @intFromEnum(Status.null_out);
-    const rw = out_w orelse return @intFromEnum(Status.null_out);
-    const rh = out_h orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const rx = out_x orelse return @backingInt(Status.null_out);
+    const ry = out_y orelse return @backingInt(Status.null_out);
+    const rw = out_w orelse return @backingInt(Status.null_out);
+    const rh = out_h orelse return @backingInt(Status.null_out);
     const rect = app_session.imeCursorRect();
     rx.* = rect.x;
     ry.* = rect.y;
     rw.* = rect.w;
     rh.* = rect.h;
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // IME deleteBackward 편집 명령(doCommand). 트랜잭션에 기록만 — 한글 마지막 자모 백스페이스의
 // insertText+deleteBackward 상쇄 판정에 쓴다.
 pub export fn maru_macos_app_session_ime_delete_backward(session: ?*AppSession) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     app_session.imeDeleteBackward();
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 포커스 변화. 잃으면 조합 중 텍스트를 확정(커밋)한다 — Terminal.app/Ghostty 의미론.
 pub export fn maru_macos_app_session_set_focus(session: ?*AppSession, focused: i32) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    return @intFromEnum(if (app_session.trySetFocused(focused != 0)) Status.ok else Status.key_failed);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    return @backingInt(if (app_session.trySetFocused(focused != 0)) Status.ok else Status.key_failed);
 }
 
 // 세팅 등 chrome 오버레이가 열렸는지(keybind 녹음 중이면 settings.open=true라 포함). Swift performKeyEquivalent가 1이면
@@ -2731,10 +2731,10 @@ pub export fn maru_macos_app_session_editor_owns_chord(session: ?*AppSession, ev
 // web-editor/pass-through provenance를 보존하며, v132가 옛 v100 Bool 조회를 대체한다. null/event 변환 실패는
 // pass-through. 실제 app-action은 아래 전용 export가 resolver를 다시 평가한 뒤 terminal 전처리 없이 dispatch한다.
 pub export fn maru_macos_app_session_web_key_route(session: ?*AppSession, surface_id: u64, event: ?*const KeyEvent) u32 {
-    const app_session = session orelse return @intFromEnum(maru.config.keybinding.WebKeyRoute.pass_through);
-    const raw_event = (event orelse return @intFromEnum(maru.config.keybinding.WebKeyRoute.pass_through)).*;
-    const key_event = keyEventFromAbi(raw_event) catch return @intFromEnum(maru.config.keybinding.WebKeyRoute.pass_through);
-    return @intFromEnum(app_session.webKeyRoute(surface_id, key_event));
+    const app_session = session orelse return @backingInt(maru.config.keybinding.WebKeyRoute.pass_through);
+    const raw_event = (event orelse return @backingInt(maru.config.keybinding.WebKeyRoute.pass_through)).*;
+    const key_event = keyEventFromAbi(raw_event) catch return @backingInt(maru.config.keybinding.WebKeyRoute.pass_through);
+    return @backingInt(app_session.webKeyRoute(surface_id, key_event));
 }
 
 // route가 app-action이던 이벤트를 같은 resolver로 다시 검증해 현재 Action만 직접 실행한다. Swift의 범용 terminal
@@ -2749,8 +2749,8 @@ pub export fn maru_macos_app_session_dispatch_web_app_action(session: ?*AppSessi
 // 진행 중 IME 조합을 확정(커밋)한다. Swift가 IME를 우회하는 특수키/단축키 직전에 호출해
 // marked text와 Surface preedit가 어긋나지 않게 한다(조합 없으면 무동작).
 pub export fn maru_macos_app_session_commit_composition(session: ?*AppSession) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    return @intFromEnum(if (app_session.tryCommitComposition()) Status.ok else Status.key_failed);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    return @backingInt(if (app_session.tryCommitComposition()) Status.ok else Status.key_failed);
 }
 
 // 마우스 호버 갱신(backing px). *out_cursor_kind에 위치별 커서 종류를 돌려준다(CursorKind: 0=arrow/사이드바·탭
@@ -2765,10 +2765,10 @@ pub export fn maru_macos_app_session_hover(
     mods: i32, // 마우스 수식키 비트(xterm: shift=4, alt=8, ctrl=16, cmd=32) — Zig가 url-click-modifier와 비교(v71)
     out_cursor_kind: ?*i32,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const out = out_cursor_kind orelse return @intFromEnum(Status.null_out);
-    out.* = @intFromEnum(app_session.hoverCursor(x_px, y_px, mods));
-    return @intFromEnum(Status.ok);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const out = out_cursor_kind orelse return @backingInt(Status.null_out);
+    out.* = @backingInt(app_session.hoverCursor(x_px, y_px, mods));
+    return @backingInt(Status.ok);
 }
 
 // (config 수식키)+클릭 위치의 링크(backing px). mods가 url-click-modifier와 안 맞으면 len 0(일반 클릭). 버퍼는
@@ -2783,15 +2783,15 @@ pub export fn maru_macos_app_session_url_at(
     out_len: ?*usize,
     out_kind: ?*i32,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
-    const len_out = out_len orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const ptr_out = out_ptr orelse return @backingInt(Status.null_out);
+    const len_out = out_len orelse return @backingInt(Status.null_out);
     const url = app_session.urlAt(x_px, y_px, mods);
     ptr_out.* = if (url.len > 0) url.ptr else null;
     len_out.* = url.len;
     // 링크 종류(0=url, 1=file_path) — url.len>0일 때만 의미. LinkKind 태그 순서(url=0, file_path=1)에 묶인다.
-    if (out_kind) |k| k.* = @intFromEnum(app_session.url_kind);
-    return @intFromEnum(Status.ok);
+    if (out_kind) |k| k.* = @backingInt(app_session.url_kind);
+    return @backingInt(Status.ok);
 }
 
 // v147: 터미널에서 클릭한 **웹 링크(http/https)** 를 `input.link-open-target` 정책대로 연다. 1이면 Zig가 인앱
@@ -2818,13 +2818,13 @@ pub export fn maru_macos_app_session_copy_text(
     out_ptr: ?*?[*]const u8,
     out_len: ?*usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
-    const len_out = out_len orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const ptr_out = out_ptr orelse return @backingInt(Status.null_out);
+    const len_out = out_len orelse return @backingInt(Status.null_out);
     const text = app_session.copyText();
     ptr_out.* = if (text.len > 0) text.ptr else null;
     len_out.* = text.len;
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // OSC 52 클립보드 쓰기 데이터. 반환 버퍼는 Zig 소유로 다음 pending_clipboard/destroy까지 유효하다. write는
@@ -2834,13 +2834,13 @@ pub export fn maru_macos_app_session_pending_clipboard(
     out_ptr: ?*?[*]const u8,
     out_len: ?*usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
-    const len_out = out_len orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const ptr_out = out_ptr orelse return @backingInt(Status.null_out);
+    const len_out = out_len orelse return @backingInt(Status.null_out);
     const data = app_session.pendingClipboard();
     ptr_out.* = if (data.len > 0) data.ptr else null;
     len_out.* = data.len;
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 /// v206(W5c): 방금 내보낸 알림이 웹 알림이면 그 번호.
@@ -2878,20 +2878,20 @@ pub export fn maru_macos_app_session_pending_notification(
     runtime_id_lo_out: ?*u64,
     event_id_out: ?*u64,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const has = has_out orelse return @intFromEnum(Status.null_out);
-    const tp = title_ptr orelse return @intFromEnum(Status.null_out);
-    const tl = title_len orelse return @intFromEnum(Status.null_out);
-    const bp = body_ptr orelse return @intFromEnum(Status.null_out);
-    const bl = body_len orelse return @intFromEnum(Status.null_out);
-    const sid = surface_id_out orelse return @intFromEnum(Status.null_out);
-    const fg = foreground_out orelse return @intFromEnum(Status.null_out);
-    const route_present = route_present_out orelse return @intFromEnum(Status.null_out);
-    const hid_hi = host_id_hi_out orelse return @intFromEnum(Status.null_out);
-    const hid_lo = host_id_lo_out orelse return @intFromEnum(Status.null_out);
-    const rid_hi = runtime_id_hi_out orelse return @intFromEnum(Status.null_out);
-    const rid_lo = runtime_id_lo_out orelse return @intFromEnum(Status.null_out);
-    const eid = event_id_out orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const has = has_out orelse return @backingInt(Status.null_out);
+    const tp = title_ptr orelse return @backingInt(Status.null_out);
+    const tl = title_len orelse return @backingInt(Status.null_out);
+    const bp = body_ptr orelse return @backingInt(Status.null_out);
+    const bl = body_len orelse return @backingInt(Status.null_out);
+    const sid = surface_id_out orelse return @backingInt(Status.null_out);
+    const fg = foreground_out orelse return @backingInt(Status.null_out);
+    const route_present = route_present_out orelse return @backingInt(Status.null_out);
+    const hid_hi = host_id_hi_out orelse return @backingInt(Status.null_out);
+    const hid_lo = host_id_lo_out orelse return @backingInt(Status.null_out);
+    const rid_hi = runtime_id_hi_out orelse return @backingInt(Status.null_out);
+    const rid_lo = runtime_id_lo_out orelse return @backingInt(Status.null_out);
+    const eid = event_id_out orelse return @backingInt(Status.null_out);
     const n = app_session.pendingNotification() orelse {
         has.* = 0;
         tp.* = null;
@@ -2906,7 +2906,7 @@ pub export fn maru_macos_app_session_pending_notification(
         rid_hi.* = 0;
         rid_lo.* = 0;
         eid.* = 0;
-        return @intFromEnum(Status.ok);
+        return @backingInt(Status.ok);
     };
     has.* = 1;
     tp.* = if (n.title.len > 0) n.title.ptr else null;
@@ -2916,7 +2916,7 @@ pub export fn maru_macos_app_session_pending_notification(
     sid.* = n.surface_id;
     fg.* = if (n.foreground_banner) 1 else 0;
     writeNotificationRoute(n.route, route_present, hid_hi, hid_lo, rid_hi, rid_lo, eid);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 fn writeNotificationRoute(
@@ -3137,9 +3137,9 @@ pub export fn maru_macos_app_session_take_notification_authorization_request(ses
 // theme.follow-system이 켜져 있으면 Zig가 theme.preset-light/dark 색 세트로 라이브 교체한다(꺼져 있으면 무시, write-back
 // 없음). 외관 판정·관찰은 OS(Swift), 색 정책은 Zig. session null=무동작. (v77)
 pub export fn maru_macos_app_session_set_system_appearance(session: ?*AppSession, is_dark: i32) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     app_session.setSystemAppearance(is_dark != 0);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 창 뒤(데스크톱) 배경 블러의 유효 반경(px) — config window.blur, 단 window.opacity>=1이면 0(불투명 창=블러 안 보임).
@@ -3241,36 +3241,36 @@ test "quit_after_last_window_closed ABI getter: null 은 종료, config 를 그�
 // 다시 읽어 트리거 단독을 재확인했는데, 그 정적 읽기가 stale/빈 값이면 트리거를 쥐고 있어도 미표시였다. 이제 단일
 // 출처(flagsChanged 이벤트 스트림)로 머신이 판정하고 만료는 글로벌을 안 읽는다(armed로 살아남음 = 유지됨). (ABI v88)
 pub export fn maru_macos_app_session_key_hint_on_flags(session: ?*AppSession, mods_bits: u32) c_int {
-    const app_session = session orelse return @intFromEnum(keyhint_hold.Action.none);
+    const app_session = session orelse return @backingInt(keyhint_hold.Action.none);
     const mods: keyhint_hold.Mods = .{
         .command = (mods_bits & command_catalog.mod_command) != 0,
         .control = (mods_bits & command_catalog.mod_control) != 0,
         .option = (mods_bits & command_catalog.mod_option) != 0,
         .shift = (mods_bits & command_catalog.mod_shift) != 0,
     };
-    return @intCast(@intFromEnum(app_session.keyHintOnFlags(mods)));
+    return @intCast(@backingInt(app_session.keyHintOnFlags(mods)));
 }
 // 타이머 만료 → 머신. armed면 show(글로벌 재읽기 없음 — 루트커즈 수정). session null=0(none). (ABI v88)
 pub export fn maru_macos_app_session_key_hint_on_timer(session: ?*AppSession) c_int {
-    const app_session = session orelse return @intFromEnum(keyhint_hold.Action.none);
-    return @intCast(@intFromEnum(app_session.keyHintOnTimer()));
+    const app_session = session orelse return @backingInt(keyhint_hold.Action.none);
+    return @intCast(@backingInt(app_session.keyHintOnTimer()));
 }
 // keyDown(실제 단축키)·포커스 상실 → 머신 취소(표시 중이면 hide). session null=0(none). (ABI v88)
 pub export fn maru_macos_app_session_key_hint_cancel(session: ?*AppSession) c_int {
-    const app_session = session orelse return @intFromEnum(keyhint_hold.Action.none);
-    return @intCast(@intFromEnum(app_session.keyHintCancel()));
+    const app_session = session orelse return @backingInt(keyhint_hold.Action.none);
+    return @intCast(@backingInt(app_session.keyHintCancel()));
 }
 
 // 단축키 힌트 config(Swift 홀드 감지가 읽어 동작 결정) — out_enabled(1/0)·out_delay_ms·out_modifier(0=command·
 // 1=control·2=option)에 채운다. gesture 정책은 Zig(config) 단일 출처, 타이머 clock만 Swift. 라이브 값 read
 // (reload로 갱신, 1회성 신호 아님). out 포인터는 null이면 건너뛴다. session null=null_out. (ABI v87)
 pub export fn maru_macos_app_session_key_hints_config(session: ?*AppSession, out_enabled: ?*u32, out_delay_ms: ?*u32, out_modifier: ?*u32) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     const cfg = app_session.keyHintConfig();
     if (out_enabled) |p| p.* = if (cfg.enabled) 1 else 0;
     if (out_delay_ms) |p| p.* = cfg.delay_ms;
     if (out_modifier) |p| p.* = cfg.modifier;
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // OS 클립보드 1회성 동작(input.right-click=paste·menu). 0=무동작, 1=copy, 2=paste. Zig가 우클릭/터미널 메뉴에서
@@ -3278,7 +3278,7 @@ pub export fn maru_macos_app_session_key_hints_config(session: ?*AppSession, out
 // 부른다(클립보드는 OS 소유). take_bell과 같은 1회성 패턴 — drain하면 비워진다. session null=0. (ABI v74)
 pub export fn maru_macos_app_session_take_clipboard_action(session: ?*AppSession) u32 {
     const app_session = session orelse return 0;
-    return @intFromEnum(app_session.takeClipboardAction());
+    return @backingInt(app_session.takeClipboardAction());
 }
 
 // OSC 52 읽기(`?` 쿼리)가 대기 중이고 osc52.read=allow면 1(Swift가 시스템 클립보드를 읽어 provide_clipboard_read로
@@ -3291,10 +3291,10 @@ pub export fn maru_macos_app_session_take_clipboard_read_request(session: ?*AppS
 // take_clipboard_read_request가 1을 준 뒤, Swift가 읽은 시스템 클립보드 바이트를 넘긴다 — Zig가 base64 OSC 52 응답을
 // 요청 surface PTY로 비차단 전송한다(`ESC ] 52 ; <Pc> ; <base64> ST`). bytes/len 0이면 빈 클립보드 응답. (v75)
 pub export fn maru_macos_app_session_provide_clipboard_read(session: ?*AppSession, bytes: ?[*]const u8, len: usize) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     const slice: []const u8 = if (bytes) |p| p[0..len] else &.{};
     app_session.provideClipboardRead(slice);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 세팅 window.background-image 행 활성으로 파일 선택창 요청이 대기 중이면 1(플래그 비움), 없으면 0. Swift가 tick마다
@@ -3307,10 +3307,10 @@ pub export fn maru_macos_app_session_take_file_pick_request(session: ?*AppSessio
 // take_file_pick_request가 1을 준 뒤, Swift가 NSOpenPanel에서 고른 파일의 절대경로를 넘긴다 — Zig가 window.background-image에
 // setText + 라이브 반영(다음 frame 디코드) + dirty(영속). bytes/len 0(취소 등)이면 무동작. 지우기는 행 Backspace가 담당. (v81)
 pub export fn maru_macos_app_session_provide_picked_file(session: ?*AppSession, bytes: ?[*]const u8, len: usize) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     const slice: []const u8 = if (bytes) |p| p[0..len] else &.{};
     app_session.providePickedFile(slice);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // open_file_panel(Cmd+O/팔릿/메뉴) 또는 완전히 빈 도크의 우상단 launcher가 요청한 Markdown/HTML
@@ -3322,21 +3322,21 @@ pub export fn maru_macos_app_session_take_file_panel_pick_request(session: ?*App
 
 pub export fn maru_macos_app_session_take_file_tree_root_pick_request(session: ?*AppSession) u32 {
     const app_session = session orelse return 0;
-    return @intFromEnum(app_session.takeFileTreeRootPickRequest());
+    return @backingInt(app_session.takeFileTreeRootPickRequest());
 }
 
 pub export fn maru_macos_app_session_provide_file_tree_root_pick(session: ?*AppSession, bytes: ?[*]const u8, len: usize) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     const slice: []const u8 = if (bytes) |ptr| ptr[0..len] else &.{};
     app_session.provideFileTreeRootPick(slice);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 절대경로를 현재 창 도크에 연다. 0=지원하지 않는 확장자, 1=열림/기존 탭 활성화, 2=지원 확장자지만 실패. (v121)
 pub export fn maru_macos_app_session_open_file_panel_path(session: ?*AppSession, bytes: ?[*]const u8, len: usize) u32 {
-    const app_session = session orelse return @intFromEnum(AppSession.FilePanelOpenPathResult.failed);
-    const ptr = bytes orelse return @intFromEnum(AppSession.FilePanelOpenPathResult.failed);
-    return @intFromEnum(app_session.openFilePanelPath(ptr[0..len]));
+    const app_session = session orelse return @backingInt(AppSession.FilePanelOpenPathResult.failed);
+    const ptr = bytes orelse return @backingInt(AppSession.FilePanelOpenPathResult.failed);
+    return @backingInt(app_session.openFilePanelPath(ptr[0..len]));
 }
 
 // surface가 도크 entry면 borrowed path와 kind(1=markdown, 2=html)를 돌려준다. 0=도크 아님. (v121)
@@ -3435,15 +3435,15 @@ pub export fn maru_macos_app_session_syntax_style_js(
 pub export fn maru_macos_app_session_file_panel_mode(session: ?*AppSession, surface_id: u64) i32 {
     const app_session = session orelse return -1;
     const mode = app_session.filePanelMode(surface_id) orelse return -1;
-    return @intCast(@intFromEnum(mode));
+    return @intCast(@backingInt(mode));
 }
 
 /// 파일 패널 mode를 설정한다(헤더 mode 선택기 클릭과 같은 경로). 1=적용/이미 그 mode, 0=없는 surface이거나
 /// 그 kind가 허용하지 않는 mode. v149.
 pub export fn maru_macos_app_session_set_file_panel_mode(session: ?*AppSession, surface_id: u64, raw_mode: u32) u32 {
     const app_session = session orelse return 0;
-    if (raw_mode > @intFromEnum(maru.session.dock_panel.Mode.rich)) return 0;
-    const mode: maru.session.dock_panel.Mode = @enumFromInt(raw_mode);
+    if (raw_mode > @backingInt(maru.session.dock_panel.Mode.rich)) return 0;
+    const mode: maru.session.dock_panel.Mode = @fromBackingInt(@intCast(raw_mode));
     return if (app_session.setFilePanelModeBySurface(surface_id, mode)) 1 else 0;
 }
 
@@ -3502,7 +3502,7 @@ pub export fn maru_macos_app_session_take_external_link_action(
     const kind = kind_out orelse return 0;
     const action = app_session.takeExternalLinkAction(out[0..url_cap]) orelse return 0;
     sid.* = action.surface_id;
-    kind.* = @intFromEnum(action.kind);
+    kind.* = @backingInt(action.kind);
     return action.url.len;
 }
 
@@ -3538,7 +3538,7 @@ pub export fn maru_macos_app_session_take_file_panel_mode_action(session: ?*AppS
     const out = surface_id_out orelse return -1;
     const action = app_session.takeFilePanelModeAction() orelse return -1;
     out.* = action.surface_id;
-    return @intCast(@intFromEnum(action.mode));
+    return @intCast(@backingInt(action.mode));
 }
 
 /// 파일 본문 우클릭 메뉴에서 고른 항목 중 **web이 실행할 것**을 drain한다(docs/file-panel-kinds.md §2.6).
@@ -3679,12 +3679,12 @@ pub export fn maru_macos_app_session_accessibility_element(
     index: u32,
     out_element: ?*session_mod.accessibility.Element,
 ) c_int {
-    const out = out_element orelse return @intFromEnum(Status.null_out);
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const out = out_element orelse return @backingInt(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     const elements = dockAccessibility(app_session).*.elements.items;
-    if (index >= elements.len) return @intFromEnum(Status.invalid_config);
+    if (index >= elements.len) return @backingInt(Status.invalid_config);
     out.* = elements[index];
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 /// 줄의 라벨을 host 버퍼로 복사하고 **필요한 바이트 수**를 돌려준다(0 = 없거나 범위 밖).
@@ -3789,9 +3789,9 @@ pub export fn maru_macos_app_session_complete_file_tree_trash(
 ) void {
     const app_session = session orelse return;
     const outcome: session_mod.FileTreeTrashOutcome = switch (outcome_raw) {
-        @intFromEnum(session_mod.FileTreeTrashOutcome.not_moved) => .not_moved,
-        @intFromEnum(session_mod.FileTreeTrashOutcome.moved_verified) => .moved_verified,
-        @intFromEnum(session_mod.FileTreeTrashOutcome.moved_unverified) => .moved_unverified,
+        @backingInt(session_mod.FileTreeTrashOutcome.not_moved) => .not_moved,
+        @backingInt(session_mod.FileTreeTrashOutcome.moved_verified) => .moved_verified,
+        @backingInt(session_mod.FileTreeTrashOutcome.moved_unverified) => .moved_unverified,
         else => return,
     };
     const recovery_path: ?[]const u8 = if (recovery_path_len == 0)
@@ -3817,9 +3817,9 @@ pub export fn maru_macos_app_session_take_color_sample_request(session: ?*AppSes
 // take_color_sample_request가 1을 준 뒤, Swift NSColorSampler 콜백이 고른 화면 픽셀 RGB를 넘긴다(비동기) — Zig가 picker
 // 선택값(pick h/s/v)에 반영한다. r/g/b는 0~255(상위 비트는 무시 — u8로 truncate). picker가 닫혔으면 무시. (v83)
 pub export fn maru_macos_app_session_provide_sampled_color(session: ?*AppSession, r: u32, g: u32, b: u32) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     app_session.provideSampledColor(.{ .r = @truncate(r), .g = @truncate(g), .b = @truncate(b) });
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // view options(⚙) 사이드바 토글이 바뀌어 config 파일 반영이 필요하면 1(플래그 비움), 없으면 0. Swift가 tick마다
@@ -3843,13 +3843,13 @@ pub export fn maru_macos_app_session_cwd(
     out_ptr: ?*?[*]const u8,
     out_len: ?*usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
-    const len_out = out_len orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const ptr_out = out_ptr orelse return @backingInt(Status.null_out);
+    const len_out = out_len orelse return @backingInt(Status.null_out);
     const text = app_session.currentCwd();
     ptr_out.* = if (text.len > 0) text.ptr else null;
     len_out.* = text.len;
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // config 파일 경로(Open Config 메뉴 — MARU_CONFIG override·$HOME/.config/maru/config, 규칙은 Zig loader가
@@ -3859,40 +3859,40 @@ pub export fn maru_macos_app_session_config_path(
     out_ptr: ?*?[*]const u8,
     out_len: ?*usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
-    const len_out = out_len orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const ptr_out = out_ptr orelse return @backingInt(Status.null_out);
+    const len_out = out_len orelse return @backingInt(Status.null_out);
     const text = app_session.configPath();
     ptr_out.* = if (text.len > 0) text.ptr else null;
     len_out.* = text.len;
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // Reload Config 메뉴 — config 파일을 재로드해 재시작 없이 반영한다(폰트·여백·테마·palette·scrollback·bell·
 // page-keys). 파싱은 forgiving, 로드 실패(OOM 등)면 무동작(기존 config 유지)이라 항상 Status.ok. 규칙(경로·
 // 파싱)은 Zig loader가 단일 출처. Swift는 메뉴 클릭에서 호출만 한다.
 pub export fn maru_macos_app_session_reload_config(session: ?*AppSession) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     app_session.reloadConfig();
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // Reset to Defaults 메뉴 — requestResetAll로 **확인 모달**을 연다(커맨드 팝업 "Reset All Settings to Defaults"와 같은
 // 경로). 확정 시 모든 config를 내장 기본값으로 되돌리고 config 파일을 기본 상태(빈+주석)로 덮어쓴다(파괴적이라 무확인 즉시 실행 안 함 —
 // 확정/취소는 다음 tick confirm 모달 입력으로). 항상 Status.ok. Swift는 메뉴 클릭에서 호출만 한다.
 pub export fn maru_macos_app_session_reset_defaults(session: ?*AppSession) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     app_session.requestResetAll();
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // Reset 메뉴(⌘⇧R) — 활성 터미널의 잔류 입력 모드(focus 1004·mouse·kitty keyboard)만 끈다. ssh 너머 TUI가
 // SIGKILL로 죽어 정리 못 한 모드가 raw 셸 입력을 오염시키는 증상(포커스마다 CSI I·비프)의 수동 회복 경로다.
 // 화면·스크롤백은 보존한다(fullReset/RIS와 다름). 항상 Status.ok. Swift는 메뉴 클릭에서 호출만 한다.
 pub export fn maru_macos_app_session_reset_input_modes(session: ?*AppSession) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     app_session.resetInputModes();
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 창 제목으로 보여줄 문자열(OSC 0/2 제목 우선, 없으면 OSC 7 cwd basename). 우선순위는 core가
@@ -3903,13 +3903,13 @@ pub export fn maru_macos_app_session_window_title(
     out_ptr: ?*?[*]const u8,
     out_len: ?*usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
-    const len_out = out_len orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const ptr_out = out_ptr orelse return @backingInt(Status.null_out);
+    const len_out = out_len orelse return @backingInt(Status.null_out);
     const text = app_session.windowTitle();
     ptr_out.* = if (text.len > 0) text.ptr else null;
     len_out.* = text.len;
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 이 창(세션)의 workspace restore 블록(헤더 없는 `window …` 라인)을 직렬화해 돌려준다. Swift가 멀티 창
@@ -3927,9 +3927,9 @@ pub export fn maru_macos_app_session_serialize_workspace(
     frame_w: i32,
     frame_h: i32,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
-    const len_out = out_len orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const ptr_out = out_ptr orelse return @backingInt(Status.null_out);
+    const len_out = out_len orelse return @backingInt(Status.null_out);
     // is_active(!=0) = 이 창이 저장 시점 key 창(Swift window.isKeyWindow). 활성 창만 workspace.v1 옵션-키
     // active-window=1을 내고, 재시작 복원이 그 창을 다시 focus한다(M3e). false면 키 생략(옛 파일 flat 동일).
     // has_frame(!=0) = Swift window.frame(전역 스크린 좌표 점)을 저장. win-x/y/w/h 옵션-키를 내고 재시작 복원이
@@ -3941,11 +3941,11 @@ pub export fn maru_macos_app_session_serialize_workspace(
     const text = app_session.serializeWorkspaceWindow(is_active != 0, frame) catch {
         ptr_out.* = null;
         len_out.* = 0;
-        return @intFromEnum(Status.ok);
+        return @backingInt(Status.ok);
     };
     ptr_out.* = if (text.len > 0) text.ptr else null;
     len_out.* = text.len;
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 /// **종료 직전 미저장 백업을 굳힌다**(§3.10 — U4a). debounce 만으로는 마지막 몇 초의 편집이 빠지므로
@@ -3954,9 +3954,9 @@ pub export fn maru_macos_app_session_serialize_workspace(
 /// **실패를 돌려주지 않는다.** 한 문서를 못 썼다는 사실로 종료를 막을 수는 없고(사용자는 이미 종료를
 /// 골랐다), 그 자리에 띄울 화면도 없다 — 백업은 조용한 보호이고 그 실패도 조용하다.
 pub export fn maru_macos_app_session_flush_editor_backups(session: ?*AppSession) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     session_mod.editor_backup_ops.flushAll(app_session);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 fn clearWorkspaceCheckpointEffect(out: *c.MaruWorkspaceCheckpointEffect) void {
@@ -4012,8 +4012,8 @@ pub export fn maru_macos_workspace_checkpoint_arm(initial_dirty: u32) c_int {
         .debounce_ns = 500 * std.time.ns_per_ms,
         .retry_initial_ns = std.time.ns_per_s,
         .retry_max_ns = 30 * std.time.ns_per_s,
-    }, initial_dirty != 0 or revival_dirty) catch return @intFromEnum(Status.invalid_config);
-    return @intFromEnum(Status.ok);
+    }, initial_dirty != 0 or revival_dirty) catch return @backingInt(Status.invalid_config);
+    return @backingInt(Status.ok);
 }
 
 pub export fn maru_macos_app_session_set_workspace_checkpoint_failure(session: ?*AppSession, failure: u32) void {
@@ -4056,25 +4056,25 @@ pub export fn maru_macos_workspace_checkpoint_tick(
     out_effect: ?*c.MaruWorkspaceCheckpointEffect,
 ) c_int {
     enforceAppLogCap();
-    const out = out_effect orelse return @intFromEnum(Status.null_out);
+    const out = out_effect orelse return @backingInt(Status.null_out);
     clearWorkspaceCheckpointEffect(out);
-    if (!session_mod.app_runtime.workspace_checkpoint.armed) return @intFromEnum(Status.invalid_config);
-    const effect = session_mod.app_runtime.workspace_checkpoint.tick(now_ns) catch return @intFromEnum(Status.tick_failed);
+    if (!session_mod.app_runtime.workspace_checkpoint.armed) return @backingInt(Status.invalid_config);
+    const effect = session_mod.app_runtime.workspace_checkpoint.tick(now_ns) catch return @backingInt(Status.tick_failed);
     writeWorkspaceCheckpointEffect(effect, null, out);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 pub export fn maru_macos_workspace_checkpoint_quit_requested(
     now_ns: u64,
     out_effect: ?*c.MaruWorkspaceCheckpointEffect,
 ) c_int {
-    const out = out_effect orelse return @intFromEnum(Status.null_out);
+    const out = out_effect orelse return @backingInt(Status.null_out);
     clearWorkspaceCheckpointEffect(out);
-    if (!session_mod.app_runtime.workspace_checkpoint.armed) return @intFromEnum(Status.invalid_config);
+    if (!session_mod.app_runtime.workspace_checkpoint.armed) return @backingInt(Status.invalid_config);
     const effect = session_mod.app_runtime.workspace_checkpoint.quitRequested(now_ns) catch
-        return @intFromEnum(Status.tick_failed);
+        return @backingInt(Status.tick_failed);
     writeWorkspaceCheckpointEffect(effect, null, out);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 pub export fn maru_macos_workspace_checkpoint_capture_completed(
@@ -4083,13 +4083,13 @@ pub export fn maru_macos_workspace_checkpoint_capture_completed(
     now_ns: u64,
     out_effect: ?*c.MaruWorkspaceCheckpointEffect,
 ) c_int {
-    const out = out_effect orelse return @intFromEnum(Status.null_out);
+    const out = out_effect orelse return @backingInt(Status.null_out);
     clearWorkspaceCheckpointEffect(out);
-    if (!session_mod.app_runtime.workspace_checkpoint.armed) return @intFromEnum(Status.invalid_config);
+    if (!session_mod.app_runtime.workspace_checkpoint.armed) return @backingInt(Status.invalid_config);
     const completion = session_mod.app_runtime.workspace_checkpoint.captureCompleted(generation, succeeded != 0, now_ns) catch
-        return @intFromEnum(Status.tick_failed);
+        return @backingInt(Status.tick_failed);
     writeWorkspaceCheckpointEffect(completion.effect, completion.notice, out);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 pub export fn maru_macos_workspace_checkpoint_write_completed(
@@ -4098,13 +4098,13 @@ pub export fn maru_macos_workspace_checkpoint_write_completed(
     now_ns: u64,
     out_effect: ?*c.MaruWorkspaceCheckpointEffect,
 ) c_int {
-    const out = out_effect orelse return @intFromEnum(Status.null_out);
+    const out = out_effect orelse return @backingInt(Status.null_out);
     clearWorkspaceCheckpointEffect(out);
-    if (!session_mod.app_runtime.workspace_checkpoint.armed) return @intFromEnum(Status.invalid_config);
+    if (!session_mod.app_runtime.workspace_checkpoint.armed) return @backingInt(Status.invalid_config);
     const completion = session_mod.app_runtime.workspace_checkpoint.writeCompleted(generation, succeeded != 0, now_ns) catch
-        return @intFromEnum(Status.tick_failed);
+        return @backingInt(Status.tick_failed);
     writeWorkspaceCheckpointEffect(completion.effect, completion.notice, out);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 pub export fn maru_macos_workspace_checkpoint_publish(
@@ -4113,16 +4113,16 @@ pub export fn maru_macos_workspace_checkpoint_publish(
     snapshot: ?[*]const u8,
     snapshot_len: usize,
 ) u32 {
-    const path_ptr = parent_path orelse return @intFromEnum(workspace_checkpoint_file.Result.open_parent_failed);
-    const bytes_ptr = snapshot orelse return @intFromEnum(workspace_checkpoint_file.Result.invalid_snapshot);
+    const path_ptr = parent_path orelse return @backingInt(workspace_checkpoint_file.Result.open_parent_failed);
+    const bytes_ptr = snapshot orelse return @backingInt(workspace_checkpoint_file.Result.invalid_snapshot);
     if (parent_path_len == 0 or parent_path_len > std.fs.max_path_bytes or
         std.mem.indexOfScalar(u8, path_ptr[0..parent_path_len], 0) != null)
-        return @intFromEnum(workspace_checkpoint_file.Result.open_parent_failed);
+        return @backingInt(workspace_checkpoint_file.Result.open_parent_failed);
     var path_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     @memcpy(path_buf[0..parent_path_len], path_ptr[0..parent_path_len]);
     path_buf[parent_path_len] = 0;
     const path: [:0]const u8 = path_buf[0..parent_path_len :0];
-    return @intFromEnum(workspace_checkpoint_file.publish(path, bytes_ptr[0..snapshot_len]));
+    return @backingInt(workspace_checkpoint_file.publish(path, bytes_ptr[0..snapshot_len]));
 }
 
 /// 복원이 **완전히 성공한** 실행이 `workspace.v1.bak` 을 해제한다 — 백업 불변식을 다시 무장한다.
@@ -4132,15 +4132,15 @@ pub export fn maru_macos_workspace_checkpoint_release_backup(
     parent_path: ?[*]const u8,
     parent_path_len: usize,
 ) u32 {
-    const path_ptr = parent_path orelse return @intFromEnum(workspace_checkpoint_file.Result.open_parent_failed);
+    const path_ptr = parent_path orelse return @backingInt(workspace_checkpoint_file.Result.open_parent_failed);
     if (parent_path_len == 0 or parent_path_len > std.fs.max_path_bytes or
         std.mem.indexOfScalar(u8, path_ptr[0..parent_path_len], 0) != null)
-        return @intFromEnum(workspace_checkpoint_file.Result.open_parent_failed);
+        return @backingInt(workspace_checkpoint_file.Result.open_parent_failed);
     var path_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     @memcpy(path_buf[0..parent_path_len], path_ptr[0..parent_path_len]);
     path_buf[parent_path_len] = 0;
     const path: [:0]const u8 = path_buf[0..parent_path_len :0];
-    return @intFromEnum(workspace_checkpoint_file.releaseBackup(path));
+    return @backingInt(workspace_checkpoint_file.releaseBackup(path));
 }
 
 pub export fn maru_macos_workspace_checkpoint_publish_final(
@@ -4150,16 +4150,16 @@ pub export fn maru_macos_workspace_checkpoint_publish_final(
     snapshot_len: usize,
     preserve_previous: u32,
 ) u32 {
-    const path_ptr = parent_path orelse return @intFromEnum(workspace_checkpoint_file.Result.open_parent_failed);
-    const bytes_ptr = snapshot orelse return @intFromEnum(workspace_checkpoint_file.Result.invalid_snapshot);
+    const path_ptr = parent_path orelse return @backingInt(workspace_checkpoint_file.Result.open_parent_failed);
+    const bytes_ptr = snapshot orelse return @backingInt(workspace_checkpoint_file.Result.invalid_snapshot);
     if (parent_path_len == 0 or parent_path_len > std.fs.max_path_bytes or
         std.mem.indexOfScalar(u8, path_ptr[0..parent_path_len], 0) != null)
-        return @intFromEnum(workspace_checkpoint_file.Result.open_parent_failed);
+        return @backingInt(workspace_checkpoint_file.Result.open_parent_failed);
     var path_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     @memcpy(path_buf[0..parent_path_len], path_ptr[0..parent_path_len]);
     path_buf[parent_path_len] = 0;
     const path: [:0]const u8 = path_buf[0..parent_path_len :0];
-    return @intFromEnum(workspace_checkpoint_file.publishFinal(
+    return @backingInt(workspace_checkpoint_file.publishFinal(
         path,
         bytes_ptr[0..snapshot_len],
         preserve_previous != 0,
@@ -4175,17 +4175,17 @@ pub export fn maru_macos_app_session_serialize_sidebar_config(
     out_ptr: ?*?[*]const u8,
     out_len: ?*usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
-    const len_out = out_len orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const ptr_out = out_ptr orelse return @backingInt(Status.null_out);
+    const len_out = out_len orelse return @backingInt(Status.null_out);
     const text = app_session.serializeConfig() catch {
         ptr_out.* = null;
         len_out.* = 0;
-        return @intFromEnum(Status.ok);
+        return @backingInt(Status.ok);
     };
     ptr_out.* = if (text.len > 0) text.ptr else null;
     len_out.* = text.len;
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 시작 시 저장된 workspace 텍스트(헤더 + N개 창 블록)에서 window_index번째 창을 parse해 이 세션에 복원 적용한다
@@ -4199,16 +4199,16 @@ pub export fn maru_macos_app_session_apply_workspace_window(
     text_len: usize,
     window_index: usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const tp = text_ptr orelse return @intFromEnum(Status.null_out);
-    var parsed = maru.session.workspace.parse(app_session.allocator, tp[0..text_len]) catch return @intFromEnum(Status.invalid_config);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const tp = text_ptr orelse return @backingInt(Status.null_out);
+    var parsed = maru.session.workspace.parse(app_session.allocator, tp[0..text_len]) catch return @backingInt(Status.invalid_config);
     defer parsed.deinit(); // apply가 cwd 슬라이스를 spawn에 다 쓴 뒤 arena 해제(안전)
-    if (window_index >= parsed.workspace.windows.len) return @intFromEnum(Status.invalid_config);
+    if (window_index >= parsed.workspace.windows.len) return @backingInt(Status.invalid_config);
     // RB1: 재부팅 증명은 창 목록 **전체**로 판정한다 — 그래서 한 창이 아니라 목록과 인덱스를 넘긴다.
     session_mod.workspace_ops.applySavedWorkspaceWindow(app_session, parsed.workspace.windows, window_index) catch |err| {
         // 「복원할 게 없음」은 실패 묶음에서 먼저 뺀다 — 아래 진단은 **무엇이 죽었는지** 를 적는 자리라,
         // 죽은 것이 없는 사건을 같이 실으면 로그가 거짓을 말한다.
-        if (err == error.EmptyWorkspace) return @intFromEnum(Status.workspace_empty);
+        if (err == error.EmptyWorkspace) return @backingInt(Status.workspace_empty);
         // **`create_failed` 하나가 열일곱을 접는다.** 2026-09-13 실측: 저장 파일에 창 둘(탭 11 + 탭 1)이
         // 온전하고 host 에 세션 23 개가 살아 있는데도 두 창이 모두 `status=4` 로 거절돼, 앱이 기본
         // `/bin/zsh` 한 창으로 뜨고 그 상태가 원본을 덮었다 — 하루에 다섯 번.
@@ -4236,9 +4236,9 @@ pub export fn maru_macos_app_session_apply_workspace_window(
                 AppSession.restore_host_reason,
             },
         );
-        return @intFromEnum(Status.create_failed);
+        return @backingInt(Status.create_failed);
     };
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 저장된 workspace 텍스트의 창 개수를 센다(Swift가 창마다 NSWindow를 만들기 위해). 헤더·포맷뿐 아니라 manifest-wide
@@ -4319,13 +4319,13 @@ pub export fn maru_macos_app_session_global_hotkeys(
     out_ptr: ?*?[*]const session_mod.GlobalHotkey,
     out_count: ?*usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
-    const count_out = out_count orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const ptr_out = out_ptr orelse return @backingInt(Status.null_out);
+    const count_out = out_count orelse return @backingInt(Status.null_out);
     const hotkeys = app_session.globalHotkeys();
     ptr_out.* = if (hotkeys.len > 0) hotkeys.ptr else null;
     count_out.* = hotkeys.len;
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // quick terminal 표시 옵션(config에서 파싱). Swift가 매 토글마다 읽어 auto_hide·화면 모드·chrome 재생성 판정에
@@ -4335,10 +4335,10 @@ pub export fn maru_macos_app_session_quick_terminal_config(
     session: ?*AppSession,
     out_config: ?*session_mod.QuickTerminalConfig,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const config_out = out_config orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const config_out = out_config orelse return @backingInt(Status.null_out);
     config_out.* = app_session.quickTerminalConfig();
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // quick 패널 보임/숨김 사각형 — Swift가 대상 화면 visibleFrame(vf_*, macOS 좌표 minX/minY/width/height)을 넘기면
@@ -4352,10 +4352,10 @@ pub export fn maru_macos_app_session_quick_terminal_frames(
     vf_h: f64,
     out_frames: ?*session_mod.QuickTerminalFrames,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const frames_out = out_frames orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const frames_out = out_frames orelse return @backingInt(Status.null_out);
     frames_out.* = app_session.quickTerminalFrames(vf_x, vf_y, vf_w, vf_h);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 커맨드 카탈로그(메뉴바·커맨드 팝업이 그릴 액션 목록). config/액션에서 만들고, keybind 변경(GUI rebind/unbind·config
@@ -4368,13 +4368,13 @@ pub export fn maru_macos_app_session_command_catalog(
     out_ptr: ?*?[*]const session_mod.CommandEntry,
     out_count: ?*usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const ptr_out = out_ptr orelse return @intFromEnum(Status.null_out);
-    const count_out = out_count orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const ptr_out = out_ptr orelse return @backingInt(Status.null_out);
+    const count_out = out_count orelse return @backingInt(Status.null_out);
     const items = app_session.commandCatalog();
     ptr_out.* = if (items.len > 0) items.ptr else null;
     count_out.* = items.len;
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 메뉴/팝업이 고른 액션 한 개를 실행한다 — action_key(카탈로그가 준 식별자) 바이트를 받아 Zig가
@@ -4385,10 +4385,10 @@ pub export fn maru_macos_app_session_run_action(
     bytes: ?[*]const u8,
     len: usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const ptr = bytes orelse return @intFromEnum(Status.null_out);
-    if (!app_session.runAction(ptr[0..len])) return @intFromEnum(Status.invalid_config);
-    return @intFromEnum(Status.ok);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const ptr = bytes orelse return @backingInt(Status.null_out);
+    if (!app_session.runAction(ptr[0..len])) return @backingInt(Status.invalid_config);
+    return @backingInt(Status.ok);
 }
 
 // 한 화면씩 스크롤(Shift+PageUp/Down). delta_pages>0=위(과거). 한 화면(rows-1) 계산은 app session이
@@ -4397,18 +4397,18 @@ pub export fn maru_macos_app_session_scroll_page(
     session: ?*AppSession,
     delta_pages: i32,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     app_session.scrollPage(delta_pages);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 pub export fn maru_macos_app_session_focus_changed(
     session: ?*AppSession,
     gained: i32,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     app_session.focusChanged(gained != 0);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // 이전(dir<0)/다음(dir>0) 프롬프트 블록으로 뷰포트 점프(OSC 133 semantic prompt — Cmd+↑/↓).
@@ -4417,9 +4417,9 @@ pub export fn maru_macos_app_session_jump_prompt(
     session: ?*AppSession,
     dir: i32,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     app_session.jumpToPrompt(if (dir < 0) -1 else 1);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 pub export fn maru_macos_app_session_destroy(session: ?*AppSession) void {
@@ -4439,10 +4439,10 @@ pub export fn maru_macos_app_session_metal_frame(
     // 가장 최근 tick의 RenderFrame을 Metal DTO(cells/atlas uploads/raster pixels)로 노출한다.
     // 포인터는 app session이 소유한 retained 배열을 가리키며 다음 tick까지 유효하다. caller는
     // 같은 main thread에서 tick 직후 동기적으로 읽는다.
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const out = out_frame orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const out = out_frame orelse return @backingInt(Status.null_out);
     out.* = app_session.metalFrame();
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // Phase 4e-3: 웹 Term(WKWebView) surface 전이 ABI DTO. app_host_abi.h의 MaruAppHostWebSurfaceTransition과 layout 정합
@@ -4479,11 +4479,11 @@ pub export fn maru_macos_app_session_web_surface_transition_at(
     index: u32,
     out: ?*WebSurfaceTransitionAbi,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
-    const o = out orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
+    const o = out orelse return @backingInt(Status.null_out);
     const t = app_session.webSurfaceTransitionAt(index);
     o.* = .{
-        .op = @intFromEnum(t.op),
+        .op = @backingInt(t.op),
         .visible = if (t.visible) 1 else 0,
         .surface_id = t.surface_id,
         .panel_kind = switch (t.panel_kind) {
@@ -4499,7 +4499,7 @@ pub export fn maru_macos_app_session_web_surface_transition_at(
         .frame_pt_w = t.frame_pt.w,
         .frame_pt_h = t.frame_pt.h,
     };
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // Phase 7e-1a: browser(비신뢰) 웹 패널의 WKWebView nav 상태(현재 url·canGoBack·canGoForward)를 per-surface로 저장한다.
@@ -4514,10 +4514,10 @@ pub export fn maru_macos_app_session_set_web_nav_state(
     url_ptr: ?[*]const u8,
     url_len: usize,
 ) c_int {
-    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const app_session = session orelse return @backingInt(Status.null_out);
     const url: []const u8 = if (url_ptr) |p| p[0..url_len] else &.{};
     app_session.setWebNavState(surface_id, can_go_back != 0, can_go_forward != 0, url);
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 // surface_id에 저장된 nav url을 out에 복사하고 그 길이를 돌려준다(스모크가 Swift KVO → set_web_nav_state → 저장 →
@@ -4863,7 +4863,7 @@ pub export fn maru_macos_app_asset_role_for_origin(
     const sp = scheme_ptr orelse return -1;
     const hp = host_ptr orelse return -1;
     const role = maru.session.app_scheme.appAssetRoleForOrigin(sp[0..scheme_len], hp[0..host_len], has_explicit_port != 0) orelse return -1;
-    return @intCast(@intFromEnum(role));
+    return @intCast(@backingInt(role));
 }
 
 /// Swift의 WKSecurityOrigin/URL 구성요소를 L2 exact-origin 정책으로 판정한다. role은
@@ -5166,7 +5166,7 @@ pub export fn maru_mermaid_protocol_matches_hello_ack(
     nonce: u64,
 ) u32 {
     const value = frame orelse return 0;
-    return @intFromBool(value.tag == @intFromEnum(mermaid_protocol.Tag.hello_ack) and
+    return @intFromBool(value.tag == @backingInt(mermaid_protocol.Tag.hello_ack) and
         value.helper_instance == helper_instance and value.nonce == nonce);
 }
 
@@ -5270,7 +5270,7 @@ pub export fn maru_macos_mermaid_complete_action_handoff(helper_instance: u64, j
 
 pub export fn maru_macos_mermaid_complete_decoded(frame: ?*const MermaidDecodedFrameAbi, arrival_ms: u64) i32 {
     const decoded = frame orelse return -1;
-    if (decoded.tag != @intFromEnum(mermaid_protocol.Tag.result)) return -1;
+    if (decoded.tag != @backingInt(mermaid_protocol.Tag.result)) return -1;
     if (decoded.body_len > 0 and decoded.body_ptr == null) return -1;
     const status = std.enums.fromInt(mermaid_protocol.ResultStatus, decoded.status) orelse return -1;
     return switch (session_mod.mermaidCoordinator().completeResult(
@@ -5335,7 +5335,7 @@ pub export fn maru_macos_app_session_take_osr_cursor(session: ?*AppSession, out_
     const app = session orelse return 0;
     const out = out_cursor_kind orelse return 0;
     const kind = session_mod.web_ops.takeOsrCursor(app) orelse return 0;
-    out.* = @intFromEnum(kind);
+    out.* = @backingInt(kind);
     return 1;
 }
 
@@ -5347,7 +5347,7 @@ pub export fn maru_macos_app_session_take_osr_dialog(session: ?*AppSession, out:
     dst.* = .{
         .surface_id = view.surface_id,
         .token = view.token,
-        .kind = @intFromEnum(view.kind),
+        .kind = @backingInt(view.kind),
         .offer_suppress = @intFromBool(view.offer_suppress),
         .title = view.title.ptr,
         .title_len = view.title.len,
@@ -5483,8 +5483,8 @@ pub export fn maru_macos_app_session_osr_context_menu_item(
     const m = session_mod.web_ops.osrContextMenuShown(app, menu) orelse return 0;
     if (index >= m.items.len) return 0;
     const item = m.items.items[index];
-    if (out_kind) |p| p.* = @intFromEnum(item.kind);
-    if (out_command) |p| p.* = @intFromEnum(item.command);
+    if (out_kind) |p| p.* = @backingInt(item.kind);
+    if (out_command) |p| p.* = @backingInt(item.command);
     if (out_enabled) |p| p.* = @intFromBool(item.enabled);
     if (out_depth) |p| p.* = item.depth;
     var buf: [1024]u8 = undefined;
@@ -5679,7 +5679,7 @@ pub export fn maru_macos_downloads_row(index: u32, out: ?*MaruDownloadRow) i32 {
     const row = out orelse return 0;
     const e = session_mod.web_downloads.at(index) orelse return 0;
     row.key = e.key;
-    row.state = @intFromEnum(e.state);
+    row.state = @backingInt(e.state);
     row.risky = @intFromBool(e.risky);
     row.received = e.received;
     row.total = e.total;
@@ -6025,7 +6025,7 @@ pub export fn maru_macos_mermaid_take_terminal(out_result: ?*MermaidTerminalResu
         .window_id = value.window_id,
         .job_id = value.job_id,
         .renderer = rendererToAbi(value.renderer),
-        .reason = @intFromEnum(value.reason),
+        .reason = @backingInt(value.reason),
     };
     return 1;
 }
@@ -6042,7 +6042,7 @@ comptime {
 
 fn decodedFrameAbi(message: mermaid_protocol.Message) MermaidDecodedFrameAbi {
     var out = std.mem.zeroes(MermaidDecodedFrameAbi);
-    out.tag = @intFromEnum(message);
+    out.tag = @backingInt(message);
     switch (message) {
         .hello, .hello_ack => |hello| {
             out.helper_instance = hello.helper_instance;
@@ -6056,7 +6056,7 @@ fn decodedFrameAbi(message: mermaid_protocol.Message) MermaidDecodedFrameAbi {
             out.palette = request.palette;
         },
         .result => |result| {
-            out.status = @intFromEnum(result.status);
+            out.status = @backingInt(result.status);
             out.capability = capabilityToAbi(result.capability);
             out.helper_instance = result.capability.helper_instance;
             out.body_ptr = if (result.body.len == 0) null else result.body.ptr;
@@ -6126,13 +6126,13 @@ test "Mermaid codec ABI keeps header constants and opaque frame behavior aligned
     try std.testing.expectEqual(@as(u64, c.MARU_MERMAID_WARM_RESPONSE_DEADLINE_MS), mermaid_coordinator.warm_response_deadline_ms);
     try std.testing.expectEqual(@as(u64, c.MARU_MERMAID_REPLY_FALLBACK_GRACE_MS), mermaid_coordinator.reply_fallback_grace_ms);
     try std.testing.expectEqual(@as(u64, c.MARU_MERMAID_REPLY_FALLBACK_MS), mermaid_coordinator.reply_fallback_ms);
-    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_SUPERSEDED), @intFromEnum(mermaid_coordinator.TerminalReason.superseded));
-    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_DEADLINE), @intFromEnum(mermaid_coordinator.TerminalReason.deadline));
-    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_TRANSIENT_FAILURE), @intFromEnum(mermaid_coordinator.TerminalReason.transient_failure));
-    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_INTEGRITY_FAILURE), @intFromEnum(mermaid_coordinator.TerminalReason.integrity_failure));
-    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_INVALID_RESULT), @intFromEnum(mermaid_coordinator.TerminalReason.invalid_result));
-    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_CAPACITY_EXCEEDED), @intFromEnum(mermaid_coordinator.TerminalReason.capacity_exceeded));
-    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_FAILURE_LATCHED), @intFromEnum(mermaid_coordinator.TerminalReason.failure_latched));
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_SUPERSEDED), @backingInt(mermaid_coordinator.TerminalReason.superseded));
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_DEADLINE), @backingInt(mermaid_coordinator.TerminalReason.deadline));
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_TRANSIENT_FAILURE), @backingInt(mermaid_coordinator.TerminalReason.transient_failure));
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_INTEGRITY_FAILURE), @backingInt(mermaid_coordinator.TerminalReason.integrity_failure));
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_INVALID_RESULT), @backingInt(mermaid_coordinator.TerminalReason.invalid_result));
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_CAPACITY_EXCEEDED), @backingInt(mermaid_coordinator.TerminalReason.capacity_exceeded));
+    try std.testing.expectEqual(@as(u32, c.MARU_MERMAID_TERMINAL_FAILURE_LATCHED), @backingInt(mermaid_coordinator.TerminalReason.failure_latched));
     try std.testing.expectEqual(@sizeOf(c.MaruMermaidRendererCapability), @sizeOf(MermaidRendererCapabilityAbi));
     try std.testing.expectEqual(@sizeOf(c.MaruMermaidJobCapability), @sizeOf(MermaidJobCapabilityAbi));
     try std.testing.expectEqual(@sizeOf(c.MaruMermaidDecodedFrame), @sizeOf(MermaidDecodedFrameAbi));
@@ -6234,7 +6234,7 @@ test "Mermaid coordinator ABI drains exact terminals and exact old job revoke pr
     try std.testing.expectEqual(@as(u64, 3), terminal_result.window_id);
     try std.testing.expectEqual(@as(u64, 1), terminal_result.job_id);
     try std.testing.expectEqual(renderer.widget_id, terminal_result.renderer.widget_id);
-    try std.testing.expectEqual(@as(u32, @intFromEnum(mermaid_coordinator.TerminalReason.superseded)), terminal_result.reason);
+    try std.testing.expectEqual(@as(u32, @backingInt(mermaid_coordinator.TerminalReason.superseded)), terminal_result.reason);
     try std.testing.expectEqual(@as(i32, 0), maru_macos_mermaid_take_terminal(&terminal_result));
 
     maru_macos_mermaid_revoke_job(3, 1, &renderer);
@@ -7132,12 +7132,12 @@ fn appHostIo() std.Io {
 fn controlBaseDir(buf: []u8) ?[:0]u8 {
     if (std.c.getenv("XDG_CACHE_HOME")) |x| {
         const xs = std.mem.span(x);
-        if (xs.len > 0) return std.fmt.bufPrintZ(buf, "{s}/maru", .{std.mem.trimEnd(u8, xs, "/")}) catch null;
+        if (xs.len > 0) return std.fmt.bufPrintSentinel(buf, "{s}/maru", .{std.mem.trimEnd(u8, xs, "/")}, 0) catch null;
     }
     const home = std.c.getenv("HOME") orelse return null;
     const hs = std.mem.span(home);
     if (hs.len == 0) return null;
-    return std.fmt.bufPrintZ(buf, "{s}/.cache/maru", .{std.mem.trimEnd(u8, hs, "/")}) catch null;
+    return std.fmt.bufPrintSentinel(buf, "{s}/.cache/maru", .{std.mem.trimEnd(u8, hs, "/")}, 0) catch null;
 }
 
 /// 인스턴스 nonce(§4.2 "부팅 nonce") — 파일명 유일성용(암호 비밀 아님). macOS arc4random_buf로 8바이트 채운다.
@@ -7525,7 +7525,7 @@ fn grantPromptText(buf: []u8, scope: control_capability.ScopeClass, url: []const
 
 // 동의문은 질문이 URL 뒤에 온다 — URL 이 길어도 질문이 남아야 사용자가 무엇에 답하는지 안다.
 test "grant 동의문: 아무리 긴 URL 이어도 질문이 남고, 호스트가 보이며, 모달 버퍼 안이다" {
-    const long_url = "https://login.example.com/oauth/authorize?" ++ "state=" ++ "x" ** 1500 ++ "&end=1";
+    const long_url = "https://login.example.com/oauth/authorize?" ++ "state=" ++ array_repeat.repeat("x", 1500) ++ "&end=1";
     const prev = maru.i18n.lang();
     defer maru.i18n.setLang(prev);
     for ([_]maru.i18n.Lang{ .en, .ko }) |lang| {
@@ -7556,7 +7556,7 @@ test "grant 동의문 URL: 호스트는 줄이지 않고, 너무 길면 왼쪽�
     const userinfo = "https://docs-preview.example-wiki.org-session-xx@accounts.google.com/x";
     try std.testing.expectEqualStrings("https://accounts.google.com/x", grantPromptUrl(&buf, userinfo, max));
     // ③ 짧은 호스트 + 긴 경로 — 호스트·포트는 통째로, 경로만 가운데가 준다.
-    const long_path = "http://localhost:3000/" ++ "a" ** 200 ++ "/report.pdf";
+    const long_path = "http://localhost:3000/" ++ array_repeat.repeat("a", 200) ++ "/report.pdf";
     const shown_c = grantPromptUrl(&buf, long_path, max);
     try std.testing.expect(oi.displayCols(shown_c) <= max);
     try std.testing.expect(std.mem.startsWith(u8, shown_c, "http://localhost:3000/"));
@@ -7574,7 +7574,7 @@ test "grant 동의문 URL: 호스트는 줄이지 않고, 너무 길면 왼쪽�
         const hl = r.intRangeAtMost(usize, 12, host_buf.len);
         for (host_buf[0..hl]) |*ch| ch.* = "abcdefghijklmnopqrstuvwxyz.-"[r.intRangeLessThan(usize, 0, 28)];
         var url_buf: [400]u8 = undefined;
-        const url = std.fmt.bufPrint(&url_buf, "https://{s}{s}", .{ host_buf[0..hl], ("/p" ** 40)[0..r.intRangeAtMost(usize, 0, 80)] }) catch unreachable;
+        const url = std.fmt.bufPrint(&url_buf, "https://{s}{s}", .{ host_buf[0..hl], (array_repeat.repeat("/p", 40))[0..r.intRangeAtMost(usize, 0, 80)] }) catch unreachable;
         const shown = grantPromptUrl(&buf, url, max);
         try std.testing.expect(oi.displayCols(shown) <= max);
         try std.testing.expect(std.mem.indexOf(u8, shown, host_buf[hl - 12 .. hl]) != null);
@@ -7732,7 +7732,7 @@ fn pushBrowserOp(
         server.cross_gpa.free(backend_arg);
         return;
     }
-    browser_op_queue.push(allocator, .{ .async_id = async_id, .surface_id = op.surface_id, .op_kind = @intFromEnum(op.method), .arg = backend_arg, .required_host = required_host }) catch {
+    browser_op_queue.push(allocator, .{ .async_id = async_id, .surface_id = op.surface_id, .op_kind = @backingInt(op.method), .arg = backend_arg, .required_host = required_host }) catch {
         if (op.method == .wait) _ = removeActiveBrowserWait(async_id);
         if (browserMethodHasTrackedLifecycle(op.method)) _ = active_browser_executions.finish(async_id);
         server.cross_gpa.free(backend_arg);
@@ -8106,7 +8106,7 @@ fn beginCdp(run: *CdpRun) void {
                     if (run.doc_url) |u| allocator.free(u);
                     allocator.destroy(run);
                     // 그 grant 의 사이트가 아니다 — WebKit 의 마지막 관문과 같이 unauthorized.
-                    maru_macos_control_complete_browser_op(async_id, @intFromEnum(control_browser.BrowserCompletionStatus.unauthorized), null, 0);
+                    maru_macos_control_complete_browser_op(async_id, @backingInt(control_browser.BrowserCompletionStatus.unauthorized), null, 0);
                     startNextCdp(surface_id);
                     return;
                 }
@@ -8268,7 +8268,7 @@ const TabRun = struct {
 var tab_runs: std.ArrayList(TabRun) = .empty;
 
 fn completeTabStatus(async_id: u64, status: control_browser.BrowserCompletionStatus, result: []const u8) void {
-    maru_macos_control_complete_browser_op(async_id, @intFromEnum(status), result.ptr, result.len);
+    maru_macos_control_complete_browser_op(async_id, @backingInt(status), result.ptr, result.len);
 }
 
 fn completeAgentOpen(async_id: u64, tab: u64, url: []const u8, loaded: bool) void {
@@ -8579,7 +8579,7 @@ fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void 
         else => completeCdp(async_id, status, result),
     } else if (refused)
         // W9c③: 사용자가 거부했다(또는 물을 창이 없다) — 인가 판정이 아니라 사용자의 답이라 그 글을 싣는다(L2 가 업로드만 글을 싣는다).
-        maru_macos_control_complete_browser_op(async_id, @intFromEnum(control_browser.BrowserCompletionStatus.unauthorized), result.ptr, result.len)
+        maru_macos_control_complete_browser_op(async_id, @backingInt(control_browser.BrowserCompletionStatus.unauthorized), result.ptr, result.len)
     else
         completeCdp(async_id, status, result);
     startNextCdp(surface_id);
@@ -8697,15 +8697,15 @@ fn startNextCdp(surface_id: u64) void {
 }
 
 fn completeCdp(async_id: u64, status: web_cdp_ops.Status, result: []const u8) void {
-    maru_macos_control_complete_browser_op(async_id, @intFromEnum(status), result.ptr, result.len);
+    maru_macos_control_complete_browser_op(async_id, @backingInt(status), result.ptr, result.len);
 }
 
 comptime {
     // web_cdp_ops 의 status 숫자는 control_browser 계약과 같다.
-    std.debug.assert(@intFromEnum(web_cdp_ops.Status.success) == @intFromEnum(control_browser.BrowserCompletionStatus.success));
-    std.debug.assert(@intFromEnum(web_cdp_ops.Status.failed) == @intFromEnum(control_browser.BrowserCompletionStatus.failed));
-    std.debug.assert(@intFromEnum(web_cdp_ops.Status.timeout) == @intFromEnum(control_browser.BrowserCompletionStatus.timeout));
-    std.debug.assert(@intFromEnum(web_cdp_ops.Status.invalid_params) == @intFromEnum(control_browser.BrowserCompletionStatus.invalid_params));
+    std.debug.assert(@backingInt(web_cdp_ops.Status.success) == @backingInt(control_browser.BrowserCompletionStatus.success));
+    std.debug.assert(@backingInt(web_cdp_ops.Status.failed) == @backingInt(control_browser.BrowserCompletionStatus.failed));
+    std.debug.assert(@backingInt(web_cdp_ops.Status.timeout) == @backingInt(control_browser.BrowserCompletionStatus.timeout));
+    std.debug.assert(@backingInt(web_cdp_ops.Status.invalid_params) == @backingInt(control_browser.BrowserCompletionStatus.invalid_params));
 }
 
 // ── W9c③: 에이전트의 파일 올리기(`browser.upload`) — 모달 전에 파일을 열고, 매번 확인 모달, 승인 뒤 사본을 넣는다 ─────────────────────────────
@@ -8972,7 +8972,7 @@ fn uploadRemoveOp(surface_id: u64, async_id: u64) void {
 /// 빈 `<뿌리>/<탭>` 이 남았다(적대 리뷰 1 회차). 다른 op 의 사본이 있으면 `rmdir` 이 실패하고 그대로 둔다.
 fn uploadRemoveOpAt(root: []const u8, tab: u64, op: u64) void {
     var tab_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tab_dir = std.fmt.bufPrintZ(&tab_buf, "{s}/{d}", .{ root, tab }) catch return;
+    const tab_dir = std.fmt.bufPrintSentinel(&tab_buf, "{s}/{d}", .{ root, tab }, 0) catch return;
     var op_buf: [24]u8 = undefined;
     web_upload_stage.removeUnder(tab_dir, std.fmt.bufPrint(&op_buf, "{d}", .{op}) catch return);
     _ = std.c.unlinkat(std.c.AT.FDCWD, tab_dir.ptr, std.c.AT.REMOVEDIR);
@@ -9280,10 +9280,10 @@ pub export fn maru_macos_control_server_start() c_int {
     // 비-macOS: 라이브 서버 없음(1b/A2b는 macOS 전용 — 소켓 부트스트랩이 fstatat/arc4random_buf 등 macOS syscall에
     // 의존). comptime-true 조기 반환이 뒤 macOS 바디(Server.bind·instanceNonce)를 linux 컴파일에서 prune한다
     // (live_pty.zig:298 선례). Linux/Win 이식 시 OS-중립 부트스트랩으로 대체.
-    if (builtin.os.tag != .macos) return @intFromEnum(Status.create_failed);
-    if (control_server_active) return @intFromEnum(Status.ok); // idempotent
+    if (builtin.os.tag != .macos) return @backingInt(Status.create_failed);
+    if (control_server_active) return @backingInt(Status.ok); // idempotent
     var base_buf: [1024]u8 = undefined;
-    const base = controlBaseDir(&base_buf) orelse return @intFromEnum(Status.create_failed);
+    const base = controlBaseDir(&base_buf) orelse return @backingInt(Status.create_failed);
     // <base>(<cache>/maru) 존재 보장(Server.bind는 <base>/control만 mkdir). 부모(<cache>)도 best-effort mkdir.
     if (std.mem.lastIndexOfScalar(u8, base, '/')) |slash| {
         if (slash > 0) {
@@ -9295,7 +9295,7 @@ pub export fn maru_macos_control_server_start() c_int {
     _ = std.c.mkdir(base.ptr, 0o700);
 
     var key_buf: [64]u8 = undefined;
-    const key = control_socket.formatInstanceKey(&key_buf, std.c.getpid(), instanceNonce()) catch return @intFromEnum(Status.create_failed);
+    const key = control_socket.formatInstanceKey(&key_buf, std.c.getpid(), instanceNonce()) catch return @backingInt(Status.create_failed);
 
     control_server_storage.start(
         appHostIo(),
@@ -9308,10 +9308,10 @@ pub export fn maru_macos_control_server_start() c_int {
         16, // max_pending(5f-0b-2a 연결당 스레드로 최대 max_connections=16개 동시 push 가능 → queue 용량 = 그 이상)
     ) catch |e| {
         if (std.c.getenv("MARU_DEBUG") != null) std.debug.print("[maru control] start failed base={s} key={s} err={s}\n", .{ base, key, @errorName(e) });
-        return @intFromEnum(Status.create_failed);
+        return @backingInt(Status.create_failed);
     };
     control_server_active = true;
-    return @intFromEnum(Status.ok);
+    return @backingInt(Status.ok);
 }
 
 /// #4 값싼 per-tick 게이트: 대기 중인 컨트롤 요청 **또는 held grant 확인**이 있으면 1, 없으면 0. Swift가 매 tick `drain`
@@ -9421,11 +9421,11 @@ pub export fn maru_macos_control_take_browser_op(
     pruneInactiveBrowserWaits(server);
     const e: BrowserOpEntry = while (browser_op_queue.take()) |candidate| {
         // revoke/close/reap가 Swift drain 전에 wait를 끝냈다면 큐의 늦은 엔트리를 실행하지 않는다.
-        if (candidate.op_kind == @intFromEnum(control_browser.BrowserMethod.wait) and !activeBrowserWait(candidate.async_id)) {
+        if (candidate.op_kind == @backingInt(control_browser.BrowserMethod.wait) and !activeBrowserWait(candidate.async_id)) {
             server.cross_gpa.free(candidate.arg);
             continue;
         }
-        const method: control_browser.BrowserMethod = @enumFromInt(candidate.op_kind);
+        const method: control_browser.BrowserMethod = @fromBackingInt(@intCast(candidate.op_kind));
         if (browserMethodHasTrackedLifecycle(method)) {
             if (!queuedExecutionReady(server, candidate.async_id, now)) {
                 rejectUnreadyBrowserExecution(server, candidate.async_id, now);
@@ -9439,7 +9439,7 @@ pub export fn maru_macos_control_take_browser_op(
     browser_op_take_buf.clearRetainingCapacity();
     browser_op_take_buf.appendSlice(allocator, e.arg) catch {
         server.cross_gpa.free(e.arg);
-        const method: control_browser.BrowserMethod = @enumFromInt(e.op_kind);
+        const method: control_browser.BrowserMethod = @fromBackingInt(@intCast(e.op_kind));
         if (browserMethodHasTrackedLifecycle(method)) {
             _ = active_browser_executions.finish(e.async_id);
             _ = server.completeInFlight(e.async_id, null);
@@ -9447,7 +9447,7 @@ pub export fn maru_macos_control_take_browser_op(
         return 0;
     };
     server.cross_gpa.free(e.arg);
-    const method: control_browser.BrowserMethod = @enumFromInt(e.op_kind);
+    const method: control_browser.BrowserMethod = @fromBackingInt(@intCast(e.op_kind));
     if (browserMethodHasTrackedLifecycle(method) and !active_browser_executions.markRunning(e.async_id)) return 0;
     if (out_async_id) |p| p.* = e.async_id;
     if (out_surface_id) |p| p.* = e.surface_id;
@@ -10300,72 +10300,72 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(u32, 0), normal_pua_policy.is_cell_raster_icon);
     try std.testing.expectEqual(@as(f32, 1), normal_pua_policy.scale_x);
     try std.testing.expectEqual(@as(f32, 1), normal_pua_policy.scale_y);
-    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_REGULAR)), @as(u32, @intFromEnum(file_tree_mutation_backend.IdentityKind.regular)));
-    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_DIRECTORY)), @as(u32, @intFromEnum(file_tree_mutation_backend.IdentityKind.directory)));
-    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_SYMLINK)), @as(u32, @intFromEnum(file_tree_mutation_backend.IdentityKind.symlink)));
-    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_OTHER)), @as(u32, @intFromEnum(file_tree_mutation_backend.IdentityKind.other)));
-    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_OUTCOME_NOT_MOVED)), @as(u32, @intFromEnum(session_mod.FileTreeTrashOutcome.not_moved)));
-    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_OUTCOME_MOVED_VERIFIED)), @as(u32, @intFromEnum(session_mod.FileTreeTrashOutcome.moved_verified)));
-    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_OUTCOME_MOVED_UNVERIFIED)), @as(u32, @intFromEnum(session_mod.FileTreeTrashOutcome.moved_unverified)));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_REGULAR)), @as(u32, @backingInt(file_tree_mutation_backend.IdentityKind.regular)));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_DIRECTORY)), @as(u32, @backingInt(file_tree_mutation_backend.IdentityKind.directory)));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_SYMLINK)), @as(u32, @backingInt(file_tree_mutation_backend.IdentityKind.symlink)));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_OTHER)), @as(u32, @backingInt(file_tree_mutation_backend.IdentityKind.other)));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_OUTCOME_NOT_MOVED)), @as(u32, @backingInt(session_mod.FileTreeTrashOutcome.not_moved)));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_OUTCOME_MOVED_VERIFIED)), @as(u32, @backingInt(session_mod.FileTreeTrashOutcome.moved_verified)));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_OUTCOME_MOVED_UNVERIFIED)), @as(u32, @backingInt(session_mod.FileTreeTrashOutcome.moved_unverified)));
     try std.testing.expectEqual(@as(usize, @intCast(c.MARU_FILE_TREE_PATH_CAPACITY)), file_tree_mutation_backend.trash_path_capacity);
     try std.testing.expectEqual(@as(u32, @intCast(c.MARU_BROWSER_WAIT_DEFAULT_TIMEOUT_MS)), control_browser.wait_default_timeout_ms);
     try std.testing.expectEqual(@as(u32, @intCast(c.MARU_BROWSER_WAIT_MAX_TIMEOUT_MS)), control_browser.wait_max_timeout_ms);
     try std.testing.expectEqual(@as(u32, @intCast(c.MARU_BROWSER_WAIT_POLL_INTERVAL_MS)), control_browser.wait_poll_interval_ms);
     // url_at out_kind 계약: @intFromEnum(LinkKind)를 그대로 싣고 Swift handleUrlClick이 kind==1=file_path로 분기한다.
     // LinkKind 순서를 바꾸면 분기가 silent하게 뒤집히므로(웹↔파일) 태그 값을 고정한다(C typedef 없는 enum 가드 — Status/EventKind 선례).
-    try std.testing.expectEqual(@as(i32, 0), @intFromEnum(terminal.LinkKind.url));
-    try std.testing.expectEqual(@as(i32, 1), @intFromEnum(terminal.LinkKind.file_path));
+    try std.testing.expectEqual(@as(i32, 0), @backingInt(terminal.LinkKind.url));
+    try std.testing.expectEqual(@as(i32, 1), @backingInt(terminal.LinkKind.file_path));
     // 5e-2b op_kind wire 계약: take_browser_op이 @intFromEnum(BrowserMethod)를 그대로 op_kind로 싣고 Swift
     // drainBrowserOps가 0=navigate·1=getUrl·2=executeScript·4=getCookies·5=screenshot·6=setCookie·7=deleteCookie·8~11=localStorage/clear·12=click·13=type·14=scroll·15=wait로 디코드한다. BrowserMethod 순서를 바꾸면
     // op_kind가 silent하게 재매핑돼 navigate 요청이 다른 op을 구동하므로(컴파일·테스트 무경보) 태그 값을 고정한다
     // (LinkKind 선례 — .h 주석·Swift switch와 단일 계약). 신규 메서드는 **끝에** 추가한다(3=subscribe는 async op이
     // 아니라 op_kind로 안 실림 — get_cookies는 그 뒤 4).
-    try std.testing.expectEqual(@as(u8, 0), @as(u8, @intFromEnum(control_browser.BrowserMethod.navigate)));
-    try std.testing.expectEqual(@as(u8, 1), @as(u8, @intFromEnum(control_browser.BrowserMethod.get_url)));
-    try std.testing.expectEqual(@as(u8, 2), @as(u8, @intFromEnum(control_browser.BrowserMethod.execute_script)));
-    try std.testing.expectEqual(@as(u8, 4), @as(u8, @intFromEnum(control_browser.BrowserMethod.get_cookies))); // 5f-4c
-    try std.testing.expectEqual(@as(u8, 5), @as(u8, @intFromEnum(control_browser.BrowserMethod.screenshot))); // 5f-1
-    try std.testing.expectEqual(@as(u8, 6), @as(u8, @intFromEnum(control_browser.BrowserMethod.set_cookie))); // cookie write
-    try std.testing.expectEqual(@as(u8, 7), @as(u8, @intFromEnum(control_browser.BrowserMethod.delete_cookie)));
-    try std.testing.expectEqual(@as(u8, 8), @as(u8, @intFromEnum(control_browser.BrowserMethod.get_local_storage))); // localStorage/clear
-    try std.testing.expectEqual(@as(u8, 9), @as(u8, @intFromEnum(control_browser.BrowserMethod.set_local_storage)));
-    try std.testing.expectEqual(@as(u8, 10), @as(u8, @intFromEnum(control_browser.BrowserMethod.remove_local_storage)));
-    try std.testing.expectEqual(@as(u8, 11), @as(u8, @intFromEnum(control_browser.BrowserMethod.clear_storage)));
-    try std.testing.expectEqual(@as(u8, 12), @as(u8, @intFromEnum(control_browser.BrowserMethod.click))); // act 5f-2
-    try std.testing.expectEqual(@as(u8, 13), @as(u8, @intFromEnum(control_browser.BrowserMethod.type_text)));
-    try std.testing.expectEqual(@as(u8, 14), @as(u8, @intFromEnum(control_browser.BrowserMethod.scroll)));
-    try std.testing.expectEqual(@as(u8, 15), @as(u8, @intFromEnum(control_browser.BrowserMethod.wait)));
-    try std.testing.expectEqual(@as(u8, 16), @as(u8, @intFromEnum(control_browser.BrowserMethod.snapshot))); // §9.5.4
-    try std.testing.expectEqual(@as(u8, 17), @as(u8, @intFromEnum(control_browser.BrowserMethod.console))); // §9.5.9
+    try std.testing.expectEqual(@as(u8, 0), @as(u8, @backingInt(control_browser.BrowserMethod.navigate)));
+    try std.testing.expectEqual(@as(u8, 1), @as(u8, @backingInt(control_browser.BrowserMethod.get_url)));
+    try std.testing.expectEqual(@as(u8, 2), @as(u8, @backingInt(control_browser.BrowserMethod.execute_script)));
+    try std.testing.expectEqual(@as(u8, 4), @as(u8, @backingInt(control_browser.BrowserMethod.get_cookies))); // 5f-4c
+    try std.testing.expectEqual(@as(u8, 5), @as(u8, @backingInt(control_browser.BrowserMethod.screenshot))); // 5f-1
+    try std.testing.expectEqual(@as(u8, 6), @as(u8, @backingInt(control_browser.BrowserMethod.set_cookie))); // cookie write
+    try std.testing.expectEqual(@as(u8, 7), @as(u8, @backingInt(control_browser.BrowserMethod.delete_cookie)));
+    try std.testing.expectEqual(@as(u8, 8), @as(u8, @backingInt(control_browser.BrowserMethod.get_local_storage))); // localStorage/clear
+    try std.testing.expectEqual(@as(u8, 9), @as(u8, @backingInt(control_browser.BrowserMethod.set_local_storage)));
+    try std.testing.expectEqual(@as(u8, 10), @as(u8, @backingInt(control_browser.BrowserMethod.remove_local_storage)));
+    try std.testing.expectEqual(@as(u8, 11), @as(u8, @backingInt(control_browser.BrowserMethod.clear_storage)));
+    try std.testing.expectEqual(@as(u8, 12), @as(u8, @backingInt(control_browser.BrowserMethod.click))); // act 5f-2
+    try std.testing.expectEqual(@as(u8, 13), @as(u8, @backingInt(control_browser.BrowserMethod.type_text)));
+    try std.testing.expectEqual(@as(u8, 14), @as(u8, @backingInt(control_browser.BrowserMethod.scroll)));
+    try std.testing.expectEqual(@as(u8, 15), @as(u8, @backingInt(control_browser.BrowserMethod.wait)));
+    try std.testing.expectEqual(@as(u8, 16), @as(u8, @backingInt(control_browser.BrowserMethod.snapshot))); // §9.5.4
+    try std.testing.expectEqual(@as(u8, 17), @as(u8, @backingInt(control_browser.BrowserMethod.console))); // §9.5.9
     // W9b①: Chromium 전용(Swift 로 가지 않는다 — DevTools). 그래도 번호는 고정한다.
-    try std.testing.expectEqual(@as(u8, 18), @as(u8, @intFromEnum(control_browser.BrowserMethod.back)));
-    try std.testing.expectEqual(@as(u8, 19), @as(u8, @intFromEnum(control_browser.BrowserMethod.forward)));
-    try std.testing.expectEqual(@as(u8, 20), @as(u8, @intFromEnum(control_browser.BrowserMethod.reload)));
-    try std.testing.expectEqual(@as(u8, 21), @as(u8, @intFromEnum(control_browser.BrowserMethod.hover)));
-    try std.testing.expectEqual(@as(u8, 22), @as(u8, @intFromEnum(control_browser.BrowserMethod.press)));
-    try std.testing.expectEqual(@as(u8, 23), @as(u8, @intFromEnum(control_browser.BrowserMethod.open))); // W9b③
-    try std.testing.expectEqual(@as(u8, 24), @as(u8, @intFromEnum(control_browser.BrowserMethod.close)));
-    try std.testing.expectEqual(@as(u8, 25), @as(u8, @intFromEnum(control_browser.BrowserMethod.dialog))); // W9c②
-    try std.testing.expectEqual(@as(u8, 26), @as(u8, @intFromEnum(control_browser.BrowserMethod.handle_dialog)));
-    try std.testing.expectEqual(@as(u8, 27), @as(u8, @intFromEnum(control_browser.BrowserMethod.upload))); // W9c③
+    try std.testing.expectEqual(@as(u8, 18), @as(u8, @backingInt(control_browser.BrowserMethod.back)));
+    try std.testing.expectEqual(@as(u8, 19), @as(u8, @backingInt(control_browser.BrowserMethod.forward)));
+    try std.testing.expectEqual(@as(u8, 20), @as(u8, @backingInt(control_browser.BrowserMethod.reload)));
+    try std.testing.expectEqual(@as(u8, 21), @as(u8, @backingInt(control_browser.BrowserMethod.hover)));
+    try std.testing.expectEqual(@as(u8, 22), @as(u8, @backingInt(control_browser.BrowserMethod.press)));
+    try std.testing.expectEqual(@as(u8, 23), @as(u8, @backingInt(control_browser.BrowserMethod.open))); // W9b③
+    try std.testing.expectEqual(@as(u8, 24), @as(u8, @backingInt(control_browser.BrowserMethod.close)));
+    try std.testing.expectEqual(@as(u8, 25), @as(u8, @backingInt(control_browser.BrowserMethod.dialog))); // W9c②
+    try std.testing.expectEqual(@as(u8, 26), @as(u8, @backingInt(control_browser.BrowserMethod.handle_dialog)));
+    try std.testing.expectEqual(@as(u8, 27), @as(u8, @backingInt(control_browser.BrowserMethod.upload))); // W9c③
 
     // workspace 헤더도 .h define과 Zig 단일 출처(session.workspace.header)가 갈라지면 저장/로드가 어긋나므로 고정.
     try std.testing.expectEqualStrings(c.MARU_WORKSPACE_HEADER, maru.session.workspace.header);
-    try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusOk), @intFromEnum(Status.ok));
-    try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusNullOut), @intFromEnum(Status.null_out));
-    try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusInvalidConfig), @intFromEnum(Status.invalid_config));
-    try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusSessionEnded), @intFromEnum(Status.session_ended));
+    try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusOk), @backingInt(Status.ok));
+    try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusNullOut), @backingInt(Status.null_out));
+    try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusInvalidConfig), @backingInt(Status.invalid_config));
+    try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusSessionEnded), @backingInt(Status.session_ended));
     // M3d-2b: cross-window 이동 거부 status(=10)를 Swift가 이 값으로 판정하므로 .h와 고정 정합(값 드리프트면 이동 실패를 성공으로 오독).
-    try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusMoveFailed), @intFromEnum(Status.move_failed));
-    try std.testing.expectEqual(@as(u32, c.MaruAppHostEventKeyDown), @intFromEnum(EventKind.key_down));
-    try std.testing.expectEqual(@as(u32, c.MaruAppHostEventAppShouldTerminate), @intFromEnum(EventKind.app_should_terminate));
-    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodeArrowUp)), @intFromEnum(KeyCode.arrow_up));
+    try std.testing.expectEqual(@as(c_int, c.MaruAppHostStatusMoveFailed), @backingInt(Status.move_failed));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostEventKeyDown), @backingInt(EventKind.key_down));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostEventAppShouldTerminate), @backingInt(EventKind.app_should_terminate));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodeArrowUp)), @backingInt(KeyCode.arrow_up));
     // PC-style 기능키 C 상수 ↔ enum 정합(경계 1개씩 + F12로 확인).
-    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodeHome)), @intFromEnum(KeyCode.home));
-    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodePageDown)), @intFromEnum(KeyCode.page_down));
-    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodeF1)), @intFromEnum(KeyCode.f1));
-    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodeF12)), @intFromEnum(KeyCode.f12));
-    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostCommandControlledSmoke)), @intFromEnum(AppCommandKind.controlled_smoke));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodeHome)), @backingInt(KeyCode.home));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodePageDown)), @backingInt(KeyCode.page_down));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodeF1)), @backingInt(KeyCode.f1));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostKeyCodeF12)), @backingInt(KeyCode.f12));
+    try std.testing.expectEqual(@as(u32, @intCast(c.MaruAppHostCommandControlledSmoke)), @backingInt(AppCommandKind.controlled_smoke));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostCapabilities), @sizeOf(Capabilities));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostCapabilities), @alignOf(Capabilities));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostKeyEvent), @sizeOf(KeyEvent));
@@ -10380,18 +10380,18 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostSessionConfig), @sizeOf(AppSessionConfig));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostSessionConfig), @alignOf(AppSessionConfig));
     // AS4-c fixture probe는 mixed-width ABI라 size만으로 field reorder를 잡지 못한다.
-    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_CARD), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.session_dock_card));
-    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_RESUME), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_resume));
-    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REVEAL_LOG), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_reveal_log));
-    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_FOCUS_LIVE), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_focus_live));
-    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_AGENT_SESSIONS), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.dock_agent_sessions));
-    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_LAUNCHER), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.dock_launcher));
-    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REFRESH), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_refresh));
-    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_SCROLL_ANCHOR), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_expanded_scroll_anchor));
-    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SCOPE_ROW), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_scope_row));
-    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SEARCH), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_search));
-    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_CARD), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_expanded_card));
-    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SORT_TOGGLE), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_sort_toggle));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_CARD), @backingInt(session_mod.AgentSessionArchiveSmokeProbeTarget.session_dock_card));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_RESUME), @backingInt(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_resume));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REVEAL_LOG), @backingInt(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_reveal_log));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_FOCUS_LIVE), @backingInt(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_focus_live));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_AGENT_SESSIONS), @backingInt(session_mod.AgentSessionArchiveSmokeProbeTarget.dock_agent_sessions));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_LAUNCHER), @backingInt(session_mod.AgentSessionArchiveSmokeProbeTarget.dock_launcher));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REFRESH), @backingInt(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_refresh));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_SCROLL_ANCHOR), @backingInt(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_expanded_scroll_anchor));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SCOPE_ROW), @backingInt(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_scope_row));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SEARCH), @backingInt(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_search));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_CARD), @backingInt(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_expanded_card));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SORT_TOGGLE), @backingInt(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_sort_toggle));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostAgentSessionArchiveSmokeProbe), @sizeOf(AgentSessionArchiveSmokeProbe));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostAgentSessionArchiveSmokeProbe), @alignOf(AgentSessionArchiveSmokeProbe));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostAgentSessionArchiveSmokeProbe, "request_id"), @offsetOf(AgentSessionArchiveSmokeProbe, "request_id"));
@@ -10403,8 +10403,8 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@alignOf(c.MaruAppHostQuickTerminalConfig), @alignOf(session_mod.QuickTerminalConfig));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostQuickTerminalFrames), @sizeOf(session_mod.QuickTerminalFrames));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostQuickTerminalFrames), @alignOf(session_mod.QuickTerminalFrames));
-    try std.testing.expectEqual(@as(u32, c.MaruAppHostQuickTerminalChromeMinimal), @intFromEnum(maru.config.theme.QuickTerminalChrome.minimal));
-    try std.testing.expectEqual(@as(u32, c.MaruAppHostQuickTerminalPositionCenter), @intFromEnum(maru.config.theme.QuickTerminalPosition.center));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostQuickTerminalChromeMinimal), @backingInt(maru.config.theme.QuickTerminalChrome.minimal));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostQuickTerminalPositionCenter), @backingInt(maru.config.theme.QuickTerminalPosition.center));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostCommand), @sizeOf(session_mod.CommandEntry));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostCommand), @alignOf(session_mod.CommandEntry));
     // CommandEntry는 동일-폭 포인터 4개라 @sizeOf가 필드 reorder를 못 잡는다 — @offsetOf로 C↔Zig 위치를
@@ -10513,12 +10513,12 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_w"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_w"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostWebSurfaceTransition, "frame_pt_h"), @offsetOf(WebSurfaceTransitionAbi, "frame_pt_h"));
     // op enum 값(C ↔ session_mod.WebSurfaceOp) 정합 — Swift switch가 이 정수로 분기하므로 값이 어긋나면 안 된다.
-    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpNone), @intFromEnum(session_mod.WebSurfaceOp.none));
-    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpCreate), @intFromEnum(session_mod.WebSurfaceOp.create));
-    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpDestroy), @intFromEnum(session_mod.WebSurfaceOp.destroy));
-    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpReframe), @intFromEnum(session_mod.WebSurfaceOp.reframe));
-    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpHide), @intFromEnum(session_mod.WebSurfaceOp.hide));
-    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpShow), @intFromEnum(session_mod.WebSurfaceOp.show));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpNone), @backingInt(session_mod.WebSurfaceOp.none));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpCreate), @backingInt(session_mod.WebSurfaceOp.create));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpDestroy), @backingInt(session_mod.WebSurfaceOp.destroy));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpReframe), @backingInt(session_mod.WebSurfaceOp.reframe));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpHide), @backingInt(session_mod.WebSurfaceOp.hide));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostWebSurfaceOpShow), @backingInt(session_mod.WebSurfaceOp.show));
 }
 
 test "browser wait revoke/close matching preserves capability-origin and isolates pane grant key" {
@@ -10551,8 +10551,8 @@ test "live hello capabilities advertise browser.wait and only parsed browser met
     }
     try std.testing.expectEqual(@as(usize, 1), wait_count);
     // 모든 browser 메서드를 광고한다(메서드를 더하고 여기를 빠뜨리면 걸린다 — snapshot·console 이 빠져 있었다).
-    inline for (std.meta.fields(control_browser.BrowserMethod)) |f| {
-        const m: control_browser.BrowserMethod = @enumFromInt(f.value);
+    inline for (@import("type_info_fields").fields(control_browser.BrowserMethod)) |f| {
+        const m: control_browser.BrowserMethod = @fromBackingInt(@intCast(f.value));
         var found = false;
         for (control_hello_caps) |method| {
             if (std.mem.startsWith(u8, method, "browser.") and std.mem.eql(u8, method["browser.".len..], control_browser.browserMethodWireName(m))) found = true;
@@ -10563,7 +10563,7 @@ test "live hello capabilities advertise browser.wait and only parsed browser met
 
 test "WT4b live hello 는 lsp.trust.* 를 dispatch 가 아는 메서드 그대로 광고한다 — 조회·철회·잊기·감사 기록 넷, 부여 없음" {
     const clt = maru.session.control_lsp_trust;
-    var seen: [@typeInfo(clt.Op).@"enum".fields.len]bool = @splat(false);
+    var seen: [@import("type_info_fields").enumFields(clt.Op).len]bool = @splat(false);
     var lsp_count: usize = 0;
     for (control_hello_caps) |method| {
         const parsed = control_plane.parseMethod(method);
@@ -10571,7 +10571,7 @@ test "WT4b live hello 는 lsp.trust.* 를 dispatch 가 아는 메서드 그대�
         lsp_count += 1;
         const op = clt.opFor(parsed.rest) orelse return error.UnknownLspMethodAdvertised;
         try std.testing.expectEqualStrings(op.method(), method);
-        seen[@intFromEnum(op)] = true;
+        seen[@backingInt(op)] = true;
     }
     try std.testing.expectEqual(@as(usize, 4), lsp_count);
     for (seen) |b| try std.testing.expect(b);
@@ -10594,7 +10594,7 @@ test "TA2 컨트롤 상대 — 소켓에 마지막으로 쓴 프로세스의 pid
 
 test "macOS app host capabilities describe ownership before runtime exists" {
     var capabilities: Capabilities = undefined;
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_host_capabilities(&capabilities));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_host_capabilities(&capabilities));
     try std.testing.expectEqual(abi_version, capabilities.abi_version);
     try std.testing.expectEqual(@as(u32, 1), capabilities.swift_owns_ns_application);
     try std.testing.expectEqual(@as(u32, 1), capabilities.swift_owns_window_lifecycle);
@@ -10602,7 +10602,7 @@ test "macOS app host capabilities describe ownership before runtime exists" {
     try std.testing.expectEqual(@as(u32, 1), capabilities.zig_owns_live_pty_sessions);
     try std.testing.expectEqual(@as(u32, 1), capabilities.zig_owns_frame_loop);
     try std.testing.expectEqual(@as(u32, 1), capabilities.objective_c_smokes_remain);
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_host_capabilities(null));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.null_out)), maru_macos_app_host_capabilities(null));
 }
 
 test "macOS app host event DTOs are explicit fixed-width C ABI records" {
@@ -10615,9 +10615,9 @@ test "macOS app host event DTOs are explicit fixed-width C ABI records" {
     try std.testing.expectEqual(@as(usize, 44), @sizeOf(AppSessionConfig)); // 11 u32(abi/cols/rows/queue/cmd/chrome_minimal/minimal_tabs/defer_initial_surface + width_px/height_px/scale_milli)
     try std.testing.expectEqual(@as(usize, 176), @sizeOf(AppFrameSummary)); // quit_decision(u32,v90)+web_surfaces_present(u32,v102)가 168→176 정렬 패딩을 채워 176 불변
     try std.testing.expectEqual(@as(usize, 8), @alignOf(AppFrameSummary));
-    try std.testing.expectEqual(@as(u32, @intFromEnum(session_mod.FileTreeRootOperation.none)), @as(u32, c.MARU_FILE_TREE_ROOT_PICK_NONE));
-    try std.testing.expectEqual(@as(u32, @intFromEnum(session_mod.FileTreeRootOperation.replace)), @as(u32, c.MARU_FILE_TREE_ROOT_PICK_REPLACE));
-    try std.testing.expectEqual(@as(u32, @intFromEnum(session_mod.FileTreeRootOperation.add)), @as(u32, c.MARU_FILE_TREE_ROOT_PICK_ADD));
+    try std.testing.expectEqual(@as(u32, @backingInt(session_mod.FileTreeRootOperation.none)), @as(u32, c.MARU_FILE_TREE_ROOT_PICK_NONE));
+    try std.testing.expectEqual(@as(u32, @backingInt(session_mod.FileTreeRootOperation.replace)), @as(u32, c.MARU_FILE_TREE_ROOT_PICK_REPLACE));
+    try std.testing.expectEqual(@as(u32, @backingInt(session_mod.FileTreeRootOperation.add)), @as(u32, c.MARU_FILE_TREE_ROOT_PICK_ADD));
 }
 
 test "FP7 watch-root ABI short output reports required length without consuming one-shot" {
@@ -10636,10 +10636,10 @@ test "FP7 watch-root ABI short output reports required length without consuming 
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+        .command_kind = @backingInt(AppCommandKind.controlled_smoke),
     };
     var session: ?*AppSession = null;
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_create(&config, &session));
     defer maru_macos_app_session_destroy(session);
     try std.testing.expectEqual(@as(u32, 1), maru_macos_app_session_open_file_panel_path(session, path.ptr, path.len));
 
@@ -10660,22 +10660,22 @@ test "Explorer v137 root picker ABI drains typed operations and cancel or invali
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+        .command_kind = @backingInt(AppCommandKind.controlled_smoke),
     };
     var session: ?*AppSession = null;
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_create(&config, &session));
     defer maru_macos_app_session_destroy(session);
 
     session.?.file_tree_root_pick_pending = .replace;
     try std.testing.expectEqual(@as(u32, c.MARU_FILE_TREE_ROOT_PICK_REPLACE), maru_macos_app_session_take_file_tree_root_pick_request(session));
     try std.testing.expectEqual(@as(u32, c.MARU_FILE_TREE_ROOT_PICK_NONE), maru_macos_app_session_take_file_tree_root_pick_request(session));
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_provide_file_tree_root_pick(session, null, 0));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_provide_file_tree_root_pick(session, null, 0));
     try std.testing.expectEqual(session_mod.FileTreeRootOperation.none, session.?.file_tree_root_picker_inflight);
 
     session.?.file_tree_root_pick_pending = .add;
     try std.testing.expectEqual(@as(u32, c.MARU_FILE_TREE_ROOT_PICK_ADD), maru_macos_app_session_take_file_tree_root_pick_request(session));
     const generation = session.?.file_tree.rootGeneration();
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_provide_file_tree_root_pick(session, "relative", "relative".len));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_provide_file_tree_root_pick(session, "relative", "relative".len));
     try std.testing.expectEqual(generation, session.?.file_tree.rootGeneration());
     try std.testing.expect(session.?.file_tree_root_validation == null);
 }
@@ -10751,7 +10751,7 @@ test "a failed window restore keeps the backup records of documents it had alrea
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+        .command_kind = @backingInt(AppCommandKind.controlled_smoke),
     };
     for (cases) |case| {
         const record = try backup_mod.encode(a, case.doc, case.content);
@@ -10761,13 +10761,13 @@ test "a failed window restore keeps the backup records of documents it had alrea
         try backup_dir.writeFile(io, .{ .sub_path = name, .data = record });
 
         var session: ?*AppSession = null;
-        try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+        try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_create(&config, &session));
         defer maru_macos_app_session_destroy(session);
 
         var text_buf: [8192]u8 = undefined;
         const text = try failingRestoreText(&text_buf, case.tail);
         try std.testing.expectEqual(
-            @as(c_int, @intFromEnum(Status.create_failed)),
+            @as(c_int, @backingInt(Status.create_failed)),
             maru_macos_app_session_apply_workspace_window(session, text.ptr, text.len, 0),
         );
         // 레코드가 **바이트까지 그대로** 남고, 다른 이름으로 옮겨 간 것도 아니다(폴더에 그 하나뿐).
@@ -10809,10 +10809,10 @@ test "a new untitled document never takes the number of a record a failed restor
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+        .command_kind = @backingInt(AppCommandKind.controlled_smoke),
     };
     var session: ?*AppSession = null;
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_create(&config, &session));
     defer maru_macos_app_session_destroy(session);
     // 문서 1 은 **망가진 탭 뒤**의 탭에 있다 — 그 탭에 닿기 전에 apply 가 실패해 발급기가 1 을 보지 못한다.
     const text =
@@ -10835,7 +10835,7 @@ test "a new untitled document never takes the number of a record a failed restor
         "pane surfaces=1 active-term=0 custom-name=\"\" untitled-term=\"1:1\"\n" ++
         "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=10\n";
     try std.testing.expectEqual(
-        @as(c_int, @intFromEnum(Status.create_failed)),
+        @as(c_int, @backingInt(Status.create_failed)),
         maru_macos_app_session_apply_workspace_window(session, text.ptr, text.len, 0),
     );
 
@@ -10879,10 +10879,10 @@ test "a successful window restore retains the backup record until a replacement 
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+        .command_kind = @backingInt(AppCommandKind.controlled_smoke),
     };
     var session: ?*AppSession = null;
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_create(&config, &session));
     defer maru_macos_app_session_destroy(session);
     const text =
         "maru.workspace.v1\n" ++
@@ -10891,7 +10891,7 @@ test "a successful window restore retains the backup record until a replacement 
         "tree-node leaf pane=0\n" ++
         "pane surfaces=1 active-term=0 custom-name=\"\" untitled-term=\"1:1\"\n" ++
         "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=10\n";
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_apply_workspace_window(session, text.ptr, text.len, 0));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_apply_workspace_window(session, text.ptr, text.len, 0));
     var read_buf: [4096]u8 = undefined;
     try std.testing.expectEqualStrings(record, readBackupRecord(tmp.dir, name, &read_buf).?);
     const pane = session.?.tabs.items[0].panes.items[0];
@@ -10922,7 +10922,7 @@ test "app log redirect targets only a /dev/null stderr" {
     try std.testing.expect(!fdIsDevNull(pipe_fds[1]));
 
     var path_buf: [128]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "/private/tmp/maru-app-log-redirect-{d}", .{std.c.getpid()});
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "/private/tmp/maru-app-log-redirect-{d}", .{std.c.getpid()}, 0);
     const file = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
     try std.testing.expect(file >= 0);
     defer _ = std.c.unlink(path.ptr);
@@ -10941,10 +10941,10 @@ test "workspace apply failure names the tab it was building" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+        .command_kind = @backingInt(AppCommandKind.controlled_smoke),
     };
     var session: ?*AppSession = null;
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_create(&config, &session));
     defer maru_macos_app_session_destroy(session);
     const text =
         "maru.workspace.v1\n" ++
@@ -10963,7 +10963,7 @@ test "workspace apply failure names the tab it was building" {
         "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=10\n";
     AppSession.restore_position = .{};
     try std.testing.expectEqual(
-        @as(c_int, @intFromEnum(Status.create_failed)),
+        @as(c_int, @backingInt(Status.create_failed)),
         maru_macos_app_session_apply_workspace_window(session, text.ptr, text.len, 0),
     );
     try std.testing.expectEqualStrings("tabs", AppSession.restore_position.stage);
@@ -10980,15 +10980,15 @@ test "workspace restore ABI preserves multi-window count active and apply" {
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+        .command_kind = @backingInt(AppCommandKind.controlled_smoke),
     };
     var session0: ?*AppSession = null;
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session0));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_create(&config, &session0));
     defer maru_macos_app_session_destroy(session0);
     var deferred_config = config;
     deferred_config.defer_initial_surface = 1;
     var session1: ?*AppSession = null;
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&deferred_config, &session1));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_create(&deferred_config, &session1));
     defer maru_macos_app_session_destroy(session1);
     try std.testing.expectEqual(@as(usize, 0), session1.?.tabs.items.len); // restore 전 throwaway tab/PTY 0.
     try std.testing.expect(!session1.?.surface_initialized);
@@ -11000,7 +11000,7 @@ test "workspace restore ABI preserves multi-window count active and apply" {
     // 정당한 직렬화 형식이라 파서에서 버릴 수 없고, 그래서 **적용 결과**를 갈라야 한다.
     const empty_text = "maru.workspace.v1\nwindow tabs=0 active-tab=0\n";
     try std.testing.expectEqual(
-        @as(c_int, @intFromEnum(Status.workspace_empty)),
+        @as(c_int, @backingInt(Status.workspace_empty)),
         maru_macos_app_session_apply_workspace_window(session1, empty_text.ptr, empty_text.len, 0),
     );
 
@@ -11024,8 +11024,8 @@ test "workspace restore ABI preserves multi-window count active and apply" {
     try std.testing.expectEqual(@as(i64, 2), maru_macos_app_session_workspace_window_count(session0, text.ptr, text.len));
     try std.testing.expectEqual(@as(i64, 2), maru_macos_app_session_workspace_window_count(null, text.ptr, text.len));
     try std.testing.expectEqual(@as(i64, 1), maru_macos_app_session_workspace_active_window(session0, text.ptr, text.len));
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_apply_workspace_window(session0, text.ptr, text.len, 0));
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_apply_workspace_window(session1, text.ptr, text.len, 1));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_apply_workspace_window(session0, text.ptr, text.len, 0));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_apply_workspace_window(session1, text.ptr, text.len, 1));
     try std.testing.expectEqual(@as(usize, 1), session0.?.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 2), session0.?.tabs.items[0].panes.items.len);
     try std.testing.expectEqual(@as(usize, 1), session0.?.tabs.items[0].active_pane);
@@ -11059,16 +11059,16 @@ test "workspace preflight ABI rejects cross-window duplicate runtime owner befor
         .cols = 40,
         .rows = 10,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+        .command_kind = @backingInt(AppCommandKind.controlled_smoke),
         .defer_initial_surface = 1,
     };
     var session: ?*AppSession = null;
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_create(&config, &session));
     defer maru_macos_app_session_destroy(session);
     session.?.restore_runtime_host_id = "preflight-sentinel";
     session.?.restore_runtime_id = "preflight-sentinel";
     try std.testing.expectEqual(
-        @as(c_int, @intFromEnum(Status.invalid_config)),
+        @as(c_int, @backingInt(Status.invalid_config)),
         maru_macos_app_session_apply_workspace_window(session, text.ptr, text.len, 0),
     );
     try std.testing.expectEqual(@as(usize, 0), session.?.tabs.items.len);
@@ -11092,10 +11092,10 @@ test "Metal key-down ABI: 터미널이 활성이면 Cmd+W가 파일 패널을 �
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+        .command_kind = @backingInt(AppCommandKind.controlled_smoke),
     };
     var session: ?*AppSession = null;
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_create(&config, &session));
     defer maru_macos_app_session_destroy(session);
     try std.testing.expectEqual(@as(u32, 1), maru_macos_app_session_open_file_panel_path(session, path.ptr, path.len));
     const entry = session.?.fileEntryAt(0).?;
@@ -11120,7 +11120,7 @@ test "Metal key-down ABI: 터미널이 활성이면 Cmd+W가 파일 패널을 �
         .raw_key_code = 0x0D,
     };
     var summary: AppFrameSummary = undefined;
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_key_down(session, &event, &summary));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_key_down(session, &event, &summary));
     var request_id: u64 = 0;
     try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_take_file_panel_dirty_sync_action_v2(session, &request_id));
     try std.testing.expect(session.?.pending_file_panel_close == null);
@@ -11133,22 +11133,22 @@ test "macOS app exported session API reports null outputs as ABI errors" {
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+        .command_kind = @backingInt(AppCommandKind.controlled_smoke),
     };
     try std.testing.expectEqual(
-        @as(c_int, @intFromEnum(Status.null_out)),
+        @as(c_int, @backingInt(Status.null_out)),
         maru_macos_app_session_create(&config, null),
     );
     try std.testing.expectEqual(
-        @as(c_int, @intFromEnum(Status.null_out)),
+        @as(c_int, @backingInt(Status.null_out)),
         maru_macos_app_session_tick(null, maru.config.theme.render_frame_rate_default, null),
     );
     try std.testing.expectEqual(
-        @as(c_int, @intFromEnum(Status.null_out)),
+        @as(c_int, @backingInt(Status.null_out)),
         maru_macos_app_session_key_down(null, null, null),
     );
     try std.testing.expectEqual(
-        @as(c_int, @intFromEnum(Status.null_out)),
+        @as(c_int, @backingInt(Status.null_out)),
         maru_macos_app_session_set_agent_session_archive_detail_smoke_gate(null, 0),
     );
     try std.testing.expectEqual(
@@ -11156,7 +11156,7 @@ test "macOS app exported session API reports null outputs as ABI errors" {
         maru_macos_app_session_agent_session_archive_detail_smoke_gate_reached(null),
     );
     try std.testing.expectEqual(
-        @as(c_int, @intFromEnum(Status.null_out)),
+        @as(c_int, @backingInt(Status.null_out)),
         maru_macos_app_session_set_agent_session_archive_smoke_gate(null, 0),
     );
     try std.testing.expectEqual(
@@ -11172,33 +11172,33 @@ test "macOS app exported session API reports null outputs as ABI errors" {
         maru_macos_app_session_agent_session_archive_smoke_term_count(null),
     );
     try std.testing.expectEqual(
-        @as(c_int, @intFromEnum(Status.null_out)),
+        @as(c_int, @backingInt(Status.null_out)),
         maru_macos_app_session_agent_session_archive_smoke_probe(null, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_CARD, null),
     );
     try std.testing.expectEqual(
-        @as(c_int, @intFromEnum(Status.null_out)),
+        @as(c_int, @backingInt(Status.null_out)),
         maru_macos_app_session_input_smoke_probe(null, null),
     );
     try std.testing.expectEqual(
-        @as(c_int, @intFromEnum(Status.null_out)),
+        @as(c_int, @backingInt(Status.null_out)),
         maru_macos_app_session_resize(null, null, null),
     );
     try std.testing.expectEqual(
-        @as(c_int, @intFromEnum(Status.null_out)),
+        @as(c_int, @backingInt(Status.null_out)),
         maru_macos_app_session_close(null, null),
     );
     // v18~v21 신규 IME/focus export도 null session을 ABI 오류로 닫는지 — 헤더에 선언만 되고
     // 계약 테스트가 안 건드리던 공백(리뷰 #13)을 메운다(심볼 존재 + null-safety 동시 확인).
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_ime_begin(null));
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_ime_insert(null, null, 0));
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_ime_marked(null, null, 0));
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_ime_end(null, null));
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_ime_delete_backward(null));
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_set_focus(null, 0));
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_ime_cursor_rect(null, null, null, null, null));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.null_out)), maru_macos_app_session_ime_begin(null));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.null_out)), maru_macos_app_session_ime_insert(null, null, 0));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.null_out)), maru_macos_app_session_ime_marked(null, null, 0));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.null_out)), maru_macos_app_session_ime_end(null, null));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.null_out)), maru_macos_app_session_ime_delete_backward(null));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.null_out)), maru_macos_app_session_set_focus(null, 0));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.null_out)), maru_macos_app_session_ime_cursor_rect(null, null, null, null, null));
     // v40 chrome Notice: null session은 ABI 오류, null bytes(len>0)도 오류, len==0은 무동작 ok(붙여넣기와 같은 규율).
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_show_notice(null, null, 0));
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_show_notice(null, "x", 1));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.null_out)), maru_macos_app_session_show_notice(null, null, 0));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.null_out)), maru_macos_app_session_show_notice(null, "x", 1));
     // M3f workspace_window_frame: null session·null out 포인터는 -1(조용한 폴백 = count/active-window와 동형, Status가
     // 아니라 present/absent/fail의 정수 신호). Swift는 -1/0을 "frame 없음 → 현행 기본"으로 동일 처리한다.
     try std.testing.expectEqual(@as(c_int, -1), maru_macos_app_session_workspace_window_frame(null, null, 0, 0, null, null, null, null));
@@ -11221,7 +11221,7 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(@as(u32, 2), maru_macos_app_session_open_file_panel_path(null, "x", 1));
     // v137 탐색기 root picker: null session은 요청 없음, provide는 typed null_out이다.
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_take_file_tree_root_pick_request(null));
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_provide_file_tree_root_pick(null, null, 0));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.null_out)), maru_macos_app_session_provide_file_tree_root_pick(null, null, 0));
     var file_panel_path: ?[*]const u8 = undefined;
     var file_panel_path_len: usize = 99;
     try std.testing.expectEqual(@as(u32, 0), maru_macos_app_session_file_panel_entry(null, 1, &file_panel_path, &file_panel_path_len));
@@ -11355,7 +11355,7 @@ test "latin layouts are preserved: Ctrl+B with an ascii codepoint does not consu
 test "keyEventFromAbi maps function keys to terminal.Key" {
     const mk = struct {
         fn f(code: KeyCode) KeyEvent {
-            return .{ .codepoint = 0, .base_codepoint = 0, .key_code = @intFromEnum(code), .modifier_shift = 0, .modifier_control = 0, .modifier_option = 0, .modifier_command = 0, .is_repeat = 0, .is_release = 0, .raw_key_code = 0 };
+            return .{ .codepoint = 0, .base_codepoint = 0, .key_code = @backingInt(code), .modifier_shift = 0, .modifier_control = 0, .modifier_option = 0, .modifier_command = 0, .is_repeat = 0, .is_release = 0, .raw_key_code = 0 };
         }
     }.f;
     try std.testing.expectEqual(terminal.input.Key.delete, (try keyEventFromAbi(mk(.delete))).key);
@@ -11372,7 +11372,7 @@ test "keypad Enter chains through ABI to terminal .enter (keypad=true) — confi
     const abi_event = KeyEvent{
         .codepoint = 0, // Swift가 keypad Enter를 잡아 codepoint를 비운다(default로 안 떨어짐)
         .base_codepoint = 0,
-        .key_code = @intFromEnum(KeyCode.enter),
+        .key_code = @backingInt(KeyCode.enter),
         .modifier_shift = 0,
         .modifier_control = 0,
         .modifier_option = 0,
@@ -11394,7 +11394,7 @@ test "Option+Backspace chains through ABI to meta-DEL (\\e\\x7f, word delete)" {
     const abi_event = KeyEvent{
         .codepoint = 0,
         .base_codepoint = 0,
-        .key_code = @intFromEnum(KeyCode.backspace),
+        .key_code = @backingInt(KeyCode.backspace),
         .modifier_shift = 0,
         .modifier_control = 0,
         .modifier_option = 1,
@@ -11438,7 +11438,7 @@ test "5f-5b ActiveBrowserExecutions: busy, queued cancel, running abandon, shrin
     const gpa = std.testing.allocator;
     var executions = ActiveBrowserExecutions.init(10, 2);
     defer executions.deinit(gpa);
-    const provenance: ExecutionProvenance = .{ .capability = .{ .nonce = [_]u8{0xA5} ** control_capability.nonce_len, .generation = 0 } };
+    const provenance: ExecutionProvenance = .{ .capability = .{ .nonce = @as([control_capability.nonce_len]u8, @splat(0xA5)), .generation = 0 } };
 
     try executions.admit(gpa, .{ .async_id = 1, .surface_id = 11, .reserved_bytes = 6, .provenance = provenance });
     try std.testing.expectEqual(@as(usize, 6), executions.budget.usedBytes());
@@ -11562,7 +11562,7 @@ fn expectPendingErrorCode(pending: *control_server_mod.PendingRequest, code: con
     pending.response = null;
     var pm = try control_plane.parseMessage(std.testing.allocator, response);
     defer pm.deinit();
-    try std.testing.expectEqual(@as(i64, @intFromEnum(code)), pm.message.response.err.?.code);
+    try std.testing.expectEqual(@as(i64, @backingInt(code)), pm.message.response.err.?.code);
 }
 
 const FakeBrowserResultProvider = struct {
@@ -11850,11 +11850,11 @@ test "generic async browser op: target close wins once and late callback only re
     try std.testing.expectEqual(ExecutionPhase.abandoned, active_browser_executions.get(id).?.phase);
 
     const secret = "[{\"name\":\"sid\",\"value\":\"secret\"}]";
-    maru_macos_control_complete_browser_op(id, @intFromEnum(control_browser.BrowserCompletionStatus.success), secret.ptr, secret.len);
+    maru_macos_control_complete_browser_op(id, @backingInt(control_browser.BrowserCompletionStatus.success), secret.ptr, secret.len);
     try std.testing.expect(active_browser_executions.get(id) == null);
     try std.testing.expectEqual(control_server_mod.PendingRequest.State.done, pending.state);
     // 중복 backend callback도 client terminal을 되살리거나 새 response를 만들지 않는다.
-    maru_macos_control_complete_browser_op(id, @intFromEnum(control_browser.BrowserCompletionStatus.success), secret.ptr, secret.len);
+    maru_macos_control_complete_browser_op(id, @backingInt(control_browser.BrowserCompletionStatus.success), secret.ptr, secret.len);
     try std.testing.expect(pending.response == null);
 
     var revoked_pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
@@ -11884,7 +11884,7 @@ test "generic async browser op: target close wins once and late callback only re
     cancelBrowserOpsForCrashedSurface(&control_server_storage, 12);
     try expectPendingErrorCode(&crash_pending, .process_exited);
     try std.testing.expect(control_pane_grant_store.hasGrant(5, 12, .browser_storage)); // crash는 logical surface/grant close 아님
-    maru_macos_control_complete_browser_op(crash_id, @intFromEnum(control_browser.BrowserCompletionStatus.failed), null, 0);
+    maru_macos_control_complete_browser_op(crash_id, @backingInt(control_browser.BrowserCompletionStatus.failed), null, 0);
     try std.testing.expect(active_browser_executions.get(crash_id) == null);
 }
 
@@ -12115,7 +12115,7 @@ test "5f-5b cancel: release 확인 전 terminal을 노출하지 않고 재시도
     }
     var parsed_cancel = try control_plane.parseMessage(std.testing.allocator, cancel_frame.bytes);
     defer parsed_cancel.deinit();
-    try std.testing.expectEqual(@as(i64, @intFromEnum(control_plane.ErrorCode.unauthorized)), parsed_cancel.message.response.err.?.code);
+    try std.testing.expectEqual(@as(i64, @backingInt(control_plane.ErrorCode.unauthorized)), parsed_cancel.message.response.err.?.code);
 }
 
 test "5f-5b cancel: writer-owned chunk는 연결을 abort하고 terminal을 섞지 않음" {
@@ -12248,7 +12248,7 @@ test "5f-5b pull ABI: lying copy cannot expose heap and release failure pins res
     try std.testing.expectEqual(ExecutionPhase.release_pending, active_browser_executions.get(failed_release_id).?.phase);
     try std.testing.expectEqual(failed_release.data.len, active_browser_executions.budget.usedBytes());
     // Swift fallback은 registry를 직접 release한 뒤 old completion을 불러 pinned reservation을 반환한다.
-    maru_macos_control_complete_browser_op(failed_release_id, @intFromEnum(control_browser.BrowserCompletionStatus.failed), null, 0);
+    maru_macos_control_complete_browser_op(failed_release_id, @backingInt(control_browser.BrowserCompletionStatus.failed), null, 0);
     try std.testing.expect(active_browser_executions.get(failed_release_id) == null);
     try std.testing.expectEqual(@as(usize, 0), active_browser_executions.budget.usedBytes());
     const success_response = failed_release_pending.response orelse return error.ExpectedResponse;
@@ -12335,7 +12335,7 @@ test "5f-5b glue: queue Full rollback과 queued/running typed timeout" {
     var server = lifecycleTestServer();
     defer server.in_flight.deinit(std.testing.allocator);
     const request = "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"browser.executeScript\",\"params\":{\"id\":11,\"script\":\"1\",\"max_result_bytes\":64}}";
-    const nonce = [_]u8{0x3C} ** control_capability.nonce_len;
+    const nonce = @as([control_capability.nonce_len]u8, @splat(0x3C));
 
     var queue_full: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
     const full_id = try server.deferRequest(&queue_full, 100);
@@ -12365,7 +12365,7 @@ test "5f-5b glue: queue Full rollback과 queued/running typed timeout" {
     try browser_op_queue.push(allocator, .{
         .async_id = queued_id,
         .surface_id = 11,
-        .op_kind = @intFromEnum(control_browser.BrowserMethod.execute_script),
+        .op_kind = @backingInt(control_browser.BrowserMethod.execute_script),
         .arg = try allocator.dupe(u8, "1"),
     });
     expireActiveBrowserExecutions(&server, 101);
@@ -12377,7 +12377,7 @@ test "5f-5b glue: queue Full rollback과 queued/running typed timeout" {
     try browser_op_queue.push(allocator, .{
         .async_id = queued_id + 1,
         .surface_id = 12,
-        .op_kind = @intFromEnum(control_browser.BrowserMethod.get_url),
+        .op_kind = @backingInt(control_browser.BrowserMethod.get_url),
         .arg = try allocator.dupe(u8, ""),
     });
     const replacement = browser_op_queue.take().?;
@@ -12604,7 +12604,7 @@ test "app 진단 로그 fd는 base 아래 app.log를 append로 열고 상한을 
     var base_buf: [std.fs.max_path_bytes:0]u8 = undefined;
     var resolved: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &resolved);
-    const base = try std.fmt.bufPrintZ(&base_buf, "{s}/cache-base", .{resolved[0..len]});
+    const base = try std.fmt.bufPrintSentinel(&base_buf, "{s}/cache-base", .{resolved[0..len]}, 0);
 
     // base가 아직 없어도 만들어 연다 — 첫 실행에서 진단이 사라지면 안 된다.
     const fd = openAppLogFd(base);
@@ -12645,10 +12645,10 @@ test "TIG5 활성 Term 질의 ABI 가 Term 종류를 그대로 전한다 (선-�
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(AppCommandKind.controlled_smoke),
+        .command_kind = @backingInt(AppCommandKind.controlled_smoke),
     };
     var session: ?*AppSession = null;
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_create(&config, &session));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_create(&config, &session));
     defer maru_macos_app_session_destroy(session);
     const s = session orelse return error.NoSession;
     s.surface_initialized = true;
@@ -12702,12 +12702,12 @@ test "IME_ACK1 commit and focus ABI reject read-only admission and retry exactly
         .cols = 80,
         .rows = 24,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(session_mod.CommandKind.controlled_smoke),
     });
     defer session.deinit();
     const term = try editor.openPathInActivePane(session, path);
     term.rt.editor_selection = maru.session.editor.selection.Selection.at(2);
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_commit_composition(session));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_commit_composition(session));
     for ([_]bool{ false, true }) |pending| {
         try std.testing.expect(editor_ime_ops.marked(session, "한", .{ .location = 1, .length = 0 }, null));
         if (pending) {
@@ -12725,23 +12725,23 @@ test "IME_ACK1 commit and focus ABI reject read-only admission and retry exactly
         const marked = editor_ime_ops.state(session).?.marked;
         if (pending) try std.testing.expectEqual(@as(usize, 0), marked.length);
         for (0..2) |_| {
-            try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.key_failed)), maru_macos_app_session_commit_composition(session));
-            try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.key_failed)), maru_macos_app_session_set_focus(session, 0));
+            try std.testing.expectEqual(@as(c_int, @backingInt(Status.key_failed)), maru_macos_app_session_commit_composition(session));
+            try std.testing.expectEqual(@as(c_int, @backingInt(Status.key_failed)), maru_macos_app_session_set_focus(session, 0));
             try std.testing.expectEqualStrings(before, term.rt.editorDocument().opened.?.file.content);
             try std.testing.expectEqual(rev, term.rt.editorDocument().opened.?.file.revision);
             try std.testing.expectEqual(@as(?u64, term.surface.id), session.ime_terminal_target_id);
             try std.testing.expectEqual(marked, editor_ime_ops.state(session).?.marked);
         }
         term.rt.editorDocument().opened.?.file.read_only = false;
-        try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_set_focus(session, 0));
+        try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_set_focus(session, 0));
         const accepted_rev = term.rt.editorDocument().opened.?.file.revision;
-        try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.ok)), maru_macos_app_session_commit_composition(session));
+        try std.testing.expectEqual(@as(c_int, @backingInt(Status.ok)), maru_macos_app_session_commit_composition(session));
         try std.testing.expectEqual(accepted_rev, term.rt.editorDocument().opened.?.file.revision);
         try std.testing.expectEqual(@as(?u64, null), session.ime_terminal_target_id);
         try std.testing.expect(!session.ime_editor_commit_pending);
         try std.testing.expectEqualStrings(if (pending) "ab한한" else "ab한", term.rt.editorDocument().opened.?.file.content);
     }
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(Status.null_out)), maru_macos_app_session_commit_composition(null));
+    try std.testing.expectEqual(@as(c_int, @backingInt(Status.null_out)), maru_macos_app_session_commit_composition(null));
 }
 
 test "러너는 판정자마다 번호를 바꾼다 — 프레임 도장 같은 판정자 전역이 판정자 사이에서 새지 않게" {
@@ -12769,7 +12769,7 @@ fn w9b3Session(ta: std.mem.Allocator) !*AppSession {
         .cols = 20,
         .rows = 5,
         .queue_capacity = 16,
-        .command_kind = @intFromEnum(session_mod.CommandKind.controlled_smoke),
+        .command_kind = @backingInt(session_mod.CommandKind.controlled_smoke),
     });
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     session.setSurfaceClosedCallback(null, onAppSessionSurfaceClosed);
@@ -14342,7 +14342,7 @@ test "W9c①: 512 KiB 를 넘는 콘솔 결과는 browser.consoleChunk 조각으
     defer w9c2Forget(ta, &.{87});
     try control_pane_grant_store.grant(.{ .pane = 5, .target = 87, .scope = .browser });
     // 따옴표는 JSON 에서 두 바이트 — 쥔 글은 512 KiB 안이어도 결과는 그 두 배쯤이다.
-    const line = "\"" ** 8000;
+    const line = array_repeat.repeat("\"", 8000);
     for (0..65) |_| session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 87, .text = line } });
     const request = "{\"jsonrpc\":\"2.0\",\"id\":81,\"method\":\"browser.console\",\"params\":{\"id\":87}}";
     var process_budget = control_server_mod.ProcessOutboundBudget.init(std.testing.io, 32 * 1024 * 1024, 1024 * 1024);
@@ -14604,7 +14604,7 @@ test "W9c③: 모달 전에 연 파일이 폴더·없는 파일·같은 파일 �
     try tmp.dir.createDir(std.testing.io, "d", .default_dir);
     var lb: [std.fs.max_path_bytes]u8 = undefined;
     var tb: [std.fs.max_path_bytes]u8 = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink((try std.fmt.bufPrintZ(&tb, "{s}/a.txt", .{base})).ptr, (try std.fmt.bufPrintZ(&lb, "{s}/link.txt", .{base})).ptr));
+    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink((try std.fmt.bufPrintSentinel(&tb, "{s}/a.txt", .{base}, 0)).ptr, (try std.fmt.bufPrintSentinel(&lb, "{s}/link.txt", .{base}, 0)).ptr));
     const session = try w9b3Session(ta);
     defer w9b3Cleanup(ta, session);
     const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
@@ -14669,7 +14669,7 @@ test "W9c③: 승인 → 사본(<뿌리>/<탭>/<op>/<i>/<이름>, 0400)을 만�
     try std.testing.expectEqualStrings(want, run.upload.?.staged.items[0]);
     {
         var zb: [std.fs.max_path_bytes]u8 = undefined;
-        const fd = std.c.open((try std.fmt.bufPrintZ(&zb, "{s}", .{want})).ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+        const fd = std.c.open((try std.fmt.bufPrintSentinel(&zb, "{s}", .{want}, 0)).ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
         defer _ = std.c.close(fd);
         var st: std.c.Stat = undefined;
         try std.testing.expectEqual(@as(c_int, 0), std.c.fstat(fd, &st));
@@ -14684,14 +14684,14 @@ test "W9c③: 승인 → 사본(<뿌리>/<탭>/<op>/<i>/<이름>, 0400)을 만�
     p.response = null;
     // 넣기 전에 끝났다 — 그 op 의 사본은 곧 지웠다.
     var gone_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const op_dir = try std.fmt.bufPrintZ(&gone_buf, "{s}/upload-staging/83/{d}", .{ base, id });
+    const op_dir = try std.fmt.bufPrintSentinel(&gone_buf, "{s}/upload-staging/83/{d}", .{ base, id }, 0);
     try std.testing.expect(std.c.open(op_dir.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0)) < 0);
     // 탭이 닫히면 그 탭의 폴더(페이지에 갔던 사본 — 여기서는 흉내로 둔 것)를 지운다.
     var keep_buf: [std.fs.max_path_bytes]u8 = undefined;
     try tmp.dir.createDirPath(std.testing.io, "upload-staging/83/999/0");
     try w9c3Write(tmp.dir, "upload-staging/83/999/0/kept.txt", "k");
     onAppSessionSurfaceClosed(null, 83);
-    const tab_dir = try std.fmt.bufPrintZ(&keep_buf, "{s}/upload-staging/83", .{base});
+    const tab_dir = try std.fmt.bufPrintSentinel(&keep_buf, "{s}/upload-staging/83", .{base}, 0);
     try std.testing.expect(std.c.open(tab_dir.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0)) < 0);
 }
 
@@ -14890,7 +14890,7 @@ test "W9c③ 적대 리뷰 1 회차 재현 R11: 모달 전의 파일 거절은 �
     try env.tmp.dir.createDir(std.testing.io, "d", .default_dir);
     var lb: [std.fs.max_path_bytes]u8 = undefined;
     var tb: [std.fs.max_path_bytes]u8 = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink((try std.fmt.bufPrintZ(&tb, "{s}/a.txt", .{base})).ptr, (try std.fmt.bufPrintZ(&lb, "{s}/link.txt", .{base})).ptr));
+    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink((try std.fmt.bufPrintSentinel(&tb, "{s}/a.txt", .{base}, 0)).ptr, (try std.fmt.bufPrintSentinel(&lb, "{s}/link.txt", .{base}, 0)).ptr));
     const session = try w9b3Session(ta);
     defer w9b3Cleanup(ta, session);
     const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
@@ -15054,7 +15054,7 @@ test "W9c③ 적대 리뷰 1 회차 재현 R16: op 의 사본 폴더를 지우�
     defer allocator.free(job.root.?);
     job.removeOpDir();
     var zb: [std.fs.max_path_bytes]u8 = undefined;
-    const tab_dir = try std.fmt.bufPrintZ(&zb, "{s}/70", .{root});
+    const tab_dir = try std.fmt.bufPrintSentinel(&zb, "{s}/70", .{root}, 0);
     try std.testing.expect(std.c.open(tab_dir.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0)) < 0);
 }
 
@@ -15493,7 +15493,7 @@ test "W9c③ 적대 리뷰 5 회차 LOW-2: 끝난 요청의 멈춘 파일 읽기
     defer _ = session_mod.web_osr.setDecidedForTest(saved_decided);
     defer control_pane_grant_store.clearAll();
     const stuck_pane: ExecutionProvenance = .{ .pane_grant = .{ .pane = 41, .target = 99, .scope = .browser } };
-    const stuck_cap: ExecutionProvenance = .{ .capability = .{ .nonce = [_]u8{0x5A} ** control_capability.nonce_len, .generation = 1 } };
+    const stuck_cap: ExecutionProvenance = .{ .capability = .{ .nonce = @as([control_capability.nonce_len]u8, @splat(0x5A)), .generation = 1 } };
     // pane 41 과 cap 하나가 저마다 멈춘 읽기를 하나씩 남겼다(요청은 시한으로 끝났다).
     const job = try UploadJob.fromArg("{\"files\":[\"/x/a.txt\"]}", 99, 1);
     job.caller = stuck_pane;
@@ -15513,7 +15513,7 @@ test "W9c③ 적대 리뷰 5 회차 LOW-2: 끝난 요청의 멈춘 파일 읽기
     try std.testing.expectEqual(UploadAdmission.stuck, uploadAdmission(stuck_cap));
     try std.testing.expectEqual(UploadAdmission.stuck, uploadAdmission(.{ .pane_grant = .{ .pane = 41, .target = 7, .scope = .browser } })); // 같은 pane 의 다른 탭
     try std.testing.expectEqual(UploadAdmission.admit, uploadAdmission(.{ .pane_grant = .{ .pane = 42, .target = 99, .scope = .browser } }));
-    try std.testing.expectEqual(UploadAdmission.admit, uploadAdmission(.{ .capability = .{ .nonce = [_]u8{0x5B} ** control_capability.nonce_len, .generation = 1 } }));
+    try std.testing.expectEqual(UploadAdmission.admit, uploadAdmission(.{ .capability = .{ .nonce = @as([control_capability.nonce_len]u8, @splat(0x5B)), .generation = 1 } }));
     // 실제 받기 길 — 그 pane 은 까닭이 다른 resource busy(멈춘 읽기·다시 띄우기), 다른 pane 은 그 까닭으로 막히지 않는다.
     const req = "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"browser.upload\",\"params\":{\"id\":99,\"selector\":\"#f\",\"files\":[\"/x\"]}}";
     {
@@ -15566,7 +15566,7 @@ test "W9c③ 적대 리뷰 5 회차 LOW-2: 업로드 작업은 실행 자리의 
     var p: control_server_mod.PendingRequest = undefined;
     _ = try w9c3StartFrom(&p, req, 91, files, 43); // 그 탭의 앞선 op — 다음 것은 줄에 선다(시작하지 않는다)
     // 실제 시작 길(`startCdpOpHost`) — 실행 자리에 든 cap 이 부른 업로드.
-    const cap: ExecutionProvenance = .{ .capability = .{ .nonce = [_]u8{0x6C} ** control_capability.nonce_len, .generation = 3 } };
+    const cap: ExecutionProvenance = .{ .capability = .{ .nonce = @as([control_capability.nonce_len]u8, @splat(0x6C)), .generation = 3 } };
     var q: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
     const id = try control_server_storage.deferRequest(&q, std.math.maxInt(i128));
     try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = 91, .method = .upload, .reserved_bytes = 0, .provenance = cap });

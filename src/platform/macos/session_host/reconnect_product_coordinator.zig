@@ -88,7 +88,7 @@ pub const Coordinator = struct {
     pub fn diagnosticSnapshot(self: *Coordinator) !Snapshot {
         if (!self.ready) return .{
             .ready = false,
-            .worker_state_raw = @intFromEnum(worker_mod.State.pristine),
+            .worker_state_raw = @backingInt(worker_mod.State.pristine),
             .active_jobs = 0,
             .job_receipt_present = false,
             .completion_receipt_present = false,
@@ -96,7 +96,7 @@ pub const Coordinator = struct {
         try self.validate();
         return .{
             .ready = true,
-            .worker_state_raw = @intFromEnum(try self.worker.stateSnapshot()),
+            .worker_state_raw = @backingInt(try self.worker.stateSnapshot()),
             .active_jobs = try self.jobs.activeCount(),
             .job_receipt_present = !std.meta.eql(self.job_receipt, owner_mod.JobReceipt{}),
             .completion_receipt_present = !std.meta.eql(self.completion_receipt, owner_mod.CompletionReceipt{}),
@@ -1012,13 +1012,13 @@ fn admitFixture(
         .host_adapter_generation = host_adapter_generation,
         .connection_generation = connection_generation,
         .wire_major = 1,
-        .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),
-        .scope_raw = @intFromEnum(incident.Scope.connection),
-        .disposition_raw = @intFromEnum(incident.Disposition.reconnect),
-        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
-        .host_class_raw = @intFromEnum(incident.HostClass.current),
-        .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle),
-        .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle),
+        .reason_raw = @backingInt(incident.ConnectionReason.connection_eof),
+        .scope_raw = @backingInt(incident.Scope.connection),
+        .disposition_raw = @backingInt(incident.Disposition.reconnect),
+        .source_site_raw = @backingInt(incident.SourceSite.client_read),
+        .host_class_raw = @backingInt(incident.HostClass.current),
+        .parser_phase_raw = @backingInt(incident.ParserPhase.idle),
+        .outbound_phase_raw = @backingInt(incident.OutboundPhase.idle),
     };
     try admissions.admit(.{
         .publication = .{
@@ -1032,6 +1032,6 @@ fn admitFixture(
             .aggregate_generation = sequence,
         },
         .wake = .queued,
-        .kind_raw = @intFromEnum(publication.PublicationKind.first),
+        .kind_raw = @backingInt(publication.PublicationKind.first),
     }, input);
 }

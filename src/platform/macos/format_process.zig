@@ -112,10 +112,10 @@ fn copyJob(req: Request) !*Job {
         gpa.free(argv);
     }
     for (req.argv) |a| {
-        argv[n_argv] = try gpa.dupeZ(u8, a);
+        argv[n_argv] = try gpa.dupeSentinel(u8, a, 0);
         n_argv += 1;
     }
-    const cwd = try gpa.dupeZ(u8, req.cwd);
+    const cwd = try gpa.dupeSentinel(u8, req.cwd, 0);
     errdefer gpa.free(cwd);
     var env: ?[][:0]u8 = null;
     var n_env: usize = 0;
@@ -127,7 +127,7 @@ fn copyJob(req: Request) !*Job {
         var count: usize = 0;
         while (envp[count] != null) count += 1;
         env = try gpa.alloc([:0]u8, count);
-        while (n_env < count) : (n_env += 1) env.?[n_env] = try gpa.dupeZ(u8, std.mem.span(envp[n_env].?));
+        while (n_env < count) : (n_env += 1) env.?[n_env] = try gpa.dupeSentinel(u8, std.mem.span(envp[n_env].?), 0);
     }
     const stdin = try gpa.dupe(u8, req.stdin);
     job.* = .{ .id = next_id.fetchAdd(1, .monotonic), .argv = argv, .cwd = cwd, .env = env, .stdin = stdin, .timeout_ms = req.timeout_ms };
@@ -460,7 +460,7 @@ test "EFP2 실행기 — 시한이면 그룹째 끝내고(손자까지) 거둔�
         defer testing.allocator.free(gc);
         const gpid = try std.fmt.parseInt(std.c.pid_t, std.mem.trim(u8, gc, " \n"), 10);
         sleepMs(50);
-        try testing.expect(std.c.kill(gpid, @enumFromInt(0)) != 0); // 손자도 없다(신호 0 — 있는지만 본다)
+        try testing.expect(std.c.kill(gpid, @fromBackingInt(@intCast(0))) != 0); // 손자도 없다(신호 0 — 있는지만 본다)
     }
     {
         // stdout 상한 — 끝없이 쓰는 자식을 그룹째 끝낸다.

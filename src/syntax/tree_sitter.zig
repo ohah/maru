@@ -23,9 +23,7 @@
 const std = @import("std");
 const predicate = @import("predicate.zig");
 
-const c = @cImport({
-    @cInclude("tree_sitter/api.h");
-});
+const c = @import("tree_sitter_c");
 
 /// grammar가 내보내는 진입점. `parser.c`가 이 이름으로 정의한다.
 extern fn tree_sitter_zig() *const c.TSLanguage;
@@ -252,7 +250,7 @@ const grammar_table = [_]GrammarEntry{
 };
 
 /// 쿼리 캐시 칸 — 표와 **같은 색인**이다. 언어마다 하나이고 프로세스 수명이다(아래 `queryFor`).
-var query_cells = [_]std.atomic.Value(?*c.TSQuery){.init(null)} ** grammar_table.len;
+var query_cells = @as([grammar_table.len]std.atomic.Value(?*c.TSQuery), @splat(.init(null)));
 
 /// 언어별 하이라이트 쿼리 — **프로세스 수명 동안 한 번만 만든다.** 두 가지가 이것을 요구한다:
 ///
@@ -3609,7 +3607,7 @@ test "PRD4 `not-` 접두는 결과를 뒤집는다 — 번들 쿼리엔 아직 �
 test "PRD5 번들 쿼리의 정규식은 전부 `PRD2` 표에 있고, 표의 정규식은 전부 번들 쿼리가 쓴다 — grammar 를 더하면 표를 다시 뽑게 한다" {
     // 표를 다시 뽑는 일이 사람의 기억에만 있어 BL2(Swift)에서 빠질 뻔했다. 정규식은 tree-sitter 가 해석한 **뒤** 값으로 잰다
     // (`ts_query_string_value_for_id` — 평가 자리 `predicatePasses` 와 같은 값). 다시 뽑기: `tools/editor/predicate_oracle.py`.
-    var used = [_]bool{false} ** predicate.oracle.len;
+    var used = @as([predicate.oracle.len]bool, @splat(false));
     var missing: usize = 0;
     inline for (grammar_table) |g| {
         const query = queryFor(slotFor(g.lang).?).?;

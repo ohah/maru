@@ -14,7 +14,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.next() != null or executable_raw.len == 0) return error.InvalidExecutable;
     const executable_path = try std.Io.Dir.cwd().realPathFileAlloc(io, executable_raw, allocator);
     defer allocator.free(executable_path);
-    const executable = try allocator.dupeZ(u8, executable_path);
+    const executable = try allocator.dupeSentinel(u8, executable_path, 0);
     defer allocator.free(executable);
 
     var random: [16]u8 = undefined;
@@ -23,28 +23,29 @@ pub fn main(init: std.process.Init) !void {
     random[8] = (random[8] & 0x3f) | 0x80;
     const compact = std.fmt.bytesToHex(random, .lower);
     var uuid_storage: [37:0]u8 = undefined;
-    const uuid = try std.fmt.bufPrintZ(
+    const uuid = try std.fmt.bufPrintSentinel(
         &uuid_storage,
         "{s}-{s}-{s}-{s}-{s}",
         .{ compact[0..8], compact[8..12], compact[12..16], compact[16..20], compact[20..32] },
+        0,
     );
     var root_storage: [48:0]u8 = undefined;
-    const root = try std.fmt.bufPrintZ(&root_storage, "/tmp/mn-{s}", .{compact});
+    const root = try std.fmt.bufPrintSentinel(&root_storage, "/tmp/mn-{s}", .{compact}, 0);
     if (c.mkdir(root.ptr, 0o700) != 0) return error.CreateRootFailed;
     var host_proved_gone = false;
     defer if (host_proved_gone) std.Io.Dir.cwd().deleteTree(io, root) catch {};
     var session_storage: [52:0]u8 = undefined;
-    const session = try std.fmt.bufPrintZ(&session_storage, "{s}/s", .{root});
+    const session = try std.fmt.bufPrintSentinel(&session_storage, "{s}/s", .{root}, 0);
     if (c.mkdir(session.ptr, 0o700) != 0) return error.CreateRootFailed;
     var helper_storage: [52:0]u8 = undefined;
-    const helper = try std.fmt.bufPrintZ(&helper_storage, "{s}/h", .{root});
+    const helper = try std.fmt.bufPrintSentinel(&helper_storage, "{s}/h", .{root}, 0);
     if (c.mkdir(helper.ptr, 0o700) != 0) return error.CreateRootFailed;
 
     const absolute_deadline = std.Io.Clock.awake.now(io).nanoseconds + 15 * std.time.ns_per_s;
     var deadline_storage: [48:0]u8 = undefined;
-    const deadline = try std.fmt.bufPrintZ(&deadline_storage, "{d}", .{absolute_deadline});
+    const deadline = try std.fmt.bufPrintSentinel(&deadline_storage, "{d}", .{absolute_deadline}, 0);
     var visible_storage: [80:0]u8 = undefined;
-    const visible = try std.fmt.bufPrintZ(&visible_storage, "{s}-gui-zero", .{uuid});
+    const visible = try std.fmt.bufPrintSentinel(&visible_storage, "{s}-gui-zero", .{uuid}, 0);
     var environment: [1:null]?[*:0]const u8 = @splat(null);
     var prepare_argv: [9:null]?[*:0]const u8 = .{
         executable.ptr,
@@ -81,9 +82,9 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, receipt.value.schema, "maru.session-host-notification-runtime-preparation.v1") or
         receipt.value.host_id.len != 32 or receipt.value.runtime_id.len != 32 or receipt.value.event_id != 1)
         return error.InvalidReceipt;
-    const host = try allocator.dupeZ(u8, receipt.value.host_id);
+    const host = try allocator.dupeSentinel(u8, receipt.value.host_id, 0);
     defer allocator.free(host);
-    const runtime = try allocator.dupeZ(u8, receipt.value.runtime_id);
+    const runtime = try allocator.dupeSentinel(u8, receipt.value.runtime_id, 0);
     defer allocator.free(runtime);
 
     var cleanup_argv: [7:null]?[*:0]const u8 = .{

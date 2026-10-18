@@ -37,7 +37,7 @@ pub const PreparedReconnectDispatch = struct {
     },
     attempt_generation: u64 = 0,
     lifecycle: PreparedReconnectDispatch.Lifecycle = .pristine,
-    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+    seal: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
 };
 
 pub const Projection = struct {
@@ -66,7 +66,7 @@ pub const Owner = struct {
     next_attempt_generation: u64 = 1,
     count: u8 = 0,
     lifecycle_raw: u8 = 0,
-    rows: [capacity]Row = [_]Row{.{}} ** capacity,
+    rows: [capacity]Row = @as([capacity]Row, @splat(.{})),
 
     pub fn initInPlace(self: *Owner, process_nonce: u64) Error!void {
         const pid = process_seal.currentProcessId();
@@ -76,12 +76,12 @@ pub const Owner = struct {
         self.pid = pid;
         self.process_nonce = process_nonce;
         self.owner_thread = @intCast(std.Thread.getCurrentId());
-        self.lifecycle_raw = @intFromEnum(Lifecycle.ready);
+        self.lifecycle_raw = @backingInt(Lifecycle.ready);
     }
 
     pub fn admit(self: *Owner, result: publication.IncidentCommitResult, input: publication.IncidentInput) Error!void {
-        if (result.kind_raw != @intFromEnum(publication.PublicationKind.first) or
-            input.disposition_raw != @intFromEnum(@import("maru").observability.connection_incident.Disposition.reconnect))
+        if (result.kind_raw != @backingInt(publication.PublicationKind.first) or
+            input.disposition_raw != @backingInt(@import("maru").observability.connection_incident.Disposition.reconnect))
             return error.InvalidOwner;
         try self.preflight(input);
         // Owner-thread serialization makes this suffix no-fail after the identical preflight.
@@ -90,7 +90,7 @@ pub const Owner = struct {
 
     pub fn preflight(self: *Owner, input: publication.IncidentInput) Error!void {
         try self.validate();
-        if (input.disposition_raw != @intFromEnum(@import("maru").observability.connection_incident.Disposition.reconnect))
+        if (input.disposition_raw != @backingInt(@import("maru").observability.connection_incident.Disposition.reconnect))
             return error.InvalidOwner;
         for (&self.rows) |*row| {
             if (row.lifecycle != .pristine and row.admission.host_id == input.host_id and
@@ -106,8 +106,8 @@ pub const Owner = struct {
         input: publication.IncidentInput,
     ) void {
         self.validate() catch process_seal.fatalIntegrity(.incident_authority);
-        if (result.kind_raw != @intFromEnum(publication.PublicationKind.first) or
-            input.disposition_raw != @intFromEnum(@import("maru").observability.connection_incident.Disposition.reconnect))
+        if (result.kind_raw != @backingInt(publication.PublicationKind.first) or
+            input.disposition_raw != @backingInt(@import("maru").observability.connection_incident.Disposition.reconnect))
             process_seal.fatalIntegrity(.incident_authority);
         var target: ?*Row = null;
         for (&self.rows) |*row| {
@@ -127,7 +127,7 @@ pub const Owner = struct {
             .connection_generation = input.connection_generation,
             .incident_id = result.publication.incident_id,
             .disposition_raw = input.disposition_raw,
-            .lifecycle_raw = @intFromEnum(publication.ReconnectAdmissionLifecycle.admitted),
+            .lifecycle_raw = @backingInt(publication.ReconnectAdmissionLifecycle.admitted),
         };
         value.seal = admissionSeal(value);
         row.* = .{ .generation = generation, .lifecycle = .admitted, .admission = value };
@@ -269,7 +269,7 @@ pub const Owner = struct {
     fn validate(self: *const Owner) Error!void {
         if (self.self_addr != @intFromPtr(self) or self.pid != process_seal.currentProcessId() or
             self.process_nonce == 0 or self.owner_thread != @as(u64, @intCast(std.Thread.getCurrentId())) or
-            self.lifecycle_raw != @intFromEnum(Lifecycle.ready) or self.count > capacity) return error.InvalidOwner;
+            self.lifecycle_raw != @backingInt(Lifecycle.ready) or self.count > capacity) return error.InvalidOwner;
         process_seal.validateReady(self.pid, self.process_nonce) catch return error.InvalidOwner;
         var occupied: u8 = 0;
         for (&self.rows) |*row| {
@@ -314,7 +314,7 @@ fn dispatchProjection(value: PreparedReconnectDispatch) Projection {
 }
 
 fn dispatchLifecycleValid(value: PreparedReconnectDispatch.Lifecycle) bool {
-    return @as(*const u8, @ptrCast(&value)).* <= @intFromEnum(PreparedReconnectDispatch.Lifecycle.consumed);
+    return @as(*const u8, @ptrCast(&value)).* <= @backingInt(PreparedReconnectDispatch.Lifecycle.consumed);
 }
 
 fn objectsOverlap(first: anytype, second: anytype) bool {
@@ -348,7 +348,7 @@ fn dispatchSeal(value: PreparedReconnectDispatch) process_seal.CleanupSeal {
         .incident_app_instance_nonce = value.incident_id.app_instance_nonce,
         .incident_sequence = value.incident_id.sequence,
         .attempt_generation = value.attempt_generation,
-        .lifecycle_raw = @intFromEnum(value.lifecycle),
+        .lifecycle_raw = @backingInt(value.lifecycle),
     }) catch process_seal.fatalIntegrity(.incident_authority);
 }
 
@@ -373,12 +373,12 @@ fn fixtureResult(sequence: u64, detail: bool) publication.IncidentCommitResult {
         .detail_slot = 0,
         .aggregate_slot = 0,
         .aggregate_generation = 1,
-    }, .wake = .queued, .kind_raw = @intFromEnum(publication.PublicationKind.first) };
+    }, .wake = .queued, .kind_raw = @backingInt(publication.PublicationKind.first) };
 }
 
 fn fixtureInput(generation: u64) publication.IncidentInput {
     const incident = @import("maru").observability.connection_incident;
-    return .{ .timestamp_ns = 1, .host_id = 2, .host_adapter_generation = 3, .connection_generation = generation, .wire_major = 1, .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof), .scope_raw = @intFromEnum(incident.Scope.connection), .disposition_raw = @intFromEnum(incident.Disposition.reconnect), .source_site_raw = @intFromEnum(incident.SourceSite.client_read), .host_class_raw = @intFromEnum(incident.HostClass.current), .parser_phase_raw = @intFromEnum(incident.ParserPhase.idle), .outbound_phase_raw = @intFromEnum(incident.OutboundPhase.idle) };
+    return .{ .timestamp_ns = 1, .host_id = 2, .host_adapter_generation = 3, .connection_generation = generation, .wire_major = 1, .reason_raw = @backingInt(incident.ConnectionReason.connection_eof), .scope_raw = @backingInt(incident.Scope.connection), .disposition_raw = @backingInt(incident.Disposition.reconnect), .source_site_raw = @backingInt(incident.SourceSite.client_read), .host_class_raw = @backingInt(incident.HostClass.current), .parser_phase_raw = @backingInt(incident.ParserPhase.idle), .outbound_phase_raw = @backingInt(incident.OutboundPhase.idle) };
 }
 
 test "CR0b reconnect admission owner는 first publication을 exact once 게시하고 consume한다" {
@@ -399,10 +399,10 @@ test "CR0b reconnect admission owner는 repeat와 no-retry를 mutation 없이 �
     var owner: Owner = .{};
     try owner.initInPlace(@import("client_slot.zig").ClientSlot.publicationProcessIdentity().?.process_nonce);
     var repeat = fixtureResult(1, false);
-    repeat.kind_raw = @intFromEnum(publication.PublicationKind.repeat);
+    repeat.kind_raw = @backingInt(publication.PublicationKind.repeat);
     try std.testing.expectError(error.InvalidOwner, owner.admit(repeat, fixtureInput(1)));
     var input = fixtureInput(1);
-    input.disposition_raw = @intFromEnum(@import("maru").observability.connection_incident.Disposition.no_retry);
+    input.disposition_raw = @backingInt(@import("maru").observability.connection_incident.Disposition.no_retry);
     try std.testing.expectError(error.InvalidOwner, owner.admit(fixtureResult(1, true), input));
     try std.testing.expectEqual(@as(u8, 0), owner.count);
 }

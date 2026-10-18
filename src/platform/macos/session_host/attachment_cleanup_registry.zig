@@ -12,6 +12,7 @@ const prepared_request_authority = @import("prepared_request_authority.zig");
 const rpc_response_authority = @import("rpc_response_authority.zig");
 const settlement = @import("pending_event_settlement_contract.zig");
 const process_seal = @import("process_seal_service.zig");
+const type_info_fields = @import("type_info_fields");
 
 extern "c" fn alarm(seconds: c_uint) c_uint;
 
@@ -91,12 +92,12 @@ fn fixtureRegistrySettlementBinding(
             .owner_incarnation = 3,
             .operation_incarnation = 5,
             .operation_kind_raw = 3,
-            .operation_seal = [_]u8{0x31} ** 32,
+            .operation_seal = @as([32]u8, @splat(0x31)),
         },
-        .ranges_digest = [_]u8{0x32} ** 32,
-        .pristine_digest = [_]u8{0x33} ** 32,
-        .preflight_proof_seal_digest = [_]u8{0x34} ** 32,
-        .lease_seal_digest = [_]u8{0x35} ** 32,
+        .ranges_digest = @as([32]u8, @splat(0x32)),
+        .pristine_digest = @as([32]u8, @splat(0x33)),
+        .preflight_proof_seal_digest = @as([32]u8, @splat(0x34)),
+        .lease_seal_digest = @as([32]u8, @splat(0x35)),
     };
     binding.binding_seal = try settlement.sealRuntimeSettlementBinding(binding);
     return binding;
@@ -201,27 +202,27 @@ const PolicyResult = enum {
 
 fn registryLifecycleRawValid(value: *const RegistryLifecycle) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
-    return raw <= @intFromEnum(RegistryLifecycle.dead);
+    return raw <= @backingInt(RegistryLifecycle.dead);
 }
 
 fn entryLifecycleRawValid(value: *const EntryLifecycle) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
-    return raw <= @intFromEnum(EntryLifecycle.drop_active);
+    return raw <= @backingInt(EntryLifecycle.drop_active);
 }
 
 fn controllerAuthorityRawValid(value: *const ControllerAuthority) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
-    return raw <= @intFromEnum(ControllerAuthority.revoked);
+    return raw <= @backingInt(ControllerAuthority.revoked);
 }
 
 fn eventAuthorityLifecycleRawValid(value: *const EventAuthorityLifecycle) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
-    return raw <= @intFromEnum(EventAuthorityLifecycle.terminal);
+    return raw <= @backingInt(EventAuthorityLifecycle.terminal);
 }
 
 fn eventOrderingClassRawValid(value: *const EventOrderingClass) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
-    return raw <= @intFromEnum(EventOrderingClass.controller_revoke);
+    return raw <= @backingInt(EventOrderingClass.controller_revoke);
 }
 
 fn rangesOverlap(a_addr: usize, a_len: usize, b_addr: usize, b_len: usize) bool {
@@ -434,7 +435,7 @@ pub const AttachmentCleanupRegistry = struct {
     connection_ordering_blocker_count: usize = 0,
     active_rpc_recovery_entry_plus_one: u16 = 0,
     lifecycle: RegistryLifecycle = .pristine,
-    entries: [max_entries]Entry = [_]Entry{.{}} ** max_entries,
+    entries: [max_entries]Entry = @as([max_entries]Entry, @splat(.{})),
 
     pub fn initInPlace(out: *AttachmentCleanupRegistry, incarnation: u64) Error!void {
         if (incarnation == 0) return error.InvalidIdentity;
@@ -1595,7 +1596,7 @@ pub const AttachmentCleanupRegistry = struct {
             .stream_id = entry.stream_id,
             .event_generation = receipt.event_generation,
             .event_owner_addr = receipt.owner_addr,
-            .ordering_class_raw = @intFromEnum(authority.ordering_class),
+            .ordering_class_raw = @backingInt(authority.ordering_class),
             .expected_blocker_count = self.connection_ordering_blocker_count,
         };
     }
@@ -1626,7 +1627,7 @@ pub const AttachmentCleanupRegistry = struct {
             canonical.node_incarnation != permit.event_node_incarnation or
             authority.active_generation != permit.event_generation or
             authority.active_owner_addr != permit.event_owner_addr or
-            @intFromEnum(authority.ordering_class) != permit.ordering_class_raw or
+            @backingInt(authority.ordering_class) != permit.ordering_class_raw or
             self.connection_ordering_blocker_count != permit.expected_blocker_count or
             authority.completion_addr != 0 or authority.registered_operation_id != 0)
             process_seal.fatalIntegrity(.proof_loss);
@@ -1657,7 +1658,7 @@ pub const AttachmentCleanupRegistry = struct {
             canonical.node_incarnation == permit.event_node_incarnation and
             authority.active_generation == permit.event_generation and
             authority.active_owner_addr == permit.event_owner_addr and
-            @intFromEnum(authority.ordering_class) == permit.ordering_class_raw and
+            @backingInt(authority.ordering_class) == permit.ordering_class_raw and
             self.connection_ordering_blocker_count == permit.expected_blocker_count and
             authority.completion_addr == 0 and authority.registered_operation_id == 0;
     }
@@ -1691,15 +1692,15 @@ pub const AttachmentCleanupRegistry = struct {
             .pid = ready.pid,
             .process_nonce = ready.process_nonce,
             .thread_id = @intCast(std.Thread.getCurrentId()),
-            .role_raw = @intFromEnum(settlement.EventReleaseLeafRole.registry),
+            .role_raw = @backingInt(settlement.EventReleaseLeafRole.registry),
             .identity_a = permit.registry_incarnation,
             .identity_b = permit.binding_reservation_id,
             .identity_c = permit.event_node_incarnation,
             .identity_d = permit.event_generation,
             .before_a = blocker_before,
-            .before_b = @intFromEnum(EventAuthorityLifecycle.releasing),
+            .before_b = @backingInt(EventAuthorityLifecycle.releasing),
             .after_a = self.connection_ordering_blocker_count,
-            .after_b = @intFromEnum(EventAuthorityLifecycle.idle),
+            .after_b = @backingInt(EventAuthorityLifecycle.idle),
         };
         receipt.seal = settlement.sealEventReleaseLeafReceipt(receipt) catch
             process_seal.fatalIntegrity(.proof_loss);
@@ -2108,7 +2109,7 @@ pub const AttachmentCleanupRegistry = struct {
 
 fn admissionContextRawValid(value: *const AdmissionContext) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
-    return raw <= @intFromEnum(AdmissionContext.execute_rpc);
+    return raw <= @backingInt(AdmissionContext.execute_rpc);
 }
 
 fn policyDecision(result: PolicyResult) AdmissionError!AdmissionDecision {
@@ -2867,7 +2868,7 @@ test "B3-2 private destination admission exhausts context policy and raw discrim
 
     var context: AdmissionContext = .prepare;
     const context_raw: *u8 = @ptrCast(&context);
-    var raw: u16 = @intFromEnum(AdmissionContext.execute_rpc) + 1;
+    var raw: u16 = @backingInt(AdmissionContext.execute_rpc) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         context_raw.* = @intCast(raw);
         try std.testing.expectEqual(PolicyResult.invalid_destination, classifyEntryPolicy(
@@ -2884,7 +2885,7 @@ test "B3-2 private destination admission exhausts context policy and raw discrim
     entry.stream_id = 0;
     entry.controller_authority = .unavailable;
     var invalid_lifecycle: EntryLifecycle = .reserved;
-    raw = @intFromEnum(EntryLifecycle.drop_active) + 1;
+    raw = @backingInt(EntryLifecycle.drop_active) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         @as(*u8, @ptrCast(&invalid_lifecycle)).* = @intCast(raw);
         entry.lifecycle = invalid_lifecycle;
@@ -2900,7 +2901,7 @@ test "B3-2 private destination admission exhausts context policy and raw discrim
 
     entry.lifecycle = .reserved;
     var invalid_authority: ControllerAuthority = .unavailable;
-    raw = @intFromEnum(ControllerAuthority.revoked) + 1;
+    raw = @backingInt(ControllerAuthority.revoked) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         @as(*u8, @ptrCast(&invalid_authority)).* = @intCast(raw);
         entry.controller_authority = invalid_authority;
@@ -2916,7 +2917,7 @@ test "B3-2 private destination admission exhausts context policy and raw discrim
 
     entry.controller_authority = .unavailable;
     var invalid_role: contract.AttachmentRole = .controller;
-    raw = @intFromEnum(contract.AttachmentRole.observer) + 1;
+    raw = @backingInt(contract.AttachmentRole.observer) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         @as(*u8, @ptrCast(&invalid_role)).* = @intCast(raw);
         var identity = reserved.identity;
@@ -2932,7 +2933,7 @@ test "B3-2 private destination admission exhausts context policy and raw discrim
     }
 
     var invalid_tag: contract.RuntimeRequestTag = .attach_controller;
-    raw = @intFromEnum(contract.RuntimeRequestTag.attach_observer) + 1;
+    raw = @backingInt(contract.RuntimeRequestTag.attach_observer) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         @as(*u8, @ptrCast(&invalid_tag)).* = @intCast(raw);
         try std.testing.expectEqual(PolicyResult.invalid_receipt, classifyEntryPolicy(
@@ -2946,7 +2947,7 @@ test "B3-2 private destination admission exhausts context policy and raw discrim
     }
 
     var invalid_family: contract.RequestFamily = .attach_only;
-    raw = @intFromEnum(contract.RequestFamily.bound_terminal) + 1;
+    raw = @backingInt(contract.RequestFamily.bound_terminal) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         @as(*u8, @ptrCast(&invalid_family)).* = @intCast(raw);
         try std.testing.expectEqual(PolicyResult.invalid_receipt, classifyEntryPolicy(
@@ -2981,7 +2982,7 @@ test "B3-2 private destination admission rejects canonical splice and same-addre
     try registry.publishPreparedRequest(reserved.reservation, reserved.identity, prepared);
 
     const before = registry;
-    inline for (std.meta.fields(contract.BindingIdentity)) |field| {
+    inline for (type_info_fields.fields(contract.BindingIdentity)) |field| {
         var foreign_identity = reserved.identity;
         if (field.type == contract.AttachmentRole)
             @field(foreign_identity, field.name) = .observer
@@ -2996,7 +2997,7 @@ test "B3-2 private destination admission rejects canonical splice and same-addre
             0,
         ));
     }
-    inline for (std.meta.fields(Reservation)) |field| {
+    inline for (type_info_fields.fields(Reservation)) |field| {
         var foreign_reservation = reserved.reservation;
         @field(foreign_reservation, field.name) +%= 1;
         try std.testing.expectError(error.InvalidOwner, registry.preparedAttachAdmission(
@@ -3024,7 +3025,7 @@ test "B3-2 private destination admission rejects canonical splice and same-addre
         prepared.receipt,
         0,
     ));
-    inline for (std.meta.fields(contract.PreparedCallReceipt)) |field| {
+    inline for (type_info_fields.fields(contract.PreparedCallReceipt)) |field| {
         var foreign_receipt = prepared.receipt;
         @field(foreign_receipt, field.name) +%= 1;
         try std.testing.expectError(error.InvalidReceipt, registry.preparedAttachAdmission(
@@ -3158,12 +3159,12 @@ test "CR3a-2c3a controller revoke authority is canonical absorbing and raw-tag g
     ));
     const entry = &registry.entries[reserved.reservation.entry_index];
     const authority_raw: *u8 = @ptrCast(&entry.controller_authority);
-    authority_raw.* = @intFromEnum(ControllerAuthority.revoked) + 1;
+    authority_raw.* = @backingInt(ControllerAuthority.revoked) + 1;
     try std.testing.expectError(
         error.InvalidState,
         registry.controllerRevokePending(reserved.reservation, reserved.identity, 41),
     );
-    authority_raw.* = @intFromEnum(ControllerAuthority.revoke_pending);
+    authority_raw.* = @backingInt(ControllerAuthority.revoke_pending);
     try registry.finishControllerRevoke(reserved.reservation, reserved.identity, 41);
     try std.testing.expect(!(try registry.controllerAuthorityLive(
         reserved.reservation,
@@ -3186,7 +3187,7 @@ test "CR3a-2c3a authority entrypoints reject every invalid enclosing raw lifecyc
     try registry.bindStream(reserved.reservation, reserved.identity, 43);
 
     const registry_raw: *u8 = @ptrCast(&registry.lifecycle);
-    var raw: u16 = @intFromEnum(RegistryLifecycle.dead) + 1;
+    var raw: u16 = @backingInt(RegistryLifecycle.dead) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         registry_raw.* = @intCast(raw);
         try std.testing.expectError(error.MovedOrCopied, registry.controllerAuthorityLive(
@@ -3210,11 +3211,11 @@ test "CR3a-2c3a authority entrypoints reject every invalid enclosing raw lifecyc
             43,
         ));
     }
-    registry_raw.* = @intFromEnum(RegistryLifecycle.live);
+    registry_raw.* = @backingInt(RegistryLifecycle.live);
 
     const entry = &registry.entries[reserved.reservation.entry_index];
     const entry_raw: *u8 = @ptrCast(&entry.lifecycle);
-    raw = @intFromEnum(EntryLifecycle.drop_active) + 1;
+    raw = @backingInt(EntryLifecycle.drop_active) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         entry_raw.* = @intCast(raw);
         try std.testing.expectError(error.InvalidState, registry.controllerAuthorityLive(
@@ -3238,7 +3239,7 @@ test "CR3a-2c3a authority entrypoints reject every invalid enclosing raw lifecyc
             43,
         ));
     }
-    entry_raw.* = @intFromEnum(EntryLifecycle.bound);
+    entry_raw.* = @backingInt(EntryLifecycle.bound);
     try registry.beginControllerRevoke(reserved.reservation, reserved.identity, 43);
     try registry.finishControllerRevoke(reserved.reservation, reserved.identity, 43);
     try registry.beginBoundDrop(reserved.reservation, reserved.identity, 43);
@@ -3251,7 +3252,7 @@ test "CR3a-2c3a reserve rejects every invalid raw role before publication" {
     try AttachmentCleanupRegistry.initInPlace(&registry, 0x2C3F);
     var seed = fixtureSeed(0x2C40, 0x2C41);
     const role_raw: *u8 = @ptrCast(&seed.role);
-    var raw: u16 = @intFromEnum(contract.AttachmentRole.observer) + 1;
+    var raw: u16 = @backingInt(contract.AttachmentRole.observer) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         role_raw.* = @intCast(raw);
         try std.testing.expectError(error.InvalidIdentity, registry.reserve(seed));
@@ -3482,14 +3483,14 @@ test "CR3a-2c3d C2 event authority lifecycle and rollback burn are canonical" {
         "releasing",
         "terminal",
     };
-    const actual_tags = std.meta.fields(EventAuthorityLifecycle);
+    const actual_tags = type_info_fields.fields(EventAuthorityLifecycle);
     try std.testing.expectEqual(expected_tags.len, actual_tags.len);
     inline for (actual_tags, 0..) |actual, index|
         try std.testing.expectEqualStrings(expected_tags[index], actual.name);
     for (0..256) |raw| {
         var authority: EventAuthority = .{};
         @as(*u8, @ptrCast(&authority.lifecycle)).* = @intCast(raw);
-        try std.testing.expectEqual(raw <= @intFromEnum(EventAuthorityLifecycle.terminal), eventAuthorityLifecycleRawValid(&authority.lifecycle));
+        try std.testing.expectEqual(raw <= @backingInt(EventAuthorityLifecycle.terminal), eventAuthorityLifecycleRawValid(&authority.lifecycle));
     }
 
     var registry: AttachmentCleanupRegistry = .{};
@@ -3679,7 +3680,7 @@ test "CR3a-2c3d C2 event authority lifecycle and rollback burn are canonical" {
 
 test "C3-3a1 ordering class remains closed and ordinary events join the all-event blocker" {
     const expected = [_][]const u8{ "none", "non_revoke_effect", "controller_revoke" };
-    const actual = std.meta.fields(EventOrderingClass);
+    const actual = type_info_fields.fields(EventOrderingClass);
     try std.testing.expectEqual(expected.len, actual.len);
     inline for (actual, 0..) |field, index|
         try std.testing.expectEqualStrings(expected[index], field.name);
@@ -3687,7 +3688,7 @@ test "C3-3a1 ordering class remains closed and ordinary events join the all-even
         var ordering: EventOrderingClass = .none;
         @as(*u8, @ptrCast(&ordering)).* = @intCast(raw);
         try std.testing.expectEqual(
-            raw <= @intFromEnum(EventOrderingClass.controller_revoke),
+            raw <= @backingInt(EventOrderingClass.controller_revoke),
             eventOrderingClassRawValid(&ordering),
         );
     }

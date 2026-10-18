@@ -63,7 +63,7 @@ test "candidate gate executes exact mounted CLI then publishes one canonical hel
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
     var output_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    const output_path = try std.fmt.bufPrintZ(&output_buf, "{s}/signed-cli-ssh.json", .{root[0..len]});
+    const output_path = try std.fmt.bufPrintSentinel(&output_buf, "{s}/signed-cli-ssh.json", .{root[0..len]}, 0);
     var capture: [128]u8 = undefined;
     var gate: subject.Gate = .{};
     try gate.init(std.testing.allocator, std.testing.io, inputs(output_path), &capture);
@@ -133,7 +133,7 @@ test "candidate gate never overwrites an occupied evidence destination" {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
     var output_buf: [std.fs.max_path_bytes:0]u8 = undefined;
-    const output_path = try std.fmt.bufPrintZ(&output_buf, "{s}/signed-cli-ssh.json", .{root[0..len]});
+    const output_path = try std.fmt.bufPrintSentinel(&output_buf, "{s}/signed-cli-ssh.json", .{root[0..len]}, 0);
     var gate: subject.Gate = .{};
     var capture: [128]u8 = undefined;
     var fake = FakeRunner{};

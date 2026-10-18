@@ -177,8 +177,8 @@ test "업그레이드 스캔 판정 — resumed·거절(conflict 제외)만 다�
     for (cases) |case| try testing.expectEqual(case.expected, afterPrepare(case.resolution));
 
     // 표가 모든 변형을 덮는지 — 새 `AttemptStatus`·`Resolution` 변형이 판정 없이 새어 들어오지 않게 센다.
-    const status_count = @typeInfo(upgrade_wire.AttemptStatus).@"enum".fields.len;
-    const plain_variants = @typeInfo(Resolution).@"union".fields.len - 2; // completed·reconnected_old_image 제외
+    const status_count = @import("type_info_fields").enumFields(upgrade_wire.AttemptStatus).len;
+    const plain_variants = @import("type_info_fields").unionFields(Resolution).len - 2; // completed·reconnected_old_image 제외
     try testing.expectEqual(plain_variants + 2 * status_count, cases.len);
 }
 

@@ -170,7 +170,7 @@ test "bundle paths are canonical distinct inputs before deadline or authority ac
 
     value = inputs(&cli);
     var duplicate_storage: [128:0]u8 = @splat(0);
-    value.bundles.dmg_bundle = try std.fmt.bufPrintZ(&duplicate_storage, "{s}", .{value.paths.dmg});
+    value.bundles.dmg_bundle = try std.fmt.bufPrintSentinel(&duplicate_storage, "{s}", .{value.paths.dmg}, 0);
     try std.testing.expectError(error.InvalidPath, product.run(std.testing.io, std.testing.allocator, value, "token", &scratch, std.time.ns_per_s, &execution));
     try std.testing.expect(execution.isPristineForComposition());
 }

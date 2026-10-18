@@ -53,11 +53,11 @@ pub const ResolvedTheme = struct {
     // ANSI 16색(0~15) config override. null=그 인덱스는 기본 xterm 표준색(color.ansi16/xterm256). 렌더(metal_frame)가
     // `.indexed` 색을 풀 때 OSC4 override → 이 config base → xterm256 순으로 폴백한다(OSC4가 없을 때만 이 값이 보인다).
     // 명시 색은 다른 테마 색과 같은 #RRGGBB 검증을 거친다(깨진 색은 resolveTheme에서 막힌다).
-    palette: [16]?color.Rgb = .{null} ** 16,
+    palette: [16]?color.Rgb = @splat(null),
     // 구문 색 역할별 override(resolve된 Rgb, null=파생). **여기서는 대비 보정을 걸지 않는다** —
     // 역할마다 목표 대비가 다르므로(본문 4.0 · comment/punctuation 2.4) `syntax_theme.fromTheme`가
     // 자기 자리에서 건다. 여기서 한 번 더 걸면 두 번 보정된다.
-    syntax: [theme.syntax_role_count]?color.Rgb = .{null} ** theme.syntax_role_count,
+    syntax: [theme.syntax_role_count]?color.Rgb = @splat(null),
     // theme.min-contrast 목표 명암비(resolve된 값 그대로). 위 palette는 이 값으로 이미 선보정돼 있고,
     // 렌더(metal_frame)가 팔레트 밖 색(256색 16~255·truecolor)의 per-cell 하한에 같은 값을 쓴다 —
     // 렌더 배선의 단일 출처를 resolve 결과에 둔다(config 원값을 렌더가 따로 읽지 않게). 0=끔.
@@ -197,7 +197,7 @@ fn resolveTheme(config: theme.ThemeConfig, min_contrast: f32) ResolveError!Resol
     // min_contrast=0(둘 다 floor 무동작)에선 미지정 인덱스가 전부 null로 남아 **기존 동작을 100% 보존**한다(회귀 0). floor가
     // 실제로 바꾼 default 색만 non-null로 seed해 렌더에 전달한다. 깨진 override 색은 여기서 막힌다(loader가 valid만 담지만,
     // resolve 단독 호출·테스트도 같은 게이트를 거치게 한다).
-    var palette: [16]?color.Rgb = .{null} ** 16;
+    var palette: [16]?color.Rgb = @splat(null);
     for (config.palette, 0..) |maybe, i| {
         if (maybe) |hex| {
             palette[i] = contrastFloor(try parseHexColor(hex), bg_lum, min_contrast, .darken_only);
@@ -208,7 +208,7 @@ fn resolveTheme(config: theme.ThemeConfig, min_contrast: f32) ResolveError!Resol
         }
     }
     // 구문 색 역할 override를 푼다. 깨진 색은 여기서 막힌다(팔레트와 같은 게이트).
-    var syntax: [theme.syntax_role_count]?color.Rgb = .{null} ** theme.syntax_role_count;
+    var syntax: [theme.syntax_role_count]?color.Rgb = @splat(null);
     for (config.syntax, 0..) |maybe, i| {
         if (maybe) |hex| syntax[i] = try parseHexColor(hex);
     }
@@ -367,7 +367,7 @@ test "appearance resolver propagates ANSI palette overrides and keeps unset indi
     for (default_resolved.theme.palette) |c| try std.testing.expect(c == null);
 
     // non-null만 변환·전파, 나머지는 null 유지. 인덱스 0(black)과 9(bright red)만 override.
-    var raw: [16]?[]const u8 = .{null} ** 16;
+    var raw: [16]?[]const u8 = @splat(null);
     raw[0] = "#ff0000";
     raw[9] = "#00ff00";
     const resolved = try resolve(.{ .theme = .{ .palette = raw } });
@@ -377,10 +377,10 @@ test "appearance resolver propagates ANSI palette overrides and keeps unset indi
     try std.testing.expect(resolved.theme.palette[15] == null);
 
     // 명시 palette 색도 다른 테마 색과 같은 #RRGGBB 검증을 거친다(깨진 색은 resolveTheme에서 막힌다).
-    var bad: [16]?[]const u8 = .{null} ** 16;
+    var bad: [16]?[]const u8 = @splat(null);
     bad[3] = "#zzzzzz";
     try std.testing.expectError(error.InvalidHexColorDigit, resolve(.{ .theme = .{ .palette = bad } }));
-    var bad_fmt: [16]?[]const u8 = .{null} ** 16;
+    var bad_fmt: [16]?[]const u8 = @splat(null);
     bad_fmt[7] = "nope";
     try std.testing.expectError(error.InvalidHexColorFormat, resolve(.{ .theme = .{ .palette = bad_fmt } }));
 }
@@ -391,7 +391,7 @@ test "theme.min-contrast floors low-contrast ANSI palette colors on light backgr
     const white = color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff };
     const bg_lum = relativeLuminance(white);
 
-    var raw: [16]?[]const u8 = .{null} ** 16;
+    var raw: [16]?[]const u8 = @splat(null);
     raw[11] = "#ffff00"; // bright yellow — 흰 배경 대비 ~1.07(거의 안 보임)
     raw[15] = "#ffffff"; // bright white — 대비 1.0(완전히 안 보임)
     raw[4] = "#000080"; // blue — 대비 ~16(이미 충분, 무변경 대조군)
@@ -425,14 +425,14 @@ test "theme.min-contrast seeds only floor-changed default indices on light backg
 
 test "theme.min-contrast is a no-op on dark backgrounds and when disabled" {
     // 다크 배경: 어둡게 해도 대비가 안 올라(목표 미달) 원본 유지 → 다크 프리셋 팔레트 불변, 미지정 default는 null.
-    var raw: [16]?[]const u8 = .{null} ** 16;
+    var raw: [16]?[]const u8 = @splat(null);
     raw[15] = "#ffffff";
     const dark = try resolve(.{ .theme = .{ .background = "#101010", .foreground = "#e8e8e8", .palette = raw } });
     try std.testing.expectEqual(@as(?color.Rgb, color.Rgb{ .r = 0xff, .g = 0xff, .b = 0xff }), dark.theme.palette[15]);
     try std.testing.expect(dark.theme.palette[0] == null); // 미지정 default는 다크 배경서 floor 무동작 → null 유지
 
     // min-contrast=0(끔): 밝은 배경이어도 업스트림 원색을 그대로 보존한다(사용자가 명시적으로 끈 것 — 표준값 우선).
-    var raw2: [16]?[]const u8 = .{null} ** 16;
+    var raw2: [16]?[]const u8 = @splat(null);
     raw2[11] = "#ffff00";
     const off = try resolve(.{ .theme = .{ .background = "#ffffff", .foreground = "#000000", .palette = raw2 }, .theme_min_contrast = 0 });
     try std.testing.expectEqual(@as(?color.Rgb, color.Rgb{ .r = 0xff, .g = 0xff, .b = 0x00 }), off.theme.palette[11]);
@@ -446,7 +446,7 @@ test "theme.min-contrast activation boundary: dark presets stay no-op but medium
 
     // (a) 번들 다크 프리셋 배경(#101010, bg_lum≈0.006): 검정으로도 목표를 못 넘어 floor 무동작. 어두워서 저대비인 색
     //     (dark blue #000080, 대비≈1.2)조차 손대지 않는다 — 어둡게 해봐야 대비가 더 안 오른다.
-    var raw: [16]?[]const u8 = .{null} ** 16;
+    var raw: [16]?[]const u8 = @splat(null);
     raw[4] = "#000080";
     const dark = try resolve(.{ .theme = .{ .background = "#101010", .foreground = "#e8e8e8", .palette = raw } });
     try std.testing.expectEqual(@as(?color.Rgb, color.Rgb{ .r = 0x00, .g = 0x00, .b = 0x80 }), dark.theme.palette[4]);

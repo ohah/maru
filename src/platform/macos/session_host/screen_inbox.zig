@@ -15,7 +15,7 @@ const Entry = struct {
 
 pub const RecoveryTable = struct {
     entries: [client_queue_limits.max_recovery_streams]Entry =
-        [_]Entry{.{}} ** client_queue_limits.max_recovery_streams,
+        @as([client_queue_limits.max_recovery_streams]Entry, @splat(.{})),
     count: u16 = 0,
 
     pub fn valid(self: *const RecoveryTable) bool {

@@ -245,7 +245,7 @@ fn bootstrapProcessSeal() !process_seal_service.ReadyIdentity {
 fn selfImageBuildId(allocator: std.mem.Allocator, io: std.Io) ?[]u8 {
     const self_path = std.process.executablePathAlloc(io, allocator) catch return null;
     defer allocator.free(self_path);
-    const self_path_z = allocator.dupeZ(u8, self_path) catch return null;
+    const self_path_z = allocator.dupeSentinel(u8, self_path, 0) catch return null;
     defer allocator.free(self_path_z);
     return host_manifest.buildIdForExecutable(allocator, self_path_z) catch null;
 }
@@ -273,7 +273,7 @@ fn activateValidated(
     const deadline = try validated.deadline(io);
     try checkRoleDeadline(invocation.role, deadline);
     var inherited_close = try validated.prepareInheritedClose();
-    const session_dir = try allocator.dupeZ(u8, invocation.session_dir);
+    const session_dir = try allocator.dupeSentinel(u8, invocation.session_dir, 0);
     defer allocator.free(session_dir);
 
     var owner_path_buf: [832]u8 = undefined;
@@ -348,7 +348,7 @@ fn activateValidated(
     // activation marker 를 영영 보지 못했다). 격리를 들여온 쪽이 이 자리도 함께 옮겨야 한다.
     var socket_dir_buf: [272]u8 = undefined;
     const socket_dir = try short_endpoint.currentSocketDirPathIn(&socket_dir_buf);
-    const socket_path = try allocator.dupeZ(u8, invocation.socket_path);
+    const socket_path = try allocator.dupeSentinel(u8, invocation.socket_path, 0);
     defer allocator.free(socket_path);
     var server = try socket_server.SocketServer.bind(
         allocator,
@@ -915,10 +915,11 @@ test "CR4a restore exec bootstrap은 graph 접근 전에 fresh process seal을 �
         // 같은 PID exec 뒤 위 child branch가 이를 NotReady로 관측해야 증거가 된다.
         _ = bootstrapProcessSeal() catch c._exit(125);
         var pid_env_buf: [96]u8 = undefined;
-        const pid_env = std.fmt.bufPrintZ(
+        const pid_env = std.fmt.bufPrintSentinel(
             &pid_env_buf,
             "MARU_CR4A_RESTORE_EXEC_PID={d}",
             .{process_seal_service.currentProcessId()},
+            0,
         ) catch c._exit(125);
         const argv = [_:null]?[*:0]const u8{self_path.ptr};
         const child_env = [_:null]?[*:0]const u8{

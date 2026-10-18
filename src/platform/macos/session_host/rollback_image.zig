@@ -124,7 +124,7 @@ pub const Authority = struct {
         const previous_identity = self.image.identity;
         // Swap 뒤 실패해도 target leaf로 밀려난 old current의 cleanup owner를 잃지 않도록
         // destructive rename 전에 독립 path ownership을 확보한다.
-        const displaced_path = self.image.allocator.dupeZ(u8, target_path) catch
+        const displaced_path = self.image.allocator.dupeSentinel(u8, target_path, 0) catch
             return .unchanged_failure;
         var displaced_path_owned = true;
         defer if (displaced_path_owned) self.image.allocator.free(displaced_path);
@@ -178,7 +178,7 @@ pub const testing_api = if (@import("builtin").is_test) struct {
 
 pub fn validateRecord(record: attempt_record.ImageView) bool {
     var path_buf: [@import("upgrade_limits.zig").max_target_path_bytes + 1]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}", .{record.path}) catch return false;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{record.path}, 0) catch return false;
     const actual = staged_image.inspect(path) catch return false;
     return staged_image.identityEqual(.{
         .dev = record.dev,
@@ -196,7 +196,7 @@ pub fn validateCanonicalRecord(
     var host_dir_buf: [768]u8 = undefined;
     const host_dir = host_manifest.hostDirPathIn(&host_dir_buf, session_dir, host_id) catch return false;
     var expected_buf: [@import("upgrade_limits.zig").max_target_path_bytes + 1]u8 = undefined;
-    const expected = std.fmt.bufPrintZ(&expected_buf, "{s}/{s}", .{ host_dir, current_leaf }) catch
+    const expected = std.fmt.bufPrintSentinel(&expected_buf, "{s}/{s}", .{ host_dir, current_leaf }, 0) catch
         return false;
     return std.mem.eql(u8, record.path, expected) and validateRecord(record);
 }
@@ -204,17 +204,18 @@ pub fn validateCanonicalRecord(
 test "rollback image pins expected executable and reconciles post-swap failure" {
     const c = std.c;
     var dir_buf: [192]u8 = undefined;
-    const dir = try std.fmt.bufPrintZ(
+    const dir = try std.fmt.bufPrintSentinel(
         &dir_buf,
         "/tmp/maru-rollback-image-{d}-{d}",
         .{ c.getpid(), std.Io.Clock.awake.now(std.testing.io).nanoseconds },
+        0,
     );
     if (c.mkdir(dir.ptr, 0o700) != 0) return error.TestUnexpectedResult;
     defer _ = c.rmdir(dir.ptr);
     var old_buf: [256]u8 = undefined;
-    const old = try std.fmt.bufPrintZ(&old_buf, "{s}/old", .{dir});
+    const old = try std.fmt.bufPrintSentinel(&old_buf, "{s}/old", .{dir}, 0);
     var target_buf: [256]u8 = undefined;
-    const target = try std.fmt.bufPrintZ(&target_buf, "{s}/target", .{dir});
+    const target = try std.fmt.bufPrintSentinel(&target_buf, "{s}/target", .{dir}, 0);
     try writeFixture(old, "old-image");
     try writeFixture(target, "new-image");
     defer _ = c.unlink(old.ptr);

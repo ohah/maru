@@ -30,7 +30,7 @@ fn currentAuthority() current_mod.CurrentReleaseAuthority {
 fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(out, "{s}/{s}", .{ root[0..len], leaf });
+    return std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ root[0..len], leaf }, 0);
 }
 
 const Authority = struct {
@@ -72,7 +72,7 @@ const Attestor = struct {
         if (self.block_cleanup) {
             const parent = std.fs.path.dirname(path) orelse return error.MutationFailed;
             var parent_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-            const parent_z = try std.fmt.bufPrintZ(&parent_storage, "{s}", .{parent});
+            const parent_z = try std.fmt.bufPrintSentinel(&parent_storage, "{s}", .{parent}, 0);
             if (c.chmod(parent_z.ptr, 0o500) != 0) return error.MutationFailed;
         }
         if (self.fail) return error.ChildFailed;
@@ -366,7 +366,7 @@ test "candidate consume forwards one shared deadline and owns child or outer pub
 
     try candidate_mod.read(std.testing.allocator, context, std.mem.sliceTo(&fixture.manifest_path, 0), &candidate_owner);
     var private_path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const private_path = try std.fmt.bufPrintZ(&private_path_storage, "{s}/{s}", .{ std.mem.sliceTo(&fixture.work_path, 0), file_name });
+    const private_path = try std.fmt.bufPrintSentinel(&private_path_storage, "{s}/{s}", .{ std.mem.sliceTo(&fixture.work_path, 0), file_name }, 0);
     attestor = .{};
     authority = .{};
     deadline = .{ .mutate_at = 4, .mutate_path = private_path };

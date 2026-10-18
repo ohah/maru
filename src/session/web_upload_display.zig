@@ -14,6 +14,8 @@
 //!
 //! 페이지가 정한 글(제목·입력칸 이름·accept)은 싣지 않는다 — 출처만(모달 문장은 앱이 만든다).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const i18n = @import("../i18n.zig");
 const width = @import("../width.zig");
@@ -390,7 +392,7 @@ test "W9c③ 엿보기: 글은 빈 줄을 건너뛴 첫 줄(잘라서·코드로
     defer freeLines(k);
     try testing.expectEqualStrings("   text, 63 bytes — first line: “-----BEGIN OPENSSH PRIVATE KEY-----”", k[1]);
     // 긴 줄은 48 칸에서 「…」, 줄 안의 ESC·RLO 는 코드로, 탭은 공백으로.
-    const long = "a\x1bb\u{202e}c\td" ++ "x" ** 80;
+    const long = "a\x1bb\u{202e}c\td" ++ array_repeat.repeat("x", 80);
     const lg = try lines(.{ .path = "/d/a", .size = long.len, .nlink = 1, .peek = classify(long, long.len) }, "");
     defer freeLines(lg);
     try testing.expect(std.mem.indexOf(u8, lg[1], "“a⟨U+001B⟩b⟨U+202E⟩c d") != null);
@@ -432,7 +434,7 @@ test "W9c③ 적대 리뷰 1 회차 재현 R7: 경로의 공백 여럿·이름 �
     const prev = i18n.lang();
     defer i18n.setLang(prev);
     i18n.setLang(.en);
-    const fake = try lines(.{ .path = "/Users/me/Downloads/x" ++ " " ** 40 ++ "2. ~/Downloads/cat.jpg", .size = 1, .nlink = 1, .peek = .empty }, "/Users/me");
+    const fake = try lines(.{ .path = "/Users/me/Downloads/x" ++ array_repeat.repeat(" ", 40) ++ "2. ~/Downloads/cat.jpg", .size = 1, .nlink = 1, .peek = .empty }, "/Users/me");
     defer freeLines(fake);
     try testing.expectEqualStrings("1. ~/Downloads/x⟨U+0020×40⟩2. ~/Downloads/cat.jpg", fake[0]);
     try testing.expect(std.mem.indexOf(u8, fake[0], "  ") == null);
@@ -454,16 +456,16 @@ test "W9c③ 적대 리뷰 1 회차 재현 R8: 엿보기는 첫 줄 앞의 공�
     const prev = i18n.lang();
     defer i18n.setLang(prev);
     i18n.setLang(.en);
-    const key = " " ** 60 ++ "-----BEGIN OPENSSH PRIVATE KEY-----\n";
+    const key = array_repeat.repeat(" ", 60) ++ "-----BEGIN OPENSSH PRIVATE KEY-----\n";
     const k = try lines(.{ .path = "/d/cat.jpg", .size = key.len, .nlink = 1, .peek = classify(key, key.len) }, "");
     defer freeLines(k);
     try testing.expect(std.mem.indexOf(u8, k[1], "“-----BEGIN OPENSSH PRIVATE KEY-----”") != null);
-    const wide = "\u{3000}" ** 20 ++ "\t\u{00a0}-----BEGIN OPENSSH PRIVATE KEY-----\n";
+    const wide = array_repeat.repeat("\u{3000}", 20) ++ "\t\u{00a0}-----BEGIN OPENSSH PRIVATE KEY-----\n";
     const w = try lines(.{ .path = "/d/cat.jpg", .size = wide.len, .nlink = 1, .peek = classify(wide, wide.len) }, "");
     defer freeLines(w);
     try testing.expect(std.mem.indexOf(u8, w[1], "“-----BEGIN OPENSSH PRIVATE KEY-----”") != null);
     // 줄 안의 공백 덩어리는 하나로 — 뒤의 글이 48 칸 밖으로 밀리지 않는다.
-    const mid = "abc" ++ " " ** 60 ++ "SECRET\n";
+    const mid = "abc" ++ array_repeat.repeat(" ", 60) ++ "SECRET\n";
     const m = try lines(.{ .path = "/d/a", .size = mid.len, .nlink = 1, .peek = classify(mid, mid.len) }, "");
     defer freeLines(m);
     try testing.expect(std.mem.indexOf(u8, m[1], "“abc SECRET”") != null);

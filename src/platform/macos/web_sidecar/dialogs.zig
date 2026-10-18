@@ -54,7 +54,7 @@ fn clearReset(id: BrowserId) void {
         };
     }
 }
-var pages: [dialog_table.capacity]?Page = [_]?Page{null} ** dialog_table.capacity;
+var pages: [dialog_table.capacity]?Page = @as([dialog_table.capacity]?Page, @splat(null));
 
 fn pageOf(id: BrowserId) ?*Page {
     for (&pages) |*slot| {
@@ -79,10 +79,10 @@ fn forgetPage(id: BrowserId) void {
 
 // CEF 의 파일 선택 방식 값이 우리 enum 과 같다 — CEF 를 올려 바뀌면 빌드가 멈춘다.
 comptime {
-    std.debug.assert(c.FILE_DIALOG_OPEN == @intFromEnum(message.FileDialogMode.open));
-    std.debug.assert(c.FILE_DIALOG_OPEN_MULTIPLE == @intFromEnum(message.FileDialogMode.open_multiple));
-    std.debug.assert(c.FILE_DIALOG_OPEN_FOLDER == @intFromEnum(message.FileDialogMode.open_folder));
-    std.debug.assert(c.FILE_DIALOG_SAVE == @intFromEnum(message.FileDialogMode.save));
+    std.debug.assert(c.FILE_DIALOG_OPEN == @backingInt(message.FileDialogMode.open));
+    std.debug.assert(c.FILE_DIALOG_OPEN_MULTIPLE == @backingInt(message.FileDialogMode.open_multiple));
+    std.debug.assert(c.FILE_DIALOG_OPEN_FOLDER == @backingInt(message.FileDialogMode.open_folder));
+    std.debug.assert(c.FILE_DIALOG_SAVE == @backingInt(message.FileDialogMode.save));
 }
 
 pub fn browserId(browser: [*c]c.cef_browser_t) ?BrowserId {

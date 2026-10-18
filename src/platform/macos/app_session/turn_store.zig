@@ -43,7 +43,7 @@ pub fn sessionDirAlloc(a: std.mem.Allocator, base: []const u8, session_id: []con
 
 fn mkdir0700(path: []const u8) void {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return;
+    const z = std.fmt.bufPrintSentinel(&buf, "{s}", .{path}, 0) catch return;
     _ = std.c.mkdir(z.ptr, 0o700);
     _ = std.c.chmod(z.ptr, 0o700);
 }
@@ -72,11 +72,11 @@ fn writeAtomic(io: std.Io, path: []const u8, body: []const u8) !void {
     const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.maru-tmp.{d}", .{ path, std.c.getpid() }) catch return error.BadPath;
     std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
     {
-        const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{ .truncate = true, .permissions = @enumFromInt(0o600) });
+        const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{ .truncate = true, .permissions = @fromBackingInt(@intCast(0o600)) });
         defer file.close(io);
         errdefer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
         try file.writePositionalAll(io, body, 0);
-        file.setPermissions(io, @enumFromInt(0o600)) catch {};
+        file.setPermissions(io, @fromBackingInt(@intCast(0o600))) catch {};
         file.sync(io) catch {};
     }
     errdefer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
@@ -323,7 +323,7 @@ test "턴 스냅샷 영속(AT7): 쓰고 되읽으면 같은 링·같은 사본�
     var p: [std.fs.max_path_bytes]u8 = undefined;
     const mpath = try std.fmt.bufPrint(&p, "{s}/turn-rings/0f6c1a2e-1111-4222-8333-444455556666/ring.v1", .{base});
     const st = try std.Io.Dir.cwd().statFile(io, mpath, .{});
-    try testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(@intFromEnum(st.permissions) & 0o777)));
+    try testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(@backingInt(st.permissions) & 0o777)));
     var bp: [std.fs.max_path_bytes]u8 = undefined;
     const bpath = blobPath(&bp, mpath[0 .. mpath.len - "/ring.v1".len], turn_persist.blobHash("one\n")).?;
     try testing.expect(fileExists(io, bpath));

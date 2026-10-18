@@ -9,6 +9,8 @@
 //! **왜 ring buffer인가**: "마지막 턴"만 남기면 두 턴 전과 비교할 수 없고, 무한히 쌓으면 그 자체가 누수다. tree OID는
 //! 40바이트짜리 이름이라 몇 개를 들고 있어도 싸다 — 대신 개수를 못 박아 상한을 코드에 둔다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 /// 같은 L2 순수 층이다 — 제목을 UTF-8 경계에서 자르는 규칙을 여기서 다시 적지 않는다(`clampUtf8`).
 const agent_transcript = @import("agent_transcript.zig");
@@ -733,7 +735,7 @@ test "capture_id 가 없으면 0이다 — 없음과 0번을 가르지 않는다
 test "빈 oid나 너무 긴 oid는 무시한다" {
     var ring: Ring = .{};
     ring.push(.{ .tree = "", .surface_id = 1, .captured_s = 0, .agent_kind = 0 });
-    ring.push(.{ .tree = "x" ** (max_oid_len + 1), .surface_id = 1 });
+    ring.push(.{ .tree = array_repeat.repeat("x", (max_oid_len + 1)), .surface_id = 1 });
     try testing.expectEqual(@as(usize, 0), ring.len);
 }
 
@@ -792,7 +794,7 @@ test "턴 키: 상한을 넘으면 담지 않는다 — 자르지 않는다" {
     // ⚠️ **길이가 0 인 것을 단언해야 한다.** 「뭔가 담겼다」만 보면 `@min` 으로 자르는 구현도 통과하는데,
     // 잘린 키는 AT3 귀속에서 **남의 턴과 거짓으로 일치한다**(그게 이 규칙의 존재 이유다).
     var ring: Ring = .{};
-    ring.push(.{ .tree = "a1", .surface_id = 1, .turn_key = "k" ** (max_turn_key_len + 1) });
+    ring.push(.{ .tree = "a1", .surface_id = 1, .turn_key = array_repeat.repeat("k", (max_turn_key_len + 1)) });
     try std.testing.expectEqual(@as(usize, 1), ring.len); // 스냅샷 자체는 들어간다(tree 는 여전히 값지다)
     try std.testing.expectEqual(@as(usize, 0), ring.latest().?.turnKey().len);
 }
@@ -823,14 +825,14 @@ test "턴 제목: 없으면 빈 값이다" {
 test "턴 제목: 넘치면 자른다 — 키와 반대 규율이다" {
     // 키는 신원이라 자르면 남의 턴과 거짓으로 일치하지만, 제목은 산문이라 앞부분이 여전히 쓸모 있다.
     var ring: Ring = .{};
-    ring.push(.{ .tree = "a1", .surface_id = 1, .title = "z" ** (max_turn_title_len + 10) });
+    ring.push(.{ .tree = "a1", .surface_id = 1, .title = array_repeat.repeat("z", (max_turn_title_len + 10)) });
     try std.testing.expectEqual(max_turn_title_len, ring.latest().?.titleText().len);
 }
 
 test "턴 제목: 비ASCII 를 잘라도 UTF-8 경계를 안 쪼갠다" {
     // 쪼개면 렌더가 U+FFFD 를 뿌린다. 한글은 3바이트라 상한이 3의 배수가 아니면 반드시 경계에 걸린다.
     var ring: Ring = .{};
-    ring.push(.{ .tree = "a1", .surface_id = 1, .title = "가" ** 100 });
+    ring.push(.{ .tree = "a1", .surface_id = 1, .title = array_repeat.repeat("가", 100) });
     const got = ring.latest().?.titleText();
     try std.testing.expect(got.len <= max_turn_title_len);
     try std.testing.expect(std.unicode.utf8ValidateSlice(got)); // ← 경계가 안 쪼개졌다

@@ -370,7 +370,7 @@ const Workspace = struct {
 
     fn init(io: std.Io, allocator: std.mem.Allocator, fixture: []const u8, index: usize, mode: []const u8) !Workspace {
         var template_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
-        const template = try std.fmt.bufPrintZ(&template_storage, "/private/tmp/maru-live-command-{d}-{s}.XXXXXX", .{ index, mode });
+        const template = try std.fmt.bufPrintSentinel(&template_storage, "/private/tmp/maru-live-command-{d}-{s}.XXXXXX", .{ index, mode }, 0);
         const created = std.mem.span(mkdtemp(template.ptr) orelse return error.TempRootFailed);
         const root = try allocator.dupe(u8, created);
         errdefer allocator.free(root);
@@ -381,7 +381,7 @@ const Workspace = struct {
         try dir.createDir(io, "checkpoint", .default_dir);
         try dir.createDir(io, "work", .default_dir);
         var checkpoint_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-        const checkpoint_path = try std.fmt.bufPrintZ(&checkpoint_storage, "{s}/checkpoint", .{root});
+        const checkpoint_path = try std.fmt.bufPrintSentinel(&checkpoint_storage, "{s}/checkpoint", .{root}, 0);
         if (c.chmod(checkpoint_path.ptr, 0o700) != 0) return error.PrivateRootFailed;
         const fixture_bytes = try std.Io.Dir.cwd().readFileAlloc(io, fixture, allocator, .limited(32 * 1024 * 1024));
         defer allocator.free(fixture_bytes);
@@ -389,7 +389,7 @@ const Workspace = struct {
         const validator = try std.fmt.allocPrint(allocator, "{s}/zig-out/bin/maru-session-host-release-validator", .{root});
         errdefer allocator.free(validator);
         var validator_z: [std.fs.max_path_bytes:0]u8 = undefined;
-        const validator_path = try std.fmt.bufPrintZ(&validator_z, "{s}", .{validator});
+        const validator_path = try std.fmt.bufPrintSentinel(&validator_z, "{s}", .{validator}, 0);
         if (c.chmod(validator_path.ptr, 0o755) != 0) return error.ExecutableModeFailed;
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(fixture_bytes, &digest, .{});
@@ -524,7 +524,7 @@ const Workspace = struct {
     fn bootstrap(self: *Workspace, io: std.Io, allocator: std.mem.Allocator) ![:0]const u8 {
         _ = io;
         var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_storage, "{s}/checkpoint", .{self.root});
+        const path = try std.fmt.bufPrintSentinel(&path_storage, "{s}/checkpoint", .{self.root}, 0);
         var root: checkpoint.Root = .{};
         try checkpoint.openRoot(&root, path);
         defer root.deinit() catch {};
@@ -536,7 +536,7 @@ const Workspace = struct {
 
     fn settle(self: *Workspace, io: std.Io, allocator: std.mem.Allocator, token: []const u8, stage: phase.Stage) !void {
         var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_storage, "{s}/checkpoint", .{self.root});
+        const path = try std.fmt.bufPrintSentinel(&path_storage, "{s}/checkpoint", .{self.root}, 0);
         var root: checkpoint.Root = .{};
         try checkpoint.openRootExpected(&root, path, try checkpoint.decodeRootIdentity(token));
         defer root.deinit() catch {};
@@ -547,7 +547,7 @@ const Workspace = struct {
 
     fn expectFinal(self: *Workspace, io: std.Io, allocator: std.mem.Allocator, token: []const u8, expected: phase.Outcome) !void {
         var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_storage, "{s}/checkpoint", .{self.root});
+        const path = try std.fmt.bufPrintSentinel(&path_storage, "{s}/checkpoint", .{self.root}, 0);
         var root: checkpoint.Root = .{};
         try checkpoint.openRootExpected(&root, path, try checkpoint.decodeRootIdentity(token));
         defer root.deinit() catch {};
@@ -559,7 +559,7 @@ const Workspace = struct {
 
     fn expectCount(self: *Workspace, io: std.Io, allocator: std.mem.Allocator, token: []const u8, count: u8, expected: phase.Outcome) !void {
         var path_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_storage, "{s}/checkpoint", .{self.root});
+        const path = try std.fmt.bufPrintSentinel(&path_storage, "{s}/checkpoint", .{self.root}, 0);
         var root: checkpoint.Root = .{};
         try checkpoint.openRootExpected(&root, path, try checkpoint.decodeRootIdentity(token));
         defer root.deinit() catch {};

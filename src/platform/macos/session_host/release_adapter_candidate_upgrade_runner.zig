@@ -346,7 +346,7 @@ fn cleanupPinned(value: *evidence_mod.PublishedEvidence, unlinked: *bool, worksp
     if (!unlinked.*) {
         const observed = try value.revalidate(path);
         var leaf_storage: [std.fs.max_name_bytes:0]u8 = undefined;
-        const leaf = std.fmt.bufPrintZ(&leaf_storage, "{s}", .{std.fs.path.basename(path)}) catch return error.CleanupFailed;
+        const leaf = std.fmt.bufPrintSentinel(&leaf_storage, "{s}", .{std.fs.path.basename(path)}, 0) catch return error.CleanupFailed;
         var named: posix.Stat = undefined;
         if (c.fstatat(root_fd, leaf.ptr, &named, posix.AT.SYMLINK_NOFOLLOW) != 0 or
             !posix.S.ISREG(named.mode) or named.dev != observed.identity.device or named.ino != observed.identity.inode)
@@ -367,7 +367,7 @@ fn cleanupChild(io: std.Io, workspace: *workspace_mod.Workspace, kind: child.Kin
     const root_fd = try workspace.directoryDescriptor();
     const leaf_name = std.fs.path.basename(leaf);
     var leaf_storage: [std.fs.max_name_bytes:0]u8 = undefined;
-    const leaf_z = std.fmt.bufPrintZ(&leaf_storage, "{s}", .{leaf_name}) catch return error.CleanupFailed;
+    const leaf_z = std.fmt.bufPrintSentinel(&leaf_storage, "{s}", .{leaf_name}, 0) catch return error.CleanupFailed;
     if (c.unlinkat(root_fd, leaf_z.ptr, 0) != 0 and posix.errno(-1) != .NOENT) return error.CleanupFailed;
     (std.Io.Dir{ .handle = root_fd }).deleteTree(io, std.fs.path.basename(home)) catch return error.CleanupFailed;
     if (c.fsync(root_fd) != 0) return error.CleanupFailed;

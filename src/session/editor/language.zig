@@ -450,8 +450,8 @@ test "SBL1 문법 표시 이름은 언어별로 갈리고, 모르면 없다" {
     try std.testing.expect(Grammar.none.displayName() == null);
 
     // **모든 값이 이름을 갖거나 `none` 이다** — 문법을 더하고 이름을 잊으면 상태바가 조용히 빈다.
-    inline for (@typeInfo(Grammar).@"enum".fields) |f| {
-        const g: Grammar = @enumFromInt(f.value);
+    inline for (@import("type_info_fields").enumFields(Grammar)) |f| {
+        const g: Grammar = @fromBackingInt(@intCast(f.value));
         if (g != .none) try std.testing.expect(g.displayName() != null);
     }
 

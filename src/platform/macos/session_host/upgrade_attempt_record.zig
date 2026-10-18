@@ -203,7 +203,7 @@ pub fn encode(allocator: std.mem.Allocator, view: View) Error![]u8 {
     try validateView(view);
     var writer: Writer = .{ .allocator = allocator };
     defer writer.deinit();
-    try writer.append(&([_]u8{0} ** header_len));
+    try writer.append(&(@as([header_len]u8, @splat(0))));
     try writer.integer(u128, view.host_id);
     try writer.integer(u128, view.attempt_id);
     try writer.integer(u64, view.epoch_before);
@@ -231,8 +231,8 @@ pub fn encode(allocator: std.mem.Allocator, view: View) Error![]u8 {
     for (view.runtime_ids) |runtime_id| try writer.integer(u128, runtime_id);
     for (view.completed) |entry| {
         try writer.integer(u128, entry.attempt_id);
-        try writer.integer(u8, @intFromEnum(entry.report.status));
-        try writer.integer(u8, @intFromEnum(entry.report.reason));
+        try writer.integer(u8, @backingInt(entry.report.status));
+        try writer.integer(u8, @backingInt(entry.report.reason));
         try writer.integer(u16, entry.reader_min);
         try writer.integer(u16, entry.reader_max);
         try writer.append(&entry.sha256);
@@ -444,7 +444,7 @@ fn buildIdMatches(build_id: []const u8, digest: [32]u8) bool {
 
 const test_rollback_image: ImageView = .{
     .path = "/tmp/maru/rollback-current",
-    .sha256 = [_]u8{0x33} ** 32,
+    .sha256 = @as([32]u8, @splat(0x33)),
     .dev = 7,
     .ino = 8,
     .size = 9,
@@ -455,7 +455,7 @@ test "upgrade attempt record round-trips running authority runtime set and compl
         .attempt_id = 0x10,
         .request_path = "/Applications/old",
         .build_id = "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-        .sha256 = [_]u8{0x11} ** 32,
+        .sha256 = @as([32]u8, @splat(0x11)),
         .reader_min = 1,
         .reader_max = 1,
         .report = .{ .status = .resumed, .reason = .exec_failed },
@@ -470,7 +470,7 @@ test "upgrade attempt record round-trips running authority runtime set and compl
         .request_path = "/Applications/Maru.app/Contents/MacOS/maru",
         .staged_path = "/tmp/maru/attempt/target",
         .build_id = "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-        .sha256 = [_]u8{0x22} ** 32,
+        .sha256 = @as([32]u8, @splat(0x22)),
         .dev = 4,
         .ino = 5,
         .size = 6,
@@ -562,7 +562,7 @@ test "upgrade attempt record rejects checksum ordering and cap violations" {
         .request_path = "/a",
         .staged_path = "/b",
         .build_id = "sha256:0101010101010101010101010101010101010101010101010101010101010101",
-        .sha256 = [_]u8{1} ** 32,
+        .sha256 = @as([32]u8, @splat(1)),
         .dev = 1,
         .ino = 2,
         .size = 3,
@@ -593,7 +593,7 @@ test "upgrade attempt record rejects checksum ordering and cap violations" {
         .request_path = "/a",
         .staged_path = "/b",
         .build_id = "sha256:0101010101010101010101010101010101010101010101010101010101010101",
-        .sha256 = [_]u8{1} ** 32,
+        .sha256 = @as([32]u8, @splat(1)),
         .dev = 1,
         .ino = 2,
         .size = 3,
@@ -614,7 +614,7 @@ test "running attempt record permits opaque zero id and reserves one terminal hi
         .attempt_id = index,
         .request_path = "/old",
         .build_id = "sha256:0101010101010101010101010101010101010101010101010101010101010101",
-        .sha256 = [_]u8{1} ** 32,
+        .sha256 = @as([32]u8, @splat(1)),
         .reader_min = 1,
         .reader_max = 1,
         .report = .{ .status = .committed },
@@ -629,7 +629,7 @@ test "running attempt record permits opaque zero id and reserves one terminal hi
         .request_path = "/a",
         .staged_path = "/b",
         .build_id = "sha256:0202020202020202020202020202020202020202020202020202020202020202",
-        .sha256 = [_]u8{2} ** 32,
+        .sha256 = @as([32]u8, @splat(2)),
         .dev = 1,
         .ino = 2,
         .size = 3,

@@ -101,13 +101,13 @@ pub const PreparedRpcTransitionPermit = struct {
     authority_addr: usize = 0,
     registry_incarnation: u64 = 0,
     binding: contract.BindingIdentity = std.mem.zeroes(contract.BindingIdentity),
-    canonical_digest: owner_seal.Digest = [_]u8{0} ** 32,
-    authority_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    canonical_digest: owner_seal.Digest = @as([32]u8, @splat(0)),
+    authority_seal: owner_seal.Digest = @as([32]u8, @splat(0)),
     kind_raw: u8 = 0,
     from_raw: u8 = 0,
     to_raw: u8 = 0,
     consumed: u8 = 0,
-    seal: owner_seal.Digest = [_]u8{0} ** 32,
+    seal: owner_seal.Digest = @as([32]u8, @splat(0)),
 
     pub fn pristineExact(self: *const @This()) bool {
         return self.self_addr == 0 and self.authority_addr == 0 and
@@ -147,7 +147,7 @@ pub const Authority = struct {
     binding: contract.BindingIdentity = std.mem.zeroes(contract.BindingIdentity),
     next_epoch: u64 = 0,
     active: Active = std.mem.zeroes(Active),
-    seal: owner_seal.Digest = [_]u8{0} ** 32,
+    seal: owner_seal.Digest = @as([32]u8, @splat(0)),
 
     pub const Error = error{
         InvalidState,
@@ -158,7 +158,7 @@ pub const Authority = struct {
 
     pub fn pristineExact(self: *const Authority) bool {
         return self.self_addr == 0 and self.registry_incarnation == 0 and
-            rawLifecycle(self) == @intFromEnum(Lifecycle.idle) and
+            rawLifecycle(self) == @backingInt(Lifecycle.idle) and
             self.binding_present == 0 and self.canonical_present == 0 and self.next_epoch == 0 and
             bindingZero(&self.binding) and activeZero(&self.active) and
             std.mem.allEqual(u8, &self.seal, 0);
@@ -182,7 +182,7 @@ pub const Authority = struct {
     }
 
     pub fn rawLifecycleValid(self: *const Authority) bool {
-        return rawLifecycle(self) <= @intFromEnum(Lifecycle.terminal);
+        return rawLifecycle(self) <= @backingInt(Lifecycle.terminal);
     }
 
     pub fn settledExact(self: *const Authority) bool {
@@ -558,9 +558,9 @@ pub const Authority = struct {
             .binding = current_binding,
             .canonical_digest = canonicalDigest(canonical),
             .authority_seal = self.seal,
-            .kind_raw = @intFromEnum(kind),
-            .from_raw = @intFromEnum(from),
-            .to_raw = @intFromEnum(to),
+            .kind_raw = @backingInt(kind),
+            .from_raw = @backingInt(from),
+            .to_raw = @backingInt(to),
         };
         out.seal = permitSeal(out);
     }
@@ -747,8 +747,8 @@ fn permitExactFor(
         std.meta.eql(permit.binding, canonical.binding) and
         std.mem.eql(u8, &permit.canonical_digest, &canonicalDigest(canonical)) and
         std.mem.eql(u8, &permit.authority_seal, &authority.seal) and
-        permit.kind_raw == @intFromEnum(kind) and permit.from_raw == @intFromEnum(from) and
-        permit.to_raw == @intFromEnum(to) and permit.consumed == 0 and
+        permit.kind_raw == @backingInt(kind) and permit.from_raw == @backingInt(from) and
+        permit.to_raw == @backingInt(to) and permit.consumed == 0 and
         std.mem.eql(u8, &permit.seal, &permitSeal(permit)) and
         authority.matches(canonical, from, permit.registry_incarnation, permit.binding);
 }
@@ -825,7 +825,7 @@ test "B3-1 RPC response authority rejects copy ABA and every canonical splice" {
     try std.testing.expectError(error.MovedOrCopied, copied.publish(canonical, fixture_registry_incarnation, fixtureBinding(41)));
     try std.testing.expect(authority.matches(canonical, .executing, fixture_registry_incarnation, fixtureBinding(41)));
 
-    inline for (@typeInfo(Canonical).@"struct".fields) |field| {
+    inline for (@import("type_info_fields").structFields(Canonical)) |field| {
         var spliced = canonical;
         switch (@typeInfo(field.type)) {
             .int => @field(spliced, field.name) +%= 1,
@@ -839,7 +839,7 @@ test "B3-1 RPC response authority rejects copy ABA and every canonical splice" {
         try std.testing.expectError(error.InvalidCanonical, authority.publish(spliced, fixture_registry_incarnation, fixtureBinding(41)));
         try std.testing.expect(authority.matches(canonical, .executing, fixture_registry_incarnation, fixtureBinding(41)));
     }
-    inline for (@typeInfo(contract.BindingIdentity).@"struct".fields) |field| {
+    inline for (@import("type_info_fields").structFields(contract.BindingIdentity)) |field| {
         var spliced = canonical;
         switch (@typeInfo(field.type)) {
             .int => @field(spliced.binding, field.name) +%= 1,
@@ -884,14 +884,14 @@ test "B3-1 RPC response authority rejects every invalid raw lifecycle and exhaus
     try authority.initInPlace(fixture_registry_incarnation, fixtureBinding(47));
     const canonical = try authority.reserveExecuting(fixtureInput(fixtureBinding(47)));
     const lifecycle_raw: *u8 = @ptrCast(&authority.lifecycle);
-    var raw: u16 = @intFromEnum(Lifecycle.terminal) + 1;
+    var raw: u16 = @backingInt(Lifecycle.terminal) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         lifecycle_raw.* = @intCast(raw);
         try std.testing.expectEqual(SettlementReadiness.invalid, authority.settlementReadiness());
         try std.testing.expectError(error.InvalidState, authority.publish(canonical, fixture_registry_incarnation, fixtureBinding(47)));
     }
 
-    lifecycle_raw.* = @intFromEnum(Lifecycle.executing);
+    lifecycle_raw.* = @backingInt(Lifecycle.executing);
     authority.seal = sealFor(&authority);
     try authority.rollbackExecuting(canonical, fixture_registry_incarnation, fixtureBinding(47));
     inline for (.{ Lifecycle.executing, .published, .borrowed, .releasing }) |active_lifecycle| {

@@ -126,7 +126,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, r
     var u: [256]u8 = undefined;
 
     var log_buf: [1024]u8 = undefined;
-    const log_path = try std.fmt.bufPrintZ(&log_buf, "{s}/popupadopt-host.log", .{root});
+    const log_path = try std.fmt.bufPrintSentinel(&log_buf, "{s}/popupadopt-host.log", .{root}, 0);
     var host = try Host.spawnWith(host_path, profile_arg, log_path, &.{});
     var shut_down = false;
     defer if (!shut_down) {

@@ -37,7 +37,7 @@ const PublicationPort = struct {
     process_nonce: u64 = 0,
     app_instance_nonce: u128 = 0,
     owner_lifecycle_raw: u8 = 0,
-    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+    seal: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
 };
 
 var publication_port: PublicationPort = .{};
@@ -72,7 +72,7 @@ pub const PublicationTimestampReceipt = struct {
     process_nonce: u64 = 0,
     app_instance_nonce: u128 = 0,
     timestamp_ns: i128 = -1,
-    seal: process_seal.CleanupSeal = [_]u8{0} ** 32,
+    seal: process_seal.CleanupSeal = @as([32]u8, @splat(0)),
 };
 
 fn lockPublicationPort() void {
@@ -87,7 +87,7 @@ fn clearPublicationPortLocked() void {
     publication_port.process_nonce = 0;
     publication_port.app_instance_nonce = 0;
     publication_port.owner_lifecycle_raw = 0;
-    publication_port.seal = [_]u8{0} ** 32;
+    publication_port.seal = @as([32]u8, @splat(0));
 }
 
 fn publicationPortSeal(port: *const PublicationPort) process_seal.CleanupSeal {
@@ -287,7 +287,7 @@ pub const AppProcessIncidentOwner = struct {
         const pid = process_seal.currentProcessId();
         if (pid == 0 or process_nonce == 0 or app_instance_nonce == 0)
             return error.InvalidOwner;
-        if (self.lifecycle_raw == @intFromEnum(Lifecycle.ready)) {
+        if (self.lifecycle_raw == @backingInt(Lifecycle.ready)) {
             if (!self.validReady() or self.process_nonce != process_nonce or
                 self.app_instance_nonce != app_instance_nonce)
                 return error.InvalidOwner;
@@ -318,15 +318,15 @@ pub const AppProcessIncidentOwner = struct {
         try self.reconnect_budget.initInPlace(process_nonce);
         try runtime.installPublisherRegistry(&self.registry);
         self.runtime = runtime;
-        self.lifecycle_raw = @intFromEnum(Lifecycle.ready);
+        self.lifecycle_raw = @backingInt(Lifecycle.ready);
     }
 
     pub fn publisher(self: *AppProcessIncidentOwner) ?struct {
         registry: *registry_mod.Registry,
         runtime: *runtime_mod.ConnectionIncidentRuntime,
     } {
-        if (!self.validOwned() or self.lifecycle_raw != @intFromEnum(Lifecycle.ready) or
-            self.registry.lifecycle_raw != @intFromEnum(registry_mod.Lifecycle.ready)) return null;
+        if (!self.validOwned() or self.lifecycle_raw != @backingInt(Lifecycle.ready) or
+            self.registry.lifecycle_raw != @backingInt(registry_mod.Lifecycle.ready)) return null;
         return .{ .registry = &self.registry, .runtime = self.runtime.? };
     }
 
@@ -352,7 +352,7 @@ pub const AppProcessIncidentOwner = struct {
     ) PublicationError!publication.IncidentCommitResult {
         const publisher_view = self.publisher() orelse return error.InvalidOwner;
         const query = try adapter.managedPoisonQuery(prepared);
-        const wants_reconnect = prepared.input.disposition_raw == @intFromEnum(@import("maru").observability.connection_incident.Disposition.reconnect);
+        const wants_reconnect = prepared.input.disposition_raw == @backingInt(@import("maru").observability.connection_incident.Disposition.reconnect);
         const will_publish_first = try adapter.managedPoisonWillPublishFirst(prepared);
         if (wants_reconnect and will_publish_first) try self.reconnect_admissions.preflight(prepared.input);
         const result = try coordinator.publishCanonical(
@@ -361,14 +361,14 @@ pub const AppProcessIncidentOwner = struct {
             query,
             prepared.input,
         );
-        const terminal_fd = if (result.kind_raw == @intFromEnum(publication.PublicationKind.first))
+        const terminal_fd = if (result.kind_raw == @backingInt(publication.PublicationKind.first))
             adapter.terminalizeManagedPoisonNoFail(prepared, result)
         else
             null;
         adapter.consumeManagedPoison(prepared) catch
             process_seal.fatalIntegrity(.incident_authority);
         if (terminal_fd) |fd| _ = c.close(fd);
-        if (result.kind_raw == @intFromEnum(publication.PublicationKind.first) and wants_reconnect)
+        if (result.kind_raw == @backingInt(publication.PublicationKind.first) and wants_reconnect)
             self.reconnect_admissions.admitAfterPreflightNoFail(result, prepared.input);
         return result;
     }
@@ -381,13 +381,13 @@ pub const AppProcessIncidentOwner = struct {
     } else struct {};
 
     pub fn shutdown(self: *AppProcessIncidentOwner) Error!runtime_mod.ShutdownResult {
-        if (!self.validOwned() or (self.lifecycle_raw != @intFromEnum(Lifecycle.ready) and
-            self.lifecycle_raw != @intFromEnum(Lifecycle.closing))) return error.InvalidOwner;
+        if (!self.validOwned() or (self.lifecycle_raw != @backingInt(Lifecycle.ready) and
+            self.lifecycle_raw != @backingInt(Lifecycle.closing))) return error.InvalidOwner;
         const runtime = self.runtime.?;
-        self.lifecycle_raw = @intFromEnum(Lifecycle.closing);
+        self.lifecycle_raw = @backingInt(Lifecycle.closing);
         const result = try runtime.shutdownPublished(&self.registry);
         self.runtime = null;
-        self.lifecycle_raw = @intFromEnum(Lifecycle.closed);
+        self.lifecycle_raw = @backingInt(Lifecycle.closed);
         return result;
     }
 
@@ -399,7 +399,7 @@ pub const AppProcessIncidentOwner = struct {
         while (true) {
             const result = self.shutdown() catch |err| switch (err) {
                 error.InvalidAuthority => {
-                    if (!self.validOwned() or self.lifecycle_raw != @intFromEnum(Lifecycle.closing))
+                    if (!self.validOwned() or self.lifecycle_raw != @backingInt(Lifecycle.closing))
                         process_seal.fatalIntegrity(.incident_authority);
                     const now = monotonicMs() orelse process_seal.fatalIntegrity(.incident_authority);
                     if (now -| started >= 200) return .detached;
@@ -417,7 +417,7 @@ pub const AppProcessIncidentOwner = struct {
     }
 
     fn validReady(self: *const AppProcessIncidentOwner) bool {
-        return self.validOwned() and self.lifecycle_raw == @intFromEnum(Lifecycle.ready);
+        return self.validOwned() and self.lifecycle_raw == @backingInt(Lifecycle.ready);
     }
 
     fn validOwned(self: *const AppProcessIncidentOwner) bool {
@@ -489,7 +489,7 @@ test "CR0b GUI incident owner prerequisite는 current restore 호출이 같은 o
     try owner.registry.acquire(&lease);
     try std.testing.expectError(error.InvalidAuthority, owner.shutdown());
     try std.testing.expect(owner.runtime != null);
-    try std.testing.expectEqual(@intFromEnum(Lifecycle.closing), owner.lifecycle_raw);
+    try std.testing.expectEqual(@backingInt(Lifecycle.closing), owner.lifecycle_raw);
     try owner.registry.release(&lease);
     try std.testing.expectEqual(runtime_mod.ShutdownResult.joined, try owner.shutdown());
 }
@@ -511,7 +511,7 @@ test "CR0b GUI incident owner prerequisite는 active lease deadline에 backing�
     const elapsed = (monotonicMs() orelse return error.TestUnexpectedResult) -| started;
     try std.testing.expect(elapsed >= 200 and elapsed < 2_000);
     try std.testing.expect(owner.runtime == runtime);
-    try std.testing.expectEqual(@intFromEnum(Lifecycle.closing), owner.lifecycle_raw);
+    try std.testing.expectEqual(@backingInt(Lifecycle.closing), owner.lifecycle_raw);
     try std.testing.expectEqual(@as(u16, 1), owner.registry.active_lease_count);
     try owner.registry.release(&lease);
     try std.testing.expectEqual(TerminationOutcome.joined, owner.shutdownForTermination());
@@ -593,8 +593,8 @@ test "CR0b managed public poison은 canonical suffix만 호출한다" {
     const incident = @import("maru").observability.connection_incident;
     const binding = adapter.slot.logicalClientConst().incident_binding;
     const request: publication.ManagedPoisonRequest = .{
-        .reason_raw = @intFromEnum(incident.ConnectionReason.connection_eof),
-        .source_site_raw = @intFromEnum(incident.SourceSite.client_read),
+        .reason_raw = @backingInt(incident.ConnectionReason.connection_eof),
+        .source_site_raw = @backingInt(incident.SourceSite.client_read),
         .controller_generation = 13,
     };
     var invalid_request = request;
@@ -605,7 +605,7 @@ test "CR0b managed public poison은 canonical suffix만 호출한다" {
     try std.testing.expectEqual(@as(u8, 0), owner.reconnect_admissions.count);
     const first = try owner.publishManagedPoison(adapter, request);
     try std.testing.expect(first.publication.detail_present);
-    try std.testing.expectEqual(@intFromEnum(publication.PublicationKind.first), first.kind_raw);
+    try std.testing.expectEqual(@backingInt(publication.PublicationKind.first), first.kind_raw);
     const first_id = adapter.slot.logicalClientConst().first_incident_id;
     try std.testing.expect(first_id.sequence != 0);
     const client_after_first = host_adapter_mod.HostAdapter.testing.rawClient(adapter);
@@ -622,7 +622,7 @@ test "CR0b managed public poison은 canonical suffix만 호출한다" {
 
     const repeat = try owner.publishManagedPoison(adapter, request);
     try std.testing.expect(!repeat.publication.detail_present);
-    try std.testing.expectEqual(@intFromEnum(publication.PublicationKind.repeat), repeat.kind_raw);
+    try std.testing.expectEqual(@backingInt(publication.PublicationKind.repeat), repeat.kind_raw);
     try std.testing.expectEqual(first_id, repeat.publication.incident_id);
     try std.testing.expectEqual(first.publication.aggregate_generation + 1, repeat.publication.aggregate_generation);
     try std.testing.expectEqual(first_id, adapter.slot.logicalClientConst().first_incident_id);

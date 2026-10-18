@@ -3,10 +3,7 @@
 const std = @import("std");
 const maru = @import("maru");
 const session_host = @import("session_host");
-const mac = @cImport({
-    @cInclude("libproc.h");
-    @cInclude("sys/resource.h");
-});
+const mac = @import("darwin_perf_c");
 
 const c = std.c;
 const posix = std.posix;
@@ -182,7 +179,7 @@ fn writeArtifact(allocator: std.mem.Allocator, io: std.Io, artifact: Artifact) !
     }
     if (c.close(fd) != 0) return error.ArtifactWriteFailed;
     open = false;
-    const destination = try allocator.dupeZ(u8, artifact_path);
+    const destination = try allocator.dupeSentinel(u8, artifact_path, 0);
     defer allocator.free(destination);
     if (c.rename(temp.ptr, destination.ptr) != 0) return error.ArtifactRenameFailed;
 }
@@ -206,9 +203,9 @@ test "P4 E3c actual generation-backed GUI client idle pump emits strict scale ev
     if (c.flock(fixture_lock_fd, posix.LOCK.EX) != 0) return error.FixtureLockFailed;
 
     var dir_buffer: [256]u8 = undefined;
-    const dir_path = try std.fmt.bufPrintZ(&dir_buffer, "/tmp/maru-sh-e3c-{d}", .{c.getpid()});
+    const dir_path = try std.fmt.bufPrintSentinel(&dir_buffer, "/tmp/maru-sh-e3c-{d}", .{c.getpid()}, 0);
     var socket_buffer: [320]u8 = undefined;
-    const socket_path = try std.fmt.bufPrintZ(&socket_buffer, "{s}/control.sock", .{dir_path});
+    const socket_path = try std.fmt.bufPrintSentinel(&socket_buffer, "{s}/control.sock", .{dir_path}, 0);
 
     const host_pid = c.fork();
     if (host_pid < 0) return error.HostForkFailed;

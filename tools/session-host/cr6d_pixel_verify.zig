@@ -1,5 +1,7 @@
 //! CR6d-v2a product receipt + two CAMetalLayer PPM artifact verifier.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const pixel = @import("cr6d_pixel");
 
@@ -103,8 +105,8 @@ test "CR6d-v2a receipt fields drive the independent pixel verdict" {
     ;
     const black = "\x00\x00\x00";
     const white = "\xff\xff\xff";
-    const before = "P6\n4 2\n255\n" ++ black ** 8;
-    const marked = "P6\n4 2\n255\n" ++ black ++ white ** 2 ++ black ** 5;
+    const before = "P6\n4 2\n255\n" ++ array_repeat.repeat(black, 8);
+    const marked = "P6\n4 2\n255\n" ++ black ++ array_repeat.repeat(white, 2) ++ array_repeat.repeat(black, 5);
     const result = try validateArtifacts(std.testing.allocator, receipt, before, marked);
     try std.testing.expectEqual(@as(u64, 7), result.surface_id);
     try std.testing.expectEqual(@as(u64, 10), result.before_generation);

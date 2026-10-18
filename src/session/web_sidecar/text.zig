@@ -1,5 +1,7 @@
 //! sidecar 가 보낼 글을 상한 안으로 줄이는 도구(W1a).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const max_text_bytes = @import("wire.zig").max_text_bytes;
 
@@ -69,7 +71,7 @@ test "clampUtf8 never splits a character" {
     try std.testing.expectEqualStrings("가", clampUtf8("가나", 5)); // 한글은 3바이트 — 5 에서 자르면 둘째 글자 중간
     try std.testing.expectEqualStrings("가나", clampUtf8("가나", 6));
     try std.testing.expectEqualStrings("", clampUtf8("가", 2));
-    const long = "제목" ** 1000;
+    const long = array_repeat.repeat("제목", 1000);
     const clamped = clampUtf8(long, max_text_bytes);
     try std.testing.expect(clamped.len <= max_text_bytes);
     try std.testing.expect(std.unicode.utf8ValidateSlice(clamped));

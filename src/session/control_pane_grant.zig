@@ -371,9 +371,9 @@ test "W9c①: grant 번호 — 새 자리마다 새 번호, 다시 허용은 그
 
 test "GrantHost: 상한을 넘거나 빈 호스트는 빈 값" {
     try testing.expectEqual(@as(u8, 0), GrantHost.init("").len);
-    const long = [_]u8{'a'} ** (max_host_bytes + 1);
+    const long = @as([(max_host_bytes + 1)]u8, @splat('a'));
     try testing.expectEqual(@as(u8, 0), GrantHost.init(&long).len);
-    const max = [_]u8{'a'} ** max_host_bytes;
+    const max = @as([max_host_bytes]u8, @splat('a'));
     try testing.expectEqual(@as(u8, max_host_bytes), GrantHost.init(&max).len);
 }
 

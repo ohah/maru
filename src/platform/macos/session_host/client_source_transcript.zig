@@ -3,6 +3,9 @@
 //! This leaf intentionally imports only `std`. Client field order, protocol header meaning, and
 //! reducer semantics belong to their owning adapters; this module only fixes byte framing.
 
+const array_repeat = @import("array_repeat");
+const type_info_fields = @import("type_info_fields");
+
 const std = @import("std");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -158,7 +161,7 @@ test "writer matches the frozen byte transcript" {
         "\x34\x12\x00\x00\x00\x00\x00\x00" ++
         "\x02\x00\x00\x00\x00\x00\x00\x00" ++
         "\x05\x00\x00\x00\x00\x00\x00\x00" ++
-        "\x00\x00\x00\x00\x00\x00\x00\x00" ** 3;
+        array_repeat.repeat("\x00\x00\x00\x00\x00\x00\x00\x00", 3);
     const frozen_digest =
         "\x10\x3e\x81\x21\x94\x20\x4b\xbe\xfb\xa2\x47\x92\xc8\xa9\xae\xb9" ++
         "\x99\x70\x6e\xa7\x4b\x74\x26\x61\x1f\x58\x26\x1e\xf6\x41\x21\x74";
@@ -223,7 +226,7 @@ test "all domain bytes are exact NUL terminated and pairwise distinct" {
         "\xf7\xce\x48\x58\xb3\xd6\x56\xec\x07\x2d\x91\xf5\x03\x83\x0c\xda" ++
             "\x33\x2a\xaf\x1a\x5d\xa7\x7b\x6b\x34\xa2\x6f\xc4\x62\xe9\xad\xba",
     };
-    try std.testing.expectEqual(std.meta.fields(Domain).len, domains.len);
+    try std.testing.expectEqual(type_info_fields.fields(Domain).len, domains.len);
     for (domains, expected, frozen_digests) |domain, bytes, frozen| {
         try std.testing.expectEqualStrings(bytes, domain.bytes());
         try std.testing.expectEqual(@as(u8, 0), bytes[bytes.len - 1]);

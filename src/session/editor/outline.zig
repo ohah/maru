@@ -201,7 +201,7 @@ test "outline 섞인 입력과 반복 접힘을 별도 부모 모델과 대조�
                 break;
             };
         }
-        var collapsed = [_]bool{false} ** n;
+        var collapsed = @as([n]bool, @splat(false));
         for (0..250) |_| {
             const id = random.random().uintLessThan(usize, n);
             const expandable = id * 2 + 1 < n;

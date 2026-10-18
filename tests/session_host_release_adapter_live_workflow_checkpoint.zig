@@ -123,7 +123,7 @@ test "foreign context and state content mode symlink or hardlink drift are rejec
             try std.testing.expectError(error.InvalidDocument, checkpoint.advance(std.testing.allocator, &root, .candidate_pinning, .succeeded, current));
         } else if (std.mem.eql(u8, scenario, "mode")) {
             var leaf_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-            const leaf = try std.fmt.bufPrintZ(&leaf_storage, "{s}/00-initial.state", .{root_path});
+            const leaf = try std.fmt.bufPrintSentinel(&leaf_storage, "{s}/00-initial.state", .{root_path}, 0);
             try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(leaf.ptr, 0o644));
             try std.testing.expectError(error.UnsafeMode, checkpoint.advance(std.testing.allocator, &root, .candidate_pinning, .succeeded, current));
         } else if (std.mem.eql(u8, scenario, "symlink")) {
@@ -169,7 +169,7 @@ test "root must be private owned canonical and no-follow" {
     changed.mode ^= 1;
     try std.testing.expectError(error.RootChanged, checkpoint.openRootExpected(&root, root_path, changed));
     var alias_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const alias = try std.fmt.bufPrintZ(&alias_storage, "{s}/root-link", .{root_path[0..std.mem.lastIndexOfScalar(u8, root_path, '/').?]});
+    const alias = try std.fmt.bufPrintSentinel(&alias_storage, "{s}/root-link", .{root_path[0..std.mem.lastIndexOfScalar(u8, root_path, '/').?]}, 0);
     try std.Io.Dir.cwd().symLink(std.testing.io, root_path, alias, .{});
     try std.testing.expectError(error.UnsafeRoot, checkpoint.openRoot(&root, alias));
     try std.testing.expectError(error.UnsafeRoot, checkpoint.openRoot(&root, "/private/tmp/../tmp"));
@@ -236,7 +236,7 @@ fn rootPath(tmp: *std.testing.TmpDir, output: *[std.fs.max_path_bytes:0]u8) ![:0
     try tmp.dir.createDir(std.testing.io, "root", .default_dir);
     var parent: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &parent);
-    return std.fmt.bufPrintZ(output, "{s}/root", .{parent[0..len]});
+    return std.fmt.bufPrintSentinel(output, "{s}/root", .{parent[0..len]}, 0);
 }
 
 fn privateMode(path: [:0]const u8) !void {

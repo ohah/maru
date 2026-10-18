@@ -990,7 +990,7 @@ pub const Tree = struct {
     /// through the existing background snapshot path; recent paths have no scanner owner, so the model
     /// updates them explicitly and atomically with respect to row projection.
     pub fn remapRecent(self: *Tree, old_prefix: []const u8, new_prefix: []const u8) !void {
-        var staged: [max_recent]?[]u8 = .{null} ** max_recent;
+        var staged: [max_recent]?[]u8 = @splat(null);
         errdefer for (staged) |path| if (path) |owned| self.allocator.free(owned);
         for (self.recent.items, 0..) |path, i| {
             if (!pathWithin(path, old_prefix)) continue;
@@ -1757,18 +1757,18 @@ test "스냅샷 검증은 직접 잰 축끼리만 견준다 — 부모가 준 �
     try tree.replaceExplicitRoots(&.{"/project"});
 
     // 부모가 준 항목 identity(링크 자신 축) — 노드에 실린다.
-    const from_parent: Identity = .{ .device = 1, .inode = 111, .kind = @intFromEnum(IdentityKind.symlink) };
+    const from_parent: Identity = .{ .device = 1, .inode = 111, .kind = @backingInt(IdentityKind.symlink) };
     try tree.applySnapshot("/project", &.{.{ .name = "link", .kind = .symlink_directory, .identity = from_parent }});
 
     // 그 폴더를 펼쳐 직접 잰 값은 **실체**라 위와 다르다. 옛 코드는 여기서 IdentityMismatch 였다.
-    const scanned: ScanIdentity = .{ .value = .{ .device = 1, .inode = 222, .kind = @intFromEnum(IdentityKind.directory) } };
+    const scanned: ScanIdentity = .{ .value = .{ .device = 1, .inode = 222, .kind = @backingInt(IdentityKind.directory) } };
     try tree.applySnapshotWithIdentity("/project/link", scanned, &.{.{ .name = "inside.txt", .kind = .file }});
 
     // 같은 축으로 다시 오면 통과한다(정상 refresh).
     try tree.applySnapshotWithIdentity("/project/link", scanned, &.{.{ .name = "inside.txt", .kind = .file }});
 
     // **재배치는 여전히 잡는다** — 같은 경로가 다른 실체를 열면 그때가 진짜 mismatch 다.
-    const replaced: ScanIdentity = .{ .value = .{ .device = 1, .inode = 333, .kind = @intFromEnum(IdentityKind.directory) } };
+    const replaced: ScanIdentity = .{ .value = .{ .device = 1, .inode = 333, .kind = @backingInt(IdentityKind.directory) } };
     try std.testing.expectError(
         error.IdentityMismatch,
         tree.applySnapshotWithIdentity("/project/link", replaced, &.{}),
@@ -1792,7 +1792,7 @@ test "file tree transaction clone is independent and pinned root rejects replace
     var tree = Tree.init(allocator);
     defer tree.deinit();
     try tree.replaceExplicitRoots(&.{"/project"});
-    const pinned: Identity = .{ .device = 7, .inode = 11, .kind = @intFromEnum(IdentityKind.directory) };
+    const pinned: Identity = .{ .device = 7, .inode = 11, .kind = @backingInt(IdentityKind.directory) };
     const pinned_scan: ScanIdentity = .{ .value = pinned };
     try std.testing.expect(tree.pinRootIdentity("/project", pinned));
     try tree.applySnapshotWithIdentity("/project", pinned_scan, &.{.{ .name = "docs", .kind = .directory }});
@@ -1803,7 +1803,7 @@ test "file tree transaction clone is independent and pinned root rejects replace
     try std.testing.expectEqual(@as(usize, 1), tree.rootCount());
     try std.testing.expectEqual(@as(usize, 2), candidate.rootCount());
 
-    const replaced: ScanIdentity = .{ .value = .{ .device = 7, .inode = 12, .kind = @intFromEnum(IdentityKind.directory) } };
+    const replaced: ScanIdentity = .{ .value = .{ .device = 7, .inode = 12, .kind = @backingInt(IdentityKind.directory) } };
     try std.testing.expectError(error.IdentityMismatch, candidate.applySnapshotWithIdentity("/project", replaced, &.{}));
     try std.testing.expect(try candidate.removeExplicitRoot("/outside"));
     try std.testing.expectError(error.IdentityMismatch, candidate.applySnapshotWithIdentity("/project", replaced, &.{}));

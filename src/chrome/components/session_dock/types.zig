@@ -496,7 +496,7 @@ test "scope segment keeps room for its label across the whole bounded dock zoom 
 test "DockMetrics scales with one resolved Dock scale" {
     const one_x = DockMetrics.resolve(1000);
     const two_x = DockMetrics.resolve(2000);
-    inline for (std.meta.fields(DockMetrics)) |field| {
+    inline for (@import("type_info_fields").fields(DockMetrics)) |field| {
         try std.testing.expectEqual(@field(one_x, field.name) * 2, @field(two_x, field.name));
     }
     try std.testing.expectEqual(one_x.header_h, DockMetrics.resolve(0).header_h);
@@ -504,7 +504,7 @@ test "DockMetrics scales with one resolved Dock scale" {
 
 test "DockMetrics fails closed at extreme backing scale without overflow" {
     const m = DockMetrics.resolve(std.math.maxInt(u32));
-    inline for (std.meta.fields(DockMetrics)) |field| {
+    inline for (@import("type_info_fields").fields(DockMetrics)) |field| {
         try std.testing.expect(@field(m, field.name) <= @as(u32, std.math.maxInt(i32)));
     }
 }

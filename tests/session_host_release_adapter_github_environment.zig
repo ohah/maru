@@ -2,6 +2,8 @@
 //! expose configured policy facts only; they do not prove that the current workflow job passed
 //! those rules or authenticate the transport that captured the response.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const github_environment = @import("release_adapter_github_environment");
 
@@ -49,7 +51,7 @@ test "an exact environment without configured protection remains an unprotected 
 }
 
 test "response cap is enforced before parsing" {
-    const oversized = " " ** (github_environment.max_response_bytes + 1);
+    const oversized = array_repeat.repeat(" ", (github_environment.max_response_bytes + 1));
     try std.testing.expectError(
         error.ResponseTooLarge,
         github_environment.parseAndBind(std.testing.allocator, oversized),

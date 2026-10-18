@@ -229,7 +229,7 @@ test "core_command.apply: 각 명령이 코어를 올바르게 mutate (위임 �
         .foreground = .{ .r = 0x11, .g = 0x22, .b = 0x33 },
         .background = .{ .r = 0x44, .g = 0x55, .b = 0x66 },
     } });
-    var palette: [16]?terminal.Rgb = .{null} ** 16;
+    var palette: [16]?terminal.Rgb = @splat(null);
     palette[1] = .{ .r = 10, .g = 20, .b = 30 };
     _ = apply(&core, .{ .set_config_palette = palette });
     try std.testing.expect(core.config_palette[1] != null);

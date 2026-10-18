@@ -335,7 +335,7 @@ const RuntimeAttachment = union(enum) {
         if (&runtime.currentGeneration().attachment != self) return error.ProtocolError;
         if (!generation_contract.runtimeRequestTagRawValid(@ptrCast(&request.tag)))
             return error.ProtocolError;
-        const tag: generation_contract.RuntimeRequestTag = @enumFromInt(request.tag);
+        const tag: generation_contract.RuntimeRequestTag = @fromBackingInt(@intCast(request.tag));
         if (!std.mem.eql(u8, generation_contract.requestMethod(tag), legacy_method))
             return error.ProtocolError;
         return switch (self.*) {
@@ -566,7 +566,7 @@ fn metadataDtoMatchesObservation(
         dto.observer_generation != view.observer_generation or
         dto.title_generation != view.title_generation or
         dto.cols != view.size.cols or dto.rows != view.size.rows or
-        @intFromEnum(dto.semantic_state) != @intFromEnum(view.semantic_state) or
+        @backingInt(dto.semantic_state) != @backingInt(view.semantic_state) or
         dto.alt_active != view.alt_active or
         dto.app_cursor_keys != view.app_cursor_keys or
         dto.app_keypad != view.app_keypad or
@@ -694,9 +694,9 @@ fn preparedOrderedRetiringLifecycleRawValid(
     value: *const PreparedOrderedRetiringReclaim.Lifecycle,
 ) bool {
     return switch (@as(*const u8, @ptrCast(value)).*) {
-        @intFromEnum(PreparedOrderedRetiringReclaim.Lifecycle.pristine),
-        @intFromEnum(PreparedOrderedRetiringReclaim.Lifecycle.prepared),
-        @intFromEnum(PreparedOrderedRetiringReclaim.Lifecycle.reclaimed),
+        @backingInt(PreparedOrderedRetiringReclaim.Lifecycle.pristine),
+        @backingInt(PreparedOrderedRetiringReclaim.Lifecycle.prepared),
+        @backingInt(PreparedOrderedRetiringReclaim.Lifecycle.reclaimed),
         => true,
         else => false,
     };
@@ -706,7 +706,7 @@ fn generationAttachmentTerminal(
     attachment: *const generation_attachment_mod.GenerationAttachment,
 ) bool {
     return @as(*const u8, @ptrCast(&attachment.lifecycle)).* ==
-        @intFromEnum(generation_attachment_mod.Lifecycle.terminal);
+        @backingInt(generation_attachment_mod.Lifecycle.terminal);
 }
 
 const ReconnectGenerationEffect = enum(u8) {
@@ -775,7 +775,7 @@ const ReconnectProductExecutor = struct {
     state: ?reconnect_reducer.State = null,
     prepared: PreparedReconnect = .{},
     admission: ?reconnect_admission_owner.Projection = null,
-    admission_seal: process_seal_service.CleanupSeal = [_]u8{0} ** 32,
+    admission_seal: process_seal_service.CleanupSeal = @as([32]u8, @splat(0)),
     resident_budget_addr: usize = 0,
     resident_lease: reconnect_resident_budget.Lease = .{},
     live: bool = false,
@@ -862,7 +862,7 @@ const ReconnectProductExecutor = struct {
     fn clearAdmissionBinding(self: *ReconnectProductExecutor) void {
         self.resident_budget_addr = 0;
         self.admission = null;
-        self.admission_seal = [_]u8{0} ** 32;
+        self.admission_seal = @as([32]u8, @splat(0));
     }
 
     fn preflightChargeHandOff(
@@ -1090,7 +1090,7 @@ const ReconnectProductExecutor = struct {
             !reconnect_reducer.valid(self.state.?)) return error.InvalidAuthority;
         try owner.validate();
         if (self.resident_budget_addr == 0) {
-            if (self.admission != null or !std.mem.eql(u8, &self.admission_seal, &([_]u8{0} ** 32)) or
+            if (self.admission != null or !std.mem.eql(u8, &self.admission_seal, &(@as([32]u8, @splat(0)))) or
                 !std.meta.eql(self.resident_lease, reconnect_resident_budget.Lease{}))
                 return error.InvalidAuthority;
         } else {
@@ -1156,7 +1156,7 @@ pub const DirectReleaseProjection = struct {
     attempt: u64 = 0,
     candidate_connection_generation: u64 = 0,
     deadline_ns: u64 = 0,
-    runtime_id: [16]u8 = [_]u8{0} ** 16,
+    runtime_id: [16]u8 = @as([16]u8, @splat(0)),
 };
 
 /// CR5 host job이 connect 전에 runtime membership을 봉인할 때 읽는 최소 identity다.
@@ -1188,7 +1188,7 @@ pub const CloseEvent = struct {
     retry_shell_generation: u64 = 0,
 
     pub fn init(close_tag: CloseEventTag) CloseEvent {
-        return .{ .tag_raw = @intFromEnum(close_tag) };
+        return .{ .tag_raw = @backingInt(close_tag) };
     }
 
     pub fn tag(self: CloseEvent) !CloseEventTag {
@@ -1256,7 +1256,7 @@ pub const CloseStateProjection = struct {
     attempt: u64 = 0,
     candidate_connection_generation: u64 = 0,
     phase_deadline_ns: u64 = 0,
-    runtime_id: [16]u8 = [_]u8{0} ** 16,
+    runtime_id: [16]u8 = @as([16]u8, @splat(0)),
     unavailable_retry_at_ns: u64 = 0,
     unavailable_last_attempt: u64 = 0,
     unavailable_last_candidate_connection_generation: u64 = 0,
@@ -1343,11 +1343,11 @@ fn updateCloseState(hasher: *std.crypto.hash.Blake3, state: CloseStateProjection
 
 fn closeStateProjection(state: reconnect_reducer.State) CloseStateProjection {
     var out: CloseStateProjection = .{
-        .phase_raw = @intFromEnum(state.phaseTag()),
-        .ledger_raw = @intFromEnum(state.ledger),
-        .local_raw = @intFromEnum(state.local),
-        .mutation_raw = @intFromEnum(state.mutation),
-        .close_raw = @intFromEnum(std.meta.activeTag(state.close)),
+        .phase_raw = @backingInt(state.phaseTag()),
+        .ledger_raw = @backingInt(state.ledger),
+        .local_raw = @backingInt(state.local),
+        .mutation_raw = @backingInt(state.mutation),
+        .close_raw = @backingInt(std.meta.activeTag(state.close)),
         .shell_generation = state.shell_generation,
     };
     switch (state.phase) {
@@ -1402,7 +1402,7 @@ fn closeTransitionProjectionForState(
     return .{
         .before = closeStateProjection(state),
         .event = event,
-        .decision_raw = @intFromEnum(result.decision),
+        .decision_raw = @backingInt(result.decision),
         .after = closeStateProjection(result.state),
     };
 }
@@ -3770,7 +3770,7 @@ pub const RemoteRuntime = struct {
                 &runtime.generation_owner,
                 expected.event,
             );
-            if (@intFromEnum(decision) != expected.decision_raw)
+            if (@backingInt(decision) != expected.decision_raw)
                 process_seal_service.fatalIntegrity(.proof_loss);
         }
 
@@ -3867,7 +3867,7 @@ pub const RemoteRuntime = struct {
             if (runtime.blocking_flush_active or runtime.direct_input.items.len != 0 or
                 runtime.pending_controls.items.len != 0 or runtime.input_batches.records.items.len != 0)
                 return false;
-            if (runtime.pending_event_owner.lifecycle_raw != @intFromEnum(pending_event_owner_mod.PendingLifecycle.idle))
+            if (runtime.pending_event_owner.lifecycle_raw != @backingInt(pending_event_owner_mod.PendingLifecycle.idle))
                 return false;
             const generation = runtime.currentGeneration();
             if (generation.resync_needed) return false;
@@ -4907,14 +4907,14 @@ pub const RemoteRuntime = struct {
         find_scroll,
         notification_config,
     };
-    const mutation_drop_op_count = @typeInfo(MutationDropOp).@"enum".fields.len;
+    const mutation_drop_op_count = @import("type_info_fields").enumFields(MutationDropOp).len;
 
     /// 관문(`mutationAllowed`)이나 stable mutation owner 가 mutation 을 버렸다. op 마다 **이유가 바뀔 때만**
     /// 한 줄 남긴다 — 키마다 적으면 넘치고, 한 번만 적으면 일시적 이유가 진짜 이유를 가린다
     /// (`mutation_drop_reasons` 주석). 예전엔 전부 흔적 없이 사라져, 2026-09-29 재연결 뒤 한 host 의
     /// runtime 셋이 resize·input 을 버린 이유를 로그로 볼 수 없었다.
     fn noteMutationDropped(self: *RemoteRuntime, op: MutationDropOp, reason: []const u8) void {
-        const slot = &self.mutation_drop_reasons[@intFromEnum(op)];
+        const slot = &self.mutation_drop_reasons[@backingInt(op)];
         if (slot.* == reason.ptr) return;
         slot.* = reason.ptr;
         self.mutation_drop_lines +|= 1;
@@ -4933,7 +4933,7 @@ pub const RemoteRuntime = struct {
 
     /// 그 op 가 stable mutation 을 얻었다 — 다음 버림은 이유가 같아도 새 사건이다.
     fn clearMutationDropNote(self: *RemoteRuntime, op: MutationDropOp) void {
-        self.mutation_drop_reasons[@intFromEnum(op)] = null;
+        self.mutation_drop_reasons[@backingInt(op)] = null;
     }
 
     /// 재연결 게시가 새 generation 을 연다 — 옛 generation 에서 적은 이유는 모두 지난 일이다.
@@ -5158,8 +5158,8 @@ pub const RemoteRuntime = struct {
 
     fn reconnectMutationSealDigest(self: *const RemoteRuntime) ?process_seal_service.CleanupSeal {
         const lifecycle_raw = @as(*const u8, @ptrCast(&self.mutation_owner.lifecycle)).*;
-        if (lifecycle_raw != @intFromEnum(reconnect_mutation_seal.MutationLifecycle.sealed_clean) and
-            lifecycle_raw != @intFromEnum(reconnect_mutation_seal.MutationLifecycle.sealed_ambiguous))
+        if (lifecycle_raw != @backingInt(reconnect_mutation_seal.MutationLifecycle.sealed_clean) and
+            lifecycle_raw != @backingInt(reconnect_mutation_seal.MutationLifecycle.sealed_ambiguous))
             return null;
         if (self.mutation_owner.active_leases != 0 or !self.paused_paste_store.initialized()) return null;
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
@@ -5838,7 +5838,7 @@ pub const RemoteRuntime = struct {
         output: *anyopaque,
         apply: BoundRpcDecodeApply,
     ) client_mod.ClientError!void {
-        const tag: generation_contract.RuntimeRequestTag = @enumFromInt(request.tag);
+        const tag: generation_contract.RuntimeRequestTag = @fromBackingInt(@intCast(request.tag));
         var context: BoundRpcDecodeContext = .{
             .runtime = self,
             .expected_tag = tag,
@@ -5881,8 +5881,8 @@ pub const RemoteRuntime = struct {
                 break :blk .{
                     .timestamp_ns = receipt.timestamp_ns,
                     .controller_generation = self.currentGeneration().attachment.statePtr().controller_generation,
-                    .source_site_raw = @intFromEnum(connection_incident.SourceSite.client_response),
-                    .allocator_source_site_raw = @intFromEnum(connection_incident.SourceSite.client_cleanup),
+                    .source_site_raw = @backingInt(connection_incident.SourceSite.client_response),
+                    .allocator_source_site_raw = @backingInt(connection_incident.SourceSite.client_cleanup),
                     .capture_addr = @intFromPtr(&poison_capture),
                     .prepared_addr = @intFromPtr(&prepared_poison),
                 };
@@ -5899,7 +5899,7 @@ pub const RemoteRuntime = struct {
             poison_request,
         ) catch |err| {
             if (prepared_poison.lifecycle_raw ==
-                @intFromEnum(incident_publication_contract.ManagedPoisonLifecycle.prepared))
+                @backingInt(incident_publication_contract.ManagedPoisonLifecycle.prepared))
             {
                 const adapter = self.generationConnection() orelse return error.ProtocolError;
                 _ = app_process_incident_owner.publishPreparedManagedPoison(
@@ -6098,10 +6098,10 @@ pub const RemoteRuntime = struct {
     ) client_mod.ClientError!void {
         if (capture.self_addr != @intFromPtr(capture) or
             capture.timestamp_ns != timestamp.timestamp_ns or
-            capture.source_site_raw != @intFromEnum(connection_incident.SourceSite.client_read) or
+            capture.source_site_raw != @backingInt(connection_incident.SourceSite.client_read) or
             capture.reason_present_raw != 1 or
             std.enums.fromInt(client_poison.ConnectionReason, capture.reason_raw) == null or
-            capture.lifecycle_raw != @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.finalized))
+            capture.lifecycle_raw != @backingInt(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.finalized))
             return error.ProtocolError;
         const generation = switch (self.currentGeneration().attachment) {
             .legacy => return error.ProtocolError,
@@ -6364,12 +6364,12 @@ pub const RemoteRuntime = struct {
         const outcome = generation.takeEventWithPoisonCapture(.{
             .timestamp_ns = timestamp.timestamp_ns,
             .controller_generation = self.currentGeneration().attachment.statePtr().controller_generation,
-            .source_site_raw = @intFromEnum(connection_incident.SourceSite.client_slot_operation),
+            .source_site_raw = @backingInt(connection_incident.SourceSite.client_slot_operation),
             .capture_addr = @intFromPtr(&capture),
             .prepared_addr = @intFromPtr(&prepared),
         }) catch |err| {
             if (prepared.lifecycle_raw ==
-                @intFromEnum(incident_publication_contract.ManagedPoisonLifecycle.prepared))
+                @backingInt(incident_publication_contract.ManagedPoisonLifecycle.prepared))
             {
                 const adapter = self.generationConnection() orelse return error.Corrupt;
                 _ = app_process_incident_owner.publishPreparedManagedPoison(
@@ -6402,7 +6402,7 @@ pub const RemoteRuntime = struct {
             self.idle_drain_epoch != 0 and
             self.idle_drain_epoch == enqueue_epoch and
             self.idle_drain_generation == generation_number and
-            self.pending_event_owner.lifecycle_raw == @intFromEnum(pending_event_owner_mod.PendingLifecycle.idle))
+            self.pending_event_owner.lifecycle_raw == @backingInt(pending_event_owner_mod.PendingLifecycle.idle))
         {
             _ = @atomicRmw(u64, &observation_drains_skipped, .Add, 1, .monotonic);
             return result;
@@ -6614,7 +6614,7 @@ pub const RemoteRuntime = struct {
             .resync_needed = self.currentGeneration().resync_needed,
             .resize_generation = self.currentGeneration().resize_generation,
             .resize_baseline_present = self.currentGeneration().resize_baseline_present,
-            .attachment_role_raw = @intFromEnum(attachment_state.role),
+            .attachment_role_raw = @backingInt(attachment_state.role),
             .controller_generation = attachment_state.controller_generation,
             .metadata_published = result.metadata,
             .ended_published = result.ended,
@@ -6838,7 +6838,7 @@ pub const RemoteRuntime = struct {
             .cwd_host = dto.cwdHost(),
             .window_title = dto.windowTitle(),
             .ssh_remote_dest = dto.sshRemoteDest(),
-            .semantic_state = @enumFromInt(@intFromEnum(dto.semantic_state)),
+            .semantic_state = @fromBackingInt(@intCast(@backingInt(dto.semantic_state))),
             .alt_active = dto.alt_active,
             .app_cursor_keys = dto.app_cursor_keys,
             .app_keypad = dto.app_keypad,
@@ -8422,8 +8422,8 @@ pub const testing_api = if (builtin.is_test) struct {
         if (Cr3c2OrderedReclaimTestState.len != 2)
             @panic("ordered reconnect reclaim trace is incomplete");
         return .{
-            @intFromEnum(Cr3c2OrderedReclaimTestState.stages[0]) + 1,
-            @intFromEnum(Cr3c2OrderedReclaimTestState.stages[1]) + 1,
+            @backingInt(Cr3c2OrderedReclaimTestState.stages[0]) + 1,
+            @backingInt(Cr3c2OrderedReclaimTestState.stages[1]) + 1,
         };
     }
 
@@ -8656,7 +8656,7 @@ pub const testing_api = if (builtin.is_test) struct {
     }
 
     pub fn expectedCloseDecision(case: CloseCase) u8 {
-        return @intFromEnum(switch (case) {
+        return @backingInt(switch (case) {
             .preserve_old => reconnect_reducer.Decision.close_preserve_old,
             .preserve_old_with_paused_notice => .close_preserve_old_with_paused_notice,
             .publish_new => .close_publish_new,
@@ -8684,7 +8684,7 @@ pub const testing_api = if (builtin.is_test) struct {
         }
         runtime.reconnect_executor.resident_budget_addr = 0;
         runtime.reconnect_executor.admission = null;
-        runtime.reconnect_executor.admission_seal = [_]u8{0} ** 32;
+        runtime.reconnect_executor.admission_seal = @as([32]u8, @splat(0));
         runtime.reconnect_executor.state = reconnect_reducer.State.initial(
             1,
             runtime.generation_owner.currentGeneration() catch
@@ -8713,7 +8713,7 @@ pub const testing_api = if (builtin.is_test) struct {
         const settlement = generation_attachment_mod.testing_api.settlementSourceSnapshot(attachment);
         return .{
             .pending_idle = runtime.pending_event_owner.lifecycle_raw ==
-                @intFromEnum(pending_event_owner_mod.PendingLifecycle.idle),
+                @backingInt(pending_event_owner_mod.PendingLifecycle.idle),
             .owner_pristine = settlement.owner_pristine,
             .correlation_pristine = settlement.correlation_pristine,
             .event_generation_mirror = settlement.event_generation_mirror,
@@ -9039,7 +9039,7 @@ test "CR3a-2c3c C2 projects every product core command into the closed generatio
         .{ .report_focus = true },
         .{ .set_cell_metrics = .{ .width = 4, .height = 5 } },
         .{ .set_default_colors = .{ .foreground = 6, .background = 7 } },
-        .{ .set_config_palette = .{null} ** 16 },
+        .{ .set_config_palette = @splat(null) },
         .{ .set_max_scrollback = 8 },
         .{ .set_ambiguous_wide = true },
         .{ .set_emoji_wide = false },
@@ -9048,7 +9048,7 @@ test "CR3a-2c3c C2 projects every product core command into the closed generatio
             .max_scrollback = 9,
             .ambiguous_wide = true,
             .emoji_wide = false,
-            .palette = .{null} ** 16,
+            .palette = @splat(null),
             .default_colors = .{ .foreground = 10, .background = 11 },
             .cell_metrics = .{ .width = 12, .height = 13 },
             .cursor_shape = 1,
@@ -9070,7 +9070,7 @@ test "CR3a-2c3c C2 projects every product core command into the closed generatio
         .{ .report_focus = true },
         .{ .set_cell_metrics = .{ .width = 4, .height = 5 } },
         .{ .set_default_colors = .{ .foreground = 6, .background = 7 } },
-        .{ .set_config_palette = .{null} ** 16 },
+        .{ .set_config_palette = @splat(null) },
         .{ .set_max_scrollback = 8 },
         .{ .set_ambiguous_wide = true },
         .{ .set_emoji_wide = false },
@@ -9079,7 +9079,7 @@ test "CR3a-2c3c C2 projects every product core command into the closed generatio
             .max_scrollback = 9,
             .ambiguous_wide = true,
             .emoji_wide = false,
-            .palette = .{null} ** 16,
+            .palette = @splat(null),
             .foreground = 10,
             .background = 11,
             .cell_width = 12,
@@ -9096,12 +9096,12 @@ test "CR3a-2c3c C2 projects every product core command into the closed generatio
         .selection_clear,
     };
     try testing.expectEqual(
-        @as(usize, @typeInfo(core_command_wire.Command).@"union".fields.len),
+        @as(usize, @import("type_info_fields").unionFields(core_command_wire.Command).len),
         commands.len,
     );
     try testing.expectEqual(
         commands.len,
-        @typeInfo(generation_contract.CoreCommandRequest).@"union".fields.len,
+        @import("type_info_fields").unionFields(generation_contract.CoreCommandRequest).len,
     );
     for (commands, expected) |command, oracle| {
         const projected = runtime_pending_control.projectCoreCommand(command);
@@ -9122,7 +9122,7 @@ test "CR3a-2c3c C2 projects every product core command into the closed generatio
             .max_scrollback = 14,
             .ambiguous_wide = false,
             .emoji_wide = true,
-            .palette = .{null} ** 16,
+            .palette = @splat(null),
             .default_colors = .{ .foreground = 15, .background = 16 },
             .cell_metrics = null,
             .cursor_shape = 2,
@@ -9133,7 +9133,7 @@ test "CR3a-2c3c C2 projects every product core command into the closed generatio
             .max_scrollback = 14,
             .ambiguous_wide = false,
             .emoji_wide = true,
-            .palette = .{null} ** 16,
+            .palette = @splat(null),
             .foreground = 15,
             .background = 16,
             .cell_width = 0,
@@ -9215,7 +9215,7 @@ test "remote runtime: new spawn config fails closed against a legacy daemon that
             .max_scrollback = 1000,
             .ambiguous_wide = false,
             .emoji_wide = true,
-            .palette = .{null} ** 16,
+            .palette = @splat(null),
             .default_colors = .{
                 .foreground = .{ .r = 0xD0, .g = 0xD0, .b = 0xD0 },
                 .background = .{ .r = 0x10, .g = 0x10, .b = 0x10 },
@@ -9473,7 +9473,7 @@ const RuntimeConfigSpawnWire = struct {
 };
 
 fn coreConfigToSpawnWire(config: maru.session.core_command.RuntimeConfig) RuntimeConfigSpawnWire {
-    var palette: core_command_wire.Command.Palette = .{null} ** 16;
+    var palette: core_command_wire.Command.Palette = @splat(null);
     for (config.palette, 0..) |maybe_rgb, index| {
         palette[index] = if (maybe_rgb) |rgb|
             (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b
@@ -9493,7 +9493,7 @@ fn coreConfigToSpawnWire(config: maru.session.core_command.RuntimeConfig) Runtim
             config.default_colors.background.b,
         .cell_width = if (config.cell_metrics) |metrics| metrics.width else 0,
         .cell_height = if (config.cell_metrics) |metrics| metrics.height else 0,
-        .cursor_shape = @intFromEnum(config.default_cursor_shape),
+        .cursor_shape = @backingInt(config.default_cursor_shape),
     };
 }
 
@@ -9517,7 +9517,7 @@ test "remote runtime: spawn wire preserves extended SpawnRequest fields" {
         .cell_width_px = 9,
         .cell_height_px = 18,
     };
-    var palette: [16]?terminal.Rgb = .{null} ** 16;
+    var palette: [16]?terminal.Rgb = @splat(null);
     palette[0] = .{ .r = 0x11, .g = 0x22, .b = 0x33 };
     const json = try buildSpawnParams(allocator, request, .{ .cols = 132, .rows = 43 }, .{
         .max_scrollback = 4321,
@@ -10911,10 +10911,10 @@ test "ID1 빈 드레인은 새 이벤트가 없을 때만 건너뛰고, 남의 s
     //    있다(`preparePendingEventForClose`) — 건너뛰면 그 close 가 영영 정산되지 않는다. 적대적 검증에서 이
     //    가드를 지운 돌연변이가 살아남아 더했다. 여기서는 정산할 실체가 없으니 드레인이 ProtocolError 로
     //    돌아오는 것까지가 «건너뛰지 않았다» 의 증거다.
-    rr.pending_event_owner.lifecycle_raw = @intFromEnum(pending_event_owner_mod.PendingLifecycle.prepared);
+    rr.pending_event_owner.lifecycle_raw = @backingInt(pending_event_owner_mod.PendingLifecycle.prepared);
     try std.testing.expectError(error.ProtocolError, rr.drainObservationEvents());
     try std.testing.expectEqual(s0 + 2, skipped.now());
-    rr.pending_event_owner.lifecycle_raw = @intFromEnum(pending_event_owner_mod.PendingLifecycle.idle);
+    rr.pending_event_owner.lifecycle_raw = @backingInt(pending_event_owner_mod.PendingLifecycle.idle);
 
     // ④ generation 번호가 다르면(재접속으로 Client 가 바뀐 경우) 세대가 같아도 건너뛰지 않는다.
     rr.idle_drain_generation +%= 1;
@@ -11060,9 +11060,9 @@ test "QP1 조용한 owner 펌프는 할 일이 없다고 증명될 때만 건너
     rr.currentGeneration().resync_needed = true;
     try std.testing.expect(!proven(&rr));
     rr.currentGeneration().resync_needed = false;
-    rr.pending_event_owner.lifecycle_raw = @intFromEnum(pending_event_owner_mod.PendingLifecycle.prepared);
+    rr.pending_event_owner.lifecycle_raw = @backingInt(pending_event_owner_mod.PendingLifecycle.prepared);
     try std.testing.expect(!proven(&rr));
-    rr.pending_event_owner.lifecycle_raw = @intFromEnum(pending_event_owner_mod.PendingLifecycle.idle);
+    rr.pending_event_owner.lifecycle_raw = @backingInt(pending_event_owner_mod.PendingLifecycle.idle);
     rr.blocking_flush_active = true;
     try std.testing.expect(!proven(&rr));
     rr.blocking_flush_active = false;
@@ -11576,8 +11576,8 @@ fn runB4ProofLossChild(case: B4ProofLossCase) noreturn {
             allocator_probe.target_len = fixture.runtime.currentGeneration().observation.cwd.items.len;
             allocator_probe.armed = true;
         },
-        .observation => testing_api.armSemanticProofLoss(@intFromEnum(B4SemanticProofLossStage.observation_drift)),
-        .continuation => testing_api.armSemanticProofLoss(@intFromEnum(B4SemanticProofLossStage.continuation_drift)),
+        .observation => testing_api.armSemanticProofLoss(@backingInt(B4SemanticProofLossStage.observation_drift)),
+        .continuation => testing_api.armSemanticProofLoss(@backingInt(B4SemanticProofLossStage.continuation_drift)),
     }
     _ = fixture.runtime.advancePendingEventForClose();
     std.c._exit(124);
@@ -11654,7 +11654,7 @@ test "C3-3b4 실제 Runtime event ended는 settlement 뒤 종료를 게시한다
     try fixture.initInPlace();
     defer fixture.deinit();
     try std.testing.expect((try fixture.publish("{\"event\":\"runtime.ended\"}")).ended);
-    try std.testing.expectEqual(@intFromEnum(pending_event_owner_mod.PendingLifecycle.idle), fixture.runtime.pending_event_owner.lifecycle_raw);
+    try std.testing.expectEqual(@backingInt(pending_event_owner_mod.PendingLifecycle.idle), fixture.runtime.pending_event_owner.lifecycle_raw);
 }
 
 test "C3-3b4 실제 Runtime event invalidated는 settlement 뒤 resync intent를 게시한다" {
@@ -11769,7 +11769,7 @@ test "C3-3b4 실제 Runtime event failure는 confirmed effect 뒤 prepared 의�
             "\"cols\":120,\"rows\":40,\"resize_generation\":10,\"reason\":\"controller\"}}",
     ));
     try std.testing.expectEqual(terminal.Size{ .cols = 90, .rows = 30 }, fixture.runtime.currentGeneration().observation.size);
-    try std.testing.expectEqual(@intFromEnum(pending_event_owner_mod.PendingLifecycle.idle), fixture.runtime.pending_event_owner.lifecycle_raw);
+    try std.testing.expectEqual(@backingInt(pending_event_owner_mod.PendingLifecycle.idle), fixture.runtime.pending_event_owner.lifecycle_raw);
 }
 
 const B4BusyHook = struct {
@@ -11809,7 +11809,7 @@ test "C3-3b4 pump round-robin은 Busy owner를 같은 tick에 재시도하지 �
         fixture.runtime.drainGenerationObservationEventsWithHook(B4BusyHook.run),
     );
     try std.testing.expect(fixture.runtime.currentGeneration().attachment.generation.event_generation_mirror != 0);
-    try std.testing.expectEqual(@intFromEnum(pending_event_owner_mod.PendingLifecycle.prepared), fixture.runtime.pending_event_owner.lifecycle_raw);
+    try std.testing.expectEqual(@backingInt(pending_event_owner_mod.PendingLifecycle.prepared), fixture.runtime.pending_event_owner.lifecycle_raw);
     _ = try fixture.runtime.drainObservationEvents();
 }
 
@@ -11828,7 +11828,7 @@ test "C3-3b4 pump round-robin은 Busy owner를 다음 tick에 exact once 완료�
     );
     _ = try fixture.runtime.drainObservationEvents();
     try std.testing.expect(fixture.runtime.currentGeneration().resync_needed);
-    try std.testing.expectEqual(@intFromEnum(pending_event_owner_mod.PendingLifecycle.idle), fixture.runtime.pending_event_owner.lifecycle_raw);
+    try std.testing.expectEqual(@backingInt(pending_event_owner_mod.PendingLifecycle.idle), fixture.runtime.pending_event_owner.lifecycle_raw);
 }
 
 test "C3-3b4 pump round-robin은 purge ended를 take보다 먼저 게시한다" {
@@ -12295,7 +12295,7 @@ fn cr3c2OwnerProjection(
         .remote_shell_generation = remote_node.generation,
         .remote_connection_generation = remote_node.payload.connection_generation,
         .remote_attachment_lifecycle_raw = switch (remote_node.payload.attachment) {
-            .generation => |attachment| @intFromEnum(attachment.lifecycle),
+            .generation => |attachment| @backingInt(attachment.lifecycle),
             .legacy => return error.InvalidAuthority,
         },
         .client_generation = adapter.connectionGeneration(),
@@ -13668,11 +13668,13 @@ const ReconnectResidentLedger = if (builtin.is_test) struct {
 
 fn reconnectCandidateResidentBytes() !usize {
     return switch (builtin.mode) {
+        // Zig 0.17 adds the unmanaged ArrayList pointer-stability safety lock in Debug builds;
+        // this candidate's measured Debug resident grows by 80 bytes, while ReleaseFast is unchanged.
         // 2026-10-12 이미지 채널 IC3b-2a(`AttachmentTransport` 에 함수 포인터 둘): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
         // 2026-10-12 이미지 채널 IC3b-2b-1(`AttachmentTransport.prepare_image_apply`): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
         // 2026-10-12 이미지 채널 IC3b-2b-2(`AttachmentTransport` 의 stream 열기·hwm 정리): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
-        .Debug => 3648,
-        .ReleaseFast => 3632,
+        .debug => 3728,
+        .fast => 3632,
         else => error.SkipZigTest,
     };
 }
@@ -15835,11 +15837,11 @@ test "CR0b prepared execution poison은 held operation suffix를 호출한다" {
     try testing.expectEqual(@as(u128, 0), pre_publication.pending_slots);
     try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
     try testing.expectEqual(
-        @intFromEnum(client_poison.ConnectionReason.connection_eof),
+        @backingInt(client_poison.ConnectionReason.connection_eof),
         pre_publication.reason_raw,
     );
     try testing.expectEqual(
-        @intFromEnum(connection_incident.SourceSite.client_response),
+        @backingInt(connection_incident.SourceSite.client_response),
         pre_publication.source_site_raw,
     );
     try testing.expectEqual(runtime.currentGeneration().attachment.statePtr().controller_generation, pre_publication.controller_generation);
@@ -15850,7 +15852,7 @@ test "CR0b prepared execution poison은 held operation suffix를 호출한다" {
     try testing.expect(!std.mem.eql(
         u8,
         &published.incident_repeat_key.fingerprint,
-        &([_]u8{0} ** 32),
+        &(@as([32]u8, @splat(0))),
     ));
     try testing.expect(published.unusable);
     try testing.expectEqual(@as(c.fd_t, -1), published.fd);
@@ -15942,17 +15944,17 @@ test "CR0b actual outbound RPC ambiguity는 canonical suffix를 호출한다" {
     try testing.expectEqual(@as(u128, 0), pre_publication.pending_slots);
     try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
     try testing.expectEqual(
-        @intFromEnum(client_poison.ConnectionReason.outbound_write_ambiguous),
+        @backingInt(client_poison.ConnectionReason.outbound_write_ambiguous),
         pre_publication.reason_raw,
     );
     try testing.expectEqual(
-        @intFromEnum(connection_incident.SourceSite.client_response),
+        @backingInt(connection_incident.SourceSite.client_response),
         pre_publication.source_site_raw,
     );
     try testing.expectEqual(runtime.currentGeneration().attachment.statePtr().controller_generation, pre_publication.controller_generation);
     try testing.expectEqual(@as(u32, 1), pre_publication.pending_request_count);
     try testing.expectEqual(
-        @intFromEnum(connection_incident.OutboundPhase.partial),
+        @backingInt(connection_incident.OutboundPhase.partial),
         pre_publication.outbound_phase_raw,
     );
     try testing.expect(pre_publication.outbound_offset > 1);
@@ -15969,7 +15971,7 @@ test "CR0b actual outbound RPC ambiguity는 canonical suffix를 호출한다" {
     try testing.expect(!std.mem.eql(
         u8,
         &published.incident_repeat_key.fingerprint,
-        &([_]u8{0} ** 32),
+        &(@as([32]u8, @splat(0))),
     ));
     try testing.expect(published.pending_outbound == null);
     try testing.expect(published.unusable);
@@ -16051,11 +16053,11 @@ test "CR0b actual read event pump poison은 canonical suffix를 호출한다" {
     try testing.expectEqual(@as(u128, 0), pre_publication.pending_slots);
     try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
     try testing.expectEqual(
-        @intFromEnum(client_poison.ConnectionReason.connection_eof),
+        @backingInt(client_poison.ConnectionReason.connection_eof),
         pre_publication.reason_raw,
     );
     try testing.expectEqual(
-        @intFromEnum(connection_incident.SourceSite.client_read),
+        @backingInt(connection_incident.SourceSite.client_read),
         pre_publication.source_site_raw,
     );
     try testing.expectEqual(runtime.currentGeneration().attachment.statePtr().controller_generation, pre_publication.controller_generation);
@@ -16066,7 +16068,7 @@ test "CR0b actual read event pump poison은 canonical suffix를 호출한다" {
     try testing.expect(!std.mem.eql(
         u8,
         &published.incident_repeat_key.fingerprint,
-        &([_]u8{0} ** 32),
+        &(@as([32]u8, @splat(0))),
     ));
     try testing.expect(published.unusable);
     try testing.expectEqual(@as(c.fd_t, -1), published.fd);
@@ -16272,11 +16274,11 @@ test "CR0b allocator callback deferred poison은 canonical suffix를 호출한�
     try testing.expectEqual(@as(u128, 0), pre_publication.pending_slots);
     try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
     try testing.expectEqual(
-        @intFromEnum(client_poison.ConnectionReason.local_resource_exhausted),
+        @backingInt(client_poison.ConnectionReason.local_resource_exhausted),
         pre_publication.reason_raw,
     );
     try testing.expectEqual(
-        @intFromEnum(connection_incident.SourceSite.client_cleanup),
+        @backingInt(connection_incident.SourceSite.client_cleanup),
         pre_publication.source_site_raw,
     );
 
@@ -16359,11 +16361,11 @@ test "CR0b registered operation deferred poison은 canonical suffix를 호출한
     try testing.expectEqual(@as(u128, 0), pre_publication.pending_slots);
     try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
     try testing.expectEqual(
-        @intFromEnum(client_poison.ConnectionReason.local_invariant_violation),
+        @backingInt(client_poison.ConnectionReason.local_invariant_violation),
         pre_publication.reason_raw,
     );
     try testing.expectEqual(
-        @intFromEnum(connection_incident.SourceSite.client_slot_operation),
+        @backingInt(connection_incident.SourceSite.client_slot_operation),
         pre_publication.source_site_raw,
     );
     try testing.expectEqual(runtime.currentGeneration().attachment.statePtr().controller_generation, pre_publication.controller_generation);
@@ -16478,7 +16480,7 @@ fn runC2TypedFamilySocket(tag: generation_contract.RuntimeRequestTag) !void {
     var client: client_mod.Client = .{
         .allocator = testing.allocator,
         .fd = fds[0],
-        .host_id = 0x2C3E_C200 + @as(u128, @intFromEnum(tag)),
+        .host_id = 0x2C3E_C200 + @as(u128, @backingInt(tag)),
         .parser = framing.FrameParser.init(testing.allocator),
         .compatibility_profile = @import("compatibility.zig").profileForMajor(1).?,
     };
@@ -16639,7 +16641,7 @@ fn runC3ResponsePredecessor(
     var client: client_mod.Client = .{
         .allocator = testing.allocator,
         .fd = fds[0],
-        .host_id = 0x2C3E_C300 + @as(u128, @intFromEnum(mode)),
+        .host_id = 0x2C3E_C300 + @as(u128, @backingInt(mode)),
         .parser = framing.FrameParser.init(testing.allocator),
         .metadata_support = .supported,
     };
@@ -16738,7 +16740,7 @@ fn runC3ResponseFollower(
     var client: client_mod.Client = .{
         .allocator = testing.allocator,
         .fd = fds[0],
-        .host_id = 0x2C3E_C320 + @as(u128, @intFromEnum(mode)),
+        .host_id = 0x2C3E_C320 + @as(u128, @backingInt(mode)),
         .parser = framing.FrameParser.init(testing.allocator),
         .metadata_support = .supported,
     };
@@ -16837,7 +16839,7 @@ fn runC3EofCadence(mode: C3CadenceAttachmentMode, cut: enum { immediate, complet
     var client: client_mod.Client = .{
         .allocator = testing.allocator,
         .fd = fds[0],
-        .host_id = 0x2C3E_C340 + @as(u128, @intFromEnum(mode)),
+        .host_id = 0x2C3E_C340 + @as(u128, @backingInt(mode)),
         .parser = framing.FrameParser.init(testing.allocator),
         .metadata_support = .supported,
     };
@@ -16915,7 +16917,7 @@ fn runC3InvalidCadence(
                 return;
             }
             const header: protocol.Header = switch (selected) {
-                .unknown => .{ .kind = @enumFromInt(0x7fff), .request_id = request.header.request_id },
+                .unknown => .{ .kind = @fromBackingInt(@intCast(0x7fff)), .request_id = request.header.request_id },
                 .wrong_correlation => .{ .kind = .response, .request_id = request.header.request_id + 1 },
                 .malformed => unreachable,
             };
@@ -16928,7 +16930,7 @@ fn runC3InvalidCadence(
     var client: client_mod.Client = .{
         .allocator = testing.allocator,
         .fd = fds[0],
-        .host_id = 0x2C3E_C360 + @as(u128, @intFromEnum(mode)),
+        .host_id = 0x2C3E_C360 + @as(u128, @backingInt(mode)),
         .parser = framing.FrameParser.init(testing.allocator),
         .metadata_support = .supported,
     };
@@ -17079,7 +17081,7 @@ fn runC3UnreadRevokeBeforeTx(mode: C3CadenceAttachmentMode) !void {
     var client: client_mod.Client = .{
         .allocator = testing.allocator,
         .fd = fds[0],
-        .host_id = 0x2C3E_C380 + @as(u128, @intFromEnum(mode)),
+        .host_id = 0x2C3E_C380 + @as(u128, @backingInt(mode)),
         .parser = framing.FrameParser.init(testing.allocator),
         .metadata_support = .supported,
     };
@@ -17204,9 +17206,18 @@ test "remote runtime noteLayoutCell 은 알려진 셀 픽셀만 적고 모르는
 }
 
 test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
-    try testing.expectEqual(@as(usize, 2736), @sizeOf(pending_event_owner_mod.PendingEventOwner));
+    // Zig 0.17's ArrayList pointer-stability lock is present in Debug and zero-sized in ReleaseFast.
+    // RuntimeObservation embeds seven such lists; final owner alignment makes the Debug delta 64 B.
+    const expected_pending_event_owner_size: usize = switch (builtin.mode) {
+        .debug => 2800,
+        .fast => 2736,
+        else => unreachable,
+    };
+    try testing.expectEqual(expected_pending_event_owner_size, @sizeOf(pending_event_owner_mod.PendingEventOwner));
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
+            // Zig 0.17's Debug pointer-stability locks on unmanaged ArrayLists add 352 bytes to
+            // RemoteRuntime in addition to the 80-byte RemoteGeneration growth; ReleaseFast is unchanged.
             // 값은 **실측이다** — Debug 와 ReleaseFast 의 델타가 서로 다를 수 있어(필드가 기존 패딩에
             // 들어가면 안 커진다) 한쪽 델타를 다른 쪽에 옮겨 적으면 틀린다. `TerminalCore.handoff`
             // (atomic u32 둘, 2026-09-15)가 그 예다: Debug 는 +16, ReleaseFast 는 기존 패딩에 들어가 +0.
@@ -17228,36 +17239,41 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
             // 2026-10-12 이미지 채널 IC3b-2a(`AttachmentTransport` 에 함수 포인터 둘): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
             // 2026-10-12 이미지 채널 IC3b-2b-1(`AttachmentTransport.prepare_image_apply`): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
             // 2026-10-12 이미지 채널 IC3b-2b-2(`AttachmentTransport` 의 stream 열기·hwm 정리): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
-            .Debug => 11920,
+            .debug => 12272, // Zig 0.17 Debug ArrayList locks add 64 B in PendingEventOwner and 288 B elsewhere.
             // 2026-09-23 빈 드레인 건너뛰기(`idle_drain_epoch`·`idle_drain_generation`, u64 둘): Debug +16 · ReleaseFast +16(실측).
             // 2026-10-03 셀 픽셀 결정 번호(`TerminalCore.cell_metrics_epoch`, u64 — 원격 Surface 의 코어 안): Debug +0(기존
             // 패딩에 들어감) · ReleaseFast **+16** — `test-session-host-2c3d-c3-3b2b3` 에서 실측(u32 로 줄여도 +16 이었다).
             // 2026-10-03 화면별 kitty placement(`saved_kitty_placements`): ReleaseFast +16(Debug 는 위 줄 +32).
-            .ReleaseFast => 11856,
+            .fast => 11856,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
         // (session_host.zig `if (builtin.os.tag == .macos)`) linux 로는 이 파일이 아예 컴파일되지 않는다.
         // 그래서 `process_identity` 를 더하면서도 손대지 않았다 — 잴 수 없는 자리에 숫자를 지어 넣지 않는다.
         .linux => switch (builtin.mode) {
-            .Debug => 11328,
-            .ReleaseFast => 11280,
+            .debug => 11328,
+            .fast => 11280,
             else => unreachable,
         },
         else => unreachable,
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9184, // 2026-10-12 이미지 채널 IC3b-2a +16 · IC3b-2b-1 +16 · IC3b-2b-2 +16 · 2026-09-30 #4017 +96 · 2026-10-03 화면별 kitty placement +32(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
-            .ReleaseFast => 9120, // 2026-10-12 이미지 채널 IC3b-2a +16 · IC3b-2b-1 +16 · IC3b-2b-2 +16 · 2026-09-30 #4017 +80 · 2026-10-03 셀 픽셀 결정 번호 +16 · 같은 날 화면별 kitty placement +16(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
+            .debug => 9472, // Earlier runtime remainder plus 36 Debug ArrayList pointer-stability locks (+288 B).
+            .fast => 9120, // 2026-10-12 이미지 채널 IC3b-2a +16 · IC3b-2b-1 +16 · IC3b-2b-2 +16 · 2026-09-30 #4017 +80 · 2026-10-03 셀 픽셀 결정 번호 +16 · 같은 날 화면별 kitty placement +16(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
             else => unreachable,
         },
         // 위와 같은 이유로 측정 불가 — 원래 값 그대로다.
         .linux => switch (builtin.mode) {
-            .Debug => 8608,
-            .ReleaseFast => 8560,
+            .debug => 8608,
+            .fast => 8560,
             else => unreachable,
         },
+        else => unreachable,
+    };
+    const expected_pending_event_owner_4096_bytes: usize = switch (builtin.mode) {
+        .debug => 11_468_800,
+        .fast => 11_206_656,
         else => unreachable,
     };
     try testing.expectEqual(expected_runtime_size, @sizeOf(RemoteRuntime));
@@ -17266,7 +17282,7 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
         @sizeOf(RemoteRuntime) - @sizeOf(pending_event_owner_mod.PendingEventOwner),
     );
     try testing.expectEqual(
-        @as(usize, 11_206_656),
+        expected_pending_event_owner_4096_bytes,
         @sizeOf(pending_event_owner_mod.PendingEventOwner) * 4096,
     );
     const generation_transport_mod = @import("generation_transport.zig");
@@ -17314,7 +17330,7 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
                 // Both values are semantically valid and share the same poison effect. Only the
                 // keyed publication transcript may distinguish this coherent raw-storage rewrite.
                 const original_failure = runtime.pending_event_owner.prepared.failure_raw;
-                runtime.pending_event_owner.prepared.failure_raw = @intFromEnum(
+                runtime.pending_event_owner.prepared.failure_raw = @backingInt(
                     @import("runtime_event_prepared_types.zig").PreparationFailure.local_resource_exhausted,
                 );
                 try testing.expectError(
@@ -17323,10 +17339,10 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
                 );
                 runtime.pending_event_owner.prepared.failure_raw = original_failure;
                 const original_raw = runtime.pending_event_owner.prepared;
-                runtime.pending_event_owner.prepared.prepared_tag_raw = @intFromEnum(
+                runtime.pending_event_owner.prepared.prepared_tag_raw = @backingInt(
                     @import("runtime_event_prepared_types.zig").PreparedEventTag.ignored,
                 );
-                runtime.pending_event_owner.prepared.effect_tag_raw = @intFromEnum(
+                runtime.pending_event_owner.prepared.effect_tag_raw = @backingInt(
                     @import("runtime_event_prepared_types.zig").EffectTag.none,
                 );
                 runtime.pending_event_owner.prepared.failure_raw = 0;
@@ -17348,15 +17364,15 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
                     else => return error.TestUnexpectedResult,
                 }
                 try testing.expectEqual(
-                    @intFromEnum(@import("pending_event_owner.zig").PendingSourceLeaseState.consumed),
+                    @backingInt(@import("pending_event_owner.zig").PendingSourceLeaseState.consumed),
                     runtime.pending_event_owner.source_lease.state_raw,
                 );
                 try testing.expectEqual(
-                    @intFromEnum(@import("pending_event_owner.zig").PendingReleaseState.live),
+                    @backingInt(@import("pending_event_owner.zig").PendingReleaseState.live),
                     runtime.pending_event_owner.release_receipt.state_raw,
                 );
                 try testing.expectEqual(
-                    @intFromEnum(@import("runtime_lifetime_owner.zig").State.idle),
+                    @backingInt(@import("runtime_lifetime_owner.zig").State.idle),
                     runtime.runtime_lifetime.state_raw,
                 );
                 try testing.expect(runtime.pending_event_owner.cleanup_graph.cwd.address != 0);
@@ -17366,7 +17382,7 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
 
                 const source_lease = runtime.pending_event_owner.source_lease;
                 runtime.pending_event_owner.source_lease.state_raw =
-                    @intFromEnum(@import("pending_event_owner.zig").PendingSourceLeaseState.active);
+                    @backingInt(@import("pending_event_owner.zig").PendingSourceLeaseState.active);
                 try testing.expectError(
                     error.InvalidOwner,
                     runtime.pending_event_owner.borrowPrepared(),
@@ -17375,7 +17391,7 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
 
                 const release_receipt = runtime.pending_event_owner.release_receipt;
                 runtime.pending_event_owner.release_receipt.state_raw =
-                    @intFromEnum(@import("pending_event_owner.zig").PendingReleaseState.consumed);
+                    @backingInt(@import("pending_event_owner.zig").PendingReleaseState.consumed);
                 try testing.expectError(
                     error.InvalidOwner,
                     runtime.pending_event_owner.borrowPrepared(),
@@ -17486,11 +17502,11 @@ test "C3-3b2b3 integration adapter rejects every preflight before source mutatio
             }
 
             try testing.expectEqual(
-                @intFromEnum(pending_event_owner_mod.PendingLifecycle.idle),
+                @backingInt(pending_event_owner_mod.PendingLifecycle.idle),
                 runtime.pending_event_owner.lifecycle_raw,
             );
             if (scenario != 0) try testing.expectEqual(
-                @intFromEnum(runtime_lifetime_owner_mod.State.idle),
+                @backingInt(runtime_lifetime_owner_mod.State.idle),
                 runtime.runtime_lifetime.state_raw,
             );
             const after = try generation_transport_mod.preparationEventViewOwned(transport, source_owner);
@@ -18305,8 +18321,8 @@ test "CR4b stable queue seal은 lease drain 뒤 metadata와 완전 paste만 보�
     const metadata = rr.paused_input_metadata.?;
     try testing.expectEqual(@as(u32, 2), metadata.total_count);
     try testing.expectEqual(@as(u64, 8), metadata.total_bytes);
-    try testing.expectEqual(@as(u32, 1), metadata.kinds[@intFromEnum(reconnect_mutation_seal.SealKind.key_bytes)].count);
-    try testing.expectEqual(@as(u32, 1), metadata.kinds[@intFromEnum(reconnect_mutation_seal.SealKind.paste)].count);
+    try testing.expectEqual(@as(u32, 1), metadata.kinds[@backingInt(reconnect_mutation_seal.SealKind.key_bytes)].count);
+    try testing.expectEqual(@as(u32, 1), metadata.kinds[@backingInt(reconnect_mutation_seal.SealKind.paste)].count);
     const paste = (try rr.paused_paste_store.projection()).?;
     try testing.expectEqual(@as(u64, 2), paste.id);
     try testing.expectEqual(@as(u64, 5), paste.full_length);
@@ -19128,9 +19144,9 @@ test "remote runtime: spawns over the wire, renders host screen into a Surface, 
     const io = testing.io;
 
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-rr-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -19212,9 +19228,9 @@ test "remote runtime: two runtimes sharing one connection both receive their own
     const io = testing.io;
 
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-mux-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-rr-mux-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -19292,19 +19308,19 @@ test "P3-e4d-1 actual metadata events stay isolated and reattach starts current"
     const io = testing.io;
 
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-e4d1-{d}", .{c.getpid()}) catch
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-e4d1-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     var socket_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&socket_buf, "{s}/control.sock", .{dir_path}) catch
+    const socket_path = std.fmt.bufPrintSentinel(&socket_buf, "{s}/control.sock", .{dir_path}, 0) catch
         return error.SkipZigTest;
     var fifo_a_buf: [256]u8 = undefined;
-    const fifo_a = std.fmt.bufPrintZ(&fifo_a_buf, "/tmp/maru-e4d1-a-{d}.fifo", .{c.getpid()}) catch
+    const fifo_a = std.fmt.bufPrintSentinel(&fifo_a_buf, "/tmp/maru-e4d1-a-{d}.fifo", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     var fifo_b_buf: [256]u8 = undefined;
-    const fifo_b = std.fmt.bufPrintZ(&fifo_b_buf, "/tmp/maru-e4d1-b-{d}.fifo", .{c.getpid()}) catch
+    const fifo_b = std.fmt.bufPrintSentinel(&fifo_b_buf, "/tmp/maru-e4d1-b-{d}.fifo", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     var commit_buf: [256]u8 = undefined;
-    const detached_commit = std.fmt.bufPrintZ(&commit_buf, "/tmp/maru-e4d1-a2-{d}.commit", .{c.getpid()}) catch
+    const detached_commit = std.fmt.bufPrintSentinel(&commit_buf, "/tmp/maru-e4d1-a2-{d}.commit", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     _ = c.unlink(fifo_a.ptr);
     _ = c.unlink(fifo_b.ptr);
@@ -19523,28 +19539,28 @@ test "K3 actual daemon kernel cwd survives detach and preserves authority isolat
     const io = testing.io;
 
     var control_dir_buf: [256]u8 = undefined;
-    const control_dir = std.fmt.bufPrintZ(&control_dir_buf, "/tmp/maru-sh-k3-{d}", .{c.getpid()}) catch
+    const control_dir = std.fmt.bufPrintSentinel(&control_dir_buf, "/tmp/maru-sh-k3-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     var socket_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&socket_buf, "{s}/control.sock", .{control_dir}) catch
+    const socket_path = std.fmt.bufPrintSentinel(&socket_buf, "{s}/control.sock", .{control_dir}, 0) catch
         return error.SkipZigTest;
     var cwd_a0_buf: [256]u8 = undefined;
-    const cwd_a0 = std.fmt.bufPrintZ(&cwd_a0_buf, "/private/tmp/maru-k3-a0-{d}", .{c.getpid()}) catch
+    const cwd_a0 = std.fmt.bufPrintSentinel(&cwd_a0_buf, "/private/tmp/maru-k3-a0-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     var cwd_a1_buf: [256]u8 = undefined;
-    const cwd_a1 = std.fmt.bufPrintZ(&cwd_a1_buf, "/private/tmp/maru-k3-a1-{d}", .{c.getpid()}) catch
+    const cwd_a1 = std.fmt.bufPrintSentinel(&cwd_a1_buf, "/private/tmp/maru-k3-a1-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     var cwd_b_buf: [256]u8 = undefined;
-    const cwd_b = std.fmt.bufPrintZ(&cwd_b_buf, "/private/tmp/maru-k3-b-{d}", .{c.getpid()}) catch
+    const cwd_b = std.fmt.bufPrintSentinel(&cwd_b_buf, "/private/tmp/maru-k3-b-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     var fifo_buf: [256]u8 = undefined;
-    const fifo = std.fmt.bufPrintZ(&fifo_buf, "/tmp/maru-k3-{d}.fifo", .{c.getpid()}) catch
+    const fifo = std.fmt.bufPrintSentinel(&fifo_buf, "/tmp/maru-k3-{d}.fifo", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     var detached_commit_buf: [256]u8 = undefined;
-    const detached_commit = std.fmt.bufPrintZ(&detached_commit_buf, "/tmp/maru-k3-{d}.detached", .{c.getpid()}) catch
+    const detached_commit = std.fmt.bufPrintSentinel(&detached_commit_buf, "/tmp/maru-k3-{d}.detached", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     var cat_ready_buf: [256]u8 = undefined;
-    const cat_ready = std.fmt.bufPrintZ(&cat_ready_buf, "/tmp/maru-k3-{d}.cat", .{c.getpid()}) catch
+    const cat_ready = std.fmt.bufPrintSentinel(&cat_ready_buf, "/tmp/maru-k3-{d}.cat", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
 
     _ = c.unlink(fifo.ptr);
@@ -19731,9 +19747,9 @@ test "remote runtime: attachExisting reconnects to a pre-existing host runtime a
     const io = testing.io;
 
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-att-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-rr-att-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -19813,9 +19829,9 @@ test "P4 N2b1 product runtime pulls stable host OSC notification" {
     const io = testing.io;
 
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-notif-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-rr-notif-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -20163,9 +20179,9 @@ test "typed control admission remote runtime requestResync makes the host push a
     const io = testing.io;
 
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-rsy-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-rr-rsy-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -20469,9 +20485,9 @@ test "remote runtime: scroll core command routes to host so client sees scrolled
     const io = testing.io;
 
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-scr-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-rr-scr-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -20544,9 +20560,9 @@ test "remote runtime: selectedText extracts the selection text on the host (§6b
     const io = testing.io;
 
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-sel-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-rr-sel-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -20621,9 +20637,9 @@ test "CR6e-c3c remote select-all copy survives projection refresh (§6b-2)" {
     const io = testing.io;
 
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-wl-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-rr-wl-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -20738,9 +20754,9 @@ test "remote runtime: find matches on the host and returns viewport spans (§6c)
     const io = testing.io;
 
     var dir_buf: [256]u8 = undefined;
-    const dir_path = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-sh-rr-find-{d}", .{c.getpid()}) catch return error.SkipZigTest;
+    const dir_path = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-sh-rr-find-{d}", .{c.getpid()}, 0) catch return error.SkipZigTest;
     var sp_buf: [320]u8 = undefined;
-    const socket_path = std.fmt.bufPrintZ(&sp_buf, "{s}/control.sock", .{dir_path}) catch return error.SkipZigTest;
+    const socket_path = std.fmt.bufPrintSentinel(&sp_buf, "{s}/control.sock", .{dir_path}, 0) catch return error.SkipZigTest;
 
     const child = c.fork();
     if (child < 0) return error.SkipZigTest;
@@ -20800,12 +20816,12 @@ test "remote runtime: find matches on the host and returns viewport spans (§6c)
     const regex_result = try rr.find("x.z", 0, false, true, &spans);
     try testing.expectEqual(@as(usize, 2), regex_result.count);
     try testing.expect(regex_result.regex_error == null);
-    var exact_pattern = [_]u8{' '} ** generation_contract.FindRequest.max_query_bytes;
+    var exact_pattern = @as([generation_contract.FindRequest.max_query_bytes]u8, @splat(' '));
     @memcpy(exact_pattern[0..7], "(?x)x.z");
     const exact_limit = try rr.find(&exact_pattern, 0, false, true, &spans);
     try testing.expectEqual(@as(usize, 2), exact_limit.count);
     try testing.expect(exact_limit.regex_error == null);
-    const overlong_pattern = [_]u8{'a'} ** (generation_contract.FindRequest.max_query_bytes + 1);
+    const overlong_pattern = @as([(generation_contract.FindRequest.max_query_bytes + 1)]u8, @splat('a'));
     const too_long = try rr.find(&overlong_pattern, 0, false, true, &spans);
     try testing.expectEqual(@as(usize, 0), too_long.count);
     try testing.expectEqualStrings("regex too long", too_long.regex_error orelse return error.MissingRegexError);
@@ -20853,13 +20869,15 @@ test "C3-3b2b2 compatibility maps event materialization failures by provenance" 
 }
 
 test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 포함한다" {
-    const fields = @typeInfo(RemoteGeneration).@"struct".fields;
+    const fields = @import("type_info_fields").structFields(RemoteGeneration);
     const expected_generation_size: usize = switch (builtin.mode) {
+        // Zig 0.17's Debug pointer-stability locks on unmanaged ArrayLists add 80 bytes here;
+        // ReleaseFast's zero-sized locks leave its measured layout unchanged.
         // 2026-10-12 이미지 채널 IC3b-2a(`AttachmentTransport` 에 함수 포인터 둘): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
         // 2026-10-12 이미지 채널 IC3b-2b-1(`AttachmentTransport.prepare_image_apply`): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
         // 2026-10-12 이미지 채널 IC3b-2b-2(`AttachmentTransport` 의 stream 열기·hwm 정리): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
-        .Debug => 3600,
-        .ReleaseFast => 3584,
+        .debug => 3680,
+        .fast => 3584,
         else => unreachable,
     };
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
@@ -20877,16 +20895,16 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
             // 2026-10-12 이미지 채널 IC3b-2a(`AttachmentTransport` 에 함수 포인터 둘): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
             // 2026-10-12 이미지 채널 IC3b-2b-1(`AttachmentTransport.prepare_image_apply`): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
             // 2026-10-12 이미지 채널 IC3b-2b-2(`AttachmentTransport` 의 stream 열기·hwm 정리): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
-            .Debug => 11920,
-            .ReleaseFast => 11856, // 2026-09-23 빈 드레인 건너뛰기 +16 · 2026-10-03 셀 픽셀 결정 번호 +16 · 같은 날 화면별 placement +16 — 위 사본과 «같은 값이어야 한다»(CR2a 가 둘을 센다)
+            .debug => 12272,
+            .fast => 11856, // 2026-09-23 빈 드레인 건너뛰기 +16 · 2026-10-03 셀 픽셀 결정 번호 +16 · 같은 날 화면별 placement +16 — 위 사본과 «같은 값이어야 한다»(CR2a 가 둘을 센다)
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
         // (session_host.zig `if (builtin.os.tag == .macos)`) linux 로는 이 파일이 아예 컴파일되지 않는다.
         // 그래서 `process_identity` 를 더하면서도 손대지 않았다 — 잴 수 없는 자리에 숫자를 지어 넣지 않는다.
         .linux => switch (builtin.mode) {
-            .Debug => 11328,
-            .ReleaseFast => 11280,
+            .debug => 11328,
+            .fast => 11280,
             else => unreachable,
         },
         else => unreachable,
@@ -20929,9 +20947,9 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
 }
 
 test "CR2a RemoteGeneration 추출은 distinct state와 allocator ownership을 보존한다" {
-    const runtime_fields = @typeInfo(RemoteRuntime).@"struct".fields;
-    try testing.expectEqual(@as(usize, 1), comptime countField(runtime_fields, "generation_owner"));
-    inline for (@typeInfo(RemoteGeneration).@"struct".fields) |field|
+    const runtime_fields = @import("type_info_fields").structFields(RemoteRuntime);
+    try testing.expectEqual(@as(usize, 1), comptime countField(&runtime_fields, "generation_owner"));
+    inline for (@import("type_info_fields").structFields(RemoteGeneration)) |field|
         try testing.expect(!@hasField(RemoteRuntime, field.name));
 
     var generation: RemoteGeneration = .{
@@ -21270,10 +21288,10 @@ test "CR6e-c3b2c host charge: identity-only executor 는 abort 에서 lease 없�
 
     // backend 는 이 판정으로 «결속을 푸는 close» 앞에서만 charge 를 넘긴다.
     try testing.expect(RemoteRuntime.backend_api.closeTransitionClearsBinding(.{
-        .decision_raw = @intFromEnum(reconnect_reducer.Decision.close_preserve_old),
+        .decision_raw = @backingInt(reconnect_reducer.Decision.close_preserve_old),
     }));
     try testing.expect(!RemoteRuntime.backend_api.closeTransitionClearsBinding(.{
-        .decision_raw = @intFromEnum(reconnect_reducer.Decision.publish_termination_pending),
+        .decision_raw = @backingInt(reconnect_reducer.Decision.publish_termination_pending),
     }));
 
     for (&proxies, &owners, &executors) |*proxy, *owner, *executor| {
@@ -21521,11 +21539,11 @@ test "CR2e-e2b 제품 executor는 reachable Decision 31개와 effect table을 �
         .{ .decision = .publish_termination_unconfirmed, .effect = .retain },
         .{ .decision = .abandon_shell_to_inventory, .effect = .retain },
     };
-    try testing.expectEqual(@typeInfo(D).@"enum".fields.len, rows.len);
+    try testing.expectEqual(@import("type_info_fields").enumFields(D).len, rows.len);
     var seen: [rows.len]bool = @splat(false);
     for (rows) |row| {
         try testing.expectEqual(row.effect, reconnectGenerationEffect(row.decision));
-        const index = @intFromEnum(row.decision);
+        const index = @backingInt(row.decision);
         try testing.expect(!seen[index]);
         seen[index] = true;
     }
@@ -21689,7 +21707,7 @@ fn expectEveryReconnectDecisionReachable() !void {
         .controller_evidenced,
         .authority_conflict,
         .gone_positive,
-        .{ .begin_retry_wait_release = .{ .work = work, .runtime_id = .{1} ** 16 } },
+        .{ .begin_retry_wait_release = .{ .work = work, .runtime_id = @splat(1) } },
         .retry_direct_granted,
         .{ .retry_expired = .{ .now_ns = 100 } },
         .begin_publish,
@@ -21724,7 +21742,7 @@ fn expectEveryReconnectDecisionReachable() !void {
     var states: std.ArrayListUnmanaged(reconnect_reducer.State) = .empty;
     defer states.deinit(testing.allocator);
     try states.append(testing.allocator, reconnect_reducer.State.initial(3, 2));
-    var decisions: [@typeInfo(reconnect_reducer.Decision).@"enum".fields.len]bool = @splat(false);
+    var decisions: [@import("type_info_fields").enumFields(reconnect_reducer.Decision).len]bool = @splat(false);
     var cursor: usize = 0;
     while (cursor < states.items.len) : (cursor += 1) {
         const before = states.items[cursor];
@@ -21733,7 +21751,7 @@ fn expectEveryReconnectDecisionReachable() !void {
                 try testing.expectEqual(error.IllegalTransition, err);
                 continue;
             };
-            decisions[@intFromEnum(result.decision)] = true;
+            decisions[@backingInt(result.decision)] = true;
             try appendUniqueReconnectState(&states, result.state);
         }
         const summaries = [_]reconnect_reducer.TerminalSummary{
@@ -21746,7 +21764,7 @@ fn expectEveryReconnectDecisionReachable() !void {
                 try testing.expectEqual(error.IllegalTransition, err);
                 continue;
             };
-            decisions[@intFromEnum(result.decision)] = true;
+            decisions[@backingInt(result.decision)] = true;
             try appendUniqueReconnectState(&states, result.state);
         }
         try testing.expect(states.items.len <= 2048);
@@ -21754,7 +21772,7 @@ fn expectEveryReconnectDecisionReachable() !void {
     for (decisions, 0..) |reached, index| {
         if (!reached) {
             std.debug.print("unreachable reconnect decision: {s}\n", .{
-                @tagName(@as(reconnect_reducer.Decision, @enumFromInt(index))),
+                @tagName(@as(reconnect_reducer.Decision, @fromBackingInt(@intCast(index)))),
             });
         }
         try testing.expect(reached);
@@ -21769,7 +21787,7 @@ fn appendUniqueReconnectState(
     try states.append(testing.allocator, state);
 }
 
-fn countField(comptime fields: []const std.builtin.Type.StructField, comptime name: []const u8) usize {
+fn countField(comptime fields: []const @import("type_info_fields").Field, comptime name: []const u8) usize {
     comptime var result: usize = 0;
     inline for (fields) |field| if (std.mem.eql(u8, field.name, name)) {
         result += 1;

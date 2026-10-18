@@ -18,6 +18,8 @@
 //! **감사 기록 조회**(`lsp.trust.log` — 계획 docs/plans/workspace-trust-audit.md TA2): 결정이 바뀐 기록(`lsp-trust-log`)의 최근 `limit`
 //! 건을 시간 순서로 낸다. 읽기만 한다 — 기록을 지우거나 고치는 메서드는 없다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const cp = @import("control_plane.zig");
 const trust_log = @import("lsp/trust_log.zig");
@@ -368,8 +370,8 @@ test "control_lsp_trust: 메서드 이름 — trust.list·revoke·forget·log �
     try testing.expectEqual(Op.forget, opFor("trust.forget").?);
     try testing.expectEqual(Op.log, opFor("trust.log").?);
     for ([_][]const u8{ "trust.allow", "trust.grant", "trust.decide", "trust.set", "trust.clear", "trust.log.clear", "trust", "list", "" }) |m| try testing.expect(opFor(m) == null);
-    try testing.expectEqual(@as(usize, 4), @typeInfo(Op).@"enum".fields.len);
-    inline for (@typeInfo(Op).@"enum".fields) |f| {
+    try testing.expectEqual(@as(usize, 4), @import("type_info_fields").enumFields(Op).len);
+    inline for (@import("type_info_fields").enumFields(Op)) |f| {
         const op: Op = @field(Op, f.name);
         const p = cp.parseMethod(op.method());
         try testing.expectEqualStrings(namespace, p.namespace);
@@ -520,7 +522,7 @@ test "control_lsp_trust: 철회·잊기 응답은 previous·changed·saved 셋 �
         defer testing.allocator.free(resp);
         var pm = try cp.parseMessage(testing.allocator, resp);
         defer pm.deinit();
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), pm.message.response.err.?.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), pm.message.response.err.?.code);
     }
     // params 가 틀리면 impl 에 닿지 않는다.
     impl.seen_op = null;
@@ -529,7 +531,7 @@ test "control_lsp_trust: 철회·잊기 응답은 previous·changed·saved 셋 �
         defer testing.allocator.free(resp);
         var pm = try cp.parseMessage(testing.allocator, resp);
         defer pm.deinit();
-        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), pm.message.response.err.?.code);
+        try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), pm.message.response.err.?.code);
         try testing.expect(impl.seen_op == null);
     }
 }
@@ -660,7 +662,7 @@ test "control_lsp_trust: 감사 기록 조회 (계획 workspace-trust-audit TA2)
 
 test "control_lsp_trust: 감사 기록 응답이 예산을 넘으면 건수를 반씩 줄여 최근 것을 남기고 more 를 세운다 — 제어 문자 경로는 JSON 에서 여섯 배다 (적대적 검증 TA2 1회차)" {
     // 제어 문자(0x01) 200 개짜리 경로 — 줄은 230 바이트 남짓인데 JSON 에서는 1.2 KiB 다.
-    const weird = "/" ++ "\x01" ** 200;
+    const weird = "/" ++ array_repeat.repeat("\x01", 200);
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(testing.allocator);
     for (0..8) |i| {

@@ -8,6 +8,7 @@ const context_mod = @import("release_adapter_context");
 const cli_authority = @import("release_adapter_github_cli_authority");
 const handoff = @import("release_adapter_candidate_aggregate_handoff");
 const reopen = @import("release_adapter_candidate_aggregate_reopen");
+const failure_stable_allocator = @import("support/failure_stable_allocator.zig");
 const manifest_mod = @import("release_manifest");
 const post = @import("release_adapter_github_post_publish_attestation");
 const retention = @import("release_adapter_candidate_aggregate_retention");
@@ -357,14 +358,14 @@ const Fixture = struct {
     }
 
     fn durablePath(self: *@This(), name: []const u8, storage: []u8) ![:0]const u8 {
-        return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ self.destinationPath(), name });
+        return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ self.destinationPath(), name }, 0);
     }
 };
 
 fn absolute(tmp: *std.testing.TmpDir, suffix: []const u8, output: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(output, "{s}/{s}", .{ root[0..len], suffix });
+    return std.fmt.bufPrintSentinel(output, "{s}/{s}", .{ root[0..len], suffix }, 0);
 }
 
 fn verify(fixture: *Fixture, allocator: std.mem.Allocator, verifier: *Verifier, cli: *Cli, deadline: *Deadline, result: *reopen.ReopenedAggregate) !void {
@@ -424,7 +425,7 @@ fn publicationSnapshot(fixture: *Fixture, aggregate: reopen.View) !post.Snapshot
         .release_id = 88,
         .tag = "v1.2.3",
         .source_commit = "0123456789abcdef0123456789abcdef01234567",
-        .cli_sha256 = [_]u8{'f'} ** 64,
+        .cli_sha256 = @as([64]u8, @splat('f')),
         .artifacts = artifacts,
     };
 }
@@ -949,7 +950,8 @@ fn allocationPath(allocator: std.mem.Allocator) !void {
 }
 
 test "every allocation failure leaves no reusable partial owner" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationPath, .{});
+    var backing = failure_stable_allocator.State{ .backing = std.testing.allocator };
+    try std.testing.checkAllAllocationFailures(backing.allocator(), allocationPath, .{});
 }
 
 test "successful and failed reopen close every descriptor without deleting durable bytes" {

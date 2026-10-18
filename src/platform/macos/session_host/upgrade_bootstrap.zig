@@ -139,16 +139,17 @@ pub const PreparedRollbackExec = struct {
         var buffers: entrypoint.RestoreArgBuffers = .{};
         const raw = entrypoint.formatRestoreArgs(rollback, &buffers) catch
             return error.InvalidState;
-        const executable = allocator.dupeZ(
+        const executable = allocator.dupeSentinel(
             u8,
             armed.state.attempt.rollback_path,
+            0,
         ) catch return error.OutOfMemory;
         errdefer allocator.free(executable);
         var args: [entrypoint.max_invocation_args][:0]u8 = undefined;
         var built: usize = 0;
         errdefer for (args[0..built]) |arg| allocator.free(arg);
         for (raw, 0..) |arg, index| {
-            args[index] = allocator.dupeZ(u8, arg) catch
+            args[index] = allocator.dupeSentinel(u8, arg, 0) catch
                 return error.OutOfMemory;
             built += 1;
         }
@@ -614,7 +615,7 @@ test "PFD1 preflight 의 detail 은 «어느 디코드에서 몇 바이트» 까
     try std.testing.expectEqualStrings("", lastDetail());
 
     // ⑴ **envelope 자리** — 자리 이름과 크기가 함께 든다.
-    const bad_envelope = [_]u8{0} ** 64;
+    const bad_envelope = @as([64]u8, @splat(0));
     try std.testing.expectError(error.InvalidState, decodeValidated(std.testing.allocator, &bad_envelope));
     const d1 = lastDetail();
     try std.testing.expect(std.mem.startsWith(u8, d1, "envelope:"));
@@ -628,7 +629,7 @@ test "PFD1 preflight 의 detail 은 «어느 디코드에서 몇 바이트» 까
     // `"BadMagic"` 으로 고쳐도 초록이었다). 봉투 머리보다 **짧은** 입력은 magic 에 닿기 전에
     // `Truncated` 로 갈리므로, 같은 자리에서 **다른 이름**이 나오는지 본다.
     clearDetail();
-    const too_short = [_]u8{0} ** 8;
+    const too_short = @as([8]u8, @splat(0));
     try std.testing.expectError(error.InvalidState, decodeValidated(std.testing.allocator, &too_short));
     const d2 = lastDetail();
     try std.testing.expect(std.mem.startsWith(u8, d2, "envelope:"));
@@ -684,7 +685,7 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
         std.testing.allocator,
     );
     defer std.testing.allocator.free(restore_raw_path);
-    const restore_executable = try std.testing.allocator.dupeZ(u8, restore_raw_path);
+    const restore_executable = try std.testing.allocator.dupeSentinel(u8, restore_raw_path, 0);
     defer std.testing.allocator.free(restore_executable);
     const restore_identity = try staged_image.inspect(restore_executable);
     const digest_hex = std.fmt.bytesToHex(restore_identity.sha256, .lower);
@@ -697,7 +698,7 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
         std.testing.allocator,
     );
     defer std.testing.allocator.free(product_raw_path);
-    const product = try std.testing.allocator.dupeZ(u8, product_raw_path);
+    const product = try std.testing.allocator.dupeSentinel(u8, product_raw_path, 0);
     defer std.testing.allocator.free(product);
     const product_identity = try staged_image.inspect(product);
     const product_rollback_gate = if (c.getenv("MARU_SESSION_HOST_PRODUCT_ROLLBACK_GATE")) |value|
@@ -708,10 +709,11 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     const host_id: u128 = 0xA11CE;
     const attempt_id: u128 = 0;
     var session_buf: [192]u8 = undefined;
-    const session_dir = std.fmt.bufPrintZ(
+    const session_dir = std.fmt.bufPrintSentinel(
         &session_buf,
         "/tmp/maru-restore-bootstrap-{d}-{d}",
         .{ c.getpid(), std.Io.Clock.awake.now(std.testing.io).nanoseconds },
+        0,
     ) catch return error.SkipZigTest;
     if (c.mkdir(session_dir.ptr, 0o700) != 0) return error.TestUnexpectedResult;
     defer _ = c.rmdir(session_dir.ptr);
@@ -719,7 +721,7 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     // namespace and out of sibling test processes; a fixed public host-id socket could otherwise
     // connect this assertion to an unrelated daemon and manufacture a false success.
     const previous_root = if (c.getenv("MARU_SESSION_HOST_ROOT")) |value|
-        try std.testing.allocator.dupeZ(u8, std.mem.span(value))
+        try std.testing.allocator.dupeSentinel(u8, std.mem.span(value), 0)
     else
         null;
     defer {
@@ -1004,10 +1006,11 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
     );
     defer restoring_manifest.deinit();
     var activation_marker_buf: [192]u8 = undefined;
-    const activation_marker = try std.fmt.bufPrintZ(
+    const activation_marker = try std.fmt.bufPrintSentinel(
         &activation_marker_buf,
         "/tmp/maru-restore-activation-{d}",
         .{c.getpid()},
+        0,
     );
     _ = c.unlink(activation_marker.ptr);
     defer _ = c.unlink(activation_marker.ptr);
@@ -1144,10 +1147,11 @@ test "target and rollback bootstrap validate exact zero-runtime inherited proces
 
 fn openTruncatedUnlinkedCopy(owner_dir: [:0]const u8, bytes: []const u8) !c.fd_t {
     var path_buf: [1024]u8 = undefined;
-    const path = std.fmt.bufPrintZ(
+    const path = std.fmt.bufPrintSentinel(
         &path_buf,
         "{s}/truncated-primary-{d}",
         .{ owner_dir, c.getpid() },
+        0,
     ) catch return error.TestUnexpectedResult;
     _ = c.unlink(path.ptr);
     const writer = c.open(
@@ -1221,7 +1225,7 @@ fn spawnRestoreGateChild(
         const raw_args = entrypoint.formatRestoreArgs(invocation, &buffers) catch c._exit(2);
         var owned: [entrypoint.max_invocation_args][:0]u8 = undefined;
         for (raw_args, 0..) |arg, index|
-            owned[index] = std.heap.page_allocator.dupeZ(u8, arg) catch c._exit(2);
+            owned[index] = std.heap.page_allocator.dupeSentinel(u8, arg, 0) catch c._exit(2);
         const argv = [_:null]?[*:0]const u8{
             executable_path.ptr,
             entrypoint.subcommand,

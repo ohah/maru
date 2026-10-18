@@ -18,7 +18,7 @@ fn expected() subject.Expected {
         .path = paths[index],
         .name = std.fs.path.basename(paths[index]),
         .size = 100 + index,
-        .sha256 = [_]u8{'a' + @as(u8, @intCast(index))} ** 64,
+        .sha256 = @as([64]u8, @splat('a' + @as(u8, @intCast(index)))),
     };
     return .{
         .context = .{
@@ -29,7 +29,7 @@ fn expected() subject.Expected {
             .protected_tag = true,
         },
         .release_id = 88,
-        .cli_sha256 = [_]u8{'f'} ** 64,
+        .cli_sha256 = @as([64]u8, @splat('f')),
         .assets = assets,
     };
 }
@@ -293,7 +293,7 @@ fn parseWithFailingAllocator(allocator: std.mem.Allocator, bytes: []const u8, ex
 }
 
 test "ReleaseFast diagnostic measures the whole injected composition" {
-    if (builtin.mode != .ReleaseFast) return error.SkipZigTest;
+    if (builtin.mode != .fast) return error.SkipZigTest;
     var samples: [20]u64 = undefined;
     const fd_before = try openFdCount();
     var external_calls: usize = 0;

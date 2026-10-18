@@ -91,7 +91,7 @@ test "pristine failure is exclusive to prepare candidate" {
         var result_ctx: ResultCtx = .{ .calls = &pristine_calls, .result = .failed_before_remote_mutation };
         var executor: owner.Executor = .{};
         try executor.init(&result_ctx, fixedResult);
-        if (index == @intFromEnum(phase.Stage.draft_authoring)) {
+        if (index == @backingInt(phase.Stage.draft_authoring)) {
             const terminal = try owner.run(std.testing.allocator, &fixture.root, workflow, invocation, &executor);
             try std.testing.expectEqual(phase.Outcome.local_failure, terminal.outcome);
         } else {
@@ -326,7 +326,7 @@ const Fixture = struct {
         try result.tmp.dir.createDir(std.testing.io, "root", .default_dir);
         var parent: [std.fs.max_path_bytes]u8 = undefined;
         const len = try result.tmp.dir.realPath(std.testing.io, &parent);
-        result.path_len = (try std.fmt.bufPrintZ(&result.path_storage, "{s}/root", .{parent[0..len]})).len;
+        result.path_len = (try std.fmt.bufPrintSentinel(&result.path_storage, "{s}/root", .{parent[0..len]}, 0)).len;
         try privateMode(result.path_storage[0..result.path_len :0]);
         result.root = .{};
         result.tag = "v1.2.3".*;

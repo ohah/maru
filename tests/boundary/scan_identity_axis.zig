@@ -85,7 +85,7 @@ fn readZigFileZ(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![:0
 
 /// test 블록 밖의 `ScanIdentity` 토큰 수. 마스킹 규칙은 `source_digest` 가 소유한다(두 벌을 만들지 않는다).
 fn countOutsideTests(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source, .{});
     defer tree.deinit(allocator);
     const mask = try source_digest.topLevelTestTokenMask(allocator, &tree);
     defer allocator.free(mask);
@@ -118,7 +118,7 @@ test "스캔 축: `ScanIdentity` 를 만지는 자리는 재고에 적힌 파일
     }
 
     var failed = false;
-    var seen: [inventory.len]bool = .{false} ** inventory.len;
+    var seen: [inventory.len]bool = @splat(false);
     for (paths.items) |path| {
         const source = readZigFileZ(allocator, io, path) catch continue;
         defer allocator.free(source);

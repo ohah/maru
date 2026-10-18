@@ -86,7 +86,7 @@ pub fn prepareCurrent(
     } else null;
 
     var validator_path: [std.fs.max_path_bytes:0]u8 = @splat(0);
-    const validator = std.fmt.bufPrintZ(&validator_path, "{s}/zig-out/bin/{s}", .{ workspace, validator_name }) catch
+    const validator = std.fmt.bufPrintSentinel(&validator_path, "{s}/zig-out/bin/{s}", .{ workspace, validator_name }, 0) catch
         return error.InvalidPath;
     result.* = .{ .owner = result, .io = io, .selection = selection };
     errdefer {
@@ -207,10 +207,11 @@ fn appendProfileEnvironment(result: *Execution, count: *usize, value: []const u8
         return error.InvalidEnvironment;
     for (value[0 .. value.len - 1]) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidEnvironment;
     if (count.* >= max_environment_entries) return error.InvalidEnvironment;
-    const entry = std.fmt.bufPrintZ(
+    const entry = std.fmt.bufPrintSentinel(
         &result.environment_bytes[count.*],
         "{s}={s}",
         .{ profile_endorsement.environment_name, value },
+        0,
     ) catch return error.InvalidEnvironment;
     result.environment[count.*] = entry.ptr;
     count.* += 1;
@@ -220,7 +221,7 @@ fn appendEnvironment(result: *Execution, count: *usize, name: []const u8, value:
     if (count.* >= max_environment_entries or value.len == 0 or value.len > max_environment_value_bytes)
         return error.InvalidEnvironment;
     for (value) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidEnvironment;
-    const entry = std.fmt.bufPrintZ(&result.environment_bytes[count.*], "{s}={s}", .{ name, value }) catch
+    const entry = std.fmt.bufPrintSentinel(&result.environment_bytes[count.*], "{s}={s}", .{ name, value }, 0) catch
         return error.InvalidEnvironment;
     result.environment[count.*] = entry.ptr;
     count.* += 1;

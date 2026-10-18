@@ -54,9 +54,9 @@ test "RA5 원격 이벤트 채널은 홈을 원격 셸이 펴게 둔다 — 작�
     );
     defer allocator.free(body);
 
-    const source = try allocator.dupeZ(u8, body);
+    const source = try allocator.dupeSentinel(u8, body, 0);
     defer allocator.free(source);
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source, .{});
     defer tree.deinit(allocator);
     if (tree.errors.len != 0) return error.MalformedSource;
     const wrapper = namedFunction(&tree, "spawnAgentEventsMode") orelse return error.SpawnMissing;
@@ -82,7 +82,7 @@ test "RA5 원격 이벤트 채널은 홈을 원격 셸이 펴게 둔다 — 작�
     try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, script, " \n"), "remote_shell.path_assign ++"));
     // Negative control: a comment that preserves the old needle must not stand
     // in for a real shell wrapper call after the public shim was introduced.
-    var mutation = try std.zig.Ast.parse(allocator, "pub fn spawnAgentEventsReplayMode() void {\n// remote_shell.wrapAlloc(allocator, stream_script)\n}\n", .zig);
+    var mutation = try std.zig.Ast.parse(allocator, "pub fn spawnAgentEventsReplayMode() void {\n// remote_shell.wrapAlloc(allocator, stream_script)\n}\n", .{});
     defer mutation.deinit(allocator);
     const mutant = namedFunction(&mutation, "spawnAgentEventsReplayMode") orelse return error.SpawnMissing;
     try std.testing.expect(!hasTokens(&mutation, mutant, &.{ "remote_shell", ".", "wrapAlloc", "(", "allocator", ",", "stream_script" }));

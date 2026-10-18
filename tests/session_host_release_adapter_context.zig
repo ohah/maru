@@ -1,6 +1,8 @@
 //! Proves that release identity comes from one closed GitHub Actions context and is bound to the
 //! canonical manifest. This is a component seam: it does not claim GitHub API or attestation E2E.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const context = @import("release_adapter_context");
 const manifest = @import("release_manifest");
@@ -59,7 +61,7 @@ test "noncanonical numeric and oversized scalar values are rejected" {
     entries[8].value = "0";
     try std.testing.expectError(error.InvalidBuild, context.parse(&entries));
     entries = good_entries;
-    entries[0].value = "x" ** (context.max_value_bytes + 1);
+    entries[0].value = array_repeat.repeat("x", (context.max_value_bytes + 1));
     try std.testing.expectError(error.ValueTooLong, context.parse(&entries));
 }
 

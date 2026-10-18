@@ -34,7 +34,7 @@ pub const HostAdapter = struct {
 
     pub const testing_api = if (@import("builtin").is_test) struct {
         pub const DeinitTrace = struct {
-            host_ids: [8]u128 = [_]u128{0} ** 8,
+            host_ids: [8]u128 = @as([8]u128, @splat(0)),
             len: usize = 0,
         };
         var armed: ?*DeinitTrace = null;
@@ -58,13 +58,13 @@ pub const HostAdapter = struct {
 
     pub const ShutdownManifest = struct {
         host_id: u128 = 0,
-        build_id: [host_manifest.max_build_id_bytes]u8 = [_]u8{0} ** host_manifest.max_build_id_bytes,
+        build_id: [host_manifest.max_build_id_bytes]u8 = @as([host_manifest.max_build_id_bytes]u8, @splat(0)),
         build_id_len: u8 = 0,
         protocol_major: u16 = 0,
         screen_codec_version: u16 = 0,
         upgrade_epoch: u64 = 0,
         lifecycle: host_manifest.Lifecycle = .ready,
-        endpoint: [host_manifest.max_endpoint_bytes]u8 = [_]u8{0} ** host_manifest.max_endpoint_bytes,
+        endpoint: [host_manifest.max_endpoint_bytes]u8 = @as([host_manifest.max_endpoint_bytes]u8, @splat(0)),
         endpoint_len: u8 = 0,
 
         pub fn descriptor(self: *const ShutdownManifest) ?host_manifest.Descriptor {
@@ -501,7 +501,7 @@ pub const HostAdapter = struct {
         out.shutdown_manifest = .{};
         if (!incident_binding_contract.validPublicationShape(publication))
             @panic("managed Client incident publication missing");
-        permit.lifecycle_raw = @intFromEnum(incident_binding_contract.PublicationLifecycle.bound);
+        permit.lifecycle_raw = @backingInt(incident_binding_contract.PublicationLifecycle.bound);
         permit.seal = process_seal_service.preparedHostPublicationSeal(permit.pid, permit.process_nonce, .{
             .self_addr = permit.self_addr,
             .pool_addr = permit.pool_addr,
@@ -519,7 +519,7 @@ pub const HostAdapter = struct {
         const pid = client_slot_identity.pid;
         permit.pid = client_slot_identity.pid;
         permit.process_nonce = client_slot_identity.process_nonce;
-        permit.lifecycle_raw = @intFromEnum(incident_binding_contract.PublicationLifecycle.prepared);
+        permit.lifecycle_raw = @backingInt(incident_binding_contract.PublicationLifecycle.prepared);
         permit.seal = try process_seal_service.preparedHostPublicationSeal(pid, permit.process_nonce, .{
             .self_addr = permit.self_addr,
             .pool_addr = permit.pool_addr,
@@ -552,11 +552,11 @@ pub const HostAdapter = struct {
     }
 
     pub fn hostPublicationPrepared(permit: *const incident_binding_contract.PreparedHostPublication) bool {
-        return permit.lifecycle_raw == @intFromEnum(incident_binding_contract.PublicationLifecycle.prepared);
+        return permit.lifecycle_raw == @backingInt(incident_binding_contract.PublicationLifecycle.prepared);
     }
 
     pub fn hostPublicationBound(permit: *const incident_binding_contract.PreparedHostPublication) bool {
-        return permit.lifecycle_raw == @intFromEnum(incident_binding_contract.PublicationLifecycle.bound);
+        return permit.lifecycle_raw == @backingInt(incident_binding_contract.PublicationLifecycle.bound);
     }
 
     pub fn incidentBindingPublication(self: *const HostAdapter) incident_binding_contract.IncidentBindingPublication {
@@ -588,14 +588,14 @@ pub const HostAdapter = struct {
             binding.host_adapter_generation == permit.adapter_generation and
             binding.connection_generation == self.slot.connectionGeneration() and
             binding.wire_major == client.wire_major and
-            binding.host_class_raw == @intFromEnum(switch (self.kind) {
+            binding.host_class_raw == @backingInt(switch (self.kind) {
                 .current => incident_binding_contract.HostClass.current,
                 .previous => incident_binding_contract.HostClass.previous,
             }) and incident_binding_contract.validPublicationShape(self.incidentBindingPublication());
     }
 
     pub fn consumePreparedHostPublicationNoFail(permit: *incident_binding_contract.PreparedHostPublication) void {
-        permit.lifecycle_raw = @intFromEnum(incident_binding_contract.PublicationLifecycle.consumed);
+        permit.lifecycle_raw = @backingInt(incident_binding_contract.PublicationLifecycle.consumed);
         permit.seal = process_seal_service.preparedHostPublicationSeal(permit.pid, permit.process_nonce, .{
             .self_addr = permit.self_addr,
             .pool_addr = permit.pool_addr,
@@ -878,7 +878,7 @@ pub const HostAdapter = struct {
 
 comptime {
     const expected_fields = [_][]const u8{ "slot", "kind", "shutdown_manifest" };
-    const fields = @typeInfo(HostAdapter).@"struct".fields;
+    const fields = @import("type_info_fields").structFields(HostAdapter);
     if (fields.len != expected_fields.len)
         @compileError("HostAdapter ownership inventory changed; update CR3a SSOT first");
     for (fields, expected_fields) |field, expected|
@@ -938,7 +938,7 @@ test "host adapter validation failure preserves Client ownership and destination
         .parser = @import("framing.zig").FrameParser.init(allocator),
     };
     defer source.deinit();
-    var out_bytes: [@sizeOf(HostAdapter)]u8 align(@alignOf(HostAdapter)) = [_]u8{0xA5} ** @sizeOf(HostAdapter);
+    var out_bytes: [@sizeOf(HostAdapter)]u8 align(@alignOf(HostAdapter)) = @as([@sizeOf(HostAdapter)]u8, @splat(0xA5));
     const before = out_bytes;
     const out: *HostAdapter = @ptrCast(&out_bytes);
     try std.testing.expectError(error.UnsupportedProtocol, HostAdapter.initInPlace(out, allocator, &source));
@@ -1130,7 +1130,7 @@ test "CR0b ClientSlot binding은 final Client 주소를 map publication보다 �
     pool_owns_adapter = true;
     try std.testing.expect(pool.get(host_id) == adapter);
     try std.testing.expectEqual(
-        @intFromEnum(incident_binding_contract.PublicationLifecycle.consumed),
+        @backingInt(incident_binding_contract.PublicationLifecycle.consumed),
         permit.lifecycle_raw,
     );
 }
@@ -1311,7 +1311,7 @@ test "CR0b ClientSlot binding은 N-1 class와 wire major를 봉인한다" {
     try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
     try HostAdapter.initManagedInPlace(adapter, allocator, &source, &permit);
     const binding = adapter.slot.logicalClientConst().incident_binding;
-    try std.testing.expectEqual(@intFromEnum(incident_binding_contract.HostClass.previous), binding.host_class_raw);
+    try std.testing.expectEqual(@backingInt(incident_binding_contract.HostClass.previous), binding.host_class_raw);
     try std.testing.expectEqual(protocol.version_major - 1, binding.wire_major);
     pool.commitOwnedPublication(adapter, &permit);
     pool_owns_adapter = true;
@@ -1417,7 +1417,7 @@ test "CR0b ClientSlot binding은 current class와 exact connection generation을
     try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
     try HostAdapter.initManagedInPlace(adapter, allocator, &source, &permit);
     const binding = adapter.slot.logicalClientConst().incident_binding;
-    try std.testing.expectEqual(@intFromEnum(incident_binding_contract.HostClass.current), binding.host_class_raw);
+    try std.testing.expectEqual(@backingInt(incident_binding_contract.HostClass.current), binding.host_class_raw);
     try std.testing.expectEqual(adapter.connectionGeneration(), binding.connection_generation);
     try std.testing.expectEqual(permit.adapter_generation, binding.host_adapter_generation);
     pool.commitOwnedPublication(adapter, &permit);

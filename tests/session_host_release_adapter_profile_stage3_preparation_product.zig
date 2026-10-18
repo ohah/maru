@@ -225,7 +225,7 @@ test "production run keeps borrowed inputs in its stack-owned adapter until owne
 }
 
 test "profile stage3 composition records actual APFS preparation samples without FD or staging leaks" {
-    const samples: usize = if (builtin.mode == .ReleaseFast) 40 else 1;
+    const samples: usize = if (builtin.mode == .fast) 40 else 1;
     var elapsed: [40]u64 = undefined;
     const fd_before = try openFdCount();
     for (0..samples) |index| {
@@ -384,7 +384,7 @@ const FilesystemSteps = struct {
 fn absolute(tmp: *std.testing.TmpDir, suffix: []const u8, out: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(out, "{s}/{s}", .{ root[0..len], suffix });
+    return std.fmt.bufPrintSentinel(out, "{s}/{s}", .{ root[0..len], suffix }, 0);
 }
 
 fn expectNoStaging(fixture: *FilesystemFixture) !void {

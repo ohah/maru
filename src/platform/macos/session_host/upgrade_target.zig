@@ -42,7 +42,7 @@ pub const Stager = struct {
             request.handoff_reader_max < handoff_codec.schema_v1)
             return .unsupported;
 
-        const source = allocator.dupeZ(u8, request.target_path) catch return .resource_exhausted;
+        const source = allocator.dupeSentinel(u8, request.target_path, 0) catch return .resource_exhausted;
         defer allocator.free(source);
         var leaf_buf: [80]u8 = undefined;
         const leaf = std.fmt.bufPrint(&leaf_buf, "target-{x:0>32}.image", .{request.attempt_id}) catch
@@ -114,7 +114,7 @@ pub const Stager = struct {
             recorded.reader_max < handoff_codec.schema_v1 or
             !buildIdMatches(recorded.build_id, recorded.sha256))
             return .invalid_target;
-        const path = allocator.dupeZ(u8, recorded.staged_path) catch return .resource_exhausted;
+        const path = allocator.dupeSentinel(u8, recorded.staged_path, 0) catch return .resource_exhausted;
         var path_owned = true;
         defer if (path_owned) allocator.free(path);
         const build_id = allocator.dupe(u8, recorded.build_id) catch return .resource_exhausted;
@@ -265,12 +265,12 @@ fn writeFixture(path: [:0]const u8, bytes: []const u8, mode: c.mode_t) !void {
 
 test "upgrade target stages an exact executable inode and cancellation removes it" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-upgrade-target-{d}", .{c.getpid()}) catch
+    const dir = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-upgrade-target-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     if (c.mkdir(dir.ptr, 0o700) != 0) return error.SkipZigTest;
     defer _ = c.rmdir(dir.ptr);
     var source_buf: [224]u8 = undefined;
-    const source = try std.fmt.bufPrintZ(&source_buf, "{s}/source", .{dir});
+    const source = try std.fmt.bufPrintSentinel(&source_buf, "{s}/source", .{dir}, 0);
     defer _ = c.unlink(source.ptr);
     try writeFixture(source, "new-image", 0o700);
     const identity = try staged_image.inspect(source);
@@ -312,7 +312,7 @@ test "upgrade target stages an exact executable inode and cancellation removes i
         .size = target.artifact.size,
         .sha256 = target.artifact.sha256,
     }, try staged_image.inspect(target.artifact.path)));
-    const owned_path = try std.testing.allocator.dupeZ(u8, target.artifact.path);
+    const owned_path = try std.testing.allocator.dupeSentinel(u8, target.artifact.path, 0);
     defer std.testing.allocator.free(owned_path);
     ops.release_artifact(ops.ctx, std.testing.allocator, &target.artifact);
     try std.testing.expect(c.access(owned_path.ptr, c.F_OK) != 0);
@@ -320,12 +320,12 @@ test "upgrade target stages an exact executable inode and cancellation removes i
 
 test "upgrade target rejects hash build reader and executable mismatches without residue" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-upgrade-target-invalid-{d}", .{c.getpid()}) catch
+    const dir = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-upgrade-target-invalid-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     if (c.mkdir(dir.ptr, 0o700) != 0) return error.SkipZigTest;
     defer _ = c.rmdir(dir.ptr);
     var source_buf: [224]u8 = undefined;
-    const source = try std.fmt.bufPrintZ(&source_buf, "{s}/source", .{dir});
+    const source = try std.fmt.bufPrintSentinel(&source_buf, "{s}/source", .{dir}, 0);
     defer _ = c.unlink(source.ptr);
     try writeFixture(source, "new-image", 0o700);
     const identity = try staged_image.inspect(source);
@@ -375,12 +375,12 @@ test "upgrade target rejects hash build reader and executable mismatches without
 
 test "real target stager and upgrade owner release cancel and terminal artifacts" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-upgrade-owner-real-{d}", .{c.getpid()}) catch
+    const dir = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-upgrade-owner-real-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     if (c.mkdir(dir.ptr, 0o700) != 0) return error.SkipZigTest;
     defer _ = c.rmdir(dir.ptr);
     var source_buf: [224]u8 = undefined;
-    const source = try std.fmt.bufPrintZ(&source_buf, "{s}/source", .{dir});
+    const source = try std.fmt.bufPrintSentinel(&source_buf, "{s}/source", .{dir}, 0);
     defer _ = c.unlink(source.ptr);
     try writeFixture(source, "real-owner-image", 0o700);
     const identity = try staged_image.inspect(source);
@@ -402,10 +402,11 @@ test "real target stager and upgrade owner release cancel and terminal artifacts
     try std.testing.expectEqual(wire.PrepareDecision.accepted, owner.stagePending(cancelled));
     owner.cancelUnaccepted(cancelled.attempt_id);
     var cancelled_path_buf: [272]u8 = undefined;
-    const cancelled_path = try std.fmt.bufPrintZ(
+    const cancelled_path = try std.fmt.bufPrintSentinel(
         &cancelled_path_buf,
         "{s}/target-{x:0>32}.image",
         .{ dir, cancelled.attempt_id },
+        0,
     );
     try std.testing.expect(c.access(cancelled_path.ptr, c.F_OK) != 0);
 
@@ -424,10 +425,11 @@ test "real target stager and upgrade owner release cancel and terminal artifacts
     try std.testing.expect(c.fcntl(borrowed_exec_fd, c.F.GETFD, @as(c_int, 0)) < 0);
     try std.testing.expectEqual(posix.E.BADF, posix.errno(-1));
     var completed_path_buf: [272]u8 = undefined;
-    const completed_path = try std.fmt.bufPrintZ(
+    const completed_path = try std.fmt.bufPrintSentinel(
         &completed_path_buf,
         "{s}/target-{x:0>32}.image",
         .{ dir, completed.attempt_id },
+        0,
     );
     try std.testing.expect(c.access(completed_path.ptr, c.F_OK) != 0);
     const replay = owner.stagePending(completed);
@@ -437,12 +439,12 @@ test "real target stager and upgrade owner release cancel and terminal artifacts
 
 test "real target restore reopens a CLOEXEC pin and terminal finish closes it exactly once" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-upgrade-target-restore-{d}", .{c.getpid()}) catch
+    const dir = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-upgrade-target-restore-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     if (c.mkdir(dir.ptr, 0o700) != 0) return error.SkipZigTest;
     defer _ = c.rmdir(dir.ptr);
     var source_buf: [224]u8 = undefined;
-    const source = try std.fmt.bufPrintZ(&source_buf, "{s}/source", .{dir});
+    const source = try std.fmt.bufPrintSentinel(&source_buf, "{s}/source", .{dir}, 0);
     defer _ = c.unlink(source.ptr);
     try writeFixture(source, "restore-image", 0o700);
     const identity = try staged_image.inspect(source);
@@ -503,22 +505,23 @@ test "real target restore reopens a CLOEXEC pin and terminal finish closes it ex
     try std.testing.expect(c.fcntl(restored_fd, c.F.GETFD, @as(c_int, 0)) < 0);
     try std.testing.expectEqual(posix.E.BADF, posix.errno(-1));
     var staged_buf: [272]u8 = undefined;
-    const staged_path = try std.fmt.bufPrintZ(
+    const staged_path = try std.fmt.bufPrintSentinel(
         &staged_buf,
         "{s}/target-{x:0>32}.image",
         .{ dir, request.attempt_id },
+        0,
     );
     try std.testing.expect(c.access(staged_path.ptr, c.F_OK) != 0);
 }
 
 test "pinned target fd keeps the approved inode while path replacement is rejected and preserved" {
     var dir_buf: [192]u8 = undefined;
-    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-upgrade-target-swap-{d}", .{c.getpid()}) catch
+    const dir = std.fmt.bufPrintSentinel(&dir_buf, "/tmp/maru-upgrade-target-swap-{d}", .{c.getpid()}, 0) catch
         return error.SkipZigTest;
     if (c.mkdir(dir.ptr, 0o700) != 0) return error.SkipZigTest;
     defer _ = c.rmdir(dir.ptr);
     var source_buf: [224]u8 = undefined;
-    const source = try std.fmt.bufPrintZ(&source_buf, "{s}/source", .{dir});
+    const source = try std.fmt.bufPrintSentinel(&source_buf, "{s}/source", .{dir}, 0);
     defer _ = c.unlink(source.ptr);
     try writeFixture(source, "approved-image", 0o700);
     const identity = try staged_image.inspect(source);
@@ -538,10 +541,10 @@ test "pinned target fd keeps the approved inode while path replacement is reject
     try std.testing.expect(decision == .verified);
     var target = decision.verified;
     defer std.testing.allocator.free(target.build_id);
-    const staged_path = try std.testing.allocator.dupeZ(u8, target.artifact.path);
+    const staged_path = try std.testing.allocator.dupeSentinel(u8, target.artifact.path, 0);
     defer std.testing.allocator.free(staged_path);
     var approved_buf: [272]u8 = undefined;
-    const approved_path = try std.fmt.bufPrintZ(&approved_buf, "{s}.approved", .{staged_path});
+    const approved_path = try std.fmt.bufPrintSentinel(&approved_buf, "{s}.approved", .{staged_path}, 0);
     defer _ = c.unlink(approved_path.ptr);
     defer _ = c.unlink(staged_path.ptr);
 

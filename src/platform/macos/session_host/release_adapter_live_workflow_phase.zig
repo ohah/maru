@@ -80,10 +80,10 @@ const ordered_stages = [_]Stage{
 };
 
 comptime {
-    const fields = @typeInfo(Stage).@"enum".fields;
+    const fields = @import("type_info_fields").enumFields(Stage);
     if (fields.len != ordered_stages.len) @compileError("live workflow stage inventory drift");
     for (ordered_stages, 0..) |stage, index| {
-        if (@intFromEnum(stage) != index or fields[index].value != index)
+        if (@backingInt(stage) != index or fields[index].value != index)
             @compileError("live workflow stage order drift");
     }
 }

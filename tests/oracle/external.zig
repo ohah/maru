@@ -2,10 +2,7 @@ const std = @import("std");
 const maru = @import("maru");
 const artifacts = @import("test_support");
 
-const c = @cImport({
-    @cInclude("vterm.h");
-    @cInclude("vterm_shim.h");
-});
+const c = @import("libvterm_c");
 
 // 외부 오라클: 동일한 fixture를 실제 reference VT 엔진(libvterm)에 먹여 최종 화면을
 // 덤프하고, 커밋된 golden과 비교한다.

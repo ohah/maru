@@ -780,8 +780,8 @@ fn applyExtendedColor(self: *TerminalCore, start: usize, target: *types.Color) u
 // (screen.cursorPosition/setScrollRegion도 호출 — self.로 부른다).
 
 pub fn beginCsi(self: *TerminalCore) void {
-    self.csi_params = [_]u16{0} ** core.TerminalCore.max_csi_params;
-    self.csi_subparam = [_]bool{false} ** core.TerminalCore.max_csi_params;
+    self.csi_params = @as([core.TerminalCore.max_csi_params]u16, @splat(0));
+    self.csi_subparam = @as([core.TerminalCore.max_csi_params]bool, @splat(false));
     // 항상 최소 1개의 (비어 있을 수도 있는) 파라미터가 있다고 본다.
     self.csi_param_count = 1;
     self.csi_has_digit = false;

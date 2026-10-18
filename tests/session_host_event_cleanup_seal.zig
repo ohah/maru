@@ -10,7 +10,7 @@ const seal = @import("event_cleanup_seal");
 
 fn emptyDecisionProgress() seal.CleanupProgressInput {
     var value: seal.CleanupProgressInput = undefined;
-    value.retained_observation_digest = [_]u8{0} ** 32;
+    value.retained_observation_digest = @as([32]u8, @splat(0));
     value.decision = .{};
     return value;
 }
@@ -56,19 +56,19 @@ fn observationInput() seal.ObservationCleanupDigestInput {
         .foreground_process_count = 0,
         .graph = graph,
         .cwd_digest = seal.observationStringDigest(.cwd, "/tmp"),
-        .cwd_host_digest = [_]u8{0} ** 32,
-        .window_title_digest = [_]u8{0} ** 32,
-        .ssh_remote_dest_digest = [_]u8{0} ** 32,
-        .clipboard_read_target_digest = [_]u8{0} ** 32,
-        .foreground_processes_digest = [_]u8{0} ** 32,
-        .agent_progress_digest = [_]u8{0} ** 32,
+        .cwd_host_digest = @as([32]u8, @splat(0)),
+        .window_title_digest = @as([32]u8, @splat(0)),
+        .ssh_remote_dest_digest = @as([32]u8, @splat(0)),
+        .clipboard_read_target_digest = @as([32]u8, @splat(0)),
+        .foreground_processes_digest = @as([32]u8, @splat(0)),
+        .agent_progress_digest = @as([32]u8, @splat(0)),
     };
 }
 
 test "C3-3b2b1 cleanup seal ABI and role domains are deterministic" {
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(seal.CleanupSeal));
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(seal.CleanupPhase.preparation));
-    try std.testing.expectEqual(@as(u8, 8), @intFromEnum(seal.CleanupRole.agent_progress));
+    try std.testing.expectEqual(@as(u8, 1), @backingInt(seal.CleanupPhase.preparation));
+    try std.testing.expectEqual(@as(u8, 8), @backingInt(seal.CleanupRole.agent_progress));
 
     const cwd = seal.observationStringDigest(.cwd, "same");
     try std.testing.expectEqualSlices(u8, &cwd, &seal.observationStringDigest(.cwd, "same"));
@@ -260,10 +260,10 @@ test "C3-3b2b1 cleanup seal observation couples every owner and digest" {
     const digest = seal.observationCleanupDigest(baseline);
     try std.testing.expectEqualSlices(u8, &digest, &seal.observationCleanupDigest(baseline));
 
-    inline for (std.meta.fields(seal.ObservationCleanupGraph)) |field| {
+    inline for (@import("type_info_fields").fields(seal.ObservationCleanupGraph)) |field| {
         var missing_digest = baseline;
         @field(missing_digest.graph, field.name) = descriptor(0x4000);
-        @field(missing_digest, field.name ++ "_digest") = [_]u8{0} ** 32;
+        @field(missing_digest, field.name ++ "_digest") = @as([32]u8, @splat(0));
         if (comptime std.mem.eql(u8, field.name, "ssh_remote_dest"))
             missing_digest.ssh_remote_dest_present = 1;
         if (comptime std.mem.eql(u8, field.name, "foreground_processes"))
@@ -272,7 +272,7 @@ test "C3-3b2b1 cleanup seal observation couples every owner and digest" {
 
         var digest_without_owner = baseline;
         @field(digest_without_owner.graph, field.name) = .{};
-        @field(digest_without_owner, field.name ++ "_digest") = [_]u8{9} ** 32;
+        @field(digest_without_owner, field.name ++ "_digest") = @as([32]u8, @splat(9));
         try std.testing.expect(!seal.testing.observationCleanupInputCanonical(digest_without_owner));
     }
 
@@ -324,7 +324,7 @@ test "C3-3b2b1 cleanup seal neutral codecs have independent golden digests" {
 test "C3-3b2b1 cleanup seal observation encoder binds every scalar descriptor and digest" {
     const baseline_input = observationInput();
     const baseline = seal.testing.observationCleanupDigestUnchecked(baseline_input);
-    inline for (std.meta.fields(seal.ObservationCleanupDigestInput)) |field| {
+    inline for (@import("type_info_fields").fields(seal.ObservationCleanupDigestInput)) |field| {
         if (comptime std.mem.eql(u8, field.name, "graph")) continue;
         var changed = baseline_input;
         switch (@typeInfo(field.type)) {
@@ -338,8 +338,8 @@ test "C3-3b2b1 cleanup seal observation encoder binds every scalar descriptor an
             &seal.testing.observationCleanupDigestUnchecked(changed),
         ));
     }
-    inline for (std.meta.fields(seal.ObservationCleanupGraph)) |owner_field| {
-        inline for (std.meta.fields(seal.CleanupDescriptor)) |descriptor_field| {
+    inline for (@import("type_info_fields").fields(seal.ObservationCleanupGraph)) |owner_field| {
+        inline for (@import("type_info_fields").fields(seal.CleanupDescriptor)) |descriptor_field| {
             var changed = baseline_input;
             @field(@field(changed.graph, owner_field.name), descriptor_field.name) +%= 1;
             try std.testing.expect(!std.mem.eql(

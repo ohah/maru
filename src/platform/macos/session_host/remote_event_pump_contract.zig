@@ -134,7 +134,7 @@ test "C3-3b4 중립 pump 계약은 round-robin cursor의 16 owner 상한을 고�
 
 test "P4 E3c probe 뒤 준비된 owner는 같은 frame의 16 owner 안에서 우선된다" {
     var handles: [100]u64 = undefined;
-    var priority = [_]bool{false} ** 100;
+    var priority = @as([100]bool, @splat(false));
     for (&handles, 0..) |*handle, index| handle.* = index + 1;
     priority[99] = true;
     var selected: [max_owners_per_frame]u64 = undefined;
@@ -153,7 +153,7 @@ test "P4 E3c priority는 probe를 중복하지 않고 quiet frame은 기존 roun
     try std.testing.expectEqualSlices(u64, &.{ 20, 30, 40, 10 }, selected[0..first.count]);
     try std.testing.expectEqual(@as(usize, 4), first.round_robin_advanced);
 
-    const quiet = [_]bool{false} ** handles.len;
+    const quiet = @as([handles.len]bool, @splat(false));
     const second = try selectAfterProbe(&handles, 2, &quiet, &selected);
     try std.testing.expectEqualSlices(u64, &.{ 30, 40, 10, 20 }, selected[0..second.count]);
     try std.testing.expectEqual(@as(usize, 4), second.round_robin_advanced);

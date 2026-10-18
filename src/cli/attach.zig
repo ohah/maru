@@ -306,8 +306,8 @@ test "attach maps every canonical remote error to one stable exit" {
         .busy, // resource_exhausted
         .internal,
     };
-    inline for (std.meta.fields(RemoteError)) |field| {
-        const code: RemoteError = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").fields(RemoteError)) |field| {
+        const code: RemoteError = @fromBackingInt(@intCast(field.value));
         try std.testing.expectEqual(expected[field.value], remoteExitCode(code));
     }
 }

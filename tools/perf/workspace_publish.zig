@@ -6,7 +6,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(a);
     defer a.free(args);
     if (args.len != 4) return error.ExpectedParentBytesMode;
-    const parent = try a.dupeZ(u8, args[1]);
+    const parent = try a.dupeSentinel(u8, args[1], 0);
     defer a.free(parent);
     const count = try std.fmt.parseInt(usize, args[2], 10);
     const bytes = try a.alloc(u8, count);

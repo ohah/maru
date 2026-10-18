@@ -135,10 +135,10 @@ fn spawnGrandchild(dir: [*:0]const u8) void {
     var buf: [32]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, "{d}\n", .{pid}) catch std.c._exit(3);
     var path_buf: [4096]u8 = undefined;
-    const pid_path = std.fmt.bufPrintZ(&path_buf, "{s}/gc-{d}", .{ std.mem.span(dir), std.c.getpid() }) catch std.c._exit(3);
+    const pid_path = std.fmt.bufPrintSentinel(&path_buf, "{s}/gc-{d}", .{ std.mem.span(dir), std.c.getpid() }, 0) catch std.c._exit(3);
     // 임시 이름에 쓰고 옮긴다 — 읽는 쪽이 반쯤 쓴 파일을 보지 않게.
     var tmp_buf: [4096]u8 = undefined;
-    const tmp_path = std.fmt.bufPrintZ(&tmp_buf, "{s}.tmp", .{pid_path}) catch std.c._exit(3);
+    const tmp_path = std.fmt.bufPrintSentinel(&tmp_buf, "{s}.tmp", .{pid_path}, 0) catch std.c._exit(3);
     const fd = std.c.open(tmp_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
     if (fd < 0) std.c._exit(3);
     _ = std.c.write(fd, text.ptr, text.len);
@@ -149,7 +149,7 @@ fn spawnGrandchild(dir: [*:0]const u8) void {
 /// stdin EOF 를 봤다는 표식(`<디렉터리>/eof-<pid>`) — 빈 파일 하나.
 fn markEof(dir: [*:0]const u8) void {
     var path_buf: [4096]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/eof-{d}", .{ std.mem.span(dir), std.c.getpid() }) catch return;
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/eof-{d}", .{ std.mem.span(dir), std.c.getpid() }, 0) catch return;
     const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
     if (fd >= 0) _ = std.c.close(fd);
 }
@@ -245,7 +245,7 @@ var mute_hover = false;
 /// g.c 의 `OUTSIDE` 를 지웠다).
 const DefMode = enum { same, none, other, outside };
 const DocMode = struct { uri: [1024]u8 = undefined, len: usize = 0, mode: DefMode = .same };
-var doc_modes: [8]DocMode = [_]DocMode{.{}} ** 8;
+var doc_modes: [8]DocMode = @as([8]DocMode, @splat(.{}));
 
 fn setDocMode(uri: []const u8, mode: DefMode) void {
     if (uri.len > 1024) return;
@@ -263,7 +263,7 @@ fn setDocMode(uri: []const u8, mode: DefMode) void {
 
 /// 문서 본문을 uri 별로 기억한다(signatureHelp 가 caret 앞을 본다). 상한 8 문서·64 KB.
 const DocText = struct { uri: [1024]u8 = undefined, len: usize = 0, text: [65536]u8 = undefined, text_len: usize = 0, version: i64 = 0, lang: [32]u8 = undefined, lang_len: usize = 0 };
-var doc_texts: [8]DocText = [_]DocText{.{}} ** 8;
+var doc_texts: [8]DocText = @as([8]DocText, @splat(.{}));
 
 fn setDocText(uri: []const u8, text: []const u8, version: i64) void {
     if (uri.len > 1024 or text.len > 65536) return;

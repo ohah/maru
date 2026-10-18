@@ -1,6 +1,8 @@
 //! Proves strict semantic binding of a bounded GitHub repository REST response. This component
 //! does not claim that the bytes came from GitHub; command execution and transport are later seams.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const github_repository = @import("release_adapter_github_repository");
 const manifest = @import("release_manifest");
@@ -21,7 +23,7 @@ test "repository response binds numeric and textual identity while allowing addi
 }
 
 test "response cap is enforced before parsing" {
-    const oversized = " " ** (github_repository.max_response_bytes + 1);
+    const oversized = array_repeat.repeat(" ", (github_repository.max_response_bytes + 1));
     try std.testing.expectError(
         error.ResponseTooLarge,
         github_repository.parseAndBind(std.testing.allocator, oversized, expected),

@@ -47,13 +47,13 @@ fn runScenario(scenario: [:0]const u8, expected: []const u8) !ScenarioResult {
     const new_path = std.mem.span(new_raw);
     const next_path = std.mem.span(next_raw);
     var state_buf: [256]u8 = undefined;
-    const state_path = std.fmt.bufPrintZ(&state_buf, "/tmp/maru-upgrade-state-{d}-{s}", .{ c.getpid(), scenario }) catch return error.SkipZigTest;
+    const state_path = std.fmt.bufPrintSentinel(&state_buf, "/tmp/maru-upgrade-state-{d}-{s}", .{ c.getpid(), scenario }, 0) catch return error.SkipZigTest;
     var backup_buf: [280]u8 = undefined;
-    const backup_path = std.fmt.bufPrintZ(&backup_buf, "{s}.backup", .{state_path}) catch return error.SkipZigTest;
+    const backup_path = std.fmt.bufPrintSentinel(&backup_buf, "{s}.backup", .{state_path}, 0) catch return error.SkipZigTest;
     var result_buf: [256]u8 = undefined;
-    const result_path = std.fmt.bufPrintZ(&result_buf, "/tmp/maru-upgrade-result-{d}-{s}", .{ c.getpid(), scenario }) catch return error.SkipZigTest;
+    const result_path = std.fmt.bufPrintSentinel(&result_buf, "/tmp/maru-upgrade-result-{d}-{s}", .{ c.getpid(), scenario }, 0) catch return error.SkipZigTest;
     var owner_buf: [256]u8 = undefined;
-    const owner_dir = std.fmt.bufPrintZ(&owner_buf, "/tmp/maru-upgrade-owner-{d}-{s}", .{ c.getpid(), scenario }) catch return error.SkipZigTest;
+    const owner_dir = std.fmt.bufPrintSentinel(&owner_buf, "/tmp/maru-upgrade-owner-{d}-{s}", .{ c.getpid(), scenario }, 0) catch return error.SkipZigTest;
     _ = c.unlink(state_path.ptr);
     _ = c.unlink(backup_path.ptr);
     _ = c.unlink(result_path.ptr);
@@ -64,7 +64,7 @@ fn runScenario(scenario: [:0]const u8, expected: []const u8) !ScenarioResult {
         _ = c.unlink(result_path.ptr);
         var artifact_buf: [320]u8 = undefined;
         for ([_][]const u8{ "owner.lock", "self-current", "self-previous", "target-current" }) |name| {
-            if (std.fmt.bufPrintZ(&artifact_buf, "{s}/{s}", .{ owner_dir, name })) |path| {
+            if (std.fmt.bufPrintSentinel(&artifact_buf, "{s}/{s}", .{ owner_dir, name }, 0)) |path| {
                 _ = c.unlink(path.ptr);
             } else |_| {}
         }
@@ -74,9 +74,9 @@ fn runScenario(scenario: [:0]const u8, expected: []const u8) !ScenarioResult {
     const pid = c.fork();
     if (pid < 0) return error.SkipZigTest;
     if (pid == 0) {
-        const old_z = std.testing.allocator.dupeZ(u8, old_path) catch c._exit(126);
-        const new_z = std.testing.allocator.dupeZ(u8, new_path) catch c._exit(126);
-        const next_z = std.testing.allocator.dupeZ(u8, next_path) catch c._exit(126);
+        const old_z = std.testing.allocator.dupeSentinel(u8, old_path, 0) catch c._exit(126);
+        const new_z = std.testing.allocator.dupeSentinel(u8, new_path, 0) catch c._exit(126);
+        const next_z = std.testing.allocator.dupeSentinel(u8, next_path, 0) catch c._exit(126);
         const argv = [_:null]?[*:0]const u8{
             old_z.ptr,
             new_z.ptr,

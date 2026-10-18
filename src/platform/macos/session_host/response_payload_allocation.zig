@@ -729,9 +729,9 @@ fn entriesSemanticDigest(entries: []const Entry) u64 {
         hasher.update(std.mem.asBytes(&entry.len));
         hasher.update(std.mem.asBytes(&entry.allocator.ptr_addr));
         hasher.update(std.mem.asBytes(&entry.allocator.vtable_addr));
-        const lifecycle: u8 = @intFromEnum(entry.lifecycle);
+        const lifecycle: u8 = @backingInt(entry.lifecycle);
         hasher.update(std.mem.asBytes(&lifecycle));
-        const reason: u8 = if (entry.terminal_reason) |value| @intFromEnum(value) + 1 else 0;
+        const reason: u8 = if (entry.terminal_reason) |value| @backingInt(value) + 1 else 0;
         hasher.update(std.mem.asBytes(&reason));
     }
     return hasher.final();
@@ -785,7 +785,7 @@ fn failureReleaseExact(
 }
 
 fn failureReleaseStageRawValid(stage: *const FailureReleaseStage) bool {
-    return @as(*const u8, @ptrCast(stage)).* <= @intFromEnum(FailureReleaseStage.abandoned_no_free);
+    return @as(*const u8, @ptrCast(stage)).* <= @backingInt(FailureReleaseStage.abandoned_no_free);
 }
 
 fn failureReleaseSeal(txn: *const Ledger.PreparedFailureRelease) u64 {

@@ -371,7 +371,7 @@ fn makeStoredArchive(allocator: std.mem.Allocator, content: []const u8) ![]u8 {
 fn temporaryPath(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root[0..root_len], leaf });
+    return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ root[0..root_len], leaf }, 0);
 }
 
 fn pathExists(path: [:0]const u8) !bool {

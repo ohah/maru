@@ -293,7 +293,7 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(client_slot, "pub const PreparedExecutionPoisonCaptureRequest = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(publication, "allocator_source_site_raw"));
     try std.testing.expectEqual(@as(usize, 7), count(client_slot, "allocator_source_site_raw"));
-    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, ".allocator_source_site_raw = @intFromEnum(connection_incident.SourceSite.client_cleanup)"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, ".allocator_source_site_raw = @backingInt(connection_incident.SourceSite.client_cleanup)"));
     try std.testing.expectEqual(@as(usize, 1), count(client, "fn capturePreparedExecutionPoison("));
     try std.testing.expectEqual(@as(usize, 2), count(client, "self.capturePreparedExecutionPoison("));
     try std.testing.expectEqual(@as(usize, 2), count(client_slot, "settlePreWireForDeferredPublication("));
@@ -536,8 +536,8 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(bootstrap_contract, "pub const Transcript = extern struct"));
     try std.testing.expectEqual(@as(usize, 1), count(bootstrap_contract, "pub const Role = enum(u8) { gui = 1, daemon = 2 };"));
     try std.testing.expectEqual(@as(usize, 2), count(bootstrap_contract, "expected_role"));
-    try std.testing.expectEqual(@as(usize, 1), count(app_session, ".role_raw = @intFromEnum(session_host.incident_bootstrap_contract.Role.gui)"));
-    try std.testing.expectEqual(@as(usize, 1), count(daemon, ".role_raw = @intFromEnum(incident_bootstrap_contract.Role.daemon)"));
+    try std.testing.expectEqual(@as(usize, 1), count(app_session, ".role_raw = @backingInt(session_host.incident_bootstrap_contract.Role.gui)"));
+    try std.testing.expectEqual(@as(usize, 1), count(daemon, ".role_raw = @backingInt(incident_bootstrap_contract.Role.daemon)"));
     try std.testing.expectEqual(@as(usize, 1), count(bootstrap_contract, "test \"CR0b bootstrap transcript 계약은"));
     try std.testing.expectEqual(@as(usize, 1), count(bootstrap_contract, "test \"CR0b daemon bootstrap은 GUI와 독립된 nonce와 sequence owner를 설치한다\""));
     try std.testing.expectEqual(@as(usize, 1), count(app_session, "test \"CR0b bootstrap 4 GUI child는"));

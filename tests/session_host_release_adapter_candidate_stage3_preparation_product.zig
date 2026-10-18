@@ -430,13 +430,13 @@ test "ReleaseFast records the actual durable stage3 boundary without touching ap
     const fd_after = try perfFdCount();
     try std.testing.expectEqual(fd_before, fd_after);
     inline for (.{ &promote, &fence, &retain, &cleanup, &total }) |values| std.mem.sort(u64, values, {}, std.sort.asc(u64));
-    if (builtin.mode == .ReleaseFast) std.debug.print("{{\"schema\":\"maru.session-host-release-stage3-preparation-product-perf.v1\",\"samples\":20,\"failures\":0,\"fd_delta\":0,\"residue\":0,\"promote_ns\":{{\"median\":{d},\"p95\":{d},\"max\":{d}}},\"fence_ns\":{{\"median\":{d},\"p95\":{d},\"max\":{d}}},\"retained_close_ns\":{{\"median\":{d},\"p95\":{d},\"max\":{d}}},\"local_cleanup_ns\":{{\"median\":{d},\"p95\":{d},\"max\":{d}}},\"total_ns\":{{\"median\":{d},\"p95\":{d},\"max\":{d}}}}}\n", .{ promote[10], promote[18], promote[19], fence[10], fence[18], fence[19], retain[10], retain[18], retain[19], cleanup[10], cleanup[18], cleanup[19], total[10], total[18], total[19] });
+    if (builtin.mode == .fast) std.debug.print("{{\"schema\":\"maru.session-host-release-stage3-preparation-product-perf.v1\",\"samples\":20,\"failures\":0,\"fd_delta\":0,\"residue\":0,\"promote_ns\":{{\"median\":{d},\"p95\":{d},\"max\":{d}}},\"fence_ns\":{{\"median\":{d},\"p95\":{d},\"max\":{d}}},\"retained_close_ns\":{{\"median\":{d},\"p95\":{d},\"max\":{d}}},\"local_cleanup_ns\":{{\"median\":{d},\"p95\":{d},\"max\":{d}}},\"total_ns\":{{\"median\":{d},\"p95\":{d},\"max\":{d}}}}}\n", .{ promote[10], promote[18], promote[19], fence[10], fence[18], fence[19], retain[10], retain[18], retain[19], cleanup[10], cleanup[18], cleanup[19], total[10], total[18], total[19] });
 }
 
 fn perfAbsolute(tmp: *std.testing.TmpDir, suffix: []const u8, storage: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root[0..len], suffix });
+    return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ root[0..len], suffix }, 0);
 }
 
 fn perfFdCount() !u32 {

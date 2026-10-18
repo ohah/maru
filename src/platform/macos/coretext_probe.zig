@@ -67,8 +67,8 @@ pub fn emptyNativeResult() NativeCoreTextSmokeResult {
         .raster_height = 0,
         .raster_non_clear_pixels = 0,
         .raster_failures = 0,
-        .primary_font_name = [_]u8{0} ** font_name_capacity,
-        .first_fallback_font_name = [_]u8{0} ** font_name_capacity,
+        .primary_font_name = @as([font_name_capacity]u8, @splat(0)),
+        .first_fallback_font_name = @as([font_name_capacity]u8, @splat(0)),
     };
 }
 
@@ -79,7 +79,7 @@ pub fn emptyGlyphRecord() NativeGlyphRecord {
         .string_index = 0,
         .category = 0,
         .fallback = 0,
-        .font_name = [_]u8{0} ** font_name_capacity,
+        .font_name = @as([font_name_capacity]u8, @splat(0)),
     };
 }
 
@@ -114,7 +114,7 @@ pub fn coreTextGlyphRecord(record: *const NativeGlyphRecord) CoreTextGlyphRecord
         .font_name = cStringField(&record.font_name),
         .fallback = record.fallback != 0,
         .color_glyph_kind = colorGlyphKindForCategory(record.category),
-        .drawable = record.glyph_id != 0 and record.category != @intFromEnum(NativeGlyphCategory.space),
+        .drawable = record.glyph_id != 0 and record.category != @backingInt(NativeGlyphCategory.space),
     };
 }
 
@@ -132,8 +132,8 @@ pub fn shapedRecordFromNativeGlyph(
 }
 
 pub fn cellWidthForCategory(category: u32) u2 {
-    if (category == @intFromEnum(NativeGlyphCategory.cjk) or
-        category == @intFromEnum(NativeGlyphCategory.emoji))
+    if (category == @backingInt(NativeGlyphCategory.cjk) or
+        category == @backingInt(NativeGlyphCategory.emoji))
     {
         return 2;
     }
@@ -141,22 +141,22 @@ pub fn cellWidthForCategory(category: u32) u2 {
 }
 
 pub fn colorGlyphKindForCategory(category: u32) renderer.ColorGlyphKind {
-    if (category == @intFromEnum(NativeGlyphCategory.emoji)) return .color;
+    if (category == @backingInt(NativeGlyphCategory.emoji)) return .color;
     return .monochrome;
 }
 
 pub fn codepointForRecord(record: *const NativeGlyphRecord) u21 {
     return switch (record.category) {
-        @intFromEnum(NativeGlyphCategory.ascii) => switch (record.string_index) {
+        @backingInt(NativeGlyphCategory.ascii) => switch (record.string_index) {
             0 => 'M',
             1 => 'a',
             2 => 'r',
             3 => 'u',
             else => '?',
         },
-        @intFromEnum(NativeGlyphCategory.cjk) => '한',
-        @intFromEnum(NativeGlyphCategory.emoji) => 0x1f34e,
-        @intFromEnum(NativeGlyphCategory.space) => ' ',
+        @backingInt(NativeGlyphCategory.cjk) => '한',
+        @backingInt(NativeGlyphCategory.emoji) => 0x1f34e,
+        @backingInt(NativeGlyphCategory.space) => ' ',
         else => '?',
     };
 }
@@ -183,7 +183,7 @@ pub fn nativeGlyphRecordForTest(args: NativeGlyphRecordFixture) NativeGlyphRecor
     record.font_id = args.native_font_id;
     record.glyph_id = args.glyph_id;
     record.string_index = args.string_index;
-    record.category = @intFromEnum(args.category);
+    record.category = @backingInt(args.category);
     record.fallback = if (args.fallback) 1 else 0;
 
     const len = @min(args.font_name.len, record.font_name.len - 1);

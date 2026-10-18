@@ -13,8 +13,8 @@ pub const Error = phase.Error || error{InvalidCommand};
 pub const max_stdout_bytes: usize = 1;
 pub const max_stderr_bytes: usize = blk: {
     var maximum: usize = 0;
-    for (@typeInfo(command_outcome.Outcome).@"enum".fields) |field| {
-        const outcome: command_outcome.Outcome = @enumFromInt(field.value);
+    for (@import("type_info_fields").enumFields(command_outcome.Outcome)) |field| {
+        const outcome: command_outcome.Outcome = @fromBackingInt(@intCast(field.value));
         maximum = @max(maximum, command_outcome.stderrLine(outcome).len);
     }
     break :blk maximum;
@@ -72,8 +72,8 @@ fn classify(observation: Observation) phase.Result {
         .exited => |value| value,
         .signal, .stopped, .unknown => return .cleanup_failed,
     };
-    inline for (@typeInfo(command_outcome.Outcome).@"enum".fields) |field| {
-        const outcome: command_outcome.Outcome = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(command_outcome.Outcome)) |field| {
+        const outcome: command_outcome.Outcome = @fromBackingInt(@intCast(field.value));
         if (code == command_outcome.exitCode(outcome) and
             std.mem.eql(u8, observation.stderr.bytes, command_outcome.stderrLine(outcome)))
         {
@@ -88,6 +88,6 @@ fn classify(observation: Observation) phase.Result {
 }
 
 comptime {
-    if (@typeInfo(Command).@"enum".fields.len != 9)
+    if (@import("type_info_fields").enumFields(Command).len != 9)
         @compileError("release workflow command inventory drift");
 }

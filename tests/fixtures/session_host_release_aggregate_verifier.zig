@@ -87,7 +87,7 @@ pub fn main(init: std.process.Init) !void {
     const aggregate_dir = std.fs.path.dirname(bundle) orelse return error.InvalidArguments;
     const durable_dir = std.fs.path.dirname(aggregate_dir) orelse return error.InvalidArguments;
     var order_path_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
-    const order_path = try std.fmt.bufPrintZ(&order_path_storage, "{s}/verify-order", .{durable_dir});
+    const order_path = try std.fmt.bufPrintSentinel(&order_path_storage, "{s}/verify-order", .{durable_dir}, 0);
     const order_fd = std.c.open(order_path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
     if (order_fd < 0) return error.OrderLogFailed;
     defer _ = std.c.close(order_fd);
@@ -96,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.c.write(order_fd, order_line.ptr, order_line.len) != order_line.len) return error.OrderLogFailed;
     if (std.mem.eql(u8, bundle_bytes, "MUTATE\n")) {
         var artifact_path_storage: [std.fs.max_path_bytes:0]u8 = @splat(0);
-        const artifact_path = try std.fmt.bufPrintZ(&artifact_path_storage, "{s}", .{artifact});
+        const artifact_path = try std.fmt.bufPrintSentinel(&artifact_path_storage, "{s}", .{artifact}, 0);
         const artifact_fd = std.c.open(artifact_path.ptr, .{ .ACCMODE = .WRONLY, .APPEND = true, .CLOEXEC = true });
         if (artifact_fd < 0) return error.ArtifactMutationFailed;
         defer _ = std.c.close(artifact_fd);

@@ -77,12 +77,12 @@ fn forkProjectionContainsPointer(comptime T: type) bool {
         .optional => |info| forkProjectionContainsPointer(info.child),
         .error_union => |info| forkProjectionContainsPointer(info.payload),
         .@"struct" => |info| blk: {
-            inline for (info.fields) |field|
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field|
                 if (forkProjectionContainsPointer(field.type)) break :blk true;
             break :blk false;
         },
         .@"union" => |info| blk: {
-            inline for (info.fields) |field|
+            inline for (@import("type_info_fields").fieldsFromInfo(info)) |field|
                 if (forkProjectionContainsPointer(field.type)) break :blk true;
             break :blk false;
         },
@@ -112,7 +112,7 @@ fn forkRejectedSettlementProjection(
         .pending_release_digest = forkProjectionDigest(pending.release_receipt),
         .pending_disposition_digest = forkProjectionDigest(pending.settlement_disposition),
         .attachment_self_addr = attachment.self_addr,
-        .attachment_lifecycle_raw = @intFromEnum(attachment.lifecycle),
+        .attachment_lifecycle_raw = @backingInt(attachment.lifecycle),
         .attachment_event_generation_mirror = attachment.event_generation_mirror,
         .attachment_event_owner_digest = forkProjectionDigest(attachment.event_owner),
         .attachment_correlation_digest = forkProjectionDigest(attachment.transport.event_correlation),
@@ -151,7 +151,7 @@ const SettlementDeathMarker = enum(u8) {
 const settlement_death_marker_fd: std.c.fd_t = 198;
 
 fn writeSettlementDeathMarker(fd: std.c.fd_t, marker: SettlementDeathMarker) void {
-    const byte: [1]u8 = .{@intFromEnum(marker)};
+    const byte: [1]u8 = .{@backingInt(marker)};
     while (true) {
         const written = std.c.write(fd, &byte, byte.len);
         if (written == 1) return;
@@ -180,7 +180,7 @@ fn killAndReapSettlementChild(child: std.c.pid_t) !c_int {
 }
 
 const SettlementChildObservation = struct {
-    transcript: [16]u8 = [_]u8{0} ** 16,
+    transcript: [16]u8 = @as([16]u8, @splat(0)),
     transcript_len: usize = 0,
     status: c_int = 0,
     eof: bool = false,
@@ -589,7 +589,7 @@ pub fn settlePendingEvent(
             pending,
             attachment,
         );
-        const target = inventory[@intFromEnum(injection.role)];
+        const target = inventory[@backingInt(injection.role)];
         const alias = switch (injection.kind) {
             .exact => .{ target.start, target.end - target.start },
             .left => .{ target.start - 1, @as(usize, 2) },
@@ -696,11 +696,11 @@ fn projectEffectRequest(value: prepared_types.EffectRequest) contract.EffectRequ
     return switch (value) {
         .none => .{},
         .poison => |reason| .{
-            .tag_raw = @intFromEnum(contract.EffectRequestTag.poison),
-            .requested_reason = .{ .present_raw = 1, .reason_raw = @intFromEnum(reason) },
+            .tag_raw = @backingInt(contract.EffectRequestTag.poison),
+            .requested_reason = .{ .present_raw = 1, .reason_raw = @backingInt(reason) },
         },
         .revoke_fence => |fence| .{
-            .tag_raw = @intFromEnum(contract.EffectRequestTag.revoke_fence),
+            .tag_raw = @backingInt(contract.EffectRequestTag.revoke_fence),
             .revoke_fence = fence,
         },
     };
@@ -1142,7 +1142,7 @@ fn runActualPreparedSettlement(options: ActualSettlementOptions) !void {
     const post_snapshot = attachment_mod.testing_api.takeEventReleasePostSnapshot() orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(contract.validEventReleasePostContext(post_snapshot.context, post_snapshot.post, post_snapshot.completion));
-    var post_splices = [_]contract.EventReleasePostProjection{post_snapshot.post} ** 7;
+    var post_splices = @as([7]contract.EventReleasePostProjection, @splat(post_snapshot.post));
     post_splices[0].registry_closed_digest[0] ^= 1;
     post_splices[1].quarantine_closed_digest[0] ^= 1;
     post_splices[2].pin_consumed_digest[0] ^= 1;
@@ -1176,7 +1176,7 @@ fn runActualPreparedSettlement(options: ActualSettlementOptions) !void {
         post_snapshot.post,
         post_snapshot.completion,
     ));
-    var context_splices = [_]contract.EventReleasePostContext{post_snapshot.context} ** 7;
+    var context_splices = @as([7]contract.EventReleasePostContext, @splat(post_snapshot.context));
     context_splices[0].registry.identity_a +%= 1;
     context_splices[1].quarantine.before_a +%= 1;
     context_splices[2].pin.identity_e +%= 1;
@@ -1258,7 +1258,7 @@ fn runActualPreparedSettlement(options: ActualSettlementOptions) !void {
         resealed_registry_post,
         resealed_registry_completion,
     ));
-    try std.testing.expectEqual(@intFromEnum(pending_owner.PendingLifecycle.settling), pending.lifecycle_raw);
+    try std.testing.expectEqual(@backingInt(pending_owner.PendingLifecycle.settling), pending.lifecycle_raw);
     if (options.reentry) {
         try settlePendingEvent(
             &sibling_lifetime_owner,
@@ -1299,7 +1299,7 @@ fn settlementScratchInventory(
     lifetime_owner: anytype,
     pending: anytype,
     attachment: anytype,
-) error{InvalidOwner}![std.meta.fields(SettlementScratchRole).len]ScratchRange {
+) error{InvalidOwner}![@import("type_info_fields").fields(SettlementScratchRole).len]ScratchRange {
     return .{
         try scratchRange(lease_out),     try scratchRange(effect_out),     try scratchRange(release_out),
         try scratchRange(effect_permit), try scratchRange(release_permit), try scratchRange(pending_permit),
@@ -1433,12 +1433,12 @@ fn hashPristineRecord(
     comptime schema_version: u64,
     comptime field_allowlist: []const u8,
 ) void {
-    const record_length = std.meta.fields(T).len;
+    const record_length = @import("type_info_fields").fields(T).len;
     comptime {
         @setEvalBranchQuota(10_000);
         if (@typeInfo(T) != .@"struct") @compileError("pristine transcript records must be structs");
         var cursor: usize = 0;
-        for (std.meta.fields(T), 0..) |field, index| {
+        for (@import("type_info_fields").fields(T), 0..) |field, index| {
             const end = std.mem.indexOfScalarPos(u8, field_allowlist, cursor, ',') orelse field_allowlist.len;
             if (!std.mem.eql(u8, field_allowlist[cursor..end], field.name))
                 @compileError(role_tag ++ " pristine transcript field allowlist is stale at " ++ field.name);
@@ -1460,7 +1460,7 @@ fn hashPristineRecord(
     hashTranscriptU64(&semantic, role_tag.len);
     semantic.update(role_tag);
     hashTranscriptU64(&semantic, schema_version);
-    inline for (std.meta.fields(T)) |field| {
+    inline for (@import("type_info_fields").fields(T)) |field| {
         hashTranscriptU64(&semantic, field.name.len);
         semantic.update(field.name);
         const type_name = @typeName(field.type);
@@ -1491,8 +1491,8 @@ fn hashSemanticValue(hasher: *std.crypto.hash.Blake3, value: anytype) void {
                 for (value) |item| hashSemanticValue(hasher, item);
             }
         },
-        .@"enum" => hashSemanticValue(hasher, @intFromEnum(value)),
-        .@"struct" => inline for (std.meta.fields(T)) |field| {
+        .@"enum" => hashSemanticValue(hasher, @backingInt(value)),
+        .@"struct" => inline for (@import("type_info_fields").fields(T)) |field| {
             hashTranscriptU64(hasher, field.name.len);
             hasher.update(field.name);
             hashSemanticValue(hasher, @field(value, field.name));
@@ -1551,7 +1551,7 @@ test "C3-3b3 lease owner는 final address에 봉인된다" {
     fixture.owner.abortSettlementPreAdmissionNoFail(&fixture.lease);
 }
 test "C3-3b3 lease owner는 settlement ordinal을 봉인한다" {
-    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(lifetime.OperationKind.settlement));
+    try std.testing.expectEqual(@as(u8, 3), @backingInt(lifetime.OperationKind.settlement));
     var fixture: LeaseFixture = .{};
     try fixture.init(2);
     try std.testing.expectEqual(@as(u8, 3), fixture.lease.operation.operation_kind_raw);
@@ -1630,7 +1630,7 @@ test "C3-3b3 lease owner는 짝지은 preflight만 허용한다" {
         &pending,
         &attachment,
     ));
-    effect_permit.lifecycle_raw = @intFromEnum(contract.AuthorityLifecycle.prepared);
+    effect_permit.lifecycle_raw = @backingInt(contract.AuthorityLifecycle.prepared);
     try std.testing.expectError(error.InvalidOwner, preflightSettlementScratchPristine(
         range_proof,
         &lease_out,
@@ -1673,8 +1673,8 @@ test "C3-3b3 lease owner는 짝지은 preflight만 허용한다" {
         .owner_incarnation = 3,
         .attempt = 1,
         .event_generation = 13,
-        .correlation_digest = [_]u8{0x41} ** 32,
-        .prepared_effect_digest = [_]u8{0x42} ** 32,
+        .correlation_digest = @as([32]u8, @splat(0x41)),
+        .prepared_effect_digest = @as([32]u8, @splat(0x42)),
         .slot_incarnation = 5,
         .node_incarnation = 7,
         .binding_incarnation = 9,
@@ -1682,22 +1682,22 @@ test "C3-3b3 lease owner는 짝지은 preflight만 허용한다" {
         .operation_node_addr = 0x1000,
         .operation_id = 1,
         .target_stream_id = 17,
-        .action_raw = @intFromEnum(contract.EffectAction.none),
+        .action_raw = @backingInt(contract.EffectAction.none),
         .fd_before = 9,
         .fd_after = 9,
         .effect_out_addr = @intFromPtr(&effect_out),
         .effect_out_extent = @sizeOf(contract.EffectCommitEvidence),
         .effect_out_alignment = @alignOf(contract.EffectCommitEvidence),
-        .effect_out_pristine_digest = [_]u8{0x43} ** 32,
+        .effect_out_pristine_digest = @as([32]u8, @splat(0x43)),
         .scratch_ranges_digest = proof.ranges_digest,
         .scratch_pristine_digest = proof.pristine_digest,
         .preflight_proof_seal_digest = proof.proof_seal,
         .lease_seal_digest = binding.lease_seal_digest,
-        .preflight_authority_digest = [_]u8{0x44} ** 32,
+        .preflight_authority_digest = @as([32]u8, @splat(0x44)),
     };
     prepared_effect.seal = try contract.sealPreparedEffectPermit(prepared_effect);
     effect_permit = prepared_effect;
-    effect_permit.lifecycle_raw = @intFromEnum(contract.AuthorityLifecycle.prepared);
+    effect_permit.lifecycle_raw = @backingInt(contract.AuthorityLifecycle.prepared);
     try std.testing.expect(contract.validPreparedEffectPermit(&effect_permit));
     var copied_effect = effect_permit;
     try std.testing.expect(!contract.validPreparedEffectPermit(&copied_effect));
@@ -1780,8 +1780,8 @@ fn makeProof(nonce: u64, seed: u8) !contract.SettlementScratchPreflightProof {
         .pid = process_seal.currentProcessId(),
         .process_nonce = nonce,
         .thread_id = @intCast(std.Thread.getCurrentId()),
-        .ranges_digest = [_]u8{seed} ** 32,
-        .pristine_digest = [_]u8{seed +% 1} ** 32,
+        .ranges_digest = @as([32]u8, @splat(seed)),
+        .pristine_digest = @as([32]u8, @splat(seed +% 1)),
     };
     proof.proof_seal = try contract.sealScratchPreflightProof(proof);
     return proof;
@@ -1790,40 +1790,40 @@ fn makeProof(nonce: u64, seed: u8) !contract.SettlementScratchPreflightProof {
 fn effectPlanFixture(action: contract.EffectAction, relation: contract.OutboundRelation) contract.PreparedEffectPermit {
     const present = relation != .absent;
     var value: contract.PreparedEffectPermit = .{
-        .action_raw = @intFromEnum(action),
+        .action_raw = @backingInt(action),
         .fd_before = 17,
         .fd_after = 17,
-        .outbound_relation_raw = @intFromEnum(relation),
-        .outbound_disposition_raw = @intFromEnum(if (present)
+        .outbound_relation_raw = @backingInt(relation),
+        .outbound_disposition_raw = @backingInt(if (present)
             contract.OutboundDisposition.preserved
         else
             contract.OutboundDisposition.absent),
         .outbound_offset = if (present) 0 else 0,
         .outbound_len = if (present) 16 else 0,
-        .outbound_descriptor_digest = if (present) [_]u8{0x61} ** 32 else contract.zero_digest,
+        .outbound_descriptor_digest = if (present) @as([32]u8, @splat(0x61)) else contract.zero_digest,
     };
     switch (action) {
         .none => {},
         .poison => {
-            value.effect_request = .{ .tag_raw = @intFromEnum(contract.EffectRequestTag.poison), .requested_reason = .{ .present_raw = 1, .reason_raw = 7 } };
+            value.effect_request = .{ .tag_raw = @backingInt(contract.EffectRequestTag.poison), .requested_reason = .{ .present_raw = 1, .reason_raw = 7 } };
             value.first_reason_after = value.effect_request.requested_reason;
             value.unusable_after_raw = 1;
             value.fd_after = -1;
-            value.fd_disposition_raw = @intFromEnum(contract.FdDisposition.detached_close_attempted);
+            value.fd_disposition_raw = @backingInt(contract.FdDisposition.detached_close_attempted);
             value.close_attempt_count = 1;
             if (present) setAllocatorCleanup(&value, .freed);
         },
-        .revoke_clean => value.effect_request = .{ .tag_raw = @intFromEnum(contract.EffectRequestTag.revoke_fence), .revoke_fence = 23 },
+        .revoke_clean => value.effect_request = .{ .tag_raw = @backingInt(contract.EffectRequestTag.revoke_fence), .revoke_fence = 23 },
         .revoke_cancel => {
-            value.effect_request = .{ .tag_raw = @intFromEnum(contract.EffectRequestTag.revoke_fence), .revoke_fence = 23 };
+            value.effect_request = .{ .tag_raw = @backingInt(contract.EffectRequestTag.revoke_fence), .revoke_fence = 23 };
             setAllocatorCleanup(&value, .cancelled);
         },
         .revoke_partial_poison => {
-            value.effect_request = .{ .tag_raw = @intFromEnum(contract.EffectRequestTag.revoke_fence), .revoke_fence = 23 };
+            value.effect_request = .{ .tag_raw = @backingInt(contract.EffectRequestTag.revoke_fence), .revoke_fence = 23 };
             value.first_reason_after = .{ .present_raw = 1, .reason_raw = 5 };
             value.unusable_after_raw = 1;
             value.fd_after = -1;
-            value.fd_disposition_raw = @intFromEnum(contract.FdDisposition.detached_close_attempted);
+            value.fd_disposition_raw = @backingInt(contract.FdDisposition.detached_close_attempted);
             value.close_attempt_count = 1;
             value.outbound_offset = 1;
             setAllocatorCleanup(&value, .partial_poisoned);
@@ -1835,7 +1835,7 @@ fn effectPlanFixture(action: contract.EffectAction, relation: contract.OutboundR
             value.unusable_after_raw = 1;
             value.fd_before = -1;
             value.fd_after = -1;
-            value.fd_disposition_raw = @intFromEnum(contract.FdDisposition.already_detached);
+            value.fd_disposition_raw = @backingInt(contract.FdDisposition.already_detached);
             if (present) setAllocatorCleanup(&value, .freed);
         },
     }
@@ -1843,10 +1843,10 @@ fn effectPlanFixture(action: contract.EffectAction, relation: contract.OutboundR
 }
 
 fn setAllocatorCleanup(value: *contract.PreparedEffectPermit, disposition: contract.OutboundDisposition) void {
-    value.outbound_disposition_raw = @intFromEnum(disposition);
-    value.cleanup_mode_raw = @intFromEnum(contract.CleanupMode.allocator_free);
+    value.outbound_disposition_raw = @backingInt(disposition);
+    value.cleanup_mode_raw = @backingInt(contract.CleanupMode.allocator_free);
     value.cleanup_count = 1;
-    value.cleanup_callback_provenance_digest = [_]u8{0x63} ** 32;
+    value.cleanup_callback_provenance_digest = @as([32]u8, @splat(0x63));
 }
 
 fn validEffectPlan(value: *const contract.PreparedEffectPermit) bool {
@@ -1858,7 +1858,7 @@ test "C3-3b3 닫힌 결과 plan shape none은 보존 relation만 허용한다" {
     for ([_]contract.OutboundRelation{ .absent, .target, .sibling }) |relation| {
         var plan = effectPlanFixture(.none, relation);
         try std.testing.expect(validEffectPlan(&plan));
-        plan.outbound_disposition_raw = @intFromEnum(contract.OutboundDisposition.freed);
+        plan.outbound_disposition_raw = @backingInt(contract.OutboundDisposition.freed);
         try std.testing.expect(!validEffectPlan(&plan));
     }
 }
@@ -1904,7 +1904,7 @@ test "C3-3b3 닫힌 결과 plan shape terminal_cleanup은 detached 또는 deferr
         try std.testing.expect(validEffectPlan(&effectPlanFixture(.terminal_cleanup, relation)));
     var deferred = effectPlanFixture(.terminal_cleanup, .sibling);
     deferred.fd_before = 17;
-    deferred.fd_disposition_raw = @intFromEnum(contract.FdDisposition.detached_close_attempted);
+    deferred.fd_disposition_raw = @backingInt(contract.FdDisposition.detached_close_attempted);
     deferred.close_attempt_count = 1;
     try std.testing.expect(validEffectPlan(&deferred));
     deferred.first_reason_before = .{};
@@ -1924,20 +1924,20 @@ test "C3-3b3 payload 보호 범위는 정확·부분·오버플로 겹침을 거
 }
 
 test "C3-3b3 POST transcript는 모든 단일 필드 splice를 거부한다" {
-    const permit = [_]u8{0x20} ** 32;
+    const permit = @as([32]u8, @splat(0x20));
     const base: contract.EventReleasePostProjection = .{
-        .registry_closed_digest = [_]u8{0x31} ** 32,
-        .quarantine_closed_digest = [_]u8{0x32} ** 32,
-        .pin_consumed_digest = [_]u8{0x33} ** 32,
-        .callback_invoked_digest = [_]u8{0x34} ** 32,
-        .owner_tombstoned_digest = [_]u8{0x35} ** 32,
-        .correlation_tombstoned_digest = [_]u8{0x36} ** 32,
-        .mirror_tombstoned_digest = [_]u8{0x37} ** 32,
+        .registry_closed_digest = @as([32]u8, @splat(0x31)),
+        .quarantine_closed_digest = @as([32]u8, @splat(0x32)),
+        .pin_consumed_digest = @as([32]u8, @splat(0x33)),
+        .callback_invoked_digest = @as([32]u8, @splat(0x34)),
+        .owner_tombstoned_digest = @as([32]u8, @splat(0x35)),
+        .correlation_tombstoned_digest = @as([32]u8, @splat(0x36)),
+        .mirror_tombstoned_digest = @as([32]u8, @splat(0x37)),
         .callback_invocation_count = 1,
         .source_tombstone_count = 1,
     };
     const expected = contract.eventReleasePostTranscriptDigest(permit, base).?;
-    var splices = [_]contract.EventReleasePostProjection{base} ** 7;
+    var splices = @as([7]contract.EventReleasePostProjection, @splat(base));
     splices[0].registry_closed_digest[0] ^= 1;
     splices[1].quarantine_closed_digest[0] ^= 1;
     splices[2].pin_consumed_digest[0] ^= 1;

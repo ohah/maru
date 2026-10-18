@@ -4,7 +4,7 @@ const std = @import("std");
 const contract = @import("shutdown_contract.zig");
 
 pub const capacity = 64;
-const reason_count = @typeInfo(contract.ShutdownDiagnosticReason).@"enum".fields.len;
+const reason_count = @import("type_info_fields").enumFields(contract.ShutdownDiagnosticReason).len;
 
 pub const ShutdownDiagnosticOverflow = struct {
     dropped_count: u32 = 0,
@@ -14,7 +14,7 @@ pub const ShutdownDiagnosticOverflow = struct {
 pub const ShutdownDiagnosticBatch = struct {
     details: [capacity]contract.ShutdownDiagnostic = undefined,
     detail_count: u8 = 0,
-    overflow: [reason_count]ShutdownDiagnosticOverflow = [_]ShutdownDiagnosticOverflow{.{}} ** reason_count,
+    overflow: [reason_count]ShutdownDiagnosticOverflow = @as([reason_count]ShutdownDiagnosticOverflow, @splat(.{})),
 };
 
 pub const ShutdownDiagnosticSink = struct {
@@ -26,7 +26,7 @@ pub const ShutdownDiagnosticSink = struct {
             self.batch.detail_count += 1;
             return;
         }
-        const index = @intFromEnum(diagnostic.reason);
+        const index = @backingInt(diagnostic.reason);
         const overflow = &self.batch.overflow[index];
         if (overflow.dropped_count == std.math.maxInt(u32)) {
             overflow.counter_saturated = true;
@@ -77,7 +77,7 @@ pub fn drainToConsumers(
     }
     for (batch.overflow, 0..) |overflow, index| {
         if (overflow.dropped_count == 0 and !overflow.counter_saturated) continue;
-        port.report_overflow(port.context, @enumFromInt(index), overflow) catch {};
+        port.report_overflow(port.context, @fromBackingInt(@intCast(index)), overflow) catch {};
     }
 }
 
@@ -110,14 +110,14 @@ test "C3-3b6 진단 sink는 65번째부터 reason별 drop summary를 남긴다" 
     for (0..capacity) |_| sink.push(testDiagnostic(.terminate_unconfirmed));
     sink.push(testDiagnostic(.profile_incompatible));
     const batch = sink.drainBatch();
-    try std.testing.expectEqual(@as(u32, 1), batch.overflow[@intFromEnum(contract.ShutdownDiagnosticReason.profile_incompatible)].dropped_count);
-    try std.testing.expectEqual(@as(u32, 0), batch.overflow[@intFromEnum(contract.ShutdownDiagnosticReason.terminate_unconfirmed)].dropped_count);
+    try std.testing.expectEqual(@as(u32, 1), batch.overflow[@backingInt(contract.ShutdownDiagnosticReason.profile_incompatible)].dropped_count);
+    try std.testing.expectEqual(@as(u32, 0), batch.overflow[@backingInt(contract.ShutdownDiagnosticReason.terminate_unconfirmed)].dropped_count);
 }
 
 test "C3-3b6 진단 sink는 dropped counter 포화를 sticky bit로 보존한다" {
     var sink: ShutdownDiagnosticSink = .{};
     sink.batch.detail_count = capacity;
-    const index = @intFromEnum(contract.ShutdownDiagnosticReason.deadline_exhausted);
+    const index = @backingInt(contract.ShutdownDiagnosticReason.deadline_exhausted);
     sink.batch.overflow[index].dropped_count = std.math.maxInt(u32);
     sink.push(testDiagnostic(.deadline_exhausted));
     try std.testing.expect(sink.batch.overflow[index].counter_saturated);
@@ -187,7 +187,7 @@ test "C3-3b6 진단 bridge는 reason별 overflow snapshot을 value로 전달한�
     var probe: ConsumerProbe = .{};
     drainToConsumers(&sink, false, probe.port());
     try std.testing.expectEqual(@as(u8, 1), probe.overflows);
-    try std.testing.expectEqual(@as(u32, 0), sink.batch.overflow[@intFromEnum(contract.ShutdownDiagnosticReason.profile_incompatible)].dropped_count);
+    try std.testing.expectEqual(@as(u32, 0), sink.batch.overflow[@backingInt(contract.ShutdownDiagnosticReason.profile_incompatible)].dropped_count);
 }
 
 test "C3-3b6 진단 bridge는 quit과 consumer 실패 뒤 재삽입 없이 재사용된다" {

@@ -92,7 +92,7 @@ pub const ControlExpectation = union(enum) {
 pub fn expectationDigest(expectation: ControlExpectation) [32]u8 {
     var hasher = std.crypto.hash.Blake3.init(.{});
     hasher.update("MARUCEX1");
-    hasher.update(&.{@intFromEnum(std.meta.activeTag(expectation))});
+    hasher.update(&.{@backingInt(std.meta.activeTag(expectation))});
     var word: [8]u8 = undefined;
     switch (expectation) {
         .resize => |value| {
@@ -104,7 +104,7 @@ pub fn expectationDigest(expectation: ControlExpectation) [32]u8 {
                 std.mem.writeInt(u64, &word, value, .little);
                 hasher.update(&word);
             }
-            hasher.update(&.{@intFromEnum(authority.origin)});
+            hasher.update(&.{@backingInt(authority.origin)});
         },
         .detach => {},
         .declare_viewport => {},

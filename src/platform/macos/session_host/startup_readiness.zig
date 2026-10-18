@@ -31,7 +31,7 @@ pub const NotifierError = error{InvalidChannel};
 /// 부모에서 완성한 envp를 execve에 전달한다.
 pub fn installEnvironment(fd: c.fd_t) bool {
     var value_buf: [24]u8 = undefined;
-    const value = std.fmt.bufPrintZ(&value_buf, "{d}", .{fd}) catch return false;
+    const value = std.fmt.bufPrintSentinel(&value_buf, "{d}", .{fd}, 0) catch return false;
     return setenv(env_name.ptr, value.ptr, 1) == 0;
 }
 
@@ -76,7 +76,7 @@ pub const Notifier = struct {
     fn finish(self: *Notifier, status: Status) void {
         const fd = self.fd orelse return;
         self.fd = null;
-        const byte = [_]u8{@intFromEnum(status)};
+        const byte = [_]u8{@backingInt(status)};
         _ = c.write(fd, &byte, byte.len);
         _ = c.close(fd);
     }
@@ -105,8 +105,8 @@ pub fn awaitParent(fd: c.fd_t, timeout_ms: c_int) ParentResult {
         const n = c.read(fd, &byte, byte.len);
         if (n != 1) return .failed;
         return switch (byte[0]) {
-            @intFromEnum(Status.ready) => .ready,
-            @intFromEnum(Status.failed) => .failed,
+            @backingInt(Status.ready) => .ready,
+            @backingInt(Status.failed) => .failed,
             else => .failed,
         };
     }
@@ -125,7 +125,7 @@ test "startup readiness parent decoder distinguishes ready fail EOF unknown and 
     inline for (.{ Status.ready, Status.failed }) |status| {
         var fds: [2]c.fd_t = undefined;
         try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
-        const byte = [_]u8{@intFromEnum(status)};
+        const byte = [_]u8{@backingInt(status)};
         try std.testing.expectEqual(@as(isize, 1), c.write(fds[1], &byte, 1));
         _ = c.close(fds[1]);
         defer _ = c.close(fds[0]);

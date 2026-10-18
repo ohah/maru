@@ -6,7 +6,7 @@ const baseline = @import("release_adapter_candidate_baseline_workspace");
 fn absolute(tmp: *std.testing.TmpDir, leaf: []const u8, storage: []u8) ![:0]const u8 {
     var root: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(std.testing.io, &root);
-    return std.fmt.bufPrintZ(storage, "{s}/{s}", .{ root[0..len], leaf });
+    return std.fmt.bufPrintSentinel(storage, "{s}/{s}", .{ root[0..len], leaf }, 0);
 }
 
 test "one private root seals both homes leaves and aggregate" {

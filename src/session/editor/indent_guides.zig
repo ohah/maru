@@ -6,6 +6,8 @@
 //!
 //! 줄은 `src` 가 준다 — `count() usize` 와 `text(i) []const u8`(줄바꿈 제외) 두 메서드를 가진 값. 문서 줄 전체가 대상이고(접혀 숨은 줄도),
 //! 화면 축으로 옮기는 것은 호출자의 일이다.
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const fold = @import("fold.zig");
 const language = @import("language.zig");
@@ -40,7 +42,7 @@ pub const Unit = struct {
     tabs: bool,
     width: u8,
 
-    const spaces_buf = " " ** max_unit_width;
+    const spaces_buf = array_repeat.repeat(" ", max_unit_width);
 
     /// 한 단계의 글자(여러 줄 들여쓰기·Enter 의 한 단계).
     pub fn text(self: Unit) []const u8 {
@@ -103,7 +105,7 @@ pub fn guessWith(src: anytype, default_tab: u16, default_spaces_mode: bool) Gues
     var space_lines: usize = 0;
     var prev_text: []const u8 = "";
     var prev_indent: usize = 0;
-    var counts = [_]usize{0} ** 9;
+    var counts = @as([9]usize, @splat(0));
     // **자르지 않는다** — VS Code 는 `tabSize = defaultTabSize` 로 시작하고 정렬 예외도 `defaultTabSize === diff` 로 비교한다. 처음엔 8 로 잘라
     // 탭 폭 9~16 에서 갈렸다(적대적 8회차: 폭 12 · `a` / 12 칸 `b` 에서 VS Code 선 1 개, 우리 2 개 — monaco 0.56 실측, `IG9`).
     const default_spaces: usize = default_tab;

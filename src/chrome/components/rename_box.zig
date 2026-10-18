@@ -5,6 +5,8 @@
 //! 입력 라우팅은 platform 의 인라인 rename 모달(`inputFocus() == .rename`)이 이미 한다 — `modalInputRole` 에는 `.not_an_overlay` 로 선다
 //! (호버 상자와 같은 자리 · 키를 여기서 가로채지 않는다).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const draw = @import("../draw.zig");
 const props = @import("../props.zig");
@@ -210,7 +212,7 @@ test "RNB3 rename_box — 글이 상한을 넘어 앞이 잘리면 caret 도 잘
     const tk: tokens.Tokens = .{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
     var st = State{};
     st.show(100, 200, 20);
-    const long = "a" ** 100;
+    const long = array_repeat.repeat("a", 100);
     const shown_cols = max_cols - 3;
     const hidden = 100 - shown_cols;
     const r = boxRect(&st, long, p).?;
@@ -245,7 +247,7 @@ test "RNB5 caretOffsetAt — 그리는 쪽의 역함수: 좌패딩은 0, 글자 
     try testing.expectEqual(@as(?usize, 0), caretOffsetAt(&st, "가나", tx + 9, p)); // 칸 0.9 → 앞(1.0 은 가운데라 뒤)
     try testing.expectEqual(@as(?usize, 6), caretOffsetAt(&st, "가나", tx + 35, p));
     // 꼬리 창 — 90칸 글은 앞 13칸이 잘려 77칸만 보인다. 보이는 첫 칸을 누르면 13(잘린 바이트), 보이는 셋째 칸 경계면 15.
-    const long = "a" ** 90;
+    const long = array_repeat.repeat("a", 90);
     const lr = boxRect(&st, long, p).?;
     const ltx: f64 = @floatFromInt(lr.x + 10);
     try testing.expectEqual(@as(?usize, 13), caretOffsetAt(&st, long, ltx + 1, p));

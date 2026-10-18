@@ -200,7 +200,7 @@ pub fn hasFit(icon: Icon, fit: Fit) bool {
 
 /// 이 아이콘의 **기본 fit** codepoint. fit을 고르려면 `codepointFit`을 쓴다.
 pub fn codepoint(icon: Icon) u21 {
-    return @intFromEnum(icon);
+    return @backingInt(icon);
 }
 
 /// 요청한 fit의 codepoint. **그 fit이 없으면 기본 fit으로 폴백한다** — 변형은 큐레이션된 소수라,
@@ -363,13 +363,13 @@ pub fn fromCodepoint(cp: u21) ?Resolved {
 
 test "icons: 이름·fit·codepoint·UTF-8·역참조가 서로 일치한다" {
     const std = @import("std");
-    inline for (@typeInfo(Icon).@"enum".fields) |field| {
-        const icon: Icon = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(Icon)) |field| {
+        const icon: Icon = @fromBackingInt(@intCast(field.value));
         try std.testing.expectEqual(@as(u21, field.value), codepoint(icon));
         // fit도 **comptime 전수**한다 — 배열에 손으로 적으면 새 fit이 조용히 검증 밖에 남는다
         // (적대적 검증 실측: 세 번째 fit이 미등록 cp를 가리켜도 전부 통과했다).
-        inline for (@typeInfo(Fit).@"enum".fields) |fit_field| {
-            const fit: Fit = @enumFromInt(fit_field.value);
+        inline for (@import("type_info_fields").enumFields(Fit)) |fit_field| {
+            const fit: Fit = @fromBackingInt(@intCast(fit_field.value));
             const cp = codepointFit(icon, fit);
             const resolved = fromCodepoint(cp) orelse return error.TestUnexpectedResult;
             try std.testing.expectEqual(icon, resolved.icon); // 폴백해도 같은 아이콘이다
@@ -403,8 +403,8 @@ test "icons: 모든 아이콘이 standard 자산을 갖는다(기본 fit 뒤집�
     // 기본이 뒤집혀 fit 없이 부르던 소비처가 조용히 다른 그림을 그린다(적대적 검증이 짚은 default flip).
     // 지금은 그런 아이콘이 없다 — 새로 만들려면 의도적 결정이어야 하므로, 그때 이 단언이 깨져
     // 소비처가 fit을 명시했는지 확인하게 한다.
-    inline for (@typeInfo(Icon).@"enum".fields) |field| {
-        const icon: Icon = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(Icon)) |field| {
+        const icon: Icon = @fromBackingInt(@intCast(field.value));
         try std.testing.expect(hasFit(icon, .standard));
     }
 }

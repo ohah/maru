@@ -70,8 +70,8 @@ pub fn lineHeightPx(role: ChromeTextRole, scale_milli: u32) u32 {
 }
 
 test "every Chrome text role has a positive fixed token" {
-    inline for (@typeInfo(ChromeTextRole).@"enum".fields) |field| {
-        const role: ChromeTextRole = @enumFromInt(field.value);
+    inline for (@import("type_info_fields").enumFields(ChromeTextRole)) |field| {
+        const role: ChromeTextRole = @fromBackingInt(@intCast(field.value));
         const value = token(role);
         try std.testing.expect(value.point_size > 0);
         try std.testing.expect(value.line_height >= value.point_size);

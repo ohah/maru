@@ -374,7 +374,7 @@ test "buildDrawListWithUnfocused: hollow/hidden이 cursor overlay에 반영 (F1-
 test "draw list emits OSC 133 gutter marks for prompt rows with a recorded exit" {
     // 종료코드는 프롬프트 시작 행에만 스탬프되므로(exit != null), 그 행마다 거터 마크가 나와야 한다.
     // 성공(exit 0)=초록(success=true), 실패(≠0)=빨강. exit 없는 행은 거터 없음.
-    var cells = [_]terminal.Cell{.{}} ** 4; // 2 cols × 2 rows
+    var cells = @as([4]terminal.Cell, @splat(.{})); // 2 cols × 2 rows
     const marks = [_]terminal.RowPrompt{
         .{ .kind = .input, .exit = 0 }, // row0: 성공 명령의 프롬프트 시작
         .{ .kind = .command, .exit = null }, // row1: 출력 — 거터 없음
@@ -402,7 +402,7 @@ test "draw list emits OSC 133 gutter marks for prompt rows with a recorded exit"
 }
 
 test "draw list emits a red gutter mark for a failed command" {
-    var cells = [_]terminal.Cell{.{}} ** 2; // 2 cols × 1 row
+    var cells = @as([2]terminal.Cell, @splat(.{})); // 2 cols × 1 row
     const marks = [_]terminal.RowPrompt{.{ .kind = .input, .exit = 1 }};
     const snapshot: terminal.RenderSnapshot = .{
         .size = .{ .cols = 2, .rows = 1 },
@@ -549,7 +549,7 @@ test "draw list suppresses cursor overlay when its row is outside the dirty rang
     // 때만 생성한다. TerminalCore는 cursor 이동 시 그 row를 항상 dirty로 만들지만,
     // 다른 row만 바뀐 frame에서 cursor를 다시 그리면 redraw가 낭비된다. core 경로로는
     // cursor row가 빠진 dirty를 만들 수 없어 snapshot을 직접 구성해 guard를 고정한다.
-    var cells = [_]terminal.Cell{.{}} ** 4;
+    var cells = @as([4]terminal.Cell, @splat(.{}));
     const snapshot: terminal.RenderSnapshot = .{
         .size = .{ .cols = 2, .rows = 2 },
         .cursor = .{ .row = 1, .col = 0, .visible = true },

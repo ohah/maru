@@ -4,6 +4,8 @@
 //! detached worker thread에서 실행한다. 요청·완료·in-flight를 모두 bound해 watcher burst가 frame loop나
 //! 메모리를 무제한 점유하지 않게 한다(docs/file-panel.md §7).
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const detached_worker_wait = @import("detached_worker_wait.zig");
 const builtin = @import("builtin");
@@ -415,7 +417,7 @@ fn validateRootSnapshotImpl(
     defer if (!transferred) dir.close(io);
     if (builtin.is_test and force_identity_failure) return null;
     const identity = directoryIdentity(io, dir) catch return null;
-    if (identity.kind != @intFromEnum(file_tree.IdentityKind.directory)) return null;
+    if (identity.kind != @backingInt(file_tree.IdentityKind.directory)) return null;
     // **입구 정규화**(계약 §5 규칙 1, 입구 Ⓑ = OS API). `realPath` 는 native 를 준다 — Windows 에서는
     // 역슬래시 경로다. 그대로 들고 있으면 이 값을 중립 레이어의 `/` 경로와 비교하는 소비자가 전부
     // 어긋난다. 실측: `openValidatedFileTreeRow` 가 정상 파일에도 null 을 냈다(W8.1) —
@@ -489,7 +491,7 @@ pub fn openValidatedFileTreeRow(
     path: []const u8,
     expected_leaf_identity: file_tree.Identity,
 ) ?ValidatedFileTreeRow {
-    if (expected_leaf_identity.kind != @intFromEnum(file_tree.IdentityKind.regular)) return null;
+    if (expected_leaf_identity.kind != @backingInt(file_tree.IdentityKind.regular)) return null;
     if (!file_tree.Tree.pathWithinRoot(path, root_path) or std.mem.eql(u8, path, root_path)) return null;
     var validated = (validateRootSnapshot(allocator, io, root_path) catch return null) orelse return null;
     defer validated.deinit(allocator, io);
@@ -556,7 +558,7 @@ fn openLeafNoFollow(
             .allow_directory = false,
         });
     }
-    const leaf_z = try allocator.dupeZ(u8, leaf);
+    const leaf_z = try allocator.dupeSentinel(u8, leaf, 0);
     defer allocator.free(leaf_z);
     const fd = try std.posix.openat(dir.handle, leaf_z, .{
         .ACCMODE = .RDONLY,
@@ -572,7 +574,7 @@ fn identityAt(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, leaf: [
         const stat = try dir.statFile(io, leaf, .{ .follow_symlinks = false });
         return .{ .device = 0, .inode = @intCast(stat.inode), .kind = kindTag(stat.kind) };
     }
-    const leaf_z = try allocator.dupeZ(u8, leaf);
+    const leaf_z = try allocator.dupeSentinel(u8, leaf, 0);
     defer allocator.free(leaf_z);
     var stat: std.posix.Stat = undefined;
     if (std.c.fstatat(dir.handle, leaf_z.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW) != 0) return error.StatFailed;
@@ -631,7 +633,7 @@ fn remoteResultFromWire(allocator: std.mem.Allocator, owned_path: []u8, bytes: [
             result.identity = .{ .value = .{
                 .device = identity.dev,
                 .inode = identity.ino,
-                .kind = @intFromEnum(file_tree.IdentityKind.directory),
+                .kind = @backingInt(file_tree.IdentityKind.directory),
             } };
         },
         .entry => |entry| {
@@ -645,7 +647,7 @@ fn remoteResultFromWire(allocator: std.mem.Allocator, owned_path: []u8, bytes: [
                 .identity = .{
                     .device = entry.dev,
                     .inode = entry.ino,
-                    .kind = @intFromEnum(identityKindFor(entry.kind)),
+                    .kind = @backingInt(identityKindFor(entry.kind)),
                 },
             }) catch {
                 allocator.free(name);
@@ -849,11 +851,11 @@ fn directoryIdentity(io: std.Io, dir: std.Io.Dir) !file_tree.Identity {
         return identityFromStat(stat);
     }
     const stat = try dir.stat(io);
-    return .{ .device = 0, .inode = @intCast(stat.inode), .kind = @intFromEnum(file_tree.IdentityKind.directory) };
+    return .{ .device = 0, .inode = @intCast(stat.inode), .kind = @backingInt(file_tree.IdentityKind.directory) };
 }
 
 fn kindTag(kind: std.Io.File.Kind) u8 {
-    return @intFromEnum(switch (kind) {
+    return @backingInt(switch (kind) {
         .file => file_tree.IdentityKind.regular,
         .directory => file_tree.IdentityKind.directory,
         .sym_link => file_tree.IdentityKind.symlink,
@@ -873,7 +875,7 @@ fn identityFromStat(stat: std.posix.Stat) file_tree.Identity {
     return .{
         .device = @intCast(stat.dev),
         .inode = @intCast(stat.ino),
-        .kind = @intFromEnum(kind),
+        .kind = @backingInt(kind),
     };
 }
 
@@ -1032,7 +1034,7 @@ test "file tree backend chooses nearest git ancestor and otherwise parent" {
     // 저장소 밖 /tmp에 pid+counter 고유 디렉터리를 만들어 실제 ancestor 부재를 검증한다.
     var plain_root_buf: [256]u8 = undefined;
     const counter = test_tmp_counter.fetchAdd(1, .monotonic);
-    const plain_parent = try std.fmt.bufPrintZ(&plain_root_buf, "/tmp/maru-file-tree-{d}-{d}", .{ c.getpid(), counter });
+    const plain_parent = try std.fmt.bufPrintSentinel(&plain_root_buf, "/tmp/maru-file-tree-{d}-{d}", .{ c.getpid(), counter }, 0);
     if (c.mkdir(plain_parent.ptr, 0o700) != 0) return error.Unexpected;
     defer _ = c.rmdir(plain_parent.ptr);
     const plain_file = try std.fs.path.join(allocator, &.{ plain_parent, "page.md" });
@@ -1065,7 +1067,7 @@ test "file tree root validation canonicalizes a directory alias and rejects a re
     defer valid.deinit(allocator, io);
     try std.testing.expect(valid.ok);
     try std.testing.expectEqualStrings(actual, valid.path);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(file_tree.IdentityKind.directory)), valid.identity.?.value.kind);
+    try std.testing.expectEqual(@as(u8, @backingInt(file_tree.IdentityKind.directory)), valid.identity.?.value.kind);
 
     const file = try std.fs.path.join(allocator, &.{ root, "plain.txt" });
     var invalid = validateRoot(allocator, io, file);
@@ -1178,7 +1180,7 @@ test "validated file tree row capability remains bound across leaf replacement a
     defer replacement.close(io);
     try std.testing.expect(!(try identityOfFile(io, replacement)).eql(old_identity));
 
-    const link_z = try allocator.dupeZ(u8, link);
+    const link_z = try allocator.dupeSentinel(u8, link, 0);
     defer allocator.free(link_z);
     var link_stat: std.posix.Stat = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.fstatat(std.posix.AT.FDCWD, link_z.ptr, &link_stat, std.posix.AT.SYMLINK_NOFOLLOW));
@@ -1621,12 +1623,12 @@ test "원격 매핑: 완결된 목록이 entries·신원·ok 로 풀린다" {
     try std.testing.expect(result.ok);
     try std.testing.expect(result.remote_error == null);
     try std.testing.expectEqual(@as(u64, 77), result.identity.?.value.inode);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(file_tree.IdentityKind.directory)), result.identity.?.value.kind);
+    try std.testing.expectEqual(@as(u8, @backingInt(file_tree.IdentityKind.directory)), result.identity.?.value.kind);
     try std.testing.expectEqual(@as(usize, 2), result.entries.items.len);
     try std.testing.expectEqualStrings("nl\nname.txt", result.entries.items[0].name);
     try std.testing.expectEqual(file_tree.Kind.symlink_directory, result.entries.items[1].kind);
     // 신원 종류가 wire 종류에서 맞게 접혔다 — 갈리면 같은 항목이 「다른 파일」로 읽힌다.
-    try std.testing.expectEqual(@as(u8, @intFromEnum(file_tree.IdentityKind.symlink)), result.entries.items[1].identity.kind);
+    try std.testing.expectEqual(@as(u8, @backingInt(file_tree.IdentityKind.symlink)), result.entries.items[1].identity.kind);
 }
 
 test "원격 매핑: 잘림·오독·비정상 종료는 ok=false 이고 «말할 수 있는 실패» 를 담는다 (§2.5)" {
@@ -1690,7 +1692,7 @@ test "hashFile: 다른 스레드가 쓰는 중인 파일을 반복해 해시해�
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/grow.log", .{root});
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/grow.log", .{root}, 0);
 
     const Writer = struct {
         stop: std.atomic.Value(bool) = .init(false),
@@ -1699,7 +1701,7 @@ test "hashFile: 다른 스레드가 쓰는 중인 파일을 반복해 해시해�
             const fd = std.c.open(p.ptr, .{ .ACCMODE = .WRONLY, .APPEND = true, .CLOEXEC = true }, @as(std.c.mode_t, 0));
             if (fd < 0) return;
             defer _ = std.c.close(fd);
-            const chunk = "x" ** 4096;
+            const chunk = array_repeat.repeat("x", 4096);
             var written: usize = 0;
             while (!self.stop.load(.acquire)) {
                 _ = std.c.write(fd, chunk, chunk.len);

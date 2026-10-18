@@ -11,6 +11,8 @@
 //! 때문이다 — gutter는 `visual_out`으로 받은 결과를 따른다(`gutter.rowsForVisual`). 둘이 각자 행을
 //! 세면 랩된 줄에서 번호가 본문과 어긋난다.
 
+const array_repeat = @import("array_repeat");
+
 const std = @import("std");
 const builtin = @import("builtin");
 const chrome = @import("../../../chrome.zig");
@@ -1491,7 +1493,7 @@ test "INL3 가상 텍스트 — columnsAtOffsetsWith: byte 의 열은 그 앞 �
     const inl = [_]Inlay{ .{ .at = 4, .text = "a:" }, .{ .at = 7, .text = "b:" }, .{ .at = 9, .text = " -> i32" } };
     // "add(1, 2)" — byte 4 는 `1`, 7 은 `2`, 9 는 줄 끝.
     const offs = [_]u32{ 0, 4, 5, 7, 9, 20 };
-    var cols = [_]u32{0} ** 6;
+    var cols = @as([6]u32, @splat(0));
     columnsAtOffsetsWith("add(1, 2)", 4, &offs, &cols, std.math.maxInt(u32), &inl);
     try testing.expectEqual(@as(u32, 0), cols[0]);
     try testing.expectEqual(@as(u32, 6), cols[1]); // `add(` 4 + `a:` 2
@@ -1499,7 +1501,7 @@ test "INL3 가상 텍스트 — columnsAtOffsetsWith: byte 의 열은 그 앞 �
     try testing.expectEqual(@as(u32, 11), cols[3]); // `add(a:1, ` 9 + `b:` 2
     try testing.expectEqual(@as(u32, 20), cols[4]); // `add(a:1, b:2)` 13 + ` -> i32` 7
     try testing.expectEqual(@as(u32, 20), cols[5]);
-    var plain = [_]u32{0} ** 6;
+    var plain = @as([6]u32, @splat(0));
     columnsAtOffsets("add(1, 2)", 4, &offs, &plain, std.math.maxInt(u32));
     try testing.expectEqual(@as(u32, 4), plain[1]);
     try testing.expectEqual(@as(u32, 9), plain[4]);
@@ -1863,7 +1865,7 @@ test "랩된 줄에서 op이 다해도 그 줄의 나머지 조각이 배치에�
     var ops: [1]draw.Op = undefined; // **op은 하나뿐**
     var runs: [1]draw.Run = undefined;
 
-    const rows = [_]Row{ .{ .bytes = "0123456789" ** 4 }, .{ .bytes = "second" } };
+    const rows = [_]Row{ .{ .bytes = array_repeat.repeat("0123456789", 4) }, .{ .bytes = "second" } };
     var props = testProps(layout, &rows);
     props.wrap = true;
 
@@ -1891,7 +1893,7 @@ test "저장소가 모자라도 build는 성공하고 나머지 줄을 계속 �
     var tiny: [8]u8 = undefined; // 한 줄도 못 담는 저장소
 
     const rows = [_]Row{
-        .{ .bytes = "\t" ++ "0123456789" ** 30 }, // 저장소를 넘기는 긴 줄
+        .{ .bytes = "\t" ++ array_repeat.repeat("0123456789", 30) }, // 저장소를 넘기는 긴 줄
         .{ .bytes = "\tsecond" },
         .{ .bytes = "\tthird" },
     };
@@ -1932,19 +1934,19 @@ test "rowCount는 실제로 그리는 조각 수와 언제나 같다" {
     var out: [8192]u8 = undefined;
     var scratch: [8192]u8 = undefined;
     const lines = [_][]const u8{
-        "",                            "a",
-        "0123456789" ** 6,
-        "가나다라마바사아자차" ** 3,
+        "",                                          "a",
+        array_repeat.repeat("0123456789", 6),
+        array_repeat.repeat("가나다라마바사아자차", 3),
         "\ta\tb\tc",
         "\t\t\t가나다",
-        "a가b나c다" ** 6,
-        "ab\u{202E}cd",                "\u{202E}" ** 5,
+        array_repeat.repeat("a가b나c다", 6),
+        "ab\u{202E}cd",                              array_repeat.repeat("\u{202E}", 5),
         "a\u{200D}\u{200D}b\u{200D}c",
-        "👨\u{200D}👩\u{200D}👧" ** 6,
-        "e\u{0301}\u{0301}가나" ** 4,
+        array_repeat.repeat("👨\u{200D}👩\u{200D}👧", 6),
+        array_repeat.repeat("e\u{0301}\u{0301}가나", 4),
         "  들여쓰기 있는 한글 줄입니다 길게 길게",
-        "\tx" ** 20,                   "\u{1F1F0}\u{1F1F7}" ** 8,
-        "\u{2764}\u{FE0F}" ** 10,      "\t",
+        array_repeat.repeat("\tx", 20),              array_repeat.repeat("\u{1F1F0}\u{1F1F7}", 8),
+        array_repeat.repeat("\u{2764}\u{FE0F}", 10), "\t",
         "\t\t\t\t",
         "가\t나",
         "a\t가\tb", // ← 언더플로를 재현했던 모양
@@ -1996,7 +1998,7 @@ test "first_piece: 랩된 줄의 중간 행부터 화면이 시작한다" {
     var vrows: [8]visual_map.VisualRow = undefined;
     var scratch: [256]u8 = undefined;
 
-    const long = "0123456789" ** 4;
+    const long = array_repeat.repeat("0123456789", 4);
     const rows = [_]Row{ .{ .bytes = long }, .{ .bytes = "next" } };
     var props = testProps(layout, &rows);
     props.wrap = true;
@@ -2038,7 +2040,7 @@ test "first_piece가 있어도 화면 아래까지 채운다 — 전개 예산�
     var scratch: [1024]u8 = undefined;
 
     // 60칸 → 12열에서 5조각.
-    const rows = [_]Row{ .{ .bytes = "0123456789" ** 6 }, .{ .bytes = "next" } };
+    const rows = [_]Row{ .{ .bytes = array_repeat.repeat("0123456789", 6) }, .{ .bytes = "next" } };
     var props = testProps(layout, &rows);
     props.wrap = true;
     props.first_piece = 2;
@@ -2075,7 +2077,7 @@ test "first_piece가 범위를 넘으면 줄을 지우지 않고 처음부터 �
     var scratch: [512]u8 = undefined;
 
     // 24칸 → 12열에서 2조각. 마지막 유효 조각(1)까지는 정상 동작해야 한다.
-    const rows = [_]Row{ .{ .bytes = "0123456789" ** 2 ++ "abcd" }, .{ .bytes = "next" } };
+    const rows = [_]Row{ .{ .bytes = array_repeat.repeat("0123456789", 2) ++ "abcd" }, .{ .bytes = "next" } };
     var props = testProps(layout, &rows);
     props.wrap = true;
     props.first_piece = 1;
@@ -2122,7 +2124,7 @@ test "rowCount: 65535열을 넘는 줄도 끝까지 센다 — u16 상한에 걸
     // 초판은 열 예산을 `ColRange.count`(u16)로 넘겨 **scratch와 무관하게** 65535열에서 잘렸다.
     // 코드 리뷰 실측: 200KB 줄·12열·1MiB scratch에서 5462행(실제 16667행). 이 PR이 고치려던
     // "긴 줄 아래를 볼 방법이 없다"가 그대로 되살아나는 자리다.
-    const line = "0123456789" ** 8000; // 80,000칸
+    const line = array_repeat.repeat("0123456789", 8000); // 80,000칸
     var scratch: [131072]u8 = undefined;
     const r = rowCount(line, 4, 12, true, 0, &scratch);
     try testing.expect(!r.truncated);
@@ -2132,7 +2134,7 @@ test "rowCount: 65535열을 넘는 줄도 끝까지 센다 — u16 상한에 걸
 test "rowCount: 저장소가 모자라면 절단을 보고한다 — 조용히 짧아지지 않는다" {
     // 절단 자체는 §3.8이 허용하지만 **조용해서는 안 된다**(`Written.truncated_rows`와 같은 규율).
     // 이 값이 없으면 스크롤바가 문서보다 짧게 그려지는데 왜인지 알 길이 없다.
-    const line = "\t" ++ ("0123456789" ** 200);
+    const line = "\t" ++ (array_repeat.repeat("0123456789", 200));
     var tiny: [64]u8 = undefined;
     const r = rowCount(line, 4, 12, true, 0, &tiny);
     try testing.expect(r.truncated);
@@ -2145,7 +2147,7 @@ test "rowCount: 저장소가 모자라면 절단을 보고한다 — 조용히 �
 
 test "rowCount: 랩이 꺼지면 언제나 한 행이다" {
     var scratch: [64]u8 = undefined;
-    try testing.expectEqual(@as(u32, 1), rowCount("0123456789" ** 10, 4, 20, false, 0, &scratch).rows);
+    try testing.expectEqual(@as(u32, 1), rowCount(array_repeat.repeat("0123456789", 10), 4, 20, false, 0, &scratch).rows);
     try testing.expectEqual(@as(u32, 1), rowCount("", 4, 20, false, 0, &scratch).rows);
     // 뷰 폭이 0이면 접을 수 없다 — 0으로 나누거나 무한히 도는 대신 한 행으로 둔다.
     try testing.expectEqual(@as(u32, 1), rowCount("긴 줄", 4, 0, true, 0, &scratch).rows);
@@ -2156,9 +2158,9 @@ test "어떤 시작 열·폭 조합에서도 창 폭을 넘지 않는다" {
     // 렌더러가 반쪽을 그린다(실측으로 잡은 결함이다).
     var out: [512]u8 = undefined;
     const inputs = [_][]const u8{
-        "0123456789" ** 8,
-        "가나다라마바사아자차" ** 4,
-        "a가b나c다" ** 8,
+        array_repeat.repeat("0123456789", 8),
+        array_repeat.repeat("가나다라마바사아자차", 4),
+        array_repeat.repeat("a가b나c다", 8),
         "\t\t가나다라마",
         "ab\u{202E}cd가나다", // §3.8 표기(8칸)가 경계에 걸리는 경우
         "\ta\tb\t가\t나",
@@ -2172,7 +2174,7 @@ test "어떤 시작 열·폭 조합에서도 창 폭을 넘지 않는다" {
         "a\u{200D}\u{200D}b\u{200D}c",
         "가\u{200D}\u{200D}\u{200D}나다",
         "a\u{0301}\u{200B}b",
-        "\u{200D}" ** 20,
+        array_repeat.repeat("\u{200D}", 20),
         "\t가\u{200D}나\t다",
         "",
         "가",
@@ -2306,7 +2308,7 @@ test "긴 줄은 본문이 저장소를 끝까지 쓴다 — 뒤에 그릴 것�
     var vrows: [32]visual_map.VisualRow = undefined;
     var scratch: [128]u8 = undefined;
 
-    const rows = [_]Row{.{ .bytes = "\t" ++ "0123456789" ** 40 }};
+    const rows = [_]Row{.{ .bytes = "\t" ++ array_repeat.repeat("0123456789", 40) }};
     var props = testProps(layout, &rows);
     props.wrap = true;
 

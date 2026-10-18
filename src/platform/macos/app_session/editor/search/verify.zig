@@ -33,7 +33,7 @@ pub const Proof = struct {
 };
 pub const Read = struct { bytes: []u8, hash: [32]u8, proof: Proof, has_bom: bool = false };
 fn fileIdentity(stat: std.posix.Stat) maru.session.file_tree.Identity {
-    const device: std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(stat.dev))) = @bitCast(stat.dev);
+    const device: @Int(.unsigned, @bitSizeOf(@TypeOf(stat.dev))) = @bitCast(stat.dev);
     return .{ .device = device, .inode = stat.ino, .kind = 1 };
 }
 pub fn disk(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: []const u8, control: *process.Control, max_bytes: usize, expected: maru.session.file_tree.Identity) ![32]u8 {
@@ -53,9 +53,9 @@ pub fn read(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: []con
 fn readInternal(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: []const u8, control: *process.Control, max_bytes: usize, expected: maru.session.file_tree.Identity, output: ?*std.ArrayList(u8)) !Proof {
     var root = try process.openRoot(a, io, root_path);
     defer root.deinit(a, io);
-    const device: std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(root.device))) = @bitCast(root.device);
+    const device: @Int(.unsigned, @bitSizeOf(@TypeOf(root.device))) = @bitCast(root.device);
     if (@as(u64, device) != expected.device or root.stat.inode != expected.inode or expected.kind != 2) return error.RootChanged;
-    const name = try a.dupeZ(u8, try maru.session.editor.search.request.relativePath(path));
+    const name = try a.dupeSentinel(u8, try maru.session.editor.search.request.relativePath(path), 0);
     defer a.free(name);
     const fd = std.c.openat(root.directory.handle, name, std.c.O{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true });
     if (fd < 0) return error.Unopenable;

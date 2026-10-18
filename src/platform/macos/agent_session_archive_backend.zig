@@ -719,7 +719,7 @@ fn appendCandidate(allocator: std.mem.Allocator, io: std.Io, dir: *std.Io.Dir, o
 
 fn fileDevice(allocator: std.mem.Allocator, dir: std.Io.Dir, name: []const u8) ?u64 {
     if (comptime builtin.os.tag != .macos) return 0;
-    const name_z = allocator.dupeZ(u8, name) catch return null;
+    const name_z = allocator.dupeSentinel(u8, name, 0) catch return null;
     defer allocator.free(name_z);
     var stat: std.posix.Stat = undefined;
     if (std.c.fstatat(dir.handle, name_z.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW) != 0) return null;

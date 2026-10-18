@@ -95,7 +95,7 @@ fn BudgetType(
         live_bytes: usize = 0,
         peak_entries: usize = 0,
         peak_bytes: usize = 0,
-        entries: [max_entries]Entry = [_]Entry{.{}} ** max_entries,
+        entries: [max_entries]Entry = @as([max_entries]Entry, @splat(.{})),
 
         pub fn initInPlace(self: *Self, process_nonce: u64) !void {
             if (!std.meta.eql(self.*, Self{}) or process_nonce == 0)
@@ -393,7 +393,7 @@ test "CR2e-e3a2 resident budget은 fixed inventory byte bound와 cap plus one을
     const process_nonce = try readyProcessNonceForTest();
     var budget: StructuralInventoryBudget = .{};
     try budget.initInPlace(process_nonce);
-    var leases: [max_entries]Lease = [_]Lease{.{}} ** max_entries;
+    var leases: [max_entries]Lease = @as([max_entries]Lease, @splat(.{}));
     for (&leases) |*lease| try budget.reserve(lease, max_entry_bytes, .candidate);
     const at_cap = try budget.snapshot();
     try std.testing.expectEqual(max_tracked_bytes, at_cap.live_bytes);
@@ -410,7 +410,7 @@ test "CR2e-e3a2 resident budget은 entry exact cap과 copied lease replay를 거
     const process_nonce = try readyProcessNonceForTest();
     var budget: StructuralInventoryBudget = .{};
     try budget.initInPlace(process_nonce);
-    var leases: [max_entries]Lease = [_]Lease{.{}} ** max_entries;
+    var leases: [max_entries]Lease = @as([max_entries]Lease, @splat(.{}));
     for (&leases) |*lease| try budget.reserve(lease, 1, .candidate);
     var rejected: Lease = .{};
     try std.testing.expectError(error.ResidentLimit, budget.reserve(&rejected, 1, .candidate));
@@ -521,7 +521,7 @@ test "CR2e-e3b1 reconnect admission budget은 128 MiB와 max charge 일곱 개�
 
     var budget: ReconnectAdmissionBudget = .{};
     try budget.initInPlace(process_nonce);
-    var leases: [8]Lease = [_]Lease{.{}} ** 8;
+    var leases: [8]Lease = @as([8]Lease, @splat(.{}));
     for (leases[0..7]) |*lease| try budget.reserve(lease, max_entry_bytes, .candidate);
     const at_cap = try budget.snapshot();
     const owner_at_cap = budget;
@@ -538,7 +538,7 @@ test "CR2e-e3b1 reconnect admission budget은 128 MiB와 max charge 일곱 개�
     try std.testing.expectEqualDeep(leases_at_cap, leases);
     const stale_same_address = leases[0];
     for (leases[0..7]) |*lease| try budget.release(lease, .candidate);
-    try std.testing.expectEqualDeep([_]Lease{.{}} ** 8, leases);
+    try std.testing.expectEqualDeep(@as([8]Lease, @splat(.{})), leases);
     try budget.deinit();
     try budget.initInPlace(process_nonce);
     try budget.reserve(&leases[0], max_entry_bytes, .candidate);
@@ -551,7 +551,7 @@ test "CR2e-e3b1 reconnect admission budget은 128 MiB와 max charge 일곱 개�
     leases[0] = current_same_address;
     try budget.release(&leases[0], .candidate);
 
-    var small: [9]Lease = [_]Lease{.{}} ** 9;
+    var small: [9]Lease = @as([9]Lease, @splat(.{}));
     for (small[0..max_active_entries]) |*lease| try budget.reserve(lease, 1, .candidate);
     const at_count_cap = try budget.snapshot();
     const owner_at_count_cap = budget;
@@ -562,7 +562,7 @@ test "CR2e-e3b1 reconnect admission budget은 128 MiB와 max charge 일곱 개�
     try std.testing.expectEqualDeep(owner_at_count_cap, budget);
     try std.testing.expectEqualDeep(small_at_count_cap, small);
     for (small[0..max_active_entries]) |*lease| try budget.release(lease, .candidate);
-    try std.testing.expectEqualDeep([_]Lease{.{}} ** 9, small);
+    try std.testing.expectEqualDeep(@as([9]Lease, @splat(.{})), small);
     try budget.deinit();
     try std.testing.expectEqualDeep(ReconnectAdmissionBudget{}, budget);
 

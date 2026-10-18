@@ -1004,8 +1004,8 @@ test "비교 밴드 색은 자기 역할에만 산다 — 다른 역할을 덮�
         try std.testing.expectEqual(theme.diagnostic_warning, tk.get(.diagnostic_warning));
         try std.testing.expectEqual(theme.diagnostic_info, tk.get(.diagnostic_info));
         try std.testing.expectEqual(theme.diagnostic_hint, tk.get(.diagnostic_hint));
-        inline for (@typeInfo(ColorRole).@"enum".fields) |f| {
-            const role: ColorRole = @enumFromInt(f.value);
+        inline for (@import("type_info_fields").enumFields(ColorRole)) |f| {
+            const role: ColorRole = @fromBackingInt(@intCast(f.value));
             if (role == .diff_added_bg or role == .diff_removed_bg) continue;
             try std.testing.expect(!std.meta.eql(tk.get(role), theme.diff_added));
             try std.testing.expect(!std.meta.eql(tk.get(role), theme.diff_removed));
@@ -1022,7 +1022,7 @@ test "HL9 setSyntax 가 11색을 각자 제 역할에 넣는다 — 자리 바�
 
     // 필드 수가 역할 수와 같아야 한다 — 한쪽만 늘면 `setSyntax`가 조용히 빠뜨린다.
     // (반사는 여기서만 쓴다. test 블록은 digest 원장이 마스킹한다.)
-    try testing.expectEqual(syntax_roles.len, @typeInfo(SyntaxPalette).@"struct".fields.len);
+    try testing.expectEqual(syntax_roles.len, @import("type_info_fields").structFields(SyntaxPalette).len);
 
     tk.setSyntax(.{
         .keyword = .{ .r = 1, .g = 0, .b = 0 },

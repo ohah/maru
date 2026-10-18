@@ -10,7 +10,7 @@ pub const max_response_bytes = github_json.max_response_bytes;
 pub const max_token_bytes = github_json.max_scalar_string_bytes;
 pub const max_args: usize = 8;
 const max_arg_bytes = github_json.max_scalar_string_bytes + 1;
-const max_assets = @typeInfo(release_manifest.AssetRole).@"enum".fields.len;
+const max_assets = @import("type_info_fields").enumFields(release_manifest.AssetRole).len;
 
 pub const Artifact = struct {
     name: []const u8,
@@ -209,14 +209,14 @@ const BoundedExecutor = struct {
     io: std.Io,
     fn capture(self: *@This(), executable: []const u8, child_args: []const []const u8, environment: []const []const u8, output: []u8, budget_ns: i128) Error![]const u8 {
         var executable_storage: [max_token_bytes + 1]u8 = undefined;
-        const executable_z = std.fmt.bufPrintZ(&executable_storage, "{s}", .{executable}) catch return error.InvalidPath;
+        const executable_z = std.fmt.bufPrintSentinel(&executable_storage, "{s}", .{executable}, 0) catch return error.InvalidPath;
         var argument_storage: [max_args][max_arg_bytes]u8 = undefined;
         var argv: [max_args + 1:null]?[*:0]const u8 = @splat(null);
         argv[0] = executable_z.ptr;
-        for (child_args, 0..) |arg, index| argv[index + 1] = (std.fmt.bufPrintZ(&argument_storage[index], "{s}", .{arg}) catch return error.InvalidExpected).ptr;
+        for (child_args, 0..) |arg, index| argv[index + 1] = (std.fmt.bufPrintSentinel(&argument_storage[index], "{s}", .{arg}, 0) catch return error.InvalidExpected).ptr;
         var environment_storage: [2]["GH_TOKEN=".len + max_token_bytes + 1]u8 = undefined;
         var envp: [2:null]?[*:0]const u8 = @splat(null);
-        for (environment, 0..) |entry, index| envp[index] = (std.fmt.bufPrintZ(&environment_storage[index], "{s}", .{entry}) catch return error.InvalidToken).ptr;
+        for (environment, 0..) |entry, index| envp[index] = (std.fmt.bufPrintSentinel(&environment_storage[index], "{s}", .{entry}, 0) catch return error.InvalidToken).ptr;
         return process.runCaptureEnvironmentStdout(self.io, executable_z, &argv, &envp, output, budget_ns);
     }
 };
@@ -226,7 +226,7 @@ fn validateExpected(expected: Expected) Error!void {
     var role_counts: [max_assets]u8 = @splat(0);
     for (expected.assets, 0..) |asset, index| {
         if (!basename(asset.name) or !identity.lowerHex(asset.sha256, 64) or asset.size == 0) return error.InvalidExpected;
-        role_counts[@intFromEnum(asset.role)] += 1;
+        role_counts[@backingInt(asset.role)] += 1;
         if (std.mem.eql(u8, asset.name, expected.manifest.name)) return error.InvalidExpected;
         for (expected.assets[index + 1 ..]) |other| if (std.mem.eql(u8, asset.name, other.name)) return error.InvalidExpected;
     }

@@ -170,7 +170,7 @@ fn directoryMetadata(fd: c.fd_t) ?DirectoryMetadata {
             fd,
             "",
             linux.AT.EMPTY_PATH,
-            .{ .BASIC_STATS = true },
+            linux.STATX.BASIC_STATS,
             &observed,
         ));
         if (errno != .SUCCESS or !observed.mask.TYPE or !observed.mask.INO or !observed.mask.UID)

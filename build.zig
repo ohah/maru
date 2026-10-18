@@ -662,11 +662,15 @@ pub fn build(b: *std.Build) void {
         //      자동 추가하지 않아 CoreText.h/Metal.h를 못 찾는다.
         //  (2) SDK를 sysroot로 넘긴다 — framework path만으로는 clang이 SDK를 sysroot로 인식하지
         //      못해 Security.framework가 의존하는 usr/include/libDER/* 헤더를 못 찾고("file not found")
-        //      availability 메타데이터(예: CGToneMapping macOS 15.0)도 어긋난다.
-        //  (3) usr/include·usr/lib는 절대경로로 추가하지 않는다 — sysroot가 자동 해석하며, 절대로
-        //      또 주면 sysroot prefix와 이중 결합돼(…/SDK/…/SDK/usr/lib) 깨진다.
+        //      availability 메타데이터(예: CGToneMapping macOS 15.0)도 어긋난다. Zig 0.17 부터는
+        //      `b.sysroot` 가 없어 .m 컴파일 플래그에 `-isysroot` 로 준다(`objc_macos_flags`·
+        //      `support.linkSessionHostNotificationAdapter`).
+        //  (3) usr/lib 는 SDK 절대경로로 준다 — Zig 0.17 에는 sysroot 가 없어 Foundation.tbd 가 부르는
+        //      `/usr/lib/libobjc.A.dylib` 을 호스트 /usr/lib 에서 찾다 실패한다(2026-10-18 실측). 0.16 때는
+        //      sysroot 가 앞에 붙여 줬고, 그때 절대경로를 또 주면 이중 결합(…/SDK/…/SDK/usr/lib)이 났다.
         // universal 빌드(arm64 + x86_64 lipo)에 필요하고, native에도 무해하다.
         maru_mod.addSystemFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}) });
+        maru_mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}) });
     }
     const test_support_mod = b.addModule("test_support", .{
         .root_source_file = b.path("tests/support/artifacts.zig"),
@@ -1981,7 +1985,14 @@ pub fn build(b: *std.Build) void {
     });
     macos_app_host_abi_tests.root_module.addIncludePath(b.path("src/platform/macos"));
     support.attachAppHostAbiCImport(b, macos_app_host_abi_tests.root_module);
-    const objc_macos_flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined", "-iframeworkwithsysroot", "/System/Library/Frameworks", "-iwithsysroot", "/usr/include" };
+    // `-iframeworkwithsysroot`·`-iwithsysroot` 은 sysroot 가 있어야 SDK 를 가리킨다. Zig 0.17 은 build.zig 에서
+    // sysroot 를 정할 수 없고(`b.sysroot` 가 없다 — `zig build --sysroot` 는 framework 경로까지 앞에 붙여 링크를
+    // 깬다) 명시 -Dtarget(universal dmg)은 cross 라 Zig 가 SDK 를 sysroot 로 주지 않는다. 그래서 clang 에 `-isysroot`
+    // 로 직접 준다 — 빠지면 `<libDER/DERItem.h>` not found·CGToneMapping availability 오류(2026-10-18 실측).
+    const objc_macos_flags: []const []const u8 = if (macos_sdk) |sdk|
+        b.allocator.dupe([]const u8, &.{ "-fobjc-arc", "-fno-sanitize=undefined", "-isysroot", sdk, "-iframeworkwithsysroot", "/System/Library/Frameworks", "-iwithsysroot", "/usr/include" }) catch @panic("OOM")
+    else
+        &.{ "-fobjc-arc", "-fno-sanitize=undefined", "-iframeworkwithsysroot", "/System/Library/Frameworks", "-iwithsysroot", "/usr/include" };
     if (target.result.os.tag == .macos) {
         // macOS에서는 app session이 실제 CoreText로 frame을 만들므로 계약 테스트도 그
         // ObjC 브리지와 framework를 링크해야 한다. Linux 빌드는 tick의 macOS 분기가

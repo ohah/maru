@@ -74,11 +74,47 @@ fn ownedProbe(a: std.mem.Allocator) !void {
     try testing.expectEqualStrings("bar", prepared.items.items[1].changes[0].text);
     for (spec.targets.items) |target| try testing.expectEqual(batch.Outcome.pending, target.outcome);
 }
+const NoRemapAllocator = struct {
+    backing: std.mem.Allocator,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            },
+        };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, return_address: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.backing.rawAlloc(len, alignment, return_address);
+    }
+
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, return_address: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.backing.rawFree(memory, alignment, return_address);
+    }
+};
 test "RPBP1 전체 준비는 모든 대상의 독립 Plan과 편집을 보존한다" {
     try ownedProbe(testing.allocator);
 }
 test "RPBP2 모든 준비 할당 실패는 앞 파일의 Plan까지 해제한다" {
-    try testing.checkAllAllocationFailures(testing.allocator, ownedProbe, .{});
+    // Backing allocator의 in-place remap 성공 여부에 따라 allocation 수가 바뀌지 않도록,
+    // 이 실패 주입은 모든 성장에서 새 allocation을 요구하는 고정 경로로 수행한다.
+    var backing = NoRemapAllocator{ .backing = testing.allocator };
+    try testing.checkAllAllocationFailures(backing.allocator(), ownedProbe, .{});
 }
 test "RPBP3 마지막 파일 원문 불일치는 부분 준비를 반환하지 않는다" {
     var spec = try specification(testing.allocator, "bar");

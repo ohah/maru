@@ -4,10 +4,17 @@
 //! owner binds that held vnode to the protected source identity and exact `GITHUB_WORKSPACE` name.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const safe_open = @import("safe_open");
 const bootstrap_mod = @import("release_adapter_executable_bootstrap");
 const c = std.c;
-const Stat = c.Stat;
+
+const DirectoryMetadata = struct {
+    device: u64,
+    inode: u64,
+    uid: u32,
+    is_directory: bool,
+};
 
 pub const Bootstrap = bootstrap_mod.Bootstrap;
 pub const required_name: [:0]const u8 = "GITHUB_WORKSPACE";
@@ -75,12 +82,11 @@ pub const SourceDirectory = struct {
                 return error.SourceMismatch;
         } else if (runner_source != null or requested_path != null) return error.SourceMismatch;
         const descriptor_flags = c.fcntl(self.fd, c.F.GETFD, @as(c_int, 0));
-        var observed: Stat = undefined;
+        const observed = directoryMetadata(self.fd) orelse return error.DirectoryChanged;
         if (descriptor_flags < 0 or descriptor_flags & c.FD_CLOEXEC == 0 or
-            fstat(self.fd, &observed) != 0 or !std.posix.S.ISDIR(observed.mode) or
-            observed.uid != c.geteuid() or @as(u64, @intCast(observed.dev)) != self.identity.device or
-            @as(u64, @intCast(observed.ino)) != self.identity.inode or
-            @as(u32, @intCast(observed.uid)) != self.identity.uid) return error.DirectoryChanged;
+            !observed.is_directory or observed.uid != c.geteuid() or
+            observed.device != self.identity.device or observed.inode != self.identity.inode or
+            observed.uid != self.identity.uid) return error.DirectoryChanged;
     }
 };
 
@@ -122,11 +128,10 @@ pub fn prepare(
         return error.InvalidPath;
     const fd = safe_open.openAbsoluteNoFollow(path, true) catch return error.OpenFailed;
     errdefer _ = c.close(fd);
-    var observed: Stat = undefined;
+    const observed = directoryMetadata(fd) orelse return error.UnsafeDirectory;
     const descriptor_flags = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
     if (descriptor_flags < 0 or descriptor_flags & c.FD_CLOEXEC == 0 or
-        fstat(fd, &observed) != 0 or !std.posix.S.ISDIR(observed.mode) or
-        observed.uid != c.geteuid()) return error.UnsafeDirectory;
+        !observed.is_directory or observed.uid != c.geteuid()) return error.UnsafeDirectory;
 
     var source_commit: [40]u8 = undefined;
     @memcpy(&source_commit, view.context.source_commit);
@@ -136,9 +141,9 @@ pub fn prepare(
         .owner = result,
         .fd = fd,
         .identity = .{
-            .device = @intCast(observed.dev),
-            .inode = @intCast(observed.ino),
-            .uid = @intCast(observed.uid),
+            .device = observed.device,
+            .inode = observed.inode,
+            .uid = observed.uid,
         },
         .path_len = requested_path.len,
         .path_sha256 = path_sha256,
@@ -148,8 +153,37 @@ pub fn prepare(
     result.seal = ownerSeal(result);
 }
 
-fn fstat(fd: c.fd_t, observed: *Stat) c_int {
-    return c.fstat(fd, observed);
+fn directoryMetadata(fd: c.fd_t) ?DirectoryMetadata {
+    if (comptime builtin.os.tag.isDarwin()) {
+        var observed: c.Stat = undefined;
+        if (c.fstat(fd, &observed) != 0) return null;
+        return .{
+            .device = @intCast(observed.dev),
+            .inode = @intCast(observed.ino),
+            .uid = @intCast(observed.uid),
+            .is_directory = c.S.ISDIR(observed.mode),
+        };
+    } else if (comptime builtin.os.tag == .linux) {
+        const linux = std.os.linux;
+        var observed: linux.Statx = undefined;
+        const errno = linux.errno(linux.statx(
+            fd,
+            "",
+            linux.AT.EMPTY_PATH,
+            .{ .BASIC_STATS = true },
+            &observed,
+        ));
+        if (errno != .SUCCESS or !observed.mask.TYPE or !observed.mask.INO or !observed.mask.UID)
+            return null;
+        return .{
+            .device = (@as(u64, observed.dev_major) << 32) | observed.dev_minor,
+            .inode = observed.ino,
+            .uid = observed.uid,
+            .is_directory = linux.S.ISDIR(@intCast(observed.mode)),
+        };
+    } else {
+        return null;
+    }
 }
 
 pub fn prepareCurrent(

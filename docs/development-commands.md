@@ -1347,6 +1347,15 @@ CBL1~8과 import 네 개, 총 12개가 숨은 커서의 즉시 표시·주기 �
 빌드한 뒤 AppKit keyDown, 제품 타이머, Metal readback으로 이동·멀티커서·Shift 선택 직후 표시와
 이후 자연 깜빡임을 검사한다. PNG·로그·소스/바이너리 해시를 남긴다. 물리 HID·실제 한국어 입력기
 검증은 아니다. 이 하네스로 빌드한 앱만 `--app`으로 재사용한다.
+타이핑 Undo 집중 검증: `mise exec -- zig build test-editor-typing-undo test-editor-typing-regressions`.
+`test-editor-typing-undo`는 TYPE_UNDO1~3과 import 판정자 네 개, 총 7개를 실행한다.
+Undo 배열을 꽉 채운 뒤 재할당의 제자리 확장을 막고 할당 실패를 순차 주입해,
+본문·전체 선택·Undo/Redo·항목 ID·공유 뷰를 보존하는지 검사한다. ASCII·한글·괄호·직접 IME,
+읽기 전용·ID 고갈, 조합 추적 보존과 재시도, 이력 ID 고갈 시의 괄호 건너뛰기를 포함한다.
+`test-editor-typing-regressions`는 EDIT·UNDO·AID·IME_DIRECT_MULTI·IME_RETRY·IME_DELETE
+판정자와 import 판정자 네 개, 총 52개를 실행해 연속 입력 묶음·자동 괄호·다중 커서·IME 재시도를 검사한다.
+ReleaseFast는 같은 명령에 `-Doptimize=ReleaseFast`를 붙인다. 모델 호출 검증이며 실제 입력기·HID·
+OS 전체 메모리 부족을 재현한 결과로 해석하지 않는다.
 
 삭제 Undo 집중 검증: `mise exec -- zig build test-editor-delete-undo -Doptimize=ReleaseFast`.
 `DEL1~7`과 익명 import 판정자 4개, 총 11개다. 문자·단어·줄 경계의 앞/뒤 삭제에 순차 할당 실패·

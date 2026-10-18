@@ -1338,6 +1338,16 @@ python3 tools/editor-outline-app/run.py --output /tmp/maru-outline-app-new
 
 Unicode 검색 접기 집중 검증: `mise exec -- zig build test-search-case-fold -Doptimize=ReleaseFast`. `SCF1~3`이 전체 scalar의 표 탐색·편집용 변환 분리·터미널 실제 셀 검색을 확인한다. 표 재생성은 `python3 tools/generate-search-case-fold.py references/unicode/17.0.0/CaseFolding.txt`이며 공식 데이터의 SHA-256이 일치해야 한다.
 
+커서 활동 집중 검증: `mise exec -- zig build test-editor-caret-activity test-editor-caret-activity-regressions`.
+CBL1~8과 import 네 개, 총 12개가 숨은 커서의 즉시 표시·주기 초기화·불투명도와 무관한 활동의
+비초기화를 검사한다. 회귀 게이트는 이동·Undo·선택·열/추가 커서·구조적 선택·비교·병합·찾기·
+직접 IME와 재시도 경로를 실행한다. `-Doptimize=ReleaseFast`로 같은 검사를 반복할 수 있다.
+실제 앱 검증: `python3 tools/editor-caret-activity-app/run.py --output /tmp/maru-caret-activity-new`.
+출력은 비어 있는 저장소 밖 디렉터리여야 한다. 격리 사본에서 고정 웹 의존성을 설치하고 앱을
+빌드한 뒤 AppKit keyDown, 제품 타이머, Metal readback으로 이동·멀티커서·Shift 선택 직후 표시와
+이후 자연 깜빡임을 검사한다. PNG·로그·소스/바이너리 해시를 남긴다. 물리 HID·실제 한국어 입력기
+검증은 아니다. 이 하네스로 빌드한 앱만 `--app`으로 재사용한다.
+
 삭제 Undo 집중 검증: `mise exec -- zig build test-editor-delete-undo -Doptimize=ReleaseFast`.
 `DEL1~7`과 익명 import 판정자 4개, 총 11개다. 문자·단어·줄 경계의 앞/뒤 삭제에 순차 할당 실패·
 ID 고갈·읽기 전용을 적용해 본문·전체 선택·기존 이력을 검사하고, UTF-8·삭제 묶음·뷰 간 Undo/Redo를 확인한다.

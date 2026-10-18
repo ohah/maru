@@ -306,6 +306,7 @@ pub fn marked(self: *app.AppSession, bytes: []const u8, selected: Range, replace
         term.rt.editor_preedit_end = canonical.end;
         term.rt.editor_preedit_selected = selected;
         if (bytes.len > 0 and self.ime_terminal_target_id == null) self.ime_terminal_target_id = term.surface.id;
+        editor.noteCaretActivity(self, term);
         self.metal_dirty = true;
         if (self.ime_active) self.ime_marked_changed = true;
         if (!self.ime_active and term.rt.editor_preedit.len == 0) self.ime_terminal_target_id = null;
@@ -362,6 +363,7 @@ pub fn marked(self: *app.AppSession, bytes: []const u8, selected: Range, replace
     }
     term.rt.editor_preedit_selected = selected;
     if (bytes.len > 0 and self.ime_terminal_target_id == null) self.ime_terminal_target_id = term.surface.id;
+    editor.noteCaretActivity(self, term);
     self.metal_dirty = true;
     if (self.ime_active) self.ime_marked_changed = true;
     if (!self.ime_active and term.rt.editor_preedit.len == 0) self.ime_terminal_target_id = null;

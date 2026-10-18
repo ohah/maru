@@ -273,6 +273,7 @@ fn step(self: *AppSession, term: *Term, primary_pos: usize, delta: i32) void {
     if (term.rt.editor_extra_selections.len > 0) self.allocator.free(term.rt.editor_extra_selections);
     term.rt.editor_extra_selections = extras;
     term.rt.editor_selection = items[merged.primary];
+    editor_ops.noteCaretActivity(self, term);
 
     // 세운 뒤의 키 — 합쳐져 수가 줄었으면 사슬과 커서가 짝을 잃었다: 다음 키가 합친 선택에서 새로 세운다.
     st.key_version = term.rt.editorDocument().notifications.lsp_version;

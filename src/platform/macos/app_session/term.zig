@@ -235,6 +235,7 @@ pub fn noteEditorFocus(self: *AppSession, term: *Term) void {
     if (term.kind != .editor) return;
     self.editor_focus_order.* +|= 1;
     term.rt.editor_focus_order = self.editor_focus_order.*;
+    editor_ops.noteCaretActivity(self, term);
 }
 
 pub fn focusTerm(self: *AppSession, term_index: usize) void {

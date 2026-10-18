@@ -2496,6 +2496,28 @@ fn diffCaretFixture(fx: *Fixture, entry: *dock_panel.Entry, leaf: maru.session.S
     drawn.dl.deinit(testing.allocator);
 }
 
+test "CBL7 비교 뷰 이동·선택 확장·열 전환은 깜빡임을 초기화한다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("alpha\nbeta\n", "alpha\nBETA\n");
+    try diffCaretFixture(&fx, &entry, .{ .x = 0, .y = 0, .w = 800, .h = 400 });
+    for (0..3) |operation| {
+        fx.session.blink_visible = false;
+        fx.session.blink_phase_ns = 123;
+        fx.session.metal_buffer.setCursorFadeMilli(0);
+        switch (operation) {
+            0 => try testing.expect(editor_ops.diffMove(fx.session, fx.term, .char_right, false)),
+            1 => try testing.expect(editor_ops.diffMove(fx.session, fx.term, .char_right, true)),
+            2 => try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term)),
+            else => unreachable,
+        }
+        try testing.expect(fx.session.blink_visible);
+        try testing.expectEqual(@as(i128, 0), fx.session.blink_phase_ns);
+        try testing.expectEqual(@as(u32, 1000), fx.session.metal_buffer.cursor_fade_milli);
+    }
+}
+
 test "DCARET1: 비교 뷰를 세우면 caret 이 오른쪽 (0,0) 에 선다" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     var fx = try Fixture.init(testing.allocator);

@@ -101,6 +101,17 @@ Selections {
 ColumnAnchor { from_row, from_col, to_row, to_col }   // 시각 좌표 — 갱신은 L3 전용
 ```
 
+**커서 활동 직후에는 즉시 보이고 깜빡임 주기를 다시 시작한다.** 이동·선택 확장·클릭/드래그·
+멀티커서 추가/제거·편집·Undo/Redo·검색/정의/심볼 탐색·IME 갱신·편집기 포커스 복귀가 대상이다.
+모든 커서는 같은 위상으로 표시한다. 비교 뷰의 좌우 커서와 병합의 읽기 전용 판 커서도 같다.
+Maru의 기존 `resetCursorBlink`로 주기 기준과 표시 여부·불투명도를 함께 초기화하며,
+주기 길이와 페이드 설정은 기존 설정을 유지한다. VS Code의
+[`ViewCursors.onCursorStateChanged`와 `_updateBlinking`](https://github.com/microsoft/vscode/blob/main/src/vs/editor/browser/viewParts/viewCursors/viewCursors.ts)
+이 커서 상태 이벤트에서 타이머를 취소하고 즉시 표시하는 동작을 기준으로 한다.
+스크롤·호버·프레임 재구축·임시 선택을 빌리는 계산과 활성 문서에 무관한 다른 문서 처리는
+활동으로 세지 않는다. 공유 문서 편집이 활성 뷰 커서를 매핑하는 경우는 포함한다.
+배선과 조사 범위는 [커서 활동 계획](plans/editor-caret-activity.md)이 소유한다.
+
 #### 비교 뷰는 같은 계약을 다른 축 위에서 쓴다 (2026-08-21)
 
 **비교 뷰에는 문서 offset 축이 없다.** 화면에 서는 것은 원본 줄이 아니라 짝을 맞춰 정렬한 **행 배열**이고, 원본에 없는 빈 행이 섞여 있으며, 좌우가 서로 다른 두 버퍼다(왼쪽은 git이 준 HEAD 판이라 열려 있는 문서가 아니다). 그 축의 단일 출처는 [시각 매핑](native-editor-visual-mapping.md) **§4.1g "비교 뷰"**이고, 이 절은 그것을 가리키기만 한다.

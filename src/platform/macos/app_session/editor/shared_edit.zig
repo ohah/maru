@@ -152,6 +152,7 @@ pub const Publication = struct {
                 continue;
             }
             v.term.rt.editor_selection = v.primary;
+            editor_ops.noteCaretActivity(self.session, v.term);
             if (v.term.rt.editor_extra_selections.len > 0) self.session.allocator.free(v.term.rt.editor_extra_selections);
             v.term.rt.editor_extra_selections = v.extras;
             v.term.rt.editor_column_anchor = null;

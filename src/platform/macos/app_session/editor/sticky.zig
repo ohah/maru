@@ -307,6 +307,7 @@ pub fn click(self: *AppSession, term: *Term, x_px: f64, y_px: f64) bool {
     if (term.rt.editor_extra_selections.len > 0) self.allocator.free(term.rt.editor_extra_selections);
     term.rt.editor_extra_selections = &.{};
     term.rt.editor_selection = maru.session.editor.selection.Selection.at(line.start + @min(byte, text.len));
+    editor_ops.noteCaretActivity(self, term);
     editor_ops.breakUndoGroup(term);
     // 스크롤 — 그 줄이 행 `row` 에 오게(위로 올라가 있던 줄이다).
     if (visibleOf(term.rt.editor_visible_numbers, line_no, term.rt.editor_lines.len)) |v| {

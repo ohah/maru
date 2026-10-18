@@ -569,6 +569,7 @@ fn placeCaretAndReveal(self: *AppSession, term: *Term, offset: usize) void {
     clearExtraSelections(self, term);
     term.rt.editor_selection = editor_selection.Selection.at(offset);
     revealPrimaryCaret(self, term);
+    noteCaretActivity(self, term);
     self.metal_dirty = true;
 }
 
@@ -3699,6 +3700,16 @@ pub const SelectionIter = struct {
     }
 };
 
+/// 사용자에게 게시한 활성 편집기 커서 활동의 시각 부수효과다.
+/// 이동·선택·편집의 성공 지점에서만 부른다. 스크롤/렌더/임시 선택 계산에서는 부르지 않는다.
+/// VS Code ViewCursors.onCursorStateChanged → _updateBlinking처럼 즉시 보이고 새 주기를 시작한다.
+pub fn noteCaretActivity(self: *AppSession, term: *Term) void {
+    if (term.kind != .editor or !self.surface_initialized or self.tabs.items.len == 0) return;
+    if (pane_ops.activePane(self).activeTerm() != term) return;
+    self.resetCursorBlink();
+    self.metal_dirty = true;
+}
+
 /// 이 Term의 커서 전부.
 pub fn selections(term: *Term) SelectionIter {
     return .{ .primary = term.rt.editor_selection, .extras = term.rt.editor_extra_selections };
@@ -4342,6 +4353,7 @@ pub fn moveCarets(self: *AppSession, term: *Term, how: Motion, extend: bool) boo
     mergeCarets(self, term);
     breakUndoGroup(term); // 커서가 편집 아닌 이유로 움직였다(§3.3)
     revealPrimaryCaret(self, term); // 화면 밖으로 나갔으면 따라간다
+    noteCaretActivity(self, term);
     self.metal_dirty = true;
     return true;
 }
@@ -4402,6 +4414,7 @@ pub fn addCursorVertically(self: *AppSession, term: *Term, down: bool) bool {
 
     breakUndoGroup(term); // 커서가 늘었다 — 다음 타이핑은 새 묶음이다(§3.3)
     revealPrimaryCaret(self, term);
+    noteCaretActivity(self, term);
     self.metal_dirty = true;
     return true;
 }
@@ -4449,6 +4462,7 @@ pub fn addNextOccurrence(self: *AppSession, term: *Term) bool {
 
     term.rt.editor_selection = next.primary;
     breakUndoGroup(term); // 커서가 늘었다 — 다음 타이핑은 새 묶음이다(§3.3)
+    noteCaretActivity(self, term);
     self.metal_dirty = true;
     return true;
 }
@@ -4919,6 +4933,7 @@ pub fn setEditorPreedit(self: *AppSession, term: *Term, bytes: []const u8) void 
     if (term.rt.editor_preedit.len > 0) self.allocator.free(term.rt.editor_preedit);
     term.rt.editor_preedit = next;
     term.rt.editor_preedit_selected = .{ .location = maru.session.editor.text_input.utf16Length(bytes) orelse 0, .length = 0 };
+    noteCaretActivity(self, term);
 }
 
 /// Focus changes commit the same primary range and secondary selections as an input-method callback.
@@ -5191,6 +5206,7 @@ fn selectFindMatch(self: *AppSession, term: *Term, match: maru.session.editor.fi
     term.rt.editor_selection = editor_selection.Selection.fromPoints(start, end);
     // 편집이 아닌 이유로 커서가 움직였다 — 다음 타이핑이 앞의 것과 한 묶음이 되면 안 된다(§3.3).
     breakUndoGroup(term);
+    noteCaretActivity(self, term);
 }
 
 pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
@@ -5705,6 +5721,7 @@ pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64, 
     } else null;
 
     self.beginPointerGesture(.{ .editor_selection = .{ .term = term } });
+    noteCaretActivity(self, term);
     self.metal_dirty = true;
     // **누른 뒤 캐럿이 실제로 어디 섰나**(제보 조사 2026-09-12). `hit` 은 «좌표를 어떻게 읽었나» 만
     // 말하고, 그 뒤 누가 캐럿을 옮겨도 안 보인다. 둘을 나란히 찍어야 «읽기» 와 «세우기» 가 갈린다.
@@ -5845,6 +5862,7 @@ fn selectWordOrLineInDiff(self: *AppSession, pane: *Pane, whole_line: bool, x_px
     // **검색도 이 열의 것이 되어야 한다**(§5.1 — 강조·마커는 live 인데 목록은 캐시다). 열이 실제로
     // 바뀌었을 때만 다시 센다 — 헬퍼가 그 판정을 한다.
     find_ops.diffCaretSideChanged(self, term, was_side);
+    noteCaretActivity(self, term);
     self.metal_dirty = true;
     return true;
 }
@@ -5869,6 +5887,7 @@ pub fn beginDiffBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f
     // **검색도 이 열의 것이 되어야 한다**(§5.1 — 강조·마커는 live 인데 목록은 캐시다). 열이 실제로
     // 바뀌었을 때만 다시 센다 — 헬퍼가 그 판정을 한다.
     find_ops.diffCaretSideChanged(self, term, was_side);
+    noteCaretActivity(self, term);
     self.metal_dirty = true;
     return true;
 }
@@ -5909,6 +5928,7 @@ pub fn dragDiffBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64)
                         break :blk .{ .row = hit.row, .byte = edge };
                     },
                 };
+                noteCaretActivity(self, owner.term);
                 self.metal_dirty = true;
             }
             return true;
@@ -6031,6 +6051,7 @@ pub fn diffMove(self: *AppSession, term: *Term, how: Motion, extend: bool) bool 
     term.rt.editor_diff_selection = .{ .side = side, .sel = sel };
     scrollDiffCaretIntoView(self, term, next.row, texts.len, rows);
     revealDiffCaretColumn(self, term, side, texts[next.row], next.byte, map);
+    noteCaretActivity(self, term);
     self.metal_dirty = true;
     return true;
 }
@@ -6093,6 +6114,7 @@ pub fn diffSwitchSide(self: *AppSession, term: *Term) bool {
     // **넘어간 자리도 보여야 한다** — 반대 열의 가로 위치는 이 열과 따로 흐른다(§3.5).
     revealDiffCaretColumn(self, term, to, dst[row], landed, map);
     find_ops.diffCaretSideChanged(self, term, from);
+    noteCaretActivity(self, term);
     self.metal_dirty = true;
     return true;
 }
@@ -6400,6 +6422,9 @@ pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px
         term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(range.lo, range.hi, range.hi, kind);
     }
 
+    // 뒤의 선택 병합 준비가 실패해도 위에서 바뀐 primary는 이미 게시됐다.
+    noteCaretActivity(self, term);
+
     // **넓히면 옆 커서를 삼킬 수 있다**(§3.2d) — 같은 낱말·줄 안에 `⌥클릭`으로 찍어 둔 것들이다.
     // §3.2 의 *"겹치면 하나로 합친다"* 가 그대로 걸린다. **primary 는 승계된다**(그 함수가 한다) —
     // 넓힌 것이 primary 이므로 그것이 남고, 합쳐진 범위는 원래 낱말과 대응이 끊기므로 `kind` 가
@@ -6419,6 +6444,7 @@ pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px
     // `⌥` 를 껴도 같다: `dragBodySelection` 이 primary 하나만 미므로 **방금 넓힌 것**이 이어서
     // 늘어나고 나머지 커서는 가만히 있다(§3.2d).
     self.beginPointerGesture(.{ .editor_selection = .{ .term = term } });
+    noteCaretActivity(self, term);
     self.metal_dirty = true;
     return true;
 }
@@ -6498,6 +6524,7 @@ fn toggleCursorAt(self: *AppSession, term: *Term, off: usize) void {
         // 커서가 아예 없으면 그냥 하나 세운다 — 지울 것이 없다.
         term.rt.editor_selection = editor_selection.Selection.at(off);
         breakUndoGroup(term);
+        noteCaretActivity(self, term);
         self.metal_dirty = true;
         return;
     };
@@ -6511,6 +6538,7 @@ fn toggleCursorAt(self: *AppSession, term: *Term, off: usize) void {
     writeCursors(self, term, planned.items, planned.primary);
     breakUndoGroup(term); // 커서가 편집 아닌 이유로 움직였다(§3.3)
     revealPrimaryCaret(self, term);
+    noteCaretActivity(self, term);
     self.metal_dirty = true;
 }
 
@@ -6527,6 +6555,7 @@ fn writeCursors(self: *AppSession, term: *Term, items: []const editor_selection.
     if (term.rt.editor_extra_selections.len > 0) self.allocator.free(term.rt.editor_extra_selections);
     term.rt.editor_extra_selections = extras;
     term.rt.editor_selection = items[primary];
+    noteCaretActivity(self, term);
 }
 
 /// 사각형을 줄마다 selection 으로 펴서 제품 두 필드에 쓴다(§3.2a).
@@ -6577,6 +6606,7 @@ fn applyColumnSelection(self: *AppSession, term: *Term) void {
     if (term.rt.editor_extra_selections.len > 0) self.allocator.free(term.rt.editor_extra_selections);
     term.rt.editor_extra_selections = extras;
     term.rt.editor_selection = buf[0];
+    noteCaretActivity(self, term);
     self.metal_dirty = true;
 }
 
@@ -6619,6 +6649,7 @@ pub fn dragBodySelection(self: *AppSession, kind: u32, x_px: f64, y_px: f64) boo
                     widenedFocus(&doc.file, sel.*, off)
                 else
                     off;
+                noteCaretActivity(self, owner.term);
                 self.metal_dirty = true;
             }
             return true;
@@ -7899,7 +7930,10 @@ fn adjustFoldedSelections(self: *AppSession, term: *Term) void {
     var changed = false;
     if (term.rt.editor_selection) |*sel| changed = adjustFoldedSelection(term, doc, sel) or changed;
     for (term.rt.editor_extra_selections) |*sel| changed = adjustFoldedSelection(term, doc, sel) or changed;
-    if (changed) mergeCarets(self, term); // 여러 커서가 같은 머리줄 끝으로 모일 수 있다
+    if (changed) {
+        mergeCarets(self, term); // 여러 커서가 같은 머리줄 끝으로 모일 수 있다
+        noteCaretActivity(self, term);
+    }
 }
 
 /// 탭 폭을 바꾸는 **단일 지점**. 필드에 직접 대입하지 말고 여기를 부른다.
@@ -8519,6 +8553,7 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
         }
         for (term.rt.editor_extra_selections) |*e| e.* = editor_selection.Selection.at(e.focus + 1);
         breakUndoGroup(term); // 커서가 편집 아닌 이유로 움직였다(§3.3)
+        noteCaretActivity(self, term);
         self.metal_dirty = true;
         return true;
     }
@@ -8792,6 +8827,7 @@ pub fn selectAll(self: *AppSession, term: *Term) bool {
         .anchor_end = 0,
         .focus = doc.file.content.len,
     };
+    noteCaretActivity(self, term);
     self.metal_dirty = true;
     return true;
 }
@@ -9896,6 +9932,7 @@ fn applyDocumentEditPrepared(self: *AppSession, term: *Term, d: maru.session.edi
 }
 
 pub fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) error{OutOfMemory}!void {
+    noteCaretActivity(self, term);
     // 직접 IME 커서 정산처럼 별도 준비 저장소를 소비한 경로의 여분 준비를 정산한다.
     if (term.rt.editor_shared_selection_buf) |buf| self.allocator.free(buf);
     term.rt.editor_shared_selection_buf = null;
@@ -34223,6 +34260,206 @@ test "MC1 다음 일치 추가가 커서를 늘리고, 띠가 전부 서고, 복
     // ⑹ 클릭 한 번이 정리한다 — 없으면 사용자가 커서를 없앨 방법이 없다.
     clearExtraSelections(fx.session, term);
     try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+}
+
+fn hideCaretForActivityTest(self: *AppSession) void {
+    self.blink_visible = false;
+    self.blink_phase_ns = 123;
+    self.metal_buffer.setCursorFadeMilli(0);
+    self.metal_dirty = false;
+}
+
+fn expectCaretActivityForTest(self: *AppSession) !void {
+    try testing.expect(self.blink_visible);
+    try testing.expectEqual(@as(i128, 0), self.blink_phase_ns);
+    try testing.expectEqual(@as(u32, 1000), self.metal_buffer.cursor_fade_milli);
+    try testing.expect(self.metal_dirty);
+}
+
+test "CBL2 선택·멀티커서·편집·Undo·IME·탐색은 같은 주기를 시작한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    for (0..15) |operation| {
+        var fx = try PaneFixture.init(a);
+        defer fx.deinit(a);
+        const term = try undoFixture(&fx, a, "activity.txt", "one two\none two\nlast\n");
+        term.rt.editor_selection = editor_selection.Selection.at(1);
+        if (operation == 11 or operation == 12) {
+            try testing.expect(insertText(fx.session, term, "X"));
+            if (operation == 12) try testing.expect(undoEdit(fx.session, term));
+        }
+        if (operation == 13) {
+            term.rt.editor_selection = editor_selection.Selection.at(0);
+            try testing.expect(insertText(fx.session, term, "("));
+        }
+        hideCaretForActivityTest(fx.session);
+        switch (operation) {
+            0 => try testing.expect(moveCarets(fx.session, term, .char_right, true)),
+            1 => try testing.expect(addCursorVertically(fx.session, term, true)),
+            2 => try testing.expect(addNextOccurrence(fx.session, term)),
+            3 => try testing.expect(selectAll(fx.session, term)),
+            4 => try testing.expect(insertText(fx.session, term, "X")),
+            5 => try testing.expect(deleteText(fx.session, term, true)),
+            6 => {
+                var changes = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = 0, .text = "X" }};
+                try testing.expect(applyEditAsOneWithUndo(fx.session, term, &changes));
+            },
+            7 => selectFindMatch(fx.session, term, .{ .line = 1, .start = 0, .len = 3 }),
+            8 => toggleCursorAt(fx.session, term, 10),
+            9 => try testing.expect(columnSelectStep(fx.session, term, .down)),
+            10 => setEditorPreedit(fx.session, term, "한"),
+            11 => try testing.expect(undoEdit(fx.session, term)),
+            12 => try testing.expect(redoEdit(fx.session, term)),
+            13 => try testing.expect(insertText(fx.session, term, ")")),
+            14 => try navigateTo(fx.session, .{ .offset = 10 }),
+            else => unreachable,
+        }
+        try expectCaretActivityForTest(fx.session);
+    }
+}
+
+test "CBL3 클릭·드래그·낱말 선택·열 선택과 커서 토글은 즉시 표시된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const term = try undoFixture(&fx, a, "pointer-activity.txt", "alpha beta\ngamma delta\nepsilon\n");
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
+    drawn.dl.deinit(a);
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const geom = term.rt.editor_hit_geom;
+    const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
+    const x: f64 = @floatFromInt(@as(i32, @intCast(body.x)) + inset + @as(i32, @intCast(geom.content_left_px)) + 2 * @as(i32, geom.cell_w_px));
+    const y: f64 = @floatFromInt(@as(i32, @intCast(body.y)) + inset + 1);
+    const pane = pane_ops.activePane(fx.session);
+    for (0..4) |operation| {
+        hideCaretForActivityTest(fx.session);
+        switch (operation) {
+            0 => try testing.expect(beginBodySelection(fx.session, pane, x, y, 0)),
+            1 => try testing.expect(dragBodySelection(fx.session, 2, x, y + @as(f64, @floatFromInt(geom.cell_h_px)))),
+            2 => try testing.expect(selectWordOrLineAt(fx.session, pane, false, x, y, 0)),
+            3 => try testing.expect(selectWordOrLineAt(fx.session, pane, true, x, y, 0)),
+            else => unreachable,
+        }
+        try expectCaretActivityForTest(fx.session);
+    }
+    try testing.expect(dragBodySelection(fx.session, 3, x, y));
+    // primary가 먼저 바뀐 뒤 추가 커서 병합 배열 준비만 실패하는 경우도 시각 상태는 게시한다.
+    hideCaretForActivityTest(fx.session);
+    var failing = testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    const selected = selectWordOrLineAt(fx.session, pane, false, x, y, 8);
+    fx.session.allocator = a;
+    try testing.expect(selected);
+    try testing.expect(failing.has_induced_failure);
+    try expectCaretActivityForTest(fx.session);
+}
+
+test "CBL4 스크롤·렌더·노출 계산과 무관한 문서 편집은 주기를 초기화하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const background = try undoFixture(&fx, a, "background.txt", "old\n");
+    background.rt.editor_selection = editor_selection.Selection.at(0);
+    const term = try undoFixture(&fx, a, "foreground.txt", "one\ntwo\nthree\n");
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    hideCaretForActivityTest(fx.session);
+    setEditorTop(fx.session, term, 1, "activity-test");
+    revealOffsetForRenameBox(fx.session, term, 2);
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
+    drawn.dl.deinit(a);
+    try testing.expect(insertText(fx.session, background, "X"));
+    try testing.expect(!fx.session.blink_visible);
+    try testing.expectEqual(@as(i128, 123), fx.session.blink_phase_ns);
+    try testing.expectEqual(@as(u32, 0), fx.session.metal_buffer.cursor_fade_milli);
+}
+
+test "CBL5 창·pane·탭과 본문 포커스 복귀는 새 주기를 시작한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const term = try undoFixture(&fx, a, "focus-activity.txt", "one\n");
+    for (0..5) |operation| {
+        hideCaretForActivityTest(fx.session);
+        switch (operation) {
+            0 => fx.session.focusChanged(true),
+            1 => try testing.expect(pane_ops.tryFocusPane(fx.session, tab_ops.activeTab(fx.session).active_pane)),
+            2 => try testing.expect(term_ops.tryFocusTerm(fx.session, pane_ops.activePane(fx.session).active_term)),
+            3 => @import("../workspace.zig").focusWorkspaceInput(fx.session),
+            4 => try testing.expect(tab_ops.switchTab(fx.session, fx.session.app_window.active_tab)),
+            else => unreachable,
+        }
+        try expectCaretActivityForTest(fx.session);
+    }
+    // 이미 활성인 뷰의 재선택뿐 아니라 실제 다른 Term과 pane에서 돌아오는 경로도 검사한다.
+    const peer = try openSharedViewInActivePane(fx.session, term);
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == peer);
+    hideCaretForActivityTest(fx.session);
+    _ = fx.session.activateExistingFileTerm(term);
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == term);
+    try expectCaretActivityForTest(fx.session);
+    try testing.expect(fx.session.runAction("split_editor_right"));
+    try testing.expectEqual(@as(usize, 2), tab_ops.activeTab(fx.session).panes.items.len);
+    hideCaretForActivityTest(fx.session);
+    try testing.expect(pane_ops.tryFocusPane(fx.session, 0));
+    try expectCaretActivityForTest(fx.session);
+}
+
+test "CBL6 공유 뷰에서 활성 뷰 커서가 매핑될 때도 새 주기를 시작한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const source = try undoFixture(&fx, a, "shared-activity.txt", "one two\n");
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    const peer = try openSharedViewInActivePane(fx.session, source);
+    peer.rt.editor_selection = editor_selection.Selection.at(5);
+    hideCaretForActivityTest(fx.session);
+    try testing.expect(insertText(fx.session, source, "X"));
+    try testing.expectEqual(@as(usize, 6), peer.rt.editor_selection.?.focus);
+    try expectCaretActivityForTest(fx.session);
+}
+
+test "CBL8 병합의 읽기 전용 판 커서도 클릭과 이동 직후 표시된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const term = try mergeCaretFixture(&fx, &dir, "merge-activity.txt", a);
+    defer editor_merge_ops.clear(fx.session, term);
+    const wide: maru.session.SplitRect = .{ .x = fx.leaf_rect.x, .y = fx.leaf_rect.y, .w = 1200, .h = fx.leaf_rect.h };
+    var drawn = appendPaneFrame(fx.session, wide, term) orelse return error.NoDraw;
+    defer drawn.dl.deinit(a);
+    const current = term.rt.editor_merge_layout.?.current.?;
+    const hit = term.rt.editor_merge.?.ours_hit;
+    const x = @as(f64, @floatFromInt(@as(i64, current.x) + hit.content_left_px)) + @as(f64, @floatFromInt(fx.session.cell_width_px)) * 3.25;
+    const y = @as(f64, @floatFromInt(current.y)) + @as(f64, @floatFromInt(fx.session.cell_height_px)) * 2.5;
+    hideCaretForActivityTest(fx.session);
+    try testing.expect(editor_merge_ops.placePaneCaret(fx.session, term, x, y));
+    try expectCaretActivityForTest(fx.session);
+    hideCaretForActivityTest(fx.session);
+    try testing.expect(editor_merge_ops.paneMove(fx.session, term, .char_right, false));
+    try expectCaretActivityForTest(fx.session);
+}
+
+test "CBL1 커서 이동은 숨은 커서를 즉시 보이고 깜빡임 주기를 다시 시작한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const term = try undoFixture(&fx, a, "blink.txt", "one two\nthree four\n");
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    fx.session.blink_visible = false;
+    fx.session.blink_phase_ns = 123;
+    fx.session.metal_dirty = false;
+    try testing.expect(moveCarets(fx.session, term, .char_left, false));
+    try testing.expect(fx.session.blink_visible);
+    try testing.expectEqual(@as(u64, 0), fx.session.blink_phase_ns);
+    try testing.expect(fx.session.metal_dirty);
 }
 
 test "EDIT1 타이핑이 문서에 들어간다 — 파생 상태까지 따라온다 (§3.3)" {

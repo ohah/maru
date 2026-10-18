@@ -61,9 +61,11 @@ CI의 `capture_list` 실패에서 앱의 기존 artifact allowlist가 `zig-out/m
 유지하며, AF_UNIX host root는 짧은 별도 sibling으로 둔다. 경로 회귀 판정에 이 관계와
 socket 길이를 추가했다. 같은 CI가 드러낸 CR6c·CR6e 실행 파일 root의 Zig 0.17 호환 모듈
 누락은 기존 공유 build helper를 두 root에 연결해 수정하고 namespace boundary에서 고정한다.
-후속 AppKit CI는 통과했다. 남은 AppSession aggregate의 RPMW4 실패는 Zig 0.17의
-in-place realloc 여부가 OOM sweep의 할당 횟수를 바꾸는 문제였다. 인접 RPBW5와 같은
-resize/remap 거부 backing을 RPMW4에도 적용해 OOM 전수 검사와 worker drain을 유지한다.
+후속 AppKit CI는 통과했다. 남은 AppSession aggregate의 RPMW4는
+`NondeterministicMemoryUsage`로 실패했다. 조사 중 main에 worker/caller allocator 정산의
+동기화와 가변 할당 횟수를 처리하는 OOM sweep 수정이 반영됐다. main으로 리베이스해
+그 수정을 유지하며, 이 PR은 editor fixture를 중복 변경하지 않는다. 최신 head의 실제
+aggregate 통과 여부는 CI에서 별도로 확인한다.
 
 
 B1-button 이관 순서와 AS3·AS4 슬라이스의 구현 순서·완료 조건이다. 계약은 [에이전트 세션 기록 도크](../agent-session-list.md)와 그 절별 소유 문서가 가진다.

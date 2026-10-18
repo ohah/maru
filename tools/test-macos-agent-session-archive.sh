@@ -6,8 +6,13 @@ app_path=${1:?Maru app executable path is required}
 workspace=$(pwd -P)
 app_path=$(cd "$(dirname "$app_path")" && pwd -P)/$(basename "$app_path")
 artifact_root="$workspace/zig-out/maru-agent-session-archive-smoke"
-root=$(mktemp -d "/tmp/maru-agent-session-archive.XXXXXX")
-session_root="$root/host"
+temp_root=$(mktemp -d "/tmp/maru-agent-session-archive.XXXXXX")
+temp_root=$(cd "$temp_root" && pwd -P)
+# The app's existing capture allowlist requires this suffix and HOME as its direct child.
+root="$temp_root/zig-out/maru-agent-session-archive-smoke"
+# Keep the AF_UNIX socket root short even though the artifact suffix is nested.
+session_root="$temp_root/host"
+mkdir -p "$root"
 # Keep failure evidence too. Never replace an application failure with successful copying.
 finish() {
     status=$?
@@ -20,15 +25,15 @@ finish() {
     done
     if [ "$status" -eq 0 ]; then
         # A persistent host can outlive AppKit. Do not remove its live socket/binary directory.
-        if lsof -t +D "$root" > "$root/active-pids.txt" 2> "$root/lsof-errors.txt"; then
-            echo "archive smoke passed; active fixture retained at $root" >&2
+        if lsof -t +D "$temp_root" > "$root/active-pids.txt" 2> "$root/lsof-errors.txt"; then
+            echo "archive smoke passed; active fixture retained at $temp_root" >&2
         elif [ -s "$root/lsof-errors.txt" ]; then
-            echo "archive smoke passed; cleanup could not prove fixture idle: $root" >&2
+            echo "archive smoke passed; cleanup could not prove fixture idle: $temp_root" >&2
         else
-            rm -rf "$root"
+            rm -rf "$temp_root"
         fi
     else
-        echo "archive smoke failed; private evidence retained at $root" >&2
+        echo "archive smoke failed; private evidence retained at $temp_root" >&2
     fi
     exit "$status"
 }

@@ -110,7 +110,7 @@ int main(int argc, char **argv) {
         result = subprocess.run(['sh', 'tools/test-macos-agent-session-archive.sh', str(executable)], cwd=workspace,
                                 env=dict(os.environ, MARU_AGENT_SESSION_ARCHIVE_GUI='0'), text=True, capture_output=True, timeout=30)
         self.assertNotEqual(result.returncode, 0)
-        match = re.search(r'private evidence retained at (/tmp/maru-agent-session-archive\.\w+)', result.stderr)
+        match = re.search(r'private evidence retained at (/(?:private/)?tmp/maru-agent-session-archive\.\w+)', result.stderr)
         self.assertIsNotNone(match, result.stderr)
         private = Path(match.group(1))
         try:
@@ -120,9 +120,16 @@ int main(int argc, char **argv) {
             text = (published / 'runs/resume-pointer/app.stderr.txt').read_text()
             lines = dict(line.split('=', 1) for line in text.splitlines() if '=' in line and not line.startswith('MARU_SCREENSHOT'))
             self.assertEqual(len(lines), 11)
+            artifact = Path(lines['MARU_AGENT_SESSION_ARCHIVE_SMOKE_ARTIFACT_DIR'])
+            # Keep the product capture allowlist intact: parent of HOME and this exact suffix.
+            self.assertEqual(artifact.name, 'maru-agent-session-archive-smoke')
+            self.assertEqual(artifact.parent.name, 'zig-out')
+            self.assertEqual(Path(lines['HOME']).parent, artifact)
+            socket = Path(lines['MARU_SESSION_HOST_ROOT']) / 'sh' / ('f' * 32 + '.sock')
+            self.assertLess(len(os.fsencode(socket)), 104)
             for value in lines.values():
                 self.assertTrue(Path(value).resolve().is_relative_to(private.resolve()), value)
-            self.assertEqual(hashlib.sha256((private / 'Maru.app/Contents/MacOS/maru-macos-app').read_bytes()).hexdigest(), digest)
+            self.assertEqual(hashlib.sha256((private / 'zig-out/maru-agent-session-archive-smoke/Maru.app/Contents/MacOS/maru-macos-app').read_bytes()).hexdigest(), digest)
             self.assertEqual(hashlib.sha256(executable.read_bytes()).hexdigest(), digest)
             self.assertEqual((private / 'host').stat().st_mode & 0o777, 0o700)
         finally:

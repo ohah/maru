@@ -55,7 +55,7 @@ TCC 설정을 바꾸지 않았으며 원본 로그·스택·원인별 대조군�
 open/header/pixels/close 실패, 용량 부족 및 하네스 실패 반출을 적대적으로 검증한다.
 native·controlled-child 판정과 최초 오류/close 실패/캡처 오류/private HOME 음성 대조를
 통과했다. 별도 소용량 볼륨은 `stage=pixels errno=28`로 실패하고 공간 복구 뒤 전체 PPM을
-기록했다. 로컬 GUI launcher 재검증은 화면 잠금으로 대기 중이며 native 성공과 구분한다.
+기록했다. 당시 화면 잠금으로 남아 있던 로컬 GUI launcher 검증도 아래와 같이 마쳤다.
 CI의 `capture_list` 실패에서 앱의 기존 artifact allowlist가 `zig-out/maru-agent-session-archive-smoke`
 접미사를 요구하는 것을 확인했다. 임시 루트 안에서도 이 접미사와 HOME의 직접 부모 관계를
 유지하며, AF_UNIX host root는 짧은 별도 sibling으로 둔다. 경로 회귀 판정에 이 관계와
@@ -64,8 +64,27 @@ socket 길이를 추가했다. 같은 CI가 드러낸 CR6c·CR6e 실행 파일 r
 후속 AppKit CI는 통과했다. 남은 AppSession aggregate의 RPMW4는
 `NondeterministicMemoryUsage`로 실패했다. 조사 중 main에 worker/caller allocator 정산의
 동기화와 가변 할당 횟수를 처리하는 OOM sweep 수정이 반영됐다. main으로 리베이스해
-그 수정을 유지하며, 이 PR은 editor fixture를 중복 변경하지 않는다. 최신 head의 실제
-aggregate 통과 여부는 CI에서 별도로 확인한다.
+그 수정을 유지했으며 editor fixture는 중복 변경하지 않았다. 최종 CI에서 AppSession
+aggregate·macOS-only·AppKit 잡까지 통과한 뒤 PR #4507을 머지했다.
+
+
+### 로컬 GUI launcher 검증
+
+완료(2026-10-18): main `9d0db0a03`을 Zig 0.17.0으로 새로 빌드한 동일 서명 앱으로
+`MARU_AGENT_SESSION_ARCHIVE_GUI=1` 전체 묶음을 실행했다. 실행마다 private HOME과
+launchd job을 새로 만들고 실제 LaunchServices `open -n -W`로 cold AppKit 프로세스를
+띄웠다. 앱과 CLI 해시가 바뀌지 않은 상태에서 16개 시나리오를 5회 통과했다.
+
+목록·loading/ready/stale Metal 캡처, 교체된 로그의 action 차단, terminal 불변,
+정렬 왕복, 펼친 카드의 스크롤 앵커와 14·24pt × 1·2배 geometry를 확인했다.
+Documents 접근 대기나 PPM 저장 실패는 재현되지 않았으며, 캡처는 부모 shell의 기존
+artifact 경로로 반출됐다. ready/stale 및 큰 폰트 PNG는 직접 열어 확인했다.
+종료 후 80개 GUI job과 앱 PID를 다시 조회했고, 남은 검증용 job·앱·private root는 없었다.
+
+요약·로그·45개 PNG와 바이너리 해시/정리 판정은 저장소 밖
+`maru-archive-gui-validation-20261018/result.json` 및 실행별 디렉터리에 보존했다.
+이미지는 저장소에 커밋하지 않는다. provider-native resume나 실제 Finder 열기는 이 검사의
+범위 밖이며 기존 synthetic transcript와 fake provider exact-argv 판정을 사용한다.
 
 
 B1-button 이관 순서와 AS3·AS4 슬라이스의 구현 순서·완료 조건이다. 계약은 [에이전트 세션 기록 도크](../agent-session-list.md)와 그 절별 소유 문서가 가진다.

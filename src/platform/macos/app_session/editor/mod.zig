@@ -22967,13 +22967,25 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
         return error.TestUnexpectedResult;
     }
     const root = f.root_buf[0..f.root_len];
+    // `⇧⌥F` reports and returns when the shared shell environment is still resolving.
+    // Fixture LSP readiness does not guarantee that independent tool-environment read has settled.
+    _ = lsp_client.toolEnvironment(s, root);
+    const ToolEnvironmentSettled = struct {
+        fn g(_: *AppSession) bool {
+            return tool_env.settled();
+        }
+    };
+    if (!pumpLspUntil(&f.fx, @as(u64, test_formatter_timeout_ms) + 2_000, s, ToolEnvironmentSettled.g)) {
+        std.debug.print("EXFB3_WAIT stage=tool-environment status={s}\n", .{@tagName(tool_env.status())});
+        return error.TestUnexpectedResult;
+    }
     const ext = @import("external_formatter.zig");
     ext.timeout_ms = test_formatter_timeout_ms; // 부하가 큰 기계에서 흔들리지 않게(EXFB1 주석)
     defer ext.timeout_ms = @import("../../format_process.zig").default_timeout_ms;
     defer ext.test_path = null;
     const settled = struct {
         fn g(ss: *AppSession) bool {
-            return !ss.editor_format.waiting and @import("save/dispatch.zig").requestCount() == 0;
+            return !ss.editor_format.waiting and !ss.editor_format.preparing and @import("save/dispatch.zig").requestCount() == 0;
         }
         fn wait(fx: *PaneFixture, stage: []const u8) !void {
             // 실행기에 허용한 20초보다 먼저 정상 작업을 실패로 판정하지 않는다.
@@ -66276,6 +66288,46 @@ test "RPBC10 마지막 Undo 연결 준비 중 발생한 실제 수정도 commit 
 }
 
 const MixedWorkerOptions = struct { last_index: usize = 1, occupied: []const maru.session.file_tree.Identity = &.{} };
+/// `checkAllAllocationFailures` uses `std.testing.FailingAllocator`, whose counters are not
+/// synchronized. The detached worker and caller share the allocator, so serialize every vtable
+/// operation while this one test injects failures across both sides of the handoff.
+const SynchronizedAllocator = struct {
+    mutex: std.Thread.Mutex = .{},
+    backing: std.mem.Allocator,
+
+    fn allocator(self: *SynchronizedAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, return_address: usize) ?[*]u8 {
+        const self: *SynchronizedAllocator = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.backing.rawAlloc(len, alignment, return_address);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) bool {
+        const self: *SynchronizedAllocator = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.backing.rawResize(memory, alignment, new_len, return_address);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) ?[*]u8 {
+        const self: *SynchronizedAllocator = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.backing.rawRemap(memory, alignment, new_len, return_address);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, return_address: usize) void {
+        const self: *SynchronizedAllocator = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.backing.rawFree(memory, alignment, return_address);
+    }
+};
+
 fn mixedWorkerStart(a: std.mem.Allocator, input: *CoordinatorFixture, total: usize) !*project_replace_mixed_worker.Job {
     return mixedWorkerStartWith(a, input, total, .{});
 }
@@ -66355,14 +66407,16 @@ test "RPMW3 혼합 총량과 완료 후 취소도 미리보기로 승격하지 �
     mixedWorkerDrain();
 }
 fn mixedAllocationTrial(a: std.mem.Allocator, input: *CoordinatorFixture) !void {
-    const job = try mixedWorkerStart(a, input, 1000);
+    var synchronized = SynchronizedAllocator{ .backing = a };
+    const allocator = synchronized.allocator();
+    const job = try mixedWorkerStart(allocator, input, 1000);
     defer {
         job.deinit();
         mixedWorkerDrain();
     }
     mixedWorkerWait(job);
     var ready = (try job.take()).?;
-    defer ready.deinit(a);
+    defer ready.deinit(allocator);
     try testing.expectEqual(@as(usize, 3), ready.prepared.effective);
 }
 test "RPMW4 혼합 worker 준비의 모든 할당 실패는 snapshot Read 경로를 회수한다" {

@@ -6,5 +6,5 @@
 //! product must observe; it is not inferred from the current compatibility table.
 
 pub const source_revision = "a9ed24855f6261303d6f467203bcfed183f27175";
-pub const source_sha256 = "0ab5fbfea2eb246591246b26e45e97641d6f0530735d82cf2080f76d41230252";
+pub const source_sha256 = "d7edcd2cc18cf15e606ce8ce34578dc45c720ef316c7e9eabf5e49cede92fb4a";
 pub const expected_fingerprint = "mrsh-v2:screen-v2:controller-transfer-absent";

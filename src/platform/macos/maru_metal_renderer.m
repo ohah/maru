@@ -1799,10 +1799,12 @@ bool maru_metal_renderer_draw(
         [command_buffer waitUntilCompleted];
 
         const uint8_t *pixels = (const uint8_t *)readback.contents;
-        const BOOL wrote = maru_write_ppm_from_bgra8_buffer(
-            capture_path, pixels, shot_w, shot_h, bytes_per_row);
+        MaruPPMWriteError capture_error = {0};
+        const BOOL wrote = maru_write_ppm_from_bgra8_buffer_with_error(
+            capture_path, pixels, shot_w, shot_h, bytes_per_row, &capture_error);
         if (!wrote) {
-            fprintf(stderr, "MARU_SCREENSHOT: PPM 쓰기 실패 → %s\n", capture_path);
+            fprintf(stderr, "MARU_SCREENSHOT: PPM 쓰기 실패 stage=%s errno=%d (%s) → %s\n",
+                    capture_error.stage, capture_error.code, strerror(capture_error.code), capture_path);
             exit(1);
         }
         fprintf(stderr, "MARU_SCREENSHOT: %zux%zu PPM 캡처 → %s\n", shot_w, shot_h, capture_path);

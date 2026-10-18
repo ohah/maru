@@ -1,16 +1,40 @@
 #!/bin/sh
-# Runs isolated cold AppKit processes so pointer and keyboard archive actions cannot share a
-# completed action, terminal, or external-open one-shot.  Paths stay inside the explicit
-# zig-out fixture root; the summaries contain only opaque scenario/verdict/count fields.
+# All GUI-accessed paths live outside Documents. Only the parent shell publishes evidence.
 set -eu
 
 app_path=${1:?Maru app executable path is required}
-# AppSession's config/statusline adapters intentionally require absolute HOME-derived paths.
-# Resolve once here instead of relying on the build runner's current directory.
 workspace=$(pwd -P)
-root="$workspace/zig-out/maru-agent-session-archive-smoke"
-session_root=$(mktemp -d "/tmp/maru-agent-session-archive.XXXXXX")
-trap 'rm -rf "$session_root"' EXIT HUP INT TERM
+app_path=$(cd "$(dirname "$app_path")" && pwd -P)/$(basename "$app_path")
+artifact_root="$workspace/zig-out/maru-agent-session-archive-smoke"
+root=$(mktemp -d "/tmp/maru-agent-session-archive.XXXXXX")
+session_root="$root/host"
+# Keep failure evidence too. Never replace an application failure with successful copying.
+finish() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    mkdir -p "$artifact_root" || status=1
+    for item in "$root"/*.txt "$root"/*.json "$root"/captures "$root"/runs; do
+        [ -e "$item" ] || continue
+        # Both roots are usually APFS: keep large partial PPM evidence without another full copy.
+        cp -cR "$item" "$artifact_root/" 2>/dev/null || cp -R "$item" "$artifact_root/" || status=1
+    done
+    if [ "$status" -eq 0 ]; then
+        # A persistent host can outlive AppKit. Do not remove its live socket/binary directory.
+        if lsof -t +D "$root" > "$root/active-pids.txt" 2> "$root/lsof-errors.txt"; then
+            echo "archive smoke passed; active fixture retained at $root" >&2
+        elif [ -s "$root/lsof-errors.txt" ]; then
+            echo "archive smoke passed; cleanup could not prove fixture idle: $root" >&2
+        else
+            rm -rf "$root"
+        fi
+    else
+        echo "archive smoke failed; private evidence retained at $root" >&2
+    fi
+    exit "$status"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' HUP TERM
 home="$root/home"
 bin="$root/bin"
 marker="$root/fake-provider.verdict"
@@ -25,18 +49,27 @@ replacement_path="$home/.codex/sessions/2026/08/03/.rollout-replacement.tmp"
 # inode and the replacement projection must exercise identity-anchor restoration rather than the
 # stale-source fallback.
 reorder_path="$home/.codex/sessions/2026/08/03/rollout-fixture-scroll-anchor.jsonl"
-summary="$workspace/zig-out/maru-macos-app/app.summary.txt"
-
-case "$root" in
-    "$workspace"/zig-out/maru-agent-session-archive-smoke) ;;
-    *)
-        echo "refusing an unexpected archive smoke fixture root: $root" >&2
-        exit 2
-        ;;
-esac
+summary="$root/app.summary.txt"
 
 test -x "$app_path"
-rm -rf "$root"
+rm -rf "$artifact_root"
+mkdir -p "$artifact_root"
+case "$app_path" in
+    */Contents/MacOS/*)
+        bundle=$(dirname "$(dirname "$(dirname "$app_path")")")
+        # APFS clone avoids duplicating hundreds of MB; preserve the signed bundle bytes.
+        if ! cp -cR "$bundle" "$root/Maru.app"; then
+            # A supplied bundle may be on a different filesystem where clonefile is unavailable.
+            rm -rf "$root/Maru.app"
+            cp -pR "$bundle" "$root/Maru.app"
+        fi
+        app_path="$root/Maru.app/Contents/MacOS/$(basename "$app_path")"
+        ;;
+    *) echo "archive smoke requires an executable inside a signed .app bundle" >&2; exit 2 ;;
+esac
+codesign --verify --deep --strict "$root/Maru.app"
+mkdir -p "$session_root" "$root/runs"
+chmod 700 "$session_root"
 mkdir -p "$home/.codex/sessions/2026/08/03" "$home/.claude/projects/fixture-project" "$bin"
 mkdir -p "$root/captures"
 cp tests/fixtures/agent-session-archive/fake-codex.sh "$bin/codex"
@@ -114,7 +147,17 @@ run_scenario() {
             exit 2
             ;;
     esac
+    rm -f "$summary"
+    run_output="$root/runs/$summary_name"
+    mkdir -p "$run_output"
+    (
+    cd "$root"
     HOME="$home" \
+    XDG_CONFIG_HOME="$home/.config" \
+    XDG_DATA_HOME="$home/.local/share" \
+    XDG_STATE_HOME="$home/.local/state" \
+    XDG_CACHE_HOME="$home/.cache" \
+    MARU_APP_SUMMARY_PATH="$summary" \
     CFFIXED_USER_HOME="$home" \
     MARU_SESSION_HOST_ROOT="$session_root" \
     MARU_CONFIG="$font_config" \
@@ -129,7 +172,8 @@ run_scenario() {
     MARU_AGENT_SESSION_ARCHIVE_SMOKE_REORDER_PATH="$reorder_path" \
     MARU_AGENT_SESSION_ARCHIVE_SMOKE_RENDER_SCALE_MILLI="$render_scale" \
     MARU_AGENT_SESSION_ARCHIVE_SMOKE_ARTIFACT_DIR="$root" \
-    "$app_path"
+    python3 "$workspace/tools/run-macos-archive-app.py" "$app_path" "$run_output"
+    )
     test -f "$summary"
     cp "$summary" "$root/$summary_name.summary.txt"
     if [ -n "$geometry_name" ]; then

@@ -5718,6 +5718,14 @@ pub fn build(b: *std.Build) void {
     run_document_runtime_tests.setCwd(b.path("."));
     run_document_runtime_tests.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-document-runtime", "Run editor document registration and release judges").dependOn(&run_document_runtime_tests.step);
+    const conflict_choice_tests = addProjectTest(b, .{
+        .root_module = editor_tests.root_module,
+        .filters = &.{".test.CFL"},
+    });
+    const run_conflict_choice_tests = b.addRunArtifact(conflict_choice_tests);
+    run_conflict_choice_tests.setCwd(b.path("."));
+    run_conflict_choice_tests.addArg("--maru-expect-tests=23"); // CFL1~19와 익명 import 판정자 4개.
+    b.step("test-editor-conflict-choice", "Run conflict choice, input and Undo preparation judges").dependOn(&run_conflict_choice_tests.step);
     const document_regex_product_tests = addProjectTest(b, .{
         .root_module = editor_tests.root_module,
         .filters = &.{"EDREG"},

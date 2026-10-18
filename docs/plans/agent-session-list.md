@@ -22,7 +22,28 @@ provider-native resume 성공과 구분한다. 기존 fixture 기반 stale sourc
 해당 session·권한·모델의 exact argv 판정자로 검증했다(실제 provider resume는 실행하지 않음).
 기존 합성 AppKit 묶음도 최종 16개 시나리오와 PNG 9개를 통과했다. 최초 GUI launcher의
 startup timeout과 첫 직접 묶음의 폰트/배율 단계 미시작 기록은 실패 증거로 보존했다.
-동일 앱의 후속 전체 실행은 통과했지만 그 초기화 실패의 원인이 수정됐다고 주장하지 않는다.
+두 증상의 원인은 아래 조사에서 분리해 확인했다.
+
+### 초기 실행 실패 조사
+
+GUI launcher의 정지는 테스트 HOME을 Documents 아래에 놓아 생긴 macOS TCC 응답 대기였다.
+최초 실패 PID의 시스템 로그에 `SystemPolicyDocumentsFolder` prompt가 남았고, 관측용
+앱으로 재현한 같은 정지의 메인 스택은 `prepareNewHookLogProfile` →
+`agent_log_record.openDirectory` → `openat`였다. 동일 서명 관측 앱의 HOME·staged bundle·
+출력·cwd를 `/tmp`로 옮긴 대조군은 권한 변경 없이 목록·상세·명시 action 검증까지 완료했다.
+앞서 보인 `launch_failed`만으로 이 대기의 원인을 판정할 수는 없다.
+
+직접 실행의 조기 종료는 시작 실패가 아니라 PPM 저장 실패 뒤 renderer의 `exit(1)`이었다.
+원본 로그에 `PPM 쓰기 실패`와 같은 PID의 exit가 연속 기록됐고, 3840×2400 PPM은
+필요한 27,648,017바이트 중 19,677,184바이트만 남았다. 최초 PPM 오류의 errno 자체는
+기록되지 않았지만 당시 APFS 시스템 로그에 ENOSPC가 확인됐다. 전역 디스크를 채우지 않고
+별도 소용량 이미지 볼륨에서 같은 PPM writer를 실행해 errno=28과 부분 파일을 재현했고,
+그 볼륨의 공간을 복구한 대조군은 같은 픽셀 입력을 전체 크기로 기록했다.
+
+두 원인을 앱 상태·재접속 결함으로 묶어 처리하지 않는다. 향후 GUI 하네스는 private HOME·
+출력을 보호 폴더 밖에 두고 shell 측에서 증거를 반출하며, 캡처 I/O 실패의 OS 오류를 보존해
+`not_started` 요약만 보고 시작 실패로 오인하지 않게 해야 한다. 이번 조사는 제품 정책이나
+TCC 설정을 바꾸지 않았으며 원본 로그·스택·원인별 대조군은 저장소 밖에 보존했다.
 
 B1-button 이관 순서와 AS3·AS4 슬라이스의 구현 순서·완료 조건이다. 계약은 [에이전트 세션 기록 도크](../agent-session-list.md)와 그 절별 소유 문서가 가진다.
 

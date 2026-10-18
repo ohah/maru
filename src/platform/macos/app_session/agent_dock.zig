@@ -870,7 +870,7 @@ pub fn agentSessionDockSearchCaretRect(self: *const AppSession) ?chrome.draw.Rec
     if (entry.rect.height < @as(f32, @floatFromInt(line_h))) return null;
     return .{
         .x = @as(i32, @intCast(content.x)) + @as(i32, @intFromFloat(@floor(x))),
-        .y = @as(i32, @intCast(content.y)) + @as(i32, @intFromFloat(@floor(entry.rect.y + (entry.rect.height - @as(f32, @floatFromInt(line_h)) / 2)))),
+        .y = @as(i32, @intCast(content.y)) + @as(i32, @intFromFloat(@floor(entry.rect.y + (entry.rect.height - @as(f32, @floatFromInt(line_h))) / 2))),
         .w = cw,
         .h = line_h,
     };

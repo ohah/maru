@@ -68,6 +68,34 @@ socket 길이를 추가했다. 같은 CI가 드러낸 CR6c·CR6e 실행 파일 r
 aggregate·macOS-only·AppKit 잡까지 통과한 뒤 PR #4507을 머지했다.
 
 
+### 검색 입력·IME 실제 호스트 검증
+
+진행: 검색창 click과 도크 소유권이 있는 상태의 `/`를 실제 NSView 이벤트로 확인한다.
+검색 owner의 marked text는 필터를 바꾸지 않고 commit만 query와 필터를 바꿔야 한다.
+도크를 떠나면 조합은 원래 검색어에 확정되고, 그 다음 입력은 terminal로 돌아가야 한다.
+firstResponder와 published search rect 안의 native caret anchor를 함께 검사한다.
+
+검증 도구는 private 소스 사본에 읽기 전용 probe와 opt-in driver만 붙인다. 제품 입력
+라우팅·배포 ABI·권한 설정은 바꾸지 않는다. callback 경로를 직접 호출하는 결정적 검증과
+실제 두벌식 HID → TSM → 후보창 검증을 분리한다. 후자는 실제 후보창의 새 window·서명·
+픽셀/OCR·anchor 대조가 필요하며 synthetic marked text나 caret rect만으로 통과시키지 않는다.
+기존 input-source 소유권/복원 정책과 후보창 판정자를 재사용하고, private HOME·번들·출력은
+보호 폴더 밖에 둔다. 실패 로그와 단계별 상태는 유지하며, 구현 결함은 재현 후 수정한다.
+음성 대조는 search focus 누락·preedit 필터 오염·PTY 누출·caret fallback·blur 뒤 검색 잔류를
+각각 거부하고 정상 입력/터미널 복귀 대조도 함께 통과해야 한다.
+첫 callback AppKit 실행에서 검색창 아래로 caret가 8px 벗어나는 것을 재현했다.
+세로 중앙 정렬의 나눗셈 괄호 위치를 수정하고, published rect 안의 위·아래 여백이
+균형을 이루는지를 배율·홀짝 높이 대조로 고정한다.
+수정 후 callback 실행은 이 anchor와 조합/확정을 통과했지만, Escape 뒤 도크 소유 `/`가
+검색을 열지 않고 PTY로 전달되는 결함을 재현했다. AppKit의 `insertText` 확정이 일반
+키 분기를 우회하는 것이 원인이다. 조합이 없는 단일 `/` key transaction에 한해
+도크 소유 여부를 확인하고 기존 키 action으로 전달한다. 터미널 소유 `/`는 실제
+IME transaction 대조에서 계속 PTY로 전달되어야 한다.
+callback AppKit 검증은 검색 클릭·조합·확정·`/` 재진입·blur 확정·터미널 복귀까지 통과했다.
+독립 판정자는 텍스트뿐 아니라 각 단계의 firstResponder·검색 owner·AppKit marked 상태와
+확정 후 비어 있는 preedit를 함께 검사한다. 실제 OS 후보창은 이 결과로 대체하지 않는다.
+
+
 ### 로컬 GUI launcher 검증
 
 완료(2026-10-18): main `9d0db0a03`을 Zig 0.17.0으로 새로 빌드한 동일 서명 앱으로

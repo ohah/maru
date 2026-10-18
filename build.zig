@@ -2259,6 +2259,17 @@ pub fn build(b: *std.Build) void {
     ssh_failure_carrier.setCwd(b.path("."));
     b.step("test-ssh-reconnect-failure-process", "Product CLI refusal and SIGINT during backoff with owned fault injector").dependOn(&ssh_failure_carrier.step);
 
+    const dock_search_input_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"Session Dock 검색은"},
+    });
+    const run_dock_search_input = b.addRunArtifact(dock_search_input_tests);
+    run_dock_search_input.setEnvironmentVariable("MARU_TEST_KEEP_ONLY_PREFIX", "app_session.test.Session Dock 검색은");
+    run_dock_search_input.addArg("--maru-expect-tests=6");
+    run_dock_search_input.addArg("--maru-expect-passed=1");
+    run_dock_search_input.setCwd(b.path("."));
+    b.step("test-session-dock-search-input", "Run Session Dock search ownership and candidate caret containment judges").dependOn(&run_dock_search_input.step);
+
     const remote_failure_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
         .filters = &.{"remote reconnect failure"},

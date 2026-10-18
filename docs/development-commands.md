@@ -1,5 +1,14 @@
 # 개발 명령
 
+- Session Dock 검색 입력: `mise exec -- zig build test-session-dock-search-input`.
+  `python3 tools/session-dock-ime/run.py --output <새 절대경로> --mode callbacks`는
+  private 소스 사본을 빌드해 실제 AppKit 검색 클릭·키 이벤트, 직접 marked/commit callback,
+  native caret 위치와 터미널 입력 복귀를 검증한다. `--mode live`는 실제 두벌식 HID와
+  한자 후보창 5개 및 독립 픽셀 판정까지 요구한다. callback 성공은 실제 OS 후보창 증거가 아니다.
+  이미 빌드한 관측 앱은 `--app <Maru.app/Contents/MacOS/maru-macos-app>`으로 재사용한다.
+  서명이 같은 staged bundle은 재실행 사이에 유지하며, 결과·화면은 저장소 밖에 둔다.
+  독립 판정자 음성 대조: `python3 -m unittest discover -s tools/session-dock-ime -p 'test_*.py'`.
+
 - `zig build test-session-host-reconnect-read-fence`: macOS Debug·ReleaseFast에서 실제 retirement 준비로
   얼린 runtime의 화면·조회 RPC·maintenance 진입점이 Client를 읽거나 이벤트를 소비하지 않는지 검사한다.
   실제 socket의 이전 부분 프레임을 retirement에서 버리고 새 연결의 같은 stream 번호를 구분하는지,

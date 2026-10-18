@@ -1362,7 +1362,7 @@ Undo 배열을 꽉 채운 뒤 재할당의 제자리 확장을 막고 할당 실
 본문·전체 선택·Undo/Redo·항목 ID·공유 뷰를 보존하는지 검사한다. ASCII·한글·괄호·직접 IME,
 읽기 전용·ID 고갈, 조합 추적 보존과 재시도, 이력 ID 고갈 시의 괄호 건너뛰기를 포함한다.
 `test-editor-typing-regressions`는 EDIT·UNDO·AID·IME_DIRECT_MULTI·IME_RETRY·IME_DELETE
-판정자와 import 판정자 네 개, 총 52개를 실행해 연속 입력 묶음·자동 괄호·다중 커서·IME 재시도를 검사한다.
+판정자, 공유 뷰 할당 실패 회귀와 import 판정자 네 개, 총 53개를 실행해 연속 입력 묶음·자동 괄호·다중 커서·IME 재시도를 검사한다.
 ReleaseFast는 같은 명령에 `-Doptimize=ReleaseFast`를 붙인다. 모델 호출 검증이며 실제 입력기·HID·
 OS 전체 메모리 부족을 재현한 결과로 해석하지 않는다.
 

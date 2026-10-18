@@ -9552,6 +9552,8 @@ pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit
     var edit = (edit_ops.planDelete(self.allocator, doc.file.content, doc.file.lines, sels.items, backward, unit, term.rt.editor_auto_closed_at, stops) catch return false) orelse return false;
     defer edit.deinit(self.allocator);
     const ranges = &edit.changes;
+    // 삭제도 본문을 바꾼 뒤 기존 Undo를 잃지 않도록 기록 공간을 먼저 준비한다.
+    if (!prepareUndoSlot(self, term)) return false;
 
     // **편집 전 커서를 떠 둔다** — undo가 그것을 되살린다(§3.3).
     const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
@@ -40513,6 +40515,85 @@ test "MOV10 제품 열 변환이 L2 대역과 같은 계약을 쓴다 — 탭 �
     for ([_]usize{ 0, 1, 2 }) |b| {
         const c = map.columnOf(map.ctx, text, b);
         try testing.expectEqual(b, map.offsetOf(map.ctx, text, c));
+    }
+}
+
+test "DEL7 삭제의 Undo 준비 실패는 본문·전체 선택·기존 이력을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    for (0..6) |operation| {
+        for (0..3) |mode| {
+            var complete = false;
+            for (0..256) |failure| {
+                var fx = try PaneFixture.init(a);
+                defer fx.deinit(a);
+                const term = try undoFixture(&fx, a, "delete-undo.txt", "가나다 foo bar\nnext line\n");
+                term.rt.editor_selection = editor_selection.Selection.at(term.rt.editorDocument().opened.?.file.content.len);
+                try testing.expect(insertText(fx.session, term, "tail"));
+                breakUndoGroup(term);
+                try testing.expect(insertText(fx.session, term, "redo"));
+                try testing.expect(undoEdit(fx.session, term));
+                term.rt.editor_selection = editor_selection.Selection.at(23);
+                term.rt.editor_extra_selections = try a.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(14)});
+                const peer = try openSharedViewInActivePane(fx.session, term);
+                peer.rt.editor_selection = editor_selection.Selection.at(0);
+                const state = term.rt.editorDocument();
+                if (mode == 1) state.history.next_id = std.math.maxInt(u64);
+                if (mode == 2) state.opened.?.file.read_only = true;
+                const before = try a.dupe(u8, state.opened.?.file.content);
+                defer a.free(before);
+                const selection = term.rt.editor_selection;
+                const extra_before = try a.dupe(editor_selection.Selection, term.rt.editor_extra_selections);
+                defer a.free(extra_before);
+                const revision = state.opened.?.file.revision;
+                state.history.undo = try a.realloc(state.history.undo, state.history.undo_len);
+                const undo_len = state.history.undo_len;
+                const redo_len = state.history.redo_len;
+                const next_id = state.history.next_id;
+                var failing = testing.FailingAllocator.init(a, .{ .fail_index = if (mode != 0) std.math.maxInt(usize) else failure, .resize_fail_index = 0 });
+                fx.session.allocator = failing.allocator();
+                state.opened.?.file.allocator = failing.allocator();
+                state.opened.?.file.buf.allocator = failing.allocator();
+                const unit: DeleteUnit = switch (operation / 2) {
+                    0 => .char,
+                    1 => .word,
+                    2 => .line_edge,
+                    else => unreachable,
+                };
+                const applied = deleteBy(fx.session, term, operation % 2 == 0, unit);
+                fx.session.allocator = a;
+                state.opened.?.file.allocator = a;
+                state.opened.?.file.buf.allocator = a;
+                if (!applied) {
+                    try testing.expectEqualStrings(before, state.opened.?.file.content);
+                    try testing.expectEqualDeep(selection, term.rt.editor_selection);
+                    try testing.expectEqualDeep(extra_before, term.rt.editor_extra_selections);
+                    try testing.expectEqual(revision, state.opened.?.file.revision);
+                    try testing.expectEqual(undo_len, state.history.undo_len);
+                    try testing.expectEqual(redo_len, state.history.redo_len);
+                    try testing.expectEqual(next_id, state.history.next_id);
+                    try testing.expectEqual(@as(usize, 0), peer.rt.editor_selection.?.focus);
+                } else {
+                    try testing.expectEqual(@as(usize, 0), mode);
+                    try testing.expectEqual(undo_len + 1, state.history.undo_len);
+                    try testing.expectEqual(@as(usize, 0), state.history.redo_len);
+                    const after = try a.dupe(u8, state.opened.?.file.content);
+                    defer a.free(after);
+                    try testing.expect(!std.mem.eql(u8, before, after));
+                    try testing.expect(std.unicode.utf8ValidateSlice(after));
+                    try testing.expect(undoEdit(fx.session, peer));
+                    try testing.expectEqualStrings(before, state.opened.?.file.content);
+                    try testing.expect(redoEdit(fx.session, term));
+                    try testing.expectEqualStrings(after, state.opened.?.file.content);
+                }
+                if (!failing.has_induced_failure) {
+                    try testing.expectEqual(mode == 0, applied);
+                    complete = true;
+                    break;
+                }
+            }
+            try testing.expect(complete);
+        }
     }
 }
 

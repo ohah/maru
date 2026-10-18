@@ -5879,6 +5879,14 @@ pub fn build(b: *std.Build) void {
     run_document_runtime_tests.setCwd(b.path("."));
     run_document_runtime_tests.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-document-runtime", "Run editor document registration and release judges").dependOn(&run_document_runtime_tests.step);
+    const delete_undo_tests = addProjectTest(b, .{
+        .root_module = editor_tests.root_module,
+        .filters = &.{".test.DEL"},
+    });
+    const run_delete_undo_tests = b.addRunArtifact(delete_undo_tests);
+    run_delete_undo_tests.setCwd(b.path("."));
+    run_delete_undo_tests.addArg("--maru-expect-tests=11");
+    b.step("test-editor-delete-undo", "Run deletion units, grouping and Undo preparation judges").dependOn(&run_delete_undo_tests.step);
     const paste_undo_tests = addProjectTest(b, .{
         .root_module = editor_tests.root_module,
         .filters = &.{".test.PASTE"},

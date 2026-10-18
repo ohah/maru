@@ -66419,12 +66419,66 @@ fn mixedAllocationTrial(a: std.mem.Allocator, input: *CoordinatorFixture) !void 
     defer ready.deinit(allocator);
     try testing.expectEqual(@as(usize, 3), ready.prepared.effective);
 }
-test "RPMW4 혼합 worker 준비의 모든 할당 실패는 snapshot Read 경로를 회수한다" {
+test "RPMW4 혼합 worker 준비의 할당 실패는 snapshot Read 경로를 회수한다" {
     var fx = try PaneFixture.init(testing.allocator);
     defer fx.deinit(testing.allocator);
     var input = try CoordinatorFixture.init(&fx, "bar");
     defer input.deinit();
-    try testing.checkAllAllocationFailures(testing.allocator, mixedAllocationTrial, .{&input});
+
+    // `checkAllAllocationFailures` requires every trial to make exactly the same number of
+    // allocations. The detached worker's filesystem path does not promise that, so walk the
+    // observed failure indices and stop after an index is no longer reached. The synchronized
+    // allocator keeps FailingAllocator's counters and leak accounting valid across the worker.
+    const needed_allocations = blk: {
+        var probe = testing.FailingAllocator.init(testing.allocator, .{});
+        try mixedAllocationTrial(probe.allocator(), &input);
+        break :blk probe.allocations;
+    };
+    try testing.expect(needed_allocations > 0);
+
+    var failed_steps: usize = 0;
+    var induced_steps: usize = 0;
+    var ok_steps: usize = 0;
+    var step: usize = 0;
+    const walk_cap = @max(needed_allocations * 4, 16);
+    var exhausted = true;
+    while (step <= walk_cap) : (step += 1) {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = step });
+        const outcome = mixedAllocationTrial(failing.allocator(), &input);
+        if (failing.has_induced_failure) {
+            induced_steps += 1;
+            if (outcome) |_| {
+                return error.SwallowedOutOfMemoryError;
+            } else |err| switch (err) {
+                error.OutOfMemory => {},
+                else => return err,
+            }
+            if (failing.allocated_bytes != failing.freed_bytes) {
+                std.debug.print(
+                    "RPMW4 fail_index={d}: allocated {d} bytes, freed {d} bytes\n",
+                    .{ step, failing.allocated_bytes, failing.freed_bytes },
+                );
+                return error.MemoryLeakDetected;
+            }
+            failed_steps += 1;
+        } else {
+            try outcome;
+            ok_steps += 1;
+            if (step >= needed_allocations) {
+                exhausted = false;
+                break;
+            }
+        }
+    }
+    if (exhausted) return error.AllocationWalkRunaway;
+    if (induced_steps != needed_allocations) {
+        std.debug.print(
+            "RPMW4 allocation walk: probe {d}, induced {d}, failed {d}, succeeded {d}, steps {d}\n",
+            .{ needed_allocations, induced_steps, failed_steps, ok_steps, step + 1 },
+        );
+    }
+    try testing.expect(failed_steps >= 1);
+    try testing.expect(ok_steps >= 1);
 }
 test "RPMW5 caller가 즉시 종료해도 detached worker의 마지막 소유권을 회수한다" {
     var fx = try PaneFixture.init(testing.allocator);

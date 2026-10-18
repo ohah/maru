@@ -5918,6 +5918,22 @@ pub fn build(b: *std.Build) void {
     run_caret_activity_regression_tests.addArg("--maru-expect-tests=110");
     run_caret_activity_regression_tests.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-caret-activity-regressions", "Run cursor, selection, diff, find and IME regression judges").dependOn(&run_caret_activity_regression_tests.step);
+    const typing_undo_tests = addProjectTest(b, .{
+        .root_module = editor_tests.root_module,
+        .filters = &.{".test.TYPE_UNDO"},
+    });
+    const run_typing_undo_tests = b.addRunArtifact(typing_undo_tests);
+    run_typing_undo_tests.setCwd(b.path("."));
+    run_typing_undo_tests.addArg("--maru-expect-tests=7");
+    b.step("test-editor-typing-undo", "Run typing Undo preparation judges").dependOn(&run_typing_undo_tests.step);
+    const typing_regression_tests = addProjectTest(b, .{
+        .root_module = editor_tests.root_module,
+        .filters = &.{ ".test.EDIT", ".test.UNDO", ".test.AID", ".test.IME_DIRECT_MULTI", ".test.IME_RETRY", ".test.IME_DELETE" },
+    });
+    const run_typing_regression_tests = b.addRunArtifact(typing_regression_tests);
+    run_typing_regression_tests.setCwd(b.path("."));
+    run_typing_regression_tests.addArg("--maru-expect-tests=52");
+    b.step("test-editor-typing-regressions", "Run typing, grouping, pairing and IME retry judges").dependOn(&run_typing_regression_tests.step);
     const delete_undo_tests = addProjectTest(b, .{
         .root_module = editor_tests.root_module,
         .filters = &.{".test.DEL"},

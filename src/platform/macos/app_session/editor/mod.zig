@@ -8470,7 +8470,7 @@ fn saveDocumentGuarded(self: *AppSession, term: *Term, guard: SaveGuard) SaveErr
 /// 실패하면 **아무 일도 안 일어난다**: delta 층이 원자적이고(`OutOfRange`·`MalformedDelta`·OOM
 /// 전부 되돌린다), 파생 재구축이 실패해도 문서가 편집 전이다.
 ///
-/// **역연산을 아직 어디에도 안 쌓는다** — undo 스택은 다음 조각이다. 지금은 받아서 버린다.
+/// Undo 기록은 본문 변경 전에 준비하고, 성공한 편집만 기존 그룹 규칙으로 게시한다.
 pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     return insertTextWithRange(self, term, text, null, null, null, false);
 }
@@ -8575,6 +8575,10 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
     // **겹치는 커서는 여기서 걸린다**(`Typing.wellFormed`) — 문서 순서로 쌓았으니 정렬하지 않는다(정렬해 숨기면
     // `skip_overs`·`first_change` 의 인덱스가 다시 어긋난다).
     if (!typing.wellFormed()) return false;
+
+    // 본문·IME 추적 상태를 바꾸기 전에 Undo 슬롯과 ID를 확보한다.
+    // 괄호를 건너뛰기만 하는 입력은 위에서 끝나므로 기록 공간을 요구하지 않는다.
+    if (!prepareUndoSlot(self, term)) return false;
 
     var sels = selectionsForEdit(self, term) orelse return false;
     const sels_storage = sels.items;
@@ -40779,6 +40783,168 @@ test "MOV10 제품 열 변환이 L2 대역과 같은 계약을 쓴다 — 탭 �
     for ([_]usize{ 0, 1, 2 }) |b| {
         const c = map.columnOf(map.ctx, text, b);
         try testing.expectEqual(b, map.offsetOf(map.ctx, text, c));
+    }
+}
+
+test "TYPE_UNDO2 기록 ID 고갈도 괄호 건너뛰기를 막지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const term = try undoFixture(&fx, a, "typing-skip.txt", "\n");
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "("));
+    const state = term.rt.editorDocument();
+    const count = state.history.undo_len;
+    const revision = state.opened.?.file.revision;
+    state.history.next_id = std.math.maxInt(u64);
+    try testing.expect(insertText(fx.session, term, ")"));
+    try testing.expectEqualStrings("()\n", state.opened.?.file.content);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(count, state.history.undo_len);
+    try testing.expectEqual(revision, state.opened.?.file.revision);
+}
+
+test "TYPE_UNDO3 직접 IME 교체의 준비 실패는 조합 추적을 보존하고 재시도된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var complete = false;
+    for (0..256) |failure| {
+        var fx = try PaneFixture.init(a);
+        defer fx.deinit(a);
+        const term = try undoFixture(&fx, a, "typing-direct.txt", "L R");
+        term.rt.editor_selection = editor_selection.Selection.at(1);
+        term.rt.editor_extra_selections = try a.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(3)});
+        try testing.expect(insertDirectIMETextAtSelection(fx.session, term, "ㄱ", null, null));
+        const state = term.rt.editorDocument();
+        const direct_before = try a.dupe(DirectIMEState.Item, term.rt.editor_ime_direct.items);
+        defer a.free(direct_before);
+        const direct_revision = term.rt.editor_ime_direct.revision;
+        const direct_primary = term.rt.editor_ime_direct.primary;
+        const selection = term.rt.editor_selection;
+        const extra = term.rt.editor_extra_selections[0];
+        state.history.undo = try a.realloc(state.history.undo, state.history.undo_len);
+        const count = state.history.undo_len;
+        const id = state.history.next_id;
+        var failing = testing.FailingAllocator.init(a, .{ .fail_index = failure, .resize_fail_index = 0 });
+        fx.session.allocator = failing.allocator();
+        state.opened.?.file.allocator = failing.allocator();
+        state.opened.?.file.buf.allocator = failing.allocator();
+        const applied = insertDirectIMETextAtSelection(fx.session, term, "가", .{ .start = 1, .end = 4 }, .{ .start = 4, .end = 4 });
+        fx.session.allocator = a;
+        state.opened.?.file.allocator = a;
+        state.opened.?.file.buf.allocator = a;
+        if (!applied) {
+            try testing.expectEqualStrings("Lㄱ Rㄱ", state.opened.?.file.content);
+            try testing.expectEqualDeep(direct_before, term.rt.editor_ime_direct.items);
+            try testing.expectEqual(direct_revision, term.rt.editor_ime_direct.revision);
+            try testing.expectEqual(direct_primary, term.rt.editor_ime_direct.primary);
+            try testing.expectEqualDeep(selection, term.rt.editor_selection);
+            try testing.expectEqualDeep(extra, term.rt.editor_extra_selections[0]);
+            try testing.expectEqual(count, state.history.undo_len);
+            try testing.expectEqual(id, state.history.next_id);
+            try testing.expect(insertDirectIMETextAtSelection(fx.session, term, "가", .{ .start = 1, .end = 4 }, .{ .start = 4, .end = 4 }));
+        }
+        try testing.expectEqualStrings("L가 R가", state.opened.?.file.content);
+        try testing.expectEqual(count + 1, state.history.undo_len);
+        try testing.expect(insertDirectIMETextAtSelection(fx.session, term, "간", .{ .start = 1, .end = 4 }, .{ .start = 4, .end = 4 }));
+        try testing.expectEqualStrings("L간 R간", state.opened.?.file.content);
+        if (!failing.has_induced_failure) {
+            try testing.expect(applied);
+            complete = true;
+            break;
+        }
+    }
+    try testing.expect(complete);
+}
+
+test "TYPE_UNDO1 타이핑의 Undo 준비 실패는 본문·전체 선택·기존 이력을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    for (0..5) |operation| {
+        for (0..3) |mode| {
+            var complete = false;
+            for (0..256) |failure| {
+                var fx = try PaneFixture.init(a);
+                defer fx.deinit(a);
+                const term = try undoFixture(&fx, a, "typing-undo.txt", "가나다 foo bar\nnext line\n");
+                term.rt.editor_selection = editor_selection.Selection.at(term.rt.editorDocument().opened.?.file.content.len);
+                try testing.expect(insertText(fx.session, term, "tail"));
+                breakUndoGroup(term);
+                try testing.expect(insertText(fx.session, term, "redo"));
+                try testing.expect(undoEdit(fx.session, term));
+                term.rt.editor_selection = editor_selection.Selection.at(23);
+                term.rt.editor_extra_selections = try a.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(14)});
+                if (operation == 4) {
+                    term.rt.editor_selection = editor_selection.Selection.fromPoints(18, 22);
+                    term.rt.editor_extra_selections[0] = editor_selection.Selection.fromPoints(10, 13);
+                }
+                const peer = try openSharedViewInActivePane(fx.session, term);
+                peer.rt.editor_selection = editor_selection.Selection.at(0);
+                const state = term.rt.editorDocument();
+                if (mode == 1) state.history.next_id = std.math.maxInt(u64);
+                if (mode == 2) state.opened.?.file.read_only = true;
+                const before = try a.dupe(u8, state.opened.?.file.content);
+                defer a.free(before);
+                const selection = term.rt.editor_selection;
+                const extra_before = try a.dupe(editor_selection.Selection, term.rt.editor_extra_selections);
+                defer a.free(extra_before);
+                const revision = state.opened.?.file.revision;
+                state.history.undo = try a.realloc(state.history.undo, state.history.undo_len);
+                const undo_len = state.history.undo_len;
+                const redo_len = state.history.redo_len;
+                const next_id = state.history.next_id;
+                const edit_group = state.history.edit_group;
+                const last_edit_kind = state.history.last_edit_kind;
+                const last_edit_ms = state.history.last_edit_ms;
+                const auto_closed = term.rt.editor_auto_closed_at;
+                var failing = testing.FailingAllocator.init(a, .{ .fail_index = if (mode != 0) std.math.maxInt(usize) else failure, .resize_fail_index = 0 });
+                fx.session.allocator = failing.allocator();
+                state.opened.?.file.allocator = failing.allocator();
+                state.opened.?.file.buf.allocator = failing.allocator();
+                const applied = if (operation == 3) insertDirectIMETextAtSelection(fx.session, term, "한", null, null) else insertText(fx.session, term, switch (operation) {
+                    0 => "X",
+                    1 => "한",
+                    2, 4 => "(",
+                    else => unreachable,
+                });
+                fx.session.allocator = a;
+                state.opened.?.file.allocator = a;
+                state.opened.?.file.buf.allocator = a;
+                if (!applied) {
+                    try testing.expectEqualStrings(before, state.opened.?.file.content);
+                    try testing.expectEqualDeep(selection, term.rt.editor_selection);
+                    try testing.expectEqualDeep(extra_before, term.rt.editor_extra_selections);
+                    try testing.expectEqual(revision, state.opened.?.file.revision);
+                    try testing.expectEqual(undo_len, state.history.undo_len);
+                    try testing.expectEqual(redo_len, state.history.redo_len);
+                    try testing.expectEqual(next_id, state.history.next_id);
+                    try testing.expectEqual(edit_group, state.history.edit_group);
+                    try testing.expectEqual(last_edit_kind, state.history.last_edit_kind);
+                    try testing.expectEqual(last_edit_ms, state.history.last_edit_ms);
+                    try testing.expectEqual(auto_closed, term.rt.editor_auto_closed_at);
+                    try testing.expectEqual(@as(usize, 0), peer.rt.editor_selection.?.focus);
+                } else {
+                    try testing.expectEqual(@as(usize, 0), mode);
+                    try testing.expectEqual(undo_len + 1, state.history.undo_len);
+                    try testing.expectEqual(@as(usize, 0), state.history.redo_len);
+                    const after = try a.dupe(u8, state.opened.?.file.content);
+                    defer a.free(after);
+                    try testing.expect(!std.mem.eql(u8, before, after));
+                    try testing.expect(std.unicode.utf8ValidateSlice(after));
+                    try testing.expect(undoEdit(fx.session, peer));
+                    try testing.expectEqualStrings(before, state.opened.?.file.content);
+                    try testing.expect(redoEdit(fx.session, term));
+                    try testing.expectEqualStrings(after, state.opened.?.file.content);
+                }
+                if (!failing.has_induced_failure) {
+                    try testing.expectEqual(mode == 0, applied);
+                    complete = true;
+                    break;
+                }
+            }
+            try testing.expect(complete);
+        }
     }
 }
 

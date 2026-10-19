@@ -36,6 +36,7 @@ def main():
     parser.add_argument("--matrix", action="store_true")
     parser.add_argument("--native-close-save", action="store_true")
     parser.add_argument("--save-as-command", action="store_true")
+    parser.add_argument("--save-as-physical-ime", action="store_true")
     parser.add_argument("--save-as-scenario", choices=("save", "cancel", "edit-during-write"), default="save")
     parser.add_argument("--native-panel-capture-app", type=Path,
                         help="화면 기록이 허용된 native-window-capture.swift.inc 앱 번들")
@@ -59,6 +60,8 @@ def main():
     parser.add_argument("--optimize", choices=("Debug", "ReleaseFast"), default="Debug")
     parser.add_argument("--app", type=Path, help="이 하네스로 빌드한 앱을 재사용한다")
     args = parser.parse_args()
+    if args.save_as_physical_ime and (not args.save_as_command or not args.native_panel_capture_app or args.physical_ime or args.save_as_scenario != "save"):
+        parser.error("Save As physical IME needs native capture, --save-as-command and the save scenario without --physical-ime")
     if args.save_as_scenario != "save" and (not args.save_as_command or not args.native_panel_capture_app):
         parser.error("Save As lifecycle scenarios need --save-as-command and --native-panel-capture-app")
     if args.native_panel_capture_app and (not args.save_as_command or not args.native_panel_capture_app.is_dir()):
@@ -122,6 +125,8 @@ def main():
         source = app.parents[4]
         if args.save_as_scenario == "edit-during-write" and "fn saveAsWriteGate(" not in (source / "src/platform/macos/app_session/editor/local_save.zig").read_text():
             parser.error("This app lacks the writer gate; build a new Save As verification app")
+        if args.save_as_physical_ime and "SAVE_AS_IME marked=true" not in (source / "src/platform/macos/MaruAppHost.swift").read_text():
+            parser.error("This app lacks the Korean Save As driver; build a new verification app")
         hashes = {name: sha(source / name) for name in names}
         command = None
     else:
@@ -242,10 +247,11 @@ def main():
     if args.native_close_save: env["MARU_EDITOR_NATIVE_CLOSE_SAVE"] = "1"
     if args.save_as_command: env["MARU_EDITOR_SAVE_AS_COMMAND"] = "1"
     env["MARU_EDITOR_SAVE_AS_SCENARIO"] = args.save_as_scenario
+    if args.save_as_physical_ime: env["MARU_EDITOR_SAVE_AS_PHYSICAL_IME"] = "1"
     if args.native_panel_capture_app: env["MARU_NATIVE_PANEL_CAPTURE_EXTERNAL"] = "1"
     env["MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY"] = "1" if args.replace_batch_save_retry else "0"
     env["MARU_EDITOR_PROJECT_REPLACE_BATCH"] = "1" if args.replace_batch else "0"
-    if args.physical_ime:
+    if args.physical_ime or args.save_as_physical_ime:
         main = root / "main.swift"
         main.write_text((repo / "src/platform/macos/SessionHostInputSourcePolicy.swift").read_text() + "\n" +
                         (source / "tools/editor-project-search-app/hid.swift.inc").read_text())
@@ -260,9 +266,9 @@ def main():
         hid = None
         hid_log = None
         try:
-            if args.physical_ime:
+            if args.physical_ime or args.save_as_physical_ime:
                 hid_log = (root / "hid.log").open("wb")
-                hid = subprocess.Popen([str(root / "hid"), str(child.pid), str(artifacts)], stdout=hid_log, stderr=hid_log)
+                hid = subprocess.Popen([str(root / "hid"), str(child.pid), str(artifacts)], env=env, stdout=hid_log, stderr=hid_log)
             samples = []
             panel_captured = False
             panel_capture_attempts = 0
@@ -369,7 +375,12 @@ end run'''
         expected += ("save-as-before", "save-as-after")
         if args.save_as_scenario != "save" and "SAVE_AS_HISTORY undo=true redo=true" not in transcript:
             raise RuntimeError("Save As lifecycle scenario did not verify Undo/Redo")
-        wanted = (("source", b"foo"),) if args.save_as_scenario == "cancel" else (("source", b"foo"), ("destination", b"foo!"))
+        saved = "foo한".encode() if args.save_as_physical_ime else b"foo!"
+        wanted = (("source", b"foo"),) if args.save_as_scenario == "cancel" else (("source", b"foo"), ("destination", saved))
+        if args.save_as_physical_ime:
+            expected += ("save-as-ime-marked",)
+            if "SAVE_AS_IME marked=true" not in transcript or "source_restore=restored original=" not in (root / "hid.log").read_text():
+                raise RuntimeError("Missing real marked-text or input source restoration evidence")
         for name, data in wanted:
             if (project / ("save-as-" + name + ".txt")).read_bytes() != data:
                 raise RuntimeError("Save As disk bytes differ: " + name)
@@ -405,13 +416,16 @@ end run'''
     if args.replace_batch and (not metrics["batch_apply_ns"] or not metrics["batch_plans"]):
         raise RuntimeError("Missing actual batch timing evidence")
     report = dict(scope="Real AppKit search input, result click, navigation, bottom dock scrolling, cancellation and Metal readback",
-        limits="Physical Korean HID and Enter verified; no VoiceOver or OS candidate screenshot proof" if args.physical_ime else "No physical Korean HID or VoiceOver proof", source_sha256=hashes, binary_sha256=sha(app), command=command,
+        limits="Korean CGEvent typing and Save As composition commit verified; shortcut is AppKit NSEvent; no VoiceOver proof" if args.save_as_physical_ime else "Physical Korean HID and Enter verified; no VoiceOver or OS candidate screenshot proof" if args.physical_ime else "No physical Korean HID or VoiceOver proof", source_sha256=hashes, binary_sha256=sha(app), command=command,
         product_passed=True, native_close_save=args.native_close_save, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, batch_open_files=args.batch_open_files, batch_peer_bytes=args.batch_peer_bytes, optimize=args.optimize, disk_padding_lines=args.disk_padding_lines, batch_save_delay_ms=args.batch_save_delay_ms, replace_batch_save_retry=args.replace_batch_save_retry, replace_batch=args.replace_batch, replace_preview=args.replace_preview, replace_apply=args.replace_apply, replace_disk_apply=args.replace_disk_apply, replace_ime_refuse=args.replace_ime_refuse, conflict_markers=args.conflict_markers, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(source / "tools/editor-project-search-app" / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc", "batch.zig.inc", "native-close.zig.inc", "native-close.swift.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
     report["runner_sha256"] = sha(Path(__file__))
     report["save_as_command"] = args.save_as_command
     report["save_as_scenario"] = args.save_as_scenario
+    report["save_as_physical_ime"] = args.save_as_physical_ime
     if args.save_as_command:
         report["scope"] = "AppKit Save As shortcut, native sheet capture and accessibility confirmation; model path and original/destination disk bytes"
+        if args.save_as_physical_ime:
+            report["scope"] += "; Korean input source CGEvent composition, marked text before Save As, source restoration"
         for name in ("save-as.swift.inc", "save-as.zig.inc"):
             report["harness_sha256"][name] = sha(source / "tools/editor-project-search-app" / name)
         gate = source / "tools/editor-project-search-app/save-as-write-gate.zig.inc"

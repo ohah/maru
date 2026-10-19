@@ -8,6 +8,7 @@
     static var timer: Timer?
     static var confirming = false
     static var editedDuringWrite = false
+    static var imeStarted = false
 }
 extension MaruAppHostController {
     private func maybeRunSaveAsCommand() {
@@ -36,6 +37,10 @@ extension MaruAppHostController {
             if !success { exitCode = 1 }
             FileHandle.standardError.write(Data("EDITOR_PROJECT_SEARCH_FINISH passed=\(success) transport=AppKit-local save-as=true\n".utf8))
             FileHandle.standardError.write(Data("SAVE_AS_FINISH stage=\(stage) reason=\(reason) screen_capture_permission=\(CGPreflightScreenCaptureAccess())\n".utf8))
+            if ProcessInfo.processInfo.environment["MARU_EDITOR_SAVE_AS_PHYSICAL_IME"] == "1",
+               let root = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_OUTPUT"] {
+                try? Data().write(to: URL(fileURLWithPath: root).appendingPathComponent("save-as-ime-finished"), options: .atomic)
+            }
             bypassQuitConfirm = true
             // 실패한 sheet가 남으면 AppKit이 종료를 보류해 원래 실패를 timeout으로 가린다.
             // 검증용 정리도 제품의 취소 callback을 통해 요청을 정산한다.
@@ -60,6 +65,29 @@ extension MaruAppHostController {
             do { try Data().write(to: directory.appendingPathComponent("save-as-writer-release"), options: .atomic) }
             catch { finish(false, "writer_release"); return }
             EditorSaveAsRun.next = now + 0.05
+            return
+        }
+        if stage == 1, ProcessInfo.processInfo.environment["MARU_EDITOR_SAVE_AS_PHYSICAL_IME"] == "1" {
+            guard let root = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_OUTPUT"] else { finish(false, "ime_root"); return }
+            if !EditorSaveAsRun.imeStarted {
+                guard editorSaveAsProbe(1) == 1 else { finish(false, "ime_initial_model"); return }
+                window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+                window.makeFirstResponder(view)
+                EditorSaveAsRun.imeStarted = true
+                do { try Data().write(to: URL(fileURLWithPath: root).appendingPathComponent("save-as-physical-ready"), options: .atomic) }
+                catch { finish(false, "ime_ready"); return }
+                return
+            }
+            guard view.hasMarkedText(), view.markedRange().length == 1, editorSaveAsProbe(6) == 1 else { EditorSaveAsRun.next = now + 0.05; return }
+            guard editorProjectSearchCapture("save-as-ime-marked"), editorProjectSearchCapture("save-as-before"),
+                  let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .shift], timestamp: now, windowNumber: window.windowNumber, context: nil, characters: "S", charactersIgnoringModifiers: "s", isARepeat: false, keyCode: 1)
+            else { finish(false, "ime_capture"); return }
+            FileHandle.standardError.write(Data("SAVE_AS_IME marked=true length=1\n".utf8))
+            // 중첩 AppKit 이벤트가 같은 명령을 재전송하지 않게 먼저 단계를 이동한다.
+            EditorSaveAsRun.stage = 2
+            EditorSaveAsRun.next = now + 0.3
+            view.keyDown(with: event)
             return
         }
         let ready = editorSaveAsProbe(stage)
@@ -132,6 +160,9 @@ extension MaruAppHostController {
             FileHandle.standardError.write(Data("SAVE_AS stage=3 verified=true\n".utf8))
             return
         case 4:
+            if ProcessInfo.processInfo.environment["MARU_EDITOR_SAVE_AS_PHYSICAL_IME"] == "1", view.hasMarkedText() {
+                finish(false, "ime_not_committed"); return
+            }
             guard editorSaveAsHistory() == 1, editorSaveAsProbe(4) == 1 else { finish(false, "undo_redo"); return }
             guard editorProjectSearchCapture("save-as-after") else { finish(false); return }
             finish(true); return

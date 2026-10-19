@@ -4369,4 +4369,6 @@ ScreenCaptureKit 패널 이미지·native 접근성 확인·대화상자 종료�
 후속 `--save-as-scenario cancel`은 실제 취소 뒤 원본 경로·dirty·본문과 목적지 미생성을,
 `edit-during-write`는 writer 진입 동기화 뒤 추가 입력·이전 snapshot 저장·새 본문 유지를
 검증했다. 세 시나리오의 Undo/Redo와 Metal 이미지도 확인했다.
-이 결과는 물리 IME·VoiceOver의 증거가 아니다.
+`--save-as-physical-ime`는 한국어 OS 입력기에 CGEvent를 보내 조합 중 preedit·marked range를
+확인한 뒤 NSEvent Save As를 실행했다. `foo한` 저장·조합 종료·Undo/Redo와 입력기 복원이
+통과했다. 사람의 키보드 조작·VoiceOver·한자 후보창 위치의 증거는 아니다.

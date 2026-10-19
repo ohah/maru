@@ -18818,6 +18818,7 @@ pub const AppSession = struct {
         // 전제한다(`scrollbarGrabAt` 의 `activeSurface`, `navButtonHoverAt` 의 `activeTab`) — 2026-10-19 크래시 3 건.
         // 0 탭이면 tick 도 그리지 않으므로 hover 할 것이 없다.
         if (self.tabs.items.len == 0) return .default;
+        if (!inspector_ops.contains(self, x_px, y_px) or self.anyModalOverlayOpen()) inspector_ops.clearHover(self);
         if (!self.anyModalOverlayOpen() and inspector_ops.dividerContains(self, x_px, y_px)) {
             return if (self.inspector.presentation.placement == .left or self.inspector.presentation.placement == .right) .resize_h else .resize_v;
         }
@@ -101283,6 +101284,11 @@ test "Live inspector: shared GUI and CLI snapshot, pause, closed target and inpu
     _ = try session.handleKeyEvent(.{ .key = .arrow_left });
     try std.testing.expectEqual(terminal_before + 1, session.total_key_events);
     try std.testing.expectEqual(@as(usize, 0), session.inspector.query_len);
+    const button = chrome.components.inspector.controlRect(inspector_ops.propsFor(session), session.scale_milli, arena.allocator(), 40) orelse return error.InspectorButtonMissing;
+    _ = session.hoverCursor(@as(f64, @floatFromInt(button.x)) + @as(f64, @floatFromInt(button.w)) / 2, @as(f64, @floatFromInt(button.y)) + @as(f64, @floatFromInt(button.h)) / 2, 0);
+    try std.testing.expectEqual(@as(?u64, 40), session.inspector.hovered);
+    _ = session.hoverCursor(-1, -1, 0);
+    try std.testing.expect(session.inspector.hovered == null);
     const filter = inspector_ops.caretRect(session) orelse return error.InspectorFilterMissing;
     session.mouse(1, @floatFromInt(filter.x + 2), @floatFromInt(filter.y + 2), 0, 0);
     try std.testing.expectEqual(AppSession.InputFocus.inspector, session.inputFocus());

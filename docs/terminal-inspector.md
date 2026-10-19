@@ -106,3 +106,15 @@ GPU scene tag 6이 인스펙터 배경·글자를 구분한다. 도킹 상태에
 레이아웃 정책은 중립 `session/inspector/layout.zig`, 제품 상태·입력·수집은 macOS adapter,
 NSWindow 생성·닫기·실제 drawable 배율 전달은 Swift가 소유한다. ABI v231은 배치·입력·
 read-only control rect/target 관측을 전달하며 JSON schema `maru.inspector.v1`은 유지한다.
+
+## UX 레퍼런스와 결정 기준
+
+사용자 지정 레퍼런스는 Ghostty와 Chrome DevTools다. 공개 문서와 동작을 비교하며 reference
+구현의 소스 표현을 복사하지 않는다. 기존 계약을 바꾸는 결정은 사용자와 먼저 논의한다.
+
+- [Ghostty Inspector action](https://ghostty.org/docs/config/keybind/reference#inspector): terminal inspector의
+  표시/숨김 조작을 참고한다. Maru의 공개 action 이름은 `toggle_inspector`다.
+- [Chrome DevTools placement](https://developer.chrome.com/docs/devtools/customize#placement): 오른쪽·아래·왼쪽
+  dock, 별도 window, 마지막 위치 복원을 참고한다. **위쪽 dock은 사용자 승인에 따른 Maru 확장**이다.
+- 필터와 terminal의 Escape 경계, Follow/Pin/Paused, export 익명화·권한은 이 문서의 Maru 계약을 따른다.
+  Chrome의 Drawer Escape 동작을 별도 Drawer가 없는 현재 Inspector에 그대로 옮기지 않는다.

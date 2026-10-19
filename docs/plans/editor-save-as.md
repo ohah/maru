@@ -234,6 +234,9 @@ Debug/ReleaseFast 대상 검사, 전체 ReleaseFast 에디터 검사(1,511 통�
 실제 GUI 검증은 `tools/editor-project-search-app/run.py --save-as-command`로
 제품 NSEvent·NSSavePanel·Metal 렌더를 사용한다. 물리 IME와 접근성 검증을 대신하지
 않는다. 잠긴 화면에서 나온 검은 이미지는 시각 검증 증거로 사용하지 않는다.
+격리 사본은 웹 의존성을 `bun install --frozen-lockfile`로 준비하며 원본 checkout의
+설치 상태나 공유 `node_modules`에 의존하지 않는다. 설치 로그는 `dependencies.log`에
+보존하고, 설치 실패 시 앱 빌드를 시작하지 않는다.
 잠긴 환경에서 별도로 시도한 논리 경로도 저장 sheet 확인 이후 시간 초과했으므로
 완료로 판정하지 않는다. 해당 실험 하네스 변경은 제품 PR에 포함하지 않는다.
 실제 저장 창 촬영과 물리 IME 검증은 남아 있다.

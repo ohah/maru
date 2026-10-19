@@ -107,9 +107,11 @@ def main():
         subprocess.run(["rsync", "-a", "--exclude=.git", "--exclude=.zig-cache", "--exclude=zig-out",
                         "--exclude=node_modules", "--exclude=references", "--exclude=.env*", "--exclude=.codex-worktrees",
                         str(repo) + "/", str(source) + "/"], check=True, timeout=120)
-        for name in ("node_modules", "web/node_modules"):
-            if (repo / name).exists():
-                (source / name).symlink_to(repo / name, target_is_directory=True)
+        # 격리 사본은 checkout의 설치 상태나 공유 node_modules에 의존하지 않는다.
+        with (root / "dependencies.log").open("wb") as log:
+            subprocess.run(["mise", "exec", "--", "bun", "install", "--frozen-lockfile"],
+                           cwd=source / "web", stdout=log, stderr=subprocess.STDOUT,
+                           check=True, timeout=300)
         hashes = {name: sha(source / name) for name in names}
         if hashes != {name: sha(repo / name) for name in names}:
             raise RuntimeError("Source changed during copying")

@@ -4742,6 +4742,19 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_inspector_rules.step);
+    const inline_input_step = b.step("test-inline-text-input", "Validate bounded UTF-16 inline IME projections and failure atomicity");
+    inline for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
+        const inline_input_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+            .root_source_file = b.path("src/inline_text_input.zig"),
+            .target = target,
+            .optimize = mode,
+        }) });
+        const run_inline_input = b.addRunArtifact(inline_input_tests);
+        run_inline_input.addArg("--maru-expect-tests=8");
+        inline_input_step.dependOn(&run_inline_input.step);
+        test_step.dependOn(&run_inline_input.step);
+    }
+
     const agent_log_record_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/agent_log_record_test.zig"),
         .target = target,
@@ -5642,7 +5655,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_session_host_cr6d_candidate_debug = b.addRunArtifact(session_host_cr6d_candidate_debug);
-    run_session_host_cr6d_candidate_debug.addArg("--maru-expect-tests=11");
+    run_session_host_cr6d_candidate_debug.addArg("--maru-expect-tests=12");
     const session_host_cr6d_candidate_release = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/ime_candidate_evidence.zig"),
@@ -5652,7 +5665,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_session_host_cr6d_candidate_release = b.addRunArtifact(session_host_cr6d_candidate_release);
-    run_session_host_cr6d_candidate_release.addArg("--maru-expect-tests=11");
+    run_session_host_cr6d_candidate_release.addArg("--maru-expect-tests=12");
     test_step.dependOn(&run_session_host_cr6d_candidate_debug.step);
     test_step.dependOn(&run_session_host_cr6d_candidate_release.step);
     const session_host_cr6d_candidate_step = b.step(

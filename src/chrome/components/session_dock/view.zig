@@ -459,6 +459,10 @@ const Writer = struct {
         if (empty and !show_caret) {
             return self.emit(x, y, i18n.t(.sd_search), max_cols, .head, .muted_fg, .control, false, false);
         }
+        if (self.props.search_caret_byte) |caret| {
+            const at = @min(caret, self.props.search.len);
+            return self.emitJoined(x, y, self.props.search[0..at], if (show_caret) "|" else "", self.props.search[at..], max_cols, if (empty) .muted_fg else .surface_fg);
+        }
         return self.emitJoined(x, y, self.props.search, self.props.search_preedit, if (show_caret) "|" else "", max_cols, if (empty) .muted_fg else .surface_fg);
     }
 

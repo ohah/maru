@@ -7,6 +7,10 @@
   한자 후보창 5개 및 독립 픽셀 판정까지 요구한다. callback 성공은 실제 OS 후보창 증거가 아니다.
   이미 빌드한 관측 앱은 `--app <Maru.app/Contents/MacOS/maru-macos-app>`으로 재사용한다.
   서명이 같은 staged bundle은 재실행 사이에 유지하며, 결과·화면은 저장소 밖에 둔다.
+  검색 문맥 범위/실패 원자성: `mise exec -- zig build test-inline-text-input test-session-dock-search-input`.
+  후보 관측 계약: `mise exec -- zig build test-session-host-cr6d-ime-candidate-evidence`.
+  검색 전용 candidate schema는 원본 callback 횟수와 query/preedit 전이를 검증하며 기존 terminal
+  candidate 판정자는 그대로 유지한다. live 모드는 후보창 5회 취소 뒤 실제 한자 선택도 확인한다.
   독립 판정자 음성 대조: `python3 -m unittest discover -s tools/session-dock-ime -p 'test_*.py'`.
 
 ## Live Terminal Inspector

@@ -564,7 +564,7 @@ content 크기를 `agent_session_archive_smoke_content_size`로 summary에 남�
 이 fixture는 provider-native binary가 실제 계정 세션을 재개한다는 보장은 아니다. 그 수동 검증은 사용자가 명시적으로
 승인한 실제 이력에서만 하며, CI evidence와 섞지 않는다.
 
-#### 실제 한자 후보창 문맥 확장 제안 (사용자 논의 전 · 미착수)
+#### 실제 한자 후보창 문맥 확장 (2026-10-19 사용자 승인 · 진행)
 
 권한을 모두 통과한 실제 HID 실행에서 `ㅎ → 하 → 한` marked text와 검색 owner는 정상으로
 관측됐다. 처음 한 실행의 `ㅎ` 즉시 commit은 다음 실행에서 재현되지 않았으므로 원인이
@@ -572,18 +572,25 @@ content 크기를 `agent_session_archive_smoke_content_size`로 summary에 남�
 CR6d와 같은 `input.option-as-meta=false`로 제거한다. 이 설정으로도 Option-Return이
 `setMarkedText(한)` → `insertText(한)` → `insertNewlineIgnoringFieldEditor`를 발생시키고
 후보창은 열리지 않았다. 같은 transaction의 `selectedRange`는 계속 `{0,0}`이다.
-현재 검색창은 editor 문서 context가 아니므로 host의 terminal fallback을 사용한다.
-즉, 검색어의 실제 선택 위치·주변 문자열·replacement range를 입력기에 제공하지 않는다.
+확장 전 검색창은 editor 문서 context가 아니므로 host의 terminal fallback을 사용했다.
+즉, 검색어의 실제 선택 위치·주변 문자열·replacement range를 입력기에 제공하지 않았다.
 이것은 anchor 위치 수정이나 test-only 임시 문자열로 대신할 수 없는 별도 입력 계약이다.
 
-확장안은 다음과 같다. 기존 문서 context/키 정책을 바꾸므로 구현 전에 사용자와 논의한다.
+사용자가 확장안을 승인했다. 구현 순서는 아래와 같으며, 검색 문맥/키 정책을 함께 확장한다.
+
+설계 검토에서 late callback의 generation 숫자만 현재 view에 보관하면 재진입 뒤 과거 callback을
+구분하지 못하는 구멍을 확인했다. 검색 세대마다 별도 `NSTextInputClient`/context를 만들고 고정한
+owner token으로 forward한다. 이전 client는 새 검색 owner나 terminal에 callback을 전달하지 않는다.
+텍스트 projection은 최대 256-byte query와 256-byte marked text의 bounded 중립 모델로 두고,
+실제 query는 key transaction 끝에서만 failure-atomic하게 갱신한다. OOM/잘못된 범위 거부 뒤
+물리 키를 재생하지 않으며, blur 확정이 실패하면 owner 전환도 거부한다.
 
 1. `OverlayInput`의 canonical query/preedit를 권위로 유지하고, UTF-16 선택·marked 범위·
    substring 및 replacement의 순수 계산을 L3 중립 모델에 둔다. Swift에 검색어 사본이나
    test-only 후보 문맥을 제품 권위로 추가하지 않는다.
 2. AppSession의 명시적 search owner와 입력 세대를 고정한 읽기/쓰기 adapter로 AppKit을
    연결한다. `imeEnd` 전 확정 대기 문자열도 같은 transaction의 문맥 질의에 일관되게
-   투영한다. 필요 시 ABI를 확장하고 기존 export의 호환성·버전을 함께 관리한다.
+   투영한다. chrome 전용 state/substring export를 추가하고 ABI를 232로 올렸다(main의 Inspector ABI 231 이후). 기존 editor export는 유지한다.
 3. `selectedRange`, `markedRange`, `attributedSubstring`, `insertText`의 replacement를
    같은 문서 축으로 해석한다. 범위 밖·surrogate 중간·UTF-8 한계·OOM은 query를 훼손하거나
    다른 owner/terminal로 재지정하지 않는다. marked만 바뀌는 동안 필터를 확정하지 않는다.

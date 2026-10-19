@@ -137,11 +137,75 @@ pub const Error = error{
     InvalidDisplay,
     AnchorOutsideDisplay,
     AnchorDrift,
+    SearchTransitionInvalid,
 };
 
 /// Reduces one request/open/Escape-close observation.  Any concurrent new eligible window makes
 /// the result ambiguous rather than letting the producer choose the convenient row.
 pub fn reduceTriplet(app_pid: i32, triplet: Triplet) Error!Candidate {
+    const candidate = try reduceWindowTriplet(app_pid, triplet);
+    // Diagnose absent/invalid candidate authority first; counter drift must not hide that the
+    // request never produced a candidate. The same conjunction still rejects every mutation.
+    if (!Counters.eql(triplet.before_counters, triplet.opened_counters) or
+        !Counters.eql(triplet.before_counters, triplet.closed_counters)) return error.CounterMutation;
+    return candidate;
+}
+
+pub const SearchState = struct {
+    owner_generation: u64,
+    first_responder: bool,
+    search_owner: bool,
+    query_bytes: u32,
+    query_hash: u64,
+    preedit_bytes: u32,
+    preedit_hash: u64,
+};
+pub const SearchTransition = struct {
+    before: SearchState,
+    opened: SearchState,
+    closed: SearchState,
+    before_counters: Counters,
+    opened_counters: Counters,
+    closed_counters: Counters,
+};
+fn fixtureHash(bytes: []const u8) u64 {
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+    return std.mem.readInt(u64, hash[0..8], .little);
+}
+fn searchMarked(state: SearchState) bool {
+    return state.query_bytes == 0 and state.query_hash == fixtureHash("") and
+        state.preedit_bytes == 3 and state.preedit_hash == fixtureHash("한");
+}
+fn searchCommitted(state: SearchState) bool {
+    return state.query_bytes == 3 and state.query_hash == fixtureHash("한") and
+        state.preedit_bytes == 0 and state.preedit_hash == fixtureHash("");
+}
+fn validSearchStep(before: SearchState, after: SearchState, a: Counters, b: Counters) bool {
+    if (a.pty_input_bytes != b.pty_input_bytes or a.base_screen_generation != b.base_screen_generation or
+        b.committed_text_callbacks < a.committed_text_callbacks) return false;
+    const callbacks = b.committed_text_callbacks - a.committed_text_callbacks;
+    return (callbacks == 0 and std.meta.eql(before, after)) or
+        (callbacks == 1 and searchCommitted(after));
+}
+/// Search reconversion may commit the original syllable while requesting candidates. This is a
+/// separate schema/policy: terminal consumers still require every counter to stay identical.
+pub fn reduceSearchTriplet(app_pid: i32, triplet: Triplet, transition: SearchTransition) Error!Candidate {
+    const candidate = try reduceWindowTriplet(app_pid, triplet);
+    if (!std.meta.eql(transition.before_counters, triplet.before_counters) or
+        !std.meta.eql(transition.opened_counters, triplet.opened_counters) or
+        !std.meta.eql(transition.closed_counters, triplet.closed_counters)) return error.SearchTransitionInvalid;
+    if (transition.before.owner_generation == 0 or !searchMarked(transition.before)) return error.SearchTransitionInvalid;
+    for ([_]SearchState{ transition.before, transition.opened, transition.closed }) |state| {
+        if (!state.first_responder or !state.search_owner or state.owner_generation != transition.before.owner_generation)
+            return error.SearchTransitionInvalid;
+    }
+    if (!validSearchStep(transition.before, transition.opened, triplet.before_counters, triplet.opened_counters) or
+        !validSearchStep(transition.opened, transition.closed, triplet.opened_counters, triplet.closed_counters)) return error.SearchTransitionInvalid;
+    return candidate;
+}
+
+fn reduceWindowTriplet(app_pid: i32, triplet: Triplet) Error!Candidate {
     if (app_pid <= 0) return error.InvalidAppPid;
     try validateSnapshot(triplet.before);
     try validateSnapshot(triplet.opened);
@@ -170,10 +234,6 @@ pub fn reduceTriplet(app_pid: i32, triplet: Triplet) Error!Candidate {
             containsId(triplet.before, window.id)) continue;
         return error.CandidateNotClosed;
     }
-    // Diagnose absent/invalid candidate authority first; counter drift must not hide that the
-    // request never produced a candidate. The same conjunction still rejects every mutation.
-    if (!Counters.eql(triplet.before_counters, triplet.opened_counters) or
-        !Counters.eql(triplet.before_counters, triplet.closed_counters)) return error.CounterMutation;
     return .{
         .app_capture = app_capture,
         .window_id = candidate.id,
@@ -261,6 +321,7 @@ fn findById(windows: []const Window, id: u32) ?Window {
 }
 
 const RawSnapshot = struct {
+    search: ?SearchState = null,
     app_captures: []const AppCapture = &.{},
     windows: []const Window,
     counters: Counters,
@@ -304,11 +365,13 @@ const Artifact = struct {
 /// Swift lends the complete in-memory transcript once.  Parsing, candidate selection, series
 /// authority and absent-target publication stay in Zig so the producer cannot grow a second
 /// heuristic or leave another application's window inventory on disk.
-pub fn publishObservation(
-    allocator: std.mem.Allocator,
-    transcript_bytes: []const u8,
-    output_path: [:0]const u8,
-) !void {
+pub fn publishObservation(allocator: std.mem.Allocator, transcript_bytes: []const u8, output_path: [:0]const u8) !void {
+    return publish(allocator, transcript_bytes, output_path, false);
+}
+pub fn publishSearchObservation(allocator: std.mem.Allocator, transcript_bytes: []const u8, output_path: [:0]const u8) !void {
+    return publish(allocator, transcript_bytes, output_path, true);
+}
+fn publish(allocator: std.mem.Allocator, transcript_bytes: []const u8, output_path: [:0]const u8, search: bool) !void {
     if (transcript_bytes.len == 0 or transcript_bytes.len > max_transcript_bytes)
         return error.InventoryTooLarge;
     if (output_path.len == 0 or output_path.len >= std.fs.max_path_bytes)
@@ -320,16 +383,18 @@ pub fn publishObservation(
     }) catch return error.InvalidTranscript;
     defer parsed.deinit();
     const raw = parsed.value;
-    if (!std.mem.eql(u8, raw.schema, "maru.session-host-cr6d-ime-candidate-transcript.v1") or
+    if (!std.mem.eql(u8, raw.schema, if (search) "maru.session-dock-ime-candidate-transcript.v1" else "maru.session-host-cr6d-ime-candidate-transcript.v1") or
         raw.source_id.len == 0 or raw.source_id.len > 255 or
         raw.rows.len != required_observations) return error.InvalidTranscript;
 
+    if (search and !std.mem.eql(u8, raw.source_id, "com.apple.inputmethod.Korean.2SetKorean")) return error.InvalidTranscript;
+    var transitions: [required_observations]SearchTransition = undefined;
     var candidates: [required_observations]Candidate = undefined;
     var rows: [required_observations]ArtifactRow = undefined;
     var series_anchor: ?ConvertedRect = null;
     for (raw.rows, 0..) |row, index| {
         if (row.before.app_captures.len != 0 or row.closed.app_captures.len != 0) return error.InvalidTranscript;
-        const candidate = reduceTriplet(raw.app_pid, .{
+        const triplet: Triplet = .{
             .app_captures = row.opened.app_captures,
             .before = row.before.windows,
             .opened = row.opened.windows,
@@ -337,7 +402,18 @@ pub fn publishObservation(
             .before_counters = row.before.counters,
             .opened_counters = row.opened.counters,
             .closed_counters = row.closed.counters,
-        }) catch |err| {
+        };
+        if (search) {
+            transitions[index] = .{
+                .before = row.before.search orelse return error.InvalidTranscript,
+                .opened = row.opened.search orelse return error.InvalidTranscript,
+                .closed = row.closed.search orelse return error.InvalidTranscript,
+                .before_counters = row.before.counters,
+                .opened_counters = row.opened.counters,
+                .closed_counters = row.closed.counters,
+            };
+        } else if (row.before.search != null or row.opened.search != null or row.closed.search != null) return error.InvalidTranscript;
+        const candidate = (if (search) reduceSearchTriplet(raw.app_pid, triplet, transitions[index]) else reduceTriplet(raw.app_pid, triplet)) catch |err| {
             const changes = counterChanges(row.before.counters, row.opened.counters, row.closed.counters);
             if (changes.pty_input_changed or changes.committed_callbacks_changed or changes.screen_generation_changed) {
                 std.debug.print("session_host_ime_candidate_counter_mutation row={d} pty_input_changed={} committed_callbacks_changed={} screen_generation_changed={} pty_open_interval_changed={} pty_close_interval_changed={}\n", .{
@@ -376,7 +452,11 @@ pub fn publishObservation(
     var output: std.Io.Writer.Allocating = .init(allocator);
     defer output.deinit();
     var json: std.json.Stringify = .{ .writer = &output.writer, .options = .{} };
-    try json.write(Artifact{ .schema = if (candidates[0].app_capture != null) "maru.session-host-cr6d-ime-candidate-observation.v2" else "maru.session-host-cr6d-ime-candidate-observation.v1", .source_id = raw.source_id, .rows = &rows });
+    if (search) {
+        try json.write(.{ .schema = "maru.session-dock-ime-candidate-observation.v1", .source_id = raw.source_id, .rows = &rows, .search_transitions = &transitions });
+    } else {
+        try json.write(Artifact{ .schema = if (candidates[0].app_capture != null) "maru.session-host-cr6d-ime-candidate-observation.v2" else "maru.session-host-cr6d-ime-candidate-observation.v1", .source_id = raw.source_id, .rows = &rows });
+    }
     try output.writer.writeByte('\n');
     if (output.written().len > max_artifact_bytes) return error.ArtifactTooLarge;
 
@@ -426,6 +506,47 @@ fn validTriplet() Triplet {
         .opened_counters = counters,
         .closed_counters = counters,
     };
+}
+
+test "search candidate evidence permits one exact syllable commit and keeps terminal policy strict" {
+    const marked = SearchState{ .owner_generation = 9, .first_responder = true, .search_owner = true, .query_bytes = 0, .query_hash = fixtureHash(""), .preedit_bytes = 3, .preedit_hash = fixtureHash("한") };
+    const committed = SearchState{ .owner_generation = 9, .first_responder = true, .search_owner = true, .query_bytes = 3, .query_hash = fixtureHash("한"), .preedit_bytes = 0, .preedit_hash = fixtureHash("") };
+    var triplet = validTriplet();
+    var transition = SearchTransition{ .before = marked, .opened = marked, .closed = marked, .before_counters = counters, .opened_counters = counters, .closed_counters = counters };
+    _ = try reduceSearchTriplet(999, triplet, transition);
+    triplet.opened_counters.committed_text_callbacks += 1;
+    triplet.closed_counters = triplet.opened_counters;
+    transition.opened = committed;
+    transition.closed = committed;
+    transition.opened_counters = triplet.opened_counters;
+    transition.closed_counters = triplet.closed_counters;
+    _ = try reduceSearchTriplet(999, triplet, transition);
+    try std.testing.expectError(error.CounterMutation, reduceTriplet(999, triplet));
+    for (0..6) |mutation| {
+        var bad = transition;
+        var bad_triplet = triplet;
+        switch (mutation) {
+            0 => bad.opened.query_hash +%= 1,
+            1 => bad.opened.owner_generation += 1,
+            2 => bad.closed.first_responder = false,
+            3 => {
+                bad_triplet.closed_counters.pty_input_bytes += 1;
+                bad.closed_counters = bad_triplet.closed_counters;
+            },
+            4 => {
+                bad_triplet.closed_counters.base_screen_generation += 1;
+                bad.closed_counters = bad_triplet.closed_counters;
+            },
+            5 => {
+                bad_triplet.opened_counters.committed_text_callbacks += 1;
+                bad.opened_counters = bad_triplet.opened_counters;
+                bad_triplet.closed_counters = bad_triplet.opened_counters;
+                bad.closed_counters = bad_triplet.closed_counters;
+            },
+            else => unreachable,
+        }
+        try std.testing.expectError(error.SearchTransitionInvalid, reduceSearchTriplet(999, bad_triplet, bad));
+    }
 }
 
 test "v2b0 reducer accepts one Apple-signed transient window from complete snapshots" {

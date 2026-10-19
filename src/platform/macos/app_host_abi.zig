@@ -29,6 +29,7 @@ const web_cdp_ops = @import("web_cdp_ops.zig");
 const web_upload_stage = @import("web_upload_stage.zig"); // W9c③: 업로드할 파일을 열고 사본을 만든다(작업 스레드)
 const web_cdp_keys = @import("web_cdp_keys.zig");
 const editor_ime_ops = @import("app_session/editor_ime.zig");
+const chrome_ime_ops = @import("app_session/chrome_ime.zig");
 /// 컨트롤 플레인 `lsp.trust.*`(계획 WT4b) — 언어 서버 신뢰 표는 편집기 LSP 모듈이 다룬다(ABI 는 표를 모른다 — LSPB23).
 const editor_lsp_ops = @import("app_session/editor/lsp.zig");
 const session_host = @import("session_host.zig");
@@ -203,7 +204,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 231), abi_version);
+    try std.testing.expectEqual(@as(u32, 232), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @backingInt(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @backingInt(Location.unavailable));
@@ -1966,12 +1967,13 @@ pub export fn maru_macos_app_session_input_smoke_probe(
 
 /// CR6d-v2b0b의 exact-once 판정/게시 leaf. Swift는 complete raw transcript를 동기 호출 동안만
 /// 빌려주며 선택 규칙이나 artifact writer를 소유하지 않는다.
-pub export fn maru_macos_session_host_ime_candidate_observation_publish(
-    transcript_ptr: ?[*]const u8,
-    transcript_len: usize,
-    output_path_ptr: ?[*]const u8,
-    output_path_len: usize,
-) u32 {
+pub export fn maru_macos_session_host_ime_candidate_observation_publish(transcript_ptr: ?[*]const u8, transcript_len: usize, output_path_ptr: ?[*]const u8, output_path_len: usize) u32 {
+    return publishCandidateObservation(transcript_ptr, transcript_len, output_path_ptr, output_path_len, false);
+}
+pub export fn maru_macos_chrome_ime_candidate_observation_publish(transcript_ptr: ?[*]const u8, transcript_len: usize, output_path_ptr: ?[*]const u8, output_path_len: usize) u32 {
+    return publishCandidateObservation(transcript_ptr, transcript_len, output_path_ptr, output_path_len, true);
+}
+fn publishCandidateObservation(transcript_ptr: ?[*]const u8, transcript_len: usize, output_path_ptr: ?[*]const u8, output_path_len: usize, search: bool) u32 {
     const transcript = transcript_ptr orelse return @backingInt(IMECandidateObservationResult.failed);
     const output = output_path_ptr orelse return @backingInt(IMECandidateObservationResult.failed);
     if (transcript_len == 0 or transcript_len > ime_candidate_evidence.max_transcript_bytes or
@@ -1983,11 +1985,11 @@ pub export fn maru_macos_session_host_ime_candidate_observation_publish(
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     @memcpy(path_buf[0..output_path_len], output_bytes);
     path_buf[output_path_len] = 0;
-    ime_candidate_evidence.publishObservation(
-        allocator,
-        transcript[0..transcript_len],
-        path_buf[0..output_path_len :0],
-    ) catch |err| {
+    const result = if (search)
+        ime_candidate_evidence.publishSearchObservation(allocator, transcript[0..transcript_len], path_buf[0..output_path_len :0])
+    else
+        ime_candidate_evidence.publishObservation(allocator, transcript[0..transcript_len], path_buf[0..output_path_len :0]);
+    result catch |err| {
         // Only the typed failure name crosses this diagnostic boundary, never the borrowed
         // transcript or another application's window inventory. The strict verdict is unchanged.
         std.debug.print("session_host_ime_candidate_publish_error={s}\n", .{@errorName(err)});
@@ -2509,6 +2511,7 @@ pub export fn maru_macos_app_session_ime_insert_with_range(session: ?*AppSession
     const self = session orelse return @backingInt(Status.null_out);
     const text: []const u8 = if (bytes) |ptr| ptr[0..len] else &.{};
     const replacement: ?editor_ime_ops.Range = if (location == std.math.maxInt(u64)) null else .{ .location = location, .length = length };
+    if (chrome_ime_ops.insert(self, text, replacement)) return @backingInt(Status.ok);
     if (!editor_ime_ops.insert(self, text, replacement)) {
         self.imeMarked("");
         self.imeInsert(text);
@@ -2520,6 +2523,7 @@ pub export fn maru_macos_app_session_ime_marked_with_ranges(session: ?*AppSessio
     const self = session orelse return @backingInt(Status.null_out);
     const text: []const u8 = if (bytes) |ptr| ptr[0..len] else &.{};
     const replacement: ?editor_ime_ops.Range = if (replacement_location == std.math.maxInt(u64)) null else .{ .location = replacement_location, .length = replacement_length };
+    if (chrome_ime_ops.marked(self, text, .{ .location = selected_location, .length = selected_length }, replacement)) return @backingInt(Status.ok);
     if (!editor_ime_ops.marked(self, text, .{ .location = selected_location, .length = selected_length }, replacement)) self.imeMarked(text);
     return @backingInt(Status.ok);
 }
@@ -2535,6 +2539,43 @@ pub export fn maru_macos_app_session_editor_ime_state(session: ?*AppSession, sel
     selected_len.* = snapshot.selected.length;
     marked_at.* = snapshot.marked.location;
     marked_len.* = snapshot.marked.length;
+    return 1;
+}
+
+/// Zero means no editable search owner. A token belongs to one activation, never a window alone.
+pub export fn maru_macos_app_session_chrome_ime_generation(session: ?*AppSession) u64 {
+    return chrome_ime_ops.generation(session orelse return 0) orelse 0;
+}
+
+pub export fn maru_macos_app_session_chrome_ime_state(session: ?*AppSession, selected_location: ?*u64, selected_length: ?*u64, marked_location: ?*u64, marked_length: ?*u64) c_int {
+    const self = session orelse return 0;
+    const selected_at = selected_location orelse return 0;
+    const selected_len = selected_length orelse return 0;
+    const marked_at = marked_location orelse return 0;
+    const marked_len = marked_length orelse return 0;
+    const context = chrome_ime_ops.projection(self) orelse return 0;
+    const selected = context.selectedRange() orelse return 0;
+    const marked = context.markedRange() orelse return 0;
+    selected_at.* = selected.location;
+    selected_len.* = selected.length;
+    marked_at.* = marked.location;
+    marked_len.* = marked.length;
+    return 1;
+}
+
+pub export fn maru_macos_app_session_chrome_ime_substring(session: ?*AppSession, location: u64, length: u64, bytes: ?[*]u8, capacity: usize, written: ?*usize, actual_location: ?*u64, actual_length: ?*u64) c_int {
+    const context = chrome_ime_ops.projection(session orelse return 0) orelse return 0;
+    const count = written orelse return 0;
+    const actual_at = actual_location orelse return 0;
+    const actual_len = actual_length orelse return 0;
+    const part = context.substring(.{ .location = location, .length = length }) orelse return 0;
+    count.* = part.bytes.len;
+    actual_at.* = part.actual.location;
+    actual_len.* = part.actual.length;
+    if (bytes) |out| {
+        if (capacity < part.bytes.len) return 0;
+        @memcpy(out[0..part.bytes.len], part.bytes);
+    }
     return 1;
 }
 

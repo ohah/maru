@@ -28,6 +28,10 @@ private enum DockIMERun {
     static var candidateCount = 0
     static var candidateDeadline = 0.0
     static var liveKey = 0
+    static var clearEscapes = 0
+    static var inputReadyAfter = 0.0
+    static var oldSearchClient: (any NSTextInputClient)?
+    static var selectedCandidateID: UInt32?
 }
 
 extension MaruAppHostController {
@@ -44,6 +48,7 @@ extension MaruAppHostController {
     private func dockIMEState(_ name: String, view: MaruMetalTerminalView, window: NSWindow) {
         DockIMERun.observations.append([
             "name": name, "step": DockIMERun.step, "first_responder": window.firstResponder === view,
+            "owner_generation": appSession.map { maru_macos_app_session_chrome_ime_generation($0) } ?? 0,
             "search_active": dockIMEWitness(1), "dock_focus": dockIMEWitness(2), "search_owner": dockIMEWitness(3),
             "query_bytes": dockIMEWitness(4), "query_hash": String(dockIMEWitness(5)),
             "preedit_bytes": dockIMEWitness(6), "preedit_hash": String(dockIMEWitness(7)),
@@ -170,7 +175,7 @@ extension MaruAppHostController {
                     DockIMERun.baselineCards = dockIMEWitness(8)
                     dockIMEState("view_switch", view: view, window: window)
                     // Direct committed callback is a routing control, not a physical-key claim.
-                    view.insertText("/", replacementRange: NSRange(location: NSNotFound, length: 0))
+                    (view.inputContext?.client ?? view).insertText("/", replacementRange: NSRange(location: NSNotFound, length: 0))
                     DockIMERun.step = 3
                 case 3:
                     try dockIMEText(query: "", preedit: "")
@@ -190,9 +195,10 @@ extension MaruAppHostController {
                         DockIMERun.originalView = context.selectedKeyboardInputSource
                         DockIMERun.originalGlobal = try SessionHostInputSourcePolicy.prepareKoreanSelection(recordURL: dockIMERoot.appendingPathComponent("input-source.json"))
                         context.deactivate(); context.selectedKeyboardInputSource = SessionHostInputSourcePolicy.korean2SetSourceID; context.activate()
+                        DockIMERun.inputReadyAfter = now + 0.75
                         DockIMERun.step = 50
                     } else {
-                        view.setMarkedText("한", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+                        (view.inputContext?.client ?? view).setMarkedText("한", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
                         DockIMERun.step = 5
                     }
                 case 5:
@@ -202,13 +208,14 @@ extension MaruAppHostController {
                     try dockIMERequire(anchor.minX > DockIMERun.emptyAnchor.minX, "marked_caret_did_not_move")
                     dockIMEState("marked", view: view, window: window)
                     try dockIMECapture("marked", surface: surface)
-                    view.insertText("한", replacementRange: NSRange(location: NSNotFound, length: 0))
+                    (view.inputContext?.client ?? view).insertText("한", replacementRange: NSRange(location: NSNotFound, length: 0))
                     DockIMERun.step = 6
                 case 6:
                     try dockIMEText(query: "한", preedit: "")
                     try dockIMERequire(dockIMEWitness(8) == 0 && dockIMEWitness(9) == DockIMERun.baselineBytes, "commit_filter_or_terminal_leak")
                     dockIMEState("committed", view: view, window: window)
                     try dockIMECapture("committed", surface: surface)
+                    DockIMERun.oldSearchClient = view.inputContext?.client
                     try dockIMEKey(53, "\u{1b}", view: view, window: window)
                     DockIMERun.step = 7
                 case 7:
@@ -218,10 +225,18 @@ extension MaruAppHostController {
                     DockIMERun.step = 8
                 case 8:
                     try dockIMERequire(dockIMEWitness(1) == 1 && window.firstResponder === view, "owned_slash_did_not_focus_search")
+                    DockIMERun.oldSearchClient?.insertText("stale", replacementRange: NSRange(location: NSNotFound, length: 0))
+                    view.insertText("old-terminal", replacementRange: NSRange(location: NSNotFound, length: 0))
                     try dockIMEText(query: "", preedit: "")
-                    view.setMarkedText("한", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+                    (view.inputContext?.client ?? view).setMarkedText("한", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
                     DockIMERun.step = 9
                 case 9:
+                    DockIMERun.oldSearchClient?.setMarkedText("늦", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+                    DockIMERun.oldSearchClient?.unmarkText()
+                    try dockIMERequire(DockIMERun.oldSearchClient != nil, "missing_old_client")
+                    let staleClient = DockIMERun.oldSearchClient!
+                    try dockIMERequire(!staleClient.hasMarkedText() && staleClient.selectedRange().location == NSNotFound && staleClient.markedRange().location == NSNotFound, "stale_client_exposes_current_ranges")
+                    try dockIMERequire(staleClient.attributedSubstring(forProposedRange: NSRange(location: 0, length: 1), actualRange: nil) == nil, "stale_client_exposes_current_text")
                     try dockIMEText(query: "", preedit: "한")
                     try dockIMEClickTerminal(view: view, window: window)
                     DockIMERun.step = 10
@@ -229,7 +244,7 @@ extension MaruAppHostController {
                     try dockIMEText(query: "한", preedit: "")
                     try dockIMERequire(dockIMEWitness(1) == 0 && dockIMEWitness(2) == 0 && dockIMEWitness(3) == 0, "search_retained_after_blur")
                     try dockIMERequire(dockIMEWitness(9) == DockIMERun.baselineBytes, "blur_committed_to_terminal")
-                    view.insertText("z", replacementRange: NSRange(location: NSNotFound, length: 0))
+                    (view.inputContext?.client ?? view).insertText("z", replacementRange: NSRange(location: NSNotFound, length: 0))
                     DockIMERun.step = 11
                 case 11:
                     try dockIMEText(query: "한", preedit: "")
@@ -252,14 +267,21 @@ extension MaruAppHostController {
 
 extension MaruAppHostController {
     private func dockIMECandidateSnapshot(view: MaruMetalTerminalView) throws -> SessionHostIMECandidateObservation.Snapshot {
-        try DockIMERun.candidateObserver.capture(counters: .init(pty_input_bytes: dockIMEWitness(9),
+        guard let session = appSession else { throw NSError(domain: "candidate_session", code: 1) }
+        var snapshot = try DockIMERun.candidateObserver.capture(counters: .init(pty_input_bytes: dockIMEWitness(9),
             committed_text_callbacks: DockIMECallbackWitness.committed, base_screen_generation: dockIMEWitness(11)),
             anchor: view.firstRect(forCharacterRange: view.selectedRange(), actualRange: nil))
+        snapshot.search = .init(owner_generation: maru_macos_app_session_chrome_ime_generation(session),
+            first_responder: view.window?.firstResponder === view, search_owner: dockIMEWitness(3) == 1,
+            query_bytes: UInt32(clamping: dockIMEWitness(4)), query_hash: dockIMEWitness(5),
+            preedit_bytes: UInt32(clamping: dockIMEWitness(6)), preedit_hash: dockIMEWitness(7))
+        return snapshot
     }
     private func tickLiveSessionDockIME(view: MaruMetalTerminalView, window: NSWindow,
                                         surface: TerminalSurface, session: OpaquePointer, now: Double) throws {
         switch DockIMERun.step {
         case 50:
+            guard now >= DockIMERun.inputReadyAfter else { return }
             guard SessionHostInputSourcePolicy.currentSourceID() == SessionHostInputSourcePolicy.korean2SetSourceID &&
                 view.inputContext?.selectedKeyboardInputSource == SessionHostInputSourcePolicy.korean2SetSourceID else { return }
             try dockIMEText(query: "", preedit: "")
@@ -302,16 +324,22 @@ extension MaruAppHostController {
             DockIMERun.candidateCount += 1
             if DockIMERun.candidateCount == 5 {
                 try DockIMERun.candidateObserver.publish(sourceID: SessionHostInputSourcePolicy.korean2SetSourceID,
-                    outputURL: dockIMERoot.appendingPathComponent("candidate.json"))
+                    outputURL: dockIMERoot.appendingPathComponent("candidate.json"), search: true)
                 try dockIMEHID(36, view: view, window: window)
                 DockIMERun.step = 58
             } else {
-                try dockIMEHID(53, view: view, window: window)
+                DockIMERun.clearEscapes = 0
                 DockIMERun.step = 56
             }
         case 56:
-            // Escape first cancels composition; a following Escape belongs to the search owner.
-            try dockIMEHID(53, view: view, window: window)
+            // Candidate open may already commit the syllable. Never send a second Escape
+            // after search has closed: that would become a terminal byte.
+            if dockIMEWitness(1) == 1 {
+                try dockIMERequire(DockIMERun.clearEscapes < 2, "search_clear_timeout")
+                DockIMERun.clearEscapes += 1
+                try dockIMEHID(53, view: view, window: window)
+                return
+            }
             DockIMERun.step = 57
         case 57:
             try dockIMEText(query: "", preedit: "")
@@ -323,6 +351,31 @@ extension MaruAppHostController {
             try dockIMERequire(dockIMEWitness(9) == DockIMERun.baselineBytes && dockIMEWitness(8) == 0, "live_commit_leak_or_filter")
             dockIMEState("live_committed", view: view, window: window)
             try dockIMECapture("live-committed", surface: surface)
+            DockIMERun.candidateBefore = try dockIMECandidateSnapshot(view: view)
+            try dockIMEHID(36, view: view, window: window, flags: .maskAlternate)
+            DockIMERun.candidateDeadline = now + 4
+            DockIMERun.step = 66
+        case 66:
+            guard let before = DockIMERun.candidateBefore else { throw NSError(domain: "select_before", code: 1) }
+            let opened = try dockIMECandidateSnapshot(view: view)
+            let oldIDs = Set(before.windows.map { $0.id })
+            if opened.windows.allSatisfy({ oldIDs.contains($0.id) }) {
+                try dockIMERequire(now < DockIMERun.candidateDeadline, "selection_candidate_missing")
+                return
+            }
+            let captured = try DockIMERun.candidateObserver.captureAppCandidate(before: before, opened: opened)
+            guard let proof = captured.app_captures.first else { throw NSError(domain: "selection_capture", code: 1) }
+            DockIMERun.selectedCandidateID = proof.window_id
+            try JSONEncoder().encode(captured.app_captures).write(to: dockIMERoot.appendingPathComponent("selected-candidate-capture.json"))
+            try dockIMEHID(36, view: view, window: window)
+            DockIMERun.step = 67
+        case 67:
+            try dockIMEText(query: "韓", preedit: "")
+            try dockIMERequire(dockIMEWitness(9) == DockIMERun.baselineBytes && dockIMEWitness(8) == 0, "candidate_selection_leaked_or_filtered")
+            let closed = try dockIMECandidateSnapshot(view: view)
+            try dockIMERequire(!closed.windows.contains { $0.id == DockIMERun.selectedCandidateID }, "selected_candidate_not_closed")
+            dockIMEState("live_candidate_selected", view: view, window: window)
+            try dockIMECapture("live-candidate-selected", surface: surface)
             try dockIMEHID(53, view: view, window: window)
             DockIMERun.step = 59
         case 59:

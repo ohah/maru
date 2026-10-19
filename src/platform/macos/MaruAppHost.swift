@@ -127,8 +127,91 @@ func CGSMainConnectionID() -> CGSConnectionID
 @discardableResult
 func CGSSetWindowBackgroundBlurRadius(_ connection: CGSConnectionID, _ windowNumber: Int, _ radius: Int) -> Int32
 
+/// One client per search activation. Stale clients cannot acquire the current owner's token.
+@MainActor
+private final class MaruChromeIMEClient: NSObject, @preconcurrency NSTextInputClient {
+    weak var view: MaruMetalTerminalView?
+    let generation: UInt64
+    let callbackGeneration: UInt64
+    init(view: MaruMetalTerminalView, generation: UInt64, callbackGeneration: UInt64) {
+        self.view = view
+        self.generation = generation
+        self.callbackGeneration = callbackGeneration
+        super.init()
+    }
+    private func read<T>(_ fallback: T, _ body: (MaruMetalTerminalView) -> T) -> T {
+        guard let view else { return fallback }
+        return view.withChromeIMEOwner(generation, callbackGeneration: callbackGeneration, client: self, fallback: fallback) { body(view) }
+    }
+    func insertText(_ string: Any, replacementRange: NSRange) {
+        read(()) { $0.insertText(string, replacementRange: replacementRange) }
+    }
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        read(()) { $0.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange) }
+    }
+    func unmarkText() { read(()) { $0.unmarkText() } }
+    func hasMarkedText() -> Bool { read(false) { $0.hasMarkedText() } }
+    func markedRange() -> NSRange { read(NSRange(location: NSNotFound, length: 0)) { $0.markedRange() } }
+    func selectedRange() -> NSRange { read(NSRange(location: NSNotFound, length: 0)) { $0.selectedRange() } }
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
+    func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
+        read(nil) { $0.attributedSubstring(forProposedRange: range, actualRange: actualRange) }
+    }
+    func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        read(NSRect.zero) { $0.firstRect(forCharacterRange: range, actualRange: actualRange) }
+    }
+    func characterIndex(for point: NSPoint) -> Int { read(NSNotFound) { $0.characterIndex(for: point) } }
+    func doCommand(by selector: Selector) { read(()) { $0.doCommand(by: selector) } }
+    func windowLevel() -> Int { read(0) { $0.window?.level.rawValue ?? 0 } }
+}
+
 @MainActor
 final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
+    private var chromeIMEClient: MaruChromeIMEClient?
+    private var chromeIMEContext: NSTextInputContext?
+    private var forwardingChromeIMEGeneration: UInt64?
+    private var replacingChromeIMEContext = false
+
+    override var inputContext: NSTextInputContext? {
+        if replacingChromeIMEContext { return chromeIMEContext ?? super.inputContext }
+        guard let generation = controller?.chromeIMEGeneration(in: self) else {
+            replacingChromeIMEContext = true
+            defer { replacingChromeIMEContext = false }
+            let previous = chromeIMEContext
+            chromeIMEContext = nil
+            chromeIMEClient = nil
+            previous?.deactivate()
+            return super.inputContext
+        }
+        if chromeIMEContext == nil || chromeIMEClient?.generation != generation || chromeIMEClient?.callbackGeneration != imeOwnerGeneration {
+            replacingChromeIMEContext = true
+            defer { replacingChromeIMEContext = false }
+            let previous = chromeIMEContext
+            chromeIMEContext = nil
+            chromeIMEClient = nil
+            previous?.deactivate()
+            let client = MaruChromeIMEClient(view: self, generation: generation, callbackGeneration: imeOwnerGeneration)
+            chromeIMEClient = client
+            chromeIMEContext = NSTextInputContext(client: client)
+            if window?.firstResponder === self { chromeIMEContext?.activate() }
+        }
+        return chromeIMEContext
+    }
+
+    // A previous context may still deliver an asynchronous callback. Its immutable owner
+    // token is checked in the originating window before any view/controller state is touched.
+    fileprivate func withChromeIMEOwner<T>(_ generation: UInt64, callbackGeneration: UInt64, client: NSObject, fallback: T, _ body: () -> T) -> T {
+        guard let controller else { return fallback }
+        var result = fallback
+        controller.inViewSurface(self) {
+            guard chromeIMEClient === client, controller.chromeIMEGeneration(in: self) == generation && imeOwnerGeneration == callbackGeneration else { return }
+            let previous = forwardingChromeIMEGeneration
+            forwardingChromeIMEGeneration = generation
+            defer { forwardingChromeIMEGeneration = previous }
+            result = body()
+        }
+        return result
+    }
     weak var controller: MaruAppHostController?
     // Keep the owner shell available through close notifications; teardown clears its session.
     var inspectorOwner: TerminalSurface?
@@ -372,8 +455,15 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     private var discardingIMECallbacks = false
 
     private func acceptsIMECallback() -> Bool {
-        !discardingIMECallbacks && (interpretingIMEGeneration == nil
-            || interpretingIMEGeneration == imeOwnerGeneration)
+        guard acceptsIMEKeyTransaction() else { return false }
+        if let owner = controller?.chromeIMEGeneration(in: self) {
+            return forwardingChromeIMEGeneration == owner
+        }
+        return forwardingChromeIMEGeneration == nil
+    }
+
+    private func acceptsIMEKeyTransaction() -> Bool {
+        !discardingIMECallbacks && (interpretingIMEGeneration == nil || interpretingIMEGeneration == imeOwnerGeneration)
     }
 
     private func invalidateIMECallbacks() {
@@ -451,6 +541,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         guard controller?.imeCommit() == true else { imeLog("admission_rejected"); return false }
         invalidateIMECallbacks()
         imeLog("admission_accepted")
+        editorHanjaCandidateActive = false
         guard hadMarkedText else { return true }
         markedTextBuffer = ""               // hasMarkedText() = false 로 동기화
         editorHanjaCandidateActive = false
@@ -577,7 +668,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // 가로채면 선택한 한글이 후보 요청 대신 줄바꿈으로 바뀐다. editor IME range가 유효할 때만
         // 예외를 열어 터미널의 Meta-Return과 다른 화면의 Option 키 계약은 그대로 둔다.
         let editorHanjaCandidate = exactChord == [.option] && event.keyCode == 36
-            && controller?.editorIMEState() != nil
+            && controller?.inputIMEState() != nil
         let candidateWasActive = editorHanjaCandidateActive
         let bypassMods: NSEvent.ModifierFlags = optionAsMeta && !editorHanjaCandidate
             ? [.command, .control, .option] : [.command, .control]
@@ -621,7 +712,11 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
                 self.interpretingIMEKey = previousKey
                 self.interpretingIMEGeneration = previousGeneration
             }
-            self.interpretKeyEvents([event])
+            if self.controller?.chromeIMEGeneration(in: self) != nil, let context = self.inputContext {
+                _ = context.handleEvent(event)
+            } else {
+                self.interpretKeyEvents([event])
+            }
             // AppKit may finish a composition with unmarkText alone. The
             // protocol requires accepting that text; insertText wins if both
             // callbacks arrive in the same key transaction.
@@ -631,12 +726,20 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
                 self.pendingUnmarkGeneration = nil
                 self.controller?.imeInsert(pending)
             }
-            return self.acceptsIMECallback()
+            return self.acceptsIMEKeyTransaction()
         }
         // 콜백이 후보를 확정·취소하면 아래 플래그가 먼저 지워진다. Option-Return이 실제로
         // marked text를 시작한 경우에만 다음 키까지 후보 소유권을 이어 간다.
-        if editorHanjaCandidate { editorHanjaCandidateActive = hasMarkedText() }
-        else if !hasMarkedText() { editorHanjaCandidateActive = false }
+        _ = inputContext
+        if controller?.chromeIMEGeneration(in: self) != nil {
+            if editorHanjaCandidate { editorHanjaCandidateActive = true }
+            else if candidateWasActive && [UInt16(53), UInt16(36)].contains(event.keyCode) {
+                editorHanjaCandidateActive = false
+            } else if !candidateWasActive && !hasMarkedText() { editorHanjaCandidateActive = false }
+        } else {
+            if editorHanjaCandidate { editorHanjaCandidateActive = hasMarkedText() }
+            else if !hasMarkedText() { editorHanjaCandidateActive = false }
+        }
     }
 
     // 입력기가 텍스트로 만들지 않은 키의 편집 명령. 여기서 아무것도 하지 않는다(시스템 비프
@@ -709,8 +812,8 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
             controller?.imeMarked("")
             return
         }
-        if let state = controller?.editorIMEState() {
-            if state.marked.length > 0, let text = controller?.editorIMESubstring(state.marked)?.text {
+        if let state = controller?.inputIMEState() {
+            if state.marked.length > 0, let text = controller?.inputIMESubstring(state.marked)?.text {
                 controller?.imeInsert(text, replacementRange: NSRange(location: NSNotFound, length: 0))
             }
             markedTextBuffer = ""
@@ -787,7 +890,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     func hasMarkedText() -> Bool {
-        if let state = controller?.editorIMEState() {
+        if let state = controller?.inputIMEState() {
             let has = state.marked.location != NSNotFound && state.marked.length > 0
             imeLog("? hasMarkedText editor -> \(has)")
             return has
@@ -808,7 +911,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 마지막 자모에서 Backspace가 자모 삭제 대신 확정(insertText)으로 처리돼 삭제에 키가 한 번
     // 더 들었다(라이브: 가ㄴ -> BS -> 가ㄴ -> BS -> 가).
     func markedRange() -> NSRange {
-        if let state = controller?.editorIMEState() {
+        if let state = controller?.inputIMEState() {
             imeLog("? markedRange editor -> loc=\(state.marked.location) len=\(state.marked.length)")
             return state.marked
         }
@@ -823,7 +926,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         if let context = sessionHostCandidateDocumentContext {
             return NSRange(location: context.utf16.count, length: 0)
         }
-        if let state = controller?.editorIMEState() {
+        if let state = controller?.inputIMEState() {
             imeLog("? selectedRange editor -> loc=\(state.selected.location) len=\(state.selected.length)")
             return state.selected
         }
@@ -832,12 +935,13 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
+        if let owner = controller?.chromeIMEGeneration(in: self), forwardingChromeIMEGeneration != owner { return nil }
         if let context = sessionHostCandidateDocumentContext {
             let full = NSRange(location: 0, length: context.utf16.count)
             actualRange?.pointee = full
             return NSAttributedString(string: context)
         }
-        if let result = controller?.editorIMESubstring(range) {
+        if let result = controller?.inputIMESubstring(range) {
             actualRange?.pointee = result.range
             imeLog("? attributedSubstring editor loc=\(result.range.location) len=\(result.range.length)")
             return NSAttributedString(string: result.text)
@@ -8937,6 +9041,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // macOS buttonNumber(0=L,1=R,2=M) → xterm(0=L,1=M,2=R).
         let button: Int32 = event.buttonNumber == 1 ? 2 : (event.buttonNumber == 2 ? 1 : 0)
         _ = maru_macos_app_session_mouse(session, kind, xPx, yPx, button, modsBits(event))
+        if [1, 4, 5].contains(kind) { _ = (view as? MaruMetalTerminalView)?.inputContext }
         markMetalNeedsRedraw()
     }
 
@@ -16279,6 +16384,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         range.location == NSNotFound ? UInt64.max : UInt64(range.location)
     }
 
+    func chromeIMEGeneration(in view: NSView) -> UInt64? {
+        guard let session = surfaceForView(view)?.appSession else { return nil }
+        let generation = maru_macos_app_session_chrome_ime_generation(session)
+        return generation == 0 ? nil : generation
+    }
+
+    func inputIMEState() -> (selected: NSRange, marked: NSRange)? {
+        guard let session = appSession else { return nil }
+        var location: UInt64 = 0, length: UInt64 = 0, markedAt: UInt64 = 0, markedLength: UInt64 = 0
+        if maru_macos_app_session_chrome_ime_state(session, &location, &length, &markedAt, &markedLength) == 1 {
+            return (NSRange(location: Int(clamping: location), length: Int(clamping: length)),
+                    NSRange(location: Int(clamping: markedAt), length: Int(clamping: markedLength)))
+        }
+        return editorIMEState()
+    }
+
+    func inputIMESubstring(_ proposed: NSRange) -> (text: String, range: NSRange)? {
+        guard let session = appSession else { return nil }
+        return readIMESubstring(proposed, chrome: maru_macos_app_session_chrome_ime_generation(session) != 0)
+    }
+
     func editorIMEState() -> (selected: NSRange, marked: NSRange)? {
         guard let session = appSession else { return nil }
         var selectedLocation: UInt64 = 0, selectedLength: UInt64 = 0
@@ -16303,15 +16429,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func editorIMESubstring(_ proposed: NSRange) -> (text: String, range: NSRange)? {
+        return readIMESubstring(proposed, chrome: false)
+    }
+
+    private func readIMESubstring(_ proposed: NSRange, chrome: Bool) -> (text: String, range: NSRange)? {
         guard let session = appSession, proposed.location != NSNotFound else { return nil }
+        let read = chrome ? maru_macos_app_session_chrome_ime_substring : maru_macos_app_session_editor_ime_substring
         var count = 0
         var location: UInt64 = 0, length: UInt64 = 0
-        guard maru_macos_app_session_editor_ime_substring(
+        guard read(
             session, UInt64(proposed.location), UInt64(proposed.length), nil, 0, &count, &location, &length
         ) == 1 else { return nil }
         var bytes = [UInt8](repeating: 0, count: count)
         let copied = bytes.withUnsafeMutableBufferPointer { buffer in
-            maru_macos_app_session_editor_ime_substring(
+            read(
                 session, UInt64(proposed.location), UInt64(proposed.length), buffer.baseAddress, buffer.count,
                 &count, &location, &length
             )

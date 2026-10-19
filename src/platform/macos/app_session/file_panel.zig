@@ -2950,6 +2950,7 @@ pub fn restoredPaneHasPath(self: *AppSession, pane: *Pane, path: []const u8) boo
 
 pub fn activateFilePanelDockControl(self: *AppSession) void {
     const action = filePanelDockControlAction(self) orelse return;
+    if (self.agent_session_archive_search_active and !@import("chrome_ime.zig").commitAll(self)) return;
     const old_presented = self.dock.presented;
     const old_collapsed = self.dock.collapsed;
     // A collapsed right dock has no consumer for archive work.  Withdraw the current

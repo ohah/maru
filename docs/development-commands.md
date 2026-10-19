@@ -1211,6 +1211,9 @@ OS 한국어 IME 화면 검증을 의미하지 않는다. 범위와 남은 작�
 ABI에서 `key_failed`로 전달되고 유효한 재시도와 중복 확정이 한 번만 적용되는지 검증한다.
 같은 gate의 `tools/test-macos-ime-ack-host.py`는 실제 Swift 메서드를 추출해 stub ABI/OS context로
 실패 정산과 interaction gate를 실행하며 기본 macOS ABI 테스트에도 포함된다.
+선택·marked 범위의 UTF-16 단위, 문맥 부재 시 기존 fallback, substring의 actual range와
+chrome owner 불일치 거절도 검사한다. 문맥 제공 여부는 backend stub이므로 개별 검색창의
+제품 연결이나 실제 TSM 후보창 성공을 증명하지 않는다.
 `-Doptimize=ReleaseFast`로도 실행한다. `test-editor-shared`의 공유 IME admission 판정자는
 두 뷰의 선택·문서 통지 불변과 allocation 실패 24지점의 재시도를 검증한다. 실제 OS 입력기와
 후보창 검증을 대체하지 않는다.

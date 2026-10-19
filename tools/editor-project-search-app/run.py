@@ -29,6 +29,8 @@ def main():
     parser.add_argument("--matrix", action="store_true")
     parser.add_argument("--native-close-save", action="store_true")
     parser.add_argument("--save-as-command", action="store_true")
+    parser.add_argument("--native-panel-capture-app", type=Path,
+                        help="화면 기록이 허용된 native-window-capture.swift.inc 앱 번들")
     parser.add_argument("--replace-batch", action="store_true")
     parser.add_argument("--replace-batch-save-retry", action="store_true")
     parser.add_argument("--batch-open-files", type=int, default=2)
@@ -49,6 +51,8 @@ def main():
     parser.add_argument("--optimize", choices=("Debug", "ReleaseFast"), default="Debug")
     parser.add_argument("--app", type=Path, help="이 하네스로 빌드한 앱을 재사용한다")
     args = parser.parse_args()
+    if args.native_panel_capture_app and (not args.save_as_command or not args.native_panel_capture_app.is_dir()):
+        parser.error("Native panel capture needs --save-as-command and an existing capture app bundle")
     if not 2 <= args.batch_open_files <= 64:
         parser.error("Batch open-file measurement is bounded to 2..64")
     if not 0 <= args.batch_peer_bytes <= 1048576 or not 0 <= args.disk_padding_lines <= 400000 or not 0 <= args.batch_save_delay_ms <= 50 or not 60 <= args.timeout_seconds <= 300:
@@ -76,6 +80,12 @@ def main():
     if re.fullmatch(r"[1-9][0-9]{2,3}x[1-9][0-9]{2,3}", args.window_size) is None:
         parser.error("Expected a bounded WIDTHxHEIGHT")
     repo = Path(__file__).resolve().parents[2]
+    if args.save_as_command and args.output is None:
+        # NSSavePanel은 /private/tmp를 링크 경로 /tmp로 돌려줄 수 있다.
+        # 부모 링크를 거절하는 제품 저장 계약에 맞춰 기본 fixture는 홈 캐시에 둔다.
+        cache = Path.home() / "Library/Caches/maru-verification"
+        cache.mkdir(parents=True, exist_ok=True)
+        args.output = Path(tempfile.mkdtemp(prefix="maru-save-as-app-", dir=cache))
     root = (args.output or Path(tempfile.mkdtemp(prefix="maru-editor-project-search-app-"))).resolve()
     if root == repo or repo in root.parents or (root.exists() and any(root.iterdir())):
         parser.error("Output must be a new, empty directory outside the repository")
@@ -214,6 +224,7 @@ def main():
     env["MARU_EDITOR_PROJECT_BATCH_SAVE_DELAY_MS"] = str(args.batch_save_delay_ms)
     if args.native_close_save: env["MARU_EDITOR_NATIVE_CLOSE_SAVE"] = "1"
     if args.save_as_command: env["MARU_EDITOR_SAVE_AS_COMMAND"] = "1"
+    if args.native_panel_capture_app: env["MARU_NATIVE_PANEL_CAPTURE_EXTERNAL"] = "1"
     env["MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY"] = "1" if args.replace_batch_save_retry else "0"
     env["MARU_EDITOR_PROJECT_REPLACE_BATCH"] = "1" if args.replace_batch else "0"
     if args.physical_ime:
@@ -230,8 +241,43 @@ def main():
                 hid_log = (root / "hid.log").open("wb")
                 hid = subprocess.Popen([str(root / "hid"), str(child.pid), str(artifacts)], stdout=hid_log, stderr=hid_log)
             samples = []
+            panel_captured = False
+            panel_capture_attempts = 0
+            panel_confirmed = False
             deadline = time.monotonic() + args.timeout_seconds
             while child.poll() is None:
+                request = artifacts / "save-as-panel-request.json"
+                if args.native_panel_capture_app and not panel_captured and request.exists():
+                    target = json.loads(request.read_text())
+                    window_id = target.get("panel_id", target["window_id"])
+                    if not isinstance(window_id, int) or not 0 < window_id <= 0xffffffff:
+                        raise RuntimeError("Invalid native panel window ID")
+                    pending = artifacts / "save-as-panel-pending.png"
+                    # 빠르게 끝난 앱은 open -W가 kevent 등록 전에 종료될 수 있다.
+                    # 실행기 종료 코드 대신 실제 PNG 게시를 아래에서 확인한다.
+                    subprocess.run(["open", "-W", "-n", "-a", str(args.native_panel_capture_app.resolve()),
+                                    "--args", str(window_id), str(pending)], timeout=30)
+                    panel_capture_attempts += 1
+                    if not pending.exists():
+                        if panel_capture_attempts >= 10:
+                            raise RuntimeError("Native panel capture failed; inspect /tmp/maru-screen-capture-status.json")
+                    else:
+                        pending.replace(artifacts / "save-as-panel.png")
+                        panel_captured = True
+                if args.native_panel_capture_app and not panel_confirmed and (artifacts / "save-as-confirm-request").exists():
+                    # 대상 프로세스의 실제 sheet 필드와 Save 버튼만 접근성 API로 조작한다.
+                    script = '''on run arguments
+tell application "System Events"
+set targetProcess to first process whose unix id is (item 1 of arguments as integer)
+set paneGroup to splitter group 1 of sheet 1 of window 1 of targetProcess
+if value of text field 1 of paneGroup is not "save-as-source.txt" then error "Unexpected Save As filename"
+set value of text field 1 of paneGroup to "save-as-destination.txt"
+click button "Save" of paneGroup
+end tell
+end run'''
+                    subprocess.run(["osascript", "-e", script, str(child.pid)], check=True, timeout=15)
+                    (artifacts / "save-as-confirm-sent").write_text("native-accessibility\n")
+                    panel_confirmed = True
                 if hid is not None and hid.poll() not in (None, 0):
                     raise RuntimeError("Physical IME driver failed; inspect hid.log")
                 if time.monotonic() > deadline:
@@ -318,6 +364,19 @@ def main():
     report = dict(scope="Real AppKit search input, result click, navigation, bottom dock scrolling, cancellation and Metal readback",
         limits="Physical Korean HID and Enter verified; no VoiceOver or OS candidate screenshot proof" if args.physical_ime else "No physical Korean HID or VoiceOver proof", source_sha256=hashes, binary_sha256=sha(app), command=command,
         product_passed=True, native_close_save=args.native_close_save, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, batch_open_files=args.batch_open_files, batch_peer_bytes=args.batch_peer_bytes, optimize=args.optimize, disk_padding_lines=args.disk_padding_lines, batch_save_delay_ms=args.batch_save_delay_ms, replace_batch_save_retry=args.replace_batch_save_retry, replace_batch=args.replace_batch, replace_preview=args.replace_preview, replace_apply=args.replace_apply, replace_disk_apply=args.replace_disk_apply, replace_ime_refuse=args.replace_ime_refuse, conflict_markers=args.conflict_markers, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(source / "tools/editor-project-search-app" / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc", "batch.zig.inc", "native-close.zig.inc", "native-close.swift.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
+    report["runner_sha256"] = sha(Path(__file__))
+    report["save_as_command"] = args.save_as_command
+    if args.save_as_command:
+        report["scope"] = "AppKit Save As shortcut, native sheet capture and accessibility confirmation; model path and original/destination disk bytes"
+        for name in ("save-as.swift.inc", "save-as.zig.inc"):
+            report["harness_sha256"][name] = sha(source / "tools/editor-project-search-app" / name)
+        if args.native_panel_capture_app:
+            report["native_panel_capture"] = {
+                "method": "ScreenCaptureKit",
+                "confirmation": "native-accessibility",
+                "binary_sha256": sha(args.native_panel_capture_app / "Contents/MacOS/capture"),
+                "request": json.loads((artifacts / "save-as-panel-request.json").read_text()),
+            }
     (root / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     print(root / "manifest.json", flush=True)
 

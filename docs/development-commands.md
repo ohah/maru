@@ -27,6 +27,10 @@ GUI는 `⌥⌘I` 또는 View → Terminal Inspector다.
 `--start 21 --rounds 10`은 닫기/재열기·Escape·export·저장 실패·단축키 override/unbind·
 UTF-8 포화·가로/세로 크기 기억·잘못된 CLI selector를 추가 검사한다. `--start 31 --rounds 2`는 attached/detached 버튼 hover의 실제 GPU 변경·이탈 복원 픽셀을 검사한다. 전체는 `--rounds 32`다.
 커서는 제품 NSView의 mouseMoved 뒤 실제 `NSCursor.current`를 읽어 판정한다.
+`--start 33 --rounds 20`은 필드별 데이터 설명 검증이다. 한·영, 다섯 배치와 2x에서
+행 선택의 GPU 변화, 이동 전후 Paused JSON 불변, GUI/CLI window ID·수집 상태,
+실제 false/0 보존을 검사한다. 각 회차의 `field-before/field-selected/field-moved.png`와
+`result.json`에 증거를 남긴다. 앱 빌드가 완전히 끝난 후 실행한다.
 백그라운드 포커스 검사의 window delegate fallback 여부는 `focus_transports`에 기록한다.
 이 검사는 NSEvent와 native marked-text callback을 사용하며 실제 HID·OS 입력기 검증은 별도다.
 계약과 수집 한계는 [Terminal Inspector](terminal-inspector.md)를 따른다.

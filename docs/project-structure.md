@@ -670,6 +670,7 @@ actor coordinator가 전체 반영한다. 기존 모델 전용 `worker.zig`는 �
 ## Live terminal diagnostics
 
 - `src/session/inspector/snapshot.zig`: 공통 진단 DTO·경로 결정·유한 history·JSON 익명화.
+- `src/inspector_metadata.zig`: GUI·CLI 공통 필드 출처·수집 상태·누락 이유.
 - `src/session/inspector/layout.zig`: 독립 도크 배치·source viewport·크기 경계.
 - `src/chrome/components/inspector/`: 도메인 I/O 없는 픽셀 tree와 표시·입력 사각형.
 - `src/platform/macos/app_session/inspector.zig`: 실제 상태 수집·독립 도크/분리 창 presentation·export 어댑터.

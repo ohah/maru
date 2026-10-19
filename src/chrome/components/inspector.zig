@@ -7,6 +7,8 @@ pub const hit = panel.hit;
 pub const cursor = panel.cursor;
 pub const caretRect = panel.caretRect;
 pub const controlRect = panel.controlRect;
+pub const fieldAt = panel.fieldAt;
+pub const dataControlRect = panel.dataControlRect;
 
 // The facade must expose the panel's geometry regression to the maru test root.
 test {

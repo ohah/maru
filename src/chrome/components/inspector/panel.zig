@@ -39,14 +39,14 @@ fn build(a: std.mem.Allocator, p: props.ChromeProps, scale: u32, labels: []const
     const height = w.h;
     const n = 100 + body_count * 3;
     const nodes = try a.alloc(tree.UiNode, n);
-    const main = nodes[0..6];
-    const tools = nodes[6..14];
-    const tabs = nodes[14..18];
-    const header = nodes[18..25];
-    const footer = nodes[25..29];
-    const columns = nodes[29..31];
-    const rows = nodes[31..][0..body_count];
-    const cells = nodes[31 + body_count ..][0 .. body_count * 2];
+    const main = nodes[0..8];
+    const tools = nodes[8..16];
+    const tabs = nodes[16..20];
+    const header = nodes[20..27];
+    const footer = nodes[27..31];
+    const columns = nodes[31..33];
+    const rows = nodes[33..][0..body_count];
+    const cells = nodes[33 + body_count ..][0 .. body_count * 2];
     for (tools, 0..) |*node, i| node.* = tree.button(.{ .id = 10 + i, .action = .{ .id = 1 + i }, .variant = .ghost, .paint = .{ .corner_radii_px = .{ 4, 4, 4, 4 }, .border_widths_px = .{ 0, 0, 0, 0 } }, .style = .{ .width = .{ .px = @floatFromInt(spacing.pointsPx(if (i == 2 or i == 3) 96 else if (i == 5) 112 else 56, scale)) }, .height = .{ .percent = 1 }, .flex = .{ .shrink = 0 } }, .semantics = .{ .role = .button, .label = if (i == 0) i18n.t(.inspector_previous) else if (i == 1) i18n.t(.inspector_next) else if (i == 4) i18n.t(.inspector_refresh) else if (i == 7) i18n.t(.inspector_close) else labels[1 + i].text } });
     header[0] = tree.container(.{ .id = 3, .style = .{ .height = .{ .px = @floatFromInt(row) }, .flex = .{ .shrink = 0 } } }, &.{});
     for (0..5) |i| header[i + 1] = tools[i];
@@ -72,20 +72,26 @@ fn build(a: std.mem.Allocator, p: props.ChromeProps, scale: u32, labels: []const
     main[0] = tree.container(.{ .id = 45, .direction = .column, .style = .{ .height = .{ .px = @floatFromInt(spacing.pointsPx(if (compact) 60 else 92, scale)) }, .flex = .{ .shrink = 0 } } }, header_bands);
     for (tabs, 0..) |*node, i| node.* = tree.button(.{ .id = 20 + i, .action = .{ .id = 9 + i }, .variant = .ghost, .paint = .{ .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 0, 0 } }, .style = .{ .width = .{ .percent = 0.25 }, .height = .{ .percent = 1 } }, .semantics = .{ .role = .tab, .label = labels[9 + i].text, .selected = labels[9 + i].accent } });
     main[1] = tree.container(.{ .id = 5, .direction = .row, .style = .{ .height = .{ .px = @floatFromInt(spacing.pointsPx(if (compact) 28 else 32, scale)) }, .padding = .{ .left = @floatFromInt(gap), .right = @floatFromInt(gap) }, .flex = .{ .shrink = 0 } } }, tabs);
-    main[2] = tree.card(.{ .id = 6, .style = .{ .height = .{ .px = @floatFromInt(spacing.pointsPx(if (compact) 28 else 32, scale)) }, .margin = .{ .left = @floatFromInt(inset), .right = @floatFromInt(inset), .top = @floatFromInt(gap), .bottom = @floatFromInt(gap) }, .flex = .{ .shrink = 0 } }, .paint = .{ .background = .inset_bg, .corner_radii_px = .{ 4, 4, 4, 4 }, .shadow = .none, .border_widths_px = .{ 1, 1, 1, 1 }, .border = .divider } }, &.{});
+    const context = try a.alloc(tree.UiNode, if (contextPoints(p, scale) == 40) 2 else 1);
+    for (context, 0..) |*node, i| node.* = tree.container(.{ .id = if (context.len == 1) 32 else 31 + i, .style = .{ .height = .{ .percent = 1.0 / @as(f32, @floatFromInt(context.len)) } } }, &.{});
+    main[2] = tree.container(.{ .id = 30, .style = .{ .height = .{ .px = @floatFromInt(spacing.pointsPx(contextPoints(p, scale), scale)) }, .flex = .{ .shrink = 0 } } }, context);
+    main[3] = tree.card(.{ .id = 6, .style = .{ .height = .{ .px = @floatFromInt(spacing.pointsPx(if (compact) 28 else 32, scale)) }, .margin = .{ .left = @floatFromInt(inset), .right = @floatFromInt(inset), .top = @floatFromInt(gap), .bottom = @floatFromInt(gap) }, .flex = .{ .shrink = 0 } }, .paint = .{ .background = .inset_bg, .corner_radii_px = .{ 4, 4, 4, 4 }, .shadow = .none, .border_widths_px = .{ 1, 1, 1, 1 }, .border = .divider } }, &.{});
     for (columns, 0..) |*node, i| node.* = tree.container(.{ .id = 26 + i, .style = .{ .width = .{ .percent = if (i == 0) 0.36 else 0.64 }, .height = .{ .percent = 1 } } }, &.{});
-    main[3] = tree.card(.{ .id = 8, .direction = .row, .style = .{ .height = .{ .px = @floatFromInt(row) }, .flex = .{ .shrink = 0 } }, .paint = .{ .background = .inset_bg, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 0, 0 }, .shadow = .none } }, columns);
+    main[4] = tree.card(.{ .id = 8, .direction = .row, .style = .{ .height = .{ .px = @floatFromInt(row) }, .flex = .{ .shrink = 0 } }, .paint = .{ .background = .inset_bg, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 0, 0 }, .shadow = .none } }, columns);
     for (rows, 0..) |*node, i| {
         const pair = cells[i * 2 ..][0..2];
         for (pair, 0..) |*cell, col| cell.* = tree.container(.{ .id = 101 + i * 3 + col, .style = .{ .width = .{ .percent = if (col == 0) 0.36 else 0.64 }, .height = .{ .percent = 1 } } }, &.{});
         node.* = tree.container(.{ .id = 100 + i * 3, .direction = .row, .style = .{ .height = .{ .px = @floatFromInt(row) }, .flex = .{ .shrink = 0 } } }, pair);
     }
-    main[4] = tree.container(.{ .id = 10000, .style = .{ .height = .{ .fill = 1 } }, .overflow = .clip }, rows);
+    main[5] = tree.container(.{ .id = 10000, .style = .{ .height = .{ .fill = 1 } }, .overflow = .clip }, rows);
+    const detail = try a.alloc(tree.UiNode, 3);
+    for (detail, 0..) |*node, i| node.* = tree.container(.{ .id = 61 + i, .style = .{ .height = .{ .percent = 1.0 / 3.0 } } }, &.{});
+    main[6] = tree.card(.{ .id = 60, .style = .{ .height = .{ .px = @floatFromInt(spacing.pointsPx(60, scale)) }, .flex = .{ .shrink = 0 } }, .paint = .{ .background = .inset_bg, .shadow = .none, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 0, 0 } } }, detail);
     footer[0] = tree.container(.{ .id = 28, .style = .{ .height = .{ .percent = 1 }, .flex = .{ .grow = 1 } } }, &.{});
     footer[1] = tree.button(.{ .id = 7, .action = .{ .id = 13 }, .variant = .ghost, .style = .{ .width = .{ .px = @floatFromInt(spacing.pointsPx(144, scale)) }, .height = .{ .percent = 1 }, .flex = .{ .shrink = 0 } } });
     footer[2] = tools[5];
     footer[3] = tools[6];
-    main[5] = tree.container(.{ .id = 9, .direction = .row, .align_items = .center, .style = .{ .height = .{ .px = @floatFromInt(spacing.pointsPx(if (compact) 32 else 40, scale)) }, .padding = .{ .left = @floatFromInt(inset), .right = @floatFromInt(gap) }, .flex = .{ .shrink = 0 } } }, footer);
+    main[7] = tree.container(.{ .id = 9, .direction = .row, .align_items = .center, .style = .{ .height = .{ .px = @floatFromInt(spacing.pointsPx(if (compact) 32 else 40, scale)) }, .padding = .{ .left = @floatFromInt(inset), .right = @floatFromInt(gap) }, .flex = .{ .shrink = 0 } } }, footer);
     footer[0].style.width = .{ .px = 0 };
     footer[0].style.flex.grow = 0;
     footer[1].style.width = .{ .percent = 0.44 };
@@ -98,7 +104,7 @@ fn build(a: std.mem.Allocator, p: props.ChromeProps, scale: u32, labels: []const
 }
 
 fn labelsFor(a: std.mem.Allocator, tab: Tab, paused: bool, pinned: bool, anonymize: bool, query: []const u8, status: []const u8) ![]Label {
-    const labels = try a.alloc(Label, 23);
+    const labels = try a.alloc(Label, 28);
     labels[0] = .{ .id = 3, .text = if (status.len > 0) try std.fmt.allocPrint(a, "{s} · {s}", .{ i18n.t(.inspector_title), status }) else i18n.t(.inspector_title) };
     const tools = [_][]const u8{ "‹", "›", if (pinned) i18n.t(.inspector_pinned) else i18n.t(.inspector_follow), if (paused) i18n.t(.inspector_paused) else i18n.t(.inspector_live), "↻", i18n.t(.inspector_copy), i18n.t(.inspector_save), "×" };
     for (tools, 0..) |text, i| labels[i + 1] = .{ .id = 10 + i, .text = text };
@@ -111,6 +117,7 @@ fn labelsFor(a: std.mem.Allocator, tab: Tab, paused: bool, pinned: bool, anonymi
     labels[17] = .{ .id = 27, .text = i18n.t(.inspector_value), .muted = true };
     const placements = [_][]const u8{ "↑", "→", "↓", "←", "↗" };
     for (placements, 0..) |text, i| labels[18 + i] = .{ .id = 40 + i, .text = text };
+    for ([_]u64{ 31, 32, 61, 62, 63 }, 23..) |id, i| labels[i] = .{ .id = id, .text = "", .muted = true };
     return labels;
 }
 // Visual arrows are icons; assistive labels describe the action in the UI language.
@@ -159,35 +166,93 @@ fn contains(text: []const u8, needle: []const u8) bool {
     for (0..text.len - needle.len + 1) |i| if (std.ascii.eqlIgnoreCase(text[i..][0..needle.len], needle)) return true;
     return false;
 }
-pub fn collect(tab: Tab, placement: usize, paused: bool, pinned: bool, anonymize: bool, query: []const u8, offset: *usize, status: []const u8, json: []const u8, p: props.ChromeProps, scale: u32, tk: *const tokens.Tokens, a: std.mem.Allocator, hovered: ?u64, out: *std.ArrayList(draw.ChromeDraw)) !void {
-    const base = try labelsFor(a, tab, paused, pinned, anonymize, query, status);
-    if (placement < 5) base[18 + placement].accent = true;
-    var all: std.ArrayList(fields.Row) = .empty;
+fn contextPoints(p: props.ChromeProps, scale: u32) u16 {
+    return if (props.workspaceRect(p.metrics).h >= spacing.pointsPx(480, scale)) 40 else 24;
+}
+const Prepared = struct { root: std.json.Value, rows: []fields.Row, count: usize, offset: usize };
+fn prepare(a: std.mem.Allocator, tab: Tab, query: []const u8, json: []const u8, p: props.ChromeProps, scale: u32, offset: usize) !Prepared {
     const parsed = try std.json.parseFromSlice(std.json.Value, a, json, .{ .allocate = .alloc_always });
+    var all: std.ArrayList(fields.Row) = .empty;
     if (parsed.value == .object) if (parsed.value.object.get(@tagName(tab))) |section| try fields.flatten(a, section, "", &all);
+    try fields.decorate(a, parsed.value, @tagName(tab), all.items);
+    const compact = props.workspaceRect(p.metrics).w >= spacing.pointsPx(640, scale);
+    const reserve = (if (compact) @as(u16, 180) else @as(u16, 244)) + contextPoints(p, scale) + 60;
+    const budget = (props.workspaceRect(p.metrics).h -| spacing.pointsPx(reserve, scale)) / @max(spacing.pointsPx(if (compact) 24 else 32, scale), 1);
     var filtered: std.ArrayList(fields.Row) = .empty;
     for (all.items) |row| {
-        if (query.len == 0 or (!row.heading and (contains(row.key, query) or contains(row.label, query) or contains(row.value, query)))) try filtered.append(a, row);
+        if (row.heading and budget < 3) continue;
+        if (query.len == 0 or (!row.heading and (contains(row.key, query) or contains(row.label, query) or contains(row.value, query) or contains(row.raw_value, query) or contains(row.meaning, query) or contains(fields.sourceLabel(row.info.source), query)))) try filtered.append(a, row);
     }
     if (filtered.items.len == 0) try filtered.append(a, .{ .key = "", .label = i18n.t(.inspector_empty) });
-    const height = props.workspaceRect(p.metrics).h;
-    const compact = props.workspaceRect(p.metrics).w >= spacing.pointsPx(640, scale);
-    const rows: usize = (height -| spacing.pointsPx(if (compact) 180 else 244, scale)) / @max(spacing.pointsPx(if (compact) 24 else 32, scale), 1);
-    offset.* = @min(offset.*, filtered.items.len -| rows);
-    const count = @min(rows, filtered.items.len - offset.*);
+    const start = @min(offset, filtered.items.len -| budget);
+    return .{ .root = parsed.value, .rows = filtered.items, .count = @min(budget, filtered.items.len - start), .offset = start };
+}
+fn formatted(a: std.mem.Allocator, key: i18n.Key, args: []const i18n.Arg) ![]const u8 {
+    return i18n.format(try a.alloc(u8, 1024), i18n.t(key), args);
+}
+fn overviewValue(a: std.mem.Allocator, root: std.json.Value, key: []const u8) ![]const u8 {
+    if (root == .object) if (root.object.get("overview")) |overview| if (overview == .object) if (overview.object.get(key)) |value| return std.json.Stringify.valueAlloc(a, value, .{});
+    return i18n.t(.inspector_unavailable);
+}
+fn selectedRow(prepared: Prepared, key: []const u8) ?fields.Row {
+    if (key.len != 0) for (prepared.rows) |row| {
+        if (std.mem.eql(u8, row.field_path, key)) return row;
+    };
+    for (prepared.rows[prepared.offset .. prepared.offset + prepared.count]) |row| if (!row.heading and row.field_path.len != 0) return row;
+    return null;
+}
+pub const FieldPick = struct { key: []const u8, id: u64 };
+pub fn fieldAt(tab: Tab, query: []const u8, offset: usize, json: []const u8, p: props.ChromeProps, scale: u32, a: std.mem.Allocator, x: f64, y: f64) ?FieldPick {
+    const prepared = prepare(a, tab, query, json, p, scale, offset) catch return null;
+    const f = build(a, p, scale, labelsFor(a, tab, false, false, true, query, "") catch return null, prepared.count) catch return null;
+    for (prepared.rows[prepared.offset .. prepared.offset + prepared.count], 0..) |row, i| {
+        if (row.heading or row.field_path.len == 0) continue;
+        const id = 100 + i * 3;
+        const e = f.rects.entries[f.rects.find(id) orelse continue];
+        const r = if (e.effective_clip) |clip| layout.intersectRect(e.rect, clip) else e.rect;
+        if (x >= r.x and x < r.x + r.width and y >= r.y and y < r.y + r.height) return .{ .key = row.field_path, .id = id };
+    }
+    return null;
+}
+pub fn dataControlRect(tab: Tab, query: []const u8, offset: usize, json: []const u8, p: props.ChromeProps, scale: u32, a: std.mem.Allocator, id: u64) ?draw.Rect {
+    const prepared = prepare(a, tab, query, json, p, scale, offset) catch return null;
+    const f = build(a, p, scale, labelsFor(a, tab, false, false, true, query, "") catch return null, prepared.count) catch return null;
+    const e = f.rects.entries[f.rects.find(id) orelse return null];
+    return rectOf(if (e.effective_clip) |clip| layout.intersectRect(e.rect, clip) else e.rect);
+}
+pub fn collect(tab: Tab, placement: usize, paused: bool, pinned: bool, anonymize: bool, query: []const u8, offset: *usize, status: []const u8, json: []const u8, p: props.ChromeProps, scale: u32, tk: *const tokens.Tokens, a: std.mem.Allocator, hovered: ?u64, selected_key: []const u8, out: *std.ArrayList(draw.ChromeDraw)) !void {
+    const base = try labelsFor(a, tab, paused, pinned, anonymize, query, status);
+    if (placement < 5) base[18 + placement].accent = true;
+    const prepared = try prepare(a, tab, query, json, p, scale, offset.*);
+    offset.* = prepared.offset;
+    const filtered = prepared.rows;
+    const count = prepared.count;
+    const selected = selectedRow(prepared, selected_key);
+    base[23].text = i18n.t(switch (tab) {
+        .overview => .inspector_summary_overview,
+        .path => .inspector_summary_path,
+        .terminal => .inspector_summary_terminal,
+        .events => .inspector_summary_events,
+    });
+    base[24].text = try formatted(a, .inspector_sample_line, &.{ .{ .s = try overviewValue(a, prepared.root, "surface_id") }, .{ .s = if (paused) i18n.t(.inspector_paused) else i18n.t(.inspector_live) }, .{ .s = try overviewValue(a, prepared.root, "sampled_at_ms") } });
+    if (selected) |row| {
+        base[25].text = row.meaning;
+        base[26].text = try formatted(a, .inspector_source_line, &.{ .{ .s = fields.sourceLabel(row.info.source) }, .{ .s = fields.availabilityLabel(row.info.availability) } });
+        base[27].text = if (row.info.reason == .none) row.field_path else try formatted(a, .inspector_reason_raw, &.{ .{ .s = fields.reasonLabel(row.info.reason) }, .{ .s = row.raw_value } });
+    } else base[25].text = i18n.t(.inspector_field_hint);
     const labels = try a.alloc(Label, base.len + count * 2);
     @memcpy(labels[0..base.len], base);
     for (0..count) |i| {
-        const row = filtered.items[offset.* + i];
+        const row = filtered[offset.* + i];
         labels[base.len + i * 2] = .{ .id = 101 + i * 3, .text = row.label, .accent = row.heading, .muted = !row.heading };
-        labels[base.len + i * 2 + 1] = .{ .id = 102 + i * 3, .text = if (row.missing) i18n.t(.inspector_unavailable) else row.value, .muted = row.missing };
+        labels[base.len + i * 2 + 1] = .{ .id = 102 + i * 3, .text = row.value, .muted = row.missing };
     }
     const frame = try build(a, p, scale, labels, count);
     const ops = try a.alloc(draw.Op, frame.rects.entries.len + labels.len + count * 2 + 12);
     const painted = try paint.paint(frame.rects, .{ .hovered = hovered }, tk, .sidebar, .{ .ops = ops });
     var n = painted.ops.len;
     // Thin rules distinguish bands and rows; selected tabs use an underline, not a pill.
-    for ([_]u64{ 4, 5, 8 }) |id| {
+    for ([_]u64{ 4, 5, 8, 30, 60 }) |id| {
         const r = rectOf(frame.rects.entries[frame.rects.find(id).?].rect);
         ops[n] = .{ .quad = .{ .rect = .{ .x = r.x, .y = r.y + @as(i32, @intCast(r.h)) - 1, .w = r.w, .h = 1 }, .fill_role = .divider } };
         n += 1;
@@ -197,9 +262,9 @@ pub fn collect(tab: Tab, placement: usize, paused: bool, pinned: bool, anonymize
     n += 1;
     for (0..count) |i| {
         const r = rectOf(frame.rects.entries[frame.rects.find(100 + i * 3).?].rect);
-        const row = filtered.items[offset.* + i];
-        if (row.heading) {
-            ops[n] = .{ .quad = .{ .rect = r, .fill_role = .inset_bg } };
+        const row = filtered[offset.* + i];
+        if (row.heading or hovered == 100 + i * 3 or (selected_key.len != 0 and std.mem.eql(u8, row.field_path, selected_key))) {
+            ops[n] = .{ .quad = .{ .rect = r, .fill_role = if (row.heading) .inset_bg else .tab_hover_bg } };
             n += 1;
         }
         ops[n] = .{ .quad = .{ .rect = .{ .x = r.x, .y = r.y + @as(i32, @intCast(r.h)) - 1, .w = r.w, .h = 1 }, .fill_role = .divider } };
@@ -214,7 +279,7 @@ pub fn collect(tab: Tab, placement: usize, paused: bool, pinned: bool, anonymize
         run[0] = .{ .text = text, .bold = label.accent or label.id == 3 };
         const pad: i32 = @intCast(spacing.px(.sm, scale));
         const centered = (label.id >= 10 and label.id <= 23) or label.id == 7 or (label.id >= 40 and label.id <= 44);
-        const text_role: typography.ChromeTextRole = if (label.id == 3) .group_heading else .control;
+        const text_role: typography.ChromeTextRole = if (label.id == 3) .group_heading else if (label.id == 31 or label.id == 32 or (label.id >= 61 and label.id <= 63)) .supporting else .control;
         const text_y = r.y + @as(i32, @intCast((r.h -| typography.lineHeightPx(text_role, scale)) / 2));
         ops[n] = .{ .text = .{ .origin = .{ .x = r.x + pad, .y = text_y }, .runs = run, .role = if (label.muted) .list_secondary_fg else .surface_fg, .text_role = text_role, .max_width_px = r.w -| @as(u32, @intCast(pad * 2)), .placement = if (centered) .{ .center_in_rect = r } else .origin, .clip = clip, .scroll_clipped = true, .above_scroll = true } };
         n += 1;
@@ -251,4 +316,33 @@ test "inspector cursor uses filter and action geometry at narrow wide and retina
         try std.testing.expectEqual(Cursor.hand, cursor(p, scale, a, @as(f64, @floatFromInt(button.x)) + 1, @as(f64, @floatFromInt(button.y)) + 1));
         try std.testing.expectEqual(Cursor.arrow, cursor(p, scale, a, -1, -1));
     };
+}
+
+test "inspector field selection matches painted filtered rows at narrow wide retina and short sizes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const json =
+        \\{"overview":{"backend":"in_process","window":7,"surface_id":1,"terminated":false,"sampled_at_ms":0}}
+    ;
+    for ([_]u32{ 360, 720 }) |width| for ([_]u32{ 300, 600 }) |height| for ([_]u32{ 1000, 2000 }) |scale| {
+        const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = width * scale / 1000, .backing_height_px = height * scale / 1000 } };
+        const prepared = try prepare(a, .overview, "window", json, p, scale, 0);
+        if (width == 360 and height == 300) {
+            try std.testing.expectEqual(@as(usize, 0), prepared.count);
+            try std.testing.expect(dataControlRect(.overview, "window", 0, json, p, scale, a, 100) == null);
+            continue;
+        }
+        try std.testing.expectEqual(@as(usize, 1), prepared.count);
+        const rect = dataControlRect(.overview, "window", 0, json, p, scale, a, 100).?;
+        try std.testing.expect(rect.h > 0);
+        const pick = fieldAt(.overview, "window", 0, json, p, scale, a, @as(f64, @floatFromInt(rect.x)) + 1, @as(f64, @floatFromInt(rect.y)) + 1).?;
+        try std.testing.expectEqualStrings("overview.window", pick.key);
+        try std.testing.expect(fieldAt(.overview, "window", 0, json, p, scale, a, -1, -1) == null);
+        try std.testing.expectEqualStrings("overview.window", selectedRow(prepared, pick.key).?.field_path);
+        try std.testing.expect(selectedRow(prepared, pick.key).?.meaning.len > 0);
+    };
+    const measured = try prepare(a, .overview, "terminated", json, .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 720, .backing_height_px = 600 } }, 1000, 0);
+    try std.testing.expectEqualStrings("false", measured.rows[0].value);
+    try std.testing.expectEqual(.available, measured.rows[0].info.availability);
 }

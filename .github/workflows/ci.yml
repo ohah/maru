@@ -482,8 +482,9 @@ jobs:
     # 컴파일하지 않으므로 여기가 영영 콜드가 된다.
     if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_macos_only != 'true' }}
     runs-on: macos-15
-    # 떼어 내기 전 잡(50분)의 이 부분 실측은 웜 약 7분 — 콜드 러너 편차와 첫 캐시 없는 실행을 수용한다.
-    timeout-minutes: 30
+    # PR #4523의 콜드 실행은 테스트가 진행 중인데 30분 제한으로 취소됐다.
+    # 컴파일을 포함한 콜드 실행을 수용한다. 개별 테스트의 timeout과 단언은 유지한다.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:

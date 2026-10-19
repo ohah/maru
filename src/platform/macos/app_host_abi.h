@@ -19,7 +19,7 @@ uint32_t maru_macos_editor_url_drain(struct MaruAppHostSession *session, uint8_t
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 232u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 233u
 /* Search-owned UTF-16 context; generation 0 means unavailable. Existing editor exports keep
    their editor-only meaning. All calls are main-thread only; substring supports a size query. */
 uint64_t maru_macos_app_session_chrome_ime_generation(struct MaruAppHostSession *session);
@@ -1904,7 +1904,8 @@ int32_t maru_macos_app_session_run_action(
     size_t len
 );
 void maru_macos_app_session_destroy(MaruAppHostSession *session);
-/* v231: independent Inspector presentation, no new runtime/session ownership. */
+/* v233: native owner membership binding for shared GUI/CLI Inspector diagnostics. */
+void maru_macos_app_session_inspector_set_window_id(MaruAppHostSession *session, uint64_t id);
 const char *maru_macos_app_session_inspector_title(void);
 uint32_t maru_macos_app_session_inspector_minimum_pt(void);
 uint32_t maru_macos_app_session_inspector_flags(MaruAppHostSession *session);

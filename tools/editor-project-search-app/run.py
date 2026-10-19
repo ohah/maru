@@ -35,6 +35,9 @@ def main():
     parser.add_argument("--physical-ime", action="store_true")
     parser.add_argument("--matrix", action="store_true")
     parser.add_argument("--native-close-save", action="store_true")
+    parser.add_argument("--untitled-save-benchmark", action="store_true")
+    parser.add_argument("--untitled-bytes", type=int, default=65536)
+    parser.add_argument("--untitled-delay-ms", type=int, default=0)
     parser.add_argument("--save-as-command", action="store_true")
     parser.add_argument("--save-as-physical-ime", action="store_true")
     parser.add_argument("--save-as-scenario", choices=("save", "cancel", "edit-during-write"), default="save")
@@ -60,6 +63,12 @@ def main():
     parser.add_argument("--optimize", choices=("Debug", "ReleaseFast"), default="Debug")
     parser.add_argument("--app", type=Path, help="이 하네스로 빌드한 앱을 재사용한다")
     args = parser.parse_args()
+    if args.untitled_save_benchmark and (args.save_as_command or args.native_close_save or args.matrix or args.physical_ime or args.replace_preview or args.unicode_field):
+        parser.error("Untitled benchmark must run without other GUI scenarios")
+    if not args.untitled_save_benchmark and (args.untitled_bytes != 65536 or args.untitled_delay_ms != 0):
+        parser.error("Untitled size/delay options need --untitled-save-benchmark")
+    if not 2 <= args.untitled_bytes <= 8 * 1024 * 1024 or not 0 <= args.untitled_delay_ms <= 2000:
+        parser.error("Untitled benchmark needs 2..8388608 bytes and 0..2000 ms")
     if args.save_as_physical_ime and (not args.save_as_command or not args.native_panel_capture_app or args.physical_ime or args.save_as_scenario != "save"):
         parser.error("Save As physical IME needs native capture, --save-as-command and the save scenario without --physical-ime")
     if args.save_as_scenario != "save" and (not args.save_as_command or not args.native_panel_capture_app):
@@ -113,6 +122,8 @@ def main():
              "src/platform/macos/app_session/editor/search/verify.zig", "src/platform/macos/app_session/editor/search/disk_apply.zig", "src/platform/macos/app_session/editor/search/preview.zig", "src/session/editor/search/preview.zig", "src/platform/macos/app_session/editor/search/coordinator.zig",
              "src/platform/macos/app_session/editor/search/backend.zig", "src/session/editor/search/query.zig",
              "src/platform/macos/app_session/editor/search/report.zig", "src/platform/macos/app_session/editor/search/owner.zig", "src/platform/macos/app_session/tab.zig", "src/i18n.zig", "src/icons.zig", "src/renderer/icon_coverage_data.zig", "src/platform/macos/icon_codepoints.h", "src/platform/macos/app_session/editor/search/batch.zig", "src/platform/macos/app_session/editor/search/batch/ui.zig", "src/platform/macos/app_session/editor/search/batch/worker.zig", "src/platform/macos/app_session/editor/search/batch/mixed_worker.zig", "src/platform/macos/app_session/editor/search/batch/collect.zig", "src/platform/macos/app_session/editor/search/batch/coordinator.zig", "src/platform/macos/app_session/editor/search/batch/load.zig", "src/platform/macos/app_session/editor/local_save.zig", "src/platform/macos/app_session/editor/save/dispatch.zig", "src/platform/macos/app_session/editor/save/owner.zig", "src/session/editor/ops/save_receipt.zig", "src/session/editor/search/batch.zig", "src/editor_save_notice.zig")
+    if args.untitled_save_benchmark:
+        names += ("src/platform/macos/app_session/editor/untitled_save.zig",)
     if args.save_as_command:
         names += ("src/platform/macos/app_session/editor/save/as.zig", "src/platform/macos/app_session/editor/save/queue.zig", "src/platform/macos/app_session/editor/save/destination.zig", "src/platform/macos/app_session/editor/lsp.zig", "src/config/action.zig", "src/config/keybinding.zig", "src/platform/macos/app_host_abi.h", "src/platform/macos/app_host_abi.zig", "tools/editor-project-search-app/save-as.swift.inc", "tools/editor-project-search-app/save-as.zig.inc")
     if args.native_close_save:
@@ -127,6 +138,9 @@ def main():
             parser.error("This app lacks the writer gate; build a new Save As verification app")
         if args.save_as_physical_ime and "SAVE_AS_IME marked=true" not in (source / "src/platform/macos/MaruAppHost.swift").read_text():
             parser.error("This app lacks the Korean Save As driver; build a new verification app")
+        if args.untitled_save_benchmark:
+            if "maybeRunUntitledBenchmark" not in (source / "src/platform/macos/MaruAppHost.swift").read_text() or "UNTITLED_SERIALIZE" not in (source / "src/platform/macos/app_session/editor/untitled_save.zig").read_text():
+                parser.error("This app lacks the untitled benchmark driver and delay hook")
         hashes = {name: sha(source / name) for name in names}
         command = None
     else:
@@ -160,6 +174,16 @@ def main():
             driver = replace_once(driver, "        let now = ProcessInfo.processInfo.systemUptime\n        guard now >= EditorProjectSearchRun.next", "        if EditorProjectSearchRun.stage == 81 { maybeRunSaveAsCommand(); return }\n        let now = ProcessInfo.processInfo.systemUptime\n        guard now >= EditorProjectSearchRun.next")
             driver = replace_once(driver, "            if !matrix { finish(true); return }", "            if ProcessInfo.processInfo.environment[\"MARU_EDITOR_SAVE_AS_COMMAND\"] == \"1\" { EditorProjectSearchRun.stage = 81; return }\n            if !matrix { finish(true); return }")
             driver += "\n" + (source / "tools/editor-project-search-app/save-as.swift.inc").read_text()
+        if args.untitled_save_benchmark:
+            observer.write_text(observer.read_text() + "\n" + (source / "tools/editor-project-search-app/untitled-save.zig.inc").read_text())
+            driver = replace_once(driver, "        let now = ProcessInfo.processInfo.systemUptime\n        guard now >= EditorProjectSearchRun.next", "        if EditorProjectSearchRun.stage == 82 { maybeRunUntitledBenchmark(); return }\n        let now = ProcessInfo.processInfo.systemUptime\n        guard now >= EditorProjectSearchRun.next")
+            driver = replace_once(driver, "            if !matrix { finish(true); return }", "            if ProcessInfo.processInfo.environment[\"MARU_UNTITLED_BENCHMARK\"] == \"1\" { EditorProjectSearchRun.stage = 82; return }\n            if !matrix { finish(true); return }")
+            driver += "\n" + (source / "tools/editor-project-search-app/untitled-save.swift.inc").read_text()
+            untitled = source / "src/platform/macos/app_session/editor/untitled_save.zig"
+            untitled.write_text(replace_once(untitled.read_text(), "fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: bool) void {", "fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: bool) void {\n    const benchmark_started = std.Io.Clock.awake.now(self.io).nanoseconds;"))
+            untitled.write_text(replace_once(untitled.read_text(), "    const saved_content = doc.file.content;", "    const saved_content = doc.file.content;\n    std.debug.print(\"UNTITLED_SERIALIZE ns={d}\\n\", .{std.Io.Clock.awake.now(self.io).nanoseconds - benchmark_started});\n    const benchmark_delay = std.fmt.parseInt(u32, std.mem.span(std.c.getenv(\"MARU_UNTITLED_DELAY_MS\") orelse \"0\"), 10) catch 0;\n    if (benchmark_delay > 0) std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(benchmark_delay), .awake) catch {};"))
+            untitled.write_text(replace_once(untitled.read_text(), "    // **새 파일과 덮어쓰기는 다른 함수다.**", "    const benchmark_io_started = std.Io.Clock.awake.now(self.io).nanoseconds;\n    // **새 파일과 덮어쓰기는 다른 함수다.**"))
+            untitled.write_text(replace_once(untitled.read_text(), "    // **여기부터 실패해도 파일은 이미 있다**", "    std.debug.print(\"UNTITLED_IO ns={d}\\n\", .{std.Io.Clock.awake.now(self.io).nanoseconds - benchmark_io_started});\n    // **여기부터 실패해도 파일은 이미 있다**"))
         host = source / names[3]
         host.write_text(replace_once(host.read_text(), "        maybeRunEditorIMESmoke()\n",
             "        maybeRunEditorIMESmoke()\n        maybeRunEditorProjectSearch()\n") + "\n" +
@@ -244,6 +268,10 @@ def main():
     env["MARU_EDITOR_PROJECT_BATCH_OPEN_FILES"] = str(args.batch_open_files)
     env["MARU_EDITOR_PROJECT_BATCH_PEER_BYTES"] = str(args.batch_peer_bytes)
     env["MARU_EDITOR_PROJECT_BATCH_SAVE_DELAY_MS"] = str(args.batch_save_delay_ms)
+    if args.untitled_save_benchmark:
+        env["MARU_UNTITLED_BENCHMARK"] = "1"
+        env["MARU_UNTITLED_BYTES"] = str(args.untitled_bytes)
+        env["MARU_UNTITLED_DELAY_MS"] = str(args.untitled_delay_ms)
     if args.native_close_save: env["MARU_EDITOR_NATIVE_CLOSE_SAVE"] = "1"
     if args.save_as_command: env["MARU_EDITOR_SAVE_AS_COMMAND"] = "1"
     env["MARU_EDITOR_SAVE_AS_SCENARIO"] = args.save_as_scenario
@@ -366,6 +394,15 @@ end run'''
             expected += ("bottom-batch-saved", "right-batch-saved", "batch-undo", "batch-undo-saved")
     if args.matrix:
         expected += ("shared", "independent", "zero-override", "root-changed", "stale-release")
+    if args.untitled_save_benchmark:
+        expected += ("untitled-saved",)
+        data = bytes(ord("x") if i % 2 == 0 else 10 for i in range(args.untitled_bytes))
+        if (project / "untitled-benchmark.txt").read_bytes() != data:
+            raise RuntimeError("Untitled first-save disk bytes differ")
+        metric = re.search(r"UNTITLED_SAVE_METRIC call_ns=(\d+) next_event_ns=(\d+) passed=true", transcript)
+        if metric is None: raise RuntimeError("Missing untitled main-event measurement")
+        if int(metric[2]) < int(metric[1]) or int(metric[1]) < args.untitled_delay_ms * 1_000_000:
+            raise RuntimeError("Untitled measurement violates the synchronous delay ordering")
     if args.native_close_save:
         expected += ("native-close-confirm", "native-close-saving", "native-close-saved", "native-close-edit-kept", "native-close-conflict-kept")
         for name, data in (("saved", b"foo!"), ("kept", b"foo!"), ("conflict", b"outside")):
@@ -418,6 +455,11 @@ end run'''
     report = dict(scope="Real AppKit search input, result click, navigation, bottom dock scrolling, cancellation and Metal readback",
         limits="Korean CGEvent typing and Save As composition commit verified; shortcut is AppKit NSEvent; no VoiceOver proof" if args.save_as_physical_ime else "Physical Korean HID and Enter verified; no VoiceOver or OS candidate screenshot proof" if args.physical_ime else "No physical Korean HID or VoiceOver proof", source_sha256=hashes, binary_sha256=sha(app), command=command,
         product_passed=True, native_close_save=args.native_close_save, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, batch_open_files=args.batch_open_files, batch_peer_bytes=args.batch_peer_bytes, optimize=args.optimize, disk_padding_lines=args.disk_padding_lines, batch_save_delay_ms=args.batch_save_delay_ms, replace_batch_save_retry=args.replace_batch_save_retry, replace_batch=args.replace_batch, replace_preview=args.replace_preview, replace_apply=args.replace_apply, replace_disk_apply=args.replace_disk_apply, replace_ime_refuse=args.replace_ime_refuse, conflict_markers=args.conflict_markers, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(source / "tools/editor-project-search-app" / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc", "batch.zig.inc", "native-close.zig.inc", "native-close.swift.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
+    if args.untitled_save_benchmark:
+        report["untitled_save_benchmark"] = dict(bytes=args.untitled_bytes, injected_delay_ms=args.untitled_delay_ms, call_ns=int(metric[1]), next_event_ns=int(metric[2]), serialize_ns=int(re.search(r"UNTITLED_SERIALIZE ns=(\d+)", transcript)[1]), io_ns=int(re.search(r"UNTITLED_IO ns=(\d+)", transcript)[1]))
+        report["scope"] = "Synchronous untitled first-save naming commit in the actual AppKit main queue; disk bytes and model adoption"
+        for name in ("untitled-save.swift.inc", "untitled-save.zig.inc"):
+            report["harness_sha256"][name] = sha(source / "tools/editor-project-search-app" / name)
     report["runner_sha256"] = sha(Path(__file__))
     report["save_as_command"] = args.save_as_command
     report["save_as_scenario"] = args.save_as_scenario

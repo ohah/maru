@@ -1736,3 +1736,12 @@ U4b/U4c/U4d 제품 회귀·백업 reader·복구 저장소와 U4b-19 실패 주�
 원본 백업 바이트와 정상 복원의 Undo를 검사한다. `test-editor-recovery-codec`와
 `test-editor-recovery-window`는 복구 포맷과 창 staging 회귀를 함께 확인한다.
 물리 IME·실제 전원 손실·OS 전체 메모리 고갈은 별도 검증이다.
+
+### 이름 없는 문서 첫 저장의 응답 지연 실측
+
+`python3 tools/measure-editor-untitled-save.py`는 격리 실제 앱을 빌드하고 64KiB/1MiB 문서의
+첫 저장을 무지연/200ms 주입 각각 세 번 실행한다. `--app <같은 하네스의 앱>`으로 빌드를
+재사용할 수 있다. `--output <저장소 밖 새 폴더>`에 원본 manifest 경로와 집계를 남긴다.
+하위 실행은 `tools/editor-project-search-app/run.py --untitled-save-benchmark
+--untitled-bytes 65536 --untitled-delay-ms 200`이다. 제품 코드에 지연을 넣지 않는다.
+측정의 의미·범위와 후속 연결안은 [첫 저장 비동기 전환](plans/editor-untitled-save-async.md)을 따른다.

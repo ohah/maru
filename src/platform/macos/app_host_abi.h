@@ -19,7 +19,7 @@ uint32_t maru_macos_editor_url_drain(struct MaruAppHostSession *session, uint8_t
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 230u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 231u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1897,6 +1897,17 @@ int32_t maru_macos_app_session_run_action(
     size_t len
 );
 void maru_macos_app_session_destroy(MaruAppHostSession *session);
+/* v231: independent Inspector presentation, no new runtime/session ownership. */
+const char *maru_macos_app_session_inspector_title(void);
+uint32_t maru_macos_app_session_inspector_minimum_pt(void);
+uint32_t maru_macos_app_session_inspector_flags(MaruAppHostSession *session);
+uint64_t maru_macos_app_session_inspector_target(MaruAppHostSession *session);
+uint32_t maru_macos_app_session_inspector_control_rect(MaruAppHostSession *session, uint32_t id, uint32_t *rect_out);
+uint32_t maru_macos_app_session_inspector_placement(MaruAppHostSession *session);
+void maru_macos_app_session_inspector_command(MaruAppHostSession *session, uint32_t command);
+void maru_macos_app_session_inspector_resize(MaruAppHostSession *session, uint32_t width, uint32_t height, uint32_t scale);
+/* kind 2 returns CursorKind (arrow=0, text=1, hand=2); other kinds report consumption. */
+uint32_t maru_macos_app_session_inspector_pointer(MaruAppHostSession *session, uint32_t kind, double x, double y);
 int32_t maru_macos_app_session_metal_frame(
     MaruAppHostSession *session,
     MaruAppHostMetalFrame *out_frame

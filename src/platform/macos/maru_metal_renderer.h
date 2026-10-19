@@ -64,6 +64,9 @@ bool maru_metal_renderer_set_atlas(
    모달·닫힘 clear 유실 방지; MaruAppHost.drawMetalFrame이 metalNeedsRedraw로 재시도). MARU_SCREENSHOT
    모드는 두 pass를 한 오프스크린 텍스처에 합성(터미널 Clear → 오버레이 Load)해 실제 2레이어 합성과 같은 최종
    픽셀을 한 장으로 캡처한다(획득/인코딩 실패는 retry 없이 exit(1) fail-fast). */
+/* 0=attached scene, 1=main scene without Inspector, 2=Inspector only.
+   Both windows reuse one atlas and retained frame generation. */
+void maru_metal_renderer_set_inspector_mode(MaruMetalRenderer *renderer, uint32_t mode);
 bool maru_metal_renderer_draw(
     MaruMetalRenderer *renderer,
     CAMetalLayer *terminal_layer,

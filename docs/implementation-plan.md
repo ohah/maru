@@ -32,6 +32,7 @@ macOS 로컬 shell 1개 surface
 단계·이니셔티브별 구현 계획과 완료 이력은 `docs/plans/` 아래 파일이 소유한다. 이 문서는 인덱스와
 모든 계획에 공통인 원칙만 들고, 개별 단계의 서술은 갖지 않는다.
 
+- [Live Terminal Inspector — GUI와 CLI 진단](plans/terminal-inspector.md)
 - [1~7단계 — facade·snapshot·parser·PTY·runtime·E2E·renderer 구현 계획](plans/core-slices.md)
 - [8단계 — 탭·사이드바·split 구현 계획](plans/tabs-and-splits.md)
 - [8단계 — chrome 폴리시와 에이전트 표시 구현 이력](plans/chrome-polish.md)

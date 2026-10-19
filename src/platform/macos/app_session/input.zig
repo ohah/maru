@@ -330,6 +330,7 @@ pub fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
     }
     switch (self.inputFocus()) {
         .confirm, .notice, .file_tree, .dock_pending => {}, // 구조 input owner는 조합을 표시하지 않는다.
+        .inspector => app_session_mod.inspector_ops.setPreedit(self, bytes),
         .settings => self.chrome_host.settings.setSearchPreedit(bytes), // 세팅 검색줄 조합(고정 버퍼 — OverlayInput과 별개)
         .rename => self.rename_input.setPreedit(self.allocator, bytes) catch {},
         .sidebar_search => self.sidebar_search_input.setPreedit(self.allocator, bytes) catch {},
@@ -387,6 +388,7 @@ pub fn imeComposingActive(self: *AppSession) bool {
     }
     return switch (self.inputFocus()) {
         .confirm, .notice, .file_tree, .dock_pending => false, // 구조 input owner는 조합 상태가 없다.
+        .inspector => self.inspector.preedit_len > 0,
         .settings => self.chrome_host.settings.searchPreedit().len > 0,
         .rename => self.rename_input.preedit.items.len > 0,
         .sidebar_search => self.sidebar_search_input.preedit.items.len > 0,
@@ -1371,6 +1373,7 @@ pub fn imeCursorRect(self: *AppSession) ImeCursorRect {
         // 잡는다(사이드바 y는 slot 기준 근사). null이면 아래 터미널 커서로 폴백.
         .rename => settings_ops.renameCaretRect(self),
         // 세팅 검색줄 caret — buildChromeOverlayPrep이 캐시한 rect(검색 중이 아니면 null → 터미널 커서 폴백).
+        .inspector => app_session_mod.inspector_ops.caretRect(self),
         .settings => self.settings_search_caret,
         .sidebar_search => sidebar_ops.sidebarSearchCaretRect(self),
         .agent_session_search => agent_dock.agentSessionDockSearchCaretRect(self),

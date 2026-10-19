@@ -1,5 +1,57 @@
 # 검증 매트릭스
 
+## Live Terminal Inspector
+
+- 2026-10-19: `origin/main` `1fd82a846` 기반. 파일·SCM 도크와 별개인 상·하·좌·우 독립 도크,
+  구분선 resize, native 분리 창·재도킹을 구현했다. 기존 도크는 6개 슬롯을 유지한다.
+- `mise exec -- zig build test-inspector macos-app-build -j2`: 중립 47개 + AppSession 10개 통과,
+  앱 빌드 성공. ABI v231, Paused snapshot 이동 불변, detached Escape 이후 입력 소유권을 포함한다.
+- `python3 tools/inspector-app/run.py --rounds 10 --output /tmp/maru-independent-e2e-release`: 10회 전부 통과.
+  실제 AppKit·Metal 상태 87건, 제품 GPU 캡처 10장, 같은 실행 앱의 CLI inspect 왕복 70건이다.
+  산출물: `/tmp/maru-independent-e2e-release/manifest.json` 및 매 round의 `result.json`·PNG·앱 로그.
+- 시나리오: 네 방향 이동과 기존 Explorer 동시 표시, 반복 분리·재도킹, 2x 최소 크기와 native resize,
+  필터·native marked text·소스 포커스 복귀, Escape→Cmd+W와 native 닫기, Pin/Paused·새 대상·0600 export,
+  네 방향 구분선 drag, Settings 모달 우선권, 두 번째 실제 owner의 창 종료, 빠른 20회 전환.
+- 음성 대조에서 Paused 이동의 강제 새 수집과 분리 창 Escape 후 Cmd+W의 터미널 라우팅 누수를 재현했다.
+  각각 강제 refresh 제거, 필터 포커스와 창 포커스 분리로 수정한 뒤 위 10회 전체를 다시 통과했다.
+- 테스트는 제품 NSView의 NSEvent와 NSTextInputClient callback을 사용한다. 실제 HID·OS IME 후보창,
+  실제 SSH·host-backed GUI·물리적 다중 디스플레이 이동은 검증하지 않았다.
+  테스트 완료 후 앱 정리는 필요하면 harness SIGTERM을 사용하므로 정상 종료 확인창의 증거로 보지 않는다.
+- `test-cli-failure-contract`: 698 통과·1 skip·0 실패.
+- `sh tools/test-macos-agent-session-archive.sh ./zig-out/Maru.app/Contents/MacOS/maru-macos-app`: exit 0.
+  이전 CI 실패 조건인 font24/scale2000 `font-scale-rects`를 포함한다.
+- `mise exec -- zig build check-boundaries -j2`: 전체 exit 0.
+  로그 `/tmp/maru-independent-boundaries-release.log`. 커밋별 구문·원장 검사도 exit 0.
+- 원격 CI는 PR checks로 별도 추적한다. 로컬 통과를 원격 CI 통과로 표시하지 않는다.
+- 추가 검증: `python3 tools/inspector-app/run.py --start 11 --rounds 10 --output /tmp/maru-inspector-extra-e2e-second`:
+  **11~20회 모두 통과**, 상태 69건·실제 NSCursor 판정 58건·live CLI inspect 58건·GPU 캡처 4장.
+  네 방향/2x·분리 창의 filter=text, button=hand, body/outside=arrow, divider=resize-h/v를 검사했다.
+  모달 중 필터 커서도 arrow로 떨어진다. native 창 테두리의 OS resize cursor와 실제 HID는 별도다.
+- 나머지 추가 시나리오: 필터 focus에서 navigation 키 PTY 격리, 한글126byte/이모지128byte 한계와
+  UTF-8 backspace, 조합 중 다섯 배치 이동의 exact-once commit, 두 실제 터미널 Follow/Previous/Next/Pin,
+  Paused refresh의 snapshot 갱신과 이후 이동 불변, close/reopen의 Live/Follow 복귀·필터 유지,
+  파일 도크 방향 전환과 Inspector 공존.
+- 포커스 검사 하네스: 백그라운드 앱에서 OS key 전환이 생기지 않으면 실제 native window delegate를
+  명시 호출하고 `focus_transports=delegate-background`로 기록한다. native 전환은 `native`로 기록한다.
+  입력 대상 창으로 전환할 때 한 번만 focus delegate를 호출하며 Zig의 focus flag를 보고 재집중하지 않는다.
+  Escape 뒤 매 키마다 다시 focus를 주어 결함을 숨기지 않는다. 이는 실제 WindowServer 전환·HID 증거가 아니다.
+- 커서 음성 대조 `/tmp/maru-inspector-cursor-negative/round-11/result.json`: 수정 전 네 방향의
+  필터 커서가 모두 arrow로 나와 실패했다. 수정 후 위 10회는 전부 통과했다.
+- CI에서 발견한 `.inspector_dock_top` 등의 한국어 값 부재를 localized 접근성 설명/시각 기호 분리로
+  수정했다. `test-inspector test-chrome-ui`: 중립48 + host10 + Chrome UI1,154 통과.
+- 수정 후 `macos-app-build`: exit 0, `check-boundaries -Dboundary-shard=0/4`: exit 0.
+  최종 로그 `/tmp/maru-inspector-focus-observer-build.log`, `/tmp/maru-inspector-extra-final-boundaries.log`.
+- 원격 file explorer job은 기존 Swift IME mouse seam에 새 inspectorOwner/ABI stub이 없어 컴파일 실패했다.
+  `tools/test-macos-ime-ack-host.py`를 갱신하고 inspector down/drag/up·세 버튼·IME 승인/거부 30개 조합을 추가했다.
+  실제 제품 메서드 추출 검사: `PASS checks=253`, `inspector_mouse_cases=30 failed_cases=0`, `press_failed=0`.
+  로그 `/tmp/maru-inspector-extra-ime-host.log`. 실제 GUI focus의 증거와 구분한다.
+- 하네스 focus 전제 보완 후 **전체 20/20 재실행 통과**: `156` 상태, 커서 `58`건,
+  live CLI inspect `129`건, GPU PNG `14`장. `/tmp/maru-inspector-final-20/manifest.json`.
+  명령 `python3 tools/inspector-app/run.py --rounds 20 --output /tmp/maru-inspector-final-20`.
+  background delegate 전환 `31`회는 각 `focus_transports`에 기록했다.
+- 범위와 미지원 항목은 [계약](terminal-inspector.md), 진행은 [계획](plans/terminal-inspector.md)을 따른다.
+
+
 > 응답(report) 축 — DSR/CPR/DA/DECRQM 호스트 응답의 적합성과 vttest 수동 시각 점검은 [VT 적합성 테스트](conformance-testing.md)를 본다.
 
 이 문서는 Maru의 각 영역이 무엇으로 검증되는지 추적하기 위한 표다. 목표는 "나중에 구현하자"가 아니라, 아직 구현되지 않은 영역도 어떤 자동 테스트와 산출물로 증명할지 먼저 정해 두는 것이다.

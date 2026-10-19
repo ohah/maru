@@ -130,6 +130,8 @@ func CGSSetWindowBackgroundBlurRadius(_ connection: CGSConnectionID, _ windowNum
 @MainActor
 final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     weak var controller: MaruAppHostController?
+    // Keep the owner shell available through close notifications; teardown clears its session.
+    var inspectorOwner: TerminalSurface?
 
     // W6b: Chromium 탭 툴팁은 macOS 의 툴팁으로 띄운다 — Mac 의 Chrome 도 웹 툴팁을 AppKit 툴팁으로 띄운다(실측: 지연은
     // 사용자 설정 NSInitialToolTipDelay 를 따랐다). 지연·위치·접기·다크 모드·키에 숨기·창을 떠나면 흐려지기·비활성 앱에서 안
@@ -781,7 +783,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     @objc private func windowLostKey(_ note: Notification) {
-        commitComposition()
+        controller?.inViewSurface(self) { _ = commitComposition() }
     }
 
     func hasMarkedText() -> Bool {
@@ -4050,11 +4052,12 @@ final class MaruTerminalContainerView: NSView {
     let terminalView: MaruMetalTerminalView
     let overlayView: MaruMetalOverlayView
 
-    init(frame frameRect: NSRect, controller: MaruAppHostController) {
+    init(frame frameRect: NSRect, controller: MaruAppHostController, inspectorOwner: TerminalSurface? = nil) {
         terminalView = MaruMetalTerminalView(frame: frameRect)
         overlayView = MaruMetalOverlayView(frame: frameRect)
         super.init(frame: frameRect)
         terminalView.controller = controller
+        terminalView.inspectorOwner = inspectorOwner
         // wantsLayer=true가 각 뷰의 makeBackingLayer()로 CAMetalLayer를 즉시 만들게 한다.
         terminalView.wantsLayer = true
         overlayView.wantsLayer = true
@@ -4354,6 +4357,29 @@ final class MaruFileTreeWatcher {
 }
 
 @MainActor
+// An Inspector is a presentation of its owner's retained frame, never an AppSession/PTY.
+final class MaruInspectorPresentation {
+    weak var owner: TerminalSurface?
+    let window: NSWindow
+    let container: MaruTerminalContainerView
+    var lastGeneration: UInt64 = 0
+    var needsRedraw = true
+    init(owner: TerminalSurface, controller: MaruAppHostController) {
+        self.owner = owner
+        window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 720, height: 520), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.title = String(cString: maru_macos_app_session_inspector_title())
+        let minimum = Double(maru_macos_app_session_inspector_minimum_pt())
+        window.contentMinSize = NSSize(width: minimum, height: minimum)
+        container = MaruTerminalContainerView(frame: NSRect(x: 0, y: 0, width: 720, height: 520), controller: controller, inspectorOwner: owner)
+        window.contentView = container
+        window.delegate = controller
+        window.acceptsMouseMovedEvents = true
+        window.makeFirstResponder(container.terminalView)
+    }
+}
+
+@MainActor
 final class TerminalSurface {
     var window: NSWindow?
     var appSession: OpaquePointer?
@@ -4557,6 +4583,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 컬렉션에서 view/key 창으로 고른다. quick terminal이 별도(특수) surface다. 아래 계산 프로퍼티들은
     // 기존 세션별 메서드가 코드 변경 없이 "활성 surface"의 상태를 읽고 쓰게 하는 forwarder다(상태만 분리).
     private var windows: [TerminalSurface] = []
+    private var inspectorWindows: [UInt64: MaruInspectorPresentation] = [:]
+    private var inspectorCapturePaths: [UInt64: String] = [:]
+    private weak var inspectorTestInputWindow: NSWindow?
     /// 아카이브 fixture 창이 **실제로 연** content 크기(pt, "WxH"). 빈 문자열이면 fixture 가 아니거나
     /// 드라이버가 한 번도 안 돌았다는 뜻이다.
     private var agentSessionArchiveSmokeContentSize: String = ""
@@ -4759,6 +4788,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     private var activeSurface: TerminalSurface? {
         if let explicitSurface { return explicitSurface }
+        if let tool = inspectorPresentation(for: NSApp.keyWindow), let owner = tool.owner { return owner }
         // sheet(W5a — Chromium 탭 대화상자, W10b 저장 창)가 키면 그 **부모 창**이 대상이다 — 안 그러면 sheet 가 뜬 동안 메뉴
         // 단축키(⌘W 등)가 첫 창에 작용했다(적대 검증). 두 겹 sheet(저장 창 위의 확인)도 사슬 끝까지 본다(W10b 6 회차).
         func isKey(_ window: NSWindow?) -> Bool {
@@ -4786,6 +4816,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 주어진 뷰가 속한 surface(그 뷰의 창으로 판정). 뷰에서 비롯된 콜백(backing scale 변경 등)이 key 창이 아니라
     /// '그 뷰의' surface를 대상으로 하게 한다 — quick 뷰가 fire했는데 primary가 key면 quick을 골라야 한다.
     private func surfaceForView(_ view: NSView) -> TerminalSurface? {
+        if let bound = (view as? MaruMetalTerminalView)?.inspectorOwner { return bound }
+        if let owner = inspectorPresentation(for: view.window)?.owner { return owner }
         if let quick, view.window === quick.window { return quick }
         // 그 뷰가 속한 일반 창의 surface(멀티 창이면 정확히 그 창). 단일 창에선 그 창=primary라 동작 불변.
         return windows.first(where: { $0.window === view.window }) ?? primary
@@ -6103,6 +6135,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if let tool = inspectorPresentation(for: sender), let session = tool.owner?.appSession {
+            maru_macos_app_session_inspector_command(session, 6)
+            return true
+        }
         // 빨간 닫기 버튼/창 단위 닫기 요청. session이 없으면(quick 창 등 delegate 미사용 경로) 평소대로 닫는다.
         guard let surface = surfaceForWindow(sender), let session = surface.appSession else { return true }
         // 마지막(유일) 일반 창의 빨간 버튼 = 앱 종료다. 창 하나 닫기(request_window_close, 실행 중 명령 게이트)가 아니라
@@ -6124,6 +6160,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func windowWillClose(_ notification: Notification) {
+        if let tool = inspectorPresentation(for: notification.object as? NSWindow) {
+            if let owner = tool.owner { inspectorWindows.removeValue(forKey: owner.token) }
+            return
+        }
         // W5a: 그 창에 붙어 있던 Chromium 탭 대화상자 기록을 치운다(창 주소가 새 창에 다시 쓰여 엉뚱한 sheet 를 닫지 않게).
         if let closing = notification.object as? NSWindow, let open = osrDialogSheets.removeValue(forKey: ObjectIdentifier(closing)) {
             open.dismissed = true
@@ -6152,6 +6192,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func windowDidResize(_ notification: Notification) {
+        if let tool = inspectorPresentation(for: notification.object as? NSWindow) { resizeInspector(tool); return }
         // 그 창(notification.object)의 surface를 명시 대상으로 — 멀티 창에서 다른 창/quick이 key여도 이 창을 리사이즈.
         guard let surface = surfaceForWindow(notification.object as? NSWindow) else { return }
         withSurface(surface) {
@@ -6174,9 +6215,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        if let tool = inspectorPresentation(for: notification.object as? NSWindow), let session = tool.owner?.appSession { maru_macos_app_session_inspector_command(session, 7); return }
         // 창 포커스 획득 → 그 창 surface에 focus reporting(DECSET 1004 켜졌으면 CSI I). 멀티 창에서 그 창만(notification.object).
         guard let window = notification.object as? NSWindow,
               let surface = surfaceForWindow(window), surface.appSession != nil else { return }
+        if let session = surface.appSession { maru_macos_app_session_inspector_command(session, 8) }
         reportSessionFocus(surface, true)
         if workspaceCheckpointArmed && surface.workspaceCheckpointPublished {
             let identity = ObjectIdentifier(window)
@@ -6188,6 +6231,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        if let tool = inspectorPresentation(for: notification.object as? NSWindow), let owner = tool.owner, let session = owner.appSession {
+            withSurface(owner) { _ = tool.container.terminalView.commitComposition(); maru_macos_app_session_inspector_command(session, 8) }
+            return
+        }
         // 창 포커스 상실 → CSI O(focus reporting 켜졌으면). 뷰의 windowLostKey(IME 조합 커밋)와는 별개 경로/목적.
         let resigning = surfaceForWindow(notification.object as? NSWindow)
         // 단축키 힌트 HUD를 닫는다(KH-4 — 앱 전환 등으로 떼는 flagsChanged가 안 올 수 있음). **떠나는 창의 surface로**
@@ -6292,6 +6339,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
+        if let tool = inspectorPresentation(for: notification.object as? NSWindow) { resizeInspector(tool); return }
         // 그 창(notification.object)의 surface를 명시 대상으로(위 windowDidResize와 같은 이유).
         guard let surface = surfaceForWindow(notification.object as? NSWindow) else { return }
         withSurface(surface) {
@@ -6836,11 +6884,56 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     private var screenshotDelayPending: Bool { Self.screenshotDelayArmed }
 
-    private func drawMetalFrame() {
+    private func inspectorPresentation(for window: NSWindow?) -> MaruInspectorPresentation? {
+        guard let window else { return nil }
+        return inspectorWindows.values.first { $0.window === window }
+    }
+
+    private func resizeInspector(_ tool: MaruInspectorPresentation) {
+        guard let session = tool.owner?.appSession else { return }
+        tool.container.terminalView.updateDrawableSize()
+        tool.container.overlayView.updateDrawableSize()
+        let scale = archiveSmokeRenderScale(tool.window)
+        maru_macos_app_session_inspector_resize(session, clampedUInt32(tool.container.bounds.width * scale), clampedUInt32(tool.container.bounds.height * scale), clampedUInt32(scale * 1000))
+        tool.needsRedraw = true
+    }
+
+    private func syncInspectorPresentation() {
+        guard let owner = activeSurface, let session = owner.appSession else { return }
+        if maru_macos_app_session_inspector_placement(session) != 5 {
+            if let tool = inspectorWindows.removeValue(forKey: owner.token) {
+                tool.window.delegate = nil
+                tool.window.close()
+                owner.window?.makeFirstResponder((owner.window?.contentView as? MaruTerminalContainerView)?.terminalView)
+            }
+            return
+        }
+        if inspectorWindows[owner.token] == nil {
+            let tool = MaruInspectorPresentation(owner: owner, controller: self)
+            // One renderer/atlas serves both windows, with independent CAMetalLayer drawables.
+            tool.container.terminalView.metalLayer?.device = metalTerminalView?.metalLayer?.device
+            tool.container.overlayView.metalLayer?.device = metalTerminalView?.metalLayer?.device
+            inspectorWindows[owner.token] = tool
+            resizeInspector(tool)
+            tool.window.makeKeyAndOrderFront(nil)
+        }
+        if let path = inspectorCapturePaths.removeValue(forKey: owner.token), let renderer = owner.metalRenderer, let tool = inspectorWindows[owner.token] {
+            tool.needsRedraw = true
+            _ = maru_metal_renderer_request_test_capture(renderer, path)
+        }
+        if let tool = inspectorWindows[owner.token] {
+            let title = String(cString: maru_macos_app_session_inspector_title())
+            if tool.window.title != title { tool.window.title = title }
+        }
+        drawMetalFrame(inspectorOnly: true)
+    }
+
+    private func drawMetalFrame(inspectorOnly: Bool = false) {
+        let tool = activeSurface.flatMap { inspectorWindows[$0.token] }
         // Phase 4b-2: 컨테이너의 터미널 layer(맨 아래) + 오버레이 layer(맨 위, 투명)를 함께 렌더러에 넘긴다.
         guard let appSession, let renderer = metalRenderer,
-              let view = metalTerminalView, let metalLayer = view.metalLayer,
-              let overlayLayer = metalOverlayView?.metalLayer else {
+              let view = inspectorOnly ? tool?.container.terminalView : metalTerminalView, let metalLayer = view.metalLayer,
+              let overlayLayer = (inspectorOnly ? tool?.container.overlayView : metalOverlayView)?.metalLayer else {
             return
         }
         var frame = MaruAppHostMetalFrame()
@@ -6851,7 +6944,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // alpha가 뒤(데스크톱/다른 창)를 비추게 하고, 1이면 불투명 유지(합성 비용·창 그림자 보존). 매 frame 멱등 —
         // 값이 바뀔 때만 실제 set한다. **오버레이 layer는 항상 투명(isOpaque=false 고정)** — 모달만 그리므로 window.opacity와
         // 무관하게 아래 터미널이 비쳐야 한다. clear color alpha 자체는 renderer가 window_opacity_milli로 터미널에만 적용.
-        let opaqueWindow = frame.window_opacity_milli >= 1000
+        let opaqueWindow = inspectorOnly || frame.window_opacity_milli >= 1000
         if metalLayer.isOpaque != opaqueWindow { metalLayer.isOpaque = opaqueWindow }
         if let win = view.window, win.isOpaque != opaqueWindow {
             win.isOpaque = opaqueWindow
@@ -6871,12 +6964,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 새 frame(generation 변경)일 때뿐 아니라, drawableSize/backing-scale 변경 등 surface가
         // 무효화돼 다시 칠해야 할 때(metalNeedsRedraw)도 그린다. generation만 보면 한가한 셸이
         // 리사이즈/디스플레이 전환 후 stale/blank로 남는다.
-        let newFrame = frame.generation != lastDrawnGeneration
+        let newFrame = frame.generation != (inspectorOnly ? tool?.lastGeneration ?? 0 : lastDrawnGeneration)
         // 지연 스크린샷이 걸려 있으면 generation이 그대로여도 그린다 — 캡처는 renderer draw 안에서
         // 일어나므로(MARU_SCREENSHOT_DELAY_MS 게이트) 여기서 끊으면 마감이 지나도 찍을 기회가 없다.
         // **바깥 tick 게이트만 넓히면 부족하다**: 이 조기 반환이 두 번째 관문이다(실측: 그것만 고쳤을 때
         // metal_frames_drawn=1로 멈췄다).
-        if !newFrame && !metalNeedsRedraw && !screenshotDelayPending {
+        if !newFrame && !(inspectorOnly ? tool?.needsRedraw ?? false : metalNeedsRedraw) && !screenshotDelayPending {
             return
         }
         // atlas slot은 누적된다(같은 크기면 새 glyph delta만 올린다). 새 generation일 때만
@@ -6894,19 +6987,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         // cols/rows는 u32이지만 grid 좌표(cell.col/row)는 u16이다. 비현실적으로 큰 값은
         // truncate-wrap(0이 되면 draw가 거부됨) 대신 u16 상한으로 클램프한다.
-        let cols = UInt16(min(frame.cols, UInt32(UInt16.max)))
-        let rows = UInt16(min(frame.rows, UInt32(UInt16.max)))
+        let cols = UInt16(min(max(frame.cols, inspectorOnly ? 1 : 0), UInt32(UInt16.max)))
+        let rows = UInt16(min(max(frame.rows, inspectorOnly ? 1 : 0), UInt32(UInt16.max)))
         // 제목줄 진단(MARU_DEBUG)에 쓰도록 cell 픽셀 크기를 기록한다. grid 계산은 Zig app
         // session이 하므로 Swift는 이 값을 resize에 쓰지 않는다(진단 표시 전용).
         if frame.cell_width_px > 0 { lastCellWidthPx = frame.cell_width_px }
         if frame.cell_height_px > 0 { lastCellHeightPx = frame.cell_height_px }
+        let inspectorMode: UInt32 = inspectorOnly ? 2 : (maru_macos_app_session_inspector_placement(appSession) == 5 ? 1 : 0)
+        maru_metal_renderer_set_inspector_mode(renderer, inspectorMode)
+        defer { maru_metal_renderer_set_inspector_mode(renderer, 0) }
         // W3c: 이 프레임에 그릴 Chromium 탭 본문(IOSurface 를 복사 없이 텍스처로). 없으면 0 장 — 비용 없음.
         var osrQuads = [MaruAppHostOsrQuad](repeating: MaruAppHostOsrQuad(), count: 16)
         let osrCount = osrQuads.withUnsafeMutableBufferPointer {
-            maru_macos_app_session_osr_quads(appSession, frame.generation, $0.baseAddress, $0.count)
+            inspectorOnly ? 0 : maru_macos_app_session_osr_quads(appSession, frame.generation, $0.baseAddress, $0.count)
         }
         osrQuads.withUnsafeBufferPointer {
-            maru_metal_renderer_set_osr_quads(renderer, $0.baseAddress, osrCount, frame.generation)
+            maru_metal_renderer_set_osr_quads(renderer, $0.baseAddress, osrCount, inspectorOnly ? 0 : frame.generation)
         }
         let drew = maru_metal_renderer_draw(
             renderer,
@@ -6951,6 +7047,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.cell_clip_count
         )
         if drew {
+            if inspectorOnly { tool?.lastGeneration = frame.generation; tool?.needsRedraw = false; return }
             lastDrawnGeneration = frame.generation
             metalNeedsRedraw = false
             metalFramesDrawn += 1
@@ -6980,6 +7077,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // view가 drawableSize/backing-scale 변경을 알리면, 다음 tick이 generation 변화가 없어도
     // 현재 frame을 새 surface에 다시 그리게 표시한다.
     func markMetalNeedsRedraw() {
+        if let tool = inspectorPresentation(for: NSApp.keyWindow) { tool.needsRedraw = true }
         metalNeedsRedraw = true
     }
 
@@ -6987,6 +7085,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 새 scale로 glyph를 rasterize하고 cell 메트릭을 device 해상도에 맞춘다. 런치 시점에
     // backingScaleFactor가 아직 1.0이고 창이 Retina로 정착하며 바뀌는 경우를 잡는다.
     func handleBackingScaleChange(in view: NSView) {
+        if (view as? MaruMetalTerminalView)?.inspectorOwner != nil {
+            if let tool = inspectorPresentation(for: view.window) { resizeInspector(tool) }
+            return
+        }
         guard !smokeMode else { return }
         // backing scale 변경은 그 변경이 일어난 '뷰의' 창(=surface)을 대상으로 resize해야 한다 — quick 뷰가
         // fire했는데 primary가 key면(또는 반대) activeSurface가 엉뚱한 surface를 고를 수 있으므로 명시한다.
@@ -7420,6 +7522,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         preserveWebPanelsForSummary: Bool = false,
         checkpointRemovalAlreadyCovered: Bool = false
     ) {
+        if let tool = inspectorWindows.removeValue(forKey: surface.token) { tool.window.delegate = nil; tool.window.close() }
         releaseQuitConfirmHeld(by: surface)
         let removedPublishedWindow = workspaceCheckpointArmed && surface.workspaceCheckpointPublished && !checkpointRemovalAlreadyCovered
         let removedWindowIdentity = surface.window.map(ObjectIdentifier.init)
@@ -8501,6 +8604,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 lastSeenMetalGeneration = summary.metal_generation
                 drawMetalFrame()
             }
+            syncInspectorPresentation()
             drainWebSurfaceTransition() // Phase 4e-3: 이번 tick의 웹 surface 전이 batch(생성/파괴/reframe/hide/show)를 컨테이너 NSView에 적용.
             reconcileWebFocus() // Phase 4g-1: 웹↔터미널 포커스 동기 불변식(firstResponder ⟺ Zig 활성 pane). 웹 패널 없으면 무동작.
             drainOsc52Clipboard() // OSC 52: 이번 tick에 셸이 보낸 클립보드 쓰기를 NSPasteboard에 반영(정책 gate는 Zig).
@@ -8642,7 +8746,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 넘기고, 줄 수 환산(셀 높이·clamp·NaN 가드)은 Zig가 실제 메트릭으로 한다(네이티브 최소화).
     // scrollingDeltaY>0이면 위(과거)로 본다 — 표준 터미널 방향. scrollingDeltaX는 그 pane 탭 바 가로 스크롤(Zig가 셀 환산·라우팅).
     func handleScroll(_ event: NSEvent, in view: NSView) {
-        guard let session = appSession else { return }
+        guard let session = surfaceForView(view)?.appSession else { return }
+        if (view as? MaruMetalTerminalView)?.inspectorOwner != nil {
+            _ = maru_macos_app_session_inspector_pointer(session, 3, 0, Double(event.scrollingDeltaY))
+            return
+        }
         // 마우스 위치를 backing 픽셀(좌상단 원점)로 — Zig가 커서 아래 panel로 스크롤을 라우팅한다(split).
         let local = view.convert(event.locationInWindow, from: nil)
         let scale = archiveSmokeRenderScale(window) // drawable 과 같은 배율(스크린샷 배율 주입 포함)
@@ -8751,7 +8859,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     private func backingPx(_ local: NSPoint, in view: NSView) -> (x: Double, y: Double) {
-        let scale = archiveSmokeRenderScale(window)
+        let scale = archiveSmokeRenderScale(view.window)
         return (Double(local.x * scale), Double((view.bounds.height - local.y) * scale))
     }
 
@@ -8772,6 +8880,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 설정의 타이틀바 더블클릭 동작), 단일=performDrag(창 이동). 처리하면 true(호출자는 일반 마우스 처리를 건너뛴다).
     // 빈 영역 판정은 Zig(is_window_drag_region)가 단일 출처 — 아이콘·검색·터미널이면 0이라 false.
     func handleWindowChromeMouseDown(_ event: NSEvent, in view: NSView) -> Bool {
+        if (view as? MaruMetalTerminalView)?.inspectorOwner != nil { return false }
         guard let session = appSession, let window else { return false }
         let (xPx, yPx) = backingPx(view.convert(event.locationInWindow, from: nil), in: view)
         guard maru_macos_app_session_is_window_drag_region(session, xPx, yPx) != 0 else { return false }
@@ -8820,6 +8929,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if [1, 4, 5].contains(kind), let terminalView = view as? MaruMetalTerminalView,
            !terminalView.commitMarkedTextIfComposing() { return }
         let (xPx, yPx) = backingPx(view.convert(event.locationInWindow, from: nil), in: view)
+        if (view as? MaruMetalTerminalView)?.inspectorOwner != nil {
+            if kind == 1 && event.buttonNumber == 0 { _ = maru_macos_app_session_inspector_pointer(session, 1, xPx, yPx) }
+            markMetalNeedsRedraw()
+            return
+        }
         // macOS buttonNumber(0=L,1=R,2=M) → xterm(0=L,1=M,2=R).
         let button: Int32 = event.buttonNumber == 1 ? 2 : (event.buttonNumber == 2 ? 1 : 0)
         _ = maru_macos_app_session_mouse(session, kind, xPx, yPx, button, modsBits(event))
@@ -8941,6 +9055,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // Zig가 위치별 커서 종류를 판정해 돌려준다(CursorKind). Swift는 그 값을 NSCursor로 매핑만 한다 —
         // 전부 iBeam이던 걸 영역별로(사이드바·탭 바=arrow, divider=resize, 터미널=iBeam, URL=pointingHand).
         // mods는 Zig가 config url-click-modifier와 비교해 URL 밑줄을 켜는 데 쓴다.
+        if (view as? MaruMetalTerminalView)?.inspectorOwner != nil {
+            let hit = maru_macos_app_session_inspector_pointer(session, 2, xPx, yPx)
+            Self.cursor(for: Int32(hit)).set()
+            return
+        }
         var cursorKind: Int32 = 1
         guard maru_macos_app_session_hover(session, xPx, yPx, mods, &cursorKind) == Self.statusOK else { return }
         Self.cursor(for: cursorKind).set()
@@ -9045,9 +9164,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return flags
     }
 
+    // Synthetic NSView input can run while AppKit has no OS key window. Model the
+    // window transition once per target, independently of the Zig focus under test:
+    // re-focusing before every key would hide an Escape -> Cmd+W focus regression.
+    private func prepareInspectorTestInput(_ tool: MaruInspectorPresentation?) {
+        guard let tool else { inspectorTestInputWindow = nil; return }
+        if !tool.window.isKeyWindow && inspectorTestInputWindow !== tool.window {
+            windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: tool.window))
+            Self.testReport("inspector focus-input transport=delegate-background")
+        }
+        inspectorTestInputWindow = tool.window
+    }
+
     private static func testCursorName(_ cursor: NSCursor) -> String {
         let named: [(NSCursor, String)] = [
             (.arrow, "arrow"), (.iBeam, "ibeam"), (.pointingHand, "hand"), (.crosshair, "crosshair"),
+            (.resizeLeftRight, "resize-h"), (.resizeUpDown, "resize-v"),
             (.openHand, "open-hand"), (.closedHand, "closed-hand"), (.operationNotAllowed, "not-allowed"),
             (hiddenCursor, "hidden"),
         ]
@@ -9377,6 +9509,108 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 return ((fx * view.bounds.width + dx) * scale, (fy * view.bounds.height + dy) * scale)
             }
             switch line[0] {
+            case "inspect-main-capture" where line.count >= 2:
+                if let renderer = metalRenderer { _ = maru_metal_renderer_request_test_capture(renderer, line[1]); metalNeedsRedraw = true; drawMetalFrame() }
+            case "inspect-drag" where line.count >= 3:
+                var rect = [UInt32](repeating: 0, count: 4)
+                let ok = rect.withUnsafeMutableBufferPointer { maru_macos_app_session_inspector_control_rect(session, 0, $0.baseAddress) }
+                if ok != 0, let terminal = Self.firstTerminalView(in: view) {
+                    let scale = archiveSmokeRenderScale(window)
+                    let start = NSPoint(x: (Double(rect[0]) + Double(rect[2]) / 2) / scale, y: terminal.bounds.height - (Double(rect[1]) + Double(rect[3]) / 2) / scale)
+                    let end = NSPoint(x: start.x + (Double(line[1]) ?? 0), y: start.y - (Double(line[2]) ?? 0))
+                    for (type, point) in [(NSEvent.EventType.leftMouseDown, start), (.leftMouseDragged, end), (.leftMouseUp, end)] {
+                        if let event = Self.testButtonMouseEvent(type, 0, terminal.convert(point, to: nil), 1) {
+                            if type == .leftMouseDown { terminal.mouseDown(with: event) } else if type == .leftMouseDragged { terminal.mouseDragged(with: event) } else { terminal.mouseUp(with: event) }
+                        }
+                    }
+                }
+            case "inspect-open":
+                if maru_macos_app_session_inspector_placement(session) == 0 { maru_macos_app_session_inspector_command(session, 0) }
+            case "inspect-destroy-owner":
+                if windows.count > 1 { window?.close(); testSurface = nil }
+            case "inspect-finish":
+                Self.testReport("inspector finished")
+                NSApp.terminate(nil)
+            case "inspect-report":
+                var inspectorRect = [UInt32](repeating: 0, count: 4)
+                _ = inspectorRect.withUnsafeMutableBufferPointer { maru_macos_app_session_inspector_control_rect(session, 2, $0.baseAddress) }
+                Self.testReport("inspector label=\(line.count > 1 ? line[1] : "state") placement=\(maru_macos_app_session_inspector_placement(session)) target=\(maru_macos_app_session_inspector_target(session)) owners=\(windows.count) tools=\(inspectorWindows.count) flags=\(maru_macos_app_session_inspector_flags(session)) keys=\(latestFrameSummary.key_events) width=\(inspectorRect[2]) height=\(inspectorRect[3])")
+            case "inspect-hover" where line.count >= 3:
+                let tool = activeSurface.flatMap { inspectorWindows[$0.token] }
+                let target = tool?.container.terminalView ?? Self.firstTerminalView(in: view)
+                if let target {
+                    var rect = [UInt32](repeating: 0, count: 4)
+                    let outside = line[1] == "outside"
+                    let ok = outside ? 1 : rect.withUnsafeMutableBufferPointer { maru_macos_app_session_inspector_control_rect(session, UInt32(line[1]) ?? 2, $0.baseAddress) }
+                    if ok != 0 {
+                        let scale = archiveSmokeRenderScale(target.window)
+                        let local = outside ? NSPoint(x: -10, y: -10) : NSPoint(x: (Double(rect[0]) + Double(rect[2]) / 2) / scale, y: target.bounds.height - (Double(rect[1]) + Double(rect[3]) / 2) / scale)
+                        if let event = Self.testButtonMouseEvent(.mouseMoved, 0, target.convert(local, to: nil), 0) {
+                            target.mouseMoved(with: event)
+                            Self.testReport("inspector-cursor label=\(line[2]) actual=\(Self.testCursorName(NSCursor.current))")
+                        }
+                    } else { Self.testReport("inspector hover-missing=\(line[1])") }
+                }
+            case "inspect-text" where line.count >= 2:
+                let tool = activeSurface.flatMap { inspectorWindows[$0.token] }
+                prepareInspectorTestInput(tool)
+                if let terminal = tool?.container.terminalView ?? Self.firstTerminalView(in: view) {
+                    terminal.insertText(line[1], replacementRange: NSRange(location: NSNotFound, length: 0))
+                }
+            case "inspect-click" where line.count >= 2:
+                if let id = UInt32(line[1]) {
+                    var rect = [UInt32](repeating: 0, count: 4)
+                    let ok = rect.withUnsafeMutableBufferPointer { maru_macos_app_session_inspector_control_rect(session, id, $0.baseAddress) }
+                    let tool = activeSurface.flatMap { inspectorWindows[$0.token] }
+                prepareInspectorTestInput(tool)
+                    let targetWindow = tool?.window ?? window
+                    let targetView = tool?.container.terminalView ?? Self.firstTerminalView(in: view)
+                    if ok != 0, let targetWindow, let targetView {
+                        let scale = archiveSmokeRenderScale(targetWindow)
+                        let local = NSPoint(x: (Double(rect[0]) + Double(rect[2]) / 2) / scale, y: targetView.bounds.height - (Double(rect[1]) + Double(rect[3]) / 2) / scale)
+                        let point = targetView.convert(local, to: nil)
+                        if let down = Self.testButtonMouseEvent(.leftMouseDown, 0, point, 1), let up = Self.testButtonMouseEvent(.leftMouseUp, 0, point, 1) {
+                            targetView.mouseDown(with: down); targetView.mouseUp(with: up)
+                            Self.testReport("inspector clicked=\(id)")
+                        }
+                    } else { Self.testReport("inspector click-missing=\(id)") }
+                }
+            case "inspect-capture" where line.count >= 2:
+                if let owner = activeSurface { inspectorCapturePaths[owner.token] = line[1] }
+            case "inspect-close":
+                if let owner = activeSurface, let tool = inspectorWindows[owner.token] { tool.window.performClose(nil) }
+            case "inspect-resize" where line.count >= 3:
+                if let owner = activeSurface, let tool = inspectorWindows[owner.token] { tool.window.setContentSize(NSSize(width: max(tool.window.contentMinSize.width, Double(line[1]) ?? 720), height: max(tool.window.contentMinSize.height, Double(line[2]) ?? 520))) }
+            case "inspect-key" where line.count >= 3:
+                let tool = activeSurface.flatMap { inspectorWindows[$0.token] }
+                prepareInspectorTestInput(tool)
+                let w = tool?.window ?? window
+                let terminal = tool?.container.terminalView ?? Self.firstTerminalView(in: view)
+                if let w, let terminal {
+                    let flags = NSEvent.ModifierFlags(rawValue: UInt(Self.testCGFlags(line.count > 3 ? Int32(line[3]) ?? 0 : 0).rawValue))
+                    if let key = Self.testKeyEvent(.keyDown, w, UInt16(line[1]) ?? 0, Self.testScalar(line[2]), Self.testScalar(line[2]), flags) { terminal.keyDown(with: key) }
+                }
+            case "inspect-ime" where line.count >= 2:
+                let tool = activeSurface.flatMap { inspectorWindows[$0.token] }
+                prepareInspectorTestInput(tool)
+                if let terminal = tool?.container.terminalView ?? Self.firstTerminalView(in: view) {
+                    terminal.setMarkedText(line[1], selectedRange: NSRange(location: (line[1] as NSString).length, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+                }
+            case "inspect-focus-owner":
+                inspectorTestInputWindow = nil
+                let tool = activeSurface.flatMap { inspectorWindows[$0.token] }
+                let wasToolKey = tool?.window.isKeyWindow ?? false
+                window?.makeKeyAndOrderFront(nil)
+                window?.makeFirstResponder(Self.firstTerminalView(in: view))
+                // Background automation can send NSTextInputClient callbacks without owning
+                // the OS key window. Match the existing newwindow harness: explicitly exercise
+                // the product delegate in that case and record the narrower evidence.
+                if let tool, let ownerWindow = window, !wasToolKey || !ownerWindow.isKeyWindow {
+                    windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: tool.window))
+                    windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: ownerWindow))
+                    Self.testReport("inspector focus-owner transport=delegate-background")
+                } else { Self.testReport("inspector focus-owner transport=native") }
+
             case "mouse" where line.count >= 7:
                 let (x, y) = point(2)
                 _ = maru_macos_app_session_mouse(session, Int32(line[1]) ?? 0, x, y, Int32(line[6]) ?? 0, 0)
@@ -13197,6 +13431,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         view.addItem(catalogMenuItem("decrease_font_size", catalog))
         view.addItem(catalogMenuItem("reset_font_size", catalog))
         view.addItem(.separator())
+        view.addItem(catalogMenuItem("toggle_inspector", catalog))
         view.addItem(catalogMenuItem("show_downloads", catalog)) // W10a: Chromium 탭 다운로드 목록(⇧⌘J)
         view.addItem(.separator())
         view.addItem(nativeMenuItem("Toggle Full Screen", #selector(menuToggleFullScreen(_:)), key: "f", mods: [.control, .command], target: self))

@@ -747,6 +747,20 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
         self.requestAppQuit();
         return;
     }
+    // Capture the product Metal inspector without synthesizing pointer input.
+    if (std.c.getenv("MARU_OPEN_INSPECTOR") != null) {
+        app_session_mod.inspector_ops.toggle(self);
+        if (std.c.getenv("MARU_INSPECTOR_DOCK")) |side| {
+            if (std.meta.stringToEnum(app_session_mod.inspector_ops.layout.Placement, std.mem.span(side))) |placement|
+                app_session_mod.inspector_ops.setPlacement(self, placement);
+        }
+        if (std.c.getenv("MARU_INSPECTOR_WITH_DOCK") != null) dock_ops.openDockTo(self, .explorer);
+        std.log.info("inspector capture opened={any}, ready={any}", .{ @import("inspector.zig").visible(self), self.surface_initialized });
+        if (std.c.getenv("MARU_INSPECTOR_TAB")) |tab| {
+            self.inspector.tab = std.meta.stringToEnum(maru.chrome.components.inspector.Tab, std.mem.span(tab)) orelse .overview;
+        }
+        return;
+    }
     if (std.c.getenv("MARU_OPEN_SETTINGS") == null) return;
     settings_ops.toggleSettings(self);
     // MARU_OPEN_SETTINGS_SECTION=N — 특정 섹션을 열어 캡처(스크린샷 self-verify용 debug-gate). 미설정=섹션 0.

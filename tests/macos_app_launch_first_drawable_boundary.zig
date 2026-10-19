@@ -22,7 +22,7 @@ test "L1 launch gate preserves product startup and isolates every ambient profil
     try std.testing.expectEqual(@as(usize, 1), count(launch_gate, "--maru-expect-tests=2"));
     try std.testing.expectEqual(@as(usize, 0), count(launch_gate, "MARU_MACOS_APP_SMOKE_MS"));
 
-    const draw = between(swift, "private func drawMetalFrame() {", "\n    // view가 drawableSize") orelse
+    const draw = between(swift, "private func drawMetalFrame(inspectorOnly: Bool = false) {", "\n    // view가 drawableSize") orelse
         return error.MissingDrawOwner;
     const successful = std.mem.indexOf(u8, draw, "if drew {") orelse return error.MissingDrawOwner;
     const frame = std.mem.indexOfPos(u8, draw, successful, "metalFramesDrawn += 1") orelse return error.MissingDrawOwner;
@@ -30,7 +30,8 @@ test "L1 launch gate preserves product startup and isolates every ambient profil
         return error.MissingDrawOwner;
     const terminate = std.mem.indexOfPos(u8, draw, submit, "DispatchQueue.main.async { NSApp.terminate(nil) }") orelse
         return error.MissingDrawOwner;
-    try std.testing.expect(successful < frame and frame < submit and submit < terminate);
+    const inspector_only = std.mem.indexOfPos(u8, draw, successful, "if inspectorOnly {") orelse return error.MissingDrawOwner;
+    try std.testing.expect(successful < inspector_only and inspector_only < frame and frame < submit and submit < terminate);
     try std.testing.expectEqual(@as(usize, 1), count(swift, "if smokeMode || appLaunchFirstDrawableArmed { return finishProjectSearchBeforeTermination() }"));
     try std.testing.expectEqual(@as(usize, 1), count(swift, "if maru_macos_editor_save_pending_requests() == 0 && maru_macos_project_search_outstanding_workers() == 0 { return .terminateNow }"));
 

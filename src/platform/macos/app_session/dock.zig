@@ -163,6 +163,7 @@ pub fn dockVisible(self: *const AppSession) bool {
 
 pub fn dockGeometry(self: *const AppSession) dock_layout.Geometry {
     return dock_layout.compute(.{
+        .available_override = @import("inspector.zig").geometry(self).remaining,
         .backing_width_px = self.backing_width_px,
         .backing_height_px = self.backing_height_px,
         .sidebar_width_px = self.sidebar_width_px,

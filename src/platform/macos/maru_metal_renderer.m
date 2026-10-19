@@ -118,6 +118,7 @@ typedef struct {
 _Static_assert(sizeof(MaruRendererImageVertex) == 16, "MaruRendererImageVertex must match MSL ImageIn (16B tight-pack)");
 
 @interface MaruMetalRendererImpl : NSObject
+@property (nonatomic) uint32_t inspectorMode;
 @property (nonatomic, strong) id<MTLDevice> device;
 @property (nonatomic, strong) id<MTLCommandQueue> queue;
 @property (nonatomic, strong) id<MTLRenderPipelineState> pipeline;
@@ -259,6 +260,7 @@ static void maru_osr_evict(MaruMetalRendererImpl *impl) {
    여기 없는 실행에서는 seam 자체가 없다 — 제품·일반 스크린샷 경로는 이 함수를 통과하지 못한다. */
 static bool maru_test_capture_env_allows(void) {
     static const char *const gates[] = {
+        "MARU_INSPECTOR_APP_TEST",           /* Independent Inspector AppKit E2E */
         "MARU_AGENT_SESSION_ARCHIVE_SMOKE", /* AS4-c 아카이브 상태 캡처 */
         "MARU_TAB_DRAG_SMOKE",              /* CIM4b 탭 드래그 — 끄는 도중 프레임 */
         "MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", /* CR6c 복구 행 전후 실제 AppKit 프레임 */
@@ -691,7 +693,7 @@ static void maru_draw_rich_glyphs(
     MaruMetalRendererImpl *impl,
     const MaruAppHostGpuGlyph *glyphs,
     size_t glyph_count,
-    CGSize drawable_size
+    CGSize drawable_size, uint32_t layer
 ) {
     if (glyphs == NULL || glyph_count == 0 || drawable_size.width <= 0.0 || drawable_size.height <= 0.0) return;
     if (glyph_count > SIZE_MAX / 6 || glyph_count * 6 > SIZE_MAX / sizeof(MaruRendererVertex)) return;
@@ -701,7 +703,7 @@ static void maru_draw_rich_glyphs(
     MaruRendererVertex *vertices = (MaruRendererVertex *)buffer.contents;
     size_t count = 0;
     for (size_t i = 0; i < glyph_count; i++) {
-        if (glyphs[i].layer != 0u || glyphs[i].w <= 0.0f || glyphs[i].h <= 0.0f) continue;
+        if (glyphs[i].layer != layer || glyphs[i].w <= 0.0f || glyphs[i].h <= 0.0f) continue;
         maru_fill_rich_glyph_quad(&vertices[count * 6], glyphs[i], (float)drawable_size.width, (float)drawable_size.height);
         count += 1;
     }
@@ -1198,6 +1200,10 @@ static void maru_draw_overlay_layer(const MaruDrawPass *c) {
 #undef MARU_DRAW_QUADS
 #undef MARU_DRAW_IMAGES
 
+void maru_metal_renderer_set_inspector_mode(MaruMetalRenderer *renderer, uint32_t mode) {
+    if (renderer != NULL) ((__bridge MaruMetalRendererImpl *)renderer).inspectorMode = mode <= 2 ? mode : 0;
+}
+
 bool maru_metal_renderer_draw(
     MaruMetalRenderer *renderer,
     CAMetalLayer *terminal_layer,
@@ -1265,6 +1271,33 @@ bool maru_metal_renderer_draw(
     MaruMetalRendererImpl *impl = (__bridge MaruMetalRendererImpl *)renderer;
     if (impl.atlas == nil) {
         return false;
+    }
+    // Presentation channels share the atlas, but never paint another window's scene.
+    // ARC owns the temporary filtered storage even on early allocation/drawable failures.
+    NSMutableData *inspectorQuads = nil;
+    bool filterInspector = impl.inspectorMode != 0;
+    if (!filterInspector && gpu_quads != NULL) for (size_t i = 0; i < gpu_quad_count; i++) if (gpu_quads[i].layer == 6) { filterInspector = true; break; }
+    if (filterInspector && gpu_quads != NULL && gpu_quad_count > 0) {
+        if (gpu_quad_count > SIZE_MAX / sizeof(MaruAppHostGpuQuad)) return false;
+        inspectorQuads = [NSMutableData dataWithLength:gpu_quad_count * sizeof(MaruAppHostGpuQuad)];
+        if (inspectorQuads == nil) return false;
+        MaruAppHostGpuQuad *filtered = inspectorQuads.mutableBytes;
+        size_t n = 0;
+        for (size_t i = 0; i < gpu_quad_count; i++) {
+            const bool isInspector = gpu_quads[i].layer == 6;
+            if ((impl.inspectorMode == 1 && isInspector) || (impl.inspectorMode == 2 && !isInspector)) continue;
+            filtered[n] = gpu_quads[i];
+            if (isInspector) filtered[n].layer = 2; // ordinary opaque chrome background pass
+            n++;
+        }
+        gpu_quads = filtered;
+        gpu_quad_count = n;
+    }
+    if (impl.inspectorMode == 2) {
+        cell_count = sidebar_cell_count = modal_cells_start = cursor_cells = cursor_start_in = 0;
+        gpu_shadow_count = gpu_image_count = 0;
+        terminal_origin_x_px = sidebar_bg = overlay_cells_present = status_bar_height_px = 0;
+        window_opacity_milli = 1000;
     }
     // drawable의 backing 픽셀 크기. fixed-cell layout은 cell을 고정 픽셀 크기로 깔고 이 크기로
     // NDC에 투영하므로, 창을 키우면 글자가 늘어나는 게 아니라 더 많은 cell이 보인다. 터미널 레이어가
@@ -1746,7 +1779,8 @@ bool maru_metal_renderer_draw(
         }
         pass_ctx.encoder = tenc;
         maru_draw_terminal_layer(&pass_ctx);
-        maru_draw_rich_glyphs(tenc, impl, gpu_glyphs, gpu_glyph_count, drawable_size);
+        maru_draw_rich_glyphs(tenc, impl, gpu_glyphs, gpu_glyph_count, drawable_size, impl.inspectorMode == 2 ? 6 : 0);
+        if (impl.inspectorMode == 0) maru_draw_rich_glyphs(tenc, impl, gpu_glyphs, gpu_glyph_count, drawable_size, 6);
         [tenc endEncoding];
         // pass 2: 오버레이(Load — 터미널 결과 위에 합성)
         MTLRenderPassDescriptor *opass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1881,7 +1915,8 @@ bool maru_metal_renderer_draw(
     }
     pass_ctx.encoder = tenc;
     maru_draw_terminal_layer(&pass_ctx); // 맨 아래: 터미널 셀·사이드바·chrome·kitty·(모달 없을 때)터미널 커서
-    maru_draw_rich_glyphs(tenc, impl, gpu_glyphs, gpu_glyph_count, drawable_size);
+    maru_draw_rich_glyphs(tenc, impl, gpu_glyphs, gpu_glyph_count, drawable_size, impl.inspectorMode == 2 ? 6 : 0);
+        if (impl.inspectorMode == 0) maru_draw_rich_glyphs(tenc, impl, gpu_glyphs, gpu_glyph_count, drawable_size, 6);
     [tenc endEncoding];
 
     // pass 2: 오버레이 레이어(Clear=투명). 모달만 그리고 나머지는 투명이라 아래 터미널이 비친다. present 대상이

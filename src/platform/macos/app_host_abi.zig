@@ -203,7 +203,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 230), abi_version);
+    try std.testing.expectEqual(@as(u32, 231), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @backingInt(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @backingInt(Location.unavailable));
@@ -4432,6 +4432,84 @@ pub export fn maru_macos_app_session_destroy(session: ?*AppSession) void {
     allocator.destroy(app_session);
 }
 
+pub export fn maru_macos_app_session_inspector_minimum_pt() u32 {
+    return maru.session.inspector.layout.minimum_window_pt;
+}
+
+pub export fn maru_macos_app_session_inspector_title() [*:0]const u8 {
+    return maru.i18n.t(.inspector_title);
+}
+
+// v231: presentation transport only. Zig owns placement, focus and resize limits.
+pub export fn maru_macos_app_session_inspector_flags(session: ?*AppSession) u32 {
+    const self = session orelse return 0;
+    var flags: u32 = 0;
+    if (self.dock_initialized) flags |= @as(u32, @intFromBool(self.dock.presented)) * 8 | @as(u32, @intFromBool(self.dock.collapsed)) * 16 | @as(u32, @intCast(self.dock.view.slot())) << 8;
+    if (session_mod.inspector_ops.visible(self)) flags |= @as(u32, @intFromBool(self.inspector.input_focused)) | @as(u32, @intFromBool(self.inspector.pinned)) * 2 | @as(u32, @intFromBool(self.inspector.paused)) * 4 | @as(u32, @intFromBool(self.inspector.resizing)) * 32 | @as(u32, @intFromBool(self.inputFocus() == .inspector)) * 64 | @as(u32, @intCast(self.inspector.query_len)) << 16;
+    return flags;
+}
+pub export fn maru_macos_app_session_inspector_target(session: ?*AppSession) u64 {
+    const self = session orelse return 0;
+    if (!session_mod.inspector_ops.visible(self)) return 0;
+    return self.inspector.target orelse 0;
+}
+pub export fn maru_macos_app_session_inspector_control_rect(session: ?*AppSession, id: u32, out: ?[*]u32) u32 {
+    const self = session orelse return 0;
+    const r = out orelse return 0;
+    if (!session_mod.inspector_ops.visible(self)) return 0;
+    var arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena.deinit();
+    const scale = if (session_mod.inspector_ops.detached(self)) self.inspector.presentation.window_scale else self.scale_milli;
+    if (id == 0) {
+        const d = session_mod.inspector_ops.geometry(self).divider;
+        r[0] = d.x;
+        r[1] = d.y;
+        r[2] = d.w;
+        r[3] = d.h;
+        return @intFromBool(d.w != 0 and d.h != 0);
+    }
+    const rect = maru.chrome.components.inspector.controlRect(session_mod.inspector_ops.propsFor(self), scale, arena.allocator(), id) orelse return 0;
+    r[0] = @intCast(@max(rect.x, 0));
+    r[1] = @intCast(@max(rect.y, 0));
+    r[2] = rect.w;
+    r[3] = rect.h;
+    return 1;
+}
+
+pub export fn maru_macos_app_session_inspector_placement(session: ?*AppSession) u32 {
+    const self = session orelse return 0;
+    if (!session_mod.inspector_ops.visible(self)) return 0;
+    return @as(u32, @intCast(@backingInt(self.inspector.presentation.placement))) + 1;
+}
+pub export fn maru_macos_app_session_inspector_command(session: ?*AppSession, command: u32) void {
+    const self = session orelse return;
+    const ops = session_mod.inspector_ops;
+    switch (command) {
+        0 => ops.toggle(self),
+        1...5 => ops.setPlacement(self, @fromBackingInt(@as(u3, @intCast(command - 1)))),
+        6 => if (ops.visible(self)) ops.close(self),
+        7 => if (ops.visible(self)) {
+            self.inspector.window_focused = ops.detached(self);
+            self.inspector.input_focused = true;
+        },
+        8 => if (ops.visible(self)) ops.releaseWindowFocus(self),
+        else => {},
+    }
+}
+pub export fn maru_macos_app_session_inspector_resize(session: ?*AppSession, width: u32, height: u32, scale: u32) void {
+    const self = session orelse return;
+    if (session_mod.inspector_ops.detached(self)) session_mod.inspector_ops.resizeWindow(self, width, height, scale);
+}
+pub export fn maru_macos_app_session_inspector_pointer(session: ?*AppSession, kind: u32, x: f64, y: f64) u32 {
+    const self = session orelse return 0;
+    const ops = session_mod.inspector_ops;
+    if (!ops.detached(self) or self.anyModalOverlayOpen()) return 0;
+    if (kind == 1) ops.click(self, x, y);
+    if (kind == 2) return @intCast(@backingInt(ops.hover(self, x, y)));
+    if (kind == 3) ops.scroll(self, y);
+    return 0;
+}
+
 pub export fn maru_macos_app_session_metal_frame(
     session: ?*AppSession,
     out_frame: ?*AppMetalFrame,
@@ -7150,12 +7228,16 @@ fn instanceNonce() u64 {
 /// 살아있는 세션들(refs)을 창마다 `collectSessionInto`로 평탄화해 하나의 CollectorSnapshot으로 조립한다(§2). 스냅샷은
 /// `arena` 메모리를 빌린다(caller가 arena 수명 관리). app_session=NULL 항목은 건너뛴다. 순수 조립 — 테스트가 실 AppSession으로 커버.
 fn collectSessionsInto(refs: []const ControlSessionRef, arena: std.mem.Allocator) std.mem.Allocator.Error!control_surface.CollectorSnapshot {
+    return collectSessionsWithInspection(refs, arena, null);
+}
+
+fn collectSessionsWithInspection(refs: []const ControlSessionRef, arena: std.mem.Allocator, target: ?u64) std.mem.Allocator.Error!control_surface.CollectorSnapshot {
     var surfaces: std.ArrayList(control_surface.SurfaceDto) = .empty;
     var windows: std.ArrayList(maru.session.WindowMembershipSnapshot) = .empty;
     for (refs) |ref| {
         const app = ref.app_session orelse continue;
         const kind = std.enums.fromInt(maru.session.WindowKind, ref.window_kind) orelse .normal;
-        try app.collectSessionInto(arena, ref.window_id, kind, &surfaces, &windows);
+        try app.collectSessionIntoWithInspection(arena, ref.window_id, kind, &surfaces, &windows, target);
     }
     return .{ .surfaces = surfaces.items, .windows = windows.items };
 }
@@ -7219,7 +7301,7 @@ fn handleControlRequest(
 ) void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit(); // 스냅샷은 dispatch 동안만 필요 — 응답(cross_gpa)은 arena와 독립
-    const snapshot = collectSessionsInto(refs, arena.allocator()) catch {
+    const snapshot = collectSessionsWithInspection(refs, arena.allocator(), maru.cli.sessions.inspectionTarget(arena.allocator(), pending.request_bytes)) catch {
         server.resolveRequest(pending, null); // collect OOM — 응답 없이 종료(accept 무한 대기 방지)
         return;
     };

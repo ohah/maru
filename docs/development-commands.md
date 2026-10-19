@@ -9,6 +9,22 @@
   서명이 같은 staged bundle은 재실행 사이에 유지하며, 결과·화면은 저장소 밖에 둔다.
   독립 판정자 음성 대조: `python3 -m unittest discover -s tools/session-dock-ime -p 'test_*.py'`.
 
+## Live Terminal Inspector
+
+`maru session inspect <surface-id> --json [--anonymize]`로 앱의 진단 스냅샷을 읽는다.
+GUI는 `⌥⌘I` 또는 View → Terminal Inspector다.
+`MARU_OPEN_INSPECTOR=1 MARU_INSPECTOR_TAB=overview`와 기존 `MARU_SCREENSHOT`을
+함께 주면 제품 renderer로 캡처한다. 탭 값은 `overview/path/terminal/events`다. `MARU_INSPECTOR_DOCK=bottom`을 추가하면
+독립 도크의 하단 배치를 캡처할 수 있다. `top/right/bottom/left/window`를 지원한다.
+`mise exec -- zig build test-inspector macos-app-build -j2` 후
+`python3 tools/inspector-app/run.py --rounds 10 --output /tmp/inspector-e2e-새경로`로
+실제 AppKit·Metal 앱의 적대적 시나리오 10회와 매회 CLI 왕복을 검증한다.
+`--start 11 --rounds 10`은 추가 시나리오 11~20(커서·UTF-8 한계·조합·대상 전환·Paused refresh·재열기·도크 공존)을 실행한다.
+커서는 제품 NSView의 mouseMoved 뒤 실제 `NSCursor.current`를 읽어 판정한다.
+백그라운드 포커스 검사의 window delegate fallback 여부는 `focus_transports`에 기록한다.
+이 검사는 NSEvent와 native marked-text callback을 사용하며 실제 HID·OS 입력기 검증은 별도다.
+계약과 수집 한계는 [Terminal Inspector](terminal-inspector.md)를 따른다.
+
 - `zig build test-session-host-reconnect-read-fence`: macOS Debug·ReleaseFast에서 실제 retirement 준비로
   얼린 runtime의 화면·조회 RPC·maintenance 진입점이 Client를 읽거나 이벤트를 소비하지 않는지 검사한다.
   실제 socket의 이전 부분 프레임을 retirement에서 버리고 새 연결의 같은 stream 번호를 구분하는지,

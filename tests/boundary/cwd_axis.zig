@@ -56,6 +56,12 @@ const Entry = struct {
 
 const inventory = [_]Entry{
     .{
+        .path = "src/platform/macos/app_session/inspector.zig",
+        .fns = &.{"capture"},
+        .aliases = 1,
+        .why = "Read-only diagnostics display raw OSC 7 alongside the selected cwd. Selection still calls git.termCwd/remoteCwdDecision; the raw observation never becomes an independent product cwd policy.",
+    },
+    .{
         .path = "src/platform/macos/app_session.zig",
         .fns = &.{ "termCwdIsRemote", "respawnEndedPlaceholder", "writeEndedPlaceholderGuidance", "currentCwd", "pinTermsOutsideRepo", "pinTermsOutsideRepo" },
         .aliases = 2,
@@ -81,7 +87,7 @@ const inventory = [_]Entry{
     },
     .{
         .path = "src/platform/macos/app_session/git.zig",
-        .fns = &.{ "remoteCwd", "termCwd" },
+        .fns = &.{ "remoteCwdDecision", "termCwd" },
         .aliases = 0,
         .why =
         \\축 자체 — 로컬은 `termCwd`의 1단(OSC 7), 원격은 `remoteCwd`다.

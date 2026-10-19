@@ -95,5 +95,6 @@ test "K3 kernel cwd parity uses an actual daemon and canonical AppSession consum
     // 관측 직독이 `remoteCwd` 로 옮겨 가면서 그 이름이 직독 재고에서 빠졌다. 커널 축은 그대로다 —
     // 그 함수는 로컬에서 여전히 `termCwd`(OSC 7 → 커널 2단)로 떨어지고, 옮겨 간 것은 원격 분기뿐이다.
     // 그래서 여기서 세는 것도 «커널 조회를 하는 이름» 하나(`termCwd`)가 재고에 남아 있는가이다.
-    try std.testing.expectEqual(@as(usize, 1), count(cwd_axis, "\"remoteCwd\", \"termCwd\" }"));
+    // Only the kernel owner belongs to this assertion; adjacent remote reader names are independent.
+    try std.testing.expectEqual(@as(usize, 1), count(cwd_axis, "\"termCwd\""));
 }

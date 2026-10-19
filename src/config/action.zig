@@ -141,6 +141,7 @@ pub const Action = union(enum) {
     // 세팅 화면(⌘,)을 토글한다(config-gui.md CS-4). 앱 UI 상태(chrome settings 컴포넌트)라 dispatchAppAction이
     // 열고/닫는다. ⌘,는 macOS Settings 관례 — 기존 "Open Config…"(파일 열기) 메뉴의 ⌘, keyEquivalent를 양보받는다.
     toggle_settings,
+    toggle_inspector,
     // Chromium 탭의 다운로드 목록 창(W10a)을 연다(이미 열려 있으면 앞으로). 창은 Swift 가 띄운다(앱 전역 창 하나) — dispatchAppAction 은
     // 요청만 세운다. 기본 키바인딩 ⇧⌘J(⌥⌘L 은 `toggle_find_in_selection` 이 쓴다), 메뉴 「보기 > 다운로드」·커맨드 팝업.
     show_downloads,
@@ -361,6 +362,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "select_all")) return .select_all;
     if (std.mem.eql(u8, value, "clear_screen")) return .clear_screen;
     if (std.mem.eql(u8, value, "toggle_command_palette")) return .toggle_command_palette;
+    if (std.mem.eql(u8, value, "toggle_inspector")) return .toggle_inspector;
     if (std.mem.eql(u8, value, "toggle_settings")) return .toggle_settings;
     if (std.mem.eql(u8, value, "show_downloads")) return .show_downloads;
     if (std.mem.eql(u8, value, "install_cli")) return .install_cli;

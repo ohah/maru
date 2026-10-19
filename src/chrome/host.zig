@@ -96,6 +96,7 @@ pub const HostAction = union(enum) {
 };
 
 pub const ChromeHost = struct {
+    inspector: struct { open: bool = false } = .{},
     interaction: ChromeState = .{},
     notice: notice.State = .{},
     confirm: confirm.State = .{},
@@ -133,6 +134,7 @@ pub const ChromeHost = struct {
     suggest_docs: suggest_docs.State = .{},
     notifications: notifications.State = .{},
     settings: settings.State = .{},
+    // Keep modal ownership in the common registry so input and focus gates agree.
     /// 단축키 힌트 HUD(패시브 — 입력 비소비). 가시성만, 홀드 머신(keyhint_hold)이 토글. 다른 오버레이와 달리 handleInput 라우팅엔 없다.
     key_hints: shortcut_hints.State = .{},
 

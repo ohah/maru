@@ -112,6 +112,7 @@ pub const AgentInfo = struct {
 /// terminal surface 전용 메타(§3). collector가 app_session Model 트리 + termCwdForDisplay + termGitBranch +
 /// agent observer의 터미널 관측 결과에서 채운다(수집 로직은 L4, 여긴 스키마만).
 pub const TerminalMeta = struct {
+    inspector: ?@import("inspector/snapshot.zig").Snapshot = null,
     /// **이 터미널이 서 있는 작업 디렉터리** — GUI의 사이드바·소스 컨트롤·파일 탐색기·상태바 폴더줄과
     /// **같은 값**이다. 규칙의 단일 출처는 docs/editor-surface-dock.md §3.5(OSC 7 → 커널 조회 2단)다.
     ///
@@ -365,6 +366,10 @@ fn writeSurface(s: *std.json.Stringify, dto: SurfaceDto) !void {
 
     switch (dto.detail) {
         .terminal => |t| {
+            if (t.inspector) |inspection| {
+                try s.objectField("inspector");
+                try s.write(inspection);
+            }
             if (t.cwd) |c| {
                 try s.objectField("cwd");
                 try s.write(c);

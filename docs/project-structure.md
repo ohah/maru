@@ -666,3 +666,11 @@ actor coordinator가 전체 반영한다. 기존 모델 전용 `worker.zig`는 �
 `app_session/editor/search/batch/collect.zig`는 완료 검색의 명세·Match·snapshot·점유를 독립 소유하고
 닫힌 파일의 기존 RG 행과 전문 hash를 검증한다. `batch/ui.zig`가 collect→mixed_worker→coordinator를
 연결하며, 완료 결과의 실제 document ID를 유지한다. 기존 model-only worker는 독립 API로 유지한다.
+
+## Live terminal diagnostics
+
+- `src/session/inspector/snapshot.zig`: 공통 진단 DTO·경로 결정·유한 history·JSON 익명화.
+- `src/session/inspector/layout.zig`: 독립 도크 배치·source viewport·크기 경계.
+- `src/chrome/components/inspector/`: 도메인 I/O 없는 픽셀 tree와 표시·입력 사각형.
+- `src/platform/macos/app_session/inspector.zig`: 실제 상태 수집·독립 도크/분리 창 presentation·export 어댑터.
+- `src/cli/sessions.zig`: 기존 session 조회 transport 위의 CLI 인자·wire·응답 표시.

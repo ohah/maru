@@ -2653,6 +2653,26 @@ pub fn build(b: *std.Build) void {
     ime_ack_step.dependOn(&run_ime_ack_tests.step);
     ime_ack_step.dependOn(&ime_ack_host.step);
 
+    // Live inspector exercises the actual AppSession collector, nonmodal dock and CLI presentation.
+    const inspector_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{ "inspector", "inspection request", "cwd decision shares", "history is bounded", "OVF1", "InputFocus의 모든", "도크 뷰 바:" },
+    });
+    const run_inspector_tests = b.addRunArtifact(inspector_tests);
+    run_inspector_tests.setCwd(b.path("."));
+    run_inspector_tests.addArg("--maru-expect-passed=10");
+    const inspector_step = b.step("test-inspector", "Verify live inspector UI, shared snapshot and CLI contracts");
+    inspector_step.dependOn(&run_inspector_tests.step);
+    if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_inspector_tests.step);
+    // Module tests need their own root: imported modules do not contribute tests.
+    const inspector_rules = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{ "inspector", "inspection request", "cwd decision shares", "history is bounded", "components.dock_view_bar" },
+    });
+    const run_inspector_rules = b.addRunArtifact(inspector_rules);
+    run_inspector_rules.setCwd(b.path("."));
+    inspector_step.dependOn(&run_inspector_rules.step);
+
     const test_macos_app_host_abi_step = b.step("test-macos-app-host-abi", "Run macOS Swift/Zig app host ABI contract tests");
     test_macos_app_host_abi_step.dependOn(&ime_ack_host.step);
     // 종료·창 닫기·Dock 다시 열기의 실제 Swift 본문(창 0 개 앱 LW1 × 다운로드 유지 W10c/W10e × 대화상자 보류 W6k — 두 갈래를 손으로 합친 자리).
@@ -4721,6 +4741,7 @@ pub fn build(b: *std.Build) void {
     const posix_host_tests = target.result.os.tag != .windows;
 
     const test_step = b.step("test", "Run all Zig tests");
+    test_step.dependOn(&run_inspector_rules.step);
     const agent_log_record_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/agent_log_record_test.zig"),
         .target = target,

@@ -108,6 +108,8 @@ pub const entries = [_]Entry{
     // 스크롤백 Find(⌘F)·다음/이전 매치(⌘G/⌘⇧G). **toggle_command_palette(팝업 자기 토글 — 재귀)와 달리**
     // Find는 별개 모달이라 팝업에 띄운다(선택 시 acceptPalette가 팝업을 닫고 Find를 연다). 메뉴 Find 서브메뉴는
     // keyEquivalent 없이(키바인딩 가림 방지) 별도지만, 팝업은 chord를 표시만 한다(가로채지 않음 — 안전).
+    // Korean search metadata remains available independently of the displayed UI language.
+    .{ .action = .toggle_inspector, .key = "toggle_inspector", .title = "Terminal Inspector", .search_ko = maru.i18n.tIn(.ko, .inspector_title) },
     .{ .action = .toggle_find, .key = "toggle_find", .title = "Find", .search_ko = "찾기" },
     .{ .action = .toggle_find_replace, .key = "toggle_find_replace", .title = "Find and Replace", .search_ko = "찾기 바꾸기" },
     .{ .action = .toggle_find_match_case, .key = "toggle_find_match_case", .title = "Find: Match Case", .search_ko = "찾기 대소문자 구분" },

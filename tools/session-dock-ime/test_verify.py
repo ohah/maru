@@ -147,8 +147,8 @@ class CandidateQueryOracleTests(unittest.TestCase):
                 validate_candidate_transitions(bad, report)
 
     def test_rejects_query_owner_counter_and_manifest_rebinding(self):
-        report = control('live')
-        for mutation in ('query', 'owner', 'responder', 'pty', 'screen', 'callbacks', 'report', 'id_replay', 'schema'):
+        for mutation in ('query', 'owner', 'responder', 'pty', 'screen', 'callbacks', 'report', 'id_replay', 'schema', 'absent_owner'):
+            report = control('live')
             artifact = candidate_control(report)
             row = artifact['search_transitions'][0]
             if mutation == 'query': row['opened']['query_hash'] = int(hash64('한韓'))
@@ -160,6 +160,9 @@ class CandidateQueryOracleTests(unittest.TestCase):
             if mutation == 'report': row['before_counters']['pty_input_bytes'] += 1
             if mutation == 'id_replay': artifact['rows'][1]['window_id'] = artifact['rows'][0]['window_id']
             if mutation == 'schema': artifact['schema'] = 'maru.session-host-cr6d-ime-candidate-observation.v2'
+            if mutation == 'absent_owner':
+                for name in ('before', 'opened', 'closed'): row[name]['owner_generation'] = 0
+                report['observations'][2]['owner_generation'] = 0
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 validate_candidate_transitions(artifact, report)
 

@@ -212,6 +212,38 @@ test "inline IME rejects malformed and oversized ranges before touching its proj
     try std.testing.expect(!context.insert(&oversized, null));
     try std.testing.expect(!context.setMarked("😀", .{ .location = 1, .length = 0 }, null));
     try std.testing.expectEqualStrings(original.text(), context.text());
+
+    // Reading context must reject a surrogate interior too, rather than exposing unrelated
+    // bytes as a fallback. End-of-document and oversized-but-intersecting requests stay valid.
+    for ([_]Range{ .{ .location = 2, .length = 0 }, .{ .location = 1, .length = 1 }, .{ .location = 99, .length = 0 }, .{ .location = std.math.maxInt(u64), .length = 1 } }) |span| {
+        try std.testing.expect(context.substring(span) == null);
+    }
+    const at_end = context.substring(.{ .location = 4, .length = std.math.maxInt(u64) }) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("", at_end.bytes);
+    try std.testing.expectEqual(Range{ .location = 4, .length = 0 }, at_end.actual);
+    const clipped = context.substring(.{ .location = 1, .length = std.math.maxInt(u64) }) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("😀z", clipped.bytes);
+    try std.testing.expectEqual(Range{ .location = 1, .length = 3 }, clipped.actual);
+
+    // The cap itself is legal. Cap+1 must fail without discarding the old marked text or
+    // admitting a partial query; testing only rejection could hide a disabled blur path.
+    var full: [query_limit]u8 = undefined;
+    @memset(&full, 'x');
+    try std.testing.expect(context.reset("a", &full));
+    const before_blur = context;
+    try std.testing.expect(!context.admitMarked());
+    try std.testing.expectEqualStrings(before_blur.text(), context.text());
+    try std.testing.expectEqual(before_blur.selected, context.selected);
+    try std.testing.expectEqual(before_blur.markedRange(), context.markedRange());
+    try std.testing.expectEqual(@as(usize, 1), context.committedLength());
+    try std.testing.expect(!context.pending);
+    try std.testing.expect(context.reset("", &full));
+    try std.testing.expect(context.admitMarked());
+    try std.testing.expectEqual(query_limit, context.committedLength());
+    try std.testing.expect(context.pending and context.marked == null);
+    var admitted: [query_limit]u8 = undefined;
+    context.copyCommitted(&admitted);
+    try std.testing.expectEqualStrings(&full, &admitted);
 }
 
 test "inline IME backspace follows replacement caret and cancels only the last inserted scalar" {

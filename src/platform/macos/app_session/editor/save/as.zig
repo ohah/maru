@@ -13,14 +13,15 @@ const registry = maru.session.editor.document_registry;
 const reservations = maru.session.editor.save_as_reservation;
 const Store = reservations.Store(registry.DocumentIdentity);
 const View = struct { session: *host.AppSession, term: *host.Term };
-const EntryPath = struct { surface: u64, entry: u64, a: std.mem.Allocator, path: ?[]u8 };
+const EntryPath = struct { surface: u64, entry: u64, a: std.mem.Allocator, path: ?[]u8, created: ?*maru.session.dock_panel.Entry = null, window: u64 = 0 };
 const Info = struct { canonical: []u8, key: []u8, file: ?reservations.FileIdentity, parent: reservations.FileIdentity, target: destination.Destination };
 const CloseIntent = struct { window: u64, surface: u64, target: host.PendingClose };
 const Operation = struct {
     token: Store.Token,
     lease: registry.Lease,
-    source_epoch: u64,
-    source_path: []u8,
+    source_path: ?[]u8,
+    source: maru.session.editor.save_ops.BindingSource,
+    untitled_number: ?u32 = null,
     source_disk_hash: ?u64 = null,
     selected: ?Info = null,
     taken: bool = false,
@@ -61,8 +62,8 @@ fn find(op: *const Operation, original: bool) ?View {
 }
 fn current(op: *const Operation) bool {
     const state = op.lease.owner.get(op.lease) orelse return false;
-    return state.opened != null and state.path != null and state.save_target_epoch == op.source_epoch and
-        std.mem.eql(u8, state.path.?, op.source_path);
+    if (state.opened == null or state.remote != null or (state.path == null) != (state.untitled != null)) return false;
+    return op.source.matches(.{ .document = @intFromPtr(state), .identity = identity(op.lease), .epoch = state.save_target_epoch, .path = state.path });
 }
 fn get(id: u64) ?*Operation {
     for (operations.items) |op| if (op.token.id == id) return op;
@@ -81,11 +82,12 @@ pub fn begin(session: *host.AppSession, term: *host.Term) void {
         return;
     }
     if (term.file_entry) |entry| if (!entry.native_editor or entry.usesEditorBridge()) return;
-    beginFallible(session, term) catch {
+    _ = beginFallible(session, term) catch {
         session.showNoticeKey(.app_save_failed);
+        return;
     };
 }
-fn beginFallible(session: *host.AppSession, term: *host.Term) !void {
+fn beginFallible(session: *host.AppSession, term: *host.Term) !*Operation {
     const state = term.rt.editorDocument();
     if (state.save_target_epoch == std.math.maxInt(u64)) return error.WriteFailed;
     if (store == null) store = Store.init(a());
@@ -93,28 +95,29 @@ fn beginFallible(session: *host.AppSession, term: *host.Term) !void {
     try operations.ensureUnusedCapacity(a(), 1);
     const lease = try @constCast(source.owner).retain(source, .request);
     errdefer _ = @constCast(lease.owner).release(lease) catch unreachable;
-    const path = try a().dupe(u8, state.path.?);
-    errdefer a().free(path);
+    const path = if (state.path) |old| try a().dupe(u8, old) else null;
+    errdefer if (path) |old| a().free(old);
     const op = try a().create(Operation);
     errdefer a().destroy(op);
     const token = try store.?.begin(identity(lease), .{ .window = session.recovered_session_window_generation, .surface = term.surface.id });
-    op.* = .{ .token = token, .lease = lease, .source_epoch = state.save_target_epoch, .source_path = path };
+    op.* = .{ .token = token, .lease = lease, .source_path = path, .source = .{ .document = @intFromPtr(state), .identity = identity(lease), .epoch = state.save_target_epoch, .path = path }, .untitled_number = if (state.untitled) |name| name.n else null };
     operations.appendAssumeCapacity(op);
+    return op;
 }
 /// AppKit이 소유한 버퍼에 복사한 뒤에만 패널 요청을 가져간 것으로 표시한다.
 pub fn take(session: *host.AppSession, id: *u64, path: []u8) usize {
     if (session.ime_active) return 0;
     for (operations.items) |op| {
-        if (op.taken or op.token.origin.window != session.recovered_session_window_generation) continue;
+        if (op.source_path == null or op.taken or op.token.origin.window != session.recovered_session_window_generation) continue;
         if (!current(op) or find(op, true) == null) {
             cancel(op);
             return 0;
         }
-        if (path.len < op.source_path.len) return 0;
-        @memcpy(path[0..op.source_path.len], op.source_path);
+        if (path.len < op.source_path.?.len) return 0;
+        @memcpy(path[0..op.source_path.?.len], op.source_path.?);
         id.* = op.token.id;
         op.taken = true;
-        return op.source_path.len;
+        return op.source_path.?.len;
     }
     return 0;
 }
@@ -152,7 +155,7 @@ fn releaseInfo(info: Info) void {
 }
 fn occupied(view: View, op: *Operation, info: Info) bool {
     for (host.editorSaveWindows()) |session| for (session.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
-        if (same(term, op.lease)) continue;
+        if (!op.source.protectsOpenTarget(session == view.session) or same(term, op.lease)) continue;
         const path = if (term.kind == .editor) term.rt.editorDocument().path orelse continue else if (term.file_entry) |entry| entry.path else continue;
         if (std.mem.eql(u8, path, info.canonical)) return true;
         if (info.file) |wanted| {
@@ -207,19 +210,19 @@ pub fn reply(session: *host.AppSession, id: u64, path: []const u8) void {
         cancel(op);
         return;
     };
-    if (std.mem.eql(u8, info.canonical, op.source_path)) {
+    if (std.mem.eql(u8, info.canonical, op.source_path.?)) {
         releaseInfo(info);
         cancel(op);
         @import("../save_actions.zig").saveCommand(session, view.term);
         return;
     }
     if (info.file) |wanted| {
-        const source = std.Io.Dir.cwd().openFile(session.io, op.source_path, .{}) catch null;
+        const source = std.Io.Dir.cwd().openFile(session.io, op.source_path.?, .{}) catch null;
         if (source) |file| {
             defer file.close(session.io);
             const actual = physical(session, file) catch null;
             if (actual != null and std.meta.eql(actual.?, wanted)) {
-                const relation = aliasRelation(session, op.source_path, file, info) catch .unknown;
+                const relation = aliasRelation(session, op.source_path.?, file, info) catch .unknown;
                 if (relation != .different) {
                     releaseInfo(info);
                     cancel(op);
@@ -256,6 +259,30 @@ pub fn reply(session: *host.AppSession, id: u64, path: []const u8) void {
     };
     op.selected = info;
 }
+/// 첫 저장도 Save As와 같은 문서/대상 예약 및 writer 수명을 쓴다. 이름 입력 UI는 caller가 소유한다.
+pub fn firstSave(session: *host.AppSession, term: *host.Term, path: []const u8, overwriting: bool) void {
+    firstSaveFallible(session, term, path, overwriting) catch |err| {
+        session.showNoticeKey(switch (err) {
+            error.ExternalConflict => .editor_save_external_conflict,
+            error.AlreadyOpen => .editor_untitled_already_open,
+            else => .app_save_failed,
+        });
+    };
+}
+fn firstSaveFallible(session: *host.AppSession, term: *host.Term, path: []const u8, overwriting: bool) !void {
+    const state = term.rt.editorDocument();
+    if (state.path != null or state.untitled == null or state.remote != null or state.opened == null) return error.NotAnEditor;
+    const info = try inspect(session, path);
+    errdefer releaseInfo(info);
+    if ((info.file != null) != overwriting) return error.ExternalConflict;
+    const op = try beginFallible(session, term);
+    errdefer cancel(op);
+    op.taken = true; // native Save As sheet를 요청하지 않는다.
+    if (occupied(.{ .session = session, .term = term }, op, info) or reservedPath(session, info.canonical, op.token.id)) return error.AlreadyOpen;
+    try store.?.accept(op.token, .{ .namespace = info.key, .file = info.file });
+    op.selected = info;
+}
+
 pub fn reservedPath(session: *host.AppSession, path: []const u8, except: ?u64) bool {
     var selected_exists = false;
     for (operations.items) |op| if (op.selected != null and op.token.id != except) {
@@ -336,9 +363,48 @@ fn prepare(op: *Operation, view: View) !void {
             try op.paths.ensureUnusedCapacity(a(), 1);
             const path = try session.allocator.dupe(u8, selected.canonical);
             op.paths.appendAssumeCapacity(.{ .surface = term.surface.id, .entry = entry.id, .a = session.allocator, .path = path });
+        } else if (op.untitled_number != null) {
+            try op.paths.ensureUnusedCapacity(a(), 1);
+            const path = try session.allocator.dupe(u8, selected.canonical);
+            errdefer session.allocator.free(path);
+            const entry = try @import("../untitled_save.zig").prepareEntry(session, term, path);
+            op.paths.appendAssumeCapacity(.{ .surface = term.surface.id, .entry = entry.id, .a = session.allocator, .path = null, .created = entry, .window = session.recovered_session_window_generation });
+            session.editor_batch_reserved_entries += 1;
         }
     };
 }
+// 창이 사라져도 포인터를 보관하지 않는다. 살아 있는 원래 창의 예약만 해제한다.
+fn releaseEntrySlot(item: *const EntryPath) void {
+    for (host.editorSaveWindows()) |session| {
+        if (session.recovered_session_window_generation == item.window) {
+            session.editor_batch_reserved_entries -= 1;
+            return;
+        }
+    }
+}
+
+// 쓰기 중 창을 옮긴 경우에도 경로 채택 전에 실제 수신 창의 자리와 allocator를 검사한다.
+fn canPublishEntries(op: *const Operation) bool {
+    for (host.editorSaveWindows()) |session| {
+        var adding: usize = 0;
+        var owned: usize = 0;
+        for (session.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+            if (!same(term, op.lease)) continue;
+            for (op.paths.items) |item| {
+                if (item.surface != term.surface.id or item.created == null) continue;
+                if (term.file_entry != null or item.a.ptr != session.allocator.ptr or item.a.vtable != session.allocator.vtable) return false;
+                adding += 1;
+                if (item.window == session.recovered_session_window_generation) owned += 1;
+            }
+        };
+        var count: usize = 0;
+        var it = panel.fileEntries(session);
+        while (it.next()) |_| count += 1;
+        if (!maru.session.editor.save_ops.canAddEntries(count, session.editor_batch_reserved_entries -| owned, adding, maru.session.dock_panel.max_entries)) return false;
+    }
+    return true;
+}
+
 fn finish(op: *Operation, success: bool, failure: ?anyerror) void {
     const view = find(op, false);
     if (failure) |err| if (view) |v| v.session.showResponseNotice(switch (err) {
@@ -386,7 +452,7 @@ pub fn poll() void {
                 return;
             }
             if (current(op)) for (host.editorSaveWindows()) |session| @import("../lsp.zig").notePathChanging(session, op.lease);
-            if (!op.prepared.?.adopt(model_a, op.lease)) {
+            if (!canPublishEntries(op) or !op.prepared.?.adopt(model_a, op.lease)) {
                 if (find(op, false)) |v| v.session.showResponseNotice(.editor_untitled_written_not_adopted, &.{});
                 finish(op, false, null);
                 return;
@@ -395,6 +461,12 @@ pub fn poll() void {
             const prepared = &op.prepared.?;
             const saved = prepared.work.?.content();
             for (host.editorSaveWindows()) |session| for (session.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| if (same(term, op.lease)) {
+                for (op.paths.items) |*item| if (item.surface == term.surface.id and item.created != null and term.file_entry == null) {
+                    releaseEntrySlot(item);
+                    term.file_entry = item.created;
+                    item.created = null;
+                    session.workspaceChanged(.persisted_surface);
+                };
                 for (op.paths.items) |*item| if (item.surface == term.surface.id and item.path != null) {
                     if (term.file_entry) |entry| if (entry.id == item.entry) {
                         item.a.free(entry.path);
@@ -402,7 +474,7 @@ pub fn poll() void {
                         item.path = null;
                     };
                 };
-                @import("../backup.zig").markClean(session, term, saved, .{ .path = .{ .path = op.source_path, .disk_hash = op.source_disk_hash } });
+                @import("../backup.zig").markClean(session, term, saved, if (op.untitled_number) |number| .{ .untitled = number } else .{ .path = .{ .path = op.source_path.?, .disk_hash = op.source_disk_hash } });
                 term.rt.editor_syntax.deinit(session.allocator);
                 const old = term.rt.editor_grammar;
                 term.rt.editor_grammar = maru.session.editor.language.grammarForPath(prepared.work.?.path);
@@ -470,11 +542,18 @@ fn remove(op: *Operation) void {
     };
     const model_a = op.lease.owner.resourceAllocator(op.lease).?;
     if (op.prepared) |*prepared| prepared.deinit(model_a);
-    for (op.paths.items) |item| if (item.path) |path| item.a.free(path);
+    for (op.paths.items) |item| {
+        if (item.path) |path| item.a.free(path);
+        if (item.created) |entry| {
+            releaseEntrySlot(&item);
+            item.a.free(entry.path);
+            item.a.destroy(entry);
+        }
+    }
     op.paths.deinit(a());
     op.prior_saves.deinit(a());
     if (op.selected) |info| releaseInfo(info);
-    a().free(op.source_path);
+    if (op.source_path) |path| a().free(path);
     _ = @constCast(op.lease.owner).release(op.lease) catch unreachable;
     a().destroy(op);
 }

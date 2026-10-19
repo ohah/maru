@@ -26,6 +26,12 @@ class MeasurementTests(unittest.TestCase):
                      'UNTITLED_BUILD mode=debug\nUNTITLED_BUILD mode=release_fast']:
             with self.subTest(text=text), self.assertRaises(ValueError): parse_build_mode(text)
 
+    def test_async_response_may_precede_io_but_not_settlement(self):
+        text = TEXT.replace('call_ns=200000100 next_event_ns=200000200', 'call_ns=100 next_event_ns=200') + 'UNTITLED_SETTLED ns=210000000\n'
+        self.assertEqual(parse_metrics(text, 65536, 200, require_settled=True)['settled_ns'], 210000000)
+        for changed in [text.replace('ns=210000000', 'ns=100'), TEXT]:
+            with self.assertRaises(ValueError): parse_metrics(changed, 65536, 200, require_settled=True)
+
     def test_success_control_and_exact_records(self):
         self.assertEqual(parse_metrics(TEXT, 65536, 200)['call_ns'], 200000100)
         for changed in [TEXT.replace('passed=true', 'passed=trueX'), TEXT.replace('passed=true', 'passed=false'),

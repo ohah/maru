@@ -53,3 +53,54 @@ pub fn successorBaseline(before: ?u64, queued: ?u64, written: u64) ?u64 {
 pub fn sameDocument(a: Token, b: Token) bool {
     return a.document == b.document and sameIdentity(a.identity, b.identity);
 }
+
+/// 경로를 붙이는 저장의 원본 신원. 첫 저장은 path=null이며 빈 경로로 named Target을 가장하지 않는다.
+pub const BindingSource = struct {
+    document: usize,
+    identity: Identity,
+    epoch: u64,
+    path: ?[]const u8,
+
+    /// 첫 저장의 열린 대상 검사는 기존 창 범위를 유지한다. 쓰기 중 대상 예약은 별도 전역 계약이다.
+    pub fn protectsOpenTarget(self: BindingSource, same_window: bool) bool {
+        return self.path != null or same_window;
+    }
+
+    pub fn matches(self: BindingSource, current: BindingSource) bool {
+        if (self.document != current.document or !std.meta.eql(self.identity, current.identity) or self.epoch != current.epoch) return false;
+        if (self.path) |path| return if (current.path) |other| std.mem.eql(u8, path, other) else false;
+        return current.path == null;
+    }
+};
+
+test "FSBIND 첫 저장의 원본은 이름 있는 경로 및 다른 문서 세대와 구분한다" {
+    const a: BindingSource = .{ .document = 1, .identity = .{ .owner = 2, .slot = 3, .generation = 4 }, .epoch = 5, .path = null };
+    try std.testing.expect(a.matches(a));
+    try std.testing.expect(a.protectsOpenTarget(true));
+    try std.testing.expect(!a.protectsOpenTarget(false));
+    var b = a;
+    b.path = "";
+    try std.testing.expect(b.protectsOpenTarget(false));
+    try std.testing.expect(!a.matches(b));
+    b = a;
+    b.epoch += 1;
+    try std.testing.expect(!a.matches(b));
+    b = a;
+    b.identity.generation += 1;
+    try std.testing.expect(!a.matches(b));
+    b = a;
+    b.document += 1;
+    try std.testing.expect(!a.matches(b));
+}
+
+/// 아직 공개하지 않은 entry도 같은 창의 용량을 사용한다. 덧셈 overflow 없이 여유를 판정한다.
+pub fn canAddEntries(visible: usize, reserved: usize, adding: usize, limit: usize) bool {
+    return visible <= limit and reserved <= limit - visible and adding <= limit - visible - reserved;
+}
+
+test "FSBIND 공개 전 예약도 용량에 포함하고 넘침을 거절한다" {
+    try std.testing.expect(canAddEntries(2, 1, 1, 4));
+    try std.testing.expect(!canAddEntries(2, 1, 2, 4));
+    try std.testing.expect(!canAddEntries(5, 0, 0, 4));
+    try std.testing.expect(!canAddEntries(0, std.math.maxInt(usize), 1, 4));
+}

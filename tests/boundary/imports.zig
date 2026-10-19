@@ -12897,19 +12897,11 @@ test "이름 없는 문서 저장: 디스크에 쓰는 자리 둘, 이름을 붙
         }
     }.f;
 
-    // ⑴ **쓰는 함수는 둘이고 각자 한 번씩만 불린다.** 새 파일은 배타 생성, 덮어쓰기는 CAS — 하나로
-    //    합치면 새 파일에서 CAS 가 원본을 못 찾아 실패하거나(그 방향) 덮어쓰기에서 배타가 늘 실패한다.
-    try std.testing.expectEqual(@as(usize, 1), countOf(save, "editor_ops.createDocumentBytes(self, abs, bytes)"));
-    // ⚠️ **덮어쓰기는 지문을 넘기지 않는다**(`null`) — 사용자가 방금 「있다」를 보고 「덮어쓴다」고
-    //    답했으므로 「연 뒤 바뀌었나」를 다시 묻지 않는다(§3.9d). 그 인자가 빠지거나 지문이 끼면
-    //    덮어쓰기가 자기 확인을 무시하고 다시 충돌로 거절된다.
-    try std.testing.expectEqual(@as(usize, 1), countOf(save, "editor_ops.writeDocumentBytes(self, abs, bytes, null)"));
-
-    // ⑵ **이름을 지우는 자리는 「경로·신원이 붙는 그 순간」뿐이고, 지금 둘이다**(U3 로 하나 늘었다):
-    //    이쪽 채택(`editor_document.path` 를 세운다)과 저쪽 채택(`editor_document.remote` 를 세운다). 그 둘은 **배타**이고
-    //    각자 자기 값을 세운 뒤 이름을 버린다 — 자리가 그 둘 말고 늘면 한쪽이 낡아 문서가 영원히
-    //    「저장 안 한 문서」로 남거나 반대로 이름 없는 문서가 이름을 잃는다.
-    try std.testing.expectEqual(@as(usize, 2), countOf(save, "term.rt.editorDocument().untitled = null"));
+    // 로컬 쓰기·경로 채택은 actor/destination으로 이동했다. 원격 신원 채택만 이 파일에 남는다.
+    const destination = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/save/destination.zig");
+    defer allocator.free(destination);
+    try std.testing.expectEqual(@as(usize, 1), countOf(destination, "state.untitled = null"));
+    try std.testing.expectEqual(@as(usize, 1), countOf(save, "term.rt.editorDocument().untitled = null"));
 
     // ⑶ **들고 있던 경로는 그 물음이 끝나면 비어 있다.** 수락(그 함수 머리)과 취소
     //    (`cancelPendingConfirm`)가 그 둘이고, 수락 쪽만 비우면 취소한 경로가 남아 다음 저장을
@@ -12940,19 +12932,13 @@ test "이름 없는 문서 저장: 디스크에 쓰는 자리 둘, 이름을 붙
         countOf(app_session, ".untitled_overwrite, .untitled_where, .untitled_remote_overwrite => self.pending_untitled_save = .{}"),
     );
 
-    // ⑷ **실패 문구는 「쓰기 앞」과 「쓰기 뒤」로 갈린다.** 쓰기 뒤의 실패에 「저장하지 못했습니다」를
-    //    쓰면 **거짓**이다(파일은 이미 있다) — 사용자는 아무 일도 없었다고 읽는다. 반대로 쓰기 앞의
-    //    실패에 「파일은 만들어졌지만…」을 쓰면 그것도 거짓이다. 각 자리 수를 센다.
-    //
-    //    쓰기 앞 둘: `saveBytes` 실패(뭉갠 문구 하나) · 쓰기 자체 실패(**이유별 문구** — C0 이 그것을
-    //    올렸으므로 여기서 다시 뭉개면 C0 을 지우는 셈이다). 쓰기 뒤 셋: 경로 복사 둘 · entry 붙이기.
-    // U3 로 **하나 늘었다**: 저쪽 저장도 보낼 바이트를 먼저 만들고, 그 실패는 이쪽과 **같은 이유**라
-    // 같은 문구를 쓴다(목적지가 다르다고 「바이트를 못 만들었다」가 달라지지 않는다).
-    try std.testing.expectEqual(@as(usize, 2), countOf(save, "showNoticeKey(.app_save_failed)"));
-    try std.testing.expectEqual(@as(usize, 2), countOf(save, "saveFailureNoticeKey"));
-    // U3 로 **둘 늘었다**: 저쪽 채택도 신원 두 조각(목적지·경로)을 복사하고, 그 실패는 **쓰기 뒤**라
-    // 같은 문구를 쓴다 — 「저장하지 못했습니다」로 쓰면 거짓이다(저쪽 파일은 이미 있다).
-    try std.testing.expectEqual(@as(usize, 5), countOf(save, "showNoticeKey(.editor_untitled_written_not_adopted)"));
+    // 로컬 첫 저장은 준비/worker/완료를 actor가 소유한다. 아래 문구 수는 기존 원격 경로만 센다.
+    try std.testing.expectEqual(@as(usize, 1), countOf(save, "showNoticeKey(.app_save_failed)"));
+    try std.testing.expectEqual(@as(usize, 0), countOf(save, "saveFailureNoticeKey"));
+    try std.testing.expectEqual(@as(usize, 2), countOf(save, "showNoticeKey(.editor_untitled_written_not_adopted)"));
+    try std.testing.expectEqual(@as(usize, 1), countOf(save, "@import(\"save/as.zig\").firstSave(self, term, abs, overwriting)"));
+    // 준비 entry를 쓰기 전에 Term에 붙여 성공처럼 공개하지 않는다. 실제 순서는 U2ASYNC가 검사한다.
+    try std.testing.expectEqual(@as(usize, 0), countOf(save, "term.file_entry = entry"));
 
     // ⑸ **NUL 검사는 경로를 «푼 뒤»에 한 번** — 푸는 앞에서 이름만 보면 base 쪽 NUL 이 새고, 두 번
     //    적으면 한쪽이 낡는다.
@@ -13143,9 +13129,9 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     try std.testing.expectEqual(@as(usize, 0), countOfB(save, "editorDocument().opened.?.saved_hash = "));
     try std.testing.expectEqual(@as(usize, 1), countOfB(local_save, "editor_backup_ops.markClean(session, term, self.content(), null)"));
     try std.testing.expectEqual(@as(usize, 1), countOfB(conflict, "editor_backup_ops.markClean(self, term, fresh.file.content, null)"));
-    try std.testing.expectEqual(@as(usize, 2), countOfB(save, "editor_backup_ops.markClean(self, term, "));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(save, "editor_backup_ops.markClean(self, term, "));
     // **신원이 바뀌는 둘은 옛 신원을 먼저 뜬다** — 새 이름으로는 옛 파일을 지울 수 없다.
-    try std.testing.expectEqual(@as(usize, 2), countOfB(save, "editor_backup_ops.identity(term)"));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(save, "editor_backup_ops.identity(term)"));
 
     // ⑵ 편집 게시와 별도 문서 복구가 같은 noteEdit 시계를 예약한다. 복구 본문은 초기 상태여서
     //    편집 연산을 거치지 않는다. 두 호출의 효과는 U4와 discovery 제품 판정자가 실제 파일로 잰다.

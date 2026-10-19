@@ -50519,6 +50519,7 @@ const UntitledFixture = struct {
     }
 
     fn deinit(self: *UntitledFixture, allocator: std.mem.Allocator) void {
+        saveAsCleanupForTest();
         self.session.deinit();
         allocator.destroy(self.session);
         app_session_mod.app_runtime.untitled_docs = self.saved_counter;
@@ -51117,6 +51118,7 @@ test "U2b 이름을 주면 파일이 생기고 보통 문서가 된다 — 경�
 
     try fx.session.rename_input.setText(allocator, "new.zig");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
 
     // ⑴ 파일이 디스크에 있고 내용이 맞다.
     const on_disk = try dir.dir.readFileAlloc(std.testing.io, "new.zig", allocator, .limited(4096));
@@ -51195,6 +51197,7 @@ test "U2d 같은 이름이 이미 있으면 덮어쓸지 묻고, 수락하면 �
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.setText(allocator, "taken.txt");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
 
     // **묻는다** — 그리고 아직 안 썼다(파일은 옛 내용 그대로).
     try testing.expect(fx.session.chrome_host.confirm.open);
@@ -51211,6 +51214,7 @@ test "U2d 같은 이름이 이미 있으면 덮어쓸지 묻고, 수락하면 �
 
     // 수락하면 그때 쓴다.
     fx.session.dispatchChromeAction(.confirm_accept);
+    try awaitSaveAsForTest();
     const after = try dir.dir.readFileAlloc(io, "taken.txt", allocator, .limited(4096));
     defer allocator.free(after);
     try testing.expectEqualStrings("new\n", after);
@@ -51241,6 +51245,7 @@ test "U2e 덮어쓰기를 취소하면 아무 일도 없고 들고 있던 경로
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.setText(allocator, "taken.txt");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
     try testing.expect(fx.session.pending_untitled_save.path_len > 0);
 
     fx.session.dispatchChromeAction(.confirm_cancel);
@@ -51275,6 +51280,7 @@ test "U2f 그 경로로 이미 열린 Term 이 있으면 저장하지 않는다 
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.setText(allocator, "open.txt");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
 
     // **확인이 뜨지 않는다** — 디스크를 덮어쓸지와 다른 질문이라 거절하고 말한다.
     try testing.expect(!fx.session.chrome_host.confirm.open);
@@ -51312,6 +51318,7 @@ test "U2g base 밖 이름은 거절한다 — 절대 경로도 «갈아입은 ..
         fx.session.rename_input.clear();
         try fx.session.rename_input.setText(allocator, bad);
         settings_ops.commitRename(fx.session);
+        try awaitSaveAsForTest();
         try testing.expect(fx.session.chrome_host.notice.open);
         try testing.expect(t.rt.editorDocument().path == null); // 이름이 안 붙었다
         try testing.expect(t.rt.editorDocument().untitled != null);
@@ -51367,6 +51374,7 @@ test "U2i 저장하면 workspace 저장 시퀀스에 든다 — 다음 실행에
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.setText(allocator, "kept.txt");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
     try testing.expect(t.rt.editorDocument().path != null);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -51399,6 +51407,7 @@ test "U2j 저장 뒤에는 보통 문서의 저장 경로를 탄다 — 두 번�
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.setText(allocator, "twice.txt");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
 
     // 더 고치고 다시 저장 — **상자가 뜨지 않고** 그 파일에 바로 쓴다(이름이 이미 있다).
     try testing.expect(insertText(fx.session, t, "two\n"));
@@ -51430,6 +51439,7 @@ test "U2k 저장 뒤 닫기 확인은 «공용» 문구다 — 더 이상 사라
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.setText(allocator, "closed.txt");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
     try testing.expect(insertText(fx.session, t, "b\n")); // 다시 dirty
 
     // ⑴ **이름 표식이 사라졌으므로** 이 문서는 더 이상 「사라지는 문서」가 아니다. 안 지우면 저장한
@@ -51515,6 +51525,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
         fx.session.rename_input.clear();
         try fx.session.rename_input.setText(allocator, name);
         settings_ops.commitRename(fx.session);
+        try awaitSaveAsForTest();
         try testing.expect(t.rt.editorDocument().path != null);
         try testing.expect(t.file_entry != null);
     }
@@ -51528,6 +51539,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
             fx.session.rename_input.clear();
             try fx.session.rename_input.setText(allocator, bad);
             settings_ops.commitRename(fx.session);
+            try awaitSaveAsForTest();
             try testing.expect(t.rt.editorDocument().path == null);
             try testing.expect(t.file_entry == null);
         }
@@ -51536,6 +51548,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
         fx.session.rename_input.clear();
         try fx.session.rename_input.setText(allocator, "after-bad.txt");
         settings_ops.commitRename(fx.session);
+        try awaitSaveAsForTest();
         try testing.expect(t.rt.editorDocument().path != null);
     }
 
@@ -51548,6 +51561,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
         fx.session.rename_input.clear();
         try fx.session.rename_input.setText(allocator, "over.txt");
         settings_ops.commitRename(fx.session);
+        try awaitSaveAsForTest();
         fx.session.dispatchChromeAction(.confirm_cancel);
         try testing.expectEqual(@as(usize, 0), fx.session.pending_untitled_save.path_len);
         // 다른 이름으로 저장 — **취소한 경로에 쓰이면 안 된다**.
@@ -51555,6 +51569,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
         fx.session.rename_input.clear();
         try fx.session.rename_input.setText(allocator, "other.txt");
         settings_ops.commitRename(fx.session);
+        try awaitSaveAsForTest();
         try testing.expect(std.mem.endsWith(u8, t.rt.editorDocument().path.?, "/other.txt"));
         const untouched = try dir.dir.readFileAlloc(io, "over.txt", allocator, .limited(64));
         defer allocator.free(untouched);
@@ -51564,7 +51579,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
     // ⑷ **저장한 문서를 열어 둔 채 세션이 끝난다** — 경로 두 벌과 entry 가 같은 teardown 을 지난다.
 }
 
-test "U2n 쓰기는 됐는데 entry 를 못 붙이면 — 새지 않고, 이름도 안 붙고, 그 사실을 말한다" {
+test "U2n entry 준비 실패는 디스크에 쓰기 전에 이름 없는 본문과 Undo를 보존한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try UntitledFixture.init(allocator, false, true);
@@ -51587,29 +51602,15 @@ test "U2n 쓰기는 됐는데 entry 를 못 붙이면 — 새지 않고, 이름�
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.setText(allocator, "orphan.txt");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
 
-    // ⚠️ **파일은 이미 있다** — 쓰기가 먼저이기 때문이다(그 순서의 근거는 그 함수 주석에 있다:
-    // 뒤집으면 「경로는 붙었는데 파일이 없는」 중간 상태가 생긴다). 그 대가를 여기서 못 박는다.
-    const on_disk = try dir.dir.readFileAlloc(io, "orphan.txt", allocator, .limited(64));
-    defer allocator.free(on_disk);
-    try testing.expectEqualStrings("written\n", on_disk);
-    // 그러나 **이름은 안 붙었다** — 반쪽 상태(경로는 있고 entry 는 없는)를 만들지 않는다.
+    // entry 준비 실패는 쓰기 전에 끝난다. 디스크와 이름 없는 본문/Undo를 보존한다.
+    try testing.expectError(error.FileNotFound, dir.dir.access(io, "orphan.txt", .{}));
     try testing.expect(t.rt.editorDocument().path == null);
     try testing.expect(t.rt.editorDocument().untitled != null);
     try testing.expect(t.file_entry == null);
-    // 그리고 **무엇이 됐는지 말한다** — 「저장하지 못했습니다」는 이 자리에서 **거짓**이다(파일은 있다).
-    // 같은 문구를 쓰면 사용자는 아무 일도 없었다고 읽고, 디스크에는 자기 내용이 담긴 파일이 남는다.
+    try testing.expectEqualStrings("written\n", t.rt.editorDocument().opened.?.file.content);
     try testing.expect(fx.session.chrome_host.notice.open);
-    try testing.expect(std.mem.startsWith(
-        u8,
-        &fx.session.notice_message_buf,
-        maru.i18n.t(.editor_untitled_written_not_adopted),
-    ));
-    try testing.expect(!std.mem.startsWith(
-        u8,
-        &fx.session.notice_message_buf,
-        maru.i18n.t(.app_save_failed),
-    ));
     // 새 복사본은 놓았다(testing allocator 가 이 테스트 끝에서 잰다).
 }
 
@@ -51700,6 +51701,7 @@ test "U2p 이름 상자가 떠 있는 동안 그 Term 이 닫히면 — 확정�
     // 확정해도 **아무 일도 안 일어난다**(파일도 안 생긴다) — 낡은 포인터를 만지지 않는다.
     try fx.session.rename_input.setText(allocator, "ghost.txt");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
     try testing.expect(fx.session.rename == null);
     try testing.expectError(error.FileNotFound, dir.dir.access(io, "ghost.txt", .{}));
     // **남은 문서는 그대로다** — 닫힌 것을 못 찾았다고 아무 문서에나 이름을 붙이지 않는다.
@@ -51734,6 +51736,7 @@ test "U2u 재진입: 상자가 떠 있는데 또 ⌘S · 확인 중에 또 저�
 
     // ⑵ 확정 → **덮어쓰기 확인**이 뜨고 경로를 들고 있다.
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
     try testing.expect(fx.session.pending_confirm == .untitled_overwrite);
     const held = fx.session.pending_untitled_save.path_len;
     try testing.expect(held > 0);
@@ -51761,6 +51764,7 @@ test "U2u 재진입: 상자가 떠 있는데 또 ⌘S · 확인 중에 또 저�
 
     // ⑸ 수락하면 **처음 고른 문서**가 그 파일을 갖는다.
     fx.session.dispatchChromeAction(.confirm_accept);
+    try awaitSaveAsForTest();
     try testing.expect(a.rt.editorDocument().path != null);
     try testing.expect(std.mem.endsWith(u8, a.rt.editorDocument().path.?, "/exists.txt"));
     const got = try dir.dir.readFileAlloc(io, "exists.txt", allocator, .limited(64));
@@ -51875,6 +51879,7 @@ test "U2x 파일시스템의 거친 자리: 없는 하위 폴더 · 같은 이�
             s.rename_input.clear();
             try s.rename_input.setText(a, name);
             settings_ops.commitRename(s);
+            try awaitSaveAsForTest();
         }
     }.f;
 
@@ -51986,6 +51991,7 @@ test "U2y 「이미 열림」은 이 창만 본다 — 다른 창은 검사 범�
     try testing.expectError(error.AskName, saveDocument(w2, t));
     try w2.rename_input.setText(allocator, "shared.txt");
     settings_ops.commitRename(w2);
+    try awaitSaveAsForTest();
     try testing.expect(w2.pending_confirm == .untitled_overwrite); // 확인은 뜬다(디스크에 있다)
     try testing.expect(t.rt.editorDocument().path == null); // 아직 안 썼다
 }
@@ -52016,6 +52022,7 @@ test "U2z 저장 상한은 두 경로가 같다 — 만들 수 있는데 다시 
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.setText(allocator, "big.txt");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
 
     // **파일이 안 생겼다** — 그리고 그 이유를 말한다.
     try testing.expectError(error.FileNotFound, dir.dir.access(io, "big.txt", .{}));
@@ -52034,6 +52041,7 @@ test "U2z 저장 상한은 두 경로가 같다 — 만들 수 있는데 다시 
     fx.session.rename_input.clear();
     try fx.session.rename_input.setText(allocator, "small.txt");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
     try testing.expect(ok_doc.rt.editorDocument().path != null);
 }
 
@@ -52056,6 +52064,7 @@ test "U2B 덮어쓰기 확인이 떠 있는데 그 문서를 닫으면 — 확�
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.setText(allocator, "target.txt");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
     try testing.expect(fx.session.pending_confirm == .untitled_overwrite);
     try testing.expect(fx.session.chrome_host.confirm.open);
 
@@ -52106,6 +52115,7 @@ test "U2C 제품 키 경로: Enter 가 확정하고 Esc 가 취소하며 클릭-
         typeName(fx.session, "k1.txt");
         try testing.expectEqualStrings("k1.txt", fx.session.rename_input.text.items);
         settings_ops.handleRenameKey(fx.session, .{ .key = .{ .key = .enter } });
+        try awaitSaveAsForTest();
         try testing.expect(t.rt.editorDocument().path != null);
         const got = try dir.dir.readFileAlloc(io, "k1.txt", allocator, .limited(64));
         defer allocator.free(got);
@@ -52757,6 +52767,7 @@ test "C1a-6 상자가 떠 있는데 그 문서를 닫으면 — 확인도 접히
 
     // **수락이 와도 아무 일도 없다** — 대상이 없으니 쓸 곳도 없다.
     s.dispatchChromeAction(.confirm_accept);
+    try awaitSaveAsForTest();
     {
         const on_disk = try c.diskText(allocator, "gone.txt");
         defer allocator.free(on_disk);
@@ -52872,6 +52883,7 @@ test "C1a-10 재진입: 두 문서가 잇달아 충돌해도 답은 «마지막�
     // ⑸ **답을 또 눌러도 아무 일도 없다** — 보류가 비었으므로 되살아난 답이 남의 문서를 덮지 않는다.
     try testing.expect(s.pending_confirm == .none);
     s.dispatchChromeAction(.confirm_accept);
+    try awaitSaveAsForTest();
     {
         const one = try c.diskText(allocator, "one.txt");
         defer allocator.free(one);
@@ -53528,6 +53540,7 @@ test "C0c 디스크 지문의 수명 — 두 번째 저장이 자기가 쓴 것�
     try testing.expectError(error.AskName, saveDocument(fx.session, u));
     try fx.session.rename_input.setText(allocator, "fresh.txt");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
     try testing.expect(u.rt.editorDocument().path != null);
     // 이름이 붙은 뒤에는 **지문이 선다** — 안 서면 그 문서는 영영 충돌을 못 본다.
     try testing.expect(u.rt.editorDocument().opened.?.disk_hash != null);
@@ -53731,6 +53744,7 @@ test "U4a-6 이름이 붙으면 옛 신원의 백업이 사라진다" {
     try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.setText(allocator, "named.txt");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
     try testing.expect(t.rt.editorDocument().path != null);
     // **옛 이름의 파일이 남으면** 다음 실행이 이미 저장된 문서를 「이름 없는 dirty」로 되살린다.
     try testing.expect(!backupExists(root, .{ .untitled = n }));
@@ -55425,6 +55439,7 @@ test "IGP7 다시 추정 — 설정 탭 폭이 바뀌면 지금 내용으로(최
         try testing.expectError(error.AskName, saveDocument(fx.session, t));
         try fx.session.rename_input.setText(allocator, "t.go");
         settings_ops.commitRename(fx.session);
+        try awaitSaveAsForTest();
         try testing.expectEqual(maru.session.editor.language.Grammar.go, t.rt.editor_grammar);
         try testing.expectEqual(@as(usize, 1), countHits(try guideHitsIn(fx.session, untitled_leaf, t, &buf), 2));
         try testing.expectEqual(@as(u64, 2), t.rt.editor_guides.guessed);
@@ -55445,6 +55460,7 @@ test "IGP7 다시 추정 — 설정 탭 폭이 바뀌면 지금 내용으로(최
         try testing.expectError(error.AskName, saveDocument(fx.session, t));
         try fx.session.rename_input.setText(allocator, "t.ts");
         settings_ops.commitRename(fx.session);
+        try awaitSaveAsForTest();
         try testing.expectEqual(maru.session.editor.language.Grammar.typescript, t.rt.editor_grammar);
         try testing.expectEqual(@as(usize, 2), countHits(try guideHitsIn(fx.session, untitled_leaf, t, &buf), 2));
         try testing.expectEqual(@as(u64, 1), t.rt.editor_guides.guessed);
@@ -59187,6 +59203,7 @@ test "U4d-7 복구 원본은 실패 때 보존하고 재백업 저장 버리기�
                 try testing.expect(backupExists(root, source));
                 try fx.session.rename_input.setText(allocator, "recovered.txt");
                 settings_ops.commitRename(fx.session);
+                try awaitSaveAsForTest();
                 try testing.expect(!isDirty(term));
                 const written = try dir.dir.readFileAlloc(std.testing.io, "recovered.txt", allocator, .limited(4096));
                 defer allocator.free(written);
@@ -60501,6 +60518,7 @@ test "editor backup discovery 빈 사본의 저장 취소와 실패는 보존하
     try testing.expectError(error.AskName, saveDocument(fx.session, term));
     try fx.session.rename_input.setText(allocator, "missing/recovered.txt");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
     try testing.expect(isDirty(term));
     try testing.expect(term.rt.editorDocument().path == null);
     try testing.expect(term.rt.editor_recovery.?.source != null);
@@ -60510,6 +60528,7 @@ test "editor backup discovery 빈 사본의 저장 취소와 실패는 보존하
     try testing.expectError(error.AskName, saveDocument(fx.session, term));
     try fx.session.rename_input.setText(allocator, "recovered.txt");
     settings_ops.commitRename(fx.session);
+    try awaitSaveAsForTest();
     const bytes = try dir.dir.readFileAlloc(testing.io, "recovered.txt", allocator, .limited(128));
     defer allocator.free(bytes);
     try testing.expectEqualStrings("", bytes);
@@ -68398,7 +68417,8 @@ fn saveAsSelectForTest(fx: *PaneFixture, term: *Term, path: []const u8) !u64 {
     actor.reply(fx.session, id, path);
     return id;
 }
-fn awaitSaveAsForTest() !void {
+pub fn awaitSaveAsForTest() !void {
+    if (!builtin.is_test) @compileError("test-only save settlement");
     const actor = @import("save/as.zig");
     const dispatch = @import("save/dispatch.zig");
     const end = std.Io.Clock.awake.now(testing.io).nanoseconds + 5 * std.time.ns_per_s;
@@ -68407,6 +68427,8 @@ fn awaitSaveAsForTest() !void {
         actor.poll();
         _ = usleep(2_000);
     }
+    // 완료 뒤 남은 닫기 의도도 다음 제품 tick에 해당하는 한 번의 poll로 진행한다.
+    actor.poll();
     try testing.expectEqual(@as(usize, 0), actor.pending());
     try testing.expectEqual(@as(usize, 0), dispatch.requestCount());
 }
@@ -68721,4 +68743,230 @@ test "SASCMD 8MiB 본문과 기존 목적지의 main actor 시간을 실측한�
         try testing.expectEqualStrings(path, t.rt.editorDocument().path.?);
         try testing.expect(!isDirty(t));
     }
+}
+
+// 첫 저장 actor는 실제 디스크와 차단 writer로 검증한다. 이름 입력 UI는 기존 U2가 별도로 검사한다.
+const FirstSaveFixture = struct {
+    fx: UntitledFixture,
+    dir: std.testing.TmpDir,
+    root: []u8,
+    path: []u8,
+    term: *Term,
+    fn init() !FirstSaveFixture {
+        var fx = try UntitledFixture.init(testing.allocator, false, true);
+        errdefer fx.deinit(testing.allocator);
+        var dir = testing.tmpDir(.{});
+        errdefer dir.cleanup();
+        var buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const root = try testing.allocator.dupe(u8, buffer[0..try dir.dir.realPath(testing.io, &buffer)]);
+        errdefer testing.allocator.free(root);
+        const path = try std.fs.path.join(testing.allocator, &.{ root, "first.txt" });
+        errdefer testing.allocator.free(path);
+        pinUntitledBase(fx.session, root);
+        const term = try openUntitledInActivePane(fx.session);
+        if (!insertText(fx.session, term, "foo")) return error.OutOfMemory;
+        return .{ .fx = fx, .dir = dir, .root = root, .path = path, .term = term };
+    }
+    fn deinit(self: *FirstSaveFixture) void {
+        self.fx.deinit(testing.allocator);
+        testing.allocator.free(self.path);
+        testing.allocator.free(self.root);
+        self.dir.cleanup();
+    }
+    fn begin(self: *FirstSaveFixture, gate: *@import("save/worker.zig").TestGate) !void {
+        const actor = @import("save/as.zig");
+        actor.setGateForTests(gate);
+        actor.firstSave(self.fx.session, self.term, self.path, false);
+        const end = std.Io.Clock.awake.now(testing.io).nanoseconds + 5 * std.time.ns_per_s;
+        while (!gate.entered.load(.acquire) and std.Io.Clock.awake.now(testing.io).nanoseconds < end) {
+            actor.poll();
+            _ = usleep(1_000);
+        }
+        try testing.expect(gate.entered.load(.acquire));
+    }
+    fn disk(self: *FirstSaveFixture, expected: []const u8) !void {
+        const data = try self.dir.dir.readFileAlloc(testing.io, "first.txt", testing.allocator, .limited(4096));
+        defer testing.allocator.free(data);
+        try testing.expectEqualStrings(expected, data);
+    }
+};
+
+test "U2ASYNC 첫 저장은 실제 완료 전 이름과 entry를 붙이지 않고 추가 입력과 Undo를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try FirstSaveFixture.init();
+    defer fx.deinit();
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer gate.set();
+    try fx.begin(&gate);
+    try testing.expectEqual(@as(usize, 1), fx.fx.session.editor_batch_reserved_entries);
+    try testing.expect(fx.term.rt.editorDocument().path == null);
+    try testing.expect(fx.term.rt.editorDocument().untitled != null);
+    try testing.expect(fx.term.file_entry == null);
+    try testing.expectError(error.FileNotFound, fx.dir.dir.access(testing.io, "first.txt", .{}));
+    try testing.expect(insertText(fx.fx.session, fx.term, "!"));
+    gate.set();
+    try awaitSaveAsForTest();
+    try testing.expectEqual(@as(usize, 0), fx.fx.session.editor_batch_reserved_entries);
+    try fx.disk("foo");
+    try testing.expectEqualStrings(fx.path, fx.term.rt.editorDocument().path.?);
+    try testing.expect(fx.term.file_entry != null);
+    try testing.expectEqualStrings(fx.path, fx.term.file_entry.?.path);
+    try testing.expect(isDirty(fx.term));
+    try testing.expectEqualStrings("foo!", fx.term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(undoEdit(fx.fx.session, fx.term));
+    try testing.expect(redoEdit(fx.fx.session, fx.term));
+    try testing.expectEqualStrings("foo!", fx.term.rt.editorDocument().opened.?.file.content);
+}
+
+test "U2ASYNC 배타 생성 실패는 외부 파일과 이름 없는 본문을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try FirstSaveFixture.init();
+    defer fx.deinit();
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer gate.set();
+    try fx.begin(&gate);
+    try testing.expectEqual(@as(usize, 1), fx.fx.session.editor_batch_reserved_entries);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "first.txt", .data = "external" });
+    gate.set();
+    try awaitSaveAsForTest();
+    try testing.expectEqual(@as(usize, 0), fx.fx.session.editor_batch_reserved_entries);
+    try fx.disk("external");
+    try testing.expect(fx.term.rt.editorDocument().path == null);
+    try testing.expect(fx.term.rt.editorDocument().untitled != null);
+    try testing.expect(fx.term.file_entry == null);
+    try testing.expectEqualStrings("foo", fx.term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(undoEdit(fx.fx.session, fx.term));
+    try testing.expect(redoEdit(fx.fx.session, fx.term));
+}
+
+test "U2ASYNC 대상 세대가 달라진 늦은 완료는 이름을 붙이지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try FirstSaveFixture.init();
+    defer fx.deinit();
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer gate.set();
+    try fx.begin(&gate);
+    fx.term.rt.editorDocument().invalidateSaveTarget();
+    gate.set();
+    try awaitSaveAsForTest();
+    try fx.disk("foo");
+    try testing.expect(fx.term.rt.editorDocument().path == null);
+    try testing.expect(fx.term.file_entry == null);
+    try testing.expect(isDirty(fx.term));
+}
+
+test "U2ASYNC 반복 저장은 첫 저장 뒤 새 경로에 추가 입력을 저장한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try FirstSaveFixture.init();
+    defer fx.deinit();
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer gate.set();
+    try fx.begin(&gate);
+    try testing.expect(insertText(fx.fx.session, fx.term, "!"));
+    @import("save_actions.zig").saveCommand(fx.fx.session, fx.term);
+    gate.set();
+    try awaitSaveAsForTest();
+    try fx.disk("foo!");
+    try testing.expect(!isDirty(fx.term));
+    try testing.expectEqualStrings(fx.path, fx.term.rt.editorDocument().path.?);
+}
+
+test "U2ASYNC 저장 중 닫기는 추가 입력을 버리지 않고 완료 뒤 다시 묻는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try FirstSaveFixture.init();
+    defer fx.deinit();
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer gate.set();
+    try fx.begin(&gate);
+    const before = pane_ops.activePane(fx.fx.session).terms.items.len;
+    try testing.expect(insertText(fx.fx.session, fx.term, "!"));
+    fx.fx.session.requestClose(.active_term);
+    try testing.expectEqual(before, pane_ops.activePane(fx.fx.session).terms.items.len);
+    gate.set();
+    try awaitSaveAsForTest();
+    try testing.expectEqual(before, pane_ops.activePane(fx.fx.session).terms.items.len);
+    try testing.expectEqualStrings("foo!", fx.term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(fx.fx.session.editor_save_close != null);
+    try testing.expect(fx.fx.session.pending_confirm == .editor_save_close);
+    try fx.disk("foo");
+}
+
+test "U2ASYNC 첫 저장의 모든 snapshot 경로 준비 할당 실패는 본문과 디스크를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try FirstSaveFixture.init();
+    defer fx.deinit();
+    const destination = @import("save/destination.zig");
+    for (0..4) |index| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
+        if (index < 3) {
+            const expected = if (index < 2) error.WriteFailed else error.OutOfMemory;
+            try testing.expectError(expected, destination.Prepared.init(failing.allocator(), fx.term, fx.path, .absent));
+        } else {
+            var prepared = try destination.Prepared.init(failing.allocator(), fx.term, fx.path, .absent);
+            defer prepared.deinit(failing.allocator());
+        }
+        try testing.expect(fx.term.rt.editorDocument().path == null);
+        try testing.expect(fx.term.file_entry == null);
+        try testing.expectEqualStrings("foo", fx.term.rt.editorDocument().opened.?.file.content);
+        try testing.expectError(error.FileNotFound, fx.dir.dir.access(testing.io, "first.txt", .{}));
+    }
+}
+
+test "U2ASYNC 첫 저장 중 같은 목적지의 새 요청은 이름 없는 두 번째 문서를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try FirstSaveFixture.init();
+    defer fx.deinit();
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer gate.set();
+    try fx.begin(&gate);
+    const other = try openUntitledInActivePane(fx.fx.session);
+    try testing.expect(insertText(fx.fx.session, other, "bar"));
+    @import("save/as.zig").firstSave(fx.fx.session, other, fx.path, false);
+    try testing.expect(other.rt.editorDocument().untitled != null);
+    try testing.expect(other.rt.editorDocument().path == null);
+    try testing.expectEqualStrings("bar", other.rt.editorDocument().opened.?.file.content);
+    gate.set();
+    try awaitSaveAsForTest();
+    try fx.disk("foo");
+    try testing.expect(other.rt.editorDocument().untitled != null);
+}
+
+test "U2ASYNC 마지막 도크 자리는 쓰기 중 다른 파일 열기에 소비되지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try FirstSaveFixture.init();
+    defer fx.deinit();
+    fx.fx.session.editor_batch_reserved_entries = maru.session.dock_panel.max_entries - 1;
+    defer fx.fx.session.editor_batch_reserved_entries = 0;
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer gate.set();
+    try fx.begin(&gate);
+    try testing.expectEqual(maru.session.dock_panel.max_entries, fx.fx.session.editor_batch_reserved_entries);
+    const other = try std.fs.path.join(testing.allocator, &.{ fx.root, "other.txt" });
+    defer testing.allocator.free(other);
+    try testing.expectError(error.TooManyEntries, pane_ops.openFileTermInActivePane(fx.fx.session, other, .text));
+    gate.set();
+    try awaitSaveAsForTest();
+    try fx.disk("foo");
+    try testing.expect(fx.term.file_entry != null);
+    try testing.expectEqual(maru.session.dock_panel.max_entries - 1, fx.fx.session.editor_batch_reserved_entries);
+}
+
+test "U2ASYNC 쓰기 중 워크스페이스를 옮겨도 새 창에 entry를 붙이고 원래 예약을 해제한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try FirstSaveFixture.init();
+    defer fx.deinit();
+    var dst = try UntitledFixture.init(testing.allocator, false, true);
+    defer dst.deinit(testing.allocator);
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer gate.set();
+    try fx.begin(&gate);
+    var out: [16]u64 = undefined;
+    _ = try AppSession.moveWorkspaceToSession(fx.fx.session, dst.session, 0, &out);
+    gate.set();
+    try awaitSaveAsForTest();
+    try fx.disk("foo");
+    try testing.expect(fx.term.file_entry != null);
+    try testing.expectEqualStrings(fx.path, fx.term.rt.editorDocument().path.?);
+    try testing.expectEqual(@as(usize, 0), fx.fx.session.editor_batch_reserved_entries);
+    try testing.expectEqual(@as(usize, 0), dst.session.editor_batch_reserved_entries);
 }

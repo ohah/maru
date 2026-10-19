@@ -19,8 +19,8 @@ cases = [
     ('ignore-parent-identity', 'local', 'if (wanted.device != @as(u64, @intCast(stat.dev)) or wanted.inode != @as(u64, @intCast(stat.ino))) return error.ExternalConflict;', 'if (wanted.device != @as(u64, @intCast(stat.dev)) or wanted.inode != @as(u64, @intCast(stat.ino))) {}'),
     ('bypass-held-admission', 'owner', 'const admitted = if (held) |hold|', 'const admitted = if (if (false) held else null) |hold|'),
     ('bypass-panel-reservation', 'panel', 'if (@import("editor/save/as.zig").reservedPath(self, path, null)) {', 'if (false and @import("editor/save/as.zig").reservedPath(self, path, null)) {'),
-    ('hardlink-as-ordinary-save', 'actor', 'const relation = aliasRelation(session, op.source_path, file, info) catch .unknown;', 'const relation = if (true) reservations.NamespaceRelation.same else aliasRelation(session, op.source_path, file, info) catch .unknown;'),
-    ('equivalent-epoch-parentheses', 'actor', 'state.save_target_epoch == op.source_epoch and', '(state.save_target_epoch == op.source_epoch) and'),
+    ('hardlink-as-ordinary-save', 'actor', 'const relation = aliasRelation(session, op.source_path.?, file, info) catch .unknown;', 'const relation = if (true) reservations.NamespaceRelation.same else aliasRelation(session, op.source_path.?, file, info) catch .unknown;'),
+    ('equivalent-source-parentheses', 'actor', 'return op.source.matches(', 'return (op.source).matches('),
     ('restored-control', None, None, None),
 ]
 

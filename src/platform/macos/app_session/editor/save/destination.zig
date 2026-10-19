@@ -9,8 +9,8 @@ pub const Destination = union(enum) { absent, existing: u64 };
 
 pub const Prepared = struct {
     allocator: std.mem.Allocator,
-    source: ops.Target,
-    source_path: []u8,
+    source: ops.BindingSource,
+    source_path: ?[]u8,
     binding: ?[]u8,
     work: ?local.Prepared,
     adopted: bool = false,
@@ -20,32 +20,35 @@ pub const Prepared = struct {
     pub fn init(a: std.mem.Allocator, term: *host.Term, path: []const u8, destination: Destination) !Prepared {
         if (term.kind != .editor or term.rt.editor_diff != null) return error.NotAnEditor;
         const state = term.rt.editorDocument();
-        if (state.remote != null or state.untitled != null) return error.NotAnEditor;
+        if (state.remote != null or (state.path == null) != (state.untitled != null)) return error.NotAnEditor;
         const opened = state.opened orelse return error.NotAnEditor;
         if (opened.file.read_only) return error.ReadOnly;
         if (state.save_target_epoch == std.math.maxInt(u64)) return error.WriteFailed;
         const lease = term.rt.editor_document_lease orelse return error.MissingIdentity;
-        const old_path = state.path orelse return error.NotAnEditor;
-        if (std.mem.eql(u8, old_path, path)) return error.SamePath;
-        var work = try local.Prepared.initWithAllocator(a, term, .cas);
+        const old_path = state.path;
+        if (old_path) |old| if (std.mem.eql(u8, old, path)) return error.SamePath;
+        var work = if (old_path != null) try local.Prepared.initWithAllocator(a, term, .cas) else try local.Prepared.initForPath(a, term, path, .cas);
         errdefer work.deinit(a);
-        const source_path = try a.dupe(u8, old_path);
-        errdefer a.free(source_path);
+        const source_path = if (old_path) |old| try a.dupe(u8, old) else null;
+        errdefer if (source_path) |old| a.free(old);
         const binding = try a.dupe(u8, path);
         errdefer a.free(binding);
-        const write_path = try a.dupe(u8, path);
-        a.free(work.path);
-        work.path = write_path;
+        if (old_path != null) {
+            const write_path = try a.dupe(u8, path);
+            a.free(work.path);
+            work.path = write_path;
+        }
         work.create_new = destination == .absent;
         work.expected_disk = switch (destination) {
             .absent => null,
             .existing => |hash| hash,
         };
-        return .{ .allocator = a, .source = .{ .epoch = state.save_target_epoch, .token = .{
+        return .{ .allocator = a, .source = .{
+            .epoch = state.save_target_epoch,
             .document = @intFromPtr(state),
             .identity = .{ .owner = @intFromPtr(lease.owner), .slot = lease.document.slot, .generation = lease.document.generation },
             .path = source_path,
-        } }, .source_path = source_path, .binding = binding, .work = work };
+        }, .source_path = source_path, .binding = binding, .work = work };
     }
 
     /// 모형 경로 전환만 수행한다. caller는 선행 저장 정산·대상 예약과 뷰/백업/LSP 갱신을 책임진다.
@@ -55,17 +58,19 @@ pub const Prepared = struct {
         const work = if (self.work) |*value| value else return false;
         if (self.adopted or !work.written or work.finished) return false;
         const state = lease.owner.get(lease) orelse return false;
-        const path = state.path orelse return false;
-        if (state.opened == null or state.remote != null or state.untitled != null) return false;
-        const live: ops.Target = .{ .epoch = state.save_target_epoch, .token = .{
+        const path = state.path;
+        if (state.opened == null or state.remote != null or (path == null) != (state.untitled != null)) return false;
+        const live: ops.BindingSource = .{
+            .epoch = state.save_target_epoch,
             .document = @intFromPtr(state),
             .identity = .{ .owner = @intFromPtr(lease.owner), .slot = lease.document.slot, .generation = lease.document.generation },
             .path = path,
-        } };
+        };
         if (!self.source.matches(live)) return false;
         // 성공 경계에서 할당하지 않는다. 옛 경로 메모리는 모델의 allocator로 놓는다.
-        a.free(path);
+        if (path) |old| a.free(old);
         state.path = self.binding.?;
+        state.untitled = null;
         self.binding = null;
         state.invalidateSaveTarget();
         ops.markSaved(&state.opened.?, work.content());
@@ -77,7 +82,7 @@ pub const Prepared = struct {
 
     pub fn deinit(self: *Prepared, a: std.mem.Allocator) void {
         if (self.work) |*work| work.deinit(a);
-        a.free(self.source_path);
+        if (self.source_path) |old| a.free(old);
         if (self.binding) |path| a.free(path);
         self.* = undefined;
     }

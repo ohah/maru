@@ -15,7 +15,7 @@ cases = [
     ('control', None, None, None),
     ('premature-adopt', 'destination', 'self.adopted or !work.written or work.finished', 'self.adopted or work.finished'),
     ('ignore-origin', 'destination', 'if (!self.source.matches(live)) return false;', 'if (!self.source.matches(live) and self.adopted) return false;'),
-    ('ignore-epoch', 'destination', 'const live: ops.Target = .{ .epoch = state.save_target_epoch', 'const live: ops.Target = .{ .epoch = self.source.epoch'),
+    ('ignore-epoch', 'destination', 'const live: ops.BindingSource = .{ .epoch = state.save_target_epoch', 'const live: ops.BindingSource = .{ .epoch = self.source.epoch'),
     ('ignore-destination-cas', 'local', 'if (expect_disk) |want| if (want != expected) return error.ExternalConflict;', '_ = expect_disk;'),
     ('ignore-exclusive-create', 'local', '.{ .exclusive = true }', '.{ .exclusive = false }'),
     ('mark-current-clean', 'destination', 'ops.markSaved(&state.opened.?, work.content());', 'ops.markSaved(&state.opened.?, state.opened.?.file.content);'),

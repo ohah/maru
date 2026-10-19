@@ -10,6 +10,10 @@
 - 배치 적용/재시도 저장: 구현. 전체 본문 commit 뒤 파일별로 큐에 등록하고 실제 완료를 결과에 반영한다. 웹 bridge·원격·Save As·rename coordination은 별도 단계다.
 - 저장 응답 지연 개선: 실제 AppKit의 배치 적용·메인 이벤트 지연을 측정한다. 등록 시간과 전체 쓰기 완료 시간은 구분한다. 기존 동기 API는 계속 완료까지 main에서 기다리며 모든 명령의 무중단을 보장하지 않는다.
 
+이름 없는 로컬 문서의 첫 저장은 일반 named 저장 큐의 대상이 아니라
+[첫 저장 비동기 전환](editor-untitled-save-async.md)의 Save As actor/worker 경계를 사용한다.
+위 제외 범위는 첫 저장이 계속 동기라는 뜻이 아니다. SSH 원격 첫 저장은 기존 경로를 유지한다.
+
 ## 기반의 책임
 
 `editor/save/worker.zig::Service`는 동시에 하나의 `Prepared`만 실행한다. 자료와 완료 슬롯을 먼저 확보하고 성공할 때만 소유권을 가져간다.

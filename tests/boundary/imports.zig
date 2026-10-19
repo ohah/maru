@@ -8071,7 +8071,11 @@ test "스크롤 목록 host 는 글자 뷰포트를 컴포넌트에서 받아 �
         try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "collectMeasuredTextFromCache(collected, dl, cache, builder, null,"));
     }
 
-    // 그리고 **그 다섯 말고는 없다.** 수집 함수 자신이 사는 파일만 정의를 들고 있다.
+    // The inspector dock also forwards its content viewport to measured composition.
+    const inspector = try readZigFileZ(allocator, "src/platform/macos/app_session/inspector.zig");
+    defer allocator.free(inspector);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(inspector, "self.collectMeasuredTextFromCache("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(inspector, ".{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h }"));
     const owner = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(owner);
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner, "pub fn collectMeasuredTextFromCache("));

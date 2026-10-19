@@ -34,7 +34,7 @@ pub const Request = union(enum) {
     /// `sessions list [--window <id>]`. `window`가 있으면 그 window로 좁힌다(§6 `{window?}`).
     pub const List = struct { window: ?u64 = null };
     /// `session get <id>`. `surface_id`는 조회 대상 surface_id(§3, generation 한정은 후속).
-    pub const Get = struct { surface_id: u64 };
+    pub const Get = struct { surface_id: u64, inspect: bool = false, anonymize: bool = false };
 };
 
 /// 파싱 결과: 실제 요청이거나 `--help` 요청. main이 help면 해당 help 텍스트를 출력한다.
@@ -101,12 +101,18 @@ fn parseListArgs(rest: []const []const u8) ParseError!Request.List {
 pub fn parseSession(args: []const []const u8) ParseError!Command {
     if (hasHelpFlag(args)) return .help;
     if (args.len == 0) return error.MissingSubcommand;
-    if (std.mem.eql(u8, args[0], "get")) {
+    const inspecting = std.mem.eql(u8, args[0], "inspect");
+    if (std.mem.eql(u8, args[0], "get") or inspecting) {
         const rest = args[1..];
         if (rest.len == 0) return error.MissingSurfaceId;
-        if (rest.len > 1) return error.UnexpectedArgument;
+        var anonymize = false;
+        var json_seen = false;
+        for (rest[1..]) |option| {
+            if (!inspecting) return error.UnexpectedArgument;
+            if (std.mem.eql(u8, option, "--json") and !json_seen) json_seen = true else if (std.mem.eql(u8, option, "--anonymize") and !anonymize) anonymize = true else return error.UnexpectedArgument;
+        }
         const id = parseU64(rest[0]) catch return error.InvalidSurfaceId;
-        return .{ .request = .{ .get = .{ .surface_id = id } } };
+        return .{ .request = .{ .get = .{ .surface_id = id, .inspect = inspecting, .anonymize = anonymize } } };
     }
     return error.UnknownSubcommand;
 }
@@ -153,6 +159,7 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) std.me
             var obj: std.json.ObjectMap = .empty;
             defer obj.deinit(gpa);
             try obj.put(gpa, "id", .{ .integer = @intCast(g.surface_id) });
+            if (g.inspect) try obj.put(gpa, "inspect", .{ .bool = true });
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "session.get", .params = .{ .object = obj } } });
         },
     }
@@ -349,6 +356,7 @@ pub const sessions_help =
 pub const session_help =
     \\usage:
     \\  maru session get <id>
+    \\  maru session inspect <id> [--json] [--anonymize]
     \\
     \\show read-only metadata for a single surface by id.
     \\
@@ -432,7 +440,7 @@ test "help 스냅샷: sessions/session help는 구현된 명령만 정확히 공
         sessions_help,
     );
     try testing.expectEqualStrings(
-        "usage:\n  maru session get <id>\n\nshow read-only metadata for a single surface by id.\n",
+        "usage:\n  maru session get <id>\n  maru session inspect <id> [--json] [--anonymize]\n\nshow read-only metadata for a single surface by id.\n",
         session_help,
     );
     // 구현된 명령을 담는다.
@@ -675,4 +683,59 @@ test "sessions selector rejects repeated window including zero and normalized nu
             try testing.expectError(error.DuplicateWindow, parseSessions(args.items));
         }
     }
+}
+
+/// Reads only the explicit inspection extension of session.get. Old applications
+/// remain compatible and report unsupported rather than masquerading as empty state.
+pub fn renderInspection(gpa: std.mem.Allocator, bytes: []const u8, writer: *std.Io.Writer) !bool {
+    var parsed = cp.parseMessage(gpa, bytes) catch {
+        try writer.writeAll("error: malformed inspector response\n");
+        return false;
+    };
+    defer parsed.deinit();
+    if (parsed.message != .response) return false;
+    const response = parsed.message.response;
+    if (response.err) |e| {
+        try writer.print("error: {s} ({d})\n", .{ e.message, e.code });
+        return false;
+    }
+    const value = response.result orelse return false;
+    if (value != .object) return false;
+    const inspection = value.object.get("inspector") orelse {
+        try writer.writeAll("error: live inspector unsupported by this application or target\n");
+        return false;
+    };
+    const output = try std.json.Stringify.valueAlloc(gpa, inspection, .{ .whitespace = .indent_2 });
+    defer gpa.free(output);
+    try writer.print("{s}\n", .{output});
+    return true;
+}
+
+/// Request-aware lazy collection: ordinary metadata queries incur no inspection
+/// allocation, history sampling, or control-socket lookup.
+pub fn inspectionTarget(gpa: std.mem.Allocator, bytes: []const u8) ?u64 {
+    var parsed = cp.parseMessage(gpa, bytes) catch return null;
+    defer parsed.deinit();
+    if (parsed.message != .request) return null;
+    const req = parsed.message.request;
+    if (!std.mem.eql(u8, req.method, "session.get")) return null;
+    const params = req.params orelse return null;
+    if (params != .object) return null;
+    const inspect = params.object.get("inspect") orelse return null;
+    if (inspect != .bool or !inspect.bool) return null;
+    const id = params.object.get("id") orelse return null;
+    if (id != .integer or id.integer < 0) return null;
+    return @intCast(id.integer);
+}
+
+test "inspection request is opt-in, one-target, and preserves session.get authorization route" {
+    const cmd = try parseSession(&.{ "inspect", "42", "--json" });
+    try testing.expect(cmd.request.get.inspect);
+    const bytes = try buildRequestBytes(testing.allocator, cmd.request, .{ .number = 1 });
+    defer testing.allocator.free(bytes);
+    try testing.expectEqual(@as(?u64, 42), inspectionTarget(testing.allocator, bytes));
+    const ordinary = try buildRequestBytes(testing.allocator, .{ .get = .{ .surface_id = 42 } }, .{ .number = 1 });
+    defer testing.allocator.free(ordinary);
+    try testing.expect(inspectionTarget(testing.allocator, ordinary) == null);
+    try testing.expectError(error.UnexpectedArgument, parseSession(&.{ "inspect", "42", "--send-input" }));
 }

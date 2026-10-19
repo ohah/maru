@@ -1742,6 +1742,11 @@ pub fn drainShellEventsForFrame(self: *AppSession) void {
     if (pane_ops.activePane(self).activeTerm().surface.remote != null) return; // host shell-event transport는 아직 없음; placeholder 진단 금지
     const core = &activeSurface(self).core;
     if (core.shellEvents().len == 0 and !core.shellEventsOverflowed()) return;
+    const inspected = pane_ops.activePane(self).activeTerm();
+    if (inspected.rt.inspector_history.previous != null) {
+        for (core.shellEvents()) |ev| inspected.rt.inspector_history.append(self.awakeMs(), .shell_protocol, @tagName(ev), inspected.rt.observation.revision);
+        if (core.shellEventsOverflowed()) inspected.rt.inspector_history.append(self.awakeMs(), .shell_protocol, "source_overflow", inspected.rt.observation.revision);
+    }
     if (diag_gate.maruDebugEnabled()) {
         for (core.shellEvents()) |ev| switch (ev) {
             .prompt_start => |r| shell_diag.info("shell.prompt-start row={d}", .{r}),

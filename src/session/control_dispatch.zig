@@ -92,6 +92,12 @@ fn routeReadOnly(
         return cs.serializeSessionsListFiltered(gpa, req.id, snapshot, caller_surface_id, scope, window_filter);
     }
     if (method.core == .session and std.mem.eql(u8, method.rest, "get")) {
+        // Inspection also describes the window's displayed tree/SCM state. A
+        // surface-only metadata grant must not reveal another pane's directory.
+        if (req.params) |params| if (params == .object) if (params.object.get("inspect")) |flag| {
+            if (flag != .bool) return errorResponse(gpa, req.id, .invalid_params);
+            if (flag.bool and scope != .all) return errorResponse(gpa, req.id, .unauthorized);
+        };
         const requested = readIdParam(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
         // §8.3 균일 unauthorized/process_exited 판정·직렬화는 1c가 단일 출처로 소유(재구현 금지).
         return cs.serializeSessionGet(gpa, req.id, snapshot, caller_surface_id, scope, requested);
@@ -988,4 +994,13 @@ test "WT4b lsp.trust.*: 셀렉터 없는 연결은 L4 로 넘기고(params 검�
     try expectImmediateCode(try lspDispatch(log, 10, null), .unauthorized);
     try expectImmediateCode(try lspDispatch("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"lsp.trust.log\",\"params\":{\"limit\":0}}", null, null), .invalid_params);
     try expectImmediateCode(try lspDispatch("{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"lsp.trust.log\",\"params\":{\"path\":\"/r\"}}", null, null), .invalid_params);
+}
+
+test "inspector window diagnostics require all scope before checking target existence" {
+    const present = try dispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.get\",\"params\":{\"id\":10,\"inspect\":true}}", 10, .self);
+    defer testing.allocator.free(present);
+    const absent = try dispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.get\",\"params\":{\"id\":999,\"inspect\":true}}", 10, .self);
+    defer testing.allocator.free(absent);
+    try testing.expectEqualStrings(present, absent);
+    try testing.expect(std.mem.indexOf(u8, present, "-32002") != null);
 }

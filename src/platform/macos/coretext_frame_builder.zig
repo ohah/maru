@@ -690,7 +690,7 @@ test "도크 뷰 바: 동작 glyph 는 오른쪽 끝 슬롯에 그려지고 좁�
 }
 
 test "도크 뷰 바: 등록한 뷰 슬롯이 모두 그려진다" {
-    var dl = try buildDockViewBarDrawList(std.testing.allocator, 24, 1, 0, .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } }, &.{}, dock_view_bar.Grid.fixedCols(8, dock_view_bar.default_slot_cols));
+    var dl = try buildDockViewBarDrawList(std.testing.allocator, @intCast(dock_view_bar.slot_count * dock_view_bar.default_slot_cols), 1, 0, .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } }, &.{}, dock_view_bar.Grid.fixedCols(8, dock_view_bar.default_slot_cols));
     defer dl.deinit(std.testing.allocator);
     var count: usize = 0;
     for (dl.cells) |c| {

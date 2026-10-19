@@ -153,6 +153,9 @@ const Entry = struct {
 };
 
 const inventory = [_]Entry{
+    // search_ko is Korean matching metadata, never a displayed title. It must remain
+    // searchable even while the UI is English; displayed inspector labels use t().
+    .{ .path = "src/platform/macos/command_catalog.zig", .count = 1 },
     // 모바일 그리기 경로. 이 화면은 런타임 언어 전환을 안 받으므로 `ko` 로 고정돼 있다
     // (`session_title` 의 doc 주석). 모바일이 OS 로케일을 받는 슬라이스가 이 수를 0 으로 만든다.
     // 원격 세션 목록(S10d-2)이 일곱을 더했다 — 목록의 세 상태(받는 중·없다·줄들)와 축이 꺼진

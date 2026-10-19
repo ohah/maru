@@ -220,3 +220,12 @@ z-order, hover A→B의 two-dirty, focus/pressed 전환이 관련 모든 rect를
 move/up capture, disabled·action 변경 후 stale up=0, snapshot swap·surface deactivation의 cancel,
 build 실패 뒤 기존 interaction 보존이다. 이들은 headless 계약 증거이고, 실제 Metal
 cursor/hover paint와 scripted macOS 입력은 ML3 Chrome Lab capture에서 별도로 증명한다.
+
+### 독립 인스펙터의 측정 텍스트
+
+Terminal Inspector는 `collectMeasuredTextFromCache`에 독립 content viewport를 넘긴다.
+픽셀 tree의 label clip·role line box를 보존하며 terminal 셀 격자로 반올림하지 않는다.
+GpuQuad/GpuGlyph의 scene tag 6이 배경과 글자를 구분한다. attached는 같은 물리 창,
+main-only는 tag 6 제외, inspector-only는 tag 6만 그린다. 분리 창은 같은 retained frame과
+renderer/atlas를 사용한다. 측정 글자 준비가 실패한 인스펙터는 synthetic cell로 다른 창에
+fall back하지 않는다. modal overlay 경로는 변경하지 않는다.

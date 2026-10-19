@@ -1019,6 +1019,8 @@ pub const quad_layer = struct {
     /// 터미널 글자가 판 위로 올라오고, `under`·`over` 는 이미지를 덮는다(마커 프리뷰가 「뒤 글자가
     /// 비친다」로 보이던 자리 — 2026-09-15 사용자 제보).
     pub const image_backdrop: u32 = 5;
+    /// Independent inspector scene; the host chooses attached/main-only/tool-only presentation.
+    pub const inspector: u32 = 6;
 };
 
 pub const GpuQuad = extern struct {
@@ -1099,7 +1101,7 @@ pub const GpuGlyph = extern struct {
     v1: f32,
     // 0x00RRGGBB 전경색. atlas coverage에 곱해 기존 glyph shader와 같은 결과를 만든다.
     foreground: u32,
-    // 0=terminal physical layer. raw tag로 C ABI를 안정적으로 둔다.
+    // 0=ordinary measured text, 6=independent Inspector scene; C ABI raw tags.
     layer: u32,
 };
 

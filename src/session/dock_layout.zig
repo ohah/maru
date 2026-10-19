@@ -293,6 +293,7 @@ pub fn headerDirtyRect(header: Rect, cell_width_px: u32, external_change: bool) 
 }
 
 pub const Input = struct {
+    available_override: ?Rect = null,
     backing_width_px: u32,
     backing_height_px: u32,
     sidebar_width_px: u32,
@@ -392,6 +393,7 @@ pub fn compute(in: Input) Geometry {
     var g = computeLayout(in);
     // 누르는 띠는 배치가 끝난 divider 에서 유도한다 — 띠 폭은 배율에서 나오고(10pt), 작업영역 밖으로는 안 나간다.
     g.divider_hit = outerDividerHitRect(g, in.side, dividerGrabBandPx(in.scale_milli));
+    if (in.available_override != null) g.sidebar = .{ .x = 0, .y = 0, .w = in.sidebar_width_px, .h = in.backing_height_px -| in.status_bar_px };
     return g;
 }
 
@@ -402,7 +404,7 @@ fn computeLayout(in: Input) Geometry {
     const status_bar_h = @min(in.status_bar_px, in.backing_height_px);
     const usable_h = in.backing_height_px -| status_bar_h;
     const status_bar = Rect{ .x = 0, .y = usable_h, .w = in.backing_width_px, .h = status_bar_h };
-    const available = Rect{
+    const available = in.available_override orelse Rect{
         .x = in.sidebar_width_px,
         .y = in.titlebar_height_px,
         .w = in.backing_width_px -| in.sidebar_width_px,
@@ -1179,4 +1181,15 @@ test "도크를 접어도 사이드바는 남는다" {
     // 도크가 없어도 띠는 그대로다 — 접기가 사이드바를 지우면 왼쪽이 통째로 사라진다.
     try std.testing.expectEqual(@as(u32, 180), g.sidebar.w);
     try std.testing.expectEqual(Region.sidebar, regionAt(g, 90, 300));
+}
+
+test "inspector available override preserves sidebar and status bar ownership" {
+    var input: Input = .{ .backing_width_px = 1200, .backing_height_px = 800, .sidebar_width_px = 200, .titlebar_height_px = 28, .status_bar_px = 24, .cell_width_px = 8, .cell_height_px = 16, .scale_milli = 1000, .divider_px = 1, .visible = true, .side = .right, .size_pt = 180 };
+    const ordinary = compute(input);
+    input.available_override = .{ .x = 560, .y = 28, .w = 640, .h = 748 };
+    const independent = compute(input);
+    try std.testing.expectEqual(ordinary.sidebar, independent.sidebar);
+    try std.testing.expectEqual(ordinary.status_bar, independent.status_bar);
+    try std.testing.expectEqual(input.available_override.?, independent.workspace);
+    try std.testing.expect(independent.terminal.x >= 560);
 }

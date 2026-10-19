@@ -10,6 +10,14 @@ tmux(`list-panes`/`send-keys`/`capture-pane`) 같은 도구가 푸는 문제를 
 > surface를 제어한다. 향후 `maru-sessiond`의 `runtime_id`, screen attach stream, process lifetime RPC는 별도
 > 별도 MRSH session-host transport(현재 major v2) 설계다. 기존 `session.*` method의 의미나 ID를 조용히 바꾸지 않는다.
 
+## Live Terminal Inspector 조회
+
+`session.get`의 `params.inspect:true`는 선택 대상 터미널의 `inspector` JSON을 추가한다.
+일반 get 응답은 그대로다. 창의 Explorer 진단을 포함하므로 metadata `all` scope만 허용하고,
+self/window scope는 대상 존재 확인 전에 거부한다. CLI는
+`maru session inspect <surface-id> --json [--anonymize]`다.
+스키마·수집 한계·GUI와의 관계는 [Terminal Inspector](terminal-inspector.md)를 따른다.
+
 ## 1. 확정 결정
 
 - **wire = 줄 단위(ndjson) JSON-RPC 2.0.** 메시지 1개 = 1줄. 요청/응답은 `id`로 매칭, 이벤트는 `id` 없는 notification. 직렬화는 JSON 단독(Zig `std.json` + JS `JSON.parse`, 의존성 0). 대형 페이로드는 §4.3 규약을 따른다.

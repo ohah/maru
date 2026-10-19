@@ -16353,9 +16353,27 @@ fn runSessionRequest(
     };
     const request_bytes = try maru.cli.sessions.buildRequestBytes(allocator, req, .{ .number = 1 });
     defer allocator.free(request_bytes);
-    const resp = try maru.cli.control_client.fetchResponse(io, allocator, request_bytes, stderr);
+    const resp = if (req == .get and req.get.inspect)
+        try maru.cli.control_client.fetchResponseAs(io, allocator, request_bytes, stderr, .none)
+    else
+        try maru.cli.control_client.fetchResponse(io, allocator, request_bytes, stderr);
     defer allocator.free(resp);
-    if (!try maru.cli.sessions.renderResponse(allocator, resp, kind, stdout)) return error.UnknownCommand;
+    if (req == .get and req.get.inspect) {
+        if (req.get.anonymize) {
+            var output: std.Io.Writer.Allocating = .init(allocator);
+            defer output.deinit();
+            if (!try maru.cli.sessions.renderInspection(allocator, resp, &output.writer)) {
+                try stderr.writeAll(output.written());
+                return error.UnknownCommand;
+            }
+            const redacted = try maru.session.inspector.anonymizeJson(allocator, output.written(), .{
+                .home = if (std.c.getenv("HOME")) |h| std.mem.span(h) else null,
+                .username = if (std.c.getenv("USER")) |u| std.mem.span(u) else null,
+            });
+            defer allocator.free(redacted);
+            try stdout.print("{s}\n", .{redacted});
+        } else if (!try maru.cli.sessions.renderInspection(allocator, resp, stdout)) return error.UnknownCommand;
+    } else if (!try maru.cli.sessions.renderResponse(allocator, resp, kind, stdout)) return error.UnknownCommand;
     try stdout.flush();
 }
 
@@ -16432,6 +16450,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru mcp
         \\  maru sessions list [--window <id>]
         \\  maru session get <id>
+        \\  maru session inspect <id> [--json] [--anonymize]
         \\  maru editor lsp trust list | revoke <path> [--volume <hex>] | forget <path> [--volume <hex>]
         \\  maru lsp ...  (compatibility alias for maru editor lsp)
         \\  maru host status [--json]

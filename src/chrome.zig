@@ -45,6 +45,7 @@ pub const ChromeProps = props.ChromeProps;
 pub const Tokens = tokens.Tokens;
 
 pub const components = struct {
+    pub const inspector = @import("chrome/components/inspector.zig");
     pub const project_search = @import("chrome/components/project_search.zig");
     pub const outline = @import("chrome/components/outline.zig");
     pub const overlay_input = @import("chrome/components/overlay_input.zig"); // find·palette 공유 기반(컴포넌트 아님)

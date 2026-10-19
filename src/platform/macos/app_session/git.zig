@@ -165,13 +165,12 @@ pub fn termMachineKey(term: *const Term) []const u8 {
 /// **호출 전에 관측이 새로여야 한다**(`refreshTermObservation`) — 이 함수는 관측을 갱신하지 않는다.
 /// 반환 슬라이스는 Term 소유라 다음 갱신까지만 유효하다.
 pub fn remoteCwd(self: *AppSession, term: *Term) []const u8 {
-    // 훅 cwd 는 **대표 슬롯**의 것이다(RA7 조각 3) — tmux 안 원격 Term 은 모든 이벤트가 pane 슬롯으로 가서 인라인 슬롯의
-    // cwd 가 영영 비어 있다. 실기(2 pane e2e)에서 폴더줄·원격 스냅샷이 통째로 사라진 것이 이 한 줄이었다.
+    return remoteCwdDecision(self, term).path;
+}
+
+pub fn remoteCwdDecision(self: *AppSession, term: *Term) maru.session.inspector.CwdDecision {
     const slot = agent_ops.primaryHookSlot(self, term);
-    if (slot.cwd.fresh(self.awakeMs()) and
-        slot.cwd.hostMatches(termMachineKey(term)))
-        return slot.cwd.text();
-    return term.rt.observation.cwd.items;
+    return maru.session.inspector.chooseRemoteCwd(slot.cwd.text(), slot.cwd.fresh(self.awakeMs()), slot.cwd.hostMatches(termMachineKey(term)), term.rt.observation.cwd.items);
 }
 
 /// 활성 Term 이 원격이면 그 **SCM 대상**(목적지 · control socket · 원격 cwd). 로컬이면 null.
@@ -200,21 +199,30 @@ pub const RemoteTarget = struct { dest: []const u8, ctl: []const u8, cwd: []cons
 
 /// `remoteScmTarget` 의 **Term 지정판**(AT3c). 턴 스냅샷은 활성 pane 이 아니라 **턴이 끝난 Term** 의 저장소를
 /// 찍어야 한다 — 뒤 pane 에서 턴이 끝날 때 활성 pane 의 목적지를 쓰면 남의 저장소가 그 턴의 스냅샷이 된다.
-pub fn remoteScmTargetFor(
+pub const RemoteScmDecision = struct {
+    target: ?RemoteTarget = null,
+    reason: enum { ready, unsupported_platform, not_terminal, observation_unavailable, ssh_destination_missing, ssh_destination_invalid, cwd_unavailable, cwd_not_absolute, local_home_unavailable, control_path_unavailable, control_socket_missing },
+};
+
+pub fn remoteScmTargetFor(self: *AppSession, term: *Term, dest_buf: []u8, ctl_buf: []u8, cwd_buf: []u8) ?RemoteTarget {
+    return remoteScmDecisionFor(self, term, dest_buf, ctl_buf, cwd_buf).target;
+}
+
+pub fn remoteScmDecisionFor(
     self: *AppSession,
     term: *Term,
     dest_buf: []u8,
     ctl_buf: []u8,
     cwd_buf: []u8,
-) ?RemoteTarget {
-    if (builtin.os.tag != .macos) return null;
-    if (term.kind != .terminal) return null;
+) RemoteScmDecision {
+    if (builtin.os.tag != .macos) return .{ .reason = .unsupported_platform };
+    if (term.kind != .terminal) return .{ .reason = .not_terminal };
     term_ops.refreshTermObservation(self, term, false, false);
-    if (term.rt.observation.availability == .unavailable) return null;
-    if (!term.rt.observation.ssh_remote_dest_present) return null;
+    if (term.rt.observation.availability == .unavailable) return .{ .reason = .observation_unavailable };
+    if (!term.rt.observation.ssh_remote_dest_present) return .{ .reason = .ssh_destination_missing };
 
     const dest = term.rt.observation.ssh_remote_dest.items;
-    if (dest.len == 0 or dest.len > dest_buf.len) return null;
+    if (dest.len == 0 or dest.len > dest_buf.len) return .{ .reason = .ssh_destination_invalid };
     // **원격 경로는 저쪽이 보고한 것만 쓴다.** 커널 조회는 로컬 ssh 클라이언트의 cwd 라 여기서 쓰면 안 된다
     // (§9.4 가 링크 감지에서 막은 그 함정).
     //
@@ -223,22 +231,22 @@ pub fn remoteScmTargetFor(
     // 아니다」로 떨어진다. 폴더줄은 훅 cwd 로 진짜 경로를 그리고 있는데 도크만 빈 안내를 내던 자리가
     // 이것이고, 그 어긋남 자체가 §3.5 가 한 축으로 모아 둔 것을 다시 가르는 일이다.
     const cwd = remoteCwd(self, term);
-    if (cwd.len == 0 or cwd.len > cwd_buf.len) return null;
-    if (!std.fs.path.isAbsolute(cwd)) return null;
+    if (cwd.len == 0 or cwd.len > cwd_buf.len) return .{ .reason = .cwd_unavailable };
+    if (!std.fs.path.isAbsolute(cwd)) return .{ .reason = .cwd_not_absolute };
 
-    const home_z = std.c.getenv("HOME") orelse return null;
+    const home_z = std.c.getenv("HOME") orelse return .{ .reason = .local_home_unavailable };
     const home = std.mem.span(home_z);
-    if (home.len == 0) return null;
-    const ctl = maru.cli.ssh.controlSocketPath(self.allocator, home, dest) catch return null;
+    if (home.len == 0) return .{ .reason = .local_home_unavailable };
+    const ctl = maru.cli.ssh.controlSocketPath(self.allocator, home, dest) catch return .{ .reason = .control_path_unavailable };
     defer self.allocator.free(ctl);
-    if (ctl.len > ctl_buf.len) return null;
+    if (ctl.len > ctl_buf.len) return .{ .reason = .control_path_unavailable };
     // 소켓이 **지금 있는가**. `maru ssh` 가 세션마다 만들고 끊기면 사라진다.
-    _ = std.Io.Dir.cwd().statFile(self.io, ctl, .{ .follow_symlinks = false }) catch return null;
+    _ = std.Io.Dir.cwd().statFile(self.io, ctl, .{ .follow_symlinks = false }) catch return .{ .reason = .control_socket_missing };
 
     @memcpy(dest_buf[0..dest.len], dest);
     @memcpy(ctl_buf[0..ctl.len], ctl);
     @memcpy(cwd_buf[0..cwd.len], cwd);
-    return .{ .dest = dest_buf[0..dest.len], .ctl = ctl_buf[0..ctl.len], .cwd = cwd_buf[0..cwd.len] };
+    return .{ .reason = .ready, .target = .{ .dest = dest_buf[0..dest.len], .ctl = ctl_buf[0..ctl.len], .cwd = cwd_buf[0..cwd.len] } };
 }
 
 pub fn refreshGitStatus(self: *AppSession) void {

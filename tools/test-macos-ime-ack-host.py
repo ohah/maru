@@ -362,8 +362,11 @@ import CoreGraphics
 import Darwin
 class NSEvent { var locationInWindow=CGPoint.zero; var buttonNumber=0 }
 class NSView { func convert(_ p: CGPoint, from: NSView?) -> CGPoint { p } }
-class MaruMetalTerminalView: NSView { var attempts=0; var admitted=false; func commitMarkedTextIfComposing() -> Bool { attempts+=1; return admitted } }
+class MaruMetalTerminalView: NSView { var inspectorOwner:Int?=nil; var attempts=0; var admitted=false; func commitMarkedTextIfComposing() -> Bool { attempts+=1; return admitted } }
 var dispatches=0
+var inspectorDispatches=0
+var inspectorDispatchedIn:[Int?]=[]
+func maru_macos_app_session_inspector_pointer(_ session:UnsafeMutableRawPointer,_ kind:UInt32,_ x:Double,_ y:Double)->UInt32 { inspectorDispatches+=1; inspectorDispatchedIn.append(currentSurface); return 1 }
 // W6g: 누름은 그 view 의 창 세션으로 간다 — 보낼 때의 세션이 그 view 의 것(표지 7)인지 본다.
 var currentSurface:Int?=nil
 var dispatchedIn:[Int?]=[]
@@ -396,7 +399,17 @@ for kind:Int32 in [2,3] {
  print("motion kind=\(kind) commitAttempts=\(v.attempts) dispatches=\(dispatches) surface=\(String(describing: dispatchedIn.last ?? nil))")
  if v.attempts != 0 || dispatches != 1 || dispatchedIn.last != 7 { failures+=1 }
 }
-print("failed_cases=\(failures)")
+// The new presentation branch remains subject to the same IME admission guard.
+for admitted in [false,true] { for kind:Int32 in [1,4,5,2,3] { for button in [0,1,2] {
+ let v=MaruMetalTerminalView();v.inspectorOwner=7;v.admitted=admitted
+ let c=Controller();let e=NSEvent();e.buttonNumber=button;dispatches=0;inspectorDispatches=0
+ c.handleMouse(e,kind:kind,in:v)
+ let down=[Int32(1),4,5].contains(kind)
+ let wanted=(admitted && kind==1 && button==0) ? 1:0
+ if dispatches != 0 || inspectorDispatches != wanted || v.attempts != (down ? 1:0) { failures+=1 }
+ if wanted==1 && inspectorDispatchedIn.last != 7 { failures+=1 }
+}}}
+print("inspector_mouse_cases=30 failed_cases=\(failures)")
 exit(failures==0 ? 0:1)
 '''
 

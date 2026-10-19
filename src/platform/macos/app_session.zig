@@ -112,6 +112,7 @@ const build_options = @import("build_options"); // build.zig가 주입한 .versi
 const update_repo = "ohah/maru"; // GitHub releases/latest를 조회할 repo(인앱 새 버전 안내)
 pub const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 gesture 정책(OS-중립 L2 — session/keyhint_hold.zig). platform은 alias로 참조.
 const command_palette = @import("command_palette.zig");
+pub const inspector_ops = @import("app_session/inspector.zig");
 const symbol_picker = @import("symbol_picker.zig");
 const reference_picker = @import("reference_picker.zig");
 const find_ops = @import("app_session/find.zig");
@@ -342,7 +343,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // `sidebar_header_height_px`·`titlebar_strip_px`·`sidebar_scroll_offset_px`)을 뺀다 — ABI 227 에서 draw 인자를 뺀 뒤에도
 // frame 필드로 남아 매 프레임 스탬프됐다. layout 이 바뀌므로(뒤 필드 offset 이동) 짝이 같이 올라간다.
 // 230: 비동기 편집기 저장의 main-actor 완료 pump와 정상 종료 대기 getter를 추가한다. 구조체 레이아웃은 불변이다.
-pub const abi_version: u32 = 230;
+pub const abi_version: u32 = 231;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -2292,6 +2293,7 @@ const TermRuntime = struct {
     // 화면 외 runtime 관측의 caller-owned cache. in-process core와 host-backed event를 같은 SSOT로 노출해 AppSession이
     // 원격 placeholder `surface.core`를 cwd/title/semantic/SSH/agent 출처로 오인하지 않게 한다.
     observation: app.RuntimeObservation = .{},
+    inspector_history: maru.session.inspector.History = .{},
     /// §7 **종료 placeholder**: manifest엔 있었지만 host runtime이 영구히 없어(`error.PersistentRuntimeGone`) 읽기
     /// 전용으로 복원한 Term. live PTY·pump·라우팅이 없고(`live_initialized=false`, `handle=0`) registry 슬롯은
     /// `LiveSurface.web` arm sentinel을 재사용하지만, `Term.kind`는 **`.terminal` 그대로**다 — 그래야 기존 렌더·라벨
@@ -2964,7 +2966,7 @@ const ModalInputRole = union(enum) {
 /// "존재하지만 엉뚱한 값을 적는 것"뿐이고, 그건 아래 실행 테스트가 실제 `inputFocus()`와 대조해 잡는다.
 fn modalInputRole(field: ChromeHostField) ModalInputRole {
     return switch (field) {
-        .interaction, .key_hints, .find_secondary, .diff_find_source => .not_an_overlay,
+        .inspector, .interaction, .key_hints, .find_secondary, .diff_find_source => .not_an_overlay,
         .confirm => .{ .routes_text = .confirm },
         .find => .{ .routes_text = .find },
         .palette => .{ .routes_text = .palette },
@@ -5889,11 +5891,16 @@ pub const AppSession = struct {
 
     /// 본문 분리: app_session/scroll.zig(F8). ABI가 직접 부르므로 진입만 남긴다.
     pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool, x_px: f64, y_px: f64) void {
+        if (inspector_ops.contains(self, x_px, y_px) and !self.anyModalOverlayOpen()) {
+            inspector_ops.scroll(self, delta_y);
+            return;
+        }
         return scroll_ops.scrollWheel(self, delta_y, delta_x, precise, x_px, y_px);
     }
 
     allocator: std.mem.Allocator,
     io: std.Io,
+    inspector: inspector_ops.State = .{},
     // 탭들. 각 Tab은 heap-pin(`*Tab`)이라 ArrayList가 realloc해도 본체(live_pty reader·surface)는
     // 안 움직인다. 현재는 init이 1개만 만들고, create/switch(후속)에서 늘어난다.
     tabs: std.ArrayList(*Tab) = .empty,
@@ -8611,6 +8618,7 @@ pub const AppSession = struct {
         // Chromium 탭 제스처를 끊는다(뗌을 잃고 새로 눌렀다 등) — 페이지가 잡은 마우스 capture 를 놓게 한다(C5 모달 에지).
         if (self.pointer_gesture_owner == .web_osr) web_ops.osrCaptureLost(self, self.pointer_gesture_owner.web_osr.surface_id);
         self.clearPointerGesture();
+        if (self.chrome_host.inspector.open) self.inspector.resizing = false;
         if (tab_drag_pane) |pane| term_ops.ensureActiveTermVisible(self, pane);
     }
 
@@ -8652,6 +8660,11 @@ pub const AppSession = struct {
         // config·메트릭 재계산·resize)이 한 번에 정합한다. 각 호출부에서 따로 빼면 하나만 빠뜨려도 spawn grid와
         // 실제 pane grid가 어긋난다(그 정합이 이 함수의 존재 이유다).
         p.bottom +|= status_bar_ops.statusBarHeightPx(self);
+        const independent = inspector_ops.geometry(self).remaining;
+        p.left +|= independent.x -| self.sidebar_width_px;
+        p.right +|= self.backing_width_px -| independent.x -| independent.w;
+        p.top +|= independent.y -| self.titlebar_strip_px;
+        p.bottom +|= (self.backing_height_px -| status_bar_ops.statusBarHeightPx(self)) -| independent.y -| independent.h;
         const g = dock_ops.dockGeometry(self);
         if (g.dock.w > 0) switch (self.dock.side) {
             .right => p.right +|= g.divider.w + g.dock.w,
@@ -11740,6 +11753,7 @@ pub const AppSession = struct {
             // 커맨드 팝업 토글(Cmd+Shift+P). 열려 있으면 닫고, 아니면 연다(상태머신은 PaletteState).
             .toggle_command_palette => self.togglePalette(),
             .toggle_settings => settings_ops.toggleSettings(self),
+            .toggle_inspector => inspector_ops.toggle(self),
             .show_downloads => self.show_downloads_pending = true, // W10a: 다운로드 목록 창 — Swift 가 띄운다
             .install_cli => self.installCli(), // maru CLI를 PATH에 symlink(결과 notice)
             // Find 토글(⌘F). 열려 있으면 닫고, 아니면 연다(상태머신은 FindState). **여는 UI는 하나이고, 질의가
@@ -13990,6 +14004,10 @@ pub const AppSession = struct {
     }
 
     pub fn handleKeyEvent(self: *AppSession, event: terminal.KeyEvent) !FrameSummary {
+        if (self.inputFocus() == .inspector) {
+            inspector_ops.key(self, event);
+            return input_ops.keyConsumedByApp(self);
+        }
         // 탭 전환과 다음 tick 사이에도 입력은 들어온다. 지난 비교 상자가 새 입력을 잡지 않게 한다.
         find_ops.syncDiffFind(self);
         // Swift/AppKit는 normalized key event만 전달한다. app-vs-terminal 판정과 PTY
@@ -14837,7 +14855,7 @@ pub const AppSession = struct {
         if (settings_ops.fileContentMenuHoldsWebFocus(self)) return false;
         return self.anyModalOverlayOpen() or self.addr_edit != null or self.rename != null or
             self.sidebar_search_active or self.agentSessionSearchOwnsInput() or
-            agent_activity_ops.searchOwnsInput(self) or project_search_ops.ownsInput(self) or self.scmCommitOwnsInput() or
+            agent_activity_ops.searchOwnsInput(self) or inspector_ops.ownsInput(self) or project_search_ops.ownsInput(self) or self.scmCommitOwnsInput() or
             file_panel_ops.fileTreeFocused(self) or dock_ops.pendingDockEntryOwnsInput(self);
     }
 
@@ -15217,6 +15235,14 @@ pub const AppSession = struct {
     pub fn mouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
         if (sidebar_ops.activateRecoveredRowBeforeInitialSurface(self, kind, x_px, y_px, button)) return;
         if (!self.surface_initialized) return;
+        if (kind == 1 and !self.anyModalOverlayOpen() and inspector_ops.visible(self) and !inspector_ops.contains(self, x_px, y_px)) inspector_ops.blur(self);
+        if (!self.anyModalOverlayOpen() and (self.pointerGestureIs(.none) and !self.mouse_drag_selecting)) {
+            if (inspector_ops.resizePointer(self, kind, x_px, y_px)) return;
+            if (inspector_ops.contains(self, x_px, y_px)) {
+                if (kind == 1 and button == 0) inspector_ops.click(self, x_px, y_px);
+                return;
+            }
+        }
         // 피커 행을 눌러 이동한 겹클릭의 나머지 누름은 그 클릭의 것이다(`swallow_multi_click`).
         if (kind == 1) self.swallow_multi_click = false else if ((kind == 4 or kind == 5) and self.swallow_multi_click) return;
         find_ops.syncDiffFind(self);
@@ -15480,6 +15506,9 @@ pub const AppSession = struct {
         // 각각 따로 봐야 한다. 선택 drag는 처음 가드가 놓쳐 도크 위에서 놓으면 up이 도크에 먹히고
         // `drag_autoscroll`이 latch된 채 터미널이 무한 스크롤했다.
         // capture 없는 pointer만 rect로 분류한다(docs/chrome-interaction-migration.md §2).
+        // A drag that started in the terminal retains its owner across the dock boundary.
+        if (inspector_ops.contains(self, x_px, y_px) and (kind == 2 or kind == 3) and
+            self.pointerGestureIs(.none) and !pane_ops.dividerCaptureActive(self) and !self.mouse_drag_selecting) return;
         if (dock_ops.dockVisible(self) and self.dock.view == .outline and button == 0 and (kind == 2 or kind == 3) and
             self.pointerGestureIs(.none) and !pane_ops.dividerCaptureActive(self) and !self.mouse_drag_selecting)
         {
@@ -16575,7 +16604,7 @@ pub const AppSession = struct {
     /// notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, agent_activity_search, find, palette, symbol_picker, reference_picker, recovery_picker, trust_picker, addr_edit, scm_commit, project_search };
+    pub const InputFocus = enum { inspector, terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, agent_activity_search, find, palette, symbol_picker, reference_picker, recovery_picker, trust_picker, addr_edit, scm_commit, project_search };
     pub fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
@@ -16604,6 +16633,7 @@ pub const AppSession = struct {
         // 커밋 메시지 상자(P3c). 모달·rename·검색·주소창보다 **뒤**다 — 그것들이 열리면 도크는 뒤에
         // 남고, 상자에 키가 계속 가면 사용자는 자기가 무엇을 타이핑하는지 알 수 없다. 반대로 파일
         // 트리·터미널보다는 **앞**이다: 상자는 사용자가 방금 누른 자리이고, 그 둘은 배경이다.
+        if (inspector_ops.ownsInput(self)) return .inspector;
         if (project_search_ops.ownsInput(self)) return .project_search;
         if (self.scmCommitOwnsInput()) return .scm_commit;
         if (file_panel_ops.fileTreeFocused(self)) return .file_tree;
@@ -16647,6 +16677,7 @@ pub const AppSession = struct {
         if (web_ops.osrCommitComposition(self)) return true;
         switch (self.inputFocus()) {
             .confirm, .notice, .file_tree, .dock_pending => {}, // 구조 input owner는 확정할 조합이 없다.
+            .inspector => inspector_ops.commitPreedit(self),
             .settings => if (self.chrome_host.settings.commitSearchPreedit()) {
                 settings_ops.refreshSettingsFieldCount(self); // 확정 글자로 검색 필터 재적용(setFieldCount가 selected clamp)
                 self.metal_dirty = true;
@@ -16909,6 +16940,10 @@ pub const AppSession = struct {
     /// URL은 false로 raw 전송한다(이스케이프하면 ?,&,= 등이 깨진다). 무엇을 이스케이프할지는 pasteboard
     /// 타입에 묶여 host(Swift)가 정하고, 이스케이프 '메커니즘'은 여기(Zig)가 단일 출처로 한다.
     pub fn pasteText(self: *AppSession, bytes: []const u8, escape_each: bool) void {
+        if (self.inputFocus() == .inspector) {
+            inspector_ops.paste(self, bytes);
+            return;
+        }
         if (!self.surface_initialized) return;
         // 슬라이스 4: 주소창 편집 중이면 클립보드 텍스트를 **필드 caret에 삽입**(선택 있으면 대체)한다 — PTY로 안 보낸다.
         // 현재 ⌘V가 Swift에서 이 경로(pastePasteboardText→sendPasteText→paste_text)로 오는데, web Term은 PTY가 없어
@@ -18783,6 +18818,13 @@ pub const AppSession = struct {
         // 전제한다(`scrollbarGrabAt` 의 `activeSurface`, `navButtonHoverAt` 의 `activeTab`) — 2026-10-19 크래시 3 건.
         // 0 탭이면 tick 도 그리지 않으므로 hover 할 것이 없다.
         if (self.tabs.items.len == 0) return .default;
+        if (!self.anyModalOverlayOpen() and inspector_ops.dividerContains(self, x_px, y_px)) {
+            return if (self.inspector.presentation.placement == .left or self.inspector.presentation.placement == .right) .resize_h else .resize_v;
+        }
+        if (inspector_ops.contains(self, x_px, y_px) and !self.anyModalOverlayOpen()) {
+            self.clearAllHover();
+            return inspector_ops.hover(self, x_px, y_px);
+        }
         if (!dock_ops.dockVisible(self) or self.dock.view != .outline or !layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).tree_content)) outline_ops.clearHover(self);
         // 호버 박스의 포인터 추적(tooling §8.2b) — 정지 시간은 tick 이 잰다. 열려 있으면 sticky 판정(낱말·상자 밖이면 닫힘).
         editor_ops.hover_client.notePointer(self, x_px, y_px);
@@ -19261,6 +19303,11 @@ pub const AppSession = struct {
 
     /// 선택 텍스트를 추출해 내부 버퍼로 돌려준다(없으면 빈 슬라이스). Swift가 NSPasteboard에 쓴다.
     pub fn copyText(self: *AppSession) []const u8 {
+        if (inspector_ops.visible(self) and self.inspector.copy_requested) {
+            self.inspector.copy_requested = false;
+            return inspector_ops.copyJson(self);
+        }
+        if (self.inputFocus() == .inspector) return inspector_ops.copyJson(self);
         if (!self.surface_initialized) return &.{};
         if (self.copy_buffer.len > 0) {
             self.allocator.free(self.copy_buffer);
@@ -19516,6 +19563,18 @@ pub const AppSession = struct {
         surfaces: *std.ArrayList(control_surface.SurfaceDto),
         windows: *std.ArrayList(maru.session.WindowMembershipSnapshot),
     ) std.mem.Allocator.Error!void {
+        return self.collectSessionIntoWithInspection(arena, window_id, window_kind, surfaces, windows, null);
+    }
+
+    pub fn collectSessionIntoWithInspection(
+        self: *AppSession,
+        arena: std.mem.Allocator,
+        window_id: u64,
+        window_kind: maru.session.WindowKind,
+        surfaces: *std.ArrayList(control_surface.SurfaceDto),
+        windows: *std.ArrayList(maru.session.WindowMembershipSnapshot),
+        inspect_target: ?u64,
+    ) std.mem.Allocator.Error!void {
         // focused는 **key 창의 활성 surface 하나**만 true(§3 공통 메타). window_focused=false(비-key 창)면 이 세션의
         // 어떤 surface도 focused 아님 — A2가 여러 창을 하나의 CollectorSnapshot으로 합치면 오직 key 창의 활성
         // surface 하나만 focused=true가 된다(전역 정합). activeSurface()==활성 tab·pane·term의 surface(app_window).
@@ -19694,6 +19753,7 @@ pub const AppSession = struct {
                         .runtime_id = runtime_hex,
                         .detail = .{
                             .terminal = .{
+                                .inspector = if (inspect_target != null and inspect_target.? == sid) try inspector_ops.capture(self, term, arena, window_id) else null,
                                 .cwd = cwd_copy, // 없으면 null(§3 필드 생략)
                                 .cwd_host = cwd_host_copy, // 원격일 때만(§9.4)
                                 .git_branch = branch_copy,
@@ -21442,6 +21502,7 @@ pub const AppSession = struct {
     }
 
     pub fn tick(self: *AppSession) !FrameSummary {
+        inspector_ops.poll(self);
         advanceHostnameFrame(); // 이 프레임의 hostname 은 한 번만 조회한다(`localHostname` 의 근거)
         // macOS 제품 실행은 실제 CoreText shaper/rasterizer로 frame을 만든다(fake backend
         // 아님). 그래야 summary의 glyph/atlas 통계가 실제 rasterized glyph를 반영하고, 이후
@@ -22737,6 +22798,7 @@ pub const AppSession = struct {
                 // 배치+분배한다 — cross-pane 정합(한 atlas 세대). 활성은 active_result로 받아 아래에서 pane_frames 맨 뒤(커서
                 // suffix·floating 맨 위 직전)에 넣는다.
                 if (ft_on) ft_shape = std.Io.Clock.awake.now(self.io).nanoseconds; // shape(CoreText 수집) 끝 = place 시작
+                inspector_ops.collect(self, &collected, pane_frame_builder, tabbar_colors);
                 self.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frames, &floating_pf, &sticky_pf, &active_result);
                 if (ft_on) ft_place = std.Io.Clock.awake.now(self.io).nanoseconds; // place(atlas 배치+분배) 끝 = assemble 시작
             }
@@ -23836,6 +23898,7 @@ pub const AppSession = struct {
         sidebar_search: PanePlacement,
         overlay: PanePlacement,
         pane: PanePlacement,
+        inspector: PanePlacement,
         // 도크 접기/펴기 토글(우상단) — 위치는 .pane처럼 자유(origin_x/y)지만 아이콘 1.7× 확대(raster slot 키움)는 .sidebar_header와 공유한다. collectShaped 게이트가 이 태그도 확대 대상으로 본다.
         dock_toggle: PanePlacement,
         // 상태표시줄 항목(아이콘+텍스트) — 항목마다 자기 frame이고 px origin에 놓인다
@@ -23974,7 +24037,7 @@ pub const AppSession = struct {
         // 출처가 둘이 되고, 목적지가 둘인 소비처가 한쪽만 적는 날이 온다.
         var stamped = dest;
         switch (stamped) {
-            .sidebar_search, .overlay, .pane, .dock_toggle, .status_bar, .floating, .sticky => |*placement| placement.clip_rect = text_viewport,
+            .sidebar_search, .overlay, .inspector, .pane, .dock_toggle, .status_bar, .floating, .sticky => |*placement| placement.clip_rect = text_viewport,
             .sidebar, .sidebar_header, .active => {},
         }
         const pane = builder.shapeFromRecords(self.allocator, dl, cache.records) catch return;
@@ -24082,7 +24145,7 @@ pub const AppSession = struct {
             var rich_glyph_start: ?usize = null;
             if (c.measured_text) |*artifact| {
                 const placement: ?PanePlacement = switch (c.dest) {
-                    .pane, .dock_toggle, .status_bar, .sidebar_search => |p| p,
+                    .inspector, .pane, .dock_toggle, .status_bar, .sidebar_search => |p| p,
                     else => null,
                 };
                 if (placement) |p| {
@@ -24103,6 +24166,9 @@ pub const AppSession = struct {
                         &rich_glyphs,
                     )) |_| {
                         if (rich_glyphs.items.len > 0) {
+                            if (c.dest == .inspector) for (rich_glyphs.items) |*glyph| {
+                                glyph.layer = metal_frame.quad_layer.inspector;
+                            };
                             if (self.gpu_glyphs.appendSlice(self.allocator, rich_glyphs.items)) |_| {
                                 // The measured pane owns no terminal cells, yet its shaped runs
                                 // still pass through MetalFrame's cell projection. Suppress only
@@ -24124,6 +24190,12 @@ pub const AppSession = struct {
                 }
                 c.measured_text = null;
             }
+            // Inspector synthetic cells must never fall back into the inspected scene.
+            if (c.dest == .inspector and !rich_text_only) {
+                var discarded = rf;
+                discarded.deinit(self.allocator);
+                continue;
+            }
             switch (c.dest) {
                 .sidebar => sidebar_frame.* = rf,
                 .sidebar_header => sidebar_header_frame.* = rf,
@@ -24134,7 +24206,7 @@ pub const AppSession = struct {
                     lost.deinit(self.allocator);
                     self.glyph_placement.taint(); // 이 조각의 업로드는 버려진다
                 },
-                .pane, .dock_toggle, .status_bar, .sidebar_search => |p| {
+                .inspector, .pane, .dock_toggle, .status_bar, .sidebar_search => |p| {
                     if (built_frames.append(self.allocator, rf)) |_| {
                         pane_frames.append(self.allocator, .{
                             .frame = rf,
@@ -24875,6 +24947,7 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
+        self.inspector.deinit(self.allocator);
         @import("app_session/editor/save/as.zig").windowClosing(self);
         @import("app_session/editor/save/close.zig").cancel(self);
         if (builtin.is_test and live_app_sessions == 1) @import("app_session/editor/save/dispatch.zig").cleanupForTests();
@@ -88188,6 +88261,7 @@ fn expectedTerminalResponder(focus: AppSession.InputFocus) bool {
         .terminal => false,
         // 지나가는 토스트는 텍스트/IME를 받지 않으므로 웹 포커스를 뺏지 않는다(14차 리뷰 [3]).
         .notice => false,
+        .inspector,
         .confirm,
         .settings,
         .rename,
@@ -88214,6 +88288,10 @@ fn expectedTerminalResponder(focus: AppSession.InputFocus) bool {
 fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
     switch (focus) {
         .terminal => {},
+        .inspector => {
+            inspector_ops.toggle(session);
+            session.inspector.input_focused = true;
+        },
         .confirm => session.chrome_host.confirm.open = true,
         .notice => session.chrome_host.notice.open = true,
         .settings => session.chrome_host.settings.open = true,
@@ -101154,4 +101232,96 @@ test "W9c② 적대 리뷰 5 회차 재현 C: 뒤 탭이 스스로 닫힌 표시
     try std.testing.expectEqual(y, session.osr_key_target);
     web_osr.testApplyNow(allocator, .{ .js_dialog = .{ .browser = y, .request = 1, .kind = .confirm, .origin = "https://app.test", .message = "Reload?" } });
     try std.testing.expectError(error.NotYours, web_osr.agentReplyDialog(allocator, y, null, true, "", W9c2R5Access.access));
+}
+
+test "Live inspector: shared GUI and CLI snapshot, pause, closed target and input isolation" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1200, 800, 1000);
+    const term = pane_ops.activePane(session).activeTerm();
+    try term.surface.core.write("\x1b]7;file:///tmp\x07");
+    session.dispatchAppAction(.toggle_inspector);
+    try std.testing.expect(inspector_ops.visible(session));
+    try std.testing.expect(!session.anyOverlayOpen() and !session.anyModalOverlayOpen());
+    try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
+    try std.testing.expectEqual(term.surfaceId(), session.inspector.target.?);
+    const gui_json = session.inspector.json orelse return error.InspectorSnapshotMissing;
+    var gui = try std.json.parseFromSlice(std.json.Value, a, gui_json, .{});
+    defer gui.deinit();
+    try std.testing.expectEqualStrings("maru.inspector.v1", gui.value.object.get("schema").?.string);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var surfaces: std.ArrayList(control_surface.SurfaceDto) = .empty;
+    var windows: std.ArrayList(maru.session.WindowMembershipSnapshot) = .empty;
+    try session.collectSessionIntoWithInspection(arena.allocator(), 1, .normal, &surfaces, &windows, term.surfaceId());
+    const snap = control_surface.CollectorSnapshot{ .surfaces = surfaces.items, .windows = windows.items };
+    const wire = try control_surface.serializeSessionGet(a, .{ .number = 1 }, snap, term.surfaceId(), .self, term.surfaceId());
+    defer a.free(wire);
+    var out: std.Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try std.testing.expect(try maru.cli.sessions.renderInspection(a, wire, &out.writer));
+    var cli = try std.json.parseFromSlice(std.json.Value, a, out.written(), .{});
+    defer cli.deinit();
+    try std.testing.expectEqualStrings(gui.value.object.get("path").?.object.get("selected_cwd").?.string, cli.value.object.get("path").?.object.get("selected_cwd").?.string);
+    try std.testing.expectEqual(gui.value.object.get("terminal").?.object.get("cols").?.integer, cli.value.object.get("terminal").?.object.get("cols").?.integer);
+    var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
+    const tk = session.buildChromeTokens();
+    try inspector_ops.collectInspectorDraws(session, session.buildChromeProps(), &tk, arena.allocator(), &draws);
+    try std.testing.expectEqual(@as(usize, 1), draws.items.len);
+    try std.testing.expectEqual(chrome.draw.Layer.sidebar, draws.items[0].layer);
+    const terminal_before = session.total_key_events;
+    _ = try session.handleKeyEvent(.{ .key = .arrow_left });
+    try std.testing.expectEqual(terminal_before + 1, session.total_key_events);
+    try std.testing.expectEqual(@as(usize, 0), session.inspector.query_len);
+    const filter = inspector_ops.caretRect(session) orelse return error.InspectorFilterMissing;
+    session.mouse(1, @floatFromInt(filter.x + 2), @floatFromInt(filter.y + 2), 0, 0);
+    try std.testing.expectEqual(AppSession.InputFocus.inspector, session.inputFocus());
+    const before = session.total_key_events;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'x' } });
+    try std.testing.expectEqual(before, session.total_key_events); // key never reaches the terminal routing path
+    try std.testing.expectEqual(@as(usize, 1), session.inspector.query_len);
+    session.inspector.paused = true;
+    const frozen = session.inspector.json.?;
+    inspector_ops.poll(session);
+    try std.testing.expectEqual(@intFromPtr(frozen.ptr), @intFromPtr(session.inspector.json.?.ptr));
+    inspector_ops.setPlacement(session, .left);
+    inspector_ops.poll(session);
+    try std.testing.expectEqual(@intFromPtr(frozen.ptr), @intFromPtr(session.inspector.json.?.ptr));
+    inspector_ops.setPlacement(session, .window);
+    inspector_ops.poll(session);
+    try std.testing.expectEqual(@intFromPtr(frozen.ptr), @intFromPtr(session.inspector.json.?.ptr));
+    session.inspector.window_focused = true;
+    session.inspector.input_focused = false;
+    try std.testing.expectEqual(AppSession.InputFocus.inspector, session.inputFocus());
+    const guarded_keys = session.total_key_events;
+    _ = try session.handleKeyEvent(.{ .key = .escape });
+    try std.testing.expectEqual(guarded_keys, session.total_key_events);
+    try std.testing.expectEqual(AppSession.InputFocus.inspector, session.inputFocus());
+    inspector_ops.releaseWindowFocus(session);
+    session.inspector.input_focused = true;
+    session.inspector.target = std.math.maxInt(u64);
+    session.inspector.pinned = true;
+    session.inspector.refresh = true;
+    inspector_ops.poll(session);
+    try std.testing.expect(session.inspector.status.len > 0);
+    try std.testing.expectEqual(@intFromPtr(frozen.ptr), @intFromPtr(session.inspector.json.?.ptr));
+    _ = try session.handleKeyEvent(.{ .key = .escape }); // clear filter
+    _ = try session.handleKeyEvent(.{ .key = .escape }); // return focus to terminal
+    try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
+    try std.testing.expect(inspector_ops.visible(session));
+    inspector_ops.setPlacement(session, .bottom);
+    try std.testing.expectEqual(inspector_ops.layout.Placement.bottom, session.inspector.presentation.placement);
+    try std.testing.expect(inspector_ops.visible(session));
+    session.dispatchAppAction(.toggle_inspector);
+    try std.testing.expect(!inspector_ops.visible(session));
 }

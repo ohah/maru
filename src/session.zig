@@ -5,6 +5,8 @@
 //! props로 읽고 platform(L4)이 구현/투영한다. 이 레이어엔 OS 타입(Metal·CoreText·AppKit·PTY)이 새지 않는다
 //! — tests/boundary/imports.zig가 강제.
 
+pub const inspector = @import("session/inspector/snapshot.zig");
+
 pub const ssh = struct {
     /// SSH 바이너리 패킷(RFC 4253 §6) — **sans-io**(계약 docs/ssh-client.md §2: 소켓을 모른다).
     pub const packet = @import("session/ssh/packet.zig");

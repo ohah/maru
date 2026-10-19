@@ -25,6 +25,7 @@
 - [SurfaceRuntime API 계약](docs/surface-runtime-api.md)
 - [Fixture와 Oracle 포맷](docs/fixture-format.md)
 - [Snapshot Versioning](docs/snapshot-versioning.md)
+- [Live Terminal Inspector](docs/terminal-inspector.md) — [구현 계획](docs/plans/terminal-inspector.md)
 - [Trace와 Replay](docs/trace-replay.md)
 - [PTY 운영 모델](docs/pty-operating-model.md)
 - [I/O–렌더 스레딩 분리 전략](docs/io-render-threading.md) — [present cadence](docs/io-render-present.md) · [Phase 2~4 계획](docs/plans/io-render-threading.md)

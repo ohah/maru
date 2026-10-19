@@ -24,6 +24,7 @@ const system_text = @import("system_text.zig");
 /// `2`를 쓰고 있었는데 **두 호출처가 갈린 것을 아무것도 강제하지 않았다**(2026-08-13).
 /// 한 컴포넌트를 여러 곳에서 내린다면 그 층을 이 이름들로 부르고, 이름이 없으면 새로 만든다.
 pub const layers = struct {
+    pub const inspector: u32 = metal_frame.quad_layer.inspector;
     /// 사이드바 밴드 — 셀 패스 뒤(part1 뒤·part2 앞).
     pub const under: u32 = 0;
     /// 모달 등 최상위 — 셀 위.

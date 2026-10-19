@@ -1757,3 +1757,12 @@ U4b/U4c/U4d 제품 회귀·백업 reader·복구 저장소와 U4b-19 실패 주�
 판정 보호 결함 주입은 `python3 tools/test-editor-untitled-measurement-adversarial.py`로 검사한다.
 집계 도구의 `--optimize Debug|ReleaseFast`는 실제 앱의 빌드 모드와 대조한다. 중복 크기와
 바이너리·주입 소스·하네스가 섞인 표본군은 거절한다.
+
+
+### 이름 없는 로컬 문서의 비동기 첫 저장 회귀
+
+`mise exec -- zig build test-editor-first-save-async test-editor-untitled -j2`는
+worker를 차단한 채 저장 중 입력·닫기·외부 생성·예약·workspace 이동을 재현한다.
+`python3 tools/test-editor-first-save-async-adversarial.py`는 격리 사본에 완료 신원·
+saved 기준·entry 게시·반복 저장·닫기 대상·배타 생성 결함을 주입해 판정자를 대조한다.
+정상 사본과 중복 보호 하나만 바꾼 대조군도 실행한다. 제품 checkout은 변경하지 않는다.

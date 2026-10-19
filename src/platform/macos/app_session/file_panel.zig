@@ -3603,7 +3603,7 @@ pub fn mergeFilePanelStateInto(src: *AppSession, dst: *AppSession) !void {
     while (count_it.next()) |src_entry| {
         if (fileEntryForPath(dst, src_entry.path) == null) unique += 1;
     }
-    if (fileEntryCount(dst) + unique > dock_panel.max_entries) return error.UnsupportedMove;
+    if (!maru.session.editor.save_ops.canAddEntries(fileEntryCount(dst), dst.editor_batch_reserved_entries, unique, dock_panel.max_entries)) return error.UnsupportedMove;
 
     // 2) 중복 경로 admission — **닫을 쪽을 여기서 정하고, 정할 수 없으면 모델을 건드리기 전에 거부한다.**
     //    ⓐ 거부 조건은 **양쪽 다 잃을 상태**(`filePanelEntryBlocksClose`)일 때다. 넓은 술어를 쓰면

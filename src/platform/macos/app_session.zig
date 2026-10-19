@@ -5939,7 +5939,7 @@ pub const AppSession = struct {
     editor_project_search_failure_stamp: u64 = 0,
     editor_project_search_failure_request: u64 = 0,
     editor_project_search_prepared: ?@import("app_session/editor/search/owner.zig").Prepared = null,
-    // 비활성 배치가 새 파일 entry를 게시하기 전까지 소유하는 창별 임시 예약이다.
+    // 배치와 이름 없는 문서의 첫 저장이 entry를 게시하기 전까지 소유하는 창별 임시 예약이다.
     editor_batch_reserved_entries: usize = 0,
     editor_documents: *maru.session.editor.document_registry.Registry = &app_runtime.editor_documents,
     // maru의 launch cwd가 `/`였는지(.app 더블클릭·launchd·open 증상). init에서 getcwd로 한 번만 판정해 캐시한다 —
@@ -72243,6 +72243,7 @@ test "U2A 저장 뒤 컨트롤 플레인·사이드바가 같은 사실을 말�
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
+    defer @import("app_session/editor/save/as.zig").cleanupForTests();
     session.loaded_config.config.workspace.root = root;
 
     const saved = app_runtime.untitled_docs;
@@ -72254,6 +72255,7 @@ test "U2A 저장 뒤 컨트롤 플레인·사이드바가 같은 사실을 말�
     try std.testing.expectError(error.AskName, editor_ops.saveDocument(session, t));
     try session.rename_input.setText(allocator, "outward.txt");
     settings_ops.commitRename(session);
+    try editor_ops.awaitSaveAsForTest();
     try std.testing.expect(t.rt.editorDocument().path != null);
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);

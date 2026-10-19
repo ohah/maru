@@ -87,6 +87,7 @@ pub const Pending = struct {
 /// 이름 없는 문서의 `⌘S` — 이름을 묻는다(§3.11). 물을 수 없으면 **그 이유를 말하고** 거짓을 준다.
 pub fn begin(self: *AppSession, term: *Term) bool {
     if (term.rt.editorDocument().untitled == null) return false;
+    if (@import("save/as.zig").deferCommand(self, term)) return true;
     // ⚠️ **저쪽 왕복이 도는 동안에는 다시 시작하지 않는다**(U3 적대적 6회차). 이 함수는 보류를
     // **세우는** 자리라, 첫 요청이 결말을 기다리는 사이에 들어오면 그 경로를 지운다 — 그러면 결말이
     // 왔을 때 **빈 경로**를 그 문서의 신원으로 붙인다.
@@ -465,105 +466,17 @@ pub fn confirmOverwrite(self: *AppSession) void {
     writeAndAdopt(self, term, p.path(), true);
 }
 
-/// 쓰고, 성공하면 **보통 문서로 옮겨 간다**(§3.11). 실패하면 **이름도 안 붙인다** — 「이름은 정해졌는데
-/// 내용은 없는」 중간 상태를 만들지 않는다.
+/// 첫 저장 의도를 비동기 actor에 넘긴다. 실제 완료 전에는 이름이나 도크 entry를 공개하지 않는다.
 fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: bool) void {
-    const doc = term.rt.editorDocument().opened orelse return;
-    const bytes = doc.file.saveBytes(self.allocator) catch {
-        self.showNoticeKey(.app_save_failed);
-        return;
-    };
-    defer self.allocator.free(bytes);
-
-    // ⚠️ **저장 상한은 덮어쓰기 경로가 정한 것과 같아야 한다.** 덮어쓰기는 CAS 를 위해 원본을 읽고
-    // `maru.session.file_panel_bridge.max_file_bytes` 를 넘으면 거절한다 — 그런데 **새 파일 경로에는
-    // 상한이 없어서**, 큰 문서를 한 번 만들면 그 뒤 모든 `⌘S` 가 **조용히 실패**했다(다음 저장은
-    // 덮어쓰기 경로이고 원본이 이미 상한을 넘는다). 만들 수 있는데 다시 저장할 수 없는 문서를 만들지
-    // 않는다 — 적대적 13회차에서 잡았다.
-    if (bytes.len > maru.session.file_panel_bridge.max_file_bytes) {
-        self.showNoticeKey(.app_save_too_large);
-        return;
-    }
-    const saved_content = doc.file.content;
-
-    // **새 파일과 덮어쓰기는 다른 함수다.** 새 파일은 원본이 없어 CAS 를 걸 수 없고 대신 **배타 생성**
-    // 으로 「그 사이에 생긴 파일」을 커널이 막는다. 덮어쓰기는 원본이 있으니 기존 CAS 경로를 그대로
-    // 탄다 — 그쪽 방어(부모 핀·RENAME_SWAP·inode 검증)를 다시 짜지 않는다.
-    if (overwriting)
-        // 덮어쓰기는 **사용자가 그 자리에서 고른 것**이라 「연 뒤 바뀌었나」를 다시 묻지 않는다
-        // (`null`) — 방금 「있다」를 보고 「덮어쓴다」고 답했다. 쓰는 동안의 보호는 그대로 돈다.
-        editor_ops.writeDocumentBytes(self, abs, bytes, null) catch |e| {
-            // **이유별로 말한다**(§3.9d) — 여기서 뭉개면 C0 이 올린 것을 다시 지우는 셈이다.
-            self.showNoticeKey(editor_ops.saveFailureNoticeKey(e));
-            return;
-        }
-    else
-        editor_ops.createDocumentBytes(self, abs, bytes) catch |e| {
-            self.showNoticeKey(editor_ops.saveFailureNoticeKey(e));
-            return;
-        };
-
-    // **여기부터 실패해도 파일은 이미 있다** — 그래서 실패할 수 있는 일(경로 복사·entry 생성)을
-    // 쓰기 **앞에** 둘 수 없다: 그것이 성공하고 쓰기가 실패하면 「경로는 붙었는데 파일이 없는」
-    // 중간 상태가 된다. 순서를 뒤집는 대가는 아래 OOM 갈래가 **파일은 남기고 표식만 못 옮기는** 것이고,
-    // 그때는 그 사실을 말한다(다시 `⌘S` 하면 같은 이름으로 이어진다).
-    // ⚠️ **경로를 두 벌 소유한다.** `editor_document.path` 는 `releaseEditorTerm` 이 놓고 `entry.path` 는 세션이
-    // 놓는다 — 하나를 둘이 가리키면 **이중 해제**다(파일을 여는 길도 그래서 각자 dupe 한다).
-    // ⚠️ **여기부터의 실패는 「저장하지 못했다」가 아니다 — 파일은 이미 있다.** 같은 문구를 쓰면
-    // 사용자는 아무 일도 없었다고 읽고, 디스크에는 자기 내용이 담긴 파일이 남는다(적대적 17회차).
-    // 무엇이 됐고 무엇이 안 됐는지, 그리고 **다음에 무엇을 하면 되는지**를 말한다.
-    const owned = self.allocator.dupe(u8, abs) catch {
-        self.showNoticeKey(.editor_untitled_written_not_adopted);
-        return;
-    };
-    const entry_path = self.allocator.dupe(u8, abs) catch {
-        self.allocator.free(owned);
-        self.showNoticeKey(.editor_untitled_written_not_adopted);
-        return;
-    };
-    _ = attachEntry(self, term, entry_path) catch {
-        self.allocator.free(entry_path);
-        self.allocator.free(owned);
-        self.showNoticeKey(.editor_untitled_written_not_adopted);
-        return;
-    };
-
-    const prev_backup = app_session_mod.editor_backup_ops.identity(term); // 이름이 붙기 «전»의 신원
-    term.rt.editorDocument().invalidateSaveTarget();
-    term.rt.editorDocument().path = owned;
-    term.rt.editorDocument().untitled = null; // **배타다**(§3.11) — 안 지우면 영원히 「저장 안 한 문서」다
-    app_session_mod.editor_backup_ops.markClean(self, term, saved_content, prev_backup);
-    // ⚠️ **디스크 지문도 여기서 처음 선다**(§3.9d). 이름 없는 문서는 볼 디스크가 없어 `null` 이었고,
-    // 이름이 붙는 이 순간이 그 값을 얻는 유일한 자리다 — 안 세우면 **그 문서는 영영 외부 변경을 못
-    // 본다**(저장할 때 비교할 과거가 없다). 적대적 3회차에서 잡았다: U2 로 만든 문서만 C0·C1 의
-    // 보호 밖에 남는다.
-    term.rt.editorDocument().opened.?.disk_hash = editor_ops.contentHash(bytes);
-
-    // **문법을 다시 판정한다**(§3.11 — 경로가 생겼다). 옛 상태는 grammar 가 없어 비어 있지만
-    // 그래도 같은 자리에서 놓는다(두 벌이 되면 한쪽이 새는 길이 생긴다).
-    term.rt.editor_syntax.deinit(self.allocator);
-    const prev_grammar = term.rt.editor_grammar;
-    term.rt.editor_grammar = maru.session.editor.language.grammarForPath(owned);
-    // 들여쓰기 안내선의 간격 추정 — 언어별 기본이 달라졌으면 다시 한다(§5.1c, VS Code `_onDidChangeLanguage`).
-    editor_ops.guides_client.onGrammarChanged(term, prev_grammar);
-    term.rt.editor_syntax = editor_ops.syntax_color.open(
-        term.rt.editorDocument().opened.?.file.content,
-        term.rt.editor_grammar,
-    );
-    self.metal_dirty = true;
-    // **`.persisted_surface` 다 — `.naming` 이 아니다.** 이름이 바뀐 것이 아니라 **영속되는 surface 가
-    // 하나 생겼다**(이제 workspace 저장 시퀀스에 든다). 선례는 파일 Term 생성(`openFilePanelPath` 의
-    // `if (opened.created)`)이고, 축이 틀리면 checkpoint 를 소비하는 쪽이 어떤 변화였는지 잘못 읽는다.
-    self.workspaceChanged(.persisted_surface);
+    @import("save/as.zig").firstSave(self, term, abs, overwriting);
 }
 
-/// 도크 entry 를 만들어 붙인다 — **안 붙이면 workspace 저장 시퀀스 밖**이고(그 조건이 「편집기인데
-/// 도크 entry 가 없다」다) 도크 목록에도 안 보인다. 즉 「보통 문서가 된다」가 거짓이 된다.
-fn attachEntry(self: *AppSession, term: *Term, owned_path: []const u8) !*dock_panel.Entry {
+/// 쓰기 전 entry를 준비하되 아직 Term에 붙이지 않는다. 실패는 caller가 경로를, 성공은 entry가 경로를 소유한다.
+pub fn prepareEntry(self: *AppSession, term: *Term, owned_path: []const u8) !*dock_panel.Entry {
     var count: usize = 0;
     var it = file_panel_ops.fileEntries(self);
     while (it.next()) |_| count += 1;
-    if (count >= dock_panel.max_entries) return error.TooManyEntries;
+    if (!maru.session.editor.save_ops.canAddEntries(count, self.editor_batch_reserved_entries, 1, dock_panel.max_entries)) return error.TooManyEntries;
 
     const entry = try self.allocator.create(dock_panel.Entry);
     errdefer self.allocator.destroy(entry);
@@ -575,7 +488,6 @@ fn attachEntry(self: *AppSession, term: *Term, owned_path: []const u8) !*dock_pa
         .native_editor = true, // 네이티브 편집기가 든 문서다(CM6 브리지 게이트를 타지 않는다)
         .surface_id = term.surface.id,
     };
-    term.file_entry = entry;
     return entry;
 }
 

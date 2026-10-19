@@ -2402,9 +2402,9 @@ pub fn build(b: *std.Build) void {
     //       C1a-1~C1a-11 열하나 + C1b-1~C1b-5 다섯 + U3-1~U3-8 여덟)에
     //       **U4a-1~U4a-13 열셋 + U4b-1~U4b-9 아홉 + U4c-1~U4c-5·U4c-8 여섯 + U4d-3~U4d-6 넷**을 더한 값이다(U4a 백업 · U4b 복원 · U4c 이름 없는 문서, §3.10).
     // U4b-19가 복원 준비 실패 행렬을 제품 판정자 하나로 추가한다.
-    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=143");
+    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=152");
     // ⚠️ **그리고 실제로 돌았는가** — 전부 macOS 가 아니면 `SkipZigTest` 다.
-    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=143");
+    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=152");
     run_macos_editor_untitled_tests.setCwd(b.path("."));
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_macos_editor_untitled_tests.step.dependOn(&ripgrep_prepare.step);
     const untitled_step = b.step(
@@ -2412,6 +2412,17 @@ pub fn build(b: *std.Build) void {
         "Run the untitled-document judges only (U1 filter) and the L2 naming rules (UT)",
     );
     untitled_step.dependOn(&run_macos_editor_untitled_tests.step);
+
+    const first_save_async_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{ "U2ASYNC", "IGP7", "editor backup discovery 빈 사본의 저장 취소" },
+    });
+    const run_first_save_async_tests = b.addRunArtifact(first_save_async_tests);
+    run_first_save_async_tests.addArg("--maru-expect-tests=16");
+    run_first_save_async_tests.addArg("--maru-expect-passed=16");
+    run_first_save_async_tests.setCwd(b.path("."));
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_first_save_async_tests.step.dependOn(&ripgrep_prepare.step);
+    b.step("test-editor-first-save-async", "Run blocked-writer untitled first-save lifecycle tests").dependOn(&run_first_save_async_tests.step);
 
     // **L2 규칙도 같은 이름으로 돈다.** 위 판정자는 배선을 재고 이쪽은 번호·이름 규칙을 잰다 —
     // 둘이 다른 스텝이면 한쪽만 돌려 놓고 「쟀다」고 말하게 된다. 모듈이 달라 artifact 는 둘이다
@@ -2424,15 +2435,16 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
         }),
-        .filters = &.{ "UT1", "UT2", "UT3", "UT4", "UB", "U4c-", "U4d-" }, // UB = 백업 레코드 규칙(§3.10), U4c- = workspace 영속
+        .filters = &.{ "UT1", "UT2", "UT3", "UT4", "UB", "U4c-", "U4d-", "FSBIND" }, // UB = 백업 레코드 규칙(§3.10), U4c- = workspace 영속
     });
     attachPngCodec(b, untitled_rule_tests.root_module); // maru 루트를 세우는 자리는 전부 이걸 부른다
     untitled_rule_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_untitled_rule_tests = b.addRunArtifact(untitled_rule_tests);
-    // 37 = UT1~UT4 넷 + **UB1~UB10 열**(백업 레코드 규칙 — §3.10) + **U4c-6·U4c-7 둘**(`untitled-term` 왕복·검증) + **U4d-1·U4d-2 둘**(`remote-doc-term`) + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다).
-    run_untitled_rule_tests.addArg("--maru-expect-tests=41");
+    // FSBIND와 추가로 참조된 test 블록을 포함해 45개다.
+    // 기존 규칙: UT1~UT4 넷 + **UB1~UB10 열**(백업 레코드 규칙 — §3.10) + **U4c-6·U4c-7 둘**(`untitled-term` 왕복·검증) + **U4d-1·U4d-2 둘**(`remote-doc-term`) + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다).
+    run_untitled_rule_tests.addArg("--maru-expect-tests=45");
     // ⚠️ **필터가 0 개를 골랐어도 「돌았다」로 읽히지 않게** 통과 수까지 못박는다(순수라 SKIP 이 없다).
-    run_untitled_rule_tests.addArg("--maru-expect-passed=41");
+    run_untitled_rule_tests.addArg("--maru-expect-passed=45");
     run_untitled_rule_tests.setCwd(b.path("."));
     untitled_step.dependOn(&run_untitled_rule_tests.step);
 

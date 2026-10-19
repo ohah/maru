@@ -29,6 +29,7 @@ export fn maru_untitled_benchmark_probe() callconv(.c) i32 {
     const self = editor_project_search_session orelse return -1;
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.surface.id != untitled_benchmark_surface) return -1;
+    if (@import("editor/save/as.zig").pending() != 0) return 0;
     const doc = term.rt.editorDocument();
     if (doc.untitled != null or doc.path == null or term.file_entry == null or editor_ops.isDirty(term) or self.rename != null) return -1;
     const entry = term.file_entry.?;

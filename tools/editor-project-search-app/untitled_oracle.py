@@ -2,7 +2,7 @@
 import re
 
 
-METRICS = ('call_ns', 'next_event_ns', 'serialize_ns', 'io_ns')
+METRICS = ('call_ns', 'next_event_ns', 'serialize_ns', 'io_ns', 'settled_ns')
 
 
 def validate_metrics(metrics, size, delay):
@@ -10,13 +10,13 @@ def validate_metrics(metrics, size, delay):
         raise ValueError('Untitled sample does not match the requested size/delay')
     if any(type(metrics.get(key)) is not int or metrics[key] < 0 for key in METRICS):
         raise ValueError('Untitled times must be nonnegative integer nanoseconds')
-    if not (metrics['next_event_ns'] >= metrics['call_ns'] >=
-            metrics['serialize_ns'] + metrics['io_ns'] + delay * 1_000_000):
+    if not (metrics['settled_ns'] >= metrics['next_event_ns'] >= metrics['call_ns'] and
+            metrics['settled_ns'] >= metrics['serialize_ns'] + metrics['io_ns'] + delay * 1_000_000):
         raise ValueError('Untitled measurement violates phase/delay ordering')
     return metrics
 
 
-def parse_metrics(transcript, size, delay):
+def parse_metrics(transcript, size, delay, require_settled=False):
     def one(prefix, pattern):
         # 모호한 첫 결과를 고르지 않는다. 같은 표본의 중복/손상 로그도 실패다.
         lines = [line for line in transcript.splitlines() if line.startswith(prefix)]
@@ -26,8 +26,15 @@ def parse_metrics(transcript, size, delay):
     call, event = one('UNTITLED_SAVE_METRIC', r'UNTITLED_SAVE_METRIC call_ns=(\d+) next_event_ns=(\d+) passed=true')
     serialize, = one('UNTITLED_SERIALIZE', r'UNTITLED_SERIALIZE ns=(\d+)')
     io, = one('UNTITLED_IO', r'UNTITLED_IO ns=(\d+)')
-    return validate_metrics(dict(bytes=size, injected_delay_ms=delay, call_ns=call,
-                                 next_event_ns=event, serialize_ns=serialize, io_ns=io), size, delay)
+    has_settled = require_settled or 'UNTITLED_SETTLED' in transcript
+    settled = one('UNTITLED_SETTLED', r'UNTITLED_SETTLED ns=(\d+)')[0] if has_settled else call
+    metrics = dict(bytes=size, injected_delay_ms=delay, call_ns=call,
+                                 next_event_ns=event, serialize_ns=serialize, io_ns=io, settled_ns=settled)
+    if not has_settled:
+        # 과거 동기 표본은 호출 반환 시 완료됐다. 원래 하한을 유지한 뒤 관측 시각을 next로 둔다.
+        validate_metrics(dict(metrics, next_event_ns=call), size, delay)
+        metrics['settled_ns'] = event
+    return validate_metrics(metrics, size, delay)
 
 
 def validate_report(report, size, delay, previous=None):

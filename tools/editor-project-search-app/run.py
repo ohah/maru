@@ -126,7 +126,7 @@ def main():
              "src/platform/macos/app_session/editor/search/backend.zig", "src/session/editor/search/query.zig",
              "src/platform/macos/app_session/editor/search/report.zig", "src/platform/macos/app_session/editor/search/owner.zig", "src/platform/macos/app_session/tab.zig", "src/i18n.zig", "src/icons.zig", "src/renderer/icon_coverage_data.zig", "src/platform/macos/icon_codepoints.h", "src/platform/macos/app_session/editor/search/batch.zig", "src/platform/macos/app_session/editor/search/batch/ui.zig", "src/platform/macos/app_session/editor/search/batch/worker.zig", "src/platform/macos/app_session/editor/search/batch/mixed_worker.zig", "src/platform/macos/app_session/editor/search/batch/collect.zig", "src/platform/macos/app_session/editor/search/batch/coordinator.zig", "src/platform/macos/app_session/editor/search/batch/load.zig", "src/platform/macos/app_session/editor/local_save.zig", "src/platform/macos/app_session/editor/save/dispatch.zig", "src/platform/macos/app_session/editor/save/owner.zig", "src/session/editor/ops/save_receipt.zig", "src/session/editor/search/batch.zig", "src/editor_save_notice.zig")
     if args.untitled_save_benchmark:
-        names += ("src/platform/macos/app_session/editor/untitled_save.zig",)
+        names += ("src/platform/macos/app_session/editor/untitled_save.zig", "src/platform/macos/app_session/editor/save/as.zig", "src/platform/macos/app_session/editor/save/destination.zig", "src/platform/macos/app_session/editor/save/worker.zig", "src/session/editor/ops/save_ops.zig")
     if args.save_as_command:
         names += ("src/platform/macos/app_session/editor/save/as.zig", "src/platform/macos/app_session/editor/save/queue.zig", "src/platform/macos/app_session/editor/save/destination.zig", "src/platform/macos/app_session/editor/lsp.zig", "src/config/action.zig", "src/config/keybinding.zig", "src/platform/macos/app_host_abi.h", "src/platform/macos/app_host_abi.zig", "tools/editor-project-search-app/save-as.swift.inc", "tools/editor-project-search-app/save-as.zig.inc")
     if args.native_close_save:
@@ -142,7 +142,7 @@ def main():
         if args.save_as_physical_ime and "SAVE_AS_IME marked=true" not in (source / "src/platform/macos/MaruAppHost.swift").read_text():
             parser.error("This app lacks the Korean Save As driver; build a new verification app")
         if args.untitled_save_benchmark:
-            if "maru_untitled_benchmark_probe" not in (source / "src/platform/macos/MaruAppHost.swift").read_text() or "UNTITLED_SERIALIZE" not in (source / "src/platform/macos/app_session/editor/untitled_save.zig").read_text():
+            if "maru_untitled_benchmark_probe" not in (source / "src/platform/macos/MaruAppHost.swift").read_text() or "UNTITLED_SERIALIZE" not in ((source / "src/platform/macos/app_session/editor/untitled_save.zig").read_text() + (source / "src/platform/macos/app_session/editor/local_save.zig").read_text()):
                 parser.error("This app lacks the untitled benchmark driver and delay hook")
         hashes = {name: sha(source / name) for name in names}
         command = None
@@ -183,10 +183,11 @@ def main():
             driver = replace_once(driver, "            if !matrix { finish(true); return }", "            if ProcessInfo.processInfo.environment[\"MARU_UNTITLED_BENCHMARK\"] == \"1\" { EditorProjectSearchRun.stage = 82; return }\n            if !matrix { finish(true); return }")
             driver += "\n" + (source / "tools/editor-project-search-app/untitled-save.swift.inc").read_text()
             untitled = source / "src/platform/macos/app_session/editor/untitled_save.zig"
-            untitled.write_text(replace_once(untitled.read_text(), "fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: bool) void {", "fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: bool) void {\n    const benchmark_started = std.Io.Clock.awake.now(self.io).nanoseconds;"))
-            untitled.write_text(replace_once(untitled.read_text(), "    const saved_content = doc.file.content;", "    const saved_content = doc.file.content;\n    std.debug.print(\"UNTITLED_SERIALIZE ns={d}\\n\", .{std.Io.Clock.awake.now(self.io).nanoseconds - benchmark_started});\n    const benchmark_delay = std.fmt.parseInt(u32, std.mem.span(std.c.getenv(\"MARU_UNTITLED_DELAY_MS\") orelse \"0\"), 10) catch 0;\n    if (benchmark_delay > 0) std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(benchmark_delay), .awake) catch {};"))
-            untitled.write_text(replace_once(untitled.read_text(), "    // **새 파일과 덮어쓰기는 다른 함수다.**", "    const benchmark_io_started = std.Io.Clock.awake.now(self.io).nanoseconds;\n    // **새 파일과 덮어쓰기는 다른 함수다.**"))
-            untitled.write_text(replace_once(untitled.read_text(), "    // **여기부터 실패해도 파일은 이미 있다**", "    std.debug.print(\"UNTITLED_IO ns={d}\\n\", .{std.Io.Clock.awake.now(self.io).nanoseconds - benchmark_io_started});\n    // **여기부터 실패해도 파일은 이미 있다**"))
+            if "    const saved_content = doc.file.content;" in untitled.read_text():
+                untitled.write_text(replace_once(untitled.read_text(), "fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: bool) void {", "fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: bool) void {\n    const benchmark_started = std.Io.Clock.awake.now(self.io).nanoseconds;"))
+                untitled.write_text(replace_once(untitled.read_text(), "    const saved_content = doc.file.content;", "    const saved_content = doc.file.content;\n    std.debug.print(\"UNTITLED_SERIALIZE ns={d}\\n\", .{std.Io.Clock.awake.now(self.io).nanoseconds - benchmark_started});\n    const benchmark_delay = std.fmt.parseInt(u32, std.mem.span(std.c.getenv(\"MARU_UNTITLED_DELAY_MS\") orelse \"0\"), 10) catch 0;\n    if (benchmark_delay > 0) std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(benchmark_delay), .awake) catch {};"))
+                untitled.write_text(replace_once(untitled.read_text(), "    // **새 파일과 덮어쓰기는 다른 함수다.**", "    const benchmark_io_started = std.Io.Clock.awake.now(self.io).nanoseconds;\n    // **새 파일과 덮어쓰기는 다른 함수다.**"))
+                untitled.write_text(replace_once(untitled.read_text(), "    // **여기부터 실패해도 파일은 이미 있다**", "    std.debug.print(\"UNTITLED_IO ns={d}\\n\", .{std.Io.Clock.awake.now(self.io).nanoseconds - benchmark_io_started});\n    // **여기부터 실패해도 파일은 이미 있다**"))
         host = source / names[3]
         host.write_text(replace_once(host.read_text(), "        maybeRunEditorIMESmoke()\n",
             "        maybeRunEditorIMESmoke()\n        maybeRunEditorProjectSearch()\n") + "\n" +
@@ -224,6 +225,11 @@ def main():
                 "    pub fn write(self: *Prepared, io: std.Io) editor.SaveError!void {",
                 "    pub fn write(self: *Prepared, io: std.Io) editor.SaveError!void {\n        try saveAsWriteGate(self, io);") +
                 "\n" + (source / "tools/editor-project-search-app/save-as-write-gate.zig.inc").read_text())
+        if args.untitled_save_benchmark and "    const saved_content = doc.file.content;" not in (source / "src/platform/macos/app_session/editor/untitled_save.zig").read_text():
+            text = local_source.read_text()
+            text = replace_once(text, "        const bytes = doc.file.saveBytes(a) catch return error.WriteFailed;", "        const measured_start = std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io()).nanoseconds;\n        const bytes = doc.file.saveBytes(a) catch return error.WriteFailed;\n        if (std.c.getenv(\"MARU_UNTITLED_BENCHMARK\") != null) std.debug.print(\"UNTITLED_SERIALIZE ns={d}\\n\", .{std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io()).nanoseconds - measured_start});")
+            text = replace_once(text, "    pub fn write(self: *Prepared, io: std.Io) editor.SaveError!void {", "    pub fn write(self: *Prepared, io: std.Io) editor.SaveError!void {\n        const benchmark = std.c.getenv(\"MARU_UNTITLED_BENCHMARK\") != null;\n        if (benchmark) {\n            const delay_ms = std.fmt.parseInt(u32, std.mem.span(std.c.getenv(\"MARU_UNTITLED_DELAY_MS\") orelse \"0\"), 10) catch 0;\n            if (delay_ms > 0) std.Io.sleep(io, std.Io.Duration.fromMilliseconds(delay_ms), .awake) catch {};\n        }\n        const io_start = std.Io.Clock.awake.now(io).nanoseconds;\n        defer if (benchmark) std.debug.print(\"UNTITLED_IO ns={d}\\n\", .{std.Io.Clock.awake.now(io).nanoseconds - io_start});")
+            local_source.write_text(text)
         command = ["mise", "exec", "--", "zig", "build", "macos-app-bundle", "-j2", "-Doptimize=" + args.optimize]
         print(root, flush=True)
         with (root / "build.log").open("wb") as log:
@@ -402,7 +408,7 @@ end run'''
         data = bytes(ord("x") if i % 2 == 0 else 10 for i in range(args.untitled_bytes))
         if (project / "untitled-benchmark.txt").read_bytes() != data:
             raise RuntimeError("Untitled first-save disk bytes differ")
-        untitled_metrics = parse_metrics(transcript, args.untitled_bytes, args.untitled_delay_ms)
+        untitled_metrics = parse_metrics(transcript, args.untitled_bytes, args.untitled_delay_ms, require_settled=True)
         if parse_build_mode(transcript) != args.optimize:
             raise RuntimeError("Actual untitled app build mode differs from --optimize")
     if args.native_close_save:
@@ -461,7 +467,7 @@ end run'''
         report["untitled_save_benchmark"] = untitled_metrics
         report["untitled_oracle_sha256"] = sha(Path(__file__).with_name("untitled_oracle.py"))
         report["untitled_prepared_source_sha256"] = {name: sha(source / name) for name in names}
-        report["scope"] = "Synchronous untitled first-save naming commit in the actual AppKit main queue; disk bytes and model adoption"
+        report["scope"] = "Untitled first-save naming commit in the actual AppKit main queue; response and settled times, disk bytes and model adoption"
         for name in ("untitled-save.swift.inc", "untitled-save.zig.inc"):
             report["harness_sha256"][name] = sha(source / "tools/editor-project-search-app" / name)
     report["runner_sha256"] = sha(Path(__file__))

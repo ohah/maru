@@ -4412,3 +4412,14 @@ ScreenCaptureKit 패널 이미지·native 접근성 확인·대화상자 종료�
 `--save-as-physical-ime`는 한국어 OS 입력기에 CGEvent를 보내 조합 중 preedit·marked range를
 확인한 뒤 NSEvent Save As를 실행했다. `foo한` 저장·조합 종료·Undo/Redo와 입력기 복원이
 통과했다. 사람의 키보드 조작·VoiceOver·한자 후보창 위치의 증거는 아니다.
+
+
+### 이름 없는 로컬 문서의 비동기 첫 저장
+
+구현. `test-editor-first-save-async`는 실제 worker 차단으로 완료 전 경로/entry 미공개,
+추가 입력과 Undo, 외부 배타 생성 경쟁, epoch 변경, 반복 저장, 닫기 재확인,
+준비 할당 실패, 동일 목적지 예약, 마지막 도크 자리와 쓰기 중 workspace 이동을 검사한다.
+`test-editor-untitled`의 같은 창 거절/다른 창 허용(U2y)·원격 저장 회귀를 유지한다.
+로컬 통과: 집중 그래프 16개(첫 저장 9개와 기존 소비자 회귀 2개), 전체 제품 152개·중립 규칙 45개.
+실제 AppKit 실측과 한계는 [첫 저장 계획](plans/editor-untitled-save-async.md)을 따른다.
+사람의 키보드·VoiceOver·전원 손실 직접 검증을 포함하지 않으며 CI·병합 상태는 PR로 확인한다.

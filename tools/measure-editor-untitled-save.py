@@ -60,7 +60,7 @@ def main():
         for delay in [0, 200]:
             group = [r for r in rows if r['bytes'] == size and r['injected_delay_ms'] == delay]
             metrics = {}
-            for key in ['call_ns', 'next_event_ns', 'serialize_ns', 'io_ns']:
+            for key in ['call_ns', 'next_event_ns', 'settled_ns', 'serialize_ns', 'io_ns']:
                 values = [r[key] / 1e6 for r in group]
                 metrics[key.removesuffix('_ns') + '_ms'] = dict(min=min(values), median=statistics.median(values), max=max(values))
             summary.append(dict(bytes=size, injected_delay_ms=delay, samples=len(group), metrics=metrics))

@@ -23,8 +23,13 @@ pub const Prepared = struct {
     /// 요청 자료는 창보다 오래 살 수 있으므로 coordinator의 allocator로도 준비한다.
     pub fn initWithAllocator(a: std.mem.Allocator, term: *host.Term, guard: editor.SaveGuard) editor.SaveError!Prepared {
         const state = term.rt.editorDocument();
-        const doc = state.opened orelse return error.NotAnEditor;
         const path = state.path orelse return error.NotAnEditor;
+        return initForPath(a, term, path, guard);
+    }
+    /// 경로 채택 actor도 같은 불변 bytes 준비를 쓴다. 이 자료만으로 모델 경로를 바꾸지는 않는다.
+    pub fn initForPath(a: std.mem.Allocator, term: *host.Term, path: []const u8, guard: editor.SaveGuard) editor.SaveError!Prepared {
+        const state = term.rt.editorDocument();
+        const doc = state.opened orelse return error.NotAnEditor;
         const bytes = doc.file.saveBytes(a) catch return error.WriteFailed;
         errdefer a.free(bytes);
         if (bytes.len > maru.session.file_panel_bridge.max_file_bytes) return error.TooLarge;

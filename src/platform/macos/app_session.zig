@@ -88216,6 +88216,14 @@ test "Session Dock 검색은 사이드바 검색과 같은 입력 소유 판정�
     try std.testing.expectEqual(@as(u64, 1), search_ime.projection(session).?.selectedRange().?.location);
     input_ops.imeEnd(session, null);
     try std.testing.expectEqualStrings("한", session.agent_session_archive_search.query.items);
+    const filtered_before_preview = session.agent_session_archive_filtered_indices.items.len;
+    input_ops.imeBegin(session);
+    try std.testing.expect(search_ime.insert(session, "한", .{ .location = 0, .length = 1 }));
+    try std.testing.expect(search_ime.marked(session, "韓", .{ .location = 1, .length = 0 }, .{ .location = 0, .length = 1 }));
+    input_ops.imeEnd(session, null);
+    try std.testing.expectEqualStrings("한", session.agent_session_archive_search.query.items);
+    try std.testing.expectEqualStrings("韓", session.agent_session_archive_search.preedit.items);
+    try std.testing.expectEqual(filtered_before_preview, session.agent_session_archive_filtered_indices.items.len);
     try std.testing.expect(search_ime.insert(session, "韓", .{ .location = 0, .length = 1 }));
     try std.testing.expectEqualStrings("韓", session.agent_session_archive_search.query.items);
     try std.testing.expect(search_ime.insert(session, "😀", .{ .location = 0, .length = 1 }));

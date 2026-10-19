@@ -48,7 +48,7 @@
 - 검색 IME 문맥 확장(구현 중, 실제 후보창 검증 전): query 256 byte와 preedit 256 byte를
   한 텍스트 축으로 투영하여 UTF-16 선택·marked·substring·replacement를 제공한다. UTF-16 surrogate
   중간·범위 밖·잘못된 UTF-8·한계 초과는 입력을 거부하며 기존 검색어를 보존한다. 한 키의 확정은
-  transaction 끝에 반영하고, 뒤따른 callback이 실패하면 그 키 전체를 되돌린다. 메모리 확보나
+  마지막 insert snapshot으로 준비하여 후보 marked preview가 덮어쓰지 못하게 하고 transaction 끝에 반영한다. 뒤따른 callback이 실패하면 그 키 전체를 되돌린다. 메모리 확보나
   blur 확정이 실패하면 도크 접기·다른 view 전환도 거부하여 기존 입력 owner를 유지한다.
   macOS는 검색 활성화 세대마다 별도 text input client를 만들며 이전 client의 늦은 callback을
   폐기한다. 후보 요청·취소·선택 키는 입력기가 소유하고 터미널로 재생하지 않는다. 완료 조건은

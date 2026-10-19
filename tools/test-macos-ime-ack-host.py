@@ -174,7 +174,8 @@ class Controller {
  func imeMarked(_ text:String,selectedRange:NSRange,replacementRange:NSRange) { marks.append(text) }
  func imeDeleteBackward() { deletes+=1 }
  func inputIMEState()->(selected:NSRange,marked:NSRange)? { editorState }
- func inputIMESubstring(_ range:NSRange)->(text:String,range:NSRange)? { ("한",range) }
+ var substringText:String?="한"
+ func inputIMESubstring(_ range:NSRange)->(text:String,range:NSRange)? { substringText.map { ($0,range) } }
  func recordSessionHostInputSmokeInsert() { smokeInserts+=1 }
  func recordSessionHostInputSmokeMarked() { smokeMarks+=1 }
  func editorOwnsChord(_ event:NSEvent)->Bool { ownsChord }
@@ -274,6 +275,27 @@ print("PASS checks=\(checks) commitCalls=\(commitCalls) focusCalls=\(focusCalls)
 '''
 
 CALLBACK_TESTS = r'''
+// Context availability is a backend stub here: this checks the shared Swift
+// fallback, not which product field supplies context or whether TSM opens a window.
+let fallback=View();fallback.controller!.substringText=nil
+check(fallback.selectedRange()==NSRange(location:0,length:0),"unavailable context selected fallback")
+check(fallback.markedRange()==NSRange(location:0,length:1),"unavailable context marked fallback")
+check(fallback.attributedSubstring(forProposedRange:NSRange(location:0,length:1),actualRange:nil)==nil,"unavailable context substring")
+fallback.markedTextBuffer="😀한"
+check(fallback.markedRange()==NSRange(location:0,length:3),"marked range counts UTF16 units")
+fallback.markedTextBuffer=""
+check(fallback.markedRange()==NSRange(location:0,length:0),"empty marked preserves legacy compatibility")
+let queryView=View()
+queryView.controller!.editorState=(NSRange(location:4,length:0),NSRange(location:3,length:1))
+check(queryView.selectedRange()==NSRange(location:4,length:0),"available context selection")
+check(queryView.markedRange()==NSRange(location:3,length:1),"available context marked offset")
+var actual=NSRange(location:NSNotFound,length:0)
+check(queryView.attributedSubstring(forProposedRange:NSRange(location:3,length:1),actualRange:&actual)?.string=="한","available context substring")
+check(actual==NSRange(location:3,length:1),"substring actual range")
+queryView.controller!.chromeGeneration=7;queryView.forwardingChromeIMEGeneration=8
+check(queryView.attributedSubstring(forProposedRange:NSRange(location:3,length:1),actualRange:nil)==nil,"stale chrome substring rejected")
+queryView.forwardingChromeIMEGeneration=7
+check(queryView.attributedSubstring(forProposedRange:NSRange(location:3,length:1),actualRange:nil)?.string=="한","current chrome substring admitted")
 // The dedicated chrome client must forward the current owner token. This
 // exercises extracted callback guards; the controller remains an explicit stub.
 for (owner, forwarded, accepted) in [(UInt64(7), UInt64(7), true), (7, 8, false)] {
@@ -485,7 +507,8 @@ def run(source_path):
     for i, (owner, name) in enumerate(specs):
         host = host.replace(f"@@METHOD{i}@@", extract_method(source, masked, owner, name))
     callbacks = ["acceptsIMEKeyTransaction", "acceptsIMECallback", "invalidateIMECallbacks", "discardAdmittedMarkedText",
-                 "insertText", "setMarkedText", "unmarkText", "doCommand"]
+                 "insertText", "setMarkedText", "unmarkText", "doCommand",
+                 "selectedRange", "markedRange", "attributedSubstring"]
     host = host.replace("@@CALLBACKS@@", "\n".join(
         extract_method(source, masked, view, name) for name in callbacks))
     host = host.replace("@@CALLBACK_TESTS@@", CALLBACK_TESTS)
@@ -514,7 +537,7 @@ def run(source_path):
     print(f"source={source_path} sha256={hashlib.sha256(source.encode('utf-8')).hexdigest()}", flush=True)
     with tempfile.TemporaryDirectory(prefix="maru-ime-ack-host-") as directory:
         root = Path(directory)
-        for name, code, expected in [("host", host, "PASS checks=257"),
+        for name, code, expected in [("host", host, "PASS checks=268"),
                                      ("mouse", mouse, "failed_cases=0"),
                                      ("press", press, "press_failed=0")]:
             swift = root / f"{name}.swift"

@@ -12,10 +12,13 @@ pub const Context = struct {
     len: usize = 0,
     base: [query_limit]u8 = undefined,
     base_len: usize = 0,
+    committed: [query_limit]u8 = undefined,
+    committed_len: usize = 0,
     selected: Span = .{ .start = 0, .end = 0 },
     marked: ?Span = null,
     pending: bool = false,
     last_insert: ?Span = null,
+    last_scalar_projected: ?Span = null,
     valid: bool = false,
 
     pub fn text(self: *const Context) []const u8 {
@@ -33,6 +36,8 @@ pub const Context = struct {
         self.* = .{};
         @memcpy(self.base[0..query.len], query);
         self.base_len = query.len;
+        @memcpy(self.committed[0..query.len], query);
+        self.committed_len = query.len;
         @memcpy(self.storage[0..query.len], query);
         @memcpy(self.storage[query.len..][0..marked.len], marked);
         self.len = query.len + marked.len;
@@ -75,6 +80,14 @@ pub const Context = struct {
         if (!self.replace(span, bytes)) return false;
         self.selected = .{ .start = span.start + bytes.len, .end = span.start + bytes.len };
         self.last_insert = .{ .start = span.start, .end = self.selected.end };
+        var scalar_start = self.selected.end;
+        if (bytes.len > 0) {
+            scalar_start -= 1;
+            while (scalar_start > span.start and self.storage[scalar_start] & 0xc0 == 0x80) scalar_start -= 1;
+        }
+        self.last_scalar_projected = if (bytes.len > 0) .{ .start = scalar_start, .end = self.selected.end } else null;
+        @memcpy(self.committed[0..self.len], self.text());
+        self.committed_len = self.len;
         self.marked = null;
         self.pending = true;
         return true;
@@ -85,28 +98,39 @@ pub const Context = struct {
         const local = ranges.byteRange(bytes, selected) orelse return false;
         const span = self.requested(replacement) orelse return false;
         if (self.len - (span.end - span.start) > query_limit) return false;
+        // Track only the visible last scalar; a preview may replace it entirely.
+        const scalar = if (self.last_scalar_projected) |old| blk: {
+            if (old.end <= span.start) break :blk old;
+            if (old.start >= span.end) break :blk Span{ .start = old.start - (span.end - span.start) + bytes.len, .end = old.end - (span.end - span.start) + bytes.len };
+            break :blk null;
+        } else null;
         if (!self.replace(span, bytes)) return false;
+        self.last_scalar_projected = scalar;
         self.marked = if (bytes.len > 0) .{ .start = span.start, .end = span.start + bytes.len } else null;
         self.selected = .{ .start = span.start + local.start, .end = span.start + local.end };
         return true;
     }
     pub fn cancelInsertedScalar(self: *Context) void {
-        const span = self.last_insert orelse return;
-        if (span.start == span.end) return;
-        var start = span.end - 1;
-        while (start > span.start and self.storage[start] & 0xc0 == 0x80) start -= 1;
-        const removed = span.end - start;
-        std.mem.copyForwards(u8, self.storage[start..][0 .. self.len - span.end], self.storage[span.end..self.len]);
-        self.len -= removed;
-        self.selected.start = if (self.selected.start >= span.end) self.selected.start - removed else @min(self.selected.start, start);
-        self.selected.end = if (self.selected.end >= span.end) self.selected.end - removed else @min(self.selected.end, start);
-        if (self.marked) |*mark| {
-            if (mark.start >= span.end) {
-                mark.start -= removed;
-                mark.end -= removed;
+        const inserted = self.last_insert orelse return;
+        if (inserted.start == inserted.end) return;
+        var start = inserted.end - 1;
+        while (start > inserted.start and self.committed[start] & 0xc0 == 0x80) start -= 1;
+        const removed = inserted.end - start;
+        std.mem.copyForwards(u8, self.committed[start..][0 .. self.committed_len - inserted.end], self.committed[inserted.end..self.committed_len]);
+        self.committed_len -= removed;
+        if (self.last_scalar_projected) |span| {
+            if (!self.replace(span, "")) unreachable;
+            self.selected.start = if (self.selected.start >= span.end) self.selected.start - removed else @min(self.selected.start, span.start);
+            self.selected.end = if (self.selected.end >= span.end) self.selected.end - removed else @min(self.selected.end, span.start);
+            if (self.marked) |*mark| {
+                if (mark.start >= span.end) {
+                    mark.start -= removed;
+                    mark.end -= removed;
+                }
             }
         }
-        self.last_insert = .{ .start = span.start, .end = start };
+        self.last_insert = null;
+        self.last_scalar_projected = null;
     }
     pub fn deleteBackward(self: *Context) bool {
         if (!self.valid or self.marked != null) return false;
@@ -119,19 +143,25 @@ pub const Context = struct {
         return self.insert("", range);
     }
     pub fn committedLength(self: *const Context) usize {
-        const mark = self.marked orelse return self.len;
-        return self.len - (mark.end - mark.start);
+        return self.committed_len;
     }
     pub fn copyCommitted(self: *const Context, out: []u8) void {
-        const mark = self.marked orelse Span{ .start = self.len, .end = self.len };
-        @memcpy(out[0..mark.start], self.text()[0..mark.start]);
-        @memcpy(out[mark.start..][0 .. self.len - mark.end], self.text()[mark.end..]);
+        @memcpy(out[0..self.committed_len], self.committed[0..self.committed_len]);
+    }
+    pub fn admitMarked(self: *Context) bool {
+        if (self.len > query_limit) return false;
+        @memcpy(self.committed[0..self.len], self.text());
+        self.committed_len = self.len;
+        self.marked = null;
+        self.pending = true;
+        return true;
     }
     pub fn accepted(self: *Context, query: []const u8) void {
         @memcpy(self.base[0..query.len], query);
         self.base_len = query.len;
         self.pending = false;
         self.last_insert = null;
+        self.last_scalar_projected = null;
     }
     pub fn substring(self: *const Context, requested_range: Range) ?struct { bytes: []const u8, actual: Range } {
         if (!self.valid) return null;
@@ -154,6 +184,16 @@ test "inline IME projects marked text and queued replacement without changing ca
     try std.testing.expectEqualStrings("a韓z", context.text());
     try std.testing.expect(context.insert("漢", .{ .location = 1, .length = 1 }));
     try std.testing.expectEqualStrings("a漢z", context.text());
+    // An input method can commit an original syllable then preview a candidate in one key.
+    // The preview must not erase the committed query or change its filter.
+    try std.testing.expect(context.reset("한", ""));
+    try std.testing.expect(context.insert("한", .{ .location = 0, .length = 1 }));
+    try std.testing.expect(context.setMarked("韓", .{ .location = 1, .length = 0 }, .{ .location = 0, .length = 1 }));
+    var committed: [query_limit]u8 = undefined;
+    context.copyCommitted(&committed);
+    try std.testing.expectEqualStrings("한", committed[0..context.committedLength()]);
+    try std.testing.expectEqualStrings("韓", context.text());
+    try std.testing.expect(context.reset("a漢z", ""));
     const part = context.substring(.{ .location = 1, .length = std.math.maxInt(u64) }).?;
     try std.testing.expectEqualStrings("漢z", part.bytes);
 }
@@ -193,4 +233,16 @@ test "inline IME backspace follows replacement caret and cancels only the last i
     try std.testing.expect(context.reset("abcd", ""));
     try std.testing.expect(context.insert(context.text()[0..3], .{ .location = 1, .length = 0 }));
     try std.testing.expectEqualStrings("aabcbcd", context.text());
+    try std.testing.expect(context.reset("", ""));
+    try std.testing.expect(context.insert("😀", null));
+    try std.testing.expect(context.setMarked("x", .{ .location = 1, .length = 0 }, .{ .location = 0, .length = 2 }));
+    context.cancelInsertedScalar();
+    try std.testing.expectEqualStrings("x", context.text());
+    try std.testing.expectEqual(@as(usize, 0), context.committedLength());
+    try std.testing.expect(context.reset("", ""));
+    try std.testing.expect(context.insert("ab", null));
+    try std.testing.expect(context.setMarked("😀", .{ .location = 2, .length = 0 }, .{ .location = 0, .length = 1 }));
+    context.cancelInsertedScalar();
+    try std.testing.expectEqualStrings("😀", context.text());
+    try std.testing.expectEqual(Range{ .location = 2, .length = 0 }, context.selectedRange().?);
 }

@@ -130,8 +130,7 @@ pub fn commitAll(self: *app.AppSession) bool {
     const context = sync(self) orelse return false;
     if (!context.pending and context.marked == null) return true;
     if (context.len > maru.inline_text_input.query_limit or !reserve(self)) return false;
-    context.marked = null;
-    context.pending = true;
+    if (!context.admitMarked()) return false;
     publish(self, context);
     publishPreedit(self, context);
     return true;

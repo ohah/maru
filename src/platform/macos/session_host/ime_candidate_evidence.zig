@@ -177,16 +177,23 @@ fn searchMarked(state: SearchState) bool {
     return state.query_bytes == 0 and state.query_hash == fixtureHash("") and
         state.preedit_bytes == 3 and state.preedit_hash == fixtureHash("한");
 }
-fn searchCommitted(state: SearchState) bool {
-    return state.query_bytes == 3 and state.query_hash == fixtureHash("한") and
-        state.preedit_bytes == 0 and state.preedit_hash == fixtureHash("");
+fn searchOriginalQuery(state: SearchState) bool {
+    return state.query_bytes == 3 and state.query_hash == fixtureHash("한");
 }
-fn validSearchStep(before: SearchState, after: SearchState, a: Counters, b: Counters) bool {
+fn searchCommitted(state: SearchState) bool {
+    return searchOriginalQuery(state) and state.preedit_bytes == 0 and state.preedit_hash == fixtureHash("");
+}
+fn searchCandidatePreview(state: SearchState) bool {
+    // Actual Korean 2-set candidate UI previews its selected first row without filtering.
+    return searchOriginalQuery(state) and state.preedit_bytes == 3 and state.preedit_hash == fixtureHash("韓");
+}
+fn validSearchStep(before: SearchState, after: SearchState, a: Counters, b: Counters, opening: bool) bool {
     if (a.pty_input_bytes != b.pty_input_bytes or a.base_screen_generation != b.base_screen_generation or
         b.committed_text_callbacks < a.committed_text_callbacks) return false;
     const callbacks = b.committed_text_callbacks - a.committed_text_callbacks;
+    if (!opening and searchCandidatePreview(before)) return callbacks == 1 and searchCommitted(after);
     return (callbacks == 0 and std.meta.eql(before, after)) or
-        (callbacks == 1 and searchCommitted(after));
+        (callbacks == 1 and (searchCommitted(after) or (opening and searchCandidatePreview(after))));
 }
 /// Search reconversion may commit the original syllable while requesting candidates. This is a
 /// separate schema/policy: terminal consumers still require every counter to stay identical.
@@ -200,8 +207,8 @@ pub fn reduceSearchTriplet(app_pid: i32, triplet: Triplet, transition: SearchTra
         if (!state.first_responder or !state.search_owner or state.owner_generation != transition.before.owner_generation)
             return error.SearchTransitionInvalid;
     }
-    if (!validSearchStep(transition.before, transition.opened, triplet.before_counters, triplet.opened_counters) or
-        !validSearchStep(transition.opened, transition.closed, triplet.opened_counters, triplet.closed_counters)) return error.SearchTransitionInvalid;
+    if (!validSearchStep(transition.before, transition.opened, triplet.before_counters, triplet.opened_counters, true) or
+        !validSearchStep(transition.opened, transition.closed, triplet.opened_counters, triplet.closed_counters, false)) return error.SearchTransitionInvalid;
     return candidate;
 }
 
@@ -522,6 +529,43 @@ test "search candidate evidence permits one exact syllable commit and keeps term
     transition.closed_counters = triplet.closed_counters;
     _ = try reduceSearchTriplet(999, triplet, transition);
     try std.testing.expectError(error.CounterMutation, reduceTriplet(999, triplet));
+    // Recorded OS path: request commits original text and marks the selected Hanja preview;
+    // Escape commits the original syllable once. Neither interval may leak to the PTY.
+    var preview = transition;
+    preview.opened = committed;
+    preview.opened.preedit_bytes = 3;
+    preview.opened.preedit_hash = fixtureHash("韓");
+    var preview_triplet = triplet;
+    preview_triplet.closed_counters.committed_text_callbacks += 1;
+    preview.closed_counters = preview_triplet.closed_counters;
+    _ = try reduceSearchTriplet(999, preview_triplet, preview);
+    var wrong_preview = preview;
+    wrong_preview.opened.preedit_hash = fixtureHash("漢");
+    try std.testing.expectError(error.SearchTransitionInvalid, reduceSearchTriplet(999, preview_triplet, wrong_preview));
+    wrong_preview = preview;
+    wrong_preview.opened.query_bytes = 0;
+    wrong_preview.opened.query_hash = fixtureHash("");
+    try std.testing.expectError(error.SearchTransitionInvalid, reduceSearchTriplet(999, preview_triplet, wrong_preview));
+    wrong_preview = preview;
+    wrong_preview.closed = preview.opened;
+    try std.testing.expectError(error.SearchTransitionInvalid, reduceSearchTriplet(999, preview_triplet, wrong_preview));
+    for ([_]bool{ true, false }) |opening| {
+        var double = preview;
+        var double_triplet = preview_triplet;
+        if (opening) {
+            double_triplet.opened_counters.committed_text_callbacks += 1;
+            double.opened_counters = double_triplet.opened_counters;
+        }
+        double_triplet.closed_counters.committed_text_callbacks += 1;
+        double.closed_counters = double_triplet.closed_counters;
+        try std.testing.expectError(error.SearchTransitionInvalid, reduceSearchTriplet(999, double_triplet, double));
+    }
+    var stuck = preview;
+    var stuck_triplet = preview_triplet;
+    stuck.closed = preview.opened;
+    stuck_triplet.closed_counters = stuck_triplet.opened_counters;
+    stuck.closed_counters = stuck_triplet.closed_counters;
+    try std.testing.expectError(error.SearchTransitionInvalid, reduceSearchTriplet(999, stuck_triplet, stuck));
     for (0..6) |mutation| {
         var bad = transition;
         var bad_triplet = triplet;

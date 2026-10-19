@@ -72,6 +72,8 @@ def validate_candidate_transitions(artifact, report):
     require(len(set(ids)) == 5 and all(i > 0 for i in ids), 'candidate window identity replay')
     expected = {'query_bytes': 3, 'query_hash': int(text_hash('한')),
                 'preedit_bytes': 0, 'preedit_hash': int(text_hash(''))}
+    preview = {'query_bytes': 3, 'query_hash': int(text_hash('한')),
+               'preedit_bytes': 3, 'preedit_hash': int(text_hash('韓'))}
     for index, (row, transition) in enumerate(zip(rows, transitions)):
         witness = report['observations'][index + 2]
         states = [transition[k] for k in ('before', 'opened', 'closed')]
@@ -84,9 +86,12 @@ def validate_candidate_transitions(artifact, report):
         for state in states:
             require(state['owner_generation'] == before['owner_generation'] and
                     state['first_responder'] is True and state['search_owner'] is True, 'candidate lost search owner')
-        for a, b, ca, cb in zip(states, states[1:], counts, counts[1:]):
+        for interval, (a, b, ca, cb) in enumerate(zip(states, states[1:], counts, counts[1:])):
             require(ca['pty_input_bytes'] == cb['pty_input_bytes'] and
                     ca['base_screen_generation'] == cb['base_screen_generation'], 'candidate changed terminal')
             delta = cb['committed_text_callbacks'] - ca['committed_text_callbacks']
+            if interval == 1 and all(a[k] == value for k, value in preview.items()):
+                require(delta == 1 and all(b[k] == value for k, value in expected.items()), 'candidate preview did not cancel to original')
             require((delta == 0 and a == b) or
-                    (delta == 1 and all(b[k] == value for k, value in expected.items())), 'candidate commit transition')
+                    (delta == 1 and (all(b[k] == value for k, value in expected.items()) or
+                                     (interval == 0 and all(b[k] == value for k, value in preview.items())))), 'candidate commit transition')

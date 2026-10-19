@@ -605,6 +605,17 @@ owner token으로 forward한다. 이전 client는 새 검색 owner나 terminal�
    anchor·선택 후 exact-once query·취소·terminal 복귀를 함께 확인한다. 고정된 서명 앱으로
    실제 후보창 5개가 검증되기 전에는 live gate를 완료로 바꾸지 않는다.
 
+실측(2026-10-19): 권한을 통과한 b8fda785 관측 앱으로 새 app-owned 후보창을 5회 열고
+Escape로 닫았다. WindowServer 소유권·PNG/OCR 증거는 확보했지만 전체 live 성공은 아니다.
+실제 OS는 요청 중 원문 `한`을 insert한 뒤 선택 후보 `韓`을 marked preview로 보내고,
+취소 시 원문 `한`을 다시 insert했다. 기존 판정자가 이 중간 상태를 모델링하지 않아 거부했다.
+또한 기존 projection은 pending commit 뒤 marked replacement가 오면 확정 원문까지 제외하여
+검색어/필터를 비울 수 있었다. key transaction의 마지막 확정 문자열(상한 256 byte)을 별도로
+준비해, marked preview가 이를 지우지 않도록 수정한다. 새 판정자는 요청 후 확정 query `한`과
+preview `韓`, 취소 후 query `한`·빈 preedit 및 구간당 정확히 1 callback만 허용한다.
+preview가 남거나 query가 비워짐·중복 callback·PTY/owner drift는 거부한다. 이 수정 빌드의
+실제 후보창 5회·한자 선택·terminal 복귀를 통과하기 전에는 완료로 표시하지 않는다.
+
 근거: Apple `NSTextInputClient`의 selectedRange는 실제 text storage 안의 선택이고,
 substring과 replacement도 같은 storage 범위다. 공개 계약:
 [selectedRange](https://developer.apple.com/documentation/appkit/nstextinputclient/selectedrange()),

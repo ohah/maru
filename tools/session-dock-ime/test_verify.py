@@ -125,6 +125,27 @@ class CandidateQueryOracleTests(unittest.TestCase):
         for commit in (False, True):
             validate_candidate_transitions(candidate_control(report, commit), report)
 
+    def test_preview_then_cancel_matches_actual_korean_candidate(self):
+        report = control('live')
+        artifact = candidate_control(report)
+        for row in artifact['search_transitions']:
+            row['opened'] = dict(row['closed'], preedit_bytes=3, preedit_hash=int(hash64('韓')))
+            row['closed_counters']['committed_text_callbacks'] += 1
+        validate_candidate_transitions(artifact, report)
+        stuck = copy.deepcopy(artifact)
+        stuck['search_transitions'][0]['closed'] = dict(stuck['search_transitions'][0]['opened'])
+        stuck['search_transitions'][0]['closed_counters'] = dict(stuck['search_transitions'][0]['opened_counters'])
+        with self.assertRaises(ValueError):
+            validate_candidate_transitions(stuck, report)
+        for state, field, value in [('opened', 'preedit_hash', int(hash64('漢'))),
+                                    ('opened', 'query_hash', int(hash64('韓'))),
+                                    ('opened', 'query_bytes', 0),
+                                    ('closed', 'preedit_hash', int(hash64('韓')))]:
+            bad = copy.deepcopy(artifact)
+            bad['search_transitions'][0][state][field] = value
+            with self.subTest(state=state,field=field), self.assertRaises(ValueError):
+                validate_candidate_transitions(bad, report)
+
     def test_rejects_query_owner_counter_and_manifest_rebinding(self):
         report = control('live')
         for mutation in ('query', 'owner', 'responder', 'pty', 'screen', 'callbacks', 'report', 'id_replay', 'schema'):

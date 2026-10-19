@@ -521,6 +521,13 @@ test "search candidate evidence permits one exact syllable commit and keeps term
     var triplet = validTriplet();
     var transition = SearchTransition{ .before = marked, .opened = marked, .closed = marked, .before_counters = counters, .opened_counters = counters, .closed_counters = counters };
     _ = try reduceSearchTriplet(999, triplet, transition);
+    // An absent token cannot become a valid owner merely by being stable in every sample.
+    // Keep all other fields equal so another drift guard cannot hide this requirement.
+    var absent_owner = transition;
+    absent_owner.before.owner_generation = 0;
+    absent_owner.opened.owner_generation = 0;
+    absent_owner.closed.owner_generation = 0;
+    try std.testing.expectError(error.SearchTransitionInvalid, reduceSearchTriplet(999, triplet, absent_owner));
     triplet.opened_counters.committed_text_callbacks += 1;
     triplet.closed_counters = triplet.opened_counters;
     transition.opened = committed;

@@ -202,6 +202,7 @@ pub fn blur(self: *AppSession) void {
 }
 pub fn releaseWindowFocus(self: *AppSession) void {
     blur(self);
+    clearHover(self);
     self.inspector.window_focused = false;
 }
 pub fn close(self: *AppSession) void {
@@ -466,6 +467,15 @@ pub fn caretRect(self: *AppSession) ?maru.chrome.draw.Rect {
     var arena = std.heap.ArenaAllocator.init(self.allocator);
     defer arena.deinit();
     return panel.caretRect(propsFor(self), renderScale(self), arena.allocator());
+}
+
+// Leaving the viewport must clear the painted state as well as the native cursor.
+pub fn clearHover(self: *AppSession) void {
+    if (!visible(self)) return;
+    if (self.inspector.hovered != null) {
+        self.inspector.hovered = null;
+        self.metal_dirty = true;
+    }
 }
 
 /// Hover uses the same published control geometry as click and paint.

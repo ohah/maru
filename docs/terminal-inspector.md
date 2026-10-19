@@ -5,6 +5,9 @@
 unbind할 수 있다. 파일·SCM 도크와 별개인 독립 도구 화면이며 모달이나 workspace Pane이 아니다.
 상·하·좌·우 배치와 구분선 크기 조절, 별도 OS 창으로 분리·재도킹을 지원한다. 터미널과 진단 화면을 동시에 사용할 수 있다. Trace 파일의 단계별 HTML replay 뷰어와는 별개다.
 
+검사 대상은 선택한 **터미널 surface의 관측 상태**다. UI 컴포넌트 tree를 탐색하거나,
+화면 요소를 가리켜 bounding box와 layout/style 속성을 표시하는 요소 선택기는 이 계약 밖이다.
+
 ## GUI와 CLI의 공통 계약
 
 `src/session/inspector/snapshot.zig`의 `Snapshot`을 macOS 어댑터가 수집한다.
@@ -22,12 +25,12 @@ ID는 GUI surface ID다. session-host runtime ID와 혼용하지 않는다.
 확장을 요청하지 않는 한 inspector 필드가 없다. 앱이 실행 중이어야 한다.
 구버전 앱 또는 터미널 이외 대상은 지원하지 않는다는 오류를 돌려준다.
 
-| 탭 | JSON 키 | 내용 |
-| --- | --- | --- |
-| Overview | `overview` | surface/runtime·창·탭·pane, backend, 관측 가용성·revision·generation·시각 |
-| Path/SSH | `path` | 최종 cwd와 출처·이유, OSC 7, 훅 cwd·host·신선도, SSH 목적지, 원격 SCM 후보 판정, 창의 Explorer 표시 상태 |
-| Terminal | `terminal` | 크기·커서·모드·semantic prompt·foreground pgid, 지원하는 scroll region |
-| Events | `events` | 첫 진단 이후의 유한 이벤트 기록, 샘플 변경과 셸 protocol 이벤트 구분, eviction 수 |
+| 탭 | JSON 키 | 내용 | 수집 원천 |
+| --- | --- | --- | --- |
+| Overview | `overview` | surface/runtime·창·탭·pane, backend, 관측 가용성·revision·generation·시각 | AppSession의 선택 Term, runtime observation |
+| Path/SSH | `path` | 최종 cwd와 출처·이유, OSC 7, 훅 cwd·host·신선도, SSH 목적지, 원격 SCM 후보 판정, 창의 Explorer 표시 상태 | 기존 cwd/SCM 결정 함수, OSC7 관측, agent hook slot, 파일 트리 상태 |
+| Terminal | `terminal` | 크기·커서·모드·semantic prompt·foreground pgid, 지원하는 scroll region | runtime observation과 lock 아래 renderSnapshot/core |
+| Events | `events` | 첫 진단 이후의 유한 이벤트 기록, 샘플 변경과 셸 protocol 이벤트 구분, eviction 수 | 유계 history의 sample 변화와 활성 local OSC7/133 drain |
 
 Explorer 값은 대상 터미널 소유의 경로가 아니라 **그 창이 현재 표시하는 상태**다.
 Pin으로 다른 터미널을 고르면 대상의 cwd와 창의 Explorer root가 다를 수 있다.
@@ -43,6 +46,7 @@ Refresh는 일시정지 중에도 새 스냅샷을 수집한다. 닫힌 고정 �
 필터 위 커서는 텍스트 입력 모양, 버튼·탭 위는 손 모양, 본문은 화살표다.
 붙어 있는 도크의 구분선은 방향에 맞는 좌우·상하 크기 조절 커서를 사용한다.
 분리 창에서도 같은 필터·버튼·본문 판정을 사용하며 view 밖으로 이동하면 화살표로 복원한다.
+버튼 hover 배경은 view·Inspector 영역을 벗어나거나 창 focus를 잃으면 해제한다. 커서 복원과 별개인 paint 상태다.
 필터에 포커스가 있을 때 Tab/Shift-Tab은 탭 이동, 방향키·Page Up/Down은 스크롤이다.
 wheel은 도크 위에서만 진단 목록을 스크롤한다. Escape는 필터를 먼저 지우고 다시 누르면
 붙어 있는 경우 터미널로 포커스를 돌린다. 분리 창에서는 필터만 해제하며,
@@ -61,6 +65,11 @@ GUI export는 기본 익명화이며 화면의 export 행에서 원본으로 바
 요구한다. self/window scope는 대상 존재 여부를 확인하기 전에 동일하게 거부한다.
 CLI inspect는 기존 same-UID·selector 없는 전체 metadata 조회 정책을 사용한다.
 PTY 입력·출력 원문을 수집하거나 터미널 모드를 변경하지 않는다.
+
+`runtime_id`는 session-host runtime이 있을 때의 값이며 in-process 터미널에서는 null이다.
+GUI collector는 현재 window membership ID를 받지 않아 `overview.window`가 null이고, CLI collector는
+실제 membership ID를 제공한다. 화면의 공통 “정보 없음” 표시는 해당 없음·미수집·미지원 이유를
+구별하지 못하므로 이 값만 보고 관측 실패라고 단정하지 않는다.
 
 이벤트는 `History.capacity`로 제한한다. 샘플링 사이에 변한 값은 놓칠 수 있다.
 로컬 protocol 이벤트는 기존 활성 터미널의 OSC 7/133 drain을 관측한 기록이며

@@ -318,7 +318,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func mouseExited(with event: NSEvent) {
-        controller?.clearHover()
+        controller?.inViewSurface(self) { controller?.clearHover() }
     }
 
     // Cmd 키를 누르거나 떼는 순간에도 (마우스를 안 움직여도) hover 상태를 재평가한다. 키 이벤트라
@@ -9547,7 +9547,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                         let local = outside ? NSPoint(x: -10, y: -10) : NSPoint(x: (Double(rect[0]) + Double(rect[2]) / 2) / scale, y: target.bounds.height - (Double(rect[1]) + Double(rect[3]) / 2) / scale)
                         if let event = Self.testButtonMouseEvent(.mouseMoved, 0, target.convert(local, to: nil), 0) {
                             target.mouseMoved(with: event)
-                            Self.testReport("inspector-cursor label=\(line[2]) actual=\(Self.testCursorName(NSCursor.current))")
+                            Self.testReport("inspector-cursor label=\(line[2]) actual=\(Self.testCursorName(NSCursor.current)) x=\(rect[0]) y=\(rect[1]) width=\(rect[2]) height=\(rect[3])")
                         }
                     } else { Self.testReport("inspector hover-missing=\(line[1])") }
                 }

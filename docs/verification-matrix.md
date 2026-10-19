@@ -58,6 +58,17 @@
   128byte ASCII 포화·혼합 UTF-8·backspace, 가로/세로 크기 기억, invalid CLI가 UI를 바꾸지 않음을 검사했다.
 - 테스트 fixture의 config 오류를 숨기지 않도록 override/unbind 시 config 경고도 실패 처리한다.
   해당 설정에는 formatter가 쓰는 `Alt` 철자를 사용한다. 제품 동작 변경 없이 같은 최종 앱으로 확인했다.
+- 사용자 hover 제보: 이전 cursor 판정은 paint 이탈 복원을 보지 못했다. `/tmp/maru-inspector-hover-visual-audit`
+  에서 실제 GPU button 영역이 이탈 후에도 남음을 재현했다. root cause는 inspector.hovered가 view 밖에서
+  비워지지 않은 것이다. 외부/모달/focus 해제와 owner-scoped mouseExited를 연결해 수정했다.
+- `python3 tools/inspector-app/run.py --start 31 --rounds 2 --output /tmp/maru-inspector-hover-final`: 2/2 통과.
+  `pixel_checks`: attached button1975px·detached3991px hover 변화, 이탈 후 미복원 픽셀 **각각0**.
+  실제 published control rect 안의 RGB를 before/active/left 세 native GPU 캡처에서 비교한다.
+- 수정 후 `test-inspector`: 중립48 + host10 통과. `macos-app-build` exit0. 경계 shard0/4도 exit0이다.
+  로그 `/tmp/maru-inspector-hover-boundaries.log`. 실제 HID 검증으로 확대하지 않는다.
+- live snapshot 점검에서 source=osc7, cwd=fixture/work, size38×27과 cursor row3/col8(0 기반)을 확인했다.
+  GUI Window ID는 여전히 null이고 CLI에서는 membership1을 제공한다. runtime_id=null은 in-process에서
+  해당 없음이다. 사용자에게 정보 출처·null 이유가 화면에서 충분히 구분되지 않는 한계를 보고했다.
 - 범위와 미지원 항목은 [계약](terminal-inspector.md), 진행은 [계획](plans/terminal-inspector.md)을 따른다.
 
 

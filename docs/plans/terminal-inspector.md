@@ -84,3 +84,14 @@ wire 확장, 웹 DevTools, SSH cwd 선택 정책 변경은 별도 이니셔티�
 - 사용자 지정 Ghostty/Chrome DevTools 레퍼런스와 Maru 확장 범위를 계약 문서에 기록했다.
 - GitHub `inspector` 라벨을 생성·PR에 적용하고 PR 체크리스트의 영역 목록도 동기화했다.
 - 실행·산출물은 검증 매트릭스를 따른다. 실제 HID/WindowServer 검증 범위를 확대했다는 뜻은 아니다.
+
+## 사용자 피드백: hover 시각 복원과 검사 대상 (2026-10-19)
+
+- 기존 커서 E2E는 paint 복원을 판정하지 않았다. 실제 GPU 캡처에서 view 밖으로 나가도 button hover가
+  남는 것을 재현했다. `inspector_ops.clearHover`, 외부/모달 hover 경계와 window focus 해제,
+  NSView mouseExited의 owner scope를 연결해 고쳤다.
+- 실제 버튼 rect만 비교하는 attached/detached 픽셀 회귀를 driver 31~32에 추가했다.
+- 데이터 수집 경로는 live CLI/GUI adapter를 확인했다. UI 용어·출처·null 사유 설명은 충분하지 않다.
+  in-process runtime_id는 해당 없음이며 GUI window ID는 미수집이다. 둘을 같은 “정보 없음”으로 표시한다.
+- 이 PR은 terminal diagnostics 범위다. Chrome식 UI 요소 선택·bounding-box highlight·component tree
+  검사는 구현하지 않았다. 사용자에게 hover 기대 동작을 확인 중이며 이 범위를 완료했다고 표시하지 않는다.

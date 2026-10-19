@@ -167,6 +167,12 @@ def scenario(n, out):
     elif n == 30:
         for index in [4,3,0,2,1]:place(index)
         capture('cli-errors-survivor')
+    elif n in (31,32):
+        lines.extend(['inspect-click 13','sleep 200'])
+        if n==32:place(4,'detached')
+        capture('hover-before',n==32)
+        hover(40,'hand');lines.append('sleep 100');capture('hover-active',n==32)
+        hover('outside','arrow');lines.append('sleep 100');capture('hover-left',n==32)
     else:
         raise ValueError(f'unknown adversarial scenario {n}')
     lines.extend(['inspect-report done','mark finished','sleep 400','inspect-finish'])
@@ -200,7 +206,7 @@ def run_round(app, output, n):
     env.update(HOME=str(root/'home'),CFFIXED_USER_HOME=str(root/'home'),MARU_CONFIG=str(config),XDG_CONFIG_HOME=str(root/'home/.config'),XDG_CACHE_HOME=str(root/'cache'),XDG_STATE_HOME=str(root/'state'),MARU_SESSION_HOST_ROOT=str(root/'host'),MARU_EDITOR_BACKUP_ROOT=str(root/'backups'),MARU_NO_WORKSPACE_RESTORE='1',MARU_OPEN_INSPECTOR='1',MARU_INSPECTOR_WITH_DOCK='1',MARU_INSPECTOR_APP_TEST='1',MARU_WEB_OSR_TEST_INPUT=str(dest/'input.txt'),MARU_WEB_OSR_TEST_REPORT=str(report))
     if n in (3,20):
         env.update(MARU_SCREENSHOT=str(dest/'automatic.ppm'),MARU_SCREENSHOT_DELAY_MS='60000',MARU_SCREENSHOT_TIMEOUT_MS='70000',MARU_SCREENSHOT_RENDER_SCALE_MILLI='2000')
-    cli=app.parent/'maru'; observations=[];errors=[]
+    cli=app.parent/'maru'; observations=[];errors=[];pixel_checks=[]
     with (dest/'app.log').open('w') as log:
         process=subprocess.Popen([str(app)],env=env,stdout=log,stderr=log,start_new_session=True)
         deadline=time.monotonic()+max(22, 3+len(expected)*.65)
@@ -331,6 +337,20 @@ def run_round(app, output, n):
             if states.get(tag,{}).get('width')!=states['widthSaved']['width']:errors.append(f'{tag}: horizontal size was not retained')
         for tag in ['top','bottomAgain']:
             if states.get(tag,{}).get('height')!=states['heightSaved']['height']:errors.append(f'{tag}: vertical size was not retained')
+    if n in (31,32):
+        control=re.search(r'inspector-cursor label=c0_hand actual=hand x=(\d+) y=(\d+) width=(\d+) height=(\d+)',text)
+        if not control:errors.append('missing measured native hover control rect')
+        else:
+            x,y,w,h=map(int,control.groups())
+            def roi(name):
+                parts=(dest/(name+'.ppm')).read_bytes().split(b'\n',3)
+                width,height=map(int,parts[1].split());pixels=parts[3]
+                if not (0<=x<x+w<=width and 0<=y<y+h<=height):raise ValueError('hover ROI outside capture')
+                return b''.join(pixels[(row*width+x)*3:(row*width+x+w)*3] for row in range(y,y+h))
+            before,active,left=map(roi,['hover-before','hover-active','hover-left'])
+            pixel_checks.append({'hover_changed_pixels':sum(before[i:i+3]!=active[i:i+3] for i in range(0,len(before),3)),'leave_unrestored_pixels':sum(before[i:i+3]!=left[i:i+3] for i in range(0,len(before),3)),'rect':[x,y,w,h]})
+            if before==active:errors.append('native GPU button did not visibly change on hover')
+            if before!=left:errors.append('native GPU hover paint did not reset on leaving the view')
     if 'click-missing' in text: errors.append('a control was missing from the shared product geometry')
     if 'inspector finished' not in text:errors.append('test script did not finish')
     if code not in (0,-signal.SIGTERM): errors.append(f'app exit {code}')
@@ -354,7 +374,7 @@ def run_round(app, output, n):
     if n not in (6,9,16) and any(count!=1 for count in counts):errors.append('detached window changed CLI terminal inventory')
     if n in (6,9,16) and (not counts or max(counts)!=2 or any(count not in (1,2) for count in counts)):errors.append('intentional second source was not represented exactly once')
     if n==9 and counts and counts[-1]!=1:errors.append('closing the second owner retained a terminal')
-    result={'round':n,'root':str(root),'passed':not errors,'errors':errors,'states':states,'cli':observations,'captures':[str(p.with_suffix('.png')) for p in captures],'focus_transports':re.findall(r'inspector focus-(?:owner|input) transport=(\S+)',text),'cursors':actual_cursors,'app_exit':code,'harness_cleanup_signal':code==-signal.SIGTERM}
+    result={'round':n,'root':str(root),'passed':not errors,'errors':errors,'states':states,'cli':observations,'captures':[str(p.with_suffix('.png')) for p in captures],'focus_transports':re.findall(r'inspector focus-(?:owner|input) transport=(\S+)',text),'pixel_checks':pixel_checks,'cursors':actual_cursors,'app_exit':code,'harness_cleanup_signal':code==-signal.SIGTERM}
     (dest/'result.json').write_text(json.dumps(result,indent=2))
     return result
 

@@ -21,7 +21,7 @@ GUI는 `⌥⌘I` 또는 View → Terminal Inspector다.
 실제 AppKit·Metal 앱의 적대적 시나리오 10회와 매회 CLI 왕복을 검증한다.
 `--start 11 --rounds 10`은 추가 시나리오 11~20(커서·UTF-8 한계·조합·대상 전환·Paused refresh·재열기·도크 공존)을 실행한다.
 `--start 21 --rounds 10`은 닫기/재열기·Escape·export·저장 실패·단축키 override/unbind·
-UTF-8 포화·가로/세로 크기 기억·잘못된 CLI selector를 추가 검사한다. 전체는 `--rounds 30`이다.
+UTF-8 포화·가로/세로 크기 기억·잘못된 CLI selector를 추가 검사한다. `--start 31 --rounds 2`는 attached/detached 버튼 hover의 실제 GPU 변경·이탈 복원 픽셀을 검사한다. 전체는 `--rounds 32`다.
 커서는 제품 NSView의 mouseMoved 뒤 실제 `NSCursor.current`를 읽어 판정한다.
 백그라운드 포커스 검사의 window delegate fallback 여부는 `focus_transports`에 기록한다.
 이 검사는 NSEvent와 native marked-text callback을 사용하며 실제 HID·OS 입력기 검증은 별도다.

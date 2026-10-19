@@ -164,6 +164,8 @@ class Controller {
  var smokeInserts=0
  var smokeMarks=0
  var editorState:(selected:NSRange,marked:NSRange)?=nil
+ var chromeGeneration:UInt64?
+ func chromeIMEGeneration(in view:View)->UInt64? { chromeGeneration }
  var normalizes=true
  func normalizedKeyEvent(from event:NSEvent)->StubKey? { normalizes ? StubKey() : nil }
 @@TRANSACTION@@
@@ -171,8 +173,8 @@ class Controller {
  func imeMarked(_ text:String) { marks.append(text) }
  func imeMarked(_ text:String,selectedRange:NSRange,replacementRange:NSRange) { marks.append(text) }
  func imeDeleteBackward() { deletes+=1 }
- func editorIMEState()->(selected:NSRange,marked:NSRange)? { editorState }
- func editorIMESubstring(_ range:NSRange)->(text:String,range:NSRange)? { ("한",range) }
+ func inputIMEState()->(selected:NSRange,marked:NSRange)? { editorState }
+ func inputIMESubstring(_ range:NSRange)->(text:String,range:NSRange)? { ("한",range) }
  func recordSessionHostInputSmokeInsert() { smokeInserts+=1 }
  func recordSessionHostInputSmokeMarked() { smokeMarks+=1 }
  func editorOwnsChord(_ event:NSEvent)->Bool { ownsChord }
@@ -186,7 +188,7 @@ class Controller {
 @@METHOD3@@
 @@METHOD4@@
 }
-class Context { var discards=0; var onDiscard:(()->Void)?; func discardMarkedText() { discards += 1; onDiscard?() } }
+class Context { func handleEvent(_ event:NSEvent)->Bool { false }; var discards=0; var onDiscard:(()->Void)?; func discardMarkedText() { discards += 1; onDiscard?() } }
 class BaseView { var superKeys=0; func performKeyEquivalent(with event:NSEvent)->Bool { superKeys+=1; return false }; var resigns=0; func resignFirstResponder() -> Bool { resigns += 1; return true }; func doCommand(by selector:Selector) {} }
 class View: BaseView {
  func hasMarkedText()->Bool { !markedTextBuffer.isEmpty }
@@ -197,6 +199,7 @@ class View: BaseView {
  var markedSelection = NSRange(location: 1, length: 2)
  var pendingUnmarkText: String? = "글"
  var imeOwnerGeneration:UInt64=0
+ var forwardingChromeIMEGeneration:UInt64?
  var interpretingIMEGeneration:UInt64?
  var pendingUnmarkGeneration:UInt64?=0
  var discardingIMECallbacks=false
@@ -271,6 +274,20 @@ print("PASS checks=\(checks) commitCalls=\(commitCalls) focusCalls=\(focusCalls)
 '''
 
 CALLBACK_TESTS = r'''
+// The dedicated chrome client must forward the current owner token. This
+// exercises extracted callback guards; the controller remains an explicit stub.
+for (owner, forwarded, accepted) in [(UInt64(7), UInt64(7), true), (7, 8, false)] {
+ let chrome=View();chrome.controller!.chromeGeneration=owner
+ chrome.forwardingChromeIMEGeneration=forwarded
+ chrome.setMarkedText("새",selectedRange:NSRange(location:1,length:0),replacementRange:NSRange(location:NSNotFound,length:0))
+ check(chrome.controller!.marks==(accepted ? ["새"]:[]),"chrome callback owner")
+}
+let untagged=View();untagged.controller!.chromeGeneration=7
+untagged.insertText("늦음",replacementRange:NSRange(location:NSNotFound,length:0))
+check(untagged.controller!.inserts.isEmpty,"chrome rejects direct terminal callback")
+let retired=View();retired.forwardingChromeIMEGeneration=7
+retired.insertText("늦음",replacementRange:NSRange(location:NSNotFound,length:0))
+check(retired.controller!.inserts.isEmpty,"terminal rejects retired chrome callback")
 let absent=NSRange(location:NSNotFound,length:0)
 let selected=NSRange(location:1,length:0)
 let backspace = #selector(NSStandardKeyBindingResponding.deleteBackward(_:))
@@ -362,7 +379,7 @@ import CoreGraphics
 import Darwin
 class NSEvent { var locationInWindow=CGPoint.zero; var buttonNumber=0 }
 class NSView { func convert(_ p: CGPoint, from: NSView?) -> CGPoint { p } }
-class MaruMetalTerminalView: NSView { var inspectorOwner:Int?=nil; var attempts=0; var admitted=false; func commitMarkedTextIfComposing() -> Bool { attempts+=1; return admitted } }
+class MaruMetalTerminalView: NSView { var inputContext:Int?; var inspectorOwner:Int?=nil; var attempts=0; var admitted=false; func commitMarkedTextIfComposing() -> Bool { attempts+=1; return admitted } }
 var dispatches=0
 var inspectorDispatches=0
 var inspectorDispatchedIn:[Int?]=[]
@@ -467,7 +484,7 @@ def run(source_path):
     host = HOST_TEMPLATE
     for i, (owner, name) in enumerate(specs):
         host = host.replace(f"@@METHOD{i}@@", extract_method(source, masked, owner, name))
-    callbacks = ["acceptsIMECallback", "invalidateIMECallbacks", "discardAdmittedMarkedText",
+    callbacks = ["acceptsIMEKeyTransaction", "acceptsIMECallback", "invalidateIMECallbacks", "discardAdmittedMarkedText",
                  "insertText", "setMarkedText", "unmarkText", "doCommand"]
     host = host.replace("@@CALLBACKS@@", "\n".join(
         extract_method(source, masked, view, name) for name in callbacks))
@@ -497,7 +514,7 @@ def run(source_path):
     print(f"source={source_path} sha256={hashlib.sha256(source.encode('utf-8')).hexdigest()}", flush=True)
     with tempfile.TemporaryDirectory(prefix="maru-ime-ack-host-") as directory:
         root = Path(directory)
-        for name, code, expected in [("host", host, "PASS checks=253"),
+        for name, code, expected in [("host", host, "PASS checks=257"),
                                      ("mouse", mouse, "failed_cases=0"),
                                      ("press", press, "press_failed=0")]:
             swift = root / f"{name}.swift"

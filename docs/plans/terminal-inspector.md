@@ -73,3 +73,14 @@ wire 확장, 웹 DevTools, SSH cwd 선택 정책 변경은 별도 이니셔티�
 
 - focus 하네스 보완 후 기존10 + 추가10 전체 **20/20**을 같은 최종 앱에서 재실행했다.
   `/tmp/maru-inspector-final-20/manifest.json`: 상태156건·커서58건·CLI129건·PNG14장.
+
+## 추가 적대적 검증 21~30 (2026-10-19)
+
+- 10/10 완료: 실제 앱 상태82건·raw CLI inspect52건·익명화 CLI4건·잘못된 selector 거절15건·GPU PNG4장.
+- 위치별 close/reopen의 마지막 배치·geometry, attached/detached Escape ownership, Paused JSON의
+  필터/탭/배치 불변, GUI·CLI 원본/익명화와0600, 저장 경로 충돌 보존·이후 입력, 단축키 unbind/override,
+  ASCII 포화 후 한글/emoji 경계, 가로·세로 크기 독립 보존, 잘못된 CLI 요청의 상태 불변을 확인했다.
+- 제품 로직 추가 수정 없음. 검증 fixture에는 지원하는 config 철자 `Alt`를 쓰고 config 거부 경고도 실패로 처리한다.
+- 사용자 지정 Ghostty/Chrome DevTools 레퍼런스와 Maru 확장 범위를 계약 문서에 기록했다.
+- GitHub `inspector` 라벨을 생성·PR에 적용하고 PR 체크리스트의 영역 목록도 동기화했다.
+- 실행·산출물은 검증 매트릭스를 따른다. 실제 HID/WindowServer 검증 범위를 확대했다는 뜻은 아니다.

@@ -49,6 +49,15 @@
   live CLI inspect `129`건, GPU PNG `14`장. `/tmp/maru-inspector-final-20/manifest.json`.
   명령 `python3 tools/inspector-app/run.py --rounds 20 --output /tmp/maru-inspector-final-20`.
   background delegate 전환 `31`회는 각 `focus_transports`에 기록했다.
+- 추가 21~30: `python3 tools/inspector-app/run.py --start 21 --rounds 10 --output /tmp/maru-inspector-third-verified`:
+  **10/10 통과**, 상태82건·raw CLI52건·익명화 CLI4건·invalid selector 거절15건·제품 PNG4장.
+  `/tmp/maru-inspector-third-verified/manifest.json`에 전체 판정과 각 round별 근거를 보존했다.
+  마지막 배치 복원, attached Escape→terminal과 detached Escape→Inspector 입력 경계,
+  filter/tab 변경 중 Paused JSON 동일성, HOME 내부 cwd의 GUI/CLI 익명화·원본과0600,
+  저장 디렉터리 대신 파일이 있는 실패 경로 보존·계속 입력, 기본 단축키 unbind와 사용자 override,
+  128byte ASCII 포화·혼합 UTF-8·backspace, 가로/세로 크기 기억, invalid CLI가 UI를 바꾸지 않음을 검사했다.
+- 테스트 fixture의 config 오류를 숨기지 않도록 override/unbind 시 config 경고도 실패 처리한다.
+  해당 설정에는 formatter가 쓰는 `Alt` 철자를 사용한다. 제품 동작 변경 없이 같은 최종 앱으로 확인했다.
 - 범위와 미지원 항목은 [계약](terminal-inspector.md), 진행은 [계획](plans/terminal-inspector.md)을 따른다.
 
 

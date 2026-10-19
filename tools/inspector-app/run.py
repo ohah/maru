@@ -121,6 +121,52 @@ def scenario(n, out):
         for index in [4,3,0,2,1]:
             lines.extend(['action toggle_file_panel_dock_side','sleep 200']);place(index)
         capture('ordinary-dock-coexistence')
+    elif n == 21:
+        for index in [0,3,2,1,4]:
+            place(index)
+            lines.extend(['inspect-click 17','sleep 250',f'inspect-report closed{index}','action toggle_inspector','sleep 400',f'inspect-report reopened{index}'])
+            expected.extend([(f'closed{index}',0,0),(f'reopened{index}',index+1,int(index==4))])
+    elif n == 22:
+        lines.extend(['inspect-click 6','inspect-text x','inspect-key 53 U+001B','inspect-report cleared','inspect-key 53 U+001B','inspect-report blurred','key 123 -','sleep 100','inspect-report terminal'])
+        expected.extend([('cleared',2,0),('blurred',2,0),('terminal',2,0)])
+        place(4,'detached')
+        lines.extend(['inspect-key 53 U+001B','inspect-report windowBlurred','inspect-key 123 -','sleep 100','inspect-report guarded','inspect-key 13 U+0077 32','sleep 350','inspect-report closed'])
+        expected.extend([('windowBlurred',5,1),('guarded',5,1),('closed',0,0)])
+    elif n == 23:
+        lines.extend(['inspect-click 13','inspect-click 16','sleep 250','inspect-click 6','inspect-text '+('x'*128)])
+        for tab in [20,21,22,23]:lines.append(f'inspect-click {tab}')
+        for index in [4,0,3,2,1]:place(index)
+        lines.append('inspect-click 16')
+    elif n == 24:
+        lines.extend(['inspect-click 13','inspect-click 16','sleep 250','inspect-click 7','inspect-click 16'])
+        place(4,'detached');capture('export-privacy',True);place(1,'redocked')
+    elif n == 25:
+        lines.extend(['inspect-click 16','sleep 200'])
+        for index in [4,0,3,2,1]:place(index)
+        lines.extend(['inspect-click 6','inspect-text survived','inspect-report alive']);expected.append(('alive',2,0))
+        capture('save-error')
+    elif n == 26:
+        lines.extend(['inspect-click 6','inspect-key 34 U+0069 40','inspect-report defaultUnbound']);expected.append(('defaultUnbound',2,0))
+        place(4,'detached')
+        lines.extend(['inspect-click 6','inspect-key 34 U+0069 40','inspect-report windowUnbound','inspect-click 17','sleep 300','inspect-report closed']);expected.extend([('windowUnbound',5,1),('closed',0,0)])
+    elif n == 27:
+        lines.extend(['inspect-click 6','inspect-key 2 U+0064 24','sleep 300','inspect-report customClosed','action toggle_inspector','sleep 350'])
+        expected.append(('customClosed',0,0));place(4,'detached')
+        lines.extend(['inspect-click 6','inspect-key 2 U+0064 24','sleep 350','inspect-report customWindowClosed']);expected.append(('customWindowClosed',0,0))
+    elif n == 28:
+        place(4,'detached')
+        lines.extend(['inspect-click 6','inspect-text '+('a'*256),'inspect-report saturated','inspect-text 한','inspect-report unchanged'])
+        lines.extend(['inspect-key 51 U+007F']*4)
+        lines.extend(['inspect-text 한','inspect-report mixed','inspect-text 😀','inspect-report overflow','inspect-key 51 U+007F','inspect-report removed'])
+        expected.extend([(tag,5,1) for tag in ['saturated','unchanged','mixed','overflow','removed']]);place(1,'redocked')
+    elif n == 29:
+        lines.extend(['inspect-drag -110 0','inspect-report widthSaved']);expected.append(('widthSaved',2,0))
+        place(2,'bottom');lines.extend(['inspect-drag 0 60','inspect-report heightSaved']);expected.append(('heightSaved',3,0))
+        place(3,'left');place(0,'top');place(4,'detached');place(1,'rightAgain');place(2,'bottomAgain')
+        capture('independent-axis-sizes')
+    elif n == 30:
+        for index in [4,3,0,2,1]:place(index)
+        capture('cli-errors-survivor')
     else:
         raise ValueError(f'unknown adversarial scenario {n}')
     lines.extend(['inspect-report done','mark finished','sleep 400','inspect-finish'])
@@ -130,10 +176,19 @@ def scenario(n, out):
 def run_round(app, output, n):
     root = pathlib.Path(tempfile.mkdtemp(prefix='mie-',dir='/tmp'))
     for name in ['home','cache','state','host','backups','work']: (root/name).mkdir()
-    (root/'work/README.md').write_text('# Inspector independent dock fixture\n')
-    (root/'demo.sh').write_text(f'cd "{root}/work"\nprintf "\\033]0;Inspector E2E {n}\\007\\033]7;file://{root}/work\\007\\033]133;A\\007Inspector E2E ready\\n"\nexec /bin/sh -i\n')
+    if n==24:(root/'home/work').mkdir()
+    work=root/('home/work' if n==24 else 'work')
+    (work/'README.md').write_text('# Inspector independent dock fixture\n')
+    (root/'demo.sh').write_text(f'cd "{work}"\nprintf "\\033]0;Inspector E2E {n}\\007\\033]7;file://{work}\\007\\033]133;A\\007Inspector E2E ready\\n"\nexec /bin/sh -i\n')
     config=root/'config'
-    config.write_text(f'session.keep-alive-after-quit=false\nworkspace.restore=false\nworkspace.root={root}/work\nshell.command=/bin/sh\nshell.args={root}/demo.sh\n')
+    config.write_text(f'session.keep-alive-after-quit=false\nworkspace.restore=false\nworkspace.root={work}\nshell.command=/bin/sh\nshell.args={root}/demo.sh\n')
+    if n in (26,27):
+        with config.open('a') as f:
+            f.write('keybind = Cmd+Alt+I = unbind\n')
+            if n==27:f.write('keybind = Ctrl+Alt+D = toggle_inspector\n')
+    if n==25:
+        collision=root/'home/.cache/maru/inspector';collision.parent.mkdir(parents=True)
+        collision.write_text('occupied')
     dest=output/f'round-{n:02d}';dest.mkdir()
     script,expected,captures=scenario(n,dest)
     (dest/'input.txt').write_text(script)
@@ -157,6 +212,15 @@ def run_round(app, output, n):
                 if q.returncode==0:
                     inspection=subprocess.run([str(cli),'session','inspect','1','--json'],env=env,capture_output=True,text=True,timeout=3)
                     observation.update(inspect_code=inspection.returncode,inspection=inspection.stdout,inspect_stderr=inspection.stderr)
+                if q.returncode==0 and n==24:
+                    anon=subprocess.run([str(cli),'session','inspect','1','--json','--anonymize'],env=env,capture_output=True,text=True,timeout=3)
+                    observation.update(anonymized_code=anon.returncode,anonymized=anon.stdout)
+                if q.returncode==0 and n==30:
+                    invalid=[]
+                    for selector in ['0','18446744073709551616','invalid']:
+                        rejected=subprocess.run([str(cli),'session','inspect',selector,'--json'],env=env,capture_output=True,text=True,timeout=3)
+                        invalid.append({'selector':selector,'code':rejected.returncode,'stdout':rejected.stdout,'stderr':rejected.stderr})
+                    observation['invalid']=invalid
                 observations.append(observation)
                 last_query=time.monotonic()
             if report.exists() and 'inspector finished' in report.read_text():break
@@ -168,6 +232,7 @@ def run_round(app, output, n):
             except subprocess.TimeoutExpired:os.killpg(process.pid,signal.SIGKILL);code=process.wait()
             if not (report.exists() and 'inspector finished' in report.read_text()): errors.append('app did not finish the scripted actions')
     text=report.read_text() if report.exists() else ''
+    if n in (26,27) and 'warning(config)' in (dest/'app.log').read_text():errors.append('keybinding fixture was rejected by the config parser')
     states={}
     for match in re.finditer(r'inspector label=(\S+) placement=(\d+) target=(\d+) owners=(\d+) tools=(\d+) flags=(\d+) keys=(\d+)(?: width=(\d+) height=(\d+))?',text):
         v=[int(x) if x is not None else 0 for x in match.groups()[1:]];states[match[1]]=dict(zip(['placement','target','owners','tools','flags','keys','width','height'],v))
@@ -232,6 +297,40 @@ def run_round(app, output, n):
     if n==18 and 'reopened' in states:
         if states['reopened']['flags']&6:errors.append('reopening did not restore Live/Follow')
         if states['reopened']['flags']>>16!=1:errors.append('reopening lost the filter')
+    if n==21:
+        for index in range(5):
+            before=next((state for tag,state in states.items() if tag.startswith('p') and state['placement']==index+1),None)
+            after=states.get(f'reopened{index}')
+            if not before or not after or (before['width'],before['height'])!=(after['width'],after['height']):errors.append(f'placement {index}: close/reopen lost remembered geometry')
+    if n==22:
+        if not states.get('cleared',{}).get('flags',0)&64 or states['cleared']['flags']>>16:errors.append('first Escape did not clear text while keeping filter focus')
+        if states.get('blurred',{}).get('flags',0)&64:errors.append('second Escape did not release attached focus')
+        if states.get('terminal',{}).get('keys')!=states['start']['keys']+1:errors.append('attached blur did not restore terminal input')
+        if not states.get('windowBlurred',{}).get('flags',0)&64:errors.append('detached Escape released window input ownership')
+        if states.get('guarded',{}).get('keys')!=states.get('terminal',{}).get('keys'):errors.append('detached navigation leaked to PTY')
+    if n==23:
+        exports=sorted((root/'home/.cache/maru/inspector').glob('*.json'))
+        if len(exports)!=2 or exports[0].read_bytes()!=exports[1].read_bytes():errors.append('filter/tab/placement mutated the paused diagnostic JSON')
+    if n==24:
+        exports=sorted((root/'home/.cache/maru/inspector').glob('*.json'))
+        if len(exports)!=2:errors.append('privacy toggle did not produce exactly two exports')
+        else:
+            anon,raw=[json.loads(p.read_text()) for p in exports]
+            if str(root/'home') in anon['path']['selected_cwd'] or raw['path']['selected_cwd']!=str(work):errors.append('GUI export redaction/raw contract failed')
+            if set(anon)!=set(raw) or anon['schema']!=raw['schema']:errors.append('redaction changed JSON structure')
+            if any(p.stat().st_mode&0o777!=0o600 for p in exports):errors.append('privacy export permissions are not0600')
+    if n==25:
+        if (root/'home/.cache/maru/inspector').read_text()!='occupied':errors.append('save failure overwrote the colliding path')
+        if states.get('alive',{}).get('flags',0)>>16!=8:errors.append('save error prevented later input')
+    if n==28:
+        for tag,wanted in [('saturated',128),('unchanged',128),('mixed',127),('overflow',127),('removed',124)]:
+            if states.get(tag,{}).get('flags',0)>>16!=wanted:errors.append(f'{tag}: saturated mixed UTF8 filter expected {wanted} bytes')
+    if n in (26,27,28) and states.get('done',{}).get('keys')!=states['start']['keys']:errors.append('filter binding/text key reached terminal routing')
+    if n==29:
+        for tag in ['left','rightAgain']:
+            if states.get(tag,{}).get('width')!=states['widthSaved']['width']:errors.append(f'{tag}: horizontal size was not retained')
+        for tag in ['top','bottomAgain']:
+            if states.get(tag,{}).get('height')!=states['heightSaved']['height']:errors.append(f'{tag}: vertical size was not retained')
     if 'click-missing' in text: errors.append('a control was missing from the shared product geometry')
     if 'inspector finished' not in text:errors.append('test script did not finish')
     if code not in (0,-signal.SIGTERM): errors.append(f'app exit {code}')
@@ -243,6 +342,14 @@ def run_round(app, output, n):
     for observation in successful:
         if observation.get('inspect_code')!=0:errors.append('live CLI inspect request failed');break
         if json.loads(observation['inspection']).get('schema')!='maru.inspector.v1':errors.append('CLI inspect schema changed');break
+    if n==24:
+        for observation in successful:
+            if observation.get('anonymized_code')!=0:errors.append('CLI anonymized inspection failed');continue
+            raw=json.loads(observation['inspection']);anon=json.loads(observation['anonymized'])
+            if str(root/'home') in anon['path']['selected_cwd'] or raw['path']['selected_cwd']!=str(work):errors.append('CLI raw/anonymized cwd contract failed')
+    if n==30:
+        for observation in successful:
+            if len(observation.get('invalid',[]))!=3 or any(x['code']==0 for x in observation.get('invalid',[])):errors.append('invalid inspect selector was accepted')
     counts=[len(re.findall(r'^\[\d+\] terminal',o['output'],re.M)) for o in successful]
     if n not in (6,9,16) and any(count!=1 for count in counts):errors.append('detached window changed CLI terminal inventory')
     if n in (6,9,16) and (not counts or max(counts)!=2 or any(count not in (1,2) for count in counts)):errors.append('intentional second source was not represented exactly once')

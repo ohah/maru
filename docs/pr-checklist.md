@@ -32,6 +32,7 @@ gh pr edit <번호> --add-assignee ohah --add-label <영역>,<성격>
 | `renderer` | draw-list·Metal·프레임 투영·스레딩 | `renderer` `render` `io-render` |
 | `font` | 폰트 로딩·셰이핑·글리프 atlas | `font` `glyph` |
 | `chrome` | Zig+GPU UI — 사이드바·탭·모달·팔레트·세팅 GUI·주소창 필드 | `chrome` `sidebar` `settings` `palette` `text-field` |
+| `inspector` | 터미널 진단 snapshot·독립 도크/창·CLI inspect | `inspector` |
 | `file-panel` | 파일 패널·뷰어/편집기·파일 트리·도크 | `file-panel` `file-tree` `mermaid` |
 | `editor` | 네이티브 편집기 — 문서 모델(버퍼·selection·undo)·시각 매핑·syntax·diff 본문 | `editor` `diff` `syntax` |
 | `lsp` | 언어 서버 — 진단·자동완성·정의로 이동·포맷·서버 수명. **`editor`와 함께 단다**(표시는 편집기, 실행·신뢰는 [editor-surface-tooling.md](editor-surface-tooling.md) §8.1) | `lsp` `diagnostics` `completion` |

@@ -7,11 +7,28 @@ export fn maru_editor_save_as_probe(stage: u32) callconv(.c) i32 {
     if (term.surface.id != save_as_surface or term.kind != .editor) return -1;
     const doc = term.rt.editorDocument();
     if (stage == 1) return if (std.mem.eql(u8, doc.opened.?.file.content, "foo")) 1 else -1;
+    const scenario = std.mem.span(std.c.getenv("MARU_EDITOR_SAVE_AS_SCENARIO") orelse "save");
+    if (stage == 5) return if (@import("editor/save/as.zig").pending() != 0 and std.mem.endsWith(u8, doc.path.?, "save-as-source.txt") and std.mem.eql(u8, doc.opened.?.file.content, "foo!")) 1 else -1;
     if (stage == 4) {
         if (@import("editor/save/as.zig").pending() != 0) return 0;
         std.debug.print("SAVE_AS_RESULT name={s} dirty={any} bytes={d}\n", .{ std.fs.path.basename(doc.path.?), editor_ops.isDirty(term), doc.opened.?.file.content.len });
-        return if (std.mem.endsWith(u8, doc.path.?, "save-as-destination.txt") and !editor_ops.isDirty(term) and std.mem.eql(u8, doc.opened.?.file.content, "foo!")) 1 else -1;
+        const cancelled = std.mem.eql(u8, scenario, "cancel");
+        const edited = std.mem.eql(u8, scenario, "edit-during-write");
+        const name = if (cancelled) "save-as-source.txt" else "save-as-destination.txt";
+        const content = if (edited) "foo!?" else "foo!";
+        return if (std.mem.endsWith(u8, doc.path.?, name) and editor_ops.isDirty(term) == (cancelled or edited) and std.mem.eql(u8, doc.opened.?.file.content, content)) 1 else -1;
     }
+    return 1;
+}
+export fn maru_editor_save_as_history() callconv(.c) i32 {
+    const self = editor_project_search_session orelse return -1;
+    const term = pane_ops.activePane(self).activeTerm();
+    const doc = term.rt.editorDocument();
+    const before = self.allocator.dupe(u8, doc.opened.?.file.content) catch return -1;
+    defer self.allocator.free(before);
+    if (!editor_ops.undoEdit(self, term) or std.mem.eql(u8, before, doc.opened.?.file.content)) return -1;
+    if (!editor_ops.redoEdit(self, term) or !std.mem.eql(u8, before, doc.opened.?.file.content)) return -1;
+    std.debug.print("SAVE_AS_HISTORY undo=true redo=true\n", .{});
     return 1;
 }
 export fn maru_editor_save_as_setup() callconv(.c) void {

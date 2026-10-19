@@ -4366,4 +4366,7 @@ main queue 대기는 FPS가 아니며, 지연 주입은 실제 원격 파일시�
 실제 기본 저장은 [Save As 계획](plans/editor-save-as.md)의 앱 하네스로 ⌘⇧S·sheet 이름/소유 창,
 ScreenCaptureKit 패널 이미지·native 접근성 확인·대화상자 종료·실제 저장 완료 뒤 원본 보존과
 새 파일 bytes·문서 경로·dirty 해제를 검증한다. 편집기 전/후 이미지는 Metal readback이다.
-이 결과는 물리 IME·VoiceOver나 GUI 취소·저장 중 추가 입력의 증거가 아니다.
+후속 `--save-as-scenario cancel`은 실제 취소 뒤 원본 경로·dirty·본문과 목적지 미생성을,
+`edit-during-write`는 writer 진입 동기화 뒤 추가 입력·이전 snapshot 저장·새 본문 유지를
+검증했다. 세 시나리오의 Undo/Redo와 Metal 이미지도 확인했다.
+이 결과는 물리 IME·VoiceOver의 증거가 아니다.

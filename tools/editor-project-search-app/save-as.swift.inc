@@ -1,7 +1,14 @@
 // 실제 NSEvent로 명령을 보내고 제품 NSSavePanel을 그대로 조작한다.
 @_silgen_name("maru_editor_save_as_probe") private func editorSaveAsProbe(_ stage: UInt32) -> Int32
 @_silgen_name("maru_editor_save_as_setup") private func editorSaveAsSetup()
-@MainActor private enum EditorSaveAsRun { static var stage: UInt32 = 0; static var next = 0.0; static var timer: Timer?; static var confirming = false }
+@_silgen_name("maru_editor_save_as_history") private func editorSaveAsHistory() -> Int32
+@MainActor private enum EditorSaveAsRun {
+    static var stage: UInt32 = 0
+    static var next = 0.0
+    static var timer: Timer?
+    static var confirming = false
+    static var editedDuringWrite = false
+}
 extension MaruAppHostController {
     private func maybeRunSaveAsCommand() {
         guard !EditorSaveAsRun.confirming, EditorProjectSearchRun.stage < 99 else { return }
@@ -39,6 +46,21 @@ extension MaruAppHostController {
                 }
                 DispatchQueue.main.async { NSApp.terminate(nil) }
             }
+        }
+        if stage == 4, ProcessInfo.processInfo.environment["MARU_EDITOR_SAVE_AS_SCENARIO"] == "edit-during-write",
+           !EditorSaveAsRun.editedDuringWrite {
+            guard let root = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_OUTPUT"] else { finish(false, "writer_root"); return }
+            let directory = URL(fileURLWithPath: root)
+            let entered = directory.appendingPathComponent("save-as-writer-entered")
+            guard FileManager.default.fileExists(atPath: entered.path) else { EditorSaveAsRun.next = now + 0.02; return }
+            guard (try? Data(contentsOf: entered)) == Data("foo!".utf8), editorSaveAsProbe(5) == 1 else { finish(false, "writer_admission"); return }
+            EditorSaveAsRun.editedDuringWrite = true
+            view.insertText("?", replacementRange: NSRange(location: NSNotFound, length: 0))
+            guard editorProjectSearchCapture("save-as-edit-pending") else { finish(false, "writer_edit_capture"); return }
+            do { try Data().write(to: directory.appendingPathComponent("save-as-writer-release"), options: .atomic) }
+            catch { finish(false, "writer_release"); return }
+            EditorSaveAsRun.next = now + 0.05
+            return
         }
         let ready = editorSaveAsProbe(stage)
         if ready == 0 { EditorSaveAsRun.next = now + 0.02; return }
@@ -110,6 +132,7 @@ extension MaruAppHostController {
             FileHandle.standardError.write(Data("SAVE_AS stage=3 verified=true\n".utf8))
             return
         case 4:
+            guard editorSaveAsHistory() == 1, editorSaveAsProbe(4) == 1 else { finish(false, "undo_redo"); return }
             guard editorProjectSearchCapture("save-as-after") else { finish(false); return }
             finish(true); return
         default: finish(false); return

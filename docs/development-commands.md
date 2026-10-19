@@ -1699,6 +1699,9 @@ OOM·접수 뒤 취소 판정을 검증한다. NSSavePanel과 실제 저장 진�
 명시적 `--output`에도 링크가 없는 저장소 밖의 새 폴더를 사용한다. `/private/tmp`가
 패널에서 `/tmp`로 반환되면 기존 부모 링크 거절 계약에 따라 실패한다.
 Mac 화면 잠금·검은 캡처는 통과로 취급하지 않는다. 물리 한글 IME 검증은 별도다.
+`--save-as-scenario cancel`은 실제 Cancel과 목적지 미생성을,
+`--save-as-scenario edit-during-write`는 격리 writer 동기화 뒤 추가 입력·이전 snapshot 저장을
+검사한다. 두 옵션은 native 캡처 앱이 필수이며 Undo/Redo도 검사한다.
 현재 남은 정책/검증은 [Save As 계획](plans/editor-save-as.md)을 따른다.
 
 `python3 tools/test-editor-formatter-wait.py`는 격리 저장소에서 EXFB3의 정상·6초 지연·

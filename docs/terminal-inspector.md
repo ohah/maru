@@ -5,8 +5,8 @@
 unbind할 수 있다. 파일·SCM 도크와 별개인 독립 도구 화면이며 모달이나 workspace Pane이 아니다.
 상·하·좌·우 배치와 구분선 크기 조절, 별도 OS 창으로 분리·재도킹을 지원한다. 터미널과 진단 화면을 동시에 사용할 수 있다. Trace 파일의 단계별 HTML replay 뷰어와는 별개다.
 
-검사 대상은 선택한 **터미널 surface의 관측 상태**다. UI 컴포넌트 tree를 탐색하거나,
-화면 요소를 가리켜 bounding box와 layout/style 속성을 표시하는 요소 선택기는 이 계약 밖이다.
+기존 네 진단 탭은 선택한 **터미널 surface의 관측 상태**를 검사한다.
+Elements 탭은 [UI 요소 선택기](plans/ui-inspector.md) 계약으로 소유 창의 published UI tree를 검사한다.
 
 ## GUI와 CLI의 공통 계약
 
@@ -31,6 +31,7 @@ ID는 GUI surface ID다. session-host runtime ID와 혼용하지 않는다.
 | Path/SSH | `path` | 최종 cwd와 출처·이유, OSC 7, 훅 cwd·host·신선도, SSH 목적지, 원격 SCM 후보 판정, 창의 Explorer 표시 상태 | 기존 cwd/SCM 결정 함수, OSC7 관측, agent hook slot, 파일 트리 상태 |
 | Terminal | `terminal` | 크기·커서·모드·semantic prompt·foreground pgid, 지원하는 scroll region | runtime observation과 lock 아래 renderSnapshot/core |
 | Events | `events` | 첫 진단 이후의 유한 이벤트 기록, 샘플 변경과 셸 protocol 이벤트 구분, eviction 수 | 유계 history의 sample 변화와 활성 local OSC7/133 drain |
+| Elements | `elements` | Pick 모드, hovered/selected 요소, source/ID/parent/generation·role·bounds·action/cursor, 지원 범위와 node 한도 | 화면·입력과 같은 published UiRectTree |
 
 Explorer 값은 대상 터미널 소유의 경로가 아니라 **그 창이 현재 표시하는 상태**다.
 Pin으로 다른 터미널을 고르면 대상의 cwd와 창의 Explorer root가 다를 수 있다.
@@ -150,3 +151,8 @@ read-only control rect/target 관측을 전달하며 JSON schema `maru.inspector
   dock, 별도 window, 마지막 위치 복원을 참고한다. **위쪽 dock은 사용자 승인에 따른 Maru 확장**이다.
 - 필터와 terminal의 Escape 경계, Follow/Pin/Paused, export 익명화·권한은 이 문서의 Maru 계약을 따른다.
   Chrome의 Drawer Escape 동작을 별도 Drawer가 없는 현재 Inspector에 그대로 옮기지 않는다.
+
+## UI 요소 검사
+
+2026-10-20 승인한 [UI 요소 선택기](plans/ui-inspector.md)를 별도 Elements 탭으로 구현했다.
+terminal diagnostics의 데이터·키바인딩 계약은 유지하며, 지원되는 published UI tree와 한계는 해당 계획이 소유한다.

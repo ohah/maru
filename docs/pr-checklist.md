@@ -40,7 +40,7 @@ gh pr edit <번호> --add-assignee ohah --add-label <영역>,<성격>
 | `renderer` | draw-list·Metal·프레임 투영·스레딩 | `renderer` `render` `io-render` |
 | `font` | 폰트 로딩·셰이핑·글리프 atlas | `font` `glyph` |
 | `chrome` | Zig+GPU UI — 사이드바·탭·모달·팔레트·세팅 GUI·주소창 필드 | `chrome` `sidebar` `settings` `palette` `text-field` |
-| `inspector` | 터미널 진단 snapshot·독립 도크/창·CLI inspect | `inspector` |
+| `inspector` | 터미널 진단 snapshot·UI 요소 선택·독립 도크/창·CLI inspect | `inspector` |
 | `file-panel` | 파일 패널·뷰어/편집기·파일 트리·도크 | `file-panel` `file-tree` `mermaid` |
 | `editor` | 네이티브 편집기 — 문서 모델(버퍼·selection·undo)·시각 매핑·syntax·diff 본문 | `editor` `diff` `syntax` |
 | `lsp` | 언어 서버 — 진단·자동완성·정의로 이동·포맷·서버 수명. **`editor`와 함께 단다**(표시는 편집기, 실행·신뢰는 [editor-surface-tooling.md](editor-surface-tooling.md) §8.1) | `lsp` `diagnostics` `completion` |
@@ -92,11 +92,11 @@ gh pr edit <번호> --add-assignee ohah --add-label <영역>,<성격>
 
 ## CI 게이트 — 무엇이 머지를 막나 (2026-08-31 사용자 결정)
 
-**required check 는 여섯이다**: `check` · `require label and assignee=ohah` · `core performance budget` ·
-`file explorer macOS product path` · `web build and security fixtures` · `check-boundaries`.
+**required check 는 일곱이다**: `check` · `require label and assignee=ohah` · `core performance budget` ·
+`file explorer macOS product path` · `web build and security fixtures` · `check-boundaries` · `macOS-only gates`.
 `check-boundaries`는 `.github/workflows/ci.yml`의 네 인덱스 샤드를 합산하는 집계 잡이다. 샤드 하나의 통과가 아니라
 전체 집계의 통과가 필요하다. 필수 목록의 실제 권위는 GitHub main branch protection이며, 위 목록은
-2026-09-16 `gh api repos/ohah/maru/branches/main/protection/required_status_checks`로 대조했다.
+2026-10-20 `gh api repos/ohah/maru/branches/main/protection/required_status_checks`로 대조했다.
 
 **session-host 잡 셋은 required 에서 빠졌고, PR 에서 아예 돌지 않는다**(`session host macOS (Debug)` ·
 `session host bundled CLI macOS` · `session host slow observer macOS`). push(main)·수동 실행에서만 돈다.
@@ -107,7 +107,7 @@ gh pr edit <번호> --add-assignee ohah --add-label <영역>,<성격>
 막지 않는다.
 
 **`file explorer macOS product path` 는 남겼다** — 골든·CoreText·provider 무변경·AppSession 전수·
-`test-macos-only` 가 전부 그 잡에 묶여 있어 **macOS 제품 경로를 지키는 유일한 required 게이트**다.
+`test-macos-only` 가 전부 그 잡에 묶여 있어 **macOS 제품 경로를 지키는 required 게이트**다.
 
 되돌리려면 ⑴ 그 셋의 `if:` 에서 `github.event_name != 'pull_request'` 를 빼고 ⑵ branch protection 의
 required 목록에 다시 넣는다(저장소 설정이라 코드에는 없다).

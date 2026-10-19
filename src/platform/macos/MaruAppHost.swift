@@ -9641,6 +9641,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 var inspectorRect = [UInt32](repeating: 0, count: 4)
                 _ = inspectorRect.withUnsafeMutableBufferPointer { maru_macos_app_session_inspector_control_rect(session, 2, $0.baseAddress) }
                 Self.testReport("inspector label=\(line.count > 1 ? line[1] : "state") placement=\(maru_macos_app_session_inspector_placement(session)) target=\(maru_macos_app_session_inspector_target(session)) owners=\(windows.count) tools=\(inspectorWindows.count) flags=\(maru_macos_app_session_inspector_flags(session)) keys=\(latestFrameSummary.key_events) width=\(inspectorRect[2]) height=\(inspectorRect[3])")
+            // Test-only coordinate fixture comes from the live CLI tree, rather
+            // than a second copy of product layout math in the harness.
+            case "inspect-owner-pointer" where line.count >= 3:
+                if let data = try? Data(contentsOf: URL(fileURLWithPath: line[1])),
+                   let point = (try? JSONSerialization.jsonObject(with: data)) as? [String: Double],
+                   let x = point["x"], let y = point["y"],
+                   let target = Self.firstTerminalView(in: view) {
+                    let scale = archiveSmokeRenderScale(target.window)
+                    let local = NSPoint(x: x / scale, y: target.bounds.height - y / scale)
+                    let location = target.convert(local, to: nil)
+                    if line[2] == "click" {
+                        if let down = Self.testButtonMouseEvent(.leftMouseDown, 0, location, 1), let up = Self.testButtonMouseEvent(.leftMouseUp, 0, location, 1) {
+                            target.mouseDown(with: down); target.mouseUp(with: up)
+                        }
+                    } else if let event = Self.testButtonMouseEvent(.mouseMoved, 0, location, 0) { target.mouseMoved(with: event) }
+                    Self.testReport("inspector-owner-pointer phase=\(line[2]) cursor=\(Self.testCursorName(NSCursor.current))")
+                }
             case "inspect-hover" where line.count >= 3:
                 let tool = activeSurface.flatMap { inspectorWindows[$0.token] }
                 let target = tool?.container.terminalView ?? Self.firstTerminalView(in: view)

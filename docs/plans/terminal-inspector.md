@@ -105,3 +105,9 @@ wire 확장, 웹 DevTools, SSH cwd 선택 정책 변경은 별도 이니셔티�
   추가 회귀 5회, 제품 PNG. 상세 증거는 검증 매트릭스를 따른다.
 - 완료: 전체 `check-boundaries -j2` exit 0.
 - 원격 CI와 머지는 PR checks에서 별도 추적한다. 실제 로컬 결과는 검증 매트릭스에 기록한다.
+
+## 후속: UI 요소 선택기
+
+2026-10-20 사용자 승인으로 [별도 UI 요소 계획](ui-inspector.md)을 구현했다.
+Elements는 published tree의 hover/클릭 상세와 같은 CLI DTO를 제공하며,
+terminal cell·미발행 chrome·웹 DOM은 지원하지 않는다. 검증은 검증 매트릭스의 UI 요소 절을 따른다.

@@ -5895,6 +5895,7 @@ pub const AppSession = struct {
 
     /// 본문 분리: app_session/scroll.zig(F8). ABI가 직접 부르므로 진입만 남긴다.
     pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool, x_px: f64, y_px: f64) void {
+        if (self.inspector.picking and !inspector_ops.contains(self, x_px, y_px)) return;
         if (inspector_ops.contains(self, x_px, y_px) and !self.anyModalOverlayOpen()) {
             inspector_ops.scroll(self, delta_y);
             return;
@@ -14020,6 +14021,10 @@ pub const AppSession = struct {
     }
 
     pub fn handleKeyEvent(self: *AppSession, event: terminal.KeyEvent) !FrameSummary {
+        if (self.inspector.picking and event.key == .escape and event.event_type != .release) {
+            inspector_ops.picker.cancel(self);
+            return input_ops.keyConsumedByApp(self);
+        }
         if (self.inputFocus() == .inspector) {
             inspector_ops.key(self, event);
             return input_ops.keyConsumedByApp(self);
@@ -15251,6 +15256,7 @@ pub const AppSession = struct {
     pub fn mouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
         if (sidebar_ops.activateRecoveredRowBeforeInitialSurface(self, kind, x_px, y_px, button)) return;
         if (!self.surface_initialized) return;
+        if (self.pointerGestureIs(.none) and !self.mouse_drag_selecting and inspector_ops.picker.pointer(self, kind, button, x_px, y_px)) return;
         if (kind == 1 and !self.anyModalOverlayOpen() and inspector_ops.visible(self) and !inspector_ops.contains(self, x_px, y_px)) inspector_ops.blur(self);
         if (!self.anyModalOverlayOpen() and (self.pointerGestureIs(.none) and !self.mouse_drag_selecting)) {
             if (inspector_ops.resizePointer(self, kind, x_px, y_px)) return;
@@ -18826,6 +18832,7 @@ pub const AppSession = struct {
         // 전제한다(`scrollbarGrabAt` 의 `activeSurface`, `navButtonHoverAt` 의 `activeTab`) — 2026-10-19 크래시 3 건.
         // 0 탭이면 tick 도 그리지 않으므로 hover 할 것이 없다.
         if (self.tabs.items.len == 0) return .default;
+        if (inspector_ops.picker.hover(self, x_px, y_px)) return .crosshair;
         if (!inspector_ops.contains(self, x_px, y_px) or self.anyModalOverlayOpen()) inspector_ops.clearHover(self);
         if (!self.anyModalOverlayOpen() and inspector_ops.dividerContains(self, x_px, y_px)) {
             return if (self.inspector.presentation.placement == .left or self.inspector.presentation.placement == .right) .resize_h else .resize_v;
@@ -22807,6 +22814,7 @@ pub const AppSession = struct {
                 // 배치+분배한다 — cross-pane 정합(한 atlas 세대). 활성은 active_result로 받아 아래에서 pane_frames 맨 뒤(커서
                 // suffix·floating 맨 위 직전)에 넣는다.
                 if (ft_on) ft_shape = std.Io.Clock.awake.now(self.io).nanoseconds; // shape(CoreText 수집) 끝 = place 시작
+                inspector_ops.picker.collectOutline(self);
                 inspector_ops.collect(self, &collected, pane_frame_builder, tabbar_colors);
                 self.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frames, &floating_pf, &sticky_pf, &active_result);
                 if (ft_on) ft_place = std.Io.Clock.awake.now(self.io).nanoseconds; // place(atlas 배치+분배) 끝 = assemble 시작
@@ -101562,4 +101570,56 @@ test "command palette dynamic IME keeps long input previews and failed keys isol
     session.imeEnd(null);
     try std.testing.expectEqual(@as(usize, 0), state.input.query.items.len);
     try std.testing.expect(ime.generation(session).? != token);
+}
+
+test "Live inspector picker consumes selection down up and rechecks published geometry" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1200, 800, 1000);
+    session.dispatchAppAction(.toggle_inspector);
+    session.status_bar_entry_count = 1;
+    session.status_bar_entry_scratch[0] = .{
+        .id = 42,
+        .parent_index = null,
+        .kind = .button,
+        .rect = .{ .x = 10, .y = 10, .width = 80, .height = 30 },
+        .effective_clip = null,
+        .action = .{ .id = 99, .enabled = false },
+    };
+    inspector_ops.picker.toggle(session);
+    try std.testing.expect(session.inspector.picking);
+    try std.testing.expectEqual(CursorKind.crosshair, session.hoverCursor(20, 20, 0));
+    try std.testing.expectEqual(@as(u64, 42), session.inspector.picker_hover.?.id);
+    session.mouse(1, 20, 20, 0, 0);
+    try std.testing.expect(!session.inspector.picking);
+    try std.testing.expect(session.inspector.picker_capture);
+    try std.testing.expect(session.swallow_multi_click);
+    try std.testing.expect(!session.mouse_drag_selecting);
+    session.mouse(3, 20, 20, 0, 0);
+    try std.testing.expect(!session.inspector.picker_capture);
+    try std.testing.expectEqual(@as(u64, 42), session.inspector.picker_selected.?.id);
+    session.status_bar_entry_count = 0;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const snap = try inspector_ops.picker.snapshot(session, arena.allocator(), 7);
+    try std.testing.expect(snap.object.get("selected").? == .null);
+    try std.testing.expectEqual(@as(i64, 7), snap.object.get("window").?.integer);
+    session.inspector.picker_capture = true;
+    try std.testing.expect(!inspector_ops.picker.pointer(session, 1, 0, 20, 20));
+    try std.testing.expect(!session.inspector.picker_capture);
+    session.inspector.paused = true;
+    inspector_ops.picker.toggle(session);
+    try std.testing.expect(!session.inspector.paused);
+    inspector_ops.close(session);
+    try std.testing.expect(!session.inspector.picking);
 }

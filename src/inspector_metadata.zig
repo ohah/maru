@@ -2,7 +2,7 @@
 //! Empty strings and false flags remain raw data; their availability is described separately.
 const std = @import("std");
 pub const Availability = enum { available, not_applicable, not_collected, unsupported, unavailable };
-pub const Source = enum { session_model, window_membership, runtime_observation, terminal_screen, local_core, osc7, agent_hook, kernel, scm_decision, explorer_state, inspector_history, sampling_policy };
+pub const Source = enum { published_ui_tree, session_model, window_membership, runtime_observation, terminal_screen, local_core, osc7, agent_hook, kernel, scm_decision, explorer_state, inspector_history, sampling_policy };
 pub const Reason = enum { none, no_session_host, window_unbound, local_terminal, no_shell_hook, no_observed_cwd, host_omitted, no_ssh_destination, host_transport_missing, observation_unavailable, foreground_unavailable, detail_not_ready, not_captured };
 pub const Info = struct { availability: Availability = .available, source: Source, reason: Reason = .none };
 
@@ -27,6 +27,7 @@ fn empty(value: std.json.Value) bool {
     return value == .null or (value == .string and value.string.len == 0);
 }
 fn sourceFor(root: std.json.Value, key: []const u8) Source {
+    if (std.mem.startsWith(u8, key, "elements.")) return .published_ui_tree;
     if (std.mem.eql(u8, key, "overview.window")) return .window_membership;
     if (std.mem.startsWith(u8, key, "overview.observ") or std.mem.eql(u8, key, "overview.sampled_at_ms")) return .runtime_observation;
     if (std.mem.startsWith(u8, key, "path.hook_")) return .agent_hook;
@@ -89,7 +90,7 @@ fn walk(a: std.mem.Allocator, root: std.json.Value, path: []const u8, value: std
 }
 pub fn collect(a: std.mem.Allocator, root: std.json.Value) !std.json.Value {
     var out: std.json.ObjectMap = .empty;
-    for ([_][]const u8{ "overview", "path", "terminal", "events" }) |section| {
+    for ([_][]const u8{ "overview", "path", "terminal", "events", "elements" }) |section| {
         const object = valueAt(root, section) orelse continue;
         if (object == .object) {
             var it = object.object.iterator();

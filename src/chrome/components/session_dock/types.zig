@@ -151,6 +151,8 @@ pub const Props = struct {
     /// 필드가 활성 입력 소유자가 보는 것을 그대로 그리면서도, 확정되지 않은 조합이 archive 투영을
     /// 바꾸는 일은 막는다.
     search_preedit: []const u8 = "",
+    /// Optional caret in the projected UTF-8 search document. Legacy hosts append preedit.
+    search_caret_byte: ?usize = null,
     search_focused: bool = false,
     search_cursor_visible: bool = false,
     loading: bool = false,

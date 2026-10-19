@@ -343,7 +343,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // `sidebar_header_height_px`·`titlebar_strip_px`·`sidebar_scroll_offset_px`)을 뺀다 — ABI 227 에서 draw 인자를 뺀 뒤에도
 // frame 필드로 남아 매 프레임 스탬프됐다. layout 이 바뀌므로(뒤 필드 offset 이동) 짝이 같이 올라간다.
 // 230: 비동기 편집기 저장의 main-actor 완료 pump와 정상 종료 대기 getter를 추가한다. 구조체 레이아웃은 불변이다.
-pub const abi_version: u32 = 231;
+// 231: independent Inspector presentation transport.
+// 232: search-owned UTF-16 context and immutable activation generation; editor exports stay editor-only.
+pub const abi_version: u32 = 232;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -7115,6 +7117,11 @@ pub const AppSession = struct {
     /// commit 전에는 목록 projection을 바꾸지 않는다.
     agent_session_archive_search: chrome.components.overlay_input.OverlayInput = .{},
     agent_session_archive_search_active: bool = false,
+    agent_session_search_ime: maru.inline_text_input.Context = .{},
+    agent_session_search_generation: u64 = 1,
+    ime_search_owner: ?u64 = null,
+    ime_search_before: ?maru.inline_text_input.Context = null,
+    ime_search_rejected: bool = false,
     agent_session_archive_scope: AgentSessionArchiveScope = .all,
     /// 목록 정렬 방향. 키는 늘 마지막 활동 시각이고 이 값은 **방향만** 정한다
     /// (docs/agent-session-list.md §2.3). 앱 실행 중에만 유지하며 디스크에 쓰지 않는다.
@@ -14223,7 +14230,7 @@ pub const AppSession = struct {
                 .char => |codepoint| codepoint == '/',
                 else => false,
             }) {
-                self.agent_session_archive_search_active = true;
+                _ = agent_dock.focusAgentSessionDockSearch(self);
                 self.metal_dirty = true;
                 return input_ops.keyConsumedByApp(self);
             }
@@ -15824,6 +15831,7 @@ pub const AppSession = struct {
             // AppKit responder 변화가 없을 수 있으므로 mouse policy도 같은 FocusOwner를 직접 갱신해야 한다.
             // 도크 카드 클릭은 `focus_owner`를 바꾸지 않으므로(계속 `.workspace`) 아래 조건만으로는
             // Session Dock의 component-local keyboard focus가 안 풀린다 — 그것부터 무조건 놓는다.
+            if (self.agent_session_archive_search_active and !@import("app_session/chrome_ime.zig").commitAll(self)) return;
             agent_dock.releaseAgentSessionDockKeyFocus(self);
             agent_activity_ops.releaseKeyFocus(self); // 크게 보기는 그대로 두고 키보드만 놓는다
             if (self.focus_owner != .workspace or self.pending_dock_focus != null) workspace_ops.focusWorkspaceInput(self);
@@ -16696,13 +16704,7 @@ pub const AppSession = struct {
                 agent_activity_ops.cancelBodySearch(self);
                 agent_activity_ops.rebuildFilter(self);
             },
-            .agent_session_search => if (self.agent_session_archive_search.commitPreedit(self.allocator)) {
-                agent_dock.rebuildAgentSessionArchiveFilter(self);
-                agent_dock.resetAgentSessionDockScroll(self);
-                self.agent_session_archive_selected = null;
-                agent_dock.closeAgentSessionInlineDetail(self);
-                self.metal_dirty = true;
-            },
+            .agent_session_search => return @import("app_session/chrome_ime.zig").commitAll(self),
             .addr_edit => if (self.addr_field.commitPreedit(self.allocator)) {
                 self.metal_dirty = true; // 조합 글자를 편집 텍스트로 확정(포커스 상실 등 엣지 — find/palette와 동형)
             },
@@ -88199,6 +88201,83 @@ test "Session Dock 검색은 사이드바 검색과 같은 입력 소유 판정�
     }
     session.scale_milli = prior_scale;
     session.agent_session_dock_entries.clearRetainingCapacity();
+
+    // Native text context exposes a queued commit before imeEnd, and reconversion replaces
+    // the old syllable instead of appending a second one. Invalid later callbacks roll back
+    // the entire key, and an old activation cannot steal a new search's query.
+    const search_ime = @import("app_session/chrome_ime.zig");
+    const input_before_context = session.total_terminal_input_bytes;
+    input_ops.imeBegin(session);
+    try std.testing.expect(search_ime.marked(session, "한", .{ .location = 1, .length = 0 }, null));
+    try std.testing.expectEqualStrings("", session.agent_session_archive_search.query.items);
+    try std.testing.expectEqualStrings("한", search_ime.projection(session).?.text());
+    try std.testing.expect(search_ime.insert(session, "한", null));
+    try std.testing.expectEqualStrings("", session.agent_session_archive_search.query.items);
+    try std.testing.expectEqual(@as(u64, 1), search_ime.projection(session).?.selectedRange().?.location);
+    input_ops.imeEnd(session, null);
+    try std.testing.expectEqualStrings("한", session.agent_session_archive_search.query.items);
+    try std.testing.expect(search_ime.insert(session, "韓", .{ .location = 0, .length = 1 }));
+    try std.testing.expectEqualStrings("韓", session.agent_session_archive_search.query.items);
+    try std.testing.expect(search_ime.insert(session, "😀", .{ .location = 0, .length = 1 }));
+    input_ops.imeBegin(session);
+    try std.testing.expect(search_ime.insert(session, "x", null));
+    try std.testing.expect(search_ime.insert(session, "invalid", .{ .location = 1, .length = 0 }));
+    input_ops.imeEnd(session, .{ .key = .{ .char = 'x' }, .modifiers = .{} });
+    try std.testing.expectEqualStrings("😀", session.agent_session_archive_search.query.items);
+    try std.testing.expectEqualStrings("😀", search_ime.projection(session).?.text());
+    const old_generation = search_ime.generation(session).?;
+    input_ops.imeBegin(session);
+    try std.testing.expect(agent_dock.blurAgentSessionDockSearch(session));
+    try std.testing.expect(agent_dock.focusAgentSessionDockSearch(session));
+    try std.testing.expect(old_generation != session.agent_session_search_generation);
+    try std.testing.expect(search_ime.insert(session, "stale", null));
+    input_ops.imeEnd(session, null);
+    try std.testing.expectEqualStrings("😀", session.agent_session_archive_search.query.items);
+    try std.testing.expectEqual(input_before_context, session.total_terminal_input_bytes);
+
+    // The very first reserve may fail. It cannot erase the old query, release the owner,
+    // publish half a composition, or replay this key into the terminal.
+    session.agent_session_archive_search.query.deinit(allocator);
+    session.agent_session_archive_search.preedit.deinit(allocator);
+    session.agent_session_archive_search = .{};
+    try session.agent_session_archive_search.query.appendSlice(allocator, "keep");
+    session.agent_session_search_ime.valid = false;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
+    session.allocator = failing.allocator();
+    input_ops.imeBegin(session);
+    _ = search_ime.insert(session, "new", null);
+    input_ops.imeEnd(session, .{ .key = .{ .char = 'n' }, .modifiers = .{} });
+    session.allocator = allocator;
+    try std.testing.expectEqualStrings("keep", session.agent_session_archive_search.query.items);
+    try std.testing.expect(session.agentSessionSearchOwnsInput());
+    try std.testing.expectEqual(input_before_context, session.total_terminal_input_bytes);
+    // A failed departure must preserve the visible owner and preedit, for both a
+    // view change and dock collapse. Restoring allocation admits the same operation.
+    try session.agent_session_archive_search.preedit.appendSlice(allocator, "한");
+    session.agent_session_search_ime.valid = false;
+    const dock_initialized_before = session.dock_initialized;
+    session.dock_initialized = true;
+    failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
+    session.allocator = failing.allocator();
+    workspace_ops.focusWorkspaceInput(session);
+    dock_ops.setDockView(session, .explorer);
+    file_panel_ops.activateFilePanelDockControl(session);
+    session.allocator = allocator;
+    try std.testing.expectEqual(dock_panel.View.agent_sessions, session.dock.view);
+    try std.testing.expect(!session.dock.collapsed);
+    try std.testing.expect(session.agentSessionSearchOwnsInput());
+    try std.testing.expectEqualStrings("keep", session.agent_session_archive_search.query.items);
+    try std.testing.expectEqualStrings("한", session.agent_session_archive_search.preedit.items);
+    file_panel_ops.activateFilePanelDockControl(session);
+    try std.testing.expect(session.dock.collapsed);
+    try std.testing.expect(!session.agent_session_archive_search_active);
+    try std.testing.expectEqualStrings("keep한", session.agent_session_archive_search.query.items);
+    try std.testing.expectEqualStrings("", session.agent_session_archive_search.preedit.items);
+    session.dock.collapsed = false;
+    session.dock_initialized = dock_initialized_before;
+    try std.testing.expect(agent_dock.focusAgentSessionDockSearch(session));
+    session.agent_session_archive_search.clear();
+    session.agent_session_search_ime.valid = false;
 
     // 타이핑도 같은 경로로 들어가고, override는 유지된다.
     for ("maru") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });

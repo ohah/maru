@@ -19,7 +19,12 @@ uint32_t maru_macos_editor_url_drain(struct MaruAppHostSession *session, uint8_t
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 231u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 232u
+/* Search-owned UTF-16 context; generation 0 means unavailable. Existing editor exports keep
+   their editor-only meaning. All calls are main-thread only; substring supports a size query. */
+uint64_t maru_macos_app_session_chrome_ime_generation(struct MaruAppHostSession *session);
+int maru_macos_app_session_chrome_ime_state(struct MaruAppHostSession *session, uint64_t *selected_location, uint64_t *selected_length, uint64_t *marked_location, uint64_t *marked_length);
+int maru_macos_app_session_chrome_ime_substring(struct MaruAppHostSession *session, uint64_t location, uint64_t length, uint8_t *bytes, size_t capacity, size_t *written, uint64_t *actual_location, uint64_t *actual_length);
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -898,6 +903,8 @@ typedef enum MaruAppHostIMECandidateObservationResult {
     MaruAppHostIMECandidateObservationPassed = 0,
     MaruAppHostIMECandidateObservationFailed = 1,
 } MaruAppHostIMECandidateObservationResult;
+/* Separate search transition schema; terminal publisher remains counter-invariant. */
+uint32_t maru_macos_chrome_ime_candidate_observation_publish(const uint8_t *transcript, size_t transcript_len, const char *output_path, size_t output_path_len);
 uint32_t maru_macos_session_host_ime_candidate_observation_publish(
     const uint8_t *transcript,
     size_t transcript_len,

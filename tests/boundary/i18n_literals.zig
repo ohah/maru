@@ -225,6 +225,8 @@ const inventory = [_]Entry{
     // 이 저장소의 다른 `@compileError` 도 한국어다. 늦게 추가한 handoff tag 를 필수로 두면
     // 업그레이드가 통째로 막히는데(2026-09-10 실측), 그 규칙을 주석이 아니라 컴파일 오류로 옮긴 자리다.
     .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .count = 2 },
+    // Fixed Korean IME evidence target hashes; fixture authority, never user-facing UI text.
+    .{ .path = "src/platform/macos/session_host/ime_candidate_evidence.zig", .count = 2 },
     .{ .path = "src/platform/macos/session_host/pending_event_preparation.zig", .count = 1 },
     .{ .path = "src/platform/macos/session_host/remote_runtime.zig", .count = 3 },
     .{ .path = "src/platform/macos/session_host/remote_screen.zig", .count = 2 },
@@ -325,7 +327,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 407; // +1: Save As 팔레트 검색 별칭(표시 안 됨) · +1: 포매터 정보 보기 검색 별칭(표시 안 됨 — tooling §8.2t) · +2: editor.formatter.<언어> 설정 진단 · +1: W10a 다운로드 목록 팔레트 검색 별칭 · +1: 소스 컨트롤 저장소 신뢰 검색 별칭(표시 안 됨 — 계획 WT6b-2a) · +1: 자동완성 목록 Lab 픽스처 낱말(§8.2g-e) · +1: 프로젝트 검색 팔레트 별칭 · +12: 검색 도크 컴포넌트 fixture · +1: 언어 서버 환경 변수 이름 보기 검색 별칭(표시 안 됨 — 계획 WT5b-1) · +1: 언어 서버 정보 보기 검색 별칭(표시 안 됨 — 계획 WT5a) · +1: 언어 서버 셸 환경 다시 읽기 검색 별칭(표시 안 됨 — 계획 WT3b) · +3: 언어 서버 신뢰 관리 검색 별칭(표시 안 됨 — 계획 WT4a) · +1: 아웃라인 열기 검색 별칭(표시 안 됨) · +4: 공유 편집기 분할 검색 별칭(표시 안 됨) · +2: workspace 복원 codec의 한글 경로 fixture · +1: 원격 훅 설치 시한 초과 재시도 사유(로그) · +115: 표시되지 않는 팔레트 한국어 검색 별칭 · +8: scm-turn-badges Lab 픽스처(AT3b-2) · +1: 진단 장면 Lab 픽스처(§5.4) · +2: 편집기 판정자의 큰 문서 픽스처 · +2: 인라인 위젯 행 Lab 픽스처(S1.5) · +1: e4d4 메타데이터 대기 진단 · +2: .frametime 단계 요약(§10.6) · +7: 코어 락 경합 진단(§13·§13.7·§12.9·플리커 신호) · +2: grid shaping 진단(§10.7) · +2: run 캐시 셰이핑 픽스처(§10.8)
+const header_total = 409; // +2: search candidate fixture target hashes (not UI) · +1: Save As 팔레트 검색 별칭(표시 안 됨) · +1: 포매터 정보 보기 검색 별칭(표시 안 됨 — tooling §8.2t) · +2: editor.formatter.<언어> 설정 진단 · +1: W10a 다운로드 목록 팔레트 검색 별칭 · +1: 소스 컨트롤 저장소 신뢰 검색 별칭(표시 안 됨 — 계획 WT6b-2a) · +1: 자동완성 목록 Lab 픽스처 낱말(§8.2g-e) · +1: 프로젝트 검색 팔레트 별칭 · +12: 검색 도크 컴포넌트 fixture · +1: 언어 서버 환경 변수 이름 보기 검색 별칭(표시 안 됨 — 계획 WT5b-1) · +1: 언어 서버 정보 보기 검색 별칭(표시 안 됨 — 계획 WT5a) · +1: 언어 서버 셸 환경 다시 읽기 검색 별칭(표시 안 됨 — 계획 WT3b) · +3: 언어 서버 신뢰 관리 검색 별칭(표시 안 됨 — 계획 WT4a) · +1: 아웃라인 열기 검색 별칭(표시 안 됨) · +4: 공유 편집기 분할 검색 별칭(표시 안 됨) · +2: workspace 복원 codec의 한글 경로 fixture · +1: 원격 훅 설치 시한 초과 재시도 사유(로그) · +115: 표시되지 않는 팔레트 한국어 검색 별칭 · +8: scm-turn-badges Lab 픽스처(AT3b-2) · +1: 진단 장면 Lab 픽스처(§5.4) · +2: 편집기 판정자의 큰 문서 픽스처 · +2: 인라인 위젯 행 Lab 픽스처(S1.5) · +1: e4d4 메타데이터 대기 진단 · +2: .frametime 단계 요약(§10.6) · +7: 코어 락 경합 진단(§13·§13.7·§12.9·플리커 신호) · +2: grid shaping 진단(§10.7) · +2: run 캐시 셰이핑 픽스처(§10.8)
 const header_config_total = 56; // +2: editor.formatter.<언어> 설정 진단(tooling §8.2t)
 
 comptime {

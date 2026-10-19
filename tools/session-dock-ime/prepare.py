@@ -25,6 +25,10 @@ def prepare(repo, snapshot):
     for name in ('node_modules', 'web/node_modules'):
         if (repo / name).exists():
             (snapshot / name).symlink_to(repo / name, target_is_directory=True)
+    instrument(repo, snapshot)
+
+
+def instrument(repo, snapshot):
     fixtures = snapshot / 'src/platform/macos/app_session/debug_fixtures.zig'
     fixtures.write_text(fixtures.read_text() + '\n' + (repo / 'tools/session-dock-ime/probe.zig.inc').read_text())
     session = snapshot / 'src/platform/macos/app_session.zig'
@@ -35,7 +39,7 @@ def prepare(repo, snapshot):
         '    private func maybeRunAgentSessionArchiveSmoke() {\n'
         '        if ProcessInfo.processInfo.environment["MARU_SESSION_DOCK_IME"] != nil {\n'
         '            tickSessionDockIME(); return\n        }')
-    text = replace_once(text, '    func insertText(_ string: Any, replacementRange: NSRange) {',
+    text = replace_once(text, '    func insertText(_ string: Any, replacementRange: NSRange) {\n        imeLog(',
         '    func insertText(_ string: Any, replacementRange: NSRange) {\n'
-        '        if ProcessInfo.processInfo.environment["MARU_SESSION_DOCK_IME"] != nil { DockIMECallbackWitness.committed += 1 }')
+        '        if ProcessInfo.processInfo.environment["MARU_SESSION_DOCK_IME"] != nil { DockIMECallbackWitness.committed += 1 }\n        imeLog(')
     host.write_text(text + '\n' + (repo / 'tools/session-dock-ime/driver.swift.inc').read_text())

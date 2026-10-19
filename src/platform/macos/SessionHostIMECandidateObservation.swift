@@ -56,7 +56,18 @@ final class SessionHostIMECandidateObservation {
         let hanja_rows: UInt32
     }
 
+    struct SearchState: Codable {
+        let owner_generation: UInt64
+        let first_responder: Bool
+        let search_owner: Bool
+        let query_bytes: UInt32
+        let query_hash: UInt64
+        let preedit_bytes: UInt32
+        let preedit_hash: UInt64
+    }
+
     struct Snapshot: Codable {
+        var search: SearchState? = nil
         var app_captures: [AppCapture] = []
         let windows: [Window]
         let counters: Counters
@@ -200,19 +211,20 @@ final class SessionHostIMECandidateObservation {
         rows.append(Row(before: before, opened: opened, closed: closed))
     }
 
-    func publish(sourceID: String, outputURL: URL) throws {
+    func publish(sourceID: String, outputURL: URL, search: Bool = false) throws {
         guard rows.count == Self.requiredObservationCount,
               outputURL.isFileURL,
               !FileManager.default.fileExists(atPath: outputURL.path) else { throw Failure.invalidOutput }
         let transcript = Transcript(
-            schema: "maru.session-host-cr6d-ime-candidate-transcript.v1",
+            schema: search ? "maru.session-dock-ime-candidate-transcript.v1" : "maru.session-host-cr6d-ime-candidate-transcript.v1",
             app_pid: getpid(), source_id: sourceID, rows: rows
         )
         let data = try JSONEncoder().encode(transcript)
         guard data.count <= Self.maximumTranscriptBytes else { throw Failure.transcriptTooLarge }
+        let publish = search ? maru_macos_chrome_ime_candidate_observation_publish : maru_macos_session_host_ime_candidate_observation_publish
         let status: UInt32 = data.withUnsafeBytes { bytes in
             outputURL.path.utf8CString.withUnsafeBufferPointer { path in
-                maru_macos_session_host_ime_candidate_observation_publish(
+                publish(
                     bytes.bindMemory(to: UInt8.self).baseAddress, data.count,
                     path.baseAddress, path.count - 1
                 )

@@ -24,6 +24,7 @@ const AppSession = app_session_mod.AppSession;
 const input_ops = app_session_mod.input_ops;
 const web_ops = app_session_mod.web_ops;
 const agent_dock = app_session_mod.agent_dock;
+const chrome_ime = @import("chrome_ime.zig");
 const scm_dock_ops = app_session_mod.scm_dock_ops;
 const placeholder_cell_height_px = app_session_mod.placeholder_cell_height_px;
 const placeholder_cell_width_px = app_session_mod.placeholder_cell_width_px;
@@ -436,6 +437,7 @@ pub fn imeBegin(self: *AppSession) void {
     self.ime_did_delete = false;
     self.ime_insert_failed = false;
     self.ime_terminal_target_tombstoned = false;
+    chrome_ime.begin(self);
     // 조합도 타이핑이다 — 과거를 보는 중이면 바닥으로 스냅해 preedit이 보이게 한다
     // (handleKeyEvent의 "입력하면 live 복귀"와 같은 동작; 조합 키는 그 경로를 안 타므로 여기서).
     // **터미널 입력일 때만** — find/palette에서 조합하면 뒤 터미널 스크롤백을 건드리면 안 된다(조합은
@@ -481,6 +483,7 @@ pub fn imeBegin(self: *AppSession) void {
 pub fn imeInsert(self: *AppSession, bytes: []const u8) void {
     if (!self.surface_initialized) return;
     if (web_ops.osrImeInsert(self, bytes)) return; // W4c
+    if (chrome_ime.insert(self, bytes, null)) return;
     if (self.ime_editor_commit_pending) return;
     if (!self.ime_active) {
         // 트랜잭션 밖 직접 커밋(입력기가 keyDown 없이 직접 — 포커스 전환 등 windowLostKey와 같은
@@ -499,6 +502,7 @@ pub fn imeInsert(self: *AppSession, bytes: []const u8) void {
 pub fn imeMarked(self: *AppSession, bytes: []const u8) void {
     if (!self.surface_initialized) return;
     if (web_ops.osrImeMarked(self, bytes)) return; // W4c
+    if (chrome_ime.marked(self, bytes, .{ .location = maru.inline_text_input.ranges.utf16Length(bytes) orelse 0, .length = 0 }, null)) return;
     if (self.ime_editor_commit_pending) return;
     imeSetPreedit(self, bytes);
     self.metal_dirty = true; // 조합 글자는 즉시 보여야 한다
@@ -553,6 +557,9 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
         self.ime_did_delete = false;
         self.ime_insert_failed = false;
         self.ime_terminal_target_tombstoned = false;
+        self.ime_search_owner = null;
+        self.ime_search_before = null;
+        self.ime_search_rejected = false;
         if (self.ime_terminal_target_id) |target_id| {
             const still_composing = if (editorTermBySurfaceId(self, target_id)) |term|
                 term.rt.editor_preedit.len > 0
@@ -570,6 +577,7 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
     if (self.ime_terminal_target_tombstoned) return;
     // OOM으로 누적이 잘렸으면 통째로 버린다 — 반쪽 문자열을 PTY에 보내지 않는다(#14).
     if (self.ime_insert_failed) return;
+    if (chrome_ime.end(self, event)) return;
     // AppKit commits plain printable keys through insertText, bypassing the ordinary
     // key route. Preserve the dock-owned slash action only for this exact unmarked
     // key transaction; IME text, paste and terminal-owned slashes remain text.

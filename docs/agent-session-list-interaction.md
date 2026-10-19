@@ -42,9 +42,18 @@
 - 검색은 이미 publish된 snapshot만 대상으로 한다. search field click 또는 `/`가 `query + IME preedit` 입력 owner를
   활성화한다. marked text는 field와 native IME 후보창에만 즉시 보이고, commit된 query만 목록 필터를 바꾼다.
   Esc는 query/preedit를 함께 지우고 닫으며, Backspace는 UTF-8 codepoint 경계를 지킨다. UTF-8 byte substring
-  (ASCII만 case-insensitive)으로 제목·요약·cwd leaf·branch·model을 찾고 입력은 256 byte로 자른다. 검색 키·IME
+  (ASCII만 case-insensitive)으로 제목·요약·cwd leaf·branch·model을 찾고 검색어의 상한은 256 byte다. 검색 키·IME
   입력은 재스캔·파일 stat·정렬을 일으키지 않으며 terminal PTY로 새지 않는다. 한국어처럼 case가 없는 문자열은 정확 byte
   match로 검색된다.
+- 검색 IME 문맥 확장(구현 중, 실제 후보창 검증 전): query 256 byte와 preedit 256 byte를
+  한 텍스트 축으로 투영하여 UTF-16 선택·marked·substring·replacement를 제공한다. UTF-16 surrogate
+  중간·범위 밖·잘못된 UTF-8·한계 초과는 입력을 거부하며 기존 검색어를 보존한다. 한 키의 확정은
+  transaction 끝에 반영하고, 뒤따른 callback이 실패하면 그 키 전체를 되돌린다. 메모리 확보나
+  blur 확정이 실패하면 도크 접기·다른 view 전환도 거부하여 기존 입력 owner를 유지한다.
+  macOS는 검색 활성화 세대마다 별도 text input client를 만들며 이전 client의 늦은 callback을
+  폐기한다. 후보 요청·취소·선택 키는 입력기가 소유하고 터미널로 재생하지 않는다. 완료 조건은
+  [구현 계획](plans/agent-session-list.md#실제-한자-후보창-문맥-확장-2026-10-19-사용자-승인--진행)의
+  실제 후보창 5회 취소·한자 선택·검색 확정·터미널 복귀 검증이다.
 - 최근 window는 provider를 합쳐 mtime 내림차순 최대 500 **검증 완료** 세션이다. 후보 탐색 상한 또는 parser byte budget 때문에 더 오래된 항목을 보장하지 않으므로 header와 empty state는 항상 `최근`이라고 말하고 `전체 이력`이라고 주장하지 않는다.
 - fixed chrome은 header·scope segmented control·검색뿐이다. scope control은 **그룹 헤더가 아니며**, 목록 본문을 밀거나 선택된 세션의 detail/action으로 대체하지 않는다. 목록의 workspace/project 그룹만 본문에서 독립적으로 접고 펼친다.
 - 기본 그룹은 canonical `cwd`의 프로젝트/폴더 이름이다. cwd가 없거나 project 밖이면 `알 수 없는 위치` 한 그룹으로 낸다. 각 그룹 header는 chevron·이름·표시 개수를 갖고 click/Left/Right로 접고 편다. 접힌 그룹은 header만 남기며 다른 그룹과 고정 chrome의 위치는 바꾸지 않는다. 그룹 접힘은 현재 view 수명 안에서만 유지하며 JSONL이나 workspace에 저장하지 않는다.

@@ -66,9 +66,9 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
 
     // The read-only record exposes five scalar observations and no
     // input handle, runtime pointer, or action token that Swift could use to bypass NSEvent.
-    try std.testing.expectEqual(@as(usize, 1), count(app, "pub const abi_version: u32 = 231;"));
-    try std.testing.expectEqual(@as(usize, 1), count(abi, "expectEqual(@as(u32, 231), abi_version)"));
-    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_MACOS_APP_HOST_ABI_VERSION 231u"));
+    try std.testing.expectEqual(@as(usize, 1), count(app, "pub const abi_version: u32 = 232;"));
+    try std.testing.expectEqual(@as(usize, 1), count(abi, "expectEqual(@as(u32, 232), abi_version)"));
+    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_MACOS_APP_HOST_ABI_VERSION 232u"));
     const probe_record = between(
         abi,
         "pub const SessionHostInputSmokeProbe = extern struct {",
@@ -312,7 +312,10 @@ test "CR6d v2b0b는 preflight 뒤 전체 inventory를 Zig 판정자에 exact onc
         try std.testing.expectEqual(@as(usize, 0), count(producer, forbidden));
     }
     try std.testing.expectEqual(@as(usize, 1), count(producer, "CGWindowListCopyWindowInfo("));
-    try std.testing.expectEqual(@as(usize, 1), count(producer, "maru_macos_session_host_ime_candidate_observation_publish("));
+    // Both policies share the same bounded raw transcript and exclusive C publisher call.
+    // Pin dispatch and use together: a symbol merely present in the source is not authority.
+    try std.testing.expectEqual(@as(usize, 1), count(producer, "let publish = search ? maru_macos_chrome_ime_candidate_observation_publish : maru_macos_session_host_ime_candidate_observation_publish"));
+    try std.testing.expectEqual(@as(usize, 1), count(producer, "publish(\n                    bytes.bindMemory(to: UInt8.self).baseAddress, data.count,\n                    path.baseAddress, path.count - 1"));
     try std.testing.expectEqual(@as(usize, 1), count(abi, "session_host_ime_candidate_publish_error={s}"));
     try std.testing.expectEqual(@as(usize, 1), count(producer, "requiredObservationCount = 5"));
     try std.testing.expectEqual(@as(usize, 1), count(producer, "maximumWindowCount = 256"));

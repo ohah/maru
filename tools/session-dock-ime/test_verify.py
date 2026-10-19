@@ -4,7 +4,7 @@ import hashlib
 import unittest
 import tempfile
 from pathlib import Path
-from verify import validate_report
+from verify import validate_report, validate_candidate_transitions
 from prepare import replace_once, require_external_destination
 
 
@@ -14,7 +14,7 @@ def hash64(text):
 
 def control(mode='callbacks'):
     def row(name, query='', marked='', active=1, owner=1, cards=3, pty=1):
-        return dict(name=name, first_responder=True, search_active=active, dock_focus=owner,
+        return dict(name=name, first_responder=True, owner_generation=9 if owner else 0, search_active=active, dock_focus=owner,
                     search_owner=owner, query_bytes=len(query.encode()), query_hash=hash64(query),
                     preedit_bytes=len(marked.encode()), preedit_hash=hash64(marked), has_marked=bool(marked), cards=cards, terminal_bytes=pty)
     rows = [row('view_switch', active=0, owner=0, pty=0), row('search_focus')]
@@ -23,7 +23,7 @@ def control(mode='callbacks'):
         rows.extend([row('committed', query='한', cards=0), row('terminal_restored', query='한', active=0, owner=0, cards=0, pty=2)])
     else:
         rows += [row('live_han_' + str(i), marked='한') for i in range(5)]
-        rows.extend([row('live_committed', query='한', cards=0), row('live_terminal_restored', query='한', active=0, owner=0, cards=0, pty=2)])
+        rows.extend([row('live_committed', query='한', cards=0), row('live_candidate_selected', query='韓', cards=0), row('live_terminal_restored', query='한', active=0, owner=0, cards=0, pty=2)])
     rect = dict(x=100, y=40, w=12, h=20, field_x=80, field_y=30, field_w=300, field_h=40)
     return dict(schema='maru.session-dock-ime.v1', mode=mode, passed=True, failures=[],
                 observations=rows, candidate_count=0 if mode=='callbacks' else 5,
@@ -101,6 +101,46 @@ class OracleTests(unittest.TestCase):
             for destination in (repo, repo / 'snapshot', alias / 'snapshot'):
                 with self.subTest(destination=destination), self.assertRaises(RuntimeError):
                     require_external_destination(repo, destination)
+
+
+def candidate_control(report, commit=True):
+    transitions, rows = [], []
+    for index in range(5):
+        witness = report['observations'][index + 2]
+        before = dict(owner_generation=witness['owner_generation'], first_responder=True, search_owner=True,
+                      query_bytes=0, query_hash=int(hash64('')), preedit_bytes=3, preedit_hash=int(hash64('한')))
+        opened = dict(before, query_bytes=3, query_hash=int(hash64('한')), preedit_bytes=0, preedit_hash=int(hash64(''))) if commit else dict(before)
+        a = dict(pty_input_bytes=witness['terminal_bytes'], committed_text_callbacks=index * 2, base_screen_generation=7)
+        b = dict(a, committed_text_callbacks=a['committed_text_callbacks'] + int(commit))
+        transitions.append(dict(before=before, opened=opened, closed=dict(opened),
+                                before_counters=a, opened_counters=b, closed_counters=dict(b)))
+        rows.append(dict(window_id=index + 1, counters=dict(a)))
+    return dict(schema='maru.session-dock-ime-candidate-observation.v1',
+                source_id='com.apple.inputmethod.Korean.2SetKorean', rows=rows, search_transitions=transitions)
+
+
+class CandidateQueryOracleTests(unittest.TestCase):
+    def test_no_commit_and_exact_request_commit_controls(self):
+        report = control('live')
+        for commit in (False, True):
+            validate_candidate_transitions(candidate_control(report, commit), report)
+
+    def test_rejects_query_owner_counter_and_manifest_rebinding(self):
+        report = control('live')
+        for mutation in ('query', 'owner', 'responder', 'pty', 'screen', 'callbacks', 'report', 'id_replay', 'schema'):
+            artifact = candidate_control(report)
+            row = artifact['search_transitions'][0]
+            if mutation == 'query': row['opened']['query_hash'] = int(hash64('한韓'))
+            if mutation == 'owner': row['closed']['owner_generation'] += 1
+            if mutation == 'responder': row['opened']['first_responder'] = False
+            if mutation == 'pty': row['closed_counters']['pty_input_bytes'] += 1
+            if mutation == 'screen': row['closed_counters']['base_screen_generation'] += 1
+            if mutation == 'callbacks': row['opened_counters']['committed_text_callbacks'] += 1
+            if mutation == 'report': row['before_counters']['pty_input_bytes'] += 1
+            if mutation == 'id_replay': artifact['rows'][1]['window_id'] = artifact['rows'][0]['window_id']
+            if mutation == 'schema': artifact['schema'] = 'maru.session-host-cr6d-ime-candidate-observation.v2'
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                validate_candidate_transitions(artifact, report)
 
 
 if __name__ == '__main__': unittest.main()

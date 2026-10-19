@@ -859,11 +859,12 @@ pub fn agentSessionDockSearchCaretRect(self: *const AppSession) ?chrome.draw.Rec
     const left = entry.rect.x + @as(f32, @floatFromInt(button.content_inset_x_px + button.leading_icon_extent_px + button.leading_icon_gap_px));
     const right = entry.rect.x + entry.rect.width - @as(f32, @floatFromInt(button.content_inset_x_px));
     if (right <= left) return null;
-    const query_cols = chrome.components.overlay_input.displayCols(self.agent_session_archive_search.query.items);
+    const projected = self.agent_session_search_ime.matches(self.agent_session_archive_search.query.items, self.agent_session_archive_search.preedit.items);
+    const query_cols = chrome.components.overlay_input.displayCols(if (projected) self.agent_session_search_ime.text()[0..self.agent_session_search_ime.selected.end] else self.agent_session_archive_search.query.items);
     // Marked text is painted immediately after committed query. The native candidate window
     // must follow that same visible end, otherwise a Korean composition is anchored before
     // its own preedit syllable while waiting for commit.
-    const preedit_cols = chrome.components.overlay_input.displayCols(self.agent_session_archive_search.preedit.items);
+    const preedit_cols = if (projected) 0 else chrome.components.overlay_input.displayCols(self.agent_session_archive_search.preedit.items);
     const wanted_x = left + @as(f32, @floatFromInt(query_cols +| preedit_cols)) * @as(f32, @floatFromInt(cw));
     const x = @min(wanted_x, right - @as(f32, @floatFromInt(cw)));
     const line_h = chrome.ui.typography.lineHeightPx(.control, agentSessionDockScaleMilli(self));
@@ -970,6 +971,7 @@ pub fn takeAgentSessionDockKeyFocus(self: *AppSession) void {
 /// 여기서 함께 blur한다 — 그러지 않으면 `handleAgentSessionArchiveSearchKey`의 `else => return true`가
 /// 터미널로 돌아온 뒤의 **모든** 키를 계속 삼킨다(Enter 하나가 아니라 타이핑 전체).
 pub fn releaseAgentSessionDockKeyFocus(self: *AppSession) void {
+    if (self.agent_session_archive_search_active and !@import("chrome_ime.zig").commitAll(self)) return;
     const had_focus = self.agent_session_dock_key_focus or self.agent_session_dock_interaction.focused != null;
     self.agent_session_dock_key_focus = false;
     self.agent_session_dock_interaction.focused = null;
@@ -982,11 +984,21 @@ pub fn releaseAgentSessionDockKeyFocus(self: *AppSession) void {
 /// IME preedit는 잃지 않도록 확정한다(`commitPreedit`의 "포커스 상실" 계약). 완전히 비우려면 Esc다.
 pub fn blurAgentSessionDockSearch(self: *AppSession) bool {
     if (!self.agent_session_archive_search_active) return false;
+    if (!@import("chrome_ime.zig").commitAll(self)) return false;
     self.agent_session_archive_search_active = false;
-    if (self.agent_session_archive_search.commitPreedit(self.allocator)) {
-        rebuildAgentSessionArchiveFilter(self);
-        resetAgentSessionDockScroll(self);
+    self.agent_session_search_generation +|= 1;
+    self.agent_session_search_ime.valid = false;
+    return true;
+}
+
+pub fn focusAgentSessionDockSearch(self: *AppSession) bool {
+    if (!self.agent_session_archive_search_active) {
+        if (self.agent_session_search_generation == std.math.maxInt(u64)) return false;
+        self.agent_session_search_generation += 1;
+        self.agent_session_search_ime.valid = false;
     }
+    self.agent_session_archive_search_active = true;
+    self.metal_dirty = true;
     return true;
 }
 
@@ -1115,6 +1127,8 @@ pub fn handleAgentSessionArchiveSearchKey(self: *AppSession, event: terminal.Key
     switch (event.key) {
         .escape => {
             self.agent_session_archive_search_active = false;
+            self.agent_session_search_generation +|= 1;
+            self.agent_session_search_ime.valid = false;
             self.agent_session_archive_search.clear();
         },
         .backspace => {
@@ -1267,8 +1281,9 @@ pub fn agentSessionDockProps(
         .sort_order = self.agent_session_archive_sort,
         .workspace_scope_enabled = self.agent_session_archive_workspace_root != null,
         .project_scope_enabled = self.agent_session_archive_project_root != null,
-        .search = self.agent_session_archive_search.query.items,
-        .search_preedit = self.agent_session_archive_search.preedit.items,
+        .search = if (self.agent_session_search_ime.matches(self.agent_session_archive_search.query.items, self.agent_session_archive_search.preedit.items)) self.agent_session_search_ime.text() else self.agent_session_archive_search.query.items,
+        .search_preedit = if (self.agent_session_search_ime.matches(self.agent_session_archive_search.query.items, self.agent_session_archive_search.preedit.items)) "" else self.agent_session_archive_search.preedit.items,
+        .search_caret_byte = if (self.agent_session_search_ime.matches(self.agent_session_archive_search.query.items, self.agent_session_archive_search.preedit.items)) self.agent_session_search_ime.selected.end else null,
         .search_focused = self.agent_session_archive_search_active,
         .search_cursor_visible = self.blink_visible,
         // The rich system-text worker follows the same truthful loading rule as archive
@@ -2026,7 +2041,7 @@ pub fn applyAgentSessionDockIntent(self: *AppSession, intent: chrome.components.
         }),
         .toggle_sort => toggleAgentSessionArchiveSort(self),
         .focus_search => {
-            self.agent_session_archive_search_active = true;
+            if (!focusAgentSessionDockSearch(self)) return;
             self.resetCursorBlink();
             self.metal_dirty = true;
         },

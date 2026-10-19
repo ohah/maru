@@ -12,7 +12,7 @@ import sys
 import tempfile
 
 from prepare import prepare, require_external_destination
-from verify import validate_report
+from verify import validate_report, validate_candidate_transitions
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / 'tools/shared-restore-app'))
 from gui_launch import GUIApp
@@ -84,6 +84,9 @@ def run(app, output, mode):
         if code != 0:
             raise RuntimeError('GUI waiter failed')
         if mode == 'live':
+            candidate = json.loads((root / 'candidate.json').read_text())
+            validate_candidate_transitions(candidate, report)
+            (root / 'candidate-query-verifier.json').write_text(json.dumps(dict(passed=True, observations=5)) + '\n')
             oracle = private / 'verify-candidate-captures'
             subprocess.run(['swiftc', str(REPO / 'tools/verify-ime-candidate-captures.swift'), '-o', str(oracle)], check=True, capture_output=True, timeout=60)
             verification = subprocess.run([str(oracle), str(root / 'candidate.json')], text=True, capture_output=True, timeout=45)

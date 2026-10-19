@@ -7241,6 +7241,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return false
         }
         appSession = created
+        if let owner = activeSurface { maru_macos_app_session_inspector_set_window_id(created, owner.token) }
         return true
     }
 
@@ -16860,6 +16861,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             return
         }
         surface.appSession = created
+        maru_macos_app_session_inspector_set_window_id(created, surface.token)
         self.quick = surface
         // quick 세션에도 현재 시스템 외관을 즉시 알린다(theme.follow-system 라이브 적용 — 새 창과 같은 이유, 리뷰 B).
         applySystemAppearanceToAllSessions()

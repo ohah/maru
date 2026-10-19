@@ -7,6 +7,11 @@ The manifest records every assertion and keeps native Metal captures and CLI res
 import argparse, json, os, pathlib, re, signal, subprocess, tempfile, time
 
 
+def shared_metadata_matches(gui, cli):
+    # Compare independent GUI and live CLI samples, never two GUI exports.
+    return isinstance(gui.get('field_info'),dict) and gui['field_info']==cli.get('field_info')
+
+
 def scenario(n, out):
     lines = ['sleep 900', 'inspect-report start']
     expected = [('start', 2, 0)]
@@ -67,7 +72,7 @@ def scenario(n, out):
         place(1,'redocked')
     elif n == 9:
         # The second real owner has its own inspector. Closing that owner must reclaim its tool.
-        lines.extend(['newwindow','sleep 900','inspect-open','sleep 400','inspect-click 44','sleep 450','inspect-report second','inspect-destroy-owner','sleep 1300','inspect-report survivor'])
+        lines.extend(['newwindow','sleep 900','inspect-open','sleep 400','inspect-click 44','sleep 450','inspect-report second','inspect-click 16','sleep 200','inspect-destroy-owner','sleep 1300','inspect-report survivor'])
         expected.extend([('second',5,1),('survivor',2,0)])
     elif n == 10:
         for index in [4,1,4,3,4,0,4,2,4,1]*2: place(index)
@@ -173,6 +178,27 @@ def scenario(n, out):
         capture('hover-before',n==32)
         hover(40,'hand');lines.append('sleep 100');capture('hover-active',n==32)
         hover('outside','arrow');lines.append('sleep 100');capture('hover-left',n==32)
+    elif 33 <= n <= 52:
+        # Twenty data-specific rounds: every field is filtered, selected through
+        # its painted row, exported twice while paused, and moved to another dock.
+        tabs_queries = [(0,'runtime_id'),(0,'window'),(0,'title'),(0,'terminated'),(0,'sampled_at_ms'),
+                        (1,'selected_cwd'),(1,'hook_cwd'),(1,'remote'),(1,'osc7_host'),(1,'ssh_destination'),
+                        (2,'cursor'),(2,'cols'),(2,'mouse_tracking'),(2,'foreground_pgid'),(2,'kitty_flags'),
+                        (3,'capacity'),(3,'evicted'),(3,'capture'),(3,'items'),(3,'protocol_support')]
+        tab,query = tabs_queries[n-33]
+        place((n-33)%5,'dataPlacement')
+        lines.extend(['inspect-click 13',f'inspect-click {20+tab}','inspect-click 6',f'inspect-text {query}',
+                      'sleep 250','inspect-click 16','sleep 150'])
+        hover(100,'arrow')
+        hover('outside','arrow')
+        capture('field-before',(n-33)%5==4)
+        lines.extend(['inspect-click 100','sleep 150'])
+        hover('outside','arrow')
+        capture('field-selected',(n-33)%5==4)
+        place((n-32)%5,'dataMoved')
+        lines.extend(['inspect-click 16','sleep 200','inspect-report dataFinal'])
+        expected.append(('dataFinal',(n-32)%5+1,int((n-32)%5==4)))
+        capture('field-moved',(n-32)%5==4)
     else:
         raise ValueError(f'unknown adversarial scenario {n}')
     lines.extend(['inspect-report done','mark finished','sleep 400','inspect-finish'])
@@ -188,6 +214,8 @@ def run_round(app, output, n):
     (root/'demo.sh').write_text(f'cd "{work}"\nprintf "\\033]0;Inspector E2E {n}\\007\\033]7;file://{work}\\007\\033]133;A\\007Inspector E2E ready\\n"\nexec /bin/sh -i\n')
     config=root/'config'
     config.write_text(f'session.keep-alive-after-quit=false\nworkspace.restore=false\nworkspace.root={work}\nshell.command=/bin/sh\nshell.args={root}/demo.sh\n')
+    if 33 <= n <= 52:
+        with config.open('a') as f:f.write(f'ui.language={"en" if n%2 else "ko"}\n')
     if n in (26,27):
         with config.open('a') as f:
             f.write('keybind = Cmd+Alt+I = unbind\n')
@@ -204,7 +232,7 @@ def run_round(app, output, n):
     for key in list(env):
         if key.startswith('MARU_'): env.pop(key)
     env.update(HOME=str(root/'home'),CFFIXED_USER_HOME=str(root/'home'),MARU_CONFIG=str(config),XDG_CONFIG_HOME=str(root/'home/.config'),XDG_CACHE_HOME=str(root/'cache'),XDG_STATE_HOME=str(root/'state'),MARU_SESSION_HOST_ROOT=str(root/'host'),MARU_EDITOR_BACKUP_ROOT=str(root/'backups'),MARU_NO_WORKSPACE_RESTORE='1',MARU_OPEN_INSPECTOR='1',MARU_INSPECTOR_WITH_DOCK='1',MARU_INSPECTOR_APP_TEST='1',MARU_WEB_OSR_TEST_INPUT=str(dest/'input.txt'),MARU_WEB_OSR_TEST_REPORT=str(report))
-    if n in (3,20):
+    if n in (3,20) or 43 <= n <= 52:
         env.update(MARU_SCREENSHOT=str(dest/'automatic.ppm'),MARU_SCREENSHOT_DELAY_MS='60000',MARU_SCREENSHOT_TIMEOUT_MS='70000',MARU_SCREENSHOT_RENDER_SCALE_MILLI='2000')
     cli=app.parent/'maru'; observations=[];errors=[];pixel_checks=[]
     with (dest/'app.log').open('w') as log:
@@ -362,6 +390,44 @@ def run_round(app, output, n):
     for observation in successful:
         if observation.get('inspect_code')!=0:errors.append('live CLI inspect request failed');break
         if json.loads(observation['inspection']).get('schema')!='maru.inspector.v1':errors.append('CLI inspect schema changed');break
+    if 33 <= n <= 52:
+        control=re.search(r'inspector-cursor label=c0_arrow actual=arrow x=(\d+) y=(\d+) width=(\d+) height=(\d+)',text)
+        if not control:errors.append('missing native field selection rect')
+        else:
+            x,y,w,h=map(int,control.groups())
+            def field_roi(name):
+                parts=(dest/(name+'.ppm')).read_bytes().split(b'\n',3)
+                width,height=map(int,parts[1].split());pixels=parts[3]
+                if not (0<=x<x+w<=width and 0<=y<y+h<=height):raise ValueError('field ROI outside capture')
+                return b''.join(pixels[(row*width+x)*3:(row*width+x+w)*3] for row in range(y,y+h))
+            before,selected=map(field_roi,['field-before','field-selected'])
+            changed=sum(before[i:i+3]!=selected[i:i+3] for i in range(0,len(before),3))
+            pixel_checks.append({'selection_changed_pixels':changed,'rect':[x,y,w,h]})
+            if changed==0:errors.append('selecting a field did not persist visible selection after mouse exit')
+        exports=sorted((root/'home/.cache/maru/inspector').glob('*.json'))
+        if len(exports)!=2 or exports[0].read_bytes()!=exports[1].read_bytes():
+            errors.append('field selection or placement changed the paused snapshot')
+        payloads=[json.loads(o['inspection']) for o in successful if o.get('inspect_code')==0]
+        payloads.extend(json.loads(p.read_text()) for p in exports)
+        for payload in payloads:
+            info=payload.get('field_info')
+            if not isinstance(info,dict):errors.append('shared field metadata missing');continue
+            checks={'overview.runtime_id':('not_applicable','session_model','no_session_host'),
+                    'overview.window':('available','window_membership','none'),
+                    'path.hook_cwd':('not_collected','agent_hook','no_shell_hook'),
+                    'path.osc7_host':('not_applicable','osc7','host_omitted'),
+                    'terminal.mouse_tracking':('available','runtime_observation','none'),
+                    'terminal.kitty_flags':('available','runtime_observation','none')}
+            for field,wanted in checks.items():
+                actual=info.get(field,{})
+                if tuple(actual.get(k) for k in ['availability','source','reason'])!=wanted:
+                    errors.append(f'{field}: incorrect collection metadata {actual}')
+            if payload['overview']['window']!=1:errors.append('GUI/CLI window membership differs from owner 1')
+            if payload['terminal']['mouse_tracking'] is not False or payload['terminal']['kitty_flags']!=0:
+                errors.append('measured false/zero was replaced with an absence value')
+        cli_payloads=[json.loads(o['inspection']) for o in successful if o.get('inspect_code')==0]
+        if exports and cli_payloads and not shared_metadata_matches(json.loads(exports[0].read_text()),cli_payloads[-1]):
+            errors.append('GUI and live CLI canonical metadata differ')
     if n==24:
         for observation in successful:
             if observation.get('anonymized_code')!=0:errors.append('CLI anonymized inspection failed');continue
@@ -374,6 +440,10 @@ def run_round(app, output, n):
     if n not in (6,9,16) and any(count!=1 for count in counts):errors.append('detached window changed CLI terminal inventory')
     if n in (6,9,16) and (not counts or max(counts)!=2 or any(count not in (1,2) for count in counts)):errors.append('intentional second source was not represented exactly once')
     if n==9 and counts and counts[-1]!=1:errors.append('closing the second owner retained a terminal')
+    if n==9:
+        exports=sorted((root/'home/.cache/maru/inspector').glob('*.json'))
+        if len(exports)!=1 or json.loads(exports[0].read_text())['overview']['window']!=2:
+            errors.append('second native owner did not bind its own Window ID to the GUI export')
     result={'round':n,'root':str(root),'passed':not errors,'errors':errors,'states':states,'cli':observations,'captures':[str(p.with_suffix('.png')) for p in captures],'focus_transports':re.findall(r'inspector focus-(?:owner|input) transport=(\S+)',text),'pixel_checks':pixel_checks,'cursors':actual_cursors,'app_exit':code,'harness_cleanup_signal':code==-signal.SIGTERM}
     (dest/'result.json').write_text(json.dumps(result,indent=2))
     return result

@@ -67,9 +67,32 @@ CLI inspect는 기존 same-UID·selector 없는 전체 metadata 조회 정책을
 PTY 입력·출력 원문을 수집하거나 터미널 모드를 변경하지 않는다.
 
 `runtime_id`는 session-host runtime이 있을 때의 값이며 in-process 터미널에서는 null이다.
-GUI collector는 현재 window membership ID를 받지 않아 `overview.window`가 null이고, CLI collector는
-실제 membership ID를 제공한다. 화면의 공통 “정보 없음” 표시는 해당 없음·미수집·미지원 이유를
-구별하지 못하므로 이 값만 보고 관측 실패라고 단정하지 않는다.
+GUI와 CLI collector는 같은 native owner의 window membership ID를 `overview.window`로 제공한다.
+owner가 연결되기 전에는 null이며 `not_collected/window_unbound`로 설명한다.
+Paused snapshot은 늦은 owner 연결로 바뀌지 않고 명시적 Refresh에서 다시 수집한다.
+
+### 필드 설명과 수집 상태
+
+각 행을 선택하면 의미·출처·수집 상태와 canonical 필드 경로 또는 누락 사유·원래 값을 표시한다.
+탭의 요약과 터미널 ID, Live/Paused, `sampled_at_ms`는 현재 표시 중인 snapshot을 설명한다.
+시각은 수집기가 사용하는 단조 시계의 밀리초이며 달력 시각이나 PTY 원시 수신 시각이 아니다.
+필터는 원래 키·번역된 이름·값·의미·출처를 검색한다.
+
+`maru.inspector.v1` JSON은 기존 원래 값을 유지하고 `field_info`를 추가한다.
+키는 `overview.window` 같은 전체 필드 경로이며 값은 `availability/source/reason`이다.
+GUI와 CLI는 `src/inspector_metadata.zig`의 같은 분류를 사용한다.
+
+| availability | 의미 |
+|---|---|
+| `available` | 실제로 수집한 값. false와 0도 유효하다 |
+| `not_applicable` | 해당 producer가 없는 경우. 로컬 터미널의 session-host runtime ID 등 |
+| `not_collected` | 필드가 해당되지만 아직 관측 값이 없는 경우 |
+| `unsupported` | 현재 transport가 전달하지 않는 값. host scroll region 등 |
+| `unavailable` | 관측 또는 foreground 조회를 사용할 수 없는 경우 |
+
+중첩 cursor/scroll-region은 자식 필드도 설명하며 이벤트 배열은 `events.items` 설명을 공유한다.
+익명화는 검증된 enum vocabulary로만 구성된 `field_info`를 보존한다. 같은 이름의 임의 JSON 데이터는
+일반 문자열과 마찬가지로 익명화한다. 원래 path/title 등은 기존 익명화 정책을 따른다.
 
 이벤트는 `History.capacity`로 제한한다. 샘플링 사이에 변한 값은 놓칠 수 있다.
 로컬 protocol 이벤트는 기존 활성 터미널의 OSC 7/133 drain을 관측한 기록이며
@@ -113,7 +136,7 @@ GPU scene tag 6이 인스펙터 배경·글자를 구분한다. 도킹 상태에
 배치·열림은 현재 소유 창 수명 동안 유지하는 임시 UI 상태이며 workspace 저장 포맷을 바꾸지 않는다.
 
 레이아웃 정책은 중립 `session/inspector/layout.zig`, 제품 상태·입력·수집은 macOS adapter,
-NSWindow 생성·닫기·실제 drawable 배율 전달은 Swift가 소유한다. ABI v231은 배치·입력·
+NSWindow 생성·닫기·실제 drawable 배율 전달은 Swift가 소유한다. ABI v233는 native owner ID 연결과 배치·입력·
 read-only control rect/target 관측을 전달하며 JSON schema `maru.inspector.v1`은 유지한다.
 
 ## UX 레퍼런스와 결정 기준

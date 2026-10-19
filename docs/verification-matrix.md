@@ -2,6 +2,45 @@
 
 ## Live Terminal Inspector
 
+### 데이터 설명·수집 상태 후속
+
+- 머지 전 재검토에서 Events의 공통 번역 라벨이 행별 sequence·관측 시각을 덮는 회귀를 발견했다.
+  행별 원래 라벨을 보존하면서 설명만 공유하도록 수정했다. sequence·시각·origin·revision 보존
+  회귀를 포함한 `test-inspector` 56개와 macOS 연동 10개가 통과했다.
+  로그 `/tmp/maru4523-events-tests.log`. 이 수정 후 실제 앱 20회와 CI를 다시 검증한다.
+- PR #4523 CI 후속: Linux Debug 번역 문법 테스트에서 전체 Table의 키별 복사로 스택이
+  53,269,696바이트로 커져 충돌했다. 두 필드 문자열만 순회하도록 바꿨으며 x86_64-linux
+  산출물의 동일 함수 스택은 676,928바이트다. macOS 8MiB 제한에서도 focused test가 통과했다.
+  Linux 실제 실행 결과는 수정 후 CI에서 별도 확인한다.
+- macOS-only 잡은 테스트가 진행 중인데 30분 제한으로 취소돼 잡 예산을 60분으로 조정했다.
+  개별 테스트 timeout·단언·필수 체크는 유지한다. 제품 UI/런타임은 이 CI 후속으로 바뀌지 않는다.
+- 2026-10-19: `origin/main` `28c32e94b` 위로 리베이스. ABI v233, 공통 `field_info`,
+  한·영 필드 설명·출처·누락 사유·수집 시각, GUI native owner ID 연결을 구현했다.
+- `test-inspector`: 중립 55개 + macOS 연동 10개 통과. GUI/CLI metadata 동일성,
+  late owner binding의 Paused sample 보존, 64개 history와 metadata를 포함한 wire frame 한도를 검사한다.
+- `test-chrome-ui`: 1,160개 통과. 로그 `/tmp/maru-inspector-data-neutral-chrome.log`.
+- 최종 앱: `/tmp/maru-inspector-data-neutral-app/Maru.app/Contents/MacOS/maru-macos-app`.
+  SHA-256 `2c5c745758d0e6d970d099652541defc915b12b97890a357071f1c805d1a7937`.
+- `python3 tools/inspector-app/run.py --app <위 앱> --start 33 --rounds 20 --output /tmp/maru-inspector-data-complete`:
+  **20회 모두 통과**, native 상태 100건·live CLI 왕복 140건·실제 GPU PNG 60장.
+  선택 후 마우스 이탈에도 유지되는 paint 변화를 회차별 ROI로 확인했다(총 변경 픽셀 748,638개).
+  한·영, 다섯 배치, 1x/2x, raw false/0, GUI/CLI window ID·수집 상태, Paused JSON 불변을 검사한다.
+- 같은 최종 앱으로 기존 시나리오 6·9·24·31·32도 통과했다.
+  두 번째 native owner의 GUI JSON Window ID 2, 익명화/raw export, attached/detached hover 복원을 포함한다.
+  산출물 `/tmp/maru-inspector-data-complete/manifest.json`.
+- 음성 대조: GUI serializer에만 metadata를 추가한 버전은 CLI의 `field_info:null` 때문에
+  새 E2E 33회차가 실패했다. 공통 capture에서 DTO를 채운 뒤 최종 20회 전체를 재검증했다.
+  null 원래 값을 표시하도록 수정하고 latest main으로 리베이스한 뒤에도 20회 전체를 다시 실행했다.
+- 추가 전체 검사에서 chrome→session 직접 import 위반을 발견해 규칙 예외 없이 공유 계산을
+  `src/inspector_metadata.zig`로 이동했다. 최종 앱에서 위 20+5회를 다시 실행했다.
+- GUI/CLI metadata 전체 비교 20건과 상태 변조·null 응답 음성 대조 40건도 통과했다.
+  증거 `/tmp/maru-inspector-data-complete/metadata-comparison.json`.
+- 전체 `check-boundaries -j2`: exit 0. 로그 `/tmp/maru-inspector-data-neutral-boundaries.log`.
+- 실제 HID·OS IME·실제 SSH/host-backed GUI·물리적 다중 디스플레이는 미검증이다.
+  native focus fallback은 `delegate-background`로 기록된다. CLI/GUI snapshot의 수집 시각은 서로 다를 수 있다.
+
+### 독립 도크 기초 검증
+
 - 2026-10-19: `origin/main` `1fd82a846` 기반. 파일·SCM 도크와 별개인 상·하·좌·우 독립 도크,
   구분선 resize, native 분리 창·재도킹을 구현했다. 기존 도크는 6개 슬롯을 유지한다.
 - `mise exec -- zig build test-inspector macos-app-build -j2`: 중립 47개 + AppSession 10개 통과,

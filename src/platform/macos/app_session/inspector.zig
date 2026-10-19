@@ -14,6 +14,7 @@ pub const layout = model.layout;
 const panel = maru.chrome.components.inspector;
 
 pub const State = struct {
+    window_id: ?u64 = null,
     rich_text: ?root.MeasuredTextCache = null,
     presentation: layout.State = .{},
     resizing: bool = false,
@@ -27,6 +28,8 @@ pub const State = struct {
     target: ?u64 = null,
     tab: panel.Tab = .overview,
     offset: usize = 0,
+    selected_field: [128]u8 = undefined,
+    selected_field_len: usize = 0,
     query: [128]u8 = undefined,
     query_len: usize = 0,
     preedit: [128]u8 = undefined,
@@ -95,7 +98,18 @@ pub fn capture(self: *AppSession, term: *Term, a: std.mem.Allocator, window: ?u6
         if (term.surface.remote == null) snapshot.terminal.scroll_region = .{ .top = term.surface.core.scroll_top, .bottom = term.surface.core.scroll_bottom };
         term.surface.unlockCore(self.io);
     }
+    try model.addFieldInfo(a, &snapshot);
     return snapshot;
+}
+
+// The native owner token is the same membership identity used by the CLI collector.
+// Binding never rewrites a paused diagnostic sample; Refresh owns that transition.
+pub fn setWindowId(self: *AppSession, id: u64) void {
+    self.inspector.window_id = if (id == 0) null else id;
+    if (visible(self) and !self.inspector.paused) {
+        self.inspector.refresh = true;
+        poll(self);
+    }
 }
 
 fn target(self: *AppSession) ?*Term {
@@ -257,7 +271,7 @@ pub fn poll(self: *AppSession) void {
     };
     var arena = std.heap.ArenaAllocator.init(self.allocator);
     defer arena.deinit();
-    const snap = capture(self, term, arena.allocator(), null) catch {
+    const snap = capture(self, term, arena.allocator(), s.window_id) catch {
         s.status = "snapshot allocation failed";
         return;
     };
@@ -350,6 +364,7 @@ pub fn key(self: *AppSession, e: maru.terminal.KeyEvent) void {
     } else if (e.key == .tab) {
         s.tab = @fromBackingInt(@intCast((@as(u8, @intCast(@backingInt(s.tab))) + (if (e.modifiers.shift) @as(u8, 3) else @as(u8, 1))) % 4));
         s.offset = 0;
+        s.selected_field_len = 0;
     } else if (e.key == .arrow_down or e.key == .page_down) {
         s.offset +|= if (e.key == .page_down) @as(usize, 10) else 1;
     } else if (e.key == .arrow_up or e.key == .page_up) {
@@ -389,12 +404,20 @@ pub fn click(self: *AppSession, x: f64, y: f64) void {
         self.metal_dirty = true;
         return;
     };
-    const hit = panel.hit(p, renderScale(self), arena.allocator(), x, y) orelse return;
+    const hit = panel.hit(p, renderScale(self), arena.allocator(), x, y) orelse {
+        if (panel.fieldAt(self.inspector.tab, self.inspector.query[0..self.inspector.query_len], self.inspector.offset, self.inspector.json orelse "{}", p, renderScale(self), arena.allocator(), x, y)) |field| {
+            self.inspector.selected_field_len = @min(field.key.len, self.inspector.selected_field.len);
+            @memcpy(self.inspector.selected_field[0..self.inspector.selected_field_len], field.key[0..self.inspector.selected_field_len]);
+            self.metal_dirty = true;
+        }
+        return;
+    };
     switch (hit) {
         .placement => |placement| setPlacement(self, @fromBackingInt(@as(u3, @intCast(placement)))),
         .privacy => self.inspector.anonymize_exports = !self.inspector.anonymize_exports,
         .tab => |t| {
             self.inspector.tab = t;
+            self.inspector.selected_field_len = 0;
             self.inspector.offset = 0;
         },
         .tool => |tool| switch (tool) {
@@ -422,7 +445,7 @@ pub fn collectInspectorDraws(self: *AppSession, p: maru.chrome.ChromeProps, tk: 
     const s = &self.inspector;
     if (!visible(self)) return;
     const query = try std.mem.concat(a, u8, &.{ s.query[0..s.query_len], s.preedit[0..s.preedit_len] });
-    try panel.collect(s.tab, @intCast(@backingInt(s.presentation.placement)), s.paused, s.pinned, s.anonymize_exports, query, &s.offset, s.status, s.json orelse "{}", p, renderScale(self), tk, a, s.hovered, out);
+    try panel.collect(s.tab, @intCast(@backingInt(s.presentation.placement)), s.paused, s.pinned, s.anonymize_exports, query, &s.offset, s.status, s.json orelse "{}", p, renderScale(self), tk, a, s.hovered, s.selected_field[0..s.selected_field_len], out);
 }
 
 pub fn copyJson(self: *AppSession) []const u8 {
@@ -446,6 +469,7 @@ pub fn paste(self: *AppSession, bytes: []const u8) void {
     // Boundaries must remain valid when a paste exceeds the fixed query buffer.
     while (s.query_len > 0 and !std.unicode.utf8ValidateSlice(s.query[0..s.query_len])) s.query_len -= 1;
     s.offset = 0;
+    s.selected_field_len = 0;
     self.metal_dirty = true;
 }
 
@@ -483,7 +507,8 @@ pub fn hover(self: *AppSession, x: f64, y: f64) root.CursorKind {
     var arena = std.heap.ArenaAllocator.init(self.allocator);
     defer arena.deinit();
     const found = panel.hit(propsFor(self), renderScale(self), arena.allocator(), x, y);
-    const id = if (found) |h| h.nodeId() else null;
+    const picked = if (found == null) panel.fieldAt(self.inspector.tab, self.inspector.query[0..self.inspector.query_len], self.inspector.offset, self.inspector.json orelse "{}", propsFor(self), renderScale(self), arena.allocator(), x, y) else null;
+    const id = if (found) |h| h.nodeId() else if (picked) |field| field.id else null;
     if (self.inspector.hovered != id) {
         self.inspector.hovered = id;
         self.metal_dirty = true;

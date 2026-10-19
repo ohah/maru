@@ -1,6 +1,7 @@
 //! Read-only live diagnostics shared by the GUI and CLI. Values describe one sampled
 //! observation; metadata changes are explicitly distinguished from protocol events.
 pub const layout = @import("layout.zig");
+pub const metadata = @import("../../inspector_metadata.zig");
 const std = @import("std");
 
 pub const CwdSource = enum { hook, osc7, kernel, unknown };
@@ -58,6 +59,7 @@ pub const History = struct {
 
 pub const Snapshot = struct {
     schema: []const u8 = "maru.inspector.v1",
+    field_info: std.json.Value = .null,
     overview: struct {
         surface_id: u64,
         runtime_id: ?[]const u8 = null,
@@ -121,8 +123,25 @@ pub const Snapshot = struct {
     },
 };
 
+/// Populate the typed DTO before either transport serializes it. The CLI nests this
+/// DTO in session.get and therefore does not call the GUI export serializer.
+pub fn addFieldInfo(a: std.mem.Allocator, snapshot: *Snapshot) error{OutOfMemory}!void {
+    const raw = try std.json.Stringify.valueAlloc(a, snapshot.*, .{});
+    defer a.free(raw);
+    const parsed = std.json.parseFromSlice(std.json.Value, a, raw, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => unreachable, // Stringify produced this typed DTO in the same call.
+    };
+    defer parsed.deinit();
+    snapshot.field_info = try metadata.collect(a, parsed.value);
+}
+
 pub fn serialize(allocator: std.mem.Allocator, snapshot: Snapshot) ![]u8 {
-    return std.json.Stringify.valueAlloc(allocator, snapshot, .{ .whitespace = .indent_2 });
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var with_info = snapshot;
+    if (with_info.field_info == .null) try addFieldInfo(arena.allocator(), &with_info);
+    return std.json.Stringify.valueAlloc(allocator, with_info, .{ .whitespace = .indent_2 });
 }
 
 test "cwd decision shares the product precedence and explains rejected hooks" {
@@ -165,7 +184,10 @@ fn anonymizeValue(a: std.mem.Allocator, value: *std.json.Value, options: @import
     switch (value.*) {
         .object => |*obj| {
             var it = obj.iterator();
-            while (it.next()) |entry| try anonymizeValue(a, entry.value_ptr, options);
+            while (it.next()) |entry| {
+                if (std.mem.eql(u8, entry.key_ptr.*, "field_info") and metadata.isCanonical(entry.value_ptr.*)) continue;
+                try anonymizeValue(a, entry.value_ptr, options);
+            }
         },
         .array => |*arr| for (arr.items) |*v| {
             try anonymizeValue(a, v, options);
@@ -186,6 +208,23 @@ test "inspector anonymization preserves JSON keys and structure" {
     try std.testing.expectEqualStrings("/Users/user/repo", parsed.value.object.get("path").?.string);
 }
 
+test "inspector anonymization preserves canonical metadata but redacts arbitrary field info" {
+    const a = std.testing.allocator;
+    const canonical =
+        \\{"field_info":{"path.selected_cwd":{"availability":"not_collected","source":"agent_hook","reason":"no_shell_hook"}},"path":{"selected_cwd":"/Users/agent/private"}}
+    ;
+    const output = try anonymizeJson(a, canonical, .{ .username = "agent" });
+    defer a.free(output);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, output, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("agent_hook", parsed.value.object.get("field_info").?.object.get("path.selected_cwd").?.object.get("source").?.string);
+    try std.testing.expectEqualStrings("/Users/user/private", parsed.value.object.get("path").?.object.get("selected_cwd").?.string);
+    const arbitrary = try anonymizeJson(a, "{\"field_info\":{\"secret\":\"/Users/agent/private\"}}", .{ .username = "agent" });
+    defer a.free(arbitrary);
+    try std.testing.expect(std.mem.indexOf(u8, arbitrary, "/Users/agent") == null);
+}
+
 test {
     std.testing.refAllDecls(layout);
+    std.testing.refAllDecls(metadata);
 }

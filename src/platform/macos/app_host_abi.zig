@@ -204,7 +204,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 232), abi_version);
+    try std.testing.expectEqual(@as(u32, 233), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @backingInt(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @backingInt(Location.unavailable));
@@ -4473,6 +4473,11 @@ pub export fn maru_macos_app_session_destroy(session: ?*AppSession) void {
     allocator.destroy(app_session);
 }
 
+/// v233: bind native window membership identity without adding an AppSession or PTY.
+pub export fn maru_macos_app_session_inspector_set_window_id(session: ?*AppSession, id: u64) void {
+    session_mod.inspector_ops.setWindowId(session orelse return, id);
+}
+
 pub export fn maru_macos_app_session_inspector_minimum_pt() u32 {
     return maru.session.inspector.layout.minimum_window_pt;
 }
@@ -4509,7 +4514,8 @@ pub export fn maru_macos_app_session_inspector_control_rect(session: ?*AppSessio
         r[3] = d.h;
         return @intFromBool(d.w != 0 and d.h != 0);
     }
-    const rect = maru.chrome.components.inspector.controlRect(session_mod.inspector_ops.propsFor(self), scale, arena.allocator(), id) orelse return 0;
+    const ops = session_mod.inspector_ops;
+    const rect = (if (id >= 100) maru.chrome.components.inspector.dataControlRect(self.inspector.tab, self.inspector.query[0..self.inspector.query_len], self.inspector.offset, self.inspector.json orelse "{}", ops.propsFor(self), scale, arena.allocator(), id) else maru.chrome.components.inspector.controlRect(ops.propsFor(self), scale, arena.allocator(), id)) orelse return 0;
     r[0] = @intCast(@max(rect.x, 0));
     r[1] = @intCast(@max(rect.y, 0));
     r[2] = rect.w;

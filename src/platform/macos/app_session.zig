@@ -345,7 +345,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 230: 비동기 편집기 저장의 main-actor 완료 pump와 정상 종료 대기 getter를 추가한다. 구조체 레이아웃은 불변이다.
 // 231: independent Inspector presentation transport.
 // 232: search-owned UTF-16 context and immutable activation generation; editor exports stay editor-only.
-pub const abi_version: u32 = 232;
+// 233: bind native owner window identity to Inspector snapshots.
+pub const abi_version: u32 = 233;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -101338,6 +101339,8 @@ test "Live inspector: shared GUI and CLI snapshot, pause, closed target and inpu
     _ = try session.resize(1200, 800, 1000);
     const term = pane_ops.activePane(session).activeTerm();
     try term.surface.core.write("\x1b]7;file:///tmp\x07");
+    inspector_ops.setWindowId(session, 1);
+    for (0..maru.session.inspector.History.capacity) |i| term.rt.inspector_history.append(i, .sampled_metadata, "terminal_modes_changed", i);
     session.dispatchAppAction(.toggle_inspector);
     try std.testing.expect(inspector_ops.visible(session));
     try std.testing.expect(!session.anyOverlayOpen() and !session.anyModalOverlayOpen());
@@ -101347,6 +101350,8 @@ test "Live inspector: shared GUI and CLI snapshot, pause, closed target and inpu
     var gui = try std.json.parseFromSlice(std.json.Value, a, gui_json, .{});
     defer gui.deinit();
     try std.testing.expectEqualStrings("maru.inspector.v1", gui.value.object.get("schema").?.string);
+    try std.testing.expectEqual(@as(i64, 1), gui.value.object.get("overview").?.object.get("window").?.integer);
+    try std.testing.expect(gui.value.object.get("field_info").? == .object);
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     var surfaces: std.ArrayList(control_surface.SurfaceDto) = .empty;
@@ -101355,11 +101360,17 @@ test "Live inspector: shared GUI and CLI snapshot, pause, closed target and inpu
     const snap = control_surface.CollectorSnapshot{ .surfaces = surfaces.items, .windows = windows.items };
     const wire = try control_surface.serializeSessionGet(a, .{ .number = 1 }, snap, term.surfaceId(), .self, term.surfaceId());
     defer a.free(wire);
+    try std.testing.expect(wire.len < maru.session.control_plane.default_max_frame);
     var out: std.Io.Writer.Allocating = .init(a);
     defer out.deinit();
     try std.testing.expect(try maru.cli.sessions.renderInspection(a, wire, &out.writer));
     var cli = try std.json.parseFromSlice(std.json.Value, a, out.written(), .{});
     defer cli.deinit();
+    try std.testing.expectEqual(@as(i64, 1), cli.value.object.get("overview").?.object.get("window").?.integer);
+    try std.testing.expect(cli.value.object.get("field_info").? == .object);
+    const gui_info = try std.json.Stringify.valueAlloc(arena.allocator(), gui.value.object.get("field_info").?, .{});
+    const cli_info = try std.json.Stringify.valueAlloc(arena.allocator(), cli.value.object.get("field_info").?, .{});
+    try std.testing.expectEqualStrings(gui_info, cli_info);
     try std.testing.expectEqualStrings(gui.value.object.get("path").?.object.get("selected_cwd").?.string, cli.value.object.get("path").?.object.get("selected_cwd").?.string);
     try std.testing.expectEqual(gui.value.object.get("terminal").?.object.get("cols").?.integer, cli.value.object.get("terminal").?.object.get("cols").?.integer);
     var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
@@ -101385,6 +101396,8 @@ test "Live inspector: shared GUI and CLI snapshot, pause, closed target and inpu
     try std.testing.expectEqual(@as(usize, 1), session.inspector.query_len);
     session.inspector.paused = true;
     const frozen = session.inspector.json.?;
+    inspector_ops.setWindowId(session, 2);
+    try std.testing.expectEqual(@intFromPtr(frozen.ptr), @intFromPtr(session.inspector.json.?.ptr));
     inspector_ops.poll(session);
     try std.testing.expectEqual(@intFromPtr(frozen.ptr), @intFromPtr(session.inspector.json.?.ptr));
     inspector_ops.setPlacement(session, .left);

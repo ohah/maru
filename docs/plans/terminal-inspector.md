@@ -10,7 +10,8 @@ Chrome DevTools의 macOS 단축키 `⌥⌘I`를 사용한다.
 - `session.get` 선택 확장과 `maru session inspect`: 작업 브랜치에 구현.
 - 네 탭·대상 선택·정지·필터·export·입력 격리: 픽셀 tree 기반으로 구현. 실제 제품 앱에서 네 탭을 캡처해 검토했다.
 - 문서 동기화·제품 앱 캡처·CLI 실제 왕복: 완료. PR에 최종 독립 도크·분리 창 PNG와 조건을 첨부한다.
-- [PR #4514](https://github.com/ohah/maru/pull/4514): 등록, 제품 PNG 첨부. CI 진행 중이며 머지는 미실행이다.
+- [PR #4514](https://github.com/ohah/maru/pull/4514): required CI 통과 후 rebase merge 완료.
+  2026-10-19T06:03:09Z, merge commit `e7939abe1ba7bf05862f3cdd15b99df814722b37`.
 
 ## 범위 밖
 
@@ -91,7 +92,16 @@ wire 확장, 웹 DevTools, SSH cwd 선택 정책 변경은 별도 이니셔티�
   남는 것을 재현했다. `inspector_ops.clearHover`, 외부/모달 hover 경계와 window focus 해제,
   NSView mouseExited의 owner scope를 연결해 고쳤다.
 - 실제 버튼 rect만 비교하는 attached/detached 픽셀 회귀를 driver 31~32에 추가했다.
-- 데이터 수집 경로는 live CLI/GUI adapter를 확인했다. UI 용어·출처·null 사유 설명은 충분하지 않다.
-  in-process runtime_id는 해당 없음이며 GUI window ID는 미수집이다. 둘을 같은 “정보 없음”으로 표시한다.
+- #4514에서는 UI 용어·출처·null 사유 설명이 충분하지 않았다. 아래 후속 단계가 이 차이를 다룬다.
 - 이 PR은 terminal diagnostics 범위다. Chrome식 UI 요소 선택·bounding-box highlight·component tree
-  검사는 구현하지 않았다. 사용자에게 hover 기대 동작을 확인 중이며 이 범위를 완료했다고 표시하지 않는다.
+  검사는 구현하지 않았다. 후속 데이터 설명 작업과도 별개의 범위다.
+
+## 후속: 데이터 설명과 수집 상태
+
+- 구현: 공통 `field_info` metadata, 유효한 false/0 보존, 해당 없음·미수집·미지원·일시 불가 구분.
+- 구현: ABI v233 native owner ID 연결, GUI/CLI window membership 일치, Paused sample 보존.
+- 구현: 한·영 필드 이름·의미, 행 선택 상세, 출처 검색, snapshot 수집 시각 표시.
+- 완료: 중립 55개·macOS 연동 10개·Chrome UI 1,160개, 최신 main의 실제 제품 GUI·CLI E2E 20회와
+  추가 회귀 5회, 제품 PNG. 상세 증거는 검증 매트릭스를 따른다.
+- 완료: 전체 `check-boundaries -j2` exit 0.
+- 원격 CI와 머지는 PR checks에서 별도 추적한다. 실제 로컬 결과는 검증 매트릭스에 기록한다.

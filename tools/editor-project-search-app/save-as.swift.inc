@@ -1,14 +1,30 @@
 // 실제 NSEvent로 명령을 보내고 제품 NSSavePanel을 그대로 조작한다.
 @_silgen_name("maru_editor_save_as_probe") private func editorSaveAsProbe(_ stage: UInt32) -> Int32
 @_silgen_name("maru_editor_save_as_setup") private func editorSaveAsSetup()
-@MainActor private enum EditorSaveAsRun { static var stage: UInt32 = 0; static var next = 0.0 }
+@MainActor private enum EditorSaveAsRun { static var stage: UInt32 = 0; static var next = 0.0; static var timer: Timer?; static var confirming = false }
 extension MaruAppHostController {
     private func maybeRunSaveAsCommand() {
+        guard !EditorSaveAsRun.confirming, EditorProjectSearchRun.stage < 99 else { return }
+        if EditorSaveAsRun.timer == nil {
+            // 저장 sheet가 열린 뒤 제품 프레임이 쉬어도 검증 단계는 계속 진행한다.
+            let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.maybeRunSaveAsCommand() }
+            }
+            EditorSaveAsRun.timer = timer
+            RunLoop.main.add(timer, forMode: .common)
+            RunLoop.main.add(timer, forMode: .modalPanel)
+        }
         guard let surface = primary, let window = surface.window, let view = surface.view else { return }
         let now = ProcessInfo.processInfo.systemUptime
         guard now >= EditorSaveAsRun.next else { return }
         let stage = EditorSaveAsRun.stage
+        if stage == 4 && !editorSaveAsPanels.isEmpty {
+            EditorSaveAsRun.next = now + 0.05
+            return
+        }
         func finish(_ success: Bool, _ reason: String = "none") {
+            EditorSaveAsRun.timer?.invalidate()
+            EditorSaveAsRun.timer = nil
             EditorProjectSearchRun.stage = 99
             if !success { exitCode = 1 }
             FileHandle.standardError.write(Data("EDITOR_PROJECT_SEARCH_FINISH passed=\(success) transport=AppKit-local save-as=true\n".utf8))
@@ -38,6 +54,25 @@ extension MaruAppHostController {
             guard panel.nameFieldStringValue == "save-as-source.txt" else { finish(false, "panel_name"); return }
             guard panel.sheetParent === window else { finish(false, "panel_owner"); return }
             guard let root = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_OUTPUT"] else { finish(false, "output_directory"); return }
+            if ProcessInfo.processInfo.environment["MARU_NATIVE_PANEL_CAPTURE_EXTERNAL"] == "1" {
+                let directory = URL(fileURLWithPath: root)
+                let request = directory.appendingPathComponent("save-as-panel-request.json")
+                if !FileManager.default.fileExists(atPath: request.path) {
+                    do {
+                        let data = try JSONSerialization.data(withJSONObject: ["window_id": window.windowNumber, "panel_id": panel.windowNumber])
+                        try data.write(to: request, options: .atomic)
+                    } catch { finish(false, "panel_capture_request"); return }
+                }
+                let image = directory.appendingPathComponent("save-as-panel.png")
+                guard FileManager.default.fileExists(atPath: image.path) else {
+                    EditorSaveAsRun.next = now + 0.05
+                    return
+                }
+                guard let data = try? Data(contentsOf: image), let bitmap = NSBitmapImageRep(data: data), let pixels = bitmap.bitmapData,
+                      bitmap.pixelsWide > 100, bitmap.pixelsHigh > 100,
+                      Set(Data(bytes: pixels, count: bitmap.bytesPerRow * bitmap.pixelsHigh)).count > 8
+                else { finish(false, "external_panel_bitmap"); return }
+            } else {
             guard let content = panel.contentView, let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) else { finish(false, "panel_bitmap_allocation"); return }
             content.displayIfNeeded()
             content.cacheDisplay(in: content.bounds, to: bitmap)
@@ -45,14 +80,33 @@ extension MaruAppHostController {
             guard Set(Data(bytes: pixels, count: bitmap.bytesPerRow * bitmap.pixelsHigh)).count > 8 else { finish(false, "panel_bitmap_uniform"); return }
             guard let png = bitmap.representation(using: .png, properties: [:]) else { finish(false, "panel_png_encoding"); return }
             do { try png.write(to: URL(fileURLWithPath: root).appendingPathComponent("save-as-panel.png")) } catch { finish(false, "panel_png_write"); return }
+            }
 
         case 3:
+            if ProcessInfo.processInfo.environment["MARU_NATIVE_PANEL_CAPTURE_EXTERNAL"] == "1",
+               let root = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_OUTPUT"] {
+                let directory = URL(fileURLWithPath: root)
+                let request = directory.appendingPathComponent("save-as-confirm-request")
+                if !FileManager.default.fileExists(atPath: request.path) {
+                    do { try Data().write(to: request, options: .atomic) }
+                    catch { finish(false, "confirm_request"); return }
+                }
+                guard FileManager.default.fileExists(atPath: directory.appendingPathComponent("save-as-confirm-sent").path) else {
+                    EditorSaveAsRun.next = now + 0.05
+                    return
+                }
+                EditorSaveAsRun.stage = 4
+                EditorSaveAsRun.next = now + 0.3
+                return
+            }
             guard let panel = editorSaveAsPanels.values.first else { finish(false); return }
             panel.nameFieldStringValue = "save-as-destination.txt"
-            // ok가 중첩 AppKit 이벤트를 처리해도 같은 요청을 다시 보내지 않는다.
-            EditorSaveAsRun.stage = 4
-            EditorSaveAsRun.next = now + 0.3
+            // ok의 중첩 이벤트에서 아직 미접수인 요청을 완료로 검사하지 않는다.
+            EditorSaveAsRun.confirming = true
             panel.ok(nil)
+            EditorSaveAsRun.confirming = false
+            EditorSaveAsRun.stage = 4
+            EditorSaveAsRun.next = ProcessInfo.processInfo.systemUptime + 0.3
             FileHandle.standardError.write(Data("SAVE_AS stage=3 verified=true\n".utf8))
             return
         case 4:

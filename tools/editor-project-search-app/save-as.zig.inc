@@ -9,6 +9,7 @@ export fn maru_editor_save_as_probe(stage: u32) callconv(.c) i32 {
     if (stage == 1) return if (std.mem.eql(u8, doc.opened.?.file.content, "foo")) 1 else -1;
     if (stage == 4) {
         if (@import("editor/save/as.zig").pending() != 0) return 0;
+        std.debug.print("SAVE_AS_RESULT name={s} dirty={any} bytes={d}\n", .{ std.fs.path.basename(doc.path.?), editor_ops.isDirty(term), doc.opened.?.file.content.len });
         return if (std.mem.endsWith(u8, doc.path.?, "save-as-destination.txt") and !editor_ops.isDirty(term) and std.mem.eql(u8, doc.opened.?.file.content, "foo!")) 1 else -1;
     }
     return 1;

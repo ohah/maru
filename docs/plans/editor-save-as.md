@@ -1,9 +1,9 @@
 # 이름 있는 문서의 Save As — 검토안
 
-상태: 후속 저장 순서·취소 정책 승인, 순수 상태 전이·writer·예약 기반 머지. 실제 명령·NSSavePanel·저장 접수 조정 구현 및 검증 진행 중.
+상태: 실제 명령·NSSavePanel·저장 접수 조정 구현. 기본 GUI 저장·원본 보존·새 경로 전환과 화면 촬영 검증 완료. 물리 IME와 GUI 취소·저장 중 추가 입력은 별도 검증이 남는다.
 기준: main `eac3677dd3370e87be9cd6aa1c39b65c503cf796`.
 
-## 현재 코드에서 확인한 범위
+## 초기 설계 당시 코드에서 확인한 범위
 
 `editor/untitled_save.zig::begin`과 `commit`은 이름 없는 문서만 받는다.
 `writeAndAdopt`는 동기 쓰기에 성공한 뒤 경로를 붙인다. 이름 있는 파일의
@@ -181,7 +181,7 @@ request lease와 writer 결과를 정산한다.
 경계 판정자의 OS namespace 허용 결함과 순수 비교 오탐 결함을 각각 주입해
 기존 금지 호출 단언·실제 ops 폴더 검사에서 검출하고 정상/복원 대조군을 확인했다.
 
-## 실제 명령 연결 — 검증 진행 중
+## 실제 명령 연결 — 기본 GUI 저장 검증, 물리 IME 미검증
 
 `editor_save_as` 액션은 이름 있는 일반 로컬 네이티브 문서에서 명령 팔레트와
 ⌘⇧S로 진입한다. Swift는 현재 창에 NSSavePanel을 sheet로 열고 현재 파일명과
@@ -237,9 +237,21 @@ Debug/ReleaseFast 대상 검사, 전체 ReleaseFast 에디터 검사(1,511 통�
 격리 사본은 웹 의존성을 `bun install --frozen-lockfile`로 준비하며 원본 checkout의
 설치 상태나 공유 `node_modules`에 의존하지 않는다. 설치 로그는 `dependencies.log`에
 보존하고, 설치 실패 시 앱 빌드를 시작하지 않는다.
+실제 저장 창은 뷰의 cacheDisplay와 별도로 ScreenCaptureKit으로 촬영할 수 있다.
+`tools/editor-project-search-app/build-window-capture.py --output <고정 경로의 새 .app>`으로
+캡처 앱을 한 번 만들고 macOS 화면 기록 권한을 허용한 뒤, 위 실행 명령에
+`--native-panel-capture-app <같은 .app>`을 추가한다. 빌더는 기존 앱을 덮어쓰지 않는다.
+캡처 앱은 AppKit 연결을 초기화한 뒤 요청한 창 ID만 촬영한다. 하네스는 sheet 이름과
+소유 창을 확인하고, 창 목록에 나타나기까지 제한된 재시도 후 실제 PNG의 크기·픽셀을
+검사한다. 제품 Metal readback과 macOS 저장 창 캡처를 별도 산출물로 보존한다.
+기본 Save As 결과 디렉터리는 홈의 `Library/Caches/maru-verification` 아래에 만든다.
+명시적 `--output`도 저장소 밖의 새 폴더를 사용한다. `/private/tmp`는 NSSavePanel이
+심볼릭 링크 `/tmp`로 반환하는 사례를 재현했으며, 기존 부모 링크 거절 계약에서
+`NotFound`로 실패한다. 성공 검증에는 링크가 없는 홈 디렉터리의 경로를 사용했다.
+이 제약을 우회하기 위해 제품의 경로 검증을 완화하지 않았다.
 잠긴 환경에서 별도로 시도한 논리 경로도 저장 sheet 확인 이후 시간 초과했으므로
 완료로 판정하지 않는다. 해당 실험 하네스 변경은 제품 PR에 포함하지 않는다.
-실제 저장 창 촬영과 물리 IME 검증은 남아 있다.
+당시에는 실제 저장 창 촬영과 물리 IME 검증이 남아 있었다. 후속 결과는 아래에 기록한다.
 
 GUI 하네스는 `SAVE_AS_FINISH`에 실패 단계·원인·화면 기록 권한 관측값을 기록한다.
 패널 이름·소유 창, bitmap 확보·픽셀·PNG 인코딩·쓰기 실패를 구분하며,
@@ -251,3 +263,12 @@ GUI 하네스는 `SAVE_AS_FINISH`에 실패 단계·원인·화면 기록 권한
 sheet 이름·소유 창 검사를 지난 뒤 균일 픽셀 검사에서 거절됐음을 확인했다.
 프로세스 관측 구간은 약 6.64초였으며 이전의 120초 timeout으로 끝나지 않았다.
 실패 정리의 검증이며 저장 완료·패널 이미지·물리 IME 통과를 뜻하지 않는다.
+
+2026-10-19 후속 검증에서는 ScreenCaptureKit 도구의 화면 기록 권한을 실제 조회하고,
+NSSavePanel의 이름·소유 창 확인 뒤 저장 창을 촬영했다. 검증 앱의 실제 sheet 필드와
+Save 버튼을 접근성 API로 조작하고, 대화상자 종료와 저장 완료를 기다린 뒤
+원본 `foo` 보존·새 파일 `foo!`·새 문서 경로·dirty 해제를 확인했다. 저장 전/후 편집기
+화면은 제품 Metal readback으로 검증했다. 단계 진행은 별도 main run-loop 타이머를
+사용해 sheet가 열린 동안 제품 프레임 생성에 의존하지 않는다. 캡처 도구는 AppKit을
+초기화한 뒤 창 필터를 만든다. 실제 물리 키·한국어 IME·VoiceOver, GUI 취소·저장 중
+추가 입력을 이 성공 결과로 대체하지 않는다.

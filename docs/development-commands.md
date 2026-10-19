@@ -1671,9 +1671,15 @@ OOM·접수 뒤 취소 판정을 검증한다. NSSavePanel과 실제 저장 진�
 실제 명령 actor·저장 큐·디스크 경계의 회귀를 실행한다.
 `python3 tools/test-editor-save-as-command-adversarial.py`는 격리 사본에서 결함 주입과
 정상/복원 대조군을 검사한다.
-`python3 tools/editor-project-search-app/run.py --save-as-command --count 3`는 격리 앱에서
+`python3 tools/editor-project-search-app/build-window-capture.py --output <고정 경로의 새 .app>`으로
+캡처 앱을 한 번 만들고 화면 기록 권한을 허용한다. 빌더는 기존 앱을 덮어쓰지 않는다.
+`python3 tools/editor-project-search-app/run.py --save-as-command --native-panel-capture-app <같은 .app> --count 3`는 격리 앱에서
 실제 NSEvent로 ⌘⇧S를 보내 제품 NSSavePanel의 기본 이름·sheet 연결과 새 경로 저장을
-검사한다. 저장 전후는 Metal capture이고, 패널은 AppKit content view capture다.
+검사한다. 저장 전후는 Metal readback, 실제 저장 창은 ScreenCaptureKit이며 확인은
+대상 프로세스의 native sheet를 접근성 API로 조작한다. 별도 타이머로 대화상자 종료와
+저장 완료를 기다린 뒤 모델·원본/목적지 bytes를 대조한다. 기본 결과는 홈 캐시에 두며,
+명시적 `--output`에도 링크가 없는 저장소 밖의 새 폴더를 사용한다. `/private/tmp`가
+패널에서 `/tmp`로 반환되면 기존 부모 링크 거절 계약에 따라 실패한다.
 Mac 화면 잠금·검은 캡처는 통과로 취급하지 않는다. 물리 한글 IME 검증은 별도다.
 현재 남은 정책/검증은 [Save As 계획](plans/editor-save-as.md)을 따른다.
 

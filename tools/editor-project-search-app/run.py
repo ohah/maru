@@ -17,6 +17,9 @@ def replace_once(text, old, new):
     return text.replace(old, new)
 
 
+from untitled_oracle import parse_metrics, parse_build_mode
+
+
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -139,7 +142,7 @@ def main():
         if args.save_as_physical_ime and "SAVE_AS_IME marked=true" not in (source / "src/platform/macos/MaruAppHost.swift").read_text():
             parser.error("This app lacks the Korean Save As driver; build a new verification app")
         if args.untitled_save_benchmark:
-            if "maybeRunUntitledBenchmark" not in (source / "src/platform/macos/MaruAppHost.swift").read_text() or "UNTITLED_SERIALIZE" not in (source / "src/platform/macos/app_session/editor/untitled_save.zig").read_text():
+            if "maru_untitled_benchmark_probe" not in (source / "src/platform/macos/MaruAppHost.swift").read_text() or "UNTITLED_SERIALIZE" not in (source / "src/platform/macos/app_session/editor/untitled_save.zig").read_text():
                 parser.error("This app lacks the untitled benchmark driver and delay hook")
         hashes = {name: sha(source / name) for name in names}
         command = None
@@ -399,10 +402,9 @@ end run'''
         data = bytes(ord("x") if i % 2 == 0 else 10 for i in range(args.untitled_bytes))
         if (project / "untitled-benchmark.txt").read_bytes() != data:
             raise RuntimeError("Untitled first-save disk bytes differ")
-        metric = re.search(r"UNTITLED_SAVE_METRIC call_ns=(\d+) next_event_ns=(\d+) passed=true", transcript)
-        if metric is None: raise RuntimeError("Missing untitled main-event measurement")
-        if int(metric[2]) < int(metric[1]) or int(metric[1]) < args.untitled_delay_ms * 1_000_000:
-            raise RuntimeError("Untitled measurement violates the synchronous delay ordering")
+        untitled_metrics = parse_metrics(transcript, args.untitled_bytes, args.untitled_delay_ms)
+        if parse_build_mode(transcript) != args.optimize:
+            raise RuntimeError("Actual untitled app build mode differs from --optimize")
     if args.native_close_save:
         expected += ("native-close-confirm", "native-close-saving", "native-close-saved", "native-close-edit-kept", "native-close-conflict-kept")
         for name, data in (("saved", b"foo!"), ("kept", b"foo!"), ("conflict", b"outside")):
@@ -456,7 +458,9 @@ end run'''
         limits="Korean CGEvent typing and Save As composition commit verified; shortcut is AppKit NSEvent; no VoiceOver proof" if args.save_as_physical_ime else "Physical Korean HID and Enter verified; no VoiceOver or OS candidate screenshot proof" if args.physical_ime else "No physical Korean HID or VoiceOver proof", source_sha256=hashes, binary_sha256=sha(app), command=command,
         product_passed=True, native_close_save=args.native_close_save, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, batch_open_files=args.batch_open_files, batch_peer_bytes=args.batch_peer_bytes, optimize=args.optimize, disk_padding_lines=args.disk_padding_lines, batch_save_delay_ms=args.batch_save_delay_ms, replace_batch_save_retry=args.replace_batch_save_retry, replace_batch=args.replace_batch, replace_preview=args.replace_preview, replace_apply=args.replace_apply, replace_disk_apply=args.replace_disk_apply, replace_ime_refuse=args.replace_ime_refuse, conflict_markers=args.conflict_markers, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(source / "tools/editor-project-search-app" / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc", "batch.zig.inc", "native-close.zig.inc", "native-close.swift.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
     if args.untitled_save_benchmark:
-        report["untitled_save_benchmark"] = dict(bytes=args.untitled_bytes, injected_delay_ms=args.untitled_delay_ms, call_ns=int(metric[1]), next_event_ns=int(metric[2]), serialize_ns=int(re.search(r"UNTITLED_SERIALIZE ns=(\d+)", transcript)[1]), io_ns=int(re.search(r"UNTITLED_IO ns=(\d+)", transcript)[1]))
+        report["untitled_save_benchmark"] = untitled_metrics
+        report["untitled_oracle_sha256"] = sha(Path(__file__).with_name("untitled_oracle.py"))
+        report["untitled_prepared_source_sha256"] = {name: sha(source / name) for name in names}
         report["scope"] = "Synchronous untitled first-save naming commit in the actual AppKit main queue; disk bytes and model adoption"
         for name in ("untitled-save.swift.inc", "untitled-save.zig.inc"):
             report["harness_sha256"][name] = sha(source / "tools/editor-project-search-app" / name)

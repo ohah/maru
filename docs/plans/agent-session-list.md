@@ -70,7 +70,7 @@ aggregate·macOS-only·AppKit 잡까지 통과한 뒤 PR #4507을 머지했다.
 
 ### 검색 입력·IME 실제 호스트 검증
 
-진행: 검색창 click과 도크 소유권이 있는 상태의 `/`를 실제 NSView 이벤트로 확인한다.
+완료(2026-10-19): 검색창 click과 도크 소유권이 있는 상태의 `/`를 실제 NSView 이벤트로 확인했다.
 검색 owner의 marked text는 필터를 바꾸지 않고 commit만 query와 필터를 바꿔야 한다.
 도크를 떠나면 조합은 원래 검색어에 확정되고, 그 다음 입력은 terminal로 돌아가야 한다.
 firstResponder와 published search rect 안의 native caret anchor를 함께 검사한다.
@@ -564,9 +564,9 @@ content 크기를 `agent_session_archive_smoke_content_size`로 summary에 남�
 이 fixture는 provider-native binary가 실제 계정 세션을 재개한다는 보장은 아니다. 그 수동 검증은 사용자가 명시적으로
 승인한 실제 이력에서만 하며, CI evidence와 섞지 않는다.
 
-#### 실제 한자 후보창 문맥 확장 (2026-10-19 사용자 승인 · 진행)
+#### 실제 한자 후보창 문맥 확장 (2026-10-19 구현·실제 검증 완료)
 
-권한을 모두 통과한 실제 HID 실행에서 `ㅎ → 하 → 한` marked text와 검색 owner는 정상으로
+확장 전 실측: 권한을 모두 통과한 실제 HID 실행에서 `ㅎ → 하 → 한` marked text와 검색 owner는 정상으로
 관측됐다. 처음 한 실행의 `ㅎ` 즉시 commit은 다음 실행에서 재현되지 않았으므로 원인이
 확정된 제품 결함으로 분류하지 않는다. 초기 테스트 config의 Option-as-Meta 우회는 기존
 CR6d와 같은 `input.option-as-meta=false`로 제거한다. 이 설정으로도 Option-Return이
@@ -576,7 +576,7 @@ CR6d와 같은 `input.option-as-meta=false`로 제거한다. 이 설정으로도
 즉, 검색어의 실제 선택 위치·주변 문자열·replacement range를 입력기에 제공하지 않았다.
 이것은 anchor 위치 수정이나 test-only 임시 문자열로 대신할 수 없는 별도 입력 계약이다.
 
-사용자가 확장안을 승인했다. 구현 순서는 아래와 같으며, 검색 문맥/키 정책을 함께 확장한다.
+사용자가 확장안을 승인했다. 구현 내용과 검증 범위는 아래와 같다.
 
 설계 검토에서 late callback의 generation 숫자만 현재 view에 보관하면 재진입 뒤 과거 callback을
 구분하지 못하는 구멍을 확인했다. 검색 세대마다 별도 `NSTextInputClient`/context를 만들고 고정한
@@ -597,13 +597,10 @@ owner token으로 forward한다. 이전 client는 새 검색 owner나 terminal�
 4. 검색창의 후보 요청·탐색·취소/선택 키 소유권을 명시하고, terminal의 기본 Meta 키 및
    Enter 정책과 섞지 않는다. Escape의 후보 취소와 검색 전체 지우기, blur의 원 검색어
    확정, 늦은 callback의 세대 폐기를 각각 검증한다.
-5. 현재 live 도구가 재사용하는 CR6d candidate reducer는 terminal의 PTY·확정 callback·
-   화면 세대 불변 계약이다. 검색/재변환에서는 입력기의 정상적인 `insertText`가 candidate
-   요청 중 발생할 수 있으므로 그대로 재사용할 수 있는지 먼저 실측한다. terminal 판정자를
-   느슨하게 바꾸지 않고 검색창의 정상 전이를 구분한 관측 계약을 별도로 정한다.
-6. native 범위/실패-원자성 테스트와 실제 HID·새 후보창 ownership/lifecycle·PNG/OCR·
-   anchor·선택 후 exact-once query·취소·terminal 복귀를 함께 확인한다. 고정된 서명 앱으로
-   실제 후보창 5개가 검증되기 전에는 live gate를 완료로 바꾸지 않는다.
+5. terminal의 PTY·확정 callback·화면 세대 불변 reducer는 유지한다. 검색 전용 관측 schema는
+   query/preedit·고정 owner·원본 callback 카운터를 함께 검사하여 실제 후보 preview와 취소를 구분한다.
+6. native 범위/실패-원자성, stale client의 쓰기·읽기 거부, 실제 HID·새 후보창
+   ownership/lifecycle·PNG/OCR·anchor, 취소·한자 선택·terminal 복귀를 각각 검증했다.
 
 실측(2026-10-19): 권한을 통과한 b8fda785 관측 앱으로 새 app-owned 후보창을 5회 열고
 Escape로 닫았다. WindowServer 소유권·PNG/OCR 증거는 확보했지만 전체 live 성공은 아니다.
@@ -611,10 +608,17 @@ Escape로 닫았다. WindowServer 소유권·PNG/OCR 증거는 확보했지만 �
 취소 시 원문 `한`을 다시 insert했다. 기존 판정자가 이 중간 상태를 모델링하지 않아 거부했다.
 또한 기존 projection은 pending commit 뒤 marked replacement가 오면 확정 원문까지 제외하여
 검색어/필터를 비울 수 있었다. key transaction의 마지막 확정 문자열(상한 256 byte)을 별도로
-준비해, marked preview가 이를 지우지 않도록 수정한다. 새 판정자는 요청 후 확정 query `한`과
+준비해, marked preview가 이를 지우지 않도록 수정했다. 새 판정자는 요청 후 확정 query `한`과
 preview `韓`, 취소 후 query `한`·빈 preedit 및 구간당 정확히 1 callback만 허용한다.
-preview가 남거나 query가 비워짐·중복 callback·PTY/owner drift는 거부한다. 이 수정 빌드의
-실제 후보창 5회·한자 선택·terminal 복귀를 통과하기 전에는 완료로 표시하지 않는다.
+preview가 남거나 query가 비워짐·중복 callback·PTY/owner drift는 거부한다.
+
+수정 빌드 `cf767d417aa9371f1dd0324e8f4ec7d573d4d9652fb1f4523652e29990807d4c`의
+callback gate와 실제 live gate가 모두 통과했다. live는 실제 후보창 5회 취소와 별도 6번째
+후보창에서 `韓` 선택, 조합 중 terminal click 뒤 원문 `한` 확정 및 terminal typing 복귀를
+확인했다. 독립 query 전이와 PNG/OCR 판정도 통과했다. artifact는 저장소 밖
+`maru-session-dock-ime-preview-final-grant-20261019/run/`의 `result.json`, `candidate.json`,
+`candidate-query-verifier.json`, `candidate-pixel-verifier.log` 및 단계별 capture로 보존한다.
+초기 timeout·권한 거부·이전 projection/판정자 실패 기록은 삭제하지 않고 성공과 분리한다.
 
 근거: Apple `NSTextInputClient`의 selectedRange는 실제 text storage 안의 선택이고,
 substring과 replacement도 같은 storage 범위다. 공개 계약:

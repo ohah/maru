@@ -1,6 +1,6 @@
 # 이름 없는 로컬 문서의 첫 저장 — 비동기 전환과 실측
 
-상태: 비동기 제품 연결 구현. 로컬 회귀 검사 통과, 최종 실측·CI·병합 확인은 별도다.
+상태: 완료 — 비동기 제품 연결·전후 실측·필수 CI 검증을 마치고 [PR #4524](https://github.com/ohah/maru/pull/4524)로 병합했다. 첫 paint와 제품 이벤트 통지는 이 범위 밖이다.
 기존 계약은 [문서 모델 §3.11](../native-editor-document-model.md), 저장 기반은
 [비동기 로컬 저장](editor-local-save-async.md), 대상 예약·경로 전환은
 [Save As](editor-save-as.md)가 소유한다. 아래는 승인된 기존 계약과 구현·검증 범위다.

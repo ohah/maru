@@ -4502,3 +4502,11 @@ ScreenCaptureKit 패널 이미지·native 접근성 확인·대화상자 종료�
 ReleaseFast 정상 19개·다섯 의미 결함 검출·원복 18개, 결과 판정기 10개가 일반/최적화 Python에서 통과했다.
 실측 30표본과 구간별 비용은 [백업 실측 계획](plans/editor-backup-main-latency.md)을 따른다.
 제품의 백업 I/O·주기·저장/종료 정책과 UI는 바꾸지 않는다. 실제 AppKit 입력/프레임 지연은 별도다.
+### 첫 저장 완료 구간과 이벤트 통지 실험
+
+완료: 제품 통지 도입 전 계측 실험과 도구. `probe-editor-first-save-completion.py`는 도입 전의 준비한 실제 AppKit 소스 사본에서
+시작 대기·준비·worker·완료 수거 대기·상태 반영·probe-ready 구간을 나누고, 같은 바이너리의
+tick/event 각 12표본을 대조한다. `test-editor-first-save-completion.py`는 로그의 누락·중복·
+인과 역전과 사본 밖 symlink를 거절하고, 바이너리 혼합·전달 로그 누락·worker 내 지연 누락도 검사한다.
+현재 제품 통지의 구현·수명 검증은 [저장 이벤트 계획](plans/editor-save-event-wake.md)을 따른다. 이 옛 실험만으로 화면의 첫 저장 완료 표시, OS IME와 창/앱 종료 수명까지
+검증한 결과로 해석하지 않으며 [완료 통지 계획](plans/editor-first-save-completion-wake.md)이 실험 범위를 소유한다.

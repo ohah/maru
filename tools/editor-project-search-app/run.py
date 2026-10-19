@@ -21,6 +21,13 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def native_session_state():
+    result = subprocess.run(["swift", "-e",
+        'import CoreGraphics; if let session = CGSessionCopyCurrentDictionary() as? [String: Any] { print(session["CGSSessionScreenIsLocked"] as? Int == 1 ? "locked" : "unlocked") } else { print("unavailable") }'],
+        check=True, capture_output=True, text=True, timeout=30)
+    return result.stdout.strip()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
@@ -29,6 +36,7 @@ def main():
     parser.add_argument("--matrix", action="store_true")
     parser.add_argument("--native-close-save", action="store_true")
     parser.add_argument("--save-as-command", action="store_true")
+    parser.add_argument("--save-as-scenario", choices=("save", "cancel", "edit-during-write"), default="save")
     parser.add_argument("--native-panel-capture-app", type=Path,
                         help="화면 기록이 허용된 native-window-capture.swift.inc 앱 번들")
     parser.add_argument("--replace-batch", action="store_true")
@@ -51,6 +59,8 @@ def main():
     parser.add_argument("--optimize", choices=("Debug", "ReleaseFast"), default="Debug")
     parser.add_argument("--app", type=Path, help="이 하네스로 빌드한 앱을 재사용한다")
     args = parser.parse_args()
+    if args.save_as_scenario != "save" and (not args.save_as_command or not args.native_panel_capture_app):
+        parser.error("Save As lifecycle scenarios need --save-as-command and --native-panel-capture-app")
     if args.native_panel_capture_app and (not args.save_as_command or not args.native_panel_capture_app.is_dir()):
         parser.error("Native panel capture needs --save-as-command and an existing capture app bundle")
     if not 2 <= args.batch_open_files <= 64:
@@ -110,6 +120,8 @@ def main():
         if app.name != "maru-macos-app":
             parser.error("Expected the GUI maru-macos-app binary")
         source = app.parents[4]
+        if args.save_as_scenario == "edit-during-write" and "fn saveAsWriteGate(" not in (source / "src/platform/macos/app_session/editor/local_save.zig").read_text():
+            parser.error("This app lacks the writer gate; build a new Save As verification app")
         hashes = {name: sha(source / name) for name in names}
         command = None
     else:
@@ -175,6 +187,11 @@ def main():
         local_source = source / "src/platform/macos/app_session/editor/local_save.zig"
         local_source.write_text(replace_once(local_source.read_text(), "    pub fn write(self: *Prepared, io: std.Io) editor.SaveError!void {",
             '    pub fn write(self: *Prepared, io: std.Io) editor.SaveError!void {\n        const delay = std.fmt.parseInt(u32, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_BATCH_SAVE_DELAY_MS") orelse "0"), 10) catch 0;\n        if (delay > 0) std.Io.sleep(io, std.Io.Duration.fromMilliseconds(delay), .awake) catch {};\n        if (std.c.getenv("MARU_EDITOR_NATIVE_CLOSE_SAVE") != null) std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1000), .awake) catch {};'))
+        if args.save_as_command:
+            local_source.write_text(replace_once(local_source.read_text(),
+                "    pub fn write(self: *Prepared, io: std.Io) editor.SaveError!void {",
+                "    pub fn write(self: *Prepared, io: std.Io) editor.SaveError!void {\n        try saveAsWriteGate(self, io);") +
+                "\n" + (source / "tools/editor-project-search-app/save-as-write-gate.zig.inc").read_text())
         command = ["mise", "exec", "--", "zig", "build", "macos-app-bundle", "-j2", "-Doptimize=" + args.optimize]
         print(root, flush=True)
         with (root / "build.log").open("wb") as log:
@@ -224,6 +241,7 @@ def main():
     env["MARU_EDITOR_PROJECT_BATCH_SAVE_DELAY_MS"] = str(args.batch_save_delay_ms)
     if args.native_close_save: env["MARU_EDITOR_NATIVE_CLOSE_SAVE"] = "1"
     if args.save_as_command: env["MARU_EDITOR_SAVE_AS_COMMAND"] = "1"
+    env["MARU_EDITOR_SAVE_AS_SCENARIO"] = args.save_as_scenario
     if args.native_panel_capture_app: env["MARU_NATIVE_PANEL_CAPTURE_EXTERNAL"] = "1"
     env["MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY"] = "1" if args.replace_batch_save_retry else "0"
     env["MARU_EDITOR_PROJECT_REPLACE_BATCH"] = "1" if args.replace_batch else "0"
@@ -232,6 +250,11 @@ def main():
         main.write_text((repo / "src/platform/macos/SessionHostInputSourcePolicy.swift").read_text() + "\n" +
                         (source / "tools/editor-project-search-app/hid.swift.inc").read_text())
         subprocess.run(["swiftc", str(main), "-o", str(root / "hid")], check=True, timeout=60)
+    if args.native_panel_capture_app:
+        state = native_session_state()
+        (root / "session-state.json").write_text(json.dumps({"state": state}) + "\n")
+        if state != "unlocked":
+            raise RuntimeError("Native Save As GUI needs an unlocked macOS session; observed " + state)
     with (root / "app.log").open("wb") as log:
         child = subprocess.Popen([str(app)], env=env, stdout=log, stderr=log, start_new_session=True)
         hid = None
@@ -269,13 +292,24 @@ def main():
                     script = '''on run arguments
 tell application "System Events"
 set targetProcess to first process whose unix id is (item 1 of arguments as integer)
+set frontmost of targetProcess to true
+repeat 50 times
+if exists window 1 of targetProcess then
+if exists sheet 1 of window 1 of targetProcess then exit repeat
+end if
+delay 0.1
+end repeat
 set paneGroup to splitter group 1 of sheet 1 of window 1 of targetProcess
 if value of text field 1 of paneGroup is not "save-as-source.txt" then error "Unexpected Save As filename"
+if item 2 of arguments is "cancel" then
+click button "Cancel" of paneGroup
+else
 set value of text field 1 of paneGroup to "save-as-destination.txt"
 click button "Save" of paneGroup
+end if
 end tell
 end run'''
-                    subprocess.run(["osascript", "-e", script, str(child.pid)], check=True, timeout=15)
+                    subprocess.run(["osascript", "-e", script, str(child.pid), args.save_as_scenario], check=True, timeout=15)
                     (artifacts / "save-as-confirm-sent").write_text("native-accessibility\n")
                     panel_confirmed = True
                 if hid is not None and hid.poll() not in (None, 0):
@@ -333,9 +367,18 @@ end run'''
                 raise RuntimeError("Native close disk bytes differ: " + name)
     if args.save_as_command:
         expected += ("save-as-before", "save-as-after")
-        for name, data in (("source", b"foo"), ("destination", b"foo!")):
+        if args.save_as_scenario != "save" and "SAVE_AS_HISTORY undo=true redo=true" not in transcript:
+            raise RuntimeError("Save As lifecycle scenario did not verify Undo/Redo")
+        wanted = (("source", b"foo"),) if args.save_as_scenario == "cancel" else (("source", b"foo"), ("destination", b"foo!"))
+        for name, data in wanted:
             if (project / ("save-as-" + name + ".txt")).read_bytes() != data:
                 raise RuntimeError("Save As disk bytes differ: " + name)
+        if args.save_as_scenario == "cancel" and (project / "save-as-destination.txt").exists():
+            raise RuntimeError("Cancelled Save As created a destination")
+        if args.save_as_scenario == "edit-during-write":
+            if (artifacts / "save-as-writer-entered").read_bytes() != b"foo!":
+                raise RuntimeError("Writer did not freeze the expected pre-edit snapshot")
+            expected += ("save-as-edit-pending",)
         if not (artifacts / "save-as-panel.png").exists():
             raise RuntimeError("Missing native NSSavePanel capture")
     for label in expected:
@@ -366,10 +409,15 @@ end run'''
         product_passed=True, native_close_save=args.native_close_save, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, batch_open_files=args.batch_open_files, batch_peer_bytes=args.batch_peer_bytes, optimize=args.optimize, disk_padding_lines=args.disk_padding_lines, batch_save_delay_ms=args.batch_save_delay_ms, replace_batch_save_retry=args.replace_batch_save_retry, replace_batch=args.replace_batch, replace_preview=args.replace_preview, replace_apply=args.replace_apply, replace_disk_apply=args.replace_disk_apply, replace_ime_refuse=args.replace_ime_refuse, conflict_markers=args.conflict_markers, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(source / "tools/editor-project-search-app" / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc", "batch.zig.inc", "native-close.zig.inc", "native-close.swift.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
     report["runner_sha256"] = sha(Path(__file__))
     report["save_as_command"] = args.save_as_command
+    report["save_as_scenario"] = args.save_as_scenario
     if args.save_as_command:
         report["scope"] = "AppKit Save As shortcut, native sheet capture and accessibility confirmation; model path and original/destination disk bytes"
         for name in ("save-as.swift.inc", "save-as.zig.inc"):
             report["harness_sha256"][name] = sha(source / "tools/editor-project-search-app" / name)
+        gate = source / "tools/editor-project-search-app/save-as-write-gate.zig.inc"
+        if gate.exists(): report["harness_sha256"][gate.name] = sha(gate)
+        if args.save_as_scenario == "edit-during-write":
+            report["writer_snapshot_sha256"] = sha(artifacts / "save-as-writer-entered")
         if args.native_panel_capture_app:
             report["native_panel_capture"] = {
                 "method": "ScreenCaptureKit",

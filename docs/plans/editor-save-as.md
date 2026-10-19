@@ -272,3 +272,18 @@ Save 버튼을 접근성 API로 조작하고, 대화상자 종료와 저장 완�
 사용해 sheet가 열린 동안 제품 프레임 생성에 의존하지 않는다. 캡처 도구는 AppKit을
 초기화한 뒤 창 필터를 만든다. 실제 물리 키·한국어 IME·VoiceOver, GUI 취소·저장 중
 추가 입력을 이 성공 결과로 대체하지 않는다.
+
+## GUI 취소·저장 중 추가 입력 — 실제 실행 검증 완료
+
+`--save-as-scenario cancel`은 실제 Cancel 버튼 뒤 원본 경로·미저장 본문 유지와 목적지
+미생성, Undo/Redo 복원을 검사한다. `--save-as-scenario edit-during-write`는 격리 앱에만
+writer gate를 주입한다. 저장 snapshot을 원자적으로 게시한 뒤 writer를 대기시키고,
+UI에서 추가 입력·캡처를 마친 뒤 해제한다. 최종 디스크는 이전 snapshot, 본문은 추가
+입력과 dirty를 유지하는지와 Undo/Redo를 검사한다. 시간 지연만으로 순서를 추정하지 않는다.
+두 시나리오는 `--save-as-command --native-panel-capture-app <허용된 앱>`과 함께 사용한다.
+2026-10-19 잠금 해제 후 실제 Cancel·저장 중 추가 입력·기본 Save As가 통과했다.
+취소 뒤 본문 `foo!`·원본 경로·dirty 유지와 목적지 미생성을 확인했다.
+writer 대기 중 `?`를 추가한 뒤 디스크 `foo!`·본문 `foo!?`·새 경로·dirty 유지를 확인했다.
+세 시나리오 모두 Undo 뒤 본문 변경과 Redo 뒤 원문 복원, 최종 경로·dirty를 재검사했다.
+취소 후·writer 대기 중·저장 후 Metal 이미지도 직접 확인했다.
+잘못된 실행 옵션과 잠금 상태는 실패로 중단한다. 물리 한글 IME·VoiceOver는 별도다.

@@ -3,8 +3,8 @@ import AppKit
 import CoreGraphics
 let pid = pid_t(CommandLine.arguments[1])!
 let root = URL(fileURLWithPath: CommandLine.arguments[2])
-func waitFor(_ name: String) throws {
-    let end = Date().addingTimeInterval(12)
+func waitFor(_ name: String, timeout: TimeInterval = 12) throws {
+    let end = Date().addingTimeInterval(timeout)
     while !FileManager.default.fileExists(atPath: root.appendingPathComponent(name).path) {
         if Date() > end { throw NSError(domain: "IME", code: 1) }
         Thread.sleep(forTimeInterval: 0.05)
@@ -25,7 +25,8 @@ func post(_ code: CGKeyCode) throws {
     Thread.sleep(forTimeInterval: 0.15)
 }
 do {
-    try waitFor("physical-ready")
+    let saveAs = ProcessInfo.processInfo.environment["MARU_EDITOR_SAVE_AS_PHYSICAL_IME"] == "1"
+    try waitFor(saveAs ? "save-as-physical-ready" : "physical-ready")
     guard CGPreflightPostEventAccess(), let app = NSRunningApplication(processIdentifier: pid) else { throw NSError(domain: "IME", code: 3) }
     app.activate(options: [.activateIgnoringOtherApps])
     Thread.sleep(forTimeInterval: 0.3)
@@ -33,10 +34,17 @@ do {
     let original = try SessionHostInputSourcePolicy.prepareKoreanSelection(recordURL: record)
     defer { print("source_restore=\(SessionHostInputSourcePolicy.restore(recordURL: record)) original=\(original)") }
     Thread.sleep(forTimeInterval: 0.3)
-    for code: CGKeyCode in [5, 40, 1, 15, 46, 3] { try post(code) }
-    try waitFor("ime-marked.ppm")
-    try post(36)
-    print("physical_keys=6 enter=1 transport=cghidEventTap")
+    let codes: [CGKeyCode] = saveAs ? [5, 40, 1] : [5, 40, 1, 15, 46, 3]
+    for code in codes { try post(code) }
+    try waitFor(saveAs ? "save-as-ime-marked.ppm" : "ime-marked.ppm")
+    if saveAs {
+        // Enter로 먼저 확정하지 않는다. 조합 중 Save As 명령의 확정을 제품에서 검증한다.
+        try waitFor("save-as-ime-finished", timeout: 25)
+        print("physical_keys=3 enter=0 transport=cghidEventTap")
+    } else {
+        try post(36)
+        print("physical_keys=6 enter=1 transport=cghidEventTap")
+    }
 } catch {
     print("physical_error=\(error)")
     exit(1)

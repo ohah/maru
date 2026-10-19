@@ -287,3 +287,21 @@ writer 대기 중 `?`를 추가한 뒤 디스크 `foo!`·본문 `foo!?`·새 경
 세 시나리오 모두 Undo 뒤 본문 변경과 Redo 뒤 원문 복원, 최종 경로·dirty를 재검사했다.
 취소 후·writer 대기 중·저장 후 Metal 이미지도 직접 확인했다.
 잘못된 실행 옵션과 잠금 상태는 실패로 중단한다. 물리 한글 IME·VoiceOver는 별도다.
+
+## 한국어 IME Save As — 실제 OS 입력기 실행 검증 완료
+
+`--save-as-physical-ime`는 한국어 입력 소스에서 CGEvent 키 세 개로 `한`을 조합한다.
+Enter로 먼저 확정하지 않는다. 제품의 preedit가 정확히 `한`이고 AppKit marked range가
+한 글자인 상태를 관측·촬영한 뒤 기존 NSEvent ⌘⇧S 경로를 실행한다. 이후 실제 저장 창을
+확인하고 원본 `foo`·목적지/본문 `foo한`·dirty 해제·preedit 종료·Undo/Redo를 검사한다.
+입력 소스는 성공·실패 모두 기존 복원 기록 계약으로 복원하고 로그를 검사한다.
+
+한국어 입력은 OS 입력기 경로를 거치는 CGEvent이며 사람의 물리 키보드 조작은 아니다.
+저장 단축키는 기존 AppKit NSEvent, 저장 창 확인은 접근성 API다. VoiceOver와 한자
+후보창 위치 검증을 대신하지 않는다. 2026-10-19 잠금 해제 후 실제 한국어 입력기의
+조합 중 marked range·preedit `한`을 확인하고 저장했다. 원본 `foo` 보존·목적지와 본문
+`foo한`·새 경로·dirty 해제·조합 종료·Undo/Redo와 입력 소스 복원이 모두 통과했다.
+조합 중/저장 후 Metal 이미지도 직접 확인했다. 첫 실행은 입력기 복원 enum `.restored`를
+boolean 문자열로 기대한 하네스 판정 오류로 거절됐으며 실제 로그 계약에 맞춰 수정하고
+새 실행 전체가 통과했다. 옵션 누락·검색 IME와 중복·취소 시나리오와 중복·오래된 앱은
+GUI/HID 실행 전에 거절한다. 사람의 키보드 조작과 VoiceOver는 여전히 별도다.

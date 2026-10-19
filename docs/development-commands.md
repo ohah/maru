@@ -1702,7 +1702,9 @@ Mac 화면 잠금·검은 캡처는 통과로 취급하지 않는다. 물리 한
 `--save-as-scenario cancel`은 실제 Cancel과 목적지 미생성을,
 `--save-as-scenario edit-during-write`는 격리 writer 동기화 뒤 추가 입력·이전 snapshot 저장을
 검사한다. 두 옵션은 native 캡처 앱이 필수이며 Undo/Redo도 검사한다.
-현재 남은 정책/검증은 [Save As 계획](plans/editor-save-as.md)을 따른다.
+`--save-as-physical-ime`는 기본 save 시나리오와 native 캡처 앱에서 한국어 CGEvent 조합 중
+Save As를 검사한다. 검색용 `--physical-ime`와 함께 쓰지 않는다. 잠금 해제가 필요하며,
+현재 실제 실행 완료 여부는 [Save As 계획](plans/editor-save-as.md)을 따른다.
 
 `python3 tools/test-editor-formatter-wait.py`는 격리 저장소에서 EXFB3의 정상·6초 지연·
 5초 조기 실패·복원 대조군을 실행한다. 제품 포매터의 20초 timeout은 바꾸지 않는다.

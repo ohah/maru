@@ -8,6 +8,7 @@ export fn maru_editor_save_as_probe(stage: u32) callconv(.c) i32 {
     const doc = term.rt.editorDocument();
     if (stage == 1) return if (std.mem.eql(u8, doc.opened.?.file.content, "foo")) 1 else -1;
     const scenario = std.mem.span(std.c.getenv("MARU_EDITOR_SAVE_AS_SCENARIO") orelse "save");
+    if (stage == 6) return if (std.mem.eql(u8, term.rt.editor_preedit, "한")) 1 else 0;
     if (stage == 5) return if (@import("editor/save/as.zig").pending() != 0 and std.mem.endsWith(u8, doc.path.?, "save-as-source.txt") and std.mem.eql(u8, doc.opened.?.file.content, "foo!")) 1 else -1;
     if (stage == 4) {
         if (@import("editor/save/as.zig").pending() != 0) return 0;
@@ -15,7 +16,9 @@ export fn maru_editor_save_as_probe(stage: u32) callconv(.c) i32 {
         const cancelled = std.mem.eql(u8, scenario, "cancel");
         const edited = std.mem.eql(u8, scenario, "edit-during-write");
         const name = if (cancelled) "save-as-source.txt" else "save-as-destination.txt";
-        const content = if (edited) "foo!?" else "foo!";
+        const physical = std.c.getenv("MARU_EDITOR_SAVE_AS_PHYSICAL_IME") != null;
+        if (physical and term.rt.editor_preedit.len != 0) return -1;
+        const content = if (physical) "foo한" else if (edited) "foo!?" else "foo!";
         return if (std.mem.endsWith(u8, doc.path.?, name) and editor_ops.isDirty(term) == (cancelled or edited) and std.mem.eql(u8, doc.opened.?.file.content, content)) 1 else -1;
     }
     return 1;

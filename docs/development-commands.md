@@ -1781,6 +1781,10 @@ saved 기준·entry 게시·반복 저장·닫기 대상·배타 생성 결함�
 계약과 실제 재현 기록은 [명령 팔레트 IME 문맥](plans/command-palette-ime.md)을 따른다.
 
 
+### 첫 저장 완료 대기와 이벤트 통지 비교
+
+`tools/probe-editor-first-save-completion.py --source <첫 저장 하네스의 준비 source> --output <저장소 밖 새 경로>`는 별도 사본의 Debug 앱 하나로 tick/event 각각 12표본을 검사한다. 실제 파일·모델 완료 관측이며 첫 paint 시각은 포함하지 않는다. `python3 tools/test-editor-first-save-completion.py`는 phase 판정과 사본 경계의 반례를 검사한다. 준비·실행 명령과 한계는 [완료 통지 계획](plans/editor-first-save-completion-wake.md)을 따른다.
+
 ### 로컬 저장 완료 통지
 
 `mise exec -- zig build test-editor-save-wake`와 `-Doptimize=ReleaseFast`는 frame tick 없이 저장 접수·완료·입력 재개와 늦은 알림을 검사한다. `python3 tools/test-editor-save-wake-native.py`는 실제 main run loop와 worker join을, `python3 tools/test-editor-save-wake-adversarial.py`는 통지 누락/재예약 유실과 정상·복원 대조군을 검사한다. 범위와 한계는 [저장 이벤트 계획](plans/editor-save-event-wake.md)을 따른다.

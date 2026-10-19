@@ -1745,3 +1745,8 @@ U4b/U4c/U4d 제품 회귀·백업 reader·복구 저장소와 U4b-19 실패 주�
 하위 실행은 `tools/editor-project-search-app/run.py --untitled-save-benchmark
 --untitled-bytes 65536 --untitled-delay-ms 200`이다. 제품 코드에 지연을 넣지 않는다.
 측정의 의미·범위와 후속 연결안은 [첫 저장 비동기 전환](plans/editor-untitled-save-async.md)을 따른다.
+
+첫 저장 실측의 판정 반례는 `python3 tools/test-editor-untitled-measurement.py`,
+판정 보호 결함 주입은 `python3 tools/test-editor-untitled-measurement-adversarial.py`로 검사한다.
+집계 도구의 `--optimize Debug|ReleaseFast`는 실제 앱의 빌드 모드와 대조한다. 중복 크기와
+바이너리·주입 소스·하네스가 섞인 표본군은 거절한다.

@@ -12,8 +12,13 @@ const agent = @import("agent.zig");
 const model = maru.session.inspector;
 pub const layout = model.layout;
 const panel = maru.chrome.components.inspector;
+pub const picker = @import("inspector_picker.zig");
 
 pub const State = struct {
+    picking: bool = false,
+    picker_hover: ?maru.chrome.ui.inspection.Key = null,
+    picker_selected: ?maru.chrome.ui.inspection.Key = null,
+    picker_capture: bool = false,
     window_id: ?u64 = null,
     rich_text: ?root.MeasuredTextCache = null,
     presentation: layout.State = .{},
@@ -98,6 +103,7 @@ pub fn capture(self: *AppSession, term: *Term, a: std.mem.Allocator, window: ?u6
         if (term.surface.remote == null) snapshot.terminal.scroll_region = .{ .top = term.surface.core.scroll_top, .bottom = term.surface.core.scroll_bottom };
         term.surface.unlockCore(self.io);
     }
+    snapshot.elements = try picker.snapshot(self, a, window);
     try model.addFieldInfo(a, &snapshot);
     return snapshot;
 }
@@ -220,6 +226,7 @@ pub fn releaseWindowFocus(self: *AppSession) void {
     self.inspector.window_focused = false;
 }
 pub fn close(self: *AppSession) void {
+    picker.cancel(self);
     releaseWindowFocus(self);
     self.inspector.resizing = false;
     self.chrome_host.inspector.open = false;
@@ -362,7 +369,7 @@ pub fn key(self: *AppSession, e: maru.terminal.KeyEvent) void {
         s.refresh = true;
         poll(self);
     } else if (e.key == .tab) {
-        s.tab = @fromBackingInt(@intCast((@as(u8, @intCast(@backingInt(s.tab))) + (if (e.modifiers.shift) @as(u8, 3) else @as(u8, 1))) % 4));
+        s.tab = @fromBackingInt(@intCast((@as(u8, @intCast(@backingInt(s.tab))) + (if (e.modifiers.shift) @as(u8, 4) else @as(u8, 1))) % 5));
         s.offset = 0;
         s.selected_field_len = 0;
     } else if (e.key == .arrow_down or e.key == .page_down) {
@@ -414,6 +421,7 @@ pub fn click(self: *AppSession, x: f64, y: f64) void {
     };
     switch (hit) {
         .placement => |placement| setPlacement(self, @fromBackingInt(@as(u3, @intCast(placement)))),
+        .picker => picker.toggle(self),
         .privacy => self.inspector.anonymize_exports = !self.inspector.anonymize_exports,
         .tab => |t| {
             self.inspector.tab = t;
@@ -424,7 +432,10 @@ pub fn click(self: *AppSession, x: f64, y: f64) void {
             0 => cycle(self, true),
             1 => cycle(self, false),
             2 => self.inspector.pinned = !self.inspector.pinned,
-            3 => self.inspector.paused = !self.inspector.paused,
+            3 => {
+                self.inspector.paused = !self.inspector.paused;
+                if (self.inspector.paused) picker.cancel(self);
+            },
             4 => {
                 self.inspector.refresh = true;
                 poll(self);
@@ -445,7 +456,7 @@ pub fn collectInspectorDraws(self: *AppSession, p: maru.chrome.ChromeProps, tk: 
     const s = &self.inspector;
     if (!visible(self)) return;
     const query = try std.mem.concat(a, u8, &.{ s.query[0..s.query_len], s.preedit[0..s.preedit_len] });
-    try panel.collect(s.tab, @intCast(@backingInt(s.presentation.placement)), s.paused, s.pinned, s.anonymize_exports, query, &s.offset, s.status, s.json orelse "{}", p, renderScale(self), tk, a, s.hovered, s.selected_field[0..s.selected_field_len], out);
+    try panel.collect(s.tab, @intCast(@backingInt(s.presentation.placement)), s.paused, s.picking, s.pinned, s.anonymize_exports, query, &s.offset, s.status, s.json orelse "{}", p, renderScale(self), tk, a, s.hovered, s.selected_field[0..s.selected_field_len], out);
 }
 
 pub fn copyJson(self: *AppSession) []const u8 {

@@ -12,6 +12,31 @@
 
 ## Live Terminal Inspector
 
+### UI 요소 선택기 (2026-10-20)
+
+- `feat/inspector-ui-picker`, base `0eb64393a`: published tree의 hover/선택·Elements·CLI를 구현했다.
+  상세 범위·지원 source·세대/clip/소유 창·512 node 한도는 [UI 요소 계획](plans/ui-inspector.md)을 따른다.
+- Debug `test-inspector` 중립 **61개 + macOS 연동 11개**, `test-chrome-ui` **1,166개**,
+  CLI failure contract **703개 통과·1개 skip**, doc links/line refs, 전체 `check-boundaries -j4` 통과.
+  `/tmp/maru-picker-final-checks.log`, `/tmp/maru-picker-boundaries-final.log`, `/tmp/maru-picker-final-docs.log`.
+- ReleaseFast `test-inspector` **61개 + 11개** 통과: `/tmp/maru-picker-final-releasefast.log`.
+- 최종 실제 앱 E2E **20/20**, live CLI 표본 **439건**, native Metal PNG **64장**,
+  선택 경계의 변경 픽셀 합계 **22272개**. `/tmp/maru-picker-complete-e2e20/manifest.json`.
+  앱 SHA256 `41e8ff651f79e8c09ed29657d36f8c455bc9b26e26179cbc3eb4090894a52bc3`.
+  소유 창과 별도 도구 창, 상/우/하/좌/window, 한·영·1×/주입 2×, 상태바·파일 트리,
+  Pick 취소·Pause/Live·음수 좌표·도구 hover·선택 유지·닫기/재열기를 검사했다.
+- 제품 검토에서 낮은 도크의 선택 정보가 표 아래로 밀려 선택 node를 먼저 표시하고 요약 줄을 추가했다.
+  표시 필드는 localized name과 간결한 geometry를 쓴다. 수정 뒤 전체 20회를 다시 실행했다.
+- 창 밖 음수 좌표의 native cursor는 arrow가 정상이다. crosshair를 요구하던 fixture 기준을
+  수정한 뒤 전체 20회를 재실행했다. 제품 동작을 fixture에 맞추지 않았다.
+- 의도적 결함 5종(clip 무시·역순 선택·오래된 세대·source 무시·포함 경계)을 실제 컴파일/실행해 검출했다.
+  정상·등가·복원 대조군도 통과: `/tmp/maru-picker-mutants-tq8eswdr/manifest.json`.
+  `python3 tools/test-inspector-picker-adversarial.py`로 재실행한다.
+- native E2E는 `python3 tools/inspector-picker-app/run.py --app zig-out/Maru.app/Contents/MacOS/maru-macos-app --output <새 경로> --rounds 20`이다.
+  NSEvent callback/Metal readback 증거다. 물리 HID·IME·다중 디스플레이·실제 SSH/host GUI,
+  SCM/세션 도크의 실물 시나리오는 이 20회의 검증 범위가 아니다. 해당 어댑터의 좌표 변환은 중립 판정자로 검사했다.
+- 원격 CI/머지는 PR checks와 별도다. main required check 7개는 2026-10-20 실제 보호 설정과 문서 목록을 대조했다.
+
 ### 데이터 설명·수집 상태 후속
 
 - 머지 전 재검토에서 Events의 공통 번역 라벨이 행별 sequence·관측 시각을 덮는 회귀를 발견했다.

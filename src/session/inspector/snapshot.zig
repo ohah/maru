@@ -60,6 +60,7 @@ pub const History = struct {
 pub const Snapshot = struct {
     schema: []const u8 = "maru.inspector.v1",
     field_info: std.json.Value = .null,
+    elements: std.json.Value = .null,
     overview: struct {
         surface_id: u64,
         runtime_id: ?[]const u8 = null,

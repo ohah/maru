@@ -130,6 +130,13 @@ pub fn decorate(a: std.mem.Allocator, root: std.json.Value, section: []const u8,
             // explanation without replacing the identity of each history row.
             if (!std.mem.startsWith(u8, row.field_path, "events.items[")) row.label = i18n.t(spec.name);
             row.meaning = i18n.t(spec.meaning);
+        } else if (std.mem.startsWith(u8, row.field_path, "elements.")) {
+            const suffix = row.key[(if (std.mem.indexOfScalar(u8, row.key, '.')) |dot| dot + 1 else 0)..];
+            const names = .{ .{ "source", .inspector_ui_source }, .{ "id", .inspector_ui_id }, .{ "parent_id", .inspector_ui_parent_id }, .{ "generation", .inspector_ui_generation }, .{ "kind", .inspector_ui_kind }, .{ "role", .inspector_ui_role }, .{ "rect", .inspector_ui_rect }, .{ "visible_rect", .inspector_ui_visible_rect }, .{ "action_id", .inspector_ui_action_id }, .{ "enabled", .inspector_ui_enabled }, .{ "cursor", .inspector_ui_cursor } };
+            inline for (names) |entry| if (std.mem.eql(u8, suffix, entry[0])) {
+                row.label = i18n.t(entry[1]);
+            };
+            row.meaning = i18n.t(.inspector_ui_detail);
         } else row.meaning = row.field_path;
         if (row.info.availability != .available) {
             row.value = availabilityLabel(row.info.availability);
@@ -190,6 +197,7 @@ pub fn availabilityLabel(value: metadata.Availability) []const u8 {
 }
 pub fn sourceLabel(value: metadata.Source) []const u8 {
     return switch (value) {
+        .published_ui_tree => i18n.t(.inspector_src_ui_tree),
         .session_model => i18n.t(.inspector_src_session_model),
         .window_membership => i18n.t(.inspector_src_window_membership),
         .runtime_observation => i18n.t(.inspector_src_runtime_observation),
@@ -220,4 +228,27 @@ pub fn reasonLabel(value: metadata.Reason) []const u8 {
         .detail_not_ready => i18n.t(.inspector_why_detail_not_ready),
         .not_captured => i18n.t(.inspector_why_not_captured),
     };
+}
+
+test "inspector UI field labels explain published node values without JSON prefixes" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const root = try std.json.parseFromSlice(std.json.Value, arena.allocator(),
+        \\{"elements":{"selected":{"source":"file_tree","id":7,"visible_rect":{"x":1,"y":2,"width":3,"height":4}}}}
+    , .{});
+    var rows = [_]Row{
+        .{ .key = "selected.source", .label = "selected.source", .value = "file_tree" },
+        .{ .key = "selected.id", .label = "selected.id", .value = "7" },
+        .{ .key = "selected.visible_rect", .label = "selected.visible_rect", .value = "3 x 4" },
+    };
+    try decorate(arena.allocator(), root.value, "elements", &rows);
+    try std.testing.expectEqualStrings(i18n.t(.inspector_ui_source), rows[0].label);
+    try std.testing.expectEqualStrings(i18n.t(.inspector_ui_id), rows[1].label);
+    try std.testing.expectEqualStrings(i18n.t(.inspector_ui_visible_rect), rows[2].label);
+    for (rows) |row| {
+        try std.testing.expectEqual(metadata.Source.published_ui_tree, row.info.source);
+        try std.testing.expectEqual(metadata.Availability.available, row.info.availability);
+        try std.testing.expectEqualStrings(i18n.t(.inspector_ui_detail), row.meaning);
+    }
 }

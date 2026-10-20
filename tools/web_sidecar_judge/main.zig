@@ -15,7 +15,7 @@
 //! 판정만 돈다. `--upload` 는 W9c③ 업로드가 기대는 Chromium 의 성질(`upload_check.zig`)만 본다. `--network` 는 W9d① 네트워크 기록
 //! (`network_check.zig` — 지켜보는 탭의 갈래·헤더·리다이렉트·서비스 워커·쏟아짐·설정 끔, 적대 리뷰 5 회차 항목은 `network_r9d5_check.zig`)와
 //! W9d② 응답 본문 기록(`network_body_check.zig` — 잡기·상한·글 아님·끊김·맞추기·서비스 워커·UB1·설정 끔·쓰는 스레드·렌더러 죽음·끄기, 적대 리뷰
-//! 1 회차 항목은 `network_body_r1_check.zig`)만 본다. `--network-body` 는 본문 판정(적대 리뷰 1 회차 항목 포함)만.
+//! 1·2 회차 항목은 `network_body_r1_check.zig`)만 본다. `--network-body` 는 본문 판정(적대 리뷰 1·2 회차 항목 포함)만.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -415,7 +415,7 @@ fn permissionChecks(host_path: [:0]const u8, profile_root: []const u8) void {
 /// 단독 모드의 첫 판정 전에 host 를 한 번 띄워 빈 브라우저를 만들고 끝낸다(프로필 `<뿌리>/w`) — 판정이 아니다. 새로 빌드한
 /// x86_64 설치물의 첫 실행은 Rosetta 번역으로 느려 첫 페이지 준비가 15 초를 넘겼다(W6a① 실측 27 초, 다음부터 6~7 초).
 /// 전체 판정은 앞의 판정들이 이 비용을 치른다. 걸린 시간을 출력해 정말 느려진 것은 보이게 한다(W6a① 적대 검증 5 차).
-/// W9d② 적대 리뷰 1 회차(`body-r1-*`) — 따로 띄운 sidecar·프로필로(앞 판정의 지켜보기·쿠키가 섞이지 않게).
+/// W9d② 적대 리뷰 1·2 회차(`body-r1-*`·`body-r2-*`) — 따로 띄운 sidecar·프로필로(앞 판정의 지켜보기·쿠키가 섞이지 않게).
 fn bodyR1Checks(host: [:0]const u8, profile_root: []const u8) void {
     var pb: [1024]u8 = undefined;
     const prof = std.fmt.bufPrintSentinel(&pb, "--profile-dir={s}/netbody_r1", .{profile_root}, 0) catch return;

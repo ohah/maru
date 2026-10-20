@@ -3260,13 +3260,20 @@ fn newRecordSession(s: *Surface) void {
     s.rec_status = .off;
 }
 
-/// W9d② 적대 리뷰 1 회차: 본문 `need` 바이트가 앱 상한(32 MiB)에 들어갈 자리를 탭과 무관하게 가장 먼저 받은 본문부터 버려 낸다(`evicted`).
-/// 탭 상한은 그 탭의 링이 따로 낸다(`Ring.bodyData`). 전에는 앱 상한도 그 탭의 것만 버려, 다른 탭들이 상한을 채우면 새 탭의 본문은 모두 버려졌다.
+/// 본문 `need` 바이트가 앱 상한(32 MiB)에 들어갈 자리를 낸다(`evicted`) — 탭 상한은 그 탭의 링이 따로 낸다(`Ring.bodyData`).
+/// W9d② 적대 리뷰 1 회차: 전에는 앱 상한도 받는 탭의 것만 버려, 다른 탭들이 상한을 채우면 새 탭의 본문은 모두 버려졌다.
+/// W9d② 적대 리뷰 2 회차(작성자 선택): 본문을 가장 많이 쥔 탭(받는 중인 바이트 포함 — `Ring.body_bytes`)의 가장 먼저 받은 본문부터 버린다(같으면
+/// 더 먼저 받은 본문의 탭). 바쁜 탭은 다른 탭보다 먼저 제 본문을 버린다 — 1 회차의 「탭과 무관하게 가장 먼저 받은 것부터」 는 바쁜 페이지가
+/// 사용자 탭의 본문(대개 더 먼저 받았다)을 밀어냈다.
 fn makeAppBodyRoom(gpa: std.mem.Allocator, need: usize) void {
     while (net_budget.body_bytes + need > net_budget.body_cap) {
         var victim: ?struct { ring: *net_ring.Ring, entry: *net_ring.Entry } = null;
         for (surfaces.values()) |*sp| if (sp.network.oldestBody(null)) |e| {
-            if (victim == null or e.body_order < victim.?.entry.body_order) victim = .{ .ring = &sp.network, .entry = e };
+            const better = if (victim) |v|
+                sp.network.body_bytes > v.ring.body_bytes or (sp.network.body_bytes == v.ring.body_bytes and e.body_order < v.entry.body_order)
+            else
+                true;
+            if (better) victim = .{ .ring = &sp.network, .entry = e };
         };
         const v = victim orelse return;
         v.ring.evictBody(gpa, &net_budget, v.entry);
@@ -5348,9 +5355,11 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .net_end => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.end(v),
         .net_dropped => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.addDropped(gpa, &net_budget, v.count) catch {},
         // W9d②: 본문 — 이 탭에 매긴 세션의 것만(끈 뒤에 오는 옛 세션의 끝도 받는다 — 기다리던 기록의 상태를 정한다).
-        // 지운 뒤(`rec_floor`)의 옛 세션 frame 은 받지 않는다(W9d② 적대 리뷰 1 회차 LOW-2). 앱 상한은 탭과 무관하게 가장 먼저 받은 본문부터 낸다.
+        // 지운 뒤(`rec_floor`)의 옛 세션 frame 은 받지 않는다(W9d② 적대 리뷰 1 회차 LOW-2). 앱 상한은 본문을 가장 많이 쥔 탭부터 낸다
+        // (`makeAppBodyRoom`) — 링이 받을 조각(기다리는 기록·이어지는 오프셋·본문 상한 안)일 때만: 받지 않을 조각 때문에 다른 탭의 본문을 버리지
+        // 않는다(W9d② 적대 리뷰 2 회차 — 전에는 오프셋·크기를 보기 전에 버렸다).
         .net_body_data => |v| if (surfaces.getPtr(v.browser)) |s| if (bodyFrameAccepted(s, v.session)) {
-            if (s.network.awaitsBody(v.request)) makeAppBodyRoom(gpa, v.bytes.len);
+            if (s.network.acceptsBodyData(v)) makeAppBodyRoom(gpa, v.bytes.len);
             s.network.bodyData(gpa, &net_budget, v) catch {};
         },
         .net_body_end => |v| if (surfaces.getPtr(v.browser)) |s| {
@@ -9029,7 +9038,7 @@ test "W9d② 적대 리뷰 1 회차 재현 RV1-maru: 설정이 꺼진 동안 적
     try std.testing.expect(std.mem.indexOf(u8, d2, "COVERED-OK") != null);
 }
 
-test "W9d② 적대 리뷰 1 회차: 앱 본문 상한(32 MiB)은 탭과 무관하게 가장 먼저 받은 본문부터 낸다 — 다른 탭 넷이 8 MiB 씩 채워도 다섯째 탭의 본문은 들어간다" {
+test "W9d② 적대 리뷰 1 회차: 앱 본문 상한(32 MiB) — 다른 탭 넷이 8 MiB 씩 채워도 다섯째 탭의 본문은 들어간다(2 회차: 본문을 가장 많이 쥔 탭부터 낸다)" {
     const gpa = std.testing.allocator;
     state = .starting;
     defer testTeardown(gpa);
@@ -9063,10 +9072,90 @@ test "W9d② 적대 리뷰 1 회차: 앱 본문 상한(32 MiB)은 탭과 무관�
         }
         try std.testing.expect(net_budget.body_bytes <= net_budget.body_cap);
     }
-    // 다섯째 탭의 마지막 본문은 들어갔고, 버려진 것은 첫 탭의 가장 먼저 받은 것이다.
+    // 다섯째 탭의 본문은 들어갔다. 처음 버린 것은 가장 많이 쥔 탭들(91–94, 같다) 중 가장 먼저 받은 것(91 의 첫 본문), 그 뒤로는 그때 가장 많이
+    // 쥔 탭의 것 — 다섯째 탭도 일곱을 쥐었을 때 제 첫 본문을 버렸다. 어느 탭도 비지 않는다(탭마다 여섯 넘게 남는다 — 32 MiB 에 1 MiB 남짓 서른둘).
     const last = surfaces.getPtr(95).?.network.entries.atPtr(7);
     try std.testing.expectEqual(net_ring.BodyState.captured, last.body_state);
-    try std.testing.expectEqual(net_ring.BodyState.captured, surfaces.getPtr(95).?.network.entries.atPtr(0).body_state);
+    try std.testing.expectEqual(net_ring.BodyState.evicted, surfaces.getPtr(95).?.network.entries.atPtr(0).body_state);
+    try std.testing.expectEqual(net_ring.BodyState.captured, surfaces.getPtr(95).?.network.entries.atPtr(1).body_state);
     try std.testing.expectEqual(net_ring.BodyState.evicted, surfaces.getPtr(91).?.network.entries.atPtr(0).body_state);
     try std.testing.expectEqual(net_ring.BodyState.captured, surfaces.getPtr(94).?.network.entries.atPtr(7).body_state);
+    for (tabs) |t| try std.testing.expect(surfaces.getPtr(t).?.network.body_bytes >= 6 * pieces * piece.len);
+}
+
+// 이 시험이 증명하는 것(W9d② 적대 리뷰 2 회차 — 작성자 선택): 앱 본문 상한은 본문을 가장 많이 쥔 탭의 가장 먼저 받은 본문부터 낸다 — 바쁜 탭이
+// 제 본문을 버리고, 사용자 탭이 먼저 받은 본문은 남는다(1 회차의 「탭과 무관하게 가장 먼저 받은 것부터」 는 그것부터 버렸다). 받지 않을 조각
+// (이어지지 않는 오프셋·기다리지 않는 번호)은 아무 탭의 본문도 버리지 않는다(전에는 오프셋을 보기 전에 버렸다). 왜 중요한가 — 쏟아지는 페이지
+// 하나가 에이전트가 읽으려던 다른 탭의 응답을 밀어내면, 에이전트는 그 탭의 본문을 `evicted` 로만 본다.
+test "W9d② 적대 리뷰 2 회차: 앱 본문 상한은 본문을 가장 많이 쥔 탭부터 — 바쁜 탭은 제 본문을 먼저 버리고 사용자 탭의 먼저 받은 본문은 남는다, 받지 않을 조각은 아무것도 버리지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    net_budget.body_cap = 64 * 1024;
+    defer net_budget.body_cap = net_ring.global_body_cap_bytes;
+    const user: u64 = 96;
+    const busy: u64 = 97;
+    const third: u64 = 98;
+    const tabs = [_]u64{ user, busy, third };
+    try testSurfaces(gpa, &tabs);
+    var ng: [tabs.len]NetworkGrant = undefined;
+    var bg: [tabs.len]NetworkGrant = undefined;
+    for (tabs, 0..) |t, i| {
+        ng[i] = .{ .tab = t, .who = 100 + t, .birth = true, .any_host = true };
+        bg[i] = .{ .tab = t, .who = 200 + t, .birth = true, .any_host = true };
+    }
+    networkSync(&ng);
+    networkBodySync(&bg);
+    for (tabs) |t| {
+        try networkRecord(t, true);
+        apply(gpa, .{ .url_changed = .{ .browser = t, .url = "https://a.test/" } }, 0);
+    }
+    var piece: [8 * 1024]u8 = undefined;
+    @memset(&piece, 'p');
+    const Feed = struct {
+        fn body(g: std.mem.Allocator, tab: u64, request: u64, bytes: []const u8) void {
+            const session = surfaces.getPtr(tab).?.rec_session;
+            apply(g, .{ .net_begin = .{ .browser = tab, .request = request, .flags2 = .{ .body_expected = true }, .url = "https://a.test/b", .host = "a.test", .site = "a.test" } }, 0);
+            apply(g, .{ .net_body_data = .{ .browser = tab, .session = session, .request = request, .offset = 0, .bytes = bytes } }, 0);
+            apply(g, .{ .net_body_end = .{ .browser = tab, .session = session, .request = request, .state = .captured, .size = @intCast(bytes.len) } }, 0);
+        }
+        fn st(tab: u64, k: usize) net_ring.BodyState {
+            return surfaces.getPtr(tab).?.network.entries.atPtr(k).body_state;
+        }
+    };
+    // 사용자 탭이 먼저 둘(가장 먼저 받았다), 바쁜 탭이 열 — 상한(64 KiB)에 여덟만 든다.
+    Feed.body(gpa, user, 1, &piece);
+    Feed.body(gpa, user, 2, &piece);
+    for (0..10) |k| Feed.body(gpa, busy, 10 + k, &piece);
+    try std.testing.expectEqual(net_budget.body_cap, net_budget.body_bytes);
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(user, 0));
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(user, 1));
+    for (0..4) |k| try std.testing.expectEqual(net_ring.BodyState.evicted, Feed.st(busy, k));
+    for (4..10) |k| try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(busy, k));
+    // 받지 않을 조각 — 기다리는 기록의 이어지지 않는 오프셋, 기다리지 않는 번호: 꽉 찬 상한에서도 아무 본문도 버리지 않는다.
+    const s3 = surfaces.getPtr(third).?.rec_session;
+    apply(gpa, .{ .net_begin = .{ .browser = third, .request = 30, .flags2 = .{ .body_expected = true }, .url = "https://a.test/c", .host = "a.test", .site = "a.test" } }, 0);
+    apply(gpa, .{ .net_body_data = .{ .browser = third, .session = s3, .request = 30, .offset = 5, .bytes = &piece } }, 0);
+    apply(gpa, .{ .net_body_data = .{ .browser = third, .session = s3, .request = 31, .offset = 0, .bytes = &piece } }, 0);
+    try std.testing.expectEqual(net_budget.body_cap, net_budget.body_bytes);
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(busy, 4));
+    try std.testing.expectEqual(net_ring.BodyState.unavailable, Feed.st(third, 0));
+    // 셋째 탭의 본문 — 가장 많이 쥔 바쁜 탭의 가장 먼저 받은 것을 버린다(사용자 탭의 것이 더 먼저 받았어도).
+    Feed.body(gpa, third, 32, &piece);
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(third, 1));
+    try std.testing.expectEqual(net_ring.BodyState.evicted, Feed.st(busy, 4));
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(user, 0));
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(user, 1));
+    // 바쁜 탭(40 KiB)이 사용자 탭(16 KiB)·셋째 탭(8 KiB)보다 많이 쥔 동안은 바쁜 탭이 계속 낸다.
+    Feed.body(gpa, third, 33, &piece);
+    try std.testing.expectEqual(net_ring.BodyState.evicted, Feed.st(busy, 5));
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(user, 0));
+    Feed.body(gpa, third, 34, &piece); // 바쁜 탭 32 KiB → 24 KiB, 셋째 탭 24 KiB
+    try std.testing.expectEqual(net_ring.BodyState.evicted, Feed.st(busy, 6));
+    // 같이 쥐면(바쁜 탭·셋째 탭 24 KiB) 더 먼저 받은 본문의 탭(바쁜 탭)부터 — 셋째 탭의 첫 본문은 남는다.
+    Feed.body(gpa, third, 35, &piece);
+    try std.testing.expectEqual(net_ring.BodyState.evicted, Feed.st(busy, 7));
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(third, 1));
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(user, 0));
 }

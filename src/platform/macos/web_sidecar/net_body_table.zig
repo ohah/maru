@@ -6,8 +6,9 @@
 //! (조각을 뗀 온 주소, 메서드, 서비스 워커 갈래)의 열쇠와 시각·차례로 맞춘다(J1·J2 — 실제 사이트 14 곳 두 번에서 짝지은 요청의 상태가 100 %
 //! 같았다):
 //!   - 후보: 같은 열쇠의 아직 짝이 없는 CEF 시작 중 IO 시각이 CDP 시작 `[ts − 5 ms, ts + 2 s]` 안.
-//!   - 차례: 같은 열쇠의 다른 CDP 요청 중 먼저 시작해 아직 열린 것의 수 k — 후보 중 k 번째로 오래된 것(같은 주소의 동시 요청 2250/2250 이 시작
-//!     차례 그대로였다).
+//!   - 차례: 같은 열쇠의 CDP 요청(시작 차례)과 후보(IO 시각 차례)를 차례를 지켜 맞춘다 — 요청마다 앞 요청의 짝 뒤의 첫 후보(같은 주소의 동시
+//!     요청 2250/2250 이 시작 차례 그대로였다). 기록이 아직 오지 않은 요청은 건너뛴다(W9d② 적대 리뷰 2 회차 — 전에는 먼저 시작해 열린 요청
+//!     수만큼 창 안의 후보를 건너뛰어, 그 요청의 기록이 창 밖이어도 셌다).
 //!   - CDP 의 `loadingFinished` 가 CEF 의 시작보다 먼저 올 수 있다(10 ms 묶음 — 빠른 로컬 요청은 450/450) — 그때는 잠시(`cef_grace_us`) 기다린다.
 //!   - 모호함: 창 안의 다른 후보가 보이는 규칙(프레임·첫 사이트·initiator)이 다르거나, 그 탭이 같은 주소의 요청을 문에서 넘긴 창 안이면
 //!     짝을 지어도 본문을 붙이지 않는다(`ambiguous` — 넘긴 요청의 쌍둥이 자리에 다른 요청이 들어온다, J2: 넘김 창 안에서 4–6 개가 틀렸다).
@@ -19,11 +20,16 @@
 //! CEF 응답보다 대개 먼저 온다(`cover_pending`·`cover_grace_us`, 시한·응답 없는 끝은 `not_covered`). (MED-2) 창 안의 같은 열쇠 후보가 그것을 가져갈
 //! 같은 열쇠의 CDP 요청보다 많으면(CDP 가 보지 못한 워커의 fetch) 짝일 수 있는 후보를 모두 `ambiguous` 로 끝낸다. (LOW-3) ExtraInfo 는 보낸 홉마다
 //! 세고 덜 왔으면 실린 것으로 친다(잠시 기다린다 — `extra_grace_us`), ExtraInfo 만 온 자리는 시한·수로 놓는다.
+//! W9d② 적대 리뷰 2 회차: 차례는 앞에서부터·뒤에서부터 두 번 맞춰 본다 — 둘이 이 요청에 다른 후보를 주면 CDP 가 보지 못한 같은 열쇠의 기록이
+//! 섞였다(MED-2 를 바꿨다 — 후보 수와 가져갈 요청 수를 견주던 것은 창 밖의 열린 요청을 셌다): 두 후보 사이를 모두 `ambiguous` 로 끝내고 두 맞추기가
+//! 갈린 다른 요청도 `ambiguous`(`Cdp.tainted`). 다시 시작은 바로 앞 홉과 같은 주소를 다시 보낸 것뿐이고(A → B → A 는 리다이렉트), 다시 시작한 CDP
+//! 요청은 다시 시작한 CEF 시도와만 짓는다.
 //!
-//! 시험이 증명하는 것: 맞추기(두 도착 차례·창·같은 주소의 차례·문 넘김과 보이는 규칙이 다른 후보의 모호함·CDP 가 보지 못한 같은 주소 후보의
-//! 모호함·서비스 워커 갈래·조각 떼기), 설정 끔의 응답 호스트 기다림, 홉마다의 ExtraInfo 와 그 자리의 시한,
-//! 상한과 판정(넘침·글 아님·빈 본문·끊김·실패), 동시·초당 상한과 기다림의 만료, 세대(끈 뒤 늦게 온 결과는 버린다), 시작마다 끝은 꼭 하나,
-//! MIME 가르기, 결과 풀기(JSON 글·base64·잘못된 UTF-8·windows-1252 되돌리기).
+//! 시험이 증명하는 것: 맞추기(두 도착 차례·창·같은 주소의 차례 — 창이 다른 동시 요청·기록이 아직인 뒤 요청·ExtraInfo 가 먼저 온 요청·문 넘김과
+//! 보이는 규칙이 다른 후보의 모호함·CDP 가 보지 못한 같은 주소 후보의 모호함과 갈린 다른 요청·서비스 워커 갈래·조각 떼기·A → B → A 와 다시
+//! 시작), 설정 끔의 응답 호스트 기다림, 홉마다의 ExtraInfo 와 그 자리의 시한, 상한과 판정(넘침·글 아님·빈 본문·끊김·실패), 동시·초당 상한과
+//! 기다림의 만료, 세대(끈 뒤 늦게 온 결과는 버린다), 시작마다 끝은 꼭 하나, MIME 가르기, 결과 풀기(JSON 글·base64·잘못된 UTF-8·windows-1252
+//! 되돌리기).
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -460,6 +466,8 @@ const Cdp = struct {
     ts_us: i64,
     /// 응답의 서비스 워커 갈래(응답 전이면 거짓).
     sw: bool = false,
+    /// 응답을 봤다(`sw` 를 안다) — 아직이면 어느 갈래의 맞추기에도 넣는다(W9d② 적대 리뷰 2 회차).
+    responded: bool = false,
     state: CdpState = .open,
     prefetch: bool = false,
     mime: [msg.max_net_mime_bytes]u8 = undefined,
@@ -484,6 +492,11 @@ const Cdp = struct {
     /// 같은 requestId 로 같은 주소·메서드를 다시 보낸 때(0 = 없었다) — Chromium 이 이 요청을 다시 시작했다(CEF 는 같은 번호로 새 시작을 낸다,
     /// CDP 는 리다이렉트로 알린다 — 판정 `body-restart-same-id` 실측). 본문은 마지막 시도의 것이라 짝은 그때 시작한 CEF 시도와 짓는다.
     restart_ts_us: i64 = 0,
+    /// W9d② 적대 리뷰 2 회차 F3: 마지막으로 보낸 홉의 주소 해시 — 다시 시작은 바로 앞 홉과 같은 주소를 다시 보낸 것뿐이다(A → B → A 는 리다이렉트).
+    last_url: u64 = 0,
+    /// W9d② 적대 리뷰 2 회차: 같은 열쇠의 다른 요청이 CDP 가 보지 못한 후보 때문에 모호하다고 정했고, 그 후보가 이 요청의 창에도 든다 — 이 요청의
+    /// 짝도 가를 수 없으니 본문을 붙이지 않는다(`ambiguous`).
+    tainted: bool = false,
 
     fn key(self: *const Cdp) Key {
         return .{ .url = self.key_url, .method = self.key_method, .sw = self.sw };
@@ -591,11 +604,30 @@ pub const Table = struct {
     next_id: i32 = id_base,
     global_bytes: Bucket = .{ .tokens = global_bytes_per_s },
     actions: std.ArrayList(Action) = .empty,
+    /// `tryDecide` 의 맞추기가 다시 쓰는 자리(부를 때마다 할당하지 않는다).
+    scratch: Scratch = .{},
+
+    const Scratch = struct {
+        reqs: std.ArrayList(usize) = .empty,
+        cands: std.ArrayList(usize) = .empty,
+        left: std.ArrayList(usize) = .empty,
+        right: std.ArrayList(usize) = .empty,
+        extra: std.ArrayList(u64) = .empty,
+
+        fn deinit(self: *Scratch, gpa: std.mem.Allocator) void {
+            self.reqs.deinit(gpa);
+            self.cands.deinit(gpa);
+            self.left.deinit(gpa);
+            self.right.deinit(gpa);
+            self.extra.deinit(gpa);
+        }
+    };
 
     pub fn deinit(self: *Table, gpa: std.mem.Allocator) void {
         for (&self.tabs) |*t| t.deinit(gpa);
         self.inflight.deinit(gpa);
         self.actions.deinit(gpa);
+        self.scratch.deinit(gpa);
     }
 
     pub fn tabOf(self: *Table, browser: BrowserId) ?*Tab {
@@ -788,6 +820,16 @@ pub const Table = struct {
 
     // ── CDP 쪽 ──────────────────────────────────────────────────────────────────────────────────────────────
 
+    /// 같은 requestId 로 다시 보낸 것이 Chromium 의 다시 시작인가(CEF 는 같은 번호로 새 시작을 낸다) — 첫 주소·메서드를 **바로 앞 홉과 같은 주소로**
+    /// 다시 보냈다. W9d② 적대 리뷰 2 회차 F3: A → B → A 로 돌아온 리다이렉트는 한 CEF 요청 안의 홉이다(새 시작이 없다) — 그것을 다시 시작으로
+    /// 치면 기준 시각이 옮겨져 이 요청의 CEF 기록은 창 밖이 되고 그 뒤에 시작한 같은 주소의 다른 요청 기록이 이 요청의 본문을 받았다. 리다이렉트
+    /// 응답의 상태로는 가르지 못한다 — 실측(판정 `body-restart-same-id`, 실제 CEF 154)에서 Critical-CH 다시 시작도 307 이었다. 그래서 제 주소로의
+    /// 3xx 는 여전히 다시 시작으로 보이고, 다시 시작한 CDP 요청은 다시 시작한 CEF 시도와만 짓는다(`feasible`) — 그 요청의 본문은 `unmatched` 이지
+    /// 다른 기록에 붙지 않는다.
+    fn isRestart(r: *const Cdp, url_hash: u64, method_hash: u64) bool {
+        return url_hash == r.key_url and method_hash == r.key_method and r.last_url == r.key_url;
+    }
+
     fn cdpIndex(t: *Tab, rid: []const u8) ?usize {
         var i = t.cdp.items.len;
         while (i > 0) {
@@ -834,21 +876,23 @@ pub const Table = struct {
                         r.has_key = true;
                         r.prefetch = r.prefetch or v.prefetch;
                         r.sends = 1;
+                        r.last_url = v.url_hash;
                     } else if (r.has_key) {
                         // 다시 보냈다(리다이렉트 홉·다시 시작) — 그 홉의 ExtraInfo 가 하나 더 온다(LOW-3).
                         r.sends +|= 1;
-                        if (v.url_hash == r.key_url and v.method_hash == r.key_method) {
-                            // 같은 주소를 다시 보냈다 — 다시 시작(실측: Critical-CH 의 403 을 리다이렉트 응답으로 싣는다). 받은 바이트는 앞 시도의 것.
+                        if (isRestart(r, v.url_hash, v.method_hash)) {
+                            // 같은 주소를 다시 보냈다 — 다시 시작(실측: Critical-CH 의 403 뒤 307 리다이렉트로 알린다). 받은 바이트는 앞 시도의 것.
                             r.restart_ts_us = v.ts_us;
                             r.data_bytes = 0;
                         }
+                        r.last_url = v.url_hash;
                     }
                     return;
                 }
                 if (v.redirect) return; // 첫 홉을 못 봤다 — 옮겨 간 주소는 CEF 의 열쇠(첫 주소)가 아니다
                 const rid = Rid.init(v.rid) orelse return;
                 if (t.cdp.items.len >= max_cdp) _ = t.cdp.orderedRemove(0);
-                try t.cdp.append(gpa, .{ .rid = rid, .key_url = v.url_hash, .key_method = v.method_hash, .ts_us = v.ts_us, .prefetch = v.prefetch, .has_key = true });
+                try t.cdp.append(gpa, .{ .rid = rid, .key_url = v.url_hash, .key_method = v.method_hash, .ts_us = v.ts_us, .prefetch = v.prefetch, .has_key = true, .last_url = v.url_hash });
             },
             .extra_info => |v| {
                 const i = cdpIndex(t, v.rid) orelse blk: {
@@ -873,6 +917,7 @@ pub const Table = struct {
                 const i = cdpIndex(t, v.rid) orelse return;
                 const r = &t.cdp.items[i];
                 r.sw = v.from_sw;
+                r.responded = true;
                 if (v.prefetch) r.prefetch = true;
                 r.has_extra_info = v.has_extra_info;
                 const m = v.mime[0..@min(v.mime.len, r.mime.len)];
@@ -913,45 +958,88 @@ pub const Table = struct {
         }
     }
 
+    /// 후보 `c` 가 CDP 요청 `o` 의 짝일 수 있는가(열쇠는 부른 쪽이 이미 골랐다) — `o` 의 기준 시각의 창 안이고 다시 시작의 갈래가 맞는다.
+    fn feasible(o: *const Cdp, c: *const Candidate) bool {
+        const ts = o.anchor();
+        if (c.t_io_us < ts - window_before_us or c.t_io_us > ts + window_after_us) return false;
+        // 다시 시작한 시도의 후보는 앞 시도 때 시작한(다시 보내지 않은) CDP 요청과 짓지 않는다 — 그 본문은 버려진 앞 시도의 것이다(다른
+        // requestId 로 보이는 다시 시작).
+        if (c.prev_t_io_us != 0 and o.restart_ts_us == 0 and o.ts_us <= c.prev_t_io_us + window_before_us) return false;
+        // W9d② 적대 리뷰 2 회차 F3: 다시 시작한 CDP 요청은 다시 시작한 CEF 시도(같은 번호의 둘째 시작)와만 — 옮긴 기준 시각의 창에 든 같은 주소의
+        // 다른 요청 기록을 갖지 않는다.
+        if (o.restart_ts_us != 0 and c.prev_t_io_us == 0) return false;
+        return true;
+    }
+
     /// 끝난 CDP 요청 `i` 의 짝을 찾아 판정한다. 아직 후보가 없으면 그대로 둔다(`tick` 이 다시 본다).
+    ///
+    /// 짝은 차례를 지키는 맞추기로 고른다(W9d② 적대 리뷰 2 회차 — 같은 주소의 동시 요청은 시작 차례 그대로다, J2): 같은 열쇠의 CDP 요청(기준 시각
+    /// 차례)과 짝 없는 후보(IO 시각 차례)를 앞에서부터 — 요청마다 앞 요청의 짝 뒤의 첫 「짝일 수 있는」 후보(창 안)를 준다(왼쪽 맞추기). 후보가
+    /// 없는 요청은 CEF 기록이 아직 오지 않았다(10 ms 묶음 — 오면 이미 준 후보들보다 IO 시각이 앞이 아니다)고 보고 건너뛴다. 전에는 먼저 시작해
+    /// 아직 열린 요청 수 k 만큼 창 안의 후보를 건너뛰었다 — 그 요청의 기록이 이 요청의 창 밖(앞)에 있어도 세어, 5 ms 넘게 떨어져 시작한 같은
+    /// 주소의 두 요청 중 뒤 요청이 먼저 끝나면 둘 다 본문을 잃었고(F1 — 느린 앞 요청이 있는 동시 POST /graphql), 워커의 같은 주소 기록이 페이지의
+    /// 본문을 가져갔다(F2). 같은 맞추기를 뒤에서부터도 한다(오른쪽 맞추기 — 요청마다 뒤 요청의 짝 앞의 마지막 짝일 수 있는 후보, 왼쪽에서 짝을
+    /// 받은 요청만). 둘이 이 요청에 다른 후보를 주면 CDP 가 보지 못한 같은 열쇠의 CEF 요청(전용·공유 워커의 fetch — J3)이 섞여 차례로는 가를 수
+    /// 없다 — 두 후보 사이(둘 포함)를 모두 `ambiguous` 로 끝내고(적대 리뷰 1 회차 MED-2), 두 맞추기가 다른 짝을 준 다른 요청도 뒤에 `ambiguous`
+    /// 로 정한다(`Cdp.tainted` — 끝낸 후보가 그 요청의 갈림을 보이던 증거였다).
     fn tryDecide(self: *Table, gpa: std.mem.Allocator, t: *Tab, i: usize, now_us: i64) std.mem.Allocator.Error!void {
         const r = t.cdp.items[i];
         const key = r.key();
-        // 시각의 기준 — 다시 보낸 요청은 다시 보낸 때(다시 시작한 CEF 시도가 그때 시작했다).
         const ts = r.anchor();
-        // 차례 k — 같은 열쇠의 다른 CDP 요청 중 먼저 시작해 아직 짝을 정하지 않은 것(열렸거나 끝나 짝을 기다린다 — 정한 것은 목록에서
-        // 빠졌다). 끝난 것도 세야 한다: 앞 요청이 CEF 기록을 기다리는 동안 뒤 요청이 끝나면 앞 요청의 짝을 가져갔다.
-        var k: usize = 0;
+        const none = std.math.maxInt(usize);
+        // 같은 갈래의 CDP 요청 — 같은 주소·메서드, 서비스 워커 갈래가 같거나 아직 응답이 없어 모르는 것(열렸거나 끝나 짝을 기다린다 — 정한 것은
+        // 목록에서 빠졌다), 기준 시각 차례. 끝난 것도 넣어야 한다: 앞 요청이 CEF 기록을 기다리는 동안 뒤 요청이 끝나면 앞 요청의 짝을 가져갔다.
+        const sc = &self.scratch;
+        sc.reqs.clearRetainingCapacity();
         for (t.cdp.items, 0..) |o, j| {
-            if (j == i or o.state == .cached or o.prefetch or !o.has_key) continue;
+            if (o.state == .cached or o.prefetch or !o.has_key) continue;
             if (o.key_url != key.url or o.key_method != key.method) continue;
-            if (o.anchor() < ts or (o.anchor() == ts and j < i)) k += 1;
+            if (o.sw != key.sw and o.responded) continue;
+            try sc.reqs.append(gpa, j);
         }
-        // 후보 — 같은 열쇠의 짝 없는 CEF 시작(창 안), IO 시각 차례. 다시 시작한 시도의 후보는 앞 시도 때 시작한(다시 보내지 않은) CDP 요청과
-        // 짓지 않는다 — 그 본문은 버려진 앞 시도의 것이다(다른 requestId 로 보이는 다시 시작).
-        var picks: [64]usize = undefined;
-        var n: usize = 0;
-        for (t.cands.items, 0..) |c, ci| {
-            if (c.claimed or !c.key.eql(key)) continue;
-            if (c.t_io_us < ts - window_before_us or c.t_io_us > ts + window_after_us) continue;
-            if (c.prev_t_io_us != 0 and r.restart_ts_us == 0 and r.ts_us <= c.prev_t_io_us + window_before_us) continue;
-            if (n == picks.len) break;
-            picks[n] = ci;
-            n += 1;
-        }
-        const Ctx = struct {
-            cands: []const Candidate,
+        const ReqCtx = struct {
+            cdp: []const Cdp,
             fn lessThan(ctx: @This(), a: usize, b: usize) bool {
-                return ctx.cands[a].t_io_us < ctx.cands[b].t_io_us;
+                const x = ctx.cdp[a].anchor();
+                const y = ctx.cdp[b].anchor();
+                return x < y or (x == y and a < b);
             }
         };
-        std.mem.sort(usize, picks[0..n], Ctx{ .cands = t.cands.items }, Ctx.lessThan);
-        if (n < k + 1) {
+        std.mem.sort(usize, sc.reqs.items, ReqCtx{ .cdp = t.cdp.items }, ReqCtx.lessThan);
+        // 같은 열쇠의 짝 없는 CEF 시작 — IO 시각 차례.
+        sc.cands.clearRetainingCapacity();
+        for (t.cands.items, 0..) |c, ci| if (!c.claimed and c.key.eql(key)) try sc.cands.append(gpa, ci);
+        const CandCtx = struct {
+            cands: []const Candidate,
+            fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                const x = ctx.cands[a].t_io_us;
+                const y = ctx.cands[b].t_io_us;
+                return x < y or (x == y and a < b);
+            }
+        };
+        std.mem.sort(usize, sc.cands.items, CandCtx{ .cands = t.cands.items }, CandCtx.lessThan);
+        const reqs = sc.reqs.items;
+        const cands = sc.cands.items;
+        // 왼쪽 맞추기(요청마다 후보의 자리 — `none` 은 아직 기록이 오지 않았다).
+        try sc.left.resize(gpa, reqs.len);
+        var me: usize = none;
+        var pos: usize = 0;
+        for (reqs, 0..) |j, q| {
+            sc.left.items[q] = none;
+            if (j == i) me = q;
+            var p = pos;
+            while (p < cands.len and !feasible(&t.cdp.items[j], &t.cands.items[cands[p]])) p += 1;
+            if (p == cands.len) continue;
+            sc.left.items[q] = p;
+            pos = p + 1;
+        }
+        const left = sc.left.items[me];
+        if (left == none) {
             // 짝이 아직 오지 않았다(CEF 기록은 10 ms 묶음) — 시한이 지나면 CEF 가 보지 못한 요청으로 놓는다(본문 없음, maru 에 기록도 없다).
             if (now_us - r.done_at >= cef_grace_us) _ = t.cdp.orderedRemove(i);
             return;
         }
-        const ci = picks[k];
+        const ci = cands[left];
         if (r.state == .finished) {
             // MED-1(설정이 꺼졌을 때): 응답을 보낸 호스트(리다이렉트 뒤)를 CEF 응답이 정하기 전에는 받으러 가지 않는다 — 시작 호스트로 정한
             // 「덮인다」 는 덮이지 않는 호스트로 리다이렉트한 요청에서 틀린다(판정 body-r1-switch-off-redirect: 12/12 가 빠져나갔다). 시한이
@@ -965,39 +1053,52 @@ pub const Table = struct {
             // LOW-3: Chromium 이 ExtraInfo 가 온다고 했는데 홉마다의 것이 아직 다 오지 않았다 — 잠시 기다린다(넘기면 `decide` 가 실린 것으로).
             if (r.has_extra_info and r.extras < r.sends and now_us - r.done_at < extra_grace_us) return;
         }
+        // 오른쪽 맞추기 — 왼쪽에서 짝을 받은 요청만(기록이 아직 오지 않은 요청이 뒤의 후보를 가져가는 것으로 치지 않는다).
+        try sc.right.resize(gpa, reqs.len);
+        var bound: usize = cands.len;
+        var q = reqs.len;
+        while (q > 0) {
+            q -= 1;
+            sc.right.items[q] = none;
+            if (sc.left.items[q] == none) continue;
+            var p = bound;
+            while (p > 0 and !feasible(&t.cdp.items[reqs[q]], &t.cands.items[cands[p - 1]])) p -= 1;
+            if (p == 0) continue;
+            sc.right.items[q] = p - 1;
+            bound = p - 1;
+        }
+        const right = sc.right.items[me];
         var ambiguous = false;
-        for (picks[0..n]) |o| if (o != ci and t.cands.items[o].attr != t.cands.items[ci].attr) {
+        // 보이는 규칙(프레임·첫 사이트·initiator)이 다른 후보가 이 요청의 창 안에 있다.
+        for (cands) |o| if (o != ci and t.cands.items[o].attr != t.cands.items[ci].attr and feasible(&r, &t.cands.items[o])) {
             ambiguous = true;
         };
-        // MED-2: 창 안의 같은 열쇠 후보가 그것을 가져갈 수 있는 같은 열쇠의 CDP 요청(이 요청 포함)보다 많다 — CDP 가 보지 못한 CEF 요청이 섞였다
-        // (전용·공유 워커의 fetch 는 CEF 가 주 프레임의 것으로 적고 페이지의 CDP 에는 없다 — J3). 같은 열쇠·같은 보이는 규칙이라 차례로는 가를 수
-        // 없다(판정 body-r1-worker-same-url: 워커의 요청이 페이지의 본문을 40 번 중 39–40 번 가져갔다) — 본문을 붙이지 않는다. 이 요청의 짝일 수
-        // 있는 후보(차례 k 의 것부터 남는 수만큼 — `extra`)를 모두 `ambiguous` 로 끝낸다: 차례로 고른 하나만 끝내면 남은 것이(페이지의 것일 수
-        // 있다) `unmatched` 로 보였다. 그 뒤의 후보는 뒤 CDP 요청의 몫으로 남긴다.
-        var claimants: usize = 0;
-        for (t.cdp.items) |o| {
-            if (o.state == .cached or o.prefetch or !o.has_key) continue;
-            if (o.key_url != key.url or o.key_method != key.method) continue;
-            const a = o.anchor();
-            if (a >= ts - window_after_us - window_before_us and a <= ts + window_after_us + window_before_us) claimants += 1;
-        }
-        var extra: [picks.len]u64 = undefined;
-        var extra_len: usize = 0;
-        if (n > claimants) {
+        // 두 맞추기가 다른 후보를 준다 — CDP 가 보지 못한 같은 열쇠의 CEF 요청이 섞였다(MED-2·F2): 사이의 후보(둘 포함 — 이 요청의 짝일 수
+        // 있다)를 모두 `ambiguous` 로 끝내고, 두 맞추기가 다른 짝을 준 다른 요청도 `ambiguous` 로 정한다.
+        var extra_lo: usize = 0;
+        var extra_hi: usize = 0;
+        if (right != left) {
             ambiguous = true;
-            for (picks[k + 1 .. @min(n, k + 1 + (n - claimants))]) |pi| {
-                extra[extra_len] = t.cands.items[pi].request;
-                extra_len += 1;
+            if (right != none and right > left) {
+                extra_lo = left + 1;
+                extra_hi = right + 1;
             }
+            for (reqs, 0..) |j, x| if (j != i and sc.left.items[x] != none and sc.left.items[x] != sc.right.items[x]) {
+                t.cdp.items[j].tainted = true;
+            };
         }
+        if (r.tainted) ambiguous = true;
         if (t.drop_overflow_until != 0 and ts - window_before_us <= t.drop_overflow_until) ambiguous = true;
         for (t.drops[0..t.drop_len]) |d| if (d.url == key.url and d.t_us >= ts - window_before_us and d.t_us <= ts + window_after_us) {
             ambiguous = true;
         };
+        // 끝낼 사이의 후보는 번호로 적어 둔다(판정이 목록을 바꾼다).
+        try sc.extra.resize(gpa, extra_hi - extra_lo);
+        for (cands[extra_lo..extra_hi], 0..) |x, n| sc.extra.items[n] = t.cands.items[x].request;
         const cand = t.cands.items[ci];
         _ = t.cdp.orderedRemove(i);
         try self.decide(gpa, t, ci, cand, r, ambiguous, now_us);
-        for (extra[0..extra_len]) |req| for (t.cands.items, 0..) |c, x| if (c.request == req) {
+        for (sc.extra.items) |req| for (t.cands.items, 0..) |c, x| if (c.request == req) {
             try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = req, .state = .ambiguous, .flags = .{ .credentialed = c.cef_credentialed } } });
             _ = t.cands.orderedRemove(x);
             break;
@@ -2115,4 +2216,336 @@ test "W9d② 적대 리뷰 1 회차 재현 C8: 정한 뒤 온 ExtraInfo 의 자�
     try h.finish(5, "4.1", 8_011_100);
     try testing.expectEqual(before + 3, h.fetches.items.len);
     try testing.expect(h.table.takeInflight(h.fetches.items[before + 2].fetch.id).?.credentialed);
+}
+
+// W9d② 적대 리뷰 2 회차 재현 F1: 같은 주소의 두 요청(5 ms 넘게 떨어져 시작) 중 뒤 요청이 먼저 끝나면 차례 k 가 창 밖 후보를 가진 앞 요청을
+// 세어 뒤 요청은 짝을 못 찾고, 앞 요청은 남은 뒤 후보 때문에 ambiguous — 둘 다 본문이 없다(동시 POST /graphql 꼴).
+test "W9d② 적대 리뷰 2 회차 재현 F1: 같은 주소의 느린 앞 요청과 빠른 뒤 요청 — 둘 다 제 본문을 받는다" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const url = "https://app.test/graphql";
+    try h.sent(5, "q.1", url, 1_000_000, 1_000_100);
+    _ = try h.cand(5, 101, url, 1_000_300, .{});
+    try h.sent(5, "q.2", url, 1_020_000, 1_020_100);
+    _ = try h.cand(5, 102, url, 1_020_300, .{});
+    try h.respond(5, "q.2", "application/json", 10, 1_059_000);
+    try h.finish(5, "q.2", 1_060_000);
+    h.table.cefEnd(5, 102, 1_065_000);
+    try h.table.tick(gpa_t, 1_400_000);
+    try h.drain();
+    try h.respond(5, "q.1", "application/json", 10, 1_499_000);
+    try h.finish(5, "q.1", 1_500_000);
+    h.table.cefEnd(5, 101, 1_505_000);
+    try h.table.tick(gpa_t, 1_510_000);
+    try h.drain();
+    var buf: [4]u64 = undefined;
+    const got = h.fetchedRequests(&buf);
+    try testing.expect(std.mem.indexOfScalar(u64, got, 101) != null);
+    try testing.expect(std.mem.indexOfScalar(u64, got, 102) != null);
+}
+
+// W9d② 적대 리뷰 2 회차 재현 F2: 같은 주소의 앞 요청이 아직 열려 있으면(창 밖 후보) k=1 이 되어 페이지 요청의 본문이 워커의 CEF 기록(차례 1)에
+// 붙는다 — 후보 둘·가져갈 쪽 둘이라 MED-2 의 모호함도 서지 않는다.
+test "W9d② 적대 리뷰 2 회차 재현 F2: 앞의 열린 같은 주소 요청이 있어도 워커의 CEF 기록은 페이지의 본문을 받지 않는다" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const url = "http://127.0.0.1/rv/echo";
+    try h.sent(5, "p.0", url, 500_000, 500_100); // 오래 걸리는 앞 요청
+    _ = try h.cand(5, 200, url, 500_300, .{});
+    try h.sent(5, "p.1", url, 2_000_000, 2_000_100); // 페이지 요청
+    _ = try h.cand(5, 201, url, 2_000_200, .{}); // 페이지의 CEF 기록
+    _ = try h.cand(5, 202, url, 2_000_400, .{}); // 워커의 fetch(CDP 에 없다)
+    try h.respond(5, "p.1", "application/json", 10, 2_029_000);
+    try h.finish(5, "p.1", 2_030_000);
+    var buf: [4]u64 = undefined;
+    try testing.expect(std.mem.indexOfScalar(u64, h.fetchedRequests(&buf), 202) == null);
+}
+
+// W9d② 적대 리뷰 2 회차 재현 F3: A → B → A 리다이렉트는 CDP 에서 같은 주소 다시 보냄이라 기준 시각이 옮겨진다 — 그 뒤에 시작한 같은 주소의
+// 다른 요청의 CEF 기록이 이 요청의 본문을 받는다(문서는 「틀린 기록에 붙지는 않는다」).
+test "W9d② 적대 리뷰 2 회차 재현 F3: A→B→A 로 돌아온 요청의 본문은 그 뒤에 시작한 같은 주소의 다른 요청 기록에 붙지 않는다" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const a = "https://app.test/me";
+    try h.sent(5, "r.1", a, 1_000_000, 1_000_100);
+    _ = try h.cand(5, 301, a, 1_000_300, .{});
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "r.1", .url_hash = hashUrl8("https://sso.test/auth"), .method_hash = hashMethod("GET"), .ts_us = 1_010_000, .redirect = true } }, 1_010_100);
+    try h.ev(5, .{ .extra_info = .{ .rid = "r.1", .credentialed = true } }, 1_010_200);
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "r.1", .url_hash = hashUrl8(a), .method_hash = hashMethod("GET"), .ts_us = 1_020_000, .redirect = true } }, 1_020_100);
+    try h.ev(5, .{ .extra_info = .{ .rid = "r.1", .credentialed = false } }, 1_020_200);
+    try h.sent(5, "r.2", a, 1_021_000, 1_021_100);
+    _ = try h.cand(5, 302, a, 1_021_300, .{});
+    try h.respond(5, "r.1", "application/json", 10, 1_039_000);
+    try h.finish(5, "r.1", 1_040_000);
+    var buf: [4]u64 = undefined;
+    try testing.expect(std.mem.indexOfScalar(u64, h.fetchedRequests(&buf), 302) == null);
+}
+
+// ── W9d② 적대 리뷰 2 회차(고친 뒤 넓힌 시험) ──────────────────────────────────────────────────────────────────────────────────
+//
+// 이 시험들이 증명하는 것: 짝은 차례를 지키는 맞추기(앞에서부터·뒤에서부터)로 고른다 — 같은 주소의 동시 요청은 창이 서로 달라도 끝난 차례와 무관하게
+// 저마다 제 본문을 받고(먼저 시작한 요청의 기록이 이 요청의 창 밖이면 그 요청 몫으로 건너뛰지 않는다), CDP 가 보지 못한 같은 주소의 기록이 섞이면
+// 두 맞추기가 갈려 그 사이의 후보와 갈린 다른 요청 모두 `ambiguous` 다. 같은 주소로 돌아오는 리다이렉트(A → B → A)는 다시 시작이 아니다(기준 시각을
+// 옮기지 않는다), 다시 시작한 CDP 요청은 다시 시작한 CEF 시도와만 짓는다(제 주소로의 3xx 는 다시 시작과 가르지 못해 본문이 없다 — 틀린 기록보다). 왜 중요한가 — 에이전트는 본문을 그 요청의 응답으로
+// 읽는다: 다른 요청의 본문이 붙으면(동시 POST /graphql 의 다른 질의, 워커의 응답) 틀린 결론을 내고, 둘 다 잃으면 흔한 페이지에서 본문이 없다.
+
+/// 보낸 호출 중 그 requestId 의 것이 받으러 간 CEF 번호(없으면 null).
+fn fetchedFor(h: *H, rid: []const u8) ?u64 {
+    for (h.fetches.items) |a| if (a.fetch.rid.eql(rid)) {
+        for (h.table.inflight.items) |f| if (f.id == a.fetch.id) return f.request;
+    };
+    return null;
+}
+
+test "W9d② 적대 리뷰 2 회차: 같은 주소의 동시 요청 셋(창이 서로 다르다) — 거꾸로 끝나도, 느린 첫 요청이 있어도 저마다 제 CEF 기록의 본문을 받는다" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const url = "https://app.test/graphql";
+    const post = hashMethod("POST");
+    const starts = [_]i64{ 1_000_000, 1_100_000, 1_300_000 };
+    const rids = [_][]const u8{ "g.1", "g.2", "g.3" };
+    for (starts, rids, 0..) |st, rid, k| {
+        try h.ev(5, .{ .will_be_sent = .{ .rid = rid, .url_hash = hashUrl8(url), .method_hash = post, .ts_us = st } }, st + 100);
+        try h.ev(5, .{ .extra_info = .{ .rid = rid, .credentialed = false } }, st + 100);
+        _ = try h.cand(5, 700 + k, url, st + 300 + @as(i64, @intCast(k)) * 1_000, .{ .method = "POST" });
+    }
+    // 셋째가 먼저, 둘째가 시한(cef_grace) 넘게 뒤에, 첫째(느리다)는 1 초 뒤에 끝난다.
+    try h.respond(5, "g.3", "application/json", 10, 1_350_000);
+    try h.finish(5, "g.3", 1_351_000);
+    try h.table.tick(gpa_t, 1_700_000);
+    try h.drain();
+    try h.respond(5, "g.2", "application/json", 10, 1_800_000);
+    try h.finish(5, "g.2", 1_801_000);
+    try h.table.tick(gpa_t, 2_200_000);
+    try h.drain();
+    // 자리를 비운다(탭마다 동시 2).
+    for (h.fetches.items) |a| if (h.table.takeInflight(a.fetch.id)) |f| {
+        try testing.expectEqual(@as(u64, if (a.fetch.rid.eql("g.3")) 702 else 701), f.request);
+        try h.noteEnd(f.request, .captured);
+        try h.table.bodyDone(gpa_t, f, 2_300_000);
+    };
+    try h.drain();
+    try h.respond(5, "g.1", "application/json", 10, 2_400_000);
+    try h.finish(5, "g.1", 2_401_000);
+    try testing.expectEqual(@as(?u64, 700), fetchedFor(&h, "g.1"));
+    try testing.expectEqual(@as(usize, 3), h.fetches.items.len);
+    for (0..3) |k| try testing.expect(h.ended.get(700 + k) == null or stateIs(&h, 700 + k, .captured));
+    try testing.expect(h.ended.get(700) == null);
+}
+
+test "W9d② 적대 리뷰 2 회차: 워커의 같은 주소 기록이 섞여 두 맞추기가 갈리면 이 요청의 사이 후보와 갈린 앞 요청도 ambiguous — 어느 기록에도 본문이 없다" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const url = "http://127.0.0.1/rv/echo";
+    try h.sent(5, "p.0", url, 500_000, 500_100); // 오래 걸리는 앞 요청
+    _ = try h.cand(5, 200, url, 500_300, .{});
+    try h.sent(5, "p.1", url, 2_000_000, 2_000_100);
+    _ = try h.cand(5, 201, url, 2_000_200, .{}); // 페이지
+    _ = try h.cand(5, 202, url, 2_000_400, .{}); // 워커(CDP 에 없다)
+    try h.respond(5, "p.1", "application/json", 10, 2_029_000);
+    try h.finish(5, "p.1", 2_030_000);
+    try testing.expect(stateIs(&h, 201, .ambiguous));
+    try testing.expect(stateIs(&h, 202, .ambiguous));
+    // 앞 요청의 짝(200)도 가를 수 없었다(200 이 워커의 것이고 앞 요청의 기록이 201 일 수 있다 — 창 2 초 안) — 본문을 붙이지 않는다.
+    try h.respond(5, "p.0", "application/json", 10, 2_100_000);
+    try h.finish(5, "p.0", 2_100_100);
+    try testing.expect(stateIs(&h, 200, .ambiguous));
+    try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
+    // 워커 없이 같은 꼴이면(앞 요청의 기록은 이 요청의 창 밖) 둘 다 제 본문을 받는다.
+    _ = try h.cand(5, 300, url, 5_000_300, .{});
+    try h.sent(5, "q.0", url, 5_000_000, 5_000_400);
+    try h.sent(5, "q.1", url, 6_500_000, 6_500_100);
+    _ = try h.cand(5, 301, url, 6_500_200, .{});
+    try h.respond(5, "q.1", "application/json", 10, 6_529_000);
+    try h.finish(5, "q.1", 6_530_000);
+    try h.respond(5, "q.0", "application/json", 10, 6_600_000);
+    try h.finish(5, "q.0", 6_600_100);
+    try testing.expectEqual(@as(?u64, 301), fetchedFor(&h, "q.1"));
+    try testing.expectEqual(@as(?u64, 300), fetchedFor(&h, "q.0"));
+}
+
+test "W9d② 적대 리뷰 2 회차: 같은 주소 다시 보냄(다시 시작 — 실측 307, 제 주소로의 3xx 와 가르지 못한다)의 CDP 요청은 다시 시작한 CEF 시도와만 — 앞 시도의 기록도, 옮긴 창에 든 다른 요청의 기록도 갖지 않는다" {
+    const a = "https://app.test/me";
+    // ① 제 주소로의 302(쿠키를 세우고 같은 주소로 — CEF 는 새 시작을 내지 않는다): 그 뒤에 시작한 같은 주소의 다른 요청 기록(402)을 갖지 않는다 —
+    // 제 기록(401)과도 짓지 못해 `unmatched`(틀린 기록보다 없음).
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    try h.sent(5, "s.1", a, 1_000_000, 1_000_100);
+    _ = try h.cand(5, 401, a, 1_000_300, .{});
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "s.1", .url_hash = hashUrl8(a), .method_hash = hashMethod("GET"), .ts_us = 1_020_000, .redirect = true } }, 1_020_100);
+    try h.ev(5, .{ .extra_info = .{ .rid = "s.1", .credentialed = false } }, 1_020_200);
+    try h.sent(5, "s.2", a, 1_021_000, 1_021_100);
+    _ = try h.cand(5, 402, a, 1_021_300, .{});
+    try h.respond(5, "s.1", "application/json", 10, 1_039_000);
+    try h.finish(5, "s.1", 1_040_000);
+    try h.table.tick(gpa_t, 1_040_000 + cef_grace_us);
+    try h.drain();
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "s.1"));
+    try h.respond(5, "s.2", "application/json", 10, 1_300_000);
+    try h.finish(5, "s.2", 1_300_100);
+    try testing.expectEqual(@as(?u64, 402), fetchedFor(&h, "s.2"));
+    h.table.cefEnd(5, 401, 1_041_000);
+    try h.table.tick(gpa_t, 1_041_000 + unclaimed_expiry_us);
+    try h.drain();
+    try testing.expect(stateIs(&h, 401, .unmatched));
+    // ② 같은 주소 다시 보냄(Critical-CH — 다시 시작): 옮긴 창에 든 다른 요청의 기록(412)도, 앞 시도의 기록(411)도 갖지 않고
+    // 같은 번호의 둘째 시작(411 의 새 시도)을 기다린다.
+    var g: H = .{};
+    defer g.deinit();
+    _ = try g.table.start(gpa_t, 5, 1);
+    try g.sent(5, "c.1", a, 2_000_000, 2_000_100);
+    _ = try g.cand(5, 411, a, 2_000_300, .{});
+    try g.ev(5, .{ .will_be_sent = .{ .rid = "c.1", .url_hash = hashUrl8(a), .method_hash = hashMethod("GET"), .ts_us = 2_200_000, .redirect = true } }, 2_200_100);
+    try g.ev(5, .{ .extra_info = .{ .rid = "c.1", .credentialed = false } }, 2_200_200);
+    try g.sent(5, "c.2", a, 2_201_000, 2_201_100);
+    _ = try g.cand(5, 412, a, 2_201_300, .{});
+    try g.respond(5, "c.1", "text/html", 10, 2_210_000);
+    try g.finish(5, "c.1", 2_211_000);
+    try testing.expectEqual(@as(usize, 0), g.fetches.items.len);
+    try testing.expect(try g.cand(5, 411, a, 2_200_400, .{})); // 같은 번호의 둘째 시작
+    try testing.expect(stateIs(&g, 411, .restarted));
+    try g.table.tick(gpa_t, 2_220_000);
+    try g.drain();
+    try testing.expectEqual(@as(?u64, 411), fetchedFor(&g, "c.1"));
+    try g.respond(5, "c.2", "text/html", 10, 2_230_000);
+    try g.finish(5, "c.2", 2_231_000);
+    try testing.expectEqual(@as(?u64, 412), fetchedFor(&g, "c.2"));
+}
+
+test "W9d② 적대 리뷰 2 회차: 맞추기의 차례와 갈래 — 뒤 요청의 기록이 아직이어도 앞 요청은 제 것, ExtraInfo 가 먼저 온 요청도 시작 시각 차례, 서비스 워커 갈래는 응답 전의 요청도 세고 다른 갈래로 응답한 요청은 세지 않는다" {
+    const sw_resp = struct {
+        fn f(h: *H, rid: []const u8, now: i64) !void {
+            try h.ev(5, .{ .response = .{ .rid = rid, .mime = "application/json", .from_sw = true, .charset = true } }, now);
+            try h.ev(5, .{ .data = .{ .rid = rid, .bytes = 9 } }, now);
+        }
+    }.f;
+    {
+        // 뒤 요청(1 ms 뒤)의 CEF 기록이 아직 오지 않았다 — 앞 요청은 제 기록을 받는다(뒤 요청이 그것을 가져갈 쪽으로 치지 않는다).
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        const u = "https://a.test/pair";
+        try h.sent(5, "a.r", u, 1_000_000, 1_000_100);
+        _ = try h.cand(5, 501, u, 1_000_300, .{});
+        try h.sent(5, "a.s", u, 1_001_000, 1_001_100);
+        try h.respond(5, "a.r", "application/json", 9, 1_019_000);
+        try h.finish(5, "a.r", 1_020_000);
+        try testing.expectEqual(@as(?u64, 501), fetchedFor(&h, "a.r"));
+        _ = try h.cand(5, 502, u, 1_001_300, .{});
+        try h.respond(5, "a.s", "application/json", 9, 1_029_000);
+        try h.finish(5, "a.s", 1_030_000);
+        try testing.expectEqual(@as(?u64, 502), fetchedFor(&h, "a.s"));
+    }
+    {
+        // ExtraInfo 가 requestWillBeSent 보다 먼저 와 목록 앞에 자리를 잡은 뒤 요청 — 차례는 목록 자리가 아니라 시작 시각이다.
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        const u = "https://a.test/ph";
+        try h.ev(5, .{ .extra_info = .{ .rid = "b.s", .credentialed = false } }, 2_000_000);
+        try h.sent(5, "b.r", u, 2_000_000, 2_000_050);
+        try h.ev(5, .{ .will_be_sent = .{ .rid = "b.s", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = 2_001_000 } }, 2_001_100);
+        _ = try h.cand(5, 511, u, 2_000_300, .{});
+        _ = try h.cand(5, 512, u, 2_001_300, .{});
+        try h.respond(5, "b.r", "application/json", 9, 2_029_000);
+        try h.finish(5, "b.r", 2_030_000);
+        try testing.expectEqual(@as(?u64, 511), fetchedFor(&h, "b.r"));
+    }
+    {
+        // 서비스 워커 갈래: 앞 요청이 아직 응답 전이면(어느 갈래인지 모른다) 그 몫을 센다 — 뒤 요청이 앞 요청의 서비스 워커 기록을 갖지 않는다.
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        const u = "https://a.test/swv";
+        try h.sent(5, "c.o", u, 3_000_000, 3_000_100);
+        try h.sent(5, "c.r", u, 3_001_000, 3_001_100);
+        _ = try h.cand(5, 521, u, 3_000_300, .{ .sw = true });
+        _ = try h.cand(5, 522, u, 3_001_300, .{ .sw = true });
+        try sw_resp(&h, "c.r", 3_019_000);
+        try h.finish(5, "c.r", 3_020_000);
+        try testing.expectEqual(@as(?u64, 522), fetchedFor(&h, "c.r"));
+    }
+    {
+        // 앞 요청이 서비스 워커가 아닌 응답을 받았으면(다른 갈래) 서비스 워커 갈래의 맞추기에 넣지 않는다 — 뒤 요청은 제 기록을 받는다.
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        const u = "https://a.test/swx";
+        try h.sent(5, "d.o", u, 4_000_000, 4_000_100);
+        _ = try h.cand(5, 531, u, 4_000_300, .{});
+        try h.respond(5, "d.o", "application/json", 9, 4_005_000);
+        try h.sent(5, "d.r", u, 4_001_000, 4_001_100);
+        _ = try h.cand(5, 532, u, 4_001_300, .{ .sw = true });
+        try sw_resp(&h, "d.r", 4_019_000);
+        try h.finish(5, "d.r", 4_020_000);
+        try testing.expectEqual(@as(?u64, 532), fetchedFor(&h, "d.r"));
+    }
+}
+
+test "W9d② 적대 리뷰 2 회차: 갈린 맞추기 — 갈린 뒤 요청도 ambiguous, 사이의 후보는 모두 ambiguous, 보이는 규칙이 다른 두 후보는 수가 맞아도 ambiguous, A→B→A 로 돌아온 요청은 제 본문" {
+    {
+        // 워커의 기록(542)이 두 요청의 기록 사이 — 앞 요청이 정할 때 뒤 요청도 갈린다(542 일 수도 543 일 수도): 뒤 요청의 543 도 본문이 없다.
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        const u = "https://a.test/mix";
+        try h.sent(5, "e.r", u, 5_000_000, 5_000_100);
+        try h.sent(5, "e.s", u, 5_010_000, 5_010_100);
+        _ = try h.cand(5, 541, u, 5_000_300, .{});
+        _ = try h.cand(5, 542, u, 5_010_200, .{});
+        _ = try h.cand(5, 543, u, 5_010_300, .{});
+        try h.respond(5, "e.r", "application/json", 9, 5_029_000);
+        try h.finish(5, "e.r", 5_030_000);
+        try testing.expect(stateIs(&h, 541, .ambiguous) and stateIs(&h, 542, .ambiguous));
+        try h.respond(5, "e.s", "application/json", 9, 5_039_000);
+        try h.finish(5, "e.s", 5_040_000);
+        try testing.expect(stateIs(&h, 543, .ambiguous));
+        try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
+    }
+    {
+        // 워커 기록 둘이 앞에 — 두 맞추기 사이의 후보 셋(551·552·553)이 모두 ambiguous(하나라도 남으면 뒤에 unmatched 로 보인다).
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        const u = "https://a.test/two";
+        try h.sent(5, "f.r", u, 6_000_000, 6_000_100);
+        for (0..3) |k| _ = try h.cand(5, 551 + k, u, 6_000_100 + @as(i64, @intCast(k)) * 100, .{});
+        try h.respond(5, "f.r", "application/json", 9, 6_029_000);
+        try h.finish(5, "f.r", 6_030_000);
+        for (0..3) |k| try testing.expect(stateIs(&h, 551 + k, .ambiguous));
+    }
+    {
+        // 같은 주소의 요청 둘·기록 둘(수가 맞는다)이어도 보이는 규칙(프레임·첫 사이트)이 다르면 모호하다.
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        const u = "https://a.test/attr";
+        try h.sent(5, "g.1", u, 7_000_000, 7_000_100);
+        try h.sent(5, "g.2", u, 7_001_000, 7_001_100);
+        _ = try h.cand(5, 561, u, 7_000_300, .{ .attr = 1 });
+        _ = try h.cand(5, 562, u, 7_001_300, .{ .attr = 2 });
+        try h.respond(5, "g.1", "application/json", 9, 7_029_000);
+        try h.finish(5, "g.1", 7_030_000);
+        try testing.expect(stateIs(&h, 561, .ambiguous));
+    }
+    {
+        // A → B → A — 다시 시작이 아니다: 기준 시각은 처음 보낸 때, 제 CEF 기록의 본문을 받는다.
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        const a = "https://app.test/aba";
+        try h.sent(5, "h.1", a, 8_000_000, 8_000_100);
+        _ = try h.cand(5, 571, a, 8_000_300, .{});
+        try h.ev(5, .{ .will_be_sent = .{ .rid = "h.1", .url_hash = hashUrl8("https://sso.test/x"), .method_hash = hashMethod("GET"), .ts_us = 8_010_000, .redirect = true } }, 8_010_100);
+        try h.ev(5, .{ .will_be_sent = .{ .rid = "h.1", .url_hash = hashUrl8(a), .method_hash = hashMethod("GET"), .ts_us = 8_020_000, .redirect = true } }, 8_020_100);
+        try h.respond(5, "h.1", "application/json", 9, 8_039_000);
+        try h.finish(5, "h.1", 8_040_000);
+        try testing.expectEqual(@as(?u64, 571), fetchedFor(&h, "h.1"));
+    }
 }

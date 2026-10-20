@@ -2055,7 +2055,8 @@ W9d① 적대 리뷰 후 — 같은 id 다시 시작(2026-10-16 — W9d② 측�
   만들어지면 새 세션으로 다시 켠다.
 - **표식**: 기록하는 탭의 제목 앞 ◉(U+25C9 — `diffAwareLabel`). running ● 처럼 셀로 그리고 그 칸만 빨갛게(`tab_ops.recolorRecordingMarkCells`).
 - **지우기 판**: 본문 grant 철회(하나·모두)·마지막 본문 grant → 끄고 지운다(◉ 사라짐), 네트워크 grant 철회 → 기록도 끈다, 탭 닫힘 → 기록째 사라진다,
-  sidecar 재시작 → 기다리던 본문 `detached`·새 세션으로 다시 켠다, 이동 → 기다리던 본문은 Chromium 이 버려 `unavailable`, 렌더러 죽음 → `detached`(기록은
+  sidecar 재시작 → 기다리던 본문 `detached`(sidecar 를 잃는 때 곧 — 다시 뜨지 않아도, 3 회차 B2)·새 세션으로 다시 켠다(쏟아짐 밸브로 멈춘 기록은 그대로 — 3 회차 F1;
+  엔진이 다시 뜨지 않으면 기록은 `failed`), 이동 → 기다리던 본문은 Chromium 이 버려 `unavailable`, 렌더러 죽음 → `detached`(기록은
   그대로), 설정 켬 → 끔 → 받은 본문과 기다리던 본문 `discarded`·기록은 새 세션으로, 기록 끄기(`networkRecord off`) → 기록만 끄고 받은 본문은 남긴다
   (적대 리뷰 1 회차 LOW-4 — 작성자 선택). 지울 때는 그때까지의 세션 frame 을 더 받지 않는다(적대 리뷰 1 회차 LOW-2).
 - **CLI·MCP**: `maru browser network-record --surface N (--on|--off)`, `network-request ... --body [--offset n] [--max-bytes n] [--out f]`(본문 칸은 `--body` 를
@@ -2073,7 +2074,8 @@ sidecar 재시작), control_browser(op 30·모달 전 `-32008`·`needs_network_p
 사이트 — 인터넷이 없으면 관측)·`body-document`·`body-over-cap-json`·`body-over-cap-script`·`body-not-text`·`body-no-body`·`body-partial`·`body-redecoded`·
 `body-join-same-url`·`body-cross-process-iframe`·`body-service-worker`·`body-ub1-credentialed`·`body-switch-off-prefilter`·`body-writer-nonblocking`·
 `body-devtools-guard`·`body-renderer-crash`·`body-record-off`·`body-restart-same-id`·`body-one-end-each`(번호마다 시도 수만큼). 적대 리뷰 1 회차 항목
-`body-r1-*` 는 `network_body_r1_check.zig`(`--network`·`--network-body` 끝에 따로 띄운 sidecar — 아래 「W9d② 적대 리뷰: 1 회차」).
+`body-r1-*` 는 `network_body_r1_check.zig`(`--network`·`--network-body` 끝에 따로 띄운 sidecar — 아래 「W9d② 적대 리뷰: 1 회차」), 3 회차 항목
+`body-r3-*` 는 `network_body_r3_check.zig`(그 뒤에 또 따로 — 이것만은 `--review-body-r3`).
 
 **W9d② × 같은 번호 다시 시작(W9d① 적대 리뷰 후 위로 리베이스 — 2026-10-16)**: W9d① 이 같은 CEF 번호의 시작을 다시 시작으로 치게 되자(앞 기록
 `restarted`, 새 시도는 새 기록) 한 번호에 기록이 둘이 될 수 있다 — 그런데 본문 frame 은 번호로만 오고 maru 는 그 번호의 가장 새 기록에 붙인다.
@@ -2101,9 +2103,9 @@ sidecar 재시작), control_browser(op 30·모달 전 `-32008`·`needs_network_p
   `unmatched` 다 — 틀린 시도에 붙이느니 없는 편을 골랐다.
 
 남은 틈(알고 둔 것): 다른 프로세스 iframe·worker·서비스 워커만의 요청(페이지 twin 이 없는 것)·메모리 캐시·추측 미리 받기·preflight·opaque no-cors·ORB 막힘의
-본문은 없다(UB4·J3·J13 — `unmatched` 이거나 기록 자체가 없다; worker 가 페이지와 같은 주소를 거의 같은 때 받으면 둘 다 `ambiguous` — 적대 리뷰 1 회차 MED-2, 그 주소의 열린 다른 페이지
-요청도 창이 겹치면 `ambiguous` — 2 회차). 이벤트 흐름(`text/event-stream`)은 받지 않는다. 쏟아짐 밸브로 멈춘 기록은 에이전트가 다시 켜야
-한다.
+본문은 없다(UB4·J3·J13 — `unmatched` 이거나 기록 자체가 없다; worker 가 페이지와 같은 주소를 페이지의 응답 전에 받으면 둘 다 `ambiguous` — 적대 리뷰 1 회차 MED-2·3 회차 P1,
+그 주소의 열린 다른 페이지 요청도 창이 겹치면 `ambiguous` — 2 회차; 페이지의 응답 뒤에 받은 worker 의 것은 이제 페이지를 모호하게 하지 않는다 — 3 회차).
+이벤트 흐름(`text/event-stream`)은 받지 않는다. 쏟아짐 밸브로 멈춘 기록은 에이전트가 다시 켜야 한다(sidecar 가 다시 떠도 — 3 회차 F1).
 
 W9d② 적대 리뷰: 1 회차(2026-10-20 — 리뷰가 재현 시험(「W9d② 적대 리뷰 1 회차 재현 …」 — 순수 `net_body_table` 셋·L2 `web_osr` 셋)과 실제 CEF 154 판정
 항목을 남겼다. 그것을 붙여 여섯 시험이 모두 실패하고 판정 셋(`body-r1-switch-off-redirect` 12/12 나감·`body-r1-worker-same-url` 40/40 틀림·`body-r1-slot-leak`
@@ -2184,3 +2186,60 @@ W9d② 적대 리뷰: 2 회차(2026-10-20 — 리뷰가 순수 `net_body_table` 
   페이지의 본문 「p0」 을 받았다)·제 본문 14. 변이 23 개(사본에서 — 순수 18·L2 5): 처음 순수 18 중 9 가 RED, 산 아홉(다시 시작의 앞 홉 비교·`last_url` 갱신·오른쪽 맞추기에 기록이 아직인 요청 넣기·서비스 워커 갈래의 응답 전
   요청·`responded`·요청 차례를 목록 자리로·보이는 규칙 검사·뒤 요청의 표지·사이 후보 모두)은 시험 둘을 더해 모두 RED. L2 다섯 중 넷이 RED, 같이 쥔 탭의 갈림(더 먼저 받은 본문의 탭)은 살아 시험에 그 단계를 더한 뒤 RED —
   23/23. 판정자 `--network` 113 통과(`body-r1-*`·`body-r2-*` 포함)·`--upload` 9, cdp 스모크 40 통과.
+
+W9d② 적대 리뷰: 3 회차(2026-10-20 — 리뷰가 재현 시험(「W9d② 적대 리뷰 3 회차 재현 …」 — 순수 `net_body_table` 셋 P1·P5·S1, CLI·`web_osr_network` 셋
+D1·F3·C1, L2 셋 D6·B2·F1)과 실제 CEF 154 재현 판정(`rv3-*`)을 남겼다. 붙여 순수 111 통과·3 실패, CLI 763 통과·3 실패, L2 셋 실패, 판정(고치기 전
+표에 새 판정): `rv3-worker-own-late` 틀린 본문 24/80, `rv3-abort-refetch` 다시 받은 요청의 제 본문 15/30(나머지 `request_failed`)을 본 뒤 고쳤다.
+판정 항목은 `body-r3-*` 로 옮겨 `network_body_r3_check.zig` 를 `--network`·`--network-body` 끝에서 따로 띄운 sidecar 로 돌린다(이것만은
+`--review-body-r3`):
+- **P1(MED) 제 기록이 늦은 빠른 요청의 본문이 먼저 온 워커의 같은 주소 기록에 붙었다**: CDP 끝은 CEF 의 10 ms 묶음보다 먼저 온다 — 그때 창 안의
+  기록이 워커의 것 하나뿐이면 두 맞추기가 같은 후보를 줬다. 고침: **CEF 기록의 물 높이**(`Table.cef_seen_us` — 이 IO 시각까지의 CEF 시작은 모두
+  표에 닿았다). `network.zig` 가 IO 시각을 넘김 상자의 잠금 아래에서 찍어 상자의 차례가 곧 시각의 차례다 — 시작 하나가 닿으면 그 앞의 것은 다
+  닿았고, 상자가 비었으면 지금까지 다 닿았다(`cefWatermark` — 남은 가장 이른 기록·문 넘김 표지의 앞). 요청은 물 높이가 그 요청의 **응답 시각**
+  (`Cdp.bound` — CDP `responseReceived.timestamp`, 맞아 보이지 않으면 UI 가 받은 때; 응답 없이 끝났으면 끝을 본 때)에 닿은 뒤에만 정한다 — 요청은
+  CEF 의 `on_before_resource_load` 가 돌아온 뒤에 나가므로 제 기록은 응답보다 앞에 시작했다. 보내는 task 가 상자를 비우면(`cefFlushed`) 곧 다시
+  정하고, CDP 끝 때 상자가 비었으면 기다리지 않는다. 시한(250 ms)까지 오르지 않으면 `ambiguous`. 그리고 응답 뒤에 시작한 기록은 그 요청의 짝일 수
+  없다(`compatible`) — 2 초 창 안이어도. 그래서 페이지의 응답 **뒤에** 같은 주소를 받은 워커는 이제 페이지를 모호하게 하지 않는다(대가가 줄었다 —
+  판정 `body-r3-worker-after-response` 페이지의 제 본문 0/40 → 40/40). 응답 **전에** 받은 워커는 여전히 둘 다 `ambiguous`(`body-r3-worker-own-late`
+  틀림 24 → 0, 페이지 80 모두 `ambiguous` — 고치기 전에도 제 본문은 0 이었다: `ambiguous` 56·`unmatched` 24). 다시 시작한 요청은 끝을 본 때를
+  쓰고 시각 제한을 두지 않는다 — 실측(판정 `body-restart-same-id`)에서 새 시도의 CEF 시작이 CDP 의 200 응답 뒤에 왔다(그 짝은 다시 시작한 CEF
+  시도뿐이라 섞이지 않는다).
+- **P5(MED) CEF 에 닿지 않고 abort 한 요청이 다시 받은 요청의 기록을 가져갔다**(React StrictMode 의 fetch 두 번): 실패한 CDP 요청은 짝 없이 시한까지
+  남아 차례의 앞에서 다음 요청의 기록을 가져가 `request_failed` 로 끝냈다. 고침: CEF 끝의 성공 여부를 표에 준다(`cefEndAs`). 성공한 CDP 요청은
+  CEF 가 실패·취소로 끝낸 기록과 짓지 않고, 응답 없이 실패한 요청은 끝을 본 때까지 시작한 기록이거나 그 뒤에 시작했어도 CEF 가 성공으로 끝내지
+  않은 기록(렌더러의 abort 가 CEF 시작보다 먼저 보인 꼴)만 갖는다 — 끝이 아직인 뒤 기록은 「그럴 수 있다」 라 맞추기의 차례는 지키되 실패한 요청이
+  그것을 제 짝으로 정하지는 않는다(`definite` — 끝을 기다리고 시한이면 짝 없이 놓는다). 판정 `body-r3-abort-refetch` 제 본문 15/30 → 30/30(abort 가
+  CEF 까지 간 시도는 그 기록이 `request_failed`).
+- **S1(LOW) 답이 오지 않는 `getResponseBody`**: 시한이 없어 자리(탭 2·전체 8)를 영영 쥐고 주기 task 가 멈추지 않았다. 고침: 5 초(`fetch_timeout_us` —
+  기다리는 본문은 3 초에 `busy` 라 그보다 길게 잡을 까닭이 없다) 뒤 `unavailable` 하나로 끝내고 자리를 놓는다, 늦은 답은 버린다.
+- **C1(LOW) 탭 주소를 모르면 UB1 의 「제 사이트」 가 등록 도메인으로 넓어졌다**: 고침: `Entry.top_inexact`(`topHostFromSite` — 첫 사이트를 썼다) —
+  어느 호스트든의 본문 읽는 쪽은 그런 요청의 쿠키·인증이 실린 본문을 쿠키 권한이 있을 때만 본다(닫힌 쪽).
+- **D1(LOW–MED) 본문 글이 maru 의 「more: --offset」 줄을 흉내 냈다**: 고침: CLI 는 본문 글을 콘솔·대화상자처럼 한 줄로(줄바꿈 ` ⏎ ` — `writeLinesText`)
+  찍는다 — maru 가 찍는 줄은 페이지가 만들지 못한다. 본문 그대로의 모양은 `--out` 의 파일. MCP 설명을 고쳤다.
+- **F1(LOW) 멈춘 기록이 sidecar 재시작에 다시 켜졌다**: 고침: `browser_created` 는 `paused` 를 그대로 둔다(설정 끔의 `wipeBodies` 와 같은 규칙).
+  켜지 못했던 기록(`failed`)은 새 브라우저에서 다시 해 본다(작성자 선택 — 엔진이 돌아오면 기록도 돌아온다).
+- **B2(LOW) sidecar 가 다시 뜨지 않으면 받던 본문이 `pending` 으로 바이트를 쥐고 ◉ 이 켜진 채였다**: 고침: sidecar 를 잃을 때(`forgetSidecar`) 곧
+  `Ring.abandonBodies`(`detached`), 엔진이 내려가면(`fail`) 기록은 `failed`(◉ 이 사라진다 — 켤 뜻은 남아 엔진이 다시 뜨면 다시 켠다).
+- **D6(LOW–MED) 네트워크 grant 만 철회한 뒤 본문 grant 로 켜면 이유 없는 실패였다**: 고침: control_browser 가 인가된 켬도 그 탭의 `browser_network`
+  grant 가 지금 문서를 덮는지 본다(`-32002`·`needs_network_permission`), 앱의 실행 단계 답(`NotWatching`)도 `{"reason"}` 으로 같은 코드·이유가 된다.
+- **F3(LOW 방어) 잘못된 UTF-8 의 글 본문**: 고침: `bodyEnd` 가 `binary` 아닌 본문의 UTF-8 을 보고 아니면 `unavailable`(작성자 선택 — 바이트가
+  무엇인지 모르니 글로도 바이너리로도 내지 않는다).
+- **작은 것(코드 읽기)**: `--out` 은 u32 를 넘는(그리고 1 MiB 를 넘는) 다음 오프셋에 죽지 않고 실패를 알린다(`BodyOut.add` — 순수 시험), 요약 줄에
+  되돌린 글·Chromium 이 푼 그대로·자격 증명 표시를 싣는다(`writeBodyMarks` — 본문 칸과 같은 글), `--out` 과 `--offset` 을 함께 주면 파서가 거절한다
+  (`OutWithOffset` — 작성자 선택: 꼬리만 쓰고 성공이라 하던 것을 조용히 무시하지 않는다; MCP 의 `out`+`body_offset` 도). 앱 본문 상한은 한 번 훑어
+  첫째·둘째 링을 고르고 첫째가 앞서는 동안 그 링 안에서만 다음 본문을 찾는다(전에는 버릴 본문마다 모든 링을 훑었다 — 고르는 차례는 그대로).
+- **시험 도구**: 순수 시험의 `H.sync`(CDP 사건마다 상자가 비었다고 친다 — 기본)와 `flushed`. P1 재현 시험은 `.sync = false`(제 기록이 CDP 끝 때 상자에
+  있다). 앞 시험 둘(맞추기 ②·ExtraInfo 의 A/B)은 CEF 기록의 IO 시각을 CDP 응답 뒤로 두었다(인과상 없는 차례) — 응답 앞으로 고치고 그 부분을
+  `sync = false` 로 돌린다(A/B 는 같은 tick 에 정해지므로 보낸 차례 대신 짝을 본다).
+- **남는 틈**: 이 요청 뒤에 시작한 같은 주소 요청의 기록이 이 요청의 응답 뒤에 오고(그래서 물 높이로는 기다리지 않는다) 워커의 기록이 이 요청의 기록
+  앞에 있으면 수가 맞아 보여 워커의 것을 고를 수 있다(2 회차의 남는 틈 — 이제 뒤 요청의 기록이 이 요청의 응답보다 늦게 시작한 때로 좁혀졌다).
+- **검증**: 순수 `net_body_table` — 재현 셋과 넓힌 시험 다섯(물 높이: 응답 앞까지만 비운 상자·시한 뒤 `ambiguous`·상자가 비었으면 곧; 응답 뒤 워커의
+  기록·응답의 CDP 시각과 맞아 보이지 않는 시각·CEF 가 실패로 끝낸 기록; abort 가 CEF 까지 갔든(그 끝이 판정 앞·뒤) 아니든(다시 받은 요청의 CEF 끝이
+  늦어도)·빈 응답으로 실패; 시한 뒤 늦은 답·놓인 자리; 닿은 시작으로 오르는 물 높이·응답 없는 끝), 무작위 「끝은 꼭 하나」 에 CEF 실패 끝·상자 비우기·
+  두 시험 도구 판 — 119 통과. CLI·session — D1·F3·C1 재현, `--out` 의 순수 판(`BodyOut` — u32 를 넘는 오프셋·표시), `OutWithOffset`(CLI·MCP),
+  control_browser D6(인가된 켬·끄기·앱 답의 코드) — 769 통과. L2 — D6·B2·F1 재현, 앱 상한이 작은 본문 여럿을 두 탭에서 번갈아 버리는 차례,
+  `failed` 기록은 새 브라우저에서 다시 켬. 판정자(실제 CEF 154) `--network` 121 통과(`body-r3-*` 여덟 포함)·`--upload` 9. 변이 40(사본에서 — 순수 21·
+  CLI·session 10·L2 7·판정 2): 39 RED. 산 하나 — 다시 시작한 요청의 `bound` 예외(없애도 그 요청은 다시 시작한 CEF 시도와만 짓고 짝이 아직이면
+  기다려 결과가 같다 — 방어). 판정 변이: 물 높이가 상자를 보지 않으면 `body-r3-worker-own-late` 틀림 24/80 이 돌아온다, CEF 끝의 성공 여부를 버리면
+  `body-r3-abort-refetch` 30 중 하나를 잃는다(abort 한 기록이 CDP 실패 뒤에 시작한 시도에서만 갈린다 — 약한 신호). 변이가 드러낸 죽은 코드(다시 시작 때
+  `responded_at` 을 0 으로 — 다시 시작한 요청은 그 값을 쓰지 않는다)는 지웠다.

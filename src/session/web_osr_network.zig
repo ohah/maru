@@ -166,6 +166,9 @@ pub const Entry = struct {
     site: []u8 = &.{},
     /// 요청이 났을 때 탭의 맨 위 문서 호스트(`topHostOf` — F2). 주 프레임 문서 요청은 쓰지 않는다(처음 주소와 홉의 대상으로 가른다 — 2 회차 N1).
     top_host: []u8 = &.{},
+    /// W9d② 적대 리뷰 3 회차 C1: `top_host` 가 페이지의 정확한 호스트가 아니라 첫 사이트(등록 도메인)다 — app 이 탭 주소를 몰랐거나 요청의
+    /// 첫 사이트와 엇갈렸다(`topHostFromSite`). 어느 호스트든의 본문 읽는 쪽(UB1)은 이 값으로 「제 사이트」 를 넓히지 않는다.
+    top_inexact: bool = false,
     /// 서비스 워커 요청이 났을 때 같은 출처를 보이던 다른 탭들(F4·N6 — 그 탭의 요청일 수 있다). 넘치면 `sw_tabs_overflow`(누구에게나 수만).
     sw_tabs: [max_sw_tabs]u64 = @splat(0),
     sw_tab_count: u8 = 0,
@@ -443,6 +446,15 @@ pub fn topHostOf(v: msg.NetBegin, app_top: []const u8) []const u8 {
     return v.site;
 }
 
+/// W9d② 적대 리뷰 3 회차 C1: `topHostOf` 가 첫 사이트(등록 도메인 — CEF 가 그 꼴로 준다)를 줬다 — 페이지의 호스트가 아니라 그것을 덮는 더 넓은
+/// 이름이다. 헤더의 좁히기(호스트에 묶인 grant 가 덮는가)에는 그대로 쓰지만, 어느 호스트든의 본문 읽는 쪽이 UB1 의 「제 사이트」 로 쓰면 같은
+/// 등록 도메인의 다른 호스트(`mail.example.edu`)의 쿠키 실린 본문이 쿠키 권한 없이 보였다.
+pub fn topHostFromSite(v: msg.NetBegin, app_top: []const u8) bool {
+    if (v.flags.main_frame and v.resource_type == 0) return false;
+    if (v.flags.previous_document or v.site.len == 0) return false;
+    return !(app_top.len != 0 and policy.sameSite(app_top, v.site));
+}
+
 pub const DetailError = error{ UnknownRequest, Evicted, OutOfMemory };
 
 pub const Ring = struct {
@@ -575,6 +587,7 @@ pub const Ring = struct {
         e.initiator = try gpa.dupe(u8, v.initiator);
         e.site = try gpa.dupe(u8, v.site);
         e.top_host = try gpa.dupe(u8, top);
+        e.top_inexact = topHostFromSite(v, ctx.top_host);
         if (v.flags.service_worker) {
             e.sw_tab_count = @intCast(@min(ctx.sw_tabs.len, max_sw_tabs));
             @memcpy(e.sw_tabs[0..e.sw_tab_count], ctx.sw_tabs[0..e.sw_tab_count]);
@@ -709,7 +722,12 @@ pub const Ring = struct {
         };
         self.live.clearRetainingCapacity();
         self.recent_ends = @splat(.{}); // 새 프로세스의 같은 번호는 다시 시작이 아니다
-        // W9d②: 끝나지 않은 본문의 끝도 오지 않는다(옛 sidecar 와 함께 사라졌다) — 받던 바이트는 버린다.
+        self.abandonBodies(gpa, budget);
+    }
+
+    /// W9d②: 끝나지 않은 본문의 끝은 오지 않는다(옛 sidecar 와 함께 사라졌다) — `detached` 로 끝내고 받던 바이트는 버린다. sidecar 를 잃을 때
+    /// 곧 부른다(W9d② 적대 리뷰 3 회차 B2: 전에는 다음 `browser_created` 만 끝내, sidecar 가 다시 뜨지 않으면 `pending` 이 바이트를 쥔 채 남았다).
+    pub fn abandonBodies(self: *Ring, gpa: std.mem.Allocator, budget: *Budget) void {
         var bit = self.entries.iterator();
         while (bit.nextPtr()) |e| if (e.body_state == .pending) self.setBodyState(gpa, budget, e, .detached);
     }
@@ -866,6 +884,9 @@ pub const Ring = struct {
         e.body_flags = v.flags;
         e.body_decoded = v.decoded;
         if (v.state == .captured and e.body.items.len != v.size) return self.setBodyState(gpa, budget, e, .unavailable);
+        // W9d② 적대 리뷰 3 회차 F3(방어): 글이라 한 본문(`binary` 아님)은 UTF-8 이어야 한다 — sidecar 는 풀어 낸 글만 보내지만 maru 는 sidecar 를
+        // 믿지 않는다. 아니면 JSON 이 `body` 를 숫자 배열로 쓰고(CLI·MCP·`--out` 은 글을 기대한다) 그 바이트가 무엇인지 모른다 — `unavailable`.
+        if (v.state == .captured and !v.flags.binary and !std.unicode.utf8ValidateSlice(e.body.items)) return self.setBodyState(gpa, budget, e, .unavailable);
         self.setBodyState(gpa, budget, e, BodyState.fromWire(v.state));
         if (v.state == .captured) {
             e.body.shrinkAndFree(gpa, e.body.items.len);
@@ -1020,7 +1041,9 @@ fn bodyPageCovered(e: *const Entry, bq: BodyQuery) bool {
 
 /// 이 읽는 쪽에게 이 요청의 본문이 어떻게 보이는가(`net_policy.bodyAccess` — 순수 판정에 이 기록의 사실을 준다).
 fn bodyAccessOf(e: *const Entry, view: View, body: BodyView) policy.BodyAccess {
-    const host = if (body.q.any_host) pageHost(e) else body.q.host;
+    // W9d② 적대 리뷰 3 회차 C1: 어느 호스트든의 읽는 쪽은 그 요청이 난 페이지의 호스트를 UB1 의 「제 사이트」 로 본다 — 그 호스트를 정확히 모르면
+    // (첫 사이트뿐 — `top_inexact`) 닫힌 쪽으로: 쿠키가 실린 본문은 쿠키 권한이 있어야 보인다.
+    const host = if (body.q.any_host) (if (e.top_inexact) "" else pageHost(e)) else body.q.host;
     return policy.bodyAccess(.{
         .has_body_grant = body.q.who != null,
         .response_visible = bodyResponseVisible(view, e),
@@ -2946,4 +2969,40 @@ test "W9d② 적대 리뷰 1 회차: 지우기는 기다리던 본문도 끝낸�
     t.ring.evictBody(testing.allocator, &t.budget, t.ring.oldestBody(null).?); // 3
     t.ring.evictBody(testing.allocator, &t.budget, t.ring.oldestBody(null).?); // 4
     try testing.expectEqual(t.ring.next_seq - 1, t.ring.oldestBody(null).?.seq); // 6 이 5 보다 먼저 받았다
+}
+
+// W9d② 적대 리뷰 3 회차 재현 F3(방어): maru 는 글 본문(`binary` 아님)의 UTF-8 을 보지 않는다 — 잘못된 UTF-8 이면 Stringify 가 `body` 를 숫자
+// 배열로 쓴다(CLI·MCP·--out 은 글을 기대한다; --out 은 그 조각을 빈 글로 치고 구멍 난 파일을 낸다). sidecar 는 잘못 만들지 않지만 codec 은 sidecar 를
+// 믿지 않는 쪽이다.
+test "W9d② 적대 리뷰 3 회차 재현 F3: 잘못된 UTF-8 의 글 본문이 body 를 숫자 배열로 내지 않는다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    try bodyBegin(&t, 1, "https://a.test/x", "a.test");
+    try bodyFeed(&t, 1, &.{ 'a', 0xff, 'b' }, .{});
+    const p = try bodyDetail(&t, 1, .{ .who = 70, .any_host = true, .want = true }, "");
+    defer p.deinit();
+    if (p.value.object.get("body")) |b| try testing.expect(b == .string);
+}
+
+// W9d② 적대 리뷰 3 회차 재현 C1: 어느 호스트든의 본문 읽는 쪽(에이전트 탭)은 UB1 의 「덮는 호스트」 를 그 요청이 난 페이지의 호스트(`pageHost` —
+// 하위 자원은 `top_host`)로 본다. app 이 탭 주소를 모르면(이동 경쟁·32 KiB 넘는 주소의 문서 내내 `url_stale`) `topHostOf` 는 첫 사이트(등록 도메인
+// `example.edu`)를 준다 — `hostCovers("example.edu", "mail.example.edu")` 라 같은 등록 도메인의 다른 호스트에서 쿠키가 실린 본문이 보인다. 주소를
+// 알 때(`user.example.edu`)는 needs_cookie_permission 이다. W9d① 에서 이 값은 좁히기(호스트에 묶인 grant)에만 쓰였다 — 여기서는 넓힌다.
+test "W9d② 적대 리뷰 3 회차 재현 C1: 탭 주소를 모를 때도 같은 등록 도메인의 다른 호스트의 자격 증명 본문은 needs_cookie_permission" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const bq: BodyQuery = .{ .who = 70, .any_host = true };
+    for ([_][]const u8{ "user.example.edu", "" }, 1..) |app_top, req| {
+        const nb: msg.NetBegin = .{ .browser = 1, .request = req, .flags = .{ .subframe = true }, .flags2 = .{ .body_expected = true }, .resource_type = 1, .time_ms = 1000 + req, .url = "https://mail.example.edu/", .host = "mail.example.edu", .site = "example.edu" };
+        try t.ring.begin(testing.allocator, &t.budget, nb, .{ .top_host = app_top });
+        try t.ring.response(testing.allocator, &t.budget, .{ .browser = 1, .request = req, .status = 200, .mime = "text/html" });
+        t.ring.end(.{ .browser = 1, .request = req, .received = 7, .time_ms = 3000 + req });
+        try bodyFeed(&t, req, "<inbox>", .{ .credentialed = true });
+        errdefer std.debug.print("C1: app_top=\"{s}\"\n", .{app_top});
+        try testing.expectEqualStrings("needs_cookie_permission", try bodyStateOf(&t, req, bq, ""));
+    }
 }

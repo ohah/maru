@@ -22,6 +22,7 @@ const browsers = @import("browsers.zig");
 const registry_mod = @import("registry.zig");
 const table_mod = @import("net_body_table.zig");
 const events = @import("events.zig");
+const network = @import("network.zig"); // W9d② 적대 리뷰 3 회차 P1: CEF 기록의 물 높이(`cefWatermark`)
 
 const msg = protocol.message;
 const BrowserId = msg.BrowserId;
@@ -172,9 +173,22 @@ pub fn cefCovered(browser: BrowserId, request: u64, covered: bool) void {
     table.cefCovered(browser, request, covered);
 }
 
-pub fn cefEnd(browser: BrowserId, request: u64) void {
-    dbg("cef-end b={d} req={d} t={d}", .{ browser, request, machUs() });
-    table.cefEnd(browser, request, machUs());
+/// CEF 끝 — `ok` 는 CEF 가 성공으로 끝냈는가(W9d② 적대 리뷰 3 회차 P5: 취소·실패로 끝난 기록은 성공한 CDP 요청의 짝이 아니다).
+pub fn cefEnd(browser: BrowserId, request: u64, ok: bool) void {
+    dbg("cef-end b={d} req={d} ok={} t={d}", .{ browser, request, ok, machUs() });
+    table.cefEndAs(browser, request, machUs(), ok);
+    ensureTick();
+}
+
+/// `network.zig` 의 보내는 task 가 상자를 비웠다 — CEF 기록이 IO 시각 `seen_us` 까지 모두 표에 닿았다(W9d② 적대 리뷰 3 회차 P1). 제 기록을
+/// 기다리던 CDP 끝을 곧 정한다(주기 task 의 50 ms 를 기다리지 않는다).
+pub fn cefFlushed(seen_us: i64) void {
+    if (!table.busy()) {
+        table.cef_seen_us = @max(table.cef_seen_us, seen_us);
+        return;
+    }
+    table.cefSeen(gpa, seen_us, machUs()) catch {};
+    runActions();
     ensureTick();
 }
 
@@ -269,11 +283,16 @@ fn onEvent(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser
         };
         defer parsed.deinit();
         const ev = table_mod.parseEvent(method, parsed.value);
+        // P1: 끝이면 지금의 물 높이를 먼저 올린다 — 상자가 비었으면 곧 정하고, 아니면 다음 flush(`cefFlushed`)가 정한다.
+        if (ev) |e| switch (e) {
+            .finished, .failed => table.cef_seen_us = @max(table.cef_seen_us, network.cefWatermark()),
+            else => {},
+        };
         if (debug_log) if (ev) |e| switch (e) {
             .will_be_sent => |v| dbg("cdp-sent rid={s} url={x} m={x} ts={d} redirect={} now={d}", .{ v.rid, v.url_hash, v.method_hash, v.ts_us, v.redirect, now }),
-            .response => |v| dbg("cdp-resp rid={s} mime={s} sw={}", .{ v.rid, v.mime, v.from_sw }),
-            .finished => |v| dbg("cdp-fin rid={s} now={d}", .{ v.rid, now }),
-            .failed => |v| dbg("cdp-fail rid={s}", .{v.rid}),
+            .response => |v| dbg("cdp-resp rid={s} mime={s} sw={} now={d}", .{ v.rid, v.mime, v.from_sw, now }),
+            .finished => |v| dbg("cdp-fin rid={s} now={d} seen={d}", .{ v.rid, now, table.cef_seen_us }),
+            .failed => |v| dbg("cdp-fail rid={s} now={d} seen={d}", .{ v.rid, now, table.cef_seen_us }),
             .from_cache => |v| dbg("cdp-cache rid={s}", .{v.rid}),
             else => {},
         } else dbg("cdp-unparsed {s}", .{method});
@@ -416,7 +435,7 @@ fn ensureTick() void {
 fn tick(_: [*c]c.cef_task_t) callconv(.c) void {
     tick_posted = false;
     dbg("tick", .{});
-    table.tick(gpa, machUs()) catch {};
+    table.tickAt(gpa, machUs(), network.cefWatermark()) catch {};
     runActions();
     ensureTick();
 }

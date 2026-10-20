@@ -24,12 +24,18 @@
 //! 섞였다(MED-2 를 바꿨다 — 후보 수와 가져갈 요청 수를 견주던 것은 창 밖의 열린 요청을 셌다): 두 후보 사이를 모두 `ambiguous` 로 끝내고 두 맞추기가
 //! 갈린 다른 요청도 `ambiguous`(`Cdp.tainted`). 다시 시작은 바로 앞 홉과 같은 주소를 다시 보낸 것뿐이고(A → B → A 는 리다이렉트), 다시 시작한 CDP
 //! 요청은 다시 시작한 CEF 시도와만 짓는다.
+//! W9d② 적대 리뷰 3 회차: (P1) CDP 끝이 제 CEF 기록보다 먼저 오면 먼저 온 워커의 같은 주소 기록만 보고 정해 페이지의 본문이 워커의 기록에 붙었다 —
+//! 이제 물 높이(`cef_seen_us` — CEF 기록이 이 IO 시각까지 다 왔다)가 그 요청의 응답 때(`Cdp.bound` — 제 기록은 그보다 앞에 시작했다)에 닿은 뒤에만
+//! 정하고, 응답 뒤에 시작한 기록은 그 요청의 짝으로 치지 않는다(`compatible`). (P5) 응답 없이 실패한 요청(abort — CEF 에 닿지 않았을 수 있다)은
+//! 끝난 뒤에 시작한 기록을 CEF 가 성공으로 끝내면 갖지 않고, 「그럴 수 있다」 뿐이면 제 짝으로 정하지 않는다(`definite`); 성공한 요청은 CEF 가
+//! 실패·취소로 끝낸 기록을 갖지 않는다. (S1) 답이 오지 않는 본문 호출은 `fetch_timeout_us` 뒤 `unavailable`.
 //!
 //! 시험이 증명하는 것: 맞추기(두 도착 차례·창·같은 주소의 차례 — 창이 다른 동시 요청·기록이 아직인 뒤 요청·ExtraInfo 가 먼저 온 요청·문 넘김과
 //! 보이는 규칙이 다른 후보의 모호함·CDP 가 보지 못한 같은 주소 후보의 모호함과 갈린 다른 요청·서비스 워커 갈래·조각 떼기·A → B → A 와 다시
 //! 시작), 설정 끔의 응답 호스트 기다림, 홉마다의 ExtraInfo 와 그 자리의 시한, 상한과 판정(넘침·글 아님·빈 본문·끊김·실패), 동시·초당 상한과
 //! 기다림의 만료, 세대(끈 뒤 늦게 온 결과는 버린다), 시작마다 끝은 꼭 하나, MIME 가르기, 결과 풀기(JSON 글·base64·잘못된 UTF-8·windows-1252
-//! 되돌리기).
+//! 되돌리기), 물 높이(제 기록이 늦은 빠른 요청·응답 뒤 워커의 기록·응답의 CDP 시각·시한), abort 한 요청과 다시 받은 요청(CEF 에 닿았든 아니든·
+//! CEF 끝이 늦어도), 답이 오지 않는 본문 호출의 시한.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -50,6 +56,10 @@ pub const cef_grace_us: i64 = 250_000;
 pub const unclaimed_expiry_us: i64 = 3_000_000;
 /// 자리가 날 때까지 기다리는 본문의 시한 — 다음 문서로 옮기면 본문이 사라진다(J4).
 pub const waiting_expiry_us: i64 = 3_000_000;
+/// W9d② 적대 리뷰 3 회차 S1: 보낸 `getResponseBody` 의 답을 기다리는 시한 — 넘기면 그 본문은 `unavailable` 로 끝내고 자리를 놓는다(늦은 답은
+/// 버린다). 렌더러 죽음은 `detached` 가 곧 끝내지만(J5) 그 밖에 답이 오지 않는 꼴이 생기면 자리(탭 2·전체 8)를 영영 쥐고 주기 task 가
+/// 멈추지 않았다. 1 MiB 본문의 답도 실측에서 ms 단위였다 — 넉넉히(그동안 그 탭의 다른 본문은 자리를 기다리다 `busy` 가 된다).
+pub const fetch_timeout_us: i64 = 5_000_000;
 /// W9d② 적대 리뷰 1 회차 MED-1: 설정이 꺼졌을 때 CDP 끝 뒤 CEF 응답(응답을 보낸 호스트 — 리다이렉트 뒤)을 기다리는 시간. CEF 기록은 10 ms
 /// 묶음으로 오고 CDP 가 p50 7 ms 앞선다(J1) — 넘기면 덮이지 않는 것으로 친다(`not_covered` — 본문이 브라우저 프로세스를 나가지 않는다).
 pub const cover_grace_us: i64 = 500_000;
@@ -300,7 +310,8 @@ pub const Event = union(enum) {
     /// `Network.requestWillBeSentExtraInfo` — 실제로 실린 쿠키(막히지 않은 것)·인증 헤더가 있었나.
     extra_info: struct { rid: []const u8, credentialed: bool },
     /// `Network.responseReceived` — `has_extra_info` 는 이 요청의 ExtraInfo 가 오거나 왔다는 Chromium 의 알림(`hasExtraInfo`).
-    response: struct { rid: []const u8, mime: []const u8, from_sw: bool, charset: bool, prefetch: bool = false, has_extra_info: bool = false },
+    /// `ts_us` 는 CDP `timestamp`(µs — 0 = 모른다; W9d② 적대 리뷰 3 회차 P1 의 `bound`).
+    response: struct { rid: []const u8, mime: []const u8, from_sw: bool, charset: bool, prefetch: bool = false, has_extra_info: bool = false, ts_us: i64 = 0 },
     /// `Network.dataReceived` — 풀어 낸 바이트.
     data: struct { rid: []const u8, bytes: u64 },
     /// `Network.requestServedFromCache` — 메모리 캐시: CEF 는 이 요청을 보지 못한다(J1).
@@ -424,6 +435,7 @@ pub fn parseEvent(method: []const u8, v: std.json.Value) ?Event {
             .charset = hasCharset(ct),
             .prefetch = boolean(v, "response.fromPrefetchCache"),
             .has_extra_info = boolean(v, "hasExtraInfo"),
+            .ts_us = if (number(v, "timestamp")) |t| @intFromFloat(t * 1e6) else 0,
         } };
     }
     if (std.mem.eql(u8, method, "Network.loadingFinished")) return .{ .finished = .{ .rid = rid } };
@@ -453,6 +465,9 @@ pub const Candidate = struct {
     claimed: bool = false,
     /// CEF 끝을 본 UI 시각(µs, 0 = 아직).
     ended_at: i64 = 0,
+    /// W9d② 적대 리뷰 3 회차 P5: CEF 가 그 요청을 실패·취소로 끝냈다(`ended_at` 과 함께 본다) — 성공한 CDP 요청의 짝이 아니고, 렌더러가 먼저
+    /// abort 해 CDP 실패보다 늦게 시작한 기록이 abort 한 요청의 것임을 알게 해 준다.
+    cef_failed: bool = false,
     /// 같은 번호로 다시 시작한 시도면 앞 시도의 IO 시각(0 = 첫 시도) — 앞 시도 때 시작한 CDP 요청과 짓지 않는다(`tryDecide`).
     prev_t_io_us: i64 = 0,
 };
@@ -487,6 +502,9 @@ const Cdp = struct {
     placed_at: i64 = 0,
     /// 끝(성공·실패)을 본 UI 시각 — 후보를 기다리는 시한의 기준.
     done_at: i64 = 0,
+    /// W9d② 적대 리뷰 3 회차 P1: 응답(`responseReceived`)의 시각(CDP `timestamp` — 맞아 보이지 않으면 UI 가 받은 때; 마지막 다시 시작 뒤 — 0 = 아직). 응답은 요청이 나간 뒤에 오고 요청은 CEF 의
+    /// `on_before_resource_load`(제 기록의 IO 시각) 뒤에 나간다 — 그래서 제 CEF 기록의 IO 시각은 이 값보다 앞이다(`bound`).
+    responded_at: i64 = 0,
     /// requestWillBeSent 를 봤다(ExtraInfo 가 먼저 와 자리만 잡은 동안 거짓 — 짝을 찾지 않는다).
     has_key: bool = true,
     /// 같은 requestId 로 같은 주소·메서드를 다시 보낸 때(0 = 없었다) — Chromium 이 이 요청을 다시 시작했다(CEF 는 같은 번호로 새 시작을 낸다,
@@ -505,6 +523,14 @@ const Cdp = struct {
     /// 짝을 찾는 기준 시각 — 다시 보냈으면 그때, 아니면 처음 보낸 때.
     fn anchor(self: *const Cdp) i64 {
         return if (self.restart_ts_us != 0) self.restart_ts_us else self.ts_us;
+    }
+
+    /// W9d② 적대 리뷰 3 회차 P1: 이 시각까지의 CEF 기록이 모두 오면 제 기록(있다면)도 왔다 — 응답을 봤으면 그때(제 기록은 그보다 앞이다),
+    /// 아니면 끝을 본 때(응답 없이 실패한 요청 — 그때까지 시작한 기록이 다 와야 「CEF 에 닿지 않았다」 를 안다). 0 = 아직 모른다(열린 요청).
+    /// 다시 시작한 요청은 끝을 본 때다 — 실측(판정 `body-restart-same-id`)에서 새 시도의 CEF 시작이 CDP 의 200 응답 뒤에 왔다(그 짝은 다시
+    /// 시작한 CEF 시도뿐이라 — `feasible` — 워커의 기록과 섞이지 않는다).
+    fn bound(self: *const Cdp) i64 {
+        return if (self.responded_at != 0 and self.restart_ts_us == 0) self.responded_at else self.done_at;
     }
 
     fn mimeSlice(self: *const Cdp) []const u8 {
@@ -534,6 +560,8 @@ pub const Inflight = struct {
     mime_len: u8 = 0,
     charset: bool,
     credentialed: bool,
+    /// 보낸 UI 시각 — 답이 `fetch_timeout_us` 안에 오지 않으면 `unavailable` 로 끝낸다(W9d② 적대 리뷰 3 회차 S1).
+    sent_at: i64 = 0,
 
     pub fn mimeSlice(self: *const Inflight) []const u8 {
         return self.mime[0..self.mime_len];
@@ -606,6 +634,10 @@ pub const Table = struct {
     actions: std.ArrayList(Action) = .empty,
     /// `tryDecide` 의 맞추기가 다시 쓰는 자리(부를 때마다 할당하지 않는다).
     scratch: Scratch = .{},
+    /// W9d② 적대 리뷰 3 회차 P1: CEF 기록이 이 IO 시각까지 모두 왔다(물 높이 — µs). `network.zig` 는 IO 시각을 넘김 상자의 잠금 아래에서 찍어
+    /// 상자의 차례가 곧 시각의 차례다 — 그래서 시작 하나가 오면 그보다 앞서 찍힌 것은 모두 왔고(`cefBegin`), 상자가 비었으면 지금까지 모두
+    /// 왔다(`cefSeen`·`tickAt`). 상자는 모든 브라우저가 함께 쓰므로 하나다.
+    cef_seen_us: i64 = 0,
 
     const Scratch = struct {
         reqs: std.ArrayList(usize) = .empty,
@@ -726,6 +758,8 @@ pub const Table = struct {
     /// 기록하는 탭의 CEF 시작 하나를 후보로 적는다 — 적었으면 참(그 요청의 `net_begin` 에 `body_expected` 를 세운다 — 끝은 꼭 하나).
     /// 같은 번호의 후보가 있으면 다시 시작이다(`restartCand` — 앞 시도의 끝을 여기서 낸다: 부른 쪽은 이 시작의 `net_begin` 보다 먼저 보낸다).
     pub fn cefBegin(self: *Table, gpa: std.mem.Allocator, browser: BrowserId, c: Candidate) std.mem.Allocator.Error!bool {
+        // 물 높이 — 이 시작보다 앞서 찍힌 시작은 모두 왔다(상자의 차례 — `cef_seen_us`). 기록하지 않는 탭의 시작도 같은 상자로 온다.
+        self.cef_seen_us = @max(self.cef_seen_us, c.t_io_us);
         const t = self.tabOf(browser) orelse return false;
         if (!t.recording()) return false;
         var prev: i64 = 0;
@@ -788,11 +822,17 @@ pub const Table = struct {
         };
     }
 
-    /// CEF 끝 — 짝이 없으면 시한 뒤 `unmatched`. 응답 호스트가 정해지지 않은 채 끝났으면(응답 없이 끝났다) 덮이지 않는 쪽으로 정한다(MED-1).
+    /// CEF 끝(성공) — 짝이 없으면 시한 뒤 `unmatched`. 응답 호스트가 정해지지 않은 채 끝났으면(응답 없이 끝났다) 덮이지 않는 쪽으로 정한다(MED-1).
     pub fn cefEnd(self: *Table, browser: BrowserId, request: u64, now_us: i64) void {
+        self.cefEndAs(browser, request, now_us, true);
+    }
+
+    /// CEF 끝 — `ok` 는 CEF 가 성공으로 끝냈는가(취소·실패면 거짓 — W9d② 적대 리뷰 3 회차 P5: 성공한 CDP 요청의 짝이 아니다).
+    pub fn cefEndAs(self: *Table, browser: BrowserId, request: u64, now_us: i64, ok: bool) void {
         const t = self.tabOf(browser) orelse return;
         for (t.cands.items) |*c| if (c.request == request and c.ended_at == 0) {
             c.ended_at = @max(now_us, 1);
+            c.cef_failed = !ok;
             if (c.cover_pending) {
                 c.cover_pending = false;
                 c.covered = false;
@@ -918,6 +958,10 @@ pub const Table = struct {
                 const r = &t.cdp.items[i];
                 r.sw = v.from_sw;
                 r.responded = true;
+                // 제 기록의 IO 시각은 응답보다 앞이다 — CDP 의 응답 시각(같은 시계 — J1)이 맞아 보이면(UI 가 받은 때 앞 2 초 안) 그것, 아니면 UI 가
+                // 받은 때(늦은 쪽 — 기다림이 조금 길 뿐 틀리지 않는다).
+                const at = if (v.ts_us > 0 and v.ts_us <= now_us and now_us - v.ts_us <= window_after_us) v.ts_us else now_us;
+                if (r.responded_at == 0) r.responded_at = @max(at, 1);
                 if (v.prefetch) r.prefetch = true;
                 r.has_extra_info = v.has_extra_info;
                 const m = v.mime[0..@min(v.mime.len, r.mime.len)];
@@ -971,6 +1015,30 @@ pub const Table = struct {
         return true;
     }
 
+    /// 후보 `c` 가 CDP 요청 `o` 의 짝일 수 있는가 — 창(`feasible`)과 함께 시각의 차례(W9d② 적대 리뷰 3 회차):
+    ///   - 응답을 봤으면 제 기록은 그 전에 시작했다(`bound` — 요청은 CEF 기록 뒤에 나가고 응답은 그 뒤에 온다): 그 뒤에 시작한 기록은 아니다.
+    ///     뒤에 같은 주소를 받은 워커의 기록이 2 초 창에 들어도 이 요청을 모호하게 하지 않는다(P1 의 대가를 줄인다).
+    ///   - 성공한 CDP 요청은 CEF 가 실패·취소로 끝낸 기록의 짝이 아니다(P5 — abort 한 요청의 기록).
+    ///   - 응답 없이 실패한 요청(abort — CEF 에 닿지 않았을 수 있다, P5)은 끝을 본 때까지 시작한 기록이거나, 그 뒤에 시작했어도 CEF 가 성공으로
+    ///     끝내지 않은 기록(렌더러의 abort 가 CEF 의 시작보다 먼저 보인 꼴 — 아직 끝나지 않았으면 「그럴 수 있다」)만.
+    fn compatible(o: *const Cdp, c: *const Candidate) bool {
+        if (!feasible(o, c)) return false;
+        const known_ok = c.ended_at != 0 and !c.cef_failed;
+        if (o.state == .finished and c.ended_at != 0 and c.cef_failed) return false;
+        if (o.restart_ts_us != 0) return true; // 다시 시작한 시도와만 짓는다(`feasible`) — 시각의 차례는 실측과 다르다(`bound`)
+        if (o.responded_at != 0) return c.t_io_us <= o.responded_at;
+        if (o.state == .failed and c.t_io_us > o.done_at) return !known_ok;
+        if (o.state == .finished and c.t_io_us > o.done_at) return false;
+        return true;
+    }
+
+    /// 실패한 요청 `o` 가 후보 `c` 를 제 것으로 정해도 되는가 — 「그럴 수 있다」(끝이 아직인 뒤 기록)가 아니라 확실할 때만(P5): 그 기록은 다음
+    /// 요청의 것일 수 있다(CEF 가 성공으로 끝내면 아니다 — 그때 다시 본다).
+    fn definite(o: *const Cdp, c: *const Candidate) bool {
+        if (o.state != .failed or o.responded_at != 0 or o.restart_ts_us != 0) return true;
+        return c.t_io_us <= o.done_at or (c.ended_at != 0 and c.cef_failed);
+    }
+
     /// 끝난 CDP 요청 `i` 의 짝을 찾아 판정한다. 아직 후보가 없으면 그대로 둔다(`tick` 이 다시 본다).
     ///
     /// 짝은 차례를 지키는 맞추기로 고른다(W9d② 적대 리뷰 2 회차 — 같은 주소의 동시 요청은 시작 차례 그대로다, J2): 같은 열쇠의 CDP 요청(기준 시각
@@ -987,6 +1055,16 @@ pub const Table = struct {
         const key = r.key();
         const ts = r.anchor();
         const none = std.math.maxInt(usize);
+        // W9d② 적대 리뷰 3 회차 P1: 제 CEF 기록이 아직 오지 않았을 수 있다 — CDP 의 끝은 CEF 의 10 ms 묶음보다 대개 먼저 온다(빠른 로컬 요청은
+        // 450/450). 그때 CDP 가 보지 못한 같은 주소의 기록(워커의 fetch — 앞 묶음으로 왔다)이 창 안에 있으면 두 맞추기 모두 그것을 줘 페이지의
+        // 본문이 워커의 기록에 붙었다(실제 CEF 24/80). 그래서 제 기록이 시작했을 때(`bound` 앞)까지의 CEF 기록이 모두 온 뒤에만 정한다 — 물
+        // 높이는 IO 상자가 비면 곧 지금이라 대개 기다리지 않거나 다음 묶음(10 ms)까지다. 시한(`cef_grace_us`)이 지나도 오르지 않으면(UI 스레드가
+        // 상자를 비우지 못했다) 틀린 기록에 붙이느니 `ambiguous` 로 정한다.
+        var late = false;
+        if (self.cef_seen_us < r.bound()) {
+            if (now_us - r.done_at < cef_grace_us) return;
+            late = true;
+        }
         // 같은 갈래의 CDP 요청 — 같은 주소·메서드, 서비스 워커 갈래가 같거나 아직 응답이 없어 모르는 것(열렸거나 끝나 짝을 기다린다 — 정한 것은
         // 목록에서 빠졌다), 기준 시각 차례. 끝난 것도 넣어야 한다: 앞 요청이 CEF 기록을 기다리는 동안 뒤 요청이 끝나면 앞 요청의 짝을 가져갔다.
         const sc = &self.scratch;
@@ -1028,7 +1106,7 @@ pub const Table = struct {
             sc.left.items[q] = none;
             if (j == i) me = q;
             var p = pos;
-            while (p < cands.len and !feasible(&t.cdp.items[j], &t.cands.items[cands[p]])) p += 1;
+            while (p < cands.len and !compatible(&t.cdp.items[j], &t.cands.items[cands[p]])) p += 1;
             if (p == cands.len) continue;
             sc.left.items[q] = p;
             pos = p + 1;
@@ -1040,6 +1118,12 @@ pub const Table = struct {
             return;
         }
         const ci = cands[left];
+        // P5: 응답 없이 실패한 요청에게 준 후보가 「그럴 수 있다」 뿐이면(뒤에 시작해 아직 끝나지 않은 기록 — 다음 요청의 것일 수 있다) 그 끝을
+        // 기다린다. 시한까지 확실해지지 않으면 이 요청은 짝 없이 놓는다(그 기록은 제 요청이 가져가거나 `unmatched`).
+        if (!definite(&r, &t.cands.items[ci])) {
+            if (now_us - r.done_at >= cef_grace_us) _ = t.cdp.orderedRemove(i);
+            return;
+        }
         if (r.state == .finished) {
             // MED-1(설정이 꺼졌을 때): 응답을 보낸 호스트(리다이렉트 뒤)를 CEF 응답이 정하기 전에는 받으러 가지 않는다 — 시작 호스트로 정한
             // 「덮인다」 는 덮이지 않는 호스트로 리다이렉트한 요청에서 틀린다(판정 body-r1-switch-off-redirect: 12/12 가 빠져나갔다). 시한이
@@ -1062,7 +1146,7 @@ pub const Table = struct {
             sc.right.items[q] = none;
             if (sc.left.items[q] == none) continue;
             var p = bound;
-            while (p > 0 and !feasible(&t.cdp.items[reqs[q]], &t.cands.items[cands[p - 1]])) p -= 1;
+            while (p > 0 and !compatible(&t.cdp.items[reqs[q]], &t.cands.items[cands[p - 1]])) p -= 1;
             if (p == 0) continue;
             sc.right.items[q] = p - 1;
             bound = p - 1;
@@ -1070,7 +1154,7 @@ pub const Table = struct {
         const right = sc.right.items[me];
         var ambiguous = false;
         // 보이는 규칙(프레임·첫 사이트·initiator)이 다른 후보가 이 요청의 창 안에 있다.
-        for (cands) |o| if (o != ci and t.cands.items[o].attr != t.cands.items[ci].attr and feasible(&r, &t.cands.items[o])) {
+        for (cands) |o| if (o != ci and t.cands.items[o].attr != t.cands.items[ci].attr and compatible(&r, &t.cands.items[o])) {
             ambiguous = true;
         };
         // 두 맞추기가 다른 후보를 준다 — CDP 가 보지 못한 같은 열쇠의 CEF 요청이 섞였다(MED-2·F2): 사이의 후보(둘 포함 — 이 요청의 짝일 수
@@ -1087,7 +1171,7 @@ pub const Table = struct {
                 t.cdp.items[j].tainted = true;
             };
         }
-        if (r.tainted) ambiguous = true;
+        if (r.tainted or late) ambiguous = true;
         if (t.drop_overflow_until != 0 and ts - window_before_us <= t.drop_overflow_until) ambiguous = true;
         for (t.drops[0..t.drop_len]) |d| if (d.url == key.url and d.t_us >= ts - window_before_us and d.t_us <= ts + window_after_us) {
             ambiguous = true;
@@ -1167,7 +1251,7 @@ pub const Table = struct {
             self.global_bytes.tokens -= need;
             const id = self.next_id;
             self.next_id = if (self.next_id + 1 >= id_end) id_base else self.next_id + 1;
-            var f: Inflight = .{ .id = id, .browser = t.browser, .session = t.session, .request = w.request, .decoded = w.bytes, .charset = w.charset, .credentialed = w.credentialed };
+            var f: Inflight = .{ .id = id, .browser = t.browser, .session = t.session, .request = w.request, .decoded = w.bytes, .charset = w.charset, .credentialed = w.credentialed, .sent_at = @max(now_us, 1) };
             @memcpy(f.mime[0..w.mime_len], w.mime[0..w.mime_len]);
             f.mime_len = w.mime_len;
             try self.inflight.append(gpa, f);
@@ -1198,8 +1282,51 @@ pub const Table = struct {
         try self.pump(gpa, t, now_us);
     }
 
-    /// 주기적으로(UI task) — 기다리던 CDP 끝의 짝을 다시 보고, 짝 없는 CEF 요청을 `unmatched` 로 정하고, 기다리는 본문을 보낸다.
+    /// W9d② 적대 리뷰 3 회차 P1: CEF 기록이 IO 시각 `seen_us` 까지 모두 왔다(`network.zig` 가 IO 상자를 비운 뒤) — 물 높이를 올리고 그것을
+    /// 기다리던 CDP 끝을 다시 본다(주기 task 를 기다리지 않는다 — 다음 묶음이 오면 곧 정한다).
+    pub fn cefSeen(self: *Table, gpa: std.mem.Allocator, seen_us: i64, now_us: i64) std.mem.Allocator.Error!void {
+        if (seen_us <= self.cef_seen_us) return;
+        self.cef_seen_us = seen_us;
+        for (&self.tabs) |*t| {
+            if (t.browser == 0 or t.session == 0) continue;
+            try self.decidePending(gpa, t, now_us);
+        }
+    }
+
+    /// 끝난 CDP 요청(짝을 기다린다)을 앞에서부터 다시 본다.
+    fn decidePending(self: *Table, gpa: std.mem.Allocator, t: *Tab, now_us: i64) std.mem.Allocator.Error!void {
+        var i: usize = 0;
+        while (i < t.cdp.items.len) {
+            const before = t.cdp.items.len;
+            if (t.cdp.items[i].state == .finished or t.cdp.items[i].state == .failed) try self.tryDecide(gpa, t, i, now_us);
+            if (t.cdp.items.len == before) i += 1;
+        }
+    }
+
+    /// 주기적으로 — IO 상자가 비었을 때(시험·상자가 빈 때 — 지금까지의 CEF 기록이 모두 왔다). 제품은 물 높이를 주는 `tickAt` 을 부른다.
     pub fn tick(self: *Table, gpa: std.mem.Allocator, now_us: i64) std.mem.Allocator.Error!void {
+        return self.tickAt(gpa, now_us, now_us);
+    }
+
+    /// 주기적으로(UI task) — 물 높이(`seen_us` — CEF 기록이 이 IO 시각까지 왔다)를 올리고, 답이 오지 않는 본문 호출을 끝내고(S1), 기다리던
+    /// CDP 끝의 짝을 다시 보고, 짝 없는 CEF 요청을 `unmatched` 로 정하고, 기다리는 본문을 보낸다.
+    pub fn tickAt(self: *Table, gpa: std.mem.Allocator, now_us: i64, seen_us: i64) std.mem.Allocator.Error!void {
+        self.cef_seen_us = @max(self.cef_seen_us, seen_us);
+        // S1: 답이 시한 안에 오지 않은 본문 호출 — `unavailable` 로 끝내고 자리를 놓는다(늦은 답은 `takeInflight` 가 못 찾아 버린다).
+        var f: usize = 0;
+        while (f < self.inflight.items.len) {
+            const x = self.inflight.items[f];
+            if (now_us - x.sent_at < fetch_timeout_us) {
+                f += 1;
+                continue;
+            }
+            _ = self.inflight.swapRemove(f);
+            const t = self.tabOf(x.browser) orelse continue;
+            t.inflight -|= 1;
+            if (t.session != x.session) continue; // 끄거나 다시 켠 뒤의 옛 호출 — 그 끝은 그때 냈다
+            try self.emit(gpa, .{ .end = .{ .browser = x.browser, .session = x.session, .request = x.request, .state = .unavailable, .flags = .{ .credentialed = x.credentialed }, .decoded = x.decoded } });
+            self.removeCand(t, x.request);
+        }
         for (&self.tabs) |*t| {
             if (t.browser == 0 or t.session == 0) continue;
             // ExtraInfo 만 온 자리(열쇠 없음)는 시한 뒤 놓는다(LOW-3 — 이미 정한 요청의 늦은 ExtraInfo 는 다시 짝이 될 일이 없다).
@@ -1213,12 +1340,7 @@ pub const Table = struct {
                 p += 1;
             }
             // 끝난 CDP 요청(짝을 기다린다) — 앞에서부터.
-            var i: usize = 0;
-            while (i < t.cdp.items.len) {
-                const before = t.cdp.items.len;
-                if (t.cdp.items[i].state == .finished or t.cdp.items[i].state == .failed) try self.tryDecide(gpa, t, i, now_us);
-                if (t.cdp.items.len == before) i += 1;
-            }
+            try self.decidePending(gpa, t, now_us);
             var c: usize = 0;
             while (c < t.cands.items.len) {
                 const cand = t.cands.items[c];
@@ -1257,6 +1379,9 @@ const H = struct {
     ends: usize = 0,
     fetches: std.ArrayList(Action) = .empty,
     paused: usize = 0,
+    /// CDP 사건마다 그때까지의 CEF 기록이 모두 왔다고 친다(IO 상자가 빈 때 — 시험이 후보를 사건 차례대로 곧 넘긴다). 제 기록이 CDP 끝보다
+    /// 늦게 오는 꼴(W9d② 적대 리뷰 3 회차 P1)을 보는 시험은 끄고 물 높이를 손으로 올린다(`flushed`·`tick`).
+    sync: bool = true,
 
     fn deinit(self: *H) void {
         self.table.deinit(gpa_t);
@@ -1300,7 +1425,14 @@ const H = struct {
         return ok;
     }
 
+    /// IO 상자를 비웠다 — CEF 기록이 IO 시각 `seen` 까지 모두 왔다(`network.zig` 의 flush 끝).
+    fn flushed(self: *H, seen: i64, now: i64) !void {
+        try self.table.cefSeen(gpa_t, seen, now);
+        try self.drain();
+    }
+
     fn ev(self: *H, browser: BrowserId, e: Event, now: i64) !void {
+        if (self.sync) self.table.cef_seen_us = @max(self.table.cef_seen_us, now);
         try self.table.cdpEvent(gpa_t, browser, e, now);
         try self.drain();
     }
@@ -1473,6 +1605,9 @@ test "W9d②: CDP 이벤트 고르기 — requestWillBeSent(리다이렉트·미
     // W9d② 적대 리뷰 1 회차: `hasExtraInfo`(ExtraInfo 가 오거나 왔다 — 홉마다의 ExtraInfo 를 잠시 기다릴지).
     const rx = (try P.ev("Network.responseReceived", "{\"requestId\":\"2\",\"hasExtraInfo\":true,\"response\":{\"mimeType\":\"text/plain\",\"headers\":{}}}")).response;
     try testing.expect(rx.has_extra_info);
+    try testing.expectEqual(@as(i64, 0), rx.ts_us);
+    // W9d② 적대 리뷰 3 회차 P1: 응답의 `timestamp`(제 CEF 기록은 그보다 앞에 시작했다).
+    try testing.expectEqual(@as(i64, 12_500_000), (try P.ev("Network.responseReceived", "{\"requestId\":\"3\",\"timestamp\":12.5,\"response\":{\"mimeType\":\"text/plain\",\"headers\":{}}}")).response.ts_us);
     try testing.expect(parseEvent("Network.loadingFinished", .{ .object = .empty }) == null); // requestId 없음
     const d = scanData("{\"requestId\":\"77.3\",\"timestamp\":1.0,\"dataLength\":4096,\"encodedDataLength\":10}").?.data;
     try testing.expectEqualStrings("77.3", d.rid);
@@ -1492,14 +1627,16 @@ test "W9d②: 맞추기 — CDP 가 먼저 와도 CEF 가 먼저 와도 짝을 �
     try h.finish(5, "1.1", 1_000_300);
     var buf: [8]u64 = undefined;
     try testing.expectEqualSlices(u64, &.{100}, h.fetchedRequests(&buf));
-    // ② CDP 끝이 CEF 시작보다 먼저(J1 — 빠른 로컬 요청) — 기다렸다가 짓는다.
+    // ② CDP 끝이 CEF 기록보다 먼저(J1 — 빠른 로컬 요청: 기록은 응답보다 앞에 시작했지만 10 ms 묶음이 아직이다) — 기다렸다가 짓는다.
+    h.sync = false;
     try h.sent(5, "1.2", "https://a.test/b.json", 2_000_000, 2_000_000);
     try h.respond(5, "1.2", "application/json", 10, 2_000_100);
     try h.finish(5, "1.2", 2_000_200);
     try testing.expectEqual(@as(usize, 1), h.fetches.items.len);
-    try testing.expect(try h.cand(5, 101, "https://a.test/b.json", 2_000_900, .{}));
+    try testing.expect(try h.cand(5, 101, "https://a.test/b.json", 2_000_050, .{}));
     try h.table.tick(gpa_t, 2_010_000);
     try h.drain();
+    h.sync = true;
     // 자리는 탭마다 2 — 첫 것이 쥐고 있어도 둘째는 받으러 간다.
     try testing.expectEqualSlices(u64, &.{ 100, 101 }, h.fetchedRequests(&buf));
     // ③ 짝이 없는 CDP 요청(메모리 캐시가 아닌데 CEF 가 보지 못했다 — 다른 프로세스 iframe 등) — 시한 뒤 놓는다(끝 없음 — maru 에 기록이 없다).
@@ -1572,22 +1709,24 @@ test "W9d②: ExtraInfo 가 먼저 와도 실린 자격 증명을 잃지 않는�
     try testing.expectEqual(State.not_text, h.ended.get(1).?);
     // 자격 증명 표시는 ExtraInfo 의 것(실리지 않았다).
     try h.drain();
-    // 앞(A)·뒤(B) 둘 다 끝났는데 CEF 기록이 아직 — 오면 A 가 먼저 것을, B 가 뒤 것을 갖는다.
+    // 앞(A)·뒤(B) 둘 다 끝났는데 CEF 기록이 아직(IO 상자에 있다) — 오면 A 가 먼저 것을, B 가 뒤 것을 갖는다.
+    h.sync = false;
     try h.sent(5, "A", "https://a.test/s", 2_000_000, 2_000_000);
     try h.sent(5, "B", "https://a.test/s", 2_000_010, 2_000_010);
     try h.respond(5, "A", "text/plain", 1, 2_000_020);
     try h.respond(5, "B", "text/plain", 1, 2_000_020);
     try h.finish(5, "A", 2_000_030);
-    _ = try h.cand(5, 10, "https://a.test/s", 2_000_100, .{});
-    _ = try h.cand(5, 11, "https://a.test/s", 2_000_110, .{});
-    try h.finish(5, "B", 2_000_200); // B 가 먼저 판정 기회를 얻는다 — A 가 아직 목록에 있으니 k = 1
+    _ = try h.cand(5, 10, "https://a.test/s", 2_000_012, .{});
+    _ = try h.cand(5, 11, "https://a.test/s", 2_000_015, .{});
+    try h.finish(5, "B", 2_000_200);
     try h.table.tick(gpa_t, 2_000_300);
     try h.drain();
     var buf: [4]u64 = undefined;
     const got = h.fetchedRequests(&buf);
     try testing.expectEqual(@as(usize, 2), got.len);
-    // 보낸 차례는 B(11) 다음 A(10) — 짝은 시작 차례 그대로다.
-    try testing.expectEqualSlices(u64, &.{ 11, 10 }, got);
+    // 짝은 시작 차례 그대로다(B 가 먼저 끝나도 A 의 기록을 갖지 않는다).
+    try testing.expectEqual(@as(?u64, 10), fetchedFor(&h, "A"));
+    try testing.expectEqual(@as(?u64, 11), fetchedFor(&h, "B"));
 }
 
 test "W9d②: 모호함 — 보이는 규칙이 다른 후보가 창 안에 있거나, 그 탭이 같은 주소의 요청을 문에서 넘긴 창 안이면 ambiguous(본문 없음)" {
@@ -1781,7 +1920,8 @@ test "W9d②: 끝은 꼭 하나 — 무작위 사건 차례(CEF·CDP 의 엇갈�
     var prng = std.Random.DefaultPrng.init(0x9d2e);
     const r = prng.random();
     for (0..60) |round| {
-        var h: H = .{};
+        // 물 높이를 CDP 사건마다 올리는 판과 손으로만 올리는 판(W9d② 적대 리뷰 3 회차) 모두.
+        var h: H = .{ .sync = round % 2 == 0 };
         defer h.deinit();
         _ = try h.table.start(gpa_t, 5, 1);
         var registered: std.ArrayList(u64) = .empty;
@@ -1795,7 +1935,7 @@ test "W9d②: 끝은 꼭 하나 — 무작위 사건 차례(CEF·CDP 의 엇갈�
             const url = try std.fmt.bufPrint(&ub, "https://a.test/{d}", .{url_i});
             var rb: [16]u8 = undefined;
             const rid = try std.fmt.bufPrint(&rb, "{d}.{d}", .{ round, r.intRangeLessThan(u16, 0, 40) });
-            switch (r.intRangeLessThan(u8, 0, 14)) {
+            switch (r.intRangeLessThan(u8, 0, 15)) {
                 0, 1 => {
                     if (try h.cand(5, next_req, url, now + r.intRangeAtMost(i64, -3000, 50_000), .{ .attr = r.intRangeAtMost(u64, 1, 2) })) try registered.append(gpa_t, next_req);
                     next_req += 1;
@@ -1805,7 +1945,7 @@ test "W9d②: 끝은 꼭 하나 — 무작위 사건 차례(CEF·CDP 의 엇갈�
                 4 => try h.finish(5, rid, now),
                 5 => try h.ev(5, .{ .failed = .{ .rid = rid } }, now),
                 6 => try h.ev(5, .{ .from_cache = .{ .rid = rid } }, now),
-                7 => h.table.cefEnd(5, r.intRangeLessThan(u64, 1, next_req + 1), now),
+                7 => h.table.cefEndAs(5, r.intRangeLessThan(u64, 1, next_req + 1), now, r.intRangeLessThan(u8, 0, 4) != 0),
                 8 => h.table.noteDrop(5, hashUrl8(url), now),
                 9 => {
                     try h.table.tick(gpa_t, now);
@@ -1820,6 +1960,8 @@ test "W9d②: 끝은 꼭 하나 — 무작위 사건 차례(CEF·CDP 의 엇갈�
                         try h.drain();
                     }
                 },
+                // IO 상자를 비웠다(물 높이 — W9d② 적대 리뷰 3 회차).
+                11 => try h.flushed(now - r.intRangeAtMost(i64, 0, 20_000), now),
                 // 같은 번호 다시 시작(W9d① 적대 리뷰 후 × W9d②) — 앞 시도가 어디에 있든(짝 없음·기다림·보낸 호출·이미 끝남).
                 12 => if (registered.items.len > 0) {
                     const req = registered.items[r.intRangeLessThan(usize, 0, registered.items.len)];
@@ -2547,5 +2689,286 @@ test "W9d② 적대 리뷰 2 회차: 갈린 맞추기 — 갈린 뒤 요청도 a
         try h.respond(5, "h.1", "application/json", 9, 8_039_000);
         try h.finish(5, "h.1", 8_040_000);
         try testing.expectEqual(@as(?u64, 571), fetchedFor(&h, "h.1"));
+    }
+}
+
+// W9d② 적대 리뷰 3 회차 재현 P1: 빠른 요청은 CDP 끝이 제 CEF 기록(10 ms 묶음)보다 먼저 온다(450/450). 그때 CDP 가 보지 못한 같은 주소의 기록
+// (전용 워커의 fetch — 앞 묶음으로 이미 왔다)이 창 안에 있으면 두 맞추기 모두 그것을 준다(후보 하나·요청 하나) — 페이지의 본문이 워커의 기록에 붙는다.
+test "W9d② 적대 리뷰 3 회차 재현 P1: 제 기록이 아직인 빠른 요청의 본문은 먼저 온 워커의 같은 주소 기록에 붙지 않는다" {
+    var h: H = .{ .sync = false }; // 고침 뒤: 페이지의 제 기록은 CDP 끝 때 아직 IO 상자에 있다(물 높이를 CDP 사건마다 올리지 않는다)
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const u = "http://127.0.0.1/rv3/e?1";
+    _ = try h.cand(5, 701, u, 997_000, .{}); // 워커의 fetch(CDP 에 없다) — 앞 묶음으로 왔다
+    try h.sent(5, "p.1", u, 1_000_000, 1_000_100);
+    try h.respond(5, "p.1", "application/json", 9, 1_002_000);
+    try h.finish(5, "p.1", 1_003_000);
+    _ = try h.cand(5, 702, u, 1_000_400, .{}); // 페이지의 제 CEF 기록 — 다음 묶음
+    h.table.cefEnd(5, 701, 1_004_000);
+    h.table.cefEnd(5, 702, 1_008_000);
+    try h.table.tick(gpa_t, 1_060_000);
+    try h.drain();
+    try testing.expect(fetchedFor(&h, "p.1") != @as(?u64, 701));
+}
+
+// W9d② 적대 리뷰 3 회차 재현 P5: CEF 까지 가지 않고 실패한 CDP 요청(곧 abort 한 fetch — React StrictMode 의 effect 두 번 꼴)이 짝 없이 남아 있는
+// 동안(cef_grace 250 ms) 같은 주소의 다음 요청을 시작하면, 왼쪽 맞추기가 실패한 요청에 다음 요청의 기록을 준다 — 성공한 요청이 `request_failed`.
+test "W9d② 적대 리뷰 3 회차 재현 P5: CEF 에 닿지 않은 실패 요청이 같은 주소 다음 요청의 기록을 request_failed 로 끝내지 않는다" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const u = "https://app.test/api/me";
+    try h.sent(5, "a.0", u, 2_000_000, 2_000_100);
+    try h.ev(5, .{ .failed = .{ .rid = "a.0" } }, 2_000_300); // abort — CEF 시작 없음
+    try h.sent(5, "a.1", u, 2_001_000, 2_001_100);
+    _ = try h.cand(5, 711, u, 2_001_200, .{});
+    try h.respond(5, "a.1", "application/json", 9, 2_009_000);
+    try h.finish(5, "a.1", 2_010_000);
+    h.table.cefEnd(5, 711, 2_012_000);
+    try h.table.tick(gpa_t, 2_060_000);
+    try h.drain();
+    try h.table.tick(gpa_t, 2_400_000);
+    try h.drain();
+    try testing.expect(!stateIs(&h, 711, .request_failed));
+    try testing.expectEqual(@as(?u64, 711), fetchedFor(&h, "a.1"));
+}
+
+// W9d② 적대 리뷰 3 회차 재현 S1(방어): 보낸 getResponseBody 에는 시한이 없다 — 답이 오지 않으면(렌더러 죽음 밖의 꼴) 그 후보는 끝이 영영 없고
+// (maru 의 기록은 `pending`), 동시 자리(탭 2·전체 8)를 쥐며 주기 task 가 멈추지 않는다.
+test "W9d② 적대 리뷰 3 회차 재현 S1: 답이 오지 않는 getResponseBody 도 시한 뒤 끝이 꼭 하나다" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const u = "https://app.test/a.json";
+    try h.sent(5, "s.1", u, 1_000_000, 1_000_100);
+    _ = try h.cand(5, 721, u, 1_000_300, .{});
+    try h.respond(5, "s.1", "application/json", 9, 1_009_000);
+    try h.finish(5, "s.1", 1_010_000);
+    try testing.expectEqual(@as(?u64, 721), fetchedFor(&h, "s.1"));
+    try h.table.tick(gpa_t, 61_010_000);
+    try h.drain();
+    try testing.expectEqual(@as(u32, 1), endCount(&h, 721));
+    try testing.expect(!h.table.busy());
+}
+
+// ── W9d② 적대 리뷰 3 회차 ──
+// 시험이 증명하는 것: (P1) CDP 끝이 제 CEF 기록보다 먼저 와도 물 높이(그 요청의 응답 때까지의 CEF 기록이 다 왔다)가 오르기 전에는 정하지 않는다 —
+// 오르면 먼저 온 워커의 같은 주소 기록과 제 기록이 함께 보여 `ambiguous`(틀린 본문이 아니다), 물 높이가 시한까지 오르지 않으면 `ambiguous`. 응답 뒤에
+// 시작한 워커의 같은 주소 기록은 그 요청의 짝일 수 없어 이제 모호하게 하지 않는다(대가가 줄었다). (P5) CEF 에 닿지 않고 실패한(abort) 요청은 다음
+// 같은 주소 요청의 기록을 갖지 않는다 — 그 기록의 CEF 끝이 늦어도, abort 가 CEF 까지 간 꼴(실패 뒤에 시작해 취소로 끝난 기록)도 저마다 제 것.
+// (S1) 보낸 본문 호출의 답이 시한 안에 오지 않으면 `unavailable` 하나로 끝내고 자리를 놓는다 — 늦은 답은 버리고 기다리던 본문을 보낸다.
+// 브라우저 탭에서 중요한 이유: 에이전트는 본문을 그 요청의 응답으로 읽는다 — 워커의 응답이나 abort 한 요청의 실패가 다른 요청에 붙으면 틀린 것을 믿는다.
+
+test "W9d② 적대 리뷰 3 회차 P1: 물 높이가 그 요청의 응답 때에 닿기 전에는 정하지 않는다 — 닿으면 워커와 제 기록이 함께 보여 ambiguous, 닿지 않으면 시한 뒤 ambiguous" {
+    const u = "http://127.0.0.1/rv3/e?1";
+    // ① 상자를 비운 물 높이가 응답 때 앞이면 기다리고, 닿으면(제 기록이 함께 왔다) 둘 다 ambiguous — 어느 기록에도 본문이 없다.
+    {
+        var h: H = .{ .sync = false };
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        _ = try h.cand(5, 701, u, 997_000, .{});
+        try h.sent(5, "p.1", u, 1_000_000, 1_000_100);
+        try h.respond(5, "p.1", "application/json", 9, 1_002_000);
+        try h.finish(5, "p.1", 1_003_000);
+        try h.flushed(1_001_999, 1_003_500); // 응답(1_002_000) 앞까지만 — 제 기록이 아직 상자에 있을 수 있다
+        try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
+        try testing.expect(h.ended.get(701) == null);
+        _ = try h.cand(5, 702, u, 1_000_400, .{});
+        try h.flushed(1_013_000, 1_013_000);
+        try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
+        try testing.expect(stateIs(&h, 701, .ambiguous));
+        try testing.expect(stateIs(&h, 702, .ambiguous));
+    }
+    // ② 물 높이가 시한(cef_grace_us)까지 오르지 않으면 정하되 ambiguous — 먼저 온 워커의 기록에 본문을 붙이지 않는다.
+    {
+        var h: H = .{ .sync = false };
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        _ = try h.cand(5, 701, u, 997_000, .{});
+        try h.sent(5, "p.1", u, 1_000_000, 1_000_100);
+        try h.respond(5, "p.1", "application/json", 9, 1_002_000);
+        try h.finish(5, "p.1", 1_003_000);
+        try h.table.tickAt(gpa_t, 1_003_000 + cef_grace_us - 1, 999_000);
+        try h.drain();
+        try testing.expect(h.ended.get(701) == null);
+        try h.table.tickAt(gpa_t, 1_003_000 + cef_grace_us, 999_000);
+        try h.drain();
+        try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
+        try testing.expect(stateIs(&h, 701, .ambiguous));
+    }
+    // ③ 물 높이가 이미 응답 때를 넘었으면(상자가 비었다) 곧 정한다 — 기다림은 묶음이 늦을 때만이다.
+    {
+        var h: H = .{ .sync = false };
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        try h.sent(5, "q.1", u, 1_000_000, 1_000_100);
+        _ = try h.cand(5, 703, u, 1_000_300, .{});
+        try h.respond(5, "q.1", "application/json", 9, 1_002_000);
+        try h.flushed(1_002_500, 1_002_500);
+        try h.finish(5, "q.1", 1_003_000);
+        try testing.expectEqual(@as(?u64, 703), fetchedFor(&h, "q.1"));
+    }
+}
+
+test "W9d② 적대 리뷰 3 회차 P1: 응답 뒤에 시작한 워커의 같은 주소 기록은 그 요청의 짝일 수 없다 — 페이지는 제 본문, 워커의 기록은 본문 없이" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const u = "https://app.test/api/me";
+    try h.sent(5, "p.1", u, 1_000_000, 1_000_100);
+    _ = try h.cand(5, 801, u, 1_000_300, .{}); // 페이지의 제 기록
+    try h.respond(5, "p.1", "application/json", 9, 1_004_000);
+    _ = try h.cand(5, 802, u, 1_006_000, .{}); // 워커가 응답 뒤(2 초 창 안)에 같은 주소를 받는다
+    try h.finish(5, "p.1", 1_008_000);
+    try testing.expectEqual(@as(?u64, 801), fetchedFor(&h, "p.1"));
+    try testing.expect(h.ended.get(802) == null); // 짝 없이 남는다 — 시한 뒤 unmatched
+    h.table.cefEnd(5, 802, 1_010_000);
+    try h.table.tick(gpa_t, 1_010_000 + unclaimed_expiry_us);
+    try h.drain();
+    try testing.expect(stateIs(&h, 802, .unmatched));
+    // 응답의 CDP 시각이 UI 가 받은 때보다 앞이면 그것으로 — 그 사이에 시작한 워커의 기록도 짝이 아니다. 시각이 맞아 보이지 않으면(받은 때보다
+    // 뒤) UI 가 받은 때로.
+    for ([_]i64{ 1_503_000, 1_509_000 }, [_]bool{ true, false }) |cdp_ts, own| {
+        var k: H = .{};
+        defer k.deinit();
+        _ = try k.table.start(gpa_t, 5, 1);
+        try k.sent(5, "p.2", u, 1_500_000, 1_500_100);
+        _ = try k.cand(5, 821, u, 1_500_300, .{});
+        _ = try k.cand(5, 822, u, 1_504_000, .{}); // CDP 응답(1_503_000) 뒤·UI 가 받은 때(1_505_000) 앞에 시작한 워커의 기록
+        try k.ev(5, .{ .response = .{ .rid = "p.2", .mime = "application/json", .from_sw = false, .charset = true, .ts_us = cdp_ts } }, 1_505_000);
+        try k.ev(5, .{ .data = .{ .rid = "p.2", .bytes = 9 } }, 1_505_000);
+        try k.finish(5, "p.2", 1_506_000);
+        errdefer std.debug.print("cdp_ts={d}\n", .{cdp_ts});
+        if (own) try testing.expectEqual(@as(?u64, 821), fetchedFor(&k, "p.2")) else try testing.expect(stateIs(&k, 821, .ambiguous));
+    }
+    // 성공한 CDP 요청은 CEF 가 취소·실패로 끝낸 기록과 짓지 않는다 — 그 기록뿐이면 짝 없이 놓는다.
+    var g: H = .{};
+    defer g.deinit();
+    _ = try g.table.start(gpa_t, 5, 1);
+    try g.sent(5, "c.1", u, 2_000_000, 2_000_100);
+    _ = try g.cand(5, 811, u, 2_000_300, .{});
+    g.table.cefEndAs(5, 811, 2_000_900, false);
+    try g.respond(5, "c.1", "application/json", 9, 2_004_000);
+    try g.finish(5, "c.1", 2_005_000);
+    try testing.expectEqual(@as(usize, 0), g.fetches.items.len);
+}
+
+test "W9d② 적대 리뷰 3 회차 P5: abort 가 CEF 까지 갔든 아니든 다시 받은 같은 주소 요청은 제 본문 — 실패 뒤에 시작해 취소로 끝난 기록은 abort 한 요청의 것" {
+    const u = "https://app.test/api/me";
+    // ① abort 가 CEF 까지 갔다 — 그 기록(711)은 CDP 실패보다 늦게 시작해 취소로 끝난다. 그 끝이 다시 받은 요청의 판정 전에 오든 뒤에 오든.
+    for ([_]bool{ true, false }) |end_first| {
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        try h.sent(5, "a.0", u, 2_000_000, 2_000_100);
+        try h.ev(5, .{ .failed = .{ .rid = "a.0" } }, 2_000_300);
+        try h.sent(5, "a.1", u, 2_000_400, 2_000_500);
+        _ = try h.cand(5, 711, u, 2_000_600, .{}); // abort 한 요청의 기록(렌더러의 abort 가 먼저 보였다)
+        _ = try h.cand(5, 712, u, 2_000_700, .{});
+        if (end_first) h.table.cefEndAs(5, 711, 2_001_000, false);
+        try h.respond(5, "a.1", "application/json", 9, 2_009_000);
+        try h.finish(5, "a.1", 2_010_000);
+        try testing.expectEqual(@as(?u64, 712), fetchedFor(&h, "a.1"));
+        if (!end_first) h.table.cefEndAs(5, 711, 2_011_000, false);
+        try h.table.tick(gpa_t, 2_020_000);
+        try h.drain();
+        errdefer std.debug.print("P5 ① end_first={}\n", .{end_first});
+        try testing.expect(stateIs(&h, 711, .request_failed));
+        try testing.expect(h.ended.get(712) == null); // 받으러 갔다
+    }
+    // ② abort 가 CEF 에 닿지 않았다 — 다시 받은 요청의 기록이 끝나기(성공) 전에는 실패한 요청이 그것을 「그럴 수 있다」 로만 본다: 실패한
+    // 요청은 기다리고, 다시 받은 요청도 기다린다. 끝이 오면 다시 받은 요청이 갖는다 — 실패한 요청은 시한 뒤 짝 없이 놓인다.
+    {
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        try h.sent(5, "b.0", u, 3_000_000, 3_000_100);
+        try h.ev(5, .{ .failed = .{ .rid = "b.0" } }, 3_000_300);
+        try h.sent(5, "b.1", u, 3_000_400, 3_000_500);
+        _ = try h.cand(5, 721, u, 3_000_600, .{});
+        try h.table.tick(gpa_t, 3_001_000);
+        try h.drain();
+        try testing.expect(h.ended.get(721) == null); // 실패한 요청이 「그럴 수 있다」 뿐인 후보로 정하지 않는다
+        try h.respond(5, "b.1", "application/json", 9, 3_009_000);
+        try h.finish(5, "b.1", 3_010_000);
+        try testing.expectEqual(@as(usize, 0), h.fetches.items.len); // 실패한 요청이 그 후보를 가질 수도 있다 — 끝을 기다린다
+        h.table.cefEnd(5, 721, 3_012_000);
+        try h.table.tick(gpa_t, 3_060_000);
+        try h.drain();
+        try testing.expectEqual(@as(?u64, 721), fetchedFor(&h, "b.1"));
+        try h.table.tick(gpa_t, 3_000_300 + cef_grace_us);
+        try h.drain();
+        try testing.expectEqual(@as(usize, 0), h.table.tabOf(5).?.cdp.items.len);
+        try testing.expect(h.ended.get(721) == null);
+    }
+    // ③ 바이트 전에 실패한 요청의 기록(실패 전에 시작했다)은 그대로 request_failed — 서버가 빈 응답으로 닫은 꼴.
+    {
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        try h.sent(5, "f.0", u, 4_000_000, 4_000_100);
+        _ = try h.cand(5, 731, u, 4_000_300, .{});
+        try h.ev(5, .{ .failed = .{ .rid = "f.0" } }, 4_005_000);
+        try testing.expect(stateIs(&h, 731, .request_failed));
+    }
+}
+
+test "W9d② 적대 리뷰 3 회차 S1: 시한 뒤 끝낸 본문 호출의 늦은 답은 버리고, 놓인 자리로 기다리던 본문을 보낸다" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    for (0..3) |i| {
+        var ub: [32]u8 = undefined;
+        const url = try std.fmt.bufPrint(&ub, "https://app.test/{d}.json", .{i});
+        var rb: [8]u8 = undefined;
+        const rid = try std.fmt.bufPrint(&rb, "s.{d}", .{i});
+        // 셋째는 늦게 끝난다 — 시한 때 아직 기다림의 시한(waiting_expiry_us) 안이다.
+        const at: i64 = if (i == 2) 1_010_000 + fetch_timeout_us - 1_000_000 else 1_000_000;
+        try h.sent(5, rid, url, at, at + 100);
+        _ = try h.cand(5, 900 + i, url, at + 300, .{});
+        try h.respond(5, rid, "application/json", 9, at + 9_000);
+        try h.finish(5, rid, at + 10_000);
+    }
+    try testing.expectEqual(@as(usize, 2), h.fetches.items.len); // 탭마다 2 — 셋째는 기다린다
+    const first = h.fetches.items[0].fetch.id;
+    try h.table.tick(gpa_t, 1_010_000 + fetch_timeout_us - 1);
+    try h.drain();
+    try testing.expectEqual(@as(usize, 2), h.fetches.items.len);
+    try h.table.tick(gpa_t, 1_010_000 + fetch_timeout_us);
+    try h.drain();
+    try testing.expect(stateIs(&h, 900, .unavailable) and stateIs(&h, 901, .unavailable));
+    try testing.expectEqual(@as(usize, 3), h.fetches.items.len); // 놓인 자리로 셋째를 보냈다
+    try testing.expect(h.table.takeInflight(first) == null); // 늦은 답은 버린다(끝이 둘이 되지 않는다)
+    try testing.expectEqual(@as(u32, 1), endCount(&h, 900));
+}
+
+test "W9d② 적대 리뷰 3 회차 P1: 물 높이는 닿은 CEF 시작으로도 오른다(상자의 차례) — 응답 뒤에 찍힌 시작이 닿았으면 CDP 끝에서 곧 정한다; 응답 없이 끝난 요청은 끝 뒤에 시작한 기록과 짓지 않는다" {
+    const u = "https://app.test/api/x";
+    {
+        var h: H = .{ .sync = false };
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        try h.sent(5, "r.1", u, 1_000_000, 1_000_100);
+        _ = try h.cand(5, 851, u, 1_000_300, .{});
+        try h.respond(5, "r.1", "application/json", 9, 1_004_000);
+        _ = try h.cand(5, 852, "https://other.test/y", 1_004_500, .{}); // 다른 주소 — 응답 뒤에 찍혀 닿았다: 그 앞은 다 왔다
+        try h.finish(5, "r.1", 1_005_000);
+        try testing.expectEqual(@as(?u64, 851), fetchedFor(&h, "r.1"));
+    }
+    // 응답 사건 없이 끝난 요청(드물다) — 끝 뒤에 시작한 같은 주소의 기록(워커)은 그 짝이 아니다.
+    {
+        var h: H = .{ .sync = false };
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        try h.sent(5, "n.1", u, 2_000_000, 2_000_100);
+        _ = try h.cand(5, 861, u, 2_000_300, .{});
+        try h.ev(5, .{ .data = .{ .rid = "n.1", .bytes = 9 } }, 2_003_000);
+        try h.finish(5, "n.1", 2_004_000);
+        _ = try h.cand(5, 862, u, 2_006_000, .{});
+        try h.table.tick(gpa_t, 2_010_000);
+        try h.drain();
+        try testing.expect(h.ended.get(861) != null or fetchedFor(&h, "n.1") == @as(?u64, 861));
+        try testing.expect(!stateIs(&h, 861, .ambiguous));
+        try testing.expect(h.ended.get(862) == null);
     }
 }

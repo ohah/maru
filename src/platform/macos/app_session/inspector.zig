@@ -19,6 +19,8 @@ pub const State = struct {
     picker_hover: ?maru.chrome.ui.inspection.Key = null,
     picker_selected: ?maru.chrome.ui.inspection.Key = null,
     picker_capture: bool = false,
+    collapsed: [512]maru.chrome.ui.inspection.Key = undefined,
+    collapsed_len: usize = 0,
     window_id: ?u64 = null,
     rich_text: ?root.MeasuredTextCache = null,
     presentation: layout.State = .{},
@@ -404,7 +406,7 @@ pub fn click(self: *AppSession, x: f64, y: f64) void {
     const p = propsFor(self);
     var arena = std.heap.ArenaAllocator.init(self.allocator);
     defer arena.deinit();
-    const filter = panel.caretRect(p, renderScale(self), arena.allocator());
+    const filter = panel.caretRectForTab(p, renderScale(self), arena.allocator(), self.inspector.tab);
     if (filter) |r| if (x >= @as(f64, @floatFromInt(r.x)) and y >= @as(f64, @floatFromInt(r.y)) and x < @as(f64, @floatFromInt(r.x)) + @as(f64, @floatFromInt(r.w)) and y < @as(f64, @floatFromInt(r.y)) + @as(f64, @floatFromInt(r.h))) {
         if (!self.tryCommitComposition()) return;
         self.inspector.input_focused = true;
@@ -413,6 +415,10 @@ pub fn click(self: *AppSession, x: f64, y: f64) void {
     };
     const hit = panel.hit(p, renderScale(self), arena.allocator(), x, y) orelse {
         if (panel.fieldAt(self.inspector.tab, self.inspector.query[0..self.inspector.query_len], self.inspector.offset, self.inspector.json orelse "{}", p, renderScale(self), arena.allocator(), x, y)) |field| {
+            if (field.element) |element| {
+                picker.select(self, element, field.disclosure);
+                return;
+            }
             self.inspector.selected_field_len = @min(field.key.len, self.inspector.selected_field.len);
             @memcpy(self.inspector.selected_field[0..self.inspector.selected_field_len], field.key[0..self.inspector.selected_field_len]);
             self.metal_dirty = true;
@@ -501,7 +507,7 @@ pub fn commitPreedit(self: *AppSession) void {
 pub fn caretRect(self: *AppSession) ?maru.chrome.draw.Rect {
     var arena = std.heap.ArenaAllocator.init(self.allocator);
     defer arena.deinit();
-    return panel.caretRect(propsFor(self), renderScale(self), arena.allocator());
+    return panel.caretRectForTab(propsFor(self), renderScale(self), arena.allocator(), self.inspector.tab);
 }
 
 // Leaving the viewport must clear the painted state as well as the native cursor.
@@ -524,7 +530,8 @@ pub fn hover(self: *AppSession, x: f64, y: f64) root.CursorKind {
         self.inspector.hovered = id;
         self.metal_dirty = true;
     }
-    return switch (panel.cursor(propsFor(self), renderScale(self), arena.allocator(), x, y)) {
+    if (picked) |field| if (field.element != null) return .link;
+    return switch (panel.cursorForTab(propsFor(self), renderScale(self), arena.allocator(), x, y, self.inspector.tab)) {
         .arrow => .default,
         .text => .text,
         .hand => .link,

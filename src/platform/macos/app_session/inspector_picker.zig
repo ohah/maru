@@ -41,13 +41,84 @@ pub fn nodes(self: *AppSession, a: std.mem.Allocator) ![]const inspect.Node {
 }
 pub fn snapshot(self: *AppSession, a: std.mem.Allocator, window: ?u64) error{OutOfMemory}!std.json.Value {
     const all = try nodes(self, a);
-    const dto = .{ .window = window, .coordinate_space = "owner_window_backing_pixels", .node_limit = 512, .limit_reached = all.len == 512, .picking = self.inspector.picking, .hovered = inspect.resolve(all, self.inspector.picker_hover), .selected = inspect.resolve(all, self.inspector.picker_selected), .coverage = "published status bar, sidebar scroll, pane dividers and visible file/SCM/session dock trees; unpublished chrome, terminal cells and web DOM unsupported", .nodes = all };
+    const branches = try inspect.hierarchy(a, all, self.inspector.collapsed[0..self.inspector.collapsed_len], self.inspector.query[0..self.inspector.query_len]);
+    const dto = .{ .tree = branches, .collapsed = self.inspector.collapsed[0..self.inspector.collapsed_len], .query = self.inspector.query[0..self.inspector.query_len], .window = window, .coordinate_space = "owner_window_backing_pixels", .node_limit = 512, .limit_reached = all.len == 512, .picking = self.inspector.picking, .hovered = inspect.resolve(all, self.inspector.picker_hover), .selected = inspect.resolve(all, self.inspector.picker_selected), .coverage = "published status bar, sidebar scroll, pane dividers and visible file/SCM/session dock trees; unpublished chrome, terminal cells and web DOM unsupported", .nodes = all };
     const bytes = try std.json.Stringify.valueAlloc(a, dto, .{});
     const parsed = std.json.parseFromSlice(std.json.Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable, // Stringify generated this DTO in this call.
     };
     return parsed.value;
+}
+/// Tree interaction is read-only and validates the rendered identity against the
+/// current publication before changing selection or expansion.
+pub fn select(self: *AppSession, key: inspect.Key, disclosure: bool) void {
+    var arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena.deinit();
+    const all = nodes(self, arena.allocator()) catch return;
+    const node = inspect.resolve(all, key) orelse return;
+    const s = &self.inspector;
+    // Drop vanished publications before storing another key. Otherwise repeated
+    // refresh/collapse cycles could fill the bounded state with dead identities.
+    var retained: usize = 0;
+    for (s.collapsed[0..s.collapsed_len]) |k| {
+        if (inspect.resolve(all, k) != null) {
+            s.collapsed[retained] = k;
+            retained += 1;
+        }
+    }
+    s.collapsed_len = retained;
+    if (disclosure) {
+        var found: ?usize = null;
+        for (s.collapsed[0..s.collapsed_len], 0..) |k, i| if (inspect.same(k, key)) {
+            found = i;
+            break;
+        };
+        if (found) |i| {
+            s.collapsed_len -= 1;
+            s.collapsed[i] = s.collapsed[s.collapsed_len];
+        } else if (s.collapsed_len < s.collapsed.len) {
+            s.collapsed[s.collapsed_len] = inspect.identity(node);
+            s.collapsed_len += 1;
+        }
+    } else {
+        s.picker_selected = inspect.identity(node);
+        s.selected_field_len = 0;
+    }
+    // An explicit tree interaction requests a fresh sample even while Paused,
+    // just like Refresh. Background polling remains paused afterwards.
+    s.refresh = true;
+    ops.poll(self);
+    self.metal_dirty = true;
+}
+fn reveal(self: *AppSession) void {
+    const s = &self.inspector;
+    const selected = s.picker_selected orelse return;
+    var arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const all = nodes(self, a) catch return;
+    const expanded = inspect.hierarchy(a, all, &.{}, "") catch return;
+    var ancestor: ?inspect.Key = selected;
+    while (ancestor) |key| {
+        var i: usize = 0;
+        while (i < s.collapsed_len) {
+            if (inspect.same(s.collapsed[i], key)) {
+                s.collapsed_len -= 1;
+                s.collapsed[i] = s.collapsed[s.collapsed_len];
+            } else i += 1;
+        }
+        ancestor = null;
+        for (expanded) |branch| if (inspect.same(branch.key, key)) {
+            ancestor = branch.parent;
+            break;
+        };
+    }
+    const visible = inspect.hierarchy(a, all, s.collapsed[0..s.collapsed_len], "") catch return;
+    for (visible, 0..) |branch, i| if (inspect.same(branch.key, selected)) {
+        s.offset = i;
+        break;
+    };
 }
 pub fn toggle(self: *AppSession) void {
     self.inspector.picking = !self.inspector.picking;
@@ -115,6 +186,8 @@ pub fn pointer(self: *AppSession, kind: i32, button: i32, x: f64, y: f64) bool {
     _ = hover(self, x, y);
     if (kind == 1 and button == 0) {
         self.inspector.picker_selected = self.inspector.picker_hover;
+        self.inspector.query_len = 0;
+        reveal(self);
         cancel(self);
         self.inspector.picker_capture = true;
         self.swallow_multi_click = true;

@@ -10,6 +10,7 @@ const spacing = @import("../../ui/spacing.zig");
 const typography = @import("../../ui/typography.zig");
 const i18n = @import("../../../i18n.zig");
 const fields = @import("fields.zig");
+const inspection = @import("../../ui/inspection.zig");
 pub const Tab = enum { overview, path, terminal, events, elements };
 pub const Hit = union(enum) {
     tab: Tab,
@@ -74,9 +75,10 @@ fn build(a: std.mem.Allocator, p: props.ChromeProps, scale: u32, labels: []const
     main[0] = tree.container(.{ .id = 45, .direction = .column, .style = .{ .height = .{ .px = @floatFromInt(spacing.pointsPx(if (compact) 60 else 92, scale)) }, .flex = .{ .shrink = 0 } } }, header_bands);
     for (tabs, 0..) |*node, i| node.* = tree.button(.{ .id = 20 + i, .action = .{ .id = if (i == 4) 20 else 9 + i }, .variant = .ghost, .paint = .{ .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 0, 0 } }, .style = .{ .width = .{ .percent = 0.2 }, .height = .{ .percent = 1 } }, .semantics = .{ .role = .tab, .label = labels[if (i == 4) 28 else 9 + i].text, .selected = labels[if (i == 4) 28 else 9 + i].accent } });
     main[1] = tree.container(.{ .id = 5, .direction = .row, .style = .{ .height = .{ .px = @floatFromInt(spacing.pointsPx(if (compact) 28 else 32, scale)) }, .padding = .{ .left = @floatFromInt(gap), .right = @floatFromInt(gap) }, .flex = .{ .shrink = 0 } } }, tabs);
-    const context = try a.alloc(tree.UiNode, if (contextPoints(p, scale) == 40) 2 else 1);
+    const context_height: u16 = if (labels[28].accent) 0 else contextPoints(p, scale);
+    const context = try a.alloc(tree.UiNode, if (context_height == 40) 2 else 1);
     for (context, 0..) |*node, i| node.* = tree.container(.{ .id = if (context.len == 1) 32 else 31 + i, .style = .{ .height = .{ .percent = 1.0 / @as(f32, @floatFromInt(context.len)) } } }, &.{});
-    main[2] = tree.container(.{ .id = 30, .style = .{ .height = .{ .px = @floatFromInt(spacing.pointsPx(contextPoints(p, scale), scale)) }, .flex = .{ .shrink = 0 } } }, context);
+    main[2] = tree.container(.{ .id = 30, .style = .{ .height = .{ .px = @floatFromInt(spacing.pointsPx(context_height, scale)) }, .flex = .{ .shrink = 0 } } }, context);
     main[3] = tree.card(.{ .id = 6, .style = .{ .height = .{ .px = @floatFromInt(spacing.pointsPx(if (compact) 28 else 32, scale)) }, .margin = .{ .left = @floatFromInt(inset), .right = @floatFromInt(inset), .top = @floatFromInt(gap), .bottom = @floatFromInt(gap) }, .flex = .{ .shrink = 0 } }, .paint = .{ .background = .inset_bg, .corner_radii_px = .{ 4, 4, 4, 4 }, .shadow = .none, .border_widths_px = .{ 1, 1, 1, 1 }, .border = .divider } }, &.{});
     for (columns, 0..) |*node, i| node.* = tree.container(.{ .id = 26 + i, .style = .{ .width = .{ .percent = if (i == 0) 0.36 else 0.64 }, .height = .{ .percent = 1 } } }, &.{});
     main[4] = tree.card(.{ .id = 8, .direction = .row, .style = .{ .height = .{ .px = @floatFromInt(row) }, .flex = .{ .shrink = 0 } }, .paint = .{ .background = .inset_bg, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 0, 0, 0, 0 }, .shadow = .none } }, columns);
@@ -137,7 +139,10 @@ fn placementLabel(index: usize) []const u8 {
 pub const Cursor = enum { arrow, text, hand };
 // Share the filter's exact paint geometry with attached and detached hover handling.
 pub fn cursor(p: props.ChromeProps, scale: u32, a: std.mem.Allocator, x: f64, y: f64) Cursor {
-    if (caretRect(p, scale, a)) |r| {
+    return cursorForTab(p, scale, a, x, y, .overview);
+}
+pub fn cursorForTab(p: props.ChromeProps, scale: u32, a: std.mem.Allocator, x: f64, y: f64, tab: Tab) Cursor {
+    if (caretRectForTab(p, scale, a, tab)) |r| {
         if (x >= @as(f64, @floatFromInt(r.x)) and y >= @as(f64, @floatFromInt(r.y)) and x < @as(f64, @floatFromInt(r.x)) + @as(f64, @floatFromInt(r.w)) and y < @as(f64, @floatFromInt(r.y)) + @as(f64, @floatFromInt(r.h))) return .text;
     }
     return if (hit(p, scale, a, x, y) != null) .hand else .arrow;
@@ -159,7 +164,10 @@ pub fn controlRect(p: props.ChromeProps, scale: u32, a: std.mem.Allocator, id: u
     return rectOf(f.rects.entries[f.rects.find(id) orelse return null].rect);
 }
 pub fn caretRect(p: props.ChromeProps, scale: u32, a: std.mem.Allocator) ?draw.Rect {
-    const labels = labelsFor(a, .overview, false, false, true, "", "") catch return null;
+    return caretRectForTab(p, scale, a, .overview);
+}
+pub fn caretRectForTab(p: props.ChromeProps, scale: u32, a: std.mem.Allocator, tab: Tab) ?draw.Rect {
+    const labels = labelsFor(a, tab, false, false, true, "", "") catch return null;
     const f = build(a, p, scale, labels, 0) catch return null;
     const entry = f.rects.entries[f.rects.find(6) orelse return null];
     return rectOf(entry.rect);
@@ -181,38 +189,59 @@ fn prepare(a: std.mem.Allocator, tab: Tab, query: []const u8, json: []const u8, 
     var all: std.ArrayList(fields.Row) = .empty;
     if (parsed.value == .object) if (parsed.value.object.get(@tagName(tab))) |section| {
         if (tab == .elements and section == .object) {
-            // Put the inspected node first, even in a shallow top/bottom dock.
-            const hovered_node = section.object.get("hovered") orelse .null;
-            const selected_node = section.object.get("selected") orelse .null;
-            const prefix: []const u8 = if (hovered_node == .object) "hovered" else "selected";
-            const node = if (hovered_node == .object) hovered_node else selected_node;
-            if (node == .object) {
-                var it = node.object.iterator();
-                while (it.next()) |field| {
-                    const path = try std.fmt.allocPrint(a, "{s}.{s}", .{ prefix, field.key_ptr.* });
-                    if ((std.mem.eql(u8, field.key_ptr.*, "rect") or std.mem.eql(u8, field.key_ptr.*, "visible_rect")) and field.value_ptr.* == .object) {
-                        const r = field.value_ptr.object;
-                        const rendered = try std.fmt.allocPrint(a, "{s} × {s} px · {s}, {s}", .{ try std.json.Stringify.valueAlloc(a, r.get("width") orelse .null, .{}), try std.json.Stringify.valueAlloc(a, r.get("height") orelse .null, .{}), try std.json.Stringify.valueAlloc(a, r.get("x") orelse .null, .{}), try std.json.Stringify.valueAlloc(a, r.get("y") orelse .null, .{}) });
-                        try all.append(a, .{ .key = path, .label = path, .value = rendered });
-                    } else try fields.flatten(a, field.value_ptr.*, path, &all);
+            const raw = section.object.get("nodes") orelse .null;
+            if (raw == .array) {
+                const decoded = try std.json.parseFromValue([]inspection.Node, a, raw, .{ .ignore_unknown_fields = true });
+                const collapse_value = section.object.get("collapsed") orelse .null;
+                const collapsed = if (collapse_value == .array) (try std.json.parseFromValue([]inspection.Key, a, collapse_value, .{})).value else &.{};
+                const branches = try inspection.hierarchy(a, decoded.value, collapsed, query);
+                for (branches) |branch| {
+                    const node = branch.node;
+                    const path = try std.fmt.allocPrint(a, "elements.tree.{s}.{d}.{d}", .{ @tagName(node.source), node.generation, node.id });
+                    try all.append(a, .{
+                        .key = path,
+                        .field_path = path,
+                        .element = branch.key,
+                        .branch = branch.children,
+                        .expanded = branch.expanded,
+                        .label = try std.fmt.allocPrint(a, "{s} {s} #{d}", .{ if (!branch.children) "·" else if (branch.expanded) "▾" else "▸", node.kind, node.id }),
+                        .value = try std.fmt.allocPrint(a, "{s} · {s} · {d:.0} × {d:.0}", .{ @tagName(node.source), node.role orelse "—", node.visible_rect.width, node.visible_rect.height }),
+                        .meaning = i18n.t(.inspector_ui_detail),
+                        .info = .{ .source = .published_ui_tree },
+                    });
                 }
             }
-            if (section.object.get("coverage")) |coverage| try fields.flatten(a, coverage, "coverage", &all);
-            if (section.object.get("nodes")) |nodes| try fields.flatten(a, nodes, "nodes", &all);
         } else try fields.flatten(a, section, "", &all);
     };
     try fields.decorate(a, parsed.value, @tagName(tab), all.items);
     const compact = props.workspaceRect(p.metrics).w >= spacing.pointsPx(640, scale);
-    const reserve = (if (compact) @as(u16, 180) else @as(u16, 244)) + contextPoints(p, scale) + 60;
+    const reserve = (if (compact) @as(u16, 180) else @as(u16, 244)) + (if (tab == .elements) @as(u16, 0) else contextPoints(p, scale)) + 60;
     const budget = (props.workspaceRect(p.metrics).h -| spacing.pointsPx(reserve, scale)) / @max(spacing.pointsPx(if (compact) 24 else 32, scale), 1);
     var filtered: std.ArrayList(fields.Row) = .empty;
     for (all.items) |row| {
         if (row.heading and budget < 3) continue;
-        if (query.len == 0 or (!row.heading and (contains(row.key, query) or contains(row.label, query) or contains(row.value, query) or contains(row.raw_value, query) or contains(row.meaning, query) or contains(fields.sourceLabel(row.info.source), query)))) try filtered.append(a, row);
+        if (tab == .elements or query.len == 0 or (!row.heading and (contains(row.key, query) or contains(row.label, query) or contains(row.value, query) or contains(row.raw_value, query) or contains(row.meaning, query) or contains(fields.sourceLabel(row.info.source), query)))) try filtered.append(a, row);
     }
     if (filtered.items.len == 0) try filtered.append(a, .{ .key = "", .label = i18n.t(.inspector_empty) });
     const start = @min(offset, filtered.items.len -| budget);
     return .{ .root = parsed.value, .rows = filtered.items, .count = @min(budget, filtered.items.len - start), .offset = start };
+}
+fn jsonField(a: std.mem.Allocator, node: std.json.Value, key: []const u8) ![]const u8 {
+    const value = node.object.get(key) orelse .null;
+    if (value == .object and (std.mem.eql(u8, key, "rect") or std.mem.eql(u8, key, "visible_rect"))) {
+        return std.fmt.allocPrint(a, "{s} × {s} px · {s}, {s}", .{ try jsonField(a, value, "width"), try jsonField(a, value, "height"), try jsonField(a, value, "x"), try jsonField(a, value, "y") });
+    }
+    return if (value == .string) value.string else std.json.Stringify.valueAlloc(a, value, .{});
+}
+fn selectedElement(a: std.mem.Allocator, root: std.json.Value) ?inspection.Key {
+    if (root != .object) return null;
+    const elements = root.object.get("elements") orelse return null;
+    if (elements != .object) return null;
+    const selected = elements.object.get("selected") orelse return null;
+    if (selected != .object) return null;
+    // Compare the full identity, including unsigned IDs, without narrowing JSON numbers.
+    const decoded = std.json.parseFromValue(inspection.Node, a, selected, .{ .ignore_unknown_fields = true }) catch return null;
+    return inspection.identity(decoded.value);
 }
 fn formatted(a: std.mem.Allocator, key: i18n.Key, args: []const i18n.Arg) ![]const u8 {
     return i18n.format(try a.alloc(u8, 1024), i18n.t(key), args);
@@ -228,7 +257,7 @@ fn selectedRow(prepared: Prepared, key: []const u8) ?fields.Row {
     for (prepared.rows[prepared.offset .. prepared.offset + prepared.count]) |row| if (!row.heading and row.field_path.len != 0) return row;
     return null;
 }
-pub const FieldPick = struct { key: []const u8, id: u64 };
+pub const FieldPick = struct { key: []const u8, id: u64, element: ?inspection.Key = null, disclosure: bool = false };
 pub fn fieldAt(tab: Tab, query: []const u8, offset: usize, json: []const u8, p: props.ChromeProps, scale: u32, a: std.mem.Allocator, x: f64, y: f64) ?FieldPick {
     const prepared = prepare(a, tab, query, json, p, scale, offset) catch return null;
     const f = build(a, p, scale, labelsFor(a, tab, false, false, true, query, "") catch return null, prepared.count) catch return null;
@@ -237,19 +266,33 @@ pub fn fieldAt(tab: Tab, query: []const u8, offset: usize, json: []const u8, p: 
         const id = 100 + i * 3;
         const e = f.rects.entries[f.rects.find(id) orelse continue];
         const r = if (e.effective_clip) |clip| layout.intersectRect(e.rect, clip) else e.rect;
-        if (x >= r.x and x < r.x + r.width and y >= r.y and y < r.y + r.height) return .{ .key = row.field_path, .id = id };
+        if (x >= r.x and x < r.x + r.width and y >= r.y and y < r.y + r.height) return .{ .key = row.field_path, .id = id, .element = row.element, .disclosure = row.branch and inspection.contains(disclosureRect(f.rects.entries[f.rects.find(id + 1).?].rect, scale, row.depth), x, y) };
     }
     return null;
+}
+fn disclosureRect(row: layout.UiRect, scale: u32, depth: usize) layout.UiRect {
+    var r = row;
+    const indent: f32 = @floatFromInt(@min(depth, 16) * spacing.pointsPx(12, scale));
+    r.x += indent;
+    r.width = @min(@max(0, row.width - indent), @as(f32, @floatFromInt(spacing.pointsPx(28, scale))));
+    return r;
 }
 pub fn dataControlRect(tab: Tab, query: []const u8, offset: usize, json: []const u8, p: props.ChromeProps, scale: u32, a: std.mem.Allocator, id: u64) ?draw.Rect {
     const prepared = prepare(a, tab, query, json, p, scale, offset) catch return null;
     const f = build(a, p, scale, labelsFor(a, tab, false, false, true, query, "") catch return null, prepared.count) catch return null;
-    const e = f.rects.entries[f.rects.find(id) orelse return null];
-    return rectOf(if (e.effective_clip) |clip| layout.intersectRect(e.rect, clip) else e.rect);
+    if (id >= 20000 and id - 20000 >= prepared.count) return null;
+    const row_id = if (id >= 20000) 101 + (id - 20000) * 3 else id;
+    const e = f.rects.entries[f.rects.find(row_id) orelse return null];
+    const clipped = if (e.effective_clip) |clip| layout.intersectRect(e.rect, clip) else e.rect;
+    return rectOf(if (id >= 20000) disclosureRect(clipped, scale, prepared.rows[prepared.offset + @as(usize, @intCast(id - 20000))].depth) else clipped);
 }
 pub fn collect(tab: Tab, placement: usize, paused: bool, picking: bool, pinned: bool, anonymize: bool, query: []const u8, offset: *usize, status: []const u8, json: []const u8, p: props.ChromeProps, scale: u32, tk: *const tokens.Tokens, a: std.mem.Allocator, hovered: ?u64, selected_key: []const u8, out: *std.ArrayList(draw.ChromeDraw)) !void {
     const base = try labelsFor(a, tab, paused, pinned, anonymize, query, status);
     if (placement < 5) base[18 + placement].accent = true;
+    if (tab == .elements) {
+        base[16].text = i18n.t(.inspector_elements);
+        base[17].text = i18n.t(.inspector_ui_source);
+    }
     const prepared = try prepare(a, tab, query, json, p, scale, offset.*);
     base[29].accent = picking;
     offset.* = prepared.offset;
@@ -282,6 +325,15 @@ pub fn collect(tab: Tab, placement: usize, paused: bool, picking: bool, pinned: 
         base[26].text = try formatted(a, .inspector_source_line, &.{ .{ .s = fields.sourceLabel(row.info.source) }, .{ .s = fields.availabilityLabel(row.info.availability) } });
         base[27].text = if (row.info.reason == .none) row.field_path else try formatted(a, .inspector_reason_raw, &.{ .{ .s = fields.reasonLabel(row.info.reason) }, .{ .s = row.raw_value } });
     } else base[25].text = i18n.t(.inspector_field_hint);
+    if (tab == .elements and prepared.root == .object) if (prepared.root.object.get("elements")) |elements| if (elements == .object) {
+        const hovered_node = elements.object.get("hovered") orelse .null;
+        const node = if (hovered_node == .object) hovered_node else elements.object.get("selected") orelse .null;
+        if (node == .object) {
+            base[25].text = try std.fmt.allocPrint(a, "{s}: {s} · {s}: {s} · {s}: {s}", .{ i18n.t(.inspector_ui_kind), try jsonField(a, node, "kind"), i18n.t(.inspector_ui_role), try jsonField(a, node, "role"), i18n.t(.inspector_ui_generation), try jsonField(a, node, "generation") });
+            base[26].text = try std.fmt.allocPrint(a, "{s}: {s} · {s}: {s} · {s}: {s}", .{ i18n.t(.inspector_ui_action_id), try jsonField(a, node, "action_id"), i18n.t(.inspector_ui_enabled), try jsonField(a, node, "enabled"), i18n.t(.inspector_ui_cursor), try jsonField(a, node, "cursor") });
+            base[27].text = try std.fmt.allocPrint(a, "{s}: {s}", .{ i18n.t(.inspector_ui_rect), try jsonField(a, node, "rect") });
+        }
+    };
     const labels = try a.alloc(Label, base.len + count * 2);
     @memcpy(labels[0..base.len], base);
     for (0..count) |i| {
@@ -302,10 +354,11 @@ pub fn collect(tab: Tab, placement: usize, paused: bool, picking: bool, pinned: 
     const active = rectOf(frame.rects.entries[frame.rects.find(20 + @as(u64, @intCast(@backingInt(tab)))).?].rect);
     ops[n] = .{ .quad = .{ .rect = .{ .x = active.x, .y = active.y + @as(i32, @intCast(active.h)) - 2, .w = active.w, .h = 2 }, .fill_role = .surface_fg } };
     n += 1;
+    const element_key = selectedElement(a, prepared.root);
     for (0..count) |i| {
         const r = rectOf(frame.rects.entries[frame.rects.find(100 + i * 3).?].rect);
         const row = filtered[offset.* + i];
-        if (row.heading or hovered == 100 + i * 3 or (selected_key.len != 0 and std.mem.eql(u8, row.field_path, selected_key))) {
+        if (row.heading or hovered == 100 + i * 3 or (if (row.element) |k| if (element_key) |selected_k| inspection.same(k, selected_k) else false else false) or (selected_key.len != 0 and std.mem.eql(u8, row.field_path, selected_key))) {
             ops[n] = .{ .quad = .{ .rect = r, .fill_role = if (row.heading) .inset_bg else .tab_hover_bg } };
             n += 1;
         }
@@ -315,6 +368,7 @@ pub fn collect(tab: Tab, placement: usize, paused: bool, picking: bool, pinned: 
     for (labels) |label| {
         const entry = frame.rects.entries[frame.rects.find(label.id) orelse continue];
         const r = rectOf(entry.rect);
+        if (r.h == 0 or r.w == 0) continue;
         const clip = rectOf(if (entry.effective_clip) |c| layout.intersectRect(c, entry.rect) else entry.rect);
         const run = try a.alloc(draw.Run, 1);
         const text = if (label.id == 21 and r.w < spacing.pointsPx(100, scale)) label.text[0 .. std.mem.indexOf(u8, label.text, " / ") orelse label.text.len] else label.text;
@@ -323,7 +377,11 @@ pub fn collect(tab: Tab, placement: usize, paused: bool, picking: bool, pinned: 
         const centered = (label.id >= 10 and label.id <= 23) or label.id == 7 or (label.id >= 40 and label.id <= 44);
         const text_role: typography.ChromeTextRole = if (label.id == 3) .group_heading else if (label.id == 31 or label.id == 32 or (label.id >= 61 and label.id <= 63)) .supporting else .control;
         const text_y = r.y + @as(i32, @intCast((r.h -| typography.lineHeightPx(text_role, scale)) / 2));
-        ops[n] = .{ .text = .{ .origin = .{ .x = r.x + pad, .y = text_y }, .runs = run, .role = if (label.muted) .list_secondary_fg else .surface_fg, .text_role = text_role, .max_width_px = r.w -| @as(u32, @intCast(pad * 2)), .placement = if (centered) .{ .center_in_rect = r } else .origin, .clip = clip, .scroll_clipped = true, .above_scroll = true } };
+        const tree_label = tab == .elements and label.id >= 101 and label.id < 101 + count * 3 and (label.id - 101) % 3 == 0;
+        // Text and disclosure hit testing share this origin from the published
+        // cell rectangle. Clipped indentation never creates an invisible target.
+        const origin_x = if (tree_label) rectOf(disclosureRect(entry.rect, scale, filtered[offset.* + @as(usize, @intCast((label.id - 101) / 3))].depth)).x else r.x;
+        ops[n] = .{ .text = .{ .origin = .{ .x = origin_x + pad, .y = text_y }, .runs = run, .role = if (label.muted) .list_secondary_fg else .surface_fg, .text_role = text_role, .max_width_px = r.w -| @as(u32, @intCast(pad * 2)), .placement = if (centered) .{ .center_in_rect = r } else .origin, .clip = clip, .scroll_clipped = true, .above_scroll = true } };
         n += 1;
     }
 
@@ -400,4 +458,34 @@ test "inspector Elements and Pick controls share hit and paint in all scales" {
         try std.testing.expect(hit(p, scale, arena.allocator(), @as(f64, @floatFromInt(pick.x)) + 1, @as(f64, @floatFromInt(pick.y)) + 1).? == .picker);
         try std.testing.expectEqual(Tab.elements, hit(p, scale, arena.allocator(), @as(f64, @floatFromInt(tab.x)) + 1, @as(f64, @floatFromInt(tab.y)) + 1).?.tab);
     }
+}
+
+test "inspector Elements hierarchy shares disclosure selection and unsigned identities across scales" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rect: layout.UiRect = .{ .x = 10, .y = 20, .width = 100, .height = 30 };
+    const nodes = [_]inspection.Node{
+        .{ .source = .scm, .id = 1, .parent_id = null, .generation = 3, .kind = "container", .role = null, .rect = rect, .visible_rect = rect, .action_id = null, .enabled = null, .cursor = "arrow" },
+        .{ .source = .scm, .id = std.math.maxInt(u64), .parent_id = 1, .generation = 3, .kind = "button", .role = null, .rect = rect, .visible_rect = rect, .action_id = 0, .enabled = false, .cursor = "hand" },
+    };
+    const json = try std.json.Stringify.valueAlloc(a, .{ .elements = .{ .nodes = nodes, .collapsed = [_]inspection.Key{inspection.identity(nodes[0])}, .selected = nodes[1] } }, .{});
+    for ([_]u32{ 360, 720 }) |width| for ([_]u32{ 1000, 2000 }) |scale| {
+        const p: props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = width * scale / 1000, .backing_height_px = 650 * scale / 1000 } };
+        const collapsed = try prepare(a, .elements, "", json, p, scale, 0);
+        try std.testing.expectEqual(@as(usize, 1), collapsed.rows.len);
+        const searched = try prepare(a, .elements, "BUTTON", json, p, scale, 0);
+        try std.testing.expectEqual(@as(usize, 2), searched.rows.len);
+        try std.testing.expect(std.mem.indexOf(u8, searched.rows[1].label, "18446744073709551615") != null);
+        try std.testing.expect(inspection.same(selectedElement(a, searched.root).?, searched.rows[1].element.?));
+        const toggle = dataControlRect(.elements, "", 0, json, p, scale, a, 20000).?;
+        const picked = fieldAt(.elements, "", 0, json, p, scale, a, @as(f64, @floatFromInt(toggle.x)) + @as(f64, @floatFromInt(toggle.w)) / 2, @as(f64, @floatFromInt(toggle.y)) + 1).?;
+        try std.testing.expect(picked.disclosure);
+        try std.testing.expect(dataControlRect(.elements, "", 0, json, p, scale, a, 23299) == null);
+        const row = dataControlRect(.elements, "", 0, json, p, scale, a, 100).?;
+        const selected = fieldAt(.elements, "", 0, json, p, scale, a, @as(f64, @floatFromInt(row.x)) + @as(f64, @floatFromInt(row.w)) / 2, @as(f64, @floatFromInt(row.y)) + 1).?;
+        try std.testing.expect(!selected.disclosure);
+        try std.testing.expect(inspection.same(picked.element.?, selected.element.?));
+        try std.testing.expect(fieldAt(.elements, "absent", 0, json, p, scale, a, @as(f64, @floatFromInt(row.x)) + 1, @as(f64, @floatFromInt(row.y)) + 1) == null);
+    };
 }

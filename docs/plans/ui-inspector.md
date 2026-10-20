@@ -34,3 +34,32 @@
 적대적 E2E 20/20과 제품 PNG 64장은 [검증 매트릭스](../verification-matrix.md)의 UI 요소 절을 따른다.
 원격 CI와 머지는 PR checks에서 별도로 추적한다.
 물리 HID·OS IME·다중 모니터 증거와 callback/Metal 검증을 구분한다.
+
+## Elements 계층 탐색 (2026-10-21 승인)
+
+- Chrome [DOM tree 탐색](https://developer.chrome.com/docs/devtools/dom)의 계층 선택·검색 UX를 참고한다.
+  Maru는 발행 UI 트리의 읽기 전용 검사로 범위를 한정하며 reference 코드를 복사하지 않는다.
+- `chrome.ui.inspection.hierarchy`가 발행 순서·source·generation을 기준으로
+  부모/자식, 깊이, 자식 유무, 펼침 상태와 검색 일치를 계산한다. GUI와 CLI가 같은 함수를 쓴다.
+  앞서 발행된 유일한 부모만 인정하므로 잘린 부모·모호한 ID·역방향 참조는 루트로 표시한다.
+  source나 publication을 넘어 부모를 연결하지 않으며 재귀 없이 최대 512개를 처리한다.
+  내보내는 depth는 실제 깊이이고 화면의 들여쓰기만 최대 16단계로 제한한다.
+- Elements는 들여쓴 노드 행, 왼쪽 펼침 표시와 선택 상세를 제공한다. 펼침 표시의
+  28pt 영역은 가지를 접고 펼친다. 나머지 행 클릭은 선택만 바꾸며 제품 action을 실행하지 않는다.
+  선택 행의 source·kind/role·geometry와 하단 kind/role/publication·action/enabled/cursor·bounds를 표시한다.
+  낮은 도크에서는 중복 요약 밴드를 생략해 트리 행 공간을 확보한다.
+- 필터는 source, kind, role, 십진수 ID를 대소문자 구분 없이 찾는다. 일치 노드와 부모 경로를
+  함께 표시하고 검색 중 접힘을 무시한다. 검색을 지우면 기존 접힘이 복원된다.
+- 화면 Pick은 선택 경로의 부모만 펼치고 필터를 지우며 선택 노드까지 스크롤한다.
+  트리 선택도 현재 발행 identity로 재검증하고 소유 창의 경계 강조와 상세에 연결한다.
+  사라진 요소와 다른 publication으로 바뀐 목록 행은 재선택하지 않는다.
+- `session inspect --json`의 `elements.tree`는 현재 검색/접힘을 반영한 preorder 행이다.
+  각 행은 `key`, `parent`, `depth`, `children`, `expanded`, `matched`, `node`를 제공한다.
+  `elements.collapsed`와 `elements.query`, 기존 `nodes`·`selected`·`hovered`도 함께 노출한다.
+  조회 CLI는 읽기 전용이며 GUI가 Paused여도 새 표본을 수집한다.
+- Paused 상태의 명시적 트리 선택/펼침은 Refresh처럼 표본을 한 번 갱신한다.
+  Paused 상태 자체는 유지한다. Pick은 기존 계약대로 Live로 전환한다.
+- 실제 앱 검증: `tools/inspector-tree-app/run.py`는 격리 HOME의 실제 git 작업 디렉터리와
+  Codex archive를 만들고 제품 파일·SCM·세션 도크를 연다. 실제 NSEvent 클릭, native cursor,
+  Metal readback과 CLI 왕복으로 선택·접기·검색·복원·Pick을 검사한다.
+  테스트 fixture의 `MARU_INSPECTOR_WITH_DOCK=scm/sessions`는 해당 제품 도크를 연다.

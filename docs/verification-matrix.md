@@ -12,6 +12,30 @@
 
 ## Live Terminal Inspector
 
+### Elements 계층 탐색 (2026-10-21)
+
+- `feat/inspector-element-tree`, base `f00891e8c`: 부모/자식·접기/펼치기·검색·선택 경계와
+  CLI `elements.tree/collapsed/query`를 연결했다. [계약과 한계](plans/ui-inspector.md)를 따른다.
+- 최종 실제 앱 **20/20**, live CLI **996건**, Metal PNG **104장**,
+  트리 선택 후 소유 창 경계 변경 **53158 pixels**.
+  `/tmp/maru-tree-frozen-e2e20/manifest.json`·`verified.json`·회차별 `pixels.json`.
+  앱 SHA256 `81ec1161d45a2a1a913d070be60613393f5887633177ac2966902d583b41278a`.
+- 파일(1~5,16~20)·SCM(6~10)·실제 Codex archive 세션 도크(11~15),
+  top/right/bottom/left/window, 한·영, 주입 2×(2,7,12,17), Paused(11~15)를 포함한다.
+  매회 native 트리 클릭→접기→검색으로 경로 노출→검색 해제 시 접힘 복원→펼치기→화면 Pick을 검사했다.
+  독립 판정자는 native hand cursor, 배치, Paused 유지와 Pick 시 Live 복귀, PNG·경계 픽셀을 확인한다.
+  `read-only-controls.json`의 **20/20**에서 작업 파일과 git index가 그대로임을 확인했다.
+- Debug Inspector **65+11**, Chrome UI **1,184**, ReleaseFast Inspector **65+11** 통과.
+  `/tmp/maru-tree-frozen-debug.log`, `/tmp/maru-tree-frozen-releasefast.log`.
+- 모델 결함 변이 **10종**을 실제 컴파일해 행동 실패로 거부했다. 정상·동등·복구 대조군 통과.
+  `/tmp/maru-picker-mutants-26t4thsp/manifest.json` (최종 inspection 소스와 동일).
+  source/generation 무시, clip/배치 순서/배타 경계 무시, 부모 publication/source 혼합,
+  접힘 무시·검색 부모 누락·낡은 접힘 재사용을 포함한다.
+- 검토 중 트리 커서·들여쓴 화살표 좌표·빈 query의 수집 상태를 수정했다.
+  실행 중 번들을 재생성한 이전 검증의 CLI ENOENT는 최종 기록에서 제외했다.
+  최종 20회는 `/tmp/maru-tree-frozen-final/Maru.app`의 고정 사본으로 실행했다.
+- 이 증거는 실제 NSEvent callback·Metal readback이다. 물리 HID·WindowServer 화면·OS IME를 증명하지 않는다.
+
 ### UI 요소 선택기 (2026-10-20)
 
 - `feat/inspector-ui-picker`, base `0eb64393a`: published tree의 hover/선택·Elements·CLI를 구현했다.

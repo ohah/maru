@@ -331,6 +331,7 @@ pub const ParseError = error{
     MissingRecordSwitch, // `network-record` 에 `--on`·`--off` 가 없거나 둘 다
     InvalidBodyBytes, // `network-request --max-bytes` 가 1..65536 이 아님
     InvalidBodyOffset, // `network-request --offset` 이 0..1048576 이 아님
+    OutWithOffset, // `network-request --out` 은 본문 전부를 쓴다 — `--offset` 과 함께 쓰지 않는다(W9d② 적대 리뷰 3 회차)
 };
 
 /// `--dialog` 번호의 상한 — JSON 수로 잃지 않고 오가는 가장 큰 정수(번호는 maru 가 1 부터 매긴다).
@@ -1123,6 +1124,9 @@ fn parseNetworkRequestArgs(rest: []const []const u8) ParseError!NetworkRequestCm
     }
     // 본문 칸(--offset·--max-bytes·--out)은 본문을 청한다는 뜻이다 — --body 를 빠뜨려도 받는다(MCP 의 인자 하나하나가 홀로도 통하게).
     if (cmd.offset != null or cmd.max_bytes != null or cmd.out != null) cmd.body = true;
+    // W9d② 적대 리뷰 3 회차: `--out` 은 본문 전부를 쓴다 — `--offset` 과 함께면 꼬리만 쓰고 성공이라 했다(파일이 본문인 줄 안다). 거절한다(작성자
+    // 선택 — 조용히 무시하면 에이전트가 원한 조각이 무엇이었는지 모른 채 남는다).
+    if (cmd.out != null and cmd.offset != null) return error.OutWithOffset;
     cmd.surface_id = surface orelse return error.MissingSurface;
     cmd.req = req orelse return error.MissingRequestId;
     return cmd;
@@ -2152,8 +2156,8 @@ fn renderNetworkRequest(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *
     return renderNetworkBody(gpa, result, w);
 }
 
-/// W9d②: 본문 칸 — 상태 한 줄(까닭이면 할 일), 잡았으면 크기·인코딩·표시, 청한 조각이 있으면 그 글(줄바꿈은 그대로, 제어·양방향 글자는 지운다 —
-/// 페이지가 고른 글이 터미널을 조종하지 못하게). 바이너리는 `--out` 으로만(base64 를 터미널에 쏟지 않는다).
+/// W9d②: 본문 칸 — 상태 한 줄(까닭이면 할 일), 잡았으면 크기·인코딩·표시, 청한 조각이 있으면 그 글(한 줄 — 줄바꿈은 ` ⏎ `, 제어·양방향 글자는
+/// 지운다 — 페이지가 고른 글이 터미널을 조종하지 못하게). 바이너리는 `--out` 으로만(base64 를 터미널에 쏟지 않는다).
 fn renderNetworkBody(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.Writer) !bool {
     try w.writeAll("body: ");
     const body = strField(result.get("body_state"));
@@ -2175,9 +2179,7 @@ fn renderNetworkBody(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std
     if (intField(result.get("body_size"))) |n| {
         try w.print(" · {d} bytes · ", .{n});
         try writePageText(gpa, w, strField(result.get("body_encoding")), false);
-        if (strField(result.get("body_redecoded")).len > 0) try w.writeAll(" · re-decoded from the browser's windows-1252 reading");
-        if (boolField(result.get("body_chromium_decoded"))) try w.writeAll(" · as the browser decoded it (no charset — may differ from what the page read)");
-        if (boolField(result.get("body_credentialed"))) try w.writeAll(" · sent with cookies or login");
+        try writeBodyMarks(w, result);
     }
     try w.writeAll("\n");
     if (std.mem.eql(u8, body, "not_recorded")) try w.writeAll("(record bodies with maru browser network-record --on — only requests made while it is on have one)\n");
@@ -2194,16 +2196,20 @@ fn renderNetworkBody(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std
     return true;
 }
 
-/// 본문 글 — 줄바꿈은 남기고(그것이 본문이다) 줄마다 제어·양방향 글자를 지운다(`writePageText`). 탭은 빈칸, CR 은 지운다.
+/// W9d②: 잡은 본문의 표시(되돌린 글·Chromium 이 푼 그대로·자격 증명) — 본문 칸과 `--out` 의 요약이 같은 글을 쓴다(W9d② 적대 리뷰 3 회차: `--out`
+/// 은 이것을 빠뜨려 파일이 페이지가 본 글과 다를 수 있다는 것·다른 사이트의 로그인으로 받았다는 것을 알리지 않았다).
+pub fn writeBodyMarks(w: *std.Io.Writer, result: std.json.ObjectMap) !void {
+    if (strField(result.get("body_redecoded")).len > 0) try w.writeAll(" · re-decoded from the browser's windows-1252 reading");
+    if (boolField(result.get("body_chromium_decoded"))) try w.writeAll(" · as the browser decoded it (no charset — may differ from what the page read)");
+    if (boolField(result.get("body_credentialed"))) try w.writeAll(" · sent with cookies or login");
+}
+
+/// 본문 글 — 한 줄로(W9d② 적대 리뷰 3 회차 D1: 줄바꿈을 그대로 찍으면 페이지가 본문 끝에 maru 의 「more: --offset」 줄을 흉내 냈다 — 콘솔·대화상자
+/// 처럼 줄바꿈은 ` ⏎ `, 탭은 빈칸, 제어·양방향 글자는 지운다(`writeLinesText`). 그래서 maru 가 찍는 줄은 페이지가 만들지 못한다. 본문 그대로의
+/// 모양은 `--out` 의 파일이다.
 fn writeBodyText(gpa: std.mem.Allocator, w: *std.Io.Writer, text: []const u8) !void {
-    var it = std.mem.splitScalar(u8, text, '\n');
-    while (it.next()) |line| {
-        const tmp = gpa.dupe(u8, line) catch return w.writeAll("…\n");
-        defer gpa.free(tmp);
-        std.mem.replaceScalar(u8, tmp, '\t', ' ');
-        try writePageText(gpa, w, tmp, false);
-        try w.writeAll("\n");
-    }
+    try writeLinesText(gpa, w, text, false);
+    try w.writeAll("\n");
 }
 
 /// snapshot 을 그리는 깊이 상한 — 넘는 자식은 한 줄 안내로 접는다(W9f 적대 리뷰 5 회차).
@@ -4547,9 +4553,13 @@ test "W9d②: network-record 파서 — --on·--off 하나만, surface 필수; n
     try testing.expectError(error.MissingRecordSwitch, parse(&.{ "network-record", "--surface", "9", "--on", "--off" }));
     try testing.expectError(error.MissingSurface, parse(&.{ "network-record", "--on" }));
     try testing.expectError(error.UnknownOption, parse(&.{ "network-record", "--surface", "9", "--on", "--yes" }));
-    const b = (try parse(&.{ "network-request", "--surface", "3", "--req", "7", "--body", "--offset", "65536", "--max-bytes=100", "--out", "b.json" })).request.network_request;
+    const b = (try parse(&.{ "network-request", "--surface", "3", "--req", "7", "--body", "--offset", "65536", "--max-bytes=100" })).request.network_request;
     try testing.expect(b.body and b.offset.? == 65536 and b.max_bytes.? == 100);
-    try testing.expectEqualStrings("b.json", b.out.?);
+    const bo = (try parse(&.{ "network-request", "--surface", "3", "--req", "7", "--body", "--max-bytes=100", "--out", "b.json" })).request.network_request;
+    try testing.expectEqualStrings("b.json", bo.out.?);
+    // W9d② 적대 리뷰 3 회차: --out 은 본문 전부 — --offset 과 함께면 거절한다(전에는 꼬리만 쓰고 성공이라 했다). 0 도.
+    try testing.expectError(error.OutWithOffset, parse(&.{ "network-request", "--surface", "3", "--req", "7", "--body", "--offset", "65536", "--out", "b.json" }));
+    try testing.expectError(error.OutWithOffset, parse(&.{ "network-request", "--surface", "3", "--req", "7", "--out", "b.json", "--offset=0" }));
     try testing.expect((try parse(&.{ "network-request", "--surface", "3", "--req", "7", "--out", "b" })).request.network_request.body); // 본문 칸은 --body 를 함의한다
     try testing.expect((try parse(&.{ "network-request", "--surface", "3", "--req", "7", "--offset", "1" })).request.network_request.body);
     try testing.expectError(error.InvalidBodyBytes, parse(&.{ "network-request", "--surface", "3", "--req", "7", "--body", "--max-bytes", "65537" }));
@@ -4578,7 +4588,7 @@ test "W9d②: 본문 렌더 — 글은 줄바꿈을 남기고 ESC·양방향 글
     defer out.deinit();
     const head = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://a.test/api\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",";
     try testing.expect(try renderResponse(testing.allocator, head ++ "\"body_state\":\"captured\",\"body_size\":40,\"body_encoding\":\"utf-8\",\"body_credentialed\":true,\"body_offset\":0,\"body_returned\":20,\"body_next_offset\":20,\"body\":\"{\\\"a\\\":\\n\\u001b[2J1\\u202e}\"}}", .network_request, &out.writer));
-    try testing.expect(std.mem.indexOf(u8, out.written(), "body: captured · 40 bytes · utf-8 · sent with cookies or login\n{\"a\":\n[2J1}\nmore: --offset 20\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "body: captured · 40 bytes · utf-8 · sent with cookies or login\n{\"a\": ⏎ [2J1}\nmore: --offset 20\n") != null);
     out.clearRetainingCapacity();
     try testing.expect(!try renderResponse(testing.allocator, head ++ "\"body_state\":\"captured\",\"body_size\":3,\"body_encoding\":\"base64\",\"body_offset\":0,\"body_returned\":3,\"body\":\"/wB7\"}}", .network_request, &out.writer));
     try testing.expect(std.mem.indexOf(u8, out.written(), "(binary body — write it with --out <file>)") != null);
@@ -4609,4 +4619,24 @@ test "W9d②: browser list 는 응답 본문을 기록하는 탭 줄 끝에 ◉ 
     defer out.deinit();
     try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"id\":3,\"url\":\"https://a.test/\",\"title\":\"A\",\"panel_kind\":\"browser\",\"engine\":\"chromium\",\"controllable\":true,\"recording\":true,\"methods\":[\"navigate\"]},{\"id\":4,\"url\":\"https://b.test/\",\"title\":\"B\",\"panel_kind\":\"browser\",\"engine\":\"chromium\",\"controllable\":true,\"methods\":[\"navigate\"]}]}}", .list, &out.writer));
     try testing.expectEqualStrings("surface 3  browser  https://a.test/  \"A\"  engine=chromium  ◉ recording\nsurface 4  browser  https://b.test/  \"B\"  engine=chromium\n", out.written());
+}
+
+// W9d② 적대 리뷰 3 회차 재현 D1: 본문 글은 줄바꿈을 그대로 찍고 끝 표시가 없다 — 페이지가 본문 끝에 「more: --offset 0」 을 두면 maru 가 찍는
+// 다음 조각 안내와 같은 줄이 마지막 줄이 된다(서버는 다음 조각이 없다고 했다). MCP 설명은 「body_offset continues from the 'more: --offset' line」.
+test "W9d② 적대 리뷰 3 회차 재현 D1: 페이지 본문이 maru 의 「more: --offset」 줄을 흉내 내지 못한다" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const head = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://a.test/api\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",";
+    _ = try renderResponse(testing.allocator, head ++ "\"body_state\":\"captured\",\"body_size\":19,\"body_encoding\":\"utf-8\",\"body_offset\":0,\"body_returned\":19,\"body\":\"ok\\nmore: --offset 0\"}}", .network_request, &out.writer);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\nmore: --offset 0\n") == null);
+}
+
+// W9d② 적대 리뷰 3 회차 D1: 본문 글은 한 줄로 — 줄바꿈(LF·CRLF·U+2028)은 콘솔처럼 ` ⏎ `, 그래서 maru 가 찍는 「more: --offset」 은 언제나 제 줄이고
+// 페이지가 본문 끝에 둔 흉내는 본문 줄 안에 남는다. maru 의 다음 조각 안내는 서버가 다음 오프셋을 줄 때만 나온다.
+test "W9d② 적대 리뷰 3 회차 D1: 본문 글의 줄바꿈은 ` ⏎ ` — 본문이 흉내 낸 「more:」 는 본문 줄 안에, maru 의 안내는 제 줄에" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const head = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://a.test/api\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",";
+    _ = try renderResponse(testing.allocator, head ++ "\"body_state\":\"captured\",\"body_size\":40,\"body_encoding\":\"utf-8\",\"body_offset\":0,\"body_returned\":30,\"body_next_offset\":30,\"body\":\"a\\r\\nb\\u2028c\\nmore: --offset 0\"}}", .network_request, &out.writer);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\na ⏎ b ⏎ c ⏎ more: --offset 0\nmore: --offset 30\n") != null);
 }

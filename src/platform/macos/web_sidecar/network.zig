@@ -326,8 +326,9 @@ fn markDrop(targets: []const BrowserId, request: [*c]c.cef_request_t) void {
     const raw = request.*.get_url.?(request);
     defer if (raw != null) api().string_userfree_utf16_free(raw);
     const hash = body_table.hashUrl16(units(raw));
-    const t = net_body.machUs();
     doLock();
+    // 잠금 아래에서 찍는다 — 표지의 차례가 시각의 차례라 물 높이(`cefWatermark`)가 남은 표지의 가장 이른 시각으로 정해진다(W9d② 적대 리뷰 3 회차).
+    const t = net_body.machUs();
     defer doUnlock();
     for (targets) |b| {
         if (drop_mark_len < drop_marks.len) {
@@ -367,8 +368,11 @@ const Event = struct {
     /// 적을 때 찍은 덜어 내기(대상마다 — 3 회차 P1c).
     stamp: gate.Stamp = .{},
     /// W9d②(begin — 어느 탭이든 기록할 때만): 조각을 뗀 온 주소의 해시(맞추기 열쇠)와 IO 시각(mach µs — CDP `timestamp` 와 같은 시계).
+    /// IO 시각은 넘김 상자에 넣을 때 잠금 아래에서 찍는다(`enqueue` — W9d② 적대 리뷰 3 회차 P1: 상자의 차례가 곧 시각의 차례라야 물 높이가 선다).
     url_hash: u64 = 0,
     t_io_us: i64 = 0,
+    /// 상자에 넣은 시각(잠금 아래 — 모든 기록). 상자에 남은 가장 이른 것이 물 높이를 정한다(`cefWatermark`).
+    queued_us: i64 = 0,
     /// 덮이는지 가를 호스트(begin — 요청 주소, redirect — 옮기기 전 주소, response — 지금 주소) — 온 주소에서 읽었다(3 회차 T1).
     host: []const u8 = "",
     /// 싣는 주소의 호스트(begin — 요청 주소, redirect — 옮겨 갈 주소 — wire 의 `host` 칸).
@@ -436,6 +440,10 @@ fn freeEvent(e: *Event) void {
 /// 넘김 상자에 넣는다 — 넘치면 버리고 그 탭들의 넘긴 수를 센다. 넣기 전에 대상마다 덜어 내기를 찍는다(3 회차 P1c — 적을 때의 설정·호스트).
 fn enqueue(e: *Event) void {
     doLock();
+    // W9d② 적대 리뷰 3 회차 P1: 시각을 잠금 아래에서 찍는다 — 그러면 상자의 차례가 시각의 차례이고, 보내는 task 가 상자를 비운 때까지 찍힌
+    // 시작은 모두 표에 닿았다(물 높이). 요청은 이 콜백이 돌아온 뒤에 나가므로 제 기록의 IO 시각은 여전히 그 요청의 응답보다 앞이다.
+    e.queued_us = net_body.machUs();
+    if (e.kind == .begin and e.url_hash != 0) e.t_io_us = e.queued_us;
     e.stamp = state.stamp(e.targets[0..e.target_count], e.host, e.site);
     const ok = state.reserveQueue(e.bytes()) and blk: {
         queue.append(std.heap.c_allocator, e) catch {
@@ -452,6 +460,17 @@ fn enqueue(e: *Event) void {
     doUnlock();
     if (!ok) freeEvent(e);
     postFlush();
+}
+
+/// W9d② 적대 리뷰 3 회차 P1: 물 높이 — 이 IO 시각까지 찍힌 CEF 기록(시작·문 넘김 표지)은 모두 보내는 task 가 표에 넘겼다(UI 스레드에서 부른다 —
+/// 보내는 task 도 UI 스레드라 상자에서 꺼낸 것은 이미 다 넘겼다). 상자가 비었으면 지금, 아니면 남은 가장 이른 것의 앞.
+pub fn cefWatermark() i64 {
+    doLock();
+    defer doUnlock();
+    var w = net_body.machUs() - 1;
+    if (queue.items.len > 0) w = @min(w, queue.items[0].queued_us - 1);
+    if (drop_mark_len > 0) w = @min(w, drop_marks[0].t_us - 1);
+    return w;
 }
 
 fn postFlush() void {
@@ -548,10 +567,7 @@ fn onBeforeResourceLoad(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.
     const raw_url = request.*.get_url.?(request);
     defer if (raw_url != null) api().string_userfree_utf16_free(raw_url);
     // W9d②: 기록하는 탭이 있으면 맞추기 열쇠 — 온 주소(2 KiB 앞부분이 아니다 — 긴 주소의 앞이 같을 수 있다)의 해시와 IO 시각.
-    if (net_body.any_recording.load(.acquire)) {
-        e.url_hash = body_table.hashUrl16(units(raw_url));
-        e.t_io_us = net_body.machUs();
-    }
+    if (net_body.any_recording.load(.acquire)) e.url_hash = body_table.hashUrl16(units(raw_url)); // IO 시각은 `enqueue` 가 찍는다
     const url = readUrl(raw_url, &ub, &uh);
     if (url.text.len == 0) return c.RV_CONTINUE;
     e.flags.url_truncated = url.truncated;
@@ -698,6 +714,8 @@ fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
     overflowed = drop_marks_overflowed;
     drop_marks_overflowed = @splat(0);
     std.mem.swap(std.ArrayList(*Event), &queue, &taken);
+    // 꺼낸 때 — 이 앞에 찍힌 것은 모두 꺼냈다(아래에서 표에 넘긴 뒤 물 높이로 알린다).
+    const swapped_us = net_body.machUs();
     for (&state.watches) |*w| if (w.on and w.dropped != 0) {
         drops[drop_count] = .{ .browser = w.browser, .count = w.dropped };
         drop_count += 1;
@@ -715,6 +733,8 @@ fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
         doUnlock();
         freeEvent(e);
     }
+    // W9d② 적대 리뷰 3 회차 P1: 꺼낸 때까지의 CEF 기록이 모두 표에 닿았다 — 제 기록을 기다리던 CDP 끝을 곧 정한다.
+    net_body.cefFlushed(swapped_us - 1);
 }
 
 /// W9d②: 보이는 규칙에 드는 칸(프레임 갈래·앞 문서·첫 사이트·initiator)의 해시 — 같은 주소의 두 후보가 이것이 다르면 짝을 잘못 지었을 때
@@ -799,7 +819,7 @@ fn send(e: *const Event, browser: BrowserId, index: usize) void {
             break :blk .{ .net_response = .{ .browser = browser, .request = e.request, .status = e.status, .flags = hop, .time_ms = e.time_ms, .mime = e.mime, .headers = headers } };
         },
         .end => blk: {
-            net_body.cefEnd(browser, e.request); // W9d②: 짝이 없으면 시한 뒤 `unmatched`
+            net_body.cefEnd(browser, e.request, e.outcome == .success); // W9d②: 짝이 없으면 시한 뒤 `unmatched`(실패·취소는 P5 의 갈림)
             break :blk .{ .net_end = .{ .browser = browser, .request = e.request, .outcome = e.outcome, .error_code = e.error_code, .received = e.received, .time_ms = e.time_ms } };
         },
     };

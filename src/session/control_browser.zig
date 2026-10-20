@@ -2241,6 +2241,9 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             // W9d①: 모르는·버려진 요청 번호 — handleDialog 의 모르는 번호와 같은 코드에 `data.reason`(앱이 `{"reason","message"}` 를 준다).
             .failed => if (bmethod == .network_request and result.len > 0 and result[0] == '{')
                 serializeNetworkRequestFailure(gpa, req.id, result)
+            else if (bmethod == .network_record and result.len > 0 and result[0] == '{')
+                // W9d② 적대 리뷰 3 회차 D6: 실행 단계에서 지켜보기가 없다(네트워크 grant 만 철회됐다) — 모달 전 검사와 같은 -32002·`needs_network_permission`.
+                serializeReasonError(gpa, req.id, .unauthorized, result)
             else
                 cp.serializeError(gpa, req.id, .internal_error, if (result.len > 0) result else if (bmethod == .wait) "browser wait failed" else "browser op failed", null),
         };
@@ -2348,6 +2351,11 @@ fn serializeNetworkResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8
 
 /// W9d①: 모르는·버려진 요청 번호의 오류 — `{"reason","message"}` 를 받아 -32603 에 `data.reason`.
 fn serializeNetworkRequestFailure(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8) std.mem.Allocator.Error![]u8 {
+    return serializeReasonError(gpa, id, .internal_error, payload);
+}
+
+/// 앱이 준 `{"reason","message"}` 를 `code` 의 오류에 `data.reason` 으로 싣는다(모양이 틀리면 균일 internal_error).
+fn serializeReasonError(gpa: std.mem.Allocator, id: cp.Id, code: cp.ErrorCode, payload: []const u8) std.mem.Allocator.Error![]u8 {
     const parsed = std.json.parseFromSlice(struct { reason: []const u8, message: []const u8 }, gpa, payload, .{}) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return cp.serializeError(gpa, id, .internal_error, "browser op failed", null),
@@ -2356,7 +2364,7 @@ fn serializeNetworkRequestFailure(gpa: std.mem.Allocator, id: cp.Id, payload: []
     var data: std.json.ObjectMap = .empty;
     defer data.deinit(gpa);
     try data.put(gpa, "reason", .{ .string = parsed.value.reason });
-    return cp.serializeError(gpa, id, .internal_error, parsed.value.message, .{ .object = data });
+    return cp.serializeError(gpa, id, code, parsed.value.message, .{ .object = data });
 }
 
 /// W9b③ 결과 — open `{"id":<u64>,"url":<str>,"loaded":<bool>}`, close `{"closed":<bool>,"reason"?:<str>}`. 다른 키·모양은 거절.
@@ -2880,6 +2888,14 @@ pub fn browserOpFromRequest(
             if (!grants.authorizes(pane, target_id, .browser_network, targetHost(snapshot, target_id))) return .{ .err = try needsNetworkPermission(gpa, req.id) };
             // 네트워크 grant 를 쥔 caller 다 — `on` 만 본다(끄기면 모달 없이 거절).
             if (!(parseNetworkRecordParams(req.params) catch true)) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+        }
+    }
+    // W9d② 적대 리뷰 3 회차 D6: 본문 grant 로 인가됐어도 켜기는 네트워크 grant 가 지금 문서를 덮어야 한다 — 사용자가 메뉴에서 네트워크 grant 만
+    // 철회하면 본문 grant 는 남는다(전에는 이 검사가 인가되지 않은 때만이라 앱까지 가서 이유 없는 실패로 답했다). 끄기는 그대로 받는다.
+    if (authorized and bmethod == .network_record) {
+        if (pane_selector) |pane| {
+            const on = parseNetworkRecordParams(req.params) catch false; // 형식 오류는 아래 파싱이 invalid_params 로 답한다(인가된 caller)
+            if (on and !grants.authorizes(pane, target_id, .browser_network, targetHost(snapshot, target_id))) return .{ .err = try needsNetworkPermission(gpa, req.id) };
         }
     }
     if (!authorized) return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope);
@@ -5864,4 +5880,43 @@ test "W9d②: browser.list 는 응답 본문을 기록하는 탭에만 recording
     const arr = pm.message.response.result.?.object.get("surfaces").?.array.items;
     try testing.expect(arr[0].object.get("recording").?.bool);
     try testing.expect(arr[1].object.get("recording") == null);
+}
+
+// W9d② 적대 리뷰 3 회차 D6: 사용자가 메뉴에서 네트워크 grant 만 철회하면 본문 grant 는 남는다 — 그 grant 로 인가된 켜기도 모달 전 검사처럼
+// -32002 `needs_network_permission`(전에는 인가되지 않은 때만 봐 앱까지 가서 이유 없는 실패였다), 끄기는 그대로 op. 앱이 실행 단계에서 지켜보기가
+// 없다고 답해도(그 사이 철회) 같은 코드·이유로 싣는다. 에이전트는 이유로 다음 일(`maru browser network`)을 안다.
+test "W9d② 적대 리뷰 3 회차 D6: 본문 grant 만 남은 켜기는 -32002 needs_network_permission — 끄기는 op, 앱의 실행 단계 답도 같은 코드·이유" {
+    const on = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":12,\"on\":true}}";
+    const off = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":12,\"on\":false}}";
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network_body, .host = cpg.GrantHost.init("example") });
+    switch (try dispatchEngine(on, &grants)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(e));
+            try testing.expect(std.mem.indexOf(u8, e, "needs_network_permission") != null);
+        },
+        else => return error.ExpectedErr,
+    }
+    switch (try dispatchEngine(off, &grants)) {
+        .op => |op| testing.allocator.free(op.arg),
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedOp;
+        },
+        else => return error.ExpectedOp,
+    }
+    // 다른 사이트에 묶인 네트워크 grant 는 덮지 않는다 — 같은 답.
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("bank.test") });
+    switch (try dispatchEngine(on, &grants)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expect(std.mem.indexOf(u8, e, "needs_network_permission") != null);
+        },
+        else => return error.ExpectedErr,
+    }
+    const w = try serializeBrowserResponseStatus(testing.allocator, on, .failed, "{\"reason\":\"needs_network_permission\",\"message\":\"m\"}");
+    defer testing.allocator.free(w);
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(w));
+    try testing.expect(std.mem.indexOf(u8, w, "\"reason\":\"needs_network_permission\"") != null);
 }

@@ -8033,7 +8033,8 @@ fn answerNetworkRecord(async_id: u64, op: control_browser.BrowserOp) void {
     const parsed = std.json.parseFromSlice(struct { on: bool }, allocator, op.arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
     defer parsed.deinit();
     session_mod.web_osr.networkRecord(op.surface_id, parsed.value.on) catch |e| return completeTabStatus(async_id, .failed, switch (e) {
-        error.NotWatching => "recording response bodies needs this tab's network permission first — run maru browser network on this tab",
+        // W9d② 적대 리뷰 3 회차 D6: control_browser 가 -32002 `needs_network_permission` 으로 싣는다(모달 전 검사와 같은 답).
+        error.NotWatching => "{\"reason\":\"needs_network_permission\",\"message\":\"recording response bodies needs this tab's network permission first — run maru browser network on this tab\"}",
         error.NoBodyPermission => "the permission to record this tab's response bodies is gone — ask again with maru browser network-record --on",
     });
     const json = session_mod.web_osr.networkRecordResult(allocator, op.surface_id) catch return completeTabStatus(async_id, .failed, "out of memory");
@@ -16891,4 +16892,34 @@ test "W9d②: 확인 모달 승인(resolveGrantPrompt)이 본문 grant 를 그 �
         defer p.deinit();
     }
     try std.testing.expect(session_mod.web_osr.networkRecording(233));
+}
+
+// W9d② 적대 리뷰 3 회차 재현 D6: 사용자가 메뉴에서 네트워크 grant 만 철회하면 본문 grant 는 남는다 — 그 grant 로 인가된 networkRecord on 은
+// control_browser 의 모달 전 검사(인가되지 않은 때만)를 지나 앱에 닿고, 앱은 `failed` 로 답한다(-32002·needs_network_permission 이 아니다 — 문서·
+// 주석은 그것을 약속한다).
+test "W9d② 적대 리뷰 3 회차 재현 D6: 네트워크 grant 가 사라진 뒤 본문 grant 로 켜면 -32002 needs_network_permission" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{233});
+    defer w9c2Forget(ta, &.{233});
+    defer {
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 233, .url = "https://app.test/" } });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 233, .scope = .browser_network, .host = control_pane_grant.GrantHost.init("app.test") });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 233, .scope = .browser_network_body, .host = control_pane_grant.GrantHost.init("app.test") });
+    syncNetworkWatch();
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, 233, 2));
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":1,\"on\":true}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&pending, .{ .surface_id = 233, .method = .network_record, .arg = try allocator.dupe(u8, "{\"on\":true}"), .pane_grant = w9d2BodyGrant(5, 233) });
+    const response = pending.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    pending.response = null;
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"code\":-32002") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "needs_network_permission") != null);
 }

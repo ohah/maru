@@ -45,7 +45,7 @@ def run(app, output, number):
     phases = ['ready', 'selected', 'collapsed', 'searched', 'cleared', 'expanded', 'picked']
     point = dest / 'point.json'
     lines = ['sleep 1500', f'inspect-click {40 + placement}', 'inspect-click 24', 'sleep 700', f'inspect-main-capture {dest}/baseline.ppm', 'inspect-report ready', f'waitfile {dest}/ready-ok',
-             'inspect-hover 100 row', 'inspect-click 100', 'sleep 400', f'inspect-main-capture {dest}/selected.ppm', 'inspect-report selected', f'waitfile {dest}/selected-ok']
+             'inspect-click 48', 'sleep 150', 'inspect-hover 100 row', 'inspect-click 100', 'sleep 400', f'inspect-main-capture {dest}/selected.ppm', 'inspect-report selected', f'waitfile {dest}/selected-ok']
     if paused:
         lines += ['inspect-click 13']
     lines += ['inspect-click 20000', 'sleep 400', f'inspect-main-capture {dest}/collapsed.ppm', 'inspect-report collapsed', f'waitfile {dest}/collapsed-ok',
@@ -108,6 +108,8 @@ def run(app, output, number):
                                 seen[(node['source'], node['id'], node['generation'])] = branch
                             selected_key = identity(tree[0]['node'])
                         elif phase == 'selected':
+                            if e['picking']:
+                                errors.append('tree selection retained Pick mode')
                             if identity(e['selected']) != selected_key:
                                 errors.append('tree click did not select published root')
                             if 'label=row actual=hand' not in text:

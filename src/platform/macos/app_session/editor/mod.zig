@@ -24075,7 +24075,7 @@ test "LSI5 Bash 서버는 `.zsh` 를 안 다룬다 (계획 editor-lsp-servers-ex
     try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_current_unavailable), s.chrome_host.notice.message);
 }
 
-test "LSI6 `.scss`·`.less` 의 languageId 는 그 방언 — 서버가 뜨기 전에 붙은 문서(준비 뒤 didOpen)와 뜬 뒤에 붙은 문서(곧바로 didOpen) 두 길 다 (계획 editor-lsp-servers-expand LS1)" {
+test "LSI6 `.scss` 의 languageId 는 그 방언 — 처음 붙일 때의 didOpen 과 서버가 죽어 다시 뜬 뒤 다시 여는 didOpen 두 길 다 (계획 editor-lsp-servers-expand LS1)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var f = (try SmtFixture.openRepo(allocator, "a.ts", "let a = 1;\n")) orelse return error.SkipZigTest;
@@ -24083,30 +24083,37 @@ test "LSI6 `.scss`·`.less` 의 languageId 는 그 방언 — 서버가 뜨기 �
     const s = f.fx.session;
     // `LANGID` — 가짜 서버가 didOpen 으로 받은 languageId 를 진단 message 에 싣는다(`tools/fake_lsp.zig`).
     try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "t.scss", .data = "$c: red;\n/* LANGID */\n" });
-    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "u.less", .data = "@c: red;\n/* LANGID */\n" });
     try testing.expect(f.ready());
     const root = f.root_buf[0..f.root_len];
-    const HasDiag = struct {
-        fn g(t: *Term) bool {
-            return t.rt.editor_diagnostics.lsp.items.len > 0;
+    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const t = (try pane_ops.openFileTermInActivePane(s, try std.fmt.bufPrint(&pbuf, "{s}/t.scss", .{root}), .text)).term;
+    const Scss = struct {
+        fn current(tt: *Term) bool {
+            var b: [64]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "fake: {d} scss", .{tt.rt.editorDocument().notifications.lsp_version}) catch return false;
+            return tt.rt.editor_diagnostics.lsp.items.len > 0 and std.mem.eql(u8, tt.rt.editor_diagnostics.lsp.items[0].message, want);
         }
     };
-    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
-    var want_buf: [64]u8 = undefined;
-    // ⑴ CSS 서버는 아직 없다 — 이 문서가 그 서버를 세우므로 뜨기 전에 붙고(`sent_version` 0), 준비가 끝난 뒤 동기화가 didOpen 을 보낸다(첫 길).
-    for (s.editor_lsp.clients.items) |*c| try testing.expect(!std.mem.eql(u8, c.server.exe, "vscode-css-language-server"));
-    const t = (try pane_ops.openFileTermInActivePane(s, try std.fmt.bufPrint(&pbuf, "{s}/t.scss", .{root}), .text)).term;
-    try testing.expect(pumpLspUntil(&f.fx, 5000, t, HasDiag.g));
+    // ⑴ 처음 붙일 때(`attachDocument` 의 didOpen).
+    try testing.expect(pumpLspUntil(&f.fx, 5000, t, Scss.current));
     var css: ?*lsp_client.Client = null;
     for (s.editor_lsp.clients.items) |*c| if (c.findDoc(t) != null) {
+        try testing.expectEqualStrings("vscode-css-language-server", c.server.exe);
         css = c;
     };
-    try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "fake: {d} scss", .{t.rt.editorDocument().notifications.lsp_version}), t.rt.editor_diagnostics.lsp.items[0].message);
-    // ⑵ 서버가 떠 있다 — 붙이는 자리에서 곧바로 didOpen(둘째 길).
-    try testing.expect(css != null and css.?.phase == .ready);
-    const u = (try pane_ops.openFileTermInActivePane(s, try std.fmt.bufPrint(&pbuf, "{s}/u.less", .{root}), .text)).term;
-    try testing.expect(pumpLspUntil(&f.fx, 5000, u, HasDiag.g));
-    try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "fake: {d} less", .{u.rt.editorDocument().notifications.lsp_version}), u.rt.editor_diagnostics.lsp.items[0].message);
+    try testing.expect(css != null);
+    // ⑵ 서버가 죽어(`BOOM` — exit 1) backoff 뒤 다시 뜨면 새 프로세스는 문서를 모른다 — 동기화가 다시 연다(`syncOne` 의 didOpen).
+    t.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 }; // 새로 연 문서엔 caret 이 없다
+    try testing.expect(insertText(s, t, "BOOM "));
+    const deadline = s.awakeMs() + 3000;
+    while (css.?.phase != .restarting and s.awakeMs() < deadline) {
+        lsp_client.pump(s);
+        _ = usleep(2_000);
+    }
+    try testing.expectEqual(lsp_client.Phase.restarting, css.?.phase);
+    try removeMarkerHover(s, t, "BOOM ");
+    try testing.expect(pumpLspUntil(&f.fx, 5000, t, Scss.current)); // 지금 version 의 진단이 새 프로세스에서 — languageId 는 여전히 `scss`
+    try testing.expect(css.?.phase == .ready);
 }
 
 test "FOS1 저장 시 포맷 — ⌘S 가 포맷을 먼저 적용하고(되돌리기 하나) 저장하며 didSave 가 간다; 설정을 끄거나 서버가 포맷을 못 하면 곧바로 저장, 응답이 낡았거나 거부되면 포맷 없이 저장, 시한을 넘기면 포맷 없이 저장하고 알림, 기다리는 동안 같은 문서의 ⌘S·⇧⌥F 는 무동작, 다른 문서의 ⌘S 는 기다리던 것을 먼저 저장 (제품 경계, §8.2r)" {

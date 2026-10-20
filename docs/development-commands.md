@@ -1785,6 +1785,7 @@ mise exec -- zig build test-inspector test-chrome-ui -j2
 mise exec -- zig build macos-app-bundle -j2
 python3 tools/inspector-tree-app/run.py --app zig-out/Maru.app/Contents/MacOS/maru-macos-app --output /tmp/maru-tree-새경로 --rounds 20
 python3 tools/inspector-tree-app/verify.py /tmp/maru-tree-새경로
+python3 -m unittest discover -s tools/inspector-tree-app -p 'test_*.py'
 python3 tools/test-inspector-picker-adversarial.py
 ```
 

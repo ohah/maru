@@ -23982,6 +23982,9 @@ test "ASB7 보조 언어 서버 — JSON·CSS 에 주 서버(언어 서버 후�
         var line_buf: [512]u8 = undefined;
         const want = maru.i18n.format(&line_buf, maru.i18n.t(.lsp_info_aux), &.{ .{ .s = "Biome" }, .{ .s = "biome.json" }, .{ .s = "node_modules/.bin/biome" } });
         try testing.expect(std.mem.indexOf(u8, s.chrome_host.notice.message, want) != null);
+        // 주 서버(JSON 서버)는 저장소 설정을 읽지 않는다 — 「찾지 못함」이 아니라 그렇다고(`config_files` 의 빈 표, LS1).
+        try testing.expect(std.mem.indexOf(u8, s.chrome_host.notice.message, maru.i18n.t(.lsp_info_config_not_read)) != null);
+        try testing.expect(std.mem.indexOf(u8, s.chrome_host.notice.message, maru.i18n.t(.lsp_info_config_none)) == null);
     }
     s.dismissMessageOverlays();
     // ⑸ 신뢰 관리 — 그 저장소의 결정을 보조 서버의 클라이언트로 찾아 상자를 띄운다.

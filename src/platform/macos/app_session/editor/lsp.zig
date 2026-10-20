@@ -1071,10 +1071,16 @@ pub fn showServerInfo(self: *AppSession) void {
         printLine(&w, maru.i18n.format(&repo_buf, maru.i18n.t(.lsp_info_repo), &.{ .{ .s = app_session_mod.homeTildeInto(r, &shown_buf) }, .{ .s = word } }));
         // 설정 파일(계획 WT5b-3) — 그 서버가 읽는 자리에 있는 저장소 설정(문서에서 가장 가까운 것·루트의 것). 실행 파일 줄보다 앞이다(넘치면 끝부터
         // 잘린다 — 경로가 먼저 준다).
+        // 저장소 설정을 **읽지 않는** 서버(JSON·CSS·HTML·YAML·Dockerfile 서버 — `config_files` 의 빈 표)는 「찾지 못함」이 아니라 그렇다고 말한다.
+        const info_exe = if (c) |cl| cl.server.exe else server.exe;
         var config_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const config = configFilesText(if (c) |cl| cl.server.exe else server.exe, r, termPath(term), &config_buf);
+        const config = configFilesText(info_exe, r, termPath(term), &config_buf);
         var config_line_buf: [std.fs.max_path_bytes + 128]u8 = undefined;
-        printLine(&w, if (config.len > 0) maru.i18n.format(&config_line_buf, maru.i18n.t(.lsp_info_config), &.{.{ .s = config }}) else maru.i18n.t(.lsp_info_config_none));
+        const reads_none = if (lsp.config_files.specsFor(info_exe)) |specs| specs.len == 0 else false;
+        printLine(&w, if (config.len > 0)
+            maru.i18n.format(&config_line_buf, maru.i18n.t(.lsp_info_config), &.{.{ .s = config }})
+        else
+            maru.i18n.t(if (reads_none) .lsp_info_config_not_read else .lsp_info_config_none));
     }
     // ④ 실행 파일 — 출처 경고, 그리고 경로를 맨 끝에. 떠 있으면 띄운 경로와 띄울 때 굳힌 출처, 아니면 지금 찾아 낸 경로 — 셸 환경을
     // 담기 전·다시 읽는 중에는 찾지도 재지도 않는다(그 PATH·자리 변수가 아직 없어 「찾지 못함」·「그 밖」이 된다 — 상태바가 「없음」을
@@ -1137,7 +1143,7 @@ fn repoRelative(path: []const u8, root: []const u8, buf: []u8) []const u8 {
 /// 나누므로, 개행 든 폴더 이름이 신뢰 시트에 가짜 안내 줄(「• 이 저장소는 …」)을 끼울 수 있었다(적대적 검증 1회차).
 fn configFilesText(exe: []const u8, root: []const u8, doc_path: ?[]const u8, out: []u8) []const u8 {
     const dir: ?[]const u8 = if (doc_path) |p| std.fs.path.dirname(p) else null;
-    const text = lsp.config_files.describe(lsp.config_files.specsFor(exe), root, dir, {}, fileExists, out);
+    const text = lsp.config_files.describe(lsp.config_files.specsFor(exe) orelse &.{}, root, dir, {}, fileExists, out);
     for (out[0..text.len]) |*b| b.* = lsp.rpc.displayByte(b.*);
     return text;
 }

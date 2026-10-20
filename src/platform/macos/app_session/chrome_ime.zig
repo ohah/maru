@@ -6,15 +6,55 @@ const app = @import("../app_session.zig");
 const dock = @import("agent_dock.zig");
 pub const Range = maru.inline_text_input.Range;
 const Context = maru.inline_text_input.Context;
+const palette_ime = @import("palette_ime.zig");
+
+pub const Projection = union(enum) {
+    fixed: *Context,
+    dynamic: *maru.inline_text_input.DynamicContext,
+    pub fn text(self: Projection) []const u8 {
+        return switch (self) {
+            inline else => |context| context.text(),
+        };
+    }
+    pub fn selectedRange(self: Projection) ?Range {
+        return switch (self) {
+            inline else => |context| context.selectedRange(),
+        };
+    }
+    pub fn markedRange(self: Projection) ?Range {
+        return switch (self) {
+            inline else => |context| context.markedRange(),
+        };
+    }
+    pub fn substring(self: Projection, range: Range) ?struct { bytes: []const u8, actual: Range } {
+        return switch (self) {
+            inline else => |context| blk: {
+                const part = context.substringForInputMethod(range) orelse break :blk null;
+                break :blk .{ .bytes = part.bytes, .actual = part.actual };
+            },
+        };
+    }
+};
 
 pub fn generation(self: *app.AppSession) ?u64 {
+    if (palette_ime.generation(self)) |token| return token;
+    const token = fixedGeneration(self) orelse return null;
+    return if (token < (@as(u64, 1) << 63)) token else null;
+}
+pub fn projection(self: *app.AppSession) ?Projection {
+    if (palette_ime.projection(self)) |context| return .{ .dynamic = context };
+    if (fixedProjection(self)) |context| return .{ .fixed = context };
+    return null;
+}
+
+fn fixedGeneration(self: *app.AppSession) ?u64 {
     if (self.ime_terminal_target_id != null or self.inputFocus() != .agent_session_search) return null;
     if (self.ime_search_owner) |owner| if (owner != self.agent_session_search_generation) return null;
     return self.agent_session_search_generation;
 }
 
-pub fn projection(self: *app.AppSession) ?*Context {
-    _ = generation(self) orelse return null;
+fn fixedProjection(self: *app.AppSession) ?*Context {
+    _ = fixedGeneration(self) orelse return null;
     return sync(self);
 }
 
@@ -62,8 +102,9 @@ fn publish(self: *app.AppSession, context: *Context) void {
 
 /// A stale pinned owner consumes callbacks too: falling through would edit the next owner.
 pub fn insert(self: *app.AppSession, bytes: []const u8, replacement: ?Range) bool {
-    if (self.ime_search_owner != null and generation(self) == null) return true;
-    const context = projection(self) orelse return false;
+    if (palette_ime.insert(self, bytes, replacement)) return true;
+    if (self.ime_search_owner != null and fixedGeneration(self) == null) return true;
+    const context = fixedProjection(self) orelse return false;
     if (self.ime_active) self.ime_marked_changed = true;
     if (!reserve(self) or !context.insert(bytes, replacement)) {
         if (self.ime_active) self.ime_search_rejected = true;
@@ -75,8 +116,9 @@ pub fn insert(self: *app.AppSession, bytes: []const u8, replacement: ?Range) boo
 }
 
 pub fn marked(self: *app.AppSession, bytes: []const u8, selected: Range, replacement: ?Range) bool {
-    if (self.ime_search_owner != null and generation(self) == null) return true;
-    const context = projection(self) orelse return false;
+    if (palette_ime.marked(self, bytes, selected, replacement)) return true;
+    if (self.ime_search_owner != null and fixedGeneration(self) == null) return true;
+    const context = fixedProjection(self) orelse return false;
     if (self.ime_active) self.ime_marked_changed = true;
     if (!reserve(self) or !context.setMarked(bytes, selected, replacement)) {
         if (self.ime_active) self.ime_search_rejected = true;
@@ -88,15 +130,17 @@ pub fn marked(self: *app.AppSession, bytes: []const u8, selected: Range, replace
 }
 
 pub fn begin(self: *app.AppSession) void {
-    self.ime_search_owner = generation(self);
+    palette_ime.begin(self);
+    self.ime_search_owner = fixedGeneration(self);
     self.ime_search_rejected = false;
-    self.ime_search_before = if (projection(self)) |context| context.* else null;
+    self.ime_search_before = if (fixedProjection(self)) |context| context.* else null;
 }
 
 pub fn end(self: *app.AppSession, event: ?maru.terminal.KeyEvent) bool {
+    if (palette_ime.end(self, event)) return true;
     _ = self.ime_search_owner orelse return false;
-    if (generation(self) == null) return true;
-    const context = projection(self) orelse return true;
+    if (fixedGeneration(self) == null) return true;
+    const context = fixedProjection(self) orelse return true;
     if (self.ime_search_rejected) {
         if (self.ime_search_before) |before| {
             context.* = before;

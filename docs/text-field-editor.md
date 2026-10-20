@@ -308,3 +308,9 @@ TextArea (새 얇은 층 — 세로 축만 소유)
   스모크를 먼저 안 돌리면 **옛 아티팩트와 비교돼 조용히 통과한다**(편집기 세션이 한 번 속았다).
 - ⑥의 시각 행 계수는 `editor_view/frame.zig`의 `first_visual` 계산부가 참고 구현이다 — `total_visual_rows`를
   미리 받은 경로에서도 **접두 합계를 세야 한다**는 주의가 그 주석에 있다.
+
+### 명령 팔레트 IME 문맥 후속
+
+[명령 팔레트 IME 계획](plans/command-palette-ime.md)은 TextField 전원 이관과 별개다.
+팔레트의 OverlayInput과 조합 중 필터·기존 키 동작을 유지하고, 동적 native IME 문맥만 연결한다.
+주소창·find·사이드바 검색의 완전 IME 프로토콜을 함께 완료했다고 해석하지 않는다.

@@ -6,6 +6,7 @@
 //! 으로 공유해 한글 잘림/조합 미표시가 없다. 단일 출처: docs/chrome-strategy.md §5.4, docs/layering-and-portability.md §5(C1b).
 
 const std = @import("std");
+const owned_input = @import("../../inline_text_input_owned.zig");
 const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
@@ -38,6 +39,8 @@ pub const max_visible: usize = 10;
 /// input의 query·preedit는 ArrayList라 host가 deinit한다. 조합 중 글자는 query 뒤 preedit으로 보여 입력 가시성을 준다.
 pub const State = struct {
     open: bool = false,
+    ime_context: owned_input.OwnedContext = .{},
+    ime_generation: u64 = 1,
     input: overlay_input.OverlayInput = .{},
     selected: usize = 0,
     result_count: usize = 0,
@@ -50,11 +53,14 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
+        self.ime_context.deinit(allocator);
         self.input.deinit(allocator);
     }
 
     /// 팝업을 연다 — 검색어·조합·선택·결과 수를 비운다(host가 곧 초기 필터+setResultCount).
     pub fn show(self: *State) void {
+        self.ime_generation +|= 1;
+        self.ime_context.value.valid = false;
         self.input.clear();
         self.selected = 0;
         self.result_count = 0;
@@ -62,6 +68,7 @@ pub const State = struct {
     }
 
     pub fn hide(self: *State) void {
+        if (self.open) self.ime_generation +|= 1;
         self.open = false;
     }
 
@@ -141,13 +148,23 @@ pub fn handle(allocator: std.mem.Allocator, k: input.InputEvent.KeyEvent, state:
 /// (imeCursorRect)에 공유한다. 닫혔거나 터미널 0칸/패널 밖이면 null. 위치 = "> " + query **시작점**(= 조합중 시작).
 /// 조합 중에는 반전 블록 커서가 그 자리(query 끝)에서 조합 글자 위에 겹친다(find와 같은 규약 — 단일 줄 append라
 /// caret 뒤 텍스트가 없어 터미널 grid의 삽입/오버레이 구분과 무관). 표시 폭은 EAW.
+// Read-only borrowed slices: never deinit this temporary view. Both painting
+// and caret placement use the same projection, including Hanja preview replacement.
+fn displayInput(state: *const State) overlay_input.OverlayInput {
+    const context = &state.ime_context.value;
+    if (!context.matches(state.input.query.items, state.input.preedit.items)) return state.input;
+    const at = context.selected.end;
+    return .{ .query = .fromOwnedSlice(@constCast(context.text()[0..at])), .preedit = .fromOwnedSlice(@constCast(context.text()[at..])) };
+}
+
 pub fn caretRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
     if (!state.open) return null;
     const lay = overlay_input.panelLayout(p) orelse return null;
     // caret 위치는 view의 tail 창 배치와 **같은 단일 출처**(inputLineView)에서 얻는다 — 긴 검색어가 패널을 넘치면
     // caret은 창 오른쪽 끝(= query 끝)으로 오고, 넘치지 않으면 prompt_cols+queryCols(기존과 동일). row0엔 우측 요소가
     // 없어 텍스트 영역은 패널 폭 전체(find와 달리 카운터 예약 없음).
-    const line = overlay_input.inputLineView(&state.input, promptCols(state), lay.panel_cols);
+    const shown = displayInput(state);
+    const line = overlay_input.inputLineView(&shown, promptCols(state), lay.panel_cols);
     if (line.caret_col >= lay.panel_cols) return null; // 패널 밖(극단 좁음)
     return .{ .x = lay.x + @as(i32, @intCast(line.caret_col * lay.cw)), .y = lay.y, .w = lay.cw, .h = lay.ch };
 }
@@ -231,7 +248,8 @@ pub fn view(
     // row0: "> " + (…?) + query(창) + preedit(조합 중) (한 text op). prefix는 ASCII라 칸 수=바이트 수. 조합 글자는 query
     // 뒤에 같은 색으로 붙여 입력 가시성을 준다(IME 조합이 팝업에 즉시 보인다). 긴 검색어가 패널을 넘치면 inputLineView가
     // tail 창(선두 "…")으로 오른쪽 정렬해 방금 친 글자·caret이 잘려 안 보이던 문제를 없앤다(find와 같은 규칙).
-    const line = overlay_input.inputLineView(&state.input, promptCols(state), lay.panel_cols);
+    const shown = displayInput(state);
+    const line = overlay_input.inputLineView(&shown, promptCols(state), lay.panel_cols);
     const prompt_runs = try overlay_input.promptRuns(arena, state.promptText(), line); // 프롬프트+(…?)+query+preedit run 조립(find와 공유)
     try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = y }, .runs = prompt_runs, .role = .surface_fg } });
 

@@ -17,6 +17,14 @@
 //!                                                        워커의 요청이 페이지의 본문을 가져갔다(MED-2).
 //!   body-r1-slot-leak(rv-slot-leak)                       서로 다른 브라우저 34 개가 기록 켬 → 끔 → 닫기 — 모두 `net_record_state on` 을 받는다.
 //!                                                        고치기 전에는 끄기의 `Network.disable` 이 결과 자리를 새어 32 개 뒤로는 답이 없었다(LOW-1).
+//!
+//! W9d② 적대 리뷰 2 회차 항목(`body-r2-*` — 같은 sidecar 에서 `body-r1-slot-leak` 앞에 돈다):
+//!   body-r2-concurrent-same-url                           같은 주소의 POST 둘을 30 ms 떨어져 — 앞 것은 느리고(800 ms) 뒤 것이 먼저 끝난다(동시 POST
+//!                                                        /graphql 꼴), 여섯 쌍. 모두 제 본문(`x-n` 의 메아리)을 받고 틀린 본문은 없다. 고치기 전에는
+//!                                                        뒤 요청이 앞 요청 몫으로 제 기록을 건너뛰어 놓쳤고 앞 요청은 남은 둘 때문에 `ambiguous`(F1).
+//!   body-r2-worker-same-url-open-earlier                  같은 주소의 느린 페이지 요청(1.2 s)이 열린 동안 페이지와 전용 워커가 그 주소를 거의 같은 때
+//!                                                        받는다 — 어느 CEF 요청도 남의 본문을 받지 않는다(워커의 것은 본문이 없다, 페이지의 것은 맞거나
+//!                                                        `ambiguous`). 고치기 전에는 열린 앞 요청을 차례로 세어 워커의 기록이 페이지의 본문을 받았다(F2).
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -225,6 +233,29 @@ fn serveOne(conn: c_int) void {
         const body = std.fmt.bufPrint(&bb, "{{\"n\":\"{s}\"}}", .{nv}) catch return;
         return reply(conn, "200 OK", "application/json", "", body);
     }
+    // W9d② 적대 리뷰 2 회차 F1: 같은 주소의 POST 둘 — 앞 것(a)은 느리고 30 ms 뒤의 것(b)이 먼저 끝난다. 쌍마다 다른 주소(?r=k).
+    if (std.mem.eql(u8, path, "/rv2/gqlpage")) return reply(conn, "200 OK", html, "", "<!doctype html><title>gql</title><script>" ++ read_js ++
+        "function P(k,t){return F('/rv2/gql?r='+k,{method:'POST',headers:{'x-n':t+k,'content-type':'application/json'},body:'{}'})}" ++
+        "var k=0;function step(){if(k>=6){document.title='gdone';return}var j=k;P(j,'a');setTimeout(function(){P(j,'b')},30);k++;setTimeout(step,200)}" ++
+        "setTimeout(step,200)</script>gql");
+    if (std.mem.eql(u8, path, "/rv2/gql")) {
+        const nv = headerValue(head, "x-n");
+        os.sleepMs(if (nv.len > 0 and nv[0] == 'a') 800 else 10);
+        const body = std.fmt.bufPrint(&bb, "{{\"n\":\"{s}\"}}", .{nv}) catch return;
+        return reply(conn, "200 OK", "application/json", "", body);
+    }
+    // W9d② 적대 리뷰 2 회차 F2: 같은 주소의 느린 페이지 요청(s)이 열린 동안 페이지(p)와 전용 워커(w)가 그 주소를 받는다.
+    if (std.mem.eql(u8, path, "/rv2/wpage")) return reply(conn, "200 OK", html, "", "<!doctype html><title>wpage2</title><script>" ++ read_js ++
+        "var w=new Worker('/rv2/w.js');var i=0;function step(){if(i>=15){document.title='wdone';return}var k=i;var u='/rv2/echo?'+k;" ++
+        "F(u,{headers:{'x-n':'s'+k}});setTimeout(function(){w.postMessage(k);F(u,{headers:{'x-n':'p'+k}})},200);i++;setTimeout(step,400)}" ++
+        "w.onmessage=function(){};setTimeout(step,300)</script>wpage2");
+    if (std.mem.eql(u8, path, "/rv2/w.js")) return reply(conn, "200 OK", "application/javascript", "", "onmessage=function(e){var k=e.data;fetch('/rv2/echo?'+k,{headers:{'x-n':'w'+k}}).then(function(r){return r.text()}).catch(function(){})};");
+    if (std.mem.eql(u8, path, "/rv2/echo")) {
+        const nv = headerValue(head, "x-n");
+        os.sleepMs(if (nv.len > 0 and nv[0] == 's') 1200 else 15);
+        const body = std.fmt.bufPrint(&bb, "{{\"n\":\"{s}\"}}", .{nv}) catch return;
+        return reply(conn, "200 OK", "application/json", "", body);
+    }
     return reply(conn, "200 OK", "text/plain", "", "x");
 }
 
@@ -311,6 +342,48 @@ fn hasState(r: *Run, id: u64) bool {
 }
 fn isClosed(r: *Run, id: u64) bool {
     return r.closed.contains(id);
+}
+
+/// W9d② 적대 리뷰 2 회차 항목의 셈 — `at` 뒤의 그 주소 CEF 요청마다 받은 본문이 제 `x-n` 의 메아리인가(틀린 것은 앞 몇 개를 적는다).
+const Tally = struct {
+    total: usize = 0,
+    worker: usize = 0,
+    right: usize = 0,
+    wrong: usize = 0,
+    ambiguous: usize = 0,
+    other: usize = 0,
+    worker_captured: usize = 0,
+    notes: [600]u8 = undefined,
+    notes_len: usize = 0,
+};
+
+fn tally(r: *Run, at: usize, needle: []const u8) Tally {
+    var t: Tally = .{};
+    for (r.begins.items[at..]) |b| if (b.browser == rec_tab and std.mem.indexOf(u8, b.url, needle) != null) {
+        t.total += 1;
+        const is_worker = b.xn.len > 0 and b.xn[0] == 'w';
+        if (is_worker) t.worker += 1;
+        const x = r.body(rec_tab, b.request);
+        if (x.ends == 1 and x.state == .captured) {
+            if (is_worker) t.worker_captured += 1;
+            var want: [32]u8 = undefined;
+            const wnt = std.fmt.bufPrint(&want, "{{\"n\":\"{s}\"}}", .{b.xn}) catch "";
+            if (std.mem.eql(u8, x.data.items, wnt)) t.right += 1 else t.wrong += 1;
+            if (!std.mem.eql(u8, x.data.items, wnt) or is_worker) {
+                const piece = std.fmt.bufPrint(t.notes[t.notes_len..], " [req {d} x-n {s} got {s}]", .{ b.request, b.xn, x.data.items[0..@min(x.data.items.len, 20)] }) catch "";
+                t.notes_len += piece.len;
+            }
+        } else if (x.ends == 1 and x.state == .ambiguous) {
+            t.ambiguous += 1;
+        } else {
+            t.other += 1;
+            if (!is_worker) {
+                const piece = std.fmt.bufPrint(t.notes[t.notes_len..], " [req {d} x-n {s} {s}]", .{ b.request, b.xn, if (x.ends == 1) @tagName(x.state) else "(no end)" }) catch "";
+                t.notes_len += piece.len;
+            }
+        }
+    };
+    return t;
 }
 
 pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !void {
@@ -474,6 +547,24 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             }
         };
         report(wrong == 0 and worker_captured == 0 and page_other == 0 and page_begins > 0, "body-r1-worker-same-url", std.fmt.bufPrint(&detail, "page begins {d} · worker begins {d} · bodies right {d} · wrong {d} · page ambiguous {d} · page other {d} · worker captured {d}{s}", .{ page_begins, worker_begins, right, wrong, page_ambiguous, page_other, worker_captured, wrong_detail[0..wd_len] }) catch "");
+    }
+
+    // ── W9d② 적대 리뷰 2 회차 F1: 같은 주소의 동시 POST, 앞 것이 느리다 ──
+    {
+        const at = r.begins.items.len;
+        try r.navigate(rec_tab, "/rv2/gqlpage");
+        r.pump(4500);
+        const t = tally(&r, at, "/rv2/gql?");
+        report(t.total == 12 and t.right == t.total and t.wrong == 0, "body-r2-concurrent-same-url", std.fmt.bufPrint(&detail, "POSTs {d} · own body {d} · wrong {d} · other {d}{s}", .{ t.total, t.right, t.wrong, t.other, t.notes[0..t.notes_len] }) catch "");
+    }
+
+    // ── W9d② 적대 리뷰 2 회차 F2: 같은 주소의 앞 요청이 열린 동안 페이지와 워커 ──
+    {
+        const at = r.begins.items.len;
+        try r.navigate(rec_tab, "/rv2/wpage");
+        r.pump(9000);
+        const t = tally(&r, at, "/rv2/echo?");
+        report(t.total > 0 and t.wrong == 0 and t.worker_captured == 0, "body-r2-worker-same-url-open-earlier", std.fmt.bufPrint(&detail, "CEF requests {d} (worker {d}) · own body {d} · wrong {d} · ambiguous {d} · other {d} · worker captured {d}{s}", .{ t.total, t.worker, t.right, t.wrong, t.ambiguous, t.other, t.worker_captured, t.notes[0..t.notes_len] }) catch "");
     }
 
     // ── RV3: 켬 결과 자리의 샘 ──

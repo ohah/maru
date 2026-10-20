@@ -185,7 +185,21 @@ WT5 는 둘로 나눈다(2026-10-09) — 무엇이 실행되는지 보이는 일
   - rust-analyzer — `rust-analyzer.toml`·`Cargo.toml`(가장 가까운 것 — 빌드 스크립트·절차 매크로를 돌린다), `rust-toolchain.toml`·`rust-toolchain`(루트).
   - pyright — `pyrightconfig.json`·`pyproject.toml`(루트).
   - gopls — `go.work`·`go.mod`(가장 가까운 것).
-- 세션(`editor/lsp.zig` `configFilesText`): 신뢰 시트는 묻게 한 그 문서에서 찾은 줄(「• 이 서버가 읽는 저장소 설정: …」)을 출처 줄 뒤·경로 줄 앞에 두고(없으면 줄이 없다), 「Show Server Info」는 저장소 줄 뒤에 늘 한 줄(「설정 파일: …」·「설정 파일: 찾지 못함」) — 실행 파일 줄보다 앞이다(알림은 넘치면 끝부터 잘린다). 루트와 문서 사이 폴더 이름은 신뢰 전 저장소가 정하는 글자라 제어 문자는 공백으로 보인다(`rpc.displayByte`).
+  - **언어 서버 후보 확대 LS1**([계획](editor-lsp-servers-expand.md), 2026-10-20 — 각 서버의 공개 문서·소스로 정했다):
+    - sourcekit-lsp — `Package.swift`(가장 가까운 것 — SwiftPM 이 **빌드한다**), `.sourcekit-lsp/config.json`·`buildServer.json`·`compile_commands.json`(루트).
+    - Dart — `analysis_options.yaml`·`pubspec.yaml`(가장 가까운 것 — analyzer 플러그인을 선언하면 그 코드를 돌린다).
+    - csharp-ls — `.editorconfig`(가장 가까운 것). 솔루션·프로젝트 파일(`*.sln`·`*.csproj` — MSBuild 가 평가한다)은 이름이 패턴이라 표에 없다.
+    - Metals — `build.sbt`·`build.mill`·`build.sc`·`pom.xml`·`build.gradle(.kts)`·`.scalafmt.conf`·`.jvmopts`(루트 — 빌드 도구를 **띄운다**).
+    - jdtls — `pom.xml`·`build.gradle(.kts)`·`settings.gradle(.kts)`·`.classpath`·`.project`(루트 — Gradle 스크립트를 **실행한다**).
+    - kotlin-language-server — `build.gradle.kts`·`build.gradle`·`pom.xml`(가장 가까운 것)·`kls-classpath`(루트 — 이것들로 classpath 를 얻으려 **실행한다**).
+    - intelephense — `intelephense.config.json`(루트 — 클라이언트가 설정을 주지 않을 때 읽는다; maru 는 설정 요청을 거절한다).
+    - LuaLS — `.luarc.json`·`.luarc.jsonc`(루트), `.editorconfig`(가장 가까운 것). bash-language-server — `.editorconfig`(가장 가까운 것 — 포맷).
+      shellcheck 의 `.shellcheckrc` 는 서버가 본문을 stdin 으로 넘겨 어디서 찾는지 확인하지 못해 싣지 않았다.
+    - taplo — `.taplo.toml`·`taplo.toml`(루트).
+    - **저장소 설정을 읽지 않는 서버** — YAML·Dockerfile·JSON·CSS·HTML 서버(설정은 클라이언트가 보내는 것과 문서 안의 `$schema` 뿐이다). 표에
+      「읽지 않음」(빈 표)으로 올라 있고, 표에 없는 이름(`null`)과 다르다 — 정보 명령은 「찾지 못함」이 아니라 「이 서버는 저장소의 설정 파일을
+      읽지 않음」이라 말한다.
+- 세션(`editor/lsp.zig` `configFilesText`): 신뢰 시트는 묻게 한 그 문서에서 찾은 줄(「• 이 서버가 읽는 저장소 설정: …」)을 출처 줄 뒤·경로 줄 앞에 두고(없으면 줄이 없다), 「Show Server Info」는 저장소 줄 뒤에 늘 한 줄(「설정 파일: …」·「설정 파일: 찾지 못함」·읽지 않는 서버면 「설정 파일: 이 서버는 저장소의 설정 파일을 읽지 않음」) — 실행 파일 줄보다 앞이다(알림은 넘치면 끝부터 잘린다). 루트와 문서 사이 폴더 이름은 신뢰 전 저장소가 정하는 글자라 제어 문자는 공백으로 보인다(`rpc.displayByte`).
 - **한계(받아들인 것)**: 「서버가 실제로 읽었다」가 아니라 「이 서버가 읽는 자리에 있다」이다 — 서버의 설정(`initializationOptions`·사용자 설정 폴더)이 다른 파일을 가리키면 그것은 모른다. 시트는 저장소(서버·루트)마다 한 번 묻으므로 그 줄은 처음 묻게 한 문서 기준이다(다른 하위 폴더의 문서는 다른 `tsconfig.json` 을 쓸 수 있다 — 정보 명령은 지금 문서 기준). 표에 든 서버의 파일 이름은 각 서버의 문서·소스로 정했다 — 서버가 바뀌면 표를 고친다.
 - **적대적 검증(5회차)**: ① 폴더 이름의 개행이 시트에 가짜 안내 줄을 끼울 수 있었다 — 제어 문자를 공백으로(위); ② zls 표가 틀렸다(처음 루트의 `zls.json` — 사용자 설정 폴더의 것; `build.zig` 가 빠졌다 — zls 가 실행하는 바로 그 파일) — 고쳤다; ③ 판정자 자리 — LSPB43 의 「설정 줄 뒤에 경로 줄 셋」 위치 단언이 한 칸 어긋나 있었다(판정자 결함 — 고쳤다); ④ 표에 없는 서버면 정보 명령이 「찾지 못함」이라 거짓말한다 — 서버는 언제나 서버 이름표에서 오므로(`MARU_LSP_SERVER_OVERRIDE` 도 경로만 바꾼다) 방어 대신 **이름표 전부가 이 표에 있는지** 판정자(LSC1)가 문다; ⑤ 문서와 루트의 철자가 어긋나 「가장 가까운」 걸음이 루트에서 시작할 수 있나 — `rootFor` 가 문서 경로에서 구하고 `underRoot` 로 묶어 같은 철자다(결함 없음).
 - **종료:** `LSC1`(이름표의 모든 서버가 표를 가짐·TS 셋이 같은 표·표 밖 이름은 빈 표·zls 의 첫 줄은 `build.zig`·`zls.json` 없음), `LSC2`(가장 가까운 것이 이김·루트 위는 안 봄·「루트」 표는 문서 폴더를 안 봄·zls 의 하위 패키지·루트 밖 문서는 루트에서·모자란 버퍼), `LSPB43`(제품 경로 — 시트의 줄과 위치(경로 줄 셋 앞)·정보 명령의 줄·개행 든 폴더 이름이 한 줄로 남음·설정 없는 저장소는 시트에 줄이 없고 정보는 「찾지 못함」), `LSPB2`·`LSPB40`(시트 줄 수·순서).

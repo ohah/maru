@@ -69238,3 +69238,166 @@ test "U2ASYNC 쓰기 중 워크스페이스를 옮겨도 새 창에 entry를 붙
     try testing.expectEqual(@as(usize, 0), fx.fx.session.editor_batch_reserved_entries);
     try testing.expectEqual(@as(usize, 0), dst.session.editor_batch_reserved_entries);
 }
+
+// 프레임 tick과 actor 직접 poll을 모두 멈추고 제품 통지 drain만으로 진행시킨다.
+fn awaitSaveWakeForTest() !void {
+    const wake = @import("save/wake.zig");
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (@import("save/as.zig").pending() != 0 or @import("save/dispatch.zig").requestCount() != 0) {
+        _ = wake.deliverForTest();
+        if (std.Io.Clock.awake.now(testing.io).nanoseconds >= deadline) return error.SaveWakeTimedOut;
+        _ = usleep(1000);
+    }
+    _ = wake.deliverForTest();
+}
+
+test "SAVEWAKE 접수와 worker 완료만으로 틱 없이 첫 저장하고 중복 알림은 한 번 소비한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const wake = @import("save/wake.zig");
+    _ = wake.deliverForTest();
+    var fx = try FirstSaveFixture.init();
+    defer fx.deinit();
+    const generation = fx.fx.session.last_summary.metal_generation;
+    @import("save/as.zig").firstSave(fx.fx.session, fx.term, fx.path, false);
+    for (0..100) |_| wake.request();
+    try awaitSaveWakeForTest();
+    try fx.disk("foo");
+    try testing.expectEqualStrings(fx.path, fx.term.rt.editorDocument().path.?);
+    try testing.expect(!isDirty(fx.term));
+    try testing.expectEqual(generation, fx.fx.session.last_summary.metal_generation);
+    try testing.expect(!wake.deliverForTest());
+    try testing.expect(undoEdit(fx.fx.session, fx.term));
+    try testing.expect(redoEdit(fx.fx.session, fx.term));
+    try testing.expectEqualStrings("foo", fx.term.rt.editorDocument().opened.?.file.content);
+}
+
+test "SAVEWAKE IME 대기는 빈 drain을 반복하지 않고 입력 종료 통지로 재개한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const wake = @import("save/wake.zig");
+    _ = wake.deliverForTest();
+    var fx = try FirstSaveFixture.init();
+    defer fx.deinit();
+    fx.fx.session.ime_active = true;
+    @import("save/as.zig").firstSave(fx.fx.session, fx.term, fx.path, false);
+    try testing.expect(wake.deliverForTest());
+    try testing.expect(!wake.deliverForTest());
+    try testing.expect(fx.term.rt.editorDocument().path == null);
+    try testing.expectError(error.FileNotFound, fx.dir.dir.access(testing.io, "first.txt", .{}));
+    @import("../input.zig").imeEnd(fx.fx.session, null);
+    try awaitSaveWakeForTest();
+    try fx.disk("foo");
+    try testing.expect(!isDirty(fx.term));
+}
+
+test "SAVEWAKE 차단 worker 중 추가 편집과 반복 저장은 완료 통지에서 새 본문을 잇는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const wake = @import("save/wake.zig");
+    _ = wake.deliverForTest();
+    var fx = try FirstSaveFixture.init();
+    defer fx.deinit();
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer gate.set();
+    @import("save/as.zig").setGateForTests(&gate);
+    @import("save/as.zig").firstSave(fx.fx.session, fx.term, fx.path, false);
+    try testing.expect(wake.deliverForTest());
+    const end = std.Io.Clock.awake.now(testing.io).nanoseconds + std.time.ns_per_s;
+    while (!gate.entered.load(.acquire) and std.Io.Clock.awake.now(testing.io).nanoseconds < end) _ = usleep(1000);
+    try testing.expect(gate.entered.load(.acquire));
+    try testing.expect(insertText(fx.fx.session, fx.term, "!"));
+    @import("save_actions.zig").saveCommand(fx.fx.session, fx.term);
+    gate.set();
+    try awaitSaveWakeForTest();
+    try fx.disk("foo!");
+    try testing.expect(!isDirty(fx.term));
+    try testing.expect(undoEdit(fx.fx.session, fx.term));
+    try testing.expect(!std.mem.eql(u8, "foo!", fx.term.rt.editorDocument().opened.?.file.content));
+    try testing.expect(redoEdit(fx.fx.session, fx.term));
+    try testing.expectEqualStrings("foo!", fx.term.rt.editorDocument().opened.?.file.content);
+}
+
+test "SAVEWAKE 대상 변경과 디스크 충돌은 이벤트에서도 원문을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |conflict| {
+        const wake = @import("save/wake.zig");
+        _ = wake.deliverForTest();
+        var fx = try FirstSaveFixture.init();
+        defer fx.deinit();
+        var gate: @import("save/worker.zig").TestGate = .{};
+        defer gate.set();
+        @import("save/as.zig").setGateForTests(&gate);
+        @import("save/as.zig").firstSave(fx.fx.session, fx.term, fx.path, false);
+        try testing.expect(wake.deliverForTest());
+        if (conflict) try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "first.txt", .data = "external" }) else fx.term.rt.editorDocument().invalidateSaveTarget();
+        gate.set();
+        try awaitSaveWakeForTest();
+        try fx.disk(if (conflict) "external" else "foo");
+        try testing.expect(fx.term.rt.editorDocument().path == null);
+        try testing.expect(fx.term.file_entry == null);
+        try testing.expect(isDirty(fx.term));
+        try testing.expectEqual(@as(usize, 0), fx.fx.session.editor_batch_reserved_entries);
+    }
+}
+
+test "SAVEWAKE 모든 창 해제 뒤 늦은 알림과 빈 재개는 자원에 접근하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const wake = @import("save/wake.zig");
+    {
+        var fx = try FirstSaveFixture.init();
+        defer fx.deinit();
+        @import("save/as.zig").firstSave(fx.fx.session, fx.term, fx.path, false);
+        try awaitSaveWakeForTest();
+        wake.request();
+    }
+    try testing.expect(wake.deliverForTest());
+    try testing.expect(!wake.deliverForTest());
+    wake.resumePending();
+    try testing.expect(!wake.deliverForTest());
+}
+
+test "SAVEWAKE 닫기 확인 Enter의 IME 종료는 저장 큐 접수 전 대기도 재개한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const wake = @import("save/wake.zig");
+    _ = wake.deliverForTest();
+    var fx = try FirstSaveFixture.init();
+    defer fx.deinit();
+    @import("save/as.zig").firstSave(fx.fx.session, fx.term, fx.path, false);
+    try awaitSaveWakeForTest();
+    try testing.expect(insertText(fx.fx.session, fx.term, "!"));
+    const before = pane_ops.activePane(fx.fx.session).terms.items.len;
+    fx.fx.session.requestClose(.active_term);
+    try testing.expect(fx.fx.session.pending_confirm == .editor_save_close);
+    fx.fx.session.ime_active = true;
+    nativeCloseAccept(fx.fx.session);
+    try testing.expect(wake.deliverForTest());
+    try testing.expect(!wake.deliverForTest());
+    try testing.expectEqual(@as(usize, 0), @import("save/dispatch.zig").requestCount());
+    try testing.expectEqual(before, pane_ops.activePane(fx.fx.session).terms.items.len);
+    @import("../input.zig").imeEnd(fx.fx.session, null);
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (fx.fx.session.editor_save_close != null) {
+        _ = wake.deliverForTest();
+        if (std.Io.Clock.awake.now(testing.io).nanoseconds >= deadline) return error.SaveWakeTimedOut;
+        _ = usleep(1000);
+    }
+    try fx.disk("foo!");
+    try testing.expectEqual(before - 1, pane_ops.activePane(fx.fx.session).terms.items.len);
+    _ = wake.deliverForTest();
+}
+
+test "SAVEWAKE worker 없는 시작 전 거절도 실패를 정산하고 본문을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    _ = @import("save/wake.zig").deliverForTest();
+    var fx = try FirstSaveFixture.init();
+    defer fx.deinit();
+    @import("save/as.zig").firstSave(fx.fx.session, fx.term, fx.path, false);
+    try awaitSaveWakeForTest();
+    try testing.expect(insertText(fx.fx.session, fx.term, "!"));
+    _ = try @import("save/dispatch.zig").trySave(fx.fx.session, fx.term, null);
+    fx.term.rt.editorDocument().invalidateSaveTarget();
+    try awaitSaveWakeForTest();
+    try fx.disk("foo");
+    try testing.expect(isDirty(fx.term));
+    try testing.expectEqualStrings("foo!", fx.term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(undoEdit(fx.fx.session, fx.term));
+    try testing.expect(redoEdit(fx.fx.session, fx.term));
+}

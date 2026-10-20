@@ -4489,3 +4489,8 @@ ScreenCaptureKit 패널 이미지·native 접근성 확인·대화상자 종료�
 로컬 통과: 집중 그래프 16개(첫 저장 9개와 기존 소비자 회귀 2개), 전체 제품 152개·중립 규칙 45개.
 실제 AppKit 실측과 한계는 [첫 저장 계획](plans/editor-untitled-save-async.md)을 따른다.
 사람의 키보드·VoiceOver·전원 손실 직접 검증을 포함하지 않으며 CI·병합 상태는 PR로 확인한다.
+
+
+### 로컬 저장 메인 큐 통지
+
+제품 연결 구현. `test-editor-save-wake`는 렌더링 tick 없이 기존 저장 actor의 접수/완료·IME 재개·반복 저장·외부 충돌·대상 세대와 늦은 callback을 검사한다. 실제 Dispatch main run loop/worker join은 `test-editor-save-wake-native.py`, 알림 결함과 정상/복원 대조군은 `test-editor-save-wake-adversarial.py`로 검사한다. OS IME·전체 앱 종료와 화면의 첫 완료 표시까지 검증한 것으로 간주하지 않는다. [범위와 남은 검증](plans/editor-save-event-wake.md).

@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "main_queue.c.inc"
 #include <mach/mach_time.h>
 
 // [진단·present §10.7] shape_draw_list 한 호출의 단계별 시간(ns) — 마지막 호출 값. 문자열 조립(units·CFString·attributed),

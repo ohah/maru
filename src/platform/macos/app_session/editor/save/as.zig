@@ -195,6 +195,7 @@ fn aliasRelation(session: *host.AppSession, path: []const u8, file: std.Io.File,
     return reservations.namespaceRelation(evidence);
 }
 pub fn reply(session: *host.AppSession, id: u64, path: []const u8) void {
+    defer @import("wake.zig").request();
     const op = get(id) orelse return;
     if (op.completed or !op.taken or op.selected != null or op.token.origin.window != session.recovered_session_window_generation) return;
     const view = find(op, true) orelse {
@@ -261,6 +262,7 @@ pub fn reply(session: *host.AppSession, id: u64, path: []const u8) void {
 }
 /// 첫 저장도 Save As와 같은 문서/대상 예약 및 writer 수명을 쓴다. 이름 입력 UI는 caller가 소유한다.
 pub fn firstSave(session: *host.AppSession, term: *host.Term, path: []const u8, overwriting: bool) void {
+    defer @import("wake.zig").request();
     firstSaveFallible(session, term, path, overwriting) catch |err| {
         session.showNoticeKey(switch (err) {
             error.ExternalConflict => .editor_save_external_conflict,
@@ -406,6 +408,7 @@ fn canPublishEntries(op: *const Operation) bool {
 }
 
 fn finish(op: *Operation, success: bool, failure: ?anyerror) void {
+    defer @import("wake.zig").request();
     const view = find(op, false);
     if (failure) |err| if (view) |v| v.session.showResponseNotice(switch (err) {
         error.ExternalConflict => .editor_save_external_conflict,

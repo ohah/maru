@@ -218,6 +218,7 @@ fn retryPrepare(self: *AppSession) void {
     const st = &self.editor_format;
     const term = editorTerm(self, st.waiting_surface) orelse {
         st.waiting = false;
+        defer @import("save/wake.zig").resumePending();
         st.then_save = false;
         st.preparing = false;
         return;
@@ -239,6 +240,7 @@ fn retryPrepare(self: *AppSession) void {
 fn onExternal(self: *AppSession, r: *const format_process.Result) void {
     const st = &self.editor_format;
     st.waiting = false;
+    defer @import("save/wake.zig").resumePending();
     st.external_id = 0;
     const then_save = st.then_save;
     st.then_save = false;
@@ -255,6 +257,7 @@ fn finishPendingSaveWithNotice(self: *AppSession, late: bool, message: ?maru.edi
     const st = &self.editor_format;
     dropExternal(st);
     st.waiting = false;
+    defer @import("save/wake.zig").resumePending();
     st.then_save = false;
     const term = editorTerm(self, st.waiting_surface) orelse return;
     saveNowWithNotice(self, term, late, message);
@@ -322,6 +325,7 @@ pub fn onResponse(self: *AppSession, seq: u32, result: ?std.json.Value, enc: lsp
     const st = &self.editor_format;
     if (!st.waiting or seq != st.waiting_seq) return;
     st.waiting = false;
+    defer @import("save/wake.zig").resumePending();
     const then_save = st.then_save;
     st.then_save = false;
     const term = editorTerm(self, st.waiting_surface) orelse return;

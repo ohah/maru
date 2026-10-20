@@ -2438,6 +2438,23 @@ pub fn build(b: *std.Build) void {
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_first_save_async_tests.step.dependOn(&ripgrep_prepare.step);
     b.step("test-editor-first-save-async", "Run blocked-writer untitled first-save lifecycle tests").dependOn(&run_first_save_async_tests.step);
 
+    const save_wake_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"SAVEWAKE"},
+    });
+    const run_save_wake_tests = b.addRunArtifact(save_wake_tests);
+    run_save_wake_tests.addArg("--maru-expect-tests=12");
+    run_save_wake_tests.addArg("--maru-expect-passed=12");
+    run_save_wake_tests.setCwd(b.path("."));
+    if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_save_wake_tests.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_save_wake_tests.step.dependOn(&ripgrep_prepare.step);
+    b.step("test-editor-save-wake", "Run save notification lifecycle without frame ticks").dependOn(&run_save_wake_tests.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        const native_save_wake = b.addSystemCommand(&.{ "python3", "tools/test-editor-save-wake-native.py" });
+        native_save_wake.setCwd(b.path("."));
+        macos_only_test_step.dependOn(&native_save_wake.step);
+    }
+
     // **L2 규칙도 같은 이름으로 돈다.** 위 판정자는 배선을 재고 이쪽은 번호·이름 규칙을 잰다 —
     // 둘이 다른 스텝이면 한쪽만 돌려 놓고 「쟀다」고 말하게 된다. 모듈이 달라 artifact 는 둘이다
     // (Zig 는 별도 모듈의 test 를 안 모은다).

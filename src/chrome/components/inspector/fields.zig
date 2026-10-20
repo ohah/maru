@@ -3,7 +3,7 @@
 const std = @import("std");
 const i18n = @import("../../../i18n.zig");
 const metadata = @import("../../../inspector_metadata.zig");
-pub const Row = struct { key: []const u8, label: []const u8, value: []const u8 = "", heading: bool = false, missing: bool = false, field_path: []const u8 = "", meaning: []const u8 = "", raw_value: []const u8 = "", info: metadata.Info = .{ .source = .session_model } };
+pub const Row = struct { depth: usize = 0, element: ?@import("../../ui/inspection.zig").Key = null, branch: bool = false, expanded: bool = false, key: []const u8, label: []const u8, value: []const u8 = "", heading: bool = false, missing: bool = false, field_path: []const u8 = "", meaning: []const u8 = "", raw_value: []const u8 = "", info: metadata.Info = .{ .source = .session_model } };
 
 fn humanize(a: std.mem.Allocator, key: []const u8) ![]const u8 {
     const text = try a.dupe(u8, key);
@@ -121,7 +121,7 @@ fn specFor(path: []const u8) ?Spec {
 /// Add context from the canonical shared metadata without changing the raw JSON.
 pub fn decorate(a: std.mem.Allocator, root: std.json.Value, section: []const u8, rows: []Row) !void {
     for (rows) |*row| {
-        if (row.heading or row.key.len == 0) continue;
+        if (row.heading or row.key.len == 0 or row.element != null) continue;
         row.field_path = try std.fmt.allocPrint(a, "{s}.{s}", .{ section, row.key });
         row.raw_value = row.value;
         row.info = metadata.forField(root, row.field_path);

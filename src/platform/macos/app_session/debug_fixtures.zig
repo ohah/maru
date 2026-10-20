@@ -754,7 +754,11 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
             if (std.meta.stringToEnum(app_session_mod.inspector_ops.layout.Placement, std.mem.span(side))) |placement|
                 app_session_mod.inspector_ops.setPlacement(self, placement);
         }
-        if (std.c.getenv("MARU_INSPECTOR_WITH_DOCK") != null) dock_ops.openDockTo(self, .explorer);
+        if (std.c.getenv("MARU_INSPECTOR_WITH_DOCK")) |value| {
+            const name = std.mem.span(value);
+            // Exercise the real dock collectors, not synthetic inspection nodes.
+            dock_ops.openDockTo(self, if (std.mem.eql(u8, name, "scm")) .source_control else if (std.mem.eql(u8, name, "sessions")) .agent_sessions else .explorer);
+        }
         std.log.info("inspector capture opened={any}, ready={any}", .{ @import("inspector.zig").visible(self), self.surface_initialized });
         if (std.c.getenv("MARU_INSPECTOR_TAB")) |tab| {
             self.inspector.tab = std.meta.stringToEnum(maru.chrome.components.inspector.Tab, std.mem.span(tab)) orelse .overview;

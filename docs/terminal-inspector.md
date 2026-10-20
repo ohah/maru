@@ -7,6 +7,8 @@ unbind할 수 있다. 파일·SCM 도크와 별개인 독립 도구 화면이며
 
 기존 네 진단 탭은 선택한 **터미널 surface의 관측 상태**를 검사한다.
 Elements 탭은 [UI 요소 선택기](plans/ui-inspector.md) 계약으로 소유 창의 published UI tree를 검사한다.
+부모·자식 행을 접고 펼치거나 검색할 수 있으며, 행 선택과 화면 Pick은 같은 선택 identity를 쓴다.
+CLI `elements.tree`는 현재 검색/접힘을 반영한 계층이고 `nodes`는 최대 512개의 원래 발행 목록이다.
 
 ## GUI와 CLI의 공통 계약
 
@@ -31,7 +33,7 @@ ID는 GUI surface ID다. session-host runtime ID와 혼용하지 않는다.
 | Path/SSH | `path` | 최종 cwd와 출처·이유, OSC 7, 훅 cwd·host·신선도, SSH 목적지, 원격 SCM 후보 판정, 창의 Explorer 표시 상태 | 기존 cwd/SCM 결정 함수, OSC7 관측, agent hook slot, 파일 트리 상태 |
 | Terminal | `terminal` | 크기·커서·모드·semantic prompt·foreground pgid, 지원하는 scroll region | runtime observation과 lock 아래 renderSnapshot/core |
 | Events | `events` | 첫 진단 이후의 유한 이벤트 기록, 샘플 변경과 셸 protocol 이벤트 구분, eviction 수 | 유계 history의 sample 변화와 활성 local OSC7/133 drain |
-| Elements | `elements` | Pick 모드, hovered/selected 요소, source/ID/parent/generation·role·bounds·action/cursor, 지원 범위와 node 한도 | 화면·입력과 같은 published UiRectTree |
+| Elements | `elements` | 부모·자식 트리/검색/접힘, Pick 모드, hovered/selected 요소, source/ID/parent/generation·role·bounds·action/cursor, 지원 범위와 node 한도 | 화면·입력과 같은 published UiRectTree |
 
 Explorer 값은 대상 터미널 소유의 경로가 아니라 **그 창이 현재 표시하는 상태**다.
 Pin으로 다른 터미널을 고르면 대상의 cwd와 창의 Explorer root가 다를 수 있다.
@@ -44,7 +46,7 @@ Live는 어댑터의 poll 간격으로 갱신하고 Paused는 진단 화면만 �
 Refresh는 일시정지 중에도 새 스냅샷을 수집한다. 닫힌 고정 대상은 마지막 스냅샷과
 대상 종료 상태를 보존한다. 필터를 클릭한 뒤 타이핑하거나 붙여넣어 항목을 좁힌다. 열기만 하면 키보드 포커스는
 터미널에 남는다. 터미널을 클릭하면 필터 포커스를 해제한다.
-필터 위 커서는 텍스트 입력 모양, 버튼·탭 위는 손 모양, 본문은 화살표다.
+필터 위 커서는 텍스트 입력 모양, 버튼·탭과 선택 가능한 Elements 트리 행은 손 모양, 일반 진단 본문은 화살표다.
 붙어 있는 도크의 구분선은 방향에 맞는 좌우·상하 크기 조절 커서를 사용한다.
 분리 창에서도 같은 필터·버튼·본문 판정을 사용하며 view 밖으로 이동하면 화살표로 복원한다.
 버튼 hover 배경은 view·Inspector 영역을 벗어나거나 창 focus를 잃으면 해제한다. 커서 복원과 별개인 paint 상태다.

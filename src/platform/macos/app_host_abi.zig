@@ -4515,7 +4515,7 @@ pub export fn maru_macos_app_session_inspector_control_rect(session: ?*AppSessio
         return @intFromBool(d.w != 0 and d.h != 0);
     }
     const ops = session_mod.inspector_ops;
-    const rect = (if (id >= 100) maru.chrome.components.inspector.dataControlRect(self.inspector.tab, self.inspector.query[0..self.inspector.query_len], self.inspector.offset, self.inspector.json orelse "{}", ops.propsFor(self), scale, arena.allocator(), id) else maru.chrome.components.inspector.controlRect(ops.propsFor(self), scale, arena.allocator(), id)) orelse return 0;
+    const rect = (if (id == 6) maru.chrome.components.inspector.caretRectForTab(ops.propsFor(self), scale, arena.allocator(), self.inspector.tab) else if (id >= 100) maru.chrome.components.inspector.dataControlRect(self.inspector.tab, self.inspector.query[0..self.inspector.query_len], self.inspector.offset, self.inspector.json orelse "{}", ops.propsFor(self), scale, arena.allocator(), id) else maru.chrome.components.inspector.controlRect(ops.propsFor(self), scale, arena.allocator(), id)) orelse return 0;
     r[0] = @intCast(@max(rect.x, 0));
     r[1] = @intCast(@max(rect.y, 0));
     r[2] = rect.w;

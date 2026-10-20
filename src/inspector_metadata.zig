@@ -52,6 +52,8 @@ fn sourceFor(root: std.json.Value, key: []const u8) Source {
 /// Classification uses explicit producer facts, never guesses a missing value from zero/false.
 pub fn describe(root: std.json.Value, key: []const u8, value: std.json.Value) Info {
     var info: Info = .{ .source = sourceFor(root, key) };
+    // An empty filter is a measured UI state, not a missing observation.
+    if (std.mem.eql(u8, key, "elements.query") and value == .string) return info;
     const host = std.mem.eql(u8, text(root, "overview.backend"), "session_host");
     if (std.mem.eql(u8, key, "overview.runtime_id") and !host) return .{ .source = info.source, .availability = .not_applicable, .reason = .no_session_host };
     if (std.mem.eql(u8, key, "overview.window") and empty(value)) return .{ .source = info.source, .availability = .not_collected, .reason = .window_unbound };
@@ -146,6 +148,8 @@ test "inspector metadata separates absent producer, unsupported transport and me
     defer raw.deinit();
     try std.testing.expectEqual(Availability.not_applicable, describe(raw.value, "overview.runtime_id", .null).availability);
     try std.testing.expectEqual(Availability.not_collected, describe(raw.value, "overview.window", .null).availability);
+    try std.testing.expectEqual(Availability.available, describe(raw.value, "elements.query", .{ .string = "" }).availability);
+    try std.testing.expectEqual(Availability.not_collected, describe(raw.value, "elements.query", .null).availability);
     try std.testing.expectEqual(Availability.available, describe(raw.value, "terminal.mouse_tracking", .{ .bool = false }).availability);
     try std.testing.expectEqual(Availability.available, describe(raw.value, "terminal.cursor.row", .{ .integer = 0 }).availability);
     try std.testing.expectEqual(Availability.not_applicable, describe(raw.value, "path.hook_fresh", .{ .bool = false }).availability);

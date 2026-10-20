@@ -1775,3 +1775,20 @@ saved 기준·entry 게시·반복 저장·닫기 대상·배타 생성 결함�
 잘못된 범위 뒤 key 전체 rollback, snapshot OOM 뒤 재시도, 닫기/재열기의 stale owner 거절을 확인한다.
 후자는 `-Doptimize=ReleaseFast`로도 실행한다. 실제 OS 후보창·픽셀 검증을 대체하지 않는다.
 계약과 실제 재현 기록은 [명령 팔레트 IME 문맥](plans/command-palette-ime.md)을 따른다.
+
+## Elements 계층 탐색 검증
+
+앱 번들을 순차 빌드한 뒤 실행한다(동시에 번들 packager를 실행하지 않는다).
+
+```sh
+mise exec -- zig build test-inspector test-chrome-ui -j2
+mise exec -- zig build macos-app-bundle -j2
+python3 tools/inspector-tree-app/run.py --app zig-out/Maru.app/Contents/MacOS/maru-macos-app --output /tmp/maru-tree-새경로 --rounds 20
+python3 tools/inspector-tree-app/verify.py /tmp/maru-tree-새경로
+python3 tools/test-inspector-picker-adversarial.py
+```
+
+실제 파일·SCM·세션 도크, 다섯 Inspector 배치, 한·영·2×·Paused 상태를 포함한다.
+결과에는 회차별 가설·CLI 표본·native event report·Metal PNG와 바이너리 SHA256이 있다.
+NSEvent/Metal 검증이며 물리 HID·WindowServer 화면·실제 OS IME 증거와 구분한다.
+조회 계약은 [UI 요소 계획](plans/ui-inspector.md)을 따른다.

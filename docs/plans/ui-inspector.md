@@ -27,7 +27,7 @@
   paused GUI의 고정 표본과 CLI의 새 live 표본은 시각이 다를 수 있다.
 - UI 도구 상태는 workspace restore에 저장하지 않는다. 새 의존성·ABI 변경은 없다.
 
-## 구현과 검증
+## 첫 선택기 구현과 검증 (2026-10-20)
 
 구현 완료. 중립 모델·host 연결·Elements 표시·실제 NSEvent/Metal/CLI 하네스를 제공한다.
 최종 Debug/ReleaseFast 61+11개, Chrome UI 1,166개, CLI 703개와 전체 경계 검사를 통과했다.
@@ -63,3 +63,6 @@
   Codex archive를 만들고 제품 파일·SCM·세션 도크를 연다. 실제 NSEvent 클릭, native cursor,
   Metal readback과 CLI 왕복으로 선택·접기·검색·복원·Pick을 검사한다.
   테스트 fixture의 `MARU_INSPECTOR_WITH_DOCK=scm/sessions`는 해당 제품 도크를 연다.
+
+계층 탐색의 최종 Debug/ReleaseFast·Chrome UI·전체 경계·실제 앱 20회 및 추가 선택기 회귀 10회는
+[검증 매트릭스](../verification-matrix.md)의 Elements 절에 기록한다.

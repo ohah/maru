@@ -109,5 +109,5 @@ wire 확장, 웹 DevTools, SSH cwd 선택 정책 변경은 별도 이니셔티�
 ## 후속: UI 요소 선택기
 
 2026-10-20 사용자 승인으로 [별도 UI 요소 계획](ui-inspector.md)을 구현했다.
-Elements는 published tree의 hover/클릭 상세와 같은 CLI DTO를 제공하며,
+Elements는 published tree의 계층 탐색·검색·접힘, hover/클릭 상세와 같은 CLI DTO를 제공하며,
 terminal cell·미발행 chrome·웹 DOM은 지원하지 않는다. 검증은 검증 매트릭스의 UI 요소 절을 따른다.

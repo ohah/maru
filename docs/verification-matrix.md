@@ -27,6 +27,13 @@
   `read-only-controls.json`의 **20/20**에서 작업 파일과 git index가 그대로임을 확인했다.
 - Debug Inspector **65+11**, Chrome UI **1,184**, ReleaseFast Inspector **65+11** 통과.
   `/tmp/maru-tree-frozen-debug.log`, `/tmp/maru-tree-frozen-releasefast.log`.
+- 최종 전체 `check-boundaries -j4`, 문서 링크/줄 참조, fmt/diff 검사 통과.
+  `/tmp/maru-tree-final-boundaries.log`, `/tmp/maru-tree-docs-complete.log`.
+- 선택기 취소·Pause·도구 hover·음수 좌표·재열기 추가 회귀 **10/10** 통과.
+  `/tmp/maru-tree-frozen-picker-regression10/manifest.json` (같은 고정 앱).
+- artifact 판정자도 음성 10종과 정상·동등·복구 대조군을 통과했다.
+  `python3 -m unittest discover -s tools/inspector-tree-app -p 'test_*.py'` (**2개 test / 10개 negative subcase**).
+  `/tmp/maru-tree-artifact-controls.log`.
 - 모델 결함 변이 **10종**을 실제 컴파일해 행동 실패로 거부했다. 정상·동등·복구 대조군 통과.
   `/tmp/maru-picker-mutants-26t4thsp/manifest.json` (최종 inspection 소스와 동일).
   source/generation 무시, clip/배치 순서/배타 경계 무시, 부모 publication/source 혼합,

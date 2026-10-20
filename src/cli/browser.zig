@@ -55,7 +55,7 @@ pub const browser_help =
     \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
     \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
     \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page)
-    \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a 0600 file; a binary body needs --out; Chromium tabs)
+    \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a 0600 file, replacing it; a binary body needs --out; Chromium tabs)
     \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ◉ while recording)
     \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
     \\
@@ -1912,7 +1912,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 try w.writeAll("recording response bodies (");
                 try writePageText(gpa, w, strField(result.get("state")), false);
                 try w.writeAll(") — the tab title shows ◉; read them with network-request --body\n");
-            } else try w.writeAll("not recording response bodies\n");
+            } else try w.writeAll("not recording response bodies — the bodies already recorded stay readable until the permission is revoked or the tab closes\n"); // W9d② 적대 리뷰 1 회차 LOW-4: 끄기는 지우지 않는다
         },
         .handle_dialog => {
             try w.writeAll("answered ");
@@ -2163,7 +2163,7 @@ fn renderNetworkBody(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std
     else if (std.mem.eql(u8, body, "needs_body_permission"))
         "hidden — needs the permission to record this tab's bodies: maru browser network-record --on asks for it"
     else if (std.mem.eql(u8, body, "needs_cookie_permission"))
-        "hidden — this response carried another site's cookies or login: maru browser get-cookies on that site asks for its cookie permission"
+        "hidden — this response carried another site's cookies or login: navigate the tab to that site, then maru browser get-cookies asks for its cookie permission (it covers the tab's current site)"
     else if (std.mem.eql(u8, body, "before_body_permission"))
         "hidden — made before your permission to record bodies"
     else if (std.mem.eql(u8, body, "restarted"))
@@ -3432,7 +3432,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
         \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
         \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page)
-        \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a 0600 file; a binary body needs --out; Chromium tabs)
+        \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a 0600 file, replacing it; a binary body needs --out; Chromium tabs)
         \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ◉ while recording)
         \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
         \\
@@ -4585,7 +4585,7 @@ test "W9d②: 본문 렌더 — 글은 줄바꿈을 남기고 ESC·양방향 글
     try testing.expect(std.mem.indexOf(u8, out.written(), "/wB7") == null);
     out.clearRetainingCapacity();
     try testing.expect(try renderResponse(testing.allocator, head ++ "\"body_state\":\"needs_cookie_permission\"}}", .network_request, &out.writer));
-    try testing.expect(std.mem.indexOf(u8, out.written(), "body: hidden — this response carried another site's cookies or login: maru browser get-cookies") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "body: hidden — this response carried another site's cookies or login: navigate the tab to that site, then maru browser get-cookies asks for its cookie permission") != null);
     out.clearRetainingCapacity();
     try testing.expect(try renderResponse(testing.allocator, head ++ "\"body_state\":\"over_cap\",\"body_decoded_size\":2097152}}", .network_request, &out.writer));
     try testing.expect(std.mem.indexOf(u8, out.written(), "body: over_cap (2097152 bytes — over the 1 MiB body limit)\n") != null);
@@ -4598,7 +4598,7 @@ test "W9d②: 본문 렌더 — 글은 줄바꿈을 남기고 ESC·양방향 글
     try testing.expectEqualStrings("recording response bodies (starting) — the tab title shows ◉; read them with network-request --body\n", out.written());
     out.clearRetainingCapacity();
     try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"recording\":false,\"state\":\"off\"}}", .network_record, &out.writer));
-    try testing.expectEqualStrings("not recording response bodies\n", out.written());
+    try testing.expectEqualStrings("not recording response bodies — the bodies already recorded stay readable until the permission is revoked or the tab closes\n", out.written());
     out.clearRetainingCapacity();
     try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[{\"req\":2,\"method\":\"GET\",\"url\":\"https://a.test/j\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"status\":200,\"body_state\":\"captured\",\"body_size\":12},{\"req\":1,\"method\":\"GET\",\"url\":\"https://a.test/p.png\",\"type\":\"image\",\"state\":\"done\",\"start_ms\":1,\"status\":200,\"body_state\":\"not_text\"}],\"hidden_before_grant\":0,\"dropped\":0,\"full_details\":true,\"recording\":\"on\"}}", .network, &out.writer));
     try testing.expectEqualStrings("#2 GET 200 xhr https://a.test/j [body captured 12B]\n#1 GET 200 image https://a.test/p.png [body not_text]\n(recording response bodies: on)\n", out.written());

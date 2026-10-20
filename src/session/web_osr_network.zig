@@ -74,6 +74,9 @@ pub const Budget = struct {
     /// W9d②: 본문 바이트(요약·자세한 것과 따로 센다).
     body_bytes: usize = 0,
     body_cap: usize = global_body_cap_bytes,
+    /// W9d② 적대 리뷰 1 회차: 다 받은 본문에 매기는 차례(`Entry.body_order`) — 앱 상한에서는 탭과 무관하게 가장 먼저 받은 본문부터 버린다
+    /// (`web_osr` 의 앱 쪽 자리 내기). 전에는 이 탭의 것만 버려, 다른 탭 넷이 8 MiB 씩 채우면 다섯째 탭의 본문은 모두 `evicted` 였다.
+    body_clock: u64 = 0,
 };
 
 /// 본문의 상태(W9d② — maru 쪽). `none` 은 기록하지 않은 요청, `pending` 은 끝을 기다린다. 가운데는 sidecar 의 `NetBodyState` 그대로,
@@ -200,6 +203,13 @@ pub const Entry = struct {
     body_flags: msg.NetBodyFlags = .{},
     /// sidecar 가 센 풀어 낸 크기(`over_cap` 이 얼마였는지).
     body_decoded: u64 = 0,
+    /// 다 받은 차례(`Budget.body_clock` — 앱 상한에서 가장 먼저 받은 것부터 버린다).
+    body_order: u64 = 0,
+    /// W9d② 적대 리뷰 1 회차 MED-1: sidecar 가 설정이 꺼진 동안 이 응답을 덜어 보냈다(`net_response` 의 `stripped` — 적을 때 찍는다, 헤더의
+    /// P1c 와 같은 갈래). 그런 응답의 본문은 뒤에 설정을 켜도 꺼졌을 때의 투영(읽는 쪽 호스트가 응답을 보낸 곳을 덮는가)으로만 보인다 — 끈 동안
+    /// 덮이지 않는 호스트에서 maru 에 들어온 본문이 켠 뒤에 읽히지 않게(전에는 켜면 그 본문이 `captured` 로 읽혔고 같은 응답의 헤더는 덜어진
+    /// 채였다).
+    response_stripped: bool = false,
 
     /// 마지막 주소의 호스트(리다이렉트 뒤 — 응답을 보낸 곳).
     fn finalHost(self: *const Entry) []const u8 {
@@ -630,6 +640,7 @@ pub const Ring = struct {
         e.status = v.status;
         e.has_response = true;
         e.response_hsts = v.flags.hsts;
+        e.response_stripped = v.flags.stripped;
         if (!e.detail_evicted) {
             const old = e.response_headers.bytes.len;
             const headers = try dupeHeaders(gpa, v.headers, v.flags.headers_truncated, v.flags.stripped);
@@ -805,7 +816,14 @@ pub const Ring = struct {
         return null;
     }
 
-    /// `need` 바이트를 더 쥘 자리를 낸다 — 이 탭의 다른 다 받은 본문을 오래된 것부터 버린다(`evicted`). 다른 탭의 본문은 이 탭이 버리지 않는다.
+    /// W9d② 적대 리뷰 1 회차: 그 번호의 본문 frame 을 이 링이 받을 것인가(끝을 기다리는 기록이 있다) — 받지 않을 frame 때문에 다른 탭의 본문을
+    /// 버리지 않게(앱 상한의 자리 내기 전에 본다).
+    pub fn awaitsBody(self: *Ring, request: u64) bool {
+        return self.pendingBody(request) != null;
+    }
+
+    /// `need` 바이트를 더 쥘 자리를 낸다 — 이 탭의 다른 다 받은 본문을 오래된 것부터 버린다(`evicted`). 앱 상한은 부른 쪽이 먼저 탭과 무관하게
+    /// 가장 먼저 받은 본문부터 낸다(`web_osr.makeAppBodyRoom` — W9d② 적대 리뷰 1 회차); 여기서 앱 상한이 남는 것은 그래도 모자랄 때뿐이다.
     fn makeBodyRoom(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, keep: *const Entry, need: usize) bool {
         var i: usize = 0;
         while ((self.body_bytes + need > max_tab_body_bytes or budget.body_bytes + need > budget.body_cap) and i < self.entries.len) : (i += 1) {
@@ -839,16 +857,43 @@ pub const Ring = struct {
         e.body_decoded = v.decoded;
         if (v.state == .captured and e.body.items.len != v.size) return self.setBodyState(gpa, budget, e, .unavailable);
         self.setBodyState(gpa, budget, e, BodyState.fromWire(v.state));
-        if (v.state == .captured) e.body.shrinkAndFree(gpa, e.body.items.len);
+        if (v.state == .captured) {
+            e.body.shrinkAndFree(gpa, e.body.items.len);
+            budget.body_clock += 1;
+            e.body_order = budget.body_clock;
+        }
     }
 
-    /// 다 받은 본문을 모두 지운다(`discarded` — 본문 권한이 모두 사라졌거나 설정이 꺼졌다). 끝을 기다리는 것은 그대로 둔다(그 끝은 온다 —
-    /// 기록을 끄면 `recording_stopped`) — 다만 받던 바이트는 버린다.
+    /// 다 받은 본문을 모두 지운다(`discarded` — 본문 권한이 모두 사라졌거나 설정이 꺼졌다). 끝을 기다리던 것도 `discarded` 로 끝낸다(W9d② 적대
+    /// 리뷰 1 회차 LOW-2 — 전에는 그대로 두어, 이미 관이나 sidecar 의 줄에 있던 본문 frame 이 지운 뒤에 `captured` 로 들어앉았다). 부른 쪽은 그 탭의
+    /// 옛 세션 frame 을 더 받지 않는다(`web_osr` 의 세션 바닥).
     pub fn discardBodies(self: *Ring, gpa: std.mem.Allocator, budget: *Budget) void {
         var it = self.entries.iterator();
         while (it.nextPtr()) |e| {
-            if (e.body_state == .captured) self.setBodyState(gpa, budget, e, .discarded) else if (e.body.items.len > 0) self.freeBody(gpa, budget, e);
+            if (e.body_state == .captured or e.body_state == .pending) self.setBodyState(gpa, budget, e, .discarded) else if (e.body.items.len > 0) self.freeBody(gpa, budget, e);
         }
+    }
+
+    /// W9d② 적대 리뷰 1 회차 LOW-2: 그 번호의 본문을 기다리는 기록을 `discarded` 로 끝낸다(지운 뒤에 온 옛 세션의 끝 — 본문은 받지 않는다).
+    pub fn discardPending(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, request: u64) void {
+        const e = self.pendingBody(request) orelse return;
+        self.setBodyState(gpa, budget, e, .discarded);
+    }
+
+    /// W9d② 적대 리뷰 1 회차: 이 탭의 다 받은 본문 중 가장 먼저 받은 것(앱 상한에서 버릴 쪽 — `keep` 은 빼고). 없으면 null.
+    pub fn oldestBody(self: *Ring, keep: ?*const Entry) ?*Entry {
+        var best: ?*Entry = null;
+        var it = self.entries.iterator();
+        while (it.nextPtr()) |e| {
+            if (e == keep or e.body_state != .captured or e.body.items.len == 0) continue;
+            if (best == null or e.body_order < best.?.body_order) best = e;
+        }
+        return best;
+    }
+
+    /// 다 받은 본문 하나를 앱 상한으로 버린다(`evicted`).
+    pub fn evictBody(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, e: *Entry) void {
+        self.setBodyState(gpa, budget, e, .evicted);
     }
 
     // ── 읽기 ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -968,7 +1013,7 @@ fn bodyAccessOf(e: *const Entry, view: View, body: BodyView) policy.BodyAccess {
     const host = if (body.q.any_host) pageHost(e) else body.q.host;
     return policy.bodyAccess(.{
         .has_body_grant = body.q.who != null,
-        .response_visible = responseVisible(view, e),
+        .response_visible = bodyResponseVisible(view, e),
         .page_covered = bodyPageCovered(e, body.q),
         .after_grant = e.seq >= body.start,
         .body_host = host,
@@ -1017,6 +1062,14 @@ fn shownUrl(view: View, url: []const u8, host: []const u8, buf: []u8) []const u8
 /// 응답 쪽(상태·MIME·크기·응답 헤더)을 보일 수 있는가 — 응답을 보낸 곳(마지막 홉의 호스트)이 덮인다.
 fn responseVisible(view: View, e: *const Entry) bool {
     return view.covers(e.finalHost());
+}
+
+/// W9d② 적대 리뷰 1 회차 MED-1: 본문을 보일 수 있는 응답인가 — 응답 쪽이 보이고, 설정이 꺼진 동안 적은 응답(`response_stripped`)이면 지금 설정과
+/// 무관하게 꺼졌을 때의 투영으로도 덮인다(적을 때 찍은 덜어 내기는 켠 뒤에도 그대로 — 헤더의 P1c 와 같다).
+fn bodyResponseVisible(view: View, e: *const Entry) bool {
+    if (!responseVisible(view, e)) return false;
+    if (e.response_stripped) return policy.hostCovers(view.grant_host, e.finalHost());
+    return true;
 }
 
 const Matcher = struct {
@@ -2569,7 +2622,7 @@ test "W9d②: 본문 읽기는 64 KiB 조각 — 글은 글자 경계에서 자�
     }
 }
 
-test "W9d②: 상한 — 탭 8 MiB 를 넘으면 이 탭의 오래된 본문부터 evicted, 앱 32 MiB 도 이 탭에서만 내고, 기록이 버려지면 본문 바이트도 예산에서 빠진다" {
+test "W9d②: 상한 — 탭 8 MiB 를 넘으면 이 탭의 오래된 본문부터 evicted, 앱 32 MiB 가 그래도 모자라면(앱 쪽이 다른 탭에서 내지 못했다) 이 탭에서 내고, 기록이 버려지면 본문 바이트도 예산에서 빠진다" {
     var t: T = .{};
     defer t.deinit();
     t.ring.noteReader(7, true);
@@ -2825,4 +2878,62 @@ test "W9d② × 다시 시작 B4: 새 시도를 적지 못했거나(상한) 새 
     try testing.expectEqual(BodyState.restarted, t.ring.entryBySeq(s13).?.body_state);
     try testing.expectEqual(@as(usize, 0), t.budget.body_bytes);
     try testing.expectEqual(BodyState.pending, t.ring.entryBySeq(s13 + 1).?.body_state);
+}
+
+// 이 시험이 증명하는 것(W9d② 적대 리뷰 1 회차): ① 지우기(`discardBodies`)는 끝을 기다리던 기록도 `discarded` 로 끝내 늦게 온 frame 이 붙을
+// 자리가 없다(LOW-2). ② 설정이 꺼진 동안 덜어 낸 응답(`stripped`)의 본문은 지금 설정이 켜져 있어도 읽는 쪽 호스트가 응답을 보낸 곳을 덮을 때만
+// 보인다 — 적을 때 찍은 덜어 내기(MED-1). ③ 다 받은 본문에 받은 차례를 매기고 가장 먼저 받은 것을 고른다(앱 상한의 자리 내기 — `web_osr`).
+// 왜 중요한가 — 「끄고 지운다」·「덮이지 않는 호스트의 본문은 꺼진 동안 받지 않는다」 는 사용자의 결정이 뒤에 오는 frame·설정 켜기로 뒤집히지 않아야 한다.
+test "W9d② 적대 리뷰 1 회차: 지우기는 기다리던 본문도 끝낸다, 꺼진 동안 덜어 낸 응답의 본문은 켠 뒤에도 꺼졌을 때의 투영으로, 받은 차례로 가장 오래된 본문" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const bq: BodyQuery = .{ .who = 70, .any_host = true };
+    // ① 기다리던 것도 discarded — 늦은 frame 은 붙지 않는다.
+    try bodyBegin(&t, 1, "https://a.test/p", "a.test");
+    try t.ring.bodyData(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = 1, .offset = 0, .bytes = "half" });
+    try testing.expect(t.ring.awaitsBody(1));
+    t.ring.discardBodies(testing.allocator, &t.budget);
+    try testing.expect(!t.ring.awaitsBody(1));
+    try bodyFeed(&t, 1, "late", .{});
+    try testing.expectEqualStrings("discarded", try bodyStateOf(&t, 1, bq, ""));
+    try testing.expectEqual(@as(usize, 0), t.budget.body_bytes);
+    // ② 꺼진 동안 덜어 낸 응답 — 덮이지 않는 호스트(b.test)는 켠 뒤에도(투영 full) 숨고, 덮이는 호스트(a.test)는 보인다.
+    for ([_]struct { req: u64, url: []const u8 }{ .{ .req = 2, .url = "https://b.test/x" }, .{ .req = 3, .url = "https://a.test/y" } }) |c| {
+        const host = policy.hostOfUrl(c.url).?;
+        try t.ring.begin(testing.allocator, &t.budget, .{ .browser = 1, .request = c.req, .flags2 = .{ .body_expected = true }, .resource_type = 13, .url = c.url, .host = host, .site = "a.test" }, .{ .top_host = "a.test" });
+        try t.ring.response(testing.allocator, &t.budget, .{ .browser = 1, .request = c.req, .status = 200, .mime = "application/json", .flags = .{ .stripped = true } });
+        t.ring.end(.{ .browser = 1, .request = c.req, .received = 2 });
+        try bodyFeed(&t, c.req, "{}", .{});
+    }
+    const seq_b = t.ring.next_seq - 2;
+    const seq_a = t.ring.next_seq - 1;
+    {
+        const p = try t.ring.detail(testing.allocator, 7, .{ .grant_host = "a.test" }, seq_b, bq);
+        defer testing.allocator.free(p);
+        try testing.expect(std.mem.indexOf(u8, p, "\"body_state\":\"captured\"") == null);
+        const q = try t.ring.detail(testing.allocator, 7, .{ .grant_host = "a.test" }, seq_a, bq);
+        defer testing.allocator.free(q);
+        try testing.expect(std.mem.indexOf(u8, q, "\"body_state\":\"captured\"") != null);
+    }
+    // 켠 동안 적은(덜어 내지 않은) 다른 호스트의 응답은 그대로 보인다(설정이 켜져 있으면).
+    try bodyBegin(&t, 4, "https://c.test/z", "a.test");
+    try bodyFeed(&t, 4, "{}", .{});
+    {
+        const p = try t.ring.detail(testing.allocator, 7, .{ .grant_host = "a.test" }, t.ring.next_seq - 1, bq);
+        defer testing.allocator.free(p);
+        try testing.expect(std.mem.indexOf(u8, p, "\"body_state\":\"captured\"") != null);
+    }
+    // ③ 가장 먼저 받은 본문(받은 차례 — 기록 차례가 아니다): 4 의 본문을 받은 뒤 5 를 먼저 시작했지만 늦게 받는다.
+    try bodyBegin(&t, 5, "https://a.test/q", "a.test");
+    try bodyBegin(&t, 6, "https://a.test/r", "a.test");
+    try bodyFeed(&t, 6, "{}", .{});
+    try bodyFeed(&t, 5, "{}", .{});
+    try testing.expectEqual(seq_b, t.ring.oldestBody(null).?.seq); // 2(b.test — 위에서 숨겼을 뿐 다 받았다)가 가장 먼저 받았다
+    try testing.expect(t.ring.oldestBody(t.ring.entryBySeq(seq_b).?).?.seq == seq_a); // 버리지 않을 것(`keep`)은 건너뛴다
+    t.ring.evictBody(testing.allocator, &t.budget, t.ring.oldestBody(null).?); // 2
+    t.ring.evictBody(testing.allocator, &t.budget, t.ring.oldestBody(null).?); // 3
+    t.ring.evictBody(testing.allocator, &t.budget, t.ring.oldestBody(null).?); // 4
+    try testing.expectEqual(t.ring.next_seq - 1, t.ring.oldestBody(null).?.seq); // 6 이 5 보다 먼저 받았다
 }

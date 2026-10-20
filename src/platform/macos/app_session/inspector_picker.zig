@@ -84,6 +84,9 @@ pub fn select(self: *AppSession, key: inspect.Key, disclosure: bool) void {
     } else {
         s.picker_selected = inspect.identity(node);
         s.selected_field_len = 0;
+        // Selecting in the tree completes inspection just like selecting on the
+        // owner. Leaving Pick active would hide this selection behind hover.
+        cancel(self);
     }
     // An explicit tree interaction requests a fresh sample even while Paused,
     // just like Refresh. Background polling remains paused afterwards.

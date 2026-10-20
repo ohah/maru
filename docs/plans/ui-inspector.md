@@ -52,6 +52,7 @@
   함께 표시하고 검색 중 접힘을 무시한다. 검색을 지우면 기존 접힘이 복원된다.
 - 화면 Pick은 선택 경로의 부모만 펼치고 필터를 지우며 선택 노드까지 스크롤한다.
   트리 선택도 현재 발행 identity로 재검증하고 소유 창의 경계 강조와 상세에 연결한다.
+  Pick 활성 중 트리 행을 선택해도 Pick을 종료해 hover가 선택 경계를 가리지 않게 한다.
   사라진 요소와 다른 publication으로 바뀐 목록 행은 재선택하지 않는다.
 - `session inspect --json`의 `elements.tree`는 현재 검색/접힘을 반영한 preorder 행이다.
   각 행은 `key`, `parent`, `depth`, `children`, `expanded`, `matched`, `node`를 제공한다.

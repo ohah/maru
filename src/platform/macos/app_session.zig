@@ -101609,6 +101609,10 @@ test "Live inspector picker consumes selection down up and rechecks published ge
     session.mouse(3, 20, 20, 0, 0);
     try std.testing.expect(!session.inspector.picker_capture);
     try std.testing.expectEqual(@as(u64, 42), session.inspector.picker_selected.?.id);
+    session.inspector.picking = true;
+    inspector_ops.picker.select(session, .{ .source = .status_bar, .id = 42 }, false);
+    try std.testing.expect(!session.inspector.picking);
+    try std.testing.expect(session.inspector.picker_hover == null);
     inspector_ops.picker.select(session, .{ .source = .status_bar, .id = 42 }, true);
     try std.testing.expectEqual(@as(usize, 1), session.inspector.collapsed_len);
     inspector_ops.picker.select(session, .{ .source = .status_bar, .id = 42 }, true);

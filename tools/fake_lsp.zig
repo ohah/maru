@@ -11,6 +11,8 @@
 //! - `didOpen`/`didChange` → 그 문서의 `publishDiagnostics` 하나: 첫 줄 0..3 에 error, message `fake: <version>`·code `E1`, `version` 은
 //!   문서 version. 본문에 `STALE` 이 있으면 version 을 **하나 낮춰**(클라이언트가 버려야 한다). `BOOM` 이 있으면 즉시 exit 1(재시작).
 //!   `WARN` 이 있으면 severity 2 를 하나 더(둘째 줄 0..2). `INFO` 가 있으면 severity 3 을 첫 줄 0..1 에 하나 더(message 두 줄).
+//!   `PULLCAP` 이 있으면 message 가 `fake: <version> pull=<true|false>` 다(클라이언트가 `initialize` 에서 `textDocument.diagnostic` 을 알렸나 — pull 칸이
+//!   꺼진 주 서버엔 알리지 않는지 서버 쪽에서 잰다, LS2).
 //!   `LANGID` 가 있으면 message 가 `fake: <version> <didOpen 의 languageId>` 다(문서마다 그 방언의 값인지 — `.scss`·`.less`, 계획 editor-lsp-servers-expand).
 //! - `HANG` 이 있으면 stdout 을 **닫고 살아 있는다**(진단도 exit 도 없다) — 클라이언트는 EOF 를 「끝」으로 보고 죽여 재시작해야 한다.
 //! - `textDocument/hover` → contents(markdown): 펜스 `int fake` · `fake hover L<line>:C<char>` · `**bold** here` · 항목 14개(`- item N`,
@@ -60,6 +62,11 @@
 //!   `AUXFIX` → `AUX_FIXED`, 본문에 `AUXSTALL` 이 있으면 메뉴 요청에 답하지 않는다. `AUXSLOW` 면 메뉴 요청에 150ms 늦게 답한다. `AUXLAZY` 면 resolve 가 필요한 「aux: lazy」를 더 내고,
 //!   보조 역할의 resolve 는 첫 줄에 `# aux lazy` 를 넣는다(주 역할은 `// lazy`). 주 역할은 `quickfix`·`refactor`·
 //!   `source.organizeImports`·`source.fixAll` 을 알린다.
+//! - **pull 만 내는 주 서버 역할**(계획 editor-lsp-servers-expand LS2): 실행 파일 이름이 `tsgo` 면(판정자가 사본을 그 이름으로 두고
+//!   `MARU_LSP_SERVER_OVERRIDE` 를 건다) **주 서버**로 서되 파일 진단을 push 하지 않고, 클라이언트가 `textDocument.diagnostic` 을 알렸을 때만
+//!   `diagnosticProvider`(`interFileDependencies: true`)를 알린다(실서버 tsgo 와 같다). `textDocument/diagnostic` 에는 곧바로 `full` — 첫 줄 0..3 에
+//!   error `pull: <version> <languageId>`(code `P1`), 본문에 `PQUIET` 면 빈 목록. **열린 문서 어느 것에든** `XFILE` 이 있으면 모든 문서의 답에
+//!   `pull: cross`(code `P2`, 둘째 줄 0..1)를 더한다 — 한 파일이 다른 파일의 오류를 바꾸는 파일 간 의존을 흉내 낸다.
 //! - **ESLint 역할**(tooling §8.2u): 실행 파일 이름(argv[0])이 `vscode-eslint-language-server` 면(판정자가 저장소 `node_modules/.bin` 에 사본을
 //!   둔다) push 를 안 하고 `diagnosticProvider` 를 알린다(클라이언트가 `textDocument.diagnostic` 을 알렸을 때만, `MARU_FAKE_LSP_NOPULLCAP=1` 이면 안 알린다). 첫 `textDocument/diagnostic` 에서 `workspace/configuration`(`srv-c`)을 묻고 그 pull 은
 //!   답을 받은 뒤에 답한다 — 설정 객체(`validate: "on"`·`workingDirectory`·`experimental` 객체)가 아니면 실서버처럼 오류. 진단은 첫 줄 0..3 의 `eslint: <version> <didOpen 의 languageId>`(code `no-var`, source
@@ -168,6 +175,7 @@ pub fn main(init: std.process.Init) void {
         // Biome·oxlint 역할(AS4) — 보조 역할에 이름만 다르다.
         biome_mode = std.mem.eql(u8, base, "biome");
         oxlint_mode = std.mem.eql(u8, base, "oxlint");
+        pull_primary_mode = std.mem.eql(u8, base, "tsgo");
         if (biome_mode or oxlint_mode) auxiliary = true;
     } else |_| {}
     const noise = "fake: stderr noise\n";
@@ -212,6 +220,10 @@ var biome_mode = false;
 var oxlint_mode = false;
 /// ESLint 역할로 떴다 — pull 진단만, `workspace/configuration` 에 설정 객체를 받아야 검사한다.
 var eslint_mode = false;
+/// pull 만 내는 주 서버 역할로 떴다(LS2 — tsgo 꼴).
+var pull_primary_mode = false;
+/// 클라이언트가 `initialize` 에서 `textDocument.diagnostic` 을 알렸다(`PULLCAP` 이 진단에 싣는다).
+var client_announced_pull = false;
 /// 우리가 낸 설정 요청(`srv-c`)에 설정 객체(`validate: "on"`)로 답을 받았다 / 답을 기다리는 중이다.
 var eslint_config_ok = false;
 var eslint_config_asked = false;
@@ -892,6 +904,31 @@ fn handlePullDiagnostics(allocator: std.mem.Allocator, obj: std.json.ObjectMap, 
         return;
     }
     answerPull(allocator, id, uri);
+}
+
+/// pull 만 내는 주 서버의 pull(LS2 — tsgo 꼴) — 설정을 묻지 않고 곧바로 `full`. 파일 간 의존(`XFILE`)은 열린 문서 전부를 본다.
+fn answerPrimaryPull(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
+    var uri: []const u8 = "";
+    if (obj.get("params")) |p| if (p == .object) if (p.object.get("textDocument")) |td| if (td == .object) {
+        uri = str(td.object.get("uri")) orelse "";
+    };
+    var msg_buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "pull: {d} {s}", .{ docVersion(uri), docLang(uri) }) catch "pull";
+    const Diag = struct { range: struct { start: struct { line: u32, character: u32 }, end: struct { line: u32, character: u32 } }, severity: u8, message: []const u8, code: []const u8 };
+    var items: [2]Diag = undefined;
+    var n: usize = 0;
+    if (std.mem.indexOf(u8, docText(uri), "PQUIET") == null) {
+        items[n] = .{ .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 3 } }, .severity = 1, .message = msg, .code = "P1" };
+        n += 1;
+    }
+    const cross = for (&doc_texts) |*d| {
+        if (d.len > 0 and std.mem.indexOf(u8, d.text[0..d.text_len], "XFILE") != null) break true;
+    } else false;
+    if (cross) {
+        items[n] = .{ .range = .{ .start = .{ .line = 1, .character = 0 }, .end = .{ .line = 1, .character = 1 } }, .severity = 1, .message = "pull: cross", .code = "P2" };
+        n += 1;
+    }
+    sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = .{ .kind = "full", .items = items[0..n] } });
 }
 
 fn answerPull(allocator: std.mem.Allocator, id: std.json.Value, uri: []const u8) void {
@@ -1651,7 +1688,8 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         if (obj.get("params")) |p| if (p == .object) if (p.object.get("capabilities")) |c| if (c == .object) if (c.object.get("textDocument")) |td| if (td == .object) {
             client_pull = td.object.get("diagnostic") != null;
         };
-        const offer_pull = eslint_mode and client_pull and std.c.getenv("MARU_FAKE_LSP_NOPULLCAP") == null;
+        client_announced_pull = client_pull;
+        const offer_pull = (eslint_mode or pull_primary_mode) and client_pull and std.c.getenv("MARU_FAKE_LSP_NOPULLCAP") == null;
         // `MARU_FAKE_LSP_UTF16=1` 이면 제안과 무관하게 utf-16 을 고른다 — 클라이언트의 byte ↔ character 변환을 제품 경계에서 재는 데 쓴다.
         const force_utf16 = std.c.getenv("MARU_FAKE_LSP_UTF16") != null;
         negotiated_utf16 = !(utf8 and !force_utf16); // 협상 결과를 기억한다 — 자리를 읽고 내는 처리기가 같은 단위를 쓴다
@@ -1679,7 +1717,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     // 내는 kind 를 실서버처럼 알린다 — 클라이언트는 알린 kind 만 저장 시 묻는다(tooling §8.2u). 보조 역할은 ruff 꼴.
                     .codeActionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOACTCAP") == null) .{ .codeActionKinds = if (eslint_mode) eslint_action_kinds[0..] else if (biome_mode) biome_action_kinds[0..] else if (oxlint_mode) oxlint_action_kinds[0..] else if (auxiliary) aux_action_kinds[0..] else primary_action_kinds[0..], .resolveProvider = true } else null,
                     // pull 진단(ESLint 꼴 — §8.2u). 다른 역할은 없다(push).
-                    .diagnosticProvider = if (offer_pull) @as(?struct { identifier: []const u8, interFileDependencies: bool, workspaceDiagnostics: bool }, .{ .identifier = "eslint", .interFileDependencies = false, .workspaceDiagnostics = false }) else null,
+                    .diagnosticProvider = if (offer_pull) @as(?struct { identifier: []const u8, interFileDependencies: bool, workspaceDiagnostics: bool }, .{ .identifier = if (pull_primary_mode) "tsgo" else "eslint", .interFileDependencies = pull_primary_mode, .workspaceDiagnostics = false }) else null,
                     // semantic tokens(§8.2i) — legend 다섯(하나는 클라이언트가 모르는 이름·`variable` 은 무색). `MARU_FAKE_LSP_SEMFULL=1` 이면 range 없이
                     // full 만(clangd 꼴), `MARU_FAKE_LSP_NOSEMCAP=1` 이면 provider 없음.
                     // 접힘 3층(§8.2j) — `MARU_FAKE_LSP_NOFOLDCAP=1` 이면 provider 없음.
@@ -1715,7 +1753,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/diagnostic")) {
-        handlePullDiagnostics(allocator, obj, id orelse .null);
+        if (pull_primary_mode) answerPrimaryPull(allocator, obj, id orelse .null) else handlePullDiagnostics(allocator, obj, id orelse .null);
         return;
     }
     if (not_initialized) {
@@ -1998,6 +2036,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         const v = if (std.mem.indexOf(u8, text, "STALE") != null) version - 1 else version;
         var msg_buf: [64]u8 = undefined;
         const Diag = struct { range: struct { start: struct { line: u32, character: u32 }, end: struct { line: u32, character: u32 } }, severity: u8, message: []const u8, code: []const u8 };
+        if (pull_primary_mode) return; // tsgo 꼴도 파일 진단은 push 하지 않는다 — 주 서버의 pull 로만(LS2)
         if (eslint_mode) {
             // ESLint 꼴은 push 하지 않는다 — 클라이언트가 pull 로 물어야 한다. `ESLREFRESH` 면 다시 물어 달라고 한다(`workspace/diagnostic/refresh`).
             if (std.mem.indexOf(u8, text, "ESLREFRESH") != null and std.mem.eql(u8, method, "textDocument/didChange"))
@@ -2018,7 +2057,9 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             sendJson(allocator, .{ .jsonrpc = "2.0", .method = "textDocument/publishDiagnostics", .params = .{ .uri = uri, .version = v, .diagnostics = if (quiet) one[0..0] else one[0..] } });
             return;
         }
-        const msg = (if (std.mem.indexOf(u8, text, "LANGID") != null) std.fmt.bufPrint(&msg_buf, "fake: {d} {s}", .{ version, docLang(uri) }) else std.fmt.bufPrint(&msg_buf, "fake: {d}", .{version})) catch "fake";
+        const msg = (if (std.mem.indexOf(u8, text, "PULLCAP") != null)
+            std.fmt.bufPrint(&msg_buf, "fake: {d} pull={}", .{ version, client_announced_pull })
+        else if (std.mem.indexOf(u8, text, "LANGID") != null) std.fmt.bufPrint(&msg_buf, "fake: {d} {s}", .{ version, docLang(uri) }) else std.fmt.bufPrint(&msg_buf, "fake: {d}", .{version})) catch "fake";
         var diags: [3]Diag = undefined;
         var count: usize = 1;
         diags[0] = .{ .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 3 } }, .severity = 1, .message = msg, .code = "E1" };

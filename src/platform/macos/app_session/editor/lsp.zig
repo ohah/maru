@@ -135,11 +135,13 @@ pub const Client = struct {
     local_exe: ?[]u8 = null,
     /// 보조 서버를 띄운 까닭인 저장소 설정 파일(절대 경로, 소유 — 정보 명령이 보인다).
     aux_config: ?[]u8 = null,
-    /// pull 진단으로 받는 서버(보조 서버 표 — ESLint)와 `workspace/configuration` 에 답하는 서버. `initialize` 의 능력이 둘을 알린다.
-    pull_diagnostics: bool = false,
+    /// `workspace/configuration` 에 답하는 서버(보조 서버 표 — ESLint). pull 진단은 서버 표의 칸(`server.pull_diagnostics`)이다 — `initialize` 의
+    /// 능력이 둘을 알린다.
     answers_configuration: bool = false,
     /// 서버가 `diagnosticProvider` 를 냈다(그래야 묻는다).
     diagnostic_provider: bool = false,
+    /// 그 `diagnosticProvider` 가 `interFileDependencies` 를 알렸다(tsgo) — 문서를 보낼 때마다 다른 열린 문서도 다시 묻는다(`pullAfterSend`).
+    diagnostic_inter_file: bool = false,
     diagnostic_seq: u32 = 0,
     phase: Phase = .missing,
     proc: ?lsp_process.Process = null,
@@ -1559,7 +1561,7 @@ fn ensureClient(self: *AppSession, root: []const u8, server: lsp.servers.Server,
 fn ensureAuxClient(self: *AppSession, root: []const u8, aux: lsp.auxiliary.Auxiliary, term: *Term, config: []const u8) ?*Client {
     if (clientFor(self, root, aux.server)) |c| return c;
     const owned = self.allocator.dupe(u8, root) catch return null;
-    var c: Client = .{ .root = owned, .server = aux.server, .role = .auxiliary, .phase = .restarting, .grammar = term.rt.editor_grammar, .pull_diagnostics = aux.pull_diagnostics, .answers_configuration = aux.answers_configuration };
+    var c: Client = .{ .root = owned, .server = aux.server, .role = .auxiliary, .phase = .restarting, .grammar = term.rt.editor_grammar, .answers_configuration = aux.answers_configuration };
     c.aux_config = self.allocator.dupe(u8, config) catch null;
     if (termPath(term)) |path| {
         const fs: external_formatter.RealFs = .{ .io = self.io };
@@ -1639,7 +1641,7 @@ fn spawnClient(self: *AppSession, c: *Client, now_ms: u64) void {
     }
     var uri_buf: [std.fs.max_path_bytes * 3]u8 = undefined;
     const root_uri = fileUriBuf(c.root, &uri_buf) orelse return;
-    const msg = lsp.rpc.initializeRequest(self.allocator, root_uri, @intCast(std.c.getpid()), .{ .pull_diagnostics = c.pull_diagnostics, .configuration = c.answers_configuration }) catch return;
+    const msg = lsp.rpc.initializeRequest(self.allocator, root_uri, @intCast(std.c.getpid()), .{ .pull_diagnostics = c.server.pull_diagnostics, .configuration = c.answers_configuration }) catch return;
     defer self.allocator.free(msg);
     _ = send(self, c, msg);
 }
@@ -1930,6 +1932,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 c.highlight_supported = lsp.highlight.supportedFromResult(r.result); // §8.2p
                 c.selection_range_supported = lsp.selection_range.supportedFromResult(r.result); // §8.2q
                 c.diagnostic_provider = lsp.rpc.diagnosticProviderFromResult(r.result); // §8.2u — pull 진단
+                c.diagnostic_inter_file = lsp.rpc.diagnosticInterFileFromResult(r.result);
                 c.phase = .ready;
                 c.restarts = 0;
                 const msg = lsp.rpc.initializedNotification(self.allocator) catch return;
@@ -2057,7 +2060,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 if (answerConfiguration(self, c, q.id, q.params)) return;
             }
             // §8.2u — pull 서버가 다시 물어 달라고 한다(설정·의존 파일이 바뀌었다): `null` 로 답하고 그 서버의 문서를 다시 묻는다.
-            if (c.pull_diagnostics and std.mem.eql(u8, q.method, lsp.rpc.diagnostic_refresh_method)) {
+            if (c.server.pull_diagnostics and std.mem.eql(u8, q.method, lsp.rpc.diagnostic_refresh_method)) {
                 const ok = lsp.rpc.nullResult(self.allocator, q.id) catch return;
                 defer self.allocator.free(ok);
                 _ = send(self, c, ok);
@@ -2088,9 +2091,18 @@ fn answerConfiguration(self: *AppSession, c: *Client, id: std.json.Value, params
     return true;
 }
 
+/// 문서를 보낸 뒤의 pull(§8.2u) — 그 문서를 묻고, 서버가 파일 간 의존을 알렸으면(`diagnostic_inter_file`) 그 클라이언트의 다른 열린 문서도 다시
+/// 묻는다(한 파일의 타입이 다른 파일의 오류를 바꾼다 — push 서버라면 서버가 스스로 다시 게시하던 일이다). 문서를 보내는 두 자리(처음 붙이기·동기화)가
+/// 이것 하나를 부른다.
+fn pullAfterSend(self: *AppSession, c: *Client, d: *OpenDoc) void {
+    requestPull(self, c, d);
+    if (!c.diagnostic_inter_file) return;
+    for (c.docs.items) |*o| if (o != d) requestPull(self, c, o);
+}
+
 /// pull 진단을 묻는다(§8.2u) — pull 서버에 그 문서를 보낸 뒤마다. 이미 기다리는 것이 있으면 다시 물을 표시만(답이 오면 버리고 묻는다).
 fn requestPull(self: *AppSession, c: *Client, d: *OpenDoc) void {
-    if (!c.pull_diagnostics or !c.diagnostic_provider or c.phase != .ready or d.sent_version == 0) return;
+    if (!c.server.pull_diagnostics or !c.diagnostic_provider or c.phase != .ready or d.sent_version == 0) return;
     if (d.pull_seq != 0) {
         d.pull_dirty = true;
         return;
@@ -2387,7 +2399,7 @@ fn syncOne(self: *AppSession, c: *Client, term: *Term, mode: SyncMode) void {
             self.editor_lsp.sent_changes += 1;
         }
         d.sent_version = version;
-        requestPull(self, c, d); // §8.2u — pull 서버는 보낸 뒤에 물어야 검사한다
+        pullAfterSend(self, c, d); // §8.2u — pull 서버는 보낸 뒤에 물어야 검사한다
         return;
     }
     const path = termPath(term) orelse return;
@@ -2420,7 +2432,7 @@ fn syncOne(self: *AppSession, c: *Client, term: *Term, mode: SyncMode) void {
     }
     c.docs.appendAssumeCapacity(.{ .surface_id = term.surfaceId(), .document = pin, .uri = uri, .sent_version = v });
     committed = true;
-    requestPull(self, c, &c.docs.items[c.docs.items.len - 1]); // §8.2u
+    pullAfterSend(self, c, &c.docs.items[c.docs.items.len - 1]); // §8.2u
 }
 
 /// 문서 크기 상한(§3.0 의 상한과 같은 자리 — Full sync 라 전문이 프레임마다 갈 수 있다).

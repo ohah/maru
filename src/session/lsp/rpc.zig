@@ -125,8 +125,9 @@ fn requestIdOf(id_num: i64) ?RequestId {
 /// 위치 인코딩 — `initialize` 에서 utf-8 을 먼저 제안하고 서버가 고른 것을 쓴다(§8.2a).
 pub const PositionEncoding = enum { utf8, utf16 };
 
-/// 클라이언트마다 다른 능력(§8.2u) — 보조 서버 ESLint 는 pull 진단만 내고 `workspace/configuration` 을 묻는다. 주 서버에는 둘 다 알리지
-/// 않는다(tsgo 등이 push 에서 pull 로 바꾸면 지금 동작이 바뀐다).
+/// 클라이언트마다 다른 능력(§8.2u) — pull 진단은 서버 표가 그렇다고 적은 서버에만(`servers.Server.pull_diagnostics` — 보조 서버 ESLint, 주 서버
+/// tsgo·TS 7 의 `tsc`), `workspace/configuration` 은 고정 설정이 있는 보조 서버(ESLint)에만 알린다. 칸이 꺼진 서버엔 알리지 않는다(push 로 내는
+/// 서버가 pull 로 바꾸면 지금 동작이 바뀐다).
 pub const InitOptions = struct {
     /// `textDocument.diagnostic` 을 알린다(pull 진단).
     pull_diagnostics: bool = false,
@@ -136,6 +137,7 @@ pub const InitOptions = struct {
 
 pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid: i64, opts: InitOptions) error{OutOfMemory}![]u8 {
     const DiagnosticCaps = struct { dynamicRegistration: bool = false, relatedDocumentSupport: bool = false };
+    const RefreshCaps = struct { refreshSupport: bool = true };
     return std.json.Stringify.valueAlloc(allocator, .{
         .jsonrpc = "2.0",
         .id = initialize_id,
@@ -149,7 +151,7 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                 .textDocument = .{
                     .synchronization = .{ .dynamicRegistration = false, .didSave = true }, // §8.2k — rustc 진단은 저장에만 다시 돈다
                     .publishDiagnostics = .{ .versionSupport = true },
-                    .diagnostic = if (opts.pull_diagnostics) @as(?DiagnosticCaps, .{}) else null, // §8.2u — 보조 서버에만(없으면 키도 없다)
+                    .diagnostic = if (opts.pull_diagnostics) @as(?DiagnosticCaps, .{}) else null, // §8.2u — 칸이 켜진 서버에만(없으면 키도 없다)
                     .hover = .{ .contentFormat = [_][]const u8{ "markdown", "plaintext" } },
                     // 자동완성(§8.2g) — 스니펫은 받지 않는다(`snippetSupport = false` 면 서버가 평문 insertText 를 낸다). resolve 도 아직.
                     .completion = .{
@@ -213,7 +215,9 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                 },
                 // `inlayHint.refreshSupport` — rust-analyzer 는 색인이 끝나기 전엔 `[]` 를 내고 끝나면 `workspace/inlayHint/refresh` 를
                 // 보낸다(§8.2n 실측 2026-09-22). 이것을 안 받으면 서버가 뜬 뒤 연 파일의 힌트가 **영영** 안 온다.
-                .workspace = .{ .applyEdit = false, .configuration = opts.configuration, .workspaceFolders = false, .inlayHint = .{ .refreshSupport = true } },
+                // `diagnostics.refreshSupport` — pull 서버에만(§8.2u). tsgo 는 이것을 알린 클라이언트에만 `workspace/diagnostic/refresh` 를 보낸다 —
+                // 디스크의 파일이 바뀌면(다른 파일 저장·checkout·설치) 다시 물어 달라고(LS2 실측: 안 알리면 열린 문서의 「모듈 없음」이 고칠 때까지 남는다).
+                .workspace = .{ .applyEdit = false, .configuration = opts.configuration, .workspaceFolders = false, .inlayHint = .{ .refreshSupport = true }, .diagnostics = if (opts.pull_diagnostics) @as(?RefreshCaps, .{}) else null },
             },
         },
     }, .{ .emit_null_optional_fields = false });
@@ -259,14 +263,27 @@ pub fn diagnosticRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8
     }, .{});
 }
 
+fn diagnosticProviderValue(result: ?std.json.Value) ?std.json.Value {
+    const r = result orelse return null;
+    if (r != .object) return null;
+    const caps = r.object.get("capabilities") orelse return null;
+    if (caps != .object) return null;
+    return caps.object.get("diagnosticProvider");
+}
+
 /// `initialize` 결과에 `diagnosticProvider` 가 있나(pull 진단을 내는 서버).
 pub fn diagnosticProviderFromResult(result: ?std.json.Value) bool {
-    const r = result orelse return false;
-    if (r != .object) return false;
-    const caps = r.object.get("capabilities") orelse return false;
-    if (caps != .object) return false;
-    const prov = caps.object.get("diagnosticProvider") orelse return false;
+    const prov = diagnosticProviderValue(result) orelse return false;
     return prov == .object or (prov == .bool and prov.bool);
+}
+
+/// `diagnosticProvider.interFileDependencies` — 한 문서가 바뀌면 다른 문서의 진단도 바뀔 수 있다(tsgo: 한 파일의 타입이 다른 파일의 오류를 낸다).
+/// 그 서버엔 문서를 보낼 때마다 그 클라이언트의 다른 열린 문서도 다시 묻는다(§8.2u — push 서버라면 서버가 스스로 다시 게시하던 일이다).
+pub fn diagnosticInterFileFromResult(result: ?std.json.Value) bool {
+    const prov = diagnosticProviderValue(result) orelse return false;
+    if (prov != .object) return false;
+    const v = prov.object.get("interFileDependencies") orelse return false;
+    return v == .bool and v.bool;
 }
 
 /// pull 진단 응답(`DocumentDiagnosticReport`) — `full` 이면 `items`, `unchanged` 면 그대로 둔다. 모양이 틀리면 `null`.
@@ -1978,7 +1995,7 @@ test "CAK4 문맥 진단은 서버의 data(JSON 원문)와 source 를 그대로 
     try testing.expect(std.mem.indexOf(u8, without, "\"code\"") == null);
 }
 
-test "LSJ22 pull 진단 — 요청은 i32 안의 마지막 칸(20e8), classify, 결과 full·unchanged, provider 판정, 능력은 고른 클라이언트에만, 설정 응답은 items 수만큼 (tooling §8.2u)" {
+test "LSJ22 pull 진단 — 요청은 i32 안의 마지막 칸(20e8), classify, 결과 full·unchanged, provider·파일 간 의존 판정, 능력(pull·refresh·설정)은 고른 클라이언트에만, 설정 응답은 items 수만큼 (tooling §8.2u)" {
     const a = testing.allocator;
     const req = try diagnosticRequest(a, 7, "file:///r/a.ts");
     defer a.free(req);
@@ -2005,15 +2022,27 @@ test "LSJ22 pull 진단 — 요청은 i32 안의 마지막 칸(20e8), classify, 
     var none = try parse(a, "{\"capabilities\":{}}");
     defer none.deinit();
     try testing.expect(!diagnosticProviderFromResult(none.value));
+    // 파일 간 의존 — 객체의 `interFileDependencies: true` 만(ESLint 꼴은 키가 없다, tsgo 는 참).
+    try testing.expect(!diagnosticInterFileFromResult(caps.value));
+    try testing.expect(!diagnosticInterFileFromResult(none.value));
+    try testing.expect(!diagnosticInterFileFromResult(null));
+    var tsgo = try parse(a, "{\"capabilities\":{\"diagnosticProvider\":{\"interFileDependencies\":true,\"workspaceDiagnostics\":false}}}");
+    defer tsgo.deinit();
+    try testing.expect(diagnosticProviderFromResult(tsgo.value) and diagnosticInterFileFromResult(tsgo.value));
+    var off = try parse(a, "{\"capabilities\":{\"diagnosticProvider\":{\"interFileDependencies\":false}}}");
+    defer off.deinit();
+    try testing.expect(diagnosticProviderFromResult(off.value) and !diagnosticInterFileFromResult(off.value));
     // 능력 — 기본(주 서버)엔 pull 도 설정도 없다(키도 없다), 고른 클라이언트에만.
     const plain = try initializeRequest(a, "file:///r", 1, .{});
     defer a.free(plain);
     try testing.expect(std.mem.indexOf(u8, plain, "\"diagnostic\":") == null);
+    try testing.expect(std.mem.indexOf(u8, plain, "\"diagnostics\":") == null); // refresh 도 pull 서버에만
     try testing.expect(std.mem.indexOf(u8, plain, "\"configuration\":false") != null);
     const pull = try initializeRequest(a, "file:///r", 1, .{ .pull_diagnostics = true, .configuration = true });
     defer a.free(pull);
     try testing.expect(std.mem.indexOf(u8, pull, "\"diagnostic\":{\"dynamicRegistration\":false,\"relatedDocumentSupport\":false}") != null);
     try testing.expect(std.mem.indexOf(u8, pull, "\"configuration\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, pull, "\"diagnostics\":{\"refreshSupport\":true}") != null);
     // 설정 응답 — items 수만큼, id 는 서버의 것 그대로(문자열도).
     var q = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":\"c-1\",\"method\":\"workspace/configuration\",\"params\":{\"items\":[{\"section\":\"\"},{\"section\":\"\"}]}}");
     defer q.deinit();

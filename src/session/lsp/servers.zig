@@ -16,6 +16,9 @@ pub const Server = struct {
     /// 그 문법인데도 **이 서버가 다루지 않는 확장자**(대소문자 무시, 점 없이). 그런 문서에는 주 서버가 없다 — Bash 서버는 `.zsh` 에
     /// shellcheck 를 돌려 zsh shebang 파일마다 「ShellCheck only supports sh/bash…」 오류를 냈다(계획 editor-lsp-servers-expand LS1 실측).
     skip_extensions: []const []const u8 = &.{},
+    /// 파일 진단을 pull 로만 내는 서버(push 를 안 한다 — ESLint 2026-10-13 실측, tsgo 계획 editor-lsp-servers-expand LS2 실측). 그 서버의 클라이언트에만
+    /// `initialize` 에서 `textDocument.diagnostic` 을 알리고 문서를 보낼 때마다 묻는다(§8.2u). 주 서버·보조 서버가 같은 칸이다.
+    pull_diagnostics: bool = false,
 
     /// 그 경로의 문서를 다루나(`skip_extensions`).
     pub fn serves(self: Server, path: []const u8) bool {
@@ -39,10 +42,11 @@ const ts_native_install = "npm i -g @typescript/native-preview";
 const ts_legacy_install = "npm i -g typescript-language-server typescript@5";
 fn tsCandidates(comptime language_id: []const u8) [3]Server {
     return .{
-        .{ .exe = "tsgo", .args = &lsp_stdio, .language_id = language_id, .install = ts_native_install },
-        .{ .exe = "typescript-language-server", .args = &stdio, .language_id = language_id, .install = ts_legacy_install },
-        // typescript@7 의 `tsc` 는 같은 네이티브 LSP 다. TS 5 의 `tsc` 는 `--lsp` 를 몰라 곧 죽고 backoff 뒤 「실패」로 선다(계약이 그렇게 적었다).
-        .{ .exe = "tsc", .args = &lsp_stdio, .language_id = language_id, .install = ts_native_install },
+        // TS 7 네이티브는 파일 진단을 pull 로만 낸다 — push 는 tsconfig 의 진단뿐이다(계획 editor-lsp-servers-expand LS2 실측: 2026-01~07 판 전부).
+        .{ .exe = "tsgo", .args = &lsp_stdio, .language_id = language_id, .install = ts_native_install, .pull_diagnostics = true },
+        .{ .exe = "typescript-language-server", .args = &stdio, .language_id = language_id, .install = ts_legacy_install }, // push 로 낸다(실측)
+        // typescript@7 의 `tsc` 는 같은 네이티브 LSP 다(그래서 pull 도 같다). TS 5 의 `tsc` 는 `--lsp` 를 몰라 곧 죽고 backoff 뒤 「실패」로 선다(계약이 그렇게 적었다).
+        .{ .exe = "tsc", .args = &lsp_stdio, .language_id = language_id, .install = ts_native_install, .pull_diagnostics = true },
     };
 }
 const ts_candidates = tsCandidates("typescript");
@@ -84,7 +88,8 @@ pub fn candidatesFor(g: language.Grammar) []const Server {
         .json => &[_]Server{.{ .exe = "vscode-json-language-server", .args = &stdio, .language_id = "json", .install = "npm i -g vscode-langservers-extracted" }},
         .css => &[_]Server{.{ .exe = "vscode-css-language-server", .args = &stdio, .language_id = "css", .install = "npm i -g vscode-langservers-extracted" }},
         .html => &[_]Server{.{ .exe = "vscode-html-language-server", .args = &stdio, .language_id = "html", .install = "npm i -g vscode-langservers-extracted" }},
-        // 싣지 않는다(계획 「싣지 않는 것」 — 실측): Ruby 는 pull 진단만 내 LS2, SQL·Markdown·XML·DTD·Make 는 쓸 만한 서버가 없다.
+        // 싣지 않는다(계획 「싣지 않는 것」 — 실측): Ruby 는 범위 없는 전문 didChange 를 못 받아 LS4(계획 editor-lsp-servers-expand), SQL·Markdown·
+        // XML·DTD·Make 는 쓸 만한 서버가 없다.
         .none, .markdown, .ruby, .xml, .dtd, .make, .sql => &.{},
     };
 }
@@ -151,7 +156,7 @@ test "LSI1 이름표 — zig·c·cpp·objc·ts·tsx·js·rust·python·go 와 LS
     try testing.expectEqualStrings("--stdio", ts.args[1]);
     try testing.expectEqualStrings("typescriptreact", forGrammar(.tsx).?.language_id);
     try testing.expectEqual(@as(usize, 0), forGrammar(.zig).?.args.len);
-    // 싣지 않은 것(계획 editor-lsp-servers-expand 「싣지 않는 것」 — 실측). Ruby 는 pull 진단만 내 LS2 다.
+    // 싣지 않은 것(계획 editor-lsp-servers-expand 「싣지 않는 것」 — 실측). Ruby 는 LS4 다.
     inline for (.{ .none, .markdown, .ruby, .xml, .dtd, .make, .sql }) |g| try testing.expect(forGrammar(g) == null);
     // 설치 명령은 전부 있고 개행이 없다(한 줄을 입력한다).
     inline for (@import("type_info_fields").enumFields(language.Grammar)) |f| {
@@ -227,7 +232,29 @@ test "LSI3 언어 서버 후보 확대 LS1 — 열다섯의 실행 파일·인�
         try testing.expectEqualStrings(r.id, c[0].language_id);
         try testing.expectEqualStrings(r.id, languageIdFor(r.g).?);
         try testing.expectEqualStrings(r.install, c[0].install);
+        try testing.expect(!c[0].pull_diagnostics); // 열다섯은 push 로 낸다(실측)
     }
+}
+
+test "LSI8 TS 7 네이티브(`tsgo`·TS 7 의 `tsc`)는 파일 진단을 pull 로만 낸다 — 그 둘만 pull 칸이 켜지고 `typescript-language-server` 는 push; 주 서버 표에서 pull 칸이 켜진 자리는 TS·TSX·JS 마다 그 둘, 모두 여섯 (계획 editor-lsp-servers-expand LS2)" {
+    inline for (.{ .typescript, .tsx, .javascript }) |g| {
+        const c = candidatesFor(g);
+        try testing.expectEqualStrings("tsgo", c[0].exe);
+        try testing.expect(c[0].pull_diagnostics);
+        try testing.expectEqualStrings("typescript-language-server", c[1].exe);
+        try testing.expect(!c[1].pull_diagnostics);
+        try testing.expectEqualStrings("tsc", c[2].exe);
+        try testing.expect(c[2].pull_diagnostics);
+    }
+    // 표를 훑어 **켜진 자리를 센다** — pull 칸은 실측으로 push 를 안 낸 서버에만(켜면 그 서버에 묻는 요청이 문서마다 늘고, 꺼 두면 진단이 영영 안 온다).
+    var n: usize = 0;
+    for (std.enums.values(language.Grammar)) |g| for (candidatesFor(g)) |s| {
+        if (s.pull_diagnostics) {
+            try testing.expect(std.mem.eql(u8, s.exe, "tsgo") or std.mem.eql(u8, s.exe, "tsc"));
+            n += 1;
+        }
+    };
+    try testing.expectEqual(@as(usize, 6), n);
 }
 
 test "LSI4 문서마다 — CSS 문법의 `.scss`·`.less` 는 그 방언의 languageId, Bash 서버는 `.zsh` 를 안 다룬다(LS1 실측) (계획 editor-lsp-servers-expand)" {

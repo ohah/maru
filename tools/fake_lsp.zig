@@ -11,6 +11,8 @@
 //! - `didOpen`/`didChange` → 그 문서의 `publishDiagnostics` 하나: 첫 줄 0..3 에 error, message `fake: <version>`·code `E1`, `version` 은
 //!   문서 version. 본문에 `STALE` 이 있으면 version 을 **하나 낮춰**(클라이언트가 버려야 한다). `BOOM` 이 있으면 즉시 exit 1(재시작).
 //!   `WARN` 이 있으면 severity 2 를 하나 더(둘째 줄 0..2). `INFO` 가 있으면 severity 3 을 첫 줄 0..1 에 하나 더(message 두 줄).
+//!   `SYNCSUM` 이 있으면 message 가 `fake: <version> sum=<사본의 FNV-1a 32 16진 8자리> rl=<range 없이 온 전문 수> rj=<거부한 변경 수>` 다
+//!   (LS3 — didChange 는 받은 range 를 사본에 적용하고, 사본 밖 위치는 거부한다; 판정자가 maru 본문의 해시와 맞대 본다).
 //!   `PULLCAP` 이 있으면 message 가 `fake: <version> pull=<true|false>` 다(클라이언트가 `initialize` 에서 `textDocument.diagnostic` 을 알렸나 — pull 칸이
 //!   꺼진 주 서버엔 알리지 않는지 서버 쪽에서 잰다, LS2).
 //!   `LANGID` 가 있으면 message 가 `fake: <version> <didOpen 의 languageId>` 다(문서마다 그 방언의 값인지 — `.scss`·`.less`, 계획 editor-lsp-servers-expand).
@@ -275,7 +277,7 @@ fn setDocMode(uri: []const u8, mode: DefMode) void {
 }
 
 /// 문서 본문을 uri 별로 기억한다(signatureHelp 가 caret 앞을 본다). 상한 8 문서·64 KB.
-const DocText = struct { uri: [1024]u8 = undefined, len: usize = 0, text: [65536]u8 = undefined, text_len: usize = 0, version: i64 = 0, lang: [32]u8 = undefined, lang_len: usize = 0 };
+const DocText = struct { uri: [1024]u8 = undefined, len: usize = 0, text: [65536]u8 = undefined, text_len: usize = 0, version: i64 = 0, lang: [32]u8 = undefined, lang_len: usize = 0, rangeless: u32 = 0, rejects: u32 = 0 };
 var doc_texts: [8]DocText = @as([8]DocText, @splat(.{}));
 
 fn setDocText(uri: []const u8, text: []const u8, version: i64) void {
@@ -314,6 +316,76 @@ fn docLang(uri: []const u8) []const u8 {
 fn docVersion(uri: []const u8) i64 {
     for (&doc_texts) |*d| if (d.len == uri.len and std.mem.eql(u8, d.uri[0..d.len], uri)) return d.version;
     return 0;
+}
+
+fn docSlot(uri: []const u8) ?*DocText {
+    for (&doc_texts) |*d| if (d.len == uri.len and std.mem.eql(u8, d.uri[0..d.len], uri)) return d;
+    return null;
+}
+
+/// LS3 — didChange 의 변경들을 **서버 사본에 차례로 적용한다**(실서버처럼 — 전에는 첫 변경의 `text` 를 통째로 썼다). range 가 있으면 그 자리를
+/// 갈고, 없으면 전문으로 바꾸며 그 수를 센다(`rangeless`). 위치는 협상한 단위, 줄은 maru 와 같은 모델(`\n` 경계, CRLF 의 `\r` 은 줄 내용 밖).
+/// **사본 밖 위치는 거부한다**(줄이 없거나 글자가 줄 길이를 넘는다 — ruby-lsp 가 그렇다) — 그 변경을 버리고 사본은 그대로, `rejects` 를 센다.
+/// 판정자는 `SYNCSUM` 표식으로 사본의 해시·두 수를 진단에 받아 maru 본문과 맞대 본다.
+var splice_a: [65536]u8 = undefined;
+var splice_b: [65536]u8 = undefined;
+fn applyChanges(uri: []const u8, cc: []const std.json.Value) []const u8 {
+    const d = docSlot(uri) orelse return "";
+    var cur: []u8 = splice_a[0..d.text_len];
+    @memcpy(cur, d.text[0..d.text_len]);
+    for (cc) |item| {
+        if (item != .object) continue;
+        const t = str(item.object.get("text")) orelse continue;
+        const r = item.object.get("range") orelse {
+            d.rangeless += 1;
+            if (t.len > splice_a.len) continue;
+            @memcpy(splice_a[0..t.len], t);
+            cur = splice_a[0..t.len];
+            continue;
+        };
+        const lo = rangeOffset(cur, r, "start");
+        const hi = rangeOffset(cur, r, "end");
+        if (lo == null or hi == null or lo.? > hi.? or lo.? + t.len + (cur.len - hi.?) > splice_b.len) {
+            d.rejects += 1;
+            continue;
+        }
+        const n = lo.? + t.len + (cur.len - hi.?);
+        @memcpy(splice_b[0..lo.?], cur[0..lo.?]);
+        @memcpy(splice_b[lo.? .. lo.? + t.len], t);
+        @memcpy(splice_b[lo.? + t.len .. n], cur[hi.?..]);
+        @memcpy(splice_a[0..n], splice_b[0..n]);
+        cur = splice_a[0..n];
+    }
+    return cur;
+}
+
+/// range 의 한 끝(`which` — `start`·`end`) → 사본의 byte. 사본 밖이면 `null`.
+fn rangeOffset(text: []const u8, r: std.json.Value, which: []const u8) ?usize {
+    if (r != .object) return null;
+    const p = r.object.get(which) orelse return null;
+    if (p != .object) return null;
+    const line = int(p.object.get("line")) orelse return null;
+    const ch = int(p.object.get("character")) orelse return null;
+    if (line < 0 or ch < 0) return null;
+    var start: usize = 0;
+    var l: i64 = 0;
+    while (l < line) : (l += 1) start = (std.mem.indexOfScalarPos(u8, text, start, '\n') orelse return null) + 1;
+    var stop = std.mem.indexOfScalarPos(u8, text, start, '\n') orelse text.len;
+    if (stop > start and stop < text.len and text[stop - 1] == '\r') stop -= 1; // CRLF 의 `\r` 은 줄 내용 밖
+    const content = text[start..stop];
+    var units: i64 = 0;
+    var bi: usize = 0;
+    while (units < ch) {
+        if (bi >= content.len) return null; // 줄 길이를 넘는다
+        const n = std.unicode.utf8ByteSequenceLength(content[bi]) catch 1;
+        if (negotiated_utf16) {
+            const cp = std.unicode.utf8Decode(content[bi..@min(bi + n, content.len)]) catch 0xFFFD;
+            units += if (cp > 0xFFFF) 2 else 1;
+        } else units += @intCast(n);
+        bi += @max(1, n);
+    }
+    if (units != ch) return null; // 글자 가운데를 가리킨다
+    return start + bi;
 }
 
 fn docText(uri: []const u8) []const u8 {
@@ -2018,9 +2090,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         const version = int(td.object.get("version")) orelse 0;
         const text: []const u8 = blk: {
             if (str(td.object.get("text"))) |t| break :blk t;
-            if (params.object.get("contentChanges")) |cc| if (cc == .array and cc.array.items.len > 0 and cc.array.items[0] == .object) {
-                if (str(cc.array.items[0].object.get("text"))) |t| break :blk t;
-            };
+            if (params.object.get("contentChanges")) |cc| if (cc == .array) break :blk applyChanges(uri, cc.array.items);
             break :blk "";
         };
         no_hover = std.mem.indexOf(u8, text, "NOHOVER") != null;
@@ -2057,7 +2127,10 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             sendJson(allocator, .{ .jsonrpc = "2.0", .method = "textDocument/publishDiagnostics", .params = .{ .uri = uri, .version = v, .diagnostics = if (quiet) one[0..0] else one[0..] } });
             return;
         }
-        const msg = (if (std.mem.indexOf(u8, text, "PULLCAP") != null)
+        const sync_slot = docSlot(uri);
+        const msg = (if (std.mem.indexOf(u8, text, "SYNCSUM") != null)
+            std.fmt.bufPrint(&msg_buf, "fake: {d} sum={x:0>8} rl={d} rj={d}", .{ version, std.hash.Fnv1a_32.hash(text), if (sync_slot) |sl| sl.rangeless else 0, if (sync_slot) |sl| sl.rejects else 0 })
+        else if (std.mem.indexOf(u8, text, "PULLCAP") != null)
             std.fmt.bufPrint(&msg_buf, "fake: {d} pull={}", .{ version, client_announced_pull })
         else if (std.mem.indexOf(u8, text, "LANGID") != null) std.fmt.bufPrint(&msg_buf, "fake: {d} {s}", .{ version, docLang(uri) }) else std.fmt.bufPrint(&msg_buf, "fake: {d}", .{version})) catch "fake";
         var diags: [3]Diag = undefined;

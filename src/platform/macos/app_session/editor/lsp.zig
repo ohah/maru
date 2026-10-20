@@ -103,10 +103,19 @@ const OpenDoc = struct {
     uri: []u8,
     /// 서버에 보낸 마지막 version.
     sent_version: u64,
+    /// 서버에 보낸 마지막 본문의 끝(§8.2a 「동기화」 — 다음 didChange 의 range 끝, 협상한 단위). `null` 이면 그 본문에 서버마다 줄 수가 갈리는
+    /// 글자가 있었다 — 다음 didChange 는 range 없는 전문이다. 보내는 세 자리가 `markSent` 하나로 sent_version 과 함께 갱신한다.
+    sent_end: ?lsp.rpc.Position = null,
     /// pull 진단(§8.2u) — 대기 중인 요청의 seq(0 = 없음), 그때 서버가 본 version, 기다리는 사이 다시 보냈다(답을 버리고 다시 묻는다).
     pull_seq: u32 = 0,
     pull_version: u64 = 0,
     pull_dirty: bool = false,
+
+    /// 이 문서를 서버에 보냈다(didOpen·didChange) — version 과 그 본문의 끝을 함께 적는다.
+    fn markSent(self: *OpenDoc, version: u64, content: []const u8, lines: maru.session.editor.line_index.LineIndex, enc: lsp.rpc.PositionEncoding) void {
+        self.sent_version = version;
+        self.sent_end = lsp.position.wholeRangeEnd(content, lines, enc);
+    }
 
     fn matches(self: OpenDoc, term: *Term) bool {
         if (self.retiring) return false;
@@ -2376,7 +2385,7 @@ fn gateTrust(self: *AppSession, c: *Client, doc_path: ?[]const u8) void {
 }
 
 /// 밀린 쓰기가 있을 때 전문 didChange 를 어떻게 하나. `.coalesce` 는 tick 의 동기화 — 밀린 것이 빠질 때까지 **새로 쌓지 않는다**
-/// (Full sync 라 나중의 전문 하나가 앞의 것들을 대신한다; §8.2a 「프레임당 한 번 최신 본문」). `.now` 는 위치 요청 직전 — 서버가
+/// (전문이라 나중의 전문 하나가 앞의 것들을 대신한다 — range 의 끝은 서버가 마지막으로 받은 본문의 것이다; §8.2a 「프레임당 한 번 최신 본문」). `.now` 는 위치 요청 직전 — 서버가
 /// 지금 본문을 알아야 그 요청의 위치가 맞으므로 밀려 있어도 보낸다.
 const SyncMode = enum { coalesce, now };
 
@@ -2393,12 +2402,12 @@ fn syncOne(self: *AppSession, c: *Client, term: *Term, mode: SyncMode) void {
             defer self.allocator.free(msg);
             if (!send(self, c, msg)) return;
         } else {
-            const msg = lsp.rpc.didChangeFull(self.allocator, d.uri, @intCast(version), opened.file.content) catch return;
+            const msg = lsp.rpc.didChange(self.allocator, d.uri, @intCast(version), d.sent_end, opened.file.content) catch return;
             defer self.allocator.free(msg);
             if (!send(self, c, msg)) return;
             self.editor_lsp.sent_changes += 1;
         }
-        d.sent_version = version;
+        d.markSent(version, opened.file.content, opened.file.lines, c.encoding);
         pullAfterSend(self, c, d); // §8.2u — pull 서버는 보낸 뒤에 물어야 검사한다
         return;
     }
@@ -2430,12 +2439,13 @@ fn syncOne(self: *AppSession, c: *Client, term: *Term, mode: SyncMode) void {
         self.allocator.free(uri);
         return;
     }
-    c.docs.appendAssumeCapacity(.{ .surface_id = term.surfaceId(), .document = pin, .uri = uri, .sent_version = v });
+    c.docs.appendAssumeCapacity(.{ .surface_id = term.surfaceId(), .document = pin, .uri = uri, .sent_version = 0 });
+    c.docs.items[c.docs.items.len - 1].markSent(v, opened.file.content, opened.file.lines, c.encoding);
     committed = true;
     pullAfterSend(self, c, &c.docs.items[c.docs.items.len - 1]); // §8.2u
 }
 
-/// 문서 크기 상한(§3.0 의 상한과 같은 자리 — Full sync 라 전문이 프레임마다 갈 수 있다).
+/// 문서 크기 상한(§3.0 의 상한과 같은 자리 — 전문 동기화라 전문이 프레임마다 갈 수 있다).
 pub const max_sync_bytes: usize = 4 * 1024 * 1024;
 
 /// 문서 편집 통지 — `notifyDocumentEdit`가 revision마다 한 번 부른다. version 을 올려 다음 pump 가 didChange 를 보내게.

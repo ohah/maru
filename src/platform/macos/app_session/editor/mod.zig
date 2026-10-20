@@ -24125,6 +24125,85 @@ test "LSI6 `.scss` 의 languageId 는 그 방언 — 처음 붙일 때의 didOpe
     try testing.expect(css.?.phase == .ready);
 }
 
+/// LS3 판정자의 몸 — 편집 열을 보내고 단계마다 **서버 사본 = maru 본문**을 잰다(가짜 서버는 받은 range 를 사본에 적용하고 사본 밖은 거부한다;
+/// `SYNCSUM` 이 사본의 FNV-1a·range 없이 온 전문 수·거부 수를 진단에 싣는다). `utf16` 이면 가짜가 utf-16 을 고른다.
+fn syncSumScenario(utf16: bool) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    if (utf16) _ = setenv("MARU_FAKE_LSP_UTF16", "1", 1);
+    defer if (utf16) {
+        _ = unsetenv("MARU_FAKE_LSP_UTF16");
+    };
+    var f = (try SmtFixture.open(allocator, "s.c", "// SYNCSUM\nint a; // 日本😀")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const t = f.term;
+    try testing.expect(f.ready());
+    var c: ?*lsp_client.Client = null;
+    for (s.editor_lsp.clients.items) |*cl| if (cl.findDoc(t) != null) {
+        c = cl;
+    };
+    try testing.expect(c != null);
+    try testing.expectEqual(if (utf16) maru.session.editor.lsp.rpc.PositionEncoding.utf16 else maru.session.editor.lsp.rpc.PositionEncoding.utf8, c.?.encoding);
+    const Ctx = struct { t: *Term, rl: u32 };
+    const Same = struct {
+        fn same(x: Ctx) bool {
+            const content = x.t.rt.editorDocument().opened.?.file.content;
+            var b: [96]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "fake: {d} sum={x:0>8} rl={d} rj=0", .{ x.t.rt.editorDocument().notifications.lsp_version, std.hash.Fnv1a_32.hash(content), x.rl }) catch return false;
+            const items = x.t.rt.editor_diagnostics.lsp.items;
+            return items.len > 0 and std.mem.eql(u8, items[0].message, want);
+        }
+    };
+    const H = struct {
+        fn atEnd(tt: *Term) void {
+            const n: u32 = @intCast(tt.rt.editorDocument().opened.?.file.content.len);
+            tt.rt.editor_selection = .{ .anchor_start = n, .anchor_end = n, .focus = n };
+        }
+    };
+    // ⑴ 연 본문 — 마지막 줄이 다바이트·개행 없음.
+    try testing.expect(pumpLspUntil(&f.fx, 5000, Ctx{ .t = t, .rl = 0 }, Same.same));
+    // ⑵ CRLF 줄을 붙인다 — 끝은 직전 본문(다바이트 마지막 줄)의 끝.
+    H.atEnd(t);
+    try testing.expect(insertText(s, t, "\r\nint b; // 日😀"));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, Ctx{ .t = t, .rl = 0 }, Same.same));
+    // ⑶ 끝 개행 — 빈 마지막 줄.
+    H.atEnd(t);
+    try testing.expect(insertText(s, t, "\n"));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, Ctx{ .t = t, .rl = 0 }, Same.same));
+    // ⑷ 첫 줄 뒤를 통째로 지운다 — 짧아진 본문.
+    const first_end: u32 = @intCast(std.mem.indexOfScalar(u8, t.rt.editorDocument().opened.?.file.content, '\n').?);
+    const n_all: u32 = @intCast(t.rt.editorDocument().opened.?.file.content.len);
+    t.rt.editor_selection = .{ .anchor_start = first_end, .anchor_end = n_all, .focus = n_all };
+    try testing.expect(deleteText(s, t, false));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, Ctx{ .t = t, .rl = 0 }, Same.same));
+    // ⑸ 단독 CR 을 넣는다 — 이 변경의 끝은 직전 본문(단독 CR 없음)으로 센다: range 꼴 그대로.
+    H.atEnd(t);
+    try testing.expect(insertText(s, t, "\nx\ry"));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, Ctx{ .t = t, .rl = 0 }, Same.same));
+    // ⑹ 그 다음 변경 — 직전 본문에 단독 CR 이 있어 서버마다 줄 수가 갈린다: range 없는 전문(하나 센다).
+    H.atEnd(t);
+    try testing.expect(insertText(s, t, "z"));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, Ctx{ .t = t, .rl = 1 }, Same.same));
+    // ⑺ 단독 CR 을 지운다 — 직전 본문엔 아직 있으니 이것도 range 없이.
+    const cr: u32 = @intCast(std.mem.indexOfScalar(u8, t.rt.editorDocument().opened.?.file.content, '\r').?);
+    t.rt.editor_selection = .{ .anchor_start = cr, .anchor_end = cr + 1, .focus = cr + 1 };
+    try testing.expect(deleteText(s, t, false));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, Ctx{ .t = t, .rl = 2 }, Same.same));
+    // ⑻ 다시 range 꼴로 돌아온다.
+    H.atEnd(t);
+    try testing.expect(insertText(s, t, " // 😀本"));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, Ctx{ .t = t, .rl = 2 }, Same.same));
+}
+
+test "LSD1 전문 didChange 는 문서 전체를 덮는 range 하나 — 단계마다 서버 사본이 maru 본문과 같다(다바이트 끝·CRLF·끝 개행·큰 삭제), 단독 CR 이 있던 본문 뒤의 변경만 range 없이 (utf-8, 계획 editor-lsp-servers-expand LS3)" {
+    try syncSumScenario(false);
+}
+
+test "LSD2 같은 편집 열을 utf-16 으로 — CJK 1·이모지 2 unit 의 끝 (계획 editor-lsp-servers-expand LS3)" {
+    try syncSumScenario(true);
+}
+
 test "LSI7 주 서버의 pull 진단(계획 editor-lsp-servers-expand LS2) — TS 7 네이티브(`tsgo`)는 파일 진단을 pull 로만 내는 주 서버라 그 클라이언트만 `textDocument.diagnostic` 을 알리고, 문서를 보낼 때마다 물어 주 서버 칸에 세운다; 서버가 파일 간 의존을 알렸으면 한 문서를 보낼 때 다른 열린 문서도 다시 묻고, 빈 목록이면 걷는다; pull 칸이 꺼진 주 서버(C)엔 알리지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

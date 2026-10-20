@@ -377,7 +377,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, s
 
     // ── 긴 호스트 출처 — 맨 끝(이 페이지 뒤의 이동이 가끔 늦다 — 다른 판정에 번지지 않게) ──
     // 255 바이트를 넘는 호스트(`*.localhost` 는 127.0.0.1 로 풀린다) — 잘린 앞부분이 출처로 가면 안 된다(빈 출처).
-    const label = array_repeat.repeat("a", 60);
+    const label = comptime array_repeat.repeat("a", 60); // comptime — 함수 안 `const` 에 받은 repeat 결과는 런타임 값이라 아래 `++` 가 거절한다(Zig 0.17)
     var long_url_buf: [512]u8 = undefined;
     const long_url = std.fmt.bufPrint(&long_url_buf, "http://" ++ label ++ "." ++ label ++ "." ++ label ++ "." ++ label ++ ".localhost:{d}/dialog-hold", .{port}) catch unreachable;
     try host.send(.{ .navigate = .{ .browser = id, .url = long_url } });

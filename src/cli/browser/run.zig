@@ -172,10 +172,8 @@ fn runNetworkBodyOut(io: std.Io, allocator: std.mem.Allocator, cmd: browser.Netw
     var binary = false;
     var rounds: usize = 0;
     while (true) : (rounds += 1) {
-        if (rounds > (browser.max_network_body_bytes / 1024) + 4) return bodyOutError(stderr, "the body did not end");
-        var piece = cmd;
-        piece.offset = offset;
-        piece.out = null;
+        if (rounds > body_out_max_rounds) return bodyOutError(stderr, "the body did not end");
+        const piece = bodyOutPiece(cmd, offset);
         const request_bytes = try browser.buildRequestBytes(allocator, .{ .network_request = piece }, .{ .number = 1 });
         defer allocator.free(request_bytes);
         const resp = try control_client.fetchResponse(io, allocator, request_bytes, stderr);
@@ -221,6 +219,29 @@ fn runNetworkBodyOut(io: std.Io, allocator: std.mem.Allocator, cmd: browser.Netw
     publishResult(std.Io.Dir.cwd(), io, path, body.items) catch return bodyOutError(stderr, "cannot publish the output file atomically");
     try stdout.print("body: {d} bytes{s} → {s}\n", .{ body.items.len, if (binary) " (binary)" else "", path });
     try stdout.flush();
+}
+
+/// `--out` 의 조각 크기·바퀴 상한(W9d② 적대 리뷰 1 회차): 파일로 쓸 때는 조각을 가장 크게(64 KiB) 읽는다 — `--max-bytes` 는 터미널에 찍을 조각의
+/// 크기라 여기서는 쓰지 않는다(작은 `--max-bytes` 로는 1 MiB 본문이 바퀴 상한(1028) 안에 끝나지 않아 「the body did not end」 였다 — MCP 의
+/// `body_max_bytes`+`out` 도). 한 바퀴는 조각의 절반 넘게 나아간다(UTF-8 글자 경계로 조금 덜 줄 뿐) — 상한은 그것의 두 배로 넉넉히.
+const body_out_piece_bytes: u32 = browser.max_network_body_read;
+const body_out_max_rounds: usize = browser.max_network_body_bytes / (body_out_piece_bytes / 2) + 4;
+
+/// `--out` 이 보내는 조각 하나의 요청 — 그 오프셋부터 가장 큰 조각, 파일 칸은 빼고.
+fn bodyOutPiece(cmd: browser.NetworkRequestCmd, offset: u32) browser.NetworkRequestCmd {
+    var piece = cmd;
+    piece.offset = offset;
+    piece.out = null;
+    piece.max_bytes = body_out_piece_bytes;
+    return piece;
+}
+
+test "W9d② 적대 리뷰 1 회차: --out 은 --max-bytes 와 무관하게 64 KiB 조각으로 읽고, 바퀴 상한은 1 MiB 본문을 다 읽는다" {
+    const p = bodyOutPiece(.{ .surface_id = 3, .req = 7, .body = true, .max_bytes = 100, .out = "b.json" }, 4096);
+    try std.testing.expectEqual(@as(?u32, browser.max_network_body_read), p.max_bytes);
+    try std.testing.expectEqual(@as(?u32, 4096), p.offset);
+    try std.testing.expect(p.out == null and p.body);
+    try std.testing.expect(body_out_max_rounds * (body_out_piece_bytes / 2) >= browser.max_network_body_bytes);
 }
 
 fn bodyOutError(stderr: *std.Io.Writer, msg: []const u8) error{UnknownCommand} {

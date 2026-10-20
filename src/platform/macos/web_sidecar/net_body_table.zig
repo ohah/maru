@@ -15,8 +15,13 @@
 //! `recording_stopped`, 렌더러가 죽으면 `detached`, 같은 번호로 다시 시작하면 앞 시도는 `restarted` — 그 끝은 새 시작보다 먼저).
 //! 상한: 풀어 낸 크기(`dataReceived` 의 합 — J4: 이것이 실제 크기와 꼭 같았다)가 1 MiB 를 넘으면 받지 않는다(CDP 의 자원 상한은 스크립트·스타일에 듣지 않았다 — 11 MB 가 왔다), 동시 2/탭·8 전체, 초당 20 개·4 MiB/탭·8 MiB 전체.
 //! 다음 문서로 옮기면 본문이 사라지므로(J4) 기다리는 것은 잠시뿐이고(`waiting_expiry_us`) 넘으면 `busy` 다.
+//! W9d② 적대 리뷰 1 회차: (MED-1) 설정이 꺼졌으면 응답을 보낸 호스트(리다이렉트 뒤)를 CEF 응답이 정하기 전에는 받으러 가지 않는다 — CDP 끝은 그
+//! CEF 응답보다 대개 먼저 온다(`cover_pending`·`cover_grace_us`, 시한·응답 없는 끝은 `not_covered`). (MED-2) 창 안의 같은 열쇠 후보가 그것을 가져갈
+//! 같은 열쇠의 CDP 요청보다 많으면(CDP 가 보지 못한 워커의 fetch) 짝일 수 있는 후보를 모두 `ambiguous` 로 끝낸다. (LOW-3) ExtraInfo 는 보낸 홉마다
+//! 세고 덜 왔으면 실린 것으로 친다(잠시 기다린다 — `extra_grace_us`), ExtraInfo 만 온 자리는 시한·수로 놓는다.
 //!
-//! 시험이 증명하는 것: 맞추기(두 도착 차례·창·같은 주소의 차례·문 넘김과 보이는 규칙이 다른 후보의 모호함·서비스 워커 갈래·조각 떼기),
+//! 시험이 증명하는 것: 맞추기(두 도착 차례·창·같은 주소의 차례·문 넘김과 보이는 규칙이 다른 후보의 모호함·CDP 가 보지 못한 같은 주소 후보의
+//! 모호함·서비스 워커 갈래·조각 떼기), 설정 끔의 응답 호스트 기다림, 홉마다의 ExtraInfo 와 그 자리의 시한,
 //! 상한과 판정(넘침·글 아님·빈 본문·끊김·실패), 동시·초당 상한과 기다림의 만료, 세대(끈 뒤 늦게 온 결과는 버린다), 시작마다 끝은 꼭 하나,
 //! MIME 가르기, 결과 풀기(JSON 글·base64·잘못된 UTF-8·windows-1252 되돌리기).
 
@@ -39,6 +44,16 @@ pub const cef_grace_us: i64 = 250_000;
 pub const unclaimed_expiry_us: i64 = 3_000_000;
 /// 자리가 날 때까지 기다리는 본문의 시한 — 다음 문서로 옮기면 본문이 사라진다(J4).
 pub const waiting_expiry_us: i64 = 3_000_000;
+/// W9d② 적대 리뷰 1 회차 MED-1: 설정이 꺼졌을 때 CDP 끝 뒤 CEF 응답(응답을 보낸 호스트 — 리다이렉트 뒤)을 기다리는 시간. CEF 기록은 10 ms
+/// 묶음으로 오고 CDP 가 p50 7 ms 앞선다(J1) — 넘기면 덮이지 않는 것으로 친다(`not_covered` — 본문이 브라우저 프로세스를 나가지 않는다).
+pub const cover_grace_us: i64 = 500_000;
+/// W9d② 적대 리뷰 1 회차 LOW-3: 응답이 ExtraInfo 가 온다고 알렸는데(`hasExtraInfo`) 홉마다의 ExtraInfo 가 아직 다 오지 않았으면 CDP 끝 뒤
+/// 이만큼 기다린다 — 넘기면 실린 것으로 친다(UB1 은 닫힌 쪽으로).
+pub const extra_grace_us: i64 = 200_000;
+/// requestWillBeSent 없이 ExtraInfo 만 온 자리(열쇠 없음)의 시한과 수 — 이미 정한 요청의 늦은 ExtraInfo 는 다시 짝이 될 일이 없다. 둘 다 넘치면
+/// 오래된 자리부터 놓는다(전에는 기록 내내 남아 주기 task 가 멈추지 않았고, 4096 개가 쌓이면 사건마다 목록을 통째로 밀었다).
+pub const placeholder_expiry_us: i64 = 1_000_000;
+pub const max_placeholders: usize = 64;
 pub const max_inflight_per_tab: usize = 2;
 pub const max_inflight: usize = 8;
 pub const max_waiting_per_tab: usize = 32;
@@ -180,11 +195,21 @@ pub const Decoded = struct {
     flags: Flags = .{},
     /// `captured` 일 때만 — 부른 쪽 소유.
     bytes: []u8 = &.{},
+    /// `over_cap` 일 때 넘친 글의 바이트(0 = 모른다) — Chromium 이 windows-1252 로 푼 글은 UTF-8 로 원래의 세 배까지 커져, 받은 바이트(Σ
+    /// `dataReceived`)는 상한 안인데 글이 넘칠 수 있다. 부른 쪽은 둘 중 큰 것을 알린다(크기와 상태가 엇갈리지 않게).
+    over_bytes: u64 = 0,
 };
 
 /// `getResponseBody` 의 결과(`{"body":"…","base64Encoded":bool}`)를 보낼 바이트로 푼다. `mime` 은 응답 MIME, `charset` 은 Content-Type 에
-/// charset 이 있었는가. 실패한 호출(`ok` 거짓 — 「다음 문서로 옮겨 사라졌다」 등)과 모양이 틀린 결과는 `unavailable`.
-pub fn decodeResult(gpa: std.mem.Allocator, ok: bool, json: []const u8, mime: []const u8, charset: bool) std.mem.Allocator.Error!Decoded {
+/// charset 이 있었는가, `raw_size` 는 받은 바이트(Σ `dataReceived` — 0 = 모른다). 실패한 호출(`ok` 거짓 — 「다음 문서로 옮겨 사라졌다」 등)과
+/// 모양이 틀린 결과는 `unavailable`.
+///
+/// windows-1252 되돌리기(J11)는 Chromium 이 **UTF-8 바이트를 windows-1252 로 잘못 읽은** 글에만 한다(W9d② 적대 리뷰 1 회차): 글을 그 표로
+/// 되돌린 바이트가 UTF-8 로 맞고, 받은 바이트 수가 알려졌으면 그것과 꼭 같을 때. windows-1252 로 읽었다면 글자 하나가 받은 바이트 하나라
+/// 수가 같다. BOM 으로 UTF-8 을 알아본 본문(Chromium 이 맞게 풀었다 — BOM 세 바이트와 여러 바이트 글자만큼 수가 다르다)은 이것으로 걸러져
+/// 그대로 둔다(전에는 「Ã©」 같은 글을 담은 그런 본문을 「é」 로 바꿨다). 남는 틈: 받은 바이트를 모를 때(0)는 수를 보지 않는다. 진짜
+/// Latin-1 본문 안의 「Ã©」 꼴 바이트는 UTF-8 로 맞아 되돌린다 — fetch·XHR 은 charset 없는 글을 UTF-8 로 읽으므로 그것이 페이지가 읽은 글이다.
+pub fn decodeResult(gpa: std.mem.Allocator, ok: bool, json: []const u8, mime: []const u8, charset: bool, raw_size: u64) std.mem.Allocator.Error!Decoded {
     if (!ok) return .{ .state = .unavailable };
     const parsed = std.json.parseFromSlice(struct { body: []const u8 = "", base64Encoded: bool = false }, gpa, json, .{ .ignore_unknown_fields = true }) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -196,14 +221,14 @@ pub fn decodeResult(gpa: std.mem.Allocator, ok: bool, json: []const u8, mime: []
     if (v.base64Encoded) {
         const dec = std.base64.standard.Decoder;
         const n = dec.calcSizeForSlice(v.body) catch return .{ .state = .unavailable };
-        if (n > msg.max_net_body_bytes) return .{ .state = .over_cap };
+        if (n > msg.max_net_body_bytes) return .{ .state = .over_cap, .over_bytes = n };
         bytes = try gpa.alloc(u8, n);
         dec.decode(bytes, v.body) catch {
             gpa.free(bytes);
             return .{ .state = .unavailable };
         };
     } else {
-        if (v.body.len > 4 * msg.max_net_body_bytes) return .{ .state = .over_cap };
+        if (v.body.len > 4 * msg.max_net_body_bytes) return .{ .state = .over_cap, .over_bytes = v.body.len };
         bytes = try gpa.dupe(u8, v.body);
     }
     if (bytes.len == 0) {
@@ -219,7 +244,7 @@ pub fn decodeResult(gpa: std.mem.Allocator, ok: bool, json: []const u8, mime: []
         const back = try gpa.alloc(u8, bytes.len);
         defer gpa.free(back);
         if (toCp1252(bytes, back)) |raw| {
-            if (std.unicode.utf8ValidateSlice(raw) and !isAscii(raw)) {
+            if (std.unicode.utf8ValidateSlice(raw) and !isAscii(raw) and (raw_size == 0 or raw_size == raw.len)) {
                 const fixed = try gpa.dupe(u8, raw);
                 gpa.free(bytes);
                 bytes = fixed;
@@ -228,8 +253,9 @@ pub fn decodeResult(gpa: std.mem.Allocator, ok: bool, json: []const u8, mime: []
         } else flags.chromium_decoded = true;
     }
     if (bytes.len > msg.max_net_body_bytes) {
+        const n = bytes.len;
         gpa.free(bytes);
-        return .{ .state = .over_cap };
+        return .{ .state = .over_cap, .over_bytes = n };
     }
     return .{ .state = .captured, .flags = flags, .bytes = bytes };
 }
@@ -267,8 +293,8 @@ pub const Event = union(enum) {
     will_be_sent: struct { rid: []const u8, url_hash: u64, method_hash: u64, ts_us: i64, redirect: bool = false, prefetch: bool = false },
     /// `Network.requestWillBeSentExtraInfo` — 실제로 실린 쿠키(막히지 않은 것)·인증 헤더가 있었나.
     extra_info: struct { rid: []const u8, credentialed: bool },
-    /// `Network.responseReceived`.
-    response: struct { rid: []const u8, mime: []const u8, from_sw: bool, charset: bool, prefetch: bool = false },
+    /// `Network.responseReceived` — `has_extra_info` 는 이 요청의 ExtraInfo 가 오거나 왔다는 Chromium 의 알림(`hasExtraInfo`).
+    response: struct { rid: []const u8, mime: []const u8, from_sw: bool, charset: bool, prefetch: bool = false, has_extra_info: bool = false },
     /// `Network.dataReceived` — 풀어 낸 바이트.
     data: struct { rid: []const u8, bytes: u64 },
     /// `Network.requestServedFromCache` — 메모리 캐시: CEF 는 이 요청을 보지 못한다(J1).
@@ -391,6 +417,7 @@ pub fn parseEvent(method: []const u8, v: std.json.Value) ?Event {
             .from_sw = boolean(v, "response.fromServiceWorker"),
             .charset = hasCharset(ct),
             .prefetch = boolean(v, "response.fromPrefetchCache"),
+            .has_extra_info = boolean(v, "hasExtraInfo"),
         } };
     }
     if (std.mem.eql(u8, method, "Network.loadingFinished")) return .{ .finished = .{ .rid = rid } };
@@ -411,6 +438,10 @@ pub const Candidate = struct {
     attr: u64,
     /// 덮이는 호스트인가(설정이 꺼졌을 때 — 리다이렉트마다 다시 정한다). 켜져 있으면 늘 참.
     covered: bool = true,
+    /// W9d② 적대 리뷰 1 회차 MED-1(설정이 꺼졌을 때): 응답을 보낸 호스트가 아직 정해지지 않았다 — 시작 호스트로 정한 `covered` 는 덮이는 주소가
+    /// 덮이지 않는 호스트로 리다이렉트하면 틀린다. CDP `loadingFinished` 는 그 CEF 응답보다 대개 먼저 오므로(J1 — 10 ms 묶음), CEF 응답
+    /// (`cefCovered`)이나 끝(`cefEnd` — 응답 없이 끝났으면 덮이지 않는 쪽)이 오기 전에는 본문을 받으러 가지 않는다. 리다이렉트마다 다시 선다.
+    cover_pending: bool = false,
     /// CEF 헤더에 쿠키·인증 헤더가 있었다(ExtraInfo 가 없을 때와 함께 쓴다).
     cef_credentialed: bool = false,
     claimed: bool = false,
@@ -435,9 +466,17 @@ const Cdp = struct {
     mime_len: u8 = 0,
     charset: bool = false,
     data_bytes: u64 = 0,
-    /// ExtraInfo 가 실린 것을 알렸다 / 모른다.
+    /// ExtraInfo 가 실린 것을 알렸다.
     credentialed: bool = false,
-    saw_extra: bool = false,
+    /// W9d② 적대 리뷰 1 회차 LOW-3: 이 requestId 로 보낸 수(첫 requestWillBeSent·리다이렉트 홉·다시 보내기 — ExtraInfo 는 보낼 때마다 하나다,
+    /// CDP `redirectHasExtraInfo`)와 받은 ExtraInfo 수. 받은 수가 보낸 수보다 적으면 어느 홉의 쿠키를 모른다 — 실린 것으로 친다(전에는 ExtraInfo
+    /// 하나만 봐도 「모른다」 가 풀려, 뒤 홉의 쿠키가 `loadingFinished` 뒤에 오면 실리지 않은 것이 됐다).
+    sends: u8 = 1,
+    extras: u8 = 0,
+    /// 응답이 ExtraInfo 가 온다고 알렸다(`responseReceived.hasExtraInfo`) — 덜 왔으면 잠시(`extra_grace_us`) 기다릴 값어치가 있다.
+    has_extra_info: bool = false,
+    /// ExtraInfo 만 온 자리(열쇠 없음)를 잡은 UI 시각 — 시한(`placeholder_expiry_us`)이 지나면 놓는다.
+    placed_at: i64 = 0,
     /// 끝(성공·실패)을 본 UI 시각 — 후보를 기다리는 시한의 기준.
     done_at: i64 = 0,
     /// requestWillBeSent 를 봤다(ExtraInfo 가 먼저 와 자리만 잡은 동안 거짓 — 짝을 찾지 않는다).
@@ -697,19 +736,35 @@ pub const Table = struct {
         _ = t.cands.orderedRemove(i);
     }
 
+    /// CEF 리다이렉트 — 설정이 꺼졌을 때(`pending`) 응답을 보낼 호스트가 바뀐다: 다음 CEF 응답(또는 끝)이 올 때까지 본문을 받으러 가지 않는다
+    /// (W9d② 적대 리뷰 1 회차 MED-1).
+    pub fn cefRedirect(self: *Table, browser: BrowserId, request: u64, pending: bool) void {
+        if (!pending) return;
+        const t = self.tabOf(browser) orelse return;
+        for (t.cands.items) |*c| if (c.request == request) {
+            c.cover_pending = true;
+        };
+    }
+
     /// CEF 응답 — 설정이 꺼졌을 때 응답을 보낸 호스트가 덮이는가(`net_response` 의 헤더를 덜어 낼지와 같은 결정 — 리다이렉트 뒤의 호스트다).
+    /// 이것으로 응답 호스트가 정해진다(`cover_pending` 이 풀린다).
     pub fn cefCovered(self: *Table, browser: BrowserId, request: u64, covered: bool) void {
         const t = self.tabOf(browser) orelse return;
         for (t.cands.items) |*c| if (c.request == request) {
             c.covered = covered;
+            c.cover_pending = false;
         };
     }
 
-    /// CEF 끝 — 짝이 없으면 시한 뒤 `unmatched`.
+    /// CEF 끝 — 짝이 없으면 시한 뒤 `unmatched`. 응답 호스트가 정해지지 않은 채 끝났으면(응답 없이 끝났다) 덮이지 않는 쪽으로 정한다(MED-1).
     pub fn cefEnd(self: *Table, browser: BrowserId, request: u64, now_us: i64) void {
         const t = self.tabOf(browser) orelse return;
         for (t.cands.items) |*c| if (c.request == request and c.ended_at == 0) {
             c.ended_at = @max(now_us, 1);
+            if (c.cover_pending) {
+                c.cover_pending = false;
+                c.covered = false;
+            }
         };
     }
 
@@ -778,10 +833,15 @@ pub const Table = struct {
                         r.ts_us = v.ts_us;
                         r.has_key = true;
                         r.prefetch = r.prefetch or v.prefetch;
-                    } else if (r.has_key and v.url_hash == r.key_url and v.method_hash == r.key_method) {
-                        // 같은 주소를 다시 보냈다 — 다시 시작(실측: Critical-CH 의 403 을 리다이렉트 응답으로 싣는다). 받은 바이트는 앞 시도의 것.
-                        r.restart_ts_us = v.ts_us;
-                        r.data_bytes = 0;
+                        r.sends = 1;
+                    } else if (r.has_key) {
+                        // 다시 보냈다(리다이렉트 홉·다시 시작) — 그 홉의 ExtraInfo 가 하나 더 온다(LOW-3).
+                        r.sends +|= 1;
+                        if (v.url_hash == r.key_url and v.method_hash == r.key_method) {
+                            // 같은 주소를 다시 보냈다 — 다시 시작(실측: Critical-CH 의 403 을 리다이렉트 응답으로 싣는다). 받은 바이트는 앞 시도의 것.
+                            r.restart_ts_us = v.ts_us;
+                            r.data_bytes = 0;
+                        }
                     }
                     return;
                 }
@@ -793,13 +853,20 @@ pub const Table = struct {
             .extra_info => |v| {
                 const i = cdpIndex(t, v.rid) orelse blk: {
                     // ExtraInfo 가 requestWillBeSent 보다 먼저 올 수 있다 — 자리를 먼저 잡는다(열쇠는 requestWillBeSent 가 채운다, 그 전에는
-                    // 어느 후보와도 맞지 않는다).
+                    // 어느 후보와도 맞지 않는다). 이미 정한 요청의 늦은 ExtraInfo 도 여기로 온다 — 그 자리는 시한(`tick`)과 수(`max_placeholders`)로
+                    // 놓는다(W9d② 적대 리뷰 1 회차 LOW-3).
                     const rid = Rid.init(v.rid) orelse return;
-                    if (t.cdp.items.len >= max_cdp) _ = t.cdp.orderedRemove(0);
-                    try t.cdp.append(gpa, .{ .rid = rid, .key_url = 0, .key_method = 0, .ts_us = std.math.maxInt(i64), .has_key = false });
+                    var placeholders: usize = 0;
+                    var oldest: ?usize = null;
+                    for (t.cdp.items, 0..) |o, j| if (!o.has_key) {
+                        placeholders += 1;
+                        if (oldest == null) oldest = j;
+                    };
+                    if (placeholders >= max_placeholders) _ = t.cdp.orderedRemove(oldest.?) else if (t.cdp.items.len >= max_cdp) _ = t.cdp.orderedRemove(0);
+                    try t.cdp.append(gpa, .{ .rid = rid, .key_url = 0, .key_method = 0, .ts_us = std.math.maxInt(i64), .has_key = false, .sends = 0, .placed_at = @max(now_us, 1) });
                     break :blk t.cdp.items.len - 1;
                 };
-                t.cdp.items[i].saw_extra = true;
+                t.cdp.items[i].extras +|= 1;
                 if (v.credentialed) t.cdp.items[i].credentialed = true;
             },
             .response => |v| {
@@ -807,6 +874,7 @@ pub const Table = struct {
                 const r = &t.cdp.items[i];
                 r.sw = v.from_sw;
                 if (v.prefetch) r.prefetch = true;
+                r.has_extra_info = v.has_extra_info;
                 const m = v.mime[0..@min(v.mime.len, r.mime.len)];
                 @memcpy(r.mime[0..m.len], m);
                 r.mime_len = @intCast(m.len);
@@ -884,10 +952,44 @@ pub const Table = struct {
             return;
         }
         const ci = picks[k];
+        if (r.state == .finished) {
+            // MED-1(설정이 꺼졌을 때): 응답을 보낸 호스트(리다이렉트 뒤)를 CEF 응답이 정하기 전에는 받으러 가지 않는다 — 시작 호스트로 정한
+            // 「덮인다」 는 덮이지 않는 호스트로 리다이렉트한 요청에서 틀린다(판정 body-r1-switch-off-redirect: 12/12 가 빠져나갔다). 시한이
+            // 지나도 오지 않으면 덮이지 않는 쪽으로.
+            const c = &t.cands.items[ci];
+            if (c.cover_pending) {
+                if (now_us - r.done_at < cover_grace_us) return;
+                c.cover_pending = false;
+                c.covered = false;
+            }
+            // LOW-3: Chromium 이 ExtraInfo 가 온다고 했는데 홉마다의 것이 아직 다 오지 않았다 — 잠시 기다린다(넘기면 `decide` 가 실린 것으로).
+            if (r.has_extra_info and r.extras < r.sends and now_us - r.done_at < extra_grace_us) return;
+        }
         var ambiguous = false;
         for (picks[0..n]) |o| if (o != ci and t.cands.items[o].attr != t.cands.items[ci].attr) {
             ambiguous = true;
         };
+        // MED-2: 창 안의 같은 열쇠 후보가 그것을 가져갈 수 있는 같은 열쇠의 CDP 요청(이 요청 포함)보다 많다 — CDP 가 보지 못한 CEF 요청이 섞였다
+        // (전용·공유 워커의 fetch 는 CEF 가 주 프레임의 것으로 적고 페이지의 CDP 에는 없다 — J3). 같은 열쇠·같은 보이는 규칙이라 차례로는 가를 수
+        // 없다(판정 body-r1-worker-same-url: 워커의 요청이 페이지의 본문을 40 번 중 39–40 번 가져갔다) — 본문을 붙이지 않는다. 이 요청의 짝일 수
+        // 있는 후보(차례 k 의 것부터 남는 수만큼 — `extra`)를 모두 `ambiguous` 로 끝낸다: 차례로 고른 하나만 끝내면 남은 것이(페이지의 것일 수
+        // 있다) `unmatched` 로 보였다. 그 뒤의 후보는 뒤 CDP 요청의 몫으로 남긴다.
+        var claimants: usize = 0;
+        for (t.cdp.items) |o| {
+            if (o.state == .cached or o.prefetch or !o.has_key) continue;
+            if (o.key_url != key.url or o.key_method != key.method) continue;
+            const a = o.anchor();
+            if (a >= ts - window_after_us - window_before_us and a <= ts + window_after_us + window_before_us) claimants += 1;
+        }
+        var extra: [picks.len]u64 = undefined;
+        var extra_len: usize = 0;
+        if (n > claimants) {
+            ambiguous = true;
+            for (picks[k + 1 .. @min(n, k + 1 + (n - claimants))]) |pi| {
+                extra[extra_len] = t.cands.items[pi].request;
+                extra_len += 1;
+            }
+        }
         if (t.drop_overflow_until != 0 and ts - window_before_us <= t.drop_overflow_until) ambiguous = true;
         for (t.drops[0..t.drop_len]) |d| if (d.url == key.url and d.t_us >= ts - window_before_us and d.t_us <= ts + window_after_us) {
             ambiguous = true;
@@ -895,12 +997,18 @@ pub const Table = struct {
         const cand = t.cands.items[ci];
         _ = t.cdp.orderedRemove(i);
         try self.decide(gpa, t, ci, cand, r, ambiguous, now_us);
+        for (extra[0..extra_len]) |req| for (t.cands.items, 0..) |c, x| if (c.request == req) {
+            try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = req, .state = .ambiguous, .flags = .{ .credentialed = c.cef_credentialed } } });
+            _ = t.cands.orderedRemove(x);
+            break;
+        };
     }
 
     /// 짝지은 요청의 판정 — 끝내거나(본문 없음) 받으러 간다.
     fn decide(self: *Table, gpa: std.mem.Allocator, t: *Tab, ci: usize, cand: Candidate, r: Cdp, ambiguous: bool, now_us: i64) std.mem.Allocator.Error!void {
-        // 실린 자격 증명(UB1): ExtraInfo 가 알렸거나, 오지 않았으면 실린 것으로 친다(J12 — 서비스 워커·메모리 캐시엔 없다), CEF 헤더에 있으면 실렸다.
-        const cred = r.credentialed or !r.saw_extra or cand.cef_credentialed;
+        // 실린 자격 증명(UB1): ExtraInfo 가 알렸거나, 보낸 홉마다의 것이 다 오지 않았으면 실린 것으로 친다(J12 — 서비스 워커·메모리 캐시엔 없다;
+        // W9d② 적대 리뷰 1 회차 LOW-3 — 뒤 홉의 것이 늦을 수 있다), CEF 헤더에 있으면 실렸다.
+        const cred = r.credentialed or r.extras < r.sends or cand.cef_credentialed;
         var flags: Flags = .{ .credentialed = cred };
         const end = struct {
             fn f(s: *Table, g: std.mem.Allocator, tab: *Tab, idx: usize, request: u64, state: State, fl: Flags, decoded: u64) std.mem.Allocator.Error!void {
@@ -993,6 +1101,16 @@ pub const Table = struct {
     pub fn tick(self: *Table, gpa: std.mem.Allocator, now_us: i64) std.mem.Allocator.Error!void {
         for (&self.tabs) |*t| {
             if (t.browser == 0 or t.session == 0) continue;
+            // ExtraInfo 만 온 자리(열쇠 없음)는 시한 뒤 놓는다(LOW-3 — 이미 정한 요청의 늦은 ExtraInfo 는 다시 짝이 될 일이 없다).
+            var p: usize = 0;
+            while (p < t.cdp.items.len) {
+                const o = t.cdp.items[p];
+                if (!o.has_key and now_us - o.placed_at >= placeholder_expiry_us) {
+                    _ = t.cdp.orderedRemove(p);
+                    continue;
+                }
+                p += 1;
+            }
             // 끝난 CDP 요청(짝을 기다린다) — 앞에서부터.
             var i: usize = 0;
             while (i < t.cdp.items.len) {
@@ -1069,8 +1187,8 @@ const H = struct {
         };
     }
 
-    fn cand(self: *H, browser: BrowserId, request: u64, url: []const u8, t_io: i64, opts: struct { method: []const u8 = "GET", sw: bool = false, attr: u64 = 1, covered: bool = true }) !bool {
-        const ok = try self.table.cefBegin(gpa_t, browser, .{ .request = request, .key = .{ .url = hashUrl8(url), .method = hashMethod(opts.method), .sw = opts.sw }, .t_io_us = t_io, .attr = opts.attr, .covered = opts.covered });
+    fn cand(self: *H, browser: BrowserId, request: u64, url: []const u8, t_io: i64, opts: struct { method: []const u8 = "GET", sw: bool = false, attr: u64 = 1, covered: bool = true, cover_pending: bool = false }) !bool {
+        const ok = try self.table.cefBegin(gpa_t, browser, .{ .request = request, .key = .{ .url = hashUrl8(url), .method = hashMethod(opts.method), .sw = opts.sw }, .t_io_us = t_io, .attr = opts.attr, .covered = opts.covered, .cover_pending = opts.cover_pending });
         // 앞 시도의 끝(다시 시작)은 이 시작보다 먼저 센다 — sidecar 는 앞 시도의 끝을 이 시작의 `net_begin` 보다 먼저 보낸다.
         try self.drain();
         if (ok) {
@@ -1146,7 +1264,7 @@ test "W9d②: MIME 가르기 — 글(text/*·JSON·XML·JS·+json·+xml), 글 �
 
 test "W9d②: 결과 풀기 — JSON 글, base64(글이면 글·아니면 바이너리), 빈 본문, 실패·모양이 틀린 결과, charset 없는 text/plain 의 windows-1252 되돌리기" {
     {
-        const d = try decodeResult(gpa_t, true, "{\"body\":\"{\\\"a\\\":\\\"\\uD55C\\\"}\",\"base64Encoded\":false}", "application/json", false);
+        const d = try decodeResult(gpa_t, true, "{\"body\":\"{\\\"a\\\":\\\"\\uD55C\\\"}\",\"base64Encoded\":false}", "application/json", false, 0);
         defer gpa_t.free(d.bytes);
         try testing.expectEqual(State.captured, d.state);
         try testing.expectEqualStrings("{\"a\":\"한\"}", d.bytes);
@@ -1154,47 +1272,67 @@ test "W9d②: 결과 풀기 — JSON 글, base64(글이면 글·아니면 바이
     }
     {
         // 잘못된 UTF-8 JSON 은 base64 로 온다(J11) — 바이트 그대로, 바이너리 표시.
-        const d = try decodeResult(gpa_t, true, "{\"body\":\"/wB7\",\"base64Encoded\":true}", "application/json", true);
+        const d = try decodeResult(gpa_t, true, "{\"body\":\"/wB7\",\"base64Encoded\":true}", "application/json", true, 0);
         defer gpa_t.free(d.bytes);
         try testing.expect(d.state == .captured and d.flags.binary);
         try testing.expectEqualSlices(u8, &.{ 0xff, 0x00, 0x7b }, d.bytes);
     }
     {
         // 글인 base64 는 글.
-        const d = try decodeResult(gpa_t, true, "{\"body\":\"7ZWc\",\"base64Encoded\":true}", "text/plain", true);
+        const d = try decodeResult(gpa_t, true, "{\"body\":\"7ZWc\",\"base64Encoded\":true}", "text/plain", true, 0);
         defer gpa_t.free(d.bytes);
         try testing.expect(d.state == .captured and !d.flags.binary);
         try testing.expectEqualStrings("한", d.bytes);
     }
     {
         // UTF-8 「한」(ED 95 9C) 을 windows-1252 로 푼 깨진 글 「í•œ」 — 되돌린다.
-        const d = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153 ok\",\"base64Encoded\":false}", "text/plain", false);
+        const d = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153 ok\",\"base64Encoded\":false}", "text/plain", false, 0);
         defer gpa_t.free(d.bytes);
         try testing.expect(d.state == .captured and d.flags.redecoded);
         try testing.expectEqualStrings("한 ok", d.bytes);
+        // W9d② 적대 리뷰 1 회차: 받은 바이트 수(Σ dataReceived)를 알면 windows-1252 로 읽은 글자 수와 같을 때만 되돌린다 — 「한 ok」 는 6 바이트.
+        const same = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153 ok\",\"base64Encoded\":false}", "text/plain", false, 6);
+        defer gpa_t.free(same.bytes);
+        try testing.expect(same.flags.redecoded);
+        // BOM 으로 UTF-8 을 알아본 본문 — Chromium 이 맞게 풀었다(글 「Ã©」 는 원래 C3 83 C2 A9 에 BOM 셋, 7 바이트): 되돌리지 않는다(「é」 로 바꾸지 않는다).
+        const bom = try decodeResult(gpa_t, true, "{\"body\":\"\\u00c3\\u00a9\",\"base64Encoded\":false}", "text/plain", false, 7);
+        defer gpa_t.free(bom.bytes);
+        try testing.expect(!bom.flags.redecoded and bom.flags.chromium_decoded);
+        try testing.expectEqualStrings("Ã©", bom.bytes);
+    }
+    {
+        // windows-1252 로 푼 글이 UTF-8 로 커져 상한을 넘으면 넘친 글의 크기를 함께 알린다(받은 바이트는 상한 안이어도).
+        var big: std.ArrayList(u8) = .empty;
+        defer big.deinit(gpa_t);
+        try big.appendSlice(gpa_t, "{\"body\":\"");
+        for (0..400 * 1024) |_| try big.appendSlice(gpa_t, "\\u20ac");
+        try big.appendSlice(gpa_t, "\",\"base64Encoded\":false}");
+        const o = try decodeResult(gpa_t, true, big.items, "text/plain", false, 400 * 1024);
+        try testing.expectEqual(State.over_cap, o.state);
+        try testing.expectEqual(@as(u64, 3 * 400 * 1024), o.over_bytes);
     }
     {
         // charset 이 있으면 되돌리지 않는다. 되돌릴 수 없는 글(표에 없는 글자)은 표시만.
-        const d = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153\",\"base64Encoded\":false}", "text/plain", true);
+        const d = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153\",\"base64Encoded\":false}", "text/plain", true, 0);
         defer gpa_t.free(d.bytes);
         try testing.expect(!d.flags.redecoded and !d.flags.chromium_decoded);
-        const e = try decodeResult(gpa_t, true, "{\"body\":\"\\uD55C\",\"base64Encoded\":false}", "text/plain", false);
+        const e = try decodeResult(gpa_t, true, "{\"body\":\"\\uD55C\",\"base64Encoded\":false}", "text/plain", false, 0);
         defer gpa_t.free(e.bytes);
         try testing.expect(e.flags.chromium_decoded and !e.flags.redecoded);
         // 라틴 글이 우연히 UTF-8 이 되지 않으면(é 하나) 그대로 — 표시만.
-        const f = try decodeResult(gpa_t, true, "{\"body\":\"caf\\u00e9\",\"base64Encoded\":false}", "text/csv", false);
+        const f = try decodeResult(gpa_t, true, "{\"body\":\"caf\\u00e9\",\"base64Encoded\":false}", "text/csv", false, 0);
         defer gpa_t.free(f.bytes);
         try testing.expect(f.flags.chromium_decoded);
         try testing.expectEqualStrings("café", f.bytes);
         // HTML 은 되돌리지 않는다(J11 — 맞게 풀렸다).
-        const g = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153\",\"base64Encoded\":false}", "text/html", false);
+        const g = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153\",\"base64Encoded\":false}", "text/html", false, 0);
         defer gpa_t.free(g.bytes);
         try testing.expect(!g.flags.redecoded and !g.flags.chromium_decoded);
     }
-    try testing.expectEqual(State.no_body, (try decodeResult(gpa_t, true, "{\"body\":\"\",\"base64Encoded\":false}", "text/plain", true)).state);
-    try testing.expectEqual(State.unavailable, (try decodeResult(gpa_t, false, "{\"code\":-32000}", "text/plain", true)).state);
-    try testing.expectEqual(State.unavailable, (try decodeResult(gpa_t, true, "[1]", "text/plain", true)).state);
-    try testing.expectEqual(State.unavailable, (try decodeResult(gpa_t, true, "{\"body\":\"!!!\",\"base64Encoded\":true}", "image/png", true)).state);
+    try testing.expectEqual(State.no_body, (try decodeResult(gpa_t, true, "{\"body\":\"\",\"base64Encoded\":false}", "text/plain", true, 0)).state);
+    try testing.expectEqual(State.unavailable, (try decodeResult(gpa_t, false, "{\"code\":-32000}", "text/plain", true, 0)).state);
+    try testing.expectEqual(State.unavailable, (try decodeResult(gpa_t, true, "[1]", "text/plain", true, 0)).state);
+    try testing.expectEqual(State.unavailable, (try decodeResult(gpa_t, true, "{\"body\":\"!!!\",\"base64Encoded\":true}", "image/png", true, 0)).state);
     var cp: [8]u8 = undefined;
     try testing.expectEqualSlices(u8, &.{ 0x80, 0xe9, 0x9f }, toCp1252("€éŸ", &cp).?);
     try testing.expect(toCp1252("한", &cp) == null);
@@ -1230,7 +1368,10 @@ test "W9d②: CDP 이벤트 고르기 — requestWillBeSent(리다이렉트·미
     try testing.expect(!(try P.ev("Network.requestWillBeSentExtraInfo", "{\"requestId\":\"1\",\"associatedCookies\":[{\"blockedReasons\":[\"SameSiteLax\"]}],\"headers\":{\"Accept\":\"*\"}}")).extra_info.credentialed);
     try testing.expect((try P.ev("Network.requestWillBeSentExtraInfo", "{\"requestId\":\"1\",\"associatedCookies\":[],\"headers\":{\"Authorization\":\"Basic x\"}}")).extra_info.credentialed);
     const r = (try P.ev("Network.responseReceived", "{\"requestId\":\"1\",\"response\":{\"mimeType\":\"text/plain\",\"fromServiceWorker\":true,\"headers\":{\"Content-Type\":\"text/plain\"}}}")).response;
-    try testing.expect(r.from_sw and !r.charset);
+    try testing.expect(r.from_sw and !r.charset and !r.has_extra_info);
+    // W9d② 적대 리뷰 1 회차: `hasExtraInfo`(ExtraInfo 가 오거나 왔다 — 홉마다의 ExtraInfo 를 잠시 기다릴지).
+    const rx = (try P.ev("Network.responseReceived", "{\"requestId\":\"2\",\"hasExtraInfo\":true,\"response\":{\"mimeType\":\"text/plain\",\"headers\":{}}}")).response;
+    try testing.expect(rx.has_extra_info);
     try testing.expect(parseEvent("Network.loadingFinished", .{ .object = .empty }) == null); // requestId 없음
     const d = scanData("{\"requestId\":\"77.3\",\"timestamp\":1.0,\"dataLength\":4096,\"encodedDataLength\":10}").?.data;
     try testing.expectEqualStrings("77.3", d.rid);
@@ -1751,4 +1892,227 @@ test "W9d② × 다시 시작 S4: 앞 시도가 자리를 기다리면(동시 �
     try h.drain();
     try testing.expectEqual(@as(usize, 2), h.fetches.items.len); // 앞 시도(W)는 받으러 가지 않는다
     try testing.expectEqual(@as(u32, 1), endCount(&h, 9));
+}
+
+// ── W9d② 적대 리뷰 1 회차 재현(그 리뷰의 repro — 고치기 전에는 모두 실패했다) ─────────────────────────────────────────────────
+
+// 이 시험이 증명하는 것(MED-1): 설정이 꺼졌을 때 덮이는 주소가 덮이지 않는 호스트로 리다이렉트하면, CDP 의 `loadingFinished` 가 그 CEF 응답보다
+// 먼저 와도(J1 — 10 ms 묶음) 본문을 받으러 가지 않고 CEF 응답이 정한 대로 `not_covered` 로 끝낸다. 덮이는 호스트의 응답이면 그때 받으러 간다.
+// 응답 없이 끝났거나 시한까지 오지 않으면 덮이지 않는 쪽. 왜 중요한가 — 설정을 끈 사용자의 결정은 「덮이지 않는 호스트의 본문은 브라우저 프로세스를
+// 나가지 않는다」 다(실제 CEF 154 판정에서 12/12 가 빠져나갔다).
+test "W9d② 적대 리뷰 1 회차 재현 RV1: 설정 끔 — 덮이는 주소가 덮이지 않는 호스트로 리다이렉트하면 CEF 응답이 덮임을 정하기 전에는 받지 않는다(not_covered), 덮이면 그때 받는다, 응답 없이 끝나거나 시한이 지나면 덮이지 않는 쪽" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    // CEF 시작(덮이는 첫 홉 127.0.0.1 — covered 참, 설정 끔이라 응답 호스트는 아직 모른다).
+    _ = try h.cand(5, 900, "http://127.0.0.1/rv/redir?0", 1_000_000, .{ .covered = true, .cover_pending = true });
+    try h.sent(5, "9.1", "http://127.0.0.1/rv/redir?0", 999_500, 1_000_100);
+    h.table.cefRedirect(5, 900, true);
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "9.1", .url_hash = hashUrl8("http://localhost/rv/secret.json?0"), .method_hash = hashMethod("GET"), .ts_us = 1_080_000, .redirect = true } }, 1_080_100);
+    try h.ev(5, .{ .extra_info = .{ .rid = "9.1", .credentialed = false } }, 1_080_100);
+    try h.respond(5, "9.1", "application/json", 38, 1_081_000);
+    try h.finish(5, "9.1", 1_081_100);
+    try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
+    // 시한 안의 tick 도 받으러 가지 않는다.
+    try h.table.tick(gpa_t, 1_081_100 + cover_grace_us / 2);
+    try h.drain();
+    try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
+    // CEF 응답(호스트 localhost — 덮이지 않는다)이 오면 not_covered.
+    h.table.cefCovered(5, 900, false);
+    try h.table.tick(gpa_t, 1_100_000);
+    try h.drain();
+    try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
+    try testing.expectEqual(State.not_covered, h.ended.get(900).?);
+
+    // 덮이는 호스트로의 응답이면 그때 받으러 간다.
+    _ = try h.cand(5, 901, "http://127.0.0.1/own?1", 2_000_000, .{ .cover_pending = true });
+    try h.sent(5, "9.2", "http://127.0.0.1/own?1", 1_999_500, 2_000_100);
+    try h.respond(5, "9.2", "application/json", 3, 2_001_000);
+    try h.finish(5, "9.2", 2_001_100);
+    try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
+    h.table.cefCovered(5, 901, true);
+    try h.table.tick(gpa_t, 2_010_000);
+    try h.drain();
+    var buf: [4]u64 = undefined;
+    try testing.expectEqualSlices(u64, &.{901}, h.fetchedRequests(&buf));
+
+    // 응답 없이 끝났다(CEF 끝만) — 덮이지 않는 쪽.
+    _ = try h.cand(5, 902, "http://127.0.0.1/noresp", 3_000_000, .{ .cover_pending = true });
+    try h.sent(5, "9.3", "http://127.0.0.1/noresp", 2_999_500, 3_000_100);
+    try h.respond(5, "9.3", "text/plain", 3, 3_001_000);
+    try h.finish(5, "9.3", 3_001_100);
+    h.table.cefEnd(5, 902, 3_002_000);
+    try h.table.tick(gpa_t, 3_010_000);
+    try h.drain();
+    try testing.expectEqual(State.not_covered, h.ended.get(902).?);
+
+    // 시한까지 CEF 응답이 오지 않는다 — 덮이지 않는 쪽.
+    _ = try h.cand(5, 903, "http://127.0.0.1/slow", 4_000_000, .{ .cover_pending = true });
+    try h.sent(5, "9.4", "http://127.0.0.1/slow", 3_999_500, 4_000_100);
+    try h.respond(5, "9.4", "text/plain", 3, 4_001_000);
+    try h.finish(5, "9.4", 4_001_100);
+    try h.table.tick(gpa_t, 4_001_100 + cover_grace_us);
+    try h.drain();
+    try testing.expectEqual(State.not_covered, h.ended.get(903).?);
+    try testing.expectEqualSlices(u64, &.{901}, h.fetchedRequests(&buf));
+
+    // 앞 홉의 응답이 덮임을 정했어도 리다이렉트가 오면 다시 기다린다(마지막 응답 호스트로 정한다).
+    _ = try h.cand(5, 904, "http://127.0.0.1/hop", 5_000_000, .{ .cover_pending = true });
+    try h.sent(5, "9.5", "http://127.0.0.1/hop", 4_999_500, 5_000_100);
+    h.table.cefCovered(5, 904, true);
+    h.table.cefRedirect(5, 904, true);
+    try h.respond(5, "9.5", "application/json", 3, 5_001_000);
+    try h.finish(5, "9.5", 5_001_100);
+    h.table.cefCovered(5, 904, false);
+    try h.table.tick(gpa_t, 5_010_000);
+    try h.drain();
+    try testing.expectEqual(State.not_covered, h.ended.get(904).?);
+    // 설정이 켜져 있으면(리다이렉트가 `pending` 거짓) 기다리지 않는다.
+    _ = try h.cand(5, 905, "http://127.0.0.1/on", 6_000_000, .{});
+    try h.sent(5, "9.6", "http://127.0.0.1/on", 5_999_500, 6_000_100);
+    h.table.cefRedirect(5, 905, false);
+    try h.respond(5, "9.6", "application/json", 3, 6_001_000);
+    try h.finish(5, "9.6", 6_001_100);
+    try testing.expect(std.mem.indexOfScalar(u64, h.fetchedRequests(&buf), 905) != null);
+}
+
+// 이 시험이 증명하는 것(MED-2): 페이지의 CDP 에 없는 같은 주소의 CEF 요청(전용 워커의 fetch — CEF 는 주 프레임의 것으로 적는다, J3)이 창 안에
+// 있으면 페이지의 본문을 어느 CEF 요청에도 붙이지 않는다 — 이 요청의 짝일 수 있는 후보(워커의 것·페이지의 것)를 모두 `ambiguous` 로 끝내고,
+// 창 안이어도 뒤 CDP 요청의 몫인 후보는 남긴다. 후보 수가 그것을 가져갈 CDP 요청 수와 같으면(같은 주소 동시 요청) 전처럼 차례로 짓는다. 왜 중요한가 — 에이전트가 A 의 요청 헤더와 B 의 본문을 한 요청으로 보게 된다(실제 CEF 154
+// 판정에서 40 번 중 39–40 번).
+test "W9d② 적대 리뷰 1 회차 재현 RV2: 페이지의 CDP 가 보지 못한 같은 주소의 워커 요청이 창 안에 있으면 짝일 수 있는 후보를 모두 ambiguous 로(본문 없음), 그 뒤 요청의 후보는 남긴다 — 후보와 CDP 요청 수가 같으면 차례대로" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    // 워커의 fetch: CEF 시작만(같은 열쇠·같은 보이는 규칙).
+    _ = try h.cand(5, 4011, "http://127.0.0.1/rv/echo3?1", 1_000_300, .{});
+    // 페이지의 fetch: CDP 시각이 조금 뒤, 그 CEF 시작은 0.7 ms 뒤.
+    _ = try h.cand(5, 4012, "http://127.0.0.1/rv/echo3?1", 1_001_200, .{});
+    try h.sent(5, "1.40", "http://127.0.0.1/rv/echo3?1", 1_000_500, 1_001_300);
+    try h.respond(5, "1.40", "application/json", 10, 1_020_000);
+    try h.finish(5, "1.40", 1_020_100);
+    var buf: [4]u64 = undefined;
+    try testing.expect(std.mem.indexOfScalar(u64, h.fetchedRequests(&buf), 4011) == null);
+    try testing.expectEqual(@as(usize, 0), h.fetchedRequests(&buf).len);
+    // 이 요청의 짝일 수 있는 후보 둘(워커의 것·페이지의 것)이 모두 `ambiguous` — 어느 쪽에도 본문이 없다.
+    try testing.expectEqual(State.ambiguous, h.ended.get(4011).?);
+    try testing.expectEqual(State.ambiguous, h.ended.get(4012).?);
+    h.table.cefEnd(5, 4012, 1_030_000);
+    h.table.cefEnd(5, 4011, 1_030_000);
+    try h.table.tick(gpa_t, 1_030_000 + unclaimed_expiry_us);
+    try h.drain(); // 끝은 하나씩(두 번째 끝이면 drain 이 실패한다)
+
+    // 워커가 늦게 시작해도(페이지의 CEF 시작 4021 뒤 — 4022) 창 안이면 모호하다 — 어느 쪽이 페이지의 것인지 차례로는 가를 수 없다.
+    _ = try h.cand(5, 4021, "http://127.0.0.1/rv/echo3?2", 2_000_700, .{});
+    _ = try h.cand(5, 4022, "http://127.0.0.1/rv/echo3?2", 2_001_000, .{});
+    try h.sent(5, "1.41", "http://127.0.0.1/rv/echo3?2", 2_000_000, 2_001_100);
+    try h.respond(5, "1.41", "application/json", 10, 2_020_000);
+    try h.finish(5, "1.41", 2_020_100);
+    try testing.expectEqual(State.ambiguous, h.ended.get(4021).?);
+    try testing.expectEqual(State.ambiguous, h.ended.get(4022).?);
+
+    // 같은 주소의 페이지 요청 둘과 CEF 후보 둘 — 수가 같으니 차례대로 짓는다(모호하지 않다).
+    _ = try h.cand(5, 4031, "http://127.0.0.1/rv/echo3?3", 3_000_700, .{});
+    _ = try h.cand(5, 4032, "http://127.0.0.1/rv/echo3?3", 3_001_700, .{});
+    try h.sent(5, "1.50", "http://127.0.0.1/rv/echo3?3", 3_000_000, 3_000_100);
+    try h.sent(5, "1.51", "http://127.0.0.1/rv/echo3?3", 3_001_000, 3_001_100);
+    try h.respond(5, "1.51", "application/json", 10, 3_020_000);
+    try h.finish(5, "1.51", 3_020_100);
+    try h.respond(5, "1.50", "application/json", 10, 3_021_000);
+    try h.finish(5, "1.50", 3_021_100);
+    try testing.expectEqualSlices(u64, &.{ 4032, 4031 }, h.fetchedRequests(&buf));
+    // 같은 주소의 CDP 요청이라도 창 밖(3 초 뒤 — 이 요청의 후보를 가져갈 수 없다)이면 가져갈 쪽으로 세지 않는다: 워커 후보 하나가 남는다 → 모호.
+    _ = try h.cand(5, 4051, "http://127.0.0.1/rv/echo3?5", 7_000_300, .{}); // w
+    _ = try h.cand(5, 4052, "http://127.0.0.1/rv/echo3?5", 7_001_000, .{}); // 페이지
+    try h.sent(5, "1.70", "http://127.0.0.1/rv/echo3?5", 7_000_500, 7_000_600);
+    try h.sent(5, "1.71", "http://127.0.0.1/rv/echo3?5", 10_100_000, 10_100_100); // 창 밖의 열린 같은 주소 요청
+    try h.respond(5, "1.70", "application/json", 10, 10_200_000);
+    try h.finish(5, "1.70", 10_200_100);
+    try testing.expectEqual(State.ambiguous, h.ended.get(4052).?);
+
+    // 받은 것으로 치고 자리를 비운다(탭마다 동시 2).
+    for (h.fetches.items) |act| if (h.table.takeInflight(act.fetch.id)) |f| try h.table.bodyDone(gpa_t, f, 3_100_000);
+    try h.drain();
+
+    // 워커의 것이 끼어도 그 뒤(창 밖으로 먼 뒤 요청의 몫)의 후보는 남긴다: 워커 w, 페이지 요청 A(곧 시작)와 B(1.5 초 뒤) — A 가 늦게 끝나 B 의
+    // 후보까지 창에 들어도 A 는 w·a 만 모호로 끝내고 B 는 제 후보와 짓는다.
+    _ = try h.cand(5, 4041, "http://127.0.0.1/rv/echo3?4", 4_000_000, .{}); // w
+    _ = try h.cand(5, 4042, "http://127.0.0.1/rv/echo3?4", 4_001_000, .{}); // a
+    try h.sent(5, "1.60", "http://127.0.0.1/rv/echo3?4", 4_000_300, 4_000_400);
+    try h.sent(5, "1.61", "http://127.0.0.1/rv/echo3?4", 5_500_000, 5_500_100);
+    _ = try h.cand(5, 4043, "http://127.0.0.1/rv/echo3?4", 5_500_700, .{}); // b
+    try h.respond(5, "1.60", "application/json", 10, 5_600_000);
+    try h.finish(5, "1.60", 5_600_100);
+    try testing.expectEqual(State.ambiguous, h.ended.get(4041).?);
+    try testing.expectEqual(State.ambiguous, h.ended.get(4042).?);
+    try testing.expect(h.ended.get(4043) == null);
+    try h.respond(5, "1.61", "application/json", 10, 5_700_000);
+    try h.finish(5, "1.61", 5_700_100);
+    try testing.expect(std.mem.indexOfScalar(u64, h.fetchedRequests(&buf), 4043) != null);
+}
+
+// 이 시험이 증명하는 것(LOW-3): 정한 뒤에 온 ExtraInfo 가 남긴 열쇠 없는 자리는 시한 뒤 놓여 할 일이 없어진다(`busy` 거짓 — 50 ms 주기 task 가
+// 멈춘다), 그런 자리는 수도 묶인다(오래된 것부터 — 진행 중인 요청을 밀어내지 않는다). 홉마다 ExtraInfo 를 세어 뒤 홉의 것이 `loadingFinished` 뒤에
+// 오면 잠시 기다려 그 쿠키를 반영하고, 끝내 오지 않으면 실린 것으로 친다(UB1 은 닫힌 쪽).
+test "W9d② 적대 리뷰 1 회차 재현 C8: 정한 뒤 온 ExtraInfo 의 자리는 시한 뒤 놓는다(busy 거짓), 그런 자리의 수는 묶인다, 뒤 홉의 쿠키가 loadingFinished 뒤에 와도 실린 것" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    _ = try h.cand(5, 1, "https://a.test/x", 1_000_000, .{});
+    try h.sent(5, "1.1", "https://a.test/x", 999_500, 1_000_100);
+    try h.respond(5, "1.1", "application/json", 3, 1_000_200);
+    try h.finish(5, "1.1", 1_000_300);
+    // 정한 뒤의 늦은 ExtraInfo(리다이렉트 홉의 것이 loadingFinished 뒤에 오는 꼴).
+    try h.ev(5, .{ .extra_info = .{ .rid = "1.1", .credentialed = true } }, 1_000_400);
+    var list: [4]u64 = undefined;
+    _ = h.fetchedRequests(&list);
+    const f = h.table.takeInflight(h.fetches.items[0].fetch.id).?;
+    try h.table.bodyDone(gpa_t, f, 1_001_000);
+    try h.table.tick(gpa_t, 100_000_000);
+    try h.drain();
+    try testing.expect(!h.table.busy());
+
+    // 열쇠 없는 자리는 많아야 `max_placeholders` — 진행 중인 요청(열쇠 있음)은 밀려나지 않는다.
+    _ = try h.table.start(gpa_t, 6, 2);
+    try h.ev(6, .{ .will_be_sent = .{ .rid = "live", .url_hash = hashUrl8("https://a.test/live"), .method_hash = hashMethod("GET"), .ts_us = 5_000_000 } }, 5_000_000);
+    var rb: [16]u8 = undefined;
+    for (0..max_placeholders * 3) |n| try h.ev(6, .{ .extra_info = .{ .rid = try std.fmt.bufPrint(&rb, "late.{d}", .{n}), .credentialed = false } }, 5_000_100);
+    const t6 = h.table.tabOf(6).?;
+    try testing.expectEqual(@as(usize, max_placeholders + 1), t6.cdp.items.len);
+    try testing.expect(Table.cdpIndex(t6, "live") != null);
+
+    // 홉마다 센다: 첫 홉의 ExtraInfo(쿠키 없음) → 리다이렉트 → loadingFinished → 둘째 홉의 ExtraInfo(쿠키) — Chromium 이 ExtraInfo 가 온다고
+    // 했으면 잠시 기다려 반영한다.
+    const before = h.fetches.items.len;
+    _ = try h.cand(5, 2, "https://a.test/r", 6_000_000, .{});
+    try h.sent(5, "2.1", "https://a.test/r", 5_999_500, 6_000_100);
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "2.1", .url_hash = hashUrl8("https://b.test/y"), .method_hash = hashMethod("GET"), .ts_us = 6_010_000, .redirect = true } }, 6_010_100);
+    try h.ev(5, .{ .response = .{ .rid = "2.1", .mime = "application/json", .from_sw = false, .charset = true, .has_extra_info = true } }, 6_011_000);
+    try h.ev(5, .{ .data = .{ .rid = "2.1", .bytes = 3 } }, 6_011_000);
+    try h.finish(5, "2.1", 6_011_100);
+    try testing.expectEqual(before, h.fetches.items.len); // 둘째 홉의 ExtraInfo 를 기다린다
+    try h.ev(5, .{ .extra_info = .{ .rid = "2.1", .credentialed = true } }, 6_020_000);
+    try h.table.tick(gpa_t, 6_030_000);
+    try h.drain();
+    try testing.expectEqual(before + 1, h.fetches.items.len);
+    const f2 = h.table.takeInflight(h.fetches.items[before].fetch.id).?;
+    try testing.expect(f2.credentialed);
+    try h.table.bodyDone(gpa_t, f2, 6_040_000);
+    // 둘째 홉의 ExtraInfo 가 끝내 오지 않으면(시한) 실린 것으로 친다. Chromium 이 ExtraInfo 가 없다고 했으면 기다리지 않고 실린 것으로.
+    _ = try h.cand(5, 3, "https://a.test/s", 7_000_000, .{});
+    try h.sent(5, "3.1", "https://a.test/s", 6_999_500, 7_000_100);
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "3.1", .url_hash = hashUrl8("https://b.test/z"), .method_hash = hashMethod("GET"), .ts_us = 7_010_000, .redirect = true } }, 7_010_100);
+    try h.ev(5, .{ .response = .{ .rid = "3.1", .mime = "application/json", .from_sw = false, .charset = true, .has_extra_info = true } }, 7_011_000);
+    try h.finish(5, "3.1", 7_011_100);
+    try h.table.tick(gpa_t, 7_011_100 + extra_grace_us);
+    try h.drain();
+    try testing.expectEqual(before + 2, h.fetches.items.len);
+    try testing.expect(h.table.takeInflight(h.fetches.items[before + 1].fetch.id).?.credentialed);
+    _ = try h.cand(5, 4, "https://a.test/u", 8_000_000, .{});
+    try h.sent(5, "4.1", "https://a.test/u", 7_999_500, 8_000_100);
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "4.1", .url_hash = hashUrl8("https://b.test/w"), .method_hash = hashMethod("GET"), .ts_us = 8_010_000, .redirect = true } }, 8_010_100);
+    try h.respond(5, "4.1", "application/json", 3, 8_011_000);
+    try h.finish(5, "4.1", 8_011_100);
+    try testing.expectEqual(before + 3, h.fetches.items.len);
+    try testing.expect(h.table.takeInflight(h.fetches.items[before + 2].fetch.id).?.credentialed);
 }

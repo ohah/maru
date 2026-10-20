@@ -1806,6 +1806,17 @@ pub fn tabTitleMarker(title: []const u8) ?[]const u8 {
     return null;
 }
 
+/// W9d② 적대 리뷰 1 회차: 프로그램·페이지·사용자가 고른 제목이 기록 표식(`◉`)으로 시작하면 앞에 붙이는 글자 — WORD JOINER(U+2060, 보이지
+/// 않고 폭이 없다: 탭 제목의 measured 경로는 CoreText `CTLine` 이라 기본 무시 글자를 그리지 않는다). 마커는 제목의 머리 글자로 가르므로
+/// (`tabTitleMarker`), 이것이 없으면 OSC 로 「◉ …」 제목을 단 터미널이나 그렇게 이름을 바꾼 탭이 빨간 기록 표식을 얻었다(거짓 양성 — 진짜
+/// 표식을 숨길 수는 없다). 기록 표식은 maru 가 붙인 것만 표식이다. running `●` 의 같은 거짓 양성은 W9d② 전부터 있던 것이라 그대로 둔다.
+pub const title_mark_escape = "\u{2060}";
+
+/// 고른 제목을 탭 제목으로 쓸 때 기록 표식으로 읽히지 않게 할 것인가(`title_mark_escape` 를 앞에 붙인다).
+pub fn titleNeedsMarkEscape(title: []const u8) bool {
+    return std.mem.startsWith(u8, title, recording_mark_utf8);
+}
+
 /// 마커·구분 공백을 뗀 제목 본문. 마커가 없으면 원본 그대로.
 pub fn tabTitleBody(title: []const u8) []const u8 {
     const marker = tabTitleMarker(title) orelse return title;

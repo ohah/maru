@@ -35,8 +35,10 @@ var tick_task: c.cef_task_t = undefined;
 var tick_posted = false;
 /// 어느 탭이든 기록하는가 — IO 스레드(`network.zig`)가 값싸게 본다(주소 해시를 낼지).
 pub var any_recording = std.atomic.Value(bool).init(false);
-/// `Network.enable`·`Network.disable` 의 번호 — 결과가 오면 켜짐을 알린다(본문 호출과 같은 대역).
-var control_ids: [registry_mod.capacity]struct { id: i32 = 0, browser: BrowserId = 0, session: u32 = 0, enable: bool = false } = @splat(.{});
+/// `Network.enable` 의 번호 — 결과가 오면 켜짐을 알린다(본문 호출과 같은 대역). 탭마다 많아야 하나다. `Network.disable` 은 적지 않는다 —
+/// 보낸 뒤 곧 관찰자를 놓아 그 결과는 오지 않는다(W9d② 적대 리뷰 1 회차 LOW-1: 적으면 자리가 새어, 서로 다른 탭 32 개를 끈 뒤로는 켬의 결과를
+/// 짝지을 자리가 없어 maru 가 영영 `starting` 에 머물렀다). 관찰자를 놓을 때(끄기·닫힘) 그 탭의 자리를 비운다.
+var control_ids: [registry_mod.capacity]struct { id: i32 = 0, browser: BrowserId = 0, session: u32 = 0 } = @splat(.{});
 
 const tick_ms: i64 = 50;
 
@@ -112,6 +114,7 @@ pub fn record(v: msg.NetRecord) void {
         runActions();
         if (was) sendCdp(entry, "Network.disable", "{}", v.browser, 0, false);
         unregister(entry.cef_id);
+        clearControl(v.browser);
         refreshAny();
         writer().send(.{ .net_record_state = .{ .browser = v.browser, .session = 0, .status = .off } }) catch {};
         return;
@@ -119,6 +122,7 @@ pub fn record(v: msg.NetRecord) void {
     const ok = table.start(gpa, v.browser, v.session) catch false;
     runActions();
     if (!ok or !register(entry)) {
+        clearControl(v.browser);
         table.stop(gpa, v.browser) catch {};
         runActions();
         refreshAny();
@@ -141,6 +145,7 @@ pub fn browserClosed(cef_id: c_int, browser: BrowserId) void {
     table.closed(gpa, browser) catch {};
     runActions();
     unregister(cef_id);
+    clearControl(browser);
     refreshAny();
 }
 
@@ -155,8 +160,15 @@ pub fn cefBegin(browser: BrowserId, cand: table_mod.Candidate) bool {
     return ok;
 }
 
+/// CEF 리다이렉트 — 설정이 꺼졌으면(`pending`) 응답 호스트가 다시 정해질 때까지 본문을 받으러 가지 않는다(W9d② 적대 리뷰 1 회차 MED-1).
+pub fn cefRedirect(browser: BrowserId, request: u64, pending: bool) void {
+    dbg("cef-redirect b={d} req={d} pending={}", .{ browser, request, pending });
+    table.cefRedirect(browser, request, pending);
+}
+
 /// CEF 응답 — 설정이 꺼졌을 때 응답 호스트가 덮이는가(`net_response` 헤더와 같은 결정).
 pub fn cefCovered(browser: BrowserId, request: u64, covered: bool) void {
+    dbg("cef-response b={d} req={d} covered={}", .{ browser, request, covered });
     table.cefCovered(browser, request, covered);
 }
 
@@ -218,11 +230,23 @@ fn sendCdp(entry: *const registry_mod.Entry, method: []const u8, params: []const
     const id = nextId();
     var jb: [512]u8 = undefined;
     const json = std.fmt.bufPrint(&jb, "{{\"id\":{d},\"method\":\"{s}\",\"params\":{s}}}", .{ id, method, params }) catch return;
-    for (&control_ids) |*slot| if (slot.id == 0 or slot.browser == browser) {
-        slot.* = .{ .id = id, .browser = browser, .session = session, .enable = enable };
-        break;
-    };
+    // 켬의 결과만 짝짓는다(LOW-1 — 끄기의 결과는 관찰자를 놓아 오지 않는다). 그 탭의 앞 켬 자리는 덮는다(다시 켬 — 앞 세션의 결과는 버린다).
+    if (enable) {
+        const slot = for (&control_ids) |*sl| {
+            if (sl.browser == browser) break sl;
+        } else for (&control_ids) |*sl| {
+            if (sl.id == 0) break sl;
+        } else null;
+        if (slot) |sl| sl.* = .{ .id = id, .browser = browser, .session = session };
+    }
     _ = host.*.send_dev_tools_message.?(host, json.ptr, json.len);
+}
+
+/// 그 탭의 켬 자리를 비운다(관찰자를 놓았다 — 결과가 오지 않는다).
+fn clearControl(browser: BrowserId) void {
+    for (&control_ids) |*slot| if (slot.browser == browser) {
+        slot.* = .{};
+    };
 }
 
 fn onEvent(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t, method_s: [*c]const c.cef_string_t, params: ?*const anyopaque, params_size: usize) callconv(.c) void {
@@ -268,15 +292,13 @@ fn onResult(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browse
         const s = slot.*;
         slot.* = .{};
         // 켬의 답 — 그 사이 끄거나 다시 켜지 않았을 때만 알린다.
-        if (s.enable) {
-            const t = table.tabOf(s.browser);
-            if (t != null and t.?.session == s.session) {
-                writer().send(.{ .net_record_state = .{ .browser = s.browser, .session = s.session, .status = if (success != 0) .on else .failed } }) catch {};
-                if (success == 0) {
-                    table.stop(gpa, s.browser) catch {};
-                    runActions();
-                    refreshAny();
-                }
+        const t = table.tabOf(s.browser);
+        if (t != null and t.?.session == s.session) {
+            writer().send(.{ .net_record_state = .{ .browser = s.browser, .session = s.session, .status = if (success != 0) .on else .failed } }) catch {};
+            if (success == 0) {
+                table.stop(gpa, s.browser) catch {};
+                runActions();
+                refreshAny();
             }
         }
         return;
@@ -304,9 +326,10 @@ fn onDetached(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_brow
 /// 받은 결과를 풀어 보낸다 — 잡았으면 조각들과 끝(보내는 줄에 자리가 없으면 `busy`), 아니면 끝 하나.
 fn sendBody(f: table_mod.Inflight, ok: bool, json: []const u8) void {
     var flags: msg.NetBodyFlags = .{ .credentialed = f.credentialed };
-    const d = table_mod.decodeResult(gpa, ok, json, f.mimeSlice(), f.charset) catch table_mod.Decoded{ .state = .busy };
+    const d = table_mod.decodeResult(gpa, ok, json, f.mimeSlice(), f.charset, f.decoded) catch table_mod.Decoded{ .state = .busy };
     defer if (d.bytes.len > 0) gpa.free(d.bytes);
-    const end: msg.NetBodyEnd = .{ .browser = f.browser, .session = f.session, .request = f.request, .state = d.state, .flags = flags, .decoded = f.decoded };
+    // 넘쳤으면 넘친 글의 크기까지(windows-1252 로 푼 글은 받은 바이트보다 클 수 있다 — 상태와 크기가 엇갈리지 않게).
+    const end: msg.NetBodyEnd = .{ .browser = f.browser, .session = f.session, .request = f.request, .state = d.state, .flags = flags, .decoded = @max(f.decoded, d.over_bytes) };
     if (d.state != .captured) return writer().send(.{ .net_body_end = end }) catch {};
     const total = events.bodyFrameBytes(d.bytes.len);
     if (!writer().reserveBody(total)) {

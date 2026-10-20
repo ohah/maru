@@ -775,6 +775,8 @@ fn send(e: *const Event, browser: BrowserId, index: usize) void {
                     .t_io_us = e.t_io_us,
                     .attr = projectionAttr(flags, e.site, e.initiator),
                     .covered = d.full or d.covered,
+                    // 설정이 꺼졌으면 응답을 보낼 호스트(리다이렉트 뒤)가 정해질 때까지 받으러 가지 않는다(W9d② 적대 리뷰 1 회차 MED-1).
+                    .cover_pending = !d.full,
                     .cef_credentialed = credentialHeaders(raw),
                 });
             }
@@ -783,6 +785,8 @@ fn send(e: *const Event, browser: BrowserId, index: usize) void {
         .redirect => blk: {
             var hop = e.hop;
             if (!d.full) hop.stripped = true;
+            // W9d②(적대 리뷰 1 회차 MED-1): 설정이 꺼졌으면 응답 호스트가 바뀐다 — 다음 응답이 덮이는지 정할 때까지 본문을 받으러 가지 않는다.
+            net_body.cefRedirect(browser, e.request, !d.full);
             if (url.len == 0) return;
             break :blk .{ .net_redirect = .{ .browser = browser, .request = e.request, .status = e.status, .flags = hop, .time_ms = e.time_ms, .url = url, .host = e.url_host, .headers = headers } };
         },

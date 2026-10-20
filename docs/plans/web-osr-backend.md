@@ -1993,7 +1993,8 @@ W9d① 적대 리뷰 후 — 같은 id 다시 시작(2026-10-16 — W9d② 측�
 - **UB1 「적용」** — 자격 증명 규칙(D1)이 본문에도 선다: 본문 권한이 덮지 않는 호스트에서 쿠키나 인증이 **실제로 실린** 응답의 본문은 그 호스트를 덮는
   `browser_storage` grant 가 있어야 보인다(스크립트·스타일·문서까지 — 종류를 가리지 않는다). 기록한 사이트 제 응답과 자격 증명이 실리지 않은 응답은 그대로 보인다.
 - **UB2 「묻지 않음」** — 에이전트가 연 탭은 본문 기록을 확인 모달 없이 켠다(태어날 때 grant — `browser_network` 와 같다). 탭 제목 앞의 ◉ 는 그대로 보인다.
-- 작성자 기본(묻지 않음): UB3 (a) 사용자 탭은 탭마다 사이트마다 한 번 묻는다, UB4 다른 프로세스 iframe·worker 의 본문은 W9d② 에서 잡지 않는다(`unmatched`).
+- 작성자 기본(묻지 않음): UB3 (a) 사용자 탭은 탭마다 사이트마다 한 번 묻는다, UB4 다른 프로세스 iframe·worker 의 본문은 W9d② 에서 잡지 않는다(`unmatched` — 적대
+  리뷰 1 회차 MED-2 뒤로는 worker 가 페이지와 같은 주소를 거의 같은 때 받으면 그 둘은 `ambiguous`).
 
 **W9d②-0 실측(실제 CEF 154 — J1–J13, `$S/w9d_plan/MEASURE3.md`)으로 정한 것(작성자 결정 2026-10-16)**:
 - **맞추기**: CDP `requestId` 와 CEF 요청 번호 사이에 관계가 없다(J1) — 열쇠는 (조각을 뗀 **온 주소**의 해시, 메서드, 서비스 워커 갈래)다. CEF 주소는 `#조각` 을
@@ -2047,14 +2048,16 @@ W9d① 적대 리뷰 후 — 같은 id 다시 시작(2026-10-16 — W9d② 측�
   상한·세대·끝은 꼭 하나, 순수 시험) + `out_queue.zig`(보내는 줄 — 순수·스레드 시험). `network.zig` 가 IO 스레드에서 해시·IO 시각을 찍고, 보내는 task 에서
   후보를 적고(`body_expected`), 응답에서 덮이는지, 끝에서 `unmatched` 시한을 건다. 기록 중에 시작한 요청마다 본문 끝이 **꼭 하나**다(짝 없음 `unmatched`·끄기
   `recording_stopped`·렌더러 죽음과 닫힘 `detached`·상한 `busy`).
-- **maru**: `web_osr_network.Ring` 의 기록마다 본문(하나 1 MiB·탭 8 MiB·앱 32 MiB — 넘으면 이 탭의 오래된 본문부터 `evicted`, 메모리에만). 본문 frame 은 새것부터
+- **maru**: `web_osr_network.Ring` 의 기록마다 본문(하나 1 MiB·탭 8 MiB·앱 32 MiB — 탭 상한은 이 탭의, 앱 상한은 탭과 무관하게 가장 먼저 받은 본문부터
+  `evicted`(적대 리뷰 1 회차), 메모리에만). 본문 frame 은 새것부터
   찾아 붙인다(끝은 대개 `net_end` 뒤에 온다). 읽는 쪽 시작점은 네트워크와 본문이 따로(`ReaderSet` 둘 — 본문 grant 번호로). 보이는가는 `net_policy.bodyAccess`
   (순수 판 — 본문 권한 → 응답 투영 → 묶인 사이트의 페이지 → 허락 뒤 → UB1). `web_osr` 가 탭마다 기록 상태(켬·세션·sidecar 상태)를 쥐고 브라우저가 새로
   만들어지면 새 세션으로 다시 켠다.
 - **표식**: 기록하는 탭의 제목 앞 ◉(U+25C9 — `diffAwareLabel`). running ● 처럼 셀로 그리고 그 칸만 빨갛게(`tab_ops.recolorRecordingMarkCells`).
 - **지우기 판**: 본문 grant 철회(하나·모두)·마지막 본문 grant → 끄고 지운다(◉ 사라짐), 네트워크 grant 철회 → 기록도 끈다, 탭 닫힘 → 기록째 사라진다,
   sidecar 재시작 → 기다리던 본문 `detached`·새 세션으로 다시 켠다, 이동 → 기다리던 본문은 Chromium 이 버려 `unavailable`, 렌더러 죽음 → `detached`(기록은
-  그대로), 설정 켬 → 끔 → 받은 본문 `discarded`.
+  그대로), 설정 켬 → 끔 → 받은 본문과 기다리던 본문 `discarded`·기록은 새 세션으로, 기록 끄기(`networkRecord off`) → 기록만 끄고 받은 본문은 남긴다
+  (적대 리뷰 1 회차 LOW-4 — 작성자 선택). 지울 때는 그때까지의 세션 frame 을 더 받지 않는다(적대 리뷰 1 회차 LOW-2).
 - **CLI·MCP**: `maru browser network-record --surface N (--on|--off)`, `network-request ... --body [--offset n] [--max-bytes n] [--out f]`(본문 칸은 `--body` 를
   함의한다; `--out` 은 조각을 이어 받아 다 모은 뒤 0600 원자적으로 쓴다, 바이너리는 `--out` 으로만), 목록 줄의 `[body …]`; MCP `browser_network_record`·
   `browser_network_request` 의 `body`·`body_offset`·`body_max_bytes`·`out`(상한을 설명에 적었다).
@@ -2069,7 +2072,8 @@ sidecar 재시작), control_browser(op 30·모달 전 `-32008`·`needs_network_p
 판정자(`network_body_check.zig` — `--network` 끝에 따로 띄운 sidecar): `body-record-on`·`body-captured-chunked`·`body-captured-gzip`·`body-captured-h2(net)`(공개
 사이트 — 인터넷이 없으면 관측)·`body-document`·`body-over-cap-json`·`body-over-cap-script`·`body-not-text`·`body-no-body`·`body-partial`·`body-redecoded`·
 `body-join-same-url`·`body-cross-process-iframe`·`body-service-worker`·`body-ub1-credentialed`·`body-switch-off-prefilter`·`body-writer-nonblocking`·
-`body-devtools-guard`·`body-renderer-crash`·`body-record-off`·`body-restart-same-id`·`body-one-end-each`(번호마다 시도 수만큼).
+`body-devtools-guard`·`body-renderer-crash`·`body-record-off`·`body-restart-same-id`·`body-one-end-each`(번호마다 시도 수만큼). 적대 리뷰 1 회차 항목
+`body-r1-*` 는 `network_body_r1_check.zig`(`--network`·`--network-body` 끝에 따로 띄운 sidecar — 아래 「W9d② 적대 리뷰: 1 회차」).
 
 **W9d② × 같은 번호 다시 시작(W9d① 적대 리뷰 후 위로 리베이스 — 2026-10-16)**: W9d① 이 같은 CEF 번호의 시작을 다시 시작으로 치게 되자(앞 기록
 `restarted`, 새 시도는 새 기록) 한 번호에 기록이 둘이 될 수 있다 — 그런데 본문 frame 은 번호로만 오고 maru 는 그 번호의 가장 새 기록에 붙인다.
@@ -2095,5 +2099,50 @@ sidecar 재시작), control_browser(op 30·모달 전 `-32008`·`needs_network_p
   `unmatched` 다 — 틀린 시도에 붙이느니 없는 편을 골랐다.
 
 남은 틈(알고 둔 것): 다른 프로세스 iframe·worker·서비스 워커만의 요청(페이지 twin 이 없는 것)·메모리 캐시·추측 미리 받기·preflight·opaque no-cors·ORB 막힘의
-본문은 없다(UB4·J3·J13 — `unmatched` 이거나 기록 자체가 없다). 이벤트 흐름(`text/event-stream`)은 받지 않는다. 쏟아짐 밸브로 멈춘 기록은 에이전트가 다시 켜야
+본문은 없다(UB4·J3·J13 — `unmatched` 이거나 기록 자체가 없다; worker 가 페이지와 같은 주소를 거의 같은 때 받으면 둘 다 `ambiguous` — 적대 리뷰 1 회차 MED-2). 이벤트 흐름(`text/event-stream`)은 받지 않는다. 쏟아짐 밸브로 멈춘 기록은 에이전트가 다시 켜야
 한다.
+
+W9d② 적대 리뷰: 1 회차(2026-10-20 — 리뷰가 재현 시험(「W9d② 적대 리뷰 1 회차 재현 …」 — 순수 `net_body_table` 셋·L2 `web_osr` 셋)과 실제 CEF 154 판정
+항목을 남겼다. 그것을 붙여 여섯 시험이 모두 실패하고 판정 셋(`body-r1-switch-off-redirect` 12/12 나감·`body-r1-worker-same-url` 40/40 틀림·`body-r1-slot-leak`
+31/34)이 실패하는 것을 본 뒤 고쳤다. 판정은 `network_body_r1_check.zig` — `--network`·`--network-body` 끝에 따로 띄운 sidecar·프로필로 돈다):
+- **MED-1 설정 끔: 덮이는 주소가 덮이지 않는 호스트로 리다이렉트하면 본문이 sidecar 를 나갔다**: 후보의 「덮인다」 는 시작 호스트로 정하고 CEF 응답에서만 고쳤는데,
+  판정은 CDP `loadingFinished` 에서 하고 그것은 CEF 응답을 싣는 10 ms 묶음보다 대개 먼저 온다(J1) — 덮이지 않는 localhost 의 본문이 maru 에 왔다(판정
+  12/12, 대조로 본문을 250 ms 늦추면 `not_covered` 12/12). 그리고 maru 는 꺼진 동안 받은 그 본문을 투영으로 가렸지만 설정을 다시 켜면 `captured` 로 읽혔다(같은
+  응답의 헤더는 덜어진 채). 고침: sidecar 는 설정이 꺼진 후보에 「응답 호스트 모름」(`cover_pending`)을 세우고 리다이렉트마다 다시 세운다 — CEF 응답
+  (`cefCovered`)이나 끝(응답 없이 끝났으면 덮이지 않는 쪽)이 오기 전에는 받으러 가지 않고(주기 task 가 다시 본다), 500 ms(`cover_grace_us`) 안에 오지 않으면
+  `not_covered`. 실측 차례는 시작·리다이렉트·응답(마지막 호스트)·끝 — 302 에는 CEF 응답이 없었다(판정 로그). maru 는 `net_response` 의 `stripped`(꺼진 동안
+  적었다)를 기록에 찍고(`Entry.response_stripped` — 헤더의 P1c 와 같은 갈래), 그런 응답의 본문은 지금 설정과 무관하게 읽는 쪽 호스트가 응답을 보낸 곳을 덮을
+  때만 보인다.
+- **MED-2 같은 주소의 워커 요청이 페이지의 본문을 가져갔다**: 전용·공유 워커의 fetch 는 CEF 가 주 프레임의 것으로 적고 페이지의 CDP 에는 없다(J3) — 같은 열쇠·
+  같은 보이는 규칙의 후보가 페이지의 것보다 먼저 시작하면 차례 0 이라 뽑혔다(판정 39–40/40, 페이지의 것은 `unmatched`). 고침: 창 안의 같은 열쇠 후보가 그것을
+  가져갈 수 있는 같은 열쇠의 CDP 요청(이 요청 포함, 창이 겹치는 것만)보다 많으면 CDP 가 보지 못한 요청이 섞였다 — 이 요청의 짝일 수 있는 후보(차례 k 부터 남는
+  수만큼)를 모두 `ambiguous` 로 끝낸다(하나만 끝내면 남은 페이지의 것이 `unmatched` 로 보였다). 뒤 CDP 요청의 몫인 후보는 남긴다. 판정: 페이지 40·워커 40 중
+  틀린 본문 0, 페이지의 것 `ambiguous` 40, 워커가 본문을 받은 것 0. 남는 틈: 워커가 같은 주소를 2 초 창 안에서 받으면 페이지의 본문도 없다(틀리게 붙이느니).
+- **LOW-1 결과 자리가 새어 서른두 번째 끄기 뒤로는 켬에 답하지 않았다**: `Network.disable` 이 결과 자리를 잡았는데 곧 관찰자를 놓아 그 결과는 오지 않았다.
+  고침: 켬만 자리를 잡고(탭마다 하나 — 다시 켜면 덮는다) 관찰자를 놓을 때(끄기·닫힘·켬 실패) 그 탭의 자리를 비운다. 판정 34/34.
+- **LOW-2 지운 뒤 이미 오던 본문이 들어앉았다**: 지우기(`discardBodies`)가 기다리던 기록을 그대로 둬, 관·sidecar 의 줄에 있던 본문 frame(2 MiB 까지)이 지운 뒤
+  `captured` 로 들어앉았다 — 설정 켬 → 끔 → 켬이면 읽혔다. 고침: 지우기는 기다리던 것도 `discarded` 로 끝내고, 탭마다 지운 때의 세션을 바닥으로 둬 그 이하의
+  frame 은 받지 않는다(끝이면 기다리던 기록을 `discarded` 로 끝낸다 — 지운 뒤 sidecar 가 새 세션을 받기 전에 시작한 요청이 영영 `pending` 이지 않게). 설정 끔은
+  도는 기록을 새 세션으로 이어 간다(쏟아짐 밸브로 멈춘 기록은 그대로 — 다시 켜는 것은 에이전트다).
+- **LOW-3 늦은 ExtraInfo 의 자리가 기록 내내 남았다, 뒤 홉의 쿠키가 늦으면 실리지 않은 것이 됐다**: 이미 정한 요청의 늦은 ExtraInfo 가 열쇠 없는 자리를 만들고
+  아무도 지우지 않아 `busy()` 가 늘 참(50 ms 주기 task 가 멈추지 않는다)이었고, 4096 개가 쌓이면 사건마다 목록을 통째로 밀었다. 그리고 ExtraInfo 하나만 봐도
+  「모른다」 가 풀려 둘째 홉의 쿠키가 `loadingFinished` 뒤에 오면 `credentialed` 가 아니었다(UB1 이 열린 쪽). 고침: 열쇠 없는 자리는 1 초 뒤 놓고 64 개까지만
+  (오래된 것부터 — 진행 중 요청을 밀어내지 않는다). 보낸 수(첫 요청·리다이렉트 홉·다시 보내기 — ExtraInfo 는 보낼 때마다 하나다, CDP `redirectHasExtraInfo`)와
+  받은 ExtraInfo 수를 세어 덜 왔으면 실린 것으로 친다 — 응답이 ExtraInfo 가 온다고 했으면(`hasExtraInfo`) 200 ms 기다린다. 대조 판정
+  `body-r1-redirect-uncredentialed`: 쿠키 없는 다른 호스트 리다이렉트 여섯이 모두 `credentialed` 가 아니다(홉마다 ExtraInfo 가 왔다).
+- **LOW-4 문서와 코드가 달랐다(작성자 선택)**: 끄기(`networkRecord off`)는 기록만 끄고 받은 본문은 남긴다 — 에이전트가 끈 뒤에 읽는 흐름이 자연스럽고, 지우는
+  것은 권한의 끝(철회)·탭 닫힘·설정 끔이 맡는다. control-plane-browser.md 의 행과 MCP·CLI 의 글을 고쳤다(CLI 「not recording response bodies — the bodies
+  already recorded stay readable …」).
+- **nit**: ◉ 로 시작하는 제목(OSC·이름 바꾸기 — 웹 탭 라벨은 페이지 제목이 아니다)의 탭이 빨간 기록 표식을 얻었다 — 라벨 함수가 그런 제목 앞에 WORD JOINER
+  (U+2060, 보이지 않는다)를 둬 표식은 maru 가 붙인 것만이다(running ● 의 같은 거짓 양성은 전부터라 그대로). `--out` 은 `--max-bytes` 와 무관하게 64 KiB
+  조각으로 읽는다(작은 값이면 바퀴 상한에 걸려 「the body did not end」 였다). MCP `out` 설명(기존 파일을 바꾼다·상대 경로는 MCP 서버의 작업 디렉터리 기준).
+  windows-1252 되돌리기는 되돌린 바이트 수가 받은 바이트 수(Σ `dataReceived`)와 같을 때만(UTF-8 을 windows-1252 로 잘못 읽은 꼴) — BOM 으로 UTF-8 을 알아본
+  본문은 그대로 둔다; 받은 수를 모르면(0) 전처럼. 그렇게 푼 글이 1 MiB 를 넘으면 그 크기를 `decoded` 로 알린다(상태와 크기가 엇갈렸다). 앱 본문 상한은 탭과
+  무관하게 가장 먼저 받은 본문부터 버린다(받은 차례 `body_order`). `needs_cookie_permission` 의 CLI 안내는 「그 사이트로 옮긴 뒤 get-cookies」.
+- **검증**: 순수 `net_body_table`(재현 RV1·RV2·C8 을 넓혔다 — 응답 호스트 기다림·응답 없는 끝·시한·홉의 응답 뒤 리다이렉트·켬은 기다리지 않음, 워커 앞·뒤·창
+  밖의 CDP 요청·뒤 요청의 후보는 남김, 자리의 시한·수·홉마다의 ExtraInfo·기다림·`hasExtraInfo` 풀기, windows-1252 의 받은 수·넘친 크기), L2
+  `web_osr_network`(지우기·꺼진 동안 찍은 응답·받은 차례), web_osr(재현 C2·C2b·RV1-maru — C2b 는 지운 뒤 옛 세션 후보의 끝까지, RV1-maru 는 끈 뒤의 세션으로
+  고쳐 찍기를 본다; 다섯 탭 앱 상한·멈춘 기록은 설정 끔에 다시 켜지지 않음), app_session(◉ 제목의 라벨), CLI(`--out` 조각)·MCP. 판정자 `body-r1-*` 여덟(실제
+  CEF 154) — `--network` 111 통과. 변이 39 중 35 가 해당 시험·판정에서 RED. 남은 넷: 열쇠 없는 자리의 처음 보낸 수(채울 때 덮어써 같은 뜻), 네트워크 grant
+  철회 때의 세션 바닥(기록째 지워 늦은 frame 이 붙을 자리가 없다 — 방어), `network.zig` 의 리다이렉트 때 다시 세우기(실측 차례에서는 시작에서 이미 섰다 — 방어,
+  표의 뜻은 순수 시험이 본다), LOW-1 의 두 겹 중 하나(끄기의 자리를 적지 않기와 관찰자를 놓을 때 비우기 — 하나만으로도 닫힌다).

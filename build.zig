@@ -252,6 +252,10 @@ fn boundaryScanIndex(comptime root: []const u8) usize {
 }
 
 pub fn build(b: *std.Build) void {
+    // Zig 0.17 의 설정 캐시는 env 를 키로 안 써서, env 를 심는 run 스텝이 **처음 설정한 셸의 env 를 되풀이**한다 —
+    // 호출자가 건 `MARU_TEST_KEEP_ONLY_PREFIX` 가 사라진 원인이다. 사연과 대가는 `build/support.zig` 가 소유한다.
+    support.configureFromCallerEnvironment(b);
+
     // 🔥 **macOS 전용 게이트의 집계 — 선언이 «첫 사용보다 앞»이어야 한다**(계획 §28).
     //
     // 예전에는 이 선언이 3,500 줄쯤에 있었고, 그 **위에서 만들어진 macOS 스텝 아홉 개는 붙을 수조차
@@ -11382,6 +11386,10 @@ pub fn build(b: *std.Build) void {
         );
         std.debug.print("check-boundaries shard {d}/{d}: {d} of {d} steps\n", .{ shard.index, shard.count, mine, total });
     }
+
+    // 모든 스텝이 생긴 **뒤**여야 한다 — 호출자가 테스트를 좁혔으면 테스트 run 스텝이 캐시된 결과를 주고받지 않게
+    // 한다(`build/support.zig` `uncacheTestRunsWhenNarrowed`).
+    support.uncacheTestRunsWhenNarrowed(b);
 }
 
 fn swiftMacOSTarget(b: *std.Build, target: std.Target) []const u8 {

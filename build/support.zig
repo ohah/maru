@@ -5,6 +5,8 @@
 //! 받아 **본문을 한 글자도 바꾸지 않는다**(그 무변경이 분해의 안전 근거다).
 const std = @import("std");
 const Translator = @import("translate_c").Translator;
+/// 러너(`tools/simple_test_runner.zig`)가 «무엇을 돌릴지» 고르는 env 이름 — 러너와 이 파일이 같은 목록을 본다.
+const test_selection_env = @import("../tools/test_runner_selection_env.zig");
 
 var array_repeat_module: ?*std.Build.Module = null;
 var type_info_fields_module: ?*std.Build.Module = null;
@@ -95,6 +97,63 @@ pub fn addProjectTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.
         .mode = .simple,
     };
     return b.addTest(configured);
+}
+
+/// **설정(configure) 결과를 env 와 상관없이 재사용하지 못하게 한다.** `build()` 맨 앞에서 한 번 부른다.
+///
+/// Zig 0.17 은 `build.zig` 를 따로 도는 configurer 가 실행해 그래프를 파일로 직렬화하고, 그 파일을 **캐시**한다.
+/// 캐시 키는 `-D` 인자·대상·`build.zig` 소스뿐이고 **env 는 없다**(`lib/compiler/Maker.zig` `configure`). 그런데
+/// `Run.setEnvironmentVariable` 은 그 순간 configurer 의 env **전체**를 복사해(`getEnvMapInternal`) 직렬화 파일에
+/// 박고, make 단계는 그 사본**만** 쓴다(`Maker/Step/Run.zig` — 사본이 있으면 지금 셸의 env 를 안 본다).
+/// 그래서 env 를 하나라도 심는 run 스텝(이 저장소에 150 곳이 넘는다)은 **처음 설정한 셸의 env 를 영영 되풀이**했다:
+/// `MARU_TEST_KEEP_ONLY_PREFIX=… zig build test-macos-app-host-abi` 가 6,816 개를 다 돌았고(2026-10-21 리뷰 보고),
+/// 거꾸로 그 변수를 건 채 처음 설정하면 이후 **걸지 않은** 실행이 좁혀진 채로 돈다(최소 재현: 두 경우 다 확인).
+/// Zig 0.16 은 `build.zig` 를 매 실행 같은 프로세스에서 돌려 사본이 늘 지금의 env 였다 — 이 함수가 그 의미를 되돌린다.
+///
+/// 대가는 매 `zig build` 마다 configurer 를 다시 도는 것이다(실측 약 0.3 초 — configurer 컴파일은 그대로 캐시된다).
+/// **왜 스텝마다 고치지 않나**: 사본을 안 만들려면 `setEnvironmentVariable` 150 곳을 전부 `/usr/bin/env K=V` 로 바꿔야
+/// 하고, 앞으로 한 곳이라도 원래 API 를 쓰면 같은 사고가 조용히 돌아온다. 원인이 «설정 캐시가 env 를 모른다» 이니
+/// 그 캐시를 끄는 것이 한 자리에서 닫힌다.
+pub fn configureFromCallerEnvironment(b: *std.Build) void {
+    b.graph.poisonCache();
+}
+
+/// **좁힌 실행과 전체 실행이 서로의 캐시를 쓰지 않게 한다.** `build()` 맨 끝에서(모든 스텝이 생긴 뒤) 부른다.
+///
+/// 결과를 캐시하는 run 스텝(`expectExitCode`·출력 캡처 — 예: `test-session-host`)은 env 사본이 없으면 지금 셸의 env 를
+/// 물려주지만 **캐시 키에는 넣지 않는다**(`Maker/Step/Run.zig` 는 직렬화된 env 사본만 해시한다). 그래서 좁히는
+/// 변수를 걸어도 앞선 전체 실행의 «통과»가 그대로 재사용되고, 거꾸로 좁힌 실행의 «통과»가 다음 전체 실행 자리에
+/// 남는다 — 전체가 한 번도 안 돌았는데 초록이 되는 쪽이 더 나쁘다.
+/// 좁히는 변수가 걸린 실행에서만 테스트 바이너리를 도는 run 스텝을 «부작용 있음»으로 바꾼다: 그 실행은 늘 돌고
+/// 캐시에 결과를 **쓰지도 않는다**(`finalizeManifestAndWatch` 를 건너뛴다). 변수가 없으면 아무것도 바꾸지 않아
+/// 평소 캐시는 그대로다.
+///
+/// ⚠️ 테스트 바이너리를 돌면서 **출력 파일·캡처를 만드는** run 스텝은 지금 없다(2026-10-21 설정 비교: 바뀌는
+/// 1,684 스텝 중 출력 인자 0). 생기면 좁힌 실행이 같은 출력 자리를 덮을 수 있으니 그때 다시 본다.
+pub fn uncacheTestRunsWhenNarrowed(b: *std.Build) void {
+    const narrowed = for (test_selection_env.names) |name| {
+        const value = b.graph.environ_map.get(name) orelse continue;
+        // 러너는 빈 값을 «안 걸림»으로 본다(`envPrefix`) — 같은 규칙.
+        if (value.len != 0) break true;
+    } else false;
+    if (!narrowed) return;
+
+    var seen: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty;
+    var stack: std.ArrayList(*std.Build.Step) = .empty;
+    for (b.top_level_steps.values()) |top| stack.append(b.allocator, &top.step) catch @panic("OOM");
+    while (stack.pop()) |step| {
+        const entry = seen.getOrPut(b.allocator, step) catch @panic("OOM");
+        if (entry.found_existing) continue;
+        stack.appendSlice(b.allocator, step.dependencies.items) catch @panic("OOM");
+        const run = step.cast(std.Build.Step.Run) orelse continue;
+        for (run.argv.items) |arg| switch (arg) {
+            .artifact => |decorated| if (decorated.artifact.kind.isTest()) {
+                run.has_side_effects = true;
+                break;
+            },
+            else => {},
+        };
+    }
 }
 
 pub fn linkSessionHostNotificationAdapter(

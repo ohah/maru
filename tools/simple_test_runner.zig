@@ -68,6 +68,8 @@ var is_fuzz_test: bool = false;
 const runner_io: Io = Io.Threaded.global_single_threaded.io();
 
 const runner_home = @import("test_runner_home.zig");
+/// 테스트를 고르는 env 이름 — 빌드(`build/support.zig`)도 같은 목록으로 «좁힌 실행»을 알아본다.
+const selection_env = @import("test_runner_selection_env.zig");
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
@@ -328,7 +330,7 @@ fn invalidShard(raw: []const u8) noreturn {
 }
 
 fn envShard() ?Shard {
-    const raw = envPrefix("MARU_TEST_SHARD") orelse return null;
+    const raw = envPrefix(selection_env.shard) orelse return null;
     const slash = std.mem.indexOfScalar(u8, raw, '/') orelse invalidShard(raw);
     const index = std.fmt.parseInt(usize, raw[0..slash], 10) catch invalidShard(raw);
     const count = std.fmt.parseInt(usize, raw[slash + 1 ..], 10) catch invalidShard(raw);
@@ -367,12 +369,12 @@ pub fn main(init: std.process.Init.Minimal) void {
     // 것(예: `session_host.` 는 `test-session-host` 가 모듈 그래프째 돈다). `--maru-keep-prefix` 는 그 예외다
     // (그 잡에 없어 여기서만 도는 모듈). 컴파일 수(`--maru-expect-tests`)는 그대로라 «골라졌는가»는 불변이고,
     // 실행만 건너뛰어 러너 시간을 던다.
-    const skip_prefixes = envPrefix("MARU_TEST_SKIP_PREFIX");
-    const keep_prefixes = envPrefix("MARU_TEST_KEEP_PREFIX");
+    const skip_prefixes = envPrefix(selection_env.skip_prefix);
+    const keep_prefixes = envPrefix(selection_env.keep_prefix);
     // `MARU_TEST_KEEP_ONLY_PREFIX`: 이것으로 시작하는 이름 **만** 돌린다(나머지는 FILTERED). 같은 모듈 그래프를
     // 루트만 달리해 컴파일한 바이너리가 다른 바이너리의 테스트를 통째로 다시 도는 «번짐»을, 자기 몫만 남기고 끊는
     // 용도다(예: client_external_rx_read_test_support — 1,589개 중 1,555개가 client_external_pump 바이너리와 동일).
-    const keep_only_prefixes = envPrefix("MARU_TEST_KEEP_ONLY_PREFIX");
+    const keep_only_prefixes = envPrefix(selection_env.keep_only_prefix);
     const shard = envShard();
     var kept: usize = 0;
     var filtered: usize = 0;

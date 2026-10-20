@@ -530,6 +530,7 @@ pub fn imeDeleteBackward(self: *AppSession) void {
 /// ime_begin 후 ime_end를 영영 안 닫아 ime_active가 박히고 누적 텍스트가 유실되던 누수를
 /// 막는다(라이브 회귀 클래스).
 pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
+    defer @import("editor/save/wake.zig").resumePending();
     if (!self.surface_initialized) return;
     if (web_ops.osrImeEnd(self)) return; // W4c
     // target이 imeBegin 뒤 사라진 경우도 같은 transaction에서 tombstone으로 승격한다. pin id가
@@ -725,6 +726,7 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
 /// Retry only the editor that owned the rejected commit. No allocation is needed to keep a failure;
 /// success uses the normal edit path so the next marked range moves with the real multi-cursor delta.
 pub fn retryEditorCommit(self: *AppSession) bool {
+    defer @import("editor/save/wake.zig").resumePending();
     _ = validateEditorCommit(self);
     if (!self.ime_editor_commit_pending) return true;
     const target_id = self.ime_terminal_target_id orelse {

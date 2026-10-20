@@ -129,6 +129,7 @@ fn next(self: *AppSession, term: *Term) bool {
 fn finish(self: *AppSession, late: bool) void {
     const st = &self.editor_save_actions;
     st.active = false;
+    defer @import("save/wake.zig").resumePending();
     const term = editorTerm(self, st.surface) orelse return;
     if (late) format_client.continueSave(self, term) else format_client.saveCommand(self, term);
 }

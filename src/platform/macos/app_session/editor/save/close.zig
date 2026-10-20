@@ -46,6 +46,7 @@ pub fn cancel(session: *host.AppSession) void {
     if (state.receipt) |value| value.release();
 }
 pub fn accept(session: *host.AppSession) void {
+    defer @import("wake.zig").resumePending();
     const state = session.editor_save_close orelse return;
     if (state.receipt != null) return;
     if (find(session, state) == null) {
@@ -68,7 +69,7 @@ fn startAfterInput(session: *host.AppSession) void {
         return;
     };
     // 확인창의 Enter도 AppKit 해석 트랜잭션 안에서 호출된다. 그 안에서 조합 확정을
-    // 요청하면 정상 거절되므로 취소하지 않고 imeEnd 뒤의 tick에서 시작한다.
+    // 요청하면 정상 거절되므로 취소하지 않고 imeEnd 뒤의 통지 또는 안전망 tick에서 시작한다.
     if (!session.tryCommitComposition()) {
         cancel(session);
         session.showResponseNotice(.fp_save_failed_tab_kept, &.{});

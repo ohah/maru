@@ -59,6 +59,7 @@ fn enqueueNative(session: *host.AppSession, term: *host.Term, success_notice: ?n
         };
     };
     session.metal_dirty = true;
+    @import("wake.zig").request();
     return admitted.id;
 }
 fn matchesIdentity(term: *host.Term, identity: RegistryIdentity) bool {
@@ -136,6 +137,7 @@ pub fn poll() void {
     pumpConflicts();
     const owner = if (active) |*value| value else return;
     if (owner.queue.poll()) |outcome| {
+        defer @import("wake.zig").request();
         const entry = owner.reference(outcome.id) orelse unreachable;
         const live = owner_mod.Owner.liveTarget(entry);
         var accepted = false;
@@ -178,6 +180,8 @@ pub fn poll() void {
         if (owner_mod.Owner.liveTarget(entry)) |live| {
             owner.queue.startNext(live) catch |failure| owner.queue.failNext(failure) catch unreachable;
         } else owner.queue.rejectNext() catch unreachable;
+        // worker를 만들지 않은 실패도 완료다. 다음 프레임 없이 결과를 정산한다.
+        if (owner.queue.outcome != null) @import("wake.zig").request();
     };
     if (owner.queue.requestCount() == 0) {
         owner.deinit();
@@ -188,6 +192,7 @@ pub fn writerBusy() bool {
     return if (active) |*owner| owner.queue.running != null else false;
 }
 pub fn releaseHeld(id: u64, lease: maru.session.editor.document_registry.Lease, success: bool) void {
+    defer @import("wake.zig").request();
     if (active) |*owner| {
         const live = owner_mod.Owner.liveTarget(.{ .id = 0, .lease = lease, .origin = .{ .window = 0, .surface = 0 } });
         const state = lease.owner.get(lease);

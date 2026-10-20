@@ -28,7 +28,7 @@ pub const Completion = struct {
     }
 };
 
-// 실행 중인 writer의 완료 슬롯까지 먼저 할당한다. 완료 전달에 새 할당은 없다.
+// 실행 중인 writer의 결과 슬롯까지 먼저 할당한다. 결과 보관에는 새 할당이 없고 통지는 OS가 소유한다.
 const Job = struct {
     prepared: local.Prepared,
     done: std.atomic.Value(bool) = .init(false),
@@ -46,6 +46,7 @@ const Job = struct {
             };
         }
         self.done.store(true, .release);
+        @import("wake.zig").request();
     }
 };
 

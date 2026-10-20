@@ -1780,6 +1780,16 @@ saved 기준·entry 게시·반복 저장·닫기 대상·배타 생성 결함�
 후자는 `-Doptimize=ReleaseFast`로도 실행한다. 실제 OS 후보창·픽셀 검증을 대체하지 않는다.
 계약과 실제 재현 기록은 [명령 팔레트 IME 문맥](plans/command-palette-ime.md)을 따른다.
 
+
+### 로컬 저장 완료 통지
+
+`mise exec -- zig build test-editor-save-wake`와 `-Doptimize=ReleaseFast`는 frame tick 없이 저장 접수·완료·입력 재개와 늦은 알림을 검사한다. `python3 tools/test-editor-save-wake-native.py`는 실제 main run loop와 worker join을, `python3 tools/test-editor-save-wake-adversarial.py`는 통지 누락/재예약 유실과 정상·복원 대조군을 검사한다. 범위와 한계는 [저장 이벤트 계획](plans/editor-save-event-wake.md)을 따른다.
+
+
+### 저장 통지의 여러 창·연속 요청·재진입 추가 검증
+
+`python3 tools/test-editor-save-wake-extra.py`는 격리 사본에서 다섯 추가 시나리오를 Debug/ReleaseFast로 실행한다. 여러 창의 첫 저장·32개 연속 접수·한 창의 IME 닫기 대기 중 다른 창 진행·실패 후 재저장·중첩 drain 방어를 검사하고, 대응 결함 다섯 개와 정상/복원 대조군을 확인한다. 재진입 호출 훅은 사본에만 넣으며 제품 공개 API나 원본 파일을 바꾸지 않는다. 실제 OS의 중첩 이벤트나 물리 IME 입력 재현과는 구분한다.
+
 ## Elements 계층 탐색 검증
 
 앱 번들을 순차 빌드한 뒤 실행한다(동시에 번들 packager를 실행하지 않는다).

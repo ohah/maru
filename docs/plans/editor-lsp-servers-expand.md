@@ -38,6 +38,8 @@ maru 주 서버 클라이언트와 **같은 능력**으로 말을 걸었다(임�
   `scss`·`less` 로 열면 0 이다(같은 서버가 셋을 다 안다). 문서마다 그 방언의 값을 보낸다(`servers.languageIdForPath`).
 - **Bash 서버와 zsh** — 문법 Bash 는 `.zsh` 도 덮는다. zsh 셰뱅(`#!/bin/zsh`)의 파일을 열면 shellcheck 가 「ShellCheck only supports sh/bash/dash/ksh」
   오류를 첫 줄에 낸다. Bash 서버는 `.zsh` 를 다루지 않는다(`Server.skip_extensions`) — 그 문서엔 주 서버가 없다. 색·접힘은 Bash 문법 그대로다.
+  **남는 한계**: 확장자가 `.sh` 인데 셰뱅이 zsh 인 파일은 여전히 그 오류가 선다(확장자로 가르고 내용은 보지 않는다). `.zshrc` 같은 확장자 없는
+  셸 파일은 문법이 `.none` 이라 서버가 아예 없다.
 
 **싣지 않는 것**(실측 근거):
 - SQL — `sql-language-server` 는 Node 24 에서 기동 실패(`ERR_PACKAGE_PATH_NOT_EXPORTED`), `sqls` 는 DB 연결이 없으면 진단을 안 낸다.
@@ -69,5 +71,6 @@ maru 주 서버 클라이언트와 **같은 능력**으로 말을 걸었다(임�
 
 - 순수: 서버 표의 이름표·인자·languageId·설치 명령(`LSI1`·`LSI3`), 문서마다 languageId 와 다루는 확장자(`LSI4`), 보조 서버 ⊂ 주 서버(`AUX6`).
 - 제품 경로: `ASB7` — JSON·CSS 에 주 서버와 Biome 이 함께, `.scss`·`.less` 엔 주 서버만 그 방언의 languageId 로(가짜 서버가 받은 값을 진단에 싣는다 —
-  `LANGID` 표식). `LSI5` — 같은 저장소의 `.sh` 엔 Bash 서버가 붙고 `.zsh` 엔 붙지도 상태바에 서지도 않으며 정보·신뢰 관리는 「쓰지 않는 문서」.
+  `LANGID` 표식). `LSI5` — 같은 저장소의 `.sh` 엔 Bash 서버가 붙고 `.zsh` 엔 붙지도 상태바에 서지도 않으며 정보·신뢰 관리는 「언어 서버를 쓰는 편집기 문서에서 쓸 수 있습니다」. `LSI6` — `.scss` 의 languageId 가
+  didOpen 의 두 길(처음 붙일 때·서버가 죽어 다시 뜬 뒤 다시 열 때) 모두에서 `scss`.
 - 실물: 위 실측 도구로 각 서버를 다시 돌려 표의 결과를 확인한다(PR 에 결과를 싣는다).

@@ -24032,7 +24032,7 @@ test "ASB7 보조 언어 서버 — JSON·CSS 에 주 서버(언어 서버 후�
     try testing.expect(std.mem.indexOf(u8, content(j), "BIO_FIXED") != null);
 }
 
-test "LSI5 Bash 서버는 `.zsh` 를 안 다룬다 (계획 editor-lsp-servers-expand LS1) — 같은 저장소의 `.sh` 엔 붙고, `.zsh` 엔 붙지도 상태바에 서지도 않으며 정보·신뢰 관리는 「쓰지 않는 문서」다" {
+test "LSI5 Bash 서버는 `.zsh` 를 안 다룬다 (계획 editor-lsp-servers-expand LS1) — 같은 저장소의 `.sh` 엔 붙고, `.zsh` 엔 붙지도 상태바에 서지도 않으며 정보·신뢰 관리는 서버 없는 문서의 안내를 낸다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var f = (try SmtFixture.openRepo(allocator, "a.ts", "let a = 1;\n")) orelse return error.SkipZigTest;

@@ -49,6 +49,28 @@ pub fn characterOf(line_text: []const u8, byte: u32, enc: rpc.PositionEncoding) 
     }
 }
 
+/// 문서 전체를 덮는 range 의 끝(§8.2a 「동기화」, 계획 editor-lsp-servers-expand LS3) — 마지막 줄 번호와 그 줄의 길이(`enc` 단위). 줄은 maru 의
+/// 줄 모델(`lines` — `\n`·`\r\n` 경계)이다. **서버마다 줄로 세는 것이 갈리는 글자**가 있으면 `null` 이다 — 끝을 하나로 셀 수 없으니 range 없는
+/// 전문을 보낸다(명세가 허용하는 꼴; 서버 열일곱 중 ruby-lsp 만 거부한다). 갈리는 글자는 `ambiguousLineBreak` 가 소유한다.
+pub fn wholeRangeEnd(content: []const u8, lines: LineIndex, enc: rpc.PositionEncoding) ?rpc.Position {
+    if (ambiguousLineBreak(content)) return null;
+    const last = lines.lineCount() - 1;
+    const ln = lines.line(last).?;
+    const text = content[ln.start..ln.contentEnd()];
+    return .{ .line = @intCast(last), .character = characterOf(text, @intCast(text.len), enc) };
+}
+
+/// 서버마다 줄바꿈으로 세는 것이 갈리는 글자가 있나 — **단독 `\r`**(뒤에 `\n` 이 없는 것): 명세·tsgo·pyright 는 줄바꿈으로 세고 maru·clangd 는
+/// 줄 내용으로 센다(2026-10-21 실측 — 한 모델로 끝을 세면 다른 쪽 서버의 사본에 찌꺼기가 남는다).
+fn ambiguousLineBreak(content: []const u8) bool {
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, content, i, '\r')) |at| {
+        if (at + 1 >= content.len or content[at + 1] != '\n') return true;
+        i = at + 1;
+    }
+    return false;
+}
+
 /// `{line, character}` → 문서 byte. 줄이 문서 밖이면 문서 끝.
 pub fn offsetOf(content: []const u8, lines: LineIndex, line: u32, character: u32, enc: rpc.PositionEncoding) u32 {
     const ln = lines.line(line) orelse return @intCast(content.len);
@@ -228,6 +250,36 @@ test "LSP1 character → byte: utf-8 은 그대로, utf-16 은 한글 1 unit=3 b
     try testing.expectEqual(@as(u32, 5), characterOf(line, 50, .utf16));
     try testing.expectEqual(@as(u32, 8), characterOf(line, 8, .utf8));
     try testing.expectEqual(@as(u32, 9), characterOf(line, 50, .utf8));
+}
+
+test "LSP4 문서 전체를 덮는 range 의 끝 — 마지막 줄 번호와 그 줄의 길이(utf-8 byte·utf-16 unit), 끝 개행이면 빈 마지막 줄, 빈 문서는 0:0, CRLF 는 한 줄바꿈, 단독 CR 이 있으면 null (§8.2a 「동기화」, 계획 editor-lsp-servers-expand LS3)" {
+    const a = testing.allocator;
+    const Case = struct { text: []const u8, u8_line: u32, u8_ch: u32, u16_ch: u32 };
+    const cases = [_]Case{
+        .{ .text = "", .u8_line = 0, .u8_ch = 0, .u16_ch = 0 },
+        .{ .text = "abc", .u8_line = 0, .u8_ch = 3, .u16_ch = 3 },
+        .{ .text = "abc\n", .u8_line = 1, .u8_ch = 0, .u16_ch = 0 },
+        .{ .text = "a\n가😀b", .u8_line = 1, .u8_ch = 8, .u16_ch = 4 }, // 가(3 byte·1 unit) 😀(4 byte·2 unit) b
+        .{ .text = "x\r\ny\r\n가", .u8_line = 2, .u8_ch = 3, .u16_ch = 1 },
+        .{ .text = "x\r\n", .u8_line = 1, .u8_ch = 0, .u16_ch = 0 },
+        .{ .text = "\n\n", .u8_line = 2, .u8_ch = 0, .u16_ch = 0 },
+    };
+    for (cases) |c| {
+        var idx = try line_index.build(a, c.text);
+        defer idx.deinit();
+        const e8 = wholeRangeEnd(c.text, idx, .utf8).?;
+        const e16 = wholeRangeEnd(c.text, idx, .utf16).?;
+        try testing.expectEqual(c.u8_line, e8.line);
+        try testing.expectEqual(c.u8_ch, e8.character);
+        try testing.expectEqual(c.u8_line, e16.line);
+        try testing.expectEqual(c.u16_ch, e16.character);
+    }
+    // 단독 CR — 서버마다 줄 수가 갈린다(끝에 있어도·가운데 있어도). CRLF 의 CR 은 아니다.
+    inline for (.{ "a\rb", "ab\r", "\r", "x\r\ny\rz\n" }) |t| {
+        var idx = try line_index.build(a, t);
+        defer idx.deinit();
+        try testing.expect(wholeRangeEnd(t, idx, .utf16) == null);
+    }
 }
 
 test "LSP3 저장소를 message + code + data + source 만큼 먼저 잡는다 — 코드가 커서 재할당이 나면 앞 항목의 슬라이스가 허공을 본다 (변이 A2)" {

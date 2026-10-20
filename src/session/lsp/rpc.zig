@@ -323,16 +323,20 @@ pub fn didOpen(allocator: std.mem.Allocator, uri: []const u8, language_id: []con
     }, .{});
 }
 
-/// Full sync(§8.2a): 변경 하나에 전문. 증분은 2단.
-pub fn didChangeFull(allocator: std.mem.Allocator, uri: []const u8, version: i64, text: []const u8) error{OutOfMemory}![]u8 {
+/// 전문 동기화(§8.2a 「동기화」): 변경 하나에 전문 — **문서 전체를 덮는 range** 하나(`0:0` → `end`, 직전에 보낸 본문의 끝). `end` 가 `null` 이면
+/// (그 본문에 서버마다 줄 수가 갈리는 글자가 있었다 — `position.wholeRangeEnd`) range 없는 전문이다. 증분(바뀐 조각만)은 2단.
+pub fn didChange(allocator: std.mem.Allocator, uri: []const u8, version: i64, end: ?Position, text: []const u8) error{OutOfMemory}![]u8 {
+    const Whole = struct { start: Position, end: Position };
+    const Change = struct { range: ?Whole, text: []const u8 };
+    const change: Change = .{ .range = if (end) |e| .{ .start = .{ .line = 0, .character = 0 }, .end = e } else null, .text = text };
     return std.json.Stringify.valueAlloc(allocator, .{
         .jsonrpc = "2.0",
         .method = "textDocument/didChange",
         .params = .{
             .textDocument = .{ .uri = uri, .version = version },
-            .contentChanges = [_]struct { text: []const u8 }{.{ .text = text }},
+            .contentChanges = [_]Change{change},
         },
-    }, .{});
+    }, .{ .emit_null_optional_fields = false });
 }
 
 /// 저장 통지(§8.2k) — 서버가 `includeText` 를 냈으면 저장한 본문을 싣는다(`text`), 아니면 uri 만.
@@ -1293,7 +1297,7 @@ test "LSJ1 initialize 는 id 1·rootUri·utf-8 먼저인 positionEncodings·appl
     try testing.expect(params.get("capabilities").?.object.get("textDocument").?.object.get("publishDiagnostics").?.object.get("versionSupport").?.bool);
 }
 
-test "LSJ2 didOpen/didChange/didClose — uri·version·전문, didChange 는 contentChanges 하나(Full) (§8.2a)" {
+test "LSJ2 didOpen/didChange/didClose — uri·version·전문, didChange 는 contentChanges 하나 — 문서 전체를 덮는 range, 끝을 셀 수 없으면 range 없이 (§8.2a)" {
     const a = testing.allocator;
     const o1 = try didOpen(a, "file:///a.c", "c", 3, "int x;\n");
     defer a.free(o1);
@@ -1305,14 +1309,28 @@ test "LSJ2 didOpen/didChange/didClose — uri·version·전문, didChange 는 co
     try testing.expectEqualStrings("int x;\n", td.get("text").?.string);
     try testing.expect(p1.value.object.get("id") == null); // 알림
 
-    const c1 = try didChangeFull(a, "file:///a.c", 4, "int y;\n");
+    // 전문은 문서 전체를 덮는 range 하나 — start 0:0, end 는 직전에 보낸 본문의 끝(LS3).
+    const c1 = try didChange(a, "file:///a.c", 4, .{ .line = 1, .character = 0 }, "int y;\n");
     defer a.free(c1);
     var p2 = try parse(a, c1);
     defer p2.deinit();
+    try testing.expectEqual(@as(i64, 4), p2.value.object.get("params").?.object.get("textDocument").?.object.get("version").?.integer);
     const changes = p2.value.object.get("params").?.object.get("contentChanges").?.array;
     try testing.expectEqual(@as(usize, 1), changes.items.len);
-    try testing.expect(changes.items[0].object.get("range") == null); // Full — range 없음
+    const range = changes.items[0].object.get("range").?.object;
+    try testing.expectEqual(@as(i64, 0), range.get("start").?.object.get("line").?.integer);
+    try testing.expectEqual(@as(i64, 0), range.get("start").?.object.get("character").?.integer);
+    try testing.expectEqual(@as(i64, 1), range.get("end").?.object.get("line").?.integer);
+    try testing.expectEqual(@as(i64, 0), range.get("end").?.object.get("character").?.integer);
     try testing.expectEqualStrings("int y;\n", changes.items[0].object.get("text").?.string);
+    // 끝을 셀 수 없으면(단독 CR) range 없는 전문 — 키도 없다.
+    const c2 = try didChange(a, "file:///a.c", 5, null, "int z;\n");
+    defer a.free(c2);
+    var p3 = try parse(a, c2);
+    defer p3.deinit();
+    const ch2 = p3.value.object.get("params").?.object.get("contentChanges").?.array;
+    try testing.expect(ch2.items[0].object.get("range") == null);
+    try testing.expectEqualStrings("int z;\n", ch2.items[0].object.get("text").?.string);
 
     const cl = try didClose(a, "file:///a.c");
     defer a.free(cl);

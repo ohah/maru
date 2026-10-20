@@ -3265,18 +3265,34 @@ fn newRecordSession(s: *Surface) void {
 /// W9d② 적대 리뷰 2 회차(작성자 선택): 본문을 가장 많이 쥔 탭(받는 중인 바이트 포함 — `Ring.body_bytes`)의 가장 먼저 받은 본문부터 버린다(같으면
 /// 더 먼저 받은 본문의 탭). 바쁜 탭은 다른 탭보다 먼저 제 본문을 버린다 — 1 회차의 「탭과 무관하게 가장 먼저 받은 것부터」 는 바쁜 페이지가
 /// 사용자 탭의 본문(대개 더 먼저 받았다)을 밀어냈다.
+/// W9d② 적대 리뷰 3 회차: 버릴 본문마다 모든 링을 훑었다(작은 본문이 많으면 버림 수 × 모든 기록). 이제 한 번 훑어 첫째·둘째 링을 고르고, 첫째가
+/// 둘째를 앞서는 동안은 그 링 안에서만 다음 것을 찾는다 — 다른 링은 바뀌지 않으니 고르는 차례는 그대로다.
 fn makeAppBodyRoom(gpa: std.mem.Allocator, need: usize) void {
+    const Pick = struct {
+        ring: *net_ring.Ring,
+        entry: *net_ring.Entry,
+        /// 먼저 버릴 쪽인가 — 본문을 더 많이 쥐었거나, 같으면 더 먼저 받은 본문.
+        fn before(a: @This(), b: @This()) bool {
+            return a.ring.body_bytes > b.ring.body_bytes or (a.ring.body_bytes == b.ring.body_bytes and a.entry.body_order < b.entry.body_order);
+        }
+    };
     while (net_budget.body_bytes + need > net_budget.body_cap) {
-        var victim: ?struct { ring: *net_ring.Ring, entry: *net_ring.Entry } = null;
+        var first: ?Pick = null;
+        var second: ?Pick = null;
         for (surfaces.values()) |*sp| if (sp.network.oldestBody(null)) |e| {
-            const better = if (victim) |v|
-                sp.network.body_bytes > v.ring.body_bytes or (sp.network.body_bytes == v.ring.body_bytes and e.body_order < v.entry.body_order)
-            else
-                true;
-            if (better) victim = .{ .ring = &sp.network, .entry = e };
+            const p: Pick = .{ .ring = &sp.network, .entry = e };
+            if (first == null or p.before(first.?)) {
+                second = first;
+                first = p;
+            } else if (second == null or p.before(second.?)) second = p;
         };
-        const v = victim orelse return;
-        v.ring.evictBody(gpa, &net_budget, v.entry);
+        var v = first orelse return;
+        while (true) {
+            v.ring.evictBody(gpa, &net_budget, v.entry);
+            if (net_budget.body_bytes + need <= net_budget.body_cap) return;
+            v.entry = v.ring.oldestBody(null) orelse break;
+            if (second) |o| if (!v.before(o)) break;
+        }
     }
 }
 
@@ -4577,7 +4593,13 @@ fn sleepMs(ms: i64) void {
 fn fail(notice: Notice) void {
     state = .failed;
     latched = notice;
-    for (surfaces.values()) |*s| s.stopped_notice_pending = true;
+    for (surfaces.values()) |*s| {
+        s.stopped_notice_pending = true;
+        // W9d② 적대 리뷰 3 회차 B2: 엔진이 다시 뜨지 않는다 — 켜 둔 본문 기록은 돌지 않는다(◉·`recording` 이 꺼지고 상태는 `failed`). 켤 뜻은
+        // 남긴다: 엔진을 다시 띄워 브라우저가 만들어지면 새 세션으로 다시 켠다(`browser_created` — 멈춘 기록이 아니다).
+        if (s.rec_on) s.rec_status = .failed;
+        s.rec_sent = 0;
+    }
 }
 
 /// W10b: 지금 sidecar 가 프로필을 잡았다(첫 `browser_created` — 초기화·잠금 뒤에만 온다). sidecar 마다 — 한 번 잡았다고
@@ -4980,6 +5002,8 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         forgetDrag(s); // 새 sidecar 는 그 끌기를 모른다 — enter 없이 drop 을 보내지 않게(W6d①)
         dropDragOut(gpa, s); // 페이지 끌기도 — 답할 곳이 없다(W6d②)
         failFileFetch(s.record.surface_id); // 청한 파일 내용도 오지 않는다(W6d③)
+        // W9d② 적대 리뷰 3 회차 B2: 받던 본문의 끝은 오지 않는다 — 곧 `detached` 로 끝내고 바이트를 놓는다(다시 뜨지 않아도).
+        s.network.abandonBodies(gpa, &net_budget);
         // 물은 닫기(W6j) — 답할 곳이 없다. 사용자는 닫기를 골랐다(떠나기 확인도 함께 사라졌다) — 창이 닫는다. 에이전트가 물은 닫기는 아니다 —
         // 떠나기 확인은 사용자가 그 탭에서 정한다(결정 ③): 탭을 남기고 에이전트에게는 「kept open」(W9b③ 적대 리뷰 5 회차).
         if (s.close_ask == .asking or s.close_ask == .asked) {
@@ -5165,12 +5189,14 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             s.network.abandonLive(gpa, &net_budget);
             s.net_sent = null;
             sendNetWatch(gpa, id, s);
-            // W9d②: 켜 둔 본문 기록도 새 브라우저에 다시(새 세션 — 옛 sidecar 의 늦은 frame 과 섞이지 않게). 지켜보기 뒤에.
-            if (s.rec_on) {
+            // W9d②: 켜 둔 본문 기록도 새 브라우저에 다시(새 세션 — 옛 sidecar 의 늦은 frame 과 섞이지 않게). 지켜보기 뒤에. 쏟아짐 밸브로 멈춘
+            // 기록은 그대로 둔다 — 다시 켜는 것은 에이전트다(W9d② 적대 리뷰 3 회차 F1: 전에는 sidecar 가 다시 뜨면 묻지 않고 켜졌다; 설정 끔의
+            // `wipeBodies` 와 같은 규칙). 켜지 못했던 기록(`failed` — 엔진이 내려간 때 포함)은 새 브라우저에서 다시 해 본다.
+            s.rec_sent = 0;
+            if (s.rec_on and s.rec_status != .paused) {
                 newRecordSession(s);
-                s.rec_sent = 0;
                 sendRecord(gpa, id, s);
-            } else s.rec_sent = 0;
+            }
             if (s.last_url) |u| {
                 send(gpa, .{ .navigate = .{ .browser = id, .url = u } });
                 s.nav_pending = true;
@@ -9158,4 +9184,130 @@ test "W9d② 적대 리뷰 2 회차: 앱 본문 상한은 본문을 가장 많�
     try std.testing.expectEqual(net_ring.BodyState.evicted, Feed.st(busy, 7));
     try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(third, 1));
     try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(user, 0));
+}
+
+// W9d② 적대 리뷰 3 회차 재현 F1: 쏟아짐 밸브로 멈춘 기록(「에이전트가 다시 켜야 한다」)이 브라우저가 다시 만들어지면(sidecar 재시작·창 닫힌 페이지
+// 되살리기) 묻지 않고 새 세션으로 다시 켜진다 — 설정 끔의 길은 막았지만(1 회차 시험) browser_created 의 길은 `rec_status` 를 보지 않는다.
+test "W9d② 적대 리뷰 3 회차 재현 F1: 쏟아짐 밸브로 멈춘 기록은 브라우저가 다시 만들어져도 다시 켜지지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{88});
+    networkSync(&.{.{ .tab = 88, .who = 7, .birth = true, .any_host = true }});
+    networkBodySync(&.{.{ .tab = 88, .who = 17, .birth = true, .any_host = true }});
+    try networkRecord(88, true);
+    const session = surfaces.getPtr(88).?.rec_session;
+    apply(gpa, .{ .net_record_state = .{ .browser = 88, .session = session, .status = .paused } }, 0);
+    try std.testing.expect(!networkRecording(88));
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 88 }, 0);
+    var buf: [8]Message = undefined;
+    try std.testing.expectEqual(@as(usize, 0), recFrames(&buf).len);
+    try std.testing.expect(!networkRecording(88));
+}
+
+// W9d② 적대 리뷰 3 회차 재현 B2: sidecar 가 죽고 다시 뜨지 않으면(예산을 다 써 `crashed_repeatedly`) 받던 본문은 `pending` 으로 남아 바이트를
+// 쥐고, ◉ 와 `recording` 은 켜진 채다 — 끝내는 것은 다음 `browser_created`(abandonLive) 뿐이다.
+test "W9d② 적대 리뷰 3 회차 재현 B2: sidecar 가 죽어 다시 뜨지 않으면 받던 본문은 끝나고 기록 표시는 꺼진다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{89});
+    networkSync(&.{.{ .tab = 89, .who = 7, .birth = true, .any_host = true }});
+    networkBodySync(&.{.{ .tab = 89, .who = 17, .birth = true, .any_host = true }});
+    try networkRecord(89, true);
+    const session = surfaces.getPtr(89).?.rec_session;
+    apply(gpa, .{ .net_record_state = .{ .browser = 89, .session = session, .status = .on } }, 0);
+    apply(gpa, .{ .net_begin = .{ .browser = 89, .request = 1, .flags2 = .{ .body_expected = true }, .url = "https://a.test/x.json", .host = "a.test", .site = "a.test", .resource_type = 13 } }, 0);
+    apply(gpa, .{ .net_body_data = .{ .browser = 89, .session = session, .request = 1, .offset = 0, .bytes = "{\"a\"" } }, 0);
+    try std.testing.expect(net_budget.body_bytes > 0);
+    forgetSidecar(gpa);
+    fail(.crashed_repeatedly);
+    try std.testing.expect(!networkRecording(89));
+    try std.testing.expectEqual(@as(usize, 0), net_budget.body_bytes);
+}
+
+// 이 시험이 증명하는 것(W9d② 적대 리뷰 3 회차): 앱 본문 상한의 버리기가 링을 다시 훑지 않고 한 링 안에서 이어 버려도 고르는 차례는 그대로다 —
+// 큰 조각 하나가 작은 본문 여럿을 버릴 때 본문을 가장 많이 쥔 탭(같으면 더 먼저 받은 본문의 탭)이 번갈아 버린다. 왜 중요한가 — 차례가 바뀌면
+// 바쁜 탭이 아니라 다른 탭의 본문이 사라진다(2 회차의 약속).
+test "W9d② 적대 리뷰 3 회차: 앱 본문 상한이 작은 본문 여럿을 버릴 때도 차례는 「가장 많이 쥔 탭, 같으면 더 먼저 받은 본문」 — 두 탭을 번갈아" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    net_budget.body_cap = 64 * 1024;
+    defer net_budget.body_cap = net_ring.global_body_cap_bytes;
+    const a: u64 = 101;
+    const b: u64 = 102;
+    const c: u64 = 103;
+    const tabs = [_]u64{ a, b, c };
+    try testSurfaces(gpa, &tabs);
+    var ng: [tabs.len]NetworkGrant = undefined;
+    var bg: [tabs.len]NetworkGrant = undefined;
+    for (tabs, 0..) |t, i| {
+        ng[i] = .{ .tab = t, .who = 100 + t, .birth = true, .any_host = true };
+        bg[i] = .{ .tab = t, .who = 200 + t, .birth = true, .any_host = true };
+    }
+    networkSync(&ng);
+    networkBodySync(&bg);
+    for (tabs) |t| {
+        try networkRecord(t, true);
+        apply(gpa, .{ .url_changed = .{ .browser = t, .url = "https://a.test/" } }, 0);
+    }
+    var piece: [16 * 1024]u8 = undefined;
+    @memset(&piece, 'q');
+    const Feed = struct {
+        fn begin(g: std.mem.Allocator, tab: u64, request: u64) void {
+            apply(g, .{ .net_begin = .{ .browser = tab, .request = request, .flags2 = .{ .body_expected = true }, .url = "https://a.test/b", .host = "a.test", .site = "a.test" } }, 0);
+        }
+        fn data(g: std.mem.Allocator, tab: u64, request: u64, bytes: []const u8) void {
+            apply(g, .{ .net_body_data = .{ .browser = tab, .session = surfaces.getPtr(tab).?.rec_session, .request = request, .offset = 0, .bytes = bytes } }, 0);
+        }
+        fn body(g: std.mem.Allocator, tab: u64, request: u64, bytes: []const u8) void {
+            begin(g, tab, request);
+            data(g, tab, request, bytes);
+            apply(g, .{ .net_body_end = .{ .browser = tab, .session = surfaces.getPtr(tab).?.rec_session, .request = request, .state = .captured, .size = @intCast(bytes.len) } }, 0);
+        }
+        fn st(tab: u64, k: usize) net_ring.BodyState {
+            return surfaces.getPtr(tab).?.network.entries.atPtr(k).body_state;
+        }
+    };
+    // a: 2 KiB 열여섯(먼저 받았다), b: 4 KiB 여덟 — 둘 다 32 KiB, 상한이 찼다.
+    for (0..16) |k| Feed.body(gpa, a, 1 + k, piece[0 .. 2 * 1024]);
+    for (0..8) |k| Feed.body(gpa, b, 100 + k, piece[0 .. 4 * 1024]);
+    try std.testing.expectEqual(net_budget.body_cap, net_budget.body_bytes);
+    // c 의 16 KiB 조각 — 차례: a0(같으면 먼저 받은 것) · b0 · a1 · a2(같으면 먼저) · b1 · a3 로 16 KiB.
+    Feed.begin(gpa, c, 200);
+    Feed.data(gpa, c, 200, &piece);
+    try std.testing.expectEqual(net_budget.body_cap, net_budget.body_bytes);
+    for (0..16) |k| try std.testing.expectEqual(if (k < 4) net_ring.BodyState.evicted else net_ring.BodyState.captured, Feed.st(a, k));
+    for (0..8) |k| try std.testing.expectEqual(if (k < 2) net_ring.BodyState.evicted else net_ring.BodyState.captured, Feed.st(b, k));
+    try std.testing.expectEqual(@as(usize, 24 * 1024), surfaces.getPtr(a).?.network.body_bytes);
+    try std.testing.expectEqual(@as(usize, 24 * 1024), surfaces.getPtr(b).?.network.body_bytes);
+}
+
+// 이 시험이 증명하는 것(W9d② 적대 리뷰 3 회차 F1·B2 의 짝): 멈춘 기록(쏟아짐 밸브)만 브라우저가 다시 만들어져도 그대로다 — 켜지 못했던 기록
+// (`failed` — DevTools 가 떨어졌거나 엔진이 내려갔다)은 새 브라우저에서 새 세션으로 다시 해 본다(엔진을 다시 띄우면 기록도 돌아온다). 왜
+// 중요한가 — 멈춤은 에이전트가 정할 일이지만, 엔진의 실패로 꺼진 기록이 엔진이 돌아온 뒤에도 꺼져 있으면 에이전트는 그 탭이 기록 중이라 믿는다.
+test "W9d② 적대 리뷰 3 회차: 켜지 못했던 기록(failed)은 브라우저가 다시 만들어지면 새 세션으로 다시 켠다 — 멈춘 것(paused)과 다르다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{104});
+    networkSync(&.{.{ .tab = 104, .who = 7, .birth = true, .any_host = true }});
+    networkBodySync(&.{.{ .tab = 104, .who = 17, .birth = true, .any_host = true }});
+    try networkRecord(104, true);
+    const session = surfaces.getPtr(104).?.rec_session;
+    apply(gpa, .{ .net_record_state = .{ .browser = 104, .session = session, .status = .failed } }, 0);
+    try std.testing.expect(!networkRecording(104));
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 104 }, 0);
+    var buf: [8]Message = undefined;
+    const frames = recFrames(&buf);
+    try std.testing.expectEqual(@as(usize, 1), frames.len);
+    try std.testing.expect(frames[0].net_record.on and frames[0].net_record.session > session);
+    try std.testing.expect(networkRecording(104));
 }

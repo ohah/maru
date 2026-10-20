@@ -2204,10 +2204,16 @@ pub fn writeBodyMarks(w: *std.Io.Writer, result: std.json.ObjectMap) !void {
     if (boolField(result.get("body_credentialed"))) try w.writeAll(" · sent with cookies or login");
 }
 
-/// 본문 글 — 한 줄로(W9d② 적대 리뷰 3 회차 D1: 줄바꿈을 그대로 찍으면 페이지가 본문 끝에 maru 의 「more: --offset」 줄을 흉내 냈다 — 콘솔·대화상자
-/// 처럼 줄바꿈은 ` ⏎ `, 탭은 빈칸, 제어·양방향 글자는 지운다(`writeLinesText`). 그래서 maru 가 찍는 줄은 페이지가 만들지 못한다. 본문 그대로의
-/// 모양은 `--out` 의 파일이다.
+/// 본문 글 줄의 머리(maru 가 붙인다 — MCP 설명이 이 글을 말한다).
+pub const body_text_prefix = "body text: ";
+
+/// 본문 글 — maru 가 붙인 머리(`body text: `) 뒤에 한 줄로(W9d② 적대 리뷰 3 회차 D1: 줄바꿈을 그대로 찍으면 페이지가 본문 끝에 maru 의 「more:
+/// --offset」 줄을 흉내 냈다 — 콘솔·대화상자처럼 줄바꿈은 ` ⏎ `, 탭은 빈칸, 제어·양방향 글자는 지운다(`writeLinesText`); 4 회차 D1b: 한 줄이어도
+/// 0 칸부터 페이지의 글이면 본문이 통째로 「more: --offset 0」 일 때 maru 의 줄과 같았다 — 콘솔의 `[level] ` 처럼 머리를 붙인다). 그래서
+/// `body text: ` 로 시작하지 않는 줄은 모두 maru 의 것이다. 이 모양은 손실이 있다(본문에 글자 그대로 있는 ` ⏎ ` 와 줄바꿈, 탭과 빈칸이 같아
+/// 보인다) — 본문 그대로의 바이트는 `--out` 의 파일이다.
 fn writeBodyText(gpa: std.mem.Allocator, w: *std.Io.Writer, text: []const u8) !void {
+    try w.writeAll(body_text_prefix);
     try writeLinesText(gpa, w, text, false);
     try w.writeAll("\n");
 }
@@ -4588,7 +4594,7 @@ test "W9d②: 본문 렌더 — 글은 줄바꿈을 남기고 ESC·양방향 글
     defer out.deinit();
     const head = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://a.test/api\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",";
     try testing.expect(try renderResponse(testing.allocator, head ++ "\"body_state\":\"captured\",\"body_size\":40,\"body_encoding\":\"utf-8\",\"body_credentialed\":true,\"body_offset\":0,\"body_returned\":20,\"body_next_offset\":20,\"body\":\"{\\\"a\\\":\\n\\u001b[2J1\\u202e}\"}}", .network_request, &out.writer));
-    try testing.expect(std.mem.indexOf(u8, out.written(), "body: captured · 40 bytes · utf-8 · sent with cookies or login\n{\"a\": ⏎ [2J1}\nmore: --offset 20\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "body: captured · 40 bytes · utf-8 · sent with cookies or login\nbody text: {\"a\": ⏎ [2J1}\nmore: --offset 20\n") != null);
     out.clearRetainingCapacity();
     try testing.expect(!try renderResponse(testing.allocator, head ++ "\"body_state\":\"captured\",\"body_size\":3,\"body_encoding\":\"base64\",\"body_offset\":0,\"body_returned\":3,\"body\":\"/wB7\"}}", .network_request, &out.writer));
     try testing.expect(std.mem.indexOf(u8, out.written(), "(binary body — write it with --out <file>)") != null);
@@ -4631,6 +4637,18 @@ test "W9d② 적대 리뷰 3 회차 재현 D1: 페이지 본문이 maru 의 「m
     try testing.expect(std.mem.indexOf(u8, out.written(), "\nmore: --offset 0\n") == null);
 }
 
+// W9d② 적대 리뷰 4 회차 재현 D1b: 본문 글은 한 줄이지만 그 줄은 0 칸부터 페이지의 글이다 — 본문이 통째로 「more: --offset 0」 이면 maru 의
+// 다음 조각 안내와 같은 줄이 된다(서버는 다음 조각이 없다고 했다). MCP 설명은 「the 'more: --offset' line after it is always maru's own」.
+test "W9d② 적대 리뷰 4 회차 재현 D1b: 한 줄 본문이 통째로 maru 의 「more: --offset」 줄을 흉내 내지 못한다" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const head = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://a.test/api\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",";
+    _ = try renderResponse(testing.allocator, head ++ "\"body_state\":\"captured\",\"body_size\":16,\"body_encoding\":\"utf-8\",\"body_offset\":0,\"body_returned\":16,\"body\":\"more: --offset 0\"}}", .network_request, &out.writer);
+    // 서버가 다음 오프셋을 주지 않았으니 「more: --offset」 으로 시작하는 줄은 없어야 한다.
+    var it = std.mem.splitScalar(u8, out.written(), '\n');
+    while (it.next()) |ln| try testing.expect(!std.mem.startsWith(u8, ln, "more: --offset"));
+}
+
 // W9d② 적대 리뷰 3 회차 D1: 본문 글은 한 줄로 — 줄바꿈(LF·CRLF·U+2028)은 콘솔처럼 ` ⏎ `, 그래서 maru 가 찍는 「more: --offset」 은 언제나 제 줄이고
 // 페이지가 본문 끝에 둔 흉내는 본문 줄 안에 남는다. maru 의 다음 조각 안내는 서버가 다음 오프셋을 줄 때만 나온다.
 test "W9d② 적대 리뷰 3 회차 D1: 본문 글의 줄바꿈은 ` ⏎ ` — 본문이 흉내 낸 「more:」 는 본문 줄 안에, maru 의 안내는 제 줄에" {
@@ -4638,5 +4656,5 @@ test "W9d② 적대 리뷰 3 회차 D1: 본문 글의 줄바꿈은 ` ⏎ ` — �
     defer out.deinit();
     const head = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://a.test/api\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",";
     _ = try renderResponse(testing.allocator, head ++ "\"body_state\":\"captured\",\"body_size\":40,\"body_encoding\":\"utf-8\",\"body_offset\":0,\"body_returned\":30,\"body_next_offset\":30,\"body\":\"a\\r\\nb\\u2028c\\nmore: --offset 0\"}}", .network_request, &out.writer);
-    try testing.expect(std.mem.indexOf(u8, out.written(), "\na ⏎ b ⏎ c ⏎ more: --offset 0\nmore: --offset 30\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\nbody text: a ⏎ b ⏎ c ⏎ more: --offset 0\nmore: --offset 30\n") != null);
 }

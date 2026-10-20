@@ -23929,7 +23929,13 @@ test "ASB7 보조 언어 서버 — JSON·CSS 에 주 서버(언어 서버 후�
     };
     // ⑴ JSON — 주 서버(`vscode-json-language-server` — 판정자에선 가짜 서버)와 Biome 이 함께 붙고, Biome 은 그 문법의 languageId(`json`)로 연다.
     const j = try bio.open(s, root, "d.json");
-    try testing.expect(pumpLspUntil(&f.fx, 5000, j, HasDiag.g));
+    // 두 서버의 진단을 다 기다린다 — 주 서버는 준비가 끝나야 문서를 붙인다(Biome 이 먼저 서는 느린 기계에서 주 서버를 보면 아직 없다 — CI 실측).
+    const BothDiag = struct {
+        fn g(t: *Term) bool {
+            return bio.diag(t) != null and t.rt.editor_diagnostics.lsp.items.len > 0;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, j, BothDiag.g));
     var want_buf: [64]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "biome: {d} json", .{j.rt.editorDocument().notifications.lsp_version}), bio.diag(j).?.message);
     var json_primary = false;

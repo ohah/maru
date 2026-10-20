@@ -32,9 +32,6 @@ pub const Auxiliary = struct {
     server: servers.Server,
     /// 저장소 안에서 먼저 볼 실행 파일 폴더(문서 폴더에서 루트까지 각 폴더 아래) — 외부 포매터와 같은 자리.
     bin_dirs: []const []const u8,
-    /// pull 진단만 내는 서버(ESLint — 2026-10-13 실측: push 를 40 초 기다려도 오지 않는다). 그 클라이언트에만 `textDocument.diagnostic` 을
-    /// 알리고 문서를 보낼 때마다 묻는다.
-    pull_diagnostics: bool = false,
     /// `workspace/configuration` 에 이 서버의 고정 설정으로 답한다(ESLint — 설정 객체가 없으면 진단 요청이 실패한다). `settingsJson` 이 만든다.
     answers_configuration: bool = false,
     /// 그 문법 안에서도 이 확장자의 파일에만 붙는다(빈 목록 = 그 문법의 파일 전부). Biome 의 CSS — 문법 `.css` 는 `scss`·`less` 도 덮지만
@@ -56,9 +53,9 @@ const stdio_args = [_][]const u8{"--stdio"};
 const eslint: Auxiliary = .{
     .tool = .eslint,
     // `language_id` 는 쓰지 않는다 — 문서마다 그 문법의 값을 보낸다(`servers.languageIdFor`).
-    .server = .{ .exe = "vscode-eslint-language-server", .args = &stdio_args, .language_id = "javascript", .install = "npm i -g vscode-langservers-extracted" },
+    // pull 진단만 낸다(2026-10-13 실측: push 를 40 초 기다려도 오지 않는다) — `Server.pull_diagnostics`.
+    .server = .{ .exe = "vscode-eslint-language-server", .args = &stdio_args, .language_id = "javascript", .install = "npm i -g vscode-langservers-extracted", .pull_diagnostics = true },
     .bin_dirs = &.{"node_modules/.bin"},
-    .pull_diagnostics = true,
     .answers_configuration = true,
 };
 const ruff: Auxiliary = .{
@@ -213,14 +210,14 @@ test "AUX1 보조 서버 표 — Python 에 ruff server, JS·TS·TSX 에 ESLint(
     try testing.expectEqualStrings("ruff", py[0].server.exe);
     try testing.expectEqualStrings("server", py[0].server.args[0]);
     try testing.expectEqualStrings("python", py[0].server.language_id);
-    try testing.expect(!py[0].pull_diagnostics and !py[0].answers_configuration);
+    try testing.expect(!py[0].server.pull_diagnostics and !py[0].answers_configuration);
     for ([_]language.Grammar{ .javascript, .typescript, .tsx }) |g| {
         const js = forGrammar(g);
         try testing.expectEqual(@as(usize, 3), js.len);
         try testing.expectEqual(Tool.eslint, js[0].tool);
         try testing.expectEqualStrings("vscode-eslint-language-server", js[0].server.exe);
         try testing.expectEqualStrings("--stdio", js[0].server.args[0]);
-        try testing.expect(js[0].pull_diagnostics and js[0].answers_configuration);
+        try testing.expect(js[0].server.pull_diagnostics and js[0].answers_configuration);
         // Biome·oxlint 는 push 진단이고 설정 요청은 거부한다(실측 — 거부해도 돈다).
         try testing.expectEqual(Tool.biome, js[1].tool);
         try testing.expectEqualStrings("biome", js[1].server.exe);
@@ -231,7 +228,7 @@ test "AUX1 보조 서버 표 — Python 에 ruff server, JS·TS·TSX 에 ESLint(
         for (js) |a| {
             try testing.expectEqual(@as(usize, 1), a.server.args.len);
             try testing.expectEqualStrings("node_modules/.bin", a.bin_dirs[0]);
-            if (a.tool != .eslint) try testing.expect(!a.pull_diagnostics and !a.answers_configuration);
+            if (a.tool != .eslint) try testing.expect(!a.server.pull_diagnostics and !a.answers_configuration);
         }
     }
     try testing.expectEqual(Tool.eslint, byExe("vscode-eslint-language-server").?.tool);

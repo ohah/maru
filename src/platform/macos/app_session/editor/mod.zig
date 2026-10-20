@@ -23620,7 +23620,7 @@ test "ASB4 보조 언어 서버 ESLint (tooling §8.2u) — 설정이 있으면 
     try testing.expect(pumpLspUntil(&f.fx, 5000, term, HasDiag.g));
     const c = esl.client(s) orelse return error.NoEslintClient;
     try testing.expectEqualStrings("vscode-eslint-language-server", c.server.exe);
-    try testing.expect(c.pull_diagnostics and c.diagnostic_provider and c.answers_configuration);
+    try testing.expect(c.server.pull_diagnostics and c.diagnostic_provider and c.answers_configuration);
     try testing.expect(std.mem.endsWith(u8, c.launched_path.?, "/node_modules/.bin/vscode-eslint-language-server"));
     try testing.expect(s.editor_lsp.answered_configurations >= 1);
     try testing.expect(s.editor_lsp.sent_pulls >= 1);
@@ -23775,7 +23775,7 @@ test "ASB5 보조 언어 서버 ESLint (tooling §8.2u) — 서버가 diagnostic
         lsp_client.pump(s);
         _ = usleep(5_000);
     }
-    for (s.editor_lsp.clients.items) |*c| if (c.role == .auxiliary) try testing.expect(c.pull_diagnostics and !c.diagnostic_provider);
+    for (s.editor_lsp.clients.items) |*c| if (c.role == .auxiliary) try testing.expect(c.server.pull_diagnostics and !c.diagnostic_provider);
     try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_pulls);
 }
 
@@ -24123,6 +24123,92 @@ test "LSI6 `.scss` 의 languageId 는 그 방언 — 처음 붙일 때의 didOpe
     try removeMarkerHover(s, t, "BOOM ");
     try testing.expect(pumpLspUntil(&f.fx, 5000, t, Scss.current)); // 지금 version 의 진단이 새 프로세스에서 — languageId 는 여전히 `scss`
     try testing.expect(css.?.phase == .ready);
+}
+
+test "LSI7 주 서버의 pull 진단(계획 editor-lsp-servers-expand LS2) — TS 7 네이티브(`tsgo`)는 파일 진단을 pull 로만 내는 주 서버라 그 클라이언트만 `textDocument.diagnostic` 을 알리고, 문서를 보낼 때마다 물어 주 서버 칸에 세운다; 서버가 파일 간 의존을 알렸으면 한 문서를 보낼 때 다른 열린 문서도 다시 묻고, 빈 목록이면 걷는다; pull 칸이 꺼진 주 서버(C)엔 알리지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.openRepo(allocator, "c.c", "int c; // PULLCAP\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    // 가짜 서버의 사본을 `tsgo` 이름으로 — 가짜는 실행 파일 이름으로 「pull 만 내는 주 서버」 역할을 고른다(`tools/fake_lsp.zig`).
+    try installFakeLspCopy(&f.fx, "bin/tsgo");
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "a.ts", .data = "let a = 1;\n" });
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "b.ts", .data = "let b = 2;\n" });
+    try testing.expect(f.ready());
+    // ⑴ pull 칸이 꺼진 주 서버(clangd 행)는 `initialize` 에서 pull 을 **알리지 않았다** — 서버 쪽 기록으로 잰다(`PULLCAP`; 클라이언트 쪽의
+    // `diagnostic_provider` 만으로는 못 가른다 — 가짜 C 서버는 알려도 provider 를 안 낸다).
+    const NoPull = struct {
+        fn seen(t: *Term) bool {
+            var buf: [64]u8 = undefined;
+            const want = std.fmt.bufPrint(&buf, "fake: {d} pull=false", .{t.rt.editorDocument().notifications.lsp_version}) catch return false;
+            return t.rt.editor_diagnostics.lsp.items.len > 0 and std.mem.eql(u8, t.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, f.term, NoPull.seen));
+    for (s.editor_lsp.clients.items) |*c| if (c.findDoc(f.term) != null) {
+        try testing.expectEqualStrings("clangd", c.server.exe);
+        try testing.expect(!c.server.pull_diagnostics and !c.diagnostic_provider);
+    };
+    const root = f.root_buf[0..f.root_len];
+    var over_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const over = try std.fmt.bufPrintSentinel(&over_buf, "{s}/bin/tsgo", .{root}, 0);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", over.ptr, 1);
+    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const a = (try pane_ops.openFileTermInActivePane(s, try std.fmt.bufPrint(&pbuf, "{s}/a.ts", .{root}), .text)).term;
+    const Pull = struct {
+        fn current(t: *Term) bool {
+            var b: [64]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "pull: {d} typescript", .{t.rt.editorDocument().notifications.lsp_version}) catch return false;
+            return t.rt.editor_diagnostics.lsp.items.len == 1 and std.mem.eql(u8, t.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+        fn cross(t: *Term) bool {
+            const items = t.rt.editor_diagnostics.lsp.items;
+            return items.len == 2 and (std.mem.eql(u8, items[0].message, "pull: cross") or std.mem.eql(u8, items[1].message, "pull: cross"));
+        }
+        fn empty(t: *Term) bool {
+            return t.rt.editor_diagnostics.lsp.items.len == 0;
+        }
+    };
+    // ⑵ 처음 열면 pull — 그 문서의 version 과 languageId 가 진단에 선다(주 서버 칸 `lsp`). 클라이언트는 표의 첫 후보 `tsgo` 행이다.
+    try testing.expect(pumpLspUntil(&f.fx, 5000, a, Pull.current));
+    var ts: ?*lsp_client.Client = null;
+    for (s.editor_lsp.clients.items) |*c| if (c.findDoc(a) != null) {
+        ts = c;
+    };
+    try testing.expect(ts != null);
+    try testing.expectEqualStrings("tsgo", ts.?.server.exe);
+    try testing.expect(ts.?.role == .primary and ts.?.server.pull_diagnostics and ts.?.diagnostic_provider and ts.?.diagnostic_inter_file);
+    const b = (try pane_ops.openFileTermInActivePane(s, try std.fmt.bufPrint(&pbuf, "{s}/b.ts", .{root}), .text)).term;
+    try testing.expect(pumpLspUntil(&f.fx, 5000, b, Pull.current));
+    // ⑶ 편집 — 보낼 때마다 다시 묻는다(새 version 의 진단).
+    a.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    const v1 = a.rt.editorDocument().notifications.lsp_version;
+    try testing.expect(insertText(s, a, "x"));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, a, Pull.current));
+    try testing.expect(a.rt.editorDocument().notifications.lsp_version > v1);
+    // ⑷ 파일 간 의존 — a 에 `XFILE` 을 넣으면 **b 를 고치지 않아도** b 의 진단이 바뀐다(a 를 보낼 때 b 도 다시 묻는다). 빼면 b 도 돌아온다.
+    const vb = b.rt.editorDocument().notifications.lsp_version;
+    try testing.expect(insertText(s, a, "XFILE "));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, b, Pull.cross));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, a, Pull.cross));
+    try removeMarkerHover(s, a, "XFILE ");
+    try testing.expect(pumpLspUntil(&f.fx, 5000, b, Pull.current));
+    try testing.expectEqual(vb, b.rt.editorDocument().notifications.lsp_version); // b 는 그대로다 — 다시 물었을 뿐
+    // ⑸ 서버가 빈 목록으로 답하면 걷는다.
+    try testing.expect(insertText(s, a, "PQUIET "));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, a, Pull.empty));
+    // ⑹ 처음 붙이는 문서도 같다 — `XFILE` 을 든 c 를 **열기만** 해도 이미 열린 a·b 를 다시 묻는다(붙이기·동기화가 같은 함수를 부른다).
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "c.ts", .data = "let c = 3; // XFILE\n" });
+    _ = (try pane_ops.openFileTermInActivePane(s, try std.fmt.bufPrint(&pbuf, "{s}/c.ts", .{root}), .text)).term;
+    const OnlyCross = struct {
+        fn seen(t: *Term) bool {
+            const items = t.rt.editor_diagnostics.lsp.items;
+            return items.len == 1 and std.mem.eql(u8, items[0].message, "pull: cross");
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, a, OnlyCross.seen)); // a 는 `PQUIET` 이라 파일 간 진단만
+    try testing.expect(pumpLspUntil(&f.fx, 5000, b, Pull.cross));
 }
 
 test "FOS1 저장 시 포맷 — ⌘S 가 포맷을 먼저 적용하고(되돌리기 하나) 저장하며 didSave 가 간다; 설정을 끄거나 서버가 포맷을 못 하면 곧바로 저장, 응답이 낡았거나 거부되면 포맷 없이 저장, 시한을 넘기면 포맷 없이 저장하고 알림, 기다리는 동안 같은 문서의 ⌘S·⇧⌥F 는 무동작, 다른 문서의 ⌘S 는 기다리던 것을 먼저 저장 (제품 경계, §8.2r)" {

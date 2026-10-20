@@ -1766,3 +1766,12 @@ worker를 차단한 채 저장 중 입력·닫기·외부 생성·예약·worksp
 `python3 tools/test-editor-first-save-async-adversarial.py`는 격리 사본에 완료 신원·
 saved 기준·entry 게시·반복 저장·닫기 대상·배타 생성 결함을 주입해 판정자를 대조한다.
 정상 사본과 중복 보호 하나만 바꾼 대조군도 실행한다. 제품 checkout은 변경하지 않는다.
+
+### 명령 팔레트의 동적 IME 문맥
+
+`mise exec -- zig build test-inline-text-input test-inline-text-input-owned`는 고정 문맥의 기존
+9개와 동적 저장·깊은 snapshot·할당 실패·긴 입력의 14개 판정자를 Debug·ReleaseFast에서 실행한다.
+`mise exec -- zig build test-palette-ime-context`는 실제 AppSession의 긴 검색어, 한자 preview,
+잘못된 범위 뒤 key 전체 rollback, snapshot OOM 뒤 재시도, 닫기/재열기의 stale owner 거절을 확인한다.
+후자는 `-Doptimize=ReleaseFast`로도 실행한다. 실제 OS 후보창·픽셀 검증을 대체하지 않는다.
+계약과 실제 재현 기록은 [명령 팔레트 IME 문맥](plans/command-palette-ime.md)을 따른다.

@@ -2280,6 +2280,16 @@ pub fn build(b: *std.Build) void {
     run_dock_search_input.addArg("--maru-expect-passed=1");
     run_dock_search_input.setCwd(b.path("."));
     b.step("test-session-dock-search-input", "Run Session Dock search ownership and candidate caret containment judges").dependOn(&run_dock_search_input.step);
+    const palette_ime_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"command palette"},
+    });
+    const run_palette_ime = b.addRunArtifact(palette_ime_tests);
+    run_palette_ime.setEnvironmentVariable("MARU_TEST_KEEP_ONLY_PREFIX", "app_session.test.command palette");
+    run_palette_ime.addArg("--maru-expect-tests=11");
+    run_palette_ime.addArg("--maru-expect-passed=6");
+    run_palette_ime.setCwd(b.path("."));
+    b.step("test-palette-ime-context", "Run dynamic palette IME publication and owner lifetime judges").dependOn(&run_palette_ime.step);
 
     const remote_failure_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
@@ -4755,6 +4765,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_inspector_rules.step);
     const inline_input_step = b.step("test-inline-text-input", "Validate bounded UTF-16 inline IME projections and failure atomicity");
+    const owned_inline_step = b.step("test-inline-text-input-owned", "Validate dynamic IME storage, deep snapshots and allocation failure");
     inline for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
         const inline_input_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
             .root_source_file = b.path("src/inline_text_input.zig"),
@@ -4762,7 +4773,16 @@ pub fn build(b: *std.Build) void {
             .optimize = mode,
         }) });
         const run_inline_input = b.addRunArtifact(inline_input_tests);
-        run_inline_input.addArg("--maru-expect-tests=8");
+        run_inline_input.addArg("--maru-expect-tests=9");
+        const owned_inline_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+            .root_source_file = b.path("src/inline_text_input_owned.zig"),
+            .target = target,
+            .optimize = mode,
+        }) });
+        const run_owned_inline = b.addRunArtifact(owned_inline_tests);
+        run_owned_inline.addArg("--maru-expect-tests=14");
+        owned_inline_step.dependOn(&run_owned_inline.step);
+        test_step.dependOn(&run_owned_inline.step);
         inline_input_step.dependOn(&run_inline_input.step);
         test_step.dependOn(&run_inline_input.step);
     }

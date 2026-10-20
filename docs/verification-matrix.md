@@ -1,5 +1,15 @@
 # 검증 매트릭스
 
+## 명령 팔레트 IME 문맥 — 진행 중
+
+고정/동적 공통 모델, 깊은 snapshot과 필터 준비·rollback을 구현했다. 중립 모델 9/14개,
+실제 팔레트 회귀 6개가 Debug·ReleaseFast에서 통과했고 Swift callback 하네스와 동적 저장
+결함 주입 5종과 전체 check-boundaries도 통과했다. 수정 전 실제 HID 재현과 수정 후 OS 후보창 검증을 구분한다.
+수정 후 빈 입력·긴 입력의 실제 후보창을 확인했다. 이모지 앞부분의 surrogate를 나누는 읽기
+조회가 nil이 되어 후보창을 막는 문제를 별도 대조 빌드로 분리했고, 읽기 범위 보정을 반영했다.
+제품 최종 빌드의 전체 후보창·픽셀 검증은 진행 중이다.
+계획과 산출물 범위: [명령 팔레트 IME](plans/command-palette-ime.md).
+
 ## Live Terminal Inspector
 
 ### 데이터 설명·수집 상태 후속

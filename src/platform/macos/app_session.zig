@@ -346,7 +346,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 231: independent Inspector presentation transport.
 // 232: search-owned UTF-16 context and immutable activation generation; editor exports stay editor-only.
 // 233: bind native owner window identity to Inspector snapshots.
-pub const abi_version: u32 = 233;
+// 234: palette-owned dynamic IME context and deep transaction snapshots.
+pub const abi_version: u32 = 234;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -7120,6 +7121,12 @@ pub const AppSession = struct {
     agent_session_archive_search_active: bool = false,
     agent_session_search_ime: maru.inline_text_input.Context = .{},
     agent_session_search_generation: u64 = 1,
+    palette_ime_owner: ?u64 = null,
+    palette_ime_before: ?maru.inline_text_input_owned.OwnedContext = null,
+    palette_ime_rejected: bool = false,
+    palette_ime_selected_before: usize = 0,
+    palette_ime_filtered_before: [command_catalog.entries.len]usize = undefined,
+    palette_ime_filtered_before_len: usize = 0,
     ime_search_owner: ?u64 = null,
     ime_search_before: ?maru.inline_text_input.Context = null,
     ime_search_rejected: bool = false,
@@ -11905,7 +11912,8 @@ pub const AppSession = struct {
         const input = &self.chrome_host.palette.input;
         var pending: std.ArrayList(u8) = .empty;
         defer pending.deinit(self.allocator);
-        const query = if (input.preedit.items.len == 0) input.query.items else blk: {
+        const projection = &self.chrome_host.palette.ime_context.value;
+        const query = if (projection.matches(input.query.items, input.preedit.items)) projection.text() else if (input.preedit.items.len == 0) input.query.items else blk: {
             pending.appendSlice(self.allocator, input.query.items) catch {
                 self.palette_filtered.clearRetainingCapacity();
                 self.chrome_host.palette.setResultCount(0);
@@ -16724,10 +16732,7 @@ pub const AppSession = struct {
                     self.metal_dirty = true;
                 }
             },
-            .palette => if (self.chrome_host.palette.input.commitPreedit(self.allocator)) {
-                self.recomputePalette(); // 필터가 바뀜
-                self.metal_dirty = true;
-            },
+            .palette => return @import("app_session/palette_ime.zig").commitAll(self),
             .symbol_picker => if (self.chrome_host.symbol_picker.input.commitPreedit(self.allocator)) {
                 editor_ops.recomputeSymbolPicker(self); // 필터가 바뀜(§7.5)
                 self.metal_dirty = true;
@@ -25338,6 +25343,7 @@ pub const AppSession = struct {
         self.command_key_equivalents.deinit(self.allocator);
         self.command_entries.deinit(self.allocator);
         self.palette_filtered.deinit(self.allocator);
+        @import("app_session/palette_ime.zig").finish(self);
         self.chrome_host.deinit(self.allocator); // chrome 컴포넌트 heap(find.query) 해제
         // rename/컨텍스트 메뉴 대상은 *Tab/*Pane/*Term을 들 수 있다 — 아래 인라인 teardown이 그 탭들을 통째 free하므로,
         // destroyTabStandalone(.group 대상 클리어, code-review #1)과 대칭으로 여기서도 대상 포인터를 먼저 비운다(세션
@@ -50785,7 +50791,7 @@ test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합
     try std.testing.expectEqual(@as(usize, 1), session.metal_buffer.cursor_cells);
 }
 
-test "command palette IME preedit allocation failure does not retain stale command selection" {
+test "command palette IME preedit allocation failure preserves matching input and retries" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -50803,15 +50809,21 @@ test "command palette IME preedit allocation failure does not retain stale comma
     input_ops.imeMarked(session, "새 터미널");
     try std.testing.expectEqual(maru.config.Action.new_term, command_palette.actionAt(session.palette_filtered.items, 0).?);
 
+    const results_before = session.palette_filtered.items.len;
+    const selected_before = session.chrome_host.palette.selected;
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
     const long_marked = @as([1024]u8, @splat('x'));
     session.allocator = failing.allocator();
     input_ops.imeMarked(session, &long_marked);
     session.allocator = allocator;
 
-    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.palette.input.preedit.items.len);
+    try std.testing.expectEqualStrings("새 터미널", session.chrome_host.palette.input.preedit.items);
+    try std.testing.expectEqual(results_before, session.palette_filtered.items.len);
+    try std.testing.expectEqual(selected_before, session.chrome_host.palette.selected);
+    try std.testing.expectEqual(maru.config.Action.new_term, command_palette.actionAt(session.palette_filtered.items, 0).?);
+    input_ops.imeMarked(session, &long_marked);
+    try std.testing.expectEqualStrings(&long_marked, session.chrome_host.palette.input.preedit.items);
     try std.testing.expectEqual(@as(usize, 0), session.palette_filtered.items.len);
-    try std.testing.expectEqual(@as(usize, 0), session.chrome_host.palette.result_count);
 }
 
 test "command palette does not accept Enter while IME preedit survives without callback" {
@@ -101432,4 +101444,122 @@ test "Live inspector: shared GUI and CLI snapshot, pause, closed target and inpu
     try std.testing.expect(inspector_ops.visible(session));
     session.dispatchAppAction(.toggle_inspector);
     try std.testing.expect(!inspector_ops.visible(session));
+}
+
+test "command palette dynamic IME keeps long input previews and failed keys isolated" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @backingInt(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const ime = @import("app_session/palette_ime.zig");
+    const state = &session.chrome_host.palette;
+    state.show();
+    var prefix: [257]u8 = undefined;
+    @memset(&prefix, 'x');
+    try state.input.query.appendSlice(allocator, &prefix);
+    const token = ime.generation(session).?;
+    try std.testing.expect(token > (@as(u64, 1) << 63));
+    const initial = ime.projection(session).?;
+    try std.testing.expectEqual(@as(u64, 257), initial.selectedRange().?.location);
+    session.imeBegin();
+    try std.testing.expect(ime.marked(session, "한", .{ .location = 1, .length = 0 }, null));
+    try std.testing.expectEqualStrings(&prefix, state.input.query.items);
+    try std.testing.expect(ime.insert(session, "한", null));
+    try std.testing.expect(ime.marked(session, "韓", .{ .location = 1, .length = 0 }, .{ .location = 257, .length = 1 }));
+    session.imeEnd(null);
+    try std.testing.expectEqualStrings("한", state.input.query.items[257..]);
+    try std.testing.expectEqualStrings("韓", state.input.preedit.items);
+    try std.testing.expectEqualStrings("韓", ime.projection(session).?.text()[257..]);
+    try std.testing.expect(session.tryCommitComposition());
+    try std.testing.expectEqualStrings("韓", state.input.query.items[257..]);
+    try std.testing.expectEqual(@as(usize, 0), state.input.preedit.items.len);
+
+    // A malformed replacement must roll back the entire key, including a valid
+    // earlier callback. The restored storage must not alias the discarded edit.
+    state.show();
+    try state.input.query.appendSlice(allocator, "😀a");
+    _ = ime.projection(session).?;
+    // Actual Korean TSM asks for the leading surrogate while finding its word.
+    // The read adapter expands that query; the invalid edit below must still fail.
+    const read_part = @import("app_session/chrome_ime.zig").projection(session).?.substring(.{ .location = 0, .length = 1 }).?;
+    try std.testing.expectEqualStrings("😀", read_part.bytes);
+    try std.testing.expectEqual(maru.inline_text_input.Range{ .location = 0, .length = 2 }, read_part.actual);
+    session.imeBegin();
+    try std.testing.expect(ime.insert(session, "z", null));
+    try std.testing.expect(ime.insert(session, "bad", .{ .location = 1, .length = 0 }));
+    session.imeEnd(null);
+    try std.testing.expectEqualStrings("😀a", state.input.query.items);
+    try std.testing.expectEqualStrings("😀a", ime.projection(session).?.text());
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    session.allocator = failing.allocator();
+    session.imeBegin();
+    try std.testing.expect(ime.marked(session, "한", .{ .location = 1, .length = 0 }, null));
+    session.imeEnd(null);
+    session.allocator = allocator;
+    try std.testing.expectEqualStrings("😀a", state.input.query.items);
+    try std.testing.expectEqual(@as(usize, 0), state.input.preedit.items.len);
+    session.imeBegin();
+    try std.testing.expect(ime.insert(session, "한", null));
+    session.imeEnd(null);
+    try std.testing.expectEqualStrings("😀a한", state.input.query.items);
+
+    // Fail each allocation in snapshot, dynamic reserve, canonical reserve and
+    // preedit reserve. A following control admits the same long insertion.
+    var reached_success = false;
+    for (0..32) |failure| {
+        state.deinit(allocator);
+        state.* = .{};
+        state.show();
+        session.palette_filtered.deinit(allocator);
+        session.palette_filtered = .empty;
+        try state.input.query.appendSlice(allocator, "keep");
+        _ = ime.projection(session).?;
+        var allocation_failure = std.testing.FailingAllocator.init(allocator, .{ .fail_index = failure, .resize_fail_index = 0 });
+        var long_insert: [1024]u8 = undefined;
+        @memset(&long_insert, 'x');
+        session.allocator = allocation_failure.allocator();
+        session.imeBegin();
+        try std.testing.expect(ime.insert(session, &long_insert, null));
+        session.imeEnd(null);
+        session.allocator = allocator;
+        if (allocation_failure.has_induced_failure) {
+            try std.testing.expectEqualStrings("keep", state.input.query.items);
+            try std.testing.expectEqualStrings("keep", ime.projection(session).?.text());
+        } else {
+            try std.testing.expect(failure >= 4);
+            try std.testing.expectEqual(@as(usize, 1028), state.input.query.items.len);
+            reached_success = true;
+        }
+        try std.testing.expectEqual(@as(usize, 0), state.input.preedit.items.len);
+        if (reached_success) break;
+    }
+    try std.testing.expect(reached_success);
+    state.show();
+    session.recomputePalette();
+    try std.testing.expect(state.result_count > 1);
+    state.selected = 1;
+    session.imeBegin();
+    try std.testing.expect(ime.insert(session, "😀", null));
+    try std.testing.expect(ime.insert(session, "bad", .{ .location = 1, .length = 0 }));
+    session.imeEnd(null);
+    try std.testing.expectEqual(@as(usize, 0), state.input.query.items.len);
+    try std.testing.expectEqual(@as(usize, 1), state.selected);
+
+    session.imeBegin();
+    state.hide();
+    state.show();
+    try std.testing.expect(ime.generation(session) == null);
+    try std.testing.expect(ime.insert(session, "stale", null));
+    session.imeEnd(null);
+    try std.testing.expectEqual(@as(usize, 0), state.input.query.items.len);
+    try std.testing.expect(ime.generation(session).? != token);
 }

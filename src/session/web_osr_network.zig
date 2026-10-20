@@ -74,8 +74,8 @@ pub const Budget = struct {
     /// W9d②: 본문 바이트(요약·자세한 것과 따로 센다).
     body_bytes: usize = 0,
     body_cap: usize = global_body_cap_bytes,
-    /// W9d② 적대 리뷰 1 회차: 다 받은 본문에 매기는 차례(`Entry.body_order`) — 앱 상한에서는 탭과 무관하게 가장 먼저 받은 본문부터 버린다
-    /// (`web_osr` 의 앱 쪽 자리 내기). 전에는 이 탭의 것만 버려, 다른 탭 넷이 8 MiB 씩 채우면 다섯째 탭의 본문은 모두 `evicted` 였다.
+    /// W9d② 적대 리뷰 1 회차: 다 받은 본문에 매기는 차례(`Entry.body_order`) — 앱 상한에서는 본문을 가장 많이 쥔 탭의 가장 먼저 받은 본문부터
+    /// 버린다(`web_osr` 의 앱 쪽 자리 내기 — 2 회차). 전에는 이 탭의 것만 버려, 다른 탭 넷이 8 MiB 씩 채우면 다섯째 탭의 본문은 모두 `evicted` 였다.
     body_clock: u64 = 0,
 };
 
@@ -203,7 +203,7 @@ pub const Entry = struct {
     body_flags: msg.NetBodyFlags = .{},
     /// sidecar 가 센 풀어 낸 크기(`over_cap` 이 얼마였는지).
     body_decoded: u64 = 0,
-    /// 다 받은 차례(`Budget.body_clock` — 앱 상한에서 가장 먼저 받은 것부터 버린다).
+    /// 다 받은 차례(`Budget.body_clock` — 앱 상한에서 버릴 탭 안에서는 가장 먼저 받은 것부터).
     body_order: u64 = 0,
     /// W9d② 적대 리뷰 1 회차 MED-1: sidecar 가 설정이 꺼진 동안 이 응답을 덜어 보냈다(`net_response` 의 `stripped` — 적을 때 찍는다, 헤더의
     /// P1c 와 같은 갈래). 그런 응답의 본문은 뒤에 설정을 켜도 꺼졌을 때의 투영(읽는 쪽 호스트가 응답을 보낸 곳을 덮는가)으로만 보인다 — 끈 동안
@@ -816,14 +816,24 @@ pub const Ring = struct {
         return null;
     }
 
-    /// W9d② 적대 리뷰 1 회차: 그 번호의 본문 frame 을 이 링이 받을 것인가(끝을 기다리는 기록이 있다) — 받지 않을 frame 때문에 다른 탭의 본문을
-    /// 버리지 않게(앱 상한의 자리 내기 전에 본다).
+    /// W9d② 적대 리뷰 1 회차: 그 번호의 본문 frame 을 이 링이 받을 것인가(끝을 기다리는 기록이 있다).
     pub fn awaitsBody(self: *Ring, request: u64) bool {
         return self.pendingBody(request) != null;
     }
 
-    /// `need` 바이트를 더 쥘 자리를 낸다 — 이 탭의 다른 다 받은 본문을 오래된 것부터 버린다(`evicted`). 앱 상한은 부른 쪽이 먼저 탭과 무관하게
-    /// 가장 먼저 받은 본문부터 낸다(`web_osr.makeAppBodyRoom` — W9d② 적대 리뷰 1 회차); 여기서 앱 상한이 남는 것은 그래도 모자랄 때뿐이다.
+    /// 이 조각을 `bodyData` 가 붙일 것인가 — 끝을 기다리는 기록이 있고, 앞 조각에 이어지며(오프셋), 본문 상한 안이다. 받지 않을 조각 때문에 다른
+    /// 탭의 본문을 버리지 않게 앱 상한의 자리 내기 전에 본다(W9d② 적대 리뷰 2 회차 — 전에는 기다림만 보고 오프셋·크기는 버린 뒤에 봤다).
+    pub fn acceptsBodyData(self: *Ring, v: msg.NetBodyData) bool {
+        const e = self.pendingBody(v.request) orelse return false;
+        return bodyChunkFits(e, v);
+    }
+
+    fn bodyChunkFits(e: *const Entry, v: msg.NetBodyData) bool {
+        return v.offset == e.body.items.len and e.body.items.len + v.bytes.len <= max_body_bytes;
+    }
+
+    /// `need` 바이트를 더 쥘 자리를 낸다 — 이 탭의 다른 다 받은 본문을 오래된 것부터 버린다(`evicted`). 앱 상한은 부른 쪽이 먼저 본문을 가장
+    /// 많이 쥔 탭부터 낸다(`web_osr.makeAppBodyRoom` — W9d② 적대 리뷰 1·2 회차); 여기서 앱 상한이 남는 것은 그래도 모자랄 때뿐이다.
     fn makeBodyRoom(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, keep: *const Entry, need: usize) bool {
         var i: usize = 0;
         while ((self.body_bytes + need > max_tab_body_bytes or budget.body_bytes + need > budget.body_cap) and i < self.entries.len) : (i += 1) {
@@ -837,7 +847,7 @@ pub const Ring = struct {
     /// 본문 한 조각(`net_body_data`) — 앞 조각에 이어지지 않거나(오프셋) 상한을 넘으면 그 본문은 받지 않는다.
     pub fn bodyData(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, v: msg.NetBodyData) std.mem.Allocator.Error!void {
         const e = self.pendingBody(v.request) orelse return;
-        if (v.offset != e.body.items.len or e.body.items.len + v.bytes.len > max_body_bytes) {
+        if (!bodyChunkFits(e, v)) {
             self.setBodyState(gpa, budget, e, .unavailable);
             return;
         }

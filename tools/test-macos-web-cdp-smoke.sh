@@ -1604,7 +1604,7 @@ bbad() { body_bad="$body_bad · $1"; }
 grep -q '^rc=0$' "$out/bd-rec" && grep -q '^recording response bodies' "$out/bd-rec" || bbad "turning on body recording on the agent's tab failed or asked ($(tr '\n' ' ' < "$out/bd-rec"))"
 grep -q "^surface $(sed -n 's/^opened \([0-9]*\) .*/\1/p' "$out/bd-open") .*◉ recording" "$out/bd-blist" || bbad "the recording tab was not marked ◉ recording in browser list ($(tr '\n' ' ' < "$out/bd-blist" | cut -c1-400))"
 grep -q '(recording response bodies: on)' "$out/bd-list" || bbad "the network list did not say the tab records bodies ($(tr '\n' ' ' < "$out/bd-list" | cut -c1-600))"
-grep -q '^rc=0$' "$out/bd-c" && grep -q '^body: captured · 25 bytes · utf-8' "$out/bd-c" && grep -qxF '{"chunked":["one","two"]}' "$out/bd-c" \
+grep -q '^rc=0$' "$out/bd-c" && grep -q '^body: captured · 25 bytes · utf-8' "$out/bd-c" && grep -qxF 'body text: {"chunked":["one","two"]}' "$out/bd-c" \
     || bbad "the chunked JSON body was not captured as it was sent ($(tr '\n' ' ' < "$out/bd-c") · $(cat "$out/bd-reqs"))"
 grep -q '^body: over_cap ([0-9]* bytes — over the 1 MiB body limit)' "$out/bd-big" || bbad "a 2 MiB JSON body was not over_cap ($(tr '\n' ' ' < "$out/bd-big"))"
 grep -q '^body: not_text$' "$out/bd-pic" || bbad "a PNG body was not not_text ($(tr '\n' ' ' < "$out/bd-pic"))"
@@ -1616,7 +1616,7 @@ grep -q '^rc=0$' "$out/bd-ck" && grep -q '^body: captured' "$out/bd-cred2" && gr
 [ -f "$out/p2-body-done" ] || bbad "the second pane did not finish its body reads ($(ls "$out" | grep -E '^(bd2-|p2-body)' | tr '\n' ' '))"
 grep -q '^body: hidden — needs the permission to record this tab' "$out/bd2-nobody" && ! grep -qF '"one","two"' "$out/bd2-nobody" || bbad "a pane without the body permission saw the body ($(tr '\n' ' ' < "$out/bd2-nobody"))"
 grep -q '^rc=0$' "$out/bd2-rec" && grep -q '^body: hidden — made before your permission to record bodies' "$out/bd2-before" || bbad "after the second pane's body permission a body from before it was shown ($(tr '\n' ' ' < "$out/bd2-rec") · $(tr '\n' ' ' < "$out/bd2-before"))"
-grep -q '^body: captured' "$out/bd2-after" && grep -qxF '{"chunked":["one","two"]}' "$out/bd2-after" || bbad "the second pane did not see the body of a request after its permission ($(tr '\n' ' ' < "$out/bd2-after"))"
+grep -q '^body: captured' "$out/bd2-after" && grep -qxF 'body text: {"chunked":["one","two"]}' "$out/bd2-after" || bbad "the second pane did not see the body of a request after its permission ($(tr '\n' ' ' < "$out/bd2-after"))"
 ! grep -q '◉ recording' "$out/bd-blist2" || bbad "after revoking all grants the tab was still marked recording ($(tr '\n' ' ' < "$out/bd-blist2" | cut -c1-400))"
 grep -q '^rc=0$' "$out/bd-revoked" && ! grep -q 'bodyc.json' "$out/bd-revoked" && ! grep -q 'recording response bodies' "$out/bd-revoked" && ! grep -qF '"one","two"' "$out/bd-revoked-req" \
     || bbad "after revoking all grants the recorded bodies were not wiped ($(tr '\n' ' ' < "$out/bd-revoked" | cut -c1-400) · $(tr '\n' ' ' < "$out/bd-revoked-req"))"

@@ -173,10 +173,11 @@ pub fn cefCovered(browser: BrowserId, request: u64, covered: bool) void {
     table.cefCovered(browser, request, covered);
 }
 
-/// CEF 끝 — `ok` 는 CEF 가 성공으로 끝냈는가(W9d② 적대 리뷰 3 회차 P5: 취소·실패로 끝난 기록은 성공한 CDP 요청의 짝이 아니다).
-pub fn cefEnd(browser: BrowserId, request: u64, ok: bool) void {
-    dbg("cef-end b={d} req={d} ok={} t={d}", .{ browser, request, ok, machUs() });
-    table.cefEndAs(browser, request, machUs(), ok);
+/// CEF 끝 — `ok` 는 CEF 가 성공으로 끝냈는가(W9d② 적대 리뷰 3 회차 P5: 취소·실패로 끝난 기록은 성공한 CDP 요청의 짝이 아니다), `received` 는
+/// 받은 바이트(4 회차 N1 — CDP 의 빈 본문이 정말 0 바이트였는가).
+pub fn cefEnd(browser: BrowserId, request: u64, ok: bool, received: u64) void {
+    dbg("cef-end b={d} req={d} ok={} received={d} t={d}", .{ browser, request, ok, received, machUs() });
+    table.cefEndReceived(browser, request, machUs(), ok, received);
     ensureTick();
 }
 
@@ -290,7 +291,7 @@ fn onEvent(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser
         };
         if (debug_log) if (ev) |e| switch (e) {
             .will_be_sent => |v| dbg("cdp-sent rid={s} url={x} m={x} ts={d} redirect={} now={d}", .{ v.rid, v.url_hash, v.method_hash, v.ts_us, v.redirect, now }),
-            .response => |v| dbg("cdp-resp rid={s} mime={s} sw={} now={d}", .{ v.rid, v.mime, v.from_sw, now }),
+            .response => |v| dbg("cdp-resp rid={s} mime={s} sw={} src={s} now={d}", .{ v.rid, v.mime, v.from_sw, v.sw_source, now }),
             .finished => |v| dbg("cdp-fin rid={s} now={d} seen={d}", .{ v.rid, now, table.cef_seen_us }),
             .failed => |v| dbg("cdp-fail rid={s} now={d} seen={d}", .{ v.rid, now, table.cef_seen_us }),
             .from_cache => |v| dbg("cdp-cache rid={s}", .{v.rid}),
@@ -345,7 +346,8 @@ fn onDetached(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_brow
 /// 받은 결과를 풀어 보낸다 — 잡았으면 조각들과 끝(보내는 줄에 자리가 없으면 `busy`), 아니면 끝 하나.
 fn sendBody(f: table_mod.Inflight, ok: bool, json: []const u8) void {
     var flags: msg.NetBodyFlags = .{ .credentialed = f.credentialed };
-    const d = table_mod.decodeResult(gpa, ok, json, f.mimeSlice(), f.charset, f.decoded) catch table_mod.Decoded{ .state = .busy };
+    var d = table_mod.decodeResult(gpa, ok, json, f.mimeSlice(), f.charset, f.decoded) catch table_mod.Decoded{ .state = .busy };
+    d.state = table.emptyBodyState(f, d.state); // 4 회차 N1: 빈 본문인데 CEF 는 바이트를 받았다 — `unavailable`
     defer if (d.bytes.len > 0) gpa.free(d.bytes);
     // 넘쳤으면 넘친 글의 크기까지(windows-1252 로 푼 글은 받은 바이트보다 클 수 있다 — 상태와 크기가 엇갈리지 않게).
     const end: msg.NetBodyEnd = .{ .browser = f.browser, .session = f.session, .request = f.request, .state = d.state, .flags = flags, .decoded = @max(f.decoded, d.over_bytes) };

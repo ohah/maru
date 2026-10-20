@@ -2075,7 +2075,8 @@ sidecar 재시작), control_browser(op 30·모달 전 `-32008`·`needs_network_p
 `body-join-same-url`·`body-cross-process-iframe`·`body-service-worker`·`body-ub1-credentialed`·`body-switch-off-prefilter`·`body-writer-nonblocking`·
 `body-devtools-guard`·`body-renderer-crash`·`body-record-off`·`body-restart-same-id`·`body-one-end-each`(번호마다 시도 수만큼). 적대 리뷰 1 회차 항목
 `body-r1-*` 는 `network_body_r1_check.zig`(`--network`·`--network-body` 끝에 따로 띄운 sidecar — 아래 「W9d② 적대 리뷰: 1 회차」), 3 회차 항목
-`body-r3-*` 는 `network_body_r3_check.zig`(그 뒤에 또 따로 — 이것만은 `--review-body-r3`).
+`body-r3-*` 는 `network_body_r3_check.zig`(그 뒤에 또 따로 — 이것만은 `--review-body-r3`), 4 회차 항목 `body-r4-*` 는 `network_body_r4_check.zig`(그 뒤에
+또 따로 — 이것만은 `--review-body-r4`).
 
 **W9d② × 같은 번호 다시 시작(W9d① 적대 리뷰 후 위로 리베이스 — 2026-10-16)**: W9d① 이 같은 CEF 번호의 시작을 다시 시작으로 치게 되자(앞 기록
 `restarted`, 새 시도는 새 기록) 한 번호에 기록이 둘이 될 수 있다 — 그런데 본문 frame 은 번호로만 오고 maru 는 그 번호의 가장 새 기록에 붙인다.
@@ -2103,7 +2104,8 @@ sidecar 재시작), control_browser(op 30·모달 전 `-32008`·`needs_network_p
   `unmatched` 다 — 틀린 시도에 붙이느니 없는 편을 골랐다.
 
 남은 틈(알고 둔 것): 다른 프로세스 iframe·worker·서비스 워커만의 요청(페이지 twin 이 없는 것)·메모리 캐시·추측 미리 받기·preflight·opaque no-cors·ORB 막힘의
-본문은 없다(UB4·J3·J13 — `unmatched` 이거나 기록 자체가 없다; worker 가 페이지와 같은 주소를 페이지의 응답 전에 받으면 둘 다 `ambiguous` — 적대 리뷰 1 회차 MED-2·3 회차 P1,
+본문은 없다(UB4·J3·J13 — `unmatched` 이거나 기록 자체가 없다; 서비스 워커가 네트워크 밖(Cache Storage·HTTP 캐시·`new Response`)에서 답한 응답의 본문도 없다
+— 그 워커가 네트워크로 받은 기록은 `unmatched`, 4 회차 SW1; worker 가 페이지와 같은 주소를 페이지의 응답 전에 받으면 둘 다 `ambiguous` — 적대 리뷰 1 회차 MED-2·3 회차 P1,
 그 주소의 열린 다른 페이지 요청도 창이 겹치면 `ambiguous` — 2 회차; 페이지의 응답 뒤에 받은 worker 의 것은 이제 페이지를 모호하게 하지 않는다 — 3 회차).
 이벤트 흐름(`text/event-stream`)은 받지 않는다. 쏟아짐 밸브로 멈춘 기록은 에이전트가 다시 켜야 한다(sidecar 가 다시 떠도 — 3 회차 F1).
 
@@ -2243,3 +2245,56 @@ D1·F3·C1, L2 셋 D6·B2·F1)과 실제 CEF 154 재현 판정(`rv3-*`)을 남�
   기다려 결과가 같다 — 방어). 판정 변이: 물 높이가 상자를 보지 않으면 `body-r3-worker-own-late` 틀림 24/80 이 돌아온다, CEF 끝의 성공 여부를 버리면
   `body-r3-abort-refetch` 30 중 하나를 잃는다(abort 한 기록이 CDP 실패 뒤에 시작한 시도에서만 갈린다 — 약한 신호). 변이가 드러낸 죽은 코드(다시 시작 때
   `responded_at` 을 0 으로 — 다시 시작한 요청은 그 값을 쓰지 않는다)는 지웠다.
+
+W9d② 적대 리뷰: 4 회차(2026-10-20 — 리뷰가 CLI 재현 시험 D1b 와 실제 CEF 154 재현 판정(`rv4-*` — `network_body_r4_check.zig`, `--review-body-r4`)을 남겼다.
+붙여 CLI 796 통과·1 실패(D1b), 판정(고치기 전 표): `rv4-sw-swr` 틀린 본문 38/40(리뷰 다섯 번 37–38), `rv4-sw-synth` 15/15, SPA 꼴의 페이지 JSON
+134/152(88 % — 잃은 것은 모두 `busy`)를 본 뒤 고쳤다. 판정 항목은 `body-r4-*` 로 옮겨 `--network`·`--network-body` 끝에서 따로 띄운 sidecar 로 돌린다
+(이것만은 `--review-body-r4`):
+- **SW1(HIGH) 서비스 워커가 캐시로 답하며 같은 주소를 네트워크로 다시 받으면(Workbox StaleWhileRevalidate) 캐시의 옛 본문이 그 네트워크 기록에 붙었다**:
+  워커가 `fetch(event.request)` 를 먼저 시작하고 Cache Storage 의 것으로 답한다 — 페이지의 CDP 응답(fromServiceWorker)이 서비스 워커 갈래의 그 CEF
+  기록(워커 제 fetch — 페이지의 응답 전에 시작해 3 회차의 `bound` 도 막지 못한다)과 짝지어져, 기록의 머리는 새 네트워크 응답인데 본문은 캐시의 앞
+  응답이었다. 지금 사건 칸으로는 이 차례가 그대로 넘김(pass-through — 잡아야 한다)과 같다. 고침(사용자 결정): 서비스 워커가 준 응답은 CDP
+  `response.serviceWorkerResponseSource` 가 `network` 일 때만 서비스 워커 갈래의 기록과 맞춘다. `cache-storage`·`http-cache`·`fallback-code`·칸
+  없음은 CEF 가 보지 못한 응답으로 친다(`Cdp.sw_off_network` — 메모리 캐시처럼 맞추기에 넣지 않고 끝나면 놓는다 — 열린 동안에도 다른 요청의 차례에
+  들지 않는다). 그 워커의 기록은 짝 없이 `unmatched` 로 끝난다(작성자 선택 — 그 기록의 응답은 페이지가 받지 않았다; 있는 상태 중 가장 맞다).
+  **실측**(CEF 154, 판정 진단 줄의 `responseReceived` 729): fromServiceWorker 가 아니면 칸이 없다(614), 워커의 응답은 `cache-storage` 57(stale-while-
+  revalidate·대조 판정의 캐시 적중)·`fallback-code` 15(`new Response`)·`network` 43(그대로 넘김 40·캐시가 비어 네트워크 응답을 돌려준 3) — 칸은
+  판정의 모든 꼴에서 맞았다(HTTP 캐시 꼴은 재지 않았다). 그대로 넘긴 요청과 캐시로 답한 요청이 같은 주소로 섞이면 캐시 쪽 워커 기록이 그대로 넘긴
+  요청의 차례에 남아 두 맞추기가 갈린다 — 둘 다 `ambiguous`(틀린 본문보다 없음). 대가: 워커가 HTTP 캐시에서 받아 그대로 넘긴 응답(기록과 본문이
+  같다)도 이제 본문이 없다.
+- **SW1b(MED) 워커가 네트워크로 받은 뒤 `new Response(...)` 로 바꿔 답하면 만든 본문이 그 기록에 붙었다**: 같은 규칙(출처 `fallback-code`)으로
+  닫혔다 — 판정 틀림 15/15 → 0(기록은 `unmatched`).
+- **D1b(LOW–MED) 한 줄 본문이 통째로 maru 의 「more: --offset」 줄을 흉내 냈다**: 3 회차는 본문을 한 줄로 찍었지만 그 줄은 0 칸부터 페이지의 글이라
+  본문이 「more: --offset 0」 이면 maru 의 다음 조각 안내와 같은 줄이었다(MCP 설명은 「그 뒤의 'more: --offset' 줄은 늘 maru 의 것」). 고침: 콘솔의
+  `[level] ` 처럼 본문 줄에 maru 의 머리 `body text: `(`browser.body_text_prefix`)를 붙인다 — 그것으로 시작하지 않는 줄은 모두 maru 의 것이다. 이
+  모양은 손실이 있다(본문에 글자 그대로 있는 ` ⏎ ` 는 줄바꿈과, 탭은 빈칸과 같아 보인다) — 그대로의 바이트는 `--out`. MCP 설명(머리·손실·`out`)·
+  control-plane-browser·cdp 스모크(`bd-c`·`bd2-after` 의 본문 줄)를 고쳤다.
+- **본문 수 버스트(작성자 선택 — 사용자 결정)**: 탭의 본문 수 양동이가 초당 20·버스트 20 이라 초당 34 개의 JSON 을 5 초 내는 SPA 꼴에서 기다림
+  (32 개·3 초)이 넘쳐 페이지 JSON 의 12 % 가 `busy` 였다 — 같은 주소 셋 9·POST 8·폴링 1, 한 바퀴의 뒤에 낸 것들(앞에 낸 서로 다른 JSON 은 72/72):
+  기다림에 들어가는 차례로 잃었으니 까닭은 양동이다(동시 2/탭은 아니었다 — 버스트만 올리자 모두 잡혔다). 고침: 버스트를 60(`tab_bodies_burst` —
+  3 초 몫)으로. 꾸준한 초당 20·바이트 양동이(탭 4 MiB/s·전체 8 MiB/s)·동시 2/탭·8 전체·기다림 32 개·3 초·하나 1 MiB·maru 의 탭 8 MiB·앱 32 MiB
+  는 그대로다. 판정 `body-r4-spa-page-json`(새 항목 — 97 % 이상) 134/152 → 152/152(`busy` 0 — 같은 주소 셋 27 → 36, POST 16 → 24, 폴링 19 → 20,
+  캐시되는 설정 8 → 12), 디스크 캐시·304 의 `busy` 4·6 → 0.
+- **넘김 상자가 넘쳐 버린 시작(코드 읽기)**: `reserveQueue` 가 거절한 시작은 넘긴 수만 세고 본문 표에 표지를 남기지 않아, 시작이 표에 닿지 않은 요청의
+  CDP 쪽이 같은 주소의 다른 요청 기록을 가져갈 수 있었다(4096 개·8 MiB 가 쌓여야 한다 — UI 스레드가 멈춘 때, 재현은 없다). 고침: 표지를
+  `net_gate.State` 로 옮기고(`markDrop`·`queueRefused`·`takeDropMarks` — 순수 시험) 넘친 시작도 문이 넘긴 것처럼 붙일 탭마다 표지(주소 해시·잠금
+  아래의 IO 시각)를 남긴다 — 그 창의 같은 주소 짝은 `ambiguous`.
+- **N1(NIT) `<link rel=prefetch>` 가 `no_body` 였다**: CDP 는 `dataReceived` 없이 빈 본문을 줬지만 서버는 바이트를 보냈다(CEF 끝의 받은 바이트).
+  고침: CEF 끝의 받은 바이트(`Candidate.cef_received` — `net_end.received`)가 0 보다 크면 빈 결과는 `unavailable`(`emptyBodyState`), `dataReceived`
+  없는 글 아닌 응답도 같다. 남는 틈: CEF 끝이 본문 호출의 답보다 늦으면(10 ms 묶음) 아직 모른다 — `no_body` 그대로(판정 두 번 모두 CEF 끝이 먼저였다).
+  판정 prefetch 의 `no_body` 14 → 0(`unavailable` 14) — `body-r4-cache-*` 는 `no_body` 가 없어야 통과한다.
+- **N2(NIT — 그대로 둔다)**: sidecar 가 다시 뜬 뒤 되살린 탭의 문서 요청 본문은 `unavailable` 이다(앱 실측 두 번 모두 — 다시 켜기 전에 시작한 그 문서의
+  본문은 새 sidecar 가 받지 못했다, 정직한 상태). 기다리던 본문은 `detached`(3 회차 B2 그대로).
+- **검증**: 순수 — SW1 실측 차례·SW1b(만든 응답·HTTP 캐시·출처 없음, 대조 `network`)·섞인 같은 주소·캐시로 답해 열린 요청·출처 칸 읽기·넘친 시작의
+  표지(`net_gate`)와 그 결과(표 — 표지가 없을 때 가져가던 대조)·N1, 버스트 시험을 60 과 쉰 뒤 다시 찬 버스트로 — 127 통과. CLI — D1b 재현(이제
+  통과)·본문 줄 시험 둘을 머리로·MCP 설명이 머리를 말한다 — 797 통과. 판정자(실제 CEF 154) `body-r4-*` 스물여섯 모두 통과 — `body-r4-sw-swr` 틀림 0
+  (캐시가 빈 2 는 제 본문, 38 `unmatched`)·`body-r4-sw-synth` 틀림 0·`body-r4-sw-mixed` 그대로 넘긴 워커 기록 40/40 제 본문(통과 조건에 더했다)·
+  `body-service-worker` 그대로 통과. `--network` 147 통과(한 번은 `body-r3-abort-refetch`
+  가 29/30 — abort 한 fetch 하나가 CEF 에 닿지 않았는데 다시 받은 요청의 CEF 시작이 UI 가 그 실패를 보기 전이라 그 기록을 가져가 `request_failed`, 틀린
+  본문 0; 3 회차 P5 의 남은 틈으로 이번 고침과 무관하다 — 따로 세 번·전체 다시 한 번은 30/30)·`--upload` 9, cdp 스모크 40 통과. 변이 24(사본에서 — 순수
+  20·CLI 3·판정 1): 첫 판 순수 20 중 RED 13·산 셋(실패로 끝난 캐시 쪽 응답을 놓기, 열린 캐시 쪽 응답을 맞추기에서 빼기, 빈 본문 말고는 바꾸지 않기)·
+  컴파일 실패 넷(쓰지 않는 인자 — 고쳐 썼다) — 시험을 굳혀(캐시 쪽 응답이 그대로 넘긴 기록의 시작 뒤에 오고 열린 채·그 뒤 실패, `over_cap`·`busy`
+  는 그대로) 둘째 판 순수 20/20 RED(끝에서 놓기 둘은 맞추기 목록에 없는 요청의 자리로 죽어 RED), CLI 3/3 RED, 판정 변이(본문 호출 결과에
+  `emptyBodyState` 를 거치지 않기)는 `body-r4-cache-prefetch` 가 `no_body` 15 로 RED. 변이하지 않은 것: `network.zig` 의 넘친 시작 → `queueRefused`
+  배선(실제 CEF 에서 상자를 넘치게 해야 한다 — 판단은 `net_gate` 의 순수 시험이 본다). 서비스 워커 규칙·버스트를 통째로 되돌린 판은 고치기 전 판정
+  그대로다(위 숫자).

@@ -231,6 +231,8 @@ fn sidecarExe(
     cef_api.addIncludePath(.{ .cwd_relative = sdk });
     cef_api.addIncludePath(b.path("src/platform/macos/web_sidecar/shim"));
     exe.root_module.addImport("cef_c", cef_api.mod);
+    // Zig 0.17 의 호환 모듈(`array_repeat`·`type_info_fields`) — host·helper 의 파일도 쓴다(판정자와 같은 이유).
+    support.attachArrayRepeatImports(b, exe.root_module);
     // 헤더만 쓴다 — 함수는 실행 중에 dlopen 한 프레임워크에서 찾으므로 프레임워크를 링크하지 않는다.
     exe.root_module.addIncludePath(.{ .cwd_relative = sdk });
     exe.root_module.addIncludePath(b.path("src/platform/macos/web_sidecar/shim"));
@@ -241,11 +243,10 @@ fn sidecarExe(
     return exe;
 }
 
-/// Objective-C 런타임(`libobjc`). 경로는 `/usr/lib` 로만 준다 — sysroot(SDK)가 앞에 붙여 푼다(SDK 절대경로를 주면 두 번
-/// 붙어 깨진다 — build.zig 의 SDK 주석).
+/// Objective-C 런타임(`libobjc`). 경로는 SDK 절대경로(`<SDK>/usr/lib`)로 준다 — Zig 0.17 에는 sysroot 가 없어 `/usr/lib` 만
+/// 주면 호스트 `/usr/lib` 에서 `libobjc` 를 찾다 실패한다(sidecar 대상은 macOS 11.0 이라 cross — build.zig 의 SDK 주석 (3)).
 fn linkObjc(b: *std.Build, ctx: Context, artifact: *std.Build.Step.Compile) void {
-    _ = b;
-    if (ctx.macos_sdk != null) artifact.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+    if (ctx.macos_sdk) |macos_sdk| artifact.root_module.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{macos_sdk}) });
     artifact.root_module.linkSystemLibrary("objc", .{});
 }
 

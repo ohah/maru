@@ -14,7 +14,7 @@
 //!     짝을 지어도 본문을 붙이지 않는다(`ambiguous` — 넘긴 요청의 쌍둥이 자리에 다른 요청이 들어온다, J2: 넘김 창 안에서 4–6 개가 틀렸다).
 //! 본문 상태(`NetBodyState`)는 CEF 시작마다 **꼭 하나**다(`body_expected` 로 알린 요청 — 짝이 없으면 `unmatched`, 기록을 끄면
 //! `recording_stopped`, 렌더러가 죽으면 `detached`, 같은 번호로 다시 시작하면 앞 시도는 `restarted` — 그 끝은 새 시작보다 먼저).
-//! 상한: 풀어 낸 크기(`dataReceived` 의 합 — J4: 이것이 실제 크기와 꼭 같았다)가 1 MiB 를 넘으면 받지 않는다(CDP 의 자원 상한은 스크립트·스타일에 듣지 않았다 — 11 MB 가 왔다), 동시 2/탭·8 전체, 초당 20 개·4 MiB/탭·8 MiB 전체.
+//! 상한: 풀어 낸 크기(`dataReceived` 의 합 — J4: 이것이 실제 크기와 꼭 같았다)가 1 MiB 를 넘으면 받지 않는다(CDP 의 자원 상한은 스크립트·스타일에 듣지 않았다 — 11 MB 가 왔다), 동시 2/탭·8 전체, 초당 20 개(버스트 60 — 4 회차)·4 MiB/탭·8 MiB 전체.
 //! 다음 문서로 옮기면 본문이 사라지므로(J4) 기다리는 것은 잠시뿐이고(`waiting_expiry_us`) 넘으면 `busy` 다.
 //! W9d② 적대 리뷰 1 회차: (MED-1) 설정이 꺼졌으면 응답을 보낸 호스트(리다이렉트 뒤)를 CEF 응답이 정하기 전에는 받으러 가지 않는다 — CDP 끝은 그
 //! CEF 응답보다 대개 먼저 온다(`cover_pending`·`cover_grace_us`, 시한·응답 없는 끝은 `not_covered`). (MED-2) 창 안의 같은 열쇠 후보가 그것을 가져갈
@@ -29,13 +29,18 @@
 //! 정하고, 응답 뒤에 시작한 기록은 그 요청의 짝으로 치지 않는다(`compatible`). (P5) 응답 없이 실패한 요청(abort — CEF 에 닿지 않았을 수 있다)은
 //! 끝난 뒤에 시작한 기록을 CEF 가 성공으로 끝내면 갖지 않고, 「그럴 수 있다」 뿐이면 제 짝으로 정하지 않는다(`definite`); 성공한 요청은 CEF 가
 //! 실패·취소로 끝낸 기록을 갖지 않는다. (S1) 답이 오지 않는 본문 호출은 `fetch_timeout_us` 뒤 `unavailable`.
+//! W9d② 적대 리뷰 4 회차: (SW1) 서비스 워커가 준 응답은 그 출처(`serviceWorkerResponseSource`)가 `network` 일 때만 서비스 워커 갈래의 기록과
+//! 맞춘다 — Cache Storage·HTTP 캐시·워커가 만든 응답·출처 없음은 CEF 가 보지 못한 응답으로 친다(`Cdp.sw_off_network` — 캐시로 답하며 같은 주소를
+//! 다시 받는 워커의 기록에 캐시의 옛 본문이 붙었다). (N1) CDP 의 빈 본문인데 CEF 끝이 바이트를 알렸으면 `unavailable`(`emptyBodyState`).
+//! 본문 수의 버스트는 60(`tab_bodies_burst` — 초당 20 은 그대로).
 //!
 //! 시험이 증명하는 것: 맞추기(두 도착 차례·창·같은 주소의 차례 — 창이 다른 동시 요청·기록이 아직인 뒤 요청·ExtraInfo 가 먼저 온 요청·문 넘김과
 //! 보이는 규칙이 다른 후보의 모호함·CDP 가 보지 못한 같은 주소 후보의 모호함과 갈린 다른 요청·서비스 워커 갈래·조각 떼기·A → B → A 와 다시
 //! 시작), 설정 끔의 응답 호스트 기다림, 홉마다의 ExtraInfo 와 그 자리의 시한, 상한과 판정(넘침·글 아님·빈 본문·끊김·실패), 동시·초당 상한과
 //! 기다림의 만료, 세대(끈 뒤 늦게 온 결과는 버린다), 시작마다 끝은 꼭 하나, MIME 가르기, 결과 풀기(JSON 글·base64·잘못된 UTF-8·windows-1252
 //! 되돌리기), 물 높이(제 기록이 늦은 빠른 요청·응답 뒤 워커의 기록·응답의 CDP 시각·시한), abort 한 요청과 다시 받은 요청(CEF 에 닿았든 아니든·
-//! CEF 끝이 늦어도), 답이 오지 않는 본문 호출의 시한.
+//! CEF 끝이 늦어도), 답이 오지 않는 본문 호출의 시한, 서비스 워커 응답의 출처(Cache Storage·만든 응답·HTTP 캐시·출처 없음은 워커 기록에 붙이지
+//! 않고 그대로 넘긴 것만 — 섞이면 `ambiguous`), 넘김 상자가 넘쳐 놓친 시작의 표지, CEF 가 받은 바이트로 가르는 빈 본문.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -78,6 +83,10 @@ pub const max_candidates: usize = 4096;
 pub const max_cdp: usize = 4096;
 /// 초당 본문 수·바이트(탭), 바이트(전체).
 pub const tab_bodies_per_s: f64 = 20;
+/// W9d② 적대 리뷰 4 회차(작성자 선택 — 사용자 결정): 본문 수의 버스트는 초당 수의 세 배(3 초 몫). 전에는 버스트가 초당 수와 같아(20) 초당 34 개의
+/// JSON 을 5 초 동안 내는 SPA 꼴에서 기다림(32 개·3 초)이 넘쳐 페이지 JSON 의 12 % 가 `busy` 였다(판정 `rv4-spa` 134/152). 꾸준한 초당 수와 바이트
+/// 양동이(하나 1 MiB 의 본문이 몰려도 탭 4 MiB/s·전체 8 MiB/s)·동시 2/탭·8 전체·maru 의 저장 상한은 그대로다.
+pub const tab_bodies_burst: f64 = 3 * tab_bodies_per_s;
 pub const tab_bytes_per_s: f64 = 4 * 1024 * 1024;
 pub const global_bytes_per_s: f64 = 8 * 1024 * 1024;
 /// 쏟아짐 밸브 — 이벤트가 초당 이만큼을 연달아 이 초만큼 넘으면 기록을 멈춘다(J7: 쏟아질 때 Chromium 의 직렬화가 CPU 를 먹는다).
@@ -310,8 +319,9 @@ pub const Event = union(enum) {
     /// `Network.requestWillBeSentExtraInfo` — 실제로 실린 쿠키(막히지 않은 것)·인증 헤더가 있었나.
     extra_info: struct { rid: []const u8, credentialed: bool },
     /// `Network.responseReceived` — `has_extra_info` 는 이 요청의 ExtraInfo 가 오거나 왔다는 Chromium 의 알림(`hasExtraInfo`).
-    /// `ts_us` 는 CDP `timestamp`(µs — 0 = 모른다; W9d② 적대 리뷰 3 회차 P1 의 `bound`).
-    response: struct { rid: []const u8, mime: []const u8, from_sw: bool, charset: bool, prefetch: bool = false, has_extra_info: bool = false, ts_us: i64 = 0 },
+    /// `ts_us` 는 CDP `timestamp`(µs — 0 = 모른다; W9d② 적대 리뷰 3 회차 P1 의 `bound`). `sw_source` 는 서비스 워커가 준 응답의 출처
+    /// (`response.serviceWorkerResponseSource` — `network`·`http-cache`·`cache-storage`·`fallback-code`, 없으면 빈 글; W9d② 적대 리뷰 4 회차 SW1).
+    response: struct { rid: []const u8, mime: []const u8, from_sw: bool, charset: bool, prefetch: bool = false, has_extra_info: bool = false, ts_us: i64 = 0, sw_source: []const u8 = "" },
     /// `Network.dataReceived` — 풀어 낸 바이트.
     data: struct { rid: []const u8, bytes: u64 },
     /// `Network.requestServedFromCache` — 메모리 캐시: CEF 는 이 요청을 보지 못한다(J1).
@@ -432,6 +442,7 @@ pub fn parseEvent(method: []const u8, v: std.json.Value) ?Event {
             .rid = rid,
             .mime = str(v, "response.mimeType"),
             .from_sw = boolean(v, "response.fromServiceWorker"),
+            .sw_source = str(v, "response.serviceWorkerResponseSource"),
             .charset = hasCharset(ct),
             .prefetch = boolean(v, "response.fromPrefetchCache"),
             .has_extra_info = boolean(v, "hasExtraInfo"),
@@ -468,6 +479,9 @@ pub const Candidate = struct {
     /// W9d② 적대 리뷰 3 회차 P5: CEF 가 그 요청을 실패·취소로 끝냈다(`ended_at` 과 함께 본다) — 성공한 CDP 요청의 짝이 아니고, 렌더러가 먼저
     /// abort 해 CDP 실패보다 늦게 시작한 기록이 abort 한 요청의 것임을 알게 해 준다.
     cef_failed: bool = false,
+    /// W9d② 적대 리뷰 4 회차 N1: CEF 끝이 알린 받은 바이트(`net_end.received` — 0 = 없었거나 아직 끝을 보지 못했다). CDP 가 빈 본문을 줘도 이것이
+    /// 0 보다 크면 서버는 바이트를 보냈다(`<link rel=prefetch>` — CDP 는 `dataReceived` 없이 빈 글을 줬다): `no_body`(「0 바이트」)가 아니라 `unavailable`.
+    cef_received: u64 = 0,
     /// 같은 번호로 다시 시작한 시도면 앞 시도의 IO 시각(0 = 첫 시도) — 앞 시도 때 시작한 CDP 요청과 짓지 않는다(`tryDecide`).
     prev_t_io_us: i64 = 0,
 };
@@ -483,6 +497,11 @@ const Cdp = struct {
     sw: bool = false,
     /// 응답을 봤다(`sw` 를 안다) — 아직이면 어느 갈래의 맞추기에도 넣는다(W9d② 적대 리뷰 2 회차).
     responded: bool = false,
+    /// W9d② 적대 리뷰 4 회차 SW1: 서비스 워커가 준 응답인데 네트워크에서 받은 것이 아니다(`serviceWorkerResponseSource` 가 `network` 가 아니거나
+    /// 없다 — Cache Storage·HTTP 캐시·워커가 만든 `new Response`). 서비스 워커 갈래의 CEF 기록은 그 워커 제 fetch 다 — 캐시로 답하며 같은 주소를
+    /// 네트워크로 다시 받는 stale-while-revalidate 에서는 그 기록과 페이지가 받은 본문(캐시의 옛것)이 다르다(실제 CEF 38/40 틀림). 그래서 이
+    /// 요청은 CEF 가 보지 못한 것으로 친다(메모리 캐시처럼 — 맞추기에 넣지 않고 끝나면 놓는다). 그 워커 기록은 `unmatched` 로 끝난다.
+    sw_off_network: bool = false,
     state: CdpState = .open,
     prefetch: bool = false,
     mime: [msg.max_net_mime_bytes]u8 = undefined,
@@ -598,7 +617,7 @@ pub const Tab = struct {
     drop_next: usize = 0,
     /// 표지가 넘쳤다 — 이 시각까지의 창은 모두 모호하다.
     drop_overflow_until: i64 = 0,
-    bodies: Bucket = .{ .tokens = tab_bodies_per_s },
+    bodies: Bucket = .{ .tokens = tab_bodies_burst },
     bytes: Bucket = .{ .tokens = tab_bytes_per_s },
     /// 쏟아짐 밸브 — 지금 초의 이벤트 수와 넘은 초가 이어진 수.
     flood_second: i64 = 0,
@@ -829,10 +848,16 @@ pub const Table = struct {
 
     /// CEF 끝 — `ok` 는 CEF 가 성공으로 끝냈는가(취소·실패면 거짓 — W9d② 적대 리뷰 3 회차 P5: 성공한 CDP 요청의 짝이 아니다).
     pub fn cefEndAs(self: *Table, browser: BrowserId, request: u64, now_us: i64, ok: bool) void {
+        self.cefEndReceived(browser, request, now_us, ok, 0);
+    }
+
+    /// CEF 끝과 받은 바이트(`received` — W9d② 적대 리뷰 4 회차 N1: CDP 의 빈 본문이 정말 0 바이트였는가를 가른다, `emptyBodyState`).
+    pub fn cefEndReceived(self: *Table, browser: BrowserId, request: u64, now_us: i64, ok: bool, received: u64) void {
         const t = self.tabOf(browser) orelse return;
         for (t.cands.items) |*c| if (c.request == request and c.ended_at == 0) {
             c.ended_at = @max(now_us, 1);
             c.cef_failed = !ok;
+            c.cef_received = received;
             if (c.cover_pending) {
                 c.cover_pending = false;
                 c.covered = false;
@@ -958,6 +983,7 @@ pub const Table = struct {
                 const r = &t.cdp.items[i];
                 r.sw = v.from_sw;
                 r.responded = true;
+                r.sw_off_network = v.from_sw and !std.mem.eql(u8, v.sw_source, "network");
                 // 제 기록의 IO 시각은 응답보다 앞이다 — CDP 의 응답 시각(같은 시계 — J1)이 맞아 보이면(UI 가 받은 때 앞 2 초 안) 그것, 아니면 UI 가
                 // 받은 때(늦은 쪽 — 기다림이 조금 길 뿐 틀리지 않는다).
                 const at = if (v.ts_us > 0 and v.ts_us <= now_us and now_us - v.ts_us <= window_after_us) v.ts_us else now_us;
@@ -980,8 +1006,9 @@ pub const Table = struct {
             .finished => |v| {
                 const i = cdpIndex(t, v.rid) orelse return;
                 const r = &t.cdp.items[i];
-                if (r.state == .cached or r.prefetch or !r.has_key) {
-                    _ = t.cdp.orderedRemove(i); // CEF 가 보지 못한 요청(메모리 캐시·추측 미리 받기 — J1·J3)
+                if (r.state == .cached or r.prefetch or !r.has_key or r.sw_off_network) {
+                    // CEF 가 보지 못한 요청(메모리 캐시·추측 미리 받기 — J1·J3; 서비스 워커가 네트워크 밖에서 준 응답 — 4 회차 SW1)
+                    _ = t.cdp.orderedRemove(i);
                     return;
                 }
                 r.state = .finished;
@@ -991,7 +1018,7 @@ pub const Table = struct {
             .failed => |v| {
                 const i = cdpIndex(t, v.rid) orelse return;
                 const r = &t.cdp.items[i];
-                if (r.state == .cached or r.prefetch or !r.has_key) {
+                if (r.state == .cached or r.prefetch or !r.has_key or r.sw_off_network) {
                     _ = t.cdp.orderedRemove(i);
                     return;
                 }
@@ -1070,7 +1097,8 @@ pub const Table = struct {
         const sc = &self.scratch;
         sc.reqs.clearRetainingCapacity();
         for (t.cdp.items, 0..) |o, j| {
-            if (o.state == .cached or o.prefetch or !o.has_key) continue;
+            // 서비스 워커가 네트워크 밖에서 준 응답(4 회차 SW1)은 어느 기록도 가져가지 않는다 — 그 워커의 기록은 이 요청의 차례에 남아 갈림을 보인다.
+            if (o.state == .cached or o.prefetch or !o.has_key or o.sw_off_network) continue;
             if (o.key_url != key.url or o.key_method != key.method) continue;
             if (o.sw != key.sw and o.responded) continue;
             try sc.reqs.append(gpa, j);
@@ -1205,7 +1233,7 @@ pub const Table = struct {
         if (r.state == .failed) return end(self, gpa, t, ci, cand.request, if (r.data_bytes > 0) .partial else .request_failed, flags, r.data_bytes);
         if (!cand.covered) return end(self, gpa, t, ci, cand.request, .not_covered, flags, r.data_bytes);
         const class = mimeClass(r.mimeSlice());
-        if (class == .binary) return end(self, gpa, t, ci, cand.request, if (r.data_bytes == 0) .no_body else .not_text, flags, r.data_bytes);
+        if (class == .binary) return end(self, gpa, t, ci, cand.request, if (r.data_bytes != 0) .not_text else if (cand.cef_received != 0) .unavailable else .no_body, flags, r.data_bytes);
         if (r.data_bytes > msg.max_net_body_bytes) return end(self, gpa, t, ci, cand.request, .over_cap, flags, r.data_bytes);
         flags = .{ .credentialed = cred };
         // 받으러 간다 — 자리가 없으면 잠시 기다린다(넘치면 busy).
@@ -1241,7 +1269,7 @@ pub const Table = struct {
                 continue;
             }
             if (t.inflight >= max_inflight_per_tab or self.inflight.items.len >= max_inflight) return;
-            t.bodies.refill(tab_bodies_per_s, tab_bodies_per_s, now_us);
+            t.bodies.refill(tab_bodies_per_s, tab_bodies_burst, now_us);
             t.bytes.refill(tab_bytes_per_s, tab_bytes_per_s, now_us);
             self.global_bytes.refill(global_bytes_per_s, global_bytes_per_s, now_us);
             const need: f64 = @floatFromInt(@max(w.bytes, 1));
@@ -1273,6 +1301,16 @@ pub const Table = struct {
             return f;
         };
         return null;
+    }
+
+    /// W9d② 적대 리뷰 4 회차 N1: 받은 결과를 푼 상태 — CDP 가 빈 본문(`no_body`)을 줬는데 CEF 끝이 받은 바이트를 알렸으면 `unavailable`(서버는
+    /// 바이트를 보냈다 — `<link rel=prefetch>` 는 CDP 에 `dataReceived` 도 본문도 없었다). CEF 끝이 결과보다 늦으면(10 ms 묶음) 아직 모른다 —
+    /// 그때는 `no_body` 그대로다(알고 둔 틈). 부른 쪽은 `bodyDone`(후보를 지운다) 전에 부른다.
+    pub fn emptyBodyState(self: *Table, f: Inflight, state: State) State {
+        if (state != .no_body) return state;
+        const t = self.tabOf(f.browser) orelse return state;
+        for (t.cands.items) |c| if (c.request == f.request) return if (c.cef_received != 0) .unavailable else state;
+        return state;
     }
 
     /// 받은 본문을 보냈거나 끝냈다 — 후보를 지우고 다음 기다림을 보낸다.
@@ -1690,7 +1728,7 @@ test "W9d②: 같은 주소의 동시 요청은 시작 차례대로 — 먼저 �
     _ = try h.cand(5, 400, "https://a.test/swdata", 3_000_000, .{ .sw = false });
     _ = try h.cand(5, 401, "https://a.test/swdata", 3_000_050, .{ .sw = true });
     try h.sent(5, "w.1", "https://a.test/swdata", 2_999_900, 3_000_000);
-    try h.ev(5, .{ .response = .{ .rid = "w.1", .mime = "application/json", .from_sw = true, .charset = true } }, 3_000_100);
+    try h.ev(5, .{ .response = .{ .rid = "w.1", .mime = "application/json", .from_sw = true, .charset = true, .sw_source = "network" } }, 3_000_100);
     try h.ev(5, .{ .data = .{ .rid = "w.1", .bytes = 9 } }, 3_000_100);
     try h.finish(5, "w.1", 3_000_200);
     const last = h.fetches.items[h.fetches.items.len - 1].fetch.id;
@@ -1836,14 +1874,14 @@ test "W9d②: 동시·초당 상한 — 탭마다 2·전체 8, 자리가 나면 
     try testing.expect(h.table.takeInflight(old) == null);
 }
 
-test "W9d②: 초당 본문 수 — 20 개를 넘으면 기다린다(시간이 지나면 보낸다)" {
+test "W9d②: 초당 본문 수 — 버스트 60 개(W9d② 적대 리뷰 4 회차 — 전에는 20)를 넘으면 기다린다(시간이 지나면 초당 20 개씩 보낸다)" {
     var h: H = .{};
     defer h.deinit();
     for (1..6) |b| _ = try h.table.start(gpa_t, b, 1);
-    // 다섯 탭이 하나씩 — 전체 8 자리 안. 한 탭에서 결과를 곧 돌려주며 30 개를 같은 순간에.
+    // 다섯 탭이 하나씩 — 전체 8 자리 안. 한 탭에서 결과를 곧 돌려주며 80 개를 같은 순간에(넘친 20 은 기다림 32 안).
     var t: i64 = 5_000_000;
     var got: usize = 0;
-    for (0..30) |i| {
+    for (0..80) |i| {
         var ub: [32]u8 = undefined;
         const url = try std.fmt.bufPrint(&ub, "https://a.test/r{d}", .{i});
         var rb: [8]u8 = undefined;
@@ -1858,8 +1896,8 @@ test "W9d②: 초당 본문 수 — 20 개를 넘으면 기다린다(시간이 �
             try h.drain();
         }
     }
-    try testing.expectEqual(@as(usize, 20), h.fetches.items.len); // 버스트 20
-    t += 500_000; // 0.5 초 — 10 개 더
+    try testing.expectEqual(@as(usize, 60), h.fetches.items.len); // 버스트 60
+    t += 500_000; // 0.5 초 — 10 개 더(꾸준한 수는 초당 20 그대로)
     try h.table.tick(gpa_t, t);
     try h.drain();
     while (got < h.fetches.items.len) : (got += 1) {
@@ -1867,7 +1905,25 @@ test "W9d②: 초당 본문 수 — 20 개를 넘으면 기다린다(시간이 �
         try h.table.bodyDone(gpa_t, f, t);
         try h.drain();
     }
-    try testing.expectEqual(@as(usize, 30), h.fetches.items.len);
+    try testing.expectEqual(@as(usize, 70), h.fetches.items.len);
+    // 쉬고 나면 버스트가 60 까지 다시 찬다(초당 수로 깎이지 않는다). 남은 기다림 10 은 시한(3 초)이 지나 busy 로 끝나고, 새로 70 개를 같은 순간에.
+    t += 10_000_000;
+    for (0..70) |i| {
+        var ub: [32]u8 = undefined;
+        const url = try std.fmt.bufPrint(&ub, "https://a.test/s{d}", .{i});
+        var rb: [8]u8 = undefined;
+        const rid = try std.fmt.bufPrint(&rb, "s.{d}", .{i});
+        _ = try h.cand(1, 6000 + i, url, t, .{});
+        try h.sent(1, rid, url, t - 10, t);
+        try h.respond(1, rid, "text/plain", 10, t);
+        try h.finish(1, rid, t);
+        while (got < h.fetches.items.len) : (got += 1) {
+            const f = h.table.takeInflight(h.fetches.items[got].fetch.id).?;
+            try h.table.bodyDone(gpa_t, f, t);
+            try h.drain();
+        }
+    }
+    try testing.expectEqual(@as(usize, 70 + 60), h.fetches.items.len);
 }
 
 test "W9d②: 끄기·렌더러 죽음·닫힘 — 기다림·보낸 호출·짝 없는 후보 모두 끝을 하나씩(recording_stopped·detached), 꺼진 탭은 후보를 적지 않는다" {
@@ -2563,7 +2619,7 @@ test "W9d② 적대 리뷰 2 회차: 같은 주소 다시 보냄(다시 시작 �
 test "W9d② 적대 리뷰 2 회차: 맞추기의 차례와 갈래 — 뒤 요청의 기록이 아직이어도 앞 요청은 제 것, ExtraInfo 가 먼저 온 요청도 시작 시각 차례, 서비스 워커 갈래는 응답 전의 요청도 세고 다른 갈래로 응답한 요청은 세지 않는다" {
     const sw_resp = struct {
         fn f(h: *H, rid: []const u8, now: i64) !void {
-            try h.ev(5, .{ .response = .{ .rid = rid, .mime = "application/json", .from_sw = true, .charset = true } }, now);
+            try h.ev(5, .{ .response = .{ .rid = rid, .mime = "application/json", .from_sw = true, .charset = true, .sw_source = "network" } }, now);
             try h.ev(5, .{ .data = .{ .rid = rid, .bytes = 9 } }, now);
         }
     }.f;
@@ -2971,4 +3027,181 @@ test "W9d② 적대 리뷰 3 회차 P1: 물 높이는 닿은 CEF 시작으로도
         try testing.expect(!stateIs(&h, 861, .ambiguous));
         try testing.expect(h.ended.get(862) == null);
     }
+}
+
+// ── W9d② 적대 리뷰 4 회차 ──────────────────────────────────────────────────────────────────────────────────
+
+/// 서비스 워커가 준 응답(fromServiceWorker)과 그 출처(`serviceWorkerResponseSource`).
+fn swResponse(h: *H, rid: []const u8, source: []const u8, now: i64) !void {
+    try h.ev(5, .{ .response = .{ .rid = rid, .mime = "application/json", .from_sw = true, .charset = true, .sw_source = source } }, now);
+    try h.ev(5, .{ .data = .{ .rid = rid, .bytes = 11 } }, now);
+}
+
+// SW1: 실제 CEF 154 의 차례(판정 rv4-sw-swr 진단 줄 — µs): CDP 시작 518 911 · 서비스 워커의 네트워크 fetch 의 CEF 시작 519 318 · 페이지의 응답
+// (fromServiceWorker — Cache Storage 의 옛 본문) 519 790 · CDP 끝 519 914 · 그 CEF 기록의 끝 531 249. 전에는 페이지 요청이 서비스 워커 갈래의 그
+// 기록과 짝지어져 캐시의 옛 본문이 네트워크 응답의 기록에 붙었다(38/40). 지금 Event 칸으로는 이 차례가 서비스 워커의 그대로 넘김(pass-through —
+// 판정 body-service-worker 는 잡아야 한다)과 같다 — 가르는 것은 응답의 출처다.
+test "W9d② 적대 리뷰 4 회차 SW1: 서비스 워커가 Cache Storage 로 답하고 같은 주소를 네트워크로 다시 받으면(stale-while-revalidate) 그 네트워크 기록에 캐시의 본문을 붙이지 않는다 — 기록은 unmatched" {
+    const u = "https://app.test/sw/d";
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    try h.sent(5, "p.1", u, 518_911, 518_950);
+    _ = try h.cand(5, 9001, u, 519_318, .{ .sw = true });
+    try swResponse(&h, "p.1", "cache-storage", 519_790);
+    try h.finish(5, "p.1", 519_914);
+    try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
+    try testing.expectEqual(@as(usize, 0), h.table.tabOf(5).?.cdp.items.len); // CEF 가 보지 못한 응답으로 놓았다
+    h.table.cefEnd(5, 9001, 531_249);
+    try h.table.tick(gpa_t, 531_249 + unclaimed_expiry_us);
+    try h.drain();
+    try testing.expect(stateIs(&h, 9001, .unmatched));
+    try testing.expectEqual(@as(u32, 1), endCount(&h, 9001));
+}
+
+// SW1b·출처 없음: 워커가 네트워크로 받은 뒤 `new Response(...)` 로 바꿔 답했다(출처 `fallback-code`), HTTP 캐시의 것, 출처를 알리지 않은 응답 —
+// 모두 네트워크 응답이 아니다(닫힌 쪽). 대조: 출처가 `network` 면(그대로 넘김) 그 워커 기록의 본문을 받는다.
+test "W9d② 적대 리뷰 4 회차 SW1b: 서비스 워커가 만든 응답·HTTP 캐시의 것·출처를 모르는 것도 워커 기록에 붙이지 않는다, 네트워크에서 받은 응답(그대로 넘김)만 붙인다" {
+    const u = "https://app.test/sw/syn";
+    for ([_][]const u8{ "fallback-code", "http-cache", "", "network" }, 0..) |source, n| {
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        const base: i64 = 1_000_000;
+        try h.sent(5, "s.1", u, base, base + 50);
+        _ = try h.cand(5, 9100 + n, u, base + 400, .{ .sw = true });
+        try swResponse(&h, "s.1", source, base + 9_000);
+        try h.finish(5, "s.1", base + 9_100);
+        var buf: [4]u64 = undefined;
+        if (std.mem.eql(u8, source, "network")) {
+            try testing.expectEqualSlices(u64, &.{9100 + n}, h.fetchedRequests(&buf));
+        } else {
+            try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
+            h.table.cefEnd(5, 9100 + n, base + 20_000);
+            try h.table.tick(gpa_t, base + 20_000 + unclaimed_expiry_us);
+            try h.drain();
+            try testing.expect(stateIs(&h, 9100 + n, .unmatched));
+        }
+    }
+}
+
+// 같은 주소를 서비스 워커가 그대로 넘긴 요청(P — 출처 network)과 캐시로 답하며 다시 받은 요청(A — 출처 cache-storage)이 한꺼번에: A 의 다시 받기
+// 기록(a)이 P 의 기록(p)보다 앞이다. A 는 기록을 가져가지 않으므로 P 의 왼쪽 맞추기는 a 를, 오른쪽은 p 를 준다 — 갈렸으니 둘 다 `ambiguous`(틀린
+// 본문보다 없음). P 가 a 의 본문을 받는 일은 없다.
+test "W9d② 적대 리뷰 4 회차 SW1: 그대로 넘긴 요청과 캐시로 답한 요청이 같은 주소로 섞이면 그대로 넘긴 요청도 캐시 쪽 워커 기록을 갖지 않는다(ambiguous)" {
+    const u = "https://app.test/sw/mix";
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    try h.sent(5, "a.1", u, 1_000_000, 1_000_050);
+    _ = try h.cand(5, 9201, u, 1_000_200, .{ .sw = true }); // A 의 다시 받기
+    try h.sent(5, "p.1", u, 1_000_500, 1_000_550);
+    _ = try h.cand(5, 9202, u, 1_000_700, .{ .sw = true }); // P 의 그대로 넘김
+    try swResponse(&h, "a.1", "cache-storage", 1_001_000);
+    try h.finish(5, "a.1", 1_001_100);
+    try swResponse(&h, "p.1", "network", 1_010_000);
+    try h.finish(5, "p.1", 1_011_000);
+    try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
+    try testing.expect(stateIs(&h, 9201, .ambiguous) and stateIs(&h, 9202, .ambiguous));
+}
+
+// 캐시로 답한 요청(A — 기록이 없는 캐시 적중)이 아직 열린 동안 같은 주소를 그대로 넘긴 요청(P)이 끝난다: A 는 어느 기록도 가져가지 않으므로 P 는
+// 곧 제 기록(p)을 받는다(A 를 맞추기에 넣으면 — A 의 응답이 p 의 시작 뒤라 p 는 A 의 짝일 수 있다 — A 가 p 를 가져가 P 는 기다리다 본문을 잃었다).
+// 캐시로 답한 요청이 실패로 끝나도(읽는 중 끊김) 아무 기록에도 닿지 않고 놓인다.
+test "W9d② 적대 리뷰 4 회차 SW1: 캐시로 답해 아직 열린 요청은 같은 주소의 그대로 넘긴 요청의 기록을 가져가지 않는다, 실패로 끝나도 놓인다" {
+    const u = "https://app.test/sw/open";
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    try h.sent(5, "a.1", u, 1_000_000, 1_000_050);
+    try h.sent(5, "p.1", u, 1_000_500, 1_000_550);
+    _ = try h.cand(5, 9251, u, 1_000_700, .{ .sw = true });
+    try swResponse(&h, "a.1", "cache-storage", 1_005_000); // 응답은 왔고 끝은 아직
+    try swResponse(&h, "p.1", "network", 1_010_000);
+    try h.finish(5, "p.1", 1_011_000);
+    try testing.expectEqual(@as(?u64, 9251), fetchedFor(&h, "p.1"));
+    try h.ev(5, .{ .failed = .{ .rid = "a.1" } }, 1_012_000);
+    try testing.expectEqual(@as(usize, 0), h.table.tabOf(5).?.cdp.items.len);
+    try h.table.tick(gpa_t, 1_012_000 + cef_grace_us);
+    try h.drain();
+    try testing.expectEqual(@as(u32, 0), endCount(&h, 9251)); // 보낸 호출은 그대로 — 실패한 A 가 끝내지 않았다
+}
+
+test "W9d② 적대 리뷰 4 회차 SW1: responseReceived 의 serviceWorkerResponseSource 를 읽는다(없으면 빈 글)" {
+    const P = struct {
+        var arena_state: std.heap.ArenaAllocator = undefined;
+        fn ev(json: []const u8) !Event {
+            const v = try std.json.parseFromSliceLeaky(std.json.Value, arena_state.allocator(), json, .{});
+            return parseEvent("Network.responseReceived", v).?;
+        }
+    };
+    P.arena_state = .init(gpa_t);
+    defer P.arena_state.deinit();
+    try testing.expectEqualStrings("cache-storage", (try P.ev("{\"requestId\":\"1\",\"response\":{\"mimeType\":\"a/b\",\"fromServiceWorker\":true,\"serviceWorkerResponseSource\":\"cache-storage\",\"headers\":{}}}")).response.sw_source);
+    try testing.expectEqualStrings("", (try P.ev("{\"requestId\":\"1\",\"response\":{\"mimeType\":\"a/b\",\"fromServiceWorker\":true,\"headers\":{}}}")).response.sw_source);
+}
+
+// 넘김 상자가 넘쳐 시작이 표에 닿지 않은 요청(A — 그 표지는 `net_gate.State.queueRefused` 가 남긴다)과 같은 주소의 동시 요청(B): 표지가 없으면 A 의
+// 맞추기가 B 의 기록(b)을 준다 — B 의 응답 본문이 아니라 A 의 본문이 b 에 붙는다. 표지가 있으면 그 창은 모호하다.
+test "W9d② 적대 리뷰 4 회차: 상자가 넘쳐 놓친 시작 — 표지가 있으면 같은 주소의 다른 요청 기록을 갖지 않는다(ambiguous), 표지가 없을 때는 가져갔다(대조)" {
+    const u = "https://app.test/api/q";
+    for ([_]bool{ false, true }) |marked| {
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        try h.sent(5, "A", u, 1_000_000, 1_000_050);
+        if (marked) h.table.noteDrop(5, hashUrl8(u), 1_000_100); // A 의 시작(상자에 넣지 못했다)
+        try h.sent(5, "B", u, 1_001_000, 1_001_050);
+        _ = try h.cand(5, 9301, u, 1_001_200, .{}); // B 의 기록
+        try h.respond(5, "A", "application/json", 9, 1_005_000);
+        try h.finish(5, "A", 1_006_000);
+        if (marked) {
+            try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
+            try testing.expect(stateIs(&h, 9301, .ambiguous));
+        } else {
+            try testing.expectEqual(@as(?u64, 9301), fetchedFor(&h, "A"));
+        }
+    }
+}
+
+// N1: `<link rel=prefetch>` — CDP 는 `dataReceived` 없이 빈 본문을 줬는데 서버는 13 바이트를 보냈다(CEF 끝의 받은 바이트). 「0 바이트」(`no_body`)가
+// 아니라 `unavailable`. 204·HEAD(CEF 도 0)는 그대로 `no_body`. 글 아닌 종류도 같다. CEF 끝이 결과보다 늦으면 아직 모른다(no_body 그대로 — 알고 둔 틈).
+test "W9d② 적대 리뷰 4 회차 N1: CDP 가 빈 본문을 줬는데 CEF 는 바이트를 받았으면 unavailable — 정말 0 바이트면 no_body" {
+    const u = "https://app.test/pf";
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    // 글: 받으러 간 뒤 빈 결과.
+    try h.sent(5, "f.1", u, 1_000_000, 1_000_050);
+    _ = try h.cand(5, 9401, u, 1_000_200, .{});
+    h.table.cefEndReceived(5, 9401, 1_004_000, true, 13);
+    try h.respond(5, "f.1", "application/json", 0, 1_003_000);
+    try h.finish(5, "f.1", 1_005_000);
+    const f1 = h.table.takeInflight(h.fetches.items[0].fetch.id).?;
+    try testing.expectEqual(State.unavailable, h.table.emptyBodyState(f1, .no_body));
+    try testing.expectEqual(State.captured, h.table.emptyBodyState(f1, .captured));
+    try testing.expectEqual(State.over_cap, h.table.emptyBodyState(f1, .over_cap)); // 빈 본문만 바꾼다
+    try testing.expectEqual(State.busy, h.table.emptyBodyState(f1, .busy));
+    try h.table.bodyDone(gpa_t, f1, 1_006_000);
+    // 정말 0 바이트(204) — 그대로.
+    try h.sent(5, "f.2", u, 2_000_000, 2_000_050);
+    _ = try h.cand(5, 9402, u, 2_000_200, .{});
+    h.table.cefEndReceived(5, 9402, 2_004_000, true, 0);
+    try h.respond(5, "f.2", "application/json", 0, 2_003_000);
+    try h.finish(5, "f.2", 2_005_000);
+    const f2 = h.table.takeInflight(h.fetches.items[1].fetch.id).?;
+    try testing.expectEqual(State.no_body, h.table.emptyBodyState(f2, .no_body));
+    try h.table.bodyDone(gpa_t, f2, 2_006_000);
+    // 글 아닌 종류 — 받으러 가지 않고 곧 정한다.
+    try h.sent(5, "f.3", "https://app.test/i.png", 3_000_000, 3_000_050);
+    _ = try h.cand(5, 9403, "https://app.test/i.png", 3_000_200, .{});
+    h.table.cefEndReceived(5, 9403, 3_004_000, true, 70);
+    try h.respond(5, "f.3", "image/png", 0, 3_003_000);
+    try h.finish(5, "f.3", 3_005_000);
+    try testing.expect(stateIs(&h, 9403, .unavailable));
+    try h.sent(5, "f.4", "https://app.test/j.png", 4_000_000, 4_000_050);
+    _ = try h.cand(5, 9404, "https://app.test/j.png", 4_000_200, .{});
+    try h.respond(5, "f.4", "image/png", 0, 4_003_000);
+    try h.finish(5, "f.4", 4_005_000);
+    try testing.expect(stateIs(&h, 9404, .no_body));
 }

@@ -9,7 +9,7 @@
   도구 버튼 활성화 → hover 경계 → 클릭 선택을 참고한다. 참조 코드는 복사하지 않는다.
 - `chrome.ui.inspection`은 paint/input이 소비하는 **발행된** `UiRectTree`를 읽는다.
   유효 clip과 좌표 변환을 적용하고 뒤에서부터 가장 위 요소를 고른다. disabled 요소도 읽을 수 있다.
-- 대상은 파일 보기 mode 선택기, pane 탭·닫기·추가·좌우 스크롤 버튼, 사이드바 workspace 카드·그룹·닫기 버튼, 상태바, 사이드바 scroll, pane divider, 표시 중인 파일·SCM·세션 도크의 발행 tree다.
+- 대상은 파일 헤더의 보기 mode·breadcrumb·상태·충돌 도구, pane 탭·닫기·추가·좌우 스크롤 버튼, 사이드바 workspace 카드·그룹·닫기 버튼, 상태바, 사이드바 scroll, pane divider, 표시 중인 파일·SCM·세션 도크의 발행 tree다.
   미발행 chrome 영역, terminal cell, 웹 DOM은 미지원이며 `elements.coverage`에 명시한다.
   전체 앱의 완성된 component tree를 제공한다고 표현하지 않는다.
 - 각 node는 source + ID, parent ID, generation, kind/semantic role, 원래·보이는 rect,
@@ -85,7 +85,7 @@
   사이드바 카드 publication을 폐기하고 Inspector에서 제외한다. 기존 drag 경로를 유지한다.
 - 사용자 이름·경로 label을 복사하지 않는다. agent/recovered 행은 공유 geometry의 일부지만
   이번 Inspector 카드·그룹 범위에서는 제외한다. 네이티브 accessibility 이관 완료를 뜻하지 않는다.
-- pane 탭 바 확장은 아래 절을 따른다. 도크 뷰 바 확장은 아래 절을 따른다. 파일별 헤더는 후속 범위다.
+- pane 탭 바 확장은 아래 절을 따른다. 도크 뷰 바 확장은 아래 절을 따른다. 파일별 헤더는 아래 두 절을 따른다.
 - 이번 PR의 적대적 검증은 사용자 요청에 따라 최초 **5회 + 추가 5회, 누적 10회**다
   (기본 20회에 대한 이번 작업의 예외).
   실제 앱·CLI·Metal PNG와 정상 입력 대조군, 컴파일 결함 5종의 결과는
@@ -117,7 +117,7 @@
 
 - `chrome.components.dock_view_bar.published.Frame`이 도크 상단의 뷰 전환 6개와
   현재 뷰의 동작 버튼(탐색기 새로고침·전체 접기)을 `dock_header` source로 제공한다.
-  파일별 mode 선택기는 아래 절을 따른다. breadcrumb와 sidebar 상단 도구는 후속 범위다.
+  파일별 mode 선택기는 아래 절을 따른다. breadcrumb·상태·충돌 도구는 아래 절을 따르며 sidebar 상단 도구는 후속 범위다.
 - 기존 `slotRect`/`actionRect`가 셀 정렬 geometry를 준비한다. host paint의 활성/hover 밴드와
   일반 포인터 입력은 유효한 publication rect를 소비하고 CoreText glyph lowering은 기존 셀 경로를 유지한다.
   첫 paint 전이나 레이아웃 변경 직후에는 기존 계산으로 입력을 처리하며 Inspector에는 낡은 tree를 내보내지 않는다.
@@ -136,7 +136,7 @@
 
 - `chrome.components.file_header.Frame`은 Markdown의 읽기·라이브·소스와 SVG의 읽기·소스
   버튼을 `file_header` source로 발행한다. 모드가 없는 kind는 발행하지 않는다.
-  root의 rect도 실제 모드 strip으로 제한하며 breadcrumb·dirty 표시·충돌/이동 버튼은 미지원이다.
+  root의 rect도 실제 모드 strip으로 제한한다. breadcrumb·상태·충돌 도구는 별도 `file_header_details` source로 발행한다.
 - kind별 선택지·상태 칸 예약·셀 분할 정책은 기존 L2 `dock_layout`이 소유한다.
   macOS `app_session/inspector_file_header.zig`가 실제 활성 파일 Term의 band와 mode rect를
   중립 rect 모델로 옮긴다. L3는 파일/세션 타입을 import하지 않는다.
@@ -156,3 +156,22 @@
   Metal 캡처는 chrome 증거이며 WKWebView 본문/DOM 검증을 뜻하지 않는다.
 
 파일 mode의 child ID는 pane별 root ID + 1 + 기존 Mode 값(읽기 0·소스 1·라이브 2)이다. 문자열 label을 수집하지 않고도 CLI에서 구별할 수 있으며 generation이 다른 선택은 재사용하지 않는다.
+
+## 파일 헤더 breadcrumb·상태·충돌 도구 발행
+
+- `components/file_header/details.zig`는 실제 그린 breadcrumb 한 묶음·수정 점·재읽기·이전/다음 충돌 glyph의 중립 rect를 발행한다.
+  `app_session/inspector_file_header_details.zig`는 `fileHeaderBandDrawList`가 만든 같은 DrawCell을 읽으므로 생략된 경로·숨긴 status를 재구성하지 않는다.
+- source는 `file_header_details`, pane별 root는 `0x4644000000000000 + index * 0x100000000`이다.
+  child는 root + 1 + Part(0 breadcrumb·1 modified·2 reload·3 previous·4 next)다.
+  breadcrumb·modified는 action 없는 text, 나머지는 action 있는 button이다. root는 계층만 제공하는 0 크기 group이며 빈 여백에 Pick 영역을 만들지 않는다.
+- breadcrumb는 실제 표시 글자의 첫/끝 셀 범위 한 묶음이다. 심볼 피커 마디별 자식 tree와 native accessibility 전체 이관은 이 범위에 포함하지 않는다.
+  기존 심볼 마디 클릭은 기존 painted span 경로를 유지한다. 이름·경로·심볼 문자열·문서 본문·native pointer는 발행 tree에 저장하지 않는다.
+- 일반 재읽기·충돌 이동 클릭과 hand cursor는 유효한 발행 rect를 읽는다. 첫 paint 전·layout/state 변경 직후에는 기존 L2 셀 기하를 사용하고 Inspector에는 낡은 tree를 주지 않는다.
+  모드 버튼은 기존 `file_header` source를 유지한다. 기존 저장·reload 확인·충돌 이동 정책을 바꾸지 않는다.
+- 소유 Term/entry·kind·mode·status·충돌 구간 유무·문서 revision·caret·breadcrumb 마디 신원·geometry·pane lifetime이 바뀌면 이전 선택을 폐기한다.
+  실제 draw-list 수집 후 frame 전체를 원자적으로 발행한다. 부분 할당 실패·draw-list 실패·tab reorder preview는 전체 발행을 닫고 다음 정상 frame에서 복구한다.
+- 네이티브 편집기의 수정 `*`는 현재 탭이 소유한다. 헤더에 그리지 않은 `modified`/`reload`를 Inspector만 만들어 내지 않는다.
+  조건부 status는 실제 헤더 DrawList를 사용하는 host 통합 테스트로 검증하며 native E2E 20회와 구분한다.
+- GUI Elements와 CLI `elements.nodes/tree/hovered/selected`는 같은 collector·source/ID/generation을 사용한다.
+  읽기 전용 Pick·owner backing pixels·독립 창·Pause·Escape·512-node 예산을 유지한다.
+  실제 앱 검증은 `tools/inspector-picker-app/run.py --file-details --rounds 20`과 독립 `verify_file_header_details.py`를 따른다.

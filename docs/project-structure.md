@@ -677,3 +677,6 @@ actor coordinator가 전체 반영한다. 기존 모델 전용 `worker.zig`는 �
 - `src/chrome/components/inspector/`: 도메인 I/O 없는 픽셀 tree와 표시·입력 사각형.
 - `src/platform/macos/app_session/inspector.zig`: 실제 상태 수집·독립 도크/분리 창 presentation·export 어댑터.
 - `src/cli/sessions.zig`: 기존 session 조회 transport 위의 CLI 인자·wire·응답 표시.
+
+- `src/chrome/components/dock_view_bar/published.zig`: 고정 배열의 도크 뷰 바 발행 tree.
+- `src/platform/macos/app_session/dock.zig`: 실제 뷰·동작 신원 및 paint/input의 도크 뷰 바 연결.

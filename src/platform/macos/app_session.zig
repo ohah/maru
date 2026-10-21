@@ -6781,6 +6781,7 @@ pub const AppSession = struct {
     /// rows[i].card.tab)에 쓴다. 슬롯↔탭 단일 출처(인덱스 어긋남 방지). SG3a는 card row만(그룹 헤더는 SG3b).
     sidebar_rows: std.ArrayList(chrome.components.sidebar.Row) = .empty,
     sidebar_publication: chrome.components.sidebar.published.Frame = .{},
+    dock_header_publication: dock_view_bar.published.Frame = .{},
     pane_tabs_publication: chrome.components.tabbar.published.Frame = .{},
     pane_tab_references: std.ArrayList(inspector_tabs_ops.Reference) = .empty,
     pane_tab_identity_epoch: u64 = 0,
@@ -22219,6 +22220,7 @@ pub const AppSession = struct {
                 // 앰버 사각 ring은 제거했다. full/minimal 모두 아래 공용 FocusOwner body border 하나가 실제 입력 경계를 담당한다.
             }
 
+            dock_ops.publishDockHeader(self);
             // FP3 창-로컬 파일 도크 chrome. 순수 dockGeometry의 tab/header/divider rect를 그대로 쓴다.
             if (dock_ops.dockVisible(self)) {
                 const dg = dock_ops.dockGeometry(self);
@@ -22226,16 +22228,10 @@ pub const AppSession = struct {
                 // 뷰 스위처 한 행(docs/file-explorer.md §3.5). 활성 슬롯만 배경으로 표시해 "지금 보는 뷰"를 남긴다.
                 if (dg.view_bar.w > 0 and dg.view_bar.h > 0) {
                     self.appendBarBgQuad(dg.view_bar, self.chromeQuadBg(sidebar_ops.sidebarBg(self)));
-                    const bar_rect = dock_view_bar.Rect{
-                        .x = dg.view_bar.x,
-                        .y = dg.view_bar.y,
-                        .w = dg.view_bar.w,
-                        .h = dg.view_bar.h,
-                    };
                     // 호버를 **먼저** 깔고 활성을 그 위에 얹는다 — 활성 슬롯을 호버해도 활성 표시가 유지된다.
                     if (self.dock_view_hovered_slot) |hovered| {
                         if (hovered != dock_ops.dockViewSlotIndex(self)) {
-                            if (dock_view_bar.slotRect(bar_rect, self.dockViewBarGrid(), hovered)) |slot| {
+                            if (dock_ops.headerSlotRect(self, hovered)) |slot| {
                                 self.appendBarBgQuad(
                                     .{ .x = slot.x, .y = slot.y, .w = slot.w, .h = slot.h },
                                     self.chromeQuadBg(sidebar_ops.sidebarHoverBg(self)),
@@ -22243,7 +22239,7 @@ pub const AppSession = struct {
                             }
                         }
                     }
-                    if (dock_view_bar.slotRect(bar_rect, self.dockViewBarGrid(), dock_ops.dockViewSlotIndex(self))) |slot| {
+                    if (dock_ops.headerSlotRect(self, dock_ops.dockViewSlotIndex(self))) |slot| {
                         self.appendBarBgQuad(
                             .{ .x = slot.x, .y = slot.y, .w = slot.w, .h = slot.h },
                             self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)),
@@ -22251,12 +22247,7 @@ pub const AppSession = struct {
                     }
                     // 동작 버튼은 **활성이 없다** — 호버 배경만 선다(어느 뷰인지 읽는 신호와 겹치지 않게).
                     if (self.dock_action_hovered_slot) |hovered| {
-                        if (dock_view_bar.actionRect(
-                            bar_rect,
-                            self.dockViewBarGrid(),
-                            dock_ops.dockActions(self).len,
-                            hovered,
-                        )) |slot| {
+                        if (dock_ops.headerActionRect(self, hovered)) |slot| {
                             self.appendBarBgQuad(
                                 .{ .x = slot.x, .y = slot.y, .w = slot.w, .h = slot.h },
                                 self.chromeQuadBg(sidebar_ops.sidebarHoverBg(self)),
@@ -101730,4 +101721,49 @@ test "Live inspector pane tabs share paint input and retire replaced publication
     session.tab_drag_order.clearRetainingCapacity();
     inspector_tabs_ops.publish(session, leaves.items, true);
     try std.testing.expect(inspector_tabs_ops.current(session, a));
+}
+
+test "Live inspector dock header shares paint input and rejects changed meaning" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{ .abi_version = abi_version, .cols = 80, .rows = 24, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
+    defer session.deinit();
+    _ = try session.resize(1600, 900, 1000);
+    dock_ops.openDockTo(session, .explorer);
+    inspector_ops.toggle(session);
+    dock_ops.publishDockHeader(session);
+    try std.testing.expect(dock_ops.headerPublicationCurrent(session));
+    const pubbar = dock_view_bar.published;
+    const r = dock_ops.headerSlotRect(session, 1).?;
+    const x = @as(f64, @floatFromInt(r.x)) + 1;
+    const y = @as(f64, @floatFromInt(r.y)) + 1;
+    try std.testing.expectEqual(@as(?usize, 1), dock_ops.dockViewSlotAt(session, x, y));
+    inspector_ops.picker.toggle(session);
+    session.mouse(1, x, y, 0, 0);
+    session.mouse(3, x, y, 0, 0);
+    try std.testing.expectEqual(dock_panel.View.explorer, session.dock.view);
+    const key = session.inspector.picker_selected orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(chrome.ui.inspection.Source.dock_header, key.source);
+    try std.testing.expectEqual(pubbar.slotId(1), key.id);
+    // Prove input consumes the published rect, not a parallel reconstruction.
+    const index = session.dock_header_publication.snapshot().find(pubbar.slotId(1)).?;
+    session.dock_header_publication.entries[index].rect.x += 1;
+    try std.testing.expect(dock_ops.dockViewSlotAt(session, @floatFromInt(r.x), y) != 1);
+    dock_ops.publishDockHeader(session);
+    dock_ops.enterDockView(session, .source_control);
+    try std.testing.expect(!dock_ops.headerPublicationCurrent(session));
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    try std.testing.expect(chrome.ui.inspection.resolve(try inspector_ops.picker.nodes(session, arena.allocator()), key) == null);
+    dock_ops.publishDockHeader(session);
+    try std.testing.expect(chrome.ui.inspection.resolve(try inspector_ops.picker.nodes(session, arena.allocator()), key) == null);
+    try std.testing.expect(session.dock_header_publication.rect(pubbar.actionId(0)) == null);
+    session.dock.collapsed = true;
+    dock_ops.publishDockHeader(session);
+    try std.testing.expectEqual(@as(usize, 0), session.dock_header_publication.len);
+    session.dock.collapsed = false;
+    dock_ops.publishDockHeader(session);
+    try std.testing.expect(dock_ops.headerPublicationCurrent(session));
 }

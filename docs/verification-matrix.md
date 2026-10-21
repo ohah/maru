@@ -70,6 +70,20 @@
   Live 복귀 누락·Pause 유실·초기 Paused 누락, 잘못된 배타 경계·제품 변경·경계 누락·cursor 오류·회차 누락이다.
 - 실제 NSEvent callback·Metal readback·CLI 증거이며, 물리 HID/다중 모니터 증거는 포함하지 않는다.
 
+### Sidebar CI 회귀 보완 (2026-10-21)
+
+- PR #4536의 `file explorer macOS product path`는 app-host 전체 샤드에서 sidebar 입력 7개와
+  editor capture OOM 1개가 실패했다. 필수 gate가 실패한 상태에서는 머지하지 않는다.
+- native resize 전 viewport 높이가 0이면 빈 발행을 입력 권위로 삼지 않고 기존 canonical 행
+  산술을 유지한다. 실제 viewport가 생긴 뒤에는 발행 clip과 입력을 공유한다.
+  resize 전 row 0 입력과 resize 후 published picker를 같은 테스트에서 대조한다.
+- editor OOM fixture는 실제 live whole-window capture 대조군을 먼저 확인하고, 실제 close 경로로
+  무관한 셸을 닫은 뒤 공유 editor 두 view의 capture 할당 실패를 열거한다. 강제 PTY 관측의
+  cwd/title 길이 변화가 allocation-site 열거를 흔들지 않게 하며 제품 편집 정책은 바꾸지 않는다.
+- `test-inspector-sidebar-regressions`는 위 CI 실패와 picker를 묶은 focused **14개** 판정이다.
+  Debug 14개 통과, `/tmp/maru4536-ci-regressions-final.log`.
+  새 head의 전체 CI·ReleaseFast·실제 앱 재검증 결과는 PR에서 별도로 추적한다.
+
 ### Elements 계층 탐색 (2026-10-21)
 
 - `feat/inspector-element-tree`, base `f00891e8c`: 부모/자식·접기/펼치기·검색·선택 경계와

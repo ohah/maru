@@ -1807,3 +1807,11 @@ python3 tools/test-inspector-picker-adversarial.py
 결과에는 회차별 가설·CLI 표본·native event report·Metal PNG와 바이너리 SHA256이 있다.
 NSEvent/Metal 검증이며 물리 HID·WindowServer 화면·실제 OS IME 증거와 구분한다.
 조회 계약은 [UI 요소 계획](plans/ui-inspector.md)을 따른다.
+
+
+### Inspector 사이드바 초기화 회귀
+
+`mise exec -- zig build test-inspector-sidebar-regressions -j2`는 native resize 전 입력과
+published picker, sidebar 클릭·닫기·reorder·그룹 drop, editor workspace capture OOM의
+**14개** focused 판정을 실행한다. `-Doptimize=ReleaseFast`도 지원한다.
+전체 macOS app-host-abi/CI 검증을 대체하지 않는다.

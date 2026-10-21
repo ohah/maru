@@ -917,7 +917,9 @@ fn sidebarPublicationParams(self: *const AppSession) chrome.components.sidebar.p
     return p;
 }
 pub fn sidebarPublicationCurrent(self: *const AppSession) bool {
-    return self.sidebar_drag_preview == null and self.sidebar_publication.current(self.sidebar_rows.items, sidebarPublicationParams(self), sidebarModelStamp(self));
+    // Before the first native resize there is no drawable viewport. Keep the
+    // prepublication arithmetic path for lifecycle/input fixtures and startup.
+    return sidebarViewport(self).height() > 0 and self.sidebar_drag_preview == null and self.sidebar_publication.current(self.sidebar_rows.items, sidebarPublicationParams(self), sidebarModelStamp(self));
 }
 
 /// Sidebar y -> canonical row; preview/startup keep the existing arithmetic path.

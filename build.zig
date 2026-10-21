@@ -2707,6 +2707,16 @@ pub fn build(b: *std.Build) void {
     const inspector_step = b.step("test-inspector", "Verify live inspector UI, shared snapshot and CLI contracts");
     inspector_step.dependOn(&run_inspector_tests.step);
     if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_inspector_tests.step);
+    // Startup has no native viewport. Keep those legacy input controls alongside
+    // live published inspection and deterministic editor capture OOM coverage.
+    const inspector_sidebar_regressions = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{ "code-review #3: pane grip", "사이드바 드래그:", "sidebar click switches", "hovering the sidebar + slot", "clicking the hovered slot close", "dragging a sidebar tab", "editor recovery restore 캡처 OOM", "Live inspector picker consumes" },
+    });
+    const run_inspector_sidebar_regressions = b.addRunArtifact(inspector_sidebar_regressions);
+    run_inspector_sidebar_regressions.setCwd(b.path("."));
+    run_inspector_sidebar_regressions.addArg("--maru-expect-passed=14");
+    b.step("test-inspector-sidebar-regressions", "Verify startup sidebar input, published picking and capture OOM regressions").dependOn(&run_inspector_sidebar_regressions.step);
     // Module tests need their own root: imported modules do not contribute tests.
     const inspector_rules = addProjectTest(b, .{
         .root_module = maru_mod,

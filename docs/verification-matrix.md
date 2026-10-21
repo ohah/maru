@@ -4499,6 +4499,6 @@ ScreenCaptureKit 패널 이미지·native 접근성 확인·대화상자 종료�
 
 별도 소스 사본에서 제품 백업 tick·복구 ID writer·직렬화의 호출 비용을 분리하는 도구를 구현했다.
 이름 없는/로컬 ID 문서의 64KiB·1MiB·8MiB 최초·반복 기록과 삭제를 검사한다.
-ReleaseFast 정상 19개·다섯 의미 결함 검출·원복 18개, 결과 판정기 5개가 통과했다.
+ReleaseFast 정상 19개·다섯 의미 결함 검출·원복 18개, 결과 판정기 10개가 일반/최적화 Python에서 통과했다.
 실측 30표본과 구간별 비용은 [백업 실측 계획](plans/editor-backup-main-latency.md)을 따른다.
 제품의 백업 I/O·주기·저장/종료 정책과 UI는 바꾸지 않는다. 실제 AppKit 입력/프레임 지연은 별도다.

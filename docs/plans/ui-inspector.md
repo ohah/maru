@@ -9,7 +9,7 @@
   도구 버튼 활성화 → hover 경계 → 클릭 선택을 참고한다. 참조 코드는 복사하지 않는다.
 - `chrome.ui.inspection`은 paint/input이 소비하는 **발행된** `UiRectTree`를 읽는다.
   유효 clip과 좌표 변환을 적용하고 뒤에서부터 가장 위 요소를 고른다. disabled 요소도 읽을 수 있다.
-- 대상은 pane 탭·닫기·추가·좌우 스크롤 버튼, 사이드바 workspace 카드·그룹·닫기 버튼, 상태바, 사이드바 scroll, pane divider, 표시 중인 파일·SCM·세션 도크의 발행 tree다.
+- 대상은 파일 보기 mode 선택기, pane 탭·닫기·추가·좌우 스크롤 버튼, 사이드바 workspace 카드·그룹·닫기 버튼, 상태바, 사이드바 scroll, pane divider, 표시 중인 파일·SCM·세션 도크의 발행 tree다.
   미발행 chrome 영역, terminal cell, 웹 DOM은 미지원이며 `elements.coverage`에 명시한다.
   전체 앱의 완성된 component tree를 제공한다고 표현하지 않는다.
 - 각 node는 source + ID, parent ID, generation, kind/semantic role, 원래·보이는 rect,
@@ -117,7 +117,7 @@
 
 - `chrome.components.dock_view_bar.published.Frame`이 도크 상단의 뷰 전환 6개와
   현재 뷰의 동작 버튼(탐색기 새로고침·전체 접기)을 `dock_header` source로 제공한다.
-  파일별 breadcrumb/mode 헤더, sidebar 상단 도구 및 미발행 chrome은 이번 범위에 포함하지 않는다.
+  파일별 mode 선택기는 아래 절을 따른다. breadcrumb와 sidebar 상단 도구는 후속 범위다.
 - 기존 `slotRect`/`actionRect`가 셀 정렬 geometry를 준비한다. host paint의 활성/hover 밴드와
   일반 포인터 입력은 유효한 publication rect를 소비하고 CoreText glyph lowering은 기존 셀 경로를 유지한다.
   첫 paint 전이나 레이아웃 변경 직후에는 기존 계산으로 입력을 처리하며 Inspector에는 낡은 tree를 내보내지 않는다.
@@ -131,3 +131,28 @@
 - 실제 앱 하네스는 `tools/inspector-picker-app/run.py --dock-header --rounds 20`과
   독립 `verify_dock_header.py`를 사용한다. `MARU_INSPECTOR_WITH_DOCK=header-wide`는
   실제 수동 너비 360pt 도크를 여는 캡처 fixture이며 제품 기본 너비는 기존 설정을 따른다.
+
+## 파일 보기 모드 선택기 발행
+
+- `chrome.components.file_header.Frame`은 Markdown의 읽기·라이브·소스와 SVG의 읽기·소스
+  버튼을 `file_header` source로 발행한다. 모드가 없는 kind는 발행하지 않는다.
+  root의 rect도 실제 모드 strip으로 제한하며 breadcrumb·dirty 표시·충돌/이동 버튼은 미지원이다.
+- kind별 선택지·상태 칸 예약·셀 분할 정책은 기존 L2 `dock_layout`이 소유한다.
+  macOS `app_session/inspector_file_header.zig`가 실제 활성 파일 Term의 band와 mode rect를
+  중립 rect 모델로 옮긴다. L3는 파일/세션 타입을 import하지 않는다.
+- 실제 paint 전에 발행한다. hover 밴드와 일반 클릭·cursor hit-test는 유효한 발행 rect를 소비하며,
+  CoreText의 mode label·bold 및 breadcrumb lowering은 기존 셀 경로를 유지한다.
+  첫 paint 전·layout 변경 직후에는 기존 기하로 입력하고 Inspector에는 낡은 발행을 내보내지 않는다.
+- source + ID + generation으로 선택을 묶는다. 실제 Term surface/entry 신원·kind·mode·dirty·외부 변경·
+  충돌 구간·geometry·pane lifetime이 바뀌면 새 세대를 발행한다. cached Term은 live owner와 비교만 하며
+  오래된 포인터를 역참조하지 않는다. 이름·경로·본문·native pointer를 발행 tree에 저장하지 않는다.
+- 할당 실패·잘못된 mode 개수/중복 ID는 부분 발행을 폐기한다. tab reorder preview 중에는
+  발행을 비우고 기존 canonical/preview 입력 경로를 유지한다. 다음 정상 frame은 다시 발행한다.
+- GUI와 `session inspect --json`의 `elements.nodes/tree/hovered/selected`는 동일한 collector를 쓴다.
+  owner backing-pixel·분리 창·읽기 전용 Pick·512-node 예산을 유지한다.
+- 실제 앱은 기존 `MARU_FILE_PANEL`로 격리 Markdown/SVG 파일을 연다.
+  `tools/inspector-picker-app/run.py --file-header --rounds 20`과 독립 `verify_file_header.py`가
+  mode 전환 차단·정상 클릭 대조군·원본 파일 bytes 보존·다섯 배치·2×·취소·재열기를 확인한다.
+  Metal 캡처는 chrome 증거이며 WKWebView 본문/DOM 검증을 뜻하지 않는다.
+
+파일 mode의 child ID는 pane별 root ID + 1 + 기존 Mode 값(읽기 0·소스 1·라이브 2)이다. 문자열 label을 수집하지 않고도 CLI에서 구별할 수 있으며 generation이 다른 선택은 재사용하지 않는다.

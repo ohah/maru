@@ -680,3 +680,6 @@ actor coordinator가 전체 반영한다. 기존 모델 전용 `worker.zig`는 �
 
 - `src/chrome/components/dock_view_bar/published.zig`: 고정 배열의 도크 뷰 바 발행 tree.
 - `src/platform/macos/app_session/dock.zig`: 실제 뷰·동작 신원 및 paint/input의 도크 뷰 바 연결.
+
+- `src/chrome/components/file_header.zig`: 파일 보기 모드 strip의 중립 발행 tree.
+- `src/platform/macos/app_session/inspector_file_header.zig`: L2 mode 기하·live 파일 Term 신원과 paint/input/Inspector 연결.

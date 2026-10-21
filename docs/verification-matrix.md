@@ -4689,3 +4689,43 @@ Artifact 판정자는 전체 **8개 테스트**, 이번 도크 반례 **21개**�
 전체 실패 목록도 일치한다(`/tmp/maru-header-baseline-comparison.json`, `same_failures=true`,
 `full_suite_matches_baseline=true`). 전체 게이트 통과로 표현하지 않는다.
 격리 HOME에서도 같은 기존 9개 실패가 재현됐다(`/tmp/maru-header-clean-home-nine.json`). 사용자 설정 영향으로 단정하지 않는다.
+
+## Inspector 파일 보기 모드 strip
+
+`file_header`는 실제 Markdown 읽기·라이브·소스 및 SVG 읽기·소스 버튼만 발행한다.
+`test-inspector` Debug/ReleaseFast와 `test-chrome-ui`는 parent/clip·pane별 ID·owner/active/epoch 세대,
+부분 OOM 폐기와 정상 복원, 실제 host paint/input의 발행 rect 소비 및 mode Pick의 읽기 전용 계약을 검사한다.
+`python3 tools/test-file-header-publication-adversarial.py`는 컴파일한 결함 9종을
+정상·동등·복원 대조군과 대조한다. `python3 -m unittest discover -s tools/inspector-picker-app -p 'test_*.py'`는
+독립 artifact 판정의 정상/복원·위조 반례를 검사한다.
+
+실제 앱 명령:
+
+```sh
+python3 tools/inspector-picker-app/run.py --app <고정 앱>/Contents/MacOS/maru-macos-app --output <새 경로> --file-header --rounds 20
+python3 tools/inspector-picker-app/verify_file_header.py <같은 경로>
+```
+
+| 회차 | 검증 가설 |
+| --- | --- |
+| 1–3 | Markdown 세 mode의 Pick은 실제 mode를 바꾸지 않고, 1회의 일반 클릭 대조군은 전환한다 |
+| 4–5 | SVG에는 읽기·소스만 있고 라이브 mode ID는 없다 |
+| 6–10 | 2× split/다섯 Inspector 배치에서도 활성 파일 pane의 같은 mode strip을 검사한다 |
+| 11–14 | Escape·Pick 재클릭·Paused 재개·Pause 취소가 선택/hover를 남기지 않는다 |
+| 15–17 | mode 오른쪽 경계는 이웃, 음수 좌표는 없음/arrow, 도구 hover는 owner 강조 해제로 판정한다 |
+| 18–20 | 한국어 SVG·음수 hover 뒤 선택 유지·분리 창 닫기/재열기 후 낡은 geometry 선택 폐기를 검사한다 |
+
+검증은 실제 NSEvent callback·CLI·Metal chrome readback이다. WKWebView 본문/DOM, 물리 HID,
+WindowServer·실제 Retina/다중 모니터 검증을 뜻하지 않는다. breadcrumb/충돌 버튼은 미지원이다.
+최종 실제 앱 **20/20**, CLI **429개**, PNG **64장**, 경계 변화 **9,288픽셀**, 원본 파일 bytes 보존 **20/20**.
+원본: `/tmp/maru-file-header-final-e2e20/{manifest,verified}.json`.
+앱 SHA256: `1a2b8523f903408f788c213137ea10b7a4c8305453b34feb3c411d4bddbcb957`.
+컴파일 결함 9종과 정상/동등/복원은 `/tmp/maru-file-header-mutants-sjjc_fl9/manifest.json`에 기록한다.
+집중 Debug/ReleaseFast **72+14개**, Chrome UI **1,198개**, artifact **10개 테스트/이번 반례 23개**를 검사한다.
+전체 `check-boundaries -j4`는 통과했다(`/tmp/maru-file-header-boundaries.log`, exit 0).
+로컬 전체 `test-macos-app-host-abi`는 **6,699 통과·114 skip·9 실패·7 filtered**로 실패했다
+(`/tmp/maru-file-header-full-host.log`). 같은 cwd에서 이전 도크 헤더 바이너리와 새 바이너리를 각각 실행해
+기존 AC3/BR6/COL7/LSPE19/LSPE2/LATE3·공유 Find R1/R6/R7의 동일한 9개 실패를 재현했다.
+전체 실패 목록도 일치한다(`/tmp/maru-file-header-baseline-comparison.json`, `same_failures=true`,
+`full_suite_matches_baseline=true`). 바이너리와 SHA256은 같은 manifest에 기록하고 캐시 밖에 보존했다.
+전체 게이트 통과로 표현하지 않으며 원격 CI와 구분한다.

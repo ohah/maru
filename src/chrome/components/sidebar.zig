@@ -10,7 +10,9 @@ const draw = @import("../draw.zig");
 const props = @import("../props.zig");
 const tokens = @import("../tokens.zig");
 
-/// 이 컴포넌트가 그리는 레이어 — 사이드바(가장 아래 Z, 터미널 strip 왼쪽). platform이 밴드 fill을 lower해 sidebar 셀 슬롯에.
+pub const published = @import("sidebar/published.zig");
+
+/// 이 컴포넌트가 그리는 레이어 — 사이드바(가장 아래 Z, 터미널 strip 왼쪽).
 pub const layer = draw.Layer.sidebar;
 
 /// host(projectRows)가 주입하는 사이드바 화면 **한 줄(row)**. 카드일 수도 그룹 헤더일 수도 있다 — hit-test/view는
@@ -557,6 +559,10 @@ pub fn dragTargetSlot(y_px: f64, header_height_px: u32, rows: []const Row, m: Me
 /// 넘긴다. strip 배경·제목 glyph는 platform이 따로(밴드만 chrome). 활성 우선(활성 슬롯은 호버여도 활성 색). tabs
 /// 빈(사이드바 꺼짐)이거나 메트릭 0이면 무동작. 순수: tabs·hover 상태만 읽는다. out·op은 호출자 frame arena 소유.
 pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
+    return viewPublished(rows, hovered_slot, drop_slot, p, arena, out, null);
+}
+
+pub fn viewPublished(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op), frame: ?*const published.Frame) !void {
     // 밴드는 스크롤바 gutter를 **뗀** 폭을 쓴다. 스크롤바가 카드 위(layer 3)가 아니라 같은 층에서 그려지면
     // 밴드가 사이드바 폭을 다 먹을 때 그것을 덮는다 — 컨테이너가 자기 폭에서 예약하는 것이 §4의 규율이다.
     const w = p.metrics.sidebar_width_px -| p.metrics.sidebar_scroll_gutter_px;
@@ -573,7 +579,7 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
     // lowerSidebar가 그 밴드 색에 그룹 색을 tint해 색 구분을 유지한다(삼각+이름 glyph는 platform이 그 위에 올린다).
     // hover/active 밴드(아래)는 has_color 무관하게 그대로 — 상호작용 피드백은 보더라인이 아니라 카드와 같은 하이라이트다.
     for (rows, 0..) |r, i| switch (r) {
-        .group_header => |h| if (h.has_color) try out.append(arena, bandFill(rows, i, w, m, .tab_hover_bg, p.shape)),
+        .group_header => |h| if (h.has_color) try out.append(arena, bandFillPublished(rows, i, w, m, .tab_hover_bg, p.shape, frame)),
         // 에이전트 목록 행은 소속 카드 아래 붙는 부속이라 자기 색 밴드를 내지 않는다(hover/active는 아래 공통 경로).
         .card, .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
     };
@@ -591,7 +597,7 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
         // 활성 밴드는 **카드 + 그 아래 에이전트 목록 전체**를 덮는다 — 목록은 그 워크스페이스에 딸린 부속이라
         // 카드만 칠하면 "어디까지가 이 워크스페이스인지"가 안 보인다(사용자 피드백). 범위는 `cardSpanEnd`가
         // 단일 출처로 준다(platform의 per-card tint·accent 막대도 같은 함수를 쓴다 — 두 벌 누적 금지).
-        try out.append(arena, bandFillSpan(rows, ai, cardSpanEnd(rows, ai), w, m, .tab_active_bg, p.shape)); // 카드+목록 배경 밴드
+        try out.append(arena, bandFillSpanPublished(rows, ai, cardSpanEnd(rows, ai), w, m, .tab_active_bg, p.shape, frame)); // 카드+목록 배경 밴드
         // 좌측 accent 막대는 여기서 내지 않는다 — 막대색이 카드별(우클릭 "바: …", tab.accent_color)이라 role 기반
         // chrome op으로 임의 RGB를 실을 수 없어, 배경 tint와 같은 이유로 **platform이 카드별 GpuQuad로 직접 그린다**
         // (app_session rebuildSidebar의 per-tab accent 루프 — 활성=기본 앰버/지정색, 비활성=지정 시에만). 카드 폭 inset과
@@ -618,8 +624,8 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
             // 한 겹 들여 "카드에 딸린 부속"으로 보이게 하고 활성 밴드 위 위아래 행과 맞닿지 않게 한다
             // (사용자 피드백). 인셋이 얕아 클릭 영역과 어긋나 보이지 않는다 — docs/sidebar-agent-list.md §3.2.
             switch (rows[hs]) {
-                .agent_toggle, .agent, .agent_pane => try out.append(arena, listRowHoverBand(rows, hs, w, m, hover_role, p.shape)),
-                .card, .group_header => try out.append(arena, bandFill(rows, hs, w, m, hover_role, p.shape)),
+                .agent_toggle, .agent, .agent_pane => try out.append(arena, listRowHoverBandPublished(rows, hs, w, m, hover_role, p.shape, frame)),
+                .card, .group_header => try out.append(arena, bandFillPublished(rows, hs, w, m, hover_role, p.shape, frame)),
                 .recovered_sessions_header, .recovered_session => {},
             }
         }
@@ -629,7 +635,7 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
     // 그린다. drop_slot < rows.len이면 합칠 카드, == rows.len이면 카드 목록 아래 행('새 워크스페이스'). 범위 검사 없이
     // 그 행에 밴드를 낸다(카드 아래 행도 유효 — platform이 드래그 중에만, 그리고 자기 카드는 제외해 넘긴다).
     if (drop_slot) |ds| {
-        try out.append(arena, bandFill(rows, ds, w, m, .drop_zone, p.shape));
+        try out.append(arena, bandFillPublished(rows, ds, w, m, .drop_zone, p.shape, frame));
     }
 }
 
@@ -637,8 +643,8 @@ pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props
 /// 높이(카드=slot_h·헤더=header_row_h)라 고정 row*slot_h가 아니다. row==rows.len(카드 목록 아래 새 워크스페이스 행)이면
 /// 콘텐츠 하단·카드 높이로 둔다. platform lowerSidebar가 같은 누적으로 row를 역산해 tint를 얹고(.m이 header_h를 더해 절대
 /// y를 맞춘다 — 헤더 시프트는 .m 단일 책임).
-fn bandFill(rows: []const Row, row: usize, w: u32, m: Metrics, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
-    return bandFillSpan(rows, row, row + 1, w, m, role, shape);
+fn bandFillPublished(rows: []const Row, row: usize, w: u32, m: Metrics, role: tokens.ColorRole, shape: props.ShapeTokens, frame: ?*const published.Frame) draw.Op {
+    return bandFillSpanPublished(rows, row, row + 1, w, m, role, shape, frame);
 }
 
 /// `[from, to)` **여러 row를 한 덩어리로** 덮는 밴드. 활성 워크스페이스가 카드 + 에이전트 목록을 함께 칠할 때 쓴다
@@ -649,16 +655,17 @@ fn bandFill(rows: []const Row, row: usize, w: u32, m: Metrics, role: tokens.Colo
 /// 카드가 눌렸다 — "보이는 곳 = 눌리는 곳"이 깨져 호버 하이라이트가 무엇을 가리키는지 어긋나 보인다(사용자
 /// 제보 → 결정 2026-07-28: **밴드를 클릭 행에 맞춘다**). `card_gap_px`는 이제 카드 **텍스트 좌측 들여쓰기**
 /// 전용 토큰이다. platform(rebuildSidebar의 per-card tint·accent 막대·드래그 고스트)도 같은 `spanRect`를 부른다.
-fn bandFillSpan(rows: []const Row, from: usize, to: usize, w: u32, m: Metrics, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
-    return quadOp(spanRect(rows, from, to, w, m), role, shape);
+fn bandFillSpanPublished(rows: []const Row, from: usize, to: usize, w: u32, m: Metrics, role: tokens.ColorRole, shape: props.ShapeTokens, frame: ?*const published.Frame) draw.Op {
+    const rect = if (frame) |f| f.span(from, to) orelse spanRect(rows, from, to, w, m) else spanRect(rows, from, to, w, m);
+    return quadOp(rect, role, shape);
 }
 
 /// 목록 행(토글·에이전트) **호버 밴드** op = 행에서 사방 `list_pad_v/2`만 들인 rect. 카드 밴드(행 전체)와 달리
 /// 한 겹 들이는 건 "목록 행은 카드에 딸린 부속"이라는 위계와, 활성 밴드 위에 놓일 때 위아래 행과 맞닿지 않게
 /// 하려는 것이다(사용자 피드백). `card_gap`은 쓰지 않는다 — 행이 얕아 그만큼 들이면 밴드가 글자보다 작아지고
 /// 클릭 영역과도 크게 어긋난다(`listRowBandV` 주석의 6px 띠 회귀).
-fn listRowHoverBand(rows: []const Row, row: usize, w: u32, m: Metrics, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
-    const top: i64 = rowTop(rows, row, 0, m, 0); // 슬롯 상대(헤더·스크롤 제외), ≥0
+fn listRowHoverBandPublished(rows: []const Row, row: usize, w: u32, m: Metrics, role: tokens.ColorRole, shape: props.ShapeTokens, frame: ?*const published.Frame) draw.Op {
+    const top: i64 = if (frame) |f| if (f.span(row, row + 1)) |r| r.y else rowTop(rows, row, 0, m, 0) else rowTop(rows, row, 0, m, 0); // 슬롯 상대(헤더·스크롤 제외), ≥0
     const v = listRowBandV(rowHeight(rows[row], m), m);
     const g: u16 = @intCast(@min(m.list_pad_v / 2, @as(u32, std.math.maxInt(u16))));
     const band = draw.Rect{ .x = 0, .y = @intCast(top + @as(i64, v.top)), .w = w, .h = v.h };
@@ -670,6 +677,10 @@ fn listRowHoverBand(rows: []const Row, row: usize, w: u32, m: Metrics, role: tok
 fn quadOp(rect: draw.Rect, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
     const r = shape.corner_radius_px;
     return .{ .quad = .{ .rect = rect, .fill_role = role, .corner_radii = .{ r, r, r, r } } };
+}
+
+fn bandFillSpan(rows: []const Row, from: usize, to: usize, w: u32, m: Metrics, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
+    return bandFillSpanPublished(rows, from, to, w, m, role, shape, null);
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -1276,4 +1287,32 @@ test "sidebar closeButton: 옛 폭-역산 zone은 실측 메트릭에서 그려�
     for ([_]f64{ 309, 311, 313, 317, 321 }) |x| try std.testing.expect(x < legacy_start);
     // 그중 그려진 ✕ 칸에 든 좌표는 이제 닫힌다.
     try std.testing.expect(closeButton(range.start, c, cw));
+}
+
+test {
+    _ = published;
+}
+
+test "published sidebar paint consumes the same frame as clipped input" {
+    const a = std.testing.allocator;
+    const rows = [_]Row{.{ .card = .{ .tab = 0, .label = "", .active = true } }};
+    const p: props.ChromeProps = .{ .metrics = .{ .cell_width_px = 10, .cell_height_px = 20, .sidebar_width_px = 200, .sidebar_header_row_h_px = 20, .backing_width_px = 800, .backing_height_px = 600 } };
+    var f: published.Frame = .{};
+    defer f.deinit(a);
+    try f.publish(a, &rows, .{ .width = 200, .header = 40, .viewport_height = 100, .scroll = 12, .metrics = Metrics.init(20, 20) }, 1);
+    var legacy: std.ArrayList(draw.Op) = .empty;
+    defer legacy.deinit(a);
+    var shared: std.ArrayList(draw.Op) = .empty;
+    defer shared.deinit(a);
+    try view(&rows, null, null, p, a, &legacy);
+    try viewPublished(&rows, null, null, p, a, &shared, &f);
+    try std.testing.expectEqualDeep(legacy.items[0].quad.rect, shared.items[0].quad.rect);
+    // Change the published rect only. A disconnected Inspector-only tree would
+    // leave the painted band and input unchanged, which this control rejects.
+    f.entries.items[f.snapshot().find(published.rowId(0)).?].rect.y += 9;
+    shared.clearRetainingCapacity();
+    try viewPublished(&rows, null, null, p, a, &shared, &f);
+    try std.testing.expectEqual(legacy.items[0].quad.rect.y + 9, shared.items[0].quad.rect.y);
+    try std.testing.expectEqual(@as(?usize, null), f.slotAt(f.row(0).?.rect.y - 1));
+    try std.testing.expectEqual(@as(?usize, 0), f.slotAt(f.row(0).?.rect.y));
 }

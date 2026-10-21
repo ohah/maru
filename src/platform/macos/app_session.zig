@@ -6779,6 +6779,8 @@ pub const AppSession = struct {
     /// 채우고, buildSidebarDrawList가 순회, slotAt/click/hover가 표시 슬롯(row 인덱스)→원본 탭 역매핑(visibleTab =
     /// rows[i].card.tab)에 쓴다. 슬롯↔탭 단일 출처(인덱스 어긋남 방지). SG3a는 card row만(그룹 헤더는 SG3b).
     sidebar_rows: std.ArrayList(chrome.components.sidebar.Row) = .empty,
+    sidebar_publication: chrome.components.sidebar.published.Frame = .{},
+    sidebar_identity_epoch: u64 = 0,
     /// SG8c 드래그 프리뷰 — 드래그 중 `sidebar_rows`(원본, 불변, hit-test·plan 계산이 봄)와 분리된 **렌더 전용 투영**
     /// (고스트 포함, docs/plans/sidebar-groups.md §9 SG8). 라이브 재배치(매 프레임 self.tabs 커밋) 대신 비커밋 프리뷰:
     /// simulateDrop이 낸 가상 order/group_depth를 projectRowsCore(프리뷰 모드)로 투영한다. 고스트 [lo,hi) 구간은 접힘
@@ -25363,6 +25365,7 @@ pub const AppSession = struct {
         self.web_nav_action_pending = null; // Phase 7e-3: nav 버튼 클릭 pending(POD, heap 없음 — 같은 대칭 규율)
         self.rename_input.deinit(self.allocator); // 인라인 rename 입력(query/preedit) heap 해제
         self.sidebar_search_input.deinit(self.allocator); // 사이드바 검색바 입력 heap 해제
+        self.sidebar_publication.deinit(self.allocator);
         self.sidebar_rows.deinit(self.allocator); // 검색 필터 표시 슬롯 매핑 heap 해제
         self.sidebar_preview_rows.deinit(self.allocator); // SG8c 드래그 프리뷰 투영(고스트 포함) heap 해제
         self.find_matches.deinit(self.allocator);
@@ -101631,6 +101634,28 @@ test "Live inspector picker consumes selection down up and rechecks published ge
     session.inspector.paused = true;
     inspector_ops.picker.toggle(session);
     try std.testing.expect(!session.inspector.paused);
+    try sidebar_ops.rebuildSidebar(session);
+    try std.testing.expect(sidebar_ops.sidebarPublicationCurrent(session));
+    const entries = try inspector_ops.picker.nodes(session, arena.allocator());
+    var card: ?maru.chrome.ui.inspection.Node = null;
+    for (entries) |entry| if (entry.source == .sidebar and std.mem.eql(u8, entry.role orelse "", "tab")) {
+        card = entry;
+        break;
+    };
+    const key = maru.chrome.ui.inspection.identity(card orelse return error.TestUnexpectedResult);
+    try std.testing.expect(key.generation != 0);
+    inspector_ops.picker.select(session, key, false);
+    try std.testing.expectEqual(key, session.inspector.picker_selected.?);
+    // Replacement at the same index/address cannot inherit an old selection.
+    session.sidebar_identity_epoch +%= 1;
+    const stale = try inspector_ops.picker.nodes(session, arena.allocator());
+    try std.testing.expect(maru.chrome.ui.inspection.resolve(stale, key) == null);
+    try sidebar_ops.rebuildSidebar(session);
+    const replacement = try inspector_ops.picker.nodes(session, arena.allocator());
+    try std.testing.expect(maru.chrome.ui.inspection.resolve(replacement, key) == null);
+    session.sidebar_publication.invalidate();
+    const unpublished = try inspector_ops.picker.nodes(session, arena.allocator());
+    for (unpublished) |entry| try std.testing.expect(entry.source != .sidebar);
     inspector_ops.close(session);
     try std.testing.expect(!session.inspector.picking);
 }

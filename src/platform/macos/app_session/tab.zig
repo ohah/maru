@@ -1547,6 +1547,8 @@ pub fn captureWorkspaceTabWithEditors(self: *AppSession, arena: std.mem.Allocato
 /// 컬렉션에 안 든 Tab을 teardown·해제한다(closeTab의 teardown 부분 — 단, tabs/surface_ptrs는 호출자가 관리).
 /// 트리(tab.tree)가 세팅된 '완성된' 탭에만 쓴다(buildWorkspaceTab은 자기 granular errdefer로 미완성을 정리).
 pub fn destroyTabStandalone(self: *AppSession, tab: *Tab) void {
+    // A later allocation may reuse this address; retire row inspection identities.
+    self.sidebar_identity_epoch +%= 1;
     // restore 실패/교체처럼 closeTab을 통하지 않는 teardown도 raw pane/split 및 sidebar payload의 수명 장벽이다.
     self.cancelPointerGesture();
     // rename 대상이 이 워크스페이스(또는 그 안 pane/Term)·이 탭이 시작하는 그룹이면 비운다 — pane/Term은 아래

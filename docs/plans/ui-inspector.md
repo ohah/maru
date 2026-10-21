@@ -9,7 +9,7 @@
   도구 버튼 활성화 → hover 경계 → 클릭 선택을 참고한다. 참조 코드는 복사하지 않는다.
 - `chrome.ui.inspection`은 paint/input이 소비하는 **발행된** `UiRectTree`를 읽는다.
   유효 clip과 좌표 변환을 적용하고 뒤에서부터 가장 위 요소를 고른다. disabled 요소도 읽을 수 있다.
-- 첫 대상은 상태바, 사이드바 scroll, pane divider, 표시 중인 파일·SCM·세션 도크의 발행 tree다.
+- 대상은 사이드바 workspace 카드·그룹·닫기 버튼, 상태바, 사이드바 scroll, pane divider, 표시 중인 파일·SCM·세션 도크의 발행 tree다.
   미발행 chrome 영역, terminal cell, 웹 DOM은 미지원이며 `elements.coverage`에 명시한다.
   전체 앱의 완성된 component tree를 제공한다고 표현하지 않는다.
 - 각 node는 source + ID, parent ID, generation, kind/semantic role, 원래·보이는 rect,
@@ -67,3 +67,25 @@
 
 계층 탐색의 최종 Debug/ReleaseFast·Chrome UI·전체 경계·실제 앱 20회 및 추가 선택기 회귀 10회는
 [검증 매트릭스](../verification-matrix.md)의 Elements 절에 기록한다.
+
+
+## 사이드바 발행 트리 (2026-10-21 승인)
+
+- `chrome.components.sidebar.published.Frame`이 canonical 행에서 카드·그룹·닫기 버튼과
+  스크롤 컨테이너의 rect/clip/parent/semantic role을 발행한다. 새 `sidebar` source는
+  GUI Elements와 CLI `elements.nodes/tree/hovered/selected`에서 동일하게 제공한다.
+- 일반 프레임의 밴드 view와 행 입력은 이 발행 geometry를 소비한다. CoreText 텍스트와
+  색상 lowering은 기존 host 경로를 유지하며, Inspector에서 별도 좌표를 만들지 않는다.
+- 상단 헤더와 하단 상태바를 제외한 viewport로 clip한다. 카드 닫기 영역은 기존 입력의
+  실제 close 열 × 카드 높이를 반영한다. glyph 크기로 임의 축소하지 않는다.
+- source/row ID/publication generation으로 선택한다. 행 순서·깊이·접힘·geometry·활성 상태와
+  host workspace identity가 바뀌면 세대를 갱신한다. host identity는 내부 Tab 주소 순서와
+  teardown epoch로 구분하며 주소 자체를 내보내지 않는다. 할당 실패는 예전 발행을 폐기한다.
+- 카드 reorder 중에는 paint의 preview 행과 입력의 canonical 행이 의도적으로 다르므로
+  사이드바 카드 publication을 폐기하고 Inspector에서 제외한다. 기존 drag 경로를 유지한다.
+- 사용자 이름·경로 label을 복사하지 않는다. agent/recovered 행은 공유 geometry의 일부지만
+  이번 Inspector 카드·그룹 범위에서는 제외한다. 네이티브 accessibility 이관 완료를 뜻하지 않는다.
+- 탭 바·도크 헤더의 발행 트리 확장은 후속 범위다.
+- 이번 PR의 적대적 검증은 최신 사용자 요청에 따라 **5회**다(기본 20회에 대한 이번 작업의 예외).
+  실제 앱·CLI·Metal PNG와 정상 입력 대조군, 컴파일 결함 5종의 결과는
+  [검증 매트릭스](../verification-matrix.md)의 사이드바 절을 따른다.

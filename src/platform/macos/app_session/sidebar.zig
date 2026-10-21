@@ -892,8 +892,37 @@ pub fn inSidebar(self: *const AppSession, x_px: f64) bool {
     return chrome.components.sidebar.inSidebar(x_px, self.sidebar_width_px);
 }
 
-/// 사이드바 y → 탭 슬롯 인덱스(순수 `sidebarSlot` 래퍼 — 슬롯 높이·탭 수·스크롤로 판정).
+// Tab pointers are never exported. Together with the teardown epoch they prevent
+// an index-based row ID from silently following a replacement workspace.
+fn sidebarModelStamp(self: *const AppSession) u64 {
+    var h = std.hash.Wyhash.init(self.sidebar_identity_epoch);
+    for (self.tabs.items) |tab| {
+        const address = @intFromPtr(tab);
+        h.update(std.mem.asBytes(&address));
+    }
+    return h.final();
+}
+fn sidebarPublicationParams(self: *const AppSession) chrome.components.sidebar.published.Params {
+    var p: chrome.components.sidebar.published.Params = .{
+        .width = self.sidebar_width_px -| sidebarScrollGutterPx(self),
+        .header = self.sidebar_header_height_px,
+        .viewport_height = sidebarViewport(self).height(),
+        .scroll = self.sidebar_scroll_offset_px,
+        .metrics = sidebarMetrics(self),
+    };
+    if (sidebarColumns(self)) |cols| {
+        const c = cols.closeXRange(self.cell_width_px);
+        p.close = .{ .left = @floatCast(c.start), .right = @floatCast(c.end) };
+    }
+    return p;
+}
+pub fn sidebarPublicationCurrent(self: *const AppSession) bool {
+    return self.sidebar_drag_preview == null and self.sidebar_publication.current(self.sidebar_rows.items, sidebarPublicationParams(self), sidebarModelStamp(self));
+}
+
+/// Sidebar y -> canonical row; preview/startup keep the existing arithmetic path.
 pub fn sidebarSlotAt(self: *const AppSession, y_px: f64) ?usize {
+    if (sidebarPublicationCurrent(self)) return self.sidebar_publication.slotAt(y_px);
     // 가변 높이(카드=slot_h·헤더=cell_h). 반환은 row 인덱스(호출처 visibleTab이 row→tab). header_row_h는 SG3b-2에서
     // 헤더 row가 실제로 생길 때 의미를 갖고, 지금(카드만)은 안 쓰인다 — cell_height_px를 근사로 넘긴다.
     return chrome.components.sidebar.slotAt(y_px, self.sidebar_header_height_px, self.sidebar_rows.items, sidebarMetrics(self), self.sidebar_scroll_offset_px);
@@ -1093,6 +1122,9 @@ pub fn rebuildSidebar(self: *AppSession) !void {
     self.dropQuadsByLayer(0);
     tab_ops.recomputeVisibleTabs(self); // 검색 필터로 표시 카드(sidebar_rows) 갱신 — 아래는 전부 표시 슬롯 기준
     clampSidebarScroll(self); // 표시 카드 수/뷰포트가 바뀌었을 수 있으니 stale 스크롤 정정 — 아래 quad가 이 오프셋을 쓴다
+    if (self.sidebar_drag_preview == null) {
+        try self.sidebar_publication.publish(self.allocator, self.sidebar_rows.items, sidebarPublicationParams(self), sidebarModelStamp(self));
+    } else self.sidebar_publication.invalidate();
     if (self.tabs.items.len == 0) return;
     // 밴드(활성/호버 슬롯·"+" 호버)는 chrome `sidebar.view`가 fill op으로 단일 출처. `lowerSidebar`가 그 fill을
     // GPU quad(layer 0)로 lower한다 — 화면 y는 `sidebarScrollClipQuad`가 글자 셀과 같은 식으로 낸다(색은 platform).
@@ -1113,7 +1145,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
     };
     const drop_slot = if (self.sidebar_drag_preview != null) null else pane_drop_slot;
     var ops: std.ArrayList(chrome.draw.Op) = .empty;
-    chrome.components.sidebar.view(rows, self.hovered_slot, drop_slot, self.buildChromeProps(), arena, &ops) catch return;
+    chrome.components.sidebar.viewPublished(rows, self.hovered_slot, drop_slot, self.buildChromeProps(), arena, &ops, if (sidebarPublicationCurrent(self)) &self.sidebar_publication else null) catch return;
     lowerSidebar(self, ops.items);
     // 헤더(검색바) 하단 구분선 — 검색 줄과 카드 목록 사이 경계를 명확히(사용자 요청 "Searchbar에 언더바"). divider
     // 색·border 두께로 사이드바 폭 전체에 가로선(layer 0=사이드바 retained). 검색 줄 바로 아래(=header_h 하단)에 둔다.

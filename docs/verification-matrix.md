@@ -12,6 +12,40 @@
 
 ## Live Terminal Inspector
 
+### 사이드바 카드·그룹 발행 트리 (2026-10-21)
+
+이번 작업은 최신 사용자 요청에 따라 적대적 검증 **5회**로 수행했다. 기본 PR 20회 규칙의
+이번 작업에 대한 예외이며, 이전 PR의 결과를 포함하지 않는다.
+
+| 회차 | 공격 가설·조건 | 기대 결과와 최종 결과 |
+|---|---|---|
+| 1 | 비활성 workspace 카드 Pick이 탭을 바꾸거나 scroll 좌표가 어긋남 | CLI rect의 경계가 Metal에 표시되고 선택만 변경. 일반 클릭 대조군은 탭 전환. 통과 |
+| 2 | 그룹 Pick이 접힘을 실행하거나 clip 밖 행이 입력을 받음 | Pick 전후 publication 동일, 일반 클릭은 그룹 접힘. viewport 밖·NaN 입력 거부. 통과 |
+| 3 | 중첩 그룹 부모가 틀리거나 교체된 row ID로 선택이 넘어감 | 실제 중첩 그룹 선택·일반 클릭 대조군 통과. 부모 연결과 host epoch 변경 시 stale 선택 거부. 통과 |
+| 4 | 닫기 버튼 좌상단 경계 Pick이 workspace를 닫거나 실패한 발행이 남음 | close 영역을 선택하고 카드 목록 유지. OOM은 이전 tree 폐기 후 복구 대조군 통과. 통과 |
+| 5 | 분리 창·주입 2× 좌표에서 다른 창을 검사하거나 닫기 action 실행 | 소유 창의 같은 close 영역 선택·목록 유지·crosshair·경계 PNG 확인. 통과 |
+
+- 실제 앱 명령: `python3 tools/inspector-picker-app/run.py --sidebar --rounds 5 --app <고정 앱 실행 파일> --output <새 경로>`.
+  `MARU_FORCE_SR5_NESTED_TOP` fixture로 실제 workspace/group projection을 사용한다.
+  1~5회는 top/right/bottom/left/window 배치, 한·영 UI, 5회는 주입 2× backing 좌표다.
+- 최종 앱과 CLI는 `/tmp/maru-sidebar-verified/Maru.app`의 고정 사본을 사용한다.
+  최종 실제 앱 **5/5**, live CLI **118건**, Metal PNG **16장**, 경계 변경 **3104 pixels**.
+  앱 SHA256 `c98057fda418c7c5a318a7821391b5252d6ecd2c2ebe40589c004046714e52ac`.
+  최종 native 결과: `/tmp/maru-sidebar-verified-e2e5/manifest.json`, `verified.json`, 회차별
+  `observations.json`, `report.txt`, `pixels.json`, PNG. 실제 NSEvent callback/Metal readback 증거이며
+  물리 HID·다중 모니터·실제 Retina 디스플레이 검증은 포함하지 않는다.
+- 독립 artifact 검증은 `tools/inspector-picker-app/verify_sidebar.py`가 CLI 선택·목록 보존,
+  정상 입력 대조군, native cursor/배치, 실제 PPM 경계 픽셀과 분리 창 PNG를 다시 판정한다.
+  판정자 자체 정상·복구/결함 대조군: `python3 -m unittest discover -s tools/inspector-picker-app -p test_verify_sidebar.py` (**3개 test, 결함 9개 subcase**).
+- `python3 tools/test-sidebar-publication-adversarial.py`: clip 무시·scroll 제거·부모 누락·epoch 무시·
+  OOM 발행 유지 **5종**을 실제 컴파일해 행동 실패로 거부했다. 정상·동등·복구 대조군 통과.
+  `/tmp/maru-sidebar-mutants-q7ijf98q/manifest.json`.
+- Debug Inspector **66+11**, Chrome UI **1,188**, ReleaseFast Inspector **66+11**.
+  로그: `/tmp/maru-sidebar-debug-verified.log`, `/tmp/maru-sidebar-chrome-verified.log`,
+  `/tmp/maru-sidebar-releasefast-verified.log`.
+- 전체 경계·문서 링크/줄 참조·fmt/diff 결과와 원격 CI 상태는 PR에서 구분해 기록한다.
+  agent/recovered 행·상단 헤더·reorder preview와 native accessibility의 전체 이관은 이번 완료 범위에 포함하지 않는다.
+
 ### Elements 계층 탐색 (2026-10-21)
 
 - `feat/inspector-element-tree`, base `f00891e8c`: 부모/자식·접기/펼치기·검색·선택 경계와

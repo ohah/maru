@@ -1790,6 +1790,15 @@ saved 기준·entry 게시·반복 저장·닫기 대상·배타 생성 결함�
 
 `python3 tools/test-editor-save-wake-extra.py`는 격리 사본에서 다섯 추가 시나리오를 Debug/ReleaseFast로 실행한다. 여러 창의 첫 저장·32개 연속 접수·한 창의 IME 닫기 대기 중 다른 창 진행·실패 후 재저장·중첩 drain 방어를 검사하고, 대응 결함 다섯 개와 정상/복원 대조군을 확인한다. 재진입 호출 훅은 사본에만 넣으며 제품 공개 API나 원본 파일을 바꾸지 않는다. 실제 OS의 중첩 이벤트나 물리 IME 입력 재현과는 구분한다.
 
+## 편집기 미저장 백업 호출 비용
+
+`python3 tools/probe-editor-backup.py --adversarial`는 별도 소스 사본의 제품 백업 tick을
+ReleaseFast로 실행한다. 64KiB·1MiB·8MiB의 이름 없는/로컬 ID 문서에 대해 최초·반복 기록과 삭제를
+측정하고, 기존 백업 계약 13개와 다섯 의미 결함 주입·원복 대조군을 확인한다.
+`python3 tools/test-editor-backup-probe.py`는 표본 누락·중복·내용 검증과 구간 귀속 판정을 검사한다.
+산출물과 해석 한계는 [백업 실측 계획](plans/editor-backup-main-latency.md)을 따른다.
+실제 AppKit 입력·렌더 프레임 지연이나 cold-cache 성능을 뜻하지 않는다.
+
 ## Elements 계층 탐색 검증
 
 앱 번들을 순차 빌드한 뒤 실행한다(동시에 번들 packager를 실행하지 않는다).

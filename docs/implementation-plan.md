@@ -74,6 +74,7 @@ macOS 로컬 shell 1개 surface
 - [Save As](plans/editor-save-as.md) — 순서·취소 정책, writer·예약·콜백 신원과 실제 저장 접수·뷰/백업/LSP·NSSavePanel 연결 구현. 기본 GUI 저장·원본 보존·경로 전환·화면 촬영 검증; GUI 취소·저장 중 추가 입력·Undo/Redo도 검증. 한국어 OS 입력기 CGEvent 조합 중 저장도 검증. 사람의 키보드·VoiceOver는 별도 검증이 남음.
 - [이름 없는 로컬 문서의 첫 저장](plans/editor-untitled-save-async.md) — 비동기 제품 연결·도크 예약·창 이동 경합 구현. 로컬 회귀 완료, 최종 실측·CI는 개별 계획 참조.
 - [로컬 저장 메인 큐 통지](plans/editor-save-event-wake.md) — 기존 저장 actor를 요청·완료 이벤트로 깨우고 틱 안전망을 유지한다. 검증 범위는 개별 계획을 따른다.
+- [미저장 백업 동기 호출 실측](plans/editor-backup-main-latency.md) — 이름 없는/로컬 ID 백업의 직렬화·기존 기록 검증·전체 쓰기·삭제 비용을 분리해 worker 분리 판단의 근거를 모은다.
 - [로컬 저장의 자료·쓰기·완료 분리](plans/editor-local-save.md) — 기존 동기 저장 계약을 유지하는 비동기 저장 기반과 신원/본문 수명 검증.
 - [공유 편집기 복원 포맷과 구현 계획](plans/editor-shared-restore.md) — 문서 연결과 뷰 상태, v1 선택적 필드와 v2 비교, downgrade와 복원 실패 경계
 - [복구 ID 예약 후보 실험](plans/editor-recovery-reservation.md) — 실제 owner lease·atomic writer, 실패/중단/정리 경계와 비용 비교; 제품 연결 전 비교 이력

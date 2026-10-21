@@ -23,7 +23,7 @@ def run(app, output, n, sidebar=False):
     fixture=dest/'point.json';gate=dest/'hover-ok';end=dest/'selected-ok'
     placement=(n-1)%5
     lines=['sleep 1000',f'inspect-click {40+placement}','sleep 500',f'inspect-main-capture {dest}/baseline.ppm','inspect-report ready',f'waitfile {fixture}']
-    if n==13:lines+=['inspect-click 13','sleep 200']
+    if n==13:lines+=['inspect-click 13','sleep 200','inspect-report pre-pick']
     lines+=['inspect-click 48','sleep 350',f'inspect-owner-pointer {fixture} hover','sleep 400',f'inspect-main-capture {dest}/hover.ppm','inspect-report hovered',f'waitfile {gate}']
     if n==11:lines+=['inspect-key 53 U+001B']
     elif n==12:lines+=['inspect-click 48']
@@ -39,10 +39,10 @@ def run(app, output, n, sidebar=False):
     script=dest/'input.txt';script.write_text('\n'.join(lines)+'\n');report=dest/'report.txt'
     env={k:v for k,v in os.environ.items() if not k.startswith('MARU_')}
     env.update(HOME=str(root/'home'),CFFIXED_USER_HOME=str(root/'home'),MARU_CONFIG=str(config),XDG_CONFIG_HOME=str(root/'home/.config'),XDG_CACHE_HOME=str(root/'cache'),XDG_STATE_HOME=str(root/'state'),MARU_SESSION_HOST_ROOT=str(root/'host'),MARU_EDITOR_BACKUP_ROOT=str(root/'backups'),MARU_NO_WORKSPACE_RESTORE='1',MARU_OPEN_INSPECTOR='1',MARU_INSPECTOR_WITH_DOCK='1',MARU_INSPECTOR_APP_TEST='1',MARU_WEB_OSR_TEST_INPUT=str(script),MARU_WEB_OSR_TEST_REPORT=str(report))
-    if 6<=n<=10 or (sidebar and n==5):env.update(MARU_SCREENSHOT=str(dest/'auto.ppm'),MARU_SCREENSHOT_DELAY_MS='60000',MARU_SCREENSHOT_TIMEOUT_MS='70000',MARU_SCREENSHOT_RENDER_SCALE_MILLI='2000')
+    if 6<=n<=10 or (sidebar and n in (5,13)):env.update(MARU_SCREENSHOT=str(dest/'auto.ppm'),MARU_SCREENSHOT_DELAY_MS='60000',MARU_SCREENSHOT_TIMEOUT_MS='70000',MARU_SCREENSHOT_RENDER_SCALE_MILLI='2000')
     if sidebar:
         env.update(MARU_FORCE_SR5_NESTED_TOP="1", MARU_FORCE_GROUP_COLOR="1", MARU_INSPECTOR_TAB="elements")
-    observations=[];errors=[];expected=None;hover=None;selected=None;sidebar_before=None;control=None
+    observations=[];errors=[];expected=None;hover=None;selected=None;sidebar_before=None;control=None;target=None
     with (dest/'app.log').open('w') as log:
         process=subprocess.Popen([str(app)],env=env,stdout=log,stderr=log,start_new_session=True)
         try:
@@ -60,15 +60,17 @@ def run(app, output, n, sidebar=False):
                         if not candidates:raise RuntimeError('no published UI candidates')
                         if sidebar:
                             sidebar_before=[v for v in all_nodes if v['source']=='sidebar']
-                            role={1:'tab',2:'tree_item',3:'tree_item',4:'button',5:'button'}[n]
+                            role={1:'tab',2:'tree_item',3:'tree_item',4:'button',5:'button'}[n-10 if n>=11 else n]
                             preferred=[v for v in candidates if v['source']=='sidebar' and v['role']==role]
-                            if n==3:preferred=preferred[1:]
+                            if n in (3,13):preferred=preferred[1:]
                             if not preferred:raise RuntimeError('missing real sidebar candidate')
                         else:
                             preferred=[v for v in candidates if v['source']==('file_tree' if n%2==0 else 'status_bar')]
                         node=next((v for v in (preferred if sidebar else reversed(preferred or candidates)) if v['action_id'] is not None),(preferred or candidates)[-1]);r=node['visible_rect'];x=r['x']+r['width']/2;y=r['y']+r['height']/2
                         if n==15 or (sidebar and n==4):x=r['x']+.25;y=r['y']+.25
                         if n==16:x=-10;y=-10
+                        target=node
+                        if sidebar and n==15:x=r['x']+r['width'];y=r['y']+r['height']/2
                         expected=next((v for v in reversed(all_nodes) if contains(v['visible_rect'],x,y)),None)
                         fixture.write_text(json.dumps({'x':x,'y':y}))
                     if 'label=hovered' in text and not gate.exists():
@@ -120,13 +122,13 @@ def run(app, output, n, sidebar=False):
             (dest/'pixels.json').write_text(json.dumps({'outline_edge_changed_pixels':changed,'roi':[x,y,w,h]}))
             if changed==0:errors.append('hover did not paint the inspected boundary')
     (dest/'observations.json').write_text(json.dumps(observations,indent=2))
-    result={'control':control,'sidebar_before':sidebar_before,'mode':'sidebar' if sidebar else 'picker','round':n,'placement':placement,'expected':expected,'hover':hover,'selected':selected,'passed':not errors,'errors':errors,'root':str(root),'transport':'native NSEvent callbacks; CLI session.inspect; Metal readback'}
+    result={'target':target,'control':control,'sidebar_before':sidebar_before,'mode':'sidebar' if sidebar else 'picker','round':n,'placement':placement,'expected':expected,'hover':hover,'selected':selected,'passed':not errors,'errors':errors,'root':str(root),'transport':'native NSEvent callbacks; CLI session.inspect; Metal readback'}
     (dest/'result.json').write_text(json.dumps(result,indent=2));return result
 
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--app',type=pathlib.Path,required=True);p.add_argument('--output',type=pathlib.Path,required=True);p.add_argument('--sidebar',action='store_true');p.add_argument('--start',type=int,default=1);p.add_argument('--rounds',type=int,default=20);args=p.parse_args()
-    if args.sidebar and (args.start != 1 or args.rounds != 5):p.error("--sidebar requires --start 1 --rounds 5")
+    if args.sidebar and (args.start not in (1,11) or args.rounds != 5):p.error("--sidebar requires --start 1 or 11 and --rounds 5")
     args.output.mkdir(parents=True,exist_ok=False);results=[]
     for n in range(args.start,args.start+args.rounds):
         r=run(args.app.resolve(),args.output.resolve(),n,args.sidebar);results.append(r);print(n,'PASS' if r['passed'] else 'FAIL',r['errors'],flush=True)

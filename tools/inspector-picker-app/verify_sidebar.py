@@ -2,6 +2,7 @@
 """Recheck five sidebar rounds from CLI snapshots and actual Metal pixels."""
 import json
 import pathlib
+import re
 import sys
 
 
@@ -48,8 +49,67 @@ def verify(output):
     return dict(passed=True, rounds=5, cli_samples=samples, changed_edge_pixels=changed)
 
 
+def verify_extra(output):
+    """Cancellation, paused transitions and exclusive close edge, cases 11-15."""
+    manifest = json.loads((output / 'manifest.json').read_text())
+    assert [r['round'] for r in manifest['rounds']] == list(range(11, 16))
+    changed = samples = 0
+    for result in manifest['rounds']:
+        n = result['round']
+        assert result['mode'] == 'sidebar' and result['passed'] and not result['errors']
+        expected = result['expected']
+        assert expected['source'] == 'sidebar'
+        assert expected['role'] == {11:'tab',12:'tree_item',13:'tree_item',14:'button',15:'tab'}[n]
+        assert result['hover']['picking'] and result['hover']['hovered'] == expected
+        assert not result['selected']['picking']
+        if n in (11,12,14):
+            assert result['selected']['selected'] is None, 'cancel selected a product target'
+        else:
+            assert result['selected']['selected'] == expected
+        assert result['sidebar_before'] == [v for v in result['selected']['nodes'] if v['source'] == 'sidebar']
+        folder = output / f'round-{n:02d}'
+        report = (folder / 'report.txt').read_text()
+        assert 'phase=hover cursor=crosshair' in report and f'placement={n-10}' in report
+        flags = {label:int(value) for label,value in re.findall(r'label=([\w-]+) [^\n]*?flags=(\d+)', report)}
+        assert flags['hovered'] & 4 == 0, 'Pick did not resume Live'
+        assert bool(flags['selected'] & 4) == (n == 14), 'Pause/cancel state mismatch'
+        if n == 13:
+            assert flags['pre-pick'] & 4, 'missing initially Paused control'
+        if n == 15:
+            point = json.loads((folder / 'point.json').read_text())
+            target = result['target']
+            r = target['visible_rect']
+            assert target['role'] == 'button' and expected['id'] == target['parent_id']
+            assert point['x'] == r['x'] + r['width'], 'exclusive edge was not exercised'
+        before = (folder / 'baseline.ppm').read_bytes().split(b'\n', 3)
+        hover = (folder / 'hover.ppm').read_bytes().split(b'\n', 3)
+        assert before[:3] == hover[:3]
+        width,height = map(int,before[1].split())
+        assert len(before[3]) == len(hover[3]) == width*height*3
+        if n == 13: assert width >= 1800, 'missing injected 2x backing'
+        if n == 15: assert (folder/'detached.png').read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
+        r = expected['visible_rect']
+        x,y,w,h = (int(r[v]) for v in ('x','y','width','height'))
+        assert 0 <= x < x+w <= width and 0 <= y < y+h <= height
+        pixels = sum(before[3][(yy*width+xx)*3:(yy*width+xx)*3+3] != hover[3][(yy*width+xx)*3:(yy*width+xx)*3+3]
+                     for yy in range(y,y+h) for xx in range(x,x+w)
+                     if xx-x<2 or x+w-xx<=2 or yy-y<2 or y+h-yy<=2)
+        assert pixels > 0, 'no actual hover boundary'
+        if n in (11,12,14):
+            selected = (folder/'selected.ppm').read_bytes().split(b'\n',3)
+            assert selected[:3] == before[:3] and len(selected[3]) == len(before[3])
+            assert all(before[3][(yy*width+xx)*3:(yy*width+xx)*3+3] == selected[3][(yy*width+xx)*3:(yy*width+xx)*3+3]
+                       for yy in range(y,y+h) for xx in range(x,x+w)
+                       if xx-x<2 or x+w-xx<=2 or yy-y<2 or y+h-yy<=2), 'cancel left a painted boundary'
+
+        changed += pixels
+        samples += len(json.loads((folder/'observations.json').read_text()))
+    return dict(passed=True,rounds=5,cli_samples=samples,changed_edge_pixels=changed)
+
+
 if __name__ == '__main__':
     root = pathlib.Path(sys.argv[1])
-    result = verify(root)
+    manifest = json.loads((root/'manifest.json').read_text())
+    result = (verify_extra if manifest['rounds'][0]['round'] == 11 else verify)(root)
     (root / 'verified.json').write_text(json.dumps(result, indent=2))
     print(json.dumps(result))

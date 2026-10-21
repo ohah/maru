@@ -2076,7 +2076,7 @@ sidecar 재시작), control_browser(op 30·모달 전 `-32008`·`needs_network_p
 `body-devtools-guard`·`body-renderer-crash`·`body-record-off`·`body-restart-same-id`·`body-one-end-each`(번호마다 시도 수만큼). 적대 리뷰 1 회차 항목
 `body-r1-*` 는 `network_body_r1_check.zig`(`--network`·`--network-body` 끝에 따로 띄운 sidecar — 아래 「W9d② 적대 리뷰: 1 회차」), 3 회차 항목
 `body-r3-*` 는 `network_body_r3_check.zig`(그 뒤에 또 따로 — 이것만은 `--review-body-r3`), 4 회차 항목 `body-r4-*` 는 `network_body_r4_check.zig`(그 뒤에
-또 따로 — 이것만은 `--review-body-r4`).
+또 따로 — 이것만은 `--review-body-r4`), 5 회차 항목 `body-r5-*` 는 `network_body_r5_check.zig`(그 뒤에 또 따로 — 이것만은 `--review-body-r5`).
 
 **W9d② × 같은 번호 다시 시작(W9d① 적대 리뷰 후 위로 리베이스 — 2026-10-16)**: W9d① 이 같은 CEF 번호의 시작을 다시 시작으로 치게 되자(앞 기록
 `restarted`, 새 시도는 새 기록) 한 번호에 기록이 둘이 될 수 있다 — 그런데 본문 frame 은 번호로만 오고 maru 는 그 번호의 가장 새 기록에 붙인다.
@@ -2107,7 +2107,9 @@ sidecar 재시작), control_browser(op 30·모달 전 `-32008`·`needs_network_p
 본문은 없다(UB4·J3·J13 — `unmatched` 이거나 기록 자체가 없다; 서비스 워커가 네트워크 밖(Cache Storage·HTTP 캐시·`new Response`)에서 답한 응답의 본문도 없다
 — 그 워커가 네트워크로 받은 기록은 `unmatched`, 4 회차 SW1; worker 가 페이지와 같은 주소를 페이지의 응답 전에 받으면 둘 다 `ambiguous` — 적대 리뷰 1 회차 MED-2·3 회차 P1,
 그 주소의 열린 다른 페이지 요청도 창이 겹치면 `ambiguous` — 2 회차; 페이지의 응답 뒤에 받은 worker 의 것은 이제 페이지를 모호하게 하지 않는다 — 3 회차).
-이벤트 흐름(`text/event-stream`)은 받지 않는다. 쏟아짐 밸브로 멈춘 기록은 에이전트가 다시 켜야 한다(sidecar 가 다시 떠도 — 3 회차 F1).
+이벤트 흐름(`text/event-stream`)은 받지 않는다. 쏟아짐 밸브로 멈춘 기록은 에이전트가 다시 켜야 한다(sidecar 가 다시 떠도 — 3 회차 F1). 서비스 워커의
+navigation preload 응답(워커가 `preloadResponse` 로 답한 이동)의 본문도 없다 — preload 의 CEF 기록은 서비스 워커 갈래가 아니고 CDP 의 이동은
+서비스 워커 쪽이라 짝이 없다(`unmatched` — 5 회차 N1, 실측 20/20; 짝짓지 않기로 했다).
 
 W9d② 적대 리뷰: 1 회차(2026-10-20 — 리뷰가 재현 시험(「W9d② 적대 리뷰 1 회차 재현 …」 — 순수 `net_body_table` 셋·L2 `web_osr` 셋)과 실제 CEF 154 판정
 항목을 남겼다. 그것을 붙여 여섯 시험이 모두 실패하고 판정 셋(`body-r1-switch-off-redirect` 12/12 나감·`body-r1-worker-same-url` 40/40 틀림·`body-r1-slot-leak`
@@ -2298,3 +2300,54 @@ W9d② 적대 리뷰: 4 회차(2026-10-20 — 리뷰가 CLI 재현 시험 D1b �
   `emptyBodyState` 를 거치지 않기)는 `body-r4-cache-prefetch` 가 `no_body` 15 로 RED. 변이하지 않은 것: `network.zig` 의 넘친 시작 → `queueRefused`
   배선(실제 CEF 에서 상자를 넘치게 해야 한다 — 판단은 `net_gate` 의 순수 시험이 본다). 서비스 워커 규칙·버스트를 통째로 되돌린 판은 고치기 전 판정
   그대로다(위 숫자).
+
+W9d② 적대 리뷰: 5 회차(2026-10-21, 마지막 — 리뷰가 순수 재현 시험 A1·A2(`net_body_table`)와 실제 CEF 154 재현 판정(`rv5-*` — `network_body_r5_check.zig`,
+`--review-body-r5`)을 남겼다. 붙여 순수 127 통과·2 실패, 판정(고치기 전 표, ReleaseFast): `rv5-abort-refetch-many` 450 번에 `request_failed` 4(리뷰 1200 번에
+5 — 모두 abort 가 CEF 에 닿지 않은 시도), `rv5-mix-page-json` 60/90·57/90(잃은 것은 모두 `busy`)을 본 뒤 고쳤다. 판정 항목은 `body-r5-*` 로 옮겨
+`--network`·`--network-body` 끝에서 따로 띄운 sidecar 로 돌린다(이것만은 `--review-body-r5`):
+- **A1(LOW–MED) CEF 에 닿지 않은 abort 가 다시 받은 요청의 기록을 `request_failed` 로 가져갔다**(3 회차 P5 의 남은 틈): 응답 없이 실패한 요청은 「UI 가
+  실패를 본 때까지 시작한 기록」 을 결과를 보지 않고 제 것으로 쳤는데, UI 가 `loadingFailed` 를 받는 때는 abort 보다 늦다 — 렌더러가 abort 와 다시 받기를
+  한 task 에서 하면 다시 받은 요청의 CEF 시작이 그보다 앞일 수 있다(리뷰의 시각 분석: UI 시각과의 차 −0.13..+0.04 ms, CDP `timestamp` 와의 차 −0.47..−0.18 ms
+  — 93/93). 고침(사용자 결정 — 둘 다): (a) 실패 시각은 CDP `loadingFailed.timestamp`(`Cdp.failed_at` — 응답 시각과 같은 검사: 0 보다 크고 UI 가 받은 때 앞
+  2 초 안, 아니면 UI 가 받은 때)이고 물 높이의 기준(`bound`)이다. (b) 응답 없이 실패한 요청은 CEF 가 성공으로 끝낸 기록을 IO 시각과 무관하게 갖지 않고
+  (`compatible`), CEF 가 실패·취소로 끝낸 기록만 제 것으로 정한다(`definite`) — 끝이 아직이면 기다리고(시한 `cef_grace_us` 안), 시한까지 모르면 정하지
+  않는다: 그 기록이 CDP 실패 시각 앞에 시작했으면 그 요청의 것일 수 있어(abort 가 CEF 의 끝보다 앞섰는데 그 끝이 늦다) 다음 요청에게 주지 않고 `ambiguous`,
+  뒤에 시작했으면(A1 — 다시 받은 요청의 것) 그 요청만 놓는다. 그리고 그런 요청은 맞추기의 차례를 밀지 않는다(`failedBare` — 집은 후보에 표만 하고
+  뒤 요청은 같은 자리부터 본다, 오른쪽 맞추기에서는 빠진다) — 차례를 밀면 다시 받은 요청의 기록이 성공으로 끝난 뒤 그 요청이 다음 기록을 집어 다시 받은
+  요청이 짝을 잃었다(세 요청 시험을 쓰며 찾았다). 차례가 앞인 그런 요청이 결과를 모르는 기록을 이 요청의 후보 앞에 쥐고 있으면 이 요청은 그 끝을
+  기다린다(`held` — 시한이면 `ambiguous`; 고치기 전에는 그 사이에 다시 받은 요청이 뒤 요청의 기록을 집을 수 있었다 — 틀린 본문). 대가: 응답 없이
+  실패했는데 CEF 는 성공으로 끝낸 기록(CORS 막힘 꼴 — 실측은 없다)은 이제 `request_failed` 가 아니라 `unmatched`; abort 가 CEF 에 닿았는데 그 취소의 끝이
+  250 ms 넘게 늦으면 `ambiguous`. 판정 `body-r5-abort-refetch-many` 다섯 번 `request_failed` 0/750·틀린 본문 0(CEF 에 닿지 않은 abort 92–99/150).
+- **A2(MED) 무거운 페이지의 첫 적재에서 페이지 JSON 의 1/3 이 `busy` 였다**: 탭의 기다림 32 가 글 응답 백여 개(스크립트·스타일·JSON)가 한꺼번에 끝나는
+  순간에 넘쳤다 — 본문 호출은 ms 단위로 끝나 시한(3 초) 안에 받을 수 있는데도. 고침(사용자 결정 — 차례와 상한, 작성자가 정한 값): 기다림에 차례를 둔다 —
+  CDP 자원 종류(`requestWillBeSent`·`responseReceived` 의 `type`)가 `Document`·`Script`·`Stylesheet`·`Image`·`Font`·`Media` 면 뒤 차례(`lowPriority` —
+  페이지가 그리는 데 쓰고 주소로 다시 받을 수 있는 것; 문서는 snapshot·content 로도 읽고 iframe 이 많은 페이지에서 데이터를 밀어내지 않게), 그 밖
+  (`XHR`·`Fetch`·`EventSource`·`Manifest`·`TextTrack`·`Ping`·`Other`… 종류를 모름도)은 앞 차례 — 앞 차례끼리·뒤 차례끼리는 들어온 차례. 상한은 탭 128(그
+  탭이 시한 3 초 안에 보낼 수 있는 가장 많은 수 = 버스트 60 + 초당 20 × 3 초)·모든 탭 512(기다림 하나 약 220 바이트 — 512 개 ≈ 110 KiB; 본문은 받기
+  전까지 Chromium 의 버퍼에 있고 다음 문서로 옮기면 사라지므로 시한 3 초는 그대로 — J4). 넘치면 앞 차례는 뒤 차례의 가장 새것을 `busy` 로 내주고 들어가고,
+  뒤 차례(또는 내줄 것이 없는 앞 차례)는 제가 `busy`. 시한은 줄 전체를 본다(차례가 들어온 때와 다르다). 하나 1 MiB·초당 20·버스트 60·바이트 양동이·동시
+  2/8·maru 의 탭 8 MiB·앱 32 MiB 는 그대로 — 차례를 둔 뒤 페이지 JSON 에 초당 수는 걸림돌이 아니었다(스크립트가 대신 `busy` 18/30 — 뜻한 대로). 판정
+  `body-r5-mix-page-json` 88/90·88/90·90/90(고치기 전 57–62/90), 같은 페이지 전체 120/159(92/159), 적대 탭(900 KiB 120 개 + 작은 것 200 개)과 함께 다른
+  기록 탭 60/60 두 번·sidecar RSS 147→185 MiB·153→180 MiB(고치기 전 149→179 MiB).
+- **C1(LOW, 코드 읽기) 넘김 상자가 넘쳐 버린 끝**: `queueRefused` 는 시작 아닌 기록(리다이렉트·응답·끝)이면 아무것도 하지 않아, 버린 끝의 후보는 끝을 영영
+  기다렸다 — maru 는 그 본문을 늘 `pending` 으로 보였고 50 ms 주기 task 가 멈추지 않았다. 고침: 본문을 기록할 때 그 요청 번호의 표지를 붙일 탭마다 남기고
+  (`net_gate.LostMark` — 256 개, 넘치면 그 탭을 넘침으로), 보내는 task 가 함께 꺼낸 기록을 표에 넘긴 **뒤에**(그 요청의 시작은 표지보다 먼저 상자에 들었다)
+  `cefLost`·`cefLostAll` 로 후보를 끝난 것·결과를 모르는 것으로 친다(`Candidate.lost` — 짝이 없으면 시한 뒤 `unmatched`, 짝이면 `ambiguous`, 설정 끔의
+  덮임을 기다리던 것은 덮이지 않는 쪽, 응답 없이 실패한 요청은 그것을 제 것으로 정하지 않는다).
+- **N1(NIT) 서비스 워커의 navigation preload 응답은 본문이 없다**(판정 20/20 `unmatched` — preload 의 CEF 기록은 서비스 워커 갈래가 아니고 CDP 의 이동은
+  워커 쪽이다): 짝짓지 않고(사용자 결정) 알고 둔 틈에 적었다(위 「남은 틈」·control-plane-browser).
+- **변이 생존(리뷰)**: M11(한 바이트 남은 조각의 `body_next_offset`)·M13(한 번에 주는 바이트의 64 KiB 상한 — 링에서)·M14(지우기가 끝난 다른 상태를
+  `discarded` 로)·M25(`--out` 이 조각 사이에 바뀐 본문 크기)를 덮는 시험을 더해 넷 다 RED. S18(옛 세션의 늦은 결과)은 같은 뜻이다 — 켬·끔이 그 탭의 보낸
+  호출을 모두 목록에서 빼므로 다른 세션의 호출은 목록에 남지 않는다. 리뷰의 변이 72 개(67 RED)의 산 다섯은 넷이 RED·하나는 같은 뜻 — 리뷰 판으로 71 RED·같은 뜻 1(다른 67 은 다시 돌리지 않았다; 기다림 상한을
+  바꾼 꼴(S13)은 고친 코드의 그 줄이 바뀌어 이번 변이 Q01·Q05 가 대신 본다).
+- **시험 도구·시험**: A2 재현은 보낼 것이 없으면(초당 본문 수 양동이) 시간을 10 ms 씩 보낸다 — 전에는 그 자리에서 멈춰 「시한 안에 다 받는다」 를 보지
+  못했다(고친 표로 63/100 에서 멈췄다 — 시한 안에 100 이 모두 나간다); 응답은 스크립트(뒤 차례)로 알린다. 3 회차 P5 시험은 결과를 모르는 abort 기록이
+  있으면 다시 받은 요청이 그 끝을 기다리고, 바이트 전에 실패한 요청도 CEF 의 실패 끝을 본 뒤 `request_failed` 로 고쳤다. 동시·초당 상한 시험은 기다림 상한을
+  상수로 센다.
+- **검증**: 순수 — A1·A2 재현과 더한 시험 아홉(실패 시각·자원 종류 읽기, 느린 다시 받기와 맞지 않는·없는 실패 시각, 늦은 취소 끝, 세 요청의 차례, 물 높이의
+  실패 시각, 기다림의 차례·내주기·줄 가운데의 시한, 전체 상한, 응답에서만 안 종류, 버린 끝; `net_gate` 의 버린 기록 표지) — 139 통과. CLI·session — 변이
+  생존 넷을 덮는 시험 — 799 통과. 판정자(실제 CEF 154) — 위 숫자(ReleaseFast), 디버그 빌드의 `--network` 173 통과(`body-r5-*` 스물여섯
+  포함)·`--upload` 9, cdp 스모크 40 통과. 변이 40(사본에서 — 순수 36·CLI 4): 첫 판 RED 30·컴파일 실패 5(쓰지 않는
+  인자 — 고쳐 썼다)·산 다섯(물 높이의 실패 시각·실패 시각의 검사·응답에서만 안 종류 — 시험을 더했다; 끝이 버려진 후보의 `definite`·받으러 간 후보의 표지 —
+  같은 뜻이라 코드를 줄였다), 둘째 판 40/40 RED. 변이하지 않은 것: `network.zig` 의 배선(넘친 시작 아닌 기록 → `queueRefused`, flush → `cefLost`) —
+  실제 CEF 에서 상자를 넘치게 해야 한다(판단은 `net_gate`·`net_body_table` 의 순수 시험이 본다).

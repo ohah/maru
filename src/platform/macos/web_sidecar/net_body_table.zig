@@ -46,6 +46,12 @@
 //! W9d② 최종 재검증: (D-A) N1 이 앞 문서의 기록을 끝낼 때 왼쪽 맞추기가 그 기록에 맞춘 열린 CDP 요청도 함께 놓는다(`retireOwner` — 기록만 지우면 그
 //! 요청이 다시 불러온 문서의 같은 주소 기록을 가져갔다). (D-B) 자리 상한의 묶음 놓기가 놓은 요청의 창 끝까지는 본문을 붙이지 않는다(`Tab.cdp_drop_until`).
 //! (N-a) 끊긴 CDP 자리 훑기는 짝 없는 후보의 색인으로(`buildCandIndex`·`cdpMayPair` — 요청 × 후보였다).
+//! W9d② 재검증 2–9 회차(WB): 판정 밖에서 짝 없는 기록을 끝내거나 지우는 모든 길(N1 끊김·짝 없는 시한·모호한 판정의 짝과 MED-2 사이 후보·A1
+//! 시한 끝·후보 상한)은 그 기록의 **주인일 수 있는** CDP 요청(`mayOwn`)을 모두 함께 맞추기에서 뺀다(`expireRecords`) — 기록만 지우면 주인이
+//! 차례에 남아 남의 기록을 가져갔다(두 맞추기가 함께 밀려 갈림으로 보이지 않는다). 끊긴 기록에 열린 주인 후보가 둘 이상이면 시한까지 지우지
+//! 않는다. 응답 없이 실패한 요청이 쥔 기록에 기대는 판정은 그 요청이 정해질 때까지 기다리고(`held`), 그 기록의 실패 끝이 새
+//! 문서 시작 뒤에 왔으면 그 abort 의 것으로 정하지 않는다(`definite`). 앞 문서의 열린 요청이 새 문서의 기록을 쥐면 그 뒤 요청은 본문을 붙이지
+//! 않는다(`crossesDoc` — WB-3). CDP 자리 상한의 표지는 주소마다(`Tab.cdp_drop_marks`).
 //!
 //! 시험이 증명하는 것: 맞추기(두 도착 차례·창·같은 주소의 차례 — 창이 다른 동시 요청·기록이 아직인 뒤 요청·ExtraInfo 가 먼저 온 요청·문 넘김과
 //! 보이는 규칙이 다른 후보의 모호함·CDP 가 보지 못한 같은 주소 후보의 모호함과 갈린 다른 요청·서비스 워커 갈래·조각 떼기·A → B → A 와 다시
@@ -75,6 +81,8 @@ pub const window_after_us: i64 = 2_000_000;
 pub const cef_grace_us: i64 = 250_000;
 /// 짝이 없는 CEF 요청이 끝난 뒤 `unmatched` 로 정하기까지(그 뒤의 CDP 끝이 아직 짝을 찾을 수 있게).
 pub const unclaimed_expiry_us: i64 = 3_000_000;
+/// 재검증 2–9 회차 WB: 성공으로 끝난 요청의 CEF 끝이 늦어도 이만큼 안에는 왔다(`Table.mayOwn` — CEF 의 끝은 렌더러의 `loadingFinished` 보다 먼저다).
+pub const end_slack_us: i64 = 20_000;
 /// 자리가 날 때까지 기다리는 본문의 시한 — 다음 문서로 옮기면 본문이 사라진다(J4).
 pub const waiting_expiry_us: i64 = 3_000_000;
 /// W9d② 적대 리뷰 3 회차 S1: 보낸 `getResponseBody` 의 답을 기다리는 시한 — 넘기면 그 본문은 `unavailable` 로 끝내고 자리를 놓는다(늦은 답은
@@ -120,6 +128,10 @@ pub const flood_events_per_s: u32 = 5000;
 pub const flood_seconds: u8 = 2;
 /// 탭마다 기억하는 문 넘김 표지 수(넘치면 그 창 전체를 모호함으로).
 pub const max_drop_marks: usize = 128;
+/// 재검증 2–9 회차 N3: CDP 자리 상한의 묶음 놓기가 남기는 주소마다의 표지 수(`Tab.cdp_drop_marks` — 묶음 하나만큼, 넘치면 탭 전체로 접는다).
+pub const max_cdp_drop_marks: usize = cdp_evict_batch;
+/// 재검증 2–9 회차 WB-3: 기억하는 새 문서 시작 수(`Tab.doc_starts`).
+pub const max_doc_starts: usize = 16;
 /// `getResponseBody` 번호 대역 — 다른 DevTools 사용처와 겹치지 않는다(J13: 권한 0 부터·알림 20000 부터·`devtools_table` [1<<29, 1<<30)·미디어 메뉴
 /// [1<<30, 2^31)).
 pub const id_base: i32 = 1 << 28;
@@ -874,6 +886,41 @@ const CandKey = struct {
     }
 };
 
+/// 재검증 2–9 회차 WB: 모든 열쇠를 한 번에 보는 칸(`Table.sortForOwners`) — (주소, 메서드, 서비스 워커 갈래, 시각, 자리) 차례.
+const GroupItem = struct {
+    url: u64,
+    method: u64,
+    sw: bool,
+    t: i64,
+    idx: usize,
+
+    fn group(a: GroupItem, b: GroupItem) std.math.Order {
+        if (a.url != b.url) return std.math.order(a.url, b.url);
+        if (a.method != b.method) return std.math.order(a.method, b.method);
+        if (a.sw != b.sw) return if (b.sw) .lt else .gt;
+        return .eq;
+    }
+
+    fn lessThan(_: void, a: GroupItem, b: GroupItem) bool {
+        return switch (group(a, b)) {
+            .lt => true,
+            .gt => false,
+            .eq => a.t < b.t or (a.t == b.t and a.idx < b.idx),
+        };
+    }
+
+    /// `key` 보다 작지 않은 첫 자리(정렬된 `items`).
+    fn lowerBound(items: []const GroupItem, key: GroupItem) usize {
+        var lo: usize = 0;
+        var hi: usize = items.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (lessThan({}, items[mid], key)) lo = mid + 1 else hi = mid;
+        }
+        return lo;
+    }
+};
+
 const Waiting = struct {
     request: u64,
     rid: Rid,
@@ -945,9 +992,17 @@ pub const Tab = struct {
     /// W9d② 20 회 검증 N1: 주 프레임에 마지막으로 새 문서가 시작된 UI 시각(µs — `documentStarted`, 0 = 아직). 그보다 앞에 시작했는데 CEF 가
     /// 취소·실패로 끝낸 요청은 앞 문서와 함께 끊긴 것이다 — CDP 는 그 끝을 보내지 않는다(실측 0/34).
     doc_at: i64 = 0,
-    /// W9d② 최종 재검증 D-B: CDP 자리 상한의 묶음 놓기(`dropOldestCdp`)가 놓은 요청의 창 끝(기준 시각 + `window_after_us`)의 가장 큰 값(µs, 0 = 없다).
-    /// 놓인 요청의 CEF 기록은 남는다 — 같은 열쇠의 다른 요청이 그것을 제 짝으로 볼 수 있으니, 창이 여기까지 닿는 요청은 짝을 지어도 본문을
-    /// 붙이지 않는다(`ambiguous`). 줄지 않는다 — 창이 이 값보다 뒤에서 시작하는 요청에는 듣지 않으니 잊을 까닭이 없다.
+    /// 재검증 2–9 회차 WB-3: 최근 새 문서 시작 시각들(고리 — `doc_starts_len` 개, 넘치면 가장 오래된 것을 덮는다). 열린 요청과 그것이 쥔 기록
+    /// 사이에 문서 경계가 있는가를 본다(`crossesDoc`).
+    doc_starts: [max_doc_starts]i64 = @splat(0),
+    doc_starts_next: usize = 0,
+    /// W9d② 최종 재검증 D-B: CDP 자리 상한의 묶음 놓기(`dropOldestCdp`)가 놓은 요청의 창 끝(기준 시각 + `window_after_us`)을 주소마다(µs —
+    /// `cdp_drop_marks`). 놓인 요청의 CEF 기록은 남는다 — 같은 주소의 다른 요청이 그것을 제 짝으로 볼 수 있으니, 창이 여기까지 닿는 같은 주소
+    /// 요청은 짝을 지어도 본문을 붙이지 않는다(`ambiguous`). 재검증 2–9 회차 N3: 전에는 탭 전체의 값 하나라 다른 주소의 요청도 2 초 동안
+    /// `ambiguous` 였다(4096 묶음 뒤 다른 주소 90 개 중 31). 표지 자리가 차면 그 묶음의 남은 것은 탭 전체의 값(`cdp_drop_until` — 0 = 없다)으로
+    /// 접는다(보수적). 줄지 않는다 — 창이 이 값보다 뒤에서 시작하는 요청에는 듣지 않으니 잊을 까닭이 없다. 기록을 다시 켜면(`start`) 비운다(놓인
+    /// 요청의 기록도 그때 함께 끝났다).
+    cdp_drop_marks: std.ArrayList(DropMark) = .empty,
     cdp_drop_until: i64 = 0,
 
     pub fn recording(self: *const Tab) bool {
@@ -955,6 +1010,7 @@ pub const Tab = struct {
     }
 
     fn deinit(self: *Tab, gpa: std.mem.Allocator) void {
+        self.cdp_drop_marks.deinit(gpa);
         self.cands.deinit(gpa);
         self.cdp.deinit(gpa);
         self.waiting.deinit(gpa);
@@ -994,8 +1050,21 @@ pub const Table = struct {
         taken: std.ArrayList(bool) = .empty,
         /// 최종 재검증 N-a: 끊긴 CDP 자리 훑기의 짝 없는 후보 색인(열쇠·IO 시각 차례 — `cdpMayPair`).
         index: std.ArrayList(CandKey) = .empty,
+        /// 재검증 2–9 회차 WB: 끝내는 기록의 주인일 수 있는 요청 찾기(`sortForOwners`) — 요청·끝낼 후보의 (열쇠, 시각) 칸, 끝낼 후보·놓을 요청의
+        /// 표.
+        all_reqs: std.ArrayList(GroupItem) = .empty,
+        all_cands: std.ArrayList(GroupItem) = .empty,
+        drop_cand: std.ArrayList(bool) = .empty,
+        drop_cdp: std.ArrayList(bool) = .empty,
+        /// 본문 없이 끝낼 기록 자리(`tryDecide` — 모호한 판정의 짝과 사이 후보).
+        recs: std.ArrayList(usize) = .empty,
 
         fn deinit(self: *Scratch, gpa: std.mem.Allocator) void {
+            self.all_reqs.deinit(gpa);
+            self.all_cands.deinit(gpa);
+            self.drop_cand.deinit(gpa);
+            self.drop_cdp.deinit(gpa);
+            self.recs.deinit(gpa);
             self.index.deinit(gpa);
             self.taken.deinit(gpa);
             self.reqs.deinit(gpa);
@@ -1050,6 +1119,9 @@ pub const Table = struct {
             t.session = session;
             t.paused = false;
             t.flood_over = 0;
+            // 재검증 2–9 회차 N3: 놓인 요청의 기록은 방금 함께 끝났다 — 그 표지도 비운다.
+            t.cdp_drop_marks.clearRetainingCapacity();
+            t.cdp_drop_until = 0;
             return true;
         }
         for (&self.tabs) |*t| if (t.browser == 0) {
@@ -1124,8 +1196,12 @@ pub const Table = struct {
             const victim = for (t.cands.items, 0..) |e, i| {
                 if (!e.claimed) break i;
             } else return false;
+            // 재검증 2–9 회차 WB: 그 기록의 주인일 수 있는 CDP 요청도 맞추기에서 뺀다(`expireRecords` 의 규칙 — 기록만 지우면 주인이 다음 기록을
+            // 가져간다). 그 요청의 끝은 이 `busy` 다(제 기록이 따로 있었으면 그 기록은 짝 없는 시한으로 끝난다).
+            try self.retireOwnersOf(gpa, t, &.{victim});
             try self.emit(gpa, .{ .end = .{ .browser = browser, .session = t.session, .request = t.cands.items[victim].request, .state = .busy } });
             _ = t.cands.orderedRemove(victim);
+            self.dropRetired(t);
         }
         var cand = c;
         cand.claimed = false;
@@ -1235,6 +1311,16 @@ pub const Table = struct {
     pub fn documentStarted(self: *Table, browser: BrowserId, now_us: i64) void {
         const t = self.tabOf(browser) orelse return;
         t.doc_at = @max(now_us, 1);
+        t.doc_starts[t.doc_starts_next] = t.doc_at;
+        t.doc_starts_next = (t.doc_starts_next + 1) % max_doc_starts;
+    }
+
+    /// 재검증 2–9 회차 WB-3: 시각 `from`(요청의 기준 시각)과 `to`(기록의 IO 시각) 사이에 새 문서가 시작했는가 — 그 요청은 앞 문서의 것인데 쥔
+    /// 기록은 새 문서의 것이다. 새 문서 알림(`on_load_start`)은 문서가 실제로 바뀐 때보다 늦어 새 문서의 첫 요청이 알림보다 먼저 시작할 수
+    /// 있다 — 경계를 알림 앞 `window_before_us` 까지 넓게 본다(요청은 알림 앞, 기록은 그 넓힌 경계 뒤).
+    fn crossesDoc(t: *const Tab, from: i64, to: i64) bool {
+        for (t.doc_starts) |d| if (d != 0 and from < d and d - window_before_us <= to) return true;
+        return false;
     }
 
     fn markLost(c: *Candidate, now_us: i64) void {
@@ -1265,10 +1351,20 @@ pub const Table = struct {
     /// 그래서 놓인 요청의 창 끝까지를 적어 두고(`Tab.cdp_drop_until`) 창이 거기에 닿는 요청은 본문을 붙이지 않는다 — 놓인 요청의 기록은 그
     /// 요청의 창 안에 있으니, 그 기록을 짝으로 볼 수 있는 요청은 모두 창이 그 끝 앞에서 시작한다. 값은 묶음마다 한 번 훑어(O(묶음)) 정한다.
     /// CEF 가 보지 못한 요청(메모리 캐시·미리 받기·네트워크 밖의 서비스 워커 응답)과 자리만 잡은 것은 기록이 없어 적지 않는다.
-    fn dropOldestCdp(t: *Tab) void {
+    fn dropOldestCdp(gpa: std.mem.Allocator, t: *Tab) void {
         const n = @min(cdp_evict_batch, t.cdp.items.len);
         for (t.cdp.items[0..n]) |*o| if (o.has_key and o.state != .cached and !o.prefetch and !o.sw_off_network) {
-            t.cdp_drop_until = @max(t.cdp_drop_until, o.anchor() + window_after_us);
+            const until = o.anchor() + window_after_us;
+            const mark = for (t.cdp_drop_marks.items) |*m| {
+                if (m.url == o.key_url) break m;
+            } else null;
+            if (mark) |m| {
+                m.t_us = @max(m.t_us, until);
+            } else if (t.cdp_drop_marks.items.len < max_cdp_drop_marks) {
+                t.cdp_drop_marks.append(gpa, .{ .url = o.key_url, .t_us = until }) catch {
+                    t.cdp_drop_until = @max(t.cdp_drop_until, until); // 자리를 못 잡으면 탭 전체로(보수적)
+                };
+            } else t.cdp_drop_until = @max(t.cdp_drop_until, until);
         };
         t.cdp.replaceRangeAssumeCapacity(0, n, &.{});
     }
@@ -1382,7 +1478,7 @@ pub const Table = struct {
                 }
                 if (v.redirect) return; // 첫 홉을 못 봤다 — 옮겨 간 주소는 CEF 의 열쇠(첫 주소)가 아니다
                 const rid = Rid.init(v.rid) orelse return;
-                if (t.cdp.items.len >= max_cdp) dropOldestCdp(t);
+                if (t.cdp.items.len >= max_cdp) dropOldestCdp(gpa, t);
                 try t.cdp.append(gpa, .{ .rid = rid, .key_url = v.url_hash, .key_method = v.method_hash, .ts_us = v.ts_us, .prefetch = v.prefetch, .has_key = true, .last_url = v.url_hash, .low = v.low });
             },
             .extra_info => |v| {
@@ -1397,7 +1493,7 @@ pub const Table = struct {
                         placeholders += 1;
                         if (oldest == null) oldest = j;
                     };
-                    if (placeholders >= max_placeholders) _ = t.cdp.orderedRemove(oldest.?) else if (t.cdp.items.len >= max_cdp) dropOldestCdp(t);
+                    if (placeholders >= max_placeholders) _ = t.cdp.orderedRemove(oldest.?) else if (t.cdp.items.len >= max_cdp) dropOldestCdp(gpa, t);
                     try t.cdp.append(gpa, .{ .rid = rid, .key_url = 0, .key_method = 0, .ts_us = std.math.maxInt(i64), .has_key = false, .sends = 0, .placed_at = @max(now_us, 1) });
                     break :blk t.cdp.items.len - 1;
                 };
@@ -1502,12 +1598,17 @@ pub const Table = struct {
     /// 실패한 요청 `o` 가 후보 `c` 를 제 것으로 정해도 되는가 — CEF 가 그 기록을 실패·취소로 끝냈을 때만(5 회차 A1 — 전에는 실패를 본 때까지
     /// 시작한 기록이면 결과를 보지 않았다). 끝이 아직이면 그 기록은 다음 요청의 것일 수 있다 — 기다리고(`tryDecide`), CEF 가 성공으로 끝내면
     /// 짝이 아니다(`compatible`). 끝이 버려진 후보(`lost` — 끝난 것으로 쳤을 뿐 `cef_failed` 를 세우지 않는다)는 결과를 모르니 정하지 않는다.
-    fn definite(o: *const Cdp, c: *const Candidate) bool {
+    ///
+    /// 재검증 2–9 회차 WB: 그 실패가 새 문서 시작(`doc_at`) 앞인데 기록의 실패 끝이 그 뒤에 왔으면 정하지 않는다 — 문서를 옮기며 CEF 가 진행 중
+    /// 요청을 모두 취소하므로 그 끝은 이 abort 의 것이 아니라 다음 요청의 기록이 끊긴 것일 수 있다(퍼즈: CEF 에 닿지 않은 abort 가 뒤 요청의
+    /// 끊긴 기록을 `request_failed` 로 가져가, 그 기록의 주인이 기록 없이 차례에 남았다). 시한 뒤의 길(`tryDecide`)이 정한다.
+    fn definite(o: *const Cdp, c: *const Candidate, doc_at: i64) bool {
         if (o.state != .failed or o.responded_at != 0 or o.restart_ts_us != 0) return true;
+        if (doc_at != 0 and o.failed_at < doc_at and c.ended_at >= doc_at) return false;
         return c.ended_at != 0 and c.cef_failed;
     }
 
-    /// 맞추기의 왼쪽 차례(`tryDecide` 와 N1 끊김의 짝 놓기 `retireOwner` 가 함께 쓴다) — 열쇠 `key` 의 CDP 요청(기준 시각 차례 — `scratch.reqs`)과
+    /// 맞추기의 왼쪽 차례(`tryDecide` 가 쓴다) — 열쇠 `key` 의 CDP 요청(기준 시각 차례 — `scratch.reqs`)과
     /// 짝 없는 후보(IO 시각 차례 — `scratch.cands`)를 채우고 요청마다 왼쪽 맞추기의 후보 자리를 `scratch.left` 에 둔다(`none` = 아직 기록이 오지
     /// 않았다).
     ///
@@ -1637,21 +1738,41 @@ pub const Table = struct {
         // 기다린다. 시한까지 모르면 정하지 않는다: CDP 의 실패 시각 뒤에 시작한 기록은 다음 요청의 것(다시 받기 — 실제 CEF 93/93 이 실패 시각
         // 뒤)이라 이 요청만 놓고, 앞에 시작한 기록은 이 요청의 것일 수 있어(abort 가 CEF 의 끝보다 먼저 보였는데 그 끝이 늦다) 다음 요청에게 주지
         // 않고 본문 없이 끝낸다(`ambiguous`).
-        if (!definite(&r, &t.cands.items[ci])) {
+        if (!definite(&r, &t.cands.items[ci], t.doc_at)) {
             if (now_us - r.done_at < cef_grace_us) return;
             const c = t.cands.items[ci];
             _ = t.cdp.orderedRemove(i);
             if (c.t_io_us <= r.failed_at) {
+                // 재검증 2–9 회차 WB: 그 기록의 주인일 수 있는 다른 요청도 맞추기에서 뺀다 — 그 기록이 그 요청의 것이었으면(abort 가 CEF 에 닿지
+                // 않았다; 이 요청은 차례를 밀지 않고 집어 그 요청의 왼쪽 짝은 뒤로 밀려 있었다) 남겨 두면 다음 기록(남의 것)을 가져간다(검증 5 회차
+                // B). 본문은 잃지만 틀리지 않는다.
+                try self.retireOwnersOf(gpa, t, &.{ci});
                 try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = c.request, .state = .ambiguous, .flags = .{ .credentialed = c.cef_credentialed } } });
                 _ = t.cands.orderedRemove(ci);
+                self.dropRetired(t);
             }
             return;
         }
         // 5 회차 A1: 응답 없이 실패한 요청이 이 요청의 후보 앞의 기록을 CEF 끝이 아직인 채 쥐고 있다 — 그 기록이 성공으로 끝나면 놓여 이 요청의
         // 짝이 바뀐다(abort 가 CEF 에 닿지 않았으면 그 기록은 다시 받은 이 요청의 것이다). 끝이 올 때까지 기다리고 시한이면 본문 없이.
+        // 재검증 2–9 회차 WB: 쥔 기록이 이 요청의 후보 뒤여도 이 요청의 창 안이면 같다 — 두 맞추기가 모두 그 기록을 건너뛰어(`taken`) 갈림을
+        // 보이지 못한다(퍼즈: 워커의 기록이 이 요청의 짝 자리에 들고, 이 요청의 기록은 그 실패한 요청이 쥐었다 — 둘이 함께 워커의 기록을 줬다).
+        // 쥔 기록이 뒤에 있고 차례가 이 요청 뒤인 요청 가운데 아직 짝이 없는(기록이 오지 않은 것으로 보인) 요청이 그 기록과 짝일 수 있으면 그
+        // 요청의 기록으로 본다(abort 의 다시 받기와 같은 주소의 다른 요청 — 5 회차 A1 의 꼴, 그 요청은 실패한 요청이 놓으면 그 기록을 받는다).
         var held = false;
-        if (!failedBare(&r)) for (reqs, sc.left.items) |j, lp| if (lp != none and lp < left and failedBare(&t.cdp.items[j]) and !definite(&t.cdp.items[j], &t.cands.items[cands[lp]])) {
-            held = true;
+        if (!failedBare(&r)) for (reqs, sc.left.items) |j, lp| {
+            if (j == i or lp == none or lp == left or !failedBare(&t.cdp.items[j])) continue;
+            const y = &t.cands.items[cands[lp]];
+            if (definite(&t.cdp.items[j], y, t.doc_at)) continue;
+            if (lp < left) {
+                held = true;
+                continue;
+            }
+            if (!compatible(&r, y)) continue;
+            const explained = for (reqs[me + 1 ..], sc.left.items[me + 1 ..]) |k, kl| {
+                if (kl == none and !failedBare(&t.cdp.items[k]) and compatible(&t.cdp.items[k], y)) break true;
+            } else false;
+            if (!explained) held = true;
         };
         if (held and now_us - r.done_at < cef_grace_us) return;
         if (r.state == .finished) {
@@ -1688,48 +1809,212 @@ pub const Table = struct {
                 t.cdp.items[j].tainted = true;
             };
         }
-        if (r.tainted or late or held or t.cands.items[ci].lost) ambiguous = true;
+        // 재검증 2–9 회차 WB-3: 차례가 이 요청 앞인 열린 앞 문서의 요청(새 문서 알림 앞에 보냈다 — CDP 끝이 오지 않는다)이 새 문서 뒤에 시작한
+        // 기록을 왼쪽 짝으로 쥔다 — 그 요청은 CEF 에 닿지 않아 제 기록이 없을 수 있다(문서가 떠나며 끊겼다). 그러면 두 맞추기가 함께 한 칸씩 밀려 이
+        // 요청의 짝이 남의 기록이다(검증 WB-3: 다시 불러온 문서의 두 같은 주소 요청). 가를 수 없으니 본문을 붙이지 않는다 — 그 요청은 쥔 기록이
+        // 짝 없는 시한으로 끝날 때 함께 빠진다(`expireRecords`).
+        var stale = false;
+        if (t.doc_at != 0) for (reqs[0..me], sc.left.items[0..me]) |j, lp| {
+            if (lp == none) continue;
+            const o = &t.cdp.items[j];
+            const c = &t.cands.items[cands[lp]];
+            // CEF 가 실패·취소로 끝낸 기록은 빼고 본다 — 대개 문서를 옮기며 끊긴 앞 문서 요청 제 기록이고(경계 앞 5 ms 안이면 넓힌 경계에 걸린다 —
+            // 실제 CEF `v20g-r9-gap-*`: 이것을 보지 않으면 다시 불러온 요청 절반이 ambiguous 였다), 성공한 요청의 짝이 아니라 본문이 붙을 일이 없다.
+            if (o.state == .open and !(c.cef_failed and c.ended_at != 0) and crossesDoc(t, o.anchor(), c.t_io_us)) stale = true;
+        };
+        if (r.tainted or late or held or stale or t.cands.items[ci].lost) ambiguous = true;
         if (t.drop_overflow_until != 0 and ts - window_before_us <= t.drop_overflow_until) ambiguous = true;
         // 최종 재검증 D-B: 자리 상한의 묶음 놓기가 놓은 요청의 기록이 이 요청의 창에 들 수 있다(`Tab.cdp_drop_until`).
         if (t.cdp_drop_until != 0 and ts - window_before_us <= t.cdp_drop_until) ambiguous = true;
+        for (t.cdp_drop_marks.items) |m| if (m.url == key.url and ts - window_before_us <= m.t_us) {
+            ambiguous = true;
+        };
         for (t.drops[0..t.drop_len]) |d| if (d.url == key.url and d.t_us >= ts - window_before_us and d.t_us <= ts + window_after_us) {
             ambiguous = true;
         };
-        // 끝낼 사이의 후보는 번호로 적어 둔다(판정이 목록을 바꾼다).
+        // 끝낼 사이의 후보는 번호로 적어 둔다(판정이 목록을 바꾼다). 재검증 2–9 회차 WB-1: 그 후보를 왼쪽 짝으로 쥔 다른 요청(그 후보의 주인)도
+        // 함께 맞추기에서 뺀다 — 기록만 끝내면 그 요청이 차례에 남아 다음 기록을 가져가 뒤 요청의 본문이 남의 기록에 붙었다(`expireRecords` 의 규칙;
+        // 그 요청의 끝은 이 `ambiguous` 다).
         try sc.extra.resize(gpa, extra_hi - extra_lo);
         for (cands[extra_lo..extra_hi], 0..) |x, n| sc.extra.items[n] = t.cands.items[x].request;
         const cand = t.cands.items[ci];
         _ = t.cdp.orderedRemove(i);
+        // 본문 없이 끝내는 기록(이 요청의 짝 — 모호하면 — 과 사이의 후보)은 짝을 정한 것이 아니다 — 그 주인일 수 있는 다른 요청도 뺀다.
+        if (ambiguous) {
+            try sc.recs.resize(gpa, extra_hi - extra_lo + 1);
+            for (cands[extra_lo..extra_hi], 0..) |x, n| sc.recs.items[n] = x;
+            sc.recs.items[extra_hi - extra_lo] = ci;
+            try self.retireOwnersOf(gpa, t, sc.recs.items);
+        }
         try self.decide(gpa, t, ci, cand, r, ambiguous, now_us);
         for (sc.extra.items) |req| for (t.cands.items, 0..) |c, x| if (c.request == req) {
             try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = req, .state = .ambiguous, .flags = .{ .credentialed = c.cef_credentialed } } });
             _ = t.cands.orderedRemove(x);
             break;
         };
+        if (ambiguous) self.dropRetired(t);
     }
 
-    /// W9d② 최종 재검증 D-A·R5-1: N1 이 끝내는 앞 문서의 기록 `ci`(짝 없음)를 왼쪽 맞추기가 짝으로 준 CDP 요청이 열려 있으면 그 요청도 놓는다 —
-    /// 앞 문서와 함께 끊긴 요청은 CDP 끝이 오지 않는다(실측 0/34). 그 요청이 열린 채 남으면 기록만 사라진 차례에서 다음 기록(다시 불러온 문서가
-    /// 같은 주소를 다시 받은 기록 — 그 요청의 창 2 초 안)을 가져가, 새 요청은 짝을 잃어 `unmatched` 가 됐다(검증 9 회차: 다른 호스트·머리 전 4/4).
-    /// 새 문서 맨 앞의 abort 가 새 문서 알림과 경주해 앞 문서의 것으로 보이고 그 CDP 실패가 시한(250 ms) 뒤에 오면, 다시 받은 요청의 기록을 그
-    /// 실패가 쥐어 `ambiguous` 였다(검증 R5-1) — 그 abort 요청도 여기서 함께 놓인다(끝은 `request_failed` 가 아니라 `unavailable` — 본문은 둘 다 없다).
-    ///
-    /// 틀린 본문이 붙지 않는 까닭: 놓는 것은 왼쪽 맞추기가 이미 그 기록에 맞춰 둔 요청 하나뿐이다 — 판정(`tryDecide`)이 짝을 정해 요청과 기록을
-    /// 함께 빼는 것과 같은 일이다(본문 호출 대신 `unavailable` 일 뿐 — 판정은 늘 그렇게 짝을 빼고, 남은 요청은 남은 기록으로 다시 맞춘다). 놓인 요청은 본문 호출을 내지 않고(자리가 없어 늦은 사건은 버린다) 기록의 끝은 여기서 하나
-    /// (`unavailable`)다. CDP 가 보지 못한 같은 주소의 기록이 섞여 이 짝이 틀렸더라도(그 요청의 진짜 기록이 뒤에 남는다) 그 기록은 지우지 않으니
-    /// 남은 요청의 두 맞추기가 갈림을 그대로 본다(`ambiguous`) — 증거를 지우는 것은 끝낸 이 기록 하나다. 그 기록을 짝으로 쥔 요청이 끝나 판정을
-    /// 기다리면(실패가 곧 왔는데 물 높이가 아직이다) 놓지 않고 거짓을 돌려준다 — 그 판정이 끝(`request_failed` 등)을 낸다. 새 문서 알림이 없는
-    /// 짝 없는 시한(`unmatched`)에는 쓰지 않는다 — 그 기록은 대개 CDP 가 보지 못한 워커·다른 프로세스 iframe 의 것이라, 같은 주소의 긴 요청을
-    /// 놓으면 그 요청이 제 본문을 잃는다(시험).
-    fn retireOwner(self: *Table, gpa: std.mem.Allocator, t: *Tab, ci: usize) std.mem.Allocator.Error!bool {
-        try self.matchLeft(gpa, t, t.cands.items[ci].key);
-        const sc = &self.scratch;
-        const p = std.mem.indexOfScalar(usize, sc.cands.items, ci) orelse return true;
-        const q = std.mem.indexOfScalar(usize, sc.left.items, p) orelse return true;
-        const j = sc.reqs.items[q];
-        if (t.cdp.items[j].state != .open) return false;
-        _ = t.cdp.orderedRemove(j);
+    /// 재검증 2–9 회차 WB: CDP 요청 `o` 가 짝 없는 기록 `c` 의 주인일 수 있는가 — `compatible`(자기 기록은 늘 그렇다: 창 안, 응답 앞에 시작,
+    /// 성공한 요청이면 실패로 끝나지 않은 기록, abort 면 성공으로 끝나지 않은 기록). 다만 성공으로 끝난 요청의 기록은 그 끝 무렵에 CEF 끝도
+    /// 왔다(CEF 의 끝은 브라우저 프로세스에서 렌더러의 `loadingFinished` 보다 먼저다) — 물 높이가 그 끝 + `end_slack_us` 를 넘었는데 아직 끝나지
+    /// 않은 기록은 그 요청의 것이 아니다(다시 시작은 실측이 달라 보지 않는다).
+    fn mayOwn(self: *const Table, o: *const Cdp, c: *const Candidate) bool {
+        if (!compatible(o, c)) return false;
+        if (o.state == .finished and o.restart_ts_us == 0 and c.ended_at == 0 and self.cef_seen_us > o.done_at + end_slack_us) return false;
         return true;
+    }
+
+    /// 끝낼 기록(`scratch.drop_cand` 참)과 요청을 (열쇠, 시각) 차례로 정렬한다(`scratch.all_cands`·`all_reqs` — 응답 전이면 두 서비스 워커 갈래
+    /// 모두). 끝낼 기록이 없으면 거짓.
+    fn sortForOwners(self: *Table, gpa: std.mem.Allocator, t: *Tab) std.mem.Allocator.Error!bool {
+        const sc = &self.scratch;
+        sc.all_cands.clearRetainingCapacity();
+        for (t.cands.items, 0..) |c, ci| if (sc.drop_cand.items[ci]) try sc.all_cands.append(gpa, .{ .url = c.key.url, .method = c.key.method, .sw = c.key.sw, .t = c.t_io_us, .idx = ci });
+        if (sc.all_cands.items.len == 0) return false;
+        sc.all_reqs.clearRetainingCapacity();
+        for (t.cdp.items, 0..) |o, j| {
+            if (o.state == .cached or o.prefetch or !o.has_key or o.sw_off_network) continue;
+            for ([_]bool{ false, true }) |sw| {
+                if (o.sw != sw and o.responded) continue;
+                try sc.all_reqs.append(gpa, .{ .url = o.key_url, .method = o.key_method, .sw = sw, .t = o.anchor(), .idx = j });
+            }
+        }
+        std.mem.sort(GroupItem, sc.all_cands.items, {}, GroupItem.lessThan);
+        std.mem.sort(GroupItem, sc.all_reqs.items, {}, GroupItem.lessThan);
+        return true;
+    }
+
+    /// 요청 `x` 의 창에 든, 끝낼 기록(`drop_cand` 참) 가운데 `x` 가 주인일 수 있는 첫 것(`all_cands` 자리) — 없으면 null.
+    fn firstOwned(self: *const Table, t: *const Tab, x: GroupItem) ?usize {
+        const sc = &self.scratch;
+        const cd = sc.all_cands.items;
+        var p = GroupItem.lowerBound(cd, .{ .url = x.url, .method = x.method, .sw = x.sw, .t = x.t - window_before_us, .idx = 0 });
+        while (p < cd.len and cd[p].group(x) == .eq and cd[p].t <= x.t + window_after_us) : (p += 1) {
+            if (sc.drop_cand.items[cd[p].idx] and self.mayOwn(&t.cdp.items[x.idx], &t.cands.items[cd[p].idx])) return p;
+        }
+        return null;
+    }
+
+    /// 재검증 2–9 회차 WB: 지금 끝내는 짝 없는 기록(`t.cands` 자리 `recs`)의 **주인일 수 있는** CDP 요청(`mayOwn`)을 모두 `scratch.drop_cdp` 에
+    /// 적는다(`dropRetired` 가 뺀다). 자기 기록은 늘 그 요청의 `mayOwn` 이라 진짜 주인은 꼭 든다. 요청마다 창의 첫 기록을 이분 찾기로 본다 —
+    /// 최종 재검증의 `retireOwner`(끊긴 기록마다 `matchLeft`)는 새 문서로 옮길 때 같은 주소 4095 개에 한 주기 ReleaseFast 153 ms·Debug 1.5 s
+    /// 였다(검증 R8-b).
+    fn retireOwnersOf(self: *Table, gpa: std.mem.Allocator, t: *Tab, recs: []const usize) std.mem.Allocator.Error!void {
+        const sc = &self.scratch;
+        try sc.drop_cand.resize(gpa, t.cands.items.len);
+        @memset(sc.drop_cand.items, false);
+        for (recs) |ci| if (!t.cands.items[ci].claimed) {
+            sc.drop_cand.items[ci] = true;
+        };
+        try sc.drop_cdp.resize(gpa, t.cdp.items.len);
+        @memset(sc.drop_cdp.items, false);
+        if (!try self.sortForOwners(gpa, t)) return;
+        for (sc.all_reqs.items) |x| if (self.firstOwned(t, x) != null) {
+            sc.drop_cdp.items[x.idx] = true;
+        };
+    }
+
+    /// `scratch.drop_cdp` 의 요청을 맞추기에서 뺀다 — 한 번 훑어 남길 것만 모은다(차례는 그대로). 그 요청은 본문을 부르지 않는다(늦게 온 CDP
+    /// 사건은 자리가 없어 버린다). 표는 그 뒤로 `t.cdp` 를 바꾸지 않은 채 불러야 한다(자리로 적었다).
+    fn dropRetired(self: *Table, t: *Tab) void {
+        const marks = self.scratch.drop_cdp.items;
+        var kept: usize = 0;
+        for (0..t.cdp.items.len) |j| {
+            if (j < marks.len and marks[j]) continue;
+            if (kept != j) t.cdp.items[kept] = t.cdp.items[j];
+            kept += 1;
+        }
+        t.cdp.shrinkRetainingCapacity(kept);
+        @memset(marks, false);
+    }
+
+    /// 짝 없는 기록의 끝(`tickAt`): N1 끊김(새 문서 앞에 시작해 CEF 가 취소·실패로 끝낸 기록 — `cef_grace_us` 뒤 `unavailable`)과 짝 없는 시한
+    /// (`unclaimed_expiry_us` — 새 문서 앞의 것은 `unavailable`, 그 밖은 `unmatched`).
+    ///
+    /// **재검증 2–9 회차 WB(규칙)**: 짝을 정하지 않고(`decide` 의 본문·실패 끝이 아니게) 기록을 끝내거나 지우는 모든 길은 그 기록의 **주인일 수
+    /// 있는** CDP 요청(`mayOwn`)을 모두 함께 맞추기에서 뺀다. 기록만 지우면 주인은 차례에 남아 다음 같은 열쇠의 기록(다른 요청의 것)을
+    /// 가져가고, 왼쪽·오른쪽 맞추기가 함께 한 칸씩 밀려 뒤 요청의 본문이 남의 기록에 붙는다(WB-1·WB-2 — 둘이 함께 밀리니 갈림으로 보이지
+    /// 않는다). 왼쪽 맞추기의 짝만 빼면 모자랐다 — 응답 없이 실패한 요청은 기록을 집되 차례를 밀지 않고(`taken`), CDP 가 보지 못한 워커의
+    /// 기록이 앞에 끼면 진짜 주인의 왼쪽 짝은 다른 기록이다(퍼즈). 주인일 수 있는 요청을 모두 빼면 남는 것은 「제 기록이 없는 요청」 이 아니라
+    /// 「주인이 없는 기록」 뿐이고, 남는 기록은 두 맞추기를 가르거나(MED-2 — `ambiguous`) 짝 없는 시한으로 끝난다 — 틀린 본문이 아니라 잃은
+    /// 본문이다. 길: 이 함수(N1 끊김·짝 없는 시한 — 전에는 끊김만 왼쪽 짝 하나를 놓았다), `tryDecide` 의 모호한 판정(그 짝과 MED-2 사이 후보)·A1
+    /// 시한 끝(`!definite`), `cefBegin` 의 후보 상한 `busy`. 끝나 판정을 기다리는 요청이 주인일 수 있으면 이번에 끝내지 않는다 — 그 판정이 끝을
+    /// 낸다. `restartCand` 는 기록을 같은 요청의 새 시도로 바꾼다(주인은 다시 시작의 규칙으로 그 시도와 짓는다 — `feasible`). 받으러 간
+    /// 기록(`claimed`)은 맞추기에 없다.
+    fn expireRecords(self: *Table, gpa: std.mem.Allocator, t: *Tab, now_us: i64) std.mem.Allocator.Error!void {
+        const sc = &self.scratch;
+        try sc.drop_cand.resize(gpa, t.cands.items.len);
+        @memset(sc.drop_cand.items, false);
+        var any = false;
+        for (t.cands.items, 0..) |cand, ci| {
+            // N1: 새 문서 앞에 시작한 요청(`old_doc`)은 앞 문서와 함께 떠났다 — CDP 는 그 끝을 보내지 않는다(문서가 없다). CEF 가 취소·실패로
+            // 끝냈으면 그 실패가 CDP 로 오는 것(`request_failed`·`partial` — 앞의 `decidePending` 이 정한다)을 기다린 뒤(CEF 끝에서
+            // `cef_grace_us`) 곧 `unavailable`. CEF 가 성공으로 끝냈으면(문서가 떠난 뒤 서버가 본문을 다 보냈다 — 실측 20 개 중 2) CDP 끝이 늦을 수
+            // 있어 짝 없는 시한까지 기다리고 그때 `unmatched` 가 아니라 `unavailable`. 결과를 모르는 후보(`lost` — 기록이 버려졌다)는 그대로
+            // `unmatched`.
+            const old_doc = !cand.lost and t.doc_at != 0 and cand.t_io_us < t.doc_at;
+            const cut = old_doc and cand.cef_failed and now_us - cand.ended_at >= cef_grace_us;
+            if (!cand.claimed and cand.ended_at != 0 and (cut or now_us - cand.ended_at >= unclaimed_expiry_us)) {
+                sc.drop_cand.items[ci] = true;
+                any = true;
+            }
+        }
+        if (!any) return;
+        try sc.drop_cdp.resize(gpa, t.cdp.items.len);
+        @memset(sc.drop_cdp.items, false);
+        if (try self.sortForOwners(gpa, t)) {
+            const cd = sc.all_cands.items;
+            // 미룬다: 끝나 판정을 기다리는 요청이 주인일 수 있는 기록(그 판정이 끝을 낸다 — 시한 안에 꼭 온다), 그리고 짝 없는 시한 전의 N1 끊김
+            // (취소된 앞 문서 기록)에 주인일 수 있는 열린 요청이 둘 이상인 기록 — 누구의 것인지 모르니 지우지 않고 둔다: 맞추기의 차례는 그대로이고,
+            // 성공으로 끝나는 요청은 취소된 기록의 주인이 아니어서 수가 준다(검증 R5-1 꼴: 앞 문서의 abort 와 그 다시 받기 — 다시 받기가 끝나면
+            // abort 하나가 남는다). 시한(`unclaimed_expiry_us`)에는 남은 주인을 모두 뺀다.
+            // (가) 끝나 판정을 기다리는 요청 — 대개 몇 없다 — 의 창에 든 기록.
+            for (sc.all_reqs.items) |x| {
+                const o = &t.cdp.items[x.idx];
+                if (o.state == .open) continue;
+                var p = GroupItem.lowerBound(cd, .{ .url = x.url, .method = x.method, .sw = x.sw, .t = x.t - window_before_us, .idx = 0 });
+                while (p < cd.len and cd[p].group(x) == .eq and cd[p].t <= x.t + window_after_us) : (p += 1) {
+                    if (self.mayOwn(o, &t.cands.items[cd[p].idx])) sc.drop_cand.items[cd[p].idx] = false;
+                }
+            }
+            // (나) 시한 전의 끊김마다 열린 주인일 수 있는 요청을 둘까지 센다(기록의 창 — 기준 시각이 `[IO − window_after_us, IO + window_before_us]`).
+            const rq = sc.all_reqs.items;
+            for (cd) |c| {
+                const ci = c.idx;
+                if (!sc.drop_cand.items[ci] or now_us - t.cands.items[ci].ended_at >= unclaimed_expiry_us) continue;
+                var n: u8 = 0;
+                var q = GroupItem.lowerBound(rq, .{ .url = c.url, .method = c.method, .sw = c.sw, .t = c.t - window_after_us, .idx = 0 });
+                while (q < rq.len and rq[q].group(c) == .eq and rq[q].t <= c.t + window_before_us and n < 2) : (q += 1) {
+                    const o = &t.cdp.items[rq[q].idx];
+                    if (o.state == .open and self.mayOwn(o, &t.cands.items[ci])) n += 1;
+                }
+                if (n >= 2) sc.drop_cand.items[ci] = false;
+            }
+            // (다) 지금 끝내는 기록만 남겨(차례 그대로) 열린 요청마다 창의 첫 주인일 수 있는 기록을 찾는다 — 그런 요청을 모두 놓는다.
+            var m: usize = 0;
+            for (0..cd.len) |p| if (sc.drop_cand.items[cd[p].idx]) {
+                cd[m] = cd[p];
+                m += 1;
+            };
+            sc.all_cands.shrinkRetainingCapacity(m);
+            for (rq) |x| if (t.cdp.items[x.idx].state == .open and self.firstOwned(t, x) != null) {
+                sc.drop_cdp.items[x.idx] = true;
+            };
+        }
+        var kept: usize = 0;
+        for (0..t.cands.items.len) |ci| {
+            const cand = t.cands.items[ci];
+            if (sc.drop_cand.items[ci]) {
+                const old_doc = !cand.lost and t.doc_at != 0 and cand.t_io_us < t.doc_at;
+                try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = cand.request, .state = if (old_doc) .unavailable else .unmatched, .flags = .{ .credentialed = cand.cef_credentialed } } });
+                continue;
+            }
+            t.cands.items[kept] = cand;
+            kept += 1;
+        }
+        t.cands.shrinkRetainingCapacity(kept);
+        self.dropRetired(t);
     }
 
     /// 짝지은 요청의 판정 — 끝내거나(본문 없음) 받으러 간다.
@@ -1926,29 +2211,8 @@ pub const Table = struct {
             }
             // 끝난 CDP 요청(짝을 기다린다) — 앞에서부터.
             try self.decidePending(gpa, t, now_us);
-            var c: usize = 0;
-            while (c < t.cands.items.len) {
-                const cand = t.cands.items[c];
-                // N1: 새 문서 앞에 시작한 요청(`old_doc`)은 앞 문서와 함께 떠났다 — CDP 는 그 끝을 보내지 않는다(문서가 없다). CEF 가 취소·실패로
-                // 끝냈으면 그 실패가 CDP 로 오는 것(`request_failed`·`partial` — 앞의 `decidePending` 이 정한다)을 기다린 뒤(CEF 끝에서
-                // `cef_grace_us`) 곧 `unavailable`. CEF 가 성공으로 끝냈으면(문서가 떠난 뒤 서버가 본문을 다 보냈다 — 실측 20 개 중 2) CDP 끝이 늦을 수
-                // 있어 짝 없는 시한까지 기다리고 그때 `unmatched` 가 아니라 `unavailable`. 결과를 모르는 후보(`lost` — 기록이 버려졌다)는 그대로
-                // `unmatched`.
-                // 최종 재검증 D-A: 그 기록과 함께 그것을 짝으로 쥔 열린 CDP 요청(앞 문서의 요청 — 끝이 오지 않는다)도 놓는다(`retireOwner`). 기록만
-                // 지우면 그 요청이 맞추기의 차례에서 다음 기록(다시 불러온 문서의 같은 주소 요청의 것)을 가져가 새 요청이 본문을 잃었다.
-                const old_doc = !cand.lost and t.doc_at != 0 and cand.t_io_us < t.doc_at;
-                const cut = old_doc and cand.cef_failed and now_us - cand.ended_at >= cef_grace_us;
-                if (!cand.claimed and cand.ended_at != 0 and (cut or now_us - cand.ended_at >= unclaimed_expiry_us)) {
-                    if (old_doc and !try self.retireOwner(gpa, t, c)) {
-                        c += 1; // 그 기록을 짝으로 쥔 CDP 요청이 끝나 판정을 기다린다 — 그 판정이 끝을 낸다
-                        continue;
-                    }
-                    try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = cand.request, .state = if (old_doc) .unavailable else .unmatched, .flags = .{ .credentialed = cand.cef_credentialed } } });
-                    _ = t.cands.orderedRemove(c);
-                    continue;
-                }
-                c += 1;
-            }
+            // 짝 없는 기록의 끝 — 그 기록의 주인(왼쪽 짝인 열린 CDP 요청)도 함께 뺀다(재검증 2–9 회차 WB — `expireRecords`).
+            try self.expireRecords(gpa, t, now_us);
             // D3: 끝이 오지 않을 열린 CDP 요청(창이 지났고 짝이 될 수 없다 — `cdpWindowPassed`·`cdpMayPair`)을 놓는다. 후보를 끝낸 뒤에 본다(방금
             // 끝난 후보가 그 짝이었을 수 있다). 한 번 훑으며 남길 것만 앞으로 모은다(많이 쌓였을 때 하나씩 빼면 그때마다 목록을 민다). 차례는 그대로다.
             // 최종 재검증 N-a: 창이 지난 요청이 있을 때만 후보 색인을 만든다(요청마다 후보를 모두 훑지 않는다).
@@ -2007,6 +2271,7 @@ const H = struct {
 
     /// 끝 하나를 센다 — 그 번호의 적은 시도 수(`cand` 를 거치지 않은 시작은 하나로 친다)보다 많으면 실패(끝은 시도마다 꼭 하나).
     fn noteEnd(self: *H, request: u64, state: State) !void {
+        if (g_debug_seed != 0) std.debug.print("    end rec {d} {s}\n", .{ request, @tagName(state) });
         const gop = try self.end_counts.getOrPut(gpa_t, request);
         if (!gop.found_existing) gop.value_ptr.* = 0;
         gop.value_ptr.* += 1;
@@ -3156,9 +3421,15 @@ test "W9d② 적대 리뷰 2 회차: 워커의 같은 주소 기록이 섞여 �
     try testing.expect(stateIs(&h, 201, .ambiguous));
     try testing.expect(stateIs(&h, 202, .ambiguous));
     // 앞 요청의 짝(200)도 가를 수 없었다(200 이 워커의 것이고 앞 요청의 기록이 201 일 수 있다 — 창 2 초 안) — 본문을 붙이지 않는다.
+    // 재검증 2–9 회차 WB: 앞 요청은 끝낸 사이 후보의 주인일 수 있어 그 판정 때 함께 맞추기에서 빠졌다(남으면 다음 기록을 가져간다) — 그
+    // 끝은 버려지고, 그 기록(200)은 짝 없는 시한으로 끝난다(전에는 앞 요청의 판정이 ambiguous 로 끝냈다 — 본문은 둘 다 없다).
     try h.respond(5, "p.0", "application/json", 10, 2_100_000);
     try h.finish(5, "p.0", 2_100_100);
-    try testing.expect(stateIs(&h, 200, .ambiguous));
+    try testing.expect(h.ended.get(200) == null);
+    h.table.cefEnd(5, 200, 2_100_200);
+    try h.table.tick(gpa_t, 2_100_200 + unclaimed_expiry_us);
+    try h.drain();
+    try testing.expect(stateIs(&h, 200, .unmatched));
     try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
     // 워커 없이 같은 꼴이면(앞 요청의 기록은 이 요청의 창 밖) 둘 다 제 본문을 받는다.
     _ = try h.cand(5, 300, url, 5_000_300, .{});
@@ -3307,9 +3578,15 @@ test "W9d② 적대 리뷰 2 회차: 갈린 맞추기 — 갈린 뒤 요청도 a
         try h.respond(5, "e.r", "application/json", 9, 5_029_000);
         try h.finish(5, "e.r", 5_030_000);
         try testing.expect(stateIs(&h, 541, .ambiguous) and stateIs(&h, 542, .ambiguous));
+        // 재검증 2–9 회차 WB: 뒤 요청은 끝낸 사이 후보(542)의 주인일 수 있어 앞 요청의 판정 때 함께 빠졌다 — 그 끝은 버려지고 543 은 짝 없는
+        // 시한으로 끝난다(본문 없음 — 전에는 뒤 요청의 판정이 ambiguous 로).
         try h.respond(5, "e.s", "application/json", 9, 5_039_000);
         try h.finish(5, "e.s", 5_040_000);
-        try testing.expect(stateIs(&h, 543, .ambiguous));
+        try testing.expect(h.ended.get(543) == null);
+        h.table.cefEnd(5, 543, 5_040_100);
+        try h.table.tick(gpa_t, 5_040_100 + unclaimed_expiry_us);
+        try h.drain();
+        try testing.expect(stateIs(&h, 543, .unmatched));
         try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
     }
     {
@@ -4614,7 +4891,9 @@ test "W9d② 최종 재검증 D-A: 앞 문서의 같은 주소 요청 넷(머리
     var got: [8]u64 = undefined;
     var n: usize = 0;
     var done: usize = 0;
-    while (now < 4_000_000) : (now += 50_000) {
+    // 재검증 2–9 회차 WB: 끊긴 기록마다 주인일 수 있는 열린 앞 문서 요청이 넷이라 끊김(+250 ms)에 지우지 않고 짝 없는 시한(CEF 끝 + 3 s)에
+    // 끝낸다 — 그동안 기록이 차례에 남아 새 넷은 제 기록을 받는다.
+    while (now < 1_300_000 + unclaimed_expiry_us + 100_000) : (now += 50_000) {
         try h.table.tickAt(gpa_t, now, now);
         try h.drain();
         while (done < h.fetches.items.len) : (done += 1) {
@@ -4673,7 +4952,7 @@ test "W9d② 최종 재검증 D-A: 끊긴 앞 문서 기록에 그것을 짝으�
     try testing.expect(!h.table.busy());
 }
 
-test "W9d② 최종 재검증 D-A 대조: 새 문서 알림 없이 짝 없는 시한으로 끝나는 기록(CDP 가 보지 못한 워커의 같은 주소)은 그것을 왼쪽 짝으로 쥔 긴 요청을 놓지 않는다 — 긴 요청은 제 본문" {
+test "W9d② 재검증 2–9 회차 WB(전에는 D-A 대조): 새 문서 알림 없이 짝 없는 시한으로 끝나는 기록(CDP 가 보지 못한 워커의 같은 주소)의 주인일 수 있는 열린 긴 요청도 함께 뺀다 — 긴 요청은 본문을 잃고(틀리지 않는다) 제 기록은 짝 없는 시한으로" {
     const u = "http://127.0.0.1/v20f/da/long";
     var h: H = .{};
     defer h.deinit();
@@ -4688,13 +4967,19 @@ test "W9d② 최종 재검증 D-A 대조: 새 문서 알림 없이 짝 없는 �
         try h.drain();
     }
     try testing.expect(stateIs(&h, 700, .unmatched));
+    // 700 이 x 의 기록이었으면(x 의 CDP 끝이 3 초 넘게 밀렸다) x 를 남겨 두면 701(다른 요청의 것일 수 있다)을 가져간다 — 가를 수 없으니 뺀다.
+    try testing.expectEqual(@as(usize, 0), h.table.tabOf(5).?.cdp.items.len);
     try h.respond(5, "x", "application/json", 9, 5_900_000);
     h.table.cefEnd(5, 701, 5_950_000);
     try h.finish(5, "x", 6_000_000);
-    try h.table.tickAt(gpa_t, 6_050_000, 6_050_000);
-    try h.drain();
-    var buf: [4]u64 = undefined;
-    try testing.expectEqualSlices(u64, &.{701}, h.fetchedRequests(&buf));
+    now = 6_050_000;
+    while (now < 9_000_000) : (now += 50_000) {
+        try h.table.tickAt(gpa_t, now, now);
+        try h.drain();
+    }
+    try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
+    try testing.expect(stateIs(&h, 701, .unmatched));
+    try testing.expect(!h.table.busy());
 }
 
 test "W9d② 최종 재검증 D-B(v20f A R8-1): CDP 자리 상한의 묶음 놓기(256) — 살아 있던 X(101 째)가 놓이고 그 기록이 남아도, 제 기록을 후보 상한으로 잃은 같은 주소의 Y 는 X 의 기록에 본문을 붙이지 않는다(ambiguous) · 놓인 요청의 창 뒤에 시작한 같은 주소 Z 는 제 본문(대조)" {
@@ -4733,16 +5018,29 @@ test "W9d② 최종 재검증 D-B(v20f A R8-1): CDP 자리 상한의 묶음 놓�
     try h.drain();
     try testing.expectEqual(@as(usize, 0), h.fetches.items.len); // Y 의 본문을 X(2)의 기록에 붙이지 않는다
     try testing.expect(stateIs(&h, 2, .ambiguous));
-    // 경계: 창이 꼭 놓인 요청의 창 끝에서 시작하는 요청(다른 주소 — 그 끝의 기록을 볼 수 있다)은 본문을 붙이지 않는다.
-    const until = h.table.tabOf(5).?.cdp_drop_until;
+    // 경계: 창이 꼭 놓인 같은 주소 요청(X)의 창 끝에서 시작하는 같은 주소 요청은 본문을 붙이지 않는다(그 끝의 기록을 볼 수 있다).
+    // 재검증 2–9 회차 N3: 표지는 주소마다다 — 같은 때의 다른 주소 요청은 제 본문(전에는 탭 전체라 그것도 ambiguous 였다).
+    const tab5 = h.table.tabOf(5).?;
+    try testing.expectEqual(@as(i64, 0), tab5.cdp_drop_until); // 묶음 하나(256)는 주소마다의 표지에 다 든다
+    const until = for (tab5.cdp_drop_marks.items) |m| {
+        if (m.url == hashUrl8(k)) break m.t_us;
+    } else return error.TestUnexpectedResult;
     const tw = until + window_before_us;
-    try h.sent(5, "w", "http://127.0.0.1/v20f/r8/edge", tw, tw);
-    _ = try h.cand(5, 4, "http://127.0.0.1/v20f/r8/edge", tw + 50, .{});
+    try h.sent(5, "w", k, tw, tw);
+    _ = try h.cand(5, 4, k, tw + 50, .{});
     try h.respond(5, "w", "application/json", 9, tw + 1_000);
     h.table.cefEnd(5, 4, tw + 1_500);
     try h.finish(5, "w", tw + 2_000);
     try h.drain();
     try testing.expect(stateIs(&h, 4, .ambiguous));
+    try h.sent(5, "e", "http://127.0.0.1/v20f/r8/edge", tw, tw);
+    _ = try h.cand(5, 5, "http://127.0.0.1/v20f/r8/edge", tw + 50, .{});
+    try h.respond(5, "e", "application/json", 9, tw + 1_000);
+    h.table.cefEnd(5, 5, tw + 1_500);
+    try h.finish(5, "e", tw + 2_000);
+    try h.table.tickAt(gpa_t, tw + 2_500, tw + 2_500);
+    try h.drain();
+    try testing.expectEqual(@as(?u64, 5), fetchedFor(&h, "e"));
     // 대조: 놓인 요청의 창 끝(가장 늦은 기준 + 2 s) 뒤에 시작한 같은 주소 Z — 제 기록에 제 본문.
     const tz = until + window_before_us + 1;
     try h.sent(5, "z", k, tz, tz);
@@ -4753,7 +5051,7 @@ test "W9d② 최종 재검증 D-B(v20f A R8-1): CDP 자리 상한의 묶음 놓�
     try h.table.tickAt(gpa_t, tz + 3_000, tz + 3_000);
     try h.drain();
     var buf: [4]u64 = undefined;
-    try testing.expectEqualSlices(u64, &.{3}, h.fetchedRequests(&buf));
+    try testing.expectEqualSlices(u64, &.{ 5, 3 }, h.fetchedRequests(&buf));
 }
 
 fn cdpIndexOf(h: *H, rid: []const u8) ?usize {
@@ -4884,7 +5182,7 @@ fn v20fEarlyAbort(h: *H, doc: bool) !void {
     }
 }
 
-test "W9d② 최종 재검증 R5-1(v20f A): 새 문서 맨 앞의 abort·다시가 새 문서 알림과 경주하고 abort 의 CDP 실패가 끊김 시한(250 ms) 뒤에 오면 — 다시 받은 요청은 제 본문, abort 의 기록은 unavailable 하나(알고 둔 이름 — request_failed 가 아니다, 본문은 둘 다 없다)" {
+test "W9d② 최종 재검증 R5-1(v20f A): 새 문서 맨 앞의 abort·다시가 새 문서 알림과 경주하고 abort 의 CDP 실패가 끊김 시한(250 ms) 뒤에 오면 — 다시 받은 요청은 제 본문, abort 의 기록은 request_failed 하나(재검증 2–9 회차 WB 뒤 — 전에는 unavailable)" {
     var h: H = .{};
     defer h.deinit();
     try v20fEarlyAbort(&h, true);
@@ -4892,7 +5190,9 @@ test "W9d② 최종 재검증 R5-1(v20f A): 새 문서 맨 앞의 abort·다시�
     const got = h.fetchedRequests(&buf);
     errdefer std.debug.print("R5-1 (N1 on): fetched {any} · 800 {?} · 801 {?}\n", .{ got, h.ended.get(800), h.ended.get(801) });
     try testing.expectEqual(@as(u32, 1), endCount(&h, 800));
-    try testing.expect(stateIs(&h, 800, .unavailable));
+    // 재검증 2–9 회차 WB: 끊긴 800 의 주인일 수 있는 열린 요청이 둘(a·b)이라 짝 없는 시한까지 지우지 않고 둔다 — b 가 성공으로 끝나 주인에서
+    // 빠지고, 늦은 a 의 CDP 실패가 그 기록을 제 것으로 정한다(전에는 끊김이 a 를 놓아 unavailable — 이제 실제 끝 request_failed).
+    try testing.expect(stateIs(&h, 800, .request_failed));
     try testing.expectEqualSlices(u64, &.{801}, got);
 }
 
@@ -5109,4 +5409,1162 @@ test "W9d② 재검증 15 회차 D-G1: decodeResult 의 갈래 — 빈·모르�
         }
     }
     try testing.expectEqual(@as(usize, 0), bad);
+}
+
+// ── W9d② v20g A — adversarial re-verification of e9ba4f018 (rounds 2–9), kept as regression tests (the WB rule — `expireRecords`) ──
+// Names start with `W9d② v20g A`. The fuzz is seeded (deterministic); rows inside the model's assumptions assert "no wrong body".
+
+const GKind = enum { page, worker, cdp_only };
+const GOut = enum { ok, abort, cut };
+const GReq = struct {
+    kind: GKind,
+    url: u8,
+    /// CDP ts (page / cdp_only).
+    ts: i64 = 0,
+    /// CEF IO time (0 = no CEF record).
+    io: i64 = 0,
+    cef_id: u64 = 0,
+    out: GOut = .ok,
+    /// CDP ts of the response (0 = none).
+    resp: i64 = 0,
+    /// CDP ts of loadingFinished / loadingFailed (0 = none — cut by navigation).
+    fin: i64 = 0,
+    /// IO time of the CEF end (0 = none).
+    cef_end: i64 = 0,
+    cef_ok: bool = true,
+    /// Started after the last navigation before it (new-doc) — for stats.
+    early_new_doc: bool = false,
+};
+
+const GCdpKind = enum { sent, resp, fin, fail };
+const GCdp = struct { gen: i64, at: i64 = 0, kind: GCdpKind, idx: usize };
+const GCef = struct { io: i64, begin: bool, idx: usize };
+
+var g_debug_seed: u64 = 0;
+/// Fuzz knobs: renderer stall per mille of CDP events, its max (µs), and the IO jitter mix (0 = 85/10/5 %, 1 = no > 300 ms, 2 = only ≤ 6 ms).
+var g_stall_pm: u16 = 15;
+var g_stall_max: i64 = 3_500_000;
+var g_io_mix: u8 = 0;
+var g_worker_pct: u8 = 14;
+var g_abort_pct: u8 = 14;
+var g_navs: bool = true;
+/// abort may come before CEF saw the request (no record); a request whose record would start after the navigation has no record.
+var g_abort_precef: bool = true;
+var g_nav_drop_record: bool = true;
+
+const GStats = struct {
+    skipped: usize = 0,
+    scenarios: usize = 0,
+    page_records: usize = 0,
+    own: usize = 0,
+    wrong: usize = 0,
+    states: [16]usize = @splat(0),
+    cut_states: [16]usize = @splat(0),
+    ok_lost: usize = 0,
+    not_idle: usize = 0,
+    missing_end: usize = 0,
+    first_wrong: [256]u8 = undefined,
+    first_wrong_len: usize = 0,
+};
+
+fn gUrl(buf: []u8, u: u8) []const u8 {
+    return std.fmt.bufPrint(buf, "https://g.test/{d}", .{u}) catch unreachable;
+}
+
+fn gRid(buf: []u8, i: usize) []const u8 {
+    return std.fmt.bufPrint(buf, "g{d}", .{i}) catch unreachable;
+}
+
+/// One random scenario under the model's assumptions (every CDP-visible request has its own CEF record unless `gap`; CEF-only records —
+/// workers — exist; CEF records are delivered by a 10 ms box in IO order and the watermark follows the box; CDP events are FIFO from one
+/// renderer with stalls). Checks: no wrong body, every begin ends exactly once, the table goes idle.
+fn gScenario(seed: u64, gap: bool, doc_notices: bool, st: *GStats) !void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    var h: H = .{ .sync = false };
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    var reqs: std.ArrayList(GReq) = .empty;
+    defer reqs.deinit(gpa_t);
+    const t0: i64 = 10_000_000;
+    // navigations
+    var navs: [3]i64 = undefined;
+    var nav_n: usize = r.uintLessThan(usize, 3);
+    {
+        var t = t0 + 300_000;
+        for (0..nav_n) |k| {
+            t += r.intRangeAtMost(i64, 200_000, 1_500_000);
+            navs[k] = t;
+        }
+        if (nav_n == 0 and r.boolean()) {
+            navs[0] = t0 + r.intRangeAtMost(i64, 400_000, 2_000_000);
+            nav_n = 1;
+        }
+    }
+    if (!g_navs) nav_n = 0;
+    const n_req = r.intRangeAtMost(usize, 12, 50);
+    var t = t0;
+    var next_id: u64 = 1;
+    var i: usize = 0;
+    while (i < n_req) : (i += 1) {
+        t += switch (r.uintLessThan(u8, 4)) {
+            0 => 0,
+            1 => r.intRangeAtMost(i64, 0, 3_000),
+            else => r.intRangeAtMost(i64, 0, 150_000),
+        };
+        const url = r.uintLessThan(u8, 3);
+        const kr = r.uintLessThan(u8, 100);
+        const kind: GKind = if (kr < g_worker_pct) .worker else if (gap and kr < g_worker_pct + 6) .cdp_only else .page;
+        var q: GReq = .{ .kind = kind, .url = url };
+        if (kind == .worker) {
+            q.io = t + r.intRangeAtMost(i64, 0, 5_000);
+            q.cef_id = next_id;
+            next_id += 1;
+            q.cef_end = q.io + r.intRangeAtMost(i64, 5_000, 1_000_000);
+            try reqs.append(gpa_t, q);
+            continue;
+        }
+        q.ts = t;
+        if (kind == .page) {
+            const jr = r.uintLessThan(u8, 100);
+            q.io = q.ts + (if (g_io_mix == 3) r.intRangeAtMost(i64, 50, 6_000) else if (jr < 85 or g_io_mix == 2) r.intRangeAtMost(i64, -2_000, 6_000) else if (jr < 95 or g_io_mix == 1) r.intRangeAtMost(i64, 6_000, 300_000) else r.intRangeAtMost(i64, 300_000, 1_900_000));
+            q.cef_id = next_id;
+            next_id += 1;
+        }
+        const base = if (q.io != 0) q.io else q.ts;
+        const lr = r.uintLessThan(u8, 100);
+        const lat = if (lr < 60) r.intRangeAtMost(i64, 3_000, 200_000) else if (lr < 90) r.intRangeAtMost(i64, 200_000, 2_500_000) else r.intRangeAtMost(i64, 2_500_000, 5_000_000);
+        q.resp = base + lat;
+        q.fin = q.resp + r.intRangeAtMost(i64, 0, 300_000);
+        if (q.io != 0) q.cef_end = q.fin + r.intRangeAtMost(i64, -1_000, 2_000);
+        if (q.cef_end != 0 and q.cef_end < q.resp) q.cef_end = q.resp;
+        if (kind == .page and r.uintLessThan(u8, 100) < g_abort_pct) {
+            // abort before the response
+            const a = q.io + r.intRangeAtMost(i64, if (g_abort_precef) -3_000 else 0, 40_000);
+            if (a < q.resp) {
+                q.out = .abort;
+                q.resp = 0;
+                q.fin = @max(a, q.ts + 1);
+                if (a < q.io) {
+                    // never reached CEF
+                    q.io = 0;
+                    q.cef_id = 0;
+                    q.cef_end = 0;
+                } else {
+                    q.cef_end = a + r.intRangeAtMost(i64, 0, 1_000);
+                    q.cef_ok = false;
+                }
+                try reqs.append(gpa_t, q);
+                if (r.uintLessThan(u8, 100) < 70) {
+                    // refetch of the same URL right after the abort
+                    var b: GReq = .{ .kind = .page, .url = url, .ts = q.fin + r.intRangeAtMost(i64, 0, 500) };
+                    b.io = b.ts + r.intRangeAtMost(i64, if (g_io_mix == 3) 50 else -500, 2_000);
+                    b.cef_id = next_id;
+                    next_id += 1;
+                    b.resp = b.io + r.intRangeAtMost(i64, 3_000, 900_000);
+                    b.fin = b.resp + r.intRangeAtMost(i64, 0, 50_000);
+                    b.cef_end = b.fin + r.intRangeAtMost(i64, 0, 2_000);
+                    try reqs.append(gpa_t, b);
+                }
+                continue;
+            }
+        }
+        try reqs.append(gpa_t, q);
+    }
+    // reload bursts: right after each navigation the new document fetches URLs again (D-A shape), some before the doc notice
+    for (navs[0..nav_n]) |nv| {
+        const burst = r.intRangeAtMost(usize, 1, 5);
+        for (0..burst) |_| {
+            var b: GReq = .{ .kind = .page, .url = r.uintLessThan(u8, 3), .ts = nv + r.intRangeAtMost(i64, 100, 4_000), .early_new_doc = true };
+            b.io = b.ts + r.intRangeAtMost(i64, if (g_io_mix == 3) 50 else -500, 3_000);
+            b.cef_id = next_id;
+            next_id += 1;
+            b.resp = b.io + r.intRangeAtMost(i64, 3_000, 5_000_000);
+            b.fin = b.resp + r.intRangeAtMost(i64, 0, 100_000);
+            b.cef_end = b.fin + r.intRangeAtMost(i64, 0, 2_000);
+            try reqs.append(gpa_t, b);
+        }
+    }
+    // one renderer: CEF IO order of its requests follows their CDP start order (FIFO — J2: 2250/2250 in start order)
+    {
+        var order: std.ArrayList(usize) = .empty;
+        defer order.deinit(gpa_t);
+        for (reqs.items, 0..) |q, k| if (q.kind == .page and q.io != 0) try order.append(gpa_t, k);
+        const Ctx = struct {
+            rq: []const GReq,
+            fn lt(c: @This(), a: usize, b: usize) bool {
+                return c.rq[a].ts < c.rq[b].ts or (c.rq[a].ts == c.rq[b].ts and a < b);
+            }
+        };
+        std.mem.sort(usize, order.items, Ctx{ .rq = reqs.items }, Ctx.lt);
+        var prev: i64 = 0;
+        for (order.items) |k| {
+            const q = &reqs.items[k];
+            const io = @max(q.io, prev + 1);
+            const d = io - q.io;
+            q.io = io;
+            if (d > 0) {
+                if (q.resp != 0) q.resp += d;
+                if (q.fin != 0) q.fin += d;
+                if (q.cef_end != 0) q.cef_end += d;
+            }
+            prev = io;
+        }
+    }
+    // model assumption: a page request's record lies in its window (IO ≤ CDP ts + 2 s) — skip scenarios the FIFO push broke
+    for (reqs.items) |q| if (q.kind == .page and q.io != 0 and q.io - q.ts > window_after_us - 50_000) {
+        st.skipped += 1;
+        return;
+    };
+    if (g_debug_seed == seed) for (reqs.items, 0..) |q, k| std.debug.print("  g{d}: {s} url {d} out {s} ts {d} io {d} cef {d} resp {d} fin {d} cef_end {d} ok {}\n", .{ k, @tagName(q.kind), q.url, @tagName(q.out), q.ts, q.io, q.cef_id, q.resp, q.fin, q.cef_end, q.cef_ok });
+    if (g_debug_seed == seed) for (navs[0..nav_n]) |nv| std.debug.print("  nav {d}\n", .{nv});
+    // navigation cuts: a request alive across a navigation is cut there (CEF cancels, CDP sends no end)
+    for (reqs.items) |*q| {
+        const start = if (q.kind == .worker) q.io else q.ts;
+        const end = if (q.kind == .worker) q.cef_end else q.fin;
+        for (navs[0..nav_n]) |nv| if (start < nv and end > nv) {
+            q.out = .cut;
+            if (q.resp > nv) q.resp = 0;
+            q.fin = 0;
+            if (g_nav_drop_record and q.io != 0 and q.io >= nv) {
+                q.io = 0;
+                q.cef_id = 0;
+            }
+            if (q.io != 0) {
+                q.cef_end = nv + r.intRangeAtMost(i64, 0, 3_000);
+                q.cef_ok = false;
+            } else q.cef_end = 0;
+            break;
+        };
+    }
+    // CEF box events in IO order
+    var cef: std.ArrayList(GCef) = .empty;
+    defer cef.deinit(gpa_t);
+    for (reqs.items, 0..) |q, k| if (q.io != 0) {
+        try cef.append(gpa_t, .{ .io = q.io, .begin = true, .idx = k });
+        if (q.cef_end != 0) try cef.append(gpa_t, .{ .io = @max(q.cef_end, q.io + 1), .begin = false, .idx = k });
+    };
+    std.mem.sort(GCef, cef.items, {}, struct {
+        fn lt(_: void, a: GCef, b: GCef) bool {
+            return a.io < b.io or (a.io == b.io and a.begin and !b.begin);
+        }
+    }.lt);
+    // CDP events FIFO with stalls
+    var cdp: std.ArrayList(GCdp) = .empty;
+    defer cdp.deinit(gpa_t);
+    for (reqs.items, 0..) |q, k| if (q.kind != .worker) {
+        try cdp.append(gpa_t, .{ .gen = q.ts, .kind = .sent, .idx = k });
+        if (q.resp != 0) try cdp.append(gpa_t, .{ .gen = q.resp, .kind = .resp, .idx = k });
+        if (q.fin != 0) try cdp.append(gpa_t, .{ .gen = q.fin, .kind = if (q.out == .abort) .fail else .fin, .idx = k });
+    };
+    std.mem.sort(GCdp, cdp.items, {}, struct {
+        fn lt(_: void, a: GCdp, b: GCdp) bool {
+            if (a.gen != b.gen) return a.gen < b.gen;
+            if (a.kind != b.kind) return @backingInt(a.kind) < @backingInt(b.kind);
+            return a.idx < b.idx;
+        }
+    }.lt);
+    {
+        var last: i64 = 0;
+        for (cdp.items) |*e| {
+            var at = e.gen + r.intRangeAtMost(i64, 100, 3_000);
+            if (r.uintLessThan(u16, 1000) < g_stall_pm) at += r.intRangeAtMost(i64, @min(250_000, g_stall_max), g_stall_max); // renderer stall
+            at = @max(at, last + 1);
+            e.at = at;
+            last = at;
+        }
+    }
+    var docs: [3]i64 = undefined;
+    for (navs[0..nav_n], 0..) |nv, k| docs[k] = nv + r.intRangeAtMost(i64, 200, 4_000);
+    // rid → request
+    var rid_buf: [16]u8 = undefined;
+    var url_buf: [32]u8 = undefined;
+    // run
+    var now: i64 = t0 - 1;
+    var next_flush: i64 = t0 + r.intRangeAtMost(i64, 0, 10_000);
+    var next_tick: i64 = t0 + r.intRangeAtMost(i64, 0, 50_000);
+    var cef_cur: usize = 0;
+    var cdp_cur: usize = 0;
+    var doc_cur: usize = 0;
+    const Pending = struct { id: i32, due: i64 };
+    var pend: std.ArrayList(Pending) = .empty;
+    defer pend.deinit(gpa_t);
+    var seen_fetch: usize = 0;
+    var horizon: i64 = 0;
+    for (cdp.items) |e| horizon = @max(horizon, e.at);
+    for (cef.items) |e| horizon = @max(horizon, e.io);
+    horizon += 15_000_000;
+    while (now < horizon) {
+        // next event time
+        var nt = @min(next_flush, next_tick);
+        if (cdp_cur < cdp.items.len) nt = @min(nt, cdp.items[cdp_cur].at);
+        if (doc_cur < nav_n) nt = @min(nt, docs[doc_cur]);
+        for (pend.items) |p| nt = @min(nt, p.due);
+        now = nt;
+        const wm = blk: {
+            var w = now - 1;
+            if (cef_cur < cef.items.len and cef.items[cef_cur].io <= now) w = @min(w, cef.items[cef_cur].io - 1);
+            break :blk w;
+        };
+        if (g_debug_seed == seed) {
+            if (doc_cur < nav_n and docs[doc_cur] == now) std.debug.print("  @{d} DOC\n", .{now}) else if (cdp_cur < cdp.items.len and cdp.items[cdp_cur].at == now) std.debug.print("  @{d} cdp {s} g{d} (url {d})\n", .{ now, @tagName(cdp.items[cdp_cur].kind), cdp.items[cdp_cur].idx, reqs.items[cdp.items[cdp_cur].idx].url }) else if (next_flush == now) {
+                var k = cef_cur;
+                while (k < cef.items.len and cef.items[k].io <= now) : (k += 1) std.debug.print("  @{d} cef {s} rec {d} (g{d} url {d}) io {d}\n", .{ now, if (cef.items[k].begin) "begin" else "end", reqs.items[cef.items[k].idx].cef_id, cef.items[k].idx, reqs.items[cef.items[k].idx].url, cef.items[k].io });
+            }
+        }
+        if (doc_cur < nav_n and docs[doc_cur] == now) {
+            if (doc_notices) h.table.documentStarted(5, now);
+            doc_cur += 1;
+        } else if (cdp_cur < cdp.items.len and cdp.items[cdp_cur].at == now) {
+            const e = cdp.items[cdp_cur];
+            cdp_cur += 1;
+            const q = reqs.items[e.idx];
+            const rid = gRid(&rid_buf, e.idx);
+            switch (e.kind) {
+                .sent => {
+                    try h.ev(5, .{ .will_be_sent = .{ .rid = rid, .url_hash = hashUrl8(gUrl(&url_buf, q.url)), .method_hash = hashMethod("GET"), .ts_us = q.ts } }, now);
+                    try h.ev(5, .{ .extra_info = .{ .rid = rid, .credentialed = false } }, now);
+                },
+                .resp => {
+                    try h.ev(5, .{ .response = .{ .rid = rid, .mime = "application/json", .from_sw = false, .charset = .other, .ts_us = q.resp } }, now);
+                    try h.ev(5, .{ .data = .{ .rid = rid, .bytes = 10 } }, now);
+                },
+                .fin => {
+                    h.table.cef_seen_us = @max(h.table.cef_seen_us, wm);
+                    try h.ev(5, .{ .finished = .{ .rid = rid } }, now);
+                },
+                .fail => {
+                    h.table.cef_seen_us = @max(h.table.cef_seen_us, wm);
+                    try h.ev(5, .{ .failed = .{ .rid = rid, .ts_us = q.fin } }, now);
+                },
+            }
+        } else if (next_flush == now) {
+            next_flush += 10_000;
+            while (cef_cur < cef.items.len and cef.items[cef_cur].io <= now) : (cef_cur += 1) {
+                const e = cef.items[cef_cur];
+                const q = reqs.items[e.idx];
+                if (e.begin) {
+                    _ = try h.cand(5, q.cef_id, gUrl(&url_buf, q.url), q.io, .{});
+                } else {
+                    h.table.cefEndReceived(5, q.cef_id, now, q.cef_ok, if (q.cef_ok) 10 else 0);
+                }
+            }
+            try h.flushed(now - 1, now);
+        } else if (next_tick == now) {
+            next_tick += 50_000;
+            try h.table.tickAt(gpa_t, now, wm);
+            try h.drain();
+        } else {
+            var k: usize = 0;
+            while (k < pend.items.len) {
+                if (pend.items[k].due != now) {
+                    k += 1;
+                    continue;
+                }
+                const p = pend.swapRemove(k);
+                if (h.table.takeInflight(p.id)) |f| {
+                    try h.noteEnd(f.request, .captured);
+                    try h.table.bodyDone(gpa_t, f, now);
+                    try h.drain();
+                }
+            }
+        }
+        // new fetches: check the rid's own record
+        while (seen_fetch < h.fetches.items.len) : (seen_fetch += 1) {
+            const a = h.fetches.items[seen_fetch].fetch;
+            var req: u64 = 0;
+            for (h.table.inflight.items) |f| if (f.id == a.id) {
+                req = f.request;
+            };
+            const idx = std.fmt.parseInt(usize, a.rid.slice()[1..], 10) catch unreachable;
+            const q = reqs.items[idx];
+            if (q.cef_id == req) st.own += 1 else {
+                st.wrong += 1;
+                if (st.first_wrong_len == 0) {
+                    const s = std.fmt.bufPrint(&st.first_wrong, "seed {d} gap {} doc {}: rid g{d} (kind {s} out {s} url {d} ts {d} io {d} cef {d}) fetched for record {d}", .{ seed, gap, doc_notices, idx, @tagName(q.kind), @tagName(q.out), q.url, q.ts, q.io, q.cef_id, req }) catch "";
+                    st.first_wrong_len = s.len;
+                }
+            }
+            if (g_debug_seed == seed) std.debug.print("  @{d} fetch rid g{d} for record {d}\n", .{ now, idx, req });
+            try pend.append(gpa_t, .{ .id = a.id, .due = now + r.intRangeAtMost(i64, 1_000, 40_000) });
+        }
+    }
+    st.scenarios += 1;
+    if (h.table.busy()) st.not_idle += 1;
+    for (reqs.items) |q| if (q.cef_id != 0) {
+        const n = endCount(&h, q.cef_id);
+        if (n != 1) st.missing_end += 1;
+        if (q.kind == .page) {
+            st.page_records += 1;
+            if (h.ended.get(q.cef_id)) |s| {
+                if (q.out == .cut) st.cut_states[@backingInt(s)] += 1 else st.states[@backingInt(s)] += 1;
+                if (q.out == .ok and s != .captured) st.ok_lost += 1;
+            }
+        }
+    };
+}
+
+fn gPrint(name: []const u8, st: *const GStats) void {
+    std.debug.print("\n[v20g fuzz {s}] skipped (model) {d} · scenarios {d} · page records {d} · own fetches {d} · WRONG {d} · end!=1 {d} · not idle {d} · ok-request records without capture {d}\n", .{ name, st.skipped, st.scenarios, st.page_records, st.own, st.wrong, st.missing_end, st.not_idle, st.ok_lost });
+    std.debug.print("  states (not cut):", .{});
+    for (st.states, 0..) |c, k| if (c > 0) std.debug.print(" {s}={d}", .{ @tagName(@as(State, @fromBackingInt(@intCast(k)))), c });
+    std.debug.print("\n  states (cut by navigation):", .{});
+    for (st.cut_states, 0..) |c, k| if (c > 0) std.debug.print(" {s}={d}", .{ @tagName(@as(State, @fromBackingInt(@intCast(k)))), c });
+    std.debug.print("\n", .{});
+    if (st.first_wrong_len > 0) std.debug.print("  first wrong: {s}\n", .{st.first_wrong[0..st.first_wrong_len]});
+}
+
+test "W9d② v20g A fuzz: model-based ground truth inside the table's assumptions (CEF IO −2..+6 ms of the CDP start, no renderer stall) — navigations (cut requests, reload bursts before/after the doc notice), aborts (before/after CEF, late CDP failure), refetch, worker records, 10 ms box watermark — no wrong body, one end per begin, idle at the end" {
+    defer {
+        g_stall_pm = 15;
+        g_io_mix = 0;
+    }
+    g_stall_pm = 0;
+    g_io_mix = 2;
+    var on: GStats = .{};
+    var off: GStats = .{};
+    for (0..400) |s| {
+        try gScenario(0x20a0000 + s, false, true, &on);
+        try gScenario(0x20a0000 + s, false, false, &off);
+    }
+    gPrint("doc notices ON (product)", &on);
+    gPrint("doc notices OFF (control)", &off);
+    try testing.expectEqual(@as(usize, 0), on.wrong);
+    try testing.expectEqual(@as(usize, 0), on.missing_end);
+    try testing.expectEqual(@as(usize, 0), on.not_idle);
+}
+
+test "W9d② v20g A fuzz gap: same model plus CDP requests that have no CEF record of their own (documented gap) — count wrong bodies (observation)" {
+    var on: GStats = .{};
+    for (0..400) |s| try gScenario(0x20b0000 + s, true, true, &on);
+    gPrint("gap: CDP-only requests, doc notices ON", &on);
+    try testing.expectEqual(@as(usize, 0), on.missing_end);
+    try testing.expectEqual(@as(usize, 0), on.not_idle);
+}
+
+fn gTicks(h: *H, from: i64, to: i64) !i64 {
+    var now = from;
+    while (now <= to) : (now += 50_000) {
+        try h.table.tickAt(gpa_t, now, now);
+        try h.drain();
+    }
+    return now;
+}
+
+/// Complete every pending fetch at once (returns the fetched CEF requests in order).
+fn gServe(h: *H, done: *usize, out: *std.ArrayList(u64), now: i64) !void {
+    while (done.* < h.fetches.items.len) : (done.* += 1) {
+        const f = h.table.takeInflight(h.fetches.items[done.*].fetch.id) orelse continue;
+        try out.append(gpa_t, f.request);
+        try h.noteEnd(f.request, .captured);
+        try h.table.bodyDone(gpa_t, f, now);
+        try h.drain();
+    }
+}
+
+test "W9d② v20g A R9-a: reload chain A → B → C while every same-URL request waits for headers (4 per document, other-host shape) — C's four get their own bodies, A's and B's eight end unavailable once, table idle" {
+    const u = "http://localhost/v20g/chain";
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    var rb: [16]u8 = undefined;
+    var t: i64 = 1_000_000;
+    // A then B (300 ms later) then C (300 ms later)
+    for (0..3) |d| {
+        if (d > 0) {
+            h.table.documentStarted(5, t);
+            for (0..4) |k| h.table.cefEndAs(5, 100 * (d - 1) + k, t, false);
+            t += 100_000;
+        }
+        for (0..4) |k| {
+            const ki: i64 = @intCast(k);
+            try h.sent(5, try std.fmt.bufPrint(&rb, "d{d}.{d}", .{ d, k }), u, t + ki * 1_000, t + ki * 1_000 + 100);
+            _ = try h.cand(5, 100 * d + k, u, t + ki * 1_000 + 50, .{});
+        }
+        _ = try gTicks(&h, t + 50_000, t + 250_000);
+        t += 300_000;
+    }
+    // C answers 1.7 s after it started, in reverse order
+    var k: usize = 4;
+    const tc = t - 300_000;
+    while (k > 0) {
+        k -= 1;
+        const ki: i64 = @intCast(k);
+        const rid = try std.fmt.bufPrint(&rb, "d2.{d}", .{k});
+        try h.respond(5, rid, "application/json", 9, tc + 1_700_000 + (3 - ki) * 1_000);
+        h.table.cefEnd(5, 200 + k, tc + 1_700_500 + (3 - ki) * 1_000);
+        try h.finish(5, rid, tc + 1_700_900 + (3 - ki) * 1_000);
+    }
+    var got: std.ArrayList(u64) = .empty;
+    defer got.deinit(gpa_t);
+    var done: usize = 0;
+    var now = tc + 1_750_000;
+    while (now < tc + 9_000_000) : (now += 50_000) {
+        try h.table.tickAt(gpa_t, now, now);
+        try h.drain();
+        try gServe(&h, &done, &got, now);
+    }
+    std.mem.sort(u64, got.items, {}, std.sort.asc(u64));
+    errdefer std.debug.print("R9-a: fetched {any}; A {?} {?} B {?} {?}\n", .{ got.items, h.ended.get(0), h.ended.get(3), h.ended.get(100), h.ended.get(103) });
+    try testing.expectEqualSlices(u64, &.{ 200, 201, 202, 203 }, got.items);
+    for ([_]u64{ 0, 1, 2, 3, 100, 101, 102, 103 }) |q| {
+        try testing.expect(stateIs(&h, q, .unavailable));
+        try testing.expectEqual(@as(u32, 1), endCount(&h, q));
+    }
+    try testing.expect(!h.table.busy());
+}
+
+test "W9d② v20g A R9-b: retireOwner when the owner already ended — CDP failure arrives exactly at the cut tick / partial bytes / failure after the owner was retired: one end each, never lost" {
+    const u = "http://127.0.0.1/v20g/owner";
+    // (1) failure with data arrives at cancel + 250 ms, watermark behind → owner waits → partial
+    {
+        var h: H = .{ .sync = false };
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        try h.sent(5, "a", u, 1_000_000, 1_000_100);
+        _ = try h.cand(5, 900, u, 1_000_050, .{});
+        h.table.cef_seen_us = 1_000_100;
+        try h.ev(5, .{ .response = .{ .rid = "a", .mime = "application/json", .from_sw = false, .charset = .other, .ts_us = 1_010_000 } }, 1_010_000);
+        try h.ev(5, .{ .data = .{ .rid = "a", .bytes = 5 } }, 1_010_000);
+        h.table.documentStarted(5, 1_300_000);
+        h.table.cefEndAs(5, 900, 1_300_000, false);
+        try h.ev(5, .{ .failed = .{ .rid = "a", .ts_us = 1_549_000 } }, 1_550_000); // watermark 1_000_100 < bound 1_010_000 → waits
+        try h.table.tickAt(gpa_t, 1_550_000, 1_005_000);
+        try h.drain();
+        try testing.expect(h.ended.get(900) == null);
+        _ = try gTicks(&h, 1_600_000, 2_500_000);
+        errdefer std.debug.print("R9-b(1): 900 {?} ends {d}\n", .{ h.ended.get(900), endCount(&h, 900) });
+        try testing.expect(stateIs(&h, 900, .partial));
+        try testing.expectEqual(@as(u32, 1), endCount(&h, 900));
+        try testing.expect(!h.table.busy());
+    }
+    // (2) the CDP failure arrives 50 ms after the owner was retired — ignored; the record ended unavailable once
+    {
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        try h.sent(5, "a", u, 1_000_000, 1_000_100);
+        _ = try h.cand(5, 900, u, 1_000_050, .{});
+        h.table.documentStarted(5, 1_300_000);
+        h.table.cefEndAs(5, 900, 1_300_000, false);
+        _ = try gTicks(&h, 1_300_000, 1_600_000);
+        try testing.expect(stateIs(&h, 900, .unavailable));
+        try h.ev(5, .{ .failed = .{ .rid = "a", .ts_us = 1_299_000 } }, 1_650_000);
+        // a new same-URL request right after: own body
+        try h.sent(5, "b", u, 1_700_000, 1_700_100);
+        _ = try h.cand(5, 901, u, 1_700_050, .{});
+        try h.respond(5, "b", "application/json", 9, 1_800_000);
+        h.table.cefEnd(5, 901, 1_800_500);
+        try h.finish(5, "b", 1_801_000);
+        _ = try gTicks(&h, 1_850_000, 2_000_000);
+        var buf: [4]u64 = undefined;
+        try testing.expectEqualSlices(u64, &.{901}, h.fetchedRequests(&buf));
+        try testing.expectEqual(@as(u32, 1), endCount(&h, 900));
+    }
+}
+
+test "W9d② v20g A R9-c (documented gap, observation): an old-document CDP request that has no CEF record of its own (its CEF begin never came) and a reload of the same URL — the reloaded request loses its body (unmatched), never a wrong body" {
+    const u = "http://127.0.0.1/v20g/norec";
+    inline for (.{ 1_700_000, 2_400_000, 4_800_000 }) |fin| {
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        try h.sent(5, "o", u, 1_000_000, 1_000_100); // no CEF record
+        h.table.documentStarted(5, 1_300_000);
+        try h.sent(5, "n", u, 1_350_000, 1_350_100);
+        _ = try h.cand(5, 901, u, 1_350_050, .{});
+        _ = try gTicks(&h, 1_350_100, fin - 10_000);
+        try h.respond(5, "n", "application/json", 9, fin - 2_000);
+        h.table.cefEnd(5, 901, fin - 1_000);
+        try h.finish(5, "n", fin);
+        _ = try gTicks(&h, fin, fin + 6_000_000);
+        var buf: [4]u64 = undefined;
+        const got = h.fetchedRequests(&buf);
+        std.debug.print("\n[v20g R9-c fin={d}] fetched {any} · 901 {?} · cdp left {d} · busy {}\n", .{ fin, got, h.ended.get(901), h.table.tabOf(5).?.cdp.items.len, h.table.busy() });
+        for (got) |g| try testing.expect(g == 901);
+        try testing.expectEqual(@as(u32, 1), endCount(&h, 901));
+        try testing.expect(!h.table.busy());
+    }
+}
+
+test "W9d② v20g A R9-d (observation): a CDP-invisible old-doc record that sits ≤ 5 ms before a live long request's own record (new-doc early request with IO before the doc notice) — the live request may own the cut record, so it is released: its body is lost, never wrong (with and without the notice)" {
+    const u = "http://127.0.0.1/v20g/misowner";
+    inline for (.{ true, false }) |doc| {
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        // P (CDP ts 1.000 s) — the page's early long fetch; W (IO 1.0010 s) — a CDP-invisible record of the same URL (prefetch / worker)
+        try h.sent(5, "p", u, 1_000_000, 1_000_100);
+        _ = try h.cand(5, 700, u, 1_001_000, .{}); // W
+        _ = try h.cand(5, 701, u, 1_001_500, .{}); // P's own record
+        if (doc) h.table.documentStarted(5, 1_003_000); // both IO times before the notice (old_doc)
+        h.table.cefEnd(5, 700, 1_050_000); // W ends OK fast
+        _ = try gTicks(&h, 1_050_000, 4_200_000); // W's unmatched expiry (3 s) passes while P is open
+        try h.respond(5, "p", "application/json", 9, 4_300_000);
+        h.table.cefEnd(5, 701, 4_301_000);
+        try h.finish(5, "p", 4_302_000);
+        _ = try gTicks(&h, 4_350_000, 8_000_000);
+        var buf: [4]u64 = undefined;
+        const got = h.fetchedRequests(&buf);
+        std.debug.print("\n[v20g R9-d doc={}] fetched {any} · W(700) {?} · P(701) {?}\n", .{ doc, got, h.ended.get(700), h.ended.get(701) });
+        for (got) |g| try testing.expect(g == 701); // never a wrong body
+        try testing.expectEqual(@as(u32, 1), endCount(&h, 700));
+        try testing.expectEqual(@as(u32, 1), endCount(&h, 701) + @as(u32, @intCast(got.len)));
+    }
+}
+
+test "W9d② v20g A R5: abort racing the new-document notice — the abort's CDP failure arrives 100/249/250/251/400/3000 ms late, refetch finishes before or after it — the refetch never gets a wrong body, both end once" {
+    const u = "http://127.0.0.1/v20g/r5";
+    inline for (.{ 100_000, 249_000, 250_000, 251_000, 400_000, 3_000_000 }) |late| {
+        inline for (.{ 200_000, 900_000, 3_500_000 }) |bfin| {
+            var h: H = .{};
+            defer h.deinit();
+            _ = try h.table.start(gpa_t, 5, 1);
+            try h.sent(5, "a", u, 1_289_900, 1_289_950);
+            _ = try h.cand(5, 800, u, 1_290_000, .{});
+            try h.sent(5, "b", u, 1_290_100, 1_290_150);
+            _ = try h.cand(5, 801, u, 1_290_200, .{});
+            h.table.documentStarted(5, 1_300_000);
+            h.table.cefEndAs(5, 800, 1_291_000, false);
+            var now: i64 = 1_300_000;
+            var failed = false;
+            var finished = false;
+            var served: std.ArrayList(u64) = .empty;
+            defer served.deinit(gpa_t);
+            var done: usize = 0;
+            while (now < 8_000_000) : (now += 10_000) {
+                try gServe(&h, &done, &served, now);
+                if (!failed and now >= 1_291_000 + late) {
+                    try h.ev(5, .{ .failed = .{ .rid = "a", .ts_us = 1_290_500 } }, now);
+                    failed = true;
+                }
+                if (!finished and now >= 1_290_200 + bfin) {
+                    try h.respond(5, "b", "application/json", 9, now - 2_000);
+                    h.table.cefEnd(5, 801, now - 1_000);
+                    try h.finish(5, "b", now);
+                    finished = true;
+                }
+                if (@mod(now, 50_000) == 0) {
+                    try h.table.tickAt(gpa_t, now, now);
+                    try h.drain();
+                }
+            }
+            const got = served.items;
+            std.debug.print("[v20g R5 late={d} bfin={d}] fetched {any} · A(800) {?} · B(801) {?}\n", .{ late, bfin, got, h.ended.get(800), h.ended.get(801) });
+            for (got) |g| try testing.expect(g == 801);
+            try testing.expectEqual(@as(u32, 1), endCount(&h, 800));
+            try testing.expectEqual(@as(u32, 1), endCount(&h, 801));
+            try testing.expect(!h.table.busy());
+        }
+    }
+}
+
+test "W9d② v20g A R8-a: cdp_drop_until — after a burst of 4096 hung requests, how many later legitimate requests (distinct URLs, 50 ms apart) are made ambiguous, and the window ends (count)" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    var rb: [24]u8 = undefined;
+    var ub: [64]u8 = undefined;
+    // 4096 hung requests in 0.4 s, each with its own record (never ends)
+    for (0..max_cdp) |i| {
+        const ii: i64 = @intCast(i);
+        const ts: i64 = 1_000_000 + @divTrunc(ii * 400_000, max_cdp);
+        const rid = try std.fmt.bufPrint(&rb, "h.{d}", .{i});
+        const url = try std.fmt.bufPrint(&ub, "http://127.0.0.1/v20g/hung/{d}", .{i});
+        try h.table.cdpEvent(gpa_t, 5, .{ .will_be_sent = .{ .rid = rid, .url_hash = hashUrl8(url), .method_hash = hashMethod("GET"), .ts_us = ts } }, ts);
+        _ = try h.cand(5, 10_000 + i, url, ts + 50, .{});
+    }
+    try h.drain();
+    var amb: usize = 0;
+    var own: usize = 0;
+    var first_ok: i64 = 0;
+    var last_amb: i64 = 0;
+    var now: i64 = 1_500_000;
+    var n: usize = 0;
+    while (now < 6_000_000) : (now += 50_000) {
+        const rid = try std.fmt.bufPrint(&rb, "l.{d}", .{n});
+        const url = try std.fmt.bufPrint(&ub, "http://127.0.0.1/v20g/legit/{d}", .{n});
+        try h.sent(5, rid, url, now, now);
+        _ = try h.cand(5, 50_000 + n, url, now + 100, .{});
+        try h.respond(5, rid, "application/json", 9, now + 5_000);
+        h.table.cefEnd(5, 50_000 + n, now + 6_000);
+        try h.finish(5, rid, now + 7_000);
+        try h.table.tickAt(gpa_t, now + 8_000, now + 8_000);
+        try h.drain();
+        if (stateIs(&h, 50_000 + n, .ambiguous)) {
+            amb += 1;
+            last_amb = now;
+        } else {
+            own += 1;
+            if (first_ok == 0) first_ok = now;
+        }
+        n += 1;
+    }
+    std.debug.print("\n[v20g R8-a] legit {d}: ambiguous {d} (last at +{d} ms), not ambiguous {d} (first at +{d} ms) · drop_until +{d} ms · open cdp {d}\n", .{ n, amb, @divTrunc(last_amb - 1_000_000, 1000), own, @divTrunc(first_ok - 1_000_000, 1000), @divTrunc(h.table.tabOf(5).?.cdp_drop_until - 1_000_000, 1000), h.table.tabOf(5).?.cdp.items.len });
+    // 재검증 2–9 회차 N3: 표지는 주소마다다 — 다른 주소의 요청은 ambiguous 가 아니다(전에는 31/90).
+    try testing.expectEqual(@as(usize, 0), amb);
+}
+
+extern "c" fn clock_gettime_nsec_np(clock_id: c_int) u64;
+
+test "W9d② v20g A R8-b: cost of the N1 cut — N old-document requests of ONE URL (all open, all cancelled by a navigation: ended at the unclaimed deadline because each cut record has many possible owners) and N of distinct URLs (cut at once) — every record ends once, no CDP request is left (times printed)" {
+    inline for (.{ true, false }) |same| {
+        for ([_]usize{ 512, 1024, 2048, 4095 }) |n| {
+            var h: H = .{};
+            defer h.deinit();
+            _ = try h.table.start(gpa_t, 5, 1);
+            var rb: [24]u8 = undefined;
+            var ub: [64]u8 = undefined;
+            for (0..n) |i| {
+                const ii: i64 = @intCast(i);
+                const ts: i64 = 1_000_000 + ii * 100;
+                const rid = try std.fmt.bufPrint(&rb, "c.{d}", .{i});
+                const url = if (same) "http://127.0.0.1/v20g/same" else try std.fmt.bufPrint(&ub, "http://127.0.0.1/v20g/d/{d}", .{i});
+                try h.table.cdpEvent(gpa_t, 5, .{ .will_be_sent = .{ .rid = rid, .url_hash = hashUrl8(url), .method_hash = hashMethod("GET"), .ts_us = ts } }, ts);
+                _ = try h.table.cefBegin(gpa_t, 5, .{ .request = 10_000 + i, .key = .{ .url = hashUrl8(url), .method = hashMethod("GET"), .sw = false }, .t_io_us = ts + 50, .attr = 1 });
+            }
+            const nav: i64 = 1_000_000 + @as(i64, @intCast(n)) * 100 + 1_000;
+            h.table.documentStarted(5, nav);
+            for (0..n) |i| h.table.cefEndAs(5, 10_000 + i, nav, false);
+            // 재검증 2–9 회차 WB: 같은 주소면 끊긴 기록마다 주인일 수 있는 열린 요청이 여럿이라 짝 없는 시한(3 s)에 끝낸다 — 두 주기를 잰다.
+            const a = clock_gettime_nsec_np(4);
+            try h.table.tickAt(gpa_t, nav + cef_grace_us, nav + cef_grace_us);
+            const b = clock_gettime_nsec_np(4);
+            try h.drain();
+            const at_cut = h.ends;
+            const c = clock_gettime_nsec_np(4);
+            try h.table.tickAt(gpa_t, nav + unclaimed_expiry_us, nav + unclaimed_expiry_us);
+            const d = clock_gettime_nsec_np(4);
+            try h.drain();
+            std.debug.print("\n[v20g R8-b] {s} n={d}: cut tick {d} us (ends {d}) · deadline tick {d} us · ends {d} · cdp left {d}", .{ if (same) "same URL" else "distinct URLs", n, (b - a) / 1000, at_cut, (d - c) / 1000, h.ends, h.table.tabOf(5).?.cdp.items.len });
+            try testing.expectEqual(n, h.ends);
+            try testing.expectEqual(@as(usize, 0), h.table.tabOf(5).?.cdp.items.len);
+        }
+    }
+    std.debug.print("\n", .{});
+}
+
+/// Old (pre-N-a) release rule for one open request — every candidate scanned.
+fn gNaiveOrphan(tbl: *const Table, t: *const Tab, o: *const Cdp, now_us: i64) bool {
+    if (!o.has_key or (o.state != .open and o.state != .cached)) return false;
+    const ts = o.anchor();
+    if (now_us - ts <= window_after_us or tbl.cef_seen_us <= ts + window_after_us) return false;
+    for (t.cands.items) |c| {
+        if (c.claimed or c.key.url != o.key_url or c.key.method != o.key_method) continue;
+        if (o.responded and c.key.sw != o.sw) continue;
+        if (c.prev_t_io_us != 0) return false;
+        if (c.t_io_us >= ts - window_before_us and c.t_io_us <= ts + window_after_us) return false;
+    }
+    return true;
+}
+
+test "W9d② v20g A R4: the indexed orphan scan inside tickAt equals the brute-force rule over many ticks — one key with many (and equal) IO times, colliding keys, sw split, restarts, claimed, records and requests added/removed between ticks, watermark stalls" {
+    var prng = std.Random.DefaultPrng.init(0x20a4);
+    const r = prng.random();
+    var checked: usize = 0;
+    var released: usize = 0;
+    for (0..300) |_| {
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        const t = h.table.tabOf(5).?;
+        var now: i64 = 10_000_000;
+        var seen: i64 = now;
+        var next_rid: usize = 0;
+        var next_req: u64 = 1;
+        var rb: [16]u8 = undefined;
+        for (0..40) |_| {
+            // mutate between ticks
+            const adds = r.uintLessThan(usize, 12);
+            for (0..adds) |_| {
+                const url = r.uintLessThan(u64, 3);
+                const method = r.uintLessThan(u64, 2);
+                const ts = now - r.intRangeAtMost(i64, 0, 4_000_000);
+                if (r.boolean()) {
+                    const rid = try std.fmt.bufPrint(&rb, "o{d}", .{next_rid});
+                    next_rid += 1;
+                    var o: Cdp = .{ .rid = Rid.init(rid).?, .key_url = url, .key_method = method, .ts_us = ts, .last_url = url };
+                    if (r.uintLessThan(u8, 3) == 0) {
+                        o.responded = true;
+                        o.sw = r.boolean();
+                    }
+                    if (r.uintLessThan(u8, 10) == 0) o.restart_ts_us = ts + r.intRangeAtMost(i64, 0, 500_000);
+                    if (r.uintLessThan(u8, 10) == 0) o.state = .cached;
+                    if (t.cdp.items.len < 600) try t.cdp.append(gpa_t, o);
+                } else {
+                    // several records may share one IO time; equal timestamps on purpose
+                    const io = if (r.uintLessThan(u8, 3) == 0) now - 2_500_000 else ts + r.intRangeAtMost(i64, -6_000, 2_100_000);
+                    if (t.cands.items.len < 600) try t.cands.append(gpa_t, .{ .request = next_req, .key = .{ .url = url, .method = method, .sw = r.boolean() }, .t_io_us = io, .attr = 1, .claimed = r.uintLessThan(u8, 6) == 0, .prev_t_io_us = if (r.uintLessThan(u8, 15) == 0) io - 1 else 0 });
+                    next_req += 1;
+                }
+            }
+            // remove some records / claim some
+            if (t.cands.items.len > 0 and r.boolean()) _ = t.cands.orderedRemove(r.uintLessThan(usize, t.cands.items.len));
+            if (t.cands.items.len > 0 and r.uintLessThan(u8, 4) == 0) t.cands.items[r.uintLessThan(usize, t.cands.items.len)].claimed = true;
+            now += r.intRangeAtMost(i64, 0, 400_000);
+            // watermark sometimes stalls
+            if (r.uintLessThan(u8, 3) != 0) seen = now - r.intRangeAtMost(i64, 0, 1_000_000);
+            // expected keep set
+            var want: std.ArrayList(bool) = .empty;
+            defer want.deinit(gpa_t);
+            const tbl_seen = @max(h.table.cef_seen_us, seen);
+            const saved = h.table.cef_seen_us;
+            h.table.cef_seen_us = tbl_seen;
+            for (t.cdp.items) |*o| try want.append(gpa_t, !gNaiveOrphan(&h.table, t, o, now));
+            h.table.cef_seen_us = saved;
+            var want_rids: std.ArrayList(Rid) = .empty;
+            defer want_rids.deinit(gpa_t);
+            for (t.cdp.items, want.items) |o, k| if (k) try want_rids.append(gpa_t, o.rid);
+            const before = t.cdp.items.len;
+            // no ended candidates → tickAt touches cdp only through the release (cdp are .open/.cached, has_key)
+            try h.table.tickAt(gpa_t, now, seen);
+            try h.drain();
+            errdefer std.debug.print("R4: want {d} kept {d} (before {d})\n", .{ want_rids.items.len, t.cdp.items.len, before });
+            try testing.expectEqual(want_rids.items.len, t.cdp.items.len);
+            for (t.cdp.items, want_rids.items) |o, w| try testing.expect(o.rid.eql(w.slice()));
+            checked += before;
+            released += before - t.cdp.items.len;
+        }
+    }
+    std.debug.print("\n[v20g R4] open requests checked {d}, released {d}\n", .{ checked, released });
+    try testing.expect(released > 1000 and released < checked);
+}
+
+test "W9d② v20g A fuzz debug: V20G_SEED=<seed> [V20G_GAP=1] prints one scenario (no-op otherwise)" {
+    const env = std.c.getenv("V20G_SEED") orelse return;
+    const seed = std.fmt.parseInt(u64, std.mem.span(env), 10) catch return;
+    g_debug_seed = seed;
+    defer g_debug_seed = 0;
+    if (std.c.getenv("V20G_STALL_PM")) |v| g_stall_pm = std.fmt.parseInt(u16, std.mem.span(v), 10) catch 15;
+    if (std.c.getenv("V20G_IOMIX")) |v| g_io_mix = std.fmt.parseInt(u8, std.mem.span(v), 10) catch 0;
+    if (std.c.getenv("V20G_WORKER")) |v| g_worker_pct = std.fmt.parseInt(u8, std.mem.span(v), 10) catch 14;
+    if (std.c.getenv("V20G_ABORT")) |v| g_abort_pct = std.fmt.parseInt(u8, std.mem.span(v), 10) catch 14;
+    if (std.c.getenv("V20G_NONAV") != null) g_navs = false;
+    if (std.c.getenv("V20G_NOPRECEF") != null) g_abort_precef = false;
+    if (std.c.getenv("V20G_NAVKEEP") != null) g_nav_drop_record = false;
+    defer {
+        g_stall_pm = 15;
+        g_io_mix = 0;
+        g_worker_pct = 14;
+        g_abort_pct = 14;
+        g_navs = true;
+        g_abort_precef = true;
+        g_nav_drop_record = true;
+    }
+    var st: GStats = .{};
+    try gScenario(seed, std.c.getenv("V20G_GAP") != null, true, &st);
+    gPrint("debug", &st);
+}
+
+test "W9d② v20g A fuzz knobs (observation, outside the assumptions): renderer stalls (none / ≤ 1.9 s / ≤ 3.5 s) × IO jitter mix (IO up to 1.9 s after the CDP start), doc notices on and off — wrong bodies are printed, not asserted" {
+    defer {
+        g_stall_pm = 15;
+        g_stall_max = 3_500_000;
+        g_io_mix = 0;
+    }
+    inline for (.{ .{ 0, 3_500_000 }, .{ 15, 1_900_000 }, .{ 15, 3_500_000 }, .{ 60, 3_500_000 } }) |sk| {
+        inline for (.{ 0, 1, 2 }) |mix| {
+            g_stall_pm = sk[0];
+            g_stall_max = sk[1];
+            g_io_mix = mix;
+            var on: GStats = .{};
+            var off: GStats = .{};
+            for (0..60) |s| {
+                try gScenario(0x20c0000 + s, false, true, &on);
+                try gScenario(0x20c0000 + s, false, false, &off);
+            }
+            std.debug.print("\n[v20g knobs stall_pm={d} stall_max={d} io_mix={d}] doc ON: own {d} WRONG {d} end!=1 {d} not idle {d} · doc OFF: own {d} WRONG {d}", .{ sk[0], sk[1], mix, on.own, on.wrong, on.missing_end, on.not_idle, off.own, off.wrong });
+            if (on.first_wrong_len > 0) std.debug.print("\n   first: {s}", .{on.first_wrong[0..on.first_wrong_len]});
+        }
+    }
+    std.debug.print("\n", .{});
+}
+
+test "W9d② v20g A fuzz factors: no stalls, IO −2..+6 ms — workers {0,14 %} × aborts {0,14 %} × navigations {off,on}: no wrong body in any combination" {
+    defer {
+        g_stall_pm = 15;
+        g_io_mix = 0;
+        g_worker_pct = 14;
+        g_abort_pct = 14;
+        g_navs = true;
+    }
+    g_stall_pm = 0;
+    g_io_mix = 2;
+    inline for (.{ 0, 14 }) |wp| inline for (.{ 0, 14 }) |ap| inline for (.{ false, true }) |nv| {
+        g_worker_pct = wp;
+        g_abort_pct = ap;
+        g_navs = nv;
+        var on: GStats = .{};
+        for (0..300) |s| try gScenario(0x20d0000 + s, false, true, &on);
+        std.debug.print("\n[v20g factors workers={d}% aborts={d}% navs={}] own {d} WRONG {d} end!=1 {d} not idle {d}", .{ wp, ap, nv, on.own, on.wrong, on.missing_end, on.not_idle });
+        if (on.first_wrong_len > 0) std.debug.print("\n   first: {s}", .{on.first_wrong[0..on.first_wrong_len]});
+        try testing.expectEqual(@as(usize, 0), on.wrong);
+        try testing.expectEqual(@as(usize, 0), on.missing_end);
+        try testing.expectEqual(@as(usize, 0), on.not_idle);
+    };
+    std.debug.print("\n", .{});
+}
+
+test "W9d② v20g A fuzz attribution: IO strictly after the CDP start, no stalls — workers only / aborts only (with and without aborts before CEF) / navigations only (with and without old-doc requests that never reached CEF): no wrong body with doc notices" {
+    defer {
+        g_stall_pm = 15;
+        g_io_mix = 0;
+        g_worker_pct = 14;
+        g_abort_pct = 14;
+        g_navs = true;
+        g_abort_precef = true;
+        g_nav_drop_record = true;
+    }
+    g_stall_pm = 0;
+    g_io_mix = 3;
+    const cases = .{
+        .{ "workers only", 14, 0, false, true, true },
+        .{ "aborts only (abort may precede CEF)", 0, 14, false, true, true },
+        .{ "aborts only (abort always after CEF saw it)", 0, 14, false, false, true },
+        .{ "navigations only (old-doc request may never reach CEF)", 0, 0, true, true, true },
+        .{ "navigations only (every old-doc request reached CEF)", 0, 0, true, true, false },
+        .{ "workers + aborts after CEF + navs with records", 14, 14, true, false, false },
+    };
+    inline for (cases) |c| {
+        g_worker_pct = c[1];
+        g_abort_pct = c[2];
+        g_navs = c[3];
+        g_abort_precef = c[4];
+        g_nav_drop_record = c[5];
+        var on: GStats = .{};
+        var off: GStats = .{};
+        for (0..400) |s| {
+            try gScenario(0x20e0000 + s, false, true, &on);
+            try gScenario(0x20e0000 + s, false, false, &off);
+        }
+        std.debug.print("\n[v20g attribution {s}] doc ON: own {d} WRONG {d} end!=1 {d} not idle {d} · doc OFF: own {d} WRONG {d}", .{ c[0], on.own, on.wrong, on.missing_end, on.not_idle, off.own, off.wrong });
+        if (on.first_wrong_len > 0) std.debug.print("\n   first: {s}", .{on.first_wrong[0..on.first_wrong_len]});
+        // doc notices ON is the product; OFF is printed only (without the notice an old-doc request that never reached CEF stays a gap).
+        try testing.expectEqual(@as(usize, 0), on.wrong);
+        try testing.expectEqual(@as(usize, 0), on.missing_end);
+        try testing.expectEqual(@as(usize, 0), on.not_idle);
+    }
+    std.debug.print("\n", .{});
+}
+
+// ── v20g A minimal repros of the fuzz findings (each prints what it fetched; the assertion is the invariant "no wrong body") ──
+
+fn gFetchedFor(h: *H, rid: []const u8) ?u64 {
+    for (h.fetches.items) |a| if (a.fetch.rid.eql(rid)) {
+        for (h.table.inflight.items) |f| if (f.id == a.fetch.id) return f.request;
+    };
+    return null;
+}
+
+test "W9d② v20g A WB-1 (fixed): MED-2 ends the in-between record of a live request (worker record of the same URL) — that request stays open without its record, steals the next same-URL record, and a later request's body goes to another request's record" {
+    const u = "http://127.0.0.1/v20g/wb1";
+    const T: i64 = 1_000_000;
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    try h.sent(5, "a", u, T, T + 50); // A (finishes early)
+    try h.sent(5, "b", u, T + 1, T + 60); // B (open long — its record will be ended by A's decision)
+    _ = try h.cand(5, 1, u, T + 4_000, .{}); // A's record
+    _ = try h.cand(5, 2, u, T + 4_100, .{}); // B's record
+    _ = try h.cand(5, 9, u, T + 256_000, .{}); // worker record (CDP-invisible), inside B's window
+    h.table.cefEnd(5, 9, T + 500_000);
+    try h.ev(5, .{ .response = .{ .rid = "a", .mime = "application/json", .from_sw = false, .charset = .other, .ts_us = T + 74_000 } }, T + 74_000);
+    try h.ev(5, .{ .data = .{ .rid = "a", .bytes = 9 } }, T + 74_000);
+    h.table.cefEnd(5, 1, T + 353_000);
+    try h.finish(5, "a", T + 353_500);
+    try h.table.tickAt(gpa_t, T + 360_000, T + 360_000);
+    try h.drain();
+    const b_rec_end = h.ended.get(2);
+    // C (open long) and D, E later — same URL
+    try h.sent(5, "c", u, T + 500_000, T + 500_100);
+    _ = try h.cand(5, 3, u, T + 504_000, .{});
+    try h.sent(5, "d", u, T + 1_590_000, T + 1_590_100);
+    _ = try h.cand(5, 4, u, T + 1_594_000, .{});
+    try h.sent(5, "e", u, T + 1_640_000, T + 1_640_100);
+    _ = try h.cand(5, 5, u, T + 1_644_000, .{});
+    _ = try gTicks(&h, T + 1_650_000, T + 3_550_000); // the worker record's unmatched expiry passes
+    try h.ev(5, .{ .response = .{ .rid = "d", .mime = "application/json", .from_sw = false, .charset = .other, .ts_us = T + 3_560_000 } }, T + 3_560_000);
+    try h.ev(5, .{ .data = .{ .rid = "d", .bytes = 9 } }, T + 3_560_000);
+    h.table.cefEnd(5, 4, T + 3_599_000);
+    try h.finish(5, "d", T + 3_600_000);
+    try h.table.tickAt(gpa_t, T + 3_610_000, T + 3_610_000);
+    try h.drain();
+    const d_got = gFetchedFor(&h, "d");
+    std.debug.print("\n[v20g WB-1] B's record(2) ended {?} at A's decision · D (own record 4) fetched for record {?} · ends 3 {?} 5 {?}\n", .{ b_rec_end, d_got, h.ended.get(3), h.ended.get(5) });
+    try testing.expectEqual(@as(?u64, 4), d_got); // the WB rule: B left with its record, D gets its own
+}
+
+test "W9d② v20g A WB-2 (fixed): an old-document request whose CEF record started just after the doc notice (not old_doc) — the record ends unmatched without retiring its open CDP request, which then steals the reloaded request's record; the reloaded request's body goes to a later request's record" {
+    const u = "http://127.0.0.1/v20g/wb2";
+    const T: i64 = 1_000_000;
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    try h.sent(5, "o", u, T, T + 100); // old document's request (headers never come)
+    h.table.documentStarted(5, T + 300_000);
+    _ = try h.cand(5, 1, u, T + 301_000, .{}); // its CEF begin lands 1 ms after the doc notice …
+    h.table.cefEndAs(5, 1, T + 301_100, false); // … and is cancelled at once
+    try h.sent(5, "n", u, T + 302_000, T + 302_100); // reload's request (slow: 3.5 s)
+    _ = try h.cand(5, 2, u, T + 303_000, .{});
+    try h.sent(5, "m", u, T + 1_000_000, T + 1_000_100); // a later same-URL request (open longer)
+    _ = try h.cand(5, 3, u, T + 1_003_000, .{});
+    _ = try gTicks(&h, T + 350_000, T + 3_750_000); // record 1's unmatched expiry (3 s) passes
+    try h.ev(5, .{ .response = .{ .rid = "n", .mime = "application/json", .from_sw = false, .charset = .other, .ts_us = T + 3_790_000 } }, T + 3_790_000);
+    try h.ev(5, .{ .data = .{ .rid = "n", .bytes = 9 } }, T + 3_790_000);
+    h.table.cefEnd(5, 2, T + 3_799_000);
+    try h.finish(5, "n", T + 3_800_000);
+    try h.table.tickAt(gpa_t, T + 3_810_000, T + 3_810_000);
+    try h.drain();
+    const n_got = gFetchedFor(&h, "n");
+    std.debug.print("\n[v20g WB-2] record 1 ended {?} · N (own record 2) fetched for record {?} · 2 {?} 3 {?}\n", .{ h.ended.get(1), n_got, h.ended.get(2), h.ended.get(3) });
+    if (n_got) |g| try testing.expectEqual(@as(u64, 2), g);
+}
+
+test "W9d② v20g A WB-3 (fixed): documented gap — an old-document CDP request that never reached CEF — with TWO reloaded same-URL requests: the first reloaded request's body goes to the second's record (the gap is not only a lost body)" {
+    const u = "http://127.0.0.1/v20g/wb3";
+    const T: i64 = 1_000_000;
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    try h.sent(5, "o", u, T, T + 100); // never reaches CEF, cut by the navigation
+    h.table.documentStarted(5, T + 300_000);
+    try h.sent(5, "n1", u, T + 350_000, T + 350_100);
+    _ = try h.cand(5, 1, u, T + 351_000, .{});
+    try h.sent(5, "n2", u, T + 360_000, T + 360_100); // open longer than n1
+    _ = try h.cand(5, 2, u, T + 361_000, .{});
+    try h.ev(5, .{ .response = .{ .rid = "n1", .mime = "application/json", .from_sw = false, .charset = .other, .ts_us = T + 700_000 } }, T + 700_000);
+    try h.ev(5, .{ .data = .{ .rid = "n1", .bytes = 9 } }, T + 700_000);
+    h.table.cefEnd(5, 1, T + 709_000);
+    try h.finish(5, "n1", T + 710_000);
+    try h.table.tickAt(gpa_t, T + 720_000, T + 720_000);
+    try h.drain();
+    const got = gFetchedFor(&h, "n1");
+    std.debug.print("\n[v20g WB-3] N1 (own record 1) fetched for record {?} · 1 {?} 2 {?}\n", .{ got, h.ended.get(1), h.ended.get(2) });
+    if (got) |g| try testing.expectEqual(@as(u64, 1), g);
+}
+
+test "W9d② 재검증 2–9 회차 WB: 후보 상한(4096)으로 가장 오래된 짝 없는 기록을 busy 로 놓으면 그 주인일 수 있는 열린 요청도 뺀다 — 그 요청이 늦게 끝나도 같은 주소의 다음 요청 기록을 가져가지 않는다" {
+    const u = "http://127.0.0.1/v20g/wb/victim";
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    try h.sent(5, "a", u, 1_000_000, 1_000_100); // 오래 걸리는 요청 — 그 기록(1)이 상한으로 놓인다
+    _ = try h.cand(5, 1, u, 1_000_050, .{});
+    var ub: [64]u8 = undefined;
+    for (0..max_candidates - 1) |i| _ = try h.cand(5, 100 + i, try std.fmt.bufPrint(&ub, "http://127.0.0.1/v20g/wb/fill/{d}", .{i}), 1_000_100 + @as(i64, @intCast(i)), .{});
+    try h.sent(5, "b", u, 1_100_000, 1_100_100);
+    _ = try h.cand(5, 2, u, 1_100_050, .{}); // 상한을 넘겨 1 이 busy
+    try testing.expect(stateIs(&h, 1, .busy));
+    // a 가 남아 있으면 a 는 차례에서 b 의 기록(2)을 가져가고 b 는 짝이 없다 — 이제 a 는 빠졌다: a 의 늦은 끝은 버려지고 b 는 제 본문.
+    try testing.expect(cdpIndexOf(&h, "a") == null);
+    try h.respond(5, "a", "application/json", 9, 1_200_000);
+    try h.finish(5, "a", 1_200_100);
+    try h.respond(5, "b", "application/json", 9, 1_200_200);
+    h.table.cefEnd(5, 2, 1_200_250);
+    try h.finish(5, "b", 1_200_300);
+    try h.table.tickAt(gpa_t, 1_210_000, 1_210_000);
+    try h.drain();
+    try testing.expectEqual(@as(?u64, 2), fetchedFor(&h, "b"));
+    try testing.expectEqual(@as(usize, 1), h.fetches.items.len);
+}
+
+test "W9d② 재검증 2–9 회차 N3: CDP 자리 상한의 표지는 주소마다고 기록을 다시 켜면(start) 비운다 — 다시 켠 뒤 같은 주소 요청은 제 본문" {
+    const k = "http://127.0.0.1/v20g/n3/k";
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    var rb: [24]u8 = undefined;
+    var t: i64 = 1_000_000;
+    try h.table.cdpEvent(gpa_t, 5, .{ .will_be_sent = .{ .rid = "x", .url_hash = hashUrl8(k), .method_hash = hashMethod("GET"), .ts_us = t } }, t);
+    for (0..max_cdp) |i| {
+        t += 10;
+        const rid = try std.fmt.bufPrint(&rb, "f.{d}", .{i});
+        try h.table.cdpEvent(gpa_t, 5, .{ .will_be_sent = .{ .rid = rid, .url_hash = hashUrl8("http://127.0.0.1/v20g/n3/fill"), .method_hash = hashMethod("GET"), .ts_us = t } }, t);
+    }
+    const tab5 = h.table.tabOf(5).?;
+    try testing.expectEqual(@as(usize, 2), tab5.cdp_drop_marks.items.len); // k 와 fill — 주소마다 하나
+    _ = try h.table.start(gpa_t, 5, 2);
+    try testing.expectEqual(@as(usize, 0), tab5.cdp_drop_marks.items.len);
+    try testing.expectEqual(@as(i64, 0), tab5.cdp_drop_until);
+    try h.sent(5, "y", k, t + 100, t + 100);
+    _ = try h.cand(5, 7, k, t + 150, .{});
+    try h.respond(5, "y", "application/json", 9, t + 1_000);
+    h.table.cefEnd(5, 7, t + 1_500);
+    try h.finish(5, "y", t + 2_000);
+    try h.table.tickAt(gpa_t, t + 3_000, t + 3_000);
+    try h.drain();
+    try testing.expectEqual(@as(?u64, 7), fetchedFor(&h, "y"));
+}
+
+test "W9d② 재검증 2–9 회차 WB: CEF 에 닿지 않은 abort 의 실패 뒤 새 문서로 옮겨 다음 요청의 기록이 취소로 끝나도 그 abort 의 것으로 정하지 않는다(request_failed 아님) — 그 기록은 주인과 함께 unavailable 하나" {
+    const u = "http://127.0.0.1/v20g/wb/navdef";
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    try h.sent(5, "x", u, 1_000_000, 1_000_050); // abort — CEF 에 닿지 않는다
+    try h.ev(5, .{ .failed = .{ .rid = "x", .ts_us = 1_000_100 } }, 1_000_200);
+    try h.sent(5, "y", u, 1_000_300, 1_000_350); // 같은 주소의 다음 요청 — 머리 전에 문서가 옮긴다
+    _ = try h.cand(5, 1, u, 1_000_400, .{});
+    try h.flushed(1_001_000, 1_001_000);
+    h.table.documentStarted(5, 1_100_000);
+    h.table.cefEndAs(5, 1, 1_100_100, false); // 문서를 옮기며 CEF 가 취소한다
+    var now: i64 = 1_100_100;
+    while (now < 1_100_100 + unclaimed_expiry_us + 100_000) : (now += 50_000) {
+        try h.table.tickAt(gpa_t, now, now);
+        try h.drain();
+    }
+    try testing.expect(stateIs(&h, 1, .unavailable)); // x 가 request_failed 로 가져가지 않았다
+    try testing.expectEqual(@as(u32, 1), endCount(&h, 1));
+    try testing.expect(!h.table.busy());
+}
+
+test "W9d② 재검증 2–9 회차 WB-3: 큰 퍼즈가 찾은 씨앗 — 새 문서 알림이 실제 문서 바뀜보다 늦어 알림 앞에 시작한 새 문서 기록을 앞 문서의 열린 요청이 쥔다(경계를 알림 앞 5 ms 까지 넓게) — 틀린 본문 없음" {
+    defer {
+        g_stall_pm = 15;
+        g_io_mix = 0;
+        g_worker_pct = 14;
+        g_abort_pct = 14;
+    }
+    g_stall_pm = 0;
+    g_io_mix = 2;
+    g_worker_pct = 0;
+    var st: GStats = .{};
+    for ([_]u8{ 0, 14 }) |ap| {
+        g_abort_pct = ap;
+        for ([_]u64{ 51183964, 51184756, 51185889, 51185263, 51186227 }) |seed| try gScenario(seed, false, true, &st);
+    }
+    gPrint("pinned seeds (doc notice boundary)", &st);
+    try testing.expectEqual(@as(usize, 0), st.wrong);
+    try testing.expectEqual(@as(usize, 0), st.missing_end);
+    try testing.expectEqual(@as(usize, 0), st.not_idle);
+}
+
+test "W9d② 재검증 2–9 회차 WB-3 대조: 새 문서로 옮기기 바로 앞(알림 앞 5 ms 안)에 앞 문서가 보낸 같은 주소 요청 셋 — 그 기록은 옮기며 취소된다 — 과 다시 불러온 요청 둘은 모두 제 본문(실제 CEF v20g-r9-gap-plain 의 꼴)" {
+    const u = "http://127.0.0.1/v20g/wb3/gap";
+    var h: H = .{ .sync = false };
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const doc: i64 = 2_000_000;
+    for (0..3) |k| {
+        const ki: i64 = @intCast(k);
+        var rb: [8]u8 = undefined;
+        try h.sent(5, try std.fmt.bufPrint(&rb, "o{d}", .{k}), u, doc - 3_000 + ki * 100, doc - 2_900 + ki * 100);
+        _ = try h.cand(5, 10 + k, u, doc - 2_500 + ki * 100, .{});
+    }
+    h.table.documentStarted(5, doc);
+    for (0..3) |k| h.table.cefEndAs(5, 10 + k, doc + 500, false);
+    try h.sent(5, "n1", u, doc + 100_000, doc + 100_100);
+    _ = try h.cand(5, 20, u, doc + 100_200, .{});
+    try h.sent(5, "n2", u, doc + 1_500_000, doc + 1_500_100);
+    _ = try h.cand(5, 21, u, doc + 1_500_200, .{});
+    try h.flushed(doc + 1_500_300, doc + 1_500_300);
+    try h.respond(5, "n1", "application/json", 9, doc + 1_600_000);
+    h.table.cefEnd(5, 20, doc + 1_600_500);
+    try h.finish(5, "n1", doc + 1_601_000);
+    try h.respond(5, "n2", "application/json", 9, doc + 1_700_000);
+    h.table.cefEnd(5, 21, doc + 1_700_500);
+    try h.finish(5, "n2", doc + 1_701_000);
+    try h.flushed(doc + 1_702_000, doc + 1_702_000);
+    var buf: [4]u64 = undefined;
+    try testing.expectEqualSlices(u64, &.{ 20, 21 }, h.fetchedRequests(&buf));
 }

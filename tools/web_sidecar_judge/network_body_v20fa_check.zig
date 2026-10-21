@@ -41,6 +41,8 @@ var counter = std.atomic.Value(u64).init(1);
 /// A → B → A·제 주소 리다이렉트: 키(0..255)마다 첫 홉을 보냈는가.
 var hop_seen: [4][256]std.atomic.Value(bool) = @splat(@splat(std.atomic.Value(bool).init(false)));
 var size_body: []u8 = &.{};
+/// v20g A: hits per key for the chain handler.
+var g_hits: [256]std.atomic.Value(u8) = @splat(std.atomic.Value(u8).init(0));
 
 fn startServer() !void {
     const fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -257,6 +259,44 @@ fn serveOne(conn: c_int) void {
     }
     if (std.mem.eql(u8, path, "/v20f/r9/rlp")) return reply(conn, html, "<!doctype html><title>rlp</title><script>" ++ read_js ++
         "var q=location.search.slice(1);var g=q.split('&')[0];var rest=q.slice(g.length);var L=rest.indexOf('x=1')>=0?'http://localhost:'+location.port:'';var n=L?4:10;setTimeout(function(){for(var i=0;i<n;i++)W(L+'/v20f/r9/hp?k='+i+rest,g);document.title='rlpfired'},100)</script>rlp");
+    // ── v20g A (verifier probes) ──
+    // reload delays / chain: /v20g/hp?k=K&n=N&d=D — the first N hits of key K hold the headers 6 s, later hits answer after D ms.
+    if (std.mem.eql(u8, path, "/v20g/hp")) {
+        const k: usize = @intCast(qnum(target, "k=") % 256);
+        const hit = g_hits[k].fetchAdd(1, .acq_rel) + 1;
+        if (hit <= qnum(target, "n=")) return data(conn, head, 6000, 0);
+        return data(conn, head, qnum(target, "d="), 0);
+    }
+    if (std.mem.eql(u8, path, "/v20g/rlp")) return reply(conn, html, "<!doctype html><title>grlp</title><script>" ++ read_js ++
+        "var q=location.search.slice(1);var g=q.split('&')[0];var rest=q.slice(g.length);var o=+(new URLSearchParams(location.search).get('o')||0);var c=+(new URLSearchParams(location.search).get('c')||4);" ++
+        "var L=rest.indexOf('x=1')>=0?'http://localhost:'+location.port:'';setTimeout(function(){for(var i=0;i<c;i++)W(L+'/v20g/hp?k='+(o+i)+rest,g);document.title='grlpfired'},100)</script>grlp");
+    // gap: the old document fires the URL and reloads in the same task; the reloaded document fires it twice (n1 fast, n2 slow).
+    if (std.mem.eql(u8, path, "/v20g/g")) {
+        const who = whoOf(head);
+        const d: u64 = if (std.mem.eql(u8, who, "o")) 3000 else if (std.mem.eql(u8, who, "n1")) 100 else if (std.mem.eql(u8, who, "n2")) 1500 else 0;
+        return data(conn, head, d, 0);
+    }
+    if (std.mem.eql(u8, path, "/v20g/gp")) return reply(conn, html, "<!doctype html><title>gp</title><script>" ++ read_js ++
+        "var P=new URLSearchParams(location.search);var k=P.get('k');var m=P.get('m');var u='/v20g/g?k='+k;" ++
+        "if(!sessionStorage.getItem('g'+k)){sessionStorage.setItem('g'+k,'1');" ++
+        "if(m=='hide'){addEventListener('pagehide',function(){for(var i=0;i<3;i++)W(u,'o')});setTimeout(function(){location.reload()},50)}" ++
+        "else if(m=='low'){setTimeout(function(){for(var i=0;i<3;i++)F(u,{headers:{'x-who':'o'},priority:'low'});location.reload()},50)}" ++
+        "else{setTimeout(function(){for(var i=0;i<3;i++)W(u,'o');location.reload()},50)}}" ++
+        "else{W(u,'n1');setTimeout(function(){W(u,'n2')},5);setTimeout(function(){document.title='gdone'},2500)}</script>gp");
+    // worker + same-URL concurrency (WB-1 shape): /v20g/s delays by x-who.
+    if (std.mem.eql(u8, path, "/v20g/s")) {
+        const who = whoOf(head);
+        const D = [_]struct { []const u8, u64 }{ .{ "a", 70 }, .{ "b", 5000 }, .{ "w", 0 }, .{ "c", 5000 }, .{ "d", 2000 }, .{ "e", 4500 } };
+        var d: u64 = 0;
+        for (D) |e| if (std.mem.eql(u8, who, e[0])) {
+            d = e[1];
+        };
+        return data(conn, head, d, 0);
+    }
+    if (std.mem.eql(u8, path, "/v20g/w.js")) return reply(conn, "application/javascript", "onmessage=function(e){fetch(e.data.u,{headers:{'x-who':e.data.w}}).then(function(r){return r.text()}).catch(function(){})}");
+    if (std.mem.eql(u8, path, "/v20g/wp")) return reply(conn, html, "<!doctype html><title>wp</title><script>" ++ read_js ++
+        "var w=new Worker('/v20g/w.js');var R=+(new URLSearchParams(location.search).get('r')||8);var j=0;function round(){if(j>=R){setTimeout(function(){document.title='wpdone'},6000);return}var u='/v20g/s?k='+j+'&t='+Date.now();j++;" ++
+        "W(u,'a');W(u,'b');setTimeout(function(){w.postMessage({u:u,w:'w'})},250);setTimeout(function(){W(u,'c')},500);setTimeout(function(){W(u,'d')},1590);setTimeout(function(){W(u,'e')},1640);setTimeout(round,7000)}setTimeout(round,300)</script>wp");
     return reply(conn, "text/plain", "x");
 }
 
@@ -913,5 +953,115 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             const n1 = countInFile(stderr_path.?.ptr, "body: tick");
             report(n1 - n0 <= 2, "v20f-r9-idle-after-cut", std.fmt.bufPrint(&detail, "body ticks in the 10 s after every end: {d} (before: {d} in the whole run)", .{ n1 - n0, n0 }) catch "");
         }
+    }
+    // ══ v20g A: reload delays 1.7 / 2.4 / 4.8 s (same host, other host) · reload chain A → B → C ══
+    if (enabled("g9d")) {
+        var dn: usize = 0;
+        var ok = true;
+        inline for (.{ .{ "&n=1&d=1700&o=10", "same host 1.7 s" }, .{ "&n=1&d=2400&o=20", "same host 2.4 s" }, .{ "&n=1&d=4800&o=30", "same host 4.8 s" }, .{ "&n=1&d=1700&o=40&x=1", "other host 1.7 s" }, .{ "&n=1&d=2400&o=50&x=1", "other host 2.4 s" }, .{ "&n=1&d=4800&o=60&x=1", "other host 4.8 s" } }) |c| {
+            const at = r.begins.items.len;
+            try r.navigate(rec_tab, "/v20g/rlp?A" ++ c[0]);
+            _ = r.pumpTitle(rec_tab, "grlpfired", 10_000);
+            r.pump(300);
+            try r.navigate(rec_tab, "/v20g/rlp?B" ++ c[0]);
+            _ = r.pumpTitle(rec_tab, "grlpfired", 10_000);
+            r.pump(9000);
+            const b = tally(&r, rec_tab, at, c[0], "B");
+            const all = tally(&r, rec_tab, at, c[0], null);
+            const ec = endCheck(&r, rec_tab, at);
+            if (all.wrong != 0 or ec.missing != 0 or ec.doubled != 0) ok = false;
+            if (b.own != b.total or b.total < 4) ok = false;
+            var el: [600]u8 = undefined;
+            var sl2: [400]u8 = undefined;
+            const piece = std.fmt.bufPrint(detail[dn..], " [{s}: reloaded own {d}/{d} states{s} · all wrong {d} · {s}]", .{ c[1], b.own, b.total, stateLine(&b, &sl), all.wrong, endLine(&ec, &el, &sl2) }) catch "";
+            dn += piece.len;
+            try r.navigate(rec_tab, "/v20/blank?g9f");
+            r.pump(4000);
+        }
+        report(ok, "v20g-r9-reload-delays", detail[0..dn]);
+        dn = 0;
+        ok = true;
+        inline for (.{ .{ "&n=2&d=400&o=70", "same host" }, .{ "&n=2&d=400&o=80&x=1", "other host" } }) |c| {
+            const at = r.begins.items.len;
+            inline for (.{ "A", "B", "C" }) |g| {
+                try r.navigate(rec_tab, "/v20g/rlp?" ++ g ++ c[0]);
+                _ = r.pumpTitle(rec_tab, "grlpfired", 10_000);
+                r.pump(300);
+            }
+            r.pump(7000);
+            const cc = tally(&r, rec_tab, at, c[0], "C");
+            const all = tally(&r, rec_tab, at, c[0], null);
+            const ec = endCheck(&r, rec_tab, at);
+            if (all.wrong != 0 or ec.missing != 0 or ec.doubled != 0) ok = false;
+            if (cc.own != cc.total or cc.total < 4) ok = false;
+            var el: [600]u8 = undefined;
+            var sl2: [400]u8 = undefined;
+            const piece = std.fmt.bufPrint(detail[dn..], " [{s}: C own {d}/{d} states{s} · all wrong {d} · {s}]", .{ c[1], cc.own, cc.total, stateLine(&cc, &sl), all.wrong, endLine(&ec, &el, &sl2) }) catch "";
+            dn += piece.len;
+            try r.navigate(rec_tab, "/v20/blank?g9c");
+            r.pump(4000);
+        }
+        report(ok, "v20g-r9-reload-chain", detail[0..dn]);
+    }
+    // ══ v20g A: WB-3 live — old document fires the URL then reloads at once; the reloaded document fires it twice ══
+    if (enabled("g9gap")) {
+        inline for (.{ "plain", "low", "hide" }) |m| {
+            var wrong: usize = 0;
+            var own: usize = 0;
+            var amb: usize = 0;
+            var other: usize = 0;
+            var o_begins: usize = 0;
+            var n_total: usize = 0;
+            var missing: usize = 0;
+            var doubled: usize = 0;
+            var gk: [64]u8 = undefined;
+            for (0..10) |round| {
+                const key = std.fmt.bufPrint(&gk, "{s}{d}x{d}", .{ m, round, session }) catch "";
+                const at = r.begins.items.len;
+                var pb: [128]u8 = undefined;
+                try r.navigate(rec_tab, std.fmt.bufPrint(&pb, "/v20g/gp?m={s}&k={s}", .{ m, key }) catch "");
+                _ = r.pumpTitle(rec_tab, "gdone", 15_000);
+                r.pump(1500);
+                var nb: [96]u8 = undefined;
+                const needle = std.fmt.bufPrint(&nb, "/v20g/g?k={s}", .{key}) catch "";
+                const all = tally(&r, rec_tab, at, needle, null);
+                const n1 = tally(&r, rec_tab, at, needle, "n1");
+                const n2 = tally(&r, rec_tab, at, needle, "n2");
+                const ec = endCheck(&r, rec_tab, at);
+                wrong += all.wrong;
+                own += n1.own + n2.own;
+                amb += n1.ambiguous + n2.ambiguous;
+                other += n1.other + n2.other;
+                n_total += n1.total + n2.total;
+                o_begins += all.total -| (n1.total + n2.total);
+                missing += ec.missing;
+                doubled += ec.doubled;
+            }
+            report(wrong == 0 and missing == 0 and doubled == 0, "v20g-r9-gap-" ++ m, std.fmt.bufPrint(&detail, "10 reloads: old-doc CEF records {d} (3 fetched per round) · reloaded n1+n2 records {d}: own {d} ambiguous {d} other {d} · WRONG {d} · no end {d} · several ends {d}", .{ o_begins, n_total, own, amb, other, wrong, missing, doubled }) catch "");
+            try r.navigate(rec_tab, "/v20/blank?gapf");
+            r.pump(4000);
+        }
+    }
+    // ══ v20g A: WB-1 live — page A/B same task, dedicated worker fetches the same URL 250 ms later, C/D/E later ══
+    if (enabled("g2w")) {
+        const at = r.begins.items.len;
+        try r.navigate(rec_tab, "/v20g/wp?r=8");
+        _ = r.pumpTitle(rec_tab, "wpdone", 90_000);
+        r.pump(2000);
+        // a body still waiting for a fetch slot ends a little later — tally once every begin has its end (or after 10 s more)
+        var waited: u32 = 0;
+        while (waited < 10_000 and endCheck(&r, rec_tab, at).missing > 0) : (waited += 500) r.pump(500);
+        const all = tally(&r, rec_tab, at, "/v20g/s?", null);
+        var line: [6][160]u8 = @splat(@splat(0));
+        const whos = [_][]const u8{ "a", "b", "w", "c", "d", "e" };
+        for (whos, 0..) |w, wi| {
+            const t = tally(&r, rec_tab, at, "/v20g/s?", w);
+            var s3: [200]u8 = undefined;
+            _ = std.fmt.bufPrint(line[wi][0..159], "{s}: {d} own {d} amb {d} wrong {d}{s}", .{ w, t.total, t.own, t.ambiguous, t.wrong, stateLine(&t, &s3) }) catch "";
+        }
+        const ec = endCheck(&r, rec_tab, at);
+        var el: [600]u8 = undefined;
+        var sl2: [400]u8 = undefined;
+        report(all.wrong == 0 and ec.missing == 0 and ec.doubled == 0, "v20g-r2-worker-same-url-concurrency", std.fmt.bufPrint(&detail, "{s} | {s} | {s} | {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), std.mem.sliceTo(&line[3], 0), std.mem.sliceTo(&line[4], 0), std.mem.sliceTo(&line[5], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..all.notes_len] }) catch "");
     }
 }

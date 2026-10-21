@@ -4494,3 +4494,11 @@ ScreenCaptureKit 패널 이미지·native 접근성 확인·대화상자 종료�
 ### 로컬 저장 메인 큐 통지
 
 제품 연결 구현. `test-editor-save-wake`는 렌더링 tick 없이 기존 저장 actor의 접수/완료·IME 재개·반복 저장·외부 충돌·대상 세대와 늦은 callback을 검사한다. 실제 Dispatch main run loop/worker join은 `test-editor-save-wake-native.py`, 알림 결함과 정상/복원 대조군은 `test-editor-save-wake-adversarial.py`로 검사한다. OS IME·전체 앱 종료와 화면의 첫 완료 표시까지 검증한 것으로 간주하지 않는다. [범위와 남은 검증](plans/editor-save-event-wake.md).
+
+### 미저장 백업의 동기 호출 실측
+
+별도 소스 사본에서 제품 백업 tick·복구 ID writer·직렬화의 호출 비용을 분리하는 도구를 구현했다.
+이름 없는/로컬 ID 문서의 64KiB·1MiB·8MiB 최초·반복 기록과 삭제를 검사한다.
+ReleaseFast 정상 19개·다섯 의미 결함 검출·원복 18개, 결과 판정기 5개가 통과했다.
+실측 30표본과 구간별 비용은 [백업 실측 계획](plans/editor-backup-main-latency.md)을 따른다.
+제품의 백업 I/O·주기·저장/종료 정책과 UI는 바꾸지 않는다. 실제 AppKit 입력/프레임 지연은 별도다.

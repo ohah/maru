@@ -1,4 +1,5 @@
 import type { FrameData } from "../backend/types";
+import { mouseReport } from "./mouse-report";
 import { CanvasRenderer } from "../render/canvas";
 import { DEFAULT_FONT, measureMetrics } from "../render/metrics";
 import type { Metrics, GlyphSource } from "../render/types";
@@ -214,17 +215,9 @@ export function attachDom(el: HTMLElement, term: DomTarget, opts: AttachOptions)
   let hovered: import("../link").TerminalLink | { uri: string } | null = null;
   /** 앱이 마우스를 잡고 있는가(DECSET 1000/1002/1003). Shift 를 누르면 선택이 우선한다. */
   const mouseGrabbed = (ev: MouseEvent): boolean => term.modes >> 8 !== 0 && !ev.shiftKey;
-  /** DOM 버튼 번호를 xterm 관례로 옮긴다(좌 0 · 중 1 · 우 2). */
   const reportOf = (ev: MouseEvent, pressed: boolean, motion: boolean) => {
     const [row, col] = cellOf(ev);
-    return {
-      button: ev.button === 1 ? 1 : ev.button === 2 ? 2 : 0,
-      col,
-      row,
-      pressed,
-      motion,
-      mods: (ev.shiftKey ? 1 : 0) | (ev.altKey ? 2 : 0) | (ev.ctrlKey ? 4 : 0),
-    };
+    return mouseReport(ev, row, col, pressed, motion);
   };
   let hoverCell: [number, number] = [-9, -9];
 

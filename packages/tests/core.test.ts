@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import { sameSpans } from "../core/src/decoration";
+import { mouseReport } from "../core/src/dom/mouse-report";
+import { CellFlag } from "../core/src/wasm/exports";
 import { loadWasm, makeTerminal, rowText, settle } from "./support";
 
 test("VT 출력이 셀 격자에 들어간다", async () => {
@@ -1222,4 +1224,28 @@ test("WASM 검색은 Unicode 별칭과 원문의 셀 좌표를 보존한다", as
   } finally {
     term.dispose();
   }
+});
+
+test("SGR 2(faint)는 셀에 dim 플래그로 남고 SGR 22가 지운다", async () => {
+  const term = await makeTerminal();
+  term.write("A\x1b[2mB\x1b[1;2mC\x1b[22mD");
+  const snap = await term.snapshot();
+  const dim = (index: number) => Boolean(snap.cells[index].flags & CellFlag.dim);
+  expect([0, 1, 2, 3].map(dim)).toEqual([false, true, true, false]);
+  expect(snap.cells[2].flags & CellFlag.bold).toBeTruthy();
+  term.dispose();
+});
+
+test("버튼 없는 호버는 왼쪽 끌기가 아니라 버튼 없음 이동으로 보고한다", async () => {
+  const term = await makeTerminal();
+  const seen: string[] = [];
+  term.onData((bytes) => seen.push(new TextDecoder().decode(bytes)));
+  term.write("\x1b[?1003h\x1b[?1006h");
+  await settle();
+  const event = { button: 0, buttons: 0, shiftKey: false, altKey: false, ctrlKey: false };
+  term.mouse(mouseReport(event, 3, 5, false, true)); // 호버
+  term.mouse(mouseReport({ ...event, buttons: 1 }, 3, 6, true, true)); // 왼쪽 끌기
+  term.mouse(mouseReport(event, 3, 6, false, false)); // 왼쪽 놓기
+  expect(seen).toEqual(["\x1b[<35;6;4M", "\x1b[<32;7;4M", "\x1b[<0;7;4m"]);
+  term.dispose();
 });

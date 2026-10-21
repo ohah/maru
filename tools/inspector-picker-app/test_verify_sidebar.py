@@ -61,3 +61,54 @@ class SidebarArtifacts(unittest.TestCase):
         folder = self.root/'round-01'
         (folder/'hover.ppm').write_bytes((folder/'baseline.ppm').read_bytes())
         with self.assertRaises(AssertionError):verify(self.root)
+
+    def test_extra_cancellation_pause_and_exclusive_edge_controls(self):
+        from verify_sidebar import verify_extra
+        import shutil
+        for r in self.manifest['rounds']:
+            old = r['round']
+            n = old + 10
+            r['round'] = n
+            r['expected']['id'] = 100+n
+            r['expected']['role'] = {11:'tab',12:'tree_item',13:'tree_item',14:'button',15:'tab'}[n]
+            if n in (11,12,14):r['selected']['selected'] = None
+            folder = self.root/f'round-{n:02d}'
+            (self.root/f'round-{old:02d}').rename(folder)
+            flags = 4 if n == 14 else 0
+            report = f'phase=hover cursor=crosshair\nlabel=hovered placement={old} flags=0\nlabel=selected placement={old} flags={flags}\n'
+            if n == 13:
+                report += 'label=pre-pick placement=3 flags=4\n'
+                prefix = b'P6\n1800 5\n255\n'
+                (folder/'baseline.ppm').write_bytes(prefix+bytes(1800*5*3))
+                (folder/'hover.ppm').write_bytes(prefix+b'\xff'+bytes(1800*5*3-1))
+            if n == 15:
+                r['target'] = dict(role='button',parent_id=115,visible_rect=dict(x=2,y=0,width=1,height=3))
+                (folder/'point.json').write_text('{"x":3,"y":1.5}')
+            (folder/'report.txt').write_text(report)
+            (folder/'selected.ppm').write_bytes((folder/'baseline.ppm').read_bytes())
+        self.save()
+        self.assertTrue(verify_extra(self.root)['passed'])
+        for defect in ('cancel-select','pick-retained','resume','pause','initial-pause','exclusive-edge','readonly','pixels','cursor','case-count','cancel-highlight'):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as temp:
+                dest = pathlib.Path(temp)/'copy'
+                shutil.copytree(self.root,dest)
+                m = json.loads((dest/'manifest.json').read_text())
+                if defect == 'cancel-select':m['rounds'][0]['selected']['selected'] = m['rounds'][0]['expected']
+                elif defect == 'pick-retained':m['rounds'][1]['selected']['picking'] = True
+                elif defect in ('resume','initial-pause','pause','cursor'):
+                    n = 14 if defect == 'pause' else 13
+                    p = dest/f'round-{n:02d}'/'report.txt'
+                    text = p.read_text()
+                    if defect == 'resume':text = text.replace('label=hovered placement=3 flags=0','label=hovered placement=3 flags=4')
+                    elif defect == 'initial-pause':text = text.replace('label=pre-pick placement=3 flags=4','label=pre-pick placement=3 flags=0')
+                    elif defect == 'pause':text = text.replace('label=selected placement=4 flags=4','label=selected placement=4 flags=0')
+                    else:text = text.replace('cursor=crosshair','cursor=arrow')
+                    p.write_text(text)
+                elif defect == 'exclusive-edge':(dest/'round-15/point.json').write_text('{"x":2.5,"y":1.5}')
+                elif defect == 'readonly':m['rounds'][0]['selected']['nodes'] = []
+                elif defect == 'case-count':m['rounds'].pop()
+                elif defect == 'cancel-highlight':(dest/'round-11/selected.ppm').write_bytes((dest/'round-11/hover.ppm').read_bytes())
+                elif defect == 'pixels':(dest/'round-11/hover.ppm').write_bytes((dest/'round-11/baseline.ppm').read_bytes())
+                (dest/'manifest.json').write_text(json.dumps(m))
+                with self.assertRaises(AssertionError):verify_extra(dest)
+        self.assertTrue(verify_extra(self.root)['passed'])

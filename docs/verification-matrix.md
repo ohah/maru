@@ -46,6 +46,30 @@
 - 전체 경계·문서 링크/줄 참조·fmt/diff 결과와 원격 CI 상태는 PR에서 구분해 기록한다.
   agent/recovered 행·상단 헤더·reorder preview와 native accessibility의 전체 이관은 이번 완료 범위에 포함하지 않는다.
 
+### 사이드바 추가 적대적 검증 5회 (2026-10-21)
+
+사용자의 추가 5회 요청으로 같은 PR의 누적 검증은 **10회**다. 제품 소스는 변경하지 않았고,
+동일한 고정 앱 SHA256 `c98057fda418c7c5a318a7821391b5252d6ecd2c2ebe40589c004046714e52ac`를 사용했다.
+
+| 누적 회차 / harness case | 공격 가설·조건 | 기대 / 실제 결과 |
+|---|---|---|
+| 6 / 11 | 카드 hover 후 Escape 취소 | 선택 null·Pick 종료·제품 목록 유지·강조 테두리 제거. 통과 |
+| 7 / 12 | 그룹 hover 후 Pick 재클릭 | 선택 null·Pick 종료·제품 목록 유지·강조 테두리 제거. 통과 |
+| 8 / 13 | Paused에서 주입 2× 중첩 그룹 Pick | 시작 Paused를 확인한 뒤 Live 복귀·선택·경계 강조, 목록 유지. 통과 |
+| 9 / 14 | 닫기 버튼 hover 도중 Pause | Paused 유지·선택 null·Pick 종료·제품 목록 유지·강조 제거. 통과 |
+| 10 / 15 | 분리 창에서 close 오른쪽 배타 경계 클릭 | close action 없이 부모 카드만 선택·제품 목록 유지. 통과 |
+
+- 명령: `python3 tools/inspector-picker-app/run.py --sidebar --start 11 --rounds 5 --app <같은 고정 앱> --output <새 경로>`.
+- `/tmp/maru-sidebar-extra5/manifest.json`, `verified.json`, 회차별 CLI observations·native report·Metal PNG.
+  추가 **5/5**, CLI **112건**, PNG **16장**, hover 경계 변화 **4476 pixels**.
+  취소 3종의 selected 경계 pixels는 baseline과 일치한다(잔류 강조 **0 pixels**).
+- `verify_sidebar.py`의 추가 판정자는 native Pause flags, 실제 배타 경계 좌표, 부모 identity,
+  제품 목록 보존과 취소 후 경계 제거를 독립 재검사한다. 최초 5회 artifact도 재검사해 통과했다.
+- 판정자 테스트 **4개**, 정상·복구 대조군과 결함 **20종**(기존 9 + 추가 11) 통과.
+  `/tmp/maru-sidebar-extra5-verifier-tests.log`. 추가 결함은 취소 후 선택/잔류 강조, Pick 유지,
+  Live 복귀 누락·Pause 유실·초기 Paused 누락, 잘못된 배타 경계·제품 변경·경계 누락·cursor 오류·회차 누락이다.
+- 실제 NSEvent callback·Metal readback·CLI 증거이며, 물리 HID/다중 모니터 증거는 포함하지 않는다.
+
 ### Elements 계층 탐색 (2026-10-21)
 
 - `feat/inspector-element-tree`, base `f00891e8c`: 부모/자식·접기/펼치기·검색·선택 경계와

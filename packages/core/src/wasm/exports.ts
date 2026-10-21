@@ -150,4 +150,6 @@ export const CellFlag = {
   reverse: 1 << 7,
   continuation: 1 << 8,
   link: 1 << 9,
+  /** SGR 2(faint). Claude Code 의 입력 안내·자동완성 고스트가 이것으로 온다. */
+  dim: 1 << 10,
 } as const;

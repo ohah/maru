@@ -1801,11 +1801,26 @@ pub const recording_mark_utf8 = "\u{25C9}";
 /// 기록 표식의 빨강(녹화 표시의 관례 — 테마와 무관하게 고정, 에이전트 브랜드색처럼).
 pub const recording_mark_color: maru.color.Rgb = .{ .r = 0xE5, .g = 0x48, .b = 0x4D };
 
-/// 이 탭 제목이 셀로 그리는 마커(running `●` 또는 기록 `◉`)로 시작하면 그 마커(UTF-8).
+/// W9d③: 요청 막기 규칙·엄격 모드가 있는 Chromium 탭의 표식 ⊘(U+2298) — 규칙이 하나라도 있으면(잠든 규칙만 있어도 — 「이 탭에 규칙이 있다」,
+/// sidecar 확인 전에도). 기록 ◉ 와 함께면 `◉⊘`. 셀로 그려 **그 칸만** 호박색으로 칠한다(`recolorBlockingMarkCells`). 에이전트가 연 탭은 묻지
+/// 않고 막을 수 있어(사용자 결정 D1) 이 표식과 Browser Grants 줄이 사용자의 신호다.
+pub const blocking_mark: u21 = 0x2298;
+pub const blocking_mark_utf8 = "\u{2298}";
+/// 막기 표식의 호박색(경고 — 테마와 무관하게 고정, 기록의 빨강처럼).
+pub const blocking_mark_color: maru.color.Rgb = .{ .r = 0xE8, .g = 0xA3, .b = 0x17 };
+
+/// 이 탭 제목이 셀로 그리는 마커(running `●`, 기록 `◉`, 막기 `⊘`, 둘 다 `◉⊘`)로 시작하면 그 마커(UTF-8 — 한두 글자).
 pub fn tabTitleMarker(title: []const u8) ?[]const u8 {
     if (tabTitleRunningMarker(title)) return agentFlagUtf8();
+    if (std.mem.startsWith(u8, title, recording_mark_utf8 ++ blocking_mark_utf8)) return recording_mark_utf8 ++ blocking_mark_utf8;
     if (std.mem.startsWith(u8, title, recording_mark_utf8)) return recording_mark_utf8;
+    if (std.mem.startsWith(u8, title, blocking_mark_utf8)) return blocking_mark_utf8;
     return null;
+}
+
+/// 마커가 차지하는 칸 수(글자마다 한 칸 — `pane.appendPaneTabTitles` 가 본문의 자리를 정한다).
+pub fn tabTitleMarkerCols(marker: []const u8) u32 {
+    return @intCast(std.unicode.utf8CountCodepoints(marker) catch 1);
 }
 
 /// W9d② 적대 리뷰 1 회차: 프로그램·페이지·사용자가 고른 제목이 기록 표식(`◉`)으로 시작하면 앞에 붙이는 글자 — WORD JOINER(U+2060, 보이지
@@ -1816,7 +1831,7 @@ pub const title_mark_escape = "\u{2060}";
 
 /// 고른 제목을 탭 제목으로 쓸 때 기록 표식으로 읽히지 않게 할 것인가(`title_mark_escape` 를 앞에 붙인다).
 pub fn titleNeedsMarkEscape(title: []const u8) bool {
-    return std.mem.startsWith(u8, title, recording_mark_utf8);
+    return std.mem.startsWith(u8, title, recording_mark_utf8) or std.mem.startsWith(u8, title, blocking_mark_utf8); // W9d③: ⊘ 도
 }
 
 /// 마커·구분 공백을 뗀 제목 본문. 마커가 없으면 원본 그대로.
@@ -1830,6 +1845,13 @@ pub fn tabTitleBody(title: []const u8) []const u8 {
 pub fn recolorRecordingMarkCells(cells: anytype) void {
     for (cells) |*c| if (c.codepoint == recording_mark) {
         c.style.foreground = .{ .rgb = recording_mark_color };
+    };
+}
+
+/// W9d③: 셀에 그린 막기 표식(⊘)만 호박색으로(제목 글은 measured 라 셀에 없다 — 제목 안의 ⊘ 는 칠하지 않는다).
+pub fn recolorBlockingMarkCells(cells: anytype) void {
+    for (cells) |*c| if (c.codepoint == blocking_mark) {
+        c.style.foreground = .{ .rgb = blocking_mark_color };
     };
 }
 

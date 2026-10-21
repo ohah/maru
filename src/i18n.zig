@@ -1494,6 +1494,11 @@ const Table = struct {
     grant_scope_network_limited: [:0]const u8,
     // W9d②: 응답 본문 기록(`browser_network_body`)을 묻는 동의문 — 사이트마다 한 번(사용자 탭), 탭 제목 앞에 ◉ 가 붙는다.
     grant_scope_network_body: [:0]const u8,
+    // W9d③: 요청 막기·엄격 모드(`browser_network_block`)를 묻는 동의문 — 사이트마다 한 번(사용자 탭). 해를 인정한다(페이지가 깨질 수 있다,
+    // 서비스 워커를 이 탭에서 끌 수 있다 — 사용자 결정 UC1·Q1), 탭 제목 앞에 ⊘.
+    grant_scope_network_block: [:0]const u8,
+    // W9d③: 에이전트 규칙이 이 탭의 요청을 막는다는 알림 — 사용자가 마지막으로 몬 탭의 주 프레임 이동이 막혔거나 규칙이 있는 탭을 처음 몰 때.
+    web_osr_block_notice: [:0]const u8,
     web_osr_gpu_unavailable: [:0]const u8,
     web_osr_profile_in_use: [:0]const u8,
     web_osr_start_failed: [:0]const u8,
@@ -2502,6 +2507,8 @@ const en: Table = .{
     .grant_scope_network = "read this tab's network requests from now on, incl. other sites' (cookie values only where cookies are allowed)",
     .grant_scope_network_limited = "read this tab's network requests from now on (details for this site only, no cookie or login values)",
     .grant_scope_network_body = "record this tab's response bodies on this site from now on (kept in memory, ◉ on the tab while recording)",
+    .grant_scope_network_block = "block this site's requests in this tab and turn off its service worker here (pages may break; ⊘ on the tab)",
+    .web_osr_block_notice = "Agent rules (⊘) are blocking requests in this tab — manage them in Browser Grants.",
     .web_osr_gpu_unavailable = "The Chromium engine can't draw on this Mac (no GPU path). Use the built-in engine for this page.",
     .web_osr_profile_in_use = "Another maru is using the Chromium browser profile. Chromium tabs stay empty in this window.",
     .web_osr_start_failed = "The Chromium engine could not start. Reinstall it with brew reinstall ohah/maru/maru-chromium, then restart maru.",
@@ -3793,6 +3800,8 @@ const ko: Table = .{
     .grant_scope_network = "이 탭의 네트워크 요청을 지금부터 다른 사이트 것까지 읽으려(쿠키 값은 쿠키 허용 사이트만)",
     .grant_scope_network_limited = "이 탭의 네트워크 요청을 지금부터 읽으려(이 사이트만 자세히, 쿠키·로그인 값 없이)",
     .grant_scope_network_body = "이 탭의 이 사이트 응답 본문을 지금부터 기록하려(메모리에만, 기록하는 동안 탭에 ◉)",
+    .grant_scope_network_block = "이 탭에서 이 사이트의 요청을 막거나 서비스 워커를 끄려(페이지가 깨질 수 있음, 탭에 ⊘)",
+    .web_osr_block_notice = "에이전트 규칙(⊘)이 이 탭의 요청을 막고 있습니다 — Browser Grants 에서 관리하세요.",
     .web_osr_gpu_unavailable = "이 Mac 에서는 Chromium 엔진으로 그릴 수 없습니다(GPU 경로 없음). 이 페이지는 내장 엔진을 쓰세요.",
     .web_osr_profile_in_use = "다른 maru 가 Chromium 브라우저 프로필을 쓰고 있습니다. 이 창의 Chromium 탭은 비어 있습니다.",
     .web_osr_start_failed = "Chromium 엔진을 시작하지 못했습니다. brew reinstall ohah/maru/maru-chromium 으로 다시 설치한 뒤 maru 를 다시 켜 주세요.",

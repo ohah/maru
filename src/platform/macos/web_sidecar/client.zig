@@ -31,6 +31,7 @@ const notifications = @import("notifications.zig");
 const new_tab = @import("new_tab.zig");
 const console = @import("console.zig");
 const network = @import("network.zig");
+const blocking = @import("blocking.zig"); // W9d③: 요청 막기의 진행 중 이동·주소·엄격 모드
 
 var client_obj: c.cef_client_t = undefined;
 var life_span: c.cef_life_span_handler_t = undefined;
@@ -149,6 +150,7 @@ fn onScrollOffsetChanged(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_brows
 fn onFrameDetached(_: [*c]c.cef_frame_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t) callconv(.c) void {
     defer object.releaseArg(browser);
     defer object.releaseArg(frame);
+    blocking.frameDetached(browser, frame); // W9d③: 서비스 워커 길의 나열이 바뀐다(그 iframe 의 진행 중 이동도 끝났다 — 3 차 검증 MED-A3-1)
     if (frame == null) return;
     if (entryOf(browser)) |entry| @import("datalist.zig").closeFrame(entry.id, frame);
 }
@@ -334,6 +336,7 @@ fn onAddressChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t,
     // W9d①: 서비스 워커 요청을 붙일 출처 — 온 주소(UTF-16)에서, 길이와 무관하게(적대 리뷰 4 회차 C3: 32 KiB 를 넘는 주소는 아래에서 알리지 않아
     // 옛 출처가 남았다 — 그 출처의 서비스 워커 요청이 다른 사이트를 보이는 이 탭에 붙었다).
     network.mainFrameAddress(entry.id, url);
+    blocking.addressChanged(browser, url); // W9d③: 맨 위 호스트(규칙의 사이트 묶기)·진행 중 주 프레임 이동의 끝
     var buf: [protocol.wire.max_url_bytes]u8 = undefined;
     const text = library.readString(browsers.state.api, url, &buf);
     if (text.len == 0 or text.len == buf.len) return; // 비었거나 잘렸다(잘린 주소는 다른 주소다 — maru 는 page_started 로 옛 주소임을 안다)
@@ -342,10 +345,13 @@ fn onAddressChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t,
 
 /// `on_before_browse` — 주 프레임의 이동이 시작된다(리다이렉트마다도): maru 에 알리고(W9a 적대 리뷰 5 회차 — 확정 전 DevTools 호출을
 /// 가른다) 그대로 둔다(0 — 막지 않는다).
-fn onBeforeBrowse(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, req: [*c]c.cef_request_t, _: c_int, _: c_int) callconv(.c) c_int {
+/// W9d③: 주·하위 프레임 모두 — 진행 중 이동을 적고(서비스 워커 길·귀속), 사용자 이동 토큰을 묶고, 엄격 모드를 사이트에 묶는다(IO 의 처리기
+/// 고르기보다 늘 먼저 — 실측 J-B15·D3(i)).
+fn onBeforeBrowse(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, req: [*c]c.cef_request_t, _: c_int, is_redirect: c_int) callconv(.c) c_int {
     defer object.releaseArg(browser);
     defer object.releaseArg(frame);
     defer object.releaseArg(req);
+    blocking.beforeBrowse(browser, frame, req, is_redirect);
     if (frame == null or frame.*.is_main.?(frame) == 0) return 0;
     const id = (entryOf(browser) orelse return 0).id;
     browsers.state.writer.send(.{ .main_frame_navigating = id }) catch {};
@@ -355,6 +361,7 @@ fn onBeforeBrowse(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_browser_t, 
 /// `on_load_start` — 새 문서면 툴팁 기억을 비우고(W6b — 옛 페이지 툴팁이 남지 않게, 새 문서의 같은 글이 다시 오게) 대화상자
 /// 쪽 처리로 넘긴다(그쪽이 인자 참조를 놓는다).
 fn onLoadStart(handler: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, transition: c.cef_transition_type_t) callconv(.c) void {
+    blocking.loadStart(browser, frame); // W9d③: 그 프레임의 진행 중 이동이 끝났다(인자는 아래 `dialogs` 가 푼다)
     if (frame != null and frame.*.is_main.?(frame) != 0) {
         if (entryOf(browser)) |entry| {
             tooltip.reset(entry.id);
@@ -401,6 +408,7 @@ fn onRenderProcessTerminated(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_
     @import("media_menu.zig").rendererGone(entry.cef_id); // W6h②: 미디어 메뉴의 진행(4 회차)
     @import("devtools.zig").rendererGone(entry.id); // W9-0b: 기다리던 호출은 `detached` 로(detach 가 오지 않을 수 있다)
     @import("net_body.zig").rendererGone(entry.id); // W9d②: 보낸 본문 호출은 답이 없다(J5) — `detached`
+    @import("blocking.zig").rendererGone(entry.id, entry.cef_id); // W9d③ 9 차: 죽은 동안 보낸 Network 도메인 바꾸기를 새 렌더러에 다시
     const reason: protocol.message.RendererGoneReason = switch (status) {
         c.TS_PROCESS_WAS_KILLED => .killed,
         c.TS_PROCESS_CRASHED => .crashed,
@@ -454,5 +462,6 @@ fn onBeforePopup(
 fn onBeforeClose(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef_browser_t) callconv(.c) void {
     defer object.releaseArg(browser);
     if (browser == null) return;
+    blocking.browserClosed(browser.*.get_identifier.?(browser)); // W9d③: 서비스 워커 길의 브라우저 목록·규칙·엄격
     browsers.onClosed(browser.*.get_identifier.?(browser));
 }

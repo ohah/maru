@@ -187,6 +187,11 @@ pub const WebMeta = struct {
     /// W9d②: 이 탭의 응답 본문을 기록하는 중이다(탭 제목 앞의 ◉ 와 같은 신호 — `web_osr.networkRecording`). 에이전트가 「이 탭은 기록 중」 을
     /// 목록에서 안다.
     recording: bool = false,
+    /// W9d③: 이 탭에 요청 막기 규칙이 있다(탭 제목 앞의 ⊘ 와 같은 신호 — `web_osr.networkBlocking`; 잠든 규칙만 있어도) — 규칙 수(모든 pane)와
+    /// 엄격 모드. 없으면 null.
+    blocking: ?Blocking = null,
+
+    pub const Blocking = struct { rules: u8 = 0, strict: bool = false };
 };
 
 /// kind에 따라 분기하는 전용 메타(tagged). terminal이면 web 필드를, web이면 terminal 필드를 **타입 수준에서**

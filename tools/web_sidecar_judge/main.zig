@@ -18,7 +18,12 @@
 //! 1·2 회차 항목은 `network_body_r1_check.zig`, 3 회차 항목은 `network_body_r3_check.zig`, 4 회차 항목은 `network_body_r4_check.zig`, 5 회차 항목은
 //! `network_body_r5_check.zig`)만 본다. `--network-body` 는 본문 판정(적대 리뷰 1–5 회차 항목 포함)만, `--review-body-r3`·`--review-body-r4`·
 //! `--review-body-r5` 는 그 회차 항목만. `--review-body-v20a`·`--review-body-v20b` 는 W9d② 20 회 적대 검증의 판정(`network_body_v20a_check.zig`
-//! 1–10 회차·`network_body_v20b_check.zig` 11–20 회차 — `--network` 에는 들지 않는다)만.
+//! 1–10 회차·`network_body_v20b_check.zig` 11–20 회차 — `--network` 에는 들지 않는다)만. `--network-block` 은 W9d③ 요청 막기
+//! (`network_block_check.zig` — 탭 길·서비스 워커 길·엄격 모드·재시작·비용)만 본다. `--review-block-v20a`·`--review-block-v20b` 는 W9d③ 20 회
+//! 적대 검증의 판정(`network_block_v20a_check.zig` 1–10 회차·`network_block_check.zig` 의 `runV20b` 11–20 회차 — `--network-block` 에는
+//! 들지 않는다)만, `--review-block-v20a2` 는 2 차 검증 1–10 회차(`network_block_v20a2_check.zig` — 2 차 11–20 회차는 `runV20b` 에 더했다)만,
+//! `--review-block-v20a3`·`--review-block-v20c` 는 3 차 검증 1–10 회차(`network_block_v20a3_check.zig`)·11–20 회차(`network_block_check.zig` 의
+//! `runV20c`)만.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -58,6 +63,11 @@ const network_body_v20m_check = @import("network_body_v20m_check.zig"); // 탐�
 const network_body_v20fa_check = @import("network_body_v20fa_check.zig"); // W9d② 최종 재검증 1–10 회차(검증자 v20f A)
 const network_body_v20fb_check = @import("network_body_v20fb_check.zig"); // W9d② 최종 재검증 11–20 회차(검증자 v20f B)
 const network_body_v20b_check = @import("network_body_v20b_check.zig"); // W9d② 적대 검증 11–20 회차
+
+const network_block_check = @import("network_block_check.zig"); // W9d③ 요청 막기
+const network_block_v20a_check = @import("network_block_v20a_check.zig"); // W9d③ 20 회 적대 검증 1–10 회차
+const network_block_v20a2_check = @import("network_block_v20a2_check.zig"); // W9d③ 2 차 20 회 적대 검증 1–10 회차
+const network_block_v20a3_check = @import("network_block_v20a3_check.zig"); // W9d③ 3 차 20 회 적대 검증 1–10 회차
 const attacks = @import("attacks.zig");
 
 const helper_wait_ms = 20_000;
@@ -297,6 +307,123 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         bodyR3Checks(host, std.mem.span(argv[3]));
         bodyR4Checks(host, std.mem.span(argv[3]));
         bodyR5Checks(host, std.mem.span(argv[3]));
+        return if (failures == 0) 0 else 1;
+    }
+    // W9d③: 요청 막기 판정만(`block-*` — 탭 길·서비스 워커 길·엄격 모드·재시작·비용, 시나리오마다 따로 띄운 sidecar·프로필).
+    // W9d③ 20 회 적대 검증 1–10 회차 판정만(`A-*` — 이것만은 따로: `--review-block-v20a`).
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-block-v20a")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        network_block_v20a_check.run(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "review-block-v20a", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // W9d③ 2 차 20 회 적대 검증 1–10 회차 판정만(`A2-*` — `--review-block-v20a2`, `V20A2_ONLY=strict,d2,sw,imp,canon` 으로 고른다).
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-block-v20a2")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        network_block_v20a2_check.run(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "review-block-v20a2", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // W9d③ 3 차 20 회 적대 검증 1–10 회차 판정만(`A3-*` — `--review-block-v20a3`, `A3_ONLY=r6,r8,r10,canon` 으로 고른다): 끝나지 않은 iframe 이동·
+    // 들어오는 서비스 워커 이동·오래 도는 beforeunload·iframe 의 같은 문서 뒤로.
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-block-v20a3")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        network_block_v20a3_check.run(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "review-block-v20a3", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // W9d③ 4 차 검증 A4 의 판정(`A4-*` — `--review-block-v20a4`, `A4_ONLY=r6,r10`): 남은 막은 하위 프레임 표시·옛 문서의 같은 주소 하위 자원·
+    // 같은 사이트 iframe 의 떨어져 나감·건너뛰는 기록 항목·CDP 로 답한 떠나기 확인.
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-block-v20a4")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        network_block_v20a3_check.runA4(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "review-block-v20a4", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--network-block")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        network_block_check.run(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "network-block", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // W9d③ 20 회 적대 검증 11–20 회차 판정만(`v20b-*` — 이것만은 따로: `--review-block-v20b`).
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-block-v20b")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        network_block_check.runV20b(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "review-block-v20b", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // W9d③ 3 차 20 회 적대 검증 11–20 회차 판정만(`v20c-*` — `--review-block-v20c`): 늦은 수의 세대·DevTools 지킴 훑기.
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-block-v20c")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        network_block_check.runV20c(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "review-block-v20c", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // W9d③ 8 차 적대 검증 A8(`A8-*` — `--review-block-v20h`, `A8_ONLY=tgt,hid,dstrict,drule,drec`, `A8_M=<메서드 이름 조각>`) — 읽기 목록에 남은 28 개를 다른 강제 계산·로드 갈래로
+    // (늦은 iframe·그림, c-v:hidden 안 iframe·shadow·font-display, print, image-set·srcset, 상위 레이어, 닫힌 select·details, 숨긴 iframe, 숨은 탭). 회귀 판정(8 차 2 판 기준 199/0).
+    // 9 차(`A9-*` — dstrict·drule·drec): 렌더러가 죽은 동안 보낸 엄격 켬·끔·막기 규칙 지우기·기록 끔·켬이 되살린 렌더러에 맞는가.
+    // 10 차(`Z-*` — 기본: zbrecoff·zbstrict·zbrecon·zkill·zslots·z204·zpopup·zsrec·zkeeprec, `A8_ONLY` 에 이름이 있을 때만: zcrashurl·zrecrash·zearly·zrace):
+    // 바쁜 렌더러가 처리하지 못한 채 죽은 명령, 탭마다 짝 자리, 되살린 문서의 머리 하위 자원(남는 틈 — 적기만).
+    // 11 차(`ZJ-*` — 기본: zjnofail·zjsuper·zjrec·zjpop·zjclose·zjxnav, `A8_ONLY` 에 이름이 있을 때만: zjnav(관찰)): 죽음을 맞은 엄격 켬의 거짓 `failed`,
+    // 같은 종류 명령의 덮기, 기록과 섞기, 렌더러를 나눈 팝업, 닫은 탭의 번호를 다시 씀, 죽음 아닌 렌더러 바꾸기.
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-block-v20h")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        network_block_v20a3_check.runA8(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "review-block-v20h", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // W9d③ 7 차 적대 검증 A7(`A7-*` — `--review-block-v20g`, `A7_ONLY=forced,hidden,name,rel,sub,tok`) — 읽기 목록에 남은 메서드가 페이지 스크립트를 돌리는가.
+    // 7 차 고침 뒤 기준: getBoxModel·getComputedStyleForNode 는 토큰을 거둔다, 숨은 탭 화면 찍기·releaseObject 뒤 FinalizationRegistry 는 남는 틈(적기만).
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-block-v20g")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        network_block_v20a3_check.runA7(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "review-block-v20g", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // W9d③ 6 차 적대 검증 A6(`A6-*` — `--review-block-v20f`, `A6_ONLY=stale,mainerr,ro,tok,lazy`) — 6 차 고침(getProperties 는 토큰을 거둔다) 뒤 모두 단언.
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-block-v20f")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        network_block_v20a3_check.runA6(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "review-block-v20f", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // W9d③ 5 차 적대 검증 A5(`A5-*` — `--review-block-v20e`, `A5_ONLY=eov,leak,bfc,swi,nc,ro,tok,hist,strict`) — 5 차 고침 뒤 모두 단언.
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-block-v20e")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        network_block_v20a3_check.runA5(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "review-block-v20e", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // W9d③ 4 차 적대 검증 B4(`v20d-*` — `--review-block-v20d`): IO 스레드 맞추기 비용.
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-block-v20d")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        network_block_check.runV20d(&reportText, host, std.mem.span(argv[3])) catch |err| report(false, "review-block-v20d", "{s}", .{@errorName(err)});
         return if (failures == 0) 0 else 1;
     }
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--closeask")) {

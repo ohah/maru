@@ -33,6 +33,10 @@ pub const ArgKind = enum {
     /// 문자열 배열 — 위치 인자 여럿으로(`--` 뒤). W9c③ 업로드의 파일 경로: **절대 경로만**(이 서버의 현재 폴더는 에이전트가 모른다 — CLI 는
     /// 자기 현재 폴더로 붙이지만 MCP 서버의 것은 에이전트의 것과 다를 수 있다). 스키마는 `minItems`·`maxItems`.
     path_list,
+    /// 문자열 배열 — 원소마다 `--flag=<원소>`(W9d③ 막기의 패턴·종류). 스키마는 `minItems`·`maxItems`.
+    string_list,
+    /// 정수 배열 — 원소마다 `--flag=<정수>`(W9d③ 막기의 규칙 번호). 스키마는 `minItems`·`maxItems`.
+    int_list,
 };
 
 pub const Arg = struct {
@@ -103,7 +107,7 @@ pub const tools = [_]Tool{
         .{ .key = "dialog", .kind = .int, .flag = "--dialog", .description = "dialog token from browser_dialog", .min = 1, .max = 9_007_199_254_740_991 },
     }) },
     .{ .name = "browser_upload", .subcommand = "upload", .description = "Put files into a file input (<input type=file>) on a Chromium tab. Every call asks the user in a dialog that lists each file with a peek of its content (never remembered — allow up to 2 minutes for the answer); a declined dialog is an error and nothing is uploaded. Give one locator (selector, ref, role, by_text or by_label) and absolute file paths (up to 10; folders are refused). The page gets a copy made when the user approves. The result's kept:false means the page received the files and then cleared or replaced the input itself; navigated:true means the page started loading a new page right after the files were set, or stopped answering (was busy) after they were set (its handler most likely received them); dialog:true means the page showed a dialog right after the files were set (answer it with browser_handle_dialog if you may, see browser_dialog) — in all these cases check the page and do not upload again.", .args = withSurface(&(locator_args ++ [_]Arg{.{ .key = "files", .kind = .path_list, .description = "absolute paths of the files to upload (1-10)", .required = true, .max_items = browser.max_upload_files }})) },
-    .{ .name = "browser_network_requests", .subcommand = "network", .description = "List a Chromium tab's network requests, newest first (50 per page, up to 200): req number, method, status, type, URL, time, size, and marks for other-site, cross-site iframe and service-worker requests, and for attempts Chromium restarted (the retry is a separate, newer req). Needs a separate permission per site (the user is asked once; tabs you opened with browser_open need none). You see requests from your permission on (tabs you opened: from their creation); earlier ones are counted as hidden, and so are requests made while the tab showed a site your permission does not cover and navigations that started on or passed through such a site (even when redirected back). Request bodies are not recorded; response bodies are recorded only while browser_network_record is on (each line then shows its body state). WebSocket, CORS preflight, data:/blob: and service-worker script requests are not shown. dropped counts requests maru did not record because the page made them too fast or held too many unfinished; dropped_sw_inflight_cap counts service-worker requests not recorded because the site's service workers held too many unfinished fetches (sw_inflight_cap — 128 per origin of the worker, 512 in total; page requests are not affected). Service-worker requests of a site no tab shows any more stop counting toward that cap, but they still hold a slot: when the unfinished service-worker requests (counted and released together) fill 1024 slots, maru forgets the oldest released one: such a request stays in the list unfinished (its response and end are not recorded). Use browser_network_request with a req number for headers and redirects.", .args = withSurface(&.{
+    .{ .name = "browser_network_requests", .subcommand = "network", .description = "List a Chromium tab's network requests, newest first (50 per page, up to 200): req number, method, status, type, URL, time, size, and marks for other-site, cross-site iframe and service-worker requests (shared-worker requests carry the same mark), and for attempts Chromium restarted (the retry is a separate, newer req). Needs a separate permission per site (the user is asked once; tabs you opened with browser_open need none). You see requests from your permission on (tabs you opened: from their creation); earlier ones are counted as hidden, and so are requests made while the tab showed a site your permission does not cover and navigations that started on or passed through such a site (even when redirected back). Request bodies are not recorded; response bodies are recorded only while browser_network_record is on (each line then shows its body state). WebSocket, CORS preflight, data:/blob: and service-worker script requests are not shown. dropped counts requests maru did not record because the page made them too fast or held too many unfinished; dropped_sw_inflight_cap counts service-worker requests not recorded because the site's service workers held too many unfinished fetches (sw_inflight_cap — 128 per origin of the worker, 512 in total; page requests are not affected). Service-worker requests of a site no tab shows any more stop counting toward that cap, but they still hold a slot: when the unfinished service-worker requests (counted and released together) fill 1024 slots, maru forgets the oldest released one: such a request stays in the list unfinished (its response and end are not recorded). Use browser_network_request with a req number for headers and redirects.", .args = withSurface(&.{
         .{ .key = "types", .kind = .string, .flag = "--type", .description = "request types separated by commas: document, iframe, stylesheet, script, image, font, xhr (fetch and XHR), media, worker, shared_worker, service_worker, prefetch, favicon, ping, csp_report, object, plugin, preload, other" },
         .{ .key = "method", .kind = .string, .flag = "--method", .description = "HTTP method, like GET or POST" },
         .{ .key = "status", .kind = .string, .flag = "--status", .description = "status code (100-599) or a class like 4xx" },
@@ -122,6 +126,13 @@ pub const tools = [_]Tool{
     }) },
     .{ .name = "browser_network_record", .subcommand = "network-record", .description = "Turn recording of a Chromium tab's response bodies on or off. While on, the tab title shows a red ◉ and maru keeps the text bodies (JSON, HTML, scripts, …) of the requests the tab makes, up to 1 MiB each (counted both as received and as the text Chromium decoded), in memory only. Needs the tab's network permission first (browser_network_requests asks for it); on the user's tabs the user is asked once per site, tabs you opened need no permission. Turning it off stops recording and keeps the bodies already recorded; revoking the permission, closing the tab or the user turning browser.agent-network-full off drops them. Requests from cross-process iframes and workers have no body (unmatched, or ambiguous when a worker fetched the same URL as the page at about the same time); a service worker's fetch gets the body the page received from that worker when maru can prove the page received exactly that fetch's response (the fetch can have a different URL than the page asked for — the worker chose it), otherwise ambiguous, or unmatched when no page received it (the worker's own refresh or prefetch). maru proves it only when no other worker fetch of the same URL and method overlapped it in time (a fetch of the URL again within about 5 ms after the previous one's response counts as overlapping), maru saw the fetch start, the worker fetch was made with the same method and Range header as the page's request, and its response was not partial (a HEAD or partial (206) response shares its timing with the full response but not its bytes; a 206 response is never matched, even with the same Range header), so concurrent fetches of one URL, and fetches made while maru was still attaching to a service worker that was already running when the tab first met it while recording (and for about 300 ms after; also another worker than the one that answered, and the worker of an iframe from another origin) are ambiguous. Service workers and dedicated workers that start while recording (new, updated or restarted — also a service worker that is stopped and restarted after the tab came back to its origin) wait at start until maru has attached to them, so their fetches are not missed; they start slightly later (more when a page starts hundreds of workers at once). Still, a service worker's fetches that start within about 1.3 s after it stops or restarts are ambiguous. When a worker stops, maru detaches from it in every tab, except where it attached only for an iframe of another origin or beyond the worker limits below (maru lets go of those within 3 s): if the worker restarts within those 3 s it does not wait, and its fetches' bodies (and possibly the tab's later service-worker bodies, until recording is turned off and on) are lost — ambiguous, never another request's body. While a worker fetch of the tab is still waiting for its response (a long poll, a slow or cancelled request), the tab's later service-worker bodies are ambiguous. While recording, the service workers of every origin the tab has shown since recording started (the origins of its top-level page — not those of iframes from other origins) are kept running even when idle (maru's DevTools stays attached to them, so fetches of an origin the tab comes back to are not missed, except those started within about 5 ms of coming back; at most 16 workers per tab, counting each worker — beyond that the worker of the origin the tab left longest ago is released first, and when 64 are attached in all, the one left longest ago in any tab; coming back to a released origin is like a first meeting) and are released when recording stops; a fetch whose body the worker never reads therefore does not end while recording, and once the service workers hold too many of them (128 per origin, 512 in total), later service-worker requests are not recorded and their bodies are lost (dropped_sw_inflight_cap in browser_network_requests). maru follows at most 16 service workers per tab (64 in total); the bodies of a worker beyond that are lost.", .args = withSurface(&.{
         .{ .key = "on", .kind = .bool_choice, .flag = "--on", .flag_false = "--off", .description = "true to record, false to stop", .required = true },
+    }) },
+    .{ .name = "browser_network_block", .subcommand = "network-block", .description = "Block a Chromium tab's requests (W9d③). action add puts patterns (scheme://host[:port]/path with * wildcards — no * means a prefix of the parsed address; ASCII only; no #fragment or user@) into the tab's rules, optionally only for some request types; remove takes patterns or rule numbers; clear removes your rules; list shows them; strict with on:true makes this tab bypass the site's service worker so the requests it would make can be blocked too (offline pages and cached answers stop working on that site in this tab; cross-site iframes and shared workers are not covered). A rule works only on the site of the page where you added it (it sleeps on other sites). Blocked requests fail like a network error (ERR_BLOCKED_BY_CLIENT); a blocked navigation shows Chromium's 'blocked' page and browser_navigate says blocked. Navigations the user typed or started with back, forward or reload pass once. Requests a service worker or shared worker makes are blocked only when every tab showing that site holds a matching type-less rule (typed rules never apply to them); otherwise they are counted as not applied. Needs the tab's network permission first (browser_network_requests asks for it); on the user's tabs the user is asked once per site, tabs you opened need no permission. The tab title shows ⊘ while it has rules; at most 32 rules per tab, 10 changes a second.", .args = withSurface(&.{
+        .{ .key = "action", .kind = .string, .flag = "--action", .description = "add, remove, clear, list or strict", .required = true },
+        .{ .key = "patterns", .kind = .string_list, .flag = "--pattern", .description = "patterns to add or remove (1-32)", .max_items = browser.max_block_patterns },
+        .{ .key = "types", .kind = .string_list, .flag = "--type", .description = "with add: only these request types (document, iframe, stylesheet, script, image, font, xhr, media, worker, ping, prefetch, preload, ...; not service_worker)", .max_items = browser.max_network_types },
+        .{ .key = "rules", .kind = .int_list, .flag = "--rule", .description = "with remove: rule numbers from list (1-32 of them)", .max_items = browser.max_block_patterns },
+        .{ .key = "on", .kind = .bool_choice, .flag = "--on", .flag_false = "--off", .description = "with strict: true to turn strict mode on for the site the tab shows, false to turn it off" },
     }) },
     .{ .name = "browser_navigate", .subcommand = "navigate", .description = "Navigate a tab to an address. On Chromium tabs only http, https and about:blank, and it waits up to 25 seconds for the first load (loaded:false when no page loaded — a download, an empty response, a same-page link, or the time ran out).", .args = withSurface(&.{.{ .key = "url", .kind = .positional, .description = "address", .required = true }}) },
     .{ .name = "browser_get_url", .subcommand = "get-url", .description = "Print the tab's current document address.", .args = withSurface(&.{}) },
@@ -269,6 +280,32 @@ pub fn argv(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Va
                             else => return error.WrongType,
                         };
                         positional_list = a.items;
+                    },
+                    else => return error.WrongType,
+                },
+                // W9d③: 원소마다 옵션 하나(`--flag=값` — 값이 `-` 로 시작해도 옵션으로 읽히지 않는다).
+                .string_list => switch (v) {
+                    .array => |a| {
+                        if (a.items.len == 0 or a.items.len > spec.max_items) return error.WrongType;
+                        for (a.items) |item| switch (item) {
+                            .string => |str| try out.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ spec.flag, str })),
+                            else => return error.WrongType,
+                        };
+                    },
+                    else => return error.WrongType,
+                },
+                .int_list => switch (v) {
+                    .array => |a| {
+                        if (a.items.len == 0 or a.items.len > spec.max_items) return error.WrongType;
+                        for (a.items) |item| {
+                            const n: i64 = switch (item) {
+                                .integer => |n| n,
+                                .float => |f| if (f == @trunc(f) and f >= 0 and f < 9.007199254740992e15) @intFromFloat(f) else return error.WrongType,
+                                else => return error.WrongType,
+                            };
+                            if (n < 0) return error.WrongType;
+                            try out.append(arena, try std.fmt.allocPrint(arena, "{s}={d}", .{ spec.flag, n }));
+                        }
                     },
                     else => return error.WrongType,
                 },
@@ -430,7 +467,9 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
             "user turned browser.agent-network-full off; request bodies are not recorded. " ++
             "browser_network_record turns recording of a tab's response bodies on (the tab title shows a red ◉; asked once per site on the user's tabs, " ++
             "not on tabs you opened); read a body with browser_network_request body:true, 64 KiB per call (or out for the whole body). " ++
-            "A body sent with another site's cookies or login also needs that site's cookie permission.") catch |e| break :blk e;
+            "A body sent with another site's cookies or login also needs that site's cookie permission. " ++
+            "browser_network_block blocks a tab's requests by pattern on the site where you add the rule (the tab title shows ⊘; asked once per site " ++
+            "on the user's tabs, not on tabs you opened; strict mode bypasses the site's service worker in that tab).") catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
@@ -452,13 +491,13 @@ fn writeSchema(s: *std.json.Stringify, tool: *const Tool) !void {
             .int => "integer",
             .number => "number",
             .flag, .bool_choice => "boolean",
-            .json_array, .path_list => "array",
+            .json_array, .path_list, .string_list, .int_list => "array",
         });
-        if (a.kind == .path_list) {
+        if (a.kind == .path_list or a.kind == .string_list or a.kind == .int_list) {
             try s.objectField("items");
             try s.beginObject();
             try s.objectField("type");
-            try s.write("string");
+            try s.write(if (a.kind == .int_list) "integer" else "string");
             try s.endObject();
             try s.objectField("minItems");
             try s.write(1);
@@ -623,8 +662,12 @@ test "W9f: 도구 표의 모든 도구는 CLI 하위 명령이고, 필수 인자
             .int => .{ .integer = 4 },
             .string, .positional => .{ .string = if (std.mem.eql(u8, a.key, "key")) "Enter" else if (std.mem.eql(u8, a.key, "url")) "https://e.test/" else "x" },
             .path_list => try jsonOf(arena, "[\"/tmp/a.txt\"]"),
+            .string_list => try jsonOf(arena, "[\"x\"]"),
+            .int_list => try jsonOf(arena, "[1]"),
             else => .{ .bool = true },
         });
+        // W9d③: 막기의 필수 동작 — 그것만으로 받는 것(`list`).
+        if (std.mem.eql(u8, t.subcommand, "network-block")) try obj.put(arena, "action", .{ .string = "list" });
         const extra: ?[]const u8 = if (std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover") or std.mem.eql(u8, t.subcommand, "upload"))
             "selector"
         else if (std.mem.eql(u8, t.subcommand, "wait")) "selector" else null;
@@ -813,6 +856,12 @@ test "W9f 적대 리뷰 1 회차: 모든 도구의 선택 인자 하나하나가
             .path_list => try jsonOf(arena, "[\"/tmp/a.txt\"]"),
             else => .{ .string = if (std.mem.eql(u8, a.key, "key")) "Enter" else if (std.mem.eql(u8, a.key, "url")) "https://e.test/" else "x" },
         });
+        // W9d③: 막기의 동작은 그 인자와 짝인 것으로(패턴·종류 — add, 규칙 — remove, on — strict).
+        if (std.mem.eql(u8, t.subcommand, "network-block")) {
+            const action = if (std.mem.eql(u8, opt.key, "rules")) "remove" else if (std.mem.eql(u8, opt.key, "on")) "strict" else "add";
+            try obj.put(arena, "action", .{ .string = action });
+            if (std.mem.eql(u8, opt.key, "types")) try obj.put(arena, "patterns", try jsonOf(arena, "[\"https://a.test/\"]"));
+        }
         // 이 인자와 함께 써야 하는 짝(로케이터는 하나가 있어야, --name·--exact 는 role 과).
         const needs_locator = std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover") or std.mem.eql(u8, t.subcommand, "wait") or std.mem.eql(u8, t.subcommand, "upload");
         const is_locator = std.mem.eql(u8, opt.key, "selector") or std.mem.eql(u8, opt.key, "ref") or std.mem.eql(u8, opt.key, "role") or std.mem.eql(u8, opt.key, "by_text") or std.mem.eql(u8, opt.key, "by_label");
@@ -828,6 +877,9 @@ test "W9f 적대 리뷰 1 회차: 모든 도구의 선택 인자 하나하나가
             .number => .{ .float = 0.5 },
             .flag => .{ .bool = true },
             .json_array => try jsonOf(arena, "[1]"),
+            .string_list => try jsonOf(arena, if (std.mem.eql(u8, opt.key, "types")) "[\"image\"]" else "[\"https://a.test/x\"]"),
+            .int_list => try jsonOf(arena, "[3]"),
+            .bool_choice => .{ .bool = true },
             else => .{ .string = if (std.mem.eql(u8, opt.key, "rect")) "0,0,10,10" else if (std.mem.eql(u8, opt.key, "role")) "button" else if (std.mem.eql(u8, opt.key, "url")) "https://e.test/" else if (std.mem.eql(u8, opt.key, "types")) "xhr,image" else if (std.mem.eql(u8, opt.key, "status")) "4xx" else if (std.mem.eql(u8, opt.key, "out")) "/tmp/body" else "x" },
         });
         const a = try argv(arena, t, .{ .object = obj });
@@ -1192,3 +1244,76 @@ test "W9d② v20 A R10: browser_network_request 의 본문 인자 — 나쁜 형
     try testing.expect(inc == .call);
     try testing.expectError(error.OutWithOffset, browser.parse(inc.call.argv));
 }
+
+test "W9d③: browser_network_block — 동작·패턴·종류·규칙·on 이 CLI 의 network-block 옵션으로(원소마다 옵션 하나), 스키마는 배열의 원소 종류와 개수 상한, 안내는 사이트·서비스 워커·⊘ 를 말한다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const blk = findTool("browser_network_block").?;
+    const add = (try browser.parse(try argv(arena, blk, try jsonOf(arena, "{\"surface\":4,\"action\":\"add\",\"patterns\":[\"*://*.t.test/*\",\"-https://odd\"],\"types\":[\"image\",\"xhr\"]}")))).request.network_block;
+    try testing.expect(add.action == .add and add.pattern_count == 2 and add.type_count == 2);
+    try testing.expectEqualStrings("-https://odd", add.patterns[1]); // `-` 로 시작해도 값이다
+    const rm = (try browser.parse(try argv(arena, blk, try jsonOf(arena, "{\"surface\":4,\"action\":\"remove\",\"rules\":[3,4]}")))).request.network_block;
+    try testing.expect(rm.action == .remove and rm.rule_count == 2);
+    const st = (try browser.parse(try argv(arena, blk, try jsonOf(arena, "{\"surface\":4,\"action\":\"strict\",\"on\":false}")))).request.network_block;
+    try testing.expect(st.action == .strict and !st.on.?);
+    try testing.expectError(error.WrongType, argv(arena, blk, try jsonOf(arena, "{\"surface\":4,\"action\":\"add\",\"patterns\":[]}")));
+    try testing.expectError(error.WrongType, argv(arena, blk, try jsonOf(arena, "{\"surface\":4,\"action\":\"remove\",\"rules\":[-1]}")));
+    try testing.expectError(error.WrongType, argv(arena, blk, try jsonOf(arena, "{\"surface\":4,\"action\":\"add\",\"patterns\":[1]}")));
+    try testing.expect(std.mem.indexOf(u8, blk.description, "⊘") != null);
+    try testing.expect(std.mem.indexOf(u8, blk.description, "service worker") != null);
+    const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")).reply;
+    defer testing.allocator.free(r);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, r, .{});
+    defer parsed.deinit();
+    for (parsed.value.object.get("result").?.object.get("tools").?.array.items) |t| if (std.mem.eql(u8, t.object.get("name").?.string, "browser_network_block")) {
+        const props = t.object.get("inputSchema").?.object.get("properties").?.object;
+        try testing.expectEqualStrings("integer", props.get("rules").?.object.get("items").?.object.get("type").?.string);
+        try testing.expectEqual(@as(i64, 32), props.get("patterns").?.object.get("maxItems").?.integer);
+    };
+}
+
+test "W9d③ 변이: browser_network_block 의 문자열 배열도 개수 상한(패턴 33 개는 WrongType)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const blk = findTool("browser_network_block").?;
+    var w: std.Io.Writer.Allocating = .init(arena);
+    try w.writer.writeAll("{\"surface\":4,\"action\":\"add\",\"patterns\":[");
+    for (0..browser.max_block_patterns + 1) |i| try w.writer.print("{s}\"https://a.test/{d}\"", .{ if (i == 0) "" else ",", i });
+    try w.writer.writeAll("]}");
+    try testing.expectError(error.WrongType, argv(arena, blk, try jsonOf(arena, w.written())));
+}
+
+test "W9d③ v20b R17c: browser_network_block 의 인자 종류 — 정수 배열에 실수(3.5)·큰 수(1e20)·참거짓·중첩 배열, 문자열 배열에 null·객체는 WrongType, `=` 가 든 패턴·`--` 로 시작하는 패턴은 값으로, 종류 'image,xhr' 하나는 둘로 풀린다, on 이 문자열이면 WrongType" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const blk = findTool("browser_network_block").?;
+    for ([_][]const u8{
+        "{\"surface\":4,\"action\":\"remove\",\"rules\":[3.5]}",
+        "{\"surface\":4,\"action\":\"remove\",\"rules\":[1e20]}",
+        "{\"surface\":4,\"action\":\"remove\",\"rules\":[true]}",
+        "{\"surface\":4,\"action\":\"remove\",\"rules\":[[1]]}",
+        "{\"surface\":4,\"action\":\"remove\",\"rules\":\"1\"}",
+        "{\"surface\":4,\"action\":\"add\",\"patterns\":[null]}",
+        "{\"surface\":4,\"action\":\"add\",\"patterns\":[{\"p\":1}]}",
+        "{\"surface\":4,\"action\":\"strict\",\"on\":\"true\"}",
+        "{\"surface\":4,\"action\":7}",
+    }) |bad| {
+        if (argv(arena, blk, try jsonOf(arena, bad))) |a| {
+            if (browser.parse(a)) |_| return error.AcceptedBadArg else |_| {}
+        } else |_| {}
+    }
+    const add = (try browser.parse(try argv(arena, blk, try jsonOf(arena, "{\"surface\":4,\"action\":\"add\",\"patterns\":[\"https://a.test/?a=b\",\"--list\"],\"types\":[\"image,xhr\"]}")))).request.network_block;
+    try testing.expectEqualStrings("https://a.test/?a=b", add.patterns[0]);
+    try testing.expectEqualStrings("--list", add.patterns[1]);
+    try testing.expectEqual(NB.add, add.action);
+    try testing.expectEqual(@as(usize, 2), add.type_count);
+    const rm = (try browser.parse(try argv(arena, blk, try jsonOf(arena, "{\"surface\":4,\"action\":\"remove\",\"rules\":[3.0,4294967295]}")))).request.network_block;
+    try testing.expect(rm.rule_count == 2 and rm.rules[1] == 4294967295);
+    // u32 넘음 — argv 는 지나도 CLI 파서가 거절한다.
+    try testing.expectError(error.InvalidBlockArgs, browser.parse(try argv(arena, blk, try jsonOf(arena, "{\"surface\":4,\"action\":\"remove\",\"rules\":[4294967296]}"))));
+}
+
+const NB = browser.NetworkBlockCmd.Action;

@@ -204,7 +204,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 256), abi_version);
+    try std.testing.expectEqual(@as(u32, 257), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @backingInt(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @backingInt(Location.unavailable));
@@ -6789,6 +6789,8 @@ fn browserMethodHasTrackedLifecycle(method: control_browser.BrowserMethod) bool 
         .network, .network_request => false,
         // W9d②: 본문 기록을 켜고 끄기도 곧 답한다(sidecar 에 `net_record` 를 보내고 상태만 — 켜짐은 `browser.network` 의 `recording` 이 알린다).
         .network_record => false,
+        // W9d③: 막기 규칙·엄격 모드도 곧 답한다(sidecar 에 `net_block` 을 보내고 상태만 — `state:"sent"`).
+        .network_block => false,
     };
 }
 
@@ -6835,6 +6837,7 @@ fn browserMethodWireName(method: control_browser.BrowserMethod) []const u8 {
         .network => "browser.network",
         .network_request => "browser.networkRequest",
         .network_record => "browser.networkRecord",
+        .network_block => "browser.networkBlock",
     };
 }
 
@@ -7255,6 +7258,8 @@ const control_hello_caps = [_][]const u8{
     "browser.networkRequest",
     // W9d②: 응답 본문 기록(`browser_network_body` grant — 사이트에 묶인다, 에이전트가 연 탭은 묻지 않는다).
     "browser.networkRecord",
+    // W9d③: 요청 막기·엄격 모드(`browser_network_block` grant — 사이트에 묶인다, 에이전트가 연 탭은 묻지 않는다).
+    "browser.networkBlock",
 };
 const control_hello_version = "0.1.0";
 /// 한 drain(tick)에서 처리할 요청 상한(§5 per-tick 예산). accept 스레드 1개·in-flight ≤1이라 실질 여유.
@@ -7452,7 +7457,7 @@ fn resolveGrantPrompt(
         return;
     };
     // W9d①: 네트워크 grant 면 이제부터 적는다(사용자 탭은 이 grant 뒤의 요청만 보인다).
-    if (e.scope == .browser_network or e.scope == .browser_network_body) syncNetworkWatch(); // W9d②: 본문 grant 도 같은 동기화
+    if (e.scope == .browser_network or e.scope == .browser_network_body or e.scope == .browser_network_block) syncNetworkWatch(); // W9d②·③: 본문·막기 grant 도 같은 동기화
     // 재-dispatch: grant가 인가 → .browser/.subscribe/.immediate. grant async_id를 그대로 완료 상관자로 재사용.
     recheckSelfOrigin(pending);
     applyNetworkNarrows(); // W9d① 적대 리뷰 1 회차 F5: 모달을 기다리는 사이 사용자가 몬 탭
@@ -7667,6 +7672,8 @@ fn grantPromptText(buf: []u8, scope: control_capability.ScopeClass, url: []const
         .browser_network => if (session_mod.web_osr.networkFull()) .grant_scope_network else .grant_scope_network_limited,
         // W9d②: 응답 본문 기록 — 탭 제목 앞에 ◉ 가 붙는다는 것까지 말한다.
         .browser_network_body => .grant_scope_network_body,
+        // W9d③: 요청 막기 — 페이지가 말없이 깨질 수 있고 서비스 워커를 이 탭에서 끌 수 있다는 것까지 말한다(UC1·Q1).
+        .browser_network_block => .grant_scope_network_block,
         else => .grant_scope_control,
     });
     return maru.i18n.format(buf, maru.i18n.t(.grant_prompt), &.{ .{ .s = action }, .{ .s = shown } });
@@ -7680,7 +7687,7 @@ test "grant 동의문: 아무리 긴 URL 이어도 질문이 남고, 호스트�
     for ([_]maru.i18n.Lang{ .en, .ko }) |lang| {
         maru.i18n.setLang(lang);
         var buf: [512]u8 = undefined;
-        for ([_]control_capability.ScopeClass{ .browser_storage, .browser, .browser_network, .browser_network_body }) |scope| {
+        for ([_]control_capability.ScopeClass{ .browser_storage, .browser, .browser_network, .browser_network_body, .browser_network_block }) |scope| {
             const text = grantPromptText(&buf, scope, long_url);
             const question = if (lang == .en) "Allow?" else "허용하시겠습니까?";
             try std.testing.expect(std.mem.endsWith(u8, text, question));
@@ -7788,7 +7795,7 @@ fn pushBrowserOp(
         return;
     }
     // W9d①: 네트워크 목록·자세히는 sidecar 가 보낸 기록을 web_osr 가 쥔다 — 곧 답한다(대화상자로 멈춘 탭에서도, 확인 모달 뒤 재처리도 같은 자리).
-    if (op.method == .network or op.method == .network_request or op.method == .network_record) {
+    if (op.method == .network or op.method == .network_request or op.method == .network_record or op.method == .network_block) {
         if (chromium) return answerNetworkOp(server, async_id, op);
         server.cross_gpa.free(op.arg);
         const pending = server.inFlightPending(async_id) orelse return;
@@ -7942,8 +7949,14 @@ fn answerNetworkOp(server: *control_server_mod.ControlServer, async_id: u64, op:
     syncNetworkWatch(); // 방어 — grant 가 바뀐 자리를 놓쳤어도 읽기 전에 맞춘다
     // 읽는 쪽은 늘 pane grant 다 — `browser_network` 는 상속 fd 로 발급하지 않아(`CapabilityStore.issueForFd` 가 거절한다) 이 scope 를 쥔 cap 이
     // 없다(W9d① 적대 리뷰 5 회차 N2 — 닿지 않던 cap 갈래를 걷어 냈다). 그래도 오면 아무것도 보이지 않는다(덮지 않는 쪽).
-    const g = op.pane_grant orelse return completeTabStatus(async_id, .failed, "network reads need a browser_network grant");
+    // 20 회 검증 B N7: 막기(·본문 기록)에 「network reads」 라 답하던 것을 그 op 의 grant 이름으로.
+    const g = op.pane_grant orelse return completeTabStatus(async_id, .failed, switch (op.method) {
+        .network_block => "request blocking needs a browser_network_block grant for this pane",
+        .network_record => "recording response bodies needs a browser_network_body grant for this pane",
+        else => "network reads need a browser_network grant",
+    });
     if (op.method == .network_record) return answerNetworkRecord(async_id, op);
+    if (op.method == .network_block) return answerNetworkBlock(async_id, op, g);
     const who = consoleAuthorizer(.{ .pane_grant = g });
     // grant 호스트는 표의 지금 값으로(좁혀졌으면 좁힌 사이트 — F5). 어느 호스트든 grant(에이전트 탭)는 묶이지 않는다. 묶인 grant 는 그
     // 사이트가 아닐 때의 요청을 숨긴다(F2 — `web_osr.netView`).
@@ -7988,6 +8001,7 @@ fn answerNetworkOp(server: *control_server_mod.ControlServer, async_id: u64, op:
                 url_contains: ?[]const u8 = null,
                 before_req: ?u64 = null,
                 clear: bool = false,
+                blocked: bool = false, // W9d③: 막힌 것만(`network --blocked`)
             }, allocator, op.arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
             defer parsed.deinit();
             const a = parsed.value;
@@ -8001,6 +8015,7 @@ fn answerNetworkOp(server: *control_server_mod.ControlServer, async_id: u64, op:
                 .url_contains = a.url_contains,
                 .before_req = a.before_req,
                 .clear = a.clear,
+                .blocked = a.blocked,
             }) catch return completeTabStatus(async_id, .failed, "out of memory");
             defer allocator.free(json);
             completeTabStatus(async_id, .success, json);
@@ -8041,6 +8056,63 @@ fn answerNetworkRecord(async_id: u64, op: control_browser.BrowserOp) void {
     completeTabStatus(async_id, .success, json);
 }
 
+// ── W9d③: Chromium 탭의 요청 막기(`browser.networkBlock`) ─────────────────────────────────────────────────────────────
+
+/// W9d③ Q1(사용자 결정 2026-10-21 「예」): 사용자 탭에서도 엄격 모드(그 탭·그 사이트의 서비스 워커 우회)를 같은 사이트별 확인(block grant)
+/// 아래 켤 수 있는가. 「에이전트 탭만」 으로 바꾸려면 여기만 고친다 — 에이전트 탭(`isAgentTab`)이 아니면 거절하게.
+fn strictAllowedOn(tab: u64) bool {
+    _ = tab;
+    return true;
+}
+
+/// W9d③: `browser.networkBlock` — 곧 답한다(op 줄·DevTools 없음 — sidecar 에 `net_block` 을 보내고 `state:"sent"`). 규칙의 주인은 그 grant 의
+/// pane, 사이트는 grant 호스트(사용자 탭) 또는 지금 페이지의 호스트(에이전트 탭 — 어느 호스트든 grant). 실행 단계의 거절은 `{"reason","message",
+/// "index"?}` — control_browser 가 까닭마다 코드를 고른다.
+fn answerNetworkBlock(async_id: u64, op: control_browser.BrowserOp, g: control_browser.GrantProvenance) void {
+    const Arg = struct { action: []const u8, patterns: []const []const u8 = &.{}, types: u32 = 0, rules: []const u32 = &.{}, on: ?bool = null };
+    const parsed = std.json.parseFromSlice(Arg, allocator, op.arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
+    defer parsed.deinit();
+    const a = parsed.value;
+    const action = std.meta.stringToEnum(maru.session.web_osr_block.Action, a.action) orelse return completeTabStatus(async_id, .failed, "invalid arguments");
+    // block grant 의 지금 값(좁혀졌으면 좁힌 사이트 — F5). 그 사이 철회됐으면 바꾸기를 하지 않는다(모달 뒤 재처리·철회 경주).
+    const now = control_pane_grant_store.get(g.pane, op.surface_id, .browser_network_block) orelse return completeTabStatus(async_id, .failed, "{\"reason\":\"needs_grant\",\"message\":\"the permission to block requests on this tab is gone — ask again\"}");
+    const adds = action == .add or (action == .strict and (a.on orelse false));
+    // 막기는 네트워크 지켜보기 위에 선다 — 모달 전에 봤지만 그 사이 네트워크 grant 만 철회됐을 수 있다(W9d② D6 과 같은 갈래).
+    if (adds and control_pane_grant_store.get(g.pane, op.surface_id, .browser_network) == null) return completeTabStatus(async_id, .failed, "{\"reason\":\"needs_network_permission\",\"message\":\"blocking requests needs this tab\'s network permission first — run maru browser network on this tab\"}");
+    if (action == .strict and (a.on orelse false) and !strictAllowedOn(op.surface_id)) return completeTabStatus(async_id, .failed, "{\"reason\":\"needs_grant\",\"message\":\"strict mode is only available on tabs the agent opened\"}");
+    const answer = session_mod.web_osr.networkBlock(allocator, op.surface_id, .{
+        .pane = g.pane,
+        .any_host = now.any_host,
+        .grant_host = now.host.slice(),
+        .action = action,
+        .patterns = a.patterns,
+        .types = a.types,
+        .rules = a.rules,
+        .on = a.on,
+    }) catch return completeTabStatus(async_id, .failed, "out of memory");
+    switch (answer) {
+        .ok => |json| {
+            defer allocator.free(json);
+            completeTabStatus(async_id, .success, json);
+        },
+        .fail => |f| {
+            var buf: [512]u8 = undefined;
+            const payload = (if (f.index) |i|
+                std.fmt.bufPrint(&buf, "{{\"reason\":\"{s}\",\"message\":\"{s}\",\"index\":{d}}}", .{ f.reason, f.message, i })
+            else
+                std.fmt.bufPrint(&buf, "{{\"reason\":\"{s}\",\"message\":\"{s}\"}}", .{ f.reason, f.message })) catch return completeTabStatus(async_id, .failed, "out of memory");
+            completeTabStatus(async_id, .failed, payload);
+        },
+    }
+}
+
+/// W9d③: 그 pane 이 그 탭에 둔 막기 규칙 수와 엄격 모드 — Swift 의 Browser Grants 줄 「request blocking (N rules[, strict])」. 메인 스레드 전용.
+pub export fn maru_macos_control_browser_block_summary(pane: u64, target: u64, out_strict: ?*u8) u32 {
+    const sum = session_mod.web_osr.blockSummary(target, pane);
+    if (out_strict) |p| p.* = @intFromBool(sum.strict);
+    return sum.rules;
+}
+
 /// W9d①: grant 표의 `browser_network` grant 를 web_osr 에 알린다 — 탭마다 지켜보기를 켜고 끄며(sidecar `net_watch`), 사라진 grant 의 읽는
 /// 쪽을 빼고, 마지막 grant 가 사라진 탭의 기록을 지운다. grant 를 바꾸는 자리(모달 승인·에이전트 탭·철회·모두 철회·탭 닫힘)마다 부른다.
 /// 먼저 web_osr 가 남긴 좁히기를 grant 표에 옮긴다(적대 리뷰 2 회차 N2 — web_osr 는 몰 때 제 사본과 지켜보기를 이미 좁혔다. 옮기지 않고
@@ -8052,8 +8124,11 @@ fn syncNetworkWatch() void {
     // W9d②: 본문 grant 도 같은 자리에서 — 네트워크 grant 를 먼저 알린다(본문은 네트워크 기록 위에 선다 — 지켜보기가 끝나면 기록도 끈다).
     var body_list: [control_pane_grant.capacity]session_mod.web_osr.NetworkGrant = undefined;
     var nb: usize = 0;
+    // W9d③: 막기 grant 도 — 네트워크·본문 다음에 알린다(주인의 네트워크 grant 가 먼저 맞춰져야 그 규칙을 버릴지 안다).
+    var block_list: [control_pane_grant.capacity]session_mod.web_osr.NetworkGrant = undefined;
+    var nk: usize = 0;
     for (control_pane_grant_store.grants[0..control_pane_grant_store.len]) |*g| {
-        if (g.scope != .browser_network and g.scope != .browser_network_body) continue;
+        if (g.scope != .browser_network and g.scope != .browser_network_body and g.scope != .browser_network_block) continue;
         const item: session_mod.web_osr.NetworkGrant = .{
             .tab = g.target,
             .who = consoleAuthorizer(.{ .pane_grant = .{ .pane = g.pane, .target = g.target, .scope = g.scope, .id = g.id } }),
@@ -8065,13 +8140,17 @@ fn syncNetworkWatch() void {
         if (g.scope == .browser_network) {
             list[n] = item;
             n += 1;
-        } else {
+        } else if (g.scope == .browser_network_body) {
             body_list[nb] = item;
             nb += 1;
+        } else {
+            block_list[nk] = item;
+            nk += 1;
         }
     }
     session_mod.web_osr.networkSync(list[0..n]);
     session_mod.web_osr.networkBodySync(body_list[0..nb]);
+    session_mod.web_osr.networkBlockSync(block_list[0..nk]);
 }
 
 /// W9d① 적대 리뷰 1 회차 F5(설정 `browser.agent-network-full` 이 꺼졌을 때): 사용자가 몬 에이전트 탭의 어느 호스트든 `browser_network` grant 를
@@ -8291,7 +8370,7 @@ fn wakeCdpSleepers() void {
                 finishCdp(run, .failed, "the request was cancelled");
                 continue;
             }
-            p.nav = if (session_mod.web_osr.agentNavState(run.surface_id)) |st| .{ .done = st.done, .loaded = st.loaded, .before_unload = st.before_unload, .started = st.saw_loading or st.saw_started } else null;
+            p.nav = if (session_mod.web_osr.agentNavState(run.surface_id)) |st| .{ .done = st.done, .loaded = st.loaded, .before_unload = st.before_unload, .started = st.saw_loading or st.saw_started, .blocked_rule = st.blocked_rule } else null;
         };
         const step = run.op.wake(allocator) catch {
             finishCdp(run, .failed, "out of memory");
@@ -8529,6 +8608,8 @@ const AgentTab = struct {
     network_grant: u64 = 0,
     /// W9d②: 탭과 함께 넣은 `browser_network_body` grant 의 번호(사용자 결정 UB2 2026-10-15 「묻지 않음」 — 기록은 에이전트가 켤 때, ◉ 는 그대로).
     body_grant: u64 = 0,
+    /// W9d③: 탭과 함께 넣은 `browser_network_block` grant 의 번호(사용자 결정 D1 「묻지 않음」 — 규칙은 에이전트가 둘 때, ⊘ 는 그대로).
+    block_grant: u64 = 0,
 };
 var agent_tabs: std.ArrayList(AgentTab) = .empty;
 
@@ -8555,12 +8636,12 @@ fn forgetAgentTab(surface_id: u64) void {
 /// 그 pane 이 에이전트 탭을 하나 더 가질 자리가 있는가 — 상한(8)과 grant 표(제어 grant 는 64 자리 안, 태어날 때 네트워크 grant 는 그 밖 —
 /// W9d① 적대 리뷰 1 회차 F6).
 fn agentTabRoom(pane: u64) bool {
-    return agentTabCount(pane) < max_agent_tabs_per_pane and control_pane_grant_store.room(false) and control_pane_grant_store.birthRoom(2); // W9d②: 네트워크·본문
+    return agentTabCount(pane) < max_agent_tabs_per_pane and control_pane_grant_store.room(false) and control_pane_grant_store.birthRoom(3); // W9d②·③: 네트워크·본문·막기
 }
 
 /// W9d①: 그 (pane, tab) 의 `browser_network` grant 가 탭과 함께 생긴 것인가(번호까지 — 철회 뒤 다시 받은 grant 는 아니다).
 fn agentNetworkBirth(pane: u64, tab: u64, grant_id: u64) bool {
-    for (agent_tabs.items) |t| if (t.pane == pane and t.tab == tab) return t.network_grant == grant_id or t.body_grant == grant_id;
+    for (agent_tabs.items) |t| if (t.pane == pane and t.tab == tab) return t.network_grant == grant_id or t.body_grant == grant_id or t.block_grant == grant_id;
     return false;
 }
 
@@ -8588,7 +8669,12 @@ fn adoptAgentTab(pane: u64, tab: u64) bool {
         control_pane_grant_store.removeSurface(tab);
         return false;
     };
-    agent_tabs.append(allocator, .{ .pane = pane, .tab = tab, .network_grant = control_pane_grant_store.idOf(pane, tab, .browser_network).?, .body_grant = control_pane_grant_store.idOf(pane, tab, .browser_network_body).? }) catch {
+    // W9d③: 요청 막기도 묻지 않는다(D1) — 규칙은 추가한 때의 페이지 사이트에 묶인다(⊘).
+    control_pane_grant_store.grant(.{ .pane = pane, .target = tab, .scope = .browser_network_block, .any_host = true, .birth = true }) catch {
+        control_pane_grant_store.removeSurface(tab);
+        return false;
+    };
+    agent_tabs.append(allocator, .{ .pane = pane, .tab = tab, .network_grant = control_pane_grant_store.idOf(pane, tab, .browser_network).?, .body_grant = control_pane_grant_store.idOf(pane, tab, .browser_network_body).?, .block_grant = control_pane_grant_store.idOf(pane, tab, .browser_network_block).? }) catch {
         control_pane_grant_store.removeSurface(tab);
         return false;
     };
@@ -10509,7 +10595,7 @@ pub export fn maru_macos_control_revoke_all_browser_grants() u32 {
     return n;
 }
 
-// grant scope ABI wire(0=browser·1=browser_storage·2=browser_network — W9d①·3=browser_network_body — W9d②). @intFromEnum이 아니라 **명시 매핑** — ScopeClass 순서가 바뀌어도
+// grant scope ABI wire(0=browser·1=browser_storage·2=browser_network — W9d①·3=browser_network_body — W9d②·4=browser_network_block — W9d③). @intFromEnum이 아니라 **명시 매핑** — ScopeClass 순서가 바뀌어도
 // Swift 메뉴가 잘못된 grant를 revoke하지 않게(grant에는 이 둘만 저장되나 방어로 browser에 접음/거부).
 fn grantScopeToWire(sc: control_capability.ScopeClass) u8 {
     return switch (sc) {
@@ -10517,6 +10603,7 @@ fn grantScopeToWire(sc: control_capability.ScopeClass) u8 {
         .browser_storage => 1,
         .browser_network => 2,
         .browser_network_body => 3, // W9d②
+        .browser_network_block => 4, // W9d③
         else => 0,
     };
 }
@@ -10526,6 +10613,7 @@ fn grantScopeFromWire(w: u8) ?control_capability.ScopeClass {
         1 => .browser_storage,
         2 => .browser_network,
         3 => .browser_network_body,
+        4 => .browser_network_block,
         else => null,
     };
 }
@@ -10559,6 +10647,7 @@ pub export fn maru_macos_control_revoke_browser_grant(pane: u64, target: u64, sc
     // 사람의 탭이 된 뒤의 브라우징을 어느 사이트든 묻지 않고 읽었다). 사용자가 모달로 따로 허락한 것(번호가 다르다)은 남긴다.
     var network_revoked = false;
     var body_revoked = false;
+    var block_revoked = false;
     if (removed and sc == .browser) {
         var i: usize = 0;
         while (i < agent_tabs.items.len) {
@@ -10572,6 +10661,11 @@ pub export fn maru_macos_control_revoke_browser_grant(pane: u64, target: u64, sc
                 if (t.body_grant != 0 and control_pane_grant_store.idOf(pane, target, .browser_network_body) == t.body_grant) {
                     control_pane_grant_store.revoke(pane, target, .browser_network_body);
                     body_revoked = true;
+                }
+                // W9d③: 탭과 함께 넣은 막기 grant 도(그 규칙·엄격이 함께 사라진다 — ⊘ 도).
+                if (t.block_grant != 0 and control_pane_grant_store.idOf(pane, target, .browser_network_block) == t.block_grant) {
+                    control_pane_grant_store.revoke(pane, target, .browser_network_block);
+                    block_revoked = true;
                 }
                 _ = agent_tabs.swapRemove(i);
             } else i += 1;
@@ -10590,7 +10684,7 @@ pub export fn maru_macos_control_revoke_browser_grant(pane: u64, target: u64, sc
         cancelBrowserExecutionsForGrant(&control_server_storage, pane, target, .browser_network_body);
     }
     // W9d①: 그 읽는 쪽을 빼고, 마지막이면 끄고 지운다. W9d②: 본문 grant 의 마지막이면 기록을 끄고 본문을 지운다(◉ 도 사라진다).
-    if (removed and (sc == .browser_network or sc == .browser_network_body or network_revoked or body_revoked)) syncNetworkWatch();
+    if (removed and (sc == .browser_network or sc == .browser_network_body or sc == .browser_network_block or network_revoked or body_revoked or block_revoked)) syncNetworkWatch();
     return if (removed) 1 else 0;
 }
 
@@ -12862,7 +12956,7 @@ test "쿠키 권한은 사이트에: 실행 직전 재확인은 grant 호스트�
     try std.testing.expectEqual(@as(usize, 0), maru_macos_control_taken_browser_op_required_host(&buf, buf.len));
 }
 
-test "grant scope wire round-trip: browser=0·browser_storage=1·browser_network=2·browser_network_body=3, 그 외 from-wire는 null" {
+test "grant scope wire round-trip: browser=0·browser_storage=1·browser_network=2·browser_network_body=3·browser_network_block=4, 그 외 from-wire는 null" {
     try std.testing.expectEqual(@as(u8, 0), grantScopeToWire(.browser));
     try std.testing.expectEqual(@as(u8, 1), grantScopeToWire(.browser_storage));
     try std.testing.expectEqual(control_capability.ScopeClass.browser, grantScopeFromWire(0).?);
@@ -12871,7 +12965,9 @@ test "grant scope wire round-trip: browser=0·browser_storage=1·browser_network
     try std.testing.expectEqual(control_capability.ScopeClass.browser_network, grantScopeFromWire(2).?);
     try std.testing.expectEqual(@as(u8, 3), grantScopeToWire(.browser_network_body)); // W9d②
     try std.testing.expectEqual(control_capability.ScopeClass.browser_network_body, grantScopeFromWire(3).?);
-    try std.testing.expect(grantScopeFromWire(4) == null); // 알 수 없는 wire → null(revoke가 0 반환)
+    try std.testing.expectEqual(@as(u8, 4), grantScopeToWire(.browser_network_block)); // W9d③
+    try std.testing.expectEqual(control_capability.ScopeClass.browser_network_block, grantScopeFromWire(4).?);
+    try std.testing.expect(grantScopeFromWire(5) == null); // 알 수 없는 wire → null(revoke가 0 반환)
 }
 
 test "per-grant revoke export: count/grant_at 스냅샷 + 값기반 revoke_browser_grant(멱등)" {
@@ -15165,7 +15261,7 @@ test "W9d① 적대 리뷰 1 회차 재현 A4: 태어날 때 네트워크 grant 
         syncNetworkWatch();
     }
     for (1..5) |p| for (0..max_agent_tabs_per_pane) |i| try std.testing.expect(adoptAgentTab(p, 5000 + p * 100 + i));
-    try std.testing.expectEqual(@as(usize, 96), control_pane_grant_store.len); // 제어 32 + 태어날 때 64(W9d②: 탭마다 네트워크·본문 둘)
+    try std.testing.expectEqual(@as(usize, 128), control_pane_grant_store.len); // 제어 32 + 태어날 때 96(W9d②·③: 탭마다 네트워크·본문·막기 셋)
     try std.testing.expect(agentTabRoom(9));
     // resolveGrantPrompt(승인)가 부르는 그것 — 「허용」 뒤에 저장된다.
     try control_pane_grant_store.grant(.{ .pane = 9, .target = 9001, .scope = .browser_network, .host = control_pane_grant.GrantHost.init("a.test") });
@@ -17779,4 +17875,596 @@ test "W9d② v20f 14: switch off — a user-driven agent tab is narrowed; frames
     w9d2Body(253, 2, "https://bank.test/api/me", "{\"acct\":\"V20F-OWN\"}", .{ .credentialed = true });
     try std.testing.expect(control_pane_grant_store.authorizes(5, 253, .browser_network_body, "bank.test"));
     try std.testing.expectEqualStrings("captured", try v20bState2(253, w9d1Grant(5, 253), 2));
+}
+
+// ── W9d③: 요청 막기(`browser.networkBlock`) — 앱 쪽 ──────────────────────────────────────────────────────────────────────
+// 시험이 증명하는 것: 막기는 곧 답하고(DevTools·op 줄 없음) 탭에 ⊘(`networkBlocking`)가 선다, 에이전트가 연 탭은 묻지 않는다(태어날 때 block grant —
+// D1), 둘째 pane 은 다른 pane 의 규칙을 수만 본다, 실행 단계의 거절은 까닭마다 코드(-32602·-32002), 메뉴의 제어 철회가 태어날 때 block grant 를
+// 함께 거둬 ⊘ 가 사라진다, Browser Grants 줄의 요약, 설정이 꺼지면 서비스 워커 수를 숨긴다.
+
+fn w9d3BlockGrant(pane: u64, tab: u64) control_browser.GrantProvenance {
+    return .{ .pane = pane, .target = tab, .scope = .browser_network_block, .id = control_pane_grant_store.idOf(pane, tab, .browser_network_block).?, .host = control_pane_grant_store.hostOf(pane, tab, .browser_network_block).? };
+}
+
+/// 막기 op 하나를 보낸다 — 곧 답한다(`pending.response`). 요청은 부른 쪽의 자리에 둔다(서버가 그 주소에 답을 쓴다).
+fn w9d3Block(pending: *control_server_mod.PendingRequest, tab: u64, grant: control_browser.GrantProvenance, arg: []const u8) !void {
+    pending.* = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkBlock\",\"params\":{\"id\":1,\"action\":\"list\"}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(pending, .{ .surface_id = tab, .method = .network_block, .arg = try allocator.dupe(u8, arg), .pane_grant = grant });
+}
+
+test "W9d③: 에이전트가 연 탭은 묻지 않고 막는다 — 곧 답하고 ⊘, 둘째 pane 은 수만, 실행 단계의 거절은 까닭마다 코드, 제어 철회가 ⊘ 를 거둔다, 설정 끔이면 서비스 워커 수를 숨긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{241});
+    defer w9c2Forget(ta, &.{241});
+    defer {
+        agent_tabs.clearRetainingCapacity();
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+        session_mod.web_osr.setNetworkFull(true);
+    }
+    try std.testing.expect(adoptAgentTab(5, 241)); // 태어날 때 네트워크·본문·막기 grant(D1 — 묻지 않는다)
+    try std.testing.expect(control_pane_grant_store.authorizes(5, 241, .browser_network_block, "bank.test"));
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 241, .url = "https://agent.test/" } });
+    const before = cdp_calls_attempted;
+    {
+        var pending: control_server_mod.PendingRequest = undefined;
+        try w9d3Block(&pending, 241, w9d3BlockGrant(5, 241), "{\"action\":\"add\",\"patterns\":[\"*://*.track.test/*\"]}");
+        const p = try w9b3Result(&pending);
+        defer p.deinit();
+        const r = p.value.object.get("result").?.object;
+        try std.testing.expectEqual(@as(usize, 1), r.get("rules").?.array.items.len);
+        try std.testing.expectEqualStrings("agent.test", r.get("rules").?.array.items[0].object.get("site").?.string);
+        try std.testing.expectEqualStrings("sent", r.get("state").?.string);
+        try std.testing.expect(r.get("rules").?.array.items[0].object.get("sw_hits") != null); // 설정 켬 — 수를 보인다
+    }
+    try std.testing.expectEqual(before, cdp_calls_attempted);
+    try std.testing.expect(session_mod.web_osr.networkBlocking(241) != null); // ⊘
+    // `network --blocked` — 앱이 그 거르기를 기록 질의로 넘긴다(스모크가 찾았다: 넘기지 않아 「invalid arguments」 였다). 막힌 것만, 패턴은 주인에게.
+    w9d1Begin(241, 1, "https://x.track.test/px");
+    session_mod.web_osr.testApply(ta, .{ .net_end = .{ .browser = 241, .request = 1, .outcome = .failed, .error_code = -20, .flags = .{ .blocked = true }, .rule_id = 1 } });
+    w9d1Begin(241, 2, "https://agent.test/ok");
+    session_mod.web_osr.testApply(ta, .{ .net_end = .{ .browser = 241, .request = 2, .received = 3 } });
+    {
+        const grant: control_browser.GrantProvenance = .{ .pane = 5, .target = 241, .scope = .browser_network, .id = control_pane_grant_store.idOf(5, 241, .browser_network).?, .host = control_pane_grant_store.hostOf(5, 241, .browser_network).? };
+        const all = try w9d1List(241, grant, "{\"page\":0,\"page_size\":50,\"types\":[],\"clear\":false}");
+        defer all.deinit();
+        try std.testing.expectEqual(@as(usize, 2), all.value.object.get("result").?.object.get("requests").?.array.items.len);
+        const only = try w9d1List(241, grant, "{\"page\":0,\"page_size\":50,\"types\":[],\"clear\":false,\"blocked\":true}");
+        defer only.deinit();
+        const reqs = only.value.object.get("result").?.object.get("requests").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), reqs.len);
+        try std.testing.expect(reqs[0].object.get("blocked").?.bool);
+        try std.testing.expectEqualStrings("*://*.track.test/*", reqs[0].object.get("block_pattern").?.string);
+    }
+    var strict: u8 = 9;
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_browser_block_summary(5, 241, &strict));
+    try std.testing.expectEqual(@as(u8, 0), strict);
+    // 둘째 pane — 사용자 탭처럼 모달로 받은 네트워크·막기 grant. 다른 pane 의 규칙은 수만.
+    try control_pane_grant_store.grant(.{ .pane = 6, .target = 241, .scope = .browser_network, .host = control_pane_grant.GrantHost.init("agent.test") });
+    try control_pane_grant_store.grant(.{ .pane = 6, .target = 241, .scope = .browser_network_block, .host = control_pane_grant.GrantHost.init("agent.test") });
+    syncNetworkWatch();
+    {
+        var pending: control_server_mod.PendingRequest = undefined;
+        try w9d3Block(&pending, 241, w9d3BlockGrant(6, 241), "{\"action\":\"list\"}");
+        const p = try w9b3Result(&pending);
+        defer p.deinit();
+        const r = p.value.object.get("result").?.object;
+        try std.testing.expectEqual(@as(usize, 0), r.get("rules").?.array.items.len);
+        try std.testing.expectEqual(@as(i64, 1), r.get("other_rules").?.integer);
+    }
+    // 남의 규칙은 지우지 못한다 — -32602 unknown_rule(index 0).
+    {
+        var pending: control_server_mod.PendingRequest = undefined;
+        try w9d3Block(&pending, 241, w9d3BlockGrant(6, 241), "{\"action\":\"remove\",\"rules\":[1]}");
+        const response = pending.response orelse return error.ExpectedResponse;
+        defer allocator.free(response);
+        try std.testing.expect(std.mem.indexOf(u8, response, "-32602") != null and std.mem.indexOf(u8, response, "unknown_rule") != null);
+    }
+    // 설정 끔 — 서비스 워커 수를 숨긴다(규칙마다·합계).
+    session_mod.web_osr.setNetworkFull(false);
+    {
+        var pending: control_server_mod.PendingRequest = undefined;
+        try w9d3Block(&pending, 241, w9d3BlockGrant(5, 241), "{\"action\":\"list\"}");
+        const p = try w9b3Result(&pending);
+        defer p.deinit();
+        const r = p.value.object.get("result").?.object;
+        try std.testing.expect(r.get("rules").?.array.items[0].object.get("sw_hits") == null);
+        try std.testing.expect(r.get("service_worker").?.object.get("not_applied_total") == null);
+    }
+    session_mod.web_osr.setNetworkFull(true);
+    // 메뉴의 제어 철회 — 태어날 때 block grant 도 함께 거둔다(⊘ 가 사라진다). 둘째 pane 의 모달 grant 는 남는다.
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, 241, 0));
+    try std.testing.expect(control_pane_grant_store.get(5, 241, .browser_network_block) == null);
+    try std.testing.expect(session_mod.web_osr.networkBlocking(241) == null);
+    try std.testing.expect(control_pane_grant_store.get(6, 241, .browser_network_block) != null);
+}
+
+/// 막기 op 의 실패 답(-32xxx 와 까닭)을 꺼낸다.
+fn w9d3BlockFailure(pending: *control_server_mod.PendingRequest, code: []const u8, reason: []const u8) !void {
+    const response = pending.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    pending.response = null;
+    try std.testing.expect(std.mem.indexOf(u8, response, code) != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, reason) != null);
+}
+
+test "W9d③ 변이: 실행 단계 — 사용자 탭에서도 엄격을 켠다(Q1), 그 pane 의 네트워크 grant 가 사라졌으면 다른 pane 이 지켜봐도 add·strict on 은 needs_network_permission, block grant 가 사라졌으면 needs_grant, 에이전트 탭의 태어날 때 자리는 셋" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{242});
+    defer w9c2Forget(ta, &.{242});
+    defer {
+        agent_tabs.clearRetainingCapacity();
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 242, .url = "https://app.test/" } });
+    const host = control_pane_grant.GrantHost.init("app.test");
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 242, .scope = .browser_network, .host = host });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 242, .scope = .browser_network_block, .host = host });
+    try control_pane_grant_store.grant(.{ .pane = 6, .target = 242, .scope = .browser_network, .host = host });
+    syncNetworkWatch();
+    const g5 = w9d3BlockGrant(5, 242);
+    {
+        // 사용자 탭(모달로 받은 grant) — 엄격 모드도 켠다(사용자 결정 Q1 — `strictAllowedOn`).
+        var pending: control_server_mod.PendingRequest = undefined;
+        try w9d3Block(&pending, 242, g5, "{\"action\":\"strict\",\"on\":true}");
+        const p = try w9b3Result(&pending);
+        defer p.deinit();
+        try std.testing.expect(p.value.object.get("result").?.object.get("strict").?.object.get("on").?.bool);
+    }
+    // pane 5 의 네트워크 grant 만 철회 — pane 6 이 지켜보기를 쥐고 있어 탭은 아직 지켜본다.
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, 242, 2));
+    for ([_][]const u8{ "{\"action\":\"add\",\"patterns\":[\"https://cdn.test/*\"]}", "{\"action\":\"strict\",\"on\":true}" }) |arg| {
+        var pending: control_server_mod.PendingRequest = undefined;
+        try w9d3Block(&pending, 242, g5, arg);
+        try w9d3BlockFailure(&pending, "-32002", "needs_network_permission");
+    }
+    // 네트워크 grant 를 다시 받고 block grant 를 철회 — 모달 뒤 재처리·철회 경주: 그 grant 가 없으면 아무것도 하지 않는다.
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 242, .scope = .browser_network, .host = host });
+    syncNetworkWatch();
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, 242, 4));
+    {
+        var pending: control_server_mod.PendingRequest = undefined;
+        try w9d3Block(&pending, 242, g5, "{\"action\":\"list\"}");
+        try w9d3BlockFailure(&pending, "-32002", "needs_grant");
+    }
+    // 에이전트 탭 하나는 태어날 때 grant 셋(네트워크·본문·막기)을 넣는다 — 둘 자리만 남았으면 열지 않는다.
+    control_pane_grant_store.clearAll();
+    for (0..control_pane_grant.max_birth_grants - 2) |i| try control_pane_grant_store.grant(.{ .pane = 1, .target = 10_000 + i, .scope = .browser_network, .any_host = true, .birth = true });
+    try std.testing.expect(control_pane_grant_store.birthRoom(2));
+    try std.testing.expect(!agentTabRoom(9));
+}
+
+test "W9d③ 변이: 제어 철회가 태어날 때 block grant 만 거둬도(네트워크·본문은 사용자가 모달로 다시 받았다) 동기화해 ⊘ 가 사라진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{243});
+    defer w9c2Forget(ta, &.{243});
+    defer {
+        agent_tabs.clearRetainingCapacity();
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    try std.testing.expect(adoptAgentTab(5, 243));
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 243, .url = "https://agent.test/" } });
+    {
+        var pending: control_server_mod.PendingRequest = undefined;
+        try w9d3Block(&pending, 243, w9d3BlockGrant(5, 243), "{\"action\":\"add\",\"patterns\":[\"*://*.track.test/*\"]}");
+        const p = try w9b3Result(&pending);
+        p.deinit();
+    }
+    // 사용자가 네트워크·본문 grant 를 이 사이트로 모달에서 다시 허락했다(새 번호 — 태어날 때 grant 가 아니다).
+    const host = control_pane_grant.GrantHost.init("agent.test");
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 243, .scope = .browser_network, .host = host });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 243, .scope = .browser_network_body, .host = host });
+    syncNetworkWatch();
+    try std.testing.expect(session_mod.web_osr.networkBlocking(243) != null);
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, 243, 0));
+    try std.testing.expect(control_pane_grant_store.get(5, 243, .browser_network_block) == null);
+    try std.testing.expect(control_pane_grant_store.get(5, 243, .browser_network) != null); // 모달로 받은 것은 남는다
+    try std.testing.expect(session_mod.web_osr.networkBlocking(243) == null);
+}
+
+// ── W9d③ v20b(적대 검증 11–20 회차, 검증자 B) — 앱 쪽 ──
+
+fn v20bBlockJson(tab: u64, grant: control_browser.GrantProvenance, arg: []const u8) !std.json.Parsed(std.json.Value) {
+    var pending: control_server_mod.PendingRequest = undefined;
+    try w9d3Block(&pending, tab, grant, arg);
+    const response = pending.response orelse return error.ExpectedResponse;
+    if (std.mem.indexOf(u8, response, "\"result\"") == null) {
+        std.debug.print("v20b unexpected failure {s}\n", .{response});
+        allocator.free(response);
+        return error.ExpectedResult;
+    }
+    return w9b3Result(&pending);
+}
+
+test "W9d③ v20b R11e: 사용자 탭 — 막기 모달 거절은 grant·규칙 없이 -32002, 허락(app.test)은 그 호스트에 묶인 규칙·엄격(Q1), 다른 사이트에서는 잠든다, 다른 사이트로 다시 허락(새 번호)하면 옛 규칙·엄격이 사라진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{251});
+    defer w9c2Forget(ta, &.{251});
+    defer {
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 251, .url = "https://app.test/" } });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 251, .scope = .browser });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 251, .scope = .browser_network, .host = control_pane_grant.GrantHost.init("app.test") });
+    syncNetworkWatch();
+    const web: control_surface.WebMeta = .{ .url = "https://app.test/", .panel_kind = .browser, .loading = false, .trust = .untrusted, .engine = .chromium, .controllable = true };
+    const fx = [_]control_surface.SurfaceDto{.{ .surface_id = 251, .title = "a", .window = 1, .detail = .{ .web = web } }};
+    const snapshot: control_surface.CollectorSnapshot = .{ .surfaces = &fx, .windows = &.{} };
+    {
+        var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkBlock\",\"params\":{\"id\":251,\"action\":\"add\",\"patterns\":[\"https://cdn.test/*\"]}}", .selector = 5, .browser_pane = 5, .io = std.testing.io };
+        const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+        resolveGrantPrompt(&control_server_storage, .{ .async_id = id, .pane = 5, .target = 251, .scope = .browser_network_block, .host = control_pane_grant.GrantHost.init("app.test") }, false, snapshot, 0);
+        const resp = pending.response orelse return error.ExpectedResponse;
+        defer allocator.free(resp);
+        pending.response = null;
+        try std.testing.expect(std.mem.indexOf(u8, resp, "\"code\":-32002") != null);
+    }
+    try std.testing.expect(!control_pane_grant_store.hasGrant(5, 251, .browser_network_block));
+    try std.testing.expect(session_mod.web_osr.networkBlocking(251) == null);
+    // 허락(모달이 보인 호스트 app.test) — resolveGrantPrompt 가 하는 그 grant·동기화.
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 251, .scope = .browser_network_block, .host = control_pane_grant.GrantHost.init("app.test") });
+    syncNetworkWatch();
+    const first_id = control_pane_grant_store.idOf(5, 251, .browser_network_block).?;
+    {
+        const p = try v20bBlockJson(251, w9d3BlockGrant(5, 251), "{\"action\":\"add\",\"patterns\":[\"https://cdn.test/*\"]}");
+        defer p.deinit();
+        try std.testing.expectEqualStrings("app.test", p.value.object.get("result").?.object.get("rules").?.array.items[0].object.get("site").?.string);
+    }
+    {
+        const p = try v20bBlockJson(251, w9d3BlockGrant(5, 251), "{\"action\":\"strict\",\"on\":true}");
+        defer p.deinit();
+        try std.testing.expectEqualStrings("app.test", p.value.object.get("result").?.object.get("strict").?.object.get("site").?.string);
+    }
+    var strict: u8 = 0;
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_browser_block_summary(5, 251, &strict));
+    try std.testing.expectEqual(@as(u8, 1), strict);
+    // 사용자가 다른 사이트로 간다 — 규칙은 잠든다(⊘ 는 그대로).
+    session_mod.web_osr.noteUserNavigation(251);
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 251, .url = "https://other.test/" } });
+    {
+        const p = try v20bBlockJson(251, w9d3BlockGrant(5, 251), "{\"action\":\"list\"}");
+        defer p.deinit();
+        const r = p.value.object.get("result").?.object;
+        try std.testing.expect(r.get("rules").?.array.items[0].object.get("dormant").?.bool);
+        try std.testing.expectEqualStrings("other.test", r.get("page_site").?.string);
+    }
+    try std.testing.expect(session_mod.web_osr.networkBlocking(251) != null);
+    // 다른 사이트로 다시 허락 — 새 번호, 옛 사이트의 규칙·엄격은 사라진다.
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 251, .scope = .browser_network, .host = control_pane_grant.GrantHost.init("other.test") });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 251, .scope = .browser_network_block, .host = control_pane_grant.GrantHost.init("other.test") });
+    syncNetworkWatch();
+    try std.testing.expect(control_pane_grant_store.idOf(5, 251, .browser_network_block).? != first_id);
+    try std.testing.expect(session_mod.web_osr.networkBlocking(251) == null);
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_browser_block_summary(5, 251, &strict));
+    try std.testing.expectEqual(@as(u8, 0), strict);
+}
+
+test "W9d③ v20b R12c: 메뉴 철회 — 에이전트 탭의 네트워크(2)만 거둬도 규칙·⊘ 가 사라지고 그 뒤 add 는 needs_network_permission, 모두 철회·pane 닫힘도 ⊘ 를 거둔다, 막기(4)는 그 pane 의 것만" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{ 252, 253, 254, 255 });
+    defer w9c2Forget(ta, &.{ 252, 253, 254, 255 });
+    defer {
+        agent_tabs.clearRetainingCapacity();
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    for ([_]u64{ 252, 253, 254, 255 }) |t| {
+        try std.testing.expect(adoptAgentTab(if (t == 254) 9 else 5, t));
+        session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = t, .url = "https://agent.test/" } });
+        const p = try v20bBlockJson(t, w9d3BlockGrant(if (t == 254) 9 else 5, t), "{\"action\":\"add\",\"patterns\":[\"*://*.track.test/*\"]}");
+        p.deinit();
+        try std.testing.expect(session_mod.web_osr.networkBlocking(t) != null);
+    }
+    // 252: 네트워크 grant(2)만 메뉴에서.
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, 252, 2));
+    try std.testing.expect(session_mod.web_osr.networkBlocking(252) == null);
+    try std.testing.expect(control_pane_grant_store.get(5, 252, .browser_network_block) != null); // 막기 grant 는 남는다
+    {
+        var pending: control_server_mod.PendingRequest = undefined;
+        try w9d3Block(&pending, 252, w9d3BlockGrant(5, 252), "{\"action\":\"add\",\"patterns\":[\"https://x.test/\"]}");
+        try w9d3BlockFailure(&pending, "-32002", "needs_network_permission");
+    }
+    // 253: 막기(4) — 253 만, 255 는 그대로(같은 pane 의 다른 탭).
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, 253, 4));
+    try std.testing.expect(session_mod.web_osr.networkBlocking(253) == null);
+    try std.testing.expect(session_mod.web_osr.networkBlocking(255) != null);
+    // 같은 철회 다시(멱등) — 0.
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_revoke_browser_grant(5, 253, 4));
+    // 254(pane 9): pane 이 닫힌다.
+    onAppSessionSurfaceClosed(null, 9);
+    try std.testing.expect(session_mod.web_osr.networkBlocking(254) == null);
+    try std.testing.expect(session_mod.web_osr.networkBlocking(255) != null);
+    // 255: 모두 철회.
+    _ = maru_macos_control_revoke_all_browser_grants();
+    try std.testing.expect(session_mod.web_osr.networkBlocking(255) == null);
+}
+
+test "W9d③ v20b R12d: 제어 철회(F3) — 사용자가 막기만 모달로 다시 받았으면 막기 grant 는 남지만 태어날 때 네트워크 grant 가 거둬져 규칙은 사라진다(막기는 기록 위에 선다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{256});
+    defer w9c2Forget(ta, &.{256});
+    defer {
+        agent_tabs.clearRetainingCapacity();
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    try std.testing.expect(adoptAgentTab(5, 256));
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 256, .url = "https://agent.test/" } });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 256, .scope = .browser_network_block, .host = control_pane_grant.GrantHost.init("agent.test") });
+    syncNetworkWatch();
+    {
+        const p = try v20bBlockJson(256, w9d3BlockGrant(5, 256), "{\"action\":\"add\",\"patterns\":[\"*://*.track.test/*\"]}");
+        p.deinit();
+    }
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, 256, 0));
+    try std.testing.expect(control_pane_grant_store.get(5, 256, .browser_network_block) != null);
+    try std.testing.expect(control_pane_grant_store.get(5, 256, .browser_network) == null);
+    try std.testing.expect(session_mod.web_osr.networkBlocking(256) == null);
+}
+
+test "W9d③ v20b R13b: 에이전트 탭을 사용자가 다른 사이트로 몬다 — 설정 켬이면 막기 grant 가 어느 호스트든 남아 그 사이트에서도 묻지 않고 add(사이트=몬 곳), 설정 끔이면 몰기 전 사이트로 좁혀 규칙은 잠든 채 남고 새 사이트는 다시 묻는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{ 257, 258 });
+    defer w9c2Forget(ta, &.{ 257, 258 });
+    defer session_mod.web_osr.setNetworkFull(true);
+    defer {
+        agent_tabs.clearRetainingCapacity();
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    // 켬.
+    try std.testing.expect(adoptAgentTab(5, 257));
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 257, .url = "https://agent.test/" } });
+    {
+        const p = try v20bBlockJson(257, w9d3BlockGrant(5, 257), "{\"action\":\"add\",\"patterns\":[\"https://agent.test/a\"]}");
+        p.deinit();
+    }
+    session_mod.web_osr.userNavigate(ta, 257, "https://bank.test/");
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 257, .url = "https://bank.test/" } });
+    applyNetworkNarrows();
+    try std.testing.expect(control_pane_grant_store.authorizes(5, 257, .browser_network_block, "bank.test"));
+    {
+        const p = try v20bBlockJson(257, w9d3BlockGrant(5, 257), "{\"action\":\"add\",\"patterns\":[\"https://bank.test/transfer\"]}");
+        defer p.deinit();
+        const rules = p.value.object.get("result").?.object.get("rules").?.array.items;
+        // 설정이 켜져 있으면(F5 「그대로 둠」·D1) 사용자가 몬 다른 사이트에서도 묻지 않고 더한다 — control-plane-security 에 적었다(B R13 관찰).
+        try std.testing.expect(rules.len == 2 and std.mem.eql(u8, rules[1].object.get("site").?.string, "bank.test"));
+    }
+    // 끔(먼저 끄고 몬다).
+    session_mod.web_osr.setNetworkFull(false);
+    try std.testing.expect(adoptAgentTab(5, 258));
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 258, .url = "https://agent.test/" } });
+    {
+        const p = try v20bBlockJson(258, w9d3BlockGrant(5, 258), "{\"action\":\"add\",\"patterns\":[\"https://agent.test/a\"]}");
+        p.deinit();
+    }
+    session_mod.web_osr.userNavigate(ta, 258, "https://bank.test/");
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 258, .url = "https://bank.test/" } });
+    applyNetworkNarrows();
+    try std.testing.expect(!control_pane_grant_store.authorizes(5, 258, .browser_network_block, "bank.test"));
+    try std.testing.expect(control_pane_grant_store.authorizes(5, 258, .browser_network_block, "agent.test"));
+    try std.testing.expect(session_mod.web_osr.networkBlocking(258) != null); // 규칙은 그 사이트에 묶여 남는다(잠든다)
+    {
+        const p = try v20bBlockJson(258, w9d3BlockGrant(5, 258), "{\"action\":\"list\"}");
+        defer p.deinit();
+        const r = p.value.object.get("result").?.object;
+        try std.testing.expect(r.get("rules").?.array.items[0].object.get("dormant").?.bool);
+        try std.testing.expect(r.get("rules").?.array.items[0].object.get("sw_hits") == null); // 설정 끔 — 수를 숨긴다
+    }
+}
+
+test "W9d③ 20 회 검증 B N7: pane 을 못 찾은(cap 만) 막기 op 은 막기의 grant 이름으로 실패한다 — 「network reads」 가 아니다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{259});
+    defer w9c2Forget(ta, &.{259});
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkBlock\",\"params\":{\"id\":1,\"action\":\"list\"}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&pending, .{ .surface_id = 259, .method = .network_block, .arg = try allocator.dupe(u8, "{\"action\":\"list\"}"), .pane_grant = null });
+    const response = pending.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    pending.response = null;
+    try std.testing.expect(std.mem.indexOf(u8, response, "browser_network_block grant") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "network reads") == null);
+}
+
+// ── W9d③ 2 차 20 회 검증 11–20 회차(검증자 B2 — 6077ecc4c 를 다시 친 실제 op 길 시험) ──
+
+test "W9d③ v20b2 R16 DEF-3: 실제 op 길 — 에이전트 탭의 엄격을 둘째 pane(모달 grant)이 끄거나 켜면 -32602 other_pane, Grants 줄의 엄격은 주인에게만, 주인의 grant 철회 뒤에는 둘째 pane 이 켠다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{261});
+    defer w9c2Forget(ta, &.{261});
+    defer {
+        agent_tabs.clearRetainingCapacity();
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    try std.testing.expect(adoptAgentTab(5, 261));
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 261, .url = "https://agent.test/" } });
+    try control_pane_grant_store.grant(.{ .pane = 6, .target = 261, .scope = .browser_network, .host = control_pane_grant.GrantHost.init("agent.test") });
+    try control_pane_grant_store.grant(.{ .pane = 6, .target = 261, .scope = .browser_network_block, .host = control_pane_grant.GrantHost.init("agent.test") });
+    syncNetworkWatch();
+    {
+        const p = try v20bBlockJson(261, w9d3BlockGrant(5, 261), "{\"action\":\"strict\",\"on\":true}");
+        p.deinit();
+    }
+    for ([_][]const u8{ "{\"action\":\"strict\",\"on\":false}", "{\"action\":\"strict\",\"on\":true}" }) |arg| {
+        var pending: control_server_mod.PendingRequest = undefined;
+        try w9d3Block(&pending, 261, w9d3BlockGrant(6, 261), arg);
+        const response = pending.response orelse return error.ExpectedResponse;
+        defer allocator.free(response);
+        try std.testing.expect(std.mem.indexOf(u8, response, "-32602") != null and std.mem.indexOf(u8, response, "other_pane") != null);
+    }
+    var strict: u8 = 9;
+    _ = maru_macos_control_browser_block_summary(6, 261, &strict);
+    try std.testing.expectEqual(@as(u8, 0), strict);
+    _ = maru_macos_control_browser_block_summary(5, 261, &strict);
+    try std.testing.expectEqual(@as(u8, 1), strict);
+    {
+        const p = try v20bBlockJson(261, w9d3BlockGrant(6, 261), "{\"action\":\"list\"}");
+        defer p.deinit();
+        const st = p.value.object.get("result").?.object.get("strict").?.object;
+        try std.testing.expect(st.get("on").?.bool and st.get("other_pane").?.bool);
+    }
+    // 주인(pane 5)의 grant 를 메뉴로 거둔다 — 엄격이 사라지고 pane 6 이 켤 수 있다(주인이 된다).
+    try std.testing.expect(maru_macos_control_revoke_browser_grant(5, 261, 0) >= 1);
+    try std.testing.expect(session_mod.web_osr.networkBlocking(261) == null);
+    {
+        const p = try v20bBlockJson(261, w9d3BlockGrant(6, 261), "{\"action\":\"strict\",\"on\":true}");
+        defer p.deinit();
+        try std.testing.expect(p.value.object.get("result").?.object.get("strict").?.object.get("other_pane") == null);
+    }
+    _ = maru_macos_control_browser_block_summary(6, 261, &strict);
+    try std.testing.expectEqual(@as(u8, 1), strict);
+}
+
+test "W9d③ v20b2 R14 DEF-2: 실제 op 길 — 254 바이트(끝 점)·wire 밖 글자 호스트의 에이전트 탭에서 add·strict on 은 -32602 page_host_too_long·page_host_invalid, ⊘ 없음, punycode·253 바이트 호스트는 받고 그 사이트에 묶인다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{262});
+    defer w9c2Forget(ta, &.{262});
+    defer {
+        agent_tabs.clearRetainingCapacity();
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    try std.testing.expect(adoptAgentTab(5, 262));
+    const ar = @import("array_repeat");
+    const h253 = ar.repeat("a", 63) ++ "." ++ ar.repeat("b", 63) ++ "." ++ ar.repeat("c", 63) ++ "." ++ ar.repeat("d", 51) ++ ".localhost";
+    const Case = struct { url: []const u8, want: ?[]const u8, site: []const u8 = "" };
+    const cases = [_]Case{
+        .{ .url = "http://" ++ h253 ++ ".:8080/x", .want = "page_host_too_long" },
+        .{ .url = "http://a~b.localhost:8080/", .want = "page_host_invalid" },
+        .{ .url = "http://a!b.localhost/", .want = "page_host_invalid" },
+        .{ .url = "http://" ++ h253 ++ ":8080/x", .want = null, .site = h253 },
+        .{ .url = "http://xn--3e0b707e.localhost:9/", .want = null, .site = "xn--3e0b707e.localhost" },
+        .{ .url = "http://[::1]:8080/", .want = null, .site = "[::1]" },
+    };
+    // 받은 바꾸기는 6 번(1 초 10 번 안) — 거절 6 번은 세지 않는다(N2 고침).
+    for (cases) |cs| {
+        session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 262, .url = cs.url } });
+        for ([_][]const u8{ "{\"action\":\"add\",\"patterns\":[\"http://127.0.0.1/v20b2/*\"]}", "{\"action\":\"strict\",\"on\":true}" }) |arg| {
+            var pending: control_server_mod.PendingRequest = undefined;
+            try w9d3Block(&pending, 262, w9d3BlockGrant(5, 262), arg);
+            const response = pending.response orelse return error.ExpectedResponse;
+            defer allocator.free(response);
+            if (cs.want) |w| {
+                try std.testing.expect(std.mem.indexOf(u8, response, "-32602") != null and std.mem.indexOf(u8, response, w) != null);
+                try std.testing.expect(session_mod.web_osr.networkBlocking(262) == null);
+            } else {
+                if (std.mem.indexOf(u8, response, cs.site) == null or std.mem.indexOf(u8, response, "\"result\"") == null) {
+                    std.debug.print("v20b2 R14 L2 unexpected {s}: {s}\n", .{ cs.url, response });
+                    return error.TestUnexpectedResult;
+                }
+            }
+        }
+    }
+}
+
+// ── W9d③ 3 차 검증 11–20 회차(검증자 B3 — 8485a891e 의 실제 철회 길) ──
+
+test "W9d③ v20c R12 L2: 실제 철회 길(pane 닫힘·제어 철회 F3·메뉴의 막기 철회·모두 철회)로 규칙·엄격이 사라지면 수도 지우고 옛 세대의 늦은 수는 버린다 — 다음 pane(모달 grant)의 결과에 옛 수·경고가 없다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const tabs = [_]u64{ 271, 272, 273, 274 };
+    try w9c2Hold(ta, &tabs);
+    defer w9c2Forget(ta, &tabs);
+    defer {
+        agent_tabs.clearRetainingCapacity();
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    for (tabs) |t| {
+        const owner: u64 = if (t == 271) 9 else 5;
+        try std.testing.expect(adoptAgentTab(owner, t));
+        session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = t, .url = "https://agent.test/" } });
+        {
+            const p = try v20bBlockJson(t, w9d3BlockGrant(owner, t), "{\"action\":\"add\",\"patterns\":[\"*://*.track.test/*\"]}");
+            p.deinit();
+        }
+        {
+            const p = try v20bBlockJson(t, w9d3BlockGrant(owner, t), "{\"action\":\"strict\",\"on\":true}");
+            p.deinit();
+        }
+        // 규칙이 있던 세대(2)의 수.
+        session_mod.web_osr.testApply(ta, .{ .net_block_hits = .{ .browser = t, .generation = 2, .unrecorded = 4, .skipped_unknown_page = 2, .strict_redirect_missed = 1 } });
+        switch (t) {
+            271 => onAppSessionSurfaceClosed(null, 9),
+            272 => try std.testing.expect(maru_macos_control_revoke_browser_grant(5, t, 0) >= 1),
+            273 => try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, t, 4)),
+            else => _ = maru_macos_control_revoke_all_browser_grants(),
+        }
+        try std.testing.expect(session_mod.web_osr.networkBlocking(t) == null);
+        // 늦은 수(옛 세대) — 버린다.
+        session_mod.web_osr.testApply(ta, .{ .net_block_hits = .{ .browser = t, .generation = 2, .unrecorded = 7, .skipped_unknown_page = 3, .strict_redirect_missed = 2 } });
+        // 다음 pane(모달로 받은 네트워크·막기 grant).
+        try control_pane_grant_store.grant(.{ .pane = 6, .target = t, .scope = .browser_network, .host = control_pane_grant.GrantHost.init("agent.test") });
+        try control_pane_grant_store.grant(.{ .pane = 6, .target = t, .scope = .browser_network_block, .host = control_pane_grant.GrantHost.init("agent.test") });
+        syncNetworkWatch();
+        const p = try v20bBlockJson(t, w9d3BlockGrant(6, t), "{\"action\":\"add\",\"patterns\":[\"https://agent.test/y/*\"]}");
+        defer p.deinit();
+        const r = p.value.object.get("result").?.object;
+        const st = r.get("strict").?.object;
+        const gap = if (r.get("warnings")) |w| for (w.array.items) |item| {
+            if (std.mem.eql(u8, item.string, "strict_redirect_gap")) break true;
+        } else false else false;
+        std.testing.expect(r.get("unrecorded").?.integer == 0 and r.get("skipped_unknown_page").?.integer == 0 and st.get("redirects_not_covered").?.integer == 0 and !gap and r.get("rules").?.array.items.len == 1) catch |e| {
+            std.debug.print("v20c R12 L2 tab {d}: unrecorded {d} skipped {d} missed {d} gap {}\n", .{ t, r.get("unrecorded").?.integer, r.get("skipped_unknown_page").?.integer, st.get("redirects_not_covered").?.integer, gap });
+            return e;
+        };
+    }
 }

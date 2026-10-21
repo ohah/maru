@@ -87,7 +87,9 @@ pub var any_recording = std.atomic.Value(bool).init(false);
 /// `Network.enable` 의 번호 — 결과가 오면 켜짐을 알린다(본문 호출과 같은 대역). 탭마다 많아야 하나다. `Network.disable` 은 적지 않는다 —
 /// 보낸 뒤 곧 관찰자를 놓아 그 결과는 오지 않는다(W9d② 적대 리뷰 1 회차 LOW-1: 적으면 자리가 새어, 서로 다른 탭 32 개를 끈 뒤로는 켬의 결과를
 /// 짝지을 자리가 없어 maru 가 영영 `starting` 에 머물렀다). 관찰자를 놓을 때(끄기·닫힘) 그 탭의 자리를 비운다.
-var control_ids: [registry_mod.capacity]struct { id: i32 = 0, browser: BrowserId = 0, session: u32 = 0 } = @splat(.{});
+/// W9d③ 11 차(같은 꼴 점검): 답은 번호와 **그 답이 온 브라우저**(`cef_id`)로 짝짓는다 — 번호는 본문 호출과 나누는 대역에서 돌고, 이 자리는 답이
+/// 오거나 관찰자를 놓을 때까지 남는다(죽은 채 되살리지 않은 탭의 켬). 번호만 보면 한 바퀴 돈 남의 답이 그 탭에 켬·실패를 알릴 수 있었다(코드 읽기 — 대역 256 Mi 라 재지 않았다).
+var control_ids: [registry_mod.capacity]struct { id: i32 = 0, cef_id: c_int = 0, browser: BrowserId = 0, session: u32 = 0 } = @splat(.{});
 
 const tick_ms: i64 = 50;
 
@@ -198,9 +200,11 @@ pub fn record(v: msg.NetRecord) void {
         const was = table.tabOf(v.browser) != null;
         table.stop(gpa, v.browser) catch {};
         runActions();
-        if (was) sendCdp(entry, "Network.disable", "{}", v.browser, 0, false);
+        // W9d③: Network 도메인은 엄격 모드와 나눈다 — 끄기는 `net_domain` 이 정한다(엄격이 있으면 disable 대신 가벼운 enable). 워커 세션 떼기
+        // (위 `runActions` 의 `.detach_workers` — 줄에 넣어 다음 UI task 에서 보낸다)와의 차례는 W9d② 그대로다(페이지 세션의 끔이 먼저 나간다).
+        if (was) @import("blocking.zig").recordingOff(entry);
         // 재검증 12 차: 워커를 멈춰 붙였으면 관찰자를 남긴다 — `setAutoAttach{autoAttach:false}` 가 닿기 전에 멈춰 붙은 워커의 알림을 받아 놓아야
-        // 한다(놓지 않으면 영영 멈춘다 — 실측 `swwait-offrace`). 탭이 닫힐 때 놓는다(`browserClosed`).
+        // 한다(놓지 않으면 영영 멈춘다 — 실측 `swwait-offrace`). 탭이 닫힐 때 놓는다(`browserClosed`). W9d③ 의 엄격 명령은 제 관찰자(`blocking`)로 답을 받는다.
         if (!sw_wait) unregister(entry.cef_id);
         clearControl(v.browser);
         refreshAny();
@@ -230,6 +234,7 @@ pub fn record(v: msg.NetRecord) void {
     // 재검증 5 차 S3(C3a): 이 기록이 보는 응답은 켠 뒤의 것 — 벽시계로 적는다(붙는 워커 세션마다 다시 올린다).
     table.link.raiseVisible(v.browser, wallUs());
     sendCdp(entry, "Network.enable", "{\"maxResourceBufferSize\":2097152,\"maxTotalBufferSize\":8388608,\"maxPostDataSize\":1}", v.browser, v.session, true);
+    @import("blocking.zig").recordingOn(entry); // W9d③: 도메인의 주인에게 알린다(엄격과 나눈다)
     ensureTick();
 }
 
@@ -242,6 +247,7 @@ pub fn rendererGone(browser: BrowserId) void {
 /// 브라우저가 닫힌다(`browser_closed` 보다 먼저) — 기다리던 본문은 `detached`, 등록을 놓는다.
 pub fn browserClosed(cef_id: c_int, browser: BrowserId) void {
     table.forgetTop(browser);
+    @import("blocking.zig").recordingGone(cef_id); // W9d③: 기록 몫만 내린다(엄격은 그 탭의 `on_before_close` 에서 함께 빠진다)
     table.closed(gpa, browser) catch {};
     runActions();
     // 재검증 6 차(F16 과 같은 꼴): 기록을 끈 뒤 닫힌 탭은 표에 없어 닫힘의 떼기 일(`.detach_workers` closed)이 오지 않는다 — 서비스 워커 표의
@@ -399,7 +405,7 @@ fn sendCdp(entry: *const registry_mod.Entry, method: []const u8, params: []const
         } else for (&control_ids) |*sl| {
             if (sl.id == 0) break sl;
         } else null;
-        if (slot) |sl| sl.* = .{ .id = id, .browser = browser, .session = session };
+        if (slot) |sl| sl.* = .{ .id = id, .cef_id = entry.cef_id, .browser = browser, .session = session };
     }
     _ = host.*.send_dev_tools_message.?(host, json.ptr, json.len);
 }
@@ -462,7 +468,9 @@ fn onEvent(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser
 fn onResult(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t, id: c_int, success: c_int, result: ?*const anyopaque, size: usize) callconv(.c) void {
     defer object.releaseArg(browser);
     if (id < table_mod.id_base or id >= table_mod.id_end) return; // 다른 사용처(devtools·권한·알림·미디어)의 결과
-    for (&control_ids) |*slot| if (slot.id == id) {
+    // 브라우저를 모르면 켬의 짝으로 치지 않는다(CEF 번호는 1 부터 — 0 은 어느 자리와도 맞지 않는다); 본문 호출의 답은 아래 그대로 찾는다.
+    const cef_id: c_int = if (browser != null) browser.*.get_identifier.?(browser) else 0;
+    for (&control_ids) |*slot| if (slot.id == id and slot.cef_id == cef_id) {
         const s = slot.*;
         slot.* = .{};
         // 켬의 답 — 그 사이 끄거나 다시 켜지 않았을 때만 알린다.
@@ -470,6 +478,9 @@ fn onResult(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browse
         if (t != null and t.?.session == s.session) {
             writer().send(.{ .net_record_state = .{ .browser = s.browser, .session = s.session, .status = if (success != 0) .on else .failed } }) catch {};
             if (success == 0) {
+                // W9d③ 9 차: 렌더러 쪽 도메인을 모른다(렌더러가 죽은 동안 보낸 켬은 새 렌더러가 붙을 때 실패로 답하는데, 새 렌더러는 죽기 전
+                // 상태를 되받는다) — 기록 몫을 내리고 바라는 상태를 명시해 보낸다(`blocking.recordingFailed`).
+                if (browsers.state.registry.byId(s.browser)) |e| @import("blocking.zig").recordingFailed(e);
                 table.stop(gpa, s.browser) catch {};
                 runActions();
                 refreshAny();
@@ -494,6 +505,7 @@ fn onDetached(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_brow
     defer object.releaseArg(browser);
     if (browser == null) return;
     const id = browserOfCef(browser.*.get_identifier.?(browser)) orelse return;
+    @import("blocking.zig").recordingGone(browser.*.get_identifier.?(browser)); // W9d③: 기록 몫만 내린다(엄격은 그대로)
     // DevTools 가 떨어졌다 — 보낸 호출의 답은 오지 않는다. 기록은 다시 켜야 한다(이벤트가 끊겼다) — maru 에 알린다.
     const session = if (table.tabOf(id)) |t| t.session else 0;
     table.closed(gpa, id) catch {};
@@ -560,7 +572,8 @@ fn runActions() void {
             },
             .pause => |p| {
                 // 쏟아짐 밸브(J7) — 이벤트를 끈다(관찰자는 남긴다 — 콜백 안이다). maru 가 다시 켜야 풀린다.
-                if (browsers.state.registry.byId(p.browser)) |entry| sendCdp(entry, "Network.disable", "{}", p.browser, 0, false);
+                // W9d③: 엄격 모드가 도메인을 쥐고 있으면 끄지 않는다(기록만 멈춘다 — 엄격이 말없이 꺼지지 않게, `net_domain`).
+                if (browsers.state.registry.byId(p.browser)) |entry| @import("blocking.zig").recordingOff(entry);
                 refreshAny();
                 writer().send(.{ .net_record_state = .{ .browser = p.browser, .session = p.session, .status = .paused } }) catch {};
             },

@@ -375,3 +375,62 @@ test "W9d② v20b 11 회차: 본문 칸의 경계 — 조각 길이 16 KiB+1 을
         }
     }
 }
+
+test "W9d③ v20b R14e: 막기 frame 의 방향 — maru 쪽은 net_block 을, sidecar 쪽은 net_block_state·net_block_hits 를 받지 않는다(채널을 잠근다), 바른 쪽은 받는다(대조)" {
+    var buf: [max_frame_bytes]u8 = undefined;
+    var nb: message_mod.NetBlock = .{ .browser = 3, .generation = 1, .count = 1 };
+    nb.rules[0] = .{ .id = 1, .site = "a.test", .pattern = "https://a.test/x" };
+    var len = try encode(.{ .net_block = nb }, &buf);
+    var at_maru = StreamingDecoder.init(.to_maru);
+    _ = try at_maru.feed(buf[0..len]);
+    try std.testing.expectError(error.WrongDirection, at_maru.next());
+    var at_sidecar_ok = StreamingDecoder.init(.to_sidecar);
+    _ = try at_sidecar_ok.feed(buf[0..len]);
+    try std.testing.expect((try at_sidecar_ok.next()).? == .net_block);
+    var hits: message_mod.NetBlockHits = .{ .browser = 3, .count = 1 };
+    hits.entries[0] = .{ .rule_id = 1, .hits = 1 };
+    for ([_]Message{ .{ .net_block_state = .{ .browser = 3, .generation = 1, .ok = true } }, .{ .net_block_hits = hits }, .{ .error_page = .{ .browser = 3, .error_code = -20, .blocked_rule = 1 } } }) |m| {
+        len = try encode(m, &buf);
+        var at_sidecar = StreamingDecoder.init(.to_sidecar);
+        _ = try at_sidecar.feed(buf[0..len]);
+        try std.testing.expectError(error.WrongDirection, at_sidecar.next());
+        var at_maru_ok = StreamingDecoder.init(.to_maru);
+        _ = try at_maru_ok.feed(buf[0..len]);
+        try std.testing.expect((try at_maru_ok.next()) != null);
+    }
+}
+
+test "W9d③ v20b R14f: 가장 큰 net_block(25 110 바이트)을 모든 길이에서 잘라도 풀기는 IncompleteFrame/오류일 뿐 무너지지 않고, 1 바이트씩 넣어도 한 번에 풀린다" {
+    const array_repeat = @import("array_repeat");
+    var v: message_mod.NetBlock = .{ .browser = 1, .generation = 7, .count = message_mod.max_net_block_rules };
+    const host = array_repeat.repeat("h", message_mod.max_net_host_bytes);
+    const pattern = "https://a.test/" ++ array_repeat.repeat("p", message_mod.max_net_block_pattern_bytes - 15);
+    v.strict_site = host;
+    for (&v.rules, 0..) |*r, i| r.* = .{ .id = @intCast(i + 1), .site = host, .pattern = pattern };
+    var buf: [max_frame_bytes]u8 = undefined;
+    const len = try encode(.{ .net_block = v }, &buf);
+    try std.testing.expectEqual(@as(usize, 11 + 8 + 4 + 1 + 253 + 1 + 32 * (4 + 4 + 1 + 253 + 2 + 512)), len);
+    try std.testing.expectEqual(@as(usize, 25_110), len); // 문서의 수(20 회 검증 B N1 — 전에는 25,109 로 적었다)
+    var cut_errors: usize = 0;
+    var n: usize = 0;
+    while (n < len) : (n += 1) {
+        if (decodeExact(buf[0..n])) |_| return error.TruncatedDecoded else |_| cut_errors += 1;
+    }
+    try std.testing.expectEqual(len, cut_errors);
+    var d = StreamingDecoder.init(.to_sidecar);
+    var got: usize = 0;
+    for (buf[0..len]) |b| {
+        _ = try d.feed(&.{b});
+        while (try d.next()) |m| {
+            try std.testing.expectEqual(@as(u8, 32), m.net_block.count);
+            got += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), got);
+    // 수를 손으로 33 으로 — 규칙 수 칸만 바꾼 frame 은 거절.
+    var bad = buf;
+    const count_at = wire.prefix_len + wire.common_len + 8 + 4 + 1 + host.len;
+    try std.testing.expectEqual(@as(u8, 32), bad[count_at]);
+    bad[count_at] = 33;
+    try std.testing.expect(std.meta.isError(decodeExact(bad[0..len])));
+}

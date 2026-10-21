@@ -79,6 +79,7 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
         .new_tab_credit => |browser| new_tab.grant(browser), // W9b③ — maru 가 에이전트 탭에만
         .net_watch => |value| @import("network.zig").watch(value), // W9d①
         .net_record => |value| @import("net_body.zig").record(value), // W9d②
+        .net_block => |value| @import("blocking.zig").apply(value), // W9d③
         .resize => |value| resize(value, writer),
         .set_hidden => |value| if (hostFor(value.browser, writer)) |host| {
             defer object.release(host);
@@ -212,6 +213,8 @@ fn navigate(value: protocol.message.Navigate, writer: *events.Writer) void {
     var url = std.mem.zeroes(c.cef_string_t);
     library.setString(state.api, &url, value.url);
     defer state.api.string_utf16_clear(&url);
+    // W9d③ D2: 사용자가 친 이동 — 그 주소의 이동 한 번은 막기 규칙이 막지 않는다(토큰은 `on_before_browse` 가 그 이동에 묶는다).
+    if (value.user) @import("blocking.zig").userNavigate(value.browser, value.url) else @import("blocking.zig").agentNavigate(value.browser);
     frame.*.load_url.?(frame, &url);
 }
 
@@ -223,12 +226,33 @@ fn navAction(value: protocol.message.NavAction, writer: *events.Writer) void {
     const browser = browserOf(entry);
     // 멈춤은 새 문서를 부르지 않는다 — 대화상자 억제를 풀 표시를 남기지 않는다.
     if (value.action == .stop) dialogs.keepSuppression(value.browser);
+    // W9d③ D2: 사용자의 뒤로·앞으로·새로고침 — 그 몸짓이 시작한 주 프레임 이동 하나(1 초 — 같은 갈래만)는 막기 규칙이 막지 않는다. 갈 곳이 없는
+    // 뒤로·앞으로는 이동을 시작하지 않으므로 토큰도 걸지 않는다(20 회 검증 A LOW-3: 남은 토큰을 1 초 안의 에이전트 이동이 가져갔다).
+    // 3 차 검증 LOW-A3-4·4 차 검증 A-LOW: 주 프레임 주소가 그대로인 기록 이동(iframe 만·같은 주소의 같은 문서)은 주 프레임 이동을 시작하지 않는다 —
+    // 토큰은 이동 앞에 걸고(그 `on_before_browse` 가 곧 올 수 있다), 이동을 시작한 뒤 Chromium 이 고른 실제 대상(건너뛰는 항목 너머)을 읽어 거둔다.
+    // 멈춤은 몸짓의 이동을 끝낸다 — 누가 눌렀든 남은 토큰을 거둔다(3 차 검증 LOW-A3-3: 토큰은 이동이 시작될 때까지 기다리므로).
+    const blocking = @import("blocking.zig");
+    const step: i32 = if (value.action == .back) -1 else 1;
+    var history_token = false;
+    var history_before: ?@import("net_block_table.zig").HistoryAt = null;
+    if (value.action == .stop) {
+        blocking.agentNavigate(value.browser);
+    } else if (value.user) switch (value.action) {
+        .back, .forward => if ((if (value.action == .back) browser.*.can_go_back.?(browser) else browser.*.can_go_forward.?(browser)) != 0) {
+            history_before = blocking.historyAt(browser, step);
+            blocking.userNavAction(value.browser, .history);
+            history_token = true;
+        },
+        .reload => blocking.userNavAction(value.browser, .reload),
+        .stop => {},
+    } else blocking.agentNavigate(value.browser); // 사용자 것이 아닌 이동은 남은 토큰을 거둔다
     switch (value.action) {
         .back => browser.*.go_back.?(browser),
         .forward => browser.*.go_forward.?(browser),
         .reload => browser.*.reload.?(browser),
         .stop => browser.*.stop_load.?(browser),
     }
+    if (history_token) blocking.settleHistoryToken(value.browser, history_before, blocking.historyAt(browser, step));
 }
 
 /// 모두 닫기를 요청한다. 열린 브라우저가 없으면 바로 루프를 끝낸다.

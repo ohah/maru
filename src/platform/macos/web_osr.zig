@@ -32,6 +32,7 @@ const osr_input = maru.session.web_osr_input;
 const dialog_cause = maru.session.web_osr_dialog_cause;
 const console_ring = maru.session.web_osr_console;
 const net_ring = maru.session.web_osr_network;
+const block_mod = maru.session.web_osr_block; // W9d③: 요청 막기 규칙·엄격 모드
 
 /// 링 하나(W3c): 받은 IOSurface 셋·제어 페이지와, View 가 보는 세대·mailbox 워드.
 pub const AppRing = struct {
@@ -259,6 +260,10 @@ const Surface = struct {
     rec_status: ws.message.NetRecordStatus = .off,
     /// 마지막으로 sidecar 에 보낸 켬 세션(0 = 끔이거나 보낸 적 없음) — 브라우저가 새로 만들어지면 다시 보낸다.
     rec_sent: u32 = 0,
+    /// W9d③: 요청 막기 규칙·엄격 모드(pane 마다 주인 — `web_osr_block`). 세대가 바뀌면 sidecar 에 통째로(`sendNetBlock`).
+    /// 사용자에게 알릴 것(사용자가 마지막으로 몬 탭의 주 프레임 이동이 막혔다·규칙이 있는 탭을 처음 몰았다)은 그 안에 걸린다(`wantsNotice`·
+    /// `takeNotice` — 탭이 비면 거둔다, 3 차 검증 N-B3-c) — 창이 꺼내 간다.
+    block: block_mod.Tab = .{},
 };
 
 /// W9d①: 보낸 `net_watch` 의 값 — 켬·설정·어느 호스트든·grant 호스트(넷까지).
@@ -293,6 +298,8 @@ pub const AgentNav = struct {
     done: bool = false,
     loaded: bool = false,
     before_unload: bool = false,
+    /// W9d③: 막기 규칙이 그 이동을 막았다(`error_page.blocked_rule` — 탭 길 -20·서비스 워커 길 -2 모두, 실패 주소의 해시로 sidecar 가 짝지었다).
+    blocked_rule: u32 = 0,
 };
 
 /// 페이지에 물은 닫기의 진행(W6j).
@@ -717,6 +724,7 @@ fn testTeardown(gpa: std.mem.Allocator) void {
     test_record_sends = false;
     net_grant_count = 0; // W9d①
     body_grant_count = 0; // W9d②
+    block_grant_count = 0; // W9d③
     net_full = true;
 }
 
@@ -1189,6 +1197,7 @@ test "W9d② 재검증 13 차(LOW-H1): a hardened (release) build drops every en
         @embedFile("web_sidecar/new_tab.zig"),
         @embedFile("web_sidecar/context_menu.zig"),
         @embedFile("web_sidecar/devtools.zig"),
+        @embedFile("web_sidecar/blocking.zig"), // W9d③ — `MARU_WEB_TEST_BLOCK_LOG`(판정자의 막기 사건 줄)
     };
     var names: usize = 0;
     for (sources) |src| {
@@ -1212,9 +1221,9 @@ test "W9d② 재검증 13 차(LOW-H1): a hardened (release) build drops every en
             }
         }
     }
-    // 오늘 이 다섯 파일이 `getenv` 로 읽는 자리는 열다섯이다(이름 열넷 — `MARU_WEB_TEST_CPU_PAINT` 가 두 곳; 제품 코드에서 `getenv` 를 부르는 sidecar
-    // 파일은 이 다섯뿐 — 나머지 `getenv` 는 시험 블록의 퍼즈 손잡이). 줄면 훑기가 소스를 못 읽은 것이다.
-    try std.testing.expect(names >= 15);
+    // 오늘 이 여섯 파일이 `getenv` 로 읽는 자리는 열아홉이다(이름 열다섯 — `MARU_WEB_TEST_CPU_PAINT` 가 두 곳, W9d③ 의 `MARU_WEB_TEST_BLOCK_LOG` 가
+    // 네 곳; 제품 코드에서 `getenv` 를 부르는 sidecar 파일은 이 여섯뿐 — 나머지 `getenv` 는 시험 블록의 퍼즈 손잡이). 줄면 훑기가 소스를 못 읽은 것이다.
+    try std.testing.expect(names >= 19);
 }
 
 test "a hardened (release) build ignores the development env overrides" {
@@ -2153,12 +2162,17 @@ fn pixels(dip: u32, scale: f32) u32 {
 
 /// 이동(주소창·복원·링크). 아직 만들어지지 않았으면 만든 뒤 보낸다.
 pub fn navigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) void {
+    navigateAs(gpa, surface_id, url, false);
+}
+
+/// W9d③ D2: `user` — 사용자가 주소창에 친 이동이다(그 이동 한 번은 막기 규칙이 막지 않는다 — sidecar 가 토큰으로). 복원·에이전트·재생 이동은 거짓.
+fn navigateAs(gpa: std.mem.Allocator, surface_id: u64, url: []const u8, user: bool) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     const owned = gpa.dupe(u8, url) catch return;
     if (s.last_url) |old| gpa.free(old);
     s.last_url = owned;
     if (s.created) {
-        send(gpa, .{ .navigate = .{ .browser = surface_id, .url = url } });
+        send(gpa, .{ .navigate = .{ .browser = surface_id, .url = url, .user = user } });
         s.nav_pending = true;
         s.nav_saw_loading = false;
     }
@@ -2169,7 +2183,7 @@ pub fn navigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) void {
 /// 이미 좁히기가 먼저다).
 pub fn userNavigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) void {
     noteUserNavigation(surface_id);
-    navigate(gpa, surface_id, url);
+    navigateAs(gpa, surface_id, url, true); // W9d③ D2
 }
 
 /// W9a: 에이전트의 `browser.navigate` — 이동을 보내고 그 끝을 지켜본다(`agentNavState`). 사용자의 이동이 아니다(`noteUserNavigation` 을
@@ -2222,7 +2236,7 @@ pub fn navAction(gpa: std.mem.Allocator, surface_id: u64, action: ws.message.Nav
     s.user_action_ms = monotonicNow(); // W9c②: 이것이 부른 떠나기 확인은 사용자 것이다
     s.console.userDrove(); // W9c① 4 회차 D: 뒤로 가면 사용자가 그 탭으로 지나온 곳일 수 있다
     networkUserDrove(surface_id, s); // W9d①
-    if (s.created) send(gpa, .{ .nav_action = .{ .browser = surface_id, .action = action } });
+    if (s.created) send(gpa, .{ .nav_action = .{ .browser = surface_id, .action = action, .user = true } }); // W9d③ D2 — 부르는 곳은 모두 사용자다
 }
 
 /// W9c②: 에이전트가 이 탭을 움직였다(앱의 DevTools op 이 누름·키·이동·스크립트를 보낼 때 — `app_host_abi`). 그 뒤 5 초 안의 대화상자는
@@ -3114,7 +3128,12 @@ pub fn setNetworkFull(value: bool) void {
     net_full = value;
     if (!value) {
         var dit = surfaces.iterator();
-        while (dit.next()) |e| if (e.value_ptr.net_drove_host) |h| narrowNetwork(e.key_ptr.*, e.value_ptr, h);
+        while (dit.next()) |e| {
+            if (e.value_ptr.net_drove_host) |h| narrowNetwork(e.key_ptr.*, e.value_ptr, h);
+            // W9d③ 2 차 검증 NEW-2: 막기의 켬에만 보이는 수(서비스 워커 길·다른 사이트 리다이렉트)도 본문처럼 — 꺼지면 지우고, 꺼진 동안은 적지 않는다
+            // (`onHits`). 숨기기만 하면 나중에 켤 때 꺼진 동안의 수가 보였다.
+            e.value_ptr.block.forgetFullCounts();
+        }
     }
     const gpa = gpa_ref orelse return; // 엔진이 돈 적 없다 — 지켜보는 탭이 없다
     var it = surfaces.iterator();
@@ -3145,6 +3164,8 @@ fn reconcileNetwork(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
             s.rec_floor = s.rec_last_session; // W9d② 적대 리뷰 1 회차 LOW-2: 지운 뒤의 옛 세션 본문은 받지 않는다
         }
         recordOff(gpa, id, s); // W9d②: 본문은 네트워크 기록 위에 선다
+        // W9d③: 막기도 네트워크 지켜보기 위에 선다 — sidecar 는 지켜보기를 끄면 그 탭의 규칙을 버린다(보낼 것이 없다).
+        if (s.block.clearAll()) s.block.sent_gen = s.block.gen;
     } else {
         s.network.syncReaders(desired[0..n]);
         s.net_on = true;
@@ -3271,10 +3292,21 @@ pub fn networkList(out: std.mem.Allocator, surface_id: u64, reader: NetReader, q
         var empty: net_ring.Ring = .{};
         return empty.list(out, 0, try netView(null, surface_id, reader, &lists, origin_buf, out), q, reader.bodyQuery(false, 0, 0));
     };
-    var json = try s.network.list(out, reader.who, try netView(s, surface_id, reader, &lists, origin_buf, out), q, reader.bodyQuery(false, 0, 0));
+    var patterns: [block_mod.max_rules]net_ring.BlockPattern = undefined;
+    var view = try netView(s, surface_id, reader, &lists, origin_buf, out);
+    if (reader.pane) |pane| view.block_patterns = s.block.ownerPatterns(pane, &patterns); // W9d③: 패턴은 주인에게만
+    var json = try s.network.list(out, reader.who, view, q, reader.bodyQuery(false, 0, 0));
     // W9d②: 기록 상태를 덧붙인다(`recording` — 켜 두었는가·sidecar 가 알린 상태).
     if (s.rec_on and json.len > 1 and json[json.len - 1] == '}') {
         const tail = try std.fmt.allocPrint(out, ",\"recording\":\"{s}\"}}", .{recordStateName(s)});
+        defer out.free(tail);
+        const grown = try out.realloc(json, json.len - 1 + tail.len);
+        @memcpy(grown[grown.len - tail.len ..], tail);
+        json = grown;
+    }
+    // W9d③: 문을 지나지 못해 기록 없이 막은 수(막힌 요청이 목록에 다 보이지 않을 수 있다).
+    if (s.block.active() and json.len > 1 and json[json.len - 1] == '}') {
+        const tail = try std.fmt.allocPrint(out, ",\"blocked_unrecorded\":{d}}}", .{s.block.unrecorded});
         defer out.free(tail);
         const grown = try out.realloc(json, json.len - 1 + tail.len);
         @memcpy(grown[grown.len - tail.len ..], tail);
@@ -3290,13 +3322,134 @@ pub fn networkDetail(out: std.mem.Allocator, surface_id: u64, reader: NetReader,
     defer lists.deinit(out);
     const origin_buf = try out.alloc(u8, net_shared_origin_bytes);
     defer out.free(origin_buf);
-    return s.network.detail(out, reader.who, try netView(s, surface_id, reader, &lists, origin_buf, out), req, reader.bodyQuery(body.want, body.offset, body.max_bytes));
+    var patterns: [block_mod.max_rules]net_ring.BlockPattern = undefined;
+    var view = try netView(s, surface_id, reader, &lists, origin_buf, out);
+    if (reader.pane) |pane| view.block_patterns = s.block.ownerPatterns(pane, &patterns); // W9d③
+    return s.network.detail(out, reader.who, view, req, reader.bodyQuery(body.want, body.offset, body.max_bytes));
 }
 
 /// W9d②: `browser.networkRequest` 의 본문 인자.
 pub const BodyRead = struct { want: bool = false, offset: u32 = 0, max_bytes: u32 = net_ring.default_body_read_bytes };
 
 // ── W9d②: 응답 본문 기록(`browser.networkRecord`) ─────────────────────────────────────────────────────────────
+
+// ── W9d③: 요청 막기(`browser.networkBlock`) ─────────────────────────────────────────────────────────────
+
+/// W9d③: app 이 마지막으로 알린 `browser_network_block` grant 들(`networkBlockSync`).
+var block_grants: [maru.session.control_pane_grant.capacity]NetGrantCopy = undefined;
+var block_grant_count: usize = 0;
+
+/// W9d③: grant 가 바뀔 때마다 app 이 `browser_network_block` grant 전체 목록을 알린다(`networkSync` 뒤 — 네트워크 grant 가 먼저 맞춰진 뒤) —
+/// 주인이 grant 를 잃은 규칙·엄격을 버리고 sidecar 에 다시 보낸다(계획 §2·§10).
+pub fn networkBlockSync(grants: []const NetworkGrant) void {
+    block_grant_count = 0;
+    for (grants) |g| {
+        if (block_grant_count == block_grants.len) break;
+        block_grants[block_grant_count] = .{ .tab = g.tab, .who = g.who, .host = if (g.any_host) .{} else .init(g.host), .birth = g.birth, .any_host = g.any_host, .pane = g.pane };
+        block_grant_count += 1;
+    }
+    const gpa = gpa_ref orelse return;
+    var it = surfaces.iterator();
+    while (it.next()) |e| reconcileBlock(gpa, e.key_ptr.*, e.value_ptr);
+}
+
+fn reconcileBlock(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
+    if (!s.block.active()) return;
+    var owners: [maru.session.control_pane_grant.capacity]block_mod.OwnerGrant = undefined;
+    var no: usize = 0;
+    for (block_grants[0..block_grant_count]) |*g| if (g.tab == id) {
+        owners[no] = .{ .pane = g.pane, .any_host = g.any_host, .host = g.host.slice() };
+        no += 1;
+    };
+    var panes: [maru.session.control_pane_grant.capacity]u64 = undefined;
+    var np: usize = 0;
+    for (net_grants[0..net_grant_count]) |g| if (g.tab == id) {
+        panes[np] = g.pane;
+        np += 1;
+    };
+    if (s.block.sync(owners[0..no], panes[0..np])) sendNetBlock(gpa, id, s);
+}
+
+/// 지금의 규칙·엄격을 sidecar 에 알린다(브라우저가 있고 지켜볼 때만 — 없으면 `browser_created` 가 부른다, 지켜보기 끔은 sidecar 가 버렸다).
+fn sendNetBlock(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
+    if (!s.created or !s.net_on or s.block.sent_gen == s.block.gen) return;
+    // 만들지 못한 frame 을 보낸 것으로 적지 않는다(20 회 검증 B DEF-2 — 빈 사이트의 frame 을 codec 이 거절해 버렸는데 보낸 세대로 적혀, 그 뒤
+    // 모든 바꾸기가 sidecar 에 가지 않았다). 결과에 `failed` 로 보이고 다음 바꾸기가 다시 해 본다.
+    if (!trySend(gpa, .{ .net_block = s.block.toWire(id) })) {
+        s.block.markUnsendable();
+        std.log.warn("web osr: net_block for tab {d} (generation {d}) failed the codec — not sent", .{ id, s.block.gen });
+        return;
+    }
+    s.block.sent_gen = s.block.gen;
+    if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test net-block {d} gen={d} rules={d} strict={}\n", .{ id, s.block.gen, s.block.rules.items.len, s.block.strict_on });
+}
+
+/// W9d③: `browser.networkBlock` 한 번(인자는 L2 가 정규형으로 풀었다). `grant_host` 는 그 pane 의 block grant 호스트(사용자 탭 — 규칙의 사이트),
+/// `any_host` 면 지금 페이지의 호스트가 사이트다(에이전트 탭).
+pub const BlockRequest = struct {
+    pane: u64,
+    any_host: bool,
+    grant_host: []const u8 = "",
+    action: block_mod.Action,
+    patterns: []const []const u8 = &.{},
+    types: u32 = 0,
+    rules: []const u32 = &.{},
+    on: ?bool = null,
+};
+
+pub const BlockAnswer = union(enum) { ok: []u8, fail: block_mod.Failure };
+
+pub fn networkBlock(out: std.mem.Allocator, surface_id: u64, req: BlockRequest) std.mem.Allocator.Error!BlockAnswer {
+    const s = surfaces.getPtr(surface_id) orelse return .{ .fail = .{ .reason = "needs_network_permission", .message = "this tab is not watched — run maru browser network on this tab first" } };
+    const gpa = gpa_ref orelse return .{ .fail = .{ .reason = "needs_network_permission", .message = "the Chromium engine is not running" } };
+    // 막기는 네트워크 지켜보기 위에 선다(계획 §2) — 모달 전에 봤지만 그 사이 철회됐을 수 있다.
+    if (!s.net_on) return .{ .fail = .{ .reason = "needs_network_permission", .message = "blocking requests needs this tab's network permission first — run maru browser network on this tab" } };
+    const page_site: []const u8 = if (netKnownUrl(s)) |u| maru.session.control_pane_grant.hostOfUrl(u) orelse "" else "";
+    // 규칙의 사이트 — 에이전트 탭(어느 호스트든)은 지금 페이지의 호스트, 사용자 탭은 grant 호스트(그 사이트를 물어 받았다). 둘 다 http(s) 페이지에서만.
+    const site: []const u8 = if (page_site.len == 0) "" else if (req.any_host) page_site else req.grant_host;
+    var why: block_mod.Failure = undefined;
+    const outcome = s.block.apply(gpa, .{ .owner = req.pane, .action = req.action, .patterns = req.patterns, .types = req.types, .rules = req.rules, .on = req.on, .site = site, .now_ms = monotonicNow() }, &why) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Rejected => return .{ .fail = why },
+    };
+    if (outcome.changed) sendNetBlock(gpa, surface_id, s);
+    return .{ .ok = try s.block.resultJson(out, req.pane, outcome, page_site, net_full, sharedWithUnruledTab(surface_id, s)) };
+}
+
+/// 같은 출처를 보이는 다른 탭 중 막기 규칙이 없는 것이 있는가(탭 집합으로 정해진다 — 요청 내용과 무관, §12 P1-8). 주소가 옛 것인 탭은 그 출처일
+/// 수 있다고 친다(`tabsShowing`).
+fn sharedWithUnruledTab(id: u64, s: *const Surface) bool {
+    const u = netKnownUrl(s) orelse return false;
+    var ob: [ws.message.max_net_origin_bytes]u8 = undefined;
+    const origin = ws.net_policy.originOf(u, &ob);
+    var tabs: [64]u64 = undefined;
+    for (tabsShowing(origin, id, &tabs)) |other| {
+        const o = surfaces.getPtr(other) orelse continue;
+        if (!o.block.active()) return true;
+    }
+    return false;
+}
+
+/// W9d③: 그 탭에 막기 규칙·엄격이 있는가(탭 제목 앞 ⊘·`browser.list` 의 `blocking` — 잠든 규칙만 있어도, sidecar 확인 전에도).
+pub fn networkBlocking(surface_id: u64) ?struct { rules: usize, strict: bool } {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    if (!s.block.active()) return null;
+    return .{ .rules = s.block.rules.items.len, .strict = s.block.strict_on };
+}
+
+/// W9d③: 그 pane 이 그 탭에 둔 규칙 수와 엄격 모드(Browser Grants 줄 「request blocking (N rules[, strict])」).
+pub fn blockSummary(surface_id: u64, pane: u64) struct { rules: u32, strict: bool } {
+    const s = surfaces.getPtr(surface_id) orelse return .{ .rules = 0, .strict = false };
+    return .{ .rules = @intCast(s.block.ownerRules(pane)), .strict = s.block.strict_on and s.block.strict_owner == pane };
+}
+
+/// W9d③: 걸린 막기 알림(한 번 — 그 탭이 있는 창이 꺼내 보인다).
+pub fn takeBlockNotice(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    // 2 차 검증 N-e: 걸린 뒤 규칙이 모두 사라졌으면(철회) 알릴 것이 없다 — ⊘ 도 관리할 규칙도 없는 탭에 띄우지 않는다. 3 차 검증 N-B3-c: 그 뒤 같은
+    // 틱에 다른 pane 이 규칙을 넣어도 옛 알림은 거둔 채다(새 세대는 다음 몸짓이 한 번 알린다).
+    return s.block.takeNotice();
+}
 
 /// W9d②: grant 가 바뀔 때마다 app 이 `browser_network_body` grant 전체 목록을 알린다 — 탭마다 본문 읽는 쪽을 맞추고, 그 탭의 마지막 본문
 /// grant 가 사라지면 기록을 끄고 받은 본문을 지운다(사용자 결정 — 메모리에만, 마지막 grant 와 함께 지운다).
@@ -3478,6 +3631,8 @@ fn tabsShowing(origin: []const u8, except: u64, out: []u64) []const u64 {
 /// 좁힌다(적대 리뷰 1 회차 F5 — 켜져 있으면 사용자 결정 「그대로 둠」).
 fn networkUserDrove(id: u64, s: *Surface) void {
     s.network.userDrove();
+    // W9d③: 규칙·엄격이 있는 탭을 사용자가 몬다 — 탭·규칙 세대마다 한 번 알린다(⊘ 의 뜻과 관리할 자리).
+    _ = s.block.wantsNotice();
     const any_host = for (net_grants[0..net_grant_count]) |g| {
         if (g.tab == id and g.any_host) break true;
     } else false;
@@ -4453,6 +4608,7 @@ fn freeSurface(gpa: std.mem.Allocator, s: *Surface) void {
     s.notes.deinit(gpa);
     s.console.deinit(gpa);
     s.network.deinit(gpa, &net_budget);
+    s.block.deinit(gpa); // W9d③
 }
 
 /// 답을 기다리던 요청을 모두 버린다 — 답을 보내지 않는다(sidecar 가 죽었거나 브라우저가 사라져 콜백이 없다). 떠 있던
@@ -5203,8 +5359,14 @@ pub fn recentUserInput(surface_id: u64, window_ms: i64, now_ms: i64) bool {
 }
 
 fn send(gpa: std.mem.Allocator, message: Message) void {
+    _ = trySend(gpa, message);
+}
+
+/// 보낸다 — 만든 값이 codec 규칙을 어겨 frame 을 만들지 못했으면 거짓(보내지 않았다). 엔진이 내려가 있어 버린 것은 참이다(다시 뜨면
+/// `browser_created` 가 지금 상태를 다시 보낸다).
+fn trySend(gpa: std.mem.Allocator, message: Message) bool {
     var frame: [ws.wire.max_frame_bytes]u8 = undefined;
-    const len = ws.codec.encode(message, &frame) catch return; // maru 가 만든 값이 codec 규칙을 어기면 보내지 않는다
+    const len = ws.codec.encode(message, &frame) catch return false; // maru 가 만든 값이 codec 규칙을 어기면 보내지 않는다
     switch (state) {
         .starting => outbox_pending.appendSlice(gpa, frame[0..len]) catch {},
         .running => if (process) |*p| {
@@ -5212,6 +5374,7 @@ fn send(gpa: std.mem.Allocator, message: Message) void {
         } else if (builtin.is_test and test_record_sends) outbox_pending.appendSlice(gpa, frame[0..len]) catch {},
         .off, .failed => {},
     }
+    return true;
 }
 
 /// 받은 바이트를 decoder 에 넣고 frame 을 적용한다. decoder 는 가장 큰 frame 하나만큼만 받으므로(W1a) frame 을 비우며
@@ -5294,6 +5457,10 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
                 newRecordSession(s);
                 sendRecord(gpa, id, s);
             }
+            // W9d③: 막기 규칙·엄격 모드도 재생 이동보다 **먼저**(§12 P2-9 — 새 브라우저의 첫 이동 전에 규칙이 서야 새지 않는다). 수는 maru 가
+            // 누적했다(새 sidecar 는 0 부터 차이를 보낸다).
+            s.block.resend();
+            sendNetBlock(gpa, id, s);
             if (s.last_url) |u| {
                 send(gpa, .{ .navigate = .{ .browser = id, .url = u } });
                 s.nav_pending = true;
@@ -5378,6 +5545,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             s.last_nav_ms = monotonicNow();
             s.url_stale = true; // 4 회차 C3: 이 문서의 주소가 오기 전까지(32 KiB 를 넘으면 오지 않는다)
             s.console.newDocument(); // W9c①: 묶이지 않은 쪽은 이 문서의 줄부터 본다
+            s.block.newDocument(); // W9d③: 「적용 안 됨」 표시는 문서마다
             s.nav_uncommitted = false;
             // W9a: 만들어진 직후의 about:blank 문서는 에이전트 이동의 문서가 아니다.
             if (s.agent_nav.active and !s.agent_nav.done and !s.initial_load_pending) s.agent_nav.saw_started = true;
@@ -5467,7 +5635,24 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         },
         // W9c①: 실패한 이동이 오류 페이지로 옛 문서를 바꿨다(`page_started` 가 없다) — 콘솔의 문서 경계로만 쓴다. 다운로드의 몸짓(`last_nav_ms`)·
         // 에이전트 이동(`agent_nav`)은 건드리지 않는다 — 그쪽 판정은 `load_finished` 가 한다.
-        .error_page => |id| if (surfaces.getPtr(id)) |s| s.console.newDocument(),
+        .error_page => |v| if (surfaces.getPtr(v.browser)) |s| {
+            s.console.newDocument();
+            s.block.newDocument();
+            // W9d③: 막기 규칙이 이 이동을 막았다(실패 주소의 해시로 sidecar 가 짝지었다 — 탭 길 -20·서비스 워커 길 -2). 에이전트의 navigate 는 그
+            // 규칙으로 끝나고, 사용자가 마지막으로 몬 탭이면 알린다 — Chromium 의 페이지는 「Chromium 이 막았다」 고 말하고 주소창은 옛 주소다(J-B4).
+            if (v.blocked_rule != 0) {
+                if (s.agent_nav.active and !s.agent_nav.done) {
+                    s.agent_nav.done = true;
+                    s.agent_nav.loaded = false;
+                    s.agent_nav.blocked_rule = v.blocked_rule;
+                }
+                // 알림은 탭·규칙 세대마다 한 번(작성자 선택 11 — 20 회 검증 B N5: 막힌 주 프레임마다 떴다; 사용자가 몬 때 이미 알렸으면 다시 띄우지 않는다).
+                if (s.user_action_ms > s.agent_input_ms) _ = s.block.wantsNotice();
+            }
+        },
+        // W9d③: 막기의 답과 수.
+        .net_block_state => |v| if (surfaces.getPtr(v.browser)) |s| s.block.onState(v),
+        .net_block_hits => |v| if (surfaces.getPtr(v.browser)) |s| s.block.onHits(v, net_full),
         // W9d①: 지켜보는 탭의 요청 기록 — 지켜보기를 끈 뒤에 늦게 온 것은 버린다(끌 때 지웠다).
         .net_begin => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) {
             var sw_tabs: [net_ring.max_sw_tabs + 1]u64 = undefined;
@@ -5624,7 +5809,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .net_watch, .net_record, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .net_watch, .net_record, .net_block, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
     }
 }
 
@@ -7624,7 +7809,7 @@ test "W9c①: sidecar 의 콘솔 줄은 그 탭에 쌓인다 — 새 문서·오
     }
     // 실패한 이동은 `page_started` 없이 오류 페이지로 바뀐다 — 그것도 문서 경계다(묶이지 않은 다른 쪽에게).
     testApply(gpa, .{ .console_message = .{ .browser = 51, .level = .debug, .text = "site-b more" } });
-    testApply(gpa, .{ .error_page = 51 });
+    testApply(gpa, .{ .error_page = .{ .browser = 51, .error_code = -105 } });
     testApply(gpa, .{ .console_message = .{ .browser = 51, .dropped_errors = 1, .has_entry = false } });
     {
         const other = try consoleRead(gpa, gpa, 51, 8, false);
@@ -10110,4 +10295,708 @@ test "W9d② v20f 18: the engine stops for good while a recording is paused — 
     defer gpa.free(r);
     // observation: `fail` overwrites paused with failed (only the shown state — the engine is latched and does not come back)
     try std.testing.expectEqualStrings("{\"recording\":true,\"state\":\"failed\"}", r);
+}
+
+// ── W9d③: 요청 막기 — maru 쪽 배선 ──
+// 시험이 증명하는 것: sidecar 가 다시 떠 브라우저가 새로 만들어지면 지켜보기 → 본문 기록 → 막기 → 재생 이동의 차례로 보낸다(재생 이동은 사용자 이동이
+// 아니다 — D2 예외 없음), 사용자의 주소창 이동·뒤로는 `user` 를 싣고 에이전트 이동은 싣지 않는다, `error_page` 의 막은 규칙이 에이전트 이동을
+// `blocked` 로 끝내고 사용자가 마지막으로 몬 탭이면 알린다, 규칙·엄격이 있는 탭은 ⊘(잠든 규칙만 있어도·sidecar 확인 전에도), grant 동기화가
+// 주인을 잃은 규칙을 버리고 다시 보낸다, 지켜보기가 끝나면 사라진다.
+
+fn blockFrames(out: []Message) []Message {
+    var all: [32]Message = undefined;
+    const n = sentFrames(&all);
+    var k: usize = 0;
+    for (all[0..n]) |m| switch (m) {
+        .net_watch, .net_record, .net_block, .navigate, .nav_action => {
+            out[k] = m;
+            k += 1;
+        },
+        else => {},
+    };
+    return out[0..k];
+}
+
+test "W9d③: 보내기 차례 — 브라우저가 새로 만들어지면 net_watch → net_record → net_block → navigate(재생 — user 거짓), 사용자 이동·뒤로는 user, 에이전트 이동은 아니다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{91});
+    const s = surfaces.getPtr(91).?;
+    apply(gpa, .{ .url_changed = .{ .browser = 91, .url = "https://agent.test/" } }, 0);
+    networkSync(&.{.{ .tab = 91, .who = 7, .any_host = true, .pane = 5 }});
+    networkBodySync(&.{.{ .tab = 91, .who = 17, .any_host = true, .pane = 5 }});
+    networkBlockSync(&.{.{ .tab = 91, .who = 27, .any_host = true, .pane = 5 }});
+    try networkRecord(91, true);
+    const answer = try networkBlock(gpa, 91, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{"*://*.track.test/*"} });
+    switch (answer) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(networkBlocking(91) != null); // ⊘ — sidecar 확인 전에도
+    try std.testing.expectEqualStrings("agent.test", s.block.rules.items[0].site.slice()); // 에이전트 탭 — 지금 페이지의 사이트
+    const last = try gpa.dupe(u8, "https://agent.test/page");
+    if (s.last_url) |u| gpa.free(u);
+    s.last_url = last;
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 91 }, 0);
+    var buf: [16]Message = undefined;
+    const got = blockFrames(&buf);
+    try std.testing.expectEqual(@as(usize, 4), got.len);
+    try std.testing.expect(got[0] == .net_watch and got[1] == .net_record and got[2] == .net_block and got[3] == .navigate);
+    try std.testing.expect(!got[3].navigate.user);
+    try std.testing.expectEqual(@as(u8, 1), got[2].net_block.count);
+    outbox_pending.clearRetainingCapacity();
+    userNavigate(gpa, 91, "https://agent.test/typed");
+    navAction(gpa, 91, .back);
+    try std.testing.expect(agentNavigate(gpa, 91, "https://agent.test/agent"));
+    const nav = blockFrames(&buf);
+    try std.testing.expectEqual(@as(usize, 3), nav.len);
+    try std.testing.expect(nav[0].navigate.user and nav[1].nav_action.user and !nav[2].navigate.user);
+}
+
+test "W9d③: error_page 의 막은 규칙 — 에이전트 이동은 blocked 로 끝나고(loaded 거짓), 사용자가 마지막으로 몬 탭이면 한 번 알린다, 「적용 안 됨」 표시는 문서마다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{92});
+    const s = surfaces.getPtr(92).?;
+    // 규칙이 있는 탭이다(막힌 이동은 규칙이 있어야 온다 — 알림은 규칙 세대마다 한 번).
+    var why: block_mod.Failure = undefined;
+    _ = try s.block.apply(gpa, .{ .owner = 5, .action = .add, .patterns = &.{"https://a.test/blk*"}, .site = "a.test" }, &why);
+    try std.testing.expect(agentNavigate(gpa, 92, "https://a.test/blk"));
+    apply(gpa, .{ .error_page = .{ .browser = 92, .error_code = -20, .blocked_rule = 4 } }, 0);
+    const st = agentNavState(92).?;
+    try std.testing.expect(st.done and !st.loaded and st.blocked_rule == 4);
+    try std.testing.expect(!takeBlockNotice(92)); // 에이전트가 마지막으로 몰았다
+    endAgentNav(92);
+    s.user_action_ms = monotonicNow() + 1; // 사용자가 그 뒤에 몰았다
+    apply(gpa, .{ .error_page = .{ .browser = 92, .error_code = -2, .blocked_rule = 5 } }, 0);
+    try std.testing.expect(takeBlockNotice(92));
+    try std.testing.expect(!takeBlockNotice(92)); // 한 번
+    apply(gpa, .{ .error_page = .{ .browser = 92, .error_code = -2, .blocked_rule = 5 } }, 0);
+    try std.testing.expect(!takeBlockNotice(92)); // 같은 세대에서 다시 막혀도 다시 띄우지 않는다(20 회 검증 B N5)
+    apply(gpa, .{ .error_page = .{ .browser = 92, .error_code = -105 } }, 0); // 막기와 무관한 오류 — 알리지 않는다
+    try std.testing.expect(!takeBlockNotice(92));
+    var h: ws.message.NetBlockHits = .{ .browser = 92, .sw_shared_with_unruled_tab = true };
+    apply(gpa, .{ .net_block_hits = h }, 0);
+    try std.testing.expect(s.block.sw_shared_doc);
+    apply(gpa, .{ .page_started = 92 }, 0);
+    try std.testing.expect(!s.block.sw_shared_doc);
+    h.count = 0;
+}
+
+test "W9d③: grant 동기화가 주인을 잃은 규칙·엄격을 버리고 다시 보낸다, 사용자 탭의 규칙 사이트는 grant 호스트, 지켜보기가 끝나면 ⊘ 가 사라진다, 규칙이 있는 탭을 사용자가 처음 몰면 알린다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{93});
+    apply(gpa, .{ .url_changed = .{ .browser = 93, .url = "https://app.example.test/x" } }, 0);
+    networkSync(&.{.{ .tab = 93, .who = 7, .host = "example.test", .pane = 6 }});
+    networkBlockSync(&.{.{ .tab = 93, .who = 27, .host = "example.test", .pane = 6 }});
+    const a = try networkBlock(gpa, 93, .{ .pane = 6, .any_host = false, .grant_host = "example.test", .action = .add, .patterns = &.{"https://cdn.test/*"} });
+    switch (a) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    const st = try networkBlock(gpa, 93, .{ .pane = 6, .any_host = false, .grant_host = "example.test", .action = .strict, .on = true });
+    switch (st) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    const s = surfaces.getPtr(93).?;
+    try std.testing.expectEqualStrings("example.test", s.block.rules.items[0].site.slice()); // 사용자 탭 — grant 호스트
+    try std.testing.expectEqualStrings("example.test", s.block.strict_site.slice());
+    try std.testing.expectEqual(@as(u32, 1), blockSummary(93, 6).rules);
+    try std.testing.expect(blockSummary(93, 6).strict);
+    // 사용자가 처음 몬다 — 한 번 알린다.
+    navAction(gpa, 93, .reload);
+    try std.testing.expect(takeBlockNotice(93));
+    navAction(gpa, 93, .reload);
+    try std.testing.expect(!takeBlockNotice(93));
+    // 다른 호스트로 다시 허용 — 규칙·엄격은 그 사이트에 묶여 있었다 — 버리고 다시 보낸다.
+    outbox_pending.clearRetainingCapacity();
+    networkBlockSync(&.{.{ .tab = 93, .who = 28, .host = "bank.test", .pane = 6 }});
+    try std.testing.expect(networkBlocking(93) == null);
+    var buf: [16]Message = undefined;
+    const got = blockFrames(&buf);
+    try std.testing.expect(got.len == 1 and got[0] == .net_block and got[0].net_block.count == 0 and got[0].net_block.strict_site.len == 0);
+    // 다시 두고 — 지켜보기가 끝나면(마지막 네트워크 grant) 사라진다(sidecar 는 지켜보기 끔에 버린다 — 따로 보내지 않는다).
+    networkBlockSync(&.{.{ .tab = 93, .who = 27, .host = "example.test", .pane = 6 }});
+    const b = try networkBlock(gpa, 93, .{ .pane = 6, .any_host = false, .grant_host = "example.test", .action = .add, .patterns = &.{"https://cdn.test/*"} });
+    switch (b) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(networkBlocking(93) != null);
+    outbox_pending.clearRetainingCapacity();
+    networkSync(&.{});
+    try std.testing.expect(networkBlocking(93) == null);
+    for (blockFrames(&buf)) |m| try std.testing.expect(m != .net_block);
+    // 지켜보지 않는 탭 — needs_network_permission.
+    const c = try networkBlock(gpa, 93, .{ .pane = 6, .any_host = false, .grant_host = "example.test", .action = .list });
+    try std.testing.expectEqualStrings("needs_network_permission", c.fail.reason);
+}
+
+test "W9d③ 변이: 같은 출처를 보이는 규칙 없는 탭이 있으면 결과가 나눔을 말한다, Grants 줄의 엄격은 켠 pane 에만, 오류 페이지도 문서 경계, 기록 없이 막은 수는 목록에 붙는다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 94, 95 });
+    apply(gpa, .{ .url_changed = .{ .browser = 94, .url = "https://s.test/a" } }, 0);
+    apply(gpa, .{ .url_changed = .{ .browser = 95, .url = "https://s.test/b" } }, 0);
+    networkSync(&.{.{ .tab = 94, .who = 7, .any_host = true, .pane = 5 }});
+    networkBlockSync(&.{.{ .tab = 94, .who = 27, .any_host = true, .pane = 5 }});
+    const a = try networkBlock(gpa, 94, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{"https://s.test/sw/*"} });
+    switch (a) {
+        .ok => |json| {
+            defer gpa.free(json);
+            // 탭 95 가 같은 출처를 보이고 규칙이 없다 — 서비스 워커의 요청은 막히지 않는다고 미리 말한다.
+            try std.testing.expect(std.mem.indexOf(u8, json, "\"shared_with_unruled_tab\":true") != null);
+        },
+        .fail => return error.TestUnexpectedResult,
+    }
+    const st = try networkBlock(gpa, 94, .{ .pane = 5, .any_host = true, .action = .strict, .on = true });
+    switch (st) {
+        .ok => |json| gpa.free(json),
+        .fail => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(blockSummary(94, 5).strict);
+    try std.testing.expect(!blockSummary(94, 6).strict); // 다른 pane 의 줄에는 엄격이 없다
+    // 오류 페이지(막기와 무관해도)는 새 문서 — 「적용 안 됨」 표시를 지운다.
+    const s = surfaces.getPtr(94).?;
+    apply(gpa, .{ .net_block_hits = .{ .browser = 94, .unrecorded = 3, .sw_shared_with_unruled_tab = true } }, 0);
+    try std.testing.expect(s.block.sw_shared_doc);
+    apply(gpa, .{ .error_page = .{ .browser = 94, .error_code = -105 } }, 0);
+    try std.testing.expect(!s.block.sw_shared_doc);
+    // 문을 지나지 못해 기록 없이 막은 수 — 목록 결과에 붙는다.
+    const json = try networkList(gpa, 94, .{ .who = 7, .pane = 5 }, .{ .page_size = 200 });
+    defer gpa.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"blocked_unrecorded\":3") != null);
+}
+
+// ── W9d③ v20b(적대 검증 11–20 회차, 검증자 B) — web_osr 배선 ──
+
+fn v20bBlockOk(gpa: std.mem.Allocator, id: u64, req: BlockRequest) ![]const u8 {
+    const a = try networkBlock(gpa, id, req);
+    switch (a) {
+        .ok => |json| return json,
+        .fail => |f| {
+            std.debug.print("v20b unexpected fail {s}: {s}\n", .{ f.reason, f.message });
+            return error.TestUnexpectedResult;
+        },
+    }
+}
+
+test "W9d③ v20b R15a: sidecar 가 다시 떠도 — 규칙·엄격이 같은 세대로 다시 가고(재생 이동 앞), 수는 이어 누적되고, 확인 전에는 sent, 만들어지는 중의 바꾸기는 만들어진 뒤 마지막 세대로" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{96});
+    const s = surfaces.getPtr(96).?;
+    apply(gpa, .{ .url_changed = .{ .browser = 96, .url = "https://agent.test/" } }, 0);
+    networkSync(&.{.{ .tab = 96, .who = 7, .any_host = true, .pane = 5 }});
+    networkBlockSync(&.{.{ .tab = 96, .who = 27, .any_host = true, .pane = 5 }});
+    gpa.free(try v20bBlockOk(gpa, 96, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{"https://agent.test/blk/*"} }));
+    gpa.free(try v20bBlockOk(gpa, 96, .{ .pane = 5, .any_host = true, .action = .strict, .on = true }));
+    const gen = s.block.gen;
+    apply(gpa, .{ .net_block_state = .{ .browser = 96, .generation = gen, .ok = true, .strict = .on } }, 0);
+    var h: ws.message.NetBlockHits = .{ .browser = 96, .count = 1 };
+    h.entries[0] = .{ .rule_id = 1, .hits = 3 };
+    apply(gpa, .{ .net_block_hits = h }, 0);
+    {
+        const j = try v20bBlockOk(gpa, 96, .{ .pane = 5, .any_host = true, .action = .list });
+        defer gpa.free(j);
+        try std.testing.expect(std.mem.indexOf(u8, j, "\"state\":\"active\"") != null and std.mem.indexOf(u8, j, "\"hits\":3") != null);
+    }
+    // 재시작.
+    const last = try gpa.dupe(u8, "https://agent.test/blk/page");
+    if (s.last_url) |u| gpa.free(u);
+    s.last_url = last;
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 96 }, 0);
+    var buf: [16]Message = undefined;
+    const got = blockFrames(&buf);
+    try std.testing.expect(got.len == 3 and got[0] == .net_watch and got[1] == .net_block and got[2] == .navigate);
+    try std.testing.expectEqual(gen, got[1].net_block.generation);
+    try std.testing.expectEqualStrings("agent.test", got[1].net_block.strict_site);
+    try std.testing.expect(!got[2].navigate.user); // 재생 이동은 D2 예외가 아니다
+    {
+        const j = try v20bBlockOk(gpa, 96, .{ .pane = 5, .any_host = true, .action = .list });
+        defer gpa.free(j);
+        try std.testing.expect(std.mem.indexOf(u8, j, "\"state\":\"sent\"") != null);
+        // B N3: 엄격도 확인 전에는 sent(옛 프로세스의 on 이 남지 않는다).
+        try std.testing.expect(std.mem.indexOf(u8, j, "\"state\":\"sent\",\"covers_cross_site_iframes\"") != null);
+    }
+    h.entries[0].hits = 2;
+    apply(gpa, .{ .net_block_hits = h }, 0);
+    apply(gpa, .{ .net_block_state = .{ .browser = 96, .generation = gen, .ok = true, .strict = .on } }, 0);
+    {
+        const j = try v20bBlockOk(gpa, 96, .{ .pane = 5, .any_host = true, .action = .list });
+        defer gpa.free(j);
+        try std.testing.expect(std.mem.indexOf(u8, j, "\"hits\":5") != null and std.mem.indexOf(u8, j, "\"state\":\"active\"") != null);
+    }
+    // 브라우저가 없는 사이(만들어지는 중)의 바꾸기 — 보내지 않고, 만들어진 뒤 마지막 세대 하나로.
+    s.created = false;
+    outbox_pending.clearRetainingCapacity();
+    gpa.free(try v20bBlockOk(gpa, 96, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{"https://agent.test/two/*"} }));
+    gpa.free(try v20bBlockOk(gpa, 96, .{ .pane = 5, .any_host = true, .action = .remove, .rules = &.{1} }));
+    try std.testing.expectEqual(@as(usize, 0), blockFrames(&buf).len);
+    s.created = true;
+    apply(gpa, .{ .browser_created = 96 }, 0);
+    const got2 = blockFrames(&buf);
+    var nb_count: usize = 0;
+    for (got2) |m| if (m == .net_block) {
+        nb_count += 1;
+        try std.testing.expectEqual(s.block.gen, m.net_block.generation);
+        try std.testing.expectEqual(@as(u8, 1), m.net_block.count);
+        try std.testing.expectEqualStrings("https://agent.test/two/*", m.net_block.rules[0].pattern);
+    };
+    try std.testing.expectEqual(@as(usize, 1), nb_count);
+}
+
+test "W9d③ v20b R12b: 철회 차례 — 마지막 네트워크 grant 가 사라지면 net_watch 끔(규칙은 sidecar 가 버린다)·⊘ 사라짐·늦게 온 수는 버림, 다른 pane 이 지켜보면 주인 잃은 규칙만 빠진 net_block" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{97});
+    const s = surfaces.getPtr(97).?;
+    apply(gpa, .{ .url_changed = .{ .browser = 97, .url = "https://app.test/" } }, 0);
+    networkSync(&.{ .{ .tab = 97, .who = 7, .host = "app.test", .pane = 5 }, .{ .tab = 97, .who = 8, .host = "app.test", .pane = 6 } });
+    networkBlockSync(&.{ .{ .tab = 97, .who = 27, .host = "app.test", .pane = 5 }, .{ .tab = 97, .who = 28, .host = "app.test", .pane = 6 } });
+    gpa.free(try v20bBlockOk(gpa, 97, .{ .pane = 5, .any_host = false, .grant_host = "app.test", .action = .add, .patterns = &.{"https://cdn.test/a/*"} }));
+    gpa.free(try v20bBlockOk(gpa, 97, .{ .pane = 6, .any_host = false, .grant_host = "app.test", .action = .add, .patterns = &.{"https://cdn.test/b/*"} }));
+    // pane 5 의 네트워크 grant 만 철회 — pane 6 이 지켜본다.
+    outbox_pending.clearRetainingCapacity();
+    networkSync(&.{.{ .tab = 97, .who = 8, .host = "app.test", .pane = 6 }});
+    networkBlockSync(&.{ .{ .tab = 97, .who = 27, .host = "app.test", .pane = 5 }, .{ .tab = 97, .who = 28, .host = "app.test", .pane = 6 } });
+    var buf: [16]Message = undefined;
+    var got = blockFrames(&buf);
+    var sent_rules: ?u8 = null;
+    for (got) |m| if (m == .net_block) {
+        sent_rules = m.net_block.count;
+        try std.testing.expectEqualStrings("https://cdn.test/b/*", m.net_block.rules[0].pattern);
+    };
+    try std.testing.expectEqual(@as(?u8, 1), sent_rules);
+    try std.testing.expectEqual(@as(usize, 1), networkBlocking(97).?.rules);
+    // 마지막 네트워크 grant 도 사라진다.
+    outbox_pending.clearRetainingCapacity();
+    networkSync(&.{});
+    networkBlockSync(&.{ .{ .tab = 97, .who = 27, .host = "app.test", .pane = 5 }, .{ .tab = 97, .who = 28, .host = "app.test", .pane = 6 } });
+    got = blockFrames(&buf);
+    var watch_off = false;
+    for (got) |m| switch (m) {
+        .net_watch => |w| watch_off = !w.on,
+        .net_block => return error.NetBlockAfterWatchOff,
+        else => {},
+    };
+    try std.testing.expect(watch_off);
+    try std.testing.expect(networkBlocking(97) == null);
+    // 늦게 온 수·오류 페이지 — 버리거나(수) 이동만 끝낸다.
+    var h: ws.message.NetBlockHits = .{ .browser = 97, .unrecorded = 4, .count = 1 };
+    h.entries[0] = .{ .rule_id = 2, .hits = 9 };
+    apply(gpa, .{ .net_block_hits = h }, 0);
+    try std.testing.expect(s.block.rules.items.len == 0);
+    try std.testing.expectEqual(@as(u64, 0), s.block.unrecorded); // B N4: 모두 버린 세대의 늦은 수는 버린다
+    // 다시 지켜보면 규칙은 돌아오지 않는다.
+    outbox_pending.clearRetainingCapacity();
+    networkSync(&.{.{ .tab = 97, .who = 9, .host = "app.test", .pane = 6 }});
+    try std.testing.expect(networkBlocking(97) == null);
+    for (blockFrames(&buf)) |m| if (m == .net_block) return error.UnexpectedNetBlock;
+}
+
+test "W9d③ v20b R18a: 사용자 알림 — 몰기는 세대마다 한 번, 같은 세대에서 막힌 주 프레임이 두 번이면 몇 번인가, 에이전트가 마지막이면 없음, 규칙 없는 탭은 없음(대조)" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 98, 99 });
+    const s = surfaces.getPtr(98).?;
+    apply(gpa, .{ .url_changed = .{ .browser = 98, .url = "https://agent.test/" } }, 0);
+    networkSync(&.{.{ .tab = 98, .who = 7, .any_host = true, .pane = 5 }});
+    networkBlockSync(&.{.{ .tab = 98, .who = 27, .any_host = true, .pane = 5 }});
+    // 대조: 규칙 없는 탭(99)을 몰면 알림 없음.
+    navAction(gpa, 99, .reload);
+    try std.testing.expect(!takeBlockNotice(99));
+    gpa.free(try v20bBlockOk(gpa, 98, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{"https://agent.test/blk/*"} }));
+    navAction(gpa, 98, .reload);
+    try std.testing.expect(takeBlockNotice(98));
+    navAction(gpa, 98, .reload);
+    try std.testing.expect(!takeBlockNotice(98));
+    gpa.free(try v20bBlockOk(gpa, 98, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{"https://agent.test/two/*"} }));
+    navAction(gpa, 98, .back);
+    try std.testing.expect(takeBlockNotice(98)); // 새 세대 — 다시 한 번
+    // 같은 세대에서 사용자가 몬 이동이 두 번 막힌다(링크 — D2 예외 아님).
+    s.user_action_ms = monotonicNow() + 10;
+    var notices: usize = 0;
+    for (0..2) |_| {
+        apply(gpa, .{ .error_page = .{ .browser = 98, .error_code = -20, .blocked_rule = 1 } }, 0);
+        notices += @intFromBool(takeBlockNotice(98));
+    }
+    try std.testing.expectEqual(@as(usize, 0), notices); // B N5: 이 세대는 몰 때 이미 알렸다 — 막힌 주 프레임마다 다시 띄우지 않는다
+    // 에이전트가 마지막으로 몰았다 — 알림 없음.
+    s.agent_input_ms = s.user_action_ms + 10;
+    apply(gpa, .{ .error_page = .{ .browser = 98, .error_code = -20, .blocked_rule = 1 } }, 0);
+    try std.testing.expect(!takeBlockNotice(98));
+    // 막기와 무관한 오류(-20 이지만 규칙 0 — 다른 확장)는 알리지 않는다.
+    s.user_action_ms = s.agent_input_ms + 10;
+    apply(gpa, .{ .error_page = .{ .browser = 98, .error_code = -20 } }, 0);
+    try std.testing.expect(!takeBlockNotice(98));
+}
+
+test "W9d③ v20b R16c: 두 pane — 목록의 block_pattern 은 주인에게만(둘째 pane 은 번호만), Grants 줄의 수·엄격은 pane 마다, ⊘ 의 수는 합" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{100});
+    apply(gpa, .{ .url_changed = .{ .browser = 100, .url = "https://app.test/" } }, 0);
+    networkSync(&.{ .{ .tab = 100, .who = 7, .any_host = true, .pane = 5 }, .{ .tab = 100, .who = 8, .host = "app.test", .pane = 6 } });
+    networkBlockSync(&.{ .{ .tab = 100, .who = 27, .any_host = true, .pane = 5 }, .{ .tab = 100, .who = 28, .host = "app.test", .pane = 6 } });
+    gpa.free(try v20bBlockOk(gpa, 100, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{ "https://t.test/a/*", "https://t.test/b/*" } }));
+    gpa.free(try v20bBlockOk(gpa, 100, .{ .pane = 6, .any_host = false, .grant_host = "app.test", .action = .add, .patterns = &.{"https://t.test/c/*"} }));
+    gpa.free(try v20bBlockOk(gpa, 100, .{ .pane = 6, .any_host = false, .grant_host = "app.test", .action = .strict, .on = true }));
+    try std.testing.expectEqual(@as(usize, 3), networkBlocking(100).?.rules);
+    try std.testing.expectEqual(@as(u32, 2), blockSummary(100, 5).rules);
+    try std.testing.expect(!blockSummary(100, 5).strict);
+    try std.testing.expectEqual(@as(u32, 1), blockSummary(100, 6).rules);
+    try std.testing.expect(blockSummary(100, 6).strict);
+    try std.testing.expectEqual(@as(u32, 0), blockSummary(100, 7).rules);
+    // 막힌 요청 — 규칙 1(pane 5 의 것).
+    apply(gpa, .{ .net_begin = .{ .browser = 100, .request = 1, .url = "https://t.test/a/px", .host = "t.test", .site = "app.test", .method = "GET" } }, 0);
+    apply(gpa, .{ .net_end = .{ .browser = 100, .request = 1, .outcome = .failed, .error_code = -20, .flags = .{ .blocked = true }, .rule_id = 1 } }, 0);
+    for ([_]struct { who: u64, pane: u64, host: []const u8, bound: bool, want_pattern: bool }{
+        .{ .who = 7, .pane = 5, .host = "", .bound = false, .want_pattern = true },
+        .{ .who = 8, .pane = 6, .host = "app.test", .bound = true, .want_pattern = false },
+    }) |c| {
+        const j = try networkList(gpa, 100, .{ .who = c.who, .pane = c.pane, .grant_host = c.host, .host_bound = c.bound }, .{ .page_size = 50, .blocked = true });
+        defer gpa.free(j);
+        try std.testing.expectEqual(c.want_pattern, std.mem.indexOf(u8, j, "\"block_pattern\"") != null);
+    }
+    // pane 6 의 결과 — 제 규칙 1 개, 다른 pane 2 개, 엄격은 제 것.
+    const j6 = try v20bBlockOk(gpa, 100, .{ .pane = 6, .any_host = false, .grant_host = "app.test", .action = .list });
+    defer gpa.free(j6);
+    try std.testing.expect(std.mem.indexOf(u8, j6, "\"other_rules\":2") != null and std.mem.indexOf(u8, j6, "\"other_pane\"") == null);
+    const j5 = try v20bBlockOk(gpa, 100, .{ .pane = 5, .any_host = true, .action = .list });
+    defer gpa.free(j5);
+    try std.testing.expect(std.mem.indexOf(u8, j5, "\"other_rules\":1") != null and std.mem.indexOf(u8, j5, "\"other_pane\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, j5, "t.test/c/") == null); // 남의 패턴은 안 보인다
+}
+
+test "W9d③ 20 회 검증 B DEF-2: 만들지 못한 net_block 은 보낸 것으로 적지 않는다 — 결과는 failed(엄격도), 고친 다음 세대는 간다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{102});
+    const s = surfaces.getPtr(102).?;
+    apply(gpa, .{ .url_changed = .{ .browser = 102, .url = "https://agent.test/" } }, 0);
+    networkSync(&.{.{ .tab = 102, .who = 7, .any_host = true, .pane = 5 }});
+    networkBlockSync(&.{.{ .tab = 102, .who = 27, .any_host = true, .pane = 5 }});
+    var why: block_mod.Failure = undefined;
+    _ = try s.block.apply(gpa, .{ .owner = 5, .action = .strict, .on = true, .site = "agent.test" }, &why);
+    // 넣을 때의 검사를 지나지 못했을 사이트를 직접 심는다(닿지 않아야 하는 갈래 — codec 이 거절한다).
+    try s.block.rules.append(gpa, .{ .id = 9, .owner = 5, .site = .init("a b.test") });
+    s.block.rules.items[s.block.rules.items.len - 1].pattern_len = @intCast((try std.fmt.bufPrint(&s.block.rules.items[s.block.rules.items.len - 1].pattern_buf, "https://agent.test/x", .{})).len);
+    s.block.gen += 1;
+    outbox_pending.clearRetainingCapacity();
+    sendNetBlock(gpa, 102, s);
+    var buf: [16]Message = undefined;
+    for (blockFrames(&buf)) |m| if (m == .net_block) return error.SentUnencodable;
+    try std.testing.expect(s.block.sent_gen != s.block.gen and s.block.strict_state == .failed);
+    const j = try s.block.resultJson(gpa, 5, .{}, "agent.test", true, false);
+    defer gpa.free(j);
+    try std.testing.expect(std.mem.indexOf(u8, j, "\"state\":\"failed\"") != null);
+    // 고친 다음 세대(나쁜 규칙을 지운다)는 간다.
+    _ = s.block.rules.pop();
+    s.block.gen += 1;
+    sendNetBlock(gpa, 102, s);
+    var sent: usize = 0;
+    for (blockFrames(&buf)) |m| if (m == .net_block) {
+        sent += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), sent);
+    try std.testing.expectEqual(s.block.gen, s.block.sent_gen);
+}
+
+// ── W9d③ 2 차 20 회 검증 11–20 회차(검증자 B2 — 6077ecc4c 를 다시 친 시험을 고친 뒤의 답으로 단언) ──
+
+test "W9d③ v20b2 R13 NEW-2: 설정 끔 동안 sidecar 가 보낸 서비스 워커 수·다른 사이트 리다이렉트 수는 적지 않는다 — 나중에 켜도 보이지 않는다, 켬 동안의 수는 끄면 지운다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    const saved_full = net_full;
+    defer net_full = saved_full;
+    try testSurfaces(gpa, &.{110});
+    const s = surfaces.getPtr(110).?;
+    apply(gpa, .{ .url_changed = .{ .browser = 110, .url = "https://agent.test/" } }, 0);
+    networkSync(&.{.{ .tab = 110, .who = 7, .any_host = true, .pane = 5 }});
+    networkBlockSync(&.{.{ .tab = 110, .who = 27, .any_host = true, .pane = 5 }});
+    gpa.free(try v20bBlockOk(gpa, 110, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{"https://agent.test/sw/*"} }));
+    gpa.free(try v20bBlockOk(gpa, 110, .{ .pane = 5, .any_host = true, .action = .strict, .on = true }));
+    setNetworkFull(false);
+    var h: ws.message.NetBlockHits = .{ .browser = 110, .generation = s.block.gen, .strict_redirect_bypassed = 2, .count = 1 };
+    h.entries[0] = .{ .rule_id = 1, .hits = 1, .sw_hits = 5, .sw_not_applied = 6 };
+    apply(gpa, .{ .net_block_hits = h }, 0);
+    const off = try v20bBlockOk(gpa, 110, .{ .pane = 5, .any_host = true, .action = .list });
+    defer gpa.free(off);
+    try std.testing.expect(std.mem.indexOf(u8, off, "sw_hits") == null and std.mem.indexOf(u8, off, "redirects_bypassed_other_site") == null);
+    setNetworkFull(true);
+    const on = try v20bBlockOk(gpa, 110, .{ .pane = 5, .any_host = true, .action = .list });
+    defer gpa.free(on);
+    try std.testing.expect(std.mem.indexOf(u8, on, "\"sw_hits\":0,\"sw_not_applied\":0") != null and std.mem.indexOf(u8, on, "\"redirects_bypassed_other_site\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, on, "\"hits\":1") != null); // 탭 길의 수는 설정과 무관하게 적는다
+    // 켬 동안의 수는 적고, 끄면 지운다(W9d② 의 본문처럼) — 다시 켜도 없다.
+    var h2: ws.message.NetBlockHits = .{ .browser = 110, .generation = s.block.gen, .strict_redirect_bypassed = 1, .count = 1 };
+    h2.entries[0] = .{ .rule_id = 1, .sw_hits = 3 };
+    apply(gpa, .{ .net_block_hits = h2 }, 0);
+    try std.testing.expect(s.block.rules.items[0].sw_hits == 3 and s.block.strict_redirect_bypassed == 1);
+    setNetworkFull(false);
+    setNetworkFull(true);
+    try std.testing.expect(s.block.rules.items[0].sw_hits == 0 and s.block.strict_redirect_bypassed == 0 and s.block.rules.items[0].hits == 1);
+}
+
+test "W9d③ v20b2 R15 N-d: 만들지 못한 세대(failed) 뒤 바른 세대가 가면 — 확인 전에는 규칙·엄격 모두 sent, 확인 뒤 active·on" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{111});
+    const s = surfaces.getPtr(111).?;
+    apply(gpa, .{ .url_changed = .{ .browser = 111, .url = "https://agent.test/" } }, 0);
+    networkSync(&.{.{ .tab = 111, .who = 7, .any_host = true, .pane = 5 }});
+    networkBlockSync(&.{.{ .tab = 111, .who = 27, .any_host = true, .pane = 5 }});
+    gpa.free(try v20bBlockOk(gpa, 111, .{ .pane = 5, .any_host = true, .action = .strict, .on = true }));
+    apply(gpa, .{ .net_block_state = .{ .browser = 111, .generation = s.block.gen, .ok = true, .strict = .on } }, 0);
+    try s.block.rules.append(gpa, .{ .id = 9, .owner = 5, .site = .init("a b.test") });
+    s.block.rules.items[0].pattern_len = @intCast((try std.fmt.bufPrint(&s.block.rules.items[0].pattern_buf, "https://agent.test/x", .{})).len);
+    s.block.gen += 1;
+    sendNetBlock(gpa, 111, s);
+    // 고친 다음 바꾸기는 op 길로(나쁜 규칙 9 는 pane 5 의 것 — remove).
+    const fixed = try v20bBlockOk(gpa, 111, .{ .pane = 5, .any_host = true, .action = .remove, .rules = &.{9} });
+    defer gpa.free(fixed);
+    try std.testing.expect(std.mem.indexOf(u8, fixed, "\"state\":\"sent\",\"strict\"") != null and std.mem.indexOf(u8, fixed, "\"state\":\"failed\"") == null);
+    apply(gpa, .{ .net_block_state = .{ .browser = 111, .generation = s.block.gen, .ok = true, .strict = .on } }, 0);
+    const acked = try v20bBlockOk(gpa, 111, .{ .pane = 5, .any_host = true, .action = .list });
+    defer gpa.free(acked);
+    try std.testing.expect(std.mem.indexOf(u8, acked, "\"state\":\"active\"") != null and std.mem.indexOf(u8, acked, "\"state\":\"on\"") != null);
+}
+
+test "W9d③ v20b2 R12 N-e: 막힌 주 프레임의 알림이 걸린 뒤 그 규칙의 grant 를 철회하면 알림을 띄우지 않는다, 다시 규칙을 넣고 몰면 다시 알린다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{112});
+    const s = surfaces.getPtr(112).?;
+    apply(gpa, .{ .url_changed = .{ .browser = 112, .url = "https://agent.test/" } }, 0);
+    networkSync(&.{.{ .tab = 112, .who = 7, .any_host = true, .pane = 5 }});
+    networkBlockSync(&.{.{ .tab = 112, .who = 27, .any_host = true, .pane = 5 }});
+    gpa.free(try v20bBlockOk(gpa, 112, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{"https://agent.test/blk/*"} }));
+    s.user_action_ms = monotonicNow() + 10;
+    apply(gpa, .{ .error_page = .{ .browser = 112, .error_code = -20, .blocked_rule = 1 } }, 0);
+    networkBlockSync(&.{}); // 철회 — 규칙이 사라진다
+    try std.testing.expect(networkBlocking(112) == null);
+    const pending_after_revoke = takeBlockNotice(112);
+    try std.testing.expect(!pending_after_revoke);
+    networkBlockSync(&.{.{ .tab = 112, .who = 28, .any_host = true, .pane = 5 }});
+    gpa.free(try v20bBlockOk(gpa, 112, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{"https://agent.test/blk/*"} }));
+    navAction(gpa, 112, .reload);
+    try std.testing.expect(takeBlockNotice(112));
+}
+
+// ── W9d③ 3 차 검증 11–20 회차(검증자 B3 — 8485a891e 의 2 차 고침을 친다) ──
+
+fn v20cHits(gpa: std.mem.Allocator, id: u64, v: ws.message.NetBlockHits) void {
+    var h = v;
+    h.browser = id;
+    apply(gpa, .{ .net_block_hits = h }, 0);
+}
+
+test "W9d③ v20c R13: 설정 끄고 켜기를 두 탭·sidecar 재시작과 섞는다 — 끄면 두 탭의 켬 동안 수를 지우고, 끈 동안 온 서비스 워커·나눔·다른 사이트 리다이렉트 수는 적지 않고(재시작 뒤에도), 탭 길 수·놓친 리다이렉트는 적고, 다시 켠 뒤의 수만 보인다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    const saved_full = net_full;
+    defer net_full = saved_full;
+    net_full = true;
+    try testSurfaces(gpa, &.{ 120, 121 });
+    for ([_]u64{ 120, 121 }) |id| apply(gpa, .{ .url_changed = .{ .browser = id, .url = "https://agent.test/" } }, 0);
+    networkSync(&.{ .{ .tab = 120, .who = 7, .any_host = true, .pane = 5 }, .{ .tab = 121, .who = 8, .any_host = true, .pane = 6 } });
+    networkBlockSync(&.{ .{ .tab = 120, .who = 27, .any_host = true, .pane = 5 }, .{ .tab = 121, .who = 28, .any_host = true, .pane = 6 } });
+    gpa.free(try v20bBlockOk(gpa, 120, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{"https://agent.test/sw/*"} }));
+    gpa.free(try v20bBlockOk(gpa, 120, .{ .pane = 5, .any_host = true, .action = .strict, .on = true }));
+    gpa.free(try v20bBlockOk(gpa, 121, .{ .pane = 6, .any_host = true, .action = .add, .patterns = &.{"https://agent.test/sw/*"} }));
+    const a = surfaces.getPtr(120).?;
+    const b = surfaces.getPtr(121).?;
+    var h: ws.message.NetBlockHits = .{ .browser = 0, .generation = 0, .strict_redirect_missed = 1, .strict_redirect_bypassed = 1, .sw_shared_with_unruled_tab = true, .count = 1 };
+    h.entries[0] = .{ .rule_id = 1, .hits = 2, .sw_hits = 3, .sw_not_applied = 4 };
+    h.generation = a.block.gen;
+    v20cHits(gpa, 120, h);
+    h.generation = b.block.gen;
+    v20cHits(gpa, 121, h);
+    try std.testing.expect(a.block.rules.items[0].sw_hits == 3 and b.block.rules.items[0].sw_not_applied == 4 and a.block.strict_redirect_bypassed == 1 and a.block.sw_shared_doc);
+    setNetworkFull(false);
+    for ([_]*Surface{ a, b }) |s| try std.testing.expect(s.block.rules.items[0].sw_hits == 0 and s.block.rules.items[0].sw_not_applied == 0 and s.block.strict_redirect_bypassed == 0 and !s.block.sw_shared_doc and s.block.rules.items[0].hits == 2);
+    try std.testing.expectEqual(@as(u64, 1), a.block.strict_redirect_missed); // 놓친 리다이렉트는 엄격 사이트의 일 — 설정과 무관
+    // 끈 동안.
+    h.generation = a.block.gen;
+    v20cHits(gpa, 120, h);
+    h.generation = b.block.gen;
+    v20cHits(gpa, 121, h);
+    // sidecar 재시작(끈 채) — 다시 보낸 세대로 오는 수도 같다.
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 120 }, 0);
+    h.generation = a.block.gen;
+    v20cHits(gpa, 120, h);
+    for ([_]*Surface{ a, b }) |s| try std.testing.expect(s.block.rules.items[0].sw_hits == 0 and s.block.rules.items[0].sw_not_applied == 0 and s.block.strict_redirect_bypassed == 0 and !s.block.sw_shared_doc);
+    try std.testing.expect(a.block.rules.items[0].hits == 6 and b.block.rules.items[0].hits == 4 and a.block.strict_redirect_missed == 3);
+    setNetworkFull(true);
+    {
+        const j = try v20bBlockOk(gpa, 120, .{ .pane = 5, .any_host = true, .action = .list });
+        defer gpa.free(j);
+        std.testing.expect(std.mem.indexOf(u8, j, "\"hits\":6,\"sw_hits\":0,\"sw_not_applied\":0") != null and std.mem.indexOf(u8, j, "\"redirects_not_covered\":3,\"redirects_bypassed_other_site\":0") != null and std.mem.indexOf(u8, j, "\"not_applied_total\":0") != null) catch |e| {
+            std.debug.print("v20c R13 list after on: {s}\n", .{j});
+            return e;
+        };
+    }
+    // 켠 뒤의 수만.
+    h.generation = b.block.gen;
+    h.entries[0].sw_hits = 1;
+    v20cHits(gpa, 121, h);
+    try std.testing.expect(b.block.rules.items[0].sw_hits == 1 and b.block.rules.items[0].sw_not_applied == 4);
+}
+
+test "W9d③ v20c R12: 실제 동기화 길 — 주인 pane 의 네트워크 grant 만 사라짐(다른 pane 이 지켜봄)·block grant 만 철회로 탭이 비면 빈 net_block 을 보내고 수를 지우고 옛 세대의 늦은 수는 버린다, 다른 pane 의 다음 규칙 결과는 깨끗하다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 122, 123 });
+    for ([_]u64{ 122, 123 }) |id| apply(gpa, .{ .url_changed = .{ .browser = id, .url = "https://agent.test/" } }, 0);
+    const net_all = [_]NetworkGrant{ .{ .tab = 122, .who = 7, .any_host = true, .pane = 5 }, .{ .tab = 122, .who = 8, .host = "agent.test", .pane = 6 }, .{ .tab = 123, .who = 9, .any_host = true, .pane = 5 }, .{ .tab = 123, .who = 10, .host = "agent.test", .pane = 6 } };
+    const block_all = [_]NetworkGrant{ .{ .tab = 122, .who = 27, .any_host = true, .pane = 5 }, .{ .tab = 122, .who = 28, .host = "agent.test", .pane = 6 }, .{ .tab = 123, .who = 29, .any_host = true, .pane = 5 }, .{ .tab = 123, .who = 30, .host = "agent.test", .pane = 6 } };
+    networkSync(&net_all);
+    networkBlockSync(&block_all);
+    for ([_]u64{ 122, 123 }) |id| {
+        gpa.free(try v20bBlockOk(gpa, id, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{"https://agent.test/x/*"} }));
+        gpa.free(try v20bBlockOk(gpa, id, .{ .pane = 5, .any_host = true, .action = .strict, .on = true }));
+        v20cHits(gpa, id, .{ .browser = 0, .generation = surfaces.getPtr(id).?.block.gen, .unrecorded = 4, .skipped_unknown_page = 2, .strict_redirect_missed = 1, .strict_redirect_bypassed = 1 });
+    }
+    const old122 = surfaces.getPtr(122).?.block.gen;
+    const old123 = surfaces.getPtr(123).?.block.gen;
+    outbox_pending.clearRetainingCapacity();
+    // 122: pane 5 의 네트워크 grant 만 사라진다(pane 6 이 지켜본다). 123: pane 5 의 block grant 만 사라진다.
+    networkSync(&.{ net_all[1], net_all[2], net_all[3] });
+    networkBlockSync(&.{ block_all[0], block_all[1], block_all[3] });
+    var buf: [16]Message = undefined;
+    var empties: usize = 0;
+    for (blockFrames(&buf)) |m| if (m == .net_block and m.net_block.count == 0 and m.net_block.strict_site.len == 0) {
+        empties += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), empties);
+    for ([_]u64{ 122, 123 }, [_]u32{ old122, old123 }) |id, old| {
+        try std.testing.expect(networkBlocking(id) == null);
+        v20cHits(gpa, id, .{ .browser = 0, .generation = old, .unrecorded = 7, .skipped_unknown_page = 3, .strict_redirect_missed = 2 });
+        const j = try v20bBlockOk(gpa, id, .{ .pane = 6, .any_host = false, .grant_host = "agent.test", .action = .add, .patterns = &.{"https://agent.test/y/*"} });
+        defer gpa.free(j);
+        std.testing.expect(std.mem.indexOf(u8, j, "\"unrecorded\":0,\"skipped_unknown_page\":0") != null and std.mem.indexOf(u8, j, "\"redirects_not_covered\":0") != null and std.mem.indexOf(u8, j, "strict_redirect_gap") == null) catch |e| {
+            std.debug.print("v20c R12 web_osr tab {d}: {s}\n", .{ id, j });
+            return e;
+        };
+    }
+}
+
+test "W9d③ 3 차 검증 N-B3-c(B3 R12·R18): 알림이 걸린 뒤 철회로 탭이 비고 그 사이(같은 tick) 다른 pane 이 규칙을 넣으면 — 걸린(사라진 규칙의) 알림은 거두고, 사용자의 다음 몰기에 새 세대의 알림이 한 번 뜬다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{124});
+    apply(gpa, .{ .url_changed = .{ .browser = 124, .url = "https://agent.test/" } }, 0);
+    networkSync(&.{ .{ .tab = 124, .who = 7, .any_host = true, .pane = 5 }, .{ .tab = 124, .who = 8, .host = "agent.test", .pane = 6 } });
+    networkBlockSync(&.{ .{ .tab = 124, .who = 27, .any_host = true, .pane = 5 }, .{ .tab = 124, .who = 28, .host = "agent.test", .pane = 6 } });
+    gpa.free(try v20bBlockOk(gpa, 124, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{"https://agent.test/blk/*"} }));
+    const s = surfaces.getPtr(124).?;
+    s.user_action_ms = monotonicNow() + 10;
+    apply(gpa, .{ .error_page = .{ .browser = 124, .error_code = -20, .blocked_rule = 1 } }, 0);
+    networkBlockSync(&.{.{ .tab = 124, .who = 28, .host = "agent.test", .pane = 6 }}); // pane 5 의 막기 철회 — 탭이 빈다
+    try std.testing.expect(networkBlocking(124) == null);
+    gpa.free(try v20bBlockOk(gpa, 124, .{ .pane = 6, .any_host = false, .grant_host = "agent.test", .action = .add, .patterns = &.{"https://agent.test/other/*"} }));
+    try std.testing.expect(!takeBlockNotice(124)); // 전에는 옛 알림이 떴다(그 뒤 하나 더 — 둘)
+    navAction(gpa, 124, .reload);
+    try std.testing.expect(takeBlockNotice(124)); // 새 세대 — 한 번
+    navAction(gpa, 124, .reload);
+    try std.testing.expect(!takeBlockNotice(124));
+}
+
+test "W9d③ v20c R15: sidecar 재시작과 failed — 만들지 못한 탭은 재시작 뒤에도 net_block 없이 failed(재생 이동은 간다), 고친 바꾸기는 sent, 확인 전 재시작은 같은 세대로 sent, 옛 세대의 늦은 ok 는 무시, 지금 세대 ok 는 active·on; sidecar 의 strict failed 뒤 재시작은 strict sent" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{125});
+    const s = surfaces.getPtr(125).?;
+    apply(gpa, .{ .url_changed = .{ .browser = 125, .url = "https://agent.test/" } }, 0);
+    networkSync(&.{.{ .tab = 125, .who = 7, .any_host = true, .pane = 5 }});
+    networkBlockSync(&.{.{ .tab = 125, .who = 27, .any_host = true, .pane = 5 }});
+    gpa.free(try v20bBlockOk(gpa, 125, .{ .pane = 5, .any_host = true, .action = .add, .patterns = &.{"https://agent.test/blk/*"} }));
+    gpa.free(try v20bBlockOk(gpa, 125, .{ .pane = 5, .any_host = true, .action = .strict, .on = true }));
+    apply(gpa, .{ .net_block_state = .{ .browser = 125, .generation = s.block.gen, .ok = true, .strict = .on } }, 0);
+    // 닿지 않아야 하는 사이트를 심는다(DEF-2 의 갈래) — 만들지 못한다.
+    try s.block.rules.append(gpa, .{ .id = 9, .owner = 5, .site = .init("a b.test") });
+    s.block.rules.items[1].pattern_len = @intCast((try std.fmt.bufPrint(&s.block.rules.items[1].pattern_buf, "https://agent.test/x", .{})).len);
+    s.block.gen += 1;
+    sendNetBlock(gpa, 125, s);
+    try std.testing.expect(s.block.strict_state == .failed);
+    const last = try gpa.dupe(u8, "https://agent.test/page");
+    if (s.last_url) |u| gpa.free(u);
+    s.last_url = last;
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 125 }, 0);
+    var buf: [16]Message = undefined;
+    var saw_nav = false;
+    for (blockFrames(&buf)) |m| switch (m) {
+        .net_block => return error.SentUnencodableAfterRestart,
+        .navigate => saw_nav = true,
+        else => {},
+    };
+    try std.testing.expect(saw_nav);
+    {
+        const j = try v20bBlockOk(gpa, 125, .{ .pane = 5, .any_host = true, .action = .list });
+        defer gpa.free(j);
+        try std.testing.expect(std.mem.indexOf(u8, j, "\"state\":\"failed\",\"strict\"") != null and std.mem.indexOf(u8, j, "\"state\":\"failed\",\"covers_cross_site_iframes\"") != null);
+    }
+    const fixed = try v20bBlockOk(gpa, 125, .{ .pane = 5, .any_host = true, .action = .remove, .rules = &.{9} });
+    gpa.free(fixed);
+    const g = s.block.gen;
+    try std.testing.expect(s.block.sent_gen == g and s.block.strict_state == .sent);
+    // 확인 전 재시작 — 같은 세대로 다시, sent.
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 125 }, 0);
+    var resent: ?u32 = null;
+    for (blockFrames(&buf)) |m| if (m == .net_block) {
+        resent = m.net_block.generation;
+    };
+    try std.testing.expectEqual(@as(?u32, g), resent);
+    apply(gpa, .{ .net_block_state = .{ .browser = 125, .generation = g - 1, .ok = true, .strict = .on } }, 0); // 옛 세대
+    try std.testing.expect(s.block.strict_state == .sent and s.block.acked_gen != g);
+    apply(gpa, .{ .net_block_state = .{ .browser = 125, .generation = g, .ok = true, .strict = .on } }, 0);
+    try std.testing.expect(s.block.strict_state == .on and s.block.acked_gen == g and s.block.acked_ok);
+    // sidecar 의 strict failed(ok 참) 뒤 재시작 — 엄격도 sent 로 다시.
+    apply(gpa, .{ .net_block_state = .{ .browser = 125, .generation = g, .ok = true, .strict = .failed } }, 0);
+    try std.testing.expect(s.block.strict_state == .failed);
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 125 }, 0);
+    try std.testing.expect(s.block.strict_state == .sent);
+    apply(gpa, .{ .net_block_state = .{ .browser = 125, .generation = g, .ok = true, .strict = .on } }, 0);
+    try std.testing.expect(s.block.strict_state == .on);
 }

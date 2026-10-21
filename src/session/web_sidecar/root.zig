@@ -21,3 +21,7 @@ pub const new_tab = @import("new_tab.zig");
 pub const net_fields = @import("net_fields.zig");
 /// 에이전트에게 보이는 네트워크 기록의 규칙(W9d① — 설정이 꺼졌을 때의 투영·헤더 허용 목록·호스트 덮기, W9d② — 본문이 보이는가 `bodyAccess`).
 pub const net_policy = @import("net_policy.zig");
+/// 요청 막기의 패턴(W9d③ — 풀기·정규형·맞추기·종류 마스크) — maru 는 인자 검사와 정규형에, sidecar 는 IO 스레드의 맞추기에.
+pub const net_block = @import("net_block.zig");
+/// 주소의 Chromium 꼴 흉내(W9d③ 20 회 검증 — D2 토큰의 주소 비교, 패턴의 IP 호스트 꼴 검사).
+pub const url_canon = @import("url_canon.zig");

@@ -14019,11 +14019,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // **영어 고정**(계약 §2) — 메뉴바는 찾아서 실행하는 자리라 번역하지 않는다. 이 항목만 한국어면
         // 같은 메뉴 안에서 언어가 섞인다(다른 항목은 전부 영어다).
         // W9d①: 2 = browser_network(네트워크 기록 읽기 — 에이전트가 연 탭은 탭과 함께 생긴다). W9d②: 3 = browser_network_body(응답 본문 기록).
+        // W9d③: 4 = browser_network_block(요청 막기 — 그 pane 이 둔 규칙 수와 엄격 모드. 철회하면 규칙·엄격이 함께 사라지고 탭의 ⊘ 도).
         let scopeDesc: String
         switch scope {
         case 1: scopeDesc = "cookies & storage"
         case 2: scopeDesc = "network requests"
         case 3: scopeDesc = "response bodies"
+        case 4:
+            var strict: UInt8 = 0
+            let rules = maru_macos_control_browser_block_summary(pane, target, &strict)
+            let noun = rules == 1 ? "rule" : "rules"
+            scopeDesc = strict != 0 ? "request blocking (\(rules) \(noun), strict)" : "request blocking (\(rules) \(noun))"
         default: scopeDesc = "control"
         }
         return "Revoke pane #\(pane) → \(targetDesc) · \(scopeDesc)"

@@ -166,6 +166,14 @@ pub const BrowserMethod = enum {
     /// 확인 모달, 에이전트가 연 탭은 묻지 않는다 — 사용자 결정 UB2). 그 탭의 `browser_network` grant 가 먼저 있어야 한다(없으면 모달 없이
     /// `-32002` 에 `data.reason:"needs_network_permission"`). op.arg=`{on}`. **op_kind=30 고정**.
     network_record,
+    /// `browser.networkBlock {id, action:"add"|"remove"|"clear"|"list"|"strict", patterns?, types?, rules?, on?}`(W9d③ — Chromium 전용) →
+    /// `{rules:[…], other_rules, total, max, added?, already?, removed?, state, strict:{…}, page_site, unrecorded, skipped_unknown_page,
+    /// service_worker:{…}, warnings?}`. 그 탭의 요청을 막는 규칙(match-pattern + 경로 glob — `net_block`)과 엄격 모드(그 탭·그 사이트의 서비스
+    /// 워커 우회). **`browser_network_block` scope**(사이트에 묶인 grant — 사용자 탭은 사이트마다 확인 모달, 에이전트가 연 탭은 묻지 않는다 —
+    /// 사용자 결정 D1). 그 탭의 `browser_network` grant 가 지금 문서를 덮어야 한다(없으면 `add`·`strict on` 은 모달 없이 `-32002`
+    /// `needs_network_permission`). block grant 가 없으면 `remove`·`clear`·`list`·`strict off` 는 모달 없이 `-32002`. 곧 답한다(op 줄 없음).
+    /// op.arg=정규형 인자 JSON. **op_kind=31 고정**(W9d④ 32, W9e 33–36).
+    network_block,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -203,6 +211,7 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "network")) return .network;
     if (eq(rest, "networkRequest")) return .network_request;
     if (eq(rest, "networkRecord")) return .network_record;
+    if (eq(rest, "networkBlock")) return .network_block;
     return null;
 }
 
@@ -240,6 +249,7 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
         .network => "network",
         .network_request => "networkRequest",
         .network_record => "networkRecord",
+        .network_block => "networkBlock",
     };
 }
 
@@ -250,7 +260,7 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
 pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
     return switch (engine) {
         .webkit => switch (m) {
-            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record => false,
+            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block => false,
             else => true,
         },
         // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
@@ -259,7 +269,7 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
         // W9c①: console(CEF `on_console_message` — DevTools 를 부르지 않는다). W9c③: 업로드(`DOM.setFileInputFiles` — 매번 확인 모달).
         // W9d①: 네트워크 목록·자세히(CEF 자원 요청 처리기 — DevTools 를 부르지 않는다).
         .chromium => switch (m) {
-            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record => true,
+            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record, .network_block => true,
             else => false,
         },
     };
@@ -546,6 +556,8 @@ pub const NetworkParams = struct {
     url_contains: ?[]const u8 = null,
     before_req: ?u64 = null,
     clear: bool = false,
+    /// W9d③: 막힌 요청만.
+    blocked: bool = false,
 
     pub fn typeNames(self: *const NetworkParams) []const []const u8 {
         return self.types[0..self.type_count];
@@ -791,7 +803,7 @@ fn onlyKeys(obj: std.json.ObjectMap, allowed: []const []const u8) ParamError!voi
 /// W9d①: `browser.network` params — 새 메서드라 키를 엄격히 본다.
 pub fn parseNetworkParams(params: ?std.json.Value) ParamError!NetworkParams {
     const obj = try paramsObject(params);
-    try onlyKeys(obj, &.{ "id", "page", "page_size", "types", "method", "status", "url_contains", "before_req", "clear" });
+    try onlyKeys(obj, &.{ "id", "page", "page_size", "types", "method", "status", "url_contains", "before_req", "clear", "blocked" });
     var p: NetworkParams = .{};
     if (try optU32FromObj(obj, "page")) |v| {
         if (v > max_network_page) return error.InvalidParams;
@@ -846,6 +858,7 @@ pub fn parseNetworkParams(params: ?std.json.Value) ParamError!NetworkParams {
         else => return error.InvalidParams,
     };
     p.clear = try optBoolFromObj(obj, "clear", false);
+    p.blocked = try optBoolFromObj(obj, "blocked", false); // W9d③
     return p;
 }
 
@@ -884,6 +897,10 @@ pub fn serializeNetworkArg(gpa: std.mem.Allocator, p: NetworkParams) std.mem.All
         }
         s.objectField("clear") catch |e| break :blk e;
         s.write(p.clear) catch |e| break :blk e;
+        if (p.blocked) {
+            s.objectField("blocked") catch |e| break :blk e;
+            s.write(true) catch |e| break :blk e;
+        }
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
@@ -931,6 +948,204 @@ pub fn parseNetworkRecordParams(params: ?std.json.Value) ParamError!bool {
         .bool => |b| b,
         else => error.InvalidParams,
     };
+}
+
+// ── W9d③: browser.networkBlock ─────────────────────────────────────────────────────────────────────────────
+
+pub const NetworkBlockAction = enum { add, remove, clear, list, strict };
+
+/// 인자의 거절 까닭 — `-32602` 의 `data.reason`(와 `data.index` — 몇 번째 패턴·종류인가). 패턴은 `pattern_invalid:<net_block.Why>`(ASCII 밖은
+/// 따로 `not_ascii` — punycode·퍼센트 꼴을 쓰라고 말한다).
+pub const BlockParamWhy = struct {
+    reason: []const u8 = "",
+    index: ?usize = null,
+    buf: [64]u8 = undefined,
+};
+
+pub const NetworkBlockParams = struct {
+    action: NetworkBlockAction,
+    /// `add`·`remove` 의 패턴 — 정규형(`net_block.parse(..).norm()`)으로 바꿔 둔다(op.arg 가 들고 간다).
+    patterns: [ws_net_block.max_rules][]const u8 = undefined,
+    pattern_count: usize = 0,
+    /// 종류 마스크(0 = 모든 종류).
+    types: u32 = 0,
+    rules: [ws_net_block.max_rules]u32 = undefined,
+    rule_count: usize = 0,
+    on: ?bool = null,
+};
+
+const ws_net_block = @import("web_sidecar/net_block.zig");
+
+/// `browser.networkBlock` params — 새 메서드라 키를 엄격히 본다(action 마다 받는 키도). 패턴은 여기서 풀어 정규형으로 바꾼다 — 거절이면 `why`
+/// 에 까닭(op 이 아니라 `-32602` + `data.reason`). `norm_buf` 는 정규형 글을 담는다(op.arg 를 만들 때까지 살아 있어야 한다).
+pub fn parseNetworkBlockParams(params: ?std.json.Value, why: *BlockParamWhy, norm_buf: *[ws_net_block.max_rules][ws_net_block.max_pattern_bytes]u8) ParamError!NetworkBlockParams {
+    const obj = try paramsObject(params);
+    const action_text = strFromObj(obj, "action") catch return error.InvalidParams;
+    const action = std.meta.stringToEnum(NetworkBlockAction, action_text) orelse return error.InvalidParams;
+    var p: NetworkBlockParams = .{ .action = action };
+    switch (action) {
+        .add => try onlyKeys(obj, &.{ "id", "action", "patterns", "types" }),
+        .remove => try onlyKeys(obj, &.{ "id", "action", "patterns", "rules" }),
+        .clear, .list => try onlyKeys(obj, &.{ "id", "action" }),
+        .strict => try onlyKeys(obj, &.{ "id", "action", "on" }),
+    }
+    if (obj.get("patterns")) |v| switch (v) {
+        .array => |a| {
+            if (a.items.len == 0) return error.InvalidParams;
+            if (a.items.len > ws_net_block.max_rules) {
+                why.reason = "too_many_rules";
+                return error.InvalidParams;
+            }
+            for (a.items, 0..) |item, i| {
+                const text = switch (item) {
+                    .string => |t| t,
+                    else => return error.InvalidParams,
+                };
+                switch (ws_net_block.parse(text)) {
+                    .ok => |pp| {
+                        const n = pp.norm();
+                        @memcpy(norm_buf[i][0..n.len], n);
+                        p.patterns[p.pattern_count] = norm_buf[i][0..n.len];
+                        p.pattern_count += 1;
+                    },
+                    .err => |w| {
+                        why.index = i;
+                        why.reason = if (w == .not_ascii) "not_ascii" else std.fmt.bufPrint(&why.buf, "pattern_invalid:{s}", .{w.name()}) catch "pattern_invalid";
+                        return error.InvalidParams;
+                    },
+                }
+            }
+        },
+        else => return error.InvalidParams,
+    };
+    if (obj.get("types")) |v| switch (v) {
+        .array => |a| {
+            if (a.items.len == 0 or a.items.len > max_network_types) return error.InvalidParams;
+            for (a.items, 0..) |item, i| {
+                const name = switch (item) {
+                    .string => |t| t,
+                    else => return error.InvalidParams,
+                };
+                p.types |= ws_net_block.typeBits(name) orelse {
+                    why.reason = "types_invalid";
+                    why.index = i;
+                    return error.InvalidParams;
+                };
+            }
+        },
+        else => return error.InvalidParams,
+    };
+    if (obj.get("rules")) |v| switch (v) {
+        .array => |a| {
+            if (a.items.len == 0 or a.items.len > ws_net_block.max_rules) return error.InvalidParams;
+            for (a.items) |item| switch (item) {
+                .integer => |n| {
+                    if (n < 1 or n > std.math.maxInt(u32)) return error.InvalidParams;
+                    p.rules[p.rule_count] = @intCast(n);
+                    p.rule_count += 1;
+                },
+                else => return error.InvalidParams,
+            };
+        },
+        else => return error.InvalidParams,
+    };
+    switch (action) {
+        .add => if (p.pattern_count == 0) return error.InvalidParams,
+        .remove => if (p.pattern_count == 0 and p.rule_count == 0) return error.InvalidParams,
+        .strict => p.on = switch (obj.get("on") orelse {
+            why.reason = "strict_needs_on";
+            return error.InvalidParams;
+        }) {
+            .bool => |b| b,
+            else => {
+                why.reason = "strict_needs_on";
+                return error.InvalidParams;
+            },
+        },
+        .clear, .list => {},
+    }
+    return p;
+}
+
+/// 모달 전에 action 만 엿본다(W9d② 의 `on` 처럼 — 그 탭의 네트워크 grant 를 쥔 caller 에게만): 바꾸기를 더하는(모달로 물을 만한) 꼴인가 —
+/// `add`·`strict on`. 형식이 틀리면 참(모달 뒤의 파싱이 invalid_params 로 답한다 — 묻지 않고 거절하면 형식 오류를 「권한 없음」 으로 숨긴다).
+pub fn networkBlockWantsGrant(params: ?std.json.Value) bool {
+    const obj = paramsObject(params) catch return true;
+    const action = std.meta.stringToEnum(NetworkBlockAction, strFromObj(obj, "action") catch return true) orelse return true;
+    return switch (action) {
+        .add => true,
+        .strict => switch (obj.get("on") orelse return true) {
+            .bool => |b| b,
+            else => true,
+        },
+        else => false,
+    };
+}
+
+/// op.arg — 앱이 다시 푼다(`{action, patterns?:[정규형], types?, rules?, on?}`).
+pub fn serializeNetworkBlockArg(gpa: std.mem.Allocator, p: *const NetworkBlockParams) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (blk: {
+        s.beginObject() catch |e| break :blk e;
+        s.objectField("action") catch |e| break :blk e;
+        s.write(@tagName(p.action)) catch |e| break :blk e;
+        if (p.pattern_count > 0) {
+            s.objectField("patterns") catch |e| break :blk e;
+            s.write(p.patterns[0..p.pattern_count]) catch |e| break :blk e;
+        }
+        if (p.types != 0) {
+            s.objectField("types") catch |e| break :blk e;
+            s.write(p.types) catch |e| break :blk e;
+        }
+        if (p.rule_count > 0) {
+            s.objectField("rules") catch |e| break :blk e;
+            s.write(p.rules[0..p.rule_count]) catch |e| break :blk e;
+        }
+        if (p.on) |v| {
+            s.objectField("on") catch |e| break :blk e;
+            s.write(v) catch |e| break :blk e;
+        }
+        s.endObject() catch |e| break :blk e;
+    }) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+/// `-32602` 에 `data.reason`(와 `data.index`). 까닭이 없는 형식 오류는 균일 invalid_params.
+fn blockParamError(gpa: std.mem.Allocator, id: cp.Id, why: *const BlockParamWhy) std.mem.Allocator.Error![]u8 {
+    if (why.reason.len == 0) return errorResponse(gpa, id, .invalid_params);
+    var data: std.json.ObjectMap = .empty;
+    defer data.deinit(gpa);
+    try data.put(gpa, "reason", .{ .string = why.reason });
+    if (why.index) |i| try data.put(gpa, "index", .{ .integer = @intCast(i) });
+    return cp.serializeError(gpa, id, .invalid_params, blockReasonMessage(why.reason), .{ .object = data });
+}
+
+fn blockReasonMessage(reason: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, reason, "pattern_invalid")) return "invalid pattern — use scheme://host[:port]/path with * wildcards (http, https or *), no #fragment or user@";
+    if (eq(reason, "not_ascii")) return "patterns are ASCII only — write the host in punycode and the path percent-encoded";
+    if (eq(reason, "types_invalid")) return "unknown resource type (service_worker cannot be chosen — service worker requests are matched by type-less rules)";
+    if (eq(reason, "too_many_rules")) return "a tab holds at most 32 blocking rules";
+    if (eq(reason, "strict_needs_on")) return "strict needs on:true or on:false";
+    return cp.ErrorCode.invalid_params.defaultMessage();
+}
+
+/// W9d③: 앱이 실행 단계에서 거절한 까닭(`{"reason","message","index"?}`) — 이유마다 코드: 권한(`needs_network_permission`·`needs_grant`)은
+/// -32002, 바꾸기 상한(`resource_busy`)은 -32603, 그 밖(`too_many_rules`·`no_site`·`unknown_rule`)은 -32602.
+fn serializeBlockFailure(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8) std.mem.Allocator.Error![]u8 {
+    const parsed = std.json.parseFromSlice(struct { reason: []const u8, message: []const u8, index: ?u32 = null }, gpa, payload, .{}) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return cp.serializeError(gpa, id, .internal_error, "browser op failed", null),
+    };
+    defer parsed.deinit();
+    const r = parsed.value.reason;
+    const code: cp.ErrorCode = if (eq(r, "needs_network_permission") or eq(r, "needs_grant")) .unauthorized else if (eq(r, "resource_busy")) .internal_error else .invalid_params;
+    var data: std.json.ObjectMap = .empty;
+    defer data.deinit(gpa);
+    try data.put(gpa, "reason", .{ .string = r });
+    if (parsed.value.index) |i| try data.put(gpa, "index", .{ .integer = i });
+    return cp.serializeError(gpa, id, code, parsed.value.message, .{ .object = data });
 }
 
 pub fn parseDialogParams(params: ?std.json.Value) ParamError!void {
@@ -1513,7 +1728,7 @@ pub fn serializeNavigateResult(gpa: std.mem.Allocator, id: cp.Id) std.mem.Alloca
 }
 
 fn writeNavigateResult(s: *std.json.Stringify, id: cp.Id) !void {
-    try writeNavigateLoadedResult(s, id, null);
+    try writeNavigateLoadedResult(s, id, null, null);
 }
 
 /// `browser.navigate` 성공 — Chromium 탭은 첫 불러오기를 기다려 `loaded` 를 싣는다(W9a — 엔진이 결과 `"true"`/`"false"` 로 준다).
@@ -1522,18 +1737,37 @@ pub fn serializeNavigateLoadedResult(gpa: std.mem.Allocator, id: cp.Id, result: 
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
-    const loaded: ?bool = if (std.mem.eql(u8, result, "true")) true else if (std.mem.eql(u8, result, "false")) false else null;
-    (writeNavigateLoadedResult(&s, id, loaded)) catch return error.OutOfMemory;
+    var loaded: ?bool = if (std.mem.eql(u8, result, "true")) true else if (std.mem.eql(u8, result, "false")) false else null;
+    // W9d③: 막기 규칙이 그 이동을 막았다 — 엔진이 `{"loaded":false,"blocked":true,"block_rule":N}` 를 준다(그 칸만 싣는다).
+    var block_rule: ?u32 = null;
+    if (result.len > 0 and result[0] == '{') {
+        const parsed = std.json.parseFromSlice(struct { loaded: bool = false, blocked: bool = false, block_rule: u32 = 0 }, gpa, result, .{}) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => null,
+        };
+        if (parsed) |p| {
+            defer p.deinit();
+            loaded = p.value.loaded;
+            if (p.value.blocked and p.value.block_rule != 0) block_rule = p.value.block_rule;
+        }
+    }
+    (writeNavigateLoadedResult(&s, id, loaded, block_rule)) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
 
-fn writeNavigateLoadedResult(s: *std.json.Stringify, id: cp.Id, loaded: ?bool) !void {
+fn writeNavigateLoadedResult(s: *std.json.Stringify, id: cp.Id, loaded: ?bool, block_rule: ?u32) !void {
     try beginResult(s, id);
     try s.objectField("ok");
     try s.write(true);
     if (loaded) |l| {
         try s.objectField("loaded");
         try s.write(l);
+    }
+    if (block_rule) |r| {
+        try s.objectField("blocked");
+        try s.write(true);
+        try s.objectField("block_rule");
+        try s.write(r);
     }
     try endResult(s);
 }
@@ -2160,6 +2394,16 @@ fn writeBrowserListResult(s: *std.json.Stringify, id: cp.Id, snapshot: cs.Collec
                     try s.objectField("recording");
                     try s.write(true);
                 }
+                // W9d③: 막기 규칙·엄격이 있을 때만(탭 제목의 ⊘ 와 같은 신호).
+                if (w.blocking) |b| {
+                    try s.objectField("blocking");
+                    try s.beginObject();
+                    try s.objectField("rules");
+                    try s.write(b.rules);
+                    try s.objectField("strict");
+                    try s.write(b.strict);
+                    try s.endObject();
+                }
                 try s.objectField("methods");
                 try s.beginArray();
                 inline for (@import("type_info_fields").fields(BrowserMethod)) |f| {
@@ -2244,6 +2488,8 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             else if (bmethod == .network_record and result.len > 0 and result[0] == '{')
                 // W9d② 적대 리뷰 3 회차 D6: 실행 단계에서 지켜보기가 없다(네트워크 grant 만 철회됐다) — 모달 전 검사와 같은 -32002·`needs_network_permission`.
                 serializeReasonError(gpa, req.id, .unauthorized, result)
+            else if (bmethod == .network_block and result.len > 0 and result[0] == '{')
+                serializeBlockFailure(gpa, req.id, result) // W9d③: 까닭마다 코드
             else
                 cp.serializeError(gpa, req.id, .internal_error, if (result.len > 0) result else if (bmethod == .wait) "browser wait failed" else "browser op failed", null),
         };
@@ -2296,7 +2542,7 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid dialog payload", null),
         },
         // W9d①: 앱이 준 결과 객체(링이 만든 JSON)를 그대로 싣는다 — 객체가 아니면 내부 오류.
-        .network, .network_request, .network_record => serializeNetworkResult(gpa, req.id, result) catch |e| switch (e) {
+        .network, .network_request, .network_record, .network_block => serializeNetworkResult(gpa, req.id, result) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid network payload", null),
         },
@@ -2898,6 +3144,17 @@ pub fn browserOpFromRequest(
             if (on and !grants.authorizes(pane, target_id, .browser_network, targetHost(snapshot, target_id))) return .{ .err = try needsNetworkPermission(gpa, req.id) };
         }
     }
+    // W9d③: 막기도 네트워크 기록 위에 선다 — 그 탭의 `browser_network` grant 가 지금 문서를 덮지 않으면 막기 모달을 띄우지 않고 먼저 네트워크
+    // 권한을 받으라고 답한다. block grant 가 없는 caller 의 `remove`·`clear`·`list`·`strict off` 는 모달 없이 거절한다(바꿀 규칙이 없다 — 묻지 않는다).
+    if (bmethod == .network_block) {
+        if (pane_selector) |pane| {
+            const net_ok = grants.authorizes(pane, target_id, .browser_network, targetHost(snapshot, target_id));
+            if (!authorized) {
+                if (!net_ok) return .{ .err = try needsNetworkPermissionFor(gpa, req.id, .block) };
+                if (!networkBlockWantsGrant(req.params)) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+            } else if (!net_ok and networkBlockWantsGrant(req.params)) return .{ .err = try needsNetworkPermissionFor(gpa, req.id, .block) };
+        }
+    }
     if (!authorized) return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope);
 
     // ── 7. execute_script params 사전 검증(id 길이·args wire). 이제 authorized만 도달하므로 invalid_params가 oracle 아님. ──
@@ -2963,6 +3220,13 @@ pub fn browserOpFromRequest(
         .network_request => try serializeNetworkRequestArg(gpa, parseNetworkRequestParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         // W9d②: 본문 기록 — `{on}`.
         .network_record => try std.fmt.allocPrint(gpa, "{{\"on\":{}}}", .{parseNetworkRecordParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }}),
+        // W9d③: 막기 — 패턴은 정규형으로(거절은 `-32602` + `data.reason`·`data.index`).
+        .network_block => blk: {
+            var why: BlockParamWhy = .{};
+            var norm_buf: [ws_net_block.max_rules][ws_net_block.max_pattern_bytes]u8 = undefined;
+            const p = parseNetworkBlockParams(req.params, &why, &norm_buf) catch return .{ .err = try blockParamError(gpa, req.id, &why) };
+            break :blk try serializeNetworkBlockArg(gpa, &p);
+        },
         .subscribe => unreachable, // 위에서 이미 분기
         .open => unreachable, // 위(id 파싱 앞)에서 이미 분기
     };
@@ -3016,10 +3280,19 @@ fn ungrantedResult(gpa: std.mem.Allocator, id: cp.Id, pane_selector: ?u64, targe
 
 /// W9d②: 본문 기록 전에 네트워크 권한이 없다 — `-32002` 에 `data.reason:"needs_network_permission"`(확인 모달 없이).
 fn needsNetworkPermission(gpa: std.mem.Allocator, id: cp.Id) std.mem.Allocator.Error![]u8 {
+    return needsNetworkPermissionFor(gpa, id, .record);
+}
+
+/// W9d②·③: 네트워크 권한이 먼저 — 무엇을 하려 했는지 메시지에(본문 기록·요청 막기).
+fn needsNetworkPermissionFor(gpa: std.mem.Allocator, id: cp.Id, what: enum { record, block }) std.mem.Allocator.Error![]u8 {
     var data: std.json.ObjectMap = .empty;
     defer data.deinit(gpa);
     try data.put(gpa, "reason", .{ .string = "needs_network_permission" });
-    return cp.serializeError(gpa, id, .unauthorized, "recording response bodies needs this tab's network permission first — run maru browser network on this tab", .{ .object = data });
+    const message = switch (what) {
+        .record => "recording response bodies needs this tab's network permission first — run maru browser network on this tab",
+        .block => "blocking requests needs this tab's network permission first — run maru browser network on this tab",
+    };
+    return cp.serializeError(gpa, id, .unauthorized, message, .{ .object = data });
 }
 
 /// 코드의 default message로 에러 응답 한 줄을 만든다(1a `serializeError` 재사용). 편의 wrapper(1d와 동일).
@@ -4147,7 +4420,7 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     try testing.expect(webkit.get("controllable").?.bool);
     try testing.expectEqualStrings("webkit", webkit.get("engine").?.string);
     // WebKit 은 W9 전의 것만(back·forward·reload·hover·press·open·close·dialog·handleDialog·upload 는 Chromium 전용 — WebKit 은 걷어낼 예정).
-    try testing.expectEqual(@as(usize, @import("type_info_fields").fields(BrowserMethod).len - 13), webkit.get("methods").?.array.items.len);
+    try testing.expectEqual(@as(usize, @import("type_info_fields").fields(BrowserMethod).len - 14), webkit.get("methods").?.array.items.len);
     try testing.expectEqualStrings("navigate", webkit.get("methods").?.array.items[0].string);
     const chromium = arr.items[1].object;
     try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
@@ -4155,7 +4428,7 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     const chromium_methods = chromium.get("methods").?.array.items;
     // W9b③: close 는 탭에(그 pane 이 연 탭), open 은 탭에 쓰지 않아 싣지 않는다. W9a①: navigate·getUrl·screenshot.
     // W9a③: 쿠키·localStorage·clearStorage. W9c②: 대화상자 보기·답하기. W9c①: console. W9c③: upload.
-    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "console", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog", "upload", "network", "networkRequest", "networkRecord" };
+    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "console", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog", "upload", "network", "networkRequest", "networkRecord", "networkBlock" };
     try testing.expectEqual(want_chromium.len, chromium_methods.len);
     for (want_chromium, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).
@@ -6021,4 +6294,361 @@ test "W9d② v20b 13 회차: networkRecord·본문 읽기는 WebKit 탭·파일 
     try chrome.grant(.{ .pane = 10, .target = 12, .scope = .browser });
     try chrome.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
     try expectEngineNeedsGrant("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":12,\"on\":true}}", &chrome, .browser_network_body);
+}
+
+// ── W9d③: browser.networkBlock ──
+// 시험이 증명하는 것: 메서드 번호(op_kind 31 — Swift·앱의 wire)·이름·엔진(Chromium 만), 모달 전 검사의 차례(WebKit -32008 → 네트워크 grant 없음
+// -32002 needs_network_permission → block grant 없는 remove·clear·list·strict off 는 모달 없이 -32002 → add·strict on 은 needs_grant), 인자의
+// 엄격한 키·까닭(`pattern_invalid:<why>`·`not_ascii`·`types_invalid`·`too_many_rules`·`strict_needs_on` 과 `data.index`), op.arg 의 정규형.
+
+fn blockReq(comptime params: []const u8) []const u8 {
+    return "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkBlock\",\"params\":{\"id\":12," ++ params ++ "}}";
+}
+
+fn expectBlockErr(bytes: []const u8, grants: *const cpg.PaneGrantStore, code: cp.ErrorCode, reason: ?[]const u8, index: ?i64) !void {
+    switch (try dispatchEngine(bytes, grants)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(code)), try errCode(e));
+            if (reason) |r| {
+                const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, e, .{});
+                defer parsed.deinit();
+                const data = parsed.value.object.get("error").?.object.get("data").?.object;
+                try testing.expectEqualStrings(r, data.get("reason").?.string);
+                if (index) |i| try testing.expectEqual(i, data.get("index").?.integer);
+            }
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.ExpectedErr;
+        },
+        else => return error.ExpectedErr,
+    }
+}
+
+test "W9d③: networkBlock 은 31 — Chromium 만, 모달 전 검사의 차례(-32008 → needs_network_permission → block grant 없는 remove·clear·list·strict off 는 -32002 → add·strict on 은 모달)" {
+    try testing.expectEqual(@as(u8, 31), @as(u8, @backingInt(BrowserMethod.network_block)));
+    try testing.expectEqual(BrowserMethod.network_block, parseBrowserMethod("networkBlock").?);
+    try testing.expectEqualStrings("networkBlock", browserMethodWireName(.network_block));
+    try testing.expect(!engineSupports(.webkit, .network_block) and engineSupports(.chromium, .network_block));
+    const add = blockReq("\"action\":\"add\",\"patterns\":[\"*://*.track.test/*\"]");
+    const list = blockReq("\"action\":\"list\"");
+    const strict_on = blockReq("\"action\":\"strict\",\"on\":true");
+    const strict_off = blockReq("\"action\":\"strict\",\"on\":false");
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
+    // WebKit 탭 — 모달 전 -32008.
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkBlock\",\"params\":{\"id\":11,\"action\":\"list\"}}", fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+        },
+        else => return error.ExpectedErr,
+    }
+    // 네트워크 grant 가 없다 — 어느 action 이든 모달 없이 needs_network_permission.
+    for ([_][]const u8{ add, list, strict_on }) |req| try expectBlockErr(req, &grants, .unauthorized, "needs_network_permission", null);
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
+    // block grant 가 없다 — 바꾸기를 더하는 꼴만 모달로 묻는다.
+    try expectEngineNeedsGrant(add, &grants, .browser_network_block);
+    try expectEngineNeedsGrant(strict_on, &grants, .browser_network_block);
+    try expectBlockErr(list, &grants, .unauthorized, null, null);
+    try expectBlockErr(strict_off, &grants, .unauthorized, null, null);
+    try expectBlockErr(blockReq("\"action\":\"clear\""), &grants, .unauthorized, null, null);
+    try expectBlockErr(blockReq("\"action\":\"remove\",\"rules\":[1]"), &grants, .unauthorized, null, null);
+    // block grant — op(정규형 인자).
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network_block, .host = cpg.GrantHost.init("example") });
+    switch (try dispatchEngine(blockReq("\"action\":\"add\",\"patterns\":[\"HTTPS://A.test:443/x?q=%2f\"],\"types\":[\"image\",\"preload\"]"), &grants)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqual(BrowserMethod.network_block, op.method);
+            try testing.expectEqual(capmod.ScopeClass.browser_network_block, op.pane_grant.?.scope);
+            try testing.expectEqualStrings("{\"action\":\"add\",\"patterns\":[\"https://a.test/x?q=%2F\"],\"types\":1572880}", op.arg);
+        },
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedOp;
+        },
+        else => return error.ExpectedOp,
+    }
+    // 네트워크 grant 가 다른 사이트로 바뀌면(block grant 는 남았다) — add·strict on 은 다시 needs_network_permission, list 는 그대로 된다.
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("bank.test") });
+    try expectBlockErr(add, &grants, .unauthorized, "needs_network_permission", null);
+    switch (try dispatchEngine(list, &grants)) {
+        .op => |op| testing.allocator.free(op.arg),
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedOp;
+        },
+        else => return error.ExpectedOp,
+    }
+}
+
+test "W9d③: networkBlock 인자 — action 마다 키, 패턴의 까닭과 index, ASCII 밖, 종류(서비스 워커는 고를 수 없다), 32 개 넘음, strict 의 on" {
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network_block, .host = cpg.GrantHost.init("example") });
+    try expectBlockErr(blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\",\"ws://a.test/\"]"), &grants, .invalid_params, "pattern_invalid:scheme", 1);
+    try expectBlockErr(blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/#x\"]"), &grants, .invalid_params, "pattern_invalid:fragment", 0);
+    try expectBlockErr(blockReq("\"action\":\"add\",\"patterns\":[\"https://u@a.test/\"]"), &grants, .invalid_params, "pattern_invalid:userinfo", 0);
+    try expectBlockErr(blockReq("\"action\":\"add\",\"patterns\":[\"https://한.test/\"]"), &grants, .invalid_params, "not_ascii", 0);
+    try expectBlockErr(blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\"],\"types\":[\"image\",\"service_worker\"]"), &grants, .invalid_params, "types_invalid", 1);
+    try expectBlockErr(blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\"],\"types\":[\"websocket\"]"), &grants, .invalid_params, "types_invalid", 0);
+    try expectBlockErr(blockReq("\"action\":\"strict\""), &grants, .invalid_params, "strict_needs_on", null);
+    try expectBlockErr(blockReq("\"action\":\"strict\",\"on\":1"), &grants, .invalid_params, "strict_needs_on", null);
+    var buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.writeAll("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkBlock\",\"params\":{\"id\":12,\"action\":\"add\",\"patterns\":[");
+    for (0..33) |i| try w.print("{s}\"https://a.test/{d}\"", .{ if (i == 0) "" else ",", i });
+    try w.writeAll("]}}");
+    try expectBlockErr(w.buffered(), &grants, .invalid_params, "too_many_rules", null);
+    // 까닭 없는 형식 오류 — 균일 invalid_params.
+    for ([_][]const u8{
+        blockReq("\"action\":\"nope\""),
+        blockReq("\"action\":\"add\""),
+        blockReq("\"action\":\"add\",\"patterns\":[]"),
+        blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\"],\"rules\":[1]"),
+        blockReq("\"action\":\"list\",\"patterns\":[\"https://a.test/\"]"),
+        blockReq("\"action\":\"remove\""),
+        blockReq("\"action\":\"remove\",\"rules\":[0]"),
+        blockReq("\"action\":\"clear\",\"on\":true"),
+        blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\"],\"x\":1"),
+    }) |bad| try expectBlockErr(bad, &grants, .invalid_params, null, null);
+}
+
+test "W9d③: 앱의 거절 까닭은 까닭마다 코드 — 권한은 -32002, 바꾸기 상한은 -32603, 규칙·사이트는 -32602(data.reason·index)" {
+    const req = blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\"]");
+    const Case = struct { payload: []const u8, code: cp.ErrorCode, reason: []const u8 };
+    for ([_]Case{
+        .{ .payload = "{\"reason\":\"needs_network_permission\",\"message\":\"m\"}", .code = .unauthorized, .reason = "needs_network_permission" },
+        .{ .payload = "{\"reason\":\"resource_busy\",\"message\":\"m\"}", .code = .internal_error, .reason = "resource_busy" },
+        .{ .payload = "{\"reason\":\"no_site\",\"message\":\"m\"}", .code = .invalid_params, .reason = "no_site" },
+        .{ .payload = "{\"reason\":\"unknown_rule\",\"message\":\"m\",\"index\":2}", .code = .invalid_params, .reason = "unknown_rule" },
+    }) |c| {
+        const out = try serializeBrowserResponseStatus(testing.allocator, req, .failed, c.payload);
+        defer testing.allocator.free(out);
+        try testing.expectEqual(@as(i64, @backingInt(c.code)), try errCode(out));
+        try testing.expect(std.mem.indexOf(u8, out, c.reason) != null);
+    }
+}
+
+test "W9d③: navigate 의 결과 — 막기 규칙이 막았으면 loaded:false·blocked:true·block_rule, 아니면 그대로" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.navigate\",\"params\":{\"id\":12,\"url\":\"https://a.test/\"}}";
+    const blocked = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"loaded\":false,\"blocked\":true,\"block_rule\":7}");
+    defer testing.allocator.free(blocked);
+    try testing.expect(std.mem.indexOf(u8, blocked, "\"loaded\":false,\"blocked\":true,\"block_rule\":7") != null);
+    const plain = try serializeBrowserResponseStatus(testing.allocator, req, .success, "true");
+    defer testing.allocator.free(plain);
+    try testing.expect(std.mem.indexOf(u8, plain, "blocked") == null and std.mem.indexOf(u8, plain, "\"loaded\":true") != null);
+}
+
+test "W9d③ 변이: networkBlock 인자 — 패턴 32 개까지 받는다, 빈 patterns 배열은 remove 에서도 거절, 형식이 틀린 바꾸기는 묻는 쪽으로(권한 없음으로 숨기지 않는다), navigate 결과는 blocked 표시가 있을 때만" {
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
+    // block grant 가 없다 — 모르는 action 은 모달로(모달 뒤의 파싱이 invalid_params 로 답한다).
+    try expectEngineNeedsGrant(blockReq("\"action\":\"nope\""), &grants, .browser_network_block);
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network_block, .host = cpg.GrantHost.init("example") });
+    var buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.writeAll("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkBlock\",\"params\":{\"id\":12,\"action\":\"add\",\"patterns\":[");
+    for (0..32) |i| try w.print("{s}\"https://a.test/{d}\"", .{ if (i == 0) "" else ",", i });
+    try w.writeAll("]}}");
+    switch (try dispatchEngine(w.buffered(), &grants)) {
+        .op => |op| testing.allocator.free(op.arg),
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedOp;
+        },
+        else => return error.ExpectedOp,
+    }
+    try expectBlockErr(blockReq("\"action\":\"remove\",\"patterns\":[],\"rules\":[1]"), &grants, .invalid_params, null, null);
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.navigate\",\"params\":{\"id\":12,\"url\":\"https://a.test/\"}}";
+    const not_blocked = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"loaded\":true,\"blocked\":false,\"block_rule\":7}");
+    defer testing.allocator.free(not_blocked);
+    try testing.expect(std.mem.indexOf(u8, not_blocked, "blocked") == null);
+}
+
+// ── W9d③ v20b(적대 검증 11–20 회차, 검증자 B) ──
+
+test "W9d③ v20b R11a: 막기는 peer scope — browser·browser_storage·browser_network·browser_network_body grant 를 다 쥐어도 add 는 모달(needs_grant block), list 는 모달 없이 -32002; 다른 scope 의 cap 은 인가하지 않는다" {
+    var grants: cpg.PaneGrantStore = .{};
+    for ([_]capmod.ScopeClass{ .browser, .browser_storage, .browser_network, .browser_network_body }) |sc|
+        try grants.grant(.{ .pane = 10, .target = 12, .scope = sc, .host = if (sc == .browser) .{} else cpg.GrantHost.init("example") });
+    try expectEngineNeedsGrant(blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\"]"), &grants, .browser_network_block);
+    try expectEngineNeedsGrant(blockReq("\"action\":\"strict\",\"on\":true"), &grants, .browser_network_block);
+    for ([_][]const u8{ blockReq("\"action\":\"list\""), blockReq("\"action\":\"clear\""), blockReq("\"action\":\"strict\",\"on\":false"), blockReq("\"action\":\"remove\",\"rules\":[1]") }) |r|
+        try expectBlockErr(r, &grants, .unauthorized, null, null);
+    // 세션 cap — 다른 scope 의 cap 은 networkBlock 을 인가하지 않는다, block cap 만.
+    for ([_]capmod.Scope{ .{ .browser = {} }, .{ .browser_storage = {} }, .{ .browser_network = {} }, .{ .browser_network_body = {} } }) |sc| {
+        const cap: capmod.Capability = .{ .surface_id = 12, .generation = 0, .scope = sc };
+        try testing.expect(capmod.authorize(cap, 12, 0, "browser.networkBlock", 0) == .deny);
+    }
+    try testing.expect(capmod.authorize(.{ .surface_id = 12, .generation = 0, .scope = .{ .browser_network_block = {} } }, 12, 0, "browser.networkBlock", 0) == .granted);
+    // 대조: block cap 은 다른 메서드(network·networkRecord·navigate)를 인가하지 않는다.
+    for ([_][]const u8{ "browser.network", "browser.networkRecord", "browser.navigate", "browser.getCookies" }) |m|
+        try testing.expect(capmod.authorize(.{ .surface_id = 12, .generation = 0, .scope = .{ .browser_network_block = {} } }, 12, 0, m, 0) == .deny);
+}
+
+test "W9d③ v20b R11b: pane 을 못 찾은 연결(cap 만) — block cap 이 있으면 op 은 나가되 pane grant 가 없다(앱은 실패로 답한다), 없으면 균일 -32002" {
+    const req = blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\"]");
+    var grants: cpg.PaneGrantStore = .{};
+    switch (try dispatchBrowser(testing.allocator, req, fx_engine, &.{}, null, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(e));
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.ExpectedErr;
+        },
+        else => return error.ExpectedErr,
+    }
+    const caps = [_]capmod.Capability{.{ .surface_id = 12, .generation = 0, .scope = .{ .browser_network_block = {} } }};
+    switch (try dispatchBrowser(testing.allocator, req, fx_engine, &caps, null, &grants, 0)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expect(op.pane_grant == null);
+        },
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedOp;
+        },
+        else => return error.Unexpected,
+    }
+    // 앱은 그 op 에 막기의 grant 이름으로 실패한다(B N7 — 전에는 「network reads need a browser_network grant」). 사용자에게 가는 글.
+    const out = try serializeBrowserResponseStatus(testing.allocator, req, .failed, "request blocking needs a browser_network_block grant for this pane");
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "-32603") != null and std.mem.indexOf(u8, out, "browser_network_block grant") != null);
+}
+
+test "W9d③ v20b R11c: block grant 가 다른 사이트(bank.test)에 묶였다 — 지금 문서(example)에서는 add 가 다시 묻고, list 는 묻지 않고 -32002(그 사이트의 규칙을 보이지 않는다)" {
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network_block, .host = cpg.GrantHost.init("bank.test") });
+    try expectEngineNeedsGrant(blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\"]"), &grants, .browser_network_block);
+    try expectBlockErr(blockReq("\"action\":\"list\""), &grants, .unauthorized, null, null);
+    // 하위 도메인 grant 는 상위를 덮지 않는다: block grant sub.example, 문서 example.
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network_block, .host = cpg.GrantHost.init("sub.example") });
+    try expectEngineNeedsGrant(blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\"]"), &grants, .browser_network_block);
+    // 대조: 같은 pane 의 다른 탭(11 — WebKit)은 모달 전 -32008.
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkBlock\",\"params\":{\"id\":11,\"action\":\"add\",\"patterns\":[\"https://a.test/\"]}}", fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+        },
+        else => return error.ExpectedErr,
+    }
+    // 파일 뷰(14)·markdown(13)·터미널(10)·없는 탭(99).
+    for ([_]struct { u64, cp.ErrorCode }{ .{ 13, .unsupported_by_engine }, .{ 14, .unsupported_by_engine }, .{ 10, .unauthorized }, .{ 99, .unauthorized } }) |c| {
+        var b: [256]u8 = undefined;
+        const r = try std.fmt.bufPrint(&b, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkBlock\",\"params\":{{\"id\":{d},\"action\":\"list\"}}}}", .{c[0]});
+        switch (try dispatchBrowser(testing.allocator, r, fx_engine, &.{}, 10, &grants, 0)) {
+            .err => |e| {
+                defer testing.allocator.free(e);
+                try testing.expectEqual(@as(i64, @backingInt(c[1])), try errCode(e));
+            },
+            .op => |op| {
+                testing.allocator.free(op.arg);
+                return error.ExpectedErr;
+            },
+            else => return error.ExpectedErr,
+        }
+    }
+}
+
+test "W9d③ v20b R14d: 인자 경계·나쁜 입력 — 규칙 번호 u32 끝·넘음·실수·음수·문자열, 규칙 33 개, NUL·ESC·양방향 글자·빈칸 패턴, 512/513 바이트, 종류 21 개, on:null, 중복 키" {
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network_block, .host = cpg.GrantHost.init("example") });
+    const okOp = struct {
+        fn f(bytes: []const u8, g: *const cpg.PaneGrantStore) ![]const u8 {
+            switch (try dispatchEngine(bytes, g)) {
+                .op => |op| return op.arg,
+                .err => |e| {
+                    testing.allocator.free(e);
+                    return error.ExpectedOp;
+                },
+                else => return error.ExpectedOp,
+            }
+        }
+    }.f;
+    const a1 = try okOp(blockReq("\"action\":\"remove\",\"rules\":[4294967295]"), &grants);
+    defer testing.allocator.free(a1);
+    try testing.expectEqualStrings("{\"action\":\"remove\",\"rules\":[4294967295]}", a1);
+    for ([_][]const u8{
+        blockReq("\"action\":\"remove\",\"rules\":[4294967296]"),
+        blockReq("\"action\":\"remove\",\"rules\":[1.0]"),
+        blockReq("\"action\":\"remove\",\"rules\":[-1]"),
+        blockReq("\"action\":\"remove\",\"rules\":[\"1\"]"),
+        blockReq("\"action\":\"remove\",\"rules\":1"),
+        blockReq("\"action\":\"add\",\"patterns\":\"https://a.test/\""),
+        blockReq("\"action\":\"strict\",\"on\":null"),
+        blockReq("\"action\":\"ADD\",\"patterns\":[\"https://a.test/\"]"),
+        blockReq("\"action\":1"),
+        blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\"],\"types\":[]"),
+        blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\"],\"types\":\"image\""),
+    }) |bad| try expectBlockErr(bad, &grants, .invalid_params, null, null);
+    // 33 개 규칙 번호.
+    var buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.writeAll("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkBlock\",\"params\":{\"id\":12,\"action\":\"remove\",\"rules\":[");
+    for (0..33) |i| try w.print("{s}{d}", .{ if (i == 0) "" else ",", i + 1 });
+    try w.writeAll("]}}");
+    try expectBlockErr(w.buffered(), &grants, .invalid_params, null, null);
+    // 패턴의 제어·보이지 않는 글자 — 모두 까닭과 index.
+    for ([_][]const u8{
+        blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\\u0000x\"]"),
+        blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\\u001b[31mx\"]"),
+        blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\\u202ex\"]"),
+        blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/a b\"]"),
+        blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test/\\nx\"]"),
+        blockReq("\"action\":\"add\",\"patterns\":[\"\"]"),
+        blockReq("\"action\":\"add\",\"patterns\":[\"https://*evil.test/\"]"),
+        blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test:0/\"]"),
+        blockReq("\"action\":\"add\",\"patterns\":[\"https://a.test:65536/\"]"),
+        blockReq("\"action\":\"add\",\"patterns\":[\"//a.test/\"]"),
+        blockReq("\"action\":\"add\",\"patterns\":[\"a.test/x\"]"),
+    }) |bad| {
+        switch (try dispatchEngine(bad, &grants)) {
+            .err => |e| {
+                defer testing.allocator.free(e);
+                try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(e));
+                const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, e, .{});
+                defer parsed.deinit();
+                // 까닭이 늘 실린다(pattern_invalid:<why> 또는 not_ascii).
+                const data = parsed.value.object.get("error").?.object.get("data") orelse return error.MissingReason;
+                const reason = data.object.get("reason").?.string;
+                try testing.expect(std.mem.startsWith(u8, reason, "pattern_invalid:") or std.mem.eql(u8, reason, "not_ascii"));
+            },
+            .op => |op| {
+                testing.allocator.free(op.arg);
+                return error.AcceptedBadPattern;
+            },
+            else => return error.Unexpected,
+        }
+    }
+    // 512 바이트 패턴은 받고 513 은 거절.
+    var p512: [512]u8 = undefined;
+    @memcpy(p512[0..15], "https://a.test/");
+    @memset(p512[15..], 'p');
+    var rb: [1200]u8 = undefined;
+    const r512 = try std.fmt.bufPrint(&rb, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkBlock\",\"params\":{{\"id\":12,\"action\":\"add\",\"patterns\":[\"{s}\"]}}}}", .{&p512});
+    const a2 = try okOp(r512, &grants);
+    testing.allocator.free(a2);
+    var p513: [513]u8 = undefined;
+    @memcpy(p513[0..15], "https://a.test/");
+    @memset(p513[15..], 'p');
+    const r513 = try std.fmt.bufPrint(&rb, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkBlock\",\"params\":{{\"id\":12,\"action\":\"add\",\"patterns\":[\"{s}\"]}}}}", .{&p513});
+    try expectBlockErr(r513, &grants, .invalid_params, null, null);
+    // 같은 키 둘(JSON 중복 키) — 거절(-32700, 어느 값이 이기는지 고르지 않는다).
+    switch (try dispatchEngine(blockReq("\"action\":\"list\",\"action\":\"clear\""), &grants)) {
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.AcceptedDuplicateKey;
+        },
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, -32700), try errCode(e));
+        },
+        else => return error.Unexpected,
+    }
 }

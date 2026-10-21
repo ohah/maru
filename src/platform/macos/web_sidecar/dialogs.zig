@@ -170,6 +170,8 @@ fn ask(
         if (table.find(id, request, .js)) |entry| _ = table.take(entry);
         return giveUp(kind, callback);
     };
+    // W9d③ 2 차 검증 LOW-A2-4: 사용자 이동의 D2 토큰은 이 확인에 답할 때까지 시계를 멈춘다(그 이동의 `on_before_browse` 는 답한 뒤에 온다).
+    if (kind == .before_unload) @import("blocking.zig").beforeUnloadShown(id, request);
     return true;
 }
 
@@ -209,6 +211,7 @@ pub fn onResetDialogState(_: [*c]c.cef_jsdialog_handler_t, browser: [*c]c.cef_br
     defer object.releaseArg(browser);
     if (browser == null) return;
     const entry = browsers.state.registry.byCefId(browser.*.get_identifier.?(browser)) orelse return;
+    @import("blocking.zig").dialogsDropped(entry.id);
     while (table.takeFor(entry.id, .js)) |pending| {
         const callback: [*c]c.cef_jsdialog_callback_t = @ptrCast(@alignCast(pending.callback));
         object.release(callback);
@@ -225,6 +228,7 @@ pub fn cancelFor(id: BrowserId) void {
             page.reset_at_ms = nowMs();
         };
     }
+    @import("blocking.zig").dialogsDropped(id); // 머무르기로 답한다 — 그 이동은 시작되지 않는다(부른 쪽이 새 토큰을 건다)
     while (table.takeFor(id, .js)) |pending| {
         const callback: [*c]c.cef_jsdialog_callback_t = @ptrCast(@alignCast(pending.callback));
         callback.*.cont.?(callback, 0, null);
@@ -254,11 +258,15 @@ pub fn onLoadStart(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, fr
 
 /// `on_load_error` — 주 프레임의 이동이 실패했다. 실패한 이동은 `on_load_start` 없이 오류 페이지로 옛 문서를 바꾸므로(CEF 헤더)
 /// 옛 문서의 미디어 요청을 여기서도 치운다(적대 검증). 멈춤·새 이동으로 끊긴 것(ERR_ABORTED)은 옛 문서가 남거나 새 문서의
-/// `on_load_start` 가 치운다.
-pub fn onLoadError(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, error_code: c.cef_errorcode_t, _: [*c]const c.cef_string_t, _: [*c]const c.cef_string_t) callconv(.c) void {
+/// `on_load_start` 가 치운다 — 막기 쪽(`blocking.loadAborted` — 엄격의 경계 넘기 셈·진행 중 이동)에만 알린다.
+pub fn onLoadError(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, error_code: c.cef_errorcode_t, _: [*c]const c.cef_string_t, failed_url: [*c]const c.cef_string_t) callconv(.c) void {
     defer object.releaseArg(browser);
     defer object.releaseArg(frame);
-    if (frame == null or frame.*.is_main.?(frame) == 0 or error_code == c.ERR_ABORTED) return;
+    if (frame == null) return;
+    // W9d③ 3 차 검증 MED-A3-1: 하위 프레임의 이동이 문서 없이 끝났다(204·다운로드·오류·막힘 — 끊김 포함) — 막기 쪽의 진행 중 기록만 놓는다.
+    if (frame.*.is_main.?(frame) == 0) return @import("blocking.zig").subframeEnded(browser, frame, failed_url, @intCast(error_code));
+    // W9d③ 2 차 검증 LOW-A2-2: 끊긴 이동(204·다운로드·멈춤·새 이동에 밀림)도 막기 쪽에는 알린다 — 엄격의 경계 넘기 셈이 그 이동에 묶여 있다.
+    if (error_code == c.ERR_ABORTED) return @import("blocking.zig").loadAborted(browser, failed_url);
     const id = browserId(browser) orelse return;
     permissions.cancelMedia(id);
     // 오류 페이지로 문서가 바뀌었다 — `on_load_start` 가 없으니 툴팁 기억도 여기서 비운다(W6b 적대 검증 — 연결이 거부된 링크
@@ -267,13 +275,16 @@ pub fn onLoadError(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, fr
     @import("datalist.zig").reset(id); // W6m①: 같은 까닭으로 제안 목록도
     // W9d① 적대 리뷰 5 회차 B1: 새 문서의 세대(옛 문서의 iframe 요청에 표시 — `error_page` 보다 먼저).
     @import("network.zig").documentStarted(id);
+    // W9d③: 막기 규칙이 막은 이동인가 — 실패 주소의 해시로(탭 길 -20·서비스 워커 길 -2 모두, §6.3). 진행 중 이동도 지운다.
+    const blocked_rule = @import("blocking.zig").loadError(browser, failed_url);
     // W9c①: 콘솔의 문서 경계 — maru 에 알리고(`error_page`) 떠난 출처를 기억한다.
-    @import("console.zig").errorPage(id);
+    @import("console.zig").errorPage(id, @intCast(error_code), blocked_rule);
 }
 
 /// 렌더러가 죽었다 — 그 페이지의 JS 대화상자는 답할 곳이 없다(CEF 가 상태 비우기를 부르지 않을 수 있다 — 적대 검증). 콜백을
 /// 놓고 maru 에 알린다(떠 있는 sheet 를 닫게).
 pub fn rendererGone(id: BrowserId) void {
+    @import("blocking.zig").dialogsDropped(id);
     while (table.takeFor(id, .js)) |pending| {
         object.release(@as([*c]c.cef_jsdialog_callback_t, @ptrCast(@alignCast(pending.callback))));
         browsers.state.writer.send(.{ .dialog_closed = .{ .browser = pending.browser, .request = pending.request } }) catch {};
@@ -368,6 +379,7 @@ pub fn handle(msg: Message) bool {
             };
             // 떠나기 확인에 머무르기 — 이동이 취소됐다. 그 이동이 남긴 「새 문서에서 풀기」 표시를 지운다.
             if (!value.accept) clearReset(value.browser);
+            @import("blocking.zig").dialogAnswered(value.browser, value.request, value.accept); // W9d③ D2 토큰의 멈춤을 푼다
             const callback: [*c]c.cef_jsdialog_callback_t = @ptrCast(@alignCast(pending.callback));
             var text = std.mem.zeroes(c.cef_string_t);
             library.setString(browsers.state.api, &text, value.text);

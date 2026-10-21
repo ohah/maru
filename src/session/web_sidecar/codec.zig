@@ -85,7 +85,8 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try cursor.writeByte(@intFromBool(value.hidden));
             try writeUrl(&cursor, value.url);
         },
-        .destroy_browser, .close_asking, .new_tab_credit, .browser_created, .browser_closed, .page_started, .page_close_kept, .main_frame_navigating, .error_page => |browser| try writeBrowser(&cursor, browser),
+        .destroy_browser, .close_asking, .new_tab_credit, .browser_created, .browser_closed, .page_started, .page_close_kept, .main_frame_navigating => |browser| try writeBrowser(&cursor, browser),
+        .error_page => |value| try net_fields.writeErrorPage(&cursor, value), // W9d③: 오류 번호·막은 규칙
         .console_message => |value| try fields.writeConsoleMessage(&cursor, value),
         .net_watch => |value| try net_fields.writeWatch(&cursor, value),
         .net_begin => |value| try net_fields.writeBegin(&cursor, value),
@@ -97,6 +98,9 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .net_body_data => |value| try net_fields.writeBodyData(&cursor, value),
         .net_body_end => |value| try net_fields.writeBodyEnd(&cursor, value),
         .net_record_state => |value| try net_fields.writeRecordState(&cursor, value),
+        .net_block => |value| try net_fields.writeBlock(&cursor, value),
+        .net_block_state => |value| try net_fields.writeBlockState(&cursor, value),
+        .net_block_hits => |value| try net_fields.writeBlockHits(&cursor, value),
         .resize => |value| {
             try writeBrowser(&cursor, value.browser);
             try writeSize(&cursor, value.size);
@@ -108,6 +112,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .navigate => |value| {
             try writeBrowser(&cursor, value.browser);
             try writeUrl(&cursor, value.url);
+            try cursor.writeByte(@intFromBool(value.user)); // W9d③ D2
         },
         .shutdown => {},
         .frame_channel => |value| {
@@ -117,6 +122,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .nav_action => |value| {
             try writeBrowser(&cursor, value.browser);
             try cursor.writeByte(@backingInt(value.action));
+            try cursor.writeByte(@intFromBool(value.user)); // W9d③ D2
         },
         .mouse => |value| {
             if (!fields.validClickCount(value)) return error.InvalidClickCount;
@@ -460,7 +466,7 @@ pub fn decodeExact(frame: []const u8) Error!Message {
         .page_started => .{ .page_started = try readBrowser(&cursor) },
         .page_close_kept => .{ .page_close_kept = try readBrowser(&cursor) },
         .main_frame_navigating => .{ .main_frame_navigating = try readBrowser(&cursor) },
-        .error_page => .{ .error_page = try readBrowser(&cursor) },
+        .error_page => .{ .error_page = try net_fields.readErrorPage(&cursor) },
         .console_message => .{ .console_message = try fields.readConsoleMessage(&cursor) },
         .net_watch => .{ .net_watch = try net_fields.readWatch(&cursor) },
         .net_begin => .{ .net_begin = try net_fields.readBegin(&cursor) },
@@ -472,10 +478,13 @@ pub fn decodeExact(frame: []const u8) Error!Message {
         .net_body_data => .{ .net_body_data = try net_fields.readBodyData(&cursor) },
         .net_body_end => .{ .net_body_end = try net_fields.readBodyEnd(&cursor) },
         .net_record_state => .{ .net_record_state = try net_fields.readRecordState(&cursor) },
+        .net_block => .{ .net_block = try net_fields.readBlock(&cursor) },
+        .net_block_state => .{ .net_block_state = try net_fields.readBlockState(&cursor) },
+        .net_block_hits => .{ .net_block_hits = try net_fields.readBlockHits(&cursor) },
         .resize => .{ .resize = .{ .browser = try readBrowser(&cursor), .size = try readSize(&cursor) } },
         .set_hidden => .{ .set_hidden = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
         .set_focus => .{ .set_focus = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
-        .navigate => .{ .navigate = .{ .browser = try readBrowser(&cursor), .url = try readUrl(&cursor) } },
+        .navigate => .{ .navigate = .{ .browser = try readBrowser(&cursor), .url = try readUrl(&cursor), .user = try readBool(&cursor) } },
         .shutdown => .shutdown,
         .frame_channel => blk: {
             const service = try readService(&cursor);
@@ -483,10 +492,13 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             @memcpy(&token, try cursor.readBytes(16));
             break :blk .{ .frame_channel = .{ .service = service, .token = token } };
         },
-        .nav_action => .{ .nav_action = .{
-            .browser = try readBrowser(&cursor),
-            .action = std.enums.fromInt(NavActionKind, try cursor.readByte()) orelse return error.UnknownNavAction,
-        } },
+        .nav_action => .{
+            .nav_action = .{
+                .browser = try readBrowser(&cursor),
+                .action = std.enums.fromInt(NavActionKind, try cursor.readByte()) orelse return error.UnknownNavAction,
+                .user = try readBool(&cursor), // W9d③ D2
+            },
+        },
         .mouse => blk: {
             const mouse: message_mod.Mouse = .{
                 .browser = try readBrowser(&cursor),
@@ -896,7 +908,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  22, 0, // v22, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  23, 0, // v23, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -982,9 +994,9 @@ test "decoder rejects malformed header, trailing bytes and truncation" {
     std.mem.writeInt(u16, bad[8..10], version + 1, .big);
     try std.testing.expectError(error.UnsupportedVersion, decodeExact(bad[0..len]));
     bad = encoded;
-    bad[10] = 77; // 정의되지 않은 tag(sidecar → maru 는 W9d② 의 `net_record_state` 76 까지)
+    bad[10] = 79; // 정의되지 않은 tag(sidecar → maru 는 W9d③ 의 `net_block_hits` 78 까지)
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
-    bad[10] = 136; // 둘째 구간(maru → sidecar)도 W9d② 의 `net_record` 135 뒤는 비었다
+    bad[10] = 137; // 둘째 구간(maru → sidecar)도 W9d③ 의 `net_block` 136 뒤는 비었다
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
     try std.testing.expectError(error.IncompleteFrame, decodeExact(encoded[0 .. len - 1]));
     encoded[len] = 0;
@@ -1118,7 +1130,8 @@ test "url and text exactly at the cap decode, one byte of invalid UTF-8 or a con
 
     std.mem.writeInt(u32, body[8..12], max_url_bytes, .big);
     @memset(body[12..][0..max_url_bytes], 'a');
-    try std.testing.expectEqual(@as(usize, max_url_bytes), (try decodeExact(handFrame(&frame, .navigate, body[0 .. 12 + max_url_bytes]))).navigate.url.len);
+    body[12 + max_url_bytes] = 0; // W9d③: navigate 의 `user`
+    try std.testing.expectEqual(@as(usize, max_url_bytes), (try decodeExact(handFrame(&frame, .navigate, body[0 .. 13 + max_url_bytes]))).navigate.url.len);
 
     std.mem.writeInt(u32, body[8..12], max_text_bytes, .big);
     @memset(body[12..][0..max_text_bytes], 'a');
@@ -1567,7 +1580,7 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .console_message = .{ .browser = 3, .level = .warn, .docs_back = 2, .dropped_errors = 2, .dropped_other = 1, .dropped_old = 5, .dropped_old_back = 2, .text = "a\tb\n한" } },
         .{ .console_message = .{ .browser = 3, .dropped_other = 4, .has_entry = false } },
         .{ .console_message = .{ .browser = 3, .dropped_old = 6, .dropped_old_back = 1, .has_entry = false } },
-        .{ .error_page = 3 },
+        .{ .error_page = .{ .browser = 3, .error_code = -105 } },
         .{ .mouse = .{ .browser = 3, .kind = .down, .button = .middle, .point = .{ .x = 5, .y = -6 }, .modifiers = .{ .command = true }, .click_count = 1 } },
         .{ .wheel = .{ .browser = 3, .point = .{ .x = 5, .y = 6 }, .delta_x = 7, .delta_y = -8 } },
         .{ .key = .{ .browser = 3, .kind = .char, .character = 'a', .unmodified_character = 'a' } },
@@ -2019,7 +2032,7 @@ test "W9c①: console_message round-trips level, docs_back, the drop counts (old
     try std.testing.expectEqual(@as(u8, 255), (try roundTrip(.{ .console_message = .{ .browser = 7, .docs_back = 255, .text = "x" } })).console_message.docs_back);
     inline for (.{ message_mod.ConsoleLevel.log, .info, .warn, .debug }) |level|
         try std.testing.expectEqual(level, (try roundTrip(.{ .console_message = .{ .browser = 7, .level = level, .text = "" } })).console_message.level);
-    try std.testing.expectEqual(@as(u64, 9), (try roundTrip(.{ .error_page = 9 })).error_page);
+    try std.testing.expectEqual(@as(u64, 9), (try roundTrip(.{ .error_page = .{ .browser = 9, .error_code = -105 } })).error_page.browser);
     try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.console_message.direction());
     try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.error_page.direction());
 }
@@ -2097,7 +2110,7 @@ test "W9c①: a drop-only console_message carries counts only — closed fields 
     bad = buf;
     bad[body + 9] = 1;
     try std.testing.expectError(error.InvalidConsole, decodeExact(bad[0..only_len]));
-    len = try encode(.{ .error_page = 1 }, &buf);
+    len = try encode(.{ .error_page = .{ .browser = 1, .error_code = -105 } }, &buf);
     std.mem.writeInt(u64, buf[body..][0..8], 0, .big);
     try std.testing.expectError(error.InvalidBrowserId, decodeExact(buf[0..len]));
 }
@@ -2109,7 +2122,7 @@ test "W9c① 적대 리뷰 1 회차: 콘솔 프레임을 무작위로 망가뜨�
         .{ .console_message = .{ .browser = 3, .level = .warn, .docs_back = 3, .dropped_errors = 2, .dropped_other = 1, .dropped_old = 7, .dropped_old_back = 3, .text = "a\tb\n한 \xe2\x80\xae" } },
         .{ .console_message = .{ .browser = 3, .dropped_other = 4, .has_entry = false } },
         .{ .console_message = .{ .browser = 3, .dropped_old = 4, .dropped_old_back = 1, .has_entry = false } },
-        .{ .error_page = 3 },
+        .{ .error_page = .{ .browser = 3, .error_code = -105 } },
     };
     var buf: [max_frame_bytes]u8 = undefined;
     var ok: usize = 0;
@@ -2353,13 +2366,13 @@ test "W9d②: 본문 기록 넷이 왕복하고 방향이 맞다 — net_begin �
     inline for (.{ Tag.net_body_data, Tag.net_body_end, Tag.net_record_state }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
 }
 
-test "W9d②: 본문 frame 의 바이트 배치 골든(버전 22) — net_record·net_body_end·net_body_data·net_record_state" {
+test "W9d②: 본문 frame 의 바이트 배치 골든(버전 23 — W9d③ 이 올렸다, 본문 frame 의 배치는 22 와 같다) — net_record·net_body_end·net_body_data·net_record_state" {
     var buf: [128]u8 = undefined;
     var len = try encode(.{ .net_record = .{ .browser = 0x0102, .on = true, .session = 0x0a0b0c0d } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 22, 135, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0x0a, 0x0b, 0x0c, 0x0d }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 23, 135, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0x0a, 0x0b, 0x0c, 0x0d }, buf[0..len]);
     len = try encode(.{ .net_body_end = .{ .browser = 1, .session = 2, .request = 3, .state = .captured, .flags = .{ .redecoded = true, .credentialed = true }, .size = 0x0100, .decoded = 0x0200 } }, &buf);
     try std.testing.expectEqualSlices(u8, &.{
-        0, 0, 0, 41, 'M', 'W', 'E', 'B', 0, 22, 75, // 머리
+        0, 0, 0, 41, 'M', 'W', 'E', 'B', 0, 23, 75, // 머리
         0, 0, 0, 0, 0, 0, 0, 1, // browser
         0, 0, 0, 2, // session
         0, 0, 0, 0, 0, 0, 0, 3, // request
@@ -2368,9 +2381,9 @@ test "W9d②: 본문 frame 의 바이트 배치 골든(버전 22) — net_record
         0, 0, 0, 0, 0, 0, 2, 0, // decoded
     }, buf[0..len]);
     len = try encode(.{ .net_body_data = .{ .browser = 1, .session = 2, .request = 3, .offset = 4, .bytes = "hi" } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 35, 'M', 'W', 'E', 'B', 0, 22, 74, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 4, 0, 2, 'h', 'i' }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 35, 'M', 'W', 'E', 'B', 0, 23, 74, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 4, 0, 2, 'h', 'i' }, buf[0..len]);
     len = try encode(.{ .net_record_state = .{ .browser = 1, .session = 2, .status = .failed } }, &buf);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 22, 76, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3 }, buf[0..len]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 23, 76, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3 }, buf[0..len]);
 }
 
 test "W9d②: 본문의 닫힌 칸은 양쪽에서 거절한다 — 세션·요청 0, 빈·큰 조각, 본문 상한 넘는 끝, 잡지 않은 본문의 크기·글 표시, 켬과 세션 어긋남" {
@@ -2467,6 +2480,218 @@ test "W9d②: 본문 frame 을 무작위로 망가뜨려도 풀기는 무너지�
             .net_body_end => |v| try net_fields_mod.checkBodyEnd(v),
             .net_record_state => |v| try net_fields_mod.checkRecordState(v),
             .net_begin => |v| try net_fields_mod.checkBegin(v),
+            else => {},
+        }
+    }
+    try std.testing.expect(ok > 0);
+}
+
+// ── 요청 막기(W9d③) ─────────────────────────────────────────────────────────────────────────────────────
+// 시험이 증명하는 것: 막기 셋(`net_block`·`net_block_state`·`net_block_hits`)과 바뀐 칸(`net_end` 의 막기 표시·규칙 번호, `error_page` 의 오류 번호·
+// 막은 규칙, `navigate`·`nav_action` 의 `user`)이 왕복하고 방향이 맞다, 바이트 배치가 골든과 같다(버전 23), 닫힌 칸(규칙 수·번호 0·중복·종류
+// 마스크·호스트·정규형이 아닌 패턴·엄격 사이트, 빈 차이, 표시의 짝)은 양쪽에서 거절한다, 가장 큰 막기 frame(규칙 32 개·사이트·패턴 상한)이
+// frame 상한 안에서 왕복한다, 무작위로 망가뜨려도 풀린 값은 규칙을 지킨다. 브라우저 탭에서 중요한 이유 — 막기 규칙이 사용자 탭의 요청을 막는다
+// (maru 와 sidecar 가 같은 규칙을 봐야 하고, sidecar 가 보낸 수는 공격 입력으로 다룬다).
+
+fn testBlock(count: u8) message_mod.NetBlock {
+    var v: message_mod.NetBlock = .{ .browser = 7, .generation = 3, .strict_site = "a.test", .count = count };
+    const patterns = [_][]const u8{ "https://a.test/api", "*://*.track.test/*", "http://127.0.0.1:5555/blk/*" };
+    for (v.rules[0..count], 0..) |*r, i| r.* = .{ .id = @intCast(i + 1), .types = if (i % 2 == 0) 0 else 1 << 4, .site = "a.test", .pattern = patterns[i % patterns.len] };
+    return v;
+}
+
+test "W9d③: 막기 셋과 바뀐 칸이 왕복하고 방향이 맞다 — 규칙·엄격 사이트·상태·수·끝의 막기 표시·오류 페이지·사용자 이동" {
+    const b = (try roundTrip(.{ .net_block = testBlock(3) })).net_block;
+    try std.testing.expectEqual(@as(u8, 3), b.count);
+    try std.testing.expectEqual(@as(u32, 3), b.generation);
+    try std.testing.expectEqualStrings("a.test", b.strict_site);
+    try std.testing.expectEqualStrings("*://*.track.test/*", b.rules[1].pattern);
+    try std.testing.expectEqual(@as(u32, 1 << 4), b.rules[1].types);
+    const off = (try roundTrip(.{ .net_block = .{ .browser = 7, .generation = 4 } })).net_block; // 모두 지움·엄격 끔
+    try std.testing.expect(off.count == 0 and off.strict_site.len == 0);
+    inline for (@import("type_info_fields").fields(message_mod.NetStrictState)) |f| {
+        const st: message_mod.NetStrictState = @fromBackingInt(@intCast(f.value));
+        try std.testing.expectEqual(st, (try roundTrip(.{ .net_block_state = .{ .browser = 7, .generation = 9, .ok = true, .strict = st } })).net_block_state.strict);
+    }
+    var hits: message_mod.NetBlockHits = .{ .browser = 7, .unrecorded = 2, .skipped_unknown_page = 1, .sw_shared_with_unruled_tab = true, .count = 2 };
+    hits.entries[0] = .{ .rule_id = 1, .hits = 5 };
+    hits.entries[1] = .{ .rule_id = 9, .sw_hits = 1, .sw_not_applied = std.math.maxInt(u32) };
+    const h = (try roundTrip(.{ .net_block_hits = hits })).net_block_hits;
+    try std.testing.expect(h.sw_shared_with_unruled_tab and h.unrecorded == 2 and h.skipped_unknown_page == 1);
+    try std.testing.expectEqual(@as(u32, std.math.maxInt(u32)), h.entries[1].sw_not_applied);
+    const e = (try roundTrip(.{ .net_end = .{ .browser = 7, .request = 1, .outcome = .failed, .error_code = -20, .flags = .{ .blocked = true }, .rule_id = 4 } })).net_end;
+    try std.testing.expect(e.flags.blocked and e.rule_id == 4);
+    const sw = (try roundTrip(.{ .net_end = .{ .browser = 7, .request = 1, .flags = .{ .sw_not_applied = true }, .rule_id = 2 } })).net_end;
+    try std.testing.expect(sw.flags.sw_not_applied and !sw.flags.blocked);
+    const ep = (try roundTrip(.{ .error_page = .{ .browser = 7, .error_code = -2, .blocked_rule = 6 } })).error_page;
+    try std.testing.expect(ep.error_code == -2 and ep.blocked_rule == 6);
+    try std.testing.expect((try roundTrip(.{ .navigate = .{ .browser = 7, .url = "https://a.test/", .user = true } })).navigate.user);
+    try std.testing.expect(!(try roundTrip(.{ .navigate = .{ .browser = 7, .url = "https://a.test/" } })).navigate.user);
+    try std.testing.expect((try roundTrip(.{ .nav_action = .{ .browser = 7, .action = .back, .user = true } })).nav_action.user);
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.net_block.direction());
+    inline for (.{ Tag.net_block_state, Tag.net_block_hits }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
+}
+
+test "W9d③: 막기 frame 의 바이트 배치 골든(버전 23) — net_block·net_block_state·net_block_hits·net_end·error_page·navigate·nav_action" {
+    var buf: [256]u8 = undefined;
+    var v: message_mod.NetBlock = .{ .browser = 1, .generation = 0x0102, .strict_site = "a.t", .count = 1 };
+    v.rules[0] = .{ .id = 5, .types = 0x10, .site = "a.t", .pattern = "https://a.t/x" };
+    var len = try encode(.{ .net_block = v }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{
+        0, 0, 0, 51, 'M', 'W', 'E', 'B', 0, 23, 136, // 머리
+        0, 0, 0, 0, 0, 0, 0, 1, // browser
+        0, 0, 1, 2, // generation
+        3, 'a', '.', 't', // 엄격 사이트
+        1, // 규칙 수
+        0, 0, 0, 5, // 번호
+        0, 0, 0, 0x10, // 종류 마스크(image)
+        3, 'a', '.', 't', // 사이트
+        0, 13, 'h', 't', 't', 'p', 's', ':', '/', '/', 'a', '.', 't', '/', 'x', // 패턴
+    }, buf[0..len]);
+    len = try encode(.{ .net_block_state = .{ .browser = 1, .generation = 2, .ok = true, .strict = .failed } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 21, 'M', 'W', 'E', 'B', 0, 23, 77, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1, 2 }, buf[0..len]);
+    var hits: message_mod.NetBlockHits = .{ .browser = 1, .generation = 9, .unrecorded = 2, .skipped_unknown_page = 3, .strict_redirect_missed = 4, .strict_redirect_bypassed = 5, .sw_shared_with_unruled_tab = true, .count = 1 };
+    hits.entries[0] = .{ .rule_id = 5, .hits = 6, .sw_hits = 7, .sw_not_applied = 8 };
+    len = try encode(.{ .net_block_hits = hits }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{
+        0, 0, 0, 53, 'M', 'W', 'E', 'B', 0, 23, 78, // 머리
+        0, 0, 0, 0, 0, 0, 0, 1, // browser
+        0, 0, 0, 9, // 세대
+        0, 0, 0, 2, 0, 0, 0, 3, // 기록 없이 막음·페이지 모름
+        0, 0, 0, 4, 0, 0, 0, 5, // 엄격 리다이렉트 — 들어와 덮지 못함·나가며 건너뜀
+        1, 1, // 나눔·항목 수
+        0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0, 7, 0, 0, 0, 8, // 규칙 5 의 수
+    }, buf[0..len]);
+    len = try encode(.{ .net_end = .{ .browser = 1, .request = 2, .outcome = .failed, .error_code = -20, .received = 0, .time_ms = 3, .flags = .{ .blocked = true }, .rule_id = 5 } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{
+        0, 0, 0, 49, 'M', 'W', 'E', 'B', 0, 23, 72, // 머리
+        0, 0, 0, 0, 0, 0, 0, 1, // browser
+        0, 0, 0, 0, 0, 0, 0, 2, // request
+        2, // failed
+        0xff, 0xff, 0xff, 0xec, // -20
+        0, 0, 0, 0, 0, 0, 0, 0, // received
+        0, 0, 0, 0, 0, 0, 0, 3, // time
+        1, // 표시(blocked)
+        0, 0, 0, 5, // 규칙
+    }, buf[0..len]);
+    len = try encode(.{ .error_page = .{ .browser = 1, .error_code = -20, .blocked_rule = 5 } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 23, 'M', 'W', 'E', 'B', 0, 23, 68, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0xec, 0, 0, 0, 5 }, buf[0..len]);
+    len = try encode(.{ .navigate = .{ .browser = 1, .url = "a:", .user = true } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 22, 'M', 'W', 'E', 'B', 0, 23, 6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 'a', ':', 1 }, buf[0..len]);
+    len = try encode(.{ .nav_action = .{ .browser = 1, .action = .reload, .user = true } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 17, 'M', 'W', 'E', 'B', 0, 23, 9, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1 }, buf[0..len]);
+}
+
+test "W9d③: 막기의 닫힌 칸은 양쪽에서 거절한다 — 규칙 33 개·번호 0·중복·모르는 종류 비트·서비스 워커 종류·대문자 사이트·풀리지 않는 패턴·정규형이 아닌 패턴·엄격 사이트, 빈 차이, 표시의 짝, 양수 오류" {
+    var buf: [max_frame_bytes]u8 = undefined;
+    _ = try encode(.{ .net_block = testBlock(3) }, &buf);
+    var bad_blocks: [9]message_mod.NetBlock = undefined;
+    for (&bad_blocks) |*b| b.* = testBlock(3);
+    bad_blocks[0].rules[1].id = 0;
+    bad_blocks[1].rules[2].id = 1;
+    bad_blocks[2].rules[0].types = 1 << 21;
+    bad_blocks[3].rules[0].types = 1 << 15; // service_worker
+    bad_blocks[4].rules[0].site = "A.test";
+    bad_blocks[5].rules[0].pattern = "ws://a.test/";
+    bad_blocks[6].rules[0].pattern = "HTTPS://a.test/api"; // 정규형이 아니다
+    bad_blocks[7].strict_site = "a.test/x";
+    bad_blocks[8].rules[0].site = "";
+    for (bad_blocks) |b| try std.testing.expect(std.meta.isError(encode(.{ .net_block = b }, &buf)));
+    var many = testBlock(3);
+    many.count = 33;
+    try std.testing.expect(std.meta.isError(encode(.{ .net_block = many }, &buf)));
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_block_state = .{ .browser = 1, .generation = 1, .ok = false, .strict = .on } }, &buf));
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_block_hits = .{ .browser = 1 } }, &buf)); // 빈 차이
+    var zero_entry: message_mod.NetBlockHits = .{ .browser = 1, .count = 1 };
+    zero_entry.entries[0] = .{ .rule_id = 1 };
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_block_hits = zero_entry }, &buf));
+    zero_entry.entries[0] = .{ .rule_id = 0, .hits = 1 };
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_block_hits = zero_entry }, &buf));
+    var dup: message_mod.NetBlockHits = .{ .browser = 1, .count = 2 };
+    dup.entries[0] = .{ .rule_id = 3, .hits = 1 };
+    dup.entries[1] = .{ .rule_id = 3, .hits = 1 };
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_block_hits = dup }, &buf));
+    const bad_ends = [_]message_mod.NetEnd{
+        .{ .browser = 1, .request = 2, .outcome = .failed, .error_code = -20, .flags = .{ .blocked = true } }, // 규칙 없음
+        .{ .browser = 1, .request = 2, .outcome = .failed, .error_code = -20, .rule_id = 3 }, // 표시 없음
+        .{ .browser = 1, .request = 2, .outcome = .success, .flags = .{ .blocked = true }, .rule_id = 3 }, // 막힌 요청이 성공
+        .{ .browser = 1, .request = 2, .outcome = .failed, .error_code = -20, .flags = .{ .blocked = true, .sw_not_applied = true }, .rule_id = 3 },
+        .{ .browser = 1, .request = 2, .flags = .{ ._reserved = 1 } },
+    };
+    for (bad_ends) |e| try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_end = e }, &buf));
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .error_page = .{ .browser = 1, .error_code = 0 } }, &buf));
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .error_page = .{ .browser = 1, .error_code = 2 } }, &buf));
+    // decode 쪽: 모르는 엄격 상태, bool 아닌 user, 패턴 길이 상한.
+    const body = prefix_len + common_len;
+    var len = try encode(.{ .net_block_state = .{ .browser = 1, .generation = 1, .ok = true } }, &buf);
+    var b = buf;
+    b[body + 13] = 3;
+    try std.testing.expectError(error.InvalidNetwork, decodeExact(b[0..len]));
+    len = try encode(.{ .navigate = .{ .browser = 1, .url = "https://a.test/" } }, &buf);
+    b = buf;
+    b[len - 1] = 2;
+    try std.testing.expect(std.meta.isError(decodeExact(b[0..len])));
+    len = try encode(.{ .nav_action = .{ .browser = 1, .action = .back } }, &buf);
+    b = buf;
+    b[len - 1] = 7;
+    try std.testing.expect(std.meta.isError(decodeExact(b[0..len])));
+}
+
+test "W9d③: 가장 큰 net_block(규칙 32 개 — 사이트 253·패턴 512 바이트·엄격 사이트 253)도 frame 상한 안에서 왕복한다" {
+    var v: message_mod.NetBlock = .{ .browser = 1, .generation = std.math.maxInt(u32), .count = message_mod.max_net_block_rules };
+    const host = array_repeat.repeat("h", message_mod.max_net_host_bytes);
+    const pattern = "https://a.test/" ++ array_repeat.repeat("p", message_mod.max_net_block_pattern_bytes - 15);
+    v.strict_site = host;
+    for (&v.rules, 0..) |*r, i| r.* = .{ .id = @intCast(i + 1), .types = @import("net_block.zig").types_mask_valid, .site = host, .pattern = pattern };
+    const got = (try roundTrip(.{ .net_block = v })).net_block;
+    try std.testing.expectEqual(@as(u8, message_mod.max_net_block_rules), got.count);
+    try std.testing.expectEqual(message_mod.max_net_block_pattern_bytes, got.rules[31].pattern.len);
+    var buf: [max_frame_bytes]u8 = undefined;
+    const len = try encode(.{ .net_block = v }, &buf);
+    try std.testing.expect(len > 24 * 1024 and len <= max_frame_bytes); // 계획 §8 의 어림(약 25 KiB) — 실제 25 110 바이트(`stream.zig` 의 v20b R14f 가 수를 고정한다)
+}
+
+test "W9d③: 막기 frame 을 무작위로 망가뜨려도 풀기는 무너지지 않고 풀린 값은 닫힌 칸 규칙을 지킨다" {
+    var prng = std.Random.DefaultPrng.init(0x9d3);
+    const r = prng.random();
+    var hits: message_mod.NetBlockHits = .{ .browser = 3, .unrecorded = 1, .count = 1 };
+    hits.entries[0] = .{ .rule_id = 2, .hits = 3 };
+    const seeds = [_]Message{
+        .{ .net_block = testBlock(3) },
+        .{ .net_block_state = .{ .browser = 3, .generation = 2, .ok = true, .strict = .on } },
+        .{ .net_block_hits = hits },
+        .{ .net_end = .{ .browser = 3, .request = 9, .outcome = .failed, .error_code = -20, .flags = .{ .blocked = true }, .rule_id = 2 } },
+        .{ .error_page = .{ .browser = 3, .error_code = -20, .blocked_rule = 2 } },
+        .{ .navigate = .{ .browser = 3, .url = "https://a.test/", .user = true } },
+        .{ .nav_action = .{ .browser = 3, .action = .forward, .user = true } },
+    };
+    var buf: [max_frame_bytes]u8 = undefined;
+    var ok: usize = 0;
+    for (0..200_000) |i| {
+        const seed = seeds[i % seeds.len];
+        const len = try encode(seed, &buf);
+        var frame: [512]u8 = undefined;
+        @memcpy(frame[0..len], buf[0..len]);
+        var n = len;
+        for (0..r.intRangeAtMost(usize, 1, 6)) |_| {
+            switch (r.intRangeLessThan(u8, 0, 3)) {
+                0 => frame[r.intRangeLessThan(usize, 0, n)] = r.int(u8),
+                1 => n = r.intRangeAtMost(usize, 1, n),
+                else => if (n < frame.len) {
+                    frame[n] = r.int(u8);
+                    n += 1;
+                },
+            }
+        }
+        if (r.boolean() and n >= 4) std.mem.writeInt(u32, frame[0..4], @intCast(n - 4), .big);
+        const m = decodeExact(frame[0..n]) catch continue;
+        ok += 1;
+        switch (m) {
+            .net_block => |v| try net_fields_mod.checkBlock(v),
+            .net_block_state => |v| try net_fields_mod.checkBlockState(v),
+            .net_block_hits => |v| try net_fields_mod.checkBlockHits(v),
+            .net_end => |v| try net_fields_mod.checkEnd(v),
+            .error_page => |v| try net_fields_mod.checkErrorPage(v),
             else => {},
         }
     }

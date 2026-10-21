@@ -186,6 +186,7 @@ pub fn onBeforePopupAborted(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef
 /// 짝이 없는 팝업은 닫는다(쥘 번호가 없다 — 이어 받지 않은 브라우저를 남기지 않는다).
 pub fn onAfterCreated(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef_browser_t) callconv(.c) void {
     if (browser == null) return;
+    @import("blocking.zig").addBrowser(browser); // W9d③: 서비스 워커 길이 나열하는 목록(입양 전 팝업 포함 — §12 P1-4)
     if (browser.*.is_popup.?(browser) == 0 or browsers.state.registry.byCefId(browser.*.get_identifier.?(browser)) != null) {
         object.releaseArg(browser);
         return;

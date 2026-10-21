@@ -206,6 +206,11 @@ pub const Track = struct {
     site: [protocol.message.max_net_host_bytes]u8 = undefined,
     site_len: u8 = 0,
 
+    /// W9d③: 막기의 표시(끝 — `net_end.flags`·`rule_id` 에 싣는다). 대상마다 규칙 번호(0 = 그 대상에는 표시 없음): 탭 길은 대상 하나, 서비스
+    /// 워커 길은 맞는 규칙을 쥔 탭마다 제 규칙.
+    block_kind: BlockKind = .none,
+    block_rules: [max_targets]u32 = @splat(0),
+
     pub fn initiatorSlice(self: *const Track) []const u8 {
         return self.initiator[0..self.initiator_len];
     }
@@ -226,6 +231,9 @@ pub const Track = struct {
         return self.targets[0..self.target_count];
     }
 };
+
+/// W9d③: 요청 끝의 막기 표시 — 막았다·서비스 워커 길에서 맞았지만 규칙 없는 탭과 나눠 막지 않았다.
+pub const BlockKind = enum { none, blocked, sw_not_applied };
 
 /// `State.admitServiceWorker` 의 답 — 그 출처를 연 지켜보는 탭 수와 문을 지났는가.
 /// `cap` — 서비스 워커 몫이 차서 넘겼다(그 출처의 `max_sw_in_flight_per_origin` 이나 전체 `max_sw_in_flight` — 재검증 7 차 N12).

@@ -121,6 +121,8 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
         error.InvalidBodyBytes => "--max-bytes must be 1-65536",
         error.InvalidBodyOffset => "--offset must be 0-1048576 (a byte offset into the body)",
         error.OutWithOffset => "--out writes the whole body to the file — drop --offset (use --offset without --out to print one piece)",
+        error.InvalidBlockAction => "network-block needs exactly one of --add <pattern>, --remove <pattern>, --rule <n>, --clear, --list or --strict on|off",
+        error.InvalidBlockArgs => "network-block: --add/--remove take a pattern (scheme://host[:port]/path, * wildcards), --rule a rule number, --type goes with --add, --strict takes on or off; at most 32 patterns or rules",
     };
 }
 

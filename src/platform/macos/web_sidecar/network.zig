@@ -35,6 +35,7 @@ const browsers = @import("browsers.zig");
 const gate = @import("net_gate.zig");
 const net_body = @import("net_body.zig"); // W9d②: 기록하는 탭의 본문(맞추기 열쇠·끝)
 const body_table = @import("net_body_table.zig");
+const blocking = @import("blocking.zig"); // W9d③: 요청 막기 — 처리기 고르기에서 맞춘다
 
 const msg = protocol.message;
 const net_fields = protocol.net_fields;
@@ -47,6 +48,8 @@ var state: gate.State = .{};
 var queue: std.ArrayList(*Event) = .empty;
 
 var rrh: c.cef_resource_request_handler_t = undefined;
+/// W9d③: 막는 요청의 기록 처리기 — `rrh` 에 막는 자원 처리기 고르기를 더했다(막힌 요청도 W9d① 기록에 `blocked` 로 남는다).
+var rrh_block: c.cef_resource_request_handler_t = undefined;
 var ctx_handler: c.cef_request_context_handler_t = undefined;
 var shared_ctx: [*c]c.cef_request_context_t = null;
 var flush_task: c.cef_task_t = undefined;
@@ -91,6 +94,9 @@ pub fn init() void {
     rrh.on_resource_redirect = &onResourceRedirect;
     rrh.on_resource_response = &onResourceResponse;
     rrh.on_resource_load_complete = &onResourceLoadComplete;
+    blocking.init();
+    rrh_block = rrh;
+    rrh_block.get_resource_handler = &blocking.getBlockHandler;
     ctx_handler = object.zeroed(c.cef_request_context_handler_t);
     object.staticRefCounted(&ctx_handler.base);
     ctx_handler.get_resource_request_handler = &contextResourceRequestHandler;
@@ -132,6 +138,17 @@ pub fn watch(v: msg.NetWatch) void {
     doUnlock();
     // 재검증 8 차: 기록 중에 지켜보기만 꺼졌다 — 문이 그 탭에 기록을 붙이지 않으니 서비스 워커 본문은 그 때부터 잇지 않는다.
     if (!v.on) net_body.watchOff(v.browser);
+    // W9d③: 막기는 지켜보기 위에 선다 — 끄면 그 탭의 규칙을 버리고 엄격 모드를 끈다(계획 §2). 설정 `agent-network-full` 은 막기의 수에도
+    // 듣는다(3 차 검증 N-B3-d — 꺼진 동안의 서비스 워커 수는 세지 않는다).
+    blocking.setFull(v.browser, entry.cef_id, v.on and v.full);
+    if (!v.on) blocking.watchOff(v.browser);
+}
+
+/// W9d③: 그 탭을 지켜보는가(UI 스레드 — `blocking.apply` 가 규칙을 받을지 정한다).
+pub fn watching(browser: BrowserId) bool {
+    doLock();
+    defer doUnlock();
+    return state.watchOf(browser) != null;
 }
 
 /// 브라우저가 닫혔다.
@@ -233,6 +250,10 @@ pub fn resourceRequestHandler(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef
     defer object.releaseArg(frame);
     defer object.releaseArg(request);
     if (browser == null or request == null or is_download != 0) return null;
+    // W9d③: 막기 — 요청 번호·지켜보기·문보다 **먼저**(speculation prefetch·prerender 는 번호 0 으로 온다 — 실측 J-B11; 번호를 먼저 보면 막을
+    // 주소가 서버에 간다). 규칙이 없으면 원자 하나만 본다.
+    const block = blocking.tabSelect(browser, frame, request, is_navigation);
+    if (block.rule != 0) return blockedTab(browser, request, is_navigation, initiator, block);
     doLock();
     if (state.watching == 0) {
         doUnlock();
@@ -277,30 +298,95 @@ pub fn resourceRequestHandler(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef
     return &rrh;
 }
 
+/// W9d③: 탭 길에서 막는 요청 — 이미 적는 요청(리다이렉트의 다음 홉)이면 그 기록에 막음을 세우고, 아니면 문을 지나 적는다(막힌 요청도 목록에
+/// 보이게). 문을 지나지 못했거나(양동이·동시 요청) 번호가 0 이거나 지켜보는 탭이 아니면 기록 없이 막고 그 수를 센다(fail closed — 문이 막기를
+/// 끄지 않는다).
+fn blockedTab(browser: [*c]c.cef_browser_t, request: [*c]c.cef_request_t, is_navigation: c_int, initiator: [*c]const c.cef_string_t, block: blocking.TabHit) [*c]c.cef_resource_request_handler_t {
+    const rule = block.rule;
+    const cef_id = browser.*.get_identifier.?(browser);
+    const id = request.*.get_identifier.?(request);
+    postFlush(); // 막은 수를 보낸다
+    if (id == 0) {
+        blocking.noteUnrecorded(cef_id, block.generation);
+        return &blocking.block_only;
+    }
+    doLock();
+    if (state.find(id)) |t| {
+        t.block_kind = .blocked;
+        t.block_rules = @splat(0);
+        t.block_rules[0] = rule;
+        doUnlock();
+        return &rrh_block;
+    }
+    const w = state.watchByCef(cef_id) orelse {
+        doUnlock();
+        blocking.noteUnrecorded(cef_id, block.generation);
+        return &blocking.block_only;
+    };
+    const watched_browser = w.browser;
+    const t = state.startTab(w, id, nowUs()) orelse {
+        doUnlock();
+        if (net_body.any_recording.load(.acquire)) markDrop(&.{watched_browser}, request);
+        blocking.noteUnrecorded(cef_id, block.generation);
+        return &blocking.block_only;
+    };
+    t.navigation = is_navigation != 0;
+    t.block_kind = .blocked;
+    t.block_rules[0] = rule;
+    doUnlock();
+    var ib: [gate.max_origin_bytes]u8 = undefined;
+    const init_read = library.readPrefix(api(), initiator, gate.max_origin_bytes, &ib);
+    const init_text = if (init_read.truncated) ib[0..0] else init_read.text;
+    doLock();
+    if (state.find(id)) |tt| {
+        @memcpy(tt.initiator[0..init_text.len], init_text);
+        tt.initiator_len = init_text.len;
+    }
+    doUnlock();
+    return &rrh_block;
+}
+
 /// 공유 context 의 처리기 고르기 — 브라우저가 없는 요청(서비스·공유 워커가 대신 보냈다)만.
 fn contextResourceRequestHandler(_: [*c]c.cef_request_context_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request: [*c]c.cef_request_t, is_navigation: c_int, is_download: c_int, initiator: [*c]const c.cef_string_t, _: [*c]c_int) callconv(.c) [*c]c.cef_resource_request_handler_t {
     defer object.releaseArg(browser);
     defer object.releaseArg(frame);
     defer object.releaseArg(request);
     if (browser != null or request == null or is_download != 0) return null; // 브라우저가 있는 요청은 탭의 처리기가 본다
+    // W9d③: 서비스 워커 길의 막기(§6.2) — W9d① 의 문보다 앞. initiator 출처를 앞부분만 읽는다 — 비었거나 잘렸으면 모르는 출처라 막지 않는다.
+    var ib: [gate.max_origin_bytes]u8 = undefined;
+    var init_text: []const u8 = "";
+    var init_ok = false;
+    var sw: blocking.SwResult = .{};
+    if (blocking.anyRules()) {
+        const r = library.readPrefix(api(), initiator, gate.max_origin_bytes, &ib);
+        init_ok = true;
+        if (!r.truncated) init_text = r.text;
+        if (init_text.len != 0) sw = blocking.serviceWorkerSelect(request, init_text);
+        if (sw.outcome == .block or sw.outcome == .not_applied) postFlush();
+    }
+    const blocked = sw.outcome == .block;
     doLock();
     const any = state.watching != 0;
     doUnlock();
-    if (!any) return null; // 가장 흔한 길 — 지켜보는 탭이 없다
+    if (!any) return unrecordedServiceWorker(blocked, &sw); // 가장 흔한 길 — 지켜보는 탭이 없다
     const id = request.*.get_identifier.?(request);
-    if (id == 0) return null;
+    if (id == 0) return unrecordedServiceWorker(blocked, &sw);
     doLock();
     // 리다이렉트의 다음 홉은 문을 다시 지나지 않는다.
-    const known = state.find(id) != null;
+    if (state.find(id)) |t| {
+        if (sw.outcome == .block or sw.outcome == .not_applied) markServiceWorker(t, &sw);
+        doUnlock();
+        return if (blocked) &rrh_block else &rrh;
+    }
     doUnlock();
-    if (known) return &rrh;
     // 출처는 앞부분만(상한 있는) 바꾼다 — 지켜보는 출처가 아니면 양동이를 쓰지 않고 곧 null(적대 리뷰 2 회차 N5: 출처를 맞추기 전에 이 길의
     // 양동이를 썼더니 지켜보지 않는 출처의 쏟아짐이 지켜보는 탭의 요청을 세지도 않고 막았다). 지켜보는 출처의 거절은 붙일 탭들의 넘긴 수다.
-    var ib: [gate.max_origin_bytes]u8 = undefined;
-    const init_read = library.readPrefix(api(), initiator, gate.max_origin_bytes, &ib);
-    if (init_read.truncated) return null; // 잘린 출처로는 붙일 탭을 고르지 않는다(3 회차 T1 — 다른 출처와 앞부분이 같을 수 있다)
-    const init_text = init_read.text;
-    if (init_text.len == 0) return null;
+    if (!init_ok) {
+        const init_read = library.readPrefix(api(), initiator, gate.max_origin_bytes, &ib);
+        if (init_read.truncated) return null; // 잘린 출처로는 붙일 탭을 고르지 않는다(3 회차 T1 — 다른 출처와 앞부분이 같을 수 있다)
+        init_text = init_read.text;
+    }
+    if (init_text.len == 0) return unrecordedServiceWorker(blocked, &sw);
     doLock();
     var targets: [gate.max_targets]BrowserId = undefined;
     const gate_answer = state.startServiceWorker(init_text, id, nowUs(), &targets);
@@ -309,6 +395,7 @@ fn contextResourceRequestHandler(_: [*c]c.cef_request_context_handler_t, browser
         t.navigation = is_navigation != 0;
         @memcpy(t.initiator[0..init_text.len], init_text);
         t.initiator_len = init_text.len;
+        if (sw.outcome == .block or sw.outcome == .not_applied) markServiceWorker(t, &sw);
         break :blk true;
     } else false;
     doUnlock();
@@ -316,7 +403,21 @@ fn contextResourceRequestHandler(_: [*c]c.cef_request_context_handler_t, browser
         if (net_body.any_recording.load(.acquire)) markDropKind(targets[0..n], request, gate_answer.cap);
         postFlush();
     }
-    return if (admitted) &rrh else null;
+    if (admitted) return if (blocked) &rrh_block else &rrh;
+    return unrecordedServiceWorker(blocked, &sw);
+}
+
+/// W9d③: 서비스 워커 길의 답을 기록에 세운다(잠금 아래) — 붙일 탭마다 그 탭이 쥔 규칙(없으면 0 — 그 탭의 기록에는 표시가 없다).
+fn markServiceWorker(t: *gate.Track, sw: *const blocking.SwResult) void {
+    t.block_kind = if (sw.outcome == .block) .blocked else .sw_not_applied;
+    for (t.targets[0..t.target_count], 0..) |b, i| t.block_rules[i] = sw.ruleOf(b);
+}
+
+/// W9d③: 기록하지 않는 서비스 워커 요청 — 막으면 기록 없이 막고 막은 규칙을 쥔 탭마다 센다.
+fn unrecordedServiceWorker(blocked: bool, sw: *const blocking.SwResult) [*c]c.cef_resource_request_handler_t {
+    if (!blocked) return null;
+    blocking.noteUnrecordedTargets(sw);
+    return &blocking.block_only;
 }
 
 // ── W9d②: 문이 넘긴 요청의 표지(IO 스레드 → 보내는 task) ──────────────────────────────────────────────────
@@ -368,6 +469,9 @@ const Event = struct {
     t_io_us: i64 = 0,
     /// 상자에 넣은 시각(잠금 아래 — 모든 기록). 상자에 남은 가장 이른 것이 물 높이를 정한다(`cefWatermark`).
     queued_us: i64 = 0,
+    /// W9d③(end): 막기의 표시와 대상마다 규칙(`Track.block_kind`·`block_rules`).
+    block_kind: gate.BlockKind = .none,
+    block_rules: [gate.max_targets]u32 = @splat(0),
     /// 덮이는지 가를 호스트(begin — 요청 주소, redirect — 옮기기 전 주소, response — 지금 주소) — 온 주소에서 읽었다(3 회차 T1).
     host: []const u8 = "",
     /// 싣는 주소의 호스트(begin — 요청 주소, redirect — 옮겨 갈 주소 — wire 의 `host` 칸).
@@ -466,7 +570,7 @@ pub fn cefWatermark() i64 {
     return w;
 }
 
-fn postFlush() void {
+pub fn postFlush() void {
     if (flush_posted.swap(true, .acq_rel)) return;
     if (api().post_delayed_task(c.TID_UI, &flush_task, flush_delay_ms) == 0) flush_posted.store(false, .release);
 }
@@ -689,6 +793,8 @@ fn onResourceLoadComplete(_: [*c]c.cef_resource_request_handler_t, browser: [*c]
         e.request = id;
         e.targets = t.targets;
         e.target_count = t.target_count;
+        e.block_kind = t.block_kind;
+        e.block_rules = t.block_rules;
         state.untrack(t);
     }
     if (!begun) return;
@@ -753,6 +859,8 @@ fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
     for (lost_overflowed) |b| if (b != 0) net_body.cefLostAll(b);
     // W9d② 적대 리뷰 3 회차 P1: 꺼낸 때까지의 CEF 기록이 모두 표에 닿았다 — 제 기록을 기다리던 CDP 끝을 곧 정한다.
     net_body.cefFlushed(swapped_us - 1);
+    blocking.flushHits(); // W9d③: 막기의 수(차이)
+
 }
 
 /// W9d②: 보이는 규칙에 드는 칸(프레임 갈래·앞 문서·첫 사이트·initiator)의 해시 — 같은 주소의 두 후보가 이것이 다르면 짝을 잘못 지었을 때
@@ -846,7 +954,15 @@ fn send(e: *const Event, browser: BrowserId, index: usize) void {
         },
         .end => blk: {
             net_body.cefEnd(browser, e.request, e.outcome == .success, e.received); // W9d②: 짝이 없으면 시한 뒤 `unmatched`(실패·취소는 P5 의 갈림, 받은 바이트는 4 회차 N1)
-            break :blk .{ .net_end = .{ .browser = browser, .request = e.request, .outcome = e.outcome, .error_code = e.error_code, .received = e.received, .time_ms = e.time_ms } };
+            // W9d③: 막기의 표시 — 그 대상(탭)의 규칙이 있을 때만(막힌 요청은 실패로 끝났을 때만 — 표시가 권위다).
+            var flags: msg.NetEndFlags = .{};
+            const rule = e.block_rules[index];
+            if (rule != 0) switch (e.block_kind) {
+                .blocked => flags.blocked = e.outcome == .failed,
+                .sw_not_applied => flags.sw_not_applied = true,
+                .none => {},
+            };
+            break :blk .{ .net_end = .{ .browser = browser, .request = e.request, .outcome = e.outcome, .error_code = e.error_code, .received = e.received, .time_ms = e.time_ms, .flags = flags, .rule_id = if (flags.blocked or flags.sw_not_applied) rule else 0 } };
         },
     };
     browsers.state.writer.send(message) catch {};

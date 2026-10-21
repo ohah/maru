@@ -365,7 +365,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // v253: published location result kind is independent from pending requests.
 // v254: pending code action listings keep separate document version snapshots.
 // v255: copied code action edits own their response position encoding.
-pub const abi_version: u32 = 256;
+// v257: W9d③ maru_macos_control_browser_block_summary (Browser Grants request-blocking line).
+pub const abi_version: u32 = 257;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -19703,6 +19704,8 @@ pub const AppSession = struct {
                                     .controllable = web_ops.isBrowserTerm(term),
                                     // W9d②: 응답 본문 기록 중(탭 제목의 ◉ 와 같은 신호).
                                     .recording = web_ops.isOsrTerm(term) and web_osr.networkRecording(term.surface.id),
+                                    // W9d③: 요청 막기 규칙·엄격(탭 제목의 ⊘ 와 같은 신호).
+                                    .blocking = if (!web_ops.isOsrTerm(term)) null else if (web_osr.networkBlocking(term.surface.id)) |b| .{ .rules = @intCast(@min(b.rules, 255)), .strict = b.strict } else null,
                                 },
                             },
                         });
@@ -22512,6 +22515,7 @@ pub const AppSession = struct {
                     // running Term 탭 플래그 ● → **탭마다 그 Term 의 브랜드색**(위 `flag_kinds`).
                     agent_ops.recolorAgentFlagCellsPerTab(dl.cells, flag_kinds.items);
                     tab_ops.recolorRecordingMarkCells(dl.cells); // W9d② 기록 ◉ → 빨강(그 칸만)
+                    tab_ops.recolorBlockingMarkCells(dl.cells); // W9d③ 막기 ⊘ → 호박색(그 칸만)
                     self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
                     pane_ops.appendPaneTabTitles(self, &tab_title_batch, lr.leaf, pb, titles.items, editing_tab, pb.full);
 
@@ -23900,8 +23904,13 @@ pub const AppSession = struct {
             return std.fmt.allocPrint(allocator, "{s} {s}", .{ editor_dirty_marker, base });
         }
         // W9d②: 응답 본문을 기록하는 Chromium 탭 — 제목 앞에 ◉(셀로 그려 빨갛게 — `tab_ops.recolorRecordingMarkCells`).
-        if (term.kind == .web and web_osr.networkRecording(term.surface.id)) {
-            return std.fmt.allocPrint(allocator, "{s} {s}", .{ tab_ops.recording_mark_utf8, base });
+        // W9d③: 요청 막기 규칙·엄격이 있는 탭 — ⊘(호박색 — `recolorBlockingMarkCells`), 둘 다면 `◉⊘`.
+        if (term.kind == .web) {
+            const rec = web_osr.networkRecording(term.surface.id);
+            const blk = web_osr.networkBlocking(term.surface.id) != null;
+            if (rec and blk) return std.fmt.allocPrint(allocator, "{s}{s} {s}", .{ tab_ops.recording_mark_utf8, tab_ops.blocking_mark_utf8, base });
+            if (rec) return std.fmt.allocPrint(allocator, "{s} {s}", .{ tab_ops.recording_mark_utf8, base });
+            if (blk) return std.fmt.allocPrint(allocator, "{s} {s}", .{ tab_ops.blocking_mark_utf8, base });
         }
 
         return flagPrefixedLabel(allocator, base, term.agent_state == .running);
@@ -104977,4 +104986,24 @@ test "Codex resume identity: cached daemon rejoin reads explicit UUID from the c
     agent_ops.applyCodexHookReceipt(session, term, newer);
     agent_ops.pollAgentConsumer(session, term, false, true);
     try std.testing.expectEqualStrings(rb2_claude_id, agent_ops.resumableAgentOf(session, term).?.session_id);
+}
+
+// 이 테스트가 증명하는 것(W9d③): 요청 막기 표식 ⊘ 도 셀로 가르고(본문은 measured 에 그대로) 그 칸만 호박색이다 — 기록 ◉ 와 함께면 `◉⊘` 두 칸,
+// 본문 자리는 마커 칸 수만큼 밀린다(`tabTitleMarkerCols`), 고른 제목이 ⊘ 로 시작하면 표식이 아니다.
+test "W9d③: 막기 표식 ⊘ 는 탭 제목에서 마커로 갈리고(◉⊘ 는 두 칸) 셀에서 그 칸만 호박색이다 — 고른 제목의 ⊘ 는 표식이 아니다" {
+    try std.testing.expectEqualStrings("\u{2298}", tab_ops.tabTitleMarker("\u{2298} Example").?);
+    try std.testing.expectEqualStrings("Example", tab_ops.tabTitleBody("\u{2298} Example"));
+    try std.testing.expectEqualStrings("\u{25C9}\u{2298}", tab_ops.tabTitleMarker("\u{25C9}\u{2298} Example").?);
+    try std.testing.expectEqualStrings("Example", tab_ops.tabTitleBody("\u{25C9}\u{2298} Example"));
+    try std.testing.expectEqual(@as(u32, 2), tab_ops.tabTitleMarkerCols("\u{25C9}\u{2298}"));
+    try std.testing.expectEqual(@as(u32, 1), tab_ops.tabTitleMarkerCols("\u{2298}"));
+    try std.testing.expect(tab_ops.titleNeedsMarkEscape("\u{2298} Fake"));
+    try std.testing.expect(tab_ops.tabTitleMarker(tab_ops.title_mark_escape ++ "\u{2298} Fake") == null);
+    const C = struct { codepoint: u21, style: struct { foreground: terminal.Color = .default } = .{} };
+    var cells = [_]C{ .{ .codepoint = tab_ops.recording_mark }, .{ .codepoint = tab_ops.blocking_mark }, .{ .codepoint = 'x' } };
+    tab_ops.recolorRecordingMarkCells(&cells);
+    tab_ops.recolorBlockingMarkCells(&cells);
+    try std.testing.expectEqual(terminal.Color{ .rgb = tab_ops.recording_mark_color }, cells[0].style.foreground);
+    try std.testing.expectEqual(terminal.Color{ .rgb = tab_ops.blocking_mark_color }, cells[1].style.foreground);
+    try std.testing.expectEqual(terminal.Color.default, cells[2].style.foreground);
 }

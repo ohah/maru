@@ -59,7 +59,8 @@ pub const Op = struct {
 
     /// `started` — 이 이동 뒤 불러오기가 시작됐다(불러오는 중·새 문서). Chromium 은 읽지 못하는 주소(포트 99999·`%zz` 호스트)를 말없이 버린다 —
     /// 시작하지 않으면 `navigate_start_wait_ms` 뒤 실패(전에는 25 초 뒤 ok, 적대 리뷰 2 회차).
-    pub const NavState = struct { done: bool = false, loaded: bool = false, before_unload: bool = false, started: bool = true };
+    /// W9d③: `blocked_rule` — 막기 규칙이 그 이동을 막았다(그 규칙 번호 — 결과에 `blocked:true, block_rule`).
+    pub const NavState = struct { done: bool = false, loaded: bool = false, before_unload: bool = false, started: bool = true, blocked_rule: u32 = 0 };
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         if (self.target) |t| gpa.free(t);
@@ -120,6 +121,10 @@ pub const Op = struct {
     pub fn wake(self: *Op, gpa: std.mem.Allocator) !Step {
         const st = self.nav orelse return done(gpa, .failed, "the tab closed");
         if (st.before_unload) return done(gpa, .failed, leave_page_reason);
+        if (st.done and st.blocked_rule != 0) {
+            var buf: [96]u8 = undefined;
+            return done(gpa, .success, std.fmt.bufPrint(&buf, "{{\"loaded\":false,\"blocked\":true,\"block_rule\":{d}}}", .{st.blocked_rule}) catch "false");
+        }
         if (st.done) return done(gpa, .success, if (st.loaded) "true" else "false");
         if (!st.started and self.now_ms - self.start_ms >= navigate_start_wait_ms) return done(gpa, .failed, not_started_reason);
         if (self.now_ms >= self.deadline_ms) return done(gpa, .success, "false");

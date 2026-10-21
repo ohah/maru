@@ -141,11 +141,17 @@ fn dispatchCall(call: *table_mod.Call) void {
     if (host == null) return drop(call, .send_failed);
     defer object.release(host);
     if (!ensureObserver(host, entry.cef_id, entry.id)) return drop(call, .send_failed);
+    // W9d③ 2 차 검증 LOW-A2-3: 에이전트의 이동(뒤로·앞으로·새로 고침·누르기·스크립트)은 사용자의 D2 토큰을 가져가지 못한다 — 보내기 전에 거둔다.
+    // 인자까지 본다(5 차 검증 LOW — 화면 밖까지 찍기는 resize 처리기를 돌린다): 그래서 인자가 다 모인 여기서, 메시지를 만들기 전에(만들면 인자를
+    // 넘겨준다).
+    const starts = table_mod.startsNavigationCall(allocator, call.method(), call.params.items);
+    const browser_id = call.browser;
     const json = table.buildMessage(allocator, call) catch |e| return drop(call, switch (e) {
         error.InvalidParams => .invalid_request,
         error.OutOfMemory => .send_failed,
     });
     defer allocator.free(json);
+    if (starts) @import("blocking.zig").agentNavigate(browser_id);
     if (host.*.send_dev_tools_message.?(host, json.ptr, json.len) == 0) drop(call, .send_failed);
 }
 

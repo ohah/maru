@@ -87,6 +87,55 @@ Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 
   호스트로 리다이렉트하면 본문이 나갔다), maru 는 꺼진 동안 적은 응답의 본문을 설정을 다시 켜도 꺼졌을 때의 투영으로만 보인다(적을 때 찍는다). 기록은 sidecar 가 그 탭에만 CDP `Network.enable` 을 걸어 하고(`maxPostDataSize` 1 — 요청 본문은 적지 않는다), maru 를 거친 에이전트의
   `Network.enable`·`Network.disable`·`Fetch.*` 는 보내지 않는다(한 세션이라 기록의 상한을 바꾸거나 기록을 끌 수 있었다). 본문은 메모리에만(하나 1 MiB·탭 8 MiB·앱
   32 MiB) — 마지막 본문 grant 의 철회·네트워크 grant 의 철회·탭 닫힘·설정 끔은 받은 본문을 지운다(지우기 전에 이미 오던 본문 frame 도 받지 않는다 — 탭마다 지운 때의 세션 바닥; 기록 끄기는 지우지 않는다). 상세는 [웹 OSR 계획 「W9d② 결정·구현」](plans/web-osr-backend.md).
+- **`browser_network_block`(W9d③ — `browser.networkBlock`)은 `browser`·`browser_network`·`browser_network_body` 와 따로 묻는 peer scope 다** —
+  막기는 읽기가 아니라 **사용자의 페이지를 바꾸는 쓰기**다(페이지가 깨질 수 있고, 엄격 모드는 그 탭에서 사이트의 서비스 워커를 건너뛰어 오프라인 페이지·캐시 답을 멈춘다).
+  상속 fd 로 발급하지 않고, 확인 grant 는 모달이 보인 호스트와 그 하위 도메인에 묶인다(모달 문구가 해를 말한다). 사용자 탭은 사이트마다 한 번 묻고, 에이전트가 연 탭은
+  묻지 않는다(그 탭의 birth grant — 그래서 에이전트 탭의 birth grant 자리는 셋이다). 막기는 네트워크 기록 위에 선다 — 그 탭의 `browser_network` grant 가 지금 문서를
+  덮지 않으면 모달 없이 `needs_network_permission`, 네트워크 grant 나 막기 grant 가 사라지면(철회·다른 사이트로 다시 허용) 그 pane 의 규칙과 엄격 모드를 지운다.
+  **엄격 모드도 사용자 탭에서 같은 사이트 확인으로 켤 수 있다**(사용자 결정 Q1 2026-10-21; 허락 판정은 `app_host_abi.zig` 의 `strictAllowedOn` 한 곳). 규칙은
+  추가한 때 탭이 보이던 사이트에 묶여 그 사이트에서만 일하고, 다른 pane 의 규칙은 수만 보인다(지우지 못한다). 엄격 모드도 켠 pane 의 것이다 — 다른
+  pane 은 끄지도 가져가지도 못한다(`other_pane` — 20 회 검증 B DEF-3: 전에는 끄거나 다시 켜 주인이 됐다). **사용자가 몬 에이전트 탭**: 설정
+  `browser.agent-network-full` 이 켜져 있으면(기본) 에이전트 탭의 어느 호스트든 막기 grant 는 사용자가 그 탭을 다른 사이트(예: 은행)로 몰아도 남는다(W9d①
+  F5 「그대로 둠」과 D1) — 그래서 에이전트는 **그 사이트에서도 묻지 않고** 규칙을 더하고 엄격 모드를 켤 수 있다(규칙의 사이트는 그 사이트, ⊘ 와 Browser
+  Grants 줄로 보인다 — 20 회 검증 B R13 관찰). 설정을 끄면 몰기 전 사이트로 좁혀져 그 사이트에서는 다시 묻는다. **사용자의 이동은 막지 않는다** — 사용자가 주소를 넣거나
+  뒤로·앞으로·새로 고침으로 시작한 이동은 한 번 지나간다(D2 — 사용자를 제 탭에서 가두지 못하게). 그 예외는 **그 몸짓의 이동**에만 묶인다: 에이전트의 이동(wire
+  navigate·nav_action, 그리고 **읽기 허용 목록 밖의 모든** DevTools 호출 — 이동을 시작하거나(`Page.navigate`·`Page.reload`·`Page.navigateToHistoryEntry`·`Input.*`·
+  `Runtime.evaluate`·`Runtime.callFunctionOn`) 페이지 처리기를 부르거나 멈춘 스크립트를 잇는 호출(`DOM.focus`·`DOM.set*`·`Emulation.*`·`Page.handleJavaScriptDialog`·
+  `CSS.setStyleTexts`·`ServiceWorker.skipWaiting` 등). 4 차 검증 A-LOW: 「거두는 목록」 이 일곱을 놓쳐 — 새 메서드도 놓친다 — 처리기를 부르지 않는 읽기(DOM·
+  Accessibility 의 get·찾기, 화면 찍기, 기록·프레임 트리, 쿠키 읽기 등)만 남기는 목록으로 뒤집었다, 단일 출처는 `devtools_table.read_only_methods` — 인자도 본다(5 차 검증 LOW: 화면 밖까지 찍기
+  `captureBeyondViewport` 는 보기 크기를 바꿔 resize 처리기를 돌린다 — 거둔다, `devtools_table.startsNavigationCall`), 페이지의 JS 값을 설명하는 `Runtime.getProperties` 는
+  목록 밖이다(6 차 검증 LOW: 읽지 않은 Error 값의 설명이 페이지의 `Error.prepareStackTrace` 를 돌렸다 — 거둔다, maru 의 흐름은 쓰지 않는다), 페이지가
+  건너뛰게 한 하위 트리의 스타일·배치를 강제하는 `DOM.getBoxModel`·`CSS.getComputedStyleForNode` 도 목록 밖이다(7 차 검증 LOW-1: `content-visibility:hidden`
+  하위 트리 안의 글꼴·그림·`<object>` 를 요청해 페이지의 fonts·onload·PerformanceObserver 처리기를 돌렸다 — 거둔다, maru 의 흐름은 쓰지 않는다; 같은 노드의
+  `getContentQuads`·`describeNode`·`Accessibility.*` 등은 +0). 목록에 남은 것의 **남는 틈** 둘 — 화면 찍기는 숨은 탭에서 렌더 차례를 한 번 돈다(7 차 LOW-2:
+  rAF·ResizeObserver·IntersectionObserver 한 번씩 — maru 의 DevTools kick 은 숨은 탭의 rAF 를 돌리는 것이 목적이라 남는다), 놓기(`Runtime.releaseObject(Group)`)
+  뒤에는 GC 가 페이지의 `FinalizationRegistry` 콜백을 돌릴 수 있다(7 차 LOW-3 — maru 의 정리라 남는다) — 둘 다 페이지 타이머와 같은 등급이다; 대가는
+  에이전트의 읽기 아닌 호출 뒤 사용자의 이동이 다시 해야 지나가는 것. 에이전트의 뒤로·앞으로·새로 고침·누르기·채우기·올리기는 CDP 다)은 보내기 전에 남은 사용자
+  토큰을 거두고, 이동을 시작하지 않은 몸짓(조각만 다른 친 주소 — 같은 문서 확정, 주 프레임 주소가 그대로인 뒤로 — iframe 만, 같은 문서 항목 포함(3 차 검증
+  LOW-A3-4; 대상은 이동을 시작한 뒤 읽은 Chromium 의 실제 대상 — 몸짓 없이 생긴 항목을 건너뛴 다른 문서로 가는 뒤로는 예외다, 4 차 검증 A-LOW), 떠나기 확인에
+  머무르기, 멈춤)은 토큰을 남기지 않는다(2 차 20 회 검증 LOW-A2-3: 에이전트의 CDP 뒤로·새로 고침이 1·5 초 안에 그
+  토큰을 가져갔다). 토큰은 그 몸짓 뒤 첫 주 프레임 이동을 기다린다 — 옛 문서의 beforeunload 처리기가 대화상자 없이 도는 동안도 30 초까지(3 차 검증 LOW-A3-3:
+  2·6 초 도는 처리기 뒤의 사용자 새로 고침·뒤로·친 주소가 막혔다), 다른 주 프레임 이동이 먼저 시작되면 그때부터 1·5 초. 떠나기 확인(beforeunload)이 떠 있는 동안은
+  토큰의 시계가 멈춘다(10 분까지 — 늦게 답한 사용자의 이동이 막혔다, LOW-A2-4). 서비스 워커·공유 워커의 요청은(CEF 가 둘을 가르지 않는다)
+  그 출처를 보이는 모든 탭이 맞는 종류 없는 규칙을 가질 때만 막는다(규칙 없는 탭의 페이지를 대신 깨지 않게 — D3a). 그 출처를 **보인다고 증명된** 탭(확정된 프레임
+  주소·진행 중 이동 기록 — 문서 없이 끝난 iframe 이동의 기록은 그 끝에서 놓는다, 3 차 검증 MED-A3-1: 남은 기록이 30 초 동안 그 탭을 「보이는」 탭으로 두어
+  아무도 보이지 않는 출처의 요청이 다른 사이트 규칙에 막혔다)만 덮을 수 있고 — 그 탭은 늦게 뜨는 iframe 같은 모르는 프레임이 있어도 덮였다(20 회 검증 A MED-2) — 증명되지 않은 모르는 탭은 규칙을
+  쥐었으면 빠지고(그 탭의 다른 사이트 규칙이 아무도 보이지 않는 출처의 요청을 막거나 무관한 탭에 「적용 안 됨」 을 세지 않게 — 2 차 검증 MED-A2-1) 규칙이 없으면
+  보수적으로 거부권만 갖는다(막지 않고 「적용 안 됨」 으로 센다). 사용자에게 보이는 신호: 규칙·엄격이 있는 동안 탭 제목 앞의 호박색 ⊘,
+  Browser Grants 의 「request blocking (N rules[, strict])」 줄(거기서 철회), 사용자가 그 탭을 몰 때 알림(그 사이 규칙이 모두 철회됐으면 띄우지 않는다). 설정
+  `browser.agent-network-full` 이 꺼지면 서비스 워커 수(`sw_hits`·`sw_not_applied`)와 엄격 모드가 다른 사이트의 서비스 워커를 건너뛴 수
+  (`redirects_bypassed_other_site`)를 **적지 않는다**(끄는 순간 켜진 동안의 수도 지운다 — W9d② 의 본문처럼; 2 차 검증 NEW-2: 숨기기만 해 나중에 켜면 꺼진 동안의
+  수가 보였다; 3 차 검증 N-B3-d: sidecar 도 꺼진 동안 세지 않는다) — 그 수가 규칙 없는 탭의 요청·사용자의 이동을 엿보는 오라클이 된다. 규칙·엄격이 모두 사라지면(철회·grant 를 다른 사이트로 다시 허용·지켜보기 끝)
+  수도 지우고 그 앞 세대의 늦은 수는 버린다(2 차 검증 NEW-3 — 다음 pane 의 결과에 옛 수가 보였다; sidecar 는 수를 센 때의 세대로 보낸다 — 3 차 검증 NEW-B3-1: 보낼 때의 세대를 실어 철회
+  직전에 센 수가 빈 세대를 달고 받혔다), 엄격을 끄거나 다른 사이트로 옮기면 엄격의 리다이렉트 수도. maru 를 거친 에이전트의 `Network.setBypassServiceWorker`·`Network.setBlockedURLs`·`Network.setRequestInterception`·
+  `Network.continueInterceptedRequest`·`Network.emulateNetworkConditions`·`Network.emulateNetworkConditionsByRule`(주소 패턴마다 offline — 실측 CEF 154 에서
+  규칙 없이 막았다, 20 회 검증 B DEF-4)·`Network.loadNetworkResource`(프로필의 쿠키로 탭 길 밖에서 받아 온다)·`Fetch.*` 는 보내지 않는다(엄격 모드·막기를
+  그 세션에서 우회하거나 흉내 낼 수 있다). `Browser.executeBrowserCommand` 도 보내지 않는다(CEF 154 에서 답하지 않고 그 탭의 DevTools 를 모두 멈췄다 — 3 차 검증
+  N-B3-f, 막기와 무관한 방어). `Target.*` 도 인자 없는 `getTargetInfo`(읽기 — 저장소 op 가 쓴다; `targetId` 를 준 꼴은 다른 탭을 보므로 막는다 — W9d② 재검증 6 차 F11) 말고는 보내지 않는다 — 지킴은 바깥 메서드 이름만
+  보는데 `Target.attachToTarget`·`attachToBrowserTarget`·`setAutoAttach`·`sendMessageToTarget`·`exposeDevToolsProtocol` 은 그 안에 다른 CDP 를 실어 보낸다(2 차
+  검증 NEW-1 실측: `sendMessageToTarget` 이 실은 `Network.setBlockedURLs` 가 fetch 를 막았다). 남긴 것과 까닭(`overrideNetworkState` 는 `navigator.onLine` 만 — 실측 fetch 그대로, `setCacheDisabled` — HTTP 캐시
+  응답도 막기가 본다, 헤더·쿠키 바꾸기 — 패턴은 주소만 본다)은 `devtools_table.forbiddenMethod` 주석이 단일 출처다.
+  상세는 [웹 OSR 계획 「W9d③ 결정·실측」](plans/web-osr-backend.md).
 - `capture`·`subscribeOutput`은 비밀(스크롤백·실시간 출력)을 노출하므로 `read-output` capability가 필요하다. `capture`가 처음 노출되는 Phase 1 안에서 capability fd 발급·auth·거부 테스트까지 함께 구현한다. "read-only라 토큰은 나중"으로 미루지 않는다.
 
 ### 8.4 self-origin metadata 증명(일반 login shell)

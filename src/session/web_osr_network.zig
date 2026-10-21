@@ -208,6 +208,11 @@ pub const Entry = struct {
     restarted: bool = false,
     /// 앱·탭 상한으로 자세한 것(헤더·홉)을 버렸다.
     detail_evicted: bool = false,
+    /// W9d③: 막기 규칙이 막았다(sidecar 의 `net_end.flags.blocked` — 표시가 권위다) / 서비스 워커 길에서 맞는 규칙이 있었지만 규칙 없는 탭과 나눠
+    /// 막지 않았다. 둘 중 하나면 `block_rule` 이 그 규칙.
+    blocked: bool = false,
+    sw_not_applied: bool = false,
+    block_rule: u32 = 0,
     summary_bytes: usize = 0,
     detail_bytes: usize = 0,
     /// W9d②: 본문 — sidecar 가 `body_expected` 로 알린 요청만(끝은 꼭 하나 온다).
@@ -397,6 +402,13 @@ pub const View = struct {
     /// 그 헤더를 보내거나 받은 호스트를 이것이 덮을 때만 보인다 — 설정이 켜져 있어도(사용자 결정 2026-10-15 「쿠키 권한 있을 때만 보임」), 어느
     /// 호스트든 grant(에이전트 탭)여도. 비면 아무것도.
     cookie_host: []const u8 = "",
+    /// W9d③: 이 읽는 쪽(pane)이 이 탭에 둔 막기 규칙의 패턴 — 막힌 기록에 `block_pattern` 으로 싣는다(다른 pane 의 규칙은 번호만).
+    block_patterns: []const BlockPattern = &.{},
+
+    fn blockPattern(self: View, rule: u32) ?[]const u8 {
+        for (self.block_patterns) |b| if (b.id == rule) return b.pattern;
+        return null;
+    }
 
     fn readerHas(self: View, tab: u64) bool {
         return std.mem.indexOfScalar(u64, self.reader_tabs, tab) != null;
@@ -420,6 +432,9 @@ pub const View = struct {
     }
 };
 
+/// W9d③: 막기 규칙 하나의 번호와 정규형 패턴(`View.block_patterns`).
+pub const BlockPattern = struct { id: u32, pattern: []const u8 };
+
 /// 목록 거르기(`browser.network`). 비어 있으면 거르지 않는다. 투영된 값으로만 본다.
 pub const Query = struct {
     page: usize = 0,
@@ -434,6 +449,8 @@ pub const Query = struct {
     /// 이 번호보다 오래된 요청만(F7 — 앞 쪽의 마지막 `req`, 결과의 `next_before_req`). 새 요청이 와도 쪽이 밀리지 않는다.
     before_req: ?u64 = null,
     clear: bool = false,
+    /// W9d③: 막기 규칙이 막은 요청만.
+    blocked: bool = false,
 };
 
 /// 요청이 들어올 때 app 이 아는 것(`Ring.begin`).
@@ -454,9 +471,7 @@ pub const BeginContext = struct {
 pub fn topHostOf(v: msg.NetBegin, app_top: []const u8) []const u8 {
     if (v.flags.main_frame and v.resource_type == 0) return v.host; // sidecar 의 칸(3 회차 T1 — 잘린 주소에서 다시 읽지 않는다)
     if (v.flags.previous_document) return "";
-    if (v.site.len == 0) return app_top;
-    if (app_top.len != 0 and policy.sameSite(app_top, v.site)) return app_top;
-    return v.site;
+    return policy.pageHost(v.site, app_top); // W9d③: sidecar 의 막기와 같은 규칙(한 출처)
 }
 
 /// W9d② 적대 리뷰 3 회차 C1: `topHostOf` 가 첫 사이트(등록 도메인 — CEF 가 그 꼴로 준다)를 줬다 — 페이지의 호스트가 아니라 그것을 덮는 더 넓은
@@ -691,6 +706,9 @@ pub const Ring = struct {
         e.error_code = v.error_code;
         e.received = v.received;
         e.end_ms = v.time_ms;
+        e.blocked = v.flags.blocked; // W9d③
+        e.sw_not_applied = v.flags.sw_not_applied;
+        e.block_rule = v.rule_id;
         _ = self.live.remove(v.request);
         self.noteEnded(v.request, e.seq);
     }
@@ -1085,6 +1103,8 @@ fn bodyStateName(e: *const Entry, view: View, body: BodyView) []const u8 {
     if (!e.body_expected) return "not_recorded";
     const access = bodyAccessOf(e, view, body);
     if (access != .visible) return @tagName(access);
+    // W9d③: 막힌 요청 — sidecar 의 끝(`request_failed`·`unmatched`)을 덮는다(「끝은 꼭 하나」 는 그대로 — 이름만 「막혔다」 로).
+    if (e.blocked) return "blocked";
     return @tagName(e.body_state);
 }
 
@@ -1130,6 +1150,7 @@ fn bodyResponseVisible(view: View, e: *const Entry) bool {
 
 const Matcher = struct {
     fn matches(e: *const Entry, view: View, q: Query, url_buf: []u8) bool {
+        if (q.blocked and !e.blocked) return false; // W9d③
         if (q.types.len > 0) {
             const name = policy.resourceTypeName(e.resource_type);
             var any = false;
@@ -1278,6 +1299,17 @@ fn writeCommon(s: *std.json.Stringify, e: *const Entry, view: View, url_buf: []u
     if (view.full and policy.crossSiteIframe(e.flags, e.resource_type, e.host, e.initiator, e.site)) {
         try s.objectField("cross_site_iframe");
         try s.write(true);
+    }
+    // W9d③: 막기 — 막았다·서비스 워커 길에서 적용 안 됨, 그 규칙 번호(패턴은 그 규칙을 둔 pane 에게만).
+    if (e.blocked or e.sw_not_applied) {
+        try s.objectField(if (e.blocked) "blocked" else "sw_not_applied");
+        try s.write(true);
+        try s.objectField("block_rule");
+        try s.write(e.block_rule);
+        if (view.blockPattern(e.block_rule)) |pattern| {
+            try s.objectField("block_pattern");
+            try s.write(pattern);
+        }
     }
 }
 
@@ -3624,4 +3656,50 @@ test "W9d② v20f 11: hop overflow on a subresource (N2) — 21 hops make the fi
         if (c.hops == max_hops) try testing.expect(std.mem.indexOf(u8, d, "V20F-HOP-COOKIE") != null); // control: own site, cookie permission
     }
     try testing.expectEqual(t.ring.body_bytes, t.budget.body_bytes);
+}
+
+// ── W9d③: 막힌 요청 ──
+// 시험이 증명하는 것: sidecar 의 끝 표시(`blocked`·`sw_not_applied`·규칙)가 기록에 남고 목록·자세히에 `blocked`·`block_rule` 로 실린다, 패턴은 그
+// 규칙을 둔 읽는 쪽(`View.block_patterns`)에게만, 거르기 `blocked`, 막힌 요청의 본문 상태는 `blocked`(sidecar 의 끝을 덮는다).
+
+test "W9d③: 막힌 요청 — 목록·자세히에 blocked·block_rule(패턴은 주인에게만), 서비스 워커 길의 적용 안 됨, 거르기 blocked, 본문 상태 blocked" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 7, .birth = true }});
+    try t.begin(1, "https://a.test/ok", .{});
+    t.ring.end(.{ .browser = 1, .request = 1, .received = 3 });
+    try t.ring.begin(testing.allocator, &t.budget, .{ .browser = 1, .request = 2, .flags2 = .{ .body_expected = true }, .resource_type = 13, .url = "https://t.test/px", .host = "t.test" }, .{ .top_host = "a.test" });
+    t.ring.end(.{ .browser = 1, .request = 2, .outcome = .failed, .error_code = -20, .flags = .{ .blocked = true }, .rule_id = 5 });
+    t.ring.bodyEnd(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = 2, .state = .request_failed });
+    try t.begin(3, "https://a.test/sw", .{ .flags = .{ .service_worker = true }, .initiator = "https://a.test" });
+    t.ring.end(.{ .browser = 1, .request = 3, .received = 9, .flags = .{ .sw_not_applied = true }, .rule_id = 6 });
+    const owner: View = .{ .block_patterns = &.{.{ .id = 5, .pattern = "*://*.t.test/*" }} };
+    {
+        const json = try t.ring.list(testing.allocator, 7, owner, .{}, .{ .who = 7, .any_host = true });
+        defer testing.allocator.free(json);
+        const p = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+        defer p.deinit();
+        const b = rowOf(p, 2).?;
+        try testing.expect(b.get("blocked").?.bool);
+        try testing.expectEqual(@as(i64, 5), b.get("block_rule").?.integer);
+        try testing.expectEqualStrings("*://*.t.test/*", b.get("block_pattern").?.string);
+        try testing.expectEqualStrings("blocked", b.get("body_state").?.string);
+        const sw = rowOf(p, 3).?;
+        try testing.expect(sw.get("sw_not_applied").?.bool and sw.get("blocked") == null);
+        try testing.expect(rowOf(p, 1).?.get("blocked") == null);
+    }
+    {
+        // 다른 pane(패턴 없음) — 번호만.
+        const json = try t.ring.list(testing.allocator, 7, .{}, .{ .blocked = true }, .{});
+        defer testing.allocator.free(json);
+        const p = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+        defer p.deinit();
+        try testing.expectEqual(@as(usize, 1), p.value.object.get("requests").?.array.items.len); // 거르기 — 막힌 것만
+        try testing.expect(rowOf(p, 2).?.get("block_pattern") == null);
+    }
+    var d = try detailJson(&t, 7, owner, 2);
+    defer d.deinit();
+    try testing.expect(d.value.object.get("blocked").?.bool);
+    try testing.expectEqual(@as(i64, -20), d.value.object.get("error_code").?.integer);
 }

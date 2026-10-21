@@ -178,6 +178,11 @@ pub const Tag = enum(u8) {
     /// `recording_stopped` 로 끝난다. `session` 은 maru 가 켤 때마다 매기는 0 아닌 번호(끄면 0) — 돌아오는 본문 frame 이 그것을 싣는다(늦게 온
     /// 옛 기록의 본문을 새 기록에 붙이지 않게).
     net_record = 135,
+    /// 그 탭의 요청 막기 규칙과 엄격 모드(W9d③ — maru 가 `browser.networkBlock` 으로 바꿀 때마다·브라우저가 새로 만들어질 때 **통째로**
+    /// 보낸다 — 다시 보내도 같다). 규칙은 정규형 패턴(`net_block`)·종류 마스크·추가한 때의 페이지 사이트(그 사이트에서만 일한다 — 계획 §5).
+    /// `strict_site` 가 비지 않으면 엄격 모드(그 사이트에 묶인 서비스 워커 우회 — sidecar 의 `net_domain` 이 그 탭에 CDP
+    /// `Network.setBypassServiceWorker` 를 건다). 답은 `net_block_state`. sidecar 는 지켜보기(`net_watch`)가 꺼지면 그 탭의 규칙을 버린다.
+    net_block = 136,
 
     /// 주 프레임의 이동이 시작된다(W9a 적대 리뷰 5 회차 — CEF `on_before_browse`, 리다이렉트마다도). 확정(`page_started`)·끝(`load_finished`)·
     /// 불러오기 끝까지 그 탭은 「확정되지 않은 이동 중」 이다 — 그동안 보낸 DevTools 의 페이지 호출은 Chromium 이 붙잡았다가 새 문서에서 돌렸다.
@@ -187,7 +192,8 @@ pub const Tag = enum(u8) {
     /// 양동이로 조절해 버린 수를 함께 싣는다 — 버린 수만 실은 frame(`has_entry` 거짓)도 있다. 글은 `max_console_text_bytes`.
     console_message = 67,
     /// 주 프레임의 이동이 실패해 오류 페이지가 옛 문서를 바꿨다(W9c① — CEF `on_load_error`, ERR_ABORTED 는 빼고). 그 이동에는 `page_started` 가
-    /// 없다(실측) — maru 는 콘솔의 문서 경계로만 쓴다(다운로드의 몸짓 판정·에이전트 이동은 건드리지 않는다).
+    /// 없다(실측) — maru 는 콘솔의 문서 경계로만 쓴다(다운로드의 몸짓 판정·에이전트 이동은 건드리지 않는다). W9d③: 오류 번호와, 막기 규칙이
+    /// 그 이동을 막았으면 그 규칙 번호(`ErrorPage`) — maru 의 navigate 결과 `blocked`·사용자 알림.
     error_page = 68,
     /// 지켜보는 탭(W9d① — `net_watch`)의 요청 하나가 시작된다(CEF `on_before_resource_load` — 리다이렉트를 넘어 같은 요청 번호). 주소·메서드·
     /// 종류·요청 헤더(앞부분 — `max_net_*`)와 누가 일으켰나(initiator 출처)·첫 사이트 호스트. 서비스 워커가 대신 보낸 요청(CEF 의 브라우저가
@@ -208,6 +214,13 @@ pub const Tag = enum(u8) {
     net_body_end = 75,
     /// 그 탭의 기록 상태(W9d② — 켜짐·꺼짐·쏟아짐으로 멈춤·켜지 못함).
     net_record_state = 76,
+    /// `net_block` 을 받았다(W9d③) — 그 세대를 적용했는가와 엄격 모드의 지금 상태(꺼짐·켜짐·켜지 못함). 엄격 상태가 바뀌면(CDP 답) 같은 세대로
+    /// 다시 온다.
+    net_block_state = 77,
+    /// 막기의 수(W9d③ — 보내는 task 가 모아 **차이만**): 규칙마다 탭 길 막음·서비스 워커 길 막음·서비스 워커 길 적용 안 됨, 문을 지나지 못해
+    /// 기록 없이 막은 수, 페이지를 몰라 막지 않은 수, 이 문서에서 서비스 워커를 규칙 없는 탭과 나눴는가. maru 가 누적한다(sidecar 가 다시 뜨면
+    /// 0 부터 — 차이라 맞다).
+    net_block_hits = 78,
 
     /// `devtools_call` 결과의 한 조각(W9-0b) — `devtools_result` 앞에 온다. 결과는 CDP 가 준 JSON(`result` 또는 `error` 객체)이다.
     devtools_result_data = 64,
@@ -953,6 +966,15 @@ pub const FrameChannel = struct {
 pub const Navigate = struct {
     browser: BrowserId,
     url: []const u8,
+    /// W9d③ D2: 사용자가 주소창에 친 이동이다 — 그 탭의 막기 규칙은 이 이동 한 번(리다이렉트 홉 포함)을 막지 않는다(하위 자원은 막는다). 에이전트
+    /// 이동·sidecar 재시작 뒤 재생 이동은 거짓.
+    user: bool = false,
+};
+
+/// 주 프레임 주소가 바뀌었다(`url_changed` — W3b). `Navigate` 와 칸이 같았지만 W9d③ 이 이동에 `user` 를 더해 갈랐다.
+pub const UrlChanged = struct {
+    browser: BrowserId,
+    url: []const u8,
 };
 
 pub const BrowserText = struct {
@@ -963,6 +985,8 @@ pub const BrowserText = struct {
 pub const NavAction = struct {
     browser: BrowserId,
     action: NavActionKind,
+    /// W9d③ D2: 사용자의 뒤로·앞으로·새로고침이다 — 다음 주 프레임 이동 하나(1 초 안)는 막기 규칙이 막지 않는다.
+    user: bool = false,
 };
 
 pub const NavState = struct {
@@ -1295,6 +1319,17 @@ pub const NetEnd = struct {
     /// 받은 바이트(압축된 그대로 — CEF `received_content_length`).
     received: u64 = 0,
     time_ms: u64 = 0,
+    /// W9d③: 막기 규칙이 이 요청을 막았다(`blocked` — 표시가 권위다: 오류 -20 만으로는 「막힘」 이 아니다, 페이지가 고른 주소를 다른 확장 기능이
+    /// 막았을 수 있다), 서비스 워커 길에서 맞는 규칙이 있었지만 규칙 없는 탭과 나눠 막지 않았다(`sw_not_applied`). 둘 중 하나면 `rule_id` 가 그 규칙.
+    flags: NetEndFlags = .{},
+    rule_id: u32 = 0,
+};
+
+/// 요청 끝의 표시(W9d③).
+pub const NetEndFlags = packed struct(u8) {
+    blocked: bool = false,
+    sw_not_applied: bool = false,
+    _reserved: u6 = 0,
 };
 
 pub const NetDropped = struct {
@@ -1420,6 +1455,87 @@ pub const NetRecordState = struct {
     status: NetRecordStatus,
 };
 
+// ── 요청 막기(W9d③) ────────────────────────────────────────────────────────────────────────────────────
+
+/// 탭 하나의 규칙 수 상한(`net_block.max_rules` 와 같다).
+pub const max_net_block_rules: usize = 32;
+/// 패턴 하나의 바이트 상한(`net_block.max_pattern_bytes` 와 같다).
+pub const max_net_block_pattern_bytes: usize = 512;
+
+pub const NetBlockRule = struct {
+    /// maru 가 매기는 규칙 번호(0 아님 — 탭 안에서 다시 쓰지 않는다). 수(`net_block_hits`)와 끝 표시가 이 번호로 온다.
+    id: u32 = 0,
+    /// 종류 마스크(CEF 종류 번호의 비트 — `net_block.typeBits`, 0 = 모든 종류). 종류를 단 규칙은 서비스 워커 길에 듣지 않는다.
+    types: u32 = 0,
+    /// 규칙을 추가한 때의 페이지 호스트(사이트) — 그 사이트의 페이지에서만 일한다(소문자 호스트 — `net_fields.checkHost`).
+    site: []const u8 = "",
+    /// 정규형 패턴(`net_block.parse(..).norm()` 과 같은 글).
+    pattern: []const u8 = "",
+};
+
+pub const NetBlock = struct {
+    browser: BrowserId,
+    /// maru 가 바꿀 때마다 올리는 세대(답 `net_block_state` 가 싣는다).
+    generation: u32,
+    /// 엄격 모드가 묶인 사이트(빈 글 = 끔).
+    strict_site: []const u8 = "",
+    count: u8 = 0,
+    /// 앞 `count` 개만 쓴다.
+    rules: [max_net_block_rules]NetBlockRule = @splat(.{}),
+};
+
+pub const NetStrictState = enum(u8) {
+    off = 0,
+    on = 1,
+    /// sidecar 가 엄격 모드를 켜지 못했다(DevTools 가 답하지 않았거나 거절했다) — 오류가 아니라 상태다.
+    failed = 2,
+};
+
+pub const NetBlockState = struct {
+    browser: BrowserId,
+    generation: u32,
+    /// 그 세대의 규칙을 적용했다(거짓 — 그 브라우저를 모른다·지켜보는 탭이 아니다).
+    ok: bool,
+    strict: NetStrictState = .off,
+};
+
+pub const NetBlockHit = struct {
+    rule_id: u32 = 0,
+    /// 탭 길에서 막은 수.
+    hits: u32 = 0,
+    /// 서비스 워커 길에서 막은 수(그 출처를 보이는 탭 모두가 맞는 규칙을 쥐었다).
+    sw_hits: u32 = 0,
+    /// 서비스 워커 길에서 맞았지만 규칙 없는 탭과 나눠 막지 않은 수.
+    sw_not_applied: u32 = 0,
+};
+
+pub const NetBlockHits = struct {
+    browser: BrowserId,
+    /// sidecar 가 그 탭에 마지막으로 적용한 `net_block` 의 세대 — maru 는 모두 버린(지켜보기가 끝났다) 세대보다 앞선 수를 버린다(20 회 검증 B N4).
+    generation: u32 = 0,
+    /// 문(양동이·동시 요청)을 지나지 못해 기록 없이 막은 수(fail closed — 문이 막기를 끄지 않는다).
+    unrecorded: u32 = 0,
+    /// 탭의 맨 위 문서를 몰라 막지 않은 수(유일한 의도된 fail-open — 덮지 않는 사이트를 지킨다).
+    skipped_unknown_page: u32 = 0,
+    /// 엄격 모드: 다른 사이트에서 엄격 사이트로 들어온 리다이렉트가 서비스 워커를 지난 채 닿은 문서 수(Chromium 은 우회 값을 이동이 시작할 때만
+    /// 읽는다 — 20 회 검증 A MED-1; 그 문서에서는 엄격이 듣지 않았다).
+    strict_redirect_missed: u32 = 0,
+    /// 엄격 모드: 엄격 사이트에서 다른 사이트로 나간 리다이렉트가 그 사이트의 서비스 워커를 건너뛴 채 닿은 문서 수(같은 까닭).
+    strict_redirect_bypassed: u32 = 0,
+    /// 이 차이 안에 서비스 워커 길의 「적용 안 됨」 이 있었다(maru 가 문서마다 표시한다).
+    sw_shared_with_unruled_tab: bool = false,
+    count: u8 = 0,
+    entries: [max_net_block_rules]NetBlockHit = @splat(.{}),
+};
+
+/// 주 프레임 오류 페이지(W9c① `error_page` — W9d③ 이 오류 번호와 막은 규칙을 더했다). `blocked_rule` 은 그 이동을 막기 규칙이 막았을 때(실패한
+/// 주소의 해시로 짝지었다 — 탭 길 -20·서비스 워커 길 -2 모두) 그 규칙 번호, 아니면 0.
+pub const ErrorPage = struct {
+    browser: BrowserId,
+    error_code: i32 = 0,
+    blocked_rule: u32 = 0,
+};
+
 pub const DownloadAction = enum(u8) {
     cancel = 0,
     resume_download = 1,
@@ -1479,7 +1595,7 @@ pub const Message = union(Tag) {
     load_finished: LoadFinished,
     renderer_gone: RendererGone,
     failure: Failure,
-    url_changed: Navigate,
+    url_changed: UrlChanged,
     nav_state: NavState,
     cursor_changed: CursorChanged,
     ime_range: ImeRange,
@@ -1513,9 +1629,10 @@ pub const Message = union(Tag) {
     new_tab_credit: BrowserId,
     net_watch: NetWatch,
     net_record: NetRecord,
+    net_block: NetBlock,
     main_frame_navigating: BrowserId,
     console_message: ConsoleMessage,
-    error_page: BrowserId,
+    error_page: ErrorPage,
     net_begin: NetBegin,
     net_redirect: NetRedirect,
     net_response: NetResponse,
@@ -1524,6 +1641,8 @@ pub const Message = union(Tag) {
     net_body_data: NetBodyData,
     net_body_end: NetBodyEnd,
     net_record_state: NetRecordState,
+    net_block_state: NetBlockState,
+    net_block_hits: NetBlockHits,
 
     devtools_result_data: DevtoolsData,
     devtools_result: DevtoolsResult,

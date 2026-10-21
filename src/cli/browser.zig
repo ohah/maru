@@ -54,9 +54,10 @@ pub const browser_help =
     \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
     \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
     \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
-    \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page)
+    \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped)
     \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a 0600 file, replacing it; a binary body needs --out; Chromium tabs)
     \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ◉ while recording)
+    \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ⊘)
     \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
     \\
 ;
@@ -127,6 +128,8 @@ pub const Request = union(enum) {
     network_request: NetworkRequestCmd,
     /// `browser network-record`(W9d② — Chromium). 응답 {recording, state}.
     network_record: struct { surface_id: u64, on: bool },
+    /// `browser network-block`(W9d③ — Chromium). 응답 {rules:[…], other_rules, total, state, strict, …}.
+    network_block: NetworkBlockCmd,
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
@@ -148,9 +151,33 @@ pub const Request = union(enum) {
             .network => .network,
             .network_request => .network_request,
             .network_record => .network_record,
+            .network_block => .network_block,
         };
     }
 };
+
+/// W9d③: `browser network-block` — 사람의 꼴(`--add P`·`--remove P`·`--rule N`·`--clear`·`--list`·`--strict on|off`)과 MCP 의 꼴(`--action a`·
+/// `--pattern P`·`--rule N`·`--on`·`--off`)을 함께 받는다(MCP 도구는 인자 하나하나를 옵션 하나로 옮긴다).
+pub const NetworkBlockCmd = struct {
+    surface_id: u64,
+    action: Action = .list,
+    patterns: [max_block_patterns][]const u8 = undefined,
+    pattern_count: usize = 0,
+    types: [max_network_types][]const u8 = undefined,
+    type_count: usize = 0,
+    rules: [max_block_patterns]u64 = undefined,
+    rule_count: usize = 0,
+    on: ?bool = null,
+
+    pub const Action = enum { add, remove, clear, list, strict };
+
+    pub fn patternSlice(self: *const NetworkBlockCmd) []const []const u8 {
+        return self.patterns[0..self.pattern_count];
+    }
+};
+
+/// W9d③: 한 번에 주는 패턴·규칙 수 상한(탭 하나의 규칙 상한과 같다 — 서버가 다시 본다).
+pub const max_block_patterns = 32;
 
 /// W9d①: `browser network` 의 거르기 종류 수 상한(서버 `control_browser.max_network_types` 와 같다).
 pub const max_network_types = 20;
@@ -188,6 +215,8 @@ pub const NetworkCmd = struct {
     /// 이 번호보다 오래된 요청만(앞 쪽 결과의 `next_before_req` — 새 요청이 와도 다음 쪽이 밀리지 않는다, W9d① 적대 리뷰 1 회차 F7).
     before_req: ?u64 = null,
     clear: bool = false,
+    /// W9d③: 막기 규칙이 막은 요청만.
+    blocked: bool = false,
 
     pub fn typeNames(self: *const NetworkCmd) []const []const u8 {
         return self.types[0..self.type_count];
@@ -332,6 +361,8 @@ pub const ParseError = error{
     InvalidBodyBytes, // `network-request --max-bytes` 가 1..65536 이 아님
     InvalidBodyOffset, // `network-request --offset` 이 0..1048576 이 아님
     OutWithOffset, // `network-request --out` 은 본문 전부를 쓴다 — `--offset` 과 함께 쓰지 않는다(W9d② 적대 리뷰 3 회차)
+    InvalidBlockAction, // `network-block` 에 동작이 없거나 둘 이상(W9d③)
+    InvalidBlockArgs, // `network-block` 의 동작과 맞지 않는 옵션(패턴 없는 --add·--type 은 --add 와만·--on/--off 는 --strict 와만), 빈 패턴, 상한 넘음
 };
 
 /// `--dialog` 번호의 상한 — JSON 수로 잃지 않고 오가는 가장 큰 정수(번호는 maru 가 1 부터 매긴다).
@@ -514,6 +545,7 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     if (eq(sub, "network")) return .{ .request = .{ .network = try parseNetworkArgs(rest) } };
     if (eq(sub, "network-request")) return .{ .request = .{ .network_request = try parseNetworkRequestArgs(rest) } };
     if (eq(sub, "network-record")) return .{ .request = .{ .network_record = try parseNetworkRecordArgs(rest) } };
+    if (eq(sub, "network-block")) return .{ .request = .{ .network_block = try parseNetworkBlockArgs(rest) } };
     if (eq(sub, "navigate")) {
         const p = try parseSurfaceArg(rest);
         const s = p.surface orelse return error.MissingSurface;
@@ -1084,6 +1116,9 @@ fn parseNetworkArgs(rest: []const []const u8) ParseError!NetworkCmd {
         } else if (eq(a, "--clear")) {
             cmd.clear = true;
             i += 1;
+        } else if (eq(a, "--blocked")) { // W9d③
+            cmd.blocked = true;
+            i += 1;
         } else if (std.mem.startsWith(u8, a, "-")) {
             return error.UnknownOption;
         } else return error.UnexpectedArgument;
@@ -1155,6 +1190,85 @@ fn parseNetworkRecordArgs(rest: []const []const u8) ParseError!@FieldType(Reques
         } else return error.UnexpectedArgument;
     }
     return .{ .surface_id = surface orelse return error.MissingSurface, .on = on orelse return error.MissingRecordSwitch };
+}
+
+/// `network-block --surface <id> (--add P... [--type t,..] | --remove P... | --rule N... | --clear | --list | --strict on|off)`(W9d③) — MCP 꼴
+/// `--action a [--pattern P...] [--rule N...] [--type t,..] [--on|--off]` 도 받는다. 패턴의 문법은 서버가 본다(`pattern_invalid:<why>`).
+fn parseNetworkBlockArgs(rest: []const []const u8) ParseError!NetworkBlockCmd {
+    var surface: ?u64 = null;
+    var cmd: NetworkBlockCmd = .{ .surface_id = 0 };
+    var action: ?NetworkBlockCmd.Action = null;
+    const setAction = struct {
+        fn f(cur: *?NetworkBlockCmd.Action, want: NetworkBlockCmd.Action) ParseError!void {
+            if (cur.*) |c| if (c != want) return error.InvalidBlockAction;
+            cur.* = want;
+        }
+    }.f;
+    var i: usize = 0;
+    while (i < rest.len) {
+        const a = rest[i];
+        if (matchOpt(a, "--surface")) {
+            try assignSurface(&surface, try optValue(rest, &i, "--surface"));
+        } else if (matchOpt(a, "--add") or matchOpt(a, "--remove") or matchOpt(a, "--pattern")) {
+            const name: []const u8 = if (matchOpt(a, "--add")) "--add" else if (matchOpt(a, "--remove")) "--remove" else "--pattern";
+            const v = try optValue(rest, &i, name);
+            if (eq(name, "--add")) try setAction(&action, .add) else if (eq(name, "--remove")) try setAction(&action, .remove);
+            if (v.len == 0 or cmd.pattern_count == max_block_patterns) return error.InvalidBlockArgs;
+            cmd.patterns[cmd.pattern_count] = v;
+            cmd.pattern_count += 1;
+        } else if (matchOpt(a, "--rule")) {
+            const n = std.fmt.parseInt(u64, try optValue(rest, &i, "--rule"), 10) catch return error.InvalidBlockArgs;
+            if (n == 0 or n > std.math.maxInt(u32) or cmd.rule_count == max_block_patterns) return error.InvalidBlockArgs;
+            cmd.rules[cmd.rule_count] = n;
+            cmd.rule_count += 1;
+        } else if (matchOpt(a, "--type")) {
+            var it = std.mem.splitScalar(u8, try optValue(rest, &i, "--type"), ',');
+            while (it.next()) |t| {
+                if (t.len == 0) continue;
+                const known = for (network_type_names) |n| {
+                    if (eq(n, t)) break true;
+                } else false;
+                if (!known or cmd.type_count == max_network_types) return error.InvalidNetworkType;
+                cmd.types[cmd.type_count] = t;
+                cmd.type_count += 1;
+            }
+        } else if (matchOpt(a, "--strict")) {
+            const v = try optValue(rest, &i, "--strict");
+            try setAction(&action, .strict);
+            const on = if (eq(v, "on")) true else if (eq(v, "off")) false else return error.InvalidBlockArgs;
+            if (cmd.on) |o| if (o != on) return error.InvalidBlockArgs;
+            cmd.on = on;
+        } else if (eq(a, "--on") or eq(a, "--off")) {
+            const on = eq(a, "--on");
+            if (cmd.on) |o| if (o != on) return error.InvalidBlockArgs;
+            cmd.on = on;
+            i += 1;
+        } else if (eq(a, "--clear")) {
+            try setAction(&action, .clear);
+            i += 1;
+        } else if (eq(a, "--list")) {
+            try setAction(&action, .list);
+            i += 1;
+        } else if (matchOpt(a, "--action")) {
+            const v = try optValue(rest, &i, "--action");
+            try setAction(&action, std.meta.stringToEnum(NetworkBlockCmd.Action, v) orelse return error.InvalidBlockAction);
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            return error.UnknownOption;
+        } else return error.UnexpectedArgument;
+    }
+    // `--rule` 만 주면 그 규칙을 지운다.
+    if (action == null and cmd.rule_count > 0) action = .remove;
+    cmd.action = action orelse return error.InvalidBlockAction;
+    switch (cmd.action) {
+        .add => if (cmd.pattern_count == 0 or cmd.rule_count > 0) return error.InvalidBlockArgs,
+        .remove => if (cmd.pattern_count == 0 and cmd.rule_count == 0) return error.InvalidBlockArgs,
+        .clear, .list => if (cmd.pattern_count > 0 or cmd.rule_count > 0) return error.InvalidBlockArgs,
+        .strict => if (cmd.on == null or cmd.pattern_count > 0 or cmd.rule_count > 0) return error.InvalidBlockArgs,
+    }
+    if (cmd.type_count > 0 and cmd.action != .add) return error.InvalidBlockArgs;
+    if (cmd.on != null and cmd.action != .strict) return error.InvalidBlockArgs;
+    cmd.surface_id = surface orelse return error.MissingSurface;
+    return cmd;
 }
 
 /// `upload --surface <id> <로케이터> [--] <file>...`(W9c③) — 로케이터 옵션은 click 과 같고, 위치 인자는 파일이다(`--` 뒤는 `-` 로 시작해도 파일).
@@ -1304,7 +1418,7 @@ fn hasHelpFlag(args: []const []const u8) bool {
 /// 다음 토큰을 값으로 받는 옵션인가(`--opt=값` 꼴과 값 없는 플래그는 아니다).
 fn takesValue(opt: []const u8) bool {
     if (!std.mem.startsWith(u8, opt, "--") or std.mem.indexOfScalar(u8, opt, '=') != null) return false;
-    for ([_][]const u8{ "--", "--help", "--interactive", "--clear", "--load", "--visible", "--exact", "--secure", "--accept", "--dismiss" }) |flag| if (eq(opt, flag)) return false;
+    for ([_][]const u8{ "--", "--help", "--interactive", "--clear", "--load", "--visible", "--exact", "--secure", "--accept", "--dismiss", "--list", "--blocked" }) |flag| if (eq(opt, flag)) return false;
     return true;
 }
 
@@ -1487,6 +1601,7 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             if (n.url_contains) |u| try obj.put(gpa, "url_contains", .{ .string = u });
             if (n.before_req) |b| try obj.put(gpa, "before_req", .{ .integer = @intCast(b) });
             if (n.clear) try obj.put(gpa, "clear", .{ .bool = true });
+            if (n.blocked) try obj.put(gpa, "blocked", .{ .bool = true }); // W9d③
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.network", .params = .{ .object = obj } } });
         },
         .network_request => |n| {
@@ -1507,6 +1622,32 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             try obj.put(gpa, "id", .{ .integer = @intCast(n.surface_id) });
             try obj.put(gpa, "on", .{ .bool = n.on });
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.networkRecord", .params = .{ .object = obj } } });
+        },
+        .network_block => |n| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            var patterns = std.json.Array.init(gpa);
+            defer patterns.deinit();
+            var types = std.json.Array.init(gpa);
+            defer types.deinit();
+            var rules = std.json.Array.init(gpa);
+            defer rules.deinit();
+            try obj.put(gpa, "id", .{ .integer = @intCast(n.surface_id) });
+            try obj.put(gpa, "action", .{ .string = @tagName(n.action) });
+            if (n.pattern_count > 0) {
+                for (n.patternSlice()) |pt| try patterns.append(.{ .string = pt });
+                try obj.put(gpa, "patterns", .{ .array = patterns });
+            }
+            if (n.type_count > 0) {
+                for (n.types[0..n.type_count]) |t| try types.append(.{ .string = t });
+                try obj.put(gpa, "types", .{ .array = types });
+            }
+            if (n.rule_count > 0) {
+                for (n.rules[0..n.rule_count]) |r| try rules.append(.{ .integer = @intCast(r) });
+                try obj.put(gpa, "rules", .{ .array = rules });
+            }
+            if (n.on) |on| try obj.put(gpa, "on", .{ .bool = on });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.networkBlock", .params = .{ .object = obj } } });
         },
         .open => |o| {
             var obj: std.json.ObjectMap = .empty;
@@ -1651,7 +1792,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog, upload, network, network_request, network_record };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog, upload, network, network_request, network_record, network_block };
 
 const unauthorized_code: i64 = -32002;
 const unsupported_by_engine_code: i64 = -32008;
@@ -1767,6 +1908,11 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 }
                 // W9d②: 응답 본문을 기록하는 탭(탭 제목의 ◉ 와 같은 신호).
                 if (boolField(o.get("recording"))) try w.writeAll("  ◉ recording");
+                // W9d③: 요청 막기 규칙·엄격(탭 제목의 ⊘ 와 같은 신호).
+                if (o.get("blocking")) |b| if (b == .object) {
+                    const n = intField(b.object.get("rules")) orelse 0;
+                    try w.print("  ⊘ blocking ({d} rule{s}{s})", .{ n, if (n == 1) "" else "s", if (boolField(b.object.get("strict"))) ", strict" else "" });
+                };
                 try w.writeAll("\n");
             }
         },
@@ -1774,6 +1920,11 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             if (boolField(result.get("ok"))) try w.writeAll("ok\n") else {
                 try w.writeAll("error: navigate not ok\n");
                 return false;
+            }
+            // W9d③: 막기 규칙이 그 이동을 막았다 — 탭은 Chromium 의 「막혔다」 페이지를 보이고 주소는 앞 문서 그대로다.
+            if (boolField(result.get("blocked"))) {
+                try w.print("blocked: request-blocking rule {d} stopped this navigation (the tab shows Chromium's ERR_BLOCKED_BY_CLIENT page) — see maru browser network-block --list\n", .{intField(result.get("block_rule")) orelse 0});
+                return true;
             }
             // Chromium 탭은 첫 불러오기를 기다린다(W9a) — 불러온 문서가 없으면 경고 한 줄(이동 자체는 보냈다).
             if (result.get("loaded")) |l| if (l == .bool and !l.bool) try w.writeAll("warning: no page finished loading (an empty response, a download, a same-page link, or the time ran out) — check with get-url\n");
@@ -1914,6 +2065,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             } else if (result.get("kept")) |k| if (k == .bool and !k.bool) try w.writeAll(upload_not_kept_note ++ "\n");
         },
         .network => return renderNetwork(gpa, result, w),
+        .network_block => return renderNetworkBlock(gpa, result, w),
         .network_request => return renderNetworkRequest(gpa, result, w),
         .network_record => {
             // W9d②: 켬은 곧 답한다 — sidecar 가 켜졌다고 알리기 전이면 starting(`browser network` 의 recording 이 이어 알린다).
@@ -2002,6 +2154,90 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
 // 주소·헤더 값·MIME 은 페이지와 서버가 고른 글이다 — 모두 `writePageText` 로 걸러 낸다(제어·양방향·줄 구분 글자가 터미널에 가지 않게).
 
 /// `#<req> <METHOD> <상태|-> <종류> <주소> [<ms>] [<바이트>B] [표시…]` 한 줄씩(새것부터), 끝에 숨김·버림 수와 다음 쪽.
+/// W9d③: `browser.networkBlock` 의 결과 — 제 규칙(번호·패턴·사이트·수·종류·잠듦), 다른 pane 의 규칙 수, 엄격 모드, sidecar 의 상태, 서비스 워커
+/// 길의 나눔과 경고. 패턴·사이트는 에이전트가 준 글이지만 표시 안전하게.
+fn renderNetworkBlock(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.Writer) !bool {
+    const rules = switch (result.get("rules") orelse std.json.Value{ .null = {} }) {
+        .array => |a| a,
+        else => {
+            try w.writeAll("error: malformed network-block result\n");
+            return false;
+        },
+    };
+    const total = intField(result.get("total")) orelse 0;
+    const other = intField(result.get("other_rules")) orelse 0;
+    try w.print("{d} blocking rule{s} on this tab (of 32", .{ total, if (total == 1) "" else "s" });
+    if (other > 0) try w.print("; {d} set by other panes", .{other});
+    try w.writeAll(") — state ");
+    try writePageText(gpa, w, strField(result.get("state")), false);
+    try w.writeAll("\n");
+    // W9d③ 2 차 검증 N-h: `failed` 만으로는 무엇을 할지 모른다 — 다음 바꾸기가 다시 보낸다.
+    if (std.mem.eql(u8, strField(result.get("state")), "failed")) try w.writeAll("note: the browser did not apply the last change to this tab's rules, so requests may not be blocked — add, remove or --clear rules to send them again\n");
+    for (rules.items) |item| {
+        const o = switch (item) {
+            .object => |oo| oo,
+            else => continue,
+        };
+        try w.print("  rule {d} ", .{intField(o.get("id")) orelse 0});
+        try writePageText(gpa, w, strField(o.get("pattern")), false);
+        try w.writeAll(" on ");
+        try writePageText(gpa, w, strField(o.get("site")), false);
+        try w.print(" — hits {d}", .{intField(o.get("hits")) orelse 0});
+        if (intField(o.get("sw_hits"))) |n| try w.print(", service worker {d}", .{n});
+        if (intField(o.get("sw_not_applied"))) |n| if (n > 0) try w.print(", not applied {d}", .{n});
+        if (o.get("types")) |t| if (t == .array) {
+            try w.writeAll(" [types");
+            for (t.array.items) |name| if (name == .string) {
+                try w.writeAll(" ");
+                try writePageText(gpa, w, name.string, false);
+            };
+            try w.writeAll("]");
+        };
+        if (boolField(o.get("dormant"))) try w.writeAll(" [dormant — another site]");
+        try w.writeAll("\n");
+    }
+    for ([_][]const u8{ "added", "already", "removed" }) |key| if (result.get(key)) |v| if (v == .array and v.array.items.len > 0) {
+        try w.print("{s}:", .{key});
+        for (v.array.items) |n| if (n == .integer) try w.print(" {d}", .{n.integer});
+        try w.writeAll("\n");
+    };
+    if (result.get("strict")) |st| if (st == .object) {
+        const so = st.object;
+        if (boolField(so.get("on"))) {
+            try w.writeAll("strict: on for ");
+            try writePageText(gpa, w, strField(so.get("site")), false);
+            try w.writeAll(" (");
+            try writePageText(gpa, w, strField(so.get("state")), false);
+            try w.writeAll(") — this tab bypasses that site's service worker (no offline pages or cached answers there; cross-site iframes are not covered)\n");
+            if (std.mem.eql(u8, strField(so.get("state")), "failed")) try w.writeAll("note: the browser could not turn strict mode on in this tab — run --strict off, then --strict on to try again\n");
+        } else try w.writeAll("strict: off\n");
+        // 20 회 검증 A MED-1: 리다이렉트로 경계를 넘은 문서 — Chromium 은 우회 값을 이동이 시작할 때만 읽는다.
+        const missed = intField(so.get("redirects_not_covered")) orelse 0;
+        const bypassed = intField(so.get("redirects_bypassed_other_site")) orelse 0;
+        if (missed > 0) try w.print("strict: {d} page{s} reached this site through a redirect from another site and still used its service worker (strict applies from the next navigation)\n", .{ missed, if (missed == 1) "" else "s" });
+        if (bypassed > 0) try w.print("strict: {d} page{s} of another site reached through a redirect from this site skipped that site's service worker once\n", .{ bypassed, if (bypassed == 1) "" else "s" });
+    };
+    // 3 차 검증 N-B3-e: 「--strict on」 은 엄격이 이미 켜졌거나 이 탭에 규칙이 없으면 할 일이 아니다(우회해도 막을 규칙이 없다) — 그때는 붙이지 않는다.
+    const strict_on = if (result.get("strict")) |st| st == .object and boolField(st.object.get("on")) else false;
+    if (result.get("service_worker")) |sw| if (sw == .object) {
+        if (boolField(sw.object.get("shared_with_unruled_tab"))) {
+            // 20 회 검증 B N6: 탭 집합만으로 정한 표시다 — 그 사이트에 서비스 워커가 없어도 참일 수 있다(maru 는 모른다). 실제로 「적용 안 됨」 이
+            // 있었을 때만 그렇게 말한다.
+            const not_applied = intField(sw.object.get("not_applied_total")) orelse 0;
+            if (not_applied > 0) {
+                try w.print("note: {d} service- or shared-worker request{s} matched but {s} not blocked — another tab without rules shows this site and may use the same service worker or shared worker", .{ not_applied, if (not_applied == 1) "" else "s", if (not_applied == 1) "was" else "were" });
+            } else try w.writeAll("note: another tab without rules shows this site — if the site uses a service worker or shared worker, requests they make are not blocked");
+            try w.writeAll(if (strict_on or total == 0) "\n" else "; --strict on makes this tab bypass the service worker (not shared workers)\n");
+        }
+    };
+    const unrecorded = intField(result.get("unrecorded")) orelse 0;
+    const skipped = intField(result.get("skipped_unknown_page")) orelse 0;
+    if (unrecorded > 0) try w.print("{d} blocked request{s} not in the network list (over the recording limit)\n", .{ unrecorded, if (unrecorded == 1) "" else "s" });
+    if (skipped > 0) try w.print("{d} request{s} not blocked because the tab's page was unknown\n", .{ skipped, if (skipped == 1) "" else "s" });
+    try w.writeAll("hits count matches, not proof that the page broke; the tab title shows ⊘ while it has rules\n");
+    return true;
+}
+
 fn renderNetwork(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.Writer) !bool {
     const reqs = switch (result.get("requests") orelse std.json.Value{ .null = {} }) {
         .array => |a| a,
@@ -2041,6 +2277,16 @@ fn renderNetwork(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.
         if (sw.len > 0) {
             try w.writeAll(" [");
             try writePageText(gpa, w, sw, false);
+            try w.writeAll("]");
+        }
+        // W9d③: 막기 — 막힌 요청·서비스 워커 길의 적용 안 됨(패턴은 그 규칙을 둔 pane 에게만 온다).
+        if (boolField(o.get("blocked")) or boolField(o.get("sw_not_applied"))) {
+            try w.print(" [{s} rule {d}", .{ if (boolField(o.get("blocked"))) "blocked" else "sw not applied", intField(o.get("block_rule")) orelse 0 });
+            const pat = strField(o.get("block_pattern"));
+            if (pat.len > 0) {
+                try w.writeAll(" ");
+                try writePageText(gpa, w, pat, false);
+            }
             try w.writeAll("]");
         }
         // W9d②: 본문 칸 — 기록한 요청만(잡았으면 크기).
@@ -3449,9 +3695,10 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
         \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
         \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
-        \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page)
+        \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--blocked] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page; --blocked lists only requests your blocking rules stopped)
         \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a 0600 file, replacing it; a binary body needs --out; Chromium tabs)
         \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ◉ while recording)
+        \\  network-block --surface <id> (--add <pattern>... [--type t,..] | --remove <pattern>... | --rule <n>... | --clear | --list | --strict on|off)   block the tab's requests matching scheme://host[:port]/path patterns (* wildcards) on the site where you add them; --strict on makes the tab bypass that site's service worker so its requests can be blocked too (not shared workers; Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ⊘)
         \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
         \\
     ,
@@ -4821,5 +5068,219 @@ fn v20NoHangul(s: []const u8) !void {
             return error.NotEnglish;
         }
         i += len;
+    }
+}
+
+// ── W9d③: browser network-block·network --blocked ──
+
+test "W9d③: network-block 파서 — 사람의 꼴(--add·--remove·--rule·--clear·--list·--strict)과 MCP 꼴(--action·--pattern·--on/--off), 동작은 하나, 맞지 않는 옵션은 거절" {
+    const add = (try parse(&.{ "network-block", "--surface", "9", "--add", "*://*.t.test/*", "--add=https://a.test/x", "--type", "image,xhr" })).request.network_block;
+    try testing.expectEqual(NetworkBlockCmd.Action.add, add.action);
+    try testing.expectEqual(@as(usize, 2), add.pattern_count);
+    try testing.expectEqualStrings("https://a.test/x", add.patterns[1]);
+    try testing.expectEqual(@as(usize, 2), add.type_count);
+    const rm = (try parse(&.{ "network-block", "--surface=9", "--rule", "3", "--rule=4" })).request.network_block;
+    try testing.expect(rm.action == .remove and rm.rule_count == 2 and rm.rules[1] == 4);
+    try testing.expect((try parse(&.{ "network-block", "--surface", "9", "--remove", "https://a.test/" })).request.network_block.action == .remove);
+    try testing.expect((try parse(&.{ "network-block", "--surface", "9", "--clear" })).request.network_block.action == .clear);
+    try testing.expect((try parse(&.{ "network-block", "--surface", "9", "--list" })).request.network_block.action == .list);
+    const st = (try parse(&.{ "network-block", "--surface", "9", "--strict", "on" })).request.network_block;
+    try testing.expect(st.action == .strict and st.on.?);
+    try testing.expect(!(try parse(&.{ "network-block", "--surface", "9", "--strict=off" })).request.network_block.on.?);
+    // MCP 꼴.
+    const m = (try parse(&.{ "network-block", "--surface=9", "--action=add", "--pattern=https://a.test/" })).request.network_block;
+    try testing.expect(m.action == .add and m.pattern_count == 1);
+    try testing.expect((try parse(&.{ "network-block", "--surface=9", "--action=strict", "--on" })).request.network_block.on.?);
+    // 거절.
+    try testing.expectError(error.InvalidBlockAction, parse(&.{ "network-block", "--surface", "9" }));
+    try testing.expectError(error.InvalidBlockAction, parse(&.{ "network-block", "--surface", "9", "--clear", "--list" }));
+    try testing.expectError(error.InvalidBlockAction, parse(&.{ "network-block", "--surface", "9", "--add", "https://a.test/", "--strict", "on" }));
+    try testing.expectError(error.InvalidBlockAction, parse(&.{ "network-block", "--surface", "9", "--action=nope" }));
+    try testing.expectError(error.InvalidBlockArgs, parse(&.{ "network-block", "--surface", "9", "--strict", "maybe" }));
+    try testing.expectError(error.InvalidBlockArgs, parse(&.{ "network-block", "--surface", "9", "--list", "--type", "image" }));
+    try testing.expectError(error.InvalidBlockArgs, parse(&.{ "network-block", "--surface", "9", "--action=strict" }));
+    try testing.expectError(error.InvalidBlockArgs, parse(&.{ "network-block", "--surface", "9", "--clear", "--on" }));
+    try testing.expectError(error.InvalidBlockArgs, parse(&.{ "network-block", "--surface", "9", "--add", "https://a.test/", "--rule", "1" }));
+    try testing.expectError(error.InvalidBlockArgs, parse(&.{ "network-block", "--surface", "9", "--rule", "0" }));
+    try testing.expectError(error.InvalidNetworkType, parse(&.{ "network-block", "--surface", "9", "--add", "https://a.test/", "--type", "websocket" }));
+    try testing.expectError(error.MissingSurface, parse(&.{ "network-block", "--list" }));
+    try testing.expect((try parse(&.{ "network", "--surface", "9", "--blocked" })).request.network.blocked);
+}
+
+test "W9d③: 요청 모양 — browser.networkBlock {id, action, patterns?, types?, rules?, on?}, network 의 blocked" {
+    const a = try buildRequestBytes(testing.allocator, (try parse(&.{ "network-block", "--surface", "9", "--add", "https://a.test/x", "--type", "image" })).request, .{ .number = 1 });
+    defer testing.allocator.free(a);
+    try testing.expect(std.mem.indexOf(u8, a, "\"method\":\"browser.networkBlock\"") != null);
+    try testing.expect(std.mem.indexOf(u8, a, "\"action\":\"add\"") != null);
+    try testing.expect(std.mem.indexOf(u8, a, "\"patterns\":[\"https://a.test/x\"]") != null);
+    try testing.expect(std.mem.indexOf(u8, a, "\"types\":[\"image\"]") != null);
+    try testing.expect(std.mem.indexOf(u8, a, "\"on\"") == null);
+    const s = try buildRequestBytes(testing.allocator, (try parse(&.{ "network-block", "--surface", "9", "--strict", "on" })).request, .{ .number = 1 });
+    defer testing.allocator.free(s);
+    try testing.expect(std.mem.indexOf(u8, s, "\"action\":\"strict\"") != null and std.mem.indexOf(u8, s, "\"on\":true") != null);
+    const n = try buildRequestBytes(testing.allocator, (try parse(&.{ "network", "--surface", "9", "--blocked" })).request, .{ .number = 1 });
+    defer testing.allocator.free(n);
+    try testing.expect(std.mem.indexOf(u8, n, "\"blocked\":true") != null);
+}
+
+test "W9d③: 결과 글 — 규칙·다른 pane 수·엄격·나눔 안내, 막힌 요청 줄 끝 [blocked rule N 패턴], 목록 줄 끝 ⊘, navigate 의 blocked" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"rules\":[{\"id\":2,\"pattern\":\"*://*.t.test/*\",\"site\":\"a.test\",\"hits\":3,\"sw_hits\":0,\"sw_not_applied\":1,\"types\":[\"image\"]}],\"other_rules\":1,\"total\":2,\"max\":32,\"added\":[2],\"state\":\"active\",\"strict\":{\"on\":true,\"site\":\"a.test\",\"state\":\"on\",\"covers_cross_site_iframes\":false},\"page_site\":\"a.test\",\"unrecorded\":0,\"skipped_unknown_page\":0,\"service_worker\":{\"shared_with_unruled_tab\":true,\"not_applied_total\":1}}}", .network_block, &out.writer));
+    const text = out.written();
+    try testing.expect(std.mem.startsWith(u8, text, "2 blocking rules on this tab (of 32; 1 set by other panes) — state active\n  rule 2 *://*.t.test/* on a.test — hits 3, service worker 0, not applied 1 [types image]\nadded: 2\nstrict: on for a.test (on)"));
+    try testing.expect(std.mem.indexOf(u8, text, "note: 1 service- or shared-worker request matched but was not blocked") != null);
+    out.clearRetainingCapacity();
+    // 20 회 검증 B N6: 「적용 안 됨」 이 없으면 서비스 워커가 있다고 단정하지 않는다. A MED-1: 엄격의 리다이렉트 어긋남 수를 말한다.
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"rules\":[],\"other_rules\":0,\"total\":0,\"max\":32,\"state\":\"active\",\"strict\":{\"on\":true,\"site\":\"a.test\",\"state\":\"on\",\"covers_cross_site_iframes\":false,\"redirects_not_covered\":2,\"redirects_bypassed_other_site\":1},\"page_site\":\"a.test\",\"unrecorded\":0,\"skipped_unknown_page\":0,\"service_worker\":{\"shared_with_unruled_tab\":true,\"not_applied_total\":0}}}", .network_block, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "note: another tab without rules shows this site — if the site uses a service worker or shared worker") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "strict: 2 pages reached this site through a redirect from another site and still used its service worker") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "strict: 1 page of another site reached through a redirect from this site skipped") != null);
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[{\"req\":4,\"method\":\"GET\",\"url\":\"https://t.test/px\",\"type\":\"image\",\"state\":\"failed\",\"start_ms\":1,\"error_code\":-20,\"blocked\":true,\"block_rule\":2,\"block_pattern\":\"*://*.t.test/*\"}],\"hidden_before_grant\":0,\"dropped\":0,\"full_details\":true}}", .network, &out.writer));
+    try testing.expectEqualStrings("#4 GET - image https://t.test/px [failed -20] [blocked rule 2 *://*.t.test/*]\n", out.written());
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"surface_id\":3,\"kind\":\"web\",\"title\":\"A\",\"url\":\"https://a.test/\",\"panel_kind\":\"browser\",\"engine\":\"chromium\",\"controllable\":true,\"blocking\":{\"rules\":2,\"strict\":true},\"methods\":[\"navigate\"]}]}}", .list, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "  ⊘ blocking (2 rules, strict)") != null);
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"loaded\":false,\"blocked\":true,\"block_rule\":2}}", .navigate, &out.writer));
+    try testing.expect(std.mem.startsWith(u8, out.written(), "ok\nblocked: request-blocking rule 2 stopped this navigation"));
+}
+
+test "W9d③ 변이: network-block 파서의 상한과 모순 — 패턴 33 개·u32 밖 규칙 번호는 거절, --strict on 과 off 를 함께 주면 거절" {
+    var args: [2 + 3 + 2 * (max_block_patterns + 1)][]const u8 = undefined;
+    args[0] = "network-block";
+    args[1] = "--surface";
+    args[2] = "9";
+    var n: usize = 3;
+    for (0..max_block_patterns + 1) |_| {
+        args[n] = "--add";
+        args[n + 1] = "https://a.test/";
+        n += 2;
+    }
+    try testing.expectError(error.InvalidBlockArgs, parse(args[0..n]));
+    try testing.expectEqual(@as(usize, max_block_patterns), (try parse(args[0 .. n - 2])).request.network_block.pattern_count);
+    try testing.expectError(error.InvalidBlockArgs, parse(&.{ "network-block", "--surface", "9", "--rule", "4294967296" }));
+    try testing.expectEqual(@as(u64, 4294967295), (try parse(&.{ "network-block", "--surface", "9", "--rule", "4294967295" })).request.network_block.rules[0]);
+    try testing.expectError(error.InvalidBlockArgs, parse(&.{ "network-block", "--surface", "9", "--strict", "on", "--strict", "off" }));
+    try testing.expectError(error.InvalidBlockArgs, parse(&.{ "network-block", "--surface", "9", "--action=strict", "--on", "--off" }));
+}
+
+// ── W9d③ v20b(적대 검증 17 회차, 검증자 B) ──
+
+test "W9d③ v20b R17a: network-block 파서의 나쁜 입력 — 값 없는 옵션·빈 값·숫자 아닌 규칙·동작 둘·맞지 않는 짝, 같은 동작 되풀이는 받는다, 사용 안내는 영어" {
+    const Case = struct { args: []const []const u8, want: ?ParseError };
+    for ([_]Case{
+        .{ .args = &.{ "network-block", "--surface", "9", "--add" }, .want = error.MissingOptionValue },
+        .{ .args = &.{ "network-block", "--surface", "9", "--add=" }, .want = error.InvalidBlockArgs },
+        .{ .args = &.{ "network-block", "--surface", "9", "--rule", "abc" }, .want = error.InvalidBlockArgs },
+        .{ .args = &.{ "network-block", "--surface", "9", "--rule", "-1" }, .want = error.InvalidBlockArgs },
+        .{ .args = &.{ "network-block", "--surface", "9", "--rule", "+3" }, .want = null },
+        .{ .args = &.{ "network-block", "--surface", "9", "--strict" }, .want = error.MissingOptionValue },
+        .{ .args = &.{ "network-block", "--surface", "9", "--strict", "ON" }, .want = error.InvalidBlockArgs },
+        .{ .args = &.{ "network-block", "--surface", "9", "--add", "x", "--remove", "y" }, .want = error.InvalidBlockAction },
+        .{ .args = &.{ "network-block", "--surface", "9", "--pattern", "x", "--clear" }, .want = error.InvalidBlockArgs },
+        .{ .args = &.{ "network-block", "--surface", "9", "--pattern", "x" }, .want = error.InvalidBlockAction },
+        .{ .args = &.{ "network-block", "--surface", "9", "--list", "--list" }, .want = null },
+        .{ .args = &.{ "network-block", "--surface", "9", "--action=add", "--strict", "on" }, .want = error.InvalidBlockAction },
+        .{ .args = &.{ "network-block", "--surface", "9", "--add", "x", "--type", ",," }, .want = null },
+        .{ .args = &.{ "network-block", "--surface", "9", "--add", "x", "--type", "service_worker" }, .want = null },
+        .{ .args = &.{ "network-block", "--surface", "9", "--add", "x", "stray" }, .want = error.UnexpectedArgument },
+        .{ .args = &.{ "network-block", "--surface", "9", "--bogus" }, .want = error.UnknownOption },
+        .{ .args = &.{ "network-block", "--surface", "9", "--surface", "10", "--list" }, .want = error.DuplicateSurface },
+        .{ .args = &.{ "network", "--surface", "9", "--blocked", "--blocked" }, .want = null },
+    }) |c| {
+        const got = parse(c.args);
+        if (c.want) |w| {
+            try testing.expectError(w, got);
+        } else _ = try got;
+    }
+    for ([_]ParseError{ error.InvalidBlockAction, error.InvalidBlockArgs }) |e| {
+        const text = @import("browser/run.zig").usageReason(e);
+        for (text) |ch| try testing.expect(ch < 0x80 or ch >= 0xE2); // 한글(0xEA–0xED 시작) 없음 — 영어·기호만
+        try testing.expect(std.mem.indexOf(u8, text, "network-block") != null);
+    }
+}
+
+test "W9d③ v20b R17b: 적대적 주소가 막힌 줄·목록 줄을 위조하지 못한다 — 줄바꿈·ESC·양방향·U+2028 이 든 주소와 패턴, 출력은 요청마다 한 줄" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const hostile = "https://t.test/a\\n#99 GET 200 document https://bank.test/ [blocked rule 1 *://*]\\u001b[2J\\u202e\\u2028x";
+    const resp = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[{\"req\":4,\"method\":\"GET\",\"url\":\"" ++ hostile ++ "\",\"type\":\"image\",\"state\":\"failed\",\"start_ms\":1,\"error_code\":-20,\"blocked\":true,\"block_rule\":2,\"block_pattern\":\"*://*.t.test/*\\n#5 forged\"},{\"req\":3,\"method\":\"GET\",\"url\":\"https://a.test/sw\",\"type\":\"fetch\",\"state\":\"done\",\"status\":200,\"start_ms\":1,\"sw_not_applied\":true,\"block_rule\":6}],\"hidden_before_grant\":0,\"dropped\":0,\"full_details\":true}}";
+    try testing.expect(try renderResponse(testing.allocator, resp, .network, &out.writer));
+    const text = out.written();
+    var lines: usize = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |l| if (l.len > 0) {
+        lines += 1;
+    };
+    try testing.expectEqual(@as(usize, 2), lines);
+    try testing.expect(std.mem.indexOfScalar(u8, text, 0x1b) == null);
+    try testing.expect(std.mem.indexOf(u8, text, "\u{202e}") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "\u{2028}") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "[sw not applied rule 6]") != null);
+    // 막기 결과의 글 칸(사이트·state·종류 — 앱이 만든 값이지만)도 걸러진다.
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"rules\":[{\"id\":1,\"pattern\":\"https://a.test/\\nrule 2 forged\",\"site\":\"a.test\\u001b[31m\",\"hits\":1,\"types\":[\"image\\n\"]}],\"other_rules\":0,\"total\":1,\"state\":\"active\\nstrict: on\",\"strict\":{\"on\":false},\"page_site\":\"a.test\",\"unrecorded\":0,\"skipped_unknown_page\":0,\"service_worker\":{\"shared_with_unruled_tab\":false}}}", .network_block, &out.writer));
+    const t2 = out.written();
+    try testing.expect(std.mem.indexOfScalar(u8, t2, 0x1b) == null);
+    try testing.expect(std.mem.indexOf(u8, t2, "\nrule 2 forged") == null);
+    try testing.expect(std.mem.indexOf(u8, t2, "\nstrict: on") == null);
+    // 결과가 객체가 아니다·rules 가 배열이 아니다 — 실패(rc≠0)로.
+    out.clearRetainingCapacity();
+    try testing.expect(!(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"rules\":3}}", .network_block, &out.writer)));
+}
+
+test "W9d③ v20b2 R17·N-h: 새 거절 까닭(other_pane·page_host_too_long·page_host_invalid)은 영어 한 줄과 코드, failed 상태(규칙·엄격)에는 할 일 한 줄" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    for ([_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"strict mode on this tab was turned on by another pane — only that pane can change it\",\"data\":{\"reason\":\"other_pane\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"this page's host is longer than 253 bytes — blocking cannot be bound to it\",\"data\":{\"reason\":\"page_host_too_long\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"this page's host cannot be used as a blocking site\",\"data\":{\"reason\":\"page_host_invalid\"}}}",
+    }) |resp| {
+        out.clearRetainingCapacity();
+        try testing.expect(!try renderResponse(testing.allocator, resp, .network_block, &out.writer));
+        try testing.expect(std.mem.startsWith(u8, out.written(), "error: ") and std.mem.endsWith(u8, out.written(), "(-32602)\n"));
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "\n"));
+    }
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"rules\":[],\"other_rules\":0,\"total\":0,\"max\":32,\"state\":\"failed\",\"strict\":{\"on\":false,\"state\":\"off\",\"covers_cross_site_iframes\":false,\"redirects_not_covered\":1},\"page_site\":\"a.test\",\"unrecorded\":0,\"skipped_unknown_page\":0,\"service_worker\":{\"shared_with_unruled_tab\":false},\"warnings\":[\"strict_redirect_gap\"]}}", .network_block, &out.writer));
+    // 2 차 검증 N-h: `failed` 에는 무엇을 할지 영어 한 줄을 붙인다(엄격의 `failed` 도).
+    try testing.expect(std.mem.indexOf(u8, out.written(), "state failed\nnote: the browser did not apply the last change to this tab's rules") != null);
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"rules\":[],\"other_rules\":0,\"total\":0,\"max\":32,\"state\":\"active\",\"strict\":{\"on\":true,\"site\":\"a.test\",\"state\":\"failed\",\"covers_cross_site_iframes\":false,\"redirects_not_covered\":0},\"page_site\":\"a.test\",\"unrecorded\":0,\"skipped_unknown_page\":0,\"service_worker\":{\"shared_with_unruled_tab\":false}}}", .network_block, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "note: the browser could not turn strict mode on in this tab") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "did not apply the last change") == null);
+}
+
+test "W9d③ v20c R18: 엄격을 끈·지운 뒤의 결과(리다이렉트 수 0)에는 엄격 리다이렉트 줄이 없다, sent·active 에는 failed 안내가 없다, failed 둘은 안내 둘" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"rules\":[],\"other_rules\":0,\"total\":0,\"max\":32,\"removed\":[1,2],\"state\":\"sent\",\"strict\":{\"on\":false,\"state\":\"off\",\"covers_cross_site_iframes\":false,\"redirects_not_covered\":0,\"redirects_bypassed_other_site\":0},\"page_site\":\"a.test\",\"unrecorded\":0,\"skipped_unknown_page\":0,\"service_worker\":{\"shared_with_unruled_tab\":false,\"not_applied_total\":0}}}", .network_block, &out.writer));
+    const t1 = out.written();
+    try testing.expect(std.mem.indexOf(u8, t1, "strict: off\n") != null and std.mem.indexOf(u8, t1, "through a redirect") == null and std.mem.indexOf(u8, t1, "note:") == null and std.mem.indexOf(u8, t1, "removed: 1 2\n") != null);
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"rules\":[{\"id\":3,\"pattern\":\"https://a.test/x\",\"site\":\"a.test\",\"hits\":0}],\"other_rules\":0,\"total\":1,\"max\":32,\"state\":\"failed\",\"strict\":{\"on\":true,\"site\":\"a.test\",\"state\":\"failed\",\"covers_cross_site_iframes\":false,\"redirects_not_covered\":2,\"redirects_bypassed_other_site\":1},\"page_site\":\"a.test\",\"unrecorded\":0,\"skipped_unknown_page\":0,\"service_worker\":{\"shared_with_unruled_tab\":false}}}", .network_block, &out.writer));
+    const t2 = out.written();
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, t2, "note: the browser"));
+    try testing.expect(std.mem.indexOf(u8, t2, "strict: 2 pages reached this site through a redirect") != null and std.mem.indexOf(u8, t2, "strict: 1 page of another site") != null);
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, t2, "\n"), '\n');
+    while (lines.next()) |ln| try testing.expect(ln.len > 0);
+}
+
+test "W9d③ 3 차 검증 N-B3-e: 「--strict on makes this tab bypass the service worker」 는 엄격이 꺼졌고 이 탭에 규칙이 있을 때만 — 이미 켰거나 규칙이 없으면 안내만" {
+    const Case = struct { total: u8, strict: bool, hint: bool };
+    for ([_]Case{ .{ .total = 1, .strict = false, .hint = true }, .{ .total = 1, .strict = true, .hint = false }, .{ .total = 0, .strict = false, .hint = false } }) |c| {
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        var jb: [1024]u8 = undefined;
+        const rules = if (c.total == 1) "[{\"id\":3,\"pattern\":\"https://a.test/x\",\"site\":\"a.test\",\"hits\":0}]" else "[]";
+        const strict = if (c.strict) "{\"on\":true,\"site\":\"a.test\",\"state\":\"on\",\"covers_cross_site_iframes\":false}" else "{\"on\":false,\"state\":\"off\",\"covers_cross_site_iframes\":false}";
+        const j = try std.fmt.bufPrint(&jb, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"rules\":{s},\"other_rules\":0,\"total\":{d},\"max\":32,\"state\":\"active\",\"strict\":{s},\"page_site\":\"a.test\",\"unrecorded\":0,\"skipped_unknown_page\":0,\"service_worker\":{{\"shared_with_unruled_tab\":true}}}}}}", .{ rules, c.total, strict });
+        try testing.expect(try renderResponse(testing.allocator, j, .network_block, &out.writer));
+        const t = out.written();
+        try testing.expect(std.mem.indexOf(u8, t, "note: another tab without rules shows this site") != null);
+        try testing.expectEqual(c.hint, std.mem.indexOf(u8, t, "--strict on makes this tab bypass the service worker (not shared workers)") != null);
     }
 }

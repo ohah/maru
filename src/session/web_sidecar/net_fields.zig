@@ -12,6 +12,7 @@ const std = @import("std");
 const wire = @import("wire.zig");
 const message = @import("message.zig");
 const fields = @import("fields.zig");
+const net_block = @import("net_block.zig"); // W9d③: 막기 규칙의 패턴 — maru 와 sidecar 가 같은 함수로 본다
 
 const Cursor = wire.Cursor;
 const ReadCursor = wire.ReadCursor;
@@ -382,6 +383,11 @@ pub fn checkEnd(v: message.NetEnd) Error!void {
     if (v.outcome == .success and v.error_code != 0) return error.InvalidNetwork;
     // CEF `received_content_length` 는 i64 — 음수는 sidecar 가 0 으로 보낸다.
     if (v.received > std.math.maxInt(i64)) return error.InvalidNetwork;
+    // W9d③: 막힘·적용 안 됨은 하나만, 둘 중 하나일 때만 규칙 번호, 막힌 요청은 실패로 끝났다.
+    if (v.flags._reserved != 0) return error.InvalidNetwork;
+    if (v.flags.blocked and v.flags.sw_not_applied) return error.InvalidNetwork;
+    if ((v.flags.blocked or v.flags.sw_not_applied) != (v.rule_id != 0)) return error.InvalidNetwork;
+    if (v.flags.blocked and v.outcome != .failed) return error.InvalidNetwork;
 }
 
 pub fn writeEnd(cursor: *Cursor, v: message.NetEnd) Error!void {
@@ -392,6 +398,8 @@ pub fn writeEnd(cursor: *Cursor, v: message.NetEnd) Error!void {
     try cursor.writeU32(@bitCast(v.error_code));
     try cursor.writeU64(v.received);
     try cursor.writeU64(v.time_ms);
+    try cursor.writeByte(@bitCast(v.flags));
+    try cursor.writeU32(v.rule_id);
 }
 
 pub fn readEnd(cursor: *ReadCursor) Error!message.NetEnd {
@@ -402,6 +410,8 @@ pub fn readEnd(cursor: *ReadCursor) Error!message.NetEnd {
         .error_code = @bitCast(try cursor.readU32()),
         .received = try cursor.readU64(),
         .time_ms = try cursor.readU64(),
+        .flags = @bitCast(try cursor.readByte()),
+        .rule_id = try cursor.readU32(),
     };
     try checkEnd(v);
     return v;
@@ -566,6 +576,155 @@ pub fn readRecordState(cursor: *ReadCursor) Error!message.NetRecordState {
     };
     try checkRecordState(v);
     return v;
+}
+
+// ── 요청 막기(W9d③) ────────────────────────────────────────────────────────────────────────────────────────
+
+/// `net_block` — 규칙 수 상한, 번호 0·중복 없음, 종류 마스크는 아는 종류만(서비스 워커·18 빼고), 사이트는 호스트, 패턴은 풀리고 정규형 그대로
+/// (`net_block.parse` — maru 와 sidecar 가 같은 함수), 엄격 사이트는 빈 글이거나 호스트.
+pub fn checkBlock(v: message.NetBlock) Error!void {
+    if (v.count > message.max_net_block_rules) return error.InvalidNetwork;
+    if (v.strict_site.len != 0) try checkHost(v.strict_site);
+    for (v.rules[0..v.count], 0..) |r, i| {
+        if (r.id == 0) return error.InvalidNetwork;
+        for (v.rules[0..i]) |q| if (q.id == r.id) return error.InvalidNetwork;
+        if (r.types & ~net_block.types_mask_valid != 0) return error.InvalidNetwork;
+        try checkHost(r.site);
+        if (r.pattern.len == 0 or r.pattern.len > message.max_net_block_pattern_bytes) return error.InvalidNetwork;
+        switch (net_block.parse(r.pattern)) {
+            .ok => |p| if (!std.mem.eql(u8, p.norm(), r.pattern)) return error.InvalidNetwork,
+            .err => return error.InvalidNetwork,
+        }
+    }
+}
+
+pub fn writeBlock(cursor: *Cursor, v: message.NetBlock) Error!void {
+    try checkBlock(v);
+    try fields.writeBrowser(cursor, v.browser);
+    try cursor.writeU32(v.generation);
+    try cursor.writeByte(@intCast(v.strict_site.len));
+    try cursor.writeBytes(v.strict_site);
+    try cursor.writeByte(v.count);
+    for (v.rules[0..v.count]) |r| {
+        try cursor.writeU32(r.id);
+        try cursor.writeU32(r.types);
+        try cursor.writeByte(@intCast(r.site.len));
+        try cursor.writeBytes(r.site);
+        try writeLine(cursor, r.pattern);
+    }
+}
+
+pub fn readBlock(cursor: *ReadCursor) Error!message.NetBlock {
+    var v: message.NetBlock = .{ .browser = try fields.readBrowser(cursor), .generation = try cursor.readU32() };
+    const strict_len = try cursor.readByte();
+    v.strict_site = try cursor.readBytes(strict_len);
+    v.count = try cursor.readByte();
+    if (v.count > message.max_net_block_rules) return error.InvalidNetwork;
+    for (v.rules[0..v.count]) |*r| {
+        r.id = try cursor.readU32();
+        r.types = try cursor.readU32();
+        const site_len = try cursor.readByte();
+        r.site = try cursor.readBytes(site_len);
+        r.pattern = try readLine(cursor, message.max_net_block_pattern_bytes);
+    }
+    try checkBlock(v);
+    return v;
+}
+
+pub fn checkBlockState(v: message.NetBlockState) Error!void {
+    if (!v.ok and v.strict != .off) return error.InvalidNetwork; // 적용하지 못한 세대에는 엄격 모드도 없다
+}
+
+pub fn writeBlockState(cursor: *Cursor, v: message.NetBlockState) Error!void {
+    try checkBlockState(v);
+    try fields.writeBrowser(cursor, v.browser);
+    try cursor.writeU32(v.generation);
+    try cursor.writeByte(@intFromBool(v.ok));
+    try cursor.writeByte(@backingInt(v.strict));
+}
+
+pub fn readBlockState(cursor: *ReadCursor) Error!message.NetBlockState {
+    const v: message.NetBlockState = .{
+        .browser = try fields.readBrowser(cursor),
+        .generation = try cursor.readU32(),
+        .ok = try fields.readBool(cursor),
+        .strict = std.enums.fromInt(message.NetStrictState, try cursor.readByte()) orelse return error.InvalidNetwork,
+    };
+    try checkBlockState(v);
+    return v;
+}
+
+/// `net_block_hits` — 항목 수 상한, 번호 0·중복 없음, 빈 차이(모두 0 이고 표시도 없음)는 보내지 않는다.
+pub fn checkBlockHits(v: message.NetBlockHits) Error!void {
+    if (v.count > message.max_net_block_rules) return error.InvalidNetwork;
+    for (v.entries[0..v.count], 0..) |e, i| {
+        if (e.rule_id == 0) return error.InvalidNetwork;
+        for (v.entries[0..i]) |q| if (q.rule_id == e.rule_id) return error.InvalidNetwork;
+        if (e.hits == 0 and e.sw_hits == 0 and e.sw_not_applied == 0) return error.InvalidNetwork;
+    }
+    if (v.count == 0 and v.unrecorded == 0 and v.skipped_unknown_page == 0 and v.strict_redirect_missed == 0 and v.strict_redirect_bypassed == 0 and !v.sw_shared_with_unruled_tab) return error.InvalidNetwork;
+}
+
+pub fn writeBlockHits(cursor: *Cursor, v: message.NetBlockHits) Error!void {
+    try checkBlockHits(v);
+    try fields.writeBrowser(cursor, v.browser);
+    try cursor.writeU32(v.generation);
+    try cursor.writeU32(v.unrecorded);
+    try cursor.writeU32(v.skipped_unknown_page);
+    try cursor.writeU32(v.strict_redirect_missed);
+    try cursor.writeU32(v.strict_redirect_bypassed);
+    try cursor.writeByte(@intFromBool(v.sw_shared_with_unruled_tab));
+    try cursor.writeByte(v.count);
+    for (v.entries[0..v.count]) |e| {
+        try cursor.writeU32(e.rule_id);
+        try cursor.writeU32(e.hits);
+        try cursor.writeU32(e.sw_hits);
+        try cursor.writeU32(e.sw_not_applied);
+    }
+}
+
+pub fn readBlockHits(cursor: *ReadCursor) Error!message.NetBlockHits {
+    var v: message.NetBlockHits = .{
+        .browser = try fields.readBrowser(cursor),
+        .generation = try cursor.readU32(),
+        .unrecorded = try cursor.readU32(),
+        .skipped_unknown_page = try cursor.readU32(),
+        .strict_redirect_missed = try cursor.readU32(),
+        .strict_redirect_bypassed = try cursor.readU32(),
+        .sw_shared_with_unruled_tab = try fields.readBool(cursor),
+        .count = try cursor.readByte(),
+    };
+    if (v.count > message.max_net_block_rules) return error.InvalidNetwork;
+    for (v.entries[0..v.count]) |*e| e.* = .{ .rule_id = try cursor.readU32(), .hits = try cursor.readU32(), .sw_hits = try cursor.readU32(), .sw_not_applied = try cursor.readU32() };
+    try checkBlockHits(v);
+    return v;
+}
+
+/// `error_page` — 오류 번호는 음수(ERR_ABORTED 는 sidecar 가 보내지 않지만 받는 쪽은 가르지 않는다).
+pub fn checkErrorPage(v: message.ErrorPage) Error!void {
+    if (v.error_code >= 0) return error.InvalidNetwork;
+}
+
+pub fn writeErrorPage(cursor: *Cursor, v: message.ErrorPage) Error!void {
+    try checkErrorPage(v);
+    try fields.writeBrowser(cursor, v.browser);
+    try cursor.writeU32(@bitCast(v.error_code));
+    try cursor.writeU32(v.blocked_rule);
+}
+
+pub fn readErrorPage(cursor: *ReadCursor) Error!message.ErrorPage {
+    const v: message.ErrorPage = .{ .browser = try fields.readBrowser(cursor), .error_code = @bitCast(try cursor.readU32()), .blocked_rule = try cursor.readU32() };
+    try checkErrorPage(v);
+    return v;
+}
+
+// 가장 큰 막기 frame(규칙 32 개 — 사이트·패턴 상한)이 frame 상한 안에 든다(계획 §8 — 약 25.2 KiB).
+comptime {
+    const rule = 4 + 4 + (1 + max_host_bytes) + (2 + message.max_net_block_pattern_bytes);
+    const block = wire.prefix_len + wire.common_len + 8 + 4 + (1 + max_host_bytes) + 1 + message.max_net_block_rules * rule;
+    std.debug.assert(block <= wire.max_frame_bytes);
+    std.debug.assert(message.max_net_block_rules == net_block.max_rules);
+    std.debug.assert(message.max_net_block_pattern_bytes == net_block.max_pattern_bytes);
 }
 
 // 가장 큰 본문 조각 frame 도 frame 상한 안에 든다.

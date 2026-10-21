@@ -97,6 +97,11 @@
 #                   다른 사이트(localhost)에서 쿠키가 실린 스크립트는 그 사이트의 쿠키 권한 전에는 needs_cookie_permission, get-cookies 뒤에는 본문 ·
 #                   본문 권한이 없는 둘째 pane 에게는 needs_body_permission, 그 pane 이 기록을 허락받은 뒤(확인 모달, 자동 승인)에는 그 뒤 요청만
 #                   (그 전 요청은 before_body_permission) · 모든 grant 를 철회하면 ◉ 이 사라지고 본문도 지워진다
+#   w9d-block       (W9d③) 요청 막기: 에이전트가 연 탭은 묻지 않고 규칙을 둔다(`network-block --add`, 목록에 ⊘ blocking) — 막힌 fetch 는 페이지에
+#                   TypeError 이고 서버에 닿지 않는다, 기록에 `[blocked rule N 패턴]`·`network --blocked` 는 막힌 것만, 막힌 이동은 `blocked:` 줄 ·
+#                   서비스 워커가 다스리는 페이지의 fetch 는 그 출처를 보이는 규칙 없는 탭이 있으면 막지 않고 「not applied」 로 세고(없으면 막는다),
+#                   `--strict on` 이면 그 탭이 서비스 워커를 건너뛰어 같은 fetch 가 막힌다(목록에 strict) · `--clear` 뒤 ⊘ 가 사라지고 fetch 가 서버에
+#                   닿는다 · 규칙을 다시 두고 모든 grant 를 철회하면(앱 대본 `revokegrants`) ⊘ 가 사라진다
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -447,6 +452,14 @@ mkdir -p "$root/www/nsw"
 printf '<!doctype html><title>nsw</title><script>navigator.serviceWorker.register("/nsw/sw.js",{scope:"/nsw/"}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}fetch("/nsw/data.json?"+Date.now())})</script>nsw' > "$root/www/nsw/page.html"
 printf 'self.addEventListener("install",function(e){self.skipWaiting()});self.addEventListener("activate",function(e){e.waitUntil(self.clients.claim())});self.addEventListener("fetch",function(e){e.respondWith(fetch(e.request))});' > "$root/www/nsw/sw.js"
 printf '{"sw":1}' > "$root/www/nsw/data.json"
+# W9d③: 요청 막기 — 막을 주소(/blk/)와 서비스 워커 페이지(범위 /bsw/ — 다른 단계의 페이지를 다스리지 않게).
+printf '<!doctype html><title>blkhome</title>blkhome' > "$root/www/blkhome.html"
+mkdir -p "$root/www/blk" "$root/www/bsw"
+printf '{"blk":1}' > "$root/www/blk/data.json"
+printf '<!doctype html><title>blkdoc</title>blkdoc' > "$root/www/blk/doc.html"
+printf '<!doctype html><title>bsw</title><script>navigator.serviceWorker.register("/bsw/sw.js",{scope:"/bsw/"}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300)}})</script>bsw' > "$root/www/bsw/page.html"
+printf 'self.addEventListener("install",function(e){self.skipWaiting()});self.addEventListener("activate",function(e){e.waitUntil(self.clients.claim())});self.addEventListener("fetch",function(e){e.respondWith(fetch(e.request))});' > "$root/www/bsw/sw.js"
+printf '{"bsw":1}' > "$root/www/bsw/data.json"
 # W9d②: 응답 본문 — chunked JSON·2 MiB JSON·PNG·잘못된 UTF-8 JSON·다른 사이트(localhost)에서 쿠키가 실린 스크립트(서버가 만든다). fetch 는 본문을
 # 읽는다 — Chromium 은 페이지가 읽기 전에는 그 요청을 끝내지 않는다(판정자 실측 — 그러면 본문도 없다).
 printf '<!doctype html><title>body</title><img src="/bodypic.png"><script src="http://localhost:%s/bodycred.js"></script><script>function F(u){return fetch(u).then(function(r){return r.text()})}F("/bodyc.json");F("/bodybig.json");F("/bodybin.json")</script>body' "$port" > "$root/www/body.html"
@@ -1277,6 +1290,49 @@ sleep 1.5
 "\$cli" browser list > "\$out/bd-blist2" 2>&1
 "\$cli" browser network --surface "\$bt" > "\$out/bd-revoked" 2>&1; echo "rc=\$?" >> "\$out/bd-revoked"
 "\$cli" browser network-request --surface "\$bt" --req "\$bc" --body > "\$out/bd-revoked-req" 2>&1; echo "rc=\$?" >> "\$out/bd-revoked-req"
+# ── W9d③: 요청 막기 ──
+# 에이전트가 연 탭 — 묻지 않고 규칙을 둔다(막기는 네트워크 기록 위에 선다 — 먼저 한 번 읽는다).
+fx() { printf 'fetch("%s").then(function(r){return "ok "+r.status},function(e){return "reject "+e.name})' "\$1"; }
+"\$cli" browser open --url "http://127.0.0.1:$port/blkhome.html" > "\$out/bk-open" 2>&1
+kt=\$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "\$out/bk-open")
+"\$cli" browser network --surface "\$kt" > "\$out/bk-net0" 2>&1; echo "rc=\$?" >> "\$out/bk-net0"
+"\$cli" browser network-block --surface "\$kt" --add "http://127.0.0.1:$port/blk/*" > "\$out/bk-add" 2>&1; echo "rc=\$?" >> "\$out/bk-add"
+"\$cli" browser exec --surface "\$kt" "\$(fx /blk/data.json?t1)" > "\$out/bk-fetch" 2>&1
+"\$cli" browser exec --surface "\$kt" "\$(fx /blkhome.html?ok)" > "\$out/bk-fetch-ok" 2>&1
+sleep 0.5
+"\$cli" browser network --surface "\$kt" --blocked > "\$out/bk-blocked" 2>&1; echo "rc=\$?" >> "\$out/bk-blocked"
+"\$cli" browser list > "\$out/bk-list" 2>&1
+"\$cli" browser navigate --surface "\$kt" "http://127.0.0.1:$port/blk/doc.html" > "\$out/bk-nav" 2>&1; echo "rc=\$?" >> "\$out/bk-nav"
+# 서비스 워커 페이지 — 다스려질 때까지 기다린다.
+"\$cli" browser navigate --surface "\$kt" "http://127.0.0.1:$port/bsw/page.html" > "\$out/bk-sw-nav" 2>&1
+n=0; while [ \$n -lt 60 ]; do
+    "\$cli" browser exec --surface "\$kt" 'navigator.serviceWorker.controller ? "controlled" : "not"' > "\$out/bk-sw-ctl" 2>&1
+    grep -q '"controlled"' "\$out/bk-sw-ctl" && break
+    sleep 0.25; n=\$((n + 1))
+done
+"\$cli" browser network-block --surface "\$kt" --add "http://127.0.0.1:$port/bsw/data*" > "\$out/bk-sw-add" 2>&1; echo "rc=\$?" >> "\$out/bk-sw-add"
+"\$cli" browser exec --surface "\$kt" "\$(fx /bsw/data.json?s1)" > "\$out/bk-sw-fetch" 2>&1
+sleep 0.5
+"\$cli" browser network --surface "\$kt" --url-contains /bsw/data.json > "\$out/bk-sw-net" 2>&1
+"\$cli" browser network-block --surface "\$kt" --list > "\$out/bk-sw-ls" 2>&1; echo "rc=\$?" >> "\$out/bk-sw-ls"
+# 엄격 모드 — 이 탭이 서비스 워커를 건너뛰어 같은 fetch 가 탭 길로 와 막힌다.
+"\$cli" browser network-block --surface "\$kt" --strict on > "\$out/bk-strict" 2>&1; echo "rc=\$?" >> "\$out/bk-strict"
+sleep 1
+"\$cli" browser exec --surface "\$kt" "\$(fx /bsw/data.json?s2)" > "\$out/bk-strict-fetch" 2>&1
+"\$cli" browser network-block --surface "\$kt" --list > "\$out/bk-strict-ls" 2>&1; echo "rc=\$?" >> "\$out/bk-strict-ls"
+"\$cli" browser list > "\$out/bk-list2" 2>&1
+"\$cli" browser network-block --surface "\$kt" --strict off > "\$out/bk-strict-off" 2>&1; echo "rc=\$?" >> "\$out/bk-strict-off"
+# 지우기 — ⊘ 가 사라지고 fetch 가 서버에 닿는다.
+"\$cli" browser network-block --surface "\$kt" --clear > "\$out/bk-clear" 2>&1; echo "rc=\$?" >> "\$out/bk-clear"
+"\$cli" browser navigate --surface "\$kt" "http://127.0.0.1:$port/blkhome.html?2" > "\$out/bk-nav2" 2>&1
+"\$cli" browser exec --surface "\$kt" "\$(fx /blk/data.json?t3)" > "\$out/bk-fetch3" 2>&1
+"\$cli" browser list > "\$out/bk-list3" 2>&1
+# 규칙을 다시 두고 모든 grant 를 철회한다(앱 대본 「revokegrants」) — ⊘ 가 사라진다.
+"\$cli" browser network-block --surface "\$kt" --add "http://127.0.0.1:$port/blk/*" > "\$out/bk-add2" 2>&1; echo "rc=\$?" >> "\$out/bk-add2"
+"\$cli" browser list > "\$out/bk-list4" 2>&1
+touch "\$out/block-revoke-now"
+sleep 1.5
+"\$cli" browser list > "\$out/bk-list5" 2>&1
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -1290,7 +1346,7 @@ up_bid=$(grep -a -A1 '<key>CFBundleIdentifier</key>' "$app" | sed -n 's/.*<strin
 up_stale="$root/home/Library/Application Support/maru/web/${up_bid:-dev.maru.apphost}/profile/upload-staging/424242"
 (umask 077 && mkdir -p "$up_stale/1/0" && printf 'stale\n' > "$up_stale/1/0/old.txt")
 # 숨은 탭 경우(W9b②-3) — pane 대본이 hide-now 를 만들면 새 탭으로 Chromium 탭을 숨기고, show-now 면 돌아온다.
-printf 'waitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\n' "$out/hide-now" "$out/show-now" "$out/hide2-now" "$out/show2-now" "$out/net-revoke-now" "$out/body-revoke-now" > "$root/hide.txt"
+printf 'waitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\n' "$out/hide-now" "$out/show-now" "$out/hide2-now" "$out/show2-now" "$out/net-revoke-now" "$out/body-revoke-now" "$out/block-revoke-now" > "$root/hide.txt"
 printf 'ui.language = ko\nshell.command = %s\nshell.args =\nsession.keep-alive-after-quit = false\n' "$root/pane.sh" > "$root/maru.conf"
 env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" MARU_SESSION_HOST_ROOT="$root/session-host" \
     MARU_CONFIG="$root/maru.conf" MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="$url" \
@@ -1621,6 +1677,44 @@ grep -q '^body: captured' "$out/bd2-after" && grep -qxF 'body text: {"chunked":[
 grep -q '^rc=0$' "$out/bd-revoked" && ! grep -q 'bodyc.json' "$out/bd-revoked" && ! grep -q 'recording response bodies' "$out/bd-revoked" && ! grep -qF '"one","two"' "$out/bd-revoked-req" \
     || bbad "after revoking all grants the recorded bodies were not wiped ($(tr '\n' ' ' < "$out/bd-revoked" | cut -c1-400) · $(tr '\n' ' ' < "$out/bd-revoked-req"))"
 [ -z "$body_bad" ] || fail "w9d-body:$body_bad"
+# W9d③ — 막기 단계도 실패를 모아 한 번에 알린다.
+block_bad=""
+kbad() { block_bad="$block_bad · $1"; }
+kshow() { tr '\n' ' ' < "$out/$1" 2>/dev/null | cut -c1-300; }
+grep -q 'rc=0' "$out/bk-add" && grep -q 'added: [0-9]' "$out/bk-add" || kbad "adding a rule on the agent's tab failed ($(kshow bk-add))"
+grep -q 'reject TypeError' "$out/bk-fetch" || kbad "a blocked fetch was not a TypeError ($(kshow bk-fetch))"
+grep -q 'ok 200' "$out/bk-fetch-ok" || kbad "an unblocked fetch did not pass ($(kshow bk-fetch-ok))"
+grep -q '/blk/data.json?t1' "$root/http.log" && kbad "the server saw the blocked fetch"
+grep -q 'blk/data.json?t1.*\[blocked rule [0-9]* http://127.0.0.1:[0-9]*/blk/\*\]' "$out/bk-blocked" || kbad "network --blocked did not show the blocked request with its rule ($(kshow bk-blocked))"
+grep -q 'blkhome.html?ok' "$out/bk-blocked" && kbad "network --blocked showed an unblocked request"
+grep -q '⊘ blocking (1 rule)' "$out/bk-list" || kbad "the list did not show ⊘ blocking ($(kshow bk-list))"
+grep -q '^blocked: request-blocking rule' "$out/bk-nav" || kbad "a blocked navigation did not say blocked ($(kshow bk-nav))"
+grep -q '/blk/doc.html' "$root/http.log" && kbad "the server saw the blocked navigation"
+grep -q '"controlled"' "$out/bk-sw-ctl" || kbad "the service worker page never became controlled ($(kshow bk-sw-ctl))"
+if grep -q 'reject TypeError' "$out/bk-sw-fetch"; then
+    # 그 출처를 보이는 탭이 이 탭뿐 — 서비스 워커 길에서 막았다.
+    grep -q '/bsw/data.json?s1' "$root/http.log" && kbad "the server saw a service-worker fetch that the page saw blocked"
+elif grep -q 'ok 200' "$out/bk-sw-fetch"; then
+    # 규칙 없는 탭이 같은 출처를 보인다 — 막지 않고 「not applied」.
+    grep -q 'sw not applied rule' "$out/bk-sw-net" || kbad "an unblocked service-worker fetch was not marked not applied ($(kshow bk-sw-net))"
+    grep -q 'another tab without rules shows this site' "$out/bk-sw-ls" || kbad "the list did not say the service worker is shared ($(kshow bk-sw-ls))"
+else
+    kbad "the service-worker fetch neither passed nor was blocked ($(kshow bk-sw-fetch))"
+fi
+grep -q 'rc=0' "$out/bk-strict" || kbad "strict on failed ($(kshow bk-strict))"
+grep -q 'reject TypeError' "$out/bk-strict-fetch" || kbad "with strict on the service-worker page's fetch was not blocked ($(kshow bk-strict-fetch))"
+grep -q '/bsw/data.json?s2' "$root/http.log" && kbad "the server saw the fetch blocked under strict mode"
+grep -q 'strict: on for 127.0.0.1 ' "$out/bk-strict-ls" || kbad "the rule list did not show strict on ($(kshow bk-strict-ls))"
+grep -q '⊘ blocking (2 rules, strict)' "$out/bk-list2" || kbad "the list did not show strict ($(kshow bk-list2))"
+grep -q 'strict: off' "$out/bk-strict-off" || kbad "strict off failed ($(kshow bk-strict-off))"
+grep -q 'removed:' "$out/bk-clear" || kbad "clear removed nothing ($(kshow bk-clear))"
+grep -q 'ok 200' "$out/bk-fetch3" || kbad "after clear the fetch did not pass ($(kshow bk-fetch3))"
+grep -q '/blk/data.json?t3' "$root/http.log" || kbad "after clear the server did not see the fetch"
+grep -q '⊘' "$out/bk-list3" && kbad "the list still showed ⊘ after clear ($(kshow bk-list3))"
+grep -q '⊘ blocking (1 rule)' "$out/bk-list4" || kbad "the list did not show ⊘ for the re-added rule ($(kshow bk-list4))"
+grep -q '⊘' "$out/bk-list5" && kbad "the list still showed ⊘ after revoking all grants ($(kshow bk-list5))"
+[ -z "$block_bad" ] || fail "w9d-block:$block_bad"
+echo "PASS w9d-block: the agent's tab took a rule without asking (⊘ blocking in the list), a blocked fetch was a TypeError the server never saw, network --blocked listed it with its rule and pattern and nothing else, a blocked navigation said blocked, a service-worker page's fetch was handled as the shared-worker rule says, strict on blocked the same fetch (strict in the list), clear brought the requests back and removed ⊘, and revoking all grants removed ⊘"
 echo "PASS w9d-body: the agent's tab recorded bodies without asking (◉ recording in the list), a chunked JSON body came back as sent, a 2 MiB JSON was over_cap, a PNG not_text, a binary JSON body was refused without --out and written with it, --out wrote a 0600 file, a script sent with another site's cookies stayed hidden until get-cookies allowed that site, a pane without the body permission saw needs_body_permission and after its own permission only later bodies, and revoking all grants cleared the mark and the bodies"
 echo "PASS w9d-network: the agent's tab recorded from its birth (cookie-setting first page, cross-site iframe request marked), the detail showed Cookie and Authorization by name only until get-cookies allowed the site and then their values, a service-worker page's fetch was labelled, a second pane allowed by the dialog saw only requests after its permission (earlier ones counted as hidden) and not the requests made while the tab was on another site (counted as hidden after it came back) nor a navigation that started on another site and was redirected back, and revoking all grants wiped the record"
 echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"

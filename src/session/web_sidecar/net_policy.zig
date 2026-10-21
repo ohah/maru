@@ -62,6 +62,16 @@ pub fn sameSite(a: []const u8, b: []const u8) bool {
     return hostCovers(a, b) or hostCovers(b, a);
 }
 
+/// 그 요청이 난 페이지의 호스트(W9d① F2 규칙 — W9d③ 이 sidecar 의 막기와 함께 쓰려고 여기로 꺼냈다): 쿠키의 첫 사이트(`site` — 렌더러가 요청마다
+/// 정한다, CEF 는 등록 도메인 꼴로 준다)와 앱·sidecar 가 아는 탭의 맨 위 문서 호스트(`top`)를 맞춰 본다 — 같은 사이트면 더 좁은 `top`, 다르면
+/// 첫 사이트(이동과 엇갈려 `top` 이 옛 것이거나 이미 새 것이다 — 떠난 문서의 `pagehide` 비콘은 새 주소 뒤에 옛 첫 사이트로 온다, W9d③ 실측
+/// J-B9), 첫 사이트가 비었으면(다른 사이트 iframe 안 — W9d① 실측) `top`. 둘 다 비면 빈 글(모른다).
+pub fn pageHost(site: []const u8, top: []const u8) []const u8 {
+    if (site.len == 0) return top;
+    if (top.len != 0 and sameSite(top, site)) return top;
+    return site;
+}
+
 /// grant 호스트들 중 하나가 그 주소의 호스트를 덮는가(http(s) 가 아니면 거짓).
 pub fn anyCovers(hosts: []const []const u8, url: []const u8) bool {
     const h = hostOfUrl(url) orelse return false;
@@ -495,6 +505,14 @@ test "W9d②: 본문이 보이는가의 판 — 본문 권한·응답 투영·�
     f.response_visible = false;
     f.after_grant = false;
     try testing.expectEqual(BodyAccess.hidden, bodyAccess(f));
+}
+
+test "W9d③: pageHost — 같은 사이트면 더 좁은 맨 위 호스트, 다르면 첫 사이트(떠난 문서의 비콘), 첫 사이트가 비면 맨 위 호스트" {
+    try std.testing.expectEqualStrings("app.a.test", pageHost("a.test", "app.a.test"));
+    try std.testing.expectEqualStrings("127.0.0.1", pageHost("127.0.0.1", "localhost")); // J-B9: 새 주소 뒤의 옛 사이트 비콘
+    try std.testing.expectEqualStrings("app.a.test", pageHost("", "app.a.test"));
+    try std.testing.expectEqualStrings("a.test", pageHost("a.test", ""));
+    try std.testing.expectEqualStrings("", pageHost("", ""));
 }
 
 test "W9d①: hostCovers 는 점 경계로 하위 도메인만 덮는다(grant 와 같은 규칙), sameSite 는 어느 쪽이든 덮으면" {

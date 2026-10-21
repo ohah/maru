@@ -166,7 +166,7 @@ const Col = struct {
         const e: ?Ev = switch (m) {
             .page_started => |id| .{ .browser = id, .tag = .page_started },
             .url_changed => |v| .{ .browser = v.browser, .tag = .url_changed, .url = self.dupe(v.url) },
-            .error_page => |id| .{ .browser = id, .tag = .error_page },
+            .error_page => |v| .{ .browser = v.browser, .tag = .error_page },
             .net_begin => |v| .{ .browser = v.browser, .tag = .net_begin, .url = self.dupe(v.url), .request = v.request, .site = self.dupe(v.site), .host = self.dupe(v.host), .initiator = self.dupe(v.initiator), .flags = v.flags, .rt = v.resource_type },
             .net_redirect => |v| .{ .browser = v.browser, .tag = .net_redirect, .url = self.dupe(v.url), .request = v.request, .headers = self.dupe(v.headers.bytes), .hcount = v.headers.count, .stripped = v.flags.stripped },
             .browser_created => |id| blk: {

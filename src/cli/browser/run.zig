@@ -203,7 +203,7 @@ fn runNetworkBodyOut(io: std.Io, allocator: std.mem.Allocator, cmd: browser.Netw
         }
     }
     const path = cmd.out.?;
-    publishResult(std.Io.Dir.cwd(), io, path, acc.body.items) catch return bodyOutError(stderr, "cannot publish the output file atomically");
+    publishResult(std.Io.Dir.cwd(), io, path, acc.body.items) catch |e| return bodyOutError(stderr, publishErrorText(e));
     try stdout.print("body: {d} bytes{s}{s} → {s}\n", .{ acc.body.items.len, if (acc.binary) " (binary)" else "", acc.marks.written(), path });
     try stdout.flush();
 }
@@ -276,7 +276,7 @@ test "W9d② 적대 리뷰 3 회차: --out 은 u32 를 넘는 다음 오프셋�
     const first = try std.json.parseFromSlice(std.json.Value, ta, "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body_redecoded\":\"windows-1252\",\"body_chromium_decoded\":true,\"body_credentialed\":true,\"body\":\"ab\",\"body_next_offset\":2}", .{});
     defer first.deinit();
     try std.testing.expect(try acc.add(ta, first.value.object) == .more);
-    try std.testing.expectEqualStrings(" · re-decoded from the browser's windows-1252 reading · as the browser decoded it (no charset — may differ from what the page read) · sent with cookies or login", acc.marks.written());
+    try std.testing.expectEqualStrings(" · re-decoded from the browser's windows-1252 reading · as the browser decoded it — may differ from the bytes received and from what the page read · sent with cookies or login", acc.marks.written());
     for ([_][]const u8{ "4294967297", "1048577" }) |n| {
         var b: [256]u8 = undefined;
         const json = try std.fmt.bufPrint(&b, "{{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body\":\"cd\",\"body_next_offset\":{s}}}", .{n});
@@ -410,8 +410,8 @@ fn runExecuteScript(
         return executeError(stderr, "the executeScript result is not strict JSON");
 
     if (exec_cmd.out) |path| {
-        publishResult(std.Io.Dir.cwd(), io, path, result.items) catch
-            return executeError(stderr, "cannot publish the output file atomically");
+        publishResult(std.Io.Dir.cwd(), io, path, result.items) catch |e|
+            return executeError(stderr, publishErrorText(e));
         try stdout.print("executeScript: {d} bytes → {s}\n", .{ result.items.len, path });
     } else {
         try browser.writeDisplaySafeJsonText(stdout, result.items); // 터미널에 보이지 않는 글자를 내지 않는다(W9a③ 9 회차)
@@ -546,8 +546,8 @@ fn runScreenshot(
     }
 
     if (shot.out) |path| {
-        publishResult(std.Io.Dir.cwd(), io, path, result.items) catch
-            return screenshotError(stderr, "cannot publish the output file atomically");
+        publishResult(std.Io.Dir.cwd(), io, path, result.items) catch |e|
+            return screenshotError(stderr, publishErrorText(e));
         try stdout.print("screenshot: {d}x{d} PNG, {d} bytes → {s}\n", .{ validator.width, validator.height, result.items.len, path });
         try stdout.flush();
     } else {
@@ -572,6 +572,15 @@ fn validateJsonSlice(allocator: std.mem.Allocator, bytes: []const u8) bool {
 /// 검증된 결과를 `target`에 **0600 원자적으로** 공개한다(검증-전-미노출 보존). 임시 파일 핸들이 write-only여도(macOS)
 /// 되읽지 않으므로 무방. `.replace=true`+`Atomic.replace`라 기존 target을 **덮어쓴다**(폴링/재실행 정상화 —
 /// 옛 `.link` no-clobber 회귀 수정). caller가 에러를 사용자 메시지로 매핑.
+/// `--out` 을 쓰지 못한 까닭의 글(W9d② 재검증 N-g2: 없는 폴더·폴더인 대상도 「atomically」 로만 말했다) — 흔한 둘은 그 까닭을, 그 밖은 전처럼.
+fn publishErrorText(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "cannot write the output file: its directory does not exist",
+        error.IsDir => "cannot write the output file: the path is a directory",
+        else => "cannot publish the output file atomically",
+    };
+}
+
 fn publishResult(dir: std.Io.Dir, io: std.Io, target: []const u8, bytes: []const u8) !void {
     // **Windows에서는 도달할 수 없고, 도달해서도 안 된다.** 도달 불가인 이유: 이 경로는 컨트롤 소켓 왕복 뒤에만
     // 오는데 `control_client.connectSend`가 Windows에서 "인스턴스 없음"으로 접는다. 도달하면 안 되는 이유: POSIX의
@@ -1213,6 +1222,21 @@ test "W9d② v20 A R10: --out 의 공개는 0600 이고, 대상이 심볼릭 링
     const st = try tmp.dir.statFile(io, "link", .{ .follow_symlinks = false });
     try std.testing.expectEqual(std.Io.File.Kind.file, st.kind);
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
+}
+
+test "W9d② 재검증 N-g2: --out 이 없는 폴더·폴더인 대상이면 그 까닭을 말한다(아무것도 쓰지 않는다), 그 밖의 실패는 전의 글" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const missing = if (publishResult(tmp.dir, io, "no-such-dir/body.bin", "BODY")) |_| return error.TestUnexpectedResult else |e| e;
+    try std.testing.expectEqualStrings("cannot write the output file: its directory does not exist", publishErrorText(missing));
+    try tmp.dir.createDir(io, "target", .default_dir);
+    const dir_target = if (publishResult(tmp.dir, io, "target", "BODY")) |_| return error.TestUnexpectedResult else |e| e;
+    try std.testing.expectEqualStrings("cannot write the output file: the path is a directory", publishErrorText(dir_target));
+    var it = (try tmp.dir.openDir(io, "target", .{ .iterate = true })).iterate();
+    try std.testing.expect((try it.next(io)) == null);
+    try std.testing.expectEqualStrings("cannot publish the output file atomically", publishErrorText(error.AccessDenied));
 }
 
 // ── W9d② 최종 재검증(검증자 v20f A R10·B 16 의 재현을 회귀 시험으로) ────────────────────────────────────────────────

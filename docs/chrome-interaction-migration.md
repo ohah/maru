@@ -59,7 +59,7 @@ rewrite의 근거로 삼지 않는다.
 | `components/divider.zig` | 순수 divider geometry/hit-test/ratio | `SplitDivider` + shared capture | split 최소 크기 clamp, resize, target split 해제 시 cancel |
 | sidebar 폭 divider (`sidebar_divider`) | `AppSession` 폭 drag | `SplitDivider`와 같은 capture, 폭 domain은 host | 최소/최대 폭 clamp, 폭 0(접힘) 상태에서 drag 미시작 |
 | dock outer divider (`dock_outer_divider`) | `AppSession` dock 경계 drag | `SplitDivider`와 같은 capture | dock 열림/닫힘 전이 중 offset 유효성, dock 소멸 시 cancel |
-| `components/tabbar.zig` | terminal tab bar segment/hit-test | `TabList`/`Tab` composite | select, close, overflow horizontal scroll, drag/drop/detach |
+| `components/tabbar.zig` | pane tab bar segment·발행 paint/input tree·읽기 전용 Inspector | `TabList`/`Tab` composite | select, close, overflow horizontal scroll, drag/drop/detach |
 | pane drag (`pane`) | `AppSession` pane move/drop slot | `MovePane` typed intent | drop slot 판정, split 생성/detach, target pane 소멸 시 cancel |
 | sidebar group drag (`sidebar_group`) | `AppSession` armed→dragging 2-phase | `ReorderableList` capability | threshold 전 armed 상태의 click 보존, marker/slot 무결성 |
 | 주소창 selection drag (`address_selection`) | `AppSession` caret/selection | 이관하지 않는다 — [텍스트 필드 에디터](text-field-editor.md) 범위 | caret/selection 편집 모델, IME, first responder |
@@ -505,3 +505,12 @@ grid, static transform, animation, multi-touch, rich accessibility tree는 이 �
 reorder preview는 위 drag 계약대로 canonical 입력 목록과 분리하므로 해당 기간에는
 카드 Inspector publication을 폐기한다. label·native accessibility adapter·reorder capability의
 전체 이관은 완료로 계산하지 않는다. 세부 범위는 [UI Inspector 계획](plans/ui-inspector.md)을 따른다.
+
+
+### Pane 탭 바 Inspector 발행 범위
+
+`components/tabbar/published.zig`의 Frame과 `Metrics`가 일반 paint/input의 tab·close·plus·scroll
+geometry를 공유한다. 모델 lifetime·실제 layout 검사는 `app_session/inspector_tabs.zig`가 소유한다.
+첫 paint 전과 reorder preview에는 기존 입력 경로를 유지하고 Inspector publication을 사용하지 않는다.
+role/상태를 발행하지만 label·native accessibility·reorder capability 전체를 이관 완료로 세지 않는다.
+세부 범위와 검증은 [UI Inspector 계획](plans/ui-inspector.md)을 따른다.

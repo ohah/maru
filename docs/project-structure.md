@@ -224,7 +224,7 @@ src/
                         파일에 섞지 않는다. P2 배선은 완료되어 app_session이 opaque handle과 backend 계약만 사용한다.
   chrome/               플랫폼 중립 디자인 시스템 구현 — draw/tokens/props/input/state/host + text_layout(셀 텍스트 배치 규율 — L3, OS-중립)·file_tree_icon(filesystem 비의존 아이콘 분류)
     ui/                 새 rich/Metal typed component tree. style(닫힌 prop 어휘)·layout(typed flex)·tree(identity/rect snapshot)·interaction(pointer-local state)·paint_style(token/state resolver)·paint(pixel snap→ChromeDraw)를 책임별로 둔다. `chrome.zig`는 `chrome.ui.*` namespace로만 re-export한다.
-    components/         sidebar/published.zig는 사이드바 paint·행 입력·Inspector의 발행 geometry를 소유한다.
+    components/         sidebar/published.zig와 tabbar/published.zig는 facade 승격이 아닌 paint·입력·Inspector의 발행 geometry 하위 seam이다.
                         제품 컴포넌트(sidebar·tabbar·settings·palette·find·notice·modal 등). 한 파일로 끝나는 컴포넌트는 flat하게 두고,
                         **types/build/ids/view 네 책임으로 갈리는 컴포넌트만 같은 이름의 폴더로 승격**한다 — session_dock·archive_detail·scm_dock이
                         그 형태이고 facade `<name>.zig`가 네 파일을 re-export한다. types(platform 중립 입력 DTO)·build(bounded geometry와
@@ -673,6 +673,7 @@ actor coordinator가 전체 반영한다. 기존 모델 전용 `worker.zig`는 �
 - `src/session/inspector/snapshot.zig`: 공통 진단 DTO·경로 결정·유한 history·JSON 익명화.
 - `src/inspector_metadata.zig`: GUI·CLI 공통 필드 출처·수집 상태·누락 이유.
 - `src/session/inspector/layout.zig`: 독립 도크 배치·source viewport·크기 경계.
+- `src/platform/macos/app_session/inspector_tabs.zig`: pane 탭 발행·실제 모델 유효성·paint/input adapter.
 - `src/chrome/components/inspector/`: 도메인 I/O 없는 픽셀 tree와 표시·입력 사각형.
 - `src/platform/macos/app_session/inspector.zig`: 실제 상태 수집·독립 도크/분리 창 presentation·export 어댑터.
 - `src/cli/sessions.zig`: 기존 session 조회 transport 위의 CLI 인자·wire·응답 표시.

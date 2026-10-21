@@ -60015,7 +60015,11 @@ test "editor recovery restore 캡처 OOM은 문서와 뷰 및 예약 상태를 �
     try testing.expectEqual(@as(usize, 2), pane.terms.items.len);
     shared.rt.editor_selection = editor_selection.Selection.at(4);
     const before_revision = fx.term.rt.editorDocument().opened.?.file.revision;
-    try testing.checkAllAllocationFailures(testing.allocator, struct {
+    // Arena growth may resize in place depending on heap placement. Disable
+    // backing resizes while enumerating allocation indices so the same logical
+    // capture has a deterministic set of real allocation failure sites.
+    var no_resize = testing.FailingAllocator.init(testing.allocator, .{ .resize_fail_index = 0 });
+    try testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn run(a: std.mem.Allocator, session: *AppSession) !void {
             var arena = std.heap.ArenaAllocator.init(a);
             defer arena.deinit();

@@ -775,7 +775,7 @@ pub fn appendPaneTabTitles(
     const cw = self.cell_width_px;
     if (cw == 0 or titles.len == 0) return;
     // hit-test(`paneTabIndexAt` 등)와 **같은 메트릭**을 쓴다 — 보이는 탭과 클릭되는 탭이 갈리면 안 된다.
-    const m = barMetrics(pb.tabs, cw, paneTermOrder(self, leaf).len, self.buildChromeTokens().space.tab_width_cols, leaf.tab_scroll_cols) orelse return;
+    const m = app_session_mod.inspector_tabs_ops.metrics(self, pb.tabs, leaf) orelse return;
     const active = paneActiveTermIndex(self, leaf);
 
     // 세로 위치는 **role line box** 기준 바 중앙이다. 셀 텍스트가 쓰는 `chromeBarTextOffsetY`는
@@ -1789,6 +1789,7 @@ pub fn paneAgentKind(pane: *Pane) AgentKind {
 /// createPane errdefer·closeTab·closeActivePane·split 실패 정리에 쓴다. **모든 Pane 해제의 단일 chokepoint라,
 /// 해제 직전 구조-무효화 계약(invalidateForFreedPane)을 부른다 — 이 Pane을 가리키던 호버/드래그 포인터를 정리.**
 pub fn destroyPane(self: *AppSession, pane: *Pane) void {
+    self.pane_tab_identity_epoch +%= 1;
     invalidateForFreedPane(self, pane); // S1: 포인터 비교는 해제 전 주소로(deref 없음) — 흩어진 null화 대체
     // **하나 풀 때마다 목록에서 뺀다** — `destroyTerm` 은 저장 충돌 비교를 정리하려고 모든 탭·pane·Term 을 훑는데(`invalidateCompareFor`), 이
     // pane 이 아직 탭 목록 안이면(복원이 탭을 갈아 끼울 때) 목록에 남은 **이미 푼 형제**를 읽었다(`PANE-UAF`). 앞에서부터 — 파괴 순서는 그대로.

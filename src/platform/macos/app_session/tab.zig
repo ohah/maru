@@ -1700,7 +1700,7 @@ pub fn updateHoveredTab(self: *AppSession, x_px: f64, y_px: f64) BarHover {
                     break;
                 }
                 const count = lr.leaf.terms.items.len;
-                const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse break; // 메트릭 불가(초소형 바) → 호버 없음
+                const m = app_session_mod.inspector_tabs_ops.metrics(self, pb.tabs, lr.leaf) orelse break; // 메트릭 불가(초소형 바) → 호버 없음
                 if (m.inScrollLeftZone(x_px)) { // #5b: ‹ 버튼 호버 — 탭 호버 아님
                     next_scroll = .{ .pane = lr.leaf, .right = false };
                     break;

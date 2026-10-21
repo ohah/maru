@@ -84,6 +84,63 @@
   Debug 14개 통과, `/tmp/maru4536-ci-regressions-final.log`.
   새 head의 전체 CI·ReleaseFast·실제 앱 재검증 결과는 PR에서 별도로 추적한다.
 
+### Pane 탭 바 Inspector — 최종 실제 앱 20회
+
+`pane_tabs` source와 발행 geometry의 계약은 [UI Inspector 계획](plans/ui-inspector.md)을 따른다.
+
+| 회차 | 공격 가설·조건 | 기대 / 최종 결과 |
+|---|---|---|
+| 1 | 비활성 탭 Pick이 Term을 전환함(top) | 선택만 변경·목록 유지. 일반 클릭 대조군은 전환. 통과 |
+| 2 | close Pick이 Term을 닫음(right) | close 영역 선택·제품 목록/세대 유지. 통과 |
+| 3 | plus Pick이 Term을 생성함(bottom) | 추가 없음. 일반 클릭 대조군은 제품 변경. 통과 |
+| 4 | overflow left Pick이 scroll을 바꿈(left) | 실제 overflow 버튼 선택·publication 유지. 통과 |
+| 5 | 분리 창 right Pick이 다른 창/scroll을 바꿈 | owner 좌표·정확한 버튼 선택·제품 유지. 통과 |
+| 6 | split·주입 2×에서 tab ID가 pane 사이 충돌함 | 두 pane root/ID 구분·탭 경계 일치. 통과 |
+| 7 | split·주입 2× close가 이웃 pane을 닫음 | close 부모와 경계 일치·제품 유지. 통과 |
+| 8 | split·주입 2× plus가 생성 effect를 실행함 | 실제 plus 선택·제품 유지. 통과 |
+| 9 | split·주입 2× left가 첫 pane으로 retarget됨 | 두 번째 pane의 실제 overflow 선택. 통과 |
+| 10 | split·주입 2×·분리 창 right의 좌표 혼동 | 두 번째 pane owner 경계·선택 일치. 통과 |
+| 11 | tab hover 후 Escape가 선택/강조를 남김 | Pick 종료·선택 null·경계 복구. 통과 |
+| 12 | close hover 후 Pick 재클릭이 action을 실행함 | 취소·선택 null·경계 복구·제품 유지. 통과 |
+| 13 | Paused에서 2× plus Pick이 갱신되지 않음 | 초기 Paused 확인·Live 복귀·선택. 통과 |
+| 14 | left hover 도중 Pause가 Pick/강조를 남김 | Paused 유지·취소·경계 복구. 통과 |
+| 15 | close 오른쪽 배타 경계가 이전 탭을 닫음 | 인접 탭 시작점으로 판정·close 실행 없음. 통과 |
+| 16 | 음수 owner 좌표가 tab을 고름 | arrow cursor·hover/selected null. 통과 |
+| 17 | 도구 창 hover가 owner 강조를 남김 | Pick 유지·owner hover null·경계 복구. 통과 |
+| 18 | 한국어 bottom 도크의 plus Pick 경계 불일치 | native Pick control·owner plus 선택·제품 유지. 통과 |
+| 19 | 선택 뒤 owner 밖 hover가 선택을 지움 | 선택/선택 경계 유지·제품 유지. 통과 |
+| 20 | 분리 창 닫기/재열기→top 재배치가 낡은 행으로 선택을 이어감 | 실제 geometry·세대 변경·선택 null·Term 목록 유지. 통과 |
+
+- `python3 tools/inspector-picker-app/run.py --pane-tabs --rounds 20 --app <고정 앱> --output <새 경로>`.
+  `/tmp/maru-pane-tabs-final-e2e20/{manifest,verified}.json`, 회차별 CLI·native reports·pixels·PNG.
+- 고정 앱 `/tmp/maru-pane-tabs-frozen/Maru.app`, SHA256
+  `3a57d9d7a7a3bff3ce7e1a547033dfe9e2c32e069de8305c15b67ec201f2f413`.
+  **20/20**, live CLI **452건**, PNG **64장**, 경계 변화 **11208 pixels**.
+- 독립 `verify_pane_tabs.py`가 실제 pane root 분리, control ID/부모, read-only 보존,
+  Pause flags, cursor, PPM 경계·취소/선택 강조와 geometry 변경 후 stale 선택을 재검사했다.
+- 판정자 자체 정상·동등·복구와 결함 **22종**을 통과했다. Follow target으로 pane/Term 포커스 보존도 독립 확인했다. 기존 sidebar 판정자까지
+  `python3 -m unittest discover -s tools/inspector-picker-app -p test_*.py`: **6개 test / 결함 42종**.
+  `/tmp/maru-pane-tabs-artifact-tests.log`.
+- `test-pane-tab-publication-adversarial.py`의 실제 컴파일 결함 **11종**을 행동 실패로 거부하고
+  정상·동등·복구 대조군을 통과했다. scroll·close 부모·pane ID·epoch·Term 신원·활성 상태·
+  부분 OOM·paint/input 연결·부분 셀 폭·clip·선택 세대가 대상이다.
+  `/tmp/maru-pane-tabs-mutants-luz_mpal/manifest.json`.
+- main `c07d0cbe9` 동기화 후 Debug Inspector **67+12**, sidebar focused **14**, Chrome UI **1,193** 통과.
+  `/tmp/maru-pane-tabs-final-debug.log`, `/tmp/maru-pane-tabs-main-debug.log`(Chrome UI 부분).
+  ReleaseFast Inspector **67+12**, sidebar focused **14** 통과.
+  `/tmp/maru-pane-tabs-main-releasefast.log`, `/tmp/maru-pane-tabs-final-releasefast.log`.
+  전체 `check-boundaries`·문서 링크/줄 참조 통과. `/tmp/maru-pane-tabs-main-boundaries.log`, `/tmp/maru-pane-tabs-main-docs.log`.
+- 실제 전체 app-host-abi 로컬 실행은 **9개 실패**다. 같은 9개를 탭 바 변경 전 보관 바이너리에서도
+  동일하게 재현했다. AC3/BR6/COL7, LSPE19/LSPE2, shared Find R1/R6/R7, LATE3가 대상이다.
+  `/tmp/maru-pane-tabs-full-host.log`, `/tmp/maru-pane-tabs-baseline-comparison.json`에 두 바이너리 SHA와
+  동일 실패 이름을 기록했다. 이 결과를 전체 gate 통과로 세지 않으며 새 PR의 원격 CI를 별도로 확인한다.
+- sidebar focused의 editor capture OOM에서는 Arena backing resize의 실제 성공 여부가 할당 개수를
+  바꾸는 추가 불안정성을 확인했다. test-only backing allocator의 resize를 고정해 실제 할당 실패
+  지점을 열거한다. Debug/ReleaseFast 14개와 별도 fresh-process **30/30** 통과.
+  `/tmp/maru-pane-tabs-oom30/manifest.json`. 제품 editor 동작은 바꾸지 않았다.
+- native NSEvent callback·CLI·Metal readback 증거다. 실제 앱 fixture는 terminal Term을 사용했고,
+  물리 HID·다중 모니터와 editor/web Term별 effect 검증은 포함하지 않는다. inspector Pick의 공통 입력 격리를 검증했다.
+
 ### Elements 계층 탐색 (2026-10-21)
 
 - `feat/inspector-element-tree`, base `f00891e8c`: 부모/자식·접기/펼치기·검색·선택 경계와

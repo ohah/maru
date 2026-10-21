@@ -120,5 +120,6 @@ test {
     // 변이 검사가 `zig test <파일>` 로 직접 돌렸을 때만 잡혔다).
     testing.refAllDecls(ui);
     testing.refAllDecls(components);
+    testing.refAllDecls(components.file_header);
     testing.refAllDecls(components.editor_view);
 }

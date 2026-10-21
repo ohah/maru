@@ -112,6 +112,7 @@ const build_options = @import("build_options"); // build.zig가 주입한 .versi
 const update_repo = "ohah/maru"; // GitHub releases/latest를 조회할 repo(인앱 새 버전 안내)
 pub const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 gesture 정책(OS-중립 L2 — session/keyhint_hold.zig). platform은 alias로 참조.
 const command_palette = @import("command_palette.zig");
+pub const inspector_file_header_details_ops = @import("app_session/inspector_file_header_details.zig");
 pub const inspector_file_header_ops = @import("app_session/inspector_file_header.zig");
 pub const inspector_tabs_ops = @import("app_session/inspector_tabs.zig");
 pub const inspector_ops = @import("app_session/inspector.zig");
@@ -6782,6 +6783,7 @@ pub const AppSession = struct {
     /// rows[i].card.tab)에 쓴다. 슬롯↔탭 단일 출처(인덱스 어긋남 방지). SG3a는 card row만(그룹 헤더는 SG3b).
     sidebar_rows: std.ArrayList(chrome.components.sidebar.Row) = .empty,
     sidebar_publication: chrome.components.sidebar.published.Frame = .{},
+    file_header_details: inspector_file_header_details_ops.State = .{},
     file_header_publication: chrome.components.file_header.Frame = .{},
     file_header_references: std.ArrayList(inspector_file_header_ops.Reference) = .empty,
     dock_header_publication: dock_view_bar.published.Frame = .{},
@@ -16079,7 +16081,7 @@ pub const AppSession = struct {
                             _ = pane_ops.focusPaneByPtr(self, lr.leaf);
                             const entry = band.entry;
                             if (entry.external_change) {
-                                if (dock_layout.headerConflictRect(band.band, self.cell_width_px, entry.dirty)) |r| {
+                                if (inspector_file_header_details_ops.actionRect(self, band, .reload)) |r| {
                                     if (layout_math.pointInRect(x_px, y_px, r)) {
                                         self.requestFileConflictReload(entry.surface_id);
                                         self.drag_autoscroll = 0;
@@ -16091,8 +16093,8 @@ pub const AppSession = struct {
                             // 다음/이전 충돌 구간 버튼(S5) — 구간이 있을 때만 그 칸이 있다. mode 선택기보다 **먼저** 본다(둘은
                             // 같은 표에서 서로 다른 칸이라 순서가 결과를 바꾸진 않지만, 표가 겹치는 날 이 순서가 방어다).
                             if (editor_ops.hasConflictRegions(self, band.term)) {
-                                const nav: ?dock_layout.ConflictNav = if (dock_layout.headerConflictNavRect(band.band, self.cell_width_px, entry.dirty, entry.external_change, .next)) |r| (if (layout_math.pointInRect(x_px, y_px, r)) dock_layout.ConflictNav.next else null) else null;
-                                const nav2: ?dock_layout.ConflictNav = nav orelse (if (dock_layout.headerConflictNavRect(band.band, self.cell_width_px, entry.dirty, entry.external_change, .prev)) |r| (if (layout_math.pointInRect(x_px, y_px, r)) dock_layout.ConflictNav.prev else null) else null);
+                                const nav: ?dock_layout.ConflictNav = if (inspector_file_header_details_ops.actionRect(self, band, .next)) |r| (if (layout_math.pointInRect(x_px, y_px, r)) dock_layout.ConflictNav.next else null) else null;
+                                const nav2: ?dock_layout.ConflictNav = nav orelse (if (inspector_file_header_details_ops.actionRect(self, band, .previous)) |r| (if (layout_math.pointInRect(x_px, y_px, r)) dock_layout.ConflictNav.prev else null) else null);
                                 if (nav2) |which| {
                                     _ = editor_ops.gotoConflict(self, band.term, which);
                                     self.drag_autoscroll = 0;
@@ -19111,7 +19113,7 @@ pub const AppSession = struct {
         }
         // 파일 헤더 밴드의 mode 선택기(`읽기|리치|소스`)도 클릭 가능한 chrome이라 같은 pointingHand를 준다.
         // 밴드 자리가 browser 주소창과 상호 배타이므로 바로 다음 순서다.
-        if (self.hovered_file_header_mode != null) {
+        if (self.hovered_file_header_mode != null or inspector_file_header_details_ops.actionAt(self, x_px, y_px)) {
             self.clearHoverUrlAnchor();
             return .link;
         }
@@ -22136,6 +22138,7 @@ pub const AppSession = struct {
             };
             inspector_tabs_ops.publish(self, leaf_rects.items, leaf_layout_complete);
             inspector_file_header_ops.publish(self, leaf_rects.items, leaf_layout_complete);
+            inspector_file_header_details_ops.begin(self, leaf_layout_complete);
             const active_pane = pane_ops.activePane(self);
             var active_pane_geometry: ?PaneGeometry = null;
 
@@ -22528,11 +22531,14 @@ pub const AppSession = struct {
                         // **마디 열 범위를 이 프레임에 굳힌다**(§7.5) — 그리는 것과 재는 것이 같은
                         // `plan` 을 타므로 「그려진 것 = 클릭되는 것」이다.
                         const header_dl = fileHeaderBandDrawList(self, band, cols);
-                        if (header_dl) |list| self.collectShaped(&collected, list, pane_frame_builder, .{ .pane = .{
-                            .origin_x = band.band.x,
-                            .origin_y = band.band.y + self.chromeBarTextOffsetY(band.band.h),
-                            .colors = tabbar_colors,
-                        } });
+                        if (header_dl) |list| {
+                            inspector_file_header_details_ops.record(self, band, list);
+                            self.collectShaped(&collected, list, pane_frame_builder, .{ .pane = .{
+                                .origin_x = band.band.x,
+                                .origin_y = band.band.y + self.chromeBarTextOffsetY(band.band.h),
+                                .colors = tabbar_colors,
+                            } });
+                        } else self.file_header_details.failed = true;
                     }
 
                     const addr_at = lr.leaf.active_term;
@@ -22789,6 +22795,8 @@ pub const AppSession = struct {
                         self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = t.x, .origin_y = t.y, .colors = pane_colors } });
                     }
                 }
+
+                inspector_file_header_details_ops.finish(self);
 
                 // 3) 드래그 중 floating 탭 미리보기 — 커서 위치에 박스+제목. 활성 터미널 '뒤'(맨 위)에 넣어야 하므로
                 //    여기선 빌드만 하고 아래에서 append한다(built_frames가 소유).
@@ -25357,6 +25365,7 @@ pub const AppSession = struct {
         self.rename_input.deinit(self.allocator); // 인라인 rename 입력(query/preedit) heap 해제
         self.sidebar_search_input.deinit(self.allocator); // 사이드바 검색바 입력 heap 해제
         self.sidebar_publication.deinit(self.allocator);
+        self.file_header_details.deinit(self.allocator);
         self.file_header_publication.deinit(self.allocator);
         self.file_header_references.deinit(self.allocator);
         self.pane_tabs_publication.deinit(self.allocator);
@@ -101805,4 +101814,54 @@ test "Live inspector file mode strip shares paint input and rejects changed owne
     session.tab_drag_order.clearRetainingCapacity();
     inspector_file_header_ops.publish(session, leaves.items, true);
     try std.testing.expect(inspector_file_header_ops.current(session, a));
+}
+
+// Exercise the production lowering -> publication -> collector -> normal input
+// chain. A parallel inspector-only rectangle calculation cannot pass this test.
+test "Live inspector file header details share painted glyphs actions and owner retirement" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/inspector-details.md", .markdown);
+    file_panel_ops.assignDockSurfaceIds(session);
+    inspector_ops.toggle(session);
+    const band = pane_ops.fileHeaderBandForPaneLookup(session, pane_ops.activePane(session)).?;
+    band.entry.dirty = true;
+    band.entry.external_change = true;
+    var dl = fileHeaderBandDrawList(session, band, @intCast(band.band.w / session.cell_width_px)).?;
+    defer dl.deinit(a);
+    const detail = chrome.components.file_header.details;
+    inspector_file_header_details_ops.begin(session, true);
+    inspector_file_header_details_ops.record(session, band, dl);
+    inspector_file_header_details_ops.finish(session);
+    try std.testing.expect(inspector_file_header_details_ops.current(session, a));
+    const t = session.file_header_details.frame.snapshot();
+    try std.testing.expectEqual(@as(usize, 4), t.entries.len);
+    try std.testing.expect(t.entries[t.find(detail.partId(0, .breadcrumb)).?].action == null);
+    try std.testing.expect(t.entries[t.find(detail.partId(0, .modified)).?].action == null);
+    const r = inspector_file_header_details_ops.actionRect(session, band, .reload).?;
+    const x: f64 = @as(f64, @floatFromInt(r.x)) + 0.25;
+    const y: f64 = @as(f64, @floatFromInt(r.y)) + @as(f64, @floatFromInt(r.h)) / 2;
+    try std.testing.expect(inspector_file_header_details_ops.actionAt(session, x, y));
+    session.inspector.picking = true;
+    session.mouse(1, x, y, 0, 0);
+    session.mouse(3, x, y, 0, 0);
+    const key = session.inspector.picker_selected.?;
+    try std.testing.expectEqual(chrome.ui.inspection.Source.file_header_details, key.source);
+    try std.testing.expectEqual(detail.partId(0, .reload), key.id);
+    const at = t.find(key.id).?;
+    session.file_header_details.frame.entries.items[at].rect.x += 1;
+    try std.testing.expect(!inspector_file_header_details_ops.actionAt(session, x, y));
+    band.entry.dirty = false;
+    try std.testing.expect(!inspector_file_header_details_ops.current(session, a));
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    try std.testing.expect(chrome.ui.inspection.resolve(try inspector_ops.picker.nodes(session, arena.allocator()), key) == null);
+    inspector_file_header_details_ops.begin(session, false);
+    inspector_file_header_details_ops.finish(session);
+    try std.testing.expect(session.file_header_details.frame.stamp == null);
+    try std.testing.expect(inspector_file_header_details_ops.actionRect(session, band, .reload) != null);
 }

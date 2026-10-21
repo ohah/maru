@@ -4724,7 +4724,7 @@ python3 tools/inspector-picker-app/verify_file_header.py <같은 경로>
 | 18–20 | 한국어 SVG·음수 hover 뒤 선택 유지·분리 창 닫기/재열기 후 낡은 geometry 선택 폐기를 검사한다 |
 
 검증은 실제 NSEvent callback·CLI·Metal chrome readback이다. WKWebView 본문/DOM, 물리 HID,
-WindowServer·실제 Retina/다중 모니터 검증을 뜻하지 않는다. breadcrumb/충돌 버튼은 미지원이다.
+WindowServer·실제 Retina/다중 모니터 검증을 뜻하지 않는다. 이 `file_header` source의 범위는 mode strip이며 breadcrumb/충돌 버튼은 아래 `file_header_details` 절을 따른다.
 최종 실제 앱 **20/20**, CLI **429개**, PNG **64장**, 경계 변화 **9,288픽셀**, 원본 파일 bytes 보존 **20/20**.
 원본: `/tmp/maru-file-header-final-e2e20/{manifest,verified}.json`.
 앱 SHA256: `1a2b8523f903408f788c213137ea10b7a4c8305453b34feb3c411d4bddbcb957`.
@@ -4737,3 +4737,59 @@ WindowServer·실제 Retina/다중 모니터 검증을 뜻하지 않는다. brea
 전체 실패 목록도 일치한다(`/tmp/maru-file-header-baseline-comparison.json`, `same_failures=true`,
 `full_suite_matches_baseline=true`). 바이너리와 SHA256은 같은 manifest에 기록하고 캐시 밖에 보존했다.
 전체 게이트 통과로 표현하지 않으며 원격 CI와 구분한다.
+
+## Inspector 파일 헤더 breadcrumb·상태·충돌 도구
+
+`file_header_details`는 실제 헤더 DrawCell의 보이는 열 범위를 사용한다. 고정 Part ID는
+breadcrumb 0·modified 1·reload 2·previous 3·next 4이며 root + 1 + Part다.
+root는 0 크기 계층 group, breadcrumb·modified는 action 없는 text다.
+수정/재읽기는 기존 파일 헤더가 그린 경우에만 발행한다. 현재 네이티브 편집기의 수정 `*`는 탭에 있으므로
+native E2E에서는 breadcrumb/previous/next를 검증하고, 조건부 modified/reload는 실제 헤더
+DrawList → 발행 → Pick/일반 입력 소비 경로의 host 통합 테스트로 따로 검사한다.
+심볼 마디별 자식 tree와 WKWebView 본문/DOM·native accessibility·물리 HID 검증은 포함하지 않는다.
+
+```sh
+python3 tools/inspector-picker-app/run.py --app <고정 앱>/Contents/MacOS/maru-macos-app --output <새 경로> --file-details --rounds 20
+python3 tools/inspector-picker-app/verify_file_header_details.py <같은 경로>
+python3 tools/test-file-header-details-adversarial.py
+```
+
+| 회차 | 공격 가설과 대조군 |
+| --- | --- |
+| 1 | next Pick은 이동하지 않으며 같은 좌표의 일반 클릭은 실제 이동·세대 변경을 일으킨다 |
+| 2 | 오른쪽 Inspector에서 breadcrumb는 action 없는 text로 선택된다 |
+| 3 | next 버튼은 상단 Inspector에서도 원래 owner 좌표를 사용한다 |
+| 4 | 왼쪽 Inspector의 previous Pick은 문서/caret 이동을 실행하지 않는다 |
+| 5 | 독립 Inspector 창에서도 breadcrumb와 owner 강조가 대응한다 |
+| 6 | 2× split의 breadcrumb는 활성 Inspector 대상과 다른 파일 pane도 읽기 전용으로 검사한다 |
+| 7 | 2× split previous의 native hand → Pick crosshair와 GPU 경계가 일치한다 |
+| 8 | 2× split next는 같은 source/ID/parent/generation으로 hover·선택된다 |
+| 9 | 2× 왼쪽 배치의 previous 경계는 실제 파일 pane 안에 있다 |
+| 10 | 2× 독립 창에서도 next 선택이 원래 pane를 활성화하지 않는다 |
+| 11 | Escape는 next hover를 선택으로 남기지 않는다 |
+| 12 | Pick 버튼 재클릭은 previous hover와 경계 강조를 지운다 |
+| 13 | Paused에서 Pick은 수집을 재개하고 breadcrumb를 선택한다 |
+| 14 | Pick 중 Pause는 next 선택 없이 강조를 지운다 |
+| 15 | previous의 정확한 오른쪽 끝은 half-open 경계 밖이며 창 안 Pick 커서는 crosshair다 |
+| 16 | 음수 좌표에는 요소가 없고 native cursor는 arrow다 |
+| 17 | Inspector 도구 위 hover는 next owner 강조를 남기지 않는다 |
+| 18 | 왼쪽 배치의 previous 선택은 Follow 대상·파일 bytes를 바꾸지 않는다 |
+| 19 | 음수 hover 뒤에도 이미 선택한 breadcrumb의 identity를 보존한다 |
+| 20 | 독립 창 닫기/재열기·재배치 뒤에는 이전 next 선택과 geometry를 재사용하지 않는다 |
+
+검증기는 실제 파일 bytes·일반 클릭 대조군·동일 source/ID/세대·GPU 경계 변화·취소 복원·native cursor·
+대상/Follow 유지·독립 창 PNG·2×를 독립 대조한다. 실패한 예비 15회차의 기대값은 보존하고,
+창 내부 빈 영역은 crosshair라는 기존 계약으로 고친 뒤 최종 20회를 전부 재실행한다.
+최종 실제 앱 **20/20**, CLI **747개**, PNG **64장**, 경계 변화 **5,912픽셀**, 파일 bytes 보존 **20/20**.
+원본은 `/tmp/maru-header-details-final20/{manifest,verified}.json`이며 실제 앱 SHA256은
+`b8cd9726dc3e30d914c007a7c7013737e5cbdc98a96f564a6d8208ac3070aeb0`이다.
+독립 artifact 판정의 12개 테스트와 이번 26개 반례는 `/tmp/maru-header-details-verifier-final2.log`,
+컴파일 결함 8종과 정상·동등·복원 대조군은 `/tmp/maru-header-details-mutants-ujk__dr9/manifest.json`에 기록한다.
+집중 Debug/ReleaseFast Inspector **74+15개**와 Chrome UI **1,200개**를 검사한다.
+변경 전·후 바이너리에서 기존 9개 실패를 각각 재현했다(`/tmp/maru-header-details-baseline-comparison.json`,
+`same_failures=true`). 전체 host는 **6,707 통과·114 skip·9 실패·7 filtered**로 실패했다
+(`/tmp/maru-header-details-full-host.log`). 전체 실패 목록도 변경 전과 동일하다(`full_suite_matches_baseline=true`).
+바이너리와 SHA256은 비교 manifest 및 캐시 밖 `/tmp/maru-header-details-baseline-binaries/`에 보존한다.
+전체 로컬 green으로 표현하지 않는다. 집중 Debug **74+15**, Chrome UI **1,200**, 전체 경계와 문서 **11+4**
+재실행은 모두 exit 0이다(`/tmp/maru-header-details-gates.log`). ReleaseFast **74+15**도 통과했다
+(`/tmp/maru-header-details-releasefast.log`). 앱 빌드는 `/tmp/maru-header-details-third.log`에서 exit 0을 확인했다.

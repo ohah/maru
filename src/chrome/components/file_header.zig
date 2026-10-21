@@ -1,5 +1,6 @@
 //! Published file mode controls. The host supplies domain-free rectangles and
 //! opaque owner identity; this layer never imports the session's file model.
+pub const details = @import("file_header/details.zig");
 const std = @import("std");
 const tree = @import("../ui/tree.zig");
 const layout = @import("../ui/layout.zig");

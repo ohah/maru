@@ -33,6 +33,7 @@ pub fn nodes(self: *AppSession, a: std.mem.Allocator) ![]const inspect.Node {
     }
     try append(a, &out, .sidebar_scroll, sidebar.sidebarScrollTree(self), 0, 0);
     if (root.inspector_tabs_ops.current(self, a)) try append(a, &out, .pane_tabs, self.pane_tabs_publication.snapshot(), 0, 0);
+    if (root.inspector_file_header_details_ops.current(self, a)) try append(a, &out, .file_header_details, self.file_header_details.frame.snapshot(), 0, 0);
     if (root.inspector_file_header_ops.current(self, a)) try append(a, &out, .file_header, self.file_header_publication.snapshot(), 0, 0);
     try append(a, &out, .pane_divider, .{ .entries = self.divider_entry_scratch.items, .generation = self.divider_snapshot_generation }, 0, 0);
     if (dock.dockVisible(self)) {
@@ -53,7 +54,7 @@ pub fn nodes(self: *AppSession, a: std.mem.Allocator) ![]const inspect.Node {
 pub fn snapshot(self: *AppSession, a: std.mem.Allocator, window: ?u64) error{OutOfMemory}!std.json.Value {
     const all = try nodes(self, a);
     const branches = try inspect.hierarchy(a, all, self.inspector.collapsed[0..self.inspector.collapsed_len], self.inspector.query[0..self.inspector.query_len]);
-    const dto = .{ .tree = branches, .collapsed = self.inspector.collapsed[0..self.inspector.collapsed_len], .query = self.inspector.query[0..self.inspector.query_len], .window = window, .coordinate_space = "owner_window_backing_pixels", .node_limit = 512, .limit_reached = all.len == 512, .picking = self.inspector.picking, .hovered = inspect.resolve(all, self.inspector.picker_hover), .selected = inspect.resolve(all, self.inspector.picker_selected), .coverage = "published file mode selectors, dock view switcher/actions, pane tabs/close/plus/scroll controls, sidebar workspace cards/groups, status bar, sidebar scroll, pane dividers and visible file/SCM/session dock trees; unpublished chrome, terminal cells and web DOM unsupported", .nodes = all };
+    const dto = .{ .tree = branches, .collapsed = self.inspector.collapsed[0..self.inspector.collapsed_len], .query = self.inspector.query[0..self.inspector.query_len], .window = window, .coordinate_space = "owner_window_backing_pixels", .node_limit = 512, .limit_reached = all.len == 512, .picking = self.inspector.picking, .hovered = inspect.resolve(all, self.inspector.picker_hover), .selected = inspect.resolve(all, self.inspector.picker_selected), .coverage = "published file breadcrumb/modified/reload/conflict navigation and mode selectors, dock view switcher/actions, pane tabs/close/plus/scroll controls, sidebar workspace cards/groups, status bar, sidebar scroll, pane dividers and visible file/SCM/session dock trees; unpublished chrome, terminal cells and web DOM unsupported", .nodes = all };
     const bytes = try std.json.Stringify.valueAlloc(a, dto, .{});
     const parsed = std.json.parseFromSlice(std.json.Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,

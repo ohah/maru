@@ -521,4 +521,4 @@ role/상태를 발행하지만 label·native accessibility·reorder capability �
 
 ### 파일 보기 모드 Inspector 발행 범위
 
-`components/file_header.zig`의 Frame은 L2 `dock_layout`의 mode rect를 host에서 받아 발행한다. 일반 mode 클릭·cursor와 hover paint가 같은 발행 기하를 소비한다. CoreText glyph lowering·breadcrumb/충돌 버튼 정책은 기존 경로에 두며 전체 파일 헤더 이관 완료로 세지 않는다. 상세 범위는 [UI 요소 계획](plans/ui-inspector.md)을 따른다.
+`components/file_header.zig`의 Frame은 L2 `dock_layout`의 mode rect를 host에서 받아 발행한다. 일반 mode 클릭·cursor와 hover paint가 같은 발행 기하를 소비한다. CoreText glyph lowering과 breadcrumb/충돌 버튼 정책은 기존 경로에 둔다. `file_header/details.zig`는 같은 헤더 DrawCell의 breadcrumb·status·충돌 glyph를 별도 발행하며, 재읽기·충돌 이동 클릭과 cursor가 그 rect를 읽는다. 심볼 마디별 tree·native accessibility 전체 이관 완료로 세지 않는다. 상세 범위는 [UI 요소 계획](plans/ui-inspector.md)을 따른다.

@@ -2,13 +2,13 @@
 const std = @import("std");
 const tree = @import("tree.zig");
 const layout = @import("layout.zig");
-pub const Source = enum { pane_tabs, sidebar, status_bar, file_tree, scm, agent_sessions, sidebar_scroll, pane_divider };
+pub const Source = enum { dock_header, pane_tabs, sidebar, status_bar, file_tree, scm, agent_sessions, sidebar_scroll, pane_divider };
 pub const Key = struct { source: Source, id: u64, generation: u64 = 0 };
 /// List row IDs may be reused after publication; bind those to their generation.
 /// Fixed status/scroll identities may follow geometry across frames.
 pub fn identity(n: Node) Key {
     return .{ .source = n.source, .id = n.id, .generation = switch (n.source) {
-        .pane_tabs, .sidebar, .file_tree, .scm, .agent_sessions, .pane_divider => n.generation,
+        .dock_header, .pane_tabs, .sidebar, .file_tree, .scm, .agent_sessions, .pane_divider => n.generation,
         else => 0,
     } };
 }

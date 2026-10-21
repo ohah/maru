@@ -353,13 +353,10 @@ pub fn dockActionAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
     const bar = dockGeometry(self).view_bar;
     if (bar.h == 0 or x_px < 0 or y_px < 0) return null;
     if (!layout_math.pointInRect(x_px, y_px, bar)) return null;
-    return dock_view_bar.actionAtPoint(
-        .{ .x = bar.x, .y = bar.y, .w = bar.w, .h = bar.h },
-        self.dockViewBarGrid(),
-        actions.len,
-        @intFromFloat(x_px),
-        @intFromFloat(y_px),
-    );
+    for (actions, 0..) |_, i| if (headerActionRect(self, i)) |r| {
+        if (layout_math.pointInRect(x_px, y_px, .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h })) return i;
+    };
+    return null;
 }
 
 /// 좌표가 뷰 바의 어느 슬롯 위인지(렌더·hover·클릭 공용 — 기하가 두 벌이 되지 않게).
@@ -368,12 +365,10 @@ pub fn dockViewSlotAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
     const bar = dockGeometry(self).view_bar;
     if (bar.h == 0 or x_px < 0 or y_px < 0) return null;
     if (!layout_math.pointInRect(x_px, y_px, bar)) return null;
-    return dock_view_bar.slotAtPoint(
-        .{ .x = bar.x, .y = bar.y, .w = bar.w, .h = bar.h },
-        self.dockViewBarGrid(),
-        @intFromFloat(x_px),
-        @intFromFloat(y_px),
-    );
+    for (0..dock_view_bar.slot_count) |i| if (headerSlotRect(self, i)) |r| {
+        if (layout_math.pointInRect(x_px, y_px, .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h })) return i;
+    };
+    return null;
 }
 
 /// 지금 보이는 도크 목록이 매 프레임 내는 tree. **자식이 없다** — 행은 셀 격자라 tree 노드가 아니고(ML6의 텍스트
@@ -721,4 +716,38 @@ pub fn flattenRestoredDock(
     panel.restored.clearRetainingCapacity(); // panel은 더 이상 소유하지 않는다(이중 해제 방지)
     panel.restored_active = null;
     return out;
+}
+
+// The host supplies opaque view/action meaning; the neutral frame owns geometry.
+fn headerModel(self: *const AppSession, ids: *[max_dock_actions]u64) dock_view_bar.published.Model {
+    const r = dockGeometry(self).view_bar;
+    const actions = dockActions(self);
+    for (actions, 0..) |action, i| ids[i] = @as(u64, @backingInt(action)) + 1;
+    return .{ .rect = .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h }, .grid = self.dockViewBarGrid(), .active = dockViewSlotIndex(self), .actions = ids[0..actions.len] };
+}
+pub fn headerPublicationCurrent(self: *const AppSession) bool {
+    if (!dockVisible(self) or self.backing_height_px == 0) return false;
+    var ids: [max_dock_actions]u64 = undefined;
+    return self.dock_header_publication.current(headerModel(self, &ids));
+}
+pub fn publishDockHeader(self: *AppSession) void {
+    if (!dockVisible(self) or self.backing_height_px == 0) {
+        self.dock_header_publication.invalidate();
+        return;
+    }
+    var ids: [max_dock_actions]u64 = undefined;
+    self.dock_header_publication.publish(headerModel(self, &ids));
+}
+pub fn headerSlotRect(self: *const AppSession, index: usize) ?dock_view_bar.Rect {
+    if (headerPublicationCurrent(self)) return self.dock_header_publication.rect(dock_view_bar.published.slotId(index));
+    // Before first paint or after a layout change, retain the existing input path.
+    var ids: [max_dock_actions]u64 = undefined;
+    const m = headerModel(self, &ids);
+    return dock_view_bar.slotRect(m.rect, m.grid, index);
+}
+pub fn headerActionRect(self: *const AppSession, index: usize) ?dock_view_bar.Rect {
+    if (headerPublicationCurrent(self)) return self.dock_header_publication.rect(dock_view_bar.published.actionId(index));
+    var ids: [max_dock_actions]u64 = undefined;
+    const m = headerModel(self, &ids);
+    return dock_view_bar.actionRect(m.rect, m.grid, m.actions.len, index);
 }

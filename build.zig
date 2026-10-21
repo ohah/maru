@@ -2703,7 +2703,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_inspector_tests = b.addRunArtifact(inspector_tests);
     run_inspector_tests.setCwd(b.path("."));
-    run_inspector_tests.addArg("--maru-expect-passed=12");
+    run_inspector_tests.addArg("--maru-expect-passed=13");
     const inspector_step = b.step("test-inspector", "Verify live inspector UI, shared snapshot and CLI contracts");
     inspector_step.dependOn(&run_inspector_tests.step);
     if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_inspector_tests.step);

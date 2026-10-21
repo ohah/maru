@@ -8,6 +8,7 @@
 //! (sub-pixel quad는 셀 배경에 먹혀 사라진다 — docs 기준: 셀 격자 위젯은 셀 정렬).
 
 const std = @import("std");
+pub const published = @import("dock_view_bar/published.zig");
 
 /// 도크 기하(`split_tree.Rect`)와 **같은 좌표 규약**(u32)이다. 레이어를 넘지 않으려고 타입을 재선언하되,
 /// 변환을 끼우지 않는다 — 캐스팅이 끼면 그린 자리와 눌리는 자리가 어긋난다.
@@ -327,4 +328,8 @@ test "Grid: 환산은 내림이 아니라 반올림이다" {
     try testing.expectEqual(@as(u32, 5), Grid.init(7, 32).slot_cols);
     // 경계: 셀 9px·목표 40px 는 4.44 라 내려간다(올림이 아니라 «반올림» 임을 고정).
     try testing.expectEqual(@as(u32, 4), Grid.init(9, 40).slot_cols);
+}
+
+test {
+    _ = published;
 }

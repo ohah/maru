@@ -85,7 +85,7 @@
   사이드바 카드 publication을 폐기하고 Inspector에서 제외한다. 기존 drag 경로를 유지한다.
 - 사용자 이름·경로 label을 복사하지 않는다. agent/recovered 행은 공유 geometry의 일부지만
   이번 Inspector 카드·그룹 범위에서는 제외한다. 네이티브 accessibility 이관 완료를 뜻하지 않는다.
-- pane 탭 바 확장은 아래 절을 따른다. 도크 헤더 확장은 후속 범위다.
+- pane 탭 바 확장은 아래 절을 따른다. 도크 뷰 바 확장은 아래 절을 따른다. 파일별 헤더는 후속 범위다.
 - 이번 PR의 적대적 검증은 사용자 요청에 따라 최초 **5회 + 추가 5회, 누적 10회**다
   (기본 20회에 대한 이번 작업의 예외).
   실제 앱·CLI·Metal PNG와 정상 입력 대조군, 컴파일 결함 5종의 결과는
@@ -112,3 +112,22 @@
 - 실제 앱 검증은 `tools/inspector-picker-app/run.py --pane-tabs --rounds 20`을 사용한다.
   기존 `MARU_FORCE_TAB_COUNT`/`MARU_FORCE_SPLIT`으로 실제 Term 생성·split 경로를 실행한다.
   새 제품 의존성·설정·ABI 변경은 없다. 최종 회차·증거는 [검증 매트릭스](../verification-matrix.md)를 따른다.
+
+## 도크 뷰 바 발행 트리
+
+- `chrome.components.dock_view_bar.published.Frame`이 도크 상단의 뷰 전환 6개와
+  현재 뷰의 동작 버튼(탐색기 새로고침·전체 접기)을 `dock_header` source로 제공한다.
+  파일별 breadcrumb/mode 헤더, sidebar 상단 도구 및 미발행 chrome은 이번 범위에 포함하지 않는다.
+- 기존 `slotRect`/`actionRect`가 셀 정렬 geometry를 준비한다. host paint의 활성/hover 밴드와
+  일반 포인터 입력은 유효한 publication rect를 소비하고 CoreText glyph lowering은 기존 셀 경로를 유지한다.
+  첫 paint 전이나 레이아웃 변경 직후에는 기존 계산으로 입력을 처리하며 Inspector에는 낡은 tree를 내보내지 않는다.
+- root → tab/button 부모 구조와 빈 label만 저장한다. 사용자 경로·이름·본문·native pointer는 보관하지 않는다.
+  geometry·활성 뷰·동작 목록의 의미/순서가 바뀌면 publication generation이 바뀌어 이전 선택은 null이다.
+- 고정 배열(root 1개 + view 6개 + action 최대 8개)로 할당 없이 발행한다.
+  지원 한도를 넘는 동작 목록·숨김·높이/폭 0은 전체 publication을 폐기한다.
+  좁은 바에서 그려지지 않는 버튼은 tree에도 없고 클릭되지 않는다. 기존 512-node 보고 한도는 유지한다.
+- 같은 collector가 GUI와 `session inspect --json`의 nodes/tree/hovered/selected를 제공한다.
+  읽기 전용 Pick, owner 창 backing-pixel 좌표, Pause·Escape·분리 창 계약은 그대로다.
+- 실제 앱 하네스는 `tools/inspector-picker-app/run.py --dock-header --rounds 20`과
+  독립 `verify_dock_header.py`를 사용한다. `MARU_INSPECTOR_WITH_DOCK=header-wide`는
+  실제 수동 너비 360pt 도크를 여는 캡처 fixture이며 제품 기본 너비는 기존 설정을 따른다.

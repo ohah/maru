@@ -756,6 +756,8 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
         }
         if (std.c.getenv("MARU_INSPECTOR_WITH_DOCK")) |value| {
             const name = std.mem.span(value);
+            // A manually sized dock is needed to expose all eight real header slots.
+            if (std.mem.eql(u8, name, "header-wide")) self.dock.size = 360;
             // Exercise the real dock collectors, not synthetic inspection nodes.
             dock_ops.openDockTo(self, if (std.mem.eql(u8, name, "scm")) .source_control else if (std.mem.eql(u8, name, "sessions")) .agent_sessions else .explorer);
         }

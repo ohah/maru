@@ -4631,6 +4631,7 @@ ScreenCaptureKit 패널 이미지·native 접근성 확인·대화상자 종료�
 ReleaseFast 정상 19개·다섯 의미 결함 검출·원복 18개, 결과 판정기 10개가 일반/최적화 Python에서 통과했다.
 실측 30표본과 구간별 비용은 [백업 실측 계획](plans/editor-backup-main-latency.md)을 따른다.
 제품의 백업 I/O·주기·저장/종료 정책과 UI는 바꾸지 않는다. 실제 AppKit 입력/프레임 지연은 별도다.
+
 ### 첫 저장 완료 구간과 이벤트 통지 실험
 
 완료: 제품 통지 도입 전 계측 실험과 도구. `probe-editor-first-save-completion.py`는 도입 전의 준비한 실제 AppKit 소스 사본에서
@@ -4639,3 +4640,52 @@ tick/event 각 12표본을 대조한다. `test-editor-first-save-completion.py`�
 인과 역전과 사본 밖 symlink를 거절하고, 바이너리 혼합·전달 로그 누락·worker 내 지연 누락도 검사한다.
 현재 제품 통지의 구현·수명 검증은 [저장 이벤트 계획](plans/editor-save-event-wake.md)을 따른다. 이 옛 실험만으로 화면의 첫 저장 완료 표시, OS IME와 창/앱 종료 수명까지
 검증한 결과로 해석하지 않으며 [완료 통지 계획](plans/editor-first-save-completion-wake.md)이 실험 범위를 소유한다.
+
+## Inspector 도크 뷰 바 발행
+
+`dock_header`는 실제 상단 뷰 전환 및 탐색기 동작 버튼의 발행 tree다.
+`mise exec -- zig build test-inspector test-chrome-ui -j2`와
+`mise exec -- zig build test-inspector -Doptimize=ReleaseFast -j2`는 공유 프레임 및
+실제 host 연결을 검사한다. 고정 배열의 숨김/좁은 폭/한도 초과와 세대·동작 의미·parent·clip,
+paint/input의 발행 rect 소비, Pick의 제품 동작 차단과 정상 입력 대조군을 포함한다.
+`python3 tools/test-dock-header-publication-adversarial.py`는 컴파일한 결함 8종을 정상·동등·복원 대조군과 비교한다.
+
+실제 앱 명령은 다음과 같다. 빌드가 끝난 `.app` 전체를 고유 경로로 복사해 실행 중 빌드와 격리한다.
+
+```sh
+python3 tools/inspector-picker-app/run.py --app <고정 앱>/Contents/MacOS/maru-macos-app --output <새 경로> --dock-header --rounds 20
+python3 tools/inspector-picker-app/verify_dock_header.py <같은 경로>
+python3 -m unittest discover -s tools/inspector-picker-app -p 'test_*.py'
+```
+
+| 회차 | 적대적 가설 |
+| --- | --- |
+| 1 | 뷰 전환 Pick은 제품 동작을 실행하지 않고 일반 클릭 대조군은 실행한다 |
+| 2–3 | 새로고침·전체 접기 버튼 Pick이 제품 도크 상태를 바꾸지 않는다 |
+| 4–5 | 좌측 배치·분리 창에서도 owner 창의 다른 뷰 버튼을 고른다 |
+| 6–10 | 2× backing pixel 및 다섯 배치에서도 각 뷰 버튼을 정확히 고른다 |
+| 11–12 | Escape·Pick 재클릭은 선택과 hover를 해제한다 |
+| 13–14 | Paused에서 Pick은 Live로 전환하고 Pause는 Pick을 취소한다 |
+| 15 | 정확한 오른쪽 경계는 이웃 버튼을 고른다 |
+| 16 | 음수 좌표는 요소 없음과 arrow cursor를 보고한다 |
+| 17 | 도구 위 hover는 owner 강조를 지우고 Pick은 유지한다 |
+| 18–19 | 한국어 표시와 빈 곳으로 이동한 뒤에도 읽기 전용 선택을 유지한다 |
+| 20 | 분리 창 닫기·재열기 후 geometry가 바뀌면 낡은 선택은 null이다 |
+
+독립 판정자는 source/ID/parent/generation·모델 불변·Follow 대상·native cursor/flags,
+Metal hover/선택 경계 픽셀과 취소 뒤 복원, 분리 창 PNG를 확인한다.
+NSEvent callback·Metal readback이며 물리 HID·WindowServer·실제 Retina/다중 모니터 검증과 구분한다.
+
+이번 실행 결과: 실제 앱 **20/20**, CLI **448개**, PNG **64장**, hover 경계 변화 **6,688픽셀**.
+원본은 `/tmp/maru-header-wide-e2e20/manifest.json`과 `verified.json`이며,
+Debug/ReleaseFast 인스펙터 **70+13개**, Chrome UI **1,196개**를 통과했다.
+컴파일 결함 8종과 정상/동등/복원 대조군은 `/tmp/maru-header-mutants-1ni2uo4x/manifest.json`에 기록한다.
+Artifact 판정자는 전체 **8개 테스트**, 이번 도크 반례 **21개**를 포함한다.
+앱 SHA256: `8ddf458d50e4063217bd9bbedeac5519992a53c84877ea9696022b23f0c1af06`.
+전체 `check-boundaries -j4`도 통과했다(`/tmp/maru-header-boundaries.log`, exit 0).
+추가 로컬 전체 `test-macos-app-host-abi`는 **6,698 통과·114 skip·9 실패·7 filtered**로 실패했다
+(`/tmp/maru-header-full-host.log`). 기존 AC3/BR6/COL7/LSPE19/LSPE2/LATE3와 공유 Find R1/R6/R7이다.
+같은 cwd에서 변경 전 바이너리와 새 바이너리를 별도로 실행해 동일한 9개 실패를 재현했으며
+전체 실패 목록도 일치한다(`/tmp/maru-header-baseline-comparison.json`, `same_failures=true`,
+`full_suite_matches_baseline=true`). 전체 게이트 통과로 표현하지 않는다.
+격리 HOME에서도 같은 기존 9개 실패가 재현됐다(`/tmp/maru-header-clean-home-nine.json`). 사용자 설정 영향으로 단정하지 않는다.

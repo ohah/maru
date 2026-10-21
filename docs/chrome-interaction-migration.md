@@ -514,3 +514,7 @@ geometry를 공유한다. 모델 lifetime·실제 layout 검사는 `app_session/
 첫 paint 전과 reorder preview에는 기존 입력 경로를 유지하고 Inspector publication을 사용하지 않는다.
 role/상태를 발행하지만 label·native accessibility·reorder capability 전체를 이관 완료로 세지 않는다.
 세부 범위와 검증은 [UI Inspector 계획](plans/ui-inspector.md)을 따른다.
+
+### 도크 뷰 바 Inspector 발행 범위
+
+도크 뷰 바의 `dock_view_bar.published.Frame`은 뷰/동작 슬롯의 발행 geometry를 paint 밴드와 입력에 공유한다. Inspector `dock_header`는 그 tree만 읽는다. CoreText glyph lowering과 기존 down-action 의미는 유지하며 전체 도크 상호작용 이관 완료를 뜻하지 않는다. 계약은 [UI 요소 계획](plans/ui-inspector.md)의 도크 뷰 바 절을 따른다.

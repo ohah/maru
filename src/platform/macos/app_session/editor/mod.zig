@@ -69426,3 +69426,132 @@ test "SAVEWAKE worker 없는 시작 전 거절도 실패를 정산하고 본문�
     try testing.expect(undoEdit(fx.fx.session, fx.term));
     try testing.expect(redoEdit(fx.fx.session, fx.term));
 }
+
+// 여러 문서 닫기는 저장 명령이 아니라 경고 후 버리기다. 저장 지연을 재기 전에
+// 실제 진입점과 디스크 결과를 함께 검사해 없는 writer를 측정하지 않도록 한다.
+fn multiCloseFixture(fx: *PaneFixture) ![2]*Term {
+    const a = try undoFixture(fx, testing.allocator, "multi-a.txt", "a");
+    const b = try undoFixture(fx, testing.allocator, "multi-b.txt", "b");
+    for ([_]*Term{ a, b }) |term| {
+        term.rt.editor_selection = editor_selection.Selection.at(1);
+        try testing.expect(insertText(fx.session, term, "!"));
+    }
+    _ = try tab_ops.newTab(fx.session);
+    fx.session.app_window.active_tab = 0;
+    for (fx.session.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        if (term.kind != .editor) term.surface.core.semantic_state = .input;
+    };
+    return .{ a, b };
+}
+fn multiCloseAsk(session: *AppSession) !void {
+    const start = std.Io.Clock.awake.now(testing.io).nanoseconds;
+    session.requestClose(.{ .tab_index = 0 });
+    const elapsed = std.Io.Clock.awake.now(testing.io).nanoseconds - start;
+    try testing.expect(session.pending_confirm == .close);
+    try testing.expect(session.chrome_host.confirm.open);
+    try testing.expectEqualStrings(maru.i18n.t(.app_close_unsaved), session.chrome_host.confirm.message);
+    try testing.expectEqualStrings(maru.i18n.t(.btn_close), session.chrome_host.confirm.confirm_label);
+    try testing.expect(session.editor_save_close == null);
+    try testing.expectEqual(@as(usize, 0), @import("save/dispatch.zig").requestCount());
+    std.debug.print("\nMULTI_CLOSE request_ns={d} save_requests=0\n", .{elapsed});
+}
+fn multiCloseDisk(fx: *PaneFixture) !void {
+    try batchApplyDisk(fx, "multi-a.txt", "a");
+    try batchApplyDisk(fx, "multi-b.txt", "b");
+}
+test "multi close contract 확인창은 저장이 아닌 닫기이고 취소는 두 문서의 본문과 Undo를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const terms = try multiCloseFixture(&fx);
+    try multiCloseAsk(fx.session);
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    for (terms) |term| {
+        try testing.expect(nativeCloseSurface(fx.session, term.surface.id) == term);
+        try testing.expect(isDirty(term));
+        try testing.expectEqual(@as(usize, 1), term.rt.editorDocument().history.undo_len);
+    }
+    try testing.expectEqualStrings("a!", terms[0].rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("b!", terms[1].rt.editorDocument().opened.?.file.content);
+    for (terms) |term| try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("a", terms[0].rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("b", terms[1].rt.editorDocument().opened.?.file.content);
+    try multiCloseDisk(&fx);
+}
+test "multi close contract 닫기 확정은 두 원본 파일을 쓰지 않고 대상 탭만 닫는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const terms = try multiCloseFixture(&fx);
+    const ids = [2]u64{ terms[0].surface.id, terms[1].surface.id };
+    try multiCloseAsk(fx.session);
+    nativeCloseAccept(fx.session);
+    for (ids) |id| try testing.expect(nativeCloseSurface(fx.session, id) == null);
+    try testing.expectEqual(@as(usize, 1), fx.session.tabs.items.len);
+    try testing.expectEqual(@as(usize, 0), @import("save/dispatch.zig").requestCount());
+    try multiCloseDisk(&fx);
+}
+test "multi close contract 포커스 이동 뒤 늦은 확정은 다른 탭을 닫지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const terms = try multiCloseFixture(&fx);
+    try multiCloseAsk(fx.session);
+    _ = tab_ops.switchTab(fx.session, 1);
+    fx.session.dispatchChromeAction(.confirm_accept);
+    try testing.expectEqual(@as(usize, 2), fx.session.tabs.items.len);
+    for (terms) |term| try testing.expect(nativeCloseSurface(fx.session, term.surface.id) == term);
+    try multiCloseDisk(&fx);
+}
+test "multi close contract 확인 중 추가 편집도 취소하면 두 문서에 남는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const terms = try multiCloseFixture(&fx);
+    try multiCloseAsk(fx.session);
+    try testing.expect(insertText(fx.session, terms[0], "x"));
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    try testing.expectEqualStrings("a!x", terms[0].rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("b!", terms[1].rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 2), terms[0].rt.editorDocument().history.undo_len);
+    try multiCloseDisk(&fx);
+}
+test "multi close contract 이름 없는 문서와 섞여도 저장 선택으로 표시하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    _ = try multiCloseFixture(&fx);
+    const untitled = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, untitled, "unsaved"));
+    // 이름 없는 문서도 같은 닫기 범위에 넣는다. 실제 탭 전환으로 무효화 규칙을 거친다.
+    _ = tab_ops.switchTab(fx.session, 1);
+    _ = tab_ops.switchTab(fx.session, 0);
+    try multiCloseAsk(fx.session);
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    try testing.expectEqualStrings("unsaved", untitled.rt.editorDocument().opened.?.file.content);
+    try testing.expect(isDirty(untitled));
+    try multiCloseDisk(&fx);
+}
+
+test "multi close contract 탭 밖에 남은 공유 뷰의 미저장 본문과 Undo는 버리지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const terms = try multiCloseFixture(&fx);
+    fx.term = terms[0];
+    try testing.expect(tab_ops.switchTab(fx.session, 1));
+    const peer = try sharedViewFixturePeer(&fx);
+    const peer_id = peer.surface.id;
+    try testing.expect(tab_ops.switchTab(fx.session, 0));
+    try multiCloseAsk(fx.session);
+    nativeCloseAccept(fx.session);
+    try testing.expect(nativeCloseSurface(fx.session, peer_id) == peer);
+    try testing.expectEqualStrings("a!", peer.rt.editorDocument().opened.?.file.content);
+    try testing.expect(isDirty(peer));
+    try testing.expect(undoEdit(fx.session, peer));
+    try testing.expectEqualStrings("a", peer.rt.editorDocument().opened.?.file.content);
+    try multiCloseDisk(&fx);
+}

@@ -6207,6 +6207,15 @@ pub fn build(b: *std.Build) void {
         run_native_close_save.addArg("--maru-expect-passed=13");
         macos_only_test_step.dependOn(&run_native_close_save.step);
     }
+    const multi_close_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.multi close contract "} });
+    const run_multi_close = b.addRunArtifact(multi_close_tests);
+    run_multi_close.setCwd(b.path("."));
+    run_multi_close.addArg("--maru-expect-tests=10");
+    b.step("test-editor-multi-close-contract", "Run multi-document close warning and discard contract").dependOn(&run_multi_close.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_multi_close.addArg("--maru-expect-passed=10");
+        macos_only_test_step.dependOn(&run_multi_close.step);
+    }
     const native_close_guard_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.DIRTY5 ", ".test.U1h ", ".test.U2k ", ".test.U2l ", ".test.C1a-9 " } });
     const run_native_close_guards = b.addRunArtifact(native_close_guard_tests);
     run_native_close_guards.setCwd(b.path("."));

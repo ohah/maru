@@ -200,3 +200,24 @@ AppKit fixture는 실제 mouse 적용/재시도와 Metal readback을 사용한�
 GUI 관측기 `tools/editor-project-search-app/run.py --native-close-save`는 격리 writer에만 1초 지연을
 넣고 실제 AppKit ⌘W·확인 Enter·추가 입력과 제품 Metal 캡처를 사용한다. 원본 bytes는 별도로
 대조한다. 합성 NSEvent 증거를 물리 한국어 HID·VoiceOver·OS 후보창 증거로 확대하지 않는다.
+
+## 여러 문서 닫기 진입점 검증 (2026-10-22)
+
+현재 여러 문서를 포함한 탭 닫기는 동기 저장을 실행하는 경로가 아니다.
+`AppSession.requestClose`에서 `save/close.ask`가 단일 Term 밖을 거절하면,
+`app_close_unsaved` 경고와 **닫기 / 취소** 버튼을 보여준다. 확정은 기존
+`pending_confirm.close` → `web.closeAskingPage` → 닫기 경로이며, 저장 성공을 뜻하지 않는다.
+따라서 이 경로의 지연을 "남은 동기 저장 시간"으로 측정하거나 writer 지연을 주입해
+비동기화 효과라고 보고할 수 없다. 여러 문서의 **모두 저장 후 닫기**는 별도 UX 확장이다.
+
+`test-editor-multi-close-contract`는 실제 `requestClose(.tab_index)`와 확인 action을 실행한다.
+서로 다른 두 파일을 편집한 뒤 취소 시 본문·Undo와 원본 bytes 유지, 닫기 확정 시 대상 탭만
+제거하고 원본 bytes 유지, 포커스 이동 뒤 늦은 확정 무효화, 확인 중 추가 편집 후 취소,
+이름 없는 문서가 섞인 범위의 공통 경고, 닫는 탭 밖에 남은 공유 뷰의 본문·실제 Undo를 검사한다.
+취소한 두 독립 문서에서도 실제 Undo로 원래 본문을 복원한다. 각 확인 진입 직후 저장 큐가 비어 있고
+단일 문서 저장 후 닫기 상태가 없다는 것도 대조한다.
+
+테스트 로그의 `MULTI_CLOSE request_ns`는 헤드리스 Debug/ReleaseFast에서 확인창 준비 호출에
+걸린 진단값이다. 서로 다른 조건을 한 번씩 실행한 값으로, 대표 성능 통계·AppKit 이벤트
+지연·첫 화면 표시 시간·실제 느린 디스크의 결과로 확대하지 않는다. 이 검증으로 새로운 저장
+실패 정책이나 다중 문서 저장 기능이 구현된 것은 아니다.

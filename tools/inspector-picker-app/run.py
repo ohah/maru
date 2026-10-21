@@ -13,7 +13,7 @@ def key(n):
     return None if n is None else (n['source'], n['id'])
 
 
-def run(app, output, n):
+def run(app, output, n, sidebar=False):
     dest=output/f'round-{n:02d}';dest.mkdir()
     root=pathlib.Path(tempfile.mkdtemp(prefix='mip-',dir='/tmp'));(root/'home').mkdir();(root/'work').mkdir()
     for directory in ('cache','state','host','backups'):(root/directory).mkdir()
@@ -34,11 +34,15 @@ def run(app, output, n):
     if n==20:lines += ['inspect-click 17','action toggle_inspector']
     if placement==4:lines += [f'inspect-capture {dest}/detached.ppm']
     lines+=['sleep 500',f'inspect-main-capture {dest}/selected.ppm','inspect-report selected',f'waitfile {end}','inspect-finish']
+    if sidebar and n<=3:
+        lines[-1:-1]=[f'inspect-owner-pointer {fixture} click','sleep 500','inspect-report control',f'waitfile {dest}/control-ok']
     script=dest/'input.txt';script.write_text('\n'.join(lines)+'\n');report=dest/'report.txt'
     env={k:v for k,v in os.environ.items() if not k.startswith('MARU_')}
     env.update(HOME=str(root/'home'),CFFIXED_USER_HOME=str(root/'home'),MARU_CONFIG=str(config),XDG_CONFIG_HOME=str(root/'home/.config'),XDG_CACHE_HOME=str(root/'cache'),XDG_STATE_HOME=str(root/'state'),MARU_SESSION_HOST_ROOT=str(root/'host'),MARU_EDITOR_BACKUP_ROOT=str(root/'backups'),MARU_NO_WORKSPACE_RESTORE='1',MARU_OPEN_INSPECTOR='1',MARU_INSPECTOR_WITH_DOCK='1',MARU_INSPECTOR_APP_TEST='1',MARU_WEB_OSR_TEST_INPUT=str(script),MARU_WEB_OSR_TEST_REPORT=str(report))
-    if 6<=n<=10:env.update(MARU_SCREENSHOT=str(dest/'auto.ppm'),MARU_SCREENSHOT_DELAY_MS='60000',MARU_SCREENSHOT_TIMEOUT_MS='70000',MARU_SCREENSHOT_RENDER_SCALE_MILLI='2000')
-    observations=[];errors=[];expected=None;hover=None;selected=None
+    if 6<=n<=10 or (sidebar and n==5):env.update(MARU_SCREENSHOT=str(dest/'auto.ppm'),MARU_SCREENSHOT_DELAY_MS='60000',MARU_SCREENSHOT_TIMEOUT_MS='70000',MARU_SCREENSHOT_RENDER_SCALE_MILLI='2000')
+    if sidebar:
+        env.update(MARU_FORCE_SR5_NESTED_TOP="1", MARU_FORCE_GROUP_COLOR="1", MARU_INSPECTOR_TAB="elements")
+    observations=[];errors=[];expected=None;hover=None;selected=None;sidebar_before=None;control=None
     with (dest/'app.log').open('w') as log:
         process=subprocess.Popen([str(app)],env=env,stdout=log,stderr=log,start_new_session=True)
         try:
@@ -54,9 +58,16 @@ def run(app, output, n):
                     if 'label=ready' in text and not fixture.exists():
                         all_nodes=e['nodes'];candidates=[v for v in all_nodes if v['visible_rect']['width']>=4 and v['visible_rect']['height']>=4]
                         if not candidates:raise RuntimeError('no published UI candidates')
-                        preferred=[v for v in candidates if v['source']==('file_tree' if n%2==0 else 'status_bar')]
-                        node=next((v for v in reversed(preferred or candidates) if v['action_id'] is not None),(preferred or candidates)[-1]);r=node['visible_rect'];x=r['x']+r['width']/2;y=r['y']+r['height']/2
-                        if n==15:x=r['x']+.25;y=r['y']+.25
+                        if sidebar:
+                            sidebar_before=[v for v in all_nodes if v['source']=='sidebar']
+                            role={1:'tab',2:'tree_item',3:'tree_item',4:'button',5:'button'}[n]
+                            preferred=[v for v in candidates if v['source']=='sidebar' and v['role']==role]
+                            if n==3:preferred=preferred[1:]
+                            if not preferred:raise RuntimeError('missing real sidebar candidate')
+                        else:
+                            preferred=[v for v in candidates if v['source']==('file_tree' if n%2==0 else 'status_bar')]
+                        node=next((v for v in (preferred if sidebar else reversed(preferred or candidates)) if v['action_id'] is not None),(preferred or candidates)[-1]);r=node['visible_rect'];x=r['x']+r['width']/2;y=r['y']+r['height']/2
+                        if n==15 or (sidebar and n==4):x=r['x']+.25;y=r['y']+.25
                         if n==16:x=-10;y=-10
                         expected=next((v for v in reversed(all_nodes) if contains(v['visible_rect'],x,y)),None)
                         fixture.write_text(json.dumps({'x':x,'y':y}))
@@ -79,7 +90,14 @@ def run(app, output, n):
                         else:
                             if e['picking']:errors.append('click retained picking')
                             if key(e['selected'])!=key(expected):errors.append('selection mismatch')
+                        if sidebar and sidebar_before != [v for v in e['nodes'] if v['source']=='sidebar']:
+                            errors.append('Pick changed workspace/group publication (activation, collapse or close)')
                         end.touch()
+                    if sidebar and n<=3 and 'label=control' in text and not (dest/'control-ok').exists():
+                        control=e
+                        if sidebar_before == [v for v in e['nodes'] if v['source']=='sidebar']:
+                            errors.append('normal pointer control did not activate/collapse product row')
+                        (dest/'control-ok').touch()
                 if 'inspector finished' in text:break
                 time.sleep(.12)
             if hover is None or selected is None:errors.append('missing live hover/selection observations')
@@ -102,15 +120,16 @@ def run(app, output, n):
             (dest/'pixels.json').write_text(json.dumps({'outline_edge_changed_pixels':changed,'roi':[x,y,w,h]}))
             if changed==0:errors.append('hover did not paint the inspected boundary')
     (dest/'observations.json').write_text(json.dumps(observations,indent=2))
-    result={'round':n,'placement':placement,'expected':expected,'hover':hover,'selected':selected,'passed':not errors,'errors':errors,'root':str(root),'transport':'native NSEvent callbacks; CLI session.inspect; Metal readback'}
+    result={'control':control,'sidebar_before':sidebar_before,'mode':'sidebar' if sidebar else 'picker','round':n,'placement':placement,'expected':expected,'hover':hover,'selected':selected,'passed':not errors,'errors':errors,'root':str(root),'transport':'native NSEvent callbacks; CLI session.inspect; Metal readback'}
     (dest/'result.json').write_text(json.dumps(result,indent=2));return result
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--app',type=pathlib.Path,required=True);p.add_argument('--output',type=pathlib.Path,required=True);p.add_argument('--start',type=int,default=1);p.add_argument('--rounds',type=int,default=20);args=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--app',type=pathlib.Path,required=True);p.add_argument('--output',type=pathlib.Path,required=True);p.add_argument('--sidebar',action='store_true');p.add_argument('--start',type=int,default=1);p.add_argument('--rounds',type=int,default=20);args=p.parse_args()
+    if args.sidebar and (args.start != 1 or args.rounds != 5):p.error("--sidebar requires --start 1 --rounds 5")
     args.output.mkdir(parents=True,exist_ok=False);results=[]
     for n in range(args.start,args.start+args.rounds):
-        r=run(args.app.resolve(),args.output.resolve(),n);results.append(r);print(n,'PASS' if r['passed'] else 'FAIL',r['errors'],flush=True)
+        r=run(args.app.resolve(),args.output.resolve(),n,args.sidebar);results.append(r);print(n,'PASS' if r['passed'] else 'FAIL',r['errors'],flush=True)
         (args.output/'manifest.json').write_text(json.dumps({'binary_sha256':hashlib.sha256(args.app.read_bytes()).hexdigest(),'rounds':results,'passed':all(v['passed'] for v in results)},indent=2))
         if not r['passed']:raise SystemExit(1)
 

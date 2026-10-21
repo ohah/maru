@@ -17619,3 +17619,164 @@ test "W9d② v20b 14 회차: 사용자가 에이전트 탭을 몬다 — 설정 
         try std.testing.expect(std.mem.indexOf(u8, resp, "BANK-3") == null);
     }
 }
+
+// ── W9d② 최종 재검증 — 검증자 v20f B(11–20 회차)의 시험을 회귀 시험으로 ─────────────────────────────────────────────────
+
+/// detail of one request for that pane (with the body) — the raw response, or "" when the request is unknown to it.
+fn v20fDetail(tab: u64, grant: control_browser.GrantProvenance, seq: u64, out: []u8) ![]const u8 {
+    var ab: [96]u8 = undefined;
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRequest\",\"params\":{\"id\":1,\"req\":1}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&pending, .{ .surface_id = tab, .method = .network_request, .arg = try allocator.dupe(u8, try std.fmt.bufPrint(&ab, "{{\"req\":{d},\"body\":true,\"body_offset\":0,\"body_max_bytes\":65536}}", .{seq})), .pane_grant = grant });
+    const resp = pending.response orelse return error.ExpectedResponse;
+    defer allocator.free(resp);
+    pending.response = null;
+    const n = @min(resp.len, out.len);
+    @memcpy(out[0..n], resp[0..n]);
+    return out[0..n];
+}
+
+/// a request whose frames the sidecar sent unstripped (switch off but the begin was stamped before the narrowed watch arrived — a race),
+/// with a Set-Cookie value and a credentialed body.
+fn v20fRaceBody(tab: u64, request: u64, url: []const u8, site: []const u8, body: []const u8) void {
+    const ta = std.testing.allocator;
+    const session = session_mod.web_osr.testRecordSession(tab);
+    var hb: w9d2_ws.net_fields.HeaderBuilder = .{};
+    _ = hb.add("Content-Type", "application/json");
+    _ = hb.add("Set-Cookie", "bank=V20F-COOKIE-SECRET; Path=/");
+    session_mod.web_osr.testApply(ta, .{ .net_begin = .{ .browser = tab, .request = request, .flags2 = .{ .body_expected = true }, .url = url, .host = control_pane_grant.hostOfUrl(url) orelse "", .site = site, .resource_type = 13 } });
+    session_mod.web_osr.testApply(ta, .{ .net_response = .{ .browser = tab, .request = request, .status = 200, .mime = "application/json", .headers = hb.block() } });
+    session_mod.web_osr.testApply(ta, .{ .net_end = .{ .browser = tab, .request = request, .received = body.len } });
+    session_mod.web_osr.testApply(ta, .{ .net_body_data = .{ .browser = tab, .session = session, .request = request, .offset = 0, .bytes = body } });
+    session_mod.web_osr.testApply(ta, .{ .net_body_end = .{ .browser = tab, .session = session, .request = request, .state = .captured, .flags = .{ .credentialed = true }, .size = @intCast(body.len), .decoded = body.len } });
+}
+
+test "W9d② v20f 13: user tab — a body prompt raised at site A and approved after the tab moved to B binds A (B's bodies stay hidden), a later denied prompt does not revoke it, approving twice keeps one grant" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{251});
+    defer w9c2Forget(ta, &.{251});
+    defer {
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 251, .url = "https://app.test/" } });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 251, .scope = .browser });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 251, .scope = .browser_network, .host = control_pane_grant.GrantHost.init("app.test") });
+    syncNetworkWatch();
+    // the prompt was raised at app.test; before the user answers, the user follows a link to other.test
+    session_mod.web_osr.noteUserNavigation(251);
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 251, .url = "https://other.test/" } });
+    const web_b: control_surface.WebMeta = .{ .url = "https://other.test/", .panel_kind = .browser, .loading = false, .trust = .untrusted, .engine = .chromium, .controllable = true };
+    const fx = [_]control_surface.SurfaceDto{.{ .surface_id = 251, .title = "b", .window = 1, .detail = .{ .web = web_b } }};
+    const snapshot: control_surface.CollectorSnapshot = .{ .surfaces = &fx, .windows = &.{} };
+    {
+        var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":251,\"on\":true}}", .selector = 5, .browser_pane = 5, .io = std.testing.io };
+        const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+        resolveGrantPrompt(&control_server_storage, .{ .async_id = id, .pane = 5, .target = 251, .scope = .browser_network_body, .host = control_pane_grant.GrantHost.init("app.test") }, true, snapshot, 0);
+        // 알고 둔 틈(최종 재검증 N-1 — docs/control-plane-browser.md): 승인된 요청 자신은 다시 보낼 때 탭이 B 에 있어 -32002 로 답한다(grant 는
+        // 적혔다 — 에이전트가 다시 부르면 A 에서 쓰인다). 이 답이 바뀌면 문서도 고친다.
+        const resp = pending.response orelse return error.ExpectedResponse;
+        defer allocator.free(resp);
+        pending.response = null;
+        errdefer std.debug.print("v20f 13: approve answer: {s}\n", .{resp[0..@min(resp.len, 300)]});
+        try std.testing.expect(std.mem.indexOf(u8, resp, "\"code\":-32002") != null);
+    }
+    // the grant is the one the user was shown (app.test), not the site the tab is on now
+    try std.testing.expect(control_pane_grant_store.authorizes(5, 251, .browser_network_body, "app.test"));
+    try std.testing.expect(!control_pane_grant_store.authorizes(5, 251, .browser_network_body, "other.test"));
+    // whether or not recording started, a body at B never reaches the pane
+    if (!session_mod.web_osr.networkRecording(251)) {
+        const p = try w9d2Record(251, w9d2BodyGrant(5, 251), true);
+        defer p.deinit();
+    }
+    try std.testing.expect(session_mod.web_osr.networkRecording(251));
+    w9d2Body(251, 1, "https://other.test/b.json", "{\"b\":\"V20F-OTHER\"}", .{});
+    var db: [8192]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, try v20fDetail(251, w9d1Grant(5, 251), 1, &db), "V20F-OTHER") == null);
+    // back at A: A's new body is readable (control)
+    session_mod.web_osr.noteUserNavigation(251);
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 251, .url = "https://app.test/" } });
+    w9d2Body(251, 2, "https://app.test/a.json", "{\"a\":\"V20F-A\"}", .{});
+    try std.testing.expectEqualStrings("captured", try v20bState2(251, w9d1Grant(5, 251), 2));
+    // a second prompt for the same tab that the user denies answers -32002 and does not take the first grant away
+    {
+        var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.networkRecord\",\"params\":{\"id\":251,\"on\":true}}", .selector = 5, .browser_pane = 5, .io = std.testing.io };
+        const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+        resolveGrantPrompt(&control_server_storage, .{ .async_id = id, .pane = 5, .target = 251, .scope = .browser_network_body, .host = control_pane_grant.GrantHost.init("app.test") }, false, snapshot, 0);
+        const resp = pending.response orelse return error.ExpectedResponse;
+        defer allocator.free(resp);
+        pending.response = null;
+        try std.testing.expect(std.mem.indexOf(u8, resp, "\"code\":-32002") != null);
+    }
+    try std.testing.expect(control_pane_grant_store.hasGrant(5, 251, .browser_network_body));
+    try std.testing.expect(session_mod.web_osr.networkRecording(251));
+    try std.testing.expectEqualStrings("captured", try v20bState2(251, w9d1Grant(5, 251), 2));
+}
+
+test "W9d② v20f 14: switch off — a user-driven agent tab is narrowed; frames the sidecar sent unstripped in the race (Set-Cookie value, credentialed body) never reach the agent; an agent-driven move keeps its own first-site body (V1, control)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{ 252, 253 });
+    defer w9c2Forget(ta, &.{ 252, 253 });
+    defer session_mod.web_osr.setNetworkFull(true);
+    defer {
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    session_mod.web_osr.setNetworkFull(false);
+    // 252: user drives it to the bank
+    try std.testing.expect(adoptAgentTab(5, 252));
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 252, .url = "https://agent.test/" } });
+    {
+        const p = try w9d2Record(252, w9d2BodyGrant(5, 252), true);
+        defer p.deinit();
+    }
+    w9d2Body(252, 1, "https://agent.test/a.json", "{\"a\":1}", .{});
+    try std.testing.expectEqualStrings("captured", try v20bState2(252, w9d1Grant(5, 252), 1));
+    session_mod.web_osr.userNavigate(ta, 252, "https://bank.test/");
+    applyNetworkNarrows();
+    try std.testing.expect(!control_pane_grant_store.authorizes(5, 252, .browser_network_body, "bank.test"));
+    try std.testing.expect(!control_pane_grant_store.authorizes(5, 252, .browser_network, "bank.test"));
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 252, .url = "https://bank.test/" } });
+    // the bank document and a bank XHR, unstripped (begun before the narrowed watch reached the sidecar)
+    v20fRaceBody(252, 2, "https://bank.test/", "bank.test", "{\"acct\":\"V20F-BANK-DOC\"}");
+    v20fRaceBody(252, 3, "https://bank.test/api/me", "bank.test", "{\"acct\":\"V20F-BANK-XHR\"}");
+    var db: [16384]u8 = undefined;
+    for ([_]u64{ 2, 3 }) |seq| {
+        const d = try v20fDetail(252, w9d1Grant(5, 252), seq, &db);
+        errdefer std.debug.print("v20f 14 leak in req {d}: {s}\n", .{ seq, d });
+        try std.testing.expect(std.mem.indexOf(u8, d, "V20F-BANK") == null);
+        try std.testing.expect(std.mem.indexOf(u8, d, "V20F-COOKIE-SECRET") == null);
+    }
+    // also through the list
+    {
+        var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.network\",\"params\":{\"id\":1}}", .selector = null, .io = std.testing.io };
+        try w9c2Push(&pending, .{ .surface_id = 252, .method = .network, .arg = try allocator.dupe(u8, "{}"), .pane_grant = w9d1Grant(5, 252) });
+        const resp = pending.response orelse return error.ExpectedResponse;
+        defer allocator.free(resp);
+        pending.response = null;
+        try std.testing.expect(std.mem.indexOf(u8, resp, "V20F-COOKIE-SECRET") == null);
+    }
+    try std.testing.expectEqualStrings("captured", try v20bState2(252, w9d1Grant(5, 252), 1)); // the earlier own-site body stays
+    // 253: the agent itself navigates to the bank (not driven) — any-host grant, the bank is now its own first site: readable (by design)
+    try std.testing.expect(adoptAgentTab(5, 253));
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 253, .url = "https://agent.test/" } });
+    {
+        const p = try w9d2Record(253, w9d2BodyGrant(5, 253), true);
+        defer p.deinit();
+    }
+    w9d2Body(253, 1, "https://agent.test/a.json", "{\"a\":1}", .{});
+    try std.testing.expectEqualStrings("captured", try v20bState2(253, w9d1Grant(5, 253), 1));
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 253, .url = "https://bank.test/" } });
+    w9d2Body(253, 2, "https://bank.test/api/me", "{\"acct\":\"V20F-OWN\"}", .{ .credentialed = true });
+    try std.testing.expect(control_pane_grant_store.authorizes(5, 253, .browser_network_body, "bank.test"));
+    try std.testing.expectEqualStrings("captured", try v20bState2(253, w9d1Grant(5, 253), 2));
+}

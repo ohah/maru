@@ -3006,3 +3006,45 @@ test "W9d② 적대 리뷰 3 회차 재현 C1: 탭 주소를 모를 때도 같�
         try testing.expectEqualStrings("needs_cookie_permission", try bodyStateOf(&t, req, bq, ""));
     }
 }
+
+// W9d② 적대 리뷰 5 회차 변이 생존(M11·M13·M14 — 덮는 시험이 없었다): 한 바이트 남은 조각의 다음 오프셋, 한 번에 주는 바이트의 64 KiB 상한(링에서),
+// 지우기가 끝난 다른 상태를 `discarded` 로 바꾸지 않음.
+test "W9d② 적대 리뷰 5 회차: 한 바이트가 남아도 다음 오프셋을 준다, 한 번에 64 KiB 넘게 주지 않는다, 지우기는 다 받은 것·기다리던 것만 discarded 로" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const bq: BodyQuery = .{ .who = 70, .any_host = true };
+    try bodyBegin(&t, 1, "https://a.test/four", "a.test");
+    try bodyFeed(&t, 1, "abcd", .{});
+    {
+        const p = try bodyDetail(&t, 1, .{ .who = 70, .any_host = true, .want = true, .max_bytes = 3 }, "");
+        defer p.deinit();
+        try testing.expectEqualStrings("abc", p.value.object.get("body").?.string);
+        try testing.expectEqual(@as(i64, 3), p.value.object.get("body_next_offset").?.integer); // 남은 것은 한 바이트
+    }
+    try bodyBegin(&t, 2, "https://a.test/big.json", "a.test");
+    const big = array_repeat.repeat("x", 100 * 1024);
+    try bodyFeed(&t, 2, big, .{});
+    {
+        const p = try bodyDetail(&t, 2, .{ .who = 70, .any_host = true, .want = true, .max_bytes = 100 * 1024 }, "");
+        defer p.deinit();
+        const o = p.value.object;
+        try testing.expectEqual(@as(i64, max_body_read_bytes), o.get("body_returned").?.integer);
+        try testing.expectEqual(@as(usize, max_body_read_bytes), o.get("body").?.string.len);
+        try testing.expectEqual(@as(i64, max_body_read_bytes), o.get("body_next_offset").?.integer);
+    }
+    // 끝난 다른 상태 — 지우기에 그대로.
+    const others = [_]struct { req: u64, state: msg.NetBodyState }{ .{ .req = 3, .state = .over_cap }, .{ .req = 4, .state = .busy }, .{ .req = 5, .state = .unmatched }, .{ .req = 6, .state = .not_text } };
+    for (others) |o| {
+        try bodyBegin(&t, o.req, "https://a.test/o", "a.test");
+        t.ring.bodyEnd(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = o.req, .state = o.state });
+    }
+    try bodyBegin(&t, 7, "https://a.test/pending", "a.test");
+    t.ring.discardBodies(testing.allocator, &t.budget);
+    try testing.expectEqualStrings("discarded", try bodyStateOf(&t, 1, bq, ""));
+    try testing.expectEqualStrings("discarded", try bodyStateOf(&t, 2, bq, ""));
+    try testing.expectEqualStrings("discarded", try bodyStateOf(&t, 7, bq, ""));
+    for (others) |o| try testing.expectEqualStrings(@tagName(o.state), try bodyStateOf(&t, o.req, bq, ""));
+    try testing.expectEqual(@as(usize, 0), t.budget.body_bytes);
+}

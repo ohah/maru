@@ -281,6 +281,24 @@ test "W9d② 적대 리뷰 3 회차: --out 은 u32 를 넘는 다음 오프셋�
     try std.testing.expectEqualStrings("abcd", acc.body.items);
 }
 
+// W9d② 적대 리뷰 5 회차 변이 생존 M25(덮는 시험이 없었다): 조각 사이에 본문 크기가 바뀌면(기록을 지우고 같은 번호에 새 본문 — 다른 본문의 앞뒤를
+// 이어 붙이게 된다) 실패를 알린다.
+test "W9d② 적대 리뷰 5 회차: --out 은 조각 사이에 본문 크기가 바뀌면 이어 붙이지 않고 실패를 알린다" {
+    const ta = std.testing.allocator;
+    var acc: BodyOut = .{ .marks = .init(ta) };
+    defer acc.deinit(ta);
+    const first = try std.json.parseFromSlice(std.json.Value, ta, "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body\":\"ab\",\"body_next_offset\":2}", .{});
+    defer first.deinit();
+    try std.testing.expect(try acc.add(ta, first.value.object) == .more);
+    const changed = try std.json.parseFromSlice(std.json.Value, ta, "{\"body_state\":\"captured\",\"body_size\":5,\"body_encoding\":\"utf-8\",\"body\":\"cde\"}", .{});
+    defer changed.deinit();
+    switch (try acc.add(ta, changed.value.object)) {
+        .fail => |m| try std.testing.expectEqualStrings("the body changed while it was read", m),
+        else => return error.ExpectedFail,
+    }
+    try std.testing.expectEqualStrings("ab", acc.body.items);
+}
+
 /// `--out` 이 보내는 조각 하나의 요청 — 그 오프셋부터 가장 큰 조각, 파일 칸은 빼고.
 fn bodyOutPiece(cmd: browser.NetworkRequestCmd, offset: u32) browser.NetworkRequestCmd {
     var piece = cmd;

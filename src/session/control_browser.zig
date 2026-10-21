@@ -5920,3 +5920,105 @@ test "W9d② 적대 리뷰 3 회차 D6: 본문 grant 만 남은 켜기는 -32002
     try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(w));
     try testing.expect(std.mem.indexOf(u8, w, "\"reason\":\"needs_network_permission\"") != null);
 }
+
+// ── W9d② v20 A R7(적대 검증 — 권한): 모달 전 -32008(WebKit·markdown·파일 뷰 — grant 가 없어도), 본문 grant 는 networkRequest 의 네트워크 권한을
+// 대신하지 않는다, 본문 인자의 경계(1 MiB·64 KiB·1 바이트, 소수·u32 넘침·null), 형식이 틀린 켜기는 인가 전에 실행되지 않는다.
+test "W9d② v20 A R7: networkRecord 는 Chromium 탭이 아니면 grant 와 무관하게 모달 전 -32008, 본문 grant 만으로는 networkRequest 를 인가하지 않는다, 본문 인자의 경계" {
+    var none: cpg.PaneGrantStore = .{};
+    for ([_]u64{ 11, 13, 14 }) |target| {
+        var b: [160]u8 = undefined;
+        const req = try std.fmt.bufPrint(&b, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{{\"id\":{d},\"on\":true}}}}", .{target});
+        switch (try dispatchBrowser(testing.allocator, req, fx_engine, &.{}, 10, &none, 0)) {
+            .err => |e| {
+                defer testing.allocator.free(e);
+                errdefer std.debug.print("R7 -32008: target {d} got {s}\n", .{ target, e });
+                try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+            },
+            .op => |op| {
+                testing.allocator.free(op.arg);
+                return error.ExpectedErr;
+            },
+            else => return error.ExpectedErr,
+        }
+    }
+    // 본문 grant 만 — networkRequest(본문 포함)는 네트워크 권한을 따로 묻는다.
+    var body_only: cpg.PaneGrantStore = .{};
+    try body_only.grant(.{ .pane = 10, .target = 12, .scope = .browser_network_body, .host = cpg.GrantHost.init("example") });
+    try expectEngineNeedsGrant("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRequest\",\"params\":{\"id\":12,\"req\":1,\"body\":true}}", &body_only, .browser_network);
+    // 형식이 틀린 켜기(on 이 글) — 네트워크 grant 를 쥔 caller 에게도 op 로 실행되지 않는다(모달이든 오류든).
+    var net: cpg.PaneGrantStore = .{};
+    try net.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
+    switch (try dispatchEngine("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":12,\"on\":\"false\"}}", &net)) {
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.MalformedRecordExecuted;
+        },
+        .err => |e| testing.allocator.free(e),
+        else => {},
+    }
+    // 본문 인자의 경계.
+    const P = struct {
+        fn parse(json: []const u8) !NetworkRequestParams {
+            const v = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+            defer v.deinit();
+            return parseNetworkRequestParams(v.value);
+        }
+    };
+    const edge = try P.parse("{\"id\":1,\"req\":9007199254740991,\"body\":true,\"body_offset\":1048576,\"body_max_bytes\":65536}");
+    try testing.expect(edge.req == 9_007_199_254_740_991 and edge.body_offset == 1024 * 1024 and edge.body_max_bytes == 64 * 1024);
+    try testing.expectEqual(@as(u32, 1), (try P.parse("{\"id\":1,\"req\":1,\"body\":true,\"body_max_bytes\":1}")).body_max_bytes);
+    try testing.expectEqual(@as(u32, 0), (try P.parse("{\"id\":1,\"req\":1,\"body\":true,\"body_offset\":null}")).body_offset);
+    for ([_][]const u8{
+        "{\"id\":1,\"req\":9007199254740992,\"body\":true}",
+        "{\"id\":1,\"req\":1,\"body\":true,\"body_offset\":4294967296}",
+        "{\"id\":1,\"req\":1,\"body\":true,\"body_offset\":5.0}",
+        "{\"id\":1,\"req\":1,\"body\":true,\"body_max_bytes\":\"10\"}",
+        "{\"id\":1,\"req\":1,\"body\":null,\"body_offset\":0}",
+        "{\"id\":1,\"req\":1,\"body\":false,\"body_max_bytes\":1}",
+        "{\"id\":1,\"req\":1,\"body\":\"true\"}",
+        "{\"id\":1,\"req\":1,\"body\":true,\"out\":\"/tmp/x\"}",
+    }) |bad| {
+        errdefer std.debug.print("R7 bad params accepted: {s}\n", .{bad});
+        try testing.expectError(error.InvalidParams, P.parse(bad));
+    }
+}
+
+// W9d② 적대 검증 13 회차(v20b): 모달 전 -32008 — WebKit 탭·markdown 패널·파일 HTML 뷰는 grant 가 하나도 없어도, 모든 grant 가 있어도 모달
+// (needs_grant) 없이 unsupported_by_engine 이다(networkRecord 켬·끔, 본문 읽기). 대조: 같은 상태의 Chromium 탭은 모달·op 로 간다.
+test "W9d② v20b 13 회차: networkRecord·본문 읽기는 WebKit 탭·파일 뷰·markdown 패널에서 grant 와 무관하게 모달 전 -32008 — Chromium 탭은 모달로" {
+    const reqs = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":TAB,\"on\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":TAB,\"on\":false}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRequest\",\"params\":{\"id\":TAB,\"req\":1,\"body\":true}}",
+    };
+    var none: cpg.PaneGrantStore = .{};
+    var all: cpg.PaneGrantStore = .{};
+    for ([_]u64{ 11, 13, 14 }) |tab| {
+        for ([_]capmod.ScopeClass{ .browser, .browser_network, .browser_network_body, .browser_storage }) |sc| try all.grant(.{ .pane = 10, .target = tab, .scope = sc, .any_host = sc == .browser_network or sc == .browser_network_body, .host = if (sc == .browser_storage) cpg.GrantHost.init("example") else .{} });
+    }
+    var buf: [256]u8 = undefined;
+    for ([_]u64{ 11, 13, 14 }) |tab| for (reqs) |tmpl| for ([_]*const cpg.PaneGrantStore{ &none, &all }) |store| {
+        const at = std.mem.indexOf(u8, tmpl, "TAB").?;
+        const req = try std.fmt.bufPrint(&buf, "{s}{d}{s}", .{ tmpl[0..at], tab, tmpl[at + 3 ..] });
+        switch (try dispatchEngine(req, store)) {
+            .err => |e| {
+                defer testing.allocator.free(e);
+                try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+            },
+            .op => |op| {
+                testing.allocator.free(op.arg);
+                std.debug.print("v20b-13 tab {d} {s}: op\n", .{ tab, req });
+                return error.ExpectedUnsupported;
+            },
+            else => {
+                std.debug.print("v20b-13 tab {d} {s}: not -32008\n", .{ tab, req });
+                return error.ExpectedUnsupported;
+            },
+        }
+    };
+    // 대조: Chromium 탭(12)에 browser·네트워크 grant 만 — 본문 기록은 모달.
+    var chrome: cpg.PaneGrantStore = .{};
+    try chrome.grant(.{ .pane = 10, .target = 12, .scope = .browser });
+    try chrome.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
+    try expectEngineNeedsGrant("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":12,\"on\":true}}", &chrome, .browser_network_body);
+}

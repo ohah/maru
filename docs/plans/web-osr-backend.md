@@ -2014,6 +2014,8 @@ W9d① 적대 리뷰 후 — 같은 id 다시 시작(2026-10-16 — W9d② 측�
 - **글 풀기**: charset 없는 `text/*`(HTML·JavaScript 빼고)의 UTF-8 은 Chromium 이 windows-1252 로 풀어 깨져 온다(J11) — windows-1252 로 되돌려 UTF-8 이면
   그것을 싣고(`redecoded`), 아니면 「Chromium 이 푼 그대로」 표시(`chromium_decoded`). 글 MIME 인데 base64 로 온 것(잘못된 UTF-8 JSON·charset 없는 EUC-KR)은
   풀어 UTF-8 이면 글, 아니면 바이너리(`binary` — CLI 는 `--out` 으로만, MCP 도 `out`).
+  그 밖의 charset 없는 글은 받은 바이트 수(Σ `dataReceived`)와 글의 UTF-8 길이가 다르면 `chromium_decoded` — Chromium 이 BOM(UTF-16 등)이나 MIME 의
+  기본으로 다르게 푼 글이다(20 회 검증 15 회차 D1: `FF FE` 로 시작한 JSON 12 바이트가 표시 없이 UTF-16 글 15 바이트로 왔다). 받은 수를 모르면(0) 보지 않는다.
 - **렌더러 죽음**: 보낸 `getResponseBody` 는 다음 이동까지 답이 없다(J5) — `renderer_gone` 에서 곧 `detached` 로 끝낸다. 렌더러가 바뀌거나 다시 떠도 다시 켤
   필요가 없다(J5). `Network.disable` 의 답은 쏟아짐 뒤로 2.8 초 늦을 수 있어(J6) **보낼 때** 세대를 바꾼다.
 - **쓰는 스레드(J7)**: 예전의 막히는 쓰기는 maru 가 읽지 않으면 48 KiB 뒤에 UI 스레드를 멈춘 만큼 세웠다 — sidecar → maru 알림을 **모두** 보내는 줄
@@ -2046,7 +2048,8 @@ W9d① 적대 리뷰 후 — 같은 id 다시 시작(2026-10-16 — W9d② 측�
   표시 바이트(`body_expected` — `NetFlags` 가 찼다). 닫힌 칸은 encode·decode 가 같은 검사(`net_fields`)를 지난다.
 - **sidecar**: `net_body.zig`(CEF 관찰자 — 기록하는 탭에만 따로 단다, `getResponseBody`·풀기·보내기) + `net_body_table.zig`(CEF 를 모르는 표 — 맞추기·판정·
   상한·세대·끝은 꼭 하나, 순수 시험) + `out_queue.zig`(보내는 줄 — 순수·스레드 시험). `network.zig` 가 IO 스레드에서 해시·IO 시각을 찍고, 보내는 task 에서
-  후보를 적고(`body_expected`), 응답에서 덮이는지, 끝에서 `unmatched` 시한을 건다. 기록 중에 시작한 요청마다 본문 끝이 **꼭 하나**다(짝 없음 `unmatched`·끄기
+  후보를 적고(`body_expected`), 응답에서 덮이는지, 끝에서 `unmatched` 시한을 건다. 기록 중에 시작한 요청마다 본문 끝이 **꼭 하나**다(짝 없음 `unmatched`·새 문서로
+  옮겨 끊김 `unavailable`(20 회 검증 N1)·끄기
   `recording_stopped`·렌더러 죽음과 닫힘 `detached`·상한 `busy`).
 - **maru**: `web_osr_network.Ring` 의 기록마다 본문(하나 1 MiB·탭 8 MiB·앱 32 MiB — 탭 상한은 이 탭의, 앱 상한은 본문을 가장 많이 쥔 탭의 가장 먼저 받은
   본문부터 `evicted`(적대 리뷰 1·2 회차), 메모리에만). 본문 frame 은 새것부터
@@ -2056,7 +2059,7 @@ W9d① 적대 리뷰 후 — 같은 id 다시 시작(2026-10-16 — W9d② 측�
 - **표식**: 기록하는 탭의 제목 앞 ◉(U+25C9 — `diffAwareLabel`). running ● 처럼 셀로 그리고 그 칸만 빨갛게(`tab_ops.recolorRecordingMarkCells`).
 - **지우기 판**: 본문 grant 철회(하나·모두)·마지막 본문 grant → 끄고 지운다(◉ 사라짐), 네트워크 grant 철회 → 기록도 끈다, 탭 닫힘 → 기록째 사라진다,
   sidecar 재시작 → 기다리던 본문 `detached`(sidecar 를 잃는 때 곧 — 다시 뜨지 않아도, 3 회차 B2)·새 세션으로 다시 켠다(쏟아짐 밸브로 멈춘 기록은 그대로 — 3 회차 F1;
-  엔진이 다시 뜨지 않으면 기록은 `failed`), 이동 → 기다리던 본문은 Chromium 이 버려 `unavailable`, 렌더러 죽음 → `detached`(기록은
+  엔진이 다시 뜨지 않으면 기록은 `failed`), 이동 → 기다리던 본문은 Chromium 이 버려 `unavailable`(앞 문서와 함께 끊긴 진행 중 요청도 곧 `unavailable` — 20 회 검증 N1), 렌더러 죽음 → `detached`(기록은
   그대로), 설정 켬 → 끔 → 받은 본문과 기다리던 본문 `discarded`·기록은 새 세션으로, 기록 끄기(`networkRecord off`) → 기록만 끄고 받은 본문은 남긴다
   (적대 리뷰 1 회차 LOW-4 — 작성자 선택). 지울 때는 그때까지의 세션 frame 을 더 받지 않는다(적대 리뷰 1 회차 LOW-2).
 - **CLI·MCP**: `maru browser network-record --surface N (--on|--off)`, `network-request ... --body [--offset n] [--max-bytes n] [--out f]`(본문 칸은 `--body` 를
@@ -2351,3 +2354,60 @@ W9d② 적대 리뷰: 5 회차(2026-10-21, 마지막 — 리뷰가 순수 재현
   인자 — 고쳐 썼다)·산 다섯(물 높이의 실패 시각·실패 시각의 검사·응답에서만 안 종류 — 시험을 더했다; 끝이 버려진 후보의 `definite`·받으러 간 후보의 표지 —
   같은 뜻이라 코드를 줄였다), 둘째 판 40/40 RED. 변이하지 않은 것: `network.zig` 의 배선(넘친 시작 아닌 기록 → `queueRefused`, flush → `cefLost`) —
   실제 CEF 에서 상자를 넘치게 해야 한다(판단은 `net_gate`·`net_body_table` 의 순수 시험이 본다).
+
+W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1–10 회차·11–20 회차. 실제 CEF 154 판정 `--review-body-v20a`(`network_body_v20a_check.zig`)·
+`--review-body-v20b`(`network_body_v20b_check.zig` — 둘 다 `--network` 에는 들지 않는다), 순수·L2·CLI 시험, 실제 앱 E2E·화면). 회차마다 본 것과 결과:
+1 설정 끔의 덮기(덮이는 → 덮이지 않는 리다이렉트·바로·스크립트·문서, 끔 ↔ 켬 사이) — 새는 쪽은 닫혀 있었고 **D1** 을 찾았다. 2 페이지와 전용·공유 워커의 같은
+주소, 3 같은 주소 동시(POST·GET·거꾸로 끝남·A → B → A), 4 물 높이(잡음·워커가 먼저·IO 스레드 늦춤), 5 abort 뒤 다시 받기, 6 서비스 워커의 출처 — 틀린 본문 0.
+7 권한(진리표 4608 꼴·grant 번호·UB1) — **N2**. 8 자원 상한의 경계(버스트 60·1 MiB·4 MiB/s·기다림 128·링 8 MiB·앱 32 MiB) — 통과. 9 수명(탭 닫힘·이동·렌더러
+죽음·쏟아짐 밸브·sidecar SIGKILL — 시작마다 끝은 꼭 하나) — **D2·D3·N1**. 10 CLI·MCP 출력(적대 본문 32 가지·인자 경계·영어·`--out`) — **N3·N4**. 11 wire 22
+코덱과 어긋난 본문 frame, 12 본문이 오가는 동안 설정 켬·끔 200 번(앱 안 다시 읽기는 설정 파일을 다시 쓰면 그 뒤 제어 요청에 답이 없는 일 때문에 못 했다 — origin/main
+에서도 같아 이 PR 의 것이 아니다), 13 사용자 탭의 사이트마다 모달·거절·A → B·WebKit·파일 뷰, 14 사용자가 모는 에이전트 탭(F5) — 통과. 15 글 풀기 — **V4**(아래).
+16 크기 경계(0·1·64 KiB±1·1 MiB±1 — sidecar·maru·CLI·MCP), 17 켬·끔 500 번·두 번 켬·끔 뒤 옛 세션의 끝, 18 쏟아짐 밸브(초당 8000 을 3 초 — 멈추고 스스로
+켜지지 않는다, 대조 3000·5500/0.9 초는 멈추지 않는다), 19 회귀 대조·DevTools 지킴 이름 변형·기록 끔의 비용, 20 탭 막대의 ◉(실제 앱 화면) — 통과.
+- **D1(LOW–MED, 닫힌 쪽) 설정이 꺼지면 에이전트 탭은 제 사이트의 본문도 받지 않았다**(1 회차): `network.zig` 의 응답·리다이렉트 기록에 첫 사이트가 없어
+  `net_gate.Watch.covers(host, "")` 가 어느 호스트든의 지켜보기에서 늘 거짓 — 본문은 모두 `not_covered`, 제 사이트의 응답·홉 헤더까지 덜어 냈다(W9d① 부터의
+  뿌리). 고침: 시작(`on_before_resource_load`)에서 읽은 첫 사이트를 요청 표(`net_gate.Track.site`)에 두고 리다이렉트·응답이 그것으로 덮기를 가른다 — 홉마다
+  다시 읽지 않는다(주 프레임 이동은 Chromium 이 첫 사이트를 옮겨 갈 주소로 바꿔, 다시 읽으면 덮이지 않는 사이트로 옮기는 홉이 스스로 덮였다). 그래서 다른
+  사이트로 옮긴 홉·응답은 덮이지 않고(주 프레임 이동이 다른 사이트로 리다이렉트되면 그 문서의 응답도 덜어 낸다 — 닫힌 쪽), maru 의 기록도 시작의 첫 사이트를
+  쥔다. 순수 시험(`net_gate` — 제 사이트 덮음·옮긴 홉·빈 첫 사이트·상한을 넘는 글·같은 번호 다시 시작)과 판정 `v20a-r1-*`(어느 호스트든: 제 사이트 잡음,
+  덮이지 않는 곳 0 바이트).
+- **D2(LOW) 쏟아짐 밸브로 멈춘 기록이 묻지 않고 다시 켜졌다**(9 회차, L2): 멈춘 뒤 DevTools 가 떨어지면 sidecar(`net_body.onDetached`)가 같은 세션으로
+  `failed` 를 알리고 maru 가 그것으로 `paused` 를 덮어, 다음 `browser_created` 가 새 세션으로 켰다(3 회차 F1 의 규칙을 어김). 고침(maru 쪽 — 가장 작다): 멈춘
+  세션의 상태는 그 세션의 어떤 알림으로도 바뀌지 않는다(새 세션 — 에이전트가 다시 켤 때 — 만 멈춤을 푼다). sidecar 쪽을 고치면 `onDetached` 하나만 막고 같은
+  세션의 다른 늦은 알림은 남는다. `fail()`(엔진이 다시 뜨지 않음)도 `paused` 를 `failed` 로 덮지만 그 뒤 브라우저가 다시 만들어지지 않아 닿지 않는다(그대로 둠).
+- **D3(LOW, 성능) 이동으로 끊긴 요청의 CDP 자리가 영영 남았다**(9 회차): 주 프레임이 옮기면 앞 문서의 진행 중 요청은 CDP 끝(`loadingFinished`·`loadingFailed`)이
+  오지 않는다(실측 0/34). 그 자리는 끝으로만 빠져 `busy()` 가 늘 참 — 50 ms 주기 task 가 멈추지 않았고(30 초에 약 500 번) 4096 개까지 쌓인 뒤로는 요청마다 목록을
+  통째로 밀었다. 고침: 열린 CDP 요청이 창(기준 시각 + 2 초)이 지났고(물 높이) 짝일 수 있는 후보(같은 열쇠의 짝 없는 후보가 창 안에 있거나 다시 시작한 시도)가
+  없으면 놓는다(`cdpOrphan`) — 그런 요청은 맞추기에서 아무 후보도 받지 못해 다른 요청의 짝을 바꾸지 않는다. 한 번 훑어 남길 것만 모은다. 자리가 차면 가장
+  오래된 것을 256 개 묶음으로 놓는다(`cdp_evict_batch` — 하나씩이면 요청마다 O(n)). 짝이 살아 있는 긴 요청·창이 지난 뒤의 늦은 다시 시작은 놓지 않는다(시험).
+- **N1(NIT) 이동으로 끊긴 요청이 5 초쯤 뒤 `unmatched` 였다** — 문서는 이동이면 `unavailable`, MCP 글은 `unmatched` 를 「다른 프로세스 iframe·worker」 라 했다.
+  고침: sidecar 가 주 프레임의 새 문서(`on_load_start`·오류 페이지 — `network.documentStarted`)를 표에 알리고(`Tab.doc_at`), 그 앞에 시작한 짝 없는 후보는
+  CEF 가 취소·실패로 끝냈으면 CEF 끝에서 `cef_grace_us`(250 ms — 그 사이 CDP 실패가 오면 `request_failed`·`partial`) 뒤 곧, 성공으로 끝냈으면(문서가 떠난 뒤
+  서버가 본문을 다 보냈다 — 고친 뒤 첫 판정에서 20 개 중 2 개가 그랬다) 짝 없는 시한(3 초) 뒤 — 둘 다 `unmatched` 가 아니라 `unavailable`. 새 문서 뒤에 시작한
+  요청·기록이 버려진 후보는 그대로다. CDP 끝이 늦게라도 오는 앞 문서 요청(새 문서 요청 자체·keepalive)은 제 본문을 받는다(시험). 남는 틈: 새 문서의 첫 하위
+  요청이 `on_load_start` 보다 먼저 시작해 짝을 못 찾으면 `unavailable`(본문이 없기는 같다). MCP `browser_network_request` 의 글과 control-plane-browser 에 적었다.
+  판정 `v20a-r9-navigation-pending` 은 이제 떠난 요청 중 `unmatched` 0 을 본다.
+- **N2(NIT) 홉 상한(20)을 넘는 리다이렉트는 응답 호스트를 고치지 않았다**(Chromium 은 스무 홉에서 멈춰 닿지 않는다): 넘으면 기록에 표시(`hops_overflow`)하고 응답
+  호스트를 모르는 것으로(빈 호스트 — UB1·쿠키 가리기·이동의 덮기 모두 닫힌 쪽) 친다.
+- **N3(NIT)** `network-request --out=` 이 「screenshot --out needs a value」 였다 — 함께 쓰는 오류라 「--out needs a value」 로.
+- **N4(NIT)** CLI `--out` 이 다음 오프셋 없이 `body_size` 보다 짧게 끝난 본문과 조각 사이의 utf-8 → base64 바뀜을 받아들였다(maru 의 서버는 보내지 않는다) — 둘 다
+  실패(파일을 만들지 않는다).
+- **V4(LOW — 15 회차 D1) UTF-16 BOM JSON**: 위 「글 풀기」 — charset 없는 base64 아닌 글의 UTF-8 길이가 받은 바이트 수와 다르면 `chromium_decoded`.
+- **알고 둔 것(검증자의 관찰 — 고치지 않았다)**: 사용자 탭은 본문 grant 가 덮지 않는 사이트로 옮겨도 기록(◉)을 이어 가고 그 본문은 숨긴 채 메모리에 둔다(13 회차);
+  `--out` 이 `over_cap`·`no_body` 요청에서 따로 된 안내 없이 상태 줄과 함께 1 로 끝난다(16 회차); 켬·끔이 본문 호출 도중이면 400 개 중 2–3 개가 `unavailable`(17 회차);
+  세션 번호는 2³² 뒤 1 로 돈다(11 회차).
+- **검증자 시험**: 둘이 남긴 시험(`W9d② v20 A R…` — 순수 `net_body_table` 여섯·L2 `web_osr` 넷·CLI·MCP·session 열여덟, `W9d② v20b …` — L2·session·`stream`
+  열)과 판정 두 갈래는 모두 제품 시험으로 남겼다(뺀 것 없음 — 하네스용 빌드 단계만 붙이지 않았다). 고친 뒤 더한 시험: `net_gate` 하나(D1), `net_body_table` 다섯(N1 —
+  대조 다섯과 함께, D3 — 긴 요청과 워커 기록·늦은 다시 시작·늦은 물 높이·묶음 놓기), `web_osr_network` 하나(N2 — 이동의 덮기).
+- **검증(고친 코드)**: 순수 151 통과(`test-web-sidecar` — 검증자 시험과 더한 시험 포함), CLI·session 821 통과·1 건너뜀, L2(`test-macos-app-host-abi`)는
+  이 Mac 의 환경 실패(편집기 AC3·BR6·COL7·LATE3·LSPE19·LSPE2·shared-find R1·R6·R7)만, `mise run` 게이트 열한 개(fmt-check·check-task-split·check-mobile-contract·
+  check-wasm-sync·check-doc-links·check-doc-line-refs·check-config-docs·check-macos-app-host·check-boundaries·check-targets·macos-app-host-swift-check)와
+  `web-sidecar` 통과. 판정(실제 CEF 154, 디버그 빌드): `--network` 173/0, `--review-body-v20a` 35/0(`v20a-r1-off-anyhost` 제 사이트 5/5·덮이지 않는 곳
+  0 바이트, `v20a-r9-navigation-pending` 떠난 요청 35 개 모두 `unavailable`), `--review-body-v20b` 42/0(`v20b-15-enc-utf16bomjson` 표시됨). N1 을 처음 고친 판
+  (취소·실패로 끝난 것만)으로는 `v20a-r9-navigation-pending` 이 20 개 중 2 개 `unmatched` 로 실패했다 — 문서가 떠난 뒤 CEF 가 성공으로 끝낸 것이라 그 갈래를 더했다.
+  변이(사본에서 — 순수 21·CLI 6·L2 1, 실패 수로 판정, 매번 되돌림 확인): 첫 판 28 중 RED 22·컴파일 실패 4(쓰지 않는 값 — 고쳐 다시 돌려 RED 2·산 2)·산 2 — 산 넷 중
+  `cdpOrphan` 의 서비스 워커 갈래 검사와 물 높이 검사는 덮는 시험이 없었다 — 시험을 더해(긴 요청 시험의 워커 기록, 「물 높이가 창 끝에 닿기 전」) RED.
+  남은 산 둘은 같은 뜻이다: 시간 검사(`now − 기준 > 2 초`)는 물 높이 검사가 함의하고(물 높이는 지금보다 앞이다 — µs 의 차뿐), 열림·캐시 상태 검사는 빼도 끝난
+  요청을 `tryDecide` 가 같은 결과(짝 없음 — 놓음)로 먼저 놓는다. 최종 28 중 RED 26·같은 뜻 2. `network.zig` 의 배선(응답·리다이렉트에 첫 사이트를 싣는 것)은
+  순수 시험이 못 보므로 그것을 빈 첫 사이트로 되돌린 sidecar 를 따로 빌드해 판정 `v20a-r1-*` 를 돌렸다 — `v20a-r1-off-anyhost` FAIL(제 사이트 0/5), RED.

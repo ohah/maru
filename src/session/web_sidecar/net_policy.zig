@@ -738,3 +738,56 @@ test "W9d① 적대 리뷰 5 회차 재현 N1: 33 바이트를 넘는 스킴 —
     try testing.expect(hasUserinfo(url));
     try testing.expectError(error.InvalidNetwork, net_fields.checkBegin(.{ .browser = 1, .request = 1, .url = url, .flags = .{ .url_truncated = true } }));
 }
+
+// ── W9d② v20 A R7(적대 검증 — 권한): bodyAccess 의 판 전체를 따로 쓴 기준 모델과 맞춘다(불 다섯 × 호스트 관계). 경계: 빈 호스트(모름 — 3 회차 C1 의
+// top_inexact 가 주는 빈 body_host), 점 경계(evil 접두), 하위 도메인 쿠키 권한이 부모를 덮지 않음, 빈 쿠키 권한.
+test "W9d② v20 A R7: bodyAccess 판 전체 — 기준 모델과 같다(빈 호스트·점 경계·하위 도메인 쿠키 권한 포함), 자격 증명 본문은 덮지 않는 쪽으로 닫힌다" {
+    const hosts = [_][]const u8{ "app.test", "api.app.test", "evilapp.test", "bank.test", "api.bank.test", "" };
+    const cookies = [_][]const u8{ "", "bank.test", "api.bank.test", "app.test" };
+    const Ref = struct {
+        fn covers(g: []const u8, h: []const u8) bool {
+            if (g.len == 0 or h.len == 0) return false;
+            if (std.ascii.eqlIgnoreCase(g, h)) return true;
+            return h.len > g.len and h[h.len - g.len - 1] == '.' and std.ascii.eqlIgnoreCase(h[h.len - g.len ..], g);
+        }
+        fn model(f: BodyFacts) BodyAccess {
+            if (!f.has_body_grant) return .needs_body_permission;
+            if (!f.response_visible) return .hidden;
+            if (!f.page_covered) return .hidden;
+            if (!f.after_grant) return .before_body_permission;
+            if (!f.credentialed) return .visible;
+            if (covers(f.body_host, f.final_host)) return .visible;
+            if (covers(f.cookie_host, f.final_host)) return .visible;
+            return .needs_cookie_permission;
+        }
+    };
+    var n: usize = 0;
+    var cookie_needed: usize = 0;
+    for (0..32) |bits| for (hosts) |body_host| for (hosts) |final_host| for (cookies) |cookie_host| {
+        const f: BodyFacts = .{
+            .has_body_grant = bits & 1 != 0,
+            .response_visible = bits & 2 != 0,
+            .page_covered = bits & 4 != 0,
+            .after_grant = bits & 8 != 0,
+            .credentialed = bits & 16 != 0,
+            .body_host = body_host,
+            .final_host = final_host,
+            .cookie_host = cookie_host,
+        };
+        const want = Ref.model(f);
+        errdefer std.debug.print("R7 bodyAccess: bits={b} body={s} final={s} cookie={s} want {s}\n", .{ bits, body_host, final_host, cookie_host, @tagName(want) });
+        try testing.expectEqual(want, bodyAccess(f));
+        if (want == .needs_cookie_permission) cookie_needed += 1;
+        n += 1;
+    };
+    try testing.expectEqual(@as(usize, 32 * hosts.len * hosts.len * cookies.len), n);
+    try testing.expect(cookie_needed > 0);
+    // 대조(정상): 기록한 사이트 제 응답은 자격 증명이 실려도 보인다.
+    try testing.expectEqual(BodyAccess.visible, bodyAccess(.{ .has_body_grant = true, .response_visible = true, .page_covered = true, .after_grant = true, .body_host = "app.test", .final_host = "api.app.test", .credentialed = true }));
+    // 경계: 모르는 페이지 호스트(빈 body_host — 3 회차 C1)에서 실린 본문은 제 사이트여도 쿠키 권한(닫힌 쪽), 모르는 응답 호스트도.
+    try testing.expectEqual(BodyAccess.needs_cookie_permission, bodyAccess(.{ .has_body_grant = true, .response_visible = true, .page_covered = true, .after_grant = true, .body_host = "", .final_host = "app.test", .credentialed = true }));
+    try testing.expectEqual(BodyAccess.needs_cookie_permission, bodyAccess(.{ .has_body_grant = true, .response_visible = true, .page_covered = true, .after_grant = true, .body_host = "app.test", .final_host = "", .credentialed = true, .cookie_host = "app.test" }));
+    // 하위 도메인 쿠키 권한은 부모 호스트를 덮지 않는다, 부모의 쿠키 권한은 하위를 덮는다.
+    try testing.expectEqual(BodyAccess.needs_cookie_permission, bodyAccess(.{ .has_body_grant = true, .response_visible = true, .page_covered = true, .after_grant = true, .body_host = "app.test", .final_host = "bank.test", .credentialed = true, .cookie_host = "api.bank.test" }));
+    try testing.expectEqual(BodyAccess.visible, bodyAccess(.{ .has_body_grant = true, .response_visible = true, .page_covered = true, .after_grant = true, .body_host = "app.test", .final_host = "API.Bank.Test", .credentialed = true, .cookie_host = "bank.test" }));
+}

@@ -39,6 +39,10 @@
 //! 문서·이미지·글꼴·미디어(`lowPriority`)는 fetch·XHR 등 뒤로, 넘치면 뒤 차례의 가장 새것이 `busy`. (C1) 넘김 상자가 넘쳐 버린 시작 아닌 기록
 //! (리다이렉트·응답·끝)은 그 요청의 후보에 표지(`Candidate.lost` — `cefLost`·`cefLostAll`)를 남겨 끝이 꼭 온다(짝이면 `ambiguous`, 아니면 시한 뒤
 //! `unmatched`).
+//! W9d② 20 회 검증(2026-10-21): (N1) 주 프레임이 새 문서로 옮기면(`documentStarted`) 그 앞에 시작한 요청은 CDP 끝이 오지 않는다(실측 0/34) — CEF 가
+//! 취소·실패로 끝냈으면 `cef_grace_us` 뒤, 성공으로 끝냈으면 짝 없는 시한 뒤 `unavailable`(전에는 `unmatched` — 「다른 프로세스·worker」 로 보였다). (D3) 끝이 영영 오지 않을
+//! 열린 CDP 요청(창이 지났고 짝일 수 있는 후보가 없다 — `cdpOrphan`)은 놓는다: 전에는 남아 `busy` 가 늘 참이라 50 ms 주기 task 가 멈추지 않았고
+//! 4096 개까지 쌓였다. 자리가 차면 오래된 것을 묶음(`cdp_evict_batch`)으로 놓는다(하나씩이면 요청마다 목록을 밀었다).
 //!
 //! 시험이 증명하는 것: 맞추기(두 도착 차례·창·같은 주소의 차례 — 창이 다른 동시 요청·기록이 아직인 뒤 요청·ExtraInfo 가 먼저 온 요청·문 넘김과
 //! 보이는 규칙이 다른 후보의 모호함·CDP 가 보지 못한 같은 주소 후보의 모호함과 갈린 다른 요청·서비스 워커 갈래·조각 떼기·A → B → A 와 다시
@@ -48,7 +52,8 @@
 //! CEF 끝이 늦어도), 답이 오지 않는 본문 호출의 시한, 서비스 워커 응답의 출처(Cache Storage·만든 응답·HTTP 캐시·출처 없음은 워커 기록에 붙이지
 //! 않고 그대로 넘긴 것만 — 섞이면 `ambiguous`), 넘김 상자가 넘쳐 놓친 시작의 표지, CEF 가 받은 바이트로 가르는 빈 본문, (5 회차) CDP 실패 시각과
 //! CEF 의 결과로만 정하는 abort 한 요청(느린 다시 받기·늦은 취소 끝·세 요청의 차례·물 높이), 기다림의 차례·내주기·전체 상한·줄 전체의 시한,
-//! 넘김 상자가 버린 끝의 표지.
+//! 넘김 상자가 버린 끝의 표지, (20 회 검증) 새 문서와 함께 끊긴 요청의 `unavailable`·끝이 오지 않을 열린 CDP 요청을 놓아 한가해지는 표·자리가 찼을 때의
+//! 묶음 놓기.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -96,6 +101,9 @@ pub const max_waiting: usize = 512;
 /// 탭마다 쥐는 CEF 후보·CDP 요청 수 상한(넘으면 가장 오래된 것부터 놓는다 — 후보는 `busy` 로 끝낸다).
 pub const max_candidates: usize = 4096;
 pub const max_cdp: usize = 4096;
+/// W9d② 20 회 검증 D3: CDP 자리가 차면 가장 오래된 것을 이만큼 한꺼번에 놓는다 — 하나씩 놓으면 찬 동안 요청마다 4096 자리를 밀었다(O(n)).
+/// 열린 채 끝이 오지 않는 요청은 시한으로 따로 놓으므로(`cdpOrphan`) 이 길은 짧은 사이에 4096 개가 열려 있을 때뿐이다.
+pub const cdp_evict_batch: usize = max_cdp / 16;
 /// 초당 본문 수·바이트(탭), 바이트(전체).
 pub const tab_bodies_per_s: f64 = 20;
 /// W9d② 적대 리뷰 4 회차(작성자 선택 — 사용자 결정): 본문 수의 버스트는 초당 수의 세 배(3 초 몫). 전에는 버스트가 초당 수와 같아(20) 초당 34 개의
@@ -300,6 +308,10 @@ pub fn decodeResult(gpa: std.mem.Allocator, ok: bool, json: []const u8, mime: []
                 flags.redecoded = true;
             } else flags.chromium_decoded = true;
         } else flags.chromium_decoded = true;
+    } else if (!charset and raw_size != 0 and raw_size != bytes.len) {
+        // charset 없는 글인데 받은 바이트 수와 글의 UTF-8 길이가 다르다 — Chromium 이 BOM(UTF-16 등)이나 MIME 의 기본으로 다르게 풀었다
+        // (W9d② 20 회 검증 15 회차 D1: `FF FE` 로 시작한 JSON 12 바이트가 UTF-16 글 15 바이트로 왔다). 받은 바이트도, fetch 가 읽은 글도 아니다.
+        flags.chromium_decoded = true;
     }
     if (bytes.len > msg.max_net_body_bytes) {
         const n = bytes.len;
@@ -675,6 +687,9 @@ pub const Tab = struct {
     flood_second: i64 = 0,
     flood_count: u32 = 0,
     flood_over: u8 = 0,
+    /// W9d② 20 회 검증 N1: 주 프레임에 마지막으로 새 문서가 시작된 UI 시각(µs — `documentStarted`, 0 = 아직). 그보다 앞에 시작했는데 CEF 가
+    /// 취소·실패로 끝낸 요청은 앞 문서와 함께 끊긴 것이다 — CDP 는 그 끝을 보내지 않는다(실측 0/34).
+    doc_at: i64 = 0,
 
     pub fn recording(self: *const Tab) bool {
         return self.session != 0 and !self.paused;
@@ -952,6 +967,14 @@ pub const Table = struct {
         for (t.cands.items) |*c| markLost(c, now_us);
     }
 
+    /// W9d② 20 회 검증 N1: 주 프레임에 새 문서가 시작됐다(`on_load_start`·오류 페이지 — `network.documentStarted`). 앞 문서의 진행 중 요청은
+    /// CDP 끝(`loadingFinished`·`loadingFailed`)이 오지 않는다(판정 `v20a-r9-navigation-pending`: 끊긴 34 개 중 0) — 그런 후보는 `tickAt` 이
+    /// `unavailable` 로 끝낸다(본문이 사라졌다 — J4; 전에는 짝 없는 시한 뒤 `unmatched` 라 「다른 프로세스·worker 의 요청」 처럼 보였다).
+    pub fn documentStarted(self: *Table, browser: BrowserId, now_us: i64) void {
+        const t = self.tabOf(browser) orelse return;
+        t.doc_at = @max(now_us, 1);
+    }
+
     fn markLost(c: *Candidate, now_us: i64) void {
         c.lost = true;
         if (c.ended_at == 0) c.ended_at = @max(now_us, 1);
@@ -972,6 +995,32 @@ pub const Table = struct {
     /// 다른 기록에 붙지 않는다.
     fn isRestart(r: *const Cdp, url_hash: u64, method_hash: u64) bool {
         return url_hash == r.key_url and method_hash == r.key_method and r.last_url == r.key_url;
+    }
+
+    /// 자리가 찼다 — 가장 오래된 `cdp_evict_batch` 개를 한꺼번에 놓는다(D3 — 한 번 미는 값을 그 수만큼의 요청이 나눠 낸다).
+    fn dropOldestCdp(t: *Tab) void {
+        const n = @min(cdp_evict_batch, t.cdp.items.len);
+        t.cdp.replaceRangeAssumeCapacity(0, n, &.{});
+    }
+
+    /// W9d② 20 회 검증 D3: 끝이 영영 오지 않을 열린 CDP 요청인가 — 주 프레임이 옮기면 앞 문서의 요청은 CDP 끝 없이 사라진다(실측 0/34). 그런 자리가
+    /// 남으면 `busy` 가 늘 참이라 50 ms 주기 task 가 멈추지 않았고, 4096 개까지 쌓였다. 놓아도 되는 것은 **짝이 될 수 없는** 것뿐이다:
+    ///   - 창이 지났다 — 기준 시각 + `window_after_us` 까지의 CEF 시작이 모두 왔다(물 높이). 그 뒤의 시작은 이 요청의 창 밖이다.
+    ///   - 짝일 수 있는 후보가 없다 — 같은 열쇠의 짝 없는 후보가 창 안에 없고, 다시 시작한 시도(앞 IO 시각이 있다 — CDP 의 다시 보내기가
+    ///     기준 시각을 옮길 수 있다)도 없다.
+    /// 그런 요청은 맞추기에서 아무 후보도 받지 못해 다른 요청의 차례를 밀지 않는다(`tryDecide` 의 왼쪽·오른쪽 맞추기가 건너뛴다) — 놓아도 다른
+    /// 요청의 짝이 바뀌지 않는다. 그 요청이 늦게라도 끝나면 자리가 없어 그 끝을 버린다(짝이 없었으니 본문도 없었다).
+    fn cdpOrphan(self: *const Table, t: *const Tab, o: *const Cdp, now_us: i64) bool {
+        if (!o.has_key or (o.state != .open and o.state != .cached)) return false; // 자리만·끝난 것은 제 시한이 있다
+        const ts = o.anchor();
+        if (now_us - ts <= window_after_us or self.cef_seen_us <= ts + window_after_us) return false;
+        for (t.cands.items) |c| {
+            if (c.claimed or c.key.url != o.key_url or c.key.method != o.key_method) continue;
+            if (o.responded and c.key.sw != o.sw) continue;
+            if (c.prev_t_io_us != 0) return false;
+            if (c.t_io_us >= ts - window_before_us and c.t_io_us <= ts + window_after_us) return false;
+        }
+        return true;
     }
 
     fn cdpIndex(t: *Tab, rid: []const u8) ?usize {
@@ -1036,7 +1085,7 @@ pub const Table = struct {
                 }
                 if (v.redirect) return; // 첫 홉을 못 봤다 — 옮겨 간 주소는 CEF 의 열쇠(첫 주소)가 아니다
                 const rid = Rid.init(v.rid) orelse return;
-                if (t.cdp.items.len >= max_cdp) _ = t.cdp.orderedRemove(0);
+                if (t.cdp.items.len >= max_cdp) dropOldestCdp(t);
                 try t.cdp.append(gpa, .{ .rid = rid, .key_url = v.url_hash, .key_method = v.method_hash, .ts_us = v.ts_us, .prefetch = v.prefetch, .has_key = true, .last_url = v.url_hash, .low = v.low });
             },
             .extra_info => |v| {
@@ -1051,7 +1100,7 @@ pub const Table = struct {
                         placeholders += 1;
                         if (oldest == null) oldest = j;
                     };
-                    if (placeholders >= max_placeholders) _ = t.cdp.orderedRemove(oldest.?) else if (t.cdp.items.len >= max_cdp) _ = t.cdp.orderedRemove(0);
+                    if (placeholders >= max_placeholders) _ = t.cdp.orderedRemove(oldest.?) else if (t.cdp.items.len >= max_cdp) dropOldestCdp(t);
                     try t.cdp.append(gpa, .{ .rid = rid, .key_url = 0, .key_method = 0, .ts_us = std.math.maxInt(i64), .has_key = false, .sends = 0, .placed_at = @max(now_us, 1) });
                     break :blk t.cdp.items.len - 1;
                 };
@@ -1534,13 +1583,29 @@ pub const Table = struct {
             var c: usize = 0;
             while (c < t.cands.items.len) {
                 const cand = t.cands.items[c];
-                if (!cand.claimed and cand.ended_at != 0 and now_us - cand.ended_at >= unclaimed_expiry_us) {
-                    try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = cand.request, .state = .unmatched, .flags = .{ .credentialed = cand.cef_credentialed } } });
+                // N1: 새 문서 앞에 시작한 요청(`old_doc`)은 앞 문서와 함께 떠났다 — CDP 는 그 끝을 보내지 않는다(문서가 없다). CEF 가 취소·실패로
+                // 끝냈으면 그 실패가 CDP 로 오는 것(`request_failed`·`partial` — 앞의 `decidePending` 이 정한다)을 기다린 뒤(CEF 끝에서
+                // `cef_grace_us`) 곧 `unavailable`. CEF 가 성공으로 끝냈으면(문서가 떠난 뒤 서버가 본문을 다 보냈다 — 실측 20 개 중 2) CDP 끝이 늦을 수
+                // 있어 짝 없는 시한까지 기다리고 그때 `unmatched` 가 아니라 `unavailable`. 결과를 모르는 후보(`lost` — 기록이 버려졌다)는 그대로
+                // `unmatched`.
+                const old_doc = !cand.lost and t.doc_at != 0 and cand.t_io_us < t.doc_at;
+                const cut = old_doc and cand.cef_failed and now_us - cand.ended_at >= cef_grace_us;
+                if (!cand.claimed and cand.ended_at != 0 and (cut or now_us - cand.ended_at >= unclaimed_expiry_us)) {
+                    try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = cand.request, .state = if (old_doc) .unavailable else .unmatched, .flags = .{ .credentialed = cand.cef_credentialed } } });
                     _ = t.cands.orderedRemove(c);
                     continue;
                 }
                 c += 1;
             }
+            // D3: 끝이 오지 않을 열린 CDP 요청(짝이 될 수 없다 — `cdpOrphan`)을 놓는다. 후보를 끝낸 뒤에 본다(방금 끝난 후보가 그 짝이었을 수 있다).
+            // 한 번 훑으며 남길 것만 앞으로 모은다(많이 쌓였을 때 하나씩 빼면 그때마다 목록을 민다). 차례는 그대로다.
+            var kept: usize = 0;
+            for (0..t.cdp.items.len) |o| {
+                if (self.cdpOrphan(t, &t.cdp.items[o], now_us)) continue;
+                if (kept != o) t.cdp.items[kept] = t.cdp.items[o];
+                kept += 1;
+            }
+            t.cdp.shrinkRetainingCapacity(kept);
             // 오래된 문 넘김 표지는 잊는다(어떤 창에도 들지 않는다).
             if (t.drop_overflow_until != 0 and now_us - t.drop_overflow_until > window_after_us + unclaimed_expiry_us) t.drop_overflow_until = 0;
             try self.pump(gpa, t, now_us);
@@ -1751,6 +1816,22 @@ test "W9d②: 결과 풀기 — JSON 글, base64(글이면 글·아니면 바이
         const g = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153\",\"base64Encoded\":false}", "text/html", false, 0);
         defer gpa_t.free(g.bytes);
         try testing.expect(!g.flags.redecoded and !g.flags.chromium_decoded);
+    }
+    {
+        // W9d② 20 회 검증 15 회차 D1: `FF FE 7B 22 6B 22 3A 22 C0 80 22 7D`(12 바이트) JSON 을 Chromium 이 UTF-16 으로 풀어 15 바이트 글이 왔다 — 표시.
+        const utf16 = try decodeResult(gpa_t, true, "{\"body\":\"\\u227b\\u226b\\u223a\\u80c0\\u7d22\",\"base64Encoded\":false}", "application/json", false, 12);
+        defer gpa_t.free(utf16.bytes);
+        try testing.expect(utf16.state == .captured and utf16.flags.chromium_decoded and !utf16.flags.redecoded and !utf16.flags.binary);
+        // 대조: 같은 수(UTF-8 JSON — 여러 바이트 글자 포함), 수를 모름, charset 있음은 표시하지 않는다.
+        const same = try decodeResult(gpa_t, true, "{\"body\":\"{\\\"k\\\":\\\"\\uD55C\\\"}\",\"base64Encoded\":false}", "application/json", false, 11);
+        defer gpa_t.free(same.bytes);
+        try testing.expect(!same.flags.chromium_decoded);
+        const unknown = try decodeResult(gpa_t, true, "{\"body\":\"\\u227b\",\"base64Encoded\":false}", "application/json", false, 0);
+        defer gpa_t.free(unknown.bytes);
+        try testing.expect(!unknown.flags.chromium_decoded);
+        const cs = try decodeResult(gpa_t, true, "{\"body\":\"\\uD55C\",\"base64Encoded\":false}", "application/json", true, 2);
+        defer gpa_t.free(cs.bytes);
+        try testing.expect(!cs.flags.chromium_decoded);
     }
     try testing.expectEqual(State.no_body, (try decodeResult(gpa_t, true, "{\"body\":\"\",\"base64Encoded\":false}", "text/plain", true, 0)).state);
     try testing.expectEqual(State.unavailable, (try decodeResult(gpa_t, false, "{\"code\":-32000}", "text/plain", true, 0)).state);
@@ -3718,4 +3799,344 @@ test "W9d② 적대 리뷰 5 회차 A2: 자원 종류를 응답에서만 알아�
     try testing.expectEqual(@as(usize, 2), tab.waiting.items.len);
     try testing.expect(!tab.waiting.items[0].low); // 뒤에 온 fetch 가 앞에 선다
     try testing.expect(tab.waiting.items[1].low and tab.waiting.items[1].request == 9100);
+}
+
+// ── W9d② v20 A R8(적대 검증 — 자원 상한, 순수): 버스트 60 의 경계와 초당 20 의 다음 자리(50 ms 의 앞·뒤), 1 MiB 상한의 경계(꼭 1 MiB 는 받고
+// +1 은 over_cap — dataReceived 가 여러 조각이어도), 탭 바이트 양동이(4 MiB/s — 1 MiB 본문 다섯째는 250 ms 뒤), 앞 차례만 찬 기다림에 온 새것은
+// 앞 차례를 밀어내지 않고 제가 busy, 끝은 요청마다 꼭 하나.
+
+/// 탭 `b` 에 `bytes` 바이트(조각 `pieces` 개로 나눈) 응답 하나를 끝까지(같은 시각) — 앞 차례(JSON).
+fn v20Body(h: *H, b: BrowserId, request: u64, bytes: u64, pieces: u64, t: i64) !void {
+    var ub: [48]u8 = undefined;
+    const url = try std.fmt.bufPrint(&ub, "https://app.test/v20/{d}", .{request});
+    var rb: [24]u8 = undefined;
+    const rid = try std.fmt.bufPrint(&rb, "v.{d}", .{request});
+    _ = try h.cand(b, request, url, t, .{});
+    try h.sent(b, rid, url, t - 10, t);
+    try h.ev(b, .{ .response = .{ .rid = rid, .mime = "application/json", .from_sw = false, .charset = true } }, t);
+    var left = bytes;
+    for (0..pieces) |k| {
+        const n = if (k + 1 == pieces) left else bytes / pieces;
+        left -= n;
+        try h.ev(b, .{ .data = .{ .rid = rid, .bytes = n } }, t);
+    }
+    try h.finish(b, rid, t);
+}
+
+/// 보낸 호출을 모두 곧 돌려준다(`got` 부터).
+fn v20Return(h: *H, got: *usize, t: i64) !void {
+    while (got.* < h.fetches.items.len) : (got.* += 1) {
+        const f = h.table.takeInflight(h.fetches.items[got.*].fetch.id) orelse continue;
+        try h.table.bodyDone(gpa_t, f, t);
+        try h.drain();
+    }
+}
+
+test "W9d② v20 A R8: 본문 수 버스트 60 의 경계 — 같은 순간 61 개면 60 개가 나가고, 다음 자리는 꼭 50 ms 뒤(49.999 ms 에는 아니다)" {
+    for ([_]i64{ 49_999, 50_000 }) |later| {
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 1, 1);
+        const t: i64 = 7_000_000;
+        var got: usize = 0;
+        for (0..61) |i| {
+            try v20Body(&h, 1, 100 + i, 10, 1, t);
+            try v20Return(&h, &got, t);
+        }
+        try testing.expectEqual(@as(usize, 60), h.fetches.items.len);
+        try testing.expectEqual(@as(usize, 1), h.table.tabOf(1).?.waiting.items.len);
+        try h.table.tick(gpa_t, t + later);
+        try h.drain();
+        errdefer std.debug.print("R8 burst: later={d} fetches={d}\n", .{ later, h.fetches.items.len });
+        try testing.expectEqual(@as(usize, if (later >= 50_000) 61 else 60), h.fetches.items.len);
+        try testing.expectEqual(@as(usize, 0), h.ends); // 아무것도 busy 가 아니다
+    }
+}
+
+test "W9d② v20 A R8: 1 MiB 상한의 경계 — dataReceived 합이 꼭 1 MiB 면 받으러 가고(조각 셋이어도), 1 바이트 넘으면 over_cap(한 조각이어도), 0 바이트 글은 결과를 본 뒤" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 1, 1);
+    const t: i64 = 8_000_000;
+    const cap: u64 = msg.max_net_body_bytes;
+    try v20Body(&h, 1, 1, cap, 3, t);
+    try testing.expectEqual(@as(usize, 1), h.fetches.items.len);
+    try testing.expect(h.ended.get(1) == null);
+    try v20Body(&h, 1, 2, cap + 1, 3, t);
+    try testing.expect(stateIs(&h, 2, .over_cap));
+    try v20Body(&h, 1, 3, cap + 1, 1, t);
+    try testing.expect(stateIs(&h, 3, .over_cap));
+    try testing.expectEqual(@as(usize, 1), h.fetches.items.len); // 넘친 것은 받으러 가지 않았다
+    // 0 바이트 글 — 받으러 가서(빈 결과의 상태는 결과를 본 뒤 — `emptyBodyState`) 끝은 아직이다.
+    try v20Body(&h, 1, 4, 0, 0, t);
+    try testing.expect(h.ended.get(4) == null);
+    try testing.expectEqual(@as(usize, 2), h.fetches.items.len);
+}
+
+test "W9d② v20 A R8: 탭 바이트 양동이(4 MiB/s) — 1 MiB 본문 넷은 곧, 다섯째는 250 ms 뒤(249.999 ms 에는 아니다), 다른 탭은 제 양동이로 곧" {
+    for ([_]i64{ 249_999, 250_000 }) |later| {
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 1, 1);
+        _ = try h.table.start(gpa_t, 2, 1);
+        const t: i64 = 9_000_000;
+        var got: usize = 0;
+        for (0..5) |i| {
+            try v20Body(&h, 1, 10 + i, msg.max_net_body_bytes, 1, t);
+            try v20Return(&h, &got, t);
+        }
+        try testing.expectEqual(@as(usize, 4), h.fetches.items.len);
+        // 다른 탭의 1 MiB 는 곧(전체 8 MiB/s 안 — 4 + 1).
+        try v20Body(&h, 2, 50, msg.max_net_body_bytes, 1, t);
+        try v20Return(&h, &got, t);
+        try testing.expectEqual(@as(usize, 5), h.fetches.items.len);
+        try h.table.tick(gpa_t, t + later);
+        try h.drain();
+        errdefer std.debug.print("R8 bytes: later={d} fetches={d}\n", .{ later, h.fetches.items.len });
+        try testing.expectEqual(@as(usize, if (later >= 250_000) 6 else 5), h.fetches.items.len);
+        try testing.expectEqual(@as(usize, 0), h.ends);
+    }
+}
+
+test "W9d② v20 A R8: 앞 차례만으로 찬 기다림(128) — 새 앞 차례도 뒤 차례도 제가 busy(앞 차례를 밀어내지 않는다), 끝은 꼭 하나, 자리가 나면 들어온 차례로" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const t: i64 = 11_000_000;
+    for (0..max_waiting_per_tab + 2) |i| try bodyAt(&h, 5, i, false, t); // fetch 2 + 기다림 128(모두 앞 차례)
+    const tab = h.table.tabOf(5).?;
+    try testing.expectEqual(max_waiting_per_tab, tab.waiting.items.len);
+    try testing.expectEqual(@as(usize, 0), h.ends);
+    try bodyAt(&h, 5, 900, false, t + 1);
+    try testing.expect(stateIs(&h, 5 * 100_000 + 50_000 + 900, .busy));
+    try bodyAt(&h, 5, 901, true, t + 1);
+    try testing.expect(stateIs(&h, 5 * 100_000 + 901, .busy));
+    try testing.expectEqual(@as(usize, 2), h.ends);
+    try testing.expectEqual(max_waiting_per_tab, tab.waiting.items.len);
+    // 들어온 차례 — 다음에 나가는 것은 세 번째로 들어온 것.
+    const f = h.table.takeInflight(h.fetches.items[0].fetch.id).?;
+    try h.table.bodyDone(gpa_t, f, t + 2);
+    try h.drain();
+    try testing.expectEqual(@as(usize, 3), h.fetches.items.len);
+    try testing.expectEqualStrings("j5.2", h.fetches.items[2].fetch.rid.slice());
+    var it = h.end_counts.valueIterator();
+    while (it.next()) |c| try testing.expectEqual(@as(u32, 1), c.*);
+}
+
+// W9d② v20 A R9(실제 CEF 154 — 판정 `v20a-r9-navigation-pending`, 본문 로그): 주 프레임이 다른 문서로 옮기면 옛 문서의 진행 중 요청은 CEF 가 취소로
+// 끝내지만 CDP 는 loadingFinished·loadingFailed 를 보내지 않았다(끊긴 34 개 중 cdp-fail 0). 그 요청의 본문 끝은 짝 없는 후보의 시한으로 꼭 하나
+// 나오지만(unmatched), 끝나지 않은 CDP 요청은 표에 남았다(D3 — 고친 뒤: `cdpOrphan`). 새 문서의 시작(`documentStarted`)을 표가 알면 그 끝은 곧
+// `unavailable` 이다(N1 — 아래 「20 회 검증 N1」); 이 시험은 그 알림이 없을 때의 길이다.
+test "W9d② v20 A R9: 이동으로 CDP 끝이 오지 않는 요청 — 새 문서 시작을 못 봤어도 본문 끝은 꼭 하나(unmatched)이고, 표는 끝내 한가해진다(50 ms 주기 task 가 멈춘다)" {
+    const u = "http://127.0.0.1/v20/d?pd0";
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    try h.sent(5, "r.1", u, 1_000_000, 1_000_100);
+    _ = try h.cand(5, 900, u, 1_000_050, .{});
+    try h.ev(5, .{ .response = .{ .rid = "r.1", .mime = "application/json", .from_sw = false, .charset = true } }, 1_010_000);
+    // 이동: CEF 가 취소로 끝낸다. CDP 끝은 오지 않는다.
+    h.table.cefEndAs(5, 900, 1_400_000, false);
+    var now: i64 = 1_400_000;
+    while (now < 61_400_000) : (now += 50_000) {
+        try h.table.tickAt(gpa_t, now, now);
+        try h.drain();
+    }
+    try testing.expectEqual(@as(u32, 1), endCount(&h, 900));
+    try testing.expect(stateIs(&h, 900, .unmatched));
+    // 대조로 앞의 것은 통과한다. 이것이 거짓이면 끝나지 않은 CDP 요청이 기록 내내 남아 `busy()` 가 참이다(주기 task 가 멈추지 않는다).
+    try testing.expect(!h.table.busy());
+}
+
+test "W9d② v20 A R9: 이동으로 끝나지 않은 같은 주소의 CDP 요청이 남아도, 곧 다시 불러온 문서의 같은 주소 요청은 제 기록을 받는다(틀린 본문 없음)" {
+    const u = "http://127.0.0.1/v20/r9/hold1?k=0";
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    // 옛 문서: 보냈고 머리가 왔고, 이동으로 CEF 가 취소로 끝냈다 — CDP 끝은 없다.
+    try h.sent(5, "o.1", u, 1_000_000, 1_000_100);
+    _ = try h.cand(5, 900, u, 1_000_050, .{});
+    try h.ev(5, .{ .response = .{ .rid = "o.1", .mime = "application/json", .from_sw = false, .charset = true } }, 1_010_000);
+    h.table.cefEndAs(5, 900, 1_300_000, false);
+    // 새 문서(300 ms 뒤): 같은 주소를 다시 — 곧 끝난다.
+    try h.sent(5, "n.1", u, 1_350_000, 1_350_100);
+    _ = try h.cand(5, 901, u, 1_350_050, .{});
+    try h.respond(5, "n.1", "application/json", 9, 1_352_000);
+    h.table.cefEnd(5, 901, 1_353_000);
+    try h.finish(5, "n.1", 1_353_500);
+    var now: i64 = 1_353_500;
+    while (now < 5_000_000) : (now += 50_000) {
+        try h.table.tickAt(gpa_t, now, now);
+        try h.drain();
+    }
+    var buf: [8]u64 = undefined;
+    const got = h.fetchedRequests(&buf);
+    // 새 요청의 본문 호출은 새 기록(901)으로만 — 옛 기록(900)에 가지 않는다.
+    for (got) |rq| try testing.expect(rq != 900);
+    try testing.expectEqual(@as(u32, 1), endCount(&h, 900));
+}
+
+// ── W9d② 20 회 검증 고침(D3·N1) ─────────────────────────────────────────────────────────────────────────────
+// 증명하는 것: 주 프레임이 새 문서로 옮기면 앞 문서와 함께 끊긴 요청(CEF 는 취소로 끝내고 CDP 는 끝을 보내지 않는다)의 본문 끝은 곧(`cef_grace_us`
+// 뒤) `unavailable` 하나다 — 새 문서 뒤에 시작한 요청의 실패와 CDP 실패가 곧 온 요청은 그 규칙을 타지 않는다(N1). 끝이 오지 않을 열린 CDP 요청은
+// 창이 지나고 짝일 수 있는 후보가 없으면 놓여 표가 한가해진다 — 짝이 살아 있는 긴 요청은 놓지 않는다(D3). 자리가 차면 오래된 것을 묶음으로 놓는다.
+
+test "W9d② 20 회 검증 N1: 새 문서 앞에 시작해 CEF 가 취소로 끝낸 요청은 곧 unavailable 하나, 성공으로 끝났는데 CDP 끝이 없으면 시한 뒤 unavailable — 새 문서 뒤의 실패·기록이 버려진 것은 unmatched, CDP 실패가 곧 오면 request_failed, CDP 끝이 늦은 성공은 제 본문" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    // 앞 문서의 요청 셋: 900 은 머리가 왔고 끊긴다, 902 는 CDP 실패가 곧 온다.
+    try h.sent(5, "r.1", "http://127.0.0.1/v20/n1/a", 1_000_000, 1_000_100);
+    _ = try h.cand(5, 900, "http://127.0.0.1/v20/n1/a", 1_000_050, .{});
+    try h.ev(5, .{ .response = .{ .rid = "r.1", .mime = "application/json", .from_sw = false, .charset = true } }, 1_010_000);
+    try h.sent(5, "r.3", "http://127.0.0.1/v20/n1/c", 1_100_000, 1_100_100);
+    _ = try h.cand(5, 902, "http://127.0.0.1/v20/n1/c", 1_100_050, .{});
+    // 대조: 앞 문서 때 시작해 CEF 가 성공으로 끝낸 요청(새 문서의 문서 요청 자체·keepalive) — CDP 끝이 늦어도 제 본문을 받는다.
+    try h.sent(5, "r.4", "http://127.0.0.1/v20/n1/d", 1_200_000, 1_200_100);
+    _ = try h.cand(5, 903, "http://127.0.0.1/v20/n1/d", 1_200_050, .{});
+    // 대조: 기록이 버려진 후보(`lost` — 결과를 모른다)는 끊긴 것으로 치지 않는다(시한 뒤 unmatched).
+    _ = try h.cand(5, 904, "http://127.0.0.1/v20/n1/e", 1_250_000, .{});
+    // 앞 문서 때 시작해 문서가 떠난 뒤 CEF 가 성공으로 끝냈는데 CDP 끝은 끝내 오지 않는다 — 짝 없는 시한 뒤 unmatched 가 아니라 unavailable.
+    try h.sent(5, "r.6", "http://127.0.0.1/v20/n1/f", 1_260_000, 1_260_100);
+    _ = try h.cand(5, 905, "http://127.0.0.1/v20/n1/f", 1_260_050, .{});
+    // 새 문서가 시작된다.
+    h.table.documentStarted(5, 1_300_000);
+    h.table.cefEnd(5, 903, 1_350_000);
+    h.table.cefEnd(5, 905, 1_350_000);
+    h.table.cefEndAs(5, 904, 1_350_000, false);
+    h.table.cefLost(5, 904, 1_360_000);
+    h.table.cefEndAs(5, 900, 1_350_000, false);
+    h.table.cefEndAs(5, 902, 1_330_000, false);
+    try h.ev(5, .{ .failed = .{ .rid = "r.3", .ts_us = 1_335_000 } }, 1_340_000);
+    // 새 문서 뒤에 시작해 실패한 요청(CDP 는 보지 못했다) — 끊긴 것이 아니다.
+    _ = try h.cand(5, 901, "http://127.0.0.1/v20/n1/b", 1_400_000, .{});
+    h.table.cefEndAs(5, 901, 1_450_000, false);
+    // 시한 전(끝 + 250 ms 앞)에는 끝내지 않는다.
+    try h.table.tickAt(gpa_t, 1_599_999, 1_599_999);
+    try h.drain();
+    try testing.expect(h.ended.get(900) == null);
+    try h.table.tickAt(gpa_t, 1_600_000, 1_600_000);
+    try h.drain();
+    try testing.expect(stateIs(&h, 900, .unavailable));
+    try testing.expect(stateIs(&h, 902, .request_failed));
+    try testing.expect(h.ended.get(901) == null);
+    try testing.expect(h.ended.get(903) == null and h.ended.get(904) == null and h.ended.get(905) == null);
+    try h.respond(5, "r.4", "application/json", 5, 1_700_000);
+    try h.finish(5, "r.4", 1_700_000);
+    var fb: [4]u64 = undefined;
+    try testing.expectEqualSlices(u64, &.{903}, h.fetchedRequests(&fb));
+    // 903 의 본문 호출을 곧 돌려준다(끝은 본문 호출이 낸다 — 표의 몫이 아니다).
+    const f = h.table.takeInflight(h.fetches.items[0].fetch.id).?;
+    try h.table.bodyDone(gpa_t, f, 1_700_000);
+    try h.drain();
+    var now: i64 = 1_650_000;
+    while (now < 10_000_000) : (now += 50_000) {
+        try h.table.tickAt(gpa_t, now, now);
+        try h.drain();
+    }
+    try testing.expect(stateIs(&h, 901, .unmatched));
+    try testing.expect(stateIs(&h, 904, .unmatched));
+    try testing.expect(stateIs(&h, 905, .unavailable));
+    for ([_]u64{ 900, 901, 902, 904, 905 }) |r| try testing.expectEqual(@as(u32, 1), endCount(&h, r));
+    try testing.expect(!h.table.busy());
+}
+
+test "W9d② 20 회 검증 D3: 열린 CDP 요청은 짝이 살아 있으면 창이 지나도 놓지 않는다 — 긴 요청이 끝나면 제 기록이 본문을 받는다, 끊긴 것은 놓여 표가 한가해진다" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    // 긴 요청(10 초) — 후보는 끝나지 않은 채 산다.
+    try h.sent(5, "l.1", "http://127.0.0.1/v20/long", 1_000_000, 1_000_100);
+    _ = try h.cand(5, 909, "http://127.0.0.1/v20/long", 1_000_050, .{});
+    // 끊긴 요청 — 후보 없음(문이 넘겼다), 끝도 오지 않는다.
+    try h.sent(5, "o.1", "http://127.0.0.1/v20/orphan", 1_000_000, 1_000_100);
+    // 끊긴 요청 — 페이지의 응답(서비스 워커 아님)이 왔다. 같은 주소의 워커 기록(서비스 워커 갈래 — 짝이 될 수 없다)이 살아 있어도 놓는다.
+    try h.sent(5, "w.1", "http://127.0.0.1/v20/worker-same", 1_000_000, 1_000_100);
+    try h.ev(5, .{ .response = .{ .rid = "w.1", .mime = "application/json", .from_sw = false, .charset = true } }, 1_010_000);
+    _ = try h.cand(5, 908, "http://127.0.0.1/v20/worker-same", 1_000_060, .{ .sw = true });
+    var now: i64 = 1_050_000;
+    while (now < 11_000_000) : (now += 50_000) {
+        try h.table.tickAt(gpa_t, now, now);
+        try h.drain();
+    }
+    const tab = h.table.tabOf(5).?;
+    try testing.expectEqual(@as(usize, 1), tab.cdp.items.len);
+    try testing.expect(tab.cdp.items[0].rid.eql("l.1"));
+    try h.respond(5, "l.1", "application/json", 7, 11_000_000);
+    h.table.cefEnd(5, 909, 11_001_000);
+    try h.finish(5, "l.1", 11_002_000);
+    try h.table.tickAt(gpa_t, 11_003_000, 11_003_000);
+    try h.drain();
+    var buf: [4]u64 = undefined;
+    try testing.expectEqualSlices(u64, &.{909}, h.fetchedRequests(&buf));
+    // 끊긴 것이 늦게 끝나도 자리가 없다 — 아무 일도 없다.
+    try h.finish(5, "o.1", 11_004_000);
+    try testing.expectEqual(@as(usize, 0), tab.cdp.items.len);
+    try testing.expectEqual(@as(usize, 0), h.ends);
+}
+
+test "W9d② 20 회 검증 D3: CDP 자리가 차면 가장 오래된 것을 묶음(256)으로 놓는다 — 새것과 그 앞의 차례는 그대로" {
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    var rb: [24]u8 = undefined;
+    var ub: [48]u8 = undefined;
+    for (0..max_cdp + 1) |i| {
+        const rid = try std.fmt.bufPrint(&rb, "c.{d}", .{i});
+        const url = try std.fmt.bufPrint(&ub, "http://127.0.0.1/v20/cap/{d}", .{i});
+        // 쏟아짐 밸브(초당 5000)를 넘지 않게 사건마다 1 ms.
+        const t: i64 = 1_000_000 + @as(i64, @intCast(i)) * 1_000;
+        try h.table.cdpEvent(gpa_t, 5, .{ .will_be_sent = .{ .rid = rid, .url_hash = hashUrl8(url), .method_hash = hashMethod("GET"), .ts_us = t } }, t);
+    }
+    const tab = h.table.tabOf(5).?;
+    try testing.expectEqual(max_cdp - cdp_evict_batch + 1, tab.cdp.items.len);
+    try testing.expect(tab.cdp.items[0].rid.eql("c.256"));
+    try testing.expect(tab.cdp.items[tab.cdp.items.len - 1].rid.eql("c.4096"));
+}
+
+test "W9d② 20 회 검증 D3: 창이 지난 뒤 같은 번호로 다시 시작한 요청 — CDP 의 다시 보내기가 늦어도 그 CDP 요청을 놓지 않아 다시 시작한 시도가 본문을 받는다" {
+    const u = "http://127.0.0.1/v20/restart-late";
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    try h.sent(5, "s.1", u, 1_000_000, 1_000_100);
+    _ = try h.cand(5, 950, u, 1_000_050, .{});
+    // 2.5 초 뒤 Chromium 이 같은 번호로 다시 시작한다(느린 서버의 Critical-CH) — CEF 의 새 시작이 먼저 온다(앞 시도는 restarted).
+    _ = try h.cand(5, 950, u, 3_500_000, .{});
+    try testing.expect(stateIs(&h, 950, .restarted));
+    // 앞 시도의 창은 지났지만 다시 시작한 시도가 있다 — 그 CDP 요청을 놓지 않는다.
+    try h.table.tickAt(gpa_t, 3_600_000, 3_600_000);
+    try h.drain();
+    try testing.expectEqual(@as(usize, 1), h.table.tabOf(5).?.cdp.items.len);
+    // CDP 의 다시 보내기(같은 주소의 리다이렉트로 알린다)와 끝.
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "s.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = 3_500_100, .redirect = true } }, 3_610_000);
+    try h.ev(5, .{ .extra_info = .{ .rid = "s.1", .credentialed = false } }, 3_610_000);
+    try h.respond(5, "s.1", "application/json", 4, 3_620_000);
+    h.table.cefEnd(5, 950, 3_630_000);
+    try h.finish(5, "s.1", 3_640_000);
+    try h.table.tickAt(gpa_t, 3_700_000, 3_700_000);
+    try h.drain();
+    var buf: [4]u64 = undefined;
+    try testing.expectEqualSlices(u64, &.{950}, h.fetchedRequests(&buf));
+}
+
+test "W9d② 20 회 검증 D3: 물 높이가 창 끝에 닿기 전에는 열린 CDP 요청을 놓지 않는다 — IO 스레드가 늦어 제 CEF 기록이 2 초 넘게 늦게 와도 짝을 짓는다" {
+    const u = "http://127.0.0.1/v20/late-cef";
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    try h.sent(5, "q.1", u, 1_000_000, 1_000_100);
+    // 2.1 초 뒤 — 시간은 창을 지났지만 CEF 기록은 IO 시각 2.9 초까지만 왔다(창 끝 3.0 초 앞): 놓지 않는다.
+    try h.table.tickAt(gpa_t, 3_100_000, 2_900_000);
+    try h.drain();
+    try testing.expectEqual(@as(usize, 1), h.table.tabOf(5).?.cdp.items.len);
+    // 늦은 제 기록(IO 시각 1.5 초 — 창 안)이 오고 요청이 끝난다.
+    _ = try h.cand(5, 960, u, 1_500_000, .{});
+    try h.respond(5, "q.1", "application/json", 3, 3_200_000);
+    h.table.cefEnd(5, 960, 3_210_000);
+    try h.finish(5, "q.1", 3_220_000);
+    try h.table.tickAt(gpa_t, 3_300_000, 3_300_000);
+    try h.drain();
+    var buf: [4]u64 = undefined;
+    try testing.expectEqualSlices(u64, &.{960}, h.fetchedRequests(&buf));
 }

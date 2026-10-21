@@ -189,6 +189,10 @@ pub const Entry = struct {
     redirects: u8 = 0,
     final_url: []u8 = &.{},
     final_host: []u8 = &.{},
+    /// W9d② 20 회 검증 N2: 홉 상한(`max_hops`)을 넘는 리다이렉트가 왔다 — 적지 않은 홉 뒤의 응답 호스트를 모른다. 모르는 호스트는 덮이지
+    /// 않는 쪽이다(`finalHost` 가 빈 글 — UB1·헤더의 쿠키 가리기·이동의 덮기 모두 닫힌다). Chromium 은 스무 홉에서 멈추므로(kMaxRedirects)
+    /// 닿지 않는 길이지만, 전에는 스무째 홉의 호스트가 남아 21 번째 홉의 은행 응답이 덮이는 곳의 것으로 보였다.
+    hops_overflow: bool = false,
     /// sidecar 가 다시 떠(브라우저가 다시 만들어졌다) 끝을 받지 못한 채 끝난 것으로 친 요청(3 회차 T2 — `Ring.abandonLive`).
     engine_restarted: bool = false,
     /// Chromium 이 이 요청을 같은 CEF 번호로 다시 시작했다(W9d① 적대 리뷰 후 — `Ring.restartEarlier`). 이 기록은 버려진 앞 시도다(취소 −3) —
@@ -216,6 +220,7 @@ pub const Entry = struct {
 
     /// 마지막 주소의 호스트(리다이렉트 뒤 — 응답을 보낸 곳).
     fn finalHost(self: *const Entry) []const u8 {
+        if (self.hops_overflow) return "";
         return if (self.redirects > 0) self.final_host else self.host;
     }
 
@@ -603,7 +608,10 @@ pub const Ring = struct {
 
     pub fn redirect(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, v: msg.NetRedirect) std.mem.Allocator.Error!void {
         const e0 = self.liveEntry(v.request) orelse return;
-        if (e0.redirects >= max_hops) return;
+        if (e0.redirects >= max_hops) {
+            e0.hops_overflow = true; // N2 — 그 뒤의 응답 호스트를 모른다(덮이지 않는 쪽)
+            return;
+        }
         const seq = e0.seq;
         const old_final = e0.final_url.len + e0.final_host.len;
         const new_final = v.url.len + v.host.len;
@@ -947,6 +955,7 @@ pub const Ring = struct {
     /// 무관하다(설정은 덮이는 페이지가 보낸 다른 사이트 요청을 가른다 — 덮이지 않는 사이트에서 시작한 이동이 아니다). 자세한 것을 버려 가운데
     /// 홉을 모르면 둘 이상의 리다이렉트는 숨긴다.
     fn navigationCovered(view: View, e: *const Entry) bool {
+        if (e.hops_overflow) return false; // N2 — 적지 않은 홉이 있다
         var hosts: [max_hops + 1][]const u8 = undefined;
         var n: usize = 0;
         if (e.redirects > 0) {
@@ -3047,4 +3056,427 @@ test "W9d② 적대 리뷰 5 회차: 한 바이트가 남아도 다음 오프셋
     try testing.expectEqualStrings("discarded", try bodyStateOf(&t, 7, bq, ""));
     for (others) |o| try testing.expectEqualStrings(@tagName(o.state), try bodyStateOf(&t, o.req, bq, ""));
     try testing.expectEqual(@as(usize, 0), t.budget.body_bytes);
+}
+
+// ── W9d② v20 A(적대 검증 1–10 회차 중 maru 쪽) ───────────────────────────────────────────────────────────────
+
+/// R7: 본문 있는 요청 하나 — 시작(그때 탭 호스트 `top`)·리다이렉트 홉들·응답·끝·본문.
+fn v20Body(t: *T, request: u64, url: []const u8, hops: []const []const u8, top: []const u8, body: []const u8, flags: msg.NetBodyFlags, stripped: bool) !void {
+    const host = policy.hostOfUrl(url) orelse "";
+    try t.ring.begin(testing.allocator, &t.budget, .{ .browser = 1, .request = request, .flags2 = .{ .body_expected = true }, .resource_type = 13, .time_ms = 1000 + request, .url = url, .host = host, .site = top }, .{ .top_host = top });
+    for (hops) |h| try t.redirect(request, 302, h, .{});
+    try t.ring.response(testing.allocator, &t.budget, .{ .browser = 1, .request = request, .status = 200, .mime = "application/json", .flags = .{ .stripped = stripped } });
+    t.ring.end(.{ .browser = 1, .request = request, .received = body.len, .time_ms = 3000 + request });
+    try bodyFeed(t, request, body, flags);
+}
+
+test "W9d② v20 A R7: 본문 grant 의 다시 허락 — 같은 번호는 시작점 그대로, 다른 번호(다른 호스트·철회 뒤)는 지금부터, 태어날 때 묶음은 한 번뿐" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 71 }}); // 사용자 탭 — 모달로 받은 본문 grant(지금부터)
+    try v20Body(&t, 1, "https://app.test/a", &.{}, "app.test", "A", .{}, false);
+    const bq71: BodyQuery = .{ .who = 71, .host = "app.test" };
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 1, bq71, ""));
+    // 같은 grant 를 다시 알려도(호스트 그대로 — 번호 그대로) 시작점은 그대로.
+    t.ring.syncBodyReaders(&.{.{ .who = 71 }});
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 1, bq71, ""));
+    // 다른 사이트로 다시 허락 = 새 번호(73) — 앞 요청은 허락 전이다(그 사이트로 받은 동의는 뒤의 것만).
+    t.ring.syncBodyReaders(&.{.{ .who = 73 }});
+    try testing.expectEqualStrings("before_body_permission", try bodyStateOf(&t, 1, .{ .who = 73, .host = "app.test" }, ""));
+    // 옛 번호(71)로 읽으면 — 이제 grant 가 아니다: 처음 읽는 모르는 쪽은 지금부터(방어 — 앱은 표의 지금 번호로만 묻는다).
+    try testing.expectEqualStrings("before_body_permission", try bodyStateOf(&t, 1, bq71, ""));
+    // 철회(빈 목록) 뒤 같은 호스트로 다시 허락 = 새 번호(75) — 철회 전 요청은 허락 전.
+    try v20Body(&t, 2, "https://app.test/b", &.{}, "app.test", "B", .{}, false);
+    t.ring.syncBodyReaders(&.{});
+    t.ring.syncBodyReaders(&.{.{ .who = 75 }});
+    try testing.expectEqualStrings("before_body_permission", try bodyStateOf(&t, 2, .{ .who = 75, .host = "app.test" }, ""));
+    try v20Body(&t, 3, "https://app.test/c", &.{}, "app.test", "C", .{}, false);
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 3, .{ .who = 75, .host = "app.test" }, "")); // 대조: 허락 뒤 것은 보인다
+    // 태어날 때 묶음은 탭마다 한 번 — 철회 뒤 다시 「태어날 때」 로 들어와도 처음부터가 아니다.
+    var b: T = .{};
+    defer b.deinit();
+    b.ring.noteReader(7, true);
+    b.ring.syncBodyReaders(&.{.{ .who = 80, .birth = true }});
+    try v20Body(&b, 1, "https://agent.test/x", &.{}, "agent.test", "X", .{}, false);
+    try testing.expectEqualStrings("captured", try bodyStateOf(&b, 1, .{ .who = 80, .any_host = true }, ""));
+    b.ring.syncBodyReaders(&.{});
+    b.ring.syncBodyReaders(&.{.{ .who = 81, .birth = true }});
+    try testing.expectEqualStrings("before_body_permission", try bodyStateOf(&b, 1, .{ .who = 81, .any_host = true }, ""));
+}
+
+test "W9d② v20 A R7: UB1 — 덮이는 사이트에서 은행으로 리다이렉트된 실린 본문은 쿠키 권한, 은행에서 돌아와 제 사이트가 보낸 본문은 보인다, 쿠키 권한은 하위 도메인을 덮되 부모는 아니다, 실리지 않은 다른 사이트는 보인다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 71, .birth = true }});
+    const bound: BodyQuery = .{ .who = 71, .host = "app.test", .want = true };
+    const any: BodyQuery = .{ .who = 71, .any_host = true, .want = true };
+    try v20Body(&t, 1, "https://app.test/go", &.{"https://bank.test/me"}, "app.test", "{\"bal\":1}", .{ .credentialed = true }, false);
+    try v20Body(&t, 2, "https://bank.test/sso", &.{"https://app.test/cb"}, "app.test", "{\"cb\":1}", .{ .credentialed = true }, false);
+    try v20Body(&t, 3, "https://app.test/go2", &.{"https://api.bank.test/me"}, "app.test", "{\"api\":1}", .{ .credentialed = true }, false);
+    try v20Body(&t, 4, "https://app.test/go3", &.{"https://cdn.test/lib.js"}, "app.test", "lib", .{}, false);
+    try v20Body(&t, 5, "https://app.test/go4", &.{ "https://bank.test/a", "https://app.test/b", "https://bank.test/c" }, "app.test", "{\"c\":1}", .{ .credentialed = true }, false);
+    for ([_]BodyQuery{ bound, any }) |q| {
+        try testing.expectEqualStrings("needs_cookie_permission", try bodyStateOf(&t, 1, q, ""));
+        try testing.expectEqualStrings("needs_cookie_permission", try bodyStateOf(&t, 1, q, "api.bank.test")); // 하위 도메인 쿠키 권한은 부모를 덮지 않는다
+        try testing.expectEqualStrings("captured", try bodyStateOf(&t, 1, q, "bank.test"));
+        try testing.expectEqualStrings("captured", try bodyStateOf(&t, 2, q, "")); // 응답을 보낸 곳은 제 사이트
+        try testing.expectEqualStrings("captured", try bodyStateOf(&t, 3, q, "bank.test")); // 부모의 쿠키 권한은 하위를 덮는다
+        try testing.expectEqualStrings("needs_cookie_permission", try bodyStateOf(&t, 3, q, ""));
+        try testing.expectEqualStrings("captured", try bodyStateOf(&t, 4, q, "")); // 실리지 않은 다른 사이트(대조)
+        try testing.expectEqualStrings("needs_cookie_permission", try bodyStateOf(&t, 5, q, "")); // 덮이는 곳을 지나 은행에서 끝남
+    }
+    // 숨긴 본문은 바이트도 크기도 싣지 않는다.
+    const p = try bodyDetail(&t, 1, bound, "");
+    defer p.deinit();
+    try testing.expect(p.value.object.get("body") == null and p.value.object.get("body_size") == null and p.value.object.get("body_credentialed") == null);
+}
+
+test "W9d② v20 A R7: 탭 주소를 모르는(첫 사이트만) 요청 — 어느 호스트든 읽는 쪽에게 제 등록 도메인의 실린 본문도 쿠키 권한(닫힌 쪽), 실리지 않은 것은 보인다; 꺼진 동안 덜어 낸 응답은 읽는 쪽 호스트가 덮을 때만" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const any: BodyQuery = .{ .who = 70, .any_host = true };
+    // app 이 탭 주소를 모른다(top "") — 하위 자원의 top_host 는 첫 사이트(등록 도메인)이고 top_inexact.
+    for ([_]struct { req: u64, url: []const u8, cred: bool, want: []const u8 }{
+        .{ .req = 1, .url = "https://example.edu/me", .cred = true, .want = "needs_cookie_permission" },
+        .{ .req = 2, .url = "https://mail.example.edu/inbox", .cred = true, .want = "needs_cookie_permission" },
+        .{ .req = 3, .url = "https://mail.example.edu/pub", .cred = false, .want = "captured" },
+    }) |c| {
+        const host = policy.hostOfUrl(c.url).?;
+        try t.ring.begin(testing.allocator, &t.budget, .{ .browser = 1, .request = c.req, .flags2 = .{ .body_expected = true }, .resource_type = 13, .url = c.url, .host = host, .site = "example.edu" }, .{ .top_host = "" });
+        try t.ring.response(testing.allocator, &t.budget, .{ .browser = 1, .request = c.req, .status = 200, .mime = "application/json" });
+        t.ring.end(.{ .browser = 1, .request = c.req, .received = 2 });
+        try bodyFeed(&t, c.req, "{}", .{ .credentialed = c.cred });
+        errdefer std.debug.print("R7 top_inexact: req {d}\n", .{c.req});
+        try testing.expectEqualStrings(c.want, try bodyStateOf(&t, c.req, any, ""));
+    }
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 2, any, "mail.example.edu")); // 쿠키 권한이 있으면
+    // 덜어 낸 응답(꺼진 동안 적음) — 설정이 켜진 뒤에도 읽는 쪽 grant 호스트가 응답을 보낸 곳을 덮어야.
+    try v20Body(&t, 10, "https://app.test/r", &.{"https://other.test/x"}, "app.test", "{\"o\":1}", .{}, true);
+    try v20Body(&t, 11, "https://app.test/own", &.{}, "app.test", "{\"a\":1}", .{}, true);
+    for ([_]bool{ true, false }) |full| {
+        const d10 = try t.ring.detail(testing.allocator, 7, .{ .full = full, .grant_host = "app.test" }, t.ring.next_seq - 2, .{ .who = 70, .any_host = true, .want = true });
+        defer testing.allocator.free(d10);
+        try testing.expect(std.mem.indexOf(u8, d10, "{\\\"o\\\":1}") == null);
+        try testing.expect(std.mem.indexOf(u8, d10, "\"body_state\":\"hidden\"") != null);
+        const d11 = try t.ring.detail(testing.allocator, 7, .{ .full = full, .grant_host = "app.test" }, t.ring.next_seq - 1, .{ .who = 70, .any_host = true, .want = true });
+        defer testing.allocator.free(d11);
+        try testing.expect(std.mem.indexOf(u8, d11, "\"body_state\":\"captured\"") != null); // 대조
+    }
+}
+
+test "W9d② v20 A R7: 리다이렉트 홉 상한(20 — Chromium 의 kMaxRedirects 와 같다)까지는 마지막 홉이 응답 호스트다; 21 번째 홉이 와도 응답 호스트를 덮이는 곳으로 남기지 않는다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 71, .birth = true }});
+    const bound: BodyQuery = .{ .who = 71, .host = "app.test" };
+    // 대조: 스무 홉 — 마지막 홉(은행)이 응답 호스트.
+    var hops20: [max_hops][]const u8 = undefined;
+    for (0..max_hops - 1) |i| hops20[i] = "https://app.test/hop";
+    hops20[max_hops - 1] = "https://bank.test/me";
+    try v20Body(&t, 1, "https://app.test/start", &hops20, "app.test", "{\"b\":1}", .{ .credentialed = true }, false);
+    try testing.expectEqualStrings("needs_cookie_permission", try bodyStateOf(&t, 1, bound, ""));
+    // 스물한 홉(마지막이 은행) — 링이 21 번째 홉을 버리면 응답 호스트가 app.test 로 남아 은행의 실린 본문이 보인다.
+    var hops21: [max_hops + 1][]const u8 = undefined;
+    for (0..max_hops) |i| hops21[i] = "https://app.test/hop";
+    hops21[max_hops] = "https://bank.test/me";
+    try v20Body(&t, 2, "https://app.test/start2", &hops21, "app.test", "{\"b\":2}", .{ .credentialed = true }, false);
+    try testing.expect(!std.mem.eql(u8, "captured", try bodyStateOf(&t, 2, bound, "")));
+}
+
+// R8(자원 상한 — maru 링): 꼭 1 MiB 는 쥐고 +1 은 받지 않는다(바이트를 놓는다), 탭 8 MiB 는 꼭 차도 버리지 않고 1 바이트 넘으면 가장 먼저 받은 것
+// 하나만, 받는 중인 본문도 탭 몫을 쓴다 — 다 받은 것이 없으면 받던 것이 evicted(바이트를 놓고, 늦은 조각·끝이 되살리지 않는다).
+test "W9d② v20 A R8: 링 상한의 경계 — 꼭 1 MiB·꼭 8 MiB 는 그대로, 1 바이트 넘으면 그 본문만(1 MiB) 또는 가장 먼저 받은 것 하나만(8 MiB), 받던 본문이 밀리면 늦은 조각·끝이 되살리지 않는다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const bq: BodyQuery = .{ .who = 70, .any_host = true };
+    const mib = try testing.allocator.alloc(u8, max_body_bytes + 1);
+    defer testing.allocator.free(mib);
+    @memset(mib, 'k');
+    // 꼭 1 MiB.
+    try bodyBegin(&t, 1, "https://a.test/1", "a.test");
+    try bodyFeed(&t, 1, mib[0..max_body_bytes], .{});
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 1, bq, ""));
+    // 1 MiB + 1 — 마지막 조각을 받지 않고 그 본문을 unavailable 로(쥐던 바이트를 놓는다).
+    try bodyBegin(&t, 2, "https://a.test/2", "a.test");
+    try bodyFeed(&t, 2, mib, .{});
+    try testing.expectEqualStrings("unavailable", try bodyStateOf(&t, 2, bq, ""));
+    try testing.expectEqual(@as(usize, max_body_bytes), t.ring.body_bytes);
+    try testing.expectEqual(@as(usize, max_body_bytes), t.budget.body_bytes);
+    // 꼭 8 MiB — 일곱 더.
+    for (3..10) |i| {
+        try bodyBegin(&t, i, "https://a.test/n", "a.test");
+        try bodyFeed(&t, i, mib[0..max_body_bytes], .{});
+    }
+    try testing.expectEqual(max_tab_body_bytes, t.ring.body_bytes);
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 1, bq, "")); // 꼭 찼을 뿐 — 버리지 않는다
+    // 1 바이트 더 — 가장 먼저 받은 것(1) 하나만.
+    try bodyBegin(&t, 10, "https://a.test/one", "a.test");
+    try bodyFeed(&t, 10, "x", .{});
+    try testing.expectEqualStrings("evicted", try bodyStateOf(&t, 1, bq, ""));
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 3, bq, ""));
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 10, bq, ""));
+    try testing.expectEqual(max_tab_body_bytes - max_body_bytes + 1, t.ring.body_bytes);
+    // 받는 중인 본문만으로 탭 몫을 넘김 — 새 링: 받던 본문 여덟(각 1 MiB − 1)이 다 받은 것 없이 차면, 넘치게 하는 조각의 본문이 evicted.
+    var u: T = .{};
+    defer u.deinit();
+    u.ring.noteReader(7, true);
+    u.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    for (1..10) |i| try bodyBegin(&u, i, "https://b.test/p", "b.test");
+    for (1..9) |i| {
+        var off: usize = 0;
+        while (off < max_body_bytes - 1) : (off += msg.net_body_chunk_bytes) {
+            const k = @min(msg.net_body_chunk_bytes, max_body_bytes - 1 - off);
+            try u.ring.bodyData(testing.allocator, &u.budget, .{ .browser = 1, .session = 1, .request = i, .offset = @intCast(off), .bytes = mib[off..][0..k] });
+        }
+    }
+    try testing.expectEqual(8 * (max_body_bytes - 1), u.ring.body_bytes);
+    try u.ring.bodyData(testing.allocator, &u.budget, .{ .browser = 1, .session = 1, .request = 9, .offset = 0, .bytes = mib[0..16] });
+    try testing.expectEqualStrings("evicted", try bodyStateOf(&u, 9, bq, ""));
+    try testing.expectEqual(8 * (max_body_bytes - 1), u.ring.body_bytes);
+    // 늦은 조각·끝은 되살리지 않는다.
+    try u.ring.bodyData(testing.allocator, &u.budget, .{ .browser = 1, .session = 1, .request = 9, .offset = 16, .bytes = "late" });
+    u.ring.bodyEnd(testing.allocator, &u.budget, .{ .browser = 1, .session = 1, .request = 9, .state = .captured, .size = 20 });
+    try testing.expectEqualStrings("evicted", try bodyStateOf(&u, 9, bq, ""));
+    // 대조: 받던 여덟은 마저 받으면 다 받은 것이다(합이 탭 몫 안).
+    u.ring.bodyEnd(testing.allocator, &u.budget, .{ .browser = 1, .session = 1, .request = 1, .state = .captured, .size = max_body_bytes - 1 });
+    try testing.expectEqualStrings("captured", try bodyStateOf(&u, 1, bq, ""));
+    try testing.expectEqual(u.budget.body_bytes, u.ring.body_bytes);
+}
+
+// ── W9d② 적대 검증 11–20 회차(v20b) ────────────────────────────────────────────────────────────────────────────
+// 이 시험들이 증명하는 것: sidecar 가 어긋난 본문 frame(차례가 뒤바뀐 조각·끝 뒤의 조각·끝 둘·엉뚱한 번호·거대한 오프셋·크기가 다른 끝)을 보내도
+// 링은 무너지지 않고 틀린 바이트를 쥐지 않으며 예산이 새지 않는다(11 회차). 본문 읽기의 경계 — 0·1·64 KiB−1·64 KiB·64 KiB+1·1 MiB 의 본문을
+// 경계마다의 오프셋으로 읽고 body_next_offset 를 따라 이어 읽으면 원래 바이트와 같다, 여러 바이트 글자가 조각 경계에 걸쳐도(16 회차).
+
+test "W9d② v20b 11 회차: 어긋난 본문 frame — 차례가 뒤바뀐 조각·끝 뒤의 조각·끝 둘·엉뚱한 번호·거대한 오프셋·크기가 다른 끝은 틀린 바이트를 남기지 않고 예산이 0 으로 돌아온다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const bq: BodyQuery = .{ .who = 70, .any_host = true, .want = true };
+    const a = testing.allocator;
+    // 대조: 두 조각이 차례대로 오면 잡는다.
+    try bodyBegin(&t, 1, "https://a.test/ok", "a.test");
+    try t.ring.bodyData(a, &t.budget, .{ .browser = 1, .session = 1, .request = 1, .offset = 0, .bytes = "{\"a\":" });
+    try t.ring.bodyData(a, &t.budget, .{ .browser = 1, .session = 1, .request = 1, .offset = 5, .bytes = "1}" });
+    t.ring.bodyEnd(a, &t.budget, .{ .browser = 1, .session = 1, .request = 1, .state = .captured, .size = 7 });
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 1, bq, ""));
+    const base = t.budget.body_bytes;
+    try testing.expectEqual(@as(usize, 7), base);
+    // 차례가 뒤바뀐 조각: 둘째가 먼저 — unavailable, 뒤에 온 첫 조각·끝은 붙지 않는다.
+    try bodyBegin(&t, 2, "https://a.test/swap", "a.test");
+    try t.ring.bodyData(a, &t.budget, .{ .browser = 1, .session = 1, .request = 2, .offset = 5, .bytes = "1}" });
+    try t.ring.bodyData(a, &t.budget, .{ .browser = 1, .session = 1, .request = 2, .offset = 0, .bytes = "{\"a\":" });
+    t.ring.bodyEnd(a, &t.budget, .{ .browser = 1, .session = 1, .request = 2, .state = .captured, .size = 7 });
+    try testing.expectEqualStrings("unavailable", try bodyStateOf(&t, 2, bq, ""));
+    try testing.expectEqual(base, t.budget.body_bytes);
+    // 같은 조각 두 번(겹침): 둘째는 이어지지 않는다 — unavailable, 받던 바이트는 예산에서 빠진다.
+    try bodyBegin(&t, 3, "https://a.test/dup", "a.test");
+    try t.ring.bodyData(a, &t.budget, .{ .browser = 1, .session = 1, .request = 3, .offset = 0, .bytes = "abc" });
+    try t.ring.bodyData(a, &t.budget, .{ .browser = 1, .session = 1, .request = 3, .offset = 0, .bytes = "abc" });
+    try testing.expectEqualStrings("unavailable", try bodyStateOf(&t, 3, bq, ""));
+    try testing.expectEqual(base, t.budget.body_bytes);
+    // 끝 뒤의 조각·둘째 끝: 잡은 본문은 그대로.
+    try t.ring.bodyData(a, &t.budget, .{ .browser = 1, .session = 1, .request = 1, .offset = 7, .bytes = "EVIL" });
+    t.ring.bodyEnd(a, &t.budget, .{ .browser = 1, .session = 1, .request = 1, .state = .captured, .size = 11 });
+    t.ring.bodyEnd(a, &t.budget, .{ .browser = 1, .session = 1, .request = 1, .state = .partial });
+    {
+        const p = try bodyDetail(&t, 1, bq, "");
+        defer p.deinit();
+        try testing.expectEqualStrings("captured", p.value.object.get("body_state").?.string);
+        try testing.expectEqualStrings("{\"a\":1}", p.value.object.get("body").?.string);
+    }
+    try testing.expectEqual(base, t.budget.body_bytes);
+    // 엉뚱한 번호(본문을 기다리지 않는 기록·없는 번호): 아무것도 붙지 않는다.
+    try t.begin(4, "https://a.test/plain", .{});
+    try t.ring.bodyData(a, &t.budget, .{ .browser = 1, .session = 1, .request = 4, .offset = 0, .bytes = "x" });
+    t.ring.bodyEnd(a, &t.budget, .{ .browser = 1, .session = 1, .request = 4, .state = .captured, .size = 1 });
+    try testing.expectEqualStrings("not_recorded", try bodyStateOf(&t, 4, bq, ""));
+    try t.ring.bodyData(a, &t.budget, .{ .browser = 1, .session = 1, .request = 999_999, .offset = 0, .bytes = "x" });
+    t.ring.bodyEnd(a, &t.budget, .{ .browser = 1, .session = 1, .request = 999_999, .state = .captured, .size = 1 });
+    try testing.expectEqual(base, t.budget.body_bytes);
+    // 거대한 오프셋(첫 조각이 1 MiB 끝 바로 앞에서): 이어지지 않는다 — 1 MiB 를 잡지 않는다.
+    try bodyBegin(&t, 5, "https://a.test/giant", "a.test");
+    try t.ring.bodyData(a, &t.budget, .{ .browser = 1, .session = 1, .request = 5, .offset = msg.max_net_body_bytes - 1, .bytes = "z" });
+    try testing.expectEqualStrings("unavailable", try bodyStateOf(&t, 5, bq, ""));
+    try testing.expectEqual(base, t.budget.body_bytes);
+    // 알린 크기가 받은 것보다 작다·크다: unavailable, 바이트는 놓는다.
+    for ([_]u32{ 2, 4 }, 6..) |size, req| {
+        try bodyBegin(&t, req, "https://a.test/size", "a.test");
+        try t.ring.bodyData(a, &t.budget, .{ .browser = 1, .session = 1, .request = req, .offset = 0, .bytes = "abc" });
+        t.ring.bodyEnd(a, &t.budget, .{ .browser = 1, .session = 1, .request = req, .state = .captured, .size = size });
+        try testing.expectEqualStrings("unavailable", try bodyStateOf(&t, req, bq, ""));
+    }
+    try testing.expectEqual(base, t.budget.body_bytes);
+    // 바이트가 온 뒤 받지 못한 상태로 끝남(partial·busy): 바이트 없이, 예산은 그대로.
+    for ([_]msg.NetBodyState{ .partial, .busy, .detached }, 8..) |st, req| {
+        try bodyBegin(&t, req, "https://a.test/late", "a.test");
+        try t.ring.bodyData(a, &t.budget, .{ .browser = 1, .session = 1, .request = req, .offset = 0, .bytes = "abcdef" });
+        t.ring.bodyEnd(a, &t.budget, .{ .browser = 1, .session = 1, .request = req, .state = st });
+        const p = try bodyDetail(&t, req, bq, "");
+        defer p.deinit();
+        try testing.expectEqualStrings(@tagName(st), p.value.object.get("body_state").?.string);
+        try testing.expect(p.value.object.get("body") == null);
+    }
+    try testing.expectEqual(base, t.budget.body_bytes);
+    try testing.expectEqual(base, t.ring.body_bytes);
+    // 무작위: 1000 기록에 섞인 조각·끝을 뿌려도 예산 = 잡은 본문 합, 잡은 본문은 늘 보낸 그대로(번호마다 바이트가 정해진다).
+    var prng = std.Random.DefaultPrng.init(0x20b11);
+    const r = prng.random();
+    var sent: [64]u32 = @splat(0);
+    for (0..4000) |_| {
+        const k = r.intRangeLessThan(u64, 0, 64);
+        const req = 100 + k;
+        switch (r.intRangeLessThan(u8, 0, 6)) {
+            0 => {
+                try bodyBegin(&t, req, "https://a.test/r", "a.test");
+                sent[k] = 0;
+            },
+            1, 2 => {
+                const off: u32 = if (r.intRangeLessThan(u8, 0, 4) == 0) r.int(u32) % msg.max_net_body_bytes else sent[k];
+                const len = r.intRangeAtMost(usize, 1, 16);
+                var bytes: [16]u8 = undefined;
+                for (bytes[0..len], 0..) |*b, i| b.* = @intCast('a' + (off + i + k) % 26);
+                if (@as(u64, off) + len <= msg.max_net_body_bytes) try t.ring.bodyData(a, &t.budget, .{ .browser = 1, .session = 1, .request = req, .offset = off, .bytes = bytes[0..len] });
+                if (off == sent[k]) sent[k] += @intCast(len);
+            },
+            3 => t.ring.bodyEnd(a, &t.budget, .{ .browser = 1, .session = 1, .request = req, .state = .captured, .size = if (r.boolean()) sent[k] else r.int(u32) % 64 }),
+            4 => t.ring.bodyEnd(a, &t.budget, .{ .browser = 1, .session = 1, .request = req, .state = @fromBackingInt(@intCast(r.intRangeLessThan(u8, 0, 14))) }),
+            else => t.ring.discardPending(a, &t.budget, req),
+        }
+    }
+    var held: usize = 0;
+    var it = t.ring.entries.iterator();
+    while (it.nextPtr()) |e| {
+        if (e.body_state == .captured) {
+            if (e.request >= 100)
+                for (e.body.items, 0..) |b, i| try testing.expectEqual(@as(u8, @intCast('a' + (i + (e.request - 100)) % 26)), b);
+        } else if (e.body_state != .pending and e.body.items.len != 0) {
+            std.debug.print("v20b-dbg req {d} state {s} len {d}\n", .{ e.request, @tagName(e.body_state), e.body.items.len });
+            return error.TestUnexpectedResult;
+        }
+        held += e.body.items.len;
+    }
+    try testing.expectEqual(held, t.ring.body_bytes);
+    try testing.expectEqual(held, t.budget.body_bytes);
+}
+
+test "W9d② v20b 16 회차: 본문 크기 경계(0·1·64 KiB−1·64 KiB·64 KiB+1·1 MiB) — 경계마다의 오프셋 읽기와 body_next_offset 를 따라 이어 읽은 바이트가 원래와 같다, 여러 바이트 글자가 조각 경계에 걸쳐도" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const a = testing.allocator;
+    const sizes = [_]usize{ 1, 64 * 1024 - 1, 64 * 1024, 64 * 1024 + 1, 1024 * 1024 };
+    for (sizes, 1..) |size, req| {
+        const bytes = try a.alloc(u8, size);
+        defer a.free(bytes);
+        for (bytes, 0..) |*b, i| b.* = @intCast('0' + i % 10);
+        try bodyBegin(&t, req, "https://a.test/s", "a.test");
+        try bodyFeed(&t, req, bytes, .{});
+        // body_next_offset 를 따라 끝까지(기본 64 KiB).
+        var off: u32 = 0;
+        var got: std.ArrayList(u8) = .empty;
+        defer got.deinit(a);
+        var rounds: usize = 0;
+        while (true) : (rounds += 1) {
+            const p = try bodyDetail(&t, req, .{ .who = 70, .any_host = true, .want = true, .offset = off }, "");
+            defer p.deinit();
+            const o = p.value.object;
+            try testing.expectEqualStrings("captured", o.get("body_state").?.string);
+            try testing.expectEqual(@as(i64, @intCast(size)), o.get("body_size").?.integer);
+            try testing.expectEqual(@as(i64, off), o.get("body_offset").?.integer);
+            const piece = o.get("body").?.string;
+            try testing.expect(piece.len <= max_body_read_bytes);
+            try testing.expectEqual(@as(i64, @intCast(piece.len)), o.get("body_returned").?.integer);
+            try got.appendSlice(a, piece);
+            const next = o.get("body_next_offset") orelse break;
+            try testing.expectEqual(@as(i64, off) + @as(i64, @intCast(piece.len)), next.integer);
+            off = @intCast(next.integer);
+        }
+        try testing.expectEqualSlices(u8, bytes, got.items);
+        try testing.expectEqual((size + max_body_read_bytes - 1) / max_body_read_bytes, rounds + 1);
+        // 경계의 오프셋 — 끝(=크기)과 크기 넘어: 빈 조각, 다음 오프셋 없음.
+        for ([_]u32{ @intCast(size), @intCast(size + 1), msg.max_net_body_bytes }) |o2| {
+            const p = try bodyDetail(&t, req, .{ .who = 70, .any_host = true, .want = true, .offset = o2 }, "");
+            defer p.deinit();
+            try testing.expectEqual(@as(i64, @intCast(size)), p.value.object.get("body_offset").?.integer);
+            try testing.expectEqual(@as(i64, 0), p.value.object.get("body_returned").?.integer);
+            try testing.expectEqualStrings("", p.value.object.get("body").?.string);
+            try testing.expect(p.value.object.get("body_next_offset") == null);
+        }
+    }
+    // 0 바이트: 잡을 것이 없다 — sidecar 는 no_body 로 끝낸다(captured 크기 0 도 받아 둔다 — 빈 글).
+    try bodyBegin(&t, 6, "https://a.test/empty", "a.test");
+    t.ring.bodyEnd(a, &t.budget, .{ .browser = 1, .session = 1, .request = 6, .state = .no_body });
+    try testing.expectEqualStrings("no_body", try bodyStateOf(&t, 6, .{ .who = 70, .any_host = true }, ""));
+    try bodyBegin(&t, 7, "https://a.test/empty2", "a.test");
+    t.ring.bodyEnd(a, &t.budget, .{ .browser = 1, .session = 1, .request = 7, .state = .captured, .size = 0 });
+    {
+        const p = try bodyDetail(&t, 7, .{ .who = 70, .any_host = true, .want = true }, "");
+        defer p.deinit();
+        try testing.expectEqual(@as(i64, 0), p.value.object.get("body_size").?.integer);
+        try testing.expectEqualStrings("", p.value.object.get("body").?.string);
+    }
+    // 1 MiB + 1: 조각이 본문 상한을 넘으면 그 본문은 받지 않는다(codec 이 먼저 거절하지만 링도 지킨다).
+    try bodyBegin(&t, 8, "https://a.test/over", "a.test");
+    {
+        const big = try a.alloc(u8, msg.max_net_body_bytes);
+        defer a.free(big);
+        @memset(big, 'q');
+        var off: usize = 0;
+        while (off < big.len) : (off += msg.net_body_chunk_bytes) try t.ring.bodyData(a, &t.budget, .{ .browser = 1, .session = 1, .request = 8, .offset = @intCast(off), .bytes = big[off..][0..msg.net_body_chunk_bytes] });
+        try t.ring.bodyData(a, &t.budget, .{ .browser = 1, .session = 1, .request = 8, .offset = msg.max_net_body_bytes, .bytes = "q" });
+        try testing.expectEqualStrings("unavailable", try bodyStateOf(&t, 8, .{ .who = 70, .any_host = true }, ""));
+    }
+    // 여러 바이트 글자가 64 KiB 경계와 16 KiB 조각 경계에 걸친다(앞에 1·2·3 바이트를 두어 경계가 글자 가운데에 오게).
+    for ([_]usize{ 1, 2, 3 }, 9..) |pad, req| {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(a);
+        try text.appendNTimes(a, 'p', pad);
+        while (text.items.len < 200 * 1024) try text.appendSlice(a, "가😀é");
+        try bodyBegin(&t, req, "https://a.test/u", "a.test");
+        try bodyFeed(&t, req, text.items, .{});
+        try testing.expectEqualStrings("captured", try bodyStateOf(&t, req, .{ .who = 70, .any_host = true }, ""));
+        var off: u32 = 0;
+        var got: std.ArrayList(u8) = .empty;
+        defer got.deinit(a);
+        while (true) {
+            const p = try bodyDetail(&t, req, .{ .who = 70, .any_host = true, .want = true, .offset = off }, "");
+            defer p.deinit();
+            const piece = p.value.object.get("body").?.string;
+            try testing.expect(std.unicode.utf8ValidateSlice(piece)); // 글자 가운데서 자르지 않는다
+            try testing.expect(piece.len <= max_body_read_bytes);
+            try got.appendSlice(a, piece);
+            const next = p.value.object.get("body_next_offset") orelse break;
+            try testing.expect(piece.len > max_body_read_bytes - 4); // 끝이 아니면 글자 하나 몫(4 바이트) 안에서만 줄인다
+            off = @intCast(next.integer);
+        }
+        try testing.expectEqualSlices(u8, text.items, got.items);
+    }
+}
+
+test "W9d② 20 회 검증 N2: 홉 상한을 넘는 주 프레임 이동은 묶인 읽는 쪽에게 숨는다 — 적지 않은 21 번째 홉이 덮이지 않는 곳일 수 있다; 스무 홉까지는 그대로" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    // 대조: 스무 홉(모두 a.test) — 덮인다.
+    try t.begin(1, "https://a.test/start", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0, .site = "a.test", .top = "a.test" });
+    for (0..max_hops) |_| try t.redirect(1, 302, "https://a.test/hop", .{});
+    try t.respond(1, 200, .{});
+    // 스물한 홉 — 21 번째(은행)는 링이 적지 않는다. 전에는 적은 홉과 스무째의 호스트만 보고 덮인다고 쳤다.
+    try t.begin(2, "https://a.test/start2", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0, .site = "a.test", .top = "a.test" });
+    for (0..max_hops) |_| try t.redirect(2, 302, "https://a.test/hop", .{});
+    try t.redirect(2, 302, "https://bank.test/me", .{});
+    try t.respond(2, 200, .{});
+    const bound: View = .{ .full = true, .grant_host = "a.test", .top_bound = true };
+    try expectReqs(&t, 7, bound, &.{1});
+    try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, bound, 2, .{}));
 }

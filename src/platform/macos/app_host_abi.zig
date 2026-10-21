@@ -17439,3 +17439,183 @@ test "W9d② 적대 리뷰 3 회차 재현 D6: 네트워크 grant 가 사라진 
     try std.testing.expect(std.mem.indexOf(u8, response, "\"code\":-32002") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "needs_network_permission") != null);
 }
+
+// ── W9d② 적대 검증 13·14 회차(v20b) ─────────────────────────────────────────────────────────────────────────────
+// 증명하는 것(13): 사용자 탭의 본문 모달을 거절하면 grant 가 생기지 않고 답은 -32002, 기록은 켜지지 않는다; 사이트 A 에서 허락받아 기록하는 동안
+// 탭이 B 로 가면 B 의 본문은 그 pane 에게 숨고(hidden) A 의 본문은 그대로, B 를 다시 허락받으면 새 grant — B 에서 그 전에 잡힌 본문은
+// before_body_permission, 뒤 것은 보이고 A 의 것은 숨는다. (14) 사용자가 에이전트 탭을 다른 사이트로 몰 때 설정이 켜져 있으면 어느 호스트든
+// 본문 grant 가 남아(사용자 결정 F5 「그대로 둠」) 몬 사이트의 본문도 보이고, 설정을 끄면 처음 몰기 전의 사이트로 좁혀 다른 사이트의 본문은 숨고
+// 받은 본문은 지워진다; 설정이 꺼진 채 몰면 곧 좁히되 받은 본문은 지우지 않는다.
+
+/// 그 번호의 본문 상태 — 그 읽는 쪽에게 요청 자체가 보이지 않으면(모르는 번호 — W9d① 의 시작점·묶인 사이트) "unknown_request".
+fn v20bState2(tab: u64, grant: control_browser.GrantProvenance, seq: u64) ![]const u8 {
+    var ab: [96]u8 = undefined;
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRequest\",\"params\":{\"id\":1,\"req\":1}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&pending, .{ .surface_id = tab, .method = .network_request, .arg = try allocator.dupe(u8, try std.fmt.bufPrint(&ab, "{{\"req\":{d},\"body\":true,\"body_offset\":0,\"body_max_bytes\":65536}}", .{seq})), .pane_grant = grant });
+    const response = pending.response orelse return error.ExpectedResponse;
+    if (std.mem.indexOf(u8, response, "\"result\"") == null) {
+        defer allocator.free(response);
+        pending.response = null;
+        if (std.mem.indexOf(u8, response, "no such request") != null) return "unknown_request";
+        std.debug.print("v20b unexpected {s}\n", .{response});
+        return error.ExpectedResult;
+    }
+    const p = try w9b3Result(&pending);
+    defer p.deinit();
+    const st = p.value.object.get("result").?.object.get("body_state").?.string;
+    inline for (.{ "captured", "hidden", "discarded", "before_body_permission", "needs_body_permission", "needs_cookie_permission", "pending", "not_recorded" }) |n| if (std.mem.eql(u8, st, n)) return n;
+    std.debug.print("v20b unknown state {s}\n", .{st});
+    return error.UnknownState;
+}
+
+test "W9d② v20b 13 회차: 사용자 탭 — 본문 모달 거절은 grant 없이 -32002·기록 꺼짐, 사이트 A 허락 뒤 B 로 가면 B 의 본문은 숨고 A 는 그대로, B 를 다시 허락하면 B 의 앞 본문은 before_body_permission·A 는 숨는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{241});
+    defer w9c2Forget(ta, &.{241});
+    defer {
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 241, .url = "https://app.test/" } });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 241, .scope = .browser });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 241, .scope = .browser_network, .host = control_pane_grant.GrantHost.init("app.test") });
+    syncNetworkWatch();
+    const web: control_surface.WebMeta = .{ .url = "https://app.test/", .panel_kind = .browser, .loading = false, .trust = .untrusted, .engine = .chromium, .controllable = true };
+    const fx = [_]control_surface.SurfaceDto{.{ .surface_id = 241, .title = "a", .window = 1, .detail = .{ .web = web } }};
+    const snapshot: control_surface.CollectorSnapshot = .{ .surfaces = &fx, .windows = &.{} };
+    // 거절.
+    {
+        var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":241,\"on\":true}}", .selector = 5, .browser_pane = 5, .io = std.testing.io };
+        const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+        resolveGrantPrompt(&control_server_storage, .{ .async_id = id, .pane = 5, .target = 241, .scope = .browser_network_body, .host = control_pane_grant.GrantHost.init("app.test") }, false, snapshot, 0);
+        const resp = pending.response orelse return error.ExpectedResponse;
+        defer allocator.free(resp);
+        pending.response = null;
+        try std.testing.expect(std.mem.indexOf(u8, resp, "\"code\":-32002") != null);
+    }
+    try std.testing.expect(!control_pane_grant_store.hasGrant(5, 241, .browser_network_body));
+    try std.testing.expect(!session_mod.web_osr.networkRecording(241));
+    // 대조: 승인(A = app.test) 뒤 켬 — A 의 본문이 보인다.
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 241, .scope = .browser_network_body, .host = control_pane_grant.GrantHost.init("app.test") });
+    syncNetworkWatch();
+    {
+        const p = try w9d2Record(241, w9d2BodyGrant(5, 241), true);
+        defer p.deinit();
+    }
+    try std.testing.expect(session_mod.web_osr.networkRecording(241));
+    w9d2Body(241, 1, "https://app.test/a.json", "{\"a\":1}", .{});
+    try std.testing.expectEqualStrings("captured", try v20bState2(241, w9d1Grant(5, 241), 1));
+    // 탭이 B 로 간다(사용자가 링크를 눌렀다) — 기록은 이어지지만 B 의 본문은 그 pane 에게 숨는다.
+    session_mod.web_osr.noteUserNavigation(241);
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 241, .url = "https://other.test/" } });
+    w9d2Body(241, 2, "https://other.test/b.json", "{\"b\":\"OTHER\"}", .{});
+    // 네트워크 grant 가 A 에 묶였다 — B 의 요청은 목록에서도 숨는다(자세히는 모르는 번호). 본문은 그 앞에서 막힌다.
+    {
+        var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRequest\",\"params\":{\"id\":1,\"req\":2}}", .selector = null, .io = std.testing.io };
+        try w9c2Push(&pending, .{ .surface_id = 241, .method = .network_request, .arg = try allocator.dupe(u8, "{\"req\":2,\"body\":true,\"body_offset\":0,\"body_max_bytes\":65536}"), .pane_grant = w9d1Grant(5, 241) });
+        const resp = pending.response orelse return error.ExpectedResponse;
+        defer allocator.free(resp);
+        pending.response = null;
+        try std.testing.expect(std.mem.indexOf(u8, resp, "OTHER") == null);
+    }
+    try std.testing.expectEqualStrings("captured", try v20bState2(241, w9d1Grant(5, 241), 1)); // A 의 것은 그대로
+    // B 를 허락받는다(네트워크·본문 모두 B 로 — 같은 자리, 새 번호).
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 241, .scope = .browser_network, .host = control_pane_grant.GrantHost.init("other.test") });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 241, .scope = .browser_network_body, .host = control_pane_grant.GrantHost.init("other.test") });
+    syncNetworkWatch();
+    w9d2Body(241, 3, "https://other.test/c.json", "{\"c\":3}", .{});
+    const g = w9d1Grant(5, 241);
+    // 다시 허락한 grant 는 새 번호 — 그 전 요청(B 의 앞 본문 포함)은 요청째 보이지 않는다(W9d① 의 사용자 탭 시작점), 뒤 것은 보인다,
+    // A 의 것도 이제 묶인 사이트가 아니라 숨는다.
+    try std.testing.expectEqualStrings("unknown_request", try v20bState2(241, g, 2));
+    try std.testing.expectEqualStrings("captured", try v20bState2(241, g, 3));
+    try std.testing.expectEqualStrings("unknown_request", try v20bState2(241, g, 1));
+}
+
+test "W9d② v20b 14 회차: 사용자가 에이전트 탭을 몬다 — 설정 켬이면 어느 호스트든 본문 grant 가 남아 몬 사이트의 본문도 보인다, 설정을 끄면 몰기 전 사이트로 좁혀 다른 사이트 본문은 숨고 받은 본문은 지워진다, 끈 채 몰면 곧 좁히되 지우지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{ 242, 243 });
+    defer w9c2Forget(ta, &.{ 242, 243 });
+    defer session_mod.web_osr.setNetworkFull(true);
+    defer {
+        control_pane_grant_store.clearAll();
+        syncNetworkWatch();
+    }
+    // ── 켬 → 몰기 → 끔.
+    try std.testing.expect(adoptAgentTab(5, 242));
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 242, .url = "https://agent.test/" } });
+    {
+        const p = try w9d2Record(242, w9d2BodyGrant(5, 242), true);
+        defer p.deinit();
+    }
+    w9d2Body(242, 1, "https://agent.test/a.json", "{\"a\":1}", .{});
+    // 그 pane 이 몰기 전에 한 번 읽는다(읽기 전에 사용자가 몰면 시작점이 첫 읽기로 미뤄진다 — W9d① 의 설계).
+    try std.testing.expectEqualStrings("captured", try v20bState2(242, w9d1Grant(5, 242), 1));
+    session_mod.web_osr.userNavigate(ta, 242, "https://bank.test/");
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 242, .url = "https://bank.test/" } });
+    w9d2Body(242, 2, "https://bank.test/me.json", "{\"acct\":\"BANK-SECRET\"}", .{ .credentialed = true });
+    try std.testing.expectEqualStrings("captured", try v20bState2(242, w9d1Grant(5, 242), 1));
+    try std.testing.expectEqualStrings("captured", try v20bState2(242, w9d1Grant(5, 242), 2)); // 켬 — 「그대로 둠」
+    try std.testing.expect(control_pane_grant_store.authorizes(5, 242, .browser_network_body, "bank.test"));
+    session_mod.web_osr.setNetworkFull(false);
+    applyNetworkNarrows();
+    try std.testing.expect(control_pane_grant_store.authorizes(5, 242, .browser_network_body, "agent.test"));
+    try std.testing.expect(!control_pane_grant_store.authorizes(5, 242, .browser_network_body, "bank.test"));
+    try std.testing.expect(session_mod.web_osr.networkRecording(242)); // 기록은 새 세션으로 이어 간다
+    try std.testing.expectEqualStrings("discarded", try v20bState2(242, w9d1Grant(5, 242), 1));
+    // 은행 페이지의 요청은 이제 그 pane 에게 보이지 않는다(목록에서도).
+    {
+        var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRequest\",\"params\":{\"id\":1,\"req\":2}}", .selector = null, .io = std.testing.io };
+        try w9c2Push(&pending, .{ .surface_id = 242, .method = .network_request, .arg = try allocator.dupe(u8, "{\"req\":2,\"body\":true,\"body_offset\":0,\"body_max_bytes\":65536}"), .pane_grant = w9d1Grant(5, 242) });
+        const resp = pending.response orelse return error.ExpectedResponse;
+        defer allocator.free(resp);
+        pending.response = null;
+        try std.testing.expect(std.mem.indexOf(u8, resp, "BANK-SECRET") == null);
+    }
+    w9d2Body(242, 3, "https://bank.test/me2.json", "{\"acct\":\"BANK-SECRET-2\"}", .{ .credentialed = true });
+    {
+        var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRequest\",\"params\":{\"id\":1,\"req\":3}}", .selector = null, .io = std.testing.io };
+        try w9c2Push(&pending, .{ .surface_id = 242, .method = .network_request, .arg = try allocator.dupe(u8, "{\"req\":3,\"body\":true,\"body_offset\":0,\"body_max_bytes\":65536}"), .pane_grant = w9d1Grant(5, 242) });
+        const resp = pending.response orelse return error.ExpectedResponse;
+        defer allocator.free(resp);
+        pending.response = null;
+        try std.testing.expect(std.mem.indexOf(u8, resp, "BANK-SECRET-2") == null);
+    }
+    // 대조: 몰기 전 사이트로 돌아오면 그 사이트의 새 본문은 보인다.
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 242, .url = "https://agent.test/" } });
+    w9d2Body(242, 4, "https://agent.test/b.json", "{\"b\":4}", .{});
+    try std.testing.expectEqualStrings("captured", try v20bState2(242, w9d1Grant(5, 242), 4));
+    // ── 끔에서 몰기(243): 곧 좁히고 받은 본문은 지우지 않는다.
+    try std.testing.expect(adoptAgentTab(5, 243));
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 243, .url = "https://agent3.test/" } });
+    {
+        const p = try w9d2Record(243, w9d2BodyGrant(5, 243), true);
+        defer p.deinit();
+    }
+    w9d2Body(243, 1, "https://agent3.test/a.json", "{\"a3\":1}", .{});
+    try std.testing.expectEqualStrings("captured", try v20bState2(243, w9d1Grant(5, 243), 1));
+    session_mod.web_osr.userNavigate(ta, 243, "https://bank.test/");
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 243, .url = "https://bank.test/" } });
+    w9d2Body(243, 2, "https://bank.test/x.json", "{\"acct\":\"BANK-3\"}", .{ .credentialed = true });
+    applyNetworkNarrows();
+    try std.testing.expect(!control_pane_grant_store.authorizes(5, 243, .browser_network_body, "bank.test"));
+    try std.testing.expectEqualStrings("captured", try v20bState2(243, w9d1Grant(5, 243), 1)); // 지우지 않는다
+    {
+        var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRequest\",\"params\":{\"id\":1,\"req\":2}}", .selector = null, .io = std.testing.io };
+        try w9c2Push(&pending, .{ .surface_id = 243, .method = .network_request, .arg = try allocator.dupe(u8, "{\"req\":2,\"body\":true,\"body_offset\":0,\"body_max_bytes\":65536}"), .pane_grant = w9d1Grant(5, 243) });
+        const resp = pending.response orelse return error.ExpectedResponse;
+        defer allocator.free(resp);
+        pending.response = null;
+        try std.testing.expect(std.mem.indexOf(u8, resp, "BANK-3") == null);
+    }
+}

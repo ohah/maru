@@ -181,6 +181,13 @@ pub fn cefEnd(browser: BrowserId, request: u64, ok: bool, received: u64) void {
     ensureTick();
 }
 
+/// 주 프레임에 새 문서가 시작됐다(`network.documentStarted` — UI 스레드). W9d② 20 회 검증 N1: 앞 문서와 함께 끊긴 요청은 CDP 끝이 오지 않는다 —
+/// 표가 그 후보를 곧 `unavailable` 로 끝낸다(주기 task 가 돌고 있으면 — 후보가 있으면 돈다).
+pub fn documentStarted(browser: BrowserId) void {
+    dbg("doc-start b={d} t={d}", .{ browser, machUs() });
+    table.documentStarted(browser, machUs());
+}
+
 /// `network.zig` 의 보내는 task 가 상자를 비웠다 — CEF 기록이 IO 시각 `seen_us` 까지 모두 표에 닿았다(W9d② 적대 리뷰 3 회차 P1). 제 기록을
 /// 기다리던 CDP 끝을 곧 정한다(주기 task 의 50 ms 를 기다리지 않는다).
 pub fn cefFlushed(seen_us: i64) void {

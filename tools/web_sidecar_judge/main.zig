@@ -17,7 +17,8 @@
 //! W9d② 응답 본문 기록(`network_body_check.zig` — 잡기·상한·글 아님·끊김·맞추기·서비스 워커·UB1·설정 끔·쓰는 스레드·렌더러 죽음·끄기, 적대 리뷰
 //! 1·2 회차 항목은 `network_body_r1_check.zig`, 3 회차 항목은 `network_body_r3_check.zig`, 4 회차 항목은 `network_body_r4_check.zig`, 5 회차 항목은
 //! `network_body_r5_check.zig`)만 본다. `--network-body` 는 본문 판정(적대 리뷰 1–5 회차 항목 포함)만, `--review-body-r3`·`--review-body-r4`·
-//! `--review-body-r5` 는 그 회차 항목만.
+//! `--review-body-r5` 는 그 회차 항목만. `--review-body-v20a`·`--review-body-v20b` 는 W9d② 20 회 적대 검증의 판정(`network_body_v20a_check.zig`
+//! 1–10 회차·`network_body_v20b_check.zig` 11–20 회차 — `--network` 에는 들지 않는다)만.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -49,6 +50,8 @@ const network_body_r1_check = @import("network_body_r1_check.zig"); // W9d② �
 const network_body_r3_check = @import("network_body_r3_check.zig"); // W9d② 적대 리뷰 3 회차
 const network_body_r4_check = @import("network_body_r4_check.zig"); // W9d② 적대 리뷰 4 회차
 const network_body_r5_check = @import("network_body_r5_check.zig"); // W9d② 적대 리뷰 5 회차
+const network_body_v20a_check = @import("network_body_v20a_check.zig"); // W9d② 적대적 검증 20 회 중 1–10(A)
+const network_body_v20b_check = @import("network_body_v20b_check.zig"); // W9d② 적대 검증 11–20 회차
 const attacks = @import("attacks.zig");
 
 const helper_wait_ms = 20_000;
@@ -146,6 +149,28 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         bodyR3Checks(host, std.mem.span(argv[3]));
+        return if (failures == 0) 0 else 1;
+    }
+    // W9d② 적대적 검증 1–10 회차(A) 판정만(`v20a-*` — 고른 항목만 `V20_ONLY`).
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-body-v20a")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        var pb: [1024]u8 = undefined;
+        const prof = std.fmt.bufPrintSentinel(&pb, "--profile-dir={s}/netbody_v20a", .{std.mem.span(argv[3])}, 0) catch return 2;
+        network_body_v20a_check.run(&reportText, host, prof) catch |err| report(false, "network-body-v20a", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // W9d② 적대 검증 11–20 회차 판정만(`v20b-*` — 이것만은 따로: `--review-body-v20b`).
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-body-v20b")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        var pb: [1024]u8 = undefined;
+        const prof = std.fmt.bufPrintSentinel(&pb, "--profile-dir={s}/netbody_v20b", .{std.mem.span(argv[3])}, 0) catch return 2;
+        network_body_v20b_check.run(&reportText, host, prof) catch |err| report(false, "network-body-v20b", "{s}", .{@errorName(err)});
         return if (failures == 0) 0 else 1;
     }
     // W9d② 적대 리뷰 5 회차 판정만(`body-r5-*` — `--network`·`--network-body` 끝에서도 돈다).

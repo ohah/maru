@@ -7,6 +7,10 @@
 //!               `x-charset=`, `charset = `, single quotes, JSON with an unknown label: re-decoded to the received bytes; UTF-16 BOM under them and
 //!               under duplicate Content-Type headers: marked; UTF-8 labels and duplicates ending in utf-8: exact and unmarked; a real declared
 //!               Latin-1 / EUC-KR / UTF-16 (what XHR reads): unmarked
+//!   v20f-15-dh*  (re-verification 3, D-H1·D-H2) a UTF-16 BOM body as long as the received bytes under an unknown label and a gb18030
+//!               `<meta>` HTML page: marked; headers Chromium reads differently from the Fetch parser (a control byte in the first charset,
+//!               a second Content-Type `text/plain(x)`·`text/plai{n}`·`text/plain x`·`text/plain@`·`application/json (v2)`): re-decoded to the
+//!               received bytes; `text/plain(x); charset=utf-8`: marked (N-h4); `charset= "utf-8"` and a UTF-8 `<meta>`: exact and unmarked
 //!   v20f-14-*   V1 at the wire: agent tab with the switch off (any_host, full=false) — own first-site responses kept, other sites and hops to
 //!               them stripped and not captured; agent navigation to the other site; narrowing (user drove) hides the other site again
 //!   v20f-12-*   switch toggled every 70 ms between full and any_host+full=false (the V1 path) with a new session per off
@@ -66,6 +70,11 @@ const dg_latin = "caf\xc3\xa9 na\xc3\xafve";
 const dg_euckr = "\xb0\xa1\xb3\xaa";
 const dg_u16_nobom = "{\x00\"\x00k\x00\"\x00:\x001\x00}\x00";
 const dg_u16_bom = "\xff\xfe{\x00\"\x00k\x00\"\x00:\x00\"\x00\xe9\x00\"\x00}\x00";
+/// D-H1: UTF-16LE BOM + 「가나」 — Chromium's BOM reading is 「가나」, 6 bytes like the received 6.
+const dh_u16eq = "\xff\xfe\x00\xac\x98\xb0";
+/// D-H1: `<meta charset=gb18030>` + 「ñ中文」 — 61 bytes, and the gb18030 reading is 61 bytes of UTF-8 too.
+const dh_gb_html = "<!doctype html><meta charset=gb18030><title>g</title>\x81\x30\x8a\x39\xd6\xd0\xce\xc4";
+const dh_u8_html = "<!doctype html><meta charset=utf-8><title>u</title>" ++ dg_u8;
 const br_bytes = [_]u8{ 143, 11, 128, 123, 34, 98, 114, 34, 58, 34, 98, 114, 111, 116, 108, 105, 45, 98, 111, 100, 121, 45, 234, 176, 128, 34, 125, 3 };
 
 const Mode = enum { plain, cache, etag, chunked };
@@ -130,6 +139,23 @@ const enc_cases = [_]EncCase{
     .{ .name = "dg1-dup-lu", .ctype = "text/plain; charset=iso-8859-1; charset=utf-8", .body = dg_u8, .raw = dg_u8, .expect = .declared_noflag },
     .{ .name = "dg1-des-euckr", .ctype = "text/plain; charset=euc-kr", .body = dg_euckr, .raw = dg_euckr, .expect = .declared_noflag },
     .{ .name = "dg1-des-u16", .ctype = "application/json; charset=utf-16", .body = dg_u16_nobom, .raw = dg_u16_nobom, .expect = .declared_noflag },
+    // ── re-verification 3 (W9d② 재검증 3 차) D-H1: a decoding as long as the received bytes; D-H2: headers Chromium reads differently ──
+    .{ .name = "dh1-u16eq-jsonbogus", .ctype = "application/json; charset=x-bogus-maru", .body = dh_u16eq, .raw = dh_u16eq, .expect = .marked },
+    .{ .name = "dh1-u16eq-txtbogus", .ctype = "text/plain; charset=x-bogus-maru", .body = dh_u16eq, .raw = dh_u16eq, .expect = .marked },
+    .{ .name = "dh1-gbhtml", .ctype = "text/html", .body = dh_gb_html, .raw = dh_gb_html, .expect = .marked },
+    .{ .name = "dh1-meta8html", .ctype = "text/html", .body = dh_u8_html, .raw = dh_u8_html, .expect = .exact_noflag },
+    .{ .name = "dh2-ctlfirst-kr", .ctype = "text/plain; charset=lat\x01in1; charset=euc-kr", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
+    .{ .name = "dh2-delfirst-kr", .ctype = "text/plain; charset=euc\x7fkr; charset=euc-kr", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
+    .{ .name = "dh2-ctlfirst-json", .ctype = "application/json; charset=x\x01; charset=euc-kr", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
+    .{ .name = "dh2-ctlfirst-l2", .ctype = "text/plain; charset=lat\x01in1; charset=latin2", .body = dg_latin, .raw = dg_latin, .expect = .exact_redecoded },
+    .{ .name = "dh2-paren-kr", .ctype = "text/plain; charset=euc-kr", .body = dg_u8, .raw = dg_u8, .extra = "Content-Type: text/plain(x); charset=x-bogus-maru\r\n", .expect = .exact_redecoded },
+    .{ .name = "dh2-brace-kr", .ctype = "text/plain; charset=euc-kr", .body = dg_u8, .raw = dg_u8, .extra = "Content-Type: text/plai{n}; charset=x-bogus-maru\r\n", .expect = .exact_redecoded },
+    .{ .name = "dh2-sptype-kr", .ctype = "text/plain; charset=euc-kr", .body = dg_u8, .raw = dg_u8, .extra = "Content-Type: text/plain x; charset=x-bogus-maru\r\n", .expect = .exact_redecoded },
+    .{ .name = "dh2-at-kr", .ctype = "text/plain; charset=euc-kr", .body = dg_u8, .raw = dg_u8, .extra = "Content-Type: text/plain@; charset=x-bogus-maru\r\n", .expect = .exact_redecoded },
+    .{ .name = "dh2-parenjson-kr", .ctype = "application/json; charset=euc-kr", .body = dg_u8, .raw = dg_u8, .extra = "Content-Type: application/json (v2); charset=x-bogus-maru\r\n", .expect = .exact_redecoded },
+    // N-h4 (decision): a header Chromium reads differently but decodes right — cannot be told apart, so marked (the closed side)
+    .{ .name = "dh2-parenu8", .ctype = "text/plain(x); charset=utf-8", .body = dg_u8, .raw = dg_u8, .expect = .marked },
+    .{ .name = "dh2-spq-u8", .ctype = "text/plain; charset= \"utf-8\"", .body = dg_u8, .raw = dg_u8, .expect = .exact_noflag },
 };
 
 fn startServer() !void {

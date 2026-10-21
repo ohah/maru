@@ -1,4 +1,7 @@
 //! W9d② 최종 재검증 1–10 회차(검증자 v20f A — 6d8d39dbd 의 재검증, 고친 뒤 회귀 판정으로 남김). `--review-body-v20fa`, 고른 항목만 `V20F_ONLY=r1,r2…`.
+//! 재검증 3 차: 검증자 v20h A 의 항목(`v20h-*` — 새 문서의 첫 요청이 알림보다 먼저 나간 꼴·같은 사이트 iframe 의 같은 주소·워커 기록 뒤의
+//! 빠른 꼬리)을 더했고, 같은 주소 GET 의 동시성을 보려던 항목은 `cache:'no-store'` 로 보낸다(N-4 — Chromium 의 HTTP 캐시 잠금이 같은 주소 GET 을
+//! 줄 세워, 앞 요청의 머리가 오기 전에는 뒤 요청이 나가지 않았다).
 //! 판정자가 maru 역할로 `net_watch`·`net_record` 를 보내고 `net_*` 를 모은다. 서버는 응답마다 셈(`X-Body: N`)과 보낸 쪽(`X-Who`)을 싣는다.
 
 const std = @import("std");
@@ -131,8 +134,10 @@ fn data(conn: c_int, head: []const u8, delay_ms: u64, head_first_ms: u64) void {
     writeAll(conn, body);
 }
 
+/// `W` 는 HTTP 캐시를 거치지 않는다(`cache:'no-store'` — 재검증 3 차 N-4: 캐시 잠금이 같은 주소 GET 을 줄 세워 동시성을 보려던 항목이 그것을
+/// 보지 못했다).
 const read_js = "function F(u,o){return fetch(u,o).then(function(r){return r.text()}).catch(function(){})}" ++
-    "function W(u,w){return F(u,{headers:{'x-who':w}})}";
+    "function W(u,w){return F(u,{headers:{'x-who':w},cache:'no-store'})}";
 
 /// 서비스 워커: /v20f/sw/dl?d=N — N ms 뒤 그 요청을 그대로 넘긴다(출처 network).
 const sw_js = "self.addEventListener('install',function(e){self.skipWaiting()});" ++
@@ -293,10 +298,44 @@ fn serveOne(conn: c_int) void {
         };
         return data(conn, head, d, 0);
     }
-    if (std.mem.eql(u8, path, "/v20g/w.js")) return reply(conn, "application/javascript", "onmessage=function(e){fetch(e.data.u,{headers:{'x-who':e.data.w}}).then(function(r){return r.text()}).catch(function(){})}");
+    if (std.mem.eql(u8, path, "/v20g/w.js")) return reply(conn, "application/javascript", "onmessage=function(e){fetch(e.data.u,{headers:{'x-who':e.data.w},cache:'no-store'}).then(function(r){return r.text()}).catch(function(){})}");
     if (std.mem.eql(u8, path, "/v20g/wp")) return reply(conn, html, "<!doctype html><title>wp</title><script>" ++ read_js ++
         "var w=new Worker('/v20g/w.js');var R=+(new URLSearchParams(location.search).get('r')||8);var j=0;function round(){if(j>=R){setTimeout(function(){document.title='wpdone'},6000);return}var u='/v20g/s?k='+j+'&t='+Date.now();j++;" ++
         "W(u,'a');W(u,'b');setTimeout(function(){w.postMessage({u:u,w:'w'})},250);setTimeout(function(){W(u,'c')},500);setTimeout(function(){W(u,'d')},1590);setTimeout(function(){W(u,'e')},1640);setTimeout(round,7000)}setTimeout(round,300)</script>wp");
+    // ── 재검증 3 차: 검증자 v20h A 의 꼴 ──
+    // /v20h/e?k=K — x-who 로 늦춘다.
+    if (std.mem.eql(u8, path, "/v20h/e")) {
+        const who = whoOf(head);
+        const D = [_]struct { []const u8, u64 }{ .{ "a", 900 }, .{ "b", 30 }, .{ "c", 30 }, .{ "A", 900 }, .{ "B", 1000 }, .{ "C", 50 }, .{ "D", 400 } };
+        var d: u64 = 0;
+        for (D) |e| if (std.mem.eql(u8, who, e[0])) {
+            d = e[1];
+        };
+        return data(conn, head, d, 0);
+    }
+    // 꼬리(WB-4): 전용 워커가 u 를 받고, 페이지가 2 ms 쯤 뒤 a(느림)·8 ms 쯤 뒤 b(빠름)·b 바로 뒤 d(느림).
+    if (std.mem.eql(u8, path, "/v20h/t")) {
+        const who = whoOf(head);
+        const d: u64 = if (std.mem.eql(u8, who, "a") or std.mem.eql(u8, who, "d")) 300 else 0;
+        return data(conn, head, d, 0);
+    }
+    if (std.mem.eql(u8, path, "/v20h/tw.js")) return reply(conn, "application/javascript", "onmessage=function(e){fetch(e.data,{headers:{'x-who':'w'},cache:'no-store'}).then(function(r){return r.text()}).catch(function(){});postMessage(1)}");
+    if (std.mem.eql(u8, path, "/v20h/tp")) return reply(conn, html, "<!doctype html><title>tp</title><script>" ++ read_js ++
+        "function spin(ms){var s=performance.now();while(performance.now()-s<ms){}}" ++
+        "var w=new Worker('/v20h/tw.js');var R=+(new URLSearchParams(location.search).get('r')||40);var G=+(new URLSearchParams(location.search).get('g')||2);var j=0;var k=location.search.slice(1);" ++
+        "function N(u,w){return F(u,{headers:{'x-who':w},cache:'no-store'})}" ++
+        "var E=+(new URLSearchParams(location.search).get('e')||0.3);" ++
+        "w.onmessage=function(){spin(G);N(u,'a');spin(6);N(u,'b');spin(E);N(u,'d');setTimeout(round,700)};var u='';" ++
+        "function round(){if(j>=R){setTimeout(function(){document.title='tpdone'},4000);return}u='/v20h/t?k='+k+'_'+j;j++;w.postMessage(u)}setTimeout(round,300)</script>tp");
+    // 새 문서의 첫 인라인 스크립트가 곧 u 를 받고('a' — 느림), 40 ms 에 'b', 80 ms 에 'c'(빠름). `ns` 면 캐시를 거치지 않는다(N-4 — 셋이 동시다).
+    if (std.mem.eql(u8, path, "/v20h/ep")) return reply(conn, html, "<!doctype html><html><head><script>" ++ read_js ++
+        "var u='/v20h/e?k='+location.search.slice(1);if(location.search.indexOf('ns')<0)W=function(u,w){return F(u,{headers:{'x-who':w}})};W(u,'a');setTimeout(function(){W(u,'b')},40);setTimeout(function(){W(u,'c')},80);setTimeout(function(){document.title='epdone'},2000)</script><title>ep</title></head><body>ep</body></html>");
+    // iframe: 주 프레임 A(느림)·B(느림), 같은 사이트 iframe 이 주 프레임에 D 를 받게 한 뒤 곧 C(빠름).
+    if (std.mem.eql(u8, path, "/v20h/fp")) return reply(conn, html, "<!doctype html><title>fp</title><body>fp<script>" ++ read_js ++
+        "var u='/v20h/e?k='+location.search.slice(1);if(location.search.indexOf('ns')<0)W=function(u,w){return F(u,{headers:{'x-who':w}})};W(u,'A');setTimeout(function(){W(u,'B')},10);addEventListener('message',function(e){if(e.data=='go')W(u,'D')});" ++
+        "setTimeout(function(){var f=document.createElement('iframe');f.src='/v20h/fi?'+location.search.slice(1);document.body.appendChild(f)},30);setTimeout(function(){document.title='fpdone'},2500)</script></body>");
+    if (std.mem.eql(u8, path, "/v20h/fi")) return reply(conn, html, "<!doctype html><title>fi</title><script>" ++ read_js ++
+        "var u='/v20h/e?k='+location.search.slice(1);if(location.search.indexOf('ns')<0)W=function(u,w){return F(u,{headers:{'x-who':w}})};parent.postMessage('go','*');setTimeout(function(){W(u,'C')},2)</script>fi");
     return reply(conn, "text/plain", "x");
 }
 
@@ -1063,5 +1102,92 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         var el: [600]u8 = undefined;
         var sl2: [400]u8 = undefined;
         report(all.wrong == 0 and ec.missing == 0 and ec.doubled == 0, "v20g-r2-worker-same-url-concurrency", std.fmt.bufPrint(&detail, "{s} | {s} | {s} | {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), std.mem.sliceTo(&line[3], 0), std.mem.sliceTo(&line[4], 0), std.mem.sliceTo(&line[5], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..all.notes_len] }) catch "");
+    }
+    // ══ 재검증 3 차(v20h A): WB-4 꼬리 — 워커 기록이 a 앞에, 빠른 b, b 바로 뒤 d(그 CEF 기록이 b 의 응답 뒤에 닿을 수 있다) ══
+    if (enabled("h2tail")) {
+        inline for (.{ .{ "g1", "1", "0.3" }, .{ "g2", "2", "0.3" }, .{ "g3", "3", "0.3" }, .{ "e10", "2", "1.0" }, .{ "e15", "2", "1.5" }, .{ "e20", "2", "2.0" }, .{ "e25", "2", "2.5" }, .{ "e35", "2", "3.5" } }) |gv| {
+            const at = r.begins.items.len;
+            var pb: [96]u8 = undefined;
+            try r.navigate(rec_tab, std.fmt.bufPrint(&pb, "/v20h/tp?{s}x{d}&r=40&g={s}&e={s}", .{ gv[0], session, gv[1], gv[2] }) catch "");
+            _ = r.pumpTitle(rec_tab, "tpdone", 90_000);
+            r.pump(2000);
+            var waited: u32 = 0;
+            while (waited < 8_000 and endCheck(&r, rec_tab, at).missing > 0) : (waited += 500) r.pump(500);
+            const all = tally(&r, rec_tab, at, "/v20h/t?", null);
+            var line: [4][160]u8 = @splat(@splat(0));
+            for ([_][]const u8{ "w", "a", "b", "d" }, 0..) |w, wi| {
+                const t = tally(&r, rec_tab, at, "/v20h/t?", w);
+                var s3: [200]u8 = undefined;
+                _ = std.fmt.bufPrint(line[wi][0..159], "{s}: {d} own {d} amb {d} wrong {d}{s}", .{ w, t.total, t.own, t.ambiguous, t.wrong, stateLine(&t, &s3) }) catch "";
+            }
+            const ec = endCheck(&r, rec_tab, at);
+            var el: [600]u8 = undefined;
+            var sl2: [400]u8 = undefined;
+            report(all.wrong == 0 and ec.missing == 0 and ec.doubled == 0, "v20h-h2tail-" ++ gv[0], std.fmt.bufPrint(&detail, "40 rounds, gap {s} ms, d {s} ms after b: {s} | {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ gv[1], gv[2], std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), std.mem.sliceTo(&line[3], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 600)] }) catch "");
+            try r.navigate(rec_tab, "/v20/blank?h2t");
+            r.pump(3000);
+        }
+    }
+    // ══ 재검증 3 차(v20h A): 새 문서의 첫 요청이 알림보다 먼저 나간다(LB-1 — loader 로 가른다) · 같은 사이트 iframe 이 주 프레임과 같은 주소를
+    // 받는다(보이는 규칙만 다른 짝은 그 짝만 본문 없이). `ns` 는 캐시를 거치지 않아 셋이 동시다(N-4). 통과 조건: 틀린 본문 0·끝 하나, 그리고
+    // h9early·h9nsearly 는 제 본문이 거의 모두(60 중 57 이상 — 1c8e95230 은 h9nsearly 30/60), h2nsiframe 은 주 프레임 A·B·D 가 거의 모두(60 중 57
+    // 이상 — 1c8e95230 은 0/60). ══
+    inline for (.{ .{ "h9early", "/v20h/ep?", "epdone", [_][]const u8{ "a", "b", "c" }, "abc" }, .{ "h2iframe", "/v20h/fp?", "fpdone", [_][]const u8{ "A", "B", "C", "D" }, "" }, .{ "h9nsearly", "/v20h/ep?ns", "epdone", [_][]const u8{ "a", "b", "c" }, "abc" }, .{ "h2nsiframe", "/v20h/fp?ns", "fpdone", [_][]const u8{ "A", "B", "C", "D" }, "ABD" } }) |c| {
+        if (enabled(c[0])) {
+            const whos = c[3];
+            const rounds: usize = 20;
+            var own: [whos.len]usize = @splat(0);
+            var amb: [whos.len]usize = @splat(0);
+            var tot: [whos.len]usize = @splat(0);
+            var other_states: [16]usize = @splat(0);
+            var wrong: usize = 0;
+            var missing: usize = 0;
+            var doubled: usize = 0;
+            var rounds_txt: [1200]u8 = undefined;
+            var rn: usize = 0;
+            for (0..rounds) |round| {
+                var kb: [64]u8 = undefined;
+                const key = std.fmt.bufPrint(&kb, "{s}{d}x{d}", .{ c[0], round, session }) catch "";
+                const at = r.begins.items.len;
+                var pb: [128]u8 = undefined;
+                try r.navigate(rec_tab, std.fmt.bufPrint(&pb, "{s}{s}", .{ c[1], key }) catch "");
+                _ = r.pumpTitle(rec_tab, c[2], 15_000);
+                r.pump(1500);
+                var waited: u32 = 0;
+                while (waited < 6_000 and endCheck(&r, rec_tab, at).missing > 0) : (waited += 500) r.pump(500);
+                var nb: [96]u8 = undefined;
+                const needle = std.fmt.bufPrint(&nb, "/v20h/e?k={s}{s}", .{ if (std.mem.indexOf(u8, c[1], "?ns") != null) "ns" else "", key }) catch "";
+                const all = tally(&r, rec_tab, at, needle, null);
+                wrong += all.wrong;
+                const ec = endCheck(&r, rec_tab, at);
+                missing += ec.missing;
+                doubled += ec.doubled;
+                var mark: [8]u8 = @splat('.');
+                for (whos, 0..) |w, wi| {
+                    const t = tally(&r, rec_tab, at, needle, w);
+                    own[wi] += t.own;
+                    amb[wi] += t.ambiguous;
+                    tot[wi] += t.total;
+                    for (t.states, 0..) |n, si| other_states[si] += n;
+                    mark[wi] = if (t.own > 0) 'o' else if (t.ambiguous > 0) 'a' else if (t.total == 0) '-' else 'x';
+                }
+                const piece = std.fmt.bufPrint(rounds_txt[rn..], " {s}", .{mark[0..whos.len]}) catch "";
+                rn += piece.len;
+            }
+            var lnb: [400]u8 = undefined;
+            var ln: usize = 0;
+            var want_own: usize = 0;
+            for (whos, 0..) |w, wi| {
+                const piece = std.fmt.bufPrint(lnb[ln..], "{s}: own {d}/{d} amb {d} · ", .{ w, own[wi], tot[wi], amb[wi] }) catch "";
+                ln += piece.len;
+                if (std.mem.indexOf(u8, c[4], w) != null) want_own += own[wi];
+            }
+            const need: usize = if (c[4].len == 0) 0 else c[4].len * rounds - 3;
+            var t2: Tally = .{};
+            t2.states = other_states;
+            report(wrong == 0 and missing == 0 and doubled == 0 and want_own >= need, "v20h-" ++ c[0], std.fmt.bufPrint(&detail, "{d} rounds · {s}WRONG {d} · no end {d} · several ends {d} · own of {s} {d} (need {d}) · states{s} · per round (o own, a ambiguous, x other){s}", .{ rounds, lnb[0..ln], wrong, missing, doubled, if (c[4].len == 0) "-" else c[4], want_own, need, stateLine(&t2, &sl), rounds_txt[0..rn] }) catch "");
+            try r.navigate(rec_tab, "/v20/blank?h");
+            r.pump(4000);
+        }
     }
 }

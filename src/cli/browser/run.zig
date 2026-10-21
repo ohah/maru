@@ -577,8 +577,18 @@ fn publishErrorText(err: anyerror) []const u8 {
     return switch (err) {
         error.FileNotFound => "cannot write the output file: its directory does not exist",
         error.IsDir => "cannot write the output file: the path is a directory",
+        error.DirectoryPath => "cannot write the output file: the path names a directory (it ends with /, . or ..)",
         else => "cannot publish the output file atomically",
     };
+}
+
+/// W9d② 재검증 3 차 N-h1·N-h3: 폴더를 뜻하는 꼴의 경로인가 — `/` 로 끝나거나 마지막 조각이 `.`·`..` 다. 그런 `--out` 은 쓰기 전에 거절한다:
+/// `<폴더>/.`·`.` 은 rename 이 `EINVAL` 을 내 Debug 에서 멈췄고(std 가 프로그래머 오류로 친다) 임시 파일이 남았다, `/새이름/` 은 `newname`
+/// 이라는 파일이 됐다(폴더를 뜻한 경로가 조용히 파일이 됐다).
+fn directoryPath(path: []const u8) bool {
+    if (path.len == 0 or path[path.len - 1] == '/') return true;
+    const base = if (std.mem.lastIndexOfScalar(u8, path, '/')) |at| path[at + 1 ..] else path;
+    return std.mem.eql(u8, base, ".") or std.mem.eql(u8, base, "..");
 }
 
 fn publishResult(dir: std.Io.Dir, io: std.Io, target: []const u8, bytes: []const u8) !void {
@@ -594,6 +604,11 @@ fn publishResult(dir: std.Io.Dir, io: std.Io, target: []const u8, bytes: []const
     // 이식하는 사람이 이 결정을 잊으면 **조용히 넓은 권한으로 쓰이는 대신 여기서 시끄럽게 실패**해야 한다.
     if (builtin.os.tag == .windows) return error.UnsupportedOnWindows;
 
+    // 폴더를 뜻하는 꼴(N-h1·N-h3)은 아무것도 만들기 전에 — 있는 폴더면 「폴더다」, 아니면 「폴더를 뜻한다」.
+    if (directoryPath(target)) {
+        const st = dir.statFile(io, target, .{}) catch return error.DirectoryPath;
+        return if (st.kind == .directory) error.IsDir else error.DirectoryPath;
+    }
     var af = try dir.createFileAtomic(io, target, .{
         .permissions = std.Io.File.Permissions.fromMode(0o600),
         .replace = true,
@@ -1237,6 +1252,53 @@ test "W9d② 재검증 N-g2: --out 이 없는 폴더·폴더인 대상이면 그
     var it = (try tmp.dir.openDir(io, "target", .{ .iterate = true })).iterate();
     try std.testing.expect((try it.next(io)) == null);
     try std.testing.expectEqualStrings("cannot publish the output file atomically", publishErrorText(error.AccessDenied));
+}
+
+test "W9d② 재검증 3 차 N-h1·N-h3: --out 이 `<폴더>/.`·`.`·`..`·`/`·`<폴더>/` 면 「폴더다」, 없는 `<새이름>/`·`<파일>/` 이면 「폴더를 뜻한다」 — 멈추지 않고 아무것도 남기지 않는다" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "adir", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "afile", .data = "KEEP" });
+    const is_dir = "cannot write the output file: the path is a directory";
+    const names_dir = "cannot write the output file: the path names a directory (it ends with /, . or ..)";
+    for ([_]struct { path: []const u8, text: []const u8 }{
+        .{ .path = "adir/.", .text = is_dir },
+        .{ .path = ".", .text = is_dir },
+        .{ .path = "..", .text = is_dir },
+        .{ .path = "adir/..", .text = is_dir },
+        .{ .path = "adir/", .text = is_dir },
+        .{ .path = "/", .text = is_dir },
+        .{ .path = "newname/", .text = names_dir },
+        .{ .path = "adir/newname/", .text = names_dir },
+        .{ .path = "afile/", .text = names_dir },
+        .{ .path = "no-such-dir/.", .text = names_dir },
+    }) |case| {
+        const err = if (publishResult(tmp.dir, io, case.path, "BODY")) |_| {
+            std.debug.print("N-h1/N-h3: {s} was written\n", .{case.path});
+            return error.TestUnexpectedResult;
+        } else |e| e;
+        errdefer std.debug.print("N-h1/N-h3: {s} -> {s}\n", .{ case.path, @errorName(err) });
+        try std.testing.expectEqualStrings(case.text, publishErrorText(err));
+    }
+    // 아무것도 남기지 않았다 — 임시 파일도, `newname` 파일도.
+    var names: usize = 0;
+    var it = (try tmp.dir.openDir(io, ".", .{ .iterate = true })).iterate();
+    while (try it.next(io)) |e| {
+        errdefer std.debug.print("left: {s}\n", .{e.name});
+        try std.testing.expect(std.mem.eql(u8, e.name, "adir") or std.mem.eql(u8, e.name, "afile"));
+        names += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), names);
+    var sub = (try tmp.dir.openDir(io, "adir", .{ .iterate = true })).iterate();
+    try std.testing.expect((try sub.next(io)) == null);
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("KEEP", try tmp.dir.readFile(io, "afile", &buf));
+    // 폴더를 뜻하지 않는 꼴은 전처럼 쓴다(점으로 시작하는 이름·가운데의 `.` 조각).
+    try publishResult(tmp.dir, io, ".hidden", "B1");
+    try publishResult(tmp.dir, io, "adir/./x.json", "B2");
+    try std.testing.expectEqualStrings("B2", try tmp.dir.readFile(io, "adir/x.json", &buf));
 }
 
 // ── W9d② 최종 재검증(검증자 v20f A R10·B 16 의 재현을 회귀 시험으로) ────────────────────────────────────────────────

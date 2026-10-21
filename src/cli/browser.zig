@@ -648,11 +648,13 @@ pub fn parse(args: []const []const u8) ParseError!Command {
                 try assignSurface(&surface, a["--surface=".len..]);
                 i += 1;
             } else if (eq(a, "--out")) {
-                if (i + 1 >= args.len) return error.MissingOutValue;
+                if (i + 1 >= args.len or args[i + 1].len == 0) return error.MissingOutValue;
                 out = args[i + 1];
                 i += 2;
             } else if (std.mem.startsWith(u8, a, "--out=")) {
+                // W9d② 재검증 3 차 N-h2: 빈 값은 network-request 처럼 「값이 없다」(전에는 빈 경로로 받아 「폴더가 없다」 고 했다).
                 out = a["--out=".len..];
+                if (out.?.len == 0) return error.MissingOutValue;
                 i += 1;
             } else if (eq(a, "--rect")) {
                 if (i + 1 >= args.len) return error.MissingRectValue;
@@ -782,11 +784,13 @@ fn parseExecArgs(rest: []const []const u8) ParseError!ExecCmd {
             if (max_result_bytes == 0 or max_result_bytes > 16 * 1024 * 1024) return error.InvalidMaxResultBytes;
             i += 1;
         } else if (eq(arg, "--out")) {
-            if (i + 1 >= rest.len) return error.MissingOutValue;
+            if (i + 1 >= rest.len or rest[i + 1].len == 0) return error.MissingOutValue;
             out = rest[i + 1];
             i += 2;
         } else if (std.mem.startsWith(u8, arg, "--out=")) {
+            // W9d② 재검증 3 차 N-h2: 빈 값은 network-request 처럼 「값이 없다」.
             out = arg["--out=".len..];
+            if (out.?.len == 0) return error.MissingOutValue;
             i += 1;
         } else if (eq(arg, "--")) {
             // 그 뒤 하나는 `-` 로 시작해도 식이다(W9f).
@@ -4572,6 +4576,14 @@ test "W9d②: network-record 파서 — --on·--off 하나만, surface 필수; n
     try testing.expectError(error.InvalidBodyBytes, parse(&.{ "network-request", "--surface", "3", "--req", "7", "--body", "--max-bytes", "0" }));
     try testing.expectError(error.InvalidBodyOffset, parse(&.{ "network-request", "--surface", "3", "--req", "7", "--body", "--offset", "1048577" }));
     try testing.expectError(error.MissingOutValue, parse(&.{ "network-request", "--surface", "3", "--req", "7", "--body", "--out=" }));
+}
+
+test "W9d② 재검증 3 차 N-h2: exec·screenshot 의 빈 --out(`--out \"\"`·`--out=`)도 network-request 처럼 「값이 없다」" {
+    try testing.expectError(error.MissingOutValue, parse(&.{ "exec", "--surface", "5", "--out", "", "1" }));
+    try testing.expectError(error.MissingOutValue, parse(&.{ "exec", "--surface", "5", "--out=", "1" }));
+    try testing.expectError(error.MissingOutValue, parse(&.{ "screenshot", "--surface", "1", "--out", "" }));
+    try testing.expectError(error.MissingOutValue, parse(&.{ "screenshot", "--surface", "1", "--out=" }));
+    try testing.expectError(error.MissingOutValue, parse(&.{ "network-request", "--surface", "3", "--req", "7", "--out", "" }));
 }
 
 test "W9d②: 요청 모양 — browser.networkRecord {id, on}, 본문은 body·body_offset·body_max_bytes(주지 않은 것은 싣지 않는다)" {

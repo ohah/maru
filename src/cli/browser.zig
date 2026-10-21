@@ -2200,7 +2200,7 @@ fn renderNetworkBody(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std
 /// 은 이것을 빠뜨려 파일이 페이지가 본 글과 다를 수 있다는 것·다른 사이트의 로그인으로 받았다는 것을 알리지 않았다).
 pub fn writeBodyMarks(w: *std.Io.Writer, result: std.json.ObjectMap) !void {
     if (strField(result.get("body_redecoded")).len > 0) try w.writeAll(" · re-decoded from the browser's windows-1252 reading");
-    if (boolField(result.get("body_chromium_decoded"))) try w.writeAll(" · as the browser decoded it (no charset — may differ from what the page read)");
+    if (boolField(result.get("body_chromium_decoded"))) try w.writeAll(" · as the browser decoded it — may differ from the bytes received and from what the page read");
     if (boolField(result.get("body_credentialed"))) try w.writeAll(" · sent with cookies or login");
 }
 

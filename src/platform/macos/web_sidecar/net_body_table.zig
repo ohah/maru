@@ -219,16 +219,212 @@ fn redecodeCandidate(mime_full: []const u8) bool {
     return true;
 }
 
-/// Content-Type 헤더의 charset 매개변수: 없음, UTF-8(`utf-8`·`utf8` — 대소문자·따옴표 무시), 그 밖.
-pub const Charset = enum { none, utf8, other };
+/// 응답 Content-Type 의 charset 갈래 — Chromium 이 그 글을 푼 방법에 맞춘다(W9d② 재검증 15 회차 D-G1: 전에는 `charset=` 부분 글을 찾아 UTF-8 이
+/// 아닌 값을 모두 `other` 로 쳐, Chromium 이 무시한 빈 값·모르는 이름표·`x-charset=`·겹친 헤더의 본문이 windows-1252 로 풀린 채 표시 없이 남았다).
+pub const Charset = enum {
+    /// charset 매개변수가 없거나 그 값이 비었다 — Chromium 은 MIME 의 기본(`text/*` 는 windows-1252, JSON·JavaScript·HTML 은 UTF-8)이나 BOM 으로 푼다.
+    none,
+    /// Encoding Standard 의 UTF-8 이름표(`utf-8`·`utf8`·`unicode-1-1-utf-8`…).
+    utf8,
+    /// 이름표 표에 없는 값(`none`·`binary`·`utf-8x`·`'utf-8'`…) — Chromium 은 그 이름으로 디코더를 만들지 못해 **MIME 와 상관없이** windows-1252 로
+    /// 푼다(BOM 이 있으면 그것 — 실측: `application/json; charset=x-bogus` 도 windows-1252). fetch·XHR 은 UTF-8 로 읽는다.
+    unknown,
+    /// 그 밖의 알려진 이름표(Latin-1·EUC-KR·UTF-16…) — Chromium 도 XHR 도 그 charset 으로 푼다.
+    other,
+};
 
+/// Encoding Standard(WHATWG)의 이름표 표 — 대소문자 무시. UTF-8 의 이름표는 `utf8`, 나머지 인코딩(replacement·UTF-16·x-user-defined 포함)의
+/// 이름표는 `other`. 표에 없으면 `unknown`.
+const charset_labels = blk: {
+    @setEvalBranchQuota(50_000);
+    const utf8_labels = [_][]const u8{ "unicode-1-1-utf-8", "unicode11utf8", "unicode20utf8", "utf-8", "utf8", "x-unicode20utf8" };
+    // 인코딩마다 한 줄(Encoding Standard 의 「Encodings」 표 차례).
+    const other_groups = [_][]const []const u8{
+        &.{ "866", "cp866", "csibm866", "ibm866" }, // IBM866
+        &.{ "csisolatin2", "iso-8859-2", "iso-ir-101", "iso8859-2", "iso88592", "iso_8859-2", "iso_8859-2:1987", "l2", "latin2" }, // ISO-8859-2
+        &.{ "csisolatin3", "iso-8859-3", "iso-ir-109", "iso8859-3", "iso88593", "iso_8859-3", "iso_8859-3:1988", "l3", "latin3" }, // ISO-8859-3
+        &.{ "csisolatin4", "iso-8859-4", "iso-ir-110", "iso8859-4", "iso88594", "iso_8859-4", "iso_8859-4:1988", "l4", "latin4" }, // ISO-8859-4
+        &.{ "csisolatincyrillic", "cyrillic", "iso-8859-5", "iso-ir-144", "iso8859-5", "iso88595", "iso_8859-5", "iso_8859-5:1988" }, // ISO-8859-5
+        &.{ "arabic", "asmo-708", "csiso88596e", "csiso88596i", "csisolatinarabic", "ecma-114", "iso-8859-6", "iso-8859-6-e", "iso-8859-6-i", "iso-ir-127", "iso8859-6", "iso88596", "iso_8859-6", "iso_8859-6:1987" }, // ISO-8859-6
+        &.{ "csisolatingreek", "ecma-118", "elot_928", "greek", "greek8", "iso-8859-7", "iso-ir-126", "iso8859-7", "iso88597", "iso_8859-7", "iso_8859-7:1987", "sun_eu_greek" }, // ISO-8859-7
+        &.{ "csiso88598e", "csisolatinhebrew", "hebrew", "iso-8859-8", "iso-8859-8-e", "iso-ir-138", "iso8859-8", "iso88598", "iso_8859-8", "iso_8859-8:1988", "visual" }, // ISO-8859-8
+        &.{ "csiso88598i", "iso-8859-8-i", "logical" }, // ISO-8859-8-I
+        &.{ "csisolatin6", "iso-8859-10", "iso-ir-157", "iso8859-10", "iso885910", "l6", "latin6" }, // ISO-8859-10
+        &.{ "iso-8859-13", "iso8859-13", "iso885913" }, // ISO-8859-13
+        &.{ "iso-8859-14", "iso8859-14", "iso885914" }, // ISO-8859-14
+        &.{ "csisolatin9", "iso-8859-15", "iso8859-15", "iso885915", "iso_8859-15", "l9" }, // ISO-8859-15
+        &.{"iso-8859-16"}, // ISO-8859-16
+        &.{ "cskoi8r", "koi", "koi8", "koi8-r", "koi8_r" }, // KOI8-R
+        &.{ "koi8-ru", "koi8-u" }, // KOI8-U
+        &.{ "csmacintosh", "mac", "macintosh", "x-mac-roman" }, // macintosh
+        &.{ "dos-874", "iso-8859-11", "iso8859-11", "iso885911", "tis-620", "windows-874" }, // windows-874
+        &.{ "cp1250", "windows-1250", "x-cp1250" }, // windows-1250
+        &.{ "cp1251", "windows-1251", "x-cp1251" }, // windows-1251
+        &.{ "ansi_x3.4-1968", "ascii", "cp1252", "cp819", "csisolatin1", "ibm819", "iso-8859-1", "iso-ir-100", "iso8859-1", "iso88591", "iso_8859-1", "iso_8859-1:1987", "l1", "latin1", "us-ascii", "windows-1252", "x-cp1252" }, // windows-1252
+        &.{ "cp1253", "windows-1253", "x-cp1253" }, // windows-1253
+        &.{ "cp1254", "csisolatin5", "iso-8859-9", "iso-ir-148", "iso8859-9", "iso88599", "iso_8859-9", "iso_8859-9:1989", "l5", "latin5", "windows-1254", "x-cp1254" }, // windows-1254
+        &.{ "cp1255", "windows-1255", "x-cp1255" }, // windows-1255
+        &.{ "cp1256", "windows-1256", "x-cp1256" }, // windows-1256
+        &.{ "cp1257", "windows-1257", "x-cp1257" }, // windows-1257
+        &.{ "cp1258", "windows-1258", "x-cp1258" }, // windows-1258
+        &.{ "x-mac-cyrillic", "x-mac-ukrainian" }, // x-mac-cyrillic
+        &.{ "chinese", "csgb2312", "csiso58gb231280", "gb2312", "gb_2312", "gb_2312-80", "gbk", "iso-ir-58", "x-gbk" }, // GBK
+        &.{"gb18030"}, // gb18030
+        &.{ "big5", "big5-hkscs", "cn-big5", "csbig5", "x-x-big5" }, // Big5
+        &.{ "cseucpkdfmtjapanese", "euc-jp", "x-euc-jp" }, // EUC-JP
+        &.{ "csiso2022jp", "iso-2022-jp" }, // ISO-2022-JP
+        &.{ "csshiftjis", "ms932", "ms_kanji", "shift-jis", "shift_jis", "sjis", "windows-31j", "x-sjis" }, // Shift_JIS
+        &.{ "cseuckr", "csksc56011987", "euc-kr", "iso-ir-149", "korean", "ks_c_5601-1987", "ks_c_5601-1989", "ksc5601", "ksc_5601", "windows-949" }, // EUC-KR
+        &.{ "csiso2022kr", "hz-gb-2312", "iso-2022-cn", "iso-2022-cn-ext", "iso-2022-kr", "replacement" }, // replacement
+        &.{ "unicodefffe", "utf-16be" }, // UTF-16BE
+        &.{ "csunicode", "iso-10646-ucs-2", "ucs-2", "unicode", "unicodefeff", "utf-16", "utf-16le" }, // UTF-16LE
+        &.{"x-user-defined"}, // x-user-defined
+    };
+    var count = utf8_labels.len;
+    for (other_groups) |g| count += g.len;
+    const KV = struct { []const u8, Charset };
+    var kvs: [count]KV = undefined;
+    for (utf8_labels, 0..) |l, i| kvs[i] = .{ l, .utf8 };
+    var n = utf8_labels.len;
+    for (other_groups) |g| for (g) |l| {
+        kvs[n] = .{ l, .other };
+        n += 1;
+    };
+    break :blk std.StaticStringMapWithEql(Charset, std.static_string_map.eqlAsciiIgnoreCase).initComptime(kvs);
+};
+
+/// 이름표(따옴표를 푼 값)의 갈래 — Encoding Standard 의 「get an encoding」 처럼 앞뒤 ASCII 공백을 떼고 대소문자 없이 표에서 찾는다. 빈 값은 `none`
+/// (Chromium 은 빈 charset 을 없는 것으로 친다 — 실측: `application/json; charset=` 는 UTF-8 로 풀렸다).
+pub fn charsetOfLabel(label_in: []const u8) Charset {
+    const label = std.mem.trim(u8, label_in, " \t\n\x0c\r");
+    if (label.len == 0) return .none;
+    return charset_labels.get(label) orelse .unknown;
+}
+
+const http_ws = " \t\r\n";
+
+fn httpTokenByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or std.mem.indexOfScalar(u8, "!#$%&'*+-.^_`|~", c) != null;
+}
+
+fn allHttpToken(s: []const u8) bool {
+    for (s) |c| if (!httpTokenByte(c)) return false;
+    return true;
+}
+
+/// 따옴표 글(`"` 에서 시작)의 끝: 내용의 끝(닫는 `"` 의 자리, 닫히지 않으면 글의 끝)과 그 뒤의 자리. `\` 뒤의 글자는 건너뛴다.
+fn quotedEnd(s: []const u8, open: usize) struct { content_end: usize, next: usize } {
+    var i = open + 1;
+    while (i < s.len) {
+        switch (s[i]) {
+            '\\' => i = @min(i + 2, s.len),
+            '"' => return .{ .content_end = i, .next = i + 1 },
+            else => i += 1,
+        }
+    }
+    return .{ .content_end = s.len, .next = s.len };
+}
+
+/// 매개변수 값 하나(입력 안의 조각 — 따옴표 글이면 따옴표 안, `\` 를 아직 풀지 않았다).
+const ParamValue = struct { raw: []const u8, quoted: bool };
+
+/// MIME Sniffing 의 「parse a MIME type」 — 이 표가 쓰는 것만: 본질(`type/subtype`, 입력 안의 조각)과 첫 `charset` 매개변수.
+const ParsedMime = struct { essence: []const u8, charset: ?ParamValue };
+
+fn parseMime(value_in: []const u8) ?ParsedMime {
+    const value = std.mem.trim(u8, value_in, http_ws);
+    const slash = std.mem.indexOfScalar(u8, value, '/') orelse return null;
+    if (slash == 0 or !allHttpToken(value[0..slash])) return null;
+    var p = slash + 1;
+    const semi = std.mem.indexOfScalarPos(u8, value, p, ';') orelse value.len;
+    const subtype = std.mem.trimEnd(u8, value[p..semi], http_ws);
+    if (subtype.len == 0 or !allHttpToken(subtype)) return null;
+    var m: ParsedMime = .{ .essence = value[0 .. p + subtype.len], .charset = null };
+    p = semi;
+    while (p < value.len) {
+        p += 1; // `;`
+        while (p < value.len and std.mem.indexOfScalar(u8, http_ws, value[p]) != null) p += 1;
+        const name_start = p;
+        while (p < value.len and value[p] != ';' and value[p] != '=') p += 1;
+        const name = value[name_start..p];
+        if (p < value.len) {
+            if (value[p] == ';') continue;
+            p += 1; // `=`
+        }
+        if (p >= value.len) break;
+        var v: ParamValue = undefined;
+        if (value[p] == '"') {
+            const q = quotedEnd(value, p);
+            v = .{ .raw = value[p + 1 .. q.content_end], .quoted = true };
+            p = std.mem.indexOfScalarPos(u8, value, q.next, ';') orelse value.len;
+        } else {
+            const start = p;
+            p = std.mem.indexOfScalarPos(u8, value, p, ';') orelse value.len;
+            const raw = std.mem.trimEnd(u8, value[start..p], http_ws);
+            if (raw.len == 0) continue;
+            v = .{ .raw = raw, .quoted = false };
+        }
+        // 이름은 꼭 `charset`(대소문자 무시 — `x-charset`·`charset ` 은 아니다), 값은 따옴표 글의 글자만(제어 글자가 없다), 같은 이름은 첫 것.
+        if (m.charset != null or !std.ascii.eqlIgnoreCase(name, "charset")) continue;
+        const bad = for (v.raw) |c| {
+            if ((c < 0x20 and c != '\t') or c == 0x7f) break true;
+        } else false;
+        if (!bad) m.charset = v;
+    }
+    return m;
+}
+
+/// 헤더 값을 `,` 로 가른 다음 조각(따옴표 안의 `,` 는 가르지 않는다 — Fetch 의 「get, decode, and split」).
+fn nextHeaderValue(s: []const u8, pos: *usize) ?[]const u8 {
+    if (pos.* > s.len) return null;
+    const start = pos.*;
+    var i = start;
+    while (i < s.len and s[i] != ',') {
+        i = if (s[i] == '"') quotedEnd(s, i).next else i + 1;
+    }
+    pos.* = i + 1;
+    return std.mem.trim(u8, s[start..i], " \t");
+}
+
+/// Content-Type 헤더(CDP 는 겹친 헤더를 `\n` 으로 잇는다)가 정한 MIME 의 charset 값 — Fetch 의 「extract a MIME type」: 값마다 MIME 를 읽고(못 읽거나
+/// `*/*` 면 건너뛴다) 마지막 것을 쓰되, 본질이 앞 것과 같고 charset 이 없으면 앞의 charset 을 물려받는다(본질이 바뀌면 버린다).
+fn contentTypeCharset(content_type: []const u8) ?ParamValue {
+    var essence: ?[]const u8 = null;
+    var inherited: ?ParamValue = null;
+    var result: ?ParamValue = null;
+    var lines = std.mem.splitScalar(u8, content_type, '\n');
+    while (lines.next()) |line| {
+        var pos: usize = 0;
+        while (nextHeaderValue(line, &pos)) |value| {
+            const m = parseMime(value) orelse continue;
+            if (std.mem.eql(u8, m.essence, "*/*")) continue;
+            result = m.charset;
+            if (essence == null or !std.ascii.eqlIgnoreCase(m.essence, essence.?)) {
+                inherited = m.charset;
+                essence = m.essence;
+            } else if (m.charset == null and inherited != null) result = inherited;
+        }
+    }
+    return result;
+}
+
+/// Content-Type 헤더의 charset 갈래(위 `Charset`). 따옴표 글은 `\` 를 풀어 이름표로 본다 — 이름표 표의 가장 긴 것보다 길면 표에 없다.
 pub fn charsetOf(content_type: []const u8) Charset {
-    const at = std.ascii.findIgnoreCase(content_type, "charset=") orelse return .none;
-    var v = content_type[at + "charset=".len ..];
-    if (std.mem.indexOfScalar(u8, v, ';')) |semi| v = v[0..semi];
-    v = std.mem.trim(u8, v, " \t\"'");
-    if (std.ascii.eqlIgnoreCase(v, "utf-8") or std.ascii.eqlIgnoreCase(v, "utf8")) return .utf8;
-    return .other;
+    const v = contentTypeCharset(content_type) orelse return .none;
+    if (!v.quoted) return charsetOfLabel(v.raw);
+    var buf: [64]u8 = undefined;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < v.raw.len) : (n += 1) {
+        var c = v.raw[i];
+        if (c == '\\' and i + 1 < v.raw.len) {
+            c = v.raw[i + 1];
+            i += 2;
+        } else i += 1;
+        if (n == buf.len) return .unknown;
+        buf[n] = c;
+    }
+    return charsetOfLabel(buf[0..n]);
 }
 
 // ── 결과 풀기 ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -268,7 +464,7 @@ pub const Decoded = struct {
 };
 
 /// `getResponseBody` 의 결과(`{"body":"…","base64Encoded":bool}`)를 보낼 바이트로 푼다. `mime` 은 응답 MIME, `charset` 은 Content-Type 의
-/// charset(없음·UTF-8·그 밖), `raw_size` 는 받은 바이트(Σ `dataReceived` — 0 = 모른다). 실패한 호출(`ok` 거짓 — 「다음 문서로 옮겨 사라졌다」 등)과
+/// charset 갈래(`Charset`), `raw_size` 는 받은 바이트(Σ `dataReceived` — 0 = 모른다). 실패한 호출(`ok` 거짓 — 「다음 문서로 옮겨 사라졌다」 등)과
 /// 모양이 틀린 결과는 `unavailable`.
 ///
 /// windows-1252 되돌리기(J11)는 Chromium 이 **UTF-8 바이트를 windows-1252 로 잘못 읽은** 글에만 한다(W9d② 적대 리뷰 1 회차): 글을 그 표로
@@ -306,8 +502,8 @@ pub fn decodeResult(gpa: std.mem.Allocator, ok: bool, json: []const u8, mime: []
     if (v.base64Encoded) {
         // 글 MIME 인데 base64 로 왔다(잘못된 UTF-8 JSON·charset 없는 EUC-KR — J11): UTF-8 이면 글, 아니면 바이트 그대로.
         if (!std.unicode.utf8ValidateSlice(bytes)) flags.binary = true;
-    } else if (charset == .none and redecodeCandidate(mime) and !isAscii(bytes)) {
-        // charset 없는 text/* 를 Chromium 이 windows-1252 로 풀었다(J11) — 되돌려 UTF-8 이면 그것이 페이지가 받은 글이다.
+    } else if (!isAscii(bytes) and redecodeWanted(charset, mime, raw_size, bytes.len)) {
+        // charset 없는 text/*·모르는 charset 이름표의 글을 Chromium 이 windows-1252 로 풀었다(J11·D-G1) — 되돌려 UTF-8 이면 그것이 페이지가 받은 글이다.
         const back = try gpa.alloc(u8, bytes.len);
         defer gpa.free(back);
         if (toCp1252(bytes, back)) |raw| {
@@ -319,9 +515,9 @@ pub fn decodeResult(gpa: std.mem.Allocator, ok: bool, json: []const u8, mime: []
             } else flags.chromium_decoded = true;
         } else flags.chromium_decoded = true;
     } else if (charset != .other and raw_size != 0 and raw_size != bytes.len) {
-        // charset 이 없거나 UTF-8 인 글인데 받은 바이트 수와 글의 UTF-8 길이가 다르다 — Chromium 이 BOM(UTF-16 등 — 선언한 charset 보다 앞선다)
+        // charset 이 없거나 UTF-8 이거나 Chromium 이 모르는 이름표인 글인데 받은 바이트 수와 글의 UTF-8 길이가 다르다 — Chromium 이 BOM(UTF-16 등 — 선언한 charset 보다 앞선다)
         // 이나 MIME 의 기본으로 다르게 풀었다(W9d② 20 회 검증 15 회차 D1: `FF FE` 로 시작한 JSON 12 바이트가 UTF-16 글 15 바이트로 왔다;
-        // 최종 재검증 D-B1: `charset=utf-8` 이어도 같다). 받은 바이트도, fetch 가 읽은 글도 아니다. 다른 charset 을 선언한 글(Latin-1·EUC-KR)은
+        // 최종 재검증 D-B1: `charset=utf-8` 이어도 같다; 재검증 15 회차 D-G1: 모르는 이름표의 ASCII 글도). 받은 바이트도, fetch 가 읽은 글도 아니다. 다른 charset 을 선언한 글(Latin-1·EUC-KR)은
         // 그 charset 으로 푼 것이 XHR 이 읽은 글이라 표시하지 않는다.
         flags.chromium_decoded = true;
     }
@@ -331,6 +527,17 @@ pub fn decodeResult(gpa: std.mem.Allocator, ok: bool, json: []const u8, mime: []
         return .{ .state = .over_cap, .over_bytes = n };
     }
     return .{ .state = .captured, .flags = flags, .bytes = bytes };
+}
+
+/// windows-1252 로 되돌려 볼 글인가(ASCII 아닌 글만 묻는다): charset 없는 `text/*`(J11 — `redecodeCandidate`), 또는 Chromium 이 모르는 charset
+/// 이름표(W9d② 재검증 15 회차 D-G1 — MIME 와 상관없이 windows-1252 로 푼다). 모르는 이름표인데 글의 UTF-8 길이가 받은 바이트 수와 꼭 같으면
+/// windows-1252 로 읽은 글이 아니다(그렇게 읽으면 0x80 넘는 바이트마다 UTF-8 이 길어진다) — 맞게 풀린 글로 보고 그대로 둔다.
+fn redecodeWanted(charset: Charset, mime: []const u8, raw_size: u64, text_len: usize) bool {
+    return switch (charset) {
+        .none => redecodeCandidate(mime),
+        .unknown => raw_size == 0 or raw_size != text_len,
+        .utf8, .other => false,
+    };
 }
 
 fn isAscii(b: []const u8) bool {
@@ -4733,4 +4940,173 @@ test "W9d② v20f 15: V4 boundaries — received size ±1 marks, equal or unknow
     defer gpa_t.free(o.bytes);
     try testing.expectEqual(State.over_cap, o.state);
     try testing.expect(o.over_bytes > msg.max_net_body_bytes);
+}
+
+// ── W9d② 재검증 15 회차 D-G1 — charset 매개변수 풀기 ─────────────────────────────────────────────────────────────────────────
+
+test "W9d② 재검증 15 회차 D-G1: charsetOf — 매개변수 이름은 꼭 charset, 값은 WHATWG 이름표(빈 값은 none·모르는 이름표는 unknown), 따옴표·\\ 풀기, 같은 이름은 첫 것, 겹친 Content-Type 은 Fetch 의 extract a MIME type" {
+    const C = struct { ct: []const u8, want: Charset };
+    const cases = [_]C{
+        .{ .ct = "", .want = .none },
+        .{ .ct = "text/plain", .want = .none },
+        // 빈 값 — Chromium 은 없는 것으로 친다(실측 `application/json; charset=` 는 UTF-8)
+        .{ .ct = "text/plain; charset=", .want = .none },
+        .{ .ct = "text/plain; charset=\"\"", .want = .none },
+        .{ .ct = "text/plain; charset=\"  \"", .want = .none },
+        .{ .ct = "text/css; charset=", .want = .none },
+        .{ .ct = "application/json; charset=", .want = .none },
+        .{ .ct = "text/plain; charset", .want = .none },
+        // 모르는 이름표
+        .{ .ct = "text/plain; charset=x-bogus-maru", .want = .unknown },
+        .{ .ct = "application/json; charset=x-bogus-maru", .want = .unknown },
+        .{ .ct = "text/plain; charset=none", .want = .unknown },
+        .{ .ct = "text/plain; charset=binary", .want = .unknown },
+        .{ .ct = "text/plain; charset=utf-8x", .want = .unknown },
+        .{ .ct = "text/plain; charset='utf-8'", .want = .unknown },
+        .{ .ct = "text/plain; charset=\"utf-8\\\"\"", .want = .unknown },
+        .{ .ct = "text/plain; charset=\"a,b\"", .want = .unknown },
+        .{ .ct = "text/plain; charset=\"utf-8-utf-8-utf-8-utf-8-utf-8-utf-8-utf-8-utf-8-utf-8-utf-8-utf-8-utf-8-utf-8-\"", .want = .unknown },
+        // 이름이 charset 이 아니다(부분 글이 아니라 이름 전체 — `x-charset`·`charset `)
+        .{ .ct = "text/plain; x-charset=latin1", .want = .none },
+        .{ .ct = "text/plain; x-charset=utf-8", .want = .none },
+        .{ .ct = "text/plain; charset = utf-8", .want = .none },
+        .{ .ct = "text/plain; foo=\"a;charset=latin1\"; charset=utf-8", .want = .utf8 },
+        .{ .ct = "text/plain; foo=\"a;charset=latin1\"", .want = .none },
+        .{ .ct = "text/plain; charset;charset=utf-8", .want = .utf8 },
+        // 대소문자·공백·여러 매개변수·따옴표
+        .{ .ct = "TEXT/PLAIN; CHARSET=UTF-8", .want = .utf8 },
+        .{ .ct = "text/plain; Charset=EUC-KR", .want = .other },
+        .{ .ct = "  text/plain ;  charset=utf-8  ", .want = .utf8 },
+        .{ .ct = "text/plain; charset= utf-8", .want = .utf8 },
+        .{ .ct = "text/plain; charset=\tutf-8\t", .want = .utf8 },
+        .{ .ct = "text/plain;charset=utf-8", .want = .utf8 },
+        .{ .ct = "text/plain; format=flowed; charset=utf-8; delsp=yes", .want = .utf8 },
+        .{ .ct = "text/plain; charset=\"utf-8\"; foo=bar", .want = .utf8 },
+        .{ .ct = "text/plain; charset=\"UTF-8\"", .want = .utf8 },
+        .{ .ct = "text/plain; charset=\"ut\\f-8\"", .want = .utf8 },
+        .{ .ct = "text/plain; charset=\"utf-8", .want = .utf8 },
+        .{ .ct = "text/plain; charset=\"utf-8\"junk; x=1", .want = .utf8 },
+        .{ .ct = "text/plain; charset=lat\x01in1; charset=utf-8", .want = .utf8 },
+        // 같은 이름은 첫 것(실측: `iso-8859-1; charset=utf-8` 은 Latin-1 로 풀렸다)
+        .{ .ct = "text/plain; charset=iso-8859-1; charset=utf-8", .want = .other },
+        .{ .ct = "text/plain; charset=utf-8; charset=iso-8859-1", .want = .utf8 },
+        // UTF-8 의 다른 이름표, 그 밖의 알려진 이름표
+        .{ .ct = "text/plain; charset=unicode-1-1-utf-8", .want = .utf8 },
+        .{ .ct = "text/plain; charset=X-Unicode20UTF8", .want = .utf8 },
+        .{ .ct = "text/plain; charset=iso-8859-1", .want = .other },
+        .{ .ct = "text/plain; charset=latin1", .want = .other },
+        .{ .ct = "text/plain; charset=us-ascii", .want = .other },
+        .{ .ct = "text/plain; charset=ks_c_5601-1987", .want = .other },
+        .{ .ct = "text/plain; charset=shift_jis", .want = .other },
+        .{ .ct = "text/plain; charset=gb18030", .want = .other },
+        .{ .ct = "application/json; charset=utf-16", .want = .other },
+        .{ .ct = "application/json; charset=UTF-16LE", .want = .other },
+        .{ .ct = "application/json; charset=utf-16be", .want = .other },
+        .{ .ct = "text/plain; charset=iso-2022-kr", .want = .other },
+        .{ .ct = "text/plain; charset=replacement", .want = .other },
+        .{ .ct = "text/plain; charset=x-user-defined", .want = .other },
+        // MIME 가 아닌 값은 버린다
+        .{ .ct = "charset=utf-8", .want = .none },
+        .{ .ct = "/plain; charset=utf-8", .want = .none },
+        .{ .ct = "text/; charset=utf-8", .want = .none },
+        .{ .ct = "te xt/plain; charset=utf-8", .want = .none },
+        // 겹친 Content-Type(CDP 는 `\n` 으로 잇는다·한 헤더 안의 `,`): 마지막 MIME, 같은 본질이면 앞 charset 을 물려받고 다르면 버린다, `*/*`·틀린 값은 건너뛴다
+        .{ .ct = "application/json; charset=utf-8\napplication/json", .want = .utf8 },
+        .{ .ct = "text/plain; charset=x-bogus-maru\ntext/plain; charset=utf-8", .want = .utf8 },
+        .{ .ct = "text/plain; charset=utf-8\ntext/plain; charset=x-bogus-maru", .want = .unknown },
+        .{ .ct = "text/plain; charset=utf-8\ntext/html", .want = .none },
+        .{ .ct = "text/plain; charset=utf-8, text/html", .want = .none },
+        .{ .ct = "text/plain; charset=latin1, TEXT/Plain", .want = .other },
+        .{ .ct = "text/plain; charset=utf-8\n*/*", .want = .utf8 },
+        .{ .ct = "text/plain; charset=utf-8\nbogus", .want = .utf8 },
+        .{ .ct = "text/plain; charset=latin1\ntext/plain\ntext/plain", .want = .other },
+        .{ .ct = "text/plain; charset=utf-8\napplication/json\ntext/plain", .want = .none },
+    };
+    var bad: usize = 0;
+    for (cases) |c| {
+        const got = charsetOf(c.ct);
+        if (got != c.want) {
+            std.debug.print("charsetOf [{s}] = {s}, want {s}\n", .{ c.ct, @tagName(got), @tagName(c.want) });
+            bad += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), bad);
+    // 이름표 표: 인코딩마다 하나씩 — 대소문자 없이, 앞뒤 ASCII 공백을 떼고. 표에 없는 비슷한 이름은 unknown.
+    for ([_][]const u8{ "ibm866", "ISO-8859-2", "iso8859-3", "latin4", "cyrillic", "arabic", "greek", "hebrew", "logical", "l6", "iso885913", "iso-8859-14", "l9", "iso-8859-16", "koi8_r", "koi8-ru", "x-mac-roman", "tis-620", "cp1250", "x-cp1251", "ascii", "cp1253", "latin5", "cp1255", "windows-1256", "x-cp1257", "cp1258", "x-mac-ukrainian", "gbk", "big5-hkscs", "euc-jp", "csiso2022jp", "windows-31j", "windows-949", "hz-gb-2312", "unicodefffe", "ucs-2", " \tutf-16\x0c\n" }) |l| try testing.expectEqual(Charset.other, charsetOfLabel(l));
+    for ([_][]const u8{ "utf-8", "UTF8", "unicode11utf8", "unicode20utf8", " utf-8\r\n" }) |l| try testing.expectEqual(Charset.utf8, charsetOfLabel(l));
+    for ([_][]const u8{ "utf-7", "utf-32", "iso-8859-12", "latin", "windows-1259", "euckr", "utf_8", "utf-8;", "\"utf-8\"" }) |l| try testing.expectEqual(Charset.unknown, charsetOfLabel(l));
+    try testing.expectEqual(Charset.none, charsetOfLabel(" \t"));
+}
+
+test "W9d② 재검증 15 회차 D-G1: decodeResult 의 갈래 — 빈·모르는 charset·charset 아닌 매개변수의 windows-1252 글은 되돌리고(JSON 도), UTF-16 BOM 글은 크기로 표시, 선언한 Latin-1·EUC-KR 과 맞는 UTF-8 은 표시하지 않는다" {
+    // 실측 바이트(v20g B R15): 「café 가나 ✓ 😀」 21 바이트, windows-1252 로 푼 글 40 바이트; 「café naïve」 12 → 16; UTF-16LE BOM JSON 20 → 「{"k":"é"}」 10.
+    const good = "caf\u{e9} \u{ac00}\u{b098} \u{2713} \u{1F600}";
+    const moji = "{\"body\":\"caf\\u00c3\\u00a9 \\u00ea\\u00b0\\u20ac\\u00eb\\u201a\\u02dc \\u00e2\\u0153\\u201c \\u00f0\\u0178\\u02dc\\u20ac\",\"base64Encoded\":false}";
+    const moji_latin = "{\"body\":\"caf\\u00c3\\u00a9 na\\u00c3\\u00afve\",\"base64Encoded\":false}";
+    const ok_json = "{\"body\":\"" ++ good ++ "\",\"base64Encoded\":false}";
+    const utf16_bom = "{\"body\":\"{\\\"k\\\":\\\"\\u00e9\\\"}\",\"base64Encoded\":false}";
+    const u16_ascii = "{\"body\":\"{\\\"k\\\":1}\",\"base64Encoded\":false}";
+    const euckr = "{\"body\":\"\\uac00\\ub098\",\"base64Encoded\":false}";
+    const Out = enum { exact, redecoded, marked, as_is };
+    const R = struct { ct: []const u8, json: []const u8, raw: u64, out: Out };
+    const rows = [_]R{
+        // D-G1: 페이지(fetch·XHR)는 받은 바이트를 UTF-8 로 읽었다 — 되돌려 받은 바이트로
+        .{ .ct = "text/plain; charset=", .json = moji, .raw = 21, .out = .redecoded },
+        .{ .ct = "text/plain; charset=\"\"", .json = moji, .raw = 21, .out = .redecoded },
+        .{ .ct = "text/plain; charset=x-bogus-maru", .json = moji, .raw = 21, .out = .redecoded },
+        .{ .ct = "text/plain; charset=x-bogus-maru", .json = moji_latin, .raw = 12, .out = .redecoded },
+        .{ .ct = "text/plain; charset=none", .json = moji, .raw = 21, .out = .redecoded },
+        .{ .ct = "text/plain; charset=binary", .json = moji, .raw = 21, .out = .redecoded },
+        .{ .ct = "text/plain; charset=utf-8x", .json = moji, .raw = 21, .out = .redecoded },
+        .{ .ct = "text/plain; x-charset=latin1", .json = moji, .raw = 21, .out = .redecoded },
+        .{ .ct = "text/plain; x-charset=utf-8", .json = moji, .raw = 21, .out = .redecoded },
+        .{ .ct = "text/plain; charset = utf-8", .json = moji, .raw = 21, .out = .redecoded },
+        .{ .ct = "text/plain; charset='utf-8'", .json = moji, .raw = 21, .out = .redecoded },
+        .{ .ct = "text/css; charset=", .json = moji, .raw = 21, .out = .redecoded },
+        .{ .ct = "application/json; charset=x-bogus-maru", .json = moji, .raw = 21, .out = .redecoded },
+        .{ .ct = "application/json; charset=x-bogus-maru", .json = moji_latin, .raw = 12, .out = .redecoded },
+        .{ .ct = "text/html; charset=x-bogus-maru", .json = moji, .raw = 21, .out = .redecoded },
+        // 받은 수를 모르면 되돌린 글이 UTF-8 인 것만 본다
+        .{ .ct = "application/json; charset=x-bogus-maru", .json = moji, .raw = 0, .out = .redecoded },
+        // 모르는 이름표인데 수가 꼭 같다 — windows-1252 로 읽은 글이 아니다(그대로, 표시 없음); 수를 모르면 되돌릴 수 없어 표시
+        .{ .ct = "application/javascript; charset=x-bogus-maru", .json = ok_json, .raw = 21, .out = .exact },
+        .{ .ct = "application/javascript; charset=x-bogus-maru", .json = ok_json, .raw = 0, .out = .marked },
+        // 수가 다른데 되돌린 바이트 수와도 다르다 — 표시
+        .{ .ct = "text/plain; charset=x-bogus-maru", .json = moji, .raw = 22, .out = .marked },
+        // UTF-16 BOM(fetch 는 UTF-8 로 읽어 다르다): 빈·모르는 이름표·겹친 헤더(같은 본질 — 앞의 utf-8 을 물려받는다) — 표시
+        .{ .ct = "application/json; charset=", .json = utf16_bom, .raw = 20, .out = .marked },
+        .{ .ct = "application/json; charset=x-bogus-maru", .json = utf16_bom, .raw = 20, .out = .marked },
+        .{ .ct = "application/json; charset=x-bogus-maru", .json = u16_ascii, .raw = 16, .out = .marked },
+        .{ .ct = "application/json; charset=utf-8\napplication/json", .json = utf16_bom, .raw = 20, .out = .marked },
+        // 대조: 맞는 UTF-8(선언한 utf-8·빈 값의 JSON·겹친 헤더의 마지막 utf-8·UTF-8 의 다른 이름표) — 그대로, 표시 없음
+        .{ .ct = "application/json; charset=utf-8", .json = ok_json, .raw = 21, .out = .exact },
+        .{ .ct = "text/plain; charset=\"UTF-8\"; foo=bar", .json = ok_json, .raw = 21, .out = .exact },
+        .{ .ct = "application/json; charset=", .json = ok_json, .raw = 21, .out = .exact },
+        .{ .ct = "text/plain; charset=x-bogus-maru\ntext/plain; charset=utf-8", .json = ok_json, .raw = 21, .out = .exact },
+        .{ .ct = "text/plain; charset=unicode-1-1-utf-8", .json = ok_json, .raw = 21, .out = .exact },
+        .{ .ct = "text/plain; charset=utf-8; charset=iso-8859-1", .json = ok_json, .raw = 21, .out = .exact },
+        .{ .ct = "application/json", .json = ok_json, .raw = 21, .out = .exact },
+        // 대조: 선언한 다른 charset(XHR 이 그렇게 읽는다) — Chromium 이 푼 그대로, 표시 없음
+        .{ .ct = "text/plain; charset=iso-8859-1", .json = moji, .raw = 21, .out = .as_is },
+        .{ .ct = "text/plain; charset=iso-8859-1; charset=utf-8", .json = moji, .raw = 21, .out = .as_is },
+        .{ .ct = "text/plain; charset=euc-kr", .json = euckr, .raw = 4, .out = .as_is },
+        .{ .ct = "application/json; charset=utf-16", .json = u16_ascii, .raw = 14, .out = .as_is },
+    };
+    var bad: usize = 0;
+    for (rows) |r| {
+        const semi = std.mem.indexOfAny(u8, r.ct, ";\n") orelse r.ct.len;
+        const d = try decodeResult(gpa_t, true, r.json, r.ct[0..semi], charsetOf(r.ct), r.raw);
+        defer gpa_t.free(d.bytes);
+        const fine = d.state == .captured and switch (r.out) {
+            .exact => !d.flags.redecoded and !d.flags.chromium_decoded and std.mem.eql(u8, d.bytes, good),
+            .redecoded => d.flags.redecoded and !d.flags.chromium_decoded and (std.mem.eql(u8, d.bytes, good) or std.mem.eql(u8, d.bytes, "caf\u{e9} na\u{ef}ve")),
+            .marked => d.flags.chromium_decoded and !d.flags.redecoded,
+            .as_is => !d.flags.redecoded and !d.flags.chromium_decoded,
+        };
+        if (!fine) {
+            std.debug.print("decode [{s}] raw {d}: {s} redecoded={} chromium_decoded={} len {d}, want {s}\n", .{ r.ct, r.raw, @tagName(d.state), d.flags.redecoded, d.flags.chromium_decoded, d.bytes.len, @tagName(r.out) });
+            bad += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), bad);
 }

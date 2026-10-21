@@ -2014,7 +2014,14 @@ W9d① 적대 리뷰 후 — 같은 id 다시 시작(2026-10-16 — W9d② 측�
 - **글 풀기**: charset 없는 `text/*`(HTML·JavaScript 빼고)의 UTF-8 은 Chromium 이 windows-1252 로 풀어 깨져 온다(J11) — windows-1252 로 되돌려 UTF-8 이면
   그것을 싣고(`redecoded`), 아니면 「Chromium 이 푼 그대로」 표시(`chromium_decoded`). 글 MIME 인데 base64 로 온 것(잘못된 UTF-8 JSON·charset 없는 EUC-KR)은
   풀어 UTF-8 이면 글, 아니면 바이너리(`binary` — CLI 는 `--out` 으로만, MCP 도 `out`).
-  그 밖의 charset 이 없거나 UTF-8 인 글은 받은 바이트 수(Σ `dataReceived`)와 글의 UTF-8 길이가 다르면 `chromium_decoded` — Chromium 이 BOM(UTF-16 등 —
+  charset 은 Content-Type 을 Fetch 의 「extract a MIME type」 으로 읽는다(재검증 15 회차 D-G1 — 전에는 첫 `charset=` 부분 글을 찾아 UTF-8 이 아니면 모두
+  「다른 charset」 으로 쳐, Chromium 이 무시한 값의 windows-1252 글이 표시 없이 남았다): 겹친 헤더(CDP 는 `\n` 으로 잇는다)와 `,` 로 가른 값마다 MIME 를
+  읽어 마지막 것을 쓰고, 본질이 같은데 charset 이 없으면 앞의 것을 물려받는다(다르면 버린다); 매개변수 이름은 꼭 `charset`(대소문자 무시 — `x-charset=`·
+  `charset =` 은 아니다), 같은 이름은 첫 것, 따옴표 값은 `\` 를 푼다. 값은 Encoding Standard 의 이름표 표로 가른다 — UTF-8 의 이름표는 UTF-8, 그 밖의
+  이름표(Latin-1·EUC-KR·UTF-16·replacement…)는 Chromium 도 XHR 도 그것으로 풀어 표시하지 않고, 빈 값은 없는 것, 표에 없는 값(`none`·`binary`·`utf-8x`·
+  `'utf-8'`)은 Chromium 이 **MIME 와 상관없이** windows-1252 로 풀므로(실측: `application/json; charset=x-bogus` 도) MIME 를 가리지 않고 되돌린다(글의
+  UTF-8 길이가 받은 수와 같으면 맞게 풀린 글로 두고, 되돌리지 못하면 `chromium_decoded`).
+  그 밖의 charset 이 없거나 UTF-8 이거나 표에 없는 글은 받은 바이트 수(Σ `dataReceived`)와 글의 UTF-8 길이가 다르면 `chromium_decoded` — Chromium 이 BOM(UTF-16 등 —
   선언한 charset 보다 앞선다; 최종 재검증 D-B1: `charset=utf-8` 도 그렇다)이나 MIME 의
   기본으로 다르게 푼 글이다(20 회 검증 15 회차 D1: `FF FE` 로 시작한 JSON 12 바이트가 표시 없이 UTF-16 글 15 바이트로 왔다). 받은 수를 모르면(0) 보지 않는다. 알고 둔 틈(최종 재검증 N-2): UTF-8 BOM 으로 시작한 본문은 Chromium 이 BOM 을 떼 길이가 3 다르므로 글이 fetch 가 읽은 것과
   같아도 `chromium_decoded` 다(닫힌 쪽 — 표시는 「다를 수 있다」).
@@ -2445,3 +2452,17 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
     `mise run` 게이트 열두 개 통과. 판정(실제 CEF 154, 디버그 빌드): `--network` 173/0, `--network-body` 92/0, `--review-body-v20a` 35/0, `--review-body-v20b` 42/0, `--review-body-v20fa` 17/0(`v20f-r9-reload-while-pending` 다른 호스트·머리 전·400 ms 의 다시 받은 것 4/4 — 고치기 전 0/4, 대조 넷도 4/4·10/10; 끝난 뒤 10 초의 주기 task 0 번), `--review-body-v20fb` 33/0(`v20f-15-u16cs`·`u16plaincs`·`u16cs-xhr` 표시됨). 변이(사본에서, 실패 수로 판정, 매번 되돌림 확인): D-A 5·D-B 4·D-B1 2·N-a 8·
     N-b 2 — 21 중 RED 21(처음 판에서 D-A 의 「짝이 없으면 곧 끊는다」 가 살아 — 덮는 시험이 없었다 — 짝 없는 앞 문서 기록 시험을 더해 RED, N-a 의 하나는
     컴파일 실패라 다른 꼴로 다시 돌려 RED).
+  - **재검증 15 회차**(2026-10-21 — e9ba4f018 를 검증자 B 가 다시, `scratchpad/w9d2_v20g/ROUNDS_B.md`): **D-G1(LOW–MED)** Chromium 이 무시하는 charset
+    선언(빈 `charset=`·`charset=""`·모르는 이름표 `none`·`binary`·`utf-8x`·`x-bogus`·`'utf-8'`, 이름이 `charset` 이 아닌 `x-charset=latin1`·`charset =`,
+    `\n` 으로 이은 겹친 Content-Type)을 「다른 charset」 으로 쳐 windows-1252 로 풀린 글이 표시 없이 남았다(실제 CEF 114 본문 중 32 — 24 는 fetch 와 XHR 이
+    모두 맞는 UTF-8 을 읽었다). 고침: 위 「글 풀기」 — Fetch 의 「extract a MIME type」 과 Encoding Standard 의 이름표 표로 가르고, 표에 없는 이름표는
+    MIME 와 상관없이 되돌린다. **N-g1** CLI 표시 「as the browser decoded it (no charset — …)」 는 `charset=utf-8` 본문(D-B1·UTF-8 BOM)에도 붙었다 — 이제
+    「as the browser decoded it — may differ from the bytes received and from what the page read」. **N-g2** `--out` 이 없는 폴더·폴더인 대상이면 그
+    까닭을 말한다(「its directory does not exist」·「the path is a directory」 — 그 밖은 전의 글). 판정 `--review-body-v20fb` 에 D-G1 의 헤더 꼴 28 개
+    (`v20f-15-dg1-*` — 빈·따옴표 빈·모르는 이름표·`x-charset`·`charset =`·작은따옴표·빈 CSS·모르는 이름표의 JSON 은 받은 바이트로 되돌림, 그 아래의 UTF-16
+    BOM·겹친 헤더는 표시, UTF-8 이름표·겹친 헤더의 마지막 utf-8·`\` 를 푼 따옴표는 그대로, 선언한 Latin-1·EUC-KR·UTF-16 은 표시 없이)를 더했다.
+    검증: 순수 166(시험 둘 — 헤더 꼴 66·결과 갈래 34 줄), CLI·session 827 통과·1 건너뜀(N-g2 시험), L2 는 이 Mac 의 환경 실패 아홉(위와 같다)만,
+    `mise run` 게이트 여섯(fmt-check·check-doc-links·check-doc-line-refs·check-boundaries·check-targets·web-sidecar) 통과. 판정(실제 CEF 154):
+    `--review-body-v20fb` 61/0(`dg1` 28/28), `--network-body` 92/0, `--review-body-v20b` 42/0(선언한 Latin-1·EUC-KR 은 표시 없음 그대로). 변이(사본에서,
+    실패 수로, 매번 되돌림 확인): 매개변수 이름 4·이름표 표 6·겹친 헤더 5·따옴표 1·되돌리기 3·MIME 읽기 1·N-g2 2 — 22 중 RED 22(되돌리기 둘은 처음에
+    쓰지 않는 인자로 컴파일 실패라 그 인자를 버리는 꼴로 다시 돌려 RED).

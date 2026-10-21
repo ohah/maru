@@ -3,6 +3,10 @@
 //! sidecar write its body debug log (`MARU_WEB_TEST_BODY_LOG`) there — the orphan item counts `body: tick` lines in it.
 //!   v20f-15-*   encodings that attack V4: UTF-16 BOM with charset=utf-8, UTF-16BE BOM, other MIME, gzip, cached / 304 bodies, XHR,
 //!               BOM UTF-8 JSON (false flag?), multi-byte controls (gzip, deflate, br, chunked, cache) that must stay unflagged and exact
+//!   v20f-15-dg1-* (re-verification round 15, D-G1) Content-Type charset forms Chromium does not honour — empty, `""`, unknown labels,
+//!               `x-charset=`, `charset = `, single quotes, JSON with an unknown label: re-decoded to the received bytes; UTF-16 BOM under them and
+//!               under duplicate Content-Type headers: marked; UTF-8 labels and duplicates ending in utf-8: exact and unmarked; a real declared
+//!               Latin-1 / EUC-KR / UTF-16 (what XHR reads): unmarked
 //!   v20f-14-*   V1 at the wire: agent tab with the switch off (any_host, full=false) — own first-site responses kept, other sites and hops to
 //!               them stripped and not captured; agent navigation to the other site; narrowing (user drove) hides the other site again
 //!   v20f-12-*   switch toggled every 70 ms between full and any_host+full=false (the V1 path) with a new session per off
@@ -56,6 +60,12 @@ const gz8 = [_]u8{ 31, 139, 8, 0, 0, 0, 0, 0, 2, 255, 171, 86, 74, 87, 178, 82, 
 const df_plain = "{\"deflate\":\"\xea\xb0\x80\xeb\x82\x98\xeb\x8b\xa4\"}";
 const df_bytes = [_]u8{ 120, 156, 171, 86, 74, 73, 77, 203, 73, 44, 73, 85, 178, 82, 122, 181, 161, 225, 117, 211, 140, 215, 221, 75, 148, 106, 1, 116, 168, 10, 201 };
 const br_plain = "{\"br\":\"brotli-body-\xea\xb0\x80\"}";
+// D-G1 bodies (verifier v20g B R15): 「café 가나 ✓ 😀」, 「café naïve」, 「가나」 in EUC-KR, {"k":1} in UTF-16LE without a BOM, {"k":"é"} in UTF-16LE with a BOM
+const dg_u8 = "caf\xc3\xa9 \xea\xb0\x80\xeb\x82\x98 \xe2\x9c\x93 \xf0\x9f\x98\x80";
+const dg_latin = "caf\xc3\xa9 na\xc3\xafve";
+const dg_euckr = "\xb0\xa1\xb3\xaa";
+const dg_u16_nobom = "{\x00\"\x00k\x00\"\x00:\x001\x00}\x00";
+const dg_u16_bom = "\xff\xfe{\x00\"\x00k\x00\"\x00:\x00\"\x00\xe9\x00\"\x00}\x00";
 const br_bytes = [_]u8{ 143, 11, 128, 123, 34, 98, 114, 34, 58, 34, 98, 114, 111, 116, 108, 105, 45, 98, 111, 100, 121, 45, 234, 176, 128, 34, 125, 3 };
 
 const Mode = enum { plain, cache, etag, chunked };
@@ -64,6 +74,12 @@ const Expect = enum {
     flag_or_exact,
     /// control: captured, byte-exact, no mark (compressed / chunked / cached multi-byte UTF-8 without charset)
     exact_noflag,
+    /// D-G1: captured and byte-exact; `redecoded` allowed, never `chromium_decoded` (Chromium read the bytes as windows-1252, the page as UTF-8)
+    exact_redecoded,
+    /// D-G1: captured and marked `chromium_decoded` (a UTF-16 BOM body the page's fetch read as UTF-8)
+    marked,
+    /// a declared charset Chromium and XHR both honour: captured as Chromium decoded it, no mark of any kind
+    declared_noflag,
 };
 const EncCase = struct { name: []const u8, ctype: []const u8, body: []const u8, raw: []const u8, extra: []const u8 = "", mode: Mode = .plain, expect: Expect, twice: bool = false };
 const enc_cases = [_]EncCase{
@@ -85,6 +101,35 @@ const enc_cases = [_]EncCase{
     .{ .name = "u8chunked", .ctype = "application/json", .body = u8_json, .raw = u8_json, .mode = .chunked, .expect = .exact_noflag },
     .{ .name = "u8cache", .ctype = "application/json", .body = u8_json, .raw = u8_json, .mode = .cache, .expect = .exact_noflag, .twice = true },
     .{ .name = "u8etag", .ctype = "application/json", .body = u8_json, .raw = u8_json, .mode = .etag, .expect = .exact_noflag, .twice = true },
+    // ── re-verification round 15, D-G1 ──
+    .{ .name = "dg1-empty", .ctype = "text/plain; charset=", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
+    .{ .name = "dg1-emptyq", .ctype = "text/plain; charset=\"\"", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
+    .{ .name = "dg1-bogus", .ctype = "text/plain; charset=x-bogus-maru", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
+    .{ .name = "dg1-bogusl", .ctype = "text/plain; charset=x-bogus-maru", .body = dg_latin, .raw = dg_latin, .expect = .exact_redecoded },
+    .{ .name = "dg1-csnone", .ctype = "text/plain; charset=none", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
+    .{ .name = "dg1-csbinary", .ctype = "text/plain; charset=binary", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
+    .{ .name = "dg1-csutf8x", .ctype = "text/plain; charset=utf-8x", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
+    .{ .name = "dg1-xcsl", .ctype = "text/plain; x-charset=latin1", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
+    .{ .name = "dg1-xcsll", .ctype = "text/plain; x-charset=latin1", .body = dg_latin, .raw = dg_latin, .expect = .exact_redecoded },
+    .{ .name = "dg1-xcs8", .ctype = "text/plain; x-charset=utf-8", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
+    .{ .name = "dg1-spaced", .ctype = "text/plain; charset = utf-8", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
+    .{ .name = "dg1-squote", .ctype = "text/plain; charset='utf-8'", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
+    .{ .name = "dg1-csscs", .ctype = "text/css; charset=", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
+    .{ .name = "dg1-jsonbogus", .ctype = "application/json; charset=x-bogus-maru", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
+    .{ .name = "dg1-jsonbogusl", .ctype = "application/json; charset=x-bogus-maru", .body = dg_latin, .raw = dg_latin, .expect = .exact_redecoded },
+    .{ .name = "dg1-u16empty", .ctype = "application/json; charset=", .body = dg_u16_bom, .raw = dg_u16_bom, .expect = .marked },
+    .{ .name = "dg1-u16bogus", .ctype = "application/json; charset=x-bogus-maru", .body = dg_u16_bom, .raw = dg_u16_bom, .expect = .marked },
+    .{ .name = "dg1-dupct-u16", .ctype = "application/json; charset=utf-8", .body = dg_u16_bom, .raw = dg_u16_bom, .extra = "Content-Type: application/json\r\n", .expect = .marked },
+    .{ .name = "dg1-jsonempty", .ctype = "application/json; charset=", .body = dg_u8, .raw = dg_u8, .expect = .exact_noflag },
+    .{ .name = "dg1-u11", .ctype = "text/plain; charset=unicode-1-1-utf-8", .body = dg_u8, .raw = dg_u8, .expect = .exact_noflag },
+    .{ .name = "dg1-dup-ul", .ctype = "text/plain; charset=utf-8; charset=iso-8859-1", .body = dg_u8, .raw = dg_u8, .expect = .exact_noflag },
+    .{ .name = "dg1-dupct-u8", .ctype = "text/plain; charset=utf-8", .body = dg_u8, .raw = dg_u8, .extra = "Content-Type: text/plain\r\n", .expect = .exact_noflag },
+    .{ .name = "dg1-dupct-bogus", .ctype = "text/plain; charset=x-bogus-maru", .body = dg_u8, .raw = dg_u8, .extra = "Content-Type: text/plain; charset=utf-8\r\n", .expect = .exact_noflag },
+    .{ .name = "dg1-quoted-esc", .ctype = "text/plain; charset=\"ut\\f-8\"; foo=bar", .body = dg_u8, .raw = dg_u8, .expect = .flag_or_exact },
+    .{ .name = "dg1-des-latin1", .ctype = "text/plain; charset=iso-8859-1", .body = dg_u8, .raw = dg_u8, .expect = .declared_noflag },
+    .{ .name = "dg1-dup-lu", .ctype = "text/plain; charset=iso-8859-1; charset=utf-8", .body = dg_u8, .raw = dg_u8, .expect = .declared_noflag },
+    .{ .name = "dg1-des-euckr", .ctype = "text/plain; charset=euc-kr", .body = dg_euckr, .raw = dg_euckr, .expect = .declared_noflag },
+    .{ .name = "dg1-des-u16", .ctype = "application/json; charset=utf-16", .body = dg_u16_nobom, .raw = dg_u16_nobom, .expect = .declared_noflag },
 };
 
 fn startServer() !void {
@@ -597,6 +642,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
                     },
                     // first fetch must be captured exactly without a mark; a later (cached) one may be not captured, but never wrong or marked
                     .exact_noflag => this_ok = this_ok and ((cap and exact and !marked and !x.flags.redecoded) or (k > 0 and !cap)),
+                    .exact_redecoded => this_ok = this_ok and cap and exact and !marked,
+                    .marked => this_ok = this_ok and cap and x.flags.chromium_decoded and !x.flags.redecoded,
+                    .declared_noflag => this_ok = this_ok and cap and !marked and !x.flags.redecoded,
                 }
                 if (!this_ok) ok = false;
                 const piece = std.fmt.bufPrint(line[ln..], " [#{d} {s} chromium_decoded={} binary={} redecoded={} size={d} decoded={d} exact={} as_page_read={} 「{s}」]", .{ k + 1, stateName(x), x.flags.chromium_decoded, x.flags.binary, x.flags.redecoded, d.len, x.decoded, exact, as_page, printable(&pb, d) }) catch "";

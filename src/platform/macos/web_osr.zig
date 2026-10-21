@@ -9709,3 +9709,308 @@ test "W9d② v20b 17 회차: 기록 켬·끔 500 번 — 세션은 늘 새것, �
     networkBodySync(&.{});
     try std.testing.expectEqual(@as(usize, 0), net_budget.body_bytes);
 }
+
+// ── W9d② v20f A R9(최종 코드 6d8d39dbd 재검증 — 멈춘 기록 D2 고침을 공격) ─────────────────────────────────────
+
+test "W9d② v20f A R9-3: 멈춘 기록은 같은 세션의 늦은 on·off·failed 어느 것으로도, 설정 끔·켬으로도, 브라우저 재생성으로도 다시 켜지지 않는다 — 에이전트가 켜면 새 세션, 그 뒤 옛 세션의 알림은 무시, 새 세션의 failed 는 다시 해 본다(대조)" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    const saved_full = net_full;
+    defer net_full = saved_full;
+    net_full = true;
+    try v20Setup(gpa, &.{171});
+    const s1 = surfaces.getPtr(171).?.rec_session;
+    apply(gpa, .{ .net_record_state = .{ .browser = 171, .session = s1, .status = .on } }, 0);
+    apply(gpa, .{ .net_record_state = .{ .browser = 171, .session = s1, .status = .paused } }, 0);
+    var buf: [8]Message = undefined;
+    for ([_]ws.message.NetRecordStatus{ .on, .off, .failed, .on }) |st| {
+        apply(gpa, .{ .net_record_state = .{ .browser = 171, .session = s1, .status = st } }, 0);
+        errdefer std.debug.print("R9-3: late {s} for the paused session changed the state to {s}\n", .{ @tagName(st), @tagName(surfaces.getPtr(171).?.rec_status) });
+        try std.testing.expect(!networkRecording(171));
+        try std.testing.expectEqual(ws.message.NetRecordStatus.paused, surfaces.getPtr(171).?.rec_status);
+    }
+    outbox_pending.clearRetainingCapacity();
+    setNetworkFull(false);
+    setNetworkFull(true);
+    apply(gpa, .{ .browser_created = 171 }, 0);
+    for (recFrames(&buf)) |m| try std.testing.expect(!(m.net_record.browser == 171 and m.net_record.on));
+    try std.testing.expect(!networkRecording(171));
+    // 에이전트가 다시 켠다 — 새 세션.
+    outbox_pending.clearRetainingCapacity();
+    try networkRecord(171, true);
+    const s2 = surfaces.getPtr(171).?.rec_session;
+    try std.testing.expect(s2 != s1);
+    var sent_on = false;
+    for (recFrames(&buf)) |m| if (m.net_record.browser == 171 and m.net_record.on and m.net_record.session == s2) {
+        sent_on = true;
+    };
+    try std.testing.expect(sent_on);
+    // 옛 세션의 늦은 paused·failed 는 새 세션을 바꾸지 않는다.
+    apply(gpa, .{ .net_record_state = .{ .browser = 171, .session = s1, .status = .paused } }, 0);
+    apply(gpa, .{ .net_record_state = .{ .browser = 171, .session = s1, .status = .failed } }, 0);
+    apply(gpa, .{ .net_record_state = .{ .browser = 171, .session = s2, .status = .on } }, 0);
+    try std.testing.expect(networkRecording(171));
+    // 대조: 새 세션이 켜지지 못했다(failed) — 다음 브라우저 생성이 다시 해 본다.
+    apply(gpa, .{ .net_record_state = .{ .browser = 171, .session = s2, .status = .failed } }, 0);
+    try std.testing.expect(!networkRecording(171));
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 171 }, 0);
+    var again = false;
+    for (recFrames(&buf)) |m| if (m.net_record.browser == 171 and m.net_record.on and m.net_record.session > s2) {
+        again = true;
+    };
+    try std.testing.expect(again);
+    // 그 새 세션이 다시 멈추면(밸브) 다음 브라우저 생성은 다시 켜지 않는다.
+    const s3 = surfaces.getPtr(171).?.rec_session;
+    apply(gpa, .{ .net_record_state = .{ .browser = 171, .session = s3, .status = .paused } }, 0);
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 171 }, 0);
+    for (recFrames(&buf)) |m| try std.testing.expect(!(m.net_record.browser == 171 and m.net_record.on));
+}
+
+test "W9d② v20f A R9-4: 멈춘 기록에서 엔진이 끝내 내려가면(crashed_repeatedly) — 상태 이름과 ◉ (관측)" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    defer latched = null;
+    try v20Setup(gpa, &.{172});
+    const s1 = surfaces.getPtr(172).?.rec_session;
+    apply(gpa, .{ .net_record_state = .{ .browser = 172, .session = s1, .status = .paused } }, 0);
+    forgetSidecar(gpa);
+    fail(.crashed_repeatedly);
+    // 알고 둔 틈(최종 재검증 N-d — docs/plans/web-osr-backend.md): 멈춘 기록은 엔진이 끝내 내려가면 `failed` 로 보인다(엔진이 잠겨 다시 켤 길이 없다 — 이름뿐).
+    try std.testing.expectEqualStrings("failed", recordStateName(surfaces.getPtr(172).?));
+    try std.testing.expect(!networkRecording(172));
+}
+
+// ── W9d② 최종 재검증 — 검증자 v20f B(11–20 회차)의 시험을 회귀 시험으로 ─────────────────────────────────────────────────
+
+fn v20fFrames(buf: []Message) []Message {
+    return recFrames(buf);
+}
+
+test "W9d② v20f 11: hostile record-state frames against a paused recording — on/off/failed of the paused session, other sessions, session 0, body frames of the paused session, browser_created — stay paused until the agent asks" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 191, 192 });
+    apply(gpa, .{ .url_changed = .{ .browser = 191, .url = "https://a.test/" } }, 0);
+    networkSync(&.{ .{ .tab = 191, .who = 7, .birth = true, .any_host = true }, .{ .tab = 192, .who = 8, .birth = true, .any_host = true } });
+    networkBodySync(&.{ .{ .tab = 191, .who = 17, .birth = true, .any_host = true }, .{ .tab = 192, .who = 18, .birth = true, .any_host = true } });
+    try networkRecord(191, true);
+    try networkRecord(192, true);
+    const s = surfaces.getPtr(191).?.rec_session;
+    const other = surfaces.getPtr(192).?.rec_session;
+    apply(gpa, .{ .net_record_state = .{ .browser = 191, .session = s, .status = .on } }, 0);
+    v20bBegin(gpa, 191, 1);
+    apply(gpa, .{ .net_body_data = .{ .browser = 191, .session = s, .request = 1, .offset = 0, .bytes = "{\"p\"" } }, 0);
+    apply(gpa, .{ .net_record_state = .{ .browser = 191, .session = s, .status = .paused } }, 0);
+    try std.testing.expect(!networkRecording(191));
+    var buf: [32]Message = undefined;
+    // every later notice of the paused session, in every order, and notices of other sessions
+    const notices = [_]struct { session: u32, status: ws.message.NetRecordStatus }{
+        .{ .session = s, .status = .on },        .{ .session = s, .status = .failed },                .{ .session = s, .status = .off },
+        .{ .session = s, .status = .paused },    .{ .session = other, .status = .on },                .{ .session = 0, .status = .on },
+        .{ .session = s + 1000, .status = .on }, .{ .session = std.math.maxInt(u32), .status = .on }, .{ .session = s, .status = .on },
+    };
+    for (notices) |n| {
+        outbox_pending.clearRetainingCapacity();
+        apply(gpa, .{ .net_record_state = .{ .browser = 191, .session = n.session, .status = n.status } }, 0);
+        try std.testing.expect(!networkRecording(191));
+        try std.testing.expectEqual(@as(usize, 0), v20fFrames(&buf).len);
+        const r = try networkRecordResult(gpa, 191);
+        defer gpa.free(r);
+        try std.testing.expectEqualStrings("{\"recording\":true,\"state\":\"paused\"}", r);
+    }
+    // the paused session's pending body still ends (the sidecar closes it) — not left pending, bytes accounted
+    apply(gpa, .{ .net_body_data = .{ .browser = 191, .session = s, .request = 1, .offset = 4, .bytes = ":1}" } }, 0);
+    apply(gpa, .{ .net_body_end = .{ .browser = 191, .session = s, .request = 1, .state = .captured, .size = 7 } }, 0);
+    try std.testing.expectEqualStrings("captured", try v20bState(gpa, 191, 1));
+    // re-creation (crash restart) and a setting toggle do not re-enable it
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 191 }, 0);
+    setNetworkFull(false);
+    setNetworkFull(true);
+    for (v20fFrames(&buf)) |f| try std.testing.expect(f.net_record.browser != 191);
+    try std.testing.expect(!networkRecording(191));
+    // control: the other tab kept recording through all of it (it got a new session at the toggle)
+    try std.testing.expect(networkRecording(192));
+    // the agent asks — a new session, and only that session's notices count
+    outbox_pending.clearRetainingCapacity();
+    try networkRecord(191, true);
+    const fr = v20fFrames(&buf);
+    try std.testing.expect(fr.len == 1 and fr[0].net_record.on and fr[0].net_record.session > s);
+    const s2 = fr[0].net_record.session;
+    apply(gpa, .{ .net_record_state = .{ .browser = 191, .session = s, .status = .paused } }, 0); // late, old session
+    apply(gpa, .{ .net_record_state = .{ .browser = 191, .session = s2, .status = .on } }, 0);
+    try std.testing.expect(networkRecording(191));
+}
+
+test "W9d② v20f 12·17·18: model check — 4000 random steps over agent on/off, sidecar notices (current and old session), setting toggles, browser re-creation and sidecar loss; frames and ◉ match a reference model, a paused recording is re-enabled only by the agent" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    const tabs = [_]u64{ 181, 182 };
+    try testSurfaces(gpa, &tabs);
+    for (tabs) |t| apply(gpa, .{ .url_changed = .{ .browser = t, .url = "https://a.test/" } }, 0);
+    networkSync(&.{ .{ .tab = 181, .who = 7, .birth = true, .any_host = true }, .{ .tab = 182, .who = 8, .birth = true, .any_host = true } });
+    networkBodySync(&.{ .{ .tab = 181, .who = 17, .birth = true, .any_host = true }, .{ .tab = 182, .who = 18, .birth = true, .any_host = true } });
+    const St = enum { off, on, paused, failed };
+    const M = struct { on: bool = false, st: St = .off, sess: u32 = 0, sent: u32 = 0 };
+    var m: [2]M = .{ .{}, .{} };
+    var full = true;
+    var prng = std.Random.DefaultPrng.init(0x20f12);
+    const rnd = prng.random();
+    var buf: [32]Message = undefined;
+    var counts: [8]usize = @splat(0);
+    var paused_reenabled_by_agent: usize = 0;
+    var paused_survived: usize = 0;
+    for (0..4000) |step| {
+        const i = rnd.uintLessThan(usize, 2);
+        const t = tabs[i];
+        const op = rnd.uintLessThan(usize, 8);
+        counts[op] += 1;
+        // what the model expects: per tab, null = no frame, else on/off (a new session is checked against the frame)
+        var want: [2]?bool = .{ null, null };
+        var new_sess: [2]bool = .{ false, false };
+        const was_paused = m[i].on and m[i].st == .paused;
+        outbox_pending.clearRetainingCapacity();
+        switch (op) {
+            0 => { // agent on
+                try networkRecord(t, true);
+                if (!(m[i].on and m[i].st != .paused and m[i].st != .failed)) {
+                    m[i].on = true;
+                    m[i].st = .off;
+                    want[i] = true;
+                    new_sess[i] = true;
+                    if (was_paused) paused_reenabled_by_agent += 1;
+                }
+            },
+            1 => { // agent off
+                try networkRecord(t, false);
+                if (m[i].on or m[i].sent != 0) {
+                    if (m[i].sent != 0) want[i] = false;
+                    m[i] = .{};
+                }
+            },
+            2, 3 => { // sidecar notice for the current session (2) or an older one (3)
+                const sts = [_]ws.message.NetRecordStatus{ .on, .paused, .failed, .off };
+                const v = sts[rnd.uintLessThan(usize, sts.len)];
+                const sess = if (op == 2) m[i].sess else m[i].sess -| (1 + rnd.uintLessThan(u32, 3));
+                apply(gpa, .{ .net_record_state = .{ .browser = t, .session = sess, .status = v } }, 0);
+                if (op == 2 and m[i].on and m[i].sess != 0 and m[i].st != .paused) m[i].st = switch (v) {
+                    .on => .on,
+                    .paused => .paused,
+                    .failed, .off => .failed,
+                };
+            },
+            4 => { // setting toggled
+                const v = rnd.boolean();
+                setNetworkFull(v);
+                if (v != full) {
+                    full = v;
+                    if (!v) for (&m, 0..) |*x, k| if (x.on and x.st != .paused and x.st != .failed) {
+                        x.st = .off;
+                        want[k] = true;
+                        new_sess[k] = true;
+                    };
+                }
+            },
+            5 => { // the browser is re-created (closed popup revived)
+                apply(gpa, .{ .browser_created = t }, 0);
+                m[i].sent = 0;
+                if (m[i].on and m[i].st != .paused) {
+                    m[i].st = .off;
+                    want[i] = true;
+                    new_sess[i] = true;
+                }
+            },
+            6 => { // sidecar lost and back: every browser re-created
+                forgetSidecar(gpa);
+                for (tabs, 0..) |tt, k| {
+                    apply(gpa, .{ .browser_created = tt }, 0);
+                    m[k].sent = 0;
+                    if (m[k].on and m[k].st != .paused) {
+                        m[k].st = .off;
+                        want[k] = true;
+                        new_sess[k] = true;
+                    }
+                }
+            },
+            else => { // agent on twice (no second frame) — or a double off
+                if (rnd.boolean()) {
+                    try networkRecord(t, true);
+                    if (!(m[i].on and m[i].st != .paused and m[i].st != .failed)) {
+                        m[i].on = true;
+                        m[i].st = .off;
+                        want[i] = true;
+                        new_sess[i] = true;
+                        if (was_paused) paused_reenabled_by_agent += 1;
+                    }
+                    try networkRecord(t, true);
+                } else {
+                    try networkRecord(t, false);
+                    if (m[i].on or m[i].sent != 0) {
+                        if (m[i].sent != 0) want[i] = false;
+                        m[i] = .{};
+                    }
+                    try networkRecord(t, false);
+                }
+            },
+        }
+        if (was_paused and m[i].on and m[i].st == .paused) paused_survived += 1;
+        var got: [2]usize = .{ 0, 0 };
+        for (v20fFrames(&buf)) |f| {
+            const k: usize = if (f.net_record.browser == 181) 0 else 1;
+            got[k] += 1;
+            errdefer std.debug.print("v20f model step {d} op {d} tab {d}: frame on={} session={d} want {?}\n", .{ step, op, k, f.net_record.on, f.net_record.session, want[k] });
+            try std.testing.expect(want[k] != null and want[k].? == f.net_record.on);
+            if (f.net_record.on) {
+                try std.testing.expect(new_sess[k] and f.net_record.session > m[k].sess);
+                m[k].sess = f.net_record.session;
+                m[k].sent = f.net_record.session;
+            }
+        }
+        for (0..2) |k| {
+            errdefer std.debug.print("v20f model step {d} op {d} tab {d}: frames {d} want {?} model on={} st={s} real recording={}\n", .{ step, op, k, got[k], want[k], m[k].on, @tagName(m[k].st), networkRecording(tabs[k]) });
+            try std.testing.expectEqual(@as(usize, if (want[k] != null) 1 else 0), got[k]);
+            try std.testing.expectEqual(m[k].on and m[k].st != .paused and m[k].st != .failed, networkRecording(tabs[k]));
+            const r = try networkRecordResult(gpa, tabs[k]);
+            defer gpa.free(r);
+            const name: []const u8 = if (!m[k].on) "off" else switch (m[k].st) {
+                .off => "starting",
+                .on => "on",
+                .paused => "paused",
+                .failed => "failed",
+            };
+            var eb: [64]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&eb, "{{\"recording\":{},\"state\":\"{s}\"}}", .{ m[k].on, name }), r);
+        }
+    }
+    for (counts) |c| try std.testing.expect(c > 300);
+    try std.testing.expect(paused_reenabled_by_agent > 5 and paused_survived > 50);
+}
+
+test "W9d② v20f 18: the engine stops for good while a recording is paused — state becomes failed, ◉ stays off, and with the engine latched no browser is re-created to turn it back on" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer {
+        latched = null;
+        testTeardown(gpa);
+    }
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{193});
+    networkSync(&.{.{ .tab = 193, .who = 7, .birth = true, .any_host = true }});
+    networkBodySync(&.{.{ .tab = 193, .who = 17, .birth = true, .any_host = true }});
+    try networkRecord(193, true);
+    const s = surfaces.getPtr(193).?.rec_session;
+    apply(gpa, .{ .net_record_state = .{ .browser = 193, .session = s, .status = .paused } }, 0);
+    forgetSidecar(gpa);
+    fail(.crashed_repeatedly);
+    try std.testing.expect(!networkRecording(193));
+    const r = try networkRecordResult(gpa, 193);
+    defer gpa.free(r);
+    // observation: `fail` overwrites paused with failed (only the shown state — the engine is latched and does not come back)
+    try std.testing.expectEqualStrings("{\"recording\":true,\"state\":\"failed\"}", r);
+}

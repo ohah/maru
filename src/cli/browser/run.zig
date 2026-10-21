@@ -232,7 +232,9 @@ const BodyOut = struct {
     }
 
     fn add(self: *BodyOut, allocator: std.mem.Allocator, o: std.json.ObjectMap) std.mem.Allocator.Error!Step {
-        const total = if (o.get("body_size")) |v| (if (v == .integer) v.integer else -1) else -1;
+        // W9d② 최종 재검증 N-b: 크기가 있는데 정수가 아니거나 음수면 견줄 수 없다 — 서버의 잘못으로 보고 쓰지 않는다(전에는 −5 를 「모른다」 로
+        // 쳐 짧은 본문을 끝으로 받았다). 없으면 −1(견줄 것이 없다 — maru 의 서버는 늘 싣는다).
+        const total: i64 = if (o.get("body_size")) |v| (if (v == .integer and v.integer >= 0) v.integer else return .{ .fail = "the server returned a malformed body piece" }) else -1;
         if (self.size) |prev| if (prev != total) return .{ .fail = "the body changed while it was read" };
         const binary = if (o.get("body_encoding")) |v| v == .string and std.mem.eql(u8, v.string, "base64") else false;
         // W9d② 20 회 검증 N4: 조각 사이에 글·바이너리가 바뀌면 한 본문이 아니다(글 조각과 푼 바이트를 이어 붙이게 된다) — maru 의 서버는
@@ -259,6 +261,9 @@ const BodyOut = struct {
         if (next <= self.offset) return .{ .fail = "the body did not advance" };
         // W9d② 적대 리뷰 3 회차: 본문은 1 MiB 까지다 — 그보다 먼 다음 오프셋은 서버의 잘못이다(전에는 u32 를 넘으면 `@intCast` 가 죽었다).
         if (next > browser.max_network_body_bytes) return .{ .fail = "the server returned a body offset out of range" };
+        // W9d② 최종 재검증 N-b: 다음 오프셋은 지금까지 모은 바이트 수여야 한다 — 다르면 조각 사이에 틈이나 겹침이 있다(크기의 합이 맞아도 다른
+        // 본문이다). 전에는 `abc`+다음 4 와 `def`(크기 6)를 `abcdef` 로 다 받은 것처럼 썼다.
+        if (next != self.body.items.len) return .{ .fail = "the body pieces did not line up" };
         self.offset = @intCast(next);
         return .more;
     }
@@ -1208,4 +1213,106 @@ test "W9d② v20 A R10: --out 의 공개는 0600 이고, 대상이 심볼릭 링
     const st = try tmp.dir.statFile(io, "link", .{ .follow_symlinks = false });
     try std.testing.expectEqual(std.Io.File.Kind.file, st.kind);
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
+}
+
+// ── W9d② 최종 재검증(검증자 v20f A R10·B 16 의 재현을 회귀 시험으로) ────────────────────────────────────────────────
+
+/// 조각을 차례로 `add` 에 넣고 마지막 걸음(`more`·`done`·실패 글)과 모은 바이트.
+fn v20fRun(pieces: []const []const u8) !struct { step: []const u8, body: []u8 } {
+    const ta = std.testing.allocator;
+    var acc: BodyOut = .{ .marks = .init(ta) };
+    defer acc.deinit(ta);
+    var last: []const u8 = "more";
+    for (pieces) |p| {
+        const v = try std.json.parseFromSlice(std.json.Value, ta, p, .{});
+        defer v.deinit();
+        const step = try acc.add(ta, v.value.object);
+        last = switch (step) {
+            .more => "more",
+            .done => "done",
+            .fail => |m| m,
+        };
+        if (step != .more) break;
+    }
+    return .{ .step = last, .body = try ta.dupe(u8, acc.body.items) };
+}
+
+test "W9d② 최종 재검증 N-b(v20f A R10-1): --out — 다음 오프셋이 모은 길이와 다르면(틈·겹침) 크기 합이 맞아도, 크기가 음수면 실패(파일 없음); 대조: 크기 0·바이너리→글 바뀜·크기가 뒤에 생김·꼭 맞는 두 조각" {
+    const ta = std.testing.allocator;
+    const Case = struct { name: []const u8, pieces: []const []const u8, want: []const u8 };
+    const cases = [_]Case{
+        // 틈: 0..3 을 받고 다음은 4 부터 — 3 이 빠진 채 크기 6 이 찬다.
+        .{ .name = "gap", .pieces = &.{ "{\"body_state\":\"captured\",\"body_size\":6,\"body_encoding\":\"utf-8\",\"body\":\"abc\",\"body_next_offset\":4}", "{\"body_state\":\"captured\",\"body_size\":6,\"body_encoding\":\"utf-8\",\"body\":\"def\"}" }, .want = "the body pieces did not line up" },
+        // 겹침: 0..4 를 받고 다음은 2 부터.
+        .{ .name = "overlap", .pieces = &.{ "{\"body_state\":\"captured\",\"body_size\":6,\"body_encoding\":\"utf-8\",\"body\":\"abcd\",\"body_next_offset\":2}", "{\"body_state\":\"captured\",\"body_size\":6,\"body_encoding\":\"utf-8\",\"body\":\"ef\"}" }, .want = "the body pieces did not line up" },
+        // 바이너리 조각의 틈(푼 바이트 2 개 뒤 다음은 3).
+        .{ .name = "binary gap", .pieces = &.{ "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"base64\",\"body\":\"AAE=\",\"body_next_offset\":3}", "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"base64\",\"body\":\"AgM=\"}" }, .want = "the body pieces did not line up" },
+        // 크기가 음수·정수가 아니다(서버 잘못) — 견줄 수 없다.
+        .{ .name = "negative size", .pieces = &.{"{\"body_state\":\"captured\",\"body_size\":-5,\"body_encoding\":\"utf-8\",\"body\":\"ab\"}"}, .want = "the server returned a malformed body piece" },
+        .{ .name = "string size", .pieces = &.{"{\"body_state\":\"captured\",\"body_size\":\"2\",\"body_encoding\":\"utf-8\",\"body\":\"ab\"}"}, .want = "the server returned a malformed body piece" },
+        // 대조.
+        .{ .name = "empty", .pieces = &.{"{\"body_state\":\"captured\",\"body_size\":0,\"body_encoding\":\"utf-8\",\"body\":\"\"}"}, .want = "done" },
+        .{ .name = "base64 then utf-8", .pieces = &.{ "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"base64\",\"body\":\"YWI=\",\"body_next_offset\":2}", "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body\":\"cd\"}" }, .want = "the body changed while it was read" },
+        .{ .name = "size appears later", .pieces = &.{ "{\"body_state\":\"captured\",\"body_encoding\":\"utf-8\",\"body\":\"ab\",\"body_next_offset\":2}", "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body\":\"cd\"}" }, .want = "the body changed while it was read" },
+        .{ .name = "exact two pieces", .pieces = &.{ "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body\":\"ab\",\"body_next_offset\":2}", "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body\":\"cd\"}" }, .want = "done" },
+    };
+    for (cases) |c| {
+        const r = try v20fRun(c.pieces);
+        defer ta.free(r.body);
+        errdefer std.debug.print("N-b {s}: {s} body '{s}'\n", .{ c.name, r.step, r.body });
+        try std.testing.expectEqualStrings(c.want, r.step);
+    }
+}
+
+// ── 검증자 v20f B 16(N4 의 경계) ──────────────────────────────────────────────────────────────────────────────
+
+fn v20fPieces(pieces: []const []const u8) !union(enum) { done: []u8, fail: []const u8 } {
+    const ta = std.testing.allocator;
+    var acc: BodyOut = .{ .marks = .init(ta) };
+    defer acc.deinit(ta);
+    for (pieces, 0..) |p, k| {
+        const v = try std.json.parseFromSlice(std.json.Value, ta, p, .{});
+        defer v.deinit();
+        switch (try acc.add(ta, v.value.object)) {
+            .more => if (k + 1 == pieces.len) return error.NotEnded,
+            .done => return .{ .done = try ta.dupe(u8, acc.body.items) },
+            .fail => |m| return .{ .fail = m },
+        }
+    }
+    return error.NotEnded;
+}
+
+test "W9d② v20f 16: --out boundaries (N4) — exact sizes end, short and long ends fail, a body without a size is taken as is, binary pieces decode and are checked, flips either way fail, a piece that does not advance fails" {
+    const ta = std.testing.allocator;
+    const Exp = union(enum) { done: []const u8, fail: []const u8 };
+    const cases = [_]struct { pieces: []const []const u8, want: Exp }{
+        .{ .pieces = &.{"{\"body_state\":\"captured\",\"body_size\":1,\"body_encoding\":\"utf-8\",\"body\":\"a\"}"}, .want = .{ .done = "a" } },
+        .{ .pieces = &.{"{\"body_state\":\"captured\",\"body_size\":3,\"body_encoding\":\"utf-8\",\"body\":\"ab\"}"}, .want = .{ .fail = "the body ended before its size was reached" } },
+        .{ .pieces = &.{"{\"body_state\":\"captured\",\"body_size\":2,\"body_encoding\":\"utf-8\",\"body\":\"abc\"}"}, .want = .{ .fail = "the body ended before its size was reached" } },
+        .{ .pieces = &.{"{\"body_state\":\"captured\",\"body_encoding\":\"utf-8\",\"body\":\"ab\"}"}, .want = .{ .done = "ab" } }, // no size: nothing to compare (documented)
+        .{ .pieces = &.{"{\"body_state\":\"captured\",\"body_size\":3,\"body_encoding\":\"base64\",\"body\":\"AAEC\"}"}, .want = .{ .done = "\x00\x01\x02" } },
+        .{ .pieces = &.{"{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"base64\",\"body\":\"AAEC\"}"}, .want = .{ .fail = "the body ended before its size was reached" } },
+        .{ .pieces = &.{"{\"body_state\":\"captured\",\"body_size\":1,\"body_encoding\":\"base64\",\"body\":\"A\"}"}, .want = .{ .fail = "the server returned a malformed body piece" } },
+        .{ .pieces = &.{ "{\"body_state\":\"captured\",\"body_size\":5,\"body_encoding\":\"utf-8\",\"body\":\"ab\",\"body_next_offset\":2}", "{\"body_state\":\"captured\",\"body_size\":5,\"body_encoding\":\"utf-8\",\"body\":\"cd\",\"body_next_offset\":4}", "{\"body_state\":\"captured\",\"body_size\":5,\"body_encoding\":\"utf-8\",\"body\":\"e\"}" }, .want = .{ .done = "abcde" } },
+        .{ .pieces = &.{ "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"base64\",\"body\":\"AAE=\",\"body_next_offset\":2}", "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body\":\"cd\"}" }, .want = .{ .fail = "the body changed while it was read" } },
+        .{ .pieces = &.{ "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"base64\",\"body\":\"AAE=\",\"body_next_offset\":2}", "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"base64\",\"body\":\"AgM=\"}" }, .want = .{ .done = "\x00\x01\x02\x03" } },
+        .{ .pieces = &.{ "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body\":\"ab\",\"body_next_offset\":2}", "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body\":\"cd\",\"body_next_offset\":2}" }, .want = .{ .fail = "the body did not advance" } },
+        .{ .pieces = &.{ "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body\":\"ab\",\"body_next_offset\":2}", "{\"body_state\":\"captured\",\"body_encoding\":\"utf-8\",\"body\":\"cd\"}" }, .want = .{ .fail = "the body changed while it was read" } },
+        .{ .pieces = &.{"{\"body_state\":\"captured\",\"body_size\":0,\"body_encoding\":\"utf-8\",\"body\":\"\"}"}, .want = .{ .done = "" } },
+    };
+    for (cases, 0..) |c, i| {
+        const got = try v20fPieces(c.pieces);
+        errdefer std.debug.print("v20f 16 case {d}: got {s}\n", .{ i, @tagName(got) });
+        switch (c.want) {
+            .done => |w| {
+                try std.testing.expect(got == .done);
+                defer ta.free(got.done);
+                try std.testing.expectEqualSlices(u8, w, got.done);
+            },
+            .fail => |w| {
+                try std.testing.expect(got == .fail);
+                try std.testing.expectEqualStrings(w, got.fail);
+            },
+        }
+    }
 }

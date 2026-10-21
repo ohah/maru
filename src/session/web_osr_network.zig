@@ -3480,3 +3480,107 @@ test "W9d② 20 회 검증 N2: 홉 상한을 넘는 주 프레임 이동은 묶�
     try expectReqs(&t, 7, bound, &.{1});
     try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, bound, 2, .{}));
 }
+
+// ── W9d② v20f A R7(최종 코드 6d8d39dbd 재검증 — 권한·UB1·홉 상한) ─────────────────────────────────────────────
+
+test "W9d② v20f A R7-1: 설정 끔에 적은(덜어 낸) 제 사이트 응답의 본문 — 어느 호스트든 읽는 쪽은 탭의 지금 호스트가 응답 호스트를 덮을 때만 · 탭이 다른 사이트로 옮기면 숨고 · 탭 주소를 모르면 숨고 · 홉 상한을 넘으면 숨는다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const any: BodyQuery = .{ .who = 70, .any_host = true, .want = true };
+    try v20Body(&t, 1, "https://app.test/own", &.{}, "app.test", "{\"own\":1}", .{}, true);
+    // 20 홉(모두 app.test) 뒤 제 사이트 — 그대로. 21 홉 — 응답 호스트를 모른다.
+    var hops20: [max_hops][]const u8 = undefined;
+    for (&hops20) |*h| h.* = "https://app.test/hop";
+    try v20Body(&t, 2, "https://app.test/h20", &hops20, "app.test", "{\"h\":20}", .{}, true);
+    var hops21: [max_hops + 1][]const u8 = undefined;
+    for (&hops21) |*h| h.* = "https://app.test/hop";
+    try v20Body(&t, 3, "https://app.test/h21", &hops21, "app.test", "{\"h\":21}", .{}, true);
+    const Case = struct { full: bool, host: []const u8, seq: u64, want: []const u8 };
+    const cases = [_]Case{
+        .{ .full = false, .host = "app.test", .seq = 1, .want = "captured" },
+        .{ .full = true, .host = "app.test", .seq = 1, .want = "captured" },
+        .{ .full = false, .host = "other.test", .seq = 1, .want = "hidden" },
+        .{ .full = true, .host = "other.test", .seq = 1, .want = "hidden" },
+        .{ .full = false, .host = "", .seq = 1, .want = "hidden" },
+        .{ .full = false, .host = "api.app.test", .seq = 1, .want = "hidden" }, // 하위 도메인으로 옮긴 탭은 부모의 응답을 덮지 않는다
+        .{ .full = false, .host = "app.test", .seq = 2, .want = "captured" },
+        .{ .full = false, .host = "app.test", .seq = 3, .want = "hidden" },
+        .{ .full = true, .host = "app.test", .seq = 3, .want = "hidden" },
+    };
+    for (cases) |c| {
+        const d = try t.ring.detail(testing.allocator, 7, .{ .full = c.full, .grant_host = c.host }, c.seq, any);
+        defer testing.allocator.free(d);
+        var wb: [64]u8 = undefined;
+        errdefer std.debug.print("R7-1 full={} host='{s}' seq={d}: {s}\n", .{ c.full, c.host, c.seq, d[0..@min(d.len, 400)] });
+        try testing.expect(std.mem.indexOf(u8, d, try std.fmt.bufPrint(&wb, "\"body_state\":\"{s}\"", .{c.want})) != null);
+        if (!std.mem.eql(u8, c.want, "captured")) try testing.expect(std.mem.indexOf(u8, d, "\\\"h\\\":") == null and std.mem.indexOf(u8, d, "\\\"own\\\"") == null);
+    }
+}
+
+test "W9d② v20f A R7-2: 홉 상한을 넘긴 요청 번호로 다시 시작(같은 번호의 새 시작) — 새 기록은 홉 넘침을 물려받지 않고, 옛 기록은 그대로 닫혀 있다; 실린 본문은 쿠키 권한이 응답 호스트를 덮어도 넘친 기록에서는 보이지 않는다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const any: BodyQuery = .{ .who = 70, .any_host = true, .want = true };
+    var hops21: [max_hops + 1][]const u8 = undefined;
+    for (&hops21) |*h| h.* = "https://bank.test/hop";
+    try v20Body(&t, 5, "https://app.test/a", &hops21, "app.test", "{\"cred\":1}", .{ .credentialed = true }, false);
+    // 쿠키 권한(bank.test)이 있어도 — 응답 호스트를 모른다(빈 호스트는 덮이지 않는다).
+    try testing.expectEqualStrings("needs_cookie_permission", try bodyStateOf(&t, 1, any, "bank.test")); // 요청 5 = 기록 1
+    // 대조: 20 홉 은행 — 쿠키 권한이 있으면 보인다.
+    var hops20: [max_hops][]const u8 = undefined;
+    for (&hops20) |*h| h.* = "https://bank.test/hop";
+    try v20Body(&t, 6, "https://app.test/b", &hops20, "app.test", "{\"cred\":2}", .{ .credentialed = true }, false);
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 2, any, "bank.test"));
+    try testing.expectEqualStrings("needs_cookie_permission", try bodyStateOf(&t, 2, any, ""));
+    // 같은 번호(5)의 새 시작 — 새 기록은 넘침이 없다(홉 0, 제 사이트 응답).
+    try v20Body(&t, 5, "https://app.test/a", &.{}, "app.test", "{\"cred\":3}", .{ .credentialed = true }, false);
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 3, any, ""));
+    const old = try t.ring.detail(testing.allocator, 7, .{}, 1, any);
+    defer testing.allocator.free(old);
+    errdefer std.debug.print("R7-2 old: {s}\n", .{old[0..@min(old.len, 400)]});
+    try testing.expect(std.mem.indexOf(u8, old, "\\\"cred\\\":1") == null);
+}
+
+// ── W9d② 최종 재검증 — 검증자 v20f B(11–20 회차)의 시험을 회귀 시험으로 ─────────────────────────────────────────────────
+
+test "W9d② v20f 11: hop overflow on a subresource (N2) — 21 hops make the final host unknown: a credentialed body needs a cookie permission even for the grant's own site, Set-Cookie values are not shown; 20 hops are unchanged; a redirect after the response changes nothing" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const any: BodyQuery = .{ .who = 70, .any_host = true, .want = true };
+    var hb: net_fields.HeaderBuilder = .{};
+    _ = hb.add("Set-Cookie", "sid=V20F-HOP-COOKIE");
+    const Case = struct { req: u64, hops: usize, last: []const u8, cred: bool, want: []const u8 };
+    for ([_]Case{
+        .{ .req = 1, .hops = max_hops, .last = "https://a.test/h", .cred = true, .want = "captured" }, // boundary: 20 hops, own site
+        .{ .req = 2, .hops = max_hops + 1, .last = "https://a.test/h", .cred = true, .want = "needs_cookie_permission" }, // 21 — unknown, closed
+        .{ .req = 3, .hops = max_hops + 1, .last = "https://bank.test/me", .cred = true, .want = "needs_cookie_permission" },
+        .{ .req = 4, .hops = 255, .last = "https://bank.test/me", .cred = true, .want = "needs_cookie_permission" },
+        .{ .req = 5, .hops = max_hops + 1, .last = "https://cdn.test/x", .cred = false, .want = "captured" }, // not credentialed (UB1 needs credentials)
+    }) |c| {
+        try t.ring.begin(testing.allocator, &t.budget, .{ .browser = 1, .request = c.req, .flags2 = .{ .body_expected = true }, .resource_type = 13, .time_ms = 1000 + c.req, .url = "https://a.test/api", .host = "a.test", .site = "a.test" }, .{ .top_host = "a.test" });
+        for (0..c.hops) |k| try t.redirect(c.req, 302, if (k + 1 == c.hops) c.last else "https://a.test/h", .{});
+        try t.ring.response(testing.allocator, &t.budget, .{ .browser = 1, .request = c.req, .status = 200, .mime = "application/json", .headers = hb.block() });
+        t.ring.end(.{ .browser = 1, .request = c.req, .received = 9 });
+        // a redirect after the response (out of order) — ignored
+        try t.redirect(c.req, 302, "https://evil.test/late", .{});
+        try bodyFeed(&t, c.req, "{\"v\":\"BD\"}", .{ .credentialed = c.cred });
+        errdefer std.debug.print("v20f 11 N2: req {d} hops {d}\n", .{ c.req, c.hops });
+        try testing.expectEqualStrings(c.want, try bodyStateOf(&t, c.req, any, ""));
+        // even with a cookie permission for both hosts, an overflowed final host stays closed
+        if (c.hops > max_hops and c.cred) {
+            try testing.expectEqualStrings("needs_cookie_permission", try bodyStateOf(&t, c.req, any, "a.test"));
+            try testing.expectEqualStrings("needs_cookie_permission", try bodyStateOf(&t, c.req, any, "bank.test"));
+        }
+        const d = try t.ring.detail(testing.allocator, 7, .{ .full = true, .cookie_host = "a.test" }, c.req, any);
+        defer testing.allocator.free(d);
+        if (c.hops > max_hops) try testing.expect(std.mem.indexOf(u8, d, "V20F-HOP-COOKIE") == null);
+        if (c.hops == max_hops) try testing.expect(std.mem.indexOf(u8, d, "V20F-HOP-COOKIE") != null); // control: own site, cookie permission
+    }
+    try testing.expectEqual(t.ring.body_bytes, t.budget.body_bytes);
+}

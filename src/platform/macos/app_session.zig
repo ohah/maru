@@ -101589,6 +101589,12 @@ test "Live inspector picker consumes selection down up and rechecks published ge
         .command_kind = @backingInt(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    // The native host has not supplied a viewport yet. An empty publication
+    // must not replace startup's canonical row input with an always-miss tree.
+    try std.testing.expectEqual(@as(u32, 0), sidebar_ops.sidebarViewport(session).height());
+    try sidebar_ops.rebuildSidebar(session);
+    try std.testing.expect(!sidebar_ops.sidebarPublicationCurrent(session));
+    try std.testing.expectEqual(@as(?usize, 0), sidebar_ops.sidebarSlotAt(session, sidebar_ops.testSidebarRowCenterY(session, 0)));
     _ = try session.resize(1200, 800, 1000);
     session.dispatchAppAction(.toggle_inspector);
     session.status_bar_entry_count = 1;

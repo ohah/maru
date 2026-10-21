@@ -59992,6 +59992,27 @@ test "editor recovery restore 캡처 OOM은 문서와 뷰 및 예약 상태를 �
     var fx = try PaneFixture.init(testing.allocator);
     defer fx.deinit(testing.allocator);
     const shared = try openSharedViewInActivePane(fx.session, fx.term);
+    // Keep a live whole-window capture as the positive control, then stop the
+    // unrelated shell before enumerating deterministic editor allocation sites.
+    // Forced PTY observations can change cwd/title lengths between OOM attempts.
+    {
+        var control = std.heap.ArenaAllocator.init(testing.allocator);
+        defer control.deinit();
+        const win = try workspace_ops.captureWorkspaceWindow(fx.session, control.allocator(), true, null);
+        try testing.expectEqual(@as(usize, 1), win.editor_documents.len);
+    }
+    const pane = pane_ops.activePane(fx.session);
+    var i: usize = 0;
+    while (i < pane.terms.items.len) {
+        if (pane.terms.items[i].kind != .terminal) {
+            i += 1;
+            continue;
+        }
+        const count = pane.terms.items.len;
+        term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, i);
+        try testing.expectEqual(count - 1, pane.terms.items.len);
+    }
+    try testing.expectEqual(@as(usize, 2), pane.terms.items.len);
     shared.rt.editor_selection = editor_selection.Selection.at(4);
     const before_revision = fx.term.rt.editorDocument().opened.?.file.revision;
     try testing.checkAllAllocationFailures(testing.allocator, struct {

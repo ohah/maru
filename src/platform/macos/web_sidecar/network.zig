@@ -152,6 +152,8 @@ pub fn mainFrameAddress(id: BrowserId, url: [*c]const c.cef_string_t) void {
 /// 주 프레임에 새 문서가 시작됐다(UI 스레드 `on_load_start`·오류 페이지 — `page_started`·`error_page` 를 보내기 전에). 그 뒤에 보내는 앞 문서
 /// iframe 의 요청에는 `previous_document` 가 선다(W9d① 적대 리뷰 5 회차 B1 — `net_gate.DocFrames`).
 pub fn documentStarted(id: BrowserId) void {
+    // W9d② 20 회 검증 N1·D3: 본문 표에도 — 앞 문서와 함께 끊긴 요청(CDP 끝이 오지 않는다)을 곧 `unavailable` 로 끝낸다.
+    net_body.documentStarted(id);
     const entry = browsers.state.registry.byId(id) orelse return;
     entry.net_docs.mainDocument();
 }
@@ -461,8 +463,8 @@ fn postFlush() void {
     if (api().post_delayed_task(c.TID_UI, &flush_task, flush_delay_ms) == 0) flush_posted.store(false, .release);
 }
 
-/// 요청 번호로 그 요청을 찾아 붙일 탭들을 복사한다(시작했는지도). 없으면 null.
-fn lookup(request: [*c]c.cef_request_t, out: *Event) ?bool {
+/// 요청 번호로 그 요청을 찾아 붙일 탭들과 시작의 첫 사이트(`site_buf` 에 — W9d② 20 회 검증 D1)를 복사한다(시작했는지도). 없으면 null.
+fn lookup(request: [*c]c.cef_request_t, out: *Event, site_buf: *[msg.max_net_host_bytes]u8, site_len: *usize) ?bool {
     if (request == null) return null;
     const id = request.*.get_identifier.?(request);
     doLock();
@@ -471,6 +473,9 @@ fn lookup(request: [*c]c.cef_request_t, out: *Event) ?bool {
     out.request = id;
     out.targets = t.targets;
     out.target_count = t.target_count;
+    const site = t.siteSlice();
+    @memcpy(site_buf[0..site.len], site);
+    site_len.* = site.len;
     return t.begun;
 }
 
@@ -561,6 +566,12 @@ fn onBeforeResourceLoad(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.
     };
     var sb: [msg.max_net_host_bytes]u8 = undefined;
     const site = userfreeHost(request.*.get_first_party_for_cookies.?(request), &sb); // 온 주소에서(3 회차 T1)
+    {
+        // 리다이렉트·응답이 같은 첫 사이트로 덮기를 가르게 요청 표에 둔다(W9d② 20 회 검증 D1 — 그사이 끝났으면 자리가 없다: 그 뒤 기록도 없다).
+        doLock();
+        defer doUnlock();
+        if (state.find(id)) |t| t.setSite(site);
+    }
     var hb: net_fields.HeaderBuilder = .{};
     const map = api().string_multimap_alloc();
     if (map != null) {
@@ -583,7 +594,9 @@ fn onResourceRedirect(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.ce
     defer object.releaseArg(request);
     defer object.releaseArg(response);
     var e: Event = .{ .kind = .redirect, .request = 0 };
-    if (!(lookup(request, &e) orelse return)) return;
+    var sb: [msg.max_net_host_bytes]u8 = undefined;
+    var site_len: usize = 0;
+    if (!(lookup(request, &e, &sb, &site_len) orelse return)) return;
     if (response == null) return;
     e.status = @intCast(std.math.clamp(response.*.get_status.?(response), 100, 599));
     e.time_ms = wallMs();
@@ -605,7 +618,8 @@ fn onResourceRedirect(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.ce
     e.hop.hsts = hsts;
     e.hop.headers_truncated = hb.truncated;
     e.header_count = hb.count;
-    const ev = makeEvent(e, .{ .host = from_host, .url_host = next.host, .url = next.text, .headers = hb.block().bytes }) orelse return;
+    // 덮기는 시작의 첫 사이트로(D1) — 그 홉을 보낸 호스트(`from_host`)가 그와 같은 사이트일 때만 어느 호스트든으로 덮인다.
+    const ev = makeEvent(e, .{ .host = from_host, .url_host = next.host, .url = next.text, .site = sb[0..site_len], .headers = hb.block().bytes }) orelse return;
     enqueue(ev);
 }
 
@@ -615,7 +629,9 @@ fn onResourceResponse(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.ce
     defer object.releaseArg(request);
     defer object.releaseArg(response);
     var e: Event = .{ .kind = .response, .request = 0 };
-    if (!(lookup(request, &e) orelse return 0)) return 0;
+    var sb: [msg.max_net_host_bytes]u8 = undefined;
+    var site_len: usize = 0;
+    if (!(lookup(request, &e, &sb, &site_len) orelse return 0)) return 0;
     if (response == null) return 0;
     e.status = @intCast(std.math.clamp(response.*.get_status.?(response), 0, 999));
     e.time_ms = wallMs();
@@ -634,7 +650,8 @@ fn onResourceResponse(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.ce
     e.hop.hsts = hsts;
     e.hop.headers_truncated = hb.truncated;
     e.header_count = hb.count;
-    const ev = makeEvent(e, .{ .host = resp_host, .mime = mime, .headers = hb.block().bytes }) orelse return 0;
+    // 덮기는 시작의 첫 사이트로(D1) — 다른 사이트로 옮긴 뒤의 응답(`resp_host`)은 어느 호스트든으로 덮이지 않는다.
+    const ev = makeEvent(e, .{ .host = resp_host, .mime = mime, .site = sb[0..site_len], .headers = hb.block().bytes }) orelse return 0;
     enqueue(ev);
     return 0;
 }

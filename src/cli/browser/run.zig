@@ -79,7 +79,7 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
         error.ArgsTooDeep => "exec --args nests deeper than 128 levels inside the array",
         error.MissingMaxResultBytesValue => "exec --max-result-bytes needs a value",
         error.InvalidMaxResultBytes => "exec --max-result-bytes must be an integer in 1..16777216",
-        error.MissingOutValue => "screenshot --out needs a value",
+        error.MissingOutValue => "--out needs a value", // screenshot·exec·network-request 가 함께 쓴다(W9d② 20 회 검증 N3 — 전에는 늘 screenshot 이라 했다)
         error.MissingRectValue => "screenshot --rect needs a value",
         error.MissingScaleValue => "screenshot --scale needs a value",
         error.InvalidRect => "--rect must be x,y,w,h (four numbers, w/h > 0)",
@@ -234,9 +234,13 @@ const BodyOut = struct {
     fn add(self: *BodyOut, allocator: std.mem.Allocator, o: std.json.ObjectMap) std.mem.Allocator.Error!Step {
         const total = if (o.get("body_size")) |v| (if (v == .integer) v.integer else -1) else -1;
         if (self.size) |prev| if (prev != total) return .{ .fail = "the body changed while it was read" };
+        const binary = if (o.get("body_encoding")) |v| v == .string and std.mem.eql(u8, v.string, "base64") else false;
+        // W9d② 20 회 검증 N4: 조각 사이에 글·바이너리가 바뀌면 한 본문이 아니다(글 조각과 푼 바이트를 이어 붙이게 된다) — maru 의 서버는
+        // 본문마다 하나의 인코딩만 준다.
+        if (self.size != null and binary != self.binary) return .{ .fail = "the body changed while it was read" };
         if (self.size == null) browser.writeBodyMarks(&self.marks.writer, o) catch return error.OutOfMemory;
         self.size = total;
-        self.binary = if (o.get("body_encoding")) |v| v == .string and std.mem.eql(u8, v.string, "base64") else false;
+        self.binary = binary;
         const text = if (o.get("body")) |v| (if (v == .string) v.string else "") else "";
         if (self.binary) {
             const dec = std.base64.standard.Decoder;
@@ -246,7 +250,12 @@ const BodyOut = struct {
             dec.decode(self.body.items[start..], text) catch return .{ .fail = "the server returned a malformed body piece" };
         } else try self.body.appendSlice(allocator, text);
         const next = if (o.get("body_next_offset")) |v| (if (v == .integer) v.integer else -1) else -1;
-        if (next < 0) return .done;
+        if (next < 0) {
+            // W9d② 20 회 검증 N4: 다음 오프셋이 없는데 서버가 알린 크기만큼 모으지 못했다 — 잘린 본문을 다 받은 것처럼 쓰지 않는다(파일을 만들지
+            // 않는다). 크기를 모르면(-1 — 서버가 싣지 않았다) 견줄 것이 없다.
+            if (total >= 0 and self.body.items.len != @as(u64, @intCast(total))) return .{ .fail = "the body ended before its size was reached" };
+            return .done;
+        }
         if (next <= self.offset) return .{ .fail = "the body did not advance" };
         // W9d② 적대 리뷰 3 회차: 본문은 1 MiB 까지다 — 그보다 먼 다음 오프셋은 서버의 잘못이다(전에는 u32 를 넘으면 `@intCast` 가 죽었다).
         if (next > browser.max_network_body_bytes) return .{ .fail = "the server returned a body offset out of range" };
@@ -1065,4 +1074,138 @@ test "W9f 적대 리뷰 5 회차: 터미널에서 Ctrl-D 로 끝내면 프롬프
         try runRepl(std.testing.io, std.testing.allocator, null, slave, &out.writer, &err.writer);
         try std.testing.expectEqualStrings("maru browser> \n", err.written());
     } else return error.SkipZigTest;
+}
+
+// ── W9d② v20 A R10(적대 검증 — --out): 모든 파싱 오류 안내는 영어이고 그 명령을 말한다, --out 은 1 MiB 본문(글자 경계에서 잘린 64 KiB 조각)을
+// 그대로 모으고 바이너리 조각(패딩 포함)을 푼다, 서버가 알린 크기보다 덜 모은 채 끝나거나 조각 사이에 글·바이너리가 바뀌면 파일을 쓰지 않는다,
+// 파일은 0600 이고 대상이 심볼릭 링크면 링크를 바꾼다(가리키는 파일은 그대로).
+
+test "W9d② v20 A R10: 파싱 오류 안내는 모두 영어다(한글이 없다)" {
+    const names = comptime @typeInfo(browser.ParseError).error_set.error_names.?;
+    try std.testing.expect(names.len > 40);
+    inline for (names) |name| {
+        const reason = usageReason(@field(browser.ParseError, name));
+        var i: usize = 0;
+        while (i < reason.len) : (i += 1) if (reason[i] >= 0xEA and reason[i] <= 0xED) {
+            std.debug.print("R10: non-English usage reason for {s}: {s}\n", .{ name, reason });
+            return error.NotEnglish;
+        };
+    }
+}
+
+test "W9d② v20 A R10: network-request --out= (빈 값)의 안내는 network-request 의 것이다 — screenshot 을 말하지 않는다" {
+    const err = if (browser.parse(&.{ "network-request", "--surface", "3", "--req", "7", "--out=" })) |_| return error.ExpectedError else |e| e;
+    try std.testing.expectEqual(browser.ParseError.MissingOutValue, err);
+    const reason = usageReason(err);
+    errdefer std.debug.print("R10: --out= reason for network-request: {s}\n", .{reason});
+    try std.testing.expect(std.mem.indexOf(u8, reason, "screenshot") == null);
+}
+
+test "W9d② v20 A R10: --out 은 1 MiB 글 본문을 글자 경계의 64 KiB 조각으로 그대로 모으고, 바이너리 조각(패딩)을 푼다" {
+    const ta = std.testing.allocator;
+    // 3 바이트 글자(가)와 ASCII 를 섞은 꼭 1 MiB.
+    const total: usize = browser.max_network_body_bytes;
+    const text = try ta.alloc(u8, total);
+    defer ta.free(text);
+    var i: usize = 0;
+    while (i < total) {
+        if (i + 3 <= total and (i / 7) % 2 == 0) {
+            @memcpy(text[i..][0..3], "가");
+            i += 3;
+        } else {
+            text[i] = 'q';
+            i += 1;
+        }
+    }
+    var acc: BodyOut = .{ .marks = .init(ta) };
+    defer acc.deinit(ta);
+    var off: usize = 0;
+    var rounds: usize = 0;
+    while (true) : (rounds += 1) {
+        try std.testing.expect(rounds <= body_out_max_rounds);
+        try std.testing.expectEqual(@as(u32, @intCast(off)), acc.offset);
+        // 서버(링의 writeBody)처럼: 끝은 다음 글자의 처음으로.
+        var end = @min(off + body_out_piece_bytes, total);
+        while (end < total and (text[end] & 0xC0) == 0x80) end -= 1;
+        var o: std.json.ObjectMap = .empty;
+        defer o.deinit(ta);
+        try o.put(ta, "body_state", .{ .string = "captured" });
+        try o.put(ta, "body_size", .{ .integer = @intCast(total) });
+        try o.put(ta, "body_encoding", .{ .string = "utf-8" });
+        try o.put(ta, "body", .{ .string = text[off..end] });
+        if (end < total) try o.put(ta, "body_next_offset", .{ .integer = @intCast(end) });
+        const step = try acc.add(ta, o);
+        if (step == .done) break;
+        try std.testing.expect(step == .more);
+        off = end;
+    }
+    try std.testing.expectEqualSlices(u8, text, acc.body.items);
+    // 바이너리 — 조각마다 따로 base64(가운데 조각의 패딩).
+    var bin: BodyOut = .{ .marks = .init(ta) };
+    defer bin.deinit(ta);
+    const raw = [_]u8{ 0x1b, 0x5b, 0x32, 0x4a, 0x00, 0xff, 0x9b };
+    const pieces = [_][]const u8{ raw[0..4], raw[4..] };
+    var at: usize = 0;
+    for (pieces, 0..) |p, k| {
+        var enc: [16]u8 = undefined;
+        var o: std.json.ObjectMap = .empty;
+        defer o.deinit(ta);
+        try o.put(ta, "body_state", .{ .string = "captured" });
+        try o.put(ta, "body_size", .{ .integer = raw.len });
+        try o.put(ta, "body_encoding", .{ .string = "base64" });
+        try o.put(ta, "body", .{ .string = std.base64.standard.Encoder.encode(&enc, p) });
+        at += p.len;
+        if (k == 0) try o.put(ta, "body_next_offset", .{ .integer = @intCast(at) });
+        _ = try bin.add(ta, o);
+    }
+    try std.testing.expectEqualSlices(u8, &raw, bin.body.items);
+    try std.testing.expect(bin.binary);
+}
+
+test "W9d② v20 A R10: --out 은 서버가 알린 크기보다 덜 모은 채 끝나면 실패로 친다(파일을 쓰지 않는다)" {
+    const ta = std.testing.allocator;
+    {
+        var acc: BodyOut = .{ .marks = .init(ta) };
+        defer acc.deinit(ta);
+        const first = try std.json.parseFromSlice(std.json.Value, ta, "{\"body_state\":\"captured\",\"body_size\":6,\"body_encoding\":\"utf-8\",\"body\":\"ab\",\"body_next_offset\":2}", .{});
+        defer first.deinit();
+        try std.testing.expect(try acc.add(ta, first.value.object) == .more);
+        const short = try std.json.parseFromSlice(std.json.Value, ta, "{\"body_state\":\"captured\",\"body_size\":6,\"body_encoding\":\"utf-8\",\"body\":\"cd\"}", .{});
+        defer short.deinit();
+        const step = try acc.add(ta, short.value.object);
+        errdefer std.debug.print("R10: short body ended as {s} with {d}/6 bytes\n", .{ @tagName(step), acc.body.items.len });
+        try std.testing.expect(step == .fail);
+    }
+}
+
+test "W9d② v20 A R10: --out 은 조각 사이에 글·바이너리가 바뀌면 실패로 친다" {
+    const ta = std.testing.allocator;
+    {
+        var acc: BodyOut = .{ .marks = .init(ta) };
+        defer acc.deinit(ta);
+        const first = try std.json.parseFromSlice(std.json.Value, ta, "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body\":\"ab\",\"body_next_offset\":2}", .{});
+        defer first.deinit();
+        try std.testing.expect(try acc.add(ta, first.value.object) == .more);
+        const flip = try std.json.parseFromSlice(std.json.Value, ta, "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"base64\",\"body\":\"Y2Q=\"}", .{});
+        defer flip.deinit();
+        const step = try acc.add(ta, flip.value.object);
+        errdefer std.debug.print("R10: encoding flip ended as {s}\n", .{@tagName(step)});
+        try std.testing.expect(step == .fail);
+    }
+}
+
+test "W9d② v20 A R10: --out 의 공개는 0600 이고, 대상이 심볼릭 링크면 링크 자리를 바꾼다 — 가리키던 파일은 그대로" {
+    if (!@hasDecl(std.Io.File.Permissions, "toMode")) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "victim", .data = "KEEP" });
+    try tmp.dir.symLink(io, "victim", "link", .{});
+    try publishResult(tmp.dir, io, "link", "BODY");
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("KEEP", try tmp.dir.readFile(io, "victim", &buf));
+    try std.testing.expectEqualStrings("BODY", try tmp.dir.readFile(io, "link", &buf));
+    const st = try tmp.dir.statFile(io, "link", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(std.Io.File.Kind.file, st.kind);
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
 }

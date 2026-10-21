@@ -514,3 +514,44 @@ test "GrantHost: 상한을 넘거나 빈 호스트는 빈 값" {
 test {
     testing.refAllDecls(@This());
 }
+
+// W9d② v20 A R7(적대 검증 — 권한): 본문 grant 번호의 규칙 — 같은 호스트로 다시 허락은 번호 그대로(본문 시작점 그대로), 다른 호스트·철회 뒤 다시는
+// 새 번호(본문 읽는 쪽이 지금부터), 좁히기는 번호 그대로이되 다른 사이트를 덮지 않는다, 본문 grant 는 네트워크·쿠키 권한을 함의하지 않는다,
+// 모르는 호스트(null — http(s) 아닌 문서)는 사이트에 묶인 본문 grant 가 덮지 않는다.
+test "W9d② v20 A R7: 본문 grant 번호 — 같은 호스트 다시 허락은 그대로, 다른 호스트·철회 뒤 다시는 새 번호, 좁히기는 그대로, 함의 없음, 모르는 호스트는 덮지 않는다" {
+    var store: PaneGrantStore = .{};
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_network_body, .host = GrantHost.init("app.test") });
+    const a = store.idOf(5, 11, .browser_network_body).?;
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_network_body, .host = GrantHost.init("app.test") });
+    try testing.expectEqual(a, store.idOf(5, 11, .browser_network_body).?); // 대조: 같은 동의
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_network_body, .host = GrantHost.init("APP.test") }); // 대소문자만 다른 호스트
+    const a2 = store.idOf(5, 11, .browser_network_body).?;
+    store.revoke(5, 11, .browser_network_body);
+    try testing.expect(!store.authorizes(5, 11, .browser_network_body, "app.test"));
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_network_body, .host = GrantHost.init("app.test") });
+    const b = store.idOf(5, 11, .browser_network_body).?;
+    try testing.expect(b != a and b != a2); // 철회 뒤 다시는 새 동의
+    // 모르는 호스트·빈 호스트·점 경계.
+    try testing.expect(!store.authorizes(5, 11, .browser_network_body, null));
+    try testing.expect(!store.authorizes(5, 11, .browser_network_body, ""));
+    try testing.expect(!store.authorizes(5, 11, .browser_network_body, "evilapp.test"));
+    try testing.expect(store.authorizes(5, 11, .browser_network_body, "x.y.app.test"));
+    // 함의 없음.
+    try testing.expect(!store.authorizes(5, 11, .browser_network, "app.test"));
+    try testing.expect(!store.authorizes(5, 11, .browser_storage, "app.test"));
+    try testing.expect(!store.authorizes(5, 11, .browser, null));
+    // 다른 pane 은 그 grant 를 쓰지 못한다.
+    try testing.expect(!store.authorizes(6, 11, .browser_network_body, "app.test"));
+    // 태어날 때(어느 호스트든) → 좁히기: 번호 그대로, 다른 사이트는 덮지 않는다; 그 뒤 같은 사이트로 모달 허락 = 새 번호가 아니다(호스트·any 가 같다).
+    try store.grant(.{ .pane = 6, .target = 12, .scope = .browser_network_body, .any_host = true, .birth = true });
+    const c = store.idOf(6, 12, .browser_network_body).?;
+    try testing.expect(store.authorizes(6, 12, .browser_network_body, null)); // 어느 호스트든(모르는 문서 포함)
+    try testing.expect(store.narrowAnyHost(12, GrantHost.init("agent.test")));
+    try testing.expectEqual(c, store.idOf(6, 12, .browser_network_body).?);
+    try testing.expect(!store.authorizes(6, 12, .browser_network_body, null));
+    try testing.expect(!store.narrowAnyHost(12, GrantHost.init("bank.test"))); // 두 번째 좁히기는 아무것도 바꾸지 않는다
+    try testing.expect(store.authorizes(6, 12, .browser_network_body, "agent.test"));
+    try store.grant(.{ .pane = 6, .target = 12, .scope = .browser_network_body, .host = GrantHost.init("bank.test") });
+    try testing.expect(store.idOf(6, 12, .browser_network_body).? != c);
+    try testing.expect(!store.get(6, 12, .browser_network_body).?.birth); // 모달 허락이 태어날 때 표시를 지운다
+}

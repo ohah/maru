@@ -232,3 +232,146 @@ test "after an error the decoder stays failed — feed, next and finish all repe
     try std.testing.expectError(error.WrongDirection, decoder.feed(encoded[0..len]));
     try std.testing.expectError(error.WrongDirection, decoder.finish());
 }
+
+// ── W9d② 적대 검증 11 회차(v20b): 본문 frame 의 관 위 모양 ─────────────────────────────────────────────────────────
+// 증명하는 것: 본문 조각·끝을 아무 크기로 쪼개 읽어도 같은 차례로 풀린다(대조). 거꾸로 온 본문 frame(maru 가 net_record 를 받음·sidecar 가
+// net_body_data 를 받음)은 WrongDirection 으로 채널을 잠근다. 본문 frame 을 어디서 잘라도 무너지지 않고 IncompleteFrame 이다. 조각 길이 칸이
+// 16 KiB 를 넘으면 frame 이 그 길이만큼 실제로 실어도 거절한다. 본문 상한 경계(끝 = 1 MiB 는 받고 1 MiB + 1 은 거절 — u32 오프셋 넘침 포함),
+// 풀어 낸 크기 i64 경계, 모르는 상태·기록 상태(14·255, 4·255), net_begin 둘째 표시의 쓰지 않는 비트 일곱, 뒤에 붙은 바이트.
+
+test "W9d② v20b 11 회차: 본문 frame — 아무 크기로 쪼개 읽어도 같은 차례, 거꾸로 온 본문 frame 은 잠금, 어디서 잘라도 IncompleteFrame" {
+    const net_body_chunk_bytes = message_mod.net_body_chunk_bytes;
+    var big: [net_body_chunk_bytes]u8 = undefined;
+    for (&big, 0..) |*b, i| b.* = @intCast('a' + i % 26);
+    const seq = [_]Message{
+        .{ .net_record_state = .{ .browser = 9, .session = 3, .status = .on } },
+        .{ .net_body_data = .{ .browser = 9, .session = 3, .request = 77, .offset = 0, .bytes = &big } },
+        .{ .net_body_data = .{ .browser = 9, .session = 3, .request = 77, .offset = net_body_chunk_bytes, .bytes = big[0..5] } },
+        .{ .net_body_end = .{ .browser = 9, .session = 3, .request = 77, .state = .captured, .size = net_body_chunk_bytes + 5, .decoded = net_body_chunk_bytes + 5 } },
+        .{ .net_body_end = .{ .browser = 9, .session = 3, .request = 78, .state = .over_cap, .decoded = 5 << 20 } },
+    };
+    var stream: [4 * max_frame_bytes]u8 = undefined;
+    var n: usize = 0;
+    for (seq) |m| n += try encode(m, stream[n..]);
+    var prng = std.Random.DefaultPrng.init(0x20b11);
+    const r = prng.random();
+    for (0..300) |_| {
+        var d = StreamingDecoder.init(.to_maru);
+        var at: usize = 0;
+        var got: usize = 0;
+        while (at < n or got < seq.len) {
+            if (at < n) {
+                const piece = @min(n - at, r.intRangeAtMost(usize, 1, 40_000));
+                at += try d.feed(stream[at..][0..piece]);
+            }
+            while (try d.next()) |m| : (got += 1) {
+                try std.testing.expectEqual(std.meta.activeTag(seq[got]), std.meta.activeTag(m));
+                switch (m) {
+                    .net_body_data => |v| try std.testing.expectEqualSlices(u8, seq[got].net_body_data.bytes, v.bytes),
+                    .net_body_end => |v| try std.testing.expectEqual(seq[got].net_body_end.state, v.state),
+                    else => {},
+                }
+            }
+        }
+        try std.testing.expectEqual(seq.len, got);
+        try d.finish();
+    }
+    // 거꾸로 온 본문 frame.
+    var buf: [max_frame_bytes]u8 = undefined;
+    var len = try encode(.{ .net_record = .{ .browser = 9, .on = true, .session = 4 } }, &buf);
+    var at_maru = StreamingDecoder.init(.to_maru);
+    _ = try at_maru.feed(buf[0..len]);
+    try std.testing.expectError(error.WrongDirection, at_maru.next());
+    for ([_]Message{ seq[0], seq[1], seq[3] }) |m| {
+        len = try encode(m, &buf);
+        var at_sidecar = StreamingDecoder.init(.to_sidecar);
+        _ = try at_sidecar.feed(buf[0..len]);
+        try std.testing.expectError(error.WrongDirection, at_sidecar.next());
+    }
+    // 어디서 잘라도: 앞부분만 오고 관이 닫히면 IncompleteFrame — 풀린 값 없음.
+    len = try encode(seq[1], &buf);
+    var cut: usize = 1;
+    while (cut < len) : (cut += 97) {
+        var d = StreamingDecoder.init(.to_maru);
+        _ = try d.feed(buf[0..cut]);
+        try std.testing.expect((try d.next()) == null);
+        try std.testing.expectError(error.IncompleteFrame, d.finish());
+    }
+    // 같은 frame 의 decodeExact: 하나 모자람·하나 남음.
+    try std.testing.expectError(error.IncompleteFrame, decodeExact(buf[0 .. len - 1]));
+    var longer: [max_frame_bytes + 1]u8 = undefined;
+    @memcpy(longer[0..len], buf[0..len]);
+    longer[len] = 0;
+    try std.testing.expectError(error.TrailingBytes, decodeExact(longer[0 .. len + 1]));
+}
+
+test "W9d② v20b 11 회차: 본문 칸의 경계 — 조각 길이 16 KiB+1 을 실제로 실은 frame, 본문 상한 1 MiB 의 끝(u32 넘침), 풀어 낸 크기 i64, 모르는 상태 값, 둘째 표시의 쓰지 않는 비트" {
+    const body = wire.prefix_len + wire.common_len;
+    var buf: [max_frame_bytes]u8 = undefined;
+    // 조각 길이 칸 16 385 이고 frame 이 그만큼 싣는다(길이가 맞아도 상한).
+    {
+        var len = try encode(.{ .net_body_data = .{ .browser = 1, .session = 1, .request = 2, .offset = 0, .bytes = "ab" } }, &buf);
+        const over = message_mod.net_body_chunk_bytes + 1;
+        std.mem.writeInt(u16, buf[body + 24 ..][0..2], over, .big);
+        @memset(buf[body + 26 ..][0..over], 'x');
+        len = body + 26 + over;
+        std.mem.writeInt(u32, buf[0..4], @intCast(len - 4), .big);
+        try std.testing.expectError(error.InvalidNetwork, decodeExact(buf[0..len]));
+        // 대조: 16 384 는 받는다.
+        std.mem.writeInt(u16, buf[body + 24 ..][0..2], over - 1, .big);
+        std.mem.writeInt(u32, buf[0..4], @intCast(len - 5), .big);
+        _ = try decodeExact(buf[0 .. len - 1]);
+    }
+    // 본문 상한: 끝 = 1 MiB 는 받고, 1 MiB + 1 · u32 끝의 오프셋은 거절(u32 덧셈이 넘쳐 0 근처로 돌아가지 않는다).
+    const max = message_mod.max_net_body_bytes;
+    _ = try encode(.{ .net_body_data = .{ .browser = 1, .session = 1, .request = 2, .offset = max - 1, .bytes = "z" } }, &buf);
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_body_data = .{ .browser = 1, .session = 1, .request = 2, .offset = max, .bytes = "z" } }, &buf));
+    {
+        const len = try encode(.{ .net_body_data = .{ .browser = 1, .session = 1, .request = 2, .offset = 0, .bytes = "zz" } }, &buf);
+        for ([_]u32{ max - 1, std.math.maxInt(u32), std.math.maxInt(u32) - 1 }) |off| {
+            std.mem.writeInt(u32, buf[body + 20 ..][0..4], off, .big);
+            try std.testing.expectError(error.InvalidNetwork, decodeExact(buf[0..len]));
+        }
+    }
+    // 풀어 낸 크기: maxInt(i64) 는 받고 그 위는 거절, 잡은 크기 1 MiB 는 받고 그 위는 거절.
+    {
+        const len = try encode(.{ .net_body_end = .{ .browser = 1, .session = 1, .request = 2, .state = .over_cap, .decoded = std.math.maxInt(i64) } }, &buf);
+        _ = try decodeExact(buf[0..len]);
+        std.mem.writeInt(u64, buf[body + 26 ..][0..8], @as(u64, std.math.maxInt(i64)) + 1, .big);
+        try std.testing.expectError(error.InvalidNetwork, decodeExact(buf[0..len]));
+        std.mem.writeInt(u64, buf[body + 26 ..][0..8], std.math.maxInt(u64), .big);
+        try std.testing.expectError(error.InvalidNetwork, decodeExact(buf[0..len]));
+        const l2 = try encode(.{ .net_body_end = .{ .browser = 1, .session = 1, .request = 2, .state = .captured, .size = max } }, &buf);
+        _ = try decodeExact(buf[0..l2]);
+        std.mem.writeInt(u32, buf[body + 22 ..][0..4], max + 1, .big);
+        try std.testing.expectError(error.InvalidNetwork, decodeExact(buf[0..l2]));
+    }
+    // 모르는 상태 값(14·200·255)과 마지막 아는 값(13 restarted).
+    {
+        const len = try encode(.{ .net_body_end = .{ .browser = 1, .session = 1, .request = 2, .state = .restarted } }, &buf);
+        _ = try decodeExact(buf[0..len]);
+        for ([_]u8{ 14, 200, 255 }) |st| {
+            buf[body + 20] = st;
+            try std.testing.expectError(error.InvalidNetwork, decodeExact(buf[0..len]));
+        }
+        const l2 = try encode(.{ .net_record_state = .{ .browser = 1, .session = 1, .status = .failed } }, &buf);
+        for ([_]u8{ 4, 255 }) |st| {
+            buf[body + 12] = st;
+            try std.testing.expectError(error.InvalidNetwork, decodeExact(buf[0..l2]));
+        }
+        // 꺼짐은 세션이 있어도 받는다(끄기 전 세션의 알림 — maru 는 지금 세션과 견준다).
+        const l3 = try encode(.{ .net_record_state = .{ .browser = 1, .session = 7, .status = .off } }, &buf);
+        _ = try decodeExact(buf[0..l3]);
+    }
+    // net_begin 둘째 표시의 쓰지 않는 비트 일곱.
+    {
+        const len = try encode(.{ .net_begin = .{ .browser = 3, .request = 8, .flags2 = .{ .body_expected = true }, .url = "https://a.test/x", .host = "a.test" } }, &buf);
+        const at = body + 8 + 8 + 1;
+        try std.testing.expectEqual(@as(u8, 1), buf[at]);
+        for (1..8) |bit| {
+            var b = buf;
+            b[at] = 1 | (@as(u8, 1) << @intCast(bit));
+            try std.testing.expectError(error.InvalidNetwork, decodeExact(b[0..len]));
+        }
+    }
+}

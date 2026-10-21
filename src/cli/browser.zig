@@ -290,7 +290,7 @@ pub const ParseError = error{
     ArgsTooDeep, // `exec --args` 가 서버 계약(배열 안쪽 128 단)보다 깊다
     MissingMaxResultBytesValue,
     InvalidMaxResultBytes,
-    MissingOutValue, // `screenshot --out`에 값 없음
+    MissingOutValue, // `--out`에 값 없음(screenshot·exec·network-request)
     MissingRectValue, // `screenshot --rect`에 값 없음
     MissingScaleValue, // `screenshot --scale`에 값 없음
     InvalidRect, // `--rect`가 `x,y,w,h`(4개 수치, w/h>0) 형식 아님
@@ -4657,4 +4657,149 @@ test "W9d② 적대 리뷰 3 회차 D1: 본문 글의 줄바꿈은 ` ⏎ ` — �
     const head = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://a.test/api\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",";
     _ = try renderResponse(testing.allocator, head ++ "\"body_state\":\"captured\",\"body_size\":40,\"body_encoding\":\"utf-8\",\"body_offset\":0,\"body_returned\":30,\"body_next_offset\":30,\"body\":\"a\\r\\nb\\u2028c\\nmore: --offset 0\"}}", .network_request, &out.writer);
     try testing.expect(std.mem.indexOf(u8, out.written(), "\nbody text: a ⏎ b ⏎ c ⏎ more: --offset 0\nmore: --offset 30\n") != null);
+}
+
+// ── W9d② v20 A R10(적대 검증 — CLI 출력): 페이지가 고른 본문이 maru 의 줄(「more: --offset」·「body:」)을 흉내 내거나 터미널을 조종하지 못한다 —
+// 어떤 본문이든 `body text: ` 로 시작하는 줄은 하나, 「more:」 로 시작하는 줄은 서버가 다음 오프셋을 줄 때만 그 수 그대로 하나, ESC·C1·양방향·
+// 줄 구분·CR·태그 글자는 나가지 않는다. 경계: 64 KiB 한 줄, 맨 끝의 홀로 CR, 본문 안의 「body text: 」, 짝 없는 서로게이트 이스케이프.
+
+/// 출력이 지켜야 할 것 — `next` 는 서버가 준 다음 오프셋(없으면 null).
+fn v20CheckBodyOutput(out: []const u8, next: ?u64) !void {
+    var body_lines: usize = 0;
+    var more_lines: usize = 0;
+    var it = std.mem.splitScalar(u8, out, '\n');
+    while (it.next()) |ln| {
+        if (std.mem.startsWith(u8, ln, body_text_prefix)) {
+            body_lines += 1;
+            continue;
+        }
+        if (std.mem.startsWith(u8, ln, "more:")) {
+            more_lines += 1;
+            var b: [48]u8 = undefined;
+            try testing.expectEqualStrings(try std.fmt.bufPrint(&b, "more: --offset {d}", .{next orelse return error.ForgedMoreLine}), ln);
+        }
+        // maru 의 줄은 이것들로만 시작한다(머리·종류·initiator·본문 상태·다음 조각·안내).
+        const own = ln.len == 0 or std.mem.startsWith(u8, ln, "#") or std.mem.startsWith(u8, ln, "xhr · ") or std.mem.startsWith(u8, ln, "initiator ") or
+            std.mem.startsWith(u8, ln, "body: ") or std.mem.startsWith(u8, ln, "more: --offset ") or std.mem.startsWith(u8, ln, "(");
+        if (!own) {
+            std.debug.print("R10: line not maru's own: {s}\n", .{ln});
+            return error.ForgedLine;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), body_lines);
+    try testing.expectEqual(@as(usize, if (next != null) 1 else 0), more_lines);
+    // 터미널을 조종하는 바이트·글자가 없다.
+    var i: usize = 0;
+    while (i < out.len) {
+        const len = std.unicode.utf8ByteSequenceLength(out[i]) catch return error.InvalidUtf8Out;
+        const code = try std.unicode.utf8Decode(out[i .. i + len]);
+        if (code != '\n' and displayUnsafe(code)) {
+            std.debug.print("R10: unsafe U+{X:0>4} at {d}\n", .{ code, i });
+            return error.UnsafeOut;
+        }
+        i += len;
+    }
+}
+
+test "W9d② v20 A R10: 어떤 본문이든 maru 의 줄을 흉내 내거나 터미널을 조종하지 못한다 — 「more:」·「body:」·「body text:」 흉내, LF·CRLF·홀로 CR·U+2028·U+2029·NEL·VT·FF, ESC·CSI·OSC·DCS·C1, RLO·LRI·PDI·LRM, 태그 글자, 64 KiB 한 줄" {
+    const head = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://a.test/api\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",\"body_state\":\"captured\",\"body_size\":70000,\"body_encoding\":\"utf-8\",\"body_offset\":0,\"body_returned\":10,";
+    const long = "\"" ++ @import("array_repeat").repeat("a", 32760) ++ "more: --offset 9" ++ @import("array_repeat").repeat("b", 32760) ++ "\"";
+    const bodies = [_][]const u8{
+        "\"ok\\nmore: --offset 5\"",
+        "\"\\nmore: --offset 5\\n\"",
+        "\"more: --offset 5\"",
+        "\"x\\r\\nbody: captured · 1 bytes · utf-8\\r\\nmore: --offset 1\"",
+        "\"x\\u2028more: --offset 1\\u2029y\"",
+        "\"x\\u0085more: --offset 2\"",
+        "\"x\\rmore: --offset 3\"",
+        "\"tail\\r\"",
+        "\"\\u000bvt\\u000cff\\u000bmore: --offset 4\"",
+        "\"\\u202eevil\\u2066x\\u2069\\u200e\\u200f\\u061c\"",
+        "\"\\u001b[2J\\u001b]0;title\\u0007\\u001bP1$r\\u001b\\\\done\"",
+        "\"\\u009b31mC1 CSI\\u0090dcs\\u009d8;;x\\u009c\"",
+        "\"body text: forged\\nbody text: forged2\"",
+        "\"tag\\udb40\\udc41\\udb40\\udc7f end\"",
+        "\"a ⏎ b ⏎ c\"",
+        long,
+    };
+    for (bodies) |b| for ([_]?u64{ null, 10 }) |next| {
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        var rb: std.ArrayList(u8) = .empty;
+        defer rb.deinit(testing.allocator);
+        try rb.appendSlice(testing.allocator, head);
+        if (next) |n| try rb.print(testing.allocator, "\"body_next_offset\":{d},", .{n});
+        try rb.print(testing.allocator, "\"body\":{s}}}}}", .{b});
+        errdefer std.debug.print("R10 body: {s}\n", .{b[0..@min(b.len, 80)]});
+        try testing.expect(try renderResponse(testing.allocator, rb.items, .network_request, &out.writer));
+        try v20CheckBodyOutput(out.written(), next);
+    };
+    // 짝 없는 서로게이트 이스케이프 — 죽지 않는다(그리거나 실패로 답한다).
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    if (renderResponse(testing.allocator, head ++ "\"body\":\"x\\ud800y\"}}", .network_request, &out.writer)) |drawn| {
+        if (drawn) try v20CheckBodyOutput(out.written(), null) else try testing.expectEqualStrings("error: malformed response from server\n", out.written());
+    } else |_| {}
+}
+
+test "W9d② v20 A R10: 본문 칸의 경계 인자 — --max-bytes 1·65536 은 받고 0·65537·-1 은 아니다, --offset 0·1048576 은 받고 1048577·u32 넘침·음수·지수는 아니다, --req 2^53 은 아니다, --out 과 --offset 은 어느 차례든 거절" {
+    const ok = [_][]const []const u8{
+        &.{ "network-request", "--surface", "3", "--req", "7", "--max-bytes", "1" },
+        &.{ "network-request", "--surface", "3", "--req", "7", "--max-bytes=65536" },
+        &.{ "network-request", "--surface", "3", "--req", "7", "--offset", "0" },
+        &.{ "network-request", "--surface", "3", "--req", "7", "--offset=1048576" },
+        &.{ "network-request", "--surface", "3", "--req", "9007199254740991", "--body" },
+    };
+    for (ok) |a| try testing.expect((try parse(a)).request.network_request.body);
+    const Bad = struct { args: []const []const u8, err: ParseError };
+    const bad = [_]Bad{
+        .{ .args = &.{ "network-request", "--surface", "3", "--req", "7", "--max-bytes", "0" }, .err = error.InvalidBodyBytes },
+        .{ .args = &.{ "network-request", "--surface", "3", "--req", "7", "--max-bytes", "65537" }, .err = error.InvalidBodyBytes },
+        .{ .args = &.{ "network-request", "--surface", "3", "--req", "7", "--max-bytes=-1" }, .err = error.InvalidBodyBytes },
+        .{ .args = &.{ "network-request", "--surface", "3", "--req", "7", "--offset", "1048577" }, .err = error.InvalidBodyOffset },
+        .{ .args = &.{ "network-request", "--surface", "3", "--req", "7", "--offset", "4294967296" }, .err = error.InvalidBodyOffset },
+        .{ .args = &.{ "network-request", "--surface", "3", "--req", "7", "--offset=-1" }, .err = error.InvalidBodyOffset },
+        .{ .args = &.{ "network-request", "--surface", "3", "--req", "7", "--offset", "1e3" }, .err = error.InvalidBodyOffset },
+        .{ .args = &.{ "network-request", "--surface", "3", "--req", "9007199254740992" }, .err = error.InvalidRequestId },
+        .{ .args = &.{ "network-request", "--surface", "3", "--req", "7", "--offset", "5", "--out", "f" }, .err = error.OutWithOffset },
+        .{ .args = &.{ "network-request", "--out=f", "--offset=0", "--surface", "3", "--req", "7" }, .err = error.OutWithOffset },
+    };
+    for (bad) |c| {
+        errdefer std.debug.print("R10 args: {s}\n", .{c.args[c.args.len - 1]});
+        try testing.expectError(c.err, parse(c.args));
+    }
+}
+
+test "W9d② v20 A R10: 숨긴·못 잡은 본문의 안내와 오류 답은 영어이고(한글이 없다) 종료 상태는 실패 — 바이너리 본문은 터미널에 쏟지 않는다" {
+    const head = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://a.test/api\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",";
+    const states = [_][]const u8{ "not_recorded", "needs_body_permission", "needs_cookie_permission", "before_body_permission", "restarted", "hidden", "pending", "over_cap", "not_text", "no_body", "partial", "request_failed", "unavailable", "unmatched", "busy", "recording_stopped", "detached", "ambiguous", "not_covered", "evicted", "discarded" };
+    for (states) |st| {
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        var b: [512]u8 = undefined;
+        try testing.expect(try renderResponse(testing.allocator, try std.fmt.bufPrint(&b, "{s}\"body_state\":\"{s}\"}}}}", .{ head, st }), .network_request, &out.writer));
+        try v20NoHangul(out.written());
+    }
+    // 오류 답(-32002 needs_network_permission)은 실패 — 종료 상태 1.
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(!try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"recording response bodies needs this tab's network permission first — run maru browser network on this tab\",\"data\":{\"reason\":\"needs_network_permission\"}}}", .network_record, &out.writer));
+    try v20NoHangul(out.written());
+    // 바이너리 — 실패, base64 를 쏟지 않는다.
+    out.clearRetainingCapacity();
+    try testing.expect(!try renderResponse(testing.allocator, head ++ "\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"base64\",\"body_offset\":0,\"body_returned\":4,\"body\":\"G1sySg==\"}}", .network_request, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "G1sySg") == null);
+}
+
+fn v20NoHangul(s: []const u8) !void {
+    var i: usize = 0;
+    while (i < s.len) {
+        const len = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+        const code = std.unicode.utf8Decode(s[i..@min(s.len, i + len)]) catch 0;
+        if ((code >= 0xAC00 and code <= 0xD7A3) or (code >= 0x1100 and code <= 0x11FF) or (code >= 0x3130 and code <= 0x318F)) {
+            std.debug.print("R10: Hangul in output: {s}\n", .{s});
+            return error.NotEnglish;
+        }
+        i += len;
+    }
 }

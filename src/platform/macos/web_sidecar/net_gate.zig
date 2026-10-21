@@ -12,7 +12,8 @@
 //! 다시 쓰지 않음·꽉 차면 거절·껐다 켠 뒤 끝나는 옛 요청은 새 몫을 건드리지 않음), 넘김 상자의 상한, 덮기(어느 호스트든과 묶인 호스트의
 //! 합 — 빈 목록은 아무것도 덮지 않는다)와 덜어 내기의 결정(적을 때의 것과 보낼 때의 것 중 더 덜어 내는 쪽 — W9d① 적대 리뷰 3 회차), 놓친 시작의
 //! 표지(W9d② — 넘김 상자가 넘쳐 버린 시작도 붙일 탭마다 표지를 남긴다, 표지가 넘치면 그 탭을 넘침으로 — 적대 리뷰 4 회차), 넘김 상자가 넘쳐
-//! 버린 시작 아닌 기록(리다이렉트·응답·끝)의 표지(본문을 기록할 때 — 그 요청의 본문 끝이 꼭 오게, 적대 리뷰 5 회차 C1).
+//! 버린 시작 아닌 기록(리다이렉트·응답·끝)의 표지(본문을 기록할 때 — 그 요청의 본문 끝이 꼭 오게, 적대 리뷰 5 회차 C1), 리다이렉트·응답의 덮기는
+//! 시작의 첫 사이트로(요청 표가 쥔다 — 어느 호스트든의 지켜보기가 제 사이트의 응답을 덮고 다른 사이트로 옮긴 홉은 덮지 않는다, W9d② 20 회 검증 D1).
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -146,9 +147,27 @@ pub const Track = struct {
     initiator: [max_origin_bytes]u8 = undefined,
     initiator_len: usize = 0,
     navigation: bool = false,
+    /// 시작(`on_before_resource_load`)에서 읽은 첫 사이트(쿠키의 first party). 리다이렉트·응답도 이것으로 덮기를 가른다(W9d② 20 회 검증 1 회차
+    /// D1 — 전에는 그 둘에 첫 사이트가 없어 어느 호스트든의 지켜보기가 제 사이트의 응답 헤더까지 덜고 본문을 하나도 받지 않았다). 홉마다 다시
+    /// 읽지 않는다: 주 프레임 이동은 Chromium 이 첫 사이트를 옮겨 갈 주소로 바꾸므로, 다시 읽으면 덮이지 않는 사이트로 옮기는 홉이 제 첫
+    /// 사이트를 스스로 만들어 덮인다. 시작의 것을 쓰면 다른 사이트로 옮긴 홉은 덮이지 않는 쪽이다(maru 의 기록도 시작의 첫 사이트를 쥔다).
+    site: [protocol.message.max_net_host_bytes]u8 = undefined,
+    site_len: u8 = 0,
 
     pub fn initiatorSlice(self: *const Track) []const u8 {
         return self.initiator[0..self.initiator_len];
+    }
+
+    pub fn siteSlice(self: *const Track) []const u8 {
+        return self.site[0..self.site_len];
+    }
+
+    /// 시작의 첫 사이트를 적는다 — 한 번만(인증 재시도·다음 홉의 시작 콜백은 `begun` 이라 오지 않지만, 와도 처음 것을 지킨다). 호스트 상한을
+    /// 넘는 글은 적지 않는다(빈 첫 사이트 — 어느 호스트든으로 덮지 않는 쪽).
+    pub fn setSite(self: *Track, site: []const u8) void {
+        if (self.site_len != 0 or site.len > self.site.len) return;
+        @memcpy(self.site[0..site.len], site);
+        self.site_len = @intCast(site.len);
     }
 
     pub fn targetSlice(self: *const Track) []const BrowserId {
@@ -936,4 +955,39 @@ test "W9d① 적대 리뷰 후 — 같은 번호 다시 시작: 진행 중인 �
     var held: usize = 0;
     for (s.tracks) |tr| held += @intFromBool(tr.request != 0);
     try testing.expectEqual(@as(usize, 0), held);
+}
+
+test "W9d② 20 회 검증 1 회차 D1: 리다이렉트·응답은 시작의 첫 사이트로 덮는다 — 어느 호스트든의 지켜보기는 제 사이트의 응답을 덮고, 다른 사이트로 옮긴 홉·첫 사이트가 없는 요청은 덮지 않는다" {
+    var s: State = .{};
+    // 설정이 꺼진 에이전트 탭(태어날 때 어느 호스트든 grant — UB2).
+    try testing.expect(s.setWatch(1, 11, true, false, true, &.{}));
+    const w = s.watchByCef(11).?;
+    const t = s.startTab(w, 7, 1_000_000).?;
+    t.begun = true;
+    // 전에는 응답·리다이렉트에 첫 사이트가 없었다 — 제 사이트의 응답도 덮지 않았다(본문 `not_covered`·헤더 덜어 냄).
+    try testing.expect(!w.covers("127.0.0.1", ""));
+    t.setSite("127.0.0.1");
+    t.setSite("evil.test"); // 처음 것을 지킨다
+    try testing.expectEqualStrings("127.0.0.1", s.find(7).?.siteSlice());
+    const site = s.find(7).?.siteSlice();
+    // 응답(지금 주소의 호스트)·리다이렉트(그 홉을 보낸 호스트)가 제 사이트면 덮인다.
+    try testing.expectEqual(@as(u8, 1), s.stamp(&.{1}, "127.0.0.1", site).covered);
+    try testing.expect(w.decide(true, true, "127.0.0.1", site).covered);
+    // 다른 사이트로 옮긴 뒤의 응답·그 사이트가 보낸 다음 홉은 첫 사이트 때문에 덮이지 않는다.
+    try testing.expectEqual(@as(u8, 0), s.stamp(&.{1}, "evil.test", site).covered);
+    try testing.expect(!w.decide(true, true, "evil.test", site).covered);
+    // 첫 사이트가 상한을 넘는 글이면 적지 않는다 — 덮지 않는 쪽.
+    const u = s.startTab(w, 8, 1_000_000).?;
+    var long: [protocol.message.max_net_host_bytes + 1]u8 = undefined;
+    @memset(&long, 'a');
+    u.setSite(&long);
+    try testing.expectEqual(@as(usize, 0), u.siteSlice().len);
+    try testing.expectEqual(@as(u8, 0), s.stamp(&.{1}, "127.0.0.1", u.siteSlice()).covered);
+    // 끝난 뒤 같은 번호로 다시 시작하면 첫 사이트도 새로(앞 요청의 것을 물려받지 않는다).
+    s.untrack(s.find(7).?);
+    const again = s.startTab(w, 7, 1_000_000).?;
+    try testing.expectEqual(@as(usize, 0), again.siteSlice().len);
+    // 묶인 grant 만 있는 탭은 첫 사이트와 무관하다(그대로).
+    try testing.expect(s.setWatch(2, 12, true, false, false, &.{"shop.test"}));
+    try testing.expectEqual(@as(u8, 0), s.stamp(&.{2}, "127.0.0.1", "127.0.0.1").covered);
 }

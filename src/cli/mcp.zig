@@ -113,7 +113,7 @@ pub const tools = [_]Tool{
         .{ .key = "page_size", .kind = .int, .flag = "--page-size", .description = "requests per page (1-200, default 50)", .min = 1, .max = 200 },
         .{ .key = "clear", .kind = .flag, .flag = "--clear", .description = "after this read, show you only newer requests" },
     }) },
-    .{ .name = "browser_network_request", .subcommand = "network-request", .description = "Show one network request of a Chromium tab in detail: request and response headers, redirects, timing and size. Cookie, Set-Cookie and Authorization values (and passwords in addresses) are shown only for sites whose cookie permission you also hold on that tab (the user grants it when you run maru browser get-cookies on that site), even in tabs you opened; otherwise only their names. With browser.agent-network-full off they are never shown. With body:true it also prints one piece of the recorded response body (text only, at most 64 KiB per call, on one line that starts with 'body text: ' — every other line, such as 'more: --offset', is maru's own; line breaks in the body show as ' ⏎ ' and tabs as spaces, so that line is not exact (a ' ⏎ ' in the body looks the same); body_offset continues from the 'more: --offset' line; or out writes the whole body exactly as it is, also a binary one, to a 0600 file, replacing an existing one — not together with body_offset). Bodies exist only for requests made while browser_network_record was on, at most 1 MiB each (8 MiB per tab, 32 MiB for all tabs, in memory only); a body sent with another site's cookies or login needs that site's cookie permission too (navigate the tab to that site and run maru browser get-cookies). The body state says why there is none (needs_body_permission, over_cap, not_text, unmatched for cross-process iframes and workers — ambiguous when a worker fetched the same URL as the page at about the same time, restarted when Chromium restarted the request and the retry is a newer req, …).", .args = withSurface(&.{
+    .{ .name = "browser_network_request", .subcommand = "network-request", .description = "Show one network request of a Chromium tab in detail: request and response headers, redirects, timing and size. Cookie, Set-Cookie and Authorization values (and passwords in addresses) are shown only for sites whose cookie permission you also hold on that tab (the user grants it when you run maru browser get-cookies on that site), even in tabs you opened; otherwise only their names. With browser.agent-network-full off they are never shown. With body:true it also prints one piece of the recorded response body (text only, at most 64 KiB per call, on one line that starts with 'body text: ' — every other line, such as 'more: --offset', is maru's own; line breaks in the body show as ' ⏎ ' and tabs as spaces, so that line is not exact (a ' ⏎ ' in the body looks the same); body_offset continues from the 'more: --offset' line; or out writes the whole body exactly as it is, also a binary one, to a 0600 file, replacing an existing one — not together with body_offset). Bodies exist only for requests made while browser_network_record was on, at most 1 MiB each (8 MiB per tab, 32 MiB for all tabs, in memory only); a body sent with another site's cookies or login needs that site's cookie permission too (navigate the tab to that site and run maru browser get-cookies). The body state says why there is none (needs_body_permission, over_cap, not_text, unavailable when the tab moved to another page before the request finished, unmatched for cross-process iframes and workers — ambiguous when a worker fetched the same URL as the page at about the same time, restarted when Chromium restarted the request and the retry is a newer req, …).", .args = withSurface(&.{
         .{ .key = "req", .kind = .int, .flag = "--req", .description = "req number from browser_network_requests", .required = true, .min = 1, .max = 9_007_199_254_740_991 },
         .{ .key = "body", .kind = .flag, .flag = "--body", .description = "also print the recorded response body (one piece of up to body_max_bytes)" },
         .{ .key = "body_offset", .kind = .int, .flag = "--offset", .description = "byte offset into the body (0-1048576) — from the 'more: --offset' line of the previous piece (implies body)", .max = 1024 * 1024 },
@@ -1159,4 +1159,36 @@ test "W9d②: browser_network_record·browser_network_request 의 본문 인자 
     const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")).reply;
     defer testing.allocator.free(r);
     try testing.expect(std.mem.indexOf(u8, r, "browser_network_record") != null);
+}
+
+// W9d② v20 A R10(적대 검증 — MCP 인자): 본문 칸의 나쁜 값(음수·소수·지수·글·모르는 키)은 CLI 를 부르기 전에 거절하고, 범위 밖·out+body_offset 은
+// isError 결과로 영어 까닭을 준다(JSON-RPC 오류가 아니다). 경계 값(0·1048576·1·65536)은 그대로 CLI 로 간다.
+test "W9d② v20 A R10: browser_network_request 의 본문 인자 — 나쁜 형은 거절, 범위 밖과 out+body_offset 은 부르기 전 파서가 거절(isError 까닭), 경계 값은 그대로" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const one = findTool("browser_network_request").?;
+    for ([_][]const u8{
+        "{\"surface\":4,\"req\":2,\"body_offset\":-1}",
+        "{\"surface\":4,\"req\":2,\"body_offset\":1.5}",
+        "{\"surface\":4,\"req\":2,\"body_offset\":1e300}",
+        "{\"surface\":4,\"req\":2,\"body_max_bytes\":\"10\"}",
+        "{\"surface\":4,\"req\":2,\"body\":\"true\"}",
+        "{\"surface\":4,\"req\":2,\"out\":5}",
+    }) |bad| {
+        errdefer std.debug.print("R10 MCP accepted: {s}\n", .{bad});
+        try testing.expectError(error.WrongType, argv(arena, one, try jsonOf(arena, bad)));
+    }
+    try testing.expectError(error.UnknownArgument, argv(arena, one, try jsonOf(arena, "{\"surface\":4,\"req\":2,\"body_bytes\":1}")));
+    // 경계 값은 그대로.
+    const edge = (try browser.parse(try argv(arena, one, try jsonOf(arena, "{\"surface\":4,\"req\":2,\"body_offset\":1048576,\"body_max_bytes\":65536}")))).request.network_request;
+    try testing.expect(edge.offset.? == 1024 * 1024 and edge.max_bytes.? == 64 * 1024 and edge.body);
+    const low = (try browser.parse(try argv(arena, one, try jsonOf(arena, "{\"surface\":4,\"req\":2,\"body\":true,\"body_offset\":0,\"body_max_bytes\":1}")))).request.network_request;
+    try testing.expect(low.offset.? == 0 and low.max_bytes.? == 1);
+    try testing.expectError(error.InvalidBodyOffset, browser.parse(try argv(arena, one, try jsonOf(arena, "{\"surface\":4,\"req\":2,\"body_offset\":1048577}"))));
+    try testing.expectError(error.InvalidBodyBytes, browser.parse(try argv(arena, one, try jsonOf(arena, "{\"surface\":4,\"req\":2,\"body_max_bytes\":0}"))));
+    // tools/call — out+body_offset 은 인자 옮기기를 지나 부르기(call)로 가고, 파서가 거절한다(`mcp/run` 이 `usageReason` 을 isError 로 싣는다).
+    const inc = try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"browser_network_request\",\"arguments\":{\"surface\":4,\"req\":2,\"body_offset\":0,\"out\":\"/tmp/v20.bin\"}}}");
+    try testing.expect(inc == .call);
+    try testing.expectError(error.OutWithOffset, browser.parse(inc.call.argv));
 }

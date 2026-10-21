@@ -518,3 +518,7 @@ role/상태를 발행하지만 label·native accessibility·reorder capability �
 ### 도크 뷰 바 Inspector 발행 범위
 
 도크 뷰 바의 `dock_view_bar.published.Frame`은 뷰/동작 슬롯의 발행 geometry를 paint 밴드와 입력에 공유한다. Inspector `dock_header`는 그 tree만 읽는다. CoreText glyph lowering과 기존 down-action 의미는 유지하며 전체 도크 상호작용 이관 완료를 뜻하지 않는다. 계약은 [UI 요소 계획](plans/ui-inspector.md)의 도크 뷰 바 절을 따른다.
+
+### 파일 보기 모드 Inspector 발행 범위
+
+`components/file_header.zig`의 Frame은 L2 `dock_layout`의 mode rect를 host에서 받아 발행한다. 일반 mode 클릭·cursor와 hover paint가 같은 발행 기하를 소비한다. CoreText glyph lowering·breadcrumb/충돌 버튼 정책은 기존 경로에 두며 전체 파일 헤더 이관 완료로 세지 않는다. 상세 범위는 [UI 요소 계획](plans/ui-inspector.md)을 따른다.

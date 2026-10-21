@@ -112,6 +112,7 @@ const build_options = @import("build_options"); // build.zig가 주입한 .versi
 const update_repo = "ohah/maru"; // GitHub releases/latest를 조회할 repo(인앱 새 버전 안내)
 pub const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 gesture 정책(OS-중립 L2 — session/keyhint_hold.zig). platform은 alias로 참조.
 const command_palette = @import("command_palette.zig");
+pub const inspector_file_header_ops = @import("app_session/inspector_file_header.zig");
 pub const inspector_tabs_ops = @import("app_session/inspector_tabs.zig");
 pub const inspector_ops = @import("app_session/inspector.zig");
 const symbol_picker = @import("symbol_picker.zig");
@@ -6781,6 +6782,8 @@ pub const AppSession = struct {
     /// rows[i].card.tab)에 쓴다. 슬롯↔탭 단일 출처(인덱스 어긋남 방지). SG3a는 card row만(그룹 헤더는 SG3b).
     sidebar_rows: std.ArrayList(chrome.components.sidebar.Row) = .empty,
     sidebar_publication: chrome.components.sidebar.published.Frame = .{},
+    file_header_publication: chrome.components.file_header.Frame = .{},
+    file_header_references: std.ArrayList(inspector_file_header_ops.Reference) = .empty,
     dock_header_publication: dock_view_bar.published.Frame = .{},
     pane_tabs_publication: chrome.components.tabbar.published.Frame = .{},
     pane_tab_references: std.ArrayList(inspector_tabs_ops.Reference) = .empty,
@@ -16101,7 +16104,7 @@ pub const AppSession = struct {
                             // mode 선택기도 **렌더와 같은 표**(nav 플래그 포함)로 잰다. 오늘은 mode 선택기가 있는 kind(markdown·svg)가
                             // 편집기 Term 이 아니라 구간이 함께 설 일이 없다 — 여기 `false` 를 넘기는 변이가 사는 것이 정상이다
                             // (S5 적대적 2회차 B10·B11). 표 자체의 일치는 `dock_layout` 판정자가 든다.
-                            if (dock_layout.headerModeAt(band.band, self.cell_width_px, entry.kind, entry.dirty, entry.external_change, editor_ops.hasConflictRegions(self, band.term), x_px, y_px)) |mode| {
+                            if (inspector_file_header_ops.modeAt(self, band, x_px, y_px)) |mode| {
                                 file_panel_ops.setFilePanelMode(self, entry, mode);
                             } else if (editor_ops.crumbSegmentAt(self, pane_ops.activePane(self).activeTerm(), band.band, x_px, y_px)) |sym_idx| {
                                 // **모드 선택기 뒤에 본다**(§7.5) — 두 대상이 같은 한 줄에 있다.
@@ -22132,6 +22135,7 @@ pub const AppSession = struct {
                 break :blk true;
             };
             inspector_tabs_ops.publish(self, leaf_rects.items, leaf_layout_complete);
+            inspector_file_header_ops.publish(self, leaf_rects.items, leaf_layout_complete);
             const active_pane = pane_ops.activePane(self);
             var active_pane_geometry: ?PaneGeometry = null;
 
@@ -22503,15 +22507,7 @@ pub const AppSession = struct {
                         // 드러나야 "눌리는 곳"임을 알 수 있다 — nav 버튼 호버와 같은 색(sidebarHoverBg)·같은 규율.
                         if (self.hovered_file_header_mode) |hovered| {
                             if (hovered.surface_id == band.entry.surface_id) {
-                                if (dock_layout.headerModeRectWith(
-                                    band.band,
-                                    self.cell_width_px,
-                                    band.entry.kind,
-                                    hovered.mode,
-                                    band.entry.dirty,
-                                    band.entry.external_change,
-                                    editor_ops.hasConflictRegions(self, band.term), // 렌더와 같은 표(S5)
-                                )) |slot| self.appendBarBgQuad(slot, self.chromeQuadBg(sidebar_ops.sidebarHoverBg(self)));
+                                if (inspector_file_header_ops.modeRect(self, band, hovered.mode)) |slot| self.appendBarBgQuad(slot, self.chromeQuadBg(sidebar_ops.sidebarHoverBg(self)));
                             }
                         }
                         const cols: u16 = @intCast(@min(band.band.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
@@ -23491,7 +23487,7 @@ pub const AppSession = struct {
         return null;
     }
 
-    /// 파일 헤더 밴드의 mode 선택기 위인지 본다. 클릭 라우팅과 같은 `fileHeaderBandForPane`+`headerModeAt`을 써서
+    /// 파일 헤더 밴드의 mode 선택기 위인지 본다. 클릭 라우팅과 같은 발행 mode rect를 써서
     /// 호버 강조 영역과 실제 클릭 영역이 어긋나지 않는다.
     fn fileHeaderModeHoverAt(self: *AppSession, x_px: f64, y_px: f64) ?FileHeaderModeRef {
         if (self.cell_width_px == 0) return null;
@@ -23501,16 +23497,7 @@ pub const AppSession = struct {
             for (leaf_rects.items) |lr| {
                 const band = pane_ops.fileHeaderBandForPane(self, lr.leaf, lr.rect) orelse continue;
                 if (!layout_math.pointInRect(x_px, y_px, band.band)) continue;
-                const mode = dock_layout.headerModeAt(
-                    band.band,
-                    self.cell_width_px,
-                    band.entry.kind,
-                    band.entry.dirty,
-                    band.entry.external_change,
-                    editor_ops.hasConflictRegions(self, band.term), // 렌더와 같은 표(S5)
-                    x_px,
-                    y_px,
-                ) orelse return null; // 밴드 안이지만 breadcrumb·status 자리
+                const mode = inspector_file_header_ops.modeAt(self, band, x_px, y_px) orelse return null; // 밴드 안이지만 breadcrumb·status 자리
                 return .{ .surface_id = band.entry.surface_id, .mode = mode };
             }
         } else |_| {}
@@ -25370,6 +25357,8 @@ pub const AppSession = struct {
         self.rename_input.deinit(self.allocator); // 인라인 rename 입력(query/preedit) heap 해제
         self.sidebar_search_input.deinit(self.allocator); // 사이드바 검색바 입력 heap 해제
         self.sidebar_publication.deinit(self.allocator);
+        self.file_header_publication.deinit(self.allocator);
+        self.file_header_references.deinit(self.allocator);
         self.pane_tabs_publication.deinit(self.allocator);
         self.pane_tab_references.deinit(self.allocator);
         self.sidebar_rows.deinit(self.allocator); // 검색 필터 표시 슬롯 매핑 heap 해제
@@ -101766,4 +101755,54 @@ test "Live inspector dock header shares paint input and rejects changed meaning"
     session.dock.collapsed = false;
     dock_ops.publishDockHeader(session);
     try std.testing.expect(dock_ops.headerPublicationCurrent(session));
+}
+
+test "Live inspector file mode strip shares paint input and rejects changed owner state" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/inspector-mode.md", .markdown);
+    file_panel_ops.assignDockSurfaceIds(session);
+    inspector_ops.toggle(session);
+    var leaves: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer leaves.deinit(a);
+    try tab_ops.activeTabLeafRects(session, a, session.termRect(), &leaves);
+    inspector_file_header_ops.publish(session, leaves.items, true);
+    try std.testing.expect(inspector_file_header_ops.current(session, a));
+    const band = pane_ops.fileHeaderBandForPaneLookup(session, pane_ops.activePane(session)).?;
+    const r = inspector_file_header_ops.modeRect(session, band, .source_edit).?;
+    const x: f64 = @floatFromInt(r.x);
+    const y: f64 = @floatFromInt(r.y + 1);
+    try std.testing.expectEqual(@as(?dock_panel.Mode, .source_edit), inspector_file_header_ops.modeAt(session, band, x, y));
+    inspector_ops.picker.toggle(session);
+    const before = band.entry.mode;
+    session.mouse(1, x + 1, y, 0, 0);
+    session.mouse(3, x + 1, y, 0, 0);
+    try std.testing.expectEqual(before, band.entry.mode);
+    const key = session.inspector.picker_selected orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(chrome.ui.inspection.Source.file_header, key.source);
+    const id = chrome.components.file_header.controlId(0, @backingInt(dock_panel.Mode.source_edit));
+    try std.testing.expectEqual(id, key.id);
+    // A changed published rectangle must affect the real input consumer.
+    const index = session.file_header_publication.snapshot().find(id).?;
+    session.file_header_publication.entries.items[index].rect.x += 1;
+    try std.testing.expect(inspector_file_header_ops.modeAt(session, band, x, y) != .source_edit);
+    inspector_file_header_ops.publish(session, leaves.items, true);
+    band.entry.dirty = !band.entry.dirty;
+    try std.testing.expect(!inspector_file_header_ops.current(session, a));
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    try std.testing.expect(chrome.ui.inspection.resolve(try inspector_ops.picker.nodes(session, arena.allocator()), key) == null);
+    inspector_file_header_ops.publish(session, leaves.items, true);
+    try std.testing.expect(chrome.ui.inspection.resolve(try inspector_ops.picker.nodes(session, arena.allocator()), key) == null);
+    try session.tab_drag_order.append(a, band.term);
+    inspector_file_header_ops.publish(session, leaves.items, true);
+    try std.testing.expect(session.file_header_publication.stamp == null);
+    try std.testing.expect(inspector_file_header_ops.modeRect(session, band, .source_edit) != null);
+    session.tab_drag_order.clearRetainingCapacity();
+    inspector_file_header_ops.publish(session, leaves.items, true);
+    try std.testing.expect(inspector_file_header_ops.current(session, a));
 }

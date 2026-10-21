@@ -201,6 +201,21 @@ pub fn noteDropOverflow(browser: BrowserId, t_us: i64) void {
     table.noteDropOverflow(browser, t_us);
 }
 
+/// W9d② 적대 리뷰 5 회차 C1: 넘김 상자가 넘쳐 이 요청의 리다이렉트·응답·끝이 버려졌다 — 짝 없는 후보는 끝난 것·결과를 모르는 것으로(시한 뒤 `unmatched`,
+/// 짝이 되면 `ambiguous`).
+pub fn cefLost(browser: BrowserId, request: u64) void {
+    dbg("cef-lost b={d} req={d}", .{ browser, request });
+    table.cefLost(browser, request, machUs());
+    ensureTick();
+}
+
+/// 표지 자리도 넘쳤다 — 그 탭의 짝 없는 후보 모두.
+pub fn cefLostAll(browser: BrowserId) void {
+    dbg("cef-lost-all b={d}", .{browser});
+    table.cefLostAll(browser, machUs());
+    ensureTick();
+}
+
 // ── 관찰자 ────────────────────────────────────────────────────────────────────────────────────────────────
 
 fn register(entry: *const registry_mod.Entry) bool {
@@ -293,7 +308,8 @@ fn onEvent(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser
             .will_be_sent => |v| dbg("cdp-sent rid={s} url={x} m={x} ts={d} redirect={} now={d}", .{ v.rid, v.url_hash, v.method_hash, v.ts_us, v.redirect, now }),
             .response => |v| dbg("cdp-resp rid={s} mime={s} sw={} src={s} now={d}", .{ v.rid, v.mime, v.from_sw, v.sw_source, now }),
             .finished => |v| dbg("cdp-fin rid={s} now={d} seen={d}", .{ v.rid, now, table.cef_seen_us }),
-            .failed => |v| dbg("cdp-fail rid={s} now={d} seen={d}", .{ v.rid, now, table.cef_seen_us }),
+            // W9d② 적대 리뷰 5 회차 A1: CDP loadingFailed 의 timestamp(µs — `Cdp.failed_at`)를 UI 가 받은 때(now)와 견준다(시각만 — 본문은 싣지 않는다).
+            .failed => |v| dbg("cdp-fail rid={s} now={d} seen={d} cdp_ts={d}", .{ v.rid, now, table.cef_seen_us, v.ts_us }),
             .from_cache => |v| dbg("cdp-cache rid={s}", .{v.rid}),
             else => {},
         } else dbg("cdp-unparsed {s}", .{method});

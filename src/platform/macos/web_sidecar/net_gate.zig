@@ -11,7 +11,8 @@
 //! 넘긴 수로, 거절한 요청의 몫은 되돌린다), 지켜보는 표(브라우저 번호·켬·서비스 워커 출처 맞추기·켤 때마다 새 세대), 요청 표(같은 번호를
 //! 다시 쓰지 않음·꽉 차면 거절·껐다 켠 뒤 끝나는 옛 요청은 새 몫을 건드리지 않음), 넘김 상자의 상한, 덮기(어느 호스트든과 묶인 호스트의
 //! 합 — 빈 목록은 아무것도 덮지 않는다)와 덜어 내기의 결정(적을 때의 것과 보낼 때의 것 중 더 덜어 내는 쪽 — W9d① 적대 리뷰 3 회차), 놓친 시작의
-//! 표지(W9d② — 넘김 상자가 넘쳐 버린 시작도 붙일 탭마다 표지를 남긴다, 표지가 넘치면 그 탭을 넘침으로 — 적대 리뷰 4 회차).
+//! 표지(W9d② — 넘김 상자가 넘쳐 버린 시작도 붙일 탭마다 표지를 남긴다, 표지가 넘치면 그 탭을 넘침으로 — 적대 리뷰 4 회차), 넘김 상자가 넘쳐
+//! 버린 시작 아닌 기록(리다이렉트·응답·끝)의 표지(본문을 기록할 때 — 그 요청의 본문 끝이 꼭 오게, 적대 리뷰 5 회차 C1).
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -44,6 +45,11 @@ pub const max_drop_marks: usize = 256;
 /// W9d②: 놓친 시작 하나(붙일 탭·온 주소의 해시·IO 시각 — 잠금 아래에서 찍는다: 표지의 차례가 시각의 차례라 물 높이가 남은 표지의 가장 이른
 /// 시각으로 정해진다, W9d② 적대 리뷰 3 회차).
 pub const DropMark = struct { browser: BrowserId, url_hash: u64, t_us: i64 };
+
+/// W9d② 적대 리뷰 5 회차 C1: 넘김 상자가 넘쳐 버린 시작 아닌 기록(리다이렉트·응답·끝)의 표지 자리 — 넘치면 그 탭은 넘침으로(그 탭의 짝 없는
+/// 후보 모두 — `net_body_table.cefLostAll`).
+pub const max_lost_marks: usize = 256;
+pub const LostMark = struct { browser: BrowserId, request: u64 };
 
 const Bucket = struct {
     tokens: f64,
@@ -174,6 +180,10 @@ pub const State = struct {
     drop_marks: [max_drop_marks]DropMark = undefined,
     drop_mark_len: usize = 0,
     drop_marks_overflowed: [max_targets]BrowserId = @splat(0),
+    /// W9d② 적대 리뷰 5 회차 C1: 버린 시작 아닌 기록의 표지(본문 표가 그 요청의 후보를 끝난 것·모르는 것으로 친다 — `net_body_table.cefLost`).
+    lost_marks: [max_lost_marks]LostMark = undefined,
+    lost_mark_len: usize = 0,
+    lost_marks_overflowed: [max_targets]BrowserId = @splat(0),
 
     // ── 지켜보는 표(UI 스레드) ───────────────────────────────────────────────────────────────────────────
 
@@ -418,13 +428,41 @@ pub const State = struct {
 
     /// 넘김 상자에 넣지 못한 기록(`reserveQueue` 거짓). 시작이면 붙일 탭마다 넘긴 수를 세고, 본문 맞추기 열쇠가 있으면(어느 탭이든 본문을 기록할
     /// 때 — `url_hash` 가 0 이 아니다) 문이 넘긴 것처럼 표지도 남긴다(W9d② 적대 리뷰 4 회차: 전에는 수만 세어, 시작이 표에 닿지 않은 요청의 CDP
-    /// 쪽이 같은 주소의 다른 요청 기록을 가져갈 수 있었다).
-    pub fn queueRefused(self: *State, begin: bool, targets: []const BrowserId, url_hash: u64, t_us: i64) void {
-        if (!begin) return;
+    /// 쪽이 같은 주소의 다른 요청 기록을 가져갈 수 있었다). 시작 아닌 기록(리다이렉트·응답·끝)은 본문을 기록할 때(`body`) 그 요청 번호의 표지를
+    /// 남긴다(5 회차 C1: 전에는 아무것도 하지 않아, 버린 끝의 후보는 끝을 영영 기다렸다 — 본문 끝이 오지 않고 주기 task 가 멈추지 않았다).
+    pub fn queueRefused(self: *State, begin: bool, targets: []const BrowserId, url_hash: u64, request: u64, t_us: i64, body: bool) void {
+        if (!begin) {
+            if (body) self.markLost(targets, request);
+            return;
+        }
         for (targets) |b| if (self.watchOf(b)) |w| {
             w.dropped +|= 1;
         };
         if (url_hash != 0) self.markDrop(targets, url_hash, t_us);
+    }
+
+    /// 5 회차 C1: 버린 시작 아닌 기록의 표지를 붙일 탭마다(자리가 없으면 그 탭은 넘침으로).
+    pub fn markLost(self: *State, targets: []const BrowserId, request: u64) void {
+        for (targets) |b| {
+            if (self.lost_mark_len < max_lost_marks) {
+                self.lost_marks[self.lost_mark_len] = .{ .browser = b, .request = request };
+                self.lost_mark_len += 1;
+            } else for (&self.lost_marks_overflowed) |*o| if (o.* == 0 or o.* == b) {
+                o.* = b;
+                break;
+            };
+        }
+    }
+
+    /// 버린 기록의 표지를 꺼내 비운다(보내는 task — 잠금 아래). 꺼낸 수를 돌려준다. 부른 쪽은 함께 꺼낸 기록을 표에 넘긴 **뒤에** 쓴다(그 요청의
+    /// 시작은 표지보다 먼저 상자에 들었다 — 이번에 꺼낸 것이거나 그 앞).
+    pub fn takeLostMarks(self: *State, out: *[max_lost_marks]LostMark, overflowed: *[max_targets]BrowserId) usize {
+        const n = self.lost_mark_len;
+        @memcpy(out[0..n], self.lost_marks[0..n]);
+        self.lost_mark_len = 0;
+        overflowed.* = self.lost_marks_overflowed;
+        self.lost_marks_overflowed = @splat(0);
+        return n;
     }
 
     /// 표지를 꺼내 비운다(보내는 task — 잠금 아래). 꺼낸 수를 돌려준다.
@@ -589,7 +627,7 @@ test "W9d② 적대 리뷰 4 회차: 넘김 상자가 넘쳐 버린 시작 — �
     for (0..max_queue_events) |_| try testing.expect(s.reserveQueue(1));
     try testing.expect(!s.reserveQueue(1));
     // 시작 — 두 탭에 붙는 기록(서비스 워커 요청 꼴).
-    s.queueRefused(true, &.{ 5, 6 }, 0xabc, 1_000);
+    s.queueRefused(true, &.{ 5, 6 }, 0xabc, 41, 1_000, true);
     try testing.expectEqual(@as(u32, 1), s.watchOf(5).?.dropped);
     try testing.expectEqual(@as(u32, 1), s.watchOf(6).?.dropped);
     var marks: [max_drop_marks]DropMark = undefined;
@@ -598,16 +636,40 @@ test "W9d② 적대 리뷰 4 회차: 넘김 상자가 넘쳐 버린 시작 — �
     try testing.expectEqual(DropMark{ .browser = 5, .url_hash = 0xabc, .t_us = 1_000 }, marks[0]);
     try testing.expectEqual(DropMark{ .browser = 6, .url_hash = 0xabc, .t_us = 1_000 }, marks[1]);
     try testing.expectEqual(@as(usize, 0), s.takeDropMarks(&marks, &over)); // 꺼내면 빈다
-    // 본문을 기록하지 않을 때(열쇠 0)는 수만, 시작이 아닌 기록(응답·끝)은 세지도 남기지도 않는다.
-    s.queueRefused(true, &.{5}, 0, 2_000);
-    s.queueRefused(false, &.{5}, 0xdef, 3_000);
+    // 본문을 기록하지 않을 때(열쇠 0)는 수만, 시작이 아닌 기록(응답·끝)은 넘긴 수로 세지도 놓친 시작의 표지를 남기지도 않는다(그 표지는 5 회차 C1
+    // 의 버린 기록 표지 — 아래 시험).
+    s.queueRefused(true, &.{5}, 0, 42, 2_000, false);
+    s.queueRefused(false, &.{5}, 0xdef, 43, 3_000, true);
     try testing.expectEqual(@as(u32, 2), s.watchOf(5).?.dropped);
     try testing.expectEqual(@as(usize, 0), s.takeDropMarks(&marks, &over));
     // 표지 자리가 넘치면 그 탭은 넘침으로.
     for (0..max_drop_marks) |i| s.markDrop(&.{5}, 0x1, @intCast(i));
-    s.queueRefused(true, &.{6}, 0x2, 9_000);
+    s.queueRefused(true, &.{6}, 0x2, 44, 9_000, true);
     try testing.expectEqual(max_drop_marks, s.takeDropMarks(&marks, &over));
     try testing.expectEqual(@as(BrowserId, 6), over[0]);
+}
+
+test "W9d② 적대 리뷰 5 회차 C1: 넘김 상자가 넘쳐 버린 리다이렉트·응답·끝 — 본문을 기록하면 붙일 탭마다 그 요청의 표지(넘긴 수·놓친 시작의 표지는 아니다), 기록하지 않으면 없다, 자리가 넘치면 그 탭을 넘침으로" {
+    var s: State = .{};
+    try testing.expect(s.setWatch(5, 50, true, true, true, &.{}));
+    try testing.expect(s.setWatch(6, 60, true, true, true, &.{}));
+    s.queueRefused(false, &.{ 5, 6 }, 0, 77, 1_000, true);
+    s.queueRefused(false, &.{5}, 0, 78, 1_100, false); // 본문을 기록하지 않는다 — 남기지 않는다
+    try testing.expectEqual(@as(u32, 0), s.watchOf(5).?.dropped);
+    var dm: [max_drop_marks]DropMark = undefined;
+    var over: [max_targets]BrowserId = undefined;
+    try testing.expectEqual(@as(usize, 0), s.takeDropMarks(&dm, &over));
+    var lm: [max_lost_marks]LostMark = undefined;
+    try testing.expectEqual(@as(usize, 2), s.takeLostMarks(&lm, &over));
+    try testing.expectEqual(LostMark{ .browser = 5, .request = 77 }, lm[0]);
+    try testing.expectEqual(LostMark{ .browser = 6, .request = 77 }, lm[1]);
+    try testing.expectEqual(@as(BrowserId, 0), over[0]);
+    try testing.expectEqual(@as(usize, 0), s.takeLostMarks(&lm, &over)); // 꺼내면 빈다
+    for (0..max_lost_marks) |i| s.markLost(&.{5}, i);
+    s.queueRefused(false, &.{6}, 0, 99, 2_000, true);
+    try testing.expectEqual(max_lost_marks, s.takeLostMarks(&lm, &over));
+    try testing.expectEqual(@as(BrowserId, 6), over[0]);
+    try testing.expectEqual(@as(BrowserId, 0), over[1]);
 }
 
 // ── W9d① 적대 리뷰 1 회차 재현(리뷰가 남긴 R9d1-G1 — 붙여 실패를 본 뒤 고쳤다) ──

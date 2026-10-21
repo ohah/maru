@@ -438,7 +438,8 @@ fn enqueue(e: *Event) void {
         break :blk true;
     };
     // 넘친 시작은 넘긴 수를 세고, 본문을 기록하면 표지도 남긴다(W9d② 적대 리뷰 4 회차 — 그 요청의 CDP 쪽이 같은 주소의 다른 기록을 갖지 않게).
-    if (!ok) state.queueRefused(e.kind == .begin, e.targets[0..e.target_count], e.url_hash, e.queued_us);
+    // 넘친 리다이렉트·응답·끝은 본문을 기록하면 그 요청의 표지를 남긴다(5 회차 C1 — 버린 끝을 기다리는 후보도 끝이 꼭 오게).
+    if (!ok) state.queueRefused(e.kind == .begin, e.targets[0..e.target_count], e.url_hash, e.request, e.queued_us, net_body.any_recording.load(.acquire));
     doUnlock();
     if (!ok) freeEvent(e);
     postFlush();
@@ -688,8 +689,11 @@ fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
     var drop_count: usize = 0;
     var marks: [gate.max_drop_marks]gate.DropMark = undefined;
     var overflowed: [gate.max_targets]BrowserId = @splat(0);
+    var lost: [gate.max_lost_marks]gate.LostMark = undefined;
+    var lost_overflowed: [gate.max_targets]BrowserId = @splat(0);
     doLock();
     const mark_len = state.takeDropMarks(&marks, &overflowed);
+    const lost_len = state.takeLostMarks(&lost, &lost_overflowed);
     std.mem.swap(std.ArrayList(*Event), &queue, &taken);
     // 꺼낸 때 — 이 앞에 찍힌 것은 모두 꺼냈다(아래에서 표에 넘긴 뒤 물 높이로 알린다).
     const swapped_us = net_body.machUs();
@@ -710,6 +714,9 @@ fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
         doUnlock();
         freeEvent(e);
     }
+    // W9d② 적대 리뷰 5 회차 C1: 버린 리다이렉트·응답·끝 — 그 요청의 시작(후보)은 위에서 넘겼다(상자의 차례). 후보는 끝을 영영 기다리지 않는다.
+    for (lost[0..lost_len]) |m| net_body.cefLost(m.browser, m.request);
+    for (lost_overflowed) |b| if (b != 0) net_body.cefLostAll(b);
     // W9d② 적대 리뷰 3 회차 P1: 꺼낸 때까지의 CEF 기록이 모두 표에 닿았다 — 제 기록을 기다리던 CDP 끝을 곧 정한다.
     net_body.cefFlushed(swapped_us - 1);
 }

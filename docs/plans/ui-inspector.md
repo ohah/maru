@@ -9,7 +9,7 @@
   도구 버튼 활성화 → hover 경계 → 클릭 선택을 참고한다. 참조 코드는 복사하지 않는다.
 - `chrome.ui.inspection`은 paint/input이 소비하는 **발행된** `UiRectTree`를 읽는다.
   유효 clip과 좌표 변환을 적용하고 뒤에서부터 가장 위 요소를 고른다. disabled 요소도 읽을 수 있다.
-- 대상은 사이드바 workspace 카드·그룹·닫기 버튼, 상태바, 사이드바 scroll, pane divider, 표시 중인 파일·SCM·세션 도크의 발행 tree다.
+- 대상은 pane 탭·닫기·추가·좌우 스크롤 버튼, 사이드바 workspace 카드·그룹·닫기 버튼, 상태바, 사이드바 scroll, pane divider, 표시 중인 파일·SCM·세션 도크의 발행 tree다.
   미발행 chrome 영역, terminal cell, 웹 DOM은 미지원이며 `elements.coverage`에 명시한다.
   전체 앱의 완성된 component tree를 제공한다고 표현하지 않는다.
 - 각 node는 source + ID, parent ID, generation, kind/semantic role, 원래·보이는 rect,
@@ -85,8 +85,30 @@
   사이드바 카드 publication을 폐기하고 Inspector에서 제외한다. 기존 drag 경로를 유지한다.
 - 사용자 이름·경로 label을 복사하지 않는다. agent/recovered 행은 공유 geometry의 일부지만
   이번 Inspector 카드·그룹 범위에서는 제외한다. 네이티브 accessibility 이관 완료를 뜻하지 않는다.
-- 탭 바·도크 헤더의 발행 트리 확장은 후속 범위다.
+- pane 탭 바 확장은 아래 절을 따른다. 도크 헤더 확장은 후속 범위다.
 - 이번 PR의 적대적 검증은 사용자 요청에 따라 최초 **5회 + 추가 5회, 누적 10회**다
   (기본 20회에 대한 이번 작업의 예외).
   실제 앱·CLI·Metal PNG와 정상 입력 대조군, 컴파일 결함 5종의 결과는
   [검증 매트릭스](../verification-matrix.md)의 사이드바 절을 따른다.
+
+
+## Pane 탭 바 발행 트리
+
+- `chrome.components.tabbar.published.Frame`이 실제 pane 탭 바의 container → tab → close 및
+  plus/left/right 버튼 tree를 발행한다. `pane_tabs` source를 GUI Elements와 같은 CLI collector에 추가한다.
+- `Metrics.rawSegOf`는 발행을 준비하는 기존 컬럼 분할이다. 일반 paint/input의 `Metrics.segOf`와
+  plus/scroll hit-test는 유효한 발행 rect를 소비한다. 활성 탭·제목·버튼 배경을 같은 geometry로 그린다.
+  버튼 폭은 실제 컬럼 끝으로 제한하므로 남는 부분 픽셀을 클릭 영역으로 넓히지 않는다.
+- `app_session/inspector_tabs.zig`는 실제 leaf layout에서 publication을 만들고 live pane/Term 순서·활성 상태·
+  메트릭·pane teardown epoch를 검사한다. Inspector는 기존 publication의 유효성만 검사하고 별도 tree를 만들지 않는다.
+  pane/Term 포인터와 이름·경로·URL을 내보내지 않는다.
+- source/row ID/publication generation으로 선택을 고정한다. 순서·메트릭·활성 상태·모델 신원이 바뀌면
+  낡은 선택은 null이다. pane별 ID 영역을 나눠 split의 같은 탭 index가 충돌하지 않는다.
+- 첫 native viewport/paint 전과 tab reorder preview에는 기존 입력·그리기 경로를 유지하고
+  해당 pane tab publication을 Inspector에서 제외한다. 기존 preview/canonical 매핑과 drag owner를 바꾸지 않는다.
+  부분 발행 OOM은 전체 publication을 폐기한다. label/native accessibility 전체 이관 완료를 뜻하지 않는다.
+- CLI는 `elements.nodes/tree/hovered/selected`에서 `pane_tabs`를 제공한다. 좌표는 기존대로 owner 창의
+  backing pixels이며 분리 Inspector 창의 좌표로 바꾸지 않는다. 기존 512-node 한도를 유지한다.
+- 실제 앱 검증은 `tools/inspector-picker-app/run.py --pane-tabs --rounds 20`을 사용한다.
+  기존 `MARU_FORCE_TAB_COUNT`/`MARU_FORCE_SPLIT`으로 실제 Term 생성·split 경로를 실행한다.
+  새 제품 의존성·설정·ABI 변경은 없다. 최종 회차·증거는 [검증 매트릭스](../verification-matrix.md)를 따른다.

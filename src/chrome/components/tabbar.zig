@@ -8,6 +8,7 @@
 //! 단일 출처: docs/chrome-strategy.md §5.4, docs/layering-and-portability.md §5(C3b).
 
 const std = @import("std");
+pub const published = @import("tabbar/published.zig");
 
 /// 탭 tab_index의 **셀 경계** [start, end) — Metrics(픽셀 메트릭) 없이 순수 컬럼 분할만 계산하는 단일 소스.
 /// hit-test(segOf)와 platform view 그리기(buildPaneTabBarDrawList의 제목·✕)가 이 한 함수를 공유해 "보이는 탭/✕ ==
@@ -25,6 +26,7 @@ pub fn segCols(tab_index: usize, tab_w: u32, tab_cols: u32, scroll_cols: u32) st
 /// [탭 영역(tab_cols) | "+" zone(cols-tab_cols)]으로 나눈다. tab_w=탭 하나의 폭(컬럼). 분할 불가(셀·바·탭 0)면 host가
 /// null을 줘 이 메트릭이 안 만들어진다(호출자가 탭 처리 건너뜀). platform이 활성 밴드·제목 glyph를 같은 분할로 그린다.
 pub const Metrics = struct {
+    publication: ?struct { frame: *const published.Frame, pane: usize } = null,
     bar_x: u32,
     bar_y: u32,
     bar_w: u32,
@@ -65,6 +67,24 @@ pub const Metrics = struct {
     /// 패딩 0이라 시각/동작이 기존 셀-열 hit-test와 동일하다. 둥근 탭(C4b-5)에서 탭 패딩을 더하면 **여기 한 곳만**
     /// 바뀌어 view·hit-test가 동시에 움직인다(§6 seam 해소의 토대). colPx/segEnd를 재사용한다.
     pub fn segOf(self: Metrics, tab_index: usize) TabSeg {
+        var seg = self.rawSegOf(tab_index);
+        if (self.publication) |p| {
+            if (p.frame.rect(published.tabId(p.pane, tab_index))) |r| {
+                seg.start_px = r.x;
+                seg.end_px = @as(f64, r.x) + r.width;
+                if (p.frame.rect(published.closeId(p.pane, tab_index))) |close| {
+                    seg.close_start_px = close.x;
+                    seg.has_close = true;
+                } else seg.has_close = false;
+            } else {
+                seg.end_px = seg.start_px;
+                seg.has_close = false;
+            }
+        }
+        return seg;
+    }
+
+    pub fn rawSegOf(self: Metrics, tab_index: usize) TabSeg {
         const sc = segCols(tab_index, self.tab_w, self.tab_cols, self.scroll_cols);
         const start_col = sc.start;
         const end_col = sc.end;
@@ -170,6 +190,7 @@ pub const Metrics = struct {
     /// x_px가 "+" 버튼([plusZoneStart, +plus_button_cols)) 안인가. **인라인이라 cols까지가 아니라 버튼 폭으로 한정** —
     /// 마지막 탭 오른쪽 빈 영역을 클릭해도 새 Term이 안 생긴다(①). "+" glyph(plusZoneStart+1)를 포함하는 영역.
     pub fn inPlusZone(self: Metrics, x_px: f64) bool {
+        if (self.publication != null) return self.publishedControlHit(.plus, x_px);
         if (!self.hasPlusZone() or !std.math.isFinite(x_px)) return false;
         const ps = self.plusZoneStart();
         const end = @min(ps + plus_button_cols, self.cols);
@@ -192,14 +213,23 @@ pub const Metrics = struct {
         return self.plusZoneStart() + plus_button_cols / 2;
     }
 
+    fn publishedControlHit(self: Metrics, control: published.Control, x: f64) bool {
+        if (!std.math.isFinite(x)) return false;
+        const p = self.publication orelse return false;
+        const r = p.frame.rect(published.controlId(p.pane, control)) orelse return false;
+        return x >= r.x and x < @as(f64, r.x) + r.width;
+    }
+
     /// x_px가 ‹(왼쪽 스크롤) 버튼([tab_cols, +scroll_button_cols)) 안인가 — has_scroll일 때만.
     pub fn inScrollLeftZone(self: Metrics, x_px: f64) bool {
+        if (self.publication != null) return self.publishedControlHit(.left, x_px);
         if (!self.has_scroll or !std.math.isFinite(x_px)) return false;
         return x_px >= self.colPx(self.tab_cols) and x_px < self.colPx(self.tab_cols + scroll_button_cols);
     }
 
     /// x_px가 ›(오른쪽 스크롤) 버튼([tab_cols+scroll_button_cols, +scroll_button_cols)) 안인가 — has_scroll일 때만.
     pub fn inScrollRightZone(self: Metrics, x_px: f64) bool {
+        if (self.publication != null) return self.publishedControlHit(.right, x_px);
         if (!self.has_scroll or !std.math.isFinite(x_px)) return false;
         const start = self.tab_cols + scroll_button_cols;
         return x_px >= self.colPx(start) and x_px < self.colPx(start + scroll_button_cols);
@@ -376,4 +406,8 @@ test "tabbar: ‹›·+ 는 각 3칸 버튼이고 glyph 는 모두 가운데 칸
     const no = testMetrics();
     try std.testing.expect(!no.inScrollLeftZone(150));
     try std.testing.expect(no.inPlusZone(165)); // plus_start=8 → [colPx(8), colPx(10)=cols clamp)
+}
+
+test {
+    _ = published;
 }

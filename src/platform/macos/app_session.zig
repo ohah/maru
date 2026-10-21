@@ -112,6 +112,7 @@ const build_options = @import("build_options"); // build.zig가 주입한 .versi
 const update_repo = "ohah/maru"; // GitHub releases/latest를 조회할 repo(인앱 새 버전 안내)
 pub const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 gesture 정책(OS-중립 L2 — session/keyhint_hold.zig). platform은 alias로 참조.
 const command_palette = @import("command_palette.zig");
+pub const inspector_tabs_ops = @import("app_session/inspector_tabs.zig");
 pub const inspector_ops = @import("app_session/inspector.zig");
 const symbol_picker = @import("symbol_picker.zig");
 const reference_picker = @import("reference_picker.zig");
@@ -6780,6 +6781,9 @@ pub const AppSession = struct {
     /// rows[i].card.tab)에 쓴다. 슬롯↔탭 단일 출처(인덱스 어긋남 방지). SG3a는 card row만(그룹 헤더는 SG3b).
     sidebar_rows: std.ArrayList(chrome.components.sidebar.Row) = .empty,
     sidebar_publication: chrome.components.sidebar.published.Frame = .{},
+    pane_tabs_publication: chrome.components.tabbar.published.Frame = .{},
+    pane_tab_references: std.ArrayList(inspector_tabs_ops.Reference) = .empty,
+    pane_tab_identity_epoch: u64 = 0,
     sidebar_identity_epoch: u64 = 0,
     /// SG8c 드래그 프리뷰 — 드래그 중 `sidebar_rows`(원본, 불변, hit-test·plan 계산이 봄)와 분리된 **렌더 전용 투영**
     /// (고스트 포함, docs/plans/sidebar-groups.md §9 SG8). 라이브 재배치(매 프레임 self.tabs 커밋) 대신 비커밋 프리뷰:
@@ -15999,7 +16003,7 @@ pub const AppSession = struct {
                             return;
                         }
                         const count = lr.leaf.terms.items.len;
-                        const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols);
+                        const m = inspector_tabs_ops.metrics(self, pb.tabs, lr.leaf);
                         // 바 우측 ‹›(가로 스크롤) 버튼 클릭 → 그 pane의 tab_scroll_cols를 ±tab_w(한 탭). 넘침 범위로 clamp. "+"·탭보다 먼저.
                         if (m) |bm| if (bm.inScrollLeftZone(x_px)) {
                             _ = pane_ops.focusPaneByPtr(self, lr.leaf);
@@ -22126,6 +22130,7 @@ pub const AppSession = struct {
                 tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &leaf_rects) catch break :blk false;
                 break :blk true;
             };
+            inspector_tabs_ops.publish(self, leaf_rects.items, leaf_layout_complete);
             const active_pane = pane_ops.activePane(self);
             var active_pane_geometry: ?PaneGeometry = null;
 
@@ -22146,7 +22151,7 @@ pub const AppSession = struct {
                 // 탭 강조색: 활성 pane=밝은 sidebarActiveBg, 비활성=dim sidebarHoverBg(포커스 구분). connected 스타일은
                 // 본문색 cutout(U-tab2)으로 덮고 포커스 구분을 언더바 색으로 옮긴다 — hl_bg는 pill의 lifted fill이 쓴다.
                 const hl_bg = if (lr.leaf == active_pane) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self);
-                const m_opt = barMetrics(pb.tabs, self.cell_width_px, lr.leaf.terms.items.len, tk_space.tab_width_cols, lr.leaf.tab_scroll_cols); // 활성 밴드·‹›는 라벨 뺀 탭 영역
+                const m_opt = inspector_tabs_ops.metrics(self, pb.tabs, lr.leaf); // 활성 밴드·‹›는 라벨 뺀 탭 영역
                 // 바 배경(직각)·활성 탭(본문색 cutout + 하단 앰버 언더바) 모두 layer 2 quad. 바 배경 먼저(아래),
                 // 활성 탭이 위, 제목 셀(part1)은 그 위 — 불투명 바 배경 셀이 quad를 가리던 z-order 버그 해소(리뷰 #1).
                 self.appendBarBgQuad(bar, self.chromeQuadBg(sidebar_ops.sidebarBg(self))); // window.opacity 반영(quad straight-alpha)
@@ -22171,12 +22176,16 @@ pub const AppSession = struct {
                     const l_bg = self.chromeQuadBg(if (lh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self));
                     const r_bg = self.chromeQuadBg(if (rh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self));
                     var sb_i: u32 = 0;
-                    while (sb_i < sw and m.tab_cols + sb_i < m.cols) : (sb_i += 1) {
-                        scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols + sb_i, l_bg);
+                    if (!inspector_tabs_ops.paintControl(self, m, .left, l_bg)) {
+                        while (sb_i < sw and m.tab_cols + sb_i < m.cols) : (sb_i += 1) {
+                            scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols + sb_i, l_bg);
+                        }
                     }
                     sb_i = 0;
-                    while (sb_i < sw and m.tab_cols + sw + sb_i < m.cols) : (sb_i += 1) {
-                        scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols + sw + sb_i, r_bg);
+                    if (!inspector_tabs_ops.paintControl(self, m, .right, r_bg)) {
+                        while (sb_i < sw and m.tab_cols + sw + sb_i < m.cols) : (sb_i += 1) {
+                            scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols + sw + sb_i, r_bg);
+                        }
                     }
                 };
                 // ✕·"+" 호버 배경 — ‹/› 와 **같은 신호**다(사용자 요청 2026-08-18). 그 둘만 호버 표시가
@@ -22186,8 +22195,10 @@ pub const AppSession = struct {
                     if (self.hovered_plus) |hp| if (hp == lr.leaf and m.hasPlusZone()) {
                         const ps = m.plusZoneStart();
                         var i: u32 = 0;
-                        while (i < chrome.components.tabbar.Metrics.plus_button_cols and ps + i < m.cols) : (i += 1) {
-                            scroll_ops.appendScrollButtonQuad(self, m, ps + i, self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)));
+                        if (!inspector_tabs_ops.paintControl(self, m, .plus, self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)))) {
+                            while (i < chrome.components.tabbar.Metrics.plus_button_cols and ps + i < m.cols) : (i += 1) {
+                                scroll_ops.appendScrollButtonQuad(self, m, ps + i, self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)));
+                            }
                         }
                     };
                     if (self.hovered_tab_close) |hc| if (hc.pane == lr.leaf) {
@@ -22196,8 +22207,10 @@ pub const AppSession = struct {
                             // 배경은 ✕ 의 클릭 zone(`close_button_cols`)과 **같은 칸들**을 덮는다 —
                             // 하드코딩 2 는 zone(3칸)보다 좁아 배경이 ✕ 왼쪽에 붙었다(사용자 보고 2026-08-20).
                             var i: u32 = seg.end_col -| chrome.components.tabbar.Metrics.close_button_cols;
-                            while (i < seg.end_col and i < m.cols) : (i += 1) {
-                                scroll_ops.appendScrollButtonQuad(self, m, i, self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)));
+                            if (!inspector_tabs_ops.paintClose(self, m, hc.tab, self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)))) {
+                                while (i < seg.end_col and i < m.cols) : (i += 1) {
+                                    scroll_ops.appendScrollButtonQuad(self, m, i, self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)));
+                                }
                             }
                         }
                     };
@@ -25366,6 +25379,8 @@ pub const AppSession = struct {
         self.rename_input.deinit(self.allocator); // 인라인 rename 입력(query/preedit) heap 해제
         self.sidebar_search_input.deinit(self.allocator); // 사이드바 검색바 입력 heap 해제
         self.sidebar_publication.deinit(self.allocator);
+        self.pane_tabs_publication.deinit(self.allocator);
+        self.pane_tab_references.deinit(self.allocator);
         self.sidebar_rows.deinit(self.allocator); // 검색 필터 표시 슬롯 매핑 heap 해제
         self.sidebar_preview_rows.deinit(self.allocator); // SG8c 드래그 프리뷰 투영(고스트 포함) heap 해제
         self.find_matches.deinit(self.allocator);
@@ -101664,4 +101679,55 @@ test "Live inspector picker consumes selection down up and rechecks published ge
     for (unpublished) |entry| try std.testing.expect(entry.source != .sidebar);
     inspector_ops.close(session);
     try std.testing.expect(!session.inspector.picking);
+}
+
+test "Live inspector pane tabs share paint input and retire replaced publications" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{ .abi_version = abi_version, .cols = 80, .rows = 24, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
+    defer session.deinit();
+    _ = try session.resize(1200, 800, 1000);
+    inspector_ops.toggle(session);
+    var leaves: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer leaves.deinit(a);
+    try tab_ops.activeTabLeafRects(session, a, session.termRect(), &leaves);
+    inspector_tabs_ops.publish(session, leaves.items, true);
+    try std.testing.expect(inspector_tabs_ops.current(session, a));
+    const pane = leaves.items[0].leaf;
+    const bar = pane_ops.paneBar(session, leaves.items[0].rect, pane).?;
+    const m = inspector_tabs_ops.metrics(session, bar.tabs, pane).?;
+    try std.testing.expect(m.publication != null);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const nodes = try inspector_ops.picker.nodes(session, arena.allocator());
+    var close: ?chrome.ui.inspection.Node = null;
+    const close_id = chrome.components.tabbar.published.closeId(0, 0);
+    for (nodes) |node| if (node.source == .pane_tabs and node.id == close_id) {
+        close = node;
+        break;
+    };
+    const node = close orelse return error.TestUnexpectedResult;
+    const count = pane.terms.items.len;
+    inspector_ops.picker.toggle(session);
+    session.mouse(1, node.rect.x + node.rect.width / 2, node.rect.y + node.rect.height / 2, 0, 0);
+    session.mouse(3, node.rect.x + node.rect.width / 2, node.rect.y + node.rect.height / 2, 0, 0);
+    try std.testing.expectEqual(count, pane.terms.items.len);
+    const key = session.inspector.picker_selected orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(chrome.ui.inspection.Source.pane_tabs, key.source);
+    session.pane_tab_identity_epoch +%= 1;
+    try std.testing.expect(!inspector_tabs_ops.current(session, a));
+    const stale = try inspector_ops.picker.nodes(session, arena.allocator());
+    try std.testing.expect(chrome.ui.inspection.resolve(stale, key) == null);
+    inspector_tabs_ops.publish(session, leaves.items, true);
+    const replaced = try inspector_ops.picker.nodes(session, arena.allocator());
+    try std.testing.expect(chrome.ui.inspection.resolve(replaced, key) == null);
+    try session.tab_drag_order.append(a, pane.terms.items[0]);
+    inspector_tabs_ops.publish(session, leaves.items, true);
+    try std.testing.expect(!inspector_tabs_ops.current(session, a));
+    try std.testing.expect(inspector_tabs_ops.metrics(session, bar.tabs, pane).?.publication == null);
+    session.tab_drag_order.clearRetainingCapacity();
+    inspector_tabs_ops.publish(session, leaves.items, true);
+    try std.testing.expect(inspector_tabs_ops.current(session, a));
 }

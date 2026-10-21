@@ -2703,10 +2703,17 @@ pub fn build(b: *std.Build) void {
     });
     const run_inspector_tests = b.addRunArtifact(inspector_tests);
     run_inspector_tests.setCwd(b.path("."));
-    run_inspector_tests.addArg("--maru-expect-passed=11");
+    run_inspector_tests.addArg("--maru-expect-passed=12");
     const inspector_step = b.step("test-inspector", "Verify live inspector UI, shared snapshot and CLI contracts");
     inspector_step.dependOn(&run_inspector_tests.step);
     if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_inspector_tests.step);
+    const inspector_artifact_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/inspector-picker-app", "-p", "test_*.py" });
+    inspector_artifact_controls.setCwd(b.path("."));
+    // The verifier controls create their own fixtures; always run them instead
+    // of reusing a successful artifact from an older verifier implementation.
+    inspector_artifact_controls.has_side_effects = true;
+    inspector_step.dependOn(&inspector_artifact_controls.step);
+    if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&inspector_artifact_controls.step);
     // Startup has no native viewport. Keep those legacy input controls alongside
     // live published inspection and deterministic editor capture OOM coverage.
     const inspector_sidebar_regressions = addProjectTest(b, .{

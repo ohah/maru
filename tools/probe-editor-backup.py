@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import platform
+import re
 import statistics
 import subprocess
 import tempfile
@@ -17,6 +18,27 @@ def once(path, old, new):
     path.write_text(text.replace(old, new))
 
 
+def ensure_hashes(root, hashes):
+    # assert는 python -O에서 사라지므로 측정 신원 검증에는 쓰지 않는다.
+    if not all(hashlib.sha256((root / p).read_bytes()).hexdigest() == h for p, h in hashes.items()):
+        raise ValueError('Source identity mismatch')
+
+
+def mutation_failed(text, returncode, case):
+    # 다른 검사 실패나 실행 도중 중단을 목표 회귀의 검출로 세지 않는다.
+    headers = list(re.finditer(r'(?m)^(\d+)/18 [^\n]*', text))
+    summary = re.findall(r'(?m)^(\d+) passed; 0 skipped; (\d+) failed\.$', text)
+    if (returncode != 1 or [int(h[1]) for h in headers] != list(range(1, 19))
+            or len(summary) != 1 or sum(map(int, summary[0])) != 18 or int(summary[0][1]) == 0):
+        return False
+    for i, header in enumerate(headers):
+        if f'.test.U4a-{case} ' not in header[0]:
+            continue
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
+        return re.search(r'FAIL \((TestUnexpectedResult|TestExpectedEqual|TestExpectedError)\)', text[header.start():end]) is not None
+    return False
+
+
 def validate(rows):
     expected = {(route, size, action, sample)
                 for route in ['untitled', 'local-id']
@@ -25,6 +47,9 @@ def validate(rows):
                 for sample in samples}
     seen = set()
     for row in rows:
+        if (type(row['bytes']) is not int or type(row['sample']) is not int
+                or type(row['route']) is not str or type(row['action']) is not str):
+            raise ValueError('Invalid condition type')
         key = (row['route'], row['bytes'], row['action'], row['sample'])
         if key not in expected or key in seen or row['verified'] is not True:
             raise ValueError('Missing, duplicated or unverified condition')
@@ -59,8 +84,7 @@ def main():
     files = [base + 'backup.zig', base + 'recovery_store.zig', base + 'mod.zig', 'src/session/editor/backup.zig', 'build.zig']
     digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
     provenance = dict(head=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(), optimize=args.optimize, allocator='std.heap.smp_allocator', platform=platform.platform(), original={p: digest(root / p) for p in files}, fixture=digest(root / 'tools/editor-backup-probe.zig.inc'))
-    if not all(digest(source / p) == h for p, h in provenance['original'].items()):
-        raise ValueError('Source changed while the isolated copy was prepared')
+    ensure_hashes(source, provenance['original'])
     mod = source / (base + 'mod.zig')
     mod.write_text(mod.read_text() + '\n' + (root / 'tools/editor-backup-probe.zig.inc').read_text())
     # 측정 지점은 사본에만 둔다. 일반 빌드와 기본 CI에는 계측 비용이 없다.
@@ -107,6 +131,7 @@ def main():
             ('skipped-deletion', 'if (!term.rt.editorDocument().notifications.backup_on_disk) return;', 'if (term.kind == .editor) return;'),
         ]
         results = []
+        targets = {'ignore-debounce': 1, 'all-documents-per-tick': 13, 'lost-publication-state': 1, 'lost-retry': 10, 'skipped-deletion': 3}
         for label, old, new in variants + [('restored', None, None)]:
             try:
                 if old is not None:
@@ -114,7 +139,7 @@ def main():
                 with (output / (label + '.log')).open('w') as log:
                     result = subprocess.run(['mise', 'exec', '--', 'zig', 'build', 'test-editor-save-wake', '-j2', '-Doptimize=' + args.optimize], cwd=source, stdout=log, stderr=subprocess.STDOUT, timeout=900)
                 text = (output / (label + '.log')).read_text()
-                semantic = 'FAIL (' in text and any(reason in text for reason in ['TestUnexpectedResult', 'TestExpectedEqual', 'TestExpectedError'])
+                semantic = old is not None and mutation_failed(text, result.returncode, targets[label])
                 passed = result.returncode == 0 if old is None else result.returncode != 0 and semantic
                 results.append(dict(name=label, exit=result.returncode, semantic_failure=semantic, passed=passed))
                 (output / 'adversarial.json').write_text(json.dumps(results, indent=2))
@@ -123,8 +148,9 @@ def main():
                     raise RuntimeError('Mutation or restored control failed: ' + label)
             finally:
                 path.write_bytes(original)
-                assert path.read_bytes() == original
-    assert all(digest(root / p) == h for p, h in provenance['original'].items())
+                if path.read_bytes() != original:
+                    raise ValueError('Mutation restoration failed')
+    ensure_hashes(root, provenance['original'])
     print(json.dumps(groups, indent=2))
     print(output, flush=True)
 

@@ -16,9 +16,13 @@ pub const Server = struct {
     /// 그 문법인데도 **이 서버가 다루지 않는 확장자**(대소문자 무시, 점 없이). 그런 문서에는 주 서버가 없다 — Bash 서버는 `.zsh` 에
     /// shellcheck 를 돌려 zsh shebang 파일마다 「ShellCheck only supports sh/bash…」 오류를 냈다(계획 editor-lsp-servers-expand LS1 실측).
     skip_extensions: []const []const u8 = &.{},
-    /// 파일 진단을 pull 로만 내는 서버(push 를 안 한다 — ESLint 2026-10-13 실측, tsgo 계획 editor-lsp-servers-expand LS2 실측). 그 서버의 클라이언트에만
+    /// 파일 진단을 pull 로만 내는 서버(push 를 안 한다 — ESLint 2026-10-13 실측, tsgo·ruby-lsp 계획 editor-lsp-servers-expand LS2·LS4 실측). 그 서버의 클라이언트에만
     /// `initialize` 에서 `textDocument.diagnostic` 을 알리고 문서를 보낼 때마다 묻는다(§8.2u). 주 서버·보조 서버가 같은 칸이다.
     pull_diagnostics: bool = false,
+    /// pull 앞에 장벽을 친다 — 장벽 요청(`rpc.pullBarrierRequest`)의 답이 온 뒤에 pull 을 묻는다(§8.2u). 요청을 읽기 스레드가 **그때 적용된
+    /// 본문**으로 곧 파싱하고 didChange 는 작업 스레드가 나중에 적용하는 서버 — ruby-lsp(계획 editor-lsp-servers-expand LS4 실측: 바로 묻든
+    /// 30 ms 를 띄우든 타이핑 중 옛 본문의 진단을 계산해 다음 편집까지 캐시했다). 다른 pull 서버는 didChange 를 먼저 적용한다(tsgo·ESLint — 바로 묻는다).
+    pull_barrier: bool = false,
 
     /// 그 경로의 문서를 다루나(`skip_extensions`).
     pub fn serves(self: Server, path: []const u8) bool {
@@ -88,9 +92,12 @@ pub fn candidatesFor(g: language.Grammar) []const Server {
         .json => &[_]Server{.{ .exe = "vscode-json-language-server", .args = &stdio, .language_id = "json", .install = "npm i -g vscode-langservers-extracted" }},
         .css => &[_]Server{.{ .exe = "vscode-css-language-server", .args = &stdio, .language_id = "css", .install = "npm i -g vscode-langservers-extracted" }},
         .html => &[_]Server{.{ .exe = "vscode-html-language-server", .args = &stdio, .language_id = "html", .install = "npm i -g vscode-langservers-extracted" }},
-        // 싣지 않는다(계획 「싣지 않는 것」 — 실측): Ruby 는 범위 없는 전문 didChange 를 못 받아 LS4(계획 editor-lsp-servers-expand), SQL·Markdown·
-        // XML·DTD·Make 는 쓸 만한 서버가 없다.
-        .none, .markdown, .ruby, .xml, .dtd, .make, .sql => &.{},
+        // Ruby(LS4) — push 를 안 하고 pull 진단만 낸다(`pull_diagnostics`), 그 앞에 장벽을 친다(`pull_barrier`). 공식 권장은 프로젝트 Ruby 의 `gem install ruby-lsp` 지만 macOS 기본 Ruby
+        // 로는 안 되는 경우가 있어 자기 Ruby 를 든 Homebrew 공식을 낸다(계획 editor-lsp-servers-expand 의 2026-10-20·21 실측이 이것 — 0.26.11). 첫
+        // 기동에 저장소의 `Gemfile` 을 평가하고 `bundle install` 을 돈다.
+        .ruby => &[_]Server{.{ .exe = "ruby-lsp", .args = &none, .language_id = "ruby", .install = "brew install ruby-lsp", .pull_diagnostics = true, .pull_barrier = true }},
+        // 싣지 않는다(계획 「싣지 않는 것」 — 실측): SQL·Markdown·XML·DTD·Make 는 쓸 만한 서버가 없다.
+        .none, .markdown, .xml, .dtd, .make, .sql => &.{},
     };
 }
 
@@ -139,7 +146,7 @@ pub fn processKey(s: Server) []const u8 {
 
 const testing = std.testing;
 
-test "LSI1 이름표 — zig·c·cpp·objc·ts·tsx·js·rust·python·go 와 LS1 의 열다섯은 서버가 있고, Ruby·SQL·Markdown·XML·DTD·Make·평문은 없다; ts 계열은 --stdio, 같은 서버는 같은 키 (§8.2a)" {
+test "LSI1 이름표 — zig·c·cpp·objc·ts·tsx·js·rust·python·go 와 LS1 의 열다섯·LS4 의 Ruby 는 서버가 있고, SQL·Markdown·XML·DTD·Make·평문은 없다; ts 계열은 --stdio, 같은 서버는 같은 키 (§8.2a)" {
     try testing.expectEqualStrings("zls", forGrammar(.zig).?.exe);
     try testing.expectEqualStrings("clangd", forGrammar(.c).?.exe);
     try testing.expectEqualStrings("clangd", forGrammar(.cpp).?.exe);
@@ -156,8 +163,8 @@ test "LSI1 이름표 — zig·c·cpp·objc·ts·tsx·js·rust·python·go 와 LS
     try testing.expectEqualStrings("--stdio", ts.args[1]);
     try testing.expectEqualStrings("typescriptreact", forGrammar(.tsx).?.language_id);
     try testing.expectEqual(@as(usize, 0), forGrammar(.zig).?.args.len);
-    // 싣지 않은 것(계획 editor-lsp-servers-expand 「싣지 않는 것」 — 실측). Ruby 는 LS4 다.
-    inline for (.{ .none, .markdown, .ruby, .xml, .dtd, .make, .sql }) |g| try testing.expect(forGrammar(g) == null);
+    // 싣지 않은 것(계획 editor-lsp-servers-expand 「싣지 않는 것」 — 실측).
+    inline for (.{ .none, .markdown, .xml, .dtd, .make, .sql }) |g| try testing.expect(forGrammar(g) == null);
     // 설치 명령은 전부 있고 개행이 없다(한 줄을 입력한다).
     inline for (@import("type_info_fields").enumFields(language.Grammar)) |f| {
         const g: language.Grammar = @fromBackingInt(@intCast(f.value));
@@ -236,7 +243,7 @@ test "LSI3 언어 서버 후보 확대 LS1 — 열다섯의 실행 파일·인�
     }
 }
 
-test "LSI8 TS 7 네이티브(`tsgo`·TS 7 의 `tsc`)는 파일 진단을 pull 로만 낸다 — 그 둘만 pull 칸이 켜지고 `typescript-language-server` 는 push; 주 서버 표에서 pull 칸이 켜진 자리는 TS·TSX·JS 마다 그 둘, 모두 여섯 (계획 editor-lsp-servers-expand LS2)" {
+test "LSI8 TS 7 네이티브(`tsgo`·TS 7 의 `tsc`)는 파일 진단을 pull 로만 낸다 — 그 둘만 pull 칸이 켜지고 `typescript-language-server` 는 push; 주 서버 표에서 pull 칸이 켜진 자리는 TS·TSX·JS 마다 그 둘과 Ruby 하나, 모두 일곱 (계획 editor-lsp-servers-expand LS2·LS4)" {
     inline for (.{ .typescript, .tsx, .javascript }) |g| {
         const c = candidatesFor(g);
         try testing.expectEqualStrings("tsgo", c[0].exe);
@@ -250,11 +257,31 @@ test "LSI8 TS 7 네이티브(`tsgo`·TS 7 의 `tsc`)는 파일 진단을 pull �
     var n: usize = 0;
     for (std.enums.values(language.Grammar)) |g| for (candidatesFor(g)) |s| {
         if (s.pull_diagnostics) {
-            try testing.expect(std.mem.eql(u8, s.exe, "tsgo") or std.mem.eql(u8, s.exe, "tsc"));
+            try testing.expect(std.mem.eql(u8, s.exe, "tsgo") or std.mem.eql(u8, s.exe, "tsc") or std.mem.eql(u8, s.exe, "ruby-lsp"));
             n += 1;
         }
     };
-    try testing.expectEqual(@as(usize, 6), n);
+    try testing.expectEqual(@as(usize, 7), n);
+}
+
+test "LSI9 Ruby(`ruby-lsp`) — pull 진단만 내는 주 서버(그 앞에 장벽 — 서버 표에서 이 하나뿐), 인자 없음, languageId `ruby`, 설치는 Homebrew 공식 (계획 editor-lsp-servers-expand LS4)" {
+    const c = candidatesFor(.ruby);
+    try testing.expectEqual(@as(usize, 1), c.len);
+    const r = c[0];
+    try testing.expectEqualStrings("ruby-lsp", r.exe);
+    try testing.expectEqual(@as(usize, 0), r.args.len);
+    try testing.expectEqualStrings("ruby", r.language_id);
+    try testing.expectEqualStrings("ruby", languageIdFor(.ruby).?);
+    try testing.expectEqualStrings("brew install ruby-lsp", r.install);
+    try testing.expect(r.pull_diagnostics);
+    try testing.expect(r.pull_barrier);
+    // 장벽 칸이 켜진 자리는 이 하나뿐이다(LS4 — tsgo·tsc·ESLint 는 didChange 를 먼저 적용한다). 장벽은 pull 서버에만 뜻이 있다.
+    var n: usize = 0;
+    for (std.enums.values(language.Grammar)) |g| for (candidatesFor(g)) |sv| if (sv.pull_barrier) {
+        try testing.expect(sv.pull_diagnostics);
+        n += 1;
+    };
+    try testing.expectEqual(@as(usize, 1), n);
 }
 
 test "LSI4 문서마다 — CSS 문법의 `.scss`·`.less` 는 그 방언의 languageId, Bash 서버는 `.zsh` 를 안 다룬다(LS1 실측) (계획 editor-lsp-servers-expand)" {

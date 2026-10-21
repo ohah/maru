@@ -1,6 +1,6 @@
 # 언어 서버 후보 확대 계획
 
-상태: LS1·LS2·LS3 완료, LS4 계획(2026-10-16 사용자 결정 — 「언어 서버 후보 확대」, 실물 검증을 위해 brew 전역 설치 허용). 서버 표의 계약은
+상태: LS1~LS4 완료(2026-10-16 사용자 결정 — 「언어 서버 후보 확대」, 실물 검증을 위해 brew 전역 설치 허용). 서버 표의 계약은
 [툴링](../editor-surface-tooling.md) §8.2a 「서버 찾기」·「설치 안내」가 소유한다. 이 문서는 후보 실측·결정·조각·검증을 소유한다.
 
 ## 왜
@@ -31,7 +31,7 @@ maru 주 서버 클라이언트와 **같은 능력**으로 말을 걸었다(임�
 | JSON | `vscode-json-language-server` | `--stdio` | `json` | `npm i -g vscode-langservers-extracted` | 통과(push 로도 낸다) |
 | CSS | `vscode-css-language-server` | `--stdio` | `css` | 같은 꾸러미 | 통과 |
 | HTML | `vscode-html-language-server` | `--stdio` | `html` | 같은 꾸러미 | 통과(`<style>` 안 CSS 오류까지) |
-| Ruby | `ruby-lsp` | — | `ruby` | `brew install ruby-lsp` | **pull 진단만 낸다** — push 만 알리는 주 서버 클라이언트로는 진단이 안 온다. pull 을 알리면 첫 진단은 서지만 **고쳐도 안 비워진다**: maru 의 전문 `didChange`(range 없음)를 `NoMethodError` 로 거부해 서버 사본이 연 때의 본문에 멈춘다(아래 「didChange 실측」) — LS3·LS4 |
+| Ruby | `ruby-lsp` | — | `ruby` | `brew install ruby-lsp` | **pull 진단만 낸다** — push 만 알리는 주 서버 클라이언트로는 진단이 안 온다. pull 을 알리면 첫 진단은 서지만 **고쳐도 안 비워진다**: maru 의 전문 `didChange`(range 없음)를 `NoMethodError` 로 거부해 서버 사본이 연 때의 본문에 멈춘다(아래 「didChange 실측」) — LS3 이 range 꼴로 고쳐 LS4 에 싣는다 |
 
 **실물에서 드러난 두 가지**(같은 도구로 maru 가 보낼 값을 그대로 보냈다):
 - **SCSS·LESS 의 languageId** — 문법 `.css` 는 `.scss`·`.less` 도 덮는다. CSS 서버에 `css` 로 열면 `$c: red;`·`@c: red;` 에 거짓 오류가 **셋씩**,
@@ -63,7 +63,11 @@ maru 본문과 같은지를 진단 개수로 잰다. 방식 넷: range 없는 �
   붙이면 통과한다. 끝 위치를 잘못 세면 거의 모든 서버가 조용히 어긋났고 rust-analyzer 는 죽었다. 전문만 받는다고 알린 서버(`change: 1` — taplo·bash)도
   bash 는 range 를 **적용한다** — 「전문 서버는 range 를 무시한다」에 기대지 않는다.
 - **ruby-lsp 는 didChange 바로 뒤의 pull 에 한 박자 늦은 진단을 낸다.** 읽기 스레드는 요청이 오면 곧 파싱하고 didChange 는 큐에서 나중에 적용해, 둘이 한
-  읽기에 오면 옛 본문의 진단을 계산해 캐시한다(다음 편집까지 그대로). maru 는 didChange 를 보낸 그 자리에서 pull 을 보낸다. 5 ms 만 띄워도 사라졌다.
+  읽기에 오면 옛 본문의 진단을 계산해 캐시한다(다음 편집까지 그대로). maru 는 didChange 를 보낸 그 자리에서 pull 을 보낸다. 서버가 한가하면 5 ms 만
+  띄워도 사라졌지만 **시간으로는 못 막는다** — 30 ms 를 띄워도 한 글자씩 칠 때 났다(LS4 실측: 타이핑마다 오는 완성 요청이 작업 스레드를 붙잡는다;
+  RuboCop 진단은 더 길다). 소스로 본 원인: 읽기 스레드는 요청을 **그때 적용돼 있는 본문**으로 곧 파싱하고, 작업 스레드는 받은 순서대로 didChange 를
+  적용만 하고(다시 파싱하지 않는다) 진단을 그 파싱 결과로 계산한다. 작업 스레드가 받은 순서대로라는 것이 해법이다 — didChange 뒤에 보낸 요청의 답이
+  왔으면 그 didChange 는 적용됐다.
   ruby-lsp 는 줄바꿈으로 `\n` 만 센다(명세는 단독 `\r` 도 — 소스로 확인).
 - **줄 모델이 서버마다 갈린다**(LS3 에서 잼 — 단독 `\r`·U+2028·U+2029 를 든 편집 열을 세 모델로 센 끝으로 보냈다): **clangd·gopls 는 `\n` 경계만**
   (maru 와 같다 — 명세 모델로 세면 찌꺼기가 남는다), **tsgo·pyright 는 명세대로 단독 `\r` 도 줄바꿈**(maru 모델로 세면 찌꺼기), zls·
@@ -82,14 +86,19 @@ maru 본문과 같은지를 진단 개수로 잰다. 방식 넷: range 없는 �
     파일의 오류를 바꾼다. 문서를 보내는 두 자리(처음 붙이기·동기화)가 한 함수(`pullAfterSend`)를 부른다.
   - pull 서버의 `initialize` 엔 `workspace.diagnostics.refreshSupport` 도 알린다(LS2) — refresh 처리(`null` 로 답하고 그 서버의 문서를 다시 묻는다)는
     이미 있었고, 알리지 않아 tsgo 가 보내지 않았다.
-- **Ruby 는 LS4 로 미룬다** — 위 실측의 두 결함(range 없는 전문 거부·didChange 직후 pull 의 낡은 진단)을 먼저 고쳐야 고친 뒤 진단이 비워진다.
+- **Ruby 는 LS4 에 싣는다** — 위 실측의 두 결함(range 없는 전문 거부·didChange 직후 pull 의 낡은 진단)을 LS3·LS4 가 먼저 고쳤다.
   - **LS3**: `didChange` 를 range 로 문서 전체를 덮는 전문으로 보낸다(명세의 증분 꼴에 전문을 싣는다 — 보내는 양은 그대로). 끝은 **직전에 보낸
     본문**의 마지막 줄 번호와 그 줄의 길이 — 줄은 maru 의 줄 모델(`LineIndex` — `\n`·`\r\n`; 진단·hover 의 위치와 같은 셈), 길이는 협상한 단위
     (`position.wholeRangeEnd`). 문서를 보내는 세 자리(처음 붙이기의 didOpen·재시작 뒤의 didOpen·didChange)가 `OpenDoc.markSent` 하나로 version 과 끝을
     함께 적는다. **직전 본문에 단독 `\r` 이 있으면 range 없는 전문**이다 — 위 실측대로 끝을 하나로 셀 수 없고, range 없는 전문은 그 본문을 모든
     서버가 통과한다(ruby-lsp 만 그때 거부한다 — 단독 `\r` 파일은 드물다). 서버가 알린 `change` 종류와 무관하다(`change: 1` 인 bash 도 range 를
     적용한다). 툴링 §8.2a 「동기화」 계약이 바뀐다. 2단 증분 동기화(바뀐 조각만)의 위치 셈을 먼저 갖춘다.
-  - **LS4**: pull 을 didChange 와 같은 쓰기에 붙여 보내지 않는다(다음 tick) + Ruby 를 서버 표에(설치 `brew install ruby-lsp` — 자기 Ruby 를 든 공식;
+  - **LS4**: ruby-lsp 의 pull 앞에 **장벽**을 친다 — 서버 표의 칸 `pull_barrier`(ruby-lsp 만)가 켜진 서버엔 pull 대신 장벽 요청(위치 없는
+    `textDocument/selectionRange` — 표준 요청, 답은 빈 배열; pull 과 같은 id 칸·같은 seq 열이라 i32 칸을 나누지 않는다)을 먼저 보내고 그 답(오류여도)이
+    온 뒤에 묻는다. 기다리는 사이 다시 보내면 답이 와도 묻지 않고 장벽을 다시 친다. 시간을 띄우는 길(처음 판 — 30 ms 뒤 tick 에 묻기)은 실 ruby-lsp 로
+    재니 타이핑 중 깨져 버렸다(위 실측). 다른 pull 서버(tsgo·`tsc`·ESLint)는 didChange 를 먼저 적용해 LS2 그대로 곧바로 묻는다. 가짜 서버가 ruby-lsp 의
+    작업 스레드 지연을 본떠(pull 은 「pull 이 아닌 마지막 요청을 처리한 때」의 version 으로 답하고 다음 didChange 까지 캐시) 장벽 없이 물으면 판정자가
+    옛 version 을 받는다. + Ruby 를 서버 표에(설치 `brew install ruby-lsp` — 자기 Ruby 를 든 공식;
     ruby-lsp 문서의 권장은 프로젝트 Ruby 의 `gem install ruby-lsp` 이고 그 길로 깐 것도 PATH 에 있으면 찾는다), 서버가 읽는 저장소 설정 표(WT5b-3)에
     `Gemfile`·`Gemfile.lock`·`.index.yml`(루트)·`.rubocop.yml`(가장 가까운 것) — ruby-lsp 는 첫 기동에 `Gemfile` 을 **평가하고** `bundle install` 을 돈다.
 - 설치 안내는 표의 명령 그대로다(상태바 → 새 탭에 입력만). PATH 밖에 설치되는 것(`~/.dotnet/tools` 의 csharp-ls)·환경 변수가 필요한 것(`DOTNET_ROOT`)
@@ -110,14 +119,17 @@ maru 본문과 같은지를 진단 개수로 잰다. 방식 넷: range 없는 �
 | LS1 | 서버 표에 열다섯 — 실행 파일·인자·languageId·설치 명령, 판정자(이름표·languageId·설치 명령), 문서마다 languageId·다루지 않는 확장자, 툴링 문서의 서버 찾기·설치 안내 | 완료 |
 | LS2 | 주 서버의 서버별 pull 진단(칸을 `Server` 하나로) + tsgo·TS 7 `tsc` 에 pull, 파일 간 의존이면 다른 열린 문서도 다시 묻기, pull 서버에 refresh 알림 | 완료 |
 | LS3 | `didChange` 를 range 로 문서 전체를 덮는 전문으로(툴링 §8.2a 「동기화」 계약) — 직전에 보낸 본문의 끝 위치를 협상한 단위로, 단독 `\r` 뒤엔 range 없이 | 완료 |
-| LS4 | pull 을 didChange 와 떼어 보내기 + Ruby(`ruby-lsp`) | 계획 |
+| LS4 | pull 을 didChange 와 떼어 보내기 + Ruby(`ruby-lsp`) | 완료 |
 
 ## 검증
 
-- 순수: 서버 표의 이름표·인자·languageId·설치 명령(`LSI1`·`LSI3`), TS 7 네이티브의 pull 칸과 「켜진 자리는 여섯(TS·TSX·JS × tsgo·tsc)」(`LSI8`), 파일 간 의존 판정(`LSJ22`), 문서 전체를 덮는 range 의 끝(`LSP4` — 빈 문서·끝 개행·다바이트·CRLF·단독 CR)과 didChange 의 두 꼴(`LSJ2`), 문서마다 languageId 와 다루는 확장자(`LSI4`), 보조 서버 ⊂ 주 서버(`AUX6`).
+- 순수: 서버 표의 이름표·인자·languageId·설치 명령(`LSI1`·`LSI3`), pull 칸과 「켜진 자리는 일곱(TS·TSX·JS × tsgo·tsc, Ruby)」(`LSI8`), Ruby 행과 「장벽 칸이 켜진 자리는 그 하나」(`LSI9`), ruby-lsp 의 설정 파일(`LSC1`), 파일 간 의존 판정과 장벽 요청의 모양(`LSJ22`), 문서 전체를 덮는 range 의 끝(`LSP4` — 빈 문서·끝 개행·다바이트·CRLF·단독 CR)과 didChange 의 두 꼴(`LSJ2`), 문서마다 languageId 와 다루는 확장자(`LSI4`), 보조 서버 ⊂ 주 서버(`AUX6`).
 - 제품 경로: `ASB7` — JSON·CSS 에 주 서버와 Biome 이 함께, `.scss`·`.less` 엔 주 서버만 그 방언의 languageId 로(가짜 서버가 받은 값을 진단에 싣는다 —
   `LANGID` 표식). `LSI5` — 같은 저장소의 `.sh` 엔 Bash 서버가 붙고 `.zsh` 엔 붙지도 상태바에 서지도 않으며 정보·신뢰 관리는 「언어 서버를 쓰는 편집기 문서에서 쓸 수 있습니다」. `LSI7` — tsgo 주 서버가 pull 로 진단을 세우고(그 클라이언트만 알린다 — pull 칸이 꺼진 C 서버는 알림을 못 받았음을 서버 쪽에서 잰다), 편집마다 다시 묻고, 한 문서를 고치거나 새 문서를 열면 다른 열린 문서도 다시 물어 파일 간 의존 진단이 그 문서에 서고 빠지며, 빈 목록이면 걷는다(가짜 서버를 `tsgo` 이름으로 — pull 만 낸다). `LSI6` — `.scss` 의 languageId 가
   didOpen 의 두 길(처음 붙일 때·서버가 죽어 다시 뜬 뒤 다시 열 때) 모두에서 `scss`. `LSD1`·`LSD2` — 편집 열(다바이트 끝·CRLF·끝 개행·큰 삭제·
   단독 CR 과 그 뒤·그 CR 지우기)의 단계마다 **서버 사본 = maru 본문**(가짜 서버가 받은 range 를 사본에 적용하고 사본 밖 위치는 거부한다 — `SYNCSUM`
-  표식이 사본의 FNV-1a·range 없이 온 전문 수·거부 수를 싣는다), utf-8·utf-16 둘 다.
+  표식이 사본의 FNV-1a·range 없이 온 전문 수·거부 수를 싣는다), utf-8·utf-16 둘 다. `LSI10` — Ruby 주 서버(가짜 서버를 `ruby-lsp` 이름으로 — 작업 스레드 지연을 본뜬다)가 장벽 → pull 로
+  진단을 세우고, 장벽의 답이 오기 전엔 묻지 않으며(답하지 않는 장벽 — `SSRSTALL`), 편집마다 그 본문의 진단이 서고(보낸 그 pump 에 장벽 하나, 그 뒤
+  pull 하나), 기다리는 장벽이 있는 동안 다시 보내면 그 답에 묻지 않고 장벽을 다시 치고, refresh 도 장벽을 거치며, 장벽이 오류로 답해도 묻고, 빈
+  목록이면 걷고, 장벽을 기다리는 채로 서버가 죽었다 다시 뜨면 다시 연 문서에 다시 친다.
 - 실물: 위 실측 도구로 각 서버를 다시 돌려 표의 결과를 확인한다(PR 에 결과를 싣는다).

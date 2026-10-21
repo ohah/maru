@@ -64,11 +64,14 @@
 //!   `AUXFIX` → `AUX_FIXED`, 본문에 `AUXSTALL` 이 있으면 메뉴 요청에 답하지 않는다. `AUXSLOW` 면 메뉴 요청에 150ms 늦게 답한다. `AUXLAZY` 면 resolve 가 필요한 「aux: lazy」를 더 내고,
 //!   보조 역할의 resolve 는 첫 줄에 `# aux lazy` 를 넣는다(주 역할은 `// lazy`). 주 역할은 `quickfix`·`refactor`·
 //!   `source.organizeImports`·`source.fixAll` 을 알린다.
-//! - **pull 만 내는 주 서버 역할**(계획 editor-lsp-servers-expand LS2): 실행 파일 이름이 `tsgo` 면(판정자가 사본을 그 이름으로 두고
+//! - **pull 만 내는 주 서버 역할**(계획 editor-lsp-servers-expand LS2·LS4): 실행 파일 이름이 `tsgo`·`ruby-lsp` 면(판정자가 사본을 그 이름으로 두고
 //!   `MARU_LSP_SERVER_OVERRIDE` 를 건다) **주 서버**로 서되 파일 진단을 push 하지 않고, 클라이언트가 `textDocument.diagnostic` 을 알렸을 때만
-//!   `diagnosticProvider`(`interFileDependencies: true`)를 알린다(실서버 tsgo 와 같다). `textDocument/diagnostic` 에는 곧바로 `full` — 첫 줄 0..3 에
+//!   `diagnosticProvider`(`interFileDependencies` 는 `tsgo` 만 참 — 실서버와 같다)를 알린다. `textDocument/diagnostic` 에는 곧바로 `full` — 첫 줄 0..3 에
 //!   error `pull: <version> <languageId>`(code `P1`), 본문에 `PQUIET` 면 빈 목록. **열린 문서 어느 것에든** `XFILE` 이 있으면 모든 문서의 답에
-//!   `pull: cross`(code `P2`, 둘째 줄 0..1)를 더한다 — 한 파일이 다른 파일의 오류를 바꾸는 파일 간 의존을 흉내 낸다.
+//!   `pull: cross`(code `P2`, 둘째 줄 0..1)를 더한다 — 한 파일이 다른 파일의 오류를 바꾸는 파일 간 의존을 흉내 낸다. 본문에
+//!   `PREFRESH` 가 있는 문서의 pull 에 답한 직후 `workspace/diagnostic/refresh` 를 **한 번** 보낸다(LS4). `ruby-lsp` 이름이면 실서버의
+//!   작업 스레드 지연을 본뜬다 — pull 은 「pull 이 아닌 마지막 요청을 처리한 때」의 version 으로 답하고 다음 didChange 까지 그 답을 캐시한다
+//!   (didChange 바로 뒤의 pull 은 옛 version 이다 — 클라이언트는 장벽 요청의 답을 받고 물어야 한다).
 //! - **ESLint 역할**(tooling §8.2u): 실행 파일 이름(argv[0])이 `vscode-eslint-language-server` 면(판정자가 저장소 `node_modules/.bin` 에 사본을
 //!   둔다) push 를 안 하고 `diagnosticProvider` 를 알린다(클라이언트가 `textDocument.diagnostic` 을 알렸을 때만, `MARU_FAKE_LSP_NOPULLCAP=1` 이면 안 알린다). 첫 `textDocument/diagnostic` 에서 `workspace/configuration`(`srv-c`)을 묻고 그 pull 은
 //!   답을 받은 뒤에 답한다 — 설정 객체(`validate: "on"`·`workingDirectory`·`experimental` 객체)가 아니면 실서버처럼 오류. 진단은 첫 줄 0..3 의 `eslint: <version> <didOpen 의 languageId>`(code `no-var`, source
@@ -177,7 +180,9 @@ pub fn main(init: std.process.Init) void {
         // Biome·oxlint 역할(AS4) — 보조 역할에 이름만 다르다.
         biome_mode = std.mem.eql(u8, base, "biome");
         oxlint_mode = std.mem.eql(u8, base, "oxlint");
-        pull_primary_mode = std.mem.eql(u8, base, "tsgo");
+        pull_primary_mode = std.mem.eql(u8, base, "tsgo") or std.mem.eql(u8, base, "ruby-lsp");
+        inter_file_mode = std.mem.eql(u8, base, "tsgo"); // ruby-lsp 는 파일 간 의존을 알리지 않는다(그 소스 `inter_file_dependencies: false`)
+        worker_lag_mode = std.mem.eql(u8, base, "ruby-lsp");
         if (biome_mode or oxlint_mode) auxiliary = true;
     } else |_| {}
     const noise = "fake: stderr noise\n";
@@ -222,8 +227,15 @@ var biome_mode = false;
 var oxlint_mode = false;
 /// ESLint 역할로 떴다 — pull 진단만, `workspace/configuration` 에 설정 객체를 받아야 검사한다.
 var eslint_mode = false;
-/// pull 만 내는 주 서버 역할로 떴다(LS2 — tsgo 꼴).
+/// pull 만 내는 주 서버 역할로 떴다(LS2·LS4 — tsgo·ruby-lsp 꼴).
 var pull_primary_mode = false;
+/// 그 provider 가 `interFileDependencies: true` 를 알린다(tsgo 꼴).
+var inter_file_mode = false;
+/// ruby-lsp 꼴(LS4) — 요청은 「읽은 때 적용돼 있던 본문」으로 답하고(`DocText.seen_version`) didChange 는 작업 스레드가 나중에 적용한다: pull 의
+/// 답은 그 version 이고 다음 didChange 까지 캐시된다(`cached_pull`). pull 이 아닌 요청을 처리할 때면 앞의 didChange 는 적용됐다(`catchUp`).
+var worker_lag_mode = false;
+/// `PREFRESH` 의 refresh 를 이미 보냈다(한 번만 — 다시 보내면 묻고 답하고 다시 묻기를 되풀이한다).
+var primary_refreshed = false;
 /// 클라이언트가 `initialize` 에서 `textDocument.diagnostic` 을 알렸다(`PULLCAP` 이 진단에 싣는다).
 var client_announced_pull = false;
 /// 우리가 낸 설정 요청(`srv-c`)에 설정 객체(`validate: "on"`)로 답을 받았다 / 답을 기다리는 중이다.
@@ -277,7 +289,7 @@ fn setDocMode(uri: []const u8, mode: DefMode) void {
 }
 
 /// 문서 본문을 uri 별로 기억한다(signatureHelp 가 caret 앞을 본다). 상한 8 문서·64 KB.
-const DocText = struct { uri: [1024]u8 = undefined, len: usize = 0, text: [65536]u8 = undefined, text_len: usize = 0, version: i64 = 0, lang: [32]u8 = undefined, lang_len: usize = 0, rangeless: u32 = 0, rejects: u32 = 0 };
+const DocText = struct { uri: [1024]u8 = undefined, len: usize = 0, text: [65536]u8 = undefined, text_len: usize = 0, version: i64 = 0, lang: [32]u8 = undefined, lang_len: usize = 0, rangeless: u32 = 0, rejects: u32 = 0, seen_version: i64 = 0, cached_pull: i64 = -1 };
 var doc_texts: [8]DocText = @as([8]DocText, @splat(.{}));
 
 fn setDocText(uri: []const u8, text: []const u8, version: i64) void {
@@ -316,6 +328,11 @@ fn docLang(uri: []const u8) []const u8 {
 fn docVersion(uri: []const u8) i64 {
     for (&doc_texts) |*d| if (d.len == uri.len and std.mem.eql(u8, d.uri[0..d.len], uri)) return d.version;
     return 0;
+}
+
+/// ruby-lsp 꼴(`worker_lag_mode`) — 작업 스레드가 앞의 didChange 를 다 적용했다(pull 이 아닌 요청을 처리하는 때·pull 에 답한 뒤).
+fn catchUp() void {
+    for (&doc_texts) |*d| d.seen_version = d.version;
 }
 
 fn docSlot(uri: []const u8) ?*DocText {
@@ -985,7 +1002,13 @@ fn answerPrimaryPull(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: 
         uri = str(td.object.get("uri")) orelse "";
     };
     var msg_buf: [64]u8 = undefined;
-    const msg = std.fmt.bufPrint(&msg_buf, "pull: {d} {s}", .{ docVersion(uri), docLang(uri) }) catch "pull";
+    const seen: i64 = if (worker_lag_mode) blk: {
+        const sl = docSlot(uri) orelse break :blk 0;
+        if (sl.cached_pull < 0) sl.cached_pull = sl.seen_version;
+        break :blk sl.cached_pull;
+    } else docVersion(uri);
+    defer if (worker_lag_mode) catchUp();
+    const msg = std.fmt.bufPrint(&msg_buf, "pull: {d} {s}", .{ seen, docLang(uri) }) catch "pull";
     const Diag = struct { range: struct { start: struct { line: u32, character: u32 }, end: struct { line: u32, character: u32 } }, severity: u8, message: []const u8, code: []const u8 };
     var items: [2]Diag = undefined;
     var n: usize = 0;
@@ -1001,6 +1024,11 @@ fn answerPrimaryPull(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: 
         n += 1;
     }
     sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = .{ .kind = "full", .items = items[0..n] } });
+    if (!primary_refreshed and std.mem.indexOf(u8, docText(uri), "PREFRESH") != null) {
+        primary_refreshed = true;
+        for (&doc_texts) |*d| d.cached_pull = -1; // 실서버는 캐시를 비우고 refresh 를 보낸다
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = "srv-r", .method = "workspace/diagnostic/refresh", .params = null });
+    }
 }
 
 fn answerPull(allocator: std.mem.Allocator, id: std.json.Value, uri: []const u8) void {
@@ -1722,6 +1750,8 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         }
         return;
     };
+    // ruby-lsp 꼴(LS4) — 작업 스레드는 받은 순서대로다: pull 이 아닌 요청을 처리하는 때면 그 앞의 didChange 는 적용됐다.
+    if (worker_lag_mode and id != null and !std.mem.eql(u8, method, "textDocument/diagnostic")) catchUp();
     if (std.mem.eql(u8, method, "initialize")) {
         if (std.c.getenv("MARU_FAKE_LSP_INIT")) |m| {
             const mode = std.mem.span(m);
@@ -1789,7 +1819,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     // 내는 kind 를 실서버처럼 알린다 — 클라이언트는 알린 kind 만 저장 시 묻는다(tooling §8.2u). 보조 역할은 ruff 꼴.
                     .codeActionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOACTCAP") == null) .{ .codeActionKinds = if (eslint_mode) eslint_action_kinds[0..] else if (biome_mode) biome_action_kinds[0..] else if (oxlint_mode) oxlint_action_kinds[0..] else if (auxiliary) aux_action_kinds[0..] else primary_action_kinds[0..], .resolveProvider = true } else null,
                     // pull 진단(ESLint 꼴 — §8.2u). 다른 역할은 없다(push).
-                    .diagnosticProvider = if (offer_pull) @as(?struct { identifier: []const u8, interFileDependencies: bool, workspaceDiagnostics: bool }, .{ .identifier = if (pull_primary_mode) "tsgo" else "eslint", .interFileDependencies = pull_primary_mode, .workspaceDiagnostics = false }) else null,
+                    .diagnosticProvider = if (offer_pull) @as(?struct { identifier: []const u8, interFileDependencies: bool, workspaceDiagnostics: bool }, .{ .identifier = if (pull_primary_mode) "primary" else "eslint", .interFileDependencies = inter_file_mode, .workspaceDiagnostics = false }) else null,
                     // semantic tokens(§8.2i) — legend 다섯(하나는 클라이언트가 모르는 이름·`variable` 은 무색). `MARU_FAKE_LSP_SEMFULL=1` 이면 range 없이
                     // full 만(clangd 꼴), `MARU_FAKE_LSP_NOSEMCAP=1` 이면 provider 없음.
                     // 접힘 3층(§8.2j) — `MARU_FAKE_LSP_NOFOLDCAP=1` 이면 provider 없음.
@@ -2096,6 +2126,10 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         no_hover = std.mem.indexOf(u8, text, "NOHOVER") != null;
         mute_hover = std.mem.indexOf(u8, text, "MUTEHOVER") != null;
         setDocText(uri, text, version);
+        if (worker_lag_mode) if (docSlot(uri)) |sl| {
+            sl.cached_pull = -1; // 편집이 캐시를 비운다(실서버 `push_edits`)
+            if (std.mem.eql(u8, method, "textDocument/didOpen")) sl.seen_version = version; // 연 본문은 곧 파싱돼 있다
+        };
         if (str(td.object.get("languageId"))) |lang| setDocLang(uri, lang);
         setDocMode(uri, if (std.mem.indexOf(u8, text, "NODEF") != null) .none else if (std.mem.indexOf(u8, text, "XFILE") != null) .other else if (std.mem.indexOf(u8, text, "OUTSIDE") != null) .outside else .same);
         if (std.mem.indexOf(u8, text, "BOOM") != null) std.c._exit(1);

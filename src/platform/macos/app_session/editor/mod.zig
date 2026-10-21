@@ -24290,6 +24290,123 @@ test "LSI7 주 서버의 pull 진단(계획 editor-lsp-servers-expand LS2) — T
     try testing.expect(pumpLspUntil(&f.fx, 5000, b, Pull.cross));
 }
 
+test "LSI10 Ruby(`ruby-lsp`) 주 서버 — pull 로만 진단을 세우고(그 클라이언트만 알린다), **pull 앞에 장벽을 쳐 그 답이 온 뒤에 묻는다**(ruby-lsp 는 작업 스레드가 앞의 didChange 를 적용하기 전에 읽힌 pull 에 옛 본문의 진단을 캐시한다 — 가짜 서버가 그 지연을 본뜬다): 답이 오기 전엔 묻지 않고, 기다리는 장벽이 있는 동안 다시 보내면 답이 와도 묻지 않고 다시 치고, refresh 도 장벽을 거치며, 장벽이 오류로 답해도 묻고, 빈 목록이면 걷고, 장벽을 기다리다 서버가 다시 떠도 다시 친다 (계획 editor-lsp-servers-expand LS4)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.openRepo(allocator, "c.c", "int c;\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    // 가짜 서버의 사본을 `ruby-lsp` 이름으로 — 가짜는 실행 파일 이름으로 「pull 만 내는 주 서버」 역할과 작업 스레드 지연을 고른다
+    // (`tools/fake_lsp.zig` — pull 은 「pull 이 아닌 마지막 요청을 처리한 때」의 version 으로 답하고 다음 didChange 까지 캐시한다).
+    try installFakeLspCopy(&f.fx, "bin/ruby-lsp");
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "g.rb", .data = "puts 1\n" });
+    try testing.expect(f.ready());
+    const root = f.root_buf[0..f.root_len];
+    var over_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const over = try std.fmt.bufPrintSentinel(&over_buf, "{s}/bin/ruby-lsp", .{root}, 0);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", over.ptr, 1);
+    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const g = (try pane_ops.openFileTermInActivePane(s, try std.fmt.bufPrint(&pbuf, "{s}/g.rb", .{root}), .text)).term;
+    const Ruby = struct {
+        fn current(t: *Term) bool {
+            var b: [64]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "pull: {d} ruby", .{t.rt.editorDocument().notifications.lsp_version}) catch return false;
+            return t.rt.editor_diagnostics.lsp.items.len == 1 and std.mem.eql(u8, t.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+        fn empty(t: *Term) bool {
+            return t.rt.editor_diagnostics.lsp.items.len == 0;
+        }
+    };
+    const Count = struct {
+        ss: *AppSession,
+        n: u64,
+        fn pulls(x: @This()) bool {
+            return x.ss.editor_lsp.sent_pulls >= x.n;
+        }
+    };
+    // ⑴ 처음 열면 장벽 → pull — 그 문서의 version 과 languageId `ruby`(주 서버 칸 `lsp`).
+    try testing.expect(pumpLspUntil(&f.fx, 5000, g, Ruby.current));
+    var rc: ?*lsp_client.Client = null;
+    for (s.editor_lsp.clients.items) |*c| if (c.findDoc(g) != null) {
+        rc = c;
+    };
+    try testing.expect(rc != null);
+    try testing.expectEqualStrings("ruby-lsp", rc.?.server.exe);
+    try testing.expect(rc.?.role == .primary and rc.?.server.pull_diagnostics and rc.?.server.pull_barrier and rc.?.diagnostic_provider and !rc.?.diagnostic_inter_file);
+    try testing.expect(s.editor_lsp.sent_pull_barriers >= 1);
+    // ⑵ 장벽의 답이 오기 전에는 묻지 않는다 — 가짜 서버는 본문에 `SSRSTALL` 이 있으면 selectionRange 에 답하지 않는다. 그 답을 대신 넣으면 그때 묻는다.
+    g.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    const bars_s = s.editor_lsp.sent_pull_barriers;
+    const pulls_s = s.editor_lsp.sent_pulls;
+    try testing.expect(insertText(s, g, "SSRSTALL "));
+    lsp_client.pump(s);
+    const stalled = rc.?.findDoc(g).?.barrier_seq;
+    try testing.expect(stalled != 0);
+    try testing.expectEqual(bars_s + 1, s.editor_lsp.sent_pull_barriers);
+    try testing.expectEqual(pulls_s, s.editor_lsp.sent_pulls);
+    lsp_client.onPullDiagnostics(s, rc.?, stalled, null);
+    try testing.expectEqual(pulls_s + 1, s.editor_lsp.sent_pulls);
+    try testing.expect(pumpLspUntil(&f.fx, 5000, g, Ruby.current));
+    try removeMarkerHover(s, g, "SSRSTALL ");
+    try testing.expect(pumpLspUntil(&f.fx, 5000, g, Ruby.current));
+    // ⑶ 편집(공백 — 완성 요청을 부르지 않는다: 그 요청도 작업 스레드를 따라잡게 해 장벽 없이도 맞아 버린다) — 보낸 그 pump 에 장벽이 나가고,
+    // 그 답 뒤의 pull 이 **그 본문의** 진단을 세운다. 장벽 없이 바로 물으면 가짜 서버가 옛 version 으로 답해 서지 않는다.
+    g.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    const changes0 = s.editor_lsp.sent_changes;
+    const bars0 = s.editor_lsp.sent_pull_barriers;
+    const pulls0 = s.editor_lsp.sent_pulls;
+    try testing.expect(insertText(s, g, " "));
+    lsp_client.pump(s);
+    try testing.expectEqual(changes0 + 1, s.editor_lsp.sent_changes);
+    try testing.expectEqual(bars0 + 1, s.editor_lsp.sent_pull_barriers);
+    try testing.expect(pumpLspUntil(&f.fx, 5000, g, Ruby.current));
+    try testing.expectEqual(pulls0 + 1, s.editor_lsp.sent_pulls);
+    try testing.expectEqual(bars0 + 1, s.editor_lsp.sent_pull_barriers);
+    // ⑷ 기다리는 장벽이 있는 동안 다시 보내면 그 답이 와도 묻지 않고 장벽을 다시 친다 — 그 장벽은 이번 didChange 앞에 나갔다. 기다리는 장벽을
+    // 심고(서버는 이 번호를 모른다) 그 답을 대신 넣는다.
+    const doc = rc.?.findDoc(g).?;
+    doc.barrier_seq = 77_777;
+    const bars1 = s.editor_lsp.sent_pull_barriers;
+    const pulls1 = s.editor_lsp.sent_pulls;
+    try testing.expect(insertText(s, g, " "));
+    lsp_client.pump(s);
+    try testing.expect(doc.barrier_dirty);
+    try testing.expectEqual(bars1, s.editor_lsp.sent_pull_barriers);
+    try testing.expectEqual(pulls1, s.editor_lsp.sent_pulls);
+    lsp_client.onPullDiagnostics(s, rc.?, 77_777, null);
+    try testing.expectEqual(bars1 + 1, s.editor_lsp.sent_pull_barriers);
+    try testing.expectEqual(pulls1, s.editor_lsp.sent_pulls);
+    try testing.expect(pumpLspUntil(&f.fx, 5000, g, Ruby.current));
+    // ⑸ 서버의 refresh 도 장벽을 거친다. 가짜 서버는 `PREFRESH` 가 든 문서의 pull 에 답한 직후 refresh 를 한 번 보낸다 — 편집의 장벽·pull 하나씩,
+    // refresh 의 장벽·pull 하나씩.
+    const bars2 = s.editor_lsp.sent_pull_barriers;
+    const pulls2 = s.editor_lsp.sent_pulls;
+    const refreshes0 = s.editor_lsp.diag_refreshes;
+    try testing.expect(insertText(s, g, "PREFRESH "));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, Count{ .ss = s, .n = pulls2 + 2 }, Count.pulls));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, g, Ruby.current));
+    try testing.expectEqual(refreshes0 + 1, s.editor_lsp.diag_refreshes);
+    try testing.expectEqual(bars2 + 2, s.editor_lsp.sent_pull_barriers);
+    // ⑹ 장벽이 오류로 답해도 묻는다(가짜 서버는 `SSRERR` 면 selectionRange 를 거절한다) — 서버는 그 앞의 didChange 를 지났다.
+    const pulls3 = s.editor_lsp.sent_pulls;
+    try testing.expect(insertText(s, g, "SSRERR "));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, g, Ruby.current));
+    try testing.expect(s.editor_lsp.sent_pulls > pulls3);
+    // ⑺ 서버가 빈 목록으로 답하면 걷는다.
+    try testing.expect(insertText(s, g, "PQUIET "));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, g, Ruby.empty));
+    // ⑻ 장벽을 기다리는 채로 서버가 죽었다 다시 뜨면 다시 열고 다시 친다 — 옛 프로세스에 걸어 둔 장벽은 끝난 것으로(아니면 「기다리는 중」이라
+    // 영영 묻지 않는다).
+    const bars4 = s.editor_lsp.sent_pull_barriers;
+    const pid = rc.?.proc.?.pid;
+    rc.?.findDoc(g).?.barrier_seq = 99;
+    _ = std.c.kill(pid, std.c.SIG.KILL);
+    try removeMarkerHover(s, g, "PQUIET ");
+    try testing.expect(pumpLspUntil(&f.fx, 8000, g, Ruby.current));
+    for (s.editor_lsp.clients.items) |*c| if (c.findDoc(g) != null) try testing.expect(c.proc.?.pid != pid); // 목록이 자랐을 수 있어 다시 찾는다
+    try testing.expect(s.editor_lsp.sent_pull_barriers > bars4);
+}
+
 test "FOS1 저장 시 포맷 — ⌘S 가 포맷을 먼저 적용하고(되돌리기 하나) 저장하며 didSave 가 간다; 설정을 끄거나 서버가 포맷을 못 하면 곧바로 저장, 응답이 낡았거나 거부되면 포맷 없이 저장, 시한을 넘기면 포맷 없이 저장하고 알림, 기다리는 동안 같은 문서의 ⌘S·⇧⌥F 는 무동작, 다른 문서의 ⌘S 는 기다리던 것을 먼저 저장 (제품 경계, §8.2r)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

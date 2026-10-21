@@ -1828,3 +1828,15 @@ NSEvent/Metal 검증이며 물리 HID·WindowServer 화면·실제 OS IME 증거
 published picker, sidebar 클릭·닫기·reorder·그룹 drop, editor workspace capture OOM의
 **14개** focused 판정을 실행한다. `-Doptimize=ReleaseFast`도 지원한다.
 전체 macOS app-host-abi/CI 검증을 대체하지 않는다.
+
+### 여러 문서 닫기의 현재 계약 검증
+
+```sh
+mise exec -- zig build test-editor-multi-close-contract
+mise exec -- zig build test-editor-multi-close-contract -Doptimize=ReleaseFast
+```
+
+실제 탭 닫기 진입점의 경고·취소·버리기·포커스 무효화와 두 파일의 원본 bytes를 검사한다.
+현재 다중 문서 확인창은 저장 명령이 아니다. 로그의 호출 시간은 헤드리스 진단값이며,
+AppKit 응답 지연이나 다중 파일 저장 성능의 실측값이 아니다. 상세 범위는
+[로컬 저장 계획](plans/editor-local-save-async.md#여러-문서-닫기-진입점-검증-2026-10-22)을 따른다.

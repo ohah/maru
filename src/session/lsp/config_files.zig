@@ -109,6 +109,14 @@ const taplo = [_]Spec{
     .{ .name = ".taplo.toml", .scope = .root },
     .{ .name = "taplo.toml", .scope = .root },
 };
+// ruby-lsp(LS4) — 저장소 루트(서버의 cwd)의 `Gemfile` 을 **평가하고** `bundle install` 을 돈다(합성 번들 `.ruby-lsp/`); RuboCop 은 파일마다
+// 가장 가까운 `.rubocop.yml` 을 읽는다. 저장소 안 add-on(`**/ruby_lsp/**/addon.rb`)도 불러오지만 이름이 패턴이라 이 표엔 없다.
+const ruby = [_]Spec{
+    .{ .name = "Gemfile", .scope = .root },
+    .{ .name = "Gemfile.lock", .scope = .root },
+    .{ .name = ".rubocop.yml", .scope = .nearest },
+    .{ .name = ".index.yml", .scope = .root },
+};
 // 저장소의 설정 파일을 **읽지 않는** 서버 — 설정은 클라이언트가 보내는 것(그리고 문서 안 `$schema`)뿐이다. 정보 명령은 「찾지 못함」이 아니라
 // 그렇다고 말한다(`reads_none`).
 const reads_none = [_]Spec{};
@@ -136,6 +144,7 @@ pub fn specsFor(exe: []const u8) ?[]const Spec {
         .{ "lua-language-server", &lua },
         .{ "bash-language-server", &bash },
         .{ "taplo", &taplo },
+        .{ "ruby-lsp", &ruby },
         .{ "yaml-language-server", &reads_none },
         .{ "docker-langserver", &reads_none },
         .{ "vscode-json-language-server", &reads_none },
@@ -211,6 +220,11 @@ test "LSC1 서버별 설정 표 — 서버 이름표(`servers`)의 **모든** �
     try testing.expectEqualStrings("build.zig", specsFor("zls").?[0].name);
     for (specsFor("zls").?) |s| try testing.expect(!std.mem.eql(u8, s.name, "zls.json")); // 사용자 설정 폴더의 것이다 — 저장소 자리가 아니다
     try testing.expectEqualStrings("Package.swift", specsFor("sourcekit-lsp").?[0].name); // SwiftPM 이 빌드하는 바로 그 파일
+    // ruby-lsp(LS4) — 평가하는 `Gemfile` 이 첫째(루트), RuboCop 은 가장 가까운 것.
+    const rb = specsFor("ruby-lsp").?;
+    try testing.expectEqualStrings("Gemfile", rb[0].name);
+    try testing.expectEqual(Scope.root, rb[0].scope);
+    for (rb) |sp| if (std.mem.eql(u8, sp.name, ".rubocop.yml")) try testing.expectEqual(Scope.nearest, sp.scope);
 }
 
 test "LSC2 찾기 — 「가장 가까운」은 문서 폴더에서 루트까지 올라가 첫 것, 「루트」는 루트의 것만; 루트 기준 상대 경로를 쉼표로 잇고, 없으면 빈 조각, 루트 밖 문서·모자란 버퍼 (계획 workspace-trust WT5b-3)" {

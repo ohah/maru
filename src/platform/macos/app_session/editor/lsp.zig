@@ -110,6 +110,10 @@ const OpenDoc = struct {
     pull_seq: u32 = 0,
     pull_version: u64 = 0,
     pull_dirty: bool = false,
+    /// pull 앞의 장벽(`Server.pull_barrier`) — 대기 중인 장벽 요청의 seq(0 = 없음, pull 과 같은 칸·같은 seq 열), 기다리는 사이 다시 보냈다(답이
+    /// 와도 묻지 않고 장벽을 다시 친다).
+    barrier_seq: u32 = 0,
+    barrier_dirty: bool = false,
 
     /// 이 문서를 서버에 보냈다(didOpen·didChange) — version 과 그 본문의 끝을 함께 적는다.
     fn markSent(self: *OpenDoc, version: u64, content: []const u8, lines: maru.session.editor.line_index.LineIndex, enc: lsp.rpc.PositionEncoding) void {
@@ -331,6 +335,8 @@ pub const State = struct {
     rejected_requests: u64 = 0,
     /// 판정자 관측: 보낸 pull 진단 수·답한 `workspace/configuration` 수(§8.2u).
     sent_pulls: u64 = 0,
+    /// 보낸 pull 앞 장벽 수(`Server.pull_barrier`).
+    sent_pull_barriers: u64 = 0,
     answered_configurations: u64 = 0,
     diag_refreshes: u64 = 0,
     /// 판정자 관측: 보조 서버가 보낸 청하지 않은 응답(진단·code action 밖)을 버린 수(§8.2u).
@@ -1647,6 +1653,8 @@ fn spawnClient(self: *AppSession, c: *Client, now_ms: u64) void {
         d.sent_version = 0;
         d.pull_seq = 0;
         d.pull_dirty = false;
+        d.barrier_seq = 0;
+        d.barrier_dirty = false;
     }
     var uri_buf: [std.fs.max_path_bytes * 3]u8 = undefined;
     const root_uri = fileUriBuf(c.root, &uri_buf) orelse return;
@@ -2109,13 +2117,33 @@ fn pullAfterSend(self: *AppSession, c: *Client, d: *OpenDoc) void {
     for (c.docs.items) |*o| if (o != d) requestPull(self, c, o);
 }
 
-/// pull 진단을 묻는다(§8.2u) — pull 서버에 그 문서를 보낸 뒤마다. 이미 기다리는 것이 있으면 다시 물을 표시만(답이 오면 버리고 묻는다).
+/// pull 진단을 묻는다(§8.2u) — pull 서버에 그 문서를 보낸 뒤마다·서버의 refresh 마다. 이미 기다리는 것이 있으면 다시 물을 표시만(답이 오면
+/// 버리고 묻는다). 장벽을 쳐야 하는 서버(`Server.pull_barrier` — ruby-lsp)는 pull 대신 장벽 요청을 먼저 보내고 그 답이 온 뒤에 묻는다
+/// (`onPullDiagnostics`) — 그 서버는 요청이 오면 읽기 스레드가 **그때 적용돼 있는 본문**을 곧 파싱하고 didChange 는 작업 스레드가 순서대로
+/// 나중에 적용해, 앞의 요청(완성·이전 pull 의 RuboCop 등)이 작업 스레드를 붙잡고 있으면 pull 이 옛 본문의 진단을 계산해 다음 편집까지
+/// 캐시한다(계획 editor-lsp-servers-expand LS4 실측 — 시간을 띄우는 것으로는 못 막는다: 30 ms 를 띄워도 타이핑 중 났다). 작업 스레드는
+/// 받은 순서대로 처리하므로 didChange 뒤에 보낸 요청의 답이 왔으면 그 didChange 는 적용됐다.
 fn requestPull(self: *AppSession, c: *Client, d: *OpenDoc) void {
     if (!c.server.pull_diagnostics or !c.diagnostic_provider or c.phase != .ready or d.sent_version == 0) return;
     if (d.pull_seq != 0) {
         d.pull_dirty = true;
         return;
     }
+    if (!c.server.pull_barrier) return sendPull(self, c, d);
+    if (d.barrier_seq != 0) {
+        d.barrier_dirty = true;
+        return;
+    }
+    c.diagnostic_seq = lsp.rpc.nextSeq(c.diagnostic_seq);
+    const msg = lsp.rpc.pullBarrierRequest(self.allocator, c.diagnostic_seq, d.uri) catch return;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return;
+    d.barrier_seq = c.diagnostic_seq;
+    d.barrier_dirty = false;
+    self.editor_lsp.sent_pull_barriers += 1;
+}
+
+fn sendPull(self: *AppSession, c: *Client, d: *OpenDoc) void {
     c.diagnostic_seq = lsp.rpc.nextSeq(c.diagnostic_seq);
     const msg = lsp.rpc.diagnosticRequest(self.allocator, c.diagnostic_seq, d.uri) catch return;
     defer self.allocator.free(msg);
@@ -2130,6 +2158,12 @@ fn requestPull(self: *AppSession, c: *Client, d: *OpenDoc) void {
 /// 다시 보냈으면 버리고 다시 묻는다. 본문이 서버가 본 version 이 아니면(아직 보내지 않은 편집) 버리기만 한다 — 그 편집을 보낼 때 묻는다(여기서
 /// 다시 물으면 옛 version 으로 묻고 버리기를 보낼 때까지 되풀이한다).
 pub fn onPullDiagnostics(self: *AppSession, c: *Client, seq: u32, result: ?std.json.Value) void {
+    // 장벽의 답(`requestPull`) — 결과는 보지 않는다(오류여도 서버가 그 앞의 didChange 를 지났다). 기다리는 사이 다시 보냈으면 장벽을 다시 친다.
+    for (c.docs.items) |*b| if (b.barrier_seq != 0 and b.barrier_seq == seq) {
+        b.barrier_seq = 0;
+        if (b.barrier_dirty) requestPull(self, c, b) else sendPull(self, c, b);
+        return;
+    };
     const d = for (c.docs.items) |*d| {
         if (d.pull_seq != 0 and d.pull_seq == seq) break d;
     } else return;

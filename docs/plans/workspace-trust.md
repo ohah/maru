@@ -196,6 +196,8 @@ WT5 는 둘로 나눈다(2026-10-09) — 무엇이 실행되는지 보이는 일
     - LuaLS — `.luarc.json`·`.luarc.jsonc`(루트), `.editorconfig`(가장 가까운 것). bash-language-server — `.editorconfig`(가장 가까운 것 — 포맷).
       shellcheck 의 `.shellcheckrc` 는 서버가 본문을 stdin 으로 넘겨 어디서 찾는지 확인하지 못해 싣지 않았다.
     - taplo — `.taplo.toml`·`taplo.toml`(루트).
+    - ruby-lsp(LS4) — `Gemfile`·`Gemfile.lock`·`.index.yml`(루트 — 서버의 cwd; `Gemfile` 을 **평가하고** `bundle install` 을 돈다), `.rubocop.yml`(가장
+      가까운 것 — RuboCop). 저장소 안 add-on(`**/ruby_lsp/**/addon.rb` — 불러와 돌린다)은 이름이 패턴이라 표에 없다.
     - **저장소 설정을 읽지 않는 서버** — YAML·Dockerfile·JSON·CSS·HTML 서버(설정은 클라이언트가 보내는 것과 문서 안의 `$schema` 뿐이다). 표에
       「읽지 않음」(빈 표)으로 올라 있고, 표에 없는 이름(`null`)과 다르다 — 정보 명령은 「찾지 못함」이 아니라 「이 서버는 저장소의 설정 파일을
       읽지 않음」이라 말한다.

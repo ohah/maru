@@ -263,6 +263,18 @@ pub fn diagnosticRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8
     }, .{});
 }
 
+/// pull 앞의 장벽(§8.2u, 계획 editor-lsp-servers-expand LS4) — pull 과 같은 칸(`20e8+seq`, seq 는 같은 열에서 돈다 — 응답 분기가 기다리는 쪽을
+/// 가른다). 답은 보지 않는다: 그 서버가 앞서 받은 didChange 를 지났다는 표시일 뿐이다. 위치 없는 `textDocument/selectionRange` — 표준
+/// 요청이고 답은 빈 배열이다(그 서버가 알리는 능력이다 — `Server.pull_barrier` 를 켠 서버만 보낸다).
+pub fn pullBarrierRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8) error{OutOfMemory}![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = diagnostic_id_base + seq,
+        .method = "textDocument/selectionRange",
+        .params = .{ .textDocument = .{ .uri = uri }, .positions = [_]Position{} },
+    }, .{});
+}
+
 fn diagnosticProviderValue(result: ?std.json.Value) ?std.json.Value {
     const r = result orelse return null;
     if (r != .object) return null;
@@ -2013,12 +2025,16 @@ test "CAK4 문맥 진단은 서버의 data(JSON 원문)와 source 를 그대로 
     try testing.expect(std.mem.indexOf(u8, without, "\"code\"") == null);
 }
 
-test "LSJ22 pull 진단 — 요청은 i32 안의 마지막 칸(20e8), classify, 결과 full·unchanged, provider·파일 간 의존 판정, 능력(pull·refresh·설정)은 고른 클라이언트에만, 설정 응답은 items 수만큼 (tooling §8.2u)" {
+test "LSJ22 pull 진단 — 요청은 i32 안의 마지막 칸(20e8)·그 앞의 장벽도 같은 칸, classify, 결과 full·unchanged, provider·파일 간 의존 판정, 능력(pull·refresh·설정)은 고른 클라이언트에만, 설정 응답은 items 수만큼 (tooling §8.2u)" {
     const a = testing.allocator;
     const req = try diagnosticRequest(a, 7, "file:///r/a.ts");
     defer a.free(req);
     try testing.expect(std.mem.indexOf(u8, req, "\"id\":2000000007,\"method\":\"textDocument/diagnostic\",\"params\":{\"textDocument\":{\"uri\":\"file:///r/a.ts\"}}") != null);
     try testing.expect(@as(u64, diagnostic_id_base) + id_span - 1 <= std.math.maxInt(i32));
+    // 장벽(LS4) — 같은 칸, 위치 없는 selectionRange.
+    const bar = try pullBarrierRequest(a, 8, "file:///r/a.rb");
+    defer a.free(bar);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":2000000008,\"method\":\"textDocument/selectionRange\",\"params\":{\"textDocument\":{\"uri\":\"file:///r/a.rb\"},\"positions\":[]}}", bar);
     var p = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":2099999999,\"result\":null}"); // 칸 끝
     defer p.deinit();
     try testing.expectEqual(@as(u32, 99_999_999), classify(p.value).response.id.diagnostic);

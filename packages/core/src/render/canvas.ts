@@ -4,6 +4,9 @@ import type { Theme } from "../types";
 import { buildPalette, hex, resolveColor, withAlpha } from "./palette";
 import type { GlyphSource, Metrics, RenderOptions, Renderer } from "./types";
 
+/** SGR 2(faint) 글자의 불투명도. Ghostty `faint-opacity` 기본값과 같다. */
+const FAINT_OPACITY = 0.5;
+
 type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
 /**
@@ -240,6 +243,8 @@ export class CanvasRenderer implements Renderer {
         const y = r * ch;
         let color = resolveColor(cell.fg, this.#palette, fg) ?? fg;
         if (cell.flags & CellFlag.reverse) color = resolveColor(cell.bg, this.#palette, bg) ?? bg;
+        // faint 는 전경색을 반투명으로 그려 칸 배경과 섞는다(Ghostty `faint-opacity` 기본값 0.5).
+        if (cell.flags & CellFlag.dim) color = withAlpha(color, FAINT_OPACITY);
         // 장식이 전경색을 지정했으면 그 셀만 색을 바꾼다 — run 은 색이 키라 자연히 끊긴다.
         if (opts.decorations?.length) {
           for (const d of opts.decorations) {
@@ -320,7 +325,8 @@ export class CanvasRenderer implements Renderer {
         const to = c + width;
         if (to >= cols) break;
         const x = X(to);
-        const color = resolveColor(cell.fg, this.#palette, fg) ?? fg;
+        let color = resolveColor(cell.fg, this.#palette, fg) ?? fg;
+        if (cell.flags & CellFlag.dim) color = withAlpha(color, FAINT_OPACITY);
         if (cell.cp !== 32 && cell.cp !== 0) {
           ctx.fillStyle = color;
           drawGlyph(ctx, String.fromCodePoint(cell.cp), x, rowY + m.ascent, cw * w);

@@ -112,6 +112,7 @@ export fn vt_snapshot(h: *anyopaque) u32 {
         if (cell.style.reverse) flags |= 1 << 7;
         if (cell.continuation) flags |= 1 << 8;
         if (cell.link != 0) flags |= 1 << 9; // OSC 8 명시 링크가 걸린 셀
+        if (cell.style.dim) flags |= 1 << 10; // SGR 2(faint) — 렌더러가 전경색을 흐리게 그린다
         const o = i * 20;
         std.mem.writeInt(u32, cell_buf[o..][0..4], cp, .little);
         std.mem.writeInt(u32, cell_buf[o + 4 ..][0..4], packColor(cell.style.foreground), .little);

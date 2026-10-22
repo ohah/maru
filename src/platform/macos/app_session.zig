@@ -10435,7 +10435,9 @@ pub const AppSession = struct {
             self.requestAppQuit();
             return;
         }
-        if (self.scopeHasRunningJob(scope)) {
+        // Sidebar close may target an inactive Term. Use the same explicit
+        // target identity as teardown, rather than the active input owner.
+        if (self.closeTargetHasRunningJob(target)) {
             self.showConfirm(switch (target) {
                 .window => .app_close_window_running,
                 else => .app_close_running,
@@ -15926,7 +15928,7 @@ pub const AppSession = struct {
                             // Term 을 닫는다(조각 5 공격 ④).
                             const is_pane_row = chrome.components.sidebar.isPaneRow(self.sidebar_rows.items, slot);
                             const pane_name = chrome.components.sidebar.paneNameAt(self.sidebar_rows.items, slot);
-                            if (!is_pane_row and sidebar_ops.sidebarCloseButtonAt(self, x_px)) {
+                            if (!is_pane_row and sidebar_ops.sidebarRowCloseButtonAt(self, slot, x_px)) {
                                 agent_ops.closeAgentRow(self, ag.tab, ag.pane, ag.term);
                             } else {
                                 agent_ops.focusAgentRow(self, ag.tab, ag.pane, ag.term);
@@ -15951,7 +15953,7 @@ pub const AppSession = struct {
                             // slot=표시 슬롯, tab_idx=원본 탭(검색 필터 역매핑). 닫기/전환/드래그는 원본 인덱스로 한다.
                             // ✕는 이제 **호버 없이 고정 표시**라(사용자 요청) 호버 일치 조건을 걸지 않는다 — 보이는 자리를
                             // 누르면 언제나 닫힌다("보이는 것 = 눌리는 것").
-                            const on_close = sidebar_ops.sidebarCloseButtonAt(self, x_px);
+                            const on_close = sidebar_ops.sidebarRowCloseButtonAt(self, slot, x_px);
                             if (on_close) {
                                 self.requestClose(.{ .tab_index = tab_idx }); // 실행 중 명령 있으면 확인 모달(없으면 즉시 closeTab)
                             } else {
@@ -101732,6 +101734,83 @@ test "Live inspector sidebar sessions are read only and retire reordered Terms" 
     try sidebar_ops.rebuildSidebar(session);
     const collapsed = try inspector_ops.picker.nodes(session, arena.allocator());
     for (collapsed) |node| if (node.source == .sidebar) try std.testing.expect(!std.mem.eql(u8, node.role orelse "", "list_item"));
+}
+
+test "Live inspector sidebar session close shares glyph input and rejects retired selection" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{ .abi_version = abi_version, .cols = 80, .rows = 24, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    try pane_ops.newTermInActivePane(session);
+    try pane_ops.newTermInActivePane(session);
+    sidebar_ops.reprojectSidebarIfRowLinesStale(session);
+    const frame = &session.sidebar_publication;
+    const c = chrome.components.sidebar.published;
+    const slot: usize = 2;
+    const close = frame.close(slot) orelse return error.TestUnexpectedResult;
+    const cols = sidebar_ops.sidebarColumns(session).?;
+    var dl = try sidebar_ops.buildSidebarTitleDrawList(session);
+    defer dl.deinit(a);
+    var glyph_seen = false;
+    for (dl.cells) |cell| if (cell.row / coretext_frame_builder.sidebar_line_base == slot and cell.codepoint == coretext_frame_builder.sidebar_close_glyph) {
+        glyph_seen = true;
+        try std.testing.expectEqual(close.rect.x, @as(f32, @floatFromInt(cols.colLeftPx(cell.col, session.cell_width_px))));
+    };
+    try std.testing.expect(glyph_seen);
+    const index = frame.snapshot().find(c.closeId(slot)).?;
+    // Normal input must read the published rectangle, not recalculate Columns.
+    frame.entries.items[index].rect.x += 1;
+    try std.testing.expect(!sidebar_ops.sidebarRowCloseButtonAt(session, slot, close.rect.x + 0.5));
+    frame.entries.items[index].rect.x -= 1;
+    const pane = pane_ops.activePane(session);
+    term_ops.writeSurfaceGuidance(session, pane.activeTerm().surface, "\x1b]133;A\x07");
+    try std.testing.expect(!term_ops.termHasRunningJob(pane.activeTerm(), session.io));
+    try std.testing.expect(term_ops.termHasRunningJob(pane.terms.items[0], session.io));
+    const count = pane.terms.items.len;
+    const active = pane.activeTerm().surfaceId();
+    inspector_ops.toggle(session);
+    inspector_ops.picker.toggle(session);
+    const x = close.rect.x + close.rect.width / 2;
+    const y = close.rect.y + close.rect.height / 2;
+    session.mouse(1, x, y, 0, 0);
+    session.mouse(3, x, y, 0, 0);
+    try std.testing.expectEqual(count, pane.terms.items.len);
+    try std.testing.expect(!session.chrome_host.confirm.open);
+    try std.testing.expectEqual(active, pane.activeTerm().surfaceId());
+    const key = session.inspector.picker_selected.?;
+    try std.testing.expectEqual(c.closeId(slot), key.id);
+    inspector_ops.close(session);
+    // Existing requestClose remains the single owner of confirmation/teardown.
+    session.mouse(1, x, y, 0, 0);
+    session.mouse(3, x, y, 0, 0);
+    try std.testing.expectEqual(count, pane.terms.items.len);
+    try std.testing.expect(session.chrome_host.confirm.open);
+    try std.testing.expect(session.pending_confirm == .close);
+    try std.testing.expect(session.pending_confirm.close == .agent_term);
+    try std.testing.expectEqual(@as(usize, 0), session.pending_confirm.close.agent_term.term);
+    // The component hides before dispatching its accept intent.
+    session.chrome_host.confirm.dismiss();
+    session.dispatchChromeAction(.confirm_accept);
+    try std.testing.expectEqual(count - 1, pane.terms.items.len);
+    try std.testing.expectEqual(active, pane.activeTerm().surfaceId());
+    sidebar_ops.reprojectSidebarIfRowLinesStale(session);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const nodes = try inspector_ops.picker.nodes(session, arena.allocator());
+    try std.testing.expect(chrome.ui.inspection.resolve(nodes, key) == null);
+    // Inverse control: an idle target must not inherit the active Term's job.
+    term_ops.writeSurfaceGuidance(session, pane.terms.items[0].surface, "\x1b]133;A\x07");
+    term_ops.writeSurfaceGuidance(session, pane.activeTerm().surface, "\x1b]133;C\x07");
+    try std.testing.expect(!session.closeTargetHasRunningJob(.{ .agent_term = .{ .tab = 0, .pane = 0, .term = 0 } }));
+    const next_close = session.sidebar_publication.close(slot).?;
+    session.mouse(1, next_close.rect.x + 1, next_close.rect.y + 1, 0, 0);
+    session.mouse(3, next_close.rect.x + 1, next_close.rect.y + 1, 0, 0);
+    try std.testing.expect(!session.chrome_host.confirm.open);
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+    try std.testing.expectEqual(active, pane.activeTerm().surfaceId());
 }
 
 test "Live inspector pane tabs share paint input and retire replaced publications" {

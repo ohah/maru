@@ -1583,6 +1583,15 @@ pub fn sidebarCloseButtonAt(self: *const AppSession, x_px: f64) bool {
     return chrome.components.sidebar.closeButton(x_px, cols_layout, self.cell_width_px);
 }
 
+/// Inspection and normal close input consume the same publication. Before the
+/// first paint and during reorder preview, retain the canonical Columns path.
+pub fn sidebarRowCloseButtonAt(self: *const AppSession, slot: usize, x_px: f64) bool {
+    if (sidebarPublicationCurrent(self)) return self.sidebar_publication.closeContainsX(slot, x_px);
+    if (slot >= self.sidebar_rows.items.len) return false;
+    const row = self.sidebar_rows.items[slot];
+    return (row == .card or row == .agent) and sidebarCloseButtonAt(self, x_px);
+}
+
 /// 밴드·카드 텍스트가 스크롤바에 내주는 폭. **스크롤 여부와 무관하게 상시**다 — 넘칠 때만 떼면
 /// 목록이 마지막 카드 하나에 reflow한다(docs/scroll-area.md §4).
 pub fn sidebarScrollGutterPx(self: *const AppSession) u32 {

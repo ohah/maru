@@ -38,7 +38,7 @@ for name, before, after, passes in variants:
     log = r.stdout + r.stderr
     (out / f'{name}.log').write_text(log)
     # refAllDecls also registers shared sidebar/token judges; pin their real count.
-    ok = r.returncode == 0 and 'All 21 tests passed' in log if passes else r.returncode != 0 and ('TestUnexpectedResult' in log or 'TestExpectedEqual' in log) and 'compilation errors' not in log
+    ok = r.returncode == 0 and 'All 22 tests passed' in log if passes else r.returncode != 0 and ('TestUnexpectedResult' in log or 'TestExpectedEqual' in log) and 'compilation errors' not in log
     results.append(dict(name=name, passed=ok, expected_pass=passes, returncode=r.returncode))
     (out / 'manifest.json').write_text(json.dumps(dict(passed=all(v['passed'] for v in results), results=results), indent=2))
     print(name, 'PASS' if ok else 'FAIL', flush=True)

@@ -845,3 +845,12 @@ claude에도 같은 규율을 적용한다. 지금 회수율이 높아 실익은
 - 대화 **전체 이력** 표시. 마지막 교환 한 쌍만 보여준다. Codex·Claude의 과거 이력 도크는 별도 [에이전트 세션 기록 도크](agent-session-list.md)가 소유한다.
 - provider 훅 설치·관리(§7 "왜 훅이 아닌가").
 - 에이전트 상태 판정 규칙 변경 — [에이전트 세션 관측](agent-session.md)이 단일 출처다.
+
+
+### 세션 행 닫기의 대상 판정
+
+세션 행의 ×는 활성 Term과 다른 Term을 닫을 수 있다. 확인창은 `requestClose`가
+`closeTargetHasRunningJob(target)`으로 **닫을 Term**을 검사해 결정한다.
+대상은 실행 중이고 활성 Term이 프롬프트에 있으면 확인해야 하며, 대상이 프롬프트에 있고
+활성 Term만 실행 중이면 그 이유로 확인을 강요하지 않는다. 실제 닫기는 같은 인덱스 경로의
+`PendingClose.agent_term`을 사용한다. Inspector Pick은 이 요청 자체를 실행하지 않는다.

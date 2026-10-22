@@ -73,6 +73,18 @@ pub const Frame = struct {
         const t = self.snapshot();
         return t.entries[t.find(rowId(slot)) orelse return null];
     }
+    pub fn close(self: *const Frame, slot: usize) ?tree.RectEntry {
+        const t = self.snapshot();
+        return t.entries[t.find(closeId(slot)) orelse return null];
+    }
+    /// Row lookup has already checked y. Preserve the existing full-row-height
+    /// close column, while using the published clipped x bounds for the action.
+    pub fn closeContainsX(self: *const Frame, slot: usize, x: f64) bool {
+        if (!std.math.isFinite(x)) return false;
+        const e = self.close(slot) orelse return false;
+        const r = if (e.effective_clip) |c| layout.intersectRect(e.rect, c) else e.rect;
+        return r.width > 0 and r.height > 0 and x >= r.x and x < @as(f64, r.x) + r.width;
+    }
     pub fn slotAt(self: *const Frame, y: f64) ?usize {
         if (!std.math.isFinite(y)) return null;
         for (self.entries.items) |entry| {
@@ -143,7 +155,7 @@ pub const Frame = struct {
                 else => parent = card orelse 0,
             }
             self.entries.appendAssumeCapacity(.{ .id = rowId(i), .parent_index = parent, .kind = if (r == .group_header or r == .agent_toggle) .button else .card, .rect = rect, .effective_clip = clip, .action = .{ .id = rowId(i) }, .cursor = .press, .semantics = semantics });
-            if (r == .card) if (p.close) |c| {
+            if (r == .card or r == .agent) if (p.close) |c| {
                 if (!std.math.isFinite(c.left) or !std.math.isFinite(c.right)) continue;
                 const left = @max(0, c.left);
                 const right = @min(rect.width, c.right);
@@ -152,6 +164,52 @@ pub const Frame = struct {
         }
     }
 };
+
+test "published sidebar session close buttons share parent clip action and half open input" {
+    const a = std.testing.allocator;
+    const rows = [_]sidebar.Row{
+        .{ .card = .{ .tab = 0, .label = "private", .active = true } },
+        .{ .agent_toggle = .{ .tab = 0, .count = 2, .collapsed = false } },
+        .{ .agent = .{ .tab = 0, .pane = 0, .term = 0, .lines = 1 } },
+        .{ .agent = .{ .tab = 0, .pane = 0, .term = 1, .lines = 3 } },
+        .{ .agent_pane = .{ .tab = 0, .pane = 0, .term = 1 } },
+        .recovered_sessions_header,
+        .{ .recovered_session = .{ .projection_index = 0 } },
+    };
+    var p: Params = .{ .width = 200, .header = 40, .viewport_height = 400, .scroll = 0, .metrics = sidebar.Metrics.init(20, 24), .close = .{ .left = 180, .right = 188 } };
+    var f: Frame = .{};
+    defer f.deinit(a);
+    try f.publish(a, &rows, p, 10);
+    for ([_]usize{ 0, 2, 3 }) |slot| {
+        const button = f.close(slot) orelse return error.TestUnexpectedResult;
+        const row = f.row(slot).?;
+        try std.testing.expectEqual(rowId(slot), f.snapshot().entries[button.parent_index.?].id);
+        try std.testing.expectEqual(closeId(slot), button.action.?.id);
+        try std.testing.expectEqual(tree.SemanticRole.button, button.semantics.?.role);
+        try std.testing.expectEqual(tree.CursorHint.press, button.cursor);
+        try std.testing.expectEqualStrings("", button.semantics.?.label);
+        try std.testing.expectEqual(row.rect.y, button.rect.y);
+        try std.testing.expectEqual(row.rect.height, button.rect.height);
+        try std.testing.expectEqualDeep(row.effective_clip, button.effective_clip);
+        try std.testing.expect(f.closeContainsX(slot, 180));
+        try std.testing.expect(f.closeContainsX(slot, 187.5));
+        try std.testing.expect(!f.closeContainsX(slot, 188));
+        try std.testing.expect(!f.closeContainsX(slot, 179.5));
+        try std.testing.expect(!f.closeContainsX(slot, std.math.nan(f64)));
+    }
+    for ([_]usize{ 1, 4, 5, 6, 99 }) |slot| try std.testing.expect(f.close(slot) == null);
+    const old = f.generation;
+    p.scroll = 4000;
+    try f.publish(a, &rows, p, 10);
+    try std.testing.expect(f.generation > old and !f.closeContainsX(2, 184));
+    p.scroll = 0;
+    p.close = .{ .left = std.math.nan(f32), .right = 188 };
+    try f.publish(a, &rows, p, 10);
+    try std.testing.expect(f.close(2) == null);
+    p.close = .{ .left = 198, .right = 208 };
+    try f.publish(a, &rows, p, 10);
+    try std.testing.expect(f.closeContainsX(2, 199) and !f.closeContainsX(2, 200));
+}
 
 test "published sidebar session rows share geometry roles and retire changed owners" {
     const a = std.testing.allocator;

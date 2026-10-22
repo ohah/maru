@@ -9,7 +9,7 @@
   도구 버튼 활성화 → hover 경계 → 클릭 선택을 참고한다. 참조 코드는 복사하지 않는다.
 - `chrome.ui.inspection`은 paint/input이 소비하는 **발행된** `UiRectTree`를 읽는다.
   유효 clip과 좌표 변환을 적용하고 뒤에서부터 가장 위 요소를 고른다. disabled 요소도 읽을 수 있다.
-- 대상은 사이드바 상단 버튼 판·검색, 파일 헤더의 보기 mode·breadcrumb·상태·충돌 도구, pane 탭·닫기·추가·좌우 스크롤 버튼, 사이드바 workspace 카드·그룹·닫기 버튼과 하위 세션 행·접기 토글, 상태바, 사이드바 scroll, pane divider, 표시 중인 파일·SCM·세션 도크의 발행 tree다.
+- 대상은 사이드바 상단 버튼 판·검색, 파일 헤더의 보기 mode·breadcrumb·상태·충돌 도구, pane 탭·닫기·추가·좌우 스크롤 버튼, 사이드바 workspace 카드·그룹·닫기 버튼과 하위 세션 행·접기 토글·닫기 버튼, 상태바, 사이드바 scroll, pane divider, 표시 중인 파일·SCM·세션 도크의 발행 tree다.
   미발행 chrome 영역, terminal cell, 웹 DOM은 미지원이며 `elements.coverage`에 명시한다.
   전체 앱의 완성된 component tree를 제공한다고 표현하지 않는다.
 - 각 node는 source + ID, parent ID, generation, kind/semantic role, 원래·보이는 rect,
@@ -206,8 +206,8 @@
 - 실제 canonical 행의 rect/clip/action/cursor를 paint·일반 입력·Inspector가 공유한다.
   토글의 semantic expanded는 실제 접힘 상태에서 만들며, Inspector tree 자체의 펼침 상태와 구분한다.
   현재 CLI node는 기존 kind/role/action/enabled/cursor/geometry를 제공하며 제품의 활성 Term 표시 필드를 새로 합성하지 않는다.
-- 이름·cwd·브랜치·대화·native pointer는 수집하지 않는다. 원격 `agent_pane`·복구 후보와
-  세션 행의 닫기 glyph를 별도 node로 발행하는 것은 이 범위 밖이다. row Pick은 닫기 영역에서도 제품 action을 실행하지 않는다.
+- 이름·cwd·브랜치·대화·native pointer는 수집하지 않는다. 원격 `agent_pane`·복구 후보는 이 범위 밖이다.
+  세션 닫기 버튼의 독립 node는 아래 절을 따른다. row Pick은 닫기 영역에서도 제품 action을 실행하지 않는다.
 - 같은 row index가 다른 Term을 가리키지 않게 live Tab/Pane/Term 순서·surface ID·pane teardown epoch·
   활성 Term도 내부 signature로 검사한다. 주소는 현재 live 목록에서만 읽고 밖으로 내보내지 않는다.
   새 Term·재정렬·pane 이동/제거·focus 변경 뒤 예전 선택은 폐기한다.
@@ -218,3 +218,24 @@
   Pick·Pause/Escape·분리 도구 창·512-node 예산을 유지한다.
   실제 앱 검증은 `tools/inspector-picker-app/run.py --sidebar-sessions --rounds 20`과
   독립 `verify_sidebar_sessions.py`를 사용한다. `MARU_FORCE_TAB_COUNT=3`은 기존 제품의 새 Term 경로를 사용한다.
+
+
+## 사이드바 세션 닫기 버튼
+
+- 기존 `sidebar` source의 `closeId(slot) = rowId(slot) + 1`을 하위 세션 행에도 사용한다.
+  button/press 역할이며 parent는 그 세션의 list_item이다. 사용자 label과 native pointer는 수집하지 않는다.
+  workspace 닫기 버튼은 기존 ID를 유지하며 토글·원격 tmux pane·복구 후보에는 닫기를 만들어 내지 않는다.
+- x는 실제 glyph를 배치하는 `Columns.closeXRange`에서 받는다. y/높이와 유효 clip은 canonical 행에서 받는다.
+  기존 일반 입력이 닫기 열을 행 전체 높이에 적용하므로 Inspector도 이 입력 범위를 제공한다.
+  잉크의 작은 사각형으로 클릭 영역을 바꾸거나 버튼 배경을 새로 그리지 않는다.
+- 일반 닫기 입력은 유효한 `Frame.closeContainsX`를 소비한다. 첫 paint 전·reorder preview·낡은 publication은
+  기존 Columns 경로를 유지한다. clip 밖·오른쪽 경계·비유한 x·닫기 없는 행은 버튼으로 판정하지 않는다.
+  일반 입력과 Pick은 같은 source/ID/generation·좌표를 사용한다. glyph lowering은 기존 Columns 기반 경로다.
+- Pick은 정상 클릭을 소비해 close 확인창·focus 전환·실제 세션 닫기를 실행하지 않는다.
+  일반 클릭은 `closeAgentRow → requestClose`를 유지한다. 실행 중 명령 확인은 `closeTargetHasRunningJob(target)`로
+  실제 닫을 Term을 검사한다. 활성 Term의 상태를 대신 적용하지 않는다. 확인/취소·미저장 내용의 기존 정책을 유지한다.
+  Term 제거로 행 index가 재사용돼도 이전 publication 선택은 폐기한다.
+- 실제 앱 검증은 `run.py --sidebar-close --rounds 20`과 독립 `verify_sidebar_close.py`다.
+  idle 셸과 실행 중 sleep은 기존 OSC 133 fixture 상태로 기술한다. 실제 CLI sessions 목록으로
+  Pick 동안의 전체 surface ID 보존과 일반 클릭 후 정확히 지정한 surface 하나만 제거됐는지 검사한다.
+  다섯 배치·독립 창·2× split·기본 cursor·취소·오른쪽 경계·재열기를 포함하며 구체 결과는 검증 매트릭스를 따른다.

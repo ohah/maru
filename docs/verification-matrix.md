@@ -4906,3 +4906,57 @@ artifact `/tmp/maru-sidebar-sessions-controls.log`, mutation `/tmp/maru-sidebar-
 전체 경계 검사 결과는 최종 PR 본문과 PR checks를 따른다.
 전체 `test-macos-app-host-abi`는 이번 PR에서 로컬 재실행하지 않았다.
 물리 HID·OS IME·다중 모니터·VoiceOver 실측은 이 native callback/Metal 증거와 구분한다.
+
+## Inspector 사이드바 세션 닫기 버튼
+
+구현. 기존 `sidebar` source의 세션 list_item 아래에 `closeId(slot)` button을 발행한다.
+실제 `Columns.closeXRange`의 x와 canonical 행 전체 높이·clip을 사용한다. 일반 입력은 유효한
+`Frame.closeContainsX`를 읽는다. workspace 닫기 ID와 glyph 배치는 유지하고, 토글·원격 pane·복구 후보에 닫기를 합성하지 않는다.
+
+발견·수정한 문제:
+
+- 최초 호스트 대조군은 실행 중인 Term을 즉시 닫는다고 잘못 기대했다. 기존 확인 절차를 유지하도록
+  실제 확인창과 승인 hand-off를 검사했다. 테스트 API 이름 오타와 닫기 순서 변경에 따라 등가가 된
+  음성 fixture의 survivor 목록도 수정하고 판정자 전체를 재실행했다. 판정자의 기준을 낮추지 않았다.
+- 혼합 상태를 추가하자 **비활성 대상은 실행 중이고 활성 Term만 대기 중일 때 확인 없이 닫혔다**.
+  `/tmp/maru-session-close-mixed-before.log`는 기대 3개·실제 2개인 실제 호스트 단언 실패다.
+  `requestClose`가 기존 `closeTargetHasRunningJob(target)` 대신 활성 Term 기반 `scopeHasRunningJob`을 부른 것이 원인이었다.
+  기존 대상별 함수를 연결해 판정·확인·teardown이 같은 `PendingClose.agent_term` 신원을 사용하게 했다.
+- 반대 상태(비활성 대상은 idle, 활성 Term만 실행 중)도 불필요한 확인 없이 닫혀야 한다.
+  호스트와 최종 native E2E에서 두 방향을 함께 검사했다. idle/running은 기존 OSC 133 A/C fixture이며
+  실제 셸·sleep process, CLI `at_prompt`와 전체 surface ID 목록으로 상태와 닫힌 대상을 재확인했다.
+
+최종 고정 앱 `/tmp/maru-session-close-final/Maru.app`, 바이너리 SHA-256
+`c759ac73fe72ecf5df0f5c81e40c7e0b56f84ed30ef4fe92ceb6b967b0aac4be`.
+`/tmp/maru-session-close-e2e20-final/{manifest,verified}.json`: **20/20**, CLI **507** 표본,
+PNG **65**장, owner 경계 변화 **5,939** pixels. 독립 `verify_sidebar_close.py` 통과.
+수정 전 `/tmp/maru-session-close-e2e20`의 통과는 최종 결과로 재사용하지 않았다.
+
+| 회차 | 공격 가설과 실제 대조 | 결과 |
+|---|---|---|
+| 1 | 비활성 idle 세션 × Pick은 전체 ID 보존, 일반 클릭은 지정한 ID 하나만 제거 | 통과 |
+| 2 | 활성 idle 세션 × Pick은 focus 유지, 일반 클릭은 해당 세션 제거와 생존 세션으로 target 전환 | 통과 |
+| 3 | 비활성 running·활성 idle에서 Pick은 모달 없음, 일반 클릭은 확인 전 전체 ID 보존·승인 후 대상만 제거 | 통과 |
+| 4 | 비활성 idle·활성 running에서 일반 클릭은 불필요한 확인 없이 대상만 제거 | 통과 |
+| 5 | 독립 창에서 close의 세션 parent·action/cursor/owner backing 좌표 일치 | 통과 |
+| 6–10 | 2× split과 다섯 배치에서 서로 다른 세션 close·native hand→crosshair | 통과 |
+| 11–12 | Escape·Pick 재클릭 취소는 세션/선택 불변, owner 경계 제거 | 통과 |
+| 13–14 | Pause→Pick은 Live, Pick 중 Pause는 선택 없이 취소 | 통과 |
+| 15 | × 열 오른쪽 경계는 half-open이며 세션 본체를 선택 | 통과 |
+| 16 | 음수 owner 좌표는 선택 없음·native arrow | 통과 |
+| 17–19 | 도구 toolbar hover·좌측 배치·owner 이탈에서 경계와 선택 수명 보존 | 통과 |
+| 20 | 닫기→실제 비활성 세션 닫기→재열기에서 index/ID가 재사용돼도 이전 generation 선택 폐기 | 통과 |
+
+매회 GUI 보고·CLI snapshot·parent/ID/generation/역할/action/cursor·Follow/target와 원본 fixture bytes를 대조한다.
+픽셀 판정은 일반 회색 row hover만 바뀐 것을 Inspector 성공으로 세지 않고 실제 주황 경계 증가와 취소 후 제거를 검사한다.
+실제 확인창은 round 03의 `confirm.ppm/png`, 혼합 상태는 round 03/04의 `inventory-before.txt`에 남긴다.
+
+로컬 Debug Inspector **76+18**, Chrome UI **1,204**, 기존 header **14**, sidebar regressions **14** 통과.
+최종 host `/tmp/maru-session-close-final-host.log`, 앱 `/tmp/maru-session-close-final-app-build.log` 각각 exit 0.
+ReleaseFast **76+18**·header **14**, `/tmp/maru-session-close-final-releasefast.log` exit 0.
+Artifact controls 총 **20** test methods, 새 범위 음성 artifact **32**종 거부 + 정상/JSON 등가/복원 통과:
+`/tmp/maru-session-close-final-controls3.log`.
+컴파일 결함 **13/13** 거부 + 정상/등가/복원 통과, 정상마다 실제 **22** tests 요구:
+`/tmp/maru-session-close-mutants-jieao30y/manifest.json`.
+최종 전체 경계 검사와 원격 CI 결과는 PR 본문·checks가 출처다. 전체 macOS host ABI는 로컬 재실행하지 않았다.
+이 증거는 native NSEvent callbacks·CLI·Metal 경로이며 물리 HID·OS IME·다중 모니터·VoiceOver 실측은 아니다.

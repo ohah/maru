@@ -1879,3 +1879,11 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 `python3 tools/inspector-picker-app/run.py --app <고정 앱>/Contents/MacOS/maru-macos-app --sidebar-sessions --rounds 20 --output <새 경로>`와
 `python3 tools/inspector-picker-app/verify_sidebar_sessions.py <같은 경로>`를 실행한다.
 `python3 tools/test-sidebar-session-adversarial.py`는 격리 소스에서 컴파일한 결함과 정상/동등/복원 대조군을 검사한다.
+
+## Inspector 사이드바 세션 닫기 검증
+
+`mise exec -- zig build test-inspector test-chrome-ui test-inspector-sidebar-regressions macos-app-build -j3`로
+발행·실제 glyph 위치·일반 입력·닫기 확인 경로와 앱을 검사한다. 빌드가 끝난 전체 bundle을 고정한 뒤
+`python3 tools/inspector-picker-app/run.py --app <고정 앱>/Contents/MacOS/maru-macos-app --sidebar-close --rounds 20 --output <새 경로>`와
+`python3 tools/inspector-picker-app/verify_sidebar_close.py <같은 경로>`를 실행한다.
+`python3 tools/test-sidebar-close-adversarial.py`는 컴파일한 결함 13종과 정상/등가/복원 대조군을 검사한다.

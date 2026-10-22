@@ -495,6 +495,22 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr0b_registered_operation_poison_tests.addArg("--maru-expect-tests=1");
         run_cr0b_registered_operation_poison_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_registered_operation_poison_tests.step);
+        // callDecoded 가 새 request 를 쓰기 전에 RX 를 옮기는 선행 ingest 도 read pump 와 같은 capture 안에서 EOF 를
+        // incident·reconnect admission 으로 게시한다(2026-10-22 GUI 가 50 분 넘게 재접속하지 않던 자리).
+        const cr0b_call_decoded_ingest_poison_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b callDecoded 선행 ingest EOF는"},
+        });
+        const run_cr0b_call_decoded_ingest_poison_tests = b.addRunArtifact(cr0b_call_decoded_ingest_poison_tests);
+        run_cr0b_call_decoded_ingest_poison_tests.addArg("--maru-expect-tests=1");
+        run_cr0b_call_decoded_ingest_poison_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_call_decoded_ingest_poison_tests.step);
         const cr0b_app_session_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),

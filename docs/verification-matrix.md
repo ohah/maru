@@ -2135,7 +2135,7 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   `service aborted -> publisher released -> client released`, 넷째는 coordinator의 `ring evidence -> client committed -> pending unlock -> wake outcome ->
   publisher release -> client operation release` transcript와 Client operation prerequisite의 별도 `id -> key -> reason` store oracle을 함께 요구한다. 실패 행은 ring/pending/Client first fields 0,
   mutex 재획득, active lease 0, 같은 node operation 재사용을 함께 검증한다. repeat 두 행은 same-fingerprint aggregate-only 성공과
-  fingerprint mismatch의 ring/pending/Client mutation 0을 고정한다. 이 6개는 composite prerequisite일 뿐 suffix 10·managed caller 6 완료로 세지 않는다.
+  fingerprint mismatch의 ring/pending/Client mutation 0을 고정한다. 이 6개는 composite prerequisite일 뿐 suffix 10·managed caller 7 완료로 세지 않는다.
   publisher authority 7개와 exhaustion child 1개는 canonical child artifact 경로를 주입하는 CR0b 전용 runner에서만 완료 증거가 된다.
   일반 aggregate에서는 두 exhaustion entry가 의도적으로 skip되므로 aggregate green을 이 fail-stop 증거로 대체하지 않는다.
   별도 GUI incident owner prerequisite 4개는 final-address runtime+registry 설치, current/restore 역할의 동일 owner 재사용,
@@ -2153,7 +2153,7 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   runtime 수명 prerequisite 7개는 clean `joined|detached`와 `degraded_joined|degraded_detached`를 구분하며 writer failure 뒤
   정상 join도 degraded provenance를 보존한다. stopping 이후 injected clock 실패와 실제 completion poll 오류는 backing을 보존하는
   degraded detach로 닫는다.
-  여섯 번째 Client poison publication gate는 아래 32개 unique component와 boundary 1개, 총 33개를 Debug·ReleaseFast에서
+  여섯 번째 Client poison publication gate는 아래 33개 unique component와 boundary 1개, 총 34개를 Debug·ReleaseFast에서
   exact-count한다. 각 행은 제품 API를 직접 실행하며 같은 fixture helper의 별칭으로 개수를 채우지 않는다.
 
   | owner | exact test name |
@@ -2181,6 +2181,7 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   | caller 4 | `CR0b allocator callback deferred poison은 canonical suffix를 호출한다` |
   | caller 5 | `CR0b actual read event pump poison은 canonical suffix를 호출한다` |
   | caller 6 | `CR0b actual outbound RPC ambiguity는 canonical suffix를 호출한다` |
+  | caller 7 | `CR0b callDecoded 선행 ingest EOF는 canonical suffix와 reconnect admission을 남긴다` |
   | bootstrap 1 | `CR0b GUI current first는 managed adapter 전에 process owner를 한 번 설치한다` |
   | bootstrap 2 | `CR0b GUI restore first 뒤 current는 같은 process owner를 쓴다` |
   | bootstrap 3 | `CR0b GUI multiple window와 adapter는 process owner를 재사용한다` |

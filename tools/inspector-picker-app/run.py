@@ -32,7 +32,7 @@ def file_mode(n):
     return (1,2,0,1,0,0,1,2,1,0,0,1,2,0,2,1,2,1,0,1)[n-1]
 
 
-def run(app, output, n, sidebar=False, pane_tabs=False, dock_header=False, file_header=False, file_details=False, sidebar_header=False):
+def run(app, output, n, sidebar=False, pane_tabs=False, dock_header=False, file_header=False, file_details=False, sidebar_header=False, sidebar_sessions=False):
     dest=output/f'round-{n:02d}';dest.mkdir()
     root=pathlib.Path(tempfile.mkdtemp(prefix='mip-',dir='/tmp'));(root/'home').mkdir();(root/'work').mkdir()
     for directory in ('cache','state','host','backups'):(root/directory).mkdir()
@@ -59,17 +59,17 @@ def run(app, output, n, sidebar=False, pane_tabs=False, dock_header=False, file_
     else:lines+=[f'inspect-owner-pointer {fixture} click']
     if n==19:lines += ['hover 0 0 -10 -10']
     if n==20:
-        if pane_tabs or dock_header or file_header or file_details or sidebar_header:lines += [f'inspect-capture {dest}/detached.ppm']
+        if pane_tabs or dock_header or file_header or file_details or sidebar_header or sidebar_sessions:lines += [f'inspect-capture {dest}/detached.ppm']
         lines += ['inspect-click 17','action toggle_inspector']
-        if pane_tabs or dock_header or file_header or file_details or sidebar_header:lines += ['sleep 350','inspect-click 40','sleep 500']
-    if placement==4 and not ((pane_tabs or dock_header or file_header or file_details or sidebar_header) and n==20):lines += [f'inspect-capture {dest}/detached.ppm']
+        if pane_tabs or dock_header or file_header or file_details or sidebar_header or sidebar_sessions:lines += ['sleep 350','inspect-click 40','sleep 500']
+    if placement==4 and not ((pane_tabs or dock_header or file_header or file_details or sidebar_header or sidebar_sessions) and n==20):lines += [f'inspect-capture {dest}/detached.ppm']
     lines+=['sleep 500',f'inspect-main-capture {dest}/selected.ppm','inspect-report selected',f'waitfile {end}','inspect-finish']
-    if (sidebar and n<=3) or (pane_tabs and n in (1,3)) or ((dock_header or file_header or file_details or sidebar_header) and n==1):
+    if (sidebar and n<=3) or (pane_tabs and n in (1,3)) or ((dock_header or file_header or file_details or sidebar_header) and n==1) or (sidebar_sessions and n in (1,2,3)):
         lines[-1:-1]=[f'inspect-owner-pointer {fixture} click','sleep 500','inspect-report control',f'waitfile {dest}/control-ok']
-    if file_details or sidebar_header:
+    if file_details or sidebar_header or sidebar_sessions:
         i=lines.index('inspect-click 48')
         lines[i:i]=[f'inspect-owner-pointer {fixture} hover','inspect-report normal-pointer']
-    if sidebar_header and n==20:
+    if (sidebar_header or sidebar_sessions) and n==20:
         i=lines.index('action toggle_inspector')
         lines[i:i]=[f'inspect-owner-pointer {fixture} click','sleep 500']
     script=dest/'input.txt';script.write_text('\n'.join(lines)+'\n');report=dest/'report.txt'
@@ -94,16 +94,21 @@ def run(app, output, n, sidebar=False, pane_tabs=False, dock_header=False, file_
         env.update(MARU_INSPECTOR_TAB='elements',MARU_FT_WINDOW_SIZE='1400x900')
         config.write_text(config.read_text()+'sidebar.width=240\n')
         if 6<=n<=10:env.update(MARU_COLLAPSE_SIDEBAR=str((1,9,10,20,3)[n-6]),MARU_FORCE_SPLIT='1')
+    if sidebar_sessions:
+        env.pop('MARU_INSPECTOR_WITH_DOCK',None)
+        env.update(MARU_INSPECTOR_TAB='elements',MARU_FT_WINDOW_SIZE='1400x900',MARU_FORCE_TAB_COUNT='3')
+        config.write_text(config.read_text()+'sidebar.width=240\n')
+        if 6<=n<=10:env['MARU_FORCE_SPLIT']='1'
     observations=[];errors=[];expected=None;hover=None;selected=None;sidebar_before=None;control=None;target=None
     with (dest/'app.log').open('w') as log:
         process=subprocess.Popen([str(app)],env=env,stdout=log,stderr=log,start_new_session=True)
         try:
-            deadline=time.monotonic()+(60 if dock_header or file_header or file_details or sidebar_header else 30)
+            deadline=time.monotonic()+(60 if dock_header or file_header or file_details or sidebar_header or sidebar_sessions else 30)
             while time.monotonic()<deadline and process.poll() is None:
                 text=report.read_text() if report.exists() else ''
-                inventory=subprocess.run([str(app.parent/'maru'),'sessions','list'],env=env,capture_output=True,text=True,timeout=10 if dock_header or file_header or file_details or sidebar_header else 3)
+                inventory=subprocess.run([str(app.parent/'maru'),'sessions','list'],env=env,capture_output=True,text=True,timeout=10 if dock_header or file_header or file_details or sidebar_header or sidebar_sessions else 3)
                 (dest/'cli-last.txt').write_text(inventory.stdout+inventory.stderr)
-                result=subprocess.run([str(app.parent/'maru'),'session','inspect','1','--json'],env=env,capture_output=True,text=True,timeout=10 if dock_header or file_header or file_details or sidebar_header else 3)
+                result=subprocess.run([str(app.parent/'maru'),'session','inspect','1','--json'],env=env,capture_output=True,text=True,timeout=10 if dock_header or file_header or file_details or sidebar_header or sidebar_sessions else 3)
                 (dest/'inspect-last.txt').write_text(result.stdout+result.stderr)
                 if result.returncode==0:
                     data=json.loads(result.stdout);observations.append(data);e=data['elements']
@@ -114,7 +119,12 @@ def run(app, output, n, sidebar=False, pane_tabs=False, dock_header=False, file_
                     if 'label=ready' in text and not fixture.exists():
                         all_nodes=e['nodes'];candidates=[v for v in all_nodes if v['visible_rect']['width']>=4 and v['visible_rect']['height']>=4]
                         if not candidates:raise RuntimeError('no published UI candidates')
-                        if sidebar_header:
+                        if sidebar_sessions:
+                            sidebar_before=[v for v in all_nodes if v['source']=='sidebar']
+                            slot=1 if n in (1,4,6,9,11,14,17,20) else 3 if n in (3,8,10,12,18) else 2
+                            preferred=[v for v in candidates if v['source']=='sidebar' and v['id']==0x5342000000000000+1+slot*2]
+                            if not preferred:raise RuntimeError('missing canonical sidebar session row '+str(slot))
+                        elif sidebar_header:
                             sidebar_before=[v for v in all_nodes if v['source']=='sidebar_header']
                             part=(3,1,2,4,0,3,4,3,4,4,2,4,0,1,2,0,3,0,4,3)[n-1]
                             preferred=[v for v in candidates if v['source']=='sidebar_header' and v['id']==0x5348000000000000+1+part]
@@ -145,11 +155,11 @@ def run(app, output, n, sidebar=False, pane_tabs=False, dock_header=False, file_
                             if not preferred:raise RuntimeError('missing real pane tab candidate '+pane_feature(n))
                         else:
                             preferred=[v for v in candidates if v['source']==('file_tree' if n%2==0 else 'status_bar')]
-                        node=next((v for v in (preferred if sidebar or pane_tabs or dock_header or file_header or file_details or sidebar_header else reversed(preferred or candidates)) if v['action_id'] is not None),(preferred or candidates)[-1]);r=node['visible_rect'];x=r['x']+r['width']/2;y=r['y']+r['height']/2
+                        node=next((v for v in (preferred if sidebar or pane_tabs or dock_header or file_header or file_details or sidebar_header or sidebar_sessions else reversed(preferred or candidates)) if v['action_id'] is not None),(preferred or candidates)[-1]);r=node['visible_rect'];x=r['x']+r['width']/2;y=r['y']+r['height']/2
                         if n==15 or (sidebar and n==4):x=r['x']+.25;y=r['y']+.25
                         if n==16:x=-10;y=-10
                         target=node
-                        if (sidebar or pane_tabs or dock_header or file_header or file_details or sidebar_header) and n==15:x=r['x']+r['width'];y=r['y']+r['height']/2
+                        if (sidebar or pane_tabs or dock_header or file_header or file_details or sidebar_header or sidebar_sessions) and n==15:x=r['x']+r['width'];y=r['y']+r['height']/2
                         expected=next((v for v in reversed(all_nodes) if contains(v['visible_rect'],x,y)),None)
                         fixture.write_text(json.dumps({'x':x,'y':y}))
                     if 'label=hovered' in text and not gate.exists():
@@ -165,7 +175,7 @@ def run(app, output, n, sidebar=False, pane_tabs=False, dock_header=False, file_
                         if n in (11,12,14):
                             if e['picking']:errors.append('cancel/pause retained picking')
                             if e['selected'] is not None:errors.append('cancel selected a target')
-                        elif (pane_tabs or dock_header or file_header or file_details or sidebar_header) and n==20:
+                        elif (pane_tabs or dock_header or file_header or file_details or sidebar_header or sidebar_sessions) and n==20:
                             if e['picking'] or e['selected'] is not None:errors.append('reopened geometry reused a stale pane tab selection')
                         elif n==17:
                             if not e['picking']:errors.append('inspector toolbar hover cancelled picking')
@@ -177,6 +187,7 @@ def run(app, output, n, sidebar=False, pane_tabs=False, dock_header=False, file_
                             errors.append('Pick changed workspace/group publication (activation, collapse or close)')
                         if (file_header or file_details) and n!=20 and sidebar_before!=[v for v in e['nodes'] if v['source']==('file_header_details' if file_details else 'file_header')]:
                             errors.append('Pick changed actual file mode publication')
+                        if sidebar_sessions and n!=20 and sidebar_before!=[v for v in e['nodes'] if v['source']=='sidebar']:errors.append('Pick executed a session row action')
                         if sidebar_header and n!=20 and sidebar_before!=[v for v in e['nodes'] if v['source']=='sidebar_header']:errors.append('Pick executed a sidebar header action')
                         if dock_header and n!=20 and sidebar_before!=[v for v in e['nodes'] if v['source']=='dock_header']:
                             errors.append('Pick changed dock view/action publication')
@@ -186,7 +197,7 @@ def run(app, output, n, sidebar=False, pane_tabs=False, dock_header=False, file_
                             if (normalize(sidebar_before)!=normalize(after) if n==20 else sidebar_before!=after):
                                 errors.append('Pick changed pane tab publication (activation, close, plus or scroll)')
                         end.touch()
-                    if ((sidebar and n<=3) or (pane_tabs and n in (1,3)) or ((dock_header or file_header or file_details or sidebar_header) and n==1)) and 'label=control' in text and not (dest/'control-ok').exists():
+                    if ((sidebar and n<=3) or (pane_tabs and n in (1,3)) or ((dock_header or file_header or file_details or sidebar_header) and n==1) or (sidebar_sessions and n in (1,2,3))) and 'label=control' in text and not (dest/'control-ok').exists():
                         control=e
                         if sidebar_before == [v for v in e['nodes'] if v['source']==('sidebar_header' if sidebar_header else 'file_header_details' if file_details else 'file_header' if file_header else 'dock_header' if dock_header else 'pane_tabs' if pane_tabs else 'sidebar')]:
                             errors.append('normal pointer control did not activate/collapse product row')
@@ -215,22 +226,23 @@ def run(app, output, n, sidebar=False, pane_tabs=False, dock_header=False, file_
     file_unchanged=not (file_header or file_details) or file_path.read_bytes()==file_bytes
     if not file_unchanged:errors.append('inspection or mode control changed file bytes')
     (dest/'observations.json').write_text(json.dumps(observations,indent=2))
-    result={'file_unchanged':file_unchanged,'target':target,'control':control,'sidebar_before':sidebar_before,'fixture_bytes':file_bytes.hex() if file_details else None,'mode':'sidebar_header' if sidebar_header else 'file_header_details' if file_details else 'file_header' if file_header else 'dock_header' if dock_header else 'pane_tabs' if pane_tabs else 'sidebar' if sidebar else 'picker','round':n,'placement':placement,'expected':expected,'hover':hover,'selected':selected,'passed':not errors,'errors':errors,'root':str(root),'transport':'native NSEvent callbacks; CLI session.inspect; Metal readback'}
+    result={'file_unchanged':file_unchanged,'target':target,'control':control,'sidebar_before':sidebar_before,'fixture_bytes':file_bytes.hex() if file_details else None,'mode':'sidebar_sessions' if sidebar_sessions else 'sidebar_header' if sidebar_header else 'file_header_details' if file_details else 'file_header' if file_header else 'dock_header' if dock_header else 'pane_tabs' if pane_tabs else 'sidebar' if sidebar else 'picker','round':n,'placement':placement,'expected':expected,'hover':hover,'selected':selected,'passed':not errors,'errors':errors,'root':str(root),'transport':'native NSEvent callbacks; CLI session.inspect; Metal readback'}
     (dest/'result.json').write_text(json.dumps(result,indent=2));return result
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--app',type=pathlib.Path,required=True);p.add_argument('--output',type=pathlib.Path,required=True);p.add_argument('--sidebar',action='store_true');p.add_argument('--pane-tabs',action='store_true');p.add_argument('--dock-header',action='store_true');p.add_argument('--file-header',action='store_true');p.add_argument('--file-details',action='store_true');p.add_argument('--sidebar-header',action='store_true');p.add_argument('--start',type=int,default=1);p.add_argument('--rounds',type=int,default=20);args=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--app',type=pathlib.Path,required=True);p.add_argument('--output',type=pathlib.Path,required=True);p.add_argument('--sidebar',action='store_true');p.add_argument('--pane-tabs',action='store_true');p.add_argument('--dock-header',action='store_true');p.add_argument('--file-header',action='store_true');p.add_argument('--file-details',action='store_true');p.add_argument('--sidebar-header',action='store_true');p.add_argument('--sidebar-sessions',action='store_true');p.add_argument('--start',type=int,default=1);p.add_argument('--rounds',type=int,default=20);args=p.parse_args()
     if args.sidebar and (args.start not in (1,11) or args.rounds != 5):p.error("--sidebar requires --start 1 or 11 and --rounds 5")
-    if sum((args.sidebar,args.pane_tabs,args.dock_header,args.file_header,args.file_details,args.sidebar_header))>1:p.error("choose one product scope")
+    if sum((args.sidebar,args.pane_tabs,args.dock_header,args.file_header,args.file_details,args.sidebar_header,args.sidebar_sessions))>1:p.error("choose one product scope")
     if args.pane_tabs and (args.start != 1 or args.rounds != 20):p.error("--pane-tabs requires --start 1 --rounds 20")
     if args.dock_header and (args.start != 1 or args.rounds != 20):p.error("--dock-header requires all 20 rounds")
+    if args.sidebar_sessions and (args.start != 1 or args.rounds != 20):p.error("--sidebar-sessions requires all 20 rounds")
     if args.sidebar_header and (args.start != 1 or args.rounds != 20):p.error("--sidebar-header requires all 20 rounds")
     if args.file_details and (args.start != 1 or args.rounds != 20):p.error("--file-details requires all 20 rounds")
     if args.file_header and (args.start != 1 or args.rounds != 20):p.error("--file-header requires all 20 rounds")
     args.output.mkdir(parents=True,exist_ok=False);results=[]
     for n in range(args.start,args.start+args.rounds):
-        r=run(args.app.resolve(),args.output.resolve(),n,args.sidebar,args.pane_tabs,args.dock_header,args.file_header,args.file_details,args.sidebar_header);results.append(r);print(n,'PASS' if r['passed'] else 'FAIL',r['errors'],flush=True)
+        r=run(args.app.resolve(),args.output.resolve(),n,args.sidebar,args.pane_tabs,args.dock_header,args.file_header,args.file_details,args.sidebar_header,args.sidebar_sessions);results.append(r);print(n,'PASS' if r['passed'] else 'FAIL',r['errors'],flush=True)
         (args.output/'manifest.json').write_text(json.dumps({'binary_sha256':hashlib.sha256(args.app.read_bytes()).hexdigest(),'rounds':results,'passed':all(v['passed'] for v in results)},indent=2))
         if not r['passed']:raise SystemExit(1)
 

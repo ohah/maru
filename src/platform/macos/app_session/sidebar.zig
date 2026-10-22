@@ -789,6 +789,15 @@ pub fn sidebarSearchCaretRect(self: *AppSession) ?chrome.draw.Rect {
 /// 매 tick 전수 syscall이 된다. `.git/HEAD` 읽기는 그 위에서 cwd가 바뀔 때만 도는 별도 캐시다.
 pub fn reprojectSidebarIfRowLinesStale(self: *AppSession) void {
     if (self.sidebar_collapsed or self.chrome_minimal) return; // 그릴 자리가 없으면 볼 이유도 없다
+    // A new/reordered Term can leave every existing row height unchanged. The
+    // retained bands still need a new canonical projection in that case. This
+    // runs in the existing paint preparation path, never in the Inspector read.
+    if (self.sidebar_drag_preview == null and sidebarViewport(self).height() > 0 and
+        self.sidebar_publication.params != null and !sidebarPublicationCurrent(self))
+    {
+        rebuildSidebar(self) catch return;
+        self.metal_dirty = true;
+    }
     var stale = false;
     const rows = self.sidebar_rows.items;
     for (rows, 0..) |row, i| switch (row) {
@@ -897,13 +906,29 @@ pub fn inSidebar(self: *const AppSession, x_px: f64) bool {
     return chrome.components.sidebar.inSidebar(x_px, self.sidebar_width_px);
 }
 
-// Tab pointers are never exported. Together with the teardown epoch they prevent
-// an index-based row ID from silently following a replacement workspace.
+// Live owner addresses are hashed internally and never exported. Include pane
+// and Term order: the same row indices can refer to different sessions after a
+// reorder or replacement even when every row has the same height.
 fn sidebarModelStamp(self: *const AppSession) u64 {
     var h = std.hash.Wyhash.init(self.sidebar_identity_epoch);
+    h.update(std.mem.asBytes(&self.pane_tab_identity_epoch));
     for (self.tabs.items) |tab| {
         const address = @intFromPtr(tab);
         h.update(std.mem.asBytes(&address));
+        for (tab.panes.items) |pane| {
+            const pane_address = @intFromPtr(pane);
+            h.update(std.mem.asBytes(&pane_address));
+            for (pane.terms.items) |term| {
+                const term_address = @intFromPtr(term);
+                h.update(std.mem.asBytes(&term_address));
+                const surface = term.surfaceId();
+                h.update(std.mem.asBytes(&surface));
+            }
+            // Delimit lists so moving a Term across panes changes identity too.
+            h.update(std.mem.asBytes(&pane.active_term));
+            const count = pane.terms.items.len;
+            h.update(std.mem.asBytes(&count));
+        }
     }
     return h.final();
 }

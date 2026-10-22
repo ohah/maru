@@ -130,9 +130,19 @@ pub const Frame = struct {
                     card = index;
                     semantics = .{ .role = .tab, .label = "", .selected = c.active, .focusable = true };
                 },
+                // These are the existing canonical list rows, not a second
+                // Inspector-only layout. Keep labels in the native text owner.
+                .agent_toggle => |v| {
+                    parent = card orelse 0;
+                    semantics = .{ .role = .button, .label = "", .expanded = !v.collapsed, .focusable = true };
+                },
+                .agent => {
+                    parent = card orelse 0;
+                    semantics = .{ .role = .list_item, .label = "", .focusable = true };
+                },
                 else => parent = card orelse 0,
             }
-            self.entries.appendAssumeCapacity(.{ .id = rowId(i), .parent_index = parent, .kind = if (r == .group_header) .button else .card, .rect = rect, .effective_clip = clip, .action = .{ .id = rowId(i) }, .cursor = .press, .semantics = semantics });
+            self.entries.appendAssumeCapacity(.{ .id = rowId(i), .parent_index = parent, .kind = if (r == .group_header or r == .agent_toggle) .button else .card, .rect = rect, .effective_clip = clip, .action = .{ .id = rowId(i) }, .cursor = .press, .semantics = semantics });
             if (r == .card) if (p.close) |c| {
                 if (!std.math.isFinite(c.left) or !std.math.isFinite(c.right)) continue;
                 const left = @max(0, c.left);
@@ -142,6 +152,48 @@ pub const Frame = struct {
         }
     }
 };
+
+test "published sidebar session rows share geometry roles and retire changed owners" {
+    const a = std.testing.allocator;
+    var rows = [_]sidebar.Row{
+        .{ .card = .{ .tab = 0, .label = "private", .active = true } },
+        .{ .agent_toggle = .{ .tab = 0, .count = 2, .collapsed = false } },
+        .{ .agent = .{ .tab = 0, .pane = 0, .term = 0, .lines = 1 } },
+        .{ .agent = .{ .tab = 0, .pane = 0, .term = 1, .lines = 3, .last = true } },
+        .recovered_sessions_header,
+        .{ .recovered_session = .{ .projection_index = 0 } },
+    };
+    const p: Params = .{ .width = 240, .header = 40, .viewport_height = 400, .scroll = 10, .metrics = sidebar.Metrics.init(20, 24) };
+    var f: Frame = .{};
+    defer f.deinit(a);
+    try f.publish(a, &rows, p, 10);
+    for (1..4) |i| {
+        const row = f.row(i).?;
+        try std.testing.expectEqual(rowId(0), f.snapshot().entries[row.parent_index.?].id);
+        try std.testing.expectEqual(@as(f32, @floatFromInt(sidebar.rowTop(&rows, i, p.header, p.metrics, p.scroll))), row.rect.y);
+        try std.testing.expectEqual(@as(f32, @floatFromInt(sidebar.rowHeight(rows[i], p.metrics))), row.rect.height);
+        try std.testing.expectEqual(rowId(i), row.action.?.id);
+        try std.testing.expectEqual(tree.CursorHint.press, row.cursor);
+        try std.testing.expectEqualStrings("", row.semantics.?.label);
+        try std.testing.expectEqual(@as(?usize, i), f.slotAt(row.rect.y + 1));
+    }
+    try std.testing.expectEqual(tree.SemanticRole.button, f.row(1).?.semantics.?.role);
+    try std.testing.expect(f.row(1).?.semantics.?.expanded.?);
+    try std.testing.expectEqual(tree.SemanticRole.list_item, f.row(2).?.semantics.?.role);
+    try std.testing.expect(f.row(2).?.semantics.?.expanded == null);
+    try std.testing.expect(f.row(4).?.semantics == null and f.row(5).?.semantics == null);
+    const generation = f.generation;
+    rows[1].agent_toggle.collapsed = true;
+    try std.testing.expect(!f.current(&rows, p, 10));
+    try f.publish(a, &rows, p, 10);
+    try std.testing.expect(f.generation > generation and !f.row(1).?.semantics.?.expanded.?);
+    const changed = f.generation;
+    try f.publish(a, &rows, p, 11);
+    try std.testing.expect(f.generation > changed);
+    rows[2].agent.term = 1;
+    rows[3].agent.term = 0;
+    try std.testing.expect(!f.current(&rows, p, 11));
+}
 
 test "published sidebar shares row spans, nested parents and clipped input" {
     const a = std.testing.allocator;

@@ -4854,3 +4854,55 @@ Debug Inspector **76+16**, Chrome UI **1,202**, 기존 상단 glyph/pill·배지
 `/tmp/maru-sidebar-header-final-focused.log`에서 exit 0이다. 전체 경계 재실행도 exit 0이다(`/tmp/maru-sidebar-header-final-boundaries.log`).
 ReleaseFast Inspector **76+16**는 `/tmp/maru-sidebar-header-releasefast.log`에서 exit 0이다.
 로컬 host 전체 suite는 이번 변경에서 재실행하지 않으며 원격 CI와 구분한다.
+
+## Inspector 사이드바 하위 세션 행·접기 토글
+
+구현. 기존 `sidebar` 발행의 canonical `agent_toggle`/`agent`를 button/list_item으로 제공한다.
+카드 직계 자식이며 rect/clip/action/cursor를 기존 paint·입력과 공유한다. 이름·대화·경로는 내보내지 않는다.
+원격 tmux pane·복구 후보와 세션 닫기 glyph의 독립 node, native accessibility 전체 이관은 이 범위 밖이다.
+
+발견·수정:
+
+- 같은 높이/같은 행 index를 유지한 Term 순서 변경이 이전 Inspector 선택을 다른 세션으로 넘길 수 있었다.
+  live Tab/Pane/Term 순서·surface ID·pane teardown epoch·focus를 내부 stamp에 포함하고 host의 실제 swap/복원으로 폐기를 검증한다.
+- 첫 실제 앱 실행에서 Term 3개는 생성됐지만 사이드바는 예전 카드 하나만 유지했다.
+  기존 행 높이 검사만으로는 새 Term 구성 변경이 누락됐다. 기존 paint 준비 경로가 publication 신원 변경도 처리하도록 고쳤다.
+  조회 collector는 여전히 읽기 전용이다. 수정 후 새 고정 bundle에서 전체 20회를 다시 실행했다.
+- 첫 빌드의 웹 의존성 누락은 동일 package.json/bun.lock의 기존 설치를 재사용해 해결했다.
+  첫 mutation harness의 통과 개수 기대 4는 실제 import 포함 21로 수정한 뒤 모든 변이와 대조군을 재실행했다.
+
+실제 앱: `/tmp/maru-sidebar-sessions-final/Maru.app`의 고정 bundle,
+SHA-256 `1245ba9e8f6801b5563f6b58dc173825b541e703ddb5d0bb5bdcadd3555f0833`.
+`/tmp/maru-sidebar-sessions-e2e20-final/{manifest,verified}.json`: **20/20**, CLI **467** 표본,
+PNG **64**장, 경계 변경 **23,277** pixels. 독립 `verify_sidebar_sessions.py`도 통과했다.
+격리 HOME·PTY/session-host root와 기존 `MARU_FORCE_TAB_COUNT=3` 제품 생성 경로를 사용한다.
+
+| 회차 | 공격 가설과 실제 대조 | 결과 |
+|---|---|---|
+| 1 | Pick으로 목록 접힘이 실행되지 않음, 같은 점의 일반 클릭은 접힘 | 통과 |
+| 2–3 | 서로 다른 비활성 세션 Pick은 Follow/target 불변, 일반 클릭은 실제 target 전환 | 통과 |
+| 4–5 | 좌측/독립 창 배치에서 토글·세션 parent/source/ID/역할과 owner 좌표 일치 | 통과 |
+| 6–10 | 2× split에서 서로 다른 세션/토글·다섯 배치와 분리 창, native hand→crosshair | 통과 |
+| 11–12 | Escape와 Pick 재클릭은 선택 없이 취소하며 owner 경계 제거 | 통과 |
+| 13 | Pause→Pick이 Live로 돌아오며 세션 전환은 차단 | 통과 |
+| 14 | Pick 중 Pause는 선택 없이 취소 | 통과 |
+| 15 | 행 오른쪽 경계는 half-open이며 그 행을 고르지 않음 | 통과 |
+| 16 | 음수 owner 좌표는 선택 없음·native arrow | 통과 |
+| 17 | Inspector toolbar 호버는 owner 경계만 없애고 Pick은 유지 | 통과 |
+| 18–19 | 좌측 도크·owner 이탈에서도 선택 세션과 Follow/target 보존 | 통과 |
+| 20 | 닫기→실제 일반 접기→재열기에서 이전 선택 폐기, 세션 행 제거·generation 변경 | 통과 |
+
+모든 회차에서 GUI 보고와 CLI snapshot의 Pick/선택 상태·role/action/cursor/parent/generation,
+실제 native cursor, PPM 경계 변화·선택 유지·취소 복구와 fixture 원본 bytes를 대조한다.
+24개 결함 artifact는 거부되고 정상·JSON 등가·복원 대조군은 통과한다.
+`python3 -m unittest discover -s tools/inspector-picker-app -p 'test_*.py'`: 총 **17** test methods 통과.
+`tools/test-sidebar-session-adversarial.py`: 컴파일한 결함 **9/9** 거부 + 정상/동등/복원 통과,
+각 정상 실행 **21** tests. 결과 `/tmp/maru-sidebar-session-mutants-lij3e0hy/manifest.json`.
+
+로컬 Debug Inspector **76+17**, Chrome UI **1,203**, 기존 헤더 회귀 **14**, 기존 사이드바 회귀 **14** 통과.
+ReleaseFast Inspector **76+17** 및 헤더 **14** 통과.
+빌드 `/tmp/maru-sidebar-sessions-build3.log`, ReleaseFast `/tmp/maru-sidebar-sessions-releasefast.log`,
+artifact `/tmp/maru-sidebar-sessions-controls.log`, mutation `/tmp/maru-sidebar-sessions-mutants2.log`.
+전체 경계 검사 결과는 최종 PR 본문과 PR checks를 따른다.
+전체 `test-macos-app-host-abi`는 이번 PR에서 로컬 재실행하지 않았다.
+물리 HID·OS IME·다중 모니터·VoiceOver 실측은 이 native callback/Metal 증거와 구분한다.

@@ -48,6 +48,8 @@ def main():
     relative = 'src/platform/macos/app_session/editor/mod.zig'
     path = source / relative
     original = path.read_text()
+    locator = source / "src/platform/macos/lsp_process.zig"
+    original_locator = locator.read_text()
     digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
     before = digest(repo / relative)
     # 발견만으로 신뢰 확인창이 생긴다. 허용 전에는 이 실행 파일을 실행하면 안 된다.
@@ -65,13 +67,18 @@ def main():
     ]]
     cases += [
         ('ambient-server', 'LSPE2 ', 'EnvGuard.set("MARU_LSP_SERVER_OVERRIDE", "")', 'EnvGuard.set("MARU_LSP_SERVER_OVERRIDE", null)'),
-        ('ambient-path', 'LSPE19 ', 'export PATH=/usr/bin:/bin\\nexec /bin/sh -c ', 'exec /bin/sh -c '),
+        ('ignore-path-only', 'host discovery fixture ', 'it.fallback_pos = git_locate.fallback_dirs.len;', 'it.fallback_pos = 0;'),
         ('lost-restore', 'LSPE19 ', '    defer _ = lsp_process.setFallbackSearchForTest(fallback);', '    _ = fallback;'),
     ]
     rows = []
     try:
         for name, prefix, old, new in [('control', None, None, None)] + cases + [('restored-control', None, None, None)]:
-            path.write_text(original if prefix is None else mutate_test(original, prefix, old, new))
+            path.write_text(original)
+            locator.write_text(original_locator)
+            if name == 'ignore-path-only':
+                locator.write_text(replace_once(original_locator, old, new))
+            elif prefix is not None:
+                path.write_text(mutate_test(original, prefix, old, new))
             run = subprocess.run(['mise', 'exec', '--', 'zig', 'build', 'test-editor-host-discovery-isolation', '-j2'], cwd=source, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=600)
             label = re.sub(r'[^a-zA-Z0-9_-]+', '-', name).strip('-')
             (root / (label + '.log')).write_text(run.stdout)
@@ -86,6 +93,9 @@ def main():
                 raise RuntimeError(run.stdout[-3000:])
     finally:
         path.write_text(original)
+        locator.write_text(original_locator)
+        if locator.read_text() != original_locator:
+            raise RuntimeError("Locator restoration failed")
         if digest(repo / relative) != before or digest(path) != before:
             raise RuntimeError('Source restoration or original source integrity failed')
     (root / 'provenance.json').write_text(json.dumps(dict(head=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip(), editor_sha256=before, mutations=len(cases), controls=2, fixture_server_executed=False), indent=2))

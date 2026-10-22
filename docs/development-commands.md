@@ -1851,8 +1851,8 @@ python3 tools/test-editor-host-discovery-isolation.py
 
 첫 두 명령은 기존 실패 9개와 탐색 설정의 중첩 원복·override 대조군을 실행한다(행동 검사
 10개와 초기화 5개). LSP가 검사 대상이 아닌 키 입력·공유 찾기·늦은 응답 검사는 LSP를 끈다.
-LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 가짜 로그인 셸의 PATH를
-`/usr/bin:/bin`으로 시작해 저장소 훅이 추가한 서버만 발견한다. LSPE19의 Homebrew 등
+LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 도구 환경의 최소 PATH와
+저장소 훅이 추가한 서버를 사용한다. LSPE19의 Homebrew 등
 관례 위치 탐색 제한은 테스트 전용이며 이전 값을 원복한다. 제품의 PATH·관례 위치 탐색과
 신뢰 확인 동작은 바꾸지 않는다.
 

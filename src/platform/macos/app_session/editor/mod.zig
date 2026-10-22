@@ -17180,7 +17180,7 @@ test "LSPE19 저장소 셸 환경 — 신뢰한 저장소는 그 루트로 cd �
     // `cd` 를 함수로 덮어 chpwd 훅을 흉내 낸다 — 그 폴더로 들어가면 변수와 PATH 를 세운다(direnv 처럼).
     var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
     // 훅은 관문 파일(`$HOME/go`)을 기다린다 — 저장소 환경을 읽는 사이를 잰다(⑶).
-    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "export PATH=/usr/bin:/bin\nexec /bin/sh -c \"cd() { while [ ! -f \\\"\\$HOME/go\\\" ]; do /bin/sleep 0.02; done; command cd \\\"\\$@\\\" && export REPO_HOOK=hooked PATH=\\\"\\$PWD/devbin:\\$PATH\\\"; }; $cmd\"", &shell_buf);
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "exec /bin/sh -c \"cd() { while [ ! -f \\\"\\$HOME/go\\\" ]; do /bin/sleep 0.02; done; command cd \\\"\\$@\\\" && export REPO_HOOK=hooked PATH=\\\"\\$PWD/devbin:\\$PATH\\\"; }; $cmd\"", &shell_buf);
     errdefer fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" }) catch {}; // 실패 경로에서도 셸을 놓아 준다
     tool_env.setShellForTest(shell, null);
     var pp_buf: [std.fs.max_path_bytes + 8]u8 = undefined;

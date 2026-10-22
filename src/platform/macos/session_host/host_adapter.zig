@@ -716,6 +716,47 @@ pub const HostAdapter = struct {
         return self.slot.callCurrent(self.slot.connectionGeneration(), "runtime.spawn_full", params_json);
     }
 
+    /// `spawnRuntime` 과 같지만 응답을 읽다 만난 poison 을 `capture` 로만 받는다(CR0b caller 8). 게시는
+    /// caller 가 operation 밖에서 한다 — 이 adapter 는 publisher pointer 를 쥐지 않는다.
+    pub fn spawnRuntimeWithPoisonCapture(
+        self: *HostAdapter,
+        params_json: []const u8,
+        timestamp_ns: i128,
+        capture: *incident_publication_contract.AdminRpcPoisonCapture,
+    ) client_mod.ClientError![]u8 {
+        return self.slot.callCurrentWithAdminPoisonCapture(
+            self.slot.connectionGeneration(),
+            "runtime.spawn_full",
+            params_json,
+            timestamp_ns,
+            capture,
+        );
+    }
+
+    /// admin capture 를 게시하지 못했을 때 현재 Client 를 옛 동작대로 latch·close 한다.
+    pub fn poisonAfterUnpublishedAdminCapture(self: *HostAdapter, reason_raw: u8) void {
+        self.slot.poisonCurrentAfterUnpublishedAdminCapture(self.slot.connectionGeneration(), reason_raw);
+    }
+
+    /// `callUntil` 과 같지만 응답을 읽다 만난 poison 을 `capture` 로만 받는다(CR0b caller 9).
+    pub fn callUntilWithPoisonCapture(
+        self: *HostAdapter,
+        method: []const u8,
+        params_json: ?[]const u8,
+        deadline: client_deadline.AbsoluteDeadline,
+        timestamp_ns: i128,
+        capture: *incident_publication_contract.AdminRpcPoisonCapture,
+    ) client_mod.DeadlineClientError![]u8 {
+        return self.slot.callCurrentUntilWithAdminPoisonCapture(
+            self.slot.connectionGeneration(),
+            method,
+            params_json,
+            deadline,
+            timestamp_ns,
+            capture,
+        );
+    }
+
     /// generation RPC가 새 request를 쓰기 전에 현재 readable RX를 canonical queue로 옮긴다.
     pub fn ingestRuntimeReadableEvidence(self: *HostAdapter) client_mod.ClientError!void {
         return self.slot.ingestCurrentReadableEvidence(self.slot.connectionGeneration());

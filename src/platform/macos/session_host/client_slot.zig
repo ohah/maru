@@ -13440,6 +13440,119 @@ pub const ClientSlot = struct {
         };
     }
 
+    /// Blocking admin RPC 를 `AdminRpcPoisonCapture` 안에서 돈다. capture 는 operation 이 현재 Client 를 붙든
+    /// 동안만 armed 이고 반환 전에 `finalized` 가 된다. 그 사이 poison 이 오면 Client 는 latch·fd close 없이
+    /// 사유만 남기고, caller(RemoteRuntime)가 operation 밖에서 canonical port 로 게시한다. capture 없이 EOF 를
+    /// 먼저 만나면 incident 가 영영 없어 재접속 admission 이 생기지 않는다(2026-10-22 caller 7 과 같은 구멍).
+    pub fn callCurrentWithAdminPoisonCapture(
+        self: *ClientSlot,
+        expected_generation: u64,
+        method: []const u8,
+        params_json: ?[]const u8,
+        timestamp_ns: i128,
+        capture: *incident_publication_contract.AdminRpcPoisonCapture,
+    ) client_mod.ClientError![]u8 {
+        return self.callCurrentAdminCaptured(expected_generation, method, params_json, null, timestamp_ns, capture) catch |err| switch (err) {
+            error.DeadlineExceeded => unreachable,
+            else => |client_err| client_err,
+        };
+    }
+
+    pub fn callCurrentUntilWithAdminPoisonCapture(
+        self: *ClientSlot,
+        expected_generation: u64,
+        method: []const u8,
+        params_json: ?[]const u8,
+        deadline: client_deadline.AbsoluteDeadline,
+        timestamp_ns: i128,
+        capture: *incident_publication_contract.AdminRpcPoisonCapture,
+    ) client_mod.DeadlineClientError![]u8 {
+        return self.callCurrentAdminCaptured(expected_generation, method, params_json, deadline, timestamp_ns, capture);
+    }
+
+    /// admin capture 를 게시하지 못했을 때 옛 동작(latch·fd close)으로 되돌린다. 그러지 않으면 capture 가 막아 둔
+    /// Client 가 fd 를 연 채 반쪽 frame 을 품고 남는다. 이 시점 capture 는 이미 풀렸으므로 `poison` 이 평소대로 latch 한다.
+    /// borrow 가 실패하면(다른 operation 이 쥐고 있음) 할 수 있는 게 없다 — 다음 read 가 같은 EOF 를 다시 만난다.
+    pub fn poisonCurrentAfterUnpublishedAdminCapture(
+        self: *ClientSlot,
+        expected_generation: u64,
+        reason_raw: u8,
+    ) void {
+        const reason = std.enums.fromInt(client_poison.ConnectionReason, reason_raw) orelse return;
+        const Operation = struct {
+            fn run(poison_reason: client_poison.ConnectionReason, client: *client_mod.Client) error{}!void {
+                client.poison(poison_reason);
+            }
+        };
+        const outcome = self.withCurrent(expected_generation, reason, Operation.run) catch return;
+        outcome catch |err| switch (err) {};
+    }
+
+    fn callCurrentAdminCaptured(
+        self: *ClientSlot,
+        expected_generation: u64,
+        method: []const u8,
+        params_json: ?[]const u8,
+        deadline: ?client_deadline.AbsoluteDeadline,
+        timestamp_ns: i128,
+        capture: *incident_publication_contract.AdminRpcPoisonCapture,
+    ) client_mod.DeadlineClientError![]u8 {
+        if (timestamp_ns < 0 or
+            !std.meta.eql(capture.*, incident_publication_contract.AdminRpcPoisonCapture{}) or
+            rangesOverlapTyped(capture, self) or rangesOverlapTyped(capture, self.current))
+            return error.ProtocolError;
+        const Context = struct {
+            slot_addr: usize,
+            method: []const u8,
+            params_json: ?[]const u8,
+            deadline: ?client_deadline.AbsoluteDeadline,
+            timestamp_ns: i128,
+            capture: *incident_publication_contract.AdminRpcPoisonCapture,
+        };
+        const Operation = struct {
+            fn run(context: Context, client: *client_mod.Client) client_mod.DeadlineClientError![]u8 {
+                context.capture.* = .{
+                    .self_addr = @intFromPtr(context.capture),
+                    .slot_addr = context.slot_addr,
+                    .client_addr = @intFromPtr(client),
+                    .timestamp_ns = context.timestamp_ns,
+                    .source_site_raw = @backingInt(connection_incident.SourceSite.client_response),
+                    .lifecycle_raw = @backingInt(incident_publication_contract.AdminRpcPoisonCaptureLifecycle.armed),
+                };
+                if (!client.beginAdminRpcPoisonCapture(context.capture)) {
+                    context.capture.* = .{};
+                    return error.ProtocolError;
+                }
+                defer {
+                    client.endAdminRpcPoisonCapture(context.capture);
+                    context.capture.lifecycle_raw = @backingInt(incident_publication_contract.AdminRpcPoisonCaptureLifecycle.finalized);
+                }
+                if (context.deadline) |bounded|
+                    return client.callUntil(context.method, context.params_json, bounded);
+                return client.call(context.method, context.params_json);
+            }
+        };
+        return self.withCurrent(
+            expected_generation,
+            Context{
+                .slot_addr = @intFromPtr(self),
+                .method = method,
+                .params_json = params_json,
+                .deadline = deadline,
+                .timestamp_ns = timestamp_ns,
+                .capture = capture,
+            },
+            Operation.run,
+        ) catch |err| {
+            // 원래 `callCurrent`·`callCurrentUntil` 과 같은 borrow 실패 사상을 지킨다.
+            if (deadline == null) return mapCurrentBorrowError(err);
+            return switch (err) {
+                error.Closed, error.Busy => error.AdminBusy,
+                error.InvalidOwner, error.GenerationMismatch, error.CounterExhausted => error.ProtocolError,
+            };
+        };
+    }
+
     pub fn ingestCurrentReadableEvidence(
         self: *ClientSlot,
         expected_generation: u64,

@@ -415,6 +415,96 @@ const RuntimeConnection = union(enum) {
     generation: *host_adapter_mod.HostAdapter,
 };
 
+/// Blocking admin RPC(`runtime.spawn_full`·`host.info`·`runtime.get`)의 poison 을 capture 로 받아 operation 밖에서
+/// canonical port 로 게시한다(CR0b caller 8·9). 이 RPC 들은 prepared execution capture 도 read pump capture 도
+/// 없는 plain `Client.call`/`callUntil` 이라, capture 없이 응답을 읽다 EOF 를 먼저 만나면 사유만 latch 되고
+/// `publishCanonical` 이 그 Client 를 영영 거절한다 — 재접속 admission 이 생기지 않는다. 2026-10-22: host 가 끊은
+/// 직후 새 탭을 열면 이 상태가 된다는 것을 임시 판정자로 실측했다(`incident_seq=0 admissions=0`).
+fn publishAdminRpcPoisonCapture(
+    adapter: *host_adapter_mod.HostAdapter,
+    capture: *const incident_publication_contract.AdminRpcPoisonCapture,
+    timestamp: app_process_incident_owner.PublicationTimestampReceipt,
+) client_mod.ClientError!void {
+    if (capture.self_addr != @intFromPtr(capture) or
+        capture.timestamp_ns != timestamp.timestamp_ns or
+        capture.source_site_raw != @backingInt(connection_incident.SourceSite.client_response) or
+        capture.reason_present_raw != 1 or
+        std.enums.fromInt(client_poison.ConnectionReason, capture.reason_raw) == null or
+        capture.lifecycle_raw != @backingInt(incident_publication_contract.AdminRpcPoisonCaptureLifecycle.finalized) or
+        capture.client_addr != @intFromPtr(adapter.slot.logicalClient()))
+        return error.ProtocolError;
+    var prepared: incident_publication_contract.PreparedManagedPoison = .{};
+    adapter.prepareManagedPoisonRequest(capture.timestamp_ns, .{
+        .reason_raw = capture.reason_raw,
+        .source_site_raw = capture.source_site_raw,
+    }, &prepared) catch return error.ProtocolError;
+    _ = app_process_incident_owner.publishPreparedManagedPoison(
+        adapter,
+        &prepared,
+        timestamp,
+    ) catch return error.ProtocolError;
+}
+
+/// capture 한 사유를 게시하고, 게시하지 못하면 옛 동작(latch·fd close)으로 되돌린다. 어느 쪽이든 caller 는 **원래
+/// 오류를 그대로** 돌려준다 — `createTerm` 은 `ConnectionClosed`·`WriteFailed` 로 «host 가 죽었다» 를 판정해 host 를
+/// 내보내고 다시 띄우므로(`app_session/term.zig` 의 `remote_dead`), 여기서 오류를 `ProtocolError` 로 덮으면 그 회수가 꺼진다.
+fn settleAdminRpcPoisonCapture(
+    adapter: *host_adapter_mod.HostAdapter,
+    capture: *const incident_publication_contract.AdminRpcPoisonCapture,
+    timestamp: app_process_incident_owner.PublicationTimestampReceipt,
+) void {
+    publishAdminRpcPoisonCapture(adapter, capture, timestamp) catch
+        adapter.poisonAfterUnpublishedAdminCapture(capture.reason_raw);
+}
+
+/// 새 runtime spawn(`runtime.spawn_full`)을 admin poison capture 안에서 돈다. 반환 payload 는 `allocator` 소유다.
+pub fn spawnGenerationRuntimeWithManagedPoison(
+    adapter: *host_adapter_mod.HostAdapter,
+    allocator: std.mem.Allocator,
+    params_json: []const u8,
+) client_mod.ClientError![]u8 {
+    const timestamp = app_process_incident_owner.publicationTimestampReceipt() catch |err| {
+        if (builtin.is_test and err == error.InvalidOwner) return adapter.spawnRuntime(params_json);
+        return error.ProtocolError;
+    };
+    var capture: incident_publication_contract.AdminRpcPoisonCapture = .{};
+    const response = adapter.spawnRuntimeWithPoisonCapture(params_json, timestamp.timestamp_ns, &capture) catch |err| {
+        if (capture.reason_present_raw == 1) settleAdminRpcPoisonCapture(adapter, &capture, timestamp);
+        return err;
+    };
+    if (capture.reason_present_raw == 1) {
+        allocator.free(response);
+        settleAdminRpcPoisonCapture(adapter, &capture, timestamp);
+        return error.ConnectionClosed;
+    }
+    return response;
+}
+
+/// 복구 세션 활성화의 fresh evidence RPC(`host.info`·`runtime.get`)를 admin poison capture 안에서 돈다.
+pub fn adminCallUntilWithManagedPoison(
+    adapter: *host_adapter_mod.HostAdapter,
+    allocator: std.mem.Allocator,
+    method: []const u8,
+    params_json: ?[]const u8,
+    deadline: client_deadline.AbsoluteDeadline,
+) client_mod.DeadlineClientError![]u8 {
+    const timestamp = app_process_incident_owner.publicationTimestampReceipt() catch |err| {
+        if (builtin.is_test and err == error.InvalidOwner) return adapter.callUntil(method, params_json, deadline);
+        return error.ProtocolError;
+    };
+    var capture: incident_publication_contract.AdminRpcPoisonCapture = .{};
+    const response = adapter.callUntilWithPoisonCapture(method, params_json, deadline, timestamp.timestamp_ns, &capture) catch |err| {
+        if (capture.reason_present_raw == 1) settleAdminRpcPoisonCapture(adapter, &capture, timestamp);
+        return err;
+    };
+    if (capture.reason_present_raw == 1) {
+        allocator.free(response);
+        settleAdminRpcPoisonCapture(adapter, &capture, timestamp);
+        return error.ConnectionClosed;
+    }
+    return response;
+}
+
 fn mapGenerationInputError(err: @import("generation_transport.zig").InputError) client_mod.ClientError {
     return switch (err) {
         error.Busy => error.AdminBusy,
@@ -4221,7 +4311,7 @@ pub const RemoteRuntime = struct {
         // invalid_request로 거부하고 기존 runtime attach는 계속 v2로 가능하다.
         const spawn_resp = switch (connection) {
             .legacy => |client| try client.call("runtime.spawn_full", spawn_params),
-            .generation => |adapter| try adapter.spawnRuntime(spawn_params),
+            .generation => |adapter| try spawnGenerationRuntimeWithManagedPoison(adapter, allocator, spawn_params),
         };
         defer allocator.free(spawn_resp);
         self.runtime_id_hex = client_mod.extractRuntimeId(spawn_resp) orelse {
@@ -22255,6 +22345,204 @@ test "CR0b callDecoded 선행 ingest EOF는 canonical suffix와 reconnect admiss
         );
         try testing.expectEqual(
             @backingInt(connection_incident.SourceSite.client_read),
+            pre_publication.source_site_raw,
+        );
+
+        const published = adapter.slot.logicalClientConst();
+        try testing.expectEqual(expected_reason, published.first_poison_reason.?);
+        try testing.expect(published.first_incident_id.sequence != 0);
+        try testing.expect(published.unusable);
+        try testing.expectEqual(@as(c.fd_t, -1), published.fd);
+        try testing.expectEqual(@as(u8, 1), owner.reconnect_admissions.count);
+        const admission = (try owner.reconnect_admissions.peek()).?;
+        try testing.expectEqual(published.first_incident_id, admission.incident_id);
+        try owner.reconnect_admissions.consume(admission);
+        app_process_incident_owner.publication_port_testing_api.reset();
+        const shutdown = try owner.shutdown();
+        owner_settled = true;
+        try testing.expectEqual(@import("incident_runtime.zig").ShutdownResult.joined, shutdown);
+    }
+}
+
+test "CR0b admin spawn 응답 EOF는 canonical suffix와 reconnect admission을 남긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |fully_closed| {
+        const Pool = @import("host_pool.zig").HostPool(host_adapter_mod.HostAdapter);
+        try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+        const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse
+            return error.TestUnexpectedResult;
+
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
+        const owner_fd = c.dup(tmp.dir.handle);
+        if (owner_fd < 0) return error.TestUnexpectedResult;
+        defer _ = c.close(owner_fd);
+        var owner: app_process_incident_owner.AppProcessIncidentOwner = .{};
+        try owner.ensureReady(testing.allocator, owner_fd, identity.process_nonce, 0xC0E2 + @as(u64, @intFromBool(fully_closed)));
+        var owner_settled = false;
+        defer if (!owner_settled) {
+            app_process_incident_owner.publication_port_testing_api.reset();
+            _ = owner.shutdown() catch {};
+        };
+        try app_process_incident_owner.publication_port_testing_api.install(&owner);
+
+        var fds: [2]c.fd_t = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        var peer_open = true;
+        defer if (peer_open) {
+            _ = c.close(fds[1]);
+        };
+        // host 가 frame 하나를 반쯤 보낸 채 연결을 닫았다(2026-10-22 partial_write_stalled). read pump 도 RPC 도 돌지
+        // 않은 채 admin RPC 가 응답을 읽으며 EOF 를 처음 만난다. peer 의 read half 는 열어 두어 request write 는 성공한다.
+        const wire = try framing.encodeFrame(testing.allocator, .{ .kind = .event, .stream_id = 7 }, "{\"event\":\"runtime.ended\"}");
+        defer testing.allocator.free(wire);
+        const partial = wire.len / 2;
+        try testing.expectEqual(@as(isize, @intCast(partial)), c.write(fds[1], wire.ptr, partial));
+        if (fully_closed) {
+            // host 프로세스가 죽거나 close 한 모양 — 첫 관측자는 응답 read 가 아니라 request write 다.
+            _ = c.close(fds[1]);
+            peer_open = false;
+        } else try testing.expectEqual(@as(c_int, 0), c.shutdown(fds[1], 1));
+
+        var pool = Pool.init(testing.allocator);
+        defer pool.deinit();
+        const adapter = try testing.allocator.create(host_adapter_mod.HostAdapter);
+        var pool_owns = false;
+        errdefer if (!pool_owns) testing.allocator.destroy(adapter);
+        var source: client_mod.Client = .{
+            .allocator = testing.allocator,
+            .fd = fds[0],
+            .host_id = 0xC0E3 + @as(u128, @intFromBool(fully_closed)),
+            .wire_major = protocol.version_major,
+            .screen_codec_version = screen_stream.codec_version,
+            .parser = framing.FrameParser.init(testing.allocator),
+            .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+        };
+        var permit: maru.observability.incident_binding_contract.PreparedHostPublication = .{};
+        try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
+        try host_adapter_mod.HostAdapter.initManagedInPlace(adapter, testing.allocator, &source, &permit);
+        pool.commitOwnedPublication(adapter, &permit);
+        pool_owns = true;
+
+        const expected_reason: client_poison.ConnectionReason = if (fully_closed) .outbound_write_ambiguous else .frame_malformed;
+        var pre_publication: app_process_incident_owner.publication_port_testing_api.PrePublicationSnapshot = .{};
+        app_process_incident_owner.publication_port_testing_api.armPrePublicationSnapshot(&pre_publication);
+        defer app_process_incident_owner.publication_port_testing_api.disarmPrePublicationSnapshot();
+
+        // 원래 오류를 그대로 돌려준다 — `createTerm` 은 `WriteFailed`·`ConnectionClosed` 로 host 교체를 판정한다.
+        try testing.expectError(
+            if (fully_closed) error.WriteFailed else error.ProtocolError,
+            spawnGenerationRuntimeWithManagedPoison(adapter, testing.allocator, "{}"),
+        );
+
+        try testing.expect(pre_publication.observed);
+        try testing.expect(!pre_publication.first_reason_present);
+        try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
+        try testing.expectEqual(@backingInt(expected_reason), pre_publication.reason_raw);
+        try testing.expectEqual(
+            @backingInt(connection_incident.SourceSite.client_response),
+            pre_publication.source_site_raw,
+        );
+
+        const published = adapter.slot.logicalClientConst();
+        try testing.expectEqual(expected_reason, published.first_poison_reason.?);
+        try testing.expect(published.first_incident_id.sequence != 0);
+        try testing.expect(published.unusable);
+        try testing.expectEqual(@as(c.fd_t, -1), published.fd);
+        try testing.expectEqual(@as(u8, 1), owner.reconnect_admissions.count);
+        const admission = (try owner.reconnect_admissions.peek()).?;
+        try testing.expectEqual(published.first_incident_id, admission.incident_id);
+        try owner.reconnect_admissions.consume(admission);
+        app_process_incident_owner.publication_port_testing_api.reset();
+        const shutdown = try owner.shutdown();
+        owner_settled = true;
+        try testing.expectEqual(@import("incident_runtime.zig").ShutdownResult.joined, shutdown);
+    }
+}
+
+test "CR0b admin callUntil 응답 EOF는 canonical suffix와 reconnect admission을 남긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |fully_closed| {
+        const Pool = @import("host_pool.zig").HostPool(host_adapter_mod.HostAdapter);
+        try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+        const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse
+            return error.TestUnexpectedResult;
+
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
+        const owner_fd = c.dup(tmp.dir.handle);
+        if (owner_fd < 0) return error.TestUnexpectedResult;
+        defer _ = c.close(owner_fd);
+        var owner: app_process_incident_owner.AppProcessIncidentOwner = .{};
+        try owner.ensureReady(testing.allocator, owner_fd, identity.process_nonce, 0xC0E4 + @as(u64, @intFromBool(fully_closed)));
+        var owner_settled = false;
+        defer if (!owner_settled) {
+            app_process_incident_owner.publication_port_testing_api.reset();
+            _ = owner.shutdown() catch {};
+        };
+        try app_process_incident_owner.publication_port_testing_api.install(&owner);
+
+        var fds: [2]c.fd_t = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        var peer_open = true;
+        defer if (peer_open) {
+            _ = c.close(fds[1]);
+        };
+        // host 가 frame 하나를 반쯤 보낸 채 연결을 닫았다(2026-10-22 partial_write_stalled). read pump 도 RPC 도 돌지
+        // 않은 채 admin RPC 가 응답을 읽으며 EOF 를 처음 만난다. peer 의 read half 는 열어 두어 request write 는 성공한다.
+        const wire = try framing.encodeFrame(testing.allocator, .{ .kind = .event, .stream_id = 7 }, "{\"event\":\"runtime.ended\"}");
+        defer testing.allocator.free(wire);
+        const partial = wire.len / 2;
+        try testing.expectEqual(@as(isize, @intCast(partial)), c.write(fds[1], wire.ptr, partial));
+        if (fully_closed) {
+            // host 프로세스가 죽거나 close 한 모양 — 첫 관측자는 응답 read 가 아니라 request write 다.
+            _ = c.close(fds[1]);
+            peer_open = false;
+        } else try testing.expectEqual(@as(c_int, 0), c.shutdown(fds[1], 1));
+
+        var pool = Pool.init(testing.allocator);
+        defer pool.deinit();
+        const adapter = try testing.allocator.create(host_adapter_mod.HostAdapter);
+        var pool_owns = false;
+        errdefer if (!pool_owns) testing.allocator.destroy(adapter);
+        var source: client_mod.Client = .{
+            .allocator = testing.allocator,
+            .fd = fds[0],
+            .host_id = 0xC0E5 + @as(u128, @intFromBool(fully_closed)),
+            .wire_major = protocol.version_major,
+            .screen_codec_version = screen_stream.codec_version,
+            .parser = framing.FrameParser.init(testing.allocator),
+            .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+        };
+        var permit: maru.observability.incident_binding_contract.PreparedHostPublication = .{};
+        try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
+        try host_adapter_mod.HostAdapter.initManagedInPlace(adapter, testing.allocator, &source, &permit);
+        pool.commitOwnedPublication(adapter, &permit);
+        pool_owns = true;
+
+        const expected_reason: client_poison.ConnectionReason = if (fully_closed) .response_correlation_lost else .frame_malformed;
+        var pre_publication: app_process_incident_owner.publication_port_testing_api.PrePublicationSnapshot = .{};
+        app_process_incident_owner.publication_port_testing_api.armPrePublicationSnapshot(&pre_publication);
+        defer app_process_incident_owner.publication_port_testing_api.disarmPrePublicationSnapshot();
+
+        const deadline = try client_deadline.AbsoluteDeadline.after(testing.io, 5 * std.time.ns_per_s);
+        // 원래 오류를 그대로 돌려준다(복구 흐름의 실패 판정이 바뀌지 않는다).
+        if (adminCallUntilWithManagedPoison(adapter, testing.allocator, "host.info", "{}", deadline)) |response| {
+            testing.allocator.free(response);
+            return error.TestUnexpectedResult;
+        } else |err| try testing.expectEqual(
+            @as(client_mod.DeadlineClientError, if (fully_closed) error.WriteFailed else error.ConnectionClosed),
+            err,
+        );
+
+        try testing.expect(pre_publication.observed);
+        try testing.expect(!pre_publication.first_reason_present);
+        try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
+        try testing.expectEqual(@backingInt(expected_reason), pre_publication.reason_raw);
+        try testing.expectEqual(
+            @backingInt(connection_incident.SourceSite.client_response),
             pre_publication.source_site_raw,
         );
 

@@ -2135,7 +2135,7 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   `service aborted -> publisher released -> client released`, 넷째는 coordinator의 `ring evidence -> client committed -> pending unlock -> wake outcome ->
   publisher release -> client operation release` transcript와 Client operation prerequisite의 별도 `id -> key -> reason` store oracle을 함께 요구한다. 실패 행은 ring/pending/Client first fields 0,
   mutex 재획득, active lease 0, 같은 node operation 재사용을 함께 검증한다. repeat 두 행은 same-fingerprint aggregate-only 성공과
-  fingerprint mismatch의 ring/pending/Client mutation 0을 고정한다. 이 6개는 composite prerequisite일 뿐 suffix 10·managed caller 7 완료로 세지 않는다.
+  fingerprint mismatch의 ring/pending/Client mutation 0을 고정한다. 이 6개는 composite prerequisite일 뿐 suffix 10·managed caller 9 완료로 세지 않는다.
   publisher authority 7개와 exhaustion child 1개는 canonical child artifact 경로를 주입하는 CR0b 전용 runner에서만 완료 증거가 된다.
   일반 aggregate에서는 두 exhaustion entry가 의도적으로 skip되므로 aggregate green을 이 fail-stop 증거로 대체하지 않는다.
   별도 GUI incident owner prerequisite 4개는 final-address runtime+registry 설치, current/restore 역할의 동일 owner 재사용,
@@ -2153,7 +2153,7 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   runtime 수명 prerequisite 7개는 clean `joined|detached`와 `degraded_joined|degraded_detached`를 구분하며 writer failure 뒤
   정상 join도 degraded provenance를 보존한다. stopping 이후 injected clock 실패와 실제 completion poll 오류는 backing을 보존하는
   degraded detach로 닫는다.
-  여섯 번째 Client poison publication gate는 아래 33개 unique component와 boundary 1개, 총 34개를 Debug·ReleaseFast에서
+  여섯 번째 Client poison publication gate는 아래 35개 unique component와 boundary 1개, 총 36개를 Debug·ReleaseFast에서
   exact-count한다. 각 행은 제품 API를 직접 실행하며 같은 fixture helper의 별칭으로 개수를 채우지 않는다.
 
   | owner | exact test name |
@@ -2182,6 +2182,8 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   | caller 5 | `CR0b actual read event pump poison은 canonical suffix를 호출한다` |
   | caller 6 | `CR0b actual outbound RPC ambiguity는 canonical suffix를 호출한다` |
   | caller 7 | `CR0b callDecoded 선행 ingest EOF는 canonical suffix와 reconnect admission을 남긴다` |
+  | caller 8 | `CR0b admin spawn 응답 EOF는 canonical suffix와 reconnect admission을 남긴다` |
+  | caller 9 | `CR0b admin callUntil 응답 EOF는 canonical suffix와 reconnect admission을 남긴다` |
   | bootstrap 1 | `CR0b GUI current first는 managed adapter 전에 process owner를 한 번 설치한다` |
   | bootstrap 2 | `CR0b GUI restore first 뒤 current는 같은 process owner를 쓴다` |
   | bootstrap 3 | `CR0b GUI multiple window와 adapter는 process owner를 재사용한다` |
@@ -2201,8 +2203,8 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
 
   suffix 1은 ring/id/key 각 중간 stage의 실제 reconnect-admission probe가 0이고 reason store 뒤 exact 1임을 검증한다. 모든 이름의
   conjunction과 matrix는 closed case table과 exact executed-case count를 함께 assert한다. subprocess 3은 ring/id/key/reason 각 drift
-  injection stage의 distinct marker와 exact 4행을 고정한다. caller 2~7은 공용 facade를 직접 부르지 않고 이름에
-  적힌 실제 제품 trigger를 실행하며 boundary가 각 ingress의 canonical suffix caller exact 1과 reason-only caller 0을 고정한다.
+  injection stage의 distinct marker와 exact 4행을 고정한다. caller 2~9는 공용 facade를 직접 부르지 않는다. caller 2~7은 이름에
+  적힌 실제 제품 trigger를, caller 8·9는 제품 입구가 부르는 helper를 실행하며 boundary가 각 ingress의 canonical suffix caller exact 1과 reason-only caller 0을 고정한다.
   bootstrap 1~3은 실제 AppSession current/restore/multi-window entrypoint를 실행한다. bootstrap 4는 dedicated GUI child와 daemon
   child의 실제 bootstrap transcript를 함께 비교해 PID/process nonce/service nonce/첫 sequence domain 비공유를 증명한다. bootstrap 5는
   실제 AppHost termination entrypoint transcript로 ordinary Window/AppSession deinit의 revoke/shutdown/writer join 0, 마지막 AppSession
@@ -2252,13 +2254,20 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   EOF를 만나는 제품 ingress를 실행한다. partial frame 뒤 EOF(`frame_malformed`·`ProtocolError`)와 깨끗한 EOF(`connection_eof`·
   `ConnectionClosed`) 두 경우 모두 caller 5와 같은 `SourceSite.client_read` read capture가 사유를 받고, pre-publication 시점의 first
   reason은 비어 있으며, ingest unwind 뒤 canonical first incident·fd close와 reconnect admission을 exact 1회 게시한다.
+  caller 8·9 gate는 제품 입구(`RemoteRuntime` spawn·`activateRecoveredSessionAt`)가 부르는 helper인
+  `spawnGenerationRuntimeWithManagedPoison`(`runtime.spawn_full`)과 `adminCallUntilWithManagedPoison`(`host.info`)을 직접 실행한다.
+  입구→helper 배선은 CR0b 경계의 글자 판정(호출 자리 exact 1·2와 capture 없는 옛 입구 제품 호출 0)이 고정한다. 응답을 읽다
+  partial frame 뒤 EOF를 만나는 경우(`frame_malformed`)와 peer가 완전히 닫혀 request write가 먼저 실패하는 경우를 함께 돈다.
+  `ClientSlot` operation 안에서만 결속한 `AdminRpcPoisonCapture`가 blocking `poison`·deadline `poisonWithOps`의 사유를 받고
+  (`SourceSite.client_response`, controller generation 0), pre-publication 시점의 first reason은 비어 있으며, operation이 풀린 뒤
+  canonical first incident·fd close와 reconnect admission을 exact 1회 게시한다.
   선행 publication-port substrate는 GUI owner bootstrap 성공 뒤 final owner 주소만 keyed seal로 게시하고, current owner thread의 timestamp
   조회만 허용하며 foreign thread와 termination revoke 뒤 조회를 graph 역참조 전에 거부한다. raw registry/runtime pointer는 port에 없다.
   reconnect admission owner prerequisite 2개는 fixed-cap 64 inline final-address row와 pointer-free projection으로 first reconnect
   event의 exact-once admit/consume, duplicate generation·repeat·no-retry mutation 0을 닫는다. app-process publication owner가 admission
   capacity를 publication 전에 preflight하고 first publication·terminalization·fd close 뒤 no-fail admit한다. repeat는 admission을 늘리지 않는다.
 
-  33개 component count와 아래 내부 공격 행 count는 별도다. 복합 component의 closed table은 exact 다음 행만 포함한다:
+  35개 component count와 아래 내부 공격 행 count는 별도다. 복합 component의 closed table은 exact 다음 행만 포함한다:
 
   | component | exact 내부 행 |
   | --- | --- |

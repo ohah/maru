@@ -500,6 +500,26 @@ pub const Provider = struct {
     changed: [max_changed]ByteRange = undefined,
     changed_len: u8 = 0,
     changed_all: bool = true,
+    /// 판정자 관측(누적) — 편집 한 번이 트리에서 무엇을 했나를 시간 없이 센다(계획 editor-edit-frame-cost EW0).
+    stats: Stats = .{},
+
+    pub const Stats = struct {
+        /// `symbolsChecked` 가 걸은 노드 · `foldSpans` 가 걸은 노드.
+        symbol_nodes: u64 = 0,
+        fold_nodes: u64 = 0,
+        /// `spansForRange` 를 부른 수 · 물은 범위의 byte 합 · 돌려준 조각 수 · 그 가운데 **물은 범위와 겹치지 않는** 조각 수(범위와 겹치는
+        /// 매치의 다른 캡처 — `ts_query_cursor_set_byte_range` 는 겹치는 매치를 통째로 돌려준다, `api.h`).
+        query_calls: u64 = 0,
+        query_bytes: u64 = 0,
+        query_spans: u64 = 0,
+        query_spans_outside: u64 = 0,
+    };
+
+    /// 지금 트리의 노드 수(`ts_node_descendant_count` — 뿌리 포함). 트리가 없으면 0. 판정자가 「트리 전체를 걸었나」를 견준다.
+    pub fn nodeCount(self: *const Provider) u64 {
+        const tree = self.tree orelse return 0;
+        return c.ts_node_descendant_count(c.ts_tree_root_node(tree));
+    }
     /// 문서 하나를 맡는다. **§5.3의 `init(문서 bytes, 언어)` 그대로다** — 언어만 받고 내용을
     /// 나중에 넣는 형태였다가 계약에 맞췄다(이름과 인자가 계약과 갈리면 문서를 읽고 코드를 찾는
     /// 사람이 두 번 헤맨다).
@@ -777,6 +797,7 @@ pub const Provider = struct {
 
         while (true) {
             const node = c.ts_tree_cursor_current_node(&cursor);
+            self.stats.symbol_nodes += 1;
             const sb = c.ts_node_start_byte(node);
             while (depth > 0 and stack[depth - 1] <= sb) depth -= 1;
 
@@ -1016,6 +1037,7 @@ pub const Provider = struct {
         // 중첩이 깊은 파일에서 스택이 터지면 그것은 편집기가 죽는 것이다(§5.3의 "적대적일 수 있다").
         while (true) {
             const node = c.ts_tree_cursor_current_node(&cursor);
+            self.stats.fold_nodes += 1;
             const sp = c.ts_node_start_point(node);
             var ep = c.ts_node_end_point(node);
             // **열 0 에서 끝나는 노드는 그 줄을 갖지 않는다** — 끝이 다음 줄 머리인 노드(Markdown `section`·Scala 3 들여쓰기 블록)를 그대로
@@ -1077,6 +1099,12 @@ pub const Provider = struct {
         const tree = self.tree orelse return;
         const query = queryFor(self.slot) orelse return;
         collect(allocator, tree, query, source, range, out);
+        self.stats.query_calls += 1;
+        self.stats.query_bytes += range.end -| range.start;
+        self.stats.query_spans += out.items.len;
+        for (out.items) |sp| if (sp.end <= range.start or sp.start >= range.end) {
+            self.stats.query_spans_outside += 1;
+        };
     }
 };
 

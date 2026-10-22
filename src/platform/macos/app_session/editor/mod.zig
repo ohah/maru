@@ -46298,6 +46298,133 @@ test "EM14 신선도 대조의 **모든 축**이 하중을 진다 — 하나만 
     }
 }
 
+/// EW0 판정자의 한 문서 — 열고 파싱을 끝낸 뒤 가운데로 스크롤하고, 편집 없는 프레임과 한 글자 편집 뒤 프레임이 트리에서 한 일을 센다.
+const EditCostCounts = struct {
+    nodes: u64,
+    doc_len: usize,
+    idle: syntax_mod.Provider.Stats,
+    edit: syntax_mod.Provider.Stats,
+    /// 편집이 새로 판 트리를 심볼 순회로 두 번, 접힘 순회로 한 번 걸은 시간(ns) — 출력만 한다(「차가운 첫 순회」 가설을 가른 값).
+    walk_ns: [3]u64,
+};
+
+fn editCostCounts(allocator: std.mem.Allocator, name: []const u8, data: []const u8) !EditCostCounts {
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, name, data);
+    const s = fx.session;
+    var rounds: usize = 0;
+    while (rounds < 10_000) : (rounds += 1) {
+        var d = appendPaneFrame(s, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+        if (!term.rt.editor_syntax.pending and rounds > 2) break;
+    }
+    // 가운데 줄로 스크롤하고 caret 을 그 줄 머리에 — 고정 머리줄이 설 자리다(가운데 줄은 함수 몸 안이다).
+    const mid_line = term.rt.editor_lines.len / 2;
+    term.rt.editor_first_line = mid_line;
+    const doc = term.rt.editorDocument().opened.?;
+    const at: u32 = @intCast((doc.file.lines.line(mid_line + 2) orelse return error.NoLine).start);
+    term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at, .focus = at };
+    for (0..3) |_| {
+        var d = appendPaneFrame(s, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    const prov = &(term.rt.editor_syntax.provider orelse return error.NoProvider);
+    const nodes = prov.nodeCount();
+    const st0 = prov.stats;
+    {
+        var d = appendPaneFrame(s, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    const st1 = term.rt.editor_syntax.provider.?.stats;
+    try testing.expect(insertText(s, term, " "));
+    var walk_ns: [3]u64 = undefined;
+    // 「차가운 첫 순회」 가설(계획 「귀속」 — 기각했다) — 편집이 새로 판 트리를 같은 순회로 두 번, 그다음 다른 순회로 걷는 시간을 잰다(단언하지
+    // 않는다 — 기계 속도에 달렸다). 아래 프레임의 관측값에 섞이지 않게 앞뒤 수를 되돌린다.
+    {
+        const pv = &term.rt.editor_syntax.provider.?;
+        const saved = pv.stats;
+        var syms: std.ArrayList(syntax_mod.Provider.Symbol) = .empty;
+        defer syms.deinit(allocator);
+        var folds: std.ArrayList(syntax_mod.Provider.FoldSpan) = .empty;
+        defer folds.deinit(allocator);
+        const t0 = std.Io.Clock.awake.now(s.io).nanoseconds;
+        try pv.symbolsChecked(allocator, &syms);
+        const t1 = std.Io.Clock.awake.now(s.io).nanoseconds;
+        try pv.symbolsChecked(allocator, &syms);
+        const t2 = std.Io.Clock.awake.now(s.io).nanoseconds;
+        try pv.foldSpans(allocator, &folds);
+        const t3 = std.Io.Clock.awake.now(s.io).nanoseconds;
+        walk_ns = .{ @intCast(t1 - t0), @intCast(t2 - t1), @intCast(t3 - t2) };
+        pv.stats = saved;
+    }
+    {
+        var d = appendPaneFrame(s, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    const st2 = term.rt.editor_syntax.provider.?.stats;
+    const Sub = struct {
+        fn of(a: syntax_mod.Provider.Stats, b: syntax_mod.Provider.Stats) syntax_mod.Provider.Stats {
+            return .{
+                .symbol_nodes = b.symbol_nodes - a.symbol_nodes,
+                .fold_nodes = b.fold_nodes - a.fold_nodes,
+                .query_calls = b.query_calls - a.query_calls,
+                .query_bytes = b.query_bytes - a.query_bytes,
+                .query_spans = b.query_spans - a.query_spans,
+                .query_spans_outside = b.query_spans_outside - a.query_spans_outside,
+            };
+        }
+    };
+    return .{ .nodes = nodes, .doc_len = doc.file.content.len, .idle = Sub.of(st0, st1), .edit = Sub.of(st1, st2), .walk_ns = walk_ns };
+}
+
+test "EW0 [측정] 편집 한 번 뒤 프레임이 트리에서 하는 일 — 편집 없는 프레임은 트리를 걷지 않고, 한 글자 편집 뒤 프레임은 고정 머리줄의 심볼 순회와 접힘 승격이 **각각 트리 전체를 정확히 한 번** 걷는다(EW1·EW2 가 뒤집는다); 구문 색 질의는 보이는 범위만 묻고 범위 밖 조각을 받지 않는다 — 납작한 Zig·큰 struct 의 Zig·거대한 class 의 Swift (계획 editor-edit-frame-cost EW0)" {
+    // **재앙 감지선이다** — 지금 모양(편집마다 트리 전체 두 바퀴)을 고정한다. EW1(고정 머리줄)·EW2(접힘)가 그 단언을 「문서보다 자릿수로 작다」로
+    // 뒤집는다. 시간은 단언하지 않는다(계획 「원칙」) — 문서 크기만 출력한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // 납작한 문서(함수가 최상위에 늘어선다)·중첩 문서(큰 컨테이너 하나)·Swift 의 거대한 class.
+    var flat: std.ArrayList(u8) = .empty;
+    defer flat.deinit(allocator);
+    var nested: std.ArrayList(u8) = .empty;
+    defer nested.deinit(allocator);
+    try nested.appendSlice(allocator, "const Big = struct {\n");
+    for (0..3000) |i| {
+        var b: [160]u8 = undefined;
+        const f = try std.fmt.bufPrint(&b, "pub fn f{d}(a: u32) u32 {{\n    const x = a + {d};\n    return x * 2;\n}}\n", .{ i, i });
+        try flat.appendSlice(allocator, f);
+        try nested.appendSlice(allocator, "    ");
+        try nested.appendSlice(allocator, f);
+    }
+    try nested.appendSlice(allocator, "};\n");
+    // Swift 의 거대한 class 꼴(MaruAppHost.swift 가 이 모양이다) — 질의가 큰 노드에 걸린 패턴으로 범위 밖까지 모으는지 본다.
+    var swift: std.ArrayList(u8) = .empty;
+    defer swift.deinit(allocator);
+    try swift.appendSlice(allocator, "final class Big {\n");
+    for (0..3000) |i| {
+        var b: [200]u8 = undefined;
+        try swift.appendSlice(allocator, try std.fmt.bufPrint(&b, "    func f{d}(a: Int) -> Int {{\n        let x = a + {d}\n        return x * 2\n    }}\n", .{ i, i }));
+    }
+    try swift.appendSlice(allocator, "}\n");
+    for ([_]struct { name: []const u8, data: []const u8 }{ .{ .name = "flat.zig", .data = flat.items }, .{ .name = "nested.zig", .data = nested.items }, .{ .name = "nested.swift", .data = swift.items } }) |case| {
+        const r = try editCostCounts(allocator, case.name, case.data);
+        std.debug.print("\n[측정] EW0 {s} {d}KB 노드 {d}: 정지 프레임 심볼 {d}·접힘 {d}·질의 {d}회 {d}B | 편집 뒤 프레임 심볼 {d}·접힘 {d}·질의 {d}회 {d}B 조각 {d}(범위 밖 {d})\n", .{ case.name, r.doc_len / 1024, r.nodes, r.idle.symbol_nodes, r.idle.fold_nodes, r.idle.query_calls, r.idle.query_bytes, r.edit.symbol_nodes, r.edit.fold_nodes, r.edit.query_calls, r.edit.query_bytes, r.edit.query_spans, r.edit.query_spans_outside });
+        std.debug.print("[측정] EW0 {s} 편집 뒤 순회(출력만): 심볼 첫 {d}µs · 심볼 둘째 {d}µs · 접힘 {d}µs\n", .{ case.name, r.walk_ns[0] / 1000, r.walk_ns[1] / 1000, r.walk_ns[2] / 1000 });
+        // 편집 없는 프레임은 트리를 걷지 않는다(심볼·접힘은 version 이 같으면 다시 안 뽑는다).
+        try testing.expectEqual(@as(u64, 0), r.idle.symbol_nodes);
+        try testing.expectEqual(@as(u64, 0), r.idle.fold_nodes);
+        // 편집 뒤 프레임 — 지금은 둘 다 트리 전체를 **정확히 한 번**씩 걷는다(EW1·EW2 가 뒤집는다). 노드 수가 크다는 것부터 — 0 이면 아래가 공허하다.
+        try testing.expect(r.nodes > 50_000);
+        try testing.expectEqual(r.nodes, r.edit.symbol_nodes);
+        try testing.expectEqual(r.nodes, r.edit.fold_nodes);
+        // 구문 색 질의는 보이는 범위만 묻는다 — 한 프레임에 물은 byte 를 다 더해도 문서의 십분의 일이 안 되고, 범위와 겹치지 않는 조각을 돌려받지 않는다
+        // (큰 노드 하나에 든 문서 — Zig 의 큰 struct · Swift 의 거대한 class — 에서도).
+        try testing.expect(r.edit.query_calls > 0 and r.edit.query_spans > 0);
+        try testing.expect(r.edit.query_bytes * 10 < r.doc_len);
+        try testing.expectEqual(@as(u64, 0), r.edit.query_spans_outside);
+    }
+}
+
 test "[측정] 검색 강조가 프레임마다 문서 전체를 훑는 비용" {
     // **§5.1이 "아직 측정하지 않았다"고 적어 둔 값이다.** `buildFindMarks`는 dirty 게이트 없이
     // 매 프레임 돌아 **보이는 줄 전체 × 매치 전체**를 쓴다(`buildSelectionMarks`도 같은 모양이라

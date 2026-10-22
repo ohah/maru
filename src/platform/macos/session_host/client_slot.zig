@@ -13544,7 +13544,7 @@ pub const ClientSlot = struct {
             },
             Operation.run,
         ) catch |err| {
-            // 원래 `callCurrent`·`callCurrentUntil` 과 같은 borrow 실패 사상을 지킨다.
+            // capture 없는 원래 borrow 입구(blocking·deadline 판)와 같은 실패 사상을 지킨다.
             if (deadline == null) return mapCurrentBorrowError(err);
             return switch (err) {
                 error.Closed, error.Busy => error.AdminBusy,

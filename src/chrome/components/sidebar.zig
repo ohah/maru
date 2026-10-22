@@ -10,6 +10,7 @@ const draw = @import("../draw.zig");
 const props = @import("../props.zig");
 const tokens = @import("../tokens.zig");
 
+pub const header = @import("sidebar/header.zig");
 pub const published = @import("sidebar/published.zig");
 
 /// 이 컴포넌트가 그리는 레이어 — 사이드바(가장 아래 Z, 터미널 strip 왼쪽).

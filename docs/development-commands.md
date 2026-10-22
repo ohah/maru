@@ -1864,3 +1864,10 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 로컬 Homebrew에 `zls`가 있는 기기에서 기존 9개 실패가 재현됐고, 당시 CI 로그에서는
 같은 테스트가 실제 실행돼 통과했다. 원인은 설치된 서버가 발견돼 테스트 도중 신뢰 확인창이
 열린 것이었다. 이 차이를 키 입력이나 IME 제품 결함으로 단정하지 않는다.
+## Inspector 사이드바 상단 도구 검증
+
+`mise exec -- zig build test-inspector test-inspector-header-regressions test-inspector-sidebar-regressions macos-app-build -j2`로
+발행·배지/창 드래그·기존 카드 입력과 실제 앱을 준비한다. 빌드가 끝난 전체 bundle을 새 경로에 복사한 뒤
+`python3 tools/inspector-picker-app/run.py --app <고정 앱>/Contents/MacOS/maru-macos-app --output <새 경로> --sidebar-header --rounds 20`과
+`python3 tools/inspector-picker-app/verify_sidebar_header.py <같은 경로>`로 실제 callback·CLI·Metal 증거를 대조한다.
+`python3 tools/test-sidebar-header-adversarial.py`는 컴파일한 결함의 거부와 정상/동등/복원 대조군을 검사한다.

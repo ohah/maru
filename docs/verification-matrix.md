@@ -4801,3 +4801,56 @@ python3 tools/test-file-header-details-adversarial.py
 전체 로컬 green으로 표현하지 않는다. 집중 Debug **74+15**, Chrome UI **1,200**, 전체 경계와 문서 **11+4**
 재실행은 모두 exit 0이다(`/tmp/maru-header-details-gates.log`). ReleaseFast **74+15**도 통과했다
 (`/tmp/maru-header-details-releasefast.log`). 앱 빌드는 `/tmp/maru-header-details-third.log`에서 exit 0을 확인했다.
+
+## Inspector 사이드바 상단 버튼 판·검색
+
+`sidebar_header`는 실제 header pill·검색 밴드 및 접힘 rect를 발행한다.
+펼침은 검색/보기 옵션/새 workspace/토글/알림 5개, 접힘은 토글/알림 2개다.
+검색은 focus action이 있는 text이며 query·이름·알림 내용은 수집하지 않는다.
+root `0x5348000000000000` + 1 + Part(0 검색·1 옵션·2 새 workspace·3 토글·4 알림)로 CLI에서 구별한다.
+기존 셀 zone·배지 원/토글 잉크 우선순위는 기존 정책이 소유하며, 배지 원/숫자를 별도 node로 합성하지 않는다.
+고정 6-entry publication의 부분 상태는 노출하지 않고 비유한/잘못된 기하는 전체를 비운다.
+
+```sh
+mise exec -- zig build test-inspector test-chrome-ui test-inspector-header-regressions test-inspector-sidebar-regressions -j2
+python3 tools/inspector-picker-app/run.py --app <고정 앱>/Contents/MacOS/maru-macos-app --output <새 경로> --sidebar-header --rounds 20
+python3 tools/inspector-picker-app/verify_sidebar_header.py <같은 경로>
+python3 tools/test-sidebar-header-adversarial.py
+```
+
+| 회차 | 공격 가설·기대 결과 | 실제 |
+| --- | --- | --- |
+| 1 | 토글 Pick은 접지 않고 같은 좌표의 일반 클릭은 실제로 접는다 | 통과 |
+| 2 | 보기 옵션 Pick은 메뉴를 열지 않고 버튼을 선택한다 | 통과 |
+| 3 | 새 workspace Pick은 새 탭/대상을 만들지 않는다 | 통과 |
+| 4 | 알림 Pick은 알림 패널을 열지 않는다 | 통과 |
+| 5 | 독립 창의 검색 Pick은 입력 focus를 바꾸지 않는다 | 통과 |
+| 6 | 2× split·알림 1개 접힘 상태에는 토글/알림만 존재한다 | 통과 |
+| 7 | 2× 접힘 알림 9개의 알림 버튼 hand/Pick crosshair가 일치한다 | 통과 |
+| 8 | 2× 접힘 알림 10개에서도 토글 좌표가 owner 창을 따른다 | 통과 |
+| 9 | 2× 접힘 알림 20개에서 알림 rect는 9+ 표시를 포함한다 | 통과 |
+| 10 | 2× 독립 Inspector에서도 접힘 알림 선택은 원래 창/Follow를 유지한다 | 통과 |
+| 11 | Escape는 새 workspace hover를 선택으로 남기지 않는다 | 통과 |
+| 12 | Pick 재클릭은 알림 hover와 경계 강조를 지운다 | 통과 |
+| 13 | Paused의 Pick은 Live를 재개하고 검색을 읽기 전용 선택한다 | 통과 |
+| 14 | Pick 중 Pause는 보기 옵션 선택/메뉴 없이 취소한다 | 통과 |
+| 15 | 새 workspace 판의 정확한 오른쪽 끝은 half-open 경계 밖이다 | 통과 |
+| 16 | 음수 좌표에는 요소가 없고 native cursor는 arrow다 | 통과 |
+| 17 | 도구 창 hover는 토글의 owner 강조를 지운다 | 통과 |
+| 18 | 왼쪽 Inspector에서도 검색 cursor=text와 action을 같은 CLI tree로 읽는다 | 통과 |
+| 19 | 음수 hover 뒤에도 선택한 알림의 identity를 유지한다 | 통과 |
+| 20 | 도구 창 닫기·일반 토글로 접기·재열기 뒤 이전 선택/geometry는 폐기된다 | 통과 |
+
+실제 앱 **20/20**, 독립 판정 통과, CLI **432개**, PNG **64장**, 경계 변화 **7,232픽셀**.
+원본: `/tmp/maru-sidebar-header-e2e20/{manifest,verified}.json`.
+동결 앱 SHA256: `8bf9dcff292c2b65d8d57aa64a162bce4f144d488879b7f6281a7cb3b6f5902f`.
+실제 NSEvent callback·CLI·Metal chrome readback이며 물리 HID·WindowServer·실제 Retina/다중 모니터·native accessibility 검증은 아니다.
+Debug Inspector **76+16**, Chrome UI **1,202**, 기존 상단 glyph/pill·배지 원·접힘·검색·창 드래그 **14개**를 검사한다.
+상단 게이트는 제품 판정 9개와 공통 import 판정 5개를 합쳐 14개로 고정한다.
+처음 9로 등록해 생긴 개수 불일치는 수정했으며 실제 14개는 모두 통과했다(`/tmp/maru-sidebar-header-native-regressions.log`).
+기존 sidebar 입력 회귀 **14개**, artifact 대조군 **14개 테스트/이번 반례 26개**도 검사한다.
+컴파일 결함 **8/8 검출**, 정상·동등·복원 대조 통과: `/tmp/maru-sidebar-header-mutants-g47rea1q/manifest.json`.
+최종 커밋 기준 Debug Inspector **76+16**, Chrome UI **1,202**, header 회귀 **14**, sidebar 입력 회귀 **14**, 문서 **11+4**는
+`/tmp/maru-sidebar-header-final-focused.log`에서 exit 0이다. 전체 경계 재실행도 exit 0이다(`/tmp/maru-sidebar-header-final-boundaries.log`).
+ReleaseFast Inspector **76+16**는 `/tmp/maru-sidebar-header-releasefast.log`에서 exit 0이다.
+로컬 host 전체 suite는 이번 변경에서 재실행하지 않으며 원격 CI와 구분한다.

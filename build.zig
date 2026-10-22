@@ -2703,7 +2703,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_inspector_tests = b.addRunArtifact(inspector_tests);
     run_inspector_tests.setCwd(b.path("."));
-    run_inspector_tests.addArg("--maru-expect-passed=15");
+    run_inspector_tests.addArg("--maru-expect-passed=16");
     const inspector_step = b.step("test-inspector", "Verify live inspector UI, shared snapshot and CLI contracts");
     inspector_step.dependOn(&run_inspector_tests.step);
     if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_inspector_tests.step);
@@ -2724,6 +2724,20 @@ pub fn build(b: *std.Build) void {
     run_inspector_sidebar_regressions.setCwd(b.path("."));
     run_inspector_sidebar_regressions.addArg("--maru-expect-passed=14");
     b.step("test-inspector-sidebar-regressions", "Verify startup sidebar input, published picking and capture OOM regressions").dependOn(&run_inspector_sidebar_regressions.step);
+    const inspector_header_regressions = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{ "sidebar 헤더:", "알림 배지: 그려진 빨강 원", "notification badge circle vertically", "collapsed toggle: hover emits", "collapsed notification bell: hit-test", "isWindowDragRegion: only empty header", "사이드바 헤더 검색 줄이" },
+    });
+    const run_inspector_header_regressions = b.addRunArtifact(inspector_header_regressions);
+    run_inspector_header_regressions.setCwd(b.path("."));
+    // Nine product judges plus the five shared import judges are all counted.
+    run_inspector_header_regressions.addArg("--maru-expect-passed=14");
+    b.step("test-inspector-header-regressions", "Verify native header plates, badge arbitration, search and window dragging").dependOn(&run_inspector_header_regressions.step);
+    if (target.result.os.tag == .macos) {
+        inspector_step.dependOn(&run_inspector_header_regressions.step);
+        macos_only_test_step.dependOn(&run_inspector_header_regressions.step);
+    }
+
     // Module tests need their own root: imported modules do not contribute tests.
     const inspector_rules = addProjectTest(b, .{
         .root_module = maru_mod,

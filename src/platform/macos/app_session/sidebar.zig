@@ -144,6 +144,10 @@ pub const HeaderPlateRect = struct { x: f32, y: f32, w: f32, h: f32 };
 /// 단일 출처. 가로 중심 = 그려진 글리프 중심(`metal_frame.cellRasterIconCenterXPx`), 폭 = `headerIconHoverPlateWidthPx`,
 /// 세로 = `headerIconHoverPlateVertical`. 아이콘이 안 그려지는 폭(`header_icon_min_cols` 미만)이거나 아이콘이 아니면 null.
 pub fn headerIconHoverPlateRect(self: *const AppSession, region: chrome.components.sidebar.HeaderRegion) ?HeaderPlateRect {
+    return @import("inspector_sidebar_header.zig").plate(self, region);
+}
+
+pub fn rawHeaderIconHoverPlateRect(self: *const AppSession, region: chrome.components.sidebar.HeaderRegion) ?HeaderPlateRect {
     const center_x = headerIconCenterXPx(self, region) orelse return null;
     const w: f32 = @floatFromInt(headerIconHoverPlateWidthPx(self.cell_width_px));
     const plate = headerIconHoverPlateVertical(self);
@@ -195,6 +199,7 @@ pub fn headerRegionAt(self: *const AppSession, x_px: f64, y_px: f64) chrome.comp
     const sb = chrome.components.sidebar;
     const band = sidebarSearchBandTopPx(self);
     const zone = sb.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px, band);
+    if (zone == .search) return if (@import("inspector_sidebar_header.zig").searchContains(self, x_px, y_px)) .search else .none;
     if (self.sidebar_width_px == 0 or self.sidebar_header_height_px == 0) return zone;
     const icon_band_end: f64 = @floatFromInt(sb.headerSearchBandTop(self.sidebar_header_height_px, band, self.cell_height_px));
     if (!(y_px >= 0 and y_px < icon_band_end)) return zone; // 검색 줄 이하(·비유한)는 중립 판정 그대로

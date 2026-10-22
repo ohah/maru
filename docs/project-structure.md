@@ -681,6 +681,8 @@ actor coordinator가 전체 반영한다. 기존 모델 전용 `worker.zig`는 �
 - `src/chrome/components/dock_view_bar/published.zig`: 고정 배열의 도크 뷰 바 발행 tree.
 - `src/platform/macos/app_session/dock.zig`: 실제 뷰·동작 신원 및 paint/input의 도크 뷰 바 연결.
 
+- `src/chrome/components/sidebar/header.zig`: 사이드바 상단 버튼 판·검색의 고정 크기 중립 발행 tree.
+- `src/platform/macos/app_session/inspector_sidebar_header.zig`: 펼침/접힘 header 기하·paint/input/Inspector 연결.
 - `src/chrome/components/file_header/details.zig`: 실제 그린 breadcrumb·상태·충돌 버튼의 중립 발행 tree.
 - `src/platform/macos/app_session/inspector_file_header_details.zig`: 실제 DrawCell에서 rect를 수집하고 입력·cursor·Inspector와 연결.
 - `src/chrome/components/file_header.zig`: 파일 보기 모드 strip의 중립 발행 tree.

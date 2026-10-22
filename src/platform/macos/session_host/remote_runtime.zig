@@ -5800,6 +5800,49 @@ pub const RemoteRuntime = struct {
         return .reusable;
     }
 
+    /// `callDecoded` 가 새 request 를 쓰기 전에 readable RX 를 옮기는 단계도 read pump(`pumpDelta`)와 같은
+    /// managed capture 안에서 돈다. 이 단계는 소켓을 직접 읽으므로 EOF 를 read pump 보다 먼저 만날 수 있다.
+    /// capture 없이 만나면 `Client.poison` 이 사유만 latch 하고 incident 를 남기지 않는다. 그 뒤로는
+    /// `publishCanonical` 이 「사유는 있는데 incident 는 없는」 Client 를 거절해 reconnect admission 이 영영 생기지
+    /// 않는다. 2026-10-22 실측: host 가 partial_write_stalled 로 연결을 닫은 뒤 이 자리가 EOF 를 먼저 읽었고
+    /// (`client poison: reason=frame_malformed`, `captured` 줄 없음), GUI 는 50 분 넘게 재접속을 시도조차 하지 않았다.
+    fn ingestGenerationReadableEvidenceWithManagedPoison(
+        self: *RemoteRuntime,
+        adapter: *host_adapter_mod.HostAdapter,
+    ) client_mod.ClientError!void {
+        const generation = switch (self.currentGeneration().attachment) {
+            .legacy => return adapter.ingestRuntimeReadableEvidence(),
+            .generation => |*value| value,
+        };
+        const timestamp = app_process_incident_owner.publicationTimestampReceipt() catch |err| {
+            if (builtin.is_test and err == error.InvalidOwner) return adapter.ingestRuntimeReadableEvidence();
+            return error.ProtocolError;
+        };
+        var capture: incident_publication_contract.ReadPumpPoisonCapture = .{};
+        generation.armReadPumpPoisonCapture(
+            &capture,
+            timestamp.timestamp_ns,
+            self.currentGeneration().attachment.statePtr().controller_generation,
+        ) catch return error.ProtocolError;
+        adapter.ingestRuntimeReadableEvidence() catch |err| {
+            generation.disarmReadPumpPoisonCapture(&capture);
+            if (capture.reason_present_raw == 1) {
+                try self.publishReadPumpPoisonCapture(&capture, timestamp);
+                return err;
+            }
+            if (capture.reason_present_raw != 0 or capture.reason_raw != 0)
+                return error.ProtocolError;
+            return err;
+        };
+        generation.disarmReadPumpPoisonCapture(&capture);
+        if (capture.reason_present_raw == 1) {
+            try self.publishReadPumpPoisonCapture(&capture, timestamp);
+            return error.ConnectionClosed;
+        }
+        if (capture.reason_present_raw != 0 or capture.reason_raw != 0)
+            return error.ProtocolError;
+    }
+
     fn callDecoded(
         self: *RemoteRuntime,
         request: generation_contract.RuntimeRequest,
@@ -5810,7 +5853,7 @@ pub const RemoteRuntime = struct {
     ) client_mod.ClientError!void {
         switch (self.currentGeneration().connection) {
             .legacy => |client| try client.ingestReadableOutOfBandEvidence(),
-            .generation => |adapter| try adapter.ingestRuntimeReadableEvidence(),
+            .generation => |adapter| try self.ingestGenerationReadableEvidenceWithManagedPoison(adapter),
         }
         switch (RuntimeAttachment.preDecodeBufferedEvents(self)) {
             .proceed => {},
@@ -22130,4 +22173,93 @@ test "reconnect read fence: frozen image availability remains unknown" {
 }
 test "reconnect read fence: frozen screen and RPC preserve queued events" {
     try runFrozenReadFence(.public_reads);
+}
+
+test "CR0b callDecoded 선행 ingest EOF는 canonical suffix와 reconnect admission을 남긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const Pool = @import("host_pool.zig").HostPool(host_adapter_mod.HostAdapter);
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse
+        return error.TestUnexpectedResult;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
+    const owner_fd = c.dup(tmp.dir.handle);
+    if (owner_fd < 0) return error.TestUnexpectedResult;
+    defer _ = c.close(owner_fd);
+    var owner: app_process_incident_owner.AppProcessIncidentOwner = .{};
+    try owner.ensureReady(testing.allocator, owner_fd, identity.process_nonce, 0xC0D2);
+    var owner_settled = false;
+    defer if (!owner_settled) {
+        app_process_incident_owner.publication_port_testing_api.reset();
+        _ = owner.shutdown() catch {};
+    };
+    try app_process_incident_owner.publication_port_testing_api.install(&owner);
+
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    // 2026-10-22 실측의 모양: host 가 frame 하나를 반쯤 보낸 채 연결을 닫았다(partial_write_stalled).
+    // read pump 를 돌리지 않고 RPC 를 먼저 부르므로 EOF 는 `callDecoded` 의 선행 ingest 가 처음 만난다.
+    const wire = try framing.encodeFrame(testing.allocator, .{ .kind = .event, .stream_id = 7 }, "{\"event\":\"runtime.ended\"}");
+    defer testing.allocator.free(wire);
+    const partial = wire.len / 2;
+    try testing.expectEqual(@as(isize, @intCast(partial)), c.write(fds[1], wire.ptr, partial));
+    try testing.expectEqual(@as(c_int, 0), c.shutdown(fds[1], 1));
+
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+    const adapter = try testing.allocator.create(host_adapter_mod.HostAdapter);
+    var pool_owns = false;
+    errdefer if (!pool_owns) testing.allocator.destroy(adapter);
+    var source: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fds[0],
+        .host_id = 0xC0D3,
+        .wire_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .parser = framing.FrameParser.init(testing.allocator),
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+    };
+    var permit: maru.observability.incident_binding_contract.PreparedHostPublication = .{};
+    try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
+    try host_adapter_mod.HostAdapter.initManagedInPlace(adapter, testing.allocator, &source, &permit);
+    pool.commitOwnedPublication(adapter, &permit);
+    pool_owns = true;
+
+    var runtime: RemoteRuntime = undefined;
+    try initGenerationRuntimeForAdapter(&runtime, adapter);
+    defer deinitGenerationRuntimeForAdapter(&runtime);
+    var pre_publication: app_process_incident_owner.publication_port_testing_api.PrePublicationSnapshot = .{};
+    app_process_incident_owner.publication_port_testing_api.armPrePublicationSnapshot(&pre_publication);
+    defer app_process_incident_owner.publication_port_testing_api.disarmPrePublicationSnapshot();
+
+    try testing.expectError(error.ProtocolError, runtime.refreshObservation());
+
+    try testing.expect(pre_publication.observed);
+    try testing.expect(!pre_publication.first_reason_present);
+    try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
+    try testing.expectEqual(
+        @backingInt(client_poison.ConnectionReason.frame_malformed),
+        pre_publication.reason_raw,
+    );
+    try testing.expectEqual(
+        @backingInt(connection_incident.SourceSite.client_read),
+        pre_publication.source_site_raw,
+    );
+
+    const published = adapter.slot.logicalClientConst();
+    try testing.expectEqual(client_poison.ConnectionReason.frame_malformed, published.first_poison_reason.?);
+    try testing.expect(published.first_incident_id.sequence != 0);
+    try testing.expect(published.unusable);
+    try testing.expectEqual(@as(c.fd_t, -1), published.fd);
+    try testing.expectEqual(@as(u8, 1), owner.reconnect_admissions.count);
+    const admission = (try owner.reconnect_admissions.peek()).?;
+    try testing.expectEqual(published.first_incident_id, admission.incident_id);
+    try owner.reconnect_admissions.consume(admission);
+    app_process_incident_owner.publication_port_testing_api.reset();
+    const shutdown = try owner.shutdown();
+    owner_settled = true;
+    try testing.expectEqual(@import("incident_runtime.zig").ShutdownResult.joined, shutdown);
 }

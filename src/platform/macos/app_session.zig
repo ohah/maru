@@ -101681,6 +101681,59 @@ test "Live inspector picker consumes selection down up and rechecks published ge
     try std.testing.expect(!session.inspector.picking);
 }
 
+test "Live inspector sidebar sessions are read only and retire reordered Terms" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{ .abi_version = abi_version, .cols = 80, .rows = 24, .queue_capacity = 16, .command_kind = @backingInt(CommandKind.controlled_smoke) });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    try pane_ops.newTermInActivePane(session);
+    const pane = pane_ops.activePane(session);
+    sidebar_ops.reprojectSidebarIfRowLinesStale(session);
+    try std.testing.expect(sidebar_ops.sidebarPublicationCurrent(session));
+    inspector_ops.toggle(session);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const nodes = try inspector_ops.picker.nodes(session, arena.allocator());
+    var row: ?chrome.ui.inspection.Node = null;
+    var toggle: ?chrome.ui.inspection.Node = null;
+    for (nodes) |node| if (node.source == .sidebar) {
+        if (std.mem.eql(u8, node.role orelse "", "list_item") and row == null) row = node;
+        if (node.kind.len > 0 and std.mem.eql(u8, node.role orelse "", "button") and node.id % 2 == 1) toggle = node;
+    };
+    const target = row orelse return error.TestUnexpectedResult;
+    const collapse = toggle orelse return error.TestUnexpectedResult;
+    const before = pane.active_term;
+    inspector_ops.picker.toggle(session);
+    session.mouse(1, target.rect.x + 10, target.rect.y + target.rect.height / 2, 0, 0);
+    session.mouse(3, target.rect.x + 10, target.rect.y + target.rect.height / 2, 0, 0);
+    try std.testing.expectEqual(before, pane.active_term);
+    const key = chrome.ui.inspection.identity(target);
+    try std.testing.expectEqual(key, session.inspector.picker_selected.?);
+    // Equal-height rows can retain exactly the same indices after reordering.
+    // The live owner stamp, not the rectangle, must reject the old selection.
+    std.mem.swap(*Term, &pane.terms.items[0], &pane.terms.items[1]);
+    const stale = try inspector_ops.picker.nodes(session, arena.allocator());
+    try std.testing.expect(chrome.ui.inspection.resolve(stale, key) == null);
+    try sidebar_ops.rebuildSidebar(session);
+    const changed = try inspector_ops.picker.nodes(session, arena.allocator());
+    try std.testing.expect(chrome.ui.inspection.resolve(changed, key) == null);
+    // Restore through the same mutation path, then exercise the real row input.
+    std.mem.swap(*Term, &pane.terms.items[0], &pane.terms.items[1]);
+    try sidebar_ops.rebuildSidebar(session);
+    inspector_ops.close(session);
+    session.mouse(1, target.rect.x + 10, target.rect.y + target.rect.height / 2, 0, 0);
+    session.mouse(3, target.rect.x + 10, target.rect.y + target.rect.height / 2, 0, 0);
+    try std.testing.expectEqual(@as(usize, 0), pane.active_term);
+    session.mouse(1, collapse.rect.x + 10, collapse.rect.y + collapse.rect.height / 2, 0, 0);
+    session.mouse(3, collapse.rect.x + 10, collapse.rect.y + collapse.rect.height / 2, 0, 0);
+    try sidebar_ops.rebuildSidebar(session);
+    const collapsed = try inspector_ops.picker.nodes(session, arena.allocator());
+    for (collapsed) |node| if (node.source == .sidebar) try std.testing.expect(!std.mem.eql(u8, node.role orelse "", "list_item"));
+}
+
 test "Live inspector pane tabs share paint input and retire replaced publications" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;

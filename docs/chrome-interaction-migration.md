@@ -500,7 +500,7 @@ grid, static transform, animation, multi-touch, rich accessibility tree는 이 �
 
 ### 사이드바 Inspector 발행 범위
 
-일반 카드·그룹의 밴드 paint와 행 입력은 `components/sidebar/published.zig`의
+일반 카드·그룹·하위 세션 행과 접기 토글의 밴드 paint와 행 입력은 `components/sidebar/published.zig`의
 `Frame` geometry를 공유한다. Inspector는 같은 snapshot을 읽기 전용으로 투영한다.
 reorder preview는 위 drag 계약대로 canonical 입력 목록과 분리하므로 해당 기간에는
 카드 Inspector publication을 폐기한다. label·native accessibility adapter·reorder capability의

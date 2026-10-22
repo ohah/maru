@@ -9,7 +9,7 @@
   도구 버튼 활성화 → hover 경계 → 클릭 선택을 참고한다. 참조 코드는 복사하지 않는다.
 - `chrome.ui.inspection`은 paint/input이 소비하는 **발행된** `UiRectTree`를 읽는다.
   유효 clip과 좌표 변환을 적용하고 뒤에서부터 가장 위 요소를 고른다. disabled 요소도 읽을 수 있다.
-- 대상은 사이드바 상단 버튼 판·검색, 파일 헤더의 보기 mode·breadcrumb·상태·충돌 도구, pane 탭·닫기·추가·좌우 스크롤 버튼, 사이드바 workspace 카드·그룹·닫기 버튼, 상태바, 사이드바 scroll, pane divider, 표시 중인 파일·SCM·세션 도크의 발행 tree다.
+- 대상은 사이드바 상단 버튼 판·검색, 파일 헤더의 보기 mode·breadcrumb·상태·충돌 도구, pane 탭·닫기·추가·좌우 스크롤 버튼, 사이드바 workspace 카드·그룹·닫기 버튼과 하위 세션 행·접기 토글, 상태바, 사이드바 scroll, pane divider, 표시 중인 파일·SCM·세션 도크의 발행 tree다.
   미발행 chrome 영역, terminal cell, 웹 DOM은 미지원이며 `elements.coverage`에 명시한다.
   전체 앱의 완성된 component tree를 제공한다고 표현하지 않는다.
 - 각 node는 source + ID, parent ID, generation, kind/semantic role, 원래·보이는 rect,
@@ -83,8 +83,8 @@
   teardown epoch로 구분하며 주소 자체를 내보내지 않는다. 할당 실패는 예전 발행을 폐기한다.
 - 카드 reorder 중에는 paint의 preview 행과 입력의 canonical 행이 의도적으로 다르므로
   사이드바 카드 publication을 폐기하고 Inspector에서 제외한다. 기존 drag 경로를 유지한다.
-- 사용자 이름·경로 label을 복사하지 않는다. agent/recovered 행은 공유 geometry의 일부지만
-  이번 Inspector 카드·그룹 범위에서는 제외한다. 네이티브 accessibility 이관 완료를 뜻하지 않는다.
+- 사용자 이름·경로 label을 복사하지 않는다. 하위 세션 행·토글은 아래 절을 따른다. 원격 tmux pane 및 recovered 행은
+  Inspector 범위 밖이다. 네이티브 accessibility 이관 완료를 뜻하지 않는다.
 - pane 탭 바 확장은 아래 절을 따른다. 도크 뷰 바 확장은 아래 절을 따른다. 파일별 헤더는 아래 두 절을 따른다.
 - 이번 PR의 적대적 검증은 사용자 요청에 따라 최초 **5회 + 추가 5회, 누적 10회**다
   (기본 20회에 대한 이번 작업의 예외).
@@ -196,3 +196,25 @@
 - GUI Elements와 CLI는 같은 collector를 사용한다. 읽기 전용 Pick·Pause/Escape·owner backing pixels·독립 창·512-node 예산을 유지한다.
   실제 앱은 `tools/inspector-picker-app/run.py --sidebar-header --rounds 20`과 독립 `verify_sidebar_header.py`로 검사한다.
   기존 `MARU_COLLAPSE_SIDEBAR` fixture로 접힘·1자리/9+ 알림 폭을 재현한다. native accessibility 전체 이관은 포함하지 않는다.
+
+
+## 사이드바 하위 세션 행·접기 토글
+
+- 기존 `sidebar` source와 `published.rowId(slot)`을 유지한다. 카드의 직계 자식으로
+  `agent_toggle`은 button, `agent`는 list_item을 발행한다. 이 목록은 이름과 달리
+  터미널·웹·파일을 포함한 Term 목록이며, 표시 조건과 실제 클릭 의미는 [사이드바 목록](../sidebar-agent-list.md)을 따른다.
+- 실제 canonical 행의 rect/clip/action/cursor를 paint·일반 입력·Inspector가 공유한다.
+  토글의 semantic expanded는 실제 접힘 상태에서 만들며, Inspector tree 자체의 펼침 상태와 구분한다.
+  현재 CLI node는 기존 kind/role/action/enabled/cursor/geometry를 제공하며 제품의 활성 Term 표시 필드를 새로 합성하지 않는다.
+- 이름·cwd·브랜치·대화·native pointer는 수집하지 않는다. 원격 `agent_pane`·복구 후보와
+  세션 행의 닫기 glyph를 별도 node로 발행하는 것은 이 범위 밖이다. row Pick은 닫기 영역에서도 제품 action을 실행하지 않는다.
+- 같은 row index가 다른 Term을 가리키지 않게 live Tab/Pane/Term 순서·surface ID·pane teardown epoch·
+  활성 Term도 내부 signature로 검사한다. 주소는 현재 live 목록에서만 읽고 밖으로 내보내지 않는다.
+  새 Term·재정렬·pane 이동/제거·focus 변경 뒤 예전 선택은 폐기한다.
+- retained 사이드바의 기존 `reprojectSidebarIfRowLinesStale` paint 준비 경로는 높이가 같아도
+  publication 소유자가 바뀌었으면 canonical 행과 밴드를 갱신한다. 읽기 전용 collector에서 재발행하지 않는다.
+  reorder preview는 기존 정책대로 publication을 폐기한다. OOM과 첫 paint 전 fallback도 기존 계약을 따른다.
+- GUI와 CLI는 같은 collector, source/ID/generation과 owner 창 backing pixels를 쓴다.
+  Pick·Pause/Escape·분리 도구 창·512-node 예산을 유지한다.
+  실제 앱 검증은 `tools/inspector-picker-app/run.py --sidebar-sessions --rounds 20`과
+  독립 `verify_sidebar_sessions.py`를 사용한다. `MARU_FORCE_TAB_COUNT=3`은 기존 제품의 새 Term 경로를 사용한다.

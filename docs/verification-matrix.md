@@ -10,6 +10,14 @@
 제품 최종 빌드의 전체 후보창·픽셀 검증은 진행 중이다.
 계획과 산출물 범위: [명령 팔레트 IME](plans/command-palette-ime.md).
 
+## 호스트 언어 서버와 편집기 테스트 격리
+
+`test-editor-host-discovery-isolation`은 설치된 언어 서버의 신뢰 확인창이 키 입력·공유 찾기·
+늦은 응답 판정에 섞이지 않는지 검사한다. 셸 환경 검사는 fixture의 PATH와 명시 override를
+사용하고, 테스트 전용 관례 위치 탐색 설정은 중첩 후 원복된다. 제품의 서버 탐색·신뢰 정책은
+유지한다. opt-in 결함 주입 명령과 한계는 [개발 명령](development-commands.md#호스트-언어-서버와-편집기-테스트-격리)을 따른다.
+이 헤드리스 검증은 실제 AppKit·물리 IME·OS 후보창 검증을 대신하지 않는다.
+
 ## 여러 문서 닫기 계약
 
 `test-editor-multi-close-contract`는 두 로컬 파일이 있는 탭의 실제 닫기 요청과 확인 action으로

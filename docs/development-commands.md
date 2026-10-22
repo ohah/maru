@@ -1840,3 +1840,27 @@ mise exec -- zig build test-editor-multi-close-contract -Doptimize=ReleaseFast
 현재 다중 문서 확인창은 저장 명령이 아니다. 로그의 호출 시간은 헤드리스 진단값이며,
 AppKit 응답 지연이나 다중 파일 저장 성능의 실측값이 아니다. 상세 범위는
 [로컬 저장 계획](plans/editor-local-save-async.md#여러-문서-닫기-진입점-검증-2026-10-22)을 따른다.
+
+### 호스트 언어 서버와 편집기 테스트 격리
+
+```sh
+mise exec -- zig build test-editor-host-discovery-isolation -j2
+mise exec -- zig build test-editor-host-discovery-isolation -Doptimize=ReleaseFast -j2
+python3 tools/test-editor-host-discovery-isolation.py
+```
+
+첫 두 명령은 기존 실패 9개와 탐색 설정의 중첩 원복·override 대조군을 실행한다(행동 검사
+10개와 초기화 5개). LSP가 검사 대상이 아닌 키 입력·공유 찾기·늦은 응답 검사는 LSP를 끈다.
+LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 가짜 로그인 셸의 PATH를
+`/usr/bin:/bin`으로 시작해 저장소 훅이 추가한 서버만 발견한다. LSPE19의 Homebrew 등
+관례 위치 탐색 제한은 테스트 전용이며 이전 값을 원복한다. 제품의 PATH·관례 위치 탐색과
+신뢰 확인 동작은 바꾸지 않는다.
+
+마지막 명령은 격리 사본에 독립 Git 저장소를 만들고 실행 가능한 가짜 `zls`를 PATH 맨 앞에 둔 뒤 정상 대조군,
+격리 조건을 하나씩 제거한 결함 10개, 원복 대조군을 실행한다. 각 결함은 대상 테스트의
+실제 단언 실패로 판정하며 컴파일·선택 개수 오류를 검출 성공으로 세지 않는다. 신뢰 전에
+가짜 서버가 실행되면 실패한다. 결과와 소스 신원은 출력된 임시 경로에 보존한다.
+
+로컬 Homebrew에 `zls`가 있는 기기에서 기존 9개 실패가 재현됐고, 당시 CI 로그에서는
+같은 테스트가 실제 실행돼 통과했다. 원인은 설치된 서버가 발견돼 테스트 도중 신뢰 확인창이
+열린 것이었다. 이 차이를 키 입력이나 IME 제품 결함으로 단정하지 않는다.

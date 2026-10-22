@@ -6216,6 +6216,20 @@ pub fn build(b: *std.Build) void {
         run_multi_close.addArg("--maru-expect-passed=10");
         macos_only_test_step.dependOn(&run_multi_close.step);
     }
+    // 사용자 기기에 언어 서버가 있어도 입력 판정이 신뢰 확인창으로 새지 않아야 한다.
+    const discovery_isolation_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{ ".test.LSPE19 ", ".test.LSPE2 ", ".test.AC3 ", ".test.BR6 ", ".test.COL7 ", ".test.LATE3 ", ".test.shared editor view find adversarial R6 replacement ", ".test.shared editor view find adversarial R7 ", ".test.shared editor view find adversarial R1 ", ".test.host discovery fixture " },
+    });
+    const run_discovery_isolation = b.addRunArtifact(discovery_isolation_tests);
+    run_discovery_isolation.setCwd(b.path("."));
+    run_discovery_isolation.addArg("--maru-expect-tests=15");
+    run_discovery_isolation.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-host-discovery-isolation", "Run editor input and shell discovery independent of host language servers").dependOn(&run_discovery_isolation.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_discovery_isolation.addArg("--maru-expect-passed=15");
+        macos_only_test_step.dependOn(&run_discovery_isolation.step);
+    }
     const native_close_guard_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.DIRTY5 ", ".test.U1h ", ".test.U2k ", ".test.U2l ", ".test.C1a-9 " } });
     const run_native_close_guards = b.addRunArtifact(native_close_guard_tests);
     run_native_close_guards.setCwd(b.path("."));

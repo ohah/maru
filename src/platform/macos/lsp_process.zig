@@ -36,6 +36,18 @@ pub const Process = struct {
     }
 };
 
+// PATH 탐색 판정자는 사용자 기기의 Homebrew 설치와 독립적이어야 한다.
+// 제품은 이 상태를 읽지 않는다. 이전 값을 돌려줘 중첩 fixture도 원복할 수 있게 한다.
+const TestDiscovery = if (builtin.is_test) struct {
+    var fallback_search: bool = true;
+} else struct {};
+pub fn setFallbackSearchForTest(enabled: bool) bool {
+    if (!builtin.is_test) @compileError("test-only discovery configuration");
+    const previous = TestDiscovery.fallback_search;
+    TestDiscovery.fallback_search = enabled;
+    return previous;
+}
+
 /// `path`(사용자 셸 환경의 PATH — `tool_env.path()`), 그다음 통상 설치 위치
 /// (`git_locate.fallback_dirs`)에서 실행 파일을 찾는다(절대 경로 → `buf` 안). 없으면 `null`. `MARU_LSP_SERVER_OVERRIDE` 가 있으면 **그 경로를 이름과
 /// 무관하게** 쓴다 — 판정자가 가짜 서버를 끼우는 자리(하니스 전용; 제품 사용자가 켤 이유가 없다).
@@ -49,6 +61,9 @@ pub fn locate(exe: []const u8, path: []const u8, buf: []u8) ?[]const u8 {
     }
     if (std.mem.indexOfScalar(u8, exe, '/') != null) return null; // 이름표는 이름이다 — 경로를 받지 않는다
     var it = git_locate.candidates(path);
+    if (builtin.is_test) if (!TestDiscovery.fallback_search) {
+        it.fallback_pos = git_locate.fallback_dirs.len;
+    };
     var cand: [std.fs.max_path_bytes]u8 = undefined;
     while (nextCandidate(&it, exe, &cand)) |candidate| {
         if (!isExecutableFile(candidate)) continue;

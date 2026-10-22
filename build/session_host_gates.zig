@@ -511,6 +511,36 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr0b_call_decoded_ingest_poison_tests.addArg("--maru-expect-tests=1");
         run_cr0b_call_decoded_ingest_poison_tests.setCwd(b.path("."));
         session_host_cr0b_step.dependOn(&run_cr0b_call_decoded_ingest_poison_tests.step);
+        // 새 탭 spawn(`runtime.spawn_full`) 응답을 읽다 만난 EOF 도 admin poison capture 로 incident·reconnect admission 을 남긴다(caller 8).
+        const cr0b_admin_spawn_poison_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b admin spawn 응답 EOF는"},
+        });
+        const run_cr0b_admin_spawn_poison_tests = b.addRunArtifact(cr0b_admin_spawn_poison_tests);
+        run_cr0b_admin_spawn_poison_tests.addArg("--maru-expect-tests=1");
+        run_cr0b_admin_spawn_poison_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_admin_spawn_poison_tests.step);
+        // 복구 세션 활성화의 fresh evidence(`host.info`·`runtime.get`) 응답을 읽다 만난 EOF 도 admin poison capture 로 incident·reconnect admission 을 남긴다(caller 9).
+        const cr0b_admin_call_until_poison_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_runtime.zig"),
+                .target = target,
+                .optimize = cr0b_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR0b admin callUntil 응답 EOF는"},
+        });
+        const run_cr0b_admin_call_until_poison_tests = b.addRunArtifact(cr0b_admin_call_until_poison_tests);
+        run_cr0b_admin_call_until_poison_tests.addArg("--maru-expect-tests=1");
+        run_cr0b_admin_call_until_poison_tests.setCwd(b.path("."));
+        session_host_cr0b_step.dependOn(&run_cr0b_admin_call_until_poison_tests.step);
         const cr0b_app_session_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/app_session.zig"),

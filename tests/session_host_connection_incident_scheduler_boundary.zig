@@ -189,12 +189,12 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn publicationTimestampReceipt("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub const publication_port_testing_api = if (@import(\"builtin\").is_test) struct"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn install(owner: *AppProcessIncidentOwner) Error!void"));
-    try std.testing.expectEqual(@as(usize, 6), count(remote_runtime, "app_process_incident_owner.publication_port_testing_api.install(&owner)"));
+    try std.testing.expectEqual(@as(usize, 8), count(remote_runtime, "app_process_incident_owner.publication_port_testing_api.install(&owner)"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub const PrePublicationSnapshot = PreparedPublicationSnapshot"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn armPrePublicationSnapshot("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn disarmPrePublicationSnapshot() void"));
-    try std.testing.expectEqual(@as(usize, 6), count(remote_runtime, "publication_port_testing_api.armPrePublicationSnapshot(&pre_publication)"));
-    try std.testing.expectEqual(@as(usize, 6), count(remote_runtime, "publication_port_testing_api.disarmPrePublicationSnapshot()"));
+    try std.testing.expectEqual(@as(usize, 8), count(remote_runtime, "publication_port_testing_api.armPrePublicationSnapshot(&pre_publication)"));
+    try std.testing.expectEqual(@as(usize, 8), count(remote_runtime, "publication_port_testing_api.disarmPrePublicationSnapshot()"));
     try std.testing.expectEqual(@as(usize, 1), count(app_session, "const incident_publication_port = session_host.app_process_incident_owner;"));
     try std.testing.expectEqual(@as(usize, 3), count(app_session, "incident_publication_port.publication_port_testing_api.driftSeal()"));
     try std.testing.expectEqual(@as(usize, 2), count(app_session, "incident_publication_port.publication_port_testing_api.reset()"));
@@ -243,15 +243,32 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     // read capture 게시 호출 자리: pumpDelta 의 실패·성공 두 갈래와 callDecoded 선행 ingest(caller 7)의 두 갈래.
     // 어느 한 갈래의 게시를 지우면 그 갈래의 EOF 는 incident 없이 남는다. 호출 자리 배선은 RX-first 판정자가 잰다.
     try std.testing.expectEqual(@as(usize, 4), count(remote_runtime, "try self.publishReadPumpPoisonCapture(&capture, timestamp);"));
-    try std.testing.expectEqual(@as(usize, 4), count(remote_runtime, "app_process_incident_owner.publicationTimestampReceipt()"));
-    try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "app_process_incident_owner.publishPreparedManagedPoison("));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "test \"CR0b admin spawn 응답 EOF는"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "test \"CR0b admin callUntil 응답 EOF는"));
+    // admin RPC(caller 8·9)도 capture 안에서 돈다 — 제품 입구가 capture 없는 옛 호출로 돌아가면 EOF 가 incident
+    // 없이 latch 돼 재접속이 영영 없다(2026-10-22 실측: 새 탭 spawn 이 `incident_seq=0 admissions=0`).
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, ".generation => |adapter| try spawnGenerationRuntimeWithManagedPoison(adapter, allocator, spawn_params),"));
+    try std.testing.expectEqual(@as(usize, 2), count(app_session, "session_host.remote_runtime.adminCallUntilWithManagedPoison(adapter, allocator, "));
+    // capture 없는 옛 admin 입구는 제품 어디서도 부르지 않는다 — remote_runtime 헬퍼의 test-only fallback 만 남는다.
+    inline for (.{ "adapter.callUntil(", "adapter.spawnRuntime(" }) |uncaptured| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExcept(allocator, uncaptured, "platform/macos/session_host/remote_runtime.zig"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "adapter.spawnRuntimeWithPoisonCapture("));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "adapter.callUntilWithPoisonCapture("));
+    try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const AdminRpcPoisonCapture = struct"));
+    // 가로채는 자리는 둘이다: blocking 경로의 `poison` 과 deadline 경로의 `poisonWithOps`.
+    try std.testing.expectEqual(@as(usize, 2), count(client, "if (self.captureAdminRpcPoison(reason)) return;"));
+    try std.testing.expectEqual(@as(usize, 6), count(remote_runtime, "app_process_incident_owner.publicationTimestampReceipt()"));
+    try std.testing.expectEqual(@as(usize, 4), count(remote_runtime, "app_process_incident_owner.publishPreparedManagedPoison("));
     try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "executeDecodedWithManagedPoison("));
     try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "self.currentGeneration().attachment.callDecoded("));
     try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const PreparedExecutionPoisonCapture = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const RegisteredOperationPoisonCapture = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const ReadPumpPoisonCapture = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const ReadPumpPoisonCaptureLifecycle = enum(u8)"));
-    try std.testing.expectEqual(@as(usize, 1), count(publication, "reason_present_raw: u8 = 0"));
+    // 사유 존재 비트는 raw 0(`connection_eof`)을 「없음」으로 읽지 않게 한다 — read pump 와 admin RPC capture 둘이 쓴다.
+    try std.testing.expectEqual(@as(usize, 2), count(publication, "reason_present_raw: u8 = 0"));
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn beginReadPumpPoisonCapture("));
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn endReadPumpPoisonCapture("));
     try std.testing.expectEqual(@as(usize, 1), count(client, "fn captureReadPumpPoison("));
@@ -359,7 +376,7 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
         try countProductSourcesExcept(allocator, "app_process_incident_owner.zig", "platform/macos/session_host/app_process_incident_owner.zig"),
     );
     try std.testing.expectEqual(
-        @as(usize, 8),
+        @as(usize, 10),
         try countProductSourcesExcept(allocator, "AppProcessIncidentOwner", "platform/macos/session_host/app_process_incident_owner.zig"),
     );
     try std.testing.expectEqual(

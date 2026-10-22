@@ -271,7 +271,7 @@ incident owner의 단일 facade가 handoff와 final `HostAdapter`를 다시 검�
 내부에서만 app-global publisher를 ephemeral borrow하고 coordinator를 호출한다. 제품 caller가 raw `Registry`·
 `ConnectionIncidentRuntime`·`IncidentOperationQuery`를 서로 조합하거나 adapter/Client에 publisher pointer를 저장하는 경로는 0이다.
 
-failure-site caller 2~7이 GUI `AppSession` 모듈을 역수입하거나 `GenerationAttachment`/`RemoteRuntime`에 publisher pointer를
+failure-site caller 2~9가 GUI `AppSession` 모듈을 역수입하거나 `GenerationAttachment`/`RemoteRuntime`에 publisher pointer를
 보관하지 않도록, app-process owner 모듈은 bootstrap이 완전히 성공한 뒤 final-address owner 주소를 PID/process nonce/thread와
 함께 process-sealed 단일 publication port에 게시한다. port는 owner shutdown admission 전에 revoke하며, 다른 주소·PID·thread,
 pristine/closing owner, replay된 handoff를 graph 역참조 전에 거부한다. failure-site는 port나 owner 주소를 보지 않고 operation 반환 뒤
@@ -321,6 +321,16 @@ caller 7의 선행 ingest는 `RemoteRuntime.callDecoded`가 새 request를 쓰�
 capture(`SourceSite.client_read`)를 그 구간에만 결속하고, ingest가 unwind된 뒤 같은 publication port로 게시한다. capture 없이
 만나면 `Client.poison`이 first reason만 latch하고 incident를 남기지 않는데, 그 Client는 이후 `publishCanonical`이
 first도 repeat도 아닌 것으로 거절해 reconnect admission이 영영 생기지 않는다(2026-10-22 실측: GUI가 50분 넘게 재접속하지 않음).
+
+caller 8·9는 blocking admin RPC다. 새 탭의 `runtime.spawn_full`(`spawnGenerationRuntimeWithManagedPoison`)과 복구 세션
+활성화의 `host.info`·`runtime.get`(`adminCallUntilWithManagedPoison`)은 prepared execution capture도 read pump capture도 없는
+plain `Client.call`/`callUntil`이다. 그래서 응답을 읽다 EOF를 먼저 만나면 caller 7과 같은 영구 정지에 빠졌다(2026-10-22 임시
+판정자 실측: `incident_seq=0 admissions=0`). `ClientSlot`이 현재 Client를 operation으로 붙든 동안만 `AdminRpcPoisonCapture`
+(`SourceSite.client_response`)를 결속하고, `Client.poison`·`poisonWithOps`는 latch 대신 사유만 싣는다. operation이 풀린 뒤
+RemoteRuntime이 같은 publication port로 게시한다. admin RPC에는 attachment가 없을 수 있어 controller generation은 0이다.
+read pump와 다른 점이 하나 있다: 게시가 실패하면 그 Client를 옛 동작대로 latch·close하고 **원래 오류를 그대로** 돌려준다.
+`createTerm`은 `ConnectionClosed`·`WriteFailed`로 «host가 죽었다»를 판정해 host를 내보내고 다시 띄우므로, 오류를 바꾸거나
+fd가 열린 반쪽 Client를 남기면 그 회수가 꺼진다.
 
 coordinator는 held Client contextual state로 first/repeat를 선택한다. caller가 kind boolean을 제출하지 않는다. pristine
 first fields만 `.first`, exact sealed repeat key와 같은 fingerprint만 `.repeat`이며, 다른 fingerprint는 mutation 0 typed reject다.

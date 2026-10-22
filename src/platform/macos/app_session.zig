@@ -5489,14 +5489,14 @@ pub const AppSession = struct {
             self.io,
             session_host.recovered_session_adopt.action_deadline_ns,
         ) catch return error.InvalidAuthority;
-        const host_info = try adapter.callUntil("host.info", "{}", action_deadline);
+        const host_info = try session_host.remote_runtime.adminCallUntilWithManagedPoison(adapter, allocator, "host.info", "{}", action_deadline);
         defer allocator.free(host_info);
         var runtime_id_buf: [32]u8 = undefined;
         _ = std.fmt.bufPrint(&runtime_id_buf, "{x:0>32}", .{row.runtime_id}) catch unreachable;
         var params_buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&params_buf, "{{\"runtime_id\":\"{s}\"}}", .{&runtime_id_buf}) catch
             return error.InvalidAuthority;
-        const runtime_info = try adapter.callUntil("runtime.get", params, action_deadline);
+        const runtime_info = try session_host.remote_runtime.adminCallUntilWithManagedPoison(adapter, allocator, "runtime.get", params, action_deadline);
         defer allocator.free(runtime_info);
         try session_host.recovered_session_adopt.validateFreshEvidence(allocator, row, .{
             .projection_generation = app_recovered_sessions_projection.generation,

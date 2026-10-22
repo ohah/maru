@@ -45,11 +45,13 @@ test "CR6b 경계는 projection을 직접 attach 권위로 쓰지 않고 fresh e
     try std.testing.expectEqual(@as(usize, 1), count(activation, "app_recovered_sessions_projection.consumeExactNoFail("));
     try std.testing.expectEqual(@as(usize, 1), count(ended_replacement, "app_recovered_sessions_projection.consumeExactNoFail("));
     try std.testing.expectEqual(@as(usize, 1), count(activation, "AbsoluteDeadline.after("));
-    try std.testing.expectEqual(@as(usize, 2), count(activation, "adapter.callUntil("));
+    // fresh evidence 는 deadline 이 걸린 admin RPC 둘이다. CR0b caller 9 의 poison capture 입구를 탄다 — 응답을 읽다 EOF 를
+    // 만나도 incident·재접속이 남는다(capture 없는 `adapter.callUntil(` 은 CR0b 경계가 제품 전체에서 0 으로 고정한다).
+    try std.testing.expectEqual(@as(usize, 2), count(activation, "remote_runtime.adminCallUntilWithManagedPoison(adapter, allocator, "));
     try std.testing.expectEqual(@as(usize, 0), count(activation, "adapter.call("));
-    const host_info_pos = std.mem.indexOf(u8, activation, "adapter.callUntil(\"host.info\"") orelse
+    const host_info_pos = std.mem.indexOf(u8, activation, "adminCallUntilWithManagedPoison(adapter, allocator, \"host.info\"") orelse
         return error.TestUnexpectedResult;
-    const runtime_get_pos = std.mem.indexOf(u8, activation, "adapter.callUntil(\"runtime.get\"") orelse
+    const runtime_get_pos = std.mem.indexOf(u8, activation, "adminCallUntilWithManagedPoison(adapter, allocator, \"runtime.get\"") orelse
         return error.TestUnexpectedResult;
     const evidence_pos = std.mem.indexOf(u8, activation, "recovered_session_adopt.validateFreshEvidence(") orelse
         return error.TestUnexpectedResult;

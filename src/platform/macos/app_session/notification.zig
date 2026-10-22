@@ -753,6 +753,10 @@ pub fn collapsedBellCol(self: *const AppSession) u16 {
 /// 종 **왼쪽 텍스트 배지**(안 읽음 1~9 는 한 칸, 10 이상은 「9+」 두 칸 — `cell_text.sidebarTextBadgeCols`)가 rect 왼쪽보다 더
 /// 나가면 왼쪽을 그 칸까지 넓힌다 — 예전엔 「9+」 의 「9」 가 rect 밖이라 그 글자를 누르면 창이 끌렸다(보이는 것 = 눌리는 것).
 pub fn collapsedNotificationRect(self: *const AppSession) ?chrome.draw.Rect {
+    return @import("inspector_sidebar_header.zig").collapsed(self, .notifications);
+}
+
+pub fn rawCollapsedNotificationRect(self: *const AppSession) ?chrome.draw.Rect {
     const bell = collapsedBellCol(self);
     var r = self.collapsedIconRect(bell, 3 * self.cell_width_px) orelse return null;
     const badge_cols = maru.cell_text.sidebarTextBadgeCols(self.notification_unread);

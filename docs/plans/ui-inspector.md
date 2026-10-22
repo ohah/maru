@@ -9,7 +9,7 @@
   도구 버튼 활성화 → hover 경계 → 클릭 선택을 참고한다. 참조 코드는 복사하지 않는다.
 - `chrome.ui.inspection`은 paint/input이 소비하는 **발행된** `UiRectTree`를 읽는다.
   유효 clip과 좌표 변환을 적용하고 뒤에서부터 가장 위 요소를 고른다. disabled 요소도 읽을 수 있다.
-- 대상은 파일 헤더의 보기 mode·breadcrumb·상태·충돌 도구, pane 탭·닫기·추가·좌우 스크롤 버튼, 사이드바 workspace 카드·그룹·닫기 버튼, 상태바, 사이드바 scroll, pane divider, 표시 중인 파일·SCM·세션 도크의 발행 tree다.
+- 대상은 사이드바 상단 버튼 판·검색, 파일 헤더의 보기 mode·breadcrumb·상태·충돌 도구, pane 탭·닫기·추가·좌우 스크롤 버튼, 사이드바 workspace 카드·그룹·닫기 버튼, 상태바, 사이드바 scroll, pane divider, 표시 중인 파일·SCM·세션 도크의 발행 tree다.
   미발행 chrome 영역, terminal cell, 웹 DOM은 미지원이며 `elements.coverage`에 명시한다.
   전체 앱의 완성된 component tree를 제공한다고 표현하지 않는다.
 - 각 node는 source + ID, parent ID, generation, kind/semantic role, 원래·보이는 rect,
@@ -117,7 +117,7 @@
 
 - `chrome.components.dock_view_bar.published.Frame`이 도크 상단의 뷰 전환 6개와
   현재 뷰의 동작 버튼(탐색기 새로고침·전체 접기)을 `dock_header` source로 제공한다.
-  파일별 mode 선택기는 아래 절을 따른다. breadcrumb·상태·충돌 도구는 아래 절을 따르며 sidebar 상단 도구는 후속 범위다.
+  파일별 mode 선택기는 아래 절을 따른다. breadcrumb·상태·충돌 도구는 아래 절을 따르며 sidebar 상단 도구는 아래 절을 따른다.
 - 기존 `slotRect`/`actionRect`가 셀 정렬 geometry를 준비한다. host paint의 활성/hover 밴드와
   일반 포인터 입력은 유효한 publication rect를 소비하고 CoreText glyph lowering은 기존 셀 경로를 유지한다.
   첫 paint 전이나 레이아웃 변경 직후에는 기존 계산으로 입력을 처리하며 Inspector에는 낡은 tree를 내보내지 않는다.
@@ -175,3 +175,24 @@
 - GUI Elements와 CLI `elements.nodes/tree/hovered/selected`는 같은 collector·source/ID/generation을 사용한다.
   읽기 전용 Pick·owner backing pixels·독립 창·Pause·Escape·512-node 예산을 유지한다.
   실제 앱 검증은 `tools/inspector-picker-app/run.py --file-details --rounds 20`과 독립 `verify_file_header_details.py`를 따른다.
+
+## 사이드바 상단 버튼 판·검색 발행
+
+- `chrome.components.sidebar.header.Frame`은 펼친 헤더의 검색·보기 옵션·새 workspace·사이드바 토글·알림 판을
+  `sidebar_header` source로 발행한다. 접힌 상태는 펼치기 토글·알림 두 개만 발행한다.
+  root ID는 `0x5348000000000000`, child는 root + 1 + Part(검색 0·보기 옵션 1·새 workspace 2·토글 3·알림 4)다.
+- 검색은 focus action이 있는 text/cursor=text, 아이콘은 action이 있는 button/cursor=press다.
+  계층용 root는 0 크기 group으로 빈 창 드래그 영역을 Pick 대상으로 만들지 않는다.
+  이름·검색어·workspace 문자열·알림 내용·native pointer를 복사하지 않는다.
+- `app_session/inspector_sidebar_header.zig`는 기존 header pill·접힘 rect·검색 밴드를 중립 rect로 옮긴다.
+  실제 header frame 수집 때 발행하며 아이콘/검색 DrawList 실패는 전체 발행을 폐기한다.
+  고정 6-entry buffer를 사용하므로 발행에 동적 할당이 없다. 잘못된/비유한 기하는 원자적으로 비우고 정상 frame에서 복구한다.
+- 펼친 아이콘의 기존 3셀 click zone·알림 배지 원형 판정·토글 잉크 우선순위는 기존 정책이 소유한다.
+  Inspector는 버튼 판 본체를 제공하며 배지 원/숫자를 별도 node로 합성하지 않는다.
+  일반 hover paint와 판 입력은 같은 발행 rect를 읽고, 검색 입력·접힘 토글/알림도 같은 발행 rect를 읽는다.
+  판의 clip은 아이콘 띠로 제한한다. 검색 밴드/창 드래그 여백을 새로 버튼 영역으로 넓히지 않는다.
+- geometry·접힘·검색 focus가 바뀌면 generation으로 이전 선택을 폐기한다. 첫 paint 전·상태 변경 직후에는
+  기존 기하로 입력하고 Inspector에는 낡은 발행을 보이지 않는다. 0-tab recovery chooser는 기존 Inspector 지원 범위 밖이다.
+- GUI Elements와 CLI는 같은 collector를 사용한다. 읽기 전용 Pick·Pause/Escape·owner backing pixels·독립 창·512-node 예산을 유지한다.
+  실제 앱은 `tools/inspector-picker-app/run.py --sidebar-header --rounds 20`과 독립 `verify_sidebar_header.py`로 검사한다.
+  기존 `MARU_COLLAPSE_SIDEBAR` fixture로 접힘·1자리/9+ 알림 폭을 재현한다. native accessibility 전체 이관은 포함하지 않는다.

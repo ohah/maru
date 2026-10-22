@@ -112,6 +112,7 @@ const build_options = @import("build_options"); // build.zig가 주입한 .versi
 const update_repo = "ohah/maru"; // GitHub releases/latest를 조회할 repo(인앱 새 버전 안내)
 pub const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 gesture 정책(OS-중립 L2 — session/keyhint_hold.zig). platform은 alias로 참조.
 const command_palette = @import("command_palette.zig");
+pub const inspector_sidebar_header_ops = @import("app_session/inspector_sidebar_header.zig");
 pub const inspector_file_header_details_ops = @import("app_session/inspector_file_header_details.zig");
 pub const inspector_file_header_ops = @import("app_session/inspector_file_header.zig");
 pub const inspector_tabs_ops = @import("app_session/inspector_tabs.zig");
@@ -6782,6 +6783,7 @@ pub const AppSession = struct {
     /// 채우고, buildSidebarDrawList가 순회, slotAt/click/hover가 표시 슬롯(row 인덱스)→원본 탭 역매핑(visibleTab =
     /// rows[i].card.tab)에 쓴다. 슬롯↔탭 단일 출처(인덱스 어긋남 방지). SG3a는 card row만(그룹 헤더는 SG3b).
     sidebar_rows: std.ArrayList(chrome.components.sidebar.Row) = .empty,
+    sidebar_header_publication: chrome.components.sidebar.header.Frame = .{},
     sidebar_publication: chrome.components.sidebar.published.Frame = .{},
     file_header_details: inspector_file_header_details_ops.State = .{},
     file_header_publication: chrome.components.file_header.Frame = .{},
@@ -22042,6 +22044,7 @@ pub const AppSession = struct {
                 status_bar_ops.collectStatusBarItems(self, &collected, pane_ops.paneFrameBuilder(self), sb_colors);
                 if (ft_on) ft_s2 = std.Io.Clock.awake.now(self.io).nanoseconds; // 상태바 끝 = 헤더/검색 시작
             }
+            inspector_sidebar_header_ops.publish(self);
             var sidebar_header_frame: ?renderer.RenderFrame = null;
             defer if (sidebar_header_frame) |*hf| hf.deinit(self.allocator);
             if (builtin.os.tag == .macos) {
@@ -22049,8 +22052,10 @@ pub const AppSession = struct {
                 // 아이콘 줄의 자리(`sidebarHeaderIconRowTopPx`)와 확대(cell-raster role)는 Zig 가 정해 싣는다 — 렌더러는
                 // 예전처럼 「origin (0,0) 이면 헤더」로 짐작하지 않는다.
                 if (sidebar_ops.buildSidebarHeaderDrawList(self, .icons)) |maybe_dl| {
-                    if (maybe_dl) |dl| self.collectShaped(&collected, dl, pane_ops.paneFrameBuilder(self), .sidebar_header);
-                } else |_| {}
+                    if (maybe_dl) |dl| self.collectShaped(&collected, dl, pane_ops.paneFrameBuilder(self), .sidebar_header) else inspector_sidebar_header_ops.invalidate(self);
+                } else |_| {
+                    inspector_sidebar_header_ops.invalidate(self);
+                }
                 // 검색 줄은 상단 바 밴드 중앙에 자기 origin으로 놓인다 — 오른쪽 pane 탭 바·도크 뷰 스위처와 한 줄로
                 // 맞추기 위해서다(docs/file-explorer.md §3.5). `row = 0` frame이라 py_top이 곧 이 origin이 된다.
                 if (sidebar_ops.buildSidebarHeaderDrawList(self, .search)) |maybe_dl| {
@@ -22058,8 +22063,10 @@ pub const AppSession = struct {
                         .origin_x = 0,
                         .origin_y = sidebar_ops.sidebarSearchGlyphOriginY(self),
                         .colors = .{ .default_fg = self.appearance.theme.foreground },
-                    } });
-                } else |_| {}
+                    } }) else if (!self.sidebar_collapsed) inspector_sidebar_header_ops.invalidate(self);
+                } else |_| {
+                    inspector_sidebar_header_ops.invalidate(self);
+                }
                 // 검색 줄 **텍스트**는 measured 경로다(🔍 아이콘만 위 셀 frame에 남는다). 폰트를 키워도 바 밴드를
                 // 넘치지 않게 하려는 것이 이 이관의 목적이다(docs/file-explorer.md §3.5).
                 sidebar_ops.collectSidebarSearchText(self, &collected, pane_ops.paneFrameBuilder(self));
@@ -24343,6 +24350,10 @@ pub const AppSession = struct {
     /// 폭은 **hover pill 과 같다**(`sidebar_ops.headerIconHoverPlateWidthPx` ≈2.6칸 — 접힌 pill 은 이 rect 를 그대로 그린다).
     /// 예전 2칸이면 보이는 pill 양옆 0.3칸이 hover 도 클릭도 안 됐다. 왼쪽 종 rect(3칸)와는 ≈0.2칸 떨어져 안 겹친다.
     pub fn collapsedToggleRect(self: *const AppSession) ?chrome.draw.Rect {
+        return inspector_sidebar_header_ops.collapsed(self, .toggle);
+    }
+
+    pub fn rawCollapsedToggleRect(self: *const AppSession) ?chrome.draw.Rect {
         // 글리프 중심 (col+0.5)·cw에 pill 폭 rect를 중앙 정렬(◧는 .m이 셀 중심 기준 1.7×로 키워 ≈[(col-0.35),(col+1.35)]·cw에
         // 그려지므로, col·cw부터 잡으면 0.5칸 우측으로 치우쳐 글리프 좌측이 안 눌린다 — code-review). collapsedIconRect 단일 출처.
         return self.collapsedIconRect(self.collapsedToggleCol(), sidebar_ops.headerIconHoverPlateWidthPx(self.cell_width_px));
@@ -101864,4 +101875,54 @@ test "Live inspector file header details share painted glyphs actions and owner 
     inspector_file_header_details_ops.finish(session);
     try std.testing.expect(session.file_header_details.frame.stamp == null);
     try std.testing.expect(inspector_file_header_details_ops.actionRect(session, band, .reload) != null);
+}
+
+// A changed published plate must reach real hover/input; a second inspector-only
+// geometry path would leave the original plate clickable and fail this judge.
+test "Live inspector sidebar header shares plate search collapsed state and retires selection" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    inspector_ops.toggle(session);
+    const c = chrome.components.sidebar.header;
+    inspector_sidebar_header_ops.publish(session);
+    try std.testing.expect(inspector_sidebar_header_ops.current(session));
+    try std.testing.expectEqual(@as(usize, 6), session.sidebar_header_publication.len);
+    const r = sidebar_ops.headerIconHoverPlateRect(session, .view_options).?;
+    const x: f64 = r.x + 0.25;
+    const y: f64 = @max(r.y, 0) + 0.25;
+    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.view_options, sidebar_ops.headerRegionAt(session, x, y));
+    const idx = session.sidebar_header_publication.snapshot().find(c.partId(.options)).?;
+    session.sidebar_header_publication.entries[idx].rect.x += 1;
+    try std.testing.expect(sidebar_ops.headerRegionAt(session, x, y) != .view_options);
+    inspector_sidebar_header_ops.publish(session);
+    const toggle = sidebar_ops.headerIconHoverPlateRect(session, .toggle_sidebar).?;
+    session.inspector.picking = true;
+    session.mouse(1, toggle.x + toggle.w / 2, toggle.y + toggle.h / 2, 0, 0);
+    session.mouse(3, toggle.x + toggle.w / 2, toggle.y + toggle.h / 2, 0, 0);
+    try std.testing.expect(!session.sidebar_collapsed);
+    const key = session.inspector.picker_selected.?;
+    try std.testing.expectEqual(chrome.ui.inspection.Source.sidebar_header, key.source);
+    try std.testing.expectEqual(c.partId(.toggle), key.id);
+    session.sidebar_search_active = true;
+    try std.testing.expect(!inspector_sidebar_header_ops.current(session));
+    inspector_sidebar_header_ops.publish(session);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    try std.testing.expect(chrome.ui.inspection.resolve(try inspector_ops.picker.nodes(session, arena.allocator()), key) == null);
+    const search = session.sidebar_header_publication.snapshot().find(c.partId(.search)).?;
+    try std.testing.expect(session.sidebar_header_publication.entries[search].semantics.?.selected);
+    sidebar_ops.toggleSidebarCollapsed(session);
+    try std.testing.expect(!inspector_sidebar_header_ops.current(session));
+    inspector_sidebar_header_ops.publish(session);
+    try std.testing.expectEqual(@as(usize, 3), session.sidebar_header_publication.len);
+    try std.testing.expect(session.sidebar_header_publication.rect(.search) == null);
+    try std.testing.expectEqual(session.rawCollapsedToggleRect().?, session.collapsedToggleRect().?);
+    try std.testing.expectEqual(notification_ops.rawCollapsedNotificationRect(session).?, notification_ops.collapsedNotificationRect(session).?);
+    inspector_sidebar_header_ops.invalidate(session);
+    try std.testing.expect(!inspector_sidebar_header_ops.current(session));
+    try std.testing.expect(session.collapsedToggleRect() != null);
 }

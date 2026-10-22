@@ -121,5 +121,6 @@ test {
     testing.refAllDecls(ui);
     testing.refAllDecls(components);
     testing.refAllDecls(components.file_header);
+    testing.refAllDecls(components.sidebar);
     testing.refAllDecls(components.editor_view);
 }

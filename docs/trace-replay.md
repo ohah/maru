@@ -271,7 +271,7 @@ incident owner의 단일 facade가 handoff와 final `HostAdapter`를 다시 검�
 내부에서만 app-global publisher를 ephemeral borrow하고 coordinator를 호출한다. 제품 caller가 raw `Registry`·
 `ConnectionIncidentRuntime`·`IncidentOperationQuery`를 서로 조합하거나 adapter/Client에 publisher pointer를 저장하는 경로는 0이다.
 
-failure-site caller 2~6이 GUI `AppSession` 모듈을 역수입하거나 `GenerationAttachment`/`RemoteRuntime`에 publisher pointer를
+failure-site caller 2~7이 GUI `AppSession` 모듈을 역수입하거나 `GenerationAttachment`/`RemoteRuntime`에 publisher pointer를
 보관하지 않도록, app-process owner 모듈은 bootstrap이 완전히 성공한 뒤 final-address owner 주소를 PID/process nonce/thread와
 함께 process-sealed 단일 publication port에 게시한다. port는 owner shutdown admission 전에 revoke하며, 다른 주소·PID·thread,
 pristine/closing owner, replay된 handoff를 graph 역참조 전에 거부한다. failure-site는 port나 owner 주소를 보지 않고 operation 반환 뒤
@@ -306,12 +306,6 @@ binding이 해제된 뒤에만 RemoteRuntime이 final HostAdapter로 canonical `
 read callback이나 batch adapter가 publisher·registry·incident runtime pointer를 저장하거나 error tag에서 reason을 다시 추론하는 경로는
 0이다. capture가 없거나 서로 다른 Client/adapter/source로 drift하면 graph mutation 전 typed reject 또는 incident-authority fail-stop이다.
 
-caller 7의 선행 ingest는 `RemoteRuntime.callDecoded`가 새 request를 쓰기 전에 readable RX를 canonical queue로 옮기는
-단계다. 이 단계도 소켓을 직접 읽으므로 EOF·partial frame을 read pump보다 먼저 만날 수 있다. 그래서 caller 5와 같은 read
-capture(`SourceSite.client_read`)를 그 구간에만 결속하고, ingest가 unwind된 뒤 같은 publication port로 게시한다. capture 없이
-만나면 `Client.poison`이 first reason만 latch하고 incident를 남기지 않는데, 그 Client는 이후 `publishCanonical`이
-first도 repeat도 아닌 것으로 거절해 reconnect admission이 영영 생기지 않는다(2026-10-22 실측: GUI가 50분 넘게 재접속하지 않음).
-
 caller 6의 outbound RPC ambiguity는 actual generation `RemoteRuntime.resize`에서 이미 일부 전송된 pending outbound를 먼저
 flush하는 제품 경로를 사용한다. nonblocking socket의 partial write 뒤 `EAGAIN`은 execution lease에
 `outbound_write_ambiguous`를 capture하고, caller는 allocator/operation guard가 살아 있는 동안 Client-owned pending frame의 exact
@@ -321,6 +315,12 @@ operation을 모두 release한 뒤에만 기존 publication port가 canonical fi
 id/key/reason을 게시한 다음 terminalization이 pending outbound를 회수하고 fd를 exact once 닫으며 reconnect admission을 한 번
 게시한다. caller가 write error tag로 reason을 다시 추론하거나 부분 전송 상태를 settlement 뒤 읽거나 operation 안에서
 coordinator를 재진입하는 경로는 0이다.
+
+caller 7의 선행 ingest는 `RemoteRuntime.callDecoded`가 새 request를 쓰기 전에 readable RX를 canonical queue로 옮기는
+단계다. 이 단계도 소켓을 직접 읽으므로 EOF·partial frame을 read pump보다 먼저 만날 수 있다. 그래서 caller 5와 같은 read
+capture(`SourceSite.client_read`)를 그 구간에만 결속하고, ingest가 unwind된 뒤 같은 publication port로 게시한다. capture 없이
+만나면 `Client.poison`이 first reason만 latch하고 incident를 남기지 않는데, 그 Client는 이후 `publishCanonical`이
+first도 repeat도 아닌 것으로 거절해 reconnect admission이 영영 생기지 않는다(2026-10-22 실측: GUI가 50분 넘게 재접속하지 않음).
 
 coordinator는 held Client contextual state로 first/repeat를 선택한다. caller가 kind boolean을 제출하지 않는다. pristine
 first fields만 `.first`, exact sealed repeat key와 같은 fingerprint만 `.repeat`이며, 다른 fingerprint는 mutation 0 typed reject다.

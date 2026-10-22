@@ -240,8 +240,9 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "test \"CR0b allocator callback deferred poison은"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "test \"CR0b registered operation deferred poison은"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "test \"CR0b callDecoded 선행 ingest EOF는"));
-    // callDecoded 의 선행 ingest 도 read pump 와 같은 capture 를 건다 — 빠지면 EOF 가 incident 없이 latch 돼 재접속이 영영 없다.
-    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, ".generation => |adapter| try self.ingestGenerationReadableEvidenceWithManagedPoison(adapter)"));
+    // read capture 게시 호출 자리: pumpDelta 의 실패·성공 두 갈래와 callDecoded 선행 ingest(caller 7)의 두 갈래.
+    // 어느 한 갈래의 게시를 지우면 그 갈래의 EOF 는 incident 없이 남는다. 호출 자리 배선은 RX-first 판정자가 잰다.
+    try std.testing.expectEqual(@as(usize, 4), count(remote_runtime, "try self.publishReadPumpPoisonCapture(&capture, timestamp);"));
     try std.testing.expectEqual(@as(usize, 4), count(remote_runtime, "app_process_incident_owner.publicationTimestampReceipt()"));
     try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "app_process_incident_owner.publishPreparedManagedPoison("));
     try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "executeDecodedWithManagedPoison("));

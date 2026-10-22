@@ -2201,7 +2201,7 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
 
   suffix 1은 ring/id/key 각 중간 stage의 실제 reconnect-admission probe가 0이고 reason store 뒤 exact 1임을 검증한다. 모든 이름의
   conjunction과 matrix는 closed case table과 exact executed-case count를 함께 assert한다. subprocess 3은 ring/id/key/reason 각 drift
-  injection stage의 distinct marker와 exact 4행을 고정한다. caller 2~6은 공용 facade를 직접 부르지 않고 이름에
+  injection stage의 distinct marker와 exact 4행을 고정한다. caller 2~7은 공용 facade를 직접 부르지 않고 이름에
   적힌 실제 제품 trigger를 실행하며 boundary가 각 ingress의 canonical suffix caller exact 1과 reason-only caller 0을 고정한다.
   bootstrap 1~3은 실제 AppSession current/restore/multi-window entrypoint를 실행한다. bootstrap 4는 dedicated GUI child와 daemon
   child의 실제 bootstrap transcript를 함께 비교해 PID/process nonce/service nonce/첫 sequence domain 비공유를 증명한다. bootstrap 5는
@@ -2248,13 +2248,17 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   publication scope와 execution lease, registered operation을 모두 정산한 뒤 기존 publication port가 canonical first incident,
   terminal fd close·pending outbound 회수와 reconnect admission을 exact 1회 게시한다. write error tag 재분류나 operation 안
   coordinator 재진입은 0이다.
+  caller 7 gate는 actual generation `RemoteRuntime.refreshObservation`이 read pump보다 먼저 `callDecoded`의 선행 ingest에서
+  EOF를 만나는 제품 ingress를 실행한다. partial frame 뒤 EOF(`frame_malformed`·`ProtocolError`)와 깨끗한 EOF(`connection_eof`·
+  `ConnectionClosed`) 두 경우 모두 caller 5와 같은 `SourceSite.client_read` read capture가 사유를 받고, pre-publication 시점의 first
+  reason은 비어 있으며, ingest unwind 뒤 canonical first incident·fd close와 reconnect admission을 exact 1회 게시한다.
   선행 publication-port substrate는 GUI owner bootstrap 성공 뒤 final owner 주소만 keyed seal로 게시하고, current owner thread의 timestamp
   조회만 허용하며 foreign thread와 termination revoke 뒤 조회를 graph 역참조 전에 거부한다. raw registry/runtime pointer는 port에 없다.
   reconnect admission owner prerequisite 2개는 fixed-cap 64 inline final-address row와 pointer-free projection으로 first reconnect
   event의 exact-once admit/consume, duplicate generation·repeat·no-retry mutation 0을 닫는다. app-process publication owner가 admission
   capacity를 publication 전에 preflight하고 first publication·terminalization·fd close 뒤 no-fail admit한다. repeat는 admission을 늘리지 않는다.
 
-  32개 component count와 아래 내부 공격 행 count는 별도다. 복합 component의 closed table은 exact 다음 행만 포함한다:
+  33개 component count와 아래 내부 공격 행 count는 별도다. 복합 component의 closed table은 exact 다음 행만 포함한다:
 
   | component | exact 내부 행 |
   | --- | --- |

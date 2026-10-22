@@ -18,10 +18,11 @@ test "2c3e C3 경계는 RX-first와 decoder cadence의 유일한 제품 owner를
     // generation arm 의 RX-first 는 read pump 와 같은 managed capture 안에서 돈다(CR0b caller 7). capture 밖에서 EOF 를
     // 먼저 만나면 incident 없이 latch 돼 재접속이 영영 없다(2026-10-22).
     try std.testing.expectEqual(@as(usize, 1), count(runtime, ".generation => |adapter| try self.ingestGenerationReadableEvidenceWithManagedPoison(adapter),"));
+    // 헬퍼 몸통만 본다 — 다음 함수 선언에서 끊으므로 헬퍼를 옮겨도 판정이 그대로다.
     const managed_rx = between(
         runtime,
         "fn ingestGenerationReadableEvidenceWithManagedPoison(",
-        "fn callDecoded(\n        self: *RemoteRuntime,",
+        "\n    }\n",
     ) orelse return error.TestUnexpectedResult;
     const arm = std.mem.indexOf(u8, managed_rx, "generation.armReadPumpPoisonCapture(") orelse
         return error.TestUnexpectedResult;

@@ -15,7 +15,21 @@ test "2c3e C3 경계는 RX-first와 decoder cadence의 유일한 제품 owner를
 
     try std.testing.expectEqual(@as(usize, 12), count(runtime, "test \"2c3e C3 socket cadence는"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, ".legacy => |client| try client.ingestReadableOutOfBandEvidence(),"));
-    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".generation => |adapter| try adapter.ingestRuntimeReadableEvidence(),"));
+    // generation arm 의 RX-first 는 read pump 와 같은 managed capture 안에서 돈다(CR0b caller 7). capture 밖에서 EOF 를
+    // 먼저 만나면 incident 없이 latch 돼 재접속이 영영 없다(2026-10-22).
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".generation => |adapter| try self.ingestGenerationReadableEvidenceWithManagedPoison(adapter),"));
+    const managed_rx = between(
+        runtime,
+        "fn ingestGenerationReadableEvidenceWithManagedPoison(",
+        "fn callDecoded(\n        self: *RemoteRuntime,",
+    ) orelse return error.TestUnexpectedResult;
+    const arm = std.mem.indexOf(u8, managed_rx, "generation.armReadPumpPoisonCapture(") orelse
+        return error.TestUnexpectedResult;
+    const managed_read = std.mem.indexOf(u8, managed_rx, "adapter.ingestRuntimeReadableEvidence() catch") orelse
+        return error.TestUnexpectedResult;
+    const disarm = std.mem.indexOf(u8, managed_rx, "generation.disarmReadPumpPoisonCapture(&capture)") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(arm < managed_read and managed_read < disarm);
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn ingestReadableOutOfBandEvidence("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "RuntimeAttachment.preDecodeBufferedEvents(self)"));
     try std.testing.expectEqual(@as(usize, 1), count(attachment, "executePreparedRequestWithDecoderOwned("));
@@ -38,11 +52,13 @@ test "2c3e C3 경계는 RX-first와 decoder cadence의 유일한 제품 owner를
         return error.TestUnexpectedResult;
     const rx = std.mem.indexOf(u8, ordered, "ingestReadableOutOfBandEvidence") orelse
         return error.TestUnexpectedResult;
+    const rx_generation = std.mem.indexOf(u8, ordered, "ingestGenerationReadableEvidenceWithManagedPoison") orelse
+        return error.TestUnexpectedResult;
     const settle = std.mem.indexOf(u8, ordered, "preDecodeBufferedEvents") orelse
         return error.TestUnexpectedResult;
     const tx = std.mem.indexOf(u8, ordered, "flushQueuedInputBlocking") orelse
         return error.TestUnexpectedResult;
-    try std.testing.expect(rx < settle and settle < tx);
+    try std.testing.expect(rx < settle and rx_generation < settle and settle < tx);
 }
 
 fn between(source: []const u8, start_marker: []const u8, end_marker: []const u8) ?[]const u8 {

@@ -22177,89 +22177,99 @@ test "reconnect read fence: frozen screen and RPC preserve queued events" {
 
 test "CR0b callDecoded 선행 ingest EOF는 canonical suffix와 reconnect admission을 남긴다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const Pool = @import("host_pool.zig").HostPool(host_adapter_mod.HostAdapter);
-    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
-    const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse
-        return error.TestUnexpectedResult;
+    for ([_]bool{ true, false }) |partial_frame| {
+        const Pool = @import("host_pool.zig").HostPool(host_adapter_mod.HostAdapter);
+        try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+        const identity = host_adapter_mod.HostAdapter.publicationProcessIdentity() orelse
+            return error.TestUnexpectedResult;
 
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
-    const owner_fd = c.dup(tmp.dir.handle);
-    if (owner_fd < 0) return error.TestUnexpectedResult;
-    defer _ = c.close(owner_fd);
-    var owner: app_process_incident_owner.AppProcessIncidentOwner = .{};
-    try owner.ensureReady(testing.allocator, owner_fd, identity.process_nonce, 0xC0D2);
-    var owner_settled = false;
-    defer if (!owner_settled) {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try testing.expectEqual(@as(c_int, 0), c.fchmod(tmp.dir.handle, 0o700));
+        const owner_fd = c.dup(tmp.dir.handle);
+        if (owner_fd < 0) return error.TestUnexpectedResult;
+        defer _ = c.close(owner_fd);
+        var owner: app_process_incident_owner.AppProcessIncidentOwner = .{};
+        try owner.ensureReady(testing.allocator, owner_fd, identity.process_nonce, 0xC0D2 + @as(u64, @intFromBool(partial_frame)));
+        var owner_settled = false;
+        defer if (!owner_settled) {
+            app_process_incident_owner.publication_port_testing_api.reset();
+            _ = owner.shutdown() catch {};
+        };
+        try app_process_incident_owner.publication_port_testing_api.install(&owner);
+
+        var fds: [2]c.fd_t = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        // 2026-10-22 실측의 모양: host 가 frame 하나를 반쯤 보낸 채 연결을 닫았다(partial_write_stalled).
+        // read pump 를 돌리지 않고 RPC 를 먼저 부르므로 EOF 는 `callDecoded` 의 선행 ingest 가 처음 만난다.
+        const wire = try framing.encodeFrame(testing.allocator, .{ .kind = .event, .stream_id = 7 }, "{\"event\":\"runtime.ended\"}");
+        defer testing.allocator.free(wire);
+        if (partial_frame) {
+            const partial = wire.len / 2;
+            try testing.expectEqual(@as(isize, @intCast(partial)), c.write(fds[1], wire.ptr, partial));
+        }
+        try testing.expectEqual(@as(c_int, 0), c.shutdown(fds[1], 1));
+
+        var pool = Pool.init(testing.allocator);
+        defer pool.deinit();
+        const adapter = try testing.allocator.create(host_adapter_mod.HostAdapter);
+        var pool_owns = false;
+        errdefer if (!pool_owns) testing.allocator.destroy(adapter);
+        var source: client_mod.Client = .{
+            .allocator = testing.allocator,
+            .fd = fds[0],
+            .host_id = 0xC0D3 + @as(u128, @intFromBool(partial_frame)),
+            .wire_major = protocol.version_major,
+            .screen_codec_version = screen_stream.codec_version,
+            .parser = framing.FrameParser.init(testing.allocator),
+            .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+        };
+        var permit: maru.observability.incident_binding_contract.PreparedHostPublication = .{};
+        try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
+        try host_adapter_mod.HostAdapter.initManagedInPlace(adapter, testing.allocator, &source, &permit);
+        pool.commitOwnedPublication(adapter, &permit);
+        pool_owns = true;
+
+        var runtime: RemoteRuntime = undefined;
+        try initGenerationRuntimeForAdapter(&runtime, adapter);
+        defer deinitGenerationRuntimeForAdapter(&runtime);
+        var pre_publication: app_process_incident_owner.publication_port_testing_api.PrePublicationSnapshot = .{};
+        app_process_incident_owner.publication_port_testing_api.armPrePublicationSnapshot(&pre_publication);
+        defer app_process_incident_owner.publication_port_testing_api.disarmPrePublicationSnapshot();
+
+        // 반쯤 온 frame 뒤 EOF 는 `frame_malformed`·`ProtocolError`, 깨끗한 EOF 는 `connection_eof`·`ConnectionClosed` 다.
+        // 둘 다 같은 capture 를 지나 incident 하나와 reconnect admission 하나를 남겨야 한다.
+        const expected_reason: client_poison.ConnectionReason = if (partial_frame) .frame_malformed else .connection_eof;
+        if (partial_frame)
+            try testing.expectError(error.ProtocolError, runtime.refreshObservation())
+        else
+            try testing.expectError(error.ConnectionClosed, runtime.refreshObservation());
+
+        try testing.expect(pre_publication.observed);
+        try testing.expect(!pre_publication.first_reason_present);
+        try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
+        try testing.expectEqual(
+            @backingInt(expected_reason),
+            pre_publication.reason_raw,
+        );
+        try testing.expectEqual(
+            @backingInt(connection_incident.SourceSite.client_read),
+            pre_publication.source_site_raw,
+        );
+
+        const published = adapter.slot.logicalClientConst();
+        try testing.expectEqual(expected_reason, published.first_poison_reason.?);
+        try testing.expect(published.first_incident_id.sequence != 0);
+        try testing.expect(published.unusable);
+        try testing.expectEqual(@as(c.fd_t, -1), published.fd);
+        try testing.expectEqual(@as(u8, 1), owner.reconnect_admissions.count);
+        const admission = (try owner.reconnect_admissions.peek()).?;
+        try testing.expectEqual(published.first_incident_id, admission.incident_id);
+        try owner.reconnect_admissions.consume(admission);
         app_process_incident_owner.publication_port_testing_api.reset();
-        _ = owner.shutdown() catch {};
-    };
-    try app_process_incident_owner.publication_port_testing_api.install(&owner);
-
-    var fds: [2]c.fd_t = undefined;
-    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
-    defer _ = c.close(fds[1]);
-    // 2026-10-22 실측의 모양: host 가 frame 하나를 반쯤 보낸 채 연결을 닫았다(partial_write_stalled).
-    // read pump 를 돌리지 않고 RPC 를 먼저 부르므로 EOF 는 `callDecoded` 의 선행 ingest 가 처음 만난다.
-    const wire = try framing.encodeFrame(testing.allocator, .{ .kind = .event, .stream_id = 7 }, "{\"event\":\"runtime.ended\"}");
-    defer testing.allocator.free(wire);
-    const partial = wire.len / 2;
-    try testing.expectEqual(@as(isize, @intCast(partial)), c.write(fds[1], wire.ptr, partial));
-    try testing.expectEqual(@as(c_int, 0), c.shutdown(fds[1], 1));
-
-    var pool = Pool.init(testing.allocator);
-    defer pool.deinit();
-    const adapter = try testing.allocator.create(host_adapter_mod.HostAdapter);
-    var pool_owns = false;
-    errdefer if (!pool_owns) testing.allocator.destroy(adapter);
-    var source: client_mod.Client = .{
-        .allocator = testing.allocator,
-        .fd = fds[0],
-        .host_id = 0xC0D3,
-        .wire_major = protocol.version_major,
-        .screen_codec_version = screen_stream.codec_version,
-        .parser = framing.FrameParser.init(testing.allocator),
-        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
-    };
-    var permit: maru.observability.incident_binding_contract.PreparedHostPublication = .{};
-    try pool.prepareOwnedPublication(source.host_id, adapter, &permit);
-    try host_adapter_mod.HostAdapter.initManagedInPlace(adapter, testing.allocator, &source, &permit);
-    pool.commitOwnedPublication(adapter, &permit);
-    pool_owns = true;
-
-    var runtime: RemoteRuntime = undefined;
-    try initGenerationRuntimeForAdapter(&runtime, adapter);
-    defer deinitGenerationRuntimeForAdapter(&runtime);
-    var pre_publication: app_process_incident_owner.publication_port_testing_api.PrePublicationSnapshot = .{};
-    app_process_incident_owner.publication_port_testing_api.armPrePublicationSnapshot(&pre_publication);
-    defer app_process_incident_owner.publication_port_testing_api.disarmPrePublicationSnapshot();
-
-    try testing.expectError(error.ProtocolError, runtime.refreshObservation());
-
-    try testing.expect(pre_publication.observed);
-    try testing.expect(!pre_publication.first_reason_present);
-    try testing.expectEqual(@as(u8, 0), pre_publication.reconnect_count);
-    try testing.expectEqual(
-        @backingInt(client_poison.ConnectionReason.frame_malformed),
-        pre_publication.reason_raw,
-    );
-    try testing.expectEqual(
-        @backingInt(connection_incident.SourceSite.client_read),
-        pre_publication.source_site_raw,
-    );
-
-    const published = adapter.slot.logicalClientConst();
-    try testing.expectEqual(client_poison.ConnectionReason.frame_malformed, published.first_poison_reason.?);
-    try testing.expect(published.first_incident_id.sequence != 0);
-    try testing.expect(published.unusable);
-    try testing.expectEqual(@as(c.fd_t, -1), published.fd);
-    try testing.expectEqual(@as(u8, 1), owner.reconnect_admissions.count);
-    const admission = (try owner.reconnect_admissions.peek()).?;
-    try testing.expectEqual(published.first_incident_id, admission.incident_id);
-    try owner.reconnect_admissions.consume(admission);
-    app_process_incident_owner.publication_port_testing_api.reset();
-    const shutdown = try owner.shutdown();
-    owner_settled = true;
-    try testing.expectEqual(@import("incident_runtime.zig").ShutdownResult.joined, shutdown);
+        const shutdown = try owner.shutdown();
+        owner_settled = true;
+        try testing.expectEqual(@import("incident_runtime.zig").ShutdownResult.joined, shutdown);
+    }
 }

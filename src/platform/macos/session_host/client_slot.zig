@@ -13440,7 +13440,7 @@ pub const ClientSlot = struct {
         };
     }
 
-    /// Blocking admin RPC 를 `AdminRpcPoisonCapture` 안에서 돈다. capture 는 operation 이 현재 Client 를 붙든
+    /// Blocking admin RPC 를 `ClientCallPoisonCapture` 안에서 돈다. capture 는 operation 이 현재 Client 를 붙든
     /// 동안만 armed 이고 반환 전에 `finalized` 가 된다. 그 사이 poison 이 오면 Client 는 latch·fd close 없이
     /// 사유만 남기고, caller(RemoteRuntime)가 operation 밖에서 canonical port 로 게시한다. capture 없이 EOF 를
     /// 먼저 만나면 incident 가 영영 없어 재접속 admission 이 생기지 않는다(2026-10-22 caller 7 과 같은 구멍).
@@ -13450,7 +13450,7 @@ pub const ClientSlot = struct {
         method: []const u8,
         params_json: ?[]const u8,
         timestamp_ns: i128,
-        capture: *incident_publication_contract.AdminRpcPoisonCapture,
+        capture: *incident_publication_contract.ClientCallPoisonCapture,
     ) client_mod.ClientError![]u8 {
         return self.callCurrentAdminCaptured(expected_generation, method, params_json, null, timestamp_ns, capture) catch |err| switch (err) {
             error.DeadlineExceeded => unreachable,
@@ -13465,15 +13465,15 @@ pub const ClientSlot = struct {
         params_json: ?[]const u8,
         deadline: client_deadline.AbsoluteDeadline,
         timestamp_ns: i128,
-        capture: *incident_publication_contract.AdminRpcPoisonCapture,
+        capture: *incident_publication_contract.ClientCallPoisonCapture,
     ) client_mod.DeadlineClientError![]u8 {
         return self.callCurrentAdminCaptured(expected_generation, method, params_json, deadline, timestamp_ns, capture);
     }
 
-    /// admin capture 를 게시하지 못했을 때 옛 동작(latch·fd close)으로 되돌린다. 그러지 않으면 capture 가 막아 둔
+    /// client call·read pump capture 를 게시하지 못했을 때 옛 동작(latch·fd close)으로 되돌린다. 그러지 않으면 capture 가 막아 둔
     /// Client 가 fd 를 연 채 반쪽 frame 을 품고 남는다. 이 시점 capture 는 이미 풀렸으므로 `poison` 이 평소대로 latch 한다.
     /// borrow 가 실패하면(다른 operation 이 쥐고 있음) 할 수 있는 게 없다 — 다음 read 가 같은 EOF 를 다시 만난다.
-    pub fn poisonCurrentAfterUnpublishedAdminCapture(
+    pub fn poisonCurrentAfterUnpublishedCapture(
         self: *ClientSlot,
         expected_generation: u64,
         reason_raw: u8,
@@ -13495,10 +13495,10 @@ pub const ClientSlot = struct {
         params_json: ?[]const u8,
         deadline: ?client_deadline.AbsoluteDeadline,
         timestamp_ns: i128,
-        capture: *incident_publication_contract.AdminRpcPoisonCapture,
+        capture: *incident_publication_contract.ClientCallPoisonCapture,
     ) client_mod.DeadlineClientError![]u8 {
         if (timestamp_ns < 0 or
-            !std.meta.eql(capture.*, incident_publication_contract.AdminRpcPoisonCapture{}) or
+            !std.meta.eql(capture.*, incident_publication_contract.ClientCallPoisonCapture{}) or
             rangesOverlapTyped(capture, self) or rangesOverlapTyped(capture, self.current))
             return error.ProtocolError;
         const Context = struct {
@@ -13507,7 +13507,7 @@ pub const ClientSlot = struct {
             params_json: ?[]const u8,
             deadline: ?client_deadline.AbsoluteDeadline,
             timestamp_ns: i128,
-            capture: *incident_publication_contract.AdminRpcPoisonCapture,
+            capture: *incident_publication_contract.ClientCallPoisonCapture,
         };
         const Operation = struct {
             fn run(context: Context, client: *client_mod.Client) client_mod.DeadlineClientError![]u8 {
@@ -13517,15 +13517,15 @@ pub const ClientSlot = struct {
                     .client_addr = @intFromPtr(client),
                     .timestamp_ns = context.timestamp_ns,
                     .source_site_raw = @backingInt(connection_incident.SourceSite.client_response),
-                    .lifecycle_raw = @backingInt(incident_publication_contract.AdminRpcPoisonCaptureLifecycle.armed),
+                    .lifecycle_raw = @backingInt(incident_publication_contract.ClientCallPoisonCaptureLifecycle.armed),
                 };
-                if (!client.beginAdminRpcPoisonCapture(context.capture)) {
+                if (!client.beginClientCallPoisonCapture(context.capture)) {
                     context.capture.* = .{};
                     return error.ProtocolError;
                 }
                 defer {
-                    client.endAdminRpcPoisonCapture(context.capture);
-                    context.capture.lifecycle_raw = @backingInt(incident_publication_contract.AdminRpcPoisonCaptureLifecycle.finalized);
+                    client.endClientCallPoisonCapture(context.capture);
+                    context.capture.lifecycle_raw = @backingInt(incident_publication_contract.ClientCallPoisonCaptureLifecycle.finalized);
                 }
                 if (context.deadline) |bounded|
                     return client.callUntil(context.method, context.params_json, bounded);
@@ -15949,6 +15949,30 @@ pub const ClientSlot = struct {
             capture.slot_addr == @intFromPtr(self) and
             capture.client_addr == @intFromPtr(&self.current.client) and
             self.current.client.beginReadPumpPoisonCapture(capture);
+    }
+
+    /// operation 밖에서 현재 Client 에 client call capture 를 건다(mutation 송신 — 송신 함수가 자기 operation 을 연다).
+    /// read pump capture 와 같은 규칙이다: operation 이 비어 있고 capture 가 이 slot 의 현재 Client 를 가리킬 때만.
+    pub fn beginCurrentClientCallPoisonCapture(
+        self: *ClientSlot,
+        capture: *incident_publication_contract.ClientCallPoisonCapture,
+    ) bool {
+        return self.valid() and
+            self.current.active_operation_generation == 0 and
+            capture.slot_addr == @intFromPtr(self) and
+            capture.client_addr == @intFromPtr(&self.current.client) and
+            self.current.client.beginClientCallPoisonCapture(capture);
+    }
+
+    pub fn endCurrentClientCallPoisonCapture(
+        self: *ClientSlot,
+        capture: *incident_publication_contract.ClientCallPoisonCapture,
+    ) void {
+        if (!self.valid() or capture.slot_addr != @intFromPtr(self) or
+            capture.client_addr != @intFromPtr(&self.current.client))
+            @panic("client call poison slot authority drifted");
+        self.current.client.endClientCallPoisonCapture(capture);
+        capture.lifecycle_raw = @backingInt(incident_publication_contract.ClientCallPoisonCaptureLifecycle.finalized);
     }
 
     pub fn endReadPumpPoisonCapture(

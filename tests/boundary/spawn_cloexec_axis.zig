@@ -6,11 +6,12 @@
 //! 사는 자식이 물려받으면 host 원장은 반환됐는데 메모리는 계속 붙잡힌다).
 //!
 //! 그래서 `posix_spawn`·`posix_spawnp`·`system` 은 `POSIX_SPAWN_CLOEXEC_DEFAULT` 헬퍼(`src/pty/macos_spawn.zig`) 밖에서 부르지
-//! 않는다. fork(·`std.process.spawn` — Zig 0.16 은 fork 로 띄운다)는 울타리가 덮으므로 여기서 세지 않는다.
+//! 않는다. Zig 0.17 Darwin의 `std.process.spawn`도 posix_spawn을 쓰므로 같은 축에서 막는다.
 //!
 //! **세는 것**(최상위 test 블록 밖):
 //! - `posix_spawn`·`posix_spawnp`·`popen`(Darwin `popen` 은 안에서 posix_spawn 을 쓴다)·`vfork`(atfork 를 부르지 않는다) 식별자 — 뒤 토큰과 상관없이. 별칭
 //!   (`const ps = std.c.posix_spawn;`)·함수 포인터·`@call` 로도 피하지 못한다.
+//! - Zig Darwin의 `process.spawn`·`processSpawn` 참조와 `std.process` namespace 별칭. `Environ.Map` 같은 타입 참조는 허용한다.
 //! - `system` 식별자 바로 뒤의 `(` — 호출과 extern 선언(`.system` 열거 값은 흔해서 이름만으로는 안 센다).
 //! - `@field(…, "posix_spawn")` 처럼 이름을 문자열로 꺼내는 자리.
 //! 주석·문자열(그 밖의)은 토크나이저가 거른다. 허용 재고는 **파일·개수·이유**로 박는다 — 개수가 늘어도 줄어도 빨갛다.
@@ -26,7 +27,7 @@ const allowed = [_]Allowed{
 };
 
 /// 이름만으로 센다(어디에 쓰여도 부를 뜻이다).
-const always = [_][]const u8{ "posix_spawn", "posix_spawnp", "popen", "vfork" };
+const always = [_][]const u8{ "posix_spawn", "posix_spawnp", "popen", "vfork", "processSpawn" };
 /// 바로 뒤에 `(` 가 올 때만 센다.
 const called = [_][]const u8{"system"};
 /// `@field(…, "<이름>")` 으로 꺼내도 센다.
@@ -47,8 +48,22 @@ fn countSpawnCalls(source: [:0]const u8) usize {
     // `@field` 다음의 `(`·첫 인자·`,` 를 지나 문자열 인자를 기다린다.
     var field_stage: u8 = 0;
     var count: usize = 0;
+    var process_chain: u8 = 0;
+    var std_chain: u8 = 0;
     while (true) {
         const token = tokenizer.next();
+        // Count qualified spawn references as well as calls. Namespace aliases
+        // are conservatively blocked: their later member name may hide spawn.
+        if (inProductToken(token.tag, test_body_depth)) {
+            const text = source[token.loc.start..token.loc.end];
+            if (process_chain == 2 and token.tag == .identifier and std.mem.eql(u8, text, "spawn")) count += 1;
+            process_chain = if (token.tag == .identifier and std.mem.eql(u8, text, "process")) 1 else if (process_chain == 1 and token.tag == .period) 2 else 0;
+            if (std_chain == 3 and token.tag != .period) count += 1;
+            std_chain = if (token.tag == .identifier and std.mem.eql(u8, text, "std")) 1 else if (std_chain == 1 and token.tag == .period) 2 else if (std_chain == 2 and token.tag == .identifier and std.mem.eql(u8, text, "process")) 3 else 0;
+        } else {
+            process_chain = 0;
+            std_chain = 0;
+        }
         const was_pending = pending_watched;
         pending_watched = false;
         const in_product = test_body_depth == null;
@@ -89,6 +104,19 @@ fn countSpawnCalls(source: [:0]const u8) usize {
             else => {},
         }
     }
+}
+
+fn inProductToken(tag: std.zig.Token.Tag, test_depth: ?usize) bool {
+    return test_depth == null and tag != .doc_comment and tag != .container_doc_comment;
+}
+
+test "spawn cloexec axis: Zig Darwin high level spawn and namespace aliases cannot bypass the gate" {
+    try std.testing.expectEqual(@as(usize, 1), countSpawnCalls("fn f() void { _ = std.process.spawn(io, .{}); }"));
+    try std.testing.expectEqual(@as(usize, 1), countSpawnCalls("const launch = std.process.spawn;"));
+    try std.testing.expectEqual(@as(usize, 1), countSpawnCalls("const p = std.process; fn f() void { _ = p.spawn(io, .{}); }"));
+    try std.testing.expectEqual(@as(usize, 1), countSpawnCalls("fn f() void { _ = @field(std.process, \"spawn\")(io, .{}); }"));
+    try std.testing.expectEqual(@as(usize, 1), countSpawnCalls("const launch = io.vtable.processSpawn;"));
+    try std.testing.expectEqual(@as(usize, 0), countSpawnCalls("fn f(env: std.process.Environ.Map) void { _ = env; } test { _ = std.process.spawn(io, .{}); }"));
 }
 
 fn readZigFileZ(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]u8 {
@@ -165,7 +193,7 @@ test "spawn cloexec axis: no app code spawns outside the CLOEXEC_DEFAULT helper"
             failed = true;
             std.debug.print(
                 \\
-                \\[spawn cloexec 축] {s}: `posix_spawn`·`posix_spawnp`·`system` 호출·선언이 {d} 곳(재고 {d}).
+                \\[spawn cloexec 축] {s}: `posix_spawn`·`posix_spawnp`·`system`·표준 process spawn 호출·참조가 {d} 곳(재고 {d}).
                 \\  앱 코드는 `maru.pty.macos_spawn`(CLOEXEC_DEFAULT)으로 띄운다 — posix_spawn 계열은 fork 울타리를 지나지 않아
                 \\  이미지 채널로 받은 fd 를 자식에게 넘긴다(docs/session-host-image-channel.md §7).
                 \\  앱이 아닌 프로세스라면 재고에 **이유와 함께** 개수를 올려라. 재고 사유: {s}

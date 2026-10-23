@@ -1898,3 +1898,8 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 `mise exec -- zig build test-editor-edit-cost -j2`로 큰 Zig/Swift 문서의 프레임 작업량과
 카운터 경계 조건을 검사한다. `-Doptimize=ReleaseFast`를 추가해 최적화 빌드에서도 실행한다.
 실행 범위와 실제 AppKit 검증과의 구분은 [편집 비용 계획](plans/editor-edit-frame-cost.md#ew0-후속-검증)을 따른다.
+
+
+### 검색 워커 fd 격리
+
+`mise exec -- zig build test-editor-search-fd-isolation`과 `-Doptimize=ReleaseFast`는 20개 서로 다른 실제 제품 runner 시나리오를 실행하며 macOS에서 20 compiled/20 passed를 요구한다. fd 격리·부모 소유권·cwd/env/argv·입출력·취소·시한·오류 회수·준비/stream OOM을 검사한다. macOS-only CI와 `test-editor`에도 연결된다. 번들 rg 회귀는 `test-macos-project-search-worker test-macos-project-search-roots test-macos-project-search-adapter`다. 보호 API gate는 `tests/boundary/spawn_cloexec_axis.zig`이며 Zig 0.17 Darwin의 표준 spawn도 검사한다.

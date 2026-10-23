@@ -333,16 +333,14 @@ stream 이 떠나면 풀리며 깨운다 — 쥔 한 장이 그 연결의 다른
 ## 7. 앱: 받은 fd 가 자식 프로세스로 새지 않게
 
 받은 fd 는 CLOEXEC 가 꺼진 채로 설치되고, recvmsg 와 `F_SETFD` 사이에 다른 스레드가 fork 하면 자식이 그 fd 를 물려받는다(오래
-사는 LSP·ssh ControlMaster 가 물려받으면 host 원장은 반환됐는데 메모리는 계속 붙잡힌다). 앱에는 자식에서 fd 를 닫지 않고
-CLOEXEC 에만 기대는 spawn 이 여럿 있다(LSP·git·ssh 업로드·업데이트 확인·PTY 자식·에디터 검색 워커의 `std.process.spawn`·`system()`).
+사는 LSP·ssh ControlMaster 가 물려받으면 host 원장은 반환됐는데 메모리는 계속 붙잡힌다). 앱에서 자식의 CLOEXEC 에 기대는 spawn 경로에는 git·ssh 업로드·업데이트 확인·PTY 자식이 있다. LSP와 Chromium sidecar 자식은 stdio 위 fd를 닫으며, 검색 워커는 아래의 보호 spawn helper를 사용한다.
 
 - 프로세스 전역 rwlock 하나: 「recvmsg + `F_SETFD`」 는 쓰기 잠금, fork 는 읽기 잠금.
 - 읽기 잠금은 **fork 시스템콜 하나**만 덮는다 — `pthread_atfork(prepare=rdlock, parent=unlock, child=새로 초기화)`(자식에서 unlock
   하면 fork 순간 줄 서 있던 writer — 자식에 없는 스레드 — 에게 소유가 넘어가 자식의 다음 fork 가 멈춘다). 자식은 fork 순간 fd
-  표를 복사하므로 그 구간이면 충분하고, 의존 라이브러리 내부의 fork 도 같이 덮인다. exec 완료까지 잠금을 잡으면(`std.process.spawn`
-  은 exec 완료를 기다린다) 느린 spawn 하나가 모든 원격 터미널의 이미지 적용을 멈춘다.
+  표를 복사하므로 그 구간이면 충분하고, 의존 라이브러리 내부의 fork 도 같이 덮인다. exec 완료까지 잠금을 잡으면 느린 spawn 하나가 모든 원격 터미널의 이미지 적용을 멈춘다.
 - `posix_spawn` 계열(Darwin `system()` 포함)은 atfork 를 부르지 않는다 → `POSIX_SPAWN_CLOEXEC_DEFAULT` 를 쓰는 헬퍼를 거치게 하고,
-  헬퍼를 거치지 않는 `posix_spawn`·`system` 호출을 문법 자리 판정자로 막는다.
+  헬퍼를 거치지 않는 `posix_spawn`·`system` 호출을 문법 자리 판정자로 막는다. Zig 0.17 Darwin의 `std.process.spawn`도 이 계열이며 atfork를 호출하지 않는다. 검색 워커는 `macos_spawn.captureStdout`으로 고정 argv·환경·열린 root handle·stdout pipe를 준비하고 같은 `CLOEXEC_DEFAULT` 경계를 지난다. 표준 라이브러리 spawn 참조·namespace 별칭도 같은 판정자가 막는다.
 - 메인 스레드의 **tick** 은 쓰기 잠금을 **`pthread_rwlock_trywrlock`** 으로만 잡는다. Darwin rwlock 에는 우선순위 상속이 없어, 메인이
   BACKGROUND QoS 의 읽기 보유자를 기다리면 CPU 2 배 부하에서 최악 181 ms 를 멈춘다(실측, 부하 없으면 1.6 ms). 못 잡은 tick 에는
   채널 recvmsg 를 건너뛰고, `image_ref` 를 담은 배치를 만난 **그 스트림의 적용만** 그 배치에서 멈춘다(delta 는 앞 배치에 대한

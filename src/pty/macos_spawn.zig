@@ -28,6 +28,37 @@ pub fn spawn(
     envp: [*:null]const ?[*:0]const u8,
     stdio: Stdio,
 ) SpawnError!c.pid_t {
+    return spawnImpl(path, argv, envp, stdio, null);
+}
+
+const CaptureOptions = struct { write_fd: c.fd_t, directory_fd: c.fd_t };
+pub const Captured = struct { pid: c.pid_t, stdout_fd: c.fd_t };
+
+/// Search owns the returned descriptor and PID. Prepare all owned argv/env memory
+/// before spawn, and preserve the already-open root rather than resolving its path again.
+pub fn captureStdout(a: std.mem.Allocator, argv: []const []const u8, environment: *const std.process.Environ.Map, directory_fd: c.fd_t) !Captured {
+    if (argv.len == 0 or !std.fs.path.isAbsolute(argv[0])) return error.InvalidArguments;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const owned = arena.allocator();
+    const args = try owned.allocSentinel(?[*:0]const u8, argv.len, null);
+    for (argv, 0..) |arg, i| {
+        if (std.mem.indexOfScalar(u8, arg, 0) != null) return error.InvalidArguments;
+        args[i] = (try owned.dupeSentinel(u8, arg, 0)).ptr;
+    }
+    const env = try environment.createPosixBlock(owned, .{});
+    var pipe: [2]c.fd_t = undefined;
+    if (c.pipe(&pipe) != 0) return error.SpawnFailed;
+    errdefer for (pipe) |fd| {
+        _ = c.close(fd);
+    };
+    for (pipe) |fd| if (c.fcntl(fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC)) != 0) return error.SpawnFailed;
+    const pid = try spawnImpl(args[0].?, args.ptr, env.slice.ptr, .dev_null, .{ .write_fd = pipe[1], .directory_fd = directory_fd });
+    _ = c.close(pipe[1]);
+    return .{ .pid = pid, .stdout_fd = pipe[0] };
+}
+
+fn spawnImpl(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8, stdio: Stdio, capture: ?CaptureOptions) SpawnError!c.pid_t {
     var attr: c.posix_spawnattr_t = undefined;
     if (c.posix_spawnattr_init(&attr) != 0) return error.SpawnFailed;
     defer _ = c.posix_spawnattr_destroy(&attr);
@@ -45,7 +76,15 @@ pub fn spawn(
     var actions: c.posix_spawn_file_actions_t = undefined;
     if (c.posix_spawn_file_actions_init(&actions) != 0) return error.SpawnFailed;
     defer _ = c.posix_spawn_file_actions_destroy(&actions);
+    if (capture) |output| {
+        if (c.posix_spawn_file_actions_addfchdir_np(&actions, output.directory_fd) != 0) return error.SpawnFailed;
+    }
     for ([_]c.fd_t{ 0, 1, 2 }) |fd| {
+        if (fd == 1) if (capture) |output| {
+            if (c.posix_spawn_file_actions_adddup2(&actions, output.write_fd, 1) != 0) return error.SpawnFailed;
+            continue;
+        };
+
         // 닫힌 stdio 를 넘기라고 하면 spawn 이 EBADF 로 실패한다 — `system()` 처럼 띄우려면 그 자리는 `/dev/null` 로 채운다.
         const inherit = stdio == .inherit and c.fcntl(fd, c.F.GETFD) != -1;
         if (inherit) {

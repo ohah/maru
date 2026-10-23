@@ -492,3 +492,15 @@ rg auto는 동일 122/다름 58/오류 3, rg PCRE2는 동일 124/다름 56/오�
 기존 `^|foo` 반례만으로 옛 빈 대안 우선 정책을 계속 강제하지 않는다. 엔진/rg 번들 채택·프로젝트 worker·도크는 여전히 별도 단계다.
 
 검색 옵션 UI와 pane의 읽기 전용 결과·diff 탭은 [별도 계약과 검증](editor-project-search-pane.md)을 따른다.
+
+
+## 검색 워커 fd 격리 보강 (2026-10-23)
+
+구현. `app_session/editor/search/process.zig::runDelimited`는 `pty/macos_spawn.zig::captureStdout`을 사용한다. argv는 기존 고정 helper의 절대 경로이며 NUL을 거부한다. 환경은 기존 `Environ.Map`의 명시 사본, cwd는 기존에 연 root handle을 `addfchdir_np`로 적용한다. stdin/stderr는 `/dev/null`, stdout만 pipe로 연결하며 `CLOEXEC_DEFAULT`로 다른 fd를 상속하지 않는다. helper의 기존 signal-mask/default 규칙을 공유한다. 부모의 root·fd 소유권, 검색 query·JSON/NUL 프로토콜·취소/상한/자식 회수 정책은 유지한다.
+
+기존 가정과 달리 pinned Zig 0.17 Darwin `std.process.spawn`은 atfork를 거치지 않는 posix_spawn이며 다른 unmarked fd를 상속했다. 단순히 문서의 버전만 고치는 대신 실제 제품 runner를 보호 helper에 연결하고 source gate가 표준 라이브러리 API/별칭도 세게 한다. `test-editor-search-fd-isolation`은 서로 다른 20개 실제 프로세스·실패 시나리오의 compiled/passed 수를 요구한다. Debug/ReleaseFast와 실제 번들 rg의 worker/roots/adapter 회귀 결과는 검증 매트릭스와 해당 PR에 기록한다.
+
+이번 보강은 검색 워커 경계다. 별도 감사에서 찾은 SSH의 fd 상속·OOM·EINTR·초기화 실패 정리와 PTY/git/update의 잔여 fd 정책은 후속 수정 대상이다.
+
+
+검색 기반 고리 검증 중 기존 `test-editor-project-search`가 barrel 분석 누락으로 0 tests를 컴파일함을 발견했다. 테스트 루트의 명시적 import와 기존 PCRE2 테스트 의존성을 복구하고, 현재 실제 **288 compiled / macOS 287 passed·Windows 전용 비교 1 skipped**를 요구해 macOS CI에 연결한다. 추가로 드러난 `PSE1` ReleaseFast allocation-failure 판정의 주소 의존 remap은 테스트 backing allocator의 resize/remap을 끄고 실제 alloc/free·OOM 전파 검사를 유지해 안정화한다. 제품 JSON parser 동작은 바꾸지 않는다.

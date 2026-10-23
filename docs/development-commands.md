@@ -1683,6 +1683,10 @@ macOS 전용 CI에 포함한다. `zig build test-ssh-reconnect-failure-process`�
 프로세스로 배지·알림 예약·턴 캡처를 판정한다. 실제 macOS 앱 창의 종료/재실행과
 workspace restore, OS 알림 배너를 검사하는 gate와는 구분한다.
 
+### SSH 출력 할당 실패
+
+`mise exec -- python3 tools/test-ssh-output-oom.py`는 다섯 출력 경로의 할당 실패와 정상 출력·자식 회수를 Debug/ReleaseFast에서 검증한다. 실물 SSH 서버는 사용하지 않는다.
+
 ### Save As 순서·취소 기반
 
 `mise exec -- zig build test-editor-save-as-policy`와 `-Doptimize=ReleaseFast`는

@@ -519,6 +519,8 @@ jobs:
       # (`bun run --cwd web scripts/build-editor-smoke.ts`). 이 잡은 지금까지 웹 의존성을 안 깔았고,
       # 그래서 그 스텝이 콜드 러너에서 exit 1 로 죽었다 — 로컬은 이미 깔려 있어 초록이었다.
       # `session host bundled CLI macOS` 가 같은 이유로 이미 이 스텝을 든다.
+      - name: SSH output allocation ownership (Debug and ReleaseFast)
+        run: python3 tools/test-ssh-output-oom.py
       - name: Install web bundle dependencies for the editor smoke
         run: bun install --cwd web --frozen-lockfile
       - name: Run the gates that only exist on macOS

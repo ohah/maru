@@ -206,11 +206,13 @@ pub fn runRemoteScript(
     if (stdin_bytes) |bytes| writeAllFd(in_pipe[1], bytes);
     _ = std.c.close(in_pipe[1]); // EOF — 없어도 닫는다(원격이 stdin 을 기다리며 서지 않게)
 
-    out.* = readAllFd(allocator, out_pipe[0]) catch blk: {
-        break :blk try allocator.dupe(u8, "");
-    };
+    // Preserve collection errors, but settle FD and child ownership before
+    // returning them. Empty successful output would conceal an incomplete reply.
+    const collected = readAllFd(allocator, out_pipe[0]);
     _ = std.c.close(out_pipe[0]);
-    return reapPid(pid);
+    const code = reapPid(pid);
+    out.* = try collected;
+    return code;
 }
 
 /// **argv 를 그대로** 상한 캡처로 실행한다(RF4). `runRemoteCapped` 와 같은 규율(상한 넘치면 fd 를
@@ -228,7 +230,11 @@ pub fn runArgvCapped(
         for (argv_z.items) |maybe| if (maybe) |ptr| allocator.free(std.mem.span(ptr));
         argv_z.deinit(allocator);
     }
-    for (argv) |arg| try argv_z.append(allocator, (try allocator.dupeSentinel(u8, arg, 0)).ptr);
+    for (argv) |arg| {
+        const owned = try allocator.dupeSentinel(u8, arg, 0);
+        errdefer allocator.free(owned);
+        try argv_z.append(allocator, owned.ptr);
+    }
     try argv_z.append(allocator, null);
 
     var out_pipe: [2]c_int = undefined;
@@ -252,6 +258,7 @@ pub fn runArgvCapped(
     errdefer buf.deinit(allocator);
     var tmp: [16 * 1024]u8 = undefined;
     var overflowed = false;
+    var allocation_failed = false;
     var read_failed = false;
     while (true) {
         const n = std.c.read(out_pipe[0], &tmp, tmp.len);
@@ -265,15 +272,20 @@ pub fn runArgvCapped(
         }
         if (n == 0) break;
         const take = @min(@as(usize, @intCast(n)), max_bytes - buf.items.len);
-        buf.appendSlice(allocator, tmp[0..take]) catch break;
+        buf.appendSlice(allocator, tmp[0..take]) catch {
+            allocation_failed = true;
+            break;
+        };
         if (buf.items.len >= max_bytes) {
             overflowed = true;
             break;
         }
     }
     _ = std.c.close(out_pipe[0]);
-    out.* = try buf.toOwnedSlice(allocator);
+    // Even final slice allocation can fail: reap before any fallible return.
     const code = reapPid(pid);
+    if (allocation_failed) return error.OutOfMemory;
+    out.* = try buf.toOwnedSlice(allocator);
     if (overflowed) return -2;
     if (read_failed) return -1;
     return code;
@@ -371,6 +383,7 @@ pub fn runRemoteCappedCancelable(
     errdefer buf.deinit(allocator);
     var tmp: [16 * 1024]u8 = undefined;
     var overflowed = false;
+    var allocation_failed = false;
     var cancelled = false;
     while (true) {
         // **접을지 먼저 묻는다**(RAV7b-4). 훅이 없으면 이 블록은 통째로 안 돈다 — 예전 경로 그대로다.
@@ -395,7 +408,10 @@ pub fn runRemoteCappedCancelable(
         }
         if (n == 0) break; // EOF
         const take = @min(@as(usize, @intCast(n)), max_bytes - buf.items.len);
-        buf.appendSlice(allocator, tmp[0..take]) catch break;
+        buf.appendSlice(allocator, tmp[0..take]) catch {
+            allocation_failed = true;
+            break;
+        };
         if (buf.items.len >= max_bytes) {
             overflowed = true;
             break;
@@ -409,8 +425,10 @@ pub fn runRemoteCappedCancelable(
     // `-S <ctl>` 로 붙은 **client** 만 죽는다. master 는 남으므로 다음 왕복이 곧바로 선다.
     if (cancelled) _ = std.c.kill(pid, std.posix.SIG.TERM);
     _ = std.c.close(out_pipe[0]); // 넘쳤거나 접었으면 이 닫기가 자식을 EPIPE 로 끝낸다
-    out.* = try buf.toOwnedSlice(allocator);
+    // Even final slice allocation can fail: reap before any fallible return.
     const code = reapPid(pid);
+    if (allocation_failed) return error.OutOfMemory;
+    out.* = try buf.toOwnedSlice(allocator);
     // **접은 답은 성공이 아니다.** 읽다 만 바이트는 꼬리가 없어 파서가 잘림으로 읽지만, 호출자가
     // 코드만 보고 「깨끗한 0」으로 오독하지 않게 여기서도 가른다(넘침과 같은 규율).
     if (cancelled) return -3;

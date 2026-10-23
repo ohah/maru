@@ -4995,3 +4995,17 @@ Artifact controls 총 **20** test methods, 새 범위 음성 artifact **32**종 
 - 수정 후 focused 5 tests/5 passed. Debug 10회 + ReleaseFast 10회, **20/20 반복·총 100개 테스트 실행**은 `/tmp/maru-process-isolation-20/manifest.json`과 회차별 로그에 있다. 서로 다른 20종 결함이나 GUI E2E 20회라고 표현하지 않는다.
 - `test-editor-process-isolation`은 test 수·실제 passed 수를 검사하고 macOS-only CI에 포함한다. 전체 `test-editor`에도 회귀를 포함한다. 전체 ReleaseFast·경계 검사 및 원격 CI 결과는 해당 수정 PR의 현재 checks와 본문을 따른다.
 - 기존 main CI `39748813579`의 EXFB3는 포맷 미적용만 기록해 당시 outcome을 확정할 수 없다. 새 diagnostic은 재발 시 formatter counters와 notice를 남긴다. 로컬에서 결정적으로 재현한 pipe 수명 결함과 기존 원격 run의 정확한 스케줄을 구분한다.
+
+
+## 검색 워커 fd 격리 (2026-10-23)
+
+구현. `runDelimited`가 `macos_spawn.captureStdout`을 거쳐 `CLOEXEC_DEFAULT`를 사용한다. 부모의 열린 root handle·명시 환경·고정 helper argv를 보존하고 stdout만 연결한다. 변경은 프로세스 경계이며 UI 시각 변경은 없다.
+
+- `test-editor-search-fd-isolation`은 **20 compiled / 20 passed**를 요구한다. 서로 다른 공격 가설 20개를 Debug·ReleaseFast에서 실행한다. unmarked pipe·높은 fd·일반 파일·root fd 격리와 부모 소유권, 보호된 대조군, Unicode argv·환경·cwd·stdin EOF, stderr 역압·큰 stdout·NUL 이름, 사전/실행 중 취소, 시한·비정상 종료·callback/전문 오류 회수, root 교체, 기동/argv/준비 및 stream OOM을 검사한다. 자식을 만든 경우 실제 waitpid 소유권도 검증한다.
+- 같은 제품 runner를 이전 spawn으로 되돌린 사본에서 fd 격리 네 경우가 실제 `inherited`로 실패했다. 정상 경로 15개는 통과했고, 기동 실패의 기존 오류 이름 차이 한 경우도 별도로 실패했다. 그 다섯 번째 실패를 fd 검출로 세지 않는다.
+- `tools/test-search-fd-adversarial.py --output <새 디렉터리>`는 소스 사본에서 Debug/ReleaseFast의 정상·등가·보호 플래그 결함·복원과 source gate의 API/namespace/function/by-name 참조를 확인한다. 20개 행동 검사가 실제 실행되고, 결함은 compile 실패 대신 행동 assertion으로 검출돼야 한다.
+- 실제 오프라인 번들 rg를 사용하는 worker/roots/adapter 회귀를 함께 실행한다. 프로젝트 검색의 GUI·IME 상호작용 전체 E2E나 전체 앱 FD 감사 완료 증거는 아니다. 이번 범위 밖 SSH/PTY/git/update의 감사 항목은 후속 수정 대상이다.
+- 최종 실행 경로·회차별 로그·원격 CI 상태는 해당 PR 본문/checks에 기록한다. 문서의 오래된 Zig fork 가정도 현재 pinned Darwin spawn 경계와 일치시킨다.
+
+
+검색 기반 고리 검증 중 기존 `test-editor-project-search`가 barrel 분석 누락으로 0 tests를 컴파일함을 발견했다. 테스트 루트의 명시적 import와 기존 PCRE2 테스트 의존성을 복구하고, 현재 실제 **288 compiled / macOS 287 passed·Windows 전용 비교 1 skipped**를 요구해 macOS CI에 연결한다. 추가로 드러난 `PSE1` ReleaseFast allocation-failure 판정의 주소 의존 remap은 테스트 backing allocator의 resize/remap을 끄고 실제 alloc/free·OOM 전파 검사를 유지해 안정화한다. 제품 JSON parser 동작은 바꾸지 않는다.

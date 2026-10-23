@@ -1696,6 +1696,7 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [VS Code 방향의 편집기 검색 판정](plans/editor-search-policy.md): 기본 단어 구분자·빈 대안 우선순위·EOF 중복과 치환의 승인 계약.
 - [문서 전체 정규식 검색·치환](plans/editor-document-regex.md): 사용자 승인한 원문·ANYCRLF 정책으로 공통 엔진·여러 줄 표시·캡처 치환을 연결한다.
 
+- [프로젝트 검색 worker fd 격리](plans/editor-project-search.md): Zig 0.17 Darwin spawn의 fd 보호 우회를 차단하고 실제 프로세스 20개 시나리오와 API 재유입 gate를 제공한다.
 - [프로젝트 검색 결과 탭·옵션 UI](plans/editor-project-search-pane.md): 읽기 전용 결과 사본·Enter 이동·diff 전문 탭.
 
 - [여러 문서 Undo/Redo 사전 준비](plans/editor-history-transaction.md): 안정적인 항목 ID/epoch와 전체 준비·재검증 코어, 같은 창의 열린 문서 연결 편집과 Cmd+Z/Redo 선택 구현; 검색 배치 연결은 후속.

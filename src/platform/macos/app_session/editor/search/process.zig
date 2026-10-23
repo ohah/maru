@@ -54,13 +54,16 @@ pub fn runDelimited(a: std.mem.Allocator, io: std.Io, argv: []const []const u8, 
     const initial = root.stat;
     const before = try std.Io.Dir.cwd().statFile(io, canonical, .{});
     if (before.inode != initial.inode or before.kind != .directory or !sameDevice(root)) return error.RootChanged;
-    var child = try std.process.spawn(io, .{ .argv = argv, .environ_map = environment, .cwd = .{ .dir = directory }, .stdin = .ignore, .stdout = .pipe, .stderr = .ignore });
-    const pid = child.id.?;
+    // Zig 0.17 Darwin spawn bypasses pthread_atfork and does not close unrelated
+    // descriptors by default. Keep the image receive window safe independently
+    // of its fork fence, with the existing CLOEXEC_DEFAULT platform helper.
+    const child = try @import("maru").pty.macos_spawn.captureStdout(a, argv, environment, directory.handle);
+    const pid = child.pid;
     stats.child_pid = pid;
     stats.children_started += 1;
     stats.reaped = false;
-    const fd = child.stdout.?.handle;
-    defer child.stdout.?.close(io);
+    const fd = child.stdout_fd;
+    defer _ = c.close(fd);
     var reaped = false;
     defer if (!reaped) {
         _ = c.kill(pid, posix.SIG.KILL);

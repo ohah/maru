@@ -698,6 +698,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    project_search_module.addImport("pcre2_c", pcre2_api.mod);
+    project_search_module.linkLibrary(pcre2_lib);
     const project_search_adapter = b.addExecutable(.{
         .name = "maru-project-search-adapter",
         .root_module = b.createModule(.{
@@ -727,10 +729,28 @@ pub fn build(b: *std.Build) void {
     b.step("editor-project-search-worker", "Build actual background search lifecycle probe").dependOn(&project_search_worker_install.step);
     const project_search_adapter_install = b.addInstallArtifact(project_search_adapter, .{});
     b.step("editor-project-search-adapter", "Build actual ripgrep protocol probe").dependOn(&project_search_adapter_install.step);
+    const search_fd_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/platform/macos/project_search_fd_judges.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+    }), .filters = &.{"EDPSFD"} });
+    const run_search_fd = b.addRunArtifact(search_fd_tests);
+    run_search_fd.setCwd(b.path("."));
+    run_search_fd.addArg("--maru-expect-tests=20");
+    b.step("test-editor-search-fd-isolation", "Run 20 real search process descriptor and lifecycle regressions").dependOn(&run_search_fd.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_search_fd.addArg("--maru-expect-passed=20");
+    }
     const project_search_tests = addProjectTest(b, .{ .root_module = project_search_module });
     const run_project_search_tests = b.addRunArtifact(project_search_tests);
-    run_project_search_tests.addArg("--maru-expect-tests=25");
+    run_project_search_tests.addArg("--maru-expect-tests=288");
     b.step("test-editor-project-search", "Run project search protocol and argv judges").dependOn(&run_project_search_tests.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_project_search_tests.addArg("--maru-expect-passed=287"); // One Windows-only path comparison is intentionally skipped.
+        macos_only_test_step.dependOn(&run_project_search_tests.step);
+    }
     const ripgrep_prepare = b.addSystemCommand(&.{ "python3", "tools/build-ripgrep.py", "--output", "zig-out/ripgrep" });
     ripgrep_prepare.setCwd(b.path("."));
     ripgrep_prepare.has_side_effects = true;
@@ -6347,6 +6367,10 @@ pub fn build(b: *std.Build) void {
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_editor_tests.step.dependOn(&ripgrep_prepare.step);
     const editor_test_step = b.step("test-editor", "Run the native editor judges only (fast feedback; not a substitute for `test`)");
     editor_test_step.dependOn(&run_editor_tests.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        editor_test_step.dependOn(&run_search_fd.step);
+        macos_only_test_step.dependOn(&run_search_fd.step);
+    }
     // caret 렌더(`CRT*`)와 왕복 불변식 ①은 chrome 쪽 모듈에 있다 — 15초라 함께 돌린다.
     editor_test_step.dependOn(&run_chrome_ui_tests.step);
     editor_test_step.dependOn(&run_outline_pure.step);

@@ -115,7 +115,14 @@ test "PSE1 JSON ranges own multiline UTF8 and CRLF bytes" {
     try std.testing.expectEqualStrings("가foo\n", decoded.match.text);
     try std.testing.expectEqual(Position{ .line = 0, .byte = 3 }, decoded.match.ranges[0].start);
 
-    try std.testing.checkAllAllocationFailures(a, struct {
+    // Arena growth can remap in place depending on the backing address. Force
+    // the allocating fallback so failure-site enumeration is stable in ReleaseFast;
+    // alloc/free still use the testing allocator and every OOM must propagate.
+    var stable_vtable = a.vtable.*;
+    stable_vtable.resize = std.mem.Allocator.noResize;
+    stable_vtable.remap = std.mem.Allocator.noRemap;
+    const stable: std.mem.Allocator = .{ .ptr = a.ptr, .vtable = &stable_vtable };
+    try std.testing.checkAllAllocationFailures(stable, struct {
         fn run(alloc: std.mem.Allocator) !void {
             var value = try parse(alloc, sample);
             defer value.match.deinit(alloc);

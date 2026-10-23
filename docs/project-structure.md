@@ -687,3 +687,6 @@ actor coordinator가 전체 반영한다. 기존 모델 전용 `worker.zig`는 �
 - `src/platform/macos/app_session/inspector_file_header_details.zig`: 실제 DrawCell에서 rect를 수집하고 입력·cursor·Inspector와 연결.
 - `src/chrome/components/file_header.zig`: 파일 보기 모드 strip의 중립 발행 tree.
 - `src/platform/macos/app_session/inspector_file_header.zig`: L2 mode 기하·live 파일 Term 신원과 paint/input/Inspector 연결.
+
+
+검색 helper의 argv/env/cwd/stdout 준비와 fd 격리는 `src/pty/macos_spawn.zig::captureStdout`이 소유한다. 제품 worker의 스트림·취소·회수는 `src/platform/macos/app_session/editor/search/process.zig`에 남는다. `src/platform/macos/project_search_fd_judges.zig`는 이 제품 runner에 대한 20개 실제 프로세스 회귀의 전용 진입점이다.

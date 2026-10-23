@@ -14,6 +14,30 @@
 
 이 문서에 없는 결정이 필요하면 임의로 진행하지 않고 사용자와 먼저 논의한다([필수 프로젝트 규칙](project-rules.md)).
 
+## SSH 자식의 FD 경계
+
+`ssh_upload`의 일곱 실행 경로는 공통 `macos_spawn.spawnMapped`를 사용한다.
+`CLOEXEC_DEFAULT`와 명시적 stdio 매핑으로 부모의 다른 FD를 넘기지 않는다.
+부모가 FD 한도를 낮추기 전에 열린 높은 번호의 FD도 제외한다. 업로드/script/watch의
+stdin 파이프, 캡처의 닫힌 stdin, 명령/events의 dev-null 입력과 stderr 상속을 유지한다.
+파이프는 양 끝 CLOEXEC 설정 실패도 확인하며 닫힌 호스트 stdio와 충돌하지 않도록
+3 이상의 번호를 쓴다. macOS 실행 준비나 exec 실패는 기존 ForkFailed 오류로 반환한다.
+공통 spawn 정책에 따라 자식 신호 마스크와 처분은 기본값으로 시작한다.
+
+`mise exec -- python3 tools/test-ssh-fd-isolation.py`는 외부 파이프·일반 FD·낮춘
+soft limit 위 FD·여러 외부 파이프·닫힌 호스트 stdin의 다섯 적대적 조건과 CLOEXEC 정상
+대조군을 각각 일곱 실행 경로에서 검사한다(Debug/ReleaseFast 각 6개). 전용 PATH의
+가짜 ssh를 쓰며 네트워크에 접속하지 않는다. 정확한 출력, stdin EOF, 자식 종료와
+부모 FD 소유권을 확인하고 macOS-only CI에서도 실행한다.
+
+Linux에서 실행되는 기존 CLI/remote-watch 검증은 같은 stdio 정책을 fork/exec와
+`close_range`로 적용한다. 커널이 FD 격리를 수행하지 못하면 실행을 실패시킨다.
+Darwin 전용 spawn API는 Linux에서 분석하지 않는다. Linux 실행 검증은 CI가 담당하며
+로컬 교차 컴파일 결과와 구분한다. watch 대조군은 부모 stdin 파이프로 보낸 `watch`
+바이트를 실제 자식이 읽어야 통과한다.
+
+Linux CI의 첫 경계 샤드에서도 동일한 FD 격리 시나리오 여섯 개를 Debug/ReleaseFast로 실제 실행한다. macOS 실행과 Linux 교차 컴파일 결과와 별도로 판정한다.
+
 ## 1. `maru ssh` terminfo·자기식별·ControlMaster 스택
 
 > 이 절은 이미 구현된 동작의 기록이다. 단일 출처는 코드(`src/cli/ssh.zig`, `src/terminal/core.zig`)이고, 여기서는 설계 의도를 보존한다.
@@ -153,7 +177,7 @@ flowchart TD
 
    - **비동기 구간까지 대상 고정**: 원격 세션의 파일 드롭은 백그라운드 업로드가 끝난 **뒤** 경로를 paste하므로, 드롭과 붙는 시점 사이에 비동기 구간이 있다. **드롭 시점의 surface id를 업로드 job에 실어**(`UploadJob.target_id` → `UploadResult.target_id`) 완료 시 `pasteTextTo(target_id, …)`로 되돌린다 — 그 사이 사용자가 pane/탭을 옮겨도 경로는 **드롭한 pane**에 붙는다. **대상이 사라졌으면**(그 Term이 닫혔거나 워크스페이스가 다른 창으로 이동) **다른 pane에 붙이지 않고 notice 토스트로 경로를 알린다**: 사용자가 드롭하지도 않은 pane의 명령줄 한복판에 경로가 꽂히는 것이 이 라우팅이 없애려는 오삽입 그 자체고, 그렇다고 조용히 버리면 파일은 원격에 올라갔는데 참조할 방법이 없기 때문이다. 붙여넣기 확인 모달도 같은 규율이다(모달을 띄운 시점의 대상을 `pending_paste_confirm_target`에 고정 — 확인하는 동안 pane을 옮겨도 payload는 원래 pane으로). 이를 위해 미전송 paste 잔여 큐는 **surface별**(`pending_pastes`)이다: 단일 FIFO였을 땐 잔여가 다 빠지기 전까지 대상이 옛 surface에 고정돼, 다른 surface로 갈 바이트가 그 FIFO에 붙으면 엉뚱한 pane으로 갔다.
    - **paste(4단계)**: Swift `pastePasteboardText`(Cmd+V)가 클립보드 이미지(png/tiff/jpeg → `clipboardImagePng`가 PNG로 정규화)면 먼저 로컬 임시 PNG를 만들고, 그 경로와 PNG 바이트를 ABI로 넘긴다. 로컬 in-process Term은 즉시 false를 돌려 Swift가 그 경로를 paste한다. host-backed Term은 true로 소비하고 두 payload를 user-action queue가 소유한다. fresh SSH면 `pasted-<pid>-N.png`로 업로드하고, fresh local이면 **원래 surface**에 임시 경로를 paste한다. 이렇게 해야 비동기 판정이 host-backed local 이미지 paste를 조용히 버리지 않는다. 사용되지 않은 임시 파일은 기존 다음-launch 정리가 회수한다.
-   - **공통 업로드**: 로컬 세션이면 경로 셸 이스케이프 paste(드롭)/불개입(paste), maru ssh 원격이면 **백그라운드 스레드**(`startUploadBytes`→`uploadWorker`→`ssh_upload.uploadBytes`)가 control socket에 업로드하고 완료 시 메인 tick(`drainUploadResults`)이 원격 절대경로를 paste한다. 원격으로 확정된 뒤 context 생성, 크기/OOM, worker 시작 중 하나라도 실패하면 notice만 내고 **로컬 경로/Swift temp PNG fallback을 소비**한다. 실행은 **posix fork+pipe**로 ssh 자식 프로세스(0.16 `std.process.Child`가 io 기반이라 백그라운드 스레드에 부적합 — `pty/macos.zig` 패턴). 원격 수신 셸 구절은 `cli/ssh.zig` `uploadShellCommand`(mkdir + cat(stdin→파일) + 절대경로 stdout echo).
+   - **공통 업로드**: 로컬 세션이면 경로 셸 이스케이프 paste(드롭)/불개입(paste), maru ssh 원격이면 **백그라운드 스레드**(`startUploadBytes`→`uploadWorker`→`ssh_upload.uploadBytes`)가 control socket에 업로드하고 완료 시 메인 tick(`drainUploadResults`)이 원격 절대경로를 paste한다. 원격으로 확정된 뒤 context 생성, 크기/OOM, worker 시작 중 하나라도 실패하면 notice만 내고 **로컬 경로/Swift temp PNG fallback을 소비**한다. macOS 실행은 **CLOEXEC_DEFAULT spawn+pipe**로 ssh 자식 프로세스를 띄운다(io 무관·백그라운드 스레드 안전, 명시적 stdio만 전달). 원격 수신 셸 구절은 `cli/ssh.zig` `uploadShellCommand`(mkdir + cat(stdin→파일) + 절대경로 stdout echo).
 
 ### 4.2 원격 의존성
 
@@ -167,7 +191,7 @@ flowchart TD
 - **bounded queue**: 창당 실행 중 observation action은 하나다. 실행 중 항목을 포함해 최대 8 actions, **freshness 판정 대기 중 owned action payload** 합계 32MiB, 파일 드롭 한 action은 최대 256 paths/64KiB NUL block을 허용한다. admission 전에 전부 검사하고 cap 초과는 payload copy·request 0으로 거부한다. 이 32MiB는 판정 뒤 기존 SSH upload worker가 읽은 파일 내용의 resident/concurrency 상한이 아니다. FIFO를 보존하되 각 action deadline은 admission monotonic 시각부터 5초다. queue에서 만료되면 request 없이 terminal 실패하므로 앞 action의 timeout이 뒤 action마다 새 5초를 만들지 않는다. 이미 전송된 probe가 timeout이면 correlation을 abandoned tombstone으로 남겨 late matching event만 조용히 소비한다. 그 event가 오기 전에는 같은 managed connection에서 다음 probe가 앞질러 가지 않으며, queue의 뒤 action은 각자의 원래 deadline으로 만료된다.
 - **순수 로직(`cli/ssh.zig`)**: `controlSocketPath`·`sanitizeDropFilename`·`uploadShellCommand`·`max_upload_bytes` + control socket 경로 안정화/세션 유지(`wrapper_script`).
 - **원격 셸 규율(`session/remote_shell.zig`)**: 원격 로그인 셸에 문자열을 넘기는 **모든** 자리가 여기를 지난다 — 인용(`'\''`), `sh -c` 껍데기, 그리고 필요할 때의 PATH 처방. ⚠️ **`ssh host cmd` 는 명령을 사용자의 로그인 셸에 넘기며, 그것이 POSIX 셸이라는 보장이 없다**: csh/tcsh 는 `d="…"`·`PATH="…"` 를 **명령으로** 읽고 `Command not found` 만 낸 채 지나간다(실측 2026-09-01). 그래서 로그인 셸에는 **전부 인용된 토큰만** 주고 확장은 `sh` 안에서만 시킨다. 같은 처방이 네 곳에 따로 적혀 있다가 **네 곳이 나란히 틀렸으므로**(드롭 업로드·훅 설치·이벤트 스트리머·원격 SCM), 경계 판정자가 **사본이 다시 생기는 것**을 막는다.
-- **업로드 실행(`ssh_upload.zig`)**: posix fork+pipe로 ssh 자식 프로세스(io 무관 → 백그라운드 스레드 안전).
+- **업로드 실행(`ssh_upload.zig`)**: macOS는 `macos_spawn.spawnMapped`의 CLOEXEC_DEFAULT와 stdio 파이프로 ssh 자식을 실행한다(io 무관 → 백그라운드 스레드 안전). Linux 검증 경로는 fork/exec와 `close_range`를 쓴다.
 
 ## 5. 보안·정책
 

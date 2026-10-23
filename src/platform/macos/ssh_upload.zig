@@ -1,10 +1,72 @@
-//! 드롭한 파일 바이트를 maru ssh control socket으로 업로드한다(이미지 드롭 over SSH 3b). **posix
-//! fork+pipe**로 ssh 자식 프로세스를 띄운다 — `std.process.Child`(0.16에서 io 기반으로 개편)를 피해
-//! io 무관·스레드 안전하게 만든다(백그라운드 스레드에서 호출, 3c). maru `pty/macos.zig`의 fork+exec
-//! 저수준 패턴(`std.c.*`)과 동일한 결이다. 순수 로직(파일명 정제·수신 셸 구절·크기 상한)은 cli/ssh.zig가
-//! 단일 출처. 설계 근거: docs/ssh-integration.md §4.
+//! SSH transfer and streaming processes use the shared CLOEXEC_DEFAULT spawn
+//! boundary. Only explicit stdio reaches a child; all setup is independent of
+//! std.Io so background workers do not run app-host I/O. Remote command policy
+//! remains in cli/ssh.zig and session modules. See docs/ssh-integration.md.
 
 const std = @import("std");
+
+const child_spawn = @import("maru").pty.macos_spawn;
+const Input = union(enum) { closed, dev_null, fd: c_int };
+fn spawnChild(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, input: Input, stdout_fd: c_int) !std.c.pid_t {
+    const stderr_fd: ?c_int = if (std.c.fcntl(2, std.c.F.GETFD) >= 0) 2 else null;
+    var devnull = if (input == .dev_null) std.c.open("/dev/null", .{ .ACCMODE = .RDONLY }) else -1;
+    if (input == .dev_null and devnull < 0) return error.ForkFailed;
+    defer if (devnull >= 0) {
+        _ = std.c.close(devnull);
+    };
+    if (devnull >= 0 and devnull < 3) {
+        const moved = std.c.fcntl(devnull, std.c.F.DUPFD, @as(c_int, 3));
+        if (moved < 0) return error.ForkFailed;
+        _ = std.c.close(devnull);
+        devnull = moved;
+    }
+    const stdin_fd: ?c_int = switch (input) {
+        .closed => null,
+        .dev_null => devnull,
+        .fd => |fd| fd,
+    };
+    // Match the old closed/dev-null/pipe stdin contracts, with no inherited
+    // nonstdio descriptors. Signal defaults follow the shared spawn policy.
+    if (comptime @import("builtin").os.tag == .linux) {
+        // Existing Linux CLI/remote-watch judges execute this POSIX transport.
+        // Linux has no Darwin CLOEXEC_DEFAULT: close the entire nonstdio range
+        // in the child, including descriptors above a lowered soft limit.
+        const pid = std.c.fork();
+        if (pid < 0) return error.ForkFailed;
+        if (pid == 0) {
+            if (stdin_fd) |fd| {
+                if (std.c.dup2(fd, 0) < 0) std.c._exit(127);
+            } else _ = std.c.close(0);
+            if (std.c.dup2(stdout_fd, 1) < 0) std.c._exit(127);
+            if (stderr_fd == null) _ = std.c.close(2);
+            // Fail closed if the kernel cannot enforce descriptor isolation.
+            if (std.os.linux.close_range(3, -1, .{ .UNSHARE = false, .CLOEXEC = false }) != 0) std.c._exit(127);
+            _ = std.c.execve(path, argv, @ptrCast(std.c.environ));
+            std.c._exit(127);
+        }
+        return pid;
+    }
+    return child_spawn.spawnMapped(path, argv, @ptrCast(std.c.environ), .{ stdin_fd, stdout_fd, stderr_fd }) catch error.ForkFailed;
+}
+
+fn createPipe(fds: *[2]c_int) !void {
+    if (std.c.pipe(fds) != 0) return error.PipeFailed;
+    errdefer for (fds.*) |fd| {
+        _ = std.c.close(fd);
+    };
+    for (fds) |*slot| {
+        if (slot.* < 3) {
+            const moved = std.c.fcntl(slot.*, std.c.F.DUPFD, @as(c_int, 3));
+            if (moved < 0) return error.PipeFailed;
+            _ = std.c.close(slot.*);
+            slot.* = moved;
+        }
+        const fd = slot.*;
+        const flags = std.c.fcntl(fd, std.c.F.GETFD);
+        if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFD, flags | std.c.FD_CLOEXEC) < 0) return error.PipeFailed;
+    }
+}
+
 // cli/ssh.zig를 직접 import하면 root와 maru 두 모듈에 중복되므로(빌드 에러) maru 모듈을 통해 쓴다.
 const ssh = @import("maru").cli.ssh;
 const remote_shell = @import("maru").session.remote_shell;
@@ -37,7 +99,7 @@ const stream_resume_script = remote_shell.path_assign ++
 
 pub const UploadError = error{
     PipeFailed, // pipe(2) 실패
-    ForkFailed, // fork(2) 실패
+    ForkFailed, // 자식 실행 준비 또는 spawn 실패
     UploadFailed, // ssh 자식이 비정상 종료(exit != 0) 또는 출력 읽기 실패
     EmptyResponse, // 원격이 경로를 돌려주지 않음
 };
@@ -61,7 +123,7 @@ pub fn uploadBytes(
 
     // null-term C argv: env ssh -S <ctl> <dest> <cmd>. 0.16 std엔 execvp(PATH 검색)가 없어 /usr/bin/env를
     // execve해 env(1)가 PATH에서 ssh를 찾게 한다(현재 env 상속 — SSH_AUTH_SOCK·ControlMaster 등; maru
-    // wrapper도 env로 ssh를 실행해 일관). 문자열은 fork/exec까지 유효해야 하므로 dupeZ로 보관한다.
+    // wrapper도 env로 ssh를 실행해 일관). 문자열은 spawn 호출이 끝날 때까지 유효해야 하므로 sentinel 복사로 보관한다.
     const c_env0 = try allocator.dupeSentinel(u8, "env", 0); // execve argv[0](프로그램 이름)
     defer allocator.free(c_env0);
     const c_ssh = try allocator.dupeSentinel(u8, "ssh", 0);
@@ -84,30 +146,17 @@ pub fn uploadBytes(
 
     // stdin/stdout 파이프(부모↔자식). [0]=read, [1]=write.
     var in_pipe: [2]c_int = undefined;
-    if (std.c.pipe(&in_pipe) != 0) return UploadError.PipeFailed;
+    try createPipe(&in_pipe);
     var out_pipe: [2]c_int = undefined;
-    if (std.c.pipe(&out_pipe) != 0) {
-        // No child owns these ends yet; release both when the second pipe fails.
+    createPipe(&out_pipe) catch {
         for (in_pipe) |fd| _ = std.c.close(fd);
         return UploadError.PipeFailed;
-    }
+    };
 
-    const pid = std.c.fork();
-    if (pid < 0) {
+    const pid = spawnChild("/usr/bin/env", &argv, .{ .fd = in_pipe[0] }, out_pipe[1]) catch {
         for ([_]c_int{ in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
         return UploadError.ForkFailed;
-    }
-    if (pid == 0) {
-        // child: stdin←in_pipe[0], stdout←out_pipe[1]. dup2/close/execvp만(async-signal-safe).
-        _ = std.c.dup2(in_pipe[0], 0);
-        _ = std.c.dup2(out_pipe[1], 1);
-        _ = std.c.close(in_pipe[0]);
-        _ = std.c.close(in_pipe[1]);
-        _ = std.c.close(out_pipe[0]);
-        _ = std.c.close(out_pipe[1]);
-        _ = std.c.execve("/usr/bin/env", &argv, @ptrCast(std.c.environ)); // env가 PATH에서 ssh를 찾는다
-        std.c._exit(127); // execve 실패(/usr/bin/env 없음 등)
-    }
+    };
 
     // parent: 안 쓰는 끝을 닫고, stdin으로 bytes를 흘린 뒤(원격 cat이 받음) 닫고, stdout에서 경로를 읽는다.
     _ = std.c.close(in_pipe[0]);
@@ -133,7 +182,7 @@ pub fn uploadBytes(
 
 /// 원격 이벤트 스트리머를 띄운다([계획](../../../docs/plans/remote-agent-state.md) RA5).
 ///
-/// `uploadBytes` 와 **같은 방식**(fork + `/usr/bin/env ssh -S <ctl> <dest> <cmd>`)이지만 수명이 다르다 —
+/// `uploadBytes` 와 **같은 방식**(stdio 파이프 + `/usr/bin/env ssh -S <ctl> <dest> <cmd>`)이지만 수명이 다르다 —
 /// 업로드는 한 번 쓰고 EOF 를 기다리는 단발이고, 이쪽은 **계속 읽는 장수명 자식**이다. 그래서 fd 와 pid 를
 /// 돌려주고 호출자가 읽기·수확을 맡는다.
 ///
@@ -141,7 +190,7 @@ pub fn uploadBytes(
 /// 같은 호스트 pane 다섯이 상한이 된다.
 /// 감시자 스트림. `Stream` 과 달리 **stdin 쓰기 끝을 부모가 든다** — 그 fd 를 닫는 것이 조용한
 /// 자식에게 보내는 유일한 정상 종료 신호다.
-/// 원격에서 **셸 구절 하나를 돌리고 끝난다**(RW2c). `uploadBytes` 와 같은 fork+pipe 인데 두 가지가
+/// 원격에서 **셸 구절 하나를 돌리고 끝난다**(RW2c). `uploadBytes`와 같은 stdio 파이프 매핑인데 두 가지가
 /// 다르다: 보낼 바이트가 **없을 수도** 있고(확인만 하는 경우), 돌려주는 것이 경로가 아니라
 /// **종료 코드와 stdout** 이다.
 ///
@@ -181,25 +230,17 @@ pub fn runRemoteScript(
     };
 
     var in_pipe: [2]c_int = undefined;
-    if (std.c.pipe(&in_pipe) != 0) return UploadError.PipeFailed;
+    try createPipe(&in_pipe);
     var out_pipe: [2]c_int = undefined;
-    if (std.c.pipe(&out_pipe) != 0) {
+    createPipe(&out_pipe) catch {
         for ([_]c_int{ in_pipe[0], in_pipe[1] }) |fd| _ = std.c.close(fd);
         return UploadError.PipeFailed;
-    }
+    };
 
-    const pid = std.c.fork();
-    if (pid < 0) {
+    const pid = spawnChild("/usr/bin/env", &argv, .{ .fd = in_pipe[0] }, out_pipe[1]) catch {
         for ([_]c_int{ in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
         return UploadError.ForkFailed;
-    }
-    if (pid == 0) {
-        _ = std.c.dup2(in_pipe[0], 0);
-        _ = std.c.dup2(out_pipe[1], 1);
-        for ([_]c_int{ in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
-        _ = std.c.execve("/usr/bin/env", &argv, @ptrCast(std.c.environ));
-        std.c._exit(127);
-    }
+    };
     _ = std.c.close(in_pipe[0]);
     _ = std.c.close(out_pipe[1]);
 
@@ -232,20 +273,12 @@ pub fn runArgvCapped(
     try argv_z.append(allocator, null);
 
     var out_pipe: [2]c_int = undefined;
-    if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;
+    try createPipe(&out_pipe);
 
-    const pid = std.c.fork();
-    if (pid < 0) {
+    const pid = spawnChild(argv_z.items[0].?, @ptrCast(argv_z.items.ptr), .closed, out_pipe[1]) catch {
         for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
         return UploadError.ForkFailed;
-    }
-    if (pid == 0) {
-        _ = std.c.close(0);
-        _ = std.c.dup2(out_pipe[1], 1);
-        for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
-        _ = std.c.execve(argv_z.items[0].?, @ptrCast(argv_z.items.ptr), @ptrCast(std.c.environ));
-        std.c._exit(127);
-    }
+    };
     _ = std.c.close(out_pipe[1]);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -349,22 +382,12 @@ pub fn runRemoteCappedCancelable(
     };
 
     var out_pipe: [2]c_int = undefined;
-    if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;
+    try createPipe(&out_pipe);
 
-    const pid = std.c.fork();
-    if (pid < 0) {
+    const pid = spawnChild("/usr/bin/env", &argv, .closed, out_pipe[1]) catch {
         for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
         return UploadError.ForkFailed;
-    }
-    if (pid == 0) {
-        // stdin 은 /dev/null 이 아니라 **닫는다** — 목록은 입력이 없고, 열린 stdin 은 원격이 read 로
-        // 서는 자리다(`spawnCapture` 가 stdin 을 막는 것과 같은 이유).
-        _ = std.c.close(0);
-        _ = std.c.dup2(out_pipe[1], 1);
-        for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
-        _ = std.c.execve("/usr/bin/env", &argv, @ptrCast(std.c.environ));
-        std.c._exit(127);
-    }
+    };
     _ = std.c.close(out_pipe[1]);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -562,27 +585,12 @@ pub fn spawnRemoteCommand(
     };
 
     var out_pipe: [2]c_int = undefined;
-    if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;
+    try createPipe(&out_pipe);
 
-    const pid = std.c.fork();
-    if (pid < 0) {
+    const pid = spawnChild("/usr/bin/env", &argv, .dev_null, out_pipe[1]) catch {
         for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
         return UploadError.ForkFailed;
-    }
-    if (pid == 0) {
-        // **stdin 을 /dev/null 로 막는다** — 이 명령은 입력을 안 읽고, 열어 두면 부모가 죽었을 때
-        // 그 fd 가 남아 자식이 안 끝난다(스트리머와 같은 이유).
-        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-        if (devnull >= 0) {
-            _ = std.c.dup2(devnull, 0);
-            _ = std.c.close(devnull);
-        }
-        _ = std.c.dup2(out_pipe[1], 1);
-        _ = std.c.close(out_pipe[0]);
-        _ = std.c.close(out_pipe[1]);
-        _ = std.c.execve("/usr/bin/env", &argv, @ptrCast(std.c.environ));
-        std.c._exit(127);
-    }
+    };
     _ = std.c.close(out_pipe[1]);
     return .{ .pid = pid, .out_fd = out_pipe[0] };
 }
@@ -737,27 +745,12 @@ pub fn spawnAgentEventsReplayMode(
     };
 
     var out_pipe: [2]c_int = undefined;
-    if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;
+    try createPipe(&out_pipe);
 
-    const pid = std.c.fork();
-    if (pid < 0) {
+    const pid = spawnChild("/usr/bin/env", &argv, .dev_null, out_pipe[1]) catch {
         for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
         return UploadError.ForkFailed;
-    }
-    if (pid == 0) {
-        // child: stdout→pipe. **stdin 은 /dev/null 로 막는다** — 스트리머는 입력을 안 읽고, 열어 두면
-        // 부모가 죽었을 때 그 fd 가 남아 자식이 영영 안 끝난다.
-        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-        if (devnull >= 0) {
-            _ = std.c.dup2(devnull, 0);
-            _ = std.c.close(devnull);
-        }
-        _ = std.c.dup2(out_pipe[1], 1);
-        _ = std.c.close(out_pipe[0]);
-        _ = std.c.close(out_pipe[1]);
-        _ = std.c.execve("/usr/bin/env", &argv, @ptrCast(std.c.environ));
-        std.c._exit(127);
-    }
+    };
     _ = std.c.close(out_pipe[1]);
     return .{ .pid = pid, .out_fd = out_pipe[0] };
 }
@@ -821,7 +814,7 @@ test "원격 감시자의 git 앞머리는 env 덮어쓰기와 굳히기를 둘 
 
 /// **조용한 감시자를 위한 스트림**(RW3 — [계획](../../../docs/plans/remote-watch.md)).
 ///
-/// `spawnAgentEvents` 와 fork·pipe·execve 모양이 같지만 **stdin 이 다르다.** 그쪽은 `/dev/null` 로
+/// `spawnAgentEvents`와 stdio 파이프 매핑이 같지만 **stdin 이 다르다.** 그쪽은 `/dev/null` 로
 /// 막는데, 근거는 「스트리머는 입력을 안 읽고, 열어 두면 부모가 죽었을 때 자식이 영영 안 끝난다」다.
 /// 감시자에는 그 논리가 **거꾸로** 적용된다:
 ///
@@ -865,25 +858,17 @@ pub fn spawnRemoteWatch(
     };
 
     var out_pipe: [2]c_int = undefined;
-    if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;
+    try createPipe(&out_pipe);
     var in_pipe: [2]c_int = undefined;
-    if (std.c.pipe(&in_pipe) != 0) {
+    createPipe(&in_pipe) catch {
         for ([_]c_int{ out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
         return UploadError.PipeFailed;
-    }
+    };
 
-    const pid = std.c.fork();
-    if (pid < 0) {
+    const pid = spawnChild("/usr/bin/env", &argv, .{ .fd = in_pipe[0] }, out_pipe[1]) catch {
         for ([_]c_int{ out_pipe[0], out_pipe[1], in_pipe[0], in_pipe[1] }) |fd| _ = std.c.close(fd);
         return UploadError.ForkFailed;
-    }
-    if (pid == 0) {
-        _ = std.c.dup2(in_pipe[0], 0); // **파이프다** — 부모가 닫으면 감시자가 EOF 로 끝난다
-        _ = std.c.dup2(out_pipe[1], 1);
-        for ([_]c_int{ in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1] }) |fd| _ = std.c.close(fd);
-        _ = std.c.execve("/usr/bin/env", &argv, @ptrCast(std.c.environ));
-        std.c._exit(127);
-    }
+    };
     _ = std.c.close(out_pipe[1]);
     _ = std.c.close(in_pipe[0]);
     // **읽기가 UI 를 안 멈춘다** — 틱이 드레인하므로 논블로킹이어야 한다(에이전트 채널과 같은 규율).
@@ -916,7 +901,7 @@ pub fn stopAgentEvents(stream: Stream) void {
     if (stream.out_fd >= 0) _ = std.c.close(stream.out_fd);
     // ⚠️ **pid 를 검사하고 신호한다.** `kill(0, …)` 은 «호출자의 프로세스 그룹 **전체**» 이고 `kill(-1, …)`
     // 은 «보낼 수 있는 모든 프로세스» 다. 즉 pid 가 0/음수로 들어오면 이 한 줄이 GUI 자신과 그 아래 모든
-    // 터미널 자식을 죽인다 — fork 실패 경로나 테스트가 만든 가짜 Stream 하나면 닿는 자리라 상한을 둔다.
+    // 터미널 자식을 죽인다 — 기동 실패 경로나 테스트가 만든 가짜 Stream 하나면 닿는 자리라 상한을 둔다.
     if (stream.pid <= 0) return;
     _ = std.c.kill(stream.pid, std.c.SIG.TERM);
     _ = reapPid(stream.pid);

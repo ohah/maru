@@ -28,7 +28,18 @@ pub fn spawn(
     envp: [*:null]const ?[*:0]const u8,
     stdio: Stdio,
 ) SpawnError!c.pid_t {
-    return spawnImpl(path, argv, envp, stdio, null);
+    return spawnImpl(path, argv, envp, stdio, null, null);
+}
+
+/// Map only the named stdio descriptors. Null slots are closed in the child.
+/// Sources must be nonstdio descriptors or the same stdio slot (no cycles).
+/// CLOEXEC_DEFAULT closes every other descriptor, even above a lowered soft
+/// limit or opened by another thread while spawn is being prepared.
+pub fn spawnMapped(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8, sources: [3]?c.fd_t) SpawnError!c.pid_t {
+    for (sources, 0..) |source, index| if (source) |fd| {
+        if (fd < 0 or (fd < 3 and fd != @as(c.fd_t, @intCast(index)))) return error.SpawnFailed;
+    };
+    return spawnImpl(path, argv, envp, .inherit, null, sources);
 }
 
 const CaptureOptions = struct { write_fd: c.fd_t, directory_fd: c.fd_t };
@@ -53,12 +64,12 @@ pub fn captureStdout(a: std.mem.Allocator, argv: []const []const u8, environment
         _ = c.close(fd);
     };
     for (pipe) |fd| if (c.fcntl(fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC)) != 0) return error.SpawnFailed;
-    const pid = try spawnImpl(args[0].?, args.ptr, env.slice.ptr, .dev_null, .{ .write_fd = pipe[1], .directory_fd = directory_fd });
+    const pid = try spawnImpl(args[0].?, args.ptr, env.slice.ptr, .dev_null, .{ .write_fd = pipe[1], .directory_fd = directory_fd }, null);
     _ = c.close(pipe[1]);
     return .{ .pid = pid, .stdout_fd = pipe[0] };
 }
 
-fn spawnImpl(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8, stdio: Stdio, capture: ?CaptureOptions) SpawnError!c.pid_t {
+fn spawnImpl(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8, stdio: Stdio, capture: ?CaptureOptions, mappings: ?[3]?c.fd_t) SpawnError!c.pid_t {
     var attr: c.posix_spawnattr_t = undefined;
     if (c.posix_spawnattr_init(&attr) != 0) return error.SpawnFailed;
     defer _ = c.posix_spawnattr_destroy(&attr);
@@ -80,6 +91,13 @@ fn spawnImpl(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:n
         if (c.posix_spawn_file_actions_addfchdir_np(&actions, output.directory_fd) != 0) return error.SpawnFailed;
     }
     for ([_]c.fd_t{ 0, 1, 2 }) |fd| {
+        if (mappings) |sources| {
+            if (sources[@intCast(fd)]) |source| {
+                if (c.posix_spawn_file_actions_adddup2(&actions, source, fd) != 0) return error.SpawnFailed;
+            }
+            continue;
+        }
+
         if (fd == 1) if (capture) |output| {
             if (c.posix_spawn_file_actions_adddup2(&actions, output.write_fd, 1) != 0) return error.SpawnFailed;
             continue;
@@ -92,6 +110,19 @@ fn spawnImpl(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:n
         } else {
             const flags: c_int = if (fd == 0) 0 else 1; // O_RDONLY · O_WRONLY
             if (c.posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", flags, 0) != 0) return error.SpawnFailed;
+        }
+    }
+    if (mappings) |sources| {
+        for (sources, 0..) |source, index| {
+            if (source == null and c.fcntl(@intCast(index), c.F.GETFD) >= 0 and c.posix_spawn_file_actions_addclose(&actions, @intCast(index)) != 0) return error.SpawnFailed;
+            if (source) |fd| {
+                if (fd < 3) continue;
+                var already_closed = false;
+                for (sources[0..index]) |previous| if (previous == source) {
+                    already_closed = true;
+                };
+                if (!already_closed and c.posix_spawn_file_actions_addclose(&actions, fd) != 0) return error.SpawnFailed;
+            }
         }
     }
     var pid: c.pid_t = 0;

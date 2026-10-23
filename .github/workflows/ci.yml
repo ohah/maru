@@ -259,6 +259,9 @@ jobs:
             zig-v2-${{ runner.os }}-check-boundaries-
             zig-v2-${{ runner.os }}-check-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
             zig-v2-${{ runner.os }}-check-
+      - name: SSH descriptor isolation on Linux
+        if: matrix.shard == 1 && (needs.changes.outputs.code == 'true' || needs.changes.result != 'success')
+        run: python3 tools/test-ssh-fd-isolation.py
       - name: Run the boundary gates (shard)
         env:
           CODE: ${{ needs.changes.outputs.code }}
@@ -541,6 +544,8 @@ jobs:
             zig-out/maru-macos-editor-smoke/editor.summary.txt
             zig-out/editor-webcontent-attribution/
           if-no-files-found: warn
+      - name: SSH descriptor isolation (Debug and ReleaseFast)
+        run: python3 tools/test-ssh-fd-isolation.py
       - name: Preserve project search adapter diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

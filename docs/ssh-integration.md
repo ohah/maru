@@ -128,6 +128,20 @@ flowchart TD
   Remote -. "앱이 이 파일을 연다" .-> App
 ```
 
+## SSH 출력 수집 중 메모리 부족
+
+`runArgvCapped`와 `runRemoteCappedCancelable`는 출력 append 실패를 EOF로 취급하지
+않고 `OutOfMemory`를 반환한다. 읽기 FD를 닫고 자식을 회수한 뒤 최종 slice 할당을
+수행하므로 최종 할당 실패도 자식을 남기지 않는다. `runRemoteScript`도 수집 오류를
+빈 성공 응답으로 바꾸지 않는다. argv 등록 실패 시 임시 문자열을 정리하며
+`remote_shell.wrapAlloc`는 축소 realloc 실패 시 원래 버퍼를 정리하고 오류를 반환한다.
+
+`mise exec -- python3 tools/test-ssh-output-oom.py`는 짧은·여러 청크·빈 출력과
+원격 script/capped 경로의 할당 실패를 각 32개 위치에서 순회한다. 실제 로컬 자식과
+전용 PATH의 가짜 ssh만 사용하며 네트워크에 접속하지 않는다. 성공한 응답은 정확한
+바이트, 실패는 OutOfMemory와 미변경 out, 모든 경로는 ECHILD를 확인한다.
+다섯 시나리오 각각 정상 대조군을 포함하며 Debug/ReleaseFast 및 macOS-only CI에서 돈다.
+
 ## 4. 설계: ControlMaster 사이드채널 드롭 업로드
 
 §1.1의 두 한계를 메우고 로컬 드롭 로직을 더하면 된다. 새 인프라가 아니라 **기존 ControlMaster 사용법의 확장**이다.

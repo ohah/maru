@@ -141,7 +141,9 @@ pub fn wrapAlloc(
         n = quoteAppend(buf, n, a) orelse return error.TooLong;
     }
     if (args.len == 0) n -= 1; // 인자가 없으면 접두 끝의 공백을 되돌린다
-    return allocator.realloc(buf, n) catch buf[0..n];
+    // Failed shrink retains the original allocation length. Returning a shorter
+    // view would make the caller free it with the wrong allocation metadata.
+    return try allocator.realloc(buf, n);
 }
 
 /// 원격 실행 대상. 두 축을 **쌍으로** 든다 — 하나만 들면 「목적지는 아는데 어느 소켓으로?」가 생기고,

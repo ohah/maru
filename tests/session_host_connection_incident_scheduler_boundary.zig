@@ -189,12 +189,12 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn publicationTimestampReceipt("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub const publication_port_testing_api = if (@import(\"builtin\").is_test) struct"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn install(owner: *AppProcessIncidentOwner) Error!void"));
-    try std.testing.expectEqual(@as(usize, 8), count(remote_runtime, "app_process_incident_owner.publication_port_testing_api.install(&owner)"));
+    try std.testing.expectEqual(@as(usize, 10), count(remote_runtime, "app_process_incident_owner.publication_port_testing_api.install(&owner)"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub const PrePublicationSnapshot = PreparedPublicationSnapshot"));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn armPrePublicationSnapshot("));
     try std.testing.expectEqual(@as(usize, 1), count(gui_owner, "pub fn disarmPrePublicationSnapshot() void"));
-    try std.testing.expectEqual(@as(usize, 8), count(remote_runtime, "publication_port_testing_api.armPrePublicationSnapshot(&pre_publication)"));
-    try std.testing.expectEqual(@as(usize, 8), count(remote_runtime, "publication_port_testing_api.disarmPrePublicationSnapshot()"));
+    try std.testing.expectEqual(@as(usize, 10), count(remote_runtime, "publication_port_testing_api.armPrePublicationSnapshot(&pre_publication)"));
+    try std.testing.expectEqual(@as(usize, 10), count(remote_runtime, "publication_port_testing_api.disarmPrePublicationSnapshot()"));
     try std.testing.expectEqual(@as(usize, 1), count(app_session, "const incident_publication_port = session_host.app_process_incident_owner;"));
     try std.testing.expectEqual(@as(usize, 3), count(app_session, "incident_publication_port.publication_port_testing_api.driftSeal()"));
     try std.testing.expectEqual(@as(usize, 2), count(app_session, "incident_publication_port.publication_port_testing_api.reset()"));
@@ -256,10 +256,38 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     );
     try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "adapter.spawnRuntimeWithPoisonCapture("));
     try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "adapter.callUntilWithPoisonCapture("));
-    try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const AdminRpcPoisonCapture = struct"));
-    // 가로채는 자리는 둘이다: blocking 경로의 `poison` 과 deadline 경로의 `poisonWithOps`.
-    try std.testing.expectEqual(@as(usize, 2), count(client, "if (self.captureAdminRpcPoison(reason)) return;"));
-    try std.testing.expectEqual(@as(usize, 6), count(remote_runtime, "app_process_incident_owner.publicationTimestampReceipt()"));
+    try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const ClientCallPoisonCapture = struct"));
+    // 가로채는 자리는 셋이다: blocking 경로의 `poison`, deadline 경로의 `poisonWithOps`, lease 를 쥔 송신의
+    // `poisonWhilePreparedExecutionHeld`(caller 10). 마지막 자리는 read pump capture 도 함께 확인한다.
+    try std.testing.expectEqual(@as(usize, 3), count(client, "if (self.captureClientCallPoison(reason)) return;"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "test \"CR0b mutation 송신 EPIPE는"));
+    try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "test \"CR0b read pump 구간 송신 EPIPE는"));
+    // mutation 송신 입구 셋(`pumpQueuedInput`·`sendInputNonBlocking` 직접 송신·`flushQueuedInputBlocking`)이 capture 를 건다.
+    // 거는 줄마다 바로 다음 줄이 짝인 settle 이어야 한다 — settle 이 빠지면 threadlocal capture 가 죽은 스택을 가리킨 채
+    // 남아 다음 poison 이 그 주소를 역참조한다.
+    const arm_line = "        const armed = self.armMutationIoPoisonCapture(&capture);\n        defer self.settleMutationIoPoisonCapture(&capture, armed);\n";
+    try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, arm_line));
+    try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "self.armMutationIoPoisonCapture("));
+    inline for (.{ "fn pumpQueuedInput(self: *RemoteRuntime)", "pub fn sendInputNonBlocking(self: *RemoteRuntime", "fn flushQueuedInputBlocking(self: *RemoteRuntime)" }) |entry| {
+        const start = std.mem.indexOf(u8, remote_runtime, entry) orelse return error.TestUnexpectedResult;
+        const tail = remote_runtime[start..];
+        const end = std.mem.indexOf(u8, tail, "\n    }\n") orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(usize, 1), count(tail[0..end], arm_line));
+    }
+    // client call capture 의 arm/disarm 은 정해진 owner 만 부른다(read pump capture 와 같은 closed world).
+    inline for (.{ "beginClientCallPoisonCapture(", "endClientCallPoisonCapture(" }) |api| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(allocator, api, "platform/macos/session_host/client.zig", "platform/macos/session_host/client_slot.zig"),
+    );
+    inline for (.{ "beginCurrentClientCallPoisonCapture(", "endCurrentClientCallPoisonCapture(" }) |api| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(allocator, api, "platform/macos/session_host/client_slot.zig", "platform/macos/session_host/host_adapter.zig"),
+    );
+    inline for (.{ "beginMutationIoPoisonCapture(", "endMutationIoPoisonCapture(" }) |api| try std.testing.expectEqual(
+        @as(usize, 0),
+        try countProductSourcesExceptTwo(allocator, api, "platform/macos/session_host/host_adapter.zig", "platform/macos/session_host/remote_runtime.zig"),
+    );
+    try std.testing.expectEqual(@as(usize, 7), count(remote_runtime, "app_process_incident_owner.publicationTimestampReceipt()"));
     try std.testing.expectEqual(@as(usize, 4), count(remote_runtime, "app_process_incident_owner.publishPreparedManagedPoison("));
     try std.testing.expectEqual(@as(usize, 3), count(remote_runtime, "executeDecodedWithManagedPoison("));
     try std.testing.expectEqual(@as(usize, 1), count(remote_runtime, "self.currentGeneration().attachment.callDecoded("));
@@ -267,12 +295,12 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const RegisteredOperationPoisonCapture = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const ReadPumpPoisonCapture = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(publication, "pub const ReadPumpPoisonCaptureLifecycle = enum(u8)"));
-    // 사유 존재 비트는 raw 0(`connection_eof`)을 「없음」으로 읽지 않게 한다 — read pump 와 admin RPC capture 둘이 쓴다.
+    // 사유 존재 비트는 raw 0(`connection_eof`)을 「없음」으로 읽지 않게 한다 — read pump 와 client call capture 둘이 쓴다.
     try std.testing.expectEqual(@as(usize, 2), count(publication, "reason_present_raw: u8 = 0"));
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn beginReadPumpPoisonCapture("));
     try std.testing.expectEqual(@as(usize, 1), count(client, "pub fn endReadPumpPoisonCapture("));
     try std.testing.expectEqual(@as(usize, 1), count(client, "fn captureReadPumpPoison("));
-    try std.testing.expectEqual(@as(usize, 1), count(client, "self.captureReadPumpPoison(reason)"));
+    try std.testing.expectEqual(@as(usize, 2), count(client, "self.captureReadPumpPoison(reason)"));
     try std.testing.expectEqual(@as(usize, 1), count(client_slot, "pub fn beginReadPumpPoisonCapture("));
     try std.testing.expectEqual(@as(usize, 1), count(client_slot, "pub fn endReadPumpPoisonCapture("));
     try std.testing.expectEqual(@as(usize, 1), count(client_slot, "fn readAttachmentBatchInternal("));
@@ -376,7 +404,7 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
         try countProductSourcesExcept(allocator, "app_process_incident_owner.zig", "platform/macos/session_host/app_process_incident_owner.zig"),
     );
     try std.testing.expectEqual(
-        @as(usize, 10),
+        @as(usize, 12),
         try countProductSourcesExcept(allocator, "AppProcessIncidentOwner", "platform/macos/session_host/app_process_incident_owner.zig"),
     );
     try std.testing.expectEqual(

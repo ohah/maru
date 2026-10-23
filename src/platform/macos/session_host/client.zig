@@ -14,7 +14,7 @@ const c = std.c;
 const posix = std.posix;
 threadlocal var checked_allocator_owner_addr: usize = 0;
 threadlocal var read_pump_poison_capture_addr: usize = 0;
-threadlocal var admin_rpc_poison_capture_addr: usize = 0;
+threadlocal var client_call_poison_capture_addr: usize = 0;
 
 /// ClientSlot admission must reject an expected allocator callback before it dereferences the
 /// heap-pinned node or enters its operation fence. This TLS query intentionally needs no Client.
@@ -10660,72 +10660,74 @@ pub const Client = struct {
         return true;
     }
 
-    pub fn beginAdminRpcPoisonCapture(
+    pub fn beginClientCallPoisonCapture(
         self: *Client,
-        capture: *incident_publication_contract.AdminRpcPoisonCapture,
+        capture: *incident_publication_contract.ClientCallPoisonCapture,
     ) bool {
-        if (admin_rpc_poison_capture_addr != 0 or read_pump_poison_capture_addr != 0 or
+        if (client_call_poison_capture_addr != 0 or read_pump_poison_capture_addr != 0 or
             capture.self_addr != @intFromPtr(capture) or
             capture.client_addr != @intFromPtr(self) or capture.slot_addr == 0 or
             capture.timestamp_ns < 0 or
-            capture.source_site_raw != @backingInt(connection_incident.SourceSite.client_response) or
+            (capture.source_site_raw != @backingInt(connection_incident.SourceSite.client_response) and
+                capture.source_site_raw != @backingInt(connection_incident.SourceSite.client_write)) or
             capture.reason_raw != 0 or capture.reason_present_raw != 0 or
-            capture.lifecycle_raw != @backingInt(incident_publication_contract.AdminRpcPoisonCaptureLifecycle.armed))
+            capture.lifecycle_raw != @backingInt(incident_publication_contract.ClientCallPoisonCaptureLifecycle.armed))
             return false;
-        admin_rpc_poison_capture_addr = @intFromPtr(capture);
+        client_call_poison_capture_addr = @intFromPtr(capture);
         return true;
     }
 
-    pub fn endAdminRpcPoisonCapture(
+    pub fn endClientCallPoisonCapture(
         self: *Client,
-        capture: *incident_publication_contract.AdminRpcPoisonCapture,
+        capture: *incident_publication_contract.ClientCallPoisonCapture,
     ) void {
-        if (admin_rpc_poison_capture_addr != @intFromPtr(capture) or
+        if (client_call_poison_capture_addr != @intFromPtr(capture) or
             capture.self_addr != @intFromPtr(capture) or
             capture.client_addr != @intFromPtr(self) or
-            (capture.lifecycle_raw != @backingInt(incident_publication_contract.AdminRpcPoisonCaptureLifecycle.armed) and
-                capture.lifecycle_raw != @backingInt(incident_publication_contract.AdminRpcPoisonCaptureLifecycle.captured)) or
-            (capture.lifecycle_raw == @backingInt(incident_publication_contract.AdminRpcPoisonCaptureLifecycle.armed) and
+            (capture.lifecycle_raw != @backingInt(incident_publication_contract.ClientCallPoisonCaptureLifecycle.armed) and
+                capture.lifecycle_raw != @backingInt(incident_publication_contract.ClientCallPoisonCaptureLifecycle.captured)) or
+            (capture.lifecycle_raw == @backingInt(incident_publication_contract.ClientCallPoisonCaptureLifecycle.armed) and
                 (capture.reason_present_raw != 0 or capture.reason_raw != 0)) or
-            (capture.lifecycle_raw == @backingInt(incident_publication_contract.AdminRpcPoisonCaptureLifecycle.captured) and
+            (capture.lifecycle_raw == @backingInt(incident_publication_contract.ClientCallPoisonCaptureLifecycle.captured) and
                 (capture.reason_present_raw != 1 or
                     std.enums.fromInt(client_poison.ConnectionReason, capture.reason_raw) == null)))
-            @panic("admin rpc poison capture authority drifted");
-        admin_rpc_poison_capture_addr = 0;
+            @panic("client call poison capture authority drifted");
+        client_call_poison_capture_addr = 0;
     }
 
     /// `captureReadPumpPoison` 과 같은 규칙: 첫 사유만 싣고, 다른 두 번째 사유는 기록만 하고 버린다.
     /// Client 의 first reason·unusable·fd 는 바꾸지 않는다 — 게시가 terminalize 한다.
-    fn captureAdminRpcPoison(
+    fn captureClientCallPoison(
         self: *Client,
         reason: client_poison.ConnectionReason,
     ) bool {
-        if (admin_rpc_poison_capture_addr == 0) return false;
-        const capture: *incident_publication_contract.AdminRpcPoisonCapture =
-            @ptrFromInt(admin_rpc_poison_capture_addr);
+        if (client_call_poison_capture_addr == 0) return false;
+        const capture: *incident_publication_contract.ClientCallPoisonCapture =
+            @ptrFromInt(client_call_poison_capture_addr);
         // 다른 Client 의 poison 은 이 capture 의 몫이 아니다 — 그 Client 는 평소대로 latch 한다. read pump capture
-        // 처럼 여기서 죽이면 admin RPC 하나가 앱 전체를 끝낼 수 있다.
+        // 처럼 여기서 죽이면 RPC·송신 하나가 앱 전체를 끝낼 수 있다.
         if (capture.client_addr != @intFromPtr(self)) return false;
         const lifecycle = std.enums.fromInt(
-            incident_publication_contract.AdminRpcPoisonCaptureLifecycle,
+            incident_publication_contract.ClientCallPoisonCaptureLifecycle,
             capture.lifecycle_raw,
-        ) orelse @panic("admin rpc poison capture lifecycle drifted");
-        if (capture.self_addr != admin_rpc_poison_capture_addr or capture.slot_addr == 0 or
+        ) orelse @panic("client call poison capture lifecycle drifted");
+        if (capture.self_addr != client_call_poison_capture_addr or capture.slot_addr == 0 or
             capture.timestamp_ns < 0 or
-            capture.source_site_raw != @backingInt(connection_incident.SourceSite.client_response) or
+            (capture.source_site_raw != @backingInt(connection_incident.SourceSite.client_response) and
+                capture.source_site_raw != @backingInt(connection_incident.SourceSite.client_write)) or
             (lifecycle != .armed and lifecycle != .captured) or
             (lifecycle == .armed and (capture.reason_present_raw != 0 or capture.reason_raw != 0)))
-            @panic("admin rpc poison capture authority drifted");
+            @panic("client call poison capture authority drifted");
         if (lifecycle == .captured) {
-            if (capture.reason_present_raw != 1) @panic("admin rpc poison capture lost its reason");
+            if (capture.reason_present_raw != 1) @panic("client call poison capture lost its reason");
             if (capture.reason_raw != @backingInt(reason))
-                logAdminRpcPoisonReasonDrift(capture.reason_raw, @backingInt(reason));
+                logClientCallPoisonReasonDrift(capture.reason_raw, @backingInt(reason));
             return true;
         }
         capture.reason_raw = @backingInt(reason);
         capture.reason_present_raw = 1;
-        capture.lifecycle_raw = @backingInt(incident_publication_contract.AdminRpcPoisonCaptureLifecycle.captured);
-        logPoisonCaptured("admin_rpc", capture.reason_raw, capture.source_site_raw);
+        capture.lifecycle_raw = @backingInt(incident_publication_contract.ClientCallPoisonCaptureLifecycle.captured);
+        logPoisonCaptured("client_call", capture.reason_raw, capture.source_site_raw);
         return true;
     }
 
@@ -10738,6 +10740,16 @@ pub const Client = struct {
                 @ptrFromInt(self.prepared_request_execution_lease_addr);
             if (self.capturePreparedExecutionPoison(reason, lease.poison_source_site_raw)) return;
         }
+        // lease 를 쥔 송신(입력·제어·resync·pending frame 진전)이 EPIPE 를 먼저 만나도 incident 없이 latch 하지 않는다.
+        // read pump 구간이면 pump 가, 그 밖이면 RemoteRuntime 이 건 client call capture 가 사유를 받아 unwind 뒤 게시한다.
+        // 둘 다 없으면 옛 동작대로 latch 한다(2026-10-23: host 가 끊긴 뒤 키 입력이 pump 보다 먼저 오면 로그도 없이
+        // 재접속이 영영 없었다).
+        // read pump capture 는 다른 Client 의 poison 을 받으면 죽는다(`captureReadPumpPoison`). lease 송신 경로에서는
+        // 그 capture 가 바로 이 Client 를 가리킬 때만 넘긴다 — 아니면 client call capture 나 옛 latch 로 간다.
+        if (read_pump_poison_capture_addr != 0 and
+            @as(*const incident_publication_contract.ReadPumpPoisonCapture, @ptrFromInt(read_pump_poison_capture_addr)).client_addr == @intFromPtr(self) and
+            self.captureReadPumpPoison(reason)) return;
+        if (self.captureClientCallPoison(reason)) return;
         self.latchFirstPoisonReason(reason);
         if (self.poisonAndTakeFd()) |fd| _ = c.close(fd);
     }
@@ -15725,7 +15737,7 @@ pub const Client = struct {
         reason: client_poison.ConnectionReason,
         ops: client_deadline.Ops,
     ) void {
-        if (self.captureAdminRpcPoison(reason)) return;
+        if (self.captureClientCallPoison(reason)) return;
         self.latchFirstPoisonReason(reason);
         if (self.poisonAndTakeFd()) |fd| ops.close(ops.context, fd);
     }
@@ -15845,12 +15857,12 @@ pub const Client = struct {
         );
     }
 
-    /// admin RPC 의 두 번째 사유는 대개 구조적이다 — `callUntilWithOps` 는 안쪽 read 가 `connection_eof` 등으로 poison 한
+    /// client call 의 두 번째 사유는 대개 구조적이다 — `callUntilWithOps` 는 안쪽 read 가 `connection_eof` 등으로 poison 한
     /// 뒤 바깥 catch 가 `response_correlation_lost` 로 한 번 더 부른다. 그래서 오류가 아니라 정보로 남긴다.
-    fn logAdminRpcPoisonReasonDrift(kept_raw: u8, dropped_raw: u8) void {
+    fn logClientCallPoisonReasonDrift(kept_raw: u8, dropped_raw: u8) void {
         if (builtin.is_test) return;
         std.log.info(
-            "admin rpc poison reason drift: kept={s} dropped={s}",
+            "client call poison reason drift: kept={s} dropped={s}",
             .{ poisonReasonName(kept_raw), poisonReasonName(dropped_raw) },
         );
     }
@@ -15918,7 +15930,7 @@ pub const Client = struct {
                 return;
         }
         if (self.captureReadPumpPoison(reason)) return;
-        if (self.captureAdminRpcPoison(reason)) return;
+        if (self.captureClientCallPoison(reason)) return;
         // The cross-thread fence must win over the same-thread allocator diagnostic. During an
         // exclusive cleanup callback even the deferred poison path may not touch Client storage;
         // the rejected shared entry records intrusion and the owner converges to quarantine.

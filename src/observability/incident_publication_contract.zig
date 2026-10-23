@@ -112,13 +112,13 @@ pub const ReadPumpPoisonCaptureLifecycle = enum(u8) {
     finalized = 3,
 };
 
-/// Blocking admin RPC(`runtime.spawn_full`·`host.info`·`runtime.get`)가 응답을 읽다 만난 poison 도 Client
-/// reason/fd 를 먼저 바꾸지 않는다. 이 RPC 들은 prepared execution capture 도 read pump capture 도 없는
-/// plain `Client.call`/`callUntil` 경로라, capture 없이 EOF 를 먼저 만나면 사유만 latch 되고 incident 가
-/// 영영 게시되지 않는다(재접속 admission 0). 이 caller-final stack value 는 그 구간의 exact reason 만
-/// 받고, RemoteRuntime 이 ClientSlot operation 이 풀린 뒤 canonical port 로 게시한다. admin RPC 는
-/// attachment 가 없을 수 있어 controller generation 을 싣지 않는다.
-pub const AdminRpcPoisonCapture = struct {
+/// 현재 Client 에 대한 동기 호출 하나(blocking admin RPC 의 응답 read, lease 를 쥔 mutation 송신의 frame write)가 만난
+/// poison 도 Client reason/fd 를 먼저 바꾸지 않는다. 이 호출들은 prepared execution capture 도 read pump capture 도
+/// 없어서, capture 없이 EOF·EPIPE 를 먼저 만나면 사유만 latch 되고 incident 가 영영 게시되지 않는다(재접속 admission 0).
+/// 이 caller-final stack value 는 그 구간의 exact reason 만 받고, RemoteRuntime 이 operation 이 풀린 뒤 canonical
+/// port 로 게시한다. source site 는 admin RPC 가 `client_response`, mutation 송신이 `client_write` 다. attachment 가 없을
+/// 수 있어 controller generation 을 싣지 않는다.
+pub const ClientCallPoisonCapture = struct {
     self_addr: u64 = 0,
     slot_addr: u64 = 0,
     client_addr: u64 = 0,
@@ -129,7 +129,7 @@ pub const AdminRpcPoisonCapture = struct {
     lifecycle_raw: u8 = 0,
 };
 
-pub const AdminRpcPoisonCaptureLifecycle = enum(u8) {
+pub const ClientCallPoisonCaptureLifecycle = enum(u8) {
     pristine = 0,
     armed = 1,
     captured = 2,
@@ -413,7 +413,7 @@ test "CR0b poison publication 계약은 입력과 repeat key를 재귀 pointer-f
     try std.testing.expect(recursivelyPointerFree(PreparedManagedPoison));
     try std.testing.expect(recursivelyPointerFree(PreparedExecutionPoisonCapture));
     try std.testing.expect(recursivelyPointerFree(ReadPumpPoisonCapture));
-    try std.testing.expect(recursivelyPointerFree(AdminRpcPoisonCapture));
+    try std.testing.expect(recursivelyPointerFree(ClientCallPoisonCapture));
     try std.testing.expect(recursivelyPointerFree(RegisteredOperationPoisonCapture));
     try std.testing.expect(recursivelyPointerFree(ReconnectAdmission));
     try std.testing.expect(recursivelyPointerFree(IncidentRepeatKey));
@@ -505,12 +505,12 @@ test "CR0b poison publication 계약은 composite kind와 lifecycle raw를 닫�
     }) |lifecycle| try std.testing.expect(std.enums.fromInt(PublicationLifecycle, @backingInt(lifecycle)) != null);
     try std.testing.expect(std.enums.fromInt(PublicationLifecycle, 5) == null);
     inline for (.{
-        AdminRpcPoisonCaptureLifecycle.pristine,
-        AdminRpcPoisonCaptureLifecycle.armed,
-        AdminRpcPoisonCaptureLifecycle.captured,
-        AdminRpcPoisonCaptureLifecycle.finalized,
-    }) |lifecycle| try std.testing.expect(std.enums.fromInt(AdminRpcPoisonCaptureLifecycle, @backingInt(lifecycle)) != null);
-    try std.testing.expect(std.enums.fromInt(AdminRpcPoisonCaptureLifecycle, 4) == null);
+        ClientCallPoisonCaptureLifecycle.pristine,
+        ClientCallPoisonCaptureLifecycle.armed,
+        ClientCallPoisonCaptureLifecycle.captured,
+        ClientCallPoisonCaptureLifecycle.finalized,
+    }) |lifecycle| try std.testing.expect(std.enums.fromInt(ClientCallPoisonCaptureLifecycle, @backingInt(lifecycle)) != null);
+    try std.testing.expect(std.enums.fromInt(ClientCallPoisonCaptureLifecycle, 4) == null);
 }
 
 test "CR0b poison publication 계약은 입력의 closed raw 값과 outbound 범위를 검증한다" {

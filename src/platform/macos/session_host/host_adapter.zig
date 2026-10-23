@@ -722,7 +722,7 @@ pub const HostAdapter = struct {
         self: *HostAdapter,
         params_json: []const u8,
         timestamp_ns: i128,
-        capture: *incident_publication_contract.AdminRpcPoisonCapture,
+        capture: *incident_publication_contract.ClientCallPoisonCapture,
     ) client_mod.ClientError![]u8 {
         return self.slot.callCurrentWithAdminPoisonCapture(
             self.slot.connectionGeneration(),
@@ -733,9 +733,38 @@ pub const HostAdapter = struct {
         );
     }
 
-    /// admin capture 를 게시하지 못했을 때 현재 Client 를 옛 동작대로 latch·close 한다.
-    pub fn poisonAfterUnpublishedAdminCapture(self: *HostAdapter, reason_raw: u8) void {
-        self.slot.poisonCurrentAfterUnpublishedAdminCapture(self.slot.connectionGeneration(), reason_raw);
+    /// mutation 송신(입력·제어 frame write) 구간에 client call capture 를 건다(CR0b caller 10). 이미 다른 capture 가
+    /// 걸려 있으면(read pump 구간 안) 걸지 않고 false 다 — 그 구간의 poison 은 바깥 capture 가 받는다.
+    pub fn beginMutationIoPoisonCapture(
+        self: *HostAdapter,
+        timestamp_ns: i128,
+        capture: *incident_publication_contract.ClientCallPoisonCapture,
+    ) bool {
+        if (timestamp_ns < 0 or
+            !std.meta.eql(capture.*, incident_publication_contract.ClientCallPoisonCapture{})) return false;
+        capture.* = .{
+            .self_addr = @intFromPtr(capture),
+            .slot_addr = @intFromPtr(&self.slot),
+            .client_addr = @intFromPtr(self.slot.logicalClient()),
+            .timestamp_ns = timestamp_ns,
+            .source_site_raw = @backingInt(@import("maru").observability.connection_incident.SourceSite.client_write),
+            .lifecycle_raw = @backingInt(incident_publication_contract.ClientCallPoisonCaptureLifecycle.armed),
+        };
+        if (self.slot.beginCurrentClientCallPoisonCapture(capture)) return true;
+        capture.* = .{};
+        return false;
+    }
+
+    pub fn endMutationIoPoisonCapture(
+        self: *HostAdapter,
+        capture: *incident_publication_contract.ClientCallPoisonCapture,
+    ) void {
+        self.slot.endCurrentClientCallPoisonCapture(capture);
+    }
+
+    /// capture 한 사유를 게시하지 못했을 때 현재 Client 를 옛 동작대로 latch·close 한다.
+    pub fn poisonAfterUnpublishedCapture(self: *HostAdapter, reason_raw: u8) void {
+        self.slot.poisonCurrentAfterUnpublishedCapture(self.slot.connectionGeneration(), reason_raw);
     }
 
     /// `callUntil` 과 같지만 응답을 읽다 만난 poison 을 `capture` 로만 받는다(CR0b caller 9).
@@ -745,7 +774,7 @@ pub const HostAdapter = struct {
         params_json: ?[]const u8,
         deadline: client_deadline.AbsoluteDeadline,
         timestamp_ns: i128,
-        capture: *incident_publication_contract.AdminRpcPoisonCapture,
+        capture: *incident_publication_contract.ClientCallPoisonCapture,
     ) client_mod.DeadlineClientError![]u8 {
         return self.slot.callCurrentUntilWithAdminPoisonCapture(
             self.slot.connectionGeneration(),

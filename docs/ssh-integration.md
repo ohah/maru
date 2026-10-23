@@ -558,3 +558,16 @@ lifecycle 테스트는 **부모가 기본 처리일 때만 돌아서 이 결함�
 - 수동 E2E: `maru ssh <host>`로 붙은 뒤 와이파이를 끄고 ① 45초 안에 끊김 메시지가 뜨는지 ② 와이파이를
   켜면 다시 붙는지 ③ 재접속 뒤 드롭 업로드가 여전히 되는지(control socket 재생성) ④ `ssh.reconnect = false`로
   두면 예전처럼 로컬 셸로 떨어지는지.
+
+## SSH 업로드 파이프 생성 실패의 소유권
+
+`src/platform/macos/ssh_upload.zig`의 `uploadBytes`는 두 번째 파이프 생성이
+실패하면 첫 번째 파이프의 양 끝을 닫고 `PipeFailed`를 반환한다. 자식 생성 전의
+실패이므로 부모가 정리한다. `runRemoteScript`와 `spawnRemoteWatch`도 같은
+실패 소유권을 유지한다.
+
+`mise exec -- python3 tools/test-ssh-pipe-cleanup.py`는 macOS에서 실제 FD 한도를
+낮추고 여유 슬롯 0·1·2·3개 및 16회 연속 재시도를 검사한다. 다섯 실패 시나리오와
+정상 로컬 명령 출력 대조군이 Debug/ReleaseFast 각각 6개 통과해야 한다.
+전용 테스트 프로세스만 한도와 PATH를 변경하고 원복하며 SSH 접속은 하지 않는다.
+macOS-only CI에서도 실행한다. 실물 SSH 서버의 전송 검증을 대체하지 않는다.

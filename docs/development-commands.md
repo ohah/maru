@@ -1887,3 +1887,8 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 `python3 tools/inspector-picker-app/run.py --app <고정 앱>/Contents/MacOS/maru-macos-app --sidebar-close --rounds 20 --output <새 경로>`와
 `python3 tools/inspector-picker-app/verify_sidebar_close.py <같은 경로>`를 실행한다.
 `python3 tools/test-sidebar-close-adversarial.py`는 컴파일한 결함 13종과 정상/등가/복원 대조군을 검사한다.
+
+
+### Formatter/LSP descriptor isolation
+
+`mise exec -- zig build test-editor-process-isolation`과 같은 명령의 `-Doptimize=ReleaseFast`는 formatter 기본 동작·시한·상한 및 sibling exec의 descriptor 누수 회귀를 실행한다. 5 tests/5 passed를 요구하며 macOS-only CI도 같은 고리를 실행한다. 전체 출하 체제 회귀는 `mise exec -- zig build test-editor -Doptimize=ReleaseFast`다. 강제로 끼운 exec에서 sibling 생존 중 EOF·정확한 출력까지 확인하며 실행 횟수만 세지 않는다.

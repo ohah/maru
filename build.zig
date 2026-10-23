@@ -6253,6 +6253,15 @@ pub fn build(b: *std.Build) void {
         run_native_close_guards.addArg("--maru-expect-passed=9");
         macos_only_test_step.dependOn(&run_native_close_guards.step);
     }
+    const process_isolation_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.EFP", ".test.LSPI1" } });
+    const run_process_isolation = b.addRunArtifact(process_isolation_tests);
+    run_process_isolation.setCwd(b.path("."));
+    run_process_isolation.addArg("--maru-expect-tests=5");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_process_isolation.addArg("--maru-expect-passed=5");
+        macos_only_test_step.dependOn(&run_process_isolation.step);
+    }
+    b.step("test-editor-process-isolation", "Run formatter and LSP descriptor inheritance regressions").dependOn(&run_process_isolation.step);
     const save_pipeline_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.FOS", ".test.CSA", ".test.EXFB" } });
     const run_save_pipeline = b.addRunArtifact(save_pipeline_tests);
     run_save_pipeline.setCwd(b.path("."));

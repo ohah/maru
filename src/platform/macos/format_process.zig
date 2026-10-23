@@ -191,6 +191,14 @@ extern "c" fn getdtablesize() c_int;
 const f_setnosigpipe: c_int = 73; // macOS `F_SETNOSIGPIPE` — 닫힌 stdin 에 쓰다 SIGPIPE 로 앱이 죽지 않게
 
 fn run(job: *Job) Outcome {
+    return runWithProbe(job, struct {
+        fn afterPipes() void {}
+    });
+}
+
+// A comptime probe lets the regression force a sibling exec between pipe creation
+// and formatter fork. The product instantiation has no callback or test state.
+fn runWithProbe(job: *Job, comptime Probe: type) Outcome {
     // argv·envp 포인터 배열을 fork 전에 만든다 — 자식에서 할당하지 않는다.
     const argv = gpa.alloc(?[*:0]const u8, job.argv.len + 1) catch return .spawn_failed;
     defer gpa.free(argv);
@@ -219,9 +227,20 @@ fn run(job: *Job) Outcome {
         closeBoth(out_fds);
         return .spawn_failed;
     }
-    // 부모 쪽 끝은 다른 자식(언어 서버·셸)에 새지 않게 CLOEXEC.
-    for ([_]std.c.fd_t{ in_fds[1], out_fds[0], err_fds[0] }) |fd| _ = std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC));
+    // Both ends must close in a sibling exec. An LSP launched while this worker
+    // prepares its fork can otherwise retain stdout/stderr writers: the formatter
+    // exits successfully but the parent never receives EOF and reports a timeout.
+    // dup2 below gives only this formatter its intended standard descriptors.
+    for ([_]std.c.fd_t{ in_fds[0], in_fds[1], out_fds[0], out_fds[1], err_fds[0], err_fds[1] }) |fd| {
+        if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) {
+            closeBoth(in_fds);
+            closeBoth(out_fds);
+            closeBoth(err_fds);
+            return .spawn_failed;
+        }
+    }
 
+    Probe.afterPipes();
     const pid = std.c.fork();
     if (pid < 0) {
         closeBoth(in_fds);
@@ -485,4 +504,37 @@ test "EFP2 실행기 — 시한이면 그룹째 끝내고(손자까지) 거둔�
         defer _ = std.c.pthread_mutex_unlock(&lock);
         try testing.expectEqual(@as(usize, 0), abandoned.items.len);
     }
+}
+
+test "EFP3 sibling exec cannot keep formatter pipes alive after formatter exits" {
+    const Probe = struct {
+        var pid: std.c.pid_t = -1;
+        fn afterPipes() void {
+            pid = std.c.fork();
+            if (pid == 0) {
+                const argv = [_:null]?[*:0]const u8{ "/bin/sleep", "30", null };
+                _ = std.c.execve("/bin/sleep", &argv, @ptrCast(std.c.environ));
+                std.c._exit(127);
+            }
+        }
+    };
+    Probe.pid = -1;
+    defer if (Probe.pid > 0) {
+        _ = std.c.kill(Probe.pid, .KILL);
+        var status: c_int = 0;
+        _ = std.c.waitpid(Probe.pid, &status, 0);
+    };
+    const job = try copyJob(.{ .argv = &.{ "/bin/sh", "-c", "printf 'x = 1\n'" }, .cwd = "/", .envp = null, .stdin = "x=1\n", .timeout_ms = default_timeout_ms });
+    defer job.destroy();
+    const result: Result = .{ .id = job.id, .outcome = runWithProbe(job, Probe), .elapsed_ms = 0 };
+    defer if (result.outcome == .exited) {
+        gpa.free(result.outcome.exited.stdout);
+        gpa.free(result.outcome.exited.stderr);
+    };
+    try testing.expect(Probe.pid > 0);
+    try testing.expect(std.c.kill(Probe.pid, @fromBackingInt(0)) == 0);
+    std.debug.print("EFP3 outcome={s} sibling_alive=true\n", .{@tagName(result.outcome)});
+    try testing.expect(result.outcome == .exited);
+    try testing.expectEqual(@as(?u8, 0), result.outcome.exited.code);
+    try testing.expectEqualStrings("x = 1\n", result.outcome.exited.stdout);
 }

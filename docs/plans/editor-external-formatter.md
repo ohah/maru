@@ -45,6 +45,7 @@
 
 - 작업 스레드 하나가 한 번 실행한다. 메인은 `editor_lsp.pump` 의 tick 에서 결과를 가져간다(`tool_env` 와 같은 모양 — 결과 칸 + 뮤텍스, 세대).
 - fork + execve(`std.process.run` 은 앱 Io 에서 못 쓴다). 자식은 `setpgid(0,0)`, stdin·stdout·stderr 는 파이프, fd 3 이상은 닫고 `chdir(root)` 한다.
+- 파이프의 **양쪽 끝**에 `FD_CLOEXEC`를 지정한다. 동시에 뜨는 언어 서버가 formatter의 출력 writer를 물려받으면 정상 종료 뒤에도 EOF가 오지 않는다. 언어 서버 자식도 `execve` 전에 fd 3 이상을 모두 닫아 `pipe`와 `fcntl` 사이 경쟁까지 차단한다.
 - 부모는 `poll` 로 stdin 쓰기와 stdout·stderr 읽기를 함께 돈다(하나씩 읽으면 막힌다). 시한은 단조 시계로 잰다.
 - **상한**: 시한 3 초(Node 첫 실행이 1 초를 넘는다 — §8.2r 의 1 초는 떠 있는 서버의 응답 시한이다), stdout 16 MiB, stderr 64 KiB. 넘으면 그룹째(`kill(-pid)`) 끝내고 거둔다.
 - 결과: 종료 코드, stdout, stderr 앞부분. 0 이 아니면 실패다(stderr 첫 줄을 알림에 싣는다).
@@ -127,3 +128,11 @@
 - Biome 의 보호 파일(`tsconfig.json`)은 이 판에서 입력을 그대로 낸다(무변경). 구문 오류는 Biome 1·black 123·rustfmt 1 로 끝난다(black 은 stdout 에 입력을 내지만 0 이 아니라 적용하지 않는다).
 - rustfmt 는 edition 없이 `async fn` 에서 실패한다(그래서 넘긴다).
 - 앱의 제품 경로로 Biome·ruff·rustfmt·zig fmt 를 한 번씩 돌렸다(임시 판정자, 커밋하지 않음 — 정보 명령과 `⇧⌥F` 적용).
+
+
+## 2026-10-23 main ReleaseFast 실패 조사
+
+- main `34a0c6f99`의 CI run `39748813579`는 `EXFB3` Python 기대 `x = 1`·실제 `x=1`로 실패했다. 테스트 본문은 실패·시한 뒤에도 대기가 끝난 것으로 판정하므로 기존 로그만으로 당시 outcome은 확정할 수 없다. `EXFB3_RESULT`는 재발 시 counters와 notice를 남긴다.
+- 수정 전 실행기의 부모 쪽 끝만 CLOEXEC인 상태에서, 파이프 준비 뒤 sibling exec를 강제로 끼운 `EFP3`는 실제 formatter가 끝나도 `timeout`으로 실패했다. 수정 후에는 sibling이 살아 있는 동안 `exited`와 정확한 출력으로 통과한다.
+- `LSPI1`은 아직 CLOEXEC를 붙이지 않은 파이프를 실제 LSP spawn에 노출한다. 기존 spawn은 EOF를 막았고, 자식의 fd 전체 정리 후에는 sibling이 살아 있어도 EOF를 받는다. 이 대조는 `pipe`→`fcntl` 구간도 검증한다.
+- focused `test-editor-process-isolation`은 실제 5 tests/5 passed를 요구하고 macOS-only CI에도 포함한다. 전체 editor 고리에도 두 회귀를 포함한다. CI의 원래 스케줄을 재구성했다고 주장하지 않으며, 기존 실패와 일치하는 pipe 수명 결함을 결정적으로 제거한다.

@@ -23115,6 +23115,11 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     s.dismissMessageOverlays();
     try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
     try settled.wait(&f.fx, "ruff");
+    // Settled includes timeout/failure. Preserve the failing outcome in CI logs
+    // instead of leaving only the downstream unformatted-text assertion.
+    if (!std.mem.eql(u8, "x = 1\n", py.rt.editorDocument().opened.?.file.content)) {
+        std.debug.print("EXFB3_RESULT stage=ruff counters={any} notice={s}\n", .{ ext.counters, notice(s) });
+    }
     try testing.expectEqualStrings("x = 1\n", py.rt.editorDocument().opened.?.file.content);
     try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "format|--stdin-filename|{s}|-|\n", .{py_path}), try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));

@@ -4,6 +4,7 @@
 //! 만들어 순수 층(`session.editor.sticky.select`)에 넘기고 ③ caret 이 덮일 칸부터 걷은 뒤 ④ 머리줄의 글자·구문 색을 모아 프레임에 싣는다.
 //! 그린 줄은 기억해 두었다가 클릭·호버가 읽는다(그 행은 본문이 아니라 머리줄이다).
 const std = @import("std");
+const builtin = @import("builtin");
 const maru = @import("maru");
 const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
@@ -20,14 +21,12 @@ const ColorSpan = chrome_editor.content.ColorSpan;
 pub const Source = enum { none, lsp, syntax, fold };
 
 pub const State = struct {
-    /// 스코프(머리줄 오름차순 · 같으면 끝 내림차순). 키가 같으면 다시 안 만든다.
+    /// 스코프(머리줄 오름차순 · 같으면 끝 내림차순). LSP·접힘은 키로 재사용하고 구문 후보는 화면마다 고친다.
     scopes: std.ArrayList(sticky.Scope) = .empty,
     source: Source = .none,
     key: Key = .{},
-    /// 1층 심볼(tree-sitter) — 키가 바뀔 때만 다시 센다(트리를 걷는 값이 싸지 않다).
+    /// 1층의 화면 주변 조상만 보관한다. 전체 목록은 판정자의 대조 경로에서만 만든다.
     tree_symbols: std.ArrayList(Symbol) = .empty,
-    tree_key_version: u64 = std.math.maxInt(u64),
-    tree_key_pending: bool = true,
     picks: std.ArrayList(u32) = .empty,
     lines: [frame.sticky_max_rows]frame.StickyLine = undefined,
     color_store: std.ArrayList(ColorSpan) = .empty,
@@ -50,6 +49,17 @@ pub const State = struct {
 
 /// 이번 프레임의 머리줄(바깥부터). 꺼져 있거나 설 것이 없으면 빈 목록 — 그때도 `drawn_len` 은 0 으로 맞춘다.
 pub fn compute(self: *AppSession, term: *Term, pane_rect: maru.chrome.draw.Rect, wrap: bool) []const frame.StickyLine {
+    return computeWith(self, term, pane_rect, wrap, false);
+}
+
+/// 전체 순회를 독립 대조군으로 유지한다. 제품에는 이 경로의 인스턴스를 만들지 않는다.
+pub fn referenceForTest(self: *AppSession, term: *Term, pane_rect: maru.chrome.draw.Rect, wrap: bool) []const frame.StickyLine {
+    // 사용자 표시가 아니라 잘못 연결한 개발자에게만 나오는 컴파일 진단이다.
+    if (!builtin.is_test) @compileError("고정 머리줄 대조군은 테스트에서만 호출한다");
+    return computeWith(self, term, pane_rect, wrap, true);
+}
+
+fn computeWith(self: *AppSession, term: *Term, pane_rect: maru.chrome.draw.Rect, wrap: bool, comptime reference: bool) []const frame.StickyLine {
     const st = &term.rt.editor_sticky;
     st.drawn_len = 0;
     const cfg = self.loaded_config.config.editor;
@@ -62,10 +72,9 @@ pub fn compute(self: *AppSession, term: *Term, pane_rect: maru.chrome.draw.Rect,
     const visible_rows: usize = pane_rect.h / ch;
     const max = sticky.maxLines(cfg.sticky_scroll_max_lines, visible_rows);
     if (max == 0) return &.{};
-    refreshScopes(self, term) catch return &.{};
-    if (st.scopes.items.len == 0) return &.{};
-
     const rows = Rows.of(term, wrap);
+    refreshScopes(self, term, rows, max, reference) catch return &.{};
+    if (st.scopes.items.len == 0) return &.{};
     sticky.select(self.allocator, st.scopes.items, rows, max, &st.picks) catch return &.{};
     var n = st.picks.items.len;
     // **caret 을 덮지 않는다**(§4.1i 「다른 점」 ①) — caret 이 칸 k 에 있으면 k 부터 아래는 안 그린다.
@@ -112,8 +121,8 @@ pub fn compute(self: *AppSession, term: *Term, pane_rect: maru.chrome.draw.Rect,
     return st.lines[0..k];
 }
 
-/// 스코프 출처를 고르고(키가 바뀌었을 때만) 목록을 다시 만든다.
-fn refreshScopes(self: *AppSession, term: *Term) error{OutOfMemory}!void {
+/// 스코프 출처를 고른다. LSP·접힘은 키가 바뀔 때, 구문 조상은 화면마다 목록을 고친다.
+fn refreshScopes(self: *AppSession, term: *Term, rows: Rows, max: usize, comptime reference: bool) error{OutOfMemory}!void {
     const st = &term.rt.editor_sticky;
     const doc = term.rt.editorDocument().opened orelse return;
     const version = term.rt.editorDocument().notifications.lsp_version;
@@ -125,21 +134,41 @@ fn refreshScopes(self: *AppSession, term: *Term) error{OutOfMemory}!void {
             return;
         }
     }
-    // ② 심볼 1층 — 트리가 있고 이어 파는 중이 아닐 때만(§2.1a).
+    // ② 심볼 1층. 부분 파싱 중에는 예전처럼 접힘 출처를 사용한다.
     if (!term.rt.editor_syntax.pending) {
         if (term.rt.editor_syntax.provider) |*prov| {
-            if (st.tree_key_version != version or st.tree_key_pending) {
-                prov.symbols(self.allocator, &st.tree_symbols);
-                st.tree_key_version = version;
-                st.tree_key_pending = false;
-            }
-            if (st.tree_symbols.items.len > 0) {
-                const key: State.Key = .{ .source = .syntax, .version = version, .ptr = @intFromPtr(st.tree_symbols.items.ptr), .len = st.tree_symbols.items.len };
-                if (!std.meta.eql(key, st.key)) try fromSymbols(self, st, doc, st.tree_symbols.items, key);
-                return;
+            if (reference) {
+                try prov.symbolsChecked(self.allocator, &st.tree_symbols);
+                if (st.tree_symbols.items.len > 0) {
+                    try fromSymbols(self, st, doc, st.tree_symbols.items, .{ .source = .syntax, .version = version });
+                    return;
+                }
+            } else if (prov.tree != null) {
+                // 위의 최대 고정 행에 들어오는 논리 줄을 모두 묻는다. 첫 줄만 보면 바로 아래의 중첩 머리를 놓친다.
+                var offsets: [sticky.max_lines_cap]u32 = undefined;
+                var n: usize = 0;
+                var v = rows.first;
+                var row: i64 = -@as(i64, if (rows.wrap) rows.first_piece else 0);
+                while (v < rows.axis_len and row < @as(i64, @intCast(max)) and n < offsets.len) : (v += 1) {
+                    const numbers = term.rt.editor_visible_numbers;
+                    const number: ?usize = if (numbers.len == 0) v else if (v < numbers.len and numbers[v] != null and numbers[v].? > 0) numbers[v].? - 1 else null;
+                    if (number) |line_no| {
+                        if (doc.file.lines.line(line_no)) |line| {
+                            offsets[n] = @intCast(line.contentEnd());
+                            n += 1;
+                        }
+                    }
+                    row += rows.pieces(v);
+                }
+                if (try prov.stickySymbols(self.allocator, offsets[0..n], &st.tree_symbols)) {
+                    // 현재 후보가 비어도 파일 다른 곳의 심볼 때문에 접힘으로 내려가면 안 된다.
+                    // 작은 조상 목록은 매번 새로 바꿔 문서·트리·접힘·랩의 무효화 축을 따로 캐시하지 않는다.
+                    try fromSymbols(self, st, doc, st.tree_symbols.items, .{ .source = .syntax, .version = version });
+                    return;
+                }
             }
         }
-    } else st.tree_key_pending = true;
+    }
     // ③ 접힘 범위(지금 선 층 — LSP · tree-sitter · 들여쓰기).
     const folds = term.rt.editor_fold_ranges;
     const key: State.Key = .{ .source = .fold, .version = version, .ptr = @intFromPtr(folds.ptr), .len = folds.len };
@@ -201,7 +230,8 @@ const Rows = struct {
 
     pub fn lastRow(self: Rows, line: u32) ?i64 {
         const v = lastVisibleAtOrBefore(self.term.rt.editor_visible_numbers, line, self.axis_len) orelse return null;
-        return self.rowOf(v) + @as(i64, self.pieces(v)) - 1;
+        const above = v < self.first;
+        return sticky.lastPieceRow(self.rowOf(v), if (above) 1 else self.pieces(v), above);
     }
 
     fn pieces(self: Rows, v: usize) u32 {

@@ -46304,7 +46304,7 @@ const EditCostCounts = struct {
     doc_len: usize,
     idle: syntax_mod.Provider.Stats,
     edit: syntax_mod.Provider.Stats,
-    /// 편집이 새로 판 트리를 심볼 순회로 두 번, 접힘 순회로 한 번 걸은 시간(ns) — 출력만 한다(「차가운 첫 순회」 가설을 가른 값).
+    /// 프레임을 관측한 뒤 트리를 다시 순회한 시간(ns). 이미 읽은 트리의 값이며 출력만 한다.
     walk_ns: [3]u64,
 };
 
@@ -46320,6 +46320,7 @@ fn editCostCounts(allocator: std.mem.Allocator, name: []const u8, data: []const 
         d.dl.deinit(allocator);
         if (!term.rt.editor_syntax.pending and rounds > 2) break;
     }
+    try testing.expect(!term.rt.editor_syntax.pending);
     // 가운데 줄로 스크롤하고 caret 을 그 줄 머리에 — 고정 머리줄이 설 자리다(가운데 줄은 함수 몸 안이다).
     const mid_line = term.rt.editor_lines.len / 2;
     term.rt.editor_first_line = mid_line;
@@ -46339,6 +46340,10 @@ fn editCostCounts(allocator: std.mem.Allocator, name: []const u8, data: []const 
     }
     const st1 = term.rt.editor_syntax.provider.?.stats;
     try testing.expect(insertText(s, term, " "));
+    const after_edit = term.rt.editor_syntax.provider.?.stats;
+    // 편집 자체의 일을 프레임 비용에 더하면 어느 단계가 느린지 잘못 귀속할 수 있다.
+    try testing.expectEqual(st1.symbol_nodes, after_edit.symbol_nodes);
+    try testing.expectEqual(st1.fold_nodes, after_edit.fold_nodes);
     {
         var d = appendPaneFrame(s, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
         d.dl.deinit(allocator);
@@ -46376,7 +46381,7 @@ fn editCostCounts(allocator: std.mem.Allocator, name: []const u8, data: []const 
             };
         }
     };
-    return .{ .nodes = nodes, .doc_len = doc.file.content.len, .idle = Sub.of(st0, st1), .edit = Sub.of(st1, st2), .walk_ns = walk_ns };
+    return .{ .nodes = nodes, .doc_len = doc.file.content.len, .idle = Sub.of(st0, st1), .edit = Sub.of(after_edit, st2), .walk_ns = walk_ns };
 }
 
 test "EW0 관측은 포화 범위와 반복 조회에서도 구문 결과를 바꾸지 않는다" {
@@ -46395,13 +46400,21 @@ test "EW0 관측은 포화 범위와 반복 조회에서도 구문 결과를 바
         try p.symbolsChecked(allocator, &syms);
         try p.foldSpans(allocator, &folds);
         p.spansForRange(allocator, source, .{ .start = 0, .end = source.len }, &spans);
-        const expected = .{ syms.items.len, folds.items.len, spans.items.len };
+        // 개수만 같아도 위치·색 역할이 틀릴 수 있으므로 실제 결과를 보관해 비교한다.
+        const expected_syms = try allocator.dupe(syntax_mod.Provider.Symbol, syms.items);
+        defer allocator.free(expected_syms);
+        const expected_folds = try allocator.dupe(syntax_mod.Provider.FoldSpan, folds.items);
+        defer allocator.free(expected_folds);
+        const expected_spans = try allocator.dupe(syntax_mod.Span, spans.items);
+        defer allocator.free(expected_spans);
         @field(p.stats, field) = std.math.maxInt(u64);
         try p.symbolsChecked(allocator, &syms);
         try p.foldSpans(allocator, &folds);
         p.spansForRange(allocator, source, .{ .start = 0, .end = source.len }, &spans);
         try testing.expectEqual(std.math.maxInt(u64), @field(p.stats, field));
-        try testing.expectEqual(expected, .{ syms.items.len, folds.items.len, spans.items.len });
+        try testing.expectEqualDeep(expected_syms, syms.items);
+        try testing.expectEqualDeep(expected_folds, folds.items);
+        try testing.expectEqualDeep(expected_spans, spans.items);
         try testing.expect(syms.items.len > 0 and folds.items.len > 0 and spans.items.len > 0);
     }
     // 범위는 호출자가 요청한 byte를 센다. EOF를 넘는 요청은 수집 단계가 자르며, 역순도 질의량을 넘치게 만들지 않는다.
@@ -46441,8 +46454,12 @@ test "EW0 관측은 포화 범위와 반복 조회에서도 구문 결과를 바
     }
     try testing.expectEqual(@as(u64, 0), other.stats.symbol_nodes);
     try testing.expectEqual(@as(u64, 0), other.stats.fold_nodes);
-    // 파싱이 아직 없거나 트리를 버린 시점에도 이전 결과가 남아서는 안 된다.
+    // 실제 색 결과를 채운 뒤 트리를 없애야, 이전 결과를 지우지 않는 결함을 잡는다.
     {
+        var spans: std.ArrayList(syntax_mod.Span) = .empty;
+        defer spans.deinit(allocator);
+        p.spansForRange(allocator, source, .{ .start = 0, .end = source.len }, &spans);
+        try testing.expect(spans.items.len > 0);
         const tree = p.tree;
         defer p.tree = tree;
         p.tree = null;
@@ -46452,8 +46469,6 @@ test "EW0 관측은 포화 범위와 반복 조회에서도 구문 결과를 바
         try testing.expectEqual(@as(usize, 0), syms.items.len);
         try p.foldSpans(allocator, &folds);
         try testing.expectEqual(@as(usize, 0), folds.items.len);
-        var spans: std.ArrayList(syntax_mod.Span) = .empty;
-        defer spans.deinit(allocator);
         p.spansForRange(allocator, source, .{ .start = 0, .end = source.len }, &spans);
         try testing.expectEqual(saved, p.stats);
         try testing.expectEqual(@as(usize, 0), spans.items.len);

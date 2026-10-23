@@ -1903,3 +1903,7 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 ### 검색 워커 fd 격리
 
 `mise exec -- zig build test-editor-search-fd-isolation`과 `-Doptimize=ReleaseFast`는 20개 서로 다른 실제 제품 runner 시나리오를 실행하며 macOS에서 20 compiled/20 passed를 요구한다. fd 격리·부모 소유권·cwd/env/argv·입출력·취소·시한·오류 회수·준비/stream OOM을 검사한다. macOS-only CI와 `test-editor`에도 연결된다. 번들 rg 회귀는 `test-macos-project-search-worker test-macos-project-search-roots test-macos-project-search-adapter`다. 보호 API gate는 `tests/boundary/spawn_cloexec_axis.zig`이며 Zig 0.17 Darwin의 표준 spawn도 검사한다.
+
+### SSH 업로드 파이프 실패 정리
+
+`mise exec -- python3 tools/test-ssh-pipe-cleanup.py`: macOS 실제 FD 고갈 다섯 시나리오와 정상 명령 대조군을 Debug/ReleaseFast에서 실행한다. 범위는 [SSH 통합](ssh-integration.md#ssh-업로드-파이프-생성-실패의-소유권)을 따른다.

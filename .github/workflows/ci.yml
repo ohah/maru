@@ -523,6 +523,8 @@ jobs:
         run: bun install --cwd web --frozen-lockfile
       - name: Run the gates that only exist on macOS
         run: zig build test-macos-only
+      - name: SSH pipe failure ownership (Debug and ReleaseFast)
+        run: python3 tools/test-ssh-pipe-cleanup.py
       - name: PPM capture diagnostics and archive harness failure controls
         run: |
           sh tools/test-macos-capture-diagnostics.sh

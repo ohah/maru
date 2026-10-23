@@ -86,7 +86,11 @@ pub fn uploadBytes(
     var in_pipe: [2]c_int = undefined;
     if (std.c.pipe(&in_pipe) != 0) return UploadError.PipeFailed;
     var out_pipe: [2]c_int = undefined;
-    if (std.c.pipe(&out_pipe) != 0) return UploadError.PipeFailed;
+    if (std.c.pipe(&out_pipe) != 0) {
+        // No child owns these ends yet; release both when the second pipe fails.
+        for (in_pipe) |fd| _ = std.c.close(fd);
+        return UploadError.PipeFailed;
+    }
 
     const pid = std.c.fork();
     if (pid < 0) {

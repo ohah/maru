@@ -4960,3 +4960,13 @@ Artifact controls 총 **20** test methods, 새 범위 음성 artifact **32**종 
 `/tmp/maru-session-close-mutants-jieao30y/manifest.json`.
 최종 전체 경계 검사와 원격 CI 결과는 PR 본문·checks가 출처다. 전체 macOS host ABI는 로컬 재실행하지 않았다.
 이 증거는 native NSEvent callbacks·CLI·Metal 경로이며 물리 HID·OS IME·다중 모니터·VoiceOver 실측은 아니다.
+
+
+## Formatter/LSP descriptor isolation (2026-10-23)
+
+구현. `format_process.runWithProbe`의 `EFP3`는 formatter pipe 준비 뒤 실제 sibling exec를 강제로 끼우며, sibling 생존 중 정상 종료·정확한 stdout을 확인한다. `lsp_process.spawn`의 `LSPI1`은 CLOEXEC 전 파이프를 노출하고 sibling 생존 중 EOF를 요구한다. 실제 프로세스를 띄우며 GUI 캡처와는 다른 증거다.
+
+- 수정 전 대조: `/tmp/maru-efp3-before.log`는 실제 `timeout`, `/tmp/maru-lspi1-before.log`는 EOF poll 0으로 각각 실패했다. 컴파일 실패를 결함 검출로 세지 않는다.
+- 수정 후 focused 5 tests/5 passed. Debug 10회 + ReleaseFast 10회, **20/20 반복·총 100개 테스트 실행**은 `/tmp/maru-process-isolation-20/manifest.json`과 회차별 로그에 있다. 서로 다른 20종 결함이나 GUI E2E 20회라고 표현하지 않는다.
+- `test-editor-process-isolation`은 test 수·실제 passed 수를 검사하고 macOS-only CI에 포함한다. 전체 `test-editor`에도 회귀를 포함한다. 전체 ReleaseFast·경계 검사 및 원격 CI 결과는 해당 수정 PR의 현재 checks와 본문을 따른다.
+- 기존 main CI `39748813579`의 EXFB3는 포맷 미적용만 기록해 당시 outcome을 확정할 수 없다. 새 diagnostic은 재발 시 formatter counters와 notice를 남긴다. 로컬에서 결정적으로 재현한 pipe 수명 결함과 기존 원격 run의 정확한 스케줄을 구분한다.

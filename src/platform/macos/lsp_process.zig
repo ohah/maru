@@ -111,6 +111,8 @@ fn envValue(name: []const u8) ?[]const u8 {
 /// 재시작한다 — 상한이 없으면 멈춘 서버 하나가 편집마다 메모리를 키운다.
 pub const max_pending_bytes: usize = 64 * 1024 * 1024;
 
+extern "c" fn getdtablesize() c_int;
+
 pub const SpawnError = error{ Pipe, Fork, OutOfMemory };
 
 /// 자식이 `execve` 전에 그만둔 종료 코드 — 프로세스 그룹을 못 만들었거나 root 로 `chdir` 하지 못했다. 그 상태로 서버를 띄우면
@@ -153,6 +155,7 @@ pub fn spawn(allocator: std.mem.Allocator, exe_path: []const u8, args: []const [
     const cwd_z = try allocator.dupeSentinel(u8, cwd, 0);
     defer allocator.free(cwd_z);
 
+    const max_fd = getdtablesize();
     const pid = std.c.fork();
     if (pid < 0) {
         for ([_]c_int{ in_fds[0], in_fds[1], out_fds[0], out_fds[1] }) |fd| _ = std.c.close(fd);
@@ -168,7 +171,11 @@ pub fn spawn(allocator: std.mem.Allocator, exe_path: []const u8, args: []const [
             _ = std.c.dup2(devnull, 2); // §8.2a: 서버 로그는 우리 것이 아니다
             _ = std.c.close(devnull);
         }
-        for ([_]c_int{ in_fds[0], in_fds[1], out_fds[0], out_fds[1] }) |fd| _ = std.c.close(fd);
+        // A formatter worker may be between pipe() and fcntl(CLOEXEC) when
+        // this fork occurs. Close every non-standard descriptor in the child,
+        // so that even that window cannot retain another process's pipe ends.
+        var fd: c_int = 3;
+        while (fd < max_fd) : (fd += 1) _ = std.c.close(fd);
         if (cwd_z.len > 0 and std.c.chdir(cwd_z.ptr) != 0) std.c._exit(exit_setup_failed);
         _ = std.c.execve(exe_z.ptr, @ptrCast(argv.items.ptr), if (envp) |e| @ptrCast(e) else @ptrCast(std.c.environ));
         std.c._exit(127);
@@ -452,4 +459,31 @@ test "a reaped child is never signalled or waited for again (its pid may belong 
         try std.testing.expectEqual(@as(std.c.pid_t, 0), std.c.waitpid(sleeper.pid, &status, std.c.W.NOHANG));
         std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
     }
+}
+
+test "LSPI1 sibling LSP spawn does not inherit an unmarked formatter pipe" {
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c_int = undefined;
+    try std.testing.expect(std.c.pipe(&fds) == 0);
+    defer _ = std.c.close(fds[0]);
+    var writer_open = true;
+    defer if (writer_open) {
+        _ = std.c.close(fds[1]);
+    };
+    // Deliberately no CLOEXEC: model a concurrent worker before its fcntl.
+    var sibling = try spawn(std.testing.allocator, "/bin/sleep", &.{"30"}, "/", null);
+    defer {
+        kill(&sibling, .KILL);
+        reapBlocking(&sibling);
+        sibling.deinit(std.testing.allocator);
+    }
+    _ = std.c.close(fds[1]);
+    writer_open = false;
+    var pollfd: std.c.pollfd = .{ .fd = fds[0], .events = std.c.POLL.IN, .revents = 0 };
+    const ready = std.c.poll(@ptrCast(&pollfd), 1, 2000);
+    try std.testing.expect(std.c.kill(sibling.pid, @fromBackingInt(0)) == 0);
+    std.debug.print("LSPI1 eof_ready={d} sibling_alive=true\n", .{ready});
+    try std.testing.expect(ready == 1);
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), std.c.read(fds[0], &byte, 1));
 }

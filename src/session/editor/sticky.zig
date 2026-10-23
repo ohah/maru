@@ -57,6 +57,13 @@ pub fn select(
     }
 }
 
+/// 논리 줄의 마지막 조각 행. 이미 첫 논리 줄보다 위로 지나간 줄은 조각 수와 무관하게 화면 밖이다.
+/// 첫 논리 줄의 부분 스크롤은 머리 행이 음수여도 남은 조각이 있으므로 별도로 구분한다.
+pub fn lastPieceRow(head_row: i64, pieces: u32, above_first_line: bool) i64 {
+    if (above_first_line) return -1;
+    return head_row + @as(i64, @max(pieces, 1)) - 1;
+}
+
 /// 스코프 목록을 `select` 가 요구하는 순서로 맞춘다(머리줄 오름차순 · 같으면 끝 내림차순 — 바깥이 먼저).
 pub fn sortScopes(scopes: []Scope) void {
     std.mem.sort(Scope, scopes, {}, struct {
@@ -204,4 +211,11 @@ fn expectPicks(scopes: []const Scope, rows: TestRows, max: usize, want: []const 
     const got = try pick(scopes, rows, max);
     defer testing.allocator.free(got);
     try testing.expectEqualSlices(u32, want, got);
+}
+
+test "sticky ancestors 화면 위 논리 줄과 첫 논리 줄의 부분 스크롤을 구분한다" {
+    try testing.expectEqual(@as(i64, -1), lastPieceRow(-3, 100, true));
+    try testing.expectEqual(@as(i64, -1), lastPieceRow(-1, 1, true));
+    try testing.expectEqual(@as(i64, 2), lastPieceRow(-2, 5, false));
+    try testing.expectEqual(@as(i64, 0), lastPieceRow(0, 1, false));
 }

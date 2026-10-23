@@ -6352,6 +6352,30 @@ pub fn build(b: *std.Build) void {
     const history_step = b.step("test-editor-history-step", "Run prepared multi-document history and host identity judges");
     history_step.dependOn(&run_history_host.step);
     // 계측 검증이 전체 편집기 테스트나 설치된 언어 서버에 기대지 않도록 독립 실행한다.
+    const sticky_ancestor_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.sticky ancestors", ".test.STK" } });
+    const run_sticky_ancestors = b.addRunArtifact(sticky_ancestor_tests);
+    run_sticky_ancestors.setCwd(b.path("."));
+    run_sticky_ancestors.step.dependOn(&install_fake_lsp.step);
+    run_sticky_ancestors.addArg("--maru-expect-tests=13");
+    const sticky_step = b.step("test-editor-sticky-ancestors", "Run viewport-local sticky scope judges");
+    sticky_step.dependOn(&run_sticky_ancestors.step);
+    const sticky_syntax_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{ "sticky ancestors", "SYN10", "SYN23", "SYN24", "SYN25", "SYN27", "SYN54", "SYN56" } });
+    const run_sticky_syntax = b.addRunArtifact(sticky_syntax_tests);
+    run_sticky_syntax.addArg("--maru-expect-tests=12");
+    run_sticky_syntax.addArg("--maru-expect-passed=12");
+    sticky_step.dependOn(&run_sticky_syntax.step);
+    b.step("test-editor-sticky-symbols", "Run syntax-only sticky scope judges").dependOn(&run_sticky_syntax.step);
+    const sticky_pure_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{ ".test.sticky ancestors", ".test.STK" } });
+    const run_sticky_pure = b.addRunArtifact(sticky_pure_tests);
+    run_sticky_pure.addArg("--maru-expect-tests=35");
+    run_sticky_pure.addArg("--maru-expect-passed=35");
+    sticky_step.dependOn(&run_sticky_pure.step);
+    test_step.dependOn(&run_sticky_pure.step);
+    test_step.dependOn(&run_sticky_syntax.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_sticky_ancestors.addArg("--maru-expect-passed=13");
+        macos_only_test_step.dependOn(&run_sticky_ancestors.step);
+    }
     const edit_cost_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.EW0"} });
     const run_edit_cost = b.addRunArtifact(edit_cost_tests);
     run_edit_cost.setCwd(b.path("."));

@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const predicate = @import("predicate.zig");
+const symbol_windows = @import("symbols.zig");
 
 const c = @import("tree_sitter_c");
 
@@ -480,9 +481,8 @@ fn predicatePasses(query: *c.TSQuery, steps: []const c.TSQueryPredicateStep, mat
 /// (`ReleaseFast`). 창으로 좁히는 것만으로는 스크롤이 매번 5ms를 낸다 — 스크롤은 편집보다 잦다.
 /// 트리를 살려 두면 스크롤은 쿼리만 내고 파싱은 **문서가 바뀔 때만** 든다.
 ///
-/// **증분 파싱(`onEdit`)은 아직 없다.** `setSource`가 전체를 다시 판다 — 그래서 편집 한 번의 값이
-/// 위 5ms다. 그것을 지우는 것이 §5.3이 말한 증분 파싱이고 다음 슬라이스다. 지금 구조는 그때
-/// `ts_tree_edit` + 옛 트리를 넘기는 것으로 **이 자리만** 바뀐다.
+/// `onEdit`은 `ts_tree_edit` 뒤 옛 트리로 증분 파싱하고, 예산이 끝나면 다음 프레임에 재개한다.
+/// 전체 교체는 `setSource`로 구분한다. 고정 헤더 집계 사본에도 같은 편집 좌표를 적용한다.
 pub const Provider = struct {
     parser: *c.TSParser,
     tree: ?*c.TSTree = null,
@@ -502,6 +502,10 @@ pub const Provider = struct {
     changed_all: bool = true,
     /// 판정자 관측(누적) — 편집 한 번이 트리에서 무엇을 했나를 시간 없이 센다(계획 editor-edit-frame-cost EW0).
     stats: Stats = .{},
+    /// 뷰가 심볼이 없는 곳을 보더라도 파일 전체의 심볼 유무는 별개다. 트리의 분류만 증분 집계한다.
+    sticky_summary: symbol_windows.Summary = .{},
+    sticky_work: StickyWork = .{},
+    pub const StickyWork = symbol_windows.Work;
 
     /// 관측값이 포화돼도 편집 기능을 중단하거나 작은 값으로 되감지 않는다.
     pub const Stats = struct {
@@ -539,6 +543,7 @@ pub const Provider = struct {
     }
 
     pub fn deinit(self: *Provider) void {
+        self.sticky_summary.invalidate();
         if (self.tree) |t| c.ts_tree_delete(t);
         c.ts_parser_delete(self.parser);
         self.* = undefined;
@@ -656,6 +661,7 @@ pub const Provider = struct {
     /// **옛 트리는 시작할 때 버린다** — 내용이 통째로 바뀌었으므로 그것으로 그리면 다른 문서의 색이다.
     /// 그래서 이 경로가 pending인 동안은 **무색**이다(§5의 저하).
     pub fn setSourceBudgeted(self: *Provider, source: []const u8, budget_ns: u64) ParseStatus {
+        self.sticky_summary.invalidate();
         if (self.tree) |t| {
             c.ts_tree_delete(t);
             self.tree = null;
@@ -722,6 +728,7 @@ pub const Provider = struct {
             return;
         };
         if (source.len == 0 or source.len > max_parse_bytes) {
+            self.sticky_summary.invalidate();
             c.ts_tree_delete(old_tree);
             self.tree = null;
             self.tree_gen += 1;
@@ -736,6 +743,7 @@ pub const Provider = struct {
             .old_end_point = .{ .row = e.old_end_point.row, .column = e.old_end_point.column },
             .new_end_point = .{ .row = e.new_end_point.row, .column = e.new_end_point.column },
         };
+        self.sticky_summary.edit(&edit);
         c.ts_tree_edit(old_tree, &edit);
         _ = self.parseBudgeted(source, old_tree, budget_ns);
     }
@@ -780,6 +788,63 @@ pub const Provider = struct {
         self.symbolsChecked(allocator, out) catch {};
     }
 
+    pub const symbol_depth_limit: usize = 64;
+
+    /// 이름·범위·언어 규칙은 전체 목록과 창 조상이 같은 출처를 사용한다.
+    fn symbolForNode(self: *const Provider, node: c.TSNode, depth: u16) ?Symbol {
+        if (!hasKind(self.slot.symbol_kinds, c.ts_node_type(node)) or !isSymbolWorthy(node)) return null;
+        const name = symbolNameNode(node);
+        if (c.ts_node_is_null(name)) return null;
+        return .{
+            .name_start = c.ts_node_start_byte(name),
+            .name_end = qualifiedNameEnd(name),
+            .start = c.ts_node_start_byte(node),
+            .end = symbolEnd(node),
+            .start_row = c.ts_node_start_point(node).row,
+            .depth = depth,
+            .kind = std.mem.span(c.ts_node_type(node)),
+        };
+    }
+
+    /// 창 위쪽 몇 줄의 끝점에서 고정 머리줄 후보만 모은다. 반환값은 파일 전체의 심볼 존재 여부다.
+    /// 결과가 비어도 파일 다른 곳에 심볼이 있으면 참이다. 그래야 접힘 출처로 잘못 내려가지 않는다.
+    /// 후보의 순서는 보장하지 않으며, 호출자가 문서 줄의 스코프로 바꿔 정렬한다.
+    pub fn stickySymbols(self: *Provider, allocator: std.mem.Allocator, offsets: []const u32, out: *std.ArrayList(Symbol)) error{OutOfMemory}!bool {
+        out.clearRetainingCapacity();
+        errdefer out.clearRetainingCapacity();
+        const Adapter = struct {
+            provider: *Provider,
+            pub const depth_limit = symbol_depth_limit;
+            pub fn symbol(ctx: @This(), node: c.TSNode) ?Symbol {
+                return ctx.provider.symbolForNode(node, 0);
+            }
+            pub fn inGap(ctx: @This(), node: c.TSNode, offset: u32) ?c.TSNode {
+                const next = c.ts_node_first_named_child_for_byte(node, offset);
+                if (c.ts_node_is_null(next) or c.ts_node_start_byte(next) <= offset) return null;
+                return ctx.extended(next);
+            }
+            pub fn extended(ctx: @This(), node: c.TSNode) ?c.TSNode {
+                if (!std.mem.eql(u8, std.mem.span(c.ts_node_type(node)), "function_body")) return null;
+                const previous = c.ts_node_prev_named_sibling(node);
+                if (c.ts_node_is_null(previous)) return null;
+                if (ctx.symbol(previous) != null) return previous;
+                if (!std.mem.eql(u8, std.mem.span(c.ts_node_type(previous)), "method_signature")) return null;
+                const count = c.ts_node_named_child_count(previous);
+                var i: u32 = 0;
+                while (i < count) : (i += 1) {
+                    ctx.provider.sticky_work.ancestor_nodes +|= 1;
+                    const child = c.ts_node_named_child(previous, i);
+                    if (ctx.symbol(child) != null) return child;
+                }
+                return null;
+            }
+        };
+        const adapter: Adapter = .{ .provider = self };
+        if (!try self.sticky_summary.hasSymbols(allocator, self.tree, self.tree_gen, self.slot.symbol_kinds.len > 0, adapter, &self.sticky_work)) return false;
+        try symbol_windows.ancestors(allocator, self.tree.?, offsets, adapter, &self.sticky_work, out);
+        return true;
+    }
+
     /// 도크처럼 오래 보여 주는 목록은 일부만 수집한 결과를 완전한 목록으로 발행하면 안 된다.
     pub fn symbolsChecked(self: *Provider, allocator: std.mem.Allocator, out: *std.ArrayList(Symbol)) error{OutOfMemory}!void {
         out.clearRetainingCapacity();
@@ -793,7 +858,7 @@ pub const Provider = struct {
 
         // 깊이는 **심볼 사이의** 중첩이다(노드 깊이가 아니다) — 클래스 안 메서드가 1이어야지, 그
         // 사이에 낀 `class_body` 같은 노드까지 세면 언어마다 숫자가 달라진다.
-        var stack: [64]u32 = undefined; // 열린 심볼의 끝 offset
+        var stack: [symbol_depth_limit]u32 = undefined; // 열린 심볼의 끝 offset
         var depth: usize = 0;
 
         while (true) {
@@ -802,23 +867,11 @@ pub const Provider = struct {
             const sb = c.ts_node_start_byte(node);
             while (depth > 0 and stack[depth - 1] <= sb) depth -= 1;
 
-            if (hasKind(kinds, c.ts_node_type(node)) and isSymbolWorthy(node)) {
-                const name_node = symbolNameNode(node);
-                if (!c.ts_node_is_null(name_node)) {
-                    const end = symbolEnd(node);
-                    try out.append(allocator, .{
-                        .name_start = c.ts_node_start_byte(name_node),
-                        .name_end = qualifiedNameEnd(name_node),
-                        .start = sb,
-                        .end = end,
-                        .start_row = c.ts_node_start_point(node).row,
-                        .depth = @intCast(@min(depth, std.math.maxInt(u16))),
-                        .kind = std.mem.span(c.ts_node_type(node)),
-                    });
-                    if (depth < stack.len) {
-                        stack[depth] = end;
-                        depth += 1;
-                    }
+            if (self.symbolForNode(node, @intCast(@min(depth, std.math.maxInt(u16))))) |symbol| {
+                try out.append(allocator, symbol);
+                if (depth < stack.len) {
+                    stack[depth] = symbol.end;
+                    depth += 1;
                 }
             }
 
@@ -1969,10 +2022,14 @@ test "SYN10 Provider 가 C 메모리를 안 남긴다 — 열고 고치고 닫�
         prov.spansForRange(allocator, src1, .{ .start = 0, .end = src1.len }, &spans);
         try std.testing.expect(spans.items.len > 0);
 
+        var sticky_out: std.ArrayList(Provider.Symbol) = .empty;
+        defer sticky_out.deinit(allocator);
+        _ = try prov.stickySymbols(allocator, &.{20}, &sticky_out);
         // 여러 번 고친다 — 옛 트리를 매번 놓는지 본다.
         var i: usize = 0;
         while (i < 20) : (i += 1) {
             prov.setSource(src1);
+            _ = try prov.stickySymbols(allocator, &.{20}, &sticky_out);
             prov.onEdit(src1, .{
                 .start_byte = 6,
                 .old_end_byte = 6,
@@ -1982,6 +2039,7 @@ test "SYN10 Provider 가 C 메모리를 안 남긴다 — 열고 고치고 닫�
                 .new_end_point = .{ .row = 0, .column = 6 },
             });
         }
+        _ = try prov.stickySymbols(allocator, &.{20}, &sticky_out);
         // 상한을 넘는 문서로 트리를 버리는 경로도 지난다.
         const big = try allocator.alloc(u8, max_parse_bytes + 1);
         defer allocator.free(big);
@@ -3680,4 +3738,226 @@ test "PRD5 번들 쿼리의 정규식은 전부 `PRD2` 표에 있고, 표의 정
 
 test {
     _ = predicate; // 술어 판정자(`PRD*`)도 이 모듈의 판정자 바이너리에서 돈다
+}
+
+// 전체 목록 판정은 후보 수집과 독립적으로 유지해 증분 집계와 후보 누락을 함께 잡는다.
+fn stickyAncestorJudge(p: *Provider, source: []const u8) !void {
+    const a = std.testing.allocator;
+    var full: std.ArrayList(Provider.Symbol) = .empty;
+    defer full.deinit(a);
+    var local: std.ArrayList(Provider.Symbol) = .empty;
+    defer local.deinit(a);
+    try p.symbolsChecked(a, &full);
+    var row: usize = 0;
+    var start: usize = 0;
+    while (start <= source.len) {
+        const end = if (std.mem.indexOfScalarPos(u8, source, start, '\n')) |n| n else source.len;
+        const present = try p.stickySymbols(a, &.{@intCast(end)}, &local);
+        try std.testing.expectEqual(full.items.len != 0, present);
+        try std.testing.expectEqual(full.items.len, p.sticky_summary.count);
+        for (local.items) |got| {
+            var valid = false;
+            for (full.items) |want| {
+                if (got.name_start == want.name_start and got.name_end == want.name_end and got.start == want.start and got.end == want.end and got.start_row == want.start_row and std.mem.eql(u8, got.kind, want.kind)) {
+                    valid = true;
+                    break;
+                }
+            }
+            try std.testing.expect(valid);
+        }
+        for (full.items) |want| {
+            var head: usize = 0;
+            for (source[0..@min(want.name_start, source.len)]) |ch| if (ch == '\n') {
+                head += 1;
+            };
+            var last: usize = 0;
+            for (source[0..@min(want.end -| 1, source.len)]) |ch| if (ch == '\n') {
+                last += 1;
+            };
+            if (last < head + 2 or row < head or row >= last) continue;
+            var found = false;
+            for (local.items) |got| {
+                if (got.name_start == want.name_start and got.end == want.end) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) std.debug.print("\n누락 {s}: 행 {d} 이름 {d} 끝 {d}\n{s}\n", .{ want.kind, row, want.name_start, want.end, source });
+            try std.testing.expect(found);
+        }
+        if (end == source.len) break;
+        start = end + 1;
+        row += 1;
+    }
+    try std.testing.expectEqual(full.items.len != 0, try p.stickySymbols(a, &.{}, &local));
+    try std.testing.expectEqual(@as(usize, 0), local.items.len);
+}
+
+fn stickyPoint(source: []const u8, end: usize) Point {
+    var point: Point = .{ .row = 0, .column = 0 };
+    for (source[0..end]) |ch| {
+        if (ch == '\n') {
+            point.row += 1;
+            point.column = 0;
+        } else point.column += 1;
+    }
+    return point;
+}
+
+test "sticky ancestors 언어별 전체 목록과 모든 논리 줄 후보가 일치한다" {
+    try stickyMultipleSeedsJudge();
+    for ([_]struct { language: Language, source: []const u8 }{
+        .{ .language = .zig, .source = "const A = struct {\n fn f() void {\n _ = 1;\n }\n};\n" },
+        .{ .language = .python, .source = "class A:\n def f(self):\n  x = 1\n  return x\n\n# 끝\n" },
+        .{ .language = .dart, .source = "class A {\n int f()\n \n {\n return 1;\n }\n}\n" },
+        .{ .language = .swift, .source = "class A {\n func f() -> Int {\n return 1\n }\n}\n" },
+        .{ .language = .javascript, .source = "class A {\n f() {\n return 1;\n }\n}\n" },
+        .{ .language = .c, .source = "int f(void) {\n int x = 1;\n return x;\n}\n" },
+        .{ .language = .typescript, .source = "class A {\n f(): number {\n return 1;\n }\n}\n" },
+        .{ .language = .tsx, .source = "function F() {\n return <div/>;\n}\n" },
+        .{ .language = .cpp, .source = "class A {\n int f() {\n return 1;\n }\n};\n" },
+        .{ .language = .go, .source = "package a\nfunc f() int {\n return 1\n}\n" },
+        .{ .language = .rust, .source = "impl A {\n fn f() {\n let a = 1;\n }\n}\n" },
+        .{ .language = .java, .source = "class A {\n int f() {\n return 1;\n }\n}\n" },
+        .{ .language = .ruby, .source = "class A\n def f\n  1\n end\nend\n" },
+        .{ .language = .php, .source = "<?php\nclass A {\n function f() {\n return 1;\n }\n}\n" },
+        .{ .language = .kotlin, .source = "class A {\n fun f(): Int {\n return 1\n }\n}\n" },
+        .{ .language = .bash, .source = "f() {\n echo x\n echo y\n}\n" },
+        .{ .language = .lua, .source = "function f()\n local x=1\n return x\nend\n" },
+        .{ .language = .make, .source = "define F\n echo x\n echo y\nendef\n" },
+        .{ .language = .sql, .source = "CREATE TABLE app.users (\n id INT,\n name TEXT\n);\n" },
+        .{ .language = .csharp, .source = "namespace N {\n class A {\n int F() {\n return 1;\n }\n }\n}\n" },
+        .{ .language = .objc, .source = "@implementation A\n- (int)f {\n return 1;\n}\n@end\n" },
+        .{ .language = .scala, .source = "object A {\n def f(): Int = {\n 1\n }\n}\n" },
+        .{ .language = .markdown, .source = "# A\n\nx\n\n## B\n\ny\n" },
+        .{ .language = .css, .source = "a {\n color: red;\n display: block;\n}\n" },
+        .{ .language = .html, .source = "<div>\n <p>\n hi\n </p>\n</div>\n" },
+        .{ .language = .yaml, .source = "a:\n b:\n  c: d\n" },
+        .{ .language = .toml, .source = "[a]\nb=1\nc=2\n" },
+        .{ .language = .xml, .source = "<a>\n <b>\n hi\n </b>\n</a>\n" },
+        .{ .language = .dtd, .source = "<!ELEMENT a (\n b,\n c\n)>\n" },
+        .{ .language = .dockerfile, .source = "FROM scratch\nRUN echo x\nRUN echo y\n" },
+        .{ .language = .json, .source = "{\n \"a\": {\n \"b\": 1\n }\n}\n" },
+    }) |case| {
+        var p = Provider.init(case.source, case.language, 0) orelse return error.NoProvider;
+        defer p.deinit();
+        try stickyAncestorJudge(&p, case.source);
+    }
+}
+
+// 한 화면에서 다른 깊이의 머리줄을 얻으려면 여러 씨앗을 모두 방문하고 중복 씨앗은 합쳐야 한다.
+fn stickyMultipleSeedsJudge() !void {
+    const a = std.testing.allocator;
+    const source = "fn f() void {\n return;\n}\nfn g() void {\n return;\n}\n";
+    var p = Provider.init(source, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var out: std.ArrayList(Provider.Symbol) = .empty;
+    defer out.deinit(a);
+    const first = std.mem.indexOf(u8, source, "return;").?;
+    const second = std.mem.lastIndexOf(u8, source, "return;").?;
+    try std.testing.expect(try p.stickySymbols(a, &.{@intCast(first)}, &out));
+    const one = try a.dupe(Provider.Symbol, out.items);
+    defer a.free(one);
+    try std.testing.expectEqual(@as(usize, 1), one.len);
+    _ = try p.stickySymbols(a, &.{ @intCast(first), @intCast(first) }, &out);
+    try std.testing.expectEqualDeep(one, out.items);
+    _ = try p.stickySymbols(a, &.{ @intCast(first), @intCast(second) }, &out);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+}
+
+test "sticky ancestors 삽입 삭제와 지연 조회에서도 전체 집계를 보존한다" {
+    const a = std.testing.allocator;
+    for ([_]Language{ .zig, .python, .dart, .swift, .javascript }) |language| {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(a);
+        try text.appendSlice(a, "const A = struct {\n fn f() void {\n return;\n }\n};\n");
+        var p = Provider.init(text.items, language, 0) orelse return error.NoProvider;
+        defer p.deinit();
+        try stickyAncestorJudge(&p, text.items);
+        var random: std.Random.DefaultPrng = .init(0x535449434b59);
+        const rng = random.random();
+        const inserts = [_][]const u8{ "x", "\n", "{}", "fn q() void {\n return;\n}\n", " ", "//", "class A {\n f() {\n return 1;\n }\n}\n" };
+        for (0..400) |i| {
+            const at = rng.uintLessThan(usize, text.items.len + 1);
+            const old_end = @min(text.items.len, at + rng.uintLessThan(usize, 12));
+            const inserted = if (i % 3 == 0) "" else inserts[rng.uintLessThan(usize, inserts.len)];
+            const start_point = stickyPoint(text.items, at);
+            const old_point = stickyPoint(text.items, old_end);
+            try text.replaceRange(a, at, old_end - at, inserted);
+            p.onEdit(text.items, .{ .start_byte = @intCast(at), .old_end_byte = @intCast(old_end), .new_end_byte = @intCast(at + inserted.len), .start_point = start_point, .old_end_point = old_point, .new_end_point = stickyPoint(text.items, at + inserted.len) });
+            if (i % 4 == 0 or i == 399) try stickyAncestorJudge(&p, text.items);
+        }
+    }
+}
+
+fn stickyAncestorAllocationJudge(a: std.mem.Allocator) !void {
+    const source = "const A = struct {\n fn f() void {\n return;\n }\n};\n";
+    const changed = "const A = struct {\n fn f() void {\n return 1;\n }\n};\n";
+    var p = Provider.init(source, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var out: std.ArrayList(Provider.Symbol) = .empty;
+    defer out.deinit(a);
+    _ = p.stickySymbols(a, &.{30}, &out) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), out.items.len);
+        try stickyAncestorJudge(&p, source);
+        return err;
+    };
+    p.onEdit(changed, .{ .start_byte = 41, .old_end_byte = 41, .new_end_byte = 43, .start_point = stickyPoint(source, 41), .old_end_point = stickyPoint(source, 41), .new_end_point = stickyPoint(changed, 43) });
+    _ = p.stickySymbols(a, &.{30}, &out) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), out.items.len);
+        try stickyAncestorJudge(&p, changed);
+        return err;
+    };
+    try stickyAncestorJudge(&p, changed);
+    // 후보가 이미 일부 들어간 뒤 HashMap/출력 배열이 커지는 실패도 만든다.
+    // 두 조상만 쓰면 첫 할당이 끝난 뒤 추가 할당이 없어 errdefer를 빼도 판정이 통과했다.
+    var many: std.ArrayList(u8) = .empty;
+    defer many.deinit(std.testing.allocator);
+    var offsets: [40]u32 = undefined;
+    for (&offsets, 0..) |*offset, i| {
+        try many.print(std.testing.allocator, "fn f{d}() void {{\n return;\n}}\n", .{i});
+        offset.* = @intCast(many.items.len - 5);
+    }
+    var other = Provider.init(many.items, .zig, 0) orelse return error.NoProvider;
+    defer other.deinit();
+    _ = other.stickySymbols(a, &offsets, &out) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), out.items.len);
+        try stickyAncestorJudge(&other, many.items);
+        return err;
+    };
+    try std.testing.expectEqual(@as(usize, 40), out.items.len);
+}
+
+test "sticky ancestors 할당 실패 후 재시도는 이전 집계와 출력 경계를 보존한다" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, stickyAncestorAllocationJudge, .{});
+}
+
+test "sticky ancestors 선언 전체 삭제 재삽입과 UTF8 CRLF 좌표를 보존한다" {
+    const variants = [_][]const u8{
+        "fn f() void {\n return;\n}\nfn g() void {\n return;\n}\n",
+        "fn g() void {\n return;\n}\n",
+        "// 심볼 없음\r\n// 끝\r\n",
+        "fn 한글() void {\r\n return;\r\n}\r\n",
+        "const A = struct {\n fn f() void {\n return;\n }\n};\n",
+        "\n",
+    };
+    var p = Provider.init(variants[0], .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    try stickyAncestorJudge(&p, variants[0]);
+    var before = variants[0];
+    for (0..3) |_| for (variants) |after| {
+        var prefix: usize = 0;
+        while (prefix < @min(before.len, after.len) and before[prefix] == after[prefix]) prefix += 1;
+        var suffix: usize = 0;
+        while (suffix < before.len - prefix and suffix < after.len - prefix and before[before.len - suffix - 1] == after[after.len - suffix - 1]) suffix += 1;
+        const old_end = before.len - suffix;
+        const new_end = after.len - suffix;
+        p.onEdit(after, .{ .start_byte = @intCast(prefix), .old_end_byte = @intCast(old_end), .new_end_byte = @intCast(new_end), .start_point = stickyPoint(before, prefix), .old_end_point = stickyPoint(before, old_end), .new_end_point = stickyPoint(after, new_end) });
+        try stickyAncestorJudge(&p, after);
+        before = after;
+    };
+    for (variants) |after| {
+        p.setSource(after);
+        try stickyAncestorJudge(&p, after);
+    }
 }

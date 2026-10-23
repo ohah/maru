@@ -21735,6 +21735,64 @@ fn paneRowText(self: *AppSession, term: *Term, row: u16, buf: []u8) ![]const u8 
 /// `setEditorTop` 이 프레임에서 0 으로 되돌아가, 0·1 행이 머리줄이 아니라 **본문 1·2 줄**로 같은 글자를 보여 판정자가 헛초록이었다(처음 판).
 const sticky_src = "const A = struct {\n    pub fn f() void {\n" ++ (array_repeat.repeat("        _ = 1;\n", 100)) ++ "    }\n};\n";
 
+test "sticky ancestors 화면 위로 지난 긴 랩 본문은 닫힌 함수의 머리줄을 남기지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.loaded_config.config.lsp.enabled = false;
+    fx.session.loaded_config.config.editor.wrap = true;
+    const source = "pub fn previous() void {\n    _ = 1;\n    // " ++ array_repeat.repeat("x", 4000) ++ "\n}\n\n" ++ array_repeat.repeat("// tail\n", 80);
+    const term = try undoFixture(&fx, allocator, "wrapped.zig", source);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    var buf: [256]u8 = undefined;
+    _ = try paneRowText(fx.session, term, 0, &buf);
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editorDocument().opened.?.file.lines.line(40).?.start);
+    setEditorTop(fx.session, term, 5, "test");
+    _ = try paneRowText(fx.session, term, 0, &buf);
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_first_line);
+    // 화면 위 줄의 음수 근삿값에 랩 조각 수를 더하면, 전부 화면 밖인데도 양수가 된다.
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_sticky.drawn_len);
+}
+
+test "sticky ancestors 전체 순회 대조군과 스크롤 랩 최대 행 변경의 표시가 같다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.loaded_config.config.lsp.enabled = false;
+    const source = "const A = struct {\n    pub fn f() void {\n" ++ array_repeat.repeat("        _ = 1; // 길게 이어지는 본문 abcdefghijklmnopqrstuvwxyz\n", 100) ++ "    }\n};\n" ++ array_repeat.repeat("// tail\n", 80);
+    const term = try undoFixture(&fx, allocator, "oracle.zig", source);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    var buf: [256]u8 = undefined;
+    _ = try paneRowText(fx.session, term, 0, &buf);
+    for ([_]bool{ false, true }) |wrap| {
+        fx.session.loaded_config.config.editor.wrap = wrap;
+        for ([_]u32{ 0, 1, 2, 10 }) |max| {
+            fx.session.loaded_config.config.editor.sticky_scroll_max_lines = max;
+            for ([_]usize{ 0, 1, 2, 3, 9, 99, 100, 101, 102, 103, 110 }) |top| {
+                term.rt.editor_selection = editor_selection.Selection.at(term.rt.editorDocument().opened.?.file.lines.line(top + 10).?.start);
+                setEditorTop(fx.session, term, top, "test");
+                _ = try paneRowText(fx.session, term, 0, &buf);
+                const leaf = activeLeafRectForTest(fx.session) orelse return error.NoLeaf;
+                const got = sticky_client.compute(fx.session, term, .{ .x = @intCast(leaf.x), .y = @intCast(leaf.y), .w = leaf.w, .h = leaf.h }, wrap);
+                var numbers: [10]usize = undefined;
+                const len = got.len;
+                for (got, 0..) |line, i| numbers[i] = line.number;
+                const source_kind = term.rt.editor_sticky.source;
+                const want = sticky_client.referenceForTest(fx.session, term, .{ .x = @intCast(leaf.x), .y = @intCast(leaf.y), .w = leaf.w, .h = leaf.h }, wrap);
+                try testing.expectEqual(len, want.len);
+                try testing.expectEqual(source_kind, term.rt.editor_sticky.source);
+                for (want, 0..) |line, i| try testing.expectEqual(numbers[i], line.number);
+            }
+        }
+    }
+}
+
 test "STK7 sticky scroll 1층 — 스크롤하면 바깥부터 머리줄이 실제로 그려지고, caret 을 덮을 칸부터 걷히며, 고정 행을 누르면 그 줄로 가 자기 칸에 온다; 호버·⌘클릭은 고정 행에서 안 뜨고 설정으로 끈다 (제품 경계, §4.1i)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -46306,6 +46364,8 @@ const EditCostCounts = struct {
     edit: syntax_mod.Provider.Stats,
     /// 프레임을 관측한 뒤 트리를 다시 순회한 시간(ns). 이미 읽은 트리의 값이며 출력만 한다.
     walk_ns: [3]u64,
+    sticky_edit: syntax_mod.Provider.StickyWork,
+    edit_frame_ns: u64,
 };
 
 fn editCostCounts(allocator: std.mem.Allocator, name: []const u8, data: []const u8) !EditCostCounts {
@@ -46339,8 +46399,10 @@ fn editCostCounts(allocator: std.mem.Allocator, name: []const u8, data: []const 
         d.dl.deinit(allocator);
     }
     const st1 = term.rt.editor_syntax.provider.?.stats;
+    const edit_start = std.Io.Clock.awake.now(s.io).nanoseconds;
     try testing.expect(insertText(s, term, " "));
     const after_edit = term.rt.editor_syntax.provider.?.stats;
+    const sticky_before = term.rt.editor_syntax.provider.?.sticky_work;
     // 편집 자체의 일을 프레임 비용에 더하면 어느 단계가 느린지 잘못 귀속할 수 있다.
     try testing.expectEqual(st1.symbol_nodes, after_edit.symbol_nodes);
     try testing.expectEqual(st1.fold_nodes, after_edit.fold_nodes);
@@ -46348,7 +46410,9 @@ fn editCostCounts(allocator: std.mem.Allocator, name: []const u8, data: []const 
         var d = appendPaneFrame(s, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
         d.dl.deinit(allocator);
     }
+    const edit_end = std.Io.Clock.awake.now(s.io).nanoseconds;
     const st2 = term.rt.editor_syntax.provider.?.stats;
+    const sticky_after = term.rt.editor_syntax.provider.?.sticky_work;
     var walk_ns: [3]u64 = undefined;
     // 「차가운 첫 순회」 가설(계획 「귀속」 — 기각했다) — 편집이 새로 판 트리를 같은 순회로 두 번, 그다음 다른 순회로 걷는 시간을 잰다(단언하지
     // 않는다 — 기계 속도에 달렸다). 프레임 뒤에 실행하고 관측 카운터도 되돌려, 별도 순회의 비용을 프레임 관측에 섞지 않는다.
@@ -46381,7 +46445,7 @@ fn editCostCounts(allocator: std.mem.Allocator, name: []const u8, data: []const 
             };
         }
     };
-    return .{ .nodes = nodes, .doc_len = doc.file.content.len, .idle = Sub.of(st0, st1), .edit = Sub.of(after_edit, st2), .walk_ns = walk_ns };
+    return .{ .nodes = nodes, .doc_len = doc.file.content.len, .idle = Sub.of(st0, st1), .edit = Sub.of(after_edit, st2), .walk_ns = walk_ns, .edit_frame_ns = @intCast(edit_end - edit_start), .sticky_edit = .{ .ancestor_nodes = sticky_after.ancestor_nodes - sticky_before.ancestor_nodes, .summary_nodes = sticky_after.summary_nodes - sticky_before.summary_nodes, .rebuild_nodes = sticky_after.rebuild_nodes - sticky_before.rebuild_nodes } };
 }
 
 test "EW0 관측은 포화 범위와 반복 조회에서도 구문 결과를 바꾸지 않는다" {
@@ -46475,7 +46539,7 @@ test "EW0 관측은 포화 범위와 반복 조회에서도 구문 결과를 바
     }
 }
 
-test "EW0 [측정] 편집 한 번 뒤 프레임이 트리에서 하는 일 — 편집 없는 프레임은 트리를 걷지 않고, 한 글자 편집 뒤 프레임은 고정 머리줄의 심볼 순회와 접힘 승격이 **각각 트리 전체를 정확히 한 번** 걷는다(EW1·EW2 가 뒤집는다); 구문 색 질의는 보이는 범위만 묻고 범위 밖 조각을 받지 않는다 — 납작한 Zig·큰 struct 의 Zig·거대한 class 의 Swift (계획 editor-edit-frame-cost EW0)" {
+test "EW0 [측정] 편집 한 번 뒤 프레임이 트리에서 하는 일 — 편집 없는 프레임은 전체 목록을 다시 만들지 않고, 한 글자 편집 뒤 심볼은 화면 조상과 변경 범위만 걷으며 접힘은 전체를 걷는다(EW1); 구문 색 질의는 보이는 범위만 묻고 범위 밖 조각을 받지 않는다 — 납작한 Zig·큰 struct 의 Zig·거대한 class 의 Swift (계획 editor-edit-frame-cost EW0)" {
     // **재앙 감지선이다** — 지금 모양(편집마다 트리 전체 두 바퀴)을 고정한다. EW1(고정 머리줄)·EW2(접힘)가 그 단언을 「문서보다 자릿수로 작다」로
     // 뒤집는다. 시간은 단언하지 않는다(계획 「원칙」) — 문서 크기만 출력한다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -46510,9 +46574,13 @@ test "EW0 [측정] 편집 한 번 뒤 프레임이 트리에서 하는 일 — �
         // 편집 없는 프레임은 트리를 걷지 않는다(심볼·접힘은 version 이 같으면 다시 안 뽑는다).
         try testing.expectEqual(@as(u64, 0), r.idle.symbol_nodes);
         try testing.expectEqual(@as(u64, 0), r.idle.fold_nodes);
-        // 편집 뒤 프레임 — 지금은 둘 다 트리 전체를 **정확히 한 번**씩 걷는다(EW1·EW2 가 뒤집는다). 노드 수가 크다는 것부터 — 0 이면 아래가 공허하다.
+        // 심볼은 국소 탐색이고 접힘의 전체 순회는 EW2 범위다. 빈 fixture가 통과하지 않도록 전체 크기도 확인한다.
         try testing.expect(r.nodes > 50_000);
-        try testing.expectEqual(r.nodes, r.edit.symbol_nodes);
+        try testing.expectEqual(@as(u64, 0), r.edit.symbol_nodes);
+        try testing.expectEqual(@as(u64, 0), r.sticky_edit.rebuild_nodes);
+        try testing.expect(r.sticky_edit.ancestor_nodes > 0 and r.sticky_edit.ancestor_nodes < 1000);
+        try testing.expect(r.sticky_edit.summary_nodes < 1000);
+        std.debug.print("[측정] EW1 {s}: 조상 {d} 변경 범위 {d} 재구축 {d} 편집+프레임 {d}µs\n", .{ case.name, r.sticky_edit.ancestor_nodes, r.sticky_edit.summary_nodes, r.sticky_edit.rebuild_nodes, r.edit_frame_ns / 1000 });
         try testing.expectEqual(r.nodes, r.edit.fold_nodes);
         // 구문 색 질의는 보이는 범위만 묻는다 — 한 프레임에 물은 byte 를 다 더해도 문서의 십분의 일이 안 되고, 범위와 겹치지 않는 조각을 돌려받지 않는다
         // (큰 노드 하나에 든 문서 — Zig 의 큰 struct · Swift 의 거대한 class — 에서도).

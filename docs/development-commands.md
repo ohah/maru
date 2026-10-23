@@ -1919,3 +1919,11 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 ### SSH 자식 회수의 신호 중단
 
 `mise exec -- python3 tools/test-ssh-wait-retry.py`는 실제 자식 대기에 단발/반복 신호를 보내 종료 코드와 ECHILD를 확인한다(Debug/ReleaseFast 각 6개).
+
+### 고정 헤더의 화면 주변 탐색
+
+`mise exec -- zig build test-editor-sticky-ancestors -j2`와 `-Doptimize=ReleaseFast`로
+심볼 후보·전체 집계·기존 STK·할당 실패·C 트리 수명을 확인한다.
+`python3 tools/editor-sticky-ancestors-app/run.py --output <빈 외부 경로>`는 격리 앱의
+과거 긴 랩 본문과 현재 중첩 함수 화면을 Metal PNG로 남긴다.
+범위와 한계는 [EW1 계획](plans/editor-edit-frame-cost.md#ew1-구현과-검증)을 따른다.

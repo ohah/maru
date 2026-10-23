@@ -5009,3 +5009,11 @@ Artifact controls 총 **20** test methods, 새 범위 음성 artifact **32**종 
 
 
 검색 기반 고리 검증 중 기존 `test-editor-project-search`가 barrel 분석 누락으로 0 tests를 컴파일함을 발견했다. 테스트 루트의 명시적 import와 기존 PCRE2 테스트 의존성을 복구하고, 현재 실제 **288 compiled / macOS 287 passed·Windows 전용 비교 1 skipped**를 요구해 macOS CI에 연결한다. 추가로 드러난 `PSE1` ReleaseFast allocation-failure 판정의 주소 의존 remap은 테스트 backing allocator의 resize/remap을 끄고 실제 alloc/free·OOM 전파 검사를 유지해 안정화한다. 제품 JSON parser 동작은 바꾸지 않는다.
+
+
+### 고정 헤더의 화면 주변 심볼 탐색(EW1)
+
+`test-editor-sticky-ancestors`는 tree-sitter 전체 목록과 모든 줄의 후보, 실제 PaneFixture의
+헤더 번호·출처, 삽입·삭제·지연 조회·UTF-8/CRLF·Zig OOM 재시도·C 메모리 반환과 기존 STK를 확인한다.
+`test-editor-edit-cost`는 큰 문서 편집 뒤 전체 심볼 순회 0과 국소 방문·재구축 0을 검사한다.
+격리 AppKit·Metal 캡처 도구와 첫 전체 집계·큰 구조 변경의 한계는 [EW1](plans/editor-edit-frame-cost.md#ew1-구현과-검증)을 따른다.

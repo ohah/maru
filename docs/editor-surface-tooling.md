@@ -396,9 +396,10 @@ TextMate, git staging, formatter는 LSP의 선행 조건이 아니다. 초기 sy
 ### 8.2a LSP seam 1단 — transport·수명·문서 동기화·진단 (2026-09-17, 계획 공격 뒤의 사용자 결정)
 
 **계획 공격이 드러낸 것.** §8.2 의 seam 은 목록이고 코드는 **0 줄**이다 — 진단 층(visual-mapping §5.4)이 서고서야 「출처가 없다」가
-보였다. 이 저장소에서 자식 프로세스는 `std.process.Child`(0.16 에서 io 기반)를 피해 **posix fork+execve+pipe** 로 띄우고(`ssh_upload`·
-`update_check`·`git_backend` 의 결), 오래 사는 스트림은 **비차단 fd 를 세션 tick 에서 drain** 한다(원격 에이전트 이벤트 스트리머 —
-`spawnAgentEvents`·`setNonBlockingFd`). LSP 도 그 결로 간다 — 스레드를 새로 두지 않는다.
+보였다. `update_check`·`git_backend`는 `std.process.Child`(0.16에서 io 기반)를 피해 **posix fork+execve+pipe**로 띄운다.
+SSH 전송은 `macos_spawn.spawnMapped`의 **CLOEXEC_DEFAULT+stdio 파이프**로 실행한다(같은 I/O 무관 경계).
+오래 사는 스트림은 **비차단 fd를 세션 tick에서 drain**한다(`spawnAgentEvents`·`setNonBlockingFd`).
+LSP도 비차단 drain 방식을 쓴다 — 스레드를 새로 두지 않는다.
 
 **사용자 결정(2026-09-17).** ① 서버는 **번들하지 않는다**(§8.1a 그대로 — clangd 하나가 55.5 MB, 앱 실행 파일과 맞먹는다). ② 서버가
 있으면 **워크스페이스마다 한 번 묻고 기억**한다(VS Code Workspace Trust 의 모양 — §8.1 의 「저장소 단위 신뢰」가 이것이다). ③ 없으면

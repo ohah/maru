@@ -49,7 +49,7 @@ test "조용한 감시자는 stdin 이 «파이프» 여야 한다 — /dev/null
     // 그래서 여기만은 **파이프**여야 하고, 그 차이가 지워지면 고아가 돌아온다.
     try std.testing.expect(std.mem.indexOf(u8, spawn, "/dev/null") == null);
     try std.testing.expect(std.mem.indexOf(u8, spawn, "in_pipe") != null);
-    try std.testing.expect(std.mem.indexOf(u8, spawn, "dup2(in_pipe[0], 0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, spawn, "spawnChild(\"/usr/bin/env\", &argv, .{ .fd = in_pipe[0] }, out_pipe[1])") != null);
     // 부모가 **쓰기 끝을 든다** — 그 fd 의 존재가 「부모가 살아 있다」이고, 닫힘이 EOF 다.
     try std.testing.expect(std.mem.indexOf(u8, spawn, ".in_fd = in_pipe[1]") != null);
     // 읽기는 UI 를 안 멈춘다(에이전트 채널과 같은 규율).

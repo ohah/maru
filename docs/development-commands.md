@@ -1845,6 +1845,10 @@ mise exec -- zig build test-editor-multi-close-contract -Doptimize=ReleaseFast
 AppKit 응답 지연이나 다중 파일 저장 성능의 실측값이 아니다. 상세 범위는
 [로컬 저장 계획](plans/editor-local-save-async.md#여러-문서-닫기-진입점-검증-2026-10-22)을 따른다.
 
+### SSH 자식 FD 격리
+
+`mise exec -- python3 tools/test-ssh-fd-isolation.py`: 일곱 SSH 실행 경로의 다섯 FD/stdio 공격 조건과 정상 대조군을 Debug/ReleaseFast에서 검사한다. 실물 SSH 서버는 필요하지 않다.
+
 ### 호스트 언어 서버와 편집기 테스트 격리
 
 ```sh

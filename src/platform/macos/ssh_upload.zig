@@ -968,7 +968,14 @@ fn readAllFd(allocator: std.mem.Allocator, fd: c_int) ![]u8 {
 /// 자식을 reap하고 exit code를 돌려준다(정상 종료가 아니면 -1).
 fn reapPid(pid: std.c.pid_t) c_int {
     var status: c_int = 0;
-    _ = std.c.waitpid(pid, &status, 0);
+    // A signal does not transfer child ownership. Retry until this exact child
+    // is reaped; an untouched status must never be interpreted as exit zero.
+    while (true) {
+        const result = std.c.waitpid(pid, &status, 0);
+        if (result == pid) break;
+        if (result < 0 and std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
+        return -1;
+    }
     const us: u32 = @bitCast(status); // W 매크로는 u32를 받는다(waitpid status는 c_int)
     if (std.c.W.IFEXITED(us)) return @intCast(std.c.W.EXITSTATUS(us));
     return -1;

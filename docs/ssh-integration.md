@@ -571,3 +571,15 @@ lifecycle 테스트는 **부모가 기본 처리일 때만 돌아서 이 결함�
 정상 로컬 명령 출력 대조군이 Debug/ReleaseFast 각각 6개 통과해야 한다.
 전용 테스트 프로세스만 한도와 PATH를 변경하고 원복하며 SSH 접속은 하지 않는다.
 macOS-only CI에서도 실행한다. 실물 SSH 서버의 전송 검증을 대체하지 않는다.
+
+## SSH 자식 회수와 신호 중단
+
+`ssh_upload.reapPid`는 `waitpid`가 EINTR로 중단되면 같은 PID를 다시 기다린다.
+반환된 PID를 확인한 뒤에만 종료 상태를 읽으며 다른 오류나 signal 종료는 -1이다.
+stdout EOF는 자식 종료를 뜻하지 않으므로 두 수명을 구분한다.
+
+`mise exec -- python3 tools/test-ssh-wait-retry.py`는 stdout을 먼저 닫은 실제 자식의
+종료 대기 중 SIGALRM을 보내 0·7·127 종료, signal 종료와 반복 신호를 검사한다.
+다섯 적대적 시나리오와 무신호 대조군이 Debug/ReleaseFast 각 6개 통과해야 한다.
+각 경우 ECHILD까지 확인해 자식 회수를 증명한다. 실제 SSH 서버는 필요하지 않다.
+macOS-only CI에 연결돼 있다.

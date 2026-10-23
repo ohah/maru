@@ -1892,3 +1892,9 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 ### Formatter/LSP descriptor isolation
 
 `mise exec -- zig build test-editor-process-isolation`과 같은 명령의 `-Doptimize=ReleaseFast`는 formatter 기본 동작·시한·상한 및 sibling exec의 descriptor 누수 회귀를 실행한다. 5 tests/5 passed를 요구하며 macOS-only CI도 같은 고리를 실행한다. 전체 출하 체제 회귀는 `mise exec -- zig build test-editor -Doptimize=ReleaseFast`다. 강제로 끼운 exec에서 sibling 생존 중 EOF·정확한 출력까지 확인하며 실행 횟수만 세지 않는다.
+
+### 편집 뒤 프레임 작업량 관측
+
+`mise exec -- zig build test-editor-edit-cost -j2`로 큰 Zig/Swift 문서의 프레임 작업량과
+카운터 경계 조건을 검사한다. `-Doptimize=ReleaseFast`를 추가해 최적화 빌드에서도 실행한다.
+실행 범위와 실제 AppKit 검증과의 구분은 [편집 비용 계획](plans/editor-edit-frame-cost.md#ew0-후속-검증)을 따른다.

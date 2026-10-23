@@ -46311,6 +46311,7 @@ const EditCostCounts = struct {
 fn editCostCounts(allocator: std.mem.Allocator, name: []const u8, data: []const u8) !EditCostCounts {
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
+    fx.session.loaded_config.config.lsp.enabled = false;
     const term = try undoFixture(&fx, allocator, name, data);
     const s = fx.session;
     var rounds: usize = 0;
@@ -46338,9 +46339,14 @@ fn editCostCounts(allocator: std.mem.Allocator, name: []const u8, data: []const 
     }
     const st1 = term.rt.editor_syntax.provider.?.stats;
     try testing.expect(insertText(s, term, " "));
+    {
+        var d = appendPaneFrame(s, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    const st2 = term.rt.editor_syntax.provider.?.stats;
     var walk_ns: [3]u64 = undefined;
     // 「차가운 첫 순회」 가설(계획 「귀속」 — 기각했다) — 편집이 새로 판 트리를 같은 순회로 두 번, 그다음 다른 순회로 걷는 시간을 잰다(단언하지
-    // 않는다 — 기계 속도에 달렸다). 아래 프레임의 관측값에 섞이지 않게 앞뒤 수를 되돌린다.
+    // 않는다 — 기계 속도에 달렸다). 프레임 뒤에 실행하고 관측 카운터도 되돌려, 별도 순회의 비용을 프레임 관측에 섞지 않는다.
     {
         const pv = &term.rt.editor_syntax.provider.?;
         const saved = pv.stats;
@@ -46358,11 +46364,6 @@ fn editCostCounts(allocator: std.mem.Allocator, name: []const u8, data: []const 
         walk_ns = .{ @intCast(t1 - t0), @intCast(t2 - t1), @intCast(t3 - t2) };
         pv.stats = saved;
     }
-    {
-        var d = appendPaneFrame(s, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
-        d.dl.deinit(allocator);
-    }
-    const st2 = term.rt.editor_syntax.provider.?.stats;
     const Sub = struct {
         fn of(a: syntax_mod.Provider.Stats, b: syntax_mod.Provider.Stats) syntax_mod.Provider.Stats {
             return .{
@@ -46376,6 +46377,87 @@ fn editCostCounts(allocator: std.mem.Allocator, name: []const u8, data: []const 
         }
     };
     return .{ .nodes = nodes, .doc_len = doc.file.content.len, .idle = Sub.of(st0, st1), .edit = Sub.of(st1, st2), .walk_ns = walk_ns };
+}
+
+test "EW0 관측은 포화 범위와 반복 조회에서도 구문 결과를 바꾸지 않는다" {
+    const allocator = testing.allocator;
+    const source = "const A = struct {\n pub fn f() u32 {\n return 1;\n }\n};\n";
+    // 카운터 각각을 상한에 놓아도 같은 심볼·접힘·색 결과를 돌려줘야 한다.
+    inline for (.{ "symbol_nodes", "fold_nodes", "query_calls", "query_bytes", "query_spans", "query_spans_outside" }) |field| {
+        var p = syntax_mod.Provider.init(source, .zig, 0) orelse return error.NoProvider;
+        defer p.deinit();
+        var syms: std.ArrayList(syntax_mod.Provider.Symbol) = .empty;
+        defer syms.deinit(allocator);
+        var folds: std.ArrayList(syntax_mod.Provider.FoldSpan) = .empty;
+        defer folds.deinit(allocator);
+        var spans: std.ArrayList(syntax_mod.Span) = .empty;
+        defer spans.deinit(allocator);
+        try p.symbolsChecked(allocator, &syms);
+        try p.foldSpans(allocator, &folds);
+        p.spansForRange(allocator, source, .{ .start = 0, .end = source.len }, &spans);
+        const expected = .{ syms.items.len, folds.items.len, spans.items.len };
+        @field(p.stats, field) = std.math.maxInt(u64);
+        try p.symbolsChecked(allocator, &syms);
+        try p.foldSpans(allocator, &folds);
+        p.spansForRange(allocator, source, .{ .start = 0, .end = source.len }, &spans);
+        try testing.expectEqual(std.math.maxInt(u64), @field(p.stats, field));
+        try testing.expectEqual(expected, .{ syms.items.len, folds.items.len, spans.items.len });
+        try testing.expect(syms.items.len > 0 and folds.items.len > 0 and spans.items.len > 0);
+    }
+    // 범위는 호출자가 요청한 byte를 센다. EOF를 넘는 요청은 수집 단계가 자르며, 역순도 질의량을 넘치게 만들지 않는다.
+    for ([_]struct { start: u32, end: u32 }{
+        .{ .start = 0, .end = 0 },
+        .{ .start = 5, .end = 5 },
+        .{ .start = 8, .end = 3 },
+        .{ .start = source.len, .end = source.len },
+        .{ .start = source.len + 1, .end = source.len + 10 },
+        .{ .start = 0, .end = source.len + 100 },
+    }) |range| {
+        var p = syntax_mod.Provider.init(source, .zig, 0) orelse return error.NoProvider;
+        defer p.deinit();
+        var spans: std.ArrayList(syntax_mod.Span) = .empty;
+        defer spans.deinit(allocator);
+        p.spansForRange(allocator, source, .{ .start = range.start, .end = range.end }, &spans);
+        try testing.expectEqual(@as(u64, 1), p.stats.query_calls);
+        try testing.expectEqual(@as(u64, range.end -| range.start), p.stats.query_bytes);
+        try testing.expectEqual(@as(u64, spans.items.len), p.stats.query_spans);
+        if (range.end <= range.start or range.start >= source.len) try testing.expectEqual(@as(usize, 0), spans.items.len);
+        for (spans.items) |sp| try testing.expect(sp.start < source.len and sp.end <= source.len);
+    }
+    var p = syntax_mod.Provider.init(source, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var other = syntax_mod.Provider.init(source, .zig, 0) orelse return error.NoProvider;
+    defer other.deinit();
+    var syms: std.ArrayList(syntax_mod.Provider.Symbol) = .empty;
+    defer syms.deinit(allocator);
+    var folds: std.ArrayList(syntax_mod.Provider.FoldSpan) = .empty;
+    defer folds.deinit(allocator);
+    // 반복 순회는 매번 정확한 노드 수를 더하고, 다른 문서의 계측을 오염시키지 않는다.
+    for (1..4) |n| {
+        try p.symbolsChecked(allocator, &syms);
+        try testing.expectEqual(p.nodeCount() * n, p.stats.symbol_nodes);
+        try p.foldSpans(allocator, &folds);
+        try testing.expectEqual(p.nodeCount() * n, p.stats.fold_nodes);
+    }
+    try testing.expectEqual(@as(u64, 0), other.stats.symbol_nodes);
+    try testing.expectEqual(@as(u64, 0), other.stats.fold_nodes);
+    // 파싱이 아직 없거나 트리를 버린 시점에도 이전 결과가 남아서는 안 된다.
+    {
+        const tree = p.tree;
+        defer p.tree = tree;
+        p.tree = null;
+        const saved = p.stats;
+        try testing.expectEqual(@as(u64, 0), p.nodeCount());
+        try p.symbolsChecked(allocator, &syms);
+        try testing.expectEqual(@as(usize, 0), syms.items.len);
+        try p.foldSpans(allocator, &folds);
+        try testing.expectEqual(@as(usize, 0), folds.items.len);
+        var spans: std.ArrayList(syntax_mod.Span) = .empty;
+        defer spans.deinit(allocator);
+        p.spansForRange(allocator, source, .{ .start = 0, .end = source.len }, &spans);
+        try testing.expectEqual(saved, p.stats);
+        try testing.expectEqual(@as(usize, 0), spans.items.len);
+    }
 }
 
 test "EW0 [측정] 편집 한 번 뒤 프레임이 트리에서 하는 일 — 편집 없는 프레임은 트리를 걷지 않고, 한 글자 편집 뒤 프레임은 고정 머리줄의 심볼 순회와 접힘 승격이 **각각 트리 전체를 정확히 한 번** 걷는다(EW1·EW2 가 뒤집는다); 구문 색 질의는 보이는 범위만 묻고 범위 밖 조각을 받지 않는다 — 납작한 Zig·큰 struct 의 Zig·거대한 class 의 Swift (계획 editor-edit-frame-cost EW0)" {

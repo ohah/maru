@@ -6331,6 +6331,16 @@ pub fn build(b: *std.Build) void {
     run_history_host.addArg("--maru-expect-tests=6");
     const history_step = b.step("test-editor-history-step", "Run prepared multi-document history and host identity judges");
     history_step.dependOn(&run_history_host.step);
+    // 계측 검증이 전체 편집기 테스트나 설치된 언어 서버에 기대지 않도록 독립 실행한다.
+    const edit_cost_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.EW0"} });
+    const run_edit_cost = b.addRunArtifact(edit_cost_tests);
+    run_edit_cost.setCwd(b.path("."));
+    run_edit_cost.addArg("--maru-expect-tests=6");
+    b.step("test-editor-edit-cost", "Run editor edit frame cost instrumentation judges").dependOn(&run_edit_cost.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_edit_cost.addArg("--maru-expect-passed=6");
+        macos_only_test_step.dependOn(&run_edit_cost.step);
+    }
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
     run_editor_tests.step.dependOn(&install_fake_lsp.step);

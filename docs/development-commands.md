@@ -1911,3 +1911,7 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 ### SSH 업로드 파이프 실패 정리
 
 `mise exec -- python3 tools/test-ssh-pipe-cleanup.py`: macOS 실제 FD 고갈 다섯 시나리오와 정상 명령 대조군을 Debug/ReleaseFast에서 실행한다. 범위는 [SSH 통합](ssh-integration.md#ssh-업로드-파이프-생성-실패의-소유권)을 따른다.
+
+### SSH 자식 회수의 신호 중단
+
+`mise exec -- python3 tools/test-ssh-wait-retry.py`는 실제 자식 대기에 단발/반복 신호를 보내 종료 코드와 ECHILD를 확인한다(Debug/ReleaseFast 각 6개).

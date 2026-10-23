@@ -1927,3 +1927,16 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 `python3 tools/editor-sticky-ancestors-app/run.py --output <빈 외부 경로>`는 격리 앱의
 과거 긴 랩 본문과 현재 중첩 함수 화면을 Metal PNG로 남긴다.
 범위와 한계는 [EW1 계획](plans/editor-edit-frame-cost.md#ew1-구현과-검증)을 따른다.
+
+
+### 접힘 계산 방식 비교 실측(EW2)
+
+제품 적용 전의 독립 사본 비교다. 의존성을 준비한 뒤
+`python3 tools/editor-fold-measure/run.py --output <새 외부 경로> --deps "$PWD/zig-pkg"`로
+기준·증분·지연을 빌드하고 고정 원문·원시 입력 시간·캐시 저장소·RSS를 기록한다.
+정확성 패스는 `--resume --run-only --verify-each-edit 1 --prefix verify --repetitions 1`,
+성능 패스는 `--resume --run-only --verify-each-edit 0`으로 분리해 실행한다.
+`python3 tools/editor-fold-measure/summarize.py <출력>`으로 행렬을 집계하고,
+`python3 tools/editor-fold-measure/review.py <출력>`은 별도 사본에 실패를 주입한다.
+실제 AppKit 경로는 같은 디렉터리의 `gui.py`가 격리 앱을 빌드한다.
+범위·한계·기록 파일은 [비교 실측](plans/editor-fold-cost-measurement.md)을 따른다.

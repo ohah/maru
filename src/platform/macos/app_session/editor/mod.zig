@@ -7838,12 +7838,14 @@ pub fn unfoldAll(self: *AppSession) bool {
 fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
     const lines = foldSourceLines(term);
     const heads = foldedHeads(term);
+    // 표시 순서가 문서 줄의 오름차순이므로 정렬된 두 머리 목록도 한 번씩만 전진한다.
+    var mark_cursor: editor_fold.HeadCursor = .{ .ranges = term.rt.editor_fold_ranges, .folded = heads };
     if (heads.len == 0) {
         // 접힌 것이 없다 — 줄 배열은 원본을 그대로 그린다(만들 이유가 없다). **표식은 만든다** —
         // 펼쳐진 머리에도 화살표가 서야 접을 수 있는 자리가 보인다(Vim `foldcolumn`이 여는 fold에
         // `-`를 그리는 것과 같다).
         const marks = term.rt.editor_fold_marks[0..@min(term.rt.editor_fold_marks.len, lines.len)];
-        for (marks, 0..) |*m, i| m.* = markFor(term, @intCast(i));
+        for (marks, 0..) |*m, i| m.* = nextFoldMark(&mark_cursor, @intCast(i));
         term.rt.editor_fold_marks_len = marks.len;
 
         if (term.rt.editor_visible_lines.len > 0) self.allocator.free(term.rt.editor_visible_lines);
@@ -7881,7 +7883,7 @@ fn rebuildVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void {
         if (k >= out_lines.len) break; // 방어 — 구간 합과 어긋나도 넘치지 않는다(아래에서 꼬리를 채운다)
         out_lines[k] = line;
         out_numbers[k] = @intCast(i + 1); // gutter는 1-based다
-        if (k < out_marks.len) out_marks[k] = markFor(term, @intCast(i));
+        if (k < out_marks.len) out_marks[k] = nextFoldMark(&mark_cursor, @intCast(i));
         k += 1;
     }
 
@@ -10352,6 +10354,14 @@ fn restoreTop(term: *Term, doc_line: usize) void {
 fn markFor(term: *Term, line: u32) chrome_editor.gutter.Fold {
     if (!containsSorted(term.rt.editor_fold_ranges, line)) return .none;
     return if (std.sort.binarySearch(u32, foldedHeads(term), line, orderU32) != null) .collapsed else .open;
+}
+
+fn nextFoldMark(cursor: *editor_fold.HeadCursor, line: u32) chrome_editor.gutter.Fold {
+    return switch (cursor.at(line)) {
+        .none => .none,
+        .open => .open,
+        .collapsed => .collapsed,
+    };
 }
 
 fn orderU32(a: u32, b: u32) std.math.Order {
@@ -70093,4 +70103,79 @@ test "EW2 product 공유 뷰의 여러 줄 삭제 붙여넣기 Undo Redo가 전�
     try testing.expectEqual(@as(usize, 0), peer.rt.editorDocument().opened.?.file.content.len);
     try testing.expect(peer.rt.editor_syntax.folds.tree == null);
     try testing.expect(term.rt.editor_syntax.folds.tree == null);
+}
+
+fn expectFoldMarkLookup(term: *Term) !void {
+    // 빈 출력끼리의 비교가 통과하지 않게 게시해야 할 표식 개수도 독립적으로 확인한다.
+    const rows = if (term.rt.editor_visible_numbers.len > 0) term.rt.editor_visible_numbers.len else foldSourceLines(term).len;
+    try testing.expectEqual(@min(rows, term.rt.editor_fold_marks.len), term.rt.editor_fold_marks_len);
+    for (term.rt.editor_fold_marks[0..term.rt.editor_fold_marks_len], 0..) |got, row| {
+        const number: ?u32 = if (term.rt.editor_visible_numbers.len > 0) term.rt.editor_visible_numbers[row] else @intCast(row + 1);
+        const expected: chrome_editor.gutter.Fold = if (number) |value| markFor(term, value - 1) else .none;
+        try testing.expectEqual(expected, got);
+    }
+}
+
+fn foldMarksReady(fx: *PaneFixture, term: *Term) !void {
+    for (0..10000) |_| {
+        var frame = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoFrame;
+        frame.dl.deinit(testing.allocator);
+        if (!term.rt.editor_syntax.pending and term.rt.editor_syntax_folds_applied) break;
+    }
+    try testing.expect(term.rt.editor_syntax_folds_applied);
+    try expectFoldMarkLookup(term);
+}
+
+test "fold marks product 펴기 부분 접기 전체 접기가 기존 점 조회와 같다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const term = try undoFixture(&fx, a, "marks.zig", "const A = struct {\n fn f() void {\n  if (true) {\n   return;\n  }\n }\n};\nfn g() void {\n return;\n}\n");
+    try foldMarksReady(&fx, term);
+    try testing.expect(term.rt.editor_fold_ranges.len > 2);
+    try testing.expect(toggleFoldHead(fx.session, term, term.rt.editor_fold_ranges[0].head));
+    try expectFoldMarkLookup(term);
+    try testing.expect(term.rt.editor_visible_numbers.len > 0);
+    try testing.expect(unfoldAll(fx.session));
+    try expectFoldMarkLookup(term);
+    try testing.expect(foldAll(fx.session));
+    try expectFoldMarkLookup(term);
+    try testing.expect(unfoldAll(fx.session));
+    try expectFoldMarkLookup(term);
+}
+
+test "fold marks product 공유 뷰의 편집 Undo Redo와 숨은 줄을 대조한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(a);
+    for (0..100) |_| try source.appendSlice(a, "fn f() void {\n _ = 1;\n}\n");
+    const term = try undoFixture(&fx, a, "marks.zig", source.items);
+    try foldMarksReady(&fx, term);
+    try testing.expect(fx.session.runAction("split_editor_right"));
+    const peer = pane_ops.activePane(fx.session).activeTerm();
+    try testing.expect(peer != term);
+    fx.leaf_rect.w /= 2;
+    try foldMarksReady(&fx, peer);
+    try testing.expect(foldAll(fx.session));
+    try testing.expect(peer.rt.editor_folded_len > 0);
+    try expectFoldMarkLookup(peer);
+    for (0..4) |step| {
+        switch (step) {
+            0 => {
+                term.rt.editor_selection = editor_selection.Selection.at(0);
+                try testing.expect(insertText(fx.session, term, " "));
+            },
+            1 => try testing.expect(undoEdit(fx.session, term)),
+            2 => try testing.expect(redoEdit(fx.session, term)),
+            else => {
+                term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 100 };
+                try testing.expect(deleteText(fx.session, term, true));
+            },
+        }
+        for ([_]*Term{ term, peer }) |view| try foldMarksReady(&fx, view);
+    }
 }

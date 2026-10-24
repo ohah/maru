@@ -11,6 +11,28 @@
 const std = @import("std");
 const builtin = @import("builtin"); // 타깃 분기 — 아래 `monotonicUs`가 Windows에서 POSIX를 안 부른다
 
+/// 정렬된 문서 줄을 순서대로 표시할 때 쓴다. 줄마다 같은 머리 목록을 다시 탐색하지 않는다.
+/// 범위·접힌 머리는 오름차순이며 조회 줄은 감소하지 않아야 한다. 중복 머리와 숨은 줄 건너뛰기를 허용한다.
+pub const HeadCursor = struct {
+    ranges: []const Range,
+    folded: []const u32,
+    range_index: usize = 0,
+    folded_index: usize = 0,
+    last_line: ?u32 = null,
+
+    pub const Mark = enum { none, open, collapsed };
+
+    pub fn at(self: *HeadCursor, line: u32) Mark {
+        if (self.last_line) |last| std.debug.assert(line >= last);
+        self.last_line = line;
+        while (self.range_index < self.ranges.len and self.ranges[self.range_index].head < line) self.range_index += 1;
+        while (self.folded_index < self.folded.len and self.folded[self.folded_index] < line) self.folded_index += 1;
+        // 범위가 사라진 옛 접힘 머리만으로 화살표를 만들면 안 된다.
+        if (self.range_index == self.ranges.len or self.ranges[self.range_index].head != line) return .none;
+        return if (self.folded_index < self.folded.len and self.folded[self.folded_index] == line) .collapsed else .open;
+    }
+};
+
 /// 접을 수 있는 한 범위. **줄 단위 반열림이 아니다** — `head`는 보이고 `[first_hidden, last_hidden]`이
 /// 접었을 때 숨는 구간이다. 화면에 남는 줄과 숨는 줄을 호출자가 헷갈리지 않게 이름으로 가른다.
 pub const Range = struct {
@@ -617,4 +639,82 @@ test "[측정] 전체 접기 — 큰 문서에서 숨는 구간 만들기" {
         std.debug.print("\n[측정] {d}블록 전체 접기: {d}구간, {d}µs\n", .{ blocks, spans.len, t1 - t0 });
         try testing.expect(t1 - t0 < 100_000);
     }
+}
+
+fn expectCursorMark(cursor: *HeadCursor, line: u32) !void {
+    var expected: HeadCursor.Mark = .none;
+    for (cursor.ranges) |range| if (range.head == line) {
+        expected = .open;
+        for (cursor.folded) |head| if (head == line) {
+            expected = .collapsed;
+            break;
+        };
+        break;
+    };
+    try std.testing.expectEqual(expected, cursor.at(line));
+}
+
+fn cursorRange(head: u32) Range {
+    return .{ .head = head, .first_hidden = head + 1, .last_hidden = head + 2, .level = 1 };
+}
+
+test "fold marks cursor 빈 목록과 범위 없는 접힌 머리는 표식을 만들지 않는다" {
+    var empty: HeadCursor = .{ .ranges = &.{}, .folded = &.{ 0, 3, 10 } };
+    for (0..12) |line| try expectCursorMark(&empty, @intCast(line));
+    const ranges = [_]Range{ cursorRange(2), cursorRange(8) };
+    var orphan: HeadCursor = .{ .ranges = &ranges, .folded = &.{ 0, 3, 10 } };
+    for (0..12) |line| try expectCursorMark(&orphan, @intCast(line));
+}
+
+test "fold marks cursor 머리 경계와 반복 조회는 기존 표식과 같다" {
+    const ranges = [_]Range{ cursorRange(0), cursorRange(3), cursorRange(9) };
+    var cursor: HeadCursor = .{ .ranges = &ranges, .folded = &.{ 0, 9 } };
+    for (0..12) |line| {
+        try expectCursorMark(&cursor, @intCast(line));
+        try expectCursorMark(&cursor, @intCast(line));
+    }
+}
+
+test "fold marks cursor 중복과 숨은 줄을 건너뛰어도 머리를 놓치지 않는다" {
+    const ranges = [_]Range{ cursorRange(1), cursorRange(1), cursorRange(2), cursorRange(6), cursorRange(15) };
+    var cursor: HeadCursor = .{ .ranges = &ranges, .folded = &.{ 1, 1, 2, 6, 15 } };
+    for ([_]u32{ 0, 1, 1, 6, 15, 30 }) |line| try expectCursorMark(&cursor, line);
+    try std.testing.expectEqual(ranges.len, cursor.range_index);
+    try std.testing.expectEqual(cursor.folded.len, cursor.folded_index);
+}
+
+test "fold marks cursor 무작위 정렬 목록을 독립 전수 탐색과 대조한다" {
+    var prng = std.Random.DefaultPrng.init(0x46554c44);
+    const random = prng.random();
+    for (0..100) |_| {
+        var ranges: [100]Range = undefined;
+        var folded: [80]u32 = undefined;
+        var head: u32 = 0;
+        for (&ranges) |*range| {
+            head += random.uintLessThan(u32, 8);
+            range.* = cursorRange(head);
+        }
+        head = 0;
+        for (&folded) |*value| {
+            head += random.uintLessThan(u32, 10);
+            value.* = head;
+        }
+        var cursor: HeadCursor = .{ .ranges = &ranges, .folded = &folded };
+        var line: u32 = 0;
+        while (line < 1000) : (line += 1 + random.uintLessThan(u32, 15)) try expectCursorMark(&cursor, line);
+    }
+}
+
+test "fold marks cursor 큰 정렬 목록은 저장소 없이 끝까지 전진한다" {
+    var ranges: [10000]Range = undefined;
+    var folded: [5000]u32 = undefined;
+    for (&ranges, 0..) |*range, i| range.* = cursorRange(@intCast(i * 4));
+    for (&folded, 0..) |*head, i| head.* = @intCast(i * 8);
+    var cursor: HeadCursor = .{ .ranges = &ranges, .folded = &folded };
+    for (0..40001) |i| {
+        const expected: HeadCursor.Mark = if (i == 40000 or i % 4 != 0) .none else if (i % 8 == 0) .collapsed else .open;
+        try std.testing.expectEqual(expected, cursor.at(@intCast(i)));
+    }
+    try std.testing.expectEqual(ranges.len, cursor.range_index);
+    try std.testing.expectEqual(folded.len, cursor.folded_index);
 }

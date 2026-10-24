@@ -1,5 +1,9 @@
 # 개발 명령
 
+- 접힘 표식: `mise exec -- zig build test-editor-fold-marks test-editor-incremental-folds -j2`.
+  중립 순차 조회와 실제 뷰 게시를 기존 점 조회와 대조한다. 실패 주입·전후 비교 명령은
+  [순차 표식 재구축](plans/editor-fold-marks.md)을 따른다.
+
 - 편집·프레임 비용 귀속: `python3 tools/editor-frame-measure/run.py --output <새 외부 경로> --deps "$PWD/zig-pkg"`.
   모든 뷰의 괄호 준비를 완료하고 private 제품 사본에서 구문·접힘·색칠·표시 구간을 측정한다.
   독립 정확성 실행·집계·실패 주입 명령은 [비용 귀속](plans/editor-frame-attribution.md)을 따른다.

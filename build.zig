@@ -6395,6 +6395,22 @@ pub fn build(b: *std.Build) void {
         run_sticky_ancestors.addArg("--maru-expect-passed=13");
         macos_only_test_step.dependOn(&run_sticky_ancestors.step);
     }
+    const fold_cursor_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("src/session/editor/fold.zig"), .target = target, .optimize = optimize }), .filters = &.{"fold marks cursor"} });
+    const run_fold_cursor = b.addRunArtifact(fold_cursor_tests);
+    run_fold_cursor.addArg("--maru-expect-tests=5");
+    run_fold_cursor.addArg("--maru-expect-passed=5");
+    const fold_marks_step = b.step("test-editor-fold-marks", "Compare sequential folding marks and independent lookups");
+    fold_marks_step.dependOn(&run_fold_cursor.step);
+    test_step.dependOn(&run_fold_cursor.step);
+    const fold_marks_product = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.fold marks product"} });
+    const run_fold_marks_product = b.addRunArtifact(fold_marks_product);
+    run_fold_marks_product.setCwd(b.path("."));
+    run_fold_marks_product.addArg("--maru-expect-tests=6");
+    fold_marks_step.dependOn(&run_fold_marks_product.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_fold_marks_product.addArg("--maru-expect-passed=6");
+        macos_only_test_step.dependOn(&run_fold_marks_product.step);
+    }
     const fold_cache_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"EW2 cached folds"} });
     const run_fold_cache = b.addRunArtifact(fold_cache_tests);
     run_fold_cache.addArg("--maru-expect-tests=9");

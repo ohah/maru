@@ -10,6 +10,8 @@ checkpoint 참조 없이 남은 사본의 수동 복구는 [백업 발견 계획
 [공유 분할 명령](editor-shared-split.md)에 구현·검증됐다. 아래 표의 공유 편집·뷰 복원과
 심볼 미리보기 항목만 이를 반영했다. 9월 30일 점검 전체를 새로 실행했다는 뜻은 아니다.
 
+2026-10-25 성능 후속: 아래 편집 비용 행만 EW2 제품 캐시·EW3 저장소 계측·접힘 조회 개선의 현재 계획과 맞췄다. 전체 잔여 기능이나 종료 gate를 새로 감사했다는 뜻은 아니다.
+
 ## 범위와 판정 방법
 
 2026-10-17 후속 대조에서는 프로젝트 검색·바꾸기의 제품 연결을 다시 확인했다.
@@ -76,7 +78,7 @@ SCM·원격 감시·앱 전체 접근성은 연결되는 경계만 다룬다. �
 | 진단 출처를 언어 서버로만 | 구현(2026-10-15 — 사용자 결정) | tree-sitter 구문 오류(`ERROR`·`MISSING`)를 진단 출처에서 걷었다 — `Provider.syntaxErrors`·호버의 구문 오류 문장·SQL 만 끄던 칸까지([시각 매핑](../native-editor-visual-mapping.md) §5.4 「출처 결정」). Objective-C 에 clangd 를 더했다 | 언어 서버 후보 확대로 이었다(아래 행) |
 | 언어 서버 후보 확대 | 구현(LS1 2026-10-20 #4528·LS2 2026-10-21 #4532·LS3 2026-10-21 #4533·LS4 2026-10-21) — 사용자 결정(2026-10-16), [계획](editor-lsp-servers-expand.md) LS1(Swift·Dart·C#·Scala·Java·Kotlin·PHP·Lua·Bash·YAML·TOML·Dockerfile·JSON·CSS·HTML — maru 와 같은 능력으로 실측) | 서버 표(`session/lsp/servers.zig`)·툴링 §8.2a 「서버 찾기」·「설치 안내」. 문서마다 languageId(`.scss`·`.less`)·다루지 않는 확장자(Bash 서버의 `.zsh`). LS2 — 주 서버의 서버별 pull 진단(tsgo·TS 7 `tsc` 는 파일 진단을 pull 로만 낸다 — 실측)·파일 간 의존이면 다른 열린 문서도 다시 묻기. LS3 — 전문 didChange 를 문서 전체를 덮는 range 하나로(툴링 §8.2a 「동기화」). LS4 — Ruby(`ruby-lsp`) 와 그 pull 앞의 장벽(작업 스레드가 didChange 를 적용한 뒤에 묻는다) | 남은 조각 없음. SQL·Markdown·XML·DTD·Make 는 쓸 만한 서버가 없다(계획 「싣지 않는 것」) |
 | 하이라이트 쿼리 미리 데우기 | 결정 필요 — 번들 언어 확대가 드러낸 비용 | 쿼리는 그 언어로 처음 칠할 때 메인 스레드에서 한 번 컴파일된다(`tree_sitter.queryFor` — 프로세스 수명 캐시). 실측 Swift 84 ms·Objective-C 78 ms·Dart 46 ms([번들 언어 확대](editor-bundled-languages.md) 「한계」) | 다른 스레드에서 미리 만들지(경쟁하면 진 쪽이 버리는 캐시는 이미 그 모양이다), 언제(앱 시작·파일 열기 직전) 데울지 정하고 첫 프레임 시간을 판정자로 잰다 |
-| 편집 한 번의 메인 스레드 비용 | EW0·EW1 구현, EW2~EW3 남음 — 사용자 결정(2026-10-22 — 계측으로 원인부터), [계획](editor-edit-frame-cost.md) | 실측(ReleaseFast): 한 글자 편집 + 프레임이 72 KB 3.5 ms·178 KB 5.5 ms 로 예산 안, 719 KB 19 ms·1.1 MB 28 ms 로 60 fps 예산(16.7 ms)을 넘는다. 이 수치는 EW1 전 기준이다. EW1은 심볼 전체 순회를 조상·변경 범위 조회로 바꿨고, 같은 기준 원문 5회 중앙값은 build.zig 20.82→14.52 ms·Swift 29.69→18.12 ms다. 접힘 전체 순회는 남았다 | EW2(접힘 — 길 결정 필요)·EW3(편집 쪽 다시 재기) |
+| 편집 한 번의 메인 스레드 비용 | EW0·EW1과 [EW2 제품 캐시](editor-incremental-folds.md) 구현·검증, [EW3 저장소 비용 분리](editor-storage-cost-measurement.md) 완료·저장소 제품 변경 보류 | 큰 문서의 매 입력 접힘 전체 수집은 byte 후보 캐시로 바꿨다. 이후 표식·좌표 조회와 [구조 변경 범위 재사용](editor-fold-change-reuse.md)을 분리해 계측했다. 원문·실행 조건이 다른 결과는 합쳐 연속 개선 수치로 읽지 않는다. 함수 경과시간과 실제 AppKit/HID 증거는 각 계획에서 구분한다 | 공유 분할의 빈 초기 캐시로 인한 첫 입력 전체 수집은 [초기 스냅샷](editor-shared-initial-snapshot.md)에서 별도로 재현·개선한다. 해당 계획이 검증·main 합류·CI 상태를 소유한다. 남은 비용도 재현·귀속 후 선택하며 비동기 파싱이나 저장소 교체를 자동 승인하지 않는다 |
 | 편집기 본문 접근성 | 앱 전체 후속 | 네이티브 후속 표와 chrome interaction 전략 | chrome 접근성 구현을 본문 텍스트/선택/편집의 VoiceOver 완료로 오인하지 말고 별도 계약·제품 검증 |
 
 코드에서 찾지 못했다는 판정은 `src/` 전체 식별자/소비처 검색과 관련 host·UI·명령 카탈로그 대조에 기반한다.

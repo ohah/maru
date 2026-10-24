@@ -6438,6 +6438,21 @@ pub fn build(b: *std.Build) void {
         run_diff_oom.addArg("--maru-expect-passed=6");
         macos_only_test_step.dependOn(&run_diff_oom.step);
     }
+    const native_snapshot_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"shared native snapshot"} });
+    const run_native_snapshot = b.addRunArtifact(native_snapshot_tests);
+    run_native_snapshot.addArg("--maru-expect-tests=3");
+    run_native_snapshot.addArg("--maru-expect-passed=3");
+    b.step("test-editor-native-snapshot", "Verify independent parser/tree snapshots and native cleanup").dependOn(&run_native_snapshot.step);
+    test_step.dependOn(&run_native_snapshot.step);
+    const shared_snapshot_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.shared initial snapshot"} });
+    const run_shared_snapshot = b.addRunArtifact(shared_snapshot_tests);
+    run_shared_snapshot.setCwd(b.path("."));
+    run_shared_snapshot.addArg("--maru-expect-tests=10");
+    b.step("test-editor-shared-snapshot", "Verify independent shared editor startup snapshots").dependOn(&run_shared_snapshot.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_shared_snapshot.addArg("--maru-expect-passed=10");
+        macos_only_test_step.dependOn(&run_shared_snapshot.step);
+    }
     const fold_product_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.EW2 product", ".test.DHS16", ".test.PROMO1", ".test.ES41", ".test.ES42", ".test.EW0" } });
     const run_fold_product = b.addRunArtifact(fold_product_tests);
     run_fold_product.setCwd(b.path("."));

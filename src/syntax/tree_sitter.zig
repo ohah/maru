@@ -549,6 +549,23 @@ pub const Provider = struct {
         return self;
     }
 
+    /// 같은 언어의 완료된 스냅샷을 새 parser 소유로 연다. 뷰별 작업 버퍼는 복사하지 않는다.
+    pub fn copyReady(self: *const Provider, lang: Language) ?Provider {
+        const tree = self.tree orelse return null;
+        const slot = slotFor(lang) orelse return null;
+        if (slot.language != self.slot.language) return null;
+        const parser = c.ts_parser_new() orelse return null;
+        if (!c.ts_parser_set_language(parser, slot.language)) {
+            c.ts_parser_delete(parser);
+            return null;
+        }
+        const copy = c.ts_tree_copy(tree) orelse {
+            c.ts_parser_delete(parser);
+            return null;
+        };
+        return .{ .parser = parser, .tree = copy, .slot = slot, .tree_gen = self.tree_gen, .budget_ns = self.budget_ns };
+    }
+
     pub fn deinit(self: *Provider) void {
         self.sticky_summary.invalidate();
         if (self.tree) |t| c.ts_tree_delete(t);
@@ -4363,4 +4380,100 @@ test "fold shared changes 전체 교체는 직전 범위의 권한을 지운다"
     try std.testing.expect(p.fold_changes_before == null);
     try foldCacheJudge(&p, &cache, f.last);
     try std.testing.expectEqual(@as(u64, 0), cache.reused_changes);
+}
+
+test "shared native snapshot 편집과 원본 해제 뒤에도 사본을 소유하며 native 메모리를 회수한다" {
+    const a = std.testing.allocator;
+    var spans: std.ArrayList(Span) = .empty;
+    defer spans.deinit(a);
+    highlights(a, .zig, "fn f() void {}\n", &spans);
+    c.ts_set_allocator(countingMalloc, countingCalloc, countingRealloc, countingFree);
+    defer c.ts_set_allocator(null, null, null, null);
+    live_allocs = 0;
+    {
+        var copy: ?Provider = null;
+        defer if (copy) |*value| value.deinit();
+        var cache: FoldCache = .{};
+        defer cache.deinit(a);
+        const before = "fn f() void {\n return;\n}\n";
+        const after = "\nfn f() void {\n return;\n}\n";
+        {
+            var source = Provider.init(before, .zig, 0) orelse return error.NoProvider;
+            defer source.deinit();
+            var original: FoldCache = .{};
+            defer original.deinit(a);
+            try foldCacheJudge(&source, &original, before);
+            copy = source.copyReady(.zig) orelse return error.NoSnapshot;
+            const target = &copy.?;
+            try std.testing.expect(target.parser != source.parser);
+            try std.testing.expect(target.tree != source.tree);
+            cache = (try original.copyMatched(a, source.parser, source.tree_gen, target.parser, target.tree_gen)) orelse return error.NoCache;
+            try std.testing.expect(cache.tree != original.tree);
+            try std.testing.expect(cache.records.items.ptr != original.records.items.ptr);
+            const edit: Edit = .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = 1, .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 0 }, .new_end_point = .{ .row = 1, .column = 0 } };
+            cache.edit(edit);
+            target.onEdit(after, edit);
+            try foldCacheJudge(&source, &original, before);
+            try foldCacheJudge(target, &cache, after);
+        }
+        try foldCacheJudge(&copy.?, &cache, after);
+    }
+    try std.testing.expectEqual(@as(isize, 0), live_allocs);
+}
+
+test "shared native snapshot 모든 언어의 트리와 편집 결과가 기존 parser와 같다" {
+    const a = std.testing.allocator;
+    const Check = struct {
+        fn nodes(left: c.TSNode, right: c.TSNode) !void {
+            try std.testing.expectEqualStrings(std.mem.span(c.ts_node_type(left)), std.mem.span(c.ts_node_type(right)));
+            try std.testing.expectEqual(c.ts_node_is_named(left), c.ts_node_is_named(right));
+            try std.testing.expectEqual(c.ts_node_is_extra(left), c.ts_node_is_extra(right));
+            try std.testing.expectEqual(c.ts_node_is_missing(left), c.ts_node_is_missing(right));
+            try std.testing.expectEqual(c.ts_node_has_error(left), c.ts_node_has_error(right));
+            try std.testing.expectEqual(c.ts_node_start_byte(left), c.ts_node_start_byte(right));
+            try std.testing.expectEqual(c.ts_node_end_byte(left), c.ts_node_end_byte(right));
+            try std.testing.expectEqualDeep(c.ts_node_start_point(left), c.ts_node_start_point(right));
+            try std.testing.expectEqualDeep(c.ts_node_end_point(left), c.ts_node_end_point(right));
+            const count = c.ts_node_child_count(left);
+            try std.testing.expectEqual(count, c.ts_node_child_count(right));
+            for (0..count) |index| {
+                const lfield = c.ts_node_field_name_for_child(left, @intCast(index));
+                const rfield = c.ts_node_field_name_for_child(right, @intCast(index));
+                try std.testing.expectEqual(lfield == null, rfield == null);
+                if (lfield != null) try std.testing.expectEqualStrings(std.mem.span(lfield), std.mem.span(rfield));
+                try nodes(c.ts_node_child(left, @intCast(index)), c.ts_node_child(right, @intCast(index)));
+            }
+        }
+    };
+    const before = "head {\n value;\n}\n";
+    const after = "\nhead {\n value;\n}\n";
+    var supported: usize = 0;
+    var unavailable: usize = 0;
+    for (std.meta.tags(Language)) |lang| {
+        var source = Provider.init(before, lang, 0) orelse {
+            try std.testing.expect(slotFor(lang) == null);
+            unavailable += 1;
+            continue;
+        };
+        defer source.deinit();
+        var original: FoldCache = .{};
+        defer original.deinit(a);
+        try foldCacheJudge(&source, &original, before);
+        var copy = source.copyReady(lang) orelse return error.NoSnapshot;
+        defer copy.deinit();
+        var cache = (try original.copyMatched(a, source.parser, source.tree_gen, copy.parser, copy.tree_gen)) orelse return error.NoCache;
+        defer cache.deinit(a);
+        try Check.nodes(c.ts_tree_root_node(source.tree.?), c.ts_tree_root_node(copy.tree.?));
+        const edit: Edit = .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = 1, .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 0 }, .new_end_point = .{ .row = 1, .column = 0 } };
+        original.edit(edit);
+        cache.edit(edit);
+        source.onEdit(after, edit);
+        copy.onEdit(after, edit);
+        try Check.nodes(c.ts_tree_root_node(source.tree.?), c.ts_tree_root_node(copy.tree.?));
+        try foldCacheJudge(&source, &original, after);
+        try foldCacheJudge(&copy, &cache, after);
+        supported += 1;
+    }
+    try std.testing.expect(supported > 0);
+    std.debug.print("SHARED_SNAPSHOT_LANGUAGES supported={d} unavailable={d}\n", .{ supported, unavailable });
 }

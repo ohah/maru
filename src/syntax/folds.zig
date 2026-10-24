@@ -24,6 +24,15 @@ pub const Cache = struct {
     reused_changes: u64 = 0,
     compared_changes: u64 = 0,
     const Record = struct { lo: u32, hi: u32 };
+    /// 처리하지 않은 편집이 없는 byte 후보만 새 뷰의 parser·세대에 묶는다.
+    pub fn copyMatched(self: *const Cache, a: std.mem.Allocator, source_parser: *c.TSParser, source_gen: u64, target_parser: *c.TSParser, target_gen: u64) error{OutOfMemory}!?Cache {
+        if (self.tree == null or self.parser != source_parser or self.synced_gen != source_gen or self.edits != 0 or self.dirty != null) return null;
+        const items = try a.dupe(Record, self.records.items);
+        errdefer a.free(items);
+        const tree = c.ts_tree_copy(self.tree.?) orelse return error.OutOfMemory;
+        return .{ .records = .fromOwnedSlice(items), .tree = tree, .synced_gen = target_gen, .parser = target_parser };
+    }
+
     pub fn deinit(self: *Cache, allocator: std.mem.Allocator) void {
         self.records.deinit(allocator);
         if (self.tree) |t| c.ts_tree_delete(t);

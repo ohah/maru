@@ -1,5 +1,8 @@
 # 검증 매트릭스
 
+편집 저장소 비용의 함수 실측·독립 정확성 패스·집계 오염 거절은 [EW3 실측](plans/editor-storage-cost-measurement.md)을 따른다.
+제품 알고리즘·실패 원자성·GUI 입력 정책을 바꾸지 않으며 AppKit/HID/실제 표시 지연의 증거로 확대하지 않는다.
+
 ## 명령 팔레트 IME 문맥 — 제품 수정·실제 후보창 검증 완료
 
 제품 수정은 [PR #4527](https://github.com/ohah/maru/pull/4527)로 머지됐다. `tools/palette-ime`의

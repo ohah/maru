@@ -1,5 +1,9 @@
 # 개발 명령
 
+- 편집·프레임 비용 귀속: `python3 tools/editor-frame-measure/run.py --output <새 외부 경로> --deps "$PWD/zig-pkg"`.
+  모든 뷰의 괄호 준비를 완료하고 private 제품 사본에서 구문·접힘·색칠·표시 구간을 측정한다.
+  독립 정확성 실행·집계·실패 주입 명령은 [비용 귀속](plans/editor-frame-attribution.md)을 따른다.
+
 - 편집 저장소 비용: `python3 tools/editor-storage-measure/run.py --output <새 외부 경로> --deps "$PWD/zig-pkg" --workloads typing,structure,paste,undo,shared`.
   private 제품 사본의 delta·본문 복사·줄 인덱스·뷰 줄 배열을 분리한다.
   정확성 패스·집계·오염 거절 명령과 한계는 [EW3 실측](plans/editor-storage-cost-measurement.md)을 따른다.

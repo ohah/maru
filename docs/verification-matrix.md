@@ -5036,7 +5036,7 @@ Artifact controls 총 **20** test methods, 새 범위 음성 artifact **32**종 
 - 최종 실행 경로·회차별 로그·원격 CI 상태는 해당 PR 본문/checks에 기록한다. 문서의 오래된 Zig fork 가정도 현재 pinned Darwin spawn 경계와 일치시킨다.
 
 
-검색 기반 고리 검증 중 기존 `test-editor-project-search`가 barrel 분석 누락으로 0 tests를 컴파일함을 발견했다. 테스트 루트의 명시적 import와 기존 PCRE2 테스트 의존성을 복구하고, 현재 실제 **288 compiled / macOS 287 passed·Windows 전용 비교 1 skipped**를 요구해 macOS CI에 연결한다. 추가로 드러난 `PSE1` ReleaseFast allocation-failure 판정의 주소 의존 remap은 테스트 backing allocator의 resize/remap을 끄고 실제 alloc/free·OOM 전파 검사를 유지해 안정화한다. 제품 JSON parser 동작은 바꾸지 않는다.
+검색 기반 고리 검증 중 기존 `test-editor-project-search`가 barrel 분석 누락으로 0 tests를 컴파일함을 발견했다. 테스트 루트의 명시적 import와 기존 PCRE2 테스트 의존성을 복구하고, 현재 실제 **289 compiled / macOS 288 passed·Windows 전용 비교 1 skipped**를 `build.zig`의 `run_project_search_tests`에서 요구해 macOS CI에 연결한다. 공유 파싱 신원의 registry 판정자 하나가 같은 import 그래프에 추가되면서 개수도 함께 맞췄다. 추가로 드러난 `PSE1` ReleaseFast allocation-failure 판정의 주소 의존 remap은 테스트 backing allocator의 resize/remap을 끄고 실제 alloc/free·OOM 전파 검사를 유지해 안정화한다. 제품 JSON parser 동작은 바꾸지 않는다.
 
 
 ### 고정 헤더의 화면 주변 심볼 탐색(EW1)

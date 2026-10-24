@@ -16,9 +16,10 @@ func verify() throws {
     try require(data.count <= 16 * 1024, "artifact size")
     let artifact = try JSONSerialization.jsonObject(with: data) as! [String: Any]
     let schema = artifact["schema"] as? String
+    let address = schema == "maru.address-ime-candidate.v1"
     let search = schema == "maru.session-dock-ime-candidate-observation.v1"
     try require(schema == "maru.session-host-cr6d-ime-candidate-observation.v1" ||
-                schema == "maru.session-host-cr6d-ime-candidate-observation.v2" || schema == "maru.editor-ime-wrapped-candidate.v1" || search, "schema")
+                schema == "maru.session-host-cr6d-ime-candidate-observation.v2" || schema == "maru.editor-ime-wrapped-candidate.v1" || search || address, "schema")
     try require(Set(artifact.keys) == Set(search ? ["schema", "source_id", "rows", "search_transitions"] : ["schema", "source_id", "rows"]), "unexpected artifact fields")
     let artifactRows = artifact["rows"] as? [[String: Any]] ?? []
     try require(artifactRows.count == 5, "five observations required")
@@ -30,7 +31,7 @@ func verify() throws {
             try require(row["app_capture"] == nil || row["app_capture"] is NSNull, "app proof in external schema")
         }
     }
-    if schema == "maru.session-host-cr6d-ime-candidate-observation.v2" || schema == "maru.editor-ime-wrapped-candidate.v1" || search {
+    if schema == "maru.session-host-cr6d-ime-candidate-observation.v2" || schema == "maru.editor-ime-wrapped-candidate.v1" || search || address {
         try require(artifact["source_id"] as? String == "com.apple.inputmethod.Korean.2SetKorean", "input source")
         let rows = artifact["rows"] as? [[String: Any]] ?? []
         try require(rows.count == 5, "five observations required")

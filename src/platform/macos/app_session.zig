@@ -351,7 +351,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 232: search-owned UTF-16 context and immutable activation generation; editor exports stay editor-only.
 // 233: bind native owner window identity to Inspector snapshots.
 // 234: palette-owned dynamic IME context and deep transaction snapshots.
-pub const abi_version: u32 = 234;
+// 235: address TextField native IME ownership and transaction projection.
+pub const abi_version: u32 = 235;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -7750,6 +7751,10 @@ pub const AppSession = struct {
     // 밴드 클릭(enterAddrEdit)이 addr_edit을 세우고 addr_field에 현재 URL을 시드하며, 클릭 위치에 caret을 놓고(caretAtColumn)
     // 드래그로 선택한다. 활성이면 keyDown이 handleKeyEvent 인터셉트로·평문 IME 확정이 inputFocus=.addr_edit 라우팅으로
     // addr_field에 들어간다. teardown 시 stale surface면 addr_edit=null + addr_field.clear(dropAddrEditIfSurface).
+    address_ime: chrome.components.text_field_ime.State = .{},
+    address_ime_generation: u64 = 1,
+    address_ime_owner: ?u64 = null,
+    address_ime_surface: ?u64 = null,
     addr_edit: ?u64 = null,
     addr_field: chrome.components.text_field.TextField = .{},
     // 슬라이스 3: 주소창 밴드 드래그 선택 중인가(터미널 선택용 mouse_drag_selecting과 **별도** — §5.1). down(1)이 URL 존에서
@@ -16737,9 +16742,7 @@ pub const AppSession = struct {
                 agent_activity_ops.rebuildFilter(self);
             },
             .agent_session_search => return @import("app_session/chrome_ime.zig").commitAll(self),
-            .addr_edit => if (self.addr_field.commitPreedit(self.allocator)) {
-                self.metal_dirty = true; // 조합 글자를 편집 텍스트로 확정(포커스 상실 등 엣지 — find/palette와 동형)
-            },
+            .addr_edit => return @import("app_session/address_ime.zig").commitAll(self),
             .project_search => return project_search_ops.commitPreedit(self),
             .scm_commit => scm_dock_ops.commitCommitPreedit(self),
             .terminal => {
@@ -25297,6 +25300,7 @@ pub const AppSession = struct {
         var nav_it = self.web_nav_states.valueIterator();
         while (nav_it.next()) |v| self.allocator.free(v.url);
         self.web_nav_states.deinit(self.allocator);
+        self.address_ime.deinit(self.allocator);
         self.addr_field.deinit(self.allocator); // 슬라이스 3: 주소창 편집 TextField(text/preedit ArrayList) 해제
         self.scm_commit_field.deinit(self.allocator); // 커밋 메시지 편집(P3c) — 같은 TextField 계약
         self.scm_commit_display.deinit(self.allocator); // 조합 합성 버퍼
@@ -102057,4 +102061,46 @@ test "Live inspector sidebar header shares plate search collapsed state and reti
     inspector_sidebar_header_ops.invalidate(session);
     try std.testing.expect(!inspector_sidebar_header_ops.current(session));
     try std.testing.expect(session.collapsedToggleRect() != null);
+}
+
+test "address IME host publishes selection and consumes stale callbacks" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initRenameCaretTestSession(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    const sid = try web_ops.createAdoptedWebTermInActivePane(session);
+    web_ops.enterAddrEdit(session, sid, "a😀z");
+    session.addr_field.caret = 1;
+    session.addr_field.selection = .{ .anchor = 5, .focus = 1 };
+    const ime = @import("app_session/chrome_ime.zig");
+    const token = ime.generation(session).?;
+    try std.testing.expect(token > (@as(u64, 1) << 62) and token < (@as(u64, 1) << 63));
+    try std.testing.expectEqual(maru.inline_text_input.Range{ .location = 1, .length = 2 }, ime.projection(session).?.selectedRange().?);
+    session.imeBegin();
+    try std.testing.expect(ime.marked(session, "한", .{ .location = 1, .length = 0 }, null));
+    try std.testing.expect(ime.insert(session, "韓", null));
+    session.imeEnd(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqualStrings("a韓z", session.addr_field.text.items);
+    try std.testing.expect(session.addr_navigate_pending == null);
+    try std.testing.expect(ime.marked(session, "한", .{ .location = 1, .length = 0 }, null));
+    session.imeBegin();
+    session.imeEnd(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(session.addr_navigate_pending == null and session.addr_edit != null);
+    session.imeBegin();
+    web_ops.enterAddrEdit(session, sid, "new");
+    try std.testing.expect(ime.insert(session, "stale", null));
+    session.imeEnd(null);
+    try std.testing.expectEqualStrings("new", session.addr_field.text.items);
+    try std.testing.expect(ime.generation(session).? != token);
+    session.imeBegin();
+    session.chrome_host.palette.show();
+    try std.testing.expect(ime.insert(session, "old address", null));
+    session.imeEnd(null);
+    try std.testing.expectEqualStrings("", session.chrome_host.palette.input.query.items);
+    session.imeBegin();
+    session.chrome_host.palette.hide();
+    try std.testing.expect(ime.insert(session, "old palette", null));
+    session.imeEnd(null);
+    try std.testing.expectEqualStrings("new", session.addr_field.text.items);
 }

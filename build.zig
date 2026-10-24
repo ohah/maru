@@ -2315,6 +2315,15 @@ pub fn build(b: *std.Build) void {
     run_palette_ime.setCwd(b.path("."));
     b.step("test-palette-ime-context", "Run dynamic palette IME publication and owner lifetime judges").dependOn(&run_palette_ime.step);
 
+    const address_ime_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{ "address IME", "주소창" },
+    });
+    const run_address_ime = b.addRunArtifact(address_ime_tests);
+    run_address_ime.setCwd(b.path("."));
+    const address_field_ime_step = b.step("test-address-field-ime", "Validate address-field native IME ranges and pinned owner lifetime");
+    address_field_ime_step.dependOn(&run_address_ime.step);
+
     const remote_failure_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
         .filters = &.{"remote reconnect failure"},
@@ -4836,6 +4845,16 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_inspector_rules.step);
+    inline for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
+        const address_model_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
+            .filters = &.{"address IME"},
+        });
+        const run_address_model = b.addRunArtifact(address_model_tests);
+        run_address_model.addArg("--maru-expect-tests=15");
+        address_field_ime_step.dependOn(&run_address_model.step);
+        test_step.dependOn(&run_address_model.step);
+    }
     const inline_input_step = b.step("test-inline-text-input", "Validate bounded UTF-16 inline IME projections and failure atomicity");
     const owned_inline_step = b.step("test-inline-text-input-owned", "Validate dynamic IME storage, deep snapshots and allocation failure");
     inline for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {

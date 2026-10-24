@@ -5051,3 +5051,10 @@ Artifact controls 총 **20** test methods, 새 범위 음성 artifact **32**종 
 `EW0`는 작은 편집 뒤 접힘 트리 방문이 전체 노드의 십분의 일보다 작은지 확인한다.
 시간 수치는 고정하지 않고 제품 함수와 AppKit 경로에서 별도 실측한다.
 정확성 대조 순회와 성능 패스는 분리하며, 범위와 증거는 [제품 EW2](plans/editor-incremental-folds.md)를 따른다.
+
+
+## 주소창 IME 범위 문맥
+
+TextField 중간 선택·UTF-16 읽기/교체·NFD 정규화·OOM snapshot·owner 전환의 집중 검사를 추가했다.
+실제 후보창 5회 PNG/OCR·한자 선택·터미널 복귀를 고정 계측 앱에서 확인했다. 계획과 증거 범위: [주소창 IME 계획](plans/address-field-ime.md).
+단위 검사와 제품 빌드는 실제 후보창 PNG/OCR 성공 증거와 구분한다.

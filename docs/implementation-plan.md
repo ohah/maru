@@ -73,6 +73,7 @@ macOS 로컬 shell 1개 surface
 - [접힘 조회 세부 비용 측정](plans/editor-fold-query-attribution.md) — 변경 범위·정렬·좌표 변환의 겹치지 않는 구간을 측정하고 다음 최적화 대상을 고른다.
 - [접힘 변경 범위 재사용](plans/editor-fold-change-reuse.md) — 직전 파싱의 불변 범위를 공유하고, 누락·여러 편집·보관 불가는 기존 비교로 복귀한다.
 - [공유 뷰의 초기 구문 스냅샷](plans/editor-shared-initial-snapshot.md) — parser·byte 후보의 독립 사본을 준비해 첫 편집의 전체 접힘 방문을 줄이고 생성부터 첫 입력까지 측정한다.
+- [pane 색 계산과 그리기 목록 변환 비용 귀속](plans/editor-pane-lowering-attribution.md) — 제품 사본의 pane 내부 색·기하·구문 준비·본문 조립과 그리기 목록 변환을 구분해 관측한다.
 - [고정 머리줄 요약의 변경 범위 재사용](plans/editor-sticky-change-reuse.md) — 같은 Provider의 정확한 한 세대·한 native 편집 통지에서 이미 계산한 범위를 빌린다.
 - [캐시 경로의 원격 커밋 검증](plans/editor-scm-cache-path-test.md) — 정상 캐시 저장소를 허용하면서 실제 로컬 메시지 경로 유출을 거절한다.
 - [pane 프레임 준비 비용 귀속](plans/editor-pane-frame-attribution.md) — 편집과 프레임을 분리해 기하·표식·장식·고정 머리줄의 중첩 비용을 관측한다.

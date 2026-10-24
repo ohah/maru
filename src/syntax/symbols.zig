@@ -2,6 +2,7 @@
 //! 전체 목록을 매번 만들지 않고, 편집된 이전 트리와 현재 트리의 변경 범위에서만 개수를 고친다.
 const std = @import("std");
 const c = @import("tree_sitter_c");
+const change_ranges = @import("changes.zig");
 
 extern var ts_current_free: *const fn (?*anyopaque) callconv(.c) void;
 
@@ -9,6 +10,8 @@ pub const Work = struct {
     ancestor_nodes: u64 = 0,
     summary_nodes: u64 = 0,
     rebuild_nodes: u64 = 0,
+    reused_changes: u64 = 0,
+    compared_changes: u64 = 0,
 };
 
 const NodeContext = struct {
@@ -28,6 +31,7 @@ pub const Summary = struct {
     generation: u64 = std.math.maxInt(u64),
     count: usize = 0,
     edited: ?struct { lo: u32, hi: u32 } = null,
+    edits: u64 = 0,
 
     pub fn invalidate(self: *Summary) void {
         if (self.tree) |tree| c.ts_tree_delete(tree);
@@ -35,6 +39,7 @@ pub const Summary = struct {
     }
 
     pub fn edit(self: *Summary, e: *const c.TSInputEdit) void {
+        self.edits +|= 1;
         if (self.tree) |tree| c.ts_tree_edit(tree, e);
         // 구조가 같은 선언을 통째로 지우면 changed_ranges가 비어도 옛 선언을 빼야 한다.
         // 여러 편집의 좌표를 마지막 문서 축으로 옮긴 뒤 합집합의 경계를 보존한다.
@@ -47,7 +52,7 @@ pub const Summary = struct {
         self.edited = .{ .lo = lo, .hi = hi };
     }
 
-    pub fn hasSymbols(self: *Summary, allocator: std.mem.Allocator, current: ?*c.TSTree, generation: u64, supported: bool, adapter: anytype, work: *Work) error{OutOfMemory}!bool {
+    pub fn hasSymbols(self: *Summary, allocator: std.mem.Allocator, current: ?*c.TSTree, generation: u64, supported: bool, adapter: anytype, work: *Work, changes: ?change_ranges.Batch) error{OutOfMemory}!bool {
         const tree = current orelse {
             self.invalidate();
             return false;
@@ -60,15 +65,21 @@ pub const Summary = struct {
         var count: usize = 0;
         if (self.tree) |previous| {
             var len: u32 = 0;
-            const ranges = c.ts_tree_get_changed_ranges(previous, tree, &len);
+            // Summary는 이 Provider 안에서만 산다. 자기 이전 트리에 편집 하나를 모두 받은 때만 빌린다.
+            const shared = if (changes) |value| value.borrow(self.generation, generation, self.edits) else null;
+            const ranges = if (shared != null) null else c.ts_tree_get_changed_ranges(previous, tree, &len);
             defer if (ranges != null) ts_current_free(@ptrCast(ranges));
+            if (shared != null) work.reused_changes +|= 1 else work.compared_changes +|= 1;
             var before: Nodes = .empty;
             defer before.deinit(allocator);
             var after: Nodes = .empty;
             defer after.deinit(allocator);
-            for (0..len) |i| {
-                try touched(allocator, previous, ranges[i].start_byte, ranges[i].end_byte, adapter, work, &before);
-                try touched(allocator, tree, ranges[i].start_byte, ranges[i].end_byte, adapter, work, &after);
+            const range_count: usize = if (shared) |items| items.len else len;
+            for (0..range_count) |i| {
+                const lo = if (shared) |items| items[i].lo else ranges[i].start_byte;
+                const hi = if (shared) |items| items[i].hi else ranges[i].end_byte;
+                try touched(allocator, previous, lo, hi, adapter, work, &before);
+                try touched(allocator, tree, lo, hi, adapter, work, &after);
             }
             if (self.edited) |r| {
                 try touched(allocator, previous, r.lo, r.hi, adapter, work, &before);
@@ -84,6 +95,7 @@ pub const Summary = struct {
         self.count = count;
         self.generation = generation;
         self.edited = null;
+        self.edits = 0;
         return count != 0;
     }
 };

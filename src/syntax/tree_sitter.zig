@@ -919,7 +919,7 @@ pub const Provider = struct {
             }
         };
         const adapter: Adapter = .{ .provider = self };
-        if (!try self.sticky_summary.hasSymbols(allocator, self.tree, self.tree_gen, self.slot.symbol_kinds.len > 0, adapter, &self.sticky_work)) return false;
+        if (!try self.sticky_summary.hasSymbols(allocator, self.tree, self.tree_gen, self.slot.symbol_kinds.len > 0, adapter, &self.sticky_work, self.retainedChanges())) return false;
         try symbol_windows.ancestors(allocator, self.tree.?, offsets, adapter, &self.sticky_work, out);
         return true;
     }
@@ -1195,15 +1195,18 @@ pub const Provider = struct {
         return fold_cache.hasKind(kinds, raw);
     }
 
+    // 두 소비자가 같은 보관 판을 읽게 한다. 슬라이스는 다음 파싱 전의 동기 조회에서만 빌린다.
+    fn retainedChanges(self: *const Provider) ?fold_cache.Changes {
+        const before_gen = self.fold_changes_before orelse return null;
+        if (before_gen == std.math.maxInt(u64)) return null;
+        return .{ .before = before_gen, .after = before_gen + 1, .ranges = self.fold_changes[0..self.fold_changes_len] };
+    }
+
     /// 캐시 저장소는 호출자가 소유한다. 전체 순회 API는 대조군·일회 조회에 그대로 남긴다.
     pub fn foldSpansCached(self: *Provider, allocator: std.mem.Allocator, cache: *FoldCache, lines: anytype, out: *std.ArrayList(FoldSpan)) error{OutOfMemory}!void {
         const before = cache.nodes;
         defer self.stats.fold_nodes +|= cache.nodes - before;
-        const changes: ?fold_cache.Changes = if (self.fold_changes_before) |before_gen|
-            .{ .before = before_gen, .after = before_gen + 1, .ranges = self.fold_changes[0..self.fold_changes_len] }
-        else
-            null;
-        try cache.query(allocator, self.parser, self.tree, self.tree_gen, changes, self.slot.fold_kinds, lines, out);
+        try cache.query(allocator, self.parser, self.tree, self.tree_gen, self.retainedChanges(), self.slot.fold_kinds, lines, out);
     }
 
     /// 시작 줄 오름차순으로 담는다 — 소비처(접힘 층)가 그 순서를 전제한다.
@@ -4045,6 +4048,172 @@ test "sticky ancestors 선언 전체 삭제 재삽입과 UTF8 CRLF 좌표를 보
 }
 
 const FoldCacheLine = struct { start: usize };
+
+fn stickyChangeEdit(p: *Provider, text: *std.ArrayList(u8), at: usize, old_end: usize, inserted: []const u8) !void {
+    const start_point = stickyPoint(text.items, at);
+    const old_point = stickyPoint(text.items, old_end);
+    try text.replaceRange(std.testing.allocator, at, old_end - at, inserted);
+    p.onEdit(text.items, .{ .start_byte = @intCast(at), .old_end_byte = @intCast(old_end), .new_end_byte = @intCast(at + inserted.len), .start_point = start_point, .old_end_point = old_point, .new_end_point = stickyPoint(text.items, at + inserted.len) });
+}
+
+test "sticky changes 한 편집의 빈 구조 범위도 실제 선언 존재 여부와 함께 갱신한다" {
+    const a = std.testing.allocator;
+    var empty_deletions: usize = 0;
+    const cases = .{
+        .{ Language.zig, "fn f() void {}\nfn g() void {}\n", "fn f() void {}\n" },
+        .{ Language.python, "def f():\n return 1\ndef g():\n return 2\n", "def f():\n return 1\n" },
+        .{ Language.javascript, "function f() {}\nfunction g() {}\n", "function f() {}\n" },
+        .{ Language.swift, "func f() {}\nfunc g() {}\n", "func f() {}\n" },
+        .{ Language.dart, "void f() {}\nvoid g() {}\n", "void f() {}\n" },
+    };
+    inline for (cases) |case| {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(a);
+        try text.appendSlice(a, case[1]);
+        var p = Provider.init(text.items, case[0], 0) orelse return error.NoProvider;
+        defer p.deinit();
+        try stickyAncestorJudge(&p, text.items);
+        for (0..24) |i| {
+            const reused = p.sticky_work.reused_changes;
+            const compared = p.sticky_work.compared_changes;
+            try stickyChangeEdit(&p, &text, 0, if (i % 2 == 0) 0 else 1, if (i % 2 == 0) "\n" else "");
+            try stickyAncestorJudge(&p, text.items);
+            try std.testing.expectEqual(reused + 1, p.sticky_work.reused_changes);
+            try std.testing.expectEqual(compared, p.sticky_work.compared_changes);
+        }
+        // 같은 모양의 선언 하나를 지우면 구조 범위가 비어도 전체 개수는 줄어든다.
+        try stickyChangeEdit(&p, &text, 0, case[2].len, "");
+        if (p.fold_changes_len == 0) empty_deletions += 1;
+        try stickyAncestorJudge(&p, text.items);
+        try stickyChangeEdit(&p, &text, 0, 0, case[2]);
+        try stickyAncestorJudge(&p, text.items);
+        try stickyChangeEdit(&p, &text, 0, text.items.len, "\n");
+        try stickyAncestorJudge(&p, text.items);
+        try std.testing.expectEqual(@as(usize, 0), p.sticky_summary.count);
+        try stickyChangeEdit(&p, &text, 0, 0, case[1]);
+        try stickyAncestorJudge(&p, text.items);
+        try std.testing.expect(p.sticky_summary.count > 0);
+    }
+    try std.testing.expect(empty_deletions > 0);
+}
+
+test "sticky changes 이전 판 현재 판 편집 수와 보관 증명이 틀리면 자체 비교한다" {
+    const a = std.testing.allocator;
+    const source = "fn f() void {}\nfn g() void {}\nfn h() void {}\n";
+    for (0..5) |kind| {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(a);
+        try text.appendSlice(a, source);
+        var p = Provider.init(text.items, .zig, 0) orelse return error.NoProvider;
+        defer p.deinit();
+        try stickyAncestorJudge(&p, text.items);
+        try stickyChangeEdit(&p, &text, 0, 0, "/*");
+        const reused = p.sticky_work.reused_changes;
+        const compared = p.sticky_work.compared_changes;
+        switch (kind) {
+            0 => p.fold_changes_before = null,
+            1 => p.sticky_summary.generation = p.tree_gen - 2,
+            2 => {
+                p.fold_changes_before = p.tree_gen - 2;
+                p.sticky_summary.generation = p.tree_gen - 2;
+            },
+            3 => p.sticky_summary.edits = 2,
+            else => p.fold_changes_before = std.math.maxInt(u64),
+        }
+        try stickyAncestorJudge(&p, text.items);
+        try std.testing.expectEqual(reused, p.sticky_work.reused_changes);
+        try std.testing.expectEqual(compared + 1, p.sticky_work.compared_changes);
+    }
+}
+
+test "sticky changes 지연된 여러 편집과 전체 교체는 전체 심볼 집계와 일치한다" {
+    const a = std.testing.allocator;
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    try text.appendSlice(a, "fn f() void {}\nfn g() void {}\nfn h() void {}\n");
+    var p = Provider.init(text.items, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    try stickyAncestorJudge(&p, text.items);
+    try stickyChangeEdit(&p, &text, 0, 0, " ");
+    try stickyChangeEdit(&p, &text, 0, 0, "/*");
+    try stickyAncestorJudge(&p, text.items);
+    try std.testing.expectEqual(@as(u64, 0), p.sticky_work.reused_changes);
+    try std.testing.expectEqual(@as(u64, 1), p.sticky_work.compared_changes);
+    try stickyChangeEdit(&p, &text, 0, 2, "");
+    try stickyChangeEdit(&p, &text, 0, 0, "\n");
+    try stickyAncestorJudge(&p, text.items);
+    try std.testing.expectEqual(@as(u64, 0), p.sticky_work.reused_changes);
+    try std.testing.expectEqual(@as(u64, 2), p.sticky_work.compared_changes);
+    p.setSource("\n");
+    try stickyAncestorJudge(&p, "\n");
+    try std.testing.expectEqual(@as(usize, 0), p.sticky_summary.count);
+    try std.testing.expectEqual(@as(u64, 0), p.sticky_summary.edits);
+}
+
+test "sticky changes 다른 이전 트리의 완료 인계도 자기 범위와 요약을 사용한다" {
+    const a = std.testing.allocator;
+    const before = "fn f() void {}\nfn g() void {}\n";
+    const current = " fn f() void {}\nfn g() void {}\nfn h() void {}\n";
+    var target = Provider.init(before, .zig, 0) orelse return error.NoProvider;
+    defer target.deinit();
+    try stickyAncestorJudge(&target, before);
+    {
+        var ready = Provider.init(current, .zig, 0) orelse return error.NoProvider;
+        defer ready.deinit();
+        try std.testing.expectEqual(@as(u8, 0), ready.fold_changes_len);
+        try std.testing.expect(target.onEditFromParsed(&ready, .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = 1, .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 0 }, .new_end_point = .{ .row = 0, .column = 1 } }));
+        try std.testing.expect(target.fold_changes_len > 0);
+    }
+    try stickyAncestorJudge(&target, current);
+    try std.testing.expectEqual(@as(usize, 3), target.sticky_summary.count);
+    try std.testing.expectEqual(@as(u64, 1), target.sticky_work.reused_changes);
+    // 제공 Provider를 닫아도 독립 트리와 요약의 수명은 대상에 남아야 한다.
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    try text.appendSlice(a, current);
+    try stickyChangeEdit(&target, &text, 0, 0, "\n");
+    try stickyAncestorJudge(&target, text.items);
+    try std.testing.expectEqual(@as(u64, 2), target.sticky_work.reused_changes);
+}
+
+fn stickyChangeAllocationJudge(a: std.mem.Allocator, fallback: bool) !void {
+    const source = "fn f() void {}\nfn g() void {}\n";
+    const changed = "/*fn f() void {}\nfn g() void {}\n";
+    var p = Provider.init(source, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    try stickyAncestorJudge(&p, source);
+    p.onEdit(changed, .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = 2, .start_point = stickyPoint(source, 0), .old_end_point = stickyPoint(source, 0), .new_end_point = stickyPoint(changed, 2) });
+    if (fallback) p.fold_changes_before = null;
+    var out: std.ArrayList(Provider.Symbol) = .empty;
+    defer out.deinit(a);
+    const generation = p.sticky_summary.generation;
+    const count = p.sticky_summary.count;
+    _ = p.stickySymbols(a, &.{20}, &out) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), out.items.len);
+        if (p.sticky_summary.generation == generation) {
+            // 요약 자체의 실패는 이전 집계와 아직 반영하지 못한 편집을 남긴다.
+            try std.testing.expectEqual(count, p.sticky_summary.count);
+            try std.testing.expectEqual(@as(u64, 1), p.sticky_summary.edits);
+        } else {
+            // 요약 성공 뒤 조상 출력의 할당만 실패할 수도 있다. 완료된 집계는 되돌리지 않는다.
+            try std.testing.expectEqual(p.tree_gen, p.sticky_summary.generation);
+            try std.testing.expectEqual(@as(u64, 0), p.sticky_summary.edits);
+            var full: std.ArrayList(Provider.Symbol) = .empty;
+            defer full.deinit(std.testing.allocator);
+            try p.symbolsChecked(std.testing.allocator, &full);
+            try std.testing.expectEqual(full.items.len, p.sticky_summary.count);
+        }
+        try stickyAncestorJudge(&p, changed);
+        return err;
+    };
+    try stickyAncestorJudge(&p, changed);
+}
+
+test "sticky changes 차용과 자체 비교의 모든 할당 실패 뒤 재시도가 집계를 보존한다" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, stickyChangeAllocationJudge, .{false});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, stickyChangeAllocationJudge, .{true});
+}
+
 fn foldCacheLines(source: []const u8) !std.ArrayList(FoldCacheLine) {
     var lines: std.ArrayList(FoldCacheLine) = .empty;
     errdefer lines.deinit(std.testing.allocator);

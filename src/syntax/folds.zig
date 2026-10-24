@@ -4,8 +4,9 @@ const std = @import("std");
 const c = @import("tree_sitter_c");
 extern var ts_current_free: *const fn (?*anyopaque) callconv(.c) void;
 pub const Span = struct { start_row: u32, end_row: u32 };
-pub const Change = struct { lo: u32, hi: u32 };
-pub const Changes = struct { before: u64, after: u64, ranges: []const Change };
+const change_ranges = @import("changes.zig");
+pub const Change = change_ranges.Range;
+pub const Changes = change_ranges.Batch;
 
 pub fn hasKind(kinds: []const []const u8, raw: [*c]const u8) bool {
     const name = std.mem.span(raw);
@@ -149,7 +150,7 @@ pub const Cache = struct {
             // 직전 세대의 편집 하나를 모두 받은 경우만 Provider의 불변 범위를 빌린다.
             // 늦은 뷰·범위 넘침·전체 교체는 기존의 두 트리 비교로 되돌아간다.
             const shared: ?[]const Change = if (changes) |value|
-                if (self.edits == 1 and self.synced_gen == value.before and generation == value.after and value.before < value.after and value.after - value.before == 1) value.ranges else null
+                value.borrow(self.synced_gen, generation, self.edits)
             else
                 null;
             const ranges = if (shared != null) null else c.ts_tree_get_changed_ranges(previous, current, &count);

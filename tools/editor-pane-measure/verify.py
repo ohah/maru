@@ -74,13 +74,25 @@ def main():
         # 시간을 중복 합산하거나 frame 밖 호출을 함께 세는 경우.
         for label, field, value in (('wrong-call-count', 'paneDecorations_calls', '99'), ('child-exceeds-frame', 'sticky', '999999999999'), ('nested-child-overflow', 'guides', '999999999999'), ('negative-time', 'clampScrollToGeometry', '-1')):
             bad(label, log, raw.replace(first, re.sub(r'\b'+field+r'=\d+', field+'='+value, first), 1))
-        if pane.provider.load(root/'setup-1.json')['pane_schema'] == 2:
+        if pane.provider.load(root/'setup-1.json')['pane_schema'] >= 2:
             bad('sticky-ranges-exceed-summary', log, raw.replace(first, re.sub(r'\bstickyChangedRanges=\d+', 'stickyChangedRanges=999999999999', first), 1))
             bad('sticky-summary-exceeds-parent', log, raw.replace(first, re.sub(r'\bstickySummary=\d+', 'stickySummary=999999999999', first), 1))
+        if pane.provider.load(root/'setup-1.json')['pane_schema'] == 3:
+            bad('wrong-retained-updates', log, raw.replace(first, re.sub(r'\bstickyReusedChanges=\d+', 'stickyReusedChanges=99', first), 1))
+            bad('missing-retained-updates', log, raw.replace(first, re.sub(r' stickyReusedChanges=\d+', '', first), 1))
+            bad('wrong-actual-C-calls', log, raw.replace(first, re.sub(r'\bstickyChangedRanges_calls=\d+', 'stickyChangedRanges_calls=99', first), 1))
+            if pane.provider.load(root/'setup-1.json')['pane_summary_execution'] == 'retained-ranges':
+                bad('C-time-without-C-call', log, raw.replace(first, re.sub(r'\bstickyChangedRanges=\d+', 'stickyChangedRanges=1', first), 1))
         positive()
         # 정확성 실행·상위 제품 표본과 다른 자료를 섞는 경우.
         verification = root/'verify-0-1-flat-3000.zig-shared.log'
         bad('missing-oracle', verification, verification.read_text().replace('verified_each_edit=1', 'verified_each_edit=0', 1))
+        if pane.provider.load(root/'setup-1.json')['pane_schema'] == 3:
+            oracle_text = verification.read_text()
+            marker = 'PANE_ORACLE key=0 views=2 full=1'
+            bad('missing-full-sticky-oracle', verification, oracle_text.replace(marker+'\n', '', 1))
+            bad('wrong-sticky-oracle-view-count', verification, oracle_text.replace(marker, marker.replace('views=2', 'views=1'), 1))
+            bad('extra-oracle-in-performance', log, raw+'\n'+marker+'\n')
         bad('product-mismatch', log, raw.replace('mismatch=0', 'mismatch=1', 1))
         bad('parent-sample-mismatch', log, re.sub(r'samples_ns=\d+', 'samples_ns=1', raw, count=1))
         positive()
@@ -91,10 +103,14 @@ def main():
                 path = root/folder/relative
                 bad('changed-'+folder+'-'+Path(relative).name, path, path.read_text()+'\n')
         setup = root/'setup-1.json'
-        for label, change in (('unknown-schema', lambda v: v.update(pane_schema=3)), ('boolean-schema', lambda v: v.update(pane_schema=True)), ('missing-stage', lambda v: v['pane_stages'].pop())):
+        for label, change in (('unknown-schema', lambda v: v.update(pane_schema=4)), ('boolean-schema', lambda v: v.update(pane_schema=True)), ('missing-stage', lambda v: v['pane_stages'].pop())):
             value = pane.provider.load(setup)
             change(value)
             bad(label, setup, json.dumps(value))
+        if info['pane_schema'] == 3:
+            value = pane.provider.load(setup)
+            value['pane_summary_execution'] = 'unknown'
+            bad('unknown-summary-execution', setup, json.dumps(value))
         binary = root/'binaries.json'
         value = pane.provider.load(binary)
         value['1']['sha256'] = '0'*64

@@ -56,3 +56,5 @@ python3 tools/editor-pane-measure/run.py --output <같은 디렉터리> --deps <
 python3 tools/editor-pane-measure/summarize.py <같은 디렉터리>
 python3 tools/editor-pane-measure/verify.py <같은 디렉터리> --receipt <새 검증 결과.json>
 ```
+
+후속 [변경 범위 재사용 측정](../editor-sticky-changes/results.md)은 schema 3으로 실제 C 호출·성공 차용·별도 전체 sticky oracle을 구분한다. 기존 schema 1/2 자료와 계약을 유지하며, 이 문서의 기존 분포를 후보 개선량으로 해석하지 않는다.

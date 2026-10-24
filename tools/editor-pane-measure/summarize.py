@@ -21,8 +21,12 @@ STAGES = runner.STAGES
 
 def stage_names(info):
     schema = info.get('pane_schema')
-    if type(schema) is not int or schema not in (1, 2):
+    if type(schema) is not int or schema not in (1, 2, 3):
         raise ValueError('Unknown pane schema/stages')
+    if schema == 3 and info.get('pane_summary_execution') not in ('retained-ranges', 'own-comparison'):
+        raise ValueError('Unknown summary execution model')
+    if schema == 3 and (type(info.get('pane_sticky_oracle')) is not int or info['pane_sticky_oracle'] != 1):
+        raise ValueError('Missing full sticky reference contract')
     stages = STAGES[:-3] if schema == 1 else STAGES
     if info.get('pane_stages') != list(stages):
         raise ValueError('Mismatched pane schema/stages')
@@ -32,6 +36,8 @@ def stage_names(info):
 def source_names(info):
     stage_names(info)
     extra = runner.EXTRA - {'src/syntax/symbols.zig'} if info['pane_schema'] == 1 else runner.EXTRA
+    if info['pane_schema'] == 3 and info['pane_summary_execution'] == 'retained-ranges':
+        extra = extra | {'src/syntax/changes.zig'}
     return original_names(info) | extra
 
 
@@ -44,6 +50,8 @@ def validate(text, workload, data, filename, oracle, info):
     frames = provider.frame.validate(text, workload, len(data), data.count(b'\n')+1)
     stages = stage_names(info)
     fields = ('key',) + tuple(field for stage in stages for field in (stage, stage+'_calls'))
+    if info['pane_schema'] == 3:
+        fields += ('stickyReusedChanges',)
     pattern = re.compile('PANE '+' '.join(field+r'=(\d+)' for field in fields))
     rows = []
     for line in text.splitlines():
@@ -56,14 +64,24 @@ def validate(text, workload, data, filename, oracle, info):
     if [row['key'] for row in rows] != list(range(20)):
         raise ValueError('Missing/duplicate/reordered pane input')
     views = 2 if workload == 'shared' else 1
+    if info['pane_schema'] == 3:
+        markers = [line for line in text.splitlines() if line.startswith('PANE_ORACLE ')]
+        expected = [f'PANE_ORACLE key={key} views={views} full=1' for key in range(20)] if oracle else []
+        if markers != expected:
+            raise ValueError('Missing/extra/reordered full sticky oracle')
     for row, frame in zip(rows, frames):
-        if any(row[name+'_calls'] != views for name in stages):
+        retained = info['pane_schema'] == 3 and info['pane_summary_execution'] == 'retained-ranges'
+        if any(row[name+'_calls'] != (0 if retained and name == 'stickyChangedRanges' else views) for name in stages):
             raise ValueError('Unexpected pane call count')
+        if info['pane_schema'] == 3 and row['stickyReusedChanges'] != (views if retained else 0):
+            raise ValueError('Unexpected retained summary updates')
+        if retained and row['stickyChangedRanges'] != 0:
+            raise ValueError('C comparison time without a C call')
         if any(row[name] > frame['appendPaneFrame'] for name in stages):
             raise ValueError('Pane child exceeds frame')
         if row['guides']+row['brackets'] > row['paneDecorations']:
             raise ValueError('Decoration children exceed parent')
-        if info['pane_schema'] == 2 and (row['stickyChangedRanges'] > row['stickySummary'] or row['stickySummary']+row['stickyAncestors'] > row['sticky']):
+        if info['pane_schema'] >= 2 and (row['stickyChangedRanges'] > row['stickySummary'] or row['stickySummary']+row['stickyAncestors'] > row['sticky']):
             raise ValueError('Sticky children exceed parent')
         # 들여쓰기·괄호는 장식 안에 포함되므로 이 합에서는 제외한다.
         roots = runner.HOST_STAGES + ('sticky',)

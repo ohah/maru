@@ -1,4 +1,5 @@
 # 개발 명령
+- 고정 머리줄 변경 범위 재사용: `mise exec -- zig build test-editor-sticky-changes test-editor-sticky-symbols test-editor-fold-changes test-editor-fold-cache -j2`. [검증 범위](plans/editor-sticky-change-reuse.md)를 따른다.
 - pane 프레임 준비 비용: [사본 실행·집계·독립 손상 검증 명령](../tools/editor-pane-measure/results.md). 제품을 바꾸지 않으며 pane 내부 호출만 센다.
 - 파싱 결과 인계 기계: `mise exec -- zig build test-editor-syntax-stamp test-editor-shared-parse-core test-editor-shared-parse-product -j2`. [검증 범위와 제품 연결 조건](plans/editor-shared-parse-reuse.md)을 따른다.
 - 구문 편집 비용 귀속: [사본 실행·집계·독립 결함 검증 명령](plans/editor-provider-edit-attribution.md)을 따른다. 일반/공유 입력과 별도 매 입력 전수 대조를 함께 요구한다.

@@ -537,6 +537,7 @@ jobs:
           sh tools/test-macos-capture-diagnostics.sh
           python3 tools/test-macos-archive-harness.py
           python3 -m unittest discover -s tools/shared-restore-app -p 'test_gui_launch.py'
+          python3 -m unittest discover -s tools/palette-ime -p 'test_*.py'
       # 실패한 PID의 identity를 남겨 회수 지연과 오집계를 구분할 수 있게 한다.
       # 재실행은 다른 이름으로 보존한다 — 최초 실패의 근거를 덮어쓰지 않는다.
       - name: Preserve editor WebContent attribution diagnostics

@@ -1,5 +1,15 @@
 # 개발 명령
 
+- 명령 팔레트의 실제 한자 후보창: `python3 tools/palette-ime/run.py --output <새 외부 절대경로>`.
+  main 제품 코드를 private 사본으로 빌드하고, 읽기 전용 witness와 정상 단축키·외부 HID relay로
+  후보창 5회 취소·PNG/OCR·실제 한자 선택·조합 중 닫기·터미널 복귀를 검사한다.
+  `--prepare-only`는 사본만 준비하며, `--app <이미 빌드한 앱 실행파일>`은 동일 서명 앱을 재사용한다.
+  `--mode diagnostic`은 PNG/OCR 없는 실제 입력 진단이며 `full_validation=false`를 기록한다.
+  기본 live 모드의 완료 증거로 사용하지 않는다.
+  앱의 화면 기록 권한과 잠금 해제, 외부 relay의 이벤트 전송 권한이 필요하다.
+  `python3 -m unittest discover -s tools/palette-ime -p 'test_*.py'`는 판정자의 의미/음성 대조이며
+  실제 후보창 증거가 아니다. 산출물과 PNG는 저장소 밖에 둔다.
+
 - Session Dock 검색 입력: `mise exec -- zig build test-session-dock-search-input`.
   `python3 tools/session-dock-ime/run.py --output <새 절대경로> --mode callbacks`는
   private 소스 사본을 빌드해 실제 AppKit 검색 클릭·키 이벤트, 직접 marked/commit callback,

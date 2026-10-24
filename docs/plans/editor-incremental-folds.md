@@ -1,6 +1,6 @@
 # EW2 제품 접힘 캐시
 
-상태: 제품 경로 구현·자동 대조·실패 주입·함수 재실측 완료. 전면 AppKit 실측과 CI 확인은 대기 중이다.
+상태: 제품 경로 구현·자동 대조·실패 주입·함수 재실측 완료. 전면 AppKit 실측도 완료했으며 CI 확인은 대기 중이다.
 사용자가 승인한 증분 갱신을 연결하며, 조용 시계나 새 접힘 UX는 도입하지 않는다.
 
 ## 책임과 소유
@@ -102,8 +102,19 @@ Apple M4 Max 16 logical CPU, RAM 64 GiB, macOS 26.5.1, Zig 0.17.0 ReleaseFast다
 잠금 상태의 12회/240개 입력에서 매 키의 누적 byte, 최종 전체 순회 일치와 원본 보존을 확인했다.
 실제 960×600 Metal PNG도 확인했다. 로그·이벤트·이미지는 같은 artifacts 루트의
 `editor-fold-product-gui-background/`, 바이너리 해시는 `editor-fold-product-gui/apps-final.json`에 둔다.
-현재 전면 상태 측정은 macOS 잠금 해제 응답을 기다리고 있다. 잠금 상태의 실행은 전면 지연으로
-인용하지 않는다. 물리 HID나 compositor present 지연도 이번 실측의 증거가 아니다.
+잠금 해제 뒤 같은 바이너리로 전면 12회/240개 입력도 검사했다. 매 키가 active/key window였고,
+누적 byte 1~20, 최종 전체 순회 일치, 원문·바이너리 해시 보존을 모두 통과했다.
+증거는 `editor-fold-product-gui-foreground/summary.json`과 실행별 이벤트·Metal PNG다.
+
+| 입력 간격 | 전체 순회 처리 p50 / p95 | 캐시 처리 p50 / p95 | 전체 순회 예정→반환 p50 / p95 | 캐시 예정→반환 p50 / p95 |
+| --- | ---: | ---: | ---: | ---: |
+| 50 ms | 29.25 / 31.43 ms | 21.02 / 23.96 ms | 31.82 / 34.60 ms | 24.95 / 27.53 ms |
+| 250 ms | 31.10 / 49.53 ms | 22.90 / 39.72 ms | 41.22 / 61.89 ms | 33.95 / 49.97 ms |
+
+각 셀은 세 실행의 60개 이벤트를 합산한 중앙값과 nearest-rank p95다. 처리는 합성 `keyDown`부터
+`renderTick` 반환까지이며 예정→반환에는 main queue 대기도 포함된다. 960×600 Swift 문서에서
+공백 20개를 입력한 결과다. 잠금 상태 실행은 전면 지연으로 인용하지 않는다.
+물리 HID나 compositor present 지연도 이번 실측의 증거가 아니다.
 
 ## 한계
 

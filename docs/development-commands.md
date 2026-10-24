@@ -1,4 +1,5 @@
 # 개발 명령
+- 구문 편집 비용 귀속: [사본 실행·집계·독립 결함 검증 명령](plans/editor-provider-edit-attribution.md)을 따른다. 일반/공유 입력과 별도 매 입력 전수 대조를 함께 요구한다.
 - diff 전체 poll 실패 주입: `mise exec -- zig build test-editor-diff-oom -j2`. 세션 worker와 주입 allocator를 분리하는 이유는 [접힘 좌표 계획의 CI 회귀](plans/editor-fold-points.md)를 따른다.
 - 공유 초기 스냅샷: `mise exec -- zig build test-editor-shared-snapshot test-editor-native-snapshot -j2`. [실측·독립 결함 주입](plans/editor-shared-initial-snapshot.md).
 - 접힘 변경 범위 재사용: `mise exec -- zig build test-editor-fold-changes test-editor-fold-cache -j2`. [검증·전후 비교](plans/editor-fold-change-reuse.md).

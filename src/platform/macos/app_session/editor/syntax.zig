@@ -164,6 +164,22 @@ pub fn openBudgeted(source: []const u8, g: editor_language.Grammar, budget_ns: u
     return st;
 }
 
+/// 공유 뷰의 준비 스냅샷은 각 뷰가 따로 소유한다. 부가 캐시의 OOM으로 분할을 거절하지 않는다.
+pub fn prepareSharedSnapshot(source: *const State, allocator: std.mem.Allocator, g: editor_language.Grammar) ?*State {
+    if (source.pending) return null;
+    const original = if (source.provider) |*p| p else return null;
+    // 입장 공간을 먼저 확보하여 wrapper OOM에서는 native 자원을 만들지 않는다.
+    const next = allocator.create(State) catch return null;
+    next.* = .{ .provider = original.copyReady(syntaxLanguage(g)) };
+    const provider = if (next.provider) |*value| value else {
+        allocator.destroy(next);
+        return null;
+    };
+    const folds = source.folds.copyMatched(allocator, original.parser, original.tree_gen, provider.parser, provider.tree_gen) catch null;
+    if (folds) |value| next.folds = value;
+    return next;
+}
+
 /// 끊긴 파싱을 **이어 판다**. 프레임마다 부르고, 아직 안 끝났으면 `true`를 돌려준다 —
 /// 호출자가 그 프레임을 다시 그리게 만들어야 다음 조각이 돈다.
 pub fn resumeParse(self: *State, source: []const u8) bool {

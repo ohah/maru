@@ -2555,6 +2555,7 @@ pub const Prepared = struct {
     lines: [][]const u8,
     shared: bool = false,
     seed: ?SharedSeed = null,
+    syntax_seed: ?*syntax_color.State = null,
 
     /// 아직 뷰에 넘기지 않은 참조와 줄 배열을 되돌린다. registry는 문서를 한 번만 정산한다.
     pub fn deinit(self: *Prepared, allocator: std.mem.Allocator) void {
@@ -2568,6 +2569,10 @@ pub const Prepared = struct {
             allocator.free(seed.visible_lines);
             allocator.free(seed.visible_numbers);
             allocator.free(seed.marks);
+        }
+        if (self.syntax_seed) |state| {
+            state.deinit(allocator);
+            allocator.destroy(state);
         }
         if (self.recovery) |owner| owner.release();
         _ = @constCast(self.lease.owner).release(self.lease) catch unreachable;
@@ -2670,7 +2675,7 @@ pub fn prepareSharedView(self: *AppSession, source: *Term) (OpenFileError || err
     const deferred = if (workspace_restore.pending(source)) |value| try value.clone(self.allocator) else null;
     errdefer if (deferred) |value| value.deinit(self.allocator);
     const lease = self.editor_documents.retain(source_lease, .view) catch return error.OutOfMemory;
-    return .{ .lease = lease, .lines = lines, .recovery = if (source.rt.editor_recovery) |owner| owner.retain() else null, .shared = true, .seed = .{
+    return .{ .lease = lease, .lines = lines, .recovery = if (source.rt.editor_recovery) |owner| owner.retain() else null, .shared = true, .syntax_seed = syntax_color.prepareSharedSnapshot(&source.rt.editor_syntax, self.allocator, if (source.rt.editorDocument().path) |path| maru.session.editor.language.grammarForPath(path) else .none), .seed = .{
         .restore = deferred,
         .selection = source.rt.editor_selection,
         .extras = extras,
@@ -2781,7 +2786,11 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     // **경로가 없으면 문법도 없다**(§3.11 — 문법은 경로에서 나온다). 그 문서는 끝까지 무색이고
     // 그것은 실패가 아니라 §5 의 **저하**다. 이름이 붙는 순간(U2) 다시 판정한다.
     term.rt.editor_grammar = if (term.rt.editorDocument().path) |p| maru.session.editor.language.grammarForPath(p) else .none;
-    term.rt.editor_syntax = syntax_color.open(
+    // Prepared가 취소되면 회수하고, 게시되면 이 상태만 인계한다. 작업 버퍼는 뷰끼리 빌리지 않는다.
+    if (prepared.syntax_seed) |state| {
+        term.rt.editor_syntax = state.*;
+        self.allocator.destroy(state);
+    } else term.rt.editor_syntax = syntax_color.open(
         term.rt.editorDocument().opened.?.file.content,
         term.rt.editor_grammar,
     );
@@ -70178,4 +70187,197 @@ test "fold marks product 공유 뷰의 편집 Undo Redo와 숨은 줄을 대조�
         }
         for ([_]*Term{ term, peer }) |view| try foldMarksReady(&fx, view);
     }
+}
+
+// 첫 편집의 비용을 초기 파싱 이후에도 숨기지 않고, 실제 공개 분할과 두 뷰의 프레임으로 확인한다.
+test "shared initial snapshot 첫 편집은 준비된 캐시를 쓰고 원본 닫기 뒤에도 유효하다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    for (0..1000) |_| try text.appendSlice(a, "fn f() void {\n _ = 1;\n}\n");
+    const source = try undoFixture(&fx, a, "snapshot.zig", text.items);
+    for (0..10000) |_| {
+        var frame = appendPaneFrame(fx.session, fx.leaf_rect, source) orelse return error.NoFrame;
+        frame.dl.deinit(a);
+        if (!source.rt.editor_syntax.pending and source.rt.editor_syntax_folds_applied) break;
+    }
+    try testing.expect(source.rt.editor_syntax.folds.tree != null);
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    const source_pane = pane_ops.activePane(fx.session);
+    const source_index = std.mem.indexOfScalar(*Term, source_pane.terms.items, source).?;
+    const peer = try pane_ops.splitSharedEditorPane(fx.session, .horizontal, false);
+    try testing.expect(!peer.rt.editor_syntax.pending);
+    try testing.expect(peer.rt.editor_syntax.provider.?.parser != source.rt.editor_syntax.provider.?.parser);
+    try testing.expect(peer.rt.editor_syntax.provider.?.tree != source.rt.editor_syntax.provider.?.tree);
+    try testing.expect(peer.rt.editor_syntax.folds.tree != null);
+    try testing.expect(peer.rt.editor_syntax.folds.tree != source.rt.editor_syntax.folds.tree);
+    try testing.expect(peer.rt.editor_syntax.folds.records.items.ptr != source.rt.editor_syntax.folds.records.items.ptr);
+    const before_nodes = peer.rt.editor_syntax.folds.nodes;
+    try testing.expect(insertText(fx.session, peer, " "));
+    fx.leaf_rect.w /= 2;
+    for ([_]*Term{ source, peer }) |view| {
+        var frame = appendPaneFrame(fx.session, fx.leaf_rect, view) orelse return error.NoFrame;
+        frame.dl.deinit(a);
+    }
+    try testing.expect(peer.rt.editor_syntax.folds.nodes - before_nodes < 100);
+    try testing.expect(peer.rt.editor_syntax.folds.reused_changes > 0);
+    fx.term = peer;
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, source_pane, source_index);
+    try testing.expect(insertText(fx.session, peer, "\n"));
+    try testing.expect(undoEdit(fx.session, peer));
+    var frame = appendPaneFrame(fx.session, fx.leaf_rect, peer) orelse return error.NoFrame;
+    defer frame.dl.deinit(a);
+    var expected: std.ArrayList(syntax_mod.Provider.FoldSpan) = .empty;
+    defer expected.deinit(a);
+    try peer.rt.editor_syntax.provider.?.foldSpans(a, &expected);
+    try testing.expectEqual(expected.items.len, peer.rt.editor_fold_ranges.len);
+    for (expected.items, peer.rt.editor_fold_ranges) |want, got| {
+        try testing.expectEqual(want.start_row, got.head);
+        try testing.expectEqual(want.end_row, got.last_hidden);
+    }
+    try expectFoldMarkLookup(peer);
+}
+
+const shared_snapshot_text = "fn f() void {\n return;\n}\n";
+fn sharedSnapshotReadyState(a: std.mem.Allocator) !syntax_color.State {
+    var state = syntax_color.openBudgeted(shared_snapshot_text, .zig, 0);
+    errdefer state.deinit(a);
+    const p = if (state.provider) |*value| value else return error.NoProvider;
+    var lines = try maru.session.editor.line_index.build(a, shared_snapshot_text);
+    defer lines.deinit();
+    var spans: std.ArrayList(syntax_mod.Provider.FoldSpan) = .empty;
+    defer spans.deinit(a);
+    try p.foldSpansCached(a, &state.folds, lines.lines, &spans);
+    try testing.expect(state.folds.records.items.len > 0);
+    return state;
+}
+fn destroySharedSnapshot(a: std.mem.Allocator, state: *syntax_color.State) void {
+    state.deinit(a);
+    a.destroy(state);
+}
+
+test "shared initial snapshot pending과 다른 언어는 복사하지 않는다" {
+    const a = testing.allocator;
+    var state = try sharedSnapshotReadyState(a);
+    defer state.deinit(a);
+    state.pending = true;
+    const pending = syntax_color.prepareSharedSnapshot(&state, a, .zig);
+    defer if (pending) |value| destroySharedSnapshot(a, value);
+    try testing.expect(pending == null);
+    state.pending = false;
+    const language = syntax_color.prepareSharedSnapshot(&state, a, .swift);
+    defer if (language) |value| destroySharedSnapshot(a, value);
+    try testing.expect(language == null);
+}
+
+test "shared initial snapshot wrapper OOM은 원본을 보존하고 캐시 OOM은 복제 Provider를 유지한다" {
+    const a = testing.allocator;
+    var state = try sharedSnapshotReadyState(a);
+    defer state.deinit(a);
+    const parser = state.provider.?.parser;
+    const records = state.folds.records.items.ptr;
+    for (0..2) |failure| {
+        var failing = testing.FailingAllocator.init(a, .{ .fail_index = failure });
+        const allocator = failing.allocator();
+        const copy = syntax_color.prepareSharedSnapshot(&state, allocator, .zig);
+        defer if (copy) |value| destroySharedSnapshot(allocator, value);
+        try testing.expect(failing.has_induced_failure);
+        if (failure == 0) {
+            try testing.expect(copy == null);
+        } else {
+            try testing.expect(copy != null);
+            try testing.expect(copy.?.provider.?.tree != null);
+            try testing.expect(copy.?.folds.tree == null);
+        }
+        try testing.expectEqual(parser, state.provider.?.parser);
+        try testing.expectEqual(records, state.folds.records.items.ptr);
+    }
+}
+
+test "shared initial snapshot 어긋난 캐시 메타데이터는 새 뷰에 인계하지 않는다" {
+    const a = testing.allocator;
+    for (0..4) |kind| {
+        var state = try sharedSnapshotReadyState(a);
+        defer state.deinit(a);
+        switch (kind) {
+            0 => state.folds.synced_gen += 1,
+            1 => state.folds.edits = 1,
+            2 => state.folds.parser = null,
+            else => state.folds.dirty = .{ .lo = 0, .hi = 1 },
+        }
+        const copy = syntax_color.prepareSharedSnapshot(&state, a, .zig) orelse return error.NoSnapshot;
+        defer destroySharedSnapshot(a, copy);
+        try testing.expect(copy.provider.?.tree != null);
+        try testing.expect(copy.folds.tree == null);
+    }
+}
+
+test "shared initial snapshot 게시 전 준비 취소는 원본과 문서를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const source = try undoFixture(&fx, a, "cancel-snapshot.zig", shared_snapshot_text);
+    for (0..10000) |_| {
+        var frame = appendPaneFrame(fx.session, fx.leaf_rect, source) orelse return error.NoFrame;
+        frame.dl.deinit(a);
+        if (!source.rt.editor_syntax.pending and source.rt.editor_syntax_folds_applied) break;
+    }
+    const parser = source.rt.editor_syntax.provider.?.parser;
+    var counting = testing.FailingAllocator.init(a, .{});
+    fx.session.allocator = counting.allocator();
+    defer fx.session.allocator = a;
+    var prepared = try prepareSharedView(fx.session, source);
+    try testing.expect(prepared.syntax_seed != null);
+    prepared.deinit(counting.allocator());
+    try testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
+    fx.session.allocator = a;
+    try testing.expectEqual(parser, source.rt.editor_syntax.provider.?.parser);
+    try testing.expectEqualStrings(shared_snapshot_text, source.rt.editorDocument().opened.?.file.content);
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, source, " "));
+    try testing.expect(undoEdit(fx.session, source));
+    try testing.expectEqualStrings(shared_snapshot_text, source.rt.editorDocument().opened.?.file.content);
+}
+
+test "shared initial snapshot 준비 뒤 pane 생성 실패는 스냅샷과 문서 참조를 회수한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const source = try undoFixture(&fx, a, "post-prepare-snapshot.zig", shared_snapshot_text);
+    for (0..10000) |_| {
+        var frame = appendPaneFrame(fx.session, fx.leaf_rect, source) orelse return error.NoFrame;
+        frame.dl.deinit(a);
+        if (!source.rt.editor_syntax.pending and source.rt.editor_syntax_folds_applied) break;
+    }
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    var count = testing.FailingAllocator.init(a, .{});
+    fx.session.allocator = count.allocator();
+    defer fx.session.allocator = a;
+    var prepared = try prepareSharedView(fx.session, source);
+    try testing.expect(prepared.syntax_seed != null);
+    try testing.expect(prepared.syntax_seed.?.folds.tree != null);
+    const prepared_allocations = count.alloc_index;
+    prepared.deinit(count.allocator());
+    try testing.expectEqual(count.allocated_bytes, count.freed_bytes);
+    const tab = fx.session.tabs.items[fx.session.app_window.active_tab];
+    const old_count = tab.panes.items.len;
+    const old_tree = tab.tree;
+    const lease = source.rt.editor_document_lease.?;
+    const old_refs = lease.owner.viewCount(lease).?;
+    // 완료된 Prepared 다음의 첫 할당에서 실패시켜 게시 전 errdefer의 실제 배선을 확인한다.
+    var failing = testing.FailingAllocator.init(a, .{ .fail_index = prepared_allocations });
+    fx.session.allocator = failing.allocator();
+    try testing.expectError(error.OutOfMemory, pane_ops.splitSharedEditorPane(fx.session, .vertical, false));
+    fx.session.allocator = a;
+    try testing.expect(failing.has_induced_failure);
+    try testing.expectEqual(old_count, tab.panes.items.len);
+    try testing.expect(std.meta.eql(old_tree, tab.tree));
+    try testing.expectEqual(old_refs, lease.owner.viewCount(lease).?);
+    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    try testing.expectEqualStrings(shared_snapshot_text, source.rt.editorDocument().opened.?.file.content);
 }

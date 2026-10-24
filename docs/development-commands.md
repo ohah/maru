@@ -1,5 +1,9 @@
 # 개발 명령
 
+- 편집 저장소 비용: `python3 tools/editor-storage-measure/run.py --output <새 외부 경로> --deps "$PWD/zig-pkg" --workloads typing,structure,paste,undo,shared`.
+  private 제품 사본의 delta·본문 복사·줄 인덱스·뷰 줄 배열을 분리한다.
+  정확성 패스·집계·오염 거절 명령과 한계는 [EW3 실측](plans/editor-storage-cost-measurement.md)을 따른다.
+
 - 명령 팔레트의 실제 한자 후보창: `python3 tools/palette-ime/run.py --output <새 외부 절대경로>`.
   main 제품 코드를 private 사본으로 빌드하고, 읽기 전용 witness와 정상 단축키·외부 HID relay로
   후보창 5회 취소·PNG/OCR·실제 한자 선택·조합 중 닫기·터미널 복귀를 검사한다.

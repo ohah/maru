@@ -202,7 +202,10 @@ pub fn reduceSearchTriplet(app_pid: i32, triplet: Triplet, transition: SearchTra
     if (!std.meta.eql(transition.before_counters, triplet.before_counters) or
         !std.meta.eql(transition.opened_counters, triplet.opened_counters) or
         !std.meta.eql(transition.closed_counters, triplet.closed_counters)) return error.SearchTransitionInvalid;
-    if (transition.before.owner_generation == 0 or !searchMarked(transition.before)) return error.SearchTransitionInvalid;
+    // Both marked input and native per-keystroke committed replacement can
+    // reach reconversion. Keep the exact original syllable and every step guard.
+    if (transition.before.owner_generation == 0 or
+        (!searchMarked(transition.before) and !searchCommitted(transition.before))) return error.SearchTransitionInvalid;
     for ([_]SearchState{ transition.before, transition.opened, transition.closed }) |state| {
         if (!state.first_responder or !state.search_owner or state.owner_generation != transition.before.owner_generation)
             return error.SearchTransitionInvalid;
@@ -546,6 +549,14 @@ test "search candidate evidence permits one exact syllable commit and keeps term
     preview_triplet.closed_counters.committed_text_callbacks += 1;
     preview.closed_counters = preview_triplet.closed_counters;
     _ = try reduceSearchTriplet(999, preview_triplet, preview);
+    // Native NSTextView also receives committed replacements for each Hangul
+    // syllable update. Reconversion still commits Han once and cancels once.
+    var committed_before = preview;
+    committed_before.before = committed;
+    _ = try reduceSearchTriplet(999, preview_triplet, committed_before);
+    var unrelated_before = committed_before;
+    unrelated_before.before.query_hash = fixtureHash("韓");
+    try std.testing.expectError(error.SearchTransitionInvalid, reduceSearchTriplet(999, preview_triplet, unrelated_before));
     var wrong_preview = preview;
     wrong_preview.opened.preedit_hash = fixtureHash("漢");
     try std.testing.expectError(error.SearchTransitionInvalid, reduceSearchTriplet(999, preview_triplet, wrong_preview));

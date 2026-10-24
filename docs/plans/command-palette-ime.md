@@ -1,6 +1,7 @@
 # 명령 팔레트 IME 문맥 — 재현과 구현 계획
 
-상태: 실제 입력 재현 완료. 2026-10-19 사용자 진행 승인에 따라 기존 검색 길이를 유지하는 동적 문맥 안을 구현한다.
+상태(2026-10-24): 제품 수정 PR #4527 머지 및 실제 후보창 5회 PNG/OCR·한자 선택·터미널 복귀 검증 완료.
+검증 도구는 `tools/palette-ime/`에 있으며, 관측 판정은 정확한 원문의 조합·확정 교체형 전달을 모두 인정한다.
 
 ## 문제와 재현
 
@@ -194,3 +195,81 @@ Return 뒤 `insertText("韓")`를 확인했다. 앞선 `product-scalar-emoji` �
 
 최신 main의 Inspector ABI 233과 합치므로 팔레트 변경은 ABI 234로 배정한다. 앞의 실제 GUI 기록은
 리베이스 전 ABI 233 빌드의 기록이며, main 통합 뒤 검증 결과와 구분한다.
+
+## 머지 후 실제 후보창 완료 검증
+
+2026-10-24 기본 `NSTextView` 대조에서 입력기가 `insertText` replacement로 `ㅎ→하→한`을
+전달한 뒤 Option-Return에서 원문을 한 번 확정하고 `韓` marked preview를 게시하는 경로를 확인했다.
+따라서 후보창 직전 상태는 marked `한` 또는 이미 확정된 정확한 `한`을 허용한다. 여섯 activation의
+세 단계 실제 입력과 콜백 횟수를 따로 기록해 원문·전이·owner·PTY 불변 조건을 유지한다.
+임의의 확정 검색어나 preview를 before로 허용하지 않는다. 창·소유자·취소·PNG/OCR 판정은 그대로다.
+외부 이벤트 생성 시 Unicode payload를 비워 대상 OS 입력기가 물리 keycode를 해석하도록 한다.
+
+권한을 부여하는 앱은 재부팅 때 지워지는 `/private/tmp` 대신
+`~/Library/Application Support/Maru IME Verification/Palette/<앱 해시>/Maru.app`에 보존한다.
+기존 빌드의 바이트·서명을 유지해 복원하며, runner도 같은 영속 경로를 사용한다.
+
+PR #4527 머지 뒤 main의 제품 입력·렌더 경로를 유지한 private 소스 사본에서 검증한다.
+`tools/palette-ime`는 팔레트의 query/preedit·입력 owner·결과 수·terminal 입력 byte·화면 세대를
+읽기 전용 witness로 기록한다. 입력은 정상 단축키와 실제 HID를 쓰며 witness가 입력을 바꾸지 않는다.
+대상 inputContext를 두벌식으로 맞추고 각 키의 전역/대상 문맥·foreground PID를 확인한다.
+HID는 권한 있는 외부 relay가 보내므로 앱 자체에 이벤트 전송 권한을 추가로 요구하지 않는다.
+
+- 새 팔레트 activation마다 `ㅎ → 하 → 한`을 실제로 입력하고 Option-Return으로 후보창을 연다.
+- 새 창 5개를 각각 취소하고 창 ID·소유자·caret 인접 위치·취소 후 소멸을 공통 reducer로 판정한다.
+- 각 창의 PNG를 저장하고 독립 OCR·해시·크기 검증기로 다시 읽는다. 기존 search carrier schema는
+  동일한 Han/韓 canonical-preview 전이를 검증하는 용도로 재사용하며, 팔레트 보고서에서 host를 구분한다.
+- 여섯 번째 실제 후보창에서 Return으로 `韓` 확정을 확인하고, 명령 실행/PTY 유출이 없는지 확인한다.
+- 조합 중 팔레트 단축키로 닫아 확정한 뒤 실제 `/` 키가 terminal에 1 byte 전달되는지 확인한다.
+- 정상/실패 모두 기존 입력 소스를 보수적으로 복원하고 고정된 검증 앱·외부 산출물을 보존한다.
+  화면 잠금·권한 부족과 제품 실패는 별도로 기록한다. PNG는 저장소에 커밋하지 않는다.
+
+2026-10-24 실행에서는 기존 `e07f8e…` 관측 앱의 화면 기록 허용을 확인했다. 실제 입력을
+이미 확정된 중간 조합이라는 이유로 거부한 검증기 전제를 기본 NSTextView 대조로 수정했다.
+공통 reducer 12개(Debug·ReleaseFast), 팔레트 판정자 7개와 새 정책 결함 주입 5종이 통과했다.
+원문이 아닌 before·잘못된 preview·초과 콜백·없는 owner를 허용하는 변이는 모두 실행 검사에서 거부됐다.
+
+`--mode diagnostic`은 실제 입력 흐름만 검사하고 `diagnostic.json`의 `full_validation=false`를
+남긴다. 기본 live 모드의 후보 PNG/OCR 완료 판정으로는 사용할 수 없다. 실행 자료는 `/tmp`에
+격리하고 종료 후 지정한 외부 경로로 복사하여 Documents 접근 승인을 추가로 요구하지 않는다.
+관측 앱은 부모 프로세스가 정상 macOS API로 활성화하고, 실제 HID마다 전면 PID를 재확인한다.
+
+보완된 관측 앱은 영속 경로의 `5a65c42a98594562ac155b0d038d726056b0c9d58f1d57ad2295aeb268f4d4ec/Maru.app`이다.
+실제 팔레트 전 과정은 아직 미완료다. 준비 후 화면이 다시 잠겨 diagnostic 실행이 입력 시작 전
+step 0에서 끝났고, 새 앱의 화면 기록은 false였다. 새 앱 허용과 잠금 해제가 필요하다.
+
+후속 `dual-mode-granted-diagnostic-2`는 입력 진단 전체를 통과했다. 여섯 activation의 실제
+`ㅎ→하→한`, 후보창 5회 취소, `韓` 선택, 팔레트 닫기, 터미널 `/` 1 byte 및 입력 소스 복원을
+독립 상태 판정자로 확인했다. `diagnostic.json`의 `full_validation`은 false이며 후보 PNG 증거는 없다.
+제품 Metal 캡처는 기존 renderer-only `MARU_INSPECTOR_APP_TEST=1` opt-in을 재사용한다.
+고정한 소스에서는 이 환경변수의 소비자가 renderer 캡처 seam 한 곳뿐이며 Inspector 입력을 켜지 않는다.
+
+같은 앱의 live 실행은 여전히 `screen_capture_permission`에서 입력 전 종료됐다. TCC를 읽기 전용으로
+확인한 결과 허용 requirement가 이전 `e07f8e…` 앱의 CodeDirectory hash와 일치하고,
+현재 `5a65c4…` 앱의 requirement와는 달랐다. 설정에서 기존 Maru 항목을 제거하고 새 앱을 다시
+등록하도록 안내했다. 허용 표시만으로 현재 바이너리의 PNG 권한을 완료로 처리하지 않는다.
+
+## 실제 후보창 완료 결과 — 2026-10-24
+
+재등록 뒤 TCC requirement가 현재 앱 서명과 일치하고 앱의 `screen_capture=true`도 확인됐다.
+같은 `5a65c42a98594562ac155b0d038d726056b0c9d58f1d57ad2295aeb268f4d4ec` 관측 앱의
+`dual-mode-granted-live-3/validation.json`이 `passed=true`를 기록했다. 기반 제품 입력·렌더는
+main `69ed6080e`이며, 사본에 읽기 전용 witness·드라이버와 확정형 before 판정 보완을 적용했다.
+현재 최신 main 전체를 재검증했다는 뜻은 아니다.
+
+- 새 후보창 ID 1430·1433·1436·1439·1442의 완전한 before/opened/closed inventory와 owner를
+  공통 reducer로 검사했고, 각 PNG는 89×266이며 독립 OCR이 한자 행 6개를 다시 확인했다.
+- 별도 Swift 픽셀 판정자가 파일을 다시 열어 창 ID·이름·SHA-256·크기·OCR을 검증하고
+  `candidate_capture_verifier=passed`를 출력했다. 같은 후보 내용이라 PNG 해시는 같지만
+  서로 다른 창 ID와 lifecycle 증거는 각각 검증했다.
+- 여섯 번째 후보창에서 Return으로 `韓`을 확정했고 팔레트는 열린 채였으며 PTY 입력은 0 byte였다.
+- 다시 입력한 `한`을 팔레트 닫기로 보존하고 실제 `/` 키가 터미널에 정확히 1 byte 전달됐다.
+  마지막 preedit는 비어 있고 입력 소스 복원 기록도 정상적으로 제거됐다.
+- 첫 live 시도의 OCR 처리 뒤 취소 이벤트보다 검사가 먼저 진행한 문제는 외부 relay가
+  이벤트 게시 후 앱 event queue 처리 시간을 둔 뒤 응답하도록 수정해 재검증했다. 앱 바이너리는 바꾸지 않았다.
+
+산출물은 저장소 밖 `maru-palette-live-20261020/dual-mode-granted-live-3` 아래에 보존한다.
+PNG를 저장소에 커밋하지 않는다. 선행 실패·diagnostic 결과는 성공 횟수에 합치지 않았다.
+실제 성공 산출물의 복사본으로 해시 변조·창 ID 오연결·OCR 행 수 위조·상대 경로 탈출·
+다른 제품 화면 이미지 대체를 각각 주입했다. 독립 픽셀 판정자는 다섯 경우를 모두 거부했고,
+원본을 다시 읽은 정상 대조는 통과했다. 원본 PNG와 성공 artifact는 변경하지 않았다.

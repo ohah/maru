@@ -502,6 +502,11 @@ pub const Provider = struct {
     changed: [max_changed]ByteRange = undefined,
     changed_len: u8 = 0,
     changed_all: bool = true,
+    // takeChanged의 소비 여부와 독립적으로 직전 성공 파싱의 범위를 보존한다.
+    // 보관 한도를 넘으면 최적화만 포기하고 각 캐시가 자기 트리와 비교한다.
+    fold_changes: [max_changed]fold_cache.Change = undefined,
+    fold_changes_len: u8 = 0,
+    fold_changes_before: ?u64 = null,
     /// 판정자 관측(누적) — 편집 한 번이 트리에서 무엇을 했나를 시간 없이 센다(계획 editor-edit-frame-cost EW0).
     stats: Stats = .{},
     /// 뷰가 심볼이 없는 곳을 보더라도 파일 전체의 심볼 유무는 별개다. 트리의 분류만 증분 집계한다.
@@ -573,7 +578,10 @@ pub const Provider = struct {
         const opts: c.TSParseOptions = .{ .payload = &ctx, .progress_callback = onProgress };
         const next = c.ts_parser_parse_with_options(self.parser, old_tree, input, opts);
         if (next) |t| {
-            if (old_tree) |ot| self.noteChanged(ot, t) else self.changed_all = true;
+            if (old_tree) |ot| self.noteChanged(ot, t) else {
+                self.changed_all = true;
+                self.fold_changes_before = null;
+            }
             if (self.tree) |old| {
                 if (old != t) c.ts_tree_delete(old);
             }
@@ -670,6 +678,7 @@ pub const Provider = struct {
             self.tree_gen += 1;
         }
         self.changed_all = true;
+        self.fold_changes_before = null;
         if (source.len == 0 or source.len > max_parse_bytes) return .done;
         return self.parseBudgeted(source, null, budget_ns);
     }
@@ -689,6 +698,7 @@ pub const Provider = struct {
     fn noteChanged(self: *Provider, old: *c.TSTree, new: *c.TSTree) void {
         self.changed_all = false;
         self.changed_len = 0;
+        self.fold_changes_before = null;
         var count: u32 = 0;
         const ranges = c.ts_tree_get_changed_ranges(old, new, &count);
         // **tree-sitter 의 할당기로 푼다** — API 주석은 「`malloc` 이니 `free` 로」라지만 구현(`get_changed_ranges.c`)은 `array_push` → `ts_realloc`
@@ -696,10 +706,14 @@ pub const Provider = struct {
         defer if (ranges != null) ts_current_free(@ptrCast(ranges));
         if (count > max_changed) {
             self.changed_all = true;
+            self.fold_changes_before = null;
             return;
         }
         for (0..count) |k| self.changed[k] = .{ .start = ranges[k].start_byte, .end = ranges[k].end_byte };
         self.changed_len = @intCast(count);
+        for (0..count) |k| self.fold_changes[k] = .{ .lo = ranges[k].start_byte, .hi = ranges[k].end_byte };
+        self.fold_changes_len = @intCast(count);
+        self.fold_changes_before = self.tree_gen;
     }
 
     /// 달라진 범위를 읽고 비운다. `null` 이면 모른다(다 다시).
@@ -735,6 +749,7 @@ pub const Provider = struct {
             self.tree = null;
             self.tree_gen += 1;
             self.changed_all = true;
+            self.fold_changes_before = null;
             return;
         }
         var edit: c.TSInputEdit = .{
@@ -1122,7 +1137,11 @@ pub const Provider = struct {
     pub fn foldSpansCached(self: *Provider, allocator: std.mem.Allocator, cache: *FoldCache, lines: anytype, out: *std.ArrayList(FoldSpan)) error{OutOfMemory}!void {
         const before = cache.nodes;
         defer self.stats.fold_nodes +|= cache.nodes - before;
-        try cache.query(allocator, self.parser, self.tree, self.tree_gen, self.slot.fold_kinds, lines, out);
+        const changes: ?fold_cache.Changes = if (self.fold_changes_before) |before_gen|
+            .{ .before = before_gen, .after = before_gen + 1, .ranges = self.fold_changes[0..self.fold_changes_len] }
+        else
+            null;
+        try cache.query(allocator, self.parser, self.tree, self.tree_gen, changes, self.slot.fold_kinds, lines, out);
     }
 
     /// 시작 줄 오름차순으로 담는다 — 소비처(접힘 층)가 그 순서를 전제한다.
@@ -4242,4 +4261,106 @@ test "EW2 cached folds 한 줄 후보는 저장하지 않고 여러 줄이 되�
     p.onEdit(after, e);
     try foldCacheJudge(&p, &cache, after);
     try std.testing.expect(cache.records.items.len > 0);
+}
+
+const FoldChangeFixture = struct {
+    const before = "fn old(\n arg: u32,\n) void {\n _ = arg;\n}\n";
+    const after = "fn new(\n arg: u32,\n) void {\n _ = arg;\n}\n";
+    const last = "fn end(\n arg: u32,\n) void {\n _ = arg;\n}\n";
+    const edit: Edit = .{ .start_byte = 3, .old_end_byte = 6, .new_end_byte = 6, .start_point = .{ .row = 0, .column = 3 }, .old_end_point = .{ .row = 0, .column = 6 }, .new_end_point = .{ .row = 0, .column = 6 } };
+};
+
+test "fold shared changes 소비 뒤 두 캐시도 같은 불변 범위를 읽는다" {
+    const a = std.testing.allocator;
+    const f = FoldChangeFixture;
+    var p = Provider.init(f.before, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var first: FoldCache = .{};
+    defer first.deinit(a);
+    var second: FoldCache = .{};
+    defer second.deinit(a);
+    try foldCacheJudge(&p, &first, f.before);
+    try foldCacheJudge(&p, &second, f.before);
+    first.edit(f.edit);
+    second.edit(f.edit);
+    p.onEdit(f.after, f.edit);
+    var scratch: [Provider.max_changed]Provider.ByteRange = undefined;
+    _ = p.takeChanged(&scratch);
+    _ = p.takeChanged(&scratch);
+    try foldCacheJudge(&p, &first, f.after);
+    try foldCacheJudge(&p, &second, f.after);
+    try std.testing.expectEqual(@as(u64, 1), first.reused_changes);
+    try std.testing.expectEqual(@as(u64, 1), second.reused_changes);
+    try std.testing.expectEqual(@as(u64, 0), first.compared_changes);
+}
+
+test "fold shared changes 두 편집을 모은 캐시는 자기 트리와 비교한다" {
+    const a = std.testing.allocator;
+    const f = FoldChangeFixture;
+    var p = Provider.init(f.before, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    try foldCacheJudge(&p, &cache, f.before);
+    cache.edit(f.edit);
+    p.onEdit(f.after, f.edit);
+    cache.edit(f.edit);
+    p.onEdit(f.last, f.edit);
+    try foldCacheJudge(&p, &cache, f.last);
+    try std.testing.expectEqual(@as(u64, 0), cache.reused_changes);
+    try std.testing.expectEqual(@as(u64, 1), cache.compared_changes);
+}
+
+test "fold shared changes 편집 없는 같은 세대 조회는 이전 범위를 재사용하지 않는다" {
+    const a = std.testing.allocator;
+    const f = FoldChangeFixture;
+    var p = Provider.init(f.before, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    try foldCacheJudge(&p, &cache, f.before);
+    cache.edit(f.edit);
+    p.onEdit(f.after, f.edit);
+    try foldCacheJudge(&p, &cache, f.after);
+    try foldCacheJudge(&p, &cache, f.after);
+    try std.testing.expectEqual(@as(u64, 1), cache.reused_changes);
+    try std.testing.expectEqual(@as(u64, 1), cache.compared_changes);
+}
+
+test "fold shared changes 보관하지 못한 범위와 잘못된 세대는 비교로 복귀한다" {
+    const a = std.testing.allocator;
+    const f = FoldChangeFixture;
+    for ([_]bool{ false, true }) |wrong_generation| {
+        var p = Provider.init(f.before, .zig, 0) orelse return error.NoProvider;
+        defer p.deinit();
+        var cache: FoldCache = .{};
+        defer cache.deinit(a);
+        try foldCacheJudge(&p, &cache, f.before);
+        cache.edit(f.edit);
+        p.onEdit(f.after, f.edit);
+        p.fold_changes_before = if (wrong_generation) p.tree_gen else null;
+        try foldCacheJudge(&p, &cache, f.after);
+        try std.testing.expectEqual(@as(u64, 0), cache.reused_changes);
+        try std.testing.expectEqual(@as(u64, 1), cache.compared_changes);
+    }
+}
+
+test "fold shared changes 전체 교체는 직전 범위의 권한을 지운다" {
+    const a = std.testing.allocator;
+    const f = FoldChangeFixture;
+    var p = Provider.init(f.before, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    try foldCacheJudge(&p, &cache, f.before);
+    cache.edit(f.edit);
+    p.onEdit(f.after, f.edit);
+    try std.testing.expect(p.fold_changes_before != null);
+    p.setSource("");
+    try std.testing.expect(p.fold_changes_before == null);
+    try foldCacheJudge(&p, &cache, "");
+    p.setSource(f.last);
+    try std.testing.expect(p.fold_changes_before == null);
+    try foldCacheJudge(&p, &cache, f.last);
+    try std.testing.expectEqual(@as(u64, 0), cache.reused_changes);
 }

@@ -1,5 +1,7 @@
 # 검증 매트릭스
 [diff poll 실패 주입](plans/editor-fold-points.md)은 세션 worker와 allocator를 격리하고 실제 worker 접근 계수·완료 sweep을 대조한다. `test-editor-diff-oom`의 집중 6개와 AppSession 전수 실행을 구분한다.
+[접힘 변경 범위 재사용](plans/editor-fold-change-reuse.md)은 로컬 구현·검증 완료: 집중 6개·기존 캐시 9개·독립 결함 5개를 대조했으며, 전후 함수 실측·실제 100개 변경 범위의 복귀 진단·전체 로컬 게이트는 완료했으며 최종 main 리베이스·CI는 미완료다. 실제 GUI/HID 지연은 검증하지 않았다.
+[접힘 조회 비용 귀속](plans/editor-fold-query-attribution.md)은 제품과 분리된 사본의 성공 경로를 측정한다. 제품 대조와 세부 시간 합 검사를 함께 수행하며 GUI 지연 개선의 증거는 아니다.
 
 [접힘 후보의 근처 행 조회](plans/editor-fold-points.md)는 현재 줄 인덱스에서 경계·역방향·큰 도약과
 최대 추가 전진 수를 대조한다. 집중 6개(좌표 5개·import 1개), 기존 캐시 9개와 제품 접힘 회귀를 함께 사용한다.

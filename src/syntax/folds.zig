@@ -4,6 +4,8 @@ const std = @import("std");
 const c = @import("tree_sitter_c");
 extern var ts_current_free: *const fn (?*anyopaque) callconv(.c) void;
 pub const Span = struct { start_row: u32, end_row: u32 };
+pub const Change = struct { lo: u32, hi: u32 };
+pub const Changes = struct { before: u64, after: u64, ranges: []const Change };
 
 pub fn hasKind(kinds: []const []const u8, raw: [*c]const u8) bool {
     const name = std.mem.span(raw);
@@ -19,6 +21,8 @@ pub const Cache = struct {
     parser: ?*c.TSParser = null,
     nodes: u64 = 0,
     scanned_records: u64 = 0,
+    reused_changes: u64 = 0,
+    compared_changes: u64 = 0,
     const Record = struct { lo: u32, hi: u32 };
     pub fn deinit(self: *Cache, allocator: std.mem.Allocator) void {
         self.records.deinit(allocator);
@@ -114,7 +118,7 @@ pub const Cache = struct {
             }
         }
     }
-    pub fn query(self: *Cache, a: std.mem.Allocator, parser: *c.TSParser, tree: ?*c.TSTree, generation: u64, kinds: []const []const u8, lines: anytype, out: *std.ArrayList(Span)) error{OutOfMemory}!void {
+    pub fn query(self: *Cache, a: std.mem.Allocator, parser: *c.TSParser, tree: ?*c.TSTree, generation: u64, changes: ?Changes, kinds: []const []const u8, lines: anytype, out: *std.ArrayList(Span)) error{OutOfMemory}!void {
         out.clearRetainingCapacity();
         const current = tree orelse {
             self.invalidate();
@@ -133,13 +137,21 @@ pub const Cache = struct {
         }
         if (self.tree) |previous| {
             var count: u32 = 0;
-            const ranges = c.ts_tree_get_changed_ranges(previous, current, &count);
+            // 직전 세대의 편집 하나를 모두 받은 경우만 Provider의 불변 범위를 빌린다.
+            // 늦은 뷰·범위 넘침·전체 교체는 기존의 두 트리 비교로 되돌아간다.
+            const shared: ?[]const Change = if (changes) |value|
+                if (self.edits == 1 and self.synced_gen == value.before and generation == value.after and value.before < value.after and value.after - value.before == 1) value.ranges else null
+            else
+                null;
+            const ranges = if (shared != null) null else c.ts_tree_get_changed_ranges(previous, current, &count);
+            if (shared != null) self.reused_changes +|= 1 else self.compared_changes +|= 1;
+            const range_count: usize = if (shared) |items| items.len else count;
             defer if (ranges != null) ts_current_free(@ptrCast(ranges));
             // 추가 범위의 중복은 마지막에 위치로 합친다. 최장 후보가 없어져도 짧은 후보를 보존한다.
             // 변경 범위를 합쳐 큰 간격까지 걷지 않도록 구간마다 따로 순회한다.
-            for (0..count + 1) |i| {
-                const lo = if (i < count) ranges[i].start_byte else if (self.dirty) |r| r.lo else continue;
-                const hi = if (i < count) ranges[i].end_byte else self.dirty.?.hi;
+            for (0..range_count + 1) |i| {
+                const lo = if (i < range_count) (if (shared) |items| items[i].lo else ranges[i].start_byte) else if (self.dirty) |r| r.lo else continue;
+                const hi = if (i < range_count) (if (shared) |items| items[i].hi else ranges[i].end_byte) else self.dirty.?.hi;
                 var n: usize = 0;
                 for (self.records.items) |r| {
                     self.scanned_records +|= 1;

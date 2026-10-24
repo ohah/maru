@@ -49,6 +49,12 @@ python3 -m unittest discover -s tools/editor-storage-measure -p 'test_*.py' -v
 공유 게시의 줄 배열 구간 누락과 snapshot 해제를 인덱스 생성 시간에 포함한 경계도 수정했다.
 최종 집계에서 `preliminary/`의 중간 실행은 제외한다.
 
+추가 검토에서 빈 바이너리 manifest, 변경된 계측 소스, 숫자 접미 쓰레기 문자가 기존 집계기를
+통과하는 것을 재현했다. 제품 mode 1 바이너리의 존재와 계측 소스 해시를 필수로 검사하고,
+기록의 숫자는 행 끝까지 온전해야 받아들이도록 수정했다. Undo 후 예상 byte 수 오염과
+별도로 계산한 p50/p95·ns→ms 변환도 대조했다. 수정 전 세 결함이 검출되지 않는 것을 확인했고,
+수정 후 정상 대조군을 포함한 10개 검사가 통과했다. 실제 75회 집계 수치는 수정 전후 동일했다.
+
 로컬 증거는 `/Users/yoonhb/.cache/maru-agent-artifacts/editor-storage-measure/`의
 `inputs.json`, `binaries.json`, `setup-1.json`, `hardware.json`, `storage-summary.json`과
 `run-*.log`, `verify-*.log`다. 일반 뷰는 800×600, 공유 뷰는 각각 400×600이다.

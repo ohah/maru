@@ -9,7 +9,7 @@ import re
 import statistics
 
 FIELDS = ('total_ns', 'delta_ns', 'copy_ns', 'index_ns', 'view_lines_ns')
-PATTERN = re.compile(r'STORAGE key=(\d+) total_ns=(\d+) delta_ns=(\d+) copy_ns=(\d+) index_ns=(\d+) view_lines_ns=(\d+) bytes=(\d+) lines=(\d+)')
+PATTERN = re.compile(r'STORAGE key=(\d+) total_ns=(\d+) delta_ns=(\d+) copy_ns=(\d+) index_ns=(\d+) view_lines_ns=(\d+) bytes=(\d+) lines=(\d+)(?=\r?$)', re.MULTILINE)
 COUNTS = {'typing': 20, 'structure': 10, 'paste': 1, 'undo': 6, 'shared': 20}
 
 
@@ -45,9 +45,17 @@ def summarize(root, repetitions=3):
         if hashlib.sha256(data).hexdigest() != info['sha256'] or len(data) != info['bytes']:
             raise ValueError('Fixture hash changed')
     binaries = json.loads((root / 'binaries.json').read_text())
+    if set(binaries) != {'1'}:
+        raise ValueError('Missing production measurement binary')
     for info in binaries.values():
         if hashlib.sha256(Path(info['binary']).read_bytes()).hexdigest() != info['sha256']:
             raise ValueError('Measurement binary changed')
+    setup = json.loads((root / 'setup-1.json').read_text())
+    if setup['mode'] != 1 or not setup['instrumented_sha256']:
+        raise ValueError('Missing instrumented source manifest')
+    for name, digest in setup['instrumented_sha256'].items():
+        if hashlib.sha256((root / 'source-1' / name).read_bytes()).hexdigest() != digest:
+            raise ValueError('Instrumented source changed')
     groups = []
     for name in sorted(inputs):
         for work in COUNTS:

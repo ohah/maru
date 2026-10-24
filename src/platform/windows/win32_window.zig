@@ -263,6 +263,15 @@ const CS_VREDRAW: UINT = 0x0001;
 const IDC_ARROW: usize = 32512;
 const IDC_SIZEWE: usize = 32644;
 
+// Resource identifier shared with app.rc; icon metrics are the native large/small slots.
+const APP_ICON_RESOURCE: usize = 1;
+const IMAGE_ICON: UINT = 1;
+const LR_SHARED: UINT = 0x8000;
+const SM_CXICON: i32 = 11;
+const SM_CYICON: i32 = 12;
+const SM_CXSMICON: i32 = 49;
+const SM_CYSMICON: i32 = 50;
+
 extern "user32" fn RegisterClassExW(*const WNDCLASSEXW) callconv(abi.winapi) ATOM;
 extern "user32" fn CreateWindowExW(DWORD, ?[*:0]const u16, ?[*:0]const u16, DWORD, i32, i32, i32, i32, ?HWND, ?HMENU, ?HINSTANCE, ?*anyopaque) callconv(abi.winapi) ?HWND;
 extern "user32" fn DefWindowProcW(HWND, UINT, WPARAM, LPARAM) callconv(abi.winapi) LRESULT;
@@ -282,6 +291,9 @@ extern "user32" fn SendMessageW(HWND, UINT, WPARAM, LPARAM) callconv(abi.winapi)
 extern "user32" fn LoadCursorW(?HINSTANCE, usize) callconv(abi.winapi) ?HCURSOR;
 extern "user32" fn SetCursor(?HCURSOR) callconv(abi.winapi) ?HCURSOR;
 extern "user32" fn GetCursorPos(*POINT) callconv(abi.winapi) i32;
+
+extern "user32" fn LoadImageW(?HINSTANCE, usize, UINT, i32, i32, UINT) callconv(abi.winapi) ?HICON;
+extern "user32" fn GetSystemMetrics(i32) callconv(abi.winapi) i32;
 extern "user32" fn SetWindowLongPtrW(HWND, i32, isize) callconv(abi.winapi) isize;
 extern "user32" fn GetWindowLongPtrW(HWND, i32) callconv(abi.winapi) isize;
 /// **`GetAsyncKeyState`가 아니라 이것을 쓴다.** 전자는 "지금 물리적으로 눌려 있는가"라 메시지가 큐에서
@@ -467,14 +479,16 @@ pub const Window = struct {
             .cbClsExtra = 0,
             .cbWndExtra = 0,
             .hInstance = hinstance,
-            .hIcon = null,
+            // Shared resource handles belong to Windows; never destroy them with this window.
+            // Hosts embedding the window module without the app resource keep the system fallback.
+            .hIcon = LoadImageW(hinstance, APP_ICON_RESOURCE, IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_SHARED),
             .hCursor = LoadCursorW(null, IDC_ARROW),
             // **배경 브러시를 주지 않는다.** 주면 OS가 먼저 칠하고 우리가 덮어 깜빡인다(W7.2가 매 프레임
             // 전체를 그린다). 대신 첫 프레임 전까지는 칠해지지 않은 채로 둔다.
             .hbrBackground = null,
             .lpszMenuName = null,
             .lpszClassName = class_name,
-            .hIconSm = null,
+            .hIconSm = LoadImageW(hinstance, APP_ICON_RESOURCE, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED),
         };
         // 같은 클래스를 두 번 등록하면 실패하지만(ERROR_CLASS_ALREADY_EXISTS) 그건 정상 재진입이다 —
         // 창을 여러 개 만들 때 첫 번째만 성공한다. 그래서 실패를 곧바로 오류로 보지 않고 창 생성으로 판정한다.

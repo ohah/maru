@@ -12724,3 +12724,21 @@ repeated the native class-icon and 11 screen-pixel checks with exit 0. Five dama
 PE resource variants (missing group, wrong group ID, missing image, changed image
 and changed dimensions) were rejected while the original executable stayed intact.
 Final installation and taskbar pinning remain separate from this artifact check.
+
+### Sidebar release endpoint
+
+Sidebar resize now applies the `left_up` coordinate through the same layout path
+as a move before persisting the final width. Previously a release without a move
+saved the old width; mixed native pointer/message input also saved 392px for a
+400px release. Reducing nonclient frame refreshes did not solve that defect and
+that experimental change was removed. The final endpoint fix passed 20 native
+window scenarios, including missing/queued moves, reverse motion, grab offsets,
+clamps, capture cancellation and duplicate releases. The original mixed-pointer
+reproduction now saves exactly 400px. Shared config values, comments and unknown
+keys remain intact.
+
+`python tools/windows/check-sidebar-release.py --state <private-fixture-state.json>
+--exe <fixture-maru.exe> --output <evidence.json>` replays those scenarios. The
+caller must launch an isolated cache fixture, with the sentinel config described
+in the tool header. It verifies the process executable and window owner before
+injecting events; this is message-based application E2E, not physical mouse proof.

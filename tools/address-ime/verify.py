@@ -10,7 +10,7 @@ def require(v, m):
     if not v:
         raise ValueError(m)
 
-def semantics(report):
+def semantics(report, *, pointer_geometry=False):
     require(report['schema'] == 'maru.address-ime.v1' and report['passed'] and (not report['failures']), 'producer')
     require(report['candidate_count'] == 5, 'five windows')
     states = report['observations']
@@ -50,12 +50,15 @@ def semantics(report):
     for g in report['geometry']:
         require(g['w'] > 0 and g['h'] > 0 and (g['x'] >= g['field_x'] - 1) and (g['x'] + g['w'] <= g['field_x'] + g['field_w'] + 1) and (g['y'] >= g['field_y'] - 1) and (g['y'] + g['h'] <= g['field_y'] + g['field_h'] + 1), 'anchor')
     for (empty, composed) in zip(report['geometry'][::2], report['geometry'][1::2]):
-        require(composed['x'] > empty['x'], 'caret advance')
+        if pointer_geometry:
+            require(report.get('workflow') == 'pointer' and abs(composed['x'] - empty['x']) <= 1, 'equal-width selection caret')
+        else:
+            require(composed['x'] > empty['x'], 'caret advance')
     return (states, base)
 
-def validate(report, candidate, artifact_root=None):
+def validate(report, candidate, artifact_root=None, *, pointer_geometry=False):
     """Bind semantic witnesses to exactly one private run; image pixels are checked separately."""
-    (states, base) = semantics(report)
+    (states, base) = semantics(report, pointer_geometry=pointer_geometry)
     require(report['mode'] == 'live' and report['window_inventory_validated'] is True, 'full live window validation')
     require(candidate['schema'] == 'maru.address-ime-candidate.v1' and candidate['source_id'] == 'com.apple.inputmethod.Korean.2SetKorean', 'candidate schema')
     require(len(candidate['rows']) == 5 and len({r['window_id'] for r in candidate['rows']}) == 5, 'replay')
@@ -93,6 +96,6 @@ def validate(report, candidate, artifact_root=None):
         require(len(fresh) == 1 and fresh[0]['id'] == window_id and (fresh[0]['owner']['pid'] == proof['owner_pid']) and (fresh[0]['layer'] == proof['layer'] == 20), 'inventory')
         require(fresh[0]['owner']['bundle_id'] == proof['bundle_id'] == 'dev.maru.apphost' and fresh[0]['owner']['signing_id'] == proof['signing_id'] == 'dev.maru.apphost', 'identity')
 
-def validate_diagnostic(report):
+def validate_diagnostic(report, *, pointer_geometry=False):
     require(report['mode'] == 'diagnostic' and report['window_inventory_validated'] is False, 'diagnostic separation')
-    semantics(report)
+    semantics(report, pointer_geometry=pointer_geometry)

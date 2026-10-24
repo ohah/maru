@@ -5065,3 +5065,10 @@ Artifact controls 총 **20** test methods, 새 범위 음성 artifact **32**종 
 TextField 중간 선택·UTF-16 읽기/교체·NFD 정규화·OOM snapshot·owner 전환의 집중 검사를 추가했다.
 실제 후보창 5회 PNG/OCR·한자 선택·터미널 복귀를 고정 계측 앱에서 확인했다. 계획과 증거 범위: [주소창 IME 계획](plans/address-field-ime.md).
 단위 검사와 제품 빌드는 실제 후보창 PNG/OCR 성공 증거와 구분한다.
+
+## 주소창 실제 포인터 workflow
+
+격리된 두 pane과 표시 URL을 준비한 뒤 실제 클릭·드래그/Shift+Right와 다른 pane 클릭 복귀를
+확인하는 후속 검증이다. 네이티브 이벤트의 목표 bounds와 owner·freshness 정책 및 독립 증거 판정
+검사는 통과했다. 실제 클릭·드래그/Shift+Right·pane 복귀 입력 진단도 통과했다. 같은 고정 앱에서 후보창 5회 PNG/OCR·한자 선택·실제 다른 pane 클릭과 터미널 입력 복귀까지 통과했다. 기반 main `306ec2429`의 실측과 후속 리베이스/CI 증거는 구분한다.
+범위와 상태: [주소창 실제 포인터 검증](plans/address-field-ime-pointer.md).

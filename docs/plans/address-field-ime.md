@@ -116,3 +116,8 @@ GUI harness와 로그·PNG는 저장소 밖 `maru-address-ime-live-20261024/`에
 `tools/address-ime/`는 동일 scene의 드라이버·probe와 독립 판정자를 보존하고,
 공통 source-copy 준비·GUI 실행·HID·입력 소스 복원·PNG/OCR 판정은 기존 도구를 재사용한다.
 PNG와 실행 로그는 저장소에 넣지 않는다.
+
+## 실제 포인터·단축키 후속
+
+선택 준비와 터미널 복귀 fixture를 실제 클릭·드래그·Shift+Right·Escape로 대체하는 범위는
+[주소창 실제 포인터 검증](address-field-ime-pointer.md)이 소유한다.

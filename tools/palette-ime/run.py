@@ -35,7 +35,7 @@ def run(app, output, mode='live'):
     helper_dir.mkdir()
     (helper_dir / 'main.swift').write_text((REPO / 'tools/palette-ime/relay.swift').read_text())
     subprocess.run(['xcrun', 'swiftc', str(REPO / 'src/platform/macos/SessionHostInputSourcePolicy.swift'),
-                    str(helper_dir / 'main.swift'), '-o', str(private / 'hid-relay')], check=True, capture_output=True, timeout=60)
+                    str(REPO / 'tools/palette-ime/PointerPolicy.swift'), str(helper_dir / 'main.swift'), '-o', str(private / 'hid-relay')], check=True, capture_output=True, timeout=60)
     subprocess.run(['xcrun', 'swiftc', str(REPO / 'src/platform/macos/SessionHostInputSourcePolicy.swift'),
                     str(REPO / 'src/platform/macos/SessionHostInputSourceRestore.swift'), '-o', str(private / 'restore-input')], check=True, capture_output=True, timeout=60)
     config = root / 'config'
@@ -57,7 +57,7 @@ def run(app, output, mode='live'):
     manifest = dict(app=str(app), app_sha256=sha(app), cli_sha256=sha(app.with_name('maru')),
                     git_head=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip(),
                     tools_sha256={name: sha(REPO / 'tools/palette-ime' / name) for name in
-                                  ('prepare.py', 'driver.swift.inc', 'probe.zig.inc', 'relay.swift', 'verify.py', 'run.py')},
+                                  ('prepare.py', 'driver.swift.inc', 'probe.zig.inc', 'relay.swift', 'PointerPolicy.swift', 'verify.py', 'run.py')},
                     scope='private read-only witnesses; product input and renderer; external actual HID')
     (root / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     child = relay = None

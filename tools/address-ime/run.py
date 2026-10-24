@@ -2,6 +2,7 @@
 """Actual address-field IME scene using the shared GUI launcher, HID relay and pixel oracle."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -33,9 +34,9 @@ shared_run = common.run
 def run(app, output, mode='live'):
     # Shared manifest hashes describe the shared runner, not this private scene.
     # Record the actual scene/independent checker separately before any GUI input.
-    manifest = {'schema': 'maru.address-ime-harness.v1', 'files_sha256': {
+    manifest = {'schema': 'maru.address-ime-harness.v1', 'workflow': 'pointer' if os.environ.get('MARU_ADDRESS_POINTER') == '1' else 'fixture', 'files_sha256': {
         name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
-        for name in ('prepare.py', 'run.py', 'verify.py', 'driver.swift.inc', 'probe.zig.inc')
+        for name in ('prepare.py', 'run.py', 'verify.py', 'driver.swift.inc', 'probe.zig.inc', 'pointer.py', 'pointer_verify.py')
     }}
     (output / 'address-harness.json').write_text(json.dumps(manifest, indent=2) + '\n')
     return shared_run(app, output, mode)

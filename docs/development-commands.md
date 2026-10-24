@@ -1985,3 +1985,10 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 
 - `python3 tools/address-ime/run.py --output <새 저장소 밖 경로>`: 외부 사본을 준비·빌드한 후 실제 중간 선택 대체와 후보창 5회 PNG/OCR을 검사한다. `--prepare-only`와 `--app <고정 실행 파일>`을 지원한다.
 - `--mode diagnostic`은 PNG 없이 입력 진단만 수행하며 `full_validation=false`다. 전체 검증 성공으로 인정하지 않는다.
+
+### 주소창 실제 포인터 workflow
+
+- `python3 tools/address-ime/pointer.py --output <새 외부 경로>`: 클릭·드래그/Shift+Right 선택과 다른 pane 클릭 복귀를 실제 CGEvent로 확인한다. `--prepare-only`, `--app`, `--mode diagnostic`은 기존 주소창 도구와 같다.
+- `python3 -m unittest discover -s tools/palette-ime -p 'test_*.py'`: 순수 포인터 admission은 macOS에서 Swift로 컴파일하며 실제 이벤트는 전송하지 않는다.
+- `python3 -m unittest discover -s tools/address-ime -p 'test_*.py'`: fixture 위장·잘못된 선택과 focus·receipt 재사용을 거부한다.
+- 현재 실제 입력의 대기 상태와 범위는 [포인터 workflow 계획](plans/address-field-ime-pointer.md)을 따른다.

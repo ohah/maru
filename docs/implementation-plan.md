@@ -1709,3 +1709,6 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 
 
 - [주소창 IME 범위 문맥](plans/address-field-ime.md): 기존 TextField를 유지한 UTF-16 projection 연결과 중간 선택 대체. 모델·호스트·적대적 검사와 실제 후보창 5회 PNG/OCR·한자 선택·터미널 복귀 검증 완료.
+
+
+- [주소창 실제 포인터 workflow](plans/address-field-ime-pointer.md): fixture의 선택·focus 이동을 실제 클릭·드래그/Shift+Right·Escape·다른 pane 클릭으로 대체하고 후보창 5회 PNG/OCR·한자 선택·터미널 복귀를 검증했다.

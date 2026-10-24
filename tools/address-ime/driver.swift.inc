@@ -14,6 +14,7 @@ import CryptoKit
     static var originalView: String?
     static var observations: [[String: Any]] = []
     static var composition: [[String: Any]] = []
+    static var pointerObservations: [[String: Any]] = []
     static var geometry: [[String: Double]] = []
     static let observer = SessionHostIMECandidateObservation()
     static var before: SessionHostIMECandidateObservation.Snapshot?
@@ -26,6 +27,7 @@ import CryptoKit
 }
 extension MaruAppHostController {
     private var paletteIMERoot: URL { URL(fileURLWithPath: ProcessInfo.processInfo.environment["MARU_PALETTE_IME"]!) }
+    private var addressPointerMode: Bool { ProcessInfo.processInfo.environment["MARU_ADDRESS_POINTER"] == "1" }
     private var paletteIMEDiagnostic: Bool { ProcessInfo.processInfo.environment["MARU_PALETTE_IME_MODE"] == "diagnostic" }
     private func paletteIMERequire(_ value: Bool, _ reason: String) throws {
         if !value { throw NSError(domain: "PaletteIME", code: 1, userInfo: [NSLocalizedDescriptionKey: reason]) }
@@ -44,17 +46,62 @@ extension MaruAppHostController {
     }
     private func paletteIMEState(_ name: String, view: MaruMetalTerminalView, window: NSWindow, composition: Bool = false) {
         let row: [String: Any] = ["name": name, "first_responder": window.firstResponder === view,
-            "open": paletteIMEWitness(1), "palette_owner": paletteIMEWitness(2), "owner_generation": String(paletteIMEWitness(3)),
+            "active_surface": paletteIMEWitness(10), "open": paletteIMEWitness(1), "palette_owner": paletteIMEWitness(2), "owner_generation": String(paletteIMEWitness(3)),
             "query_bytes": paletteIMEWitness(4), "query_hash": String(paletteIMEWitness(5)),
             "preedit_bytes": paletteIMEWitness(6), "preedit_hash": String(paletteIMEWitness(7)),
             "navigate_pending": paletteIMEWitness(8), "document_hash": String(paletteIMEWitness(17)), "document_bytes": paletteIMEWitness(18), "caret": paletteIMEWitness(19), "terminal_bytes": paletteIMEWitness(9), "has_marked": view.hasMarkedText(), "committed_callbacks": PaletteIMEWitness.committed]
         if composition { PaletteIMERun.composition.append(row) } else { PaletteIMERun.observations.append(row) }
     }
+    private func pointerTarget(_ kind: UInt32, view: MaruMetalTerminalView, window: NSWindow) throws -> (CGRect, Double) {
+        var raw = [Double](repeating:0,count:4)
+        try paletteIMERequire(maru_address_pointer_rect(kind,&raw) == 1 && raw[2] > 0 && raw[3] > 0, "pointer_layout")
+        let scale = archiveSmokeRenderScale(window)
+        let local = NSRect(x:raw[0]/scale,y:view.bounds.height-(raw[1]+raw[3])/scale,width:raw[2]/scale,height:raw[3]/scale)
+        let screen = window.convertToScreen(view.convert(local,to:nil))
+        let snapshot = try PaletteIMERun.observer.capture(counters:.init(pty_input_bytes:paletteIMEWitness(9),committed_text_callbacks:PaletteIMEWitness.committed,base_screen_generation:paletteIMEWitness(11)),anchor:screen)
+        struct Input: Encodable { let anchor_appkit: SessionHostIMECandidateObservation.Bounds; let displays: [SessionHostIMECandidateObservation.Display] }
+        let encoded = try JSONEncoder().encode(Input(anchor_appkit:snapshot.anchor_appkit,displays:snapshot.displays))
+        var converted = [Double](repeating:0,count:4)
+        let valid = encoded.withUnsafeBytes { maru_address_pointer_quartz($0.bindMemory(to:UInt8.self).baseAddress!,encoded.count,&converted) }
+        try paletteIMERequire(valid == 1,"pointer_coordinates")
+        return (CGRect(x:converted[0],y:converted[1],width:converted[2],height:converted[3]),converted[2]/raw[2])
+    }
+    private func pointerBox(_ rect: CGRect) -> [String: Double] {
+        ["x":rect.minX,"y":rect.minY,"w":rect.width,"h":rect.height]
+    }
     private func paletteIMEKeyboardState(view: MaruMetalTerminalView, window: NSWindow) throws {
-        let data = try JSONSerialization.data(withJSONObject: ["pid": getpid(), "first_responder": window.firstResponder === view,
-            "generation": String(paletteIMEWitness(3)), "view_source": view.inputContext?.selectedKeyboardInputSource ?? "",
-            "time": ProcessInfo.processInfo.systemUptime], options: [.sortedKeys])
-        try data.write(to: paletteIMERoot.appendingPathComponent("keyboard-state.json"), options: .atomic)
+        var row: [String: Any] = ["pid":getpid(),"first_responder":window.firstResponder === view,
+            "generation":String(paletteIMEWitness(3)),"view_source":view.inputContext?.selectedKeyboardInputSource ?? "", "time":ProcessInfo.processInfo.systemUptime]
+        if addressPointerMode {
+            row["address_pointer_mode"] = true
+            row["window_key"] = window.isKeyWindow
+            row["window_number"] = window.windowNumber
+            if paletteIMEWitness(24) != 0 {
+                row["pointer_targets"] = ["address":pointerBox(try pointerTarget(1,view:view,window:window).0),"terminal":pointerBox(try pointerTarget(2,view:view,window:window).0)]
+            }
+        }
+        try JSONSerialization.data(withJSONObject:row,options:[.sortedKeys]).write(to:paletteIMERoot.appendingPathComponent("keyboard-state.json"),options:.atomic)
+    }
+    private func pointerRequest(_ action: String, terminal: Bool = false, view: MaruMetalTerminalView, window: NSWindow) throws {
+        try paletteIMERequire(NSApp.isActive && window.isKeyWindow && NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid(),"pointer_owner")
+        try paletteIMEKeyboardState(view:view,window:window)
+        let (rect,ratio) = try pointerTarget(terminal ? 2 : 1,view:view,window:window)
+        let cw = Double(paletteIMEWitness(22))*ratio
+        let x = terminal ? rect.midX : rect.minX + Double(paletteIMEWitness(23)+paletteIMEWitness(25))*cw
+        let y = rect.midY
+        PaletteIMERun.requestID += 1; PaletteIMERun.requestedAt = ProcessInfo.processInfo.systemUptime
+        var row: [String: Any] = ["id":PaletteIMERun.requestID,"pid":getpid(),"kind":"pointer","action":action,
+            "target":terminal ? "terminal" : "address","x":x,"y":y,"generation":String(paletteIMEWitness(3)),"time":PaletteIMERun.requestedAt]
+        if action == "drag" { row["end_x"] = x + Double(paletteIMEWitness(26))*cw; row["end_y"] = y }
+        try JSONSerialization.data(withJSONObject:row,options:[.sortedKeys]).write(to:paletteIMERoot.appendingPathComponent("hid-request.json"),options:.atomic)
+    }
+    private func pointerState(_ phase: String, view: MaruMetalTerminalView, window: NSWindow) throws {
+        let receipt = try JSONSerialization.jsonObject(with:Data(contentsOf:paletteIMERoot.appendingPathComponent("hid-ack.json"))) as! [String: Any]
+        try paletteIMERequire(receipt["id"] as? Int == PaletteIMERun.requestID && receipt["passed"] as? Bool == true,"pointer_receipt")
+        PaletteIMERun.pointerObservations.append(["phase":phase,"round":PaletteIMERun.candidateCount,"pid":getpid(),
+            "owner_generation":String(paletteIMEWitness(3)),"caret":paletteIMEWitness(19),"lo":paletteIMEWitness(20),"hi":paletteIMEWitness(21),
+            "open":paletteIMEWitness(1),"first_responder":window.firstResponder === view,"active_surface":paletteIMEWitness(10),
+            "terminal_surface":paletteIMEWitness(24),"terminal_bytes":paletteIMEWitness(9),"navigate_pending":paletteIMEWitness(8),"receipt":receipt])
     }
     private func paletteIMEHID(_ code: UInt16, view: MaruMetalTerminalView, window: NSWindow, flags: UInt64 = 0, korean: Bool = true) throws {
         try paletteIMERequire(NSApp.isActive && window.firstResponder === view && NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid(), "HID_owner")
@@ -135,6 +182,7 @@ extension MaruAppHostController {
         let report: [String: Any] = ["schema": "maru.address-ime.v1", "passed": failures.isEmpty, "failures": failures,
             "mode": paletteIMEDiagnostic ? "diagnostic" : "live",
             "window_inventory_validated": PaletteIMERun.candidateCount == 5 && !paletteIMEDiagnostic,
+            "workflow": addressPointerMode ? "pointer" : "fixture", "pointer_observations": PaletteIMERun.pointerObservations,
             "step": PaletteIMERun.step, "observations": PaletteIMERun.observations, "composition": PaletteIMERun.composition, "geometry": PaletteIMERun.geometry, "candidate_count": PaletteIMERun.candidateCount]
         do { try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: paletteIMERoot.appendingPathComponent("result.json"), options: .atomic) }
         catch { exitCode = 1 }
@@ -182,7 +230,26 @@ extension MaruAppHostController {
                     window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
                     guard NSApp.isActive && window.firstResponder === view else { return }
                     try paletteIMERequire(maru_address_fixture_start(0) != 0, "address_fixture")
-                    PaletteIMERun.step = 1; PaletteIMERun.next = now + 1
+                    PaletteIMERun.step = addressPointerMode ? 100 : 1; PaletteIMERun.next = now + 1
+                case 100:
+                    try paletteIMERequire(maru_address_fixture_start(2) != 0,"initial_navigation_fixture")
+                    try pointerRequest("click",view:view,window:window)
+                    PaletteIMERun.step = 101
+                case 101:
+                    try addressDocument("https://a.invalid/😀/z")
+                    try paletteIMERequire(paletteIMEWitness(19) == 18 && paletteIMEWitness(20) == 18 && paletteIMEWitness(21) == 18,"click_caret")
+                    try pointerState("click",view:view,window:window)
+                    if PaletteIMERun.candidateCount % 2 == 0 { try pointerRequest("drag",view:view,window:window) }
+                    else { try paletteIMEHID(124,view:view,window:window,flags:CGEventFlags.maskShift.rawValue,korean:false) }
+                    PaletteIMERun.step = 102
+                case 102:
+                    try paletteIMERequire(paletteIMEWitness(19) == 22 && paletteIMEWitness(20) == 18 && paletteIMEWitness(21) == 22,"selection_range")
+                    try pointerState("selection",view:view,window:window)
+                    PaletteIMERun.step = 1
+                case 103:
+                    try paletteIMERequire(paletteIMEWitness(1) == 0 && !view.hasMarkedText(),"escape_closes_address")
+                    try pointerRequest("click",view:view,window:window)
+                    PaletteIMERun.step = 101
                 case 1:
                     try paletteIMERequire(paletteIMEWitness(1) == 1 && paletteIMEWitness(2) == 1, "address_owner")
                     try addressDocument("https://a.invalid/😀/z")
@@ -229,16 +296,26 @@ extension MaruAppHostController {
                     paletteIMEState("cancel_\(PaletteIMERun.candidateCount)", view: view, window: window)
                     PaletteIMERun.candidateCount += 1
                     if PaletteIMERun.candidateCount == 5 && !paletteIMEDiagnostic { try addressPublish() }
-                    try paletteIMERequire(maru_address_fixture_start(0) != 0, "next_address_fixture")
-                    PaletteIMERun.step = 1; PaletteIMERun.next = now + 0.8
+                    if addressPointerMode {
+                        try paletteIMEHID(53,view:view,window:window)
+                        PaletteIMERun.step = 103
+                    } else {
+                        try paletteIMERequire(maru_address_fixture_start(0) != 0, "next_address_fixture")
+                        PaletteIMERun.step = 1; PaletteIMERun.next = now + 0.8
+                    }
                 case 30:
                     try addressDocument("https://a.invalid/韓/z")
                     try paletteIMERequire(!view.hasMarkedText() && paletteIMEWitness(1) == 1, "selected_or_navigated")
                     paletteIMEState("selected", view: view, window: window)
                     try paletteIMECapture("selected", surface: surface)
-                    try paletteIMERequire(maru_address_fixture_start(1) == 1, "terminal_fixture")
+                    if addressPointerMode { try pointerRequest("click",terminal:true,view:view,window:window) }
+                    else { try paletteIMERequire(maru_address_fixture_start(1) == 1, "terminal_fixture") }
                     PaletteIMERun.step = 31; PaletteIMERun.next = now + 1
                 case 31:
+                    if addressPointerMode {
+                        try paletteIMERequire(paletteIMEWitness(10) == paletteIMEWitness(24),"other_pane_focus")
+                        try pointerState("pane",view:view,window:window)
+                    }
                     try paletteIMERequire(paletteIMEWitness(1) == 0 && paletteIMEWitness(2) == 0 && window.firstResponder === view, "terminal_focus")
                     try paletteIMEHID(44, view: view, window: window, korean: false); PaletteIMERun.step = 32
                 case 32:
@@ -255,3 +332,6 @@ extension MaruAppHostController {
 }
 @_silgen_name("maru_address_fixture_start") private func maru_address_fixture_start(_ mode: UInt32) -> UInt64
 @_silgen_name("maru_address_validate_windows") private func maru_address_validate_windows(_ bytes: UnsafePointer<UInt8>, _ count: Int) -> UInt32
+
+@_silgen_name("maru_address_pointer_rect") private func maru_address_pointer_rect(_ kind: UInt32, _ out: UnsafeMutablePointer<Double>) -> UInt32
+@_silgen_name("maru_address_pointer_quartz") private func maru_address_pointer_quartz(_ bytes: UnsafePointer<UInt8>, _ count: Int, _ out: UnsafeMutablePointer<Double>) -> UInt32

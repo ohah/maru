@@ -818,6 +818,11 @@ pub fn build(b: *std.Build) void {
     // 호출이 조용히 실패한다(실측: `RegisterClassExW`도 시스템 `STATIC` 클래스 `CreateWindowExW`도
     // null/0을 내면서 `GetLastError`는 0이었다 — "함수가 아예 안 돈" 모양이다). 명시적으로 링크한다.
     if (target.result.os.tag == .windows) {
+        // Embed the desktop icon so installation and window creation do not depend on loose files.
+        exe.root_module.addWin32ResourceFile(.{
+            .file = b.path("src/platform/windows/app.rc"),
+            .include_paths = &.{b.path("assets/icon")},
+        });
         exe.root_module.linkSystemLibrary("user32", .{});
         exe.root_module.linkSystemLibrary("gdi32", .{});
         // W7.2a: D3D11 표시 경로. `extern "d3d11"`/`extern "dxgi"`만으로는 import가 안 붙는다 —

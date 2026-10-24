@@ -12705,3 +12705,22 @@ caption click 0·launcher toggle 8회·400px 도크 유지·grid mismatch 0·exi
 기존 캐시를 쓴 전체 경계 검사는 C 드라이브 공간 0으로 LLVM 출력 생성/실행 파일 찾기가
 실패했다. 종료된 fixture는 총 200KB여서 충분하지 않았다. 이 작업의 전용 NTFS 빌드 캐시를
 삭제하지 않고 압축해 공간을 확보했고, 최종 빌드와 검증은 별도 전용 캐시에서 실행한다.
+
+### Windows application icon
+
+The Windows executable embeds resource 1 from `src/platform/windows/app.rc`.
+`assets/icon/Maru.ico` contains the existing desktop PNG representations (32, 64,
+128 and 256 pixels), packed losslessly from `Maru.icns` by
+`python tools/windows/generate-app-icon.py`. No new renderer or runtime dependency
+is introduced. The native window class loads both icon sizes from that resource
+with shared system ownership, so window teardown never destroys shared icons.
+The executable can be moved or renamed without a loose icon file. Consumers that
+embed the window module without the application resource retain the system fallback.
+
+The isolated icon build passed with Zig 0.17.0. A copied standalone executable
+loaded both class icons and passed 11 gradient sample and cross-axis checks; the
+smoke exited successfully. After the main rebase, the full Windows executable
+repeated the native class-icon and 11 screen-pixel checks with exit 0. Five damaged
+PE resource variants (missing group, wrong group ID, missing image, changed image
+and changed dimensions) were rejected while the original executable stayed intact.
+Final installation and taskbar pinning remain separate from this artifact check.

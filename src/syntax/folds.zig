@@ -74,7 +74,27 @@ pub const Cache = struct {
             if (lines[mid].start <= offset) lo = mid + 1 else hi = mid;
         }
         const row = lo -| 1;
+        return pointAtRow(lines, offset, row);
+    }
+    fn pointAtRow(lines: anytype, offset: u32, row: usize) c.TSPoint {
         return .{ .row = @intCast(row), .column = @intCast(offset - lines[row].start) };
+    }
+    const PointLookup = struct { value: c.TSPoint, linear_steps: u8 };
+    // 같은 조회 안의 근처 줄만 최대 여덟 칸 확인한다. 큰 이동이나 역방향은 기존 이진 탐색을 쓴다.
+    // 줄 번호를 편집 너머로 보관하지 않으며, 중첩 범위의 끝이 뒤로 가도 문서 전체를 다시 걷지 않는다.
+    fn pointNear(lines: anytype, offset: u32, hint: *usize) PointLookup {
+        var row = @min(hint.*, lines.len - 1);
+        var steps: u8 = 0;
+        if (lines[row].start <= offset) {
+            while (steps < 8 and row + 1 < lines.len and lines[row + 1].start <= offset) : (steps += 1) row += 1;
+            if (row + 1 == lines.len or lines[row + 1].start > offset) {
+                hint.* = row;
+                return .{ .value = pointAtRow(lines, offset, row), .linear_steps = steps };
+            }
+        }
+        const value = point(lines, offset);
+        hint.* = value.row;
+        return .{ .value = value, .linear_steps = steps };
     }
     fn visit(self: *Cache, current: *c.TSTree, kinds: []const []const u8, a: std.mem.Allocator, lo: u32, hi: u32, full: bool) !void {
         var cur = c.ts_tree_cursor_new(c.ts_tree_root_node(current));
@@ -147,9 +167,11 @@ pub const Cache = struct {
             n += 1;
         }
         self.records.items.len = n;
+        var start_hint: usize = 0;
+        var end_hint: usize = 0;
         for (self.records.items) |r| {
-            const start = point(lines, r.lo);
-            const end = point(lines, r.hi);
+            const start = pointNear(lines, r.lo, &start_hint).value;
+            const end = pointNear(lines, r.hi, &end_hint).value;
             const ep = end.row - @as(u32, if (end.column == 0 and end.row > start.row) 1 else 0);
             if (ep <= start.row) continue;
             if (out.items.len > 0 and out.items[out.items.len - 1].start_row == start.row) {
@@ -165,3 +187,65 @@ pub const Cache = struct {
         self.parser = parser;
     }
 };
+
+const PointLine = struct { start: u32 };
+
+fn expectNearPoint(lines: []const PointLine, offset: u32, hint: *usize) !void {
+    var row: usize = 0;
+    for (lines, 0..) |line, i| {
+        if (line.start > offset) break;
+        row = i;
+    }
+    const lookup = Cache.pointNear(lines, offset, hint);
+    try std.testing.expectEqual(@as(u32, @intCast(row)), lookup.value.row);
+    try std.testing.expectEqual(offset - lines[row].start, lookup.value.column);
+    try std.testing.expectEqual(row, hint.*);
+    try std.testing.expect(lookup.linear_steps <= 8);
+}
+
+test "fold point hint 한 줄과 범위 밖의 이전 힌트를 안전하게 처리한다" {
+    const lines = [_]PointLine{.{ .start = 0 }};
+    var hint: usize = std.math.maxInt(usize);
+    for ([_]u32{ 0, 1, 100, 0 }) |offset| try expectNearPoint(&lines, offset, &hint);
+}
+
+test "fold point hint 줄 경계와 여덟 칸 전진 경계가 이진 탐색과 같다" {
+    var lines: [64]PointLine = undefined;
+    for (&lines, 0..) |*line, i| line.start = @intCast(i * 4);
+    var hint: usize = 0;
+    for ([_]u32{ 0, 32, 0, 36, 4, 3, 4, 31, 32, 35, 36, 255, 256 }) |offset| try expectNearPoint(&lines, offset, &hint);
+}
+
+test "fold point hint 중첩된 끝 좌표의 역방향과 큰 도약을 제한된 탐색으로 처리한다" {
+    var lines: [4096]PointLine = undefined;
+    for (&lines, 0..) |*line, i| line.start = @intCast(i * 3);
+    var hint: usize = 0;
+    for ([_]u32{ 12000, 100, 120, 11500, 101, 11999, 0, 12285 }) |offset| try expectNearPoint(&lines, offset, &hint);
+}
+
+test "fold point hint 서로 다른 줄 길이와 같은 좌표 반복을 보존한다" {
+    const lines = [_]PointLine{ .{ .start = 0 }, .{ .start = 3 }, .{ .start = 4 }, .{ .start = 8 }, .{ .start = 15 }, .{ .start = 16 }, .{ .start = 20 } };
+    var hint: usize = 0;
+    for (0..24) |i| {
+        try expectNearPoint(&lines, @intCast(i), &hint);
+        try expectNearPoint(&lines, @intCast(i), &hint);
+    }
+    for (0..24) |i| try expectNearPoint(&lines, @intCast(23 - i), &hint);
+}
+
+test "fold point hint 무작위 줄 인덱스와 앞뒤 조회를 독립 전수 탐색과 대조한다" {
+    var prng = std.Random.DefaultPrng.init(0x504f494e54);
+    const random = prng.random();
+    var lines: [2048]PointLine = undefined;
+    var start: u32 = 0;
+    for (&lines) |*line| {
+        line.start = start;
+        start += 1 + random.uintLessThan(u32, 100);
+    }
+    var hint: usize = 0;
+    var offset: u32 = 0;
+    for (0..5000) |i| {
+        offset = if (i % 7 == 0) random.uintLessThan(u32, start) else (offset + random.uintLessThan(u32, 100)) % start;
+        try expectNearPoint(&lines, offset, &hint);
+    }
+}

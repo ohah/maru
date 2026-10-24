@@ -13,7 +13,7 @@ spec.loader.exec_module(comparison)
 frame = comparison.frame
 
 
-def followup(root):
+def followup(root, metric):
     order = json.loads((root / 'followup-order.json').read_text())
     keys = [(e['repetition'], e['file'], e['workload'], e['variant']) for e in order]
     if not keys or len(keys) != len(set(keys)):
@@ -39,7 +39,7 @@ def followup(root):
         raise ValueError('Unpaired follow-up')
     result = {}
     for variant, records in rows.items():
-        result[variant] = dict(events=len(records), ms={key: dict(p50=statistics.median(r[key] for r in records)/1e6, p95=sorted(r[key] for r in records)[math.ceil(len(records)*.95)-1]/1e6) for key in ('total_ns', 'rebuildVisible', 'nativeParse', 'edit_ns', 'appendPaneFrame')})
+        result[variant] = dict(events=len(records), ms={key: dict(p50=statistics.median(r[key] for r in records)/1e6, p95=sorted(r[key] for r in records)[math.ceil(len(records)*.95)-1]/1e6) for key in ('total_ns', metric, 'nativeParse', 'edit_ns', 'appendPaneFrame')})
     (root / 'followup-summary.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result, indent=2))
 
@@ -49,13 +49,14 @@ def main():
     p.add_argument('output', type=Path)
     p.add_argument('--repetitions', type=int, default=3)
     p.add_argument('--followup', action='store_true')
+    p.add_argument('--metric', choices=('rebuildVisible', 'foldSpansCached'), default='rebuildVisible')
     args = p.parse_args()
     root = args.output.resolve()
     if args.followup:
         # 기본 완결 자료의 해시·실행 수 검증을 먼저 통과시킨다.
         for variant in ('baseline', 'cursor'):
             frame.summarize(root / variant, args.repetitions)
-        followup(root)
+        followup(root, args.metric)
         return
     groups = {}
     inputs = None
@@ -91,10 +92,11 @@ def main():
         rows.append(dict(file=before['file'], workload=before['workload'], events_per_variant=before['events'], baseline=before['ms'], cursor=after['ms']))
     summary = dict(events=events, conditions=rows)
     (root / 'comparison-summary.json').write_text(json.dumps(summary, indent=2) + '\n')
-    lines = ['| 파일 / 입력 | 전체 전 p50/p95 | 전체 후 p50/p95 | 표시 재구축 전 p50/p95 | 표시 재구축 후 p50/p95 |', '| --- | ---: | ---: | ---: | ---: |']
+    label = '표시 재구축' if args.metric == 'rebuildVisible' else '접힘 캐시 조회'
+    lines = [f'| 파일 / 입력 | 전체 전 p50/p95 | 전체 후 p50/p95 | {label} 전 p50/p95 | {label} 후 p50/p95 |', '| --- | ---: | ---: | ---: | ---: |']
     for row in rows:
         columns = []
-        for field in ('total_ns', 'rebuildVisible'):
+        for field in ('total_ns', args.metric):
             for variant in ('baseline', 'cursor'):
                 value = row[variant][field]
                 columns.append(f"{value['p50']:.3f} / {value['p95']:.3f}")

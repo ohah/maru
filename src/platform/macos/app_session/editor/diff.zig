@@ -1406,11 +1406,55 @@ test "긴 줄 하나가 바뀌어도 마크 계산이 줄 길이만큼 잡지 �
     try testing.expect(used < 64 * 1024);
 }
 
+// 실패 주입은 poll을 실행하는 스레드만 만져야 한다. worker가 섞이면 FailingAllocator의
+// 비원자 카운터가 지정 지점을 건너뛰어 sweep이 조기에 성공한 것처럼 보인다.
+const DiffOOMThreadRecorder = struct {
+    failing: *std.testing.FailingAllocator,
+    owner: std.Thread.Id,
+    outside: std.atomic.Value(usize) = .init(0),
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn state(ctx: *anyopaque) *@This() {
+        return @ptrCast(@alignCast(ctx));
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self = state(ctx);
+        if (std.Thread.getCurrentId() != self.owner) _ = self.outside.fetchAdd(1, .monotonic);
+        return self.failing.allocator().rawAlloc(len, alignment, ra);
+    }
+    fn resize(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
+        return state(ctx).failing.allocator().rawResize(bytes, alignment, len, ra);
+    }
+    fn remap(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+        return state(ctx).failing.allocator().rawRemap(bytes, alignment, len, ra);
+    }
+    fn free(ctx: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        state(ctx).failing.allocator().rawFree(bytes, alignment, ra);
+    }
+};
+
+test "비교 계산 실패 allocator는 worker 접근을 기록한다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    var recorder: DiffOOMThreadRecorder = .{ .failing = &failing, .owner = std.Thread.getCurrentId() };
+    const Worker = struct {
+        fn run(value: *DiffOOMThreadRecorder) void {
+            const a = value.allocator();
+            const bytes = a.alloc(u8, 1) catch return;
+            a.free(bytes);
+        }
+    };
+    const worker = try std.Thread.spawn(.{}, Worker.run, .{&recorder});
+    worker.join();
+    try testing.expectEqual(@as(usize, 1), recorder.outside.load(.monotonic));
+}
+
 test "비교 계산이 어디서 할당에 실패해도 새거나 두 번 풀지 않는다 — poll 전체를 흔든다" {
     // 지금까지는 `materialize`·`computeMarks`만 따로 주입했다(각각 이중 해제를 잡았다). 그 둘을
     // 부르는 **경로 전체**(줄 분할·대응·표시 배열·마크)를 한 번에 흔들어, 아직 안 본 자리에 같은
-    // 모양이 남아 있는지 본다. 세션 allocator는 init에 고정이라 `checkAllAllocationFailures`를
-    // 그대로 못 쓴다 — 세션을 실패 allocator로 만들고 **init이 끝난 뒤부터** 실패 지점을 민다
+    // 모양이 남아 있는지 본다. worker의 allocator까지 실패시키면 다른 스레드의 할당이 주입 지점을 건너뛴다.
+    // 세션은 backing으로 만들고 **UI poll을 부를 때만** 실패 지점을 민다
     // (`editor/mod.zig`의 파일 열기 테스트와 같은 방법).
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const backing = testing.allocator;
@@ -1424,12 +1468,13 @@ test "비교 계산이 어디서 할당에 실패해도 새거나 두 번 풀지
     while (step < 120) : (step += 1) {
         if (diff_clean_pass) break;
         var fa = std.testing.FailingAllocator.init(backing, .{});
-        defer if (!fa.has_induced_failure) {
-            diff_clean_pass = true;
-        };
-        const allocator = fa.allocator();
-        var fx = try Fixture.init(allocator);
-        defer fx.deinit(allocator);
+        var recorder: DiffOOMThreadRecorder = .{ .failing = &fa, .owner = std.Thread.getCurrentId() };
+        const allocator = recorder.allocator();
+        // Session이 시작한 worker는 backing을 유지한다. UI의 poll만 실패 allocator를 쓴다.
+        var fx = try Fixture.init(backing);
+        defer fx.deinit(backing);
+        fx.session.allocator = allocator;
+        defer fx.session.allocator = backing;
 
         var entry = testEntry(
             "fn main() {\n  var a = 1;\n  log(a);\n}\n",
@@ -1450,6 +1495,9 @@ test "비교 계산이 어디서 할당에 실패해도 새거나 두 번 풀지
         // 여기서 드러난다(정상 경로만 도는 테스트로는 절대 안 보인다).
         poll(fx.session, fx.term);
         invalidate(fx.session, fx.term);
+        try testing.expectEqual(@as(usize, 0), recorder.outside.load(.monotonic));
+        // Session teardown의 추가 할당을 성공/실패 판정에 섞지 않는다.
+        if (!fa.has_induced_failure) diff_clean_pass = true;
     }
     // **공허해질 수 없게 센다** — 한 번도 실패하지 않으면 이 테스트는 아무것도 지키지 않는다.
     std.debug.print("diff OOM sweep: steps={d} unavailable={d} compare={d} clean={}\n", .{ step, failed_steps, ok_steps, diff_clean_pass });

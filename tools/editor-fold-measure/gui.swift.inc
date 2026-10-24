@@ -8,6 +8,7 @@
 @_silgen_name("maru_ew2_inserted_bytes") private func ew2InsertedBytes() -> Int64
 @_silgen_name("maru_ew2_mode") private func ew2Mode() -> UInt32
 @MainActor private enum EW2GUI {
+    static var stableSince = 0.0
     static var started = false
     static var done = false
     static var busy = false
@@ -32,10 +33,20 @@ extension MaruAppHostController {
               !EW2GUI.done, !EW2GUI.busy, primary?.window?.isVisible == true else { return }
         if ProcessInfo.processInfo.environment["MARU_EW2_GUI_FOREGROUND"] == "1",
            let window = primary?.window, (!NSApp.isActive || !window.isKeyWindow) {
+            EW2GUI.stableSince = 0
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
             return
         }
+        // 창 활성화 뒤 늦게 도착하는 시작 이벤트를 입력 표본에 섞지 않는다.
+        let now = ProcessInfo.processInfo.systemUptime
+        if EW2GUI.stableSince == 0 {
+            EW2GUI.stableSince = now
+            // 유휴 창은 새 프레임이 없을 수 있으므로 준비 재시도도 명시적으로 깨운다.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.maybeRunEW2GUI() }
+            return
+        }
+        guard now - EW2GUI.stableSince >= 1 else { return }
         ew2Stamp()
         guard ew2Prepare() else { return }
         EW2GUI.started = true
@@ -61,7 +72,7 @@ extension MaruAppHostController {
         let end = ProcessInfo.processInfo.systemUptime
         EW2GUI.lastStart = start
         EW2GUI.lastEnd = end
-        EW2GUI.records.append(["foreground": NSApp.isActive && window.isKeyWindow ? 1 : 0, "queue_ms": max(0,start-target)*1000, "service_ms": (end-start)*1000,
+        EW2GUI.records.append(["inserted_bytes": Double(ew2InsertedBytes()), "foreground": NSApp.isActive && window.isKeyWindow ? 1 : 0, "queue_ms": max(0,start-target)*1000, "service_ms": (end-start)*1000,
                                "target_to_render_return_ms": (end-target)*1000])
         EW2GUI.index += 1
         let generation = EW2GUI.index

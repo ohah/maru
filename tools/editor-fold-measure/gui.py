@@ -99,18 +99,24 @@ def main():
                     MARU_EW2_GUI_FOREGROUND="1" if args.foreground else "0",MARU_EW2_GUI_OUTPUT=str(root/"artifacts"),MARU_EW2_GUI_INTERVAL_MS=str(interval))
                 if args.foreground and '"CGSSessionScreenIsLocked"=Yes' in subprocess.check_output(["ioreg","-n","Root","-d1"],text=True):
                     raise RuntimeError("Unlock macOS before foreground measurement")
+                if hashlib.sha256(apps[mode].read_bytes()).hexdigest() != app_manifest["binaries"][mode]["sha256"]:
+                    raise RuntimeError("GUI binary changed before the run")
                 print("GUI run",rep,mode,interval,flush=True)
                 with (root/"app.log").open("wb") as log:
                     child=subprocess.Popen([str(apps[mode])],cwd=repo,env=env,stdout=log,stderr=log,start_new_session=True)
                     try: code=child.wait(timeout=100)
                     except subprocess.TimeoutExpired:
                         child.kill();child.wait();raise
+                if hashlib.sha256(apps[mode].read_bytes()).hexdigest() != app_manifest["binaries"][mode]["sha256"]:
+                    raise RuntimeError("GUI binary changed during the run")
                 if code or "EW2_GUI_FINISH" not in (root/"app.log").read_text(): raise RuntimeError(f"GUI run failed: {root}")
                 if document.read_bytes()!=input_bytes: raise RuntimeError("GUI fixture was saved unexpectedly")
                 if args.foreground and '"CGSSessionScreenIsLocked"=Yes' in subprocess.check_output(["ioreg","-n","Root","-d1"],text=True):
                     raise RuntimeError("macOS locked during foreground measurement; preserve the run")
                 report=json.loads((root/"artifacts/events.json").read_text())
                 if report["mode"]!=mode or len(report["events"])!=20 or not report["valid"] or report["inserted_bytes"]!=20: raise RuntimeError("Wrong GUI mode or incomplete key sequence")
+                if any(event.get("inserted_bytes") != index+1 for index,event in enumerate(report["events"])):
+                    raise RuntimeError("Unexpected edit during the key sequence; preserve the run")
                 if args.foreground and any(event["foreground"]!=1 for event in report["events"]): raise RuntimeError("A foreground sample lost focus; preserve the run and retry after unlock")
                 for name in ("before","after"):
                     ppm=root/"artifacts"/(name+".ppm")

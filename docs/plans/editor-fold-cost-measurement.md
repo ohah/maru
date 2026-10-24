@@ -1,12 +1,12 @@
 # EW2 접힘 계산 방식 비교 실측
 
-상태: 제품 함수 비교와 격리 AppKit 검증을 수행했다. 전면 입력 측정은 macOS 잠금 해제 대기 중이다.
-제품 적용 정책은 사용자 확정 전이며, 아래 구현은 독립 사본에만 넣은 프로토타입이다.
+상태: 제품 함수 비교와 전면 AppKit 합성 입력 실측을 완료했다.
+증분 방식의 제품 연결은 후속 단계이며, 아래 구현은 독립 사본에만 넣은 프로토타입이다.
 
 ## 판단
 
 이번 비교에서는 **변경 범위 갱신을 권장한다**. 기존 계획의 조용 시계 우선 권장은 실측 전 가설이었다.
-증분은 실제 두 원문의 입력 프레임 중앙값을 약 43~50% 줄이고, 각 입력 뒤 접힘 범위를 즉시 정확하게 유지했다.
+제품 함수 비교에서 증분은 실제 두 원문의 입력 프레임 중앙값을 약 43~50% 줄이고, 각 입력 뒤 접힘 범위를 즉시 정확하게 유지했다.
 지연은 입력 비용을 비슷하게 줄이지만 재계산과 가시 줄 재구성이 나중 프레임에 남는다.
 캐시의 대가는 실제 원문에서 뷰당 약 56/84 KiB이고, 접힘 후보가 많은 3.13 MB 합성 문서에서는 약 3.16 MiB다.
 
@@ -108,8 +108,27 @@ ReleaseFast, Apple M4 Max 16 logical CPU, RAM 64 GiB, macOS 26.5.1에서 실행�
 빈틈을 확인했다. 만기에는 backend의 `metal_dirty` 무효화도 필요하다. 보완한 앱으로 같은 잠금·백그라운드
 조건을 3회 다시 실행해 마지막 입력 처리 완료 뒤 최신 범위까지 161.2~163.5 ms를 확인했다.
 이는 150 ms 실험 지연에 재계산이 더해진 값이며, 입력 20 byte와 최종 범위 일치도 모두 통과했다.
-현재 콘솔의 `CGSSessionScreenIsLocked=Yes`를 확인하여, 잠금 상태에서 얻은 대기 시간을 전면 앱의 지연으로
-해석하지 않는다. 전면 상태 검증은 잠금 해제 뒤 이어간다.
+초기 잠금 상태의 측정과 아래 잠금 해제 뒤 전면 측정은 분리한다.
+
+같은 1.17 MB Swift 원문과 고정 바이너리로, 방식·간격별 유효한 3회씩 총 18회/360개 입력을 대조했다.
+모든 키에서 전면 앱·key window 상태, 누적 입력 1~20 byte, 마지막 전체 순회 일치와 원본 파일 보존을 확인했다.
+시작 활성화 뒤 1초 안정 구간을 두고, 실행 전후 바이너리 SHA-256도 검사한다.
+포커스가 바뀐 실행은 제외·보존했으며 각 조건에서 시간순으로 첫 유효 실행 3개를 썼다.
+수치가 크거나 작다는 이유로 표본을 고르지 않았다. 진단용 전면 앱 감시 실행은 성능 집계에서 제외했다.
+
+| 입력 간격 | 방식 | 처리 p50 / p95 | 예정 시각→렌더 반환 p50 / p95 | 마지막 처리 후 최신 범위 |
+| --- | --- | ---: | ---: | ---: |
+| 50 ms | 전체 순회 | 29.08 / 31.15 ms | 31.73 / 35.45 ms | 0.04~0.04 ms |
+| 50 ms | 증분 갱신 | 20.54 / 22.53 ms | 23.73 / 26.78 ms | 0.04~0.04 ms |
+| 50 ms | 지연 재계산 | 20.21 / 22.50 ms | 23.44 / 26.68 ms | 153.91~163.03 ms |
+| 250 ms | 전체 순회 | 29.16 / 31.41 ms | 37.76 / 43.02 ms | 0.04~0.04 ms |
+| 250 ms | 증분 갱신 | 20.60 / 22.54 ms | 29.66 / 35.59 ms | 0.04~0.04 ms |
+| 250 ms | 지연 재계산 | 20.26 / 22.55 ms | 32.04 / 35.05 ms | 157.13~161.36 ms |
+
+50 ms 간격에서 실제 AppKit 처리 중앙값은 29.08→20.54 ms로 약 29% 감소했다.
+예정 시각→렌더 반환은 main queue 대기를 포함하며, 마지막 열은 입력 처리 반환 뒤의 추가 대기다.
+증분의 약 0.04 ms는 관측·검증 호출 지연이며 접힘 갱신을 미룬 시간이 아니다.
+이 결과도 물리 HID 입력이나 compositor가 실제 픽셀을 표시한 시점까지 잰 것은 아니다.
 
 ## 재현과 증거
 
@@ -119,7 +138,7 @@ python3 tools/editor-fold-measure/run.py --output /tmp/maru-ew2-new --deps "$PWD
 python3 tools/editor-fold-measure/summarize.py /tmp/maru-ew2-new
 python3 tools/editor-fold-measure/summarize.py /tmp/maru-ew2-new --prefix verify --repetitions 1
 python3 tools/editor-fold-measure/review.py /tmp/maru-ew2-new
-python3 tools/editor-fold-measure/gui.py /tmp/maru-ew2-new --output /tmp/maru-ew2-gui --web-deps "$PWD/web/node_modules"
+python3 tools/editor-fold-measure/gui.py /tmp/maru-ew2-new --output /tmp/maru-ew2-gui --web-deps "$PWD/web/node_modules" --foreground
 ```
 
 프로젝트 개발 의존성을 준비한 뒤 실행한다. 출력은 저장소 밖의 새 디렉터리여야 하며, `--resume --run-only`는
@@ -132,10 +151,13 @@ python3 tools/editor-fold-measure/gui.py /tmp/maru-ew2-new --output /tmp/maru-ew
 AppKit 로그·PNG·바이너리 해시는 `editor-fold-gui/`, 보완 뒤 대조군은
 `editor-fold-gui-wake-background/`에 별도로 보관한다. 초기의 단일 뷰 매핑 누락 결과는
 `summary-before-single-view-mapping.json`으로 분리했으며 최종 결과로 인용하지 않는다.
+전면 집계는 같은 artifacts 루트의 `editor-fold-gui-foreground-summary.json`이며, 각 표본의 경로·제외 목록을
+기록한다. 원시 로그·PNG는 `editor-fold-gui-foreground-final-v2/`, `editor-fold-gui-foreground-final-v3/`,
+`editor-fold-gui-foreground-topup/`에 있다. 초기 계측·진단 자료는 이 최종 집계에 섞지 않았다.
 
 ## 제품 적용 전에 남은 것
 
-- 구현 선택은 아직 사용자 확정 전이다. 이 프로토타입이 제품 EW2 완료를 뜻하지 않는다.
+- 증분 방식의 제품 연결이 남아 있다. 이 프로토타입이 제품 EW2 완료를 뜻하지 않는다.
 - 프로토타입의 캐시는 동일한 호출 allocator를 보관한다. 제품 API는 소유자가 저장소를 관리하고 allocator
   수명을 명시하도록 분리해야 한다. Zig OOM 재시도와 파싱 중/언어 변경·LSP 승격의 전체 제품 gate는 후속이다.
 - 실제 IME·물리 키 입력·전면 compositor 지연은 이번 함수 비교의 증거가 아니다.

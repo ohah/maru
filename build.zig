@@ -6417,6 +6417,12 @@ pub fn build(b: *std.Build) void {
     run_fold_points.addArg("--maru-expect-passed=6");
     b.step("test-editor-fold-points", "Compare hinted fold coordinates and bounded fallback").dependOn(&run_fold_points.step);
     test_step.dependOn(&run_fold_points.step);
+    const fold_change_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"fold shared changes"} });
+    const run_fold_changes = b.addRunArtifact(fold_change_tests);
+    run_fold_changes.addArg("--maru-expect-tests=6");
+    run_fold_changes.addArg("--maru-expect-passed=6");
+    b.step("test-editor-fold-changes", "Compare shared fold change ranges and fallback").dependOn(&run_fold_changes.step);
+    test_step.dependOn(&run_fold_changes.step);
     const fold_cache_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"EW2 cached folds"} });
     const run_fold_cache = b.addRunArtifact(fold_cache_tests);
     run_fold_cache.addArg("--maru-expect-tests=9");

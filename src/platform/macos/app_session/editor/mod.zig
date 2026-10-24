@@ -7468,7 +7468,7 @@ fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
         term.rt.editor_syntax_folds_applied = true;
         return;
     }
-    var prov = &(st.provider orelse return);
+    const prov = if (st.provider) |*provider| provider else return;
     if (prov.tree == null) return; // grammar 없음 — 들여쓰기 층이 그대로 산다(§5)
 
     const lines = foldSourceLines(term);
@@ -7494,7 +7494,7 @@ fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
     // 둘이 구별되지 않아, 일시적 할당 실패가 아래 래치를 세워 **그 문서의 구문 접힘이 영영
     // 사라졌다**(적대적 검증 2026-09-10 — 첫 할당을 실패시켜 실측했다). 지금은 오류로 오므로
     // **래치하지 않고 돌아간다** — 다음 프레임이 다시 시도한다.
-    prov.foldSpans(self.allocator, &spans) catch return;
+    prov.foldSpansCached(self.allocator, &st.folds, doc.file.lines.lines, &spans) catch return;
     // **머리 한 줄짜리는 만들지 않는다**(§4.1f — 접어도 줄어드는 것이 없다). `foldSpans`가 두 줄
     // 이상만 내므로 여기서 다시 거를 것은 없지만, 그 계약이 갈리면 아래 변환이 빈 범위를 만든다.
     if (spans.items.len == 0) {
@@ -37883,7 +37883,7 @@ test "PROMO1 승격이 어느 할당에서 실패해도 뷰가 성하다 — 그
         var prov = &(term.rt.editor_syntax.provider orelse return error.NoProvider);
         var probe_spans: std.ArrayList(syntax_color.FoldSpan) = .empty;
         var sc = std.testing.FailingAllocator.init(allocator, .{});
-        prov.foldSpans(sc.allocator(), &probe_spans) catch return error.ProbeFailed;
+        prov.foldSpansCached(sc.allocator(), &term.rt.editor_syntax.folds, d.file.lines.lines, &probe_spans) catch return error.ProbeFailed;
         probe_spans.deinit(sc.allocator());
         break :blk sc.alloc_index;
     };
@@ -46539,7 +46539,7 @@ test "EW0 관측은 포화 범위와 반복 조회에서도 구문 결과를 바
     }
 }
 
-test "EW0 [측정] 편집 한 번 뒤 프레임이 트리에서 하는 일 — 편집 없는 프레임은 전체 목록을 다시 만들지 않고, 한 글자 편집 뒤 심볼은 화면 조상과 변경 범위만 걷으며 접힘은 전체를 걷는다(EW1); 구문 색 질의는 보이는 범위만 묻고 범위 밖 조각을 받지 않는다 — 납작한 Zig·큰 struct 의 Zig·거대한 class 의 Swift (계획 editor-edit-frame-cost EW0)" {
+test "EW0 [측정] 편집 한 번 뒤 프레임이 트리에서 하는 일 — 편집 없는 프레임은 전체 목록을 다시 만들지 않고, 한 글자 편집 뒤 심볼은 화면 조상과 변경 범위만 걷으며 접힘도 바뀐 범위만 걷는다(EW2); 구문 색 질의는 보이는 범위만 묻고 범위 밖 조각을 받지 않는다 — 납작한 Zig·큰 struct 의 Zig·거대한 class 의 Swift (계획 editor-edit-frame-cost EW0)" {
     // **재앙 감지선이다** — 지금 모양(편집마다 트리 전체 두 바퀴)을 고정한다. EW1(고정 머리줄)·EW2(접힘)가 그 단언을 「문서보다 자릿수로 작다」로
     // 뒤집는다. 시간은 단언하지 않는다(계획 「원칙」) — 문서 크기만 출력한다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -46574,14 +46574,14 @@ test "EW0 [측정] 편집 한 번 뒤 프레임이 트리에서 하는 일 — �
         // 편집 없는 프레임은 트리를 걷지 않는다(심볼·접힘은 version 이 같으면 다시 안 뽑는다).
         try testing.expectEqual(@as(u64, 0), r.idle.symbol_nodes);
         try testing.expectEqual(@as(u64, 0), r.idle.fold_nodes);
-        // 심볼은 국소 탐색이고 접힘의 전체 순회는 EW2 범위다. 빈 fixture가 통과하지 않도록 전체 크기도 확인한다.
+        // 심볼과 접힘 모두 국소 탐색이어야 한다. 빈 fixture가 통과하지 않도록 전체 크기도 확인한다.
         try testing.expect(r.nodes > 50_000);
         try testing.expectEqual(@as(u64, 0), r.edit.symbol_nodes);
         try testing.expectEqual(@as(u64, 0), r.sticky_edit.rebuild_nodes);
         try testing.expect(r.sticky_edit.ancestor_nodes > 0 and r.sticky_edit.ancestor_nodes < 1000);
         try testing.expect(r.sticky_edit.summary_nodes < 1000);
         std.debug.print("[측정] EW1 {s}: 조상 {d} 변경 범위 {d} 재구축 {d} 편집+프레임 {d}µs\n", .{ case.name, r.sticky_edit.ancestor_nodes, r.sticky_edit.summary_nodes, r.sticky_edit.rebuild_nodes, r.edit_frame_ns / 1000 });
-        try testing.expectEqual(r.nodes, r.edit.fold_nodes);
+        try testing.expect(r.edit.fold_nodes > 0 and r.edit.fold_nodes < r.nodes / 10);
         // 구문 색 질의는 보이는 범위만 묻는다 — 한 프레임에 물은 byte 를 다 더해도 문서의 십분의 일이 안 되고, 범위와 겹치지 않는 조각을 돌려받지 않는다
         // (큰 노드 하나에 든 문서 — Zig 의 큰 struct · Swift 의 거대한 class — 에서도).
         try testing.expect(r.edit.query_calls > 0 and r.edit.query_spans > 0);
@@ -70017,4 +70017,80 @@ test "host discovery fixture PATH 제한은 중첩 원복과 명시 override를 
         try testing.expect(lsp_process.locate("true", "/usr/bin", &buf) == null);
     }
     try testing.expect(lsp_process.locate("true", "", &buf) != null);
+}
+
+test "EW2 product 공유 뷰의 여러 줄 삭제 붙여넣기 Undo Redo가 전체 순회와 같다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(a);
+    for (0..120) |_| try source.appendSlice(a, "fn f() void {\n _ = 1;\n}\n");
+    const term = try undoFixture(&fx, a, "folds.zig", source.items);
+    try testing.expect(fx.session.runAction("split_editor_right"));
+    const peer = pane_ops.activePane(fx.session).activeTerm();
+    try testing.expect(peer != term);
+    fx.leaf_rect.w /= 2;
+    for (0..7) |i| {
+        switch (i) {
+            0 => {},
+            1 => {
+                term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 100 };
+                try testing.expect(deleteText(fx.session, term, true));
+            },
+            2 => try testing.expect(undoEdit(fx.session, term)),
+            3 => try testing.expect(insertText(fx.session, term, "fn pasted() void {\n _ = 2;\n}\n")),
+            4 => try testing.expect(undoEdit(fx.session, term)),
+            5 => try testing.expect(redoEdit(fx.session, term)),
+            else => try testing.expect(insertText(fx.session, term, "\n")),
+        }
+        for ([_]*Term{ term, peer }) |view| {
+            for (0..10000) |_| {
+                var frame = appendPaneFrame(fx.session, fx.leaf_rect, view) orelse return error.NoFrame;
+                frame.dl.deinit(a);
+                if (!view.rt.editor_syntax.pending and view.rt.editor_syntax_folds_applied) break;
+            }
+            try testing.expect(view.rt.editor_syntax_folds_applied);
+            const provider = if (view.rt.editor_syntax.provider) |*value| value else return error.NoProvider;
+            var expected: std.ArrayList(syntax_mod.Provider.FoldSpan) = .empty;
+            defer expected.deinit(a);
+            try provider.foldSpans(a, &expected);
+            try testing.expect(expected.items.len > 0);
+            try testing.expectEqual(expected.items.len, view.rt.editor_fold_ranges.len);
+            for (expected.items, view.rt.editor_fold_ranges) |want, got| {
+                try testing.expectEqual(want.start_row, got.head);
+                try testing.expectEqual(want.end_row, got.last_hidden);
+            }
+        }
+        try testing.expect(term.rt.editor_syntax.folds.tree != null);
+        try testing.expect(peer.rt.editor_syntax.folds.tree != null);
+        try testing.expect(term.rt.editor_syntax.folds.tree != peer.rt.editor_syntax.folds.tree);
+    }
+    const ranges_before = term.rt.editor_fold_ranges.ptr;
+    const native_before = term.rt.editor_syntax.folds.tree;
+    term.rt.editor_fold_source = .lsp;
+    term.rt.editor_syntax_folds_applied = false;
+    promoteFoldRangesToSyntax(fx.session, term);
+    try testing.expect(term.rt.editor_syntax_folds_applied);
+    try testing.expectEqual(ranges_before, term.rt.editor_fold_ranges.ptr);
+    try testing.expectEqual(native_before, term.rt.editor_syntax.folds.tree);
+    try testing.expect(peer.rt.editor_syntax.folds.tree != null);
+    const nodes_before = term.rt.editor_syntax.folds.nodes;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, " "));
+    for ([_]*Term{ term, peer }) |view| {
+        var frame = appendPaneFrame(fx.session, fx.leaf_rect, view) orelse return error.NoFrame;
+        frame.dl.deinit(a);
+    }
+    const provider = if (term.rt.editor_syntax.provider) |*value| value else return error.NoProvider;
+    try testing.expect(term.rt.editor_syntax_folds_applied);
+    try testing.expect(term.rt.editor_syntax.folds.nodes - nodes_before < provider.nodeCount() / 10);
+
+    const final_len = peer.rt.editorDocument().opened.?.file.content.len;
+    peer.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = final_len };
+    try testing.expect(deleteText(fx.session, peer, true));
+    try testing.expectEqual(@as(usize, 0), peer.rt.editorDocument().opened.?.file.content.len);
+    try testing.expect(peer.rt.editor_syntax.folds.tree == null);
+    try testing.expect(term.rt.editor_syntax.folds.tree == null);
 }

@@ -23,6 +23,8 @@
 const std = @import("std");
 const predicate = @import("predicate.zig");
 const symbol_windows = @import("symbols.zig");
+const fold_cache = @import("folds.zig");
+pub const FoldCache = fold_cache.Cache;
 
 const c = @import("tree_sitter_c");
 
@@ -1042,12 +1044,7 @@ pub const Provider = struct {
     }
 
     /// 접을 수 있는 **줄 범위** 하나(§4 — 접힘의 tree-sitter 층).
-    pub const FoldSpan = struct {
-        /// 접어도 보이는 줄(화살표가 여기 선다).
-        start_row: u32,
-        /// 접으면 숨는 마지막 줄(포함).
-        end_row: u32,
-    };
+    pub const FoldSpan = fold_cache.Span;
 
     /// 트리에서 접을 범위를 뽑는다. **없으면 빈 목록**이다(§5의 저하와 같은 규율).
     ///
@@ -1118,11 +1115,14 @@ pub const Provider = struct {
     }
 
     fn hasKind(kinds: []const []const u8, raw: [*c]const u8) bool {
-        const name = std.mem.span(raw);
-        for (kinds) |k| {
-            if (std.mem.eql(u8, k, name)) return true;
-        }
-        return false;
+        return fold_cache.hasKind(kinds, raw);
+    }
+
+    /// 캐시 저장소는 호출자가 소유한다. 전체 순회 API는 대조군·일회 조회에 그대로 남긴다.
+    pub fn foldSpansCached(self: *Provider, allocator: std.mem.Allocator, cache: *FoldCache, lines: anytype, out: *std.ArrayList(FoldSpan)) error{OutOfMemory}!void {
+        const before = cache.nodes;
+        defer self.stats.fold_nodes +|= cache.nodes - before;
+        try cache.query(allocator, self.parser, self.tree, self.tree_gen, self.slot.fold_kinds, lines, out);
     }
 
     /// 시작 줄 오름차순으로 담는다 — 소비처(접힘 층)가 그 순서를 전제한다.
@@ -3960,4 +3960,279 @@ test "sticky ancestors 선언 전체 삭제 재삽입과 UTF8 CRLF 좌표를 보
         p.setSource(after);
         try stickyAncestorJudge(&p, after);
     }
+}
+
+const FoldCacheLine = struct { start: usize };
+fn foldCacheLines(source: []const u8) !std.ArrayList(FoldCacheLine) {
+    var lines: std.ArrayList(FoldCacheLine) = .empty;
+    errdefer lines.deinit(std.testing.allocator);
+    try lines.append(std.testing.allocator, .{ .start = 0 });
+    for (source, 0..) |byte, i| if (byte == '\n') {
+        try lines.append(std.testing.allocator, .{ .start = i + 1 });
+    };
+    return lines;
+}
+
+fn foldCacheJudge(p: *Provider, cache: *FoldCache, source: []const u8) !void {
+    const a = std.testing.allocator;
+    var expected: std.ArrayList(Provider.FoldSpan) = .empty;
+    defer expected.deinit(a);
+    var got: std.ArrayList(Provider.FoldSpan) = .empty;
+    defer got.deinit(a);
+    try p.foldSpans(a, &expected);
+    var lines = try foldCacheLines(source);
+    defer lines.deinit(a);
+    try p.foldSpansCached(a, cache, lines.items, &got);
+    try std.testing.expectEqualDeep(expected.items, got.items);
+}
+
+test "EW2 cached folds 언어별 결과와 무작위 편집 지연 삭제 교체" {
+    const a = std.testing.allocator;
+    for ([_]struct { language: Language, source: []const u8 }{
+        .{ .language = .zig, .source = "const A = struct {\n fn f() void {\n _ = 1;\n }\n};\n" },
+        .{ .language = .python, .source = "class A:\n def f(self):\n  x = 1\n  return x\n\n# 끝\n" },
+        .{ .language = .dart, .source = "class A {\n int f()\n \n {\n return 1;\n }\n}\n" },
+        .{ .language = .swift, .source = "class A {\n func f() -> Int {\n return 1\n }\n}\n" },
+        .{ .language = .javascript, .source = "class A {\n f() {\n return 1;\n }\n}\n" },
+        .{ .language = .c, .source = "int f(void) {\n int x = 1;\n return x;\n}\n" },
+        .{ .language = .typescript, .source = "class A {\n f(): number {\n return 1;\n }\n}\n" },
+        .{ .language = .tsx, .source = "function F() {\n return <div/>;\n}\n" },
+        .{ .language = .cpp, .source = "class A {\n int f() {\n return 1;\n }\n};\n" },
+        .{ .language = .go, .source = "package a\nfunc f() int {\n return 1\n}\n" },
+        .{ .language = .rust, .source = "impl A {\n fn f() {\n let a = 1;\n }\n}\n" },
+        .{ .language = .java, .source = "class A {\n int f() {\n return 1;\n }\n}\n" },
+        .{ .language = .ruby, .source = "class A\n def f\n  1\n end\nend\n" },
+        .{ .language = .php, .source = "<?php\nclass A {\n function f() {\n return 1;\n }\n}\n" },
+        .{ .language = .kotlin, .source = "class A {\n fun f(): Int {\n return 1\n }\n}\n" },
+        .{ .language = .bash, .source = "f() {\n echo x\n echo y\n}\n" },
+        .{ .language = .lua, .source = "function f()\n local x=1\n return x\nend\n" },
+        .{ .language = .make, .source = "define F\n echo x\n echo y\nendef\n" },
+        .{ .language = .sql, .source = "CREATE TABLE app.users (\n id INT,\n name TEXT\n);\n" },
+        .{ .language = .csharp, .source = "namespace N {\n class A {\n int F() {\n return 1;\n }\n }\n}\n" },
+        .{ .language = .objc, .source = "@implementation A\n- (int)f {\n return 1;\n}\n@end\n" },
+        .{ .language = .scala, .source = "object A {\n def f(): Int = {\n 1\n }\n}\n" },
+        .{ .language = .markdown, .source = "# A\n\nx\n\n## B\n\ny\n" },
+        .{ .language = .css, .source = "a {\n color: red;\n display: block;\n}\n" },
+        .{ .language = .html, .source = "<div>\n <p>\n hi\n </p>\n</div>\n" },
+        .{ .language = .yaml, .source = "a:\n b:\n  c: d\n" },
+        .{ .language = .toml, .source = "[a]\nb=1\nc=2\n" },
+        .{ .language = .xml, .source = "<a>\n <b>\n hi\n </b>\n</a>\n" },
+        .{ .language = .dtd, .source = "<!ELEMENT a (\n b,\n c\n)>\n" },
+        .{ .language = .dockerfile, .source = "FROM scratch\nRUN echo x\nRUN echo y\n" },
+        .{ .language = .json, .source = "{\n \"a\": {\n \"b\": 1\n }\n}\n" },
+    }) |case| {
+        var p = Provider.init(case.source, case.language, 0) orelse return error.NoProvider;
+        defer p.deinit();
+        var cache: FoldCache = .{};
+        defer cache.deinit(a);
+        try foldCacheJudge(&p, &cache, case.source);
+    }
+    for ([_]Language{ .zig, .python, .dart, .swift, .markdown }) |language| {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(a);
+        try text.appendSlice(a, "const A = struct {\n fn f() void {\n return;\n }\n};\nfn g() void {\n return;\n}\n");
+        var p = Provider.init(text.items, language, 0) orelse return error.NoProvider;
+        defer p.deinit();
+        var cache: FoldCache = .{};
+        defer cache.deinit(a);
+        try foldCacheJudge(&p, &cache, text.items);
+        var random: std.Random.DefaultPrng = .init(0x464f4c4453);
+        const rng = random.random();
+        const inserts = [_][]const u8{ "x", "\n", "{}", "fn q() void {\n return;\n}\n", " ", "/*", "*/", "\r\n", "// 한글\n" };
+        for (0..400) |i| {
+            const at = rng.uintLessThan(usize, text.items.len + 1);
+            const end = @min(text.items.len, at + rng.uintLessThan(usize, 16));
+            const insert = if (i % 3 == 0) "" else inserts[rng.uintLessThan(usize, inserts.len)];
+            const sp = stickyPoint(text.items, at);
+            const ep = stickyPoint(text.items, end);
+            try text.replaceRange(a, at, end - at, insert);
+            const edit: Edit = .{ .start_byte = @intCast(at), .old_end_byte = @intCast(end), .new_end_byte = @intCast(at + insert.len), .start_point = sp, .old_end_point = ep, .new_end_point = stickyPoint(text.items, at + insert.len) };
+            // 통지 누락도 섞어 세대 불일치의 전체 재구축을 별도로 확인한다.
+            if (i % 17 != 0) cache.edit(edit);
+            p.onEdit(text.items, edit);
+            if (i % 4 == 0 or i == 399) try foldCacheJudge(&p, &cache, text.items);
+        }
+        for ([_][]const u8{ "\n", "fn f() void {\n return;\n}\n", "fn g() void {\r\n return;\r\n}\r\n", "" }) |next| {
+            p.setSource(next);
+            try foldCacheJudge(&p, &cache, next);
+        }
+    }
+}
+
+// 실제 통지를 받을 때는 바뀐 범위만 방문하되, 전체 순회와 결과가 같아야 한다.
+test "EW2 cached folds 국소 갱신과 실제 편집의 행 근사" {
+    const a = std.testing.allocator;
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    for (0..1000) |_| try text.appendSlice(a, "fn f() void {\n _ = 1;\n}\n");
+    var p = Provider.init(text.items, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    try foldCacheJudge(&p, &cache, text.items);
+    var local: u64 = 0;
+    for (0..4) |i| {
+        const at: usize = if (i == 0) text.items.len / 2 else 0;
+        const end: usize = if (i == 2) @min(text.items.len, 100) else at;
+        const insert: []const u8 = if (i == 2) "" else if (i == 3) "/*\n" else "\n";
+        const sp = stickyPoint(text.items, at);
+        // 제품 syntax.onEditSpan과 같은 old_end_point 근사도 대조한다.
+        try text.replaceRange(a, at, end - at, insert);
+        const e: Edit = .{ .start_byte = @intCast(at), .old_end_byte = @intCast(end), .new_end_byte = @intCast(at + insert.len), .start_point = sp, .old_end_point = sp, .new_end_point = stickyPoint(text.items, at + insert.len) };
+        cache.edit(e);
+        p.onEdit(text.items, e);
+        const before = cache.nodes;
+        try foldCacheJudge(&p, &cache, text.items);
+        if (i == 0) local = cache.nodes - before;
+    }
+    try std.testing.expect(local < 100);
+}
+
+test "EW2 cached folds 할당 실패와 재시도는 반쪽 결과를 게시하지 않는다" {
+    const a = std.testing.allocator;
+    const text = "const A = struct {\n fn f() void {\n _ = 1;\n }\n};\n";
+    var p = Provider.init(text, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var lines = try foldCacheLines(text);
+    defer lines.deinit(a);
+    const allocations = blk: {
+        var cache: FoldCache = .{};
+        defer cache.deinit(a);
+        var out: std.ArrayList(Provider.FoldSpan) = .empty;
+        defer out.deinit(a);
+        var counter = std.testing.FailingAllocator.init(a, .{});
+        try p.foldSpansCached(counter.allocator(), &cache, lines.items, &out);
+        break :blk counter.alloc_index;
+    };
+    try std.testing.expect(allocations > 1);
+    for (0..allocations) |idx| {
+        var cache: FoldCache = .{};
+        defer cache.deinit(a);
+        var out: std.ArrayList(Provider.FoldSpan) = .empty;
+        defer out.deinit(a);
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = idx });
+        try std.testing.expectError(error.OutOfMemory, p.foldSpansCached(failing.allocator(), &cache, lines.items, &out));
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(@as(usize, 0), out.items.len);
+        try std.testing.expect(cache.tree == null);
+        try foldCacheJudge(&p, &cache, text);
+    }
+}
+
+test "EW2 cached folds native 트리 사본을 해제한다" {
+    const a = std.testing.allocator;
+    var spans: std.ArrayList(Span) = .empty;
+    defer spans.deinit(a);
+    highlights(a, .zig, "fn f() void {}\n", &spans);
+    c.ts_set_allocator(countingMalloc, countingCalloc, countingRealloc, countingFree);
+    defer c.ts_set_allocator(null, null, null, null);
+    live_allocs = 0;
+    {
+        const text = "fn f() void {\n return;\n}\n";
+        var p = Provider.init(text, .zig, 0) orelse return error.NoProvider;
+        defer p.deinit();
+        var cache: FoldCache = .{};
+        defer cache.deinit(a);
+        try foldCacheJudge(&p, &cache, text);
+        const e: Edit = .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = 0, .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 0 }, .new_end_point = .{ .row = 0, .column = 0 } };
+        cache.edit(e);
+        p.onEdit(text, e);
+        try foldCacheJudge(&p, &cache, text);
+        const next = "fn g() void {\n _ = 1;\n}\n";
+        p.setSource(next);
+        try foldCacheJudge(&p, &cache, next);
+    }
+    try std.testing.expectEqual(@as(isize, 0), live_allocs);
+}
+
+fn foldCacheGrowthFailure(fail_index: ?usize) !usize {
+    const a = std.testing.allocator;
+    const base = "fn f() void {\n _ = 1;\n}\n";
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    for (0..100) |_| try text.appendSlice(a, base);
+    var p = Provider.init(base, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    try foldCacheJudge(&p, &cache, base);
+    const at: u32 = @intCast(base.len);
+    const e: Edit = .{ .start_byte = at, .old_end_byte = at, .new_end_byte = @intCast(text.items.len), .start_point = stickyPoint(base, base.len), .old_end_point = stickyPoint(base, base.len), .new_end_point = stickyPoint(text.items, text.items.len) };
+    cache.edit(e);
+    p.onEdit(text.items, e);
+    var lines = try foldCacheLines(text.items);
+    defer lines.deinit(a);
+    var out: std.ArrayList(Provider.FoldSpan) = .empty;
+    defer out.deinit(a);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index orelse std.math.maxInt(usize) });
+    if (fail_index != null) {
+        try std.testing.expectError(error.OutOfMemory, p.foldSpansCached(failing.allocator(), &cache, lines.items, &out));
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expect(cache.tree == null);
+        try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    } else try p.foldSpansCached(failing.allocator(), &cache, lines.items, &out);
+    try foldCacheJudge(&p, &cache, text.items);
+    return failing.alloc_index;
+}
+
+test "EW2 cached folds 성장 중 할당 실패도 낡은 후보를 버리고 재시도한다" {
+    const count = try foldCacheGrowthFailure(null);
+    try std.testing.expect(count > 1);
+    for (0..count) |idx| _ = try foldCacheGrowthFailure(idx);
+}
+
+test "EW2 cached folds 작은 주석 편집이 먼 후보를 드러내고 숨긴다" {
+    const a = std.testing.allocator;
+    const initial = "/*\nfunction hidden() {\n return 1;\n}\n*/\nfunction kept() {\n return 2;\n}\n";
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    try text.appendSlice(a, initial);
+    var p = Provider.init(text.items, .javascript, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    try foldCacheJudge(&p, &cache, text.items);
+    for ([_][]const u8{ "//", "/*" }) |mark| {
+        try text.replaceRange(a, 0, 2, mark);
+        const e: Edit = .{ .start_byte = 0, .old_end_byte = 2, .new_end_byte = 2, .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 2 }, .new_end_point = .{ .row = 0, .column = 2 } };
+        cache.edit(e);
+        p.onEdit(text.items, e);
+        try foldCacheJudge(&p, &cache, text.items);
+    }
+}
+
+test "EW2 cached folds 구조가 같은 함수 이름 편집에도 실제 범위가 필요하다" {
+    const a = std.testing.allocator;
+    const before = "fn old(\n arg: u32,\n) void {\n _ = arg;\n}\n";
+    const after = "fn new(\n arg: u32,\n) void {\n _ = arg;\n}\n";
+    var p = Provider.init(before, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    try foldCacheJudge(&p, &cache, before);
+    const e: Edit = .{ .start_byte = 3, .old_end_byte = 6, .new_end_byte = 6, .start_point = .{ .row = 0, .column = 3 }, .old_end_point = .{ .row = 0, .column = 6 }, .new_end_point = .{ .row = 0, .column = 6 } };
+    cache.edit(e);
+    p.onEdit(after, e);
+    var count: u32 = 0;
+    const ranges = c.ts_tree_get_changed_ranges(cache.tree.?, p.tree.?, &count);
+    defer if (ranges != null) ts_current_free(@ptrCast(ranges));
+    try std.testing.expectEqual(@as(u32, 0), count);
+    try foldCacheJudge(&p, &cache, after);
+}
+
+test "EW2 cached folds 한 줄 후보는 저장하지 않고 여러 줄이 되면 수집한다" {
+    const a = std.testing.allocator;
+    const before = "fn f() void {}\nfn g() void {}\n";
+    const after = "fn f() void {\n}\nfn g() void {}\n";
+    var p = Provider.init(before, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    try foldCacheJudge(&p, &cache, before);
+    try std.testing.expectEqual(@as(usize, 0), cache.records.capacity);
+    const e: Edit = .{ .start_byte = 13, .old_end_byte = 13, .new_end_byte = 14, .start_point = .{ .row = 0, .column = 13 }, .old_end_point = .{ .row = 0, .column = 13 }, .new_end_point = .{ .row = 1, .column = 0 } };
+    cache.edit(e);
+    p.onEdit(after, e);
+    try foldCacheJudge(&p, &cache, after);
+    try std.testing.expect(cache.records.items.len > 0);
 }

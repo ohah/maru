@@ -6376,6 +6376,21 @@ pub fn build(b: *std.Build) void {
         run_sticky_ancestors.addArg("--maru-expect-passed=13");
         macos_only_test_step.dependOn(&run_sticky_ancestors.step);
     }
+    const fold_cache_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"EW2 cached folds"} });
+    const run_fold_cache = b.addRunArtifact(fold_cache_tests);
+    run_fold_cache.addArg("--maru-expect-tests=9");
+    run_fold_cache.addArg("--maru-expect-passed=9");
+    b.step("test-editor-fold-cache", "Compare cached folds and full traversal").dependOn(&run_fold_cache.step);
+    test_step.dependOn(&run_fold_cache.step);
+    const fold_product_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.EW2 product", ".test.DHS16", ".test.PROMO1", ".test.ES41", ".test.ES42", ".test.EW0" } });
+    const run_fold_product = b.addRunArtifact(fold_product_tests);
+    run_fold_product.setCwd(b.path("."));
+    run_fold_product.addArg("--maru-expect-tests=12");
+    b.step("test-editor-incremental-folds", "Run product folding, shared view, failure and parse regressions").dependOn(&run_fold_product.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_fold_product.addArg("--maru-expect-passed=12");
+        macos_only_test_step.dependOn(&run_fold_product.step);
+    }
     const edit_cost_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.EW0"} });
     const run_edit_cost = b.addRunArtifact(edit_cost_tests);
     run_edit_cost.setCwd(b.path("."));

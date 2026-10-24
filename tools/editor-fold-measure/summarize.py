@@ -18,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
     parser.add_argument("--repetitions", type=int, default=3)
+    parser.add_argument("--modes",type=int,default=3)
     parser.add_argument("--prefix", default="run")
     args = parser.parse_args()
     rows = []
@@ -60,7 +61,7 @@ def main():
             scanned_records_p50=statistics.median(r["scanned_records"] for r in group),
             cache_bytes=max(r["cache_bytes"] for r in group),
             max_rss_bytes_p50=statistics.median(r["max_rss_bytes"] for r in group if r["max_rss_bytes"] is not None)))
-    expected = 5*8*3
+    expected = 5*8*args.modes
     if len(results) != expected:
         raise RuntimeError(f"Expected {expected} groups, found {len(results)}")
     (args.output/("summary.json" if args.prefix=="run" else args.prefix+"-summary.json")).write_text(json.dumps(dict(scope="ReleaseFast product functions; test allocator and virtual timer, not HID-to-display latency",runs=rows,groups=results),indent=2)+"\n")

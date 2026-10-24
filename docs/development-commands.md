@@ -1,4 +1,5 @@
 # 개발 명령
+- 접힘 조회 세부 측정: [구간별 비용 측정](plans/editor-fold-query-attribution.md)의 사본 계측·집계·손상 기록 검증 명령을 따른다.
 
 - 접힘 좌표 조회: `mise exec -- zig build test-editor-fold-points test-editor-fold-cache test-editor-incremental-folds -j2`.
   실제 좌표 5개와 import 1개를 포함하며, 명시적 test 참조와 개수 가드로 누락을 거절한다.

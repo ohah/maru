@@ -12,7 +12,7 @@
 
 - **목표**: 주소창 편집 시 (a) 클릭으로 caret 위치 지정, (b) 드래그로 선택(블록 하이라이트), (c) 더블클릭 단어·트리플클릭 전체 선택, (d) shift+클릭/shift+화살표로 선택 확장, (e) ←/→(그래핌)·⌥←/→(단어)·Home/End·⌘←/→ 이동, (f) caret 기준 삽입/삭제, (g) ⌘A 전체선택·⌘C/⌘X/⌘V 복붙·⌘Z(후속).
 - **범위**: 주소창에서 출발했고, **인라인 rename 이 두 번째 소비자**다(2026-09-29 — §2.2 끝). 인라인 rename 은 **키보드 caret 편집만** 쓴다(선택·마우스 없음). find/palette/사이드바 검색은 **이관하지 않는다**(§2 참조).
-- **비목표(현재)**: undo/redo 무한 스택, 우클릭 컨텍스트 메뉴, 접근성(VoiceOver) 완전 대응, 네이티브 Services 메뉴. macOS marked-text 완전 프로토콜은 §7에서 후속 슬라이스로 분리. **멀티라인은 이 모델을 고치지 않고 §12가 그 위에 얹는다** — 주소창은 계속 단일행이다.
+- **비목표(현재)**: undo/redo 무한 스택, 우클릭 컨텍스트 메뉴, 접근성(VoiceOver) 완전 대응, 네이티브 Services 메뉴. macOS IME 범위 문맥은 주소창에만 연결하며, 다른 소비자와 point→character 매핑은 §7의 별도 범위다. **멀티라인은 이 모델을 고치지 않고 §12가 그 위에 얹는다** — 주소창은 계속 단일행이다.
 
 ## 2. 베이스·결정 (왜 이 구조인가)
 
@@ -45,7 +45,7 @@
 
 ### 2.3 적대 검증이 남긴 두 개의 벽 (new/extend와 무관하게 동일)
 
-1. **IME × 중간 caret**: 현재 Swift `NSTextInputClient`가 `selectedRange()`=항상 빈 `NSRange`, `insertText`/`setMarkedText`가 `replacementRange`를 **무시**, `markedRange()`=**location 항상 0**(length만 조합 길이)([MaruAppHost.swift])이라, 중간 caret에서 조합하면 preedit가 끝에 그려지고 끝에 확정된다. 선택 대체(선택 후 조합)는 미지원. → §7에서 v1/후속 분리.
+1. **도입 당시 IME × 중간 caret의 벽**: 당시 Swift `NSTextInputClient`가 `selectedRange()`=항상 빈 `NSRange`, `insertText`/`setMarkedText`가 `replacementRange`를 **무시**, `markedRange()`=**location 항상 0**(length만 조합 길이)([MaruAppHost.swift])이라, 중간 caret에서 조합하면 preedit가 끝에 그려지고 끝에 확정된다. 주소창은 현재 §7의 범위 문맥으로 선택·교체를 연결하며, 다른 소비자는 별도다.
 2. **그려진 caret이 L4에서 나옴 + 말줄임 예약 규약 불일치**: 편집 밴드는 coretext `buildPaneAddressBarDrawList`가 그리고 caret 열은 `appendEllipsizedTitle`(제목 말줄임, L4, `.tail` 앵커)에서 나온다. **폭 함수는 이미 일치**한다 — `text_layout.clusterCols = @max(1, width.cellWidth)`([src/chrome/text_layout.zig])이고 주소창은 `widen_icons=false`라 `displayCols`와 같은 값. 진짜 문제는 (a) 기존 경로가 **끝-caret 전용**이라 mid-string caret을 못 놓고, (b) hit-test가 순진하게 `overlay_input.tailWindow`로 역산하면 **"…" 1칸 예약 규약이 서로 달라**(coretext는 함수 **내부** 예약, tailWindow는 **호출자** 예산 — coretext 주석이 *"단일 함수화는 계층 침범"* 이라 공유를 금지) 말줄임 경계에서 드리프트한다. → §3에서 **필드 전용 새 순수 레이아웃 함수**로 해결.
 
 ### 2.4 상호작용·경계 베이스
@@ -149,6 +149,24 @@ TextField = struct {
 
 ## 7. IME (§2.3 벽① — v1 범위와 후속 분리)
 
+### 주소창의 범위 문맥
+
+주소창은 `chrome/components/text_field_ime.zig`의 순수 어댑터로 기존
+`inline_text_input.DynamicContext`의 selected/marked/substring·UTF-16 교체를 소비한다.
+중간 선택을 marked span으로 교체할 때 뒤쪽 URL을 유지하고, 취소 시 보관한 확정 원문을 복원한다.
+TextField의 `preedit_caret`은 정규화한 조합 안 선택 끝의 바이트 위치이며 레이아웃과 후보 anchor가
+같은 caret 열을 사용한다. NFD Hangul은 기존 주소창 계약대로 완성형으로 저장하고, incoming marked
+selection의 prefix/end도 같은 정규화로 변환한다. surrogate 분할과 overflow는 편집 전에 거부한다.
+
+어댑터는 키별 깊은 snapshot과 OOM 원자성을 소유한다. AppSession은 surface·진입 세대·현재 focus만
+확인해 기존 ABI에 연결한다. source owner를 먼저 확인하므로 주소창·팔레트·세션 검색 사이에서 낡은
+키 콜백을 다음 입력칸으로 전용하지 않는다. key 해석 밖에서 owner를 식별할 수 없는 지연 콜백과
+`characterIndex(for:)`의 point 매핑은 이 계약 밖이다. 실제 검증 상태는
+[주소창 IME 계획](plans/address-field-ime.md)이 소유한다.
+
+### 기존 v1 결정과 다른 소비자의 별도 범위
+
+
 - **v1 (이 이니셔티브)**: preedit를 **caret 위치에** 렌더(model이 preedit+caret 소유, `fieldLayout`이 run으로 배치 §3.3) + 확정 텍스트를 **caret에 삽입**(committed-text 라우팅을 `addrEditAppend`(끝, `sendTextAsKeys`→`handleAddrEditKey` 경유)에서 `insertText`(caret)로 교체). `addrEditCaretRect`(IME 후보창)를 끝에서 caret 열로. 조합 중 caret 이동은 잠금(조합 취소 후 이동). 조합 중 block caret은 §3.3 규칙(preedit 안 가림).
 - **후속 슬라이스 (별도)**: macOS marked-text **완전 프로토콜** — Swift `NSTextInputClient.selectedRange`/`markedRange`를 실 문서 오프셋으로 반환 + `insertText(_:replacementRange:)`/`setMarkedText(_:selectedRange:replacementRange:)`의 `replacementRange` 처리 → 선택 대체 조합·정확한 후보창. Swift↔Zig ABI 확장 동반. 원리·이득·벽·착수 적기를 아래에 남긴다([document-basis-and-decision]).
   - **원리(양방향 대화)**: macOS IME는 별도 상태기계이고 앱은 그 **문서**다 — `NSTextInputClient` 계약으로 양방향 대화한다. 입력기는 조작(`setMarkedText`/`insertText`) **전에** 앱에게 상태를 되묻고(`selectedRange`/`markedRange`/`attributedSubstring`/`firstRect`/`characterIndex`), 그 답에 따라 조작을 결정한다. 앱이 거짓(빈 range·location 0)을 답하면 입력기가 **틀린 문서 모델** 위에서 조작한다. 끝-caret·무선택에서만 "틀린 모델 == 현실"이 우연히 겹쳐 현행 stub이 동작한다(Zig가 입력기 주장 위치를 무시하고 자기 caret에 넣기 때문). 그 밖(중간 caret·선택)은 어긋난다.
@@ -175,7 +193,7 @@ TextField = struct {
 - **키보드·클립보드**: ←/→·⌥단어·⌘Home/End·shift 선택·⌘A·⌃A/⌃E(emacs)·⌫/⌥⌫/⌘⌫ + §5.3 ⌘C/⌘X/⌘V 브리지.
 - **IME**: `inputFocus=.addr_edit` 라우팅으로 `setPreedit`/`commitPreedit`이 caret 자리에 조합을 얹는다(§7 v1).
 
-**이 계약 밖(별도 이니셔티브)**: macOS marked-text 완전 프로토콜(§7 — 양방향 UTF-16 caret 읽기/`replacementRange` 쓰기 ABI가 필요), ⌘Z undo, caret blink 승격(v95), 2번째 소비자가 생길 때의 보편 컴포넌트 추출.
+**이 계약 밖(별도 이니셔티브)**: 주소창 외 소비자의 marked-text 범위 문맥과 `characterIndex(for:)`의 point 매핑(§7), ⌘Z undo, caret blink 승격(v95), 2번째 소비자가 생길 때의 보편 컴포넌트 추출.
 
 ## 9. 검증
 
@@ -314,3 +332,9 @@ TextArea (새 얇은 층 — 세로 축만 소유)
 [명령 팔레트 IME 계획](plans/command-palette-ime.md)은 TextField 전원 이관과 별개다.
 팔레트의 OverlayInput과 조합 중 필터·기존 키 동작을 유지하고, 동적 native IME 문맥만 연결한다.
 주소창·find·사이드바 검색의 완전 IME 프로토콜을 함께 완료했다고 해석하지 않는다.
+
+### 주소창 IME 범위 문맥
+
+[주소창 IME 계획](plans/address-field-ime.md)은 §7 후속의 주소창 부분을 구현한다.
+기존 TextField 모델과 Zig/GPU 렌더를 유지하고 공통 UTF-16 projection을 연결한다.
+다른 TextField 소비자와 검색 오버레이의 완전 IME 지원을 함께 주장하지 않는다.

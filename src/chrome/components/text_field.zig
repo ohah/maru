@@ -40,6 +40,8 @@ pub const TextField = struct {
     preedit: std.ArrayList(u8) = .empty,
     caret: usize = 0,
     selection: ?Selection = null,
+    // Native IME selection inside preedit, in UTF-8 bytes; legacy callers use its end.
+    preedit_caret: ?usize = null,
 
     pub const Selection = struct {
         anchor: usize, // 선택 시작(드래그 down·shift 기준점)
@@ -63,6 +65,7 @@ pub const TextField = struct {
     pub fn clear(self: *TextField) void {
         self.text.clearRetainingCapacity();
         self.preedit.clearRetainingCapacity();
+        self.preedit_caret = null;
         self.caret = 0;
         self.selection = null;
     }
@@ -71,6 +74,7 @@ pub const TextField = struct {
     pub fn setText(self: *TextField, allocator: std.mem.Allocator, bytes: []const u8) !void {
         self.text.clearRetainingCapacity();
         self.preedit.clearRetainingCapacity();
+        self.preedit_caret = null;
         try self.text.appendSlice(allocator, bytes);
         self.caret = self.text.items.len;
         self.selection = null;
@@ -242,6 +246,7 @@ pub const TextField = struct {
     /// IME 조합(marked) 텍스트 교체(빈 bytes=조합 해제). caret 위치에 겹쳐 표시(fieldLayout이 run으로 배치).
     pub fn setPreedit(self: *TextField, allocator: std.mem.Allocator, bytes: []const u8) !void {
         self.preedit.clearRetainingCapacity();
+        self.preedit_caret = null;
         try self.preedit.appendSlice(allocator, bytes);
     }
 
@@ -250,9 +255,11 @@ pub const TextField = struct {
         if (self.preedit.items.len == 0) return false;
         self.insertText(allocator, self.preedit.items) catch {
             self.preedit.clearRetainingCapacity();
+            self.preedit_caret = null;
             return false;
         };
         self.preedit.clearRetainingCapacity();
+        self.preedit_caret = null;
         return true;
     }
 
@@ -260,7 +267,7 @@ pub const TextField = struct {
     /// 이 View만 읽는다 — L4 렌더(coretext)가 매 프레임 TextField를 만들지 않고, OverlayInput 등 다른 백킹에서도
     /// 무-alloc으로 같은 순수 레이아웃을 얻는다(슬라이스 2 seam — 모델 교체 전 렌더가 fieldLayout을 먼저 소비).
     pub fn view(self: *const TextField) View {
-        return .{ .text = self.text.items, .preedit = self.preedit.items, .caret = self.caret, .selection = self.selection };
+        return .{ .text = self.text.items, .preedit = self.preedit.items, .caret = self.caret, .selection = self.selection, .preedit_caret = self.preedit_caret };
     }
 };
 
@@ -271,6 +278,7 @@ pub const View = struct {
     preedit: []const u8 = "",
     caret: usize,
     selection: ?TextField.Selection = null,
+    preedit_caret: ?usize = null,
 };
 
 // ── 단어 경계 (word-separators 정책 주입 — 컴포넌트 중립, §4) ──────────────────────────────
@@ -446,7 +454,7 @@ pub fn fieldLayout(v: View, metrics: Metrics) FieldLayout {
     const post_start = contentToBand(w, metrics, w.pre_cols + w.mid_cols);
 
     const caret_col = contentToBand(w, metrics, w.pre_cols); // 삽입점(preedit 시작)
-    const caret_block = contentToBand(w, metrics, w.pre_cols + w.mid_cols); // 블록 caret(preedit 끝/삽입점)
+    const caret_block = contentToBand(w, metrics, w.pre_cols + displayCols(v.preedit[0..@min(v.preedit_caret orelse v.preedit.len, v.preedit.len)])); // 블록 caret(preedit 끝/삽입점)
 
     var sel: ?SelectionSpan = null;
     if (v.selection) |s| {

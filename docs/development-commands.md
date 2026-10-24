@@ -1963,3 +1963,13 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 실패 주입은 같은 디렉터리의 `review.py`로 별도 사본에서 수행한다.
 제품 GUI는 `tools/editor-fold-measure/gui.py`의 `--product --modes 0,1 --foreground`로 관측한다.
 정확성/성능 분리와 상세 명령은 [제품 EW2](plans/editor-incremental-folds.md)를 따른다.
+
+
+### 주소창 IME 범위 문맥
+
+- `mise exec -- zig build test-address-field-ime -j2`: 주소창의 기존 편집·NFD 회귀와 새 UTF-16 범위·owner 검사를 함께 실행한다.
+- `mise exec -- zig test src/chrome.zig --test-filter 'address IME'`: OS 없는 TextField IME 모델 검사. `-O ReleaseFast`도 실행한다.
+- 실제 후보창 검증은 [주소창 IME 계획](plans/address-field-ime.md)의 별도 GUI 증거다. 위 단위 검사만으로 실제 후보창 성공을 주장하지 않는다.
+
+- `python3 tools/address-ime/run.py --output <새 저장소 밖 경로>`: 외부 사본을 준비·빌드한 후 실제 중간 선택 대체와 후보창 5회 PNG/OCR을 검사한다. `--prepare-only`와 `--app <고정 실행 파일>`을 지원한다.
+- `--mode diagnostic`은 PNG 없이 입력 진단만 수행하며 `full_validation=false`다. 전체 검증 성공으로 인정하지 않는다.

@@ -86,7 +86,7 @@ pub fn addrEditCaretRect(self: *AppSession) ?chrome.draw.Rect {
     const nav_end: u32 = @as(u32, nav_button_count) * nav_button_w; // 버튼 존 [0, nav_end)(navButtonAt·렌더 단일 소스)
     // caret 열 = fieldLayout(렌더 emitEditBand와 **같은 단일 소스**) — mid-string caret·가로 스크롤·ellipsis 반영.
     const lay = chrome.components.text_field.fieldLayout(self.addr_field.view(), .{ .cols = @intCast(cols), .nav_end = @intCast(nav_end) });
-    const caret_col: u32 = @min(lay.caret_col, cols -| 1); // 밴드 밖(cols 초과)이면 우경계로 상한 클램프
+    const caret_col: u32 = @min(lay.caret_block_col, cols -| 1); // 밴드 밖(cols 초과)이면 우경계로 상한 클램프
     const bar_h = pb.full.h;
     const text_origin_y = pb.full.y + bar_h + self.chromeBarTextOffsetY(bar_h); // 렌더 band_text_origin_y와 동일(밴드 높이 = bar_h)
     return .{
@@ -2657,6 +2657,8 @@ pub fn setBrowserNavAction(self: *AppSession, surface_id: u64, btn: NavButton) v
 /// 편집 진입(밴드 클릭). 현재 URL을 초기 버퍼로 시드(UTF-8 경계 절단) + focus-pull pending 세움(키 포커스를 WKWebView
 /// 에서 뺏어 타이핑이 주소창으로 오게 — 7e-2b Swift가 실행). 이미 편집 중이면 대상을 교체한다(한 번에 하나).
 pub fn enterAddrEdit(self: *AppSession, surface_id: u64, current_url: []const u8) void {
+    self.address_ime.invalidate(self.allocator);
+    self.address_ime_generation +|= 1;
     self.addr_field.setText(self.allocator, current_url) catch self.addr_field.clear(); // 현재 URL 시드(caret=끝)·OOM이면 빈 편집
     self.addr_edit = surface_id;
     self.addr_focus_pull_pending = surface_id;

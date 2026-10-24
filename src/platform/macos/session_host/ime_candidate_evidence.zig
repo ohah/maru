@@ -215,7 +215,8 @@ pub fn reduceSearchTriplet(app_pid: i32, triplet: Triplet, transition: SearchTra
     return candidate;
 }
 
-fn reduceWindowTriplet(app_pid: i32, triplet: Triplet) Error!Candidate {
+/// Window identity/lifecycle only; callers must separately validate their text and counters.
+pub fn reduceWindowTriplet(app_pid: i32, triplet: Triplet) Error!Candidate {
     if (app_pid <= 0) return error.InvalidAppPid;
     try validateSnapshot(triplet.before);
     try validateSnapshot(triplet.opened);

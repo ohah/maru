@@ -1703,3 +1703,6 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [프로젝트 바꾸기 단일 파일 적용](plans/editor-project-replace-apply.md): S4a 열린 문서와 S4b 디스크 재검증·자동 저장·문서 신원·Undo 사전 준비와 실패 보존.
 
 - [명령 팔레트 IME 문맥](plans/command-palette-ime.md): 실제 두벌식·후보 요청 진단, 기존 검색 길이 보존과 owner·projection·실패 원자성의 구현 계획(기존 검색 길이를 유지하는 동적 문맥).
+
+
+- [주소창 IME 범위 문맥](plans/address-field-ime.md): 기존 TextField를 유지한 UTF-16 projection 연결과 중간 선택 대체. 모델·호스트·적대적 검사와 실제 후보창 5회 PNG/OCR·한자 선택·터미널 복귀 검증 완료.

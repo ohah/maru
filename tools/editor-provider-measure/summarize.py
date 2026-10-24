@@ -45,7 +45,20 @@ def digest(path, expected):
         raise ValueError('Changed artifact: ' + str(path))
 
 
-def validate(text, workload, data, filename, oracle):
+def source_names(info):
+    schema = info.get('provider_schema', 1)
+    execution = info.get('provider_execution', 'per-view-native')
+    if type(schema) is not int or schema not in (1, 2) or execution not in ('per-view-native', 'revision-snapshots'):
+        raise ValueError('Unknown provider execution schema')
+    if schema == 1:
+        if execution != 'per-view-native':raise ValueError('Snapshot execution needs schema 2')
+        return SOURCES
+    extra = {'src/session.zig', 'src/session/editor/document_registry.zig'}
+    if execution == 'revision-snapshots':extra.add('src/session/editor/syntax_stamp.zig')
+    return SOURCES | extra
+
+
+def validate(text, workload, data, filename, oracle, schema=1, execution='per-view-native'):
     if workload not in ('typing', 'shared') or oracle not in (0, 1):
         raise ValueError('Unsupported workload/oracle')
     frames = frame.validate(text, workload, len(data), data.count(b'\n') + 1)
@@ -53,10 +66,11 @@ def validate(text, workload, data, filename, oracle):
     for line in text.splitlines():
         if not line.startswith('PROVIDER '):
             continue
-        match = PATTERN.fullmatch(line)
+        pattern = PATTERN if schema == 1 else re.compile(PATTERN.pattern + r' adopted_calls=(\d+)')
+        match = pattern.fullmatch(line)
         if match is None:
             raise ValueError('Malformed provider row')
-        rows.append(dict(zip(FIELDS, map(int, match.groups()))))
+        rows.append(dict(zip(FIELDS if schema == 1 else FIELDS + ('adopted_calls',), map(int, match.groups()))))
     if [row['key'] for row in rows] != list(range(20)):
         raise ValueError('Missing/duplicate/reordered provider key')
     controls = [line for line in text.splitlines() if line.startswith('EW2 ')]
@@ -73,7 +87,10 @@ def validate(text, workload, data, filename, oracle):
         raise ValueError('Product samples disagree with frame/storage clocks')
     views = 2 if workload == 'shared' else 1
     for row, outer in zip(rows, frames):
-        if row['native_calls'] != views or any(row[stage + '_calls'] != views for stage in STAGES):
+        expected_native = 1 if execution == 'revision-snapshots' else views
+        if schema == 2 and row['adopted_calls'] != views - expected_native:
+            raise ValueError('Unexpected successful snapshot adoptions')
+        if row['native_calls'] != expected_native or any(row[stage + '_calls'] != views for stage in STAGES):
             raise ValueError('Unexpected per-view native/observer calls')
         if row['changed_ranges'] > row['note_changed'] or row['note_changed'] > row['on_edit'] or row['on_edit'] > outer['providerEdit']:
             raise ValueError('Nested provider interval exceeds parent')
@@ -94,8 +111,9 @@ def summarize(root, repetitions=3):
         raise ValueError('Wrong attribution target/mode')
     if info.get('provider_stages') != list(STAGES) or info.get('frame_stages') != list(frame.STAGES + frame.SYNTAX_STAGES):
         raise ValueError('Wrong stage schema')
+    sources = source_names(info)
     for field in ('original_sha256', 'instrumented_sha256'):
-        if set(info.get(field, {})) != SOURCES:
+        if set(info.get(field, {})) != sources:
             raise ValueError('Incomplete source provenance')
         if any(not isinstance(value, str) or re.fullmatch('[0-9a-f]{64}', value) is None for value in info[field].values()):
             raise ValueError('Invalid source provenance')
@@ -131,7 +149,7 @@ def summarize(root, repetitions=3):
         for name in sorted(inputs):
             for work in ('typing', 'shared'):
                 for rep in range(count):
-                    rows = validate((root / f'{prefix}-{rep}-1-{name}-{work}.log').read_text(), work, data[name], name, oracle)
+                    rows = validate((root / f'{prefix}-{rep}-1-{name}-{work}.log').read_text(), work, data[name], name, oracle, info.get('provider_schema', 1), info.get('provider_execution', 'per-view-native'))
                     if prefix == 'run':
                         groups.setdefault(name + '/' + work, []).extend(rows)
     def stats(values):

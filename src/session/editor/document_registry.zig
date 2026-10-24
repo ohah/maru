@@ -114,6 +114,12 @@ pub const Registry = struct {
         return &doc.state;
     }
 
+    /// 캐시의 약한 신원은 현재 살아 있는 참조에서만 만든다. 수명은 호출 뷰의 lease가 보장한다.
+    pub fn identity(self: *const Registry, lease: Lease) ?DocumentIdentity {
+        _ = self.get(lease) orelse return null;
+        return .{ .owner = @intFromPtr(self), .slot = lease.document.slot, .generation = lease.document.generation };
+    }
+
     /// 문서 소유 경로·이력의 새 할당도 같은 allocator를 써야 해제 짝이 유지된다.
     pub fn resourceAllocator(self: *const Registry, lease: Lease) ?std.mem.Allocator {
         const doc = self.find(lease) orelse return null;
@@ -464,4 +470,28 @@ test "DREG7 released aliases and forged references cannot access a pinned docume
     try testing.expect(!(try registry.release(pin)));
     try testing.expect(registry.get(pin) == null);
     try testing.expect(try registry.release(reopened));
+}
+
+test "syntax input stamp registry는 해제된 참조와 슬롯 재사용을 구분한다" {
+    var registry: Registry = .{ .allocator = testing.allocator };
+    defer registry.deinit() catch unreachable;
+    var other: Registry = .{ .allocator = testing.allocator };
+    defer other.deinit() catch unreachable;
+    var prepared: document_state.State = .{};
+    defer prepared.clear(testing.allocator);
+    const view = try registry.create(&prepared, testing.allocator);
+    const read = try registry.retain(view, .read);
+    const first = registry.identity(view).?;
+    try testing.expectEqualDeep(first, registry.identity(read).?);
+    try testing.expect(other.identity(view) == null);
+    try testing.expect(!try registry.release(view));
+    try testing.expect(registry.identity(view) == null);
+    try testing.expectEqualDeep(first, registry.identity(read).?);
+    try testing.expect(try registry.release(read));
+    const replacement = try registry.create(&prepared, testing.allocator);
+    const next = registry.identity(replacement).?;
+    try testing.expectEqual(first.owner, next.owner);
+    try testing.expectEqual(first.slot, next.slot);
+    try testing.expect(first.generation != next.generation);
+    try testing.expect(try registry.release(replacement));
 }

@@ -51,6 +51,8 @@ pub const ColorBufs = struct {
 pub const State = struct {
     /// grammar가 없거나 파서를 못 세우면 `null`이고, 그러면 이 문서는 끝까지 무색이다(§5).
     provider: ?syntax.Provider = null,
+    /// 완료한 입력만 증명한다. 직접 변경/재개에서 버리고 C 자원은 계속 이 뷰가 소유한다.
+    input_stamp: ?maru.session.editor.syntax_stamp.Stamp = null,
     /// 뷰가 구문 provider와 함께 소유한다. 임시 출력 allocator의 수명을 보관하지 않는다.
     folds: syntax.FoldCache = .{},
 
@@ -184,6 +186,7 @@ pub fn prepareSharedSnapshot(source: *const State, allocator: std.mem.Allocator,
 /// 호출자가 그 프레임을 다시 그리게 만들어야 다음 조각이 돈다.
 pub fn resumeParse(self: *State, source: []const u8) bool {
     if (!self.pending) return false;
+    self.input_stamp = null;
     const p = if (self.provider) |*provider| provider else {
         self.pending = false;
         return false;
@@ -247,9 +250,14 @@ pub fn spanFromInverse(inverse_changes: []const maru.session.editor.delta.Change
 /// 이 입구를 재려던 판정자가 이 길을 한 번도 안 지났다). 남은 것은 `spanFromInverse` 가 `null` 을 내는 방어 갈래(역연산이
 /// 비었거나 앞뒤가 뒤집혔다)와 묶음 안에 범위를 못 만든 항목이 낀 undo 다. 틀린 트리보다 **한 번 더 파는 것**이 낫다.
 pub fn reparse(self: *State, source: []const u8) void {
+    reparseFromReady(self, source, null);
+}
+
+fn reparseFromReady(self: *State, source: []const u8, ready: ?*const syntax.Provider) void {
+    self.input_stamp = null;
     const p = if (self.provider) |*provider| provider else return;
     self.folds.invalidate();
-    p.setSource(source);
+    if (ready == null or !p.onEditFromParsed(ready.?, null)) p.setSource(source);
     self.brackets.invalidate(); // 범위를 모른다 — 괄호 목록도 처음부터(§5.1d)
     // **이어 팔 것이 안 남는다** — 예산 없이 끝까지 팠다(끊긴 여는 파싱은 `setSource` 가 버렸다). 남겨 두면 다음 프레임의
     // `resumeParse` 가 방금 맞게 판 트리를 버리고 처음부터 다시 나눠 판다(그동안 무색 · 진단은 직전 목록) — `ES41`.
@@ -264,6 +272,11 @@ pub fn onEditSpan(
     e: EditSpan,
     lines_after: maru.session.editor.line_index.LineIndex,
 ) void {
+    onEditSpanFromReady(self, allocator, source, e, lines_after, null);
+}
+
+fn onEditSpanFromReady(self: *State, allocator: std.mem.Allocator, source: []const u8, e: EditSpan, lines_after: maru.session.editor.line_index.LineIndex, ready: ?*const syntax.Provider) void {
+    self.input_stamp = null;
     const p = if (self.provider) |*provider| provider else return;
     // 옛 끝 행·열은 색 질의용 파싱의 기존 근사다. 접힘 캐시는 이 좌표로 행을 밀지 않는다.
     // byte 후보만 이동시키고 조회할 때 문서의 최신 줄 인덱스로 행·열을 구한다(EW2).
@@ -285,13 +298,39 @@ pub fn onEditSpan(
         .old_end_point = at,
         .new_end_point = to,
     };
-    p.onEdit(source, edit);
+    editProvider(p, source, edit, ready);
     // 파싱 크기 정책은 provider 하나가 판정한다. 캐시는 트리 보유 결과만 따라간다.
     if (p.tree != null) self.folds.edit(edit) else self.folds.invalidate();
     // `reparse` 와 같다 — `onEdit` 은 예산이 없어 끝까지 판다(옛 트리가 없던 여는 도중이면 처음부터). 이어 팔 것이 없다.
     self.pending = false;
     // 못 고치면(할당) 버린다 — 다음 프레임이 처음부터 만든다. 틀린 목록보다 늦은 목록이 낫다.
     self.brackets.refresh(allocator, p, source, .{ .start = start, .end = new_end }) catch self.brackets.invalidate();
+}
+
+// native 편집과 완료 트리 인계의 한 경계다. 호출자가 입력 신원/판을 검증한 후에만 ready를 넘긴다.
+fn editProvider(p: *syntax.Provider, source: []const u8, edit: syntax.Edit, ready: ?*const syntax.Provider) void {
+    if (ready) |value| if (p.onEditFromParsed(value, edit)) return;
+    p.onEdit(source, edit);
+}
+
+pub fn matchesInput(self: *const State, document: maru.session.editor.document_registry.DocumentIdentity, revision: u64) bool {
+    if (self.pending) return false;
+    const p = if (self.provider) |*value| value else return false;
+    if (p.tree == null) return false;
+    return maru.session.editor.syntax_stamp.matches(self.input_stamp, document, revision, @intFromPtr(p.parser), p.tree_gen);
+}
+
+/// 완료한 입력 판만 재사용한다. 선택/표시 및 다른 provider의 갱신 순서는 바꾸지 않는다.
+pub fn updateForInput(self: *State, allocator: std.mem.Allocator, source: []const u8, edit: ?EditSpan, lines: maru.session.editor.line_index.LineIndex, document: maru.session.editor.document_registry.DocumentIdentity, revision: u64, ready: ?*const State) void {
+    if (matchesInput(self, document, revision)) return;
+    const before: ?u64 = if (self.provider) |p| p.tree_gen else null;
+    const parsed: ?*const syntax.Provider = if (ready) |candidate| if (matchesInput(candidate, document, revision)) if (candidate.provider) |*p| p else null else null else null;
+    if (edit) |span| onEditSpanFromReady(self, allocator, source, span, lines, parsed) else reparseFromReady(self, source, parsed);
+    const p = if (self.provider) |*value| value else return;
+    // native 실패는 이전 트리를 남길 수 있다. 단순히 pending=false인 것만 보고 새 입력이라고 하지 않는다.
+    if (p.tree != null and !self.pending and (before == null or before.? != p.tree_gen)) {
+        self.input_stamp = .{ .document = document, .revision = revision, .provider_identity = @intFromPtr(p.parser), .tree_generation = p.tree_gen };
+    }
 }
 
 /// 판정이 어느 목록 판 · 어느 풀로 한 것인가.

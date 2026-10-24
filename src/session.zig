@@ -190,6 +190,7 @@ pub const editor = struct {
     pub const document_state = @import("session/editor/document_state.zig");
     pub const recovery_id = @import("session/editor/recovery_id.zig");
     pub const document_registry = @import("session/editor/document_registry.zig");
+    pub const syntax_stamp = @import("session/editor/syntax_stamp.zig");
     pub const shared_edit = @import("session/editor/shared_edit.zig");
     pub const workspace_state = @import("session/editor/workspace_state.zig");
     /// 줄 조작의 순수 판정(§3.9a — L4 에서 옮겼다, 이식 계획 D1 이동 단계 1). `ops/` 폴더는 OS 를 안 부른다
@@ -344,6 +345,7 @@ test {
     @import("std").testing.refAllDecls(web_osr_network);
     @import("std").testing.refAllDecls(web_upload_display);
     @import("std").testing.refAllDecls(editor.lsp);
+    @import("std").testing.refAllDecls(editor.syntax_stamp);
 }
 
 pub const agent_log_profile = @import("session/agent_log_profile.zig");

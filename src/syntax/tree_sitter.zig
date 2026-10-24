@@ -525,6 +525,8 @@ pub const Provider = struct {
         query_bytes: u64 = 0,
         query_spans: u64 = 0,
         query_spans_outside: u64 = 0,
+        /// 다른 뷰의 현재 트리 사본을 수락한 횟수. 실제 파싱 호출 수와 구분한다.
+        reused_parses: u64 = 0,
     };
 
     /// 지금 트리의 노드 수(`ts_node_descendant_count` — 뿌리 포함). 트리가 없으면 0. 판정자가 「트리 전체를 걸었나」를 견준다.
@@ -564,6 +566,49 @@ pub const Provider = struct {
             return null;
         };
         return .{ .parser = parser, .tree = copy, .slot = slot, .tree_gen = self.tree_gen, .budget_ns = self.budget_ns };
+    }
+
+    /// caller가 현재 입력임을 증명한 완료 트리를 빌려 쓰되 parser와 변경 범위는 이 뷰가 소유한다.
+    /// 복제부터 준비하므로 복제 실패는 기존 파싱으로 돌아갈 수 있고, 다른 문맥에는 손대지 않는다.
+    pub fn onEditFromParsed(self: *Provider, parsed: *const Provider, edit: ?Edit) bool {
+        const ready = parsed.tree orelse return false;
+        if (self == parsed or self.parser == parsed.parser or self.tree == parsed.tree or self.slot.language != parsed.slot.language) return false;
+        const next = c.ts_tree_copy(ready) orelse return false;
+        c.ts_parser_reset(self.parser);
+        if (self.tree) |previous| {
+            if (edit) |e| {
+                var change: c.TSInputEdit = .{
+                    .start_byte = e.start_byte,
+                    .old_end_byte = e.old_end_byte,
+                    .new_end_byte = e.new_end_byte,
+                    .start_point = .{ .row = e.start_point.row, .column = e.start_point.column },
+                    .old_end_point = .{ .row = e.old_end_point.row, .column = e.old_end_point.column },
+                    .new_end_point = .{ .row = e.new_end_point.row, .column = e.new_end_point.column },
+                };
+                self.sticky_summary.edit(&change);
+                c.ts_tree_edit(previous, &change);
+                // 다른 뷰의 범위를 복사하면 이전 트리가 달랐던 뷰에서 조용히 어긋난다.
+                self.noteChanged(previous, next);
+            } else {
+                self.sticky_summary.invalidate();
+                self.changed_all = true;
+                self.changed_len = 0;
+                self.fold_changes_before = null;
+                // 전체 재설정은 기존 setSource처럼 폐기와 새 트리의 판을 각각 전진시킨다.
+                self.tree_gen += 1;
+            }
+            c.ts_tree_delete(previous);
+        } else {
+            self.sticky_summary.invalidate();
+            self.changed_all = true;
+            self.changed_len = 0;
+            self.fold_changes_before = null;
+        }
+        self.tree = next;
+        self.tree_gen += 1;
+        self.budget_ns = 0;
+        self.stats.reused_parses +|= 1;
+        return true;
     }
 
     pub fn deinit(self: *Provider) void {
@@ -4421,30 +4466,31 @@ test "shared native snapshot 편집과 원본 해제 뒤에도 사본을 소유�
     try std.testing.expectEqual(@as(isize, 0), live_allocs);
 }
 
+const SnapshotTreeJudge = struct {
+    fn nodes(left: c.TSNode, right: c.TSNode) !void {
+        try std.testing.expectEqualStrings(std.mem.span(c.ts_node_type(left)), std.mem.span(c.ts_node_type(right)));
+        try std.testing.expectEqual(c.ts_node_is_named(left), c.ts_node_is_named(right));
+        try std.testing.expectEqual(c.ts_node_is_extra(left), c.ts_node_is_extra(right));
+        try std.testing.expectEqual(c.ts_node_is_missing(left), c.ts_node_is_missing(right));
+        try std.testing.expectEqual(c.ts_node_has_error(left), c.ts_node_has_error(right));
+        try std.testing.expectEqual(c.ts_node_start_byte(left), c.ts_node_start_byte(right));
+        try std.testing.expectEqual(c.ts_node_end_byte(left), c.ts_node_end_byte(right));
+        try std.testing.expectEqualDeep(c.ts_node_start_point(left), c.ts_node_start_point(right));
+        try std.testing.expectEqualDeep(c.ts_node_end_point(left), c.ts_node_end_point(right));
+        const count = c.ts_node_child_count(left);
+        try std.testing.expectEqual(count, c.ts_node_child_count(right));
+        for (0..count) |index| {
+            const lfield = c.ts_node_field_name_for_child(left, @intCast(index));
+            const rfield = c.ts_node_field_name_for_child(right, @intCast(index));
+            try std.testing.expectEqual(lfield == null, rfield == null);
+            if (lfield != null) try std.testing.expectEqualStrings(std.mem.span(lfield), std.mem.span(rfield));
+            try nodes(c.ts_node_child(left, @intCast(index)), c.ts_node_child(right, @intCast(index)));
+        }
+    }
+};
+
 test "shared native snapshot 모든 언어의 트리와 편집 결과가 기존 parser와 같다" {
     const a = std.testing.allocator;
-    const Check = struct {
-        fn nodes(left: c.TSNode, right: c.TSNode) !void {
-            try std.testing.expectEqualStrings(std.mem.span(c.ts_node_type(left)), std.mem.span(c.ts_node_type(right)));
-            try std.testing.expectEqual(c.ts_node_is_named(left), c.ts_node_is_named(right));
-            try std.testing.expectEqual(c.ts_node_is_extra(left), c.ts_node_is_extra(right));
-            try std.testing.expectEqual(c.ts_node_is_missing(left), c.ts_node_is_missing(right));
-            try std.testing.expectEqual(c.ts_node_has_error(left), c.ts_node_has_error(right));
-            try std.testing.expectEqual(c.ts_node_start_byte(left), c.ts_node_start_byte(right));
-            try std.testing.expectEqual(c.ts_node_end_byte(left), c.ts_node_end_byte(right));
-            try std.testing.expectEqualDeep(c.ts_node_start_point(left), c.ts_node_start_point(right));
-            try std.testing.expectEqualDeep(c.ts_node_end_point(left), c.ts_node_end_point(right));
-            const count = c.ts_node_child_count(left);
-            try std.testing.expectEqual(count, c.ts_node_child_count(right));
-            for (0..count) |index| {
-                const lfield = c.ts_node_field_name_for_child(left, @intCast(index));
-                const rfield = c.ts_node_field_name_for_child(right, @intCast(index));
-                try std.testing.expectEqual(lfield == null, rfield == null);
-                if (lfield != null) try std.testing.expectEqualStrings(std.mem.span(lfield), std.mem.span(rfield));
-                try nodes(c.ts_node_child(left, @intCast(index)), c.ts_node_child(right, @intCast(index)));
-            }
-        }
-    };
     const before = "head {\n value;\n}\n";
     const after = "\nhead {\n value;\n}\n";
     var supported: usize = 0;
@@ -4463,17 +4509,201 @@ test "shared native snapshot 모든 언어의 트리와 편집 결과가 기존 
         defer copy.deinit();
         var cache = (try original.copyMatched(a, source.parser, source.tree_gen, copy.parser, copy.tree_gen)) orelse return error.NoCache;
         defer cache.deinit(a);
-        try Check.nodes(c.ts_tree_root_node(source.tree.?), c.ts_tree_root_node(copy.tree.?));
+        try SnapshotTreeJudge.nodes(c.ts_tree_root_node(source.tree.?), c.ts_tree_root_node(copy.tree.?));
         const edit: Edit = .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = 1, .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 0 }, .new_end_point = .{ .row = 1, .column = 0 } };
         original.edit(edit);
         cache.edit(edit);
         source.onEdit(after, edit);
         copy.onEdit(after, edit);
-        try Check.nodes(c.ts_tree_root_node(source.tree.?), c.ts_tree_root_node(copy.tree.?));
+        try SnapshotTreeJudge.nodes(c.ts_tree_root_node(source.tree.?), c.ts_tree_root_node(copy.tree.?));
         try foldCacheJudge(&source, &original, after);
         try foldCacheJudge(&copy, &cache, after);
         supported += 1;
     }
     try std.testing.expect(supported > 0);
     std.debug.print("SHARED_SNAPSHOT_LANGUAGES supported={d} unavailable={d}\n", .{ supported, unavailable });
+}
+
+// 자기 parser로 다시 파는 대조군과 비교하므로 같은 사본을 두 번 읽는 빈 오라클이 아니다.
+test "shared parse reuse native 무작위 UTF8 편집의 트리 색 심볼 접힘 괄호를 독립 파싱과 대조한다" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { lang: Language, text: []const u8 }{
+        .{ .lang = .zig, .text = "const A = struct {\n fn f() void {\n _ = 1;\n }\n};\n" },
+        .{ .lang = .python, .text = "class A:\n def f(self):\n  return [1, 2]\n" },
+        .{ .lang = .swift, .text = "class A {\n func f() -> Int {\n return 1\n }\n}\n" },
+        .{ .lang = .javascript, .text = "class A {\n f() {\n return [1, 2];\n }\n}\n" },
+        .{ .lang = .dart, .text = "class A {\n int f() {\n return 1;\n }\n}\n" },
+    };
+    for (cases) |case| {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(a);
+        try text.appendSlice(a, case.text);
+        var source = Provider.init(text.items, case.lang, 0) orelse return error.NoProvider;
+        defer source.deinit();
+        var own = Provider.init(text.items, case.lang, 0) orelse return error.NoProvider;
+        defer own.deinit();
+        var imported = Provider.init(text.items, case.lang, 0) orelse return error.NoProvider;
+        defer imported.deinit();
+        const parser = imported.parser;
+        var cache: FoldCache = .{};
+        defer cache.deinit(a);
+        try foldCacheJudge(&imported, &cache, text.items);
+        var brackets = try fullIndexForTest(a, &imported, text.items);
+        defer brackets.deinit(a);
+        var random: std.Random.DefaultPrng = .init(0x535048415245);
+        const rng = random.random();
+        const inserts = [_][]const u8{ "x", "\n", "{}", " ", "/*", "*/", "\r\n", "// 한글\n", "🙂", "é" };
+        for (0..100) |i| {
+            var at = rng.uintLessThan(usize, text.items.len + 1);
+            while (at < text.items.len and text.items[at] & 0xc0 == 0x80) at += 1;
+            var end = @min(text.items.len, at + rng.uintLessThan(usize, 12));
+            while (end < text.items.len and text.items[end] & 0xc0 == 0x80) end += 1;
+            var insert = if (i % 3 == 0) "" else inserts[rng.uintLessThan(usize, inserts.len)];
+            if (at == 0 and end == text.items.len and insert.len == 0) insert = "\n";
+            const start_point = stickyPoint(text.items, at);
+            const old_point = stickyPoint(text.items, end);
+            try text.replaceRange(a, at, end - at, insert);
+            const edit: Edit = .{ .start_byte = @intCast(at), .old_end_byte = @intCast(end), .new_end_byte = @intCast(at + insert.len), .start_point = start_point, .old_end_point = old_point, .new_end_point = stickyPoint(text.items, at + insert.len) };
+            source.onEdit(text.items, edit);
+            own.onEdit(text.items, edit);
+            brackets.shift(a, edit.start_byte, edit.old_end_byte, edit.new_end_byte);
+            try std.testing.expect(imported.onEditFromParsed(&source, edit));
+            try std.testing.expectEqual(parser, imported.parser);
+            try std.testing.expect(imported.tree != source.tree);
+            cache.edit(edit);
+            try SnapshotTreeJudge.nodes(c.ts_tree_root_node(own.tree.?), c.ts_tree_root_node(imported.tree.?));
+            try foldCacheJudge(&imported, &cache, text.items);
+            try brackets.refresh(a, &imported, text.items, .{ .start = edit.start_byte, .end = edit.new_end_byte });
+            var fresh = try fullIndexForTest(a, &own, text.items);
+            defer fresh.deinit(a);
+            try std.testing.expectEqualDeep(fresh.leaves.items, brackets.leaves.items);
+            var want_spans: std.ArrayList(Span) = .empty;
+            defer want_spans.deinit(a);
+            var got_spans: std.ArrayList(Span) = .empty;
+            defer got_spans.deinit(a);
+            own.spansForRange(a, text.items, .{ .start = 0, .end = @intCast(text.items.len) }, &want_spans);
+            imported.spansForRange(a, text.items, .{ .start = 0, .end = @intCast(text.items.len) }, &got_spans);
+            try std.testing.expectEqualDeep(want_spans.items, got_spans.items);
+            var want_symbols: std.ArrayList(Provider.Symbol) = .empty;
+            defer want_symbols.deinit(a);
+            var got_symbols: std.ArrayList(Provider.Symbol) = .empty;
+            defer got_symbols.deinit(a);
+            try own.symbolsChecked(a, &want_symbols);
+            try imported.symbolsChecked(a, &got_symbols);
+            try std.testing.expectEqualDeep(want_symbols.items, got_symbols.items);
+            try stickyAncestorJudge(&imported, text.items);
+        }
+        try std.testing.expectEqual(@as(u64, 100), imported.stats.reused_parses);
+        try std.testing.expect(cache.reused_changes > 0);
+    }
+}
+
+test "shared parse reuse native 거절은 기존 자원을 보존한다" {
+    const text = "fn f() void {\n return;\n}\n";
+    var target = Provider.init(text, .zig, 0) orelse return error.NoProvider;
+    defer target.deinit();
+    var source = Provider.init(text, .zig, 0) orelse return error.NoProvider;
+    defer source.deinit();
+    var foreign = Provider.init(text, .swift, 0) orelse return error.NoProvider;
+    defer foreign.deinit();
+    var empty = Provider.init("", .zig, 0) orelse return error.NoProvider;
+    defer empty.deinit();
+    const parser = target.parser;
+    const tree = target.tree;
+    const generation = target.tree_gen;
+    try std.testing.expect(!target.onEditFromParsed(&target, null));
+    try std.testing.expect(!target.onEditFromParsed(&foreign, null));
+    try std.testing.expect(!target.onEditFromParsed(&empty, null));
+    {
+        target.parser = source.parser;
+        defer target.parser = parser;
+        try std.testing.expect(!target.onEditFromParsed(&source, null));
+    }
+    {
+        target.tree = source.tree;
+        defer target.tree = tree;
+        try std.testing.expect(!target.onEditFromParsed(&source, null));
+    }
+    try std.testing.expectEqual(parser, target.parser);
+    try std.testing.expectEqual(tree, target.tree);
+    try std.testing.expectEqual(generation, target.tree_gen);
+    try std.testing.expectEqual(@as(u64, 0), target.stats.reused_parses);
+}
+
+test "shared parse reuse native 전체 재설정과 원본 해제 뒤 자체 파싱을 보존한다" {
+    const a = std.testing.allocator;
+    const before = "fn f() void {}\n";
+    const after = "fn g() void {\n return;\n}\n";
+    const last = "\nfn g() void {\n return;\n}\n";
+    var target = Provider.init(before, .zig, 0) orelse return error.NoProvider;
+    defer target.deinit();
+    const parser = target.parser;
+    const generation = target.tree_gen;
+    {
+        var source = Provider.init(after, .zig, 0) orelse return error.NoProvider;
+        defer source.deinit();
+        try std.testing.expect(target.onEditFromParsed(&source, null));
+        try std.testing.expect(target.tree != source.tree);
+        try std.testing.expectEqual(parser, target.parser);
+        try std.testing.expectEqual(generation + 2, target.tree_gen);
+        try std.testing.expect(target.changed_all);
+        try std.testing.expect(target.fold_changes_before == null);
+        try SnapshotTreeJudge.nodes(c.ts_tree_root_node(source.tree.?), c.ts_tree_root_node(target.tree.?));
+    }
+    const edit: Edit = .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = 1, .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 0 }, .new_end_point = .{ .row = 1, .column = 0 } };
+    target.onEdit(last, edit);
+    var own = Provider.init(last, .zig, 0) orelse return error.NoProvider;
+    defer own.deinit();
+    try SnapshotTreeJudge.nodes(c.ts_tree_root_node(own.tree.?), c.ts_tree_root_node(target.tree.?));
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    try foldCacheJudge(&target, &cache, last);
+}
+
+// 실제 host의 옛 끝 좌표 근사를 별도 파싱 이력과 섞어도 완료 트리가 같은지 확인한다.
+test "shared parse reuse native 이전 좌표 근사 이력과 독립 파싱 결과를 대조한다" {
+    const initial = "\n\n\nfn f() void {\n return;\n}\n\n\nfn g() void {\n return;\n}\n";
+    const after = initial[3..];
+    const last = " " ++ after;
+    const wrong: Edit = .{ .start_byte = 0, .old_end_byte = 3, .new_end_byte = 0, .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 0 }, .new_end_point = .{ .row = 0, .column = 0 } };
+    const next: Edit = .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = 1, .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 0 }, .new_end_point = .{ .row = 0, .column = 1 } };
+    for ([_]Language{ .zig, .python, .swift, .javascript, .dart }) |lang| {
+        var source = Provider.init(initial, lang, 0) orelse return error.NoProvider;
+        defer source.deinit();
+        source.onEdit(after, wrong);
+        var own = Provider.init(after, lang, 0) orelse return error.NoProvider;
+        defer own.deinit();
+        var imported = Provider.init(after, lang, 0) orelse return error.NoProvider;
+        defer imported.deinit();
+        source.onEdit(last, next);
+        own.onEdit(last, next);
+        try std.testing.expect(imported.onEditFromParsed(&source, next));
+        try SnapshotTreeJudge.nodes(c.ts_tree_root_node(own.tree.?), c.ts_tree_root_node(imported.tree.?));
+    }
+}
+
+test "shared parse reuse native 늦은 뷰는 자기 이전 트리의 변경 범위를 계산한다" {
+    const a = std.testing.allocator;
+    const old = "fn old() void {}\n";
+    const prior = "fn old() void {}\nfn added() void {\n return;\n}\n";
+    const after = " " ++ prior;
+    const edit: Edit = .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = 1, .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 0 }, .new_end_point = .{ .row = 0, .column = 1 } };
+    var ready = Provider.init(prior, .zig, 0) orelse return error.NoProvider;
+    defer ready.deinit();
+    ready.onEdit(after, edit);
+    try std.testing.expectEqual(@as(u8, 0), ready.fold_changes_len);
+    var target = Provider.init(old, .zig, 0) orelse return error.NoProvider;
+    defer target.deinit();
+    target.setSource(old); // 대상의 parser 판도 제공 뷰와 일부러 다르게 만든다.
+    const generation = target.tree_gen;
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    try foldCacheJudge(&target, &cache, old);
+    try std.testing.expect(target.onEditFromParsed(&ready, edit));
+    cache.edit(edit);
+    try std.testing.expectEqual(generation + 1, target.tree_gen);
+    try std.testing.expectEqual(generation, target.fold_changes_before.?);
+    try std.testing.expect(target.fold_changes_len > 0);
+    try foldCacheJudge(&target, &cache, after);
+    try std.testing.expectEqual(@as(u64, 1), cache.reused_changes);
 }

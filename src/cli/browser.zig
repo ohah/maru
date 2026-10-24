@@ -55,7 +55,8 @@ pub const browser_help =
     \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
     \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
     \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page)
-    \\  network-request --surface <id> --req <n>  show one request in detail: headers and redirects (Chromium tabs)
+    \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a 0600 file, replacing it; a binary body needs --out; Chromium tabs)
+    \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ◉ while recording)
     \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
     \\
 ;
@@ -123,7 +124,9 @@ pub const Request = union(enum) {
     /// `browser network`(W9d① — Chromium). 거르기·쪽. 응답 {requests:[…], hidden_before_grant, dropped, …, next_page?}.
     network: NetworkCmd,
     /// `browser network-request`(W9d① — Chromium). 응답 그 요청의 자세한 것(헤더·리다이렉트·body_state).
-    network_request: struct { surface_id: u64, req: u64 },
+    network_request: NetworkRequestCmd,
+    /// `browser network-record`(W9d② — Chromium). 응답 {recording, state}.
+    network_record: struct { surface_id: u64, on: bool },
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
@@ -144,6 +147,7 @@ pub const Request = union(enum) {
             .upload => .upload,
             .network => .network,
             .network_request => .network_request,
+            .network_record => .network_record,
         };
     }
 };
@@ -155,6 +159,21 @@ pub const max_network_page_size: u32 = 200;
 pub const max_network_page: u32 = 10_000;
 /// W9d①: 에이전트에게 보일 자원 종류 이름(서버 `net_policy.resourceTypeName` 과 같은 목록 — 시험이 맞춘다).
 pub const network_type_names = [_][]const u8{ "document", "iframe", "stylesheet", "script", "image", "font", "other", "object", "media", "worker", "shared_worker", "prefetch", "favicon", "xhr", "ping", "service_worker", "csp_report", "plugin", "preload" };
+
+/// W9d②: 본문 한 번 읽기의 상한(서버 `control_browser.max_network_body_read_bytes` 와 같다)·본문 하나의 상한(오프셋이 넘을 수 없다).
+pub const max_network_body_read: u32 = 64 * 1024;
+pub const max_network_body_bytes: u32 = 1024 * 1024;
+
+/// `browser network-request`(W9d① — W9d② 가 본문 칸을 더했다). `out` 은 본문 전부를 0600 파일로(러너가 조각을 이어 받는다 — 바이너리 본문은
+/// 이것으로만).
+pub const NetworkRequestCmd = struct {
+    surface_id: u64,
+    req: u64,
+    body: bool = false,
+    offset: ?u32 = null,
+    max_bytes: ?u32 = null,
+    out: ?[]const u8 = null,
+};
 
 pub const NetworkCmd = struct {
     surface_id: u64,
@@ -309,6 +328,10 @@ pub const ParseError = error{
     MissingRequestId, // `network-request` 에 `--req` 없음
     InvalidRequestId, // `--req` 가 1..2^53-1 정수가 아님
     InvalidBeforeReq, // `network --before-req` 가 1..2^53-1 정수가 아님
+    MissingRecordSwitch, // `network-record` 에 `--on`·`--off` 가 없거나 둘 다
+    InvalidBodyBytes, // `network-request --max-bytes` 가 1..65536 이 아님
+    InvalidBodyOffset, // `network-request --offset` 이 0..1048576 이 아님
+    OutWithOffset, // `network-request --out` 은 본문 전부를 쓴다 — `--offset` 과 함께 쓰지 않는다(W9d② 적대 리뷰 3 회차)
 };
 
 /// `--dialog` 번호의 상한 — JSON 수로 잃지 않고 오가는 가장 큰 정수(번호는 maru 가 1 부터 매긴다).
@@ -490,6 +513,7 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     if (eq(sub, "upload")) return .{ .request = .{ .upload = try parseUploadArgs(rest) } };
     if (eq(sub, "network")) return .{ .request = .{ .network = try parseNetworkArgs(rest) } };
     if (eq(sub, "network-request")) return .{ .request = .{ .network_request = try parseNetworkRequestArgs(rest) } };
+    if (eq(sub, "network-record")) return .{ .request = .{ .network_record = try parseNetworkRecordArgs(rest) } };
     if (eq(sub, "navigate")) {
         const p = try parseSurfaceArg(rest);
         const s = p.surface orelse return error.MissingSurface;
@@ -1064,10 +1088,12 @@ fn parseNetworkArgs(rest: []const []const u8) ParseError!NetworkCmd {
     return cmd;
 }
 
-/// `network-request --surface <id> --req <n>`(W9d① — 번호는 `network` 가 준 것).
-fn parseNetworkRequestArgs(rest: []const []const u8) ParseError!@FieldType(Request, "network_request") {
+/// `network-request --surface <id> --req <n> [--body [--offset n] [--max-bytes n] [--out f]]`(W9d① — 번호는 `network` 가 준 것, W9d② 본문 —
+/// 본문 칸 셋은 `--body` 를 함의한다).
+fn parseNetworkRequestArgs(rest: []const []const u8) ParseError!NetworkRequestCmd {
     var surface: ?u64 = null;
     var req: ?u64 = null;
+    var cmd: NetworkRequestCmd = .{ .surface_id = 0, .req = 0 };
     var i: usize = 0;
     while (i < rest.len) {
         const a = rest[i];
@@ -1077,11 +1103,53 @@ fn parseNetworkRequestArgs(rest: []const []const u8) ParseError!@FieldType(Reque
             const n = std.fmt.parseInt(u64, try optValue(rest, &i, "--req"), 10) catch return error.InvalidRequestId;
             if (n == 0 or n > max_dialog_token) return error.InvalidRequestId;
             req = n;
+        } else if (eq(a, "--body")) {
+            cmd.body = true;
+            i += 1;
+        } else if (matchOpt(a, "--offset")) {
+            const n = std.fmt.parseInt(u32, try optValue(rest, &i, "--offset"), 10) catch return error.InvalidBodyOffset;
+            if (n > max_network_body_bytes) return error.InvalidBodyOffset;
+            cmd.offset = n;
+        } else if (matchOpt(a, "--max-bytes")) {
+            const n = std.fmt.parseInt(u32, try optValue(rest, &i, "--max-bytes"), 10) catch return error.InvalidBodyBytes;
+            if (n == 0 or n > max_network_body_read) return error.InvalidBodyBytes;
+            cmd.max_bytes = n;
+        } else if (matchOpt(a, "--out")) {
+            const v = try optValue(rest, &i, "--out");
+            if (v.len == 0) return error.MissingOutValue;
+            cmd.out = v;
         } else if (std.mem.startsWith(u8, a, "-")) {
             return error.UnknownOption;
         } else return error.UnexpectedArgument;
     }
-    return .{ .surface_id = surface orelse return error.MissingSurface, .req = req orelse return error.MissingRequestId };
+    // 본문 칸(--offset·--max-bytes·--out)은 본문을 청한다는 뜻이다 — --body 를 빠뜨려도 받는다(MCP 의 인자 하나하나가 홀로도 통하게).
+    if (cmd.offset != null or cmd.max_bytes != null or cmd.out != null) cmd.body = true;
+    // W9d② 적대 리뷰 3 회차: `--out` 은 본문 전부를 쓴다 — `--offset` 과 함께면 꼬리만 쓰고 성공이라 했다(파일이 본문인 줄 안다). 거절한다(작성자
+    // 선택 — 조용히 무시하면 에이전트가 원한 조각이 무엇이었는지 모른 채 남는다).
+    if (cmd.out != null and cmd.offset != null) return error.OutWithOffset;
+    cmd.surface_id = surface orelse return error.MissingSurface;
+    cmd.req = req orelse return error.MissingRequestId;
+    return cmd;
+}
+
+/// `network-record --surface <id> (--on | --off)`(W9d②).
+fn parseNetworkRecordArgs(rest: []const []const u8) ParseError!@FieldType(Request, "network_record") {
+    var surface: ?u64 = null;
+    var on: ?bool = null;
+    var i: usize = 0;
+    while (i < rest.len) {
+        const a = rest[i];
+        if (matchOpt(a, "--surface")) {
+            try assignSurface(&surface, try optValue(rest, &i, "--surface"));
+        } else if (eq(a, "--on") or eq(a, "--off")) {
+            if (on != null) return error.MissingRecordSwitch;
+            on = eq(a, "--on");
+            i += 1;
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            return error.UnknownOption;
+        } else return error.UnexpectedArgument;
+    }
+    return .{ .surface_id = surface orelse return error.MissingSurface, .on = on orelse return error.MissingRecordSwitch };
 }
 
 /// `upload --surface <id> <로케이터> [--] <file>...`(W9c③) — 로케이터 옵션은 click 과 같고, 위치 인자는 파일이다(`--` 뒤는 `-` 로 시작해도 파일).
@@ -1421,7 +1489,19 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             defer obj.deinit(gpa);
             try obj.put(gpa, "id", .{ .integer = @intCast(n.surface_id) });
             try obj.put(gpa, "req", .{ .integer = @intCast(n.req) });
+            if (n.body) {
+                try obj.put(gpa, "body", .{ .bool = true });
+                if (n.offset) |v| try obj.put(gpa, "body_offset", .{ .integer = v });
+                if (n.max_bytes) |v| try obj.put(gpa, "body_max_bytes", .{ .integer = v });
+            }
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.networkRequest", .params = .{ .object = obj } } });
+        },
+        .network_record => |n| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            try obj.put(gpa, "id", .{ .integer = @intCast(n.surface_id) });
+            try obj.put(gpa, "on", .{ .bool = n.on });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.networkRecord", .params = .{ .object = obj } } });
         },
         .open => |o| {
             var obj: std.json.ObjectMap = .empty;
@@ -1566,7 +1646,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog, upload, network, network_request };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog, upload, network, network_request, network_record };
 
 const unauthorized_code: i64 = -32002;
 const unsupported_by_engine_code: i64 = -32008;
@@ -1680,6 +1760,8 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                     } else if (o.get("methods")) |methods| if (methods == .array and methods.array.items.len == 0)
                         try w.writeAll(" (browser commands not supported yet)");
                 }
+                // W9d②: 응답 본문을 기록하는 탭(탭 제목의 ◉ 와 같은 신호).
+                if (boolField(o.get("recording"))) try w.writeAll("  ◉ recording");
                 try w.writeAll("\n");
             }
         },
@@ -1828,6 +1910,14 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         },
         .network => return renderNetwork(gpa, result, w),
         .network_request => return renderNetworkRequest(gpa, result, w),
+        .network_record => {
+            // W9d②: 켬은 곧 답한다 — sidecar 가 켜졌다고 알리기 전이면 starting(`browser network` 의 recording 이 이어 알린다).
+            if (boolField(result.get("recording"))) {
+                try w.writeAll("recording response bodies (");
+                try writePageText(gpa, w, strField(result.get("state")), false);
+                try w.writeAll(") — the tab title shows ◉; read them with network-request --body\n");
+            } else try w.writeAll("not recording response bodies — the bodies already recorded stay readable until the permission is revoked or the tab closes\n"); // W9d② 적대 리뷰 1 회차 LOW-4: 끄기는 지우지 않는다
+        },
         .handle_dialog => {
             try w.writeAll("answered ");
             try writePageText(gpa, w, strField(result.get("kind")), false);
@@ -1948,7 +2038,22 @@ fn renderNetwork(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.
             try writePageText(gpa, w, sw, false);
             try w.writeAll("]");
         }
+        // W9d②: 본문 칸 — 기록한 요청만(잡았으면 크기).
+        const body = strField(o.get("body_state"));
+        if (body.len > 0) {
+            try w.writeAll(" [body ");
+            try writePageText(gpa, w, body, false);
+            if (intField(o.get("body_size"))) |n| try w.print(" {d}B", .{n});
+            try w.writeAll("]");
+        }
         try w.writeAll("\n");
+    }
+    // W9d②: 본문 기록 상태(켜 두었을 때만 온다).
+    const recording = strField(result.get("recording"));
+    if (recording.len > 0) {
+        try w.writeAll("(recording response bodies: ");
+        try writePageText(gpa, w, recording, false);
+        try w.writeAll(")\n");
     }
     if (intField(result.get("hidden_before_grant"))) |n| if (n > 0) try w.print("({d} earlier request{s} hidden — made before your permission)\n", .{ n, if (n == 1) "" else "s" });
     if (intField(result.get("hidden_other_site_pages"))) |n| if (n > 0) try w.print("({d} request{s} hidden — made while the tab showed a site your permission does not cover)\n", .{ n, if (n == 1) "" else "s" });
@@ -2048,11 +2153,69 @@ fn renderNetworkRequest(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *
     };
     try renderNetworkHeaders(gpa, w, "request headers", result.get("request_headers"), boolField(result.get("request_headers_truncated")));
     try renderNetworkHeaders(gpa, w, "response headers", result.get("response_headers"), boolField(result.get("response_headers_truncated")));
+    return renderNetworkBody(gpa, result, w);
+}
+
+/// W9d②: 본문 칸 — 상태 한 줄(까닭이면 할 일), 잡았으면 크기·인코딩·표시, 청한 조각이 있으면 그 글(한 줄 — 줄바꿈은 ` ⏎ `, 제어·양방향 글자는
+/// 지운다 — 페이지가 고른 글이 터미널을 조종하지 못하게). 바이너리는 `--out` 으로만(base64 를 터미널에 쏟지 않는다).
+fn renderNetworkBody(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.Writer) !bool {
     try w.writeAll("body: ");
     const body = strField(result.get("body_state"));
-    if (std.mem.eql(u8, body, "not_recorded")) try w.writeAll("not recorded") else try writePageText(gpa, w, body, false);
+    // 숨긴 까닭은 할 일과 함께. 기록하지 않은 요청은 W9d① 의 한 줄 그대로(「not recorded」) — 할 일은 다음 줄에.
+    const hint: ?[]const u8 = if (std.mem.eql(u8, body, "not_recorded"))
+        "not recorded"
+    else if (std.mem.eql(u8, body, "needs_body_permission"))
+        "hidden — needs the permission to record this tab's bodies: maru browser network-record --on asks for it"
+    else if (std.mem.eql(u8, body, "needs_cookie_permission"))
+        "hidden — this response carried another site's cookies or login: navigate the tab to that site, then maru browser get-cookies asks for its cookie permission (it covers the tab's current site)"
+    else if (std.mem.eql(u8, body, "before_body_permission"))
+        "hidden — made before your permission to record bodies"
+    else if (std.mem.eql(u8, body, "restarted"))
+        "restarted — Chromium restarted this request before its body was kept; the retry is a newer req" // W9d① 적대 리뷰 후 × W9d②
+    else
+        null;
+    if (hint) |h| try w.writeAll(h) else try writePageText(gpa, w, body, false);
+    if (intField(result.get("body_decoded_size"))) |n| try w.print(" ({d} bytes — over the 1 MiB body limit)", .{n});
+    if (intField(result.get("body_size"))) |n| {
+        try w.print(" · {d} bytes · ", .{n});
+        try writePageText(gpa, w, strField(result.get("body_encoding")), false);
+        try writeBodyMarks(w, result);
+    }
     try w.writeAll("\n");
+    if (std.mem.eql(u8, body, "not_recorded")) try w.writeAll("(record bodies with maru browser network-record --on — only requests made while it is on have one)\n");
+    const text = result.get("body") orelse return true;
+    if (text != .string) return true;
+    if (std.mem.eql(u8, strField(result.get("body_encoding")), "base64")) {
+        try w.writeAll("(binary body — write it with --out <file>)\n");
+        return false;
+    }
+    try writeBodyText(gpa, w, text.string);
+    if (intField(result.get("body_next_offset"))) |n| {
+        try w.print("more: --offset {d}\n", .{n});
+    }
     return true;
+}
+
+/// W9d②: 잡은 본문의 표시(되돌린 글·Chromium 이 푼 그대로·자격 증명) — 본문 칸과 `--out` 의 요약이 같은 글을 쓴다(W9d② 적대 리뷰 3 회차: `--out`
+/// 은 이것을 빠뜨려 파일이 페이지가 본 글과 다를 수 있다는 것·다른 사이트의 로그인으로 받았다는 것을 알리지 않았다).
+pub fn writeBodyMarks(w: *std.Io.Writer, result: std.json.ObjectMap) !void {
+    if (strField(result.get("body_redecoded")).len > 0) try w.writeAll(" · re-decoded from the browser's windows-1252 reading");
+    if (boolField(result.get("body_chromium_decoded"))) try w.writeAll(" · as the browser decoded it (no charset — may differ from what the page read)");
+    if (boolField(result.get("body_credentialed"))) try w.writeAll(" · sent with cookies or login");
+}
+
+/// 본문 글 줄의 머리(maru 가 붙인다 — MCP 설명이 이 글을 말한다).
+pub const body_text_prefix = "body text: ";
+
+/// 본문 글 — maru 가 붙인 머리(`body text: `) 뒤에 한 줄로(W9d② 적대 리뷰 3 회차 D1: 줄바꿈을 그대로 찍으면 페이지가 본문 끝에 maru 의 「more:
+/// --offset」 줄을 흉내 냈다 — 콘솔·대화상자처럼 줄바꿈은 ` ⏎ `, 탭은 빈칸, 제어·양방향 글자는 지운다(`writeLinesText`); 4 회차 D1b: 한 줄이어도
+/// 0 칸부터 페이지의 글이면 본문이 통째로 「more: --offset 0」 일 때 maru 의 줄과 같았다 — 콘솔의 `[level] ` 처럼 머리를 붙인다). 그래서
+/// `body text: ` 로 시작하지 않는 줄은 모두 maru 의 것이다. 이 모양은 손실이 있다(본문에 글자 그대로 있는 ` ⏎ ` 와 줄바꿈, 탭과 빈칸이 같아
+/// 보인다) — 본문 그대로의 바이트는 `--out` 의 파일이다.
+fn writeBodyText(gpa: std.mem.Allocator, w: *std.Io.Writer, text: []const u8) !void {
+    try w.writeAll(body_text_prefix);
+    try writeLinesText(gpa, w, text, false);
+    try w.writeAll("\n");
 }
 
 /// snapshot 을 그리는 깊이 상한 — 넘는 자식은 한 줄 안내로 접는다(W9f 적대 리뷰 5 회차).
@@ -3281,7 +3444,8 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
         \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
         \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page)
-        \\  network-request --surface <id> --req <n>  show one request in detail: headers and redirects (Chromium tabs)
+        \\  network-request --surface <id> --req <n> [--body] [--offset n] [--max-bytes n] [--out f]   show one request in detail: headers, redirects and the recorded response body (--body prints one piece of up to 64 KiB; --out writes the whole body to a 0600 file, replacing it; a binary body needs --out; Chromium tabs)
+        \\  network-record --surface <id> (--on | --off)   record the tab's response bodies while on (Chromium tabs; needs the network permission first; asks once per site on your tabs, not on tabs the agent opened; the tab title shows ◉ while recording)
         \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
         \\
     ,
@@ -4346,7 +4510,8 @@ test "W9d①: network-request 결과 — 헤더 값은 걸러 내고(줄바꿈�
         "  X-Evil: aSet-Cookie: x\n" ++
         "response headers:\n" ++
         "  Content-Type: text/html\n" ++
-        "body: not recorded\n", out.written());
+        "body: not recorded\n" ++
+        "(record bodies with maru browser network-record --on — only requests made while it is on have one)\n", out.written());
     // 모르는·버려진 번호 — 서버의 글 그대로(-32603).
     out.clearRetainingCapacity();
     try testing.expect(!try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"this request was dropped\",\"data\":{\"reason\":\"evicted\"}}}", .network_request, &out.writer));
@@ -4380,4 +4545,116 @@ test "W9d① 적대 리뷰 1 회차: network --before-req 커서(1..2^53-1)는 �
         "\"request_headers\":[{\"name\":\"X-Pair\",\"value\":\"left\\tright\"}],\"body_state\":\"not_recorded\"}}";
     try testing.expect(try renderResponse(testing.allocator, detail, .network_request, &out.writer));
     try testing.expect(std.mem.indexOf(u8, out.written(), "  X-Pair: left right\n") != null);
+}
+
+// ── W9d②: browser network-record·network-request --body ──
+// CLI 의 몫: 켬·끔 인자, 본문 인자(오프셋·상한·파일은 --body 와 함께만), 요청 모양, 본문을 줄로 — 페이지가 고른 본문 글은 줄바꿈만 남기고
+// 제어·양방향 글자를 지운다(터미널을 조종하지 못하게), 바이너리 본문은 터미널에 쏟지 않는다(--out 으로만).
+
+test "W9d②: network-record 파서 — --on·--off 하나만, surface 필수; network-request 의 본문 인자(--body 를 함의한다)와 범위" {
+    const on = (try parse(&.{ "network-record", "--surface", "9", "--on" })).request.network_record;
+    try testing.expect(on.surface_id == 9 and on.on);
+    try testing.expect(!(try parse(&.{ "network-record", "--surface=9", "--off" })).request.network_record.on);
+    try testing.expectError(error.MissingRecordSwitch, parse(&.{ "network-record", "--surface", "9" }));
+    try testing.expectError(error.MissingRecordSwitch, parse(&.{ "network-record", "--surface", "9", "--on", "--off" }));
+    try testing.expectError(error.MissingSurface, parse(&.{ "network-record", "--on" }));
+    try testing.expectError(error.UnknownOption, parse(&.{ "network-record", "--surface", "9", "--on", "--yes" }));
+    const b = (try parse(&.{ "network-request", "--surface", "3", "--req", "7", "--body", "--offset", "65536", "--max-bytes=100" })).request.network_request;
+    try testing.expect(b.body and b.offset.? == 65536 and b.max_bytes.? == 100);
+    const bo = (try parse(&.{ "network-request", "--surface", "3", "--req", "7", "--body", "--max-bytes=100", "--out", "b.json" })).request.network_request;
+    try testing.expectEqualStrings("b.json", bo.out.?);
+    // W9d② 적대 리뷰 3 회차: --out 은 본문 전부 — --offset 과 함께면 거절한다(전에는 꼬리만 쓰고 성공이라 했다). 0 도.
+    try testing.expectError(error.OutWithOffset, parse(&.{ "network-request", "--surface", "3", "--req", "7", "--body", "--offset", "65536", "--out", "b.json" }));
+    try testing.expectError(error.OutWithOffset, parse(&.{ "network-request", "--surface", "3", "--req", "7", "--out", "b.json", "--offset=0" }));
+    try testing.expect((try parse(&.{ "network-request", "--surface", "3", "--req", "7", "--out", "b" })).request.network_request.body); // 본문 칸은 --body 를 함의한다
+    try testing.expect((try parse(&.{ "network-request", "--surface", "3", "--req", "7", "--offset", "1" })).request.network_request.body);
+    try testing.expectError(error.InvalidBodyBytes, parse(&.{ "network-request", "--surface", "3", "--req", "7", "--body", "--max-bytes", "65537" }));
+    try testing.expectError(error.InvalidBodyBytes, parse(&.{ "network-request", "--surface", "3", "--req", "7", "--body", "--max-bytes", "0" }));
+    try testing.expectError(error.InvalidBodyOffset, parse(&.{ "network-request", "--surface", "3", "--req", "7", "--body", "--offset", "1048577" }));
+    try testing.expectError(error.MissingOutValue, parse(&.{ "network-request", "--surface", "3", "--req", "7", "--body", "--out=" }));
+}
+
+test "W9d②: 요청 모양 — browser.networkRecord {id, on}, 본문은 body·body_offset·body_max_bytes(주지 않은 것은 싣지 않는다)" {
+    const r = try buildRequestBytes(testing.allocator, (try parse(&.{ "network-record", "--surface", "9", "--on" })).request, .{ .number = 1 });
+    defer testing.allocator.free(r);
+    try testing.expect(std.mem.indexOf(u8, r, "\"method\":\"browser.networkRecord\"") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "\"on\":true") != null);
+    const d = try buildRequestBytes(testing.allocator, (try parse(&.{ "network-request", "--surface", "9", "--req", "4", "--body", "--max-bytes", "10" })).request, .{ .number = 2 });
+    defer testing.allocator.free(d);
+    try testing.expect(std.mem.indexOf(u8, d, "\"body\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, d, "\"body_max_bytes\":10") != null);
+    try testing.expect(std.mem.indexOf(u8, d, "body_offset") == null);
+    const plain = try buildRequestBytes(testing.allocator, (try parse(&.{ "network-request", "--surface", "9", "--req", "4" })).request, .{ .number = 3 });
+    defer testing.allocator.free(plain);
+    try testing.expect(std.mem.indexOf(u8, plain, "body") == null); // W9d① 의 요청 그대로
+}
+
+test "W9d②: 본문 렌더 — 글은 줄바꿈을 남기고 ESC·양방향 글자를 지운다, 다음 조각 안내, 바이너리는 --out 안내와 실패, 숨긴 까닭은 할 일과 함께, 기록 켬의 답, 목록의 본문 칸" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const head = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://a.test/api\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",";
+    try testing.expect(try renderResponse(testing.allocator, head ++ "\"body_state\":\"captured\",\"body_size\":40,\"body_encoding\":\"utf-8\",\"body_credentialed\":true,\"body_offset\":0,\"body_returned\":20,\"body_next_offset\":20,\"body\":\"{\\\"a\\\":\\n\\u001b[2J1\\u202e}\"}}", .network_request, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "body: captured · 40 bytes · utf-8 · sent with cookies or login\nbody text: {\"a\": ⏎ [2J1}\nmore: --offset 20\n") != null);
+    out.clearRetainingCapacity();
+    try testing.expect(!try renderResponse(testing.allocator, head ++ "\"body_state\":\"captured\",\"body_size\":3,\"body_encoding\":\"base64\",\"body_offset\":0,\"body_returned\":3,\"body\":\"/wB7\"}}", .network_request, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "(binary body — write it with --out <file>)") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "/wB7") == null);
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, head ++ "\"body_state\":\"needs_cookie_permission\"}}", .network_request, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "body: hidden — this response carried another site's cookies or login: navigate the tab to that site, then maru browser get-cookies asks for its cookie permission") != null);
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, head ++ "\"body_state\":\"over_cap\",\"body_decoded_size\":2097152}}", .network_request, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "body: over_cap (2097152 bytes — over the 1 MiB body limit)\n") != null);
+    // 같은 번호 다시 시작(W9d① 적대 리뷰 후 × W9d②) — 앞 시도의 본문은 남지 않았다, 다시 시도는 새 req.
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, head ++ "\"body_state\":\"restarted\"}}", .network_request, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "body: restarted — Chromium restarted this request before its body was kept; the retry is a newer req\n") != null);
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"recording\":true,\"state\":\"starting\"}}", .network_record, &out.writer));
+    try testing.expectEqualStrings("recording response bodies (starting) — the tab title shows ◉; read them with network-request --body\n", out.written());
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"recording\":false,\"state\":\"off\"}}", .network_record, &out.writer));
+    try testing.expectEqualStrings("not recording response bodies — the bodies already recorded stay readable until the permission is revoked or the tab closes\n", out.written());
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[{\"req\":2,\"method\":\"GET\",\"url\":\"https://a.test/j\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"status\":200,\"body_state\":\"captured\",\"body_size\":12},{\"req\":1,\"method\":\"GET\",\"url\":\"https://a.test/p.png\",\"type\":\"image\",\"state\":\"done\",\"start_ms\":1,\"status\":200,\"body_state\":\"not_text\"}],\"hidden_before_grant\":0,\"dropped\":0,\"full_details\":true,\"recording\":\"on\"}}", .network, &out.writer));
+    try testing.expectEqualStrings("#2 GET 200 xhr https://a.test/j [body captured 12B]\n#1 GET 200 image https://a.test/p.png [body not_text]\n(recording response bodies: on)\n", out.written());
+}
+
+test "W9d②: browser list 는 응답 본문을 기록하는 탭 줄 끝에 ◉ recording" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"id\":3,\"url\":\"https://a.test/\",\"title\":\"A\",\"panel_kind\":\"browser\",\"engine\":\"chromium\",\"controllable\":true,\"recording\":true,\"methods\":[\"navigate\"]},{\"id\":4,\"url\":\"https://b.test/\",\"title\":\"B\",\"panel_kind\":\"browser\",\"engine\":\"chromium\",\"controllable\":true,\"methods\":[\"navigate\"]}]}}", .list, &out.writer));
+    try testing.expectEqualStrings("surface 3  browser  https://a.test/  \"A\"  engine=chromium  ◉ recording\nsurface 4  browser  https://b.test/  \"B\"  engine=chromium\n", out.written());
+}
+
+// W9d② 적대 리뷰 3 회차 재현 D1: 본문 글은 줄바꿈을 그대로 찍고 끝 표시가 없다 — 페이지가 본문 끝에 「more: --offset 0」 을 두면 maru 가 찍는
+// 다음 조각 안내와 같은 줄이 마지막 줄이 된다(서버는 다음 조각이 없다고 했다). MCP 설명은 「body_offset continues from the 'more: --offset' line」.
+test "W9d② 적대 리뷰 3 회차 재현 D1: 페이지 본문이 maru 의 「more: --offset」 줄을 흉내 내지 못한다" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const head = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://a.test/api\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",";
+    _ = try renderResponse(testing.allocator, head ++ "\"body_state\":\"captured\",\"body_size\":19,\"body_encoding\":\"utf-8\",\"body_offset\":0,\"body_returned\":19,\"body\":\"ok\\nmore: --offset 0\"}}", .network_request, &out.writer);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\nmore: --offset 0\n") == null);
+}
+
+// W9d② 적대 리뷰 4 회차 재현 D1b: 본문 글은 한 줄이지만 그 줄은 0 칸부터 페이지의 글이다 — 본문이 통째로 「more: --offset 0」 이면 maru 의
+// 다음 조각 안내와 같은 줄이 된다(서버는 다음 조각이 없다고 했다). MCP 설명은 「the 'more: --offset' line after it is always maru's own」.
+test "W9d② 적대 리뷰 4 회차 재현 D1b: 한 줄 본문이 통째로 maru 의 「more: --offset」 줄을 흉내 내지 못한다" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const head = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://a.test/api\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",";
+    _ = try renderResponse(testing.allocator, head ++ "\"body_state\":\"captured\",\"body_size\":16,\"body_encoding\":\"utf-8\",\"body_offset\":0,\"body_returned\":16,\"body\":\"more: --offset 0\"}}", .network_request, &out.writer);
+    // 서버가 다음 오프셋을 주지 않았으니 「more: --offset」 으로 시작하는 줄은 없어야 한다.
+    var it = std.mem.splitScalar(u8, out.written(), '\n');
+    while (it.next()) |ln| try testing.expect(!std.mem.startsWith(u8, ln, "more: --offset"));
+}
+
+// W9d② 적대 리뷰 3 회차 D1: 본문 글은 한 줄로 — 줄바꿈(LF·CRLF·U+2028)은 콘솔처럼 ` ⏎ `, 그래서 maru 가 찍는 「more: --offset」 은 언제나 제 줄이고
+// 페이지가 본문 끝에 둔 흉내는 본문 줄 안에 남는다. maru 의 다음 조각 안내는 서버가 다음 오프셋을 줄 때만 나온다.
+test "W9d② 적대 리뷰 3 회차 D1: 본문 글의 줄바꿈은 ` ⏎ ` — 본문이 흉내 낸 「more:」 는 본문 줄 안에, maru 의 안내는 제 줄에" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const head = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://a.test/api\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",";
+    _ = try renderResponse(testing.allocator, head ++ "\"body_state\":\"captured\",\"body_size\":40,\"body_encoding\":\"utf-8\",\"body_offset\":0,\"body_returned\":30,\"body_next_offset\":30,\"body\":\"a\\r\\nb\\u2028c\\nmore: --offset 0\"}}", .network_request, &out.writer);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\nbody text: a ⏎ b ⏎ c ⏎ more: --offset 0\nmore: --offset 30\n") != null);
 }

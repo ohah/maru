@@ -1492,6 +1492,8 @@ const Table = struct {
     // 요청까지 보인다 — 쿠키·인증 값은 쿠키 권한도 받은 사이트만, 적대 리뷰 3 회차 D1)와 꺼졌을 때(이 사이트의 요청만 자세히, 헤더 값은 허용 목록만).
     grant_scope_network: [:0]const u8,
     grant_scope_network_limited: [:0]const u8,
+    // W9d②: 응답 본문 기록(`browser_network_body`)을 묻는 동의문 — 사이트마다 한 번(사용자 탭), 탭 제목 앞에 ◉ 가 붙는다.
+    grant_scope_network_body: [:0]const u8,
     web_osr_gpu_unavailable: [:0]const u8,
     web_osr_profile_in_use: [:0]const u8,
     web_osr_start_failed: [:0]const u8,
@@ -2499,6 +2501,7 @@ const en: Table = .{
     .grant_scope_storage = "read and write this site's cookies and storage, including its subdomains and login tokens",
     .grant_scope_network = "read this tab's network requests from now on, incl. other sites' (cookie values only where cookies are allowed)",
     .grant_scope_network_limited = "read this tab's network requests from now on (details for this site only, no cookie or login values)",
+    .grant_scope_network_body = "record this tab's response bodies on this site from now on (kept in memory, ◉ on the tab while recording)",
     .web_osr_gpu_unavailable = "The Chromium engine can't draw on this Mac (no GPU path). Use the built-in engine for this page.",
     .web_osr_profile_in_use = "Another maru is using the Chromium browser profile. Chromium tabs stay empty in this window.",
     .web_osr_start_failed = "The Chromium engine could not start. Reinstall it with brew reinstall ohah/maru/maru-chromium, then restart maru.",
@@ -3789,6 +3792,7 @@ const ko: Table = .{
     .grant_scope_storage = "이 사이트(하위 도메인 포함)의 쿠키·스토리지(로그인 토큰 포함)를 읽고 쓰려",
     .grant_scope_network = "이 탭의 네트워크 요청을 지금부터 다른 사이트 것까지 읽으려(쿠키 값은 쿠키 허용 사이트만)",
     .grant_scope_network_limited = "이 탭의 네트워크 요청을 지금부터 읽으려(이 사이트만 자세히, 쿠키·로그인 값 없이)",
+    .grant_scope_network_body = "이 탭의 이 사이트 응답 본문을 지금부터 기록하려(메모리에만, 기록하는 동안 탭에 ◉)",
     .web_osr_gpu_unavailable = "이 Mac 에서는 Chromium 엔진으로 그릴 수 없습니다(GPU 경로 없음). 이 페이지는 내장 엔진을 쓰세요.",
     .web_osr_profile_in_use = "다른 maru 가 Chromium 브라우저 프로필을 쓰고 있습니다. 이 창의 Chromium 탭은 비어 있습니다.",
     .web_osr_start_failed = "Chromium 엔진을 시작하지 못했습니다. brew reinstall ohah/maru/maru-chromium 으로 다시 설치한 뒤 maru 를 다시 켜 주세요.",

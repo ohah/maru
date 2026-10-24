@@ -117,6 +117,10 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
         error.MissingRequestId => "network-request needs --req <n> (a req number from maru browser network)",
         error.InvalidRequestId => "--req must be a req number from maru browser network (a positive integer)",
         error.InvalidBeforeReq => "--before-req must be the next_before_req of the previous page (a positive integer)",
+        error.MissingRecordSwitch => "network-record needs exactly one of --on or --off",
+        error.InvalidBodyBytes => "--max-bytes must be 1-65536",
+        error.InvalidBodyOffset => "--offset must be 0-1048576 (a byte offset into the body)",
+        error.OutWithOffset => "--out writes the whole body to the file — drop --offset (use --offset without --out to print one piece)",
     };
 }
 
@@ -153,7 +157,169 @@ fn runRequest(
         defer browser.freeUpload(allocator, abs);
         return runPlainRequest(io, allocator, .{ .upload = abs }, stdout, stderr);
     }
+    // W9d②: 본문 전부를 파일로 — 조각(64 KiB)을 이어 받아 다 모은 뒤 0600 으로 원자적으로 쓴다(바이너리 본문은 이 길로만).
+    if (req == .network_request and req.network_request.out != null) return runNetworkBodyOut(io, allocator, req.network_request, stdout, stderr);
     return runPlainRequest(io, allocator, req, stdout, stderr);
+}
+
+/// W9d②: `network-request --body --out <file>` — `browser.networkRequest` 를 `body_offset` 을 옮기며 되풀이해 본문을 모은다(글은 UTF-8 그대로,
+/// 바이너리는 base64 를 푼다). 다 모은 뒤에만 `publishResult`(0600·원자적)로 쓴다 — 중간에 실패하면 파일을 만들지 않는다. 받는 동안 본문이
+/// 바뀌면(크기가 다르다) 실패로 친다.
+fn runNetworkBodyOut(io: std.Io, allocator: std.mem.Allocator, cmd: browser.NetworkRequestCmd, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    var acc: BodyOut = .{ .marks = .init(allocator) };
+    defer acc.deinit(allocator);
+    var rounds: usize = 0;
+    while (true) : (rounds += 1) {
+        if (rounds > body_out_max_rounds) return bodyOutError(stderr, "the body did not end");
+        const piece = bodyOutPiece(cmd, acc.offset);
+        const request_bytes = try browser.buildRequestBytes(allocator, .{ .network_request = piece }, .{ .number = 1 });
+        defer allocator.free(request_bytes);
+        const resp = try control_client.fetchResponse(io, allocator, request_bytes, stderr);
+        defer allocator.free(resp);
+        var pm = cp.parseMessage(allocator, resp) catch return bodyOutError(stderr, "the server returned a malformed answer");
+        defer pm.deinit();
+        const result = switch (pm.message) {
+            .response => |r| r.result orelse {
+                // 서버의 오류(모르는 번호·권한) — 그 글 그대로.
+                _ = browser.renderResponse(allocator, resp, .network_request, stderr) catch false;
+                stderr.flush() catch {};
+                return error.UnknownCommand;
+            },
+            else => return bodyOutError(stderr, "the server returned a malformed answer"),
+        };
+        if (result != .object) return bodyOutError(stderr, "the server returned a malformed answer");
+        const o = result.object;
+        const state = if (o.get("body_state")) |v| (if (v == .string) v.string else "") else "";
+        if (!std.mem.eql(u8, state, "captured")) {
+            // 잡지 않았거나 보이지 않는다 — 자세히를 그대로 보여 까닭을 알린다(파일은 만들지 않는다).
+            _ = browser.renderResponse(allocator, resp, .network_request, stderr) catch false;
+            stderr.flush() catch {};
+            return error.UnknownCommand;
+        }
+        switch (try acc.add(allocator, o)) {
+            .more => {},
+            .done => break,
+            .fail => |m| return bodyOutError(stderr, m),
+        }
+    }
+    const path = cmd.out.?;
+    publishResult(std.Io.Dir.cwd(), io, path, acc.body.items) catch return bodyOutError(stderr, "cannot publish the output file atomically");
+    try stdout.print("body: {d} bytes{s}{s} → {s}\n", .{ acc.body.items.len, if (acc.binary) " (binary)" else "", acc.marks.written(), path });
+    try stdout.flush();
+}
+
+/// `--out` 의 조각 크기·바퀴 상한(W9d② 적대 리뷰 1 회차): 파일로 쓸 때는 조각을 가장 크게(64 KiB) 읽는다 — `--max-bytes` 는 터미널에 찍을 조각의
+/// 크기라 여기서는 쓰지 않는다(작은 `--max-bytes` 로는 1 MiB 본문이 바퀴 상한(1028) 안에 끝나지 않아 「the body did not end」 였다 — MCP 의
+/// `body_max_bytes`+`out` 도). 한 바퀴는 조각의 절반 넘게 나아간다(UTF-8 글자 경계로 조금 덜 줄 뿐) — 상한은 그것의 두 배로 넉넉히.
+const body_out_piece_bytes: u32 = browser.max_network_body_read;
+const body_out_max_rounds: usize = browser.max_network_body_bytes / (body_out_piece_bytes / 2) + 4;
+
+/// `--out` 이 모으는 본문 — 조각(`captured` 인 결과) 하나씩 더한다(소켓 없는 순수 판 — 시험이 본다).
+const BodyOut = struct {
+    body: std.ArrayList(u8) = .empty,
+    /// 다음 조각의 오프셋(`--out` 은 본문 전부 — `--offset` 과 함께면 파서가 거절한다).
+    offset: u32 = 0,
+    size: ?i64 = null,
+    binary: bool = false,
+    /// 표시(되돌린 글·Chromium 이 푼 그대로·자격 증명 — W9d② 적대 리뷰 3 회차: 요약 줄이 빠뜨렸다) — 첫 조각의 것(조각마다 같다).
+    marks: std.Io.Writer.Allocating,
+
+    const Step = union(enum) { more, done, fail: []const u8 };
+
+    fn deinit(self: *BodyOut, allocator: std.mem.Allocator) void {
+        self.body.deinit(allocator);
+        self.marks.deinit();
+    }
+
+    fn add(self: *BodyOut, allocator: std.mem.Allocator, o: std.json.ObjectMap) std.mem.Allocator.Error!Step {
+        const total = if (o.get("body_size")) |v| (if (v == .integer) v.integer else -1) else -1;
+        if (self.size) |prev| if (prev != total) return .{ .fail = "the body changed while it was read" };
+        if (self.size == null) browser.writeBodyMarks(&self.marks.writer, o) catch return error.OutOfMemory;
+        self.size = total;
+        self.binary = if (o.get("body_encoding")) |v| v == .string and std.mem.eql(u8, v.string, "base64") else false;
+        const text = if (o.get("body")) |v| (if (v == .string) v.string else "") else "";
+        if (self.binary) {
+            const dec = std.base64.standard.Decoder;
+            const n = dec.calcSizeForSlice(text) catch return .{ .fail = "the server returned a malformed body piece" };
+            const start = self.body.items.len;
+            try self.body.resize(allocator, start + n);
+            dec.decode(self.body.items[start..], text) catch return .{ .fail = "the server returned a malformed body piece" };
+        } else try self.body.appendSlice(allocator, text);
+        const next = if (o.get("body_next_offset")) |v| (if (v == .integer) v.integer else -1) else -1;
+        if (next < 0) return .done;
+        if (next <= self.offset) return .{ .fail = "the body did not advance" };
+        // W9d② 적대 리뷰 3 회차: 본문은 1 MiB 까지다 — 그보다 먼 다음 오프셋은 서버의 잘못이다(전에는 u32 를 넘으면 `@intCast` 가 죽었다).
+        if (next > browser.max_network_body_bytes) return .{ .fail = "the server returned a body offset out of range" };
+        self.offset = @intCast(next);
+        return .more;
+    }
+};
+
+test "W9d② 적대 리뷰 3 회차: --out 은 u32 를 넘는 다음 오프셋에 죽지 않고 실패를 알리며, 요약에 본문의 표시(되돌린 글·Chromium 이 푼 그대로·자격 증명)를 싣는다" {
+    const ta = std.testing.allocator;
+    var acc: BodyOut = .{ .marks = .init(ta) };
+    defer acc.deinit(ta);
+    const first = try std.json.parseFromSlice(std.json.Value, ta, "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body_redecoded\":\"windows-1252\",\"body_chromium_decoded\":true,\"body_credentialed\":true,\"body\":\"ab\",\"body_next_offset\":2}", .{});
+    defer first.deinit();
+    try std.testing.expect(try acc.add(ta, first.value.object) == .more);
+    try std.testing.expectEqualStrings(" · re-decoded from the browser's windows-1252 reading · as the browser decoded it (no charset — may differ from what the page read) · sent with cookies or login", acc.marks.written());
+    for ([_][]const u8{ "4294967297", "1048577" }) |n| {
+        var b: [256]u8 = undefined;
+        const json = try std.fmt.bufPrint(&b, "{{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body\":\"cd\",\"body_next_offset\":{s}}}", .{n});
+        const big = try std.json.parseFromSlice(std.json.Value, ta, json, .{});
+        defer big.deinit();
+        var probe: BodyOut = .{ .marks = .init(ta), .offset = 2, .size = 4 };
+        defer probe.deinit(ta);
+        switch (try probe.add(ta, big.value.object)) {
+            .fail => |m| try std.testing.expectEqualStrings("the server returned a body offset out of range", m),
+            else => return error.ExpectedFail,
+        }
+    }
+    const last = try std.json.parseFromSlice(std.json.Value, ta, "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body\":\"cd\"}", .{});
+    defer last.deinit();
+    try std.testing.expect(try acc.add(ta, last.value.object) == .done);
+    try std.testing.expectEqualStrings("abcd", acc.body.items);
+}
+
+// W9d② 적대 리뷰 5 회차 변이 생존 M25(덮는 시험이 없었다): 조각 사이에 본문 크기가 바뀌면(기록을 지우고 같은 번호에 새 본문 — 다른 본문의 앞뒤를
+// 이어 붙이게 된다) 실패를 알린다.
+test "W9d② 적대 리뷰 5 회차: --out 은 조각 사이에 본문 크기가 바뀌면 이어 붙이지 않고 실패를 알린다" {
+    const ta = std.testing.allocator;
+    var acc: BodyOut = .{ .marks = .init(ta) };
+    defer acc.deinit(ta);
+    const first = try std.json.parseFromSlice(std.json.Value, ta, "{\"body_state\":\"captured\",\"body_size\":4,\"body_encoding\":\"utf-8\",\"body\":\"ab\",\"body_next_offset\":2}", .{});
+    defer first.deinit();
+    try std.testing.expect(try acc.add(ta, first.value.object) == .more);
+    const changed = try std.json.parseFromSlice(std.json.Value, ta, "{\"body_state\":\"captured\",\"body_size\":5,\"body_encoding\":\"utf-8\",\"body\":\"cde\"}", .{});
+    defer changed.deinit();
+    switch (try acc.add(ta, changed.value.object)) {
+        .fail => |m| try std.testing.expectEqualStrings("the body changed while it was read", m),
+        else => return error.ExpectedFail,
+    }
+    try std.testing.expectEqualStrings("ab", acc.body.items);
+}
+
+/// `--out` 이 보내는 조각 하나의 요청 — 그 오프셋부터 가장 큰 조각, 파일 칸은 빼고.
+fn bodyOutPiece(cmd: browser.NetworkRequestCmd, offset: u32) browser.NetworkRequestCmd {
+    var piece = cmd;
+    piece.offset = offset;
+    piece.out = null;
+    piece.max_bytes = body_out_piece_bytes;
+    return piece;
+}
+
+test "W9d② 적대 리뷰 1 회차: --out 은 --max-bytes 와 무관하게 64 KiB 조각으로 읽고, 바퀴 상한은 1 MiB 본문을 다 읽는다" {
+    const p = bodyOutPiece(.{ .surface_id = 3, .req = 7, .body = true, .max_bytes = 100, .out = "b.json" }, 4096);
+    try std.testing.expectEqual(@as(?u32, browser.max_network_body_read), p.max_bytes);
+    try std.testing.expectEqual(@as(?u32, 4096), p.offset);
+    try std.testing.expect(p.out == null and p.body);
+    try std.testing.expect(body_out_max_rounds * (body_out_piece_bytes / 2) >= browser.max_network_body_bytes);
+}
+
+fn bodyOutError(stderr: *std.Io.Writer, msg: []const u8) error{UnknownCommand} {
+    stderr.print("maru browser network-request: {s}\n", .{msg}) catch {};
+    stderr.flush() catch {};
+    return error.UnknownCommand;
 }
 
 fn runPlainRequest(

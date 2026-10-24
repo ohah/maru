@@ -78,6 +78,7 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
         .close_asking => |browser| askClose(browser, writer),
         .new_tab_credit => |browser| new_tab.grant(browser), // W9b③ — maru 가 에이전트 탭에만
         .net_watch => |value| @import("network.zig").watch(value), // W9d①
+        .net_record => |value| @import("net_body.zig").record(value), // W9d②
         .resize => |value| resize(value, writer),
         .set_hidden => |value| if (hostFor(value.browser, writer)) |host| {
             defer object.release(host);
@@ -251,6 +252,7 @@ pub fn onClosed(cef_id: c_int) void {
     new_tab.openerClosed(cef_id); // 그것이 연 기다리는 팝업(W6f)
     if (state.registry.remove(cef_id)) |entry| {
         dialogs.dropBrowser(entry.id);
+        @import("net_body.zig").browserClosed(cef_id, entry.id); // W9d②: 기다리던 본문은 `detached`(`browser_closed` 앞), 관찰자 등록을 놓는다
         @import("network.zig").browserClosed(entry.id); // W9d①: 지켜보기도 끝난다
         const browser: [*c]c.cef_browser_t = @ptrCast(@alignCast(entry.handle));
         object.release(browser);

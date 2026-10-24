@@ -19696,6 +19696,8 @@ pub const AppSession = struct {
                                     .engine = if (web_ops.isOsrTerm(term)) .chromium else .webkit,
                                     // markdown·파일 뷰는 browser.* 를 실행하지 않는다(Swift `drainBrowserOps` 가 거절).
                                     .controllable = web_ops.isBrowserTerm(term),
+                                    // W9d②: 응답 본문 기록 중(탭 제목의 ◉ 와 같은 신호).
+                                    .recording = web_ops.isOsrTerm(term) and web_osr.networkRecording(term.surface.id),
                                 },
                             },
                         });
@@ -22497,12 +22499,14 @@ pub const AppSession = struct {
                         }
                     }
                     for (titles.items) |t| {
-                        const marker = if (tab_ops.tabTitleRunningMarker(t)) agent_ops.agentFlagUtf8() else "";
+                        // running ● 와 W9d② 기록 ◉ — 둘 다 셀로 그리고 색을 따로 칠한다.
+                        const marker = tab_ops.tabTitleMarker(t) orelse "";
                         marker_titles.append(self.allocator, self.allocator.dupe(u8, marker) catch continue) catch {};
                     }
                     const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, marker_titles.items, @intCast(bar_cols), tab_fg, close_tab, pane_ops.paneActiveTermIndex(self, lr.leaf), active_tab_fg, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols, null) catch continue;
                     // running Term 탭 플래그 ● → **탭마다 그 Term 의 브랜드색**(위 `flag_kinds`).
                     agent_ops.recolorAgentFlagCellsPerTab(dl.cells, flag_kinds.items);
+                    tab_ops.recolorRecordingMarkCells(dl.cells); // W9d② 기록 ◉ → 빨강(그 칸만)
                     self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
                     pane_ops.appendPaneTabTitles(self, &tab_title_batch, lr.leaf, pb, titles.items, editing_tab, pb.full);
 
@@ -23835,7 +23839,12 @@ pub const AppSession = struct {
     /// 전부 여기서 붙는다). 판정자가 화면에 실제로 나오는지 재려면 이 함수를 지나야 한다.
     pub fn diffAwareLabel(self: *AppSession, allocator: std.mem.Allocator, term: *Term) ![]u8 {
         _ = self;
-        const base = termLabel(term);
+        // W9d② 적대 리뷰 1 회차: 고른 제목(OSC·rename)이 기록 표식 ◉ 로 시작하면 보이지 않는 글자를 앞에 둬 표식으로 읽히지 않게 — 아래 어느
+        // 갈래도 이 `base` 를 쓴다(maru 가 붙이는 진짜 표식만 표식이다).
+        const raw_base = termLabel(term);
+        const escaped: ?[]u8 = if (tab_ops.titleNeedsMarkEscape(raw_base)) try std.fmt.allocPrint(allocator, "{s}{s}", .{ tab_ops.title_mark_escape, raw_base }) else null;
+        defer if (escaped) |e| allocator.free(e);
+        const base: []const u8 = escaped orelse raw_base;
         if (term.file_entry) |entry| {
             if (entry.kind == .diff) {
                 // 라벨이 비면 탭이 `README.md · `로 끝나 무언가 잘린 것처럼 보인다(적대적 검증 2026-08-14).
@@ -23884,6 +23893,11 @@ pub const AppSession = struct {
         if (editor_ops.isDirty(term)) {
             return std.fmt.allocPrint(allocator, "{s} {s}", .{ editor_dirty_marker, base });
         }
+        // W9d②: 응답 본문을 기록하는 Chromium 탭 — 제목 앞에 ◉(셀로 그려 빨갛게 — `tab_ops.recolorRecordingMarkCells`).
+        if (term.kind == .web and web_osr.networkRecording(term.surface.id)) {
+            return std.fmt.allocPrint(allocator, "{s} {s}", .{ tab_ops.recording_mark_utf8, base });
+        }
+
         return flagPrefixedLabel(allocator, base, term.agent_state == .running);
     }
 
@@ -89089,6 +89103,51 @@ test "사이드바 검색 줄은 query·preedit·caret을 한 문자열로 합�
     session.sidebar_search_input.query.clearRetainingCapacity();
     session.sidebar_search_input.preedit.clearRetainingCapacity();
     try std.testing.expect(sidebar_ops.sidebarSearchTextAlloc(session, &muted) == null);
+}
+
+// 이 테스트가 증명하는 것(W9d②): 응답 본문을 기록하는 Chromium 탭의 표식 ◉ 도 running 마커처럼 셀로 가르고(본문은 measured 에 그대로),
+// 셀에서는 그 칸만 빨갛게 칠한다 — running ● 는 브랜드색 그대로. 왜 중요한가 — 에이전트가 연 탭은 기록을 묻지 않으므로(UB2) 이 표식이
+// 사용자가 「지금 이 탭의 본문이 기록된다」 를 아는 유일한 신호다. 표식이 본문에 남으면 빨강이 아니라 제목색으로 그려진다.
+test "W9d②: 기록 표식 ◉ 는 탭 제목에서 마커로 갈리고 셀에서 그 칸만 빨갛다 — running ● 와 다른 글자, 본문 안의 ◉ 는 마커가 아니다" {
+    try std.testing.expectEqualStrings("\u{25C9}", tab_ops.tabTitleMarker("\u{25C9} Example").?);
+    try std.testing.expectEqualStrings("Example", tab_ops.tabTitleBody("\u{25C9} Example"));
+    try std.testing.expect(!tab_ops.tabTitleRunningMarker("\u{25C9} Example")); // running 의 브랜드색 차례에 끼지 않는다
+    try std.testing.expectEqualStrings("\u{25CF}", tab_ops.tabTitleMarker("\u{25CF} zsh").?);
+    try std.testing.expect(tab_ops.tabTitleMarker("rec \u{25C9} x") == null);
+    // W9d② 적대 리뷰 1 회차: 고른 제목이 기록 표식으로 시작하면 보이지 않는 글자를 앞에 둬 표식이 아니게 — 제목 본문은 그대로 남는다.
+    try std.testing.expect(tab_ops.titleNeedsMarkEscape("\u{25C9} Fake"));
+    try std.testing.expect(!tab_ops.titleNeedsMarkEscape("Fake \u{25C9}"));
+    const escaped = tab_ops.title_mark_escape ++ "\u{25C9} Fake";
+    try std.testing.expect(tab_ops.tabTitleMarker(escaped) == null);
+    try std.testing.expectEqualStrings(escaped, tab_ops.tabTitleBody(escaped));
+    // 진짜 표식 뒤의 같은 글자 제목은 본문으로 남는다.
+    try std.testing.expectEqualStrings("\u{25C9}", tab_ops.tabTitleMarker("\u{25C9} \u{25C9} Fake").?);
+    try std.testing.expectEqualStrings("\u{25C9} Fake", tab_ops.tabTitleBody("\u{25C9} \u{25C9} Fake"));
+    try std.testing.expect(tab_ops.recording_mark != agent_running_flag);
+    try std.testing.expect(!std.mem.eql(u8, tab_ops.recording_mark_utf8, editor_dirty_marker));
+    // 셀 경로: 표식 칸만 빨강, running ● 는 그대로.
+    const C = struct { codepoint: u21, style: struct { foreground: terminal.Color = .default } = .{} };
+    var cells = [_]C{ .{ .codepoint = ' ' }, .{ .codepoint = tab_ops.recording_mark }, .{ .codepoint = agent_running_flag }, .{ .codepoint = 'x' } };
+    tab_ops.recolorRecordingMarkCells(&cells);
+    try std.testing.expectEqual(terminal.Color{ .rgb = tab_ops.recording_mark_color }, cells[1].style.foreground);
+    try std.testing.expectEqual(terminal.Color.default, cells[2].style.foreground);
+    try std.testing.expectEqual(terminal.Color.default, cells[3].style.foreground);
+}
+
+// 이 테스트가 증명하는 것(W9d② 적대 리뷰 1 회차): 탭 바가 부르는 라벨 함수(`diffAwareLabel`)가 고른 제목(OSC·rename)의 머리 ◉ 를 표식으로
+// 내지 않는다 — 기록하지 않는 탭이 빨간 기록 표식을 얻지 않는다. 제목 글은 그대로(보이지 않는 글자 하나만 앞에).
+test "W9d② 적대 리뷰 1 회차: ◉ 로 시작하는 제목의 탭은 기록 표식을 얻지 않는다 — 라벨 함수가 그 글자를 표식 아닌 본문으로 둔다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const term = pane_ops.activePane(session).activeTerm();
+    term.surface.custom_name = try session.allocator.dupe(u8, "\u{25C9} REC fake"); // rename(owned, deinit이 해제)
+    const label = try session.diffAwareLabel(allocator, term);
+    defer allocator.free(label);
+    try std.testing.expect(tab_ops.tabTitleMarker(label) == null);
+    try std.testing.expect(std.mem.endsWith(u8, tab_ops.tabTitleBody(label), "\u{25C9} REC fake"));
 }
 
 // 이 테스트가 증명하는 것: 탭 제목에서 running 마커(`●`)와 본문을 가르는 규칙.

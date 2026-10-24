@@ -74,6 +74,19 @@ Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 
   숨긴 수(`hidden_other_site_pages`)는 `hidden_before_grant` 처럼 받아들인다(수와 때만 — N8). 설정 `browser.agent-network-full`(기본 켬)이면 헤더 값·다른
   사이트와 다른 사이트 iframe 의 요청까지 보인다 — 사용자 결정이다(자격 증명 값·주소의 사용자 정보는 위의 쿠키 권한이 있을 때만). 끄면 허용 목록 투영이고 sidecar 가 보내기 전에 덜어 낸다. 어느 쪽이든 앱 로그에 주소·헤더를
   쓰지 않는다. 철회(하나·모두)·탭 닫힘으로 그 탭의 마지막 grant 가 사라지면 지켜보기를 끄고 기록을 지운다. 상세는 [웹 OSR 계획 「W9d① 결정·구현」](plans/web-osr-backend.md).
+- **`browser_network_body`(W9d② — `browser.networkRecord`, 그리고 `browser.networkRequest` 의 본문)는 `browser`·`browser_network` 와 따로 묻는 peer scope 다** —
+  응답 본문에는 그 사이트의 개인 자료(메일·계정·토큰)가 그대로 있다. 상속 fd 로 발급하지 않고, 확인 grant 는 모달이 보인 호스트와 그 하위 도메인에 묶인다(다른 호스트로
+  다시 허용하면 새 번호 — 본문의 시작점도 새로). 사용자 탭은 사이트마다 한 번 묻고, 에이전트가 연 탭은 묻지 않는다(사용자 결정 UB2 2026-10-15 — 기록을 켜는 것은
+  에이전트의 `networkRecord` 이고 그동안 탭 제목 앞에 빨간 ◉ 가 선다 — 사용자가 아는 신호다). 본문은 네트워크 기록 위에 선다 — 그 탭의 `browser_network` grant 가
+  지금 문서를 덮지 않으면 본문 모달을 띄우지 않고 `needs_network_permission` 으로 답하고, 네트워크 grant 가 사라지면 기록도 끈다. 보이는 규칙은 헤더의 투영(설정·덮임·
+  그 사이트에 있을 때)에 둘을 더한다: 본문 grant 뒤에 시작한 요청만(사용자 탭), 그리고 **UB1**(사용자 결정 2026-10-15 「적용」) — 본문 grant 가 덮지 않는 호스트에서
+  쿠키·인증이 **실제로 실린** 응답(CDP 가 알린 보낸 쿠키·인증 캐시의 `Authorization` — 스크립트·스타일·문서까지; 다른 사이트의 `<script>` 는 쿠키로 만든 본문도
+  받혔다, W9d②-0 J13)은 그 호스트를 덮는 `browser_storage` grant 가 있어야 보인다 — 다른 사이트의 로그인으로 받은 개인 본문이 본문 권한 하나로 새지 않게(D1 의 쿠키
+  권한 경계를 본문에도). 설정이 꺼졌으면 덮이지 않는 호스트의 본문은 브라우저 프로세스를 나가지 않는다 — sidecar 는 응답을 보낸 호스트(리다이렉트 뒤)가
+  덮이는지를 CEF 응답이 정한 뒤에만 받으러 가고(CDP 의 끝이 그보다 먼저 와도, W9d② 적대 리뷰 1 회차 MED-1 — 고치기 전에는 덮이는 주소가 덮이지 않는
+  호스트로 리다이렉트하면 본문이 나갔다), maru 는 꺼진 동안 적은 응답의 본문을 설정을 다시 켜도 꺼졌을 때의 투영으로만 보인다(적을 때 찍는다). 기록은 sidecar 가 그 탭에만 CDP `Network.enable` 을 걸어 하고(`maxPostDataSize` 1 — 요청 본문은 적지 않는다), maru 를 거친 에이전트의
+  `Network.enable`·`Network.disable`·`Fetch.*` 는 보내지 않는다(한 세션이라 기록의 상한을 바꾸거나 기록을 끌 수 있었다). 본문은 메모리에만(하나 1 MiB·탭 8 MiB·앱
+  32 MiB) — 마지막 본문 grant 의 철회·네트워크 grant 의 철회·탭 닫힘·설정 끔은 받은 본문을 지운다(지우기 전에 이미 오던 본문 frame 도 받지 않는다 — 탭마다 지운 때의 세션 바닥; 기록 끄기는 지우지 않는다). 상세는 [웹 OSR 계획 「W9d② 결정·구현」](plans/web-osr-backend.md).
 - `capture`·`subscribeOutput`은 비밀(스크롤백·실시간 출력)을 노출하므로 `read-output` capability가 필요하다. `capture`가 처음 노출되는 Phase 1 안에서 capability fd 발급·auth·거부 테스트까지 함께 구현한다. "read-only라 토큰은 나중"으로 미루지 않는다.
 
 ### 8.4 self-origin metadata 증명(일반 login shell)

@@ -116,6 +116,8 @@ fn run(init: std.process.Init) ExitCode {
     if (unset != 0) std.debug.print("maru-web-host: {d} product preference(s) not applied\n", .{unset});
     // W9d①: 서비스 워커 요청을 보는 context 하나 — 첫 서비스 워커가 뜨기 전에(브라우저 전) 만들어 끝까지 쥔다. 브라우저는 전역 context 그대로.
     network.createSharedContext();
+    // W9d②: 이제부터 알림은 보내는 줄과 쓰는 스레드로(maru 가 잠시 읽지 않아도 UI 스레드가 서지 않게 — J7). 못 띄우면 곧장 쓴다.
+    g_writer.startThread();
 
     g_inbox = .{ .io = init.io };
     g_task = object.zeroed(c.cef_task_t);
@@ -134,6 +136,7 @@ fn run(init: std.process.Init) ExitCode {
     g_accepting.store(false, .release);
     network.releaseSharedContext();
     g_api.shutdown();
+    g_writer.finish(); // 마지막 알림(browser_closed 등)이 maru 에 닿게 — 2 초까지
     return .ok;
 }
 

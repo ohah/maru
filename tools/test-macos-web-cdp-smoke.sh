@@ -92,6 +92,11 @@
 #                   갔다 돌아오면 다른 사이트에 있던 동안의 요청은 숨김 수로만(W9d① 적대 리뷰 1 회차 F2 — 실제 CEF 의 첫 사이트로 가른다) · 첫 pane 이
 #                   그 탭을 다른 사이트의 리다이렉트(localhost 의 302 → 127.0.0.1, 쿠키를 심는다)로 옮겨도 그 이동은 숨김 수로만(2 회차 N1 — 처음
 #                   주소가 덮이지 않는다) · 모든 grant 를 철회하면(앱 대본 `revokegrants`) 다시 허락받은 읽기에 앞 요청이 없다
+#   w9d-body        (W9d②) 응답 본문 기록: 에이전트가 연 탭은 묻지 않고 켠다(`network-record --on`, 목록에 ◉ recording) — chunked JSON 은 본문 그대로,
+#                   2 MiB JSON 은 over_cap, PNG 는 not_text, 글 MIME 의 잘못된 UTF-8 은 바이너리라 `--body` 만으로는 거절(--out 이면 0600 파일),
+#                   다른 사이트(localhost)에서 쿠키가 실린 스크립트는 그 사이트의 쿠키 권한 전에는 needs_cookie_permission, get-cookies 뒤에는 본문 ·
+#                   본문 권한이 없는 둘째 pane 에게는 needs_body_permission, 그 pane 이 기록을 허락받은 뒤(확인 모달, 자동 승인)에는 그 뒤 요청만
+#                   (그 전 요청은 before_body_permission) · 모든 grant 를 철회하면 ◉ 이 사라지고 본문도 지워진다
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -380,6 +385,30 @@ class H(http.server.SimpleHTTPRequestHandler):
             # W9d① 적대 리뷰 2 회차 N1: 다른 사이트(localhost)의 열린 리다이렉트 — 쿠키를 심고 덮이는 사이트(127.0.0.1)로 302.
             sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
             self.send_response(302); self.send_header("Set-Cookie", "redir=redir-secret; Path=/; HttpOnly"); self.send_header("Location", "http://127.0.0.1:%s/net-cb.html" % sys.argv[1]); self.send_header("Content-Length", "0"); self.end_headers(); return
+        if self.path.startswith("/bodyc.json"):
+            # W9d②: Content-Length 없는 chunked JSON(HTTP/1.1 — 이 응답만).
+            sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
+            self.protocol_version = "HTTP/1.1"
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Transfer-Encoding", "chunked"); self.send_header("Connection", "close"); self.end_headers()
+            for part in [b'{"chunked":[', b'"one",', b'"two"]}']:
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(part), part)); self.wfile.flush(); time.sleep(0.03)
+            self.wfile.write(b"0\r\n\r\n"); self.close_connection = True; return
+        if self.path.startswith("/bodybin.json"):
+            # W9d②: 글 MIME 인데 UTF-8 이 아니다 — CDP 는 base64 로 준다(J11), maru 는 바이너리로. 맨 앞에 BOM(FF FE)을 두면 Chromium 이
+            # UTF-16 으로 읽어 글로 준다(실측) — BOM 없는 잘못된 UTF-8 이다.
+            body = b'{"bin":"\x80\x81\xfe"}'
+            sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/bodysetck"):
+            # W9d②: localhost 가 다른 사이트 요청에도 실리는 쿠키를 심는다(localhost 는 보안 문맥 — Secure 가 된다).
+            body = b"<!doctype html><title>bodysetck</title>set"
+            sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
+            self.send_response(200); self.send_header("Content-Type", "text/html"); self.send_header("Set-Cookie", "bck=body-secret; Path=/; SameSite=None; Secure"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/bodycred.js"):
+            # W9d②: 받은 쿠키를 본문에 싣는 스크립트(쿠키로 만든 개인 본문 — UB1).
+            body = ("var bc=%s;" % repr(self.headers.get("Cookie") or "")).encode()
+            sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
+            self.send_response(200); self.send_header("Content-Type", "application/javascript"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/nocontent"):
             # W9a①: 문서가 없는 응답 — navigate 는 곧 loaded:false 로 끝나야 한다.
             sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
@@ -418,6 +447,18 @@ mkdir -p "$root/www/nsw"
 printf '<!doctype html><title>nsw</title><script>navigator.serviceWorker.register("/nsw/sw.js",{scope:"/nsw/"}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}fetch("/nsw/data.json?"+Date.now())})</script>nsw' > "$root/www/nsw/page.html"
 printf 'self.addEventListener("install",function(e){self.skipWaiting()});self.addEventListener("activate",function(e){e.waitUntil(self.clients.claim())});self.addEventListener("fetch",function(e){e.respondWith(fetch(e.request))});' > "$root/www/nsw/sw.js"
 printf '{"sw":1}' > "$root/www/nsw/data.json"
+# W9d②: 응답 본문 — chunked JSON·2 MiB JSON·PNG·잘못된 UTF-8 JSON·다른 사이트(localhost)에서 쿠키가 실린 스크립트(서버가 만든다). fetch 는 본문을
+# 읽는다 — Chromium 은 페이지가 읽기 전에는 그 요청을 끝내지 않는다(판정자 실측 — 그러면 본문도 없다).
+printf '<!doctype html><title>body</title><img src="/bodypic.png"><script src="http://localhost:%s/bodycred.js"></script><script>function F(u){return fetch(u).then(function(r){return r.text()})}F("/bodyc.json");F("/bodybig.json");F("/bodybin.json")</script>body' "$port" > "$root/www/body.html"
+printf '<!doctype html><title>bodyhome</title>bodyhome' > "$root/www/bodyhome.html"
+python3 - "$root/www" <<'PY'
+import sys, zlib, struct
+d = sys.argv[1]
+open(d + "/bodybig.json", "w").write('{"big":"' + "b" * (2 * 1024 * 1024) + '"}')
+def chunk(t, x): return struct.pack(">I", len(x)) + t + x + struct.pack(">I", zlib.crc32(t + x) & 0xffffffff)
+png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00\xff")) + chunk(b"IEND", b"")
+open(d + "/bodypic.png", "wb").write(png)
+PY
 
 # pane 셸 자리에 들어갈 대본 — login(1)이 HOME 을 실제 홈으로 되돌리므로 시험 홈을 직접 세운다(없으면 아무것도 하지 않는다).
 cat > "$root/pane.sh" <<PANE
@@ -468,6 +509,33 @@ if ! mkdir "\$out/pane-once" 2>/dev/null; then
     n=0; while [ ! -f "\$out/p2-net-revoked" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
     "\$cli" browser network --surface "\$ux" > "\$out/nw-u-revoked" 2>&1; echo "rc=\$?" >> "\$out/nw-u-revoked"
     touch "\$out/p2-net-done"
+    # W9d②: 둘째 pane — 첫 pane 이 연 에이전트 탭(이 pane 에게는 사용자의 탭과 같다). 본문 권한이 없으면 needs_body_permission, 기록을 허락받은
+    # 뒤(확인 모달, 자동 승인)에는 그 뒤 요청의 본문만 보인다.
+    n=0; while [ ! -f "\$out/p2-body-go" ] && [ \$n -lt 2400 ]; do sleep 0.25; n=\$((n + 1)); done
+    [ -f "\$out/p2-body-go" ] || exec sleep 600
+    bt=\$(cat "\$out/p2-body-go")
+    "\$cli" browser network --surface "\$bt" > "\$out/bd2-first" 2>&1; echo "rc=\$?" >> "\$out/bd2-first"
+    touch "\$out/p2-body-read1"
+    n=0; while [ ! -f "\$out/p2-body-nav1" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+    n=0; while [ \$n -lt 40 ]; do
+        "\$cli" browser network --surface "\$bt" > "\$out/bd2-list1" 2>&1
+        grep -q 'bodyc.json?p2a' "\$out/bd2-list1" && break
+        sleep 0.25; n=\$((n + 1))
+    done
+    r1=\$(sed -n 's/^#\([0-9]*\) GET [0-9-]* xhr .*bodyc\.json?p2a.*/\1/p' "\$out/bd2-list1" | head -1)
+    "\$cli" browser network-request --surface "\$bt" --req "\$r1" --body > "\$out/bd2-nobody" 2>&1; echo "rc=\$?" >> "\$out/bd2-nobody"
+    "\$cli" browser network-record --surface "\$bt" --on > "\$out/bd2-rec" 2>&1; echo "rc=\$?" >> "\$out/bd2-rec"
+    "\$cli" browser network-request --surface "\$bt" --req "\$r1" --body > "\$out/bd2-before" 2>&1; echo "rc=\$?" >> "\$out/bd2-before"
+    touch "\$out/p2-body-read2"
+    n=0; while [ ! -f "\$out/p2-body-nav2" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+    n=0; while [ \$n -lt 40 ]; do
+        "\$cli" browser network --surface "\$bt" > "\$out/bd2-list2" 2>&1
+        grep -q 'bodyc.json?p2b.*body captured' "\$out/bd2-list2" && break
+        sleep 0.25; n=\$((n + 1))
+    done
+    r2=\$(sed -n 's/^#\([0-9]*\) GET [0-9-]* xhr .*bodyc\.json?p2b.*/\1/p' "\$out/bd2-list2" | head -1)
+    "\$cli" browser network-request --surface "\$bt" --req "\$r2" --body > "\$out/bd2-after" 2>&1; echo "rc=\$?" >> "\$out/bd2-after"
+    touch "\$out/p2-body-done"
     exec sleep 600
 fi
 # 주소가 \$1 로 끝날 때까지(최대 10 초) — 목록 줄의 주소 칸으로 본다.
@@ -1162,6 +1230,53 @@ touch "\$out/net-revoke-now"
 sleep 1.5
 touch "\$out/p2-net-revoked"
 n=0; while [ ! -f "\$out/p2-net-done" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+# ── W9d②: 응답 본문 기록 ──
+# 에이전트가 연 탭 — 쿠키를 심는 localhost 페이지에서 시작한다(다른 사이트 쿠키). 기록은 묻지 않고 켠다.
+"\$cli" browser open --url "http://localhost:$port/bodysetck" > "\$out/bd-open" 2>&1
+bt=\$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "\$out/bd-open")
+"\$cli" browser network-record --surface "\$bt" --on > "\$out/bd-rec" 2>&1; echo "rc=\$?" >> "\$out/bd-rec"
+"\$cli" browser navigate --surface "\$bt" "http://127.0.0.1:$port/body.html" > "\$out/bd-nav" 2>&1
+n=0; while [ \$n -lt 60 ]; do
+    "\$cli" browser network --surface "\$bt" --page-size 200 > "\$out/bd-list" 2>&1; echo "rc=\$?" >> "\$out/bd-list"
+    grep -q 'bodyc.json.*body captured' "\$out/bd-list" && grep -q 'bodycred.js.*\[body ' "\$out/bd-list" && grep -q 'bodybin.json.*\[body ' "\$out/bd-list" && grep -q 'bodybig.json.*\[body over_cap' "\$out/bd-list" && break
+    sleep 0.25; n=\$((n + 1))
+done
+"\$cli" browser list > "\$out/bd-blist" 2>&1
+reqof() { sed -n "s/^#\\([0-9]*\\) GET .*\$1.*/\\1/p" "\$out/bd-list" | head -1; }
+bc=\$(reqof 'bodyc\.json'); bb=\$(reqof 'bodybig\.json'); bp=\$(reqof 'bodypic\.png'); bn=\$(reqof 'bodybin\.json'); bk=\$(reqof 'bodycred\.js')
+echo "bc=\$bc bb=\$bb bp=\$bp bn=\$bn bk=\$bk" > "\$out/bd-reqs"
+"\$cli" browser network-request --surface "\$bt" --req "\$bc" --body > "\$out/bd-c" 2>&1; echo "rc=\$?" >> "\$out/bd-c"
+"\$cli" browser network-request --surface "\$bt" --req "\$bb" --body > "\$out/bd-big" 2>&1; echo "rc=\$?" >> "\$out/bd-big"
+"\$cli" browser network-request --surface "\$bt" --req "\$bp" --body > "\$out/bd-pic" 2>&1; echo "rc=\$?" >> "\$out/bd-pic"
+"\$cli" browser network-request --surface "\$bt" --req "\$bn" --body > "\$out/bd-bin" 2>&1; echo "rc=\$?" >> "\$out/bd-bin"
+rm -f "\$out/bd-bin.out" "\$out/bd-c.json"
+"\$cli" browser network-request --surface "\$bt" --req "\$bn" --out "\$out/bd-bin.out" > "\$out/bd-binout" 2>&1; echo "rc=\$?" >> "\$out/bd-binout"
+"\$cli" browser network-request --surface "\$bt" --req "\$bc" --out "\$out/bd-c.json" > "\$out/bd-cout" 2>&1; echo "rc=\$?" >> "\$out/bd-cout"
+stat -f %Lp "\$out/bd-c.json" > "\$out/bd-cout-mode" 2>&1
+od -An -tx1 "\$out/bd-bin.out" | tr -d ' \n' > "\$out/bd-bin-head" 2>&1
+"\$cli" browser network-request --surface "\$bt" --req "\$bk" --body > "\$out/bd-cred" 2>&1; echo "rc=\$?" >> "\$out/bd-cred"
+# 다른 사이트(localhost)의 쿠키 권한 — 그 사이트에서 get-cookies 가 묻는다(확인 모달, 자동 승인). 그 뒤 같은 본문이 보인다.
+"\$cli" browser navigate --surface "\$bt" "http://localhost:$port/bodyhome.html" > "\$out/bd-home" 2>&1
+"\$cli" browser get-cookies --surface "\$bt" > "\$out/bd-ck" 2>&1; echo "rc=\$?" >> "\$out/bd-ck"
+"\$cli" browser navigate --surface "\$bt" "http://127.0.0.1:$port/bodyhome.html?back" > "\$out/bd-back" 2>&1
+"\$cli" browser network-request --surface "\$bt" --req "\$bk" --body > "\$out/bd-cred2" 2>&1; echo "rc=\$?" >> "\$out/bd-cred2"
+# 둘째 pane — 그 pane 의 첫 읽기(네트워크 권한) 뒤 한 번, 그 pane 이 기록을 허락받은 뒤 한 번 옮긴다.
+echo "\$bt" > "\$out/p2-body-go.tmp" && mv "\$out/p2-body-go.tmp" "\$out/p2-body-go"
+n=0; while [ ! -f "\$out/p2-body-read1" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+"\$cli" browser exec --surface "\$bt" 'fetch("/bodyc.json?p2a").then(function(r){return r.text()})' > "\$out/bd-p2a" 2>&1
+sleep 0.5
+touch "\$out/p2-body-nav1"
+n=0; while [ ! -f "\$out/p2-body-read2" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+"\$cli" browser exec --surface "\$bt" 'fetch("/bodyc.json?p2b").then(function(r){return r.text()})' > "\$out/bd-p2b" 2>&1
+sleep 0.5
+touch "\$out/p2-body-nav2"
+n=0; while [ ! -f "\$out/p2-body-done" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+# 모든 grant 를 철회한다(앱 대본 「revokegrants」) — 기록이 꺼지고(◉ 이 사라진다) 받은 본문이 지워진다.
+touch "\$out/body-revoke-now"
+sleep 1.5
+"\$cli" browser list > "\$out/bd-blist2" 2>&1
+"\$cli" browser network --surface "\$bt" > "\$out/bd-revoked" 2>&1; echo "rc=\$?" >> "\$out/bd-revoked"
+"\$cli" browser network-request --surface "\$bt" --req "\$bc" --body > "\$out/bd-revoked-req" 2>&1; echo "rc=\$?" >> "\$out/bd-revoked-req"
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -1175,7 +1290,7 @@ up_bid=$(grep -a -A1 '<key>CFBundleIdentifier</key>' "$app" | sed -n 's/.*<strin
 up_stale="$root/home/Library/Application Support/maru/web/${up_bid:-dev.maru.apphost}/profile/upload-staging/424242"
 (umask 077 && mkdir -p "$up_stale/1/0" && printf 'stale\n' > "$up_stale/1/0/old.txt")
 # 숨은 탭 경우(W9b②-3) — pane 대본이 hide-now 를 만들면 새 탭으로 Chromium 탭을 숨기고, show-now 면 돌아온다.
-printf 'waitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\nrevokegrants\n' "$out/hide-now" "$out/show-now" "$out/hide2-now" "$out/show2-now" "$out/net-revoke-now" > "$root/hide.txt"
+printf 'waitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\nrevokegrants\nwaitfile %s\nrevokegrants\n' "$out/hide-now" "$out/show-now" "$out/hide2-now" "$out/show2-now" "$out/net-revoke-now" "$out/body-revoke-now" > "$root/hide.txt"
 printf 'ui.language = ko\nshell.command = %s\nshell.args =\nsession.keep-alive-after-quit = false\n' "$root/pane.sh" > "$root/maru.conf"
 env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" MARU_SESSION_HOST_ROOT="$root/session-host" \
     MARU_CONFIG="$root/maru.conf" MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="$url" \
@@ -1483,6 +1598,30 @@ grep -qx 'ok' "$out/nw-u-redir-nav" && grep -q 'GET /netredir' "$root/http.log" 
 ! grep -q 'netredir' "$out/nw-u-away" && ! grep -q 'net-cb' "$out/nw-u-away" \
     || fail "a navigation that started on another site and was redirected back was shown to the second reader ($(tr '\n' ' ' < "$out/nw-u-away"))"
 grep -q '^rc=0$' "$out/nw-u-revoked" && ! grep -q 'net-after' "$out/nw-u-revoked" || fail "after revoking the grants the record was not wiped ($(tr '\n' ' ' < "$out/nw-u-revoked"))"
+# W9d② — 본문 단계는 실패를 모아 한 번에 알린다(한 판에 여러 갈래를 본다).
+body_bad=""
+bbad() { body_bad="$body_bad · $1"; }
+grep -q '^rc=0$' "$out/bd-rec" && grep -q '^recording response bodies' "$out/bd-rec" || bbad "turning on body recording on the agent's tab failed or asked ($(tr '\n' ' ' < "$out/bd-rec"))"
+grep -q "^surface $(sed -n 's/^opened \([0-9]*\) .*/\1/p' "$out/bd-open") .*◉ recording" "$out/bd-blist" || bbad "the recording tab was not marked ◉ recording in browser list ($(tr '\n' ' ' < "$out/bd-blist" | cut -c1-400))"
+grep -q '(recording response bodies: on)' "$out/bd-list" || bbad "the network list did not say the tab records bodies ($(tr '\n' ' ' < "$out/bd-list" | cut -c1-600))"
+grep -q '^rc=0$' "$out/bd-c" && grep -q '^body: captured · 25 bytes · utf-8' "$out/bd-c" && grep -qxF 'body text: {"chunked":["one","two"]}' "$out/bd-c" \
+    || bbad "the chunked JSON body was not captured as it was sent ($(tr '\n' ' ' < "$out/bd-c") · $(cat "$out/bd-reqs"))"
+grep -q '^body: over_cap ([0-9]* bytes — over the 1 MiB body limit)' "$out/bd-big" || bbad "a 2 MiB JSON body was not over_cap ($(tr '\n' ' ' < "$out/bd-big"))"
+grep -q '^body: not_text$' "$out/bd-pic" || bbad "a PNG body was not not_text ($(tr '\n' ' ' < "$out/bd-pic"))"
+grep -q '^rc=1$' "$out/bd-bin" && grep -q 'binary body — write it with --out' "$out/bd-bin" || bbad "a binary body was printed without --out ($(tr '\n' ' ' < "$out/bd-bin"))"
+grep -q '^rc=0$' "$out/bd-binout" && [ "$(cat "$out/bd-bin-head")" = 7b2262696e223a228081fe227d ] || bbad "the binary body was not written with --out ($(tr '\n' ' ' < "$out/bd-binout") · head $(cat "$out/bd-bin-head"))"
+grep -q '^rc=0$' "$out/bd-cout" && [ "$(cat "$out/bd-cout-mode")" = 600 ] && [ "$(cat "$out/bd-c.json")" = '{"chunked":["one","two"]}' ] || bbad "--out did not write the body to a 0600 file ($(tr '\n' ' ' < "$out/bd-cout") · mode $(cat "$out/bd-cout-mode"))"
+grep -q '^body: hidden — this response carried another site' "$out/bd-cred" && ! grep -q 'body-secret' "$out/bd-cred" || bbad "a script body sent with another site's cookies was shown without that site's cookie permission (UB1) ($(tr '\n' ' ' < "$out/bd-cred"))"
+grep -q '^rc=0$' "$out/bd-ck" && grep -q '^body: captured' "$out/bd-cred2" && grep -q 'body-secret' "$out/bd-cred2" || bbad "after get-cookies allowed the other site its credentialed body was not shown ($(tr '\n' ' ' < "$out/bd-ck") · $(tr '\n' ' ' < "$out/bd-cred2"))"
+[ -f "$out/p2-body-done" ] || bbad "the second pane did not finish its body reads ($(ls "$out" | grep -E '^(bd2-|p2-body)' | tr '\n' ' '))"
+grep -q '^body: hidden — needs the permission to record this tab' "$out/bd2-nobody" && ! grep -qF '"one","two"' "$out/bd2-nobody" || bbad "a pane without the body permission saw the body ($(tr '\n' ' ' < "$out/bd2-nobody"))"
+grep -q '^rc=0$' "$out/bd2-rec" && grep -q '^body: hidden — made before your permission to record bodies' "$out/bd2-before" || bbad "after the second pane's body permission a body from before it was shown ($(tr '\n' ' ' < "$out/bd2-rec") · $(tr '\n' ' ' < "$out/bd2-before"))"
+grep -q '^body: captured' "$out/bd2-after" && grep -qxF 'body text: {"chunked":["one","two"]}' "$out/bd2-after" || bbad "the second pane did not see the body of a request after its permission ($(tr '\n' ' ' < "$out/bd2-after"))"
+! grep -q '◉ recording' "$out/bd-blist2" || bbad "after revoking all grants the tab was still marked recording ($(tr '\n' ' ' < "$out/bd-blist2" | cut -c1-400))"
+grep -q '^rc=0$' "$out/bd-revoked" && ! grep -q 'bodyc.json' "$out/bd-revoked" && ! grep -q 'recording response bodies' "$out/bd-revoked" && ! grep -qF '"one","two"' "$out/bd-revoked-req" \
+    || bbad "after revoking all grants the recorded bodies were not wiped ($(tr '\n' ' ' < "$out/bd-revoked" | cut -c1-400) · $(tr '\n' ' ' < "$out/bd-revoked-req"))"
+[ -z "$body_bad" ] || fail "w9d-body:$body_bad"
+echo "PASS w9d-body: the agent's tab recorded bodies without asking (◉ recording in the list), a chunked JSON body came back as sent, a 2 MiB JSON was over_cap, a PNG not_text, a binary JSON body was refused without --out and written with it, --out wrote a 0600 file, a script sent with another site's cookies stayed hidden until get-cookies allowed that site, a pane without the body permission saw needs_body_permission and after its own permission only later bodies, and revoking all grants cleared the mark and the bodies"
 echo "PASS w9d-network: the agent's tab recorded from its birth (cookie-setting first page, cross-site iframe request marked), the detail showed Cookie and Authorization by name only until get-cookies allowed the site and then their values, a service-worker page's fetch was labelled, a second pane allowed by the dialog saw only requests after its permission (earlier ones counted as hidden) and not the requests made while the tab was on another site (counted as hidden after it came back) nor a navigation that started on another site and was redirected back, and revoking all grants wiped the record"
 echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"

@@ -1,4 +1,9 @@
 # 개발 명령
+- diff 전체 poll 실패 주입: `mise exec -- zig build test-editor-diff-oom -j2`. 세션 worker와 주입 allocator를 분리하는 이유는 [접힘 좌표 계획의 CI 회귀](plans/editor-fold-points.md)를 따른다.
+
+- 접힘 좌표 조회: `mise exec -- zig build test-editor-fold-points test-editor-fold-cache test-editor-incremental-folds -j2`.
+  실제 좌표 5개와 import 1개를 포함하며, 명시적 test 참조와 개수 가드로 누락을 거절한다.
+  전후 비교·공유 집계의 metric 선택과 실패 주입은 [근처 행 조회](plans/editor-fold-points.md)를 따른다.
 
 - 접힘 표식: `mise exec -- zig build test-editor-fold-marks test-editor-incremental-folds -j2`.
   중립 순차 조회와 실제 뷰 게시를 기존 점 조회와 대조한다. 실패 주입·전후 비교 명령은

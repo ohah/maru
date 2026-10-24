@@ -6411,12 +6411,27 @@ pub fn build(b: *std.Build) void {
         run_fold_marks_product.addArg("--maru-expect-passed=6");
         macos_only_test_step.dependOn(&run_fold_marks_product.step);
     }
+    const fold_point_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"fold point hint"} });
+    const run_fold_points = b.addRunArtifact(fold_point_tests);
+    run_fold_points.addArg("--maru-expect-tests=6");
+    run_fold_points.addArg("--maru-expect-passed=6");
+    b.step("test-editor-fold-points", "Compare hinted fold coordinates and bounded fallback").dependOn(&run_fold_points.step);
+    test_step.dependOn(&run_fold_points.step);
     const fold_cache_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"EW2 cached folds"} });
     const run_fold_cache = b.addRunArtifact(fold_cache_tests);
     run_fold_cache.addArg("--maru-expect-tests=9");
     run_fold_cache.addArg("--maru-expect-passed=9");
     b.step("test-editor-fold-cache", "Compare cached folds and full traversal").dependOn(&run_fold_cache.step);
     test_step.dependOn(&run_fold_cache.step);
+    const diff_oom_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.비교 계산이 어디서 할당", ".test.비교 계산 실패 allocator" } });
+    const run_diff_oom = b.addRunArtifact(diff_oom_tests);
+    run_diff_oom.setCwd(b.path("."));
+    run_diff_oom.addArg("--maru-expect-tests=6");
+    b.step("test-editor-diff-oom", "Verify full diff polling allocation failure coverage").dependOn(&run_diff_oom.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_diff_oom.addArg("--maru-expect-passed=6");
+        macos_only_test_step.dependOn(&run_diff_oom.step);
+    }
     const fold_product_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.EW2 product", ".test.DHS16", ".test.PROMO1", ".test.ES41", ".test.ES42", ".test.EW0" } });
     const run_fold_product = b.addRunArtifact(fold_product_tests);
     run_fold_product.setCwd(b.path("."));

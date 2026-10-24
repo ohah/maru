@@ -11,17 +11,51 @@ from unittest.mock import patch
 from gui_launch import GUIApp, process_identity, stage_app
 
 
+# PID가 생긴 시점에는 Python launcher가 아직 실제 interpreter로 exec하기 전일 수 있다.
+# 자식이 최종 interpreter에서 원자적으로 게시한 준비 신호 뒤에만 실행 파일을 관측한다.
+READY_CODE = ('import os,sys,time; from pathlib import Path; '
+              'marker=Path(sys.argv[1]); temp=marker.with_suffix(".tmp"); '
+              'temp.write_text(str(os.getpid())); temp.replace(marker); time.sleep(30)')
+
+
+def stop_owned_process(process):
+    if process.poll() is None:
+        process.terminate()
+    process.wait(timeout=5)
+    if process.stdin is not None and not process.stdin.closed:
+        process.stdin.close()
+
+
+def ready_identity(process, marker, timeout=5):
+    deadline = time.monotonic() + timeout
+    while True:
+        if process.poll() is not None:
+            raise RuntimeError('fixture exited before readiness')
+        try:
+            ready_pid = marker.read_text()
+        except FileNotFoundError:
+            pass
+        else:
+            if ready_pid != str(process.pid):
+                raise RuntimeError('fixture ready PID mismatch')
+            identity = process_identity(process.pid)
+            if identity is not None:
+                return identity
+        if time.monotonic() >= deadline:
+            raise TimeoutError('fixture readiness/identity timeout')
+        time.sleep(.005)
+
+
 @unittest.skipUnless(sys.platform == 'darwin', 'libproc identity is macOS-specific')
 class OwnershipTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
         self.output = Path(self.temp.name)
-        self.process = subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])
-        for _ in range(100):
-            self.identity = process_identity(self.process.pid)
-            if self.identity is not None: break
-            time.sleep(.01)
-        self.assertIsNotNone(self.identity)
+        marker = self.output / 'ready'
+        self.process = subprocess.Popen([sys.executable, '-c', READY_CODE, str(marker)])
+        self.addCleanup(stop_owned_process, self.process)
+        self.identity = ready_identity(self.process, marker)
         self.app = GUIApp.__new__(GUIApp)
         self.app.output = self.output
         self.app.executable = Path(self.identity[2])
@@ -30,11 +64,6 @@ class OwnershipTests(unittest.TestCase):
         self.app._loaded = False
         self.app.returncode = None
         (self.output/'app.stderr.txt').write_text(f'warning(app): maru build: mtime=1 pid={self.process.pid}\n')
-
-    def tearDown(self):
-        if self.process.poll() is None: self.process.terminate()
-        self.process.wait(timeout=5)
-        self.temp.cleanup()
 
     def test_observation_binds_real_uid_birth_and_executable(self):
         self.assertEqual(self.app.pid,self.process.pid)
@@ -101,6 +130,77 @@ class OwnershipTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'staged GUI binary differs.*maru'):
                 GUIApp(staged, {}, self.output, expected_binaries=expected)
             launch.assert_not_called()
+
+
+@unittest.skipUnless(sys.platform == 'darwin', 'libproc identity is macOS-specific')
+class StartupTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.marker = Path(temp.name) / 'ready'
+
+    def spawn(self, command, **kwargs):
+        process = subprocess.Popen(command, **kwargs)
+        self.addCleanup(stop_owned_process, process)
+        return process
+
+    def test_exec_transition_is_observed_only_after_child_ready(self):
+        process = self.spawn(['/bin/sh', '-c', 'IFS= read -r line; exec "$@"',
+                              'fixture-launcher', sys.executable, '-c', READY_CODE,
+                              str(self.marker)], stdin=subprocess.PIPE)
+        before = process_identity(process.pid)
+        self.assertIsNotNone(before)
+        released = False
+        real_sleep = time.sleep
+
+        def release_after_wait(_):
+            nonlocal released
+            if not released:
+                process.stdin.write(b'go\n')
+                process.stdin.flush()
+                process.stdin.close()
+                released = True
+            real_sleep(.005)
+
+        with patch(__name__ + '.time.sleep', side_effect=release_after_wait):
+            after = ready_identity(process, self.marker)
+        self.assertTrue(released)
+        self.assertEqual(before[:2], after[:2])
+        self.assertNotEqual(before[2], after[2])
+        self.assertEqual(after, process_identity(process.pid))
+
+    def test_exit_before_ready_is_rejected(self):
+        process = self.spawn([sys.executable, '-c', 'pass'])
+        process.wait(timeout=5)
+        with patch(__name__ + '.process_identity') as observe:
+            with self.assertRaisesRegex(RuntimeError, 'exited before'):
+                ready_identity(process, self.marker)
+            observe.assert_not_called()
+
+    def test_wrong_ready_pid_is_rejected(self):
+        process = self.spawn([sys.executable, '-c', 'import time; time.sleep(30)'])
+        self.marker.write_text(str(process.pid + 1))
+        with patch(__name__ + '.process_identity') as observe:
+            with self.assertRaisesRegex(RuntimeError, 'PID mismatch'):
+                ready_identity(process, self.marker)
+            observe.assert_not_called()
+
+    def test_missing_ready_times_out_without_observing_or_killing(self):
+        process = self.spawn([sys.executable, '-c', 'import time; time.sleep(30)'])
+        with patch(__name__ + '.process_identity') as observe:
+            with self.assertRaises(TimeoutError):
+                ready_identity(process, self.marker, timeout=.02)
+            observe.assert_not_called()
+        self.assertIsNone(process.poll())
+
+    def test_missing_identity_after_ready_remains_failure(self):
+        process = self.spawn([sys.executable, '-c', 'import time; time.sleep(30)'])
+        self.marker.write_text(str(process.pid))
+        with patch(__name__ + '.process_identity', return_value=None) as observe:
+            with self.assertRaises(TimeoutError):
+                ready_identity(process, self.marker, timeout=.02)
+            self.assertGreater(observe.call_count, 0)
+        self.assertIsNone(process.poll())
 
 
 class StageTests(unittest.TestCase):

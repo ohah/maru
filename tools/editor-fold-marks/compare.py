@@ -44,6 +44,7 @@ def main():
     locks = []
     inputs = None
     binaries = {}
+    comparison_target = None
     for name, root in roots.items():
         lock = (root / '.lock').open('w')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -54,8 +55,12 @@ def main():
         inputs = current
         check_source(root)
         info = json.loads((root / 'setup-1.json').read_text())
-        if info['mark_variant'] != ('binary-search' if name == 'baseline' else 'cursor'):
+        if info.get('comparison_variant', info.get('mark_variant')) != ('binary-search' if name == 'baseline' else 'cursor'):
             raise ValueError('Wrong product variant')
+        target = info.get('comparison_target', 'fold-marks')
+        if comparison_target is not None and target != comparison_target:
+            raise ValueError('Variants target different operations')
+        comparison_target = target
         binaries[name] = json.loads((root / 'binaries.json').read_text())['1']
     order = []
     files = args.files.split(',') if args.files else sorted(inputs)

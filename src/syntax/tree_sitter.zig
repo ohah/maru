@@ -4164,13 +4164,19 @@ fn foldCacheGrowthFailure(fail_index: ?usize) !usize {
     defer lines.deinit(a);
     var out: std.ArrayList(Provider.FoldSpan) = .empty;
     defer out.deinit(a);
-    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index orelse std.math.maxInt(usize) });
+    // 제자리 확장 성공 여부는 OS allocator에 따라 달라진다. 확장을 거절해
+    // 대조군과 실패 주입 모두 같은 새 할당 경로를 순서대로 검사한다.
+    var failing = std.testing.FailingAllocator.init(a, .{
+        .fail_index = fail_index orelse std.math.maxInt(usize),
+        .resize_fail_index = 0,
+    });
     if (fail_index != null) {
         try std.testing.expectError(error.OutOfMemory, p.foldSpansCached(failing.allocator(), &cache, lines.items, &out));
         try std.testing.expect(failing.has_induced_failure);
         try std.testing.expect(cache.tree == null);
         try std.testing.expectEqual(@as(usize, 0), out.items.len);
     } else try p.foldSpansCached(failing.allocator(), &cache, lines.items, &out);
+    try std.testing.expectEqual(@as(usize, 0), failing.resize_index);
     try foldCacheJudge(&p, &cache, text.items);
     return failing.alloc_index;
 }

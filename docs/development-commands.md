@@ -1931,6 +1931,9 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 
 ### 접힘 계산 방식 비교 실측(EW2)
 
+과거 프로토타입의 재현은 제품 연결 전 커밋 `7d7b3357d`에서 실행한다.
+현재 제품 소스의 비교는 아래 `editor-fold-product`를 사용한다.
+
 제품 적용 전의 독립 사본 비교다. 의존성을 준비한 뒤
 `python3 tools/editor-fold-measure/run.py --output <새 외부 경로> --deps "$PWD/zig-pkg"`로
 기준·증분·지연을 빌드하고 고정 원문·원시 입력 시간·캐시 저장소·RSS를 기록한다.
@@ -1940,3 +1943,13 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 `python3 tools/editor-fold-measure/review.py <출력>`은 별도 사본에 실패를 주입한다.
 실제 AppKit 경로는 같은 디렉터리의 `gui.py`가 격리 앱을 빌드한다.
 범위·한계·기록 파일은 [비교 실측](plans/editor-fold-cost-measurement.md)을 따른다.
+
+### 제품 증분 접힘(EW2)
+
+`mise exec -- zig build test-editor-fold-cache test-editor-incremental-folds -j2`는 캐시와 전체 순회,
+할당 실패·재시도·공유 뷰·Undo/Redo·LSP 우선권·파싱 재개를 검사한다.
+`python3 tools/editor-fold-product/run.py --output <새 외부 경로> --deps "$PWD/zig-pkg"`는
+제품 소스의 전체 순회/캐시 호출을 비교한다. `--fixtures <기존 fixtures>`로 고정 원문을 재사용한다.
+실패 주입은 같은 디렉터리의 `review.py`로 별도 사본에서 수행한다.
+제품 GUI는 `tools/editor-fold-measure/gui.py`의 `--product --modes 0,1 --foreground`로 관측한다.
+정확성/성능 분리와 상세 명령은 [제품 EW2](plans/editor-incremental-folds.md)를 따른다.

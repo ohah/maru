@@ -51,6 +51,8 @@ pub const ColorBufs = struct {
 pub const State = struct {
     /// grammar가 없거나 파서를 못 세우면 `null`이고, 그러면 이 문서는 끝까지 무색이다(§5).
     provider: ?syntax.Provider = null,
+    /// 뷰가 구문 provider와 함께 소유한다. 임시 출력 allocator의 수명을 보관하지 않는다.
+    folds: syntax.FoldCache = .{},
 
     /// 파싱이 **예산에 끊겨 남아 있는가**(§2.1a). 참인 동안 프레임마다 `resumeParse`가 이어 판다.
     /// 그 사이 이 문서는 무색이거나(전체 파싱) 직전 색이다(증분).
@@ -98,6 +100,7 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
+        self.folds.deinit(allocator);
         self.brackets.deinit(allocator);
         self.bracket_toks.deinit(allocator);
         self.bracket_info.deinit(allocator);
@@ -165,10 +168,10 @@ pub fn openBudgeted(source: []const u8, g: editor_language.Grammar, budget_ns: u
 /// 호출자가 그 프레임을 다시 그리게 만들어야 다음 조각이 돈다.
 pub fn resumeParse(self: *State, source: []const u8) bool {
     if (!self.pending) return false;
-    var p = &(self.provider orelse {
+    const p = if (self.provider) |*provider| provider else {
         self.pending = false;
         return false;
-    });
+    };
     const status = p.setSourceBudgeted(source, frame_parse_budget_ns);
     self.pending = status == .pending;
     return self.pending;
@@ -228,7 +231,8 @@ pub fn spanFromInverse(inverse_changes: []const maru.session.editor.delta.Change
 /// 이 입구를 재려던 판정자가 이 길을 한 번도 안 지났다). 남은 것은 `spanFromInverse` 가 `null` 을 내는 방어 갈래(역연산이
 /// 비었거나 앞뒤가 뒤집혔다)와 묶음 안에 범위를 못 만든 항목이 낀 undo 다. 틀린 트리보다 **한 번 더 파는 것**이 낫다.
 pub fn reparse(self: *State, source: []const u8) void {
-    const p = &(self.provider orelse return);
+    const p = if (self.provider) |*provider| provider else return;
+    self.folds.invalidate();
     p.setSource(source);
     self.brackets.invalidate(); // 범위를 모른다 — 괄호 목록도 처음부터(§5.1d)
     // **이어 팔 것이 안 남는다** — 예산 없이 끝까지 팠다(끊긴 여는 파싱은 `setSource` 가 버렸다). 남겨 두면 다음 프레임의
@@ -244,12 +248,9 @@ pub fn onEditSpan(
     e: EditSpan,
     lines_after: maru.session.editor.line_index.LineIndex,
 ) void {
-    const p = &(self.provider orelse return);
-    // **옛 끝의 행·열은 근사한다.** 정확히 채우려면 편집 **전** 줄 인덱스가 있어야 하는데 그것은
-    // 이미 갈아 끼워졌다. tree-sitter는 byte offset으로 증분 파싱을 하고 우리 소비처는 byte span만
-    // 읽으므로(§5.3의 `Span`) 이 근사가 화면에 안 나타난다 — 실측으로도 행·열을 0으로 준 판과
-    // 정확히 준 판이 **같은 span 목록**을 냈다(무작위 편집 180회, 불일치 0). `ts_node_start_point`를
-    // 읽는 소비처가 생기면 그때 편집 전 인덱스를 함께 넘겨야 한다.
+    const p = if (self.provider) |*provider| provider else return;
+    // 옛 끝 행·열은 색 질의용 파싱의 기존 근사다. 접힘 캐시는 이 좌표로 행을 밀지 않는다.
+    // byte 후보만 이동시키고 조회할 때 문서의 최신 줄 인덱스로 행·열을 구한다(EW2).
     // **문서 길이로 조인다.** `new_end` 는 편집 후 문서 안이어야 하고, `old_end` 는 편집 **전**
     // 문서 기준이라 지금 길이를 넘을 수 있다 — 그쪽은 넘어도 tree-sitter 가 감당한다.
     const len32: u32 = std.math.cast(u32, source.len) orelse std.math.maxInt(u32);
@@ -260,14 +261,17 @@ pub fn onEditSpan(
     const to = pointOf(lines_after, new_end);
     // 괄호 목록(§5.1d)은 **파기 전에 위치를 밀고 판 뒤에 달라진 범위만 고친다** — 달라진 범위는 새 트리 좌표라 민 목록과 맞는다.
     self.brackets.shift(allocator, start, old_end, new_end);
-    p.onEdit(source, .{
+    const edit: syntax.Edit = .{
         .start_byte = start,
         .old_end_byte = old_end,
         .new_end_byte = new_end,
         .start_point = at,
         .old_end_point = at,
         .new_end_point = to,
-    });
+    };
+    p.onEdit(source, edit);
+    // 파싱 크기 정책은 provider 하나가 판정한다. 캐시는 트리 보유 결과만 따라간다.
+    if (p.tree != null) self.folds.edit(edit) else self.folds.invalidate();
     // `reparse` 와 같다 — `onEdit` 은 예산이 없어 끝까지 판다(옛 트리가 없던 여는 도중이면 처음부터). 이어 팔 것이 없다.
     self.pending = false;
     // 못 고치면(할당) 버린다 — 다음 프레임이 처음부터 만든다. 틀린 목록보다 늦은 목록이 낫다.
@@ -1476,5 +1480,30 @@ test "BRC1 언어마다 무엇이 괄호인가 — VS Code 1.139 TextMate 문법
         try bracketMarksForTest(allocator, &st, long.items, false, &got);
         try testing.expectEqual(@as(usize, 4), got.items.len); // `f(` `)` · `g(` `)`
         try testing.expectEqual(@as(i64, 1), got.items[0][0]);
+    }
+}
+
+test "EW2 product 파싱 상한 밖이나 빈 문서에는 트리 사본을 남기지 않는다" {
+    const a = std.testing.allocator;
+    const initial = "fn f() void {\n _ = 1;\n}\n";
+    const large = try a.alloc(u8, syntax.max_parse_bytes + 1);
+    defer a.free(large);
+    @memset(large, 'x');
+    for ([_][]const u8{ "", large }) |after| {
+        var state = openBudgeted(initial, .zig, 0);
+        defer state.deinit(a);
+        const provider = if (state.provider) |*p| p else return error.NoProvider;
+        var before_lines = try maru.session.editor.line_index.build(a, initial);
+        defer before_lines.deinit();
+        var spans: std.ArrayList(syntax.Provider.FoldSpan) = .empty;
+        defer spans.deinit(a);
+        try provider.foldSpansCached(a, &state.folds, before_lines.lines, &spans);
+        try std.testing.expect(state.folds.tree != null);
+        var lines = try maru.session.editor.line_index.build(a, after);
+        defer lines.deinit();
+        onEditSpan(&state, a, after, .{ .start = 0, .old_end = @intCast(initial.len), .new_end = @intCast(after.len) }, lines);
+        try std.testing.expect(provider.tree == null);
+        try std.testing.expect(state.folds.tree == null);
+        try std.testing.expectEqual(@as(usize, 0), state.folds.records.items.len);
     }
 }

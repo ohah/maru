@@ -21,12 +21,14 @@ def main():
     parser.add_argument("--repetitions",type=int,default=3)
     parser.add_argument("--reuse",type=Path)
     parser.add_argument("--build-only",action="store_true")
+    parser.add_argument("--product",action="store_true",help="Observe production sources without prototype clocks")
     parser.add_argument("--foreground",action="store_true")
     parser.add_argument("--fixture",type=Path)
     parser.add_argument("--intervals",default="50,250")
-    parser.add_argument("--modes",default="0,1,2")
+    parser.add_argument("--modes")
     args=parser.parse_args()
-    selected_modes=list(map(int,args.modes.split(",")))
+    selected_modes=list(map(int,(args.modes or ("0,1" if args.product else "0,1,2")).split(",")))
+    if args.product and any(mode not in (0,1) for mode in selected_modes): parser.error("Product comparison supports modes 0 and 1 only")
     measurement=args.measurement.resolve()
     output=args.output.resolve()
     repo=Path(__file__).resolve().parents[2]
@@ -48,15 +50,23 @@ def main():
             subprocess.run(["rsync","-a","--exclude=.zig-cache","--exclude=zig-out","--exclude=node_modules","--exclude=zig-pkg","--exclude=references",str(origin)+"/",str(source)+"/"],check=True)
             (source/"zig-pkg").symlink_to((origin/"zig-pkg").resolve(),target_is_directory=True)
             (source/"web/node_modules").symlink_to(args.web_deps.resolve(),target_is_directory=True)
-            p=source/"src/syntax/tree_sitter.zig"
-            text=p.read_text()
-            text=once(text,"    pub var clock_ns: i64 = 0;","    pub var wall_clock: ?*const fn () i64 = null;\n    pub var clock_ns: i64 = 0;")
-            text=once(text,"        self.deadline = clock_ns + delay_ns;","        if (wall_clock) |get| clock_ns = get();\n        self.deadline = clock_ns + delay_ns;")
-            p.write_text(text)
+            if not args.product:
+                p=source/"src/syntax/tree_sitter.zig"
+                text=p.read_text()
+                text=once(text,"    pub var clock_ns: i64 = 0;","    pub var wall_clock: ?*const fn () i64 = null;\n    pub var clock_ns: i64 = 0;")
+                text=once(text,"        self.deadline = clock_ns + delay_ns;","        if (wall_clock) |get| clock_ns = get();\n        self.deadline = clock_ns + delay_ns;")
+                p.write_text(text)
             p=source/"src/platform/macos/app_session.zig"
             p.write_text(once(p.read_text(),"        debug_fixtures.maybeDebugOpenNativeEditor(self);","        debug_fixtures.maybeDebugOpenNativeEditor(self);\n        debug_fixtures.ew2Observe(self);"))
             p=source/"src/platform/macos/app_session/debug_fixtures.zig"
-            p.write_text(p.read_text()+"\n"+(templates/"gui.zig.inc").read_text())
+            observer=(templates/"gui.zig.inc").read_text()
+            if args.product:
+                observer="\n".join(line for line in observer.splitlines() if "FoldProbe.wall_clock" not in line and "FoldProbe.clock_ns" not in line)+"\n"
+                begin=observer.index("export fn maru_ew2_due_ns()")
+                end=observer.index("export fn maru_ew2_inserted_bytes()",begin)
+                observer=observer[:begin]+f"export fn maru_ew2_due_ns() callconv(.c) i64 {{ return 16_666_667; }}\nexport fn maru_ew2_mode() callconv(.c) u32 {{ return {mode}; }}\n\n"+observer[end:]
+                observer=observer.replace("p.foldSpansFull(self.allocator,&expected)","p.foldSpans(self.allocator,&expected)")
+            p.write_text(p.read_text()+"\n"+observer)
             p=source/"src/platform/macos/MaruAppHost.swift"
             p.write_text(once(p.read_text(),"        maybeRunEditorIMESmoke()\n","        maybeRunEditorIMESmoke()\n        maybeRunEW2GUI()\n")+"\n"+(templates/"gui.swift.inc").read_text())
             p=source/"src/platform/macos/maru_metal_renderer.m"

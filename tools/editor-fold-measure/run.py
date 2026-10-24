@@ -110,6 +110,9 @@ def main():
     args = parser.parse_args()
     if not args.prefix or Path(args.prefix).name != args.prefix or args.prefix in (".",".."): parser.error("Use a simple log prefix")
     repo = Path(__file__).resolve().parents[2]
+    needs_setup = args.refresh or not args.resume or any(not (args.output/f"source-{mode}").exists() for mode in map(int,args.modes.split(",")))
+    if not args.run_only and needs_setup and "prov.foldSpansCached(self.allocator" in (repo/"src/platform/macos/app_session/editor/mod.zig").read_text():
+        parser.error("Historical prototype setup requires revision 7d7b3357d; use tools/editor-fold-product/run.py for integrated EW2")
     output = args.output.resolve()
     deps = args.deps.resolve()
     if repo == output or repo in output.parents or not deps.is_dir():

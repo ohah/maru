@@ -37,14 +37,18 @@ def setup(repo, output, deps, mode):
     call = '    prov.foldSpansCached(self.allocator, &st.folds, doc.file.lines.lines, &spans) catch return;'
     query_slot = STAGES.index('foldSpansCached')
     text = base.once(text, call, '    {\n        const frame_inner_start = frameProbeNow();\n' + f'        defer frame_probe_ns[{query_slot}] += frameProbeNow() - frame_inner_start;\n' + call + '\n    }')
-    begin_anchor = '    if (edit) |e|\n        syntax_color.onEditSpan'
-    end_anchor = '        syntax_color.reparse(&term.rt.editor_syntax, doc.file.content);'
-    if text.count(begin_anchor) != 1 or text.count(end_anchor) != 1:
-        raise RuntimeError('Ambiguous syntax edit interval')
-    begin = text.index(begin_anchor)
-    end = text.index(end_anchor, begin) + len(end_anchor)
     parse_slot = STAGES.index('syntaxEdit')
-    text = text[:begin] + '    {\n        const frame_inner_start = frameProbeNow();\n' + f'        defer frame_probe_ns[{parse_slot}] += frameProbeNow() - frame_inner_start;\n' + text[begin:end] + '\n    }' + text[end:]
+    if '    refreshSyntaxForInput(self, term, edit);' in text:
+        call = '    refreshSyntaxForInput(self, term, edit);'
+        text = base.once(text, call, '    {\n        const frame_inner_start = frameProbeNow();\n' + f'        defer frame_probe_ns[{parse_slot}] += frameProbeNow() - frame_inner_start;\n' + call + '\n    }')
+    else:
+        begin_anchor = '    if (edit) |e|\n        syntax_color.onEditSpan'
+        end_anchor = '        syntax_color.reparse(&term.rt.editor_syntax, doc.file.content);'
+        if text.count(begin_anchor) != 1 or text.count(end_anchor) != 1:
+            raise RuntimeError('Ambiguous syntax edit interval')
+        begin = text.index(begin_anchor)
+        end = text.index(end_anchor, begin) + len(end_anchor)
+        text = text[:begin] + '    {\n        const frame_inner_start = frameProbeNow();\n' + f'        defer frame_probe_ns[{parse_slot}] += frameProbeNow() - frame_inner_start;\n' + text[begin:end] + '\n    }' + text[end:]
     text += f'\nvar frame_probe_ns: [{len(STAGES)}]i128 = @splat(0);\nfn frameProbeNow() i128 {{ return std.Io.Clock.awake.now(std.testing.io).nanoseconds; }}\n'
     text = base.once(text, '        storage_view_ns = 0;\n        const start =', f'        storage_view_ns = 0;\n        frame_probe_ns = @splat(0);\n        syntax_color.frame_syntax_ns = @splat(0);\n        syntax_color.syntax.frame_parse_ns = 0;\n        const start =')
     anchor = '''        if (std.mem.eql(u8, kind, "command")) {
@@ -79,6 +83,8 @@ def setup(repo, output, deps, mode):
         '    if (p.tree != null) self.folds.edit(edit) else self.folds.invalidate();',
         '    self.brackets.refresh(allocator, p, source, .{ .start = start, .end = new_end }) catch self.brackets.invalidate();',
     ]
+    if '    editProvider(p, source, edit, ready);' in syn:
+        calls[1] = '    editProvider(p, source, edit, ready);'
     for index, call in enumerate(calls):
         syn = base.once(syn, call, f'    const frame_syntax_start_{index} = frameSyntaxNow();\n' + call + f'\n    frame_syntax_ns[{index}] += frameSyntaxNow() - frame_syntax_start_{index};')
     p.write_text(syn)

@@ -1,5 +1,6 @@
 # 검증 매트릭스
-[구문 편집 비용 귀속](plans/editor-provider-edit-attribution.md)은 로컬 구현·검증 완료: 제품과 분리된 사본의 성능 30회/600개 입력·정확성 10회/200개 입력을 대조한다. 모집단·시간/호출 수·정확성·증거·CLI의 독립 검증을 포함한다. 전체 로컬 경계·문서 게이트는 통과했고 실제 main 리베이스 직후 전체 트리가 동일하며 PR CI는 미완료다. 새 제품 최적화·GUI/HID 지연의 증거는 아니다.
+[공유 파싱 결과 재사용](plans/editor-shared-parse-reuse.md)은 부분 구현: 신원/입력 판정 30개(import 포함)·native 인계 6개·제품 연결 7개를 대조했다. 전후 함수 실측과 독립 결함 5개 런타임 검출을 완료했다. 3뷰·비관련 문서 128개의 Debug 대조도 통과했다. 전체 에디터·경계·문서 게이트도 통과했다. 실제 GUI/HID·PR CI·main 합류는 미완료다.
+[구문 편집 비용 귀속](plans/editor-provider-edit-attribution.md)은 로컬 구현·검증 완료: 제품과 분리된 사본의 성능 30회/600개 입력·정확성 10회/200개 입력을 대조한다. 모집단·시간/호출 수·정확성·증거·CLI의 독립 검증을 포함한다. 전체 로컬 경계·문서 게이트와 PR CI를 통과해 #4575가 `1e0ec896d`로 머지됐다. 머지 트리는 PR head와 동일하다. 새 제품 최적화·GUI/HID 지연의 증거는 아니다.
 [diff poll 실패 주입](plans/editor-fold-points.md)은 세션 worker와 allocator를 격리하고 실제 worker 접근 계수·완료 sweep을 대조한다. `test-editor-diff-oom`의 집중 6개와 AppSession 전수 실행을 구분한다.
 [공유 뷰 초기 스냅샷](plans/editor-shared-initial-snapshot.md)은 로컬 구현·검증 완료: 집중 10개·native 3개와 언어 31개를 대조했고 함수 실측은 완료했다. 독립 결함 5개 런타임 검출과 기존 공유 편집·분할·앵커 회귀 124개(import 포함)도 통과했다. 전체 경계·문서 게이트 통과 후 실제 main으로 리베이스했다. 직후 전체 트리가 동일하며 집중·문서 재검사도 통과했다. PR #4574는 CI를 통과해 `db4e74406`으로 머지됐고 머지 트리는 PR head와 동일하다. GUI/HID 지연은 검증하지 않았다.
 [접힘 변경 범위 재사용](plans/editor-fold-change-reuse.md)은 로컬 구현·검증 완료: 집중 6개·기존 캐시 9개·독립 결함 5개를 대조했으며, 전후 함수 실측·실제 100개 변경 범위의 복귀 진단·전체 로컬 게이트와 실제 main 리베이스·CI를 완료했다. PR #4573은 `51a59c180`으로 머지됐으며 머지 트리는 PR head와 동일하다. 실제 GUI/HID 지연은 검증하지 않았다.

@@ -42,7 +42,7 @@ def fixture(original, root):
         shutil.copyfile(path, root / path.name)
     # 큰 바이너리와 소스는 읽기 전용으로 빌리고, 손상시킬 때는 링크부터 끊는다.
     for folder in ('source-1', 'original-product'):
-        for name in summary.SOURCES:
+        for name in summary.source_names(summary.load(original / 'setup-1.json')):
             target = root / folder / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.symlink_to(original / folder / name)
@@ -112,8 +112,10 @@ def main():
             extra.unlink()
         positive()
         # ② 중첩 시간을 합하거나 호출 일부를 빠뜨려도 그럴듯한 수치로 통과하는가.
+        native = re.search(r'native_calls=(\d+)', first).group(1)
+        wrong_native = '2' if native == '1' else '1'
         for label, old, new in (
-            ('wrong-view-count', 'native_calls=2', 'native_calls=1'),
+            ('wrong-view-count', 'native_calls=' + native, 'native_calls=' + wrong_native),
             ('missing-stage-call', 'reset_calls=2', 'reset_calls=0'),
             ('negative-interval', 'on_edit=', 'on_edit=-'),
         ):
@@ -141,6 +143,13 @@ def main():
         bad_json('comparison-label-on-attribution', 'setup-1.json', lambda value: value.update(comparison_variant='cursor'))
         bad_json('incomplete-source-provenance', 'setup-1.json', lambda value: value['instrumented_sha256'].pop('src/syntax/tree_sitter.zig'))
         bad_json('boolean-mode', 'setup-1.json', lambda value: value.update(mode=True))
+        bad_json('unknown-provider-schema', 'setup-1.json', lambda value: value.update(provider_schema=3))
+        bad_json('boolean-provider-schema', 'setup-1.json', lambda value: value.update(provider_schema=True))
+        bad_json('unknown-provider-execution', 'setup-1.json', lambda value: value.update(provider_execution='unknown'))
+        if summary.load(root / 'setup-1.json').get('provider_schema') == 2:
+            bad_text('wrong-adoption-count', log, raw.replace(first, re.sub(r'adopted_calls=\d+', 'adopted_calls=99', first), 1))
+            bad_text('missing-adoption-count', log, raw.replace(first, re.sub(r' adopted_calls=\d+', '', first), 1))
+            bad_json('legacy-schema-with-new-records', 'setup-1.json', lambda value: value.update(provider_schema=1))
         path = root / 'inputs.json'
         bad_text('duplicate-json-field', path, path.read_text().replace('{', '{"flat-3000.zig":{},', 1))
         positive()

@@ -29,6 +29,19 @@ def setup(repo,output,deps,mode):
     part=wrap(part,'        self.sticky_summary.edit(&edit);',2)
     part=wrap(part,'        c.ts_tree_edit(old_tree, &edit);',3)
     text=before+part+after
+    shared = 'pub fn updateForInput(' in (source/'src/platform/macos/app_session/editor/syntax.zig').read_text()
+    if shared:
+        anchor='    pub fn onEditFromParsed(self: *Provider, parsed: *const Provider, edit: ?Edit) bool {\n'
+        text=base.once(text,anchor,anchor+'        const shared_start = providerProbeNow();\n        provider_probe_calls[0] += 1;\n        defer provider_probe_ns[0] += providerProbeNow() - shared_start;\n')
+        begin=text.index(anchor);end=text.index('    pub fn deinit(self: *Provider)',begin)
+        before,part,after=text[:begin],text[begin:end],text[end:]
+        part=wrap(part,'        c.ts_parser_reset(self.parser);',1)
+        part=wrap(part,'                self.sticky_summary.edit(&change);',2)
+        part=wrap(part,'                c.ts_tree_edit(previous, &change);',3)
+        part=wrap(part,'            c.ts_tree_delete(previous);',6)
+        part=base.once(part,'        self.stats.reused_parses +|= 1;','        self.stats.reused_parses +|= 1;\n        provider_adopted_calls += 1;')
+        text=before+part+after
+    text+='\npub var provider_adopted_calls: u64 = 0;\n'
     anchor='    fn noteChanged(self: *Provider, old: *c.TSTree, new: *c.TSTree) void {\n'
     text=base.once(text,anchor,anchor+'        const note_start = providerProbeNow();\n        provider_probe_calls[4] += 1;\n        defer provider_probe_ns[4] += providerProbeNow() - note_start;\n')
     anchor='        const ranges = c.ts_tree_get_changed_ranges(old, new, &count);'
@@ -39,19 +52,27 @@ def setup(repo,output,deps,mode):
     p.write_text(text)
     p=source/'src/platform/macos/app_session/editor/mod.zig';text=p.read_text()
     anchor='        frame_probe_ns = @splat(0);'
-    text=base.once(text,anchor,anchor+'\n        syntax_color.syntax.provider_probe_ns = @splat(0);\n        syntax_color.syntax.provider_probe_calls = @splat(0);\n        syntax_color.syntax.provider_native_calls = 0;')
+    text=base.once(text,anchor,anchor+'\n        syntax_color.syntax.provider_probe_ns = @splat(0);\n        syntax_color.syntax.provider_probe_calls = @splat(0);\n        syntax_color.syntax.provider_native_calls = 0;\n        syntax_color.syntax.provider_adopted_calls = 0;')
     fields=' '.join(name+'={d} '+name+'_calls={d}' for name in STAGES)
     values=', '.join('syntax_color.syntax.provider_probe_ns['+str(i)+'], syntax_color.syntax.provider_probe_calls['+str(i)+']' for i in range(7))
     anchor='        const live_doc = term.rt.editorDocument().opened.?;'
-    text=base.once(text,anchor,'        std.debug.print("PROVIDER key={d} '+fields+' native_calls={d}\\n", .{i, '+values+', syntax_color.syntax.provider_native_calls});\n'+anchor)
+    text=base.once(text,anchor,'        std.debug.print("PROVIDER key={d} '+fields+' native_calls={d} adopted_calls={d}\\n", .{i, '+values+', syntax_color.syntax.provider_native_calls, syntax_color.syntax.provider_adopted_calls});\n'+anchor)
     p.write_text(text)
     p=output/'setup-1.json';info=json.loads(p.read_text())
     for name in ['src/syntax/tree_sitter.zig','src/platform/macos/app_session/editor/mod.zig']:
         info['instrumented_sha256'][name]=hashlib.sha256((source/name).read_bytes()).hexdigest()
     info['comparison_target']='provider-edit-attribution'
+    info['provider_schema']=2
+    info['provider_execution']='revision-snapshots' if shared else 'per-view-native'
+    extra=['src/session.zig','src/session/editor/document_registry.zig']
+    if shared:extra.append('src/session/editor/syntax_stamp.zig')
+    for name in extra:
+        raw=(source/name).read_bytes()
+        info['original_sha256'][name]=hashlib.sha256(raw).hexdigest()
+        info['instrumented_sha256'][name]=hashlib.sha256(raw).hexdigest()
     info.pop('comparison_variant',None)
     for name,value in info['original_sha256'].items():
-        raw=(repo/name).read_bytes()
+        raw=(source/name).read_bytes() if name in extra else (repo/name).read_bytes()
         if hashlib.sha256(raw).hexdigest()!=value:raise RuntimeError('Original source changed during setup: '+name)
         saved=output/'original-product'/name
         saved.parent.mkdir(parents=True,exist_ok=True)

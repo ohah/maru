@@ -10010,6 +10010,31 @@ fn rebuildMappedVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void 
     };
 }
 
+/// 줄/선택 게시 순서를 바꾸지 않는다. 먼저 갱신된 어느 뷰라도 완료한 같은 입력이면 빌릴 수 있다.
+fn refreshSyntaxForInput(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) void {
+    const state = term.rt.editorDocument();
+    const doc = state.opened orelse return;
+    const lease = term.rt.editor_document_lease;
+    const identity = if (lease) |value| value.owner.identity(value) else null;
+    if (identity) |document| {
+        var ready: ?*const syntax_color.State = null;
+        // 흔한 단일 뷰는 다른 Term을 훑지 않는다. 신원이 없어도 기존 파싱은 유지한다.
+        if ((lease.?.owner.viewCount(lease.?) orelse 0) > 1) find: {
+            for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |view| {
+                if (view == term or view.kind != .editor or view.rt.editor_diff != null or view.rt.editor_merge != null) continue;
+                const other = view.rt.editor_document_lease orelse continue;
+                if (!maru.session.editor.syntax_stamp.sameDocument(document, other.owner.identity(other))) continue;
+                if (!syntax_color.matchesInput(&view.rt.editor_syntax, document, doc.file.revision)) continue;
+                ready = &view.rt.editor_syntax;
+                break :find;
+            };
+        }
+        syntax_color.updateForInput(&term.rt.editor_syntax, self.allocator, doc.file.content, edit, doc.file.lines, document, doc.file.revision, ready);
+    } else if (edit) |span| {
+        syntax_color.onEditSpan(&term.rt.editor_syntax, self.allocator, doc.file.content, span, doc.file.lines);
+    } else syntax_color.reparse(&term.rt.editor_syntax, doc.file.content);
+}
+
 fn refreshViewAfterEditImpl(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan, mapped_folds: bool) error{OutOfMemory}!void {
     workspace_restore.clear(self.allocator, term);
     // **가로 위치를 먼저 떠 둔다** — 아래 ⑷ 가 그것을 0 으로 되돌린다. `defer` 안에서 뜨면
@@ -10044,14 +10069,7 @@ fn refreshViewAfterEditImpl(self: *AppSession, term: *Term, edit: ?syntax_color.
     symbols_client.onEdit(self, term); // 심볼 2층은 **버린다**(§8.2o — 낡은 체인은 「지금 어디」에 거짓말이다)
     fold_lsp_client.onEdit(self, term); // 3층은 조용 시계만(§8.2j 「편집 중」) — 범위는 아래 ⑵ 의 `dropFoldState` 가 놓는다
     if (edit) |e| inlay_client.onEdit(self, term, e.start, e.old_end, e.new_end) else inlay_client.onEdit(self, term, null, 0, 0); // 힌트 밀기(§4.1h — 경계 = 뒤)
-    if (edit) |e|
-        syntax_color.onEditSpan(&term.rt.editor_syntax, self.allocator, doc.file.content, e, doc.file.lines)
-    else
-        // **`null`은 "안 바뀌었다"가 아니라 "범위를 모른다"이다.** 이 함수는 편집 뒤에만 불리므로
-        // 통지를 건너뛰면 트리가 낡은 채로 남아 **색이 옛 문서를 가리킨다**. 범위를 못 만드는
-        // 경로(`spanFromInverse` 의 방어 갈래 · 범위 모르는 항목이 낀 undo 묶음 — 보통의 undo 는 `undoGroupSpan` 이
-        // 범위를 만든다)는 전체를 다시 파는 쪽이 정확하다.
-        syntax_color.reparse(&term.rt.editor_syntax, doc.file.content);
+    refreshSyntaxForInput(self, term, edit);
 
     // ⑷⑸⑹은 **실패할 수 없는 연산이고, ⑵⑶이 실패해도 반드시 돌아야 한다.**
     //
@@ -70380,4 +70398,140 @@ test "shared initial snapshot 준비 뒤 pane 생성 실패는 스냅샷과 문�
     try testing.expectEqual(old_refs, lease.owner.viewCount(lease).?);
     try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     try testing.expectEqualStrings(shared_snapshot_text, source.rt.editorDocument().opened.?.file.content);
+}
+
+fn expectSharedParseOutputs(term: *Term, allocator: std.mem.Allocator) !void {
+    const bytes = term.rt.editorDocument().opened.?.file.content;
+    var fresh = syntax_mod.Provider.init(bytes, syntax_color.syntaxLanguage(term.rt.editor_grammar), 0) orelse return error.NoProvider;
+    defer fresh.deinit();
+    const current = if (term.rt.editor_syntax.provider) |*value| value else return error.NoProvider;
+    var expected: std.ArrayList(syntax_mod.Span) = .empty;
+    defer expected.deinit(allocator);
+    var got: std.ArrayList(syntax_mod.Span) = .empty;
+    defer got.deinit(allocator);
+    fresh.spansForRange(allocator, bytes, .{ .start = 0, .end = @intCast(bytes.len) }, &expected);
+    current.spansForRange(allocator, bytes, .{ .start = 0, .end = @intCast(bytes.len) }, &got);
+    try testing.expectEqualDeep(expected.items, got.items);
+    var expected_symbols: std.ArrayList(syntax_mod.Provider.Symbol) = .empty;
+    defer expected_symbols.deinit(allocator);
+    var got_symbols: std.ArrayList(syntax_mod.Provider.Symbol) = .empty;
+    defer got_symbols.deinit(allocator);
+    try fresh.symbolsChecked(allocator, &expected_symbols);
+    try current.symbolsChecked(allocator, &got_symbols);
+    try testing.expectEqualDeep(expected_symbols.items, got_symbols.items);
+    try expectFoldMarkLookup(term);
+}
+
+fn sharedParseCount(left: *Term, right: *Term) u64 {
+    return left.rt.editor_syntax.provider.?.stats.reused_parses + right.rt.editor_syntax.provider.?.stats.reused_parses;
+}
+
+test "shared parse reuse product 양쪽 입력 Undo Redo와 원본 닫기 뒤 자체 파싱을 대조한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const source = try undoFixture(&fx, a, "shared-parse.zig", "fn f() void {\n _ = 1;\n}\nfn g() void {\n _ = 2;\n}\n");
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    const original_pane = pane_ops.activePane(fx.session);
+    const original_index = std.mem.indexOfScalar(*Term, original_pane.terms.items, source).?;
+    const peer = try pane_ops.splitSharedEditorPane(fx.session, .horizontal, false);
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    fx.leaf_rect.w /= 2;
+    for (0..8) |i| {
+        const before = sharedParseCount(source, peer);
+        const view = if (i % 2 == 0) source else peer;
+        try testing.expect(insertText(fx.session, view, if (i % 3 == 0) "\n" else " "));
+        try testing.expectEqual(before + 1, sharedParseCount(source, peer));
+        for ([_]*Term{ source, peer }) |current| {
+            try foldMarksReady(&fx, current);
+            try expectSharedParseOutputs(current, a);
+            const lease = current.rt.editor_document_lease.?;
+            try testing.expect(syntax_color.matchesInput(&current.rt.editor_syntax, lease.owner.identity(lease).?, current.rt.editorDocument().opened.?.file.revision));
+        }
+    }
+    for ([_]bool{ false, true }) |redo| {
+        const before = sharedParseCount(source, peer);
+        try testing.expect(if (redo) redoEdit(fx.session, source) else undoEdit(fx.session, peer));
+        try testing.expectEqual(before + 1, sharedParseCount(source, peer));
+        for ([_]*Term{ source, peer }) |current| {
+            try foldMarksReady(&fx, current);
+            try expectSharedParseOutputs(current, a);
+        }
+    }
+    const generation = source.rt.editor_syntax.provider.?.tree_gen;
+    try refreshViewAfterEdit(fx.session, source, null);
+    try testing.expectEqual(generation, source.rt.editor_syntax.provider.?.tree_gen);
+    fx.term = peer;
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, original_pane, original_index);
+    const adopted = peer.rt.editor_syntax.provider.?.stats.reused_parses;
+    try testing.expect(insertText(fx.session, peer, " "));
+    try testing.expectEqual(adopted, peer.rt.editor_syntax.provider.?.stats.reused_parses);
+    try foldMarksReady(&fx, peer);
+    try expectSharedParseOutputs(peer, a);
+}
+
+test "shared parse reuse product 낡은 입력 증명과 직접 재파싱은 현재 결과로 오인하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const source = try undoFixture(&fx, a, "stale-parse.zig", "fn f() void {\n _ = 1;\n}\n");
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    const peer = try pane_ops.splitSharedEditorPane(fx.session, .horizontal, false);
+    try testing.expect(insertText(fx.session, source, " "));
+    const lease = source.rt.editor_document_lease.?;
+    const identity = lease.owner.identity(lease).?;
+    const revision = source.rt.editorDocument().opened.?.file.revision;
+    const good = peer.rt.editor_syntax.input_stamp.?;
+    for (0..6) |kind| {
+        peer.rt.editor_syntax.input_stamp = good;
+        switch (kind) {
+            0 => peer.rt.editor_syntax.input_stamp.?.document.owner += 1,
+            1 => peer.rt.editor_syntax.input_stamp.?.document.slot += 1,
+            2 => peer.rt.editor_syntax.input_stamp.?.document.generation += 1,
+            3 => peer.rt.editor_syntax.input_stamp.?.revision += 1,
+            4 => peer.rt.editor_syntax.input_stamp.?.provider_identity += 1,
+            else => peer.rt.editor_syntax.input_stamp.?.tree_generation += 1,
+        }
+        try testing.expect(!syntax_color.matchesInput(&peer.rt.editor_syntax, identity, revision));
+        source.rt.editor_syntax.input_stamp = null;
+        const before = sharedParseCount(source, peer);
+        try refreshViewAfterEdit(fx.session, source, null);
+        try testing.expectEqual(before, sharedParseCount(source, peer));
+        try expectSharedParseOutputs(source, a);
+    }
+    peer.rt.editor_syntax.input_stamp = good;
+    syntax_color.reparse(&source.rt.editor_syntax, source.rt.editorDocument().opened.?.file.content);
+    try testing.expect(!syntax_color.matchesInput(&source.rt.editor_syntax, identity, revision));
+    const before = sharedParseCount(source, peer);
+    try refreshViewAfterEdit(fx.session, source, null);
+    try testing.expectEqual(before + 1, sharedParseCount(source, peer));
+    try testing.expect(syntax_color.matchesInput(&source.rt.editor_syntax, identity, revision));
+}
+
+test "shared parse reuse product 다른 문서의 위조된 완료 증명은 현재 lease에서 거절한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const source = try undoFixture(&fx, a, "proof-source.zig", "fn source() void {\n _ = 1;\n}\n");
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    const peer = try pane_ops.splitSharedEditorPane(fx.session, .horizontal, false);
+    try testing.expect(insertText(fx.session, source, " "));
+    const foreign = try undoFixture(&fx, a, "proof-foreign.zig", "fn foreign() void {\n _ = 2;\n}\n");
+    syntax_color.reparse(&foreign.rt.editor_syntax, foreign.rt.editorDocument().opened.?.file.content);
+    const lease = source.rt.editor_document_lease.?;
+    const identity = lease.owner.identity(lease).?;
+    const revision = source.rt.editorDocument().opened.?.file.revision;
+    const p = foreign.rt.editor_syntax.provider.?;
+    // State 값만 맞는 것으로 충분하지 않다. 현재 Term의 live 문서 lease도 같은 신원이어야 한다.
+    foreign.rt.editor_syntax.input_stamp = .{ .document = identity, .revision = revision, .provider_identity = @intFromPtr(p.parser), .tree_generation = p.tree_gen };
+    try testing.expect(syntax_color.matchesInput(&foreign.rt.editor_syntax, identity, revision));
+    peer.rt.editor_syntax.input_stamp = null;
+    source.rt.editor_syntax.input_stamp = null;
+    const before = sharedParseCount(source, peer);
+    try refreshViewAfterEdit(fx.session, source, null);
+    try testing.expectEqual(before, sharedParseCount(source, peer));
+    try expectSharedParseOutputs(source, a);
 }

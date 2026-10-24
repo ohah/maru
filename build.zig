@@ -1698,6 +1698,11 @@ pub fn build(b: *std.Build) void {
     const run_search_case_fold_tests = b.addRunArtifact(search_case_fold_tests);
     run_search_case_fold_tests.addArg("--maru-expect-tests=25"); // SCF1~3과 익명 import 판정자 22개.
     b.step("test-search-case-fold", "Run Unicode search folding judges").dependOn(&run_search_case_fold_tests.step);
+    const syntax_stamp_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"syntax input stamp"} });
+    const run_syntax_stamp = b.addRunArtifact(syntax_stamp_tests);
+    run_syntax_stamp.addArg("--maru-expect-tests=30");
+    run_syntax_stamp.addArg("--maru-expect-passed=30");
+    b.step("test-editor-syntax-stamp", "Verify document/provider provenance for parsed snapshots").dependOn(&run_syntax_stamp.step);
     const editor_document_regex_step = b.step("test-editor-document-regex", "Run whole-document regex judges");
     const document_regex_tests = addProjectTest(b, .{
         .root_module = maru_mod,
@@ -5054,6 +5059,7 @@ pub fn build(b: *std.Build) void {
     }
 
     test_step.dependOn(&run_core_tests.step);
+    test_step.dependOn(&run_syntax_stamp.step);
 
     // **macOS 에서만 만들어지는 게이트들의 모음.** `mise run check` 를 도는 CI 잡은 `ubuntu-latest`
     // 라 `if (target.result.os.tag == .macos)` 안의 아티팩트를 **컴파일조차 하지 않는다** — 그 게이트
@@ -6438,6 +6444,21 @@ pub fn build(b: *std.Build) void {
         run_diff_oom.addArg("--maru-expect-passed=6");
         macos_only_test_step.dependOn(&run_diff_oom.step);
     }
+    const parse_reuse_product_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"shared parse reuse product"} });
+    const run_parse_reuse_product = b.addRunArtifact(parse_reuse_product_tests);
+    run_parse_reuse_product.setCwd(b.path("."));
+    run_parse_reuse_product.addArg("--maru-expect-tests=7");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_parse_reuse_product.addArg("--maru-expect-passed=7");
+        macos_only_test_step.dependOn(&run_parse_reuse_product.step);
+    }
+    b.step("test-editor-shared-parse-product", "Verify shared input reuse in the editor coordinator").dependOn(&run_parse_reuse_product.step);
+    const parse_reuse_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"shared parse reuse native"} });
+    const run_parse_reuse = b.addRunArtifact(parse_reuse_tests);
+    run_parse_reuse.addArg("--maru-expect-tests=6");
+    run_parse_reuse.addArg("--maru-expect-passed=6");
+    test_step.dependOn(&run_parse_reuse.step);
+    b.step("test-editor-shared-parse-core", "Compare imported parsed trees with independent native parses").dependOn(&run_parse_reuse.step);
     const native_snapshot_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"shared native snapshot"} });
     const run_native_snapshot = b.addRunArtifact(native_snapshot_tests);
     run_native_snapshot.addArg("--maru-expect-tests=3");

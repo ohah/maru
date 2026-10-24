@@ -12055,10 +12055,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 mouse_events += 1;
 
                 if (sidebar_resize_drag) |offset| {
-                    if (m.kind == .left_up or m.kind == .capture_lost) {
-                        if (m.kind == .left_up) sidebar_writer.schedule(sidebar_w);
+                    if (m.kind == .capture_lost) {
                         sidebar_resize_drag = null;
-                    } else if (m.kind == .moved) {
+                    } else if (m.kind == .moved or m.kind == .left_up) {
+                        // The release carries the final pointer position even when Windows
+                        // coalesces or omits the last move. Paint and persist that same width.
                         const next = win_sidebar.widthForPointer(m.x_px, offset, cell_w);
                         if (next != sidebar_w) {
                             sidebar_w = next;
@@ -12088,6 +12089,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             };
                             rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                             rebuildTitlebarCells(allocator, &titlebar_cells, client_w, sidebar_w, titlebar_px, caption_btn_w, caption_hover, window.isMaximized(), &chrome_tokens) catch {};
+                        }
+                        if (m.kind == .left_up) {
+                            sidebar_writer.schedule(sidebar_w);
+                            sidebar_resize_drag = null;
                         }
                     }
                     continue;

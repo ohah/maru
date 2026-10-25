@@ -266,7 +266,7 @@ pub fn openResult(self: *host.AppSession, index: usize) void {
     // 이름 변경·닫기 뒤 경로로 다른 문서를 다시 열지 않는다. 사용자가 고른 살아 있는 정본만 연다.
     _ = self.activateExistingFileTerm(term);
     if (@import("../../../pane.zig").activePane(self).activeTerm() != term) return;
-    self.editor_search.focused = null;
+    self.editor_search.setFocused(null);
     self.metal_dirty = true;
 }
 

@@ -2335,6 +2335,16 @@ pub fn build(b: *std.Build) void {
     const address_field_ime_step = b.step("test-address-field-ime", "Validate address-field native IME ranges and pinned owner lifetime");
     address_field_ime_step.dependOn(&run_address_ime.step);
 
+    const project_search_ime_step = b.step("test-project-search-ime", "Validate project search field IME ranges and ownership");
+    const project_search_ime_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"project search IME host"},
+    });
+    const run_project_search_ime = b.addRunArtifact(project_search_ime_tests);
+    run_project_search_ime.setCwd(b.path("."));
+    project_search_ime_step.dependOn(&run_project_search_ime.step);
+    run_project_search_ime.addArg("--maru-expect-tests=34");
+    if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_project_search_ime.step);
     const find_input_ime_step = b.step("test-find-replace-ime", "Validate find/replace IME commit and view ownership boundaries");
     const find_input_ime_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
@@ -4908,6 +4918,14 @@ pub fn build(b: *std.Build) void {
         run_find_model.addArg("--maru-expect-tests=24");
         find_input_ime_step.dependOn(&run_find_model.step);
         test_step.dependOn(&run_find_model.step);
+        const project_ime_model_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
+            .filters = &.{"project search IME model"},
+        });
+        const run_project_ime_model = b.addRunArtifact(project_ime_model_tests);
+        run_project_ime_model.addArg("--maru-expect-tests=10");
+        project_search_ime_step.dependOn(&run_project_ime_model.step);
+        test_step.dependOn(&run_project_ime_model.step);
         const settings_search_model_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
             .filters = &.{"settings search IME"},
@@ -4921,6 +4939,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"inline rename IME"},
         });
         const run_rename_model = b.addRunArtifact(rename_model_tests);
+        project_search_ime_step.dependOn(&run_rename_model.step);
         run_rename_model.addArg("--maru-expect-tests=13");
         rename_ime_step.dependOn(&run_rename_model.step);
         test_step.dependOn(&run_rename_model.step);

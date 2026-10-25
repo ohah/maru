@@ -24,6 +24,15 @@ pub const budget: backend.Budget = .{ .timing = .{ .execution_ms = 10_000, .reap
 pub const State = struct {
     result: search.presentation.State = .{},
     fields: [4]chrome.components.text_field.TextField = .{ .{}, .{}, .{}, .{} },
+    // Stable per-window fields own their snapshots; result generations are unrelated.
+    ime_models: [4]chrome.components.text_field_ime.State = .{ .{ .normalization = .verbatim }, .{ .normalization = .verbatim }, .{ .normalization = .verbatim }, .{ .normalization = .verbatim } },
+    ime_epoch: u64 = 1,
+    ime_sequence: u64 = 1,
+    ime_observed: ?@import("ime.zig").Owner = null,
+    ime_owner: ?u64 = null,
+    ime_index: ?usize = null,
+    ime_touched: bool = false,
+    ime_published: bool = false,
     replacing: bool = false,
     apply_outcome: enum { none, saved, save_failed } = .none,
     preview: preview.State = .{},
@@ -46,6 +55,10 @@ pub const State = struct {
     nav: ?navigation.Ticket = null,
     pending: ?backend.Batch = null,
     consumed: usize = 0,
+    pub fn setFocused(self: *State, index: ?usize) void {
+        if (self.focused != index) self.ime_epoch +|= 1;
+        self.focused = index;
+    }
     pub fn dropPending(self: *State, a: std.mem.Allocator) void {
         if (self.pending) |*batch| {
             for (batch.rows.items[self.consumed..]) |*row| row.match.deinit(a);
@@ -69,6 +82,7 @@ pub const State = struct {
         self.preview.deinit(a);
         self.batch.deinit(a);
         self.result.deinit(a);
+        for (&self.ime_models) |*model| model.deinit(a);
         for (&self.fields) |*field| field.deinit(a);
         self.entries.deinit(a);
         self.actions.deinit(a);
@@ -199,9 +213,22 @@ pub fn commitText(self: *AppSession, bytes: []const u8) bool {
     edited(self);
     return true;
 }
+/// Preserve the existing distinction: replacement only retires preview/apply plans,
+/// while all search scopes cancel old results before another request can run.
+pub fn imeChanged(self: *AppSession, in_key: bool) void {
+    if (self.editor_search.focused == 3) {
+        edited(self);
+        return;
+    }
+    if (in_key or (if (focused(self)) |f| f.preedit.items.len > 0 else false)) {
+        stopRequest(self);
+        self.editor_search.invalidate();
+        self.editor_search.result.preedit(self.allocator);
+        self.metal_dirty = true;
+    } else edited(self);
+}
 pub fn commitPreedit(self: *AppSession) bool {
-    const field = focused(self) orelse return true;
-    return field.preedit.items.len == 0 or commitText(self, field.preedit.items);
+    return @import("ime.zig").commitAll(self);
 }
 pub fn open(self: *AppSession) void {
     if (!self.tryCommitComposition()) return;
@@ -211,19 +238,20 @@ pub fn open(self: *AppSession) void {
     self.sidebar_search_active = false;
     self.agent_session_archive_search_active = false;
     @import("../../scm_dock.zig").blurCommit(self);
-    self.editor_search.focused = 0;
+    self.editor_search.ime_epoch +|= 1;
+    self.editor_search.setFocused(0);
     self.editor_search.fields[0].selectAll();
     changed(self);
 }
 pub fn blur(self: *AppSession) bool {
     if (!commitPreedit(self)) return false;
-    self.editor_search.focused = null;
+    self.editor_search.setFocused(null);
     self.metal_dirty = true;
     return true;
 }
 pub fn leave(self: *AppSession) bool {
     if (!commitPreedit(self)) return false;
-    self.editor_search.focused = null;
+    self.editor_search.setFocused(null);
     stopRequest(self);
     self.editor_search.invalidate();
     self.editor_search.result.cancel(self.allocator);
@@ -370,7 +398,7 @@ pub fn handleKey(self: *AppSession, event: chrome.input.InputEvent) bool {
     switch (k.key) {
         .escape => {
             if (!self.tryCommitComposition()) return true;
-            self.editor_search.focused = null;
+            self.editor_search.setFocused(null);
             cancel(self);
         },
         .enter => {
@@ -385,7 +413,7 @@ pub fn handleKey(self: *AppSession, event: chrome.input.InputEvent) bool {
             if (!self.tryCommitComposition()) return true;
             const order = if (self.editor_search.expanded) (if (self.editor_search.replacing) &[_]usize{ 0, 3, 1, 2 } else &[_]usize{ 0, 1, 2 }) else if (self.editor_search.replacing) &[_]usize{ 0, 3 } else &[_]usize{0};
             for (order, 0..) |index, i| if (index == self.editor_search.focused.?) {
-                self.editor_search.focused = order[(i + (if (k.mods.shift) order.len - 1 else 1)) % order.len];
+                self.editor_search.setFocused(order[(i + (if (k.mods.shift) order.len - 1 else 1)) % order.len]);
                 break;
             };
             self.metal_dirty = true;
@@ -535,7 +563,7 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
             self.sidebar_search_active = false;
             self.agent_session_archive_search_active = false;
             @import("../../scm_dock.zig").blurCommit(self);
-            st.focused = index;
+            st.setFocused(index);
             st.fields[index].moveEnd(false);
         },
         .option => |index| {
@@ -572,12 +600,12 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
                 batch_ui.back(self);
                 preview.back(self);
                 st.replacing = !st.replacing;
-                if (!st.replacing and st.focused == 3) st.focused = 0;
+                if (!st.replacing and st.focused == 3) st.setFocused(0);
                 st.invalidate();
                 st.result.generation +%= 1;
             } else if (index == 3) {
                 st.expanded = !st.expanded;
-                if (!st.expanded and st.focused != null and st.focused.? > 0 and st.focused.? < 3) st.focused = 0;
+                if (!st.expanded and st.focused != null and st.focused.? > 0 and st.focused.? < 3) st.setFocused(0);
                 st.invalidate();
                 st.result.generation +%= 1;
             }
@@ -674,7 +702,10 @@ pub fn makeDisplay(a: std.mem.Allocator, field: *const chrome.components.text_fi
     for (text) |*byte| if (byte.* == '\n' or byte.* == '\r') {
         byte.* = ' ';
     };
-    const caret = @min(surrogate.caret + surrogate.preedit.items.len, text.len);
+    // Native selection may sit inside preedit. Snap painting on the composed
+    // grapheme, while keeping the semantic UTF-16 range in the IME context.
+    const local = maru.grapheme.snapToBoundary(surrogate.preedit.items, @min(surrogate.preedit_caret orelse surrogate.preedit.items.len, surrogate.preedit.items.len));
+    const caret = maru.grapheme.snapToBoundary(text, @min(surrogate.caret + local, text.len));
     const selected = if (surrogate.selection) |sel| Display{ .text = text, .caret = caret, .selected = .{ .start = @min(sel.lo() + (if (sel.lo() >= surrogate.caret) glyph.len else 0), text.len), .end = @min(sel.hi() + (if (sel.hi() > surrogate.caret) glyph.len else 0), text.len) } } else Display{ .text = text, .caret = caret };
     return selected;
 }

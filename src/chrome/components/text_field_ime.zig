@@ -475,3 +475,34 @@ test "inline rename IME allocation failures preserve NFD and caret" {
     }
     try std.testing.expect(failures > 0 and successes > 0);
 }
+
+test "project search IME model candidate key is consumed then bare Enter remains an action" {
+    const a = std.testing.allocator;
+    var field: Field = .{};
+    defer field.deinit(a);
+    var state: State = .{ .normalization = .verbatim };
+    defer state.deinit(a);
+    state.begin(a, &field);
+    try std.testing.expect(state.marked(a, &field, "한", .{ .location = 1, .length = 0 }, null));
+    try std.testing.expect(state.insert(a, &field, "韓", null));
+    try std.testing.expect(state.finishKey(a, &field, .enter, true, false));
+    state.finish(a);
+    try std.testing.expectEqualStrings("韓", field.text.items);
+    state.begin(a, &field);
+    try std.testing.expect(!state.finishKey(a, &field, .enter, false, false));
+}
+
+test "project search IME model NFD range uses source UTF16 units" {
+    const a = std.testing.allocator;
+    var field: Field = .{};
+    defer field.deinit(a);
+    var state: State = .{ .normalization = .verbatim };
+    defer state.deinit(a);
+    try field.setText(a, "a한z");
+    state.begin(a, &field);
+    try std.testing.expect(state.marked(a, &field, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 3 }));
+    try std.testing.expectEqualStrings("a韓z", state.context.value.text());
+    try std.testing.expect(state.insert(a, &field, "韓", null));
+    try std.testing.expect(state.finishKey(a, &field, .enter, true, false));
+    try std.testing.expectEqualStrings("a韓z", field.text.items);
+}

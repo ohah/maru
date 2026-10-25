@@ -6,6 +6,7 @@ const app = @import("../app_session.zig");
 const dock = @import("agent_dock.zig");
 pub const Range = maru.inline_text_input.Range;
 const Context = maru.inline_text_input.Context;
+const project_ime = @import("editor/search/ime.zig");
 const find_ime = @import("find_ime.zig");
 const settings_ime = @import("settings_ime.zig");
 const field_ime = @import("field_ime.zig");
@@ -41,6 +42,7 @@ pub const Projection = union(enum) {
 };
 
 pub fn generation(self: *app.AppSession) ?u64 {
+    if (project_ime.generation(self)) |token| return token;
     if (find_ime.generation(self)) |token| return token;
     if (settings_ime.generation(self)) |token| return token;
     if (field_ime.generation(self, .address)) |token| return token;
@@ -49,6 +51,7 @@ pub fn generation(self: *app.AppSession) ?u64 {
     return fixedGeneration(self);
 }
 pub fn projection(self: *app.AppSession) ?Projection {
+    if (project_ime.projection(self)) |context| return .{ .dynamic = context };
     if (find_ime.projection(self)) |context| return .{ .dynamic = context };
     if (settings_ime.projection(self)) |context| return .{ .settings = context };
     if (field_ime.projection(self, .address)) |context| return .{ .dynamic = context };
@@ -62,7 +65,7 @@ fn fixedGeneration(self: *app.AppSession) ?u64 {
     if (self.ime_terminal_target_id != null or self.inputFocus() != .agent_session_search) return null;
     if (self.ime_search_owner) |owner| if (owner != self.agent_session_search_generation) return null;
     const token = self.agent_session_search_generation;
-    return if (token < (@as(u64, 1) << 59)) token else null;
+    return if (token < (@as(u64, 1) << 58)) token else null;
 }
 
 fn fixedProjection(self: *app.AppSession) ?*Context {
@@ -116,10 +119,11 @@ fn publish(self: *app.AppSession, context: *Context) void {
 pub fn insert(self: *app.AppSession, bytes: []const u8, replacement: ?Range) bool {
     // Test the pinned source before considering the current destination. An old
     // palette/search callback must never become a fresh address-field write.
-    if (find_ime.stale(self) or settings_ime.stale(self) or field_ime.stale(self) or
+    if (project_ime.stale(self) or find_ime.stale(self) or settings_ime.stale(self) or field_ime.stale(self) or
         self.palette_ime_owner != null and palette_ime.generation(self) == null or
         self.ime_search_owner != null and fixedGeneration(self) == null) return true;
 
+    if (project_ime.insert(self, bytes, replacement)) return true;
     if (find_ime.insert(self, bytes, replacement)) return true;
     if (settings_ime.insert(self, bytes, replacement)) return true;
     if (field_ime.insert(self, .address, bytes, replacement)) return true;
@@ -140,10 +144,11 @@ pub fn insert(self: *app.AppSession, bytes: []const u8, replacement: ?Range) boo
 pub fn marked(self: *app.AppSession, bytes: []const u8, selected: Range, replacement: ?Range) bool {
     // Test the pinned source before considering the current destination. An old
     // palette/search callback must never become a fresh address-field write.
-    if (find_ime.stale(self) or settings_ime.stale(self) or field_ime.stale(self) or
+    if (project_ime.stale(self) or find_ime.stale(self) or settings_ime.stale(self) or field_ime.stale(self) or
         self.palette_ime_owner != null and palette_ime.generation(self) == null or
         self.ime_search_owner != null and fixedGeneration(self) == null) return true;
 
+    if (project_ime.marked(self, bytes, selected, replacement)) return true;
     if (find_ime.marked(self, bytes, selected, replacement)) return true;
     if (settings_ime.marked(self, bytes, selected, replacement)) return true;
     if (field_ime.marked(self, .address, bytes, selected, replacement)) return true;
@@ -162,6 +167,7 @@ pub fn marked(self: *app.AppSession, bytes: []const u8, selected: Range, replace
 }
 
 pub fn begin(self: *app.AppSession) void {
+    project_ime.begin(self);
     find_ime.begin(self);
     settings_ime.begin(self);
     field_ime.begin(self);
@@ -172,6 +178,7 @@ pub fn begin(self: *app.AppSession) void {
 }
 
 pub fn end(self: *app.AppSession, event: ?maru.terminal.KeyEvent) bool {
+    if (project_ime.end(self, event)) return true;
     if (find_ime.end(self, event)) return true;
     if (settings_ime.end(self, event)) return true;
     if (field_ime.end(self, event)) return true;

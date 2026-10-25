@@ -2329,6 +2329,17 @@ pub fn build(b: *std.Build) void {
     const address_field_ime_step = b.step("test-address-field-ime", "Validate address-field native IME ranges and pinned owner lifetime");
     address_field_ime_step.dependOn(&run_address_ime.step);
 
+    const settings_search_ime_step = b.step("test-settings-search-ime", "Validate bounded settings-search IME ranges and owner lifetime");
+    const settings_search_ime_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"settings search IME host"},
+    });
+    const run_settings_search_ime = b.addRunArtifact(settings_search_ime_tests);
+    run_settings_search_ime.addArg("--maru-expect-tests=8");
+    run_settings_search_ime.setCwd(b.path("."));
+    settings_search_ime_step.dependOn(&run_settings_search_ime.step);
+    if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_settings_search_ime.step);
+
     const rename_ime_step = b.step("test-inline-rename-ime", "Validate inline rename UTF-16 context and activation ownership");
     const rename_ime_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
@@ -4872,6 +4883,14 @@ pub fn build(b: *std.Build) void {
     const inline_input_step = b.step("test-inline-text-input", "Validate bounded UTF-16 inline IME projections and failure atomicity");
     const owned_inline_step = b.step("test-inline-text-input-owned", "Validate dynamic IME storage, deep snapshots and allocation failure");
     inline for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
+        const settings_search_model_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
+            .filters = &.{"settings search IME"},
+        });
+        const run_settings_search_model = b.addRunArtifact(settings_search_model_tests);
+        run_settings_search_model.addArg("--maru-expect-tests=18");
+        settings_search_ime_step.dependOn(&run_settings_search_model.step);
+        test_step.dependOn(&run_settings_search_model.step);
         const rename_model_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
             .filters = &.{"inline rename IME"},
@@ -4886,14 +4905,14 @@ pub fn build(b: *std.Build) void {
             .optimize = mode,
         }) });
         const run_inline_input = b.addRunArtifact(inline_input_tests);
-        run_inline_input.addArg("--maru-expect-tests=9");
+        run_inline_input.addArg("--maru-expect-tests=10");
         const owned_inline_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
             .root_source_file = b.path("src/inline_text_input_owned.zig"),
             .target = target,
             .optimize = mode,
         }) });
         const run_owned_inline = b.addRunArtifact(owned_inline_tests);
-        run_owned_inline.addArg("--maru-expect-tests=14");
+        run_owned_inline.addArg("--maru-expect-tests=15");
         owned_inline_step.dependOn(&run_owned_inline.step);
         test_step.dependOn(&run_owned_inline.step);
         inline_input_step.dependOn(&run_inline_input.step);

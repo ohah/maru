@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 
 from prepare import load, prepare
-from verify import validate, validate_diagnostic, fixture_files
+from verify import validate, validate_diagnostic, fixture_files, validate_anchors
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -42,6 +42,7 @@ def run(app, output, mode='live'):
     (output / 'project-search-harness.json').write_text(json.dumps(manifest, indent=2) + '\n')
     result = shared_run(app, output, mode, wait_timeout=195)
     fixture_files(output / "run")
+    validate_anchors(json.loads((output/"run/result.json").read_text()), json.loads((output/"run/window-transcript.json").read_text()))
     return result
 
 

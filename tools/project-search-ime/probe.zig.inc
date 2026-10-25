@@ -82,6 +82,14 @@ export fn maru_address_fixture_start(mode: u32) u64 {
     self.metal_dirty = true;
     return 1;
 }
+// Measure explicit glyphs, independent of makeDisplay/caretRect and their selected offset.
+fn projectGlyphAdvance(self: *AppSession, bytes: []const u8) ?f64 {
+    const values = @import("editor/search/dock.zig").measure(self, bytes, .{ bytes.len, bytes.len, bytes.len }, 4096) catch return null;
+    const scale = @as(f64, @floatFromInt(@import("editor/search/dock.zig").scaleMilli(self))) / 1000;
+    if (scale <= 0 or !std.math.isFinite(values[0]) or values[0] <= 0) return null;
+    // The native caret truncates its nonnegative physical-pixel position before AppKit conversion.
+    return @floor(@as(f64, values[0])) / scale;
+}
 export fn maru_palette_ime_witness(field: u32) u64 {
     const self = palette_ime_observed_session orelse return 0;
     const search_dock = @import("editor/search/dock.zig");
@@ -123,6 +131,8 @@ export fn maru_palette_ime_witness(field: u32) u64 {
         35 => state.result.generation,
         36 => paletteIMEHash(state.fields[0].text.items),
         37 => state.fields[0].text.items.len,
+        38 => if (projectGlyphAdvance(self, "한")) |v| @intFromFloat(@round(v * 1000)) else 0,
+        39 => if (projectGlyphAdvance(self, "韓")) |v| @intFromFloat(@round(v * 1000)) else 0,
         else => 0,
     };
 }
@@ -136,12 +146,37 @@ const AddressRawSnapshot = struct {
     displays: []const AddressEvidence.DisplayTranscript,
 };
 const AddressRawRow = struct { before: AddressRawSnapshot, opened: AddressRawSnapshot, closed: AddressRawSnapshot };
+fn projectAnchors(self: *AppSession, rows: []const AddressRawRow) bool {
+    if (rows.len != 5) return false;
+    const han = projectGlyphAdvance(self, "한") orelse return false;
+    const hanja = projectGlyphAdvance(self, "韓") orelse return false;
+    var first: ?AddressEvidence.ConvertedRect = null;
+    for (rows) |row| {
+        const before = AddressEvidence.appKitToQuartz(row.before.anchor_appkit, row.before.displays) catch return false;
+        const opened = AddressEvidence.appKitToQuartz(row.opened.anchor_appkit, row.opened.displays) catch return false;
+        const closed = AddressEvidence.appKitToQuartz(row.closed.anchor_appkit, row.closed.displays) catch return false;
+        if (!std.meta.eql(before, closed) or before.display_id != opened.display_id) return false;
+        if (first) |prior| { if (!std.meta.eql(prior, before)) return false; } else first = before;
+        const b = row.before.anchor_appkit;
+        const o = row.opened.anchor_appkit;
+        if (b.y != o.y or b.w != o.w or b.h != o.h or @abs((o.x - b.x) - (hanja - han)) > 0.01) return false;
+    }
+    return true;
+}
+// Diagnostics exercise the exact geometry oracle before Screen Recording is requested.
+export fn maru_project_validate_anchors(ptr: [*]const u8, length: usize) u32 {
+    if (length == 0 or length > 1048576) return 0;
+    const self = palette_ime_observed_session orelse return 0;
+    var parsed = std.json.parseFromSlice([]AddressRawRow, self.allocator, ptr[0..length], .{ .ignore_unknown_fields = false }) catch return 0;
+    defer parsed.deinit();
+    return @intFromBool(projectAnchors(self, parsed.value));
+}
 export fn maru_address_validate_windows(ptr: [*]const u8, length: usize) u32 {
     if (length == 0 or length > 1048576) return 0;
     const self = palette_ime_observed_session orelse return 0;
     var parsed = std.json.parseFromSlice([]AddressRawRow, self.allocator, ptr[0..length], .{ .ignore_unknown_fields = false }) catch return 0;
     defer parsed.deinit();
-    if (parsed.value.len != 5) return 0;
+    if (!projectAnchors(self, parsed.value)) return 0;
     var candidates: [5]AddressEvidence.Candidate = undefined;
     for (parsed.value, 0..) |row, index| {
         if (row.before.app_captures.len != 0 or row.closed.app_captures.len != 0) return 0;
@@ -153,10 +188,7 @@ export fn maru_address_validate_windows(ptr: [*]const u8, length: usize) u32 {
             std.debug.print("address_candidate_window row={d} error={s}\n", .{index, @errorName(err)});
             return 0;
         };
-        const anchor = AddressEvidence.appKitToQuartz(row.before.anchor_appkit, row.before.displays) catch return 0;
-        const opened = AddressEvidence.appKitToQuartz(row.opened.anchor_appkit, row.opened.displays) catch return 0;
-        const closed = AddressEvidence.appKitToQuartz(row.closed.anchor_appkit, row.closed.displays) catch return 0;
-        if (!std.meta.eql(anchor, opened) or !std.meta.eql(anchor, closed)) return 0;
+
     }
     _ = AddressEvidence.validateSeries(&candidates) catch |err| {
         std.debug.print("address_candidate_series error={s}\n", .{@errorName(err)});

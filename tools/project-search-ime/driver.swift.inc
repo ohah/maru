@@ -136,7 +136,7 @@ extension MaruAppHostController {
                 try? FileManager.default.removeItem(at: paletteIMERoot.appendingPathComponent("input-source.json")); failures.append("source_superseded")
             }
         }
-        let report: [String: Any] = ["schema": "maru.project-search-ime.v1", "target_field":projectIMEField, "tabs":PaletteIMERun.tabs, "passed": failures.isEmpty, "failures": failures, "foreground_bundle":NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil", "app_active":NSApp.isActive, "key_window":view?.window?.isKeyWindow ?? false,
+        let report: [String: Any] = ["schema": "maru.project-search-ime.v1", "target_field":projectIMEField, "glyph_advances":["한":Double(paletteIMEWitness(38))/1000.0,"韓":Double(paletteIMEWitness(39))/1000.0], "tabs":PaletteIMERun.tabs, "passed": failures.isEmpty, "failures": failures, "foreground_bundle":NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil", "app_active":NSApp.isActive, "key_window":view?.window?.isKeyWindow ?? false,
             "mode": paletteIMEDiagnostic ? "diagnostic" : "live",
             "window_inventory_validated": PaletteIMERun.candidateCount == 5 && !paletteIMEDiagnostic,
             "workflow": addressPointerMode ? "pointer" : "fixture", "pointer_observations": PaletteIMERun.pointerObservations,
@@ -158,6 +158,9 @@ extension MaruAppHostController {
     private func addressPublish() throws {
         let encoded = try JSONEncoder().encode(PaletteIMERun.observer.rows)
         try encoded.write(to: paletteIMERoot.appendingPathComponent("window-transcript.json"))
+        let geometry = encoded.withUnsafeBytes { maru_project_validate_anchors($0.bindMemory(to:UInt8.self).baseAddress!, encoded.count) }
+        try paletteIMERequire(geometry == 1, "phase_anchor_geometry")
+        if paletteIMEDiagnostic { return }
         let valid = encoded.withUnsafeBytes { maru_address_validate_windows($0.bindMemory(to: UInt8.self).baseAddress!, encoded.count) }
         try paletteIMERequire(valid == 1, "shared_window_reducer")
         try encoded.write(to: paletteIMERoot.appendingPathComponent("window-transcript.json"))
@@ -272,7 +275,7 @@ extension MaruAppHostController {
                     try PaletteIMERun.observer.append(before: before, opened: opened, closed: paletteIMESnapshot(view: view))
                     paletteIMEState("cancel_\(PaletteIMERun.candidateCount)", view: view, window: window)
                     PaletteIMERun.candidateCount += 1
-                    if PaletteIMERun.candidateCount == 5 && !paletteIMEDiagnostic { try addressPublish() }
+                    if PaletteIMERun.candidateCount == 5 { try addressPublish() }
                     try paletteIMERequire(maru_address_fixture_start(0) != 0, "next_rename_fixture")
                     PaletteIMERun.step = 1; PaletteIMERun.next = now + 0.8
                 case 30:
@@ -306,3 +309,5 @@ extension MaruAppHostController {
 }
 @_silgen_name("maru_address_fixture_start") private func maru_address_fixture_start(_ mode: UInt32) -> UInt64
 @_silgen_name("maru_address_validate_windows") private func maru_address_validate_windows(_ bytes: UnsafePointer<UInt8>, _ count: Int) -> UInt32
+
+@_silgen_name("maru_project_validate_anchors") private func maru_project_validate_anchors(_ bytes:UnsafePointer<UInt8>, _ count:Int) -> UInt32

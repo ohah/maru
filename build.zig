@@ -6554,6 +6554,20 @@ pub fn build(b: *std.Build) void {
     run_sticky_snapshot.addArg("--maru-expect-passed=4");
     test_step.dependOn(&run_sticky_snapshot.step);
     b.step("test-editor-sticky-snapshot", "Verify independently owned copied sticky summaries").dependOn(&run_sticky_snapshot.step);
+    const bracket_cursor_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{ "bracket range cursor native", "SYN47 ", "SYN48 ", "SYN49 " } });
+    const run_bracket_cursor = b.addRunArtifact(bracket_cursor_tests);
+    run_bracket_cursor.addArg("--maru-expect-tests=7");
+    run_bracket_cursor.addArg("--maru-expect-passed=7");
+    test_step.dependOn(&run_bracket_cursor.step);
+    b.step("test-editor-bracket-range-cursor", "Compare guarded cursor ranges with complete native child traversal").dependOn(&run_bracket_cursor.step);
+    const bracket_cursor_product = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ "bracket range cursor product", ".test.SYNU2 " } });
+    const run_bracket_cursor_product = b.addRunArtifact(bracket_cursor_product);
+    run_bracket_cursor_product.addArg("--maru-expect-tests=7");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_bracket_cursor_product.addArg("--maru-expect-passed=7");
+        macos_only_test_step.dependOn(&run_bracket_cursor_product.step);
+    }
+    b.step("test-editor-bracket-range-cursor-product", "Compare range cursor colors navigation and real Undo Redo regression").dependOn(&run_bracket_cursor_product.step);
     const bracket_edit_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"shared bracket edit native"} });
     const run_bracket_edit = b.addRunArtifact(bracket_edit_tests);
     run_bracket_edit.addArg("--maru-expect-tests=4");

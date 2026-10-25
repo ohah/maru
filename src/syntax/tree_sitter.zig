@@ -1574,6 +1574,25 @@ pub const BracketIndex = struct {
         return lo;
     }
 
+    /// node 조회와 같은 자식일 때만 byte 이동을 쓴다. 불일치는 기존 순회로 복귀한다.
+    fn firstRangeChild(cursor: *c.TSTreeCursor, node: c.TSNode, start: u32) bool {
+        // 오류 복구 노드는 node 조회도 실제 자식을 누락할 수 있다. 기존 전체 자식 순회를 유지한다.
+        if (c.ts_node_has_error(node)) return c.ts_tree_cursor_goto_first_child(cursor);
+        // 폭 0 편집은 시작에서 끝나는 왼쪽 토큰도 포함하므로 직전 byte부터 찾는다.
+        const goal = start -| 1;
+        const expected = c.ts_node_first_child_for_byte(node, goal);
+        if (c.ts_node_is_null(expected)) return false;
+        const moved = c.ts_tree_cursor_goto_first_child_for_byte(cursor, goal) >= 0;
+        return acceptRangeChild(cursor, node, expected, moved);
+    }
+
+    /// native 이동의 반환값만으로 승인하지 않는다. 잘못된 노드/실패는 부모 기준으로 복구한다.
+    fn acceptRangeChild(cursor: *c.TSTreeCursor, node: c.TSNode, expected: c.TSNode, moved: bool) bool {
+        if (moved and c.ts_node_eq(expected, c.ts_tree_cursor_current_node(cursor))) return true;
+        c.ts_tree_cursor_reset(cursor, node);
+        return c.ts_tree_cursor_goto_first_child(cursor);
+    }
+
     /// `node` 아래에서 `r` 에 걸친 잎의 괄호를 문서 순서로 모은다. `cover` 는 걸친 잎들까지 넓힌 범위가 된다(잎이 범위 가장자리를 넘는다).
     fn collectLeaves(allocator: std.mem.Allocator, node: c.TSNode, source: []const u8, slot: Slot, r: Provider.ByteRange, out: *std.ArrayList(BracketLeaf), cover: *Provider.ByteRange) error{OutOfMemory}!void {
         const s = c.ts_node_start_byte(node);
@@ -1591,11 +1610,9 @@ pub const BracketIndex = struct {
         }
         var cursor = c.ts_tree_cursor_new(node);
         defer c.ts_tree_cursor_delete(&cursor);
-        // **범위를 지나면 멈춘다** — 원소 수십만인 평평한 목록(큰 JSON 배열 · C 데이터 표)에서 편집 한 번에 뒤 형제까지 전부 도는 것을 줄인다(새 눈
-        // 리뷰가 짚었다). 앞 형제를 **건너뛰는** `ts_tree_cursor_goto_first_child_for_byte` 는 쓰지 않는다 — 자식의 끝을 `position + size` 로 세어
-        // 앞 공백(padding)만큼 짧게 잡아, 범위에 걸친 자식을 건너뛰었다(`SYNU2` 가 되돌리기 퍼즈에서 색이 갈려 잡았다 · `tree_cursor.c` 원문).
-        // TSNode 의 `ts_node_first_child_for_byte` 는 끝을 바르게 세지만 역시 자식을 처음부터 훑는다 — 앞쪽은 어느 길이든 선형이다.
-        if (!c.ts_tree_cursor_goto_first_child(&cursor)) return;
+        // 앞쪽은 native 조회로 이동하되 실제 자식이 같을 때만 쓴다. padding 반례는 기존 순회가 처리한다.
+        // 두 API도 내부 선형 탐색일 수 있다. 점근 개선이 아니라 Zig 재귀/native 호출 경계를 줄인다.
+        if (!firstRangeChild(&cursor, node, r.start)) return;
         while (true) {
             const child = c.ts_tree_cursor_current_node(&cursor);
             // `>` 와 `>=` 는 같다(적대적 2회차 N18: 등가) — 범위 끝에서 시작하는 잎은 빈 범위(지우기)에서만 걸치는데, 그 잎은 `shift` 가 이미 그대로
@@ -5243,4 +5260,153 @@ test "shared bracket edit native 진행 중 순회를 성공 뒤에만 정리하
     try std.testing.expectEqual(@as(usize, 0), target.leaves.items.len);
     try std.testing.expect(try target.step(a, &peer, text, 0));
     try std.testing.expectEqual(@as(u64, 0), target.rebuilds);
+}
+
+// 후보의 cursor 이동과 독립적으로, 모든 자식을 node API로 방문하는 작은 입력용 판정자다.
+fn collectBracketRangeOracle(allocator: std.mem.Allocator, node: c.TSNode, text: []const u8, slot: Slot, range: Provider.ByteRange, out: *std.ArrayList(BracketLeaf), cover: *Provider.ByteRange) error{OutOfMemory}!void {
+    const start = c.ts_node_start_byte(node);
+    const end = c.ts_node_end_byte(node);
+    if (end < range.start or start > range.end) return;
+    const skip = BracketIndex.skips(node, bracketRuleFor(slot.lang));
+    const count = c.ts_node_child_count(node);
+    if (count == 0 or skip) {
+        const overlaps = if (range.start < range.end) start < range.end and end > range.start else start <= range.start and range.start <= end;
+        if (!overlaps) return;
+        cover.start = @min(cover.start, start);
+        cover.end = @max(cover.end, end);
+        if (!skip) try BracketIndex.leafBrackets(allocator, node, text, slot, out);
+        return;
+    }
+    for (0..count) |i| try collectBracketRangeOracle(allocator, c.ts_node_child(node, @intCast(i)), text, slot, range, out, cover);
+}
+
+fn expectBracketRangeOracle(allocator: std.mem.Allocator, provider: *Provider, text: []const u8) !void {
+    var got: std.ArrayList(BracketLeaf) = .empty;
+    defer got.deinit(allocator);
+    var expected: std.ArrayList(BracketLeaf) = .empty;
+    defer expected.deinit(allocator);
+    const root = c.ts_tree_root_node(provider.tree.?);
+    for (0..text.len + 1) |offset| {
+        for ([_]usize{ offset, @min(offset + 1, text.len), text.len }) |end| {
+            const range: Provider.ByteRange = .{ .start = @intCast(offset), .end = @intCast(end) };
+            var cover = range;
+            var truth = range;
+            got.clearRetainingCapacity();
+            expected.clearRetainingCapacity();
+            try BracketIndex.collectLeaves(allocator, root, text, provider.slot, range, &got, &cover);
+            try collectBracketRangeOracle(allocator, root, text, provider.slot, range, &expected, &truth);
+            std.testing.expectEqualDeep(expected.items, got.items) catch |err| {
+                std.debug.print("RANGE_DIFF lang={s} start={d} end={d} tree_error={any} expected={any} got={any} cover={any} truth={any} text={s}\n", .{ @tagName(provider.slot.lang), range.start, range.end, c.ts_node_has_error(root), expected.items, got.items, cover, truth, text });
+                return err;
+            };
+            try std.testing.expectEqualDeep(truth, cover);
+        }
+    }
+}
+
+test "bracket range cursor native 모든 byte와 번들 언어의 잎 및 cover는 전체 자식 조회와 같다" {
+    const a = std.testing.allocator;
+    const samples = [_]struct { lang: Language, text: []const u8 }{
+        .{ .lang = .zig, .text = "  fn a() void {}\n                         fn b() void { _ = .{ (1), [2]u8{1,2} }; }\n" },
+        .{ .lang = .javascript, .text = "   const a = (1);\n    /* (가) */ const b = [2, { c: '\"(' }];\n" },
+        .{ .lang = .typescript, .text = "function f<T>(x: T) { return [x, (x)]; }\n  f<string>('한');\n" },
+        .{ .lang = .markdown, .text = "   [a](b)\n\n                       (c)\n\n   [d](e)\n" },
+        .{ .lang = .c, .text = "#define A(x) ((x)[0])\n  int f(void) { return (1); } /* ( */\n" },
+        .{ .lang = .bash, .text = "echo $(f [x])\ncase x in a) echo;; esac\n" },
+        .{ .lang = .python, .text = "def f(x=[1, 2]):\n    return {'한': (x)}\n" },
+        .{ .lang = .css, .text = "a { x: url('한(가)'); y: foo('(나)'); }\n" },
+        .{ .lang = .json, .text = " {\"가\": [1, {\"나\": \"(\"}], \"끝\": []}\n" },
+        .{ .lang = .ruby, .text = "x = %w[a b]\nf({a: (1)}) # (\n" },
+    };
+    for (samples) |sample| {
+        var provider = Provider.init(sample.text, sample.lang, 0) orelse return error.NoProvider;
+        defer provider.deinit();
+        try expectBracketRangeOracle(a, &provider, sample.text);
+    }
+    // 같은 비정상 입력도 모든 번들 grammar로 판다. 오류 복구 노드와 UTF8 중간 byte를 포함한다.
+    const malformed = "   (한 [x]) {\n\n       a(\"[\", /* } */ [1, 2])\n\n    ) [끝]\n";
+    for (std.enums.values(Language)) |lang| {
+        if (lang == .other) continue;
+        var provider = Provider.init(malformed, lang, 0) orelse return error.NoProvider;
+        defer provider.deinit();
+        try expectBracketRangeOracle(a, &provider, malformed);
+    }
+}
+
+test "bracket range cursor native 일치한 중간 자식은 직접 선택하고 불일치와 빈 조회는 안전하다" {
+    const text = "fn a() void {}\nfn b() void { _ = (1); }\nfn c() void {}\n";
+    var provider = Provider.init(text, .zig, 0) orelse return error.NoProvider;
+    defer provider.deinit();
+    const root = c.ts_tree_root_node(provider.tree.?);
+    const start: u32 = @intCast(std.mem.indexOf(u8, text, "(1)").? + 1);
+    const expected = c.ts_node_first_child_for_byte(root, start -| 1);
+    try std.testing.expect(c.ts_node_start_byte(expected) > c.ts_node_start_byte(c.ts_node_child(root, 0)));
+    var cursor = c.ts_tree_cursor_new(root);
+    defer c.ts_tree_cursor_delete(&cursor);
+    try std.testing.expect(BracketIndex.firstRangeChild(&cursor, root, start));
+    try std.testing.expect(c.ts_node_eq(expected, c.ts_tree_cursor_current_node(&cursor)));
+    // 성공이라고 보고했어도 다른 노드면 거절한다. 실제 C cursor로 잘못된 위치를 주입한다.
+    try std.testing.expect(c.ts_tree_cursor_goto_next_sibling(&cursor));
+    try std.testing.expect(!c.ts_node_eq(expected, c.ts_tree_cursor_current_node(&cursor)));
+    try std.testing.expect(BracketIndex.acceptRangeChild(&cursor, root, expected, true));
+    try std.testing.expect(c.ts_node_eq(c.ts_node_child(root, 0), c.ts_tree_cursor_current_node(&cursor)));
+    c.ts_tree_cursor_reset(&cursor, root);
+    try std.testing.expect(!BracketIndex.firstRangeChild(&cursor, root, @intCast(text.len + 10)));
+
+    const padded = "   [a](b)\n\n                       (c)\n";
+    var markdown = Provider.init(padded, .markdown, 0) orelse return error.NoProvider;
+    defer markdown.deinit();
+    const section = c.ts_node_child(c.ts_tree_root_node(markdown.tree.?), 0);
+    const wanted = c.ts_node_first_child_for_byte(section, 10);
+    var direct = c.ts_tree_cursor_new(section);
+    defer c.ts_tree_cursor_delete(&direct);
+    const result = c.ts_tree_cursor_goto_first_child_for_byte(&direct, 10);
+    const matches = result >= 0 and c.ts_node_eq(wanted, c.ts_tree_cursor_current_node(&direct));
+    var checked = c.ts_tree_cursor_new(section);
+    defer c.ts_tree_cursor_delete(&checked);
+    try std.testing.expect(BracketIndex.firstRangeChild(&checked, section, 11));
+    const actual = c.ts_tree_cursor_current_node(&checked);
+    try std.testing.expect(c.ts_node_eq(if (matches) wanted else c.ts_node_child(section, 0), actual));
+}
+
+test "bracket range cursor native 모든 Zig 할당 실패도 순차 판정과 같은 값 및 정리를 보존한다" {
+    const a = std.testing.allocator;
+    const text = "const a = .{ (1), (2), (3), (4), (5), (6), (7), (8), (9) };\n";
+    var provider = Provider.init(text, .zig, 0) orelse return error.NoProvider;
+    defer provider.deinit();
+    const generation = provider.tree_gen;
+    var reached_success = false;
+    for (0..32) |fail_index| {
+        var candidate = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index });
+        var legacy = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index });
+        var got: std.ArrayList(BracketLeaf) = .empty;
+        defer got.deinit(candidate.allocator());
+        var expected: std.ArrayList(BracketLeaf) = .empty;
+        defer expected.deinit(legacy.allocator());
+        const range: Provider.ByteRange = .{ .start = 0, .end = text.len };
+        var cover = range;
+        var truth = range;
+        const root = c.ts_tree_root_node(provider.tree.?);
+        const ok = if (BracketIndex.collectLeaves(candidate.allocator(), root, text, provider.slot, range, &got, &cover)) true else |err| blk: {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            break :blk false;
+        };
+        const reference_ok = if (collectBracketRangeOracle(legacy.allocator(), root, text, provider.slot, range, &expected, &truth)) true else |err| blk: {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            break :blk false;
+        };
+        try std.testing.expectEqual(reference_ok, ok);
+        try std.testing.expectEqualDeep(expected.items, got.items);
+        try std.testing.expectEqualDeep(truth, cover);
+        try std.testing.expectEqual(generation, provider.tree_gen);
+        got.clearAndFree(candidate.allocator());
+        expected.clearAndFree(legacy.allocator());
+        try std.testing.expectEqual(candidate.allocated_bytes, candidate.freed_bytes);
+        try std.testing.expectEqual(legacy.allocated_bytes, legacy.freed_bytes);
+        if (ok) {
+            reached_success = true;
+            break;
+        }
+    }
+    try std.testing.expect(reached_success);
 }

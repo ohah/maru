@@ -1,0 +1,56 @@
+// 현재 고정한 API의 두 반례를 기록한다. 제품 후보의 정확성 테스트와 별개인 재현 도구다.
+test "cursor padding diagnostic fixed input" {
+    const Probe = struct {
+        fn walk(node: c.TSNode, lang: Language, checked: *usize, cursor_mismatches: *usize, node_mismatches: *usize) !void {
+            const count = c.ts_node_child_count(node);
+            if (count == 0) return;
+            var goal = c.ts_node_start_byte(node);
+            const end = c.ts_node_end_byte(node);
+            while (goal <= end) : (goal += 1) {
+                var linear: ?c.TSNode = null;
+                for (0..count) |i| {
+                    const child = c.ts_node_child(node, @intCast(i));
+                    if (c.ts_node_end_byte(child) > goal) {
+                        linear = child;
+                        break;
+                    }
+                }
+                const expected = c.ts_node_first_child_for_byte(node, goal);
+                const node_same = if (linear) |value| !c.ts_node_is_null(expected) and c.ts_node_eq(expected, value) else c.ts_node_is_null(expected);
+                if (!node_same) {
+                    // 에러 없는 노드에서도 누락되면 후보의 error fence 근거가 무효다.
+                    try std.testing.expect(c.ts_node_has_error(node));
+                    if (node_mismatches.* == 0) std.debug.print("NODE_PADDING lang={s} parent={s} goal={d} linear_start={d} linear_end={d} api_null={d}\n", .{ @tagName(lang), std.mem.span(c.ts_node_type(node)), goal, if (linear) |n| c.ts_node_start_byte(n) else 0, if (linear) |n| c.ts_node_end_byte(n) else 0, @intFromBool(c.ts_node_is_null(expected)) });
+                    node_mismatches.* += 1;
+                }
+                var cursor = c.ts_tree_cursor_new(node);
+                defer c.ts_tree_cursor_delete(&cursor);
+                const index = c.ts_tree_cursor_goto_first_child_for_byte(&cursor, goal);
+                const got = if (index >= 0) c.ts_tree_cursor_current_node(&cursor) else expected;
+                const same = if (linear) |value| index >= 0 and c.ts_node_eq(value, got) else index < 0;
+                checked.* += 1;
+                if (!same) {
+                    if (cursor_mismatches.* == 0) std.debug.print("CURSOR_PADDING lang={s} parent={s} goal={d} expected_start={d} expected_end={d} got_start={d} got_end={d} index={d}\n", .{ @tagName(lang), std.mem.span(c.ts_node_type(node)), goal, if (linear) |n| c.ts_node_start_byte(n) else 0, if (linear) |n| c.ts_node_end_byte(n) else 0, if (index >= 0) c.ts_node_start_byte(got) else 0, if (index >= 0) c.ts_node_end_byte(got) else 0, index });
+                    cursor_mismatches.* += 1;
+                }
+            }
+            for (0..count) |i| try walk(c.ts_node_child(node, @intCast(i)), lang, checked, cursor_mismatches, node_mismatches);
+        }
+    };
+    const cases = [_]struct { lang: Language, text: []const u8 }{
+        .{ .lang = .dtd, .text = "   (한 [x]) {\n\n       a(\"[\", /* } */ [1, 2])\n\n    ) [끝]\n" },
+        .{ .lang = .zig, .text = "  fn a() void {}\n                         fn b() void {}\n" },
+        .{ .lang = .javascript, .text = "   const a = (1);\n   const b = [2];\n" },
+        .{ .lang = .markdown, .text = "   [a](b)\n\n                       (c)\n\n   [d](e)\n" },
+    };
+    var checked: usize = 0;
+    var cursor_mismatches: usize = 0;
+    var node_mismatches: usize = 0;
+    for (cases) |sample| {
+        var provider = Provider.init(sample.text, sample.lang, 0) orelse return error.NoProvider;
+        defer provider.deinit();
+        try Probe.walk(c.ts_tree_root_node(provider.tree.?), sample.lang, &checked, &cursor_mismatches, &node_mismatches);
+    }
+    std.debug.print("CURSOR_DIAG checked={d} cursor_mismatches={d} node_mismatches={d}\n", .{ checked, cursor_mismatches, node_mismatches });
+    try std.testing.expect(checked > 0 and cursor_mismatches > 0 and node_mismatches > 0);
+}

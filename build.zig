@@ -1996,6 +1996,14 @@ pub fn build(b: *std.Build) void {
     const run_shell_refresh_tests = b.addRunArtifact(shell_refresh_tests);
     run_shell_refresh_tests.addArg("--maru-expect-tests=7"); // Five shell refresh judges and two root blocks.
     b.step("test-windows-shell-refresh", "Verify settings refresh future Windows shell launches").dependOn(&run_shell_refresh_tests.step);
+    const settings_text_path_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings text paths"} });
+    const run_settings_text_path_tests = b.addRunArtifact(settings_text_path_tests);
+    run_settings_text_path_tests.addArg("--maru-expect-tests=7"); // Five text boundary judges and two root blocks.
+    b.step("test-windows-settings-text-paths", "Verify GUI text uses config path validation and ownership").dependOn(&run_settings_text_path_tests.step);
+    const settings_rollback_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings rollback"} });
+    const run_settings_rollback_tests = b.addRunArtifact(settings_rollback_tests);
+    run_settings_rollback_tests.addArg("--maru-expect-tests=7");
+    b.step("test-windows-settings-rollback", "Verify cancellation retires unpreviewed text and restores actual previews").dependOn(&run_settings_rollback_tests.step);
     const settings_wheel_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings wheel"} });
     const run_settings_wheel_tests = b.addRunArtifact(settings_wheel_tests);
     run_settings_wheel_tests.addArg("--maru-expect-tests=8"); // Six wheel judges and two root aggregation blocks.
@@ -2006,7 +2014,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-windows-settings-scrollbar", "Verify published settings scrollbar paint and capture lifecycle").dependOn(&run_settings_scrollbar_tests.step);
     const windows_settings_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings"} });
     const run_windows_settings_tests = b.addRunArtifact(windows_settings_tests);
-    run_windows_settings_tests.addArg("--maru-expect-tests=41"); // Six candidate, six wheel, five focus, fifteen IME, six scrollbar, concurrent writers and two root blocks.
+    run_windows_settings_tests.addArg("--maru-expect-tests=51"); // Eleven candidate, five rollback, six wheel, five focus, fifteen IME, six scrollbar, concurrent writers and two root blocks.
     b.step("test-windows-settings", "Verify Windows settings candidate validation").dependOn(&run_windows_settings_tests.step);
     const settings_form_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Settings form"} });
     const run_settings_form_tests = b.addRunArtifact(settings_form_tests);

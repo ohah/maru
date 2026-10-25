@@ -1966,6 +1966,12 @@ pub fn build(b: *std.Build) void {
         .root_module = exe.root_module,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
+    const settings_edit_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/app/settings/edit.zig"), .target = target, .optimize = optimize,
+    }) });
+    const run_settings_edit_tests = b.addRunArtifact(settings_edit_tests);
+    run_settings_edit_tests.addArg("--maru-expect-tests=5");
+    b.step("test-settings-edit", "Verify settings edit identity and rollback ownership").dependOn(&run_settings_edit_tests.step);
     const settings_model_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Settings model"} });
     const run_settings_model_tests = b.addRunArtifact(settings_model_tests);
     run_settings_model_tests.addArg("--maru-expect-tests=33"); // Five model judges and 28 transitive anonymous aggregation blocks.

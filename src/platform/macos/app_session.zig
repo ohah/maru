@@ -102412,7 +102412,10 @@ test "find input IME host topology-free surface declines native owner" {
 
 fn initProjectSearchIMETestSession(a: std.mem.Allocator) !*AppSession {
     const self = try initRenameCaretTestSession(a);
-    errdefer { self.deinit(); a.destroy(self); }
+    errdefer {
+        self.deinit();
+        a.destroy(self);
+    }
     _ = try self.resize(960, 600, 1000);
     project_search_ops.open(self);
     return self;

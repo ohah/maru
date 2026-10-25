@@ -213,6 +213,18 @@ pub fn prepareSharedSnapshot(source: *const State, allocator: std.mem.Allocator,
         allocator.destroy(next);
         return null;
     };
+    // 실제 복사한 입력 판만 옮기고, 계보 메타데이터는 받는 뷰의 allocator로 따로 소유한다.
+    if (source.input_stamp) |stamp| if (matchesInput(source, stamp.document, stamp.revision)) {
+        next.input_stamp = .{ .document = stamp.document, .revision = stamp.revision, .provider_identity = @intFromPtr(provider.parser), .tree_generation = provider.tree_gen };
+        const original_tag = if (source.origin_state) |proofs| proofs.current else null;
+        if (origin_model.copied(null, originResource(next, stamp.document, stamp.revision).?, originResource(source, stamp.document, stamp.revision).?, original_tag, true)) |tag| {
+            const owned = allocator.create(OriginState) catch null;
+            if (owned) |proofs| {
+                proofs.* = .{ .current = tag };
+                next.origin_state = proofs;
+            }
+        }
+    };
     const folds = source.folds.copyMatched(allocator, original.parser, original.tree_gen, provider.parser, provider.tree_gen) catch null;
     if (folds) |value| next.folds = value;
     return next;

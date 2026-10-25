@@ -5762,3 +5762,10 @@ client-coordinate bug despite the existing controller and editor gates passing.
 Validation includes five distinct broken guards with runtime rejection, source-byte
 restoration, Debug/ReleaseFast controls, ordinary app display and cancellation,
 matched pointer release, focus loss, and protected paste. Live validation is pending.
+
+### Windows 설정 휠
+
+- `zig build test-windows-settings-wheel`: 부분 델타·가로 축·자식 모달/저장 중 소유권·스크롤 비활성 정책·넓은 수·검색/섹션 초기화.
+- `zig build test-windows-wheel-detents`(Windows): 공통 수학으로 이동한 기존 Win32 어댑터 동작 회귀.
+- `tools/windows/check-settings-scroll.py --state <격리 fixture JSON> --binary <복사한 exe 메타 JSON> --output <결과 JSON>`: 실제 폼 픽셀 이동·역방향·다시 열기·필터 변경·정상 종료. config/클립보드를 바꾸지 않는다.
+- `--old-control`은 휠 무시, `--stale-context-control`은 필터 변경 후 잔여 위치를 재현하는 음성 대조다. 정상 완료 증거로 섞지 않는다. 물리 마우스·키보드·IME 검증을 대신하지 않는다.

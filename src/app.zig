@@ -1,3 +1,4 @@
+pub const config_write_lock = @import("app/config/write_lock.zig");
 pub const settings_form = @import("app/settings/form.zig");
 pub const settings_edit = @import("app/settings/edit.zig");
 pub const settings_model = @import("app/settings/model.zig");

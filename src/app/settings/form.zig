@@ -100,7 +100,9 @@ pub const Form = struct {
                     else => return .{},
                 };
                 if (row.kind != .toggle and row.kind != .dropdown and !self.state.editFits(value)) return error.TextTooLong;
-                try self.edit.begin(key, value);
+                if (self.edit.active) {
+                    if (!std.mem.eql(u8, key, self.edit.key.slice())) return error.EditInProgress;
+                } else try self.edit.begin(key, value);
                 switch (row.kind) {
                     .toggle => |v| return .{ .request = try self.edit.request(key, if (v) "false" else "true", true), .finish = true },
                     .dropdown => {
@@ -202,5 +204,20 @@ test "Settings form stale completion cannot close the new editor" {
     form.state.enterEdit("Cascadia Mono");
     form.complete(old, true, true);
     try std.testing.expect(form.state.editing);
+    try std.testing.expect(form.edit.active);
+}
+
+test "Settings form retries a failed boolean write without dropping its original" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var form: Form = .{};
+    setTestQuery(&form, "input.paste-protection");
+    const f = try form.frame(a, .{});
+    const first = try form.action(a, .{}, f, .toggle);
+    form.complete(first.request.?, true, false);
+    const retry = try form.action(a, .{}, f, .toggle);
+    try std.testing.expectEqual(first.request.?.generation, retry.request.?.generation);
+    try std.testing.expectEqualStrings(first.request.?.value.slice(), retry.request.?.value.slice());
     try std.testing.expect(form.edit.active);
 }

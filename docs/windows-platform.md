@@ -12765,3 +12765,20 @@ lookup used absolute client pixels after sidebar/titlebar layout moved the termi
 selection, wheel-cell lookup and pixel mouse reports. Signed captures are retained
 with wide subtraction and saturation. The old app issued word selections but copied
 zero bytes; the corrected app must pass the same visible-word clipboard check.
+
+### Windows 설정 화면 연결 — 진행 중
+
+`windows/settings/host.zig`가 공통 schema 폼을 Windows 키·포인터·GPU draw 경로에 연결한다.
+`Ctrl+,`는 기존 resolver의 `toggle_settings`를 따르며, 톱니바퀴는 같은 화면을 연다.
+버튼은 눌림과 릴리스가 맞아야 열리고 모달 바깥 클릭의 남은 릴리스도 모달이 소유한다.
+
+미리보기는 config 메모리만 바꾸고 취소하면 소유한 원본 키/값으로 복원한다. 확정은
+작업 스레드가 원본 파일의 해당 키만 갱신하여 주석·알 수 없는 키를 유지한다.
+저장 실패는 편집을 유지한다. 사이드바 저장과의 프로세스 내부 경쟁은 공통 쓰기 잠금으로
+직렬화한다. 외부 작성자와의 경쟁까지 보장한다는 뜻은 아니다.
+
+`test-windows-settings` 9개는 집계 2·값 검증 6·동시 부분 쓰기 1개다.
+`tools/windows/check-settings.py`는 소유 PID/HWND와 바이너리 해시를 확인한 격리 앱에서 실행한다.
+설정 저장·실패 복구·취소·입력 소유권을 확인하며 실제 물리 키보드나 IME 후보창 검증을 대신하지 않는다.
+현재 라이브 연결은 일부 입력 정책과 OSC52 읽기 정책이다. 폰트·색상·언어 등 전체 런타임 적용,
+외부 변경 reload, 기본값/합성 행, 스크롤과 포커스·IME는 아직 완료되지 않았다.

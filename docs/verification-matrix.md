@@ -5209,3 +5209,12 @@ EOF·UTF-8/UTF-16 범위, gopls 활성화 옵션, refresh 및 유실 응답 복�
 [Tab 전달 진단](plans/project-search-tab-delivery.md)은 relay post 응답과 실제 앱/view 수신·처리,
 필드 이동을 별도 증거로 검사한다. 냉간 실행 20회와 정상 대조군·독립 33개 음성 대조군을
 확인했다. 이 결과로 과거 간헐 중단의 원인이나 전체 후보창 픽셀 검증을 확정하지 않는다.
+## 실제 SDK LSP 편집 회귀 (2026-10-25)
+
+`tools/editor-lsp-real/run.py`는 Rust·Go·Kotlin·Dart·Scala를 실제 AppSession 컨트롤러에 연결해
+진단 발생/해소, 호버 표시, 같은 파일 정의 이동/복귀, 지역 변수 완성 Enter 적용/한 번의 Undo를 검사한다.
+실제 wire와 제품 상태를 독립 판정하고 바이너리·컨트롤러 소스·판정기 사본과 해시를 보존한다.
+`test-editor-real-lsp-oracles`의 43개 순수 검사는 기본 test에 포함되며, SDK 실행은 명시적 opt-in이다.
+20개 서로 다른 불량 증거 변이와 정상 대조군을 포함한다.
+버전 없는 진단은 순서와 제품 상태의 증거로 구분한다. headless 통합 검증이며 GUI/IME/픽셀 증거가 아니다.
+실행·적대적 조건·범위는 [실행 안내](../tools/editor-lsp-real/README.md)를 참조한다.

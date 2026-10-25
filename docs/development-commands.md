@@ -2072,3 +2072,20 @@ PNG/OCR 검증과 구분한다. 독립 검사기 대조군은 다음 명령으�
 ```sh
 python3 -m unittest discover -s tools/project-search-ime -p 'test_*.py'
 ```
+
+### 실제 SDK LSP 편집 회귀 (선택 실행)
+
+`mise exec -- zig build test-editor-real-lsp-oracles`는 SDK 없이 43개 증거/소유권 검사를 실행한다.
+기본 `zig build test`에도 포함한다. 실물 SDK 실행은 opt-in이다:
+
+```sh
+python3 tools/editor-lsp-real/run.py --build --optimize Debug \
+  --servers-json /absolute/path/servers.json \
+  --output "$HOME/.cache/maru-agent-artifacts/lsp-real-debug-unique"
+# ReleaseFast도 별도의 새 output으로 실행한다.
+python3 tools/editor-lsp-real/verify.py /absolute/path/saved-output
+```
+
+Rust·Go·Kotlin·Dart·Scala의 실제 서버와 AppSession으로 진단 발생/해소, 호버, 같은 파일 정의 이동/복귀,
+완성 적용/Undo를 검사한다. SDK 자동 설치와 GUI 입력 검증은 포함하지 않는다.
+설정·증거 형식·버전 없는 진단의 한계는 [실행 안내](../tools/editor-lsp-real/README.md)가 소유한다.

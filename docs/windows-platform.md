@@ -12872,3 +12872,8 @@ Windows 설정의 text/color 후보는 공용 `config.schema.tryParseFor(.window
 공용 `tryParseFor`의 절대경로 검사도 전달받은 OS를 사용한다. 호스트 OS를 그대로 사용하면 Windows에서
 POSIX 설정을 검사할 때 드라이브 경로가 잘못 통과하고, POSIX에서 Windows 어댑터를 검사할 때 정상 경로가
 거부된다. 구분자 정규화와 같은 OS 인자를 쓰며 native OS의 기존 경로 판정 정책은 유지한다.
+
+Windows 터미널의 기본 폰트 자원은 `terminal/text_resources.zig`가 DirectWrite rasterizer와 ClearType
+scratch를 함께 소유한다. 생성 중 scratch 할당에 실패하면 새 rasterizer도 해제하며, 준비는 기존 자원을
+수정하지 않는다. builder는 해당 heap 자원을 빌린다. 라이브 변경은 renderer/font identity/atlas·캐시와
+기하를 함께 준비한 뒤 게시해야 하므로 이 소유자만 교체해서는 안 된다. 현재 연결은 시작 경로까지다.

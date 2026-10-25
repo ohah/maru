@@ -781,4 +781,7 @@ Windows의 키보드·메뉴 복사와 보호된 붙여넣기 연결은
 
 `src/platform/windows/settings/host.zig`는 Windows 설정 입력·그리기 어댑터와 비동기 부분 저장을 소유한다. `src/app/config/write_lock.zig`는 같은 프로세스의 설정 작성자가 read/patch/replace를 서로 덮지 않도록 직렬화한다.
 
+`src/platform/windows/terminal/text_resources.zig`는 DirectWrite face와 래스터 작업 버퍼의 준비/해제를 함께
+소유한다. builder는 이 heap 자원을 빌리며, renderer/atlas와 레이아웃을 포함한 게시 시점은 앱 호스트가 맡는다.
+
 `session.input_math.WheelAccumulator`는 정밀 휠 나머지와 눈금→줄 변환의 공통 수학을 소유하고 Win32 어댑터는 이를 재출력한다. Windows 설정 호스트는 축·모달 소유권과 공통 설정 스크롤 API의 연결만 소유한다.

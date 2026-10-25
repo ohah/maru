@@ -5780,3 +5780,14 @@ inline-caret mode requires it to disappear while numeric edit requests remain ac
 POSIX 설정은 drive 경로를 거부하되 `/bin/shell\literal`의 역슬래시를 보존해야 한다. 호스트 OS 사용,
 Windows 전용, POSIX 전용, 무조건 절대/상대 판정의 다섯 변이를 공용 파서에 넣어 런타임 실패로 검출한다.
 호스트와 다른 OS를 전달하는 검사는 그 OS 위에서 앱을 실제 실행한 증거와 구분한다.
+
+### Windows 폰트 자원 소유권
+
+- `zig build test-windows-text-resources`: 집계 2 + 실제 Windows native 동작 5. 기본 glyph 잉크,
+  두 폰트 크기의 동시 생존/폐기, 각 할당 실패에서 기존 폰트 유지, 한글 glyph와 scratch, 이전 소유자
+  해제 후 미리 만들어 둔 builder의 렌더링을 검사한다. 다른 OS에서 native 5개는 skip이다.
+- 초기화 실패에서 face 누수·scratch 크기 소실·builder의 scratch 누락·종료 시 scratch 누수·font size
+  고착의 다섯 변이를 컴파일 후 검사한다. 종료 누수는 런타임 추적 allocator의 실제 leak 실패로 판정하며
+  컴파일 실패로 세지 않는다. 복원 Debug/ReleaseFast 각각 7개가 통과해야 한다.
+- native glyph 검사와 실제 앱의 시작/설정 회귀는 준비 자원의 수명 증거다. 설정 변경 후 font/atlas/grid의
+  원자적 교체, line-height/letter-spacing, 전체 폰트 기능이나 물리 입력 완료를 뜻하지 않는다.

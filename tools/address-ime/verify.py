@@ -71,6 +71,9 @@ def semantics(report, *, pointer_geometry=False, scene='address'):
 def validate(report, candidate, artifact_root=None, *, pointer_geometry=False, scene='address'):
     """Bind semantic witnesses to exactly one private run; image pixels are checked separately."""
     (states, base) = semantics(report, pointer_geometry=pointer_geometry, scene=scene)
+    return validate_window_evidence(report, candidate, states, base, artifact_root, scene=scene)
+
+def validate_window_evidence(report, candidate, states, base, artifact_root=None, *, scene='address'):
     require(report['mode'] == 'live' and report['window_inventory_validated'] is True, 'full live window validation')
     require(candidate['schema'] == f'maru.{scene}-ime-candidate.v1' and candidate['source_id'] == 'com.apple.inputmethod.Korean.2SetKorean', 'candidate schema')
     require(len(candidate['rows']) == 5 and len({r['window_id'] for r in candidate['rows']}) == 5, 'replay')

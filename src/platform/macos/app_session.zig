@@ -353,7 +353,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 234: palette-owned dynamic IME context and deep transaction snapshots.
 // 235: address TextField native IME ownership and transaction projection.
 // 236: shared TextField IME routing and rename owner/snapshot storage.
-pub const abi_version: u32 = 236;
+// ABI 237: settings search owns bounded IME snapshots and a pinned native owner.
+pub const abi_version: u32 = 237;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -6769,6 +6770,7 @@ pub const AppSession = struct {
     // 쓴다. buildChromeOverlayPrep이 세팅 오버레이를 그릴 때(sections/rows/props가 이미 있는 자리) settings.searchCaretRect로
     // 채운다 — imeCursorRect가 매 IME 갱신마다 필드 목록을 다시 빌드하지 않게 캐시한다(notif_panel_rect 선례).
     settings_search_caret: ?chrome.draw.Rect = null,
+    settings_search_field: ?chrome.draw.Rect = null,
     // 인라인 rename 상태(없으면 null=비활성). 활성이면 키/IME가 rename_input으로 라우팅되고(모달), 렌더가 대상
     // 슬롯/탭/라벨에 편집 텍스트+caret을 그린다. rename_input은 주소창과 같은 `TextField`(caret·그래핌 경계·IME
     // preedit-at-caret) — 예전 끝-caret 전용 `OverlayInput` 이라 ←/→ 로 커서를 못 옮겼다(2026-09-29 사용자 제보,
@@ -7758,6 +7760,7 @@ pub const AppSession = struct {
     address_ime: chrome.components.text_field_ime.State = .{},
     address_ime_generation: u64 = 1,
     address_ime_owner: ?u64 = null,
+    settings_ime_owner: ?u64 = null,
     address_ime_surface: ?u64 = null,
     addr_edit: ?u64 = null,
     addr_field: chrome.components.text_field.TextField = .{},
@@ -16727,10 +16730,7 @@ pub const AppSession = struct {
         switch (self.inputFocus()) {
             .confirm, .notice, .file_tree, .dock_pending => {}, // 구조 input owner는 확정할 조합이 없다.
             .inspector => inspector_ops.commitPreedit(self),
-            .settings => if (self.chrome_host.settings.commitSearchPreedit()) {
-                settings_ops.refreshSettingsFieldCount(self); // 확정 글자로 검색 필터 재적용(setFieldCount가 selected clamp)
-                self.metal_dirty = true;
-            },
+            .settings => return @import("app_session/settings_ime.zig").commitAll(self),
             .rename => return @import("app_session/field_ime.zig").commitAll(self, .rename),
             .sidebar_search => if (self.sidebar_search_input.commitPreedit(self.allocator)) {
                 sidebar_ops.rebuildSidebar(self) catch {}; // 확정 글자로 필터 재적용
@@ -24709,6 +24709,7 @@ pub const AppSession = struct {
                 try self.chrome_host.collectNotificationsDraws(notif_items, props, &tokens, arena, &draws);
             }
         }
+        self.settings_search_field = null;
         self.settings_search_caret = null; // 세팅 안 열림/검색 아님이면 없음(imeCursorRect가 터미널 커서로 폴백)
         self.settings_scroll_view = null; // 세팅이 닫히면 막대도 없다 — 남기면 다음 프레임에 stale 막대가 뜬다
         if (self.chrome_host.settings.open) {
@@ -24720,6 +24721,7 @@ pub const AppSession = struct {
             // 검색줄 caret을 캐시한다(sections/rows/props가 여기 있으니 추가 비용 없음) — imeCursorRect가 IME 후보창을
             // 검색줄 옆에 띄우는 데 쓴다(검색 중이 아니면 searchCaretRect가 null). notif_panel_rect 캐시 선례.
             self.settings_search_caret = chrome.components.settings.searchCaretRect(&self.chrome_host.settings, labels, fields, props, &tokens);
+            self.settings_search_field = chrome.components.settings.searchFieldRect(&self.chrome_host.settings, labels, fields, props, &tokens);
             // SV5c: 폼 목록 우측 막대. 뷰포트는 **컴포넌트가 준다** — 폼 폭이 nav·control·↺ 여백에 얽혀
             // 있어 host가 다시 계산하면 두 벌이 갈린다. 발행은 오버레이 lowering **뒤**여야 하므로
             // (배경과 같은 over 버킷, SV5b 주석) 여기서 값만 기억하고 아래에서 낸다.
@@ -102172,4 +102174,100 @@ test "inline rename IME host rejects reopen and address retarget" {
     try std.testing.expect(ime.insert(self, "old address", null));
     self.imeEnd(null);
     try std.testing.expectEqualStrings("rename", self.rename_input.text.items);
+}
+
+test "settings search IME host publishes context and consumes candidate Return" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initRenameCaretTestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const state = &self.chrome_host.settings;
+    state.show();
+    state.startSearch();
+    for ("font") |cp| state.appendSearchCp(cp);
+    settings_ops.refreshSettingsFieldCount(self);
+    var scratch = std.heap.ArenaAllocator.init(a);
+    defer scratch.deinit();
+    const original_fields = try settings_ops.currentSectionFields(self, scratch.allocator());
+    try std.testing.expect(original_fields.bools.len > 0); // Enter would toggle this first row.
+    const ime = @import("app_session/chrome_ime.zig");
+    try std.testing.expect(ime.generation(self) != null);
+    const owner = ime.generation(self).?;
+    try std.testing.expect(owner > (@as(u64, 1) << 60) and owner < (@as(u64, 1) << 61));
+    self.imeBegin();
+    try std.testing.expect(ime.marked(self, "font", .{ .location = 4, .length = 0 }, .{ .location = 0, .length = 4 }));
+    try std.testing.expectEqualStrings("font", state.searchQuery());
+    try std.testing.expect(ime.insert(self, "font", null));
+    self.imeEnd(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(state.searching and !state.editing and !state.dropdown.open and !state.picking);
+    try std.testing.expectEqualStrings("font", state.searchQuery());
+    const after_fields = try settings_ops.currentSectionFields(self, scratch.allocator());
+    try std.testing.expectEqual(original_fields.bools.len, after_fields.bools.len);
+    for (original_fields.bools, after_fields.bools) |before, after| {
+        try std.testing.expectEqualStrings(before.key, after.key);
+        try std.testing.expectEqual(before.value, after.value);
+    }
+}
+
+test "settings search IME host drops closed and retargeted source callbacks" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initRenameCaretTestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const state = &self.chrome_host.settings;
+    const ime = @import("app_session/chrome_ime.zig");
+    state.show();
+    state.startSearch();
+    const old = ime.generation(self).?;
+    self.imeBegin();
+    state.endSearch();
+    state.startSearch();
+    state.appendSearchCp('n');
+    try std.testing.expect(ime.insert(self, "stale", null));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("n", state.searchQuery());
+    try std.testing.expect(ime.generation(self).? != old);
+    self.imeBegin();
+    state.hide();
+    settings_ops.startRename(self, .{ .workspace = tab_ops.activeTab(self) });
+    try self.rename_input.setText(a, "rename");
+    try std.testing.expect(ime.insert(self, "old settings", null));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("rename", self.rename_input.text.items);
+    self.imeBegin();
+    settings_ops.closeRename(self);
+    state.show();
+    state.startSearch();
+    state.appendSearchCp('s');
+    try std.testing.expect(ime.insert(self, "old rename", null));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("s", state.searchQuery());
+}
+
+test "settings search IME host filter OOM restores marked preview and query" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initRenameCaretTestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const state = &self.chrome_host.settings;
+    const ime = @import("app_session/chrome_ime.zig");
+    state.show();
+    state.startSearch();
+    for ("font") |cp| state.appendSearchCp(cp);
+    settings_ops.refreshSettingsFieldCount(self);
+    const count = state.count;
+    try std.testing.expect(count > 0);
+    try std.testing.expect(ime.marked(self, "한", .{ .location = 1, .length = 0 }, .{ .location = 0, .length = 4 }));
+    try std.testing.expectEqual(count, state.count);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    self.allocator = failing.allocator();
+    defer self.allocator = a;
+    try std.testing.expect(ime.insert(self, "韓", null));
+    try std.testing.expectEqualStrings("font", state.searchQuery());
+    try std.testing.expectEqualStrings("한", state.searchPreedit());
+    try std.testing.expectEqualStrings("한", state.searchIMECurrent().?.text());
+    try std.testing.expectEqual(count, state.count);
 }

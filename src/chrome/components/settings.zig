@@ -22,6 +22,13 @@ const input = @import("../input.zig");
 const modal_box = @import("modal_box.zig");
 const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭) — 라벨 폭 측정(modal_box와 같은 규약)
 const scroll_area = @import("../ui/scroll_area.zig"); // SV5d: 스크롤 좌표 단일 출처(도크·탐색기와 같은 타입)
+pub const SearchIMEContext = search_ime_mod.Context;
+pub const SearchIMEResult = search_ime_mod.Result;
+pub const SearchIMEKey = search_ime_mod.Key;
+const search_ime_mod = @import("settings_search_ime.zig");
+const inline_edit = @import("inline_edit.zig");
+const text_layout = @import("../text_layout.zig");
+const grapheme = @import("../../grapheme.zig");
 const width = @import("../../width.zig"); // UTF-8 경계 절단/백스페이스 단일 출처(truncateToBoundary·dropLastCodepoint)
 const toggle = @import("toggle.zig");
 const input_box = @import("input_box.zig"); // 숫자 입력 박스(슬라이더 대체 — 프로그레스바 대신 직접 타이핑)
@@ -74,9 +81,9 @@ pub const FieldRow = struct {
 /// 않는다(platform 이 알린다 — 담으면 잘린 채 저장된다).
 pub const edit_cap: usize = 128;
 /// 검색 쿼리 버퍼 용량(바이트) — 짧은 키워드면 충분(고정 버퍼).
-const search_cap: usize = 64;
+const search_cap: usize = search_ime_mod.query_limit;
 /// 검색 IME 조합(preedit) 버퍼 용량(바이트) — 조합 중 한글 몇 자면 충분(고정 버퍼).
-const search_preedit_cap: usize = 32;
+const search_preedit_cap: usize = search_ime_mod.marked_limit;
 /// 인라인 안내 배너 버퍼 용량(바이트) — keybind 녹음 검증 실패/충돌 메시지(§6.9). notice와 달리 세팅 모달을
 /// 닫지 않고 폼 상단에 얹는다(단일-오버레이 불변식과 무관 — 세팅 자체 그리드 안 텍스트).
 const message_cap: usize = 256;
@@ -173,6 +180,8 @@ pub const State = struct {
     searching: bool = false,
     search_buf: [search_cap]u8 = undefined,
     search_len: usize = 0,
+    search_ime: search_ime_mod.State = .{},
+    search_ime_generation: u64 = 1,
     /// 검색어의 IME 조합(marked) 텍스트 — macOS는 평범한 글자 입력을 NSTextInputClient(IME)로 처리하므로, 조합 중
     /// 한글이 이 버퍼에 담겨 검색 입력줄에서 query 뒤에 보인다(find/palette의 OverlayInput.preedit와 같은 모델이되
     /// 고정 버퍼). platform이 imeSetPreedit로 채우고 commit/취소 시 비운다. query와 독립(확정 글자는 search_buf).
@@ -207,6 +216,7 @@ pub const State = struct {
         self.grid_cell = 0;
         self.recording = false;
         self.searching = false;
+        self.invalidateSearchIME();
         self.search_len = 0;
         self.search_preedit_len = 0;
         self.message_len = 0;
@@ -216,6 +226,7 @@ pub const State = struct {
     }
     /// HSV picker 열기(platform이 color 행 활성 시 호출 — 현재 색 rgb로 초기 h/s/v 시드). 폼 키/포인터가 picker로 라우팅된다.
     pub fn openPicker(self: *State, rgb: color_mod.Rgb) void {
+        self.invalidateSearchIME();
         const hsv = color_mod.rgbToHsv(rgb);
         self.pick_h = hsv.h;
         self.pick_s = hsv.s;
@@ -249,6 +260,7 @@ pub const State = struct {
         self.grid_cell = 0;
         self.recording = false;
         self.searching = false; // 섹션 바꾸면 검색 초기화(필터는 섹션 내라)
+        self.invalidateSearchIME();
         self.search_len = 0;
         self.search_preedit_len = 0;
         self.message_len = 0; // 섹션 전환 = 새 맥락 → 안내 배너 정리
@@ -262,17 +274,25 @@ pub const State = struct {
     /// 검색 시작(`/`) — 빈 쿼리로 모드 진입. 켜는 동안 selected는 보존(필터 후 platform이 clamp).
     pub fn startSearch(self: *State) void {
         self.searching = true;
+        self.invalidateSearchIME();
         self.search_len = 0;
         self.search_preedit_len = 0;
     }
     /// 검색 종료(Esc) — 쿼리·조합 비우고 모드 해제(필터 풀려 전체 행 복귀).
     pub fn endSearch(self: *State) void {
         self.searching = false;
+        self.invalidateSearchIME();
         self.search_len = 0;
         self.search_preedit_len = 0;
     }
     /// 검색 쿼리에 코드포인트 추가(UTF-8, 넘치면 무시 — 고정 버퍼).
     pub fn appendSearchCp(self: *State, cp: u21) void {
+        if (self.searchIMECurrent() != null) {
+            var native: [4]u8 = undefined;
+            const count = std.unicode.utf8Encode(cp, &native) catch return;
+            if (self.search_ime.insert(native[0..count], null)) self.publishSearchIME(.commit);
+            return;
+        }
         var tmp: [4]u8 = undefined;
         const n = std.unicode.utf8Encode(cp, &tmp) catch return;
         if (self.search_len + n > search_cap) return;
@@ -281,6 +301,10 @@ pub const State = struct {
     }
     /// 검색 쿼리 마지막 코드포인트 제거(UTF-8 경계).
     pub fn backspaceSearch(self: *State) void {
+        if (self.searchIMECurrent() != null) {
+            if (self.search_ime.context.deleteBackward()) self.publishSearchIME(.commit);
+            return;
+        }
         self.search_len = width.dropLastCodepoint(&self.search_buf, self.search_len);
     }
     /// 검색어 IME 조합(marked) 텍스트를 교체한다(빈 bytes = 조합 해제). **검색 중일 때만** 검색 버퍼에 담는다 —
@@ -289,7 +313,8 @@ pub const State = struct {
     /// 검색이 아니면 무시하고 비운다(편집 조합은 확정 텍스트가 handle(.char)→appendEditCp로 이미 편집 버퍼에 들어간다).
     /// 넘치면 **UTF-8 코드포인트 경계**로 자른다(setMessage와 같은 규율 — raw 바이트 자름은 멀티바이트 조합을 깨 손상 UTF-8을 남긴다).
     pub fn setSearchPreedit(self: *State, bytes: []const u8) void {
-        if (!self.searching) {
+        self.search_ime.invalidate(); // legacy append-only caller; native callbacks use the range adapter
+        if (!self.searchModeActive()) {
             self.search_preedit_len = 0;
             return;
         }
@@ -304,6 +329,11 @@ pub const State = struct {
     /// 조합 중 텍스트를 검색어로 확정한다(query 뒤에 코드포인트별로 붙이고 조합 비움) — 포커스 상실 등에서 조합을
     /// 잃지 않게(OverlayInput.commitPreedit의 고정 버퍼판). 확정한 게 있으면 true(platform이 재필터). 빈 조합이면 false.
     pub fn commitSearchPreedit(self: *State) bool {
+        if (self.searchIMECurrent() != null) {
+            if (self.search_preedit_len == 0 or !self.search_ime.commitAll()) return false;
+            self.publishSearchIME(.commit);
+            return true;
+        }
         if (self.search_preedit_len == 0) return false;
         const utf8 = std.unicode.Utf8View.init(self.search_preedit_buf[0..self.search_preedit_len]) catch {
             self.search_preedit_len = 0; // 손상 UTF-8은 버린다(반쪽 안 남김)
@@ -314,6 +344,46 @@ pub const State = struct {
         self.search_preedit_len = 0;
         return true;
     }
+    pub fn invalidateSearchIME(self: *State) void {
+        self.search_ime.invalidate();
+        self.search_preedit_len = 0;
+        self.search_ime_generation +|= 1;
+    }
+    fn searchModeActive(self: *const State) bool {
+        return self.searching and !self.editing and !self.recording and !self.picking and !self.dropdown.open;
+    }
+    pub fn searchIMEOwnsInput(self: *const State) bool {
+        return self.open and self.searchModeActive();
+    }
+    pub fn searchIMECurrent(self: *const State) ?*const search_ime_mod.Context {
+        if (!self.searchIMEOwnsInput() or !self.search_ime.context.matches(self.searchQuery(), self.searchPreedit())) return null;
+        return &self.search_ime.context;
+    }
+    pub fn searchIMEProjection(self: *State) ?*search_ime_mod.Context {
+        if (!self.searchIMEOwnsInput()) return null;
+        return self.search_ime.sync(self.searchQuery(), self.searchPreedit());
+    }
+    /// Canonical query remains unchanged during marked previews. The renderer
+    /// reads the projection while filtering continues to read searchQuery().
+    pub fn publishSearchIME(self: *State, result: search_ime_mod.Result) void {
+        const c = &self.search_ime.context;
+        switch (result) {
+            .none => {},
+            .commit => {
+                self.search_len = c.committedLength();
+                c.copyCommitted(self.search_buf[0..self.search_len]);
+                c.accepted(self.searchQuery());
+            },
+            .rollback => {
+                self.search_len = c.base_len;
+                @memcpy(self.search_buf[0..self.search_len], c.base[0..c.base_len]);
+            },
+        }
+        const preedit = c.preedit();
+        @memcpy(self.search_preedit_buf[0..preedit.len], preedit);
+        self.search_preedit_len = preedit.len;
+    }
+
     /// 폼 상단 안내 배너 메시지를 세운다(§6.9). bytes는 호출자(platform)가 소유 — 고정 버퍼로 복사한다. 넘치면 잘라
     /// 담되 UTF-8 코드포인트 경계로 back-up해 손상 바이트를 안 남긴다(enterEdit와 같은 규율).
     pub fn setMessage(self: *State, bytes: []const u8) void {
@@ -338,6 +408,7 @@ pub const State = struct {
     /// 인라인 편집 시작(platform이 text 행 활성 시 호출 — 현재값으로 시드). 버퍼 초과는 잘라 담되, UTF-8 코드포인트
     /// 중간에서 자르지 않게 경계로 back-up한다(리뷰 #823 — 잘린 멀티바이트는 무효 UTF-8 → view/backspace 오작동).
     pub fn enterEdit(self: *State, value: []const u8) void {
+        self.invalidateSearchIME();
         self.clearMessage(); // 새 편집 — 지난 안내(「편집 칸보다 깁니다」 등)는 이 행의 말이 아니다
         const n = width.truncateToBoundary(value, edit_cap); // 버퍼 초과는 UTF-8 경계로 자름(단일 출처 — #823)
         @memcpy(self.edit_buf[0..n], value[0..n]);
@@ -379,6 +450,7 @@ pub const State = struct {
         self.editing = false;
         self.recording = false;
         self.searching = false;
+        self.invalidateSearchIME();
         self.search_len = 0;
         self.search_preedit_len = 0;
         self.message_len = 0;
@@ -625,6 +697,28 @@ fn drawInlineEdit(box: modal_box.Box, ctrl: draw.Rect, shown: []const u8, arena:
 /// 그린다(config-gui §4). 빈 rows여도 박스는 띄운다. 순수: state·sections·rows·props·tokens만 읽는다. out/op은 호출자
 /// (platform) frame arena 소유. sections=네비 라벨, rows=선택 섹션의 필드(platform이 settings.section으로 필터해 주입).
 /// dropdown_items=드롭다운 팝업이 열렸을 때 그 변형 라벨(platform 주입; 닫혔으면 빈 슬라이스 — 폼 위 오버레이로 그림).
+const NativeSearchLayout = struct { text: []u8, caret: u16 };
+fn nativeSearchLayout(state: *const State, cols: usize, allocator: std.mem.Allocator) !?NativeSearchLayout {
+    const c = state.searchIMECurrent() orelse return null;
+    // Borrowing the projected document does not transfer storage ownership.
+    const field: inline_edit.TextField = .{
+        .text = .fromOwnedSlice(@constCast(c.text())),
+        .caret = grapheme.snapToBoundary(c.text(), c.selected.start),
+    };
+    const width_cols: u16 = @intCast(@min(cols -| 1, std.math.maxInt(u16)));
+    const fitted = try inline_edit.composeLineFit(allocator, &field, "", width_cols);
+    defer allocator.free(fitted);
+    const caret = try inline_edit.drawnCaretCol(allocator, "", &field, "", width_cols, width_cols);
+    var shown: std.ArrayList(u8) = .empty;
+    errdefer shown.deinit(allocator);
+    var plan = text_layout.plan(fitted, 0, width_cols, .tail, null);
+    while (plan.next()) |item| switch (item) {
+        .cluster => |cluster| try shown.appendSlice(allocator, fitted[cluster.start..cluster.end]),
+        .ellipsis => try shown.appendSlice(allocator, "…"),
+    };
+    return .{ .text = try shown.toOwnedSlice(allocator), .caret = caret };
+}
+
 pub fn view(
     state: *const State,
     sections: []const []const u8,
@@ -642,21 +736,34 @@ pub fn view(
     try modal_box.frame(box, p, arena, out);
     // 제목 — 검색 중이면 "검색: <쿼리><조합중>▏"(accent + caret), 아니면 "Settings" + 폼이 창보다 많으면 sel/total 위치 표식.
     if (state.searching) {
-        // 확정 쿼리("검색: " + query)와 IME 조합(preedit)을 나눠 그린다 — 조합 글자는 query 뒤에 같은 accent로 붙여
-        // 입력 가시성을 준다(find의 3-run 모델과 동형). caret은 query 끝(=조합 시작)에 둬 조합 글자 위에 겹친다(preedit는
-        // caret 위치에 안 더함 — 단일 줄 append라 뒤 텍스트가 없어 터미널 grid의 삽입/오버레이 구분과 무관, find와 동일).
-        // macOS는 평범한 글자 입력을 IME로 처리하므로 이 조합 표시가 필요하다.
-        const committed = try std.fmt.allocPrint(arena, "{s}{s}", .{ searchPrompt(), state.searchQuery() });
-        try modal_box.text(box, box.inner_x, 0, committed, .accent_bar, arena, out);
-        const committed_cols = overlay_input.displayCols(committed);
-        const caret_x = box.inner_x + @as(i32, @intCast(committed_cols * box.cw));
-        const preedit = state.searchPreedit();
-        // 조합 글자는 남은 칸으로 truncate — 좁은 모달에서 긴 조합이 박스 우단을 넘지 않게(다른 폼 값 truncate와 같은 규율).
-        if (preedit.len > 0) {
-            const shown_pre = try overlay_input.truncateToCols(arena, preedit, box.inner_cols -| committed_cols);
-            if (shown_pre.len > 0) try modal_box.text(box, caret_x, 0, shown_pre, .accent_bar, arena, out);
+        const prompt_cols = overlay_input.displayCols(searchPrompt());
+        if (try nativeSearchLayout(state, box.inner_cols -| prompt_cols, arena)) |line| {
+            try modal_box.text(box, box.inner_x, 0, searchPrompt(), .accent_bar, arena, out);
+            const origin = box.inner_x + @as(i32, @intCast(prompt_cols * box.cw));
+            try modal_box.text(box, origin, 0, line.text, .accent_bar, arena, out);
+            try out.append(arena, .{ .fill = .{ .rect = .{
+                .x = origin + @as(i32, @intCast(line.caret * box.cw)),
+                .y = modal_box.rowY(box, 0),
+                .w = box.cw,
+                .h = box.ch,
+            }, .role = .cursor } });
+        } else {
+            // 확정 쿼리("검색: " + query)와 IME 조합(preedit)을 나눠 그린다 — 조합 글자는 query 뒤에 같은 accent로 붙여
+            // 입력 가시성을 준다(find의 3-run 모델과 동형). caret은 query 끝(=조합 시작)에 둬 조합 글자 위에 겹친다(preedit는
+            // caret 위치에 안 더함 — 단일 줄 append라 뒤 텍스트가 없어 터미널 grid의 삽입/오버레이 구분과 무관, find와 동일).
+            // macOS는 평범한 글자 입력을 IME로 처리하므로 이 조합 표시가 필요하다.
+            const committed = try std.fmt.allocPrint(arena, "{s}{s}", .{ searchPrompt(), state.searchQuery() });
+            try modal_box.text(box, box.inner_x, 0, committed, .accent_bar, arena, out);
+            const committed_cols = overlay_input.displayCols(committed);
+            const caret_x = box.inner_x + @as(i32, @intCast(committed_cols * box.cw));
+            const preedit = state.searchPreedit();
+            // 조합 글자는 남은 칸으로 truncate — 좁은 모달에서 긴 조합이 박스 우단을 넘지 않게(다른 폼 값 truncate와 같은 규율).
+            if (preedit.len > 0) {
+                const shown_pre = try overlay_input.truncateToCols(arena, preedit, box.inner_cols -| committed_cols);
+                if (shown_pre.len > 0) try modal_box.text(box, caret_x, 0, shown_pre, .accent_bar, arena, out);
+            }
+            try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = modal_box.rowY(box, 0), .w = box.cw, .h = box.ch }, .role = .cursor } });
         }
-        try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = modal_box.rowY(box, 0), .w = box.cw, .h = box.ch }, .role = .cursor } });
     } else {
         const title = if (rows.len > l.win_len)
             try std.fmt.allocPrint(arena, "{s}   {d}/{d}", .{ title_text, @min(state.selected + 1, rows.len), rows.len })
@@ -861,13 +968,24 @@ pub fn searchCaretRect(state: *const State, sections: []const []const u8, rows: 
     if (!state.open or state.picking or !state.searching) return null;
     const l = computeLayout(sections, rows, scrollRows(state, p), p, tk) orelse return null;
     const box = l.box;
-    const caret_cols = overlay_input.displayCols(searchPrompt()) + overlay_input.displayCols(state.searchQuery());
+    const prompt_cols = overlay_input.displayCols(searchPrompt());
+    var stack: [4096]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&stack);
+    const native = nativeSearchLayout(state, box.inner_cols -| prompt_cols, fixed.allocator()) catch return null;
+    const caret_cols = prompt_cols + if (native) |line| @as(usize, line.caret) else overlay_input.displayCols(state.searchQuery());
     return .{
         .x = box.inner_x + @as(i32, @intCast(caret_cols * box.cw)),
         .y = modal_box.rowY(box, 0),
         .w = box.cw,
         .h = box.ch,
     };
+}
+
+/// Exact title-row text rectangle, shared with native candidate evidence.
+pub fn searchFieldRect(state: *const State, sections: []const []const u8, rows: []const FieldRow, p: props.ChromeProps, tk: *const tokens.Tokens) ?draw.Rect {
+    if (!state.open or state.picking or !state.searching) return null;
+    const l = computeLayout(sections, rows, scrollRows(state, p), p, tk) orelse return null;
+    return .{ .x = l.box.inner_x, .y = modal_box.rowY(l.box, 0), .w = @intCast(l.box.inner_cols * l.box.cw), .h = l.box.ch };
 }
 
 /// 폼 목록의 스크롤 창과 그 뷰포트 rect(SV5c) — host가 스크롤바를 발행하는 데 쓴다.
@@ -2541,4 +2659,77 @@ test "settings reserves the scrollbar gutter once and reports a viewport for the
     // ⑦ 닫혀 있으면 없다.
     s.open = false;
     try std.testing.expect(scrollView(&s, &sections, rows, with_gutter, &tk) == null);
+}
+
+test "settings search IME component keeps canonical filter and middle caret" {
+    var s: State = .{};
+    s.show();
+    s.startSearch();
+    for ([_]u21{ 'a', '한', 'z' }) |cp| s.appendSearchCp(cp);
+    s.search_ime.begin(s.searchQuery(), s.searchPreedit());
+    try std.testing.expect(s.search_ime.marked("韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 1 }));
+    s.publishSearchIME(.none);
+    try std.testing.expectEqualStrings("a한z", s.searchQuery());
+    const line = (try nativeSearchLayout(&s, 20, std.testing.allocator)).?;
+    defer std.testing.allocator.free(line.text);
+    try std.testing.expectEqualStrings("a韓z", line.text);
+    try std.testing.expectEqual(@as(u16, 3), line.caret);
+    try std.testing.expect(s.search_ime.insert("韓", null));
+    s.publishSearchIME(s.search_ime.end(false));
+    try std.testing.expectEqualStrings("a韓z", s.searchQuery());
+}
+
+test "settings search IME lifecycle never gives a nested control the search context" {
+    var s: State = .{};
+    s.show();
+    s.startSearch();
+    const original = s.search_ime_generation;
+    try std.testing.expect(s.searchIMEProjection() != null);
+    s.selectSection(1);
+    try std.testing.expect(s.searchIMEProjection() == null and s.search_ime_generation != original);
+    s.startSearch();
+    _ = s.searchIMEProjection();
+    try std.testing.expect(s.search_ime.marked("한", .{ .location = 1, .length = 0 }, null));
+    s.publishSearchIME(.none);
+    s.enterEdit("value");
+    try std.testing.expect(s.searchPreedit().len == 0);
+    s.setSearchPreedit("값");
+    try std.testing.expect(s.searchPreedit().len == 0);
+    try std.testing.expect(s.searchIMEProjection() == null);
+    s.cancelEdit();
+    s.recording = true;
+    try std.testing.expect(s.searchIMEProjection() == null);
+    s.recording = false;
+    s.openPicker(.{ .r = 0, .g = 0, .b = 0 });
+    try std.testing.expect(s.searchIMEProjection() == null);
+    s.closePicker();
+    s.hide();
+    try std.testing.expect(s.searchIMEProjection() == null);
+    s.show();
+    try std.testing.expect(s.searchIMEProjection() == null);
+    s.startSearch();
+    try std.testing.expect(s.searchIMEProjection() != null);
+}
+
+test "settings search IME narrow layout preserves graphemes and bounds caret" {
+    var s: State = .{};
+    s.show();
+    s.startSearch();
+    for ([_]u21{ 'a', '한', 'z', '😀' }) |cp| s.appendSearchCp(cp);
+    const c = s.searchIMEProjection().?;
+    c.selected = .{ .start = 1, .end = 1 };
+    for ([_]usize{ 1, 2, 3, 6, 20 }) |cols| {
+        const line = (try nativeSearchLayout(&s, cols, std.testing.allocator)).?;
+        defer std.testing.allocator.free(line.text);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(line.text));
+        try std.testing.expect(line.caret < cols);
+        try std.testing.expect(overlay_input.displayCols(line.text) < cols);
+    }
+    s.startSearch();
+    for ([_]u21{ 'a', 0x1112, 0x1161, 0x11ab, 'z' }) |cp| s.appendSearchCp(cp);
+    const nfd = s.searchIMEProjection().?;
+    nfd.selected = .{ .start = 4, .end = 4 }; // Valid scalar boundary inside one NFD grapheme.
+    const painted = (try nativeSearchLayout(&s, 20, std.testing.allocator)).?;
+    defer std.testing.allocator.free(painted.text);
+    try std.testing.expectEqual(@as(u16, 1), painted.caret);
 }

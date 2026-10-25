@@ -2028,3 +2028,10 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 - `python3 -m unittest discover -s tools/rename-ime -p 'test_*.py'`: 이름 조기 확정·이전 owner·화면/콜백 기록 손상을 거절하는 독립 검증기 대조군이다.
 - `python3 tools/rename-ime/run.py --output <새 외부 경로> --mode diagnostic`: 사본 앱을 빌드하고 실제 키 입력·후보 취소/선택·별도 Return 이름 확정·터미널 복귀를 확인한다. 화면 픽셀 통과를 뜻하지 않는다.
 - 같은 앱에 `--app <고정 실행 파일> --mode live`를 쓰면 서로 다른 후보창 5개와 PNG/OCR을 추가 검사한다. workspace 이름 변경 장면이며 Save As 파일 생성 GUI를 대신하지 않는다.
+
+## 설정 검색창 IME
+
+- `mise exec -- zig build test-settings-search-ime test-inline-text-input test-inline-text-input-owned test-address-field-ime test-inline-rename-ime -j2`: 64/32바이트 고정 용량, NFD·중간 재변환·후보 Enter·설정 owner 전환·필터 할당 실패 및 기존 입력창 회귀.
+- `python3 -m unittest discover -s tools/settings-ime -p 'test_*.py'`: 합성 정상 대조군과 독립 손상 기록 거절. 실제 GUI 성공을 뜻하지 않는다.
+- `python3 tools/settings-ime/run.py --output <새 외부 경로> --mode diagnostic`: 사본 앱을 준비·빌드한 뒤 실제 두벌식·후보 취소/선택·설정 종료·터미널 복귀를 확인한다.
+- 같은 고정 앱의 `--app <실행 파일> --mode live`는 서로 다른 후보창 5개와 독립 PNG/OCR을 추가 검사한다. 실제 입력과 pixel 결과는 [계획](plans/settings-search-ime.md)에 구분해 기록한다.

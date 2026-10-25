@@ -5125,3 +5125,10 @@ RSS 증거가 아니다. #4585의 필수 CI가 통과해 `fd953386b`로 머지�
 일치했다. 구간 개선을 전체 입력 개선으로 주장하지 않는다. 동시 컴파일을 관측했고 GUI/HID·
 present·RSS는 측정하지 않았다. 이 구현의 필수 CI·머지는 미완료다.
 [계약](plans/editor-fold-order-reuse.md)과 [전체 분포](../tools/editor-fold-order-measure/results.md)를 따른다.
+
+## 설정 검색창 IME 문맥
+
+`test-settings-search-ime`는 고정 용량·NFD·UTF-16 범위·원자적 거절/rollback·후보 Enter와
+설정/rename owner 전환·필터 OOM 복원을 검사한다. 공통 문맥의 기본 용량은 그대로다.
+`tools/settings-ime`의 합성 손상 기록과 실제 diagnostic·후보창 PNG/OCR을 구분한다.
+실제 GUI와 남은 범위는 [계획](plans/settings-search-ime.md)을 따른다.

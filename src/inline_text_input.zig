@@ -7,20 +7,24 @@ const Span = ranges.ByteRange;
 pub const query_limit = 256;
 pub const marked_limit = 256;
 
-pub const Context = ContextWithStorage(false);
-pub const DynamicContext = ContextWithStorage(true);
+pub const Context = ContextWithStorage(false, query_limit, marked_limit);
+pub const DynamicContext = ContextWithStorage(true, query_limit, marked_limit);
 
 // Storage policy changes ownership, not IME semantics. The fixed Session Dock
 // value keeps its original limits; dynamic callers reserve and snapshot first.
-fn ContextWithStorage(comptime dynamic: bool) type {
+/// Fixed callers keep their own capacity contract while sharing range semantics.
+pub fn BoundedContext(comptime query_capacity: usize, comptime marked_capacity: usize) type {
+    return ContextWithStorage(false, query_capacity, marked_capacity);
+}
+fn ContextWithStorage(comptime dynamic: bool, comptime query_capacity: usize, comptime marked_capacity: usize) type {
     return struct {
         const Self = @This();
-        storage: if (dynamic) []u8 else [query_limit + marked_limit]u8 = if (dynamic) &.{} else undefined,
+        storage: if (dynamic) []u8 else [query_capacity + marked_capacity]u8 = if (dynamic) &.{} else undefined,
         scratch: if (dynamic) []u8 else void = if (dynamic) &.{} else {},
         len: usize = 0,
-        base: if (dynamic) []u8 else [query_limit]u8 = if (dynamic) &.{} else undefined,
+        base: if (dynamic) []u8 else [query_capacity]u8 = if (dynamic) &.{} else undefined,
         base_len: usize = 0,
-        committed: if (dynamic) []u8 else [query_limit]u8 = if (dynamic) &.{} else undefined,
+        committed: if (dynamic) []u8 else [query_capacity]u8 = if (dynamic) &.{} else undefined,
         committed_len: usize = 0,
         selected: Span = .{ .start = 0, .end = 0 },
         marked: ?Span = null,
@@ -81,7 +85,7 @@ fn ContextWithStorage(comptime dynamic: bool) type {
             const length = std.math.add(usize, self.len - (span.end - span.start), bytes.len) catch return false;
             if (length > self.storage.len) return false;
             // Callers may replace from a substring of this projection. Preserve it before shifting.
-            var fixed_replacement: if (dynamic) void else [query_limit + marked_limit]u8 = undefined;
+            var fixed_replacement: if (dynamic) void else [query_capacity + marked_capacity]u8 = undefined;
             const replacement = if (dynamic) self.scratch else fixed_replacement[0..];
             @memcpy(replacement[0..bytes.len], bytes);
             const tail = self.len - span.end;
@@ -334,4 +338,21 @@ test "inline IME backspace follows replacement caret and cancels only the last i
     context.cancelInsertedScalar();
     try std.testing.expectEqualStrings("😀", context.text());
     try std.testing.expectEqual(Range{ .location = 2, .length = 0 }, context.selectedRange().?);
+}
+
+test "settings search IME bounded context retains its original 64 and 32 byte limits" {
+    var c: BoundedContext(64, 32) = .{};
+    try std.testing.expect(c.reset("a😀z", ""));
+    try std.testing.expect(c.setMarked("韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 }));
+    try std.testing.expectEqualStrings("a韓z", c.text());
+    try std.testing.expect(c.insert("韓", null));
+    try std.testing.expectEqualStrings("a韓z", c.text());
+    var long: [64]u8 = undefined;
+    @memset(&long, 'a');
+    try std.testing.expect(c.reset(&long, ""));
+    try std.testing.expect(!c.insert("z", null));
+    try std.testing.expectEqualStrings(&long, c.text());
+    var marked: [33]u8 = undefined;
+    @memset(&marked, 'x');
+    try std.testing.expect(!c.setMarked(&marked, .{ .location = 0, .length = 0 }, null));
 }

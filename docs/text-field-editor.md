@@ -344,3 +344,9 @@ TextArea (새 얇은 층 — 세로 축만 소유)
 주소창과 공유하는 순수 adapter를 rename에 연결하는 범위는
 [인라인 rename IME 계획](plans/inline-rename-ime.md)이 소유한다.
 이름의 NFD 보존·선택 UI 없음과 대상별 commit은 유지한다.
+
+### 설정 검색창 IME 문맥
+
+[설정 검색창 계획](plans/settings-search-ime.md)은 고정 64/32바이트 검색 버퍼를 유지한 채
+공통 UTF-16 문맥을 연결한다. 확정 검색어를 필터에 쓰는 기존 정책과 값 편집·키 녹음·색상
+picker/dropdown의 입력 경계를 유지한다. TextField로 저장 모델을 바꾸는 이관은 아니다.

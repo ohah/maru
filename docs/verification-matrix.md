@@ -5112,5 +5112,16 @@ Debug·ReleaseFast로 검사한다(초기화 포함 각각 33개/7개). 짝·색
 실제 호출 수·비어 있지 않은 후보·부모/자식 시간 포함 관계를 요구한다. 전체 소스/빌드 목록은
 준비 Git 객체와 대조한다. 다섯 독립 가설의 23개 손상 거절·정상 전후 대조·원본 불변 및 합성 반례
 검사 7개를 통과했다. 로그 해시를 다시 맞춘 의미 반례도 거절한다. 제품 최적화나 GUI/HID·present·
-RSS 증거가 아니며 CI·main 합류는 미완료다. [전체 결과](../tools/editor-fold-promotion-measure/results.md)와
+RSS 증거가 아니다. #4585의 필수 CI가 통과해 `fd953386b`로 머지됐고, 실제 main의 문서
+링크·행 참조·config 검사도 통과했다. main CI는 대기 중이다. [전체 결과](../tools/editor-fold-promotion-measure/results.md)와
 [범위](plans/editor-fold-promotion-attribution.md)를 따른다.
+
+### 접힘 후보의 정렬 순서 재사용
+
+`test-editor-fold-order`는 작은 추가분·동률·빈 목록·좌표 이동과 실제 native 구조 편집을
+전체 정렬·전체 접힘과 대조한다. 기존 캐시·변경 범위·좌표와 함께 Debug·ReleaseFast 각각
+25개 테스트를 통과했다. 실제 함수 추출 사본의 다섯 의미 결함과 각 전후 정상 대조도 통과했다.
+제품 사본 전후 비교 240개 실행/3,090편집과 구간 비교 60개/1,200편집에서 매 편집 결과가
+일치했다. 구간 개선을 전체 입력 개선으로 주장하지 않는다. 동시 컴파일을 관측했고 GUI/HID·
+present·RSS는 측정하지 않았다. 이 구현의 필수 CI·머지는 미완료다.
+[계약](plans/editor-fold-order-reuse.md)과 [전체 분포](../tools/editor-fold-order-measure/results.md)를 따른다.

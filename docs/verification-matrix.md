@@ -5796,3 +5796,15 @@ Six runtime mutations exercise cursor, paint, commit clearing, UTF-8 boundary, v
 isolation, and transaction cleanup. Debug and ReleaseFast must pass after restoration.
 The native app double-caret control reproduces the old title cursor; the normal
 inline-caret mode requires it to disappear while numeric edit requests remain active.
+
+## Windows 설정 스크롤바
+
+- `zig build test-windows-settings-scrollbar`: 집계 2 + 동작 6. 발행된 paint/hit, track jump,
+  이동 없는 마지막 up, 거터 가장자리 캡처·다른 버튼 up·tick 누적, 소유권 취소, 같은 기하 carry와
+  크기 변경 취소를 검사한다. 폼·막대 할당 실패에서는 hit target이 남지 않아야 한다.
+- `zig build test-windows-settings`: 전체 설정 검사 41개. 복원 Debug/ReleaseFast를 확인한다.
+- paint/입력 경로/릴리스/버튼/기하/포커스/거터/두 할당 실패 경로의 변이 9개를 런타임 실패로
+  검출한다. 컴파일/실행 파일 누락 오류는 검출 성공으로 계산하지 않는다.
+- `check-settings-scroll.py --scrollbar --inline-caret`: 격리 앱에서 실제 픽셀·드래그·기존 입력
+  소유권을 확인한다. `--scrollbar-control`과 `--gutter-control`은 이전 바이너리 실패 대조다.
+  물리 마우스·키보드나 OS IME 후보창 검증으로 확대하지 않는다.

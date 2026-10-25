@@ -4,6 +4,7 @@ const std = @import("std");
 const maru = @import("maru");
 const widget = maru.chrome.components.settings;
 const edit = maru.app.settings_edit;
+const settings_scrollbar = @import("scrollbar.zig");
 
 pub fn candidate(a: std.mem.Allocator, cfg: maru.config.Config, request: edit.Request) !maru.config.Config {
     var next = cfg;
@@ -84,6 +85,7 @@ pub const Host = struct {
     scroll_moves: usize = 0,
     scroll_peak: u32 = 0,
     swallow_left_up: bool = false,
+    scrollbar: settings_scrollbar.Bar = .{},
     pub fn init(a: std.mem.Allocator, config_arena: std.mem.Allocator, io: std.Io, cfg: *maru.config.Config) !Host {
         return .{ .a = a, .config_arena = config_arena, .io = io, .cfg = cfg, .path = try maru.config.loader.defaultConfigPath(a) };
     }
@@ -99,6 +101,7 @@ pub const Host = struct {
     }
     pub fn toggle(self: *Host) void {
         if (self.job != null) return;
+        self.scrollbar.hide();
         self.wheel_acc.reset();
         if (self.form.state.open) {
             if (self.form.edit.rollback()) |request| {
@@ -113,6 +116,7 @@ pub const Host = struct {
         } else self.form.state.show();
     }
     pub fn tick(self: *Host) void {
+        if (!self.form.state.open or self.job != null or self.form.state.dropdown.open or self.form.state.picking) self.scrollbar.hide() else self.scrollbar.tick(&self.form.state.scroll);
         const job = self.job orelse return;
         if (!job.done.load(.acquire)) return;
         job.thread.?.join();
@@ -149,6 +153,7 @@ pub const Host = struct {
     }
     pub fn key(self: *Host, event: maru.terminal.KeyEvent) void {
         if (self.job != null or event.event_type == .release) return;
+        self.scrollbar.cancel();
         var arena = std.heap.ArenaAllocator.init(self.a);
         defer arena.deinit();
         const f = self.form.frame(arena.allocator(), self.cfg.*) catch return;
@@ -172,12 +177,15 @@ pub const Host = struct {
         self.form.state.setEditPreedit(text);
         if (self.form.state.editing) self.form.state.setSearchPreedit("") else self.form.state.setSearchPreedit(text);
     }
-    pub fn pointer(self: *Host, event: maru.chrome.input.PointerEvent, props: maru.chrome.props.ChromeProps, tokens: *const maru.chrome.Tokens) void {
+    pub fn pointer(self: *Host, event: maru.chrome.input.PointerEvent, raw_props: maru.chrome.props.ChromeProps, tokens: *const maru.chrome.Tokens) void {
+        var props = raw_props;
+        props.metrics.overlay_scroll_gutter_px = settings_scrollbar.metrics.gutterPx();
         if (event.phase == .up and event.button == .left and self.swallow_left_up) {
             self.swallow_left_up = false;
             return;
         }
         if (self.job != null or !self.form.state.open) return;
+        if (self.form.state.dropdown.open or self.form.state.picking) self.scrollbar.hide() else if (self.scrollbar.pointer(event, &self.form.state.scroll)) return;
         var arena = std.heap.ArenaAllocator.init(self.a);
         defer arena.deinit();
         const f = self.form.frame(arena.allocator(), self.cfg.*) catch return;
@@ -192,14 +200,18 @@ pub const Host = struct {
     }
     fn updateScrollContext(self: *Host, intent: widget.Action) void {
         if (intent == .search_changed or intent == .section_changed) {
+            self.scrollbar.hide();
             self.wheel_acc.reset();
             self.form.state.scroll = .{};
             self.form.state.followed_selected = null;
-        } else if (intent == .close) self.wheel_acc.reset();
+        } else if (intent == .close) { self.wheel_acc.reset(); self.scrollbar.hide(); }
     }
-    pub fn wheel(self: *Host, delta: i32, lines_per_notch: u32, horizontal: bool, props: maru.chrome.props.ChromeProps, tokens: *const maru.chrome.Tokens) void {
+    pub fn wheel(self: *Host, delta: i32, lines_per_notch: u32, horizontal: bool, raw_props: maru.chrome.props.ChromeProps, tokens: *const maru.chrome.Tokens) void {
+        var props = raw_props;
+        props.metrics.overlay_scroll_gutter_px = settings_scrollbar.metrics.gutterPx();
         self.wheel_events += 1;
         if (horizontal) return;
+        self.scrollbar.cancel();
         if (self.job != null or !self.form.state.open or self.form.state.dropdown.open or self.form.state.picking or lines_per_notch == 0 or props.metrics.cell_height_px == 0 or props.metrics.cell_width_px == 0) {
             self.wheel_acc.reset();
             return;
@@ -218,7 +230,9 @@ pub const Host = struct {
     }
     /// Reuse painted modal caret geometry for IMM; a terminal cursor is
     /// unrelated to the active search or field editor.
-    pub fn imeCaret(self: *Host, props: maru.chrome.props.ChromeProps, tokens: *const maru.chrome.Tokens) ?maru.session.mouse_coordinates.ImeCaret {
+    pub fn imeCaret(self: *Host, raw_props: maru.chrome.props.ChromeProps, tokens: *const maru.chrome.Tokens) ?maru.session.mouse_coordinates.ImeCaret {
+        var props = raw_props;
+        props.metrics.overlay_scroll_gutter_px = settings_scrollbar.metrics.gutterPx();
         if (!self.form.state.open or (!self.form.state.searching and !self.form.state.editing) or self.form.state.picking) return null;
         var arena = std.heap.ArenaAllocator.init(self.a);
         defer arena.deinit();
@@ -238,10 +252,22 @@ pub const Host = struct {
             .origin_y = @intCast(@max(0, rect.y)),
         };
     }
-    pub fn draw(self: *Host, a: std.mem.Allocator, props: maru.chrome.props.ChromeProps, tokens: *const maru.chrome.Tokens, ops: *std.ArrayList(maru.chrome.draw.Op)) !void {
+    pub fn draw(self: *Host, a: std.mem.Allocator, raw_props: maru.chrome.props.ChromeProps, tokens: *const maru.chrome.Tokens, ops: *std.ArrayList(maru.chrome.draw.Op)) !void {
+        errdefer self.scrollbar.hide();
+        var props = raw_props;
+        props.metrics.overlay_scroll_gutter_px = settings_scrollbar.metrics.gutterPx();
         const f = try self.form.frame(a, self.cfg.*);
         widget.ensureSelectedVisible(&self.form.state, f.sections, f.rows, props, tokens);
         try widget.view(&self.form.state, f.sections, f.rows, f.dropdown, props, tokens, a, ops);
+        if (self.job != null or self.form.state.dropdown.open or self.form.state.picking) { self.scrollbar.hide(); return; }
+        if (widget.scrollView(&self.form.state, f.sections, f.rows, props, tokens)) |view| {
+            try self.scrollbar.publish(view, props.metrics.cell_height_px, tokens, a, ops);
+        } else self.scrollbar.hide();
+    }
+    pub fn cancelGestures(self: *Host) void {
+        self.scrollbar.hide();
+        self.form.state.dragging = false;
+        self.wheel_acc.reset();
     }
 };
 
@@ -343,7 +369,107 @@ test "Windows settings and sidebar serialize partial config writes" {
     }
 }
 
-const wheel_test_props: maru.chrome.props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 1000, .backing_height_px = 240 } };
+const wheel_test_props: maru.chrome.props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 1000, .backing_height_px = 240, .overlay_scroll_gutter_px = 16 } };
+fn scrollbarTestDraw(host: *Host, a: std.mem.Allocator, props: maru.chrome.props.ChromeProps) ![]const maru.chrome.draw.Op {
+    var ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
+    const tk = wheelTestTokens();
+    try host.draw(a, props, &tk, &ops);
+    return ops.items;
+}
+fn scrollbarTestDown(host: *Host, at_bottom: bool) void {
+    const g = host.scrollbar.geometry.?;
+    const tk = wheelTestTokens();
+    host.pointer(.{ .phase = .down, .x_px = g.track_x + g.track_w / 2, .y_px = if (at_bottom) g.track_y + g.track_h - 1 else g.thumb_y + g.thumb_h / 2 }, wheel_test_props, &tk);
+}
+test "Windows settings scrollbar paints published overflow only" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
+    const a = arena.allocator(); var cfg: maru.config.Config = .{}; var host = try wheelTestHost(a, &cfg);
+    const ops = try scrollbarTestDraw(&host, a, wheel_test_props);
+    try std.testing.expectEqual(@as(usize, 3), host.scrollbar.count);
+    try std.testing.expect(host.scrollbar.geometry != null);
+    try std.testing.expect(ops.len >= 2 and ops[ops.len-1] == .quad and ops[ops.len-2] == .quad);
+    host.form.state.startSearch(); for ("__no_setting__") |cp| host.form.state.appendSearchCp(cp);
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props);
+    try std.testing.expectEqual(@as(usize, 0), host.scrollbar.count);
+    try std.testing.expect(host.scrollbar.geometry == null);
+}
+test "Windows settings scrollbar paint allocation failure retires hit targets" {
+    var bar: settings_scrollbar.Bar = .{};
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
+    defer ops.deinit(failing.allocator());
+    const tk = wheelTestTokens();
+    try std.testing.expectError(error.OutOfMemory, bar.publish(.{
+        .viewport = .{ .x = 100, .y = 100, .w = 200, .h = 100 },
+        .total = 100, .visible = 5, .win_start = 0,
+    }, 20, &tk, failing.allocator(), &ops));
+    try std.testing.expectEqual(@as(usize, 0), bar.count);
+    try std.testing.expect(bar.geometry == null and !bar.drag.active);
+    try std.testing.expectEqual(@as(usize, 0), ops.items.len);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(arena.allocator(), &cfg);
+    _ = try scrollbarTestDraw(&host, arena.allocator(), wheel_test_props);
+    var frame_failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var frame_ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
+    defer frame_ops.deinit(frame_failing.allocator());
+    try std.testing.expectError(error.OutOfMemory, host.draw(frame_failing.allocator(), wheel_test_props, &tk, &frame_ops));
+    try std.testing.expectEqual(@as(usize, 0), host.scrollbar.count);
+}
+test "Windows settings scrollbar track jump uses final release coordinate" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
+    const a = arena.allocator(); var cfg: maru.config.Config = .{}; var host = try wheelTestHost(a, &cfg);
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props); const g = host.scrollbar.geometry.?;
+    scrollbarTestDown(&host, true);
+    try std.testing.expect(host.scrollbar.drag.active and host.form.state.scroll.offset_y_px > 0);
+    const tk = wheelTestTokens();
+    host.pointer(.{ .phase = .up, .x_px = g.track_x, .y_px = g.track_y - 100 }, wheel_test_props, &tk);
+    try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
+    try std.testing.expect(!host.scrollbar.drag.active and host.scrollbar.interaction.capture == null);
+}
+test "Windows settings scrollbar ignores unrelated release and coalesces movement" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
+    const a = arena.allocator(); var cfg: maru.config.Config = .{}; var host = try wheelTestHost(a, &cfg);
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props); const g = host.scrollbar.geometry.?; const tk = wheelTestTokens();
+    // The reserved gutter edge is outside the narrow painted thumb, but is
+    // still a published track action and must acquire typed capture.
+    host.pointer(.{ .phase = .down, .x_px = g.hit_x + 0.5, .y_px = g.thumb_y + g.thumb_h / 2 }, wheel_test_props, &tk);
+    try std.testing.expect(host.scrollbar.interaction.capture != null);
+    host.pointer(.{ .phase = .up, .button = .other, .x_px = g.track_x, .y_px = g.track_y + g.track_h }, wheel_test_props, &tk);
+    try std.testing.expect(host.scrollbar.drag.active);
+    host.pointer(.{ .phase = .move, .x_px = g.track_x, .y_px = g.track_y + g.track_h }, wheel_test_props, &tk);
+    try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
+    host.tick(); try std.testing.expect(host.form.state.scroll.offset_y_px > 0);
+    host.pointer(.{ .phase = .up, .x_px = -100, .y_px = -100 }, wheel_test_props, &tk);
+    try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
+    try std.testing.expect(host.form.state.open);
+}
+test "Windows settings scrollbar cancels on owner changes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
+    const a = arena.allocator(); var cfg: maru.config.Config = .{}; var host = try wheelTestHost(a, &cfg);
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props); scrollbarTestDown(&host, false);
+    host.cancelGestures(); try std.testing.expect(!host.scrollbar.drag.active);
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props); scrollbarTestDown(&host, false);
+    host.key(.{ .key = .{ .char = '/' } }); try std.testing.expect(!host.scrollbar.drag.active);
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props); scrollbarTestDown(&host, false);
+    host.form.state.dropdown.open = true; host.tick(); try std.testing.expect(!host.scrollbar.drag.active);
+    host.form.state.dropdown.open = false;
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props); scrollbarTestDown(&host, false);
+    host.toggle(); try std.testing.expect(!host.scrollbar.drag.active and !host.form.state.open);
+}
+test "Windows settings scrollbar carries scroll redraw but cancels resized geometry" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
+    const a = arena.allocator(); var cfg: maru.config.Config = .{}; var host = try wheelTestHost(a, &cfg);
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props); const g = host.scrollbar.geometry.?; const tk = wheelTestTokens();
+    scrollbarTestDown(&host, false);
+    host.pointer(.{ .phase = .move, .x_px = g.track_x, .y_px = g.track_y + g.track_h }, wheel_test_props, &tk); host.tick();
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props);
+    try std.testing.expect(host.scrollbar.drag.active and host.scrollbar.interaction.capture != null);
+    var resized = wheel_test_props; resized.metrics.backing_width_px += 200;
+    _ = try scrollbarTestDraw(&host, a, resized);
+    try std.testing.expect(!host.scrollbar.drag.active and host.scrollbar.interaction.capture == null);
+}
+
 test "Windows settings composition paints preview at the only active caret" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

@@ -12781,7 +12781,7 @@ zero bytes; the corrected app must pass the same visible-word clipboard check.
 `tools/windows/check-settings.py`는 소유 PID/HWND와 바이너리 해시를 확인한 격리 앱에서 실행한다.
 설정 저장·실패 복구·취소·입력 소유권을 확인하며 실제 물리 키보드나 IME 후보창 검증을 대신하지 않는다.
 현재 라이브 연결은 일부 입력 정책과 OSC52 읽기 정책이다. 폰트·색상·언어 등 전체 런타임 적용,
-외부 변경 reload, 기본값/합성 행, 스크롤바 표시·드래그와 포커스·IME는 아직 완료되지 않았다.
+외부 변경 reload, 기본값/합성 행과 다른 입력란·편집기의 IME는 아직 완료되지 않았다.
 
 Windows 설정의 세로 휠은 공통 `settings.scrollByRows`로 전달한다. 120-unit 눈금의 나머지는
 `session.input_math.WheelAccumulator`가 보존하며 Win32 어댑터도 같은 수학을 재사용한다.
@@ -12801,6 +12801,18 @@ Windows 설정의 세로 휠은 공통 `settings.scrollByRows`로 전달한다. 
 `tools/windows/check-settings-focus.py`는 소유한 입력 큐 사이의 실제 keyboard focus 전환을
 검사한다. 전역 foreground 활성화·물리 Alt+Tab·키보드·IME 검증으로 계산하지 않는다.
 설정/검색/편집기의 텍스트 포커스별 IME 위치·조합 처리는 여전히 후속 작업이다.
+
+설정 스크롤바는 `settings.scrollView`의 뷰포트와 공용 ScrollArea 트리에서 발행한다. 거터 16px는
+모든 설정 그리기·포인터·휠·IME 기하에 같은 값으로 예약한다. 트랙은 거터 전체를 그리기/캡처
+사각으로 발행하고, thumb은 공용 메트릭(8px, 최소 24px)을 쓴다. 휠과 드래그는 같은 폼 offset을
+변경한다. 공용 interaction capture와 ScrollArea.Drag가 세대·좌표·tick 누적을 소유한다.
+이동 메시지가 없는 up도 마지막 좌표를 반영하고 다른 버튼의 up은 캡처를 끊지 않는다.
+검색·섹션·닫기·포커스/캡처 손실·크기 변경·다른 모달·저장/자식 UI는 캡처를 취소한다.
+스크롤 중의 같은 트랙 재발행만 carry하며, 트랙/범위/크기가 달라지면 취소한다.
+폼/스크롤바 paint 할당 실패는 이전 hit target도 비운다.
+`test-windows-settings-scrollbar`는 집계 2와 동작 6개다. 실제 앱 검사는
+`check-settings-scroll.py --scrollbar --inline-caret`이며, 이전 바이너리 대조는
+`--scrollbar-control`(미표시)과 `--gutter-control`(거터 캡처 누락)로 구분한다.
 
 설정 **검색란**의 IMM 위치 요청은 `settings.searchCaretRect`의 공용 그리기 좌표를 사용한다.
 확정 문자는 표시 셀 폭으로 이동하고 조합 미리보기는 조합 시작 위치를 유지한다. 창 크기·셀 크기

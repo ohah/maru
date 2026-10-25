@@ -110,6 +110,8 @@ UTF-8 포화·가로/세로 크기 기억·잘못된 CLI selector를 추가 검�
 현재 번들 언어 각각을 네 프리셋으로 촬영하고 TypeScript는 전체 프리셋을 추가 비교한다.
 실제 제품 Metal 캡처이며 LSP는 꺼 둔다. 출력은 저장소 밖 새 빈 디렉터리다.
 예제·격리·PNG 비교판·원본 및 manifest의 범위는 [도구 설명](../tools/editor-theme-gallery/README.md)을 따른다.
+실제 서버를 켠 비교는 같은 도구 설명의 `prepare_lsp.py` → `run_lsp.py --servers-json …` 경로를 쓴다.
+초기 Surface와 스모크 예제 입력만 사본에서 준비하고, initialize/didOpen/token 응답을 확인한 뒤 촬영한다.
 
 ## 에디터 CLI
 

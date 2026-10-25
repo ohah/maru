@@ -70980,3 +70980,62 @@ test "shared origin snapshot 증명 거절과 선택적 할당 실패 및 독립
     try testing.expectEqualDeep(original, state.origin_state.?.current);
     try testing.expect(syntax_color.matchesInput(state, stamp.document, stamp.revision));
 }
+
+test "shared bracket edit product 실제 분할의 입력 Undo Redo와 원본 종료 뒤 색 탐색을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const source = try undoFixture(&fx, a, "shared-bracket-edit.zig", "fn f() void {\n _ = .{ (1), (2) };\n}\n");
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, source, " "));
+    try testing.expect(undoEdit(fx.session, source));
+    try syntax_color.finishBrackets(&source.rt.editor_syntax, a, source.rt.editorDocument().opened.?.file.content);
+    const original_pane = pane_ops.activePane(fx.session);
+    const original_index = std.mem.indexOfScalar(*Term, original_pane.terms.items, source).?;
+    const peer = try pane_ops.splitSharedEditorPane(fx.session, .horizontal, false);
+    fx.leaf_rect.w /= 2;
+    try foldMarksReady(&fx, peer);
+    for (0..3) |step| {
+        const partials = source.rt.editor_syntax.brackets.partials + peer.rt.editor_syntax.brackets.partials;
+        source.rt.editor_selection = editor_selection.Selection.at(0);
+        switch (step) {
+            0 => try testing.expect(insertText(fx.session, source, "fn g() void {}\n")),
+            1 => try testing.expect(undoEdit(fx.session, source)),
+            else => try testing.expect(redoEdit(fx.session, source)),
+        }
+        try testing.expectEqual(partials + 1, source.rt.editor_syntax.brackets.partials + peer.rt.editor_syntax.brackets.partials);
+        for ([_]*Term{ source, peer }) |view| {
+            try foldMarksReady(&fx, view);
+            const bytes = view.rt.editorDocument().opened.?.file.content;
+            try syntax_color.finishBrackets(&view.rt.editor_syntax, a, bytes);
+            var cold = syntax_color.openBudgeted(bytes, .zig, 0);
+            defer cold.deinit(a);
+            const pool = view.rt.editor_syntax.bracket_resolved.?.independent;
+            while (syntax_color.advanceBrackets(&cold, a, bytes, pool)) {}
+            try testing.expectEqualDeep(cold.bracket_info.items, view.rt.editor_syntax.bracket_info.items);
+            const expected = syntax_color.bracketSource(&cold).?;
+            const actual = syntax_color.bracketSource(&view.rt.editor_syntax).?;
+            for (0..bytes.len + 1) |pos| {
+                try testing.expectEqualDeep(expected.pairAt(pos), actual.pairAt(pos));
+                try testing.expectEqualDeep(expected.enclosing(pos), actual.enclosing(pos));
+                try testing.expectEqualDeep(expected.nextOpen(pos), actual.nextOpen(pos));
+                try testing.expectEqualDeep(maru.session.editor.brackets.jumpTarget(expected, bytes.len, pos), maru.session.editor.brackets.jumpTarget(actual, bytes.len, pos));
+            }
+        }
+    }
+    fx.term = peer;
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, original_pane, original_index);
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, peer, "// survivor\n"));
+    try foldMarksReady(&fx, peer);
+    try testing.expect(peer.rt.editor_syntax.brackets.ready);
+    const bytes = peer.rt.editorDocument().opened.?.file.content;
+    var cold = syntax_color.openBudgeted(bytes, .zig, 0);
+    defer cold.deinit(a);
+    while (syntax_color.advanceBrackets(&cold, a, bytes, peer.rt.editor_syntax.bracket_resolved.?.independent)) {}
+    try testing.expectEqualDeep(cold.bracket_info.items, peer.rt.editor_syntax.bracket_info.items);
+    for (0..bytes.len + 1) |pos| {
+        try testing.expectEqualDeep(syntax_color.bracketSource(&cold).?.pairAt(pos), syntax_color.bracketSource(&peer.rt.editor_syntax).?.pairAt(pos));
+    }
+}

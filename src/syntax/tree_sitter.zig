@@ -1334,6 +1334,21 @@ pub const BracketIndex = struct {
         return .{ .leaves = .fromOwnedSlice(items), .ready = true, .synced_gen = target_gen, .synced_parser = target_parser, .version = 1 };
     }
 
+    /// 실제 인계한 현재 트리의 잎 값만 덮는다. 준비 실패는 기존 값과 순회를 그대로 둔다.
+    /// 기존 용량과 계수를 유지하고 수신 판만 증가시켜 옛 판정의 즉시 노출을 막는다.
+    pub fn replaceMatched(self: *BracketIndex, allocator: std.mem.Allocator, source: *const BracketIndex, source_parser: *c.TSParser, source_gen: u64, target_parser: *c.TSParser, target_gen: u64) error{OutOfMemory}!bool {
+        if (self == source or !source.ready or source.walking or source.synced_parser != source_parser or source.synced_gen != source_gen) return false;
+        try self.leaves.ensureTotalCapacity(allocator, source.leaves.items.len);
+        self.stopWalk();
+        self.leaves.items.len = source.leaves.items.len;
+        @memcpy(self.leaves.items, source.leaves.items);
+        self.ready = true;
+        self.synced_gen = target_gen;
+        self.synced_parser = target_parser;
+        self.version += 1;
+        return true;
+    }
+
     pub fn deinit(self: *BracketIndex, allocator: std.mem.Allocator) void {
         self.stopWalk();
         self.leaves.deinit(allocator);
@@ -5125,4 +5140,107 @@ test "fold order 함수 이름과 구조 편집 모두 전체 접힘과 일치�
     const structural = p.retainedChanges() orelse return error.NoRetainedChanges;
     try std.testing.expect(structural.ranges.len > 0);
     try foldCacheJudge(&p, &cache, text.items);
+}
+
+test "shared bracket edit native 수신 배열과 판을 유지하며 완료한 값만 옮긴다" {
+    const a = std.testing.allocator;
+    const text = "fn f() void { _ = .{ (1), [2]u8{1, 2} }; }\n";
+    var donor = Provider.init(text, .zig, 0) orelse return error.NoProvider;
+    defer donor.deinit();
+    var original = try fullIndexForTest(a, &donor, text);
+    defer original.deinit(a);
+    var peer = donor.copyReady(.zig) orelse return error.NoProvider;
+    defer peer.deinit();
+    var target = try fullIndexForTest(a, &peer, text);
+    defer target.deinit(a);
+    target.version = 71;
+    const ptr = target.leaves.items.ptr;
+    const rebuilds = target.rebuilds;
+    const partials = target.partials;
+    var failed = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expect(try target.replaceMatched(failed.allocator(), &original, donor.parser, donor.tree_gen, peer.parser, peer.tree_gen));
+    try std.testing.expect(!failed.has_induced_failure);
+    if (target.leaves.items.ptr == original.leaves.items.ptr) {
+        target.leaves = .empty;
+        return error.SharedBracketLeaves;
+    }
+    try std.testing.expectEqual(ptr, target.leaves.items.ptr);
+    try std.testing.expect(target.leaves.items.ptr != original.leaves.items.ptr);
+    try std.testing.expectEqual(@as(u64, 72), target.version);
+    try std.testing.expectEqual(rebuilds, target.rebuilds);
+    try std.testing.expectEqual(partials, target.partials);
+    try std.testing.expectEqual(peer.parser, target.synced_parser.?);
+    try std.testing.expectEqualDeep(original.leaves.items, target.leaves.items);
+    original.leaves.items[0].start += 1;
+    try std.testing.expect(original.leaves.items[0].start != target.leaves.items[0].start);
+}
+
+test "shared bracket edit native 잘못된 원본 거부와 할당 실패는 수신을 보존한다" {
+    const a = std.testing.allocator;
+    const text = "fn f() void { _ = .{1, 2}; }\n";
+    var donor = Provider.init(text, .zig, 0) orelse return error.NoProvider;
+    defer donor.deinit();
+    var original = try fullIndexForTest(a, &donor, text);
+    defer original.deinit(a);
+    var peer = donor.copyReady(.zig) orelse return error.NoProvider;
+    defer peer.deinit();
+    var target: BracketIndex = .{};
+    defer target.deinit(a);
+    try std.testing.expect(!(try original.replaceMatched(a, &original, donor.parser, donor.tree_gen, donor.parser, donor.tree_gen)));
+    for (0..4) |fault| {
+        const saved = original;
+        defer original = saved;
+        switch (fault) {
+            0 => original.synced_parser = peer.parser,
+            1 => original.synced_gen += 1,
+            2 => original.ready = false,
+            else => original.walking = true,
+        }
+        try std.testing.expect(!(try target.replaceMatched(a, &original, donor.parser, donor.tree_gen, peer.parser, peer.tree_gen)));
+        try std.testing.expectEqual(@as(u64, 0), target.version);
+        try std.testing.expectEqual(@as(usize, 0), target.leaves.capacity);
+    }
+    target.walk_tree = c.ts_tree_copy(peer.tree.?);
+    target.walk_text = try a.dupe(u8, text);
+    target.walk_alloc = a;
+    target.cursor = c.ts_tree_cursor_new(c.ts_tree_root_node(target.walk_tree.?));
+    target.walking = true;
+    try target.walk_edits.append(a, .{ .start = 0, .old_end = 0, .new_end = 1 });
+    const walk_tree = target.walk_tree;
+    const walk_text = target.walk_text.ptr;
+    var failed = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, target.replaceMatched(failed.allocator(), &original, donor.parser, donor.tree_gen, peer.parser, peer.tree_gen));
+    try std.testing.expect(failed.has_induced_failure);
+    try std.testing.expect(target.walking and target.walk_tree == walk_tree and target.walk_text.ptr == walk_text);
+    try std.testing.expectEqual(@as(usize, 1), target.walk_edits.items.len);
+    try std.testing.expectEqual(@as(u64, 0), target.version);
+    try std.testing.expect(!target.ready and target.synced_parser == null);
+    try std.testing.expect(try target.replaceMatched(a, &original, donor.parser, donor.tree_gen, peer.parser, peer.tree_gen));
+    try std.testing.expectEqualDeep(original.leaves.items, target.leaves.items);
+}
+
+test "shared bracket edit native 진행 중 순회를 성공 뒤에만 정리하고 빈 목록을 게시한다" {
+    const a = std.testing.allocator;
+    const text = "// no brackets\n";
+    var donor = Provider.init(text, .zig, 0) orelse return error.NoProvider;
+    defer donor.deinit();
+    var original = try fullIndexForTest(a, &donor, text);
+    defer original.deinit(a);
+    var peer = donor.copyReady(.zig) orelse return error.NoProvider;
+    defer peer.deinit();
+    var target: BracketIndex = .{};
+    defer target.deinit(a);
+    // 실제 C cursor/tree와 별도 텍스트를 소유한 중단 상태를 만든다.
+    target.walk_tree = c.ts_tree_copy(peer.tree.?);
+    target.walk_text = try a.dupe(u8, text);
+    target.walk_alloc = a;
+    target.cursor = c.ts_tree_cursor_new(c.ts_tree_root_node(target.walk_tree.?));
+    target.walking = true;
+    try target.walk_edits.append(a, .{ .start = 0, .old_end = 0, .new_end = 1 });
+    try std.testing.expect(try target.replaceMatched(a, &original, donor.parser, donor.tree_gen, peer.parser, peer.tree_gen));
+    try std.testing.expect(target.ready and !target.walking and target.walk_tree == null and target.walk_text.len == 0);
+    try std.testing.expectEqual(@as(usize, 0), target.walk_edits.items.len);
+    try std.testing.expectEqual(@as(usize, 0), target.leaves.items.len);
+    try std.testing.expect(try target.step(a, &peer, text, 0));
+    try std.testing.expectEqual(@as(u64, 0), target.rebuilds);
 }

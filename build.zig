@@ -1992,6 +1992,10 @@ pub fn build(b: *std.Build) void {
     const run_ime_ui_tests = b.addRunArtifact(ime_ui_tests);
     run_ime_ui_tests.addArg("--maru-expect-tests=7"); // Five IME ownership judges and two root blocks.
     b.step("test-windows-ime-ui", "Verify application composition ownership without suppressing native candidates").dependOn(&run_ime_ui_tests.step);
+    const shell_refresh_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows shell refresh"} });
+    const run_shell_refresh_tests = b.addRunArtifact(shell_refresh_tests);
+    run_shell_refresh_tests.addArg("--maru-expect-tests=7"); // Five shell refresh judges and two root blocks.
+    b.step("test-windows-shell-refresh", "Verify settings refresh future Windows shell launches").dependOn(&run_shell_refresh_tests.step);
     const settings_wheel_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings wheel"} });
     const run_settings_wheel_tests = b.addRunArtifact(settings_wheel_tests);
     run_settings_wheel_tests.addArg("--maru-expect-tests=8"); // Six wheel judges and two root aggregation blocks.

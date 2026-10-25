@@ -5835,3 +5835,17 @@ inline-caret mode requires it to disappear while numeric edit requests remain ac
 `keys_to_shell=1`·`bytes_to_shell=1`을 요구한다. 실행 파일/PID/창 클래스와 foreground/keyboard focus를 검증한다.
 다섯 경로의 성공은 해당 설정 필드에서 시험한 OS 입력 주입의 증거이며, 물리 장치나 다른 편집 대상의
 조합 소유권 전환 완료를 뜻하지 않는다.
+
+### Windows 설정 이후 새 셸 실행
+
+- `zig build test-windows-shell-refresh`: 집계 2 + 동작 5. 명령 우선순위, 이전 인자 제거,
+  공백·한글·빈 인자 경계, override 제거 후 tier 복원, 롤백과 기존 셀/격자 불변을 검사한다.
+- 명령 미갱신·인자 미갱신·config 미러 미갱신·빈 override 고착·무관한 셀 크기 변경의 다섯 변이를
+  각각 compiled runtime 실패로 검출하고 복원 Debug/ReleaseFast를 확인한다.
+- `tools/windows/check-settings-shell.py --state <새 격리 앱 JSON> --binary <복사한 exe 메타 JSON> --output <결과 JSON>`:
+  실제 설정 폼과 새 워크스페이스 버튼을 거쳐 cmd/PowerShell 전환, 없는 절대경로 폴백,
+  앞뒤 공백 제거와 재전환을 확인한다. 자식 프로세스의 실행 파일과 PID를 직접 관측하며 기존 자식은
+  유지되어야 한다. 화면 캡처·무관한 config 줄 보존·셸 입력 0·정상 native 종료도 요구한다.
+- `--old-control`은 첫 cmd 변경 후에도 PowerShell이 생성되는 이전 바이너리의 음성 대조다.
+  GUI에서 빈 text를 저장하는 검증은 아니며 항목별 리셋은 별도 작업이다. 입력은 소유한 HWND의
+  합성 이벤트이며 물리 키보드 검증으로 세지 않는다.

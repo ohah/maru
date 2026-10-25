@@ -13,7 +13,8 @@ func row(_ name: String) throws -> [String: Any] {
     try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent(name))) as! [String: Any]
 }
 var last = 0
-let deadline = ProcessInfo.processInfo.systemUptime + 110
+let projectSearch = Int(ProcessInfo.processInfo.environment["MARU_PROJECT_FIELD"] ?? "").map { (0...3).contains($0) } ?? false
+let deadline = ProcessInfo.processInfo.systemUptime + (projectSearch ? 190 : 110)
 do {
     try require(CGPreflightPostEventAccess(), "relay_event_permission")
     while ProcessInfo.processInfo.systemUptime < deadline {
@@ -68,7 +69,9 @@ do {
             (UInt64(state["generation"] as? String ?? "") ?? 0) > (1 << 62) && (UInt64(state["generation"] as? String ?? "") ?? 0) < (1 << 63)
         let findTab = state["find_mode"] as? Bool == true && code == 48 && flags == 0 &&
             (UInt64(state["generation"] as? String ?? "") ?? 0) > (1 << 59) && (UInt64(state["generation"] as? String ?? "") ?? 0) < (1 << 60)
-        try require(([UInt16(5), 40, 1, 36, 53, 44].contains(code) && (flags == 0 || (code == 36 && flags == CGEventFlags.maskAlternate.rawValue))) || addressSelection || findTab, "unbounded_request")
+        let projectTab = state["project_mode"] as? Bool == true && code == 48 && flags == 0 &&
+            (UInt64(state["generation"] as? String ?? "") ?? 0) > (1 << 58) && (UInt64(state["generation"] as? String ?? "") ?? 0) < (1 << 59)
+        try require(([UInt16(5), 40, 1, 36, 53, 44].contains(code) && (flags == 0 || (code == 36 && flags == CGEventFlags.maskAlternate.rawValue))) || addressSelection || findTab || projectTab, "unbounded_request")
         if request["korean"] as? Bool == true {
             try require(state["view_source"] as? String == SessionHostInputSourcePolicy.korean2SetSourceID &&
                 SessionHostInputSourcePolicy.currentSourceID() == SessionHostInputSourcePolicy.korean2SetSourceID, "source_changed")

@@ -24,7 +24,7 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def run(app, output, mode='live'):
+def run(app, output, mode='live', wait_timeout=115):
     private = Path(tempfile.mkdtemp(prefix='maru-palette-live-', dir='/tmp'))
     # Keep app-opened files outside privacy-protected Documents/Desktop paths.
     # The authorized parent copies evidence to the requested destination afterward.
@@ -85,7 +85,7 @@ def run(app, output, mode='live'):
         if activation.returncode:
             raise RuntimeError('could not activate the owned fixture app')
         relay = subprocess.Popen([str(private / 'hid-relay'), str(root), str(pid)], stdout=relay_log, stderr=subprocess.STDOUT)
-        code = child.wait(timeout=115)
+        code = child.wait(timeout=wait_timeout)
         report = json.loads((root / 'result.json').read_text())
         if code or report.get('passed') is not True:
             raise RuntimeError('palette GUI failed: ' + repr(report.get('failures')))

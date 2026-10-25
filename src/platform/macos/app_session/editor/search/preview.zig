@@ -418,7 +418,7 @@ pub fn apply(self: *host.AppSession) !ApplyResult {
     if (!editor.applyEditAsOneWithUndo(self, term, changes)) return error.ApplyFailed;
     applied = true;
     const result: ApplyResult = if (editor.saveDocument(self, term)) |_| .saved else |err| .{ .save_failed = err };
-    self.editor_search.focused = null;
+    self.editor_search.setFocused(null);
     _ = self.activateExistingFileTerm(term);
     if (term.rt.editor_selection == null) term.rt.editor_selection = maru.session.editor.selection.Selection.at(changes[0].start);
     dock.changed(self);
@@ -501,7 +501,7 @@ fn finishDiskApply(self: *host.AppSession, transaction: *State) !ApplyResult {
     try @import("process.zig").validateRoot(self.io, &root);
     if (!editor.applyEditAsOneWithUndo(self, term, changes)) return error.ApplyFailed;
     const result: ApplyResult = if (editor.saveDocument(self, term)) |_| .saved else |err| .{ .save_failed = err };
-    self.editor_search.focused = null;
+    self.editor_search.setFocused(null);
     if (term.rt.editor_selection == null) term.rt.editor_selection = maru.session.editor.selection.Selection.at(changes[0].start);
     dock.changed(self);
     self.editor_search.preview.deinit(self.allocator);

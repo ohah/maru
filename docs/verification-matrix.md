@@ -5182,3 +5182,10 @@ EOF·UTF-8/UTF-16 범위, gopls 활성화 옵션, refresh 및 유실 응답 복�
 호스트 소유자 전환을 검사한다. 단계와 실제 앱의 독립 화면 검증은
 [찾기·바꾸기 IME 계획](plans/find-replace-ime.md)이 소유한다. 후보 미리보기와 확정 검색어,
 결과 선택, 바꿀 문자열과 문서 내용의 불변을 각각 구분해 확인한다.
+
+
+### 프로젝트 검색 도크의 입력 문맥
+
+`zig build test-project-search-ime`는 검색어·포함·제외·바꿀 문자열의 범위 편집, owner 전환과
+실패 원자성, 조합 무효화와 debounce/치환 분리를 검사한다. 실제 입력과 독립 창·픽셀 검증은
+[프로젝트 검색 IME 계획](plans/project-search-ime.md)이 소유하며 진단 통과와 PNG/OCR 통과를 구분한다.

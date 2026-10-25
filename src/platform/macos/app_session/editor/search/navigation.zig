@@ -59,7 +59,7 @@ fn reveal(self: *AppSession, term: *host.Term, span: search.event.Range) !void {
     if (end_at < start_at) return error.StaleRequest;
     _ = self.activateExistingFileTerm(term);
     if (pane.activePane(self).activeTerm() != term) return error.InputTransactionPending;
-    self.editor_search.focused = null;
+    self.editor_search.setFocused(null);
     try editor.navigateTo(self, .{ .offset = start_at });
     term.rt.editor_selection = maru.session.editor.selection.Selection.fromPoints(start_at, end_at);
     self.metal_dirty = true;

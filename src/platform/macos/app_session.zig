@@ -355,7 +355,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 236: shared TextField IME routing and rename owner/snapshot storage.
 // ABI 237: settings search owns bounded IME snapshots and a pinned native owner.
 // ABI 238: movable Find/Replace contexts and a separately owned key snapshot.
-pub const abi_version: u32 = 238;
+// ABI 239: project-search fields own native range contexts and key snapshots.
+pub const abi_version: u32 = 239;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -102407,4 +102408,456 @@ test "find input IME host topology-free surface declines native owner" {
     try std.testing.expectEqualStrings("", session.chrome_host.find.input.query.items);
     try std.testing.expectEqualStrings("", session.chrome_host.find.input.preedit.items);
     try std.testing.expectEqual(@as(u64, 0), session.chrome_host.find.ime_identity);
+}
+
+fn initProjectSearchIMETestSession(a: std.mem.Allocator) !*AppSession {
+    const self = try initRenameCaretTestSession(a);
+    errdefer { self.deinit(); a.destroy(self); }
+    _ = try self.resize(960, 600, 1000);
+    project_search_ops.open(self);
+    return self;
+}
+
+test "project search IME host middle UTF16 replacement preserves suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try std.testing.expectEqual(AppSession.InputFocus.project_search, self.inputFocus());
+    const field = &self.editor_search.fields[0];
+    try field.setText(a, "a😀z");
+    self.imeBegin();
+    // The public range ABI first tries Chrome routing, then falls back to imeInsert.
+    if (!@import("app_session/chrome_ime.zig").insert(self, "韓", .{ .location = 1, .length = 2 })) self.imeInsert("韓");
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a韓z", field.text.items);
+}
+
+fn projectIMEFocus(self: *AppSession, index: usize) void {
+    self.editor_search.expanded = true;
+    self.editor_search.replacing = true;
+    self.editor_search.setFocused(index);
+}
+
+test "project search IME host all fields keep independent UTF16 suffixes" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/chrome_ime.zig");
+    for (0..4) |index| {
+        projectIMEFocus(self, index);
+        try self.editor_search.fields[index].setText(a, "a😀z");
+        self.imeBegin();
+        try std.testing.expect(native.insert(self, "韓", .{ .location = 1, .length = 2 }));
+        self.imeEnd(null);
+        try std.testing.expectEqualStrings("a韓z", self.editor_search.fields[index].text.items);
+        for (0..index) |previous| try std.testing.expectEqualStrings("a韓z", self.editor_search.fields[previous].text.items);
+    }
+}
+
+test "project search IME host composition retires results without running a worker" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    self.editor_search.result.phase = .complete;
+    self.imeBegin();
+    self.imeMarked("한");
+    try std.testing.expectEqual(.composing, self.editor_search.result.phase);
+    try std.testing.expect(self.editor_search.result.identity == null);
+    try std.testing.expect(!project_search_ops.canSearch(self));
+    try std.testing.expect(self.editor_project_search_live == null);
+    self.imeEnd(null);
+}
+
+test "project search IME host candidate Return retains debounce deadline" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    self.imeMarked("한");
+    self.imeInsert("韓");
+    self.imeEnd(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqualStrings("韓", self.editor_search.fields[0].text.items);
+    try std.testing.expectEqual(.waiting, self.editor_search.result.phase);
+    try std.testing.expect(self.editor_search.result.due_ms.? > project_search_ops.now(self));
+    try std.testing.expect(self.editor_project_search_live == null);
+    // A separate Return keeps its existing immediate-run intent.
+    self.imeBegin();
+    self.imeEnd(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(self.editor_search.result.due_ms.? <= project_search_ops.now(self));
+}
+
+test "project search IME host replacement only invalidates plans" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.editor_search.fields[0].setText(a, "query");
+    self.editor_search.result.phase = .complete;
+    projectIMEFocus(self, 3);
+    self.imeBegin();
+    self.imeMarked("한");
+    self.imeInsert("韓");
+    self.imeEnd(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqualStrings("韓", self.editor_search.fields[3].text.items);
+    try std.testing.expectEqualStrings("query", self.editor_search.fields[0].text.items);
+    try std.testing.expectEqual(.complete, self.editor_search.result.phase);
+    try std.testing.expect(self.editor_project_search_live == null);
+    try std.testing.expect(!self.editor_search.batch.active());
+}
+
+test "project search IME host stale field callback is consumed" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    projectIMEFocus(self, 1);
+    try std.testing.expect(@import("app_session/chrome_ime.zig").insert(self, "stale", null));
+    self.imeEnd(null);
+    for (self.editor_search.fields) |field| try std.testing.expectEqualStrings("", field.text.items);
+}
+
+test "project search IME host A B A focus never revives an old key" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    projectIMEFocus(self, 1);
+    projectIMEFocus(self, 0);
+    try std.testing.expect(@import("app_session/chrome_ime.zig").insert(self, "stale", null));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("", self.editor_search.fields[0].text.items);
+}
+
+test "project search IME host reopening same field changes client" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/chrome_ime.zig");
+    const before = native.generation(self).?;
+    self.imeBegin();
+    project_search_ops.open(self);
+    try std.testing.expect(native.marked(self, "stale", .{ .location = 0, .length = 0 }, null));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("", self.editor_search.fields[0].preedit.items);
+    try std.testing.expect(before != native.generation(self).?);
+}
+
+test "project search IME host hidden dock does not accept old callbacks" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    self.dock.collapsed = true;
+    try std.testing.expect(@import("app_session/chrome_ime.zig").insert(self, "stale", null));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("", self.editor_search.fields[0].text.items);
+}
+
+test "project search IME host reconversion cancellation restores word and suffix" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const f = &self.editor_search.fields[0];
+    try f.setText(a, "a한z");
+    self.imeBegin();
+    const native = @import("app_session/chrome_ime.zig");
+    try std.testing.expect(native.marked(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 1 }));
+    try std.testing.expectEqualStrings("az", f.text.items);
+    try std.testing.expect(native.marked(self, "", .{ .location = 0, .length = 0 }, null));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a한z", f.text.items);
+    try std.testing.expectEqual(@as(usize, 4), f.caret);
+}
+
+test "project search IME host later invalid callback rolls back text and selection" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const f = &self.editor_search.fields[0];
+    try f.setText(a, "a😀z");
+    f.caret = 5;
+    f.selection = .{ .anchor = 5, .focus = 1 };
+    self.imeBegin();
+    const native = @import("app_session/chrome_ime.zig");
+    try std.testing.expect(native.insert(self, "韓", null));
+    try std.testing.expect(native.marked(self, "한", .{ .location = 99, .length = 0 }, null));
+    self.imeEnd(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqualStrings("a😀z", f.text.items);
+    try std.testing.expectEqual(@as(usize, 5), f.caret);
+    try std.testing.expectEqual(@as(usize, 1), f.selection.?.focus);
+}
+
+test "project search IME host snapshot OOM preserves selected original" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const f = &self.editor_search.fields[0];
+    try f.setText(a, "keep");
+    f.selectAll();
+    _ = @import("app_session/chrome_ime.zig").projection(self).?;
+    var fail = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    self.allocator = fail.allocator();
+    defer self.allocator = a;
+    self.imeBegin();
+    self.imeInsert("lost");
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("keep", f.text.items);
+    try std.testing.expectEqual(@as(usize, 0), f.selection.?.lo());
+    try std.testing.expectEqual(@as(usize, 4), f.selection.?.hi());
+}
+
+test "project search IME host growth OOM restores a whole key" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const f = &self.editor_search.fields[0];
+    try f.setText(a, "keep");
+    self.imeBegin();
+    self.imeInsert("x");
+    var fail = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    self.allocator = fail.allocator();
+    defer self.allocator = a;
+    var large: [10000]u8 = undefined;
+    @memset(&large, 'x');
+    self.imeMarked(&large);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("keep", f.text.items);
+    try std.testing.expectEqualStrings("", f.preedit.items);
+}
+
+test "project search IME host owner exhaustion never reaches append fallback" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    self.editor_search.ime_sequence = @as(u64, 1) << 58;
+    self.imeBegin();
+    self.imeInsert("lost");
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("", self.editor_search.fields[0].text.items);
+    try std.testing.expect(@import("app_session/chrome_ime.zig").projection(self) == null);
+}
+
+test "project search IME host NFD remains verbatim in all four fields" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    for (0..4) |index| {
+        projectIMEFocus(self, index);
+        self.imeBegin();
+        self.imeInsert("한");
+        self.imeEnd(null);
+        try std.testing.expectEqualStrings("한", self.editor_search.fields[index].text.items);
+    }
+}
+
+test "project search IME host surrogate split rejected without insertion" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const f = &self.editor_search.fields[0];
+    try f.setText(a, "a😀z");
+    self.imeBegin();
+    try std.testing.expect(@import("app_session/chrome_ime.zig").insert(self, "x", .{ .location = 2, .length = 0 }));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", f.text.items);
+}
+
+test "project search IME host preedit caret uses native selected range" {
+    const a = std.testing.allocator;
+    var field: chrome.components.text_field.TextField = .{};
+    defer field.deinit(a);
+    try field.setText(a, "ab");
+    field.caret = 1;
+    try field.preedit.appendSlice(a, "가나");
+    field.preedit_caret = 3;
+    const display = try project_search_ops.makeDisplay(a, &field, "", 40);
+    defer a.free(display.text);
+    try std.testing.expectEqualStrings("a가나b", display.text);
+    try std.testing.expectEqual(@as(usize, 4), display.caret);
+}
+
+test "project search IME host commit accompanied Tab is consumed then standalone Tab moves" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    projectIMEFocus(self, 0);
+    self.imeBegin();
+    self.imeInsert("한");
+    self.imeEnd(.{ .key = .tab, .modifiers = .{} });
+    try std.testing.expectEqual(@as(?usize, 0), self.editor_search.focused);
+    for ([_]usize{ 3, 1, 2, 0 }) |index| {
+        self.imeBegin();
+        self.imeEnd(.{ .key = .tab, .modifiers = .{} });
+        try std.testing.expectEqual(@as(?usize, index), self.editor_search.focused);
+    }
+}
+
+test "project search IME host commit navigation keeps existing replay policy" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    self.imeInsert("한");
+    self.imeEnd(.{ .key = .arrow_up, .modifiers = .{} });
+    try std.testing.expectEqualStrings("한", self.editor_search.fields[0].text.items);
+    try std.testing.expectEqual(@as(usize, 0), self.editor_search.fields[0].caret);
+}
+
+test "project search IME host active surface change rejects old callback" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    const term = try editor_ops.openUntitledInActivePane(self);
+    try std.testing.expect(@import("app_session/chrome_ime.zig").insert(self, "stale", null));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("", self.editor_search.fields[0].text.items);
+    try std.testing.expectEqualStrings("", term.rt.editorDocument().opened.?.file.content);
+}
+
+test "project search IME host topology absence never mints owner" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const tabs = self.tabs;
+    self.tabs = .empty;
+    defer self.tabs = tabs;
+    try std.testing.expect(@import("app_session/editor/search/ime.zig").generation(self) == null);
+    try std.testing.expect(@import("app_session/editor/search/ime.zig").projection(self) == null);
+}
+
+test "project search IME host stale key always releases field snapshots" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    try std.testing.expect(self.editor_search.ime_models[0].before != null);
+    projectIMEFocus(self, 2);
+    self.imeEnd(null);
+    try std.testing.expect(self.editor_search.ime_owner == null and self.editor_search.ime_index == null);
+    for (self.editor_search.ime_models) |model| try std.testing.expect(model.before == null and !model.in_key);
+}
+
+test "project search IME host root generation changes revoke key" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try std.testing.expect(self.file_tree_initialized);
+    self.imeBegin();
+    self.file_tree.root_generation += 1;
+    self.imeInsert("stale");
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("", self.editor_search.fields[0].text.items);
+}
+
+test "project search IME host hiding a composing scope commits its source" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    projectIMEFocus(self, 1);
+    self.imeBegin();
+    self.imeMarked("한");
+    self.imeEnd(null);
+    project_search_ops.apply(self, .{ .option = 3 }, self.editor_search.result.generation);
+    try std.testing.expect(!self.editor_search.expanded);
+    try std.testing.expectEqual(@as(?usize, 0), self.editor_search.focused);
+    try std.testing.expectEqualStrings("한", self.editor_search.fields[1].text.items);
+    try std.testing.expectEqualStrings("", self.editor_search.fields[1].preedit.items);
+}
+
+test "project search IME host rejected key cannot hide its field" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    projectIMEFocus(self, 1);
+    self.imeBegin();
+    try std.testing.expect(@import("app_session/chrome_ime.zig").marked(self, "한", .{ .location = 99, .length = 0 }, null));
+    project_search_ops.apply(self, .{ .option = 3 }, self.editor_search.result.generation);
+    try std.testing.expect(self.editor_search.expanded);
+    try std.testing.expectEqual(@as(?usize, 1), self.editor_search.focused);
+    self.imeEnd(null);
+}
+
+test "project search IME host old callback never becomes Find text" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    self.editor_search.setFocused(null);
+    self.chrome_host.find.show();
+    self.imeInsert("stale");
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("", self.chrome_host.find.input.query.items);
+    try std.testing.expectEqualStrings("", self.editor_search.fields[0].text.items);
+}
+
+test "project search IME host long original keeps middle reconversion suffix" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const f = &self.editor_search.fields[0];
+    var prefix: [1400]u8 = undefined;
+    @memset(&prefix, 'x');
+    try f.text.appendSlice(a, &prefix);
+    try f.text.appendSlice(a, "😀한z");
+    f.moveEnd(false);
+    self.imeBegin();
+    const native = @import("app_session/chrome_ime.zig");
+    try std.testing.expect(native.marked(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1402, .length = 1 }));
+    self.imeInsert("韓");
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("😀韓z", f.text.items[1400..]);
+}
+
+test "project search IME host NFD caret painting never changes semantic offset" {
+    const a = std.testing.allocator;
+    var field: chrome.components.text_field.TextField = .{};
+    defer field.deinit(a);
+    try field.setText(a, "ab");
+    field.caret = 1;
+    try field.preedit.appendSlice(a, "한");
+    field.preedit_caret = 3;
+    const display = try project_search_ops.makeDisplay(a, &field, "", 40);
+    defer a.free(display.text);
+    try std.testing.expectEqual(@as(usize, 1), display.caret);
+    try std.testing.expectEqual(@as(?usize, 3), field.preedit_caret);
+}
+
+test "project search IME host epoch saturation never reuses owner" {
+    const a = std.testing.allocator;
+    const self = try initProjectSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    self.editor_search.ime_epoch = std.math.maxInt(u64);
+    self.imeBegin();
+    self.imeInsert("lost");
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("", self.editor_search.fields[0].text.items);
+    try std.testing.expect(@import("app_session/chrome_ime.zig").generation(self) == null);
 }

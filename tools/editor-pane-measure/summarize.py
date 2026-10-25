@@ -46,8 +46,8 @@ provider.source_names = source_names
 
 def validate(text, workload, data, filename, oracle, info):
     # 아래 판정은 기존 제품·Provider 시간/표본/호출 대조를 약화하지 않는다.
-    provider.validate(text, workload, data, filename, oracle, info['provider_schema'], info['provider_execution'])
-    frames = provider.frame.validate(text, workload, len(data), data.count(b'\n')+1)
+    provider.validate(text, workload, data, filename, oracle, info['provider_schema'], info['provider_execution'], info.get('frame_schema', 1))
+    frames = provider.frame.validate(text, workload, len(data), data.count(b'\n')+1, info.get('frame_schema', 1))
     stages = stage_names(info)
     fields = ('key',) + tuple(field for stage in stages for field in (stage, stage+'_calls'))
     if info['pane_schema'] == 3:

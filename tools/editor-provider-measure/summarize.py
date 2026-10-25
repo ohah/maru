@@ -61,10 +61,10 @@ def source_names(info):
     return SOURCES | extra
 
 
-def validate(text, workload, data, filename, oracle, schema=1, execution='per-view-native'):
+def validate(text, workload, data, filename, oracle, schema=1, execution='per-view-native', frame_schema=1):
     if workload not in ('typing', 'shared') or oracle not in (0, 1):
         raise ValueError('Unsupported workload/oracle')
-    frames = frame.validate(text, workload, len(data), data.count(b'\n') + 1)
+    frames = frame.validate(text, workload, len(data), data.count(b'\n') + 1, frame_schema)
     rows = []
     for line in text.splitlines():
         if not line.startswith('PROVIDER '):
@@ -114,6 +114,10 @@ def validate(text, workload, data, filename, oracle, schema=1, execution='per-vi
     return rows
 
 
+def stats(values):
+    return dict(n=len(values), p50=statistics.median(values) / 1e6, p95=sorted(values)[math.ceil(len(values) * .95) - 1] / 1e6, max=max(values) / 1e6)
+
+
 def summarize(root, repetitions=3):
     root = root.resolve()
     if type(repetitions) is not int or repetitions < 1:
@@ -121,7 +125,8 @@ def summarize(root, repetitions=3):
     info = load(root / 'setup-1.json')
     if info.get('comparison_target') != 'provider-edit-attribution' or 'comparison_variant' in info or type(info.get('mode')) is not int or info['mode'] != 1:
         raise ValueError('Wrong attribution target/mode')
-    if info.get('provider_stages') != list(STAGES) or info.get('frame_stages') != list(frame.STAGES + frame.SYNTAX_STAGES):
+    frame_schema = frame.contract.manifest_schema(info)
+    if info.get('provider_stages') != list(STAGES):
         raise ValueError('Wrong stage schema')
     sources = source_names(info)
     for field in ('original_sha256', 'instrumented_sha256'):
@@ -161,12 +166,46 @@ def summarize(root, repetitions=3):
         for name in sorted(inputs):
             for work in ('typing', 'shared'):
                 for rep in range(count):
-                    rows = validate((root / f'{prefix}-{rep}-1-{name}-{work}.log').read_text(), work, data[name], name, oracle, info.get('provider_schema', 1), info.get('provider_execution', 'per-view-native'))
+                    rows = validate((root / f'{prefix}-{rep}-1-{name}-{work}.log').read_text(), work, data[name], name, oracle, info.get('provider_schema', 1), info.get('provider_execution', 'per-view-native'), frame_schema)
                     if prefix == 'run':
                         groups.setdefault(name + '/' + work, []).extend(rows)
-    def stats(values):
-        return dict(n=len(values), p50=statistics.median(values) / 1e6, p95=sorted(values)[math.ceil(len(values) * .95) - 1] / 1e6, max=max(values) / 1e6)
     return {name: {stage: stats([row[stage] for row in rows]) for stage in STAGES + ('native_parse', 'total_ns')} for name, rows in groups.items()}
+
+
+def frame_details(root, repetitions=3):
+    # 두 workload의 전체 자료·전수 대조를 먼저 검증한다. 성능 표본만 집계한다.
+    proven = summarize(root, repetitions)
+    info = load(root / 'setup-1.json')
+    schema = frame.contract.manifest_schema(info)
+    bracket = 'bracketUpdate' if schema == 2 else 'bracketRefresh'
+    fields = ('total_ns', 'edit_ns', 'appendPaneFrame', 'syntaxEdit', 'providerEdit', 'nativeParse',
+              'bracketShift', bracket, 'syntaxColors', 'buildPaneOps', 'foldSpansCached',
+              'delta_ns', 'copy_ns', 'index_ns', 'view_lines_ns')
+    groups = {}
+    for name in proven:
+        filename, work = name.rsplit('/', 1)
+        data = (root / 'fixtures' / filename).read_bytes()
+        rows, first = [], []
+        for rep in range(repetitions):
+            current = frame.validate((root / f'run-{rep}-1-{filename}-{work}.log').read_text(), work, len(data), data.count(b'\n') + 1, schema)
+            first.append(current[0]['total_ns'])
+            rows.extend(current)
+        groups[name] = dict(ms={key: stats([row[key] for row in rows]) for key in fields}, first_input_ms=stats(first))
+        if schema == 2:
+            groups[name]['call_counts'] = {key: sorted({row[key] for row in rows}) for key in ('providerEdit_calls', 'bracketUpdate_calls')}
+    return dict(head=info['head'], frame_schema=schema, groups=groups)
+
+
+def render_frames(report):
+    bracket = 'bracketUpdate' if report['frame_schema'] == 2 else 'bracketRefresh'
+    fields = ('edit_ns', 'appendPaneFrame', 'providerEdit', bracket, 'syntaxColors', 'copy_ns', 'index_ns')
+    lines = ['| 파일/입력 | 전체 p50/p95/최대 ms | 첫 입력 p50 ms | 편집 | 프레임 | Provider | 괄호 갱신 | 구문 색 | 본문 복사 | 줄 인덱스 |',
+             '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
+    for name, group in report['groups'].items():
+        total = group['ms']['total_ns']
+        values = '/'.join(f'{total[key]:.3f}' for key in ('p50', 'p95', 'max'))
+        lines.append('| ' + name + ' | ' + values + f" | {group['first_input_ms']['p50']:.3f} | " + ' | '.join(f"{group['ms'][key]['p50']:.3f}" for key in fields) + ' |')
+    return '\n'.join(lines) + '\n'
 
 
 def render(summary):
@@ -181,11 +220,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('root', type=Path)
     parser.add_argument('--repetitions', type=int, default=3)
+    parser.add_argument('--frame-details', action='store_true')
     args = parser.parse_args()
     result = summarize(args.root, args.repetitions)
     (args.root / 'provider-summary.json').write_text(json.dumps(result, indent=2) + '\n')
     (args.root / 'provider-summary.md').write_text(render(result))
     print(render(result), end='')
+    if args.frame_details:
+        report = frame_details(args.root, args.repetitions)
+        (args.root / 'provider-frame-summary.json').write_text(json.dumps(report, indent=2) + '\n')
+        (args.root / 'provider-frame-summary.md').write_text(render_frames(report))
+        print(render_frames(report), end='')
 
 
 if __name__ == '__main__':

@@ -2008,3 +2008,14 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 - `python3 -m unittest discover -s tools/palette-ime -p 'test_*.py'`: 순수 포인터 admission은 macOS에서 Swift로 컴파일하며 실제 이벤트는 전송하지 않는다.
 - `python3 -m unittest discover -s tools/address-ime -p 'test_*.py'`: fixture 위장·잘못된 선택과 focus·receipt 재사용을 거부한다.
 - 현재 실제 입력의 대기 상태와 범위는 [포인터 workflow 계획](plans/address-field-ime-pointer.md)을 따른다.
+
+
+### 괄호 구조 동일성 재사용
+
+`mise exec -- zig build test-editor-bracket-reposition -j2`와 `-Doptimize=ReleaseFast`는
+중립 33개(행동 5개)·제품 7개(행동 3개)의 선택/성공 수를 강제한다.
+전체 판정 기준과 색·짝·탐색, 현재 긴 줄 제외와 설정 변경, 늦은 불일치의 원자성,
+공유 뷰 입력·Undo/Redo 및 실제 resolver 호출 감소를 검사한다.
+격리 결함 주입과 짝지은 제품 frame 비교는 [계획](plans/editor-bracket-shape-reuse.md)을 따른다.
+전체 실측 분포·원시 자료·독립 검증 명령은 [비교 결과](../tools/editor-bracket-reposition/results.md)에 있다.
+물리 IME·Metal 픽셀·GPU present 증거를 대신하지 않는다.

@@ -6513,6 +6513,21 @@ pub fn build(b: *std.Build) void {
         macos_only_test_step.dependOn(&run_scm_cache_root_tests.step);
         test_macos_app_host_abi_step.dependOn(&run_scm_cache_root_after_shards.step);
     }
+    // 실제 native 목록과 중립 판정 재사용을 함께 검사하며, 빈 필터 통과를 허용하지 않는다.
+    const bracket_reposition_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"bracket reposition"} });
+    const run_bracket_reposition = b.addRunArtifact(bracket_reposition_tests);
+    run_bracket_reposition.setCwd(b.path("."));
+    run_bracket_reposition.addArg("--maru-expect-tests=7");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_bracket_reposition.addArg("--maru-expect-passed=7");
+    const bracket_reposition_step = b.step("test-editor-bracket-reposition", "Compare bracket coordinate reuse with full resolution");
+    bracket_reposition_step.dependOn(&run_bracket_reposition.step);
+    const bracket_reposition_pure = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{".test.bracket reposition"} });
+    const run_bracket_reposition_pure = b.addRunArtifact(bracket_reposition_pure);
+    run_bracket_reposition_pure.addArg("--maru-expect-tests=33");
+    run_bracket_reposition_pure.addArg("--maru-expect-passed=33");
+    bracket_reposition_step.dependOn(&run_bracket_reposition_pure.step);
+    test_step.dependOn(&run_bracket_reposition_pure.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_bracket_reposition.step);
     const edit_cost_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.EW0"} });
     const run_edit_cost = b.addRunArtifact(edit_cost_tests);
     run_edit_cost.setCwd(b.path("."));

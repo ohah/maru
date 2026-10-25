@@ -69,7 +69,7 @@ pub const State = struct {
     brackets: syntax.BracketIndex = .{},
     bracket_toks: std.ArrayList(bracket_colors.Token) = .empty,
     bracket_info: std.ArrayList(bracket_colors.Info) = .empty,
-    /// 판정의 작업 칸(짝 · 스택 — 괄호 수의 두 배).
+    /// 판정의 짝·스택 또는 재사용 검증의 새 좌표를 임시로 둔다(괄호 수의 두 배). 탐색 인덱스는 자기 항목을 소유한다.
     bracket_scratch: std.ArrayList(u32) = .empty,
     /// 같은 짝 판정으로 점프·강조를 찾는 목록. 색을 표시하지 않는 괄호도 여기에 남는다.
     bracket_navigation: editor_brackets.Index = .{},
@@ -374,6 +374,18 @@ fn prepareBrackets(self: *State, allocator: std.mem.Allocator, source: []const u
     if (!ready) return p.tree != null;
     if (self.bracket_resolved) |r| {
         if (r.version == self.brackets.version and r.independent == independent) return false;
+        // 판정은 중립이 맡고, native 목록은 값으로 전달한다. 동일성 확인 전에는 좌표를 게시하지 않는다.
+        var reuse = bracket_colors.Reposition.init(self.bracket_toks.items, self.bracket_scratch.items, source, self.brackets.leaves.items.len, r.independent, independent);
+        reuse.requireLengths(self.bracket_info.items.len, self.bracket_navigation.entries.items.len);
+        for (self.brackets.leaves.items) |l| {
+            reuse.feed(.{ .start = l.start, .len = l.len, .close_kind = l.close_kind, .open_kind = l.open_kind, .open = l.open, .colorized = l.colorized });
+            // 중립 판정이 실패를 확정하면 나머지를 비교해도 재사용할 수 없다.
+            if (reuse.failed) break;
+        }
+        if (reuse.finish()) {
+            self.bracket_resolved = .{ .version = self.brackets.version, .independent = independent };
+            return false;
+        }
     }
     self.bracket_resolved = null;
     try resolveBrackets(self, allocator, source, independent);
@@ -1561,4 +1573,76 @@ test "EW2 product 파싱 상한 밖이나 빈 문서에는 트리 사본을 남�
         try std.testing.expect(state.folds.tree == null);
         try std.testing.expectEqual(@as(usize, 0), state.folds.records.items.len);
     }
+}
+
+/// 새 좌표로 전체 재계산한 색·짝·점프를 모든 byte에서 대조한다.
+fn expectBracketRepositionOracle(state: *const State, source: []const u8, grammar: editor_language.Grammar, pool: bool) !void {
+    const a = std.testing.allocator;
+    var cold = openBudgeted(source, grammar, 0);
+    defer cold.deinit(a);
+    while (try prepareBrackets(&cold, a, source, pool, 0)) {}
+    try std.testing.expectEqualDeep(cold.bracket_toks.items, state.bracket_toks.items);
+    try std.testing.expectEqualDeep(cold.bracket_info.items, state.bracket_info.items);
+    const actual = bracketSource(state) orelse return error.MissingBracketSource;
+    const expected = bracketSource(&cold) orelse return error.MissingColdBracketSource;
+    for (0..source.len + 1) |pos| {
+        try std.testing.expectEqualDeep(expected.pairAt(pos), actual.pairAt(pos));
+        try std.testing.expectEqualDeep(expected.enclosing(pos), actual.enclosing(pos));
+        try std.testing.expectEqualDeep(expected.nextOpen(pos), actual.nextOpen(pos));
+        try std.testing.expectEqualDeep(editor_brackets.jumpTarget(expected, source.len, pos), editor_brackets.jumpTarget(actual, source.len, pos));
+    }
+}
+
+test "bracket reposition product coordinate edits skip actual resolver and match cold oracle" {
+    const a = std.testing.allocator;
+    const Case = struct { grammar: editor_language.Grammar, text: []const u8 };
+    const cases = [_]Case{
+        .{ .grammar = .zig, .text = "fn f() void { _ = .{ 1, 2 }; }\n" },
+        .{ .grammar = .typescript, .text = "const x = `${foo({a: [1]})}`;\n" },
+        .{ .grammar = .swift, .text = "func f() { let x = [1, 2] }\n" },
+        .{ .grammar = .markdown, .text = "# T\n\n[a](b)\n" },
+    };
+    for (cases) |c| for ([_]bool{ false, true }) |pool| {
+        var state = openBudgeted(c.text, c.grammar, 0);
+        defer state.deinit(a);
+        const before_initial = bracket_colors.resolutionCountForTest();
+        while (try prepareBrackets(&state, a, c.text, pool, 0)) {}
+        try std.testing.expectEqual(before_initial + 1, bracket_colors.resolutionCountForTest());
+        const shifted = try std.mem.concat(a, u8, &.{ "\n\n", c.text });
+        defer a.free(shifted);
+        var lines = try maru.session.editor.line_index.build(a, shifted);
+        defer lines.deinit();
+        onEditSpan(&state, a, shifted, .{ .start = 0, .old_end = 0, .new_end = 2 }, lines);
+        try std.testing.expect(bracketSource(&state) == null);
+        const calls = bracket_colors.resolutionCountForTest();
+        while (try prepareBrackets(&state, a, shifted, pool, 0)) {}
+        try std.testing.expectEqual(calls, bracket_colors.resolutionCountForTest());
+        try expectBracketRepositionOracle(&state, shifted, c.grammar, pool);
+        // 두 번의 편집을 판정 사이에 누적해도 단일 delta라는 가정 없이 처리한다.
+        reparse(&state, c.text);
+        reparse(&state, shifted);
+        const repeated = bracket_colors.resolutionCountForTest();
+        while (try prepareBrackets(&state, a, shifted, pool, 0)) {}
+        try std.testing.expectEqual(repeated, bracket_colors.resolutionCountForTest());
+        try expectBracketRepositionOracle(&state, shifted, c.grammar, pool);
+    };
+}
+
+test "bracket reposition product changed shape and pool resolve again" {
+    const a = std.testing.allocator;
+    const original = "fn f() void { _ = .{ (1) }; }\n";
+    var state = openBudgeted(original, .zig, 0);
+    defer state.deinit(a);
+    while (try prepareBrackets(&state, a, original, false, 0)) {}
+    const pool_calls = bracket_colors.resolutionCountForTest();
+    while (try prepareBrackets(&state, a, original, true, 0)) {}
+    try std.testing.expectEqual(pool_calls + 1, bracket_colors.resolutionCountForTest());
+    try expectBracketRepositionOracle(&state, original, .zig, true);
+    const changed = "fn f() void { _ = .{ ((1)) }; }\n";
+    reparse(&state, changed);
+    const calls = bracket_colors.resolutionCountForTest();
+    try finishBrackets(&state, a, changed);
+    try std.testing.expectEqual(calls + 1, bracket_colors.resolutionCountForTest());
+    try std.testing.expect(state.bracket_resolved.?.independent);
+    try expectBracketRepositionOracle(&state, changed, .zig, true);
 }

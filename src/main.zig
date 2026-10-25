@@ -11599,11 +11599,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             settings_host.changed = false;
         }
         window.horizontal_resize_active = divider_drag != null or sidebar_resize_drag != null;
-        window.input_overlay_open = settings_host.ownsInput() or terminal_popup.state.open or terminal_popup.swallow_left_up;
+        window.setInputOverlay(settings_host.ownsInput() or terminal_popup.state.open or terminal_popup.swallow_left_up, if (settings_host.ownsInput()) .retain_on_blur else .dismiss_on_blur);
         const window_events = window.poll();
         if (window.focus_loss_serial != terminal_popup_focus_serial) {
             terminal_popup.cancelCapture();
-            window.input_overlay_open = false;
+            settings_host.swallow_left_up = false;
+            settings_host.form.state.dragging = false;
+            settings_host.wheel_acc.reset();
+            window.setInputOverlay(settings_host.ownsInput(), .retain_on_blur);
             terminal_popup_focus_serial = window.focus_loss_serial;
         }
         for (window_events) |ev| switch (ev) {
@@ -11742,17 +11745,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 if (key_ev.event_type != .release and settings_binding == .app_action and settings_binding.app_action == .toggle_settings) {
                     terminal_popup.dismiss();
                     settings_host.toggle();
-                    window.input_overlay_open = settings_host.ownsInput();
+                    window.setInputOverlay(settings_host.ownsInput(), .retain_on_blur);
                     continue;
                 }
                 if (settings_host.form.state.open) {
                     settings_host.key(key_ev);
-                    window.input_overlay_open = settings_host.ownsInput();
+                    window.setInputOverlay(settings_host.ownsInput(), .retain_on_blur);
                     continue;
                 }
                 if (terminal_popup.state.open) {
                     const popup_request = terminal_popup.key(win32_keys.chromeKeyEvent(key_ev), key_ev.event_type == .release, clipboard_host.current(active_view == .terminal));
-                    window.input_overlay_open = settings_host.ownsInput() or terminal_popup.state.open or terminal_popup.swallow_left_up;
+                    window.setInputOverlay(settings_host.ownsInput() or terminal_popup.state.open or terminal_popup.swallow_left_up, if (settings_host.ownsInput()) .retain_on_blur else .dismiss_on_blur);
                     if (popup_request) |request| {
                         terminal_menu_actions += @intFromBool(try clipboard_host.perform(request, active_view == .terminal));
                     }
@@ -12035,7 +12038,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         .button = switch (m.kind) { .left_down, .left_up, .moved => .left, else => .other },
                         .x_px = @floatFromInt(m.x_px), .y_px = @floatFromInt(m.y_px),
                     }, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w, &chrome_tokens), &chrome_tokens);
-                    window.input_overlay_open = settings_host.ownsInput();
+                    window.setInputOverlay(settings_host.ownsInput(), .retain_on_blur);
                     continue;
                 }
                 terminal_popup.reconcile(clipboard_host.current(active_view == .terminal), confirm_state.open or file_notice.open or choice_notice != null or pending_save != null or file_close_waiting or initial_open.job != null or close_requested);
@@ -12056,7 +12059,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         },
                         .x_px = @floatFromInt(m.x_px), .y_px = @floatFromInt(m.y_px),
                     }, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w, &chrome_tokens), clipboard_host.current(active_view == .terminal));
-                    window.input_overlay_open = settings_host.ownsInput() or terminal_popup.state.open or terminal_popup.swallow_left_up;
+                    window.setInputOverlay(settings_host.ownsInput() or terminal_popup.state.open or terminal_popup.swallow_left_up, if (settings_host.ownsInput()) .retain_on_blur else .dismiss_on_blur);
                     if (popup_result.request) |request| terminal_menu_actions += @intFromBool(try clipboard_host.perform(request, active_view == .terminal));
                     if (popup_result.consumed) continue;
                 }
@@ -12555,7 +12558,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             if (r == .view_options and settings_gear_release) {
                                 terminal_popup.dismiss();
                                 settings_host.toggle();
-                                window.input_overlay_open = settings_host.ownsInput();
+                                window.setInputOverlay(settings_host.ownsInput(), .retain_on_blur);
                                 continue;
                             }
                             if (r == .new_workspace) queued_new_terms += 1;
@@ -13332,7 +13335,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         },
                         .menu => {
                             terminal_popup.show(active.id, m.x_px, m.y_px);
-                            window.input_overlay_open = true;
+                            window.setInputOverlay(true, .dismiss_on_blur);
                             dragging = false;
                             terminal_menus_opened += 1;
                         },
@@ -16107,6 +16110,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     try stdout.print("app_actions={d} keys_ignored={d}\n", .{ app_actions, keys_ignored });
     try stdout.print("preedit_updates={d} failures={d} max_bytes={d} ime_caret_updates={d}\n", .{ preedit_updates, preedit_failures, preedit_max_bytes, ime_caret_updates });
     try stdout.print("pastes={d} paste_bytes={d} bracketed={d} blocked={d} paste_errors={d}\n", .{ paste_out.pastes, paste_out.paste_bytes, paste_out.bracketed, paste_out.blocked, paste_out.errors });
+    try stdout.print("window_focus_losses={d} retained_overlay_blurs={d} dismissed_overlay_blurs={d}\n", .{ window.focus_loss_serial, window.retained_overlay_blurs, window.dismissed_overlay_blurs });
     try stdout.print("settings_wheel_events={d} settings_scroll_moves={d} settings_scroll_peak={d}\n", .{ settings_host.wheel_events, settings_host.scroll_moves, settings_host.scroll_peak });
     try stdout.print("settings_saves={d} settings_save_errors={d} settings_request_errors={d} settings_previews={d} settings_rollbacks={d}\n", .{ settings_host.saves, settings_host.save_errors, settings_host.request_errors, settings_host.previews, settings_host.rollbacks });
     try stdout.print("copies={d} copy_bytes={d} right_click_pastes={d} right_click_menus={d} menu_actions={d} menu_cells_peak={d} menu_draw_failures={d}\n", .{ copies, copy_bytes, right_click_pastes, terminal_menus_opened, terminal_menu_actions, terminal_menu_cells_peak, terminal_menu_draw_failures });
@@ -22234,4 +22238,42 @@ test "Terminal clipboard popup client coordinates map to rendered terminal after
         try std.testing.expectEqualDeep(case.relative, relative);
         try std.testing.expectEqualDeep(case.cell, maru.session.mouse_coordinates.cellFromPixel(relative.x, relative.y, 8, 19, 80, 24).?);
     }
+}
+
+test "Windows settings focus transient menu dismisses immediately" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator };
+    w.setInputOverlay(true, .dismiss_on_blur); w.noteFocusLoss();
+    try std.testing.expect(!w.input_overlay_open);
+    try std.testing.expectEqual(@as(u64, 1), w.focus_loss_serial);
+}
+test "Windows settings focus retained modal still owns caption and resize" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator, .titlebar_strip_px = 38, .titlebar_client_left_px = 180, .caption_buttons_px = 138, .horizontal_resize_rect = .{ .left = 390, .top = 38, .right = 410, .bottom = 680 } };
+    w.setInputOverlay(true, .retain_on_blur); w.noteFocusLoss(); w.noteFocusLoss();
+    const rect: @TypeOf(w.windowRect()) = .{ .left = 0, .top = 0, .right = 1000, .bottom = 700 };
+    try std.testing.expect(w.input_overlay_open);
+    try std.testing.expectEqual(@as(isize, 1), w.hitTestFrame(rect, 500, 16));
+    try std.testing.expect(!w.wantsHorizontalCursor(400, 300, true));
+    try std.testing.expectEqual(@as(u64, 2), w.focus_loss_serial);
+}
+test "Windows settings focus closing clears retained policy" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator };
+    w.setInputOverlay(true, .retain_on_blur); w.setInputOverlay(false, .retain_on_blur);
+    try std.testing.expectEqual(win32_window.OverlayFocusPolicy.dismiss_on_blur, w.overlay_focus_policy);
+    try std.testing.expect(!w.input_overlay_open);
+}
+test "Windows settings focus switching to a menu replaces old policy" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator };
+    w.setInputOverlay(true, .retain_on_blur); w.setInputOverlay(true, .dismiss_on_blur); w.noteFocusLoss();
+    try std.testing.expect(!w.input_overlay_open);
+}
+test "Windows settings focus loss generation wraps without reviving overlay" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator, .focus_loss_serial = std.math.maxInt(u64) };
+    w.noteFocusLoss();
+    try std.testing.expectEqual(@as(u64, 0), w.focus_loss_serial);
+    try std.testing.expect(!w.input_overlay_open);
 }

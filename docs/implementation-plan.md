@@ -1725,6 +1725,7 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [주소창 IME 범위 문맥](plans/address-field-ime.md): 기존 TextField를 유지한 UTF-16 projection 연결과 중간 선택 대체. 모델·호스트·적대적 검사와 실제 후보창 5회 PNG/OCR·한자 선택·터미널 복귀 검증 완료.
 - [이름 변경·다른 이름으로 저장 IME 문맥](plans/inline-rename-ime.md): NFD 보존·UTF-16 범위 교체·후보 Return 격리와 실제 후보창 PNG/OCR 검증. Save As 파일 생성 GUI는 별도 검증 범위다.
 - [설정 검색창 IME 문맥](plans/settings-search-ime.md): 고정 64/32바이트·확정 검색 필터를 유지하는 범위 projection과 후보 Enter 격리. 실제 후보창 5회 PNG/OCR·필터 보존·터미널 복귀 통과, PR #4588 CI 대기.
+- [찾기·바꾸기 IME 문맥](plans/find-replace-ime.md): 두 OverlayInput의 범위 재변환·후보 키 소비와 공유 view/diff 상태 이동 경계. 조사·실패 재현 단계.
 
 
 - [주소창 실제 포인터 workflow](plans/address-field-ime-pointer.md): fixture의 선택·focus 이동을 실제 클릭·드래그/Shift+Right·Escape·다른 pane 클릭으로 대체하고 후보창 5회 PNG/OCR·한자 선택·터미널 복귀를 검증했다.

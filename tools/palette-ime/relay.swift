@@ -66,7 +66,9 @@ do {
         let flags = request["flags"] as! UInt64
         let addressSelection = state["address_pointer_mode"] as? Bool == true && code == 124 && flags == CGEventFlags.maskShift.rawValue &&
             (UInt64(state["generation"] as? String ?? "") ?? 0) > (1 << 62) && (UInt64(state["generation"] as? String ?? "") ?? 0) < (1 << 63)
-        try require(([UInt16(5), 40, 1, 36, 53, 44].contains(code) && (flags == 0 || (code == 36 && flags == CGEventFlags.maskAlternate.rawValue))) || addressSelection, "unbounded_request")
+        let findTab = state["find_mode"] as? Bool == true && code == 48 && flags == 0 &&
+            (UInt64(state["generation"] as? String ?? "") ?? 0) > (1 << 59) && (UInt64(state["generation"] as? String ?? "") ?? 0) < (1 << 60)
+        try require(([UInt16(5), 40, 1, 36, 53, 44].contains(code) && (flags == 0 || (code == 36 && flags == CGEventFlags.maskAlternate.rawValue))) || addressSelection || findTab, "unbounded_request")
         if request["korean"] as? Bool == true {
             try require(state["view_source"] as? String == SessionHostInputSourcePolicy.korean2SetSourceID &&
                 SessionHostInputSourcePolicy.currentSourceID() == SessionHostInputSourcePolicy.korean2SetSourceID, "source_changed")

@@ -354,7 +354,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 235: address TextField native IME ownership and transaction projection.
 // 236: shared TextField IME routing and rename owner/snapshot storage.
 // ABI 237: settings search owns bounded IME snapshots and a pinned native owner.
-pub const abi_version: u32 = 237;
+// ABI 238: movable Find/Replace contexts and a separately owned key snapshot.
+pub const abi_version: u32 = 238;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -7761,6 +7762,11 @@ pub const AppSession = struct {
     address_ime_generation: u64 = 1,
     address_ime_owner: ?u64 = null,
     settings_ime_owner: ?u64 = null,
+    find_ime_sequence: u64 = 1,
+    find_ime_observed: ?@import("app_session/find_ime.zig").Owner = null,
+    find_ime_owner: ?u64 = null,
+    find_ime_captured: ?@import("app_session/find_ime.zig").Owner = null,
+    find_ime_transaction: chrome.components.find.IMETransaction = .{},
     address_ime_surface: ?u64 = null,
     addr_edit: ?u64 = null,
     addr_field: chrome.components.text_field.TextField = .{},
@@ -16752,14 +16758,7 @@ pub const AppSession = struct {
             },
             // **확정도 포커스를 따라간다.** 그리고 **바꿀 문자열은 재검색을 부르지 않는다** —
             // 검색어가 그대로이므로 다시 돌리면 `current`가 0으로 리셋돼 고른 매치를 잃는다.
-            .find => if (self.chrome_host.find.focused().commitPreedit(self.allocator)) {
-                if (self.chrome_host.find.replaceActive() and self.chrome_host.find.focus == .replace) {
-                    find_ops.replacementTextChanged(self);
-                } else {
-                    self.recomputeFind(); // 검색어가 바뀜
-                    self.metal_dirty = true;
-                }
-            },
+            .find => return @import("app_session/find_ime.zig").commitAll(self),
             .palette => return @import("app_session/palette_ime.zig").commitAll(self),
             .symbol_picker => if (self.chrome_host.symbol_picker.input.commitPreedit(self.allocator)) {
                 editor_ops.recomputeSymbolPicker(self); // 필터가 바뀜(§7.5)
@@ -24986,6 +24985,7 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
+        @import("app_session/find_ime.zig").finish(self);
         self.inspector.deinit(self.allocator);
         @import("app_session/editor/save/as.zig").windowClosing(self);
         @import("app_session/editor/save/close.zig").cancel(self);
@@ -102270,4 +102270,123 @@ test "settings search IME host filter OOM restores marked preview and query" {
     try std.testing.expectEqualStrings("한", state.searchPreedit());
     try std.testing.expectEqualStrings("한", state.searchIMECurrent().?.text());
     try std.testing.expectEqual(count, state.count);
+}
+
+test "find input IME host candidate Return does not navigate" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initRenameCaretTestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const term = try editor_ops.openUntitledInActivePane(self);
+    try std.testing.expect(editor_ops.insertText(self, term, "한 한"));
+    self.dispatchAppAction(.toggle_find);
+    self.imeBegin();
+    self.imeMarked("한");
+    self.imeInsert("한");
+    self.imeEnd(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqualStrings("한", self.chrome_host.find.input.query.items);
+    try std.testing.expectEqual(@as(usize, 2), self.chrome_host.find.match_count);
+    try std.testing.expectEqual(@as(usize, 0), self.chrome_host.find.current);
+}
+
+test "find input IME host native candidate Return keeps first match" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initRenameCaretTestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const term = try editor_ops.openUntitledInActivePane(self);
+    try std.testing.expect(editor_ops.insertText(self, term, "한 한"));
+    self.dispatchAppAction(.toggle_find);
+    const native = @import("app_session/chrome_ime.zig");
+    self.imeBegin();
+    try std.testing.expect(native.marked(self, "한", .{ .location = 1, .length = 0 }, null));
+    try std.testing.expectEqualStrings("", self.chrome_host.find.input.query.items);
+    try std.testing.expect(native.insert(self, "한", null));
+    self.imeEnd(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqualStrings("한", self.chrome_host.find.input.query.items);
+    try std.testing.expectEqual(@as(usize, 2), self.chrome_host.find.match_count);
+    try std.testing.expectEqual(@as(usize, 0), self.chrome_host.find.current);
+    self.imeBegin();
+    self.imeEnd(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqual(@as(usize, 1), self.chrome_host.find.current);
+}
+
+test "find input IME host stale field callback cannot edit replacement" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initRenameCaretTestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    _ = try editor_ops.openUntitledInActivePane(self);
+    self.dispatchAppAction(.toggle_find);
+    const native = @import("app_session/chrome_ime.zig");
+    self.chrome_host.find.target = .editor; // frame metadata for this headless fixture
+    self.chrome_host.find.replace_open = true;
+    self.imeBegin();
+    const before = native.generation(self).?;
+    self.chrome_host.find.setFieldFocus(.replace);
+    try std.testing.expect(native.insert(self, "stale", null));
+    self.imeEnd(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqualStrings("", self.chrome_host.find.replace.query.items);
+    try std.testing.expect(native.generation(self).? != before);
+}
+
+test "find input IME host hide reopen invalidates old key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initRenameCaretTestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    _ = try editor_ops.openUntitledInActivePane(self);
+    self.dispatchAppAction(.toggle_find);
+    self.imeBegin();
+    self.chrome_host.find.hide();
+    self.chrome_host.find.show();
+    try std.testing.expect(@import("app_session/chrome_ime.zig").insert(self, "stale", null));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("", self.chrome_host.find.input.query.items);
+}
+
+test "find input IME host cancelled reconversion preserves selected match" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initRenameCaretTestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const term = try editor_ops.openUntitledInActivePane(self);
+    try std.testing.expect(editor_ops.insertText(self, term, "한 한"));
+    self.dispatchAppAction(.toggle_find);
+    const native = @import("app_session/chrome_ime.zig");
+    try std.testing.expect(native.insert(self, "한", null));
+    self.chrome_host.find.current = 1;
+    self.imeBegin();
+    try std.testing.expect(native.marked(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 0, .length = 1 }));
+    try std.testing.expect(native.marked(self, "", .{ .location = 0, .length = 0 }, null));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("한", self.chrome_host.find.input.query.items);
+    try std.testing.expectEqual(@as(usize, 1), self.chrome_host.find.current);
+}
+
+test "find input IME host replacement candidate does not replace document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initRenameCaretTestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const term = try editor_ops.openUntitledInActivePane(self);
+    try std.testing.expect(editor_ops.insertText(self, term, "한 한"));
+    self.dispatchAppAction(.toggle_find);
+    const native = @import("app_session/chrome_ime.zig");
+    try std.testing.expect(native.insert(self, "한", null));
+    self.chrome_host.find.target = .editor; // frame metadata for this headless fixture
+    self.chrome_host.find.replace_open = true;
+    self.chrome_host.find.setFieldFocus(.replace);
+    self.imeBegin();
+    try std.testing.expect(native.marked(self, "韓", .{ .location = 1, .length = 0 }, null));
+    try std.testing.expect(native.insert(self, "韓", null));
+    self.imeEnd(.{ .key = .enter, .modifiers = .{ .command = true } });
+    try std.testing.expectEqualStrings("韓", self.chrome_host.find.replace.query.items);
+    try std.testing.expectEqualStrings("한 한", term.rt.editorDocument().opened.?.file.content);
 }

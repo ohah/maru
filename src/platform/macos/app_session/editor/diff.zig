@@ -3903,7 +3903,7 @@ test "DCOL10b: 검색 막대의 패딩 띠도 막대다 — 누르면 소비하�
     try testing.expectEqual(other, h.find.diff_side.?);
     try testing.expect(h.find.input_focused);
     // ② 주 막대의 띠 — 포커스가 풀린 뒤 누르면 다시 받는다.
-    h.find.input_focused = false;
+    h.find.setInputFocused(false);
     find_ops.syncDiffFind(fx.session);
     const pb = Band.find(&h.find, p) orelse return error.NoPrimaryBand;
     try testing.expectEqual(find_ops.DiffPointer.consumed, find_ops.diffFindPointer(fx.session, 1, 0, pb[0], pb[1]));

@@ -16,7 +16,7 @@ func verify() throws {
     try require(data.count <= 16 * 1024, "artifact size")
     let artifact = try JSONSerialization.jsonObject(with: data) as! [String: Any]
     let schema = artifact["schema"] as? String
-    let address = schema == "maru.address-ime-candidate.v1" || schema == "maru.rename-ime-candidate.v1" || schema == "maru.settings-ime-candidate.v1"
+    let address = schema == "maru.address-ime-candidate.v1" || schema == "maru.rename-ime-candidate.v1" || schema == "maru.settings-ime-candidate.v1" || schema == "maru.find-ime-candidate.v1"
     let search = schema == "maru.session-dock-ime-candidate-observation.v1"
     try require(schema == "maru.session-host-cr6d-ime-candidate-observation.v1" ||
                 schema == "maru.session-host-cr6d-ime-candidate-observation.v2" || schema == "maru.editor-ime-wrapped-candidate.v1" || search || address, "schema")

@@ -74,13 +74,14 @@ pub fn syncViewFind(self: *AppSession) void {
     const active = activeEditorTerm(self);
     const wanted: u64 = if (active) |t| (if (t.rt.editor_view_find_owned and t.rt.editor_diff == null) t.surfaceId() else 0) else 0;
     if (wanted == self.editor_view_find_owner) return;
+    @import("find_ime.zig").beforeTransfer(self);
     if (self.editor_view_find_owner != 0) {
         if (term_ops.termBySurfaceId(self, self.editor_view_find_owner)) |old| {
-            if (self.chrome_host.find.input.commitPreedit(self.allocator)) {
+            if (self.chrome_host.find.commitField(self.allocator, .find)) {
                 self.chrome_host.find.current = 0;
                 recomputeEditorFind(self, old);
             }
-            _ = self.chrome_host.find.replace.commitPreedit(self.allocator);
+            _ = self.chrome_host.find.commitField(self.allocator, .replace);
             swapViewSlot(self, &old.rt.editor_view_find);
         } else {
             // Its active slot outlived the closed Term; release it before restoring fallback.
@@ -116,6 +117,9 @@ pub fn prepareSharedViewFind(self: *AppSession, source: *Term) error{OutOfMemory
     // Composition belongs only to the source slot, never to legacy history.
     slot.state.input = .{};
     slot.state.replace = .{};
+    slot.state.ime_input = .{};
+    slot.state.ime_replace = .{};
+    slot.state.ime_identity = 0;
     errdefer slot.deinit(self.allocator);
     try slot.state.input.query.appendSlice(self.allocator, self.chrome_host.find.input.query.items);
     try slot.state.replace.query.appendSlice(self.allocator, self.chrome_host.find.replace.query.items);
@@ -273,7 +277,7 @@ pub fn diffCaretSideChanged(self: *AppSession, term: *Term, was: editor_ops.Diff
     if (self.chrome_host.diff_find_source == term.surfaceId()) {
         const side = if (term.rt.editor_diff_selection) |s| s.side else find_ui.DiffSide.left;
         if (side != self.chrome_host.find.diff_side) activateDiffSide(self, term, side);
-        self.chrome_host.find.input_focused = false;
+        self.chrome_host.find.setInputFocused(false);
         return;
     }
     if (self.chrome_host.find.diff_side != null) return;
@@ -347,7 +351,7 @@ pub fn toggleFindReplace(self: *AppSession) void {
     if (!self.chrome_host.find.open) toggleFind(self);
     if (!self.chrome_host.find.open) return; // 토글이 닫는 쪽이었다면 그대로 둔다
     self.chrome_host.find.replace_open = true;
-    self.chrome_host.find.focus = .replace; // 바꿀 문자열을 치러 온 것이다
+    self.chrome_host.find.setFieldFocus(.replace); // 바꿀 문자열을 치러 온 것이다
     self.metal_dirty = true;
 }
 
@@ -694,8 +698,9 @@ fn activateDiffSide(self: *AppSession, term: *Term, side: find_ui.DiffSide) void
     const h = &self.chrome_host;
     if (h.find.diff_side == side) return;
     // Complete composition in its original owner before changing the active slot.
-    if (h.find.input_focused and h.find.input.commitPreedit(self.allocator)) recomputeEditorFind(self, term);
-    h.find.input_focused = false;
+    @import("find_ime.zig").beforeTransfer(self);
+    if (h.find.input_focused and h.find.commitField(self.allocator, .find)) recomputeEditorFind(self, term);
+    h.find.setInputFocused(false);
     std.mem.swap(find_ui.State, &h.find, &h.find_secondary);
     std.mem.swap(std.ArrayList(maru.session.editor.find.Match), &self.editor_find_matches, &term.rt.editor_diff_find_matches);
     self.editor_find_source = term.surfaceId();
@@ -727,8 +732,8 @@ fn openDiffFind(self: *AppSession, term: *Term) void {
     h.palette.hide();
     // Reopening a column focuses its retained query; Cmd+F never toggles it shut.
     h.find.open = true;
-    h.find.input_focused = true;
-    h.find_secondary.input_focused = false;
+    h.find.setInputFocused(true);
+    h.find_secondary.setInputFocused(false);
     h.find.replace_open = false;
     h.find.in_selection = null;
     self.find_selection_at_open = null;
@@ -765,7 +770,7 @@ pub fn syncDiffFind(self: *AppSession) void {
     h.find.diff_side_shown = h.find.diff_side;
     h.find_secondary.diff_side_shown = h.find_secondary.diff_side;
     // draw·hit·IME가 공유하는 판정으로 보이지 않는 입력 포커스를 해제한다.
-    if (h.find.input_focused and find_ui.caretRect(&h.find, self.buildChromeProps()) == null) h.find.input_focused = false;
+    if (h.find.input_focused and find_ui.caretRect(&h.find, self.buildChromeProps()) == null) h.find.setInputFocused(false);
 }
 
 pub const DiffPointer = enum { none, body, consumed };
@@ -786,15 +791,16 @@ pub fn diffFindPointer(self: *AppSession, kind: i32, button: i32, x: f64, y: f64
     if (secondary_hit or find_ui.visibleContains(&h.find, p, x, y)) {
         if (kind == 1 and button == 0) {
             if (secondary_hit) activateDiffSide(self, term, h.find_secondary.diff_side.?);
-            h.find.input_focused = true;
+            h.find.setInputFocused(true);
             if (find_ui.regexButtonHit(&h.find, p, x, y)) toggleFindRegex(self);
             self.metal_dirty = true;
         }
         return .consumed;
     }
     if (kind == 1) {
-        if (h.find.input_focused and h.find.input.commitPreedit(self.allocator)) recomputeEditorFind(self, term);
-        h.find.input_focused = false;
+        @import("find_ime.zig").beforeTransfer(self);
+        if (h.find.input_focused and h.find.commitField(self.allocator, .find)) recomputeEditorFind(self, term);
+        h.find.setInputFocused(false);
         self.metal_dirty = true;
     }
     return .body;
@@ -810,8 +816,8 @@ pub fn unfocusedFindPointer(self: *AppSession, kind: i32, button: i32, x: f64, y
     if (kind != 1 and gestureInProgress(self)) return false; // 다른 곳에서 시작한 드래그의 이동·뗌은 그 주인 것이다
     if (!find_ui.visibleContains(&h.find, self.buildChromeProps(), x, y)) return false;
     if (kind == 1 and button == 0) {
-        h.find.input_focused = true;
-        h.find.focus = find_ui.focusAt(&h.find, self.buildChromeProps(), y); // 바꾸기 줄을 눌렀으면 바꾸기 입력이
+        h.find.setInputFocused(true);
+        h.find.setFieldFocus(find_ui.focusAt(&h.find, self.buildChromeProps(), y)); // 바꾸기 줄을 눌렀으면 바꾸기 입력이
         self.metal_dirty = true;
     }
     return true;
@@ -833,7 +839,7 @@ pub fn refreshDiffFind(self: *AppSession, term: *Term) void {
     recomputeEditorFind(self, term);
     std.mem.swap(find_ui.State, &self.chrome_host.find, &self.chrome_host.find_secondary);
     std.mem.swap(std.ArrayList(maru.session.editor.find.Match), &self.editor_find_matches, &term.rt.editor_diff_find_matches);
-    self.chrome_host.find.input_focused = focused;
+    self.chrome_host.find.setInputFocused(focused);
 }
 
 /// Replacement edits clear only replacement diagnostics; an unchanged invalid pattern stays visible.

@@ -2329,6 +2329,17 @@ pub fn build(b: *std.Build) void {
     const address_field_ime_step = b.step("test-address-field-ime", "Validate address-field native IME ranges and pinned owner lifetime");
     address_field_ime_step.dependOn(&run_address_ime.step);
 
+    const find_input_ime_step = b.step("test-find-replace-ime", "Validate find/replace IME commit and view ownership boundaries");
+    const find_input_ime_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"find input IME host"},
+    });
+    const run_find_input_ime = b.addRunArtifact(find_input_ime_tests);
+    run_find_input_ime.setCwd(b.path("."));
+    find_input_ime_step.dependOn(&run_find_input_ime.step);
+    run_find_input_ime.addArg("--maru-expect-tests=11");
+    if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_find_input_ime.step);
+
     const settings_search_ime_step = b.step("test-settings-search-ime", "Validate bounded settings-search IME ranges and owner lifetime");
     const settings_search_ime_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
@@ -4883,6 +4894,14 @@ pub fn build(b: *std.Build) void {
     const inline_input_step = b.step("test-inline-text-input", "Validate bounded UTF-16 inline IME projections and failure atomicity");
     const owned_inline_step = b.step("test-inline-text-input-owned", "Validate dynamic IME storage, deep snapshots and allocation failure");
     inline for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
+        const find_model_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
+            .filters = &.{"find input IME"},
+        });
+        const run_find_model = b.addRunArtifact(find_model_tests);
+        run_find_model.addArg("--maru-expect-tests=24");
+        find_input_ime_step.dependOn(&run_find_model.step);
+        test_step.dependOn(&run_find_model.step);
         const settings_search_model_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
             .filters = &.{"settings search IME"},

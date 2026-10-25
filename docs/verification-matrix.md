@@ -5823,3 +5823,15 @@ inline-caret mode requires it to disappear while numeric edit requests remain ac
   편집 caret이 초기 caret에서 측정한 셀 폭의 정확히 두 배만 이동해야 한다. config 불변·셸 입력 0과
   정상 종료도 유지해야 한다. 이전 바이너리 대조와 결합해 기본 조합창 중복을 따로 판정한다.
 - OS 입력 주입에 따른 설정 입력란의 조합/후보 검증이다. 물리 키보드나 전체 입력 영역의 IME 완료로 세지 않는다.
+
+### Windows 설정 조합 중 닫기
+
+`tools/windows/check-settings-ime-transition.py --state <새 격리 앱 JSON> --binary <복사한 exe 메타 JSON> --output <결과 JSON> --case <경로>`를 사용한다.
+각 경로는 새 프로세스에서 실행한다. `baseline`, `click`, `fast`, `chord`, `cancel` 다섯 경로는
+각각 조합 없는 비교, 조합 중 바깥 클릭, 클릭·공백의 단일 입력 묶음, 실제 `Ctrl+,`,
+실제 Escape로 조합 취소 후 `Ctrl+,`로 닫기를 검사한다.
+조합 경로는 한국어 변환 상태와 두 단계의 필드 픽셀 변화, 확정 전 caret 위치를 먼저 확인한다.
+닫은 뒤 의도한 공백만 보내고 Enter는 보내지 않는다. 정상 native 종료, config 바이트 불변,
+`keys_to_shell=1`·`bytes_to_shell=1`을 요구한다. 실행 파일/PID/창 클래스와 foreground/keyboard focus를 검증한다.
+다섯 경로의 성공은 해당 설정 필드에서 시험한 OS 입력 주입의 증거이며, 물리 장치나 다른 편집 대상의
+조합 소유권 전환 완료를 뜻하지 않는다.

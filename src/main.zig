@@ -5,6 +5,8 @@ const maru = @import("maru");
 const ts = @import("syntax");
 const win_sidebar = @import("platform/windows/chrome/sidebar.zig");
 const win_dock = @import("platform/windows/chrome/dock.zig");
+const terminal_clipboard_menu = @import("app/terminal_clipboard_menu.zig");
+const win_clipboard_host = @import("platform/windows/terminal/clipboard.zig");
 const archive_reveal = if (builtin.os.tag == .windows) @import("platform/windows/agents/reveal.zig") else struct {};
 /// Shared archive worker; the facade keeps both hosts on one owner type.
 const agent_archive_backend = maru.app.agent_session_archive_backend;
@@ -48,6 +50,8 @@ const agent_surface = if (@import("builtin").os.tag == .windows) @import("platfo
 // (실측: 추가 직후 `zig build test` 출력에 `win32_scm_surface` 가 0 회). 이 저장소가 §2m.18 에서
 // 같은 것을 밟았다.
 test {
+    _ = terminal_clipboard_menu;
+    _ = win_clipboard_host;
     // Cross-target tests must compile the native adapter as well as the common worker.
     if (comptime builtin.os.tag == .macos) _ = @import("platform/macos/file_tree_remote.zig").transport;
     _ = editor_document;
@@ -1140,69 +1144,8 @@ fn runWin32FrameSmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.
 }
 
 /// 붙여넣기 한 번의 결과. **갈래별로 센다** — 합치면 "막혔는데 붙은 줄 알았다"를 못 가른다.
-const PasteOutcome = struct {
-    pastes: usize = 0,
-    paste_bytes: usize = 0,
-    bracketed: usize = 0,
-    blocked: usize = 0,
-    errors: usize = 0,
-};
-
-/// 클립보드를 읽어 활성 표면에 붙여넣는다 — W7.4b 의 규칙 그대로다.
-///
-/// **화음(`Ctrl+Shift+V`)과 우클릭이 이 함수를 공유한다.** 두 자리에 같은 규칙을 복사하면 한쪽만 고쳐져
-/// 어긋난다 — 그리고 그 규칙이 하필 **보안 규칙**이다(raw 바이트를 셸에 보내지 않는다: bracketed 래핑·
-/// 개행 정규화·ESC 치환. 클립보드의 `\x1b[201~` 이 래핑을 빠져나오면 명령이 실행된다).
-fn pasteClipboardIntoActive(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    hwnd: ?*anyopaque,
-    app_window: *maru.session.window.AppWindow,
-    runtime: *maru.app.SurfaceRuntime,
-    stderr: *std.Io.Writer,
-    paste_protection: bool,
-    bracketed_paste_is_safe: bool,
-    out: *PasteOutcome,
-) !void {
-    const maybe = win32_clipboard.read(allocator, hwnd) catch |err| {
-        try stderr.print("  warning: clipboard read failed({s}, Win32 error {d})\n", .{ @errorName(err), win32_clipboard.last_error });
-        out.errors += 1;
-        return;
-    };
-    const text = maybe orelse return;
-    defer allocator.free(text);
-
-    var needs_confirm = false;
-    var bracketed = false;
-    if (app_window.active()) |active| {
-        // 판정과 bracketed 읽기만 락 안에서 — 인코딩(할당·복사)은 밖에서 한다(macOS `submitPaste` 순서).
-        active.lockCore(io);
-        needs_confirm = active.core.pasteNeedsConfirmation(text, paste_protection, bracketed_paste_is_safe);
-        bracketed = active.core.bracketedPasteEnabled();
-        active.unlockCore(io);
-    }
-    if (needs_confirm) {
-        // **확인 모달이 없으면 붙여넣지 않는다.** 모달이 없다고 보호를 건너뛰면 위험한 붙여넣기가
-        // 조용히 실행된다 — 거절하고 세는 편이 맞다(확인 UI 는 W8).
-        try stderr.writeAll("  paste held: the content is risky (the confirm UI is W8). Nothing was pasted\n");
-        out.blocked += 1;
-        return;
-    }
-    const encoded = maru.terminal.encodePasteWith(bracketed, allocator, text) catch |err| {
-        try stderr.print("  warning: paste encoding failed({s})\n", .{@errorName(err)});
-        out.errors += 1;
-        return;
-    };
-    defer allocator.free(encoded);
-    maru.app.host.sendInputToActiveSurface(app_window, runtime, .{ .bytes = encoded }) catch |err| {
-        try stderr.print("  warning: paste send failed({s})\n", .{@errorName(err)});
-        out.errors += 1;
-        return;
-    };
-    out.pastes += 1;
-    out.paste_bytes += encoded.len;
-    if (bracketed) out.bracketed += 1;
-}
+const PasteOutcome = win_clipboard_host.PasteOutcome;
+const pasteClipboardIntoActive = win_clipboard_host.pasteIntoActive;
 
 /// `maru win32-clipboard-smoke` — W7.4b. **OS 클립보드를 actual로 왕복시킨다.**
 ///
@@ -7378,6 +7321,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     //
     // Windows 에 없던 것은 셋이다: 그리는 배선, 모달이 떠 있는 동안의 **입력 주인**, 그리고 보류 상태.
     var confirm_state: maru.chrome.components.confirm.State = .{};
+    var terminal_popup: terminal_clipboard_menu.Popup = .{};
+    var terminal_popup_focus_serial: u64 = 0;
+    var terminal_popup_frame: ?maru.renderer.RenderFrame = null;
+    defer if (terminal_popup_frame) |*frame| frame.deinit(allocator);
+    var terminal_menu_actions: usize = 0;
+    var terminal_menu_cells_peak: usize = 0;
+    var terminal_menu_draw_failures: usize = 0;
     var file_notice: maru.chrome.components.notice.State = .{};
     var file_notice_frame: ?maru.renderer.RenderFrame = null;
     defer if (file_notice_frame) |*f| f.deinit(allocator);
@@ -8322,7 +8272,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var copies: usize = 0;
     var copy_bytes: usize = 0;
     var right_click_pastes: usize = 0;
-    var right_click_menus_unimplemented: usize = 0;
+    var terminal_menus_opened: usize = 0;
     var capture_losses: usize = 0;
     var dock_pointer_events: usize = 0;
     var dock_row_clicks: usize = 0;
@@ -8377,6 +8327,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 클립보드 탈취를 막는 사용자 결정 — `config/theme.zig` `Osc52Config`).
     const osc52_read_policy: maru.config.theme.Osc52Read = cfg.osc52.read;
     var clipboard_errors: usize = 0;
+    const clipboard_host: win_clipboard_host.Host = .{ .allocator = allocator, .io = io, .hwnd = window.hwnd, .app_window = &app_window, .runtime = &runtime, .stderr = stderr, .paste_protection = paste_protection, .bracketed_paste_is_safe = bracketed_paste_is_safe, .paste_out = &paste_out, .copies = &copies, .copy_bytes = &copy_bytes, .errors = &clipboard_errors };
 
     var counts: win32_terminal.FrameCounts = .{};
     var frames: usize = 0;
@@ -11604,17 +11555,18 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             tree_watch_due = std.Io.Clock.awake.now(io).nanoseconds + 200 * std.time.ns_per_ms;
         }
         sidebar_writer.tick() catch |err| std.log.warn("sidebar config save failed({s})", .{@errorName(err)});
-        if (confirm_state.open or file_notice.open or pending_save != null or file_close_waiting or initial_open.job != null) {
+        terminal_popup.reconcile(clipboard_host.current(active_view == .terminal), confirm_state.open or file_notice.open or choice_notice != null or pending_save != null or file_close_waiting or initial_open.job != null or close_requested);
+        if (terminal_popup.state.open or confirm_state.open or file_notice.open or pending_save != null or file_close_waiting or initial_open.job != null) {
             sidebar_resize_drag = null;
             divider_drag = null;
         }
         // Use the same divider geometry that routes pointer gestures.
-        window.horizontal_resize_rect = if (dock_visible and !confirm_state.open and !file_notice.open and
+        window.horizontal_resize_rect = if (dock_visible and !terminal_popup.state.open and !confirm_state.open and !file_notice.open and
             pending_save == null and !file_close_waiting and initial_open.job == null)
             .{ .left = @intCast(geom.divider.x), .top = @intCast(geom.divider.y), .right = @intCast(geom.divider.x + geom.divider.w), .bottom = @intCast(geom.divider.y + geom.divider.h) }
         else
             null;
-        window.sidebar_resize_rect = if (sidebar_w != 0 and !confirm_state.open and !file_notice.open and
+        window.sidebar_resize_rect = if (sidebar_w != 0 and !terminal_popup.state.open and !confirm_state.open and !file_notice.open and
             pending_save == null and !file_close_waiting and initial_open.job == null)
             .{ .left = @as(i32, @intCast(sidebar_w)) - 5, .top = @intCast(titlebar_px), .right = @as(i32, @intCast(sidebar_w)) + 5, .bottom = @intCast(client_h -| status_bar_px) }
         else
@@ -11628,8 +11580,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             dock_layout_pending = false;
         }
         window.horizontal_resize_active = divider_drag != null or sidebar_resize_drag != null;
-        for (window.poll()) |ev| switch (ev) {
+        window.input_overlay_open = terminal_popup.state.open or terminal_popup.swallow_left_up;
+        const window_events = window.poll();
+        if (window.focus_loss_serial != terminal_popup_focus_serial) {
+            terminal_popup.cancelCapture();
+            window.input_overlay_open = false;
+            terminal_popup_focus_serial = window.focus_loss_serial;
+        }
+        for (window_events) |ev| switch (ev) {
             .resized => |r| {
+                terminal_popup.dismiss();
                 layout_probe = true;
                 try present.resize(r.width_px, r.height_px);
                 // **기하를 먼저 다시 잰다** — 도크 폭이 창 크기에 따라 달라지므로 터미널 사각형도 바뀐다.
@@ -11757,6 +11717,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 if (choice_notice != null) continue;
                 if (file_notice.open) {
                     _ = maru.chrome.components.notice.handle(win32_keys.chromeKeyEvent(key_ev), &file_notice);
+                    continue;
+                }
+                if (terminal_popup.state.open) {
+                    const popup_request = terminal_popup.key(win32_keys.chromeKeyEvent(key_ev), key_ev.event_type == .release, clipboard_host.current(active_view == .terminal));
+                    window.input_overlay_open = terminal_popup.state.open or terminal_popup.swallow_left_up;
+                    if (popup_request) |request| {
+                        terminal_menu_actions += @intFromBool(try clipboard_host.perform(request, active_view == .terminal));
+                    }
                     continue;
                 }
                 // ── 검색이 포커스면 키는 검색 것이다 (W8.15) ─────────────────────────
@@ -11946,25 +11914,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // "무엇을 복사할지"가 선택 영역이고 그것이 마우스와 같은 계층이었기 때문이다(§2k).
                 // 경계는 그대로다 — 선택은 중립 코어가, 클립보드는 플랫폼이 안다.
                 if (win32_keys.isCopyChord(key_ev)) {
-                    const active = app_window.active() orelse continue;
-                    // 추출은 **락 아래**(코어 읽기), OS 호출은 락 밖 — §2j 의 규율 그대로다.
-                    const maybe_text: ?[]u8 = blk: {
-                        active.lockCore(io);
-                        defer active.unlockCore(io);
-                        break :blk active.core.extractSelection(allocator) catch null;
-                    };
-                    if (maybe_text) |text| {
-                        defer allocator.free(text);
-                        if (text.len > 0) {
-                            if (win32_clipboard.write(allocator, window.hwnd, text)) |_| {
-                                copies += 1;
-                                copy_bytes += text.len;
-                            } else |err| {
-                                try stderr.print("  warning: copy failed({s}, Win32 error {d})\n", .{ @errorName(err), win32_clipboard.last_error });
-                                clipboard_errors += 1;
-                            }
-                        }
-                    }
+                    try clipboard_host.copy();
                     continue;
                 }
                 // **붙여넣기는 플랫폼이 가로챈다.** 클립보드는 OS 소유이고 중립 레이어에 `Action`이 없다
@@ -12003,7 +11953,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // IME 조합 미리보기. **중립 계약에 그대로 넣는다** — `renderSnapshot()`이 합성해 주므로
             // Windows 가 미리보기 렌더를 따로 만들지 않는다(§2i).
             .preedit_changed => {
-                if (file_close_waiting or initial_open.job != null or file_notice.open or confirm_state.open) continue;
+                if (terminal_popup.state.open or file_close_waiting or initial_open.job != null or file_notice.open or confirm_state.open) continue;
                 const text = window.preeditText();
                 // **조합은 포커스를 따라간다**(W8.15 잔여). 검색 줄에 치는 동안 미리보기가 터미널로
                 // 가면 사용자는 자기가 친 것을 못 보는데 셸은 그것을 받는다 — 키 입력이 이미 겪은
@@ -12037,6 +11987,29 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **마우스는 중립 명령으로 번역만 한다**(§2k). 선택 코어 mutate 는 전부 `enqueueCoreCommand`
             // 로 리더 스레드에 위임한다 — 메인은 코어를 안 만진다.
             .mouse => |m| {
+                terminal_popup.reconcile(clipboard_host.current(active_view == .terminal), confirm_state.open or file_notice.open or choice_notice != null or pending_save != null or file_close_waiting or initial_open.job != null or close_requested);
+                if (m.kind == .capture_lost) terminal_popup.cancelCapture();
+                if (terminal_popup.state.open or terminal_popup.swallow_left_up) {
+                    if (m.kind == .wheel or m.kind == .wheel_h) continue;
+                    const popup_result = terminal_popup.pointer(.{
+                        .phase = switch (m.kind) {
+                            .moved => .move,
+                            .left_down, .right_down, .middle_down => .down,
+                            .left_up, .right_up, .middle_up => .up,
+                            .wheel, .wheel_h, .capture_lost => unreachable,
+                        },
+                        .button = switch (m.kind) {
+                            .right_down, .right_up => .right,
+                            .middle_down, .middle_up => .other,
+                            else => .left,
+                        },
+                        .x_px = @floatFromInt(m.x_px), .y_px = @floatFromInt(m.y_px),
+                    }, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w, &chrome_tokens), clipboard_host.current(active_view == .terminal));
+                    window.input_overlay_open = terminal_popup.state.open or terminal_popup.swallow_left_up;
+                    if (popup_result.request) |request| terminal_menu_actions += @intFromBool(try clipboard_host.perform(request, active_view == .terminal));
+                    if (popup_result.consumed) continue;
+                }
+
                 const pointer_toggle_rect = win_dock.buttonRect(client_w, sidebar_w, titlebar_px, caption_btn_w);
                 if (m.kind == .capture_lost) dock_toggle_gesture.cancel();
                 // Busy work ends an old editor capture before caption routing.
@@ -13156,6 +13129,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     mouse_over_file += 1;
                     continue;
                 }
+                const terminal_point = win32_mouse.pointRelativeTo(.{ .x = m.x_px, .y = m.y_px }, geom.terminal.x, geom.terminal.y);
                 // **가로 축을 가진 표면이 아직 편집기뿐이다.** 여기까지 오면 버린다 — 안 버리면
                 // 아래 리포트 변환의 `unreachable` 에 걸린다(터미널에는 가로 휠 리포트가 없다).
                 if (m.kind == .wheel_h) continue;
@@ -13170,7 +13144,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         // **휠 리포트에도 셀 좌표를 싣는다.** 앱이 그것으로 어느 pane 을 굴릴지 정한다
                         // (less·vim 분할) — (0,0)을 실으면 늘 좌상단이라고 말하는 셈이다. 창이 화면
                         // 기준 좌표를 주는 것은 창 쪽에서 이미 클라이언트 기준으로 바꿔 올린다.
-                        const wcell = win32_mouse.cellFromPixel(m.x_px, m.y_px, cell_w, cell_h, cols, rows) orelse continue;
+                        const wcell = win32_mouse.cellFromPixel(terminal_point.x, terminal_point.y, cell_w, cell_h, cols, rows) orelse continue;
                         last_mouse_cell = wcell;
                         last_wheel_cell = wcell;
                         // **눈금당 한 번**이다(줄 수만큼이 아니다).
@@ -13181,8 +13155,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                 .button = button,
                                 .col = wcell.col,
                                 .row = wcell.row,
-                                .x_px = @intCast(@max(m.x_px, 0)),
-                                .y_px = @intCast(@max(m.y_px, 0)),
+                                .x_px = @intCast(@max(terminal_point.x, 0)),
+                                .y_px = @intCast(@max(terminal_point.y, 0)),
                                 .pressed = true,
                                 .motion = false,
                                 .mods = win32_mouse.reportModifiers(m.mods),
@@ -13238,7 +13212,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     continue;
                 }
 
-                const cell = win32_mouse.cellFromPixel(m.x_px, m.y_px, cell_w, cell_h, cols, rows) orelse continue;
+                const cell = win32_mouse.cellFromPixel(terminal_point.x, terminal_point.y, cell_w, cell_h, cols, rows) orelse continue;
                 last_mouse_cell = cell;
 
                 if (to_shell) {
@@ -13275,8 +13249,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         .button = button,
                         .col = cell.col,
                         .row = cell.row,
-                        .x_px = @intCast(@max(m.x_px, 0)),
-                        .y_px = @intCast(@max(m.y_px, 0)),
+                        .x_px = @intCast(@max(terminal_point.x, 0)),
+                        .y_px = @intCast(@max(terminal_point.y, 0)),
                         .pressed = pressed,
                         .motion = is_motion,
                         .mods = win32_mouse.reportModifiers(m.mods),
@@ -13298,9 +13272,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             try pasteClipboardIntoActive(allocator, io, window.hwnd, &app_window, &runtime, stderr, paste_protection, bracketed_paste_is_safe, &paste_out);
                             right_click_pastes += 1;
                         },
-                        // context 메뉴는 chrome 이 있어야 한다(W8). 지금은 아무것도 하지 않고 센다 —
-                        // 조용히 무시하면 "우클릭이 안 먹는다"의 원인을 못 찾는다.
-                        .menu => right_click_menus_unimplemented += 1,
+                        .menu => {
+                            terminal_popup.show(active.id, m.x_px, m.y_px);
+                            window.input_overlay_open = true;
+                            dragging = false;
+                            terminal_menus_opened += 1;
+                        },
                         // 트래킹이 아닌데 `reporting` 으로 뒀으면 보낼 곳이 없다. 무동작이 맞다.
                         .reporting => {},
                     }
@@ -14180,6 +14157,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         //
         // 그리는 순서가 z 순서다 — 띠·상태바보다도 뒤에 얹어야 그 위를 덮는다. 모달이 무엇을 덮는지가
         // 곧 "무엇을 못 누르는가" 라, 입력 삼킴과 같은 자리에 있어야 한다.
+        terminal_popup.reconcile(clipboard_host.current(active_view == .terminal), confirm_state.open or file_notice.open or choice_notice != null or pending_save != null or file_close_waiting or initial_open.job != null or close_requested);
+        if (terminal_popup.state.open) {
+            const popup_cells = appendTerminalPopupCells(allocator, &cells, &terminal_popup, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w, &chrome_tokens), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &terminal_popup_frame) catch blk: {
+                terminal_menu_draw_failures += 1;
+                terminal_popup.dismiss();
+                break :blk 0;
+            };
+            terminal_menu_cells_peak = @max(terminal_menu_cells_peak, popup_cells);
+        }
         confirm_cells_drawn = 0;
         if (confirm_state.open) {
             if (appendConfirmCells(allocator, &cells, &confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w, &chrome_tokens), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &confirm_frame, &confirm_unpainted)) |n_drawn| {
@@ -16052,7 +16038,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     try stdout.print("app_actions={d} keys_ignored={d}\n", .{ app_actions, keys_ignored });
     try stdout.print("preedit_updates={d} failures={d} max_bytes={d} ime_caret_updates={d}\n", .{ preedit_updates, preedit_failures, preedit_max_bytes, ime_caret_updates });
     try stdout.print("pastes={d} paste_bytes={d} bracketed={d} blocked={d} paste_errors={d}\n", .{ paste_out.pastes, paste_out.paste_bytes, paste_out.bracketed, paste_out.blocked, paste_out.errors });
-    try stdout.print("copies={d} copy_bytes={d} right_click_pastes={d} right_click_menus_todo={d}\n", .{ copies, copy_bytes, right_click_pastes, right_click_menus_unimplemented });
+    try stdout.print("copies={d} copy_bytes={d} right_click_pastes={d} right_click_menus={d} menu_actions={d} menu_cells_peak={d} menu_draw_failures={d}\n", .{ copies, copy_bytes, right_click_pastes, terminal_menus_opened, terminal_menu_actions, terminal_menu_cells_peak, terminal_menu_draw_failures });
     // **갈래별로 센다.** 합치면 "이벤트는 왔는데 선택이 안 됐다"를 못 가른다.
     try stdout.print("mouse_events={d} reports={d} selections={d} selection_frames={d} extends={d} words={d} lines={d}\n", .{ mouse_events, mouse_reports, selections, selection_frames, extends, word_selections, line_selections });
     // **이 줄이 판정이다.** 명령을 몇 개 보냈는지가 아니라, 그것이 코어에 **닿아 선택이 생겼는지**를
@@ -18992,6 +18978,27 @@ fn appendConfirmCells(
     if (ops.items.len == 0) return 0;
 
     _ = confirm_unpainted_quads;
+    return appendModalOpsCells(allocator, out, ops.items, p, tk, renderer_state, builder, pipeline, atlas_w, atlas_h, frame_slot);
+}
+
+fn appendTerminalPopupCells(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(d3d11_cells.Cell),
+    popup: *const terminal_clipboard_menu.Popup,
+    p: maru.chrome.props.ChromeProps,
+    tk: *const maru.chrome.Tokens,
+    renderer_state: *maru.renderer.RendererState,
+    builder: win32_terminal.FrameBuilder,
+    pipeline: *d3d11_cells.CellPipeline,
+    atlas_w: *u32,
+    atlas_h: *u32,
+    frame_slot: *?maru.renderer.RenderFrame,
+) !usize {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
+    const labels = terminal_clipboard_menu.labels();
+    try maru.chrome.components.context_menu.view(&popup.state, &labels, p, tk, arena.allocator(), &ops);
     return appendModalOpsCells(allocator, out, ops.items, p, tk, renderer_state, builder, pipeline, atlas_w, atlas_h, frame_slot);
 }
 
@@ -22120,4 +22127,45 @@ test "Windows editor host dock launcher paint survives collapsed content without
     cells.clearRetainingCapacity();
     try appendDockToggle(std.testing.allocator, &cells, rect, true, &tk);
     try std.testing.expectEqual(collapsed_len + 1, cells.items.len);
+}
+
+
+test "Terminal clipboard popup native caption ownership prevents click through and resize cursor" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var window: win32_window.Window = .{
+        .hwnd = @ptrFromInt(1),
+        .allocator = std.testing.allocator,
+        .titlebar_strip_px = 38,
+        .titlebar_client_left_px = 180,
+        .caption_buttons_px = 138,
+        .horizontal_resize_rect = .{ .left = 390, .top = 38, .right = 410, .bottom = 680 },
+    };
+    const rect: @TypeOf(window.windowRect()) = .{ .left = 0, .top = 0, .right = 1000, .bottom = 700 };
+    try std.testing.expectEqual(@as(isize, 2), window.hitTestFrame(rect, 500, 16));
+    try std.testing.expect(window.wantsHorizontalCursor(400, 300, true));
+    window.input_overlay_open = true;
+    try std.testing.expectEqual(@as(isize, 1), window.hitTestFrame(rect, 500, 16));
+    try std.testing.expectEqual(@as(isize, 1), window.hitTestFrame(rect, 2, 300));
+    try std.testing.expect(!window.wantsHorizontalCursor(400, 300, true));
+    window.input_overlay_open = false;
+    try std.testing.expectEqual(@as(isize, 2), window.hitTestFrame(rect, 500, 16));
+    try std.testing.expect(window.wantsHorizontalCursor(400, 300, true));
+}
+
+
+test "Terminal clipboard popup client coordinates map to rendered terminal after chrome offsets" {
+    const Case = struct { point: win32_mouse.Point, x: u32, y: u32, relative: win32_mouse.Point, cell: win32_mouse.Cell };
+    const cases = [_]Case{
+        .{ .point = .{ .x = 315, .y = 50 }, .x = 300, .y = 38, .relative = .{ .x = 15, .y = 12 }, .cell = .{ .row = 0, .col = 1 } },
+        .{ .point = .{ .x = 415, .y = 50 }, .x = 400, .y = 38, .relative = .{ .x = 15, .y = 12 }, .cell = .{ .row = 0, .col = 1 } },
+        .{ .point = .{ .x = 15, .y = 12 }, .x = 0, .y = 0, .relative = .{ .x = 15, .y = 12 }, .cell = .{ .row = 0, .col = 1 } },
+        .{ .point = .{ .x = -1, .y = -1 }, .x = 300, .y = 38, .relative = .{ .x = -301, .y = -39 }, .cell = .{ .row = 0, .col = 0 } },
+        .{ .point = .{ .x = std.math.minInt(i32), .y = std.math.minInt(i32) }, .x = std.math.maxInt(u32), .y = std.math.maxInt(u32), .relative = .{ .x = std.math.minInt(i32), .y = std.math.minInt(i32) }, .cell = .{ .row = 0, .col = 0 } },
+        .{ .point = .{ .x = std.math.maxInt(i32), .y = std.math.maxInt(i32) }, .x = 300, .y = 38, .relative = .{ .x = 2147483347, .y = 2147483609 }, .cell = .{ .row = 23, .col = 79 } },
+    };
+    for (cases) |case| {
+        const relative = win32_mouse.pointRelativeTo(case.point, case.x, case.y);
+        try std.testing.expectEqualDeep(case.relative, relative);
+        try std.testing.expectEqualDeep(case.cell, win32_mouse.cellFromPixel(relative.x, relative.y, 8, 19, 80, 24).?);
+    }
 }

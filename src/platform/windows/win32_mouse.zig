@@ -48,6 +48,16 @@ pub const Cell = struct { row: u16, col: u16 };
 /// 클라이언트 좌표. **부호 있는 16비트**다.
 pub const Point = struct { x: i32, y: i32 };
 
+/// Convert client coordinates to the rendered surface's pixel coordinates before
+/// cell lookup or mouse reporting. Keep signed out-of-surface drags and saturate
+/// in a wide domain so unsigned layout origins cannot wrap through i32.
+pub fn pointRelativeTo(point: Point, origin_x: u32, origin_y: u32) Point {
+    return .{
+        .x = @intCast(std.math.clamp(@as(i64, point.x) - origin_x, std.math.minInt(i32), std.math.maxInt(i32))),
+        .y = @intCast(std.math.clamp(@as(i64, point.y) - origin_y, std.math.minInt(i32), std.math.maxInt(i32))),
+    };
+}
+
 /// 마우스 메시지의 `lParam`에서 좌표를 꺼낸다.
 ///
 /// **부호 있는 16비트로 읽어야 한다.** `LOWORD`를 부호 없이 읽는 것이 이 API의 고전적 실수다 — 드래그가

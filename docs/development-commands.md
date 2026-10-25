@@ -103,6 +103,14 @@ UTF-8 포화·가로/세로 크기 기억·잘못된 CLI selector를 추가 검�
   `python3 tools/remote-restart-app/test_partial_oracle.py --artifact <성공한 실제 결과 디렉터리>`는
   그 실제 기록에서 publication 순서·입력·resize·copy·frame·cleanup 누락 변이를 거부하는지 검사한다.
 
+## 에디터 테마 비교 캡처
+
+`mise exec -- zig build macos-app-build -j2` 뒤
+`python3 tools/editor-theme-gallery/run.py --output /tmp/maru-editor-theme-gallery-new --typescript-all-presets`로
+현재 번들 언어 각각을 네 프리셋으로 촬영하고 TypeScript는 전체 프리셋을 추가 비교한다.
+실제 제품 Metal 캡처이며 LSP는 꺼 둔다. 출력은 저장소 밖 새 빈 디렉터리다.
+예제·격리·PNG 비교판·원본 및 manifest의 범위는 [도구 설명](../tools/editor-theme-gallery/README.md)을 따른다.
+
 ## 에디터 CLI
 
 `maru editor open 'src/file 한글.zig' -l 42 -c 7`은 macOS 기본 Maru 앱에 파일을

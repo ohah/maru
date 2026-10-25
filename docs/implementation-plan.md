@@ -74,6 +74,7 @@ macOS 로컬 shell 1개 surface
 - [접힘 변경 범위 재사용](plans/editor-fold-change-reuse.md) — 직전 파싱의 불변 범위를 공유하고, 누락·여러 편집·보관 불가는 기존 비교로 복귀한다.
 - [공유 뷰의 초기 구문 스냅샷](plans/editor-shared-initial-snapshot.md) — parser·byte 후보의 독립 사본을 준비해 첫 편집의 전체 접힘 방문을 줄이고 생성부터 첫 입력까지 측정한다.
 - [괄호 구조가 같은 편집의 판정 재사용](plans/editor-bracket-shape-reuse.md) — 구조·풀·긴 줄 필터의 동일성을 확인하고 좌표만 갱신하며 전체 판정과 대조한다.
+- [접힘 범위 승격의 내부 비용 귀속](plans/editor-fold-promotion-attribution.md) — 후보 조회·범위 변환·설치·보이는 줄·열 폭 갱신을 사본에서 구분한다.
 - [pane 구문 준비와 본문 색의 내부 비용 귀속](plans/editor-pane-syntax-attribution.md) — 기존 사본의 구문 준비와 본문 색 구간을 더 나누며 제품은 유지한다.
 - [pane 색 계산과 그리기 목록 변환 비용 귀속](plans/editor-pane-lowering-attribution.md) — 제품 사본의 pane 내부 색·기하·구문 준비·본문 조립과 그리기 목록 변환을 구분해 관측한다.
 - [고정 머리줄 요약의 변경 범위 재사용](plans/editor-sticky-change-reuse.md) — 같은 Provider의 정확한 한 세대·한 native 편집 통지에서 이미 계산한 범위를 빌린다.

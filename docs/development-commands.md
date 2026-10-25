@@ -1,4 +1,5 @@
 # 개발 명령
+- 접힘 범위 승격 내부 비용: [사본 준비·실행·집계·독립 손상 검증](../tools/editor-fold-promotion-measure/results.md). 후보 조회·범위 변환·설치와 그 안의 보이는 줄·마무리를 구분한다.
 - pane 구문 내부 비용: [사본 준비·실행·집계·독립 손상 검증](../tools/editor-pane-syntax-measure/results.md). 본문과 미니맵·고정 머리줄의 호출 범위를 구분한다.
 - pane 색/그리기 목록 비용: `python3 tools/editor-lowering-measure/run.py --output <새-외부-경로> --deps "$PWD/zig-pkg" --modes 1 --workloads typing,shared`. 별도 `--resume --run-only --prefix verify --verify-each-edit 1 --repetitions 1` 실행과 [계획/검증 범위](plans/editor-pane-lowering-attribution.md)를 따른다.
 

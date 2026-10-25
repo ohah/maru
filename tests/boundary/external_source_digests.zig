@@ -20,6 +20,8 @@ pub const inventory = [_]Proof{
     // Opt-in 다중 파일 SDK judge가 Report의 owned 문자열 여섯 개를 해제하는 한 자리다.
     // @field 대상은 로컬 Report뿐이며 session-host Client receiver를 반영하지 않는다.
     .{ .path = "src/platform/macos/app_session/editor/real_lsp_multi_judge.zig", .count = 1, .digest_hex = "4769647deb0de717eb8c0601abc323739b0c99bc0f4797ad5b543d786605a2a8" },
+    // Shared settings search owns the one Lang reflection moved from the macOS host.
+    .{ .path = "src/app/settings/model.zig", .count = 1, .digest_hex = "8166fca3b13897ed02bd48cf473067102577b5908290e067359f7589dff3902d" },
     // 상태바 리소스 표본 seam(resource_samples)이 붙어 바뀐다. count는 3 그대로다 — vtable 항목과 래퍼를
     // 더했을 뿐이고 Client 구성이나 receiver 집합과는 무관하다.
     // OSC 7 authority(`cwd_host`)가 관측 view/owned cache에 실리면서 또 바뀐다. count는 3 그대로다 — 더한 것은
@@ -730,7 +732,8 @@ pub const inventory = [_]Proof{
     // 같은 슬라이스의 적대적 검증에서 한 줄이 더 붙어 값이 또 움직였다(2026-08-19): `clearBranchMenuText`의
     // "열린 메뉴를 먼저 닫는다" 가드가 **기준 목록까지** 본다. 그 목록도 같은 버퍼에서 이름을 빌리므로
     // 플래그만 다를 뿐 같은 UAF였다. count는 그대로다.
-    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 4, .digest_hex = "843b4771f1cc65e6396a631f0c24134ecb36bd4d303b87a9dac2523a85a1c930" },
+    // Settings search moved to app/settings/model.zig; the Lang @field moves with it (4 → 3).
+    .{ .path = "src/platform/macos/app_session/settings.zig", .count = 3, .digest_hex = "81f24d3842e6df77d2d49d5f63958a244c9bb40577cafd22342d91fdd22cd268" },
     // 같은 분할로 주석 둘의 경로가 바뀌어 움직였다(§2.2 → file-panel-kinds.md, §3.2 → file-panel-dock-ui.md).
     // count는 1 그대로다 — 주석 문자열만 달라졌다.
     // editor-surface.md 분할로 doc comment의 단일 출처 경로가 바뀌어 움직였다(§3 →

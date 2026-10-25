@@ -778,3 +778,5 @@ caption click 0·launcher toggle 8회·400px 도크 유지·grid mismatch 0·exi
   그림·복사·보호된 붙여넣기·취소·세션 변경·설정창 입력 격리를 확인한다. 완료 전 설치본을 교체하지 않는다.
 
 IME 후보창 기하 보정: 터미널 surface 원점과 셀 크기를 포함한 `session.mouse_coordinates.ImeCaret`를 IMM에 전달한다. 레이아웃만 바뀌어도 캐시를 갱신한다. 이 수학 검증은 실제 한국어 IME 후보창의 실기 검증을 대신하지 않으며, 검색·편집기 포커스별 후보 위치 검증은 후속으로 남는다.
+
+설정창 이식: 검색·섹션 표시 규칙을 `app.settings_model`로 이동하여 기존 macOS 호스트도 같은 구현을 사용한다. Windows 설정 화면의 입력·영속·라이브 적용 연결은 아직 진행 중이다.

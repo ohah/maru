@@ -772,3 +772,5 @@ Windows의 키보드·메뉴 복사와 보호된 붙여넣기 연결은
 ### 마우스 좌표 소유권
 
 `src/session/mouse_coordinates.zig`는 surface 원점 보정과 픽셀→셀 변환을 소유한다. Windows 메시지 해석은 `src/platform/windows/win32_mouse.zig`에 두고, 공통 좌표 계산은 `session` facade를 통해 사용한다.
+
+`src/app/settings/model.zig`는 설정 검색과 섹션 표시 규칙을 공유한다. macOS·Windows 호스트의 네이티브 저장·런타임 적용은 이 모델에 포함하지 않는다.

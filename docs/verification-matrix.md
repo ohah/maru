@@ -5680,3 +5680,10 @@ matched pointer release, focus loss, and protected paste. Live validation is pen
 - `zig build test-windows-settings-focus`: 유지/해제 정책, 닫힌 정책 초기화, 정책 인계, 세대 번호 랩.
 - `tools/windows/check-settings-focus.py --state <격리 fixture JSON> --binary <복사한 exe 메타 JSON> --output <결과 JSON>`: 설정 유지·연속 focus 전환·일시 메뉴 해제·정책 재인계·바깥 클릭 잔여 릴리스 취소. 네이티브 콜백 직후 계수·정상 종료·셸 입력 격리 확인.
 - 소유한 큐의 native keyboard focus 검증이다. 전역 foreground, 물리 Alt+Tab, 키보드·IME 증거와 구분한다.
+## Windows settings search IME adapter
+
+`zig build test-windows-settings` includes five search caret judges: ownership,
+paint-to-client coordinates, wide committed text, preedit/commit, and geometry changes.
+Five coordinate/metric/row mutations must fail at runtime; restored Debug and ReleaseFast must pass.
+`ime_settings_caret_updates` and the scroll app check observe request routing only,
+not physical keyboard input or an actual OS candidate window.

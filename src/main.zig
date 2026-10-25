@@ -8320,6 +8320,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 공용 칸으로는 "휠 좌표가 화면 기준이라 어긋났는지" 를 볼 수 없다.
     var last_wheel_cell: ?win32_mouse.Cell = null;
     var ime_caret_updates: usize = 0;
+    var ime_settings_caret_updates: usize = 0;
     var click_tracker: win32_mouse.ClickTracker = .{};
     // **사용자 설정을 OS 에 묻는다.** 값을 코드에 박으면 접근성 설정(느린 더블클릭·스크롤 줄 수)을
     // 무시하게 된다. 규칙은 순수 함수가 갖고 이 값들은 그 인자다(§2k, OS-as-parameter).
@@ -13453,7 +13454,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 defer active.unlockCore(io);
                 break :blk .{ .row = active.core.screen.cursor.row, .col = active.core.screen.cursor.col };
             };
-            const caret: maru.session.mouse_coordinates.ImeCaret = .{
+            const settings_caret = settings_host.imeCaret(
+                confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w, &chrome_tokens), &chrome_tokens,
+            );
+            const caret: maru.session.mouse_coordinates.ImeCaret = settings_caret orelse .{
                 .row = cur.row, .col = cur.col, .cell_w = cell_w, .cell_h = cell_h,
                 .origin_x = geom.terminal.x, .origin_y = geom.terminal.y,
             };
@@ -13462,6 +13466,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 window.setImeCaret(caret);
                 last_ime_caret = caret;
                 ime_caret_updates += 1;
+                if (settings_caret != null) ime_settings_caret_updates += 1;
             }
         }
 
@@ -16109,6 +16114,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     try stdout.print("keys_to_shell={d} bytes_to_shell={d}\n", .{ keys_to_shell, bytes_to_shell });
     try stdout.print("app_actions={d} keys_ignored={d}\n", .{ app_actions, keys_ignored });
     try stdout.print("preedit_updates={d} failures={d} max_bytes={d} ime_caret_updates={d}\n", .{ preedit_updates, preedit_failures, preedit_max_bytes, ime_caret_updates });
+    try stdout.print("ime_settings_caret_updates={d}\n", .{ime_settings_caret_updates});
     try stdout.print("pastes={d} paste_bytes={d} bracketed={d} blocked={d} paste_errors={d}\n", .{ paste_out.pastes, paste_out.paste_bytes, paste_out.bracketed, paste_out.blocked, paste_out.errors });
     try stdout.print("window_focus_losses={d} retained_overlay_blurs={d} dismissed_overlay_blurs={d}\n", .{ window.focus_loss_serial, window.retained_overlay_blurs, window.dismissed_overlay_blurs });
     try stdout.print("settings_wheel_events={d} settings_scroll_moves={d} settings_scroll_peak={d}\n", .{ settings_host.wheel_events, settings_host.scroll_moves, settings_host.scroll_peak });

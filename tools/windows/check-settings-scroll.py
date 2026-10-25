@@ -151,6 +151,12 @@ try:
     if not args.old_control:
         for name in ['settings_scroll_moves','settings_scroll_peak']:
             found=re.search(r'\b'+name+r'=(\d+)',log);assert found and int(found[1])>0,(name,found)
+    # New binaries report request routing, not physical OS candidate placement.
+    ime=re.search(r'\bime_settings_caret_updates=(\d+)',log)
+    if ime:
+        total=re.search(r'\bime_caret_updates=(\d+)',log)
+        assert total and 0<int(ime[1])<int(total[1]),'search/terminal IMM caret request routing was not observed'
+        record('search and terminal IMM caret requests observed; no physical candidate claim')
     record('normal exit, config preserved and no shell input')
     args.output.write_text(json.dumps({'binary':binary,'checks':checks,'captures':captures,'exit':code.value,'old_control':args.old_control,'stale_context_control':args.stale_context_control,'system_wheel_lines':lines.value,'input':'synthetic owned HWND; pixels and native wheel messages; no physical input claim'},indent=2))
 finally:

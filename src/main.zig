@@ -1977,7 +1977,7 @@ test "도크 divider: Windows 기하가 macOS 와 같은 두께·누르는 띠�
     const dock_layout = maru.session.dock_layout;
     const w: u32 = 1400;
     const h: u32 = 800;
-    const win = dockGeometryFor(w, h, 9, 19, true, 0, .explorer, 0, 0, 0);
+    const win = dockGeometryFor(w, h, 9, 19, true, 0, .explorer, 0, 0, 0, null);
     try std.testing.expect(win.dock.w > 0); // 도크가 서는 폭이다(아니면 아래가 아무것도 안 잰다)
     // macOS 가 같은 창에서 내는 기하 — 설정 기본 두께(1pt)·같은 배율.
     const mac = dock_layout.compute(.{
@@ -22149,7 +22149,7 @@ test "Terminal clipboard popup native caption ownership prevents click through a
 
 
 test "Terminal clipboard popup client coordinates map to rendered terminal after chrome offsets" {
-    const Case = struct { point: win32_mouse.Point, x: u32, y: u32, relative: win32_mouse.Point, cell: win32_mouse.Cell };
+    const Case = struct { point: maru.session.mouse_coordinates.Point, x: u32, y: u32, relative: maru.session.mouse_coordinates.Point, cell: maru.session.mouse_coordinates.Cell };
     const cases = [_]Case{
         .{ .point = .{ .x = 315, .y = 50 }, .x = 300, .y = 38, .relative = .{ .x = 15, .y = 12 }, .cell = .{ .row = 0, .col = 1 } },
         .{ .point = .{ .x = 415, .y = 50 }, .x = 400, .y = 38, .relative = .{ .x = 15, .y = 12 }, .cell = .{ .row = 0, .col = 1 } },
@@ -22159,8 +22159,8 @@ test "Terminal clipboard popup client coordinates map to rendered terminal after
         .{ .point = .{ .x = std.math.maxInt(i32), .y = std.math.maxInt(i32) }, .x = 300, .y = 38, .relative = .{ .x = 2147483347, .y = 2147483609 }, .cell = .{ .row = 23, .col = 79 } },
     };
     for (cases) |case| {
-        const relative = win32_mouse.pointRelativeTo(case.point, case.x, case.y);
+        const relative = maru.session.mouse_coordinates.pointRelativeTo(case.point, case.x, case.y);
         try std.testing.expectEqualDeep(case.relative, relative);
-        try std.testing.expectEqualDeep(case.cell, win32_mouse.cellFromPixel(relative.x, relative.y, 8, 19, 80, 24).?);
+        try std.testing.expectEqualDeep(case.cell, maru.session.mouse_coordinates.cellFromPixel(relative.x, relative.y, 8, 19, 80, 24).?);
     }
 }

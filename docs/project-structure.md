@@ -768,3 +768,7 @@ Windows full file identity는 maru facade가 한 번 소유하여 editor·watche
 `chrome/components/context_menu.zig`, OS 클립보드와 터미널 붙여넣기 보호는 플랫폼 호스트가 소유한다.
 Windows의 키보드·메뉴 복사와 보호된 붙여넣기 연결은
 `src/platform/windows/terminal/clipboard.zig`가 맡으며 `main.zig`는 이벤트와 렌더 연결만 담당한다.
+
+### 마우스 좌표 소유권
+
+`src/session/mouse_coordinates.zig`는 surface 원점 보정과 픽셀→셀 변환을 소유한다. Windows 메시지 해석은 `src/platform/windows/win32_mouse.zig`에 두고, 공통 좌표 계산은 `session` facade를 통해 사용한다.

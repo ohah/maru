@@ -12777,7 +12777,7 @@ zero bytes; the corrected app must pass the same visible-word clipboard check.
 저장 실패는 편집을 유지한다. 사이드바 저장과의 프로세스 내부 경쟁은 공통 쓰기 잠금으로
 직렬화한다. 외부 작성자와의 경쟁까지 보장한다는 뜻은 아니다.
 
-`test-windows-settings` 15개는 집계 2·값 검증 6·휠 6·동시 부분 쓰기 1개다.
+`test-windows-settings` 20개는 집계 2·값 검증 6·휠 6·포커스 5·동시 부분 쓰기 1개다.
 `tools/windows/check-settings.py`는 소유 PID/HWND와 바이너리 해시를 확인한 격리 앱에서 실행한다.
 설정 저장·실패 복구·취소·입력 소유권을 확인하며 실제 물리 키보드나 IME 후보창 검증을 대신하지 않는다.
 현재 라이브 연결은 일부 입력 정책과 OSC52 읽기 정책이다. 폰트·색상·언어 등 전체 런타임 적용,
@@ -12791,3 +12791,13 @@ Windows 설정의 세로 휠은 공통 `settings.scrollByRows`로 전달한다. 
 `test-windows-settings-wheel`은 집계 2와 동작 6개, `test-windows-wheel-detents`는 기존 어댑터
 동작 2개와 집계 28개를 확인한다. `tools/windows/check-settings-scroll.py`는 실제 폼의 픽셀
 이동·축 분리·다시 열기·검색 변경을 검사하며 두 이전 바이너리의 실패 모드도 분리해 기록한다.
+
+네이티브 입력 오버레이는 `Window.setInputOverlay`로 열림과 포커스 정책을 함께 발행한다.
+설정창은 `retain_on_blur`, 일시적인 우클릭 메뉴는 `dismiss_on_blur`다. 닫으면 유지 정책도
+초기화한다. 포커스 손실의 세대 번호는 손실/복귀가 한 poll 안에 와도 남으며, 설정의 남은
+바깥 클릭 릴리스·색 선택 드래그·휠 잔량은 이벤트 루프에서 취소한다.
+`retained_overlay_blurs`/`dismissed_overlay_blurs`는 네이티브 콜백 안에서 처리 직후 상태를 센다.
+`test-windows-settings-focus`는 집계 2와 네이티브 정책 5개를 검사한다.
+`tools/windows/check-settings-focus.py`는 소유한 입력 큐 사이의 실제 keyboard focus 전환을
+검사한다. 전역 foreground 활성화·물리 Alt+Tab·키보드·IME 검증으로 계산하지 않는다.
+설정/검색/편집기의 텍스트 포커스별 IME 위치·조합 처리는 여전히 후속 작업이다.

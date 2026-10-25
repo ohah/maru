@@ -5769,3 +5769,9 @@ matched pointer release, focus loss, and protected paste. Live validation is pen
 - `zig build test-windows-wheel-detents`(Windows): 공통 수학으로 이동한 기존 Win32 어댑터 동작 회귀.
 - `tools/windows/check-settings-scroll.py --state <격리 fixture JSON> --binary <복사한 exe 메타 JSON> --output <결과 JSON>`: 실제 폼 픽셀 이동·역방향·다시 열기·필터 변경·정상 종료. config/클립보드를 바꾸지 않는다.
 - `--old-control`은 휠 무시, `--stale-context-control`은 필터 변경 후 잔여 위치를 재현하는 음성 대조다. 정상 완료 증거로 섞지 않는다. 물리 마우스·키보드·IME 검증을 대신하지 않는다.
+
+### Windows 오버레이 포커스
+
+- `zig build test-windows-settings-focus`: 유지/해제 정책, 닫힌 정책 초기화, 정책 인계, 세대 번호 랩.
+- `tools/windows/check-settings-focus.py --state <격리 fixture JSON> --binary <복사한 exe 메타 JSON> --output <결과 JSON>`: 설정 유지·연속 focus 전환·일시 메뉴 해제·정책 재인계·바깥 클릭 잔여 릴리스 취소. 네이티브 콜백 직후 계수·정상 종료·셸 입력 격리 확인.
+- 소유한 큐의 native keyboard focus 검증이다. 전역 foreground, 물리 Alt+Tab, 키보드·IME 증거와 구분한다.

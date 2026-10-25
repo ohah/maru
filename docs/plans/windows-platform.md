@@ -786,3 +786,5 @@ IME 후보창 기하 보정: 터미널 surface 원점과 셀 크기를 포함한
 Windows 설정 연결 검증: `test-windows-settings`는 값 검증과 사이드바/설정 동시 부분 쓰기를 검사한다. 같은 프로세스의 두 작성자는 `app.config_write_lock`으로 read/patch/replace 전체를 직렬화한다. `tools/windows/check-settings.py`는 격리된 실제 앱에서 버튼·단축키, 저장 실패 후 재시도, 비유한 수 거부, 미리보기 취소, 다른 버튼 릴리스, 셸 입력 격리를 검사한다. 실제 키보드·IME 증거로 계산하지 않는다. 최종 설치 전 전체 런타임 적용·기본값/합성 행·스크롤바 표시/드래그·포커스·IME와 외부 변경 처리 검증을 끝내야 한다.
 
 설정 휠 스크롤은 연결했다. 정밀 델타·가로 축·비활성 정책·자식 모달 소유권·큰 값·검색/섹션 문맥 변경을 검사한다. `tools/windows/check-settings-scroll.py`의 이전 바이너리 대조와 수정 바이너리의 실제 픽셀 검증을 유지한다. 스크롤바 표시/드래그는 아직 후속 작업이다.
+
+설정창 유지/일시 메뉴 해제의 네이티브 포커스 정책을 분리했다. `test-windows-settings-focus`와 `tools/windows/check-settings-focus.py`로 전환·정책 인계·남은 릴리스 취소를 검증한다. 텍스트 포커스별 IME 대상·후보 위치와 편집기 조합 처리는 아직 완료되지 않았다.

@@ -416,6 +416,8 @@ pub const CursorRect = struct {
     bottom: i32,
 };
 
+pub const OverlayFocusPolicy = enum { dismiss_on_blur, retain_on_blur };
+
 pub const Window = struct {
     hwnd: HWND,
     /// **프레임리스 창의 드래그 띠 높이**(클라이언트 px). 0 이면 네이티브 캡션을 그대로 쓴다.
@@ -435,8 +437,11 @@ pub const Window = struct {
     horizontal_resize_active: bool = false,
     /// A chrome popup owns the first outside click, including the caption/border.
     input_overlay_open: bool = false,
+    overlay_focus_policy: OverlayFocusPolicy = .dismiss_on_blur,
     /// Sticky generation: focus loss remains observable even if focus returns in one poll.
     focus_loss_serial: u64 = 0,
+    retained_overlay_blurs: usize = 0,
+    dismissed_overlay_blurs: usize = 0,
     present: PresentTarget = .{},
     /// `WndProc`이 채우고 `poll`이 넘긴다. 창 하나당 하나라 락이 필요 없다(같은 스레드에서만 돈다).
     ///
@@ -826,6 +831,23 @@ pub const Window = struct {
         _ = PostMessageW(self.hwnd, msg, wparam, @intCast(lo | (hi << 16)));
     }
 
+    /// Settings remain visible across focus changes; transient menus dismiss.
+    /// Publish both values together so native hit testing never sees old policy.
+    pub fn setInputOverlay(self: *Window, open: bool, policy: OverlayFocusPolicy) void {
+        self.input_overlay_open = open;
+        self.overlay_focus_policy = if (open) policy else .dismiss_on_blur;
+    }
+    pub fn noteFocusLoss(self: *Window) void {
+        const was_open = self.input_overlay_open;
+        self.focus_loss_serial +%= 1;
+        if (self.overlay_focus_policy == .dismiss_on_blur) self.input_overlay_open = false;
+        // Sample inside the native callback, before the event loop can publish
+        // its next frame. This distinguishes immediate ownership from repair.
+        if (was_open) {
+            if (self.input_overlay_open) self.retained_overlay_blurs +|= 1 else self.dismissed_overlay_blurs +|= 1;
+        }
+    }
+
     pub fn setImeCaret(self: *Window, caret: @import("../../maru.zig").session.mouse_coordinates.ImeCaret) void {
         const anchor = caret.anchor() orelse return;
         const himc = ImmGetContext(self.hwnd) orelse return;
@@ -975,8 +997,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(abi.w
     switch (msg) {
         WM_KILLFOCUS => {
             if (self) |w| {
-                w.focus_loss_serial +%= 1;
-                w.input_overlay_open = false;
+                w.noteFocusLoss();
             }
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         },

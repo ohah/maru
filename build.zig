@@ -1996,6 +1996,10 @@ pub fn build(b: *std.Build) void {
     const run_shell_refresh_tests = b.addRunArtifact(shell_refresh_tests);
     run_shell_refresh_tests.addArg("--maru-expect-tests=7"); // Five shell refresh judges and two root blocks.
     b.step("test-windows-shell-refresh", "Verify settings refresh future Windows shell launches").dependOn(&run_shell_refresh_tests.step);
+    const text_resource_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows text resources"} });
+    const run_text_resource_tests = b.addRunArtifact(text_resource_tests);
+    run_text_resource_tests.addArg("--maru-expect-tests=7");
+    b.step("test-windows-text-resources", "Verify native font resource staging and failure ownership").dependOn(&run_text_resource_tests.step);
     const settings_text_path_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings text paths"} });
     const run_settings_text_path_tests = b.addRunArtifact(settings_text_path_tests);
     run_settings_text_path_tests.addArg("--maru-expect-tests=7"); // Five text boundary judges and two root blocks.

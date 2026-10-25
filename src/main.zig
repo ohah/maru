@@ -7,6 +7,7 @@ const win_sidebar = @import("platform/windows/chrome/sidebar.zig");
 const win_dock = @import("platform/windows/chrome/dock.zig");
 const terminal_clipboard_menu = @import("app/terminal_clipboard_menu.zig");
 const windows_settings = @import("platform/windows/settings/host.zig");
+const windows_text_resources = @import("platform/windows/terminal/text_resources.zig");
 const win_clipboard_host = @import("platform/windows/terminal/clipboard.zig");
 const archive_reveal = if (builtin.os.tag == .windows) @import("platform/windows/agents/reveal.zig") else struct {};
 /// Shared archive worker; the facade keeps both hosts on one owner type.
@@ -54,6 +55,7 @@ test {
     _ = terminal_clipboard_menu;
     _ = win_clipboard_host;
     _ = windows_settings;
+    _ = windows_text_resources;
     // Cross-target tests must compile the native adapter as well as the common worker.
     if (comptime builtin.os.tag == .macos) _ = @import("platform/macos/file_tree_remote.zig").transport;
     _ = editor_document;
@@ -6924,21 +6926,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // config 파일이 없어도 JetBrains Mono 를 먼저 찾고 없을 때 Cascadia Mono 로 내려간다. 이 기계에서
     // `font_family=Cascadia Mono` 로 보이는 것은 그 폰트가 없어서지 "빈 값이라 티어가 골라서" 가 아니다.
     // `Jetendard` 는 macOS 번들 한글 폰트라 Windows 에서는 열리지 않고 폴백 사슬 앞에 무해하게 남는다.
-    var raster = dwrite_font.Rasterizer.create(allocator, cfg.font.family, cfg.font.fallback, cfg.font.size) catch |err| {
+    var text_resources = windows_text_resources.TextResources.init(allocator, cfg.font.family, cfg.font.fallback, cfg.font.size) catch |err| {
         try stderr.print("maru win32-terminal-smoke: could not set up the font({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(dwrite_font.last_hresult)) });
         try stderr.flush();
         return error.UnknownCommand;
     };
-    defer raster.destroy();
+    defer text_resources.deinit();
+    const raster = text_resources.raster;
     const cell_w = raster.metrics.width_px;
     const cell_h = raster.metrics.height_px;
 
-    const scratch = try allocator.alloc(u8, win32_text.NeutralRasterizer.scratchSizeFor(cell_w * 2, cell_h));
-    defer allocator.free(scratch);
-    const builder = win32_terminal.FrameBuilder{
-        .shaper = .{ .raster = raster },
-        .rasterizer = .{ .raster = raster, .scratch = scratch },
-    };
+    const builder = text_resources.builder();
 
     // ── 창·표시 경로 ───────────────────────────────────────────────────────────────────────
     const title = std.unicode.utf8ToUtf16LeStringLiteral("maru (W7.2c terminal)");

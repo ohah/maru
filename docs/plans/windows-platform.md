@@ -840,3 +840,22 @@ request 오류는 거부 5건뿐이며 저장 2·저장 오류 0·셸 입력 0·
 13개도 통과해 저장 실패/재시도와 enum 미리보기 취소를 확인했다. 세 영역의 변이는 최종 소스에서
 각각 다섯 개씩 검출했고 복원 설정 51개와 cross-target 컴파일을 확인했다. 전체 Windows 작업 완료나
 설치본 반영으로 계산하지 않는다.
+
+### 폰트 라이브 적용의 자원 준비 (진행 중)
+
+1. 시작 경로의 DirectWrite face와 ClearType scratch를 Windows `terminal/text_resources.zig`의 한 소유자로
+   묶었다. 새 소유자 준비는 현재 소유자와 독립적이며 준비 실패 시 새 face를 해제한다. builder는 heap
+   자원만 빌려 소유자 값의 이동에 묶이지 않는다. 현재 지원하는 family/fallback/size 준비 단계다.
+2. 후속: RendererState·font identity·atlas와 각 chrome/editor draw cache를 새 세대에 준비한다.
+   line-height/letter-spacing은 자연 글리프 폭과 grid advance를 구분하며, font variant/ligature 등
+   노출 필드의 지원 여부도 함께 정리한다. 현재 시작 경로의 단순 메트릭은 이 설정들을 아직 적용하지 않는다.
+3. 후속: 새 자원·레이아웃·core cell metrics·PTY 격자를 함께 게시하고 실패 시 이전 화면을 유지한다.
+   설정 미리보기 취소/저장 실패·재로드도 같은 교체 경로로 검증한다.
+
+첫 단계는 실제 DirectWrite 영문/한글 잉크, 두 크기 동시 생존, 할당 실패, 이전 소유자 해제 후 준비된
+builder 사용을 검사한다. 초기화 실패 누수·작업 버퍼 소실·builder 연결 손실·해제 누수·크기 고착의
+다섯 변이를 검사하고 복원 Debug/ReleaseFast를 확인한다. 이 단계는 설정 변경의 실시간 적용 완료가 아니다.
+
+첫 단계의 최종 앱은 설정 실앱 회귀 13개·정상 native 종료·셸 입력 격리를 통과했고 실제 캡처에서도
+터미널·사이드바·설정 글자가 표시됐다. 다섯 변이와 복원 native 7개(Debug/ReleaseFast), 일반 빌드와
+cross-target 컴파일을 확인했다. 다음 단계의 atlas/cache·grid 게시와 폰트 설정 적용은 여전히 남아 있다.

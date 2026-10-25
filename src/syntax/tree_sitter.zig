@@ -4876,3 +4876,32 @@ test "shared parse reuse native 늦은 뷰는 자기 이전 트리의 변경 범
     try foldCacheJudge(&target, &cache, after);
     try std.testing.expectEqual(@as(u64, 1), cache.reused_changes);
 }
+
+test "fold order 함수 이름과 구조 편집 모두 전체 접힘과 일치한다" {
+    const a = std.testing.allocator;
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    for (0..32) |_| try text.appendSlice(a, "fn old() void {\n _ = 1;\n}\n");
+    var p = Provider.init(text.items, .zig, 0) orelse return error.NoProvider;
+    defer p.deinit();
+    var cache: FoldCache = .{};
+    defer cache.deinit(a);
+    try foldCacheJudge(&p, &cache, text.items);
+    const at = std.mem.indexOf(u8, text.items, "old") orelse return error.NoPosition;
+    const point = stickyPoint(text.items, at);
+    @memcpy(text.items[at .. at + 3], "new");
+    const edit: Edit = .{ .start_byte = @intCast(at), .old_end_byte = @intCast(at + 3), .new_end_byte = @intCast(at + 3), .start_point = point, .old_end_point = stickyPoint(text.items, at + 3), .new_end_point = stickyPoint(text.items, at + 3) };
+    cache.edit(edit);
+    p.onEdit(text.items, edit);
+    try std.testing.expectEqual(@as(usize, 0), (p.retainedChanges() orelse return error.NoRetainedChanges).ranges.len);
+    try foldCacheJudge(&p, &cache, text.items);
+    const sp = stickyPoint(text.items, 0);
+    const insert = "const A = struct {\n x: u32,\n};\n";
+    try text.insertSlice(a, 0, insert);
+    const changed: Edit = .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = insert.len, .start_point = sp, .old_end_point = sp, .new_end_point = stickyPoint(text.items, insert.len) };
+    cache.edit(changed);
+    p.onEdit(text.items, changed);
+    const structural = p.retainedChanges() orelse return error.NoRetainedChanges;
+    try std.testing.expect(structural.ranges.len > 0);
+    try foldCacheJudge(&p, &cache, text.items);
+}

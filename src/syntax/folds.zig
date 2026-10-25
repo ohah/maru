@@ -128,6 +128,35 @@ pub const Cache = struct {
             }
         }
     }
+    fn orderLess(_: void, x: Record, y: Record) bool {
+        return if (x.lo != y.lo) x.lo < y.lo else x.hi > y.hi;
+    }
+    // 겹친 후보의 안정적 삭제와 뒤쪽 후보의 같은 좌표 이동은 기존 순서를 보존한다.
+    // 여덟 개 이하는 사본 실측에서 이동 비용이 작았던 추가분이다. 결과 개수의 상한은 아니다.
+    // 구조 범위가 있거나 추가분이 크면 기존 전체 정렬을 사용한다.
+    fn orderRecords(items: []Record, prefix: ?usize) void {
+        if (prefix) |n| {
+            std.debug.assert(n <= items.len);
+            if (items.len - n <= 8) {
+                for (items[0..n], 0..) |value, i| {
+                    if (i != 0) std.debug.assert(!orderLess({}, value, items[i - 1]));
+                }
+                for (n..items.len) |i| {
+                    const value = items[i];
+                    var lo: usize = 0;
+                    var hi = i;
+                    while (lo < hi) {
+                        const mid = lo + (hi - lo) / 2;
+                        if (orderLess({}, items[mid], value)) lo = mid + 1 else hi = mid;
+                    }
+                    std.mem.copyBackwards(Record, items[lo + 1 .. i + 1], items[lo..i]);
+                    items[lo] = value;
+                }
+                return;
+            }
+        }
+        std.mem.sort(Record, items, {}, orderLess);
+    }
     pub fn query(self: *Cache, a: std.mem.Allocator, parser: *c.TSParser, tree: ?*c.TSTree, generation: u64, changes: ?Changes, kinds: []const []const u8, lines: anytype, out: *std.ArrayList(Span)) error{OutOfMemory}!void {
         out.clearRetainingCapacity();
         const current = tree orelse {
@@ -145,6 +174,7 @@ pub const Cache = struct {
             self.invalidate();
             return;
         }
+        var ordered_prefix: ?usize = null;
         if (self.tree) |previous| {
             var count: u32 = 0;
             // 직전 세대의 편집 하나를 모두 받은 경우만 Provider의 불변 범위를 빌린다.
@@ -156,6 +186,7 @@ pub const Cache = struct {
             const ranges = if (shared != null) null else c.ts_tree_get_changed_ranges(previous, current, &count);
             if (shared != null) self.reused_changes +|= 1 else self.compared_changes +|= 1;
             const range_count: usize = if (shared) |items| items.len else count;
+            if (range_count == 0) ordered_prefix = self.records.items.len;
             defer if (ranges != null) ts_current_free(@ptrCast(ranges));
             // 추가 범위의 중복은 마지막에 위치로 합친다. 최장 후보가 없어져도 짧은 후보를 보존한다.
             // 변경 범위를 합쳐 큰 간격까지 걷지 않도록 구간마다 따로 순회한다.
@@ -170,18 +201,14 @@ pub const Cache = struct {
                     n += 1;
                 }
                 self.records.items.len = n;
+                if (range_count == 0) ordered_prefix = n;
                 try self.visit(current, kinds, a, lo, hi, false);
             }
         } else {
             self.records.clearRetainingCapacity();
             try self.visit(current, kinds, a, 0, std.math.maxInt(u32), true);
         }
-        std.mem.sort(Record, self.records.items, {}, struct {
-            fn lt(_: void, x: Record, y: Record) bool {
-                if (x.lo != y.lo) return x.lo < y.lo;
-                return x.hi > y.hi;
-            }
-        }.lt);
+        orderRecords(self.records.items, ordered_prefix);
         var n: usize = 0;
         for (self.records.items) |r| {
             if (n > 0 and std.meta.eql(self.records.items[n - 1], r)) continue;
@@ -269,5 +296,64 @@ test "fold point hint 무작위 줄 인덱스와 앞뒤 조회를 독립 전수 
     for (0..5000) |i| {
         offset = if (i % 7 == 0) random.uintLessThan(u32, start) else (offset + random.uintLessThan(u32, 100)) % start;
         try expectNearPoint(&lines, offset, &hint);
+    }
+}
+
+test "fold order 작은 추가분은 동률과 빈 목록에서도 전체 정렬과 같다" {
+    var prng = std.Random.DefaultPrng.init(0x12a5bf);
+    const random = prng.random();
+    var actual: [129]Cache.Record = undefined;
+    var expected: [129]Cache.Record = undefined;
+    for (0..4096) |_| {
+        const n = random.uintLessThan(usize, actual.len + 1);
+        const tail = random.uintLessThan(usize, @min(n, 16) + 1);
+        const prefix = n - tail;
+        for (actual[0..n]) |*value| {
+            const lo = random.uintLessThan(u32, 32);
+            value.* = .{ .lo = lo, .hi = lo + random.uintLessThan(u32, 32) };
+        }
+        std.mem.sort(Cache.Record, actual[0..prefix], {}, Cache.orderLess);
+        @memcpy(expected[0..n], actual[0..n]);
+        std.mem.sort(Cache.Record, expected[0..n], {}, Cache.orderLess);
+        Cache.orderRecords(actual[0..n], prefix);
+        try std.testing.expectEqualDeep(expected[0..n], actual[0..n]);
+    }
+}
+
+test "fold order 겹친 후보 삭제와 뒤쪽 좌표 이동 뒤에도 순서를 보존한다" {
+    var prng = std.Random.DefaultPrng.init(0x8e91ac);
+    const random = prng.random();
+    var items: [2048]Cache.Record = undefined;
+    var expected: [2048]Cache.Record = undefined;
+    var n: usize = 128;
+    for (items[0..n], 0..) |*value, i| value.* = .{ .lo = @intCast(i * 8), .hi = @intCast(i * 8 + 6) };
+    for (0..200) |round| {
+        const start = if (round == 0) 0 else random.uintLessThan(u32, 1024);
+        const old_end = if (round == 0) 65535 else start + random.uintLessThan(u32, 32);
+        const new_end = if (round == 0) 0 else start + random.uintLessThan(u32, 32);
+        var kept: usize = 0;
+        for (items[0..n]) |value| {
+            if (value.hi >= start and value.lo <= old_end) continue;
+            var next = value;
+            if (value.lo > old_end) {
+                next.lo = value.lo - old_end + new_end;
+                next.hi = value.hi - old_end + new_end;
+            }
+            items[kept] = next;
+            kept += 1;
+        }
+        for (items[0..kept], 0..) |value, i| {
+            if (i != 0) try std.testing.expect(!Cache.orderLess({}, value, items[i - 1]));
+        }
+        const extra = random.uintLessThan(usize, 9);
+        for (items[kept .. kept + extra]) |*value| {
+            const lo = random.uintLessThan(u32, 2048);
+            value.* = .{ .lo = lo, .hi = lo + random.uintLessThan(u32, 64) };
+        }
+        n = kept + extra;
+        @memcpy(expected[0..n], items[0..n]);
+        std.mem.sort(Cache.Record, expected[0..n], {}, Cache.orderLess);
+        Cache.orderRecords(items[0..n], kept);
+        try std.testing.expectEqualDeep(expected[0..n], items[0..n]);
     }
 }

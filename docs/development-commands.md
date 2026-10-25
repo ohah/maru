@@ -14,6 +14,7 @@
 - 접힘 조회 세부 측정: [구간별 비용 측정](plans/editor-fold-query-attribution.md)의 사본 계측·집계·손상 기록 검증 명령을 따른다.
 
 - 접힘 좌표 조회: `mise exec -- zig build test-editor-fold-points test-editor-fold-cache test-editor-incremental-folds -j2`.
+- 접힘 후보 정렬: `mise exec -- zig build test-editor-fold-order test-editor-fold-cache test-editor-fold-changes test-editor-fold-points -j2`. [계약과 전후 실측](plans/editor-fold-order-reuse.md)을 따른다.
   실제 좌표 5개와 import 1개를 포함하며, 명시적 test 참조와 개수 가드로 누락을 거절한다.
   전후 비교·공유 집계의 metric 선택과 실패 주입은 [근처 행 조회](plans/editor-fold-points.md)를 따른다.
 

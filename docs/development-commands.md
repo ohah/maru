@@ -1,4 +1,5 @@
 # 개발 명령
+- pane 구문 내부 비용: [사본 준비·실행·집계·독립 손상 검증](../tools/editor-pane-syntax-measure/results.md). 본문과 미니맵·고정 머리줄의 호출 범위를 구분한다.
 - pane 색/그리기 목록 비용: `python3 tools/editor-lowering-measure/run.py --output <새-외부-경로> --deps "$PWD/zig-pkg" --modes 1 --workloads typing,shared`. 별도 `--resume --run-only --prefix verify --verify-each-edit 1 --repetitions 1` 실행과 [계획/검증 범위](plans/editor-pane-lowering-attribution.md)를 따른다.
 
 - 캐시 아래 원격 커밋 검증: `mise exec -- zig build test-editor-scm-cache-root -j2`. 실제 메시지 파일 경로 유출과 정상 캐시 저장소를 구분하며, [판정 범위](plans/editor-scm-cache-path-test.md)를 따른다.

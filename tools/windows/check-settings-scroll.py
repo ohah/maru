@@ -10,7 +10,7 @@ No physical keyboard, mouse or IME behavior is claimed.
 import argparse,contextlib,ctypes as c,hashlib,json,os,re,struct,time
 from ctypes import wintypes as w
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('--state',type=Path,required=True);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--old-control',action='store_true');p.add_argument('--stale-context-control',action='store_true');args=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--state',type=Path,required=True);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--old-control',action='store_true');p.add_argument('--stale-context-control',action='store_true');p.add_argument('--inline-caret',action='store_true');args=p.parse_args()
 if args.old_control and args.stale_context_control:p.error('Control modes are mutually exclusive')
 if not __debug__:p.error('Run without Python optimization so fixture and clipboard guards remain active')
 if os.name!='nt':p.error('Windows is required')
@@ -141,6 +141,14 @@ try:
             assert filtered!=reopened;record('old wheel binary reproduces stale filter scroll')
         else:
             assert filtered==reopened;record('filter changes discard the previous scroll position')
+    if args.inline_caret:
+        key(0x1b)
+        with neutral_keyboard():
+            for cp in '/font.size':send(0x102,ord(cp),1)
+        time.sleep(.25);key(0x0d)
+        capture('inline-number-caret')
+        key(0x1b) # cancel edit, retaining the filter
+        record('filtered numeric edit opened and canceled without persisting')
     close_settings();send(0x10)
     if k.WaitForSingleObject(process,12000)!=0:key(0x0d)
     assert k.WaitForSingleObject(process,12000)==0;code=w.DWORD();assert k.GetExitCodeProcess(process,c.byref(code));assert code.value==0
@@ -157,6 +165,10 @@ try:
         total=re.search(r'\bime_caret_updates=(\d+)',log)
         assert total and 0<int(ime[1])<int(total[1]),'search/terminal IMM caret request routing was not observed'
         record('search and terminal IMM caret requests observed; no physical candidate claim')
+    if args.inline_caret:
+        inline=re.search(r'\bime_settings_edit_caret_updates=(\d+)',log)
+        assert inline and int(inline[1])>0,'inline edit never owned IMM caret requests'
+        record('inline editor overrides retained search IMM request owner')
     record('normal exit, config preserved and no shell input')
     args.output.write_text(json.dumps({'binary':binary,'checks':checks,'captures':captures,'exit':code.value,'old_control':args.old_control,'stale_context_control':args.stale_context_control,'system_wheel_lines':lines.value,'input':'synthetic owned HWND; pixels and native wheel messages; no physical input claim'},indent=2))
 finally:

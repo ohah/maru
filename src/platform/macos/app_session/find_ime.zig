@@ -23,7 +23,9 @@ fn identity() u64 {
     return 0;
 }
 fn owner(self: *app.AppSession) ?Owner {
-    if (!self.surface_initialized or self.ime_terminal_target_id != null) return null;
+    // A surface can exist before tab topology (bootstrap and headless hosts).
+    // Such a session has no view identity for a native Find client yet.
+    if (!self.surface_initialized or self.tabs.items.len == 0 or self.ime_terminal_target_id != null) return null;
     ops.syncDiffFind(self);
     if (self.inputFocus() != .find) return null;
     const state = &self.chrome_host.find;

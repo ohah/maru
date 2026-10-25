@@ -2338,12 +2338,12 @@ pub fn build(b: *std.Build) void {
     const find_input_ime_step = b.step("test-find-replace-ime", "Validate find/replace IME commit and view ownership boundaries");
     const find_input_ime_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
-        .filters = &.{"find input IME host"},
+        .filters = &.{ "find input IME host", "imeBegin: 터미널 포커스만", "find IME 멀티-문자" },
     });
     const run_find_input_ime = b.addRunArtifact(find_input_ime_tests);
     run_find_input_ime.setCwd(b.path("."));
     find_input_ime_step.dependOn(&run_find_input_ime.step);
-    run_find_input_ime.addArg("--maru-expect-tests=11");
+    run_find_input_ime.addArg("--maru-expect-tests=14");
     if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_find_input_ime.step);
 
     const settings_search_ime_step = b.step("test-settings-search-ime", "Validate bounded settings-search IME ranges and owner lifetime");

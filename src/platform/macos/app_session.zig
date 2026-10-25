@@ -102390,3 +102390,21 @@ test "find input IME host replacement candidate does not replace document" {
     try std.testing.expectEqualStrings("韓", self.chrome_host.find.replace.query.items);
     try std.testing.expectEqualStrings("한 한", term.rt.editorDocument().opened.?.file.content);
 }
+
+test "find input IME host topology-free surface declines native owner" {
+    const a = std.testing.allocator;
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io, .surface_initialized = true };
+    defer session.chrome_host.deinit(a);
+    defer session.find_ime_transaction.finish(a);
+    session.chrome_host.find.show();
+    const native = @import("app_session/chrome_ime.zig");
+    try std.testing.expect(native.generation(&session) == null);
+    try std.testing.expect(native.projection(&session) == null);
+    session.imeBegin();
+    try std.testing.expect(session.find_ime_owner == null);
+    try std.testing.expect(native.insert(&session, "stale", null));
+    try std.testing.expect(native.marked(&session, "한", .{ .location = 1, .length = 0 }, null));
+    try std.testing.expectEqualStrings("", session.chrome_host.find.input.query.items);
+    try std.testing.expectEqualStrings("", session.chrome_host.find.input.preedit.items);
+    try std.testing.expectEqual(@as(u64, 0), session.chrome_host.find.ime_identity);
+}

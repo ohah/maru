@@ -2637,6 +2637,12 @@ native 트리 인계까지 성공한 뒤 현재 원본 목록을 수신 배열�
 [공유 분할 계획](plans/editor-shared-bracket-snapshot.md)과
 [공유 편집 계획](plans/editor-shared-bracket-edit.md)을 따른다.
 
+부분 수집의 자식 시작 이동 후보는 오류 없는 부모에서 node 조회와 실제 cursor 노드가
+일치할 때만 앞 형제를 건너뛴다. 오류 부모나 이동 실패/불일치는 기존 첫 자식 순회를
+사용한다. 왼쪽에 닿는 토큰·폭 0 범위·cover·할당 실패 계약은 동일하다.
+API 내부의 선형 탐색 가능성이 있어 로그 시간 탐색으로 주장하지 않는다.
+채택 상태와 실측은 [범위 수집 계획](plans/editor-bracket-range-cursor.md)이 소유한다.
+
 **언어별**(VS Code 1.139.0 의 **실제 TextMate 문법·언어 설정을 vscode-textmate 로 돌린 오라클**과 대조해 정했다 — 괄호 파서·단계는 monaco 0.56 과
 1,400 판 대조로 맞춘 이식. **색 구현 당시(2026-09-25)** 말뭉치 182 파일(이 저장소 + 태그 고정 오픈소스 20 + VS Code colorize fixture)에서 **거짓 칠함 0**; 당시 남은 차이는 전부
 아래 「다른 점」의 「VS Code 만 칠한다」 쪽이다):

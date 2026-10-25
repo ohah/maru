@@ -8,6 +8,7 @@
 - 공유 분할 고정 머리줄 요약: `mise exec -- zig build test-editor-sticky-snapshot test-editor-sticky-snapshot-product -j2`. [독립 참조·거절 조건과 검증 범위](plans/editor-shared-sticky-summary.md)를 따른다. 제품 검사는 macOS 전용이다.
 - 공유 분할 괄호 목록: `mise exec -- zig build test-editor-bracket-snapshot test-editor-bracket-snapshot-product test-editor-bracket-reposition -j2`. [완료 목록·할당 실패·원본 종료·색과 탐색 대조](plans/editor-shared-bracket-snapshot.md)를 따른다. 제품 검사는 macOS 전용이다.
 - `mise exec -- zig build test-editor-shared-bracket-edit test-editor-shared-bracket-edit-product -j2`: 공유 편집 후 완료한 괄호 목록의 독립 재사용·실패 복귀·색/탐색과 실제 분할 입력·Undo/Redo를 검증한다.
+- `mise exec -- zig build test-editor-bracket-range-cursor test-editor-bracket-range-cursor-product -j2`: 범위 수집의 독립 전체 순회·오류 복구·cursor 불일치·할당 실패와 제품 색/탐색·Undo/Redo를 검사한다. `-Doptimize=ReleaseFast`도 지원한다. [계획과 재현](plans/editor-bracket-range-cursor.md)을 따른다.
 - pane 프레임 준비 비용: [사본 실행·집계·독립 손상 검증 명령](../tools/editor-pane-measure/results.md). 제품을 바꾸지 않으며 pane 내부 호출만 센다.
 - 파싱 결과 인계 기계: `mise exec -- zig build test-editor-syntax-stamp test-editor-shared-parse-core test-editor-shared-parse-product -j2`. [검증 범위와 제품 연결 조건](plans/editor-shared-parse-reuse.md)을 따른다.
 - 변경 범위의 복사 계보: `mise exec -- zig build test-editor-change-origin test-editor-change-origin-product -j2`. [계보 발급·재사용 조건과 남은 실측](plans/editor-shared-change-origin.md)을 따른다. 제품 검사는 macOS 전용이다.

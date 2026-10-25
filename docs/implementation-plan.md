@@ -81,7 +81,8 @@ macOS 로컬 shell 1개 surface
 - [고정 머리줄 요약의 변경 범위 재사용](plans/editor-sticky-change-reuse.md) — 같은 Provider의 정확한 한 세대·한 native 편집 통지에서 이미 계산한 범위를 빌린다.
 - [공유 분할의 고정 머리줄 심볼 요약 복사](plans/editor-shared-sticky-summary.md) — 유효한 집계의 독립 복사로 새 뷰의 전체 재순회를 줄인다. PR #4593의 필수 CI 통과·머지와 실제 main 집중/문서 재검증을 완료했다.
 - [공유 분할의 완료한 괄호 목록 복사](plans/editor-shared-bracket-snapshot.md) — 완료한 parser·세대의 잎 값만 독립 복사한다. 로컬 구현·집중/제품·독립 결함 5개·실측과 전체 게이트 722개 빌드 단계를 완료했다. PR #4594의 필수 CI 통과·머지와 실제 main 집중/문서 62개 빌드 단계도 확인했다.
-- [공유 편집 후 완료한 괄호 목록 재사용](plans/editor-shared-bracket-edit.md) — 독립 배열의 기존 용량과 수신 판을 유지한다. 집중/제품 회귀와 독립 결함 다섯 개를 확인한 후보이며 일반·증가·추가 반복 실측도 완료했다. 전체 게이트 725개 빌드 단계를 통과했다. 원격 검증은 후속이다.
+- [공유 편집 후 완료한 괄호 목록 재사용](plans/editor-shared-bracket-edit.md) — 독립 배열의 기존 용량과 수신 판을 유지한다. 집중/제품 회귀와 독립 결함 다섯 개를 확인한 후보이며 일반·증가·추가 반복 실측도 완료했다. 전체 게이트 725개 빌드 단계를 통과했다. PR #4596의 필수 CI·실제 main 머지와 머지 후 집중/문서 68개 빌드 단계를 확인했다.
+- [괄호 부분 수집의 앞 형제 탐색](plans/editor-bracket-range-cursor.md) — 오류 부모와 cursor 불일치를 기존 순회로 보호하는 후보. Debug·ReleaseFast 집중 검사와 다섯 결함 주입을 통과했으며 112프로세스 교차 실측을 완료했다. 전체 경계와 문서/config 검사를 통과했다. 원격 결과는 PR #4598에서 확인한다.
 - [캐시 경로의 원격 커밋 검증](plans/editor-scm-cache-path-test.md) — 정상 캐시 저장소를 허용하면서 실제 로컬 메시지 경로 유출을 거절한다.
 - [pane 프레임 준비 비용 귀속](plans/editor-pane-frame-attribution.md) — 편집과 프레임을 분리해 기하·표식·장식·고정 머리줄의 중첩 비용을 관측한다.
 - [구문 Provider 편집 비용 귀속](plans/editor-provider-edit-attribution.md) — 파싱·변경 범위·트리 이동과 실제 뷰별 호출 수를 분리해 다음 개선의 근거를 만든다.

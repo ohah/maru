@@ -1,11 +1,16 @@
 # 검증 매트릭스
 
-[공유 편집 후 괄호 목록 재사용](plans/editor-shared-bracket-edit.md)은 부분 구현 후보다.
+[괄호 범위 수집 후보](plans/editor-bracket-range-cursor.md)는 native 7개와 제품 7개 검사를 포함해
+Debug·ReleaseFast 집중 47개 빌드 단계를 각각 통과했다. 번들 31문법의 독립 범위/cover
+오라클, 실제 잘못된 cursor의 복귀, 오류 부모, OOM과 cold 제품 색·탐색·기존 SYNU2를
+검사한다. 다섯 compiled/runtime 결함과 정상 대조 여섯 명령을 확인했다. 112프로세스 성능/정확성 교차 대조를 마쳤다. 전체 경계와 최종 문서/config 검사도 통과했다.
+원격 결과는 PR #4598이 소유하며 GUI/HID 또는 모든 C 할당 실패 검증으로 일반화하지 않는다.
+
+[공유 편집 후 괄호 목록 재사용](plans/editor-shared-bracket-edit.md)은 구현됐다.
 실제 완료 트리 인계 뒤 잎 값만 독립 배열에 옮기고 기존 용량·계수·수신 판을 유지한다.
 Debug 집중/기존 회귀 47개와 ReleaseFast 집중 44개 빌드 단계, 최종 소스의 다섯 결함과
 정상 대조를 통과했다. 원본 종료·입력/Undo/Redo·모든 byte의 색/탐색, 다른 언어/문서/판·
-미완료 원본·Zig 할당 실패·긴 줄·Markdown을 대조한다. 전후 성능의 일반·증가·추가 반복과 전체 결과 일치를 확인했다. 전체 게이트 725개 빌드 단계도 통과했다. 원격 CI는
-완료 전이며 GUI/HID·C allocator 실패 전수 검증으로 일반화하지 않는다.
+미완료 원본·Zig 할당 실패·긴 줄·Markdown을 대조한다. 전후 성능의 일반·증가·추가 반복과 전체 결과 일치를 확인했다. 전체 게이트 725개 빌드 단계도 통과했다. PR #4596의 필수 CI와 실제 main 머지, 머지 후 집중/문서 68개 빌드 단계를 확인했으며 GUI/HID·C allocator 실패 전수 검증으로 일반화하지 않는다.
 
 [공유 분할 괄호 목록 복사](plans/editor-shared-bracket-snapshot.md)는 구현됐다.
 native 집중 5개·기존 요약 4개는 Debug·ReleaseFast에서 통과했다. 새 제품 7개와 기존

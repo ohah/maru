@@ -1997,3 +1997,59 @@ test "shared bracket edit product 다른 언어 문서와 판은 완료 목록�
         try expectBracketRepositionOracle(&target, after, .zig, false);
     }
 }
+
+test "bracket range cursor product padding 오류 복구와 UTF8 삽입 뒤 색 및 모든 byte 탐색은 같다" {
+    const a = std.testing.allocator;
+    const samples = [_]struct { grammar: editor_language.Grammar, text: []const u8 }{
+        .{ .grammar = .zig, .text = "  fn a() void {}\n                         fn b() void { _ = (1); }\n" },
+        .{ .grammar = .markdown, .text = "   [a](b)\n\n                       (c)\n\n   [d](e)\n" },
+        .{ .grammar = .dtd, .text = "   (한 [x]) {\n\n       a(\"[\", /* } */ [1, 2])\n\n    ) [끝]\n" },
+        .{ .grammar = .bash, .text = "echo $(printf \"(\") ${x} [[ -n a ]]\ncase x in a) echo;; esac\n" },
+    };
+    const inserts = [_][]const u8{ " ", ")", "\n", "/*", "*/", "(한)" };
+    for (samples) |sample| for ([_]bool{ false, true }) |pool| {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(a);
+        try text.appendSlice(a, sample.text);
+        var state = openBudgeted(text.items, sample.grammar, 0);
+        defer state.deinit(a);
+        while (try prepareBrackets(&state, a, text.items, pool, 0)) {}
+        for (0..12) |i| {
+            var at = switch (i % 3) {
+                0 => @as(usize, 0),
+                1 => text.items.len / 2,
+                else => text.items.len,
+            };
+            while (at < text.items.len and (text.items[at] & 0xc0) == 0x80) at += 1;
+            const insert = inserts[i % inserts.len];
+            try text.insertSlice(a, at, insert);
+            var lines = try maru.session.editor.line_index.build(a, text.items);
+            defer lines.deinit();
+            onEditSpan(&state, a, text.items, .{ .start = @intCast(at), .old_end = @intCast(at), .new_end = @intCast(at + insert.len) }, lines);
+            while (try prepareBrackets(&state, a, text.items, pool, 0)) {}
+            try expectBracketRepositionOracle(&state, text.items, sample.grammar, pool);
+        }
+    };
+}
+
+test "bracket range cursor product OOM 뒤 낡은 위치를 내지 않고 전체 수집으로 복구한다" {
+    const a = std.testing.allocator;
+    const before = "fn f() void {\n    _ = (1);\n}\n";
+    const insert = "    _ = .{ (2), [2]u8{1, 2} };\n";
+    const at = std.mem.indexOf(u8, before, "    _").?;
+    const after = try std.mem.concat(a, u8, &.{ before[0..at], insert, before[at..] });
+    defer a.free(after);
+    var state = openBudgeted(before, .zig, 0);
+    defer state.deinit(a);
+    try finishBrackets(&state, a, before);
+    const generation = state.provider.?.tree_gen;
+    var lines = try maru.session.editor.line_index.build(a, after);
+    defer lines.deinit();
+    var failed = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    onEditSpan(&state, failed.allocator(), after, .{ .start = @intCast(at), .old_end = @intCast(at), .new_end = @intCast(at + insert.len) }, lines);
+    try std.testing.expect(failed.has_induced_failure);
+    try std.testing.expect(state.provider.?.tree_gen > generation);
+    try std.testing.expect(!state.brackets.ready and bracketSource(&state) == null);
+    try finishBrackets(&state, a, after);
+    try expectBracketRepositionOracle(&state, after, .zig, false);
+}

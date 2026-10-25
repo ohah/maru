@@ -5808,3 +5808,15 @@ inline-caret mode requires it to disappear while numeric edit requests remain ac
 - `check-settings-scroll.py --scrollbar --inline-caret`: 격리 앱에서 실제 픽셀·드래그·기존 입력
   소유권을 확인한다. `--scrollbar-control`과 `--gutter-control`은 이전 바이너리 실패 대조다.
   물리 마우스·키보드나 OS IME 후보창 검증으로 확대하지 않는다.
+
+## Windows 기본 IME 조합창 소유권
+
+- `zig build test-windows-ime-ui`: 집계 2 + 정책 5. 조합창 비트만 제거, 후보/가이드/상위 비트 보존,
+  기본 UI 복원, 지원된 입력 영역과 native 폴백, 숨겨진 agent 포커스와 최상위 모달 우선순위.
+- 중복창·후보 옵션 제거·고착된 소유권·파일 폴백 손실·숨겨진 검색 소유권의 변이 5개를 런타임
+  실패로 검출하고 복원 Debug/ReleaseFast를 확인한다.
+- `check-settings-ime.py --state <격리 앱> --binary <복사한 exe 메타> --output <결과>`:
+  실제 OS 마우스로 활성화하고 foreground/keyboard focus를 확인한 뒤 한국어 IME scan code를 보낸다.
+  두 조합 단계의 실제 픽셀 변화, 기본 조합창 부재와 앱 창 소유권, 정상 종료·config 불변·셸 입력 0을
+  확인한다. `--native-ui-control`은 이전 바이너리의 기본 조합창을 재현해야 한다.
+- OS 입력 주입에 따른 조합 UI 검증이다. 물리 키보드, 후보 선택, 전체 입력 영역의 IME 완료로 세지 않는다.

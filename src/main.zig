@@ -4346,6 +4346,23 @@ fn sidebarSlotFullyVisible(
 /// `keys_while_file` 판정이 그것을 잡았다). 순수 함수라 값으로 고정할 수 있다.
 const PreeditTarget = enum { sidebar_search, agent_search, terminal };
 
+const WindowsPreeditUi = struct {
+    terminal_visible: bool = false,
+    settings_open: bool = false,
+    settings_picking: bool = false,
+    sidebar_search: bool = false,
+    agent_search: bool = false,
+    dock_view: maru.session.dock_panel.View = .explorer,
+    blocked: bool = false,
+};
+fn windowsAppDrawnPreedit(state: WindowsPreeditUi) bool {
+    if (state.blocked) return true;
+    if (state.settings_open) return !state.settings_picking;
+    // File-editor composition and picker hex input still use native UI until
+    // their app-drawn preview is connected. Hidden agent focus is not a target.
+    return state.terminal_visible or preeditTargetFor(state.sidebar_search, state.agent_search, state.dock_view) != .terminal;
+}
+
 fn preeditTargetFor(sidebar_focused: bool, agent_focused: bool, dock_view: maru.session.dock_panel.View) PreeditTarget {
     if (sidebar_focused) return .sidebar_search;
     // 에이전트 검색은 **그 뷰가 보일 때만** 받는다(글자 입력과 같은 규칙).
@@ -11603,6 +11620,15 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         }
         window.horizontal_resize_active = divider_drag != null or sidebar_resize_drag != null;
         window.setInputOverlay(settings_host.ownsInput() or terminal_popup.state.open or terminal_popup.swallow_left_up, if (settings_host.ownsInput()) .retain_on_blur else .dismiss_on_blur);
+        window.setAppDrawnPreedit(windowsAppDrawnPreedit(.{
+            .terminal_visible = active_view == .terminal,
+            .settings_open = settings_host.form.state.open,
+            .settings_picking = settings_host.form.state.picking,
+            .sidebar_search = search_focused,
+            .agent_search = agent_search_focused,
+            .dock_view = dock_view,
+            .blocked = terminal_popup.state.open or confirm_state.open or file_notice.open or choice_notice != null or file_close_waiting or initial_open.job != null,
+        }));
         const window_events = window.poll();
         if (window.focus_loss_serial != terminal_popup_focus_serial) {
             terminal_popup.cancelCapture();
@@ -22291,4 +22317,40 @@ test "Windows settings focus loss generation wraps without reviving overlay" {
     w.noteFocusLoss();
     try std.testing.expectEqual(@as(u64, 0), w.focus_loss_serial);
     try std.testing.expect(!w.input_overlay_open);
+}
+
+test "Windows IME UI app paint hides composition only" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator, .app_drawn_preedit = true };
+    try std.testing.expectEqual(@as(usize, 0x4000000F), w.imeUiOptions(0xC000000F));
+    try std.testing.expectEqual(@as(usize, 0xF), w.imeUiOptions(0x8000000F));
+    try std.testing.expectEqual(@as(usize, 0), w.imeUiOptions(0x80000000));
+}
+test "Windows IME UI native fallback preserves all flags" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator };
+    try std.testing.expectEqual(std.math.maxInt(usize), w.imeUiOptions(std.math.maxInt(usize)));
+    try std.testing.expectEqual(@as(usize, 0xC000000F), w.imeUiOptions(0xC000000F));
+}
+test "Windows IME UI ownership switches restore native options" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator };
+    for ([_]usize{ 0, 0x80000000, 0xC000000F, std.math.maxInt(usize) }) |flags| {
+        w.setAppDrawnPreedit(true);
+        try std.testing.expectEqual(flags & ~@as(usize, 0x80000000), w.imeUiOptions(flags));
+        w.setAppDrawnPreedit(false);
+        try std.testing.expectEqual(flags, w.imeUiOptions(flags));
+    }
+}
+test "Windows IME UI claims only supported composition renderers" {
+    try std.testing.expect(windowsAppDrawnPreedit(.{ .terminal_visible = true }));
+    try std.testing.expect(windowsAppDrawnPreedit(.{ .settings_open = true }));
+    try std.testing.expect(windowsAppDrawnPreedit(.{ .sidebar_search = true }));
+    try std.testing.expect(!windowsAppDrawnPreedit(.{}));
+    try std.testing.expect(!windowsAppDrawnPreedit(.{ .settings_open = true, .settings_picking = true }));
+}
+test "Windows IME UI ignores stale agent focus and respects top overlays" {
+    try std.testing.expect(!windowsAppDrawnPreedit(.{ .agent_search = true, .dock_view = .explorer }));
+    try std.testing.expect(windowsAppDrawnPreedit(.{ .agent_search = true, .dock_view = .agent_sessions }));
+    try std.testing.expect(windowsAppDrawnPreedit(.{ .blocked = true, .settings_open = true, .settings_picking = true }));
 }

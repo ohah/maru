@@ -560,6 +560,7 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
         self.ime_terminal_target_tombstoned = false;
         @import("field_ime.zig").finish(self);
         @import("settings_ime.zig").finish(self);
+        @import("find_ime.zig").finish(self);
         @import("palette_ime.zig").finish(self);
         self.ime_search_owner = null;
         self.ime_search_before = null;
@@ -633,7 +634,7 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
             const replay_event: ?terminal.KeyEvent = self.ime_editor_commit_replay orelse if (event) |ev|
                 // 팔레트의 Enter는 명령 실행이다. 한글 조합을 확정한 바로 그 Enter를 다시 보내면
                 // 검색어가 보일 틈도 없이 선택된 명령이 실행되고 팝업이 닫힌다.
-                if (composing and ev.key == .enter and (self.inputFocus() == .palette or self.inputFocus() == .project_search))
+                if (maru.session.ime.suppressActionEnter(composing, ev.key == .enter) and (self.inputFocus() == .palette or self.inputFocus() == .project_search or self.inputFocus() == .find))
                     null
                 else if (shouldReplayAfterCommit(ev, self.ime_enter_newline))
                     ev
@@ -716,7 +717,7 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
             traceCandidateIME(event, "encode_key", false, false);
             // 입력기가 이 keyDown에서 콜백을 내지 않아도 기존 조합은 살아 있다.
             // 팔레트 Enter를 일반 키로 흘리면 조합 확정 전의 검색 결과를 실행한다.
-            if (composing and ev.key == .enter and (self.inputFocus() == .palette or self.inputFocus() == .project_search)) return;
+            if (maru.session.ime.suppressActionEnter(composing, ev.key == .enter) and (self.inputFocus() == .palette or self.inputFocus() == .project_search or self.inputFocus() == .find)) return;
             // A surviving pin can outlive a focus change between AppKit
             // callbacks. The ordinary key router has no pinned-target input.
             if (!imePinnedTargetIsActive(self)) return;

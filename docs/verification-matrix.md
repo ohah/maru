@@ -5143,3 +5143,11 @@ EOF·UTF-8/UTF-16 범위, gopls 활성화 옵션, refresh 및 유실 응답 복�
 설정/rename owner 전환·필터 OOM 복원을 검사한다. 공통 문맥의 기본 용량은 그대로다.
 `tools/settings-ime`의 합성 손상 기록과 실제 diagnostic·후보창 PNG/OCR을 구분한다.
 실제 후보창 5회 PNG/OCR·후보 전/미리보기/취소 필터 행 수 유지·한자 선택·설정 종료·터미널 복귀도 통과했다. 설정 값 편집 전체의 IME는 별도 범위이며 [계획](plans/settings-search-ime.md)을 따른다.
+
+
+### 찾기·바꾸기 입력 문맥
+
+`zig build test-find-replace-ime`는 동적 UTF-16 범위·NFD·긴 검색어·실패 원자성·키 소비와
+호스트 소유자 전환을 검사한다. 단계와 실제 앱의 독립 화면 검증은
+[찾기·바꾸기 IME 계획](plans/find-replace-ime.md)이 소유한다. 후보 미리보기와 확정 검색어,
+결과 선택, 바꿀 문자열과 문서 내용의 불변을 각각 구분해 확인한다.

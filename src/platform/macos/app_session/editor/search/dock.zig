@@ -206,7 +206,7 @@ pub fn commitPreedit(self: *AppSession) bool {
 pub fn open(self: *AppSession) void {
     if (!self.tryCommitComposition()) return;
     dock.openDockTo(self, .project_search);
-    self.chrome_host.find.input_focused = false;
+    self.chrome_host.find.setInputFocused(false);
     @import("../../web.zig").cancelAddrEdit(self, false);
     self.sidebar_search_active = false;
     self.agent_session_archive_search_active = false;
@@ -530,7 +530,7 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
     switch (intent) {
         .field => |index| {
             if (index >= 4 or index == 3 and !st.replacing or index > 0 and index < 3 and !st.expanded or !self.tryCommitComposition()) return;
-            self.chrome_host.find.input_focused = false;
+            self.chrome_host.find.setInputFocused(false);
             @import("../../web.zig").cancelAddrEdit(self, false);
             self.sidebar_search_active = false;
             self.agent_session_archive_search_active = false;

@@ -36,6 +36,12 @@ pub fn decide(composing: bool, inserted: []const u8, marked_changed: bool, did_d
     return .encode_key;
 }
 
+/// Accepting IME composition must not also invoke an action input's Return.
+/// The host classifies the destination; this policy is independent of any UI.
+pub fn suppressActionEnter(composing: bool, is_enter: bool) bool {
+    return composing and is_enter;
+}
+
 /// UTF-8 문자열에서 마지막 코드포인트를 뗀 슬라이스. continuation 바이트(0x80~0xBF)를 지나
 /// lead 바이트까지 되돌린다. 잘못된 UTF-8이면 1바이트만 뗀다(안전).
 fn dropLastCodepoint(s: []const u8) []const u8 {

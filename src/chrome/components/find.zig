@@ -9,6 +9,9 @@ const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
 const input = @import("../input.zig");
+const overlay_ime = @import("overlay_input_ime.zig");
+pub const IMETransaction = overlay_ime.Transaction;
+pub const IMEKey = overlay_ime.Key;
 const overlay_input = @import("overlay_input.zig"); // 검색어·조합 입력 모델 + 표시 폭(EAW) + 패널 레이아웃(palette와 공유)
 
 /// 비교 뷰의 어느 열인가. **여기 사는 이유는 `Target` 과 같다** — 오버레이가 그 값을 그려야 한다.
@@ -230,6 +233,10 @@ pub const State = struct {
     /// 검색어와 **독립**이다 — 하나를 공유하면 한글을 조합하다 Tab을 누를 때 조합 중인 글자가
     /// 반대편 줄로 넘어간다.
     replace: overlay_input.OverlayInput = .{},
+    ime_input: overlay_ime.Projection = .{},
+    ime_replace: overlay_ime.Projection = .{},
+    ime_identity: u64 = 0, // assigned by the host; never copied into a new logical view
+    ime_epoch: u64 = 1,
     /// 바꾸기 줄이 열렸는가. **`⌘F`는 한 줄 그대로다** — 늘 두 줄이면 평범한 찾기에서도 오버레이가
     /// 본문을 두 줄 가리고, 매치를 화면 가운데 두는 계산(§5.1 reveal)도 함께 흔들린다.
     /// `⌥⌘F`(macOS 관례)가 이것을 켠다.
@@ -269,6 +276,8 @@ pub const State = struct {
     page_found: ?bool = null,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
+        self.ime_input.deinit(allocator);
+        self.ime_replace.deinit(allocator);
         self.input.deinit(allocator);
         self.replace.deinit(allocator);
     }
@@ -282,6 +291,36 @@ pub const State = struct {
         return self.replace_open and self.target == .editor and self.scope == null;
     }
 
+    pub fn effectiveFocus(self: *const State) Focus {
+        return if (self.replaceActive() and self.focus == .replace) .replace else .find;
+    }
+    pub fn field(self: *State, role: Focus) *overlay_input.OverlayInput {
+        return if (role == .replace) &self.replace else &self.input;
+    }
+    pub fn projection(self: *State, role: Focus) *overlay_ime.Projection {
+        return if (role == .replace) &self.ime_replace else &self.ime_input;
+    }
+    pub fn nativeContext(self: *const State, role: Focus) ?*const @import("../../inline_text_input.zig").DynamicContext {
+        return if (role == .replace) self.ime_replace.current(&self.replace) else self.ime_input.current(&self.input);
+    }
+    pub fn setInputFocused(self: *State, focused_value: bool) void {
+        if (self.input_focused != focused_value) self.ime_epoch +|= 1;
+        self.input_focused = focused_value;
+    }
+    pub fn setFieldFocus(self: *State, role: Focus) void {
+        if (self.focus != role) self.ime_epoch +|= 1;
+        self.focus = role;
+    }
+    pub fn tryCommitField(self: *State, allocator: std.mem.Allocator, role: Focus) ?bool {
+        const value = self.field(role);
+        const model = self.projection(role);
+        if (model.current(value) != null) return model.commitAll(allocator, value);
+        return value.commitPreedit(allocator); // preserve legacy append-only callers
+    }
+    pub fn commitField(self: *State, allocator: std.mem.Allocator, role: Focus) bool {
+        return self.tryCommitField(allocator, role) orelse false;
+    }
+
     /// 지금 키를 받는 입력줄.
     pub fn focused(self: *State) *overlay_input.OverlayInput {
         return if (self.replaceActive() and self.focus == .replace) &self.replace else &self.input;
@@ -289,6 +328,9 @@ pub const State = struct {
 
     /// 오버레이를 연다 — 검색어·조합·네비·카운트를 비운다(host가 곧 recompute, 빈 쿼리면 매치 0이라 안전).
     pub fn show(self: *State) void {
+        self.ime_epoch +|= 1;
+        self.ime_input.invalidate();
+        self.ime_replace.invalidate();
         self.input.clear();
         // **바꿀 문자열도 비운다.** 남겨 두면 새로 연 찾기에서 Enter 한 번이 **지난번 문자열로**
         // 바꾼다 — 보이지 않는 상태가 파괴적 편집을 하는 자리다.
@@ -309,6 +351,7 @@ pub const State = struct {
     }
 
     pub fn hide(self: *State) void {
+        self.ime_epoch +|= 1;
         self.open = false;
         self.input_focused = false;
     }
@@ -377,7 +420,12 @@ pub fn handle(allocator: std.mem.Allocator, k: input.InputEvent.KeyEvent, state:
             return .navigated;
         },
         .backspace => {
-            state.focused().backspace();
+            const role = state.effectiveFocus();
+            const model = state.projection(role);
+            const field_value = state.field(role);
+            if (model.current(field_value) != null) {
+                _ = model.deleteBackward(allocator, field_value);
+            } else field_value.backspace();
             return if (state.replaceActive() and state.focus == .replace) .replace_text_changed else .query_changed;
         },
         .char => {
@@ -386,7 +434,14 @@ pub fn handle(allocator: std.mem.Allocator, k: input.InputEvent.KeyEvent, state:
                 state.hide();
                 return .close;
             }
-            state.focused().appendChar(allocator, k.codepoint) catch {};
+            const role = state.effectiveFocus();
+            const model = state.projection(role);
+            const field_value = state.field(role);
+            if (model.current(field_value) != null) {
+                var bytes: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(k.codepoint, &bytes) catch return .focus_moved;
+                _ = model.insert(allocator, field_value, bytes[0..n], null, null);
+            } else field_value.appendChar(allocator, k.codepoint) catch {};
             return if (state.replaceActive() and state.focus == .replace) .replace_text_changed else .query_changed;
         },
         // **Tab은 바꾸기 줄이 열렸을 때만 뜻이 있다** — 두 입력을 오간다(§5.1). 안 열렸으면 예전처럼
@@ -396,7 +451,7 @@ pub fn handle(allocator: std.mem.Allocator, k: input.InputEvent.KeyEvent, state:
                 state.hide();
                 return .close;
             }
-            state.focus = if (state.focus == .find) .replace else .find;
+            state.setFieldFocus(if (state.focus == .find) .replace else .find);
             return .focus_moved;
         },
         // left/right(가로 화살표)는 Find 입력줄에서 의미 없어 기타 키와 같이 닫는다(기존 동작 보존 — 예전엔
@@ -405,6 +460,57 @@ pub fn handle(allocator: std.mem.Allocator, k: input.InputEvent.KeyEvent, state:
             state.hide();
             return .close;
         },
+    }
+}
+
+// Native ranges can place the caret inside an unbounded query. Borrow only whole
+// visible graphemes; drawing and candidate anchoring share this allocation-free view.
+const NativeLine = struct { text: []const u8, start_col: u32, caret_col: u32, lead: bool, tail: bool };
+fn nativeLine(state: *const State, role: Focus, cols: u32) ?NativeLine {
+    const context = state.nativeContext(role) orelse return null;
+    const text = context.text();
+    const grapheme = @import("../../grapheme.zig");
+    const caret = grapheme.snapToBoundary(text, context.selected.end);
+    const l = @import("text_field.zig").fieldLayout(.{ .text = text, .caret = caret }, .{ .cols = cols, .nav_end = prompt_cols });
+    var begin: usize = 0;
+    var column: u32 = 0;
+    while (begin < text.len and column < l.view) {
+        const end = grapheme.clusterEnd(text, begin);
+        column += overlay_input.displayCols(text[begin..end]);
+        begin = end;
+    }
+    const start_col = prompt_cols + @as(u32, if (l.lead_ellipsis) 1 else 0) + column - l.view;
+    const right = cols -| @as(u32, if (l.tail_ellipsis) 1 else 0);
+    var end = begin;
+    var at = start_col;
+    while (end < text.len) {
+        const next = grapheme.clusterEnd(text, end);
+        const width = overlay_input.displayCols(text[end..next]);
+        if (at + width > right) break;
+        at += width;
+        end = next;
+    }
+    return .{ .text = text[begin..end], .start_col = start_col, .caret_col = l.caret_col, .lead = l.lead_ellipsis, .tail = l.tail_ellipsis };
+}
+fn drawInput(state: *const State, role: Focus, cols: u32, x: i32, y: i32, cw: u32, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
+    const prompt: []const u8 = if (role == .find) "Find: " else "Repl: ";
+    if (nativeLine(state, role, cols)) |line| {
+        const pieces = [_]struct { bytes: []const u8, column: u32 }{
+            .{ .bytes = prompt, .column = 0 },
+            .{ .bytes = if (line.lead) "…" else "", .column = prompt_cols },
+            .{ .bytes = line.text, .column = line.start_col },
+            .{ .bytes = if (line.tail) "…" else "", .column = cols -| 1 },
+        };
+        for (pieces) |piece| {
+            if (piece.bytes.len == 0) continue;
+            const runs = try arena.alloc(draw.Run, 1);
+            runs[0] = .{ .text = piece.bytes };
+            try out.append(arena, .{ .text = .{ .origin = .{ .x = x + @as(i32, @intCast(piece.column * cw)), .y = y }, .runs = runs, .role = .surface_fg } });
+        }
+    } else {
+        const field = if (role == .find) &state.input else &state.replace;
+        const runs = try overlay_input.promptRuns(arena, prompt, overlay_input.inputLineView(field, prompt_cols, cols));
+        try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = y }, .runs = runs, .role = .surface_fg } });
     }
 }
 
@@ -425,9 +531,11 @@ pub fn caretRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
         overlay_input.inputLineView(&state.replace, prompt_cols, lay.panel_cols)
     else
         overlay_input.inputLineView(&state.input, prompt_cols, textCols(state, lay.panel_cols));
-    if (line.caret_col >= lay.panel_cols) return null; // 패널 밖(극단 좁음)
+    const native = nativeLine(state, if (on_replace) .replace else .find, if (on_replace) lay.panel_cols else textCols(state, lay.panel_cols));
+    const caret_col = if (native) |n| n.caret_col else line.caret_col;
+    if (caret_col >= lay.panel_cols) return null; // 패널 밖(극단 좁음)
     const cy = lay.y + if (on_replace) @as(i32, @intCast(lay.ch)) else 0;
-    return .{ .x = lay.x + @as(i32, @intCast(line.caret_col * lay.cw)), .y = cy, .w = lay.cw, .h = lay.ch };
+    return .{ .x = lay.x + @as(i32, @intCast(caret_col * lay.cw)), .y = cy, .w = lay.cw, .h = lay.ch };
 }
 
 /// **활성 pane 우상단**(findLayout) 한 줄 패널을 `out`에 append한다(배경 fill + "Find: <query><조합중>" + 우측 정렬
@@ -458,9 +566,7 @@ pub fn view(
     // "Find: " + (…?) + query(창) + preedit(조합 중) (한 text op). prefix는 ASCII라 칸 수=바이트 수. 조합 글자는
     // query 뒤에 같은 색으로 붙여 입력 가시성을 준다(IME 조합 상태가 오버레이에 즉시 보인다). 검색어가 텍스트 영역을
     // 넘치면 inputLineView가 tail 창(선두 "…")으로 오른쪽 정렬해 방금 친 글자·caret이 잘려 안 보이던 문제를 없앤다.
-    const line = overlay_input.inputLineView(&state.input, prompt_cols, textCols(state, lay.panel_cols));
-    const prompt_runs = try overlay_input.promptRuns(arena, "Find: ", line); // 프롬프트+(…?)+query+preedit run 조립(palette와 공유)
-    try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = y }, .runs = prompt_runs, .role = .surface_fg } });
+    try drawInput(state, .find, textCols(state, lay.panel_cols), x, y, cw, arena, out);
 
     if (regexButtonRect(state, p)) |button| {
         const button_runs = try arena.alloc(draw.Run, 1);
@@ -491,9 +597,7 @@ pub fn view(
     // 다르면 두 입력이 세로로 안 맞아 눈이 줄을 잃는다. 카운터는 이 줄에 없다(매치 수는 검색어의 성질이다).
     if (state.replaceActive()) {
         const ry = y + @as(i32, @intCast(lay.ch));
-        const rline = overlay_input.inputLineView(&state.replace, prompt_cols, lay.panel_cols);
-        const rruns = try overlay_input.promptRuns(arena, "Repl: ", rline);
-        try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = ry }, .runs = rruns, .role = .surface_fg } });
+        try drawInput(state, .replace, lay.panel_cols, x, ry, cw, arena, out);
     }
 
     // 입력 커서: 검색어+조합 끝(다음 입력 위치)에 cursor role fill 1칸(caretRect 단일 출처). platform rasterizer가
@@ -1167,4 +1271,51 @@ test "visibleContains — 보이는 패널은 입력 줄보다 사방 패딩만�
     try std.testing.expect(!visibleContains(&s, p, x0 + 4, y0 + 16 + 13));
     s.hide();
     try std.testing.expect(!visibleContains(&s, p, x0 + 4, y0 + 4)); // 닫히면 없다
+}
+
+test "find input IME model coverage" {
+    std.testing.refAllDecls(overlay_ime);
+}
+
+test "find input IME viewport borrows long text without truncating source" {
+    const a = std.testing.allocator;
+    var state: State = .{};
+    defer state.deinit(a);
+    var bytes: [10000]u8 = undefined;
+    @memset(&bytes, 'x');
+    try state.input.query.appendSlice(a, &bytes);
+    _ = state.ime_input.sync(a, &state.input).?;
+    state.ime_input.context.value.selected = .{ .start = 4000, .end = 4000 };
+    const line = nativeLine(&state, .find, 30).?;
+    try std.testing.expect(line.lead and line.tail and line.text.len <= 22);
+    try std.testing.expect(line.caret_col >= prompt_cols and line.caret_col < 30);
+    try std.testing.expectEqual(@as(usize, 10000), state.input.query.items.len);
+}
+
+test "find input IME viewport never splits NFD grapheme" {
+    const a = std.testing.allocator;
+    var state: State = .{};
+    defer state.deinit(a);
+    try state.input.query.appendSlice(a, "aaaaaaaa한😀tail");
+    _ = state.ime_input.sync(a, &state.input).?;
+    state.ime_input.context.value.selected = .{ .start = 11, .end = 11 };
+    const line = nativeLine(&state, .find, 12).?;
+    try std.testing.expect(std.unicode.utf8ValidateSlice(line.text));
+    try std.testing.expect(line.caret_col < 12);
+    if (std.mem.indexOf(u8, line.text, "ᅡ") != null) try std.testing.expect(std.mem.indexOf(u8, line.text, "한") != null);
+}
+
+test "find input IME state swap transfers projection ownership" {
+    const a = std.testing.allocator;
+    var left: State = .{};
+    defer left.deinit(a);
+    var right: State = .{};
+    defer right.deinit(a);
+    try left.input.query.appendSlice(a, "left");
+    try right.input.query.appendSlice(a, "right");
+    _ = left.ime_input.sync(a, &left.input).?;
+    _ = right.ime_input.sync(a, &right.input).?;
+    std.mem.swap(State, &left, &right);
+    try std.testing.expectEqualStrings("right", left.nativeContext(.find).?.text());
+    try std.testing.expectEqualStrings("left", right.nativeContext(.find).?.text());
 }

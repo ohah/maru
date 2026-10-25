@@ -79,12 +79,13 @@ macOS 로컬 shell 1개 surface
 - [pane 구문 준비와 본문 색의 내부 비용 귀속](plans/editor-pane-syntax-attribution.md) — 기존 사본의 구문 준비와 본문 색 구간을 더 나누며 제품은 유지한다.
 - [pane 색 계산과 그리기 목록 변환 비용 귀속](plans/editor-pane-lowering-attribution.md) — 제품 사본의 pane 내부 색·기하·구문 준비·본문 조립과 그리기 목록 변환을 구분해 관측한다.
 - [고정 머리줄 요약의 변경 범위 재사용](plans/editor-sticky-change-reuse.md) — 같은 Provider의 정확한 한 세대·한 native 편집 통지에서 이미 계산한 범위를 빌린다.
+- [공유 분할의 고정 머리줄 심볼 요약 복사](plans/editor-shared-sticky-summary.md) — 유효한 집계의 독립 복사로 새 뷰의 전체 재순회를 줄인다. 집중·제품 검증·전후 실측·전체 게이트 완료, PR CI·머지는 미완료다.
 - [캐시 경로의 원격 커밋 검증](plans/editor-scm-cache-path-test.md) — 정상 캐시 저장소를 허용하면서 실제 로컬 메시지 경로 유출을 거절한다.
 - [pane 프레임 준비 비용 귀속](plans/editor-pane-frame-attribution.md) — 편집과 프레임을 분리해 기하·표식·장식·고정 머리줄의 중첩 비용을 관측한다.
 - [구문 Provider 편집 비용 귀속](plans/editor-provider-edit-attribution.md) — 파싱·변경 범위·트리 이동과 실제 뷰별 호출 수를 분리해 다음 개선의 근거를 만든다.
 - [같은 입력의 완료된 파싱 결과 재사용](plans/editor-shared-parse-reuse.md) — 뷰별 자원 소유와 자체 변경 범위 비교를 유지하는 인계 기계부터 대조한다. 제품 연결의 집중 검사는 통과했고 전후 실측·최종 게이트는 미완료다.
 - [같은 이전 구문 스냅샷의 변경 범위 재사용](plans/editor-shared-change-origin.md) — 실제 복사 계보와 정확한 편집이 일치할 때만 범위 값을 재사용한다. #4589은 필수 CI를 통과해 `00c1a9080`으로 머지됐고 실제 main의 집중·문서 검사도 통과했다.
-- [공유 분할 스냅샷의 입력·복사 계보 전달](plans/editor-shared-origin-snapshot.md) — 유효한 원본 증명만 독립 수신 자원에 묶어 분할 첫 입력에도 재사용한다. 로컬 구현·검증·실측과 실제 main 리베이스를 완료했으며 후속 PR CI·머지는 미완료다.
+- [공유 분할 스냅샷의 입력·복사 계보 전달](plans/editor-shared-origin-snapshot.md) — 유효한 원본 증명만 독립 수신 자원에 묶어 분할 첫 입력에도 재사용한다. PR #4591의 필수 CI 통과·머지와 실제 main 집중/문서 재검증을 완료했다. 해당 main의 별도 CI는 대기 중이다.
 - [도크 아웃라인](plans/editor-outline.md) — 활성 문서 계층·현재 심볼 강조·분할 전환과 클릭 수명
 - [프로젝트 전체 검색](plans/editor-project-search.md) — VS Code 디스크 rg/열린 모델 구성 채택, 번들·프로토콜과 [worker 백엔드](plans/editor-project-search-worker.md) 구현·합성 검증; [앱 owner](plans/editor-project-search-owner.md)의 문서·감시 확인·수명 API 연결, [여러 root 요청](plans/editor-project-search-roots.md)의 후보 합집합·전체 예산 연결, [도크 구현·검증](plans/editor-project-search-dock.md)에 앱 입력·결과 수신·클릭 재검증과 제품 실측을 기록; 두벌식 HID·공유/독립 문서·root 교체 화면을 검증; [바꾸기 미리보기 S3](plans/editor-project-replace-preview.md)는 파일/일치 선택·읽기 전용 diff·충돌 상태를 연결, [S4a 열린 문서·S4b 디스크 단일 파일 적용·자동 저장](plans/editor-project-replace-apply.md)을 연결, [여러 파일 적용 S4c](plans/editor-project-replace-batch.md)는 승인된 전체 준비 정책으로 열린 문서 배치 UI까지 연결, 전체 OS watcher/종료·다른 파일시스템·VoiceOver/OS 후보창 픽셀은 별도 경계
 - [프로젝트 바꾸기 배치](plans/editor-project-replace-batch.md) — 닫힌 파일 읽기·물리 신원/별칭과 비활성 문서 준비·항목 예약 API까지 구현. 혼합 coordinator의 전체 준비/commit·pane 게시·저장까지 구현. 혼합 snapshot/disk worker API까지 구현. 제품 전체 UI의 수집·미리보기·적용과 결과 문서 신원까지 연결.

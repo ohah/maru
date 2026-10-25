@@ -33,6 +33,14 @@ pub const Summary = struct {
     edited: ?struct { lo: u32, hi: u32 } = null,
     edits: u64 = 0,
 
+    /// 현재 집계만 새 뷰의 트리로 옮긴다. 편집 중인 과거 요약은 현재 트리를 설명하지 못한다.
+    pub fn copyReady(self: *const Summary, current: *c.TSTree, generation: u64) ?Summary {
+        if (self.tree == null or self.generation != generation or self.edits != 0 or self.edited != null) return null;
+        // 수신 provider의 트리와도 참조를 분리해야 다음 편집이 요약에 두 번 적용되지 않는다.
+        const tree = c.ts_tree_copy(current) orelse return null;
+        return .{ .tree = tree, .generation = generation, .count = self.count };
+    }
+
     pub fn invalidate(self: *Summary) void {
         if (self.tree) |tree| c.ts_tree_delete(tree);
         self.* = .{};

@@ -70773,6 +70773,52 @@ test "SMT3 semantic recovery strict EOF, refresh and stalled response retry" {
     try testing.expect(f.applied(3));
 }
 
+test "bracket snapshot product 실제 분할 첫 프레임은 재수집하지 않고 원본 종료 뒤 Undo Redo도 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const source = try undoFixture(&fx, a, "bracket-split.zig", "fn f() void {\n _ = .{ (1), (2) };\n}\n");
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, source, " "));
+    try testing.expect(undoEdit(fx.session, source));
+    try testing.expect(source.rt.editor_syntax.origin_state.?.current != null);
+    try syntax_color.finishBrackets(&source.rt.editor_syntax, a, source.rt.editorDocument().opened.?.file.content);
+    const original_pane = pane_ops.activePane(fx.session);
+    const original_index = std.mem.indexOfScalar(*Term, original_pane.terms.items, source).?;
+    const peer = try pane_ops.splitSharedEditorPane(fx.session, .horizontal, false);
+    fx.leaf_rect.w /= 2;
+    try testing.expect(peer.rt.editor_syntax.brackets.ready);
+    try testing.expect(peer.rt.editor_syntax.brackets.leaves.items.ptr != source.rt.editor_syntax.brackets.leaves.items.ptr);
+    try foldMarksReady(&fx, peer);
+    try testing.expectEqual(@as(u64, 0), peer.rt.editor_syntax.brackets.rebuilds);
+    fx.term = peer;
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, original_pane, original_index);
+    for (0..3) |step| {
+        peer.rt.editor_selection = editor_selection.Selection.at(0);
+        switch (step) {
+            0 => try testing.expect(insertText(fx.session, peer, "fn g() void {}\n")),
+            1 => try testing.expect(undoEdit(fx.session, peer)),
+            else => try testing.expect(redoEdit(fx.session, peer)),
+        }
+        try foldMarksReady(&fx, peer);
+        const bytes = peer.rt.editorDocument().opened.?.file.content;
+        try syntax_color.finishBrackets(&peer.rt.editor_syntax, a, bytes);
+        var cold = syntax_color.openBudgeted(bytes, .zig, 0);
+        defer cold.deinit(a);
+        try syntax_color.finishBrackets(&cold, a, bytes);
+        const pool = peer.rt.editor_syntax.bracket_resolved.?.independent;
+        _ = syntax_color.advanceBrackets(&cold, a, bytes, pool);
+        try testing.expectEqualDeep(cold.bracket_info.items, peer.rt.editor_syntax.bracket_info.items);
+        const expected = syntax_color.bracketSource(&cold).?;
+        const actual = syntax_color.bracketSource(&peer.rt.editor_syntax).?;
+        for (0..bytes.len + 1) |pos| {
+            try testing.expectEqualDeep(expected.pairAt(pos), actual.pairAt(pos));
+            try testing.expectEqualDeep(maru.session.editor.brackets.jumpTarget(expected, bytes.len, pos), maru.session.editor.brackets.jumpTarget(actual, bytes.len, pos));
+        }
+    }
+}
+
 test "sticky snapshot product 공유 분할의 요약과 머리줄은 원본 종료 후에도 독립적이다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = testing.allocator;

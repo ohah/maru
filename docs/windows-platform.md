@@ -12801,3 +12801,11 @@ Windows 설정의 세로 휠은 공통 `settings.scrollByRows`로 전달한다. 
 `tools/windows/check-settings-focus.py`는 소유한 입력 큐 사이의 실제 keyboard focus 전환을
 검사한다. 전역 foreground 활성화·물리 Alt+Tab·키보드·IME 검증으로 계산하지 않는다.
 설정/검색/편집기의 텍스트 포커스별 IME 위치·조합 처리는 여전히 후속 작업이다.
+
+설정 **검색란**의 IMM 위치 요청은 `settings.searchCaretRect`의 공용 그리기 좌표를 사용한다.
+확정 문자는 표시 셀 폭으로 이동하고 조합 미리보기는 조합 시작 위치를 유지한다. 창 크기·셀 크기
+변경은 기존 IME 캐시 키에 반영하며 검색 종료 시 터미널 위치 요청으로 돌아간다.
+`test-windows-settings`의 검색 caret 검사 5개는 닫힘/비검색/선택기 소유권, 좌표 변환,
+한글 표시 폭, 조합과 확정, 크기 변경을 다룬다. `ime_settings_caret_updates`는 위치 **요청** 수이며
+실제 OS 후보창 표시나 물리 IME 입력의 증거가 아니다. 설정 필드 편집·다른 검색란·편집기의
+텍스트 입력과 IME 대상 연결은 여전히 남아 있다.

@@ -788,3 +788,5 @@ Windows 설정 연결 검증: `test-windows-settings`는 값 검증과 사이드
 설정 휠 스크롤은 연결했다. 정밀 델타·가로 축·비활성 정책·자식 모달 소유권·큰 값·검색/섹션 문맥 변경을 검사한다. `tools/windows/check-settings-scroll.py`의 이전 바이너리 대조와 수정 바이너리의 실제 픽셀 검증을 유지한다. 스크롤바 표시/드래그는 아직 후속 작업이다.
 
 설정창 유지/일시 메뉴 해제의 네이티브 포커스 정책을 분리했다. `test-windows-settings-focus`와 `tools/windows/check-settings-focus.py`로 전환·정책 인계·남은 릴리스 취소를 검증한다. 텍스트 포커스별 IME 대상·후보 위치와 편집기 조합 처리는 아직 완료되지 않았다.
+
+설정 검색란의 IMM 위치 요청은 공용 `searchCaretRect`에 연결했다. 확정/EAW 폭·조합 시작·창/셀 크기 변경과 비검색 소유권은 `test-windows-settings`의 5개 검사로 검증한다. 위치 요청 카운터는 물리 IME 후보창 증거로 계산하지 않는다. 일반 설정 필드·다른 검색·편집기 조합 연결은 후속 작업이다.

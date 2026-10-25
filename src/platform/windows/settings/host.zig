@@ -207,6 +207,23 @@ pub const Host = struct {
         if (widget.scrollByRows(&self.form.state, f.sections, f.rows, props, tokens, lines)) self.scroll_moves += 1;
         self.scroll_peak = @max(self.scroll_peak, self.form.state.scroll.offset_y_px);
     }
+    /// Reuse the painted search caret geometry for IMM; a terminal cursor is
+    /// unrelated to the active modal input. Preedit starts at this same caret.
+    pub fn imeCaret(self: *Host, props: maru.chrome.props.ChromeProps, tokens: *const maru.chrome.Tokens) ?maru.session.mouse_coordinates.ImeCaret {
+        if (!self.form.state.open or !self.form.state.searching or self.form.state.picking) return null;
+        var arena = std.heap.ArenaAllocator.init(self.a);
+        defer arena.deinit();
+        const f = self.form.frame(arena.allocator(), self.cfg.*) catch return null;
+        const rect = widget.searchCaretRect(&self.form.state, f.sections, f.rows, props, tokens) orelse return null;
+        return .{
+            .row = 0,
+            .col = 0,
+            .cell_w = rect.w,
+            .cell_h = rect.h,
+            .origin_x = @intCast(@max(0, rect.x)),
+            .origin_y = @intCast(@max(0, rect.y)),
+        };
+    }
     pub fn draw(self: *Host, a: std.mem.Allocator, props: maru.chrome.props.ChromeProps, tokens: *const maru.chrome.Tokens, ops: *std.ArrayList(maru.chrome.draw.Op)) !void {
         const f = try self.form.frame(a, self.cfg.*);
         widget.ensureSelectedVisible(&self.form.state, f.sections, f.rows, props, tokens);
@@ -313,6 +330,87 @@ test "Windows settings and sidebar serialize partial config writes" {
 }
 
 const wheel_test_props: maru.chrome.props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 1000, .backing_height_px = 240 } };
+test "Windows settings IME respects closed and non-search owners" {
+    var cfg: maru.config.Config = .{};
+    var host: Host = .{ .a = std.testing.allocator, .config_arena = std.testing.allocator, .io = std.testing.io, .cfg = &cfg, .path = null };
+    const tk = wheelTestTokens();
+    host.form.state.startSearch();
+    try std.testing.expect(host.imeCaret(wheel_test_props, &tk) == null);
+    host.form.state.show();
+    try std.testing.expect(host.imeCaret(wheel_test_props, &tk) == null);
+    host.form.state.startSearch();
+    host.form.state.picking = true;
+    try std.testing.expect(host.imeCaret(wheel_test_props, &tk) == null);
+}
+
+test "Windows settings IME maps painted search cell to client anchor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(a, &cfg);
+    const tk = wheelTestTokens();
+    host.form.state.startSearch();
+    const f = try host.form.frame(a, cfg);
+    const rect = widget.searchCaretRect(&host.form.state, f.sections, f.rows, wheel_test_props, &tk).?;
+    const anchor = host.imeCaret(wheel_test_props, &tk).?.anchor().?;
+    try std.testing.expectEqual(rect.x, anchor.top_left.x);
+    try std.testing.expectEqual(rect.y, anchor.top_left.y);
+    try std.testing.expectEqual(rect.x + @as(i32, @intCast(rect.w)), anchor.bottom_right.x);
+    try std.testing.expectEqual(rect.y + @as(i32, @intCast(rect.h)), anchor.below.y);
+}
+
+test "Windows settings IME advances by display cells for wide committed text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(arena.allocator(), &cfg);
+    const tk = wheelTestTokens();
+    host.form.state.startSearch();
+    const before = host.imeCaret(wheel_test_props, &tk).?.anchor().?;
+    host.form.state.appendSearchCp('a');
+    host.form.state.appendSearchCp(0xAC00);
+    const after = host.imeCaret(wheel_test_props, &tk).?.anchor().?;
+    try std.testing.expectEqual(before.top_left.x + 24, after.top_left.x);
+    try std.testing.expectEqual(before.top_left.y, after.top_left.y);
+}
+
+test "Windows settings IME stays at composition start until commit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(arena.allocator(), &cfg);
+    const tk = wheelTestTokens();
+    host.form.state.startSearch();
+    const before = host.imeCaret(wheel_test_props, &tk).?;
+    host.form.state.setSearchPreedit("\xea\xb0\x80");
+    try std.testing.expectEqualDeep(before, host.imeCaret(wheel_test_props, &tk).?);
+    try std.testing.expect(host.form.state.commitSearchPreedit());
+    try std.testing.expectEqual(before.origin_x + 16, host.imeCaret(wheel_test_props, &tk).?.origin_x);
+    host.form.state.endSearch();
+    try std.testing.expect(host.imeCaret(wheel_test_props, &tk) == null);
+}
+
+test "Windows settings IME cache key follows resized modal and font metrics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(arena.allocator(), &cfg);
+    const tk = wheelTestTokens();
+    host.form.state.startSearch();
+    const before = host.imeCaret(wheel_test_props, &tk).?;
+    var props = wheel_test_props;
+    props.metrics.backing_width_px += 200;
+    const resized = host.imeCaret(props, &tk).?;
+    try std.testing.expectEqual(before.origin_x + 100, resized.origin_x);
+    props.metrics.cell_width_px = 10;
+    props.metrics.cell_height_px = 20;
+    const font = host.imeCaret(props, &tk).?;
+    try std.testing.expectEqual(@as(u32, 10), font.cell_w);
+    try std.testing.expectEqual(@as(u32, 20), font.cell_h);
+    try std.testing.expect(!std.meta.eql(resized, font));
+}
+
 fn wheelTestTokens() maru.chrome.Tokens {
     return .{ .palette = std.EnumArray(maru.chrome.tokens.ColorRole, maru.color.Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
 }

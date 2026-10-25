@@ -204,6 +204,7 @@ const VK_MENU: i32 = 0x12;
 /// VK 값이 문자와 다르므로 이 변환이 필요하다(직접 표를 만들면 레이아웃마다 틀린다).
 const MAPVK_VK_TO_CHAR: UINT = 2;
 const WM_IME_STARTCOMPOSITION: UINT = 0x010D;
+const WM_IME_SETCONTEXT: UINT = 0x0281;
 const WM_IME_ENDCOMPOSITION: UINT = 0x010E;
 const WM_IME_COMPOSITION: UINT = 0x010F;
 /// `ImmGetCompositionStringW`의 인덱스. `COMPSTR`은 **조합 중** 문자열(미리보기), `RESULTSTR`은 확정된
@@ -288,6 +289,7 @@ extern "user32" fn TranslateMessage(*const MSG) callconv(abi.winapi) i32;
 extern "user32" fn DispatchMessageW(*const MSG) callconv(abi.winapi) LRESULT;
 extern "user32" fn ShowWindow(HWND, i32) callconv(abi.winapi) i32;
 extern "user32" fn GetClientRect(HWND, *RECT) callconv(abi.winapi) i32;
+extern "user32" fn GetFocus() callconv(abi.winapi) ?HWND;
 extern "user32" fn SendMessageW(HWND, UINT, WPARAM, LPARAM) callconv(abi.winapi) LRESULT;
 extern "user32" fn LoadCursorW(?HINSTANCE, usize) callconv(abi.winapi) ?HCURSOR;
 extern "user32" fn SetCursor(?HCURSOR) callconv(abi.winapi) ?HCURSOR;
@@ -438,6 +440,8 @@ pub const Window = struct {
     /// A chrome popup owns the first outside click, including the caption/border.
     input_overlay_open: bool = false,
     overlay_focus_policy: OverlayFocusPolicy = .dismiss_on_blur,
+    app_drawn_preedit: bool = false,
+    ime_ui_options: usize = 0xC000000F,
     /// Sticky generation: focus loss remains observable even if focus returns in one poll.
     focus_loss_serial: u64 = 0,
     retained_overlay_blurs: usize = 0,
@@ -848,6 +852,19 @@ pub const Window = struct {
         }
     }
 
+    /// Microsoft WM_IME_SETCONTEXT requires custom composition renderers to
+    /// clear only ISC_SHOWUICOMPOSITIONWINDOW. Candidate/guide UI stays native.
+    /// https://learn.microsoft.com/en-us/windows/win32/intl/wm-ime-setcontext
+    pub fn imeUiOptions(self: *const Window, flags: usize) usize {
+        return if (self.app_drawn_preedit) flags & ~@as(usize, 0x80000000) else flags;
+    }
+    pub fn setAppDrawnPreedit(self: *Window, app_drawn: bool) void {
+        if (self.app_drawn_preedit == app_drawn) return;
+        self.app_drawn_preedit = app_drawn;
+        // Logical text focus can change inside one HWND. Refresh the default
+        // IME UI flags without waiting for another native window activation.
+        if (GetFocus() == self.hwnd) _ = DefWindowProcW(self.hwnd, WM_IME_SETCONTEXT, 1, @bitCast(self.imeUiOptions(self.ime_ui_options)));
+    }
     pub fn setImeCaret(self: *Window, caret: @import("../../maru.zig").session.mouse_coordinates.ImeCaret) void {
         const anchor = caret.anchor() orelse return;
         const himc = ImmGetContext(self.hwnd) orelse return;
@@ -1052,6 +1069,19 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(abi.w
             // Alt+F4 밖의 조합도 삼켜진다. Alt+F4(창 닫기)는 사용자가 기대하는 동작이라 예외로 넘긴다.
             if (msg == WM_SYSKEYDOWN and wparam != 0x73) return 0; // 0x73 = VK_F4
             if (msg == WM_KEYDOWN) return 0;
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
+        WM_IME_SETCONTEXT => {
+            if (self) |w| {
+                w.ime_ui_options = @bitCast(lparam);
+                return DefWindowProcW(hwnd, msg, wparam, @bitCast(w.imeUiOptions(w.ime_ui_options)));
+            }
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
+        WM_IME_STARTCOMPOSITION => {
+            // The app paints these characters; forwarding start would open a
+            // second composition popup. GCS_RESULTSTR still uses DefWindowProc.
+            if (self) |w| if (w.app_drawn_preedit) return 0;
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         },
         WM_IME_COMPOSITION => {

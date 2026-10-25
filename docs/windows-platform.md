@@ -12833,3 +12833,16 @@ Windows 설정의 세로 휠은 공통 `settings.scrollByRows`로 전달한다. 
 `test-windows-settings`의 조합 검사 5개와 `test-settings-form`의 소유권 전환 검사가 이 계약을
 다룬다. `--double-caret-control --inline-caret`는 이전 바이너리의 중복 커서를 화면으로 재현한다.
 색 선택기 내부 hex 편집과 물리 IME 후보창은 아직 후속 작업이다.
+
+앱이 조합을 그리는 입력 영역에서는 `Window.setAppDrawnPreedit`가 기본 IME 조합창을 숨긴다.
+`WM_IME_SETCONTEXT`의 `ISC_SHOWUICOMPOSITIONWINDOW`만 지우고 후보·가이드 옵션은 보존하며,
+`WM_IME_STARTCOMPOSITION`도 앱이 처리한다. 확정 문자열은 기존 DefWindowProc → WM_CHAR 경로를
+유지한다. 근거는 [Microsoft WM_IME_SETCONTEXT](https://learn.microsoft.com/en-us/windows/win32/intl/wm-ime-setcontext)와
+[WM_IME_STARTCOMPOSITION](https://learn.microsoft.com/en-us/windows/win32/intl/wm-ime-startcomposition)다.
+논리 포커스가 한 HWND 안에서 바뀌면 마지막 원본 UI 옵션으로 기본 IME를 갱신한다. 직접 그리기가
+연결되지 않은 파일 편집기·색 선택기 내부 입력은 기본 조합창을 유지한다. 숨겨진 agent 검색 포커스는
+소유권을 얻지 않는다. `test-windows-ime-ui`는 집계 2 + 정책 검사 5개다.
+`tools/windows/check-settings-ime.py`는 격리 앱을 마우스 SendInput으로 활성화하고 foreground와
+keyboard focus를 확인한 뒤 실제 한국어 IME에 scan code를 보낸다. 조합 픽셀 변화와 앱/기본 조합창의
+소유권, 정상 종료·설정 보존·셸 입력 격리를 확인한다. `--native-ui-control`은 이전 기본 조합창의
+실패 대조다. 이 검사는 물리 입력·후보 선택·모든 입력 영역의 전체 IME 검증을 대신하지 않는다.

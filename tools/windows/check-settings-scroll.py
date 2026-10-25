@@ -10,9 +10,11 @@ No physical keyboard, mouse or IME behavior is claimed.
 import argparse,contextlib,ctypes as c,hashlib,json,os,re,struct,time
 from ctypes import wintypes as w
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('--state',type=Path,required=True);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--old-control',action='store_true');p.add_argument('--stale-context-control',action='store_true');p.add_argument('--inline-caret',action='store_true');p.add_argument('--double-caret-control',action='store_true');args=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--state',type=Path,required=True);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--old-control',action='store_true');p.add_argument('--stale-context-control',action='store_true');p.add_argument('--inline-caret',action='store_true');p.add_argument('--double-caret-control',action='store_true');p.add_argument('--scrollbar',action='store_true');p.add_argument('--scrollbar-control',action='store_true');p.add_argument('--gutter-control',action='store_true');args=p.parse_args()
 if args.old_control and args.stale_context_control:p.error('Control modes are mutually exclusive')
 if args.double_caret_control and (not args.inline_caret or args.old_control or args.stale_context_control):p.error('Double-caret control requires only inline-caret mode')
+if args.scrollbar_control and (not args.scrollbar or args.old_control or args.stale_context_control):p.error('Scrollbar control requires scrollbar mode')
+if args.gutter_control and (not args.scrollbar or args.scrollbar_control or args.old_control or args.stale_context_control):p.error('Gutter control requires normal scrollbar mode')
 if not __debug__:p.error('Run without Python optimization so fixture and clipboard guards remain active')
 if os.name!='nt':p.error('Windows is required')
 s=json.loads(args.state.read_text(encoding='utf-8-sig'));binary=json.loads(args.binary.read_text());root=Path(s['root']).resolve();assert '.zig-cache' in root.parts
@@ -121,6 +123,47 @@ def search_cursor_block(path):
     raw=path.read_bytes()
     return any(all(min(raw[54+((y+dy)*1000+x+dx)*4:54+((y+dy)*1000+x+dx)*4+3])>=240 for dy in range(12) for dx in range(6)) for y in range(50,70) for x in range(400,650))
 
+def top_thumb(path):
+    raw=path.read_bytes()
+    # Default-font fixture: published 8px thumb at x=957..965, first row y=95.
+    # The old binary's empty gutter is the negative control for this solid patch.
+    return all(min(raw[54+(y*1000+x)*4:54+(y*1000+x)*4+3])>80 for y in range(105,125) for x in range(959,963))
+
+def scrollbar_cases():
+    initial=capture('scrollbar-initial');baseline=crop(initial)
+    if args.scrollbar_control:
+        assert not top_thumb(initial),'old binary unexpectedly paints the new scrollbar'
+        record('old binary reproduces missing settings scrollbar')
+        return
+    assert top_thumb(initial),'published scrollbar thumb is not visible'
+    record('overflow scrollbar is visible in its reserved gutter')
+    mouse(0x201,960,600);time.sleep(.2)
+    assert crop(capture('scrollbar-track-jump'))!=baseline,'track press did not scroll'
+    mouse(0x202,960,100);time.sleep(.25)
+    assert crop(capture('scrollbar-final-release'))==baseline,'release without move did not reach the top'
+    record('track jump and no-move final release reach the requested rows')
+    mouse(0x201,954,110);mouse(0x205,954,110);mouse(0x200,960,600);mouse(0x202,960,600);time.sleep(.25)
+    dragged=crop(capture('scrollbar-foreign-release'))
+    if args.gutter_control:
+        assert dragged==baseline,'old binary did not reproduce missing gutter capture'
+        record('old binary reproduces missing gutter-edge capture')
+    else:
+        assert dragged!=baseline,'gutter capture or unrelated release broke the thumb drag'
+    mouse(0x201,960,600);mouse(0x202,960,100);time.sleep(.25)
+    assert crop(capture('scrollbar-restored-top'))==baseline
+    record('track release restores rows after gutter control' if args.gutter_control else 'gutter-edge drag survives unrelated button release')
+    mouse(0x201,960,110)
+    with neutral_keyboard():send(0x102,ord('x'),1)
+    time.sleep(.2);mouse(0x200,960,600);mouse(0x202,960,600);key(8);time.sleep(.25)
+    assert crop(capture('scrollbar-filter-cancel'))==baseline,'filter change retained the old drag'
+    record('filter changes retire captured scrollbar movement')
+    mouse(0x201,960,110)
+    assert u.SetWindowPos(h,w.HWND(-1),20,20,1000,720,0x40);time.sleep(.25)
+    mouse(0x200,960,600);mouse(0x202,960,600)
+    assert u.SetWindowPos(h,w.HWND(-1),20,20,1000,700,0x40);time.sleep(.35)
+    assert crop(capture('scrollbar-resize-cancel'))==baseline,'resizing retained the old drag geometry'
+    record('window resize cancels the old captured geometry')
+
 def search_all():
     # Cross-section search guarantees overflowing rows without resizing the app.
     with neutral_keyboard():send(0x102,ord('/'),1);send(0x102,ord('.'),1)
@@ -148,6 +191,7 @@ try:
             assert filtered!=reopened;record('old wheel binary reproduces stale filter scroll')
         else:
             assert filtered==reopened;record('filter changes discard the previous scroll position')
+    if args.scrollbar:scrollbar_cases()
     if args.inline_caret:
         key(0x1b)
         with neutral_keyboard():
@@ -185,7 +229,7 @@ try:
         assert inline and int(inline[1])>0,'inline edit never owned IMM caret requests'
         record('inline editor overrides retained search IMM request owner')
     record('normal exit, config preserved and no shell input')
-    args.output.write_text(json.dumps({'binary':binary,'checks':checks,'captures':captures,'exit':code.value,'old_control':args.old_control,'stale_context_control':args.stale_context_control,'inline_caret':args.inline_caret,'double_caret_control':args.double_caret_control,'system_wheel_lines':lines.value,'input':'synthetic owned HWND; pixels and native wheel messages; no physical input claim'},indent=2))
+    args.output.write_text(json.dumps({'binary':binary,'checks':checks,'captures':captures,'exit':code.value,'old_control':args.old_control,'stale_context_control':args.stale_context_control,'inline_caret':args.inline_caret,'double_caret_control':args.double_caret_control,'scrollbar':args.scrollbar,'scrollbar_control':args.scrollbar_control,'gutter_control':args.gutter_control,'system_wheel_lines':lines.value,'input':'synthetic owned HWND; pixels and native wheel messages; no physical input claim'},indent=2))
 finally:
     if k.WaitForSingleObject(process,0)!=0:
         try:check_owner();u.SetWindowPos(h,w.HWND(-2),0,0,0,0,0x13);u.ShowWindow(h,0)

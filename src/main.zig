@@ -11588,6 +11588,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.events.push(allocator, .{ .resized = .{ .width_px = client_w, .height_px = client_h } });
             dock_layout_pending = false;
         }
+        if (confirm_state.open or file_notice.open or choice_notice != null or file_close_waiting or initial_open.job != null) settings_host.cancelGestures();
         settings_host.tick();
         if (settings_host.changed) {
             paste_protection = cfg.input.paste_protection;
@@ -11606,14 +11607,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (window.focus_loss_serial != terminal_popup_focus_serial) {
             terminal_popup.cancelCapture();
             settings_host.swallow_left_up = false;
-            settings_host.form.state.dragging = false;
-            settings_host.wheel_acc.reset();
+            settings_host.cancelGestures();
             window.setInputOverlay(settings_host.ownsInput(), .retain_on_blur);
             terminal_popup_focus_serial = window.focus_loss_serial;
         }
         for (window_events) |ev| switch (ev) {
             .resized => |r| {
                 terminal_popup.dismiss();
+                settings_host.cancelGestures();
                 layout_probe = true;
                 try present.resize(r.width_px, r.height_px);
                 // **기하를 먼저 다시 잰다** — 도크 폭이 창 크기에 따라 달라지므로 터미널 사각형도 바뀐다.
@@ -12032,7 +12033,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 if (settings_host.ownsInput() and !confirm_state.open and !file_notice.open and choice_notice == null) {
                     if (m.kind == .capture_lost) {
                         settings_host.swallow_left_up = false;
-                        settings_host.form.state.dragging = false;
+                        settings_host.cancelGestures();
                     } else if (m.kind == .wheel or m.kind == .wheel_h) {
                         settings_host.wheel(m.wheel_delta, wheel_lines_per_notch, m.kind == .wheel_h, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w, &chrome_tokens), &chrome_tokens);
                     } else settings_host.pointer(.{

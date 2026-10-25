@@ -5707,7 +5707,7 @@ inline-caret mode requires it to disappear while numeric edit requests remain ac
 - `zig build test-windows-settings-scrollbar`: 집계 2 + 동작 6. 발행된 paint/hit, track jump,
   이동 없는 마지막 up, 거터 가장자리 캡처·다른 버튼 up·tick 누적, 소유권 취소, 같은 기하 carry와
   크기 변경 취소를 검사한다. 폼·막대 할당 실패에서는 hit target이 남지 않아야 한다.
-- `zig build test-windows-settings`: 전체 설정 검사 41개. 복원 Debug/ReleaseFast를 확인한다.
+- `zig build test-windows-settings`: 전체 설정 검사 51개. 복원 Debug/ReleaseFast를 확인한다.
 - paint/입력 경로/릴리스/버튼/기하/포커스/거터/두 할당 실패 경로의 변이 9개를 런타임 실패로
   검출한다. 컴파일/실행 파일 누락 오류는 검출 성공으로 계산하지 않는다.
 - `check-settings-scroll.py --scrollbar --inline-caret`: 격리 앱에서 실제 픽셀·드래그·기존 입력
@@ -5754,3 +5754,29 @@ inline-caret mode requires it to disappear while numeric edit requests remain ac
 - `--old-control`은 첫 cmd 변경 후에도 PowerShell이 생성되는 이전 바이너리의 음성 대조다.
   GUI에서 빈 text를 저장하는 검증은 아니며 항목별 리셋은 별도 작업이다. 입력은 소유한 HWND의
   합성 이벤트이며 물리 키보드 검증으로 세지 않는다.
+
+### Windows 설정 텍스트·경로 검증
+
+- `zig build test-windows-settings-text-paths`: 집계 2 + 동작 5. 상대/tilde 명령 거부,
+  native 절대경로·UNC 구분자 정규화, 경로가 아닌 문자열 보존, 요청 버퍼와 독립된 소유권,
+  할당 실패 시 입력 config 보존을 검사한다. 전체 설정 51개는 복원 Debug/ReleaseFast로 확인한다.
+- 예전 setter 복원·파서 진단 무시·요청 버퍼 차용·비경로 문자열 정규화·할당 실패 삼킴의 다섯 변이를
+  각각 컴파일 후 기대값 실패로 검출한다. 정리 중 충돌은 판정 성공으로 사용하지 않는다.
+- `tools/windows/check-settings-text-path.py --state <새 격리 앱 JSON> --binary <복사한 exe 메타 JSON> --output <결과 JSON>`:
+  상대 이름·현재 폴더·부모 폴더·드라이브 상대·tilde의 다섯 입력에서 config 바이트 불변을 요구한다.
+  마지막 편집에서 native 절대경로로 재시도해 정규화된 저장을 확인하며, font.family의 literal 역슬래시는
+  유지되어야 한다. request 오류 5·저장 2·저장 오류 0·셸 입력 0·native exit0과 화면 캡처를 확인한다.
+- `--old-control`은 이전 setter가 상대 명령을 저장하는 음성 대조다. 기존 파일 파서의 절대경로
+  정책을 공유하며 실행 파일 존재 검사/기본 셸 폴백, OS 접미 쓰기 범위와 리셋 의미를 바꾸지 않는다.
+  소유한 HWND 합성 입력이며 물리 장치 증거가 아니다.
+
+`zig build test-windows-settings-rollback`은 집계 2 + 동작 5다. 빈 기본값의 미리보기 없는 편집 취소,
+실제 미리보기 복원/세대 종료, 저장 admission 실패 후 취소, 오래된 세대 무시, 단축키 toggle 닫기를 검사한다.
+미리보기 없는 값 재검증·세대 기록 누락·취소 후 세대 잔류·toggle의 빈 값 재검증·저장 실패 시 세대 소실의
+다섯 변이를 컴파일 후 기대값 실패로 검출한다. 실제 앱의 다섯 거부에서 request 오류는 정확히 5여야 한다.
+취소 후 남은 거래가 다음 키마다 오류를 내는 경우를 이 계수와 연속 재편집으로 검출한다.
+
+텍스트 경로 판정에는 명시적 OS의 대조도 포함한다. Windows drive/UNC는 Windows 설정에서 정규화되고,
+POSIX 설정은 drive 경로를 거부하되 `/bin/shell\literal`의 역슬래시를 보존해야 한다. 호스트 OS 사용,
+Windows 전용, POSIX 전용, 무조건 절대/상대 판정의 다섯 변이를 공용 파서에 넣어 런타임 실패로 검출한다.
+호스트와 다른 OS를 전달하는 검사는 그 OS 위에서 앱을 실제 실행한 증거와 구분한다.

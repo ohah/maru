@@ -23,9 +23,13 @@ pub fn candidate(a: std.mem.Allocator, cfg: maru.config.Config, request: edit.Re
         } else return error.InvalidValue;
         if (!maru.config.schema.setEnumIndex(&next, key, index)) return error.InvalidValue;
     } else {
-        if (!maru.config.schema.setText(&next, key, value)) return error.InvalidValue;
-        const owned = try a.dupe(u8, value);
-        _ = maru.config.schema.setText(&next, key, owned);
+        // The file parser owns text metadata, including absolute paths and
+        // Windows separator normalization. A GUI save must reject its forgiving
+        // diagnostics rather than persist a value that reload will discard.
+        var diags: std.ArrayList(maru.config.schema.Diag) = .empty;
+        defer diags.deinit(a);
+        if (!try maru.config.schema.tryParseFor(.windows, a, &next, key, value, &diags, 1) or diags.items.len != 0)
+            return error.InvalidValue;
     }
     return next;
 }
@@ -80,6 +84,7 @@ pub const Host = struct {
     request_errors: usize = 0,
     previews: usize = 0,
     rollbacks: usize = 0,
+    preview_generation: ?u64 = null,
     wheel_acc: maru.session.input_math.WheelAccumulator = .{},
     wheel_events: usize = 0,
     scroll_moves: usize = 0,
@@ -105,12 +110,7 @@ pub const Host = struct {
         self.wheel_acc.reset();
         if (self.form.state.open) {
             if (self.form.edit.rollback()) |request| {
-                if (candidate(self.config_arena, self.cfg.*, request)) |cfg| {
-                    self.cfg.* = cfg;
-                    self.changed = true;
-                    self.form.complete(request, true, true);
-                    self.rollbacks += 1;
-                } else |_| return;
+                self.apply(.{ .request = request, .finish = true }) catch return;
             }
             self.form.state.hide();
         } else self.form.state.show();
@@ -126,6 +126,7 @@ pub const Host = struct {
             self.cfg.* = job.cfg;
             self.changed = true;
             self.form.state.clearMessage();
+            if (self.preview_generation == job.request.generation) self.preview_generation = null;
         } else {
             self.save_errors += 1;
             self.form.state.setMessage(maru.i18n.t(.app_save_failed));
@@ -136,9 +137,23 @@ pub const Host = struct {
     }
     fn apply(self: *Host, result: maru.app.settings_form.Result) !void {
         const request = result.request orelse return;
+        // Inline text changes are not previews. Cancelling one must only retire
+        // its transaction: the unchanged original may legally be an empty
+        // default (for example automatic shell selection), not a new GUI value.
+        if (!request.persist and result.finish and self.preview_generation != request.generation) {
+            self.rollbacks += 1;
+            self.form.complete(request, true, true);
+            return;
+        }
         const cfg = try candidate(self.config_arena, self.cfg.*, request);
         if (!request.persist) {
-            if (result.finish) self.rollbacks += 1 else self.previews += 1;
+            if (result.finish) {
+                self.rollbacks += 1;
+                self.preview_generation = null;
+            } else {
+                self.previews += 1;
+                self.preview_generation = request.generation;
+            }
             self.cfg.* = cfg;
             self.changed = true;
             self.form.complete(request, result.finish, true);
@@ -301,6 +316,134 @@ test "Windows settings rejects malformed colors" {
     defer arena.deinit();
     try std.testing.expectError(error.InvalidValue, candidate(arena.allocator(), .{}, try testRequest("theme.background", "#zzzzzz")));
 }
+
+test "Windows settings text paths reject relative and tilde commands" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "cmd.exe", "./cmd.exe", "../cmd.exe", "C:cmd.exe", "~/bin/shell.exe" }) |value|
+        try std.testing.expectError(error.InvalidValue, candidate(arena.allocator(), .{}, try testRequest("shell.command", value)));
+}
+
+test "Windows settings text paths normalize native absolute paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const changed = try candidate(arena.allocator(), .{}, try testRequest("shell.command", "  C:\\Program Files\\shell.exe  "));
+    try std.testing.expectEqualStrings("C:/Program Files/shell.exe", changed.shell.command);
+    const network = try candidate(arena.allocator(), .{}, try testRequest("shell.command", "\\\\server\\share\\shell.exe"));
+    try std.testing.expectEqualStrings("//server/share/shell.exe", network.shell.command);
+    // A Windows adapter must remain testable on a POSIX runner, while the
+    // shared parser must still reject Windows drive paths for POSIX configs.
+    var posix: maru.config.Config = .{};
+    var diags: std.ArrayList(maru.config.schema.Diag) = .empty;
+    try std.testing.expect(try maru.config.schema.tryParseFor(.linux, arena.allocator(), &posix, "shell.command", "C:\\shell.exe", &diags, 1));
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqualStrings("", posix.shell.command);
+    diags.clearRetainingCapacity();
+    try std.testing.expect(try maru.config.schema.tryParseFor(.linux, arena.allocator(), &posix, "shell.command", "/bin/shell\\literal", &diags, 1));
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+    try std.testing.expectEqualStrings("/bin/shell\\literal", posix.shell.command);
+}
+
+test "Windows settings text paths preserve nonpath text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const changed = try candidate(arena.allocator(), .{}, try testRequest("font.family", "  Family\\literal  "));
+    try std.testing.expectEqualStrings("Family\\literal", changed.font.family);
+    try std.testing.expectError(error.InvalidValue, candidate(arena.allocator(), changed, try testRequest("font.family", " \t ")));
+}
+
+test "Windows settings text paths own accepted request bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var request = try testRequest("shell.command", "C:\\safe\\shell.exe");
+    const changed = try candidate(arena.allocator(), .{}, request);
+    @memset(request.value.bytes[0..request.value.len], 'x');
+    try std.testing.expectEqualStrings("C:/safe/shell.exe", changed.shell.command);
+}
+
+test "Windows settings text paths allocation failure preserves input" {
+    const Probe = struct {
+        fn run(a: std.mem.Allocator) !void {
+            var cfg: maru.config.Config = .{};
+            cfg.shell.command = "C:/original/shell.exe";
+            defer std.testing.expectEqualStrings("C:/original/shell.exe", cfg.shell.command) catch unreachable;
+            const changed = try candidate(a, cfg, try testRequest("shell.command", "C:\\new\\shell.exe"));
+            try std.testing.expectEqualStrings("C:/new/shell.exe", changed.shell.command);
+            a.free(changed.shell.command);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+fn rollbackTestHost(a: std.mem.Allocator, cfg: *maru.config.Config) Host {
+    return .{ .a = a, .config_arena = a, .io = std.testing.io, .cfg = cfg, .path = null };
+}
+
+test "Windows settings rollback cancels empty unpreviewed text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = rollbackTestHost(arena.allocator(), &cfg);
+    try host.form.edit.begin("shell.command", "");
+    try host.apply(.{ .request = host.form.edit.rollback(), .finish = true });
+    try std.testing.expectEqualStrings("", cfg.shell.command);
+    try std.testing.expect(!host.changed and !host.form.edit.active);
+    try host.form.edit.begin("font.family", cfg.font.family);
+}
+
+test "Windows settings rollback restores matching preview and retires generation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    cfg.input.right_click = .paste;
+    var host = rollbackTestHost(arena.allocator(), &cfg);
+    try host.form.edit.begin("input.right-click", "paste");
+    try host.apply(.{ .request = try host.form.edit.request("input.right-click", "menu", false) });
+    try std.testing.expectEqual(maru.config.theme.RightClick.menu, cfg.input.right_click);
+    try std.testing.expectEqual(@as(?u64, host.form.edit.generation), host.preview_generation);
+    try host.apply(.{ .request = host.form.edit.rollback(), .finish = true });
+    try std.testing.expectEqual(maru.config.theme.RightClick.paste, cfg.input.right_click);
+    try std.testing.expect(host.preview_generation == null and !host.form.edit.active);
+}
+
+test "Windows settings rollback retains preview after failed save admission" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    cfg.input.right_click = .paste;
+    var host = rollbackTestHost(arena.allocator(), &cfg);
+    try host.form.edit.begin("input.right-click", "paste");
+    try host.apply(.{ .request = try host.form.edit.request("input.right-click", "menu", false) });
+    try std.testing.expectError(error.MissingConfigPath, host.apply(.{ .request = try host.form.edit.request("input.right-click", "menu", true), .finish = true }));
+    try std.testing.expectEqual(@as(?u64, host.form.edit.generation), host.preview_generation);
+    try host.apply(.{ .request = host.form.edit.rollback(), .finish = true });
+    try std.testing.expectEqual(maru.config.theme.RightClick.paste, cfg.input.right_click);
+}
+
+test "Windows settings rollback ignores stale preview generation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = rollbackTestHost(arena.allocator(), &cfg);
+    try host.form.edit.begin("shell.command", "");
+    host.preview_generation = host.form.edit.generation - 1;
+    cfg.shell.command = "C:/current/shell.exe";
+    try host.apply(.{ .request = host.form.edit.rollback(), .finish = true });
+    try std.testing.expectEqualStrings("C:/current/shell.exe", cfg.shell.command);
+    try std.testing.expect(!host.changed and !host.form.edit.active);
+}
+
+test "Windows settings rollback toggle closes empty unpreviewed editor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = rollbackTestHost(arena.allocator(), &cfg);
+    host.form.state.show();
+    try host.form.edit.begin("shell.command", "");
+    host.toggle();
+    try std.testing.expect(!host.form.state.open and !host.form.edit.active and !host.changed);
+    try std.testing.expectEqual(@as(usize, 1), host.rollbacks);
+}
+
 test "Windows settings patch preserves unrelated settings" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

@@ -8305,7 +8305,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var wheel_acc_sidebar: win32_mouse.WheelAccumulator = .{};
     var wheel_acc_dock: win32_mouse.WheelAccumulator = .{};
     var wheel_acc_editor: win32_mouse.WheelAccumulator = .{};
-    var last_ime_caret: ?win32_mouse.Cell = null;
+    var last_ime_caret: ?maru.session.mouse_coordinates.ImeCaret = null;
     // 마지막으로 계산한 마우스 셀. **휠 좌표가 화면 기준으로 오는 것을 놓치면 창 위치만큼 어긋나는데**,
     // 카운터만으로는 그것이 안 보인다 — 이 줄이 그 자리를 지킨다.
     var last_mouse_cell: ?win32_mouse.Cell = null;
@@ -13392,11 +13392,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 defer active.unlockCore(io);
                 break :blk .{ .row = active.core.screen.cursor.row, .col = active.core.screen.cursor.col };
             };
-            const changed = last_ime_caret == null or
-                last_ime_caret.?.row != cur.row or last_ime_caret.?.col != cur.col;
+            const caret: maru.session.mouse_coordinates.ImeCaret = .{
+                .row = cur.row, .col = cur.col, .cell_w = cell_w, .cell_h = cell_h,
+                .origin_x = geom.terminal.x, .origin_y = geom.terminal.y,
+            };
+            const changed = last_ime_caret == null or !std.meta.eql(last_ime_caret.?, caret);
             if (changed) {
-                window.setImeCaret(cur.row, cur.col, cell_w, cell_h);
-                last_ime_caret = .{ .row = cur.row, .col = cur.col };
+                window.setImeCaret(caret);
+                last_ime_caret = caret;
                 ime_caret_updates += 1;
             }
         }

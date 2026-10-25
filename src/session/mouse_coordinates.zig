@@ -41,3 +41,57 @@ pub fn cellFromPixel(
     const row = std.math.clamp(row_raw, 0, @as(i64, rows) - 1);
     return .{ .row = @intCast(row), .col = @intCast(col) };
 }
+
+/// A cache key includes layout and metrics, because a stationary terminal cursor
+/// still moves on screen when chrome is resized or the font changes.
+pub const ImeCaret = struct {
+    row: u16,
+    col: u16,
+    cell_w: u32,
+    cell_h: u32,
+    origin_x: u32,
+    origin_y: u32,
+
+    pub const Anchor = struct { top_left: Point, bottom_right: Point, below: Point };
+
+    pub fn anchor(self: ImeCaret) ?Anchor {
+        if (self.cell_w == 0 or self.cell_h == 0) return null;
+        const left = @as(u64, self.origin_x) + @as(u64, self.col) * self.cell_w;
+        const top = @as(u64, self.origin_y) + @as(u64, self.row) * self.cell_h;
+        // IMM uses signed LONG coordinates. Saturate only at the API boundary,
+        // after wide arithmetic, so extreme layout values cannot wrap or trap.
+        return .{
+            .top_left = .{ .x = pixel(left), .y = pixel(top) },
+            .bottom_right = .{ .x = pixel(left + self.cell_w), .y = pixel(top + self.cell_h) },
+            .below = .{ .x = pixel(left), .y = pixel(top + self.cell_h) },
+        };
+    }
+
+    fn pixel(value: u64) i32 {
+        return @intCast(@min(value, std.math.maxInt(i32)));
+    }
+};
+
+test "IME caret geometry tracks chrome origins, metrics and extreme rows" {
+    const caret: ImeCaret = .{ .row = 2, .col = 3, .cell_w = 8, .cell_h = 19, .origin_x = 300, .origin_y = 38 };
+    try std.testing.expectEqualDeep(ImeCaret.Anchor{
+        .top_left = .{ .x = 324, .y = 76 },
+        .bottom_right = .{ .x = 332, .y = 95 },
+        .below = .{ .x = 324, .y = 95 },
+    }, caret.anchor().?);
+    var moved = caret;
+    moved.origin_x = 400;
+    try std.testing.expect(!std.meta.eql(caret, moved));
+    try std.testing.expectEqual(@as(i32, 424), moved.anchor().?.below.x);
+    moved = caret;
+    moved.origin_y = 0;
+    try std.testing.expectEqual(@as(i32, 57), moved.anchor().?.below.y);
+    moved = caret;
+    moved.cell_h = 20;
+    try std.testing.expect(!std.meta.eql(caret, moved));
+    try std.testing.expectEqual(@as(i32, 98), moved.anchor().?.below.y);
+    moved.cell_w = 0;
+    try std.testing.expect(moved.anchor() == null);
+    moved = .{ .row = 65535, .col = 65535, .cell_w = 4294967295, .cell_h = 4294967295, .origin_x = 4294967295, .origin_y = 4294967295 };
+    try std.testing.expectEqualDeep(Point{ .x = 2147483647, .y = 2147483647 }, moved.anchor().?.bottom_right);
+}

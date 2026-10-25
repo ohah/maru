@@ -826,19 +826,19 @@ pub const Window = struct {
         _ = PostMessageW(self.hwnd, msg, wparam, @intCast(lo | (hi << 16)));
     }
 
-    pub fn setImeCaret(self: *Window, row: u16, col: u16, cell_w: u32, cell_h: u32) void {
-        if (cell_w == 0 or cell_h == 0) return;
+    pub fn setImeCaret(self: *Window, caret: @import("../../maru.zig").session.mouse_coordinates.ImeCaret) void {
+        const anchor = caret.anchor() orelse return;
         const himc = ImmGetContext(self.hwnd) orelse return;
         defer _ = ImmReleaseContext(self.hwnd, himc);
 
-        const below = win32_mouse.pixelBelowCell(row, col, cell_w, cell_h);
-        const cell = win32_mouse.rectForCell(row, col, cell_w, cell_h);
-        const area = RECT{ .left = cell.left, .top = cell.top, .right = cell.right, .bottom = cell.bottom };
+        const below = anchor.below;
+        const cell = anchor.top_left;
+        const area = RECT{ .left = cell.x, .top = cell.y, .right = anchor.bottom_right.x, .bottom = anchor.bottom_right.y };
 
         const comp = COMPOSITIONFORM{
             .dwStyle = CFS_POINT,
             // 조합창은 **글자 자리**에 둔다(아래가 아니라) — 조합 중인 글자가 거기 그려진다.
-            .ptCurrentPos = .{ .x = cell.left, .y = cell.top },
+            .ptCurrentPos = .{ .x = cell.x, .y = cell.y },
             .rcArea = area,
         };
         _ = ImmSetCompositionWindow(himc, &comp);

@@ -6548,6 +6548,20 @@ pub fn build(b: *std.Build) void {
     run_sticky_changes.addArg("--maru-expect-passed=6");
     test_step.dependOn(&run_sticky_changes.step);
     b.step("test-editor-sticky-changes", "Verify sticky summary reuse of retained native changes").dependOn(&run_sticky_changes.step);
+    const sticky_snapshot_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"sticky snapshot"} });
+    const run_sticky_snapshot = b.addRunArtifact(sticky_snapshot_tests);
+    run_sticky_snapshot.addArg("--maru-expect-tests=4");
+    run_sticky_snapshot.addArg("--maru-expect-passed=4");
+    test_step.dependOn(&run_sticky_snapshot.step);
+    b.step("test-editor-sticky-snapshot", "Verify independently owned copied sticky summaries").dependOn(&run_sticky_snapshot.step);
+    const sticky_snapshot_product = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"sticky snapshot product"} });
+    const run_sticky_snapshot_product = b.addRunArtifact(sticky_snapshot_product);
+    run_sticky_snapshot_product.addArg("--maru-expect-tests=5");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_sticky_snapshot_product.addArg("--maru-expect-passed=5");
+        macos_only_test_step.dependOn(&run_sticky_snapshot_product.step);
+    }
+    b.step("test-editor-sticky-snapshot-product", "Compare copied shared sticky summaries with full symbol output").dependOn(&run_sticky_snapshot_product.step);
     const native_snapshot_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"shared native snapshot"} });
     const run_native_snapshot = b.addRunArtifact(native_snapshot_tests);
     run_native_snapshot.addArg("--maru-expect-tests=3");

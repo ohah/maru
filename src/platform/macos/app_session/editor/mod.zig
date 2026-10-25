@@ -70773,6 +70773,73 @@ test "SMT3 semantic recovery strict EOF, refresh and stalled response retry" {
     try testing.expect(f.applied(3));
 }
 
+test "sticky snapshot product 공유 분할의 요약과 머리줄은 원본 종료 후에도 독립적이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    fx.session.loaded_config.config.lsp.enabled = false;
+    const text = "const A = struct {\n    pub fn f() void {\n" ++ array_repeat.repeat("        _ = 1;\n", 40) ++ "    }\n};\n";
+    const source = try undoFixture(&fx, a, "sticky-split.zig", text);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    source.rt.editor_selection = editor_selection.Selection.at(source.rt.editorDocument().opened.?.file.lines.line(20).?.start);
+    setEditorTop(fx.session, source, 5, "test");
+    var buf: [256]u8 = undefined;
+    _ = try paneRowText(fx.session, source, 0, &buf);
+    try testing.expect(source.rt.editor_syntax.provider.?.sticky_summary.tree != null);
+    const original_pane = pane_ops.activePane(fx.session);
+    const original_index = std.mem.indexOfScalar(*Term, original_pane.terms.items, source).?;
+    const peer = try pane_ops.splitSharedEditorPane(fx.session, .horizontal, false);
+    fx.leaf_rect.w /= 2;
+    const state = &peer.rt.editor_syntax.provider.?;
+    try testing.expect(state.sticky_summary.tree != null);
+    try testing.expect(state.sticky_summary.tree != source.rt.editor_syntax.provider.?.sticky_summary.tree);
+    const Judge = struct {
+        fn check(f: *PaneFixture, term: *Term, allocator: std.mem.Allocator) !void {
+            for ([_]bool{ false, true }) |wrap| {
+                f.session.loaded_config.config.editor.wrap = wrap;
+                for ([_]usize{ 3, 5, 15 }) |top| {
+                    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editorDocument().opened.?.file.lines.line(25).?.start);
+                    setEditorTop(f.session, term, top, "test");
+                    var row_buf: [256]u8 = undefined;
+                    _ = try paneRowText(f.session, term, 0, &row_buf);
+                    const rect: maru.chrome.draw.Rect = .{ .x = 0, .y = 0, .w = f.leaf_rect.w, .h = f.leaf_rect.h };
+                    const got = sticky_client.compute(f.session, term, rect, wrap);
+                    try testing.expect(got.len > 0);
+                    var saved: [10]chrome_editor.frame.StickyLine = undefined;
+                    var n: usize = 0;
+                    defer for (saved[0..n]) |line| allocator.free(line.colors);
+                    for (got) |line| {
+                        saved[n] = .{ .number = line.number, .bytes = line.bytes, .colors = try allocator.dupe(chrome_editor.content.ColorSpan, line.colors) };
+                        n += 1;
+                    }
+                    const want = sticky_client.referenceForTest(f.session, term, rect, wrap);
+                    try testing.expectEqual(n, want.len);
+                    for (want, 0..) |line, i| {
+                        try testing.expectEqual(saved[i].number, line.number);
+                        try testing.expectEqualStrings(saved[i].bytes, line.bytes);
+                        try testing.expectEqualDeep(saved[i].colors, line.colors);
+                    }
+                }
+            }
+        }
+    };
+    try Judge.check(&fx, peer, a);
+    try testing.expectEqual(@as(u64, 0), state.sticky_work.rebuild_nodes);
+    fx.term = peer;
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, original_pane, original_index);
+    try Judge.check(&fx, peer, a);
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, peer, " "));
+    try foldMarksReady(&fx, peer);
+    try expectSharedParseOutputs(peer, a);
+    try Judge.check(&fx, peer, a);
+    try testing.expect(undoEdit(fx.session, peer));
+    try Judge.check(&fx, peer, a);
+}
+
 test "shared origin snapshot 기존 계보가 있는 분할 첫 입력" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = testing.allocator;

@@ -568,7 +568,9 @@ pub const Provider = struct {
             c.ts_parser_delete(parser);
             return null;
         };
-        return .{ .parser = parser, .tree = copy, .slot = slot, .tree_gen = self.tree_gen, .budget_ns = self.budget_ns };
+        // 요약은 선택적이다. 새 참조를 못 얻어도 트리 복사는 유지하고 첫 조회가 다시 집계한다.
+        const summary: symbol_windows.Summary = self.sticky_summary.copyReady(copy, self.tree_gen) orelse .{};
+        return .{ .parser = parser, .tree = copy, .slot = slot, .tree_gen = self.tree_gen, .budget_ns = self.budget_ns, .sticky_summary = summary };
     }
 
     /// caller가 현재 입력임을 증명한 완료 트리를 빌려 쓰되 parser와 변경 범위는 이 뷰가 소유한다.
@@ -3849,6 +3851,75 @@ test {
 }
 
 // 전체 목록 판정은 후보 수집과 독립적으로 유지해 증분 집계와 후보 누락을 함께 잡는다.
+test "sticky snapshot 유효한 요약은 독립 참조로 복사하고 원본 종료 뒤 편집한다" {
+    const a = std.testing.allocator;
+    const source = "fn f() void {}\nfn g() void {}\n";
+    var donor = Provider.init(source, .zig, 0) orelse return error.NoProvider;
+    var donor_live = true;
+    defer if (donor_live) donor.deinit();
+    try stickyAncestorJudge(&donor, source);
+    var peer = donor.copyReady(.zig) orelse return error.NoSnapshot;
+    defer peer.deinit();
+    // 소유권 결함을 주입한 경우에도 잘못된 이중 해제 대신 원래 위반을 보고한다.
+    if (peer.sticky_summary.tree == peer.tree) {
+        peer.sticky_summary = .{};
+        return error.SharedSummaryTree;
+    }
+    try std.testing.expect(peer.sticky_summary.tree != null);
+    try std.testing.expect(peer.sticky_summary.tree != donor.sticky_summary.tree);
+    try std.testing.expect(peer.sticky_summary.tree != peer.tree);
+    try std.testing.expectEqual(donor.sticky_summary.count, peer.sticky_summary.count);
+    try std.testing.expectEqual(peer.tree_gen, peer.sticky_summary.generation);
+    donor.deinit();
+    donor_live = false;
+    try stickyAncestorJudge(&peer, source);
+    try std.testing.expectEqual(@as(u64, 0), peer.sticky_work.rebuild_nodes);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    try text.appendSlice(a, source);
+    try stickyChangeEdit(&peer, &text, 0, 0, "\n");
+    try stickyAncestorJudge(&peer, text.items);
+    try stickyChangeEdit(&peer, &text, 0, 1, "");
+    try stickyAncestorJudge(&peer, text.items);
+    try std.testing.expectEqualStrings(source, text.items);
+}
+
+test "sticky snapshot 오래된 세대 미반영 편집과 요약 부재는 다시 집계한다" {
+    const source = "fn f() void {}\nfn g() void {}\n";
+    for (0..5) |fault| {
+        var donor = Provider.init(source, .zig, 0) orelse return error.NoProvider;
+        defer donor.deinit();
+        if (fault != 4) try stickyAncestorJudge(&donor, source);
+        switch (fault) {
+            0 => donor.sticky_summary.generation = donor.tree_gen + 1,
+            1 => donor.sticky_summary.edits = 1,
+            2 => donor.sticky_summary.edited = .{ .lo = 0, .hi = 1 },
+            3 => donor.sticky_summary.invalidate(),
+            else => {},
+        }
+        var peer = donor.copyReady(.zig) orelse return error.NoSnapshot;
+        defer peer.deinit();
+        try std.testing.expect(peer.sticky_summary.tree == null);
+        try stickyAncestorJudge(&peer, source);
+        try std.testing.expect(peer.sticky_work.rebuild_nodes > 0);
+    }
+}
+
+test "sticky snapshot 심볼이 없는 유효한 집계도 복사하며 다른 언어는 거절한다" {
+    const source = "// no declarations\n";
+    var donor = Provider.init(source, .zig, 0) orelse return error.NoProvider;
+    defer donor.deinit();
+    try stickyAncestorJudge(&donor, source);
+    try std.testing.expect(donor.sticky_summary.tree != null);
+    try std.testing.expectEqual(@as(usize, 0), donor.sticky_summary.count);
+    var peer = donor.copyReady(.zig) orelse return error.NoSnapshot;
+    defer peer.deinit();
+    try std.testing.expect(peer.sticky_summary.tree != null);
+    try stickyAncestorJudge(&peer, source);
+    try std.testing.expectEqual(@as(u64, 0), peer.sticky_work.rebuild_nodes);
+    try std.testing.expect(donor.copyReady(.c) == null);
+}
+
 fn stickyAncestorJudge(p: *Provider, source: []const u8) !void {
     const a = std.testing.allocator;
     var full: std.ArrayList(Provider.Symbol) = .empty;

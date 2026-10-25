@@ -1298,6 +1298,8 @@ pub const BracketIndex = struct {
     /// 목록이 `synced_gen` 세대 트리와 맞는가.
     ready: bool = false,
     synced_gen: u64 = 0,
+    /// 정리 완료한 목록의 parser. 위치만 옮긴 중간 상태에는 복사를 허용하지 않는다.
+    synced_parser: ?*c.TSParser = null,
     /// 예산을 든 처음 훑기 — **트리 사본과 글 사본 위를** 걷는다(`ts_tree_copy` 는 참조 계수라 싸다). 훑는 동안 편집이 와도 버리지 않는다:
     /// 처음엔 편집마다 훑기를 다시 시작해, 큰 문서(4 MB 에 20~28 프레임)에서 그보다 빨리 계속 치면 색이 영영 안 돌아왔다(새 눈 리뷰가 짚었다).
     /// 지금은 편집을 `walk_edits` 에 쌓고 「다시 봐야 할 범위」(편집 범위 ∪ 달라진 범위 — 뒤 편집으로 계속 민다)를 `walk_dirty` 에 모았다가,
@@ -1325,6 +1327,13 @@ pub const BracketIndex = struct {
 
     pub const EditRec = struct { start: u32, old_end: u32, new_end: u32 };
 
+    /// 호출자가 실제로 복사한 트리에 완료한 잎 값만 옮긴다. 순회 자원과 판정 버퍼는 공유하지 않는다.
+    pub fn copyMatched(self: *const BracketIndex, allocator: std.mem.Allocator, source_parser: *c.TSParser, source_gen: u64, target_parser: *c.TSParser, target_gen: u64) error{OutOfMemory}!?BracketIndex {
+        if (!self.ready or self.walking or self.synced_parser != source_parser or self.synced_gen != source_gen) return null;
+        const items = try allocator.dupe(BracketLeaf, self.leaves.items);
+        return .{ .leaves = .fromOwnedSlice(items), .ready = true, .synced_gen = target_gen, .synced_parser = target_parser, .version = 1 };
+    }
+
     pub fn deinit(self: *BracketIndex, allocator: std.mem.Allocator) void {
         self.stopWalk();
         self.leaves.deinit(allocator);
@@ -1350,12 +1359,15 @@ pub const BracketIndex = struct {
     pub fn invalidate(self: *BracketIndex) void {
         self.stopWalk();
         self.ready = false;
+        self.synced_parser = null;
         self.version += 1;
     }
 
     /// 편집 — 위치를 민다(`[start, old_end)` 가 `[start, new_end)` 가 됐다). 그 범위에 걸친 괄호는 버린다 — 다시 판 트리에서 `refresh` 가 채운다.
     /// 처음 훑기 도중이면 편집을 쌓고 다시 볼 범위를 민다(위 `walking`).
     pub fn shift(self: *BracketIndex, allocator: std.mem.Allocator, start: u32, old_end: u32, new_end: u32) void {
+        // 이 시점의 provider는 아직 이전 트리일 수 있다. refresh 성공 전에는 완료 목록이 아니다.
+        self.synced_parser = null;
         if (self.walking) {
             self.walk_edits.append(allocator, .{ .start = start, .old_end = old_end, .new_end = new_end }) catch return self.invalidate();
             for (self.walk_dirty.items) |*r| r.* = shiftRange(r.*, start, old_end, new_end);
@@ -1422,6 +1434,7 @@ pub const BracketIndex = struct {
             return;
         }
         self.synced_gen = prov.tree_gen;
+        self.synced_parser = prov.parser;
         self.partials += 1;
         self.version += 1;
     }
@@ -1528,6 +1541,7 @@ pub const BracketIndex = struct {
         }
         self.ready = true;
         self.synced_gen = prov.tree_gen;
+        self.synced_parser = prov.parser;
         self.rebuilds += 1;
         if (had_edits) self.partials += 1;
         self.version += 1;
@@ -3164,6 +3178,119 @@ fn pointOfForTest(src: []const u8, at: usize) Point {
         } else col += 1;
     }
     return .{ .row = row, .column = col };
+}
+
+test "bracket snapshot 완료 목록은 독립 소유하며 원본 종료 뒤 전체 목록과 일치한다" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { lang: Language, text: []const u8 }{
+        .{ .lang = .zig, .text = "fn f() void { _ = .{1, 2}; }\n" },
+        .{ .lang = .javascript, .text = "const a = `${f([1, 2])}`;\n" },
+        .{ .lang = .markdown, .text = "[a](b) and (c)\n" },
+    };
+    for (cases) |sample| {
+        var donor = Provider.init(sample.text, sample.lang, 0) orelse return error.NoProvider;
+        var donor_live = true;
+        defer if (donor_live) donor.deinit();
+        var original = try fullIndexForTest(a, &donor, sample.text);
+        defer original.deinit(a);
+        var peer = donor.copyReady(sample.lang) orelse return error.NoSnapshot;
+        defer peer.deinit();
+        var copied = (try original.copyMatched(a, donor.parser, donor.tree_gen, peer.parser, peer.tree_gen)) orelse return error.NoIndex;
+        defer copied.deinit(a);
+        // 소유권 결함을 주입해도 이중 해제 대신 실제 위반을 보고한다.
+        if (copied.leaves.items.len > 0 and copied.leaves.items.ptr == original.leaves.items.ptr) {
+            copied.leaves = .empty;
+            return error.SharedBracketLeaves;
+        }
+        try std.testing.expectEqual(peer.parser, copied.synced_parser.?);
+        try std.testing.expect(!copied.walking and copied.walk_tree == null and copied.walk_text.len == 0);
+        try std.testing.expectEqual(@as(usize, 0), copied.walk_edits.items.len);
+        try std.testing.expectEqual(@as(u64, 0), copied.rebuilds);
+        donor.deinit();
+        donor_live = false;
+        try std.testing.expect(try copied.step(a, &peer, sample.text, 0));
+        try std.testing.expectEqual(@as(u64, 0), copied.rebuilds);
+        var cold = try fullIndexForTest(a, &peer, sample.text);
+        defer cold.deinit(a);
+        try std.testing.expectEqualDeep(cold.leaves.items, copied.leaves.items);
+    }
+}
+
+test "bracket snapshot 다른 parser 세대 미완료와 순회 중인 목록은 거절한다" {
+    const a = std.testing.allocator;
+    const text = "fn f() void {}\n";
+    var source = Provider.init(text, .zig, 0) orelse return error.NoProvider;
+    defer source.deinit();
+    var other = Provider.init(text, .zig, 0) orelse return error.NoProvider;
+    defer other.deinit();
+    try std.testing.expectEqual(source.tree_gen, other.tree_gen);
+    var index = try fullIndexForTest(a, &source, text);
+    defer index.deinit(a);
+    for (0..4) |fault| {
+        const saved = index;
+        defer index = saved;
+        switch (fault) {
+            0 => index.synced_parser = other.parser,
+            1 => index.synced_gen += 1,
+            2 => index.ready = false,
+            else => index.walking = true,
+        }
+        try std.testing.expect((try index.copyMatched(a, source.parser, source.tree_gen, other.parser, other.tree_gen)) == null);
+    }
+}
+
+test "bracket snapshot shift 직후는 거절하고 부분 갱신 완료 뒤 복사하며 OOM은 원본을 보존한다" {
+    const a = std.testing.allocator;
+    const before = "fn f() void {}\n";
+    const after = "\n" ++ before;
+    var source = Provider.init(before, .zig, 0) orelse return error.NoProvider;
+    defer source.deinit();
+    var index = try fullIndexForTest(a, &source, before);
+    defer index.deinit(a);
+    index.shift(a, 0, 0, 1);
+    try std.testing.expect(index.synced_parser == null);
+    try std.testing.expect((try index.copyMatched(a, source.parser, source.tree_gen, source.parser, source.tree_gen)) == null);
+    source.onEdit(after, .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = 1, .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 0 }, .new_end_point = .{ .row = 1, .column = 0 } });
+    try index.refresh(a, &source, after, .{ .start = 0, .end = 1 });
+    try std.testing.expectEqual(source.parser, index.synced_parser.?);
+    var peer = source.copyReady(.zig) orelse return error.NoSnapshot;
+    defer peer.deinit();
+    var failed = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, index.copyMatched(failed.allocator(), source.parser, source.tree_gen, peer.parser, peer.tree_gen));
+    try std.testing.expect(failed.has_induced_failure);
+    var copy = (try index.copyMatched(a, source.parser, source.tree_gen, peer.parser, peer.tree_gen)) orelse return error.NoIndex;
+    defer copy.deinit(a);
+    var cold = try fullIndexForTest(a, &peer, after);
+    defer cold.deinit(a);
+    try std.testing.expectEqualDeep(cold.leaves.items, copy.leaves.items);
+    try std.testing.expectEqualDeep(cold.leaves.items, index.leaves.items);
+}
+
+test "bracket snapshot 빈 완료 목록도 복사하고 무효화 뒤에는 거절한다" {
+    const a = std.testing.allocator;
+    const text = "// no brackets\n";
+    const before = "fn f() void { _ = .{ 1, 2 }; }\n";
+    var source = Provider.init(before, .zig, 0) orelse return error.NoProvider;
+    defer source.deinit();
+    var index = try fullIndexForTest(a, &source, before);
+    defer index.deinit(a);
+    source.setSource(text);
+    index.invalidate();
+    try std.testing.expect(try index.step(a, &source, text, 0));
+    // 원본에 남은 여유 용량까지 복제하지 않는다. 빈 목록은 할당 실패를 유발하지 않아야 한다.
+    try std.testing.expect(index.leaves.capacity > 0);
+    var peer = source.copyReady(.zig) orelse return error.NoSnapshot;
+    defer peer.deinit();
+    try std.testing.expectEqual(@as(usize, 0), index.leaves.items.len);
+    var failed = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var copy = (try index.copyMatched(failed.allocator(), source.parser, source.tree_gen, peer.parser, peer.tree_gen)) orelse return error.NoIndex;
+    defer copy.deinit(failed.allocator());
+    try std.testing.expect(copy.ready and !failed.has_induced_failure);
+    try std.testing.expect(try copy.step(a, &peer, text, 0));
+    try std.testing.expectEqual(@as(u64, 0), copy.rebuilds);
+    index.invalidate();
+    try std.testing.expect(index.synced_parser == null);
+    try std.testing.expect((try index.copyMatched(a, source.parser, source.tree_gen, peer.parser, peer.tree_gen)) == null);
 }
 
 fn fullIndexForTest(allocator: std.mem.Allocator, prov: *Provider, source: []const u8) !BracketIndex {

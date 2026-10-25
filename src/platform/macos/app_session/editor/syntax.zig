@@ -227,6 +227,9 @@ pub fn prepareSharedSnapshot(source: *const State, allocator: std.mem.Allocator,
     };
     const folds = source.folds.copyMatched(allocator, original.parser, original.tree_gen, provider.parser, provider.tree_gen) catch null;
     if (folds) |value| next.folds = value;
+    // 잎 값만 선택적으로 옮긴다. 실패하면 수신 뷰가 기존 예산 순회로 목록을 만든다.
+    const brackets = source.brackets.copyMatched(allocator, original.parser, original.tree_gen, provider.parser, provider.tree_gen) catch null;
+    if (brackets) |value| next.brackets = value;
     return next;
 }
 
@@ -1672,6 +1675,122 @@ test "EW2 product 파싱 상한 밖이나 빈 문서에는 트리 사본을 남�
         try std.testing.expect(state.folds.tree == null);
         try std.testing.expectEqual(@as(usize, 0), state.folds.records.items.len);
     }
+}
+
+test "bracket snapshot product 원본 종료와 풀 변경 뒤 색과 모든 byte의 탐색은 전체 판정과 같다" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { grammar: editor_language.Grammar, text: []const u8 }{
+        .{ .grammar = .zig, .text = "fn f() void { _ = .{ (1), [2]u8{ 1, 2 } }; }\n" },
+        .{ .grammar = .markdown, .text = "# T\n\n[a](b)\n" },
+    };
+    for (cases) |sample| {
+        var source = openBudgeted(sample.text, sample.grammar, 0);
+        var source_live = true;
+        defer if (source_live) source.deinit(a);
+        try finishBrackets(&source, a, sample.text);
+        const copy = prepareSharedSnapshot(&source, a, sample.grammar) orelse return error.NoSnapshot;
+        defer {
+            copy.deinit(a);
+            a.destroy(copy);
+        }
+        try std.testing.expect(copy.brackets.ready and copy.bracket_resolved == null);
+        try std.testing.expectEqual(@as(usize, 0), copy.bracket_toks.items.len);
+        try std.testing.expectEqual(@as(usize, 0), copy.bracket_navigation.entries.items.len);
+        source.deinit(a);
+        source_live = false;
+        for ([_]bool{ false, true }) |pool| {
+            while (try prepareBrackets(copy, a, sample.text, pool, 0)) {}
+            try std.testing.expectEqual(@as(u64, 0), copy.brackets.rebuilds);
+            try expectBracketRepositionOracle(copy, sample.text, sample.grammar, pool);
+            if (sample.grammar == .markdown) {
+                try std.testing.expectEqual(@as(usize, 0), bracketMarks(copy).toks.len);
+                try std.testing.expect(copy.bracket_navigation.entries.items.len > 0);
+            }
+        }
+        const changed = try std.mem.concat(a, u8, &.{ "\n", sample.text });
+        defer a.free(changed);
+        var lines = try maru.session.editor.line_index.build(a, changed);
+        defer lines.deinit();
+        onEditSpan(copy, a, changed, .{ .start = 0, .old_end = 0, .new_end = 1 }, lines);
+        try finishBrackets(copy, a, changed);
+        try expectBracketRepositionOracle(copy, changed, sample.grammar, true);
+        // 복사 배열은 현재 길이만큼만 확보한다. 새 괄호가 늘어 재할당해도 판정이 같아야 한다.
+        const prefix = "fn z() void {}\n";
+        const grown = try std.mem.concat(a, u8, &.{ prefix, changed });
+        defer a.free(grown);
+        var grown_lines = try maru.session.editor.line_index.build(a, grown);
+        defer grown_lines.deinit();
+        const previous_count = copy.brackets.leaves.items.len;
+        onEditSpan(copy, a, grown, .{ .start = 0, .old_end = 0, .new_end = prefix.len }, grown_lines);
+        try finishBrackets(copy, a, grown);
+        if (sample.grammar == .zig) try std.testing.expect(copy.brackets.leaves.items.len > previous_count);
+        try expectBracketRepositionOracle(copy, grown, sample.grammar, true);
+    }
+}
+
+test "bracket snapshot product 모든 Zig 할당 실패는 본체와 원본을 보존하고 다시 수집한다" {
+    const a = std.testing.allocator;
+    const text = "fn f() void {\n _ = .{ 1, 2 };\n}\n";
+    var source = openBudgeted(text, .zig, 0);
+    defer source.deinit(a);
+    var lines = try maru.session.editor.line_index.build(a, text);
+    defer lines.deinit();
+    // 선택적 계보·접힘·괄호 할당이 함께 있는 경로를 순회한다. 신원 값은 이 단위 대조의 입력이다.
+    const document: maru.session.editor.document_registry.DocumentIdentity = .{ .owner = 1, .slot = 0, .generation = 1 };
+    updateForInputWithOrigin(&source, a, text, null, lines, document, 1, null, .{ .document = document, .revision = 1, .serial = 1 });
+    try std.testing.expect(matchesInput(&source, document, 1));
+    try std.testing.expect(source.origin_state.?.current != null);
+    try finishBrackets(&source, a, text);
+    var spans: std.ArrayList(syntax.Provider.FoldSpan) = .empty;
+    defer spans.deinit(a);
+    try source.provider.?.foldSpansCached(a, &source.folds, lines.lines, &spans);
+    const original_leaves = source.brackets.leaves.items.ptr;
+    var count = std.testing.FailingAllocator.init(a, .{});
+    {
+        const copy = prepareSharedSnapshot(&source, count.allocator(), .zig) orelse return error.NoSnapshot;
+        defer {
+            copy.deinit(count.allocator());
+            count.allocator().destroy(copy);
+        }
+        try std.testing.expect(copy.brackets.ready);
+        try std.testing.expect(copy.origin_state != null and copy.folds.tree != null);
+    }
+    try std.testing.expectEqual(count.allocated_bytes, count.freed_bytes);
+    const allocations = count.alloc_index;
+    try std.testing.expect(allocations >= 4);
+    var saw_origin_failure = false;
+    var saw_fold_failure = false;
+    var saw_bracket_failure = false;
+    for (0..allocations) |failure| {
+        var failed = std.testing.FailingAllocator.init(a, .{ .fail_index = failure });
+        const allocator = failed.allocator();
+        {
+            const copy = prepareSharedSnapshot(&source, allocator, .zig);
+            defer if (copy) |value| {
+                value.deinit(allocator);
+                allocator.destroy(value);
+            };
+            try std.testing.expect(failed.has_induced_failure);
+            if (failure == 0) {
+                try std.testing.expect(copy == null);
+            } else {
+                const value = copy orelse return error.SnapshotLostAfterOptionalFailure;
+                try std.testing.expect(value.provider.?.tree != null);
+                try std.testing.expect(matchesInput(value, document, 1));
+                if (value.origin_state == null) saw_origin_failure = true;
+                if (value.folds.tree == null) saw_fold_failure = true;
+                if (!value.brackets.ready) saw_bracket_failure = true;
+                failed.fail_index = std.math.maxInt(usize);
+                try finishBrackets(value, allocator, text);
+                try expectBracketRepositionOracle(value, text, .zig, false);
+            }
+        }
+        try std.testing.expectEqual(failed.allocated_bytes, failed.freed_bytes);
+        try std.testing.expectEqual(original_leaves, source.brackets.leaves.items.ptr);
+        try std.testing.expect(source.brackets.ready);
+        try std.testing.expect(matchesInput(&source, document, 1));
+    }
+    try std.testing.expect(saw_origin_failure and saw_fold_failure and saw_bracket_failure);
 }
 
 /// 새 좌표로 전체 재계산한 색·짝·점프를 모든 byte에서 대조한다.

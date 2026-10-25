@@ -558,7 +558,7 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
         self.ime_did_delete = false;
         self.ime_insert_failed = false;
         self.ime_terminal_target_tombstoned = false;
-        @import("address_ime.zig").finish(self);
+        @import("field_ime.zig").finish(self);
         @import("palette_ime.zig").finish(self);
         self.ime_search_owner = null;
         self.ime_search_before = null;

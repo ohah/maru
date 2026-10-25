@@ -22,6 +22,7 @@ const std = @import("std");
 const input = @import("../input.zig");
 const text_field = @import("text_field.zig");
 const text_layout = @import("../text_layout.zig");
+const grapheme = @import("../../grapheme.zig");
 
 pub const TextField = text_field.TextField;
 
@@ -72,12 +73,19 @@ pub fn applyKey(field: *TextField, allocator: std.mem.Allocator, k: input.InputE
     }
 }
 
-/// 편집 줄 — caret 앞 글 + 조합 중 글자 + caret 글리프 + caret 뒤 글. 조합은 caret 자리에서 일어나므로 caret
-/// 글리프는 조합 뒤에 온다(조합이 끝나면 그 자리에 확정된다). 호출자 소유.
+// Paint-only cursor snapping preserves a shaped grapheme; semantic ranges remain exact.
+fn visiblePreeditCaret(field: *const TextField) usize {
+    // A visible caret must not split a shaped NFD/emoji grapheme. The IME's
+    // exact scalar range remains in its projection; only painting is snapped.
+    const bytes = field.preedit.items;
+    return grapheme.snapToBoundary(bytes, @min(field.preedit_caret orelse bytes.len, bytes.len));
+}
+
 pub fn composeLine(allocator: std.mem.Allocator, field: *const TextField, caret_glyph: []const u8) ![]u8 {
     const text = field.text.items;
     const at = @min(field.caret, text.len);
-    return std.mem.concat(allocator, u8, &.{ text[0..at], field.preedit.items, caret_glyph, text[at..] });
+    const split = visiblePreeditCaret(field);
+    return std.mem.concat(allocator, u8, &.{ text[0..at], field.preedit.items[0..split], caret_glyph, field.preedit.items[split..], text[at..] });
 }
 
 /// `composeLine` 을 폭 `avail_cols` 칸 줄에 tail 앵커로 그릴 때 **caret 이 보이게** 한다. tail 앵커는 긴 줄의
@@ -86,10 +94,10 @@ pub fn composeLine(allocator: std.mem.Allocator, field: *const TextField, caret_
 /// 폭은 방출자와 같은 cluster 단위(`text_layout.displayCols`)로 잰다.
 pub fn composeLineFit(allocator: std.mem.Allocator, field: *const TextField, caret_glyph: []const u8, avail_cols: usize) ![]u8 {
     const full = try composeLine(allocator, field, caret_glyph);
+    errdefer allocator.free(full);
     if (avail_cols == 0 or text_layout.displayCols(full, null) <= avail_cols) return full;
-    const text = field.text.items;
-    const at = @min(field.caret, text.len);
-    const post = text[at..];
+    const marker_end = @min(field.caret, field.text.items.len) + visiblePreeditCaret(field) + caret_glyph.len;
+    const post = full[marker_end..];
     const keep = avail_cols / 2;
     if (text_layout.displayCols(post, null) < keep) return full; // tail 창이 이미 caret 을 담는다
     var end: usize = 0;
@@ -101,11 +109,12 @@ pub fn composeLineFit(allocator: std.mem.Allocator, field: *const TextField, car
         cols += w;
         end = text_layout.clusterEndAfter(post, end, base.advance);
     }
+    const trimmed = try std.mem.concat(allocator, u8, &.{ full[0..marker_end], post[0..end] });
     allocator.free(full);
-    return std.mem.concat(allocator, u8, &.{ text[0..at], field.preedit.items, caret_glyph, post[0..end] });
+    return trimmed;
 }
 
-/// 그려진 줄에서 caret(조합 시작점)이 놓이는 **창 안의 열** — IME 후보창 자리.
+/// 그려진 줄에서 caret이 놓이는 **창 안의 열** — IME 후보창 자리.
 ///
 /// 렌더는 `lead ++ composeLineFit(…, fit_cols)` 한 줄을 폭 `window_cols` 칸에 tail 앵커로 놓는다(`text_layout.plan`).
 /// 여기서도 **같은 계획을 돌려** caret 앞 글자가 끝나는 열을 찾는다 — 따로 셈하면 넘칠 때(앞이 "…"로 잘리거나 뒤가
@@ -123,7 +132,8 @@ pub fn drawnCaretCol(
     defer allocator.free(fitted);
     const line = try std.mem.concat(allocator, u8, &.{ lead, fitted });
     defer allocator.free(line);
-    const at = lead.len + @min(field.caret, field.text.items.len); // 조합·caret 이 시작하는 바이트
+    const at = lead.len + @min(field.caret, field.text.items.len) +
+        (if (field.preedit_caret != null) visiblePreeditCaret(field) else 0); // legacy anchor remains at the composition start
     var p = text_layout.plan(line, 0, window_cols, .tail, null);
     var last_end: u16 = 0;
     while (p.next()) |item| switch (item) {
@@ -320,4 +330,23 @@ test "인라인 편집: IME 열은 렌더와 같은 계획으로 잰다 — 넘�
     try f.setText(testing.allocator, "abc");
     f.caret = 1;
     try testing.expectEqual(@as(u16, 2 + 1), try drawnCaretCol(testing.allocator, "  ", &f, "|", 0, 40));
+}
+
+test "inline rename IME caret keeps NFD cluster intact and matches anchor" {
+    const a = testing.allocator;
+    var field: TextField = .{};
+    defer field.deinit(a);
+    try field.setText(a, "aZ");
+    field.caret = 1;
+    const nfd = "\u{1112}\u{1161}\u{11ab}";
+    try field.setPreedit(a, nfd);
+    field.preedit_caret = 3; // inside the same Hangul grapheme
+    const start = try composeLine(a, &field, "|");
+    defer a.free(start);
+    try testing.expectEqualStrings("a|" ++ nfd ++ "Z", start);
+    field.preedit_caret = nfd.len;
+    try testing.expectEqual(@as(u16, 3), try drawnCaretCol(a, "", &field, "|", 0, 40));
+    const end = try composeLineFit(a, &field, "|", 40);
+    defer a.free(end);
+    try testing.expectEqualStrings("a" ++ nfd ++ "|Z", end);
 }

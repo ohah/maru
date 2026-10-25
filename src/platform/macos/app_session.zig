@@ -352,7 +352,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 233: bind native owner window identity to Inspector snapshots.
 // 234: palette-owned dynamic IME context and deep transaction snapshots.
 // 235: address TextField native IME ownership and transaction projection.
-pub const abi_version: u32 = 235;
+// 236: shared TextField IME routing and rename owner/snapshot storage.
+pub const abi_version: u32 = 236;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -6774,6 +6775,9 @@ pub const AppSession = struct {
     // docs/text-field-editor.md §2.2). 대상 객체가 teardown되면 invalidate가 null로 비운다(stale 포인터 방지).
     rename: ?RenameTarget = null,
     rename_input: chrome.components.text_field.TextField = .{},
+    rename_ime: chrome.components.text_field_ime.State = .{ .normalization = .verbatim },
+    rename_ime_generation: u64 = 1,
+    rename_ime_owner: ?u64 = null,
     /// 사이드바 헤더 검색바 입력(query+preedit, IME·EAW 폭). find/palette와 같은 끝-caret OverlayInput 모델이지만 모달이
     /// 아니라 사이드바 상주 — sidebar_search_active일 때 키/IME가 여기로 라우팅되고, 카드 목록을 이름·브랜치·폴더로
     /// 필터링한다(visible_slots). Esc로 종료, Enter로 첫 매칭 세션 이동. P3.
@@ -16727,9 +16731,7 @@ pub const AppSession = struct {
                 settings_ops.refreshSettingsFieldCount(self); // 확정 글자로 검색 필터 재적용(setFieldCount가 selected clamp)
                 self.metal_dirty = true;
             },
-            .rename => if (self.rename_input.commitPreedit(self.allocator)) {
-                self.metal_dirty = true; // 조합 글자가 편집 텍스트로 확정됨(렌더 갱신)
-            },
+            .rename => return @import("app_session/field_ime.zig").commitAll(self, .rename),
             .sidebar_search => if (self.sidebar_search_input.commitPreedit(self.allocator)) {
                 sidebar_ops.rebuildSidebar(self) catch {}; // 확정 글자로 필터 재적용
                 self.metal_dirty = true;
@@ -16742,7 +16744,7 @@ pub const AppSession = struct {
                 agent_activity_ops.rebuildFilter(self);
             },
             .agent_session_search => return @import("app_session/chrome_ime.zig").commitAll(self),
-            .addr_edit => return @import("app_session/address_ime.zig").commitAll(self),
+            .addr_edit => return @import("app_session/field_ime.zig").commitAll(self, .address),
             .project_search => return project_search_ops.commitPreedit(self),
             .scm_commit => scm_dock_ops.commitCommitPreedit(self),
             .terminal => {
@@ -25379,6 +25381,7 @@ pub const AppSession = struct {
         self.context_menu_target = null;
         self.addr_edit = null; // Phase 7e-2a: 주소창 편집 상태(고정 버퍼라 heap 없음 — 방어적 클리어, 대칭 규율)
         self.web_nav_action_pending = null; // Phase 7e-3: nav 버튼 클릭 pending(POD, heap 없음 — 같은 대칭 규율)
+        self.rename_ime.deinit(self.allocator);
         self.rename_input.deinit(self.allocator); // 인라인 rename 입력(query/preedit) heap 해제
         self.sidebar_search_input.deinit(self.allocator); // 사이드바 검색바 입력 heap 해제
         self.sidebar_publication.deinit(self.allocator);
@@ -102103,4 +102106,70 @@ test "address IME host publishes selection and consumes stale callbacks" {
     try std.testing.expect(ime.insert(session, "old palette", null));
     session.imeEnd(null);
     try std.testing.expectEqualStrings("new", session.addr_field.text.items);
+}
+
+test "inline rename IME host preserves NFD and candidate Return has no target effect" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initRenameCaretTestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const target = tab_ops.activeTab(self);
+    settings_ops.startRename(self, .{ .workspace = target });
+    try self.rename_input.setText(a, "x  z");
+    self.rename_input.caret = 2;
+    const ime = @import("app_session/chrome_ime.zig");
+    const token = ime.generation(self).?;
+    try std.testing.expect(token > (@as(u64, 1) << 61) and token < (@as(u64, 1) << 62));
+    const nfd = "\u{1112}\u{1161}\u{11ab}";
+    self.imeBegin();
+    try std.testing.expect(ime.marked(self, nfd, .{ .location = 3, .length = 0 }, null));
+    try std.testing.expect(ime.insert(self, nfd, null));
+    self.imeEnd(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqualStrings("x " ++ nfd ++ " z", self.rename_input.text.items);
+    try std.testing.expect(target.custom_name == null and self.rename != null);
+    self.imeBegin();
+    try std.testing.expect(ime.marked(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 2, .length = 3 }));
+    try std.testing.expect(ime.insert(self, "韓", null));
+    self.imeEnd(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqualStrings("x 韓 z", self.rename_input.text.items);
+    try std.testing.expect(target.custom_name == null and self.rename != null);
+    self.imeBegin();
+    self.imeEnd(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqualStrings("x 韓 z", target.custom_name.?);
+    try std.testing.expect(self.rename == null);
+}
+
+test "inline rename IME host rejects reopen and address retarget" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initRenameCaretTestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const ime = @import("app_session/chrome_ime.zig");
+    const target = tab_ops.activeTab(self);
+    settings_ops.startRename(self, .{ .workspace = target });
+    const token = ime.generation(self).?;
+    self.imeBegin();
+    settings_ops.startRename(self, .{ .workspace = target });
+    try self.rename_input.setText(a, "new");
+    try std.testing.expect(ime.insert(self, "stale", null));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("new", self.rename_input.text.items);
+    try std.testing.expect(ime.generation(self).? != token);
+    const sid = try web_ops.createAdoptedWebTermInActivePane(self);
+    settings_ops.startRename(self, .{ .workspace = target });
+    self.imeBegin();
+    settings_ops.closeRename(self);
+    web_ops.enterAddrEdit(self, sid, "address");
+    try std.testing.expect(ime.insert(self, "old rename", null));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("address", self.addr_field.text.items);
+    self.imeBegin();
+    web_ops.cancelAddrEdit(self, false);
+    settings_ops.startRename(self, .{ .workspace = target });
+    try self.rename_input.setText(a, "rename");
+    try std.testing.expect(ime.insert(self, "old address", null));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("rename", self.rename_input.text.items);
 }

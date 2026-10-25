@@ -10,7 +10,7 @@ from verify import h, validate, validate_diagnostic
 PREFIX = 'https://a.invalid/'
 
 
-def fixture():
+def fixture(prefix=PREFIX):
     states, composition, raw, artifacts = [], [], [], []
     count = 0
     for index in range(6):
@@ -21,18 +21,18 @@ def fixture():
                         open=1, palette_owner=1, terminal_bytes=0, navigate_pending=0,
                         query_bytes=len(query.encode()), query_hash=h(query),
                         preedit_bytes=len(preedit.encode()), preedit_hash=h(preedit),
-                        document_bytes=len((PREFIX + word + '/z').encode()), document_hash=h(PREFIX + word + '/z'),
+                        document_bytes=len((prefix + word + '/z').encode()), document_hash=h(prefix + word + '/z'),
                         committed_callbacks=callbacks, has_marked=bool(preedit))
 
-        states.append(state(f'selected_fixture_{index}', PREFIX + '😀/z', '', '😀', count))
+        states.append(state(f'selected_fixture_{index}', prefix + '😀/z', '', '😀', count))
         for letter in ('ㅎ', '하', '한'):
             count += 1
-            composition.append(state(letter, PREFIX + letter + '/z', '', letter, count))
-        before = state(f'han_{index}', PREFIX + '한/z', '', '한', count)
+            composition.append(state(letter, prefix + letter + '/z', '', letter, count))
+        before = state(f'han_{index}', prefix + '한/z', '', '한', count)
         count += 1
-        opened = state(f'opened_{index}', PREFIX + '/z', '韓', '韓', count)
+        opened = state(f'opened_{index}', prefix + '/z', '韓', '韓', count)
         count += 1
-        closed = state(f'cancel_{index}' if index < 5 else 'selected', PREFIX + ('한' if index < 5 else '韓') + '/z', '', '한' if index < 5 else '韓', count)
+        closed = state(f'cancel_{index}' if index < 5 else 'selected', prefix + ('한' if index < 5 else '韓') + '/z', '', '한' if index < 5 else '韓', count)
         states.extend([before, opened, closed])
         if index == 5:
             break

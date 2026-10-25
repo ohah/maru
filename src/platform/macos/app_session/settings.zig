@@ -1239,6 +1239,8 @@ pub fn applyLoadedConfig(self: *AppSession, preserve_zoom: bool) void {
 /// 모달은 닫는다(배타적). 이후 키/IME는 모달 가드가 rename_input으로 라우팅한다. 대상은 dispatchAppAction이
 /// 활성 워크스페이스/pane/Term으로 고른다(또는 PR4/PR5 클릭 대상).
 pub fn startRename(self: *AppSession, target: RenameTarget) void {
+    self.rename_ime.invalidate(self.allocator);
+    self.rename_ime_generation +|= 1;
     self.chrome_host.find.hide(); // rename은 별도 모달 — 열려 있던 오버레이를 닫는다(배타적)
     // **하이라이트도 멎어야 한다.** `hide()`는 오버레이만 지운다 — ⌘G 닫힘-네비 중이면
     // `find_nav`가 살아 있어 강조가 그대로 남는다(적대적 검증 2026-08-23 2라운드가 이 네 번째
@@ -1270,7 +1272,7 @@ pub fn startRename(self: *AppSession, target: RenameTarget) void {
 /// 하고 새 owned 문자열로 교체. 그 뒤 편집기를 닫는다.
 pub fn commitRename(self: *AppSession) void {
     const target = self.rename orelse return;
-    _ = self.rename_input.commitPreedit(self.allocator); // 조합 잔여를 caret 자리에
+    if (!@import("field_ime.zig").commitAll(self, .rename)) return; // prepare before any target side effect
     const text = self.rename_input.text.items;
     if (target == .file_tree) {
         if (file_panel_ops.enqueueFileTreeEdit(self, target.file_tree, text)) closeRename(self);
@@ -1364,6 +1366,7 @@ pub fn closePopupRename(self: *AppSession) void {
 pub fn closeRename(self: *AppSession) void {
     if (self.rename == null) return;
     self.rename = null;
+    self.rename_ime.invalidate(self.allocator);
     self.chrome_host.rename_box.hide(); // 심볼 상자(§8.2f) — 다른 대상이면 이미 닫혀 있다
     self.rename_input.clear();
     self.resetCursorBlink();

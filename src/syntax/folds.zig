@@ -300,6 +300,14 @@ test "fold point hint 무작위 줄 인덱스와 앞뒤 조회를 독립 전수 
 }
 
 test "fold order 작은 추가분은 동률과 빈 목록에서도 전체 정렬과 같다" {
+    // 비교 함수 자체가 뒤집혀도 함께 틀리는 oracle이 되지 않도록 고정 정답도 둔다.
+    const golden = [_]Cache.Record{ .{ .lo = 0, .hi = 0 }, .{ .lo = 2, .hi = 4 }, .{ .lo = 5, .hi = 9 }, .{ .lo = 5, .hi = 8 }, .{ .lo = 5, .hi = 8 } };
+    const input = [_]Cache.Record{ golden[0], golden[1], golden[3], golden[2], golden[4] };
+    for ([_]?usize{ null, 3 }) |prefix| {
+        var tied = input;
+        Cache.orderRecords(&tied, prefix);
+        try std.testing.expectEqualDeep(&golden, &tied);
+    }
     var prng = std.Random.DefaultPrng.init(0x12a5bf);
     const random = prng.random();
     var actual: [129]Cache.Record = undefined;

@@ -1,7 +1,8 @@
 """Native Korean IME composition UI check for the isolated default-font fixture.
 
 Uses guarded SendInput mouse/scan codes. This proves OS routing and visible
-composition ownership, not physical input or candidate-list selection.
+composition ownership. --candidates also checks Hanja opening and one wide
+character commit. Physical keyboard input is not covered.
 The prior copied binary is the --native-ui-control negative control.
 """
 import argparse,contextlib,ctypes as c,hashlib,json,os,re,struct,time
@@ -10,7 +11,7 @@ from ctypes import wintypes as w
 
 from pathlib import Path
 
-p=argparse.ArgumentParser();p.add_argument('--state',type=Path,required=True);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--native-ui-control',action='store_true');args=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--state',type=Path,required=True);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--native-ui-control',action='store_true');p.add_argument('--candidates',action='store_true');args=p.parse_args()
 
 if not __debug__:p.error('Run without Python optimization so fixture and clipboard guards remain active')
 
@@ -300,7 +301,7 @@ def activate_by_owned_click():
     global click_point
     check_owner()
     for keycode in (1,2,4,0x10,0x11,0x12,0x5b,0x5c):assert not (u.GetAsyncKeyState(keycode)&0x8000),'user input is active'
-    point=w.POINT(520,600);assert u.ClientToScreen(h,c.byref(point))
+    point=w.POINT(450,20);assert u.ClientToScreen(h,c.byref(point))
     assert u.WindowFromPoint(point)==h,'activation point is not owned by fixture'
     left,top,width,height=(u.GetSystemMetrics(n) for n in (76,77,78,79));assert width>1 and height>1
     assert left<=point.x<left+width and top<=point.y<top+height
@@ -344,6 +345,37 @@ try:
         else:
             assert point_is_app and not sample['visible_owned_windows'],'default composition popup still covers app paint'
     record('old binary reproduces default composition popup' if args.native_ui_control else 'app paint owns composition while default popup stays hidden')
+    if args.candidates:
+        def candidates_present():
+            sample=ime_ui_observation()
+            return [item for item in sample['visible_owned_windows'] if 'candidate' in item['class'].lower()]
+        def wait_candidates(wanted):
+            deadline=time.monotonic()+1.5
+            while time.monotonic()<deadline:
+                items=candidates_present()
+                if bool(items)==wanted:return items
+                time.sleep(.03)
+            raise AssertionError('native candidate visibility did not settle to '+str(wanted))
+        os_key(vk=0x19)
+        candidates=wait_candidates(True)
+        assert any(120<=item['rect'][1]<=160 for item in candidates),'candidate popup is not below the fixture field caret'
+        observations.append({'native_candidates':candidates})
+        capture('os-ime-candidate')
+        record('native Hanja candidates open below the field caret')
+        os_key(vk=0x31)
+        wait_candidates(False)
+        selected=capture('os-ime-selected')
+        def cursor_starts(path):
+            raw=path.read_bytes()
+            return [x for x in range(700,940) if all(min(raw[54+(y*1000+xx)*4:54+(y*1000+xx)*4+3])>=240 for y in range(96,108) for xx in range(x,x+6))]
+        before_cursor=cursor_starts(baseline);after_cursor=cursor_starts(selected)
+        assert before_cursor and after_cursor,'field cursor pixel oracle has no positive control'
+        cell_width=before_cursor[-1]-before_cursor[0]+6
+        assert after_cursor[-1]-after_cursor[0]+6==cell_width,'cursor width changed during candidate selection'
+        assert after_cursor[0]-before_cursor[0]==2*cell_width,'candidate did not commit exactly one wide character'
+        observations.append({'candidate_cursor_advance':after_cursor[0]-before_cursor[0],'cell_width':cell_width})
+        record('candidate selection commits one wide character without duplicate delivery')
+
 except Exception as error:
     failure=repr(error)
     print('IME UI check failed: '+failure,flush=True)
@@ -368,7 +400,7 @@ finally:
     for counter in ['keys_to_shell','bytes_to_shell']:
         value=re.search(r'\b'+counter+r'=(\d+)',log);assert value and int(value[1])==0,(counter,value)
     record('normal native exit, config preserved and no shell input')
-    args.output.write_text(json.dumps({'valid':failure is None,'full_ime_validation':False,'scope':'Native OS composition UI ownership only; candidate selection and physical input are not covered','native_ui_control':args.native_ui_control,'checks':checks,'binary':binary,'observations':observations,'captures':captures,'failure':failure,'exit':code.value,'input':'SendInput scan codes into foreground-owned fixture; native IMM observation; no physical keyboard claim'},indent=2))
+    args.output.write_text(json.dumps({'valid':failure is None,'full_ime_validation':False,'scope':('Native OS composition and Hanja candidate selection in one settings field' if args.candidates else 'Native OS composition UI ownership only'),'native_ui_control':args.native_ui_control,'candidates':args.candidates,'checks':checks,'binary':binary,'observations':observations,'captures':captures,'failure':failure,'exit':code.value,'input':'SendInput scan codes into foreground-owned fixture; native IMM observation; no physical keyboard claim'},indent=2))
     current_cursor=w.POINT()
     if click_point is not None and u.GetCursorPos(c.byref(current_cursor)) and (current_cursor.x,current_cursor.y)==(click_point.x,click_point.y):u.SetCursorPos(original_cursor.x,original_cursor.y)
     k.CloseHandle(process)

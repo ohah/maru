@@ -70544,3 +70544,46 @@ test "shared parse reuse product 다른 문서의 위조된 완료 증명은 현
     try testing.expectEqual(before, sharedParseCount(source, peer));
     try expectSharedParseOutputs(source, a);
 }
+
+test "bracket reposition shared product 양쪽 입력과 Undo Redo가 좌표만 갱신하고 현재 짝을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const source = try undoFixture(&fx, a, "shared-brackets.zig", "fn f() void {\n _ = .{ 1, 2 };\n}\n");
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    const peer = try pane_ops.splitSharedEditorPane(fx.session, .horizontal, false);
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    for ([_]*Term{ source, peer }) |view| try syntax_color.finishBrackets(&view.rt.editor_syntax, a, view.rt.editorDocument().opened.?.file.content);
+    const colors = maru.session.editor.bracket_colors;
+    for (0..8) |i| {
+        const before = colors.resolutionCountForTest();
+        const view = if (i % 2 == 0) source else peer;
+        try testing.expect(insertText(fx.session, view, if (i % 3 == 0) "\n" else " "));
+        const bytes = view.rt.editorDocument().opened.?.file.content;
+        for ([_]*Term{ source, peer }) |current| try syntax_color.finishBrackets(&current.rt.editor_syntax, a, bytes);
+        try testing.expectEqual(before, colors.resolutionCountForTest());
+        // 별도 전체 판정을 기준으로 모든 byte의 짝과 점프를 대조한다.
+        var cold = syntax_color.openBudgeted(bytes, .zig, 0);
+        defer cold.deinit(a);
+        try syntax_color.finishBrackets(&cold, a, bytes);
+        const expected = syntax_color.bracketSource(&cold).?;
+        for ([_]*Term{ source, peer }) |current| {
+            const actual = syntax_color.bracketSource(&current.rt.editor_syntax).?;
+            try testing.expectEqualDeep(cold.bracket_info.items, current.rt.editor_syntax.bracket_info.items);
+            for (0..bytes.len + 1) |pos| {
+                try testing.expectEqualDeep(expected.pairAt(pos), actual.pairAt(pos));
+                try testing.expectEqualDeep(maru.session.editor.brackets.jumpTarget(expected, bytes.len, pos), maru.session.editor.brackets.jumpTarget(actual, bytes.len, pos));
+            }
+        }
+    }
+    for ([_]bool{ false, true }) |redo| {
+        const before = colors.resolutionCountForTest();
+        try testing.expect(if (redo) redoEdit(fx.session, source) else undoEdit(fx.session, peer));
+        const bytes = source.rt.editorDocument().opened.?.file.content;
+        for ([_]*Term{ source, peer }) |view| try syntax_color.finishBrackets(&view.rt.editor_syntax, a, bytes);
+        try testing.expectEqual(before, colors.resolutionCountForTest());
+        try testing.expectEqualDeep(source.rt.editor_syntax.bracket_toks.items, peer.rt.editor_syntax.bracket_toks.items);
+        try testing.expectEqualDeep(source.rt.editor_syntax.bracket_info.items, peer.rt.editor_syntax.bracket_info.items);
+    }
+}

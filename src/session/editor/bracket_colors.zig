@@ -44,8 +44,18 @@ pub const max_kinds: usize = 8;
 /// 짝이 없는 괄호. 색·강조·점프는 이 동일한 짝 판정을 함께 읽는다.
 pub const none = std.math.maxInt(u32);
 
+const builtin = @import("builtin");
+var resolution_calls: if (builtin.is_test) std.atomic.Value(u64) else void = if (builtin.is_test) .init(0) else {};
+
+/// 빠른 경로 표시 대신 실제 전체 판정 호출을 검사한다. 제품 바이너리에는 저장소가 없다.
+pub fn resolutionCountForTest() u64 {
+    if (!builtin.is_test) @compileError("test-only resolution counter");
+    return resolution_calls.load(.monotonic);
+}
+
 /// `tokens` 의 판정을 `out` 에 쓴다(길이가 같아야 한다). `partner`·`stack` 은 호출자가 주는 작업 칸(각각 `tokens.len` 이상).
 pub fn resolve(tokens: []const Token, independent: bool, out: []Info, partner: []u32, stack: []u32) void {
+    if (builtin.is_test) _ = resolution_calls.fetchAdd(1, .monotonic);
     std.debug.assert(out.len == tokens.len and partner.len >= tokens.len and stack.len >= tokens.len);
     // ① 짝 맞추기. `partner[i]` = 짝의 자리(없으면 `none`). 깊이 가드로 글자가 된 여는 괄호는 `ignored` 로 적는다(`out[i].colored` 는 거짓 그대로).
     var sp: usize = 0;
@@ -120,26 +130,85 @@ pub fn resolve(tokens: []const Token, independent: bool, out: []Info, partner: [
 /// 까닭이 이것이다.
 pub const max_tokenized_line: usize = 20_000;
 
+/// 긴 줄 제외를 전체 판정과 좌표 재사용이 함께 읽는다. 현재 원문을 기준으로 판단한다.
+pub const LineFilter = struct {
+    source: []const u8,
+    line_start: usize = 0,
+    line_end: usize = 0,
+    long: bool = false,
+
+    pub fn includes(self: *LineFilter, t: Token) bool {
+        if (t.start >= self.line_end or t.start < self.line_start) {
+            self.line_start = if (std.mem.lastIndexOfScalar(u8, self.source[0..t.start], '\n')) |nl| nl + 1 else 0;
+            self.line_end = if (std.mem.indexOfScalarPos(u8, self.source, t.start, '\n')) |nl| nl else self.source.len;
+            // 줄바꿈을 제외한 UTF-16 길이라는 기존 정책을 두 경로에 동일하게 적용한다.
+            if (self.line_end > self.line_start and self.source[self.line_end - 1] == '\r') self.line_end -= 1;
+            self.long = utf16Len(self.source[self.line_start..self.line_end]) >= max_tokenized_line;
+        }
+        return !self.long;
+    }
+};
+
 /// 긴 줄(`max_tokenized_line` 이상)에 든 괄호를 뺀다 — 제자리에서 당기고 남은 길이를 돌려준다. `tokens` 는 위치 오름차순이고 `source` 는 그 문서다.
 pub fn dropLongLines(tokens: []Token, source: []const u8) usize {
+    var filter: LineFilter = .{ .source = source };
     var w: usize = 0;
-    var line_start: usize = 0;
-    var line_end: usize = 0; // 지금 줄 [line_start, line_end) — 아직 안 셌으면 0,0
-    var long = false;
     for (tokens) |t| {
-        if (t.start >= line_end or t.start < line_start) {
-            line_start = if (std.mem.lastIndexOfScalar(u8, source[0..t.start], '\n')) |nl| nl + 1 else 0;
-            line_end = if (std.mem.indexOfScalarPos(u8, source, t.start, '\n')) |nl| nl else source.len;
-            // 줄 길이는 줄바꿈을 뺀다(VS Code `line.length`) — CRLF 의 `\r` 도 줄바꿈이다.
-            if (line_end > line_start and source[line_end - 1] == '\r') line_end -= 1;
-            long = utf16Len(source[line_start..line_end]) >= max_tokenized_line;
-        }
-        if (long) continue;
+        if (!filter.includes(t)) continue;
         tokens[w] = t;
         w += 1;
     }
     return w;
 }
+
+/// 짝·단계·탐색 인덱스는 위치가 아닌 토큰의 구조와 순서에만 의존한다.
+/// 모든 입력을 확인한 뒤 좌표만 게시해, 뒤늦은 불일치가 이전 결과를 반쯤 바꾸지 못하게 한다.
+/// scratch는 기존 판정의 두 작업 칸이며 finish 전에는 임시 좌표만 바뀐다.
+pub const Reposition = struct {
+    tokens: []Token,
+    scratch: []u32,
+    filter: LineFilter,
+    expected: usize,
+    consumed: usize = 0,
+    matched: usize = 0,
+    /// 참이 되면 종료해도 된다. 전체 입력 소비는 재사용에 성공할 때만 필요하다.
+    failed: bool,
+
+    pub fn init(tokens: []Token, scratch: []u32, source: []const u8, expected: usize, previous_pool: bool, current_pool: bool) Reposition {
+        return .{ .tokens = tokens, .scratch = scratch, .filter = .{ .source = source }, .expected = expected, .failed = previous_pool != current_pool or scratch.len / 2 < tokens.len };
+    }
+
+    /// 배열 길이가 다른 미완성 판정은 재사용하지 않는다.
+    pub fn requireLengths(self: *Reposition, info_len: usize, navigation_len: usize) void {
+        self.failed = self.failed or info_len != self.tokens.len or navigation_len != self.tokens.len;
+    }
+
+    pub fn feed(self: *Reposition, t: Token) void {
+        self.consumed += 1;
+        if (self.failed or !self.filter.includes(t)) return;
+        if (self.matched >= self.tokens.len) {
+            self.failed = true;
+            return;
+        }
+        const old = self.tokens[self.matched];
+        if (old.open != t.open or old.open_kind != t.open_kind or old.close_kind != t.close_kind or old.colorized != t.colorized) {
+            self.failed = true;
+            return;
+        }
+        self.scratch[self.matched] = t.start;
+        self.scratch[self.tokens.len + self.matched] = t.len;
+        self.matched += 1;
+    }
+
+    pub fn finish(self: *Reposition) bool {
+        if (self.failed or self.consumed != self.expected or self.matched != self.tokens.len) return false;
+        for (self.tokens, 0..) |*t, i| {
+            t.start = self.scratch[i];
+            t.len = @intCast(self.scratch[self.tokens.len + i]);
+        }
+        return true;
+    }
+};
 
 /// UTF-16 단위 길이 — byte 가 상한보다 짧으면 셀 것도 없다(UTF-16 단위 ≤ byte).
 fn utf16Len(line: []const u8) usize {
@@ -269,4 +338,139 @@ test "BPC2 VS Code 와 대조 — monaco 0.56 이 낸 판 224 개(괄호 6,016 �
         brackets += got;
     }
     try testing.expectEqual(@as(usize, 6016), brackets);
+}
+
+// 두 번째 입력의 마지막 토큰에서 실패해도 이전 좌표와 판정은 보존돼야 한다.
+test "bracket reposition late mismatch and incomplete input preserve all coordinates" {
+    var previous = [_]Token{ .{ .start = 0, .open = true, .close_kind = 0 }, .{ .start = 2, .open = false, .close_kind = 0 } };
+    const saved = previous;
+    var scratch: [4]u32 = undefined;
+    var trial = Reposition.init(&previous, &scratch, "x(])", 2, false, false);
+    trial.feed(.{ .start = 1, .open = true, .close_kind = 0 });
+    try testing.expect(!trial.failed);
+    trial.feed(.{ .start = 2, .open = false, .close_kind = 1 });
+    try testing.expect(trial.failed);
+    try testing.expect(!trial.finish());
+    try testing.expectEqualDeep(saved, previous);
+    trial = Reposition.init(&previous, &scratch, "x(a)", 2, false, false);
+    trial.feed(.{ .start = 1, .open = true, .close_kind = 0 });
+    try testing.expect(!trial.finish());
+    try testing.expectEqualDeep(saved, previous);
+    trial = Reposition.init(&previous, &scratch, "x(a)", 2, false, false);
+    trial.feed(.{ .start = 1, .open = true, .close_kind = 0 });
+    trial.feed(.{ .start = 3, .open = false, .close_kind = 0 });
+    try testing.expect(trial.finish());
+    try testing.expectEqual(@as(u32, 1), previous[0].start);
+    try testing.expectEqual(@as(u32, 3), previous[1].start);
+    var original = saved;
+    trial = Reposition.init(&original, &scratch, "x(a))", 3, false, false);
+    trial.feed(.{ .start = 1, .open = true, .close_kind = 0 });
+    trial.feed(.{ .start = 3, .open = false, .close_kind = 0 });
+    trial.feed(.{ .start = 4, .open = false, .close_kind = 0 });
+    try testing.expect(!trial.finish());
+    try testing.expectEqualDeep(saved, original);
+}
+
+test "bracket reposition rejects pool structural attributes and short scratch" {
+    const original = [_]Token{.{ .start = 0, .open = true, .close_kind = 0 }};
+    var scratch: [2]u32 = undefined;
+    for (0..8) |mutation| {
+        var previous = original;
+        var input = original[0];
+        switch (mutation) {
+            0 => input.open = false,
+            1 => input.open_kind = 1,
+            2 => input.close_kind = 1,
+            3 => input.colorized = false,
+            else => {},
+        }
+        var trial = Reposition.init(&previous, if (mutation == 5) scratch[0..1] else &scratch, "(", 1, false, mutation == 4);
+        trial.requireLengths(if (mutation == 6) 0 else 1, if (mutation == 7) 0 else 1);
+        trial.feed(input);
+        try testing.expect(!trial.finish());
+        try testing.expectEqualDeep(original, previous);
+    }
+}
+
+test "bracket reposition uses current Unicode CRLF long line filter" {
+    const a = testing.allocator;
+    const text = try a.alloc(u8, max_tokenized_line * 4 + 8);
+    defer a.free(text);
+    // 한 UTF-16 단위인 한글을 19,997개 두어 단순 byte 길이로 잘못 제외하지 못하게 한다.
+    var n: usize = 0;
+    for (0..max_tokenized_line - 3) |_| {
+        @memcpy(text[n..][0..3], "한");
+        n += 3;
+    }
+    text[n] = '(';
+    text[n + 1] = ')';
+    @memcpy(text[n + 2 ..][0..2], "\r\n");
+    var previous = [_]Token{ .{ .start = 0, .open = true, .close_kind = 0 }, .{ .start = 1, .open = false, .close_kind = 0 } };
+    var scratch: [4]u32 = undefined;
+    var trial = Reposition.init(&previous, &scratch, text[0 .. n + 4], 2, false, false);
+    trial.feed(.{ .start = @intCast(n), .open = true, .close_kind = 0 });
+    trial.feed(.{ .start = @intCast(n + 1), .open = false, .close_kind = 0 });
+    try testing.expect(trial.finish());
+    const saved = previous;
+    // 일반 글자 하나가 더 들어오면 정확히 20,000 UTF-16 단위가 돼 목록에서 빠진다.
+    text[n + 2] = 'x';
+    @memcpy(text[n + 3 ..][0..2], "\r\n");
+    trial = Reposition.init(&previous, &scratch, text[0 .. n + 5], 2, false, false);
+    trial.feed(saved[0]);
+    trial.feed(saved[1]);
+    try testing.expect(!trial.finish());
+    try testing.expectEqualDeep(saved, previous);
+    // 이전 목록도 비었다면 새 긴 줄의 제외 목록과 같아 안전하게 재사용한다.
+    trial = Reposition.init(previous[0..0], scratch[0..0], text[0 .. n + 5], 2, false, false);
+    trial.feed(saved[0]);
+    trial.feed(saved[1]);
+    try testing.expect(trial.finish());
+    // 제외되던 줄이 짧아지면 비어 있던 목록으로는 재사용하지 않는다.
+    trial = Reposition.init(previous[0..0], scratch[0..0], "()", 2, false, false);
+    trial.feed(.{ .start = 0, .open = true, .close_kind = 0 });
+    trial.feed(.{ .start = 1, .open = false, .close_kind = 0 });
+    try testing.expect(!trial.finish());
+    // 4-byte 문자는 UTF-16 두 단위다. 9,999개와 괄호 둘이면 정확히 상한이다.
+    n = 0;
+    for (0..9999) |_| {
+        @memcpy(text[n..][0..4], "😀");
+        n += 4;
+    }
+    text[n] = '(';
+    text[n + 1] = ')';
+    trial = Reposition.init(&previous, &scratch, text[0 .. n + 2], 2, false, false);
+    trial.feed(.{ .start = @intCast(n), .open = true, .close_kind = 0 });
+    trial.feed(.{ .start = @intCast(n + 1), .open = false, .close_kind = 0 });
+    try testing.expect(!trial.finish());
+}
+
+test "bracket reposition full resolver oracle across malformed deep and multibyte brackets" {
+    const cases = [_][]const u8{ "", "a(b[c{d}e]f)", "({)}", "(]", "${a{b}}", "((((((((a", ")]}" };
+    var deep: [400]u8 = undefined;
+    @memset(deep[0..200], '(');
+    @memset(deep[200..], ')');
+    for (0..cases.len + 1) |ci| {
+        const text = if (ci < cases.len) cases[ci] else &deep;
+        for ([_]bool{ false, true }) |pool| for ([_]bool{ false, true }) |colorized| {
+            var tokens: [401]Token = undefined;
+            const old = scanForTest(text, colorized, &tokens);
+            var previous_info: [401]Info = undefined;
+            var expected_info: [401]Info = undefined;
+            var work: [802]u32 = undefined;
+            resolve(old, pool, previous_info[0..old.len], work[0..old.len], work[old.len..][0..old.len]);
+            var shifted: [401]Token = undefined;
+            for (old, 0..) |t, i| {
+                shifted[i] = t;
+                shifted[i].start += @intCast(i + 2);
+            }
+            // 공백 문서는 긴 줄 필터에 충분한 유효 좌표를 제공한다. 종류·길이는 토큰 값이다.
+            var source: [1000]u8 = @splat(' ');
+            var trial = Reposition.init(old, &work, &source, old.len, pool, pool);
+            for (shifted[0..old.len]) |t| trial.feed(t);
+            try testing.expect(trial.finish());
+            try testing.expectEqualDeep(shifted[0..old.len], old);
+            resolve(old, pool, expected_info[0..old.len], work[0..old.len], work[old.len..][0..old.len]);
+            try testing.expectEqualDeep(previous_info[0..old.len], expected_info[0..old.len]);
+        };
+    }
 }

@@ -593,3 +593,40 @@ test "BRI5 완성된 색 판정 출처 — 닿은 쌍, 감싸는 쌍, 다음 여
     try jumpTargets(src, text.len, &positions, &targets, testing.allocator);
     try testing.expectEqualSlices(?usize, &.{ 10, 8, 1, null, 1, 10 }, &targets);
 }
+
+test "bracket reposition retained navigation matches independently rebuilt index at every byte" {
+    const a = std.testing.allocator;
+    var tokens = [_]bracket_colors.Token{
+        .{ .start = 0, .open = true, .close_kind = 2, .open_kind = 3, .len = 2 },
+        .{ .start = 2, .open = true, .close_kind = 0 },
+        .{ .start = 3, .open = false, .close_kind = 0 },
+        .{ .start = 4, .open = false, .close_kind = 2 },
+        .{ .start = 6, .open = true, .close_kind = 1, .open_kind = 1 },
+    };
+    var info: [5]bracket_colors.Info = undefined;
+    var scratch: [10]u32 = undefined;
+    bracket_colors.resolve(&tokens, false, &info, scratch[0..5], scratch[5..]);
+    var retained: Index = .{};
+    defer retained.deinit(a);
+    try retained.rebuild(a, &tokens, scratch[0..5]);
+    // 길이도 판정에는 무관하다. 좌표 조회는 최신 길이를 읽는지 함께 확인한다.
+    var next = tokens;
+    for (&next, 0..) |*t, i| t.start += @intCast(2 + i * 3);
+    next[0].len = 1;
+    var text: [32]u8 = @splat(' ');
+    var trial = bracket_colors.Reposition.init(&tokens, &scratch, &text, next.len, false, false);
+    for (next) |t| trial.feed(t);
+    try std.testing.expect(trial.finish());
+    bracket_colors.resolve(&next, false, &info, scratch[0..5], scratch[5..]);
+    var cold: Index = .{};
+    defer cold.deinit(a);
+    try cold.rebuild(a, &next, scratch[0..5]);
+    const actual = retained.source(&tokens);
+    const expected = cold.source(&next);
+    for (0..text.len + 1) |pos| {
+        try std.testing.expectEqualDeep(expected.pairAt(pos), actual.pairAt(pos));
+        try std.testing.expectEqualDeep(expected.enclosing(pos), actual.enclosing(pos));
+        try std.testing.expectEqualDeep(expected.nextOpen(pos), actual.nextOpen(pos));
+        try std.testing.expectEqualDeep(jumpTarget(expected, text.len, pos), jumpTarget(actual, text.len, pos));
+    }
+}

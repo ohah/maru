@@ -5090,3 +5090,16 @@ TextField 중간 선택·UTF-16 읽기/교체·NFD 정규화·OOM snapshot·owne
 확인하는 후속 검증이다. 네이티브 이벤트의 목표 bounds와 owner·freshness 정책 및 독립 증거 판정
 검사는 통과했다. 실제 클릭·드래그/Shift+Right·pane 복귀 입력 진단도 통과했다. 같은 고정 앱에서 후보창 5회 PNG/OCR·한자 선택·실제 다른 pane 클릭과 터미널 입력 복귀까지 통과했다. 기반 main `306ec2429`의 실측과 후속 리베이스/CI 증거는 구분한다.
 범위와 상태: [주소창 실제 포인터 검증](plans/address-field-ime-pointer.md).
+
+
+### 괄호 구조 동일성 재사용
+
+`test-editor-bracket-reposition`은 중립 행동 5개와 실제 native/공유 제품 행동 3개를
+Debug·ReleaseFast로 검사한다(초기화 포함 각각 33개/7개). 짝·색·byte별 탐색 전체
+재계산, 구조·독립 풀·색칠 여부·긴 줄 경계, 늦은 불일치·짧은 scratch 거절,
+양쪽 뷰 입력·Undo/Redo와 실제 resolver 호출 감소가 대상이다.
+최종 보강판의 다섯 독립 결함 주입과 각 전후 정상 대조군, 전체 경계·문서/config
+검사는 통과했다. 같은 판의 제품 비교 실측 160개 실행·성능 2,400편집·정확성
+800편집/1,200뷰와 독립 원시 자료 검증도 통과했다. [전체 분포](../tools/editor-bracket-reposition/results.md)는
+모든 셀의 중앙값·p95·최댓값과 전체 시간이 악화된 조건도 포함한다. CI·main 합류는 미완료다.
+[계획과 재현](plans/editor-bracket-shape-reuse.md)이 현재 상태를 소유한다.

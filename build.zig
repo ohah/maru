@@ -6554,12 +6554,26 @@ pub fn build(b: *std.Build) void {
     run_sticky_snapshot.addArg("--maru-expect-passed=4");
     test_step.dependOn(&run_sticky_snapshot.step);
     b.step("test-editor-sticky-snapshot", "Verify independently owned copied sticky summaries").dependOn(&run_sticky_snapshot.step);
+    const bracket_edit_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"shared bracket edit native"} });
+    const run_bracket_edit = b.addRunArtifact(bracket_edit_tests);
+    run_bracket_edit.addArg("--maru-expect-tests=4");
+    run_bracket_edit.addArg("--maru-expect-passed=4");
+    test_step.dependOn(&run_bracket_edit.step);
+    b.step("test-editor-shared-bracket-edit", "Verify independent completed bracket replacement after shared edits").dependOn(&run_bracket_edit.step);
     const bracket_snapshot_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"bracket snapshot"} });
     const run_bracket_snapshot = b.addRunArtifact(bracket_snapshot_tests);
     run_bracket_snapshot.addArg("--maru-expect-tests=5");
     run_bracket_snapshot.addArg("--maru-expect-passed=5");
     test_step.dependOn(&run_bracket_snapshot.step);
     b.step("test-editor-bracket-snapshot", "Verify independent ready bracket copies and parser provenance").dependOn(&run_bracket_snapshot.step);
+    const bracket_edit_product = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"shared bracket edit product"} });
+    const run_bracket_edit_product = b.addRunArtifact(bracket_edit_product);
+    run_bracket_edit_product.addArg("--maru-expect-tests=8");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_bracket_edit_product.addArg("--maru-expect-passed=8");
+        macos_only_test_step.dependOn(&run_bracket_edit_product.step);
+    }
+    b.step("test-editor-shared-bracket-edit-product", "Compare completed shared edit lists with fresh colors and navigation").dependOn(&run_bracket_edit_product.step);
     const bracket_snapshot_product = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"bracket snapshot product"} });
     const run_bracket_snapshot_product = b.addRunArtifact(bracket_snapshot_product);
     run_bracket_snapshot_product.addArg("--maru-expect-tests=7");

@@ -328,7 +328,7 @@ pub fn onEditSpan(
     onEditSpanFromReady(self, allocator, source, e, lines_after, null, null);
 }
 
-fn onEditSpanFromReady(self: *State, allocator: std.mem.Allocator, source: []const u8, e: EditSpan, lines_after: maru.session.editor.line_index.LineIndex, ready: ?*const syntax.Provider, trace: ?*UpdateTrace) void {
+fn onEditSpanFromReady(self: *State, allocator: std.mem.Allocator, source: []const u8, e: EditSpan, lines_after: maru.session.editor.line_index.LineIndex, ready: ?*const State, trace: ?*UpdateTrace) void {
     clearInputProofs(self);
     const p = if (self.provider) |*provider| provider else return;
     // 옛 끝 행·열은 색 질의용 파싱의 기존 근사다. 접힘 캐시는 이 좌표로 행을 밀지 않는다.
@@ -352,13 +352,23 @@ fn onEditSpanFromReady(self: *State, allocator: std.mem.Allocator, source: []con
         .new_end_point = to,
     };
     if (trace) |value| value.edit = edit;
-    editProvider(p, source, edit, ready, trace);
+    const parsed: ?*const syntax.Provider = if (ready) |value| if (value.provider) |*provider| provider else null else null;
+    editProvider(p, source, edit, parsed, trace);
     // 파싱 크기 정책은 provider 하나가 판정한다. 캐시는 트리 보유 결과만 따라간다.
     if (p.tree != null) self.folds.edit(edit) else self.folds.invalidate();
     // `reparse` 와 같다 — `onEdit` 은 예산이 없어 끝까지 판다(옛 트리가 없던 여는 도중이면 처음부터). 이어 팔 것이 없다.
     self.pending = false;
     // 못 고치면(할당) 버린다 — 다음 프레임이 처음부터 만든다. 틀린 목록보다 늦은 목록이 낫다.
-    self.brackets.refresh(allocator, p, source, .{ .start = start, .end = new_end }) catch self.brackets.invalidate();
+    var copied_brackets = false;
+    // 입력 판은 caller가 확인했고, native 트리의 실제 인계까지 성공한 뒤에만 목록을 옮긴다.
+    if (trace) |out| if (out.copied) if (ready) |value| if (value.provider) |original| {
+        copied_brackets = self.brackets.replaceMatched(allocator, &value.brackets, original.parser, original.tree_gen, p.parser, p.tree_gen) catch false;
+    };
+    if (copied_brackets) {
+        // 기존 refresh와 같이 일회성 범위를 소비한다. 접힘/계보용 retained 범위는 남긴다.
+        var changed_buf: [syntax.Provider.max_changed]syntax.Provider.ByteRange = undefined;
+        _ = p.takeChanged(&changed_buf);
+    } else self.brackets.refresh(allocator, p, source, .{ .start = start, .end = new_end }) catch self.brackets.invalidate();
 }
 
 // native 편집과 완료 트리 인계의 한 경계다. 호출자가 입력 신원/판을 검증한 후에만 ready를 넘긴다.
@@ -415,7 +425,7 @@ fn updateForInputImpl(self: *State, allocator: std.mem.Allocator, source: []cons
     }
     var trace: UpdateTrace = .{};
     if (track_origin and before_resource != null and selected != null) trace.context = .{ .receiver = before_resource.?, .tagged = before_tag, .source = selected.?, .document = document, .revision = revision };
-    if (edit) |span| onEditSpanFromReady(self, allocator, source, span, lines, parsed, &trace) else reparseFromReady(self, source, parsed, &trace);
+    if (edit) |span| onEditSpanFromReady(self, allocator, source, span, lines, selected, &trace) else reparseFromReady(self, source, parsed, &trace);
     const p = if (self.provider) |*value| value else return;
     // native 실패는 이전 트리를 남길 수 있다. 단순히 pending=false인 것만 보고 새 입력이라고 하지 않는다.
     if (p.tree != null and !self.pending and (before == null or before.? != p.tree_gen)) {
@@ -1863,4 +1873,127 @@ test "bracket reposition product changed shape and pool resolve again" {
     try std.testing.expectEqual(calls + 1, bracket_colors.resolutionCountForTest());
     try std.testing.expect(state.bracket_resolved.?.independent);
     try expectBracketRepositionOracle(&state, changed, .zig, true);
+}
+
+test "shared bracket edit product 완료 트리의 목록을 재사용해도 색과 모든 byte 탐색은 같다" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { grammar: editor_language.Grammar, text: []const u8 }{
+        .{ .grammar = .zig, .text = "fn f() void { _ = .{ (1), [2]u8{ 1, 2 } }; }\n" },
+        .{ .grammar = .markdown, .text = "# T\n\n[a](b) and (c)\n" },
+    };
+    const identity: maru.session.editor.document_registry.DocumentIdentity = .{ .owner = 1, .slot = 0, .generation = 1 };
+    const long_prefix = @import("array_repeat").repeat(" ", bracket_colors.max_tokenized_line);
+    for (cases) |sample| for ([_][]const u8{ " ", "fn g() void {}\n", "// ", long_prefix }) |prefix| for ([_]bool{ false, true }) |pool| {
+        var source = openBudgeted(sample.text, sample.grammar, 0);
+        defer source.deinit(a);
+        var original_lines = try maru.session.editor.line_index.build(a, sample.text);
+        defer original_lines.deinit();
+        updateForInput(&source, a, sample.text, null, original_lines, identity, 1, null);
+        try finishBrackets(&source, a, sample.text);
+        const peer = prepareSharedSnapshot(&source, a, sample.grammar) orelse return error.NoSnapshot;
+        defer {
+            peer.deinit(a);
+            a.destroy(peer);
+        }
+        while (try prepareBrackets(peer, a, sample.text, pool, 0)) {}
+        const version = peer.brackets.version;
+        const partials = peer.brackets.partials;
+        const after = try std.mem.concat(a, u8, &.{ prefix, sample.text });
+        defer a.free(after);
+        var lines = try maru.session.editor.line_index.build(a, after);
+        defer lines.deinit();
+        const edit: EditSpan = .{ .start = 0, .old_end = 0, .new_end = @intCast(prefix.len) };
+        updateForInput(&source, a, after, edit, lines, identity, 2, null);
+        try std.testing.expect(source.brackets.ready);
+        const source_version = source.brackets.version;
+        const source_ptr = source.brackets.leaves.items.ptr;
+        updateForInput(peer, a, after, edit, lines, identity, 2, &source);
+        try std.testing.expect(matchesInput(peer, identity, 2));
+        try std.testing.expect(peer.brackets.ready and peer.brackets.version > version);
+        try std.testing.expectEqual(partials, peer.brackets.partials);
+        try std.testing.expect(bracketSource(peer) == null);
+        try std.testing.expectEqual(source_version, source.brackets.version);
+        try std.testing.expectEqual(source_ptr, source.brackets.leaves.items.ptr);
+        if (source.brackets.leaves.items.len > 0) try std.testing.expect(source_ptr != peer.brackets.leaves.items.ptr);
+        var changed_buf: [syntax.Provider.max_changed]syntax.Provider.ByteRange = undefined;
+        try std.testing.expectEqual(@as(usize, 0), (peer.provider.?.takeChanged(&changed_buf) orelse return error.UnknownChangedRanges).len);
+        while (try prepareBrackets(peer, a, after, pool, 0)) {}
+        try expectBracketRepositionOracle(peer, after, sample.grammar, pool);
+        if (sample.grammar == .markdown) try std.testing.expectEqual(@as(usize, 0), bracketMarks(peer).toks.len);
+    };
+}
+
+test "shared bracket edit product 미완료 원본과 할당 실패는 기존 갱신으로 복귀한다" {
+    const a = std.testing.allocator;
+    const before = "fn f() void {}\n";
+    const identity: maru.session.editor.document_registry.DocumentIdentity = .{ .owner = 2, .slot = 0, .generation = 1 };
+    for ([_]bool{ false, true }) |allocation_failure| {
+        var source = openBudgeted(before, .zig, 0);
+        defer source.deinit(a);
+        var original_lines = try maru.session.editor.line_index.build(a, before);
+        defer original_lines.deinit();
+        updateForInput(&source, a, before, null, original_lines, identity, 1, null);
+        try finishBrackets(&source, a, before);
+        const peer = prepareSharedSnapshot(&source, a, .zig) orelse return error.NoSnapshot;
+        defer {
+            peer.deinit(a);
+            a.destroy(peer);
+        }
+        try finishBrackets(peer, a, before);
+        const partials = peer.brackets.partials;
+        const prefix = "fn g() void { _ = .{ (1), [2]u8{ 1, 2 }, (3), (4), (5) }; }\n";
+        const after = prefix ++ before;
+        var lines = try maru.session.editor.line_index.build(a, after);
+        defer lines.deinit();
+        const edit: EditSpan = .{ .start = 0, .old_end = 0, .new_end = prefix.len };
+        updateForInput(&source, a, after, edit, lines, identity, 2, null);
+        try std.testing.expect(source.brackets.ready);
+        if (allocation_failure) {
+            try std.testing.expect(source.brackets.leaves.items.len > peer.brackets.leaves.capacity);
+            var failed = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+            const ptr = source.brackets.leaves.items.ptr;
+            updateForInput(peer, failed.allocator(), after, edit, lines, identity, 2, &source);
+            try std.testing.expect(failed.has_induced_failure);
+            try std.testing.expect(matchesInput(peer, identity, 2));
+            try std.testing.expectEqual(ptr, source.brackets.leaves.items.ptr);
+            failed.fail_index = std.math.maxInt(usize);
+            try finishBrackets(peer, failed.allocator(), after);
+        } else {
+            source.brackets.invalidate();
+            updateForInput(peer, a, after, edit, lines, identity, 2, &source);
+            try std.testing.expectEqual(partials + 1, peer.brackets.partials);
+            try finishBrackets(peer, a, after);
+        }
+        try expectBracketRepositionOracle(peer, after, .zig, false);
+    }
+}
+
+test "shared bracket edit product 다른 언어 문서와 판은 완료 목록이 있어도 복사하지 않는다" {
+    const a = std.testing.allocator;
+    const before = "fn f() void {}\n";
+    const prefix = "const s = \"[x](y)\";\n";
+    const after = prefix ++ before;
+    const identity: maru.session.editor.document_registry.DocumentIdentity = .{ .owner = 3, .slot = 0, .generation = 1 };
+    const foreign: maru.session.editor.document_registry.DocumentIdentity = .{ .owner = 4, .slot = 0, .generation = 1 };
+    for (0..3) |fault| {
+        const grammar: editor_language.Grammar = if (fault == 0) .markdown else .zig;
+        var source = openBudgeted(after, grammar, 0);
+        defer source.deinit(a);
+        var lines = try maru.session.editor.line_index.build(a, after);
+        defer lines.deinit();
+        updateForInput(&source, a, after, null, lines, if (fault == 1) foreign else identity, if (fault == 2) 3 else 2, null);
+        try finishBrackets(&source, a, after);
+        var target = openBudgeted(before, .zig, 0);
+        defer target.deinit(a);
+        var original_lines = try maru.session.editor.line_index.build(a, before);
+        defer original_lines.deinit();
+        updateForInput(&target, a, before, null, original_lines, identity, 1, null);
+        try finishBrackets(&target, a, before);
+        const partials = target.brackets.partials;
+        updateForInput(&target, a, after, .{ .start = 0, .old_end = 0, .new_end = prefix.len }, lines, identity, 2, &source);
+        try std.testing.expect(matchesInput(&target, identity, 2));
+        try std.testing.expectEqual(partials + 1, target.brackets.partials);
+        try finishBrackets(&target, a, after);
+        try expectBracketRepositionOracle(&target, after, .zig, false);
+    }
 }

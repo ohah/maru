@@ -1,3 +1,4 @@
+pub const settings_edit = @import("app/settings/edit.zig");
 pub const settings_model = @import("app/settings/model.zig");
 pub const chrome_text = @import("app/chrome_text.zig");
 pub const git_backend = @import("app/git/backend.zig");

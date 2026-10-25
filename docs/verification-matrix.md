@@ -5724,4 +5724,7 @@ inline-caret mode requires it to disappear while numeric edit requests remain ac
   실제 OS 마우스로 활성화하고 foreground/keyboard focus를 확인한 뒤 한국어 IME scan code를 보낸다.
   두 조합 단계의 실제 픽셀 변화, 기본 조합창 부재와 앱 창 소유권, 정상 종료·config 불변·셸 입력 0을
   확인한다. `--native-ui-control`은 이전 바이너리의 기본 조합창을 재현해야 한다.
-- OS 입력 주입에 따른 조합 UI 검증이다. 물리 키보드, 후보 선택, 전체 입력 영역의 IME 완료로 세지 않는다.
+- `--candidates`: 실제 한자 후보창을 표시하고 첫 항목을 선택한다. 선택 후 후보창이 사라지고
+  편집 caret이 초기 caret에서 측정한 셀 폭의 정확히 두 배만 이동해야 한다. config 불변·셸 입력 0과
+  정상 종료도 유지해야 한다. 이전 바이너리 대조와 결합해 기본 조합창 중복을 따로 판정한다.
+- OS 입력 주입에 따른 설정 입력란의 조합/후보 검증이다. 물리 키보드나 전체 입력 영역의 IME 완료로 세지 않는다.

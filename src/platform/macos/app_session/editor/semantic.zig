@@ -19,6 +19,8 @@ const semantic = lsp.semantic;
 pub const quiet_ms: u64 = 120;
 /// 범위 요청의 위·아래 여유(원본 줄).
 pub const range_pad_lines: usize = 20;
+/// 초기 색인 중 늦어지는 서버도 기다리되, 응답 유실이 영구 대기가 되지 않게 한다.
+pub const response_timeout_ms: u64 = 30_000;
 
 pub const State = struct {
     /// 문서 순서의 byte 스팬(우리 색 역할로 옮긴 것). 편집이 밀어 두고 응답이 갈아 끼운다.
@@ -29,6 +31,7 @@ pub const State = struct {
     covered_lo: usize = 0,
     covered_hi: usize = 0,
     waiting: bool = false,
+    requested_at_ms: u64 = 0,
     waiting_seq: u32 = 0,
     waiting_version: u64 = 0,
     waiting_lo: usize = 0,
@@ -67,11 +70,12 @@ pub fn gate(st: *State) lsp_requests.Gate {
 /// 프레임마다(색을 만드는 자리에서) — 보이는 원본 줄 `[first_src, last_src]` 를 알려 주면 물을 때인지 판정해 보낸다.
 pub fn tick(self: *AppSession, term: *Term, first_src: usize, last_src: usize) void {
     const st = &term.rt.editor_semantic;
+    const now = self.awakeMs();
+    _ = lsp_requests.expire(gate(st), st.requested_at_ms, now, response_timeout_ms);
     if (st.waiting) return;
     const c = editor_lsp.readyClientFor(self, term) orelse return;
     // provider 검사는 `requestSemanticTokens` 가 한다(여기서 또 보면 등가 — 적대적 2회차 B2).
     const doc = term.rt.editorDocument().opened orelse return;
-    const now = self.awakeMs();
     if (!lsp_requests.quiet(gate(st), now, quiet_ms)) return; // 0 = 아직 편집이 없었다
     const line_count = doc.file.lines.lineCount();
     const lo = first_src -| range_pad_lines;
@@ -82,9 +86,15 @@ pub fn tick(self: *AppSession, term: *Term, first_src: usize, last_src: usize) v
     const use_full = !c.semantic_caps.range; // provider 가 없으면 `range` 도 false 지만 아래 요청이 `null` 로 막는다
     const seq = editor_lsp.requestSemanticTokens(self, term, use_full, lo, hi) orelse return;
     lsp_requests.sent(gate(st), seq, term.rt.editorDocument().notifications.lsp_version);
+    st.requested_at_ms = now;
     st.waiting_lo = if (use_full) 0 else lo;
     st.waiting_hi = if (use_full) std.math.maxInt(usize) else hi;
     st.waiting_full = use_full;
+}
+
+/// 색인이 끝난 서버가 다시 묻도록 한다. 진행 중 요청의 seq는 유지한다.
+pub fn onRefresh(term: *Term) void {
+    term.rt.editor_semantic.dirty = true;
 }
 
 /// 응답(`editor_lsp` 가 부른다). 낡은 seq·낡은 version·오류는 버린다(오류·낡음은 `dirty` 로 다시 묻는다).

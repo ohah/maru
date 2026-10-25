@@ -2,8 +2,9 @@
 //! exit)과 **읽는 쪽**(응답·알림·서버 요청을 가른다). 순수 계산이라 여기 산다. 1단이 보내는 요청은 `initialize`·`shutdown` 둘뿐이라
 //! id 대조표가 필요 없다 — 응답의 id 가 그 둘 중 무엇인지만 안다.
 //!
-//! **서버 → 클라이언트 요청은 전부 거부한다**(§8.2a 「하지 않는 것」): `window/workDoneProgress/create`·`workspace/configuration`·
-//! `client/registerCapability`·`workspace/applyEdit`… 어느 것이든 `MethodNotFound`(-32601) 로 답한다 — 승인 UI 가 없는 동안은 거부만.
+//! 서버 요청은 기본 거부한다(§8.2a). refresh는 해당 클라이언트를 다시 묻게 하고,
+//! showMessageRequest는 선택 없음(null)으로 답한다. 고정 설정이 있는 서버의 configuration 외
+//! 나머지 요청은 MethodNotFound(-32601)로 답한다 — 빌드·편집을 자동 승인하지 않는다.
 
 const array_repeat = @import("array_repeat");
 
@@ -129,11 +130,21 @@ pub const PositionEncoding = enum { utf8, utf16 };
 /// tsgo·TS 7 의 `tsc`), `workspace/configuration` 은 고정 설정이 있는 보조 서버(ESLint)에만 알린다. 칸이 꺼진 서버엔 알리지 않는다(push 로 내는
 /// 서버가 pull 로 바꾸면 지금 동작이 바뀐다).
 pub const InitOptions = struct {
+    enable_semantic_tokens: bool = false,
     /// `textDocument.diagnostic` 을 알린다(pull 진단).
     pull_diagnostics: bool = false,
     /// `workspace.configuration` 을 참으로 — 그 서버의 설정 요청에 답한다.
     configuration: bool = false,
 };
+
+pub const PassiveRequest = enum { decline_action, semantic_refresh };
+
+/// 실행이나 파일 쓰기를 승인하지 않는 요청만 기본 거부의 예외다.
+pub fn passiveRequest(method: []const u8) ?PassiveRequest {
+    if (std.mem.eql(u8, method, "window/showMessageRequest")) return .decline_action;
+    if (std.mem.eql(u8, method, "workspace/semanticTokens/refresh")) return .semantic_refresh;
+    return null;
+}
 
 pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid: i64, opts: InitOptions) error{OutOfMemory}![]u8 {
     const DiagnosticCaps = struct { dynamicRegistration: bool = false, relatedDocumentSupport: bool = false };
@@ -145,6 +156,7 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
         .params = .{
             .processId = pid,
             .rootUri = root_uri,
+            .initializationOptions = if (opts.enable_semantic_tokens) @as(?struct { semanticTokens: bool = true }, .{}) else null,
             .workspaceFolders = [_]struct { uri: []const u8, name: []const u8 }{.{ .uri = root_uri, .name = "root" }},
             .capabilities = .{
                 .general = .{ .positionEncodings = [_][]const u8{ "utf-8", "utf-16" } },
@@ -217,7 +229,7 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                 // 보낸다(§8.2n 실측 2026-09-22). 이것을 안 받으면 서버가 뜬 뒤 연 파일의 힌트가 **영영** 안 온다.
                 // `diagnostics.refreshSupport` — pull 서버에만(§8.2u). tsgo 는 이것을 알린 클라이언트에만 `workspace/diagnostic/refresh` 를 보낸다 —
                 // 디스크의 파일이 바뀌면(다른 파일 저장·checkout·설치) 다시 물어 달라고(LS2 실측: 안 알리면 열린 문서의 「모듈 없음」이 고칠 때까지 남는다).
-                .workspace = .{ .applyEdit = false, .configuration = opts.configuration, .workspaceFolders = false, .inlayHint = .{ .refreshSupport = true }, .diagnostics = if (opts.pull_diagnostics) @as(?RefreshCaps, .{}) else null },
+                .workspace = .{ .applyEdit = false, .configuration = opts.configuration, .workspaceFolders = false, .semanticTokens = .{ .refreshSupport = true }, .inlayHint = .{ .refreshSupport = true }, .diagnostics = if (opts.pull_diagnostics) @as(?RefreshCaps, .{}) else null },
             },
         },
     }, .{ .emit_null_optional_fields = false });
@@ -900,6 +912,13 @@ pub fn documentSymbolRequest(allocator: std.mem.Allocator, seq: u32, uri: []cons
 /// 서버별 설정 블롭(§8.2n 「서버 설정」) — `initialized` 뒤 한 번 보내는 `workspace/didChangeConfiguration`. 없으면 `null`.
 /// TS 계열: 힌트를 켠다(안 주면 tsgo 가 `null` 을 낸다 — 실측 2026-09-22).
 pub fn didChangeConfigurationFor(allocator: std.mem.Allocator, language_id: []const u8) error{OutOfMemory}!?[]u8 {
+    // Metals는 초기 설정을 받기 전에는 semanticTokens/full을 완료하지 않는다.
+    // 서버에 물어보는 읽기 요청이나 빌드 승인이 아니라 클라이언트 설정 알림이다.
+    if (std.mem.eql(u8, language_id, "scala")) return try std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .method = "workspace/didChangeConfiguration",
+        .params = .{ .settings = .{ .metals = .{ .enableSemanticHighlighting = true } } },
+    }, .{});
     const ts = std.mem.eql(u8, language_id, "typescript") or std.mem.eql(u8, language_id, "typescriptreact") or std.mem.eql(u8, language_id, "javascript");
     if (!ts) return null;
     const hints = .{
@@ -2086,4 +2105,26 @@ test "LSJ22 pull 진단 — 요청은 i32 안의 마지막 칸(20e8)·그 앞의
     defer a.free(ans);
     try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":\"c-1\",\"result\":[{\"validate\":\"on\"},{\"validate\":\"on\"}]}", ans);
     try testing.expectEqual(@as(usize, 1), configurationItemCount(null));
+}
+
+test "semantic recovery gopls opt-in and refresh capability preserve other servers" {
+    const a = testing.allocator;
+    const plain = try initializeRequest(a, "file:///r", 1, .{});
+    defer a.free(plain);
+    try testing.expect(std.mem.indexOf(u8, plain, "initializationOptions") == null);
+    try testing.expect(std.mem.indexOf(u8, plain, "\"semanticTokens\":{\"refreshSupport\":true}") != null);
+    const go = try initializeRequest(a, "file:///r", 1, .{ .enable_semantic_tokens = true });
+    defer a.free(go);
+    try testing.expect(std.mem.indexOf(u8, go, "\"initializationOptions\":{\"semanticTokens\":true}") != null);
+    const declined = try nullResult(a, .{ .string = "server-1" });
+    defer a.free(declined);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":\"server-1\",\"result\":null}", declined);
+    try testing.expectEqual(PassiveRequest.decline_action, passiveRequest("window/showMessageRequest").?);
+    try testing.expectEqual(PassiveRequest.semantic_refresh, passiveRequest("workspace/semanticTokens/refresh").?);
+    try testing.expect(passiveRequest("workspace/applyEdit") == null);
+    try testing.expect(passiveRequest("workspace/executeCommand") == null);
+    const scala = (try didChangeConfigurationFor(a, "scala")).?;
+    defer a.free(scala);
+    try testing.expect(std.mem.indexOf(u8, scala, "\"metals\":{\"enableSemanticHighlighting\":true}") != null);
+    try testing.expect(try didChangeConfigurationFor(a, "rust") == null);
 }

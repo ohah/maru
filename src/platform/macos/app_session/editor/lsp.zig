@@ -1658,7 +1658,7 @@ fn spawnClient(self: *AppSession, c: *Client, now_ms: u64) void {
     }
     var uri_buf: [std.fs.max_path_bytes * 3]u8 = undefined;
     const root_uri = fileUriBuf(c.root, &uri_buf) orelse return;
-    const msg = lsp.rpc.initializeRequest(self.allocator, root_uri, @intCast(std.c.getpid()), .{ .pull_diagnostics = c.server.pull_diagnostics, .configuration = c.answers_configuration }) catch return;
+    const msg = lsp.rpc.initializeRequest(self.allocator, root_uri, @intCast(std.c.getpid()), .{ .pull_diagnostics = c.server.pull_diagnostics, .configuration = c.answers_configuration, .enable_semantic_tokens = c.server.enable_semantic_tokens }) catch return;
     defer self.allocator.free(msg);
     _ = send(self, c, msg);
 }
@@ -2062,6 +2062,16 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
             if (std.mem.eql(u8, n.method, "textDocument/publishDiagnostics")) onPublishDiagnostics(self, c, n.params);
         },
         .request => |q| {
+            // LSP의 null은 선택 없음이다. 빌드 실행을 자동 승인하지 않으면서
+            // Metals 초기화가 MethodNotFound 때문에 중단되는 것을 막는다.
+            if (lsp.rpc.passiveRequest(q.method)) |passive| {
+                const ok = lsp.rpc.nullResult(self.allocator, q.id) catch return;
+                defer self.allocator.free(ok);
+                _ = send(self, c, ok);
+                if (passive == .semantic_refresh) forEachDocTerm(self, c, editor_semantic.onRefresh);
+                self.metal_dirty = true;
+                return;
+            }
             // §8.2n — `workspace/inlayHint/refresh` 는 받는다: `null` 로 답하고 이 클라이언트의 모든 편집기 힌트를 다시 묻게 한다.
             if (std.mem.eql(u8, q.method, lsp.rpc.inlay_refresh_method)) {
                 self.editor_lsp.inlay_refreshes += 1;
@@ -2799,10 +2809,11 @@ pub fn requestSemanticTokens(self: *AppSession, term: *Term, full: bool, lo: usi
     flushDocument(self, c, term);
     const d = c.findDoc(term) orelse return null;
     c.semantic_seq = lsp.rpc.nextSeq(c.semantic_seq); // 한 번에 하나라 응답 대조에는 안 올려도 같다(적대적 3회차 C5: 등가) — 낡은 응답을 가르는 규율은 다른 요청들과 같이 둔다
+    const opened = term.rt.editorDocument().opened orelse return null;
     const msg = if (full)
         lsp.rpc.semanticTokensFullRequest(self.allocator, c.semantic_seq, d.uri) catch return null
     else
-        lsp.rpc.semanticTokensRangeRequest(self.allocator, c.semantic_seq, d.uri, .{ .start = .{ .line = @intCast(lo), .character = 0 }, .end = .{ .line = @intCast(hi + 1), .character = 0 } }) catch return null;
+        lsp.rpc.semanticTokensRangeRequest(self.allocator, c.semantic_seq, d.uri, lsp.position.lineRange(opened.file.content, opened.file.lines, c.encoding, lo, hi)) catch return null;
     defer self.allocator.free(msg);
     if (!send(self, c, msg)) return null;
     self.editor_lsp.sent_semantic += 1;
@@ -2816,14 +2827,8 @@ pub fn requestInlayHints(self: *AppSession, term: *Term, lo: usize, hi: usize) ?
     flushDocument(self, c, term);
     const d = c.findDoc(term) orelse return null;
     const opened = term.rt.editorDocument().opened orelse return null;
-    const line_count = opened.file.lines.lineCount();
-    const end_line: u32 = @intCast(@min(hi + 1, line_count -| 1)); // 반열림이되 줄 수를 안 넘긴다(rust-analyzer 는 넘기면 -32603)
-    const end_char: u32 = if (hi + 1 < line_count) 0 else blk: {
-        const last = opened.file.lines.line(line_count - 1) orelse break :blk 0;
-        break :blk @intCast(last.contentEnd() - last.start);
-    };
     c.inlay_seq = lsp.rpc.nextSeq(c.inlay_seq);
-    const msg = lsp.rpc.inlayHintRequest(self.allocator, c.inlay_seq, d.uri, .{ .start = .{ .line = @intCast(lo), .character = 0 }, .end = .{ .line = end_line, .character = end_char } }) catch return null;
+    const msg = lsp.rpc.inlayHintRequest(self.allocator, c.inlay_seq, d.uri, lsp.position.lineRange(opened.file.content, opened.file.lines, c.encoding, lo, hi)) catch return null;
     defer self.allocator.free(msg);
     if (!send(self, c, msg)) return null;
     self.editor_lsp.sent_inlay += 1;

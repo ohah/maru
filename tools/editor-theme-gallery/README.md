@@ -122,3 +122,5 @@ python3 tools/editor-theme-gallery/run_lsp.py \
 실제 창·제품 Metal 출력과 실제 서버를 사용하지만, 신뢰 클릭은 합성 AppKit 입력이다. 물리 입력이나
 모든 실제 프로젝트의 빌드·의존성 구성을 검증하는 결과는 아니다. 서버가 semantic token을 제공하지 않으면
 연결돼 있어도 tree-sitter 색을 유지할 수 있다. 진단·인레이 힌트는 서버가 보내는 실제 결과를 그대로 촬영한다.
+
+시맨틱 토큰 수정의 EOF·설정·응답 복구 검증은 [회귀 증거](semantic-recovery.md)를 참고한다.

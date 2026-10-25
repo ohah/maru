@@ -2019,3 +2019,10 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 격리 결함 주입과 짝지은 제품 frame 비교는 [계획](plans/editor-bracket-shape-reuse.md)을 따른다.
 전체 실측 분포·원시 자료·독립 검증 명령은 [비교 결과](../tools/editor-bracket-reposition/results.md)에 있다.
 물리 IME·Metal 픽셀·GPU present 증거를 대신하지 않는다.
+
+## 이름 변경·다른 이름으로 저장 IME
+
+- `mise exec -- zig build test-inline-rename-ime test-address-field-ime test-editor-untitled -j2`: NFD 보존·UTF-16 범위·세대 전환·후보 Return·기존 저장 경로를 검사한다.
+- `python3 -m unittest discover -s tools/rename-ime -p 'test_*.py'`: 이름 조기 확정·이전 owner·화면/콜백 기록 손상을 거절하는 독립 검증기 대조군이다.
+- `python3 tools/rename-ime/run.py --output <새 외부 경로> --mode diagnostic`: 사본 앱을 빌드하고 실제 키 입력·후보 취소/선택·별도 Return 이름 확정·터미널 복귀를 확인한다. 화면 픽셀 통과를 뜻하지 않는다.
+- 같은 앱에 `--app <고정 실행 파일> --mode live`를 쓰면 서로 다른 후보창 5개와 PNG/OCR을 추가 검사한다. workspace 이름 변경 장면이며 Save As 파일 생성 GUI를 대신하지 않는다.

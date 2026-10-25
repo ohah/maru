@@ -8,7 +8,10 @@ const Field = @import("text_field.zig").TextField;
 pub const Range = input.Range;
 pub const Key = enum { enter, backspace, other };
 
+pub const Normalization = enum { hangul_nfc, verbatim };
+
 pub const State = struct {
+    normalization: Normalization = .hangul_nfc,
     context: Owned = .{},
     before: ?Owned = null,
     in_key: bool = false,
@@ -169,6 +172,7 @@ pub const State = struct {
         return false;
     }
     pub fn insert(self: *State, allocator: std.mem.Allocator, field: *Field, bytes: []const u8, replacement: ?Range) bool {
+        if (self.normalization == .verbatim) return self.apply(allocator, field, bytes, null, replacement);
         // Address bands retain their existing NFC Hangul storage contract.
         const composed = grapheme.composeHangul(allocator, bytes) catch return self.reject();
         defer allocator.free(composed);
@@ -176,6 +180,7 @@ pub const State = struct {
     }
     pub fn marked(self: *State, allocator: std.mem.Allocator, field: *Field, bytes: []const u8, selected: Range, replacement: ?Range) bool {
         const local = input.ranges.byteRange(bytes, selected) orelse return self.reject();
+        if (self.normalization == .verbatim) return self.apply(allocator, field, bytes, selected, replacement);
         const composed = grapheme.composeHangul(allocator, bytes) catch return self.reject();
         defer allocator.free(composed);
         const prefix = grapheme.composeHangul(allocator, bytes[0..local.start]) catch return self.reject();
@@ -228,6 +233,7 @@ pub const State = struct {
     }
 
     pub fn commitAll(self: *State, allocator: std.mem.Allocator, field: *Field) bool {
+        if (self.rejected) return false;
         const c = self.projection(allocator, field) orelse return false;
         if (!self.prepare(allocator, field, 0) or !c.admitMarked()) return false;
         self.publish(field);
@@ -385,4 +391,87 @@ test "address IME NFD insert preserves normalized document offsets" {
     try std.testing.expect(s.insert(a, &f, "\u{1112}\u{1161}\u{11ab}", null));
     try std.testing.expectEqualStrings("a한z", f.text.items);
     try std.testing.expectEqual(Range{ .location = 2, .length = 0 }, s.context.value.selectedRange().?);
+}
+
+test "inline rename IME preserves NFD text and UTF16 selection" {
+    const a = std.testing.allocator;
+    var field: Field = .{};
+    defer field.deinit(a);
+    var state: State = .{ .normalization = .verbatim };
+    defer state.deinit(a);
+    try field.setText(a, "aZ");
+    field.caret = 1;
+    const nfd = "\u{1112}\u{1161}\u{11ab}";
+    try std.testing.expect(state.marked(a, &field, nfd, .{ .location = 3, .length = 0 }, null));
+    try std.testing.expectEqualStrings(nfd, field.preedit.items);
+    try std.testing.expectEqual(Range{ .location = 4, .length = 0 }, state.context.value.selectedRange().?);
+    try std.testing.expect(state.insert(a, &field, nfd, null));
+    try std.testing.expectEqualStrings("a" ++ nfd ++ "Z", field.text.items);
+    try std.testing.expect(state.insert(a, &field, "韓", .{ .location = 1, .length = 3 }));
+    try std.testing.expectEqualStrings("a韓Z", field.text.items);
+}
+
+test "inline rename IME rejected key cannot publish through blur" {
+    const a = std.testing.allocator;
+    var field: Field = .{};
+    defer field.deinit(a);
+    var state: State = .{ .normalization = .verbatim };
+    defer state.deinit(a);
+    try field.setText(a, "old");
+    state.begin(a, &field);
+    try std.testing.expect(!state.marked(a, &field, "한", .{ .location = 99, .length = 0 }, null));
+    try std.testing.expect(!state.commitAll(a, &field));
+    try std.testing.expectEqualStrings("old", field.text.items);
+}
+
+test "inline rename IME invalid UTF16 ranges never change canonical text" {
+    const a = std.testing.allocator;
+    const invalid = [_]Range{
+        .{ .location = 2, .length = 0 }, // Inside the emoji surrogate pair.
+        .{ .location = 1, .length = 1 }, // Ends inside the surrogate pair.
+        .{ .location = 0, .length = 99 },
+        .{ .location = std.math.maxInt(u32), .length = 1 },
+        .{ .location = 1, .length = std.math.maxInt(u32) },
+    };
+    for (invalid) |range| {
+        var f: Field = .{};
+        defer f.deinit(a);
+        var s: State = .{ .normalization = .verbatim };
+        defer s.deinit(a);
+        try f.setText(a, "a😀z");
+        try std.testing.expect(!s.insert(a, &f, "韓", range));
+        try std.testing.expectEqualStrings("a😀z", f.text.items);
+        try std.testing.expectEqualStrings("", f.preedit.items);
+    }
+}
+
+test "inline rename IME allocation failures preserve NFD and caret" {
+    const a = std.testing.allocator;
+    var failures: usize = 0;
+    var successes: usize = 0;
+    const nfd = "\u{1112}\u{1161}\u{11ab}";
+    for (0..20) |failure| {
+        var f: Field = .{};
+        defer f.deinit(a);
+        try f.setText(a, "aZ");
+        f.caret = 1;
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = failure });
+        const alloc = failing.allocator();
+        var s: State = .{ .normalization = .verbatim };
+        defer s.deinit(alloc);
+        s.begin(alloc, &f);
+        const accepted = s.marked(alloc, &f, nfd, .{ .location = 3, .length = 0 }, null);
+        _ = s.end(alloc, &f, false);
+        s.finish(alloc);
+        try std.testing.expectEqualStrings("aZ", f.text.items);
+        try std.testing.expectEqual(@as(usize, 1), f.caret);
+        if (!accepted) {
+            failures += 1;
+            try std.testing.expectEqualStrings("", f.preedit.items);
+        } else {
+            successes += 1;
+            try std.testing.expectEqualStrings(nfd, f.preedit.items);
+        }
+    }
+    try std.testing.expect(failures > 0 and successes > 0);
 }

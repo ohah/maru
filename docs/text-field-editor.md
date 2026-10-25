@@ -338,3 +338,9 @@ TextArea (새 얇은 층 — 세로 축만 소유)
 [주소창 IME 계획](plans/address-field-ime.md)은 §7 후속의 주소창 부분을 구현한다.
 기존 TextField 모델과 Zig/GPU 렌더를 유지하고 공통 UTF-16 projection을 연결한다.
 다른 TextField 소비자와 검색 오버레이의 완전 IME 지원을 함께 주장하지 않는다.
+
+### 인라인 rename IME 범위 문맥
+
+주소창과 공유하는 순수 adapter를 rename에 연결하는 범위는
+[인라인 rename IME 계획](plans/inline-rename-ime.md)이 소유한다.
+이름의 NFD 보존·선택 UI 없음과 대상별 commit은 유지한다.

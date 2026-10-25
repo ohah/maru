@@ -2329,6 +2329,15 @@ pub fn build(b: *std.Build) void {
     const address_field_ime_step = b.step("test-address-field-ime", "Validate address-field native IME ranges and pinned owner lifetime");
     address_field_ime_step.dependOn(&run_address_ime.step);
 
+    const rename_ime_step = b.step("test-inline-rename-ime", "Validate inline rename UTF-16 context and activation ownership");
+    const rename_ime_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"inline rename IME host"},
+    });
+    const run_rename_ime = b.addRunArtifact(rename_ime_tests);
+    run_rename_ime.setCwd(b.path("."));
+    rename_ime_step.dependOn(&run_rename_ime.step);
+
     const remote_failure_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
         .filters = &.{"remote reconnect failure"},
@@ -2505,11 +2514,11 @@ pub fn build(b: *std.Build) void {
     attachPngCodec(b, untitled_rule_tests.root_module); // maru 루트를 세우는 자리는 전부 이걸 부른다
     untitled_rule_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_untitled_rule_tests = b.addRunArtifact(untitled_rule_tests);
-    // FSBIND와 추가로 참조된 test 블록을 포함해 45개다.
+    // FSBIND와 추가로 참조된 test 블록을 포함해 48개다.
     // 기존 규칙: UT1~UT4 넷 + **UB1~UB10 열**(백업 레코드 규칙 — §3.10) + **U4c-6·U4c-7 둘**(`untitled-term` 왕복·검증) + **U4d-1·U4d-2 둘**(`remote-doc-term`) + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다).
-    run_untitled_rule_tests.addArg("--maru-expect-tests=45");
+    run_untitled_rule_tests.addArg("--maru-expect-tests=48");
     // ⚠️ **필터가 0 개를 골랐어도 「돌았다」로 읽히지 않게** 통과 수까지 못박는다(순수라 SKIP 이 없다).
-    run_untitled_rule_tests.addArg("--maru-expect-passed=45");
+    run_untitled_rule_tests.addArg("--maru-expect-passed=48");
     run_untitled_rule_tests.setCwd(b.path("."));
     untitled_step.dependOn(&run_untitled_rule_tests.step);
 
@@ -4863,6 +4872,14 @@ pub fn build(b: *std.Build) void {
     const inline_input_step = b.step("test-inline-text-input", "Validate bounded UTF-16 inline IME projections and failure atomicity");
     const owned_inline_step = b.step("test-inline-text-input-owned", "Validate dynamic IME storage, deep snapshots and allocation failure");
     inline for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
+        const rename_model_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
+            .filters = &.{"inline rename IME"},
+        });
+        const run_rename_model = b.addRunArtifact(rename_model_tests);
+        run_rename_model.addArg("--maru-expect-tests=13");
+        rename_ime_step.dependOn(&run_rename_model.step);
+        test_step.dependOn(&run_rename_model.step);
         const inline_input_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
             .root_source_file = b.path("src/inline_text_input.zig"),
             .target = target,

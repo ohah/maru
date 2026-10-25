@@ -10,7 +10,7 @@ source = load('project_search_fixture_source', Path(__file__).resolve().parents[
 
 def fixture(index=0):
     report,candidate,raw = source.fixture(prefix='',suffix='',initial_word='',owner_shift=58)
-    report.update(schema='maru.project-search-ime.v1',target_field=index,tabs=[])
+    report.update(schema='maru.project-search-ime.v1',target_field=index,tabs=[],glyph_advances={'한':10.0,'韓':6.0})
     candidate['schema']='maru.project-search-ime-candidate.v1'
     for pos,row in enumerate(report['observations']):
         row.update(field_index=index,file_hash=h(CONTENT*2),file_bytes=30,composing=0,complete=1,request_active=1,result_generation=str(100+pos),filter_count=2 if index in (1,2) else 4)
@@ -33,6 +33,9 @@ def fixture(index=0):
             report['tabs'].append(dict(cycle=i,**{'from':a,'to':b},ack_id=i*16+j+1,generation=str(owner-len(route)+j+1)))
         if i<5:
             for snap in raw[i].values():snap['search']['owner_generation']=owner
+    for row in raw:
+        for name, snap in row.items():
+            snap['anchor_appkit']=dict(x=16 if name=='opened' else 20,y=1,w=8,h=18)
     return report,candidate,raw
 
 
@@ -51,6 +54,10 @@ class ProjectSearchVerifierTests(unittest.TestCase):
 
     def test_independent_corruptions(self):
         attacks={
+            'opened_shift':lambda r,c,w:w[0]['opened']['anchor_appkit'].update(x=20),
+            'closed_shift':lambda r,c,w:w[0]['closed']['anchor_appkit'].update(x=21),
+            'raw_geometry':lambda r,c,w:r['geometry'][1].update(y=2),
+            'wrong_advance':lambda r,c,w:r['glyph_advances'].update(韓=7),
             'schema':lambda r,c,w:r.update(schema='maru.find-ime.v1'),
             'owner_domain':lambda r,c,w:r['observations'][0].update(owner_generation=str(1<<59)),
             'owner_reuse':lambda r,c,w:r['observations'][4].update(owner_generation=r['observations'][0]['owner_generation']),

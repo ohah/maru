@@ -1,5 +1,6 @@
 """Independent field semantics, search invalidation and shared window/pixel binding."""
 import json
+import math
 from pathlib import Path
 from prepare import load
 common = load('project_search_shared_windows', Path(__file__).resolve().parents[1] / 'address-ime/verify.py')
@@ -70,11 +71,28 @@ def semantics(report):
     end = states[-1]
     require(end['open'] == end['palette_owner'] == 0 and int(end['owner_generation']) == 0 and end['terminal_bytes'] == base+1 and not end['has_marked'] and end['first_responder'], 'terminal return')
     require(len(report['geometry']) == 12, 'geometry')
+    advances = report['glyph_advances']
+    require(all(isinstance(advances[k], (float,int)) and math.isfinite(advances[k]) and advances[k] > 0 for k in ('한','韓')), 'glyph advances')
     for empty, composed in zip(report['geometry'][::2], report['geometry'][1::2]):
-        require(composed['x'] > empty['x'], 'caret advance')
+        require(abs(composed['x'] - empty['x'] - advances['한']) <= 0.01, 'caret advance')
         for g in (empty,composed):
             require(g['w'] > 0 and g['h'] > 0 and g['x'] >= g['field_x']-1 and g['x']+g['w'] <= g['field_x']+g['field_w']+1 and g['y'] >= g['field_y']-1 and g['y']+g['h'] <= g['field_y']+g['field_h']+1, 'anchor')
     return states,base
+
+
+def validate_anchors(report, raw):
+    require(len(raw) == 5, 'anchor rows')
+    first = None
+    for i, row in enumerate(raw):
+        b, o, c = (row[k]['anchor_appkit'] for k in ('before','opened','closed'))
+        g = report['geometry'][2*i+1]
+        require(all(math.isfinite(r[k]) for r in (b,o,c) for k in ('x','y','w','h')), 'finite anchors')
+        require(b == c and (first is None or first == b), 'restored anchor')
+        first = b
+        require(all(abs(b[k]-g[k]) <= 0.01 for k in ('x','y','w','h')), 'raw geometry binding')
+        require(all(b[k] == o[k] for k in ('y','w','h')), 'preview geometry')
+        require(abs(o['x']-b['x']-(report['glyph_advances']['韓']-report['glyph_advances']['한'])) <= 0.01, 'preview advance')
+        require(o['x'] >= g['field_x']-1 and o['x']+o['w'] <= g['field_x']+g['field_w']+1, 'preview bounds')
 
 
 def validate(report, candidate, artifact_root=None):
@@ -89,6 +107,7 @@ def validate(report, candidate, artifact_root=None):
                 pass
         require(len(roots) == 1, 'unique run identity')
         artifact_root = roots[0]
+    validate_anchors(report, json.loads((Path(artifact_root)/'window-transcript.json').read_text()))
     fixture_files(artifact_root)
     return common.validate_window_evidence(report,candidate,states,base,artifact_root,scene='project-search')
 

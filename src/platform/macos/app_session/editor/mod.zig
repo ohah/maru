@@ -18715,6 +18715,12 @@ test "WT7b 원격 신뢰 묻기 — 원격 목록의 도크 줄을 누르면 `�
 
 test "WT7c-1 원격 쓰기도 같은 관문 — 루트·홈을 모르면 실행하지 않고, 신뢰 전이면 시트부터·허용하면 그 원격에서 **루트로** 실행(stage·커밋 stdin), 신뢰한 원격은 바로 실행하며, 시트 뒤 목적지가 바뀌었으면 잇지 않는다 (계획 workspace-trust)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 전용 합류 게이트는 실제 캐시 경로에서만 유효하다. 일반 실행의 cwd 계약은 유지한다.
+    if (std.c.getenv("MARU_TEST_SCM_CACHE_ROOT") != null) {
+        var cache_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cache_cwd_len = try std.Io.Dir.cwd().realPath(testing.io, &cache_cwd_buf);
+        try testing.expect(std.mem.indexOf(u8, cache_cwd_buf[0..cache_cwd_len], ".cache") != null);
+    }
     const allocator = testing.allocator;
     // 홈(커밋 메시지 파일·control socket 자리)·git 신원·PATH(가짜 ssh)는 세션보다 먼저 세우고 나중에 되돌린다(WT6b-2b-i 와 같은 이유).
     var home_buf: [64]u8 = undefined;
@@ -18895,7 +18901,10 @@ test "WT7c-1 원격 쓰기도 같은 관문 — 루트·홈을 모르면 실행�
     try testing.expect(std.mem.indexOf(u8, after_commit, root_tok) != null);
     try testing.expect(std.mem.indexOf(u8, after_commit, "'commit'") != null);
     try testing.expect(std.mem.indexOf(u8, after_commit, "'-F' '-'") != null);
-    try testing.expect(std.mem.indexOf(u8, after_commit, ".cache") == null);
+    // 원격 저장소 자체가 .cache 아래 있을 수 있다. 실제 로컬 메시지 파일의 유출만 판정한다.
+    var message_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const local_message_path = scm_dock_ops.testCommitMessagePath(fx.session, &message_path_buf) orelse return error.NoMessagePath;
+    try testing.expect(std.mem.indexOf(u8, after_commit, local_message_path) == null);
     const head = git_backend_for_test.testRunCapture(allocator, &.{ exe, "-C", root, "log", "-1", "--format=%s" }) orelse return error.NoCommit;
     defer allocator.free(head);
     try testing.expectEqualStrings("remote commit WT7c\n", head);

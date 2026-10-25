@@ -6489,6 +6489,30 @@ pub fn build(b: *std.Build) void {
         run_fold_product.addArg("--maru-expect-passed=12");
         macos_only_test_step.dependOn(&run_fold_product.step);
     }
+    const scm_cache_root_tests = addProjectTest(b, .{
+        .root_module = editor_tests.root_module,
+        .filters = &.{".test.WT7c-1 "},
+    });
+    const scm_cache_root_files = b.addWriteFiles();
+    _ = scm_cache_root_files.add(".cache-scm-root/fixture", "");
+    const run_scm_cache_root_tests = b.addRunArtifact(scm_cache_root_tests);
+    run_scm_cache_root_tests.setEnvironmentVariable("MARU_TEST_SCM_CACHE_ROOT", "1");
+    run_scm_cache_root_tests.addArg("--maru-expect-tests=5");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_scm_cache_root_tests.addArg("--maru-expect-passed=5");
+    run_scm_cache_root_tests.setCwd(scm_cache_root_files.getDirectory().path(b, ".cache-scm-root"));
+    const run_scm_cache_root_after_shards = b.addRunArtifact(scm_cache_root_tests);
+    run_scm_cache_root_after_shards.setEnvironmentVariable("MARU_TEST_SCM_CACHE_ROOT", "1");
+    run_scm_cache_root_after_shards.addArg("--maru-expect-tests=5");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_scm_cache_root_after_shards.addArg("--maru-expect-passed=5");
+    run_scm_cache_root_after_shards.setCwd(scm_cache_root_files.getDirectory().path(b, ".cache-scm-root"));
+    // 같은 실제 시험을 빠른 피드백과 합류 게이트에서 쓴다. 합류에서는 전체 샤드 뒤에만 실행한다.
+    run_scm_cache_root_after_shards.step.dependOn(&run_macos_app_host_abi_shards.step);
+    b.step("test-editor-scm-cache-root", "Verify remote commit stdin below a legitimate cache repository path").dependOn(&run_scm_cache_root_tests.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        test_step.dependOn(&run_scm_cache_root_after_shards.step);
+        macos_only_test_step.dependOn(&run_scm_cache_root_tests.step);
+        test_macos_app_host_abi_step.dependOn(&run_scm_cache_root_after_shards.step);
+    }
     const edit_cost_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.EW0"} });
     const run_edit_cost = b.addRunArtifact(edit_cost_tests);
     run_edit_cost.setCwd(b.path("."));

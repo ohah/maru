@@ -23,12 +23,30 @@ const syntax_capture = maru.session.syntax_capture;
 const editor_language = maru.session.editor.language;
 const bracket_colors = maru.session.editor.bracket_colors;
 const editor_brackets = maru.session.editor.brackets;
+const origin_model = maru.session.editor.syntax.origin;
+
+const OriginState = struct {
+    current: ?origin_model.Tagged = null,
+    receipt: ?origin_model.Receipt = null,
+};
+const BorrowContext = struct {
+    receiver: origin_model.Resource,
+    tagged: ?origin_model.Tagged,
+    source: *const State,
+    document: maru.session.editor.document_registry.DocumentIdentity,
+    revision: u64,
+};
+const UpdateTrace = struct {
+    copied: bool = false,
+    edit: ?syntax.Edit = null,
+    context: ?BorrowContext = null,
+};
 
 /// 한 줄에서 색을 계산하는 열 상한. **중립이 소유한다** — 이 이름은 그것을 다시 내보낼 뿐이다
 /// (두 벌을 두면 한쪽만 늘어도 아무도 모른다).
 pub const max_color_cols = syntax_colors.max_color_cols;
 
-/// 한 문서의 구문 색 상태. **`Term.rt`가 소유한다** — 문서와 수명이 같다.
+/// 편집 뷰의 구문 색 상태. 본문을 공유해도 **각 `Term.rt`가 별도로 소유한다**.
 /// 한 창(본문 또는 미니맵)의 색 계산 저장소. 프레임마다 다시 채우되 **저장소는 재사용한다**.
 pub const ColorBufs = struct {
     /// 질의 결과(문서 byte 축).
@@ -53,6 +71,8 @@ pub const State = struct {
     provider: ?syntax.Provider = null,
     /// 완료한 입력만 증명한다. 직접 변경/재개에서 버리고 C 자원은 계속 이 뷰가 소유한다.
     input_stamp: ?maru.session.editor.syntax_stamp.Stamp = null,
+    // 터미널마다 큰 증명 값을 얹지 않는다. 편집 뷰가 필요할 때 만들며 OOM은 최적화만 포기한다.
+    origin_state: ?*OriginState = null,
     /// 뷰가 구문 provider와 함께 소유한다. 임시 출력 allocator의 수명을 보관하지 않는다.
     folds: syntax.FoldCache = .{},
 
@@ -102,6 +122,7 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
+        clearInputProofs(self);
         self.folds.deinit(allocator);
         self.brackets.deinit(allocator);
         self.bracket_toks.deinit(allocator);
@@ -115,9 +136,24 @@ pub const State = struct {
         self.crumb.deinit(allocator);
         self.crumb_bounds.deinit(allocator);
         self.crumb_syms.deinit(allocator);
+        if (self.origin_state) |proofs| allocator.destroy(proofs);
         self.* = .{};
     }
 };
+
+fn clearInputProofs(self: *State) void {
+    self.input_stamp = null;
+    if (self.origin_state) |proofs| proofs.* = .{};
+}
+
+fn originResource(self: *const State, document: maru.session.editor.document_registry.DocumentIdentity, revision: u64) ?origin_model.Resource {
+    const p = if (self.provider) |*value| value else return null;
+    return .{ .document = document, .revision = revision, .parser = @intFromPtr(p.parser), .generation = p.tree_gen, .grammar = @intFromPtr(p.slot.language), .complete = !self.pending and p.tree != null };
+}
+
+fn originEdit(edit: syntax.Edit) origin_model.Edit {
+    return .{ .start = edit.start_byte, .old_end = edit.old_end_byte, .new_end = edit.new_end_byte, .points = .{ edit.start_point.row, edit.start_point.column, edit.old_end_point.row, edit.old_end_point.column, edit.new_end_point.row, edit.new_end_point.column } };
+}
 
 /// 파일 확장자로 정한 언어(`session/editor/language.zig`)를 `syntax` 모듈의 축으로 옮긴다 — 표는 `syntax.languageFor`
 /// 하나다(이름으로 대응하고, 없는 이름은 컴파일 오류 — Windows 도 같은 것을 부른다, layering §3.5).
@@ -186,7 +222,7 @@ pub fn prepareSharedSnapshot(source: *const State, allocator: std.mem.Allocator,
 /// 호출자가 그 프레임을 다시 그리게 만들어야 다음 조각이 돈다.
 pub fn resumeParse(self: *State, source: []const u8) bool {
     if (!self.pending) return false;
-    self.input_stamp = null;
+    clearInputProofs(self);
     const p = if (self.provider) |*provider| provider else {
         self.pending = false;
         return false;
@@ -250,14 +286,16 @@ pub fn spanFromInverse(inverse_changes: []const maru.session.editor.delta.Change
 /// 이 입구를 재려던 판정자가 이 길을 한 번도 안 지났다). 남은 것은 `spanFromInverse` 가 `null` 을 내는 방어 갈래(역연산이
 /// 비었거나 앞뒤가 뒤집혔다)와 묶음 안에 범위를 못 만든 항목이 낀 undo 다. 틀린 트리보다 **한 번 더 파는 것**이 낫다.
 pub fn reparse(self: *State, source: []const u8) void {
-    reparseFromReady(self, source, null);
+    reparseFromReady(self, source, null, null);
 }
 
-fn reparseFromReady(self: *State, source: []const u8, ready: ?*const syntax.Provider) void {
-    self.input_stamp = null;
+fn reparseFromReady(self: *State, source: []const u8, ready: ?*const syntax.Provider, trace: ?*UpdateTrace) void {
+    clearInputProofs(self);
     const p = if (self.provider) |*provider| provider else return;
     self.folds.invalidate();
-    if (ready == null or !p.onEditFromParsed(ready.?, null)) p.setSource(source);
+    const copied = if (ready) |value| p.onEditFromParsed(value, null) else false;
+    if (trace) |value| value.copied = copied;
+    if (!copied) p.setSource(source);
     self.brackets.invalidate(); // 범위를 모른다 — 괄호 목록도 처음부터(§5.1d)
     // **이어 팔 것이 안 남는다** — 예산 없이 끝까지 팠다(끊긴 여는 파싱은 `setSource` 가 버렸다). 남겨 두면 다음 프레임의
     // `resumeParse` 가 방금 맞게 판 트리를 버리고 처음부터 다시 나눠 판다(그동안 무색 · 진단은 직전 목록) — `ES41`.
@@ -272,11 +310,11 @@ pub fn onEditSpan(
     e: EditSpan,
     lines_after: maru.session.editor.line_index.LineIndex,
 ) void {
-    onEditSpanFromReady(self, allocator, source, e, lines_after, null);
+    onEditSpanFromReady(self, allocator, source, e, lines_after, null, null);
 }
 
-fn onEditSpanFromReady(self: *State, allocator: std.mem.Allocator, source: []const u8, e: EditSpan, lines_after: maru.session.editor.line_index.LineIndex, ready: ?*const syntax.Provider) void {
-    self.input_stamp = null;
+fn onEditSpanFromReady(self: *State, allocator: std.mem.Allocator, source: []const u8, e: EditSpan, lines_after: maru.session.editor.line_index.LineIndex, ready: ?*const syntax.Provider, trace: ?*UpdateTrace) void {
+    clearInputProofs(self);
     const p = if (self.provider) |*provider| provider else return;
     // 옛 끝 행·열은 색 질의용 파싱의 기존 근사다. 접힘 캐시는 이 좌표로 행을 밀지 않는다.
     // byte 후보만 이동시키고 조회할 때 문서의 최신 줄 인덱스로 행·열을 구한다(EW2).
@@ -298,7 +336,8 @@ fn onEditSpanFromReady(self: *State, allocator: std.mem.Allocator, source: []con
         .old_end_point = at,
         .new_end_point = to,
     };
-    editProvider(p, source, edit, ready);
+    if (trace) |value| value.edit = edit;
+    editProvider(p, source, edit, ready, trace);
     // 파싱 크기 정책은 provider 하나가 판정한다. 캐시는 트리 보유 결과만 따라간다.
     if (p.tree != null) self.folds.edit(edit) else self.folds.invalidate();
     // `reparse` 와 같다 — `onEdit` 은 예산이 없어 끝까지 판다(옛 트리가 없던 여는 도중이면 처음부터). 이어 팔 것이 없다.
@@ -308,8 +347,22 @@ fn onEditSpanFromReady(self: *State, allocator: std.mem.Allocator, source: []con
 }
 
 // native 편집과 완료 트리 인계의 한 경계다. 호출자가 입력 신원/판을 검증한 후에만 ready를 넘긴다.
-fn editProvider(p: *syntax.Provider, source: []const u8, edit: syntax.Edit, ready: ?*const syntax.Provider) void {
-    if (ready) |value| if (p.onEditFromParsed(value, edit)) return;
+fn editProvider(p: *syntax.Provider, source: []const u8, edit: syntax.Edit, ready: ?*const syntax.Provider, trace: ?*UpdateTrace) void {
+    if (ready) |value| {
+        var reuse = false;
+        if (trace) |out| if (out.context) |context| {
+            if (matchesInput(context.source, context.document, context.revision)) {
+                if (context.source.origin_state) |proofs| if (proofs.receipt) |receipt| {
+                    if (originResource(context.source, context.document, context.revision)) |live| reuse = receipt.allows(context.receiver, context.tagged, live, originEdit(edit));
+                };
+            }
+        };
+        const copied = if (reuse) p.onEditFromMatchingPrior(value, edit) else p.onEditFromParsed(value, edit);
+        if (copied) {
+            if (trace) |out| out.copied = true;
+            return;
+        }
+    }
     p.onEdit(source, edit);
 }
 
@@ -322,14 +375,48 @@ pub fn matchesInput(self: *const State, document: maru.session.editor.document_r
 
 /// 완료한 입력 판만 재사용한다. 선택/표시 및 다른 provider의 갱신 순서는 바꾸지 않는다.
 pub fn updateForInput(self: *State, allocator: std.mem.Allocator, source: []const u8, edit: ?EditSpan, lines: maru.session.editor.line_index.LineIndex, document: maru.session.editor.document_registry.DocumentIdentity, revision: u64, ready: ?*const State) void {
+    updateForInputImpl(self, allocator, source, edit, lines, document, revision, ready, null, false);
+}
+
+/// 발급 실패는 기존 입력 증명과 파싱 재사용을 막지 않으며 범위 재사용만 포기한다.
+pub fn updateForInputWithOrigin(self: *State, allocator: std.mem.Allocator, source: []const u8, edit: ?EditSpan, lines: maru.session.editor.line_index.LineIndex, document: maru.session.editor.document_registry.DocumentIdentity, revision: u64, ready: ?*const State, reserved: ?origin_model.Origin) void {
+    updateForInputImpl(self, allocator, source, edit, lines, document, revision, ready, reserved, true);
+}
+
+fn updateForInputImpl(self: *State, allocator: std.mem.Allocator, source: []const u8, edit: ?EditSpan, lines: maru.session.editor.line_index.LineIndex, document: maru.session.editor.document_registry.DocumentIdentity, revision: u64, ready: ?*const State, reserved: ?origin_model.Origin, track_origin: bool) void {
     if (matchesInput(self, document, revision)) return;
     const before: ?u64 = if (self.provider) |p| p.tree_gen else null;
-    const parsed: ?*const syntax.Provider = if (ready) |candidate| if (matchesInput(candidate, document, revision)) if (candidate.provider) |*p| p else null else null else null;
-    if (edit) |span| onEditSpanFromReady(self, allocator, source, span, lines, parsed) else reparseFromReady(self, source, parsed);
+    const old_revision = if (self.input_stamp) |stamp| stamp.revision else revision;
+    const before_resource = originResource(self, document, old_revision);
+    const before_tag: ?origin_model.Tagged = if (track_origin and self.input_stamp != null) if (self.origin_state) |proofs| proofs.current else null else null;
+    const selected: ?*const State = if (ready) |candidate| if (matchesInput(candidate, document, revision)) candidate else null else null;
+    const parsed: ?*const syntax.Provider = if (selected) |candidate| if (candidate.provider) |*p| p else null else null;
+    if (track_origin and self.provider != null and self.origin_state == null) {
+        const proofs = allocator.create(OriginState) catch null;
+        if (proofs) |value| {
+            value.* = .{};
+            self.origin_state = value;
+        }
+    }
+    var trace: UpdateTrace = .{};
+    if (track_origin and before_resource != null and selected != null) trace.context = .{ .receiver = before_resource.?, .tagged = before_tag, .source = selected.?, .document = document, .revision = revision };
+    if (edit) |span| onEditSpanFromReady(self, allocator, source, span, lines, parsed, &trace) else reparseFromReady(self, source, parsed, &trace);
     const p = if (self.provider) |*value| value else return;
     // native 실패는 이전 트리를 남길 수 있다. 단순히 pending=false인 것만 보고 새 입력이라고 하지 않는다.
     if (p.tree != null and !self.pending and (before == null or before.? != p.tree_gen)) {
         self.input_stamp = .{ .document = document, .revision = revision, .provider_identity = @intFromPtr(p.parser), .tree_generation = p.tree_gen };
+        if (track_origin) if (self.origin_state) |proofs| {
+            const after = originResource(self, document, revision).?;
+            var tag: ?origin_model.Tagged = null;
+            if (trace.copied) if (selected) |candidate| {
+                const source_tag = if (candidate.origin_state) |source_proofs| source_proofs.current else null;
+                if (originResource(candidate, document, revision)) |live| tag = origin_model.copied(before_resource, after, live, source_tag, true);
+            };
+            proofs.current = tag orelse origin_model.parsed(before_resource, after, reserved);
+            if (trace.edit) |e| if (before_resource) |old| if (p.retainedChanges()) |batch| {
+                proofs.receipt = origin_model.Receipt.init(old, before_tag, after, proofs.current, originEdit(e), batch.before, true);
+            };
+        };
     }
 }
 

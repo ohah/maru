@@ -48,13 +48,16 @@ def digest(path, expected):
 def source_names(info):
     schema = info.get('provider_schema', 1)
     execution = info.get('provider_execution', 'per-view-native')
-    if type(schema) is not int or schema not in (1, 2) or execution not in ('per-view-native', 'revision-snapshots'):
+    if type(schema) is not int or schema not in (1, 2, 3) or execution not in ('per-view-native', 'revision-snapshots'):
         raise ValueError('Unknown provider execution schema')
     if schema == 1:
         if execution != 'per-view-native':raise ValueError('Snapshot execution needs schema 2')
         return SOURCES
     extra = {'src/session.zig', 'src/session/editor/document_registry.zig'}
     if execution == 'revision-snapshots':extra.add('src/session/editor/syntax_stamp.zig')
+    if schema == 3:
+        if execution != 'revision-snapshots':raise ValueError('Range reuse needs snapshot execution')
+        extra.add('src/session/editor/syntax/origin.zig')
     return SOURCES | extra
 
 
@@ -67,10 +70,13 @@ def validate(text, workload, data, filename, oracle, schema=1, execution='per-vi
         if not line.startswith('PROVIDER '):
             continue
         pattern = PATTERN if schema == 1 else re.compile(PATTERN.pattern + r' adopted_calls=(\d+)')
+        if schema == 3:pattern = re.compile(pattern.pattern + r' range_reuses=(\d+)')
         match = pattern.fullmatch(line)
         if match is None:
             raise ValueError('Malformed provider row')
-        rows.append(dict(zip(FIELDS if schema == 1 else FIELDS + ('adopted_calls',), map(int, match.groups()))))
+        names = FIELDS if schema == 1 else FIELDS + ('adopted_calls',)
+        if schema == 3:names += ('range_reuses',)
+        rows.append(dict(zip(names, map(int, match.groups()))))
     if [row['key'] for row in rows] != list(range(20)):
         raise ValueError('Missing/duplicate/reordered provider key')
     controls = [line for line in text.splitlines() if line.startswith('EW2 ')]
@@ -88,9 +94,15 @@ def validate(text, workload, data, filename, oracle, schema=1, execution='per-vi
     views = 2 if workload == 'shared' else 1
     for row, outer in zip(rows, frames):
         expected_native = 1 if execution == 'revision-snapshots' else views
-        if schema == 2 and row['adopted_calls'] != views - expected_native:
+        if schema >= 2 and row['adopted_calls'] != views - expected_native:
             raise ValueError('Unexpected successful snapshot adoptions')
-        if row['native_calls'] != expected_native or any(row[stage + '_calls'] != views for stage in STAGES):
+        if schema == 3:
+            reused = row['range_reuses']
+            if not 0 <= reused <= views - 1:raise ValueError('Invalid retained range reuse count')
+            if any(row[stage + '_calls'] + reused != views for stage in ('note_changed', 'changed_ranges')):
+                raise ValueError('Missing calculated or reused ranges')
+        counted = STAGES if schema < 3 else tuple(s for s in STAGES if s not in ('note_changed', 'changed_ranges'))
+        if row['native_calls'] != expected_native or any(row[stage + '_calls'] != views for stage in counted):
             raise ValueError('Unexpected per-view native/observer calls')
         if row['changed_ranges'] > row['note_changed'] or row['note_changed'] > row['on_edit'] or row['on_edit'] > outer['providerEdit']:
             raise ValueError('Nested provider interval exceeds parent')

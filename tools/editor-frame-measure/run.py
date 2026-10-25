@@ -83,7 +83,9 @@ def setup(repo, output, deps, mode):
         '    if (p.tree != null) self.folds.edit(edit) else self.folds.invalidate();',
         '    self.brackets.refresh(allocator, p, source, .{ .start = start, .end = new_end }) catch self.brackets.invalidate();',
     ]
-    if '    editProvider(p, source, edit, ready);' in syn:
+    if '    editProvider(p, source, edit, ready, trace);' in syn:
+        calls[1] = '    editProvider(p, source, edit, ready, trace);'
+    elif '    editProvider(p, source, edit, ready);' in syn:
         calls[1] = '    editProvider(p, source, edit, ready);'
     for index, call in enumerate(calls):
         syn = base.once(syn, call, f'    const frame_syntax_start_{index} = frameSyntaxNow();\n' + call + f'\n    frame_syntax_ns[{index}] += frameSyntaxNow() - frame_syntax_start_{index};')

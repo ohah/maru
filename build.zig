@@ -745,10 +745,11 @@ pub fn build(b: *std.Build) void {
     }
     const project_search_tests = addProjectTest(b, .{ .root_module = project_search_module });
     const run_project_search_tests = b.addRunArtifact(project_search_tests);
-    run_project_search_tests.addArg("--maru-expect-tests=289");
+    // registry를 경유해 구문 계보의 발급·판정 검사도 이 집계에 포함된다.
+    run_project_search_tests.addArg("--maru-expect-tests=298");
     b.step("test-editor-project-search", "Run project search protocol and argv judges").dependOn(&run_project_search_tests.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
-        run_project_search_tests.addArg("--maru-expect-passed=288"); // Windows 전용 경로 비교 1개는 의도적으로 건너뛴다.
+        run_project_search_tests.addArg("--maru-expect-passed=297"); // Windows 전용 경로 비교 1개는 의도적으로 건너뛴다.
         macos_only_test_step.dependOn(&run_project_search_tests.step);
     }
     const ripgrep_prepare = b.addSystemCommand(&.{ "python3", "tools/build-ripgrep.py", "--output", "zig-out/ripgrep" });
@@ -1703,6 +1704,11 @@ pub fn build(b: *std.Build) void {
     run_syntax_stamp.addArg("--maru-expect-tests=30");
     run_syntax_stamp.addArg("--maru-expect-passed=30");
     b.step("test-editor-syntax-stamp", "Verify document/provider provenance for parsed snapshots").dependOn(&run_syntax_stamp.step);
+    const syntax_origin_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"change origin"} });
+    const run_syntax_origin = b.addRunArtifact(syntax_origin_tests);
+    run_syntax_origin.addArg("--maru-expect-tests=37");
+    run_syntax_origin.addArg("--maru-expect-passed=37");
+    b.step("test-editor-change-origin", "Verify document-owned syntax origins and retained change receipts").dependOn(&run_syntax_origin.step);
     const editor_document_regex_step = b.step("test-editor-document-regex", "Run whole-document regex judges");
     const document_regex_tests = addProjectTest(b, .{
         .root_module = maru_mod,
@@ -6495,6 +6501,14 @@ pub fn build(b: *std.Build) void {
         macos_only_test_step.dependOn(&run_parse_reuse_product.step);
     }
     b.step("test-editor-shared-parse-product", "Verify shared input reuse in the editor coordinator").dependOn(&run_parse_reuse_product.step);
+    const change_origin_product = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"shared change origin product"} });
+    const run_change_origin_product = b.addRunArtifact(change_origin_product);
+    run_change_origin_product.addArg("--maru-expect-tests=8");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_change_origin_product.addArg("--maru-expect-passed=8");
+        macos_only_test_step.dependOn(&run_change_origin_product.step);
+    }
+    b.step("test-editor-change-origin-product", "Verify native change reuse and safe fallback in the editor coordinator").dependOn(&run_change_origin_product.step);
     const parse_reuse_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"shared parse reuse native"} });
     const run_parse_reuse = b.addRunArtifact(parse_reuse_tests);
     run_parse_reuse.addArg("--maru-expect-tests=6");

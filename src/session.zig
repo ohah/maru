@@ -191,6 +191,9 @@ pub const editor = struct {
     pub const recovery_id = @import("session/editor/recovery_id.zig");
     pub const document_registry = @import("session/editor/document_registry.zig");
     pub const syntax_stamp = @import("session/editor/syntax_stamp.zig");
+    pub const syntax = struct {
+        pub const origin = @import("session/editor/syntax/origin.zig");
+    };
     pub const shared_edit = @import("session/editor/shared_edit.zig");
     pub const workspace_state = @import("session/editor/workspace_state.zig");
     /// 줄 조작의 순수 판정(§3.9a — L4 에서 옮겼다, 이식 계획 D1 이동 단계 1). `ops/` 폴더는 OS 를 안 부른다
@@ -330,6 +333,7 @@ pub const AppWindow = window.AppWindow;
 test {
     @import("std").testing.refAllDecls(@This());
     @import("std").testing.refAllDecls(editor);
+    @import("std").testing.refAllDecls(editor.syntax);
     // **네임스페이스 자식은 따로 ref 한다** — `refAllDecls` 는 한 단계라, 소비처가 아직 없는
     // 모듈은 테스트를 써 놔도 집계 밖이다(chrome.ui.gesture 가 실제로 그랬다).
     @import("std").testing.refAllDecls(ssh);

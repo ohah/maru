@@ -6715,6 +6715,20 @@ pub fn build(b: *std.Build) void {
         run_edit_cost.addArg("--maru-expect-passed=6");
         macos_only_test_step.dependOn(&run_edit_cost.step);
     }
+    // Optional integration executable: the Python runner supplies owned projects
+    // and real SDK commands. No SDK download enters the default check graph.
+    const real_lsp_oracles = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/editor-lsp-real", "-p", "test_*.py" });
+    real_lsp_oracles.setCwd(b.path("."));
+    b.step("test-editor-real-lsp-oracles", "Verify real LSP evidence rejection and process ownership guards").dependOn(&real_lsp_oracles.step);
+    test_step.dependOn(&real_lsp_oracles.step);
+    const real_lsp_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.real LSP editing"} });
+    const install_real_lsp_tests = b.addInstallArtifact(real_lsp_tests, .{ .dest_sub_path = "maru-real-lsp-test" });
+    b.step("editor-real-lsp-judge", "Build the opt-in real language server product judge").dependOn(&install_real_lsp_tests.step);
+    const run_real_lsp_tests = b.addRunArtifact(real_lsp_tests);
+    run_real_lsp_tests.setCwd(b.path("."));
+    run_real_lsp_tests.addArg("--maru-expect-tests=5");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_real_lsp_tests.addArg("--maru-expect-passed=5");
+    b.step("test-editor-real-lsp", "Run an explicitly configured real language server case").dependOn(&run_real_lsp_tests.step);
     const semantic_recovery_step = b.step("test-editor-semantic-recovery", "Verify semantic EOF, settings, refresh and timeout recovery");
     const semantic_recovery_pure = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"semantic recovery"} });
     const run_semantic_recovery_pure = b.addRunArtifact(semantic_recovery_pure);

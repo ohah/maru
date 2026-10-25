@@ -26749,6 +26749,65 @@ const SmtFixture = struct {
     }
 };
 
+// This is opt-in: the ordinary suite never discovers or installs real servers.
+// The dedicated runner requires five passed tests, so a missing case cannot be
+// mistaken for a successful real-server execution.
+test "real LSP editing through AppSession controllers" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const case_env = std.c.getenv("MARU_REAL_LSP_CASE") orelse return error.SkipZigTest;
+    const judge = @import("real_lsp_judge.zig");
+    const a = testing.allocator;
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, std.mem.span(case_env), a, .limited(1 << 20));
+    defer a.free(bytes);
+    var parsed = try std.json.parseFromSlice(judge.Case, a, bytes, .{});
+    defer parsed.deinit();
+    const c = parsed.value;
+    if (c.nonce.len < 16 or c.timeout_ms == 0 or c.timeout_ms > 180_000) return error.InvalidRealLspCase;
+    if (!std.mem.eql(u8, std.fs.path.dirname(c.path) orelse "", c.root)) return error.UnownedRealLspDocument;
+    var root_dir = try std.Io.Dir.cwd().openDir(testing.io, c.root, .{});
+    defer root_dir.close(testing.io);
+    const marker = try root_dir.readFileAlloc(testing.io, ".maru-real-lsp-case", a, .limited(128));
+    defer a.free(marker);
+    if (!std.mem.eql(u8, marker, c.nonce)) return error.UnownedRealLspCase;
+    const on_disk = try std.Io.Dir.cwd().readFileAlloc(testing.io, c.path, a, .limited(1 << 20));
+    defer a.free(on_disk);
+    try testing.expectEqualStrings(c.good, on_disk);
+
+    // The trust override borrows this slice through session teardown.
+    const trust_dir = try std.fs.path.join(a, &.{ c.root, "trust" });
+    defer a.free(trust_dir);
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    // Close PaneFixture's unrelated Zig document before the first LSP pump.
+    // Only the runner-owned project may reach the automatic test trust answer.
+    pane_ops.closeActiveTermOrPane(fx.session);
+    const s = fx.session;
+    const old_repo = s.git_repo;
+    s.git_repo = @constCast(c.root);
+    defer s.git_repo = old_repo;
+    s.editor_lsp.auto_trust_answer = .allow;
+    s.loaded_config.config.lsp.enabled = true;
+    s.loaded_config.config.lsp.repository_environment = false;
+    s.loaded_config.config.editor.quick_suggestions = false;
+    lsp_client.setShellEnvironmentEnabled(false);
+    trust_store.setDirForTest(trust_dir);
+    const t = (try pane_ops.openFileTermInActivePane(s, c.path, .text)).term;
+    s.surface_initialized = true;
+    s.backing_width_px = 1200;
+    s.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(s) orelse return error.NoRealLspGeometry;
+    var frame = appendPaneFrame(s, leaf, t) orelse return error.RealLspDidNotDraw;
+    frame.dl.deinit(a);
+    try judge.run(s, t, c, struct {
+        fn paint(session: *AppSession, term: *Term) !void {
+            session.gpu_quads.clearRetainingCapacity();
+            const rect = activeLeafRectForTest(session) orelse return error.NoRealLspGeometry;
+            var drawn = appendPaneFrame(session, rect, term) orelse return error.RealLspDidNotDraw;
+            drawn.dl.deinit(session.allocator);
+        }
+    }.paint);
+}
+
 /// 행 `line` 의 열 `[lo, hi)` 에 정확히 걸린 색 구간의 역할.
 fn roleAt(colors: []const []const chrome_editor.content.ColorSpan, line: usize, lo: u32, hi: u32) ?maru.chrome.tokens.ColorRole {
     if (line >= colors.len) return null;

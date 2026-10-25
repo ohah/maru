@@ -140,3 +140,12 @@ maru 본문과 같은지를 진단 개수로 잰다. 방식 넷: range 없는 �
 시맨틱 토큰 응답 유실 복구를 보강한다. 서버 실행 신뢰와 자동 빌드 금지 경계는 유지한다.
 현재 계약은 [툴링 §8.2i](../editor-surface-tooling.md),
 검증은 [회귀 증거](../../tools/editor-theme-gallery/semantic-recovery.md)와 검증 매트릭스가 소유한다.
+
+
+## 실제 편집 회귀 후속 (2026-10-25)
+
+시맨틱 토큰 캡처 이후 Rust·Go·Kotlin·Dart·Scala의 실제 서버를 제품 AppSession에 연결하는
+선택 실행 판정자를 추가했다. 진단 발생/해소, 호버, 같은 파일 정의 이동/복귀, 완성 적용/Undo를
+실제 wire와 제품 상태로 대조한다. SDK 설치는 기본 test에 넣지 않고, SDK가 필요 없는 43개 증거
+판정/소유권 검사만 기본 test에 포함한다. 초기 인덱싱 대기는 test-only이며 제품 정책을 바꾸지 않는다.
+실행과 버전 없는 진단·GUI 미검증 범위는 [실행 안내](../../tools/editor-lsp-real/README.md)가 소유한다.

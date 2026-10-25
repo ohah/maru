@@ -12815,4 +12815,9 @@ Windows 설정의 세로 휠은 공통 `settings.scrollByRows`로 전달한다. 
 행·별도 색 선택기에는 해당 caret을 발행하지 않는다. 검색 필터를 유지한 편집은 검색란보다
 편집란이 우선이다. Windows 검사 5개는 실제 draw op의 caret과 위치 계약을 비교한다.
 `check-settings-scroll.py --inline-caret`는 숫자 편집 열기/취소와 위치 요청 소유권을 확인한다.
-설정 필드의 조합 미리보기 렌더, 색 선택기 내부 hex 편집 및 물리 IME 후보창은 아직 후속 작업이다.
+일반 필드 조합 미리보기는 확정값과 분리된 UTF-8 버퍼에 보관하고 편집 caret부터 필드 우단까지
+그린다. 검색 필터를 유지한 편집 중에는 검색란 커서를 숨긴다. 취소·새 편집·확정 문자 입력은
+남은 미리보기를 비우며, 검색/섹션으로 소유권을 옮기면 이전 폼 트랜잭션도 정리한다.
+`test-windows-settings`의 조합 검사 5개와 `test-settings-form`의 소유권 전환 검사가 이 계약을
+다룬다. `--double-caret-control --inline-caret`는 이전 바이너리의 중복 커서를 화면으로 재현한다.
+색 선택기 내부 hex 편집과 물리 IME 후보창은 아직 후속 작업이다.

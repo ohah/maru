@@ -5787,4 +5787,12 @@ Inline field caret coverage adds five Windows judges for number padding, text/fo
 display width, color prefix, invalid ownership, and edit-over-search priority.
 `check-settings-scroll.py --inline-caret` additionally opens/cancels a filtered
 numeric edit and requires its IMM request counter. These are request-routing and
-paint geometry checks; inline preedit rendering and physical candidate evidence remain pending.
+paint geometry checks; physical candidate evidence remains pending.
+
+Composition adds five Windows settings judges for one active caret and preview paint,
+separate preview/filter ownership, cancel/commit lifetime, UTF-8 limits, and field-edge
+clipping. A form judge covers search/section changes retiring the old edit transaction.
+Six runtime mutations exercise cursor, paint, commit clearing, UTF-8 boundary, value
+isolation, and transaction cleanup. Debug and ReleaseFast must pass after restoration.
+The native app double-caret control reproduces the old title cursor; the normal
+inline-caret mode requires it to disappear while numeric edit requests remain active.

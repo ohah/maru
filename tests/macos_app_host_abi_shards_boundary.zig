@@ -45,6 +45,22 @@ test "AppSession suite runs as index shards and fresh process judges wait for ev
     try std.testing.expect(graph.dependsOn("run_macos_app_host_abi_shards", "ripgrep_prepare"));
     try std.testing.expect(graph.dependsOn("run_editor_tests", "ripgrep_prepare"));
     try std.testing.expect(graph.dependsOn("run_search_owner_tests", "ripgrep_prepare"));
+    try std.testing.expect(graph.dependsOn("run_scm_cache_root_after_shards", "run_macos_app_host_abi_shards"));
+    try std.testing.expect(graph.dependsOn("test_macos_app_host_abi_step", "run_scm_cache_root_after_shards"));
+    try std.testing.expect(graph.dependsOn("test_step", "run_scm_cache_root_after_shards"));
+    try std.testing.expect(graph.dependsOn("macos_only_test_step", "run_scm_cache_root_tests"));
+    for ([_][]const u8{ "run_scm_cache_root_tests", "run_scm_cache_root_after_shards" }) |name| {
+        const calls = graph.varCalls(name) orelse return error.CacheRootRunMissing;
+        try std.testing.expect(calls.cwd_set);
+        try std.testing.expect(graph.hasArg(name, "--maru-expect-tests=5"));
+        try std.testing.expect(graph.hasArg(name, "--maru-expect-passed=5"));
+        var cache_mode_set = false;
+        for (calls.envs) |key| {
+            if (std.mem.eql(u8, key, "MARU_TEST_SCM_CACHE_ROOT")) cache_mode_set = true;
+        }
+        try std.testing.expect(cache_mode_set);
+    }
+
     // 매달기도 **구조로** 본다 — 문자열은 `.step` 이 붙었는지·줄바꿈이 들었는지에 흔들린다.
     try std.testing.expect(graph.dependsOn("run_macos_external_tty_fresh_tests", "run_macos_app_host_abi_shards"));
     // `test` 스텝(macOS)도 샤드 스텝에 의존한다.

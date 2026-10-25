@@ -784,4 +784,8 @@ Windows의 키보드·메뉴 복사와 보호된 붙여넣기 연결은
 `src/platform/windows/terminal/text_resources.zig`는 DirectWrite face와 래스터 작업 버퍼의 준비/해제를 함께
 소유한다. builder는 이 heap 자원을 빌리며, renderer/atlas와 레이아웃을 포함한 게시 시점은 앱 호스트가 맡는다.
 
+`src/platform/windows/terminal/renderer_resources.zig`는 CPU renderer의 font identity/atlas와 GPU
+CellPipeline의 준비/해제를 묶는다. Present의 device/context를 빌리고, 캐시된 UI와 core/PTY를 포함한
+세대 게시 시점은 앱 호스트에 남긴다.
+
 `session.input_math.WheelAccumulator`는 정밀 휠 나머지와 눈금→줄 변환의 공통 수학을 소유하고 Win32 어댑터는 이를 재출력한다. Windows 설정 호스트는 축·모달 소유권과 공통 설정 스크롤 API의 연결만 소유한다.

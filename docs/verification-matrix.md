@@ -5886,3 +5886,13 @@ Windows 전용, POSIX 전용, 무조건 절대/상대 판정의 다섯 변이를
   컴파일 실패로 세지 않는다. 복원 Debug/ReleaseFast 각각 7개가 통과해야 한다.
 - native glyph 검사와 실제 앱의 시작/설정 회귀는 준비 자원의 수명 증거다. 설정 변경 후 font/atlas/grid의
   원자적 교체, line-height/letter-spacing, 전체 폰트 기능이나 물리 입력 완료를 뜻하지 않는다.
+
+### Windows CPU·GPU 렌더러 자원 준비
+
+- `zig build test-windows-renderer-resources`: 집계 2 + Windows native 5. 숨긴 전용 창의 D3D11 device를
+  사용해 세대별 font identity/texture 분리, allocator 및 실제 GPU 생성 실패 후 기존 자원 사용,
+  이전 소유자 해제 후 준비된 GPU 사용, CPU/GPU 아틀라스 치수, 메트릭 범위/자연 폭 구분을 검사한다.
+- 자연 폭 손실·GPU 치수 이탈·잘못된 메트릭 허용·GPU 소유 객체 누수·CPU registry 누수의 다섯 변이를
+  컴파일 후 런타임 기대값 또는 추적 allocator의 실제 leak 실패로 검출한다. 복원 Debug/ReleaseFast는 각각 7개다.
+- 실제 GPU API 생성/upload/draw를 호출하는 수명 검사이며 GPU 픽셀 readback이나 라이브 폰트 게시 증거가
+  아니다. 실제 앱 캡처/입력 회귀는 별도로 확인하고, cached draw list와 core/PTY 격자의 교체는 후속이다.

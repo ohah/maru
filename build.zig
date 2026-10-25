@@ -1972,6 +1972,10 @@ pub fn build(b: *std.Build) void {
         .root_module = exe.root_module,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
+    const settings_model_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Settings model"} });
+    const run_settings_model_tests = b.addRunArtifact(settings_model_tests);
+    run_settings_model_tests.addArg("--maru-expect-tests=33"); // Five model judges and 28 transitive anonymous aggregation blocks.
+    b.step("test-settings-model", "Verify portable settings search and section identity").dependOn(&run_settings_model_tests.step);
     const chrome_request_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"prepareRequest"} });
     const chrome_request_step = b.step("test-chrome-text-request", "Verify owned portable chrome text requests and allocation failures");
     chrome_request_step.dependOn(&b.addRunArtifact(chrome_request_tests).step);

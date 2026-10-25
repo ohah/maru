@@ -1,3 +1,4 @@
+pub const settings_model = @import("app/settings/model.zig");
 pub const chrome_text = @import("app/chrome_text.zig");
 pub const git_backend = @import("app/git/backend.zig");
 pub const chrome_draw_lowering = @import("app/chrome_draw_lowering.zig");

@@ -12742,3 +12742,26 @@ keys remain intact.
 caller must launch an isolated cache fixture, with the sentinel config described
 in the tool header. It verifies the process executable and window owner before
 injecting events; this is message-based application E2E, not physical mouse proof.
+
+### Terminal clipboard popup integration
+
+Windows reuses the shared chrome context-menu component for the same Copy/Paste
+terminal menu as macOS. `input.right-click = menu` selects that behavior; the
+existing default `paste` and terminal mouse-reporting precedence remain intact.
+The common application controller owns a stable surface ID, consumes popup input,
+requires matching pointer press/release, and cancels on target changes or higher
+overlays. Clipboard actions stay in the platform host and paste uses the existing
+protection/bracketed-paste path. A held pointer release remains owned after outside
+or keyboard dismissal; capture loss clears that gesture. The dedicated gate is
+`zig build test-terminal-clipboard-popup`. Host input and GPU paint wiring share
+the existing native clipboard path. Native caption/resize hit-testing yields to
+the popup, and focus loss revokes it even if focus returns within the same event
+poll. Live validation is in progress; the historical `right_click_menus_todo`
+counter is not completion proof.
+
+The app-level Copy check also exposed an existing terminal selection bug: cell
+lookup used absolute client pixels after sidebar/titlebar layout moved the terminal.
+`win32_mouse.pointRelativeTo` now subtracts the rendered terminal origin before
+selection, wheel-cell lookup and pixel mouse reports. Signed captures are retained
+with wide subtraction and saturation. The old app issued word selections but copied
+zero bytes; the corrected app must pass the same visible-word clipboard check.

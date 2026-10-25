@@ -5650,3 +5650,20 @@ DwmFlush/CAPTUREBLT desktop 캡처 6회에서 terminal/sidebar 유지도 확인�
 상세 계약과 근거는 [Windows 플랫폼](windows-platform.md#2m204--windows-archive-원본-식별과-로그-선택),
 진행 기록은 [Windows 구현 계획](plans/windows-platform.md)을 따른다. resume/live focus와
 전체 잔여 Windows 기능·물리 입력 장기 soak는 후속이다.
+
+
+### Terminal clipboard popup (Windows host wiring)
+
+`zig build test-terminal-clipboard-popup` compiles 14 cases: two root aggregation
+blocks, nine shared controller cases, client-to-terminal coordinate mapping,
+native caption/cursor ownership, and native
+clipboard target/visibility rejection before OS access. The two native cases skip
+outside Windows. The host uses the existing chrome context-menu view and protected
+paste encoder. Popup rendering, OS message routing and clipboard behavior require
+separate owned-window app evidence; a controller-only pass does not prove those.
+Coordinate cases cover sidebar resize, titlebar origin, negative capture positions,
+zero origins and signed/unsigned limits. Real app Copy exposed the prior absolute
+client-coordinate bug despite the existing controller and editor gates passing.
+Validation includes five distinct broken guards with runtime rejection, source-byte
+restoration, Debug/ReleaseFast controls, ordinary app display and cancellation,
+matched pointer release, focus loss, and protected paste. Live validation is pending.

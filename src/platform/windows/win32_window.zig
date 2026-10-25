@@ -218,6 +218,7 @@ const sw_restore: i32 = 9;
 const WM_NCCALCSIZE: UINT = 0x0083;
 const WM_NCHITTEST: UINT = 0x0084;
 const WM_SETCURSOR: UINT = 0x0020;
+const WM_KILLFOCUS: UINT = 0x0008;
 // `WM_NCHITTEST` 반환값. 창이 프레임을 안 그려도 **OS 가 이 값들로 드래그·리사이즈·더블클릭
 // 최대화를 대신 해 준다** — Electron 의 `-webkit-app-region: drag` 가 하는 일을 Win32 에서는
 // `HTCAPTION` 하나가 한다.
@@ -432,6 +433,10 @@ pub const Window = struct {
     horizontal_resize_rect: ?CursorRect = null,
     sidebar_resize_rect: ?CursorRect = null,
     horizontal_resize_active: bool = false,
+    /// A chrome popup owns the first outside click, including the caption/border.
+    input_overlay_open: bool = false,
+    /// Sticky generation: focus loss remains observable even if focus returns in one poll.
+    focus_loss_serial: u64 = 0,
     present: PresentTarget = .{},
     /// `WndProc`이 채우고 `poll`이 넘긴다. 창 하나당 하나라 락이 필요 없다(같은 스레드에서만 돈다).
     ///
@@ -546,6 +551,7 @@ pub const Window = struct {
 
     /// A resize gesture keeps its cursor outside the band only while this window owns capture.
     pub fn wantsHorizontalCursor(self: *const Window, x: i32, y: i32, client_hit: bool) bool {
+        if (self.input_overlay_open) return false;
         if (!client_hit) return false;
         for ([_]?CursorRect{ self.horizontal_resize_rect, self.sidebar_resize_rect }) |maybe_rect| {
             const rect = maybe_rect orelse continue;
@@ -668,6 +674,7 @@ pub const Window = struct {
     /// 캡션 버튼 자리는 `HTCLIENT` 다 — 우리가 그 클릭을 받아 최소화·최대화·닫기를 한다. 안 그러면
     /// OS 가 그 자리를 드래그로 먹어 버튼이 안 눌린다.
     pub fn hitTestFrame(self: *const Window, rect: RECT, screen_x: i32, screen_y: i32) LRESULT {
+        if (self.input_overlay_open) return HTCLIENT;
         const border: i32 = @intCast(@max(4, self.resize_border_px));
         const left = screen_x < rect.left + border;
         const right = screen_x >= rect.right - border;
@@ -966,6 +973,13 @@ fn wndProc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) callconv(abi.w
     }
     const self = windowFrom(hwnd);
     switch (msg) {
+        WM_KILLFOCUS => {
+            if (self) |w| {
+                w.focus_loss_serial +%= 1;
+                w.input_overlay_open = false;
+            }
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
         WM_SETCURSOR => {
             // Nonclient border/caption shapes remain the OS's responsibility.
             if (self) |w| {

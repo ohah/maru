@@ -1985,6 +1985,13 @@ pub fn build(b: *std.Build) void {
         .root_module = exe.root_module,
         .filters = &.{"CLI internal contract"},
     });
+    const terminal_popup_tests = addProjectTest(b, .{
+        .root_module = exe.root_module,
+        .filters = &.{"Terminal clipboard popup"},
+    });
+    const run_terminal_popup_tests = b.addRunArtifact(terminal_popup_tests);
+    run_terminal_popup_tests.addArg("--maru-expect-tests=14"); // Nine controller judges, caption/clipboard/pixel-coordinate ownership, and two root aggregation blocks.
+    b.step("test-terminal-clipboard-popup", "Verify terminal clipboard popup target and input ownership").dependOn(&run_terminal_popup_tests.step);
     const run_internal_contract_tests = b.addRunArtifact(internal_contract_tests);
     run_internal_contract_tests.addArg("--maru-expect-tests=4"); // 2 root aggregation blocks, wire ABI, native/dispatcher agreement
     const internal_contract_step = b.step("test-cli-internal-contract", "Verify shared hidden CLI command contracts across platform adapters");

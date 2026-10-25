@@ -764,3 +764,15 @@ caption click 0·launcher toggle 8회·400px 도크 유지·grid mismatch 0·exi
 기존 캐시를 쓴 전체 경계 검사는 C 드라이브 공간 0으로 LLVM 출력 생성/실행 파일 찾기가
 실패했다. 종료된 fixture는 총 200KB여서 충분하지 않았다. 이 작업의 전용 NTFS 빌드 캐시를
 삭제하지 않고 압축해 공간을 확보했고, 최종 빌드와 검증은 별도 전용 캐시에서 실행한다.
+
+### Windows chrome overlay 연결 (진행 중)
+
+- 터미널 `input.right-click = menu`: macOS와 같은 공통 복사·붙여넣기 메뉴를 GPU chrome에 연결한다.
+  기본 `paste`와 터미널 마우스 리포팅 우선순위는 유지한다. 팝업은 surface ID를 소유하며 세션 변경,
+  확인 모달·알림, capture loss가 발생하면 취소한다. release만으로 항목을 실행하지 않는다.
+- 설정창: 기존 schema-driven settings 컴포넌트와 Windows `Ctrl+,` 액션을 연결한다.
+  config 텍스트를 여는 것으로 GUI 구현을 대체하지 않는다.
+- 입력 좌표: 터미널 선택·마우스 리포트는 실제 viewport 원점을 빼서 계산한다. IME 후보창도
+  같은 원점과 레이아웃 변경을 따라가는지 별도 감사하고, 파일 편집기 포커스의 후보창 경로도 확인한다.
+- 검증: 팝업 전용 ownership/gesture gate, 다섯 가지 변조와 정상 복원 대조, 실제 앱에서 메뉴
+  그림·복사·보호된 붙여넣기·취소·세션 변경·설정창 입력 격리를 확인한다. 완료 전 설치본을 교체하지 않는다.

@@ -762,3 +762,9 @@ Windows archive 로그 선택은 `src/platform/windows/agents/reveal.zig`, title
 launcher의 geometry와 클릭 소유권은 `src/platform/windows/chrome/dock.zig`가 맡는다.
 공통 archive 원본 DTO와 OS별 capture 분기는 `src/app/archive_source_identity.zig`에 있고,
 Windows full file identity는 maru facade가 한 번 소유하여 editor·watcher·archive가 공유한다.
+
+터미널 복사·붙여넣기 팝업의 안정적 surface ID와 입력 제스처 소유권은
+`src/app/terminal_clipboard_menu.zig`가 맡는다. 박스·행 그리기와 hit-test는 기존 공통
+`chrome/components/context_menu.zig`, OS 클립보드와 터미널 붙여넣기 보호는 플랫폼 호스트가 소유한다.
+Windows의 키보드·메뉴 복사와 보호된 붙여넣기 연결은
+`src/platform/windows/terminal/clipboard.zig`가 맡으며 `main.zig`는 이벤트와 렌더 연결만 담당한다.

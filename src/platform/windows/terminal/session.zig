@@ -20,6 +20,16 @@ pub const Session = struct {
         appearance: maru.config.appearance.ResolvedAppearance,
         cell_w: u32,
         cell_h: u32,
+
+        /// A settings edit changes future children, never an existing shell.
+        /// Refresh the launch snapshot together so clearing an override cannot
+        /// retain either the old executable or its arguments. Config strings
+        /// remain borrowed from the application-lifetime settings arena.
+        pub fn refreshShell(self: *SpawnOptions, shell: maru.config.theme.ShellConfig) void {
+            self.command = maru.pty.resolveShell(shell.command, maru.windowsShellKindOf(shell.windows_shell));
+            self.args = shell.args;
+            self.cfg.shell = shell;
+        }
     };
 
     pub fn label(self: *const Session) []const u8 {

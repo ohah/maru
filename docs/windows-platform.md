@@ -12850,3 +12850,10 @@ keyboard focus를 확인한 뒤 실제 한국어 IME에 scan code를 보낸다. 
 중복 확정/숫자 키 누출은 다른 이동량으로 검출된다. 창 활성화는 터미널 선택을 건드리지 않는
 캡션 클릭으로 한다. 이 검사는 설정 입력란 하나의 OS 경로이며 물리 입력·다른 입력 영역의 전체
 IME 검증을 대신하지 않는다.
+
+Windows 설정에서 셸을 바꾼 뒤 새 터미널을 만들 때, 시작 시의 `spawn_opts`가 계속 쓰이던 누락을
+수정한다. `SpawnOptions.refreshShell`은 기존 `pty.resolveShell` 계약(절대경로·존재 검사·기본 tier)을
+그대로 사용하고 명령·인자·shell config 미러를 함께 갱신한다. 설정 변경/미리보기 롤백이 통지되면
+다음 spawn용 옵션만 갱신하며 이미 실행 중인 자식과 셀/격자 크기는 바꾸지 않는다.
+`test-windows-shell-refresh`와 `tools/windows/check-settings-shell.py`가 이 경계를 검사한다.
+셸 인자 합성 행·GUI 항목별 리셋과 나머지 설정의 라이브 적용은 이 수정의 완료 범위에 포함하지 않는다.

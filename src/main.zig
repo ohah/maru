@@ -1934,6 +1934,81 @@ fn applyCoreConfig(
     });
 }
 
+fn shellRefreshOptions() !WinSession.SpawnOptions {
+    const cfg: maru.config.Config = .{};
+    return .{
+        .io = std.testing.io,
+        .command = "old-shell.exe",
+        .args = &.{"old-argument"},
+        .size = .{ .cols = 101, .rows = 37 },
+        .cfg = cfg,
+        .appearance = try maru.config.appearance.resolve(cfg),
+        .cell_w = 9,
+        .cell_h = 19,
+    };
+}
+
+test "Windows shell refresh explicit command wins over tier" {
+    var opts = try shellRefreshOptions();
+    var shell = opts.cfg.shell;
+    shell.command = maru.pty.resolveInteractiveShellFor(.cmd);
+    shell.windows_shell = .powershell;
+    opts.refreshShell(shell);
+    try std.testing.expectEqualStrings(shell.command, opts.command);
+    try std.testing.expectEqualStrings(shell.command, opts.cfg.shell.command);
+}
+
+test "Windows shell refresh removes old arguments" {
+    var opts = try shellRefreshOptions();
+    var shell = opts.cfg.shell;
+    shell.command = "cmd.exe";
+    shell.args = &.{};
+    opts.refreshShell(shell);
+    try std.testing.expectEqual(@as(usize, 0), opts.args.len);
+    try std.testing.expectEqual(@as(usize, 0), opts.cfg.shell.args.len);
+}
+
+test "Windows shell refresh preserves argument boundaries" {
+    var opts = try shellRefreshOptions();
+    var shell = opts.cfg.shell;
+    shell.args = &.{ "/Q", "argument with spaces", "한글", "" };
+    opts.refreshShell(shell);
+    try std.testing.expectEqual(@as(usize, 4), opts.args.len);
+    try std.testing.expectEqualStrings("/Q", opts.args[0]);
+    try std.testing.expectEqualStrings("argument with spaces", opts.args[1]);
+    try std.testing.expectEqualStrings("한글", opts.args[2]);
+    try std.testing.expectEqualStrings("", opts.args[3]);
+}
+
+test "Windows shell refresh clearing override restores tier" {
+    var opts = try shellRefreshOptions();
+    var shell = opts.cfg.shell;
+    shell.command = "old-custom.exe";
+    opts.refreshShell(shell);
+    shell.command = "";
+    shell.windows_shell = .cmd;
+    opts.refreshShell(shell);
+    try std.testing.expect(std.ascii.endsWithIgnoreCase(opts.command, "cmd.exe"));
+    try std.testing.expectEqualStrings("", opts.cfg.shell.command);
+    try std.testing.expectEqual(shell.windows_shell, opts.cfg.shell.windows_shell);
+}
+
+test "Windows shell refresh rollback preserves live session metrics" {
+    var opts = try shellRefreshOptions();
+    const previous = opts;
+    var shell = opts.cfg.shell;
+    shell.command = "preview.exe";
+    shell.args = &.{"preview-argument"};
+    opts.refreshShell(shell);
+    opts.refreshShell(previous.cfg.shell);
+    try std.testing.expect(!std.mem.eql(u8, opts.command, "preview.exe"));
+    try std.testing.expectEqual(@as(usize, 0), opts.args.len);
+    try std.testing.expectEqual(previous.size, opts.size);
+    try std.testing.expectEqual(previous.cell_w, opts.cell_w);
+    try std.testing.expectEqual(previous.cell_h, opts.cell_h);
+    try std.testing.expectEqual(previous.cfg.font.size, opts.cfg.font.size);
+}
+
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
 const smoke_spin_cap: usize = 1202;
@@ -11608,6 +11683,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (confirm_state.open or file_notice.open or choice_notice != null or file_close_waiting or initial_open.job != null) settings_host.cancelGestures();
         settings_host.tick();
         if (settings_host.changed) {
+            spawn_opts.refreshShell(cfg.shell);
             paste_protection = cfg.input.paste_protection;
             bracketed_paste_is_safe = cfg.input.bracketed_paste_is_safe;
             option_as_meta = cfg.input.option_as_meta;

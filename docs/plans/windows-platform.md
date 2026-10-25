@@ -799,3 +799,24 @@ Windows 설정 연결 검증: `test-windows-settings`는 값 검증과 사이드
 조합 없는 비교, 조합 중 바깥 클릭, 클릭·입력 단일 묶음, 실제 단축키 닫기, 조합 취소 후 단축키 닫기에서
 터미널은 의도한 공백 1바이트만 받았고 config는 바뀌지 않았다. 시험한 경로에서는 조합 글자 유출을 재현하지
 못했으므로 추가 취소 로직을 넣지 않았다. 다른 검색·파일 편집기·색 선택기 전환은 별도 검증 대상이다.
+
+### Windows 설정 런타임 연결 감사
+
+현재 Windows 진입점(`runWin32TerminalSmoke`)에서 확인한 범위다. 폼의 저장 성공만으로 전체 적용 완료를
+판정하지 않는다. 남은 적용 경로와 실제 앱 검증을 마친 뒤 최종 설치본을 교체한다.
+
+| 영역 | 현재 연결 | 남은 적용 경로 |
+| --- | --- | --- |
+| 붙여넣기 보호·bracketed-safe·option-as-meta·우클릭·단어 구분·OSC52 read | `settings_host.changed`에서 입력 정책과 clipboard host 갱신 | 최종 실제 앱 회귀; OSC52 read 요청의 미구현 처리와 구분 |
+| 폰트·셀 격자 | 시작 시 DirectWrite rasterizer와 renderer text config 생성 | rasterizer·글리프/atlas·레이아웃·PTY 크기를 일관되게 재생성 |
+| 테마·커서·ANSI 팔레트 | 시작 시 appearance, chrome tokens, cell colors와 clear color 생성 | core queue와 chrome/editor paint 캐시를 함께 갱신 |
+| scrollback·문자 폭 | 새 세션의 초기 core config에 포함 | 기존 세션의 reader 소유 queue에 전달하고 다음 spawn의 오래된 snapshot 제거 |
+| 셸 선택·명령·인자 | 설정 변경/롤백 통지에서 다음 spawn의 명령·인자·shell 미러 갱신 | 인자 합성 행·항목별 리셋은 후속; 기존 셸은 유지 |
+| 언어·사용자 단축키 | 설정 UI와 시작 시 resolver가 각각 존재 | 표시 문자열/캐시 갱신, 갱신된 resolver 적용과 충돌 정책 |
+| 외부 config 변경 | 현재 GUI 부분 쓰기만 연결 | 변경 감지·재로드·편집/저장 중 충돌과 실패 처리 |
+| 항목별 리셋·합성 행·플랫폼 기능 | 공용 scalar form 이후 작업 | OS 접미 쓰기/리셋 범위 결정, 팔레트·키바인딩·환경 등의 행과 지원 가능 여부 연결 |
+
+셸 갱신은 다섯 compiled runtime 변이와 복원 Debug/ReleaseFast 7개로 검사했다. 실제 격리 앱에서
+명령 지정·PowerShell 전환·없는 절대경로 폴백·앞뒤 공백·재전환의 다섯 경로가 통과했다.
+기존 자식 PID는 모두 유지됐고 셸 입력 0·config 주석/무관한 키 보존·native exit0을 확인했다.
+빈 text 저장은 공용 setter가 거부하므로 삭제/리셋 완료로 세지 않는다. OS 접미 쓰기 범위도 바꾸지 않았다.

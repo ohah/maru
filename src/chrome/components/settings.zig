@@ -988,6 +988,26 @@ pub fn searchFieldRect(state: *const State, sections: []const []const u8, rows: 
     return .{ .x = l.box.inner_x, .y = modal_box.rowY(l.box, 0), .w = @intCast(l.box.inner_cols * l.box.cw), .h = l.box.ch };
 }
 
+/// Inline editors have different painted prefixes (number padding, color swatch,
+/// palette index). Keep their IME anchor beside the same end caret as the view.
+pub fn editCaretRect(state: *const State, sections: []const []const u8, rows: []const FieldRow, p: props.ChromeProps, tk: *const tokens.Tokens) ?draw.Rect {
+    if (!state.open or !state.editing or state.picking or state.selected >= rows.len) return null;
+    const l = computeLayout(sections, rows, scrollRows(state, p), p, tk) orelse return null;
+    if (state.selected < l.win_start or state.selected >= l.win_start + l.win_len) return null;
+    const ctrl = fieldControlRect(l, state.selected - l.win_start);
+    const start: i32 = switch (rows[state.selected].kind) {
+        .number => ctrl.x + @as(i32, @intCast(l.box.cw)),
+        .text, .font => ctrl.x,
+        .color => color.hexX(ctrl, l.box.cw),
+        .palette_grid => |grid| paletteHexX(paletteGridRect(l, state.selected - l.win_start), l.box.cw) + @as(i32, @intCast((if (@min(grid.selected, palette_count - 1) < 10) @as(u32, 3) else @as(u32, 4)) * l.box.cw)),
+        else => return null,
+    };
+    return .{
+        .x = start + @as(i32, @intCast(overlay_input.displayCols(state.editText()) * l.box.cw)),
+        .y = ctrl.y, .w = l.box.cw, .h = l.box.ch,
+    };
+}
+
 /// 폼 목록의 스크롤 창과 그 뷰포트 rect(SV5c) — host가 스크롤바를 발행하는 데 쓴다.
 ///
 /// **컴포넌트가 막대를 그리지 않는다.** 모양·기하는 공용 경로(`chrome/ui/scroll_area.zig`)가 소유하고,

@@ -8321,6 +8321,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var last_wheel_cell: ?win32_mouse.Cell = null;
     var ime_caret_updates: usize = 0;
     var ime_settings_caret_updates: usize = 0;
+    var ime_settings_edit_caret_updates: usize = 0;
     var click_tracker: win32_mouse.ClickTracker = .{};
     // **사용자 설정을 OS 에 묻는다.** 값을 코드에 박으면 접근성 설정(느린 더블클릭·스크롤 줄 수)을
     // 무시하게 된다. 규칙은 순수 함수가 갖고 이 값들은 그 인자다(§2k, OS-as-parameter).
@@ -13467,6 +13468,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 last_ime_caret = caret;
                 ime_caret_updates += 1;
                 if (settings_caret != null) ime_settings_caret_updates += 1;
+                if (settings_caret != null and settings_host.form.state.editing) ime_settings_edit_caret_updates += 1;
             }
         }
 
@@ -16115,6 +16117,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     try stdout.print("app_actions={d} keys_ignored={d}\n", .{ app_actions, keys_ignored });
     try stdout.print("preedit_updates={d} failures={d} max_bytes={d} ime_caret_updates={d}\n", .{ preedit_updates, preedit_failures, preedit_max_bytes, ime_caret_updates });
     try stdout.print("ime_settings_caret_updates={d}\n", .{ime_settings_caret_updates});
+    try stdout.print("ime_settings_edit_caret_updates={d}\n", .{ime_settings_edit_caret_updates});
     try stdout.print("pastes={d} paste_bytes={d} bracketed={d} blocked={d} paste_errors={d}\n", .{ paste_out.pastes, paste_out.paste_bytes, paste_out.bracketed, paste_out.blocked, paste_out.errors });
     try stdout.print("window_focus_losses={d} retained_overlay_blurs={d} dismissed_overlay_blurs={d}\n", .{ window.focus_loss_serial, window.retained_overlay_blurs, window.dismissed_overlay_blurs });
     try stdout.print("settings_wheel_events={d} settings_scroll_moves={d} settings_scroll_peak={d}\n", .{ settings_host.wheel_events, settings_host.scroll_moves, settings_host.scroll_peak });

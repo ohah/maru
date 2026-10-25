@@ -5782,3 +5782,9 @@ paint-to-client coordinates, wide committed text, preedit/commit, and geometry c
 Five coordinate/metric/row mutations must fail at runtime; restored Debug and ReleaseFast must pass.
 `ime_settings_caret_updates` and the scroll app check observe request routing only,
 not physical keyboard input or an actual OS candidate window.
+
+Inline field caret coverage adds five Windows judges for number padding, text/font
+display width, color prefix, invalid ownership, and edit-over-search priority.
+`check-settings-scroll.py --inline-caret` additionally opens/cancels a filtered
+numeric edit and requires its IMM request counter. These are request-routing and
+paint geometry checks; inline preedit rendering and physical candidate evidence remain pending.

@@ -1994,7 +1994,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-windows-settings-wheel", "Verify settings wheel capture and fractional scrolling").dependOn(&run_settings_wheel_tests.step);
     const windows_settings_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings"} });
     const run_windows_settings_tests = b.addRunArtifact(windows_settings_tests);
-    run_windows_settings_tests.addArg("--maru-expect-tests=25"); // Six candidate, six wheel, five focus, five IME, concurrent writers and two root blocks.
+    run_windows_settings_tests.addArg("--maru-expect-tests=30"); // Six candidate, six wheel, five focus, ten IME, concurrent writers and two root blocks.
     b.step("test-windows-settings", "Verify Windows settings candidate validation").dependOn(&run_windows_settings_tests.step);
     const settings_form_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Settings form"} });
     const run_settings_form_tests = b.addRunArtifact(settings_form_tests);

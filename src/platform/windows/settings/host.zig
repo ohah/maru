@@ -207,14 +207,19 @@ pub const Host = struct {
         if (widget.scrollByRows(&self.form.state, f.sections, f.rows, props, tokens, lines)) self.scroll_moves += 1;
         self.scroll_peak = @max(self.scroll_peak, self.form.state.scroll.offset_y_px);
     }
-    /// Reuse the painted search caret geometry for IMM; a terminal cursor is
-    /// unrelated to the active modal input. Preedit starts at this same caret.
+    /// Reuse painted modal caret geometry for IMM; a terminal cursor is
+    /// unrelated to the active search or field editor.
     pub fn imeCaret(self: *Host, props: maru.chrome.props.ChromeProps, tokens: *const maru.chrome.Tokens) ?maru.session.mouse_coordinates.ImeCaret {
-        if (!self.form.state.open or !self.form.state.searching or self.form.state.picking) return null;
+        if (!self.form.state.open or (!self.form.state.searching and !self.form.state.editing) or self.form.state.picking) return null;
         var arena = std.heap.ArenaAllocator.init(self.a);
         defer arena.deinit();
         const f = self.form.frame(arena.allocator(), self.cfg.*) catch return null;
-        const rect = widget.searchCaretRect(&self.form.state, f.sections, f.rows, props, tokens) orelse return null;
+        // An inline edit can retain the filter query; keyboard handling gives
+        // the editor precedence, so IMM must do the same.
+        const rect = (if (self.form.state.editing)
+            widget.editCaretRect(&self.form.state, f.sections, f.rows, props, tokens)
+        else
+            widget.searchCaretRect(&self.form.state, f.sections, f.rows, props, tokens)) orelse return null;
         return .{
             .row = 0,
             .col = 0,
@@ -330,6 +335,66 @@ test "Windows settings and sidebar serialize partial config writes" {
 }
 
 const wheel_test_props: maru.chrome.props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 1000, .backing_height_px = 240 } };
+fn inlineCaretMatchesPaint(kind: widget.FieldRow.Kind) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tk = wheelTestTokens();
+    var state: widget.State = .{};
+    state.show();
+    state.enterEdit("a\xea\xb0\x80");
+    const rows = [_]widget.FieldRow{.{ .label = "value", .kind = kind }};
+    var ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
+    try widget.view(&state, &.{}, &rows, &.{}, wheel_test_props, &tk, a, &ops);
+    var painted: ?maru.chrome.draw.Rect = null;
+    for (ops.items) |op| if (op == .fill and op.fill.role == .cursor) { painted = op.fill.rect; };
+    try std.testing.expect(painted != null);
+    try std.testing.expectEqualDeep(painted.?, widget.editCaretRect(&state, &.{}, &rows, wheel_test_props, &tk).?);
+}
+test "Windows settings inline IME number matches padded painted caret" {
+    try inlineCaretMatchesPaint(.{ .number = .{ .value = 12, .min = 0, .max = 100 } });
+}
+test "Windows settings inline IME text matches wide painted caret" {
+    try inlineCaretMatchesPaint(.{ .text = "" });
+    try inlineCaretMatchesPaint(.{ .font = "" });
+}
+test "Windows settings inline IME color matches swatch prefix" {
+    try inlineCaretMatchesPaint(.{ .color = .{ .hex = "#000000", .rgb = .{ .r = 0, .g = 0, .b = 0 } } });
+}
+test "Windows settings inline IME rejects hidden and nonediting rows" {
+    const tk = wheelTestTokens();
+    var state: widget.State = .{};
+    const rows = [_]widget.FieldRow{.{ .label = "value", .kind = .{ .text = "" } }};
+    state.enterEdit("");
+    try std.testing.expect(widget.editCaretRect(&state, &.{}, &rows, wheel_test_props, &tk) == null);
+    state.show();
+    try std.testing.expect(widget.editCaretRect(&state, &.{}, &rows, wheel_test_props, &tk) == null);
+    state.enterEdit("");
+    state.selected = 20;
+    try std.testing.expect(widget.editCaretRect(&state, &.{}, &rows, wheel_test_props, &tk) == null);
+    state.selected = 0;
+    state.picking = true;
+    try std.testing.expect(widget.editCaretRect(&state, &.{}, &rows, wheel_test_props, &tk) == null);
+}
+test "Windows settings inline IME editor takes precedence over retained search" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(a, &cfg);
+    const tk = wheelTestTokens();
+    host.form.state.startSearch();
+    host.form.state.appendSearchCp('.');
+    const f = try host.form.frame(a, cfg);
+    for (f.rows, 0..) |row, i| if (row.kind == .number) { host.form.state.selected = i; break; } else continue;
+    widget.ensureSelectedVisible(&host.form.state, f.sections, f.rows, wheel_test_props, &tk);
+    host.form.state.enterEdit("12");
+    const rect = widget.editCaretRect(&host.form.state, f.sections, f.rows, wheel_test_props, &tk).?;
+    const anchor = host.imeCaret(wheel_test_props, &tk).?.anchor().?;
+    try std.testing.expectEqual(rect.x, anchor.top_left.x);
+    try std.testing.expectEqual(rect.y, anchor.top_left.y);
+}
+
 test "Windows settings IME respects closed and non-search owners" {
     var cfg: maru.config.Config = .{};
     var host: Host = .{ .a = std.testing.allocator, .config_arena = std.testing.allocator, .io = std.testing.io, .cfg = &cfg, .path = null };

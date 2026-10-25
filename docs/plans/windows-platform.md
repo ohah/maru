@@ -780,3 +780,5 @@ caption click 0·launcher toggle 8회·400px 도크 유지·grid mismatch 0·exi
 IME 후보창 기하 보정: 터미널 surface 원점과 셀 크기를 포함한 `session.mouse_coordinates.ImeCaret`를 IMM에 전달한다. 레이아웃만 바뀌어도 캐시를 갱신한다. 이 수학 검증은 실제 한국어 IME 후보창의 실기 검증을 대신하지 않으며, 검색·편집기 포커스별 후보 위치 검증은 후속으로 남는다.
 
 설정창 이식: 검색·섹션 표시 규칙을 `app.settings_model`로 이동하여 기존 macOS 호스트도 같은 구현을 사용한다. Windows 설정 화면의 입력·영속·라이브 적용 연결은 아직 진행 중이다.
+
+설정 폼 중간 단계: `app.settings_form`이 스키마 스칼라 행과 키 목록, 검색·섹션, 편집/드롭다운 요청을 만든다. `test-settings-form`으로 검증한다. 아직 Windows 이벤트·그리기 루프에 연결하지 않았으며, 영속·라이브 적용·합성 행(팔레트/키바인딩 등)과 항목별 기본값 리셋은 후속 연결 대상이다. 이 단계만으로 설정창 이식 완료로 계산하지 않는다.

@@ -121,6 +121,12 @@ def main():
         ):
             bad_text(label, log, raw.replace(old, new, 1))
         bad_text('nested-interval', log, raw.replace(first, re.sub(r'changed_ranges=\d+', 'changed_ranges=999999999999', first), 1))
+        if summary.load(root / 'setup-1.json').get('frame_schema', 1) == 2:
+            bad_text('legacy-fields-in-current-frame', log, raw.replace('bracketUpdate=', 'bracketRefresh='))
+            frame_line = next(line for line in raw.splitlines() if line.startswith('FRAME key=0 '))
+            bad_text('mixed-frame-records', log, raw + frame_line.replace('bracketUpdate=', 'bracketRefresh=') + '\n')
+            bad_text('provider-copy-path-not-counted', log, raw.replace('providerEdit_calls=2', 'providerEdit_calls=1', 1))
+            bad_text('bracket-update-not-counted', log, raw.replace('bracketUpdate_calls=2', 'bracketUpdate_calls=0', 1))
         on_edit = re.search(r'on_edit=(\d+)', first).group(1)
         bad_text('overlapping-exclusive-stages', log, raw.replace(first, re.sub(r'sticky_edit=\d+', 'sticky_edit=' + on_edit, first), 1))
         positive()
@@ -143,13 +149,22 @@ def main():
         bad_json('comparison-label-on-attribution', 'setup-1.json', lambda value: value.update(comparison_variant='cursor'))
         bad_json('incomplete-source-provenance', 'setup-1.json', lambda value: value['instrumented_sha256'].pop('src/syntax/tree_sitter.zig'))
         bad_json('boolean-mode', 'setup-1.json', lambda value: value.update(mode=True))
-        bad_json('unknown-provider-schema', 'setup-1.json', lambda value: value.update(provider_schema=3))
+        bad_json('unknown-provider-schema', 'setup-1.json', lambda value: value.update(provider_schema=999))
         bad_json('boolean-provider-schema', 'setup-1.json', lambda value: value.update(provider_schema=True))
         bad_json('unknown-provider-execution', 'setup-1.json', lambda value: value.update(provider_execution='unknown'))
-        if summary.load(root / 'setup-1.json').get('provider_schema') == 2:
+        bad_json('unknown-frame-schema', 'setup-1.json', lambda value: value.update(frame_schema=999))
+        bad_json('boolean-frame-schema', 'setup-1.json', lambda value: value.update(frame_schema=True))
+        if summary.load(root / 'setup-1.json').get('frame_schema', 1) == 2:
+            bad_json('legacy-frame-schema-with-current-fields', 'setup-1.json', lambda value: value.update(frame_schema=1))
+            bad_json('wrong-frame-bracket-operation', 'setup-1.json', lambda value: value.update(frame_bracket_operation='refresh'))
+            bad_json('missing-frame-call-coverage', 'setup-1.json', lambda value: value.pop('frame_call_stages'))
+        if summary.load(root / 'setup-1.json').get('provider_schema') in (2, 3):
             bad_text('wrong-adoption-count', log, raw.replace(first, re.sub(r'adopted_calls=\d+', 'adopted_calls=99', first), 1))
             bad_text('missing-adoption-count', log, raw.replace(first, re.sub(r' adopted_calls=\d+', '', first), 1))
             bad_json('legacy-schema-with-new-records', 'setup-1.json', lambda value: value.update(provider_schema=1))
+        if summary.load(root / 'setup-1.json').get('provider_schema') == 3:
+            bad_text('wrong-range-reuse-count', log, raw.replace(first, re.sub(r'range_reuses=\d+', 'range_reuses=99', first), 1))
+            bad_text('missing-range-reuse-count', log, raw.replace(first, re.sub(r' range_reuses=\d+', '', first), 1))
         path = root / 'inputs.json'
         bad_text('duplicate-json-field', path, path.read_text().replace('{', '{"flat-3000.zig":{},', 1))
         positive()
@@ -170,6 +185,11 @@ def main():
     if summary.summarize(original, args.repetitions) != before:
         raise RuntimeError('Original artifacts changed')
     receipt = dict(independent_hypotheses=5, rejected=results, positive_controls='before/after every group and original artifacts unchanged', tool_sha256={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest() for name in ('run.py', 'summarize.py', 'verify.py')})
+    # 공통 생산자와 구간 계약까지 묶어, 다른 도구로 얻은 근거를 같은 검증으로 설명하지 않는다.
+    for name in ('editor-frame-measure/contract.py', 'editor-frame-measure/run.py', 'editor-frame-measure/summarize.py',
+                 'editor-storage-measure/run.py', 'editor-storage-measure/summarize.py', 'editor-fold-points/run.py',
+                 'editor-fold-product/run.py', 'editor-fold-product/host.zig.inc'):
+        receipt['tool_sha256']['tools/' + name] = hashlib.sha256((Path(__file__).resolve().parents[1] / name).read_bytes()).hexdigest()
     if args.receipt:
         args.receipt.write_text(json.dumps(receipt, indent=2) + '\n')
     print(json.dumps(receipt, indent=2))

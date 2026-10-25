@@ -12,12 +12,11 @@ spec = importlib.util.spec_from_file_location('storage_measure', ROOT / 'tools/e
 storage = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(storage)
 base = storage.base
-STAGES = ('refreshViewAfterEditImpl', 'advanceSyntax', 'promoteFoldRangesToSyntax',
-          'rebuildVisible', 'syntaxColors', 'minimapSide', 'maxColsForRender',
-          'ensureLineCols', 'buildPaneOps', 'appendPaneFrame', 'ensureFoldRanges',
-          'installFoldRanges', 'foldSpansCached', 'syntaxEdit')
-
-SYNTAX_STAGES = ('bracketShift', 'providerEdit', 'foldCacheEdit', 'bracketRefresh', 'nativeParse')
+spec = importlib.util.spec_from_file_location('frame_contract', Path(__file__).with_name('contract.py'))
+contract = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(contract)
+STAGES = contract.STAGES
+SYNTAX_STAGES = contract.LEGACY_SYNTAX_STAGES
 
 def setup(repo, output, deps, mode):
     source = storage.setup(repo, output, deps, mode)
@@ -50,7 +49,7 @@ def setup(repo, output, deps, mode):
         end = text.index(end_anchor, begin) + len(end_anchor)
         text = text[:begin] + '    {\n        const frame_inner_start = frameProbeNow();\n' + f'        defer frame_probe_ns[{parse_slot}] += frameProbeNow() - frame_inner_start;\n' + text[begin:end] + '\n    }' + text[end:]
     text += f'\nvar frame_probe_ns: [{len(STAGES)}]i128 = @splat(0);\nfn frameProbeNow() i128 {{ return std.Io.Clock.awake.now(std.testing.io).nanoseconds; }}\n'
-    text = base.once(text, '        storage_view_ns = 0;\n        const start =', f'        storage_view_ns = 0;\n        frame_probe_ns = @splat(0);\n        syntax_color.frame_syntax_ns = @splat(0);\n        syntax_color.syntax.frame_parse_ns = 0;\n        const start =')
+    text = base.once(text, '        storage_view_ns = 0;\n        const start =', f'        storage_view_ns = 0;\n        frame_probe_ns = @splat(0);\n        syntax_color.frame_syntax_ns = @splat(0);\n        syntax_color.frame_syntax_calls = @splat(0);\n        syntax_color.syntax.frame_parse_ns = 0;\n        const start =')
     anchor = '''        if (std.mem.eql(u8, kind, "command")) {
             promoteFoldRangesToSyntax(s,term);
             _ = foldAll(s);
@@ -68,27 +67,44 @@ def setup(repo, output, deps, mode):
     std.debug.print("FRAME_WARM bracket_ready=1 views={d}\\n", .{@as(usize, if (peer != null) 2 else 1)});
 '''
     text = base.once(text, warm, warm_code + warm)
+    schema = 2 if '    var copied_brackets = false;' in (source / 'src/platform/macos/app_session/editor/syntax.zig').read_text() else 1
+    syntax_stages = contract.syntax_stages(schema)
     anchor = '        const live_doc = term.rt.editorDocument().opened.?;'
-    fields = ' '.join(f'{name}={{d}}' for name in STAGES + SYNTAX_STAGES)
+    fields = ' '.join(f'{name}={{d}}' for name in STAGES + syntax_stages)
     values = ', '.join(f'frame_probe_ns[{i}]' for i in range(len(STAGES)))
     values += ', ' + ', '.join(f'syntax_color.frame_syntax_ns[{i}]' for i in range(4)) + ', syntax_color.syntax.frame_parse_ns'
-    text = base.once(text, anchor, f'        std.debug.print("FRAME key={{d}} edit_ns={{d}} {fields}\\n", .{{i, frame_edit_ns, {values}}});\n' + anchor)
+    calls_marker = ('        std.debug.print("FRAME_CALLS key={d} providerEdit_calls={d} bracketUpdate_calls={d}\\n", .{i, syntax_color.frame_syntax_calls[1], syntax_color.frame_syntax_calls[3]});\n' if schema == 2 else '')
+    text = base.once(text, anchor, f'        std.debug.print("FRAME key={{d}} edit_ns={{d}} {fields}\\n", .{{i, frame_edit_ns, {values}}});\n' + calls_marker + anchor)
     p.write_text(text)
     p = source / 'src/platform/macos/app_session/editor/syntax.zig'
     syn = p.read_text()
-    syn += '\npub var frame_syntax_ns: [4]i128 = @splat(0);\nfn frameSyntaxNow() i128 { return std.Io.Clock.awake.now(std.testing.io).nanoseconds; }\n'
+    syn += '\npub var frame_syntax_ns: [4]i128 = @splat(0);\npub var frame_syntax_calls: [4]u64 = @splat(0);\nfn frameSyntaxNow() i128 { return std.Io.Clock.awake.now(std.testing.io).nanoseconds; }\n'
     calls = [
         '    self.brackets.shift(allocator, start, old_end, new_end);',
         '    p.onEdit(source, edit);',
         '    if (p.tree != null) self.folds.edit(edit) else self.folds.invalidate();',
         '    self.brackets.refresh(allocator, p, source, .{ .start = start, .end = new_end }) catch self.brackets.invalidate();',
     ]
-    if '    editProvider(p, source, edit, ready, trace);' in syn:
+    # helper 안의 native fallback만 감싸면 성공한 복사 시간을 빠뜨린다.
+    if '    editProvider(p, source, edit, parsed, trace);' in syn:
+        calls[1] = '    editProvider(p, source, edit, parsed, trace);'
+    elif '    editProvider(p, source, edit, ready, trace);' in syn:
         calls[1] = '    editProvider(p, source, edit, ready, trace);'
     elif '    editProvider(p, source, edit, ready);' in syn:
         calls[1] = '    editProvider(p, source, edit, ready);'
+    elif 'fn editProvider(' in syn:
+        raise RuntimeError('Unknown common provider edit invocation')
+    if schema == 2:
+        # 복사 성공과 기존 refresh 복귀를 같은 비중첩 구간으로 잰다.
+        begin = '    var copied_brackets = false;'
+        end = '    } else self.brackets.refresh(allocator, p, source, .{ .start = start, .end = new_end }) catch self.brackets.invalidate();'
+        if syn.count(begin) != 1 or syn.count(end) != 1:
+            raise RuntimeError('Ambiguous shared bracket update interval')
+        first = syn.index(begin)
+        last = syn.index(end, first) + len(end)
+        calls[3] = syn[first:last]
     for index, call in enumerate(calls):
-        syn = base.once(syn, call, f'    const frame_syntax_start_{index} = frameSyntaxNow();\n' + call + f'\n    frame_syntax_ns[{index}] += frameSyntaxNow() - frame_syntax_start_{index};')
+        syn = base.once(syn, call, f'    const frame_syntax_start_{index} = frameSyntaxNow();\n' + call + f'\n    frame_syntax_ns[{index}] += frameSyntaxNow() - frame_syntax_start_{index};\n    frame_syntax_calls[{index}] += 1;')
     p.write_text(syn)
     p = source / 'src/syntax/tree_sitter.zig'
     syn = p.read_text()
@@ -100,7 +116,10 @@ def setup(repo, output, deps, mode):
     info = json.loads(manifest.read_text())
     for name in ('src/platform/macos/app_session/editor/mod.zig', 'src/platform/macos/app_session/editor/syntax.zig', 'src/syntax/tree_sitter.zig'):
         info['instrumented_sha256'][name] = hashlib.sha256((source / name).read_bytes()).hexdigest()
-    info['frame_stages'] = STAGES + SYNTAX_STAGES
+    info['frame_schema'] = schema
+    info['frame_stages'] = STAGES + syntax_stages
+    info['frame_bracket_operation'] = 'copy-or-refresh' if schema == 2 else 'refresh'
+    info['frame_call_stages'] = ['providerEdit', 'bracketUpdate'] if schema == 2 else []
     info['frame_scope'] = 'Inclusive function times; nested stages must not be added'
     manifest.write_text(json.dumps(info, indent=2) + '\n')
     return source

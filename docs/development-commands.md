@@ -1,4 +1,11 @@
 # 개발 명령
+
+최신 편집 비용의 재측정은 [현재 메인 귀속 계획](plans/editor-current-frame-attribution.md)을 따른다.
+`python3 tools/editor-frame-measure/test_summary.py`와 `python3 tools/editor-storage-measure/test_summary.py`는
+구간 버전·혼합 기록·호출 누락·시간 포함과 기존 저장소 판정을 검사한다.
+`python3 tools/editor-provider-measure/summarize.py <자료 경로> --frame-details`는 두 workload의
+전체 근거와 정확성 대조를 검증한 뒤 첫 입력·전체 분포 및 프레임/저장소 표를 추가한다.
+
 - 접힘 범위 승격 내부 비용: [사본 준비·실행·집계·독립 손상 검증](../tools/editor-fold-promotion-measure/results.md). 후보 조회·범위 변환·설치와 그 안의 보이는 줄·마무리를 구분한다.
 - pane 구문 내부 비용: [사본 준비·실행·집계·독립 손상 검증](../tools/editor-pane-syntax-measure/results.md). 본문과 미니맵·고정 머리줄의 호출 범위를 구분한다.
 - pane 색/그리기 목록 비용: `python3 tools/editor-lowering-measure/run.py --output <새-외부-경로> --deps "$PWD/zig-pkg" --modes 1 --workloads typing,shared`. 별도 `--resume --run-only --prefix verify --verify-each-edit 1 --repetitions 1` 실행과 [계획/검증 범위](plans/editor-pane-lowering-attribution.md)를 따른다.

@@ -9,6 +9,8 @@ pub fn widthForPointer(x: i32, offset: i32, cell_width: u32) u32 {
 
 pub fn writeWidth(a: std.mem.Allocator, io: std.Io, path: []const u8, width: u32) !void {
     if (width < 120 or width > 480) return error.InvalidWidth;
+    maru.app.config_write_lock.lock(io);
+    defer maru.app.config_write_lock.unlock(io);
     const original = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited((1 << 20) + 1)) catch |err| switch (err) {
         error.FileNotFound => try a.dupe(u8, ""),
         else => return err,

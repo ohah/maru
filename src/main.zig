@@ -6,6 +6,7 @@ const ts = @import("syntax");
 const win_sidebar = @import("platform/windows/chrome/sidebar.zig");
 const win_dock = @import("platform/windows/chrome/dock.zig");
 const terminal_clipboard_menu = @import("app/terminal_clipboard_menu.zig");
+const windows_settings = @import("platform/windows/settings/host.zig");
 const win_clipboard_host = @import("platform/windows/terminal/clipboard.zig");
 const archive_reveal = if (builtin.os.tag == .windows) @import("platform/windows/agents/reveal.zig") else struct {};
 /// Shared archive worker; the facade keeps both hosts on one owner type.
@@ -52,6 +53,7 @@ const agent_surface = if (@import("builtin").os.tag == .windows) @import("platfo
 test {
     _ = terminal_clipboard_menu;
     _ = win_clipboard_host;
+    _ = windows_settings;
     // Cross-target tests must compile the native adapter as well as the common worker.
     if (comptime builtin.os.tag == .macos) _ = @import("platform/macos/file_tree_remote.zig").transport;
     _ = editor_document;
@@ -6810,7 +6812,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // 코어가 문자열 값을 arena 에서 **빌린다**. 먼저 해제하면 dangling 이다.
     var loaded = try maru.config.loader.loadDefault(io, allocator);
     defer loaded.deinit();
-    const cfg = loaded.config;
+    var cfg = loaded.config;
+    var settings_host = try windows_settings.Host.init(allocator, loaded.arena.allocator(), io, &cfg);
+    defer settings_host.deinit();
     // **hex 문자열을 여기서 파싱하지 않는다.** `appearance.resolve` 가 색 해석·대비 보정·기본값 폴백을
     // 소유한다(macOS 도 같은 함수를 쓴다). 실패하면 값이 잘못된 것이므로 **조용히 기본값으로 접지 않고**
     // 알린 뒤 빌트인으로 간다 — 키바인딩 검증과 같은 규율이다.
@@ -7323,6 +7327,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var confirm_state: maru.chrome.components.confirm.State = .{};
     var terminal_popup: terminal_clipboard_menu.Popup = .{};
     var terminal_popup_focus_serial: u64 = 0;
+    var settings_gear_pressed = false;
+    var settings_frame: ?maru.renderer.RenderFrame = null;
+    defer if (settings_frame) |*frame| frame.deinit(allocator);
     var terminal_popup_frame: ?maru.renderer.RenderFrame = null;
     defer if (terminal_popup_frame) |*frame| frame.deinit(allocator);
     var terminal_menu_actions: usize = 0;
@@ -8246,8 +8253,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var preedit_max_bytes: usize = 0;
     var paste_out: PasteOutcome = .{};
     // 붙여넣기 보호 설정 — **사용자 config 에서 온다**(W7.5).
-    const paste_protection = cfg.input.paste_protection;
-    const bracketed_paste_is_safe = cfg.input.bracketed_paste_is_safe;
+    var paste_protection = cfg.input.paste_protection;
+    var bracketed_paste_is_safe = cfg.input.bracketed_paste_is_safe;
     var osc52_writes: usize = 0;
     var osc52_reads: usize = 0;
     var osc52_reads_denied_unimplemented: usize = 0;
@@ -8289,9 +8296,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var selections_before_term_click: usize = 0;
     var dock_clicks_before_term_click: usize = 0;
     // Alt 를 meta 로 쓸지 — **사용자 config 에서 온다**. 기본 `true` 다(Alt+B/F 가 readline 단어 이동).
-    const option_as_meta = cfg.input.option_as_meta;
+    var option_as_meta = cfg.input.option_as_meta;
     // 우클릭 동작 — **사용자 config 에서 온다**(W7.5). 기본값은 `paste` 다(PuTTY/X11 식, 사용자 결정).
-    const right_click_action: maru.config.theme.RightClick = cfg.input.right_click;
+    var right_click_action: maru.config.theme.RightClick = cfg.input.right_click;
     var dragging = false;
     var last_motion_cell: ?win32_mouse.Cell = null;
     var wheel_acc: win32_mouse.WheelAccumulator = .{};
@@ -8322,12 +8329,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     const wheel_lines_per_notch = win32_mouse.systemWheelScrollLines();
     // 단어 구분자 — **사용자 config 에서 온다**(W7.5). 기본값은 빈 값이라 공백만 경계다(비공백 run
     // 전체를 선택한다). 문자열을 arena 에서 빌리므로 `loaded` 가 살아 있어야 한다.
-    const default_word_separators: []const u8 = cfg.input.word_separators;
+    var default_word_separators: []const u8 = cfg.input.word_separators;
     // OSC 52 읽기 정책 — **사용자 config 에서 온다**(W7.5). 기본값은 `deny` 다(원격 프로그램의 로컬
     // 클립보드 탈취를 막는 사용자 결정 — `config/theme.zig` `Osc52Config`).
-    const osc52_read_policy: maru.config.theme.Osc52Read = cfg.osc52.read;
+    var osc52_read_policy: maru.config.theme.Osc52Read = cfg.osc52.read;
     var clipboard_errors: usize = 0;
-    const clipboard_host: win_clipboard_host.Host = .{ .allocator = allocator, .io = io, .hwnd = window.hwnd, .app_window = &app_window, .runtime = &runtime, .stderr = stderr, .paste_protection = paste_protection, .bracketed_paste_is_safe = bracketed_paste_is_safe, .paste_out = &paste_out, .copies = &copies, .copy_bytes = &copy_bytes, .errors = &clipboard_errors };
+    var clipboard_host: win_clipboard_host.Host = .{ .allocator = allocator, .io = io, .hwnd = window.hwnd, .app_window = &app_window, .runtime = &runtime, .stderr = stderr, .paste_protection = paste_protection, .bracketed_paste_is_safe = bracketed_paste_is_safe, .paste_out = &paste_out, .copies = &copies, .copy_bytes = &copy_bytes, .errors = &clipboard_errors };
 
     var counts: win32_terminal.FrameCounts = .{};
     var frames: usize = 0;
@@ -11579,8 +11586,20 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.events.push(allocator, .{ .resized = .{ .width_px = client_w, .height_px = client_h } });
             dock_layout_pending = false;
         }
+        settings_host.tick();
+        if (settings_host.changed) {
+            paste_protection = cfg.input.paste_protection;
+            bracketed_paste_is_safe = cfg.input.bracketed_paste_is_safe;
+            option_as_meta = cfg.input.option_as_meta;
+            right_click_action = cfg.input.right_click;
+            default_word_separators = cfg.input.word_separators;
+            osc52_read_policy = cfg.osc52.read;
+            clipboard_host.paste_protection = paste_protection;
+            clipboard_host.bracketed_paste_is_safe = bracketed_paste_is_safe;
+            settings_host.changed = false;
+        }
         window.horizontal_resize_active = divider_drag != null or sidebar_resize_drag != null;
-        window.input_overlay_open = terminal_popup.state.open or terminal_popup.swallow_left_up;
+        window.input_overlay_open = settings_host.ownsInput() or terminal_popup.state.open or terminal_popup.swallow_left_up;
         const window_events = window.poll();
         if (window.focus_loss_serial != terminal_popup_focus_serial) {
             terminal_popup.cancelCapture();
@@ -11719,9 +11738,21 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     _ = maru.chrome.components.notice.handle(win32_keys.chromeKeyEvent(key_ev), &file_notice);
                     continue;
                 }
+                const settings_binding = resolver.resolveEditorDetailed(key_ev, false);
+                if (key_ev.event_type != .release and settings_binding == .app_action and settings_binding.app_action == .toggle_settings) {
+                    terminal_popup.dismiss();
+                    settings_host.toggle();
+                    window.input_overlay_open = settings_host.ownsInput();
+                    continue;
+                }
+                if (settings_host.form.state.open) {
+                    settings_host.key(key_ev);
+                    window.input_overlay_open = settings_host.ownsInput();
+                    continue;
+                }
                 if (terminal_popup.state.open) {
                     const popup_request = terminal_popup.key(win32_keys.chromeKeyEvent(key_ev), key_ev.event_type == .release, clipboard_host.current(active_view == .terminal));
-                    window.input_overlay_open = terminal_popup.state.open or terminal_popup.swallow_left_up;
+                    window.input_overlay_open = settings_host.ownsInput() or terminal_popup.state.open or terminal_popup.swallow_left_up;
                     if (popup_request) |request| {
                         terminal_menu_actions += @intFromBool(try clipboard_host.perform(request, active_view == .terminal));
                     }
@@ -11953,6 +11984,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // IME 조합 미리보기. **중립 계약에 그대로 넣는다** — `renderSnapshot()`이 합성해 주므로
             // Windows 가 미리보기 렌더를 따로 만들지 않는다(§2i).
             .preedit_changed => {
+                if (settings_host.form.state.open) {
+                    if (settings_host.form.state.searching) settings_host.form.state.setSearchPreedit(window.preeditText());
+                    continue;
+                }
                 if (terminal_popup.state.open or file_close_waiting or initial_open.job != null or file_notice.open or confirm_state.open) continue;
                 const text = window.preeditText();
                 // **조합은 포커스를 따라간다**(W8.15 잔여). 검색 줄에 치는 동안 미리보기가 터미널로
@@ -11987,6 +12022,20 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // **마우스는 중립 명령으로 번역만 한다**(§2k). 선택 코어 mutate 는 전부 `enqueueCoreCommand`
             // 로 리더 스레드에 위임한다 — 메인은 코어를 안 만진다.
             .mouse => |m| {
+                const settings_gear_release = m.kind == .left_up and settings_gear_pressed;
+                if (m.kind == .left_down or m.kind == .left_up or m.kind == .capture_lost) settings_gear_pressed = false;
+                if (settings_host.ownsInput() and !confirm_state.open and !file_notice.open and choice_notice == null) {
+                    if (m.kind == .capture_lost) {
+                        settings_host.swallow_left_up = false;
+                        settings_host.form.state.dragging = false;
+                    } else if (m.kind != .wheel and m.kind != .wheel_h) settings_host.pointer(.{
+                        .phase = switch (m.kind) { .moved => .move, .left_down, .right_down, .middle_down => .down, else => .up },
+                        .button = switch (m.kind) { .left_down, .left_up, .moved => .left, else => .other },
+                        .x_px = @floatFromInt(m.x_px), .y_px = @floatFromInt(m.y_px),
+                    }, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w, &chrome_tokens), &chrome_tokens);
+                    window.input_overlay_open = settings_host.ownsInput();
+                    continue;
+                }
                 terminal_popup.reconcile(clipboard_host.current(active_view == .terminal), confirm_state.open or file_notice.open or choice_notice != null or pending_save != null or file_close_waiting or initial_open.job != null or close_requested);
                 if (m.kind == .capture_lost) terminal_popup.cancelCapture();
                 if (terminal_popup.state.open or terminal_popup.swallow_left_up) {
@@ -12005,7 +12054,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         },
                         .x_px = @floatFromInt(m.x_px), .y_px = @floatFromInt(m.y_px),
                     }, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w, &chrome_tokens), clipboard_host.current(active_view == .terminal));
-                    window.input_overlay_open = terminal_popup.state.open or terminal_popup.swallow_left_up;
+                    window.input_overlay_open = settings_host.ownsInput() or terminal_popup.state.open or terminal_popup.swallow_left_up;
                     if (popup_result.request) |request| terminal_menu_actions += @intFromBool(try clipboard_host.perform(request, active_view == .terminal));
                     if (popup_result.consumed) continue;
                 }
@@ -12470,6 +12519,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         sidebar_redraws += 1;
                         rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                     }
+                    if (m.kind == .left_down and next_header == .view_options) settings_gear_pressed = true;
                     if (m.kind == .left_up) {
                         if (next_header) |r| {
                             sidebar_header_clicks += 1;
@@ -12498,6 +12548,12 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                                     sidebar_redraws += 1;
                                     rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, cell_w, cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
                                 }
+                                continue;
+                            }
+                            if (r == .view_options and settings_gear_release) {
+                                terminal_popup.dismiss();
+                                settings_host.toggle();
+                                window.input_overlay_open = settings_host.ownsInput();
                                 continue;
                             }
                             if (r == .new_workspace) queued_new_terms += 1;
@@ -14168,6 +14224,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 break :blk 0;
             };
             terminal_menu_cells_peak = @max(terminal_menu_cells_peak, popup_cells);
+        }
+        if (settings_host.form.state.open) {
+            var settings_arena = std.heap.ArenaAllocator.init(allocator);
+            defer settings_arena.deinit();
+            var settings_ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
+            const settings_props = confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w, &chrome_tokens);
+            settings_host.draw(settings_arena.allocator(), settings_props, &chrome_tokens, &settings_ops) catch {};
+            _ = appendModalOpsCells(allocator, &cells, settings_ops.items, settings_props, &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &settings_frame) catch 0;
         }
         confirm_cells_drawn = 0;
         if (confirm_state.open) {
@@ -16041,6 +16105,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     try stdout.print("app_actions={d} keys_ignored={d}\n", .{ app_actions, keys_ignored });
     try stdout.print("preedit_updates={d} failures={d} max_bytes={d} ime_caret_updates={d}\n", .{ preedit_updates, preedit_failures, preedit_max_bytes, ime_caret_updates });
     try stdout.print("pastes={d} paste_bytes={d} bracketed={d} blocked={d} paste_errors={d}\n", .{ paste_out.pastes, paste_out.paste_bytes, paste_out.bracketed, paste_out.blocked, paste_out.errors });
+    try stdout.print("settings_saves={d} settings_save_errors={d} settings_request_errors={d} settings_previews={d} settings_rollbacks={d}\n", .{ settings_host.saves, settings_host.save_errors, settings_host.request_errors, settings_host.previews, settings_host.rollbacks });
     try stdout.print("copies={d} copy_bytes={d} right_click_pastes={d} right_click_menus={d} menu_actions={d} menu_cells_peak={d} menu_draw_failures={d}\n", .{ copies, copy_bytes, right_click_pastes, terminal_menus_opened, terminal_menu_actions, terminal_menu_cells_peak, terminal_menu_draw_failures });
     // **갈래별로 센다.** 합치면 "이벤트는 왔는데 선택이 안 됐다"를 못 가른다.
     try stdout.print("mouse_events={d} reports={d} selections={d} selection_frames={d} extends={d} words={d} lines={d}\n", .{ mouse_events, mouse_reports, selections, selection_frames, extends, word_selections, line_selections });

@@ -1978,9 +1978,13 @@ pub fn build(b: *std.Build) void {
     const run_settings_edit_tests = b.addRunArtifact(settings_edit_tests);
     run_settings_edit_tests.addArg("--maru-expect-tests=5");
     b.step("test-settings-edit", "Verify settings edit identity and rollback ownership").dependOn(&run_settings_edit_tests.step);
+    const windows_settings_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings"} });
+    const run_windows_settings_tests = b.addRunArtifact(windows_settings_tests);
+    run_windows_settings_tests.addArg("--maru-expect-tests=9"); // Six candidate judges, concurrent config writers and two root aggregation blocks.
+    b.step("test-windows-settings", "Verify Windows settings candidate validation").dependOn(&run_windows_settings_tests.step);
     const settings_form_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Settings form"} });
     const run_settings_form_tests = b.addRunArtifact(settings_form_tests);
-    run_settings_form_tests.addArg("--maru-expect-tests=33"); // Five form judges and 28 anonymous aggregation blocks.
+    run_settings_form_tests.addArg("--maru-expect-tests=34"); // Six form judges and 28 anonymous aggregation blocks.
     b.step("test-settings-form", "Verify schema settings rows and edit requests").dependOn(&run_settings_form_tests.step);
     const settings_model_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Settings model"} });
     const run_settings_model_tests = b.addRunArtifact(settings_model_tests);

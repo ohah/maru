@@ -12028,7 +12028,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     if (m.kind == .capture_lost) {
                         settings_host.swallow_left_up = false;
                         settings_host.form.state.dragging = false;
-                    } else if (m.kind != .wheel and m.kind != .wheel_h) settings_host.pointer(.{
+                    } else if (m.kind == .wheel or m.kind == .wheel_h) {
+                        settings_host.wheel(m.wheel_delta, wheel_lines_per_notch, m.kind == .wheel_h, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w, &chrome_tokens), &chrome_tokens);
+                    } else settings_host.pointer(.{
                         .phase = switch (m.kind) { .moved => .move, .left_down, .right_down, .middle_down => .down, else => .up },
                         .button = switch (m.kind) { .left_down, .left_up, .moved => .left, else => .other },
                         .x_px = @floatFromInt(m.x_px), .y_px = @floatFromInt(m.y_px),
@@ -16105,6 +16107,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     try stdout.print("app_actions={d} keys_ignored={d}\n", .{ app_actions, keys_ignored });
     try stdout.print("preedit_updates={d} failures={d} max_bytes={d} ime_caret_updates={d}\n", .{ preedit_updates, preedit_failures, preedit_max_bytes, ime_caret_updates });
     try stdout.print("pastes={d} paste_bytes={d} bracketed={d} blocked={d} paste_errors={d}\n", .{ paste_out.pastes, paste_out.paste_bytes, paste_out.bracketed, paste_out.blocked, paste_out.errors });
+    try stdout.print("settings_wheel_events={d} settings_scroll_moves={d} settings_scroll_peak={d}\n", .{ settings_host.wheel_events, settings_host.scroll_moves, settings_host.scroll_peak });
     try stdout.print("settings_saves={d} settings_save_errors={d} settings_request_errors={d} settings_previews={d} settings_rollbacks={d}\n", .{ settings_host.saves, settings_host.save_errors, settings_host.request_errors, settings_host.previews, settings_host.rollbacks });
     try stdout.print("copies={d} copy_bytes={d} right_click_pastes={d} right_click_menus={d} menu_actions={d} menu_cells_peak={d} menu_draw_failures={d}\n", .{ copies, copy_bytes, right_click_pastes, terminal_menus_opened, terminal_menu_actions, terminal_menu_cells_peak, terminal_menu_draw_failures });
     // **갈래별로 센다.** 합치면 "이벤트는 왔는데 선택이 안 됐다"를 못 가른다.

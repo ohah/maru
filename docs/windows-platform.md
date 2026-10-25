@@ -12777,8 +12777,17 @@ zero bytes; the corrected app must pass the same visible-word clipboard check.
 저장 실패는 편집을 유지한다. 사이드바 저장과의 프로세스 내부 경쟁은 공통 쓰기 잠금으로
 직렬화한다. 외부 작성자와의 경쟁까지 보장한다는 뜻은 아니다.
 
-`test-windows-settings` 9개는 집계 2·값 검증 6·동시 부분 쓰기 1개다.
+`test-windows-settings` 15개는 집계 2·값 검증 6·휠 6·동시 부분 쓰기 1개다.
 `tools/windows/check-settings.py`는 소유 PID/HWND와 바이너리 해시를 확인한 격리 앱에서 실행한다.
 설정 저장·실패 복구·취소·입력 소유권을 확인하며 실제 물리 키보드나 IME 후보창 검증을 대신하지 않는다.
 현재 라이브 연결은 일부 입력 정책과 OSC52 읽기 정책이다. 폰트·색상·언어 등 전체 런타임 적용,
-외부 변경 reload, 기본값/합성 행, 스크롤과 포커스·IME는 아직 완료되지 않았다.
+외부 변경 reload, 기본값/합성 행, 스크롤바 표시·드래그와 포커스·IME는 아직 완료되지 않았다.
+
+Windows 설정의 세로 휠은 공통 `settings.scrollByRows`로 전달한다. 120-unit 눈금의 나머지는
+`session.input_math.WheelAccumulator`가 보존하며 Win32 어댑터도 같은 수학을 재사용한다.
+가로 축은 세로 누적에 섞지 않고 자식 드롭다운·색 선택기·저장 중에는 배경 폼을 움직이지 않는다.
+검색·섹션 전환은 누적값·스크롤 위치·선택 추적을 함께 초기화한다. 첫 draw 전에 들어온 휠도
+다음 draw의 선택 추적에 의해 취소되지 않는다. 큰 델타와 줄 수 계산은 넓은 정수에서 포화한다.
+`test-windows-settings-wheel`은 집계 2와 동작 6개, `test-windows-wheel-detents`는 기존 어댑터
+동작 2개와 집계 28개를 확인한다. `tools/windows/check-settings-scroll.py`는 실제 폼의 픽셀
+이동·축 분리·다시 열기·검색 변경을 검사하며 두 이전 바이너리의 실패 모드도 분리해 기록한다.

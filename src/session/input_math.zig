@@ -186,3 +186,35 @@ test "pageScrollDelta: scroll mode + main screen scrolls; passthrough/alt sends 
     try std.testing.expectEqual(@as(i32, 0), pageScrollDelta(true, false, .home));
     try std.testing.expectEqual(@as(i32, 0), pageScrollDelta(true, false, .{ .char = 'a' }));
 }
+
+/// Normalized 120-unit wheel detents. Wide intermediates preserve fractional
+/// input without overflowing on extreme native event or accessibility values.
+pub const WheelAccumulator = struct {
+    remainder: i32 = 0,
+
+    /// 이번 메시지의 `delta`를 넣고 **완성된 눈금 수**를 받는다. 남은 것은 다음 호출로 넘어간다.
+    ///
+    /// **줄 수가 아니라 눈금을 돌려준다.** 둘은 쓰임이 다르다 — 마우스 리포팅은 xterm 규약상 **눈금당
+    /// 한 번**이고, 사용자 설정(`SPI_GETWHEELSCROLLLINES`)은 **로컬 스크롤백**이 한 눈금에 몇 줄을 움직일지
+    /// 정하는 값이다. 여기서 미리 곱해 버리면 리포팅 쪽이 그 배수만큼 부풀어 TUI 가 한 번 굴림에 열 칸씩
+    /// 튄다(이 기계 설정이 10 이다).
+    pub fn feed(self: *WheelAccumulator, delta: i32) i32 {
+        const total = @as(i64, self.remainder) + delta;
+        const notches = @divTrunc(total, 120);
+        self.remainder = @intCast(total - notches * 120);
+        return @intCast(notches);
+    }
+
+    /// 눈금 수를 **로컬 스크롤백**의 줄 수로 바꾼다. 0이면 사용자가 "스크롤 안 함"으로 둔 것이라 0줄이다
+    /// (그 설정을 우리가 뒤집지 않는다). 리포팅에는 쓰지 않는다.
+    pub fn linesForNotches(notches: i32, lines_per_notch: u32) i32 {
+        if (lines_per_notch == 0) return 0;
+        const lines = @as(i64, notches) * @min(lines_per_notch, 255);
+        return @intCast(std.math.clamp(lines, std.math.minInt(i32), std.math.maxInt(i32)));
+    }
+
+    /// 방향이 바뀌거나 포커스를 잃으면 누적을 버린다 — 반대로 굴린 나머지가 남아 다음 스크롤을 갉는다.
+    pub fn reset(self: *WheelAccumulator) void {
+        self.remainder = 0;
+    }
+};

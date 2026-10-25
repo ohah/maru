@@ -79,6 +79,10 @@ pub const Host = struct {
     request_errors: usize = 0,
     previews: usize = 0,
     rollbacks: usize = 0,
+    wheel_acc: maru.session.input_math.WheelAccumulator = .{},
+    wheel_events: usize = 0,
+    scroll_moves: usize = 0,
+    scroll_peak: u32 = 0,
     swallow_left_up: bool = false,
     pub fn init(a: std.mem.Allocator, config_arena: std.mem.Allocator, io: std.Io, cfg: *maru.config.Config) !Host {
         return .{ .a = a, .config_arena = config_arena, .io = io, .cfg = cfg, .path = try maru.config.loader.defaultConfigPath(a) };
@@ -95,6 +99,7 @@ pub const Host = struct {
     }
     pub fn toggle(self: *Host) void {
         if (self.job != null) return;
+        self.wheel_acc.reset();
         if (self.form.state.open) {
             if (self.form.edit.rollback()) |request| {
                 if (candidate(self.config_arena, self.cfg.*, request)) |cfg| {
@@ -148,6 +153,7 @@ pub const Host = struct {
         defer arena.deinit();
         const f = self.form.frame(arena.allocator(), self.cfg.*) catch return;
         const intent = widget.handle(maru.app.chrome_key.chromeKeyEvent(event), &self.form.state);
+        self.updateScrollContext(intent);
         const result = self.form.action(arena.allocator(), self.cfg.*, f, intent) catch {
             self.form.state.setMessage(maru.i18n.t(.app_save_failed));
             return;
@@ -167,12 +173,39 @@ pub const Host = struct {
         defer arena.deinit();
         const f = self.form.frame(arena.allocator(), self.cfg.*) catch return;
         const intent = widget.handlePointer(event, f.sections, f.rows, f.dropdown, props, tokens, &self.form.state);
+        self.updateScrollContext(intent);
         if (!self.form.state.open and event.phase == .down) self.swallow_left_up = true;
         const result = self.form.action(arena.allocator(), self.cfg.*, f, intent) catch return;
         self.apply(result) catch {
             self.request_errors += 1;
             self.form.state.setMessage(maru.i18n.t(.app_save_failed));
         };
+    }
+    fn updateScrollContext(self: *Host, intent: widget.Action) void {
+        if (intent == .search_changed or intent == .section_changed) {
+            self.wheel_acc.reset();
+            self.form.state.scroll = .{};
+            self.form.state.followed_selected = null;
+        } else if (intent == .close) self.wheel_acc.reset();
+    }
+    pub fn wheel(self: *Host, delta: i32, lines_per_notch: u32, horizontal: bool, props: maru.chrome.props.ChromeProps, tokens: *const maru.chrome.Tokens) void {
+        self.wheel_events += 1;
+        if (horizontal) return;
+        if (self.job != null or !self.form.state.open or self.form.state.dropdown.open or self.form.state.picking or lines_per_notch == 0 or props.metrics.cell_height_px == 0 or props.metrics.cell_width_px == 0) {
+            self.wheel_acc.reset();
+            return;
+        }
+        const notches = self.wheel_acc.feed(delta);
+        if (notches == 0) return;
+        const lines = maru.session.input_math.WheelAccumulator.linesForNotches(notches, lines_per_notch);
+        var arena = std.heap.ArenaAllocator.init(self.a);
+        defer arena.deinit();
+        const f = self.form.frame(arena.allocator(), self.cfg.*) catch return;
+        // Establish selection following before the first wheel event. Otherwise
+        // the first draw would undo scrolling that arrived before that draw.
+        widget.ensureSelectedVisible(&self.form.state, f.sections, f.rows, props, tokens);
+        if (widget.scrollByRows(&self.form.state, f.sections, f.rows, props, tokens, lines)) self.scroll_moves += 1;
+        self.scroll_peak = @max(self.scroll_peak, self.form.state.scroll.offset_y_px);
     }
     pub fn draw(self: *Host, a: std.mem.Allocator, props: maru.chrome.props.ChromeProps, tokens: *const maru.chrome.Tokens, ops: *std.ArrayList(maru.chrome.draw.Op)) !void {
         const f = try self.form.frame(a, self.cfg.*);
@@ -277,4 +310,120 @@ test "Windows settings and sidebar serialize partial config writes" {
         try std.testing.expect(!parsed.config.input.paste_protection);
         try std.testing.expect(std.mem.indexOf(u8, bytes, "# keep comment") != null and std.mem.indexOf(u8, bytes, "future.key = keep") != null);
     }
+}
+
+const wheel_test_props: maru.chrome.props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 1000, .backing_height_px = 240 } };
+fn wheelTestTokens() maru.chrome.Tokens {
+    return .{ .palette = std.EnumArray(maru.chrome.tokens.ColorRole, maru.color.Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+}
+fn wheelTestHost(a: std.mem.Allocator, cfg: *maru.config.Config) !Host {
+    var host: Host = .{ .a = a, .config_arena = a, .io = std.testing.io, .cfg = cfg, .path = null };
+    host.form.state.show();
+    const f = try host.form.frame(a, cfg.*);
+    for (f.sections, 0..) |section, i| if (std.mem.eql(u8, section, maru.app.settings_model.settingsSectionLabel(.theme))) {
+        host.form.state.section = i;
+        break;
+    };
+    return host;
+}
+test "Windows settings wheel preserves fractional events and first draw" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(arena.allocator(), &cfg);
+    const tk = wheelTestTokens();
+    host.wheel(-40, 3, false, wheel_test_props, &tk);
+    host.wheel(-40, 3, false, wheel_test_props, &tk);
+    try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
+    host.wheel(-40, 3, false, wheel_test_props, &tk);
+    const offset = host.form.state.scroll.offset_y_px;
+    try std.testing.expect(offset > 0);
+    var ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
+    try host.draw(arena.allocator(), wheel_test_props, &tk, &ops);
+    try std.testing.expectEqual(offset, host.form.state.scroll.offset_y_px);
+}
+test "Windows settings wheel horizontal input cannot complete vertical residue" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(arena.allocator(), &cfg);
+    const tk = wheelTestTokens();
+    host.wheel(-40, 3, false, wheel_test_props, &tk);
+    host.wheel(-80, 3, true, wheel_test_props, &tk);
+    try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
+    host.wheel(-80, 3, false, wheel_test_props, &tk);
+    try std.testing.expect(host.form.state.scroll.offset_y_px > 0);
+}
+test "Windows settings wheel respects child modal and pending write ownership" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(arena.allocator(), &cfg);
+    const tk = wheelTestTokens();
+    host.form.state.dropdown.open = true;
+    host.wheel(-120, 3, false, wheel_test_props, &tk);
+    try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
+    host.form.state.dropdown.open = false;
+    host.form.state.picking = true;
+    host.wheel(-120, 3, false, wheel_test_props, &tk);
+    try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
+    host.form.state.picking = false;
+    var job: Job = .{ .io = std.testing.io, .path = "", .cfg = cfg, .request = try testRequest("font.size", "14") };
+    host.job = &job;
+    host.wheel(-120, 3, false, wheel_test_props, &tk);
+    try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
+    host.job = null;
+    host.form.state.hide();
+    host.wheel(-120, 3, false, wheel_test_props, &tk);
+    try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
+}
+test "Windows settings wheel disabled policy discards old residue" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(arena.allocator(), &cfg);
+    const tk = wheelTestTokens();
+    host.wheel(-60, 3, false, wheel_test_props, &tk);
+    host.wheel(-60, 0, false, wheel_test_props, &tk);
+    host.wheel(-60, 3, false, wheel_test_props, &tk);
+    try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
+    host.wheel(-60, 3, false, wheel_test_props, &tk);
+    try std.testing.expect(host.form.state.scroll.offset_y_px > 0);
+}
+test "Windows settings wheel wide values clamp at viewport bounds" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(arena.allocator(), &cfg);
+    const tk = wheelTestTokens();
+    var acc: maru.session.input_math.WheelAccumulator = .{};
+    _ = acc.feed(std.math.maxInt(i32));
+    const positive = acc.feed(std.math.maxInt(i32));
+    try std.testing.expectEqual(@as(i32, 2147483647), maru.session.input_math.WheelAccumulator.linesForNotches(positive, std.math.maxInt(u32)));
+    host.wheel(std.math.minInt(i32), std.math.maxInt(u32), false, wheel_test_props, &tk);
+    try std.testing.expect(host.form.state.scroll.offset_y_px > 0);
+    host.wheel(std.math.maxInt(i32), std.math.maxInt(u32), false, wheel_test_props, &tk);
+    try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
+}
+
+test "Windows settings wheel resets on search and section changes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(arena.allocator(), &cfg);
+    const tk = wheelTestTokens();
+    host.wheel(-120, 3, false, wheel_test_props, &tk);
+    try std.testing.expect(host.form.state.scroll.offset_y_px > 0);
+    host.key(.{ .key = .{ .char = '/' } });
+    try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
+    host.key(.{ .key = .{ .char = '.' } });
+    host.wheel(-120, 3, false, wheel_test_props, &tk);
+    try std.testing.expect(host.form.state.scroll.offset_y_px > 0);
+    host.key(.{ .key = .escape });
+    try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
+    host.wheel(-120, 3, false, wheel_test_props, &tk);
+    try std.testing.expect(host.form.state.scroll.offset_y_px > 0);
+    host.key(.{ .key = .arrow_left });
+    host.key(.{ .key = .arrow_up });
+    try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
 }

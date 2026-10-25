@@ -1972,9 +1972,19 @@ pub fn build(b: *std.Build) void {
     const run_settings_edit_tests = b.addRunArtifact(settings_edit_tests);
     run_settings_edit_tests.addArg("--maru-expect-tests=5");
     b.step("test-settings-edit", "Verify settings edit identity and rollback ownership").dependOn(&run_settings_edit_tests.step);
+    if (target.result.os.tag == .windows) {
+        const detent_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{ "WheelAccumulator:", "linesForNotches:" } });
+        const run_detent_tests = b.addRunArtifact(detent_tests);
+        run_detent_tests.addArg("--maru-expect-tests=30"); // Two legacy adapter judges and 28 aggregation blocks.
+        b.step("test-windows-wheel-detents", "Verify existing wheel adapter contracts after sharing arithmetic").dependOn(&run_detent_tests.step);
+    }
+    const settings_wheel_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings wheel"} });
+    const run_settings_wheel_tests = b.addRunArtifact(settings_wheel_tests);
+    run_settings_wheel_tests.addArg("--maru-expect-tests=8"); // Six wheel judges and two root aggregation blocks.
+    b.step("test-windows-settings-wheel", "Verify settings wheel capture and fractional scrolling").dependOn(&run_settings_wheel_tests.step);
     const windows_settings_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings"} });
     const run_windows_settings_tests = b.addRunArtifact(windows_settings_tests);
-    run_windows_settings_tests.addArg("--maru-expect-tests=9"); // Six candidate judges, concurrent config writers and two root aggregation blocks.
+    run_windows_settings_tests.addArg("--maru-expect-tests=15"); // Six candidate, six wheel, concurrent writers and two root aggregation blocks.
     b.step("test-windows-settings", "Verify Windows settings candidate validation").dependOn(&run_windows_settings_tests.step);
     const settings_form_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Settings form"} });
     const run_settings_form_tests = b.addRunArtifact(settings_form_tests);

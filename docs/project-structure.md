@@ -780,3 +780,5 @@ Windows의 키보드·메뉴 복사와 보호된 붙여넣기 연결은
 `src/app/settings/form.zig`는 스키마 스칼라 행·설정 키의 프레임 스냅샷과 위젯 액션을 편집 요청으로 바꾸는 컨트롤러를 소유한다. 프레임이 바뀌어도 원래 키를 유지하며, 네이티브 저장 성공 응답이 와야 편집을 완료한다.
 
 `src/platform/windows/settings/host.zig`는 Windows 설정 입력·그리기 어댑터와 비동기 부분 저장을 소유한다. `src/app/config/write_lock.zig`는 같은 프로세스의 설정 작성자가 read/patch/replace를 서로 덮지 않도록 직렬화한다.
+
+`session.input_math.WheelAccumulator`는 정밀 휠 나머지와 눈금→줄 변환의 공통 수학을 소유하고 Win32 어댑터는 이를 재출력한다. Windows 설정 호스트는 축·모달 소유권과 공통 설정 스크롤 API의 연결만 소유한다.

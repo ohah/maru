@@ -859,3 +859,15 @@ builder 사용을 검사한다. 초기화 실패 누수·작업 버퍼 소실·b
 첫 단계의 최종 앱은 설정 실앱 회귀 13개·정상 native 종료·셸 입력 격리를 통과했고 실제 캡처에서도
 터미널·사이드바·설정 글자가 표시됐다. 다섯 변이와 복원 native 7개(Debug/ReleaseFast), 일반 빌드와
 cross-target 컴파일을 확인했다. 다음 단계의 atlas/cache·grid 게시와 폰트 설정 적용은 여전히 남아 있다.
+
+두 번째 단계의 CPU renderer/font identity/atlas와 GPU CellPipeline 준비는
+`terminal/renderer_resources.zig`로 묶어 시작 경로에 연결한다. 프레임 루프는 소유자의 안정된 state 필드를
+참조한다. 별도 세대의 registry/texture, 정상/실패 준비 후 기존 세대 사용, 이전 세대 해제 뒤 새 GPU 사용,
+비정사각 아틀라스 치수, 자연 글리프 폭과 advance 구분 및 메트릭 범위를 native 검사로 확인한다.
+GPU API 생성 거부와 allocator 실패도 구분한다. 남은 두 번째 단계는 모든 cached draw list를 새 아틀라스에
+맞춰 준비하는 것이다. 그 뒤 세 번째 단계에서 font/layout/core/PTY를 함께 게시해야 실제 설정 적용이 된다.
+
+CPU/GPU 준비 단위를 사용한 최종 앱에서 설정 회귀 13개와 정상 종료·셸 입력 격리를 확인했다. 캡처에는
+터미널·사이드바·도크·복사/붙여넣기 메뉴의 글자가 유지됐다. 다섯 변이를 최종 소스에서 검출했고 복원
+native 7개(Debug/ReleaseFast), 일반 빌드와 cross-target 컴파일을 확인했다. 라이브 게시나 GPU 픽셀
+readback 완료로 계산하지 않는다.

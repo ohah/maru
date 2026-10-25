@@ -1994,6 +1994,10 @@ pub fn build(b: *std.Build) void {
     const run_text_resource_tests = b.addRunArtifact(text_resource_tests);
     run_text_resource_tests.addArg("--maru-expect-tests=7");
     b.step("test-windows-text-resources", "Verify native font resource staging and failure ownership").dependOn(&run_text_resource_tests.step);
+    const renderer_resource_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows renderer resources"} });
+    const run_renderer_resource_tests = b.addRunArtifact(renderer_resource_tests);
+    run_renderer_resource_tests.addArg("--maru-expect-tests=7");
+    b.step("test-windows-renderer-resources", "Verify CPU font identity and GPU atlas preparation ownership").dependOn(&run_renderer_resource_tests.step);
     const settings_text_path_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings text paths"} });
     const run_settings_text_path_tests = b.addRunArtifact(settings_text_path_tests);
     run_settings_text_path_tests.addArg("--maru-expect-tests=7"); // Five text boundary judges and two root blocks.

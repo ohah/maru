@@ -12877,3 +12877,9 @@ Windows 터미널의 기본 폰트 자원은 `terminal/text_resources.zig`가 Di
 scratch를 함께 소유한다. 생성 중 scratch 할당에 실패하면 새 rasterizer도 해제하며, 준비는 기존 자원을
 수정하지 않는다. builder는 해당 heap 자원을 빌린다. 라이브 변경은 renderer/font identity/atlas·캐시와
 기하를 함께 준비한 뒤 게시해야 하므로 이 소유자만 교체해서는 안 된다. 현재 연결은 시작 경로까지다.
+
+`terminal/renderer_resources.zig`는 CPU RendererState의 font identity/atlas와 GPU CellPipeline을 함께
+준비하고 해제한다. 디바이스와 context는 Present에서 빌리며 소유자가 직접 해제하지 않는다. 명시적 셀
+메트릭을 좁은 타입으로 바꾸기 전에 검증하고 자연 글리프 폭을 grid advance와 별도로 유지한다. 시작 경로의
+frame loop는 소유자의 state 필드를 참조한다. 새 세대를 게시하기 전에는 기존 아틀라스를 참조하는
+sidebar/dock/status/editor draw list도 재생성해야 하며, 이 준비만으로 live font 적용 완료를 뜻하지 않는다.

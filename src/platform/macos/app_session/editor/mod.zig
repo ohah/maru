@@ -70772,3 +70772,98 @@ test "SMT3 semantic recovery strict EOF, refresh and stalled response retry" {
     try testing.expect(st.waiting); // late old reply does not release the new wait
     try testing.expect(f.applied(3));
 }
+
+test "shared origin snapshot 기존 계보가 있는 분할 첫 입력" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const source = try undoFixture(&fx, a, "split-origin.zig", shared_snapshot_text);
+    const original_pane = pane_ops.activePane(fx.session);
+    const original_index = std.mem.indexOfScalar(*Term, original_pane.terms.items, source).?;
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, source, " "));
+    try testing.expect(source.rt.editor_syntax.origin_state.?.current != null);
+    const peer = try pane_ops.splitSharedEditorPane(fx.session, .horizontal, false);
+    fx.leaf_rect.w /= 2;
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(peer.rt.editor_syntax.origin_state != null);
+    try testing.expect(source.rt.editor_syntax.provider.?.parser != peer.rt.editor_syntax.provider.?.parser);
+    const before = sharedOriginCounts(source, peer);
+    try sharedOriginInput(&fx, source, peer, source, 1);
+    const after = sharedOriginCounts(source, peer);
+    std.debug.print("SPLIT_ORIGIN calculated={d} reused={d} source_proof=1 peer_proof_before=1\n", .{ after.calculated - before.calculated, after.reused - before.reused });
+    // 전달한 값에 원본 뷰의 컨테이너나 parser 수명이 섞이지 않아야 한다.
+    fx.term = peer;
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, original_pane, original_index);
+    const lease = peer.rt.editor_document_lease.?;
+    try testing.expectEqual(@as(usize, 1), lease.owner.viewCount(lease).?);
+    try testing.expect(insertText(fx.session, peer, " "));
+    try foldMarksReady(&fx, peer);
+    try expectSharedParseOutputs(peer, a);
+}
+
+test "shared origin snapshot 증명 거절과 선택적 할당 실패 및 독립 소유" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const source = try undoFixture(&fx, a, "split-controls.zig", shared_snapshot_text);
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, source, " "));
+    try testing.expect(insertText(fx.session, source, " "));
+    try foldMarksReady(&fx, source);
+    const state = &source.rt.editor_syntax;
+    const stamp = state.input_stamp.?;
+    const original = state.origin_state.?.current;
+    try testing.expect(state.origin_state.?.receipt != null);
+    for (0..4) |kind| {
+        try testing.expect(syntax_color.matchesInput(state, stamp.document, stamp.revision));
+        switch (kind) {
+            0 => state.input_stamp.?.provider_identity += 1,
+            1 => state.origin_state.?.current.?.resource.generation += 1,
+            2 => state.input_stamp = null,
+            else => state.pending = true,
+        }
+        defer {
+            state.input_stamp = stamp;
+            state.origin_state.?.current = original;
+            state.pending = false;
+        }
+        const copy = syntax_color.prepareSharedSnapshot(state, a, .zig);
+        defer if (copy) |value| destroySharedSnapshot(a, value);
+        if (kind == 3) {
+            try testing.expect(copy == null);
+            continue;
+        }
+        const next = copy orelse return error.NoSnapshot;
+        try testing.expect(next.provider.?.tree != null);
+        try testing.expect(next.origin_state == null);
+        if (kind == 1) {
+            try testing.expect(syntax_color.matchesInput(next, stamp.document, stamp.revision));
+        } else try testing.expect(next.input_stamp == null);
+    }
+    // 새 메타데이터의 실패는 이미 복제한 native 자원과 입력 증명을 버리지 않는다.
+    var failing = testing.FailingAllocator.init(a, .{ .fail_index = 1 });
+    const allocator = failing.allocator();
+    {
+        const copy = syntax_color.prepareSharedSnapshot(state, allocator, .zig) orelse return error.NoSnapshot;
+        defer destroySharedSnapshot(allocator, copy);
+        try testing.expect(failing.has_induced_failure);
+        try testing.expect(copy.origin_state == null);
+        try testing.expect(copy.provider.?.tree != null);
+        try testing.expect(syntax_color.matchesInput(copy, stamp.document, stamp.revision));
+    }
+    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    {
+        const copy = syntax_color.prepareSharedSnapshot(state, a, .zig) orelse return error.NoSnapshot;
+        defer destroySharedSnapshot(a, copy);
+        try testing.expect(copy.origin_state.? != state.origin_state.?);
+        try testing.expectEqualDeep(original.?.origin, copy.origin_state.?.current.?.origin);
+        try testing.expectEqual(@intFromPtr(copy.provider.?.parser), copy.origin_state.?.current.?.resource.parser);
+        try testing.expect(copy.origin_state.?.receipt == null);
+        try testing.expect(syntax_color.matchesInput(copy, stamp.document, stamp.revision));
+    }
+    try testing.expectEqualDeep(original, state.origin_state.?.current);
+    try testing.expect(syntax_color.matchesInput(state, stamp.document, stamp.revision));
+}

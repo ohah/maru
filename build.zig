@@ -6509,6 +6509,14 @@ pub fn build(b: *std.Build) void {
         macos_only_test_step.dependOn(&run_change_origin_product.step);
     }
     b.step("test-editor-change-origin-product", "Verify native change reuse and safe fallback in the editor coordinator").dependOn(&run_change_origin_product.step);
+    const origin_snapshot_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"shared origin snapshot"} });
+    const run_origin_snapshot = b.addRunArtifact(origin_snapshot_tests);
+    run_origin_snapshot.addArg("--maru-expect-tests=6");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_origin_snapshot.addArg("--maru-expect-passed=6");
+        macos_only_test_step.dependOn(&run_origin_snapshot.step);
+    }
+    b.step("test-editor-shared-origin-snapshot", "Verify copied input origins and independent snapshot ownership").dependOn(&run_origin_snapshot.step);
     const parse_reuse_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"shared parse reuse native"} });
     const run_parse_reuse = b.addRunArtifact(parse_reuse_tests);
     run_parse_reuse.addArg("--maru-expect-tests=6");

@@ -1,0 +1,126 @@
+{
+  "zig": {
+    "filename": "sample.zig",
+    "source": "const std = @import(\"std\");\n\n// Theme preview: types, fields, strings and calls.\nconst Palette = struct {\n    name: []const u8,\n    count: u32 = 42,\n\n    pub fn describe(self: Palette) void {\n        std.debug.print(\"Theme: {s} ({d})\\n\", .{ self.name, self.count });\n    }\n};\n\npub fn main() void {\n    const palette = Palette{ .name = \"Maru\" };\n    if (palette.count > 0) palette.describe();\n}\n"
+  },
+  "json": {
+    "filename": "sample.json",
+    "source": "{\n  \"name\": \"Maru theme preview\",\n  \"version\": 1,\n  \"enabled\": true,\n  \"description\": null,\n  \"editor\": {\n    \"fontSize\": 14,\n    \"lineHeight\": 1.5,\n    \"features\": [\"syntax\", \"diff\", \"search\"]\n  },\n  \"colors\": {\n    \"background\": \"#101010\",\n    \"keyword\": \"#c678dd\"\n  }\n}\n"
+  },
+  "markdown": {
+    "filename": "sample.md",
+    "source": "# Maru theme preview\n\nA paragraph with **strong text**, *emphasis*, and `inline_code`.\n\n## Editor colors\n\n- Keywords and strings\n- Types, functions and comments\n\n> A short quotation for comparison.\n\n[Documentation](https://example.com/docs)\n\n```typescript\nconst theme = \"Maru\";\n```\n"
+  },
+  "javascript": {
+    "filename": "sample.js",
+    "source": "// Theme preview: properties, functions and strings.\nexport class Palette {\n  constructor(name, count = 42) {\n    this.name = name;\n    this.count = count;\n  }\n\n  describe() {\n    return `Theme: ${this.name} (${this.count})`;\n  }\n}\n\nconst palette = new Palette(\"Maru\");\nconst enabled = true;\nif (enabled && palette.count > 0) {\n  console.log(palette.describe());\n}\n"
+  },
+  "typescript": {
+    "filename": "sample.ts",
+    "source": "// Theme preview: types, properties, functions and strings.\ninterface Palette {\n  readonly name: string;\n  count: number;\n  enabled?: boolean;\n}\n\ntype ThemeName = \"Maru\" | \"Custom\";\n\nexport function describe(palette: Palette): string {\n  const label: ThemeName = \"Maru\";\n  return `${label}: ${palette.name} (${palette.count})`;\n}\n\nconst palette: Palette = { name: \"Preview\", count: 42 };\nif (palette.count > 0) {\n  console.log(describe(palette));\n}\n"
+  },
+  "tsx": {
+    "filename": "sample.tsx",
+    "source": "import React from \"react\";\n\n// Theme preview: tags, attributes, types and expressions.\ntype Props = { title: string; count?: number };\n\nexport function ThemeCard({ title, count = 42 }: Props) {\n  const enabled = count > 0;\n  return (\n    <section className=\"theme-card\" data-active={enabled}>\n      <h2>{title}</h2>\n      <button disabled={!enabled} onClick={() => alert(title)}>\n        Preview {count} colors\n      </button>\n    </section>\n  );\n}\n"
+  },
+  "c": {
+    "filename": "sample.c",
+    "source": "#include <stdio.h>\n\n// Theme preview: types, fields, constants and strings.\ntypedef struct {\n    const char *name;\n    unsigned int count;\n} Palette;\n\nstatic void describe(const Palette *palette) {\n    printf(\"Theme: %s (%u)\\n\", palette->name, palette->count);\n}\n\nint main(void) {\n    Palette palette = { .name = \"Maru\", .count = 42 };\n    if (palette.count > 0) describe(&palette);\n    return 0;\n}\n"
+  },
+  "cpp": {
+    "filename": "sample.cpp",
+    "source": "#include <iostream>\n#include <string>\n\n// Theme preview: namespaces, templates and member calls.\nstruct Palette {\n    std::string name;\n    int count = 42;\n\n    void describe() const {\n        std::cout << \"Theme: \" << name << \" (\" << count << \")\";\n    }\n};\n\nint main() {\n    const auto palette = Palette{ \"Maru\" };\n    if (palette.count > 0) palette.describe();\n    return 0;\n}\n"
+  },
+  "python": {
+    "filename": "sample.py",
+    "source": "from dataclasses import dataclass\n\n# Theme preview: decorators, types, fields and strings.\n@dataclass\nclass Palette:\n    name: str\n    count: int = 42\n\n    def describe(self) -> str:\n        return f\"Theme: {self.name} ({self.count})\"\n\n\ndef main() -> None:\n    palette = Palette(name=\"Maru\")\n    if palette.count > 0:\n        print(palette.describe())\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "go": {
+    "filename": "sample.go",
+    "source": "package main\n\nimport \"fmt\"\n\n// Theme preview: types, fields, methods and strings.\ntype Palette struct {\n    Name  string\n    Count int\n}\n\nfunc (p Palette) Describe() string {\n    return fmt.Sprintf(\"Theme: %s (%d)\", p.Name, p.Count)\n}\n\nfunc main() {\n    palette := Palette{Name: \"Maru\", Count: 42}\n    if palette.Count > 0 {\n        fmt.Println(palette.Describe())\n    }\n}\n"
+  },
+  "rust": {
+    "filename": "sample.rs",
+    "source": "// Theme preview: attributes, types, fields and macros.\n#[derive(Debug)]\nstruct Palette {\n    name: String,\n    count: u32,\n}\n\nimpl Palette {\n    fn describe(&self) -> String {\n        format!(\"Theme: {} ({})\", self.name, self.count)\n    }\n}\n\nfn main() {\n    let palette = Palette { name: \"Maru\".into(), count: 42 };\n    if palette.count > 0 {\n        println!(\"{}\", palette.describe());\n    }\n}\n"
+  },
+  "java": {
+    "filename": "sample.java",
+    "source": "// Theme preview: annotations, types, fields and strings.\npublic final class Palette {\n    private final String name;\n    private final int count = 42;\n\n    public Palette(String name) {\n        this.name = name;\n    }\n\n    @Override\n    public String toString() {\n        return \"Theme: \" + name + \" (\" + count + \")\";\n    }\n\n    public static void main(String[] args) {\n        System.out.println(new Palette(\"Maru\"));\n    }\n}\n"
+  },
+  "ruby": {
+    "filename": "sample.rb",
+    "source": "# Theme preview: symbols, interpolation and methods.\nclass Palette\n  attr_reader :name, :count\n\n  def initialize(name, count: 42)\n    @name = name\n    @count = count\n  end\n\n  def describe\n    \"Theme: #{name} (#{count})\"\n  end\nend\n\npalette = Palette.new(\"Maru\", count: 42)\nputs palette.describe if palette.count.positive?\n"
+  },
+  "php": {
+    "filename": "sample.php",
+    "source": "<?php\n// Theme preview: types, properties, functions and strings.\nfinal class Palette {\n    public function __construct(\n        public string $name,\n        public int $count = 42,\n    ) {}\n\n    public function describe(): string {\n        return \"Theme: {$this->name} ({$this->count})\";\n    }\n}\n\n$palette = new Palette(\"Maru\");\nif ($palette->count > 0) {\n    echo $palette->describe();\n}\n"
+  },
+  "kotlin": {
+    "filename": "sample.kt",
+    "source": "// Theme preview: data classes, properties and strings.\ndata class Palette(\n    val name: String,\n    val count: Int = 42,\n) {\n    fun describe(): String = \"Theme: $name ($count)\"\n}\n\nfun main() {\n    val palette = Palette(name = \"Maru\")\n    if (palette.count > 0) {\n        println(palette.describe())\n    }\n}\n"
+  },
+  "bash": {
+    "filename": "sample.sh",
+    "source": "#!/bin/bash\n# Theme preview: variables, strings and command substitution.\nset -eu\n\nname=\"Maru\"\ncount=42\n\ndescribe() {\n    local label=\"$1\"\n    printf 'Theme: %s (%s)\\n' \"$label\" \"$count\"\n}\n\nif [ \"$count\" -gt 0 ]; then\n    describe \"$name\"\nfi\n\nfor feature in syntax diff search; do\n    printf '%s\\n' \"$feature\"\ndone\n"
+  },
+  "css": {
+    "filename": "sample.css",
+    "source": "/* Theme preview: selectors, properties and values. */\n:root {\n  --accent: #c678dd;\n  --spacing: 12px;\n}\n\n.theme-card > h2 {\n  color: var(--accent);\n  font-size: 1.5rem;\n  padding: var(--spacing);\n  background: rgb(33, 37, 43);\n}\n\n@media (min-width: 640px) {\n  .theme-card:hover {\n    opacity: 0.85;\n    border: 1px solid #61afef;\n  }\n}\n"
+  },
+  "html": {
+    "filename": "sample.html",
+    "source": "<!DOCTYPE html>\n<!-- Theme preview: tags, attributes, entities and text. -->\n<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\">\n    <title>Maru theme preview</title>\n  </head>\n  <body>\n    <section class=\"theme-card\" data-count=\"42\">\n      <h2>Maru &amp; editor colors</h2>\n      <p>Keywords, strings, types and comments.</p>\n      <a href=\"https://example.com/docs\">Documentation</a>\n      <button disabled>Preview colors</button>\n    </section>\n  </body>\n</html>\n"
+  },
+  "yaml": {
+    "filename": "sample.yaml",
+    "source": "# Theme preview: mappings, anchors and scalar values.\nname: Maru theme preview\nversion: 1\nenabled: true\ndescription: null\n\neditor: &defaults\n  font_size: 14\n  line_height: 1.5\n  features:\n    - syntax\n    - diff\n    - search\n\npreview:\n  <<: *defaults\n  label: \"Theme: Maru\"\n"
+  },
+  "toml": {
+    "filename": "sample.toml",
+    "source": "# Theme preview: tables, keys and scalar values.\nname = \"Maru theme preview\"\nversion = 1\nenabled = true\n\n[editor]\nfont_size = 14\nline_height = 1.5\nfeatures = [\"syntax\", \"diff\", \"search\"]\n\n[colors]\nbackground = \"#101010\"\nkeyword = \"#c678dd\"\n\n[[presets]]\nname = \"Maru\"\ncount = 42\n"
+  },
+  "xml": {
+    "filename": "sample.xml",
+    "source": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- Theme preview: elements, attributes, entities and text. -->\n<palette name=\"Maru\" version=\"1\">\n  <editor enabled=\"true\" font-size=\"14\">\n    <feature>syntax</feature>\n    <feature>diff</feature>\n    <feature>search</feature>\n  </editor>\n  <colors>\n    <color role=\"keyword\">#c678dd</color>\n    <color role=\"string\">#98c379</color>\n  </colors>\n  <description>Code &amp; colors</description>\n</palette>\n"
+  },
+  "dtd": {
+    "filename": "sample.dtd",
+    "source": "<!-- Theme preview: declarations, entities and attributes. -->\n<!ELEMENT palette (editor, colors, description?)>\n<!ATTLIST palette\n  name CDATA #REQUIRED\n  version CDATA \"1\"\n>\n\n<!ELEMENT editor (feature+)>\n<!ATTLIST editor enabled (true|false) \"true\">\n<!ELEMENT feature (#PCDATA)>\n\n<!ELEMENT colors (color+)>\n<!ELEMENT color (#PCDATA)>\n<!ATTLIST color role CDATA #REQUIRED>\n\n<!ELEMENT description (#PCDATA)>\n<!ENTITY app \"Maru\">\n"
+  },
+  "lua": {
+    "filename": "sample.lua",
+    "source": "-- Theme preview: tables, fields, functions and strings.\nlocal Palette = {}\nPalette.__index = Palette\n\nfunction Palette.new(name, count)\n    return setmetatable({ name = name, count = count or 42 }, Palette)\nend\n\nfunction Palette:describe()\n    return string.format(\"Theme: %s (%d)\", self.name, self.count)\nend\n\nlocal palette = Palette.new(\"Maru\", 42)\nif palette.count > 0 then\n    print(palette:describe())\nend\n"
+  },
+  "dockerfile": {
+    "filename": "Dockerfile",
+    "source": "# Theme preview: instructions, arguments and variables.\nFROM alpine:3.20 AS preview\n\nARG THEME=Maru\nENV EDITOR_THEME=${THEME}\nWORKDIR /app\n\nCOPY ./samples /app/samples\nRUN printf 'Theme: %s\\n' \"$EDITOR_THEME\" \\\n    && mkdir -p /app/output\n\nLABEL org.example.preview=\"syntax colors\"\nEXPOSE 8080\nUSER nobody\n\nENTRYPOINT [\"/bin/sh\"]\nCMD [\"-c\", \"echo Theme preview\"]\n"
+  },
+  "make": {
+    "filename": "Makefile",
+    "source": "# Theme preview: targets, variables and shell recipes.\nTHEME := Maru\nCOUNT ?= 42\nOUTPUT := output\n\n.PHONY: all preview clean\n\nall: preview\n\n$(OUTPUT):\n\tmkdir -p $@\n\npreview: | $(OUTPUT)\n\t@printf 'Theme: %s (%s)\\n' \"$(THEME)\" \"$(COUNT)\"\n\t@for feature in syntax diff search; do \\\n\t\tprintf '%s\\n' \"$$feature\"; \\\n\tdone\n\nclean:\n\trm -f $(OUTPUT)/preview.txt\n"
+  },
+  "swift": {
+    "filename": "sample.swift",
+    "source": "import Foundation\n\n// Theme preview: attributes, types, properties and strings.\nstruct Palette {\n    let name: String\n    var count: Int = 42\n\n    func describe() -> String {\n        \"Theme: \\(name) (\\(count))\"\n    }\n}\n\n@main\nstruct Preview {\n    static func main() {\n        let palette = Palette(name: \"Maru\")\n        if palette.count > 0 {\n            print(palette.describe())\n        }\n    }\n}\n"
+  },
+  "sql": {
+    "filename": "sample.sql",
+    "source": "-- Theme preview: keywords, identifiers and literals.\nCREATE TABLE palettes (\n    id INTEGER PRIMARY KEY,\n    name VARCHAR(64) NOT NULL,\n    color_count INTEGER DEFAULT 42,\n    enabled BOOLEAN DEFAULT TRUE\n);\n\nINSERT INTO palettes (id, name)\nVALUES (1, 'Maru');\n\nSELECT p.name, COUNT(*) AS total\nFROM palettes AS p\nWHERE p.enabled = TRUE\n  AND p.color_count > 0\nGROUP BY p.name\nORDER BY total DESC;\n"
+  },
+  "dart": {
+    "filename": "sample.dart",
+    "source": "// Theme preview: types, fields, methods and strings.\nclass Palette {\n  final String name;\n  final int count;\n\n  const Palette(this.name, {this.count = 42});\n\n  String describe() => 'Theme: $name ($count)';\n}\n\nvoid main() {\n  const palette = Palette('Maru');\n  if (palette.count > 0) {\n    print(palette.describe());\n  }\n}\n"
+  },
+  "csharp": {
+    "filename": "sample.cs",
+    "source": "using System;\n\n// Theme preview: attributes, types, properties and strings.\n[Serializable]\npublic sealed class Palette {\n    public string Name { get; init; } = \"Maru\";\n    public int Count { get; init; } = 42;\n\n    public string Describe() => $\"Theme: {Name} ({Count})\";\n}\n\npublic static class Preview {\n    public static void Main() {\n        var palette = new Palette();\n        if (palette.Count > 0) {\n            Console.WriteLine(palette.Describe());\n        }\n    }\n}\n"
+  },
+  "objc": {
+    "filename": "sample.m",
+    "source": "#import <Foundation/Foundation.h>\n\n// Theme preview: interfaces, properties, methods and strings.\n@interface Palette : NSObject\n@property(nonatomic, copy) NSString *name;\n@property(nonatomic) NSInteger count;\n- (NSString *)describe;\n@end\n\n@implementation Palette\n- (NSString *)describe {\n    return [NSString stringWithFormat:@\"Theme: %@ (%ld)\",\n            self.name, (long)self.count];\n}\n@end\n\nint main(void) {\n    @autoreleasepool {\n        NSLog(@\"Theme: %@ (%d)\", @\"Maru\", 42);\n    }\n}\n"
+  },
+  "scala": {
+    "filename": "sample.scala",
+    "source": "// Theme preview: annotations, types, fields and strings.\ncase class Palette(name: String, count: Int = 42) {\n  def describe: String = s\"Theme: $name ($count)\"\n}\n\nobject Preview {\n  @deprecated(\"Preview only\", \"1.0\")\n  def label(palette: Palette): String = palette.describe\n\n  def main(args: Array[String]): Unit = {\n    val palette = Palette(\"Maru\")\n    if (palette.count > 0) {\n      println(palette.describe)\n    }\n  }\n}\n"
+  }
+}

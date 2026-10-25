@@ -713,6 +713,7 @@ fn handleSemanticTokens(allocator: std.mem.Allocator, obj: std.json.ObjectMap, i
     var req_uri: []const u8 = "";
     var lo: i64 = 0;
     var hi: i64 = std.math.maxInt(i32);
+    var end_col: i64 = 0;
     if (obj.get("params")) |p| if (p == .object) {
         if (p.object.get("textDocument")) |td| if (td == .object) {
             req_uri = str(td.object.get("uri")) orelse "";
@@ -723,10 +724,22 @@ fn handleSemanticTokens(allocator: std.mem.Allocator, obj: std.json.ObjectMap, i
             };
             if (r.object.get("end")) |en| if (en == .object) {
                 hi = int(en.object.get("line")) orelse hi;
+                end_col = int(en.object.get("character")) orelse 0;
             };
         };
     };
     const text = docText(req_uri);
+    // 실제 엄격한 서버처럼 EOF 밖 범위를 거부한다. 이 대조군이 없으면 제품이
+    // 잘못 보낸 다음 줄을 fake만 조용히 허용해 EOF 회귀를 놓친다.
+    if (!full) {
+        const last: i64 = @intCast(std.mem.count(u8, text, "\n"));
+        const start = if (std.mem.lastIndexOfScalar(u8, text, '\n')) |at| at + 1 else 0;
+        if (hi > last or (hi == last and end_col > text.len - start)) {
+            sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32602), .message = "semantic range exceeds EOF" } });
+            return;
+        }
+    }
+
     if (std.mem.indexOf(u8, text, "SEMSTALL") != null) return;
     if (std.mem.indexOf(u8, text, "SEMERR") != null) {
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32801), .message = "content modified" } });
@@ -758,7 +771,7 @@ fn handleSemanticTokens(allocator: std.mem.Allocator, obj: std.json.ObjectMap, i
         while (j < text.len and isIdent(text[j])) j += 1;
         const word = text[i..j];
         const wlen: i64 = @intCast(j - i);
-        if (!std.ascii.isDigit(word[0]) and line >= lo and line < hi) {
+        if (!std.ascii.isDigit(word[0]) and line >= lo and (line < hi or (line == hi and col < end_col))) {
             const ty: i64 = if (std.mem.endsWith(u8, word, "_fn")) 1 else if (std.mem.endsWith(u8, word, "_ty")) 3 else if (std.mem.endsWith(u8, word, "_kw")) 0 else if (std.mem.endsWith(u8, word, "_bogus")) 4 else 2;
             const dl = line - prev_line;
             const dc = if (dl == 0) col - prev_col else col;

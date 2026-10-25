@@ -90,6 +90,16 @@ pub fn release(g: Gate) void {
     g.markDirty();
 }
 
+/// 살아 있는 서버가 응답을 잃어도 영원히 막지 않는다. 늦은 응답은 다음 seq와
+/// 다르므로 receive가 버린다. 실패 뒤 quiet 간격은 일반 오류와 같다.
+pub fn expire(g: Gate, sent_at: u64, now: u64, timeout: u64) bool {
+    if (!g.waiting.* or now -| sent_at < timeout) return false;
+    release(g);
+    g.dropped_error.* += 1;
+    retry(g, now);
+    return true;
+}
+
 // ── 판정자 ────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -175,4 +185,21 @@ test "서버가 내려가면 막음을 풀고 다시 묻게 둔다" {
     sent(g, 1, 1);
     release(g);
     try testing.expect(!st.waiting and st.dirty);
+}
+
+test "semantic recovery timeout boundaries, clock rollback, retry and stale response" {
+    var st: FakeState = .{};
+    const g = st.gate(true);
+    try testing.expect(!expire(g, 0, 100, 30)); // idle
+    sent(g, 1, 1);
+    try testing.expect(!expire(g, 50, 49, 30)); // clock rollback
+    try testing.expect(!expire(g, 50, 79, 30)); // before deadline
+    try testing.expect(expire(g, 50, 80, 30)); // exact deadline
+    try testing.expect(st.dirty and !st.waiting and st.dropped_error == 1);
+    try testing.expect(!quiet(g, 81, 120)); // no immediate retry storm
+    sent(g, 2, 1);
+    try testing.expectEqual(Verdict.ignore, receive(g, 1, false, 1)); // old response cannot unlock new request
+    try testing.expect(st.waiting);
+    try testing.expectEqual(Verdict.take, receive(g, 2, false, 1));
+    try testing.expect(!expire(g, 50, 999, 30)); // completed request
 }

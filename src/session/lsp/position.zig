@@ -60,6 +60,20 @@ pub fn wholeRangeEnd(content: []const u8, lines: LineIndex, enc: rpc.PositionEnc
     return .{ .line = @intCast(last), .character = characterOf(text, @intCast(text.len), enc) };
 }
 
+/// 보이는 줄의 반열림 범위. 마지막 줄 다음의 가짜 줄을 만들지 않는다 —
+/// rust-analyzer·Kotlin·Dart는 EOF 밖 위치를 내부 오류로 거부한다.
+pub fn lineRange(content: []const u8, lines: LineIndex, enc: rpc.PositionEncoding, lo: usize, hi: usize) rpc.LspRange {
+    const last = lines.lineCount() - 1;
+    const start = @min(lo, last);
+    const end = @max(start, @min(hi, last));
+    const ln = lines.line(end).?;
+    const text = content[ln.start..ln.contentEnd()];
+    return .{
+        .start = .{ .line = @intCast(start), .character = 0 },
+        .end = if (end < last) .{ .line = @intCast(end + 1), .character = 0 } else .{ .line = @intCast(last), .character = characterOf(text, @intCast(text.len), enc) },
+    };
+}
+
 /// 서버마다 줄바꿈으로 세는 것이 갈리는 글자가 있나 — **단독 `\r`**(뒤에 `\n` 이 없는 것): 명세·tsgo·pyright 는 줄바꿈으로 세고 maru·clangd 는
 /// 줄 내용으로 센다(2026-10-21 실측 — 한 모델로 끝을 세면 다른 쪽 서버의 사본에 찌꺼기가 남는다).
 fn ambiguousLineBreak(content: []const u8) bool {
@@ -373,4 +387,29 @@ test "LSP2 publishDiagnostics → 목록: 범위·severity·메시지 복사·�
     var q = try std.json.parseFromSlice(std.json.Value, a, "{\"diagnostics\":5}", .{});
     defer q.deinit();
     try testing.expectEqual(@as(usize, 0), try appendDiagnostics(a, q.value, content, idx, .utf16, &out, &msgs));
+}
+
+test "semantic recovery range endpoints: EOF, CRLF, Unicode and hostile viewport bounds" {
+    const Case = struct { text: []const u8, lo: usize = 0, hi: usize = 99, enc: rpc.PositionEncoding = .utf16, sl: u32 = 0, el: u32, ec: u32 };
+    const cases = [_]Case{
+        .{ .text = "", .el = 0, .ec = 0 },
+        .{ .text = "abc", .el = 0, .ec = 3 },
+        .{ .text = "abc\n", .el = 1, .ec = 0 },
+        .{ .text = "a\r\nb", .el = 1, .ec = 1 },
+        .{ .text = "x\r\n", .el = 1, .ec = 0 },
+        .{ .text = "가😀", .el = 0, .ec = 3 },
+        .{ .text = "가😀", .enc = .utf8, .el = 0, .ec = 7 },
+        .{ .text = "a\nb\nc", .hi = 0, .el = 1, .ec = 0 },
+        .{ .text = "a\nb", .lo = 99, .sl = 1, .el = 1, .ec = 1 },
+        .{ .text = "a\nb\nc", .lo = 1, .hi = 0, .sl = 1, .el = 2, .ec = 0 },
+    };
+    for (cases) |c| {
+        var idx = try line_index.build(testing.allocator, c.text);
+        defer idx.deinit();
+        const r = lineRange(c.text, idx, c.enc, c.lo, c.hi);
+        try testing.expectEqual(c.sl, r.start.line);
+        try testing.expectEqual(c.el, r.end.line);
+        try testing.expectEqual(c.ec, r.end.character);
+        try testing.expect(r.end.line < idx.lineCount());
+    }
 }

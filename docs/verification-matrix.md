@@ -5126,6 +5126,13 @@ RSS 증거가 아니다. #4585의 필수 CI가 통과해 `fd953386b`로 머지�
 present·RSS는 측정하지 않았다. 이 구현의 필수 CI·머지는 미완료다.
 [계약](plans/editor-fold-order-reuse.md)과 [전체 분포](../tools/editor-fold-order-measure/results.md)를 따른다.
 
+## 에디터 시맨틱 토큰 서버 호환성
+
+EOF·UTF-8/UTF-16 범위, gopls 활성화 옵션, refresh 및 유실 응답 복구는
+`test-editor-semantic-recovery`의 중립 31개(행동 3개)·macOS 제품 7개(SMT 행동 3개)로 검증한다.
+20개 적대적 조건과 실제 서버 캡처의 범위·한계는 [회귀 증거](../tools/editor-theme-gallery/semantic-recovery.md)를 따른다.
+서버가 provider를 제공하지 않는 경우와 프로젝트 빌드 대상이 준비되지 않은 경우를 토큰 기능 미구현으로 세지 않는다.
+
 ## 설정 검색창 IME 문맥
 
 `test-settings-search-ime`는 고정 용량·NFD·UTF-16 범위·원자적 거절/rollback·후보 Enter와

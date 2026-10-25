@@ -26761,7 +26761,7 @@ test "SMT1 semantic tokens — 서버가 ready 면 프레임의 색 만들기가
     try src.appendSlice(allocator, "int my_fn(int a_ty) {\n  return a_ty;\n}\n");
     var k: usize = 0;
     while (k < 296) : (k += 1) try src.appendSlice(allocator, "\n");
-    try src.appendSlice(allocator, "int tail_fn(void);"); // 끝 줄바꿈 없음 — 마지막 줄(299)이 곧 범위의 끝: 반열림 끝(`hi+1`)이어야 그 줄이 든다(적대적 3회차 C6)
+    try src.appendSlice(allocator, "int tail_fn(void);"); // 끝 줄바꿈 없음 — 마지막 줄(299)이 곧 범위의 끝: 반열림 끝이 마지막 줄 길이여야 그 줄이 든다(EOF 범위 회귀)
     var f = (try SmtFixture.open(allocator, "s.c", src.items)) orelse return error.SkipZigTest;
     defer f.close(allocator);
     const s = f.fx.session;
@@ -70586,4 +70586,35 @@ test "bracket reposition shared product 양쪽 입력과 Undo Redo가 좌표만 
         try testing.expectEqualDeep(source.rt.editor_syntax.bracket_toks.items, peer.rt.editor_syntax.bracket_toks.items);
         try testing.expectEqualDeep(source.rt.editor_syntax.bracket_info.items, peer.rt.editor_syntax.bracket_info.items);
     }
+}
+
+test "SMT3 semantic recovery strict EOF, refresh and stalled response retry" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var f = (try SmtFixture.open(a, "recover.c", "int my_fn(int a_ty) { return a_ty; }")) orelse return error.SkipZigTest;
+    defer f.close(a);
+    try testing.expect(f.ready());
+    const s = f.fx.session;
+    const t = f.term;
+    _ = frameSyntaxColors(s, t);
+    try testing.expect(f.applied(1)); // strict fake rejects the previous EOF+1 request
+    try testing.expectEqual(@as(u64, 0), t.rt.editor_semantic.dropped_error);
+    const st = &t.rt.editor_semantic;
+    const client = @import("semantic.zig");
+    client.onRefresh(t);
+    _ = frameSyntaxColors(s, t);
+    try testing.expect(f.applied(2)); // same revision, new index
+    // Simulate a lost reply without sleeping through the product deadline.
+    st.waiting = true;
+    st.waiting_seq = 900;
+    st.requested_at_ms = s.awakeMs() - client.response_timeout_ms;
+    client.tick(s, t, 0, 0);
+    try testing.expect(!st.waiting and st.dirty);
+    try testing.expectEqual(@as(u64, 1), st.dropped_error);
+    st.last_edit_ms = s.awakeMs() - client.quiet_ms;
+    client.tick(s, t, 0, 0);
+    try testing.expect(st.waiting and st.waiting_seq != 900);
+    client.onResponse(s, t, 900, null, true, .utf8);
+    try testing.expect(st.waiting); // late old reply does not release the new wait
+    try testing.expect(f.applied(3));
 }

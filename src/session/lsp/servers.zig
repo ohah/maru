@@ -23,6 +23,8 @@ pub const Server = struct {
     /// 본문**으로 곧 파싱하고 didChange 는 작업 스레드가 나중에 적용하는 서버 — ruby-lsp(계획 editor-lsp-servers-expand LS4 실측: 바로 묻든
     /// 30 ms 를 띄우든 타이핑 중 옛 본문의 진단을 계산해 다음 편집까지 캐시했다). 다른 pull 서버는 didChange 를 먼저 적용한다(tsgo·ESLint — 바로 묻는다).
     pull_barrier: bool = false,
+    /// gopls는 provider를 알리고도 기본 설정에서는 빈 토큰을 낸다(v0.20 실측).
+    enable_semantic_tokens: bool = false,
 
     /// 그 경로의 문서를 다루나(`skip_extensions`).
     pub fn serves(self: Server, path: []const u8) bool {
@@ -71,7 +73,7 @@ pub fn candidatesFor(g: language.Grammar) []const Server {
         .javascript => &js_candidates,
         .rust => &[_]Server{.{ .exe = "rust-analyzer", .args = &none, .language_id = "rust", .install = "rustup component add rust-analyzer" }},
         .python => &[_]Server{.{ .exe = "pyright-langserver", .args = &stdio, .language_id = "python", .install = "npm i -g pyright" }},
-        .go => &[_]Server{.{ .exe = "gopls", .args = &none, .language_id = "go", .install = "go install golang.org/x/tools/gopls@latest" }},
+        .go => &[_]Server{.{ .exe = "gopls", .args = &none, .language_id = "go", .install = "go install golang.org/x/tools/gopls@latest", .enable_semantic_tokens = true }},
         // 언어 서버 후보 확대 LS1(계획 editor-lsp-servers-expand — 2026-10-16, maru 와 같은 능력으로 실측해 통과한 열다섯).
         .swift => &[_]Server{.{ .exe = "sourcekit-lsp", .args = &none, .language_id = "swift", .install = "xcode-select --install" }},
         .dart => &[_]Server{.{ .exe = "dart", .args = &dart_lsp, .language_id = "dart", .install = "brew install dart-sdk" }},

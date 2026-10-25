@@ -6579,6 +6579,19 @@ pub fn build(b: *std.Build) void {
         run_edit_cost.addArg("--maru-expect-passed=6");
         macos_only_test_step.dependOn(&run_edit_cost.step);
     }
+    const semantic_recovery_step = b.step("test-editor-semantic-recovery", "Verify semantic EOF, settings, refresh and timeout recovery");
+    const semantic_recovery_pure = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"semantic recovery"} });
+    const run_semantic_recovery_pure = b.addRunArtifact(semantic_recovery_pure);
+    run_semantic_recovery_pure.addArg("--maru-expect-tests=31");
+    run_semantic_recovery_pure.addArg("--maru-expect-passed=31");
+    semantic_recovery_step.dependOn(&run_semantic_recovery_pure.step);
+    const semantic_recovery_product = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.SMT"} });
+    const run_semantic_recovery_product = b.addRunArtifact(semantic_recovery_product);
+    run_semantic_recovery_product.setCwd(b.path("."));
+    run_semantic_recovery_product.step.dependOn(&install_fake_lsp.step);
+    run_semantic_recovery_product.addArg("--maru-expect-tests=7");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_semantic_recovery_product.addArg("--maru-expect-passed=7");
+    semantic_recovery_step.dependOn(&run_semantic_recovery_product.step);
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
     run_editor_tests.step.dependOn(&install_fake_lsp.step);

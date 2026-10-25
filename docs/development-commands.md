@@ -7,6 +7,7 @@
 - 고정 머리줄 변경 범위 재사용: `mise exec -- zig build test-editor-sticky-changes test-editor-sticky-symbols test-editor-fold-changes test-editor-fold-cache -j2`. [검증 범위](plans/editor-sticky-change-reuse.md)를 따른다.
 - pane 프레임 준비 비용: [사본 실행·집계·독립 손상 검증 명령](../tools/editor-pane-measure/results.md). 제품을 바꾸지 않으며 pane 내부 호출만 센다.
 - 파싱 결과 인계 기계: `mise exec -- zig build test-editor-syntax-stamp test-editor-shared-parse-core test-editor-shared-parse-product -j2`. [검증 범위와 제품 연결 조건](plans/editor-shared-parse-reuse.md)을 따른다.
+- 변경 범위의 복사 계보: `mise exec -- zig build test-editor-change-origin test-editor-change-origin-product -j2`. [계보 발급·재사용 조건과 남은 실측](plans/editor-shared-change-origin.md)을 따른다. 제품 검사는 macOS 전용이다.
 - 구문 편집 비용 귀속: [사본 실행·집계·독립 결함 검증 명령](plans/editor-provider-edit-attribution.md)을 따른다. 일반/공유 입력과 별도 매 입력 전수 대조를 함께 요구한다.
 - diff 전체 poll 실패 주입: `mise exec -- zig build test-editor-diff-oom -j2`. 세션 worker와 주입 allocator를 분리하는 이유는 [접힘 좌표 계획의 CI 회귀](plans/editor-fold-points.md)를 따른다.
 - 공유 초기 스냅샷: `mise exec -- zig build test-editor-shared-snapshot test-editor-native-snapshot -j2`. [실측·독립 결함 주입](plans/editor-shared-initial-snapshot.md).

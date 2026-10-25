@@ -1,4 +1,6 @@
 # 검증 매트릭스
+[같은 이전 구문 스냅샷의 변경 범위 재사용](plans/editor-shared-change-origin.md)은 로컬 구현·실측 완료다. 최신 main에서 registry·계보 판정의 독립 결함 다섯 개를 런타임에서 검출했고 정상 대조 6건은 통과했다. 리베이스 뒤 집중 37개·입력 증명 30개·제품 8개는 ReleaseFast에서도 통과했다. 기존 공유 제품 7개·native snapshot 3개·접힘 변경 6개와 전체 경계·문서/config 702개 빌드 단계도 통과했다. 전후 240개 실행/3,090편집, 별도 성능 60개/1,200편집·정확성 20개/400편집 및 구조 크기를 측정했다. 구조 편집의 최초 느린 표본은 추가 20개/200편집에서 같은 차이가 재현되지 않았고 원인은 확정하지 않았다. PR CI·머지는 미완료이며 실제 OS 입력·present·RSS 검증의 증거는 아니다.
+
 [pane 구문 내부 귀속](plans/editor-pane-syntax-attribution.md)은 로컬 구현·측정 완료다. 성능 30회/600편집·별도 정확성 10회/200편집과 다섯 독립 실패 가설의 43개 손상 거절을 완료했다. 전체 로컬 경계·문서/config도 통과했다. PR CI·main 합류는 미완료이며 제품 정책과 알고리즘은 유지한다.
 
 [pane 색/그리기 목록 비용](plans/editor-pane-lowering-attribution.md)은 부분 구현: 확장 9구간 성능 30회/600입력·별도 정확성 10회/200입력 및 독립 실패 가설 다섯 개의 45개 손상 거절을 완료했다. 초기 7구간의 자료도 분리 보존하고 43개 손상을 거절했다. 전체 로컬 경계/문서 게이트를 통과했다. PR #4581은 필수 CI를 통과해 `fe90a7b71`로 머지됐고 head/main 트리가 동일하다. 실제 main의 문서/config도 통과했다. 제품 변경·GUI/HID·present·RSS의 증거는 아니다.
@@ -5113,7 +5115,7 @@ Debug·ReleaseFast로 검사한다(초기화 포함 각각 33개/7개). 짝·색
 준비 Git 객체와 대조한다. 다섯 독립 가설의 23개 손상 거절·정상 전후 대조·원본 불변 및 합성 반례
 검사 7개를 통과했다. 로그 해시를 다시 맞춘 의미 반례도 거절한다. 제품 최적화나 GUI/HID·present·
 RSS 증거가 아니다. #4585의 필수 CI가 통과해 `fd953386b`로 머지됐고, 실제 main의 문서
-링크·행 참조·config 검사도 통과했다. main CI는 대기 중이다. [전체 결과](../tools/editor-fold-promotion-measure/results.md)와
+링크·행 참조·config 검사와 main CI `40173818911`도 통과했다. [전체 결과](../tools/editor-fold-promotion-measure/results.md)와
 [범위](plans/editor-fold-promotion-attribution.md)를 따른다.
 
 ### 접힘 후보의 정렬 순서 재사용
@@ -5123,7 +5125,9 @@ RSS 증거가 아니다. #4585의 필수 CI가 통과해 `fd953386b`로 머지�
 25개 테스트를 통과했다. 실제 함수 추출 사본의 다섯 의미 결함과 각 전후 정상 대조도 통과했다.
 제품 사본 전후 비교 240개 실행/3,090편집과 구간 비교 60개/1,200편집에서 매 편집 결과가
 일치했다. 구간 개선을 전체 입력 개선으로 주장하지 않는다. 동시 컴파일을 관측했고 GUI/HID·
-present·RSS는 측정하지 않았다. 이 구현의 필수 CI·머지는 미완료다.
+present·RSS는 측정하지 않았다. #4587은 필수 CI를 통과해 `eefbca9de`로 머지됐다.
+해당 main의 문서/config 검사도 통과했다. main CI `40178718975`는 취소됐고 원인은
+확인하지 않았다. 후속 main `04c78fa1d`의 CI `40182245831`은 성공했다.
 [계약](plans/editor-fold-order-reuse.md)과 [전체 분포](../tools/editor-fold-order-measure/results.md)를 따른다.
 
 ## 에디터 시맨틱 토큰 서버 호환성

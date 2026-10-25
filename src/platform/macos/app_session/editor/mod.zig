@@ -10029,7 +10029,8 @@ fn refreshSyntaxForInput(self: *AppSession, term: *Term, edit: ?syntax_color.Edi
                 break :find;
             };
         }
-        syntax_color.updateForInput(&term.rt.editor_syntax, self.allocator, doc.file.content, edit, doc.file.lines, document, doc.file.revision, ready);
+        const origin = if (syntax_color.matchesInput(&term.rt.editor_syntax, document, doc.file.revision)) null else self.editor_documents.reserveSyntaxOrigin(lease.?, doc.file.revision);
+        syntax_color.updateForInputWithOrigin(&term.rt.editor_syntax, self.allocator, doc.file.content, edit, doc.file.lines, document, doc.file.revision, ready, origin);
     } else if (edit) |span| {
         syntax_color.onEditSpan(&term.rt.editor_syntax, self.allocator, doc.file.content, span, doc.file.lines);
     } else syntax_color.reparse(&term.rt.editor_syntax, doc.file.content);
@@ -70433,6 +70434,159 @@ fn expectSharedParseOutputs(term: *Term, allocator: std.mem.Allocator) !void {
 
 fn sharedParseCount(left: *Term, right: *Term) u64 {
     return left.rt.editor_syntax.provider.?.stats.reused_parses + right.rt.editor_syntax.provider.?.stats.reused_parses;
+}
+
+fn sharedOriginCounts(left: *Term, right: *Term) struct { calculated: u64, reused: u64 } {
+    const a = left.rt.editor_syntax.provider.?.stats;
+    const b = right.rt.editor_syntax.provider.?.stats;
+    return .{ .calculated = a.calculated_change_ranges + b.calculated_change_ranges, .reused = a.reused_change_ranges + b.reused_change_ranges };
+}
+
+fn sharedOriginInput(fx: *PaneFixture, source: *Term, peer: *Term, active: *Term, expected_reuse: ?u64) !void {
+    const before = sharedOriginCounts(source, peer);
+    const parsed = sharedParseCount(source, peer);
+    try testing.expect(insertText(fx.session, active, " "));
+    const after = sharedOriginCounts(source, peer);
+    const reused = after.reused - before.reused;
+    try testing.expect(reused <= 1);
+    if (expected_reuse) |expected| try testing.expectEqual(expected, reused);
+    try testing.expectEqual(@as(u64, 2), after.calculated - before.calculated + reused);
+    try testing.expectEqual(parsed + 1, sharedParseCount(source, peer));
+    for ([_]*Term{ source, peer }) |view| {
+        try foldMarksReady(fx, view);
+        try expectSharedParseOutputs(view, testing.allocator);
+    }
+}
+
+test "shared change origin product 양쪽 입력과 Undo Redo 및 같은 입력 재갱신을 대조한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const source = try undoFixture(&fx, a, "change-origin.zig", "fn f() void {\n _ = 1;\n}\nfn g() void {\n _ = 2;\n}\n");
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    const peer = try pane_ops.splitSharedEditorPane(fx.session, .horizontal, false);
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    fx.leaf_rect.w /= 2;
+    try sharedOriginInput(&fx, source, peer, source, null);
+    for (0..8) |i| try sharedOriginInput(&fx, source, peer, if (i % 2 == 0) source else peer, 1);
+    for ([_]bool{ false, true }) |redo| {
+        const before = sharedOriginCounts(source, peer);
+        try testing.expect(if (redo) redoEdit(fx.session, source) else undoEdit(fx.session, peer));
+        const after = sharedOriginCounts(source, peer);
+        try testing.expectEqual(before.calculated + 1, after.calculated);
+        try testing.expectEqual(before.reused + 1, after.reused);
+        for ([_]*Term{ source, peer }) |view| {
+            try foldMarksReady(&fx, view);
+            try expectSharedParseOutputs(view, a);
+        }
+    }
+    const lease = source.rt.editor_document_lease.?;
+    const revision = source.rt.editorDocument().opened.?.file.revision;
+    const marker = fx.session.editor_documents.reserveSyntaxOrigin(lease, revision).?;
+    const generation = source.rt.editor_syntax.provider.?.tree_gen;
+    try refreshViewAfterEdit(fx.session, source, null);
+    const next = fx.session.editor_documents.reserveSyntaxOrigin(lease, revision).?;
+    try testing.expectEqual(marker.serial + 1, next.serial);
+    try testing.expectEqual(generation, source.rt.editor_syntax.provider.?.tree_gen);
+    syntax_color.reparse(&source.rt.editor_syntax, source.rt.editorDocument().opened.?.file.content);
+    try testing.expect(source.rt.editor_syntax.input_stamp == null);
+    try testing.expect(source.rt.editor_syntax.origin_state.?.current == null);
+    try testing.expect(source.rt.editor_syntax.origin_state.?.receipt == null);
+}
+
+test "shared change origin product 훼손한 다섯 이전 증명은 계산으로 복귀하고 정상 전후 대조는 재사용한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const source = try undoFixture(&fx, a, "change-origin-stale.zig", "fn f() void {\n _ = 1;\n}\n");
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    const peer = try pane_ops.splitSharedEditorPane(fx.session, .horizontal, false);
+    peer.rt.editor_selection = editor_selection.Selection.at(0);
+    fx.leaf_rect.w /= 2;
+    try sharedOriginInput(&fx, source, peer, source, null);
+    for (0..5) |kind| {
+        try sharedOriginInput(&fx, source, peer, source, 1);
+        const proofs = peer.rt.editor_syntax.origin_state.?;
+        switch (kind) {
+            0 => proofs.current.?.origin.serial += 100,
+            1 => proofs.current.?.resource.generation += 1,
+            2 => proofs.current.?.resource.grammar += 1,
+            3 => proofs.current = null,
+            else => syntax_color.reparse(&peer.rt.editor_syntax, peer.rt.editorDocument().opened.?.file.content),
+        }
+        try sharedOriginInput(&fx, source, peer, source, 0);
+        try sharedOriginInput(&fx, source, peer, source, 1);
+    }
+}
+
+test "shared change origin product 증명 할당 실패와 발급 부재는 완료 입력 증명을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const source = try undoFixture(&fx, a, "change-origin-oom.zig", "fn f() void {\n _ = 1;\n}\n");
+    const doc = source.rt.editorDocument().opened.?;
+    const lease = source.rt.editor_document_lease.?;
+    const identity = lease.owner.identity(lease).?;
+    var state = syntax_color.openBudgeted(doc.file.content, source.rt.editor_grammar, 0);
+    defer state.deinit(a);
+    var failing = testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    const reserved = fx.session.editor_documents.reserveSyntaxOrigin(lease, doc.file.revision);
+    syntax_color.updateForInputWithOrigin(&state, failing.allocator(), doc.file.content, null, doc.file.lines, identity, doc.file.revision, null, reserved);
+    try testing.expect(failing.has_induced_failure);
+    try testing.expect(state.origin_state == null);
+    try testing.expect(syntax_color.matchesInput(&state, identity, doc.file.revision));
+    syntax_color.reparse(&state, doc.file.content);
+    syntax_color.updateForInputWithOrigin(&state, a, doc.file.content, null, doc.file.lines, identity, doc.file.revision, null, null);
+    try testing.expect(syntax_color.matchesInput(&state, identity, doc.file.revision));
+    try testing.expect(state.origin_state.?.current == null);
+    try testing.expect(state.origin_state.?.receipt == null);
+    try testing.expectEqualStrings(doc.file.content, source.rt.editorDocument().opened.?.file.content);
+}
+
+test "shared change origin product 세 뷰와 직접 재파싱 및 제공 뷰 닫기가 현재 결과를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const source = try undoFixture(&fx, a, "change-origin-three.zig", "fn f() void {\n _ = 1;\n}\n");
+    source.rt.editor_selection = editor_selection.Selection.at(0);
+    const original_pane = pane_ops.activePane(fx.session);
+    const original_index = std.mem.indexOfScalar(*Term, original_pane.terms.items, source).?;
+    const peer = try pane_ops.splitSharedEditorPane(fx.session, .horizontal, false);
+    const third = try pane_ops.splitSharedEditorPane(fx.session, .horizontal, false);
+    const views = [_]*Term{ source, peer, third };
+    for (views) |view| view.rt.editor_selection = editor_selection.Selection.at(0);
+    fx.leaf_rect.w /= 4;
+    try testing.expect(insertText(fx.session, source, " "));
+    for (0..8) |i| {
+        // 늦은 뷰의 이전 트리가 실제 문서와 다른 경우에도 제공자의 범위를 그대로 쓰지 않는다.
+        if (i == 6) syntax_color.reparse(&third.rt.editor_syntax, "fn stale() void {\n _ = 9;\n}\n");
+        var calculated: u64 = 0;
+        var reused: u64 = 0;
+        for (views) |view| {
+            calculated += view.rt.editor_syntax.provider.?.stats.calculated_change_ranges;
+            reused += view.rt.editor_syntax.provider.?.stats.reused_change_ranges;
+        }
+        try testing.expect(insertText(fx.session, views[i % views.len], " "));
+        var next_calculated: u64 = 0;
+        var next_reused: u64 = 0;
+        for (views) |view| {
+            next_calculated += view.rt.editor_syntax.provider.?.stats.calculated_change_ranges;
+            next_reused += view.rt.editor_syntax.provider.?.stats.reused_change_ranges;
+            try foldMarksReady(&fx, view);
+            try expectSharedParseOutputs(view, a);
+        }
+        const copied = next_reused - reused;
+        try testing.expectEqual(@as(u64, 3), next_calculated - calculated + copied);
+        // 직접 재파싱한 뷰의 증명은 비우고, 이후 입력에서 새 계보로 다시 합류한다.
+        if (i != 6) try testing.expectEqual(@as(u64, 2), copied) else try testing.expect(copied < 2);
+    }
+    fx.term = peer;
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, original_pane, original_index);
+    try sharedOriginInput(&fx, peer, third, peer, 1);
 }
 
 test "shared parse reuse product 양쪽 입력 Undo Redo와 원본 닫기 뒤 자체 파싱을 대조한다" {

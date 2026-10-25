@@ -6,6 +6,8 @@ const history_links = @import("history/links.zig");
 
 /// 다른 호스트로 전달할 문서 신원이다. owner는 역참조하지 않는 process-local 식별값이다.
 pub const DocumentIdentity = struct { owner: usize, slot: usize, generation: u64 };
+/// 저장하지 않는 구문 스냅샷 계보. 실제 native 복사 성공 때만 다른 뷰로 전달한다.
+pub const SyntaxOrigin = struct { document: DocumentIdentity, revision: u64, serial: u64 };
 pub const Handle = struct { slot: usize, generation: u64 };
 pub const Kind = enum { view, read, request };
 /// 복사본은 같은 참조다. 별도 수명이 필요하면 retain으로 새 참조를 발급받는다.
@@ -20,6 +22,8 @@ const Document = struct {
     state: document_state.State,
     resource_allocator: std.mem.Allocator,
     refs: std.ArrayList(Reference),
+    // State 교체·Undo·같은 본문 복원으로 번호가 되감기지 않도록 registry 문서가 소유한다.
+    syntax_origin_last: u64 = 0,
 };
 const Slot = struct { generation: u64 = 1, document: ?*Document = null };
 
@@ -118,6 +122,16 @@ pub const Registry = struct {
     pub fn identity(self: *const Registry, lease: Lease) ?DocumentIdentity {
         _ = self.get(lease) orelse return null;
         return .{ .owner = @intFromPtr(self), .slot = lease.document.slot, .generation = lease.document.generation };
+    }
+
+    /// 번호 예약은 본문·이력을 바꾸거나 할당하지 않는다. 실패한 native 갱신의 예약도 재사용하지 않는다.
+    /// 신원·리비전 부재나 고갈은 구문 최적화만 포기하며 입력 실패로 전달하지 않는다.
+    pub fn reserveSyntaxOrigin(self: *Registry, lease: Lease, revision: u64) ?SyntaxOrigin {
+        const doc = self.find(lease) orelse return null;
+        const opened = doc.state.opened orelse return null;
+        if (opened.file.revision != revision or doc.syntax_origin_last == std.math.maxInt(u64)) return null;
+        doc.syntax_origin_last += 1;
+        return .{ .document = .{ .owner = @intFromPtr(self), .slot = lease.document.slot, .generation = lease.document.generation }, .revision = revision, .serial = doc.syntax_origin_last };
     }
 
     /// 문서 소유 경로·이력의 새 할당도 같은 allocator를 써야 해제 짝이 유지된다.
@@ -494,4 +508,94 @@ test "syntax input stamp registry는 해제된 참조와 슬롯 재사용을 구
     try testing.expectEqual(first.slot, next.slot);
     try testing.expect(first.generation != next.generation);
     try testing.expect(try registry.release(replacement));
+}
+
+fn syntaxOriginPrepared() !document_state.State {
+    const file = try @import("edit_doc.zig").EditableFile.init(testing.allocator, "body\n", false);
+    return .{ .opened = .{ .file = file, .saved_hash = document_state.contentHash(file.content) } };
+}
+
+test "change origin registry 공유 참조는 같은 발급기를 사용하고 독립 문서는 신원이 다르다" {
+    var registry: Registry = .{ .allocator = testing.allocator };
+    defer registry.deinit() catch unreachable;
+    var prepared = try syntaxOriginPrepared();
+    defer prepared.clear(testing.allocator);
+    const view = try registry.create(&prepared, testing.allocator);
+    defer _ = registry.release(view) catch false;
+    const peer = try registry.retain(view, .view);
+    defer _ = registry.release(peer) catch false;
+    const first = registry.reserveSyntaxOrigin(view, 0).?;
+    const second = registry.reserveSyntaxOrigin(peer, 0).?;
+    try testing.expectEqual(@as(u64, 1), first.serial);
+    try testing.expectEqual(@as(u64, 2), second.serial);
+    try testing.expectEqualDeep(first.document, second.document);
+    try testing.expectEqualDeep(registry.identity(view).?, first.document);
+    try testing.expectEqual(@as(usize, 2), registry.viewCount(view).?);
+    prepared = try syntaxOriginPrepared();
+    const independent = try registry.create(&prepared, testing.allocator);
+    defer _ = registry.release(independent) catch false;
+    const other = registry.reserveSyntaxOrigin(independent, 0).?;
+    try testing.expectEqual(@as(u64, 1), other.serial);
+    try testing.expect(!std.meta.eql(first.document, other.document));
+}
+
+test "change origin registry 현재 리비전과 살아 있는 참조 및 슬롯 세대를 요구한다" {
+    var registry: Registry = .{ .allocator = testing.allocator };
+    defer registry.deinit() catch unreachable;
+    var other: Registry = .{ .allocator = testing.allocator };
+    defer other.deinit() catch unreachable;
+    var prepared: document_state.State = .{};
+    defer prepared.clear(testing.allocator);
+    const view = try registry.create(&prepared, testing.allocator);
+    defer _ = registry.release(view) catch false;
+    try testing.expect(registry.reserveSyntaxOrigin(view, 0) == null);
+    registry.get(view).?.* = try syntaxOriginPrepared();
+    try testing.expect(registry.reserveSyntaxOrigin(view, 1) == null);
+    try testing.expect(other.reserveSyntaxOrigin(view, 0) == null);
+    const read = try registry.retain(view, .read);
+    defer _ = registry.release(read) catch false;
+    try testing.expect(!try registry.release(view));
+    try testing.expect(registry.reserveSyntaxOrigin(view, 0) == null);
+    var wrong = read;
+    wrong.kind = .view;
+    try testing.expect(registry.reserveSyntaxOrigin(wrong, 0) == null);
+    wrong = read;
+    wrong.document.generation += 1;
+    try testing.expect(registry.reserveSyntaxOrigin(wrong, 0) == null);
+    const first = registry.reserveSyntaxOrigin(read, 0).?;
+    try testing.expectEqual(@as(u64, 1), first.serial);
+    try testing.expect(try registry.release(read));
+    prepared = try syntaxOriginPrepared();
+    const replacement = try registry.create(&prepared, testing.allocator);
+    defer _ = registry.release(replacement) catch false;
+    try testing.expect(registry.reserveSyntaxOrigin(read, 0) == null);
+    const next = registry.reserveSyntaxOrigin(replacement, 0).?;
+    try testing.expectEqual(first.document.slot, next.document.slot);
+    try testing.expect(first.document.generation != next.document.generation);
+    try testing.expectEqual(@as(u64, 1), next.serial);
+}
+
+test "change origin registry 예약 번호와 State 교체 및 고갈은 기존 문서를 보존한다" {
+    var registry: Registry = .{ .allocator = testing.allocator };
+    defer registry.deinit() catch unreachable;
+    var prepared = try syntaxOriginPrepared();
+    defer prepared.clear(testing.allocator);
+    const view = try registry.create(&prepared, testing.allocator);
+    defer _ = registry.release(view) catch false;
+    _ = registry.reserveSyntaxOrigin(view, 0).?;
+    const unused = registry.reserveSyntaxOrigin(view, 0).?;
+    const origin_model = @import("syntax/origin.zig");
+    const live: origin_model.Resource = .{ .document = registry.identity(view).?, .revision = 0, .parser = 1, .generation = 1, .grammar = 1 };
+    try testing.expect(origin_model.parsed(live, live, unused) == null);
+    const state = registry.get(view).?;
+    state.clear(testing.allocator);
+    state.* = try syntaxOriginPrepared();
+    const next = registry.reserveSyntaxOrigin(view, 0).?;
+    try testing.expectEqual(@as(u64, 3), next.serial);
+    registry.find(view).?.syntax_origin_last = std.math.maxInt(u64);
+    try testing.expect(registry.reserveSyntaxOrigin(view, 0) == null);
+    try testing.expectEqual(std.math.maxInt(u64), registry.find(view).?.syntax_origin_last);
+    try testing.expectEqualStrings("body\n", registry.get(view).?.opened.?.file.content);
+    try testing.expectEqual(@as(u64, 0), registry.get(view).?.opened.?.file.revision);
+    try testing.expectEqual(@as(usize, 1), registry.viewCount(view).?);
 }

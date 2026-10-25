@@ -527,6 +527,9 @@ pub const Provider = struct {
         query_spans_outside: u64 = 0,
         /// 다른 뷰의 현재 트리 사본을 수락한 횟수. 실제 파싱 호출 수와 구분한다.
         reused_parses: u64 = 0,
+        /// 실제 C 범위 계산과 증명된 값 가져오기를 구분한다. 포화돼도 입력은 계속한다.
+        calculated_change_ranges: u64 = 0,
+        reused_change_ranges: u64 = 0,
     };
 
     /// 지금 트리의 노드 수(`ts_node_descendant_count` — 뿌리 포함). 트리가 없으면 0. 판정자가 「트리 전체를 걸었나」를 견준다.
@@ -571,8 +574,19 @@ pub const Provider = struct {
     /// caller가 현재 입력임을 증명한 완료 트리를 빌려 쓰되 parser와 변경 범위는 이 뷰가 소유한다.
     /// 복제부터 준비하므로 복제 실패는 기존 파싱으로 돌아갈 수 있고, 다른 문맥에는 손대지 않는다.
     pub fn onEditFromParsed(self: *Provider, parsed: *const Provider, edit: ?Edit) bool {
+        return self.adoptParsed(parsed, edit, false);
+    }
+
+    /// 호출자는 두 이전 트리가 실제 복사 계보·입력·편집까지 같은 판임을 증명해야 한다.
+    /// 범위 값만 가져오며 캐시가 소비하는 이전/현재 세대는 수신 뷰 자신의 값으로 기록한다.
+    pub fn onEditFromMatchingPrior(self: *Provider, parsed: *const Provider, edit: Edit) bool {
+        return self.adoptParsed(parsed, edit, true);
+    }
+
+    fn adoptParsed(self: *Provider, parsed: *const Provider, edit: ?Edit, reuse_changes: bool) bool {
         const ready = parsed.tree orelse return false;
         if (self == parsed or self.parser == parsed.parser or self.tree == parsed.tree or self.slot.language != parsed.slot.language) return false;
+        const shared = if (reuse_changes) parsed.retainedChanges() else null;
         const next = c.ts_tree_copy(ready) orelse return false;
         c.ts_parser_reset(self.parser);
         if (self.tree) |previous| {
@@ -588,7 +602,15 @@ pub const Provider = struct {
                 self.sticky_summary.edit(&change);
                 c.ts_tree_edit(previous, &change);
                 // 다른 뷰의 범위를 복사하면 이전 트리가 달랐던 뷰에서 조용히 어긋난다.
-                self.noteChanged(previous, next);
+                if (shared) |batch| {
+                    self.changed_all = false;
+                    self.changed_len = @intCast(batch.ranges.len);
+                    for (batch.ranges, 0..) |range, i| self.changed[i] = .{ .start = range.lo, .end = range.hi };
+                    @memcpy(self.fold_changes[0..batch.ranges.len], batch.ranges);
+                    self.fold_changes_len = @intCast(batch.ranges.len);
+                    self.fold_changes_before = self.tree_gen;
+                    self.stats.reused_change_ranges +|= 1;
+                } else self.noteChanged(previous, next);
             } else {
                 self.sticky_summary.invalidate();
                 self.changed_all = true;
@@ -758,6 +780,7 @@ pub const Provider = struct {
     /// 「모름」이 아무도 안 읽어 남아 **편집 첫 번째가 늘 처음부터**였다(큰 문서에서 처음 훑기가 스무 프레임 넘게 걸려, 그동안 치면 색이 영영 안
     /// 돌아왔다 — `BRPERF` 실측 `partials=0` · 적대적 검증 전 벤치).
     fn noteChanged(self: *Provider, old: *c.TSTree, new: *c.TSTree) void {
+        self.stats.calculated_change_ranges +|= 1;
         self.changed_all = false;
         self.changed_len = 0;
         self.fold_changes_before = null;
@@ -1195,10 +1218,10 @@ pub const Provider = struct {
         return fold_cache.hasKind(kinds, raw);
     }
 
-    // 두 소비자가 같은 보관 판을 읽게 한다. 슬라이스는 다음 파싱 전의 동기 조회에서만 빌린다.
-    fn retainedChanges(self: *const Provider) ?fold_cache.Changes {
+    /// 소비자가 같은 보관 판을 읽는다. 슬라이스는 다음 파싱 전의 동기 조회에서만 빌린다.
+    pub fn retainedChanges(self: *const Provider) ?fold_cache.Changes {
         const before_gen = self.fold_changes_before orelse return null;
-        if (before_gen == std.math.maxInt(u64)) return null;
+        if (before_gen == std.math.maxInt(u64) or before_gen + 1 != self.tree_gen) return null;
         return .{ .before = before_gen, .after = before_gen + 1, .ranges = self.fold_changes[0..self.fold_changes_len] };
     }
 

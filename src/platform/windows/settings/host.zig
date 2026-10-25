@@ -163,6 +163,15 @@ pub const Host = struct {
             self.form.state.setMessage(maru.i18n.t(.app_save_failed));
         };
     }
+    pub fn preedit(self: *Host, text: []const u8) void {
+        if (self.job != null) {
+            self.form.state.setEditPreedit("");
+            self.form.state.setSearchPreedit("");
+            return;
+        }
+        self.form.state.setEditPreedit(text);
+        if (self.form.state.editing) self.form.state.setSearchPreedit("") else self.form.state.setSearchPreedit(text);
+    }
     pub fn pointer(self: *Host, event: maru.chrome.input.PointerEvent, props: maru.chrome.props.ChromeProps, tokens: *const maru.chrome.Tokens) void {
         if (event.phase == .up and event.button == .left and self.swallow_left_up) {
             self.swallow_left_up = false;
@@ -335,6 +344,84 @@ test "Windows settings and sidebar serialize partial config writes" {
 }
 
 const wheel_test_props: maru.chrome.props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 1000, .backing_height_px = 240 } };
+test "Windows settings composition paints preview at the only active caret" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tk = wheelTestTokens();
+    var state: widget.State = .{};
+    state.show(); state.startSearch(); state.appendSearchCp('.'); state.enterEdit("a");
+    state.setEditPreedit("\xea\xb0\x80");
+    const rows = [_]widget.FieldRow{.{ .label = "value", .kind = .{ .text = "" } }};
+    var ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
+    try widget.view(&state, &.{}, &rows, &.{}, wheel_test_props, &tk, a, &ops);
+    var cursors: usize = 0; var preview = false;
+    const caret = widget.editCaretRect(&state, &.{}, &rows, wheel_test_props, &tk).?;
+    for (ops.items) |op| {
+        if (op == .fill and op.fill.role == .cursor) cursors += 1;
+        if (op == .text) for (op.text.runs) |run| {
+            if (std.mem.eql(u8, run.text, "\xea\xb0\x80")) {
+                preview = true;
+                try std.testing.expectEqual(caret.x, op.text.origin.x);
+                try std.testing.expectEqual(caret.y, op.text.origin.y);
+            }
+        };
+    }
+    try std.testing.expectEqual(@as(usize, 1), cursors);
+    try std.testing.expect(preview);
+    try std.testing.expectEqualStrings("a", state.editText());
+}
+test "Windows settings composition routes preview without changing the filter" {
+    var cfg: maru.config.Config = .{};
+    var host: Host = .{ .a = std.testing.allocator, .config_arena = std.testing.allocator, .io = std.testing.io, .cfg = &cfg, .path = null };
+    host.form.state.show(); host.form.state.startSearch(); host.form.state.appendSearchCp('.'); host.form.state.enterEdit("old");
+    var bytes = [_]u8{0xea, 0xb0, 0x80};
+    host.preedit(&bytes); bytes[0] = 0;
+    try std.testing.expectEqualStrings("\xea\xb0\x80", host.form.state.editPreedit());
+    try std.testing.expectEqualStrings("", host.form.state.searchPreedit());
+    try std.testing.expectEqualStrings(".", host.form.state.searchQuery());
+    try std.testing.expectEqualStrings("old", host.form.state.editText());
+    host.form.state.cancelEdit(); host.preedit("search");
+    try std.testing.expectEqualStrings("", host.form.state.editPreedit());
+    try std.testing.expectEqualStrings("search", host.form.state.searchPreedit());
+}
+test "Windows settings composition cancels and commits without replaying preview" {
+    var state: widget.State = .{};
+    state.show(); state.enterEdit("old"); state.setEditPreedit("pending"); state.cancelEdit(); state.enterEdit("new");
+    try std.testing.expectEqualStrings("", state.editPreedit());
+    state.setEditPreedit("\xea\xb0\x80"); state.appendEditCp(0xAC00);
+    try std.testing.expectEqualStrings("new\xea\xb0\x80", state.editText());
+    try std.testing.expectEqualStrings("", state.editPreedit());
+    state.setEditPreedit("pending"); state.hide(); state.show(); state.enterEdit("next");
+    try std.testing.expectEqualStrings("", state.editPreedit());
+}
+test "Windows settings composition bounds UTF8 and rejects invalid previews" {
+    var state: widget.State = .{};
+    state.show(); state.enterEdit("");
+    var long: [36]u8 = undefined;
+    for (0..12) |i| @memcpy(long[i*3..][0..3], "\xea\xb0\x80");
+    state.setEditPreedit(&long);
+    try std.testing.expectEqual(@as(usize, 30), state.editPreedit().len);
+    _ = try std.unicode.Utf8View.init(state.editPreedit());
+    state.setEditPreedit(&.{0xff});
+    try std.testing.expectEqualStrings("", state.editPreedit());
+    state.cancelEdit(); state.setEditPreedit("inactive");
+    try std.testing.expectEqualStrings("", state.editPreedit());
+}
+test "Windows settings composition does not draw past the field edge" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tk = wheelTestTokens();
+    var state: widget.State = .{};
+    state.show(); state.enterEdit("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); state.setEditPreedit("\xea\xb0\x80");
+    const rows = [_]widget.FieldRow{.{ .label = "value", .kind = .{ .text = "" } }};
+    var ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
+    try widget.view(&state, &.{}, &rows, &.{}, wheel_test_props, &tk, arena.allocator(), &ops);
+    for (ops.items) |op| if (op == .text) {
+        for (op.text.runs) |run| try std.testing.expect(!std.mem.eql(u8, run.text, "\xea\xb0\x80"));
+    };
+}
+
 fn inlineCaretMatchesPaint(kind: widget.FieldRow.Kind) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

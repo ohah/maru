@@ -11990,7 +11990,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             // Windows 가 미리보기 렌더를 따로 만들지 않는다(§2i).
             .preedit_changed => {
                 if (settings_host.form.state.open) {
-                    if (settings_host.form.state.searching) settings_host.form.state.setSearchPreedit(window.preeditText());
+                    settings_host.preedit(window.preeditText());
                     continue;
                 }
                 if (terminal_popup.state.open or file_close_waiting or initial_open.job != null or file_notice.open or confirm_state.open) continue;

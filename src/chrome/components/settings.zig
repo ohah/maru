@@ -169,6 +169,9 @@ pub const State = struct {
     editing: bool = false,
     edit_buf: [edit_cap]u8 = undefined,
     edit_len: usize = 0,
+    // Composition is a preview, never part of the value sent to persistence.
+    edit_preedit_buf: [search_preedit_cap]u8 = undefined,
+    edit_preedit_len: usize = 0,
     /// palette_grid 행에서 선택된 셀(0~15). ←→가 이 값을 옮기고(platform이 moveGridCell), Enter/hex 클릭이 이 셀을
     /// 편집한다. 행 1개에 16칸이라 폼의 1D selected와 별도로 둔다(color 피커 드래그 상태가 별도인 것과 동형).
     grid_cell: usize = 0,
@@ -273,6 +276,7 @@ pub const State = struct {
     }
     /// 검색 시작(`/`) — 빈 쿼리로 모드 진입. 켜는 동안 selected는 보존(필터 후 platform이 clamp).
     pub fn startSearch(self: *State) void {
+        self.cancelEdit();
         self.searching = true;
         self.invalidateSearchIME();
         self.search_len = 0;
@@ -409,6 +413,8 @@ pub const State = struct {
     /// 중간에서 자르지 않게 경계로 back-up한다(리뷰 #823 — 잘린 멀티바이트는 무효 UTF-8 → view/backspace 오작동).
     pub fn enterEdit(self: *State, value: []const u8) void {
         self.invalidateSearchIME();
+        self.edit_preedit_len = 0;
+        self.search_preedit_len = 0;
         self.clearMessage(); // 새 편집 — 지난 안내(「편집 칸보다 깁니다」 등)는 이 행의 말이 아니다
         const n = width.truncateToBoundary(value, edit_cap); // 버퍼 초과는 UTF-8 경계로 자름(단일 출처 — #823)
         @memcpy(self.edit_buf[0..n], value[0..n]);
@@ -428,12 +434,26 @@ pub const State = struct {
     }
     pub fn cancelEdit(self: *State) void {
         self.editing = false;
+        self.edit_preedit_len = 0;
+    }
+    pub fn setEditPreedit(self: *State, bytes: []const u8) void {
+        self.edit_preedit_len = 0;
+        if (!self.open or !self.editing or self.picking) return;
+        _ = std.unicode.Utf8View.init(bytes) catch return;
+        const n = width.truncateToBoundary(bytes, search_preedit_cap);
+        @memcpy(self.edit_preedit_buf[0..n], bytes[0..n]);
+        self.edit_preedit_len = n;
+    }
+    pub fn editPreedit(self: *const State) []const u8 {
+        if (!self.open or !self.editing or self.picking) return "";
+        return self.edit_preedit_buf[0..self.edit_preedit_len];
     }
     pub fn editText(self: *const State) []const u8 {
         return self.edit_buf[0..self.edit_len];
     }
     /// 코드포인트 한 개를 UTF-8로 버퍼에 추가(넘치거나 인코딩 불가면 무시 — 고정 버퍼).
     pub fn appendEditCp(self: *State, cp: u21) void {
+        self.edit_preedit_len = 0;
         var tmp: [4]u8 = undefined;
         const n = std.unicode.utf8Encode(cp, &tmp) catch return;
         if (self.edit_len + n > edit_cap) return self.setTooLongMessage(); // 넘친 입력은 버리고 알린다(조용히 끊지 않는다)
@@ -756,13 +776,13 @@ pub fn view(
             try modal_box.text(box, box.inner_x, 0, committed, .accent_bar, arena, out);
             const committed_cols = overlay_input.displayCols(committed);
             const caret_x = box.inner_x + @as(i32, @intCast(committed_cols * box.cw));
-            const preedit = state.searchPreedit();
+            const preedit = if (state.editing) "" else state.searchPreedit();
             // 조합 글자는 남은 칸으로 truncate — 좁은 모달에서 긴 조합이 박스 우단을 넘지 않게(다른 폼 값 truncate와 같은 규율).
             if (preedit.len > 0) {
                 const shown_pre = try overlay_input.truncateToCols(arena, preedit, box.inner_cols -| committed_cols);
                 if (shown_pre.len > 0) try modal_box.text(box, caret_x, 0, shown_pre, .accent_bar, arena, out);
             }
-            try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = modal_box.rowY(box, 0), .w = box.cw, .h = box.ch }, .role = .cursor } });
+            if (!state.editing) try out.append(arena, .{ .fill = .{ .rect = .{ .x = caret_x, .y = modal_box.rowY(box, 0), .w = box.cw, .h = box.ch }, .role = .cursor } });
         }
     } else {
         const title = if (rows.len > l.win_len)
@@ -952,6 +972,20 @@ pub fn view(
     }
     // (배너가 떠 있어도 아래 드롭다운 팝업은 그린다 — 예전에는 배너 갈래가 여기서 돌아가 팝업이 안 보인 채 ↑↓ 가 값을 바꿨다;
     // 계획 workspace-trust WT5b-1 적대적 검증.)
+
+    // Paint composition at its start caret, clipped to the field's right edge.
+    // The committed edit buffer remains unchanged until native commit events.
+    if (editCaretRect(state, sections, rows, p, tk)) |caret| {
+        const ctrl = fieldControlRect(l, state.selected - l.win_start);
+        const right = @as(i64, ctrl.x) + ctrl.w;
+        const available: u32 = @intCast(@divTrunc(@max(0, right - caret.x), @as(i64, box.cw)));
+        const shown = try overlay_input.truncateToCols(arena, state.editPreedit(), available);
+        if (shown.len > 0) {
+            const runs = try arena.alloc(draw.Run, 1);
+            runs[0] = .{ .text = shown };
+            try out.append(arena, .{ .text = .{ .origin = .{ .x = caret.x, .y = caret.y }, .runs = runs, .role = .accent_bar } });
+        }
+    }
 
     // enum/font 드롭다운 팝업(열려 있으면) — 폼 위 최상위 오버레이. 앵커=선택 행의 축소 control rect(그 아래에 목록이
     // 뜬다). 항목 라벨은 platform이 dropdown_items로 주입(빈 슬라이스면 무동작). 선택 행이 보이는 창 안일 때만.

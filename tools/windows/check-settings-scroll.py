@@ -10,8 +10,9 @@ No physical keyboard, mouse or IME behavior is claimed.
 import argparse,contextlib,ctypes as c,hashlib,json,os,re,struct,time
 from ctypes import wintypes as w
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('--state',type=Path,required=True);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--old-control',action='store_true');p.add_argument('--stale-context-control',action='store_true');p.add_argument('--inline-caret',action='store_true');args=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--state',type=Path,required=True);p.add_argument('--binary',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--old-control',action='store_true');p.add_argument('--stale-context-control',action='store_true');p.add_argument('--inline-caret',action='store_true');p.add_argument('--double-caret-control',action='store_true');args=p.parse_args()
 if args.old_control and args.stale_context_control:p.error('Control modes are mutually exclusive')
+if args.double_caret_control and (not args.inline_caret or args.old_control or args.stale_context_control):p.error('Double-caret control requires only inline-caret mode')
 if not __debug__:p.error('Run without Python optimization so fixture and clipboard guards remain active')
 if os.name!='nt':p.error('Windows is required')
 s=json.loads(args.state.read_text(encoding='utf-8-sig'));binary=json.loads(args.binary.read_text());root=Path(s['root']).resolve();assert '.zig-cache' in root.parts
@@ -114,6 +115,12 @@ def wheel(delta,horizontal=False):
     send(0x20e if horizontal else 0x20a,(delta&65535)<<16,((point.y&65535)<<16)|(point.x&65535));time.sleep(.18)
 def crop(path):
     raw=path.read_bytes();return b''.join(raw[54+(y*1000+500)*4:54+(y*1000+900)*4] for y in range(100,220))
+def search_cursor_block(path):
+    # A 6x12 solid bright patch identifies the 8x16 fixture cursor, excluding
+    # thin glyph strokes. Restrict this oracle to the stable title-row region.
+    raw=path.read_bytes()
+    return any(all(min(raw[54+((y+dy)*1000+x+dx)*4:54+((y+dy)*1000+x+dx)*4+3])>=240 for dy in range(12) for dx in range(6)) for y in range(50,70) for x in range(400,650))
+
 def search_all():
     # Cross-section search guarantees overflowing rows without resizing the app.
     with neutral_keyboard():send(0x102,ord('/'),1);send(0x102,ord('.'),1)
@@ -145,8 +152,16 @@ try:
         key(0x1b)
         with neutral_keyboard():
             for cp in '/font.size':send(0x102,ord(cp),1)
-        time.sleep(.25);key(0x0d)
-        capture('inline-number-caret')
+        time.sleep(.25)
+        assert search_cursor_block(capture('inline-search-owner')),'search cursor oracle has no positive control'
+        key(0x0d)
+        edit_capture=capture('inline-number-caret')
+        if args.double_caret_control:
+            assert search_cursor_block(edit_capture),'old binary did not reproduce the double caret'
+            record('old binary reproduces inactive search cursor during inline edit')
+        else:
+            assert not search_cursor_block(edit_capture),'inactive search cursor remains during inline edit'
+            record('inactive search cursor disappears while inline edit owns input')
         key(0x1b) # cancel edit, retaining the filter
         record('filtered numeric edit opened and canceled without persisting')
     close_settings();send(0x10)
@@ -170,7 +185,7 @@ try:
         assert inline and int(inline[1])>0,'inline edit never owned IMM caret requests'
         record('inline editor overrides retained search IMM request owner')
     record('normal exit, config preserved and no shell input')
-    args.output.write_text(json.dumps({'binary':binary,'checks':checks,'captures':captures,'exit':code.value,'old_control':args.old_control,'stale_context_control':args.stale_context_control,'system_wheel_lines':lines.value,'input':'synthetic owned HWND; pixels and native wheel messages; no physical input claim'},indent=2))
+    args.output.write_text(json.dumps({'binary':binary,'checks':checks,'captures':captures,'exit':code.value,'old_control':args.old_control,'stale_context_control':args.stale_context_control,'inline_caret':args.inline_caret,'double_caret_control':args.double_caret_control,'system_wheel_lines':lines.value,'input':'synthetic owned HWND; pixels and native wheel messages; no physical input claim'},indent=2))
 finally:
     if k.WaitForSingleObject(process,0)!=0:
         try:check_owner();u.SetWindowPos(h,w.HWND(-2),0,0,0,0,0x13);u.ShowWindow(h,0)

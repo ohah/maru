@@ -112,7 +112,9 @@ pub const Form = struct {
                     else => self.state.enterEdit(value),
                 }
             },
-            .selection_changed => {
+            .selection_changed, .search_changed, .section_changed => {
+                // Moving text ownership away retires the old transaction too;
+                // otherwise the next field would inherit an EditInProgress lock.
                 if (!self.state.editing and !self.state.dropdown.open and self.edit.active)
                     return .{ .request = self.edit.rollback(), .finish = true };
             },
@@ -194,6 +196,25 @@ test "Settings form cancellation restores the original key" {
     try std.testing.expect(result.finish);
     try std.testing.expectEqualStrings("font.size", result.request.?.key.slice());
     try std.testing.expect(!result.request.?.persist);
+}
+
+test "Settings form search and section focus changes retire the old edit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]widget.Action{ .search_changed, .section_changed }) |intent| {
+        var form: Form = .{};
+        setTestQuery(&form, "font.size");
+        const f = try form.frame(a, .{});
+        _ = try form.action(a, .{}, f, .toggle);
+        if (intent == .search_changed) form.state.startSearch() else form.state.selectSection(0);
+        const result = try form.action(a, .{}, f, intent);
+        try std.testing.expect(result.finish);
+        try std.testing.expectEqualStrings("font.size", result.request.?.key.slice());
+        try std.testing.expect(!result.request.?.persist);
+        form.complete(result.request.?, result.finish, true);
+        try std.testing.expect(!form.edit.active);
+    }
 }
 test "Settings form stale completion cannot close the new editor" {
     var form: Form = .{};

@@ -108,8 +108,10 @@ Undo 본문 불일치, Undo 이력 두 개 증가.
 
 최신 main 반영 후 병렬 검증 한 번에서 Rust는 bad version의 didChange/didSave를 보냈으나
 60초 안에 오류 진단을 내지 않아 `TypeErrorNotPublished`로 실패했다. 같은 바이너리의 별도
-Rust 실행은 통과했다. 초기 분석·저장 시점의 간헐적 차이로 의심하지만 원인은 확정하지 못했다.
+Rust 실행은 통과했다. 당시에는 초기 분석·저장 시점의 간헐적 차이로 의심했으며 원인을 확정하지 못했다.
 실패 산출물은 보존하며 runner가 전체 사례를 자동 재시도해 성공으로 덮지 않는다.
+후속 조사에서 SDK의 취소·push 재발행 생략과 Maru의 push 전용 조합을 확인했다.
+재현·대조와 수정 방향은 [Rust 진단 미수신 조사](rust-diagnostics.md)를 참조한다.
 
 ReleaseFast의 Rust 완성 요청도 한 번 null을 반환했다. 호버·정의와 같은 제한된
 변경 없는 읽기 재시도를 완성에도 적용하고 시도 수와 모든 null 응답을 기록한다.

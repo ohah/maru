@@ -26,6 +26,7 @@ def fixture():
             phase['search']['owner_generation'] -= 1 << 61
     committed = copy.deepcopy(report['observations'][-1])
     committed.update(name='target_committed', terminal_bytes=0, target_hash=h('a/韓/z'))
+    report['observations'][-1]['target_hash'] = committed['target_hash']
     report['observations'].insert(-1, committed)
     return report, candidate, raw
 
@@ -40,12 +41,14 @@ class RenameVerifierTests(unittest.TestCase):
     def test_valid_control(self):
         self.check(*fixture())
 
-    def test_twenty_independent_corruptions(self):
+    def test_independent_corruptions(self):
         attacks = {
             'address_schema': lambda r,c,w: r.update(schema='maru.address-ime.v1'),
             'wrong_domain': lambda r,c,w: r['observations'][0].update(owner_generation=str(1 << 62)),
             'generation_replay': lambda r,c,w: r['observations'][4].update(owner_generation=r['observations'][0]['owner_generation']),
             'suffix_loss': lambda r,c,w: r['observations'][1].update(document_hash=h('한')),
+            'composition_target_write': lambda r,c,w: r['composition'][0].update(target_hash=h('a/韓/z')),
+            'terminal_changes_target': lambda r,c,w: r['observations'][-1].update(target_hash=h('other')),
             'early_target_write': lambda r,c,w: r['observations'][2].update(target_hash=h('a/韓/z')),
             'missing_target_write': lambda r,c,w: r['observations'][-2].update(target_hash=h('a//z')),
             'commit_keeps_open': lambda r,c,w: r['observations'][-2].update(open=1),
@@ -63,7 +66,7 @@ class RenameVerifierTests(unittest.TestCase):
             'raw_text_drift': lambda r,c,w: w[0]['opened']['search'].update(query_hash=1),
             'raw_screen_change': lambda r,c,w: w[0]['opened']['counters'].update(base_screen_generation=99),
         }
-        self.assertEqual(len(attacks), 20)
+        self.assertEqual(len(attacks), 22)
         for name, attack in attacks.items():
             r,c,w = fixture()
             attack(r,c,w)

@@ -1,6 +1,6 @@
 # 이름 변경·다른 이름으로 저장의 IME 범위 문맥
 
-상태: 구현·실제 입력 diagnostic·실패 주입 검증 완료. 실제 PNG/OCR 검증은 화면 기록 권한 대기.
+상태: 구현·실제 입력 diagnostic·실패 주입·후보창 PNG/OCR 검증 완료. PR #4583 CI 대기.
 
 ## 원인과 범위
 
@@ -49,7 +49,7 @@ owner는 rename bit 61, 주소창 bit 62, palette bit 63으로 분리하고 고�
 중립 모델 검증은 Debug/ReleaseFast에서 NFD·UTF-16·잘못된 surrogate 범위·할당 실패·거절 후 blur를
 다룬다. 기존 저장 152개와 주소창 회귀도 별도로 확인한다. 제품 사본에서 NFD 삽입/조합 정규화,
 거절 guard 제거, grapheme 분할, replacement 무시 결함을 각각 주입했을 때 회귀 검사가 실패했다.
-도구의 20가지 손상 기록 검사는 합성 대조군이며 실제 GUI/PNG 증거와 구분한다.
+도구의 22가지 손상 기록 검사는 합성 대조군이며 실제 GUI/PNG 증거와 구분한다.
 
 GUI 도구는 `tools/rename-ime`에 두고 공통 launcher·실제 HID·WindowServer reducer·PNG/OCR을
 재사용한다. 긴 이름은 의도적인 tail clipping 때문에 caret이 같은 위치일 수 있어 이 장면에는
@@ -57,4 +57,8 @@ GUI 도구는 `tools/rename-ime`에 두고 공통 launcher·실제 HID·WindowSe
 Return 뒤에만 대상 이름이 `a/韓/z`인지 검사한다. 긴 이름 렌더는 중립 clipping 회귀가 담당한다.
 실제 입력 diagnostic은 `maru-rename-ime-20261025/diagnostic-3`에서 통과했다.
 고정 앱 SHA-256은 `974af00a5afdbf32c7e5b83b02689ce59e10fff0fec6921b9cbe8659bcfc1c55`이다.
-화면 기록 preflight=false여서 PNG/OCR 검증은 아직 미완료이며 이를 merge gate로 유지한다.
+최초 화면 기록 preflight=false 이후 같은 고정 앱의 권한을 허용하고 `live-1`에서 통과했다.
+서로 다른 후보창 5개(각 89×266, 한자 행 6개), 취소·선택·대상 이름 불변·별도 Return 확정·
+터미널 복귀·입력 소스 복원을 확인했다. 독립 PNG/OCR 검증기도 통과했고 선택/복귀 Metal PNG를
+검토했다. 추가한 조합 중·터미널 복귀 뒤의 대상 불변 검사도 동일 원본 기록에 재적용해 통과했다.
+Save As 파일 생성 GUI는 수행하지 않았으며 네이티브 저장 회귀로만 확인했다.

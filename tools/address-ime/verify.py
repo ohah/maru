@@ -36,6 +36,8 @@ def semantics(report, *, pointer_geometry=False, scene='address'):
         baseline = fixture['committed_callbacks']
         require([r['committed_callbacks'] for r in phases] == ([baseline] * 3 if marked else [baseline + 1, baseline + 2, baseline + 3]), 'composition callbacks')
         for (phase, letter) in zip(phases, ('ㅎ', '하', '한')):
+            if rename:
+                require(phase['target_hash'] == h(prefix + '/z'), 'composition changed target')
             doc(phase, prefix + letter + '/z')
             require(int(phase['owner_generation']) == owner and phase['first_responder'] and (phase['terminal_bytes'] == base) and (phase['navigate_pending'] == 0), 'composition binding')
         group = states[i * 4:i * 4 + 4] if i < 5 else states[20:24]
@@ -53,6 +55,8 @@ def semantics(report, *, pointer_geometry=False, scene='address'):
         committed = states[-2]
         require(committed['target_hash'] == h(prefix + '韓/z') and committed['open'] == 0 and committed['terminal_bytes'] == base, 'explicit target commit')
     end = states[-1]
+    if rename:
+        require(end['target_hash'] == h(prefix + '韓/z'), 'target changed after commit')
     require(end['open'] == end['palette_owner'] == 0 and int(end['owner_generation']) == 0 and (end['terminal_bytes'] == base + 1) and (not end['has_marked']) and end['first_responder'], 'terminal')
     require(len(report['geometry']) == 12, 'geometry')
     for g in report['geometry']:

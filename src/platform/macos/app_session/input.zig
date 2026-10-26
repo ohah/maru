@@ -562,6 +562,7 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
         @import("settings_ime.zig").finish(self);
         @import("find_ime.zig").finish(self);
         @import("scm_commit_ime.zig").finish(self);
+        @import("inspector_ime.zig").finish(self);
         @import("sidebar_ime.zig").finish(self);
         @import("editor/search/ime.zig").finish(self);
         @import("palette_ime.zig").finish(self);
@@ -1390,7 +1391,7 @@ pub fn imeCursorRect(self: *AppSession) ImeCursorRect {
         // 잡는다(사이드바 y는 slot 기준 근사). null이면 아래 터미널 커서로 폴백.
         .rename => settings_ops.renameCaretRect(self),
         // 세팅 검색줄 caret — buildChromeOverlayPrep이 캐시한 rect(검색 중이 아니면 null → 터미널 커서 폴백).
-        .inspector => app_session_mod.inspector_ops.caretRect(self),
+        .inspector => app_session_mod.inspector_ops.imeCaretRect(self),
         .settings => self.settings_search_caret,
         .sidebar_search => sidebar_ops.sidebarSearchCaretRect(self),
         .agent_session_search => agent_dock.agentSessionDockSearchCaretRect(self),

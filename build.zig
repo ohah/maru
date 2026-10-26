@@ -2335,6 +2335,21 @@ pub fn build(b: *std.Build) void {
     const address_field_ime_step = b.step("test-address-field-ime", "Validate address-field native IME ranges and pinned owner lifetime");
     address_field_ime_step.dependOn(&run_address_ime.step);
 
+    const inspector_search_ime_step = b.step("test-inspector-search-ime", "Validate Inspector search native ranges and input ownership");
+    const inspector_search_ime_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{ "inspector search IME host", "Live inspector" },
+    });
+    const run_inspector_search_ime = b.addRunArtifact(inspector_search_ime_tests);
+    run_inspector_search_ime.addArg("--maru-expect-tests=51");
+    run_inspector_search_ime.setCwd(b.path("."));
+    inspector_search_ime_step.dependOn(&run_inspector_search_ime.step);
+    const inspector_ime_artifact_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/inspector-ime", "-p", "test_*.py" });
+    inspector_ime_artifact_controls.setCwd(b.path("."));
+    inspector_ime_artifact_controls.has_side_effects = true;
+    inspector_search_ime_step.dependOn(&inspector_ime_artifact_controls.step);
+    if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_inspector_search_ime.step);
+
     const scm_commit_ime_step = b.step("test-scm-commit-ime", "Validate commit message native IME ranges and repo ownership");
     const scm_commit_ime_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
@@ -2806,7 +2821,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_inspector_tests = b.addRunArtifact(inspector_tests);
     run_inspector_tests.setCwd(b.path("."));
-    run_inspector_tests.addArg("--maru-expect-passed=18");
+    run_inspector_tests.addArg("--maru-expect-passed=55");
     const inspector_step = b.step("test-inspector", "Verify live inspector UI, shared snapshot and CLI contracts");
     inspector_step.dependOn(&run_inspector_tests.step);
     if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_inspector_tests.step);
@@ -4918,6 +4933,8 @@ pub fn build(b: *std.Build) void {
     const posix_host_tests = target.result.os.tag != .windows;
 
     const test_step = b.step("test", "Run all Zig tests");
+    test_step.dependOn(&inspector_ime_artifact_controls.step);
+
     test_step.dependOn(&run_inspector_rules.step);
     inline for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
         const address_model_tests = addProjectTest(b, .{
@@ -4932,6 +4949,15 @@ pub fn build(b: *std.Build) void {
     const inline_input_step = b.step("test-inline-text-input", "Validate bounded UTF-16 inline IME projections and failure atomicity");
     const owned_inline_step = b.step("test-inline-text-input-owned", "Validate dynamic IME storage, deep snapshots and allocation failure");
     inline for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
+        const inspector_ime_model_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
+            .filters = &.{"inspector search IME model"},
+        });
+        const run_inspector_ime_model = b.addRunArtifact(inspector_ime_model_tests);
+        run_inspector_ime_model.addArg("--maru-expect-tests=18");
+        inspector_search_ime_step.dependOn(&run_inspector_ime_model.step);
+        test_step.dependOn(&run_inspector_ime_model.step);
+
         const find_model_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
             .filters = &.{"find input IME"},

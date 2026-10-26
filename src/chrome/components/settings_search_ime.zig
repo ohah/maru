@@ -1,98 +1,14 @@
-//! Bounded settings-search transaction policy. UTF-16 edits stay in the shared
-//! projection; the component publishes canonical search/filter changes only at commit.
+//! Settings capacities remain unchanged while transaction semantics are shared.
 const std = @import("std");
-const input = @import("../../inline_text_input.zig");
+const shared = @import("bounded_search_ime.zig");
 pub const query_limit = 64;
 pub const marked_limit = 32;
-pub const Context = input.BoundedContext(query_limit, marked_limit);
-pub const Range = input.Range;
-pub const Result = enum { none, commit, rollback };
-pub const Key = enum { enter, backspace, other };
-pub const Decision = struct { result: Result = .none, consumed: bool };
-
-pub const State = struct {
-    context: Context = .{},
-    before: ?Context = null,
-    in_key: bool = false,
-    rejected: bool = false,
-
-    pub fn invalidate(self: *State) void {
-        self.* = .{};
-    }
-    pub fn sync(self: *State, query: []const u8, preedit: []const u8) ?*Context {
-        if (self.in_key and self.rejected) return null;
-        if (!self.context.matches(query, preedit) and !self.context.reset(query, preedit)) return null;
-        return &self.context;
-    }
-    pub fn begin(self: *State, query: []const u8, preedit: []const u8) void {
-        self.finish();
-        const context = self.sync(query, preedit) orelse {
-            self.in_key = true;
-            self.rejected = true;
-            return;
-        };
-        self.before = context.*;
-        self.in_key = true;
-    }
-    pub fn finish(self: *State) void {
-        self.before = null;
-        self.in_key = false;
-        self.rejected = false;
-    }
-    pub fn insert(self: *State, bytes: []const u8, replacement: ?Range) bool {
-        if (self.rejected) return false;
-        const before = self.context;
-        if (!self.context.insert(bytes, replacement)) {
-            self.context = before;
-            if (self.in_key) self.rejected = true;
-            return false;
-        }
-        return true;
-    }
-    pub fn marked(self: *State, bytes: []const u8, selected: Range, replacement: ?Range) bool {
-        if (self.rejected) return false;
-        const before = self.context;
-        if (!self.context.setMarked(bytes, selected, replacement)) {
-            self.context = before;
-            if (self.in_key) self.rejected = true;
-            return false;
-        }
-        // Clearing a candidate preview restores the retained committed word;
-        // deleting the preview bytes alone would erase it from the projection.
-        if (bytes.len == 0) if (before.marked) |mark| {
-            const suffix = before.len - mark.end;
-            const length = before.committed_len;
-            _ = self.context.reset(before.committed[0..length], "");
-            const at = length - @min(length, suffix);
-            self.context.selected = .{ .start = at, .end = at };
-            self.context.pending = before.pending;
-        };
-        return true;
-    }
-    pub fn end(self: *State, deleted: bool) Result {
-        if (self.rejected) {
-            if (self.before) |before| self.context = before;
-            return .rollback;
-        }
-        if (!self.context.pending) return .none;
-        if (deleted) self.context.cancelInsertedScalar();
-        return .commit;
-    }
-    pub fn finishKey(self: *State, key: ?Key, changed: bool, deleted: bool) Decision {
-        const result = self.end(deleted);
-        if (result != .none) return .{ .result = result, .consumed = true };
-        if (changed) return .{ .consumed = true };
-        const value = key orelse return .{ .consumed = true };
-        if (value == .enter and self.context.preedit().len > 0) return .{ .consumed = true };
-        if (value == .backspace and deleted) {
-            return .{ .result = if (self.context.deleteBackward()) .commit else .none, .consumed = true };
-        }
-        return .{ .consumed = false };
-    }
-    pub fn commitAll(self: *State) bool {
-        return !self.rejected and self.context.admitMarked();
-    }
-};
+pub const State = shared.StateWithLimits(query_limit, marked_limit);
+pub const Context = State.Context;
+pub const Range = shared.Range;
+pub const Result = shared.Result;
+pub const Key = shared.Key;
+pub const Decision = shared.Decision;
 
 test "settings search IME replacement preserves suffix and commit boundary" {
     var s: State = .{};

@@ -1,8 +1,13 @@
 //! Live diagnostic panel facade; pixel tree layout is shared by paint and input.
+pub const search_ime = @import("inspector/search_ime.zig");
 const panel = @import("inspector/panel.zig");
 pub const Tab = panel.Tab;
 pub const Hit = panel.Hit;
 pub const collect = panel.collect;
+pub const collectWithInput = panel.collectWithInput;
+pub const InputPaint = panel.InputPaint;
+pub const filterTextRect = panel.filterTextRect;
+pub const filterCaretRect = panel.filterCaretRect;
 pub const hit = panel.hit;
 pub const cursor = panel.cursor;
 pub const cursorForTab = panel.cursorForTab;
@@ -15,4 +20,5 @@ pub const dataControlRect = panel.dataControlRect;
 // The facade must expose the panel's geometry regression to the maru test root.
 test {
     @import("std").testing.refAllDecls(panel);
+    @import("std").testing.refAllDecls(search_ime);
 }

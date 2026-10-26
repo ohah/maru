@@ -140,7 +140,7 @@ pub fn toggle(self: *AppSession) void {
     self.inspector.picking = !self.inspector.picking;
     self.inspector.picker_hover = null;
     self.inspector.tab = .elements;
-    self.inspector.query_len = 0;
+    ops.clearSearch(self);
     self.inspector.offset = 0;
     // Pick is explicitly live: it resumes a paused sample rather than mutating it
     // silently while the panel still says Paused.
@@ -202,7 +202,7 @@ pub fn pointer(self: *AppSession, kind: i32, button: i32, x: f64, y: f64) bool {
     _ = hover(self, x, y);
     if (kind == 1 and button == 0) {
         self.inspector.picker_selected = self.inspector.picker_hover;
-        self.inspector.query_len = 0;
+        ops.clearSearch(self);
         reveal(self);
         cancel(self);
         self.inspector.picker_capture = true;

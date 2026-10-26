@@ -80,6 +80,14 @@ Paused snapshot은 늦은 owner 연결로 바뀌지 않고 명시적 Refresh에�
 탭의 요약과 터미널 ID, Live/Paused, `sampled_at_ms`는 현재 표시 중인 snapshot을 설명한다.
 시각은 수집기가 사용하는 단조 시계의 밀리초이며 달력 시각이나 PTY 원시 수신 시각이 아니다.
 필터는 원래 키·번역된 이름·값·의미·출처를 검색한다.
+검색 입력은 `inspector/search_ime.zig`의 고정 용량과 공용 `BoundedContext`를 사용한다.
+확정 query는 확정 시점에 갱신하고, 조합 미리보기의 필터·paint·행 hit는 같은 투영 검색어를 읽는다.
+UTF-16 범위 재변환은 접미사를 보존하고 후보 취소는 원래 단어를 복원한다. 후보 확정 Return은
+일반 Inspector 명령으로 재생하지 않으며 독립 Tab·스크롤·Escape 동작은 유지한다.
+닫기·별도 창 focus·배치 전환은 조합을 먼저 수락하고 이전 입력 owner를 폐기한다.
+검색 밴드의 hit rect와 실제 IME caret rect를 구분하고, paint와 후보 anchor는 같은 control-font
+패딩·측정·clip 기하를 사용한다. 구현·검증 상태는 [Inspector IME 계획](plans/inspector-search-ime.md)을 따른다.
+
 
 `maru.inspector.v1` JSON은 기존 원래 값을 유지하고 `field_info`를 추가한다.
 키는 `overview.window` 같은 전체 필드 경로이며 값은 `availability/source/reason`이다.

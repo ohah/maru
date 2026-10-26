@@ -5270,3 +5270,15 @@ bitmask 전환·활성 세션 불변·터미널 복귀·입력 소스 복원도 
 커밋 진입 시도 0과 HEAD/ref/reflog/index/파일 해시 불변을 관측한다.
 독립 PNG/OCR 재판정과 추가 실행의 환경 실패는 [SCM IME 계획](plans/scm-commit-ime.md)에 구분한다.
 이미지와 실행 산출물은 저장소 밖에 두고 이미지는 PR 본문에만 올린다.
+
+## Inspector 검색창 IME 문맥
+
+고정 용량 공용 트랜잭션과 Inspector owner·UTF-16 범위·조합 취소·caret 기하를 연결했다.
+`test-inspector-search-ime`는 새 호스트 동작과 기존 Live Inspector 회귀를 함께 실행한다.
+`test-inspector`의 기존 경계·행 선택·CLI/GUI snapshot 회귀, 설정과 SCM 입력 회귀를 함께 유지한다.
+제품 변이의 단언 실패·정상 원복, 전체 ABI·경계·Swift·문서 검사를 통과했다.
+최종 고정 앱의 실제 attached/detached 입력 진단이 통과했다. 후보창 취소·한자 확정·필터 투영과
+별도 창 닫기·terminal 복귀를 확인했다. 동일 고정 앱으로 각 scene의 실제 후보창 5회에 대해
+독립 창 식별·원시 기록·PNG 해시·한자 OCR을 모두 통과했고, 실제 후보 PNG도 직접 확인했다.
+증거와 하네스의 최초 종료 단계 실패는 [계획](plans/inspector-search-ime.md)에 구분한다.
+호스트/모델 성공을 UI·PNG/OCR 완료로 표시하지 않는다.

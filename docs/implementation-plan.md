@@ -1744,3 +1744,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 
 
 - [주소창 실제 포인터 workflow](plans/address-field-ime-pointer.md): fixture의 선택·focus 이동을 실제 클릭·드래그/Shift+Right·Escape·다른 pane 클릭으로 대체하고 후보창 5회 PNG/OCR·한자 선택·터미널 복귀를 검증했다.
+
+- [Inspector 검색창 IME 범위 문맥](plans/inspector-search-ime.md): 고정 버퍼·실시간 조합 필터와 attached/detached 소유를 유지하는 범위 편집·후보 anchor 검증.

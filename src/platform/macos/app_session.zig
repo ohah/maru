@@ -357,8 +357,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // ABI 238: movable Find/Replace contexts and a separately owned key snapshot.
 // ABI 239: project-search fields own native range contexts and key snapshots.
 // ABI 240: sidebar search owns native projection and per-key rollback.
-// ABI 241: repository-bound SCM commit IME context and per-key snapshot.
-pub const abi_version: u32 = 241;
+// ABI 242: fixed Inspector IME transaction and input ownership.
+pub const abi_version: u32 = 242;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -16740,7 +16740,7 @@ pub const AppSession = struct {
         if (web_ops.osrCommitComposition(self)) return true;
         switch (self.inputFocus()) {
             .confirm, .notice, .file_tree, .dock_pending => {}, // 구조 input owner는 확정할 조합이 없다.
-            .inspector => inspector_ops.commitPreedit(self),
+            .inspector => return @import("app_session/inspector_ime.zig").commitAll(self),
             .settings => return @import("app_session/settings_ime.zig").commitAll(self),
             .rename => return @import("app_session/field_ime.zig").commitAll(self, .rename),
             .sidebar_search => return @import("app_session/sidebar_ime.zig").commitAll(self),
@@ -103845,4 +103845,633 @@ test "scm commit IME host late callback cannot overwrite restored destination dr
     _ = native.insert(self, "lost", null);
     self.imeEnd(null);
     try std.testing.expectEqualStrings("draft B", self.scm_commit_field.text.items);
+}
+
+fn initInspectorSearchIMETestSession(a: std.mem.Allocator) !*AppSession {
+    const self = try initRenameCaretTestSession(a);
+    errdefer {
+        self.deinit();
+        a.destroy(self);
+    }
+    _ = try self.resize(960, 600, 1000);
+    self.chrome_host.inspector.open = true;
+    self.inspector.input_focused = true;
+    return self;
+}
+test "inspector search IME host middle UTF16 replacement preserves suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    if (!@import("app_session/chrome_ime.zig").insert(self, "韓", .{ .location = 1, .length = 2 })) self.imeInsert("韓");
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a韓z", self.inspector.query[0..self.inspector.query_len]);
+}
+
+fn inspectorIMEQueryForTest(self: *AppSession) []const u8 {
+    return self.inspector.query[0..self.inspector.query_len];
+}
+
+test "inspector search IME host empty explicit range deletes selected text" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.insert(self, "", .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("az", q(self));
+}
+
+test "inspector search IME host empty callback without range is a no op" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.insert(self, "", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", q(self));
+}
+
+test "inspector search IME host filtered controls do not delete selection" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.insert(self, "\r\n\t\x01\x7f", .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", q(self));
+}
+
+test "inspector search IME host committed controls are removed atomically" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.insert(self, "韓\r\n\t", .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a韓z", q(self));
+}
+
+test "inspector search IME host NFD remains verbatim" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.insert(self, "가", .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a가z", q(self));
+}
+
+test "inspector search IME host surrogate split rejects whole key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.insert(self, "lost", .{ .location = 2, .length = 0 });
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", q(self));
+}
+
+test "inspector search IME host overflow rejects whole key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.insert(self, "lost", .{ .location = 1, .length = std.math.maxInt(u64) });
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", q(self));
+}
+
+test "inspector search IME host second rejected callback restores query viewport and selection" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.inspector.offset = 9;
+    @memcpy(self.inspector.selected_field[0..3], "key");
+    self.inspector.selected_field_len = 3;
+    self.imeBegin();
+    _ = native.insert(self, "x", .{ .location = 1, .length = 2 });
+    _ = native.marked(self, "韓", .{ .location = 99, .length = 0 }, null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", q(self));
+    try std.testing.expectEqual(@as(usize, 9), self.inspector.offset);
+    try std.testing.expectEqualStrings("key", self.inspector.selected_field[0..self.inspector.selected_field_len]);
+}
+
+test "inspector search IME host preview filters projected word without publishing canonical query" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.marked(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", q(self));
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("a韓z", try inspector_ops.displayQuery(self, arena.allocator()));
+}
+
+test "inspector search IME host candidate cancellation restores original word and suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.marked(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    self.imeBegin();
+    _ = native.marked(self, "", .{ .location = 0, .length = 0 }, null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", q(self));
+    try std.testing.expectEqualStrings("a😀z", native.projection(self).?.text());
+}
+
+test "inspector search IME host candidate Return consumes action key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.insert(self, "韓", .{ .location = 1, .length = 2 });
+    self.imeEnd(.{ .key = .enter });
+    try std.testing.expectEqualStrings("a韓z", q(self));
+    try std.testing.expectEqual(@as(u3, 0), @backingInt(self.inspector.tab));
+    try std.testing.expect(!self.inspector.copy_requested);
+
+    // Inspector currently has no bare Return action, so observing only its side
+    // effects cannot prove the adapter consumed the candidate key.
+    self.imeBegin();
+    _ = native.insert(self, "語", .{ .location = 1, .length = 1 });
+    const consumed = native.end(self, .{ .key = .enter });
+    self.imeEnd(null);
+    try std.testing.expect(consumed);
+    try std.testing.expectEqualStrings("a語z", q(self));
+}
+
+test "inspector search IME host ordinary Tab cycles Inspector page" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    self.imeEnd(.{ .key = .tab });
+    try std.testing.expectEqual(@as(u3, 1), @backingInt(self.inspector.tab));
+    try std.testing.expectEqualStrings("a😀z", q(self));
+}
+
+test "inspector search IME host ordinary arrow preserves Inspector scrolling" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    inspector_ops.paste(self, "a😀z");
+    self.inspector.offset = 3;
+    self.imeBegin();
+    self.imeEnd(.{ .key = .arrow_down });
+    try std.testing.expectEqual(@as(usize, 4), self.inspector.offset);
+}
+
+test "inspector search IME host blur admits marked text and keeps query" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.marked(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    inspector_ops.blur(self);
+    try std.testing.expect(!self.inspector.input_focused);
+    try std.testing.expectEqualStrings("a韓z", q(self));
+}
+
+test "inspector search IME host rejected blur keeps source owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.marked(self, "韓", .{ .location = 99, .length = 0 }, null);
+    inspector_ops.blur(self);
+    try std.testing.expect(self.inspector.input_focused);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", q(self));
+}
+
+test "inspector search IME host rejected close preserves Inspector" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.marked(self, "韓", .{ .location = 99, .length = 0 }, null);
+    inspector_ops.close(self);
+    try std.testing.expect(inspector_ops.visible(self));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", q(self));
+}
+
+test "inspector search IME host clear retires old callback without restoring old query" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    inspector_ops.clearSearch(self);
+    _ = native.insert(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("", q(self));
+}
+
+test "inspector search IME host modal does not receive old Inspector callback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    self.chrome_host.palette.open = true;
+    self.imeInsert("lost");
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", q(self));
+    try std.testing.expectEqualStrings("", self.chrome_host.palette.input.query.items);
+}
+
+test "inspector search IME host detached window focus owns search without attached flag" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    inspector_ops.setPlacement(self, .window);
+    self.inspector.input_focused = false;
+    self.inspector.window_focused = true;
+    try std.testing.expect(native.generation(self) != null);
+    self.imeBegin();
+    _ = native.insert(self, "韓", .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a韓z", q(self));
+    inspector_ops.releaseWindowFocus(self);
+    try std.testing.expect(native.generation(self) == null);
+}
+
+test "inspector search IME host placement transition admits once and rejects late callback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.insert(self, "韓", .{ .location = 1, .length = 2 });
+    inspector_ops.setPlacement(self, .left);
+    _ = native.insert(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a韓z", q(self));
+}
+
+test "inspector search IME host sequence exhaustion closes append and physical key fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.inspector.ime.sequence = @as(u64, 1) << 55;
+    self.imeBegin();
+    self.imeInsert("lost");
+    self.imeEnd(.{ .key = .{ .char = 'x' } });
+    try std.testing.expectEqualStrings("a😀z", q(self));
+    try std.testing.expect(native.generation(self) == null);
+}
+
+test "inspector search IME host epoch exhaustion closes append fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.inspector.ime.epoch = std.math.maxInt(u64);
+    self.imeBegin();
+    self.imeInsert("lost");
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", q(self));
+}
+
+test "inspector search IME host bootstrap publishes no owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    inspector_ops.paste(self, "a😀z");
+    self.surface_initialized = false;
+    defer self.surface_initialized = true;
+    try std.testing.expect(native.generation(self) == null);
+}
+
+test "inspector search IME host empty topology publishes no owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    inspector_ops.paste(self, "a😀z");
+    const tabs = self.tabs.items;
+    self.tabs.items = self.tabs.items[0..0];
+    defer self.tabs.items = tabs;
+    try std.testing.expect(native.generation(self) == null);
+}
+
+test "inspector search IME host namespace is independent of SCM and sidebar" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    inspector_ops.paste(self, "a😀z");
+    const token = native.generation(self).?;
+    try std.testing.expect(token > (@as(u64, 1) << 55));
+    try std.testing.expect(token < (@as(u64, 1) << 56));
+}
+
+test "inspector search IME host fixed transaction does not allocate during native edits" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    var fail = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+    self.allocator = fail.allocator();
+    self.imeBegin();
+    _ = native.insert(self, "韓", .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    self.allocator = a;
+    try std.testing.expectEqualStrings("a韓z", q(self));
+}
+
+test "inspector search IME host 128 byte commit cap rejects partial publication" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    var text: [128]u8 = undefined;
+    @memset(&text, 'a');
+    @memcpy(self.inspector.query[0..128], &text);
+    self.inspector.query_len = 128;
+    self.imeBegin();
+    _ = native.insert(self, "x", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings(&text, q(self));
+}
+
+test "inspector search IME host 128 byte marked cap rejects overflow" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    var text: [129]u8 = undefined;
+    @memset(&text, 'a');
+    self.imeBegin();
+    _ = native.marked(self, &text, .{ .location = 129, .length = 0 }, null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", q(self));
+    try std.testing.expectEqual(@as(usize, 0), self.inspector.preedit_len);
+}
+
+test "inspector search IME host legacy paste keeps bounded UTF8 prefix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    inspector_ops.clearSearch(self);
+    var text: [127]u8 = undefined;
+    @memset(&text, 'a');
+    inspector_ops.paste(self, &text);
+    inspector_ops.paste(self, "😀z");
+    try std.testing.expectEqualStrings(&text, q(self));
+}
+
+test "inspector search IME host candidate arrow replays Inspector scrolling once" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    const q = inspectorIMEQueryForTest;
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.insert(self, "韓", .{ .location = 1, .length = 2 });
+    self.imeEnd(.{ .key = .arrow_down });
+    try std.testing.expectEqualStrings("a韓z", q(self));
+    try std.testing.expectEqual(@as(usize, 1), self.inspector.offset);
+}
+
+test "inspector search IME host window release inside key settles once and releases both focus flags" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    inspector_ops.paste(self, "a😀z");
+    inspector_ops.setPlacement(self, .window);
+    self.inspector.window_focused = true;
+    self.imeBegin();
+    _ = native.marked(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    inspector_ops.releaseWindowFocus(self);
+    try std.testing.expect(!self.inspector.input_focused and !self.inspector.window_focused);
+    _ = native.insert(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a韓z", self.inspector.query[0..self.inspector.query_len]);
+}
+
+test "inspector search IME host close inside key preserves admitted text and releases focus" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.insert(self, "韓", .{ .location = 1, .length = 2 });
+    inspector_ops.close(self);
+    try std.testing.expect(!inspector_ops.visible(self));
+    try std.testing.expect(!self.inspector.input_focused and !self.inspector.window_focused);
+    _ = native.insert(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a韓z", self.inspector.query[0..self.inspector.query_len]);
+}
+
+test "inspector search IME host hidden source rolls back unadmitted marked replacement" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    inspector_ops.paste(self, "a😀z");
+    self.imeBegin();
+    _ = native.marked(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    self.chrome_minimal = true;
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", self.inspector.query[0..self.inspector.query_len]);
+    try std.testing.expectEqual(@as(usize, 0), self.inspector.preedit_len);
+}
+
+test "inspector search IME host candidate anchor follows internal marked caret" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/inspector_ime.zig");
+    inspector_ops.paste(self, "az");
+    self.imeBegin();
+    _ = native.marked(self, "가나", .{ .location = 0, .length = 0 }, .{ .location = 1, .length = 0 });
+    self.imeEnd(null);
+    const start = inspector_ops.imeCaretRect(self).?;
+    self.imeBegin();
+    _ = native.marked(self, "가나", .{ .location = 1, .length = 0 }, null);
+    self.imeEnd(null);
+    const middle = inspector_ops.imeCaretRect(self).?;
+    try std.testing.expect(middle.x > start.x);
+    try std.testing.expectEqual(start.y, middle.y);
+    const band = inspector_ops.caretRect(self).?;
+    try std.testing.expect(middle.w < band.w);
+    try std.testing.expectEqualStrings("a가나z", native.projection(self).?.text());
+}
+test "inspector search IME host caret allocation failure does not publish band as caret" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    inspector_ops.paste(self, "한");
+    var fail = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+    self.allocator = fail.allocator();
+    const rect = inspector_ops.imeCaretRect(self);
+    self.allocator = a;
+    try std.testing.expect(rect == null);
+    try std.testing.expectEqualStrings("한", inspectorIMEQueryForTest(self));
+}
+
+test "inspector search IME host terminal pin retains callback routing priority" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initInspectorSearchIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    inspector_ops.paste(self, "old");
+    self.ime_terminal_target_id = 123456;
+    const chrome_ops = @import("app_session/chrome_ime.zig");
+    try std.testing.expect(!chrome_ops.insert(self, "한", null));
+    try std.testing.expect(!chrome_ops.marked(self, "한", .{ .location = 1, .length = 0 }, null));
+    try std.testing.expectEqualStrings("old", inspectorIMEQueryForTest(self));
+    self.ime_terminal_target_id = null;
 }

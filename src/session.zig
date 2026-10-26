@@ -194,6 +194,7 @@ pub const editor = struct {
     pub const syntax_stamp = @import("session/editor/syntax_stamp.zig");
     pub const syntax = struct {
         pub const origin = @import("session/editor/syntax/origin.zig");
+        pub const request = @import("session/editor/syntax/request.zig");
     };
     pub const shared_edit = @import("session/editor/shared_edit.zig");
     pub const workspace_state = @import("session/editor/workspace_state.zig");
@@ -351,6 +352,7 @@ test {
     @import("std").testing.refAllDecls(web_upload_display);
     @import("std").testing.refAllDecls(editor.lsp);
     @import("std").testing.refAllDecls(editor.syntax_stamp);
+    @import("std").testing.refAllDecls(editor.syntax.request);
 }
 
 pub const agent_log_profile = @import("session/agent_log_profile.zig");

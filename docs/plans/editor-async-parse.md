@@ -218,3 +218,30 @@ Tree-sitter progress 콜백에 장벽을 넣는다. 진입 전/후 취소, 정�
 이 실험은 제품 취소 큐·wake·닫기·종료를 구현한 것이 아니다. 전역 probe 포인터는 한 워커만 쓰는
 시험용 장치이며 제품 설계로 채택하지 않는다. 인위적인 장벽 시간이 포함되므로 취소 지연이나 GUI
 응답 시간으로 해석하지 않는다. 본문 복사 이외의 C 내부 할당·제품 큐 할당 실패는 미검증이다.
+
+## 실제 코어의 요청 수락 API
+
+`session.editor.syntax.request`의 [Gate](../../src/session/editor/syntax/request.zig)는 구현됐다.
+아직 AppSession이나 워커에 연결하지 않은 순수 메인 스레드 API다. 기존 점진 파싱은 그대로다.
+
+1. `begin(Input)`을 작업 준비 할당 전에 호출해 이전 수락 증명을 지우고 새 요청 번호를 발급한다.
+2. 작업 준비가 끝나면 워커에 공개하기 전에 `publish(Request)`를 호출한다.
+3. 준비 실패나 취소는 `abandon(Request)`로 수락 가능성만 지운다. 자원은 이 API가 해제하지 않는다.
+4. caller가 성공·완료를 확인한 결과만 `accept(Request)`에 넘긴다. 문서 owner·slot·generation,
+   revision, 언어 identity·설정 generation, 요청 serial이 모두 맞고 공개된 상태여야 한 번 수락한다.
+5. 새 입력이나 닫기는 `begin` 또는 `invalidate`로 기존 `isCurrent` 증명을 무효화한다.
+
+요청 번호는 같은 Gate에서 재사용하지 않는다. 마지막 u64 번호를 한 번 발급한 뒤 고갈 오류를 반환하며,
+오류가 나도 이전 수락 증명을 유지하지 않는다. 이는 내부 API의 실패 조건이며 사용자 알림 UX는 정하지 않았다.
+문서 identity 수명에 Gate 하나를 유지하고 공유 뷰마다 값을 복사해 분기하지 않는다.
+이전 요청이 전달될 수 있는데 같은 identity·초기 번호로 새 Gate를 만들면 안 된다.
+닫은 문서에 새 Gate를 만들 때는 registry의 새 문서 신원을 사용해야 한다.
+
+`Gate`는 실제 완료 여부·트리 내용·문서 존재를 독립적으로 검증하지 않는다. 요청 메타데이터의
+수락 가능성만 판정하므로, 설치 후에는 기존 `syntax_stamp`로 parser identity와 트리 세대를 증명해야 한다.
+`accept` 뒤 실제 설치가 실패하면 caller가 `invalidate`해야 한다. 실패 결과를 성공으로 넘기지 않는다.
+
+[실행·다섯 실제 Zig 결함 대조](../../tools/editor-parse-request/README.md)는 정상 대조군과
+문서 세대/serial 누락·준비 전 수락·중복 수락·번호 고갈 시 이전 증명 유지의 오류를 구분한다.
+초기 독립 leaf-root 빌드의 상대 import 경계와 선택 개수 예상값을 고쳤으며,
+이를 의미적 결함 탐지로 세지 않았다. API target은 기본 test 경로에도 연결했다.

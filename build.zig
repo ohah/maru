@@ -1699,6 +1699,11 @@ pub fn build(b: *std.Build) void {
     const run_search_case_fold_tests = b.addRunArtifact(search_case_fold_tests);
     run_search_case_fold_tests.addArg("--maru-expect-tests=25"); // SCF1~3과 익명 import 판정자 22개.
     b.step("test-search-case-fold", "Run Unicode search folding judges").dependOn(&run_search_case_fold_tests.step);
+    const parse_request_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"parse request gate"} });
+    const run_parse_request = b.addRunArtifact(parse_request_tests);
+    run_parse_request.addArg("--maru-expect-tests=36");
+    run_parse_request.addArg("--maru-expect-passed=36");
+    b.step("test-editor-parse-request", "Verify asynchronous parse request admission").dependOn(&run_parse_request.step);
     const syntax_stamp_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"syntax input stamp"} });
     const run_syntax_stamp = b.addRunArtifact(syntax_stamp_tests);
     run_syntax_stamp.addArg("--maru-expect-tests=30");
@@ -5238,6 +5243,7 @@ pub fn build(b: *std.Build) void {
 
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_syntax_stamp.step);
+    test_step.dependOn(&run_parse_request.step);
 
     // **macOS 에서만 만들어지는 게이트들의 모음.** `mise run check` 를 도는 CI 잡은 `ubuntu-latest`
     // 라 `if (target.result.os.tag == .macos)` 안의 아티팩트를 **컴파일조차 하지 않는다** — 그 게이트

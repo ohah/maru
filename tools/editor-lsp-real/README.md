@@ -120,3 +120,11 @@ ReleaseFast의 Rust 완성 요청도 한 번 null을 반환했다. 호버·정�
 Rust는 `diagnostic_transport=pull`이어야 runner가 성공한다. 실제 요청의 본문 version과 URI로
 진단 응답을 독립 대응하며 협상한 서버의 push로 이를 대체할 수 없다.
 서버 취소/버전/늦은 push의 제품 회귀는 `mise exec -- zig build test-editor-rust-pull`로 실행한다.
+
+## 정의 재시도와 자동완성 차단
+
+초기 정의 null을 읽기 재시도로 복구할 때는 그 요청이 만든 `nav_no_definition` notice만
+실제 Escape 경로로 확인한다. 다른 오류나 신뢰 확인창을 자동으로 닫지 않는다.
+`product.json`의 `definition_notices_acknowledged`와 `completion_observation`에 그 과정과
+팝업이 열리지 않은 상태를 보존한다. [원인·전후 재생·20개 상태 회귀](completion-retry.md)를
+참조한다. SDK 없는 회귀는 `mise exec -- zig build test-editor-real-lsp-retry`로 실행한다.

@@ -2103,3 +2103,11 @@ SDK 없는 Python 증거 검사는 `test-editor-real-lsp-oracles`(51개)다.
 
 `zig build test-sidebar-search-ime`는 native owner·범위 편집·실패 복구와 중립 표시 모델을 검사한다.
 실제 두벌식·한자 후보창 검증과 권한·외부 증거 절차는 [구현 계획](plans/sidebar-search-ime.md)을 따른다.
+
+## 실제 LSP judge의 정의 재시도 알림 회귀
+
+`mise exec -- zig build test-editor-real-lsp-retry -Doptimize=Debug`와 `-Doptimize=ReleaseFast`는
+초기 정의 null의 알림을 실제 키 경로로 확인한 뒤 자동완성 표시·Enter·Undo를 검사한다.
+20개 카운터/알림/입력 소유 상태 대조를 포함한 제품 회귀 2개 + 모듈 참조 4개이며 SDK는
+필요 없다. macOS-only 게이트와 기본 macOS 제품 테스트에 포함한다.
+[원인과 관측 계약](../tools/editor-lsp-real/completion-retry.md)이 상세 범위를 소유한다.

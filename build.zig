@@ -6734,6 +6734,15 @@ pub fn build(b: *std.Build) void {
         run_edit_cost.addArg("--maru-expect-passed=6");
         macos_only_test_step.dependOn(&run_edit_cost.step);
     }
+    const real_lsp_retry_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RLC"} });
+    const run_real_lsp_retry = b.addRunArtifact(real_lsp_retry_tests);
+    run_real_lsp_retry.setCwd(b.path("."));
+    run_real_lsp_retry.addArg("--maru-expect-tests=6");
+    b.step("test-editor-real-lsp-retry", "Verify real LSP judge notice acknowledgement through product controllers").dependOn(&run_real_lsp_retry.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_real_lsp_retry.addArg("--maru-expect-passed=6");
+        macos_only_test_step.dependOn(&run_real_lsp_retry.step);
+    }
     // Optional integration executable: the Python runner supplies owned projects
     // and real SDK commands. No SDK download enters the default check graph.
     const real_lsp_oracles = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/editor-lsp-real", "-p", "test_*.py" });

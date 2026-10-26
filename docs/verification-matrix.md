@@ -5237,3 +5237,11 @@ backoff·시간 역행·오버플로·타이머 중복, 초기 접속·refresh·
 
 사이드바 전용 고정 앱의 실제 후보창 5개 창 식별·PNG 해시·독립 OCR과 한자 선택·표시 세션
 bitmask 전환·활성 세션 불변·터미널 복귀·입력 소스 복원도 통과했다. 이미지는 PR 본문에만 둔다.
+
+## 실제 LSP judge의 정의 재시도 알림 회귀
+
+`mise exec -- zig build test-editor-real-lsp-retry -Doptimize=Debug`와 `-Doptimize=ReleaseFast`는
+초기 정의 null의 알림을 실제 키 경로로 확인한 뒤 자동완성 표시·Enter·Undo를 검사한다.
+20개 카운터/알림/입력 소유 상태 대조를 포함한 제품 회귀 2개 + 모듈 참조 4개이며 SDK는
+필요 없다. macOS-only 게이트와 기본 macOS 제품 테스트에 포함한다.
+[원인과 관측 계약](../tools/editor-lsp-real/completion-retry.md)이 상세 범위를 소유한다.

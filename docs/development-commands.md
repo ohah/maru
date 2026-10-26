@@ -6,6 +6,18 @@
 `python3 tools/editor-provider-measure/summarize.py <자료 경로> --frame-details`는 두 workload의
 전체 근거와 정확성 대조를 검증한 뒤 첫 입력·전체 분포 및 프레임/저장소 표를 추가한다.
 
+## Native 파싱·변경 범위 비용 진단
+
+`python3 -m unittest discover -s tools/editor-native-parse-measure -p 'test_*.py'`로
+원시 계수·제품 대응·JSON 버전 타입의 순수 판정자를 검사한다.
+이 순수 판정자는 기존 `check` CI에서도 실행한다. SDK와 실측 원시 자료는 필요하지 않다.
+`baseline.py`는 기존 Provider의 성능/정확성 40프로세스를, `run.py`는 별도 바이너리의
+콜백 진단 10프로세스를 실행한다. `verify.py`는 Git 원본·실제 소스·보관 바이너리·로그를 대조하고,
+`adversarial.py`는 실제 자료의 격리 사본에서 다섯 독립 가설과 정상 전후 대조를 수행한다.
+`positive.py`는 초기·구조 변경·취소/재개를 별도 실제 C 실행으로 확인한다. 만료 강제는 그 대조 사본에만 적용한다.
+각 명령의 고정 원문·의존성·새 외부 경로 인자는 [도구 명령](../tools/editor-native-parse-measure/README.md),
+의미와 한계는 [계획](plans/editor-native-parse-attribution.md)을 따른다. 제품 코드·실제 UI 지연의 변경은 아니다.
+
 - 접힘 범위 승격 내부 비용: [사본 준비·실행·집계·독립 손상 검증](../tools/editor-fold-promotion-measure/results.md). 후보 조회·범위 변환·설치와 그 안의 보이는 줄·마무리를 구분한다.
 - pane 구문 내부 비용: [사본 준비·실행·집계·독립 손상 검증](../tools/editor-pane-syntax-measure/results.md). 본문과 미니맵·고정 머리줄의 호출 범위를 구분한다.
 - pane 색/그리기 목록 비용: `python3 tools/editor-lowering-measure/run.py --output <새-외부-경로> --deps "$PWD/zig-pkg" --modes 1 --workloads typing,shared`. 별도 `--resume --run-only --prefix verify --verify-each-edit 1 --repetitions 1` 실행과 [계획/검증 범위](plans/editor-pane-lowering-attribution.md)를 따른다.

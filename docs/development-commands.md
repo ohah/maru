@@ -2062,3 +2062,13 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 - `python3 -m unittest discover -s tools/settings-ime -p 'test_*.py'`: 합성 정상 대조군과 독립 손상 기록 거절. 실제 GUI 성공을 뜻하지 않는다.
 - `python3 tools/settings-ime/run.py --output <새 외부 경로> --mode diagnostic`: 사본 앱을 준비·빌드한 뒤 실제 두벌식·후보 취소/선택·설정 종료·터미널 복귀를 확인한다.
 - 같은 고정 앱의 `--app <실행 파일> --mode live`는 서로 다른 후보창 5개와 독립 PNG/OCR을 추가 검사한다. 실제 입력과 pixel 결과는 [계획](plans/settings-search-ime.md)에 구분해 기록한다.
+
+### 프로젝트 검색 첫 Tab 전달 진단
+
+실제 post 완료와 앱 수신·처리·필드 이동을 대조하는 짧은 private GUI 명령은
+[진단 계획](plans/project-search-tab-delivery.md)을 따른다. `tab_probe.py` 성공은 전체 후보창
+PNG/OCR 검증과 구분한다. 독립 검사기 대조군은 다음 명령으로 실행한다.
+
+```sh
+python3 -m unittest discover -s tools/project-search-ime -p 'test_*.py'
+```

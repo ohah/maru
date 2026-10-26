@@ -5234,3 +5234,6 @@ backoff·시간 역행·오버플로·타이머 중복, 초기 접속·refresh·
 `test-sidebar-search-ime`는 중간 UTF-16 교체·canonical 필터 보존·후보 Return 격리·blur/close·
 소유자 전환·숨김·초기화 전·포화·OOM·NFD와 내부 caret 표시를 검사한다. 진단·후보창 PNG/OCR의
 구체적 통과 범위는 [사이드바 IME 계획](plans/sidebar-search-ime.md)을 따른다.
+
+사이드바 전용 고정 앱의 실제 후보창 5개 창 식별·PNG 해시·독립 OCR과 한자 선택·표시 세션
+bitmask 전환·활성 세션 불변·터미널 복귀·입력 소스 복원도 통과했다. 이미지는 PR 본문에만 둔다.

@@ -12876,10 +12876,131 @@ POSIX 설정을 검사할 때 드라이브 경로가 잘못 통과하고, POSIX�
 Windows 터미널의 기본 폰트 자원은 `terminal/text_resources.zig`가 DirectWrite rasterizer와 ClearType
 scratch를 함께 소유한다. 생성 중 scratch 할당에 실패하면 새 rasterizer도 해제하며, 준비는 기존 자원을
 수정하지 않는다. builder는 해당 heap 자원을 빌린다. 라이브 변경은 renderer/font identity/atlas·캐시와
-기하를 함께 준비한 뒤 게시해야 하므로 이 소유자만 교체해서는 안 된다. 현재 연결은 시작 경로까지다.
+기하를 함께 준비한 뒤 게시해야 하므로 이 소유자만 교체해서는 안 된다. 설정 변경 경로는 아래 준비·게시 절차를 사용한다.
 
 `terminal/renderer_resources.zig`는 CPU RendererState의 font identity/atlas와 GPU CellPipeline을 함께
 준비하고 해제한다. 디바이스와 context는 Present에서 빌리며 소유자가 직접 해제하지 않는다. 명시적 셀
 메트릭을 좁은 타입으로 바꾸기 전에 검증하고 자연 글리프 폭을 grid advance와 별도로 유지한다. 시작 경로의
 frame loop는 소유자의 state 필드를 참조한다. 새 세대를 게시하기 전에는 기존 아틀라스를 참조하는
 sidebar/dock/status/editor draw list도 재생성해야 하며, 이 준비만으로 live font 적용 완료를 뜻하지 않는다.
+
+
+Windows의 `family`·`fallback`·`size`·`line-height`·`letter-spacing` 변경은 별도 font/renderer 세대와
+sidebar/dock/status/titlebar 캐시를 준비한 뒤 게시한다. 준비 중 atlas가 자라면 캐시를 다시 만들며,
+수렴하지 않거나 준비에 실패하면 이전 자원을 유지하고 설정 화면에 실패를 표시한다. 활성 편집기는
+같은 문서의 독립 view lease에서 syntax/selection 캐시를 준비하고, 비교 화면은 양쪽 본문과 헤더를
+준비한다. 준비 실패가 활성 뷰의 선택·스크롤·undo를 변경해서는 안 된다. 게시 뒤에는 기존 편집기
+scrollbar hit geometry를 폐기한다. 실제 편집기·비교 화면의 전환과 다섯 준비 실패 경로는 아래 범위에서
+확인했으며 모든 입력 모드·도크 상태의 전체 검증으로 계산하지 않는다.
+
+Chrome은 semantic 14px 메트릭을 유지하고 터미널 셀은 공용 `renderer/font_spacing.zig` 계산을 쓴다.
+음수 자간에서도 자연 글리프 폭을 보존한다. DirectWrite baseline은 각 run의 요청 크기로 구하고
+여분의 행 높이를 중앙에 배치한다. 터미널의 큰 baseline으로 작은 UI 글자를 잘라내지 않는다.
+`test-font-spacing`은 집계 28 + 계산 5개이고, `test-windows-text-resources`는 큰 터미널 face에서
+작은 UI run의 실제 잉크와 baseline도 검사한다.
+
+게시 뒤 각 terminal surface의 기존 `resizeWithCell` 계약으로 코어 메트릭/격자와 PTY 크기를
+갱신한다. 이 API는 코어를 먼저 변경한 뒤 PTY를 갱신하므로 PTY 오류까지 포함하는 다중 세션 원자적
+롤백을 보장하지 않는다. 해당 오류는 별도로 세고 사용자에게 표시한다. `font_applied` 진단은 실제
+코어 잠금 아래의 셀·격자를 기록한다. `tools/windows/check-live-font.py`는 격리 HWND에서 설정을
+일곱 번 변경하고 독립 캡처의 cursor 크기, 코어 격자, 셸 입력 격리와 정상 종료를 확인한다.
+이 검사는 물리 입력이나 모든 폰트 속성·모든 편집기 경로의 검증을 대신하지 않는다. variant/ligature,
+설정 재로드와 미리보기 실패/복원 검증을 마치기 전에는 폰트 지원 전체 완료로 계산하지 않는다.
+
+
+`test-windows-live-font-editor`는 집계 2 + native 준비 검사 5개다. 숨긴 자체 Win32/D3D 창에서
+활성 viewport/selection·stale projection 보존, 편집기/비교 양쪽 글리프 준비와 할당 실패를 검사한다.
+각 실패 prefix는 새 fixture에서 실행하며 임시 할당의 전량 해제와 문서 lease 수를 확인한다.
+선택적 syntax coloring이 OOM에서 plain text로 떨어지는 기존 정책은 허용한다. 서로 다른 실행의
+할당 수를 같다고 가정하지 않고 실패가 더 이상 주입되지 않는 prefix까지 검사한다.
+
+이 검사에서 공용 glyph frame의 부분 초기화 누수를 발견했다. prepared 배열 할당 뒤 uploads
+할당이 실패할 때 현재 pane이 정리 범위에서 빠졌으므로, 초기화 직후 정리 범위에 등록하도록 고쳤다.
+실제 편집기 앱 검사에서는 가는 caret이 본문 글리프에 가려지는 문제도 확인했다. bar/underline
+caret은 텍스트 뒤에 다시 그리며 block은 대조색 글자가 보이도록 기존 뒤쪽 층을 유지한다.
+`tools/windows/check-live-font.py --editor`는 자체 fixture 파일을 열고 caret 높이와 한 글자 이동 폭을 캡처로 재며
+원본 파일 불변·셸 입력 격리·정상 종료를 요구한다. 실제 앱 통과 여부는 해당 산출물로 별도 판정한다.
+
+
+폰트 게시 뒤 기존 scrollbar 기하가 폐기되므로, 준비 뷰도 실제 첫 프레임과 같은 visible-row clamp와
+기존 가로 상한을 사용한다. 축소로 위쪽 행이 새로 보이면 그 행의 글리프까지 준비한다. native 준비
+검사는 앞 행의 고유 글리프가 새 atlas에 들어갔는지 확인한다. `tools/windows/check-live-font.py --editor-scrolled`는
+자체 100행 파일의 맨 아래에서 시작해 같은 일곱 변경을 검사한다.
+
+캐시 교체는 각 소유 필드를 명시적으로 교체한다. main의 동적 @field 접근은 external reflection
+경계가 허용하지 않으므로 목록을 반사로 순회하지 않으며, 모든 필드의 타입/포인터 대응은 컴파일러가
+검사한다. 기존 session-host reflection 원장을 넓히는 방식으로 이 경계를 우회하지 않는다.
+
+
+실제 비교 화면의 family/fallback 포함 일곱 변경은 영문·한글 본문을 양쪽에 두고 확인했다. 외부 변경
+디스크 이미지는 그대로 유지하고, 비교를 연 격리 문서의 미저장 편집만 폐기한 뒤 정상 종료한다.
+별도 private 바이너리 다섯 개는 text/renderer/sidebar/dock/editor 준비에서 한 번씩 OOM을 낸다.
+각 사례는 이전 caret·잠근 코어 메트릭/격자와 sidebar/dock 픽셀 보존, 정상 변경·원복 재시도와 종료를
+확인한다. 제품 소스에 failpoint를 추가하지 않는다. 주입 없는 정상 실행 파일은 이 실패 유지 판정에서
+거부되어야 한다. 이는 준비 실패 경로이며, 게시 후 PTY 실패의 다중 세션 rollback 증거가 아니다.
+
+격리 실행 파일에도 같은 해시의 번들 폰트를 둔다. 실행 파일을 더 깊은 cache 폴더에 두면 개발용 상위
+경로 탐색만으로 저장소 폰트에 닿지 않아 시스템 폴백이 선택될 수 있다. 기본 caption 높이도 달라지므로
+화면 판정은 고정 y=38 대신 어두운 본문 시작 위치를 찾는다. 실제 34px caption의 17px caret을 잘라
+13px로 재던 판정을 수정했고 기존 실제 캡처 14건과 일치하는지도 확인했다.
+
+
+Windows에서 종료된 로컬 터미널도 레이아웃의 표시 대상이다. `terminal/layout_resize.zig`는 runtime
+resize가 ProcessExited를 반환할 때만 표시용 core를 잠그고 reflow/셀 메트릭을 맞춘다. 응답은 받을
+PTY가 없어 비운다. 종료 상태와 runtime의 input/resize 거부는 유지하며 UnknownSurface·살아 있는
+PTY 오류를 숨기지 않는다. 창 크기 변경과 글꼴 게시가 같은 함수를 사용한다. macOS 호스트의 기존
+표시 크기 책임과 같으며 Windows 코드에서 macOS 구현을 호출하지 않는다.
+
+`test-windows-layout-resize`(집계 2 + 검사 5)는 live 전달·종료/read_error 표시·미전달 응답·0 픽셀
+보존과 다른 오류 반환을 검사한다. 다섯 compiled runtime 변이와 복원 Debug/ReleaseFast를 확인했다.
+실제 종료 세션의 일곱 글꼴 변경과 종료/실행 세션 혼합의 다섯 변경도 확인했다. 진단의 `process`
+필드는 잠근 코어 메트릭과 함께 해당 surface 상태를 기록한다. `check-live-font.py --ended`는 자식
+cmd 부재와 실제 exited 상태, 커서/코어 크기·격자, 종료를 함께 요구한다. 일반 resize 오류의 재시도와
+다중 세션 원자적 rollback을 새로 보장하는 것은 아니다.
+
+
+### Windows terminal layout retry (implementation and native recovery verified)
+
+Each Windows session owns one latest layout request. Failed PTY resize or core
+allocation is retried on the awake clock, starting at 50 ms and capped at 1 s.
+A new grid supersedes the old request while retaining pending font cell metrics;
+session destruction removes the request. Exited surfaces use retained-display
+resize without calling the dead transport, and unknown surfaces are not retried.
+Both window layout and live font publication submit through this path.
+
+The Windows session retains the retry obligation after a transport failure.
+The stateless runtime retry entry regenerates the latest report under the
+core lock and delivers it only after PTY resize succeeds; it does not expose the
+failed report to the reader early. Notification allocation and writes retain
+their existing best-effort semantics. `test-windows-layout-retry` selects five
+retry scenarios, five recovery-warning scenarios, one reader ordering scenario
+and the two main import tests. Five distinct compiled mutants
+were rejected, and restored Debug/ReleaseFast each passed all 14 retry/retained
+display tests. The current normal build passed the focused matrix, cross-target
+compilation and all 272 boundary gates. Native normal regressions passed seven
+ended-session font changes and five mixed live/ended-session changes.
+
+A separate private binary failed exactly one transport resize after the core had
+changed. The ordinary frame pump recovered without another layout request:
+core and the backend's stored size both became 37x21 and pending was false.
+All seven font changes then completed, with one expected resize error, zero
+shell-input/grid/dock errors and native exit0. Backend stored size is not an
+independent kernel query. The tracked sources and normal binary were restored;
+normal PE bytes match the tested normal copy except timestamp/build-id.
+Evidence for that snapshot is in `.zig-cache/windows-layout-retry-binding.json`.
+Recovery warning ownership now resets for every new font preparation, is revoked
+when another message replaces it, and clears only after all retries settle with
+the configured font applied and no permanent error. A later session's retryable
+failure cannot hide an earlier permanent failure. Direct and reader-path tests
+assert exact CSI 48 bytes, no pre-success delivery, and no duplicate report.
+Five warning mutations and restored Debug/ReleaseFast 20-case controls passed;
+the updated build, focused tests, cross compilation and all 272 boundary gates
+also passed. The normal native app completed seven font changes with zero resize
+errors. A private one-shot transport failure recovered and cleared exactly its
+warning (message length zero, ownership/pending/permanent flags false), followed
+by seven successful font changes and native exit0. The recovered settings screen
+was captured and visually inspected. The prior native log without warning clear
+and six malformed clear acknowledgements were rejected by the observation oracle.
+The normal code and binary were restored; only PE timestamp/build-id may differ.
+The current evidence is `.zig-cache/windows-layout-notice-binding.json`.
+This does not complete all Windows settings support or replace the installed app.

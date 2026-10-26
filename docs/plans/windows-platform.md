@@ -808,7 +808,7 @@ Windows 설정 연결 검증: `test-windows-settings`는 값 검증과 사이드
 | 영역 | 현재 연결 | 남은 적용 경로 |
 | --- | --- | --- |
 | 붙여넣기 보호·bracketed-safe·option-as-meta·우클릭·단어 구분·OSC52 read | `settings_host.changed`에서 입력 정책과 clipboard host 갱신 | 최종 실제 앱 회귀; OSC52 read 요청의 미구현 처리와 구분 |
-| 폰트·셀 격자 | 시작 시 DirectWrite rasterizer와 renderer text config 생성 | rasterizer·글리프/atlas·레이아웃·PTY 크기를 일관되게 재생성 |
+| 폰트·셀 격자 | family/fallback/size·행간·자간의 font/atlas/chrome/editor 준비 후 게시와 기존 resizeWithCell 연결 | resize 오류 재시도, family-bold/family-italic·ligatures, 외부 reload/전체 설정 연계 |
 | 테마·커서·ANSI 팔레트 | 시작 시 appearance, chrome tokens, cell colors와 clear color 생성 | core queue와 chrome/editor paint 캐시를 함께 갱신 |
 | scrollback·문자 폭 | 새 세션의 초기 core config에 포함 | 기존 세션의 reader 소유 queue에 전달하고 다음 spawn의 오래된 snapshot 제거 |
 | 셸 선택·명령·인자 | 설정 변경/롤백 통지에서 다음 spawn의 명령·인자·shell 미러 갱신 | 인자 합성 행·항목별 리셋은 후속; 기존 셸은 유지 |
@@ -841,33 +841,97 @@ request 오류는 거부 5건뿐이며 저장 2·저장 오류 0·셸 입력 0·
 각각 다섯 개씩 검출했고 복원 설정 51개와 cross-target 컴파일을 확인했다. 전체 Windows 작업 완료나
 설치본 반영으로 계산하지 않는다.
 
-### 폰트 라이브 적용의 자원 준비 (진행 중)
+### 폰트 라이브 적용 (진행 중)
 
-1. 시작 경로의 DirectWrite face와 ClearType scratch를 Windows `terminal/text_resources.zig`의 한 소유자로
-   묶었다. 새 소유자 준비는 현재 소유자와 독립적이며 준비 실패 시 새 face를 해제한다. builder는 heap
-   자원만 빌려 소유자 값의 이동에 묶이지 않는다. 현재 지원하는 family/fallback/size 준비 단계다.
-2. 후속: RendererState·font identity·atlas와 각 chrome/editor draw cache를 새 세대에 준비한다.
-   line-height/letter-spacing은 자연 글리프 폭과 grid advance를 구분하며, font variant/ligature 등
-   노출 필드의 지원 여부도 함께 정리한다. 현재 시작 경로의 단순 메트릭은 이 설정들을 아직 적용하지 않는다.
-3. 후속: 새 자원·레이아웃·core cell metrics·PTY 격자를 함께 게시하고 실패 시 이전 화면을 유지한다.
-   설정 미리보기 취소/저장 실패·재로드도 같은 교체 경로로 검증한다.
+`family`·`fallback`·`size`·`line-height`·`letter-spacing` 변경은 별도 DirectWrite/scratch,
+CPU RendererState/font identity/atlas, GPU CellPipeline과 retained chrome 캐시를 준비한 뒤 게시한다.
+자원 소유자는 `terminal/text_resources.zig`와 `terminal/renderer_resources.zig`다. Chrome semantic
+크기는 터미널 행간·자간과 분리하고, 공용 `renderer/font_spacing.zig`는 음수 자간에서도 자연 글리프
+폭을 보존한다. DirectWrite baseline은 run의 요청 크기와 line box로 계산한다.
 
-첫 단계는 실제 DirectWrite 영문/한글 잉크, 두 크기 동시 생존, 할당 실패, 이전 소유자 해제 후 준비된
-builder 사용을 검사한다. 초기화 실패 누수·작업 버퍼 소실·builder 연결 손실·해제 누수·크기 고착의
-다섯 변이를 검사하고 복원 Debug/ReleaseFast를 확인한다. 이 단계는 설정 변경의 실시간 적용 완료가 아니다.
+활성 편집기는 같은 문서의 독립 view lease에서 syntax/selection 캐시를 준비하고, 비교 화면은 양쪽
+본문과 헤더를 준비한다. 준비 중 atlas 세대가 바뀌면 retained 캐시를 다시 만든다. 게시 뒤 scrollbar
+기하를 폐기하므로 준비 뷰도 실제 첫 프레임과 같은 viewport clamp를 쓴다. 캐시 교체는 명시적 필드를
+사용하여 main의 external reflection 경계를 유지한다. 기존 원장은 확대하지 않는다.
 
-첫 단계의 최종 앱은 설정 실앱 회귀 13개·정상 native 종료·셸 입력 격리를 통과했고 실제 캡처에서도
-터미널·사이드바·설정 글자가 표시됐다. 다섯 변이와 복원 native 7개(Debug/ReleaseFast), 일반 빌드와
-cross-target 컴파일을 확인했다. 다음 단계의 atlas/cache·grid 게시와 폰트 설정 적용은 여전히 남아 있다.
+게시 후 기존 `resizeWithCell` 계약으로 코어 메트릭/격자와 PTY 크기를 갱신한다. 이 API는 코어 변경 뒤
+PTY를 갱신하므로 PTY 실패까지 포함하는 다중 세션 원자적 rollback을 보장하지 않는다. 해당 오류는
+별도로 표시한다. 준비 실패의 이전 화면 유지와 이 계약을 혼동하지 않는다.
 
-두 번째 단계의 CPU renderer/font identity/atlas와 GPU CellPipeline 준비는
-`terminal/renderer_resources.zig`로 묶어 시작 경로에 연결한다. 프레임 루프는 소유자의 안정된 state 필드를
-참조한다. 별도 세대의 registry/texture, 정상/실패 준비 후 기존 세대 사용, 이전 세대 해제 뒤 새 GPU 사용,
-비정사각 아틀라스 치수, 자연 글리프 폭과 advance 구분 및 메트릭 범위를 native 검사로 확인한다.
-GPU API 생성 거부와 allocator 실패도 구분한다. 남은 두 번째 단계는 모든 cached draw list를 새 아틀라스에
-맞춰 준비하는 것이다. 그 뒤 세 번째 단계에서 font/layout/core/PTY를 함께 게시해야 실제 설정 적용이 된다.
+검증 범위:
 
-CPU/GPU 준비 단위를 사용한 최종 앱에서 설정 회귀 13개와 정상 종료·셸 입력 격리를 확인했다. 캡처에는
-터미널·사이드바·도크·복사/붙여넣기 메뉴의 글자가 유지됐다. 다섯 변이를 최종 소스에서 검출했고 복원
-native 7개(Debug/ReleaseFast), 일반 빌드와 cross-target 컴파일을 확인했다. 라이브 게시나 GPU 픽셀
-readback 완료로 계산하지 않는다.
+- `test-windows-live-font-editor`: 집계 2 + native 준비 5개. viewport/selection/stale projection,
+  비교 양쪽 글리프와 실패 prefix의 임시 메모리·문서 lease 정리를 검사한다. 부분 초기화된 glyph pane의
+  정리 누락과 텍스트에 가려지는 가는 caret, 축소 시 새로 보이는 행의 준비 누락을 발견·수정했다.
+- 스크롤·선택·stale cache 변조, 비교 오른쪽 누락, 부분 초기화 누수, caret 순서와 축소 viewport의
+  일곱 변이를 검출했고 복원 Debug/ReleaseFast 각 7개가 통과했다. 공용 spacing의 별도 다섯 변이도
+  검출했다. 복원 spacing 검사는 각 모드 33개(계산 5 + library 집계 28)다.
+- 격리 실제 터미널과 100행 편집기의 일곱 변경씩을 확인했다. 편집기는 첫 행 anchor를 유지하는 기존
+  동작에 맞춰 Home으로 caret을 드러내고 높이·한 글자 이동 폭을 잰다. 탐색 전 캡처도 보존하며 자동
+  caret reveal을 검증했다고 주장하지 않는다. `tools/windows/check-live-font.py --editor-scrolled`.
+- 실제 외부 변경 충돌로 연 비교 화면에서도 크기 확대/원복·행간·양수/음수 자간·family·fallback의
+  일곱 변경을 확인했다. 양쪽의 영문/한글 본문 잉크와 화면 변경, 디스크 canary 보존·셸 입력 격리·정상
+  종료를 확인했다. 저장하지 않은 편집은 해당 격리 fixture에서만 명시적으로 폐기한다.
+- private 실행 파일 다섯 개에서 text/renderer/sidebar/dock/editor 준비에 일회성 OOM을 주입했다.
+  각 실패 직후 기존 caret/코어 메트릭·격자를 확인하고 sidebar/dock 영역의 픽셀 일치를 확인했다.
+  이후 크기 변경과 원복을 모두 확인했다. 각 앱은 의도한 준비 오류 1건, 정상 적용 2건, resize 오류와
+  셸 입력 0, native exit0이었다. 실패를 주입하지 않은 일반 앱은 이 실패 유지 판정에서 거부됐다.
+  주입 코드는 제품에 남기지 않고 소스·일반 빌드를 복원했으며, private 바이너리의 번들 폰트도 같은
+  파일 해시로 맞췄다. 후보 자원 내부 할당 실패는 별도의 native 소유권 검사로 다룬다.
+
+이 검증은 합성 HWND 입력과 화면/잠근 코어 관측이며 물리 입력·전체 IME·모든 도크 뷰를 대신하지 않는다.
+작은 caption 높이를 고정 y=38로 재어 caret을 자르던 판정기도 수정했다. 실제 34px caption 캡처는
+13px 오측정 대신 코어와 같은 17px를 재며, 기존 실제 캡처 14건의 측정값도 보존한다.
+
+남은 범위는 family-bold/family-italic/ligatures,
+외부 config reload와 나머지 설정 연결이다. 전체 Windows 지원과 최종 설치본 반영은 아직 완료가 아니다.
+
+
+### 종료된 로컬 터미널의 표시 크기 (구현·실앱 검증)
+
+`terminal/layout_resize.zig`를 Windows 창 크기 변경과 폰트 게시 경로가 함께 사용한다. 살아 있는
+surface는 기존 runtime resize로 보낸다. `ProcessExited`만 표시용 분기로 받아 core 잠금 아래에서
+격자/셀 메트릭을 맞추고, 받을 PTY가 없는 응답을 비운다. runtime의 종료 후 input/resize 거부 계약은
+바꾸지 않는다. macOS `resizeTermCoreToLayout`과 같은 호스트 책임이며 macOS 파일을 import하지 않는다.
+UnknownSurface와 실제 PTY resize 오류는 그대로 반환한다. 0인 셀 메트릭은 기존 알려진 값을 보존한다.
+
+`test-windows-layout-resize`는 집계 2 + 표시/전달 검사 5개다. 종료 상태를 그대로 거절하는 기존
+동작에서는 세 표시 검사가 ProcessExited로 실패했다. 수정 뒤 종료·read_error·반복 레이아웃·0 메트릭,
+live 전달과 오류 보존을 검사한다. 종료 표시 거부, UnknownSurface 은폐, 미전달 응답 누적, 옛 픽셀 유지,
+0 메트릭 덮어쓰기의 다섯 변이를 검출했고 복원 Debug/ReleaseFast 각 7개가 통과했다.
+
+이전 실제 앱에서는 cmd가 종료된 뒤 글꼴 변경이 ProcessExited로 실패했고 새 폰트 14×30과 코어
+9×19가 어긋났다. 수정 앱의 종료된 단일 세션에서는 일곱 설정 변경을 확인했다. 실제 cmd 자식 부재와
+각 적용 시점의 `process=exited`, 코어/커서 픽셀·격자 일치, 적용/resize 오류 0·정상 종료를 확인했다.
+`tools/windows/check-live-font.py --ended`는 이 격리 fixture 전용 검증이다.
+
+종료/실행 중인 세션을 함께 둔 실제 앱에서도 다섯 변경을 검사했다. 새 세션의 표시 메트릭 상속,
+활성/배경 세션 전환과 두 번의 실제 창 크기 변경 뒤 격자를 확인했다. 종료된 세션을 다시 시작하지
+않았고 세션/탭/카드는 2개, 새 spawn은 1개, 살아 있는 cmd 자식은 1개였다. 셸 입력·격자 불일치·
+적용/resize 오류는 0이고 native exit0이었다. 최종 세션 수는 agent의 cards 로그가 아니라 별도
+session summary에서 읽는다. 이 판정도 중복·누락·거짓 수치/플래그 등의 여섯 로그 사례로 검사했다.
+
+
+### Windows 레이아웃 오류 자동 재시도 (구현·실앱 복구 검증)
+
+세션별 최신 요청 하나와 50ms~1초 backoff를 연결했다. 새 요청의 대체, 보류 중 글꼴
+픽셀 유지, 종료된 표시 전환, 제거된 surface의 중단을 검사했다. 실패 뒤 같은 크기의
+재시도에서도 통지가 누락되지 않도록 상태 없는 runtime retry 진입점을 사용한다.
+다섯 compiled 변이 거부와 복원 Debug/ReleaseFast 14개씩, 일반 빌드·관련 기능·교차
+컴파일·전체 경계 272개를 통과했다. 정상 앱의 종료 세션 7개와 혼합 세션 5개도 통과했다.
+별도 private 앱의 코어 변경 직후 PTY 실패 1건이 사용자 재입력 없이 복구됐고,
+core/backend 저장 격자 37x21·pending=false를 확인했다. 이어 7개 글꼴 변경·정상 종료를
+확인하고 일반 소스/빌드를 복원했다. 커널 크기 독립 조회나 물리 키 입력의 증거는 아니다.
+복구 메시지 소유권과 통지 바이트/reader 순서 추가 대조는 남아 있다. 근거와 범위는
+`.zig-cache/windows-layout-retry-binding.json`에 묶었다.
+
+
+레이아웃 복구 메시지 소유권을 연결했다. 새 글꼴 준비·다른 메시지·영구 오류가 이전
+소유권을 취소하고, 모든 대기 요청이 끝난 뒤 같은 글꼴 실패 메시지만 지운다.
+다섯 compiled 경고 변이와 복원 Debug/ReleaseFast 각 20개를 통과했다. 직접 전송과
+reader flush에서 정확한 최신 CSI 48 바이트·성공 전 미전달·중복 없는 전달도 검사한다.
+이 추가 변경도 일반 빌드·관련 기능·교차 컴파일·전체 경계 272개를 통과했다. 정상
+실앱의 7개 글꼴 변경은 오류 0건이었다. private PTY 실패 1건은 자동 복구되면서 해당
+메시지를 한 번 지웠고, 설정 화면의 안내 복원·이후 글꼴 변경 7건·정상 종료를 확인했다.
+이전 미제거 native 로그와 잘못된 제거 기록 6종은 판정자가 거부했다. 소스와 일반 PE를
+복원했으며 근거는 `.zig-cache/windows-layout-notice-binding.json`에 묶었다.

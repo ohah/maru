@@ -15,7 +15,12 @@ pub const TextResources = struct {
     pub fn init(a: std.mem.Allocator, family: []const u8, fallback: []const u8, size_px: f32) !TextResources {
         const raster = try maru.dwrite_font.Rasterizer.create(a, family, fallback, size_px);
         errdefer raster.destroy();
-        const scratch = try a.alloc(u8, maru.win32_text.NeutralRasterizer.scratchSizeFor(raster.metrics.width_px * 2, raster.metrics.height_px));
+        var chrome_extent: u32 = 1;
+        inline for (@import("type_info_fields").enumFields(maru.chrome.ui.typography.ChromeTextRole)) |field| {
+            const role: maru.chrome.ui.typography.ChromeTextRole = @fromBackingInt(@intCast(field.value));
+            chrome_extent = @max(chrome_extent, maru.chrome.ui.typography.lineHeightPx(role, 1000));
+        }
+        const scratch = try a.alloc(u8, maru.win32_text.NeutralRasterizer.scratchSizeFor(@max(raster.metrics.width_px * 2, chrome_extent * 2), @max(raster.metrics.height_px, chrome_extent)));
         return .{ .allocator = a, .raster = raster, .scratch = scratch };
     }
 
@@ -30,6 +35,11 @@ pub const TextResources = struct {
             .shaper = .{ .raster = self.raster },
             .rasterizer = .{ .raster = self.raster, .scratch = self.scratch },
         };
+    }
+
+    pub fn chromeMetrics(self: *const TextResources) maru.dwrite_font.CellMetrics {
+        const d = self.raster.design;
+        return maru.dwrite_font.cellMetricsFrom(d.upem, d.ascent, d.descent, d.line_gap, d.advance_width, maru.chrome.ui.typography.token(.list_row).point_size).?;
     }
 };
 
@@ -68,6 +78,18 @@ test "Windows text resources staging preserves the previous font" {
         try std.testing.expect(staged.raster.metrics.height_px > before.height_px);
         try expectInk(&staged, 'M', 1);
         try expectInk(&previous, 'M', 1);
+        // UI runs remain 14px even when the terminal grows. A baseline taken
+        // from the 28px terminal face would crop this smaller native glyph.
+        const ui = staged.chromeMetrics();
+        const pixels = try std.testing.allocator.alloc(u8, ui.width_px * ui.height_px * 4);
+        defer std.testing.allocator.free(pixels);
+        @memset(pixels, 0);
+        const choice = staged.raster.glyphFor('M') orelse return error.MissingNativeGlyph;
+        const ink = try staged.raster.rasterizeGlyphAtSize(choice, 14, ui.width_px, ui.height_px, ui.width_px * 4, pixels, staged.scratch);
+        try std.testing.expect(ink > 0);
+        const baseline = maru.dwrite_font.glyphBaselineForSize(staged.raster.design, 14, ui.height_px);
+        try std.testing.expectEqual(@as(f32, @floatFromInt(ui.baseline_px)), baseline);
+        try std.testing.expectEqual(baseline + 5, maru.dwrite_font.glyphBaselineForSize(staged.raster.design, 14, ui.height_px + 10));
     }
     try std.testing.expectEqual(before, previous.raster.metrics);
     try expectInk(&previous, 'M', 1);

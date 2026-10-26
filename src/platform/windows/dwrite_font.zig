@@ -484,6 +484,15 @@ fn ceilAtLeastOne(v: f32) u32 {
     return @max(1, @as(u32, @intFromFloat(@ceil(v))));
 }
 
+/// Use the requested run size, not the terminal's base-size baseline. Chrome
+/// roles keep their own size when the terminal font changes. Extra/cropped line
+/// height is distributed around the natural line box.
+pub fn glyphBaselineForSize(design: Rasterizer.DesignMetrics, em_size_px: f32, slot_height: u32) f32 {
+    const metrics = cellMetricsFrom(design.upem, design.ascent, design.descent, design.line_gap, design.advance_width, em_size_px) orelse return 0;
+    const extra = @divTrunc(@as(i64, slot_height) - @as(i64, metrics.height_px), 2);
+    return @floatFromInt(@as(i64, metrics.baseline_px) + extra);
+}
+
 /// ClearType 서브픽셀 3바이트를 회색 커버리지 하나로 접는 **순수** 변환.
 ///
 /// DirectWrite가 회색 알파 텍스처를 주지 않아(`ALIASED_1x1`은 안티앨리어싱이 없고 `CLEARTYPE_3x1`은 RGB
@@ -1191,7 +1200,7 @@ pub const Rasterizer = struct {
             rendering_mode_natural_symmetric,
             measuring_mode_natural,
             0,
-            @floatFromInt(self.metrics.baseline_px),
+            glyphBaselineForSize(self.design, em_size_px, cell_h),
             &analysis,
         ), error.AnalysisFailed);
         defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(analysis)));

@@ -19,7 +19,8 @@ uint32_t maru_macos_editor_url_drain(struct MaruAppHostSession *session, uint8_t
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 239u
+/* v240: sidebar search native range projection and deep per-key transaction. */
+#define MARU_MACOS_APP_HOST_ABI_VERSION 240u
 /* Search-owned UTF-16 context; generation 0 means unavailable. Existing editor exports keep
    their editor-only meaning. All calls are main-thread only; substring supports a size query. */
 uint64_t maru_macos_app_session_chrome_ime_generation(struct MaruAppHostSession *session);

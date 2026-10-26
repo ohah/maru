@@ -2335,6 +2335,17 @@ pub fn build(b: *std.Build) void {
     const address_field_ime_step = b.step("test-address-field-ime", "Validate address-field native IME ranges and pinned owner lifetime");
     address_field_ime_step.dependOn(&run_address_ime.step);
 
+    const sidebar_search_ime_step = b.step("test-sidebar-search-ime", "Validate sidebar search native IME ranges and owner lifetime");
+    const sidebar_search_ime_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"sidebar search IME host"},
+    });
+    const run_sidebar_search_ime = b.addRunArtifact(sidebar_search_ime_tests);
+    run_sidebar_search_ime.setCwd(b.path("."));
+    sidebar_search_ime_step.dependOn(&run_sidebar_search_ime.step);
+    run_sidebar_search_ime.addArg("--maru-expect-tests=36");
+    if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_sidebar_search_ime.step);
+
     const project_search_ime_step = b.step("test-project-search-ime", "Validate project search field IME ranges and ownership");
     const project_search_ime_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
@@ -4918,6 +4929,14 @@ pub fn build(b: *std.Build) void {
         run_find_model.addArg("--maru-expect-tests=24");
         find_input_ime_step.dependOn(&run_find_model.step);
         test_step.dependOn(&run_find_model.step);
+        const sidebar_ime_model_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
+            .filters = &.{"sidebar search IME model"},
+        });
+        const run_sidebar_ime_model = b.addRunArtifact(sidebar_ime_model_tests);
+        sidebar_search_ime_step.dependOn(&run_sidebar_ime_model.step);
+        run_sidebar_ime_model.addArg("--maru-expect-tests=12");
+        test_step.dependOn(&run_sidebar_ime_model.step);
         const project_ime_model_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
             .filters = &.{"project search IME model"},

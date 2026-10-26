@@ -235,7 +235,7 @@ pub fn open(self: *AppSession) void {
     dock.openDockTo(self, .project_search);
     self.chrome_host.find.setInputFocused(false);
     @import("../../web.zig").cancelAddrEdit(self, false);
-    self.sidebar_search_active = false;
+    @import("../../sidebar_ime.zig").setActive(self, false);
     self.agent_session_archive_search_active = false;
     @import("../../scm_dock.zig").blurCommit(self);
     self.editor_search.ime_epoch +|= 1;
@@ -560,7 +560,7 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
             if (index >= 4 or index == 3 and !st.replacing or index > 0 and index < 3 and !st.expanded or !self.tryCommitComposition()) return;
             self.chrome_host.find.setInputFocused(false);
             @import("../../web.zig").cancelAddrEdit(self, false);
-            self.sidebar_search_active = false;
+            @import("../../sidebar_ime.zig").setActive(self, false);
             self.agent_session_archive_search_active = false;
             @import("../../scm_dock.zig").blurCommit(self);
             st.setFocused(index);
@@ -686,7 +686,6 @@ pub fn caretRect(self: *AppSession) ?chrome.draw.Rect {
     return .{ .x = @intFromFloat(rect.x + @as(f32, @floatFromInt(m.inset)) + positions[0]), .y = @intFromFloat(rect.y + @as(f32, @floatFromInt(m.inset))), .w = @max(1, scaleMilli(self) / 1000), .h = m.row -| m.inset * 2 };
 }
 
-extern "c" fn maru_macos_coretext_chrome_offsets(text: [*]const u8, len: usize, offsets: *const [3]usize, positions: *[3]f64, family: [*]const u8, family_len: usize, fallback: [*]const u8, fallback_len: usize, font_px: f64, weight: u32, width: f64) c_int;
 pub const Display = struct { text: []u8, caret: usize, selected: ?struct { start: usize, end: usize } = null };
 pub fn makeDisplay(a: std.mem.Allocator, field: *const chrome.components.text_field.TextField, glyph: []const u8, cols: usize) !Display {
     var surrogate = field.*;
@@ -710,14 +709,7 @@ pub fn makeDisplay(a: std.mem.Allocator, field: *const chrome.components.text_fi
     return selected;
 }
 pub fn measure(self: *AppSession, text: []const u8, offsets: [3]usize, width: u32) ![3]f32 {
-    if (width == 0) return .{ 0, 0, 0 };
-    if (@import("builtin").os.tag != .macos) return .{ 0, 0, 0 };
-    const token = chrome.ui.typography.token(.control);
-    var values: [3]f64 = undefined;
-    const family = self.appearance.font.family;
-    const fallback = self.appearance.font.fallback;
-    if (maru_macos_coretext_chrome_offsets(text.ptr, text.len, &offsets, &values, family.ptr, family.len, fallback.ptr, fallback.len, @as(f64, @floatFromInt(token.point_size)) * @as(f64, @floatFromInt(scaleMilli(self))) / 1000.0, @backingInt(token.weight), @floatFromInt(width)) != 0) return error.MeasureFailed;
-    return .{ @floatCast(values[0]), @floatCast(values[1]), @floatCast(values[2]) };
+    return @import("../../chrome_text_offsets.zig").measure(self, text, offsets, width, scaleMilli(self));
 }
 
 extern "c" fn maru_macos_coretext_chrome_index(text: [*]const u8, len: usize, family: [*]const u8, family_len: usize, fallback: [*]const u8, fallback_len: usize, font_px: f64, weight: u32, width: f64, x: f64, byte_index: *usize) c_int;

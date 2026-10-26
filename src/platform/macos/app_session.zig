@@ -356,7 +356,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // ABI 237: settings search owns bounded IME snapshots and a pinned native owner.
 // ABI 238: movable Find/Replace contexts and a separately owned key snapshot.
 // ABI 239: project-search fields own native range contexts and key snapshots.
-pub const abi_version: u32 = 239;
+// ABI 240: sidebar search owns native projection and per-key rollback.
+pub const abi_version: u32 = 240;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -6786,6 +6787,7 @@ pub const AppSession = struct {
     /// 아니라 사이드바 상주 — sidebar_search_active일 때 키/IME가 여기로 라우팅되고, 카드 목록을 이름·브랜치·폴더로
     /// 필터링한다(visible_slots). Esc로 종료, Enter로 첫 매칭 세션 이동. P3.
     sidebar_search_input: chrome.components.overlay_input.OverlayInput = .{},
+    sidebar_ime: @import("app_session/sidebar_ime.zig").State = .{},
     sidebar_search_active: bool = false,
     /// 표시 행(sidebar.Row: 카드/헤더) 리스트 — 검색 필터·그룹 접힘을 self.tabs에 투영한 결과(SG3a 격상 — 옛
     /// sidebar_visible_tabs[usize]를 Row 배열로. docs/sidebar-groups.md §2.2). rebuildSidebar가 recomputeVisibleTabs로
@@ -15924,7 +15926,7 @@ pub const AppSession = struct {
                         self.metal_dirty = true;
                     },
                     .search => {
-                        self.sidebar_search_active = true; // 검색바 클릭 → 활성(키/IME가 검색으로 라우팅)
+                        @import("app_session/sidebar_ime.zig").setActive(self, true); // 검색바 클릭 → 활성(키/IME가 검색으로 라우팅)
                         sidebar_ops.rebuildSidebar(self) catch {}; // 보존된 검색어가 있으면 필터를 즉시 재개(blur 중 일시정지됐던 것)
                         self.resetCursorBlink();
                         self.metal_dirty = true;
@@ -16739,10 +16741,7 @@ pub const AppSession = struct {
             .inspector => inspector_ops.commitPreedit(self),
             .settings => return @import("app_session/settings_ime.zig").commitAll(self),
             .rename => return @import("app_session/field_ime.zig").commitAll(self, .rename),
-            .sidebar_search => if (self.sidebar_search_input.commitPreedit(self.allocator)) {
-                sidebar_ops.rebuildSidebar(self) catch {}; // 확정 글자로 필터 재적용
-                self.metal_dirty = true;
-            },
+            .sidebar_search => return @import("app_session/sidebar_ime.zig").commitAll(self),
             .agent_activity_search => if (self.agent_activity.search.commitPreedit(self.allocator)) {
                 // 확정 글자로 검색어가 바뀌었다 — 본문 답은 남의 답이 된다(계약 §2.1.1).
                 // **한글은 이 길로만 들어온다.** `.char` 갈래에만 놓으면 한글로 친 검색은 옛
@@ -25386,6 +25385,7 @@ pub const AppSession = struct {
         self.web_nav_action_pending = null; // Phase 7e-3: nav 버튼 클릭 pending(POD, heap 없음 — 같은 대칭 규율)
         self.rename_ime.deinit(self.allocator);
         self.rename_input.deinit(self.allocator); // 인라인 rename 입력(query/preedit) heap 해제
+        self.sidebar_ime.deinit(self.allocator);
         self.sidebar_search_input.deinit(self.allocator); // 사이드바 검색바 입력 heap 해제
         self.sidebar_publication.deinit(self.allocator);
         self.file_header_details.deinit(self.allocator);
@@ -102863,4 +102863,505 @@ test "project search IME host epoch saturation never reuses owner" {
     self.imeEnd(null);
     try std.testing.expectEqualStrings("", self.editor_search.fields[0].text.items);
     try std.testing.expect(@import("app_session/chrome_ime.zig").generation(self) == null);
+}
+
+test "sidebar search IME host middle UTF16 replacement preserves suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initRenameCaretTestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    _ = try self.resize(960, 600, 1000);
+    self.sidebar_search_active = true;
+    try self.sidebar_search_input.query.appendSlice(a, "a😀z");
+    self.imeBegin();
+    if (!@import("app_session/chrome_ime.zig").insert(self, "韓", .{ .location = 1, .length = 2 })) self.imeInsert("韓");
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a韓z", self.sidebar_search_input.query.items);
+}
+
+fn initSidebarIMETestSession(a: std.mem.Allocator) !*AppSession {
+    const self = try initRenameCaretTestSession(a);
+    errdefer {
+        self.deinit();
+        a.destroy(self);
+    }
+    _ = try self.resize(960, 600, 1000);
+    @import("app_session/sidebar_ime.zig").setActive(self, true);
+    try self.sidebar_search_input.query.appendSlice(a, "a😀z");
+    return self;
+}
+
+test "sidebar search IME host preview retains committed filter" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    const before_rows = self.sidebar_rows.items.len;
+    self.imeBegin();
+    try std.testing.expect(native.marked(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 }));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+    try std.testing.expectEqualStrings("韓", f.preedit.items);
+    try std.testing.expectEqual(before_rows, self.sidebar_rows.items.len);
+    try std.testing.expectEqualStrings("a韓z", native.projection(self).?.text());
+}
+
+test "sidebar search IME host candidate cancel restores source range" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    self.imeBegin();
+    _ = native.marked(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    self.imeBegin();
+    _ = native.marked(self, "", .{ .location = 0, .length = 0 }, null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+    try std.testing.expectEqualStrings("", f.preedit.items);
+    try std.testing.expectEqualStrings("a😀z", native.projection(self).?.text());
+}
+
+test "sidebar search IME host candidate Return commits without search activation" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    self.imeBegin();
+    _ = native.insert(self, "韓", .{ .location = 1, .length = 2 });
+    self.imeEnd(.{ .key = .enter });
+    try std.testing.expect(self.sidebar_search_active);
+    try std.testing.expectEqualStrings("a韓z", f.query.items);
+}
+
+test "sidebar search IME host standalone Return keeps first match action" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const f = &self.sidebar_search_input;
+    f.clear();
+    try f.query.appendSlice(a, "Maru");
+    try std.testing.expect(tab_ops.firstMatchingTab(self) != null);
+    self.imeBegin();
+    self.imeEnd(.{ .key = .enter });
+    try std.testing.expect(!self.sidebar_search_active);
+    try std.testing.expectEqualStrings("", f.query.items);
+}
+
+test "sidebar search IME host outside key range replacement is atomic" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    _ = native.insert(self, "韓", .{ .location = 1, .length = 2 });
+    try std.testing.expectEqualStrings("a韓z", f.query.items);
+    try std.testing.expect(!self.sidebar_ime.transaction.active);
+}
+
+test "sidebar search IME host surrogate split never reaches append fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    self.imeBegin();
+    _ = native.insert(self, "lost", .{ .location = 2, .length = 1 });
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+}
+
+test "sidebar search IME host failed second callback rolls back whole key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    self.imeBegin();
+    _ = native.insert(self, "x", null);
+    _ = native.marked(self, "韓", .{ .location = 99, .length = 0 }, null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+    try std.testing.expectEqualStrings("", f.preedit.items);
+}
+
+test "sidebar search IME host blur settles composition and keeps query" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    _ = native.marked(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    sidebar_ops.blurSidebarSearch(self);
+    try std.testing.expect(!self.sidebar_search_active);
+    try std.testing.expectEqualStrings("a韓z", f.query.items);
+    try std.testing.expectEqualStrings("", f.preedit.items);
+}
+
+test "sidebar search IME host close clears and consumes pinned late callback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const f = &self.sidebar_search_input;
+    self.imeBegin();
+    sidebar_ops.closeSidebarSearch(self);
+    _ = @import("app_session/chrome_ime.zig").insert(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("", f.query.items);
+    try std.testing.expect(!self.sidebar_search_active);
+}
+
+test "sidebar search IME host A B A activation rejects stale key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    self.imeBegin();
+    const before = self.sidebar_ime.owner.?;
+    native.setActive(self, false);
+    native.setActive(self, true);
+    _ = @import("app_session/chrome_ime.zig").insert(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+    try std.testing.expect(native.generation(self).? != before);
+}
+
+test "sidebar search IME host modal cannot receive old sidebar text" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const f = &self.sidebar_search_input;
+    self.imeBegin();
+    self.chrome_host.palette.open = true;
+    _ = @import("app_session/chrome_ime.zig").insert(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+    try std.testing.expectEqual(@as(usize, 0), self.chrome_host.palette.input.query.items.len);
+}
+
+test "sidebar search IME host collapsed sidebar has no native owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    self.sidebar_collapsed = true;
+    try std.testing.expect(native.generation(self) == null);
+    _ = native.insert(self, "lost", null);
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+}
+
+test "sidebar search IME host minimal window has no native owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    self.chrome_minimal = true;
+    try std.testing.expect(native.generation(self) == null);
+    _ = native.insert(self, "lost", null);
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+}
+
+test "sidebar search IME host bootstrap has no native owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    self.surface_initialized = false;
+    try std.testing.expect(native.generation(self) == null);
+    _ = native.insert(self, "lost", null);
+    self.surface_initialized = true;
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+}
+
+test "sidebar search IME host topology free session has no native owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    const count = self.tabs.items.len;
+    self.tabs.items.len = 0;
+    try std.testing.expect(native.generation(self) == null);
+    _ = native.insert(self, "lost", null);
+    self.tabs.items.len = count;
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+}
+
+test "sidebar search IME host pinned terminal cannot publish sidebar input" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    self.ime_terminal_target_id = 123456;
+    try std.testing.expect(native.generation(self) == null);
+    _ = native.insert(self, "lost", null);
+    self.ime_terminal_target_id = null;
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+}
+
+test "sidebar search IME host sequence saturation closes append fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    self.sidebar_ime.sequence = @as(u64, 1) << 57;
+    self.imeBegin();
+    self.imeInsert("lost");
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+    try std.testing.expect(native.generation(self) == null);
+}
+
+test "sidebar search IME host epoch saturation closes append fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const f = &self.sidebar_search_input;
+    self.sidebar_ime.epoch = std.math.maxInt(u64);
+    self.imeBegin();
+    self.imeInsert("lost");
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+}
+
+test "sidebar search IME host native token has independent namespace" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    const token = native.generation(self).?;
+    try std.testing.expect(token > (@as(u64, 1) << 57));
+    try std.testing.expect(token < (@as(u64, 1) << 58));
+    self.agent_session_search_generation = @as(u64, 1) << 57;
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+}
+
+test "sidebar search IME host paint uses marked internal caret once" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    _ = native.marked(self, "가나", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    const display = try self.sidebar_ime.projection.display(a, f, "|", 40);
+    defer a.free(display.text);
+    try std.testing.expectEqualStrings("a가|나z", display.text);
+    try std.testing.expectEqual(@as(usize, 4), display.caret);
+}
+
+test "sidebar search IME host long query retains suffix and full native document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    f.clear();
+    var prefix: [1200]u8 = undefined;
+    @memset(&prefix, 'x');
+    try f.query.appendSlice(a, &prefix);
+    try f.query.appendSlice(a, "😀z");
+    self.imeBegin();
+    _ = native.insert(self, "韓", .{ .location = 1200, .length = 2 });
+    self.imeEnd(null);
+    try std.testing.expectEqual(@as(usize, 1204), f.query.items.len);
+    try std.testing.expectEqualStrings("韓z", f.query.items[1200..]);
+}
+
+test "sidebar search IME host snapshot OOM never publishes callback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    _ = native.projection(self);
+    var fail = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+    self.allocator = fail.allocator();
+    self.imeBegin();
+    self.allocator = a;
+    _ = native.insert(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+}
+
+test "sidebar search IME host growth OOM rolls back prior insertion" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    self.imeBegin();
+    _ = native.insert(self, "x", null);
+    var fail = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+    self.allocator = fail.allocator();
+    var large: [10000]u8 = undefined;
+    @memset(&large, 'x');
+    _ = native.marked(self, &large, .{ .location = 0, .length = 0 }, null);
+    self.allocator = a;
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+}
+
+test "sidebar search IME host NFD remains verbatim" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    f.clear();
+    _ = native.insert(self, "한", null);
+    try std.testing.expectEqualStrings("한", f.query.items);
+}
+
+test "sidebar search IME host UTF16 semantic selection keeps surrogate units" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    _ = native.marked(self, "😀韓", .{ .location = 2, .length = 1 }, .{ .location = 1, .length = 2 });
+    const selection = native.projection(self).?.selectedRange().?;
+    try std.testing.expectEqual(@as(usize, 3), selection.location);
+    try std.testing.expectEqual(@as(usize, 1), selection.length);
+}
+
+test "sidebar search IME host stale pending insertion never resurfaces in next key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    self.imeBegin();
+    _ = native.insert(self, "lost", null);
+    native.setActive(self, false);
+    native.setActive(self, true);
+    self.imeEnd(null);
+    self.imeBegin();
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+}
+
+test "sidebar search IME host rejected key cannot admit composition through blur" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    const f = &self.sidebar_search_input;
+    self.imeBegin();
+    _ = native.insert(self, "x", null);
+    _ = native.marked(self, "韓", .{ .location = 99, .length = 0 }, null);
+    sidebar_ops.blurSidebarSearch(self);
+    try std.testing.expect(self.sidebar_search_active);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", f.query.items);
+}
+
+test "sidebar search IME host escape closes clean search" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const f = &self.sidebar_search_input;
+    self.imeBegin();
+    self.imeEnd(.{ .key = .escape });
+    try std.testing.expect(!self.sidebar_search_active);
+    try std.testing.expectEqualStrings("", f.query.items);
+}
+
+test "sidebar search IME host failed marked callback restores preedit and selection" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/sidebar_ime.zig");
+    self.imeBegin();
+    _ = native.marked(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    _ = native.marked(self, "lost", .{ .location = 99, .length = 0 }, null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", self.sidebar_search_input.query.items);
+    try std.testing.expectEqualStrings("", self.sidebar_search_input.preedit.items);
+    const context = native.projection(self).?;
+    try std.testing.expectEqualStrings("a😀z", context.text());
+    try std.testing.expectEqual(@as(usize, 4), context.selectedRange().?.location);
+}
+
+test "sidebar search IME host candidate Return never activates a matching session" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initSidebarIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    self.sidebar_search_input.clear();
+    try self.sidebar_search_input.query.appendSlice(a, "Maru");
+    try std.testing.expect(tab_ops.firstMatchingTab(self) != null);
+    self.imeBegin();
+    _ = @import("app_session/sidebar_ime.zig").insert(self, "M", .{ .location = 0, .length = 1 });
+    self.imeEnd(.{ .key = .enter });
+    try std.testing.expect(self.sidebar_search_active);
+    try std.testing.expectEqualStrings("Maru", self.sidebar_search_input.query.items);
 }

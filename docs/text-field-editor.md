@@ -350,3 +350,9 @@ TextArea (새 얇은 층 — 세로 축만 소유)
 [설정 검색창 계획](plans/settings-search-ime.md)은 고정 64/32바이트 검색 버퍼를 유지한 채
 공통 UTF-16 문맥을 연결한다. 확정 검색어를 필터에 쓰는 기존 정책과 값 편집·키 녹음·색상
 picker/dropdown의 입력 경계를 유지한다. TextField로 저장 모델을 바꾸는 이관은 아니다.
+
+### 사이드바 검색창 IME 범위 문맥
+
+[사이드바 검색 IME 계획](plans/sidebar-search-ime.md)은 OverlayInput과 확정 검색 필터·blur 검색어
+보존을 유지하면서 native 범위 문맥을 연결한다. 중간 caret 편집 UX나 다른 검색 입력창 전체의
+완전 IME 지원을 함께 주장하지 않는다.

@@ -561,6 +561,7 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
         @import("field_ime.zig").finish(self);
         @import("settings_ime.zig").finish(self);
         @import("find_ime.zig").finish(self);
+        @import("sidebar_ime.zig").finish(self);
         @import("editor/search/ime.zig").finish(self);
         @import("palette_ime.zig").finish(self);
         self.ime_search_owner = null;

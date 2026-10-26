@@ -5228,3 +5228,9 @@ provider 부재의 push fallback과 다른 서버의 push를 유지하며 협상
 backoff·시간 역행·오버플로·타이머 중복, 초기 접속·refresh·지난 seq/version·해소·다른 열린 문서 의존성을 검사한다.
 51개 Python 증거 검사에는 push 없는 실제 pull 판정과 잘못된 URI/협상/취소/unchanged 거부를 포함한다.
 실제 SDK 결과와 서로 다른 적대 조건은 [조사·수정 검증](../tools/editor-lsp-real/rust-diagnostics.md)을 따른다.
+
+## 사이드바 검색 IME 문맥
+
+`test-sidebar-search-ime`는 중간 UTF-16 교체·canonical 필터 보존·후보 Return 격리·blur/close·
+소유자 전환·숨김·초기화 전·포화·OOM·NFD와 내부 caret 표시를 검사한다. 진단·후보창 PNG/OCR의
+구체적 통과 범위는 [사이드바 IME 계획](plans/sidebar-search-ime.md)을 따른다.

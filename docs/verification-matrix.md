@@ -5247,3 +5247,14 @@ bitmask 전환·활성 세션 불변·터미널 복귀·입력 소스 복원도 
 20개 카운터/알림/입력 소유 상태 대조를 포함한 제품 회귀 2개 + 모듈 참조 4개이며 SDK는
 필요 없다. macOS-only 게이트와 기본 macOS 제품 테스트에 포함한다.
 [원인과 관측 계약](../tools/editor-lsp-real/completion-retry.md)이 상세 범위를 소유한다.
+
+
+## SCM 커밋 메시지 IME 문맥
+
+`test-scm-commit-ime`는 UTF-16 범위 교체·빈 입력·LF/TAB/NFD·제어문자 제거·저장소별 초안·
+후보 Return 격리·늦은 콜백·숨김·포화·할당 실패와 텍스트/스크롤 복구를 검사한다.
+조회 저장소와 입력 owner를 구분하는 기존 초안 회귀 3개도 이 집중 gate에 포함한다.
+`tools/scm-commit-ime`의 격리 Git fixture는 실제 후보 취소 5회·한자 확정·터미널 복귀·
+커밋 진입 시도 0과 HEAD/ref/reflog/index/파일 해시 불변을 관측한다.
+독립 PNG/OCR 재판정과 추가 실행의 환경 실패는 [SCM IME 계획](plans/scm-commit-ime.md)에 구분한다.
+이미지와 실행 산출물은 저장소 밖에 두고 이미지는 PR 본문에만 올린다.

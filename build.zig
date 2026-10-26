@@ -2335,6 +2335,17 @@ pub fn build(b: *std.Build) void {
     const address_field_ime_step = b.step("test-address-field-ime", "Validate address-field native IME ranges and pinned owner lifetime");
     address_field_ime_step.dependOn(&run_address_ime.step);
 
+    const scm_commit_ime_step = b.step("test-scm-commit-ime", "Validate commit message native IME ranges and repo ownership");
+    const scm_commit_ime_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{ "scm commit IME host", "커밋 메시지 초안은 저장소마다", "첫 읽기가 늦게 와도", "비운 초안은 남지 않는다" },
+    });
+    const run_scm_commit_ime = b.addRunArtifact(scm_commit_ime_tests);
+    run_scm_commit_ime.addArg("--maru-expect-tests=39");
+    run_scm_commit_ime.setCwd(b.path("."));
+    scm_commit_ime_step.dependOn(&run_scm_commit_ime.step);
+    if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_scm_commit_ime.step);
+
     const sidebar_search_ime_step = b.step("test-sidebar-search-ime", "Validate sidebar search native IME ranges and owner lifetime");
     const sidebar_search_ime_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
@@ -4929,6 +4940,22 @@ pub fn build(b: *std.Build) void {
         run_find_model.addArg("--maru-expect-tests=24");
         find_input_ime_step.dependOn(&run_find_model.step);
         test_step.dependOn(&run_find_model.step);
+        const scm_commit_text_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/session/scm_commit_text.zig"), .target = target, .optimize = mode }),
+            .filters = &.{"scm commit IME model"},
+        });
+        const run_scm_commit_text = b.addRunArtifact(scm_commit_text_tests);
+        run_scm_commit_text.addArg("--maru-expect-tests=4");
+        scm_commit_ime_step.dependOn(&run_scm_commit_text.step);
+        test_step.dependOn(&run_scm_commit_text.step);
+        const scm_commit_paint_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
+            .filters = &.{"scm commit IME model"},
+        });
+        const run_scm_commit_paint = b.addRunArtifact(scm_commit_paint_tests);
+        run_scm_commit_paint.addArg("--maru-expect-tests=10");
+        scm_commit_ime_step.dependOn(&run_scm_commit_paint.step);
+        test_step.dependOn(&run_scm_commit_paint.step);
         const sidebar_ime_model_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
             .filters = &.{"sidebar search IME model"},

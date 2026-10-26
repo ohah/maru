@@ -8,6 +8,12 @@ const Field = @import("text_field.zig").TextField;
 pub const Range = input.Range;
 pub const Key = enum { enter, backspace, other };
 
+/// Only paint snaps graphemes; the native UTF-16 selection remains unchanged.
+pub fn displayCaret(field: *const Field, text: []const u8) usize {
+    const local = grapheme.snapToBoundary(field.preedit.items, @min(field.preedit_caret orelse field.preedit.items.len, field.preedit.items.len));
+    return grapheme.snapToBoundary(text, @min(field.caret +| local, text.len));
+}
+
 pub const Normalization = enum { hangul_nfc, verbatim };
 
 pub const State = struct {
@@ -167,7 +173,7 @@ pub const State = struct {
         return true;
     }
 
-    fn reject(self: *State) bool {
+    pub fn reject(self: *State) bool {
         if (self.in_key) self.rejected = true;
         return false;
     }
@@ -505,4 +511,26 @@ test "project search IME model NFD range uses source UTF16 units" {
     try std.testing.expect(state.insert(a, &field, "韓", null));
     try std.testing.expect(state.finishKey(a, &field, .enter, true, false));
     try std.testing.expectEqualStrings("a韓z", field.text.items);
+}
+
+test "scm commit IME model composed caret respects marked internal position" {
+    const a = std.testing.allocator;
+    var field: Field = .{};
+    defer field.deinit(a);
+    try field.setText(a, "az");
+    field.caret = 1;
+    try field.setPreedit(a, "가나");
+    field.preedit_caret = 3;
+    try std.testing.expectEqual(@as(usize, 4), displayCaret(&field, "a가나z"));
+}
+
+test "scm commit IME model paint snap keeps NFD whole across preedit" {
+    const a = std.testing.allocator;
+    var field: Field = .{};
+    defer field.deinit(a);
+    try field.setText(a, "az");
+    field.caret = 1;
+    try field.setPreedit(a, "가");
+    field.preedit_caret = 3;
+    try std.testing.expectEqual(@as(usize, 1), displayCaret(&field, "a가z"));
 }

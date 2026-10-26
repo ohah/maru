@@ -123,6 +123,7 @@ pub const turn_persist = @import("session/turn_persist.zig"); // AT7: 턴 링·�
 pub const shell_bracket = @import("session/shell_bracket.zig"); // 에이전트 셸이 돌던 구간(AT3b-1, 순수 — Pre/Post 로 열고 닫는다)
 pub const repo_path = @import("session/repo_path.zig"); // 저장소 루트 안쪽 상대경로 판정(심층 방어 — 순수)
 pub const diff_payload = @import("session/diff_payload.zig"); // E1: diff 본문 페이로드 상한·binary 정책(순수) // git 실행 파일 후보 열거(설치 여부 판정 — shim 회피)
+pub const scm_commit_text = @import("session/scm_commit_text.zig");
 pub const scm_view = @import("session/scm_view.zig"); // 도크 소스 컨트롤 뷰 행 모델(섹션·개수·증감)
 pub const scm_repos = @import("session/scm_repos.zig"); // 도크가 세울 저장소·워크트리 목록(순서·중복·상한)
 pub const git_log = @import("session/git_log.zig"); // 히스토리 탭 커밋 목록 파서(--format 단일 출처, 순수)

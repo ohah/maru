@@ -703,8 +703,7 @@ pub fn makeDisplay(a: std.mem.Allocator, field: *const chrome.components.text_fi
     };
     // Native selection may sit inside preedit. Snap painting on the composed
     // grapheme, while keeping the semantic UTF-16 range in the IME context.
-    const local = maru.grapheme.snapToBoundary(surrogate.preedit.items, @min(surrogate.preedit_caret orelse surrogate.preedit.items.len, surrogate.preedit.items.len));
-    const caret = maru.grapheme.snapToBoundary(text, @min(surrogate.caret + local, text.len));
+    const caret = chrome.components.text_field_ime.displayCaret(&surrogate, text);
     const selected = if (surrogate.selection) |sel| Display{ .text = text, .caret = caret, .selected = .{ .start = @min(sel.lo() + (if (sel.lo() >= surrogate.caret) glyph.len else 0), text.len), .end = @min(sel.hi() + (if (sel.hi() > surrogate.caret) glyph.len else 0), text.len) } } else Display{ .text = text, .caret = caret };
     return selected;
 }

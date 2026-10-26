@@ -245,6 +245,20 @@ const Surface = struct {
     /// W9d① 적대 리뷰 2 회차 N3: 어느 호스트든 grant 가 있는 탭을 사용자가 처음 몬 때의 사이트(에이전트가 마지막으로 혼자 둔 사이트) — 설정이
     /// 꺼지면(그때든 나중이든) 그 grant 를 이리로 좁힌다.
     net_drove_host: ?maru.session.control_pane_grant.GrantHost = null,
+    /// W9d②: 응답 본문 기록을 켜 두었다(`browser.networkRecord on` — 그 탭에 본문 grant 가 있는 동안만). 끄기·마지막 본문 grant 의 철회·네트워크
+    /// 기록의 끝·탭 닫힘에 내린다.
+    rec_on: bool = false,
+    /// 켤 때마다 새로 매기는 세션(`net_record.session`, 0 = 꺼짐) — sidecar 가 돌려주는 본문 frame 이 싣는다.
+    rec_session: u32 = 0,
+    /// 이 탭에 매긴 가장 최근 세션 — 그보다 큰 세션의 frame 은 받지 않는다(끈 뒤에 오는 옛 세션의 끝은 받는다).
+    rec_last_session: u32 = 0,
+    /// W9d② 적대 리뷰 1 회차 LOW-2: 본문을 지웠을 때(마지막 본문 grant 의 철회·설정 끔·네트워크 기록의 끝)의 가장 최근 세션 — 이것 이하 세션의
+    /// frame 은 받지 않는다. 지우기 전에 이미 관·sidecar 의 줄에 있던 본문(2 MiB 까지)이 지운 뒤에 들어앉지 않게(`bodyFrameAccepted`).
+    rec_floor: u32 = 0,
+    /// sidecar 가 알린 기록 상태(`net_record_state` — 켜짐을 아직 모르면 `off`).
+    rec_status: ws.message.NetRecordStatus = .off,
+    /// 마지막으로 sidecar 에 보낸 켬 세션(0 = 끔이거나 보낸 적 없음) — 브라우저가 새로 만들어지면 다시 보낸다.
+    rec_sent: u32 = 0,
 };
 
 /// W9d①: 보낸 `net_watch` 의 값 — 켬·설정·어느 호스트든·grant 호스트(넷까지).
@@ -592,8 +606,13 @@ var console_birth_seq: u64 = 0;
 const NetGrantCopy = struct { tab: u64, who: u64, host: maru.session.control_pane_grant.GrantHost, birth: bool, any_host: bool, pane: u64, narrowed: bool = false };
 var net_grants: [maru.session.control_pane_grant.capacity]NetGrantCopy = undefined;
 var net_grant_count: usize = 0;
-/// W9d①: 네트워크 기록의 앱 전체 예산(32 MiB — 탭들이 함께 쓴다).
+/// W9d①: 네트워크 기록의 앱 전체 예산(32 MiB — 탭들이 함께 쓴다). W9d②: 본문도 따로 32 MiB(같은 구조체).
 var net_budget: net_ring.Budget = .{};
+/// W9d②: app 이 마지막으로 알린 `browser_network_body` grant 들(`networkBodySync`) — 기록이 아직 없는 탭은 첫 배치가 맞춘다.
+var body_grants: [maru.session.control_pane_grant.capacity]NetGrantCopy = undefined;
+var body_grant_count: usize = 0;
+/// W9d②: 다음 본문 기록 세션(앱 전체에서 오른다 — 0 은 쓰지 않는다).
+var rec_next_session: u32 = 1;
 /// W9d①: 설정 `browser.agent-network-full`(켜짐이 기본 — 사용자 결정 2026-10-15). 앱 전체 하나 — 마지막으로 읽은 창의 값.
 var net_full: bool = true;
 /// W9d① 적대 리뷰 1 회차 F5: 설정이 꺼졌을 때 사용자가 몬 탭 — 그 탭의 어느 호스트든 grant 를 그때의 사이트로 좁히라고 app 에 알린다
@@ -697,6 +716,7 @@ fn testTeardown(gpa: std.mem.Allocator) void {
     state = .off;
     test_record_sends = false;
     net_grant_count = 0; // W9d①
+    body_grant_count = 0; // W9d②
     net_full = true;
 }
 
@@ -1625,6 +1645,13 @@ pub fn testApply(gpa: std.mem.Allocator, message: Message) void {
     apply(gpa, message, 0);
 }
 
+/// 시험 전용(W9d②): 그 탭의 본문 기록 세션(0 = 꺼짐).
+pub fn testRecordSession(surface_id: u64) u32 {
+    if (!builtin.is_test) @compileError("test only");
+    const s = surfaces.getPtr(surface_id) orelse return 0;
+    return s.rec_session;
+}
+
 /// 시험 전용(W9a): `child` 를 `root` 의 팝업 가족으로 둔다.
 pub fn testSetPopupFamily(child: u64, root: u64) void {
     if (!builtin.is_test) @compileError("test only");
@@ -1732,6 +1759,7 @@ pub fn testDevtoolsReset(gpa: std.mem.Allocator) void {
 pub fn testForget(gpa: std.mem.Allocator) void {
     if (!builtin.is_test) @compileError("test only");
     net_grant_count = 0; // W9d①
+    body_grant_count = 0; // W9d②
     net_full = true;
     destroyed_ids = @splat(0);
     decided = null;
@@ -2006,6 +2034,7 @@ pub fn ensure(gpa: std.mem.Allocator, layout: plan.Layout, scale_milli: u32, now
         surfaces.put(gpa, layout.surface_id, .{ .record = record, .stopped_notice_pending = latched != null, .page_opened = takePageOpened(layout.surface_id) }) catch return;
         surfaces.getPtr(layout.surface_id).?.console.latchAtBirth(takeConsoleBirth(layout.surface_id)); // W9c① 3 회차 F1
         reconcileNetwork(gpa, layout.surface_id, surfaces.getPtr(layout.surface_id).?); // W9d①: 기록보다 먼저 온 grant(에이전트 탭의 태어남)
+        reconcileBody(gpa, layout.surface_id, surfaces.getPtr(layout.surface_id).?); // W9d②
         // 판정자 전용(`MARU_WEB_OSR_TEST_URL`): 새 탭을 이 주소로 연다 — 스모크가 sidecar 까지의 경로(띄우기·handshake·
         // 생성·이동)를 시험 서버가 받은 요청으로 확인한다. 제품 사용자가 켤 이유는 없다.
         if (std.c.getenv("MARU_WEB_OSR_TEST_URL")) |test_url| navigate(gpa, layout.surface_id, std.mem.span(test_url));
@@ -2996,7 +3025,12 @@ pub fn setNetworkFull(value: bool) void {
     }
     const gpa = gpa_ref orelse return; // 엔진이 돈 적 없다 — 지켜보는 탭이 없다
     var it = surfaces.iterator();
-    while (it.next()) |e| if (e.value_ptr.net_on) sendNetWatch(gpa, e.key_ptr.*, e.value_ptr);
+    while (it.next()) |e| {
+        if (e.value_ptr.net_on) sendNetWatch(gpa, e.key_ptr.*, e.value_ptr);
+        // W9d②: 꺼지면 켜진 동안 받은 본문을 지운다 — 다른 사이트의 본문까지 받던 판의 것이다(그 뒤로 sidecar 는 덮이지 않는 호스트의 본문을
+        // 받지 않는다 — `not_covered`). 기록은 새 세션으로 이어 간다(적대 리뷰 1 회차 LOW-2 — 켜진 동안의 세션 frame 은 지운 뒤 받지 않는다).
+        if (!value) wipeBodies(gpa, e.key_ptr.*, e.value_ptr);
+    }
 }
 
 pub fn networkFull() bool {
@@ -3015,7 +3049,9 @@ fn reconcileNetwork(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
         if (s.net_on) {
             s.net_on = false;
             s.network.wipe(gpa, &net_budget); // 철회·마지막 grant 가 사라졌다 — 적은 것을 남기지 않는다
+            s.rec_floor = s.rec_last_session; // W9d② 적대 리뷰 1 회차 LOW-2: 지운 뒤의 옛 세션 본문은 받지 않는다
         }
+        recordOff(gpa, id, s); // W9d②: 본문은 네트워크 기록 위에 선다
     } else {
         s.network.syncReaders(desired[0..n]);
         s.net_on = true;
@@ -3067,6 +3103,15 @@ pub const NetReader = struct {
     grant_host: []const u8 = "",
     host_bound: bool = false,
     cookie_host: []const u8 = "",
+    /// W9d②: 그 pane 이 이 탭에 쥔 `browser_network_body` grant 의 읽는 쪽 번호(없으면 null — 본문은 `needs_body_permission`), 그 호스트(어느
+    /// 호스트든이면 `body_any_host`).
+    body_who: ?u64 = null,
+    body_host: []const u8 = "",
+    body_any_host: bool = false,
+
+    fn bodyQuery(self: NetReader, want: bool, offset: u32, max: u32) net_ring.BodyQuery {
+        return .{ .who = self.body_who, .host = self.body_host, .any_host = self.body_any_host, .want = want, .offset = offset, .max_bytes = max };
+    }
 };
 
 /// W9d①: 읽기의 관점 — 설정과 grant 호스트(비었으면 탭의 지금 문서 호스트 — 에이전트 탭의 태어날 때 grant).
@@ -3131,19 +3176,182 @@ pub fn networkList(out: std.mem.Allocator, surface_id: u64, reader: NetReader, q
     defer out.free(origin_buf);
     const s = surfaces.getPtr(surface_id) orelse {
         var empty: net_ring.Ring = .{};
-        return empty.list(out, 0, try netView(null, surface_id, reader, &lists, origin_buf, out), q);
+        return empty.list(out, 0, try netView(null, surface_id, reader, &lists, origin_buf, out), q, reader.bodyQuery(false, 0, 0));
     };
-    return s.network.list(out, reader.who, try netView(s, surface_id, reader, &lists, origin_buf, out), q);
+    var json = try s.network.list(out, reader.who, try netView(s, surface_id, reader, &lists, origin_buf, out), q, reader.bodyQuery(false, 0, 0));
+    // W9d②: 기록 상태를 덧붙인다(`recording` — 켜 두었는가·sidecar 가 알린 상태).
+    if (s.rec_on and json.len > 1 and json[json.len - 1] == '}') {
+        const tail = try std.fmt.allocPrint(out, ",\"recording\":\"{s}\"}}", .{recordStateName(s)});
+        defer out.free(tail);
+        const grown = try out.realloc(json, json.len - 1 + tail.len);
+        @memcpy(grown[grown.len - tail.len ..], tail);
+        json = grown;
+    }
+    return json;
 }
 
 /// W9d①: `browser.networkRequest` — 그 요청의 자세한 것 JSON(`out` 소유).
-pub fn networkDetail(out: std.mem.Allocator, surface_id: u64, reader: NetReader, req: u64) net_ring.DetailError![]u8 {
+pub fn networkDetail(out: std.mem.Allocator, surface_id: u64, reader: NetReader, req: u64, body: BodyRead) net_ring.DetailError![]u8 {
     const s = surfaces.getPtr(surface_id) orelse return error.UnknownRequest;
     var lists: NetViewLists = .{};
     defer lists.deinit(out);
     const origin_buf = try out.alloc(u8, net_shared_origin_bytes);
     defer out.free(origin_buf);
-    return s.network.detail(out, reader.who, try netView(s, surface_id, reader, &lists, origin_buf, out), req);
+    return s.network.detail(out, reader.who, try netView(s, surface_id, reader, &lists, origin_buf, out), req, reader.bodyQuery(body.want, body.offset, body.max_bytes));
+}
+
+/// W9d②: `browser.networkRequest` 의 본문 인자.
+pub const BodyRead = struct { want: bool = false, offset: u32 = 0, max_bytes: u32 = net_ring.default_body_read_bytes };
+
+// ── W9d②: 응답 본문 기록(`browser.networkRecord`) ─────────────────────────────────────────────────────────────
+
+/// W9d②: grant 가 바뀔 때마다 app 이 `browser_network_body` grant 전체 목록을 알린다 — 탭마다 본문 읽는 쪽을 맞추고, 그 탭의 마지막 본문
+/// grant 가 사라지면 기록을 끄고 받은 본문을 지운다(사용자 결정 — 메모리에만, 마지막 grant 와 함께 지운다).
+pub fn networkBodySync(grants: []const NetworkGrant) void {
+    body_grant_count = 0;
+    for (grants) |g| {
+        if (body_grant_count == body_grants.len) break;
+        body_grants[body_grant_count] = .{ .tab = g.tab, .who = g.who, .host = if (g.any_host) .{} else .init(g.host), .birth = g.birth, .any_host = g.any_host, .pane = g.pane };
+        body_grant_count += 1;
+    }
+    const gpa = gpa_ref orelse return;
+    var it = surfaces.iterator();
+    while (it.next()) |e| reconcileBody(gpa, e.key_ptr.*, e.value_ptr);
+}
+
+fn reconcileBody(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
+    var desired: [maru.session.control_pane_grant.capacity]net_ring.Desired = undefined;
+    var n: usize = 0;
+    for (body_grants[0..body_grant_count]) |g| if (g.tab == id) {
+        desired[n] = .{ .who = g.who, .birth = g.birth };
+        n += 1;
+    };
+    s.network.syncBodyReaders(desired[0..n]);
+    if (n == 0) {
+        recordOff(gpa, id, s);
+        wipeBodies(gpa, id, s);
+    }
+}
+
+/// 받은 본문을 지운다(`discarded`) — 끝을 기다리던 것도 끝내고, 지금까지 매긴 세션의 frame 은 더 받지 않는다(W9d② 적대 리뷰 1 회차 LOW-2:
+/// 전에는 이미 관이나 sidecar 의 줄에 있던 본문이 지운 뒤에 `captured` 로 들어앉아, 설정을 다시 켜면 읽혔다). 기록이 돌고 있으면(설정 끔) 새
+/// 세션으로 이어 간다 — sidecar 는 옛 세션의 남은 것을 `recording_stopped` 로 끝내고(이미 `discarded` 라 버린다) 새 세션의 본문만 보낸다.
+/// 쏟아짐 밸브로 멈췄거나 켜지 못한 기록은 그대로 둔다(다시 켜는 것은 에이전트의 몫이다 — 설정 끄기가 몰래 다시 켜지 않는다).
+fn wipeBodies(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
+    s.network.discardBodies(gpa, &net_budget);
+    s.rec_floor = s.rec_last_session;
+    if (s.rec_on and s.rec_status != .paused and s.rec_status != .failed) {
+        newRecordSession(s);
+        sendRecord(gpa, id, s);
+    }
+}
+
+/// 본문 frame 을 받는가 — 지켜보는 탭이고, 이 탭에 매긴 세션까지(끈 뒤에 오는 옛 세션의 끝도 받는다)이되 지운 때의 세션보다 뒤의 것.
+fn bodyFrameAccepted(s: *const Surface, session: u32) bool {
+    return s.net_on and session > s.rec_floor and session <= s.rec_last_session;
+}
+
+/// 새 기록 세션을 매긴다(sidecar 에 알리는 것은 `sendRecord`).
+fn newRecordSession(s: *Surface) void {
+    s.rec_session = rec_next_session;
+    s.rec_last_session = rec_next_session;
+    rec_next_session +%= 1;
+    if (rec_next_session == 0) rec_next_session = 1;
+    s.rec_status = .off;
+}
+
+/// 본문 `need` 바이트가 앱 상한(32 MiB)에 들어갈 자리를 낸다(`evicted`) — 탭 상한은 그 탭의 링이 따로 낸다(`Ring.bodyData`).
+/// W9d② 적대 리뷰 1 회차: 전에는 앱 상한도 받는 탭의 것만 버려, 다른 탭들이 상한을 채우면 새 탭의 본문은 모두 버려졌다.
+/// W9d② 적대 리뷰 2 회차(작성자 선택): 본문을 가장 많이 쥔 탭(받는 중인 바이트 포함 — `Ring.body_bytes`)의 가장 먼저 받은 본문부터 버린다(같으면
+/// 더 먼저 받은 본문의 탭). 바쁜 탭은 다른 탭보다 먼저 제 본문을 버린다 — 1 회차의 「탭과 무관하게 가장 먼저 받은 것부터」 는 바쁜 페이지가
+/// 사용자 탭의 본문(대개 더 먼저 받았다)을 밀어냈다.
+/// W9d② 적대 리뷰 3 회차: 버릴 본문마다 모든 링을 훑었다(작은 본문이 많으면 버림 수 × 모든 기록). 이제 한 번 훑어 첫째·둘째 링을 고르고, 첫째가
+/// 둘째를 앞서는 동안은 그 링 안에서만 다음 것을 찾는다 — 다른 링은 바뀌지 않으니 고르는 차례는 그대로다.
+fn makeAppBodyRoom(gpa: std.mem.Allocator, need: usize) void {
+    const Pick = struct {
+        ring: *net_ring.Ring,
+        entry: *net_ring.Entry,
+        /// 먼저 버릴 쪽인가 — 본문을 더 많이 쥐었거나, 같으면 더 먼저 받은 본문.
+        fn before(a: @This(), b: @This()) bool {
+            return a.ring.body_bytes > b.ring.body_bytes or (a.ring.body_bytes == b.ring.body_bytes and a.entry.body_order < b.entry.body_order);
+        }
+    };
+    while (net_budget.body_bytes + need > net_budget.body_cap) {
+        var first: ?Pick = null;
+        var second: ?Pick = null;
+        for (surfaces.values()) |*sp| if (sp.network.oldestBody(null)) |e| {
+            const p: Pick = .{ .ring = &sp.network, .entry = e };
+            if (first == null or p.before(first.?)) {
+                second = first;
+                first = p;
+            } else if (second == null or p.before(second.?)) second = p;
+        };
+        var v = first orelse return;
+        while (true) {
+            v.ring.evictBody(gpa, &net_budget, v.entry);
+            if (net_budget.body_bytes + need <= net_budget.body_cap) return;
+            v.entry = v.ring.oldestBody(null) orelse break;
+            if (second) |o| if (!v.before(o)) break;
+        }
+    }
+}
+
+pub const RecordError = error{ NotWatching, NoBodyPermission };
+
+/// W9d②: `browser.networkRecord` — 켜면 새 세션으로 sidecar 에 `net_record` 를 보낸다(브라우저가 아직 없으면 생길 때). 그 탭을 지켜보는 중이어야
+/// 하고(네트워크 grant) 본문 grant 가 하나는 있어야 한다(app 이 인가했지만 그 사이 철회됐을 수 있다).
+pub fn networkRecord(surface_id: u64, on: bool) RecordError!void {
+    const s = surfaces.getPtr(surface_id) orelse return error.NotWatching;
+    const gpa = gpa_ref orelse return error.NotWatching;
+    if (!on) return recordOff(gpa, surface_id, s);
+    if (!s.net_on) return error.NotWatching;
+    const any = for (body_grants[0..body_grant_count]) |g| {
+        if (g.tab == surface_id) break true;
+    } else false;
+    if (!any) return error.NoBodyPermission;
+    // 이미 켜져 있으면 그대로 — 다만 sidecar 가 멈췄거나(쏟아짐 밸브) 켜지 못했으면 새 세션으로 다시 켠다.
+    if (s.rec_on and s.rec_status != .paused and s.rec_status != .failed) return;
+    s.rec_on = true;
+    newRecordSession(s);
+    sendRecord(gpa, surface_id, s);
+}
+
+fn recordOff(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
+    if (!s.rec_on and s.rec_sent == 0) return;
+    s.rec_on = false;
+    s.rec_session = 0;
+    s.rec_status = .off;
+    if (s.created and s.rec_sent != 0) send(gpa, .{ .net_record = .{ .browser = id, .on = false } });
+    s.rec_sent = 0;
+}
+
+/// 켜 둔 기록을 sidecar 에 알린다(브라우저가 있을 때만 — 없으면 `browser_created` 가 부른다). 지켜보기(`net_watch`)를 먼저 보낸 뒤다.
+fn sendRecord(gpa: std.mem.Allocator, id: u64, s: *Surface) void {
+    if (!s.rec_on or !s.created or s.rec_sent == s.rec_session) return;
+    send(gpa, .{ .net_record = .{ .browser = id, .on = true, .session = s.rec_session } });
+    s.rec_sent = s.rec_session;
+}
+
+fn recordStateName(s: *const Surface) []const u8 {
+    if (!s.rec_on) return "off";
+    return switch (s.rec_status) {
+        .off => "starting",
+        .on => "on",
+        .paused => "paused",
+        .failed => "failed",
+    };
+}
+
+/// W9d②: 그 탭이 본문을 기록하는 중인가(탭 제목 앞의 ◉ — `app_session` 이 묻는다). 켜 두었고 sidecar 가 멈추거나 켜지 못했다고 하지 않았다.
+pub fn networkRecording(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    return s.rec_on and s.rec_status != .paused and s.rec_status != .failed;
+}
+
+/// W9d②: `browser.networkRecord` 의 결과 JSON(`out` 소유) — `{recording, state}`.
+pub fn networkRecordResult(out: std.mem.Allocator, surface_id: u64) std.mem.Allocator.Error![]u8 {
+    const s = surfaces.getPtr(surface_id) orelse return out.dupe(u8, "{\"recording\":false,\"state\":\"off\"}");
+    return std.fmt.allocPrint(out, "{{\"recording\":{},\"state\":\"{s}\"}}", .{ s.rec_on, recordStateName(s) });
 }
 
 /// W9d① 적대 리뷰 1 회차 F2·F4: 요청이 들어올 때 app 이 아는 그 탭의 것 — 맨 위 문서 호스트(지금 주소), 서비스 워커 요청이면 같은 출처를
@@ -4385,7 +4593,13 @@ fn sleepMs(ms: i64) void {
 fn fail(notice: Notice) void {
     state = .failed;
     latched = notice;
-    for (surfaces.values()) |*s| s.stopped_notice_pending = true;
+    for (surfaces.values()) |*s| {
+        s.stopped_notice_pending = true;
+        // W9d② 적대 리뷰 3 회차 B2: 엔진이 다시 뜨지 않는다 — 켜 둔 본문 기록은 돌지 않는다(◉·`recording` 이 꺼지고 상태는 `failed`). 켤 뜻은
+        // 남긴다: 엔진을 다시 띄워 브라우저가 만들어지면 새 세션으로 다시 켠다(`browser_created` — 멈춘 기록이 아니다).
+        if (s.rec_on) s.rec_status = .failed;
+        s.rec_sent = 0;
+    }
 }
 
 /// W10b: 지금 sidecar 가 프로필을 잡았다(첫 `browser_created` — 초기화·잠금 뒤에만 온다). sidecar 마다 — 한 번 잡았다고
@@ -4788,6 +5002,8 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         forgetDrag(s); // 새 sidecar 는 그 끌기를 모른다 — enter 없이 drop 을 보내지 않게(W6d①)
         dropDragOut(gpa, s); // 페이지 끌기도 — 답할 곳이 없다(W6d②)
         failFileFetch(s.record.surface_id); // 청한 파일 내용도 오지 않는다(W6d③)
+        // W9d② 적대 리뷰 3 회차 B2: 받던 본문의 끝은 오지 않는다 — 곧 `detached` 로 끝내고 바이트를 놓는다(다시 뜨지 않아도).
+        s.network.abandonBodies(gpa, &net_budget);
         // 물은 닫기(W6j) — 답할 곳이 없다. 사용자는 닫기를 골랐다(떠나기 확인도 함께 사라졌다) — 창이 닫는다. 에이전트가 물은 닫기는 아니다 —
         // 떠나기 확인은 사용자가 그 탭에서 정한다(결정 ③): 탭을 남기고 에이전트에게는 「kept open」(W9b③ 적대 리뷰 5 회차).
         if (s.close_ask == .asking or s.close_ask == .asked) {
@@ -4970,9 +5186,17 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             // W9d①: 새 브라우저(처음이거나 sidecar 가 다시 떴다)는 지켜보기를 모른다 — 첫 이동보다 **먼저** 알린다(그 이동의 문서 요청부터 적게).
             // 옛 브라우저에서 진행 중이던 요청의 끝은 오지 않는다 — 끝난 것으로 치고 번호 표를 비운다(적대 리뷰 3 회차 T2: 새 프로세스가 같은 이동
             // 요청 번호를 다시 써 그 응답이 옛 기록에 붙었다).
-            s.network.abandonLive();
+            s.network.abandonLive(gpa, &net_budget);
             s.net_sent = null;
             sendNetWatch(gpa, id, s);
+            // W9d②: 켜 둔 본문 기록도 새 브라우저에 다시(새 세션 — 옛 sidecar 의 늦은 frame 과 섞이지 않게). 지켜보기 뒤에. 쏟아짐 밸브로 멈춘
+            // 기록은 그대로 둔다 — 다시 켜는 것은 에이전트다(W9d② 적대 리뷰 3 회차 F1: 전에는 sidecar 가 다시 뜨면 묻지 않고 켜졌다; 설정 끔의
+            // `wipeBodies` 와 같은 규칙). 켜지 못했던 기록(`failed` — 엔진이 내려간 때 포함)은 새 브라우저에서 다시 해 본다.
+            s.rec_sent = 0;
+            if (s.rec_on and s.rec_status != .paused) {
+                newRecordSession(s);
+                sendRecord(gpa, id, s);
+            }
             if (s.last_url) |u| {
                 send(gpa, .{ .navigate = .{ .browser = id, .url = u } });
                 s.nav_pending = true;
@@ -5156,6 +5380,27 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .net_response => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.response(gpa, &net_budget, v) catch {},
         .net_end => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.end(v),
         .net_dropped => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.addDropped(gpa, &net_budget, v.count) catch {},
+        // W9d②: 본문 — 이 탭에 매긴 세션의 것만(끈 뒤에 오는 옛 세션의 끝도 받는다 — 기다리던 기록의 상태를 정한다).
+        // 지운 뒤(`rec_floor`)의 옛 세션 frame 은 받지 않는다(W9d② 적대 리뷰 1 회차 LOW-2). 앱 상한은 본문을 가장 많이 쥔 탭부터 낸다
+        // (`makeAppBodyRoom`) — 링이 받을 조각(기다리는 기록·이어지는 오프셋·본문 상한 안)일 때만: 받지 않을 조각 때문에 다른 탭의 본문을 버리지
+        // 않는다(W9d② 적대 리뷰 2 회차 — 전에는 오프셋·크기를 보기 전에 버렸다).
+        .net_body_data => |v| if (surfaces.getPtr(v.browser)) |s| if (bodyFrameAccepted(s, v.session)) {
+            if (s.network.acceptsBodyData(v)) makeAppBodyRoom(gpa, v.bytes.len);
+            s.network.bodyData(gpa, &net_budget, v) catch {};
+        },
+        .net_body_end => |v| if (surfaces.getPtr(v.browser)) |s| {
+            if (bodyFrameAccepted(s, v.session)) {
+                s.network.bodyEnd(gpa, &net_budget, v);
+            } else if (s.net_on and v.session != 0 and v.session <= s.rec_floor) {
+                // 지운 뒤에 온 옛 세션의 끝 — 지운 뒤 sidecar 가 새 세션을 받기 전에 시작한 요청은 옛 세션의 후보라 그 끝만 온다. 기다리는
+                // 기록이면 `discarded` 로 끝낸다(본문은 받지 않는다 — 끝이 없으면 영영 `pending` 이다).
+                s.network.discardPending(gpa, &net_budget, v.request);
+            }
+        },
+        .net_record_state => |v| if (surfaces.getPtr(v.browser)) |s| if (s.rec_on and v.session == s.rec_session) {
+            s.rec_status = v.status;
+            if (v.status == .off) s.rec_status = .failed; // 켜 둔 세션에 꺼짐이 왔다 — sidecar 가 내렸다
+        },
         // W9a 적대 리뷰 5 회차: 주 프레임 이동이 시작된다 — 확정·끝·불러오기 끝까지 「확정되지 않은 이동 중」.
         .main_frame_navigating => |id| if (surfaces.getPtr(id)) |s| {
             s.nav_uncommitted = true;
@@ -5279,7 +5524,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .net_watch, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .net_watch, .net_record, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
     }
 }
 
@@ -8331,12 +8576,12 @@ test "W9d① 적대 리뷰 3 회차 재현 W1: sidecar 가 다시 떠(browser_cr
     apply(gpa, .{ .net_response = .{ .browser = 93, .request = 5, .status = 200, .mime = "text/html", .headers = .{ .count = 1, .bytes = "\x0aSet-Cookie\x00\x12bank_sid=NEWSECRET" } } }, 0);
     apply(gpa, .{ .net_end = .{ .browser = 93, .request = 5, .received = 10 } }, 0);
     const reader: NetReader = .{ .who = 7, .grant_host = "a.test", .host_bound = true };
-    const d = try networkDetail(gpa, 93, reader, 1);
+    const d = try networkDetail(gpa, 93, reader, 1, .{});
     defer gpa.free(d);
     try std.testing.expect(std.mem.indexOf(u8, d, "NEWSECRET") == null);
     try std.testing.expect(std.mem.indexOf(u8, d, "\"state\":\"canceled\"") != null and std.mem.indexOf(u8, d, "\"engine_restarted\":true") != null);
     try std.testing.expectEqual(@as(usize, 2), surfaces.getPtr(93).?.network.entries.len); // 새 요청은 제 기록(#2 — 은행이라 이 읽는 쪽에게는 숨는다)
-    try std.testing.expectError(error.UnknownRequest, networkDetail(gpa, 93, reader, 2));
+    try std.testing.expectError(error.UnknownRequest, networkDetail(gpa, 93, reader, 2, .{}));
 }
 
 // ── W9d① 적대 리뷰 3 회차 ──
@@ -8406,12 +8651,12 @@ test "W9d① 적대 리뷰 3 회차 D1: 읽는 쪽의 쿠키 권한(NetReader.co
     networkSync(&.{.{ .tab = 92, .who = 7, .birth = true, .any_host = true }});
     apply(gpa, .{ .net_begin = .{ .browser = 92, .request = 1, .url = "https://bank.test/", .host = "bank.test", .site = "bank.test", .flags = .{ .main_frame = true, .navigation = true }, .resource_type = 0, .headers = .{ .count = 1, .bytes = "\x06Cookie\x00\x0cbank=SECRET1" } } }, 0);
     {
-        const d = try networkDetail(gpa, 92, .{ .who = 7 }, 1);
+        const d = try networkDetail(gpa, 92, .{ .who = 7 }, 1, .{});
         defer gpa.free(d);
         try std.testing.expect(std.mem.indexOf(u8, d, "SECRET1") == null);
         try std.testing.expect(std.mem.indexOf(u8, d, "\"needs_cookie_permission\":true") != null);
     }
-    const d = try networkDetail(gpa, 92, .{ .who = 7, .cookie_host = "bank.test" }, 1);
+    const d = try networkDetail(gpa, 92, .{ .who = 7, .cookie_host = "bank.test" }, 1, .{});
     defer gpa.free(d);
     try std.testing.expect(std.mem.indexOf(u8, d, "bank=SECRET1") != null);
 }
@@ -8444,13 +8689,13 @@ test "W9d① 적대 리뷰 4 회차 재현 C3: 32 KiB 를 넘는 주소로 옮�
     try std.testing.expectEqual(@as(usize, 2), arr.len); // a.test 문서 때의 요청(#2·#1)만
     try std.testing.expectEqual(@as(i64, 2), arr[0].object.get("req").?.integer);
     try std.testing.expectEqual(@as(i64, 1), arr[1].object.get("req").?.integer);
-    try std.testing.expectError(error.UnknownRequest, networkDetail(gpa, 95, reader, 4));
+    try std.testing.expectError(error.UnknownRequest, networkDetail(gpa, 95, reader, 4, .{}));
     // 그 뒤 보통 주소가 오면(url_changed) 다시 그 호스트를 쓴다.
     apply(gpa, .{ .page_started = 95 }, 0);
     apply(gpa, .{ .url_changed = .{ .browser = 95, .url = "https://a.test/again" } }, 0);
     apply(gpa, .{ .net_begin = .{ .browser = 95, .request = 4, .url = "https://tracker.test/b", .host = "tracker.test", .site = "", .initiator = "https://tracker.test", .flags = .{ .subframe = true }, .resource_type = 13, .time_ms = 4 } }, 0);
     try expectNetReqsAs(95, 7, null, &.{ 5, 4, 3, 2, 1 }); // 어느 호스트든 읽는 쪽(묶이지 않음)은 다 본다
-    const again = try networkDetail(gpa, 95, reader, 5);
+    const again = try networkDetail(gpa, 95, reader, 5, .{});
     gpa.free(again);
 }
 
@@ -8552,4 +8797,517 @@ test "W9d① 변이 생존 W2: sidecar 가 다시 떠 이미 지켜보던 탭의
         again = m.net_watch.on and m.net_watch.host_count == 1;
     };
     try std.testing.expect(again);
+}
+
+// ── W9d②: 응답 본문 기록 ─────────────────────────────────────────────────────────────────────────────────────
+// 시험이 증명하는 것: 켜기는 지켜보는 탭(네트워크 grant)이고 본문 grant 가 있을 때만 — sidecar 에 `net_record{on, 새 세션}`(브라우저가 있을 때,
+// 없으면 생길 때·sidecar 가 다시 떠 브라우저가 새로 만들어질 때 새 세션으로 다시), 끄면 `net_record{off}`; 마지막 본문 grant 가 사라지면 끄고
+// 받은 본문을 지운다, 네트워크 grant 가 사라져도 끈다; 설정을 끄면 받은 본문을 지운다; 본문 frame 은 이 탭에 매긴 세션까지만 받는다;
+// sidecar 가 멈췄다(쏟아짐)·켜지 못했다고 하면 ◉ 이 사라진다.
+
+fn recFrames(out: []Message) []Message {
+    var all: [32]Message = undefined;
+    const n = sentFrames(&all);
+    var k: usize = 0;
+    for (all[0..n]) |m| if (m == .net_record and k < out.len) {
+        out[k] = m;
+        k += 1;
+    };
+    return out[0..k];
+}
+
+test "W9d②: 기록 켜기 — 지켜보는 탭·본문 grant 가 있을 때만, net_record{on, 새 세션}, 브라우저가 새로 만들어지면 새 세션으로 다시, 끄면 off, 본문 grant 가 사라지면 끄고 지운다, 네트워크 grant 가 사라져도 끈다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 81, 82 });
+    surfaces.getPtr(82).?.created = false; // 아직 브라우저가 없다
+    try std.testing.expectError(error.NotWatching, networkRecord(81, true)); // 네트워크 grant 가 먼저
+    networkSync(&.{ .{ .tab = 81, .who = 7, .host = "a.test" }, .{ .tab = 82, .who = 8, .host = "a.test" } });
+    try std.testing.expectError(error.NoBodyPermission, networkRecord(81, true)); // 본문 grant 가 없다
+    networkBodySync(&.{ .{ .tab = 81, .who = 17, .host = "a.test" }, .{ .tab = 82, .who = 18, .host = "a.test" } });
+    outbox_pending.clearRetainingCapacity();
+    try networkRecord(81, true);
+    try networkRecord(82, true);
+    var buf: [8]Message = undefined;
+    var got = recFrames(&buf);
+    try std.testing.expectEqual(@as(usize, 1), got.len); // 82 는 브라우저가 생길 때
+    try std.testing.expect(got[0].net_record.browser == 81 and got[0].net_record.on and got[0].net_record.session != 0);
+    const s81 = got[0].net_record.session;
+    try std.testing.expect(networkRecording(81) and networkRecording(82)); // ◉ — 켜 두었다(sidecar 의 답 전에도)
+    try networkRecord(81, true); // 이미 — 다시 보내지 않는다
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 82 }, 0);
+    got = recFrames(&buf);
+    try std.testing.expect(got.len == 1 and got[0].net_record.browser == 82 and got[0].net_record.on);
+    // sidecar 가 다시 떠 81 의 브라우저가 새로 만들어진다 — 새 세션으로 다시.
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 81 }, 0);
+    got = recFrames(&buf);
+    try std.testing.expect(got.len == 1 and got[0].net_record.on and got[0].net_record.session != s81);
+    // 쏟아짐 밸브 — ◉ 이 사라진다(옛 세션의 알림은 무시).
+    apply(gpa, .{ .net_record_state = .{ .browser = 81, .session = s81, .status = .paused } }, 0);
+    try std.testing.expect(networkRecording(81));
+    apply(gpa, .{ .net_record_state = .{ .browser = 81, .session = got[0].net_record.session, .status = .paused } }, 0);
+    try std.testing.expect(!networkRecording(81));
+    // 끄기.
+    outbox_pending.clearRetainingCapacity();
+    try networkRecord(81, false);
+    got = recFrames(&buf);
+    try std.testing.expect(got.len == 1 and !got[0].net_record.on);
+    try std.testing.expect(!networkRecording(81));
+    // 82: 본문 grant 가 사라지면 끈다.
+    outbox_pending.clearRetainingCapacity();
+    networkBodySync(&.{});
+    got = recFrames(&buf);
+    try std.testing.expect(got.len == 1 and got[0].net_record.browser == 82 and !got[0].net_record.on);
+    try std.testing.expect(!networkRecording(82));
+    // 다시 켠 뒤 네트워크 grant 가 사라지면 기록도 끈다.
+    networkBodySync(&.{.{ .tab = 82, .who = 19, .host = "a.test" }});
+    try networkRecord(82, true);
+    outbox_pending.clearRetainingCapacity();
+    networkSync(&.{.{ .tab = 81, .who = 7, .host = "a.test" }});
+    try std.testing.expect(!networkRecording(82));
+    var all: [8]Message = undefined;
+    const n = sentFrames(&all);
+    var saw_off = false;
+    for (all[0..n]) |m| if (m == .net_record and m.net_record.browser == 82 and !m.net_record.on) {
+        saw_off = true;
+    };
+    try std.testing.expect(saw_off);
+}
+
+test "W9d②: 본문 frame 은 이 탭에 매긴 세션까지만 받는다(앞선 세션의 끝은 받는다), 설정을 끄면 받은 본문을 지운다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{83});
+    networkSync(&.{.{ .tab = 83, .who = 7, .birth = true, .any_host = true }});
+    networkBodySync(&.{.{ .tab = 83, .who = 17, .birth = true, .any_host = true }});
+    try networkRecord(83, true);
+    const session = surfaces.getPtr(83).?.rec_session;
+    apply(gpa, .{ .url_changed = .{ .browser = 83, .url = "https://a.test/" } }, 0);
+    apply(gpa, .{ .net_begin = .{ .browser = 83, .request = 1, .flags2 = .{ .body_expected = true }, .url = "https://a.test/j", .host = "a.test", .site = "a.test" } }, 0);
+    apply(gpa, .{ .net_begin = .{ .browser = 83, .request = 2, .flags2 = .{ .body_expected = true }, .url = "https://a.test/k", .host = "a.test", .site = "a.test" } }, 0);
+    // 앞으로 매길 세션(아직 없는)의 frame 은 버린다.
+    apply(gpa, .{ .net_body_data = .{ .browser = 83, .session = session + 5, .request = 1, .offset = 0, .bytes = "evil" } }, 0);
+    try std.testing.expectEqual(@as(usize, 0), surfaces.getPtr(83).?.network.body_bytes);
+    apply(gpa, .{ .net_body_data = .{ .browser = 83, .session = session, .request = 1, .offset = 0, .bytes = "{}" } }, 0);
+    apply(gpa, .{ .net_body_end = .{ .browser = 83, .session = session, .request = 1, .state = .captured, .size = 2 } }, 0);
+    try std.testing.expectEqual(@as(usize, 2), net_budget.body_bytes);
+    // 끈 뒤에 오는 옛 세션의 끝도 기다리던 기록의 상태를 정한다.
+    try networkRecord(83, false);
+    apply(gpa, .{ .net_body_end = .{ .browser = 83, .session = session, .request = 2, .state = .recording_stopped } }, 0);
+    const d = try networkDetail(gpa, 83, .{ .who = 7, .body_who = 17, .body_any_host = true }, 2, .{});
+    defer gpa.free(d);
+    try std.testing.expect(std.mem.indexOf(u8, d, "\"body_state\":\"recording_stopped\"") != null);
+    // 설정을 끄면 받은 본문을 지운다.
+    setNetworkFull(false);
+    try std.testing.expectEqual(@as(usize, 0), net_budget.body_bytes);
+    const d2 = try networkDetail(gpa, 83, .{ .who = 7, .body_who = 17, .body_any_host = true }, 1, .{});
+    defer gpa.free(d2);
+    try std.testing.expect(std.mem.indexOf(u8, d2, "\"body_state\":\"discarded\"") != null);
+}
+
+// ── W9d② 적대 리뷰 1 회차 재현(그 리뷰의 repro — 고치기 전에는 모두 실패했다) ──────────────────────────────────────────────
+//
+// 이 시험들이 증명하는 것: 본문을 지운 뒤(마지막 본문 grant 의 철회·설정 끔)에는 이미 관·sidecar 의 줄에 있던 본문 frame 이 들어앉지 않는다
+// (지울 때 기다리던 것은 `discarded` 로 끝나고 그때까지의 세션 frame 은 받지 않는다 — LOW-2). 설정을 끄면 기록은 새 세션으로 이어 간다.
+// 설정이 꺼진 동안 적은 응답의 본문은 설정을 다시 켜도 꺼졌을 때의 투영으로만 보인다(MED-1 — 적을 때 찍는다). 앱 본문 상한(32 MiB)은 탭과
+// 무관하게 가장 먼저 받은 본문부터 낸다. 왜 중요한가 — 「끄고 지운다」 고 한 뒤에 사용자의 개인 자료가 maru 메모리에 남거나, 설정을 끈
+// 동안 덮이지 않는 호스트에서 들어온 본문이 설정을 켜자 읽히면 사용자의 결정이 지켜지지 않은 것이다.
+
+test "W9d② 적대 리뷰 1 회차 재현 C2: 마지막 본문 grant 를 철회한 뒤에 오는 본문 frame 은 받지 않는다 — 기다리던 기록은 discarded, 예산 0" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{84});
+    networkSync(&.{.{ .tab = 84, .who = 7, .host = "a.test" }});
+    networkBodySync(&.{.{ .tab = 84, .who = 17, .host = "a.test" }});
+    try networkRecord(84, true);
+    const session = surfaces.getPtr(84).?.rec_session;
+    apply(gpa, .{ .url_changed = .{ .browser = 84, .url = "https://a.test/" } }, 0);
+    apply(gpa, .{ .net_begin = .{ .browser = 84, .request = 1, .flags2 = .{ .body_expected = true }, .url = "https://a.test/me.json", .host = "a.test", .site = "a.test" } }, 0);
+    // 사용자가 마지막 본문 grant 를 철회한다 — 기록을 끄고 지운다.
+    networkBodySync(&.{});
+    try std.testing.expectEqual(@as(usize, 0), net_budget.body_bytes);
+    try std.testing.expectEqual(net_ring.BodyState.discarded, surfaces.getPtr(84).?.network.entries.atPtr(0).body_state);
+    // sidecar 가 이미 받아 둔(또는 net_record off 를 처리하기 전에 받은) 본문의 frame 이 이제 온다.
+    apply(gpa, .{ .net_body_data = .{ .browser = 84, .session = session, .request = 1, .offset = 0, .bytes = "{\"mail\":\"PRIVATE\"}" } }, 0);
+    apply(gpa, .{ .net_body_end = .{ .browser = 84, .session = session, .request = 1, .state = .captured, .size = 18 } }, 0);
+    const e = surfaces.getPtr(84).?.network.entries.atPtr(0);
+    try std.testing.expectEqual(net_ring.BodyState.discarded, e.body_state);
+    try std.testing.expectEqual(@as(usize, 0), net_budget.body_bytes);
+    // 다시 허락하고 켜면 새 세션의 본문은 받는다.
+    networkBodySync(&.{.{ .tab = 84, .who = 19, .host = "a.test" }});
+    try networkRecord(84, true);
+    const s2 = surfaces.getPtr(84).?.rec_session;
+    try std.testing.expect(s2 > session);
+    apply(gpa, .{ .net_begin = .{ .browser = 84, .request = 2, .flags2 = .{ .body_expected = true }, .url = "https://a.test/me2.json", .host = "a.test", .site = "a.test" } }, 0);
+    apply(gpa, .{ .net_body_data = .{ .browser = 84, .session = s2, .request = 2, .offset = 0, .bytes = "{}" } }, 0);
+    apply(gpa, .{ .net_body_end = .{ .browser = 84, .session = s2, .request = 2, .state = .captured, .size = 2 } }, 0);
+    try std.testing.expectEqual(@as(usize, 2), net_budget.body_bytes);
+}
+
+test "W9d② 적대 리뷰 1 회차 재현 C2b: 설정을 끄면 본문을 지우고 기록은 새 세션으로 — 켜진 동안의 세션 frame 은 지운 뒤 받지 않아 설정을 다시 켜도 captured 가 없다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{85});
+    networkSync(&.{.{ .tab = 85, .who = 7, .birth = true, .any_host = true }});
+    networkBodySync(&.{.{ .tab = 85, .who = 17, .birth = true, .any_host = true }});
+    try networkRecord(85, true);
+    const session = surfaces.getPtr(85).?.rec_session;
+    apply(gpa, .{ .url_changed = .{ .browser = 85, .url = "https://a.test/" } }, 0);
+    apply(gpa, .{ .net_begin = .{ .browser = 85, .request = 1, .flags2 = .{ .body_expected = true }, .url = "https://other.test/x.json", .host = "other.test", .site = "a.test", .resource_type = 13 } }, 0);
+    apply(gpa, .{ .net_response = .{ .browser = 85, .request = 1, .status = 200, .mime = "application/json" } }, 0);
+    outbox_pending.clearRetainingCapacity();
+    setNetworkFull(false);
+    // 기록은 이어 간다 — 새 세션으로 sidecar 에 다시 알린다.
+    var buf: [8]Message = undefined;
+    const got = recFrames(&buf);
+    try std.testing.expect(got.len == 1 and got[0].net_record.on and got[0].net_record.session > session);
+    try std.testing.expect(networkRecording(85));
+    apply(gpa, .{ .net_body_data = .{ .browser = 85, .session = session, .request = 1, .offset = 0, .bytes = "{\"o\":1}" } }, 0);
+    apply(gpa, .{ .net_body_end = .{ .browser = 85, .session = session, .request = 1, .state = .captured, .size = 7 } }, 0);
+    // 지운 뒤, sidecar 가 새 세션을 받기 전에 시작한 요청 — 옛 세션의 후보라 그 본문·끝은 옛 세션으로 온다(켜진 동안의 판으로 받은 것): 받지
+    // 않고, 끝은 그 기록을 `discarded` 로 끝낸다(영영 pending 이 아니게).
+    apply(gpa, .{ .net_begin = .{ .browser = 85, .request = 2, .flags2 = .{ .body_expected = true }, .url = "https://other.test/y.json", .host = "other.test", .site = "a.test", .resource_type = 13 } }, 0);
+    apply(gpa, .{ .net_response = .{ .browser = 85, .request = 2, .status = 200, .mime = "application/json" } }, 0);
+    apply(gpa, .{ .net_body_data = .{ .browser = 85, .session = session, .request = 2, .offset = 0, .bytes = "{\"o\":2}" } }, 0);
+    try std.testing.expectEqual(@as(usize, 0), net_budget.body_bytes);
+    apply(gpa, .{ .net_body_end = .{ .browser = 85, .session = session, .request = 2, .state = .captured, .size = 7 } }, 0);
+    try std.testing.expectEqual(net_ring.BodyState.discarded, surfaces.getPtr(85).?.network.entries.atPtr(1).body_state);
+    // 새 세션의 본문은 받는다(덮이는 호스트의 것).
+    const s_new = surfaces.getPtr(85).?.rec_session;
+    apply(gpa, .{ .net_begin = .{ .browser = 85, .request = 3, .flags2 = .{ .body_expected = true }, .url = "https://a.test/z.json", .host = "a.test", .site = "a.test", .resource_type = 13 } }, 0);
+    apply(gpa, .{ .net_body_data = .{ .browser = 85, .session = s_new, .request = 3, .offset = 0, .bytes = "{}" } }, 0);
+    apply(gpa, .{ .net_body_end = .{ .browser = 85, .session = s_new, .request = 3, .state = .captured, .size = 2 } }, 0);
+    try std.testing.expectEqual(net_ring.BodyState.captured, surfaces.getPtr(85).?.network.entries.atPtr(2).body_state);
+    setNetworkFull(true);
+    const d = try networkDetail(gpa, 85, .{ .who = 7, .body_who = 17, .body_any_host = true }, 1, .{ .want = true });
+    defer gpa.free(d);
+    try std.testing.expect(std.mem.indexOf(u8, d, "\"body_state\":\"captured\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, d, "\"body_state\":\"discarded\"") != null);
+    try std.testing.expectEqual(@as(usize, 2), net_budget.body_bytes); // 새 세션의 것만
+}
+
+test "W9d② 적대 리뷰 1 회차: 쏟아짐 밸브로 멈춘 기록은 설정을 꺼 본문을 지워도 다시 켜지지 않는다 — 지운 때의 세션 frame 은 받지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{87});
+    networkSync(&.{.{ .tab = 87, .who = 7, .birth = true, .any_host = true }});
+    networkBodySync(&.{.{ .tab = 87, .who = 17, .birth = true, .any_host = true }});
+    try networkRecord(87, true);
+    const session = surfaces.getPtr(87).?.rec_session;
+    apply(gpa, .{ .net_record_state = .{ .browser = 87, .session = session, .status = .paused } }, 0);
+    try std.testing.expect(!networkRecording(87));
+    outbox_pending.clearRetainingCapacity();
+    setNetworkFull(false);
+    var buf: [8]Message = undefined;
+    try std.testing.expectEqual(@as(usize, 0), recFrames(&buf).len); // 몰래 다시 켜지 않는다
+    try std.testing.expect(!networkRecording(87));
+    apply(gpa, .{ .net_begin = .{ .browser = 87, .request = 1, .flags2 = .{ .body_expected = true }, .url = "https://a.test/x.json", .host = "a.test", .site = "a.test", .resource_type = 13 } }, 0);
+    apply(gpa, .{ .net_body_data = .{ .browser = 87, .session = session, .request = 1, .offset = 0, .bytes = "{}" } }, 0);
+    try std.testing.expectEqual(@as(usize, 0), net_budget.body_bytes);
+    // 에이전트가 다시 켜면 새 세션.
+    try networkRecord(87, true);
+    try std.testing.expect(surfaces.getPtr(87).?.rec_session > session);
+}
+
+test "W9d② 적대 리뷰 1 회차 재현 RV1-maru: 설정이 꺼진 동안 적은 응답(덜어 낸 응답)의 본문은 설정을 다시 켜도 덮이지 않는 호스트면 읽히지 않는다 — 덮이는 호스트의 것은 읽힌다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{86});
+    networkSync(&.{.{ .tab = 86, .who = 7, .birth = true, .any_host = true }});
+    networkBodySync(&.{.{ .tab = 86, .who = 17, .birth = true, .any_host = true }});
+    try networkRecord(86, true);
+    setNetworkFull(false);
+    // 설정을 끈 뒤의 세션(꺼진 동안의 본문은 이 세션으로 온다).
+    const session = surfaces.getPtr(86).?.rec_session;
+    apply(gpa, .{ .url_changed = .{ .browser = 86, .url = "http://127.0.0.1/rv/offredir" } }, 0);
+    // 덮이는 첫 홉 → 덮이지 않는 마지막 호스트(sidecar 는 덮이지 않는 응답의 헤더를 덜어 낸다 — 본문이 경쟁으로 빠져나왔다고 친다).
+    apply(gpa, .{ .net_begin = .{ .browser = 86, .request = 1, .flags2 = .{ .body_expected = true }, .url = "http://127.0.0.1/rv/redir?0", .host = "127.0.0.1", .site = "127.0.0.1", .resource_type = 13 } }, 0);
+    apply(gpa, .{ .net_redirect = .{ .browser = 86, .request = 1, .status = 302, .url = "http://localhost/rv/secret.json?0", .host = "localhost" } }, 0);
+    apply(gpa, .{ .net_response = .{ .browser = 86, .request = 1, .status = 200, .mime = "application/json", .flags = .{ .stripped = true } } }, 0);
+    apply(gpa, .{ .net_end = .{ .browser = 86, .request = 1, .received = 38 } }, 0);
+    const leaked = "{\"uncovered\":\"SECRET-FROM-LOCALHOST\"}";
+    apply(gpa, .{ .net_body_data = .{ .browser = 86, .session = session, .request = 1, .offset = 0, .bytes = leaked } }, 0);
+    apply(gpa, .{ .net_body_end = .{ .browser = 86, .session = session, .request = 1, .state = .captured, .size = leaked.len } }, 0);
+    // 덮이는 호스트(127.0.0.1)의 제 응답 — 꺼진 동안 적었어도 읽힌다.
+    const own = "{\"own\":\"COVERED-OK\"}";
+    apply(gpa, .{ .net_begin = .{ .browser = 86, .request = 2, .flags2 = .{ .body_expected = true }, .url = "http://127.0.0.1/own.json", .host = "127.0.0.1", .site = "127.0.0.1", .resource_type = 13 } }, 0);
+    apply(gpa, .{ .net_response = .{ .browser = 86, .request = 2, .status = 200, .mime = "application/json", .flags = .{ .stripped = true } } }, 0);
+    apply(gpa, .{ .net_end = .{ .browser = 86, .request = 2, .received = own.len } }, 0);
+    apply(gpa, .{ .net_body_data = .{ .browser = 86, .session = session, .request = 2, .offset = 0, .bytes = own } }, 0);
+    apply(gpa, .{ .net_body_end = .{ .browser = 86, .session = session, .request = 2, .state = .captured, .size = own.len } }, 0);
+    {
+        // 꺼진 동안은 투영이 가린다.
+        const off = try networkDetail(gpa, 86, .{ .who = 7, .body_who = 17, .body_any_host = true }, 1, .{ .want = true });
+        defer gpa.free(off);
+        try std.testing.expect(std.mem.indexOf(u8, off, "SECRET-FROM-LOCALHOST") == null);
+    }
+    setNetworkFull(true);
+    const d = try networkDetail(gpa, 86, .{ .who = 7, .body_who = 17, .body_any_host = true }, 1, .{ .want = true });
+    defer gpa.free(d);
+    try std.testing.expect(std.mem.indexOf(u8, d, "SECRET-FROM-LOCALHOST") == null);
+    const d2 = try networkDetail(gpa, 86, .{ .who = 7, .body_who = 17, .body_any_host = true }, 2, .{ .want = true });
+    defer gpa.free(d2);
+    try std.testing.expect(std.mem.indexOf(u8, d2, "COVERED-OK") != null);
+}
+
+test "W9d② 적대 리뷰 1 회차: 앱 본문 상한(32 MiB) — 다른 탭 넷이 8 MiB 씩 채워도 다섯째 탭의 본문은 들어간다(2 회차: 본문을 가장 많이 쥔 탭부터 낸다)" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    const tabs = [_]u64{ 91, 92, 93, 94, 95 };
+    try testSurfaces(gpa, &tabs);
+    var ng: [tabs.len]NetworkGrant = undefined;
+    var bg: [tabs.len]NetworkGrant = undefined;
+    for (tabs, 0..) |t, i| {
+        ng[i] = .{ .tab = t, .who = 100 + t, .birth = true, .any_host = true };
+        bg[i] = .{ .tab = t, .who = 200 + t, .birth = true, .any_host = true };
+    }
+    networkSync(&ng);
+    networkBodySync(&bg);
+    const piece = try gpa.alloc(u8, ws.message.net_body_chunk_bytes);
+    defer gpa.free(piece);
+    @memset(piece, 'b');
+    const per_body = 1024 * 1024 - ws.message.net_body_chunk_bytes; // 하나 1 MiB 를 넘지 않게
+    const pieces = per_body / piece.len;
+    var req: u64 = 1;
+    for (tabs) |t| {
+        try networkRecord(t, true);
+        const session = surfaces.getPtr(t).?.rec_session;
+        apply(gpa, .{ .url_changed = .{ .browser = t, .url = "https://a.test/" } }, 0);
+        // 탭마다 8 개(탭 상한 8 MiB 를 거의 채운다).
+        for (0..8) |_| {
+            apply(gpa, .{ .net_begin = .{ .browser = t, .request = req, .flags2 = .{ .body_expected = true }, .url = "https://a.test/big", .host = "a.test", .site = "a.test" } }, 0);
+            for (0..pieces) |k| apply(gpa, .{ .net_body_data = .{ .browser = t, .session = session, .request = req, .offset = @intCast(k * piece.len), .bytes = piece } }, 0);
+            apply(gpa, .{ .net_body_end = .{ .browser = t, .session = session, .request = req, .state = .captured, .size = @intCast(pieces * piece.len) } }, 0);
+            req += 1;
+        }
+        try std.testing.expect(net_budget.body_bytes <= net_budget.body_cap);
+    }
+    // 다섯째 탭의 본문은 들어갔다. 처음 버린 것은 가장 많이 쥔 탭들(91–94, 같다) 중 가장 먼저 받은 것(91 의 첫 본문), 그 뒤로는 그때 가장 많이
+    // 쥔 탭의 것 — 다섯째 탭도 일곱을 쥐었을 때 제 첫 본문을 버렸다. 어느 탭도 비지 않는다(탭마다 여섯 넘게 남는다 — 32 MiB 에 1 MiB 남짓 서른둘).
+    const last = surfaces.getPtr(95).?.network.entries.atPtr(7);
+    try std.testing.expectEqual(net_ring.BodyState.captured, last.body_state);
+    try std.testing.expectEqual(net_ring.BodyState.evicted, surfaces.getPtr(95).?.network.entries.atPtr(0).body_state);
+    try std.testing.expectEqual(net_ring.BodyState.captured, surfaces.getPtr(95).?.network.entries.atPtr(1).body_state);
+    try std.testing.expectEqual(net_ring.BodyState.evicted, surfaces.getPtr(91).?.network.entries.atPtr(0).body_state);
+    try std.testing.expectEqual(net_ring.BodyState.captured, surfaces.getPtr(94).?.network.entries.atPtr(7).body_state);
+    for (tabs) |t| try std.testing.expect(surfaces.getPtr(t).?.network.body_bytes >= 6 * pieces * piece.len);
+}
+
+// 이 시험이 증명하는 것(W9d② 적대 리뷰 2 회차 — 작성자 선택): 앱 본문 상한은 본문을 가장 많이 쥔 탭의 가장 먼저 받은 본문부터 낸다 — 바쁜 탭이
+// 제 본문을 버리고, 사용자 탭이 먼저 받은 본문은 남는다(1 회차의 「탭과 무관하게 가장 먼저 받은 것부터」 는 그것부터 버렸다). 받지 않을 조각
+// (이어지지 않는 오프셋·기다리지 않는 번호)은 아무 탭의 본문도 버리지 않는다(전에는 오프셋을 보기 전에 버렸다). 왜 중요한가 — 쏟아지는 페이지
+// 하나가 에이전트가 읽으려던 다른 탭의 응답을 밀어내면, 에이전트는 그 탭의 본문을 `evicted` 로만 본다.
+test "W9d② 적대 리뷰 2 회차: 앱 본문 상한은 본문을 가장 많이 쥔 탭부터 — 바쁜 탭은 제 본문을 먼저 버리고 사용자 탭의 먼저 받은 본문은 남는다, 받지 않을 조각은 아무것도 버리지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    net_budget.body_cap = 64 * 1024;
+    defer net_budget.body_cap = net_ring.global_body_cap_bytes;
+    const user: u64 = 96;
+    const busy: u64 = 97;
+    const third: u64 = 98;
+    const tabs = [_]u64{ user, busy, third };
+    try testSurfaces(gpa, &tabs);
+    var ng: [tabs.len]NetworkGrant = undefined;
+    var bg: [tabs.len]NetworkGrant = undefined;
+    for (tabs, 0..) |t, i| {
+        ng[i] = .{ .tab = t, .who = 100 + t, .birth = true, .any_host = true };
+        bg[i] = .{ .tab = t, .who = 200 + t, .birth = true, .any_host = true };
+    }
+    networkSync(&ng);
+    networkBodySync(&bg);
+    for (tabs) |t| {
+        try networkRecord(t, true);
+        apply(gpa, .{ .url_changed = .{ .browser = t, .url = "https://a.test/" } }, 0);
+    }
+    var piece: [8 * 1024]u8 = undefined;
+    @memset(&piece, 'p');
+    const Feed = struct {
+        fn body(g: std.mem.Allocator, tab: u64, request: u64, bytes: []const u8) void {
+            const session = surfaces.getPtr(tab).?.rec_session;
+            apply(g, .{ .net_begin = .{ .browser = tab, .request = request, .flags2 = .{ .body_expected = true }, .url = "https://a.test/b", .host = "a.test", .site = "a.test" } }, 0);
+            apply(g, .{ .net_body_data = .{ .browser = tab, .session = session, .request = request, .offset = 0, .bytes = bytes } }, 0);
+            apply(g, .{ .net_body_end = .{ .browser = tab, .session = session, .request = request, .state = .captured, .size = @intCast(bytes.len) } }, 0);
+        }
+        fn st(tab: u64, k: usize) net_ring.BodyState {
+            return surfaces.getPtr(tab).?.network.entries.atPtr(k).body_state;
+        }
+    };
+    // 사용자 탭이 먼저 둘(가장 먼저 받았다), 바쁜 탭이 열 — 상한(64 KiB)에 여덟만 든다.
+    Feed.body(gpa, user, 1, &piece);
+    Feed.body(gpa, user, 2, &piece);
+    for (0..10) |k| Feed.body(gpa, busy, 10 + k, &piece);
+    try std.testing.expectEqual(net_budget.body_cap, net_budget.body_bytes);
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(user, 0));
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(user, 1));
+    for (0..4) |k| try std.testing.expectEqual(net_ring.BodyState.evicted, Feed.st(busy, k));
+    for (4..10) |k| try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(busy, k));
+    // 받지 않을 조각 — 기다리는 기록의 이어지지 않는 오프셋, 기다리지 않는 번호: 꽉 찬 상한에서도 아무 본문도 버리지 않는다.
+    const s3 = surfaces.getPtr(third).?.rec_session;
+    apply(gpa, .{ .net_begin = .{ .browser = third, .request = 30, .flags2 = .{ .body_expected = true }, .url = "https://a.test/c", .host = "a.test", .site = "a.test" } }, 0);
+    apply(gpa, .{ .net_body_data = .{ .browser = third, .session = s3, .request = 30, .offset = 5, .bytes = &piece } }, 0);
+    apply(gpa, .{ .net_body_data = .{ .browser = third, .session = s3, .request = 31, .offset = 0, .bytes = &piece } }, 0);
+    try std.testing.expectEqual(net_budget.body_cap, net_budget.body_bytes);
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(busy, 4));
+    try std.testing.expectEqual(net_ring.BodyState.unavailable, Feed.st(third, 0));
+    // 셋째 탭의 본문 — 가장 많이 쥔 바쁜 탭의 가장 먼저 받은 것을 버린다(사용자 탭의 것이 더 먼저 받았어도).
+    Feed.body(gpa, third, 32, &piece);
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(third, 1));
+    try std.testing.expectEqual(net_ring.BodyState.evicted, Feed.st(busy, 4));
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(user, 0));
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(user, 1));
+    // 바쁜 탭(40 KiB)이 사용자 탭(16 KiB)·셋째 탭(8 KiB)보다 많이 쥔 동안은 바쁜 탭이 계속 낸다.
+    Feed.body(gpa, third, 33, &piece);
+    try std.testing.expectEqual(net_ring.BodyState.evicted, Feed.st(busy, 5));
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(user, 0));
+    Feed.body(gpa, third, 34, &piece); // 바쁜 탭 32 KiB → 24 KiB, 셋째 탭 24 KiB
+    try std.testing.expectEqual(net_ring.BodyState.evicted, Feed.st(busy, 6));
+    // 같이 쥐면(바쁜 탭·셋째 탭 24 KiB) 더 먼저 받은 본문의 탭(바쁜 탭)부터 — 셋째 탭의 첫 본문은 남는다.
+    Feed.body(gpa, third, 35, &piece);
+    try std.testing.expectEqual(net_ring.BodyState.evicted, Feed.st(busy, 7));
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(third, 1));
+    try std.testing.expectEqual(net_ring.BodyState.captured, Feed.st(user, 0));
+}
+
+// W9d② 적대 리뷰 3 회차 재현 F1: 쏟아짐 밸브로 멈춘 기록(「에이전트가 다시 켜야 한다」)이 브라우저가 다시 만들어지면(sidecar 재시작·창 닫힌 페이지
+// 되살리기) 묻지 않고 새 세션으로 다시 켜진다 — 설정 끔의 길은 막았지만(1 회차 시험) browser_created 의 길은 `rec_status` 를 보지 않는다.
+test "W9d② 적대 리뷰 3 회차 재현 F1: 쏟아짐 밸브로 멈춘 기록은 브라우저가 다시 만들어져도 다시 켜지지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{88});
+    networkSync(&.{.{ .tab = 88, .who = 7, .birth = true, .any_host = true }});
+    networkBodySync(&.{.{ .tab = 88, .who = 17, .birth = true, .any_host = true }});
+    try networkRecord(88, true);
+    const session = surfaces.getPtr(88).?.rec_session;
+    apply(gpa, .{ .net_record_state = .{ .browser = 88, .session = session, .status = .paused } }, 0);
+    try std.testing.expect(!networkRecording(88));
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 88 }, 0);
+    var buf: [8]Message = undefined;
+    try std.testing.expectEqual(@as(usize, 0), recFrames(&buf).len);
+    try std.testing.expect(!networkRecording(88));
+}
+
+// W9d② 적대 리뷰 3 회차 재현 B2: sidecar 가 죽고 다시 뜨지 않으면(예산을 다 써 `crashed_repeatedly`) 받던 본문은 `pending` 으로 남아 바이트를
+// 쥐고, ◉ 와 `recording` 은 켜진 채다 — 끝내는 것은 다음 `browser_created`(abandonLive) 뿐이다.
+test "W9d② 적대 리뷰 3 회차 재현 B2: sidecar 가 죽어 다시 뜨지 않으면 받던 본문은 끝나고 기록 표시는 꺼진다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{89});
+    networkSync(&.{.{ .tab = 89, .who = 7, .birth = true, .any_host = true }});
+    networkBodySync(&.{.{ .tab = 89, .who = 17, .birth = true, .any_host = true }});
+    try networkRecord(89, true);
+    const session = surfaces.getPtr(89).?.rec_session;
+    apply(gpa, .{ .net_record_state = .{ .browser = 89, .session = session, .status = .on } }, 0);
+    apply(gpa, .{ .net_begin = .{ .browser = 89, .request = 1, .flags2 = .{ .body_expected = true }, .url = "https://a.test/x.json", .host = "a.test", .site = "a.test", .resource_type = 13 } }, 0);
+    apply(gpa, .{ .net_body_data = .{ .browser = 89, .session = session, .request = 1, .offset = 0, .bytes = "{\"a\"" } }, 0);
+    try std.testing.expect(net_budget.body_bytes > 0);
+    forgetSidecar(gpa);
+    fail(.crashed_repeatedly);
+    try std.testing.expect(!networkRecording(89));
+    try std.testing.expectEqual(@as(usize, 0), net_budget.body_bytes);
+}
+
+// 이 시험이 증명하는 것(W9d② 적대 리뷰 3 회차): 앱 본문 상한의 버리기가 링을 다시 훑지 않고 한 링 안에서 이어 버려도 고르는 차례는 그대로다 —
+// 큰 조각 하나가 작은 본문 여럿을 버릴 때 본문을 가장 많이 쥔 탭(같으면 더 먼저 받은 본문의 탭)이 번갈아 버린다. 왜 중요한가 — 차례가 바뀌면
+// 바쁜 탭이 아니라 다른 탭의 본문이 사라진다(2 회차의 약속).
+test "W9d② 적대 리뷰 3 회차: 앱 본문 상한이 작은 본문 여럿을 버릴 때도 차례는 「가장 많이 쥔 탭, 같으면 더 먼저 받은 본문」 — 두 탭을 번갈아" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    net_budget.body_cap = 64 * 1024;
+    defer net_budget.body_cap = net_ring.global_body_cap_bytes;
+    const a: u64 = 101;
+    const b: u64 = 102;
+    const c: u64 = 103;
+    const tabs = [_]u64{ a, b, c };
+    try testSurfaces(gpa, &tabs);
+    var ng: [tabs.len]NetworkGrant = undefined;
+    var bg: [tabs.len]NetworkGrant = undefined;
+    for (tabs, 0..) |t, i| {
+        ng[i] = .{ .tab = t, .who = 100 + t, .birth = true, .any_host = true };
+        bg[i] = .{ .tab = t, .who = 200 + t, .birth = true, .any_host = true };
+    }
+    networkSync(&ng);
+    networkBodySync(&bg);
+    for (tabs) |t| {
+        try networkRecord(t, true);
+        apply(gpa, .{ .url_changed = .{ .browser = t, .url = "https://a.test/" } }, 0);
+    }
+    var piece: [16 * 1024]u8 = undefined;
+    @memset(&piece, 'q');
+    const Feed = struct {
+        fn begin(g: std.mem.Allocator, tab: u64, request: u64) void {
+            apply(g, .{ .net_begin = .{ .browser = tab, .request = request, .flags2 = .{ .body_expected = true }, .url = "https://a.test/b", .host = "a.test", .site = "a.test" } }, 0);
+        }
+        fn data(g: std.mem.Allocator, tab: u64, request: u64, bytes: []const u8) void {
+            apply(g, .{ .net_body_data = .{ .browser = tab, .session = surfaces.getPtr(tab).?.rec_session, .request = request, .offset = 0, .bytes = bytes } }, 0);
+        }
+        fn body(g: std.mem.Allocator, tab: u64, request: u64, bytes: []const u8) void {
+            begin(g, tab, request);
+            data(g, tab, request, bytes);
+            apply(g, .{ .net_body_end = .{ .browser = tab, .session = surfaces.getPtr(tab).?.rec_session, .request = request, .state = .captured, .size = @intCast(bytes.len) } }, 0);
+        }
+        fn st(tab: u64, k: usize) net_ring.BodyState {
+            return surfaces.getPtr(tab).?.network.entries.atPtr(k).body_state;
+        }
+    };
+    // a: 2 KiB 열여섯(먼저 받았다), b: 4 KiB 여덟 — 둘 다 32 KiB, 상한이 찼다.
+    for (0..16) |k| Feed.body(gpa, a, 1 + k, piece[0 .. 2 * 1024]);
+    for (0..8) |k| Feed.body(gpa, b, 100 + k, piece[0 .. 4 * 1024]);
+    try std.testing.expectEqual(net_budget.body_cap, net_budget.body_bytes);
+    // c 의 16 KiB 조각 — 차례: a0(같으면 먼저 받은 것) · b0 · a1 · a2(같으면 먼저) · b1 · a3 로 16 KiB.
+    Feed.begin(gpa, c, 200);
+    Feed.data(gpa, c, 200, &piece);
+    try std.testing.expectEqual(net_budget.body_cap, net_budget.body_bytes);
+    for (0..16) |k| try std.testing.expectEqual(if (k < 4) net_ring.BodyState.evicted else net_ring.BodyState.captured, Feed.st(a, k));
+    for (0..8) |k| try std.testing.expectEqual(if (k < 2) net_ring.BodyState.evicted else net_ring.BodyState.captured, Feed.st(b, k));
+    try std.testing.expectEqual(@as(usize, 24 * 1024), surfaces.getPtr(a).?.network.body_bytes);
+    try std.testing.expectEqual(@as(usize, 24 * 1024), surfaces.getPtr(b).?.network.body_bytes);
+}
+
+// 이 시험이 증명하는 것(W9d② 적대 리뷰 3 회차 F1·B2 의 짝): 멈춘 기록(쏟아짐 밸브)만 브라우저가 다시 만들어져도 그대로다 — 켜지 못했던 기록
+// (`failed` — DevTools 가 떨어졌거나 엔진이 내려갔다)은 새 브라우저에서 새 세션으로 다시 해 본다(엔진을 다시 띄우면 기록도 돌아온다). 왜
+// 중요한가 — 멈춤은 에이전트가 정할 일이지만, 엔진의 실패로 꺼진 기록이 엔진이 돌아온 뒤에도 꺼져 있으면 에이전트는 그 탭이 기록 중이라 믿는다.
+test "W9d② 적대 리뷰 3 회차: 켜지 못했던 기록(failed)은 브라우저가 다시 만들어지면 새 세션으로 다시 켠다 — 멈춘 것(paused)과 다르다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{104});
+    networkSync(&.{.{ .tab = 104, .who = 7, .birth = true, .any_host = true }});
+    networkBodySync(&.{.{ .tab = 104, .who = 17, .birth = true, .any_host = true }});
+    try networkRecord(104, true);
+    const session = surfaces.getPtr(104).?.rec_session;
+    apply(gpa, .{ .net_record_state = .{ .browser = 104, .session = session, .status = .failed } }, 0);
+    try std.testing.expect(!networkRecording(104));
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .browser_created = 104 }, 0);
+    var buf: [8]Message = undefined;
+    const frames = recFrames(&buf);
+    try std.testing.expectEqual(@as(usize, 1), frames.len);
+    try std.testing.expect(frames[0].net_record.on and frames[0].net_record.session > session);
+    try std.testing.expect(networkRecording(104));
 }

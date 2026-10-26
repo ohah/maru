@@ -22,6 +22,9 @@
 //! 호스트(W9d① 적대 리뷰 3 회차 T1): 덮이는지 가를 호스트(요청·홉·첫 사이트)와 서비스 워커를 붙일 출처는 **자르기 전의 온 주소**(CEF 의 UTF-16)
 //! 에서 읽고(`net_policy.hostOfUrl16`), 요청·홉의 호스트는 제 칸(`host`)으로 싣는다. 2 KiB 로 자르는 주소는 사용자 정보를 빼고 자른다 — 긴
 //! 사용자 정보 안에서 끊긴 앞부분(`https://yyy…a.test`)이 덮이는 사이트로 읽혀 은행의 쿠키가 보였다. 앞부분이 잘린 initiator 는 싣지 않는다.
+//! W9d②: 어느 탭이든 본문을 기록하면(`net_body.any_recording`) IO 스레드가 시작마다 온 주소의 해시와 mach 시각을 찍고(맞추기 열쇠 — 2 KiB 앞부분이
+//! 아니다), 문이 넘긴 요청과 넘김 상자가 넘쳐 버린 시작(W9d② 적대 리뷰 4 회차)의 해시를 남긴다(그 창의 같은 주소 짝은 모호하다). 보내는 task 가 기록하는 탭의 시작을 본문 후보로 적고(`body_expected`),
+//! 응답에서 덮이는지(설정 끔 — 헤더를 덜어 낼지와 같은 결정), 끝에서 짝 없는 후보의 시한을 건다(`net_body.zig`).
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -30,6 +33,8 @@ const object = @import("object.zig");
 const library = @import("library.zig");
 const browsers = @import("browsers.zig");
 const gate = @import("net_gate.zig");
+const net_body = @import("net_body.zig"); // W9d②: 기록하는 탭의 본문(맞추기 열쇠·끝)
+const body_table = @import("net_body_table.zig");
 
 const msg = protocol.message;
 const net_fields = protocol.net_fields;
@@ -245,8 +250,11 @@ pub fn resourceRequestHandler(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef
         t.navigation = is_navigation != 0;
         break :blk true;
     } else false;
+    const watched_browser = w.browser;
     doUnlock();
     if (!admitted) {
+        // W9d②: 기록하는 탭이면 넘긴 요청의 주소 해시를 남긴다 — 그 창 안의 같은 주소 짝은 모호하다(넘긴 쌍둥이 자리에 다른 요청이 든다 — J2).
+        if (net_body.any_recording.load(.acquire)) markDrop(&.{watched_browser}, request);
         postFlush();
         return null;
     }
@@ -299,8 +307,26 @@ fn contextResourceRequestHandler(_: [*c]c.cef_request_context_handler_t, browser
         break :blk true;
     } else false;
     doUnlock();
-    if (n != 0 and !admitted) postFlush();
+    if (n != 0 and !admitted) {
+        if (net_body.any_recording.load(.acquire)) markDrop(targets[0..n], request);
+        postFlush();
+    }
     return if (admitted) &rrh else null;
+}
+
+// ── W9d②: 문이 넘긴 요청의 표지(IO 스레드 → 보내는 task) ──────────────────────────────────────────────────
+
+// 표지는 `state`(뮤텍스 아래)에 둔다 — `net_gate.State.markDrop`·`queueRefused`(상자가 넘쳐 버린 시작도 — W9d② 적대 리뷰 4 회차). 넘치면 그
+// 탭은 넘침으로 알린다(표가 그 탭의 넘침을 모르면 짝이 맞게 보일 수 있다).
+
+fn markDrop(targets: []const BrowserId, request: [*c]c.cef_request_t) void {
+    const raw = request.*.get_url.?(request);
+    defer if (raw != null) api().string_userfree_utf16_free(raw);
+    const hash = body_table.hashUrl16(units(raw));
+    doLock();
+    defer doUnlock();
+    // 잠금 아래에서 찍는다 — 표지의 차례가 시각의 차례라 물 높이(`cefWatermark`)가 남은 표지의 가장 이른 시각으로 정해진다(W9d② 적대 리뷰 3 회차).
+    state.markDrop(targets, hash, net_body.machUs());
 }
 
 // ── IO 스레드: 처리기 콜백 → 기록 ─────────────────────────────────────────────────────────────────────
@@ -326,6 +352,12 @@ const Event = struct {
     frame: u64 = 0,
     /// 적을 때 찍은 덜어 내기(대상마다 — 3 회차 P1c).
     stamp: gate.Stamp = .{},
+    /// W9d②(begin — 어느 탭이든 기록할 때만): 조각을 뗀 온 주소의 해시(맞추기 열쇠)와 IO 시각(mach µs — CDP `timestamp` 와 같은 시계).
+    /// IO 시각은 넘김 상자에 넣을 때 잠금 아래에서 찍는다(`enqueue` — W9d② 적대 리뷰 3 회차 P1: 상자의 차례가 곧 시각의 차례라야 물 높이가 선다).
+    url_hash: u64 = 0,
+    t_io_us: i64 = 0,
+    /// 상자에 넣은 시각(잠금 아래 — 모든 기록). 상자에 남은 가장 이른 것이 물 높이를 정한다(`cefWatermark`).
+    queued_us: i64 = 0,
     /// 덮이는지 가를 호스트(begin — 요청 주소, redirect — 옮기기 전 주소, response — 지금 주소) — 온 주소에서 읽었다(3 회차 T1).
     host: []const u8 = "",
     /// 싣는 주소의 호스트(begin — 요청 주소, redirect — 옮겨 갈 주소 — wire 의 `host` 칸).
@@ -393,6 +425,10 @@ fn freeEvent(e: *Event) void {
 /// 넘김 상자에 넣는다 — 넘치면 버리고 그 탭들의 넘긴 수를 센다. 넣기 전에 대상마다 덜어 내기를 찍는다(3 회차 P1c — 적을 때의 설정·호스트).
 fn enqueue(e: *Event) void {
     doLock();
+    // W9d② 적대 리뷰 3 회차 P1: 시각을 잠금 아래에서 찍는다 — 그러면 상자의 차례가 시각의 차례이고, 보내는 task 가 상자를 비운 때까지 찍힌
+    // 시작은 모두 표에 닿았다(물 높이). 요청은 이 콜백이 돌아온 뒤에 나가므로 제 기록의 IO 시각은 여전히 그 요청의 응답보다 앞이다.
+    e.queued_us = net_body.machUs();
+    if (e.kind == .begin and e.url_hash != 0) e.t_io_us = e.queued_us;
     e.stamp = state.stamp(e.targets[0..e.target_count], e.host, e.site);
     const ok = state.reserveQueue(e.bytes()) and blk: {
         queue.append(std.heap.c_allocator, e) catch {
@@ -401,14 +437,23 @@ fn enqueue(e: *Event) void {
         };
         break :blk true;
     };
-    if (!ok and e.kind == .begin) {
-        for (e.targets[0..e.target_count]) |b| if (state.watchOf(b)) |w| {
-            w.dropped +|= 1;
-        };
-    }
+    // 넘친 시작은 넘긴 수를 세고, 본문을 기록하면 표지도 남긴다(W9d② 적대 리뷰 4 회차 — 그 요청의 CDP 쪽이 같은 주소의 다른 기록을 갖지 않게).
+    // 넘친 리다이렉트·응답·끝은 본문을 기록하면 그 요청의 표지를 남긴다(5 회차 C1 — 버린 끝을 기다리는 후보도 끝이 꼭 오게).
+    if (!ok) state.queueRefused(e.kind == .begin, e.targets[0..e.target_count], e.url_hash, e.request, e.queued_us, net_body.any_recording.load(.acquire));
     doUnlock();
     if (!ok) freeEvent(e);
     postFlush();
+}
+
+/// W9d② 적대 리뷰 3 회차 P1: 물 높이 — 이 IO 시각까지 찍힌 CEF 기록(시작·문 넘김 표지)은 모두 보내는 task 가 표에 넘겼다(UI 스레드에서 부른다 —
+/// 보내는 task 도 UI 스레드라 상자에서 꺼낸 것은 이미 다 넘겼다). 상자가 비었으면 지금, 아니면 남은 가장 이른 것의 앞.
+pub fn cefWatermark() i64 {
+    doLock();
+    defer doUnlock();
+    var w = net_body.machUs() - 1;
+    if (queue.items.len > 0) w = @min(w, queue.items[0].queued_us - 1);
+    if (state.drop_mark_len > 0) w = @min(w, state.drop_marks[0].t_us - 1);
+    return w;
 }
 
 fn postFlush() void {
@@ -504,6 +549,8 @@ fn onBeforeResourceLoad(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.
     var uh: [msg.max_net_host_bytes]u8 = undefined;
     const raw_url = request.*.get_url.?(request);
     defer if (raw_url != null) api().string_userfree_utf16_free(raw_url);
+    // W9d②: 기록하는 탭이 있으면 맞추기 열쇠 — 온 주소(2 KiB 앞부분이 아니다 — 긴 주소의 앞이 같을 수 있다)의 해시와 IO 시각.
+    if (net_body.any_recording.load(.acquire)) e.url_hash = body_table.hashUrl16(units(raw_url)); // IO 시각은 `enqueue` 가 찍는다
     const url = readUrl(raw_url, &ub, &uh);
     if (url.text.len == 0) return c.RV_CONTINUE;
     e.flags.url_truncated = url.truncated;
@@ -640,8 +687,16 @@ fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
     var taken: std.ArrayList(*Event) = .empty;
     var drops: [gate.capacity]struct { browser: BrowserId, count: u32 } = undefined;
     var drop_count: usize = 0;
+    var marks: [gate.max_drop_marks]gate.DropMark = undefined;
+    var overflowed: [gate.max_targets]BrowserId = @splat(0);
+    var lost: [gate.max_lost_marks]gate.LostMark = undefined;
+    var lost_overflowed: [gate.max_targets]BrowserId = @splat(0);
     doLock();
+    const mark_len = state.takeDropMarks(&marks, &overflowed);
+    const lost_len = state.takeLostMarks(&lost, &lost_overflowed);
     std.mem.swap(std.ArrayList(*Event), &queue, &taken);
+    // 꺼낸 때 — 이 앞에 찍힌 것은 모두 꺼냈다(아래에서 표에 넘긴 뒤 물 높이로 알린다).
+    const swapped_us = net_body.machUs();
     for (&state.watches) |*w| if (w.on and w.dropped != 0) {
         drops[drop_count] = .{ .browser = w.browser, .count = w.dropped };
         drop_count += 1;
@@ -650,6 +705,8 @@ fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
     doUnlock();
     defer taken.deinit(std.heap.c_allocator);
     for (drops[0..drop_count]) |d| browsers.state.writer.send(.{ .net_dropped = .{ .browser = d.browser, .count = d.count } }) catch {};
+    for (marks[0..mark_len]) |m| net_body.noteDrop(m.browser, m.url_hash, m.t_us);
+    for (overflowed) |b| if (b != 0) net_body.noteDropOverflow(b, net_body.machUs());
     for (taken.items) |e| {
         for (e.targets[0..e.target_count], 0..) |b, i| send(e, b, i);
         doLock();
@@ -657,6 +714,32 @@ fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
         doUnlock();
         freeEvent(e);
     }
+    // W9d② 적대 리뷰 5 회차 C1: 버린 리다이렉트·응답·끝 — 그 요청의 시작(후보)은 위에서 넘겼다(상자의 차례). 후보는 끝을 영영 기다리지 않는다.
+    for (lost[0..lost_len]) |m| net_body.cefLost(m.browser, m.request);
+    for (lost_overflowed) |b| if (b != 0) net_body.cefLostAll(b);
+    // W9d② 적대 리뷰 3 회차 P1: 꺼낸 때까지의 CEF 기록이 모두 표에 닿았다 — 제 기록을 기다리던 CDP 끝을 곧 정한다.
+    net_body.cefFlushed(swapped_us - 1);
+}
+
+/// W9d②: 보이는 규칙에 드는 칸(프레임 갈래·앞 문서·첫 사이트·initiator)의 해시 — 같은 주소의 두 후보가 이것이 다르면 짝을 잘못 지었을 때
+/// 다른 규칙으로 보인다(`ambiguous`).
+fn projectionAttr(flags: msg.NetFlags, site: []const u8, initiator: []const u8) u64 {
+    var h = std.hash.Wyhash.init(0xa77);
+    const bits = [_]u8{ @intFromBool(flags.main_frame), @intFromBool(flags.subframe), @intFromBool(flags.service_worker), @intFromBool(flags.previous_document) };
+    h.update(&bits);
+    h.update(site);
+    h.update(&.{0});
+    h.update(initiator);
+    return h.final();
+}
+
+/// W9d②: CEF 의 요청 헤더에 쿠키·인증 헤더가 있다(페이지가 단 Authorization — CDP ExtraInfo 가 없을 때와 함께 쓴다, J12).
+fn credentialHeaders(block: msg.NetHeaderBlock) bool {
+    var it = net_fields.HeaderIterator.init(block);
+    while (it.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "cookie") or std.ascii.eqlIgnoreCase(h.name, "authorization") or std.ascii.eqlIgnoreCase(h.name, "proxy-authorization")) return true;
+    }
+    return false;
 }
 
 /// 기록 하나를 그 탭(대상 `index`)에 보낸다 — 적을 때 찍은 것과 지금의 지켜보기 중 더 덜어 내는 쪽으로(3 회차 P1c).
@@ -687,11 +770,27 @@ fn send(e: *const Event, browser: BrowserId, index: usize) void {
                 flags.headers_truncated = flags.headers_truncated or stripped.truncated;
             }
             if (url.len == 0) return;
-            break :blk .{ .net_begin = .{ .browser = browser, .request = e.request, .flags = flags, .resource_type = e.resource_type, .time_ms = e.time_ms, .method = e.method, .url = url, .initiator = e.initiator, .site = e.site, .host = e.url_host, .headers = headers } };
+            // W9d②: 기록하는 탭이면 본문 후보로 적는다 — 적었으면 이 요청의 본문 끝이 꼭 하나 온다(`body_expected`).
+            var flags2: msg.NetFlags2 = .{};
+            if (e.url_hash != 0 and net_body.recording(browser)) {
+                flags2.body_expected = net_body.cefBegin(browser, .{
+                    .request = e.request,
+                    .key = .{ .url = e.url_hash, .method = body_table.hashMethod(e.method), .sw = flags.service_worker },
+                    .t_io_us = e.t_io_us,
+                    .attr = projectionAttr(flags, e.site, e.initiator),
+                    .covered = d.full or d.covered,
+                    // 설정이 꺼졌으면 응답을 보낼 호스트(리다이렉트 뒤)가 정해질 때까지 받으러 가지 않는다(W9d② 적대 리뷰 1 회차 MED-1).
+                    .cover_pending = !d.full,
+                    .cef_credentialed = credentialHeaders(raw),
+                });
+            }
+            break :blk .{ .net_begin = .{ .browser = browser, .request = e.request, .flags = flags, .flags2 = flags2, .resource_type = e.resource_type, .time_ms = e.time_ms, .method = e.method, .url = url, .initiator = e.initiator, .site = e.site, .host = e.url_host, .headers = headers } };
         },
         .redirect => blk: {
             var hop = e.hop;
             if (!d.full) hop.stripped = true;
+            // W9d②(적대 리뷰 1 회차 MED-1): 설정이 꺼졌으면 응답 호스트가 바뀐다 — 다음 응답이 덮이는지 정할 때까지 본문을 받으러 가지 않는다.
+            net_body.cefRedirect(browser, e.request, !d.full);
             if (url.len == 0) return;
             break :blk .{ .net_redirect = .{ .browser = browser, .request = e.request, .status = e.status, .flags = hop, .time_ms = e.time_ms, .url = url, .host = e.url_host, .headers = headers } };
         },
@@ -699,9 +798,14 @@ fn send(e: *const Event, browser: BrowserId, index: usize) void {
             var hop = e.hop;
             hop.url_truncated = false;
             if (!d.full) hop.stripped = true;
+            // W9d②: 설정이 꺼졌을 때 응답 호스트가 덮이지 않으면 본문도 받지 않는다(헤더를 덜어 내는 것과 같은 결정).
+            net_body.cefCovered(browser, e.request, d.full or d.covered);
             break :blk .{ .net_response = .{ .browser = browser, .request = e.request, .status = e.status, .flags = hop, .time_ms = e.time_ms, .mime = e.mime, .headers = headers } };
         },
-        .end => .{ .net_end = .{ .browser = browser, .request = e.request, .outcome = e.outcome, .error_code = e.error_code, .received = e.received, .time_ms = e.time_ms } },
+        .end => blk: {
+            net_body.cefEnd(browser, e.request, e.outcome == .success, e.received); // W9d②: 짝이 없으면 시한 뒤 `unmatched`(실패·취소는 P5 의 갈림, 받은 바이트는 4 회차 N1)
+            break :blk .{ .net_end = .{ .browser = browser, .request = e.request, .outcome = e.outcome, .error_code = e.error_code, .received = e.received, .time_ms = e.time_ms } };
+        },
     };
     browsers.state.writer.send(message) catch {};
 }

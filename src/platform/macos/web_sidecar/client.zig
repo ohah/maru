@@ -400,6 +400,7 @@ fn onRenderProcessTerminated(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_
     const entry = entryOf(browser) orelse return;
     @import("media_menu.zig").rendererGone(entry.cef_id); // W6h②: 미디어 메뉴의 진행(4 회차)
     @import("devtools.zig").rendererGone(entry.id); // W9-0b: 기다리던 호출은 `detached` 로(detach 가 오지 않을 수 있다)
+    @import("net_body.zig").rendererGone(entry.id); // W9d②: 보낸 본문 호출은 답이 없다(J5) — `detached`
     const reason: protocol.message.RendererGoneReason = switch (status) {
         c.TS_PROCESS_WAS_KILLED => .killed,
         c.TS_PROCESS_CRASHED => .crashed,

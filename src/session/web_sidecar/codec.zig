@@ -93,6 +93,10 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .net_response => |value| try net_fields.writeResponse(&cursor, value),
         .net_end => |value| try net_fields.writeEnd(&cursor, value),
         .net_dropped => |value| try net_fields.writeDropped(&cursor, value),
+        .net_record => |value| try net_fields.writeRecord(&cursor, value),
+        .net_body_data => |value| try net_fields.writeBodyData(&cursor, value),
+        .net_body_end => |value| try net_fields.writeBodyEnd(&cursor, value),
+        .net_record_state => |value| try net_fields.writeRecordState(&cursor, value),
         .resize => |value| {
             try writeBrowser(&cursor, value.browser);
             try writeSize(&cursor, value.size);
@@ -464,6 +468,10 @@ pub fn decodeExact(frame: []const u8) Error!Message {
         .net_response => .{ .net_response = try net_fields.readResponse(&cursor) },
         .net_end => .{ .net_end = try net_fields.readEnd(&cursor) },
         .net_dropped => .{ .net_dropped = try net_fields.readDropped(&cursor) },
+        .net_record => .{ .net_record = try net_fields.readRecord(&cursor) },
+        .net_body_data => .{ .net_body_data = try net_fields.readBodyData(&cursor) },
+        .net_body_end => .{ .net_body_end = try net_fields.readBodyEnd(&cursor) },
+        .net_record_state => .{ .net_record_state = try net_fields.readRecordState(&cursor) },
         .resize => .{ .resize = .{ .browser = try readBrowser(&cursor), .size = try readSize(&cursor) } },
         .set_hidden => .{ .set_hidden = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
         .set_focus => .{ .set_focus = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
@@ -888,7 +896,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  21, 0, // v21, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  22, 0, // v22, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -974,9 +982,9 @@ test "decoder rejects malformed header, trailing bytes and truncation" {
     std.mem.writeInt(u16, bad[8..10], version + 1, .big);
     try std.testing.expectError(error.UnsupportedVersion, decodeExact(bad[0..len]));
     bad = encoded;
-    bad[10] = 74; // 정의되지 않은 tag(sidecar → maru 는 W9d① 의 `net_dropped` 73 까지)
+    bad[10] = 77; // 정의되지 않은 tag(sidecar → maru 는 W9d② 의 `net_record_state` 76 까지)
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
-    bad[10] = 135; // 둘째 구간(maru → sidecar)도 W9d① 의 `net_watch` 134 뒤는 비었다
+    bad[10] = 136; // 둘째 구간(maru → sidecar)도 W9d② 의 `net_record` 135 뒤는 비었다
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
     try std.testing.expectError(error.IncompleteFrame, decodeExact(encoded[0 .. len - 1]));
     encoded[len] = 0;
@@ -1651,6 +1659,14 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .net_response = .{ .browser = 3, .request = 5, .status = 200, .mime = "text/html", .headers = .{} } },
         .{ .net_end = .{ .browser = 3, .request = 5, .outcome = .failed, .error_code = -3, .received = 12, .time_ms = 1 } },
         .{ .net_dropped = .{ .browser = 3, .count = 7 } },
+        // W9d② 본문 기록.
+        .{ .net_record = .{ .browser = 3, .on = true, .session = 9 } },
+        .{ .net_record = .{ .browser = 3, .on = false } },
+        .{ .net_begin = .{ .browser = 3, .request = 8, .flags2 = .{ .body_expected = true }, .url = "https://a.test/j", .host = "a.test" } },
+        .{ .net_body_data = .{ .browser = 3, .session = 9, .request = 8, .offset = 16, .bytes = "{\"a\":1}" } },
+        .{ .net_body_end = .{ .browser = 3, .session = 9, .request = 8, .state = .captured, .flags = .{ .redecoded = true, .credentialed = true }, .size = 23, .decoded = 23 } },
+        .{ .net_body_end = .{ .browser = 3, .session = 9, .request = 8, .state = .over_cap, .decoded = 2 << 20 } },
+        .{ .net_record_state = .{ .browser = 3, .session = 9, .status = .paused } },
     };
     var encoded: [256]u8 = undefined;
     var corrupted: [256]u8 = undefined;
@@ -2220,8 +2236,14 @@ test "W9d①: 네트워크의 닫힌 칸은 양쪽에서 거절한다 — 요청
     bad[body + 16] = 0x80; // flags 의 앞 문서 표시만 — 하위 프레임 없이(5 회차 B1)
     try std.testing.expectError(error.InvalidNetwork, decodeExact(bad[0..len]));
     bad = buf;
-    bad[body + 17] = 18; // 비은 자원 종류
+    bad[body + 18] = 18; // 비은 자원 종류(W9d②: 둘째 표시 다음 칸)
     try std.testing.expectError(error.InvalidNetwork, decodeExact(bad[0..len]));
+    bad = buf;
+    bad[body + 17] = 0x02; // W9d②: 둘째 표시의 쓰지 않는 비트
+    try std.testing.expectError(error.InvalidNetwork, decodeExact(bad[0..len]));
+    bad = buf;
+    bad[body + 17] = 0x01; // body_expected 만은 받는다
+    try std.testing.expect((try decodeExact(bad[0..len])).net_begin.flags2.body_expected);
     bad = buf;
     bad[len - 3] = 1; // 헤더 개수 1 인데 바이트 0
     try std.testing.expectError(error.InvalidNetwork, decodeExact(bad[0..len]));
@@ -2291,6 +2313,157 @@ test "W9d①: 네트워크 프레임을 무작위로 망가뜨려도 풀기는 �
             .net_response => |v| try net_fields_mod.checkResponse(v),
             .net_end => |v| try net_fields_mod.checkEnd(v),
             .net_watch => |v| try net_fields_mod.checkWatch(v),
+            else => {},
+        }
+    }
+    try std.testing.expect(ok > 0);
+}
+
+// ── 응답 본문 기록(W9d②) ─────────────────────────────────────────────────────────────────────────────────
+// 시험이 증명하는 것: 본문 넷(`net_record`·`net_body_data`·`net_body_end`·`net_record_state`)과 `net_begin` 의 둘째 표시가 왕복하고 방향이
+// 맞다, 바이트 배치가 골든과 같다(버전 22 — 따로 설치되는 maru 와 sidecar 가 같은 바이트를 읽는다), 닫힌 칸(세션·요청 0, 빈·큰 조각,
+// 본문 상한 넘는 끝, 모르는 상태, 잡지 않은 본문의 크기·글 표시, 켬과 세션 어긋남)은 양쪽에서 거절한다, 무작위로 망가뜨려도 풀린 값은 규칙을
+// 지킨다. 브라우저 탭에서 중요한 이유 — 본문 바이트는 페이지·서버가 고른 것이고 maru 는 sidecar 를 공격 입력으로 다룬다.
+
+test "W9d②: 본문 기록 넷이 왕복하고 방향이 맞다 — net_begin 의 body_expected 도" {
+    const rec = (try roundTrip(.{ .net_record = .{ .browser = 7, .on = true, .session = 0xfffffffe } })).net_record;
+    try std.testing.expect(rec.on and rec.session == 0xfffffffe);
+    try std.testing.expect(!(try roundTrip(.{ .net_record = .{ .browser = 7, .on = false } })).net_record.on);
+    const big = array_repeat.repeat("가", 5000); // 15 000 바이트 — 조각 상한 16 KiB 안
+    const data = (try roundTrip(.{ .net_body_data = .{ .browser = 7, .session = 3, .request = std.math.maxInt(u64) - 2, .offset = 1024 * 1024 - big.len, .bytes = big } })).net_body_data;
+    try std.testing.expectEqualStrings(big, data.bytes);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64) - 2), data.request);
+    const end = (try roundTrip(.{ .net_body_end = .{ .browser = 7, .session = 3, .request = 5, .state = .captured, .flags = .{ .binary = true, .credentialed = true }, .size = 1024 * 1024, .decoded = 1 << 40 } })).net_body_end;
+    try std.testing.expect(end.state == .captured and end.flags.binary and end.flags.credentialed and !end.flags.redecoded);
+    try std.testing.expectEqual(@as(u64, 1 << 40), end.decoded);
+    inline for (@import("type_info_fields").fields(message_mod.NetBodyState)) |f| {
+        const st: message_mod.NetBodyState = @fromBackingInt(@intCast(f.value));
+        try std.testing.expectEqual(st, (try roundTrip(.{ .net_body_end = .{ .browser = 7, .session = 3, .request = 5, .state = st } })).net_body_end.state);
+    }
+    inline for (@import("type_info_fields").fields(message_mod.NetRecordStatus)) |f| {
+        const st: message_mod.NetRecordStatus = @fromBackingInt(@intCast(f.value));
+        try std.testing.expectEqual(st, (try roundTrip(.{ .net_record_state = .{ .browser = 7, .session = 3, .status = st } })).net_record_state.status);
+    }
+    const begin = (try roundTrip(.{ .net_begin = .{ .browser = 7, .request = 9, .flags2 = .{ .body_expected = true }, .url = "https://a.test/", .host = "a.test" } })).net_begin;
+    try std.testing.expect(begin.flags2.body_expected);
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.net_record.direction());
+    inline for (.{ Tag.net_body_data, Tag.net_body_end, Tag.net_record_state }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
+}
+
+test "W9d②: 본문 frame 의 바이트 배치 골든(버전 22) — net_record·net_body_end·net_body_data·net_record_state" {
+    var buf: [128]u8 = undefined;
+    var len = try encode(.{ .net_record = .{ .browser = 0x0102, .on = true, .session = 0x0a0b0c0d } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 22, 135, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0x0a, 0x0b, 0x0c, 0x0d }, buf[0..len]);
+    len = try encode(.{ .net_body_end = .{ .browser = 1, .session = 2, .request = 3, .state = .captured, .flags = .{ .redecoded = true, .credentialed = true }, .size = 0x0100, .decoded = 0x0200 } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{
+        0, 0, 0, 41, 'M', 'W', 'E', 'B', 0, 22, 75, // 머리
+        0, 0, 0, 0, 0, 0, 0, 1, // browser
+        0, 0, 0, 2, // session
+        0, 0, 0, 0, 0, 0, 0, 3, // request
+        0, 0b1010, // state captured · flags(redecoded·credentialed)
+        0, 0, 1, 0, // size
+        0, 0, 0, 0, 0, 0, 2, 0, // decoded
+    }, buf[0..len]);
+    len = try encode(.{ .net_body_data = .{ .browser = 1, .session = 2, .request = 3, .offset = 4, .bytes = "hi" } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 35, 'M', 'W', 'E', 'B', 0, 22, 74, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 4, 0, 2, 'h', 'i' }, buf[0..len]);
+    len = try encode(.{ .net_record_state = .{ .browser = 1, .session = 2, .status = .failed } }, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 20, 'M', 'W', 'E', 'B', 0, 22, 76, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 3 }, buf[0..len]);
+}
+
+test "W9d②: 본문의 닫힌 칸은 양쪽에서 거절한다 — 세션·요청 0, 빈·큰 조각, 본문 상한 넘는 끝, 잡지 않은 본문의 크기·글 표시, 켬과 세션 어긋남" {
+    var buf: [max_frame_bytes]u8 = undefined;
+    const over = array_repeat.repeat("x", (message_mod.net_body_chunk_bytes + 1));
+    const bad = [_]Message{
+        .{ .net_record = .{ .browser = 1, .on = true, .session = 0 } },
+        .{ .net_record = .{ .browser = 1, .on = false, .session = 4 } },
+        .{ .net_body_data = .{ .browser = 1, .session = 0, .request = 2, .offset = 0, .bytes = "a" } },
+        .{ .net_body_data = .{ .browser = 1, .session = 1, .request = 0, .offset = 0, .bytes = "a" } },
+        .{ .net_body_data = .{ .browser = 1, .session = 1, .request = 2, .offset = 0, .bytes = "" } },
+        .{ .net_body_data = .{ .browser = 1, .session = 1, .request = 2, .offset = 0, .bytes = over } },
+        .{ .net_body_data = .{ .browser = 1, .session = 1, .request = 2, .offset = message_mod.max_net_body_bytes, .bytes = "a" } },
+        .{ .net_body_end = .{ .browser = 1, .session = 0, .request = 2, .state = .captured } },
+        .{ .net_body_end = .{ .browser = 1, .session = 1, .request = 0, .state = .captured } },
+        .{ .net_body_end = .{ .browser = 1, .session = 1, .request = 2, .state = .captured, .size = message_mod.max_net_body_bytes + 1 } },
+        .{ .net_body_end = .{ .browser = 1, .session = 1, .request = 2, .state = .over_cap, .size = 5 } },
+        .{ .net_body_end = .{ .browser = 1, .session = 1, .request = 2, .state = .not_text, .flags = .{ .binary = true } } },
+        .{ .net_body_end = .{ .browser = 1, .session = 1, .request = 2, .state = .unmatched, .flags = .{ .redecoded = true } } },
+        .{ .net_body_end = .{ .browser = 1, .session = 1, .request = 2, .state = .captured, .flags = .{ .redecoded = true, .chromium_decoded = true } } },
+        .{ .net_body_end = .{ .browser = 1, .session = 1, .request = 2, .state = .captured, .flags = .{ .binary = true, .redecoded = true } } },
+        .{ .net_body_end = .{ .browser = 1, .session = 1, .request = 2, .state = .captured, .flags = .{ ._reserved = 1 } } },
+        .{ .net_record_state = .{ .browser = 1, .session = 0, .status = .on } },
+        .{ .net_record_state = .{ .browser = 1, .session = 0, .status = .paused } },
+    };
+    for (bad) |m| try std.testing.expect(std.meta.isError(encode(m, &buf)));
+    _ = try encode(.{ .net_record_state = .{ .browser = 1, .session = 0, .status = .off } }, &buf); // 꺼짐은 세션이 없어도
+    _ = try encode(.{ .net_body_end = .{ .browser = 1, .session = 1, .request = 2, .state = .unmatched, .flags = .{ .credentialed = true } } }, &buf); // 자격 표시는 어느 상태든
+    // decode 쪽: 모르는 상태·기록 상태, 조각 길이 상한.
+    const body = prefix_len + common_len;
+    var len = try encode(.{ .net_body_end = .{ .browser = 1, .session = 1, .request = 2, .state = .busy } }, &buf);
+    var b = buf;
+    // 모르는 본문 상태 — 마지막 상태 다음 값(상태가 늘어도 「모르는 값」 으로 남게).
+    b[body + 20] = @as(u8, @intCast(std.enums.values(message_mod.NetBodyState).len));
+    try std.testing.expectError(error.InvalidNetwork, decodeExact(b[0..len]));
+    b = buf;
+    b[body + 21] = 0x10; // 쓰지 않는 표시 비트
+    try std.testing.expectError(error.InvalidNetwork, decodeExact(b[0..len]));
+    len = try encode(.{ .net_record_state = .{ .browser = 1, .session = 1, .status = .on } }, &buf);
+    b = buf;
+    b[body + 12] = 4;
+    try std.testing.expectError(error.InvalidNetwork, decodeExact(b[0..len]));
+    len = try encode(.{ .net_body_data = .{ .browser = 1, .session = 1, .request = 2, .offset = 0, .bytes = "ab" } }, &buf);
+    b = buf;
+    b[body + 24] = 0x40; // 조각 길이 16 KiB 넘게(길이가 frame 과 어긋나기 전에 상한으로)
+    try std.testing.expect(std.meta.isError(decodeExact(b[0..len])));
+    len = try encode(.{ .net_record = .{ .browser = 1, .on = true, .session = 1 } }, &buf);
+    b = buf;
+    b[body + 8] = 2; // bool 이 아니다
+    try std.testing.expect(std.meta.isError(decodeExact(b[0..len])));
+}
+
+test "W9d②: 가장 큰 본문 조각(16 KiB)도 frame 상한 안에서 왕복하고, 본문 상한의 마지막 조각까지 받는다" {
+    const chunk = array_repeat.repeat("z", message_mod.net_body_chunk_bytes);
+    const got = (try roundTrip(.{ .net_body_data = .{ .browser = 1, .session = 1, .request = 1, .offset = message_mod.max_net_body_bytes - chunk.len, .bytes = chunk } })).net_body_data;
+    try std.testing.expectEqual(message_mod.net_body_chunk_bytes, got.bytes.len);
+}
+
+test "W9d②: 본문 frame 을 무작위로 망가뜨려도 풀기는 무너지지 않고 풀린 값은 닫힌 칸 규칙을 지킨다" {
+    var prng = std.Random.DefaultPrng.init(0x9d2);
+    const r = prng.random();
+    const seeds = [_]Message{
+        .{ .net_record = .{ .browser = 3, .on = true, .session = 9 } },
+        .{ .net_body_data = .{ .browser = 3, .session = 9, .request = 8, .offset = 0, .bytes = "{\"k\":\"v\"}" } },
+        .{ .net_body_end = .{ .browser = 3, .session = 9, .request = 8, .state = .captured, .flags = .{ .chromium_decoded = true }, .size = 9, .decoded = 9 } },
+        .{ .net_body_end = .{ .browser = 3, .session = 9, .request = 8, .state = .ambiguous } },
+        .{ .net_record_state = .{ .browser = 3, .session = 9, .status = .on } },
+        .{ .net_begin = .{ .browser = 3, .request = 8, .flags2 = .{ .body_expected = true }, .url = "https://a.test/x", .host = "a.test" } },
+    };
+    var buf: [max_frame_bytes]u8 = undefined;
+    var ok: usize = 0;
+    for (0..200_000) |i| {
+        const seed = seeds[i % seeds.len];
+        const len = try encode(seed, &buf);
+        var frame: [512]u8 = undefined;
+        @memcpy(frame[0..len], buf[0..len]);
+        var n = len;
+        for (0..r.intRangeAtMost(usize, 1, 6)) |_| {
+            switch (r.intRangeLessThan(u8, 0, 3)) {
+                0 => frame[r.intRangeLessThan(usize, 0, n)] = r.int(u8),
+                1 => n = r.intRangeAtMost(usize, 1, n),
+                else => if (n < frame.len) {
+                    frame[n] = r.int(u8);
+                    n += 1;
+                },
+            }
+        }
+        if (r.boolean() and n >= 4) std.mem.writeInt(u32, frame[0..4], @intCast(n - 4), .big);
+        const m = decodeExact(frame[0..n]) catch continue;
+        ok += 1;
+        switch (m) {
+            .net_record => |v| try net_fields_mod.checkRecord(v),
+            .net_body_data => |v| try net_fields_mod.checkBodyData(v),
+            .net_body_end => |v| try net_fields_mod.checkBodyEnd(v),
+            .net_record_state => |v| try net_fields_mod.checkRecordState(v),
+            .net_begin => |v| try net_fields_mod.checkBegin(v),
             else => {},
         }
     }

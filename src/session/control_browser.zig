@@ -158,8 +158,14 @@ pub const BrowserMethod = enum {
     network,
     /// `browser.networkRequest {id, req}`(W9d① — Chromium 전용) → 그 요청의 자세한 것(헤더·리다이렉트 홉·`body_state:"not_recorded"`).
     /// 모르는·버려진 번호는 handleDialog 의 모르는 번호와 같은 코드(-32603)에 `data.reason`. `browser_network` scope. op.arg=`{req}`.
-    /// **op_kind=29 고정**.
+    /// **op_kind=29 고정**. W9d②: `body:true` 면 본문 한 조각(`body_offset`·`body_max_bytes` — 64 KiB 까지)도 싣는다 — 본문은 그 pane 의
+    /// `browser_network_body` grant 가 있어야 보인다(없으면 `body_state:"needs_body_permission"` — 그 grant 는 `networkRecord` 가 묻는다).
     network_request,
+    /// `browser.networkRecord {id, on}`(W9d② — Chromium 전용) → `{recording, state}`. 그 탭의 응답 본문 기록을 켜거나 끈다(기록하는 동안만
+    /// sidecar 가 그 탭에 CDP Network 를 건다 — 탭 제목 앞에 ◉). **`browser_network_body` scope**(사이트에 묶인 grant — 사용자 탭은 사이트마다
+    /// 확인 모달, 에이전트가 연 탭은 묻지 않는다 — 사용자 결정 UB2). 그 탭의 `browser_network` grant 가 먼저 있어야 한다(없으면 모달 없이
+    /// `-32002` 에 `data.reason:"needs_network_permission"`). op.arg=`{on}`. **op_kind=30 고정**.
+    network_record,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -196,6 +202,7 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "upload")) return .upload;
     if (eq(rest, "network")) return .network;
     if (eq(rest, "networkRequest")) return .network_request;
+    if (eq(rest, "networkRecord")) return .network_record;
     return null;
 }
 
@@ -232,6 +239,7 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
         .upload => "upload",
         .network => "network",
         .network_request => "networkRequest",
+        .network_record => "networkRecord",
     };
 }
 
@@ -242,7 +250,7 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
 pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
     return switch (engine) {
         .webkit => switch (m) {
-            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog, .upload, .network, .network_request => false,
+            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record => false,
             else => true,
         },
         // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
@@ -251,7 +259,7 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
         // W9c①: console(CEF `on_console_message` — DevTools 를 부르지 않는다). W9c③: 업로드(`DOM.setFileInputFiles` — 매번 확인 모달).
         // W9d①: 네트워크 목록·자세히(CEF 자원 요청 처리기 — DevTools 를 부르지 않는다).
         .chromium => switch (m) {
-            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload, .network, .network_request => true,
+            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload, .network, .network_request, .network_record => true,
             else => false,
         },
     };
@@ -881,12 +889,46 @@ pub fn serializeNetworkArg(gpa: std.mem.Allocator, p: NetworkParams) std.mem.All
     return aw.toOwnedSlice();
 }
 
-/// W9d①: `browser.networkRequest` params — `req` 는 `browser.network` 가 준 번호(1..2^53-1).
-pub fn parseNetworkRequestParams(params: ?std.json.Value) ParamError!u64 {
+/// W9d①: `browser.networkRequest` params — `req` 는 `browser.network` 가 준 번호(1..2^53-1). W9d②: `body`(본문 한 조각을 싣는다),
+/// `body_offset`(바이트, 0..1 MiB), `body_max_bytes`(1..64 KiB, 기본 64 KiB).
+pub const max_network_body_read_bytes: u32 = 64 * 1024;
+pub const NetworkRequestParams = struct { req: u64, body: bool = false, body_offset: u32 = 0, body_max_bytes: u32 = max_network_body_read_bytes };
+
+pub fn parseNetworkRequestParams(params: ?std.json.Value) ParamError!NetworkRequestParams {
     const obj = try paramsObject(params);
-    try onlyKeys(obj, &.{ "id", "req" });
-    return switch (obj.get("req") orelse return error.InvalidParams) {
-        .integer => |i| if (i < 1 or i > 9_007_199_254_740_991) error.InvalidParams else @intCast(i),
+    try onlyKeys(obj, &.{ "id", "req", "body", "body_offset", "body_max_bytes" });
+    var p: NetworkRequestParams = .{ .req = switch (obj.get("req") orelse return error.InvalidParams) {
+        .integer => |i| if (i < 1 or i > 9_007_199_254_740_991) return error.InvalidParams else @intCast(i),
+        else => return error.InvalidParams,
+    } };
+    p.body = try optBoolFromObj(obj, "body", false);
+    if (try optU32FromObj(obj, "body_offset")) |v| {
+        if (v > ws_wire_body_cap) return error.InvalidParams;
+        p.body_offset = v;
+    }
+    if (try optU32FromObj(obj, "body_max_bytes")) |v| {
+        if (v == 0 or v > max_network_body_read_bytes) return error.InvalidParams;
+        p.body_max_bytes = v;
+    }
+    // 본문 칸은 `body` 와 함께만(빠뜨린 `body:true` 를 조용히 무시하지 않게).
+    if (!p.body and (obj.get("body_offset") != null or obj.get("body_max_bytes") != null)) return error.InvalidParams;
+    return p;
+}
+
+/// 본문 하나의 상한(sidecar·maru 와 같다 — `body_offset` 이 넘을 수 없다).
+const ws_wire_body_cap: u32 = @import("web_sidecar/message.zig").max_net_body_bytes;
+
+pub fn serializeNetworkRequestArg(gpa: std.mem.Allocator, p: NetworkRequestParams) std.mem.Allocator.Error![]u8 {
+    if (!p.body) return std.fmt.allocPrint(gpa, "{{\"req\":{d}}}", .{p.req});
+    return std.fmt.allocPrint(gpa, "{{\"req\":{d},\"body\":true,\"body_offset\":{d},\"body_max_bytes\":{d}}}", .{ p.req, p.body_offset, p.body_max_bytes });
+}
+
+/// W9d②: `browser.networkRecord` params — `on`(필수 bool).
+pub fn parseNetworkRecordParams(params: ?std.json.Value) ParamError!bool {
+    const obj = try paramsObject(params);
+    try onlyKeys(obj, &.{ "id", "on" });
+    return switch (obj.get("on") orelse return error.InvalidParams) {
+        .bool => |b| b,
         else => error.InvalidParams,
     };
 }
@@ -2113,6 +2155,11 @@ fn writeBrowserListResult(s: *std.json.Stringify, id: cp.Id, snapshot: cs.Collec
                 try s.write(w.engine.wireName());
                 try s.objectField("controllable");
                 try s.write(w.controllable);
+                // W9d②: 응답 본문 기록 중일 때만(탭 제목의 ◉ 와 같은 신호).
+                if (w.recording) {
+                    try s.objectField("recording");
+                    try s.write(true);
+                }
                 try s.objectField("methods");
                 try s.beginArray();
                 inline for (@import("type_info_fields").fields(BrowserMethod)) |f| {
@@ -2194,6 +2241,9 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             // W9d①: 모르는·버려진 요청 번호 — handleDialog 의 모르는 번호와 같은 코드에 `data.reason`(앱이 `{"reason","message"}` 를 준다).
             .failed => if (bmethod == .network_request and result.len > 0 and result[0] == '{')
                 serializeNetworkRequestFailure(gpa, req.id, result)
+            else if (bmethod == .network_record and result.len > 0 and result[0] == '{')
+                // W9d② 적대 리뷰 3 회차 D6: 실행 단계에서 지켜보기가 없다(네트워크 grant 만 철회됐다) — 모달 전 검사와 같은 -32002·`needs_network_permission`.
+                serializeReasonError(gpa, req.id, .unauthorized, result)
             else
                 cp.serializeError(gpa, req.id, .internal_error, if (result.len > 0) result else if (bmethod == .wait) "browser wait failed" else "browser op failed", null),
         };
@@ -2246,7 +2296,7 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid dialog payload", null),
         },
         // W9d①: 앱이 준 결과 객체(링이 만든 JSON)를 그대로 싣는다 — 객체가 아니면 내부 오류.
-        .network, .network_request => serializeNetworkResult(gpa, req.id, result) catch |e| switch (e) {
+        .network, .network_request, .network_record => serializeNetworkResult(gpa, req.id, result) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid network payload", null),
         },
@@ -2301,6 +2351,11 @@ fn serializeNetworkResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8
 
 /// W9d①: 모르는·버려진 요청 번호의 오류 — `{"reason","message"}` 를 받아 -32603 에 `data.reason`.
 fn serializeNetworkRequestFailure(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8) std.mem.Allocator.Error![]u8 {
+    return serializeReasonError(gpa, id, .internal_error, payload);
+}
+
+/// 앱이 준 `{"reason","message"}` 를 `code` 의 오류에 `data.reason` 으로 싣는다(모양이 틀리면 균일 internal_error).
+fn serializeReasonError(gpa: std.mem.Allocator, id: cp.Id, code: cp.ErrorCode, payload: []const u8) std.mem.Allocator.Error![]u8 {
     const parsed = std.json.parseFromSlice(struct { reason: []const u8, message: []const u8 }, gpa, payload, .{}) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return cp.serializeError(gpa, id, .internal_error, "browser op failed", null),
@@ -2309,7 +2364,7 @@ fn serializeNetworkRequestFailure(gpa: std.mem.Allocator, id: cp.Id, payload: []
     var data: std.json.ObjectMap = .empty;
     defer data.deinit(gpa);
     try data.put(gpa, "reason", .{ .string = parsed.value.reason });
-    return cp.serializeError(gpa, id, .internal_error, parsed.value.message, .{ .object = data });
+    return cp.serializeError(gpa, id, code, parsed.value.message, .{ .object = data });
 }
 
 /// W9b③ 결과 — open `{"id":<u64>,"url":<str>,"loaded":<bool>}`, close `{"closed":<bool>,"reason"?:<str>}`. 다른 키·모양은 거절.
@@ -2826,6 +2881,23 @@ pub fn browserOpFromRequest(
     if (locatorUnsupported(dto.?, bmethod, req.params)) |w| return .{ .err = try unsupportedByEngineParamResponse(gpa, req.id, w.engine, w.controllable, "locator") };
     // W9b③: close 는 그 pane 이 연 탭만 — 여는 순간 넣은 grant 가 없으면 확인 모달로 묻지 않고 거절한다(남의 탭을 닫으려고 허락을 묻지 않는다).
     if (!authorized and bmethod == .close) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+    // W9d②: 본문 기록은 네트워크 기록 위에 선다 — 그 탭의 `browser_network` grant 가 지금 문서를 덮지 않으면 본문 모달을 띄우지 않고 먼저
+    // 네트워크 권한을 받으라고 답한다(본문을 허락해도 그 요청을 볼 수 없다). 끄기는 본문 권한이 없으면 모달 없이 거절한다(끌 것이 없다).
+    if (!authorized and bmethod == .network_record) {
+        if (pane_selector) |pane| {
+            if (!grants.authorizes(pane, target_id, .browser_network, targetHost(snapshot, target_id))) return .{ .err = try needsNetworkPermission(gpa, req.id) };
+            // 네트워크 grant 를 쥔 caller 다 — `on` 만 본다(끄기면 모달 없이 거절).
+            if (!(parseNetworkRecordParams(req.params) catch true)) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+        }
+    }
+    // W9d② 적대 리뷰 3 회차 D6: 본문 grant 로 인가됐어도 켜기는 네트워크 grant 가 지금 문서를 덮어야 한다 — 사용자가 메뉴에서 네트워크 grant 만
+    // 철회하면 본문 grant 는 남는다(전에는 이 검사가 인가되지 않은 때만이라 앱까지 가서 이유 없는 실패로 답했다). 끄기는 그대로 받는다.
+    if (authorized and bmethod == .network_record) {
+        if (pane_selector) |pane| {
+            const on = parseNetworkRecordParams(req.params) catch false; // 형식 오류는 아래 파싱이 invalid_params 로 답한다(인가된 caller)
+            if (on and !grants.authorizes(pane, target_id, .browser_network, targetHost(snapshot, target_id))) return .{ .err = try needsNetworkPermission(gpa, req.id) };
+        }
+    }
     if (!authorized) return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope);
 
     // ── 7. execute_script params 사전 검증(id 길이·args wire). 이제 authorized만 도달하므로 invalid_params가 oracle 아님. ──
@@ -2888,7 +2960,9 @@ pub fn browserOpFromRequest(
         },
         // W9d①: 네트워크 — 목록은 거르기 JSON, 자세히는 `{req}`.
         .network => try serializeNetworkArg(gpa, parseNetworkParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
-        .network_request => try std.fmt.allocPrint(gpa, "{{\"req\":{d}}}", .{parseNetworkRequestParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }}),
+        .network_request => try serializeNetworkRequestArg(gpa, parseNetworkRequestParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
+        // W9d②: 본문 기록 — `{on}`.
+        .network_record => try std.fmt.allocPrint(gpa, "{{\"on\":{}}}", .{parseNetworkRecordParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }}),
         .subscribe => unreachable, // 위에서 이미 분기
         .open => unreachable, // 위(id 파싱 앞)에서 이미 분기
     };
@@ -2938,6 +3012,14 @@ fn ungrantedResult(gpa: std.mem.Allocator, id: cp.Id, pane_selector: ?u64, targe
         if (req_scope) |sc| return .{ .needs_grant = .{ .pane = pane, .target = target, .scope = sc } };
     }
     return .{ .err = try errorResponse(gpa, id, .unauthorized) };
+}
+
+/// W9d②: 본문 기록 전에 네트워크 권한이 없다 — `-32002` 에 `data.reason:"needs_network_permission"`(확인 모달 없이).
+fn needsNetworkPermission(gpa: std.mem.Allocator, id: cp.Id) std.mem.Allocator.Error![]u8 {
+    var data: std.json.ObjectMap = .empty;
+    defer data.deinit(gpa);
+    try data.put(gpa, "reason", .{ .string = "needs_network_permission" });
+    return cp.serializeError(gpa, id, .unauthorized, "recording response bodies needs this tab's network permission first — run maru browser network on this tab", .{ .object = data });
 }
 
 /// 코드의 default message로 에러 응답 한 줄을 만든다(1a `serializeError` 재사용). 편의 wrapper(1d와 동일).
@@ -4065,7 +4147,7 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     try testing.expect(webkit.get("controllable").?.bool);
     try testing.expectEqualStrings("webkit", webkit.get("engine").?.string);
     // WebKit 은 W9 전의 것만(back·forward·reload·hover·press·open·close·dialog·handleDialog·upload 는 Chromium 전용 — WebKit 은 걷어낼 예정).
-    try testing.expectEqual(@as(usize, @import("type_info_fields").fields(BrowserMethod).len - 12), webkit.get("methods").?.array.items.len);
+    try testing.expectEqual(@as(usize, @import("type_info_fields").fields(BrowserMethod).len - 13), webkit.get("methods").?.array.items.len);
     try testing.expectEqualStrings("navigate", webkit.get("methods").?.array.items[0].string);
     const chromium = arr.items[1].object;
     try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
@@ -4073,7 +4155,7 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     const chromium_methods = chromium.get("methods").?.array.items;
     // W9b③: close 는 탭에(그 pane 이 연 탭), open 은 탭에 쓰지 않아 싣지 않는다. W9a①: navigate·getUrl·screenshot.
     // W9a③: 쿠키·localStorage·clearStorage. W9c②: 대화상자 보기·답하기. W9c①: console. W9c③: upload.
-    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "console", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog", "upload", "network", "networkRequest" };
+    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "console", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog", "upload", "network", "networkRequest", "networkRecord" };
     try testing.expectEqual(want_chromium.len, chromium_methods.len);
     for (want_chromium, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).
@@ -5673,4 +5755,168 @@ test "W9d①: network 결과는 앱이 준 객체를 그대로 싣고, networkRe
     try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.internal_error)), err.code);
     try testing.expectEqualStrings("evicted", err.data.?.object.get("reason").?.string);
     try testing.expectEqualStrings("request 7 was dropped", err.message);
+}
+
+// ── W9d②: browser.networkRecord·networkRequest 의 본문 ──
+
+test "W9d②: networkRecord 는 30 — Chromium 만, browser_network_body 를 따로 묻는다(사이트에 묶인다), 네트워크 grant 가 없으면 모달 없이 -32002 needs_network_permission, 끄기는 본문 grant 없이 모달 없이 거절" {
+    try testing.expectEqual(@as(u8, 30), @as(u8, @backingInt(BrowserMethod.network_record)));
+    try testing.expectEqual(BrowserMethod.network_record, parseBrowserMethod("networkRecord").?);
+    try testing.expectEqualStrings("networkRecord", browserMethodWireName(.network_record));
+    try testing.expect(!engineSupports(.webkit, .network_record) and engineSupports(.chromium, .network_record));
+    const on = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":12,\"on\":true}}";
+    const off = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":12,\"on\":false}}";
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
+    // 네트워크 grant 가 없다 — 모달 없이.
+    switch (try dispatchEngine(on, &grants)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(e));
+            try testing.expect(std.mem.indexOf(u8, e, "needs_network_permission") != null);
+        },
+        else => return error.ExpectedErr,
+    }
+    // 다른 사이트에 묶인 네트워크 grant 도 덮지 않는다.
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("bank.test") });
+    switch (try dispatchEngine(on, &grants)) {
+        .err => |e| testing.allocator.free(e),
+        else => return error.ExpectedErr,
+    }
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
+    try expectEngineNeedsGrant(on, &grants, .browser_network_body); // 이제 본문 모달
+    switch (try dispatchEngine(off, &grants)) { // 끄기 — 본문 grant 가 없으면 모달 없이 거절
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(e));
+        },
+        else => return error.ExpectedErr,
+    }
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network_body, .host = cpg.GrantHost.init("example") });
+    for ([_][]const u8{ on, off }, [_][]const u8{ "{\"on\":true}", "{\"on\":false}" }) |req, want| switch (try dispatchEngine(req, &grants)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqual(BrowserMethod.network_record, op.method);
+            try testing.expectEqual(capmod.ScopeClass.browser_network_body, op.pane_grant.?.scope);
+            try testing.expectEqualStrings(want, op.arg);
+        },
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedOp;
+        },
+        else => return error.ExpectedOp,
+    };
+    // 다른 사이트에 묶인 본문 grant — 다시 묻는다.
+    var other: cpg.PaneGrantStore = .{};
+    try other.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("example") });
+    try other.grant(.{ .pane = 10, .target = 12, .scope = .browser_network_body, .host = cpg.GrantHost.init("bank.test") });
+    try expectEngineNeedsGrant(on, &other, .browser_network_body);
+    // WebKit 탭 — 모달 전 -32008.
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":11,\"on\":true}}", fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+        },
+        else => return error.ExpectedErr,
+    }
+    // 인자: on 은 bool 필수, 모르는 키는 거절(인가된 caller 에게만).
+    for ([_][]const u8{ "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":12}}", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":12,\"on\":1}}", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":12,\"on\":true,\"x\":1}}" }) |bad| switch (try dispatchEngine(bad, &grants)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.invalid_params)), try errCode(e));
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.ExpectedErr;
+        },
+        else => return error.ExpectedErr,
+    };
+}
+
+test "W9d②: networkRequest 의 본문 인자 — body·body_offset(1 MiB 까지)·body_max_bytes(1..64 KiB), 본문 칸은 body 와 함께만, op.arg 에 그대로" {
+    const P = struct {
+        fn parse(json: []const u8) !NetworkRequestParams {
+            const v = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+            defer v.deinit();
+            return parseNetworkRequestParams(v.value);
+        }
+    };
+    const a = try P.parse("{\"id\":1,\"req\":3,\"body\":true,\"body_offset\":65536,\"body_max_bytes\":100}");
+    try testing.expect(a.body and a.body_offset == 65536 and a.body_max_bytes == 100);
+    const b = try P.parse("{\"id\":1,\"req\":3}");
+    try testing.expect(!b.body and b.body_max_bytes == max_network_body_read_bytes);
+    for ([_][]const u8{
+        "{\"id\":1,\"req\":3,\"body\":true,\"body_max_bytes\":0}",
+        "{\"id\":1,\"req\":3,\"body\":true,\"body_max_bytes\":65537}",
+        "{\"id\":1,\"req\":3,\"body\":true,\"body_offset\":1048577}",
+        "{\"id\":1,\"req\":3,\"body_offset\":5}",
+        "{\"id\":1,\"req\":3,\"body\":1}",
+        "{\"id\":1,\"req\":3,\"body\":true,\"body_offset\":-1}",
+    }) |bad| try testing.expectError(error.InvalidParams, P.parse(bad));
+    const arg = try serializeNetworkRequestArg(testing.allocator, a);
+    defer testing.allocator.free(arg);
+    try testing.expectEqualStrings("{\"req\":3,\"body\":true,\"body_offset\":65536,\"body_max_bytes\":100}", arg);
+    const arg2 = try serializeNetworkRequestArg(testing.allocator, b);
+    defer testing.allocator.free(arg2);
+    try testing.expectEqualStrings("{\"req\":3}", arg2); // 본문 없는 판은 W9d① 그대로
+    // networkRecord 결과는 앱이 준 객체를 그대로.
+    const ok = try serializeBrowserResponseStatus(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"browser.networkRecord\",\"params\":{\"id\":12,\"on\":true}}", .success, "{\"recording\":true,\"state\":\"starting\"}");
+    defer testing.allocator.free(ok);
+    try testing.expect(std.mem.indexOf(u8, ok, "\"recording\":true") != null);
+}
+
+test "W9d②: browser.list 는 응답 본문을 기록하는 탭에만 recording:true 를 싣는다(탭 제목의 ◉ 와 같은 신호)" {
+    const web: cs.WebMeta = .{ .url = "https://a.test/", .panel_kind = .browser, .trust = .untrusted, .engine = .chromium, .controllable = true, .recording = true };
+    var quiet = web;
+    quiet.recording = false;
+    const surfaces = [_]cs.SurfaceDto{
+        .{ .surface_id = 31, .title = "rec", .window = 1, .detail = .{ .web = web } },
+        .{ .surface_id = 32, .title = "quiet", .window = 1, .detail = .{ .web = quiet } },
+    };
+    const w = try serializeBrowserListResult(testing.allocator, .{ .number = 1 }, .{ .surfaces = &surfaces, .windows = &.{} });
+    defer testing.allocator.free(w);
+    var pm = try cp.parseMessage(testing.allocator, w);
+    defer pm.deinit();
+    const arr = pm.message.response.result.?.object.get("surfaces").?.array.items;
+    try testing.expect(arr[0].object.get("recording").?.bool);
+    try testing.expect(arr[1].object.get("recording") == null);
+}
+
+// W9d② 적대 리뷰 3 회차 D6: 사용자가 메뉴에서 네트워크 grant 만 철회하면 본문 grant 는 남는다 — 그 grant 로 인가된 켜기도 모달 전 검사처럼
+// -32002 `needs_network_permission`(전에는 인가되지 않은 때만 봐 앱까지 가서 이유 없는 실패였다), 끄기는 그대로 op. 앱이 실행 단계에서 지켜보기가
+// 없다고 답해도(그 사이 철회) 같은 코드·이유로 싣는다. 에이전트는 이유로 다음 일(`maru browser network`)을 안다.
+test "W9d② 적대 리뷰 3 회차 D6: 본문 grant 만 남은 켜기는 -32002 needs_network_permission — 끄기는 op, 앱의 실행 단계 답도 같은 코드·이유" {
+    const on = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":12,\"on\":true}}";
+    const off = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.networkRecord\",\"params\":{\"id\":12,\"on\":false}}";
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network_body, .host = cpg.GrantHost.init("example") });
+    switch (try dispatchEngine(on, &grants)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(e));
+            try testing.expect(std.mem.indexOf(u8, e, "needs_network_permission") != null);
+        },
+        else => return error.ExpectedErr,
+    }
+    switch (try dispatchEngine(off, &grants)) {
+        .op => |op| testing.allocator.free(op.arg),
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedOp;
+        },
+        else => return error.ExpectedOp,
+    }
+    // 다른 사이트에 묶인 네트워크 grant 는 덮지 않는다 — 같은 답.
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser_network, .host = cpg.GrantHost.init("bank.test") });
+    switch (try dispatchEngine(on, &grants)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expect(std.mem.indexOf(u8, e, "needs_network_permission") != null);
+        },
+        else => return error.ExpectedErr,
+    }
+    const w = try serializeBrowserResponseStatus(testing.allocator, on, .failed, "{\"reason\":\"needs_network_permission\",\"message\":\"m\"}");
+    defer testing.allocator.free(w);
+    try testing.expectEqual(@as(i64, @backingInt(cp.ErrorCode.unauthorized)), try errCode(w));
+    try testing.expect(std.mem.indexOf(u8, w, "\"reason\":\"needs_network_permission\"") != null);
 }

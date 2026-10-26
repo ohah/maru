@@ -204,7 +204,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 242), abi_version);
+    try std.testing.expectEqual(@as(u32, 243), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @backingInt(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @backingInt(Location.unavailable));
@@ -16616,4 +16616,521 @@ pub export fn maru_macos_app_session_editor_save_as_reply(session: ?*AppSession,
     const selected = if (length == 0) "" else (path orelse return)[0..length];
     if (!std.unicode.utf8ValidateSlice(selected)) return;
     @import("app_session/editor/save/as.zig").reply(caller, token, selected);
+}
+
+fn activitySearchSessionForTest(a: std.mem.Allocator, query: []const u8) !*AppSession {
+    const self = try a.create(AppSession);
+    errdefer a.destroy(self);
+    try self.init(std.testing.io, a, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @backingInt(session_mod.CommandKind.controlled_smoke),
+    });
+    errdefer self.deinit();
+    _ = try self.resize(1200, 800, 1000);
+    self.dock_initialized = true;
+    self.dock.presented = true;
+    self.dock.collapsed = false;
+    self.dock.view = .agent_activity;
+    self.agent_activity.key_focus = true;
+    self.agent_activity.search_active = true;
+    try std.testing.expectEqual(AppSession.InputFocus.agent_activity_search, self.inputFocus());
+    try self.agent_activity.search.query.appendSlice(a, query);
+    return self;
+}
+fn activitySearchInsertForTest(self: *AppSession, bytes: []const u8, range: ?chrome_ime_ops.Range) void {
+    _ = maru_macos_app_session_ime_insert_with_range(self, bytes.ptr, bytes.len, if (range) |r| r.location else std.math.maxInt(u64), if (range) |r| r.length else 0);
+}
+fn activitySearchMarkedForTest(self: *AppSession, bytes: []const u8, selected: chrome_ime_ops.Range, range: ?chrome_ime_ops.Range) void {
+    _ = maru_macos_app_session_ime_marked_with_ranges(self, bytes.ptr, bytes.len, selected.location, selected.length, if (range) |r| r.location else std.math.maxInt(u64), if (range) |r| r.length else 0);
+}
+
+test "activity search IME host ABI middle UTF16 replacement preserves suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    _ = maru_macos_app_session_ime_begin(self);
+    _ = maru_macos_app_session_ime_insert_with_range(self, "韓".ptr, "韓".len, 1, 2);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a韓z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host empty explicit range deletes only the selected text" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    activitySearchInsertForTest(self, "", .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("az", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host empty callback without a range preserves the query" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    activitySearchInsertForTest(self, "", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host NFD is stored verbatim" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    activitySearchInsertForTest(self, "한", .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a한z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host surrogate split rejects the key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    activitySearchInsertForTest(self, "x", .{ .location = 2, .length = 1 });
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host invalid UTF8 rejects the key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    activitySearchInsertForTest(self, &.{0xff}, null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host outside key callback applies its range atomically" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    activitySearchInsertForTest(self, "韓", .{ .location = 1, .length = 2 });
+    try std.testing.expectEqualStrings("a韓z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host preview preserves committed query and body answer" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.agent_activity.body.query.appendSlice(a, "a😀z");
+    self.agent_activity.body.answered = true;
+    self.imeBegin();
+    activitySearchMarkedForTest(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+    try std.testing.expectEqualStrings("a韓z", chrome_ime_ops.projection(self).?.text());
+    try std.testing.expect(self.agent_activity.body.answered);
+}
+
+test "activity search IME host candidate cancel restores retained word and suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    activitySearchMarkedForTest(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    self.imeBegin();
+    activitySearchMarkedForTest(self, "", .{ .location = 0, .length = 0 }, null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", chrome_ime_ops.projection(self).?.text());
+    try std.testing.expectEqual(@as(usize, 0), self.agent_activity.search.preedit.items.len);
+}
+
+test "activity search IME host candidate Return is consumed without submitting body" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    activitySearchInsertForTest(self, "韓", .{ .location = 1, .length = 2 });
+    const consumed = @import("app_session/activity_search_ime.zig").end(self, .{ .key = .enter });
+    self.imeEnd(null);
+    try std.testing.expect(consumed);
+    try std.testing.expect(self.agent_activity.search_active);
+    try std.testing.expectEqual(@as(u64, 0), self.agent_activity.body.awaiting);
+    try std.testing.expectEqualStrings("a韓z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host independent Return closes search and retains the query" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    try std.testing.expect(session_mod.agent_activity_ops.handleSearchKey(self, .{ .key = .enter }));
+    try std.testing.expect(!self.agent_activity.search_active);
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host Escape clears then closes without reviving a callback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    try std.testing.expect(session_mod.agent_activity_ops.handleSearchKey(self, .{ .key = .escape }));
+    activitySearchInsertForTest(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqual(@as(usize, 0), self.agent_activity.search.query.items.len);
+    try std.testing.expect(self.agent_activity.search_active);
+    try std.testing.expect(session_mod.agent_activity_ops.handleSearchKey(self, .{ .key = .escape }));
+    try std.testing.expect(!self.agent_activity.search_active);
+}
+
+test "activity search IME host release focus admits marked text once and keeps the query" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    activitySearchMarkedForTest(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    session_mod.agent_activity_ops.releaseKeyFocus(self);
+    try std.testing.expect(!self.agent_activity.key_focus);
+    try std.testing.expectEqualStrings("a韓z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host rejected focus release preserves the original owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    activitySearchInsertForTest(self, "x", null);
+    activitySearchInsertForTest(self, "bad", .{ .location = 2, .length = 1 });
+    session_mod.agent_activity_ops.releaseKeyFocus(self);
+    try std.testing.expect(self.agent_activity.key_focus);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host modal consumes old source callbacks" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    self.chrome_host.confirm.open = true;
+    activitySearchInsertForTest(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host source clear cannot be overwritten by an old callback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    self.agent_activity.clear(a);
+    activitySearchInsertForTest(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqual(@as(usize, 0), self.agent_activity.search.query.items.len);
+}
+
+test "activity search IME host epoch exhaustion closes append fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.agent_activity.ime.epoch = std.math.maxInt(u64);
+    self.imeBegin();
+    activitySearchInsertForTest(self, "lost", null);
+    self.imeEnd(.{ .key = .{ .char = 'x' } });
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host sequence exhaustion closes append fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.agent_activity.ime.sequence = std.math.maxInt(u64);
+    self.imeBegin();
+    activitySearchInsertForTest(self, "lost", null);
+    self.imeEnd(.{ .key = .{ .char = 'x' } });
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host terminal composition pin keeps callback priority" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.ime_terminal_target_id = 1;
+    try std.testing.expect(!chrome_ime_ops.insert(self, "x", null));
+    try std.testing.expect(!chrome_ime_ops.marked(self, "x", .{ .location = 1, .length = 0 }, null));
+    self.ime_terminal_target_id = null;
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host owner token does not overlap Inspector" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    const token = chrome_ime_ops.generation(self).?;
+    try std.testing.expect(token > (@as(u64, 1) << 54) and token < (@as(u64, 1) << 55));
+}
+
+test "activity search IME host bootstrap has no native owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.surface_initialized = false;
+    defer self.surface_initialized = true;
+    try std.testing.expect(chrome_ime_ops.generation(self) == null);
+    activitySearchInsertForTest(self, "lost", null);
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host empty topology has no native owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    const saved = self.tabs.items;
+    self.tabs.items = &.{};
+    defer self.tabs.items = saved;
+    try std.testing.expect(chrome_ime_ops.generation(self) == null);
+    activitySearchInsertForTest(self, "lost", null);
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host snapshot allocation failure preserves query and body answer" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.agent_activity.body.query.appendSlice(a, "a😀z");
+    self.agent_activity.body.answered = true;
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    self.allocator = failing.allocator();
+    self.imeBegin();
+    activitySearchInsertForTest(self, "韓", .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    self.allocator = a;
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+    try std.testing.expect(self.agent_activity.body.answered);
+}
+
+test "activity search IME host filter allocation failure preserves the old body answer" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.agent_activity.body.query.appendSlice(a, "a😀z");
+    self.agent_activity.body.answered = true;
+    try self.agent_activity.all_hits.append(a, std.mem.zeroes(@TypeOf(self.agent_activity.all_hits.items[0])));
+    self.imeBegin();
+    activitySearchInsertForTest(self, "韓", .{ .location = 1, .length = 2 });
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    self.allocator = failing.allocator();
+    self.imeEnd(null);
+    self.allocator = a;
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+    try std.testing.expect(self.agent_activity.body.answered);
+}
+
+test "activity search IME host query boundary replaces one byte and rejects overflow" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.agent_activity.search.query.clearRetainingCapacity();
+    var text: [256]u8 = undefined;
+    @memset(&text, 'a');
+    try self.agent_activity.search.query.appendSlice(a, &text);
+    self.imeBegin();
+    activitySearchInsertForTest(self, "x", .{ .location = 255, .length = 1 });
+    self.imeEnd(null);
+    try std.testing.expectEqual(@as(usize, 256), self.agent_activity.search.query.items.len);
+    self.imeBegin();
+    activitySearchInsertForTest(self, "z", null);
+    self.imeEnd(null);
+    try std.testing.expectEqual(@as(usize, 256), self.agent_activity.search.query.items.len);
+    try std.testing.expectEqual(@as(u8, 'x'), self.agent_activity.search.query.items[255]);
+}
+
+test "activity search IME host long preedit is preserved when commit admission fails" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    var text: [300]u8 = undefined;
+    @memset(&text, 'x');
+    self.imeBegin();
+    activitySearchMarkedForTest(self, &text, .{ .location = 300, .length = 0 }, null);
+    self.imeEnd(null);
+    try std.testing.expectEqual(@as(usize, 300), self.agent_activity.search.preedit.items.len);
+    try std.testing.expect(!self.tryCommitComposition());
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host filter change admits composition and retires old callbacks" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    activitySearchMarkedForTest(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    session_mod.agent_activity_ops.setFilter(self, .all);
+    activitySearchInsertForTest(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a韓z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host legacy Unicode backspace preserves the preceding scalar" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    try std.testing.expect(session_mod.agent_activity_ops.handleSearchKey(self, .{ .key = .backspace }));
+    try std.testing.expectEqualStrings("a😀", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host accepted query change invalidates the old body answer" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.agent_activity.body.query.appendSlice(a, "a😀z");
+    self.agent_activity.body.answered = true;
+    self.imeBegin();
+    activitySearchInsertForTest(self, "韓", .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    try std.testing.expect(!self.agent_activity.body.answered);
+    try std.testing.expectEqual(@as(usize, 0), self.agent_activity.body.query.items.len);
+}
+
+test "activity search IME host projected paint and internal anchor preserve the original suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    const ops = session_mod.agent_activity_ops;
+    const old = ops.searchCaretRect(self).?;
+    self.imeBegin();
+    activitySearchMarkedForTest(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    var buf: [ops.notice_buf_bytes]u8 = undefined;
+    const line = ops.noticeText(self, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, line, "a韓z") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "a😀z韓") == null);
+    const now = ops.searchCaretRect(self).?;
+    try std.testing.expectEqual(old.x - @as(i32, @intCast(self.cell_width_px)), now.x);
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+}
+
+test "activity search IME host painted insertion bar and OS anchor share one rectangle" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.blink_visible = true;
+    self.gpu_quads.clearRetainingCapacity();
+    session_mod.agent_activity_ops.collectSearchCaret(self);
+    try std.testing.expectEqual(@as(usize, 1), self.gpu_quads.items.len);
+    const q = self.gpu_quads.items[0];
+    const r = session_mod.agent_activity_ops.searchCaretRect(self).?;
+    try std.testing.expectEqual(@as(f32, @floatFromInt(r.x)), q.x);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(r.y)), q.y);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(r.w)), q.w);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(r.h)), q.h);
+    self.dropQuadsByLayer(session_mod.agent_activity_ops.hover_layer);
+    try std.testing.expectEqual(@as(usize, 0), self.gpu_quads.items.len);
+}
+
+test "activity search IME host hidden owner restores unadmitted preview without changing body answer" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.agent_activity.body.query.appendSlice(a, "a😀z");
+    self.agent_activity.body.answered = true;
+    self.imeBegin();
+    activitySearchMarkedForTest(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    self.chrome_host.confirm.open = true;
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", self.agent_activity.search.query.items);
+    try std.testing.expectEqual(@as(usize, 0), self.agent_activity.search.preedit.items.len);
+    try std.testing.expect(self.agent_activity.body.answered);
+}
+
+test "activity search IME host dock leave settles once and rejects the previous key callback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    activitySearchMarkedForTest(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    @import("app_session/dock.zig").setDockView(self, .agent_sessions);
+    activitySearchInsertForTest(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a韓z", self.agent_activity.search.query.items);
+    try std.testing.expect(!self.agent_activity.search_active);
+}
+
+test "activity search IME host failed query admission recovers for the next native key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try activitySearchSessionForTest(a, "a😀z");
+    defer a.destroy(self);
+    defer self.deinit();
+    self.imeBegin();
+    activitySearchInsertForTest(self, "bad", .{ .location = 2, .length = 1 });
+    self.imeEnd(null);
+    self.imeBegin();
+    activitySearchInsertForTest(self, "韓", .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a韓z", self.agent_activity.search.query.items);
 }

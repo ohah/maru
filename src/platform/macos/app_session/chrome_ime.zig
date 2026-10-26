@@ -6,6 +6,7 @@ const app = @import("../app_session.zig");
 const dock = @import("agent_dock.zig");
 pub const Range = maru.inline_text_input.Range;
 const Context = maru.inline_text_input.Context;
+const activity_ime = @import("activity_search_ime.zig");
 const inspector_ime = @import("inspector_ime.zig");
 const scm_ime = @import("scm_commit_ime.zig");
 const sidebar_ime = @import("sidebar_ime.zig");
@@ -46,6 +47,7 @@ pub const Projection = union(enum) {
 };
 
 pub fn generation(self: *app.AppSession) ?u64 {
+    if (activity_ime.generation(self)) |token| return token;
     if (inspector_ime.generation(self)) |token| return token;
     if (scm_ime.generation(self)) |token| return token;
     if (sidebar_ime.generation(self)) |token| return token;
@@ -58,6 +60,7 @@ pub fn generation(self: *app.AppSession) ?u64 {
     return fixedGeneration(self);
 }
 pub fn projection(self: *app.AppSession) ?Projection {
+    if (activity_ime.projection(self)) |context| return .{ .dynamic = context };
     if (inspector_ime.projection(self)) |context| return .{ .inspector = context };
     if (scm_ime.projection(self)) |context| return .{ .dynamic = context };
     if (sidebar_ime.projection(self)) |context| return .{ .dynamic = context };
@@ -75,7 +78,7 @@ fn fixedGeneration(self: *app.AppSession) ?u64 {
     if (self.ime_terminal_target_id != null or self.inputFocus() != .agent_session_search) return null;
     if (self.ime_search_owner) |owner| if (owner != self.agent_session_search_generation) return null;
     const token = self.agent_session_search_generation;
-    return if (token < (@as(u64, 1) << 55)) token else null;
+    return if (token < (@as(u64, 1) << 54)) token else null;
 }
 
 fn fixedProjection(self: *app.AppSession) ?*Context {
@@ -129,10 +132,11 @@ fn publish(self: *app.AppSession, context: *Context) void {
 pub fn insert(self: *app.AppSession, bytes: []const u8, replacement: ?Range) bool {
     // Test the pinned source before considering the current destination. An old
     // palette/search callback must never become a fresh address-field write.
-    if (inspector_ime.stale(self) or scm_ime.stale(self) or sidebar_ime.stale(self) or project_ime.stale(self) or find_ime.stale(self) or settings_ime.stale(self) or field_ime.stale(self) or
+    if (activity_ime.stale(self) or inspector_ime.stale(self) or scm_ime.stale(self) or sidebar_ime.stale(self) or project_ime.stale(self) or find_ime.stale(self) or settings_ime.stale(self) or field_ime.stale(self) or
         self.palette_ime_owner != null and palette_ime.generation(self) == null or
         self.ime_search_owner != null and fixedGeneration(self) == null) return true;
 
+    if (activity_ime.insert(self, bytes, replacement)) return true;
     if (inspector_ime.insert(self, bytes, replacement)) return true;
     if (scm_ime.insert(self, bytes, replacement)) return true;
     if (sidebar_ime.insert(self, bytes, replacement)) return true;
@@ -157,10 +161,11 @@ pub fn insert(self: *app.AppSession, bytes: []const u8, replacement: ?Range) boo
 pub fn marked(self: *app.AppSession, bytes: []const u8, selected: Range, replacement: ?Range) bool {
     // Test the pinned source before considering the current destination. An old
     // palette/search callback must never become a fresh address-field write.
-    if (inspector_ime.stale(self) or scm_ime.stale(self) or sidebar_ime.stale(self) or project_ime.stale(self) or find_ime.stale(self) or settings_ime.stale(self) or field_ime.stale(self) or
+    if (activity_ime.stale(self) or inspector_ime.stale(self) or scm_ime.stale(self) or sidebar_ime.stale(self) or project_ime.stale(self) or find_ime.stale(self) or settings_ime.stale(self) or field_ime.stale(self) or
         self.palette_ime_owner != null and palette_ime.generation(self) == null or
         self.ime_search_owner != null and fixedGeneration(self) == null) return true;
 
+    if (activity_ime.marked(self, bytes, selected, replacement)) return true;
     if (inspector_ime.marked(self, bytes, selected, replacement)) return true;
     if (scm_ime.marked(self, bytes, selected, replacement)) return true;
     if (sidebar_ime.marked(self, bytes, selected, replacement)) return true;
@@ -183,6 +188,7 @@ pub fn marked(self: *app.AppSession, bytes: []const u8, selected: Range, replace
 }
 
 pub fn begin(self: *app.AppSession) void {
+    activity_ime.begin(self);
     inspector_ime.begin(self);
     scm_ime.begin(self);
     sidebar_ime.begin(self);
@@ -197,6 +203,7 @@ pub fn begin(self: *app.AppSession) void {
 }
 
 pub fn end(self: *app.AppSession, event: ?maru.terminal.KeyEvent) bool {
+    if (activity_ime.end(self, event)) return true;
     if (inspector_ime.end(self, event)) return true;
     if (scm_ime.end(self, event)) return true;
     if (sidebar_ime.end(self, event)) return true;

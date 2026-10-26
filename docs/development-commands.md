@@ -2162,3 +2162,8 @@ SDK 없는 Python 증거 검사는 `test-editor-real-lsp-oracles`(현재 91개 �
 실제 검증은 `python3 tools/inspector-ime/run.py --scene attached --mode diagnostic --output <새 외부 경로>`로
 시작한다. 같은 고정 앱에 `--app <실행 파일>`을 주고 `--scene detached`를 별도로 실행한다.
 `--mode live`만 독립 후보창 PNG/OCR을 검사하며 진단 결과를 픽셀 성공으로 해석하지 않는다.
+
+활동 뷰 검색 IME 집중 검증: `mise exec -- zig build test-activity-search-ime -j2`.
+호스트 범위·세대·본문 검색 경계, 중립 모델(Debug/ReleaseFast), 독립 기록 검사 손상 대조군을 실행한다.
+실제 후보창 검증은 `python3 tools/activity-search-ime/run.py --output /private/tmp/<new-run>`이며,
+`--mode diagnostic`은 입력·본문 읽기·복귀 진단만 하고 PNG/OCR 통과로 간주하지 않는다.

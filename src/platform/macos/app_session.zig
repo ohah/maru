@@ -358,7 +358,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // ABI 239: project-search fields own native range contexts and key snapshots.
 // ABI 240: sidebar search owns native projection and per-key rollback.
 // ABI 242: fixed Inspector IME transaction and input ownership.
-pub const abi_version: u32 = 242;
+// ABI 243: native activity-search projection and input ownership.
+pub const abi_version: u32 = 243;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -16744,13 +16745,7 @@ pub const AppSession = struct {
             .settings => return @import("app_session/settings_ime.zig").commitAll(self),
             .rename => return @import("app_session/field_ime.zig").commitAll(self, .rename),
             .sidebar_search => return @import("app_session/sidebar_ime.zig").commitAll(self),
-            .agent_activity_search => if (self.agent_activity.search.commitPreedit(self.allocator)) {
-                // 확정 글자로 검색어가 바뀌었다 — 본문 답은 남의 답이 된다(계약 §2.1.1).
-                // **한글은 이 길로만 들어온다.** `.char` 갈래에만 놓으면 한글로 친 검색은 옛
-                // 본문 결과를 계속 달고 다닌다.
-                agent_activity_ops.cancelBodySearch(self);
-                agent_activity_ops.rebuildFilter(self);
-            },
+            .agent_activity_search => return @import("app_session/activity_search_ime.zig").commitAll(self),
             .agent_session_search => return @import("app_session/chrome_ime.zig").commitAll(self),
             .addr_edit => return @import("app_session/field_ime.zig").commitAll(self, .address),
             .project_search => return project_search_ops.commitPreedit(self),
@@ -22726,6 +22721,7 @@ pub const AppSession = struct {
                                     .colors = tabbar_colors,
                                 } });
                             } else |_| {}
+                            agent_activity_ops.collectSearchCaret(self);
                             // 썸네일 아래 한 줄(§2.2). 그림만으로는 비슷한 스크린샷 열둘에서 못 고른다.
                             // 종류 필터 칩 — 격자든 목록이든 늘 보인다(활동 뷰 계약 §2.1).
                             agent_activity_ops.collectFilterChips(self, &collected, pane_frame_builder, tabbar_colors);

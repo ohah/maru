@@ -16,6 +16,7 @@ pub const props = @import("chrome/props.zig");
 pub const solid_rects = @import("chrome/solid_rects.zig"); // 테두리 계산 없는 단색 백엔드(Windows D3D11)용 fill·quad 평탄화
 pub const input = @import("chrome/input.zig");
 pub const ui = struct {
+    pub const spacing = @import("chrome/ui/spacing.zig");
     /// 논리 줄 하나를 시각 행으로 나누는 랩 계산(CJK 정확). 편집기와 커밋 메시지 상자가 함께 쓴다.
     pub const visual_map = @import("chrome/ui/visual_map.zig");
     pub const layout = @import("chrome/ui/layout.zig");
@@ -50,6 +51,7 @@ pub const components = struct {
     pub const project_search = @import("chrome/components/project_search.zig");
     pub const outline = @import("chrome/components/outline.zig");
     pub const overlay_input = @import("chrome/components/overlay_input.zig");
+    pub const activity_search_ime = @import("chrome/components/activity_search_ime.zig");
     pub const overlay_input_ime = @import("chrome/components/overlay_input_ime.zig"); // find·palette 공유 기반(컴포넌트 아님)
     pub const text_field_ime = @import("chrome/components/text_field_ime.zig");
     pub const text_field = @import("chrome/components/text_field.zig");

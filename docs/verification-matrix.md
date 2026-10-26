@@ -5300,3 +5300,11 @@ bitmask 전환·활성 세션 불변·터미널 복귀·입력 소스 복원도 
 독립 창 식별·원시 기록·PNG 해시·한자 OCR을 모두 통과했고, 실제 후보 PNG도 직접 확인했다.
 증거와 하네스의 최초 종료 단계 실패는 [계획](plans/inspector-search-ime.md)에 구분한다.
 호스트/모델 성공을 UI·PNG/OCR 완료로 표시하지 않는다.
+
+## 활동 뷰 검색 IME 문맥
+
+`test-activity-search-ime`는 범위 교체·rollback·한도·OOM·owner 전환과 확정 query에만
+필터를 게시하는 경계를 검사한다. 실제 두벌식 후보 취소·확정과 별도 Return 본문 읽기,
+실제 터미널 클릭·입력 복귀는 `tools/activity-search-ime`의 별도 GUI 증거로 구분한다.
+PNG/OCR은 고정된 앱의 화면 기록 권한과 독립 후보창 기록을 요구한다.
+구체적 결과는 [활동 검색 IME 계획](plans/activity-search-ime.md)에 기록한다.

@@ -969,3 +969,26 @@ DirectWrite shapeWithOptions에 liga/clig/calt 제어를 추가했다. 기존 sh
 후속 순서는 줄/스타일 run 구성과 UTF-16 클러스터의 고정 셀 매핑, 커서·스타일 경계에서의
 합자 분리, renderer frame 연결과 live font.ligatures, 실제 앱 on/off 픽셀 대조다.
 부분 버퍼·fallback·allocation 실패와 다중 스타일/그리드 보존도 같은 경로에서 검증한다.
+
+
+### Windows native glyph source metadata — intermediate step
+
+DirectWrite can optionally return a parallel source record for each glyph. Records
+retain the UTF-16 text span, cluster head, native baseline/GPOS offsets and bidi
+level. The allocation-free inversion handles multi-unit/multi-glyph clusters and
+reversed/reordered maps; malformed maps fail explicitly and short borrowed buffers
+return overflow without writing their canaries. The existing common shape request
+and the default rendering path retain their behavior.
+
+Six compiled fault injections were rejected: lost text origin, truncated spans,
+orphan cluster glyphs, lost fallback-run origin, lost global glyph head and skipped
+source-buffer bounds. Restored Debug/ReleaseFast controls each passed 22 tests.
+The normal build, focused gates, cross-target compilation and all 272 boundaries
+passed with unchanged implementation hashes. A copied native app with the pinned
+ConPTY pair passed five live font-style edits with GPU row comparisons and exit 0.
+Those synthetic-window checks are regression evidence, not physical-input proof.
+Evidence: `.zig-cache/windows-glyph-source-binding.json`.
+
+Terminal fixed-cell run construction, cursor/style boundary splitting, renderer
+integration and live `font.ligatures` on/off pixel checks remain pending. Source
+metadata completion alone does not prove terminal ligature rendering.

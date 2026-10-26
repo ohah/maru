@@ -13094,3 +13094,26 @@ on/off. Evidence is `.zig-cache/windows-typography-binding.json`.
 Terminal run construction,
 cluster-to-cell mapping, cursor/style boundaries and the live ligatures toggle
 remain to be connected and verified in the actual app.
+
+
+### Windows native glyph source metadata — intermediate step
+
+DirectWrite can optionally return a parallel source record for each glyph. Records
+retain the UTF-16 text span, cluster head, native baseline/GPOS offsets and bidi
+level. The allocation-free inversion handles multi-unit/multi-glyph clusters and
+reversed/reordered maps; malformed maps fail explicitly and short borrowed buffers
+return overflow without writing their canaries. The existing common shape request
+and the default rendering path retain their behavior.
+
+Six compiled fault injections were rejected: lost text origin, truncated spans,
+orphan cluster glyphs, lost fallback-run origin, lost global glyph head and skipped
+source-buffer bounds. Restored Debug/ReleaseFast controls each passed 22 tests.
+The normal build, focused gates, cross-target compilation and all 272 boundaries
+passed with unchanged implementation hashes. A copied native app with the pinned
+ConPTY pair passed five live font-style edits with GPU row comparisons and exit 0.
+Those synthetic-window checks are regression evidence, not physical-input proof.
+Evidence: `.zig-cache/windows-glyph-source-binding.json`.
+
+Terminal fixed-cell run construction, cursor/style boundary splitting, renderer
+integration and live `font.ligatures` on/off pixel checks remain pending. Source
+metadata completion alone does not prove terminal ligature rendering.

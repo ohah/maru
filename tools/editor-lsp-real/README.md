@@ -100,7 +100,7 @@ Kotlin·Dart·Scala의 실제 응답은 version을 생략했다. 이 경우 wire
 버퍼 단어 대체, 다른 선택 항목, 문서 밖 편집, 제품 적용 본문 불일치,
 Undo 본문 불일치, Undo 이력 두 개 증가.
 기존 단일 모드의 정상 대조군과 UTF 경계·ID 충돌·비정상 종료·오래된 바이너리·소유권 실패에
-다중 파일 검사도 더한다. 현재 전체 Python 판정은 66개 시험 함수다(파손 입력 subtest 포함).
+다중 파일 검사도 더한다. 현재 전체 Python 판정은 79개 시험 함수다(파손 입력 subtest 포함).
 
 첫 실물 실행에서 Rust가 initialize 직후 정의 요청에 null을 반환했다.
 실패를 숨기지 않고 baseline 진단 준비 대기와 제한된 읽기 재시도로 바꿨다.
@@ -135,3 +135,9 @@ Rust는 `diagnostic_transport=pull`이어야 runner가 성공한다. 실제 요�
 `--scenario multi-file`은 Rust·Go에서 다른 파일 정의/복귀, 주 파일을 바꾸거나 저장하지
 않는 연관 진단 갱신, 실제 autoimport 추가 편집과 한 번의 Undo를 검사한다.
 기본 단일 모드와 별도 opt-in judge를 사용한다. [실행·원문/버전 대응·한계](multi-file.md)를 따른다.
+
+## 다중 파일 이름 바꾸기
+
+`--scenario rename`은 Rust·Go에서 열린 두 문서와 닫힌 참조 파일의 실제 이름 변경·자동 저장·
+Undo Rename, 늦은 결과와 닫힌 파일 읽기 실패의 적용 전 거절을 검사한다.
+[실행·시점 제어·독립 판정·한계](rename.md)를 따른다.

@@ -63,6 +63,8 @@ C allocator 실패 전수 주입과 GUI/HID 검증은 없다.
 
 [native 내부 샘플링](plans/editor-native-sampling.md)은 수집기·주소 기반 판정기와 순수 단위 30개를 구현했다. 측정 커밋 `54aacc5b7`의 기준 40프로세스와 별도 프로파일 30개를 채택하고 원본 trace SDK 재내보내기·독립 주소/통계 reader 대조를 통과했다. 다섯 가설의 실제 손상 23건 거절·정상/등가 대조 12개를 통과했다. `aa4d1fbb8` 기준 전체 경계·문서/config 702개 단계도 통과했다. 추가 통합 검사·원격 CI 결과는 PR #4607 본문에 분리해 기록한다. [실측 결과](../tools/editor-native-sampling/results.md)는 큰 Zig 문서의 subtree 요약·압축과 변경 범위 계산 비중을 기록한다. 제품 성능 개선·노드 재사용 개수·GUI 지연을 확정하지 않는다.
 
+[일반 편집 파싱 예산 비교](plans/editor-edit-parse-budget.md)는 제품 변경 없이 Provider 성능 600입력·별도 정확성 200입력과 기존 구문 상태의 pending·공유 자원·접힘/괄호를 대조한다. 모든 C 노드의 byte·행·열과 색 질의를 새 파싱과 비교한다. 콜백 간격/스레드 CPU 진단으로 4ms가 모든 호출의 엄격한 상한은 아님을 재현했다. 실제 후보의 AppSession·Undo/IME·GUI 지연 개선은 미검증이며 제품 정책은 유지한다. [실측 분포](../tools/editor-parse-budget/results.md)를 함께 본다.
+
 [접힘 조회 비용 귀속](plans/editor-fold-query-attribution.md)은 제품과 분리된 사본의 성공 경로를 측정한다. 제품 대조와 세부 시간 합 검사를 함께 수행하며 GUI 지연 개선의 증거는 아니다.
 
 [접힘 후보의 근처 행 조회](plans/editor-fold-points.md)는 현재 줄 인덱스에서 경계·역방향·큰 도약과

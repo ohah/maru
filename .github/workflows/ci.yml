@@ -177,6 +177,8 @@ jobs:
         run: python3 -m unittest discover -s tools/editor-native-parse-measure -p 'test_*.py'
       - name: Native sampling evidence contracts
         run: python3 -m unittest discover -s tools/editor-native-sampling -p 'test_*.py'
+      - name: Parser budget evidence contracts
+        run: python3 -m unittest discover -s tools/editor-parse-budget -p 'test_*.py'
       # 중간 커밋도 경계 게이트를 통과하는가. `mise run check` 는 **팁만** 보므로, 리베이스 수렴을 팁에
       # 몰아 넣으면 앞 커밋들이 빨간 채로 머지된다 — 이 저장소가 그 사고를 두 번 냈다(9 커밋이 빌드 불가,
       # 2 커밋이 게이트 실패). 규율은 `docs/project-rules.md` `## 리베이스와 머지` 이고 이것이 그 기계 절반이다.

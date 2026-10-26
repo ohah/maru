@@ -2119,6 +2119,11 @@ pub fn build(b: *std.Build) void {
     const run_backup_store_tests = b.addRunArtifact(backup_store_tests);
     run_backup_store_tests.addArg("--maru-expect-tests=35"); // 2 aggregation blocks + 31 native tests + 2 pure policy tests
     backup_store_step.dependOn(&run_backup_store_tests.step);
+    const font_variant_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows font variants"} });
+    const run_font_variant_tests = b.addRunArtifact(font_variant_tests);
+    run_font_variant_tests.addArg("--maru-expect-tests=8");
+    b.step("test-windows-font-variants", "Verify native styled faces, atlas identity and owner rollback").dependOn(&run_font_variant_tests.step);
+
     const layout_retry_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows layout retry"} });
     const run_layout_retry_tests = b.addRunArtifact(layout_retry_tests);
     run_layout_retry_tests.addArg("--maru-expect-tests=13");

@@ -46,6 +46,7 @@ pub fn faceIndexFromFontId(font_id: renderer.glyph_layout.FontId) ?usize {
 /// 문자열)은 하지 않는다(계약 §2e "한계"). 터미널은 대부분 셀 단위라 이 경로로 대부분이 덮인다.
 pub const Shaper = struct {
     raster: *dwrite_font.Rasterizer,
+    variants: [3]?*dwrite_font.Rasterizer = @splat(null),
 
     pub fn shape(self: Shaper, cell: renderer.draw_list.DrawCell) renderer.glyph_layout.ShapeResult {
         // **안 쓴 칸(codepoint 0)은 공백으로 본다.** 안 그러면 화면의 빈 칸이 전부 "지원 못 하는 글자"로
@@ -58,9 +59,12 @@ pub const Shaper = struct {
             return .{ .font_id = synthesized_font_id, .glyph_id = 0 };
         }
 
-        if (self.raster.glyphFor(cp)) |choice| {
+        const requested: usize = @as(usize, @intFromBool(cell.style.bold)) + 2 * @as(usize, @intFromBool(cell.style.italic));
+        const style: usize = if (requested != 0 and self.variants[requested - 1] != null) requested else 0;
+        const raster = if (style == 0) self.raster else self.variants[style - 1].?;
+        if (raster.glyphFor(cp)) |choice| {
             return .{
-                .font_id = fontIdForFace(choice.face_index),
+                .font_id = fontIdForFace(choice.face_index + style * dwrite_font.max_faces),
                 .glyph_id = choice.glyph_id,
                 // face 0이 주 폰트다 — 그 밖은 폴백으로 셌다는 사실을 렌더러가 통계로 본다.
                 .fallback = choice.face_index > 0,
@@ -84,6 +88,7 @@ pub const Shaper = struct {
 /// ClearType 텍스처는 임시 버퍼가 필요하다. 프레임마다 할당하면 렌더 경로에 할당이 끼므로 한 번 잡아 둔다.
 pub const NeutralRasterizer = struct {
     raster: *dwrite_font.Rasterizer,
+    variants: [3]?*dwrite_font.Rasterizer = @splat(null),
     scratch: []u8,
     /// 터미널 폰트 크기(논리 pt). `raster_font_size_milli` 가 0 인 글리프가 이 값을 쓴다.
     font_size_pt: f32 = 0,
@@ -110,6 +115,15 @@ pub const NeutralRasterizer = struct {
     ///
     /// **이제 못 찾으면 `RasterizerFailed` 다.** 잉크가 없는 글자와 폰트를 못 찾은 것은 다른
     /// 사실이고, 뒤엣것을 앞엣것으로 접으면 빈 화면이 정상으로 보고된다.
+    fn rasterFor(self: NeutralRasterizer, font_id: renderer.glyph_layout.FontId) ?*dwrite_font.Rasterizer {
+        if (self.registry != null) return self.raster;
+        const encoded = faceIndexFromFontId(font_id) orelse return null;
+        const style = encoded / dwrite_font.max_faces;
+        if (style == 0) return self.raster;
+        if (style > self.variants.len) return null;
+        return self.variants[style - 1];
+    }
+
     fn faceFor(self: NeutralRasterizer, font_id: renderer.glyph_layout.FontId) ?usize {
         // **두 체계의 값 범위가 겹친다.** 터미널 인코딩은 `face_font_id_base`(= 2)부터 시작하고
         // 레지스트리 id 는 1 부터 하나씩 늘어난다 — 그래서 measured 크롬의 **두 번째 face 부터**
@@ -126,7 +140,9 @@ pub const NeutralRasterizer = struct {
             return self.raster.faceIndexForName(identity.postscript_name);
         }
         if (faceIndexFromFontId(font_id)) |i| {
-            if (i < self.raster.face_count) return i;
+            const raster = self.rasterFor(font_id) orelse return null;
+            const index = i % dwrite_font.max_faces;
+            if (index < raster.face_count) return index;
             return null;
         }
         return null;
@@ -169,7 +185,8 @@ pub const NeutralRasterizer = struct {
         else
             self.raster.em_size_px; // 크기를 안 준 호출자(기존 스모크) — 예전 동작 그대로
 
-        const n = self.raster.rasterizeGlyphAtSize(
+        const raster = self.rasterFor(request.run.font_id) orelse return error.RasterizerFailed;
+        const n = raster.rasterizeGlyphAtSize(
             .{ .face_index = face_index, .glyph_id = glyph_id },
             em_px,
             w,

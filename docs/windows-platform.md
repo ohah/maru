@@ -13004,3 +13004,56 @@ and six malformed clear acknowledgements were rejected by the observation oracle
 The normal code and binary were restored; only PE timestamp/build-id may differ.
 The current evidence is `.zig-cache/windows-layout-notice-binding.json`.
 This does not complete all Windows settings support or replace the installed app.
+
+
+### Windows native bold/italic faces (implemented; native terminal verified)
+
+The Windows text owner now stages regular, bold, italic and bold-italic face
+banks together, and passes those same banks to the cell shaper and rasterizer.
+The terminal font ID encodes both bank and fallback index, so identical glyph
+numbers from different native faces cannot share an atlas identity. Measured
+chrome resolves its registry IDs through the regular bank and keeps its existing
+PostScript identity path. The regular face still owns grid/chrome metrics.
+
+Host config policy follows FontConfig: family-bold overrides bold and combined
+bold-italic, family-italic overrides italic alone. Missing overrides return to
+the actual primary family. Startup and live font replacement use the same staged
+owner; preparation failure retires only the candidate banks. Ligature shaping is
+still separate work. No new runtime dependency or system font installation is
+introduced.
+
+DirectWrite selection uses the requested native weight/style through
+[GetFirstMatchingFont](https://learn.microsoft.com/en-us/windows/win32/api/dwrite/nf-dwrite-idwritefontfamily-getfirstmatchingfont).
+Faces reporting nonzero
+[GetSimulations](https://learn.microsoft.com/en-us/windows/win32/api/dwrite/nf-dwrite-idwritefontface-getsimulations)
+are rejected in favor of an unsimulated fallback. The existing trusted asset
+search roots apply to every bundled style file. The shared bundled catalog lists
+the 18 existing TTF assets, explicitly omitting Fira Code italic variants, and
+Windows registers all listed files instead of Regular alone. Distribution must
+retain those existing style files along with their existing licenses.
+
+`test-windows-font-variants` selects two aggregation blocks and six native
+checks: distinct real glyph pixels/IDs, override precedence and stable grid,
+invalid overrides and CJK fallback, allocation rollback, measured-ID isolation,
+and default bundled families. JetBrains Mono and Jetendard were absent from the
+system collection in the observed run, while all four bundled styles rendered
+distinct pixels. Six compiled mutants, including restoring Regular-only bundle
+registration, were rejected; restored Debug/ReleaseFast each passed 15 variant
+and text-owner tests. The current normal build, focused matrix, cross-target
+compilation and all 272 boundary gates also passed.
+
+The actual app displayed four distinct SGR rows. Five live edits changed only the
+expected rows: bold and combined, italic alone, bold restoration, italic
+restoration, and an invalid bold-family fallback. The regular row and cell metrics
+remained unchanged. There were five font applications, zero font/resize/input/grid
+errors, and native exit0. `tools/windows/check-font-variants.py` replays this owned
+fixture check, verifies executable/ConPTY hashes and provider selection, and saves
+GPU row hashes and captures. It uses synthetic HWND settings input.
+
+The fixture must include the already-shipped conpty.dll and x64/OpenConsole.exe;
+copying only maru.exe selected the system provider and produced two unique rows
+(italic matched regular). The same executable with the pinned pair selected
+bundled and produced four. A pre-change executable with that same pair was also
+correctly rejected. This records provider behavior rather than claiming raw PTY
+byte capture. Evidence: `.zig-cache/windows-font-variant-binding.json`.
+Ligatures, further settings runtime wiring and final installation remain separate.

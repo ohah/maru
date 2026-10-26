@@ -808,7 +808,7 @@ Windows 설정 연결 검증: `test-windows-settings`는 값 검증과 사이드
 | 영역 | 현재 연결 | 남은 적용 경로 |
 | --- | --- | --- |
 | 붙여넣기 보호·bracketed-safe·option-as-meta·우클릭·단어 구분·OSC52 read | `settings_host.changed`에서 입력 정책과 clipboard host 갱신 | 최종 실제 앱 회귀; OSC52 read 요청의 미구현 처리와 구분 |
-| 폰트·셀 격자 | family/fallback/size·행간·자간의 font/atlas/chrome/editor 준비 후 게시와 기존 resizeWithCell 연결 | resize 오류 재시도, family-bold/family-italic·ligatures, 외부 reload/전체 설정 연계 |
+| 폰트·셀 격자 | family/fallback/size·행간·자간·family-bold/italic의 font/atlas/chrome/editor 준비 후 게시, resize 자동 재시도와 복구 메시지 소유권 | ligatures, 외부 reload/전체 설정 연계 |
 | 테마·커서·ANSI 팔레트 | 시작 시 appearance, chrome tokens, cell colors와 clear color 생성 | core queue와 chrome/editor paint 캐시를 함께 갱신 |
 | scrollback·문자 폭 | 새 세션의 초기 core config에 포함 | 기존 세션의 reader 소유 queue에 전달하고 다음 spawn의 오래된 snapshot 제거 |
 | 셸 선택·명령·인자 | 설정 변경/롤백 통지에서 다음 spawn의 명령·인자·shell 미러 갱신 | 인자 합성 행·항목별 리셋은 후속; 기존 셸은 유지 |
@@ -883,7 +883,7 @@ PTY를 갱신하므로 PTY 실패까지 포함하는 다중 세션 원자적 rol
 작은 caption 높이를 고정 y=38로 재어 caret을 자르던 판정기도 수정했다. 실제 34px caption 캡처는
 13px 오측정 대신 코어와 같은 17px를 재며, 기존 실제 캡처 14건의 측정값도 보존한다.
 
-남은 범위는 family-bold/family-italic/ligatures,
+남은 범위는 ligatures,
 외부 config reload와 나머지 설정 연결이다. 전체 Windows 지원과 최종 설치본 반영은 아직 완료가 아니다.
 
 
@@ -935,3 +935,20 @@ reader flush에서 정확한 최신 CSI 48 바이트·성공 전 미전달·중�
 메시지를 한 번 지웠고, 설정 화면의 안내 복원·이후 글꼴 변경 7건·정상 종료를 확인했다.
 이전 미제거 native 로그와 잘못된 제거 기록 6종은 판정자가 거부했다. 소스와 일반 PE를
 복원했으며 근거는 `.zig-cache/windows-layout-notice-binding.json`에 묶었다.
+
+
+### Windows bold/italic face와 번들 스타일 등록 (구현·실앱 검증)
+
+SGR bold/italic 조합별 face bank와 아틀라스 ID를 연결하고, 시작과 라이브 설정 변경에서
+같은 준비/게시 소유권을 사용한다. 설정의 family-bold/italic 우선순위와 미존재 override의
+실제 primary 복귀, Regular 기준 격자를 보존한다. measured chrome의 registry ID는 별도
+해석을 유지한다. 번들 컬렉션이 Regular만 등록하던 누락도 고쳐 기존 TTF 18개를 등록한다.
+네이티브 6개 검사와 집계 2개, 서로 다른 compiled 변이 6종, 복원 Debug/ReleaseFast 각
+15개를 통과했다. 최신 일반 빌드·관련 기능·교차 컴파일·전체 경계 272개도 통과했다.
+실제 앱의 SGR 네 행과 스타일 패밀리 변경·원복·없는 패밀리 폴백 5개를 GPU 픽셀로
+확인했다. Regular 행과 셀 치수는 보존했고 적용 5건·오류/입력 유출/격자 불일치 0·exit0이었다.
+기존 배포 ConPTY 쌍을 포함한 상태에서 통과했고, 같은 쌍을 둔 이전 실행 파일은 검증이
+거부했다. DLL 쌍을 빠뜨린 첫 fixture는 system provider에서 italic 행이 regular와 같았던
+진단으로 보존한다. `tools/windows/check-font-variants.py`는 이 fixture의 소유자·실행 파일과
+DLL 해시·bundled provider·행 픽셀을 검사한다. 합자·다른 설정 런타임·최종 설치 완료의
+증거로 확대하지 않는다. 근거: `.zig-cache/windows-font-variant-binding.json`.

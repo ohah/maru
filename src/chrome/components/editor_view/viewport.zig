@@ -48,6 +48,27 @@ pub const Viewport = struct {
     }
 };
 
+/// 화면에 들어갈 수 있는 논리 줄 색의 보수적 상한이다. 랩·위젯은 한 논리 줄을 여러 행으로
+/// 늘릴 수 있으므로 행 예산보다 많은 논리 줄은 필요하지 않다. 경계 한 줄을 여유로 보되
+/// 호출자가 실제로 그릴 행 저장소를 넘지 않는다. 모델 편집·검색·LSP 미리 읽기의 상한은 아니다.
+pub fn logicalLineBudget(visible_rows: u16, row_capacity: usize) usize {
+    if (visible_rows == 0) return 0;
+    return @min(@as(usize, visible_rows) + 1, row_capacity);
+}
+
+test "visible color window budget은 빈 화면과 저장소 및 큰 행 수를 구분한다" {
+    const cases = [_]struct { rows: u16, capacity: usize, expected: usize }{
+        .{ .rows = 0, .capacity = 512, .expected = 0 },
+        .{ .rows = 8, .capacity = 512, .expected = 9 },
+        .{ .rows = 37, .capacity = 512, .expected = 38 },
+        .{ .rows = 624, .capacity = 512, .expected = 512 },
+        .{ .rows = 37, .capacity = 0, .expected = 0 },
+        .{ .rows = 624, .capacity = 128, .expected = 128 },
+        .{ .rows = 65535, .capacity = 65536, .expected = 65536 },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.expected, logicalLineBudget(case.rows, case.capacity));
+}
+
 /// 스크롤이 갈 수 있는 최대 위치.
 ///
 /// **마지막 줄이 맨 위에 올 때까지 스크롤된다** — 문서 끝에서 화면이 한 줄만 남는 것이 아니라,

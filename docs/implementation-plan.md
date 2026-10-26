@@ -87,6 +87,7 @@ macOS 로컬 shell 1개 surface
 - [본문 색 조회와 실제 표시 범위](plans/editor-visible-color-range.md) — 최대 256논리줄 조회와 실제 표시 범위를 먼저 재현·측정하고 색/레이아웃 보존 여부로 제품 변경을 판단한다.
 - [실제 렌더 범위에 맞춘 본문 색 조회](plans/editor-visible-color-window.md)
 - [native 파싱·변경 범위 비용 귀속](plans/editor-native-parse-attribution.md) — 최신 제품의 native 호출·입력 콜백·예산·변경 범위를 대조하고 다음 개선 대상을 고른다.
+- [native 내부 비용 샘플링](plans/editor-native-sampling.md) — 실행 전 연결·대상 identity·편집 문맥·누락 스택을 검증한 뒤 최신 소스의 내부 비용을 반복 관측한다.
 - [캐시 경로의 원격 커밋 검증](plans/editor-scm-cache-path-test.md) — 정상 캐시 저장소를 허용하면서 실제 로컬 메시지 경로 유출을 거절한다.
 - [pane 프레임 준비 비용 귀속](plans/editor-pane-frame-attribution.md) — 편집과 프레임을 분리해 기하·표식·장식·고정 머리줄의 중첩 비용을 관측한다.
 - [구문 Provider 편집 비용 귀속](plans/editor-provider-edit-attribution.md) — 파싱·변경 범위·트리 이동과 실제 뷰별 호출 수를 분리해 다음 개선의 근거를 만든다.

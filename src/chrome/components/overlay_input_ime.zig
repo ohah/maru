@@ -5,6 +5,7 @@ const input = @import("../../inline_text_input.zig");
 const Owned = @import("../../inline_text_input_owned.zig").OwnedContext;
 const Field = @import("overlay_input.zig").OverlayInput;
 pub const Range = input.Range;
+pub const Display = struct { text: []u8, caret: usize };
 pub const Key = enum { enter, backspace, replay, other };
 pub const Decision = struct { consumed: bool = false, changed: bool = false, replay: bool = false };
 
@@ -111,6 +112,26 @@ pub const Projection = struct {
         }
         self.preview(field);
         return true;
+    }
+    /// Paint the native composed text once; canonical query remains the filter key.
+    /// Borrowing TextField here reuses grapheme snapping and its tail-window rules.
+    pub fn display(self: *const Projection, allocator: std.mem.Allocator, field: *const Field, glyph: []const u8, cols: usize) !Display {
+        const TextField = @import("text_field.zig").TextField;
+        var temporary: ?[]u8 = null;
+        defer if (temporary) |bytes| allocator.free(bytes);
+        const context = self.current(field);
+        const text = if (context) |c| c.text() else blk: {
+            temporary = try std.mem.concat(allocator, u8, &.{ field.query.items, field.preedit.items });
+            break :blk temporary.?;
+        };
+        const caret = @import("../../grapheme.zig").snapToBoundary(text, if (context) |c| c.selected.end else text.len);
+        // composeLineFit only reads this surrogate; the borrowed bytes are never freed or edited.
+        const surrogate: TextField = .{ .text = .fromOwnedSlice(@constCast(text)), .caret = caret };
+        const rendered = try @import("inline_edit.zig").composeLineFit(allocator, &surrogate, glyph, cols);
+        for (rendered) |*byte| if (byte.* == '\n' or byte.* == '\r') {
+            byte.* = ' ';
+        };
+        return .{ .text = rendered, .caret = @min(caret, rendered.len) };
     }
     pub fn commitAll(self: *Projection, allocator: std.mem.Allocator, field: *Field) ?bool {
         _ = self.sync(allocator, field) orelse return null;
@@ -335,4 +356,61 @@ test "find input IME external text invalidates borrowed context" {
     try field.query.appendSlice(a, "external");
     try std.testing.expect(p.current(&field) == null);
     try std.testing.expectEqualStrings("external", p.sync(a, &field).?.text());
+}
+
+test "sidebar search IME model display replaces middle preedit once" {
+    const a = std.testing.allocator;
+    var field: Field = .{};
+    defer field.deinit(a);
+    try field.query.appendSlice(a, "a😀z");
+    var p: Projection = .{};
+    defer p.deinit(a);
+    try std.testing.expect(p.marked(a, &field, "가나", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 }, null));
+    const view = try p.display(a, &field, "|", 40);
+    defer a.free(view.text);
+    try std.testing.expectEqualStrings("a가|나z", view.text);
+    try std.testing.expectEqual(@as(usize, 4), view.caret);
+    try std.testing.expectEqualStrings("a😀z", field.query.items);
+}
+
+test "sidebar search IME model paint snap preserves NFD semantic selection" {
+    const a = std.testing.allocator;
+    var field: Field = .{};
+    defer field.deinit(a);
+    try field.query.appendSlice(a, "az");
+    var p: Projection = .{};
+    defer p.deinit(a);
+    try std.testing.expect(p.marked(a, &field, "가", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 0 }, null));
+    const view = try p.display(a, &field, "|", 40);
+    defer a.free(view.text);
+    try std.testing.expectEqualStrings("a|가z", view.text);
+    try std.testing.expectEqual(@as(usize, 1), view.caret);
+    try std.testing.expectEqual(@as(usize, 2), p.context.value.selectedRange().?.location);
+}
+
+test "sidebar search IME model long paint retains semantic document" {
+    const a = std.testing.allocator;
+    var field: Field = .{};
+    defer field.deinit(a);
+    try field.query.appendSlice(a, "prefix😀abcdefghijklmnop");
+    var p: Projection = .{};
+    defer p.deinit(a);
+    try std.testing.expect(p.marked(a, &field, "韓", .{ .location = 1, .length = 0 }, .{ .location = 6, .length = 2 }, null));
+    const view = try p.display(a, &field, "|", 8);
+    defer a.free(view.text);
+    try std.testing.expectEqualStrings("prefix韓|abcd", view.text);
+    try std.testing.expectEqualStrings("prefix韓abcdefghijklmnop", p.context.value.text());
+}
+
+test "sidebar search IME model display frees every failed allocation" {
+    const Scenario = struct {
+        fn run(a: std.mem.Allocator) !void {
+            const field: Field = .{ .query = .fromOwnedSlice(@constCast("abcdefghijklmnopqrstuvwxyz")) };
+            const p: Projection = .{};
+            const view = try p.display(a, &field, "|", 4);
+            defer a.free(view.text);
+            try std.testing.expectEqualStrings("abcdefghijklmnopqrstuvwxyz|", view.text);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
 }

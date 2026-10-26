@@ -294,11 +294,12 @@ pub fn setSidebarWidthPx(self: *AppSession, x_px: f64) void {
 /// 검색 숨김, 터미널이 그 자리까지 확장)이고 폭(pt)은 sidebar_width_pt에 보존돼 펼치면 복원된다. 폭이 모든 탭 term을
 /// 바꾸므로 setSidebarWidthPx와 같은 재배치(전 탭 resize + 활성 rect + 사이드바 재빌드)를 한다.
 pub fn toggleSidebarCollapsed(self: *AppSession) void {
-    if (self.chrome_minimal) return; // quick terminal minimal은 항상 사이드바 없음 — 토글 대상 아님
+    if (self.chrome_minimal) return; // quick terminal minimal은 항상 사이드바 없음
+    if (self.sidebar_search_active and !@import("sidebar_ime.zig").commitAll(self)) return;
     // 접으면 검색 입력칸이 사라지니 검색을 비활성화한다(안 그러면 inputFocus가 .sidebar_search로 남아 키가 보이지
     // 않는 검색에 갇히고 매 blink마다 재투영). 검색어는 보존(blur 규율) — 호출 경로(◧ 클릭/향후 키바인딩)와 무관하게
     // 토글 자체가 책임진다. 아래 rebuildSidebar가 필터 일시정지를 반영한다.
-    self.sidebar_search_active = false;
+    @import("sidebar_ime.zig").setActive(self, false);
     self.hovered_collapsed_toggle = false; // 토글 전후로 stale 호버 배경이 남지 않게(다음 hoverCursor가 다시 판정)
     self.sidebar_collapsed = !self.sidebar_collapsed;
     self.sidebar_width_px = if (self.sidebar_collapsed) 0 else layout_math.ptToPx(self.sidebar_width_pt, self.scale_milli);
@@ -590,7 +591,7 @@ pub fn handleSidebarSearchKey(self: *AppSession, ev: chrome.input.InputEvent) vo
         .key => |k| switch (k.key) {
             .escape => closeSidebarSearch(self),
             .enter => {
-                _ = self.sidebar_search_input.commitPreedit(self.allocator); // 조합 잔여 확정
+                if (!@import("sidebar_ime.zig").commitAll(self)) return; // 실패한 확정은 검색 이동으로 재생하지 않는다
                 sidebarSearchActivateFirst(self);
             },
             .backspace => {
@@ -614,7 +615,7 @@ pub fn handleSidebarSearchKey(self: *AppSession, ev: chrome.input.InputEvent) vo
 
 /// 검색바를 닫는다(검색어·조합 비움 + 비활성 + 필터 해제 후 재빌드). Esc·Enter(이동 후)처럼 검색을 '끝낼' 때만.
 pub fn closeSidebarSearch(self: *AppSession) void {
-    self.sidebar_search_active = false;
+    @import("sidebar_ime.zig").setActive(self, false);
     self.sidebar_search_input.clear();
     rebuildSidebar(self) catch {};
     self.metal_dirty = true;
@@ -625,7 +626,8 @@ pub fn closeSidebarSearch(self: *AppSession) void {
 /// 비활성이라 recomputeVisibleTabs가 필터를 일시정지(전체 표시)하므로, blur 중 새 워크스페이스를 만들어도
 /// 필터에 숨지 않는다. 완전히 비우려면 Esc(closeSidebarSearch). 키 포커스는 터미널로 돌아간다(inputFocus).
 pub fn blurSidebarSearch(self: *AppSession) void {
-    self.sidebar_search_active = false;
+    if (self.sidebar_search_active and !@import("sidebar_ime.zig").commitAll(self)) return;
+    @import("sidebar_ime.zig").setActive(self, false);
     rebuildSidebar(self) catch {}; // 비활성 → 필터 일시정지(전체), 검색어 텍스트는 헤더에 유지
     self.metal_dirty = true;
 }
@@ -739,22 +741,18 @@ pub fn sidebarSearchLine(self: *const AppSession, max_col: u16) SidebarSearchLin
     return .{ .truncated = line.truncated, .query = line.query, .preedit = line.preedit, .caret_col = caret };
 }
 
-/// 검색 caret rect(헤더 검색 영역) — IME 후보창이 붙는 자리. 렌더가 measured로 옮겨 갔으므로 **셰이핑된
-/// advance**에서 얻는다(셀 col 환산이 아니라). caret 글리프 자체는 텍스트 run 끝의 `|`라 별도 좌표가 필요 없고,
-/// 이 rect는 오직 후보창 anchor 용도다.
-///
-/// 캐시에 아티팩트가 없으면(첫 프레임 등) 텍스트 rect의 **시작점**으로 폴백한다 — 후보창이 잠깐 왼쪽에 뜨는 것이
-/// 아예 안 뜨는 것보다 낫고, 다음 프레임에 정확한 자리로 옮겨간다.
+/// 후보창 anchor는 실제 표시 run의 caret byte를 CoreText로 측정한다. 중간 범위 재변환에서도
+/// query/preedit을 중복하거나 전체 줄 끝으로 anchor를 보내지 않고, 첫 프레임에도 같은 규칙을 쓴다.
 pub fn sidebarSearchCaretRect(self: *AppSession) ?chrome.draw.Rect {
     if (!self.sidebar_search_active) return null;
     const rect = sidebarSearchTextRect(self) orelse return null;
-    var advance: f32 = 0;
-    if (self.sidebar_search_text_cache) |cache| {
-        for (cache.placements) |p| advance = @max(advance, p.x_px + p.advance_px);
-    }
-    // 넘치면 CoreText가 앞을 잘라(anchor `.tail`) 내용이 rect 폭 안에 들어오므로, caret은 그 오른쪽 끝이다.
-    const caret_x = rect.x + @as(i32, @intFromFloat(@min(advance, @as(f32, @floatFromInt(rect.w)))));
-    return .{ .x = caret_x, .y = rect.y, .w = @max(self.cell_width_px, 1), .h = rect.h };
+    // Measure the exact displayed run and caret byte, including tail truncation.
+    // A stale whole-line cache cannot locate a reconversion caret inside marked text.
+    const display = sidebarSearchDisplay(self, rect.w) catch return null;
+    defer self.allocator.free(display.text);
+    const positions = @import("chrome_text_offsets.zig").measure(self, display.text, .{ display.caret, display.caret, display.caret }, rect.w, self.scale_milli) catch return null;
+    const advance = @max(0, @min(positions[0], @as(f32, @floatFromInt(rect.w))));
+    return .{ .x = rect.x + @as(i32, @intFromFloat(advance)), .y = rect.y, .w = @max(1, self.scale_milli / 1000), .h = rect.h };
 }
 
 /// 행(카드·에이전트) 줄 수가 투영 당시와 달라졌으면 사이드바를 다시 투영한다.
@@ -2890,7 +2888,7 @@ pub fn sidebarSearchTextRect(self: *const AppSession) ?chrome.draw.Rect {
 
 /// 검색 줄에 그릴 문자열을 한 버퍼로 합친다(owned). query + IME preedit + caret을 **한 run**으로 두는 이유는
 /// 셋을 따로 lower하면 각자 자기 원점에서 다시 시작해 겹치기 때문이다(Session Dock 검색과 같은 처방).
-/// caret이 문자열 **끝**에 오므로, 넘칠 때 앞을 자르는 `.tail` 앵커면 방금 친 글자와 caret이 항상 남는다.
+/// native 선택이 중간에 있으면 중립 표시 helper가 기존 긴 줄 규칙으로 caret 뒤 범위를 줄인다.
 /// 빈 검색 + 비활성이면 placeholder를 돌려주고 `muted`를 true로 준다.
 pub fn sidebarSearchTextAlloc(self: *AppSession, muted: *bool) ?[]u8 {
     const has_text = self.sidebar_search_input.query.items.len > 0 or self.sidebar_search_input.preedit.items.len > 0;
@@ -2905,17 +2903,13 @@ pub fn sidebarSearchTextAlloc(self: *AppSession, muted: *bool) ?[]u8 {
         return self.allocator.dupe(u8, "Search") catch null;
     }
     muted.* = false;
-    var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(self.allocator, self.sidebar_search_input.query.items) catch return null;
-    out.appendSlice(self.allocator, self.sidebar_search_input.preedit.items) catch {
-        out.deinit(self.allocator);
-        return null;
-    };
-    if (show_caret) out.append(self.allocator, '|') catch {
-        out.deinit(self.allocator);
-        return null;
-    };
-    return out.toOwnedSlice(self.allocator) catch null;
+    const width = if (sidebarSearchTextRect(self)) |r| r.w else std.math.maxInt(u16);
+    const display = sidebarSearchDisplay(self, width) catch return null;
+    return display.text;
+}
+
+fn sidebarSearchDisplay(self: *AppSession, width: u32) !chrome.components.overlay_input_ime.Display {
+    return self.sidebar_ime.projection.display(self.allocator, &self.sidebar_search_input, if (self.sidebar_search_active and self.blink_visible) "|" else "", @max(1, width / @max(self.cell_width_px, 1)));
 }
 
 /// 사이드바 검색 줄 텍스트를 measured 경로로 수집한다. 캐시가 hit이면 CoreText를 아예 부르지 않는다 —

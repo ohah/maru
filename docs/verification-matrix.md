@@ -1,5 +1,7 @@
 # 검증 매트릭스
 
+파싱 요청 수락 코어는 `test-editor-parse-request`가 입력 신원·언어 판·요청 번호와 단계별 단발 수락을 검사한다. 기본 `zig build test`에 포함되며, [실제 결함 대조](../tools/editor-parse-request/README.md)는 별도 opt-in 실행이다. 제품 워커·UI에 연결된 상태는 아니다.
+
 [최신 메인 비용 재귀속](plans/editor-current-frame-attribution.md)은 제품 소스 변경 없이 성능 600입력과 정확성 200입력을 대조했다.
 프레임 schema 1/2 판정 13개와 저장소 판정 10개를 통과했다. 옛 원시 기록 800개는 읽기
 대조를 통과했으나 옛 실행 파일이 없어 전체 자료 검증은 거절됐으며 성공으로 세지 않는다.

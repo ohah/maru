@@ -127,7 +127,7 @@ const IDWriteFontFace = extern struct {
         GetType: *const anyopaque,
         GetFiles: *const anyopaque,
         GetIndex: *const anyopaque,
-        GetSimulations: *const anyopaque,
+        GetSimulations: *const fn (*IDWriteFontFace) callconv(abi.winapi) UINT,
         IsSymbolFont: *const anyopaque,
         GetMetrics: *const fn (*IDWriteFontFace, *FontMetrics) callconv(abi.winapi) void,
         GetGlyphCount: *const anyopaque,
@@ -621,6 +621,15 @@ test "postScriptNameFromNameTable: 못 믿을 표는 null 이다" {
 
 /// DirectWrite로 글리프를 그리는 래스터라이저. 중립 계약(`renderer/glyph_raster.zig`의 덕 타이핑
 /// `rasterize`)에 맞출 수 있도록 **코드포인트 하나 → RGBA8 버퍼 하나**를 하는 함수를 노출한다.
+/// Native face traits. Bold+italic uses the bold override family, matching
+/// FontConfig; absent variants fall back without DirectWrite simulations.
+pub const FaceStyle = enum(u2) {
+    regular,
+    bold,
+    italic,
+    bold_italic,
+};
+
 pub const Rasterizer = struct {
     factory: *IDWriteFactory,
     /// 주 폰트가 `faces[0]`, 그 뒤가 폴백 순서다. **글리프가 없으면 다음 face로 내려간다.**
@@ -765,6 +774,10 @@ pub const Rasterizer = struct {
 
     /// 이름 하나를 face로 바꾼다. 없으면 `null` — **오류가 아니다**(폴백 목록에는 없는 폰트가 흔하다).
     fn resolveFace(collection: *IDWriteFontCollection, name: []const u8) ?*IDWriteFontFace {
+        return resolveStyledFace(collection, name, .regular);
+    }
+
+    fn resolveStyledFace(collection: *IDWriteFontCollection, name: []const u8, style: FaceStyle) ?*IDWriteFontFace {
         // 이름을 UTF-16으로. 너무 길면 그 후보만 건너뛴다(전체 실패로 만들지 않는다).
         var wide: [128]u16 = undefined;
         const wlen = std.unicode.utf8ToUtf16Le(wide[0 .. wide.len - 1], name) catch return null;
@@ -780,11 +793,21 @@ pub const Rasterizer = struct {
         defer d3d11.releaseOpt(family);
 
         var font: ?*IDWriteFont = null;
-        if (d3d11.failed(family.?.vtable.GetFirstMatchingFont(family.?, font_weight_normal, font_stretch_normal, font_style_normal, &font))) return null;
+        if (d3d11.failed(family.?.vtable.GetFirstMatchingFont(family.?, if (style == .bold or style == .bold_italic) 700 else font_weight_normal, font_stretch_normal, if (style == .italic or style == .bold_italic) 2 else font_style_normal, &font))) return null;
         defer d3d11.releaseOpt(font);
 
         var f: ?*IDWriteFontFace = null;
         if (d3d11.failed(font.?.vtable.CreateFontFace(font.?, &f))) return null;
+        // GetFirstMatchingFont may synthesize bold/oblique. FontConfig promises
+        // real variants or fallback, so reject those simulated faces explicitly.
+        if (f.?.vtable.GetSimulations(f.?) != 0) {
+            d3d11.releaseOpt(f);
+            return switch (style) {
+                .regular => null,
+                .bold_italic => resolveStyledFace(collection, name, .bold),
+                else => resolveStyledFace(collection, name, .regular),
+            };
+        }
         return f;
     }
 
@@ -876,6 +899,10 @@ pub const Rasterizer = struct {
     /// docs/windows-platform.md §2m.14 의 표가 소유한다.
     fn resolveBundledPath(factory: *IDWriteFactory, family: []const u8, out: []u8) ?[]const u8 {
         const rel = maru.config.theme.bundledRegularRelPath(family) orelse return null;
+        return resolveBundledRelativePath(factory, rel, out);
+    }
+
+    fn resolveBundledRelativePath(factory: *IDWriteFactory, rel: []const u8, out: []u8) ?[]const u8 {
         var exe_buf: [1024]u8 = undefined;
         const exe_dir = exeDirNeutral(&exe_buf) orelse "";
         var roots: [4][]const u8 = undefined;
@@ -935,9 +962,10 @@ pub const Rasterizer = struct {
         defer d3d11.releaseOpt(b1_raw);
 
         var added: usize = 0;
-        for (maru.config.theme.bundled_fonts) |bf| {
+        for (maru.config.theme.bundled_fonts) |bf| for (bf.variant_rels) |optional| {
+            const rel = optional orelse continue;
             var path_buf: [1400]u8 = undefined;
-            const path = resolveBundledPath(factory, bf.family, &path_buf) orelse continue;
+            const path = resolveBundledRelativePath(factory, rel, &path_buf) orelse continue;
             var wide: [1024]u16 = undefined;
             const wlen = std.unicode.utf8ToUtf16Le(wide[0 .. wide.len - 1], path) catch continue;
             wide[wlen] = 0;
@@ -946,7 +974,7 @@ pub const Rasterizer = struct {
             defer d3d11.releaseOpt(file_ref);
             if (d3d11.failed(b1.vtable.AddFontFile(b1, file_ref.?))) continue;
             added += 1;
-        }
+        };
         if (added == 0) return null;
 
         var set: ?*anyopaque = null;
@@ -962,10 +990,10 @@ pub const Rasterizer = struct {
     ///
     /// 순서가 이 방향인 이유: 사용자가 직접 설치한 폰트가 이긴다. 같은 이름의 번들본으로 조용히
     /// 바꿔치기하면 "내가 깐 폰트가 안 먹는다" 가 된다. 번들은 **없을 때의 바닥**이다.
-    fn resolveFaceAnywhere(system: *IDWriteFontCollection, bundled: ?*IDWriteFontCollection, name: []const u8, strict: bool) ?*IDWriteFontFace {
-        if (usableFaceFrom(system, name, strict)) |f| return f;
+    fn resolveFaceAnywhere(system: *IDWriteFontCollection, bundled: ?*IDWriteFontCollection, name: []const u8, strict: bool, style: FaceStyle) ?*IDWriteFontFace {
+        if (usableFaceFrom(system, name, strict, style)) |f| return f;
         const bc = bundled orelse return null;
-        return usableFaceFrom(bc, name, strict);
+        return usableFaceFrom(bc, name, strict, style);
     }
 
     /// 컬렉션 하나에서 이름을 찾고 **쓸 수 있는지까지** 본다.
@@ -973,8 +1001,8 @@ pub const Rasterizer = struct {
     /// **시스템도 검증한다.** 예전에는 번들만 봤는데, 그러면 망가진 **시스템** 폰트가 `faces[0]` 이 되어
     /// `create` 가 `MetricsFailed` 로 죽는다 — 티어의 다음 후보로 안 내려간다. 두 갈래가 같은 규약을
     /// 쓰는 것이 맞다(`resolveFace` 의 "없으면 null, 오류가 아니다").
-    fn usableFaceFrom(collection: *IDWriteFontCollection, name: []const u8, strict: bool) ?*IDWriteFontFace {
-        const f = resolveFace(collection, name) orelse return null;
+    fn usableFaceFrom(collection: *IDWriteFontCollection, name: []const u8, strict: bool, style: FaceStyle) ?*IDWriteFontFace {
+        const f = resolveStyledFace(collection, name, style) orelse return null;
         if (faceIsUsable(f, strict)) return f;
         d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(f)));
         return null;
@@ -984,6 +1012,10 @@ pub const Rasterizer = struct {
     /// 그대로(쉼표 구분)이고, 비어 있어도 내장 폴백 티어는 시도한다. `em_size_px`는 config `font.size`를
     /// 픽셀로 환산한 값이다(DPI 적용은 호출자 몫 — 이 파일은 픽셀만 안다).
     pub fn create(allocator: std.mem.Allocator, configured: []const u8, fallback_csv: []const u8, em_size_px: f32) Error!*Rasterizer {
+        return createStyled(allocator, configured, fallback_csv, em_size_px, .regular);
+    }
+
+    pub fn createStyled(allocator: std.mem.Allocator, configured: []const u8, fallback_csv: []const u8, em_size_px: f32, style: FaceStyle) Error!*Rasterizer {
         if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
 
         var factory_raw: ?*anyopaque = null;
@@ -1022,7 +1054,7 @@ pub const Rasterizer = struct {
 
         var chosen: []const u8 = "";
         for (candidates) |name| {
-            if (resolveFaceAnywhere(coll, self.bundled, name, true)) |f| {
+            if (resolveFaceAnywhere(coll, self.bundled, name, true, style)) |f| {
                 self.faces[0] = f;
                 self.rememberFaceName(0, name, f);
                 self.face_count = 1;
@@ -1036,7 +1068,7 @@ pub const Rasterizer = struct {
         var fb_buf: [max_faces][]const u8 = undefined;
         for (fallbackCandidates(fallback_csv, chosen, &fb_buf)) |name| {
             if (self.face_count == max_faces) break;
-            if (resolveFaceAnywhere(coll, self.bundled, name, false)) |f| {
+            if (resolveFaceAnywhere(coll, self.bundled, name, false, style)) |f| {
                 self.faces[self.face_count] = f;
                 self.rememberFaceName(self.face_count, name, f);
                 self.face_count += 1;

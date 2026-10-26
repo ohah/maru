@@ -7291,7 +7291,8 @@ const LiveFontUi = struct {
 
 fn sameLiveFont(a: maru.config.theme.FontConfig, b: maru.config.theme.FontConfig) bool {
     return a.size == b.size and a.line_height == b.line_height and a.letter_spacing == b.letter_spacing and
-        std.mem.eql(u8, a.family, b.family) and std.mem.eql(u8, a.fallback, b.fallback);
+        std.mem.eql(u8, a.family, b.family) and std.mem.eql(u8, a.fallback, b.fallback) and
+        std.mem.eql(u8, a.family_bold, b.family_bold) and std.mem.eql(u8, a.family_italic, b.family_italic);
 }
 
 fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer, max_spins: ?usize, smoke_opts: TerminalSmokeOpts) !void {
@@ -7331,7 +7332,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     // config 파일이 없어도 JetBrains Mono 를 먼저 찾고 없을 때 Cascadia Mono 로 내려간다. 이 기계에서
     // `font_family=Cascadia Mono` 로 보이는 것은 그 폰트가 없어서지 "빈 값이라 티어가 골라서" 가 아니다.
     // `Jetendard` 는 macOS 번들 한글 폰트라 Windows 에서는 열리지 않고 폴백 사슬 앞에 무해하게 남는다.
-    var text_resources = windows_text_resources.TextResources.init(allocator, cfg.font.family, cfg.font.fallback, cfg.font.size) catch |err| {
+    var text_resources = windows_text_resources.TextResources.initConfigured(allocator, cfg.font) catch |err| {
         try stderr.print("maru win32-terminal-smoke: could not set up the font({s}, HRESULT 0x{X:0>8})\n", .{ @errorName(err), @as(u32, @bitCast(dwrite_font.last_hresult)) });
         try stderr.flush();
         return error.UnknownCommand;
@@ -12091,7 +12092,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         settings_host.tick();
         if (!sameLiveFont(applied_font, cfg.font) and settings_host.changed) font_apply: {
             font_recovery_notice.begin();
-            var next_text = windows_text_resources.TextResources.init(allocator, cfg.font.family, cfg.font.fallback, cfg.font.size) catch |err| {
+            var next_text = windows_text_resources.TextResources.initConfigured(allocator, cfg.font) catch |err| {
                 font_apply_errors += 1;
                 settings_host.form.state.setMessage(maru.i18n.t(.app_font_apply_failed));
                 stderr.print("  warning: font preparation failed({s})\n", .{@errorName(err)}) catch {};

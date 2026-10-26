@@ -6729,6 +6729,23 @@ pub fn build(b: *std.Build) void {
     run_real_lsp_tests.addArg("--maru-expect-tests=5");
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_real_lsp_tests.addArg("--maru-expect-passed=5");
     b.step("test-editor-real-lsp", "Run an explicitly configured real language server case").dependOn(&run_real_lsp_tests.step);
+    const rust_pull_step = b.step("test-editor-rust-pull", "Verify Rust pull diagnostics and explicit cancellation retry");
+    const rust_pull_pure = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{ "LSJDP", "RDP diagnostic", "LSI8" } });
+    const run_rust_pull_pure = b.addRunArtifact(rust_pull_pure);
+    run_rust_pull_pure.addArg("--maru-expect-tests=31");
+    run_rust_pull_pure.addArg("--maru-expect-passed=31");
+    rust_pull_step.dependOn(&run_rust_pull_pure.step);
+    test_step.dependOn(&run_rust_pull_pure.step);
+    const rust_pull_product = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.RDP1", ".test.LSI7", ".test.LSI10", ".test.ASB4", ".test.ASB5" } });
+    const run_rust_pull_product = b.addRunArtifact(rust_pull_product);
+    run_rust_pull_product.setCwd(b.path("."));
+    run_rust_pull_product.step.dependOn(&install_fake_lsp.step);
+    run_rust_pull_product.addArg("--maru-expect-tests=9");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_rust_pull_product.addArg("--maru-expect-passed=9");
+        macos_only_test_step.dependOn(&run_rust_pull_product.step);
+    }
+    rust_pull_step.dependOn(&run_rust_pull_product.step);
     const semantic_recovery_step = b.step("test-editor-semantic-recovery", "Verify semantic EOF, settings, refresh and timeout recovery");
     const semantic_recovery_pure = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"semantic recovery"} });
     const run_semantic_recovery_pure = b.addRunArtifact(semantic_recovery_pure);

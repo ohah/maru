@@ -624,6 +624,17 @@ fn errorCode(obj: std.json.ObjectMap) ?i64 {
     return if (c == .integer) c.integer else null;
 }
 
+/// LSP 3.17 DiagnosticServerCancellationData. Only the explicit server request
+/// to retrigger permits an automatic retry; permanent errors do not loop.
+fn diagnosticRetrigger(obj: std.json.ObjectMap) bool {
+    if (errorCode(obj) != -32802) return false;
+    const e = obj.get("error") orelse return false;
+    const data = e.object.get("data") orelse return false;
+    if (data != .object) return false;
+    const retry = data.object.get("retriggerRequest") orelse return false;
+    return retry == .bool and retry.bool;
+}
+
 fn errorMessage(obj: std.json.ObjectMap) ?[]const u8 {
     const e = obj.get("error") orelse return null;
     if (e != .object) return null;
@@ -1158,7 +1169,7 @@ pub fn pathFromFileUri(uri: []const u8, out: []u8) ?[]const u8 {
 /// 들어온 메시지의 갈래.
 pub const Incoming = union(enum) {
     /// 우리가 보낸 요청의 응답. `result` 는 트리 안의 값(파싱 결과가 사는 동안 유효).
-    response: struct { id: RequestId, result: ?std.json.Value, is_error: bool, error_message: ?[]const u8 = null, error_code: ?i64 = null },
+    response: struct { id: RequestId, result: ?std.json.Value, is_error: bool, error_message: ?[]const u8 = null, error_code: ?i64 = null, diagnostic_retrigger: bool = false },
     /// 서버 알림(`publishDiagnostics` 등).
     notification: struct { method: []const u8, params: ?std.json.Value },
     /// 서버 → 클라이언트 요청(id 있음) — 거부 대상.
@@ -1188,7 +1199,7 @@ pub fn classify(root: std.json.Value) Incoming {
     };
     const rid: RequestId = requestIdOf(id_num) orelse return .ignore;
     const is_error = obj.get("error") != null;
-    return .{ .response = .{ .id = rid, .result = obj.get("result"), .is_error = is_error, .error_message = errorMessage(obj), .error_code = errorCode(obj) } };
+    return .{ .response = .{ .id = rid, .result = obj.get("result"), .is_error = is_error, .error_message = errorMessage(obj), .error_code = errorCode(obj), .diagnostic_retrigger = diagnosticRetrigger(obj) } };
 }
 
 /// `initialize` 응답에서 서버가 고른 위치 인코딩. 없으면 명세 기본(utf-16).
@@ -2127,4 +2138,29 @@ test "semantic recovery gopls opt-in and refresh capability preserve other serve
     defer a.free(scala);
     try testing.expect(std.mem.indexOf(u8, scala, "\"metals\":{\"enableSemanticHighlighting\":true}") != null);
     try testing.expect(try didChangeConfigurationFor(a, "rust") == null);
+}
+
+test "LSJDP diagnostic cancellation retries require the server opt-in" {
+    const cases = .{
+        .{ "{\"code\":-32802,\"data\":{\"retriggerRequest\":true}}", true },
+        .{ "{\"code\":-32802,\"data\":{\"retriggerRequest\":false}}", false },
+        .{ "{\"code\":-32802}", false },
+        .{ "{\"code\":-32802,\"data\":null}", false },
+        .{ "{\"code\":-32802,\"data\":[]}", false },
+        .{ "{\"code\":-32802,\"data\":{}}", false },
+        .{ "{\"code\":-32802,\"data\":{\"retriggerRequest\":\"true\"}}", false },
+        .{ "{\"code\":-32802,\"data\":{\"retriggerRequest\":1}}", false },
+        .{ "{\"code\":-32800,\"data\":{\"retriggerRequest\":true}}", false },
+        .{ "{\"code\":-32801,\"data\":{\"retriggerRequest\":true}}", false },
+        .{ "{\"code\":-32602,\"data\":{\"retriggerRequest\":true}}", false },
+        .{ "{\"code\":\"-32802\",\"data\":{\"retriggerRequest\":true}}", false },
+        .{ "null", false },
+    };
+    inline for (cases) |row| {
+        const bytes = try std.fmt.allocPrint(testing.allocator, "{{\"jsonrpc\":\"2.0\",\"id\":2000000001,\"error\":{s}}}", .{row[0]});
+        defer testing.allocator.free(bytes);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, bytes, .{});
+        defer parsed.deinit();
+        try testing.expectEqual(row[1], classify(parsed.value).response.diagnostic_retrigger);
+    }
 }

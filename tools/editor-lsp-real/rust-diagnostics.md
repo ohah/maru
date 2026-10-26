@@ -99,4 +99,61 @@ RA_LOG와 Salsa 취소 추적을 켜자 진단 해소의 누락도 재현됐다.
 Rust의 진단을 서버가 제공하는 pull 경로로 요청하고, 현재 문서 버전/요청 순번에 맞는 결과만 적용하는 것이 우선이다.
 서버의 초기 준비·refresh·편집 후 재조회와 취소/재진입을 함께 검증해야 한다.
 고정 sleep, 캐시 예열 전역 비활성화, 오래된 push 진단의 무조건 수용으로 처리하지 않는다.
-이번 조사는 원인과 수정 방향을 기록한 것이며 제품의 진단 정책을 변경하지 않았다.
+위 조사 이후 사용자 승인으로 아래 pull 복구를 구현했다.
+
+
+## 제품 복구 구현
+
+Rust 서버 표의 pull 선택을 켜고 기존의 version/seq/dirty 처리, 처음 열기·편집·refresh·파일 간
+의존 문서 재조회를 사용한다. pull provider를 협상한 서버의 파일 진단은 pull만 적용하고,
+provider가 없거나 pull을 선택하지 않은 서버는 기존 push를 유지한다.
+
+실제 초기 Rust 실행에서 `-32802`와 `retriggerRequest=true`를 관찰했다. 이 명시적 신호만
+L2 `DiagnosticRetry`로 예약한다. 120ms부터 지수 backoff해 2초에서 제한하며, 정상 결과·새 편집·
+refresh·재시작·경로 퇴역은 예약을 비운다. 취소 금지·영구 오류·잘못된 data를 자동 반복하지 않는다.
+요청 seq가 달라진 응답은 새 요청의 대기를 해제하지 않는다. SDK 캐시 예열·저장·실행 신뢰는 바꾸지 않았다.
+
+판정자의 관찰기도 pull을 해석한다. 요청 때의 본문 version/URI에 대응한 `full.items`를 검사하고
+Rust의 bad/fixed가 모두 pull 응답에 있어야 성공한다. 협상된 pull 결과를 push로 대체할 수 없다.
+진단 오류·누락·협상 부재·다른 URI·근거 없는 unchanged를 거부하는 Python 검사는 총 51개다.
+
+실행 명령:
+
+```sh
+mise exec -- zig build test-editor-rust-pull -j2
+mise exec -- zig build test-editor-rust-pull -Doptimize=ReleaseFast -j2
+mise exec -- zig build test-editor-real-lsp-oracles
+```
+
+### 서로 다른 적대 조건 20개
+
+`LSJDP`의 실제 RPC 분류와 L2 `RDP diagnostic`의 주입 시계로 다음 입력을 검사한다.
+정상 `ServerCancelled + true`와 시한 도달 대조군도 함께 확인한다. 동일 실행의 반복으로 세지 않는다.
+
+| # | 공격 입력/상태 | 기대 결과 |
+|---|---|---|
+| 1 | retriggerRequest=false | 자동 재시도 신호 없음 |
+| 2 | 취소 응답에 data 없음 | 자동 재시도 신호 없음 |
+| 3 | data=null | 거부, panic 없음 |
+| 4 | data=[] | 거부, panic 없음 |
+| 5 | data 객체에 flag 없음 | 자동 재시도 신호 없음 |
+| 6 | flag가 문자열 true | 자동 재시도 신호 없음 |
+| 7 | flag가 숫자 1 | 자동 재시도 신호 없음 |
+| 8 | 클라이언트 취소 코드와 true | 자동 재시도 신호 없음 |
+| 9 | ContentModified 코드와 true | 같은 요청의 자동 재시도 신호 없음 |
+| 10 | InvalidParams 코드와 true | 영구 오류 반복 없음 |
+| 11 | 오류 코드가 문자열 | 자동 재시도 신호 없음 |
+| 12 | error=null | 거부, panic 없음 |
+| 13 | 예약 없이 최대 시각 도달 | 요청을 만들지 않음 |
+| 14 | 취소 직후 같은 시각 pump | 곧바로 재시도하지 않음 |
+| 15 | 시한 1ms 전 | 아직 재시도하지 않음 |
+| 16 | 시계가 과거로 이동 | 일찍 재시도하지 않음 |
+| 17 | 같은 만기 타이머 두 번 소비 | 한 번만 실행 |
+| 18 | 취소 횟수 300번 누적 | 카운터 wrap 없이 2초 상한 유지 |
+| 19 | 최대 u64 직전 예약 | 시한 overflow 없이 포화 |
+| 20 | 시각 0에 예약 | 예약 없음과 혼동하지 않음 |
+
+`RDP1`은 실제 AppSession과 fake process로 PCANCEL(별도 refresh 없음) 복구와 PREFRESH,
+같은 버전의 늦은 push, 다른 seq와 지연된 이전 seq, 지난 문서 version, null 결과,
+오류 해소와 다른 열린 파일의 의존 진단을 검사한다. TS·Ruby·ESLint의 기존 제품 대조군도 함께 실행한다.
+순수 31/제품 9개에는 모듈 참조 테스트가 포함되며 SDK 사례 수와 구분한다.

@@ -16,7 +16,7 @@ pub const Server = struct {
     /// 그 문법인데도 **이 서버가 다루지 않는 확장자**(대소문자 무시, 점 없이). 그런 문서에는 주 서버가 없다 — Bash 서버는 `.zsh` 에
     /// shellcheck 를 돌려 zsh shebang 파일마다 「ShellCheck only supports sh/bash…」 오류를 냈다(계획 editor-lsp-servers-expand LS1 실측).
     skip_extensions: []const []const u8 = &.{},
-    /// 파일 진단을 pull 로만 내는 서버(push 를 안 한다 — ESLint 2026-10-13 실측, tsgo·ruby-lsp 계획 editor-lsp-servers-expand LS2·LS4 실측). 그 서버의 클라이언트에만
+    /// 파일 진단을 pull 로 조회하는 서버(push 누락 복구도 포함 — Rust 2026-10-26; 기존 push 없음 실측: ESLint 2026-10-13 실측, tsgo·ruby-lsp 계획 editor-lsp-servers-expand LS2·LS4 실측). 그 서버의 클라이언트에만
     /// `initialize` 에서 `textDocument.diagnostic` 을 알리고 문서를 보낼 때마다 묻는다(§8.2u). 주 서버·보조 서버가 같은 칸이다.
     pull_diagnostics: bool = false,
     /// pull 앞에 장벽을 친다 — 장벽 요청(`rpc.pullBarrierRequest`)의 답이 온 뒤에 pull 을 묻는다(§8.2u). 요청을 읽기 스레드가 **그때 적용된
@@ -25,6 +25,12 @@ pub const Server = struct {
     pull_barrier: bool = false,
     /// gopls는 provider를 알리고도 기본 설정에서는 빈 토큰을 낸다(v0.20 실측).
     enable_semantic_tokens: bool = false,
+
+    /// When pull is negotiated it owns this server's document diagnostics.
+    /// A late push must not overwrite a newer full pull report.
+    pub fn acceptsPush(self: Server, provider: bool) bool {
+        return !self.pull_diagnostics or !provider;
+    }
 
     /// 그 경로의 문서를 다루나(`skip_extensions`).
     pub fn serves(self: Server, path: []const u8) bool {
@@ -71,7 +77,7 @@ pub fn candidatesFor(g: language.Grammar) []const Server {
         .typescript => &ts_candidates,
         .tsx => &tsx_candidates,
         .javascript => &js_candidates,
-        .rust => &[_]Server{.{ .exe = "rust-analyzer", .args = &none, .language_id = "rust", .install = "rustup component add rust-analyzer" }},
+        .rust => &[_]Server{.{ .exe = "rust-analyzer", .args = &none, .language_id = "rust", .install = "rustup component add rust-analyzer", .pull_diagnostics = true }},
         .python => &[_]Server{.{ .exe = "pyright-langserver", .args = &stdio, .language_id = "python", .install = "npm i -g pyright" }},
         .go => &[_]Server{.{ .exe = "gopls", .args = &none, .language_id = "go", .install = "go install golang.org/x/tools/gopls@latest", .enable_semantic_tokens = true }},
         // 언어 서버 후보 확대 LS1(계획 editor-lsp-servers-expand — 2026-10-16, maru 와 같은 능력으로 실측해 통과한 열다섯).
@@ -245,7 +251,7 @@ test "LSI3 언어 서버 후보 확대 LS1 — 열다섯의 실행 파일·인�
     }
 }
 
-test "LSI8 TS 7 네이티브(`tsgo`·TS 7 의 `tsc`)는 파일 진단을 pull 로만 낸다 — 그 둘만 pull 칸이 켜지고 `typescript-language-server` 는 push; 주 서버 표에서 pull 칸이 켜진 자리는 TS·TSX·JS 마다 그 둘과 Ruby 하나, 모두 일곱 (계획 editor-lsp-servers-expand LS2·LS4)" {
+test "LSI8 TS 7 네이티브(`tsgo`·TS 7 의 `tsc`)는 파일 진단을 pull 로만 낸다 — 그 둘만 pull 칸이 켜지고 `typescript-language-server` 는 push; 주 서버 표에서 pull 칸이 켜진 자리는 TS·TSX·JS 마다 그 둘과 Ruby 하나, Rust 하나까지 모두 여덟 (계획 editor-lsp-servers-expand LS2·LS4·Rust 복구)" {
     inline for (.{ .typescript, .tsx, .javascript }) |g| {
         const c = candidatesFor(g);
         try testing.expectEqualStrings("tsgo", c[0].exe);
@@ -255,15 +261,20 @@ test "LSI8 TS 7 네이티브(`tsgo`·TS 7 의 `tsc`)는 파일 진단을 pull �
         try testing.expectEqualStrings("tsc", c[2].exe);
         try testing.expect(c[2].pull_diagnostics);
     }
-    // 표를 훑어 **켜진 자리를 센다** — pull 칸은 실측으로 push 를 안 낸 서버에만(켜면 그 서버에 묻는 요청이 문서마다 늘고, 꺼 두면 진단이 영영 안 온다).
+    const rust = candidatesFor(.rust)[0];
+    try testing.expect(rust.pull_diagnostics and !rust.pull_barrier);
+    try testing.expect(!rust.acceptsPush(true));
+    try testing.expect(rust.acceptsPush(false)); // No negotiated provider: retain push fallback.
+    try testing.expect(candidatesFor(.c)[0].acceptsPush(true)); // Unselected servers keep push.
+    // 표를 훑어 **켜진 자리를 센다** — pull 칸은 push 전용 서버의 누락 복구(Rust)와 push 없는 서버에만(켜면 그 서버에 묻는 요청이 문서마다 늘고, 꺼 두면 진단이 영영 안 온다).
     var n: usize = 0;
     for (std.enums.values(language.Grammar)) |g| for (candidatesFor(g)) |s| {
         if (s.pull_diagnostics) {
-            try testing.expect(std.mem.eql(u8, s.exe, "tsgo") or std.mem.eql(u8, s.exe, "tsc") or std.mem.eql(u8, s.exe, "ruby-lsp"));
+            try testing.expect(std.mem.eql(u8, s.exe, "tsgo") or std.mem.eql(u8, s.exe, "tsc") or std.mem.eql(u8, s.exe, "ruby-lsp") or std.mem.eql(u8, s.exe, "rust-analyzer"));
             n += 1;
         }
     };
-    try testing.expectEqual(@as(usize, 7), n);
+    try testing.expectEqual(@as(usize, 8), n);
 }
 
 test "LSI9 Ruby(`ruby-lsp`) — pull 진단만 내는 주 서버(그 앞에 장벽 — 서버 표에서 이 하나뿐), 인자 없음, languageId `ruby`, 설치는 Homebrew 공식 (계획 editor-lsp-servers-expand LS4)" {

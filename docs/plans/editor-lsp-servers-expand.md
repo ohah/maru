@@ -123,7 +123,7 @@ maru 본문과 같은지를 진단 개수로 잰다. 방식 넷: range 없는 �
 
 ## 검증
 
-- 순수: 서버 표의 이름표·인자·languageId·설치 명령(`LSI1`·`LSI3`), pull 칸과 「켜진 자리는 일곱(TS·TSX·JS × tsgo·tsc, Ruby)」(`LSI8`), Ruby 행과 「장벽 칸이 켜진 자리는 그 하나」(`LSI9`), ruby-lsp 의 설정 파일(`LSC1`), 파일 간 의존 판정과 장벽 요청의 모양(`LSJ22`), 문서 전체를 덮는 range 의 끝(`LSP4` — 빈 문서·끝 개행·다바이트·CRLF·단독 CR)과 didChange 의 두 꼴(`LSJ2`), 문서마다 languageId 와 다루는 확장자(`LSI4`), 보조 서버 ⊂ 주 서버(`AUX6`).
+- 순수: 서버 표의 이름표·인자·languageId·설치 명령(`LSI1`·`LSI3`), pull 칸과 「켜진 자리는 여덟(TS·TSX·JS × tsgo·tsc, Ruby, Rust)」(`LSI8`), Ruby 행과 「장벽 칸이 켜진 자리는 그 하나」(`LSI9`), ruby-lsp 의 설정 파일(`LSC1`), 파일 간 의존 판정과 장벽 요청의 모양(`LSJ22`), 문서 전체를 덮는 range 의 끝(`LSP4` — 빈 문서·끝 개행·다바이트·CRLF·단독 CR)과 didChange 의 두 꼴(`LSJ2`), 문서마다 languageId 와 다루는 확장자(`LSI4`), 보조 서버 ⊂ 주 서버(`AUX6`).
 - 제품 경로: `ASB7` — JSON·CSS 에 주 서버와 Biome 이 함께, `.scss`·`.less` 엔 주 서버만 그 방언의 languageId 로(가짜 서버가 받은 값을 진단에 싣는다 —
   `LANGID` 표식). `LSI5` — 같은 저장소의 `.sh` 엔 Bash 서버가 붙고 `.zsh` 엔 붙지도 상태바에 서지도 않으며 정보·신뢰 관리는 「언어 서버를 쓰는 편집기 문서에서 쓸 수 있습니다」. `LSI7` — tsgo 주 서버가 pull 로 진단을 세우고(그 클라이언트만 알린다 — pull 칸이 꺼진 C 서버는 알림을 못 받았음을 서버 쪽에서 잰다), 편집마다 다시 묻고, 한 문서를 고치거나 새 문서를 열면 다른 열린 문서도 다시 물어 파일 간 의존 진단이 그 문서에 서고 빠지며, 빈 목록이면 걷는다(가짜 서버를 `tsgo` 이름으로 — pull 만 낸다). `LSI6` — `.scss` 의 languageId 가
   didOpen 의 두 길(처음 붙일 때·서버가 죽어 다시 뜬 뒤 다시 열 때) 모두에서 `scss`. `LSD1`·`LSD2` — 편집 열(다바이트 끝·CRLF·끝 개행·큰 삭제·
@@ -149,3 +149,13 @@ maru 본문과 같은지를 진단 개수로 잰다. 방식 넷: range 없는 �
 실제 wire와 제품 상태로 대조한다. SDK 설치는 기본 test에 넣지 않고, SDK가 필요 없는 43개 증거
 판정/소유권 검사만 기본 test에 포함한다. 초기 인덱싱 대기는 test-only이며 제품 정책을 바꾸지 않는다.
 실행과 버전 없는 진단·GUI 미검증 범위는 [실행 안내](../../tools/editor-lsp-real/README.md)가 소유한다.
+
+
+## Rust 진단 pull 복구 (2026-10-26)
+
+rust-analyzer의 push 진단 누락을 pull 조회로 복구한다. 기존의 문서 version/seq/dirty 규율과
+초기 didOpen·didChange·서버 refresh·파일 간 의존 문서 재조회를 사용한다. pull 협상 후에는
+그 서버의 push가 최신 pull을 덮지 않으며 provider 부재는 기존 push로 동작한다.
+명시적 ServerCancelled 재요청 신호는 L2 backoff로 처리한다.
+계약은 [툴링 §8.2u](../editor-surface-tooling.md), 재현과 검증은
+[Rust 진단 조사](../../tools/editor-lsp-real/rust-diagnostics.md)를 참조한다.

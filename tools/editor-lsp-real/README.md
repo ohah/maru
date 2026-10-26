@@ -56,7 +56,7 @@ SDK 설정 예시(경로와 버전은 환경에 맞춘다):
 `editor-real-lsp-judge`는 SDK 없이 실행 파일만 설치한다.
 `test-editor-real-lsp`는 `MARU_REAL_LSP_CASE`를 명시한 한 사례용이며 환경이 없으면 필수 통과 수 검사가 실패한다.
 각 실행의 Zig 5 tests는 **실제 언어 사례 하나 + 모듈 참조 네 개**다. 다섯 언어의 의미가 아니다.
-기본 test에서는 환경 없는 실제 SDK 사례를 skip하고, 43개의 Python 판정/소유권 검사는 실행한다.
+기본 test에서는 환경 없는 실제 SDK 사례를 skip하고, 51개의 Python 판정/소유권 검사는 실행한다.
 
 ## 증거와 격리
 
@@ -89,7 +89,7 @@ Maru에는 HOME/저장소·셸 환경 수집을 넘기지 않는다. SDK에는 �
 같은 파일 내 정의 이동과 지역 변수의 평문 완성만 다룬다. 다른 파일 이동, autoimport, snippet,
 다중 추가 편집, 원격 LSP, 모든 SDK 버전의 호환성은 별도다.
 
-Rust·Go는 진단 version을 보내므로 bad/fixed 버전을 검사한다.
+Rust는 협상된 pull 요청 시점의 version으로 bad/fixed를 대응하고, Go는 push 진단의 version을 검사한다.
 Kotlin·Dart·Scala의 실제 응답은 version을 생략했다. 이 경우 wire의 편집/진단 순서와 제품 상태를 함께 확인한
 `ordered unversioned plus native state`로 표시한다. 서버 내부 분석 버전까지 증명했다고 주장하지 않는다.
 
@@ -99,7 +99,7 @@ Kotlin·Dart·Scala의 실제 응답은 version을 생략했다. 이 경우 wire
 진단 해소 누락, 지난 해소 버전, 해소 후 오류 잔류, 빈 완성,
 버퍼 단어 대체, 다른 선택 항목, 문서 밖 편집, 제품 적용 본문 불일치,
 Undo 본문 불일치, Undo 이력 두 개 증가.
-정상 대조군과 UTF 경계·ID 충돌·비정상 종료·오래된 바이너리·소유권 실패를 더해 총 43개다.
+정상 대조군과 UTF 경계·ID 충돌·비정상 종료·오래된 바이너리·소유권 실패를 더해 총 51개다.
 
 첫 실물 실행에서 Rust가 initialize 직후 정의 요청에 null을 반환했다.
 실패를 숨기지 않고 baseline 진단 준비 대기와 제한된 읽기 재시도로 바꿨다.
@@ -116,3 +116,7 @@ Rust 실행은 통과했다. 당시에는 초기 분석·저장 시점의 간헐
 ReleaseFast의 Rust 완성 요청도 한 번 null을 반환했다. 호버·정의와 같은 제한된
 변경 없는 읽기 재시도를 완성에도 적용하고 시도 수와 모든 null 응답을 기록한다.
 진단 발생을 위한 변경·저장은 자동으로 반복하지 않는다.
+
+Rust는 `diagnostic_transport=pull`이어야 runner가 성공한다. 실제 요청의 본문 version과 URI로
+진단 응답을 독립 대응하며 협상한 서버의 push로 이를 대체할 수 없다.
+서버 취소/버전/늦은 push의 제품 회귀는 `mise exec -- zig build test-editor-rust-pull`로 실행한다.

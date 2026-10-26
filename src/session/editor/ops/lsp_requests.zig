@@ -100,6 +100,29 @@ pub fn expire(g: Gate, sent_at: u64, now: u64, timeout: u64) bool {
     return true;
 }
 
+/// Diagnostic ServerCancelled retries use an independent, capped clock.
+/// An edit/refresh or a successful report resets it; no timer means no retry.
+pub const DiagnosticRetry = struct {
+    at_ms: u64 = 0,
+    attempt: u8 = 0,
+
+    pub fn schedule(self: *DiagnosticRetry, now: u64) void {
+        const delay: u64 = @min(@as(u64, 120) << @as(u6, @intCast(@min(self.attempt, 5))), 2000);
+        self.at_ms = @max(@as(u64, 1), now +| delay);
+        self.attempt +|= 1;
+    }
+
+    pub fn takeDue(self: *DiagnosticRetry, now: u64) bool {
+        if (self.at_ms == 0 or now < self.at_ms) return false;
+        self.at_ms = 0;
+        return true;
+    }
+
+    pub fn reset(self: *DiagnosticRetry) void {
+        self.* = .{};
+    }
+};
+
 // ── 판정자 ────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -202,4 +225,34 @@ test "semantic recovery timeout boundaries, clock rollback, retry and stale resp
     try testing.expect(st.waiting);
     try testing.expectEqual(Verdict.take, receive(g, 2, false, 1));
     try testing.expect(!expire(g, 50, 999, 30)); // completed request
+}
+
+test "RDP diagnostic retry clock resists floods rollback overflow and stale timers" {
+    var clock: DiagnosticRetry = .{};
+    // No clock, even at the largest time, cannot invent a request.
+    try testing.expect(!clock.takeDue(std.math.maxInt(u64)));
+    clock.schedule(1000);
+    try testing.expect(!clock.takeDue(1000)); // no immediate spin
+    try testing.expect(!clock.takeDue(1119)); // just before deadline
+    try testing.expect(!clock.takeDue(999)); // clock rollback cannot send early
+    try testing.expect(clock.takeDue(1120)); // inclusive boundary
+    try testing.expect(!clock.takeDue(1120)); // consuming a timer is single-use
+    clock.schedule(1120);
+    try testing.expect(!clock.takeDue(1359)); // repeated cancellation backs off
+    try testing.expect(clock.takeDue(1360));
+    clock.reset(); // successful response/edit/refresh clears old timer and delay
+    try testing.expect(!clock.takeDue(9999));
+    clock.schedule(2000);
+    try testing.expect(clock.takeDue(2120));
+    for (0..300) |_| clock.schedule(1000); // attempt cannot wrap to a hot loop
+    try testing.expectEqual(@as(u8, 255), clock.attempt);
+    try testing.expect(!clock.takeDue(2999));
+    try testing.expect(clock.takeDue(3000)); // delay is bounded at 2 seconds
+    clock.schedule(std.math.maxInt(u64) - 1);
+    try testing.expect(!clock.takeDue(std.math.maxInt(u64) - 1));
+    try testing.expect(clock.takeDue(std.math.maxInt(u64))); // saturating deadline
+    clock.reset();
+    clock.schedule(0);
+    try testing.expect(!clock.takeDue(0)); // zero is not confused with no timer
+    try testing.expect(clock.takeDue(120));
 }

@@ -157,3 +157,26 @@ mise exec -- zig build test-editor-real-lsp-oracles
 같은 버전의 늦은 push, 다른 seq와 지연된 이전 seq, 지난 문서 version, null 결과,
 오류 해소와 다른 열린 파일의 의존 진단을 검사한다. TS·Ruby·ESLint의 기존 제품 대조군도 함께 실행한다.
 순수 31/제품 9개에는 모듈 참조 테스트가 포함되며 SDK 사례 수와 구분한다.
+
+
+### 수정 후 실제 SDK 결과
+
+구현 커밋 `19e9e02fa`(dirty=false)에서 다섯 언어의 실제 편집 흐름을 두 프로필로 확인했다.
+각각 진단 발생/해소·호버·정의 이동/복귀·완성 적용/Undo와 독립 wire 검증을 통과했다.
+Rust의 진단 경로는 pull로, 다른 네 언어는 기존 push로 확인했다.
+
+이전 RA_LOG 조건의 별도 Rust 반복은 Debug 8회와 ReleaseFast 8회 모두 통과했다.
+이 16회에는 실제 ServerCancelled 응답 23건이 있었고, 재요청 이후 정상 완료했다.
+같은 SDK의 이전 push 전용 16회에는 해소 미수신 6회가 있었다. 반복 수는 위 적대 조건 20개와 별개다.
+
+증거 루트: `/Users/yoonhb/.cache/maru-agent-artifacts/rust-pull-fix-20261026/`.
+`final-debug`, `real-fast`, `race-debug-1`~`8`, `race-fast-1`~`8`의 총 18개 디렉터리를
+SDK 없이 `verify.py`로 다시 검사해 모두 통과했고 `all-offline-verification.json`에 결과를 남겼다.
+`final-debug/tool-sources/verify.py`의 보관한 판정기 사본으로도 재검사했다.
+31개 순수/9개 제품 테스트는 Debug·ReleaseFast에서 전부 통과했고 Python 51개도 통과했다.
+위 적대 조건의 기대 결과를 두 프로필에서 확인했다. GUI/물리 입력 증거로 확대하지 않는다.
+
+전체 `mise run check`는 1071.38초에 종료 코드 0으로 통과했다. 현재 코드의 경계 검사와
+리베이스된 첫 구현 커밋 `907412a9c`의 별도 경계 검사도 통과했다. 그 다음 `5e811e08b`는
+README/조사 문서만 추가한 커밋으로 게이트 대상 Zig 소스가 같다. Swift·최종 문서 링크/줄 참조도 통과했다.
+Draft 주요 CI의 생략과 로컬 통과를 구분하며, 위 로그는 로컬 산출물이다.

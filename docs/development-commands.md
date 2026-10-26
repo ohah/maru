@@ -2095,6 +2095,6 @@ Rust·Go·Kotlin·Dart·Scala의 실제 서버와 AppSession으로 진단 발생
 
 `mise exec -- zig build test-editor-rust-pull -j2`와 `-Doptimize=ReleaseFast`는
 취소 응답 해석·L2 backoff·Rust 서버 선택과 실제 AppSession의 pull/refresh/늦은 push 거부를 검사한다.
-31개 순수 테스트(모듈 참조 포함)와 11개 제품 테스트(모듈 참조 포함)가 각각 전부 통과해야 한다.
+31개 순수 테스트(모듈 참조 포함)와 12개 제품 테스트(모듈 참조 포함)가 각각 전부 통과해야 한다.
 SDK 없는 Python 증거 검사는 `test-editor-real-lsp-oracles`(51개)다.
 실제 SDK 검증은 [실행 안내](../tools/editor-lsp-real/README.md)의 명시적 opt-in 명령을 쓴다.

@@ -2226,13 +2226,17 @@ fn onPullDiagnosticsWithRetry(self: *AppSession, c: *Client, seq: u32, result: ?
                 if (term.rt.editorDocument().notifications.lsp_version != d.pull_version) continue; // 서버가 본 본문이 아니다 — 보낼 때 다시 묻는다
                 const st = &term.rt.editor_diagnostics;
                 const set = serverDiagnostics(st, c) orelse continue;
-                _ = lsp.position.replaceDiagnostics(self.allocator, params, opened.file.content, opened.file.lines, c.encoding, set.list, set.messages) catch {
+                var staged = lsp.position.prepareDiagnostics(self.allocator, params, opened.file.content, opened.file.lines, c.encoding) catch {
                     publication_oom = true;
                     continue;
                 };
+                defer staged.deinit(self.allocator);
+                st.list.clearRetainingCapacity(); // Borrowed messages must go before the old storage.
+                staged.install(self.allocator, set.list, set.messages);
                 accepted = true;
                 for (set.list.items) |*dg| dg.server = c.server.exe;
                 st.lsp_dirty = true;
+                _ = editor_ops.diagnostics.refresh(st, self.allocator);
             };
             if (accepted) {
                 self.editor_lsp.received_diagnostics += 1;
@@ -2274,10 +2278,14 @@ fn onPublishDiagnostics(self: *AppSession, c: *Client, params: ?std.json.Value) 
         const st = &term.rt.editor_diagnostics;
         // 그 서버의 칸만 갈아 끼운다(§8.2u — 한 문서에 서버가 여럿이면 다른 서버의 진단을 지우지 않는다).
         const set = serverDiagnostics(st, c) orelse continue;
-        _ = lsp.position.replaceDiagnostics(self.allocator, p, opened.file.content, opened.file.lines, c.encoding, set.list, set.messages) catch continue;
+        var staged = lsp.position.prepareDiagnostics(self.allocator, p, opened.file.content, opened.file.lines, c.encoding) catch continue;
+        defer staged.deinit(self.allocator);
+        st.list.clearRetainingCapacity();
+        staged.install(self.allocator, set.list, set.messages);
         accepted = true;
         for (set.list.items) |*d| d.server = c.server.exe; // 호버의 `출처(코드)` — 그 진단을 낸 서버(표의 정적 이름)
         st.lsp_dirty = true;
+        _ = editor_ops.diagnostics.refresh(st, self.allocator);
     };
     if (accepted) {
         self.editor_lsp.received_diagnostics += 1;

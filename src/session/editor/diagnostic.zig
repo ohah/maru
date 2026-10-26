@@ -54,6 +54,22 @@ pub fn sort(items: []Diagnostic) void {
     std.mem.sort(Diagnostic, items, {}, lessThan);
 }
 
+/// Merge borrowed source diagnostics. Reserve before touching the output so an
+/// allocation failure can be retried without publishing a partial result.
+pub fn mergeSources(allocator: std.mem.Allocator, out: *std.ArrayList(Diagnostic), primary: []const Diagnostic, others: []const []const Diagnostic) error{OutOfMemory}!void {
+    var required = primary.len;
+    for (others) |source| {
+        const sum = @addWithOverflow(required, source.len);
+        if (sum[1] != 0) return error.OutOfMemory;
+        required = sum[0];
+    }
+    try out.ensureTotalCapacity(allocator, required);
+    out.clearRetainingCapacity();
+    out.appendSliceAssumeCapacity(primary);
+    for (others) |source| out.appendSliceAssumeCapacity(source);
+    sort(out.items);
+}
+
 /// 한 줄의 밑줄 조각 — 줄 안 byte 로(`frame.Mark` 와 같은 축).
 pub const LinePiece = struct { start: u32, len: u32, severity: Severity };
 

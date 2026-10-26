@@ -75,12 +75,10 @@ pub const State = struct {
 /// `.m` 676 개 중 255 개, SQL 57 개 중 12 개 — 계획 editor-bundled-languages 「한계」), 다른 편집기도 그것을 진단으로 내지 않는다.
 pub fn refresh(self: *State, allocator: std.mem.Allocator) bool {
     if (!self.lsp_dirty) return false;
+    var others: [max_aux][]const Diagnostic = undefined;
+    for (&self.aux, 0..) |*set, index| others[index] = set.list.items;
+    diagnostic.mergeSources(allocator, &self.list, self.lsp.items, &others) catch return false;
     self.lsp_dirty = false;
-    self.list.clearRetainingCapacity();
-    for (self.lsp.items) |d| self.list.append(allocator, d) catch break;
-    for (&self.aux) |*set| for (set.list.items) |d| self.list.append(allocator, d) catch break;
-    // 서버 목록은 서버 순서라 합치면 이 정렬이 규칙이 된다(이동·줄 접기의 전제).
-    diagnostic.sort(self.list.items);
     return true;
 }
 
@@ -234,4 +232,19 @@ test "DGS1 표 펴기 — 여러 줄 진단은 줄마다 조각, 마커는 시�
     try testing.expectEqual(chrome_diag.Level.warning, toLevel(.warning));
     try testing.expectEqual(chrome_diag.Level.info, toLevel(.info));
     try testing.expectEqual(chrome_diag.Level.hint, toLevel(.hint));
+}
+
+test "RDP4 a failed diagnostic cache merge remains retryable" {
+    const a = std.testing.allocator;
+    var state: State = .{};
+    defer state.deinit(a);
+    try state.lsp.append(a, .{ .start = 0, .end = 1, .severity = .@"error", .source = .lsp, .message = "retained diagnostic" });
+    state.lsp_dirty = true;
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expect(!refresh(&state, failing.allocator()));
+    try std.testing.expect(state.lsp_dirty);
+    try std.testing.expectEqual(@as(usize, 0), state.list.items.len);
+    try std.testing.expect(refresh(&state, a));
+    try std.testing.expect(!state.lsp_dirty);
+    try std.testing.expectEqualStrings("retained diagnostic", state.list.items[0].message);
 }

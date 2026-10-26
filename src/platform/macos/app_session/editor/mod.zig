@@ -24517,6 +24517,7 @@ test "RDP2 pull allocation failures retain the prior diagnostic publication" {
             doc.pull_dirty = false;
             doc.pull_retry.reset();
             lsp_client.onPullDiagnostics(session, client, 700, value);
+            _ = diagnostics.refresh(&term.rt.editor_diagnostics, session.allocator);
         }
     };
     Seed.apply(s, f.term, c, baseline.value);
@@ -24528,6 +24529,8 @@ test "RDP2 pull allocation failures retain the prior diagnostic publication" {
     try testing.expect(f.term.rt.editor_diagnostics.lsp.items.len == 1);
     try testing.expectEqualStrings(message, f.term.rt.editor_diagnostics.lsp.items[0].message);
     try testing.expectEqualStrings("{\"proof\":true}", f.term.rt.editor_diagnostics.lsp.items[0].data);
+    try testing.expectEqual(@as(usize, 1), f.term.rt.editor_diagnostics.list.items.len);
+    try testing.expect(f.term.rt.editor_diagnostics.list.items[0].message.ptr == f.term.rt.editor_diagnostics.lsp.items[0].message.ptr);
     const allocs = counting.alloc_index;
     try testing.expect(allocs >= 3);
     for (0..allocs) |k| {
@@ -24547,6 +24550,8 @@ test "RDP2 pull allocation failures retain the prior diagnostic publication" {
         try testing.expect(old_items == f.term.rt.editor_diagnostics.lsp.items.ptr);
         try testing.expect(old_messages == f.term.rt.editor_diagnostics.lsp_messages.items.ptr);
         try testing.expect(d.pull_retry.at_ms != 0);
+        try testing.expectEqual(@as(usize, 1), f.term.rt.editor_diagnostics.list.items.len);
+        try testing.expectEqualStrings("kept", f.term.rt.editor_diagnostics.list.items[0].message);
     }
 }
 

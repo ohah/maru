@@ -2335,6 +2335,21 @@ pub fn build(b: *std.Build) void {
     const address_field_ime_step = b.step("test-address-field-ime", "Validate address-field native IME ranges and pinned owner lifetime");
     address_field_ime_step.dependOn(&run_address_ime.step);
 
+    const activity_search_ime_step = b.step("test-activity-search-ime", "Validate activity search native IME ranges and body search admission");
+    const activity_search_ime_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"activity search IME host"},
+    });
+    const run_activity_search_ime = b.addRunArtifact(activity_search_ime_tests);
+    run_activity_search_ime.addArg("--maru-expect-tests=39");
+    run_activity_search_ime.setCwd(b.path("."));
+    activity_search_ime_step.dependOn(&run_activity_search_ime.step);
+    const activity_ime_artifact_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/activity-search-ime", "-p", "test_*.py" });
+    activity_ime_artifact_controls.setCwd(b.path("."));
+    activity_ime_artifact_controls.has_side_effects = true;
+    activity_search_ime_step.dependOn(&activity_ime_artifact_controls.step);
+    if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_activity_search_ime.step);
+
     const inspector_search_ime_step = b.step("test-inspector-search-ime", "Validate Inspector search native ranges and input ownership");
     const inspector_search_ime_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
@@ -4933,6 +4948,7 @@ pub fn build(b: *std.Build) void {
     const posix_host_tests = target.result.os.tag != .windows;
 
     const test_step = b.step("test", "Run all Zig tests");
+    test_step.dependOn(&activity_ime_artifact_controls.step);
     test_step.dependOn(&inspector_ime_artifact_controls.step);
 
     test_step.dependOn(&run_inspector_rules.step);
@@ -4945,6 +4961,16 @@ pub fn build(b: *std.Build) void {
         run_address_model.addArg("--maru-expect-tests=15");
         address_field_ime_step.dependOn(&run_address_model.step);
         test_step.dependOn(&run_address_model.step);
+    }
+    inline for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
+        const activity_models = addProjectTest(b, .{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
+            .filters = &.{"activity search IME model"},
+        });
+        const run_activity_models = b.addRunArtifact(activity_models);
+        run_activity_models.addArg("--maru-expect-tests=15");
+        activity_search_ime_step.dependOn(&run_activity_models.step);
+        test_step.dependOn(&run_activity_models.step);
     }
     const inline_input_step = b.step("test-inline-text-input", "Validate bounded UTF-16 inline IME projections and failure atomicity");
     const owned_inline_step = b.step("test-inline-text-input-owned", "Validate dynamic IME storage, deep snapshots and allocation failure");

@@ -474,6 +474,7 @@ pub fn dockListScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_area
 /// 남겨 둔다.
 pub fn setDockView(self: *AppSession, view: dock_panel.View) void {
     if (self.dock.view == view) return;
+    if (self.dock.view == .agent_activity and !@import("activity_search_ime.zig").commitAll(self)) return;
     if (self.agent_session_archive_search_active and !@import("chrome_ime.zig").commitAll(self)) return;
     // `dock.size == 0`은 view별 자동 폭 sentinel이다. 따라서 explorer(180pt)와
     // agent_sessions(640pt) 사이에서는 창 resize를 기다리지 않고 같은 event에서 모든 pane의

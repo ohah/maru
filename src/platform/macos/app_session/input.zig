@@ -562,6 +562,7 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
         @import("settings_ime.zig").finish(self);
         @import("find_ime.zig").finish(self);
         @import("scm_commit_ime.zig").finish(self);
+        @import("activity_search_ime.zig").finish(self);
         @import("inspector_ime.zig").finish(self);
         @import("sidebar_ime.zig").finish(self);
         @import("editor/search/ime.zig").finish(self);

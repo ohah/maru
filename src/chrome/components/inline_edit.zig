@@ -95,11 +95,22 @@ pub fn composeLine(allocator: std.mem.Allocator, field: *const TextField, caret_
 pub fn composeLineFit(allocator: std.mem.Allocator, field: *const TextField, caret_glyph: []const u8, avail_cols: usize) ![]u8 {
     const full = try composeLine(allocator, field, caret_glyph);
     errdefer allocator.free(full);
-    if (avail_cols == 0 or text_layout.displayCols(full, null) <= avail_cols) return full;
     const marker_end = @min(field.caret, field.text.items.len) + visiblePreeditCaret(field) + caret_glyph.len;
+    const end = fitLineEnd(full, marker_end, avail_cols);
+    if (end == full.len) return full;
+    const trimmed = try allocator.dupe(u8, full[0..end]);
+    allocator.free(full);
+    return trimmed;
+}
+
+/// Shared, allocation-free viewport planning for an already composed line.
+/// Consumers retain the original tail clipping and Unicode cluster width policy.
+pub fn fitLineEnd(full: []const u8, marker_end_raw: usize, avail_cols: usize) usize {
+    if (avail_cols == 0 or text_layout.displayCols(full, null) <= avail_cols) return full.len;
+    const marker_end = @min(marker_end_raw, full.len);
     const post = full[marker_end..];
     const keep = avail_cols / 2;
-    if (text_layout.displayCols(post, null) < keep) return full; // tail 창이 이미 caret 을 담는다
+    if (text_layout.displayCols(post, null) < keep) return full.len;
     var end: usize = 0;
     var cols: usize = 0;
     while (end < post.len) {
@@ -109,9 +120,7 @@ pub fn composeLineFit(allocator: std.mem.Allocator, field: *const TextField, car
         cols += w;
         end = text_layout.clusterEndAfter(post, end, base.advance);
     }
-    const trimmed = try std.mem.concat(allocator, u8, &.{ full[0..marker_end], post[0..end] });
-    allocator.free(full);
-    return trimmed;
+    return marker_end + end;
 }
 
 /// 그려진 줄에서 caret이 놓이는 **창 안의 열** — IME 후보창 자리.

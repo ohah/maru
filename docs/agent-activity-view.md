@@ -124,6 +124,12 @@ provider는 갤러리와 같은 **Codex와 Claude Code만**이고, 같은 로컬
 
 ### 2.1.1 검색은 두 층이다 — 라벨은 즉시, 본문은 Enter
 
+Native IME는 검색 owner별 동적 문맥에서 UTF-16 교체 범위·선택·조합 취소를 처리한다.
+확정 query만 라벨 필터에 게시하며 후보 미리보기와 후보 확정 Return은 본문 검색을 시작하지 않는다.
+후보를 고른 뒤 별도로 누른 Return에서만 본문 worker를 요청한다. query 한도나 메모리 부족으로
+키를 거절하면 query·preedit·필터와 기존 본문 답을 함께 보존한다. 표시 caret과 후보창 anchor는
+같은 grapheme 줄 계획을 사용한다. 구현·검증 범위는 [활동 검색 IME 계획](plans/activity-search-ime.md)을 따른다.
+
 **라벨만 보는 검색은 세션의 2.9% 만 본다.** 실측(2026-09-09, 최근 **Claude** 60 세션 ·
 호출 61,429 — provider 를 적는다. Codex 는 모양이 달라 아래에서 따로 잰다):
 

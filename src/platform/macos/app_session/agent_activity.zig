@@ -278,6 +278,7 @@ pub const State = struct {
     /// 직접 만든 바이트 버퍼로는 애초에 못 받는다. 거르는 데 쓰는 것은 확정된 `query` 뿐이고
     /// `preedit` 는 그리기 전용이다(아카이브 검색과 같은 규율).
     search: chrome.components.overlay_input.OverlayInput = .{},
+    ime: @import("activity_search_ime.zig").State = .{},
     /// 검색창이 키를 받고 있나.
     search_active: bool = false,
     /// **아래층 검색**(계약 §2.1.1 — 「라벨은 즉시, 본문은 Enter」). 위층(`search`)은 라벨만 보고
@@ -355,6 +356,7 @@ pub const State = struct {
         self.all_hits.deinit(allocator);
         self.all_labels.deinit(allocator);
         self.all_body_flags.deinit(allocator);
+        self.ime.model.deinit(allocator);
         self.search.deinit(allocator);
         self.body.deinit(allocator);
         self.dropTiles(allocator);
@@ -400,6 +402,8 @@ pub const State = struct {
     }
 
     pub fn clear(self: *State, allocator: std.mem.Allocator) void {
+        self.ime.model.abort(allocator, &self.search);
+        self.ime.retire();
         self.dropOpen(allocator);
         self.dropTiles(allocator);
         self.hits.clearAndFree(allocator);
@@ -532,6 +536,8 @@ pub const State = struct {
     /// 반쯤 걸러 두면 사용자는 왜 어떤 이미지가 사라졌는지 알 수 없다. 여기서도 자리를 못 잡으면
     /// 목록은 비지만, **`hits` 와 `labels` 는 언제나 같은 길이다**(둘 다 비어 있다).
     fn showAll(self: *State, allocator: std.mem.Allocator) void {
+        self.ime.model.abort(allocator, &self.search);
+        self.ime.retire();
         self.search.clear();
         // **센 값도 함께 지운다.** 검색을 껐는데 「라벨 3 · 본문 +12」가 남아 있으면, 목록은 그
         // 종류를 통째로 보여 주면서 안내 줄만 옛 검색을 말한다 — 화면이 자기 자신과 어긋난다
@@ -940,7 +946,7 @@ pub fn reverseFoldOwners(hits: []index.Hit) void {
 pub const activity_image_id_base: u32 = 0xFFF0_0000;
 
 /// 검색어 상한(바이트). 아카이브 검색과 같은 값이다.
-pub const max_query_bytes: usize = 256;
+pub const max_query_bytes: usize = chrome.components.activity_search_ime.query_limit;
 
 /// 동시에 픽셀을 들고 있는 타일 수 상한. 장당 0.06 MB 이므로 256장이면 15 MB 다.
 pub const max_tiles: usize = 256;
@@ -1947,6 +1953,8 @@ pub fn onSourceChanged(self: *AppSession) void {
 
 /// 갤러리를 떠날 때. 도는 스캔을 취소한다 — 안 보는 화면 때문에 3.6 초를 끝까지 돌 이유가 없다.
 pub fn onLeaveView(self: *AppSession) void {
+    if (!@import("activity_search_ime.zig").commitAll(self)) self.agent_activity.ime.model.abort(self.allocator, &self.agent_activity.search);
+    @import("activity_search_ime.zig").retire(self);
     self.agent_activity.search_active = false;
     if (!builtin.target.os.tag.isDarwin()) return;
     const backend = backendPtr(self) orelse return;
@@ -2399,6 +2407,7 @@ pub fn focusSearch(self: *AppSession) bool {
     // **갤러리가 키를 쥐고 있을 때만**이다. 도크가 보인다는 것만으로 열면, 터미널에 타이핑하던 사용자의
     // ⌘F 가 터미널 찾기 대신 갤러리 검색을 연다.
     if (!ownsKeys(self)) return false;
+    if (!self.agent_activity.search_active) @import("activity_search_ime.zig").retire(self);
     self.agent_activity.search_active = true;
     self.metal_dirty = true;
     return true;
@@ -2427,10 +2436,14 @@ pub fn handleSearchKey(self: *AppSession, event: maru.terminal.KeyEvent) bool {
             if (self.agent_activity.search.query.items.len > 0 or
                 self.agent_activity.search.preedit.items.len > 0)
             {
+                self.agent_activity.ime.model.abort(self.allocator, &self.agent_activity.search);
+                @import("activity_search_ime.zig").retire(self);
                 self.agent_activity.search.clear();
                 cancelBodySearch(self);
                 rebuildFilter(self);
             } else {
+                if (!@import("activity_search_ime.zig").commitAll(self)) return true;
+                @import("activity_search_ime.zig").retire(self);
                 self.agent_activity.search_active = false;
                 self.metal_dirty = true;
             }
@@ -2441,12 +2454,15 @@ pub fn handleSearchKey(self: *AppSession, event: maru.terminal.KeyEvent) bool {
             // **그리고 본문까지 넓힌다**(계약 §2.1.1). 라벨만 보는 검색은 세션의 2.9% 라, 「어떤
             // grep 으로 뭐가 나왔나」를 이 뷰가 답하려면 여기서 한 번 더 가야 한다. 글자마다 하지
             // 않는 이유는 대가다 — 조각을 읽어 푸는 일이라 수백 ms 다.
+            if (!@import("activity_search_ime.zig").commitAll(self)) return true;
+            @import("activity_search_ime.zig").retire(self);
             self.agent_activity.search_active = false;
             submitBodySearch(self);
             self.metal_dirty = true;
         },
         .backspace => {
             if (self.agent_activity.search.query.items.len == 0) return true;
+            self.agent_activity.ime.model.projection.invalidate();
             self.agent_activity.search.backspace(); // codepoint 단위 — 바이트로 지우면 한글이 깨진다
             // **검색어가 바뀌면 본문 답은 남의 답이다.** `appliesTo` 가 그것을 이미 막지만, 놓지
             // 않으면 워커가 아무도 안 볼 것을 위해 계속 돈다.
@@ -2456,6 +2472,7 @@ pub fn handleSearchKey(self: *AppSession, event: maru.terminal.KeyEvent) bool {
         .char => |codepoint| {
             if (event.modifiers.command or event.modifiers.control or event.modifiers.option) return false;
             if (self.agent_activity.search.query.items.len + 4 > max_query_bytes) return true;
+            self.agent_activity.ime.model.projection.invalidate();
             self.agent_activity.search.appendChar(self.allocator, codepoint) catch return true;
             cancelBodySearch(self);
             rebuildFilter(self);
@@ -2468,8 +2485,8 @@ pub fn handleSearchKey(self: *AppSession, event: maru.terminal.KeyEvent) bool {
 
 /// IME 후보창을 띄울 자리 — 검색줄 caret 셀. 검색 중이 아니면 `null`(터미널 커서로 폴백).
 ///
-/// **조합 중인 글자 뒤에 둔다**: 후보창이 preedit 앞에 붙으면 한글을 고르는 동안 후보창이 자기가 친
-/// 글자를 가린다.
+/// native 문맥은 실제 selected offset을 쓰고, legacy 문맥은 preedit 끝을 쓴다.
+/// paint와 같은 줄 레이아웃을 읽으므로 중간 재변환에서도 후보창이 suffix 뒤로 밀리지 않는다.
 /// 검색줄이 쓸 수 있는 칸 수. 알림 줄과 **같은 폭**이다(같은 자리를 쓰므로).
 fn searchLineCols(self: *const AppSession) u32 {
     const cw = self.cell_width_px;
@@ -2488,12 +2505,14 @@ pub fn searchCaretRect(self: *const AppSession) ?chrome.draw.Rect {
     var buf: [notice_buf_bytes]u8 = undefined;
     const line = searchLine(self, &buf);
     // 줄 끝을 넘지 않게 — 넘으면 후보창이 도크 밖에 뜬다.
-    const max_x = content.x +| content.w -| cw;
+    if (content.w == 0 or content.h == 0) return null;
+    const bar = @min(content.w, chrome.ui.spacing.pointsPx(1, self.scale_milli));
+    const max_x = content.x +| content.w -| bar;
     return .{
         .x = @intCast(@min(content.x +| line.caret_cols *| cw, max_x)),
         .y = @intCast(content.y),
-        .w = cw,
-        .h = ch,
+        .w = bar,
+        .h = @min(ch, content.h),
     };
 }
 
@@ -2501,8 +2520,16 @@ pub fn searchCaretRect(self: *const AppSession) ?chrome.draw.Rect {
 ///
 /// 도크는 좁다. 길어지면 **뒤쪽**을 보인다(`tailWindow`) — 앞을 보이면 방금 친 글자가 화면 밖이라
 /// 자기가 무엇을 치고 있는지 알 수 없다.
-pub const SearchLine = struct { text: []const u8, caret_cols: u32 };
+pub const SearchLine = chrome.components.activity_search_ime.Line;
 fn searchLine(self: *const AppSession, buf: []u8) SearchLine {
+    const s = &self.agent_activity;
+    const current = s.ime.model.projection.current(&s.search);
+    var scratch: [notice_buf_bytes]u8 = undefined;
+    const text = if (current) |c| c.text() else std.fmt.bufPrint(&scratch, "{s}{s}", .{ s.search.query.items, s.search.preedit.items }) catch return legacySearchLine(self, buf);
+    return chrome.components.activity_search_ime.line(buf, maru.i18n.t(.agent_activity_search_prompt), .{ .text = text, .caret = if (current) |c| c.selected.end else text.len }, if (s.body.appliesTo(s.search.query.items)) "" else maru.i18n.t(.agent_activity_body_hint), searchLineCols(self));
+}
+
+fn legacySearchLine(self: *const AppSession, buf: []u8) SearchLine {
     const prompt = maru.i18n.t(.agent_activity_search_prompt);
     const pre = self.agent_activity.search.preedit.items;
     const prompt_cols = chrome.components.overlay_input.displayCols(prompt);
@@ -2543,6 +2570,26 @@ fn searchLine(self: *const AppSession, buf: []u8) SearchLine {
     return .{ .text = buf[0..len], .caret_cols = caret_cols };
 }
 
+/// The painted insertion bar and OS anchor read the same fixed-buffer layout.
+pub fn collectSearchCaret(self: *AppSession) void {
+    if (!self.blink_visible) return;
+    const rect = searchCaretRect(self) orelse return;
+    const color = app_session_mod.packRgbAlpha(self.appearance.theme.sidebar_foreground, 0xff);
+    self.gpu_quads.append(self.allocator, .{
+        .x = @floatFromInt(rect.x),
+        .y = @floatFromInt(rect.y),
+        .w = @floatFromInt(rect.w),
+        .h = @floatFromInt(rect.h),
+        .corner_radii = .{ 0, 0, 0, 0 },
+        .border_widths = .{ 0, 0, 0, 0 },
+        .fill_color0 = color,
+        .fill_color1 = color,
+        .border_color = 0,
+        .gradient_kind = 0,
+        .layer = hover_layer,
+    }) catch {};
+}
+
 /// 알림 줄 버퍼 크기. 검색어 상한 + 앞머리 + 조합 글자가 들어갈 만큼이다.
 pub const notice_buf_bytes: usize = max_query_bytes + 128;
 
@@ -2555,6 +2602,8 @@ pub fn ownsKeys(self: *const AppSession) bool {
 /// 터미널을 눌렀다 = 키보드를 놓는다. **크게 보기는 그대로 둔다** — 보던 것을 클릭 한 번에 잃지 않는다.
 pub fn releaseKeyFocus(self: *AppSession) void {
     if (!self.agent_activity.key_focus) return;
+    if (!@import("activity_search_ime.zig").commitAll(self)) return;
+    @import("activity_search_ime.zig").retire(self);
     self.agent_activity.key_focus = false;
     self.metal_dirty = true;
 }
@@ -3730,6 +3779,8 @@ pub fn handleChipDown(self: *AppSession, x_px: f64, y_px: f64) bool {
 /// 두 입구가 다른 정리를 하면 「Tab 으로 바꿨을 때와 눌러서 바꿨을 때가 다르다」가 된다.
 pub fn setFilter(self: *AppSession, want: Filter) void {
     if (self.agent_activity.filter == want) return;
+    if (!@import("activity_search_ime.zig").commitAll(self)) return;
+    @import("activity_search_ime.zig").retire(self);
     closeOpen(self);
     self.agent_activity.filter = want;
     self.agent_activity.scroll.offset_y_px = 0;

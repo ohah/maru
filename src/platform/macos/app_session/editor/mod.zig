@@ -26958,6 +26958,146 @@ const SmtFixture = struct {
     }
 };
 
+// Real-SDK retries must follow the same notice acknowledgement as a human.
+// Injecting null into the actual definition controller makes this independent
+// of indexer timing, then the actual completion controller proves the widget.
+test "RLC1 definition null notice acknowledgement unblocks real completion state without editing" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const judge = @import("real_lsp_judge.zig");
+    const def = @import("definition.zig");
+    const comp = @import("completion.zig");
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    const s = fx.session;
+    const t = fx.term;
+    s.loaded_config.config.lsp.enabled = false;
+    s.surface_initialized = true;
+    s.backing_width_px = 1200;
+    s.backing_height_px = 800;
+    const source = "const probe_result = 41;\nconst x = probe_resul;\n";
+    var edits = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = t.rt.editorDocument().opened.?.file.content.len, .text = source }};
+    try testing.expect(applyEditAsOneWithUndo(s, t, &edits));
+    const caret = (std.mem.indexOf(u8, source, "probe_resul;") orelse unreachable) + "probe_resul".len;
+    t.rt.editor_selection = .{ .anchor_start = caret, .anchor_end = caret, .focus = caret };
+    var seen: u64 = 0;
+    s.editor_definition.waiting = true;
+    s.editor_definition.waiting_seq = 7;
+    def.onDefinitionResponse(s, 7, null, .utf8);
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expect(s.editorHelpersSuppressed());
+    const undo_before = t.rt.editorDocument().history.undo_len;
+    try testing.expect(try judge.acknowledgeDefinitionMiss(s, &seen));
+    try testing.expectEqual(@as(u64, 1), seen);
+    try testing.expect(!s.chrome_host.notice.open);
+    try testing.expectEqualStrings(source, t.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(undo_before, t.rt.editorDocument().history.undo_len);
+    try testing.expectEqual(caret, t.rt.editor_selection.?.focus);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, a,
+        \\[{"label":"probe_result","kind":6}]
+    , .{});
+    defer parsed.deinit();
+    s.editor_completion.waiting = true;
+    s.editor_completion.waiting_seq = 8;
+    s.editor_completion.waiting_surface = t.surface.id;
+    s.editor_completion.asked_word_start = caret - "probe_resul".len;
+    comp.onResponse(s, 8, parsed.value, .utf8);
+    const leaf = activeLeafRectForTest(s) orelse return error.NoRealLspGeometry;
+    var frame = appendPaneFrame(s, leaf, t) orelse return error.RealLspDidNotDraw;
+    frame.dl.deinit(a);
+    try testing.expect(comp.refresh(s));
+    try testing.expect(s.chrome_host.suggest_box.open);
+    try testing.expectEqual(@as(usize, 1), s.editor_completion.order.items.len);
+    try testing.expectEqual(@as(u8, 6), s.editor_completion.items.items[s.editor_completion.order.items[0]].kind);
+    try testing.expect(comp.handleKey(s, .enter, .{}));
+    try testing.expectEqualStrings("const probe_result = 41;\nconst x = probe_result;\n", t.rt.editorDocument().opened.?.file.content);
+    try testing.expect(undoEdit(s, t));
+    try testing.expectEqualStrings(source, t.rt.editorDocument().opened.?.file.content);
+}
+
+// Counter provenance and the notice identity must both match. The judge must
+// never turn an unrelated error into a successful SDK result by dismissing it.
+test "RLC2 retry acknowledgement guards unrelated notices and counter boundaries" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const judge = @import("real_lsp_judge.zig");
+    const max = std.math.maxInt(u64);
+    const Outcome = enum { none, acknowledged, unexpected, blocked };
+    const Scenario = struct {
+        current: u64,
+        seen: u64,
+        open: bool = true,
+        own: bool = true,
+        ended: bool = false,
+        picking: bool = false,
+        trust: bool = false,
+        outcome: Outcome,
+    };
+    const scenarios = [_]Scenario{
+        .{ .current = 0, .seen = 0, .open = false, .outcome = .none },
+        .{ .current = 0, .seen = 0, .own = false, .outcome = .none },
+        .{ .current = 0, .seen = 0, .outcome = .none },
+        .{ .current = 1, .seen = 1, .outcome = .none },
+        .{ .current = 1, .seen = 2, .outcome = .none },
+        .{ .current = 0, .seen = 1, .outcome = .none },
+        .{ .current = 1, .seen = 0, .open = false, .outcome = .none },
+        .{ .current = 3, .seen = 0, .open = false, .outcome = .none },
+        .{ .current = max, .seen = 0, .open = false, .outcome = .none },
+        .{ .current = 1, .seen = 0, .outcome = .acknowledged },
+        .{ .current = 2, .seen = 1, .outcome = .acknowledged },
+        .{ .current = 3, .seen = 0, .outcome = .acknowledged },
+        .{ .current = max, .seen = max - 1, .outcome = .acknowledged },
+        .{ .current = 1, .seen = 0, .own = false, .outcome = .unexpected },
+        .{ .current = 2, .seen = 1, .own = false, .outcome = .unexpected },
+        .{ .current = max, .seen = 0, .own = false, .outcome = .unexpected },
+        .{ .current = 1, .seen = 0, .ended = true, .outcome = .blocked },
+        .{ .current = 1, .seen = 0, .picking = true, .outcome = .blocked },
+        .{ .current = 1, .seen = 0, .open = false, .own = false, .trust = true, .outcome = .none },
+        .{ .current = 0, .seen = max, .open = false, .outcome = .none },
+    };
+    for (scenarios, 0..) |scenario, index| {
+        errdefer std.debug.print("RLC2 scenario {d} failed\n", .{index + 1});
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const s = fx.session;
+        s.loaded_config.config.lsp.enabled = false;
+        s.editor_definition.notified_none = scenario.current;
+        s.chrome_host.notice.message = if (scenario.own) maru.i18n.t(.nav_no_definition) else "unrelated save failure";
+        s.chrome_host.notice.open = scenario.open;
+        s.ended_seen = scenario.ended;
+        s.inspector.picking = scenario.picking;
+        if (scenario.trust) s.showConfirmKeys(.lsp_trust, .scm_trust_prompt, .{ .confirm = .scm_trust_allow, .cancel = .common_cancel });
+        var seen = scenario.seen;
+        const before_keys = s.total_key_events;
+        const before_caret = fx.term.rt.editor_selection;
+        const before_undo = fx.term.rt.editorDocument().history.undo_len;
+        const before_text = try testing.allocator.dupe(u8, fx.term.rt.editorDocument().opened.?.file.content);
+        defer testing.allocator.free(before_text);
+        switch (scenario.outcome) {
+            .none => try testing.expect(!try judge.acknowledgeDefinitionMiss(s, &seen)),
+            .acknowledged => {
+                try testing.expect(try judge.acknowledgeDefinitionMiss(s, &seen));
+                try testing.expectEqual(before_keys + 1, s.total_key_events);
+                try testing.expect(!s.chrome_host.notice.open);
+            },
+            .unexpected => try testing.expectError(error.UnexpectedDefinitionNotice, judge.acknowledgeDefinitionMiss(s, &seen)),
+            .blocked => try testing.expectError(error.DefinitionNoticeNotAcknowledged, judge.acknowledgeDefinitionMiss(s, &seen)),
+        }
+        if (scenario.outcome != .acknowledged) try testing.expectEqual(scenario.open, s.chrome_host.notice.open);
+        if (scenario.trust) {
+            try testing.expect(s.chrome_host.confirm.open);
+            try testing.expect(s.pending_confirm == .lsp_trust);
+        }
+        if (scenario.outcome == .none or scenario.outcome == .unexpected) try testing.expectEqual(before_keys, s.total_key_events);
+        if (scenario.outcome == .acknowledged or (!scenario.open and scenario.current > scenario.seen)) {
+            try testing.expectEqual(scenario.current, seen);
+        } else try testing.expectEqual(scenario.seen, seen);
+        try testing.expectEqualStrings(before_text, fx.term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(before_undo, fx.term.rt.editorDocument().history.undo_len);
+        try testing.expectEqualDeep(before_caret, fx.term.rt.editor_selection);
+    }
+}
+
 // This is opt-in: the ordinary suite never discovers or installs real servers.
 // The dedicated runner requires five passed tests, so a missing case cannot be
 // mistaken for a successful real-server execution.

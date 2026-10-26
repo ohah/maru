@@ -27,12 +27,87 @@ pub const Case = struct {
     timeout_ms: u64 = 90_000,
 };
 
+// Keep the state on both sides of frame preparation: a server item can exist
+// while a modal, missing hit geometry, or filtering keeps the widget invisible.
+// Fixed storage keeps observation from adding allocator failures to the judge.
+const CompletionSnapshot = struct {
+    const Phase = enum { before_paint, after_paint, after_refresh };
+    phase: Phase,
+    at_ms: u64,
+    attempts: usize,
+    received: u64,
+    active: bool,
+    waiting: bool,
+    words_only: bool,
+    helpers_suppressed: bool,
+    notice_open: bool,
+    widget_open: bool,
+    items: usize,
+    ordered: usize,
+    expected_items: usize,
+    expected_ordered: usize,
+    hit_rows: usize,
+    word_start: usize,
+    caret: usize,
+};
+
+const CompletionObservation = struct {
+    waiting_polls: usize = 0,
+    no_response_polls: usize = 0,
+    words_only_polls: usize = 0,
+    refresh_failures: usize = 0,
+    closed_widget_polls: usize = 0,
+    missing_item_polls: usize = 0,
+    samples: [16]CompletionSnapshot = undefined,
+    samples_len: usize = 0,
+    last: ?CompletionSnapshot = null,
+
+    fn capture(self: *CompletionObservation, s: *host.AppSession, t: *host.Term, name: []const u8, attempts: usize, phase: CompletionSnapshot.Phase) void {
+        const st = &s.editor_completion;
+        var expected_items: usize = 0;
+        var expected_ordered: usize = 0;
+        for (st.items.items) |item| {
+            if (item.kind != maru.session.editor.lsp.completion.word_kind and std.mem.eql(u8, item.filter, name)) expected_items += 1;
+        }
+        for (st.order.items) |index| {
+            const item = st.items.items[index];
+            if (item.kind != maru.session.editor.lsp.completion.word_kind and std.mem.eql(u8, item.filter, name)) expected_ordered += 1;
+        }
+        const snapshot: CompletionSnapshot = .{
+            .phase = phase,
+            .at_ms = s.awakeMs(),
+            .attempts = attempts,
+            .received = s.editor_lsp.received_completions,
+            .active = st.active,
+            .waiting = st.waiting,
+            .words_only = st.words_only,
+            .helpers_suppressed = s.editorHelpersSuppressed(),
+            .notice_open = s.chrome_host.notice.open,
+            .widget_open = s.chrome_host.suggest_box.open,
+            .items = st.items.items.len,
+            .ordered = st.order.items.len,
+            .expected_items = expected_items,
+            .expected_ordered = expected_ordered,
+            .hit_rows = t.rt.editor_hit_rows_len,
+            .word_start = st.word_start,
+            .caret = if (t.rt.editor_selection) |sel| sel.focus else 0,
+        };
+        if (self.samples_len < self.samples.len) {
+            self.samples[self.samples_len] = snapshot;
+            self.samples_len += 1;
+        }
+        self.last = snapshot;
+    }
+};
+
 const Report = struct {
+    completion_observation: CompletionObservation = .{},
     stage: []const u8 = "ready",
     failure: ?[]const u8 = null,
     hover_displayed: bool = false,
     hover_attempts: usize = 0,
     definition_attempts: usize = 0,
+    definition_notices_acknowledged: usize = 0,
     completion_attempts: usize = 0,
     definition_navigated: bool = false,
     navigation_returned: bool = false,
@@ -125,7 +200,9 @@ fn runSteps(s: *host.AppSession, t: *host.Term, c: Case, r: *Report, paint: Pain
     const moved = s.editor_definition.navigated;
     deadline = s.awakeMs() + c.timeout_ms;
     var last_definition: u64 = 0;
+    var seen_definition_misses = s.editor_definition.notified_none;
     while (s.editor_definition.navigated == moved and s.awakeMs() < deadline) {
+        if (try acknowledgeDefinitionMiss(s, &seen_definition_misses)) r.definition_notices_acknowledged += 1;
         // A ready initialize response does not mean workspace indexing is done.
         // Retry only this unchanged read in the judge, retaining every raw null
         // response and attempt count. Persistent failure still fails the case.
@@ -191,9 +268,32 @@ fn runSteps(s: *host.AppSession, t: *host.Term, c: Case, r: *Report, paint: Pain
             if (!completion.triggerManual(s)) return error.CompletionNotRequested;
         }
         pump(s);
-        if (s.editor_completion.waiting or s.editor_lsp.received_completions <= received_before or s.editor_completion.words_only) continue;
+        const observation = &r.completion_observation;
+        if (s.editor_completion.waiting) {
+            observation.waiting_polls += 1;
+            continue;
+        }
+        if (s.editor_lsp.received_completions <= received_before) {
+            observation.no_response_polls += 1;
+            continue;
+        }
+        if (s.editor_completion.words_only) {
+            observation.words_only_polls += 1;
+            continue;
+        }
+        observation.capture(s, t, c.completion_name, r.completion_attempts, .before_paint);
         try paint(s, t);
-        if (!completion.refresh(s) or !s.chrome_host.suggest_box.open) continue;
+        observation.capture(s, t, c.completion_name, r.completion_attempts, .after_paint);
+        const refreshed = completion.refresh(s);
+        observation.capture(s, t, c.completion_name, r.completion_attempts, .after_refresh);
+        if (!refreshed) {
+            observation.refresh_failures += 1;
+            continue;
+        }
+        if (!s.chrome_host.suggest_box.open) {
+            observation.closed_widget_polls += 1;
+            continue;
+        }
         for (s.editor_completion.order.items, 0..) |index, row| {
             const item = s.editor_completion.items.items[index];
             // Buffer words cannot prove server completion. Some real servers
@@ -207,6 +307,7 @@ fn runSteps(s: *host.AppSession, t: *host.Term, c: Case, r: *Report, paint: Pain
             }
         }
         if (found) break;
+        observation.missing_item_polls += 1;
     }
     if (!found) return error.ExpectedServerCompletionMissing;
     const undo_before = t.rt.editorDocument().history.undo_len;
@@ -225,6 +326,24 @@ fn runSteps(s: *host.AppSession, t: *host.Term, c: Case, r: *Report, paint: Pain
     r.received_diagnostics = s.editor_lsp.received_diagnostics;
     r.received_completions = s.editor_lsp.received_completions;
     r.stage = "complete";
+}
+
+/// The judge retries an unchanged read by calling the controller directly.
+/// Unlike a real key, that call cannot acknowledge a preceding no-target notice.
+pub fn acknowledgeDefinitionMiss(s: *host.AppSession, seen: *u64) !bool {
+    const current = s.editor_definition.notified_none;
+    if (current <= seen.*) return false;
+    if (!s.chrome_host.notice.open) {
+        seen.* = current;
+        return false;
+    }
+    // Never acknowledge an unrelated error, trust prompt or confirmation.
+    // Counter provenance plus the translated message identifies our read miss.
+    if (!std.mem.eql(u8, s.chrome_host.notice.message, maru.i18n.t(.nav_no_definition))) return error.UnexpectedDefinitionNotice;
+    _ = try s.handleKeyEvent(.{ .key = .escape });
+    if (s.chrome_host.notice.open) return error.DefinitionNoticeNotAcknowledged;
+    seen.* = current;
+    return true;
 }
 
 pub fn run(s: *host.AppSession, t: *host.Term, c: Case, paint: Paint) !void {
@@ -271,7 +390,19 @@ fn write(s: *host.AppSession, c: Case, r: Report) !void {
         .hover_displayed = r.hover_displayed,
         .hover_attempts = r.hover_attempts,
         .definition_attempts = r.definition_attempts,
+        .definition_notices_acknowledged = r.definition_notices_acknowledged,
         .completion_attempts = r.completion_attempts,
+        .completion_observation = .{
+            .waiting_polls = r.completion_observation.waiting_polls,
+            .no_response_polls = r.completion_observation.no_response_polls,
+            .words_only_polls = r.completion_observation.words_only_polls,
+            .refresh_failures = r.completion_observation.refresh_failures,
+            .closed_widget_polls = r.completion_observation.closed_widget_polls,
+            .missing_item_polls = r.completion_observation.missing_item_polls,
+            .samples = r.completion_observation.samples[0..r.completion_observation.samples_len],
+            .last = r.completion_observation.last,
+            .notice_message = if (s.chrome_host.notice.open) s.chrome_host.notice.message else "",
+        },
         .hover_text = r.hover_text.items,
         .definition_navigated = r.definition_navigated,
         .navigation_returned = r.navigation_returned,

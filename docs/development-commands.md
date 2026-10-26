@@ -2147,3 +2147,13 @@ SDK 없는 Python 증거 검사는 `test-editor-real-lsp-oracles`(현재 79개 �
 `python3 tools/scm-commit-ime/run.py --output /private/tmp/maru-scm-ime-<고유명> --mode diagnostic`는
 격리 Git 저장소에서 실제 입력·후보창 geometry를 확인하며 픽셀 성공을 주장하지 않는다. 같은 최종 앱으로
 `--mode live --app <앱 실행 파일> --output <새 외부 경로>`를 실행해야 PNG/OCR 검증이 완료된다.
+
+## Inspector 검색창 native IME
+
+`mise exec -- zig build test-inspector-search-ime test-inspector test-settings-search-ime test-scm-commit-ime -j2`는
+범위 편집·고정 용량·조합 취소·owner 전환·별도 창 focus·기존 Inspector 키와 공용 설정/SCM 회귀를 확인한다.
+중립 모델은 Debug/ReleaseFast 각각 실행한다.
+`python3 -m unittest discover -s tools/inspector-ime -p 'test_*.py'`는 독립 판정기의 정상·손상 대조군이다.
+실제 검증은 `python3 tools/inspector-ime/run.py --scene attached --mode diagnostic --output <새 외부 경로>`로
+시작한다. 같은 고정 앱에 `--app <실행 파일>`을 주고 `--scene detached`를 별도로 실행한다.
+`--mode live`만 독립 후보창 PNG/OCR을 검사하며 진단 결과를 픽셀 성공으로 해석하지 않는다.

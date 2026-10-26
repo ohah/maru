@@ -286,7 +286,13 @@ pub fn dataControlRect(tab: Tab, query: []const u8, offset: usize, json: []const
     const clipped = if (e.effective_clip) |clip| layout.intersectRect(e.rect, clip) else e.rect;
     return rectOf(if (id >= 20000) disclosureRect(clipped, scale, prepared.rows[prepared.offset + @as(usize, @intCast(id - 20000))].depth) else clipped);
 }
+pub const InputPaint = struct { caret_advance_px: f32 };
+
 pub fn collect(tab: Tab, placement: usize, paused: bool, picking: bool, pinned: bool, anonymize: bool, query: []const u8, offset: *usize, status: []const u8, json: []const u8, p: props.ChromeProps, scale: u32, tk: *const tokens.Tokens, a: std.mem.Allocator, hovered: ?u64, selected_key: []const u8, out: *std.ArrayList(draw.ChromeDraw)) !void {
+    return collectWithInput(tab, placement, paused, picking, pinned, anonymize, query, offset, status, json, p, scale, tk, a, hovered, selected_key, out, null);
+}
+
+pub fn collectWithInput(tab: Tab, placement: usize, paused: bool, picking: bool, pinned: bool, anonymize: bool, query: []const u8, offset: *usize, status: []const u8, json: []const u8, p: props.ChromeProps, scale: u32, tk: *const tokens.Tokens, a: std.mem.Allocator, hovered: ?u64, selected_key: []const u8, out: *std.ArrayList(draw.ChromeDraw), input: ?InputPaint) !void {
     const base = try labelsFor(a, tab, paused, pinned, anonymize, query, status);
     if (placement < 5) base[18 + placement].accent = true;
     if (tab == .elements) {
@@ -342,7 +348,7 @@ pub fn collect(tab: Tab, placement: usize, paused: bool, picking: bool, pinned: 
         labels[base.len + i * 2 + 1] = .{ .id = 102 + i * 3, .text = row.value, .muted = row.missing };
     }
     const frame = try build(a, p, scale, labels, count);
-    const ops = try a.alloc(draw.Op, frame.rects.entries.len + labels.len + count * 2 + 12);
+    const ops = try a.alloc(draw.Op, frame.rects.entries.len + labels.len + count * 2 + 14);
     const painted = try paint.paint(frame.rects, .{ .hovered = hovered }, tk, .sidebar, .{ .ops = ops });
     var n = painted.ops.len;
     // Thin rules distinguish bands and rows; selected tabs use an underline, not a pill.
@@ -381,10 +387,21 @@ pub fn collect(tab: Tab, placement: usize, paused: bool, picking: bool, pinned: 
         // Text and disclosure hit testing share this origin from the published
         // cell rectangle. Clipped indentation never creates an invisible target.
         const origin_x = if (tree_label) rectOf(disclosureRect(entry.rect, scale, filtered[offset.* + @as(usize, @intCast((label.id - 101) / 3))].depth)).x else r.x;
-        ops[n] = .{ .text = .{ .origin = .{ .x = origin_x + pad, .y = text_y }, .runs = run, .role = if (label.muted) .list_secondary_fg else .surface_fg, .text_role = text_role, .max_width_px = r.w -| @as(u32, @intCast(pad * 2)), .placement = if (centered) .{ .center_in_rect = r } else .origin, .clip = clip, .scroll_clipped = true, .above_scroll = true } };
+        // The filter glyphs, painted caret and native candidate anchor must use
+        // one content rectangle so a padding change cannot separate them.
+        const text_rect: draw.Rect = if (label.id == 6) filterTextRect(r, scale) else .{ .x = origin_x + pad, .y = text_y, .w = r.w -| @as(u32, @intCast(pad * 2)), .h = r.h };
+        ops[n] = .{ .text = .{ .origin = .{ .x = text_rect.x, .y = text_rect.y }, .runs = run, .role = if (label.muted) .list_secondary_fg else .surface_fg, .text_role = text_role, .max_width_px = text_rect.w, .placement = if (centered) .{ .center_in_rect = r } else .origin, .clip = clip, .scroll_clipped = true, .above_scroll = true } };
         n += 1;
     }
 
+    if (input) |value| {
+        const field = rectOf(frame.rects.entries[frame.rects.find(6).?].rect);
+        const caret = filterCaretRect(field, scale, value.caret_advance_px);
+        if (caret.w > 0 and caret.h > 0) {
+            ops[n] = .{ .quad = .{ .rect = caret, .fill_role = .surface_fg } };
+            n += 1;
+        }
+    }
     try out.append(a, .{ .layer = .sidebar, .ops = ops[0..n], .independent_panel = true });
 }
 
@@ -488,4 +505,68 @@ test "inspector Elements hierarchy shares disclosure selection and unsigned iden
         try std.testing.expect(inspection.same(picked.element.?, selected.element.?));
         try std.testing.expect(fieldAt(.elements, "absent", 0, json, p, scale, a, @as(f64, @floatFromInt(row.x)) + 1, @as(f64, @floatFromInt(row.y)) + 1) == null);
     };
+}
+
+/// Shared padding, vertical centering and clipping for paint and the OS candidate anchor.
+pub fn filterTextRect(field: draw.Rect, scale: u32) draw.Rect {
+    const pad = spacing.px(.sm, scale);
+    const line_h = @min(field.h, typography.lineHeightPx(.control, scale));
+    return .{ .x = field.x + @as(i32, @intCast(@min(pad, field.w))), .y = field.y + @as(i32, @intCast((field.h -| line_h) / 2)), .w = field.w -| pad * 2, .h = line_h };
+}
+pub fn filterCaretRect(field: draw.Rect, scale: u32, advance: f32) draw.Rect {
+    const text = filterTextRect(field, scale);
+    const w = @min(text.w, @max(@as(u32, 1), spacing.pointsPx(1, scale)));
+    const safe = if (std.math.isFinite(advance)) advance else 0;
+    const x: i32 = @intFromFloat(@floor(std.math.clamp(safe, 0, @as(f32, @floatFromInt(text.w -| w)))));
+    return .{ .x = text.x + x, .y = text.y, .w = w, .h = text.h };
+}
+
+test "inspector search IME model caret uses text padding clipping and scale" {
+    for ([_]u32{ 500, 1000, 2000 }) |scale| {
+        for ([_]u32{ 1, 16, 128, 640 }) |width| {
+            const field: draw.Rect = .{ .x = 21, .y = 30, .w = width, .h = 40 };
+            const text = filterTextRect(field, scale);
+            const first = filterCaretRect(field, scale, 0);
+            const last = filterCaretRect(field, scale, 10000);
+            try std.testing.expectEqual(text.x, first.x);
+            try std.testing.expectEqual(text.y, first.y);
+            try std.testing.expect(first.x >= field.x and first.y >= field.y);
+            try std.testing.expect(last.x + @as(i32, @intCast(last.w)) <= field.x + @as(i32, @intCast(field.w)));
+            try std.testing.expect(first.y + @as(i32, @intCast(first.h)) <= field.y + @as(i32, @intCast(field.h)));
+            try std.testing.expectEqual(first, filterCaretRect(field, scale, -10));
+            try std.testing.expectEqual(first, filterCaretRect(field, scale, std.math.inf(f32)));
+        }
+    }
+}
+
+test "inspector search IME model query glyphs and caret share published content geometry" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tk = tokens.Tokens.rich(std.mem.zeroes(tokens.ThemeColors));
+    for ([_]u32{ 1000, 2000 }) |scale| {
+        const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 720 * scale / 1000, .backing_height_px = 600 * scale / 1000 } };
+        const field = controlRect(p, scale, a, 6).?;
+        const content = filterTextRect(field, scale);
+        const caret = filterCaretRect(field, scale, 15);
+        var offset: usize = 0;
+        var draws: std.ArrayList(draw.ChromeDraw) = .empty;
+        try collectWithInput(.overview, 0, false, false, false, false, "aa", &offset, "", "{}", p, scale, &tk, a, null, "", &draws, .{ .caret_advance_px = 15 });
+        var found_text = false;
+        var found_caret = false;
+        for (draws.items) |batch| for (batch.ops) |op| switch (op) {
+            .text => |value| {
+                if (value.runs.len != 1 or !std.mem.eql(u8, value.runs[0].text, "aa")) continue;
+                found_text = true;
+                try std.testing.expectEqual(content.x, value.origin.x);
+                try std.testing.expectEqual(content.y, value.origin.y);
+                try std.testing.expectEqual(content.w, value.max_width_px);
+            },
+            .quad => |value| {
+                if (std.meta.eql(value.rect, caret)) found_caret = true;
+            },
+            else => {},
+        };
+        try std.testing.expect(found_text and found_caret);
+    }
 }

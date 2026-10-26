@@ -15,6 +15,7 @@ const panel = maru.chrome.components.inspector;
 pub const picker = @import("inspector_picker.zig");
 
 pub const State = struct {
+    ime: @import("inspector_ime.zig").State = .{},
     picking: bool = false,
     picker_hover: ?maru.chrome.ui.inspection.Key = null,
     picker_selected: ?maru.chrome.ui.inspection.Key = null,
@@ -37,9 +38,9 @@ pub const State = struct {
     offset: usize = 0,
     selected_field: [128]u8 = undefined,
     selected_field_len: usize = 0,
-    query: [128]u8 = undefined,
+    query: [panel.search_ime.query_limit]u8 = undefined,
     query_len: usize = 0,
-    preedit: [128]u8 = undefined,
+    preedit: [panel.search_ime.marked_limit]u8 = undefined,
     preedit_len: usize = 0,
     last_poll: u64 = 0,
     refresh: bool = true,
@@ -113,7 +114,12 @@ pub fn capture(self: *AppSession, term: *Term, a: std.mem.Allocator, window: ?u6
 // The native owner token is the same membership identity used by the CLI collector.
 // Binding never rewrites a paused diagnostic sample; Refresh owns that transition.
 pub fn setWindowId(self: *AppSession, id: u64) void {
-    self.inspector.window_id = if (id == 0) null else id;
+    const next: ?u64 = if (id == 0) null else id;
+    if (next != self.inspector.window_id) {
+        if (!@import("inspector_ime.zig").commitAll(self)) return;
+        @import("inspector_ime.zig").retire(self);
+    }
+    self.inspector.window_id = next;
     if (visible(self) and !self.inspector.paused) {
         self.inspector.refresh = true;
         poll(self);
@@ -151,7 +157,8 @@ fn renderScale(self: *const AppSession) u32 {
     return if (detached(self)) self.inspector.presentation.window_scale else self.scale_milli;
 }
 pub fn setPlacement(self: *AppSession, placement: layout.Placement) void {
-    if (!self.tryCommitComposition()) return;
+    if (!self.tryCommitComposition() or !@import("inspector_ime.zig").commitAll(self)) return;
+    @import("inspector_ime.zig").retire(self);
     self.inspector.resizing = false;
     self.inspector.presentation.placement = placement;
     if (placement != .window) self.inspector.window_focused = false;
@@ -218,16 +225,20 @@ pub fn contains(self: *const AppSession, x: f64, y: f64) bool {
 }
 pub fn blur(self: *AppSession) void {
     if (!self.inspector.input_focused) return;
-    commitPreedit(self);
+    if (!@import("inspector_ime.zig").commitAll(self)) return;
+    @import("inspector_ime.zig").retire(self);
     self.inspector.input_focused = false;
     self.metal_dirty = true;
 }
 pub fn releaseWindowFocus(self: *AppSession) void {
-    blur(self);
+    if (!@import("inspector_ime.zig").commitAll(self)) return;
+    @import("inspector_ime.zig").retire(self);
+    self.inspector.input_focused = false;
     clearHover(self);
     self.inspector.window_focused = false;
 }
 pub fn close(self: *AppSession) void {
+    if (!@import("inspector_ime.zig").commitAll(self)) return;
     picker.cancel(self);
     releaseWindowFocus(self);
     self.inspector.resizing = false;
@@ -238,6 +249,7 @@ pub fn toggle(self: *AppSession) void {
     if (visible(self)) return close(self);
     if (self.chrome_host.confirm.open or !self.tryCommitComposition()) return;
     self.cancelPointerGesture();
+    @import("inspector_ime.zig").retire(self);
     self.chrome_host.inspector.open = true;
     relayout(self);
     self.inspector.input_focused = false;
@@ -360,7 +372,7 @@ pub fn key(self: *AppSession, e: maru.terminal.KeyEvent) void {
     const raw_cp: u21 = if (e.key == .char) e.key.char else 0;
     const cp: u21 = if (raw_cp < 128) std.ascii.toLower(@intCast(raw_cp)) else raw_cp;
     if (e.key == .escape) {
-        if (s.query_len != 0) s.query_len = 0 else blur(self);
+        if (s.query_len != 0 or s.preedit_len != 0) clearSearch(self) else blur(self);
     } else if (e.modifiers.command and cp == 'w') {
         close(self);
     } else if (e.modifiers.command and cp == 'c') {
@@ -371,6 +383,8 @@ pub fn key(self: *AppSession, e: maru.terminal.KeyEvent) void {
         s.refresh = true;
         poll(self);
     } else if (e.key == .tab) {
+        if (!@import("inspector_ime.zig").commitAll(self)) return;
+        @import("inspector_ime.zig").retire(self);
         s.tab = @fromBackingInt(@intCast((@as(u8, @intCast(@backingInt(s.tab))) + (if (e.modifiers.shift) @as(u8, 4) else @as(u8, 1))) % 5));
         s.offset = 0;
         s.selected_field_len = 0;
@@ -379,12 +393,14 @@ pub fn key(self: *AppSession, e: maru.terminal.KeyEvent) void {
     } else if (e.key == .arrow_up or e.key == .page_up) {
         s.offset -|= if (e.key == .page_up) @as(usize, 10) else 1;
     } else if (e.key == .backspace) {
+        s.ime.tx.context.valid = false;
         if (s.query_len > 0) {
             s.query_len -= 1;
             while (s.query_len > 0 and s.query[s.query_len] & 0xc0 == 0x80) s.query_len -= 1;
         }
         s.offset = 0;
     } else if (e.key == .char and !e.modifiers.command and !e.modifiers.control and cp >= 32) {
+        s.ime.tx.context.valid = false;
         var buf: [4]u8 = undefined;
         const len = std.unicode.utf8Encode(raw_cp, &buf) catch return;
         if (s.query_len + len <= s.query.len) {
@@ -403,6 +419,8 @@ pub fn scroll(self: *AppSession, delta: f64) void {
 }
 
 pub fn click(self: *AppSession, x: f64, y: f64) void {
+    if (!@import("inspector_ime.zig").commitAll(self)) return;
+    @import("inspector_ime.zig").retire(self);
     const p = propsFor(self);
     var arena = std.heap.ArenaAllocator.init(self.allocator);
     defer arena.deinit();
@@ -414,7 +432,7 @@ pub fn click(self: *AppSession, x: f64, y: f64) void {
         return;
     };
     const hit = panel.hit(p, renderScale(self), arena.allocator(), x, y) orelse {
-        if (panel.fieldAt(self.inspector.tab, self.inspector.query[0..self.inspector.query_len], self.inspector.offset, self.inspector.json orelse "{}", p, renderScale(self), arena.allocator(), x, y)) |field| {
+        if (panel.fieldAt(self.inspector.tab, displayQuery(self, arena.allocator()) catch return, self.inspector.offset, self.inspector.json orelse "{}", p, renderScale(self), arena.allocator(), x, y)) |field| {
             if (field.element) |element| {
                 picker.select(self, element, field.disclosure);
                 return;
@@ -461,8 +479,9 @@ pub fn click(self: *AppSession, x: f64, y: f64) void {
 pub fn collectInspectorDraws(self: *AppSession, p: maru.chrome.ChromeProps, tk: *const maru.chrome.Tokens, a: std.mem.Allocator, out: *std.ArrayList(maru.chrome.ChromeDraw)) !void {
     const s = &self.inspector;
     if (!visible(self)) return;
-    const query = try std.mem.concat(a, u8, &.{ s.query[0..s.query_len], s.preedit[0..s.preedit_len] });
-    try panel.collect(s.tab, @intCast(@backingInt(s.presentation.placement)), s.paused, s.picking, s.pinned, s.anonymize_exports, query, &s.offset, s.status, s.json orelse "{}", p, renderScale(self), tk, a, s.hovered, s.selected_field[0..s.selected_field_len], out);
+    const query = try displayQuery(self, a);
+    const input = try inputPaint(self, a);
+    try panel.collectWithInput(s.tab, @intCast(@backingInt(s.presentation.placement)), s.paused, s.picking, s.pinned, s.anonymize_exports, query, &s.offset, s.status, s.json orelse "{}", p, renderScale(self), tk, a, s.hovered, s.selected_field[0..s.selected_field_len], out, input);
 }
 
 pub fn copyJson(self: *AppSession) []const u8 {
@@ -477,6 +496,7 @@ pub fn copyJson(self: *AppSession) []const u8 {
 }
 
 pub fn paste(self: *AppSession, bytes: []const u8) void {
+    self.inspector.ime.tx.context.valid = false;
     const s = &self.inspector;
     for (bytes) |c| {
         if (c < 32 or c == 127 or s.query_len == s.query.len) continue;
@@ -492,6 +512,7 @@ pub fn paste(self: *AppSession, bytes: []const u8) void {
 
 // Committed text follows InputFocus; marked text stays out of the terminal core.
 pub fn setPreedit(self: *AppSession, bytes: []const u8) void {
+    self.inspector.ime.tx.context.valid = false;
     const s = &self.inspector;
     var n = @min(bytes.len, s.preedit.len);
     while (n > 0 and !std.unicode.utf8ValidateSlice(bytes[0..n])) n -= 1;
@@ -500,6 +521,9 @@ pub fn setPreedit(self: *AppSession, bytes: []const u8) void {
     self.metal_dirty = true;
 }
 pub fn commitPreedit(self: *AppSession) void {
+    _ = @import("inspector_ime.zig").commitAll(self);
+}
+pub fn commitLegacyPreedit(self: *AppSession) void {
     const s = &self.inspector;
     paste(self, s.preedit[0..s.preedit_len]);
     s.preedit_len = 0;
@@ -508,6 +532,45 @@ pub fn caretRect(self: *AppSession) ?maru.chrome.draw.Rect {
     var arena = std.heap.ArenaAllocator.init(self.allocator);
     defer arena.deinit();
     return panel.caretRectForTab(propsFor(self), renderScale(self), arena.allocator(), self.inspector.tab);
+}
+pub fn imeCaretRect(self: *AppSession) ?maru.chrome.draw.Rect {
+    var arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena.deinit();
+    const field = panel.caretRectForTab(propsFor(self), renderScale(self), arena.allocator(), self.inspector.tab) orelse return null;
+    const input = (inputPaint(self, arena.allocator()) catch return null) orelse return null;
+    const rect = panel.filterCaretRect(field, renderScale(self), input.caret_advance_px);
+    return if (rect.w > 0 and rect.h > 0) rect else null;
+}
+/// Paint and field hit testing consume the same live projected query.
+pub fn displayQuery(self: *AppSession, a: std.mem.Allocator) ![]const u8 {
+    const s = &self.inspector;
+    if (s.ime.tx.context.matches(s.query[0..s.query_len], s.preedit[0..s.preedit_len])) return s.ime.tx.context.text();
+    return std.mem.concat(a, u8, &.{ s.query[0..s.query_len], s.preedit[0..s.preedit_len] });
+}
+fn inputPaint(self: *AppSession, a: std.mem.Allocator) !?panel.InputPaint {
+    if (self.inputFocus() != .inspector) return null;
+    const field = panel.caretRectForTab(propsFor(self), renderScale(self), a, self.inspector.tab) orelse return null;
+    const text = try displayQuery(self, a);
+    const context = @import("inspector_ime.zig").projection(self);
+    const caret = if (context) |c| panel.search_ime.paintCaret(c) else text.len;
+    const text_rect = panel.filterTextRect(field, renderScale(self));
+    const values = try @import("chrome_text_offsets.zig").measure(self, text, .{ caret, caret, caret }, text_rect.w, renderScale(self));
+    return .{ .caret_advance_px = values[0] };
+}
+pub fn clearSearch(self: *AppSession) void {
+    @import("inspector_ime.zig").retire(self);
+    self.inspector.query_len = 0;
+    self.inspector.preedit_len = 0;
+    self.inspector.offset = 0;
+    self.inspector.selected_field_len = 0;
+    self.metal_dirty = true;
+}
+pub fn focusInput(self: *AppSession, window: bool) void {
+    if (!self.tryCommitComposition() or !@import("inspector_ime.zig").commitAll(self)) return;
+    if (!self.inspector.input_focused or self.inspector.window_focused != window) @import("inspector_ime.zig").retire(self);
+    self.inspector.window_focused = window;
+    self.inspector.input_focused = true;
+    self.metal_dirty = true;
 }
 
 // Leaving the viewport must clear the painted state as well as the native cursor.
@@ -524,7 +587,7 @@ pub fn hover(self: *AppSession, x: f64, y: f64) root.CursorKind {
     var arena = std.heap.ArenaAllocator.init(self.allocator);
     defer arena.deinit();
     const found = panel.hit(propsFor(self), renderScale(self), arena.allocator(), x, y);
-    const picked = if (found == null) panel.fieldAt(self.inspector.tab, self.inspector.query[0..self.inspector.query_len], self.inspector.offset, self.inspector.json orelse "{}", propsFor(self), renderScale(self), arena.allocator(), x, y) else null;
+    const picked = if (found == null) panel.fieldAt(self.inspector.tab, displayQuery(self, arena.allocator()) catch return .default, self.inspector.offset, self.inspector.json orelse "{}", propsFor(self), renderScale(self), arena.allocator(), x, y) else null;
     const id = if (found) |h| h.nodeId() else if (picked) |field| field.id else null;
     if (self.inspector.hovered != id) {
         self.inspector.hovered = id;

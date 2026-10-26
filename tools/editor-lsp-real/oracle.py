@@ -229,18 +229,23 @@ def verify_directory(root, process_code):
     events = [json.loads(line) for line in (root / 'protocol.ndjson').read_text().splitlines()]
     require(not any(e.get('event') == 'observer_error' for e in events), 'protocol observer failed')
     scenario = case.get('scenario', 'single-file')
-    require(scenario in ('single-file', 'multi-file', 'rename') and native.get('scenario', 'single-file') == scenario, 'scenario mismatch')
+    require(scenario in ('single-file', 'multi-file', 'rename', 'format-save') and native.get('scenario', 'single-file') == scenario, 'scenario mismatch')
     expected_sources = {'real_lsp_judge.zig', 'mod.zig', 'lsp.zig', 'completion.zig', 'hover.zig', 'definition.zig', 'semantic.zig'}
     if scenario == 'multi-file':
         expected_sources.add('real_lsp_multi_judge.zig')
     if scenario == 'rename':
         expected_sources |= {'rename_judge.zig', 'rename.zig', 'workspace_edit.zig'}
+    if scenario == 'format-save':
+        expected_sources |= {'format_save_judge.zig', 'format.zig', 'save_dispatch.zig', 'local_save.zig'}
     fingerprints = native.get('source_fingerprints', [])
     require(len(fingerprints) == len(expected_sources) and {e.get('name') for e in fingerprints} == expected_sources, 'compiled controller fingerprint set is incomplete')
     for entry in fingerprints:
         snapshot = root.parent / 'sources' / entry['name']
         require(hashlib.sha256(snapshot.read_bytes()).hexdigest() == entry['sha256'], 'judge binary and controller snapshot differ: ' + entry['name'])
-    if scenario == 'rename':
+    if scenario == 'format-save':
+        from format_save_oracle import verify as verify_format_save
+        result = verify_format_save(case, native, records, process_code)
+    elif scenario == 'rename':
         from rename_oracle import verify as verify_rename
         result = verify_rename(case, native, records, process_code)
     elif scenario == 'multi-file':

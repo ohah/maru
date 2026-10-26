@@ -100,7 +100,7 @@ Kotlin·Dart·Scala의 실제 응답은 version을 생략했다. 이 경우 wire
 버퍼 단어 대체, 다른 선택 항목, 문서 밖 편집, 제품 적용 본문 불일치,
 Undo 본문 불일치, Undo 이력 두 개 증가.
 기존 단일 모드의 정상 대조군과 UTF 경계·ID 충돌·비정상 종료·오래된 바이너리·소유권 실패에
-다중 파일 검사도 더한다. 현재 전체 Python 판정은 79개 시험 함수다(파손 입력 subtest 포함).
+다중 파일 검사도 더한다. 현재 전체 Python 판정은 91개 시험 함수다(파손 입력 subtest 포함).
 
 첫 실물 실행에서 Rust가 initialize 직후 정의 요청에 null을 반환했다.
 실패를 숨기지 않고 baseline 진단 준비 대기와 제한된 읽기 재시도로 바꿨다.
@@ -141,3 +141,8 @@ Rust는 `diagnostic_transport=pull`이어야 runner가 성공한다. 실제 요�
 `--scenario rename`은 Rust·Go에서 열린 두 문서와 닫힌 참조 파일의 실제 이름 변경·자동 저장·
 Undo Rename, 늦은 결과와 닫힌 파일 읽기 실패의 적용 전 거절을 검사한다.
 [실행·시점 제어·독립 판정·한계](rename.md)를 따른다.
+
+## 저장 시 포맷 회귀
+
+`--scenario format-save`는 Rust·Go의 실제 ⌘S 포맷·저장·Undo와 stale/시한 뒤 현재 내용 저장,
+설정 끔을 확인한다. [실행·시간 대조·독립 판정·한계](format-save.md)를 따른다.

@@ -2087,7 +2087,7 @@ python3 -m unittest discover -s tools/project-search-ime -p 'test_*.py'
 
 ### 실제 SDK LSP 편집 회귀 (선택 실행)
 
-`mise exec -- zig build test-editor-real-lsp-oracles`는 SDK 없이 79개 Python 증거/소유권 시험 함수를 실행한다.
+`mise exec -- zig build test-editor-real-lsp-oracles`는 SDK 없이 91개 Python 증거/소유권 시험 함수를 실행한다.
 기본 `zig build test`에도 포함한다. 실물 SDK 실행은 opt-in이다:
 
 ```sh
@@ -2102,6 +2102,11 @@ Rust·Go·Kotlin·Dart·Scala의 실제 서버와 AppSession으로 진단 발생
 완성 적용/Undo를 검사한다. SDK 자동 설치와 GUI 입력 검증은 포함하지 않는다.
 설정·증거 형식·버전 없는 진단의 한계는 [실행 안내](../tools/editor-lsp-real/README.md)가 소유한다.
 
+
+### 실제 SDK 저장 시 포맷
+
+`python3 tools/editor-lsp-real/run.py --scenario format-save --build --optimize Debug --servers-json /absolute/path/servers.json --output /absolute/new/output`은 Rust·Go의 ⌘S 포맷·저장·Undo와 stale/시한 뒤 저장·설정 끔을 검사한다.
+`--optimize ReleaseFast`도 새 출력으로 실행한다. 원본 wire의 시간·저장 순서와 클라이언트 처리 지연의 한계는 [저장 시 포맷 회귀 계약](../tools/editor-lsp-real/format-save.md)을 따른다.
 
 ### 실제 SDK 다중 파일 이름 바꾸기
 
@@ -2120,7 +2125,7 @@ Rust·Go·Kotlin·Dart·Scala의 실제 서버와 AppSession으로 진단 발생
 `mise exec -- zig build test-editor-rust-pull -j2`와 `-Doptimize=ReleaseFast`는
 취소 응답 해석·L2 backoff·Rust 서버 선택과 실제 AppSession의 pull/refresh/늦은 push 거부를 검사한다.
 31개 순수 테스트(모듈 참조 포함)와 12개 제품 테스트(모듈 참조 포함)가 각각 전부 통과해야 한다.
-SDK 없는 Python 증거 검사는 `test-editor-real-lsp-oracles`(현재 79개 시험 함수)다.
+SDK 없는 Python 증거 검사는 `test-editor-real-lsp-oracles`(현재 91개 시험 함수)다.
 실제 SDK 검증은 [실행 안내](../tools/editor-lsp-real/README.md)의 명시적 opt-in 명령을 쓴다.
 
 ### 사이드바 검색창 IME

@@ -2344,6 +2344,10 @@ pub fn build(b: *std.Build) void {
     run_symbol_picker_ime.setCwd(b.path("."));
     const symbol_picker_ime_step = b.step("test-symbol-picker-ime", "Validate symbol picker IME ownership and range publication");
     symbol_picker_ime_step.dependOn(&run_symbol_picker_ime.step);
+    const symbol_ime_artifact_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/symbol-picker-ime", "-p", "test_*.py" });
+    symbol_ime_artifact_controls.setCwd(b.path("."));
+    symbol_ime_artifact_controls.has_side_effects = true;
+    symbol_picker_ime_step.dependOn(&symbol_ime_artifact_controls.step);
     if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_symbol_picker_ime.step);
 
     const activity_search_ime_step = b.step("test-activity-search-ime", "Validate activity search native IME ranges and body search admission");
@@ -4959,6 +4963,7 @@ pub fn build(b: *std.Build) void {
     const posix_host_tests = target.result.os.tag != .windows;
 
     const test_step = b.step("test", "Run all Zig tests");
+    test_step.dependOn(&symbol_ime_artifact_controls.step);
     test_step.dependOn(&activity_ime_artifact_controls.step);
     test_step.dependOn(&inspector_ime_artifact_controls.step);
 

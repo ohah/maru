@@ -56,3 +56,20 @@ sample😀4의 emoji 범위를 삭제하면 sample4·10행이 표시되고, 취�
 전체 ABI는 7,102개 중 6,983 통과·119 skip·0 실패였다. 경계·Swift·문서 링크/config/줄 참조,
 명령 팔레트 집중 회귀, fmt/diff 검사도 통과했다. 물리적 한국어 HID·OS 후보창 검증과
 전체 mise run check/필수 CI 결과는 이 로컬 증거에 포함하지 않는다.
+
+## 물리적 입력과 후보창 검증 진행
+
+`tools/symbol-picker-ime/run.py`는 기존 외부 HID relay와 독립 창/anchor/PNG 판정자를 재사용한다.
+별도 owned Zig 파일을 열고 검색창을 여는 fixture 외에는 입력을 주입하지 않는다. 실제 두벌식 키,
+Option+Return 후보 열기, Esc 취소 5회, 韓 선택 Return과 별도 이동 Return, 에디터 복귀 `/`를
+서로 구별되는 실제 키 receipt와 문서 상태에 결속한다. query·필터·정본 문서·탐색 이력과
+최종 에디터 입력 hash/byte length/caret을 검사하며 터미널 복귀 증거라고 부르지 않는다.
+
+실제 진단은 통과했다. 韓 선택까지 revision 0·focus 0·history 0·PTY 0을 유지했고,
+별도 Return 뒤 focus 34·history 1, `/` 뒤 revision 1·focus 35·PTY 0이었다. 디스크 원본은
+유지되고 입력 소스 복원도 통과했다. 고정 앱 hash는
+`3f2774484558629923c4e8c3c270baeee370a449756efe7398c9e5b6a9e469fc`다.
+
+합성 기록의 정상 대조군과 독립 손상 35개가 통과했다. 이는 실제 OS/픽셀 증거로 계산하지 않는다.
+앱 자체의 화면 기록 조회는 false이므로 PNG/OCR은 정확한 고정 앱의 권한 허용을 기다린다.
+원시 진단은 `../maru-symbol-picker-ime-os-20261027/diagnostic-1/`에 보관한다.

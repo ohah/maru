@@ -2173,3 +2173,7 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 `python3 tools/symbol-picker-ime/mutations.py --output <new-external-dir>`는 제품 변이를 격리 사본에서 검사한다.
 `python3 tools/symbol-preview-app/run.py --output <new-external-dir>`는 실제 AppKit 콜백과 Metal 화면 회귀이며
 물리적 한국어 HID·OS 후보창 증거는 아니다.
+
+심볼 피커 실제 입력/후보창: `python3 tools/symbol-picker-ime/run.py --output <new-external-dir>`.
+`--mode diagnostic`은 실제 HID·문서/이동 상태만 검사하며 PNG/OCR 완료로 계산하지 않는다.
+`--app <fixed-app>/Contents/MacOS/maru-macos-app`으로 권한을 허용한 고정 앱을 재사용한다.

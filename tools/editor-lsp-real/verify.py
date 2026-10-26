@@ -12,7 +12,12 @@ def verify_run(root):
     require(report.get('schema') == 'maru.lsp-real.run.v1', 'unsupported run schema')
     require(report.get('optimize') in PROFILES, 'unsupported build profile')
     tool_hashes = report.get('tool_sources', {})
-    require(set(tool_hashes) == {'run.py', 'oracle.py', 'verify.py', 'lsp_proxy.py'}, 'tool source inventory incomplete')
+    scenario = report.get('scenario', 'single-file')
+    require(scenario in ('single-file', 'multi-file'), 'unsupported scenario')
+    expected_tools = {'run.py', 'oracle.py', 'verify.py', 'lsp_proxy.py'}
+    if scenario == 'multi-file':
+        expected_tools |= {'multi_fixture.py', 'multi_oracle.py'}
+    require(set(tool_hashes) == expected_tools, 'tool source inventory incomplete')
     for name, expected in tool_hashes.items():
         require(hashlib.sha256((root / 'tool-sources' / name).read_bytes()).hexdigest() == expected, 'tool source hash mismatch: ' + name)
     require(hashlib.sha256((root / 'judge').read_bytes()).hexdigest() == report.get('judge_sha256'), 'judge binary hash mismatch')
@@ -22,6 +27,10 @@ def verify_run(root):
     for language, result in zip(names, report['languages']):
         require(language in ('rust', 'go', 'kotlin', 'dart', 'scala'), 'unknown language')
         case_root = root / ('case-' + language)
+        case = json.loads((case_root / 'case.json').read_text())
+        require(case.get('scenario', 'single-file') == scenario, 'run/case scenario mismatch')
+        if scenario == 'multi-file':
+            require(language in ('rust', 'go') and case.get('language') == language, 'multi-file language mismatch')
         require(result.get('exit_code') == 0 and not result.get('failure'), 'recorded product run failed: ' + language)
         hashes = result.get('artifacts', {})
         require({'case.json', 'product.json', 'wire.ndjson', 'protocol.ndjson', 'judge.log', 'server.stderr'} <= hashes.keys(), 'artifact inventory incomplete')

@@ -56,7 +56,7 @@ SDK 설정 예시(경로와 버전은 환경에 맞춘다):
 `editor-real-lsp-judge`는 SDK 없이 실행 파일만 설치한다.
 `test-editor-real-lsp`는 `MARU_REAL_LSP_CASE`를 명시한 한 사례용이며 환경이 없으면 필수 통과 수 검사가 실패한다.
 각 실행의 Zig 5 tests는 **실제 언어 사례 하나 + 모듈 참조 네 개**다. 다섯 언어의 의미가 아니다.
-기본 test에서는 환경 없는 실제 SDK 사례를 skip하고, 51개의 Python 판정/소유권 검사는 실행한다.
+기본 test에서는 환경 없는 실제 SDK 사례를 skip하고, Python 판정/소유권 검사는 실행한다.
 
 ## 증거와 격리
 
@@ -99,7 +99,8 @@ Kotlin·Dart·Scala의 실제 응답은 version을 생략했다. 이 경우 wire
 진단 해소 누락, 지난 해소 버전, 해소 후 오류 잔류, 빈 완성,
 버퍼 단어 대체, 다른 선택 항목, 문서 밖 편집, 제품 적용 본문 불일치,
 Undo 본문 불일치, Undo 이력 두 개 증가.
-정상 대조군과 UTF 경계·ID 충돌·비정상 종료·오래된 바이너리·소유권 실패를 더해 총 51개다.
+기존 단일 모드의 정상 대조군과 UTF 경계·ID 충돌·비정상 종료·오래된 바이너리·소유권 실패에
+다중 파일 검사도 더한다. 현재 전체 Python 판정은 66개 시험 함수다(파손 입력 subtest 포함).
 
 첫 실물 실행에서 Rust가 initialize 직후 정의 요청에 null을 반환했다.
 실패를 숨기지 않고 baseline 진단 준비 대기와 제한된 읽기 재시도로 바꿨다.
@@ -128,3 +129,9 @@ Rust는 `diagnostic_transport=pull`이어야 runner가 성공한다. 실제 요�
 `product.json`의 `definition_notices_acknowledged`와 `completion_observation`에 그 과정과
 팝업이 열리지 않은 상태를 보존한다. [원인·전후 재생·20개 상태 회귀](completion-retry.md)를
 참조한다. SDK 없는 회귀는 `mise exec -- zig build test-editor-real-lsp-retry`로 실행한다.
+
+## 다중 파일 회귀
+
+`--scenario multi-file`은 Rust·Go에서 다른 파일 정의/복귀, 주 파일을 바꾸거나 저장하지
+않는 연관 진단 갱신, 실제 autoimport 추가 편집과 한 번의 Undo를 검사한다.
+기본 단일 모드와 별도 opt-in judge를 사용한다. [실행·원문/버전 대응·한계](multi-file.md)를 따른다.

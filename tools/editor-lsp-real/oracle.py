@@ -228,12 +228,20 @@ def verify_directory(root, process_code):
     records = [json.loads(line) for line in (root / 'wire.ndjson').read_text().splitlines()]
     events = [json.loads(line) for line in (root / 'protocol.ndjson').read_text().splitlines()]
     require(not any(e.get('event') == 'observer_error' for e in events), 'protocol observer failed')
+    scenario = case.get('scenario', 'single-file')
+    require(scenario in ('single-file', 'multi-file') and native.get('scenario', 'single-file') == scenario, 'scenario mismatch')
     expected_sources = {'real_lsp_judge.zig', 'mod.zig', 'lsp.zig', 'completion.zig', 'hover.zig', 'definition.zig', 'semantic.zig'}
+    if scenario == 'multi-file':
+        expected_sources.add('real_lsp_multi_judge.zig')
     fingerprints = native.get('source_fingerprints', [])
     require(len(fingerprints) == len(expected_sources) and {e.get('name') for e in fingerprints} == expected_sources, 'compiled controller fingerprint set is incomplete')
     for entry in fingerprints:
         snapshot = root.parent / 'sources' / entry['name']
         require(hashlib.sha256(snapshot.read_bytes()).hexdigest() == entry['sha256'], 'judge binary and controller snapshot differ: ' + entry['name'])
-    result = verify(case, native, records, process_code)
+    if scenario == 'multi-file':
+        from multi_oracle import verify as verify_multi
+        result = verify_multi(case, native, records, process_code)
+    else:
+        result = verify(case, native, records, process_code)
     result['compiled_controller_sources'] = len(fingerprints)
     return result

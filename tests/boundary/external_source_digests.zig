@@ -17,6 +17,9 @@ pub const Proof = struct {
     digest_hex: []const u8,
 };
 pub const inventory = [_]Proof{
+    // Opt-in 다중 파일 SDK judge가 Report의 owned 문자열 여섯 개를 해제하는 한 자리다.
+    // @field 대상은 로컬 Report뿐이며 session-host Client receiver를 반영하지 않는다.
+    .{ .path = "src/platform/macos/app_session/editor/real_lsp_multi_judge.zig", .count = 1, .digest_hex = "4769647deb0de717eb8c0601abc323739b0c99bc0f4797ad5b543d786605a2a8" },
     // 상태바 리소스 표본 seam(resource_samples)이 붙어 바뀐다. count는 3 그대로다 — vtable 항목과 래퍼를
     // 더했을 뿐이고 Client 구성이나 receiver 집합과는 무관하다.
     // OSC 7 authority(`cwd_host`)가 관측 view/owned cache에 실리면서 또 바뀐다. count는 3 그대로다 — 더한 것은

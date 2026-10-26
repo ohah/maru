@@ -111,7 +111,32 @@ fn severityOf(v: ?std.json.Value) diagnostic.Severity {
 }
 
 /// `publishDiagnostics` params 의 `diagnostics` 배열 → 목록. 메시지는 **복사**해 `messages` 에 쌓고(§8.2a — 표시는 §8.3 이 오면),
-/// 진단은 `out` 에 더한다. 범위는 반열림 byte 로, 폭 0 이면 1 byte(§5.4 와 같은 규칙). 배열이 아니면 아무것도 안 한다.
+/// 성공한 배치만 `out` 과 `messages`에 함께 게시한다. 할당 실패는 이전 배치의 슬라이스까지 그대로 보존한다.
+pub fn replaceDiagnostics(
+    allocator: std.mem.Allocator,
+    params: ?std.json.Value,
+    content: []const u8,
+    lines: LineIndex,
+    enc: rpc.PositionEncoding,
+    out: *std.ArrayList(diagnostic.Diagnostic),
+    messages: *std.ArrayList(u8),
+) error{OutOfMemory}!usize {
+    var staged: std.ArrayList(diagnostic.Diagnostic) = .empty;
+    errdefer staged.deinit(allocator);
+    var storage: std.ArrayList(u8) = .empty;
+    errdefer storage.deinit(allocator);
+    const count = try appendDiagnostics(allocator, params, content, lines, enc, &staged, &storage);
+    // Every allocation and slice fixup completes before the live set changes.
+    var previous = out.*;
+    var previous_storage = messages.*;
+    out.* = staged;
+    messages.* = storage;
+    previous.deinit(allocator);
+    previous_storage.deinit(allocator);
+    return count;
+}
+
+/// Append into scratch storage. Call replaceDiagnostics for a live publication.
 pub fn appendDiagnostics(
     allocator: std.mem.Allocator,
     params: ?std.json.Value,

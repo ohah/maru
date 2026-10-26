@@ -24477,6 +24477,142 @@ test "RDP1 Rust pull owns diagnostics and recovers a server cancellation without
     try testing.expect(pumpLspUntil(&f.fx, 5000, other, Pull.current));
 }
 
+test "RDP2 pull allocation failures retain the prior diagnostic publication" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var f = (try SmtFixture.openRepo(a, "oom.rs", "fn main() {}\n")) orelse return error.SkipZigTest;
+    defer f.close(a);
+    const s = f.fx.session;
+    try installFakeLspCopy(&f.fx, "bin/rust-analyzer");
+    var over_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const over = try std.fmt.bufPrintSentinel(&over_buf, "{s}/bin/rust-analyzer", .{f.root_buf[0..f.root_len]}, 0);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", over.ptr, 1);
+    try testing.expect(f.ready());
+    const Ready = struct {
+        fn seen(t: *Term) bool {
+            return t.rt.editor_diagnostics.lsp.items.len == 1;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, f.term, Ready.seen));
+    const c = lsp_client.readyClientFor(s, f.term).?;
+    const d = c.findDoc(f.term).?;
+    var baseline = try std.json.parseFromSlice(std.json.Value, a, "{\"kind\":\"full\",\"items\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":3}},\"message\":\"kept\",\"severity\":1}]}", .{});
+    defer baseline.deinit();
+    const message = try a.alloc(u8, 4096);
+    defer a.free(message);
+    @memset(message, 'x');
+    const bytes = try std.fmt.allocPrint(a, "{{\"kind\":\"full\",\"items\":[{{\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":0,\"character\":3}}}},\"message\":\"{s}\",\"severity\":1,\"data\":{{\"proof\":true}}}}]}}", .{message});
+    defer a.free(bytes);
+    var replacement = try std.json.parseFromSlice(std.json.Value, a, bytes, .{});
+    defer replacement.deinit();
+    const Seed = struct {
+        fn apply(session: *AppSession, term: *Term, client: *lsp_client.Client, value: std.json.Value) void {
+            term.rt.editor_diagnostics.lsp.deinit(session.allocator);
+            term.rt.editor_diagnostics.lsp = .empty;
+            term.rt.editor_diagnostics.lsp_messages.deinit(session.allocator);
+            term.rt.editor_diagnostics.lsp_messages = .empty;
+            const doc = client.findDoc(term).?;
+            doc.pull_seq = 700;
+            doc.pull_version = doc.sent_version;
+            doc.pull_dirty = false;
+            doc.pull_retry.reset();
+            lsp_client.onPullDiagnostics(session, client, 700, value);
+        }
+    };
+    Seed.apply(s, f.term, c, baseline.value);
+    d.pull_seq = 701;
+    var counting = testing.FailingAllocator.init(a, .{});
+    s.allocator = counting.allocator();
+    lsp_client.onPullDiagnostics(s, c, 701, replacement.value);
+    s.allocator = a;
+    try testing.expect(f.term.rt.editor_diagnostics.lsp.items.len == 1);
+    try testing.expectEqualStrings(message, f.term.rt.editor_diagnostics.lsp.items[0].message);
+    try testing.expectEqualStrings("{\"proof\":true}", f.term.rt.editor_diagnostics.lsp.items[0].data);
+    const allocs = counting.alloc_index;
+    try testing.expect(allocs >= 3);
+    for (0..allocs) |k| {
+        Seed.apply(s, f.term, c, baseline.value);
+        const received = s.editor_lsp.received_diagnostics;
+        const old_items = f.term.rt.editor_diagnostics.lsp.items.ptr;
+        const old_messages = f.term.rt.editor_diagnostics.lsp_messages.items.ptr;
+        d.pull_seq = 702;
+        var failing = testing.FailingAllocator.init(a, .{ .fail_index = k, .resize_fail_index = 0 });
+        s.allocator = failing.allocator();
+        lsp_client.onPullDiagnostics(s, c, 702, replacement.value);
+        s.allocator = a;
+        try testing.expect(failing.has_induced_failure);
+        try testing.expectEqual(@as(usize, 1), f.term.rt.editor_diagnostics.lsp.items.len);
+        try testing.expectEqualStrings("kept", f.term.rt.editor_diagnostics.lsp.items[0].message);
+        try testing.expectEqual(received, s.editor_lsp.received_diagnostics);
+        try testing.expect(old_items == f.term.rt.editor_diagnostics.lsp.items.ptr);
+        try testing.expect(old_messages == f.term.rt.editor_diagnostics.lsp_messages.items.ptr);
+        try testing.expect(d.pull_retry.at_ms != 0);
+    }
+}
+
+test "RDP3 pull resend preparation OOM retains a future retry" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var f = (try SmtFixture.openRepo(a, "oom.rs", "fn main() {}\n")) orelse return error.SkipZigTest;
+    defer f.close(a);
+    const s = f.fx.session;
+    try installFakeLspCopy(&f.fx, "bin/rust-analyzer");
+    var over_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const over = try std.fmt.bufPrintSentinel(&over_buf, "{s}/bin/rust-analyzer", .{f.root_buf[0..f.root_len]}, 0);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", over.ptr, 1);
+    try testing.expect(f.ready());
+    const Ready = struct {
+        fn seen(t: *Term) bool {
+            return t.rt.editor_diagnostics.lsp.items.len == 1;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, f.term, Ready.seen));
+    const c = lsp_client.readyClientFor(s, f.term).?;
+    const d = c.findDoc(f.term).?;
+    var full = try std.json.parseFromSlice(std.json.Value, a, "{\"kind\":\"full\",\"items\":[]}", .{});
+    defer full.deinit();
+    var retained = try std.json.parseFromSlice(std.json.Value, a, "{\"kind\":\"full\",\"items\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":3}},\"message\":\"kept\",\"severity\":1}]}", .{});
+    defer retained.deinit();
+    const Recovery = struct {
+        session: *AppSession,
+        term: *Term,
+        before: u64,
+        fn seen(x: @This()) bool {
+            var buf: [64]u8 = undefined;
+            const want = std.fmt.bufPrint(&buf, "pull: {d} rust", .{x.term.rt.editorDocument().notifications.lsp_version}) catch return false;
+            const items = x.term.rt.editor_diagnostics.lsp.items;
+            return x.session.editor_lsp.received_diagnostics > x.before and items.len == 1 and std.mem.eql(u8, items[0].message, want);
+        }
+    };
+    for ([_]bool{ false, true }) |barrier| {
+        c.server.pull_barrier = barrier;
+        d.barrier_seq = 0;
+        d.barrier_dirty = false;
+        d.pull_seq = 899;
+        d.pull_version = d.sent_version;
+        d.pull_dirty = false;
+        lsp_client.onPullDiagnostics(s, c, 899, retained.value);
+        d.pull_seq = 900;
+        d.pull_version = d.sent_version;
+        d.pull_dirty = true; // a new edit arrived while this request was in flight
+        d.pull_retry.reset();
+        const received = s.editor_lsp.received_diagnostics;
+        const sent = s.editor_lsp.sent_pulls;
+        var failing = testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+        s.allocator = failing.allocator();
+        lsp_client.onPullDiagnostics(s, c, 900, full.value);
+        s.allocator = a;
+        try testing.expect(failing.has_induced_failure);
+        try testing.expectEqual(@as(u32, 0), d.pull_seq);
+        try testing.expectEqual(received, s.editor_lsp.received_diagnostics);
+        try testing.expect(d.pull_retry.at_ms != 0);
+        try testing.expect(pumpLspUntil(&f.fx, 5000, Recovery{ .session = s, .term = f.term, .before = received }, Recovery.seen));
+        try testing.expect(s.editor_lsp.sent_pulls > sent);
+        try testing.expectEqual(@as(u64, 0), d.pull_retry.at_ms);
+        try testing.expect(Ready.seen(f.term));
+    }
+}
+
 test "LSI10 Ruby(`ruby-lsp`) 주 서버 — pull 로만 진단을 세우고(그 클라이언트만 알린다), **pull 앞에 장벽을 쳐 그 답이 온 뒤에 묻는다**(ruby-lsp 는 작업 스레드가 앞의 didChange 를 적용하기 전에 읽힌 pull 에 옛 본문의 진단을 캐시한다 — 가짜 서버가 그 지연을 본뜬다): 답이 오기 전엔 묻지 않고, 기다리는 장벽이 있는 동안 다시 보내면 답이 와도 묻지 않고 다시 치고, refresh 도 장벽을 거치며, 장벽이 오류로 답해도 묻고, 빈 목록이면 걷고, 장벽을 기다리다 서버가 다시 떠도 다시 친다 (계획 editor-lsp-servers-expand LS4)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

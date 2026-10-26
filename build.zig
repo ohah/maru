@@ -2125,6 +2125,11 @@ pub fn build(b: *std.Build) void {
     const run_backup_store_tests = b.addRunArtifact(backup_store_tests);
     run_backup_store_tests.addArg("--maru-expect-tests=35"); // 2 aggregation blocks + 31 native tests + 2 pure policy tests
     backup_store_step.dependOn(&run_backup_store_tests.step);
+    const glyph_source_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows glyph sources"} });
+    const run_glyph_source_tests = b.addRunArtifact(glyph_source_tests);
+    run_glyph_source_tests.addArg("--maru-expect-tests=7");
+    b.step("test-windows-glyph-sources", "Verify native UTF16 cluster sources and borrowed buffer bounds").dependOn(&run_glyph_source_tests.step);
+
     const typography_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows typography"} });
     const run_typography_tests = b.addRunArtifact(typography_tests);
     run_typography_tests.addArg("--maru-expect-tests=7");

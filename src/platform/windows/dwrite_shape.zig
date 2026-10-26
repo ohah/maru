@@ -39,6 +39,7 @@ pub const Error = error{
     FormatFailed,
     LayoutFailed,
     TypographyFailed,
+    ClusterMappingFailed,
     DrawFailed,
     /// `anchor = .tail`(앞을 잘라 `…` 를 앞에 둔다)은 DirectWrite 에 없다 — 손으로 잘라야 한다.
     /// **조용히 뒤를 자르지 않는다**: 입력 줄은 caret 이 끝에 있어 앞을 잘라야 방금 친 글자가 보인다
@@ -67,11 +68,16 @@ pub const Request = seam.Request;
 const typography = @import("dwrite_typography.zig");
 pub const NativeTypography = typography.Typography;
 pub const AppliedTypographyRange = typography.AppliedRange;
+const glyph_sources = @import("glyph_sources.zig");
+pub const GlyphSource = glyph_sources.Source;
+pub const mapGlyphSources = glyph_sources.assign;
 pub const ShapeOptions = struct {
     /// Keep native defaults unless the terminal explicitly disables liga/clig/calt.
     ligatures: bool = true,
     /// Native property readback is opt-in; regular shaping makes no extra query.
     typography_readback: ?*AppliedTypographyRange = null,
+    /// Parallel native source records for terminal cluster-to-cell mapping.
+    glyph_sources: ?[]GlyphSource = null,
 };
 
 pub const ShapeResult = struct { count: usize = 0, overflow: bool = false, primary_found: bool = false };
@@ -115,14 +121,15 @@ fn guidEql(a: *const d3d11.GUID, b: *const d3d11.GUID) bool {
 
 const UnicodeRange = extern struct { first: u32, last: u32 };
 
+const GlyphOffset = extern struct { advance_offset: f32, ascender_offset: f32 };
+
 const GlyphRun = extern struct {
     font_face: ?*anyopaque,
     font_em_size: f32,
     glyph_count: u32,
     glyph_indices: ?[*]const u16,
     glyph_advances: ?[*]const f32,
-    /// `DWRITE_GLYPH_OFFSET*` — 배열이지만 opaque 라 **한 겹 포인터**로 받는다(indexable opaque 금지).
-    glyph_offsets: ?*const anyopaque,
+    glyph_offsets: ?[*]const GlyphOffset,
     is_sideways: BOOL,
     bidi_level: UINT,
 };
@@ -340,6 +347,8 @@ const Collector = struct {
     /// 무대. `Draw` 동안 `glyph_id`·`advance_px`·`codepoint` 만 쓰이고, 나머지는 `fill` 이 채운다.
     stage: []GlyphRecord,
     glyph_total: usize = 0,
+    sources: ?[]GlyphSource = null,
+    mapping_failed: bool = false,
     overflow: bool = false,
 
     fn deinit(self: *Collector) void {
@@ -425,7 +434,7 @@ const TextRenderer = extern struct {
         self: *TextRenderer,
         _: ?*anyopaque,
         baseline_x: f32,
-        _: f32,
+        baseline_y: f32,
         _: UINT,
         run: *const GlyphRun,
         desc: ?*const GlyphRunDescription,
@@ -433,7 +442,11 @@ const TextRenderer = extern struct {
     ) callconv(abi.winapi) HRESULT {
         const c = self.collector;
         const n = run.glyph_count;
-        if (c.glyph_total + n > c.stage.len) {
+        const end = std.math.add(usize, c.glyph_total, n) catch {
+            c.overflow = true;
+            return 0;
+        };
+        if (end > c.stage.len or (if (c.sources) |sources| end > sources.len else false)) {
             c.overflow = true;
             return 0;
         }
@@ -444,6 +457,24 @@ const TextRenderer = extern struct {
             c.stage[start + i].glyph_id = ids[i];
             c.stage[start + i].advance_px = if (run.glyph_advances) |a| a[i] else 0;
             c.stage[start + i].codepoint = 0;
+        }
+        if (c.sources) |sources| {
+            for (sources[start..end], 0..) |*source, glyph| {
+                source.* = .{
+                    .baseline_x = baseline_x,
+                    .baseline_y = baseline_y,
+                    .advance_offset = if (run.glyph_offsets) |offsets| offsets[glyph].advance_offset else 0,
+                    .ascender_offset = if (run.glyph_offsets) |offsets| offsets[glyph].ascender_offset else 0,
+                    .bidi_level = run.bidi_level,
+                };
+            }
+            if (n != 0) if (desc) |d| if (d.cluster_map) |map| {
+                glyph_sources.assign(map[0..d.string_length], n, d.text_position, sources[start..end]) catch {
+                    c.mapping_failed = true;
+                    return 0;
+                };
+                for (sources[start..end]) |*source| source.cluster_glyph_start += @intCast(start);
+            };
         }
         // **글리프 → 코드포인트**는 `clusterMap` 을 뒤집어 얻는다. 그 배열은 **문자 기준**이라
         // (`clusterMap[문자] = 글리프`) 같은 글리프를 가리키는 첫 문자를 그 글리프의 대표로 삼는다 —
@@ -722,10 +753,12 @@ pub const Shaper = struct {
                 return error.TypographyFailed;
             };
         }
-        var collector = Collector{ .stage = out, .allocator = self.allocator };
+        var collector = Collector{ .stage = out, .allocator = self.allocator, .sources = options.glyph_sources };
         defer collector.deinit();
         var renderer = TextRenderer{ .vtable = &TextRenderer.instance, .collector = &collector };
-        try check(layout.vtable.Draw(layout, null, &renderer, 0, 0), error.DrawFailed);
+        const draw_result = layout.vtable.Draw(layout, null, &renderer, 0, 0);
+        if (collector.mapping_failed) return error.ClusterMappingFailed;
+        try check(draw_result, error.DrawFailed);
 
         return self.fill(&collector, req, out, primary_bundled);
     }
@@ -854,6 +887,7 @@ pub const Shaper = struct {
             var chunk_len: usize = 0;
             var has_metrics = false;
 
+            const run_out_start = n;
             var x = run.baseline_x;
             var i: usize = 0;
             while (i < run.glyph_count) : (i += 1) {
@@ -888,6 +922,11 @@ pub const Shaper = struct {
                     .left_overhang_px = overhang,
                     .font_name = name_buf,
                 };
+                if (c.sources) |sources| {
+                    var source = sources[run.glyph_start + i];
+                    if (source.known) source.cluster_glyph_start = @intCast(run_out_start + source.cluster_glyph_start - run.glyph_start);
+                    sources[n] = source;
+                }
                 x += staged.advance_px;
                 n += 1;
             }

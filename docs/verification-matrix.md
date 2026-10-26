@@ -5214,6 +5214,14 @@ EOF·UTF-8/UTF-16 범위, gopls 활성화 옵션, refresh 및 유실 응답 복�
 필드 이동을 별도 증거로 검사한다. 냉간 실행 20회와 정상 대조군·독립 33개 음성 대조군을
 확인했다. 이 결과로 과거 간헐 중단의 원인이나 전체 후보창 픽셀 검증을 확정하지 않는다.
 
+## 실제 SDK 다중 파일 이름 바꾸기
+
+`run.py --scenario rename`은 Rust·Go의 세 파일을 두 열린 문서·한 닫힌 문서로 나누어 실제
+F2/Enter→WorkspaceEdit→자동 저장→Undo Rename을 확인한다. 실제 응답 관측 뒤 로컬 편집과
+닫힌 파일 제거로 적용 전 거절을 확인하며, wire를 바꾸지 않는다. 쓰기 도중 실패의 원자성을
+주장하지 않는다. [10개 컨트롤러 지문·독립 판정·파손 입력·한계](../tools/editor-lsp-real/rename.md)가 세부 범위를 소유한다.
+SDK 없는 전체 Python 판정은 현재 79개 시험 함수다. 실제 SDK는 기본 CI에 추가하지 않는다.
+
 ## 실제 SDK 다중 파일 LSP 회귀
 
 `run.py --scenario multi-file`은 Rust·Go에서 다른 파일 정의 이동/복귀, 보조 파일의 타입 변경·복원으로 인한
@@ -5221,7 +5229,7 @@ EOF·UTF-8/UTF-16 범위, gopls 활성화 옵션, refresh 및 유실 응답 복�
 편집·저장하지 않고 version도 유지해야 한다. URI별 본문/version과 요청 시점의 보조 파일 snapshot으로
 독립 대응하며 Go push는 편집/응답 순서와 제품 상태로 한계를 구분한다. 두 프로필은 별도로 실행한다.
 [계약·20개 이상 파손 입력·관측 한계](../tools/editor-lsp-real/multi-file.md)가 세부 범위를 소유한다.
-SDK 없는 전체 Python 판정은 현재 66개 시험 함수이며, 실제 서버는 기본 CI에 추가하지 않는다.
+SDK 없는 전체 Python 판정은 현재 79개 시험 함수이며, 실제 서버는 기본 CI에 추가하지 않는다.
 
 ## 실제 SDK LSP 편집 회귀 (2026-10-25)
 

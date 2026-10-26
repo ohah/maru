@@ -6792,6 +6792,14 @@ pub fn build(b: *std.Build) void {
     run_multi_lsp.addArg("--maru-expect-tests=5");
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_multi_lsp.addArg("--maru-expect-passed=5");
     b.step("test-editor-real-lsp-multi", "Run an explicitly configured multi-file SDK case").dependOn(&run_multi_lsp.step);
+    const rename_lsp_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.real LSP rename"} });
+    const install_rename_lsp = b.addInstallArtifact(rename_lsp_tests, .{ .dest_sub_path = "maru-real-lsp-rename-test" });
+    b.step("editor-real-lsp-rename-judge", "Build the opt-in real SDK rename judge").dependOn(&install_rename_lsp.step);
+    const run_rename_lsp = b.addRunArtifact(rename_lsp_tests);
+    run_rename_lsp.setCwd(b.path("."));
+    run_rename_lsp.addArg("--maru-expect-tests=5");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_rename_lsp.addArg("--maru-expect-passed=5");
+    b.step("test-editor-real-lsp-rename", "Run an explicitly configured real SDK rename case").dependOn(&run_rename_lsp.step);
     const rust_pull_step = b.step("test-editor-rust-pull", "Verify Rust pull diagnostics and explicit cancellation retry");
     const rust_pull_pure = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{ "LSJDP", "RDP diagnostic", "LSI8" } });
     const run_rust_pull_pure = b.addRunArtifact(rust_pull_pure);

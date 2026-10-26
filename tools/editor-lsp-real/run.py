@@ -118,7 +118,10 @@ def stop_owned_proxy_groups(root):
 
 def run_case(args, language, spec):
     root = args.output / ('case-' + language)
-    if getattr(args, 'scenario', 'single-file') == 'multi-file':
+    if getattr(args, 'scenario', 'single-file') == 'rename':
+        from rename_fixture import fixture as rename_fixture
+        cfg = rename_fixture(root, language)
+    elif getattr(args, 'scenario', 'single-file') == 'multi-file':
         from multi_fixture import fixture as multi_fixture
         cfg = multi_fixture(root, language)
     else:
@@ -157,7 +160,7 @@ def run_case(args, language, spec):
             try:
                 # Multi-file adds peer registration and two explicit sync
                 # barriers. Its valid phase budgets must fit inside the owner.
-                phases = 10 if getattr(args, 'scenario', 'single-file') == 'multi-file' else 7
+                phases = {'single-file': 7, 'multi-file': 10, 'rename': 16}[getattr(args, 'scenario', 'single-file')]
                 code = child.wait(timeout=args.phase_timeout * phases + 30)
             except subprocess.TimeoutExpired:
                 code = -1
@@ -182,7 +185,7 @@ def run_case(args, language, spec):
             if result['product'].get('build_mode') != PROFILES[args.optimize]:
                 raise InvalidEvidence('judge optimization mode does not match requested profile')
             result['validation'] = verify_directory(root, code)
-            if language == 'rust' and result['validation'].get('diagnostic_transport') != 'pull':
+            if language == 'rust' and getattr(args, 'scenario', 'single-file') != 'rename' and result['validation'].get('diagnostic_transport') != 'pull':
                 raise InvalidEvidence('Rust diagnostics were not obtained through pull')
         except (InvalidEvidence, OSError, ValueError, KeyError, TypeError) as exc:
             result['failure'] = 'wire/native oracle: ' + str(exc)
@@ -196,7 +199,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--servers-json', type=Path, required=True)
     parser.add_argument('--languages', nargs='+', choices=SAMPLES)
-    parser.add_argument('--scenario', choices=['single-file', 'multi-file'], default='single-file')
+    parser.add_argument('--scenario', choices=['single-file', 'multi-file', 'rename'], default='single-file')
     parser.add_argument('--judge', type=Path)
     parser.add_argument('--phase-timeout', type=int, default=90)
     parser.add_argument('--build', action='store_true')
@@ -204,10 +207,11 @@ def main():
     args = parser.parse_args()
     if sys.platform != 'darwin':
         parser.error('the product judge requires macOS; pure oracle tests are portable')
-    if args.scenario == 'multi-file' and args.languages and not set(args.languages) <= {'rust', 'go'}:
-        parser.error('multi-file supports Rust and Go only')
-    args.languages = args.languages or (['rust', 'go'] if args.scenario == 'multi-file' else list(SAMPLES))
-    args.judge = args.judge or REPO / ('zig-out/bin/maru-real-lsp-multi-test' if args.scenario == 'multi-file' else 'zig-out/bin/maru-real-lsp-test')
+    if args.scenario in ('multi-file', 'rename') and args.languages and not set(args.languages) <= {'rust', 'go'}:
+        parser.error(args.scenario + ' supports Rust and Go only')
+    args.languages = args.languages or (['rust', 'go'] if args.scenario != 'single-file' else list(SAMPLES))
+    judge_names = {'single-file': 'maru-real-lsp-test', 'multi-file': 'maru-real-lsp-multi-test', 'rename': 'maru-real-lsp-rename-test'}
+    args.judge = args.judge or REPO / 'zig-out/bin' / judge_names[args.scenario]
     args.output = args.output.resolve()
     args.judge = args.judge.resolve()
     if args.output == REPO or REPO in args.output.parents or args.output.exists():
@@ -216,7 +220,7 @@ def main():
         parser.error('phase timeout must be between 1 and 180 seconds')
     specs = json.loads(args.servers_json.read_text())
     if args.build:
-        subprocess.run(['mise', 'exec', '--', 'zig', 'build', ('editor-real-lsp-multi-judge' if args.scenario == 'multi-file' else 'editor-real-lsp-judge'), '-Doptimize=' + args.optimize, '-j2'], cwd=REPO, check=True)
+        subprocess.run(['mise', 'exec', '--', 'zig', 'build', {'single-file': 'editor-real-lsp-judge', 'multi-file': 'editor-real-lsp-multi-judge', 'rename': 'editor-real-lsp-rename-judge'}[args.scenario], '-Doptimize=' + args.optimize, '-j2'], cwd=REPO, check=True)
     args.output.mkdir(parents=True, mode=0o700)
     frozen_judge = args.output / 'judge'
     shutil.copyfile(args.judge, frozen_judge)
@@ -227,6 +231,9 @@ def main():
     controller_names = ('real_lsp_judge.zig', 'mod.zig', 'lsp.zig', 'completion.zig', 'hover.zig', 'definition.zig', 'semantic.zig')
     if args.scenario == 'multi-file':
         controller_names += ('real_lsp_multi_judge.zig',)
+    if args.scenario == 'rename':
+        controller_names += ('rename.zig', 'workspace_edit.zig')
+        (sources / 'rename_judge.zig').write_bytes((REPO / 'src/platform/macos/app_session/editor/real_lsp/rename.zig').read_bytes())
     for name in controller_names:
         (sources / name).write_bytes((REPO / 'src/platform/macos/app_session/editor' / name).read_bytes())
     tool_sources = args.output / 'tool-sources'
@@ -234,6 +241,8 @@ def main():
     tool_names = ('run.py', 'oracle.py', 'verify.py')
     if args.scenario == 'multi-file':
         tool_names += ('multi_fixture.py', 'multi_oracle.py')
+    if args.scenario == 'rename':
+        tool_names += ('rename_fixture.py', 'rename_oracle.py')
     for name in tool_names:
         (tool_sources / name).write_bytes((Path(__file__).parent / name).read_bytes())
     (tool_sources / 'lsp_proxy.py').write_bytes(PROXY.read_bytes())

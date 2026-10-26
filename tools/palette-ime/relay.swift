@@ -84,6 +84,9 @@ do {
                 var empty: UniChar = 0
                 withUnsafePointer(to: &empty) { event.keyboardSetUnicodeString(stringLength: 0, unicodeString: $0) }
             }
+            // Tag only the admitted private Project Search Tab, so its receiver can
+            // distinguish OS event handling from this relay merely posting it.
+            if projectTab { event.setIntegerValueField(.eventSourceUserData, value: Int64(id)) }
             event.flags = CGEventFlags(rawValue: flags); event.post(tap: .cghidEventTap)
         }
         // A PNG/OCR capture can exhaust the app timer's original delay. Do not
@@ -91,7 +94,7 @@ do {
         Thread.sleep(forTimeInterval: 0.4)
         last = id
         try JSONSerialization.data(withJSONObject: ["id": id, "passed": true, "kind": addressSelection ? "selection_key" : "key", "generation": request["generation"]!, "events": 2, "pid": Int(expectedPID), "keycode": code, "flags": flags]).write(to: root.appendingPathComponent("hid-ack.json"), options: .atomic)
-        print("delivered id=\(id) code=\(code) flags=\(flags)")
+        print("\(projectTab ? "posted" : "delivered") id=\(id) code=\(code) flags=\(flags)")
     }
     throw NSError(domain: "relay_timeout", code: 1)
 } catch {

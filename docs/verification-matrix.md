@@ -5201,3 +5201,9 @@ EOF·UTF-8/UTF-16 범위, gopls 활성화 옵션, refresh 및 유실 응답 복�
 `zig build test-project-search-ime`는 검색어·포함·제외·바꿀 문자열의 범위 편집, owner 전환과
 실패 원자성, 조합 무효화와 debounce/치환 분리를 검사한다. 실제 입력과 독립 창·픽셀 검증은
 [프로젝트 검색 IME 계획](plans/project-search-ime.md)이 소유하며 진단 통과와 PNG/OCR 통과를 구분한다.
+
+## 프로젝트 검색 첫 Tab 수신·처리 관측
+
+[Tab 전달 진단](plans/project-search-tab-delivery.md)은 relay post 응답과 실제 앱/view 수신·처리,
+필드 이동을 별도 증거로 검사한다. 냉간 실행 20회와 정상 대조군·독립 33개 음성 대조군을
+확인했다. 이 결과로 과거 간헐 중단의 원인이나 전체 후보창 픽셀 검증을 확정하지 않는다.

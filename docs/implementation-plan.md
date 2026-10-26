@@ -1734,7 +1734,8 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [이름 변경·다른 이름으로 저장 IME 문맥](plans/inline-rename-ime.md): NFD 보존·UTF-16 범위 교체·후보 Return 격리와 실제 후보창 PNG/OCR 검증. Save As 파일 생성 GUI는 별도 검증 범위다.
 - [설정 검색창 IME 문맥](plans/settings-search-ime.md): 고정 64/32바이트·확정 검색 필터를 유지하는 범위 projection과 후보 Enter 격리. 실제 후보창 5회 PNG/OCR·필터 보존·터미널 복귀 통과, PR #4588 머지.
 - [찾기·바꾸기 IME 문맥](plans/find-replace-ime.md): 범위 재변환·후보 키 소비와 공유 view/diff 상태 이동 경계. 실제 후보창 PNG/OCR 및 초기화 전 회귀 검증 후 PR #4590 머지.
-- [프로젝트 검색 도크 IME 문맥](plans/project-search-ime.md): 네 TextField의 UTF-16 범위·입력 owner와 기존 조합 무효화/debounce 정책 연결.
+- [프로젝트 검색 도크 IME 문맥](plans/project-search-ime.md): 네 TextField의 UTF-16 범위·입력 owner와 기존 조합 무효화/debounce 정책 연결. 실제 네 칸 PNG/OCR 확인 후 PR #4597 머지.
+- [프로젝트 검색 첫 Tab 전달 진단](plans/project-search-tab-delivery.md): post 완료·실제 앱 처리 완료를 구분해 간헐적 검증 중단의 원인을 조사.
 
 
 - [주소창 실제 포인터 workflow](plans/address-field-ime-pointer.md): fixture의 선택·focus 이동을 실제 클릭·드래그/Shift+Right·Escape·다른 pane 클릭으로 대체하고 후보창 5회 PNG/OCR·한자 선택·터미널 복귀를 검증했다.

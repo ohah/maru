@@ -24,3 +24,15 @@ def prepare(repo, snapshot):
         if not text.endswith(old) or text.count(old) != 1:
             raise RuntimeError('unexpected private instrumentation: ' + relative)
         path.write_text(text[:-len(old)] + (repo / 'tools/project-search-ime' / replacement).read_text())
+
+    # Observe real tagged HID delivery in the source copy only. Neither monitor
+    # nor defer changes event dispatch or product input decisions.
+    text = (snapshot / 'src/platform/macos/MaruAppHost.swift').read_text()
+    for signature, start, end in (
+        ('    override func keyDown(with event: NSEvent) {', 'view_received', 'view_handled'),
+        ('    override func keyUp(with event: NSEvent) {', 'view_release_received', 'view_release_handled'),
+    ):
+        if text.count(signature) != 1:
+            raise RuntimeError('unexpected private event observation point')
+        text = text.replace(signature, signature + f'\n        projectTabRecord(event, phase: "{start}")\n        defer {{ projectTabRecord(event, phase: "{end}") }}', 1)
+    (snapshot / 'src/platform/macos/MaruAppHost.swift').write_text(text + '\n' + (repo / 'tools/project-search-ime/tab_trace.swift.inc').read_text())

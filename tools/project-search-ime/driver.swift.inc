@@ -193,6 +193,7 @@ extension MaruAppHostController {
                 case 0:
                     try JSONSerialization.data(withJSONObject: ["screen_capture": CGPreflightScreenCaptureAccess()]).write(to: paletteIMERoot.appendingPathComponent("permissions.json"))
                     try paletteIMERequire(paletteIMEDiagnostic || CGPreflightScreenCaptureAccess(), "screen_capture_permission")
+                    ProjectTabTrace.install()
                     window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
                     guard NSApp.isActive && window.firstResponder === view else { return }
                     try paletteIMERequire(projectIMEField < 4, "field_index")
@@ -206,7 +207,9 @@ extension MaruAppHostController {
                 case 40:
                     let order: [UInt64] = [0,3,1,2]
                     guard let at = order.firstIndex(of:PaletteIMERun.tabSource) else { throw NSError(domain:"tab_source",code:1) }
+                    projectTabSummary()
                     try paletteIMERequire(paletteIMEWitness(29) == order[(at+1)%4], "Tab_field_order")
+                    if paletteIMEDiagnostic && ProcessInfo.processInfo.environment["MARU_PROJECT_TAB_ONLY"] == "1" { paletteIMEFinish(nil, view:view); return }
                     PaletteIMERun.tabs.append(["cycle":PaletteIMERun.candidateCount, "from":PaletteIMERun.tabSource, "to":paletteIMEWitness(29), "ack_id":PaletteIMERun.requestID, "generation":String(paletteIMEWitness(3))])
                     PaletteIMERun.step = 1
                 case 1:

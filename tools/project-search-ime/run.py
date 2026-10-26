@@ -36,7 +36,7 @@ def run(app, output, mode='live'):
     # Record the actual scene/independent checker separately before any GUI input.
     manifest = {'schema': 'maru.project-search-ime-harness.v1', 'workflow': 'fixture', 'files_sha256': {
         name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
-        for name in ('prepare.py', 'run.py', 'verify.py', 'driver.swift.inc', 'probe.zig.inc')
+        for name in ('prepare.py', 'run.py', 'verify.py', 'driver.swift.inc', 'probe.zig.inc', 'tab_trace.swift.inc')
     }}
     manifest['shared_files_sha256'] = {name: hashlib.sha256((REPO / name).read_bytes()).hexdigest() for name in ('tools/address-ime/verify.py', 'tools/verify-ime-candidate-captures.swift')}
     (output / 'project-search-harness.json').write_text(json.dumps(manifest, indent=2) + '\n')

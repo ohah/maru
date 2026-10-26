@@ -48831,36 +48831,33 @@ pub fn recomputeSymbolPicker(self: *AppSession) void {
         return;
     }
     self.symbol_picker_source = source;
-    const doc = term.rt.editorDocument().opened orelse {
-        self.symbol_picker_rows.clear(self.allocator);
-        self.chrome_host.symbol_picker.setResultCount(0);
-        return;
-    };
-    const st = &term.rt.editor_syntax;
-    // **2층이 유효하면 그것**(§8.2o · §7.5) — 목록이 같은 타입이라 피커는 층을 모른다. **1층 provider 를 먼저 요구하지 않는다**:
-    // 문법이 아예 없는 언어(grammar 없음)도 서버만 있으면 이 축이 선다(§7.5 — 「grammar 도 서버도 없을 때만 빈다」).
-    const syms = symbols_client.list(term) orelse blk: {
-        const prov = if (st.provider) |*p| p else {
-            self.symbol_picker_rows.clear(self.allocator);
-            self.chrome_host.symbol_picker.setResultCount(0);
-            return;
-        };
-        prov.symbols(self.allocator, &st.symbols);
-        break :blk st.symbols.items;
-    };
-    symbol_picker.filter(
-        self.allocator,
-        syms,
-        doc.file.content,
-        self.chrome_host.symbol_picker.input.query.items,
-        symbolLabelCols(self),
-        self.symbol_picker_scope,
-        &self.symbol_picker_rows,
-    ) catch {
+    _ = prepareSymbolPickerRows(self, self.chrome_host.symbol_picker.input.query.items, &self.symbol_picker_rows) catch {
         self.symbol_picker_rows.clear(self.allocator);
     };
     self.chrome_host.symbol_picker.selected = 0; // 쿼리 변경 시 선택 맨 위(팔레트와 같은 규율)
     self.chrome_host.symbol_picker.setResultCount(self.symbol_picker_rows.rows.items.len);
+}
+
+/// Prepare owned result rows without replacing the visible list or selection.
+pub fn prepareSymbolPickerRows(self: *AppSession, query: []const u8, out: *symbol_picker.List) !bool {
+    if (!self.surface_initialized or self.tabs.items.len == 0) return false;
+    const term = pane_ops.activePane(self).activeTerm();
+    const source = symbolPickerSource(term) orelse return false;
+    if (!std.meta.eql(self.symbol_picker_source, @as(?SymbolPickerSource, source))) return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
+    const st = &term.rt.editor_syntax;
+    // LSP symbols work even without a grammar. Fall back to syntax symbols only
+    // when the semantic layer is unavailable, preserving the existing provider policy.
+    const syms = symbols_client.list(term) orelse blk: {
+        const prov = if (st.provider) |*p| p else {
+            out.clear(self.allocator);
+            return true;
+        };
+        prov.symbols(self.allocator, &st.symbols);
+        break :blk st.symbols.items;
+    };
+    try symbol_picker.filter(self.allocator, syms, doc.file.content, query, symbolLabelCols(self), self.symbol_picker_scope, out);
+    return true;
 }
 
 /// 「없다」와 「아직 모른다」를 가른다(§7.5 저하 표).
@@ -71818,4 +71815,450 @@ test "visible color window 색 조회를 바꿔도 실제 semantic과 inlay 요�
         try testing.expectEqual(inlay_hi, term.rt.editor_inlay.waiting_hi);
         try testing.expect(term.rt.editor_syntax.bufs.line_bounds.items.len != 256);
     }
+}
+
+test "symbol picker IME host middle UTF16 range replaces the word" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    try fx.session.chrome_host.symbol_picker.input.query.appendSlice(testing.allocator, "a😀z");
+    fx.session.imeBegin();
+    if (!@import("../chrome_ime.zig").insert(fx.session, "韓", .{ .location = 1, .length = 2 })) fx.session.imeInsert("韓");
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("a韓z", fx.session.chrome_host.symbol_picker.input.query.items);
+}
+test "symbol picker IME host explicit empty range deletes only the selected word" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "", .{ .location = 1, .length = 2 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("az", field.query.items);
+}
+
+test "symbol picker IME host empty callback without range keeps query" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "abc");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("abc", field.query.items);
+}
+
+test "symbol picker IME host surrogate split rejects the whole key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "韓", .{ .location = 2, .length = 1 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("a😀z", field.query.items);
+}
+
+test "symbol picker IME host invalid UTF8 rejects the whole key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "\xff", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "symbol picker IME host NFD is preserved verbatim" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "한", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("한", field.query.items);
+}
+
+test "symbol picker IME host outside key range callback keeps suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    _ = ime.insert(fx.session, "韓", .{ .location = 1, .length = 2 });
+    try testing.expectEqualStrings("a韓z", field.query.items);
+}
+
+test "symbol picker IME host preview preserves query rows selection and document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    recomputeSymbolPicker(fx.session);
+    fx.session.chrome_host.symbol_picker.selected = 37;
+    const rev = fx.term.rt.editorDocument().opened.?.file.revision;
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "韓", .{ .location = 1, .length = 0 }, .{ .location = 0, .length = 6 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("target", field.query.items);
+    try testing.expectEqualStrings("韓", field.preedit.items);
+    try testing.expectEqual(@as(usize, 50), fx.session.symbol_picker_rows.rows.items.len);
+    try testing.expectEqual(@as(usize, 37), fx.session.chrome_host.symbol_picker.selected);
+    try testing.expectEqual(rev, fx.term.rt.editorDocument().opened.?.file.revision);
+}
+
+test "symbol picker IME host candidate Return is consumed without navigation" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "韓", .{ .location = 1, .length = 0 }, .{ .location = 0, .length = 6 });
+    fx.session.imeEnd(null);
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "韓", null);
+    try testing.expect(ime.end(fx.session, .{ .key = .enter }));
+    fx.session.imeEnd(null);
+    try testing.expect(fx.session.chrome_host.symbol_picker.open);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+}
+
+test "symbol picker IME host independent Return can reach the existing accept path" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    _ = field;
+    fx.session.imeBegin();
+    try testing.expect(!ime.end(fx.session, .{ .key = .enter }));
+    fx.session.imeEnd(null);
+}
+
+test "symbol picker IME host reopen rejects old callbacks" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    closeSymbolPicker(fx.session);
+    toggleSymbolPicker(fx.session);
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("", field.query.items);
+    try testing.expect(fx.session.chrome_host.symbol_picker.open);
+}
+
+test "symbol picker IME host scope change rejects an in flight key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "x", null);
+    fx.session.symbol_picker_scope = .{ .sibling_of = 1 };
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "symbol picker IME host revision change rejects an in flight key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "x", null);
+    fx.term.rt.editorDocument().opened.?.file.revision += 1;
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "symbol picker IME host source loss rejects the previous key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "x", null);
+    fx.session.symbol_picker_source = null;
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "symbol picker IME host sequence exhaustion closes append fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.symbol_picker_ime.sequence = @as(u64, 1) << 53;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(.{ .key = .{ .char = 'x' } });
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "symbol picker IME host lifecycle exhaustion closes append fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.chrome_host.symbol_picker.ime_generation = std.math.maxInt(u64);
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(.{ .key = .{ .char = 'x' } });
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "symbol picker IME host bootstrap has no owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    _ = field;
+    const saved = fx.session.surface_initialized;
+    fx.session.surface_initialized = false;
+    defer fx.session.surface_initialized = saved;
+    try testing.expect(ime.generation(fx.session) == null);
+}
+
+test "symbol picker IME host empty topology has no owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    _ = field;
+    const saved = fx.session.tabs.items.len;
+    fx.session.tabs.items.len = 0;
+    defer fx.session.tabs.items.len = saved;
+    try testing.expect(ime.generation(fx.session) == null);
+}
+
+test "symbol picker IME host terminal pin has priority" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    _ = field;
+    fx.session.ime_terminal_target_id = fx.term.surfaceId();
+    defer fx.session.ime_terminal_target_id = null;
+    try testing.expect(ime.generation(fx.session) == null);
+    try testing.expect(!ime.insert(fx.session, "late", null));
+}
+
+test "symbol picker IME host accepted query publishes staged rows" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    recomputeSymbolPicker(fx.session);
+    fx.session.chrome_host.symbol_picker.selected = 37;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "target4", .{ .location = 0, .length = 6 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("target4", field.query.items);
+    try testing.expectEqual(@as(usize, 10), fx.session.symbol_picker_rows.rows.items.len);
+    try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.symbol_picker.selected);
+}
+
+test "symbol picker IME host row allocation failure restores input and selected row" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    recomputeSymbolPicker(fx.session);
+    fx.session.chrome_host.symbol_picker.selected = 37;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "target4", .{ .location = 0, .length = 6 });
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    fx.session.imeEnd(null);
+    fx.session.allocator = testing.allocator;
+    try testing.expectEqualStrings("target", field.query.items);
+    try testing.expectEqual(@as(usize, 50), fx.session.symbol_picker_rows.rows.items.len);
+    try testing.expectEqual(@as(usize, 37), fx.session.chrome_host.symbol_picker.selected);
+}
+
+test "symbol picker IME host snapshot allocation failure preserves the previous input" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    fx.session.allocator = testing.allocator;
+    try testing.expectEqualStrings("target", field.query.items);
+}
+
+test "symbol picker IME host failed key recovers for a following valid key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "bad", .{ .location = 2, .length = 1 });
+    fx.session.imeEnd(null);
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "韓", .{ .location = 1, .length = 2 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("a韓z", field.query.items);
+}
+
+test "symbol picker IME host every native key allocation failure preserves visible results" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../symbol_picker_ime.zig");
+    var observed_failure = false;
+    for (0..256) |index| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        try symbolPreviewFixture(&fx);
+        toggleSymbolPicker(fx.session);
+        const field = &fx.session.chrome_host.symbol_picker.input;
+        try field.query.appendSlice(testing.allocator, "target");
+        recomputeSymbolPicker(fx.session);
+        fx.session.chrome_host.symbol_picker.selected = 37;
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
+        fx.session.allocator = failing.allocator();
+        fx.session.imeBegin();
+        _ = ime.insert(fx.session, "target4", .{ .location = 0, .length = 6 });
+        fx.session.imeEnd(null);
+        fx.session.allocator = testing.allocator;
+        if (failing.has_induced_failure) {
+            observed_failure = true;
+            try testing.expectEqualStrings("target", field.query.items);
+            try testing.expectEqual(@as(usize, 50), fx.session.symbol_picker_rows.rows.items.len);
+            try testing.expectEqual(@as(usize, 37), fx.session.chrome_host.symbol_picker.selected);
+        } else {
+            try testing.expect(observed_failure);
+            try testing.expectEqualStrings("target4", field.query.items);
+            try testing.expectEqual(@as(usize, 10), fx.session.symbol_picker_rows.rows.items.len);
+            return;
+        }
+    }
+    return error.AllocationControlNeverSucceeded;
+}
+
+test "symbol picker IME host cancel restores the original word and suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    const field = &fx.session.chrome_host.symbol_picker.input;
+    try field.query.appendSlice(testing.allocator, "a한z");
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 1 });
+    fx.session.imeEnd(null);
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "", .{ .location = 0, .length = 0 }, null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("a한z", field.query.items);
+    try testing.expectEqual(@as(usize, 0), field.preedit.items.len);
+}
+
+test "symbol picker IME host dynamic text remains longer than Session Dock budget" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try symbolPreviewFixture(&fx);
+    toggleSymbolPicker(fx.session);
+    const ime = @import("../symbol_picker_ime.zig");
+    var text: [500]u8 = undefined;
+    @memset(&text, 'x');
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, &text, null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings(&text, fx.session.chrome_host.symbol_picker.input.query.items);
 }

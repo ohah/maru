@@ -19,6 +19,7 @@ export fn maru_symbol_preview_probe(stage: u32) callconv(.c) i32 {
     if (stage < 7 and (focus != 0 or term.rt.editor_first_line != 0 or self.editor_nav_back.items.len != 0)) return -1;
     if ((stage == 1 or stage == 2 or stage == 3 or stage == 5 or stage == 6) and !open) return -1;
     if ((stage == 0 or stage == 4 or stage == 7) and open) return -1;
+    if (stage == 2 and !std.mem.eql(u8,self.chrome_host.symbol_picker.input.query.items,"sample4")) return -1;
     if (stage == 2 or stage == 3 or stage == 6) {
         const p = term.rt.editor_symbol_preview orelse return -1;
         if (p.target_line < 150) return -1;

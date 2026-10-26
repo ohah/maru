@@ -2168,3 +2168,9 @@ SDK 없는 Python 증거 검사는 `test-editor-real-lsp-oracles`(현재 91개 �
 호스트 범위·세대·본문 검색 경계, 중립 모델(Debug/ReleaseFast), 독립 기록 검사 손상 대조군을 실행한다.
 실제 후보창 검증은 `python3 tools/activity-search-ime/run.py --output /private/tmp/<new-run>`이며,
 `--mode diagnostic`은 입력·본문 읽기·복귀 진단만 하고 PNG/OCR 통과로 간주하지 않는다.
+
+심볼 피커 IME: `mise exec -- zig build test-symbol-picker-ime -j2`는 실제 editor fixture에서
+UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/목록 보존을 검사한다.
+`python3 tools/symbol-picker-ime/mutations.py --output <new-external-dir>`는 제품 변이를 격리 사본에서 검사한다.
+`python3 tools/symbol-preview-app/run.py --output <new-external-dir>`는 실제 AppKit 콜백과 Metal 화면 회귀이며
+물리적 한국어 HID·OS 후보창 증거는 아니다.

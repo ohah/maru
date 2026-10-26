@@ -2340,6 +2340,17 @@ pub fn build(b: *std.Build) void {
     const address_field_ime_step = b.step("test-address-field-ime", "Validate address-field native IME ranges and pinned owner lifetime");
     address_field_ime_step.dependOn(&run_address_ime.step);
 
+    const symbol_picker_ime_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"symbol picker IME host"},
+    });
+    const run_symbol_picker_ime = b.addRunArtifact(symbol_picker_ime_tests);
+    run_symbol_picker_ime.addArg("--maru-expect-tests=31");
+    run_symbol_picker_ime.setCwd(b.path("."));
+    const symbol_picker_ime_step = b.step("test-symbol-picker-ime", "Validate symbol picker IME ownership and range publication");
+    symbol_picker_ime_step.dependOn(&run_symbol_picker_ime.step);
+    if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_symbol_picker_ime.step);
+
     const activity_search_ime_step = b.step("test-activity-search-ime", "Validate activity search native IME ranges and body search admission");
     const activity_search_ime_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,

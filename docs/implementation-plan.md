@@ -1750,3 +1750,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [Inspector 검색창 IME 범위 문맥](plans/inspector-search-ime.md): 고정 버퍼·실시간 조합 필터와 attached/detached 소유를 유지하는 범위 편집·후보 anchor 검증.
 
 - [에이전트 활동 뷰 검색창 IME 문맥](plans/activity-search-ime.md): 확정 라벨 필터와 별도 Enter의 본문 검색을 보존하는 범위 projection·owner·실패 원자성과 실제 후보창 검증.
+
+- [심볼 피커 IME 문맥](plans/symbol-picker-ime.md): 파일/형제 범위 검색의 범위 교체·owner·원자적 필터 publication과 후보 Return 격리.

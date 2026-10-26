@@ -175,6 +175,8 @@ def run_case(args, language, spec):
             if result['product'].get('build_mode') != PROFILES[args.optimize]:
                 raise InvalidEvidence('judge optimization mode does not match requested profile')
             result['validation'] = verify_directory(root, code)
+            if language == 'rust' and result['validation'].get('diagnostic_transport') != 'pull':
+                raise InvalidEvidence('Rust diagnostics were not obtained through pull')
         except (InvalidEvidence, OSError, ValueError, KeyError, TypeError) as exc:
             result['failure'] = 'wire/native oracle: ' + str(exc)
     result['artifacts'] = {p.name: sha(p) for p in root.iterdir() if p.is_file() and p.name in ('case.json', 'product.json', 'wire.ndjson', 'protocol.ndjson', 'judge.log', 'server.stderr')}

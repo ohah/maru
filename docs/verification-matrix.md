@@ -5218,3 +5218,13 @@ EOF·UTF-8/UTF-16 범위, gopls 활성화 옵션, refresh 및 유실 응답 복�
 20개 서로 다른 불량 증거 변이와 정상 대조군을 포함한다.
 버전 없는 진단은 순서와 제품 상태의 증거로 구분한다. headless 통합 검증이며 GUI/IME/픽셀 증거가 아니다.
 실행·적대적 조건·범위는 [실행 안내](../tools/editor-lsp-real/README.md)를 참조한다.
+
+
+## Rust 진단 pull 복구 (2026-10-26)
+
+Rust는 pull 진단을 협상하고 현재 문서 version/seq에 맞는 결과만 적용한다.
+provider 부재의 push fallback과 다른 서버의 push를 유지하며 협상된 pull은 늦은 push보다 우선한다.
+`test-editor-rust-pull`: 31개 순수/9개 제품 테스트(모듈 참조 포함). 취소 재요청의 명시적 opt-in,
+backoff·시간 역행·오버플로·타이머 중복, 초기 접속·refresh·지난 seq/version·해소·다른 열린 문서 의존성을 검사한다.
+51개 Python 증거 검사에는 push 없는 실제 pull 판정과 잘못된 URI/협상/취소/unchanged 거부를 포함한다.
+실제 SDK 결과와 서로 다른 적대 조건은 [조사·수정 검증](../tools/editor-lsp-real/rust-diagnostics.md)을 따른다.

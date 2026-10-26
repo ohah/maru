@@ -94,6 +94,9 @@ def verify(case, native, records, process_code=0):
     history = {}
     initialize_count = 0
     server_info = None
+    client_pull = False
+    pull_authoritative = False
+    pull_versions = set()
     for record in records:
         require(record.get('direction') in ('client', 'server'), 'unknown wire direction')
         m = record.get('message')
@@ -106,6 +109,7 @@ def verify(case, native, records, process_code=0):
             p = m.get('params') or {}
             if method == 'initialize':
                 initialize_count += 1
+                client_pull = isinstance(p.get('capabilities', {}).get('textDocument', {}).get('diagnostic'), dict)
                 require(p.get('rootUri') == Path(case['root']).as_uri(), 'wrong workspace root')
             elif method == 'initialized':
                 initialized = True
@@ -129,17 +133,26 @@ def verify(case, native, records, process_code=0):
                 pending[key] = (m, text, version)
         elif direction == 'server' and method == 'textDocument/publishDiagnostics':
             p = m.get('params', {})
-            if p.get('uri') == uri:
+            if p.get('uri') == uri and not pull_authoritative:
                 v = p.get('version', version)
                 publications.append((v, p.get('diagnostics', []), 'version' in p))
         elif direction == 'server' and method is None and identity is not None:
             require(key in pending, 'unmatched server response')
             request, source, request_version = pending.pop(key)
             pairs.append((request, m, source, request_version))
+            if request.get('method') == 'textDocument/diagnostic' and not m.get('error'):
+                result = m.get('result')
+                if isinstance(result, dict) and result.get('kind') == 'full':
+                    require(pull_authoritative, 'pull was not negotiated')
+                    require(request.get('params', {}).get('textDocument', {}).get('uri') == uri, 'pull used wrong document')
+                    publications.append((request_version, result.get('items'), True))
+                    pull_versions.add(request_version)
             if request.get('method') == 'initialize':
                 require(not m.get('error') and isinstance(m.get('result'), dict), 'initialize failed')
                 server_info = m['result'].get('serverInfo')
                 caps = m['result'].get('capabilities', {})
+                provider = caps.get('diagnosticProvider')
+                pull_authoritative = client_pull and (isinstance(provider, dict) or provider is True)
                 encoding = caps.get('positionEncoding', 'utf-16')
                 require(encoding in ('utf-8', 'utf-16'), 'unsupported position encoding')
                 for capability in ('hoverProvider', 'definitionProvider', 'completionProvider'):
@@ -204,7 +217,8 @@ def verify(case, native, records, process_code=0):
         elif raised and v == fixed and not any(d.get('severity') == 1 for d in diags):
             cleared = True
     require(raised and cleared, 'fresh type-error publication and clear not observed')
-    return dict(server_info=server_info, encoding=encoding, hover=True, definition=True, completion=True, diagnostic_roundtrip=True,
+    require(not pull_authoritative or {bad, fixed} <= pull_versions, 'bad/fixed pull reports missing')
+    return dict(server_info=server_info, encoding=encoding, diagnostic_transport='pull' if pull_authoritative else 'push', hover=True, definition=True, completion=True, diagnostic_roundtrip=True,
                 diagnostic_correlation='versioned' if versioned else 'ordered unversioned plus native state')
 
 

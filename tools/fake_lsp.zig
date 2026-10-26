@@ -180,8 +180,8 @@ pub fn main(init: std.process.Init) void {
         // Biome·oxlint 역할(AS4) — 보조 역할에 이름만 다르다.
         biome_mode = std.mem.eql(u8, base, "biome");
         oxlint_mode = std.mem.eql(u8, base, "oxlint");
-        pull_primary_mode = std.mem.eql(u8, base, "tsgo") or std.mem.eql(u8, base, "ruby-lsp");
-        inter_file_mode = std.mem.eql(u8, base, "tsgo"); // ruby-lsp 는 파일 간 의존을 알리지 않는다(그 소스 `inter_file_dependencies: false`)
+        pull_primary_mode = std.mem.eql(u8, base, "tsgo") or std.mem.eql(u8, base, "ruby-lsp") or std.mem.eql(u8, base, "rust-analyzer");
+        inter_file_mode = std.mem.eql(u8, base, "tsgo") or std.mem.eql(u8, base, "rust-analyzer"); // ruby-lsp 는 파일 간 의존을 알리지 않는다(그 소스 `inter_file_dependencies: false`)
         worker_lag_mode = std.mem.eql(u8, base, "ruby-lsp");
         if (biome_mode or oxlint_mode) auxiliary = true;
     } else |_| {}
@@ -1009,11 +1009,17 @@ fn handlePullDiagnostics(allocator: std.mem.Allocator, obj: std.json.ObjectMap, 
 }
 
 /// pull 만 내는 주 서버의 pull(LS2 — tsgo 꼴) — 설정을 묻지 않고 곧바로 `full`. 파일 간 의존(`XFILE`)은 열린 문서 전부를 본다.
+var primary_cancelled_once = false;
 fn answerPrimaryPull(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
     var uri: []const u8 = "";
     if (obj.get("params")) |p| if (p == .object) if (p.object.get("textDocument")) |td| if (td == .object) {
         uri = str(td.object.get("uri")) orelse "";
     };
+    if (!primary_cancelled_once and std.mem.indexOf(u8, docText(uri), "PCANCEL") != null) {
+        primary_cancelled_once = true;
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = -32802, .message = "analysis not ready", .data = .{ .retriggerRequest = true } } });
+        return; // No refresh: only the client's cancellation retry can recover.
+    }
     var msg_buf: [64]u8 = undefined;
     const seen: i64 = if (worker_lag_mode) blk: {
         const sl = docSlot(uri) orelse break :blk 0;
@@ -1037,6 +1043,10 @@ fn answerPrimaryPull(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: 
         n += 1;
     }
     sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = .{ .kind = "full", .items = items[0..n] } });
+    if (std.mem.indexOf(u8, docText(uri), "POLDPUSH") != null) {
+        const late = Diag{ .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 3 } }, .severity = 1, .message = "late push", .code = "OLD" };
+        sendJson(allocator, .{ .jsonrpc = "2.0", .method = "textDocument/publishDiagnostics", .params = .{ .uri = uri, .version = docVersion(uri), .diagnostics = [_]Diag{late} } });
+    }
     if (!primary_refreshed and std.mem.indexOf(u8, docText(uri), "PREFRESH") != null) {
         primary_refreshed = true;
         for (&doc_texts) |*d| d.cached_pull = -1; // 실서버는 캐시를 비우고 refresh 를 보낸다

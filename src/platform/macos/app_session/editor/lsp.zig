@@ -110,6 +110,7 @@ const OpenDoc = struct {
     pull_seq: u32 = 0,
     pull_version: u64 = 0,
     pull_dirty: bool = false,
+    pull_retry: maru.session.editor.lsp_requests.DiagnosticRetry = .{},
     /// pull 앞의 장벽(`Server.pull_barrier`) — 대기 중인 장벽 요청의 seq(0 = 없음, pull 과 같은 칸·같은 seq 열), 기다리는 사이 다시 보냈다(답이
     /// 와도 묻지 않고 장벽을 다시 친다).
     barrier_seq: u32 = 0,
@@ -1653,6 +1654,7 @@ fn spawnClient(self: *AppSession, c: *Client, now_ms: u64) void {
         d.sent_version = 0;
         d.pull_seq = 0;
         d.pull_dirty = false;
+        d.pull_retry.reset();
         d.barrier_seq = 0;
         d.barrier_dirty = false;
     }
@@ -1862,6 +1864,9 @@ fn pumpClient(self: *AppSession, c: *Client, now_ms: u64) void {
         return;
     }
     drainFrames(self, c, now_ms);
+    if (c.proc != null and c.phase == .ready) for (c.docs.items) |*d| {
+        if (d.pull_retry.takeDue(now_ms)) requestPull(self, c, d);
+    };
     // `initialize` 에 답이 없다 — 멈춘 서버로 보고 재시작 경로로(`initialize_timeout_ms`). 이 tick 에 읽은 것을 **다 처리한 뒤**
     // 판정한다 — 메인 스레드가 오래 멈췄다 깨어난 tick 에 이미 와 있는 응답을 버리고 죽이지 않게.
     if (c.proc != null and c.phase == .starting and now_ms -| c.started_at_ms >= initialize_timeout_ms) {
@@ -2049,7 +2054,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 const target: ?lsp.rpc.Target = if (r.is_error) null else lsp.rpc.definitionTarget(r.result);
                 editor_definition.onDefinitionResponse(self, seq, target, c.encoding);
             },
-            .diagnostic => |seq| onPullDiagnostics(self, c, seq, if (r.is_error) null else r.result),
+            .diagnostic => |seq| onPullDiagnosticsWithRetry(self, c, seq, if (r.is_error) null else r.result, r.diagnostic_retrigger),
             .hover => |seq| {
                 // 낡은 응답(다른 seq)·에러·빈 내용은 전부 「내용 없음」으로 호버 층에 넘긴다 — 판정은 그쪽이 한다(§8.2b 「요청」).
                 const md: ?[]u8 = if (r.is_error) null else lsp.rpc.hoverMarkdown(self.allocator, r.result) catch null;
@@ -2092,7 +2097,10 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 defer self.allocator.free(ok);
                 _ = send(self, c, ok);
                 self.editor_lsp.diag_refreshes += 1;
-                for (c.docs.items) |*d| requestPull(self, c, d);
+                for (c.docs.items) |*d| {
+                    d.pull_retry.reset();
+                    requestPull(self, c, d);
+                }
                 return;
             }
             // §8.2a 「하지 않는 것」 — 나머지는 전부 거부.
@@ -2122,9 +2130,13 @@ fn answerConfiguration(self: *AppSession, c: *Client, id: std.json.Value, params
 /// 묻는다(한 파일의 타입이 다른 파일의 오류를 바꾼다 — push 서버라면 서버가 스스로 다시 게시하던 일이다). 문서를 보내는 두 자리(처음 붙이기·동기화)가
 /// 이것 하나를 부른다.
 fn pullAfterSend(self: *AppSession, c: *Client, d: *OpenDoc) void {
+    d.pull_retry.reset();
     requestPull(self, c, d);
     if (!c.diagnostic_inter_file) return;
-    for (c.docs.items) |*o| if (o != d) requestPull(self, c, o);
+    for (c.docs.items) |*o| if (o != d) {
+        o.pull_retry.reset();
+        requestPull(self, c, o);
+    };
 }
 
 /// pull 진단을 묻는다(§8.2u) — pull 서버에 그 문서를 보낸 뒤마다·서버의 refresh 마다. 이미 기다리는 것이 있으면 다시 물을 표시만(답이 오면
@@ -2168,6 +2180,10 @@ fn sendPull(self: *AppSession, c: *Client, d: *OpenDoc) void {
 /// 다시 보냈으면 버리고 다시 묻는다. 본문이 서버가 본 version 이 아니면(아직 보내지 않은 편집) 버리기만 한다 — 그 편집을 보낼 때 묻는다(여기서
 /// 다시 물으면 옛 version 으로 묻고 버리기를 보낼 때까지 되풀이한다).
 pub fn onPullDiagnostics(self: *AppSession, c: *Client, seq: u32, result: ?std.json.Value) void {
+    onPullDiagnosticsWithRetry(self, c, seq, result, false);
+}
+
+fn onPullDiagnosticsWithRetry(self: *AppSession, c: *Client, seq: u32, result: ?std.json.Value, retrigger: bool) void {
     // 장벽의 답(`requestPull`) — 결과는 보지 않는다(오류여도 서버가 그 앞의 didChange 를 지났다). 기다리는 사이 다시 보냈으면 장벽을 다시 친다.
     for (c.docs.items) |*b| if (b.barrier_seq != 0 and b.barrier_seq == seq) {
         b.barrier_seq = 0;
@@ -2207,10 +2223,17 @@ pub fn onPullDiagnostics(self: *AppSession, c: *Client, seq: u32, result: ?std.j
             }
         },
     };
-    if (again) requestPull(self, c, d);
+    if (report != null) d.pull_retry.reset();
+    if (again) {
+        d.pull_retry.reset();
+        requestPull(self, c, d);
+    } else if (retrigger) {
+        d.pull_retry.schedule(self.awakeMs());
+    }
 }
 
 fn onPublishDiagnostics(self: *AppSession, c: *Client, params: ?std.json.Value) void {
+    if (!c.server.acceptsPush(c.diagnostic_provider)) return;
     const p = params orelse return;
     const obj = switch (p) {
         .object => |o| o,
@@ -3181,6 +3204,7 @@ pub fn notePathChanging(self: *AppSession, source: maru.session.editor.document_
         if (pin.owner == source.owner and std.meta.eql(pin.document, source.document)) {
             doc.retiring = true;
             doc.pull_seq = 0;
+            doc.pull_retry.reset();
         }
     };
 }

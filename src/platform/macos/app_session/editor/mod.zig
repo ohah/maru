@@ -24409,6 +24409,74 @@ test "LSI7 주 서버의 pull 진단(계획 editor-lsp-servers-expand LS2) — T
     try testing.expect(pumpLspUntil(&f.fx, 5000, b, Pull.cross));
 }
 
+test "RDP1 Rust pull owns diagnostics and recovers a server cancellation without refresh" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.openRepo(allocator, "probe.rs", "fn main() {} // PCANCEL POLDPUSH PREFRESH\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    try installFakeLspCopy(&f.fx, "bin/rust-analyzer");
+    var override_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const override = try std.fmt.bufPrintSentinel(&override_buf, "{s}/bin/rust-analyzer", .{f.root_buf[0..f.root_len]}, 0);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", override.ptr, 1);
+    try testing.expect(f.ready());
+    const Pull = struct {
+        fn current(t: *Term) bool {
+            var b: [64]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "pull: {d} rust", .{t.rt.editorDocument().notifications.lsp_version}) catch return false;
+            return t.rt.editor_diagnostics.lsp.items.len == 1 and std.mem.eql(u8, t.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+        fn empty(t: *Term) bool {
+            return t.rt.editor_diagnostics.lsp.items.len == 0;
+        }
+        fn cross(t: *Term) bool {
+            return t.rt.editor_diagnostics.lsp.items.len == 2;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, f.term, Pull.current));
+    const c = lsp_client.readyClientFor(s, f.term).?;
+    try testing.expect(c.server.pull_diagnostics and c.diagnostic_provider and c.diagnostic_inter_file);
+    try testing.expect(s.editor_lsp.sent_pulls >= 2); // PCANCEL sends no refresh.
+    // Drain the explicit refresh and the following late push as well.
+    for (0..20) |_| {
+        lsp_client.pump(s);
+        _ = usleep(1000);
+    }
+    try testing.expect(s.editor_lsp.diag_refreshes > 0);
+    try testing.expect(Pull.current(f.term));
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"kind\":\"full\",\"items\":[]}", .{});
+    defer parsed.deinit();
+    const d = c.findDoc(f.term).?;
+    const count = s.editor_lsp.received_diagnostics;
+    d.pull_seq = 123;
+    d.pull_version = d.sent_version;
+    lsp_client.onPullDiagnostics(s, c, 122, parsed.value); // unknown seq cannot release a new request
+    try testing.expectEqual(@as(u32, 123), d.pull_seq);
+    try testing.expect(Pull.current(f.term));
+    d.pull_version = d.sent_version - 1;
+    lsp_client.onPullDiagnostics(s, c, 123, parsed.value); // old document version cannot clear diagnostics
+    try testing.expectEqual(count, s.editor_lsp.received_diagnostics);
+    try testing.expect(Pull.current(f.term));
+    d.pull_seq = 124;
+    d.pull_version = d.sent_version;
+    lsp_client.onPullDiagnostics(s, c, 123, parsed.value); // delayed prior response remains stale
+    try testing.expectEqual(@as(u32, 124), d.pull_seq);
+    lsp_client.onPullDiagnostics(s, c, 124, null); // malformed/missing report preserves the current view
+    try testing.expect(Pull.current(f.term));
+    const root = f.root_buf[0..f.root_len];
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.rs", .data = "fn other() {}\n" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const other = (try pane_ops.openFileTermInActivePane(s, try std.fmt.bufPrint(&path_buf, "{s}/other.rs", .{root}), .text)).term;
+    try testing.expect(pumpLspUntil(&f.fx, 5000, other, Pull.current));
+    f.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = f.term.rt.editorDocument().opened.?.file.content.len, .focus = 0 };
+    try testing.expect(insertText(s, f.term, "// XFILE PQUIET POLDPUSH\n"));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, other, Pull.cross)); // dependency refresh includes peers
+    f.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = f.term.rt.editorDocument().opened.?.file.content.len, .focus = 0 };
+    try testing.expect(insertText(s, f.term, "// PQUIET POLDPUSH\n"));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, f.term, Pull.empty));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, other, Pull.current));
+}
+
 test "LSI10 Ruby(`ruby-lsp`) 주 서버 — pull 로만 진단을 세우고(그 클라이언트만 알린다), **pull 앞에 장벽을 쳐 그 답이 온 뒤에 묻는다**(ruby-lsp 는 작업 스레드가 앞의 didChange 를 적용하기 전에 읽힌 pull 에 옛 본문의 진단을 캐시한다 — 가짜 서버가 그 지연을 본뜬다): 답이 오기 전엔 묻지 않고, 기다리는 장벽이 있는 동안 다시 보내면 답이 와도 묻지 않고 다시 치고, refresh 도 장벽을 거치며, 장벽이 오류로 답해도 묻고, 빈 목록이면 걷고, 장벽을 기다리다 서버가 다시 떠도 다시 친다 (계획 editor-lsp-servers-expand LS4)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

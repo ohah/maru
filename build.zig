@@ -1998,6 +1998,10 @@ pub fn build(b: *std.Build) void {
     const run_renderer_resource_tests = b.addRunArtifact(renderer_resource_tests);
     run_renderer_resource_tests.addArg("--maru-expect-tests=7");
     b.step("test-windows-renderer-resources", "Verify CPU font identity and GPU atlas preparation ownership").dependOn(&run_renderer_resource_tests.step);
+    const font_spacing_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"font spacing"} });
+    const run_font_spacing_tests = b.addRunArtifact(font_spacing_tests);
+    run_font_spacing_tests.addArg("--maru-expect-tests=33"); // Five spacing judges plus 28 library import blocks.
+    b.step("test-font-spacing", "Verify shared line height and natural glyph/grid spacing").dependOn(&run_font_spacing_tests.step);
     const settings_text_path_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings text paths"} });
     const run_settings_text_path_tests = b.addRunArtifact(settings_text_path_tests);
     run_settings_text_path_tests.addArg("--maru-expect-tests=7"); // Five text boundary judges and two root blocks.
@@ -2115,6 +2119,21 @@ pub fn build(b: *std.Build) void {
     const run_backup_store_tests = b.addRunArtifact(backup_store_tests);
     run_backup_store_tests.addArg("--maru-expect-tests=35"); // 2 aggregation blocks + 31 native tests + 2 pure policy tests
     backup_store_step.dependOn(&run_backup_store_tests.step);
+    const layout_retry_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows layout retry"} });
+    const run_layout_retry_tests = b.addRunArtifact(layout_retry_tests);
+    run_layout_retry_tests.addArg("--maru-expect-tests=13");
+    b.step("test-windows-layout-retry", "Verify latest layout retry and bounded recovery").dependOn(&run_layout_retry_tests.step);
+
+    const layout_resize_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows layout resize"} });
+    const run_layout_resize_tests = b.addRunArtifact(layout_resize_tests);
+    run_layout_resize_tests.addArg("--maru-expect-tests=7"); // Two root blocks and five layout/transport checks.
+    b.step("test-windows-layout-resize", "Verify retained terminal layout without dead PTY calls").dependOn(&run_layout_resize_tests.step);
+
+    const live_font_editor_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows live font"} });
+    const run_live_font_editor_tests = b.addRunArtifact(live_font_editor_tests);
+    run_live_font_editor_tests.addArg("--maru-expect-tests=7"); // 2 aggregation blocks + 5 native preparation tests
+    b.step("test-windows-live-font-editor", "Verify staged editor fonts preserve active views on success and failure").dependOn(&run_live_font_editor_tests.step);
+
     const editor_host_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor host"} });
     const editor_host_step = b.step("test-win32-editor-host", "Verify app-owned native save grants and capability refusal");
     const run_editor_host_tests = b.addRunArtifact(editor_host_tests);

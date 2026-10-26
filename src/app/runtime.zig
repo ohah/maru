@@ -358,6 +358,16 @@ pub const SurfaceRuntime = struct {
     /// 내고(`TerminalCore.resizeWithCellMetrics`), PTY 는 `PtyIo.resizeWithCell` 로 함께 바꾼다. `cell == null` 이면 `resize` 와 같다.
     /// 0 픽셀(아직 모름)은 싣지 않는다 — 모르는 값으로 아는 값을 덮지 않게.
     pub fn resizeWithCell(self: *SurfaceRuntime, surface_id: SurfaceId, size: terminal.Size, cell_in: ?core_command.CellMetrics, io: std.Io) RuntimeError!void {
+        return self.resizeWithCellImpl(surface_id, size, cell_in, false, io);
+    }
+
+    /// The host owns retry state. After partial success the core may already
+    /// match; request one current report only once transport has caught up.
+    pub fn retryResizeWithCell(self: *SurfaceRuntime, surface_id: SurfaceId, size: terminal.Size, cell_in: ?core_command.CellMetrics, io: std.Io) RuntimeError!void {
+        return self.resizeWithCellImpl(surface_id, size, cell_in, true, io);
+    }
+
+    fn resizeWithCellImpl(self: *SurfaceRuntime, surface_id: SurfaceId, size: terminal.Size, cell_in: ?core_command.CellMetrics, retry_report: bool, io: std.Io) RuntimeError!void {
         const cell: ?core_command.CellMetrics = if (cell_in) |c| (if (c.width == 0 or c.height == 0) null else c) else null;
         const link = self.linkBySurface(surface_id) orelse return error.UnknownSurface;
         if (link.surface.process_state == .exited) return error.ProcessExited;
@@ -374,11 +384,18 @@ pub const SurfaceRuntime = struct {
             // 코어 resize도 코어 변경이라 락 아래(docs/io-render-threading.md). PTY ioctl은 락 밖.
             link.surface.lockCore(io);
             defer link.surface.unlockCore(io);
+            const core = &link.surface.core;
+            const changed = core.size.cols != grid.cols or core.size.rows != grid.rows or
+                (if (cell) |c| core.cell_width_px != c.width or core.cell_height_px != c.height else false);
             if (cell) |c|
-                try link.surface.core.resizeWithCellMetrics(grid.cols, grid.rows, c.width, c.height)
+                try core.resizeWithCellMetrics(grid.cols, grid.rows, c.width, c.height)
             else
-                try link.surface.core.resize(grid.cols, grid.rows);
-            const reply = link.surface.core.pendingResponse();
+                try core.resize(grid.cols, grid.rows);
+            // A prior transport failure already changed the core. Its next same-size
+            // retry must still report, but only after PTY resize succeeds below.
+            if (core.in_band_resize and retry_report and !changed)
+                core.appendInBandResizeReport();
+            const reply = core.pendingResponse();
             if (reply.len > 0) {
                 // OOM이면 best-effort 드롭(다른 응답 자리와 같은 결) — 응답은 비운다.
                 reply_buf = self.allocator.dupe(u8, reply) catch null;

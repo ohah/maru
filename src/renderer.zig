@@ -70,6 +70,7 @@ pub const GlyphUpload = glyph_frame.GlyphUpload;
 pub const RasterStyleFlags = glyph_layout.RasterStyleFlags;
 pub const RenderFrame = types.RenderFrame;
 pub const RenderFrameStats = frame_probe.RenderFrameStats;
+pub const font_spacing = @import("renderer/font_spacing.zig");
 pub const RendererState = state.RendererState;
 pub const RendererStateConfig = state.RendererStateConfig;
 pub const renderFrameStats = frame_probe.renderFrameStats;

@@ -40,6 +40,7 @@ pub const max_visible: usize = 10;
 pub const State = struct {
     open: bool = false,
     ime_context: owned_input.OwnedContext = .{},
+    range_ime: @import("overlay_input_ime.zig").Projection = .{},
     ime_generation: u64 = 1,
     input: overlay_input.OverlayInput = .{},
     selected: usize = 0,
@@ -53,6 +54,7 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
+        self.range_ime.deinit(allocator);
         self.ime_context.deinit(allocator);
         self.input.deinit(allocator);
     }
@@ -61,6 +63,7 @@ pub const State = struct {
     pub fn show(self: *State) void {
         self.ime_generation +|= 1;
         self.ime_context.value.valid = false;
+        self.range_ime.invalidate();
         self.input.clear();
         self.selected = 0;
         self.result_count = 0;
@@ -151,7 +154,7 @@ pub fn handle(allocator: std.mem.Allocator, k: input.InputEvent.KeyEvent, state:
 // Read-only borrowed slices: never deinit this temporary view. Both painting
 // and caret placement use the same projection, including Hanja preview replacement.
 fn displayInput(state: *const State) overlay_input.OverlayInput {
-    const context = &state.ime_context.value;
+    const context = state.range_ime.current(&state.input) orelse &state.ime_context.value;
     if (!context.matches(state.input.query.items, state.input.preedit.items)) return state.input;
     const at = context.selected.end;
     return .{ .query = .fromOwnedSlice(@constCast(context.text()[0..at])), .preedit = .fromOwnedSlice(@constCast(context.text()[at..])) };

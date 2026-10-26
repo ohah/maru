@@ -5308,3 +5308,10 @@ bitmask 전환·활성 세션 불변·터미널 복귀·입력 소스 복원도 
 실제 터미널 클릭·입력 복귀는 `tools/activity-search-ime`의 별도 GUI 증거로 구분한다.
 PNG/OCR은 고정된 앱의 화면 기록 권한과 독립 후보창 기록을 요구한다.
 구체적 결과는 [활동 검색 IME 계획](plans/activity-search-ime.md)에 기록한다.
+
+## 심볼 피커 IME 문맥
+
+구현·일부 검증 완료: `test-symbol-picker-ime`는 파일/형제 범위 검색의 중간 교체, Unicode,
+후보 Return, 문서/범위/열기 owner, 할당 실패 시 query·결과·선택 보존을 검사한다.
+실제 AppKit/Metal callback 회귀는 `tools/symbol-preview-app`으로 구분하며 물리적 한국어 입력과
+OS 후보창 PNG/OCR은 아직 검증하지 않았다. [계획과 결과](plans/symbol-picker-ime.md)를 따른다.

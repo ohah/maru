@@ -228,6 +228,12 @@ byte→cell 대응을 따로 들어야 하고, 그 배관은 위 우선순위 �
 그 컴포넌트는 이미 카탈로그를 모른다 — *"host 가 필터된 행(Row)을 view 에 주입한다"*. 검색어·IME
 조합·선택·키 라우팅(`↑↓` 선택 · `Enter` 확정 · `Esc` 닫기)이 전부 거기 있고, `overlay_input` 공유라
 **한글 조합이 이미 된다**.
+Native IME의 명시적 UTF-16 교체 범위도 공용 projection에서 처리한다. preedit는 표시만 하고
+확정 query에 대해서만 심볼 결과를 게시한다. 후보 Return은 이동을 실행하지 않으며 별도 Return만
+선택한 심볼로 이동한다. 결과 label 할당 실패는 입력과 기존 목록·선택을 함께 보존한다.
+문서 revision·형제 범위·열기 세대에 따른 callback 소유와 검증 범위는
+[심볼 피커 IME 계획](plans/symbol-picker-ime.md)을 따른다.
+
 
 #### 무엇을 가르고 무엇을 합치나
 

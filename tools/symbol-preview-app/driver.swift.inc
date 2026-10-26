@@ -55,7 +55,10 @@ extension MaruAppHostController {
         case 0:
             guard symbolPreviewKey(31, "O", [.command, .shift]) else { finish(false); return }
         case 1:
-            view.insertText("sample4", replacementRange: NSRange(location: NSNotFound, length: 0))
+            // Real NSTextInputClient range callback: delete the middle non-BMP scalar.
+            // This is callback injection, not physical Korean HID proof.
+            view.inputContext?.client.insertText("sample😀4", replacementRange: NSRange(location: NSNotFound, length: 0))
+            view.inputContext?.client.insertText("", replacementRange: NSRange(location: 6, length: 2))
         case 2:
             guard symbolPreviewKey(125, "\u{F701}") else { finish(false); return }
         case 3:
@@ -63,12 +66,12 @@ extension MaruAppHostController {
             guard symbolPreviewKey(53, "\u{1b}"), symbolPreviewClickBeforeRepaint() else { finish(false); return }
         case 4:
             guard symbolPreviewKey(31, "O", [.command, .shift]) else { finish(false); return }
-            view.setMarkedText("ㅎ", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
-            view.insertText("한", replacementRange: NSRange(location: NSNotFound, length: 0))
-            view.unmarkText()
+            view.inputContext?.client.setMarkedText("ㅎ", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+            view.inputContext?.client.insertText("한", replacementRange: NSRange(location: NSNotFound, length: 0))
+            view.inputContext?.client.unmarkText()
         case 5:
             guard symbolPreviewKey(53, "\u{1b}"), symbolPreviewKey(31, "O", [.command, .shift]) else { finish(false); return }
-            view.insertText("sample40", replacementRange: NSRange(location: NSNotFound, length: 0))
+            view.inputContext?.client.insertText("sample40", replacementRange: NSRange(location: NSNotFound, length: 0))
         case 6:
             guard symbolPreviewKey(36, "\r") else { finish(false); return }
         default: finish(true); return

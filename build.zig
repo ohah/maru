@@ -6736,13 +6736,13 @@ pub fn build(b: *std.Build) void {
     run_rust_pull_pure.addArg("--maru-expect-passed=31");
     rust_pull_step.dependOn(&run_rust_pull_pure.step);
     test_step.dependOn(&run_rust_pull_pure.step);
-    const rust_pull_product = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.RDP1", ".test.LSI7", ".test.LSI10", ".test.ASB4", ".test.ASB5" } });
+    const rust_pull_product = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.RDP1", ".test.RDP2", ".test.RDP3", ".test.LSI7", ".test.LSI10", ".test.ASB4", ".test.ASB5" } });
     const run_rust_pull_product = b.addRunArtifact(rust_pull_product);
     run_rust_pull_product.setCwd(b.path("."));
     run_rust_pull_product.step.dependOn(&install_fake_lsp.step);
-    run_rust_pull_product.addArg("--maru-expect-tests=9");
+    run_rust_pull_product.addArg("--maru-expect-tests=11");
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
-        run_rust_pull_product.addArg("--maru-expect-passed=9");
+        run_rust_pull_product.addArg("--maru-expect-passed=11");
         macos_only_test_step.dependOn(&run_rust_pull_product.step);
     }
     rust_pull_step.dependOn(&run_rust_pull_product.step);

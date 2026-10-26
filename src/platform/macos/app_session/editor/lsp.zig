@@ -2157,9 +2157,15 @@ fn requestPull(self: *AppSession, c: *Client, d: *OpenDoc) void {
         return;
     }
     c.diagnostic_seq = lsp.rpc.nextSeq(c.diagnostic_seq);
-    const msg = lsp.rpc.pullBarrierRequest(self.allocator, c.diagnostic_seq, d.uri) catch return;
+    const msg = lsp.rpc.pullBarrierRequest(self.allocator, c.diagnostic_seq, d.uri) catch {
+        d.pull_retry.schedule(self.awakeMs());
+        return;
+    };
     defer self.allocator.free(msg);
-    if (!send(self, c, msg)) return;
+    if (!send(self, c, msg)) {
+        d.pull_retry.schedule(self.awakeMs());
+        return;
+    }
     d.barrier_seq = c.diagnostic_seq;
     d.barrier_dirty = false;
     self.editor_lsp.sent_pull_barriers += 1;
@@ -2167,9 +2173,15 @@ fn requestPull(self: *AppSession, c: *Client, d: *OpenDoc) void {
 
 fn sendPull(self: *AppSession, c: *Client, d: *OpenDoc) void {
     c.diagnostic_seq = lsp.rpc.nextSeq(c.diagnostic_seq);
-    const msg = lsp.rpc.diagnosticRequest(self.allocator, c.diagnostic_seq, d.uri) catch return;
+    const msg = lsp.rpc.diagnosticRequest(self.allocator, c.diagnostic_seq, d.uri) catch {
+        d.pull_retry.schedule(self.awakeMs());
+        return;
+    };
     defer self.allocator.free(msg);
-    if (!send(self, c, msg)) return;
+    if (!send(self, c, msg)) {
+        d.pull_retry.schedule(self.awakeMs());
+        return;
+    }
     d.pull_seq = c.diagnostic_seq;
     d.pull_version = d.sent_version;
     d.pull_dirty = false;
@@ -2196,12 +2208,16 @@ fn onPullDiagnosticsWithRetry(self: *AppSession, c: *Client, seq: u32, result: ?
     d.pull_seq = 0;
     const again = d.pull_dirty;
     const report = lsp.rpc.pullReportFromResult(result);
+    var publication_oom = false;
     if (!again) if (report) |rep| switch (rep) {
         .unchanged => {},
         .full => |items| {
             var wrapper: std.json.ObjectMap = .empty;
             defer wrapper.deinit(self.allocator);
-            wrapper.put(self.allocator, "diagnostics", items) catch return;
+            wrapper.put(self.allocator, "diagnostics", items) catch {
+                d.pull_retry.schedule(self.awakeMs());
+                return;
+            };
             const params: std.json.Value = .{ .object = wrapper };
             var accepted = false;
             for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
@@ -2210,10 +2226,11 @@ fn onPullDiagnosticsWithRetry(self: *AppSession, c: *Client, seq: u32, result: ?
                 if (term.rt.editorDocument().notifications.lsp_version != d.pull_version) continue; // 서버가 본 본문이 아니다 — 보낼 때 다시 묻는다
                 const st = &term.rt.editor_diagnostics;
                 const set = serverDiagnostics(st, c) orelse continue;
+                _ = lsp.position.replaceDiagnostics(self.allocator, params, opened.file.content, opened.file.lines, c.encoding, set.list, set.messages) catch {
+                    publication_oom = true;
+                    continue;
+                };
                 accepted = true;
-                set.list.clearRetainingCapacity();
-                set.messages.clearRetainingCapacity();
-                _ = lsp.position.appendDiagnostics(self.allocator, params, opened.file.content, opened.file.lines, c.encoding, set.list, set.messages) catch {};
                 for (set.list.items) |*dg| dg.server = c.server.exe;
                 st.lsp_dirty = true;
             };
@@ -2223,11 +2240,11 @@ fn onPullDiagnosticsWithRetry(self: *AppSession, c: *Client, seq: u32, result: ?
             }
         },
     };
-    if (report != null) d.pull_retry.reset();
+    if (report != null and !publication_oom) d.pull_retry.reset();
     if (again) {
         d.pull_retry.reset();
         requestPull(self, c, d);
-    } else if (retrigger) {
+    } else if (retrigger or publication_oom) {
         d.pull_retry.schedule(self.awakeMs());
     }
 }
@@ -2257,10 +2274,8 @@ fn onPublishDiagnostics(self: *AppSession, c: *Client, params: ?std.json.Value) 
         const st = &term.rt.editor_diagnostics;
         // 그 서버의 칸만 갈아 끼운다(§8.2u — 한 문서에 서버가 여럿이면 다른 서버의 진단을 지우지 않는다).
         const set = serverDiagnostics(st, c) orelse continue;
+        _ = lsp.position.replaceDiagnostics(self.allocator, p, opened.file.content, opened.file.lines, c.encoding, set.list, set.messages) catch continue;
         accepted = true;
-        set.list.clearRetainingCapacity();
-        set.messages.clearRetainingCapacity();
-        _ = lsp.position.appendDiagnostics(self.allocator, p, opened.file.content, opened.file.lines, c.encoding, set.list, set.messages) catch {};
         for (set.list.items) |*d| d.server = c.server.exe; // 호버의 `출처(코드)` — 그 진단을 낸 서버(표의 정적 이름)
         st.lsp_dirty = true;
     };

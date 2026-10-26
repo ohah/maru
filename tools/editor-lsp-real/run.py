@@ -118,7 +118,11 @@ def stop_owned_proxy_groups(root):
 
 def run_case(args, language, spec):
     root = args.output / ('case-' + language)
-    cfg = fixture(root, language)
+    if getattr(args, 'scenario', 'single-file') == 'multi-file':
+        from multi_fixture import fixture as multi_fixture
+        cfg = multi_fixture(root, language)
+    else:
+        cfg = fixture(root, language)
     cfg['timeout_ms'] = args.phase_timeout * 1000
     (root / 'case.json').write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
     server_env = {k: v for k, v in os.environ.items()
@@ -151,7 +155,10 @@ def run_case(args, language, spec):
                                  cwd=REPO, env=env, stdout=log, stderr=log, start_new_session=True)
         try:
             try:
-                code = child.wait(timeout=args.phase_timeout * 7 + 30)
+                # Multi-file adds peer registration and two explicit sync
+                # barriers. Its valid phase budgets must fit inside the owner.
+                phases = 10 if getattr(args, 'scenario', 'single-file') == 'multi-file' else 7
+                code = child.wait(timeout=args.phase_timeout * phases + 30)
             except subprocess.TimeoutExpired:
                 code = -1
         finally:
@@ -188,14 +195,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--servers-json', type=Path, required=True)
-    parser.add_argument('--languages', nargs='+', choices=SAMPLES, default=list(SAMPLES))
-    parser.add_argument('--judge', type=Path, default=REPO / 'zig-out/bin/maru-real-lsp-test')
+    parser.add_argument('--languages', nargs='+', choices=SAMPLES)
+    parser.add_argument('--scenario', choices=['single-file', 'multi-file'], default='single-file')
+    parser.add_argument('--judge', type=Path)
     parser.add_argument('--phase-timeout', type=int, default=90)
     parser.add_argument('--build', action='store_true')
     parser.add_argument('--optimize', choices=['Debug', 'ReleaseFast'], default='Debug')
     args = parser.parse_args()
     if sys.platform != 'darwin':
         parser.error('the product judge requires macOS; pure oracle tests are portable')
+    if args.scenario == 'multi-file' and args.languages and not set(args.languages) <= {'rust', 'go'}:
+        parser.error('multi-file supports Rust and Go only')
+    args.languages = args.languages or (['rust', 'go'] if args.scenario == 'multi-file' else list(SAMPLES))
+    args.judge = args.judge or REPO / ('zig-out/bin/maru-real-lsp-multi-test' if args.scenario == 'multi-file' else 'zig-out/bin/maru-real-lsp-test')
     args.output = args.output.resolve()
     args.judge = args.judge.resolve()
     if args.output == REPO or REPO in args.output.parents or args.output.exists():
@@ -204,7 +216,7 @@ def main():
         parser.error('phase timeout must be between 1 and 180 seconds')
     specs = json.loads(args.servers_json.read_text())
     if args.build:
-        subprocess.run(['mise', 'exec', '--', 'zig', 'build', 'editor-real-lsp-judge', '-Doptimize=' + args.optimize, '-j2'], cwd=REPO, check=True)
+        subprocess.run(['mise', 'exec', '--', 'zig', 'build', ('editor-real-lsp-multi-judge' if args.scenario == 'multi-file' else 'editor-real-lsp-judge'), '-Doptimize=' + args.optimize, '-j2'], cwd=REPO, check=True)
     args.output.mkdir(parents=True, mode=0o700)
     frozen_judge = args.output / 'judge'
     shutil.copyfile(args.judge, frozen_judge)
@@ -212,14 +224,20 @@ def main():
     args.judge = frozen_judge
     sources = args.output / 'sources'
     sources.mkdir()
-    for name in ('real_lsp_judge.zig', 'mod.zig', 'lsp.zig', 'completion.zig', 'hover.zig', 'definition.zig', 'semantic.zig'):
+    controller_names = ('real_lsp_judge.zig', 'mod.zig', 'lsp.zig', 'completion.zig', 'hover.zig', 'definition.zig', 'semantic.zig')
+    if args.scenario == 'multi-file':
+        controller_names += ('real_lsp_multi_judge.zig',)
+    for name in controller_names:
         (sources / name).write_bytes((REPO / 'src/platform/macos/app_session/editor' / name).read_bytes())
     tool_sources = args.output / 'tool-sources'
     tool_sources.mkdir()
-    for name in ('run.py', 'oracle.py', 'verify.py'):
+    tool_names = ('run.py', 'oracle.py', 'verify.py')
+    if args.scenario == 'multi-file':
+        tool_names += ('multi_fixture.py', 'multi_oracle.py')
+    for name in tool_names:
         (tool_sources / name).write_bytes((Path(__file__).parent / name).read_bytes())
     (tool_sources / 'lsp_proxy.py').write_bytes(PROXY.read_bytes())
-    report = dict(schema='maru.lsp-real.run.v1', optimize=args.optimize, source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip(),
+    report = dict(schema='maru.lsp-real.run.v1', scenario=args.scenario, optimize=args.optimize, source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip(),
                   judge_sha256=sha(args.judge), dirty_tree=bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=REPO)), tool_sources={p.name: sha(p) for p in tool_sources.iterdir()}, controller_sources={p.name: sha(p) for p in sources.iterdir()}, scope='headless product AppSession; real SDKs; no physical GUI/IME claim', languages=[])
     for language in args.languages:
         try:

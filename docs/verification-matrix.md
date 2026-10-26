@@ -5213,6 +5213,16 @@ EOF·UTF-8/UTF-16 범위, gopls 활성화 옵션, refresh 및 유실 응답 복�
 [Tab 전달 진단](plans/project-search-tab-delivery.md)은 relay post 응답과 실제 앱/view 수신·처리,
 필드 이동을 별도 증거로 검사한다. 냉간 실행 20회와 정상 대조군·독립 33개 음성 대조군을
 확인했다. 이 결과로 과거 간헐 중단의 원인이나 전체 후보창 픽셀 검증을 확정하지 않는다.
+
+## 실제 SDK 다중 파일 LSP 회귀
+
+`run.py --scenario multi-file`은 Rust·Go에서 다른 파일 정의 이동/복귀, 보조 파일의 타입 변경·복원으로 인한
+주 파일 진단 발생/해소, autoimport의 실제 추가 편집과 단일 Undo를 검사한다. 주 파일은 의존 진단 중
+편집·저장하지 않고 version도 유지해야 한다. URI별 본문/version과 요청 시점의 보조 파일 snapshot으로
+독립 대응하며 Go push는 편집/응답 순서와 제품 상태로 한계를 구분한다. 두 프로필은 별도로 실행한다.
+[계약·20개 이상 파손 입력·관측 한계](../tools/editor-lsp-real/multi-file.md)가 세부 범위를 소유한다.
+SDK 없는 전체 Python 판정은 현재 66개 시험 함수이며, 실제 서버는 기본 CI에 추가하지 않는다.
+
 ## 실제 SDK LSP 편집 회귀 (2026-10-25)
 
 `tools/editor-lsp-real/run.py`는 Rust·Go·Kotlin·Dart·Scala를 실제 AppSession 컨트롤러에 연결해

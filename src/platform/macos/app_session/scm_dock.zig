@@ -108,7 +108,7 @@ fn commitLineHeightPx(self: *const AppSession) u32 {
 /// **component가 합성하지 않는 이유**: props는 빌린 슬라이스이고 component는 할당하지 않는다. 조합
 /// 글자를 따로 넘기면 랩·caret 계산이 "본문 기준"과 "합성 기준" 둘로 갈린다 — 조합 중 줄이 넘칠 때
 /// 그 차이가 그대로 어긋난 caret이 된다.
-fn commitDisplayText(self: *AppSession) []const u8 {
+pub fn commitDisplayText(self: *AppSession) []const u8 {
     const field = &self.scm_commit_field;
     if (field.preedit.items.len == 0) return field.text.items;
     self.scm_commit_display.clearRetainingCapacity();
@@ -119,10 +119,9 @@ fn commitDisplayText(self: *AppSession) []const u8 {
     return self.scm_commit_display.items;
 }
 
-/// 표시 텍스트 기준 caret 오프셋 — 조합 중이면 **조합 글자 뒤**다(입력기가 그 자리에 다음 글자를 넣는다).
-fn commitDisplayCaret(self: *const AppSession) usize {
-    const field = &self.scm_commit_field;
-    return @min(field.caret, field.text.items.len) + field.preedit.items.len;
+/// 표시 텍스트 기준 caret. Native marked 내부 선택은 공용 paint snap을 사용한다.
+pub fn commitDisplayCaret(self: *const AppSession, text: []const u8) usize {
+    return chrome.components.text_field_ime.displayCaret(&self.scm_commit_field, text);
 }
 
 /// 이미 얻어 둔 표시 텍스트로 세는 판. **`propsFor`가 이것을 쓴다** — 거기서 `commitRows`를 부르면
@@ -401,7 +400,7 @@ fn projectTab(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                 .text = text,
                 .edit = if (focused) .{
                     .focused = true,
-                    .caret = commitDisplayCaret(self),
+                    .caret = commitDisplayCaret(self, text),
                     // 조합 중에는 선택이 없다(입력기가 그 구간을 소유한다) — 남기면 밴드가 조합 글자에 겹친다.
                     .selection = if (self.scm_commit_field.preedit.items.len > 0) null else selectionOf(self.scm_commit_field.selection),
                     .preedit = self.scm_commit_field.preedit.items,
@@ -3180,16 +3179,19 @@ pub fn invalidateScmLog(self: *AppSession) void {
 /// **어느 저장소인지가 포커스의 일부다**(②b) — 상자가 여럿이므로 "편집 중"만으로는 글자가 어디로 갈지
 /// 정해지지 않는다. 저장소가 바뀌면 그 전 상자의 글은 초안으로 담고 새 상자의 초안을 꺼낸다.
 pub fn focusCommitRepo(self: *AppSession, repo: []const u8) void {
+    if (self.scm_commit_focus_repo) |current| if (std.mem.eql(u8, current, repo)) return;
+    const next = self.allocator.dupe(u8, repo) catch return;
+    if (!@import("scm_commit_ime.zig").commitAll(self)) {
+        self.allocator.free(next);
+        return;
+    }
     if (self.scm_commit_focus_repo) |current| {
-        if (std.mem.eql(u8, current, repo)) return;
-        // 상자를 옮기는 것은 저장소를 옮기는 것과 같다 — 쓰던 글을 그 저장소에 남긴다.
-        _ = self.scm_commit_field.commitPreedit(self.allocator);
         stashCommitDraft(self, current);
         self.allocator.free(current);
-        self.scm_commit_focus_repo = null;
     }
-    self.scm_commit_focus_repo = self.allocator.dupe(u8, repo) catch null;
-    restoreCommitDraft(self, repo);
+    @import("scm_commit_ime.zig").retire(self);
+    self.scm_commit_focus_repo = next;
+    restoreCommitDraft(self, next);
     self.metal_dirty = true;
 }
 
@@ -3222,15 +3224,16 @@ pub fn settleCommitInput(self: *AppSession) void {
     }
     if (self.scm_commit_field.preedit.items.len == 0) return;
     if (self.scmCommitOwnsInput()) return;
-    if (self.scm_commit_field.commitPreedit(self.allocator)) self.metal_dirty = true;
+    _ = @import("scm_commit_ime.zig").commitAll(self);
 }
 
 /// 커밋 상자에서 포커스를 뗀다. **조합 중이면 먼저 확정하고**(그러지 않으면 조합 글자가 화면에서
 /// 사라진 채 편집기 안에만 남는다) 쓰던 글을 그 저장소의 초안으로 담는다.
 pub fn blurCommit(self: *AppSession) void {
     const repo = self.scm_commit_focus_repo orelse return;
-    _ = self.scm_commit_field.commitPreedit(self.allocator);
+    if (!@import("scm_commit_ime.zig").commitAll(self)) return;
     stashCommitDraft(self, repo);
+    @import("scm_commit_ime.zig").retire(self);
     self.allocator.free(repo);
     self.scm_commit_focus_repo = null;
     self.metal_dirty = true;
@@ -3241,9 +3244,11 @@ pub fn blurCommit(self: *AppSession) void {
 /// 세로는 시각 행, 가로는 `text_field.caretAtColumn`이 푼다(§12.1 — 가로 축의 주인은 하나다).
 pub fn focusCommitAt(self: *AppSession, repo_index: usize, repo: []const u8, x_px: f64, y_px: f64) void {
     focusCommitRepo(self, repo);
+    const focused = self.scm_commit_focus_repo orelse return;
+    if (!std.mem.eql(u8, focused, repo)) return;
     // **조합 중이면 먼저 확정한다**(macOS 관례 — 다른 곳을 누르면 조합이 끝난다). 그러지 않으면 아래
     // 계산이 조합 글자가 끼워진 화면과 조합 없는 본문 사이에서 갈려, 누른 자리와 caret이 어긋난다.
-    _ = self.scm_commit_field.commitPreedit(self.allocator);
+    if (!@import("scm_commit_ime.zig").commitAll(self)) return;
     const rect = commitBoxRectAt(self, repo_index) orelse return;
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
     const content = dock_ops.dockGeometry(self).tree_content;
@@ -3351,7 +3356,8 @@ pub const CommitWheel = enum { scrolled, absorbed, ignored };
 pub fn scrollCommitByWheel(self: *AppSession, delta: f64, unit_rows: f64) CommitWheel {
     if (self.scm_commit_focus_repo == null) return .ignored;
     var lines: [commit_wrap_max_rows]text_area.VisualLine = undefined;
-    const wrapped = text_area.wrap(commitDisplayText(self), commitViewCols(self), true, &lines);
+    const text = commitDisplayText(self);
+    const wrapped = text_area.wrap(text, commitViewCols(self), true, &lines);
     const visible = text_area.visibleRows(wrapped, commit_max_rows);
     if (wrapped.lines.len <= visible) {
         self.scm_commit_wheel_residue = 0; // 굴릴 것이 없으면 잔여도 없다
@@ -3377,9 +3383,10 @@ pub fn dropCommitWheelResidue(self: *AppSession) void {
 /// caret이 상자 밖으로 나갔으면 첫 행을 옮긴다(제약 ⑥ — 시각 행으로 센다).
 pub fn scrollCommitToCaret(self: *AppSession) void {
     var lines: [commit_wrap_max_rows]text_area.VisualLine = undefined;
-    const wrapped = text_area.wrap(commitDisplayText(self), commitViewCols(self), true, &lines);
+    const text = commitDisplayText(self);
+    const wrapped = text_area.wrap(text, commitViewCols(self), true, &lines);
     const visible = text_area.visibleRows(wrapped, commit_max_rows);
-    const first = text_area.scrollToCaret(wrapped, self.scm_commit_first_row, visible, commitDisplayCaret(self));
+    const first = text_area.scrollToCaret(wrapped, self.scm_commit_first_row, visible, commitDisplayCaret(self, text));
     if (first != self.scm_commit_first_row) {
         self.scm_commit_first_row = @intCast(first);
         self.metal_dirty = true;
@@ -4264,7 +4271,7 @@ pub fn handleCommitKey(self: *AppSession, ev: chrome.input.InputEvent) bool {
 }
 
 /// 글자가 바뀐 뒤 — 스크롤을 caret에 맞추고 다시 그린다. **상자 높이가 함께 바뀐다**(랩 결과가 달라지므로).
-fn afterEdit(self: *AppSession) void {
+pub fn afterEdit(self: *AppSession) void {
     scrollCommitToCaret(self);
     self.scm_commit_reveal = true;
     self.metal_dirty = true;
@@ -4321,7 +4328,7 @@ pub fn setCommitPreedit(self: *AppSession, bytes: []const u8) void {
 
 /// 조합을 확정한다 — `commitPreedit`이 조합 글자를 본문에 넣고 조합 상태를 비운다.
 pub fn commitCommitPreedit(self: *AppSession) void {
-    if (self.scm_commit_field.commitPreedit(self.allocator)) afterEdit(self);
+    _ = @import("scm_commit_ime.zig").commitAll(self);
 }
 
 /// 입력기가 확정한 글자를 넣는다(한글 등 — 평문 타이핑도 macOS에서는 이 경로다). 붙여넣기도 같은
@@ -4336,26 +4343,10 @@ pub fn commitCommitPreedit(self: *AppSession) void {
 ///  - **유효 UTF-8만** 넣는다. 손상 바이트가 들어가면 폭 계산(`clusterCols`)과 랩이 어긋나 caret이 민다.
 pub fn insertCommitText(self: *AppSession, bytes: []const u8) void {
     if (self.scm_commit_focus_repo == null) return;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(self.allocator);
-    buf.ensureTotalCapacity(self.allocator, bytes.len) catch return;
-    var i: usize = 0;
-    while (i < bytes.len) {
-        const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch {
-            i += 1; // 손상 lead 바이트 skip
-            continue;
-        };
-        if (i + n > bytes.len) break; // 잘린 꼬리
-        const cp = std.unicode.utf8Decode(bytes[i .. i + n]) catch {
-            i += n;
-            continue;
-        };
-        const keep = cp == '\n' or cp == '\t' or (cp >= 0x20 and cp != 0x7F);
-        if (keep) buf.appendSlice(self.allocator, bytes[i .. i + n]) catch return;
-        i += n;
-    }
-    if (buf.items.len == 0) return;
-    self.scm_commit_field.insertText(self.allocator, buf.items) catch return;
+    const clean = maru.session.scm_commit_text.sanitizeOwned(self.allocator, bytes) catch return;
+    defer self.allocator.free(clean);
+    if (clean.len == 0) return;
+    self.scm_commit_field.insertText(self.allocator, clean) catch return;
     afterEdit(self);
 }
 
@@ -4371,7 +4362,7 @@ pub fn commitCaretRect(self: *AppSession) ?chrome.draw.Rect {
     const text = commitDisplayText(self);
     const cols = commitViewCols(self);
     const wrapped = text_area.wrap(text, cols, true, &lines);
-    const caret = commitDisplayCaret(self);
+    const caret = commitDisplayCaret(self, text);
     const row = text_area.lineAt(wrapped, caret);
     const line_h = commitLineHeightPx(self);
 
@@ -4451,6 +4442,7 @@ pub fn stashCommitDraft(self: *AppSession, repo: []const u8) void {
 /// 그 저장소의 초안을 편집기로 꺼낸다(없으면 빈 상자). **caret·스크롤도 함께 초기화한다** — 옛
 /// 저장소의 caret 오프셋은 새 글에서 다른 자리를 가리킨다.
 pub fn restoreCommitDraft(self: *AppSession, repo: []const u8) void {
+    @import("scm_commit_ime.zig").retire(self);
     self.scm_commit_field.clear();
     self.scm_commit_first_row = 0;
     for (self.scm_commit_drafts.items) |draft| {
@@ -4464,6 +4456,8 @@ pub fn restoreCommitDraft(self: *AppSession, repo: []const u8) void {
 /// 저장소가 갈릴 때 초안을 옮겨 담는다. **`rememberGitRepo`가 부른다** — 그 함수가 옛 저장소와 새
 /// 저장소를 동시에 아는 유일한 자리다.
 pub fn switchCommitDraft(self: *AppSession, from: ?[]const u8, to: []const u8) void {
+    // Explicit editing belongs to its focused repository, not background discovery.
+    if (self.scm_commit_focus_repo != null) return;
     if (from) |old| {
         if (std.mem.eql(u8, old, to)) return;
         stashCommitDraft(self, old);
@@ -4520,7 +4514,7 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
         return;
     }
     // 조합 중이면 먼저 확정한다 — 안 그러면 화면에 보이는 글자가 메시지에서 빠진다.
-    _ = self.scm_commit_field.commitPreedit(self.allocator);
+    if (!@import("scm_commit_ime.zig").commitAll(self)) return;
     const message = std.mem.trim(u8, self.scm_commit_field.text.items, " \t\r\n");
     if (message.len == 0) {
         setScmWriteBlocker(self, repo_path, maru.i18n.t(.scm_need_commit_message));

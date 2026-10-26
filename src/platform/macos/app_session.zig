@@ -357,7 +357,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // ABI 238: movable Find/Replace contexts and a separately owned key snapshot.
 // ABI 239: project-search fields own native range contexts and key snapshots.
 // ABI 240: sidebar search owns native projection and per-key rollback.
-pub const abi_version: u32 = 240;
+// ABI 241: repository-bound SCM commit IME context and per-key snapshot.
+pub const abi_version: u32 = 241;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -7594,6 +7595,7 @@ pub const AppSession = struct {
     /// 커밋 메시지 편집 상태(P3c). **`TextField`를 그대로 쓴다** — caret·선택이 바이트 오프셋이라
     /// 개행이 섞여도 성립하고, 세로 축만 `text_area`가 얹는다(text-field-editor.md §12.1).
     scm_commit_field: chrome.components.text_field.TextField = .{},
+    scm_commit_ime: @import("app_session/scm_commit_ime.zig").State = .{},
     /// **어느 저장소의 커밋 상자**가 키를 받고 있나(경로, 세션 소유). null이면 아무 상자도 편집 중이
     /// 아니다. `InputFocus.scm_commit`의 유일한 근거다.
     ///
@@ -16752,7 +16754,7 @@ pub const AppSession = struct {
             .agent_session_search => return @import("app_session/chrome_ime.zig").commitAll(self),
             .addr_edit => return @import("app_session/field_ime.zig").commitAll(self, .address),
             .project_search => return project_search_ops.commitPreedit(self),
-            .scm_commit => scm_dock_ops.commitCommitPreedit(self),
+            .scm_commit => return @import("app_session/scm_commit_ime.zig").commitAll(self),
             .terminal => {
                 return self.commitTerminalComposition();
             },
@@ -25306,6 +25308,7 @@ pub const AppSession = struct {
         self.web_nav_states.deinit(self.allocator);
         self.address_ime.deinit(self.allocator);
         self.addr_field.deinit(self.allocator); // 슬라이스 3: 주소창 편집 TextField(text/preedit ArrayList) 해제
+        self.scm_commit_ime.deinit(self.allocator);
         self.scm_commit_field.deinit(self.allocator); // 커밋 메시지 편집(P3c) — 같은 TextField 계약
         self.scm_commit_display.deinit(self.allocator); // 조합 합성 버퍼
         for (self.scm_repo_list.items) |entry| { // 목록 캐시
@@ -84513,24 +84516,31 @@ test "소스 컨트롤: 커밋 메시지 초안은 저장소마다 따로 든다
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
-    scm_dock_ops.focusCommitRepo(session, "/repo");
+    scm_dock_ops.focusCommitRepo(session, "/repo-a");
 
     git_ops.rememberGitRepo(session, "/repo-a");
+    scm_dock_ops.focusCommitRepo(session, "/repo-a");
     scm_dock_ops.insertCommitText(session, "a의 메시지");
 
-    // 다른 저장소로 — 상자가 비고, a의 글은 보관된다.
+    // 조회 응답만 바뀌어도 a의 편집 owner는 유지된다. 실제 상자를 선택하면 초안을 옮긴다.
     git_ops.rememberGitRepo(session, "/repo-b");
+    try std.testing.expectEqualStrings("a의 메시지", session.scm_commit_field.text.items);
+    try std.testing.expectEqualStrings("/repo-a", session.scm_commit_focus_repo.?);
+    scm_dock_ops.focusCommitRepo(session, "/repo-b");
     try std.testing.expectEqualStrings("", session.scm_commit_field.text.items);
     scm_dock_ops.insertCommitText(session, "b의 메시지");
 
     // 워크트리는 루트 경로가 다르므로 **다른 저장소**다 — 주 저장소의 글이 딸려 오지 않는다.
     git_ops.rememberGitRepo(session, "/repo-a/../wt-a");
+    scm_dock_ops.focusCommitRepo(session, "/repo-a/../wt-a");
     try std.testing.expectEqualStrings("", session.scm_commit_field.text.items);
 
     // 돌아오면 각자 자기 글을 되찾는다.
     git_ops.rememberGitRepo(session, "/repo-a");
+    scm_dock_ops.focusCommitRepo(session, "/repo-a");
     try std.testing.expectEqualStrings("a의 메시지", session.scm_commit_field.text.items);
     git_ops.rememberGitRepo(session, "/repo-b");
+    scm_dock_ops.focusCommitRepo(session, "/repo-b");
     try std.testing.expectEqualStrings("b의 메시지", session.scm_commit_field.text.items);
 }
 
@@ -84546,21 +84556,26 @@ test "소스 컨트롤: 첫 읽기가 늦게 와도 쓰던 글이 사라지지 �
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
-    scm_dock_ops.focusCommitRepo(session, "/repo");
+    scm_dock_ops.focusCommitRepo(session, "/repo-late");
 
-    // 저장소를 알기 **전에** 쓴다. 픽스처가 이미 하나를 기억해 뒀으므로 **놓아 준 뒤** 비운다
+    // 선택한 상자의 경로는 알지만 첫 Git 읽기는 아직 오지 않았다. 픽스처가 이미 하나를 기억해 뒀으므로 **놓아 준 뒤** 비운다
     // (그냥 null로 덮으면 그 문자열이 샌다 — 누수 검사가 잡았다).
     if (session.git_repo) |old| session.allocator.free(old);
     session.git_repo = null;
     scm_dock_ops.insertCommitText(session, "읽기 전에 쓴 글");
     // 첫 읽기가 도착해 저장소가 정해진다.
     git_ops.rememberGitRepo(session, "/repo-late");
+    scm_dock_ops.focusCommitRepo(session, "/repo-late");
     try std.testing.expectEqualStrings("읽기 전에 쓴 글", session.scm_commit_field.text.items);
 
     // 그 글은 이제 그 저장소의 것이다 — 다른 저장소에 갔다 오면 그대로 돌아온다.
     git_ops.rememberGitRepo(session, "/repo-other");
+    try std.testing.expectEqualStrings("읽기 전에 쓴 글", session.scm_commit_field.text.items);
+    try std.testing.expectEqualStrings("/repo-late", session.scm_commit_focus_repo.?);
+    scm_dock_ops.focusCommitRepo(session, "/repo-other");
     try std.testing.expectEqualStrings("", session.scm_commit_field.text.items);
     git_ops.rememberGitRepo(session, "/repo-late");
+    scm_dock_ops.focusCommitRepo(session, "/repo-late");
     try std.testing.expectEqualStrings("읽기 전에 쓴 글", session.scm_commit_field.text.items);
 }
 
@@ -84573,17 +84588,22 @@ test "소스 컨트롤: 비운 초안은 남지 않는다(비운 것도 뜻이�
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     try openScmDockWithCommitBox(session, allocator, arena_state.allocator());
-    scm_dock_ops.focusCommitRepo(session, "/repo");
+    scm_dock_ops.focusCommitRepo(session, "/repo-a");
 
     git_ops.rememberGitRepo(session, "/repo-a");
+    scm_dock_ops.focusCommitRepo(session, "/repo-a");
     scm_dock_ops.insertCommitText(session, "지울 글");
     git_ops.rememberGitRepo(session, "/repo-b");
+    scm_dock_ops.focusCommitRepo(session, "/repo-b");
     git_ops.rememberGitRepo(session, "/repo-a");
+    scm_dock_ops.focusCommitRepo(session, "/repo-a");
     try std.testing.expectEqualStrings("지울 글", session.scm_commit_field.text.items);
 
     session.scm_commit_field.clear(); // 사용자가 다 지웠다
     git_ops.rememberGitRepo(session, "/repo-b");
+    scm_dock_ops.focusCommitRepo(session, "/repo-b");
     git_ops.rememberGitRepo(session, "/repo-a");
+    scm_dock_ops.focusCommitRepo(session, "/repo-a");
     try std.testing.expectEqualStrings("", session.scm_commit_field.text.items);
     try std.testing.expectEqual(@as(usize, 0), session.scm_commit_drafts.items.len);
 }
@@ -103364,4 +103384,465 @@ test "sidebar search IME host candidate Return never activates a matching sessio
     self.imeEnd(.{ .key = .enter });
     try std.testing.expect(self.sidebar_search_active);
     try std.testing.expectEqualStrings("Maru", self.sidebar_search_input.query.items);
+}
+
+fn initScmCommitIMETestSession(a: std.mem.Allocator) !*AppSession {
+    const self = try initRenameCaretTestSession(a);
+    errdefer {
+        self.deinit();
+        a.destroy(self);
+    }
+    _ = try self.resize(960, 600, 1000);
+    self.dock.presented = true;
+    self.dock.collapsed = false;
+    self.dock.view = .source_control;
+    self.scm_tab = .changes;
+    scm_dock_ops.focusCommitRepo(self, "/tmp/scm-ime-A");
+    return self;
+}
+
+test "scm commit IME host middle UTF16 replacement preserves suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.imeBegin();
+    if (!@import("app_session/chrome_ime.zig").insert(self, "韓", .{ .location = 1, .length = 2 })) self.imeInsert("韓");
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a韓z", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host explicit empty range deletes middle" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "abc");
+    self.imeBegin();
+    try std.testing.expect(@import("app_session/scm_commit_ime.zig").insert(self, "", .{ .location = 1, .length = 1 }));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("ac", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host empty callback without range preserves text" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "abc");
+    self.imeBegin();
+    try std.testing.expect(@import("app_session/scm_commit_ime.zig").insert(self, "", null));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("abc", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host filtered controls cannot delete range" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "abc");
+    self.imeBegin();
+    try std.testing.expect(@import("app_session/scm_commit_ime.zig").insert(self, "\r\x01", .{ .location = 1, .length = 1 }));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("abc", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host LF TAB survive committed insertion" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "ab");
+    self.imeBegin();
+    try std.testing.expect(@import("app_session/scm_commit_ime.zig").insert(self, "\n\t", .{ .location = 1, .length = 0 }));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a\n\tb", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host CR removed from committed insertion" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "ab");
+    self.imeBegin();
+    try std.testing.expect(@import("app_session/scm_commit_ime.zig").insert(self, "x\ry", .{ .location = 1, .length = 0 }));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("axyb", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host NFD remains verbatim" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "ab");
+    self.imeBegin();
+    try std.testing.expect(@import("app_session/scm_commit_ime.zig").insert(self, "가", .{ .location = 1, .length = 0 }));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a가b", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host emoji range spans two UTF16 units" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.imeBegin();
+    try std.testing.expect(@import("app_session/scm_commit_ime.zig").insert(self, "x", .{ .location = 1, .length = 2 }));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("axz", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host suffix range preserves prefix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "abc");
+    self.imeBegin();
+    try std.testing.expect(@import("app_session/scm_commit_ime.zig").insert(self, "韓", .{ .location = 2, .length = 1 }));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("ab韓", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host prefix range preserves suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "abc");
+    self.imeBegin();
+    try std.testing.expect(@import("app_session/scm_commit_ime.zig").insert(self, "韓", .{ .location = 0, .length = 1 }));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("韓bc", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host whole range replaces document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "abc");
+    self.imeBegin();
+    try std.testing.expect(@import("app_session/scm_commit_ime.zig").insert(self, "韓", .{ .location = 0, .length = 3 }));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("韓", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host out of bounds range rolls back" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "abc");
+    self.imeBegin();
+    try std.testing.expect(@import("app_session/scm_commit_ime.zig").insert(self, "x", .{ .location = 99, .length = 1 }));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("abc", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host overflow range rolls back" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "abc");
+    self.imeBegin();
+    try std.testing.expect(@import("app_session/scm_commit_ime.zig").insert(self, "x", .{ .location = 1, .length = 18446744073709551615 }));
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("abc", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host candidate Return consumes newline" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/scm_commit_ime.zig");
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.imeBegin();
+    _ = native.insert(self, "韓", .{ .location = 1, .length = 2 });
+    self.imeEnd(.{ .key = .enter });
+    try std.testing.expectEqualStrings("a韓z", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host ordinary Return inserts newline" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.scm_commit_field.caret = 1;
+    self.imeBegin();
+    self.imeEnd(.{ .key = .enter });
+    try std.testing.expectEqualStrings("a\n😀z", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host invalid marked callback rolls back earlier insert" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/scm_commit_ime.zig");
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.imeBegin();
+    _ = native.insert(self, "x", .{ .location = 1, .length = 2 });
+    _ = native.marked(self, "韓", .{ .location = 99, .length = 0 }, null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host failed key restores viewport" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/scm_commit_ime.zig");
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.scm_commit_first_row = 7;
+    self.scm_commit_reveal = false;
+    self.imeBegin();
+    _ = native.insert(self, "x", .{ .location = 1, .length = 2 });
+    _ = native.marked(self, "韓", .{ .location = 99, .length = 0 }, null);
+    self.imeEnd(null);
+    try std.testing.expectEqual(@as(u32, 7), self.scm_commit_first_row);
+    try std.testing.expect(!self.scm_commit_reveal);
+}
+
+test "scm commit IME host internal marked caret uses native selection" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/scm_commit_ime.zig");
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.imeBegin();
+    _ = native.marked(self, "가나", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    const text = scm_dock_ops.commitDisplayText(self);
+    try std.testing.expectEqualStrings("a가나z", text);
+    try std.testing.expectEqual(@as(usize, 4), scm_dock_ops.commitDisplayCaret(self, text));
+}
+
+test "scm commit IME host blur admits composition into saved draft" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/scm_commit_ime.zig");
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.imeBegin();
+    _ = native.marked(self, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 2 });
+    self.imeEnd(null);
+    scm_dock_ops.blurCommit(self);
+    try std.testing.expect(self.scm_commit_focus_repo == null);
+    scm_dock_ops.focusCommitRepo(self, "/tmp/scm-ime-A");
+    try std.testing.expectEqualStrings("a韓z", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host repository round trip restores separate drafts" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "a😀z");
+    scm_dock_ops.focusCommitRepo(self, "/tmp/scm-ime-B");
+    try self.scm_commit_field.setText(a, "draft B");
+    scm_dock_ops.focusCommitRepo(self, "/tmp/scm-ime-A");
+    try std.testing.expectEqualStrings("a😀z", self.scm_commit_field.text.items);
+    scm_dock_ops.focusCommitRepo(self, "/tmp/scm-ime-B");
+    try std.testing.expectEqualStrings("draft B", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host background repository discovery preserves focused draft" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    try self.scm_commit_field.setText(a, "a😀z");
+    scm_dock_ops.switchCommitDraft(self, "/tmp/scm-ime-A", "/tmp/scm-ime-B");
+    try std.testing.expectEqualStrings("a😀z", self.scm_commit_field.text.items);
+    try std.testing.expectEqualStrings("/tmp/scm-ime-A", self.scm_commit_focus_repo.?);
+}
+
+test "scm commit IME host rejected key prevents repository transfer" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/scm_commit_ime.zig");
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.imeBegin();
+    _ = native.marked(self, "韓", .{ .location = 99, .length = 0 }, null);
+    scm_dock_ops.focusCommitRepo(self, "/tmp/scm-ime-B");
+    try std.testing.expectEqualStrings("/tmp/scm-ime-A", self.scm_commit_focus_repo.?);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host hidden dock rejects pinned late callback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/scm_commit_ime.zig");
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.imeBegin();
+    self.dock.collapsed = true;
+    try std.testing.expect(native.stale(self));
+    _ = native.insert(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host sequence saturation closes fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/scm_commit_ime.zig");
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.scm_commit_ime.sequence = @as(u64, 1) << 56;
+    self.imeBegin();
+    self.imeInsert("lost");
+    self.imeEnd(null);
+    try std.testing.expect(native.generation(self) == null);
+    try std.testing.expectEqualStrings("a😀z", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host epoch saturation closes fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/scm_commit_ime.zig");
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.scm_commit_ime.epoch = std.math.maxInt(u64);
+    self.imeBegin();
+    self.imeInsert("lost");
+    self.imeEnd(null);
+    try std.testing.expect(native.generation(self) == null);
+    try std.testing.expectEqualStrings("a😀z", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host independent native namespace" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/scm_commit_ime.zig");
+    try self.scm_commit_field.setText(a, "a😀z");
+    const token = native.generation(self).?;
+    try std.testing.expect(token > (@as(u64, 1) << 56));
+    try std.testing.expect(token < (@as(u64, 1) << 57));
+}
+
+test "scm commit IME host bootstrap has no owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/scm_commit_ime.zig");
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.surface_initialized = false;
+    try std.testing.expect(native.generation(self) == null);
+}
+
+test "scm commit IME host failed hidden key restores source only" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/scm_commit_ime.zig");
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.imeBegin();
+    _ = native.insert(self, "x", .{ .location = 1, .length = 2 });
+    _ = native.marked(self, "韓", .{ .location = 99, .length = 0 }, null);
+    self.dock.collapsed = true;
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host snapshot allocation failure consumes callback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/scm_commit_ime.zig");
+    try self.scm_commit_field.setText(a, "a😀z");
+    _ = native.projection(self);
+    var fail = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+    self.allocator = fail.allocator();
+    self.imeBegin();
+    self.allocator = a;
+    _ = native.insert(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host sanitizer allocation failure rolls back earlier callback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/scm_commit_ime.zig");
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.imeBegin();
+    _ = native.insert(self, "x", .{ .location = 1, .length = 2 });
+    var fail = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+    self.allocator = fail.allocator();
+    _ = native.insert(self, "lost", null);
+    self.allocator = a;
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("a😀z", self.scm_commit_field.text.items);
+}
+
+test "scm commit IME host late callback cannot overwrite restored destination draft" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const self = try initScmCommitIMETestSession(a);
+    defer a.destroy(self);
+    defer self.deinit();
+    const native = @import("app_session/scm_commit_ime.zig");
+    try self.scm_commit_field.setText(a, "a😀z");
+    self.imeBegin();
+    scm_dock_ops.focusCommitRepo(self, "/tmp/scm-ime-B");
+    try self.scm_commit_field.setText(a, "draft B");
+    _ = native.insert(self, "lost", null);
+    self.imeEnd(null);
+    try std.testing.expectEqualStrings("draft B", self.scm_commit_field.text.items);
 }

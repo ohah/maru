@@ -2123,3 +2123,15 @@ SDK 없는 Python 증거 검사는 `test-editor-real-lsp-oracles`(51개)다.
 20개 카운터/알림/입력 소유 상태 대조를 포함한 제품 회귀 2개 + 모듈 참조 4개이며 SDK는
 필요 없다. macOS-only 게이트와 기본 macOS 제품 테스트에 포함한다.
 [원인과 관측 계약](../tools/editor-lsp-real/completion-retry.md)이 상세 범위를 소유한다.
+
+### SCM 커밋 메시지 native IME
+
+`mise exec -- zig build test-scm-commit-ime -j2`는 커밋 메시지 UTF-16 범위, LF/TAB·NFD 보존과
+금지 문자 제거, 저장소별 초안, 후보 Return 소비, 실패 시 텍스트·스크롤 복구를 검사한다.
+기존 저장소별 복원·첫 읽기 지연·비운 초안 회귀도 포함하며 host/discovery 합계는 39개다.
+중립 위생·표시 모델은 Debug와 ReleaseFast로 실행한다. 실제 OS 후보창과 PNG/OCR은 별도 검증이다.
+
+`python3 -m unittest discover -s tools/scm-commit-ime -p 'test_*.py'`는 독립 판정기의 정상·손상 기록을 검사한다.
+`python3 tools/scm-commit-ime/run.py --output /private/tmp/maru-scm-ime-<고유명> --mode diagnostic`는
+격리 Git 저장소에서 실제 입력·후보창 geometry를 확인하며 픽셀 성공을 주장하지 않는다. 같은 최종 앱으로
+`--mode live --app <앱 실행 파일> --output <새 외부 경로>`를 실행해야 PNG/OCR 검증이 완료된다.

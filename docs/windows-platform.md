@@ -13057,3 +13057,40 @@ bundled and produced four. A pre-change executable with that same pair was also
 correctly rejected. This records provider behavior rather than claiming raw PTY
 byte capture. Evidence: `.zig-cache/windows-font-variant-binding.json`.
 Ligatures, further settings runtime wiring and final installation remain separate.
+
+
+### Native DirectWrite typography control (terminal integration in progress)
+
+`dwrite_shape.Shaper.shapeWithOptions` can now disable the optional liga/clig/calt
+features. The existing `shape` entry keeps native defaults and makes no typography
+object or readback query. This is a Windows backend option, not a change to the
+common text-shaper request or the settings GUI's terminal behavior.
+
+`dwrite_typography.zig` owns the caller's COM reference, including a partial
+creation failure and every AddFontFeature prefix. Layout application uses the
+full UTF-16 code-unit range; required ligatures and kerning remain untouched.
+The interface slots and feature/range ABI sizes are compile-time checked. APIs:
+[CreateTypography](https://learn.microsoft.com/en-us/windows/win32/api/dwrite/nf-dwrite-idwritefactory-createtypography),
+[SetTypography](https://learn.microsoft.com/en-us/windows/win32/api/dwrite/nf-dwrite-idwritetextlayout-settypography).
+
+An opt-in readback uses
+[GetTypography](https://learn.microsoft.com/en-us/windows/win32/api/dwrite/nf-dwrite-idwritetextlayout-gettypography)
+at the final UTF-16 unit. It releases the acquired COM reference and records the
+actual effective range. Glyph-only comparisons initially failed to distinguish
+a scalar-count mutation: script itemization/feature boundaries can make a tail
+look unligated without complete range coverage. Native property readback rejects
+that mutation without requiring queries on the ordinary rendering path.
+
+`test-windows-typography` selects two import blocks plus five tests covering native
+feature descriptors, Fira Code contextual operators against isolated glyphs,
+Hangul/surrogate-prefix range coverage, toggles/overflow/empty/default behavior,
+and COM failure/success ownership. Five compiled mutants were rejected, and
+restored Debug/ReleaseFast each passed 15 typography/font-variant tests. The
+current normal build, focused matrix, cross-target compilation and all 272
+boundary gates passed. An owned actual app with the shipped ConPTY pair repeated
+five existing live style edits: five applications, zero font/resize/input/grid
+errors and native exit0. This checks existing UI behavior, not terminal ligature
+on/off. Evidence is `.zig-cache/windows-typography-binding.json`.
+Terminal run construction,
+cluster-to-cell mapping, cursor/style boundaries and the live ligatures toggle
+remain to be connected and verified in the actual app.

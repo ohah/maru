@@ -59,6 +59,7 @@ test {
     _ = windows_text_resources;
     _ = windows_renderer_resources;
     _ = win_layout_resize;
+    _ = @import("platform/windows/terminal/typography_test.zig");
     // Cross-target tests must compile the native adapter as well as the common worker.
     if (comptime builtin.os.tag == .macos) _ = @import("platform/macos/file_tree_remote.zig").transport;
     _ = editor_document;

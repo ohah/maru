@@ -311,7 +311,7 @@ fn buildMergePaneOps(
     const collapsed = pre.current == null;
     const canonical_inlays = inlayWindow(self, term);
     const hints = chrome_editor.content.InlayWindow{}; // Merge panes paint no inlay text.
-    const colors = if (projection) |v| preedit_view.colors(v, allocator, term.rt.editor_visible_numbers, syntaxColors(self, term), term.rt.editor_tab_width, canonical_inlays, hints) catch &.{} else syntaxColors(self, term);
+    const colors = if (projection) |v| preedit_view.colors(v, allocator, term.rt.editor_visible_numbers, syntaxColors(self, term, null), term.rt.editor_tab_width, canonical_inlays, hints) catch &.{} else syntaxColors(self, term, null);
     const widgets = if (projection) |v| preedit_view.rowValues(?chrome_editor.content.Widget, v, allocator, term.rt.editor_visible_numbers, result_widgets_all, null) catch &.{} else result_widgets_all;
     const bands = if (projection) |v| blk: {
         const original = conflictBands(term) orelse break :blk null;
@@ -730,7 +730,8 @@ fn advanceSyntax(self: *AppSession, term: *Term) void {
 }
 
 /// 보이는 창의 구문 색. **상태를 밀지 않는다** — 그것은 `advanceSyntax` 가 줄 배열을 잡기 전에 한다(그 함수의 doc).
-fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.content.ColorSpan {
+// 기하를 아는 호출자만 본문 색 예산을 준다. LSP 미리 읽기는 기존 범위로 별도 유지한다.
+fn syntaxColors(self: *AppSession, term: *Term, visible_budget: ?usize) []const []const chrome_editor.content.ColorSpan {
     if (term.rt.editor_diff != null) return &.{};
     const doc = term.rt.editorDocument().opened orelse return &.{};
 
@@ -742,15 +743,14 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
     else
         term.rt.editor_lines.len;
     if (first >= axis_len) return &.{};
-    // 화면 높이를 모르는 자리라 **넉넉히** 잡는다 — 랩이 켜지면 논리 줄 하나가 여러 행이 되므로
-    // 보이는 논리 줄은 행 수보다 적다. 남는 줄의 색은 만들어도 안 그려질 뿐이고, 모자라면 화면
-    // 아래가 무색이 된다.
+    // 기존 LSP 미리 읽기 범위와 기하를 아직 받지 않는 호출자의 범위다.
     const budget: usize = 256;
-    const count = @min(budget, axis_len - first);
+    const prefetch_count = @min(budget, axis_len - first);
+    const count = @min(visible_budget orelse budget, axis_len - first);
     // semantic tokens 2층(§8.2i) — 보이는 원본 줄 범위를 알려 물을 때인지 판정하고, 든 스팬을 1층 뒤에 섞는다.
     {
         const first_src = syntax_color.sourceLineFor(term.rt.editor_visible_numbers, first) orelse first;
-        const last_src = syntax_color.sourceLineFor(term.rt.editor_visible_numbers, first + count - 1) orelse (first + count - 1);
+        const last_src = syntax_color.sourceLineFor(term.rt.editor_visible_numbers, first + prefetch_count - 1) orelse (first + prefetch_count - 1);
         semantic_client.tick(self, term, first_src, last_src);
         inlay_client.tick(self, term, first_src, last_src); // 인레이 힌트(§8.2n) — 같은 창
         symbols_client.tick(self, term); // 심볼 2층(§8.2o) — 문서 단위라 창과 무관하다
@@ -2085,7 +2085,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term, false), null, null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, .{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null, &.{}, .{}, pool);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term, false), null, null, null, @as([]const u32, &.{}), null, syntaxColors(self, term, null), &.{}, .{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null, &.{}, .{}, pool);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -2137,7 +2137,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             const occurrence_marks = preedit_view.marks(v, a, term.rt.editor_visible_numbers, buildOccurrenceMarks(self, term), null) catch null;
             const canonical_inlays = inlayWindow(self, term);
             const projected_inlays = preedit_view.inlays(v, a, term.rt.editor_visible_numbers, canonical_inlays) catch chrome_editor.content.InlayWindow{};
-            const colors = preedit_view.colors(v, a, term.rt.editor_visible_numbers, syntaxColors(self, term), term.rt.editor_tab_width, canonical_inlays, projected_inlays) catch &.{};
+            const colors = preedit_view.colors(v, a, term.rt.editor_visible_numbers, syntaxColors(self, term, null), term.rt.editor_tab_width, canonical_inlays, projected_inlays) catch &.{};
             const offsets = a.alloc(usize, term.rt.editor_extra_selections.len + 1) catch return null;
             offsets[0] = if (selected) |selection| selection.end else projectedPrimaryCaret(v, term);
             for (term.rt.editor_extra_selections, 0..) |selection, i| offsets[i + 1] = v.forward(selection.focus);
@@ -2194,7 +2194,10 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             // transient view, then leave the canonical cache available for the commit frame.
             break :blk buildPaneOps(draw_lines, v.numbers, v.folds, v.total_lines, draw_first, preeditPiece(v, term, wrap), fc, max_cols, null, selection_marks, search_marks, occurrence_marks, projected_current, marker_rows.items, projected_marker_current, colors, &.{}, projected_inlays, carets, widgets, bands, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, projected_mm, projected_diag, sticky, deco, pool);
         }
-        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term, false), find_marks, buildOccurrenceMarks(self, term), find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), if (symbol_preview_frame != null) &.{} else conflictWidgets(self, term), if (symbol_preview_frame != null) null else conflictBands(term), symbol_preview_frame == null and self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag, if (symbol_preview_frame != null) &.{} else sticky_client.compute(self, term, pane_rect, wrap), paneDecorations(self, term), pool);
+        // 여백·막대가 줄이는 높이를 차감하기 전의 행 수라 보수적인 상한이다.
+        const color_metrics = diff_frame.sideMetrics(pane_rect.w, pane_rect.h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
+        const color_budget = chrome_editor.viewport.logicalLineBudget(color_metrics.visible_rows, scratch.visual_rows.len);
+        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term, false), find_marks, buildOccurrenceMarks(self, term), find_current, marker_lines, marker_current, syntaxColors(self, term, color_budget), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), if (symbol_preview_frame != null) &.{} else conflictWidgets(self, term), if (symbol_preview_frame != null) null else conflictBands(term), symbol_preview_frame == null and self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag, if (symbol_preview_frame != null) &.{} else sticky_client.compute(self, term, pane_rect, wrap), paneDecorations(self, term), pool);
     };
     if (pf.ops_len == 0) return null;
     if (symbol_preview_frame == null) {
@@ -38250,7 +38253,7 @@ test "L2C9 되돌리기도 «범위를 안다» — 한 묶음의 앞끝과 꼬�
 /// `syntaxColors` 만 부르면 파싱·승격·접힘 3층 tick 이 안 돈다(그 둘이 갈린 이유는 `advanceSyntax` 의 doc).
 fn frameSyntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.content.ColorSpan {
     advanceSyntax(self, term);
-    return syntaxColors(self, term);
+    return syntaxColors(self, term, null);
 }
 
 /// 지금 화면의 구문 색을 **전부 한 문자열로** 굳힌다 — 두 시점을 대조하기 위한 오라클.
@@ -39296,7 +39299,7 @@ test "PROMO3 승격하는 프레임은 방금 놓은 보이는 줄 표를 그리
     // 이미 민 경우에는 이 호출이 할 일이 없어 아래 프레임 단언으로는 안 보인다(파싱이 한 프레임 안의 두 예산에 걸쳐 끝날 때만 닿는다) — 그래서
     // 직접 부른다.
     const vis_before = term.rt.editor_visible_lines.ptr;
-    _ = syntaxColors(fx.session, term);
+    _ = syntaxColors(fx.session, term, null);
     try testing.expect(!term.rt.editor_syntax_folds_applied);
     try testing.expect(term.rt.editor_folded_len > 0);
     try testing.expectEqual(vis_before, term.rt.editor_visible_lines.ptr);
@@ -71037,5 +71040,206 @@ test "shared bracket edit product 실제 분할의 입력 Undo Redo와 원본 �
     try testing.expectEqualDeep(cold.bracket_info.items, peer.rt.editor_syntax.bracket_info.items);
     for (0..bytes.len + 1) |pos| {
         try testing.expectEqualDeep(syntax_color.bracketSource(&cold).?.pairAt(pos), syntax_color.bracketSource(&peer.rt.editor_syntax).?.pairAt(pos));
+    }
+}
+
+// 실제로 그린 행을 판정 기준으로 삼는다. 함수 인자의 희망 행 수를 다시 계산해 기대값으로 쓰지 않는다.
+test "visible color window 작은 화면은 실제 표시 행 근처만 조회한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    const source = try a.alloc(u8, "const value = 1;\n".len * 1000);
+    defer a.free(source);
+    for (0..1000) |i| @memcpy(source[i * "const value = 1;\n".len ..][0.."const value = 1;\n".len], "const value = 1;\n");
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    fx.session.loaded_config.config.lsp.enabled = false;
+    const term = try undoFixture(&fx, a, "visible-window.zig", source);
+    fx.term = term;
+    term.rt.editor_wrap = false;
+    for (0..10000) |i| {
+        var frame = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoFrame;
+        frame.dl.deinit(a);
+        if (!term.rt.editor_syntax.pending and i > 2) break;
+    }
+    try testing.expect(!term.rt.editor_syntax.pending);
+    term.rt.editor_first_line = 31;
+    fx.leaf_rect.h = 180;
+    var frame = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoFrame;
+    defer frame.dl.deinit(a);
+    std.debug.print("VCW first={d} rows={d} queried={d} color_slots={d}\n", .{ term.rt.editor_first_line, term.rt.editor_hit_rows_len, term.rt.editor_syntax.bufs.line_bounds.items.len, term.rt.editor_syntax.bufs.colors.per_line.items.len });
+    try testing.expectEqual(@as(usize, 31), term.rt.editor_first_line);
+    try testing.expect(term.rt.editor_hit_rows_len > 0);
+    try testing.expect(term.rt.editor_syntax.bufs.line_bounds.items.len <= term.rt.editor_hit_rows_len + 2);
+}
+
+test "visible color window 큰 화면의 실제 표시 행에도 색이 있다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    const source = try a.alloc(u8, "const value = 1;\n".len * 1000);
+    defer a.free(source);
+    for (0..1000) |i| @memcpy(source[i * "const value = 1;\n".len ..][0.."const value = 1;\n".len], "const value = 1;\n");
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    fx.session.loaded_config.config.lsp.enabled = false;
+    const term = try undoFixture(&fx, a, "visible-window.zig", source);
+    fx.term = term;
+    term.rt.editor_wrap = false;
+    for (0..10000) |i| {
+        var frame = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoFrame;
+        frame.dl.deinit(a);
+        if (!term.rt.editor_syntax.pending and i > 2) break;
+    }
+    try testing.expect(!term.rt.editor_syntax.pending);
+    term.rt.editor_first_line = 31;
+    fx.leaf_rect.h = 10000;
+    var frame = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoFrame;
+    defer frame.dl.deinit(a);
+    std.debug.print("VCW first={d} rows={d} queried={d} color_slots={d}\n", .{ term.rt.editor_first_line, term.rt.editor_hit_rows_len, term.rt.editor_syntax.bufs.line_bounds.items.len, term.rt.editor_syntax.bufs.colors.per_line.items.len });
+    try testing.expectEqual(@as(usize, 31), term.rt.editor_first_line);
+    try testing.expect(term.rt.editor_hit_rows_len > 256);
+    try testing.expect(term.rt.editor_syntax.bufs.line_bounds.items.len <= term.rt.editor_hit_rows_len + 2);
+    const colors = term.rt.editor_syntax.bufs.colors.per_line.items;
+    for (term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len]) |row| {
+        const line = term.rt.editor_first_line + row.line;
+        try testing.expect(line < colors.len);
+        try testing.expect(colors[line].len > 0);
+    }
+}
+
+// 번역할 UI 문구가 아니라 색·랩·UTF-8 경계를 대조하는 테스트 전용 C 원문이다.
+fn visibleColorWindowSource(a: std.mem.Allocator) ![]u8 {
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    for (0..100) |_| try text.appendSlice(a, "/* 한글\r\ncontinued é 😀 */\r\n" ++
+        "const char *message = \"한글 é 😀 a long string that crosses several wrapped pieces and keeps its syntax color at the right edge of a narrow pane\";\r\n" ++
+        "\nint function(void) {\n  return 123;\n}\n\n");
+    return text.toOwnedSlice(a);
+}
+
+fn expectVisibleColorWindow(fx: *PaneFixture, term: *Term) !void {
+    const a = testing.allocator;
+    const first = term.rt.editor_first_line;
+    const doc = term.rt.editorDocument().opened.?;
+    const axis = if (term.rt.editor_visible_numbers.len > 0) term.rt.editor_visible_numbers.len else doc.file.lineCount();
+    var reference: syntax_color.ColorBufs = .{};
+    defer reference.deinit(a);
+    // 같은 원문 시작에서 남은 축 전체를 조회한다. 작은 창의 끝에서 끊는 답과 실제 표시 행을 대조한다.
+    const full = syntax_color.lineColorsInto(&term.rt.editor_syntax, &reference, a, doc.file.content, doc.file.lines, first, axis - first, term.rt.editor_tab_width, term.rt.editor_visible_numbers, .inherit, semantic_client.spans(term), inlayRows(fx.session, term), bracketMarksFor(fx.session, term));
+    const actual = term.rt.editor_syntax.bufs.colors.per_line.items;
+    try testing.expect(term.rt.editor_hit_rows_len > 0);
+    var coloured: usize = 0;
+    for (term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len]) |row| {
+        const line = first + row.line;
+        try testing.expect(line < full.len and line < actual.len);
+        try testing.expectEqualDeep(full[line], actual[line]);
+        if (full[line].len > 0) coloured += 1;
+    }
+    try testing.expect(coloured > 0);
+}
+
+test "visible color window 랩 조각 스크롤과 혼합 줄바꿈의 실제 색은 전체 조회와 같다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    const source = try visibleColorWindowSource(a);
+    defer a.free(source);
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    fx.session.loaded_config.config.lsp.enabled = false;
+    const term = try undoFixture(&fx, a, "visible-window.c", source);
+    fx.term = term;
+    try foldMarksReady(&fx, term);
+    const total = term.rt.editorDocument().opened.?.file.lineCount();
+    for ([_]bool{ false, true }) |wrap| {
+        term.rt.editor_wrap = wrap;
+        for ([_]u32{ 240, 960 }) |width| {
+            fx.leaf_rect.w = width;
+            fx.leaf_rect.h = 180;
+            for ([_]usize{ 0, 1, 2, 151, total - 3 }) |first| {
+                term.rt.editor_first_line = first;
+                term.rt.editor_first_piece = if (wrap and width == 240 and first == 2) 1 else 0;
+                var frame = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoFrame;
+                defer frame.dl.deinit(a);
+                if (wrap and width == 240 and first == 2) try testing.expectEqual(@as(u32, 1), term.rt.editor_first_piece);
+                try expectVisibleColorWindow(&fx, term);
+            }
+        }
+    }
+}
+
+test "visible color window 접힌 렌더 축의 색은 원문 전체 범위와 같다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    const source = try visibleColorWindowSource(a);
+    defer a.free(source);
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    fx.session.loaded_config.config.lsp.enabled = false;
+    const term = try undoFixture(&fx, a, "visible-window.c", source);
+    fx.term = term;
+    term.rt.editor_wrap = false;
+    try foldMarksReady(&fx, term);
+    try testing.expect(term.rt.editor_fold_ranges.len > 5);
+    try testing.expect(foldAll(fx.session));
+    try testing.expect(term.rt.editor_visible_numbers.len > 0);
+    try testing.expect(term.rt.editor_visible_numbers.len < term.rt.editorDocument().opened.?.file.lineCount());
+    fx.leaf_rect.h = 180;
+    for ([_]usize{ 0, 31, 151 }) |first| {
+        term.rt.editor_first_line = first;
+        var frame = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoFrame;
+        defer frame.dl.deinit(a);
+        try expectVisibleColorWindow(&fx, term);
+        try testing.expect(term.rt.editor_syntax.bufs.line_bounds.items.len <= term.rt.editor_hit_rows_len + 2);
+    }
+}
+
+test "visible color window 색 조회를 바꿔도 실제 semantic과 inlay 요청 범위는 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    const source = try visibleColorWindowSource(a);
+    defer a.free(source);
+    // 바깥 체크아웃 유무가 서버 시작 조건을 바꾸지 않도록 임시 Git 루트를 소유한다.
+    var f = (try SmtFixture.openRepo(a, "visible-window.c", source)) orelse return error.SkipZigTest;
+    defer f.close(a);
+    try testing.expect(f.ready());
+    const s = f.fx.session;
+    const term = f.term;
+    const client = lsp_client.readyClientFor(s, term) orelse return error.MissingClient;
+    try testing.expect(client.semantic_caps.supported and client.semantic_caps.range);
+    try testing.expect(client.inlay_supported);
+    term.rt.editor_wrap = false;
+    for ([_]u32{ 180, 10000 }) |height| {
+        term.rt.editor_first_line = 31;
+        term.rt.editor_semantic.waiting = false;
+        term.rt.editor_semantic.dirty = true;
+        term.rt.editor_semantic.last_edit_ms = 0;
+        term.rt.editor_inlay.waiting = false;
+        term.rt.editor_inlay.dirty = true;
+        term.rt.editor_inlay.last_edit_ms = 0;
+        const semantic_before = s.editor_lsp.sent_semantic;
+        const inlay_before = s.editor_lsp.sent_inlay;
+        _ = frameSyntaxColors(s, term);
+        try testing.expectEqual(semantic_before + 1, s.editor_lsp.sent_semantic);
+        try testing.expectEqual(inlay_before + 1, s.editor_lsp.sent_inlay);
+        const semantic_lo = term.rt.editor_semantic.waiting_lo;
+        const semantic_hi = term.rt.editor_semantic.waiting_hi;
+        const inlay_lo = term.rt.editor_inlay.waiting_lo;
+        const inlay_hi = term.rt.editor_inlay.waiting_hi;
+        term.rt.editor_semantic.waiting = false;
+        term.rt.editor_semantic.dirty = true;
+        term.rt.editor_semantic.last_edit_ms = 0;
+        term.rt.editor_inlay.waiting = false;
+        term.rt.editor_inlay.dirty = true;
+        term.rt.editor_inlay.last_edit_ms = 0;
+        var leaf = f.leaf;
+        leaf.h = height;
+        var frame = appendPaneFrame(s, leaf, term) orelse return error.NoFrame;
+        defer frame.dl.deinit(a);
+        try testing.expectEqual(semantic_before + 2, s.editor_lsp.sent_semantic);
+        try testing.expectEqual(inlay_before + 2, s.editor_lsp.sent_inlay);
+        try testing.expectEqual(semantic_lo, term.rt.editor_semantic.waiting_lo);
+        try testing.expectEqual(semantic_hi, term.rt.editor_semantic.waiting_hi);
+        try testing.expectEqual(inlay_lo, term.rt.editor_inlay.waiting_lo);
+        try testing.expectEqual(inlay_hi, term.rt.editor_inlay.waiting_hi);
+        try testing.expect(term.rt.editor_syntax.bufs.line_bounds.items.len != 256);
     }
 }

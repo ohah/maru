@@ -49,7 +49,7 @@ test "visible color query 화면 상한과 원문 색 및 함수 비용을 대�
         // 여백·막대·sticky를 빼지 않은 상한이므로 작은 창의 과잉 조회를 보수적으로만 주장한다.
         const upper = (@as(usize, body.h) + cell_h - 1) / cell_h;
         const bounded_count = @min(upper + 1, doc.file.lineCount() - term.rt.editor_first_line);
-        const current = syntaxColors(s, term);
+        const current = syntaxColors(s, term, null);
         const queried_count = current.len - term.rt.editor_first_line;
         try testing.expectEqual(@as(usize, 256), queried_count);
         const old = visibleColorQuery(s, term, &old_bufs, queried_count);

@@ -6579,6 +6579,26 @@ pub fn build(b: *std.Build) void {
     run_bracket_cursor.addArg("--maru-expect-passed=7");
     test_step.dependOn(&run_bracket_cursor.step);
     b.step("test-editor-bracket-range-cursor", "Compare guarded cursor ranges with complete native child traversal").dependOn(&run_bracket_cursor.step);
+    // 19 = 표시 범위 제품 판정 5개 + IME 제품 6개 + 투영 모델 4개 + 익명 import 4개.
+    const visible_color_window = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.visible color window ", ".test.IME_VIEW" } });
+    const run_visible_color_window = b.addRunArtifact(visible_color_window);
+    run_visible_color_window.setCwd(b.path("."));
+    run_visible_color_window.addArg("--maru-expect-tests=19");
+    run_visible_color_window.addArg("--maru-expect-passed=19");
+    run_visible_color_window.step.dependOn(&install_fake_lsp.step);
+    const color_budget_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/chrome/components/editor_view/viewport.zig"),
+        .target = target,
+        .optimize = optimize,
+    }), .filters = &.{".test.visible color window "} });
+    const run_color_budget = b.addRunArtifact(color_budget_tests);
+    run_color_budget.addArg("--maru-expect-tests=1");
+    run_color_budget.addArg("--maru-expect-passed=1");
+    test_step.dependOn(&run_color_budget.step);
+    const visible_color_window_step = b.step("test-editor-visible-color-window", "Verify visible body color query bounds and rendered row coverage");
+    visible_color_window_step.dependOn(&run_visible_color_window.step);
+    visible_color_window_step.dependOn(&run_color_budget.step);
+
     const bracket_cursor_product = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ "bracket range cursor product", ".test.SYNU2 " } });
     const run_bracket_cursor_product = b.addRunArtifact(bracket_cursor_product);
     run_bracket_cursor_product.addArg("--maru-expect-tests=7");

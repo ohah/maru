@@ -1,5 +1,10 @@
 # 본문 색 조회 범위 재현
 
+이 도구의 결과표는 #4600의 메인 `711591ffa` 기준이다. 후속 제품은 일반 본문에 표시 예산을
+넘긴다. 이 도구의 직접 `syntaxColors` 호출은 `null`로 기존 창을 골라 고정 256줄과 후보의
+함수 범위를 비교하며, 현재 제품 프레임의 실제 조회량으로 해석하지 않는다. 현재 표시 행과의
+대조는 `test-editor-visible-color-window`를 사용한다.
+
 제품 소스를 바꾸지 않고 별도 사본에 `query.zig.inc`를 추가한다. macOS·Zig 0.17과
 현재 저장소의 잠긴 `zig-pkg` 의존성이 필요하다. 출력은 저장소 밖의 새 디렉터리여야 한다.
 
@@ -23,3 +28,17 @@ python3 -m unittest discover -s tools/editor-visible-colors -p 'test_*.py'
 실패 출력은 보존하고 수정한 재실행에는 새 경로를 쓴다. 완료 자료의 실행 파일은 캐시 밖에도 보존한다.
 
 현재 결과와 후속 제품 채택 조건은 [계획](../../docs/plans/editor-visible-color-range.md)에 있다.
+
+## 제품 Metal 전후 캡처
+
+```sh
+python3 tools/editor-visible-colors/capture.py --output /tmp/maru-color-gpu-new --deps "$PWD/zig-pkg"
+```
+
+기준 메인과 현재 소스를 별도 사본에서 촬영한다. 800×4800px·기본 appearance·첫 줄 31의
+동일 Zig 원문으로 256행 뒤의 색을 확인한다. 실제 `appendPaneFrame` → CoreText → 제품
+Metal 오프스크린 readback이며 GUI/HID/입력기 검증은 아니다. 소스·입력 fixture·실행 파일·
+PNG/PPM·로그 해시와 GPU 성공 필드를 남기고, 기존 색이 있던 위쪽 픽셀 보존과 아래쪽의
+픽셀 변화도 검사한다. 결과 `result.json`은 모든 검사 성공 후에만 생성된다.
+
+[전후 편집·프레임 실측 결과](results.md)는 함수 미시 비용과 실제 표시 색 대조를 구분한다.

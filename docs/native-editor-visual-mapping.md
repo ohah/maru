@@ -2425,6 +2425,7 @@ Term 을 막는다. 그래서 `fileTermForPath` 의 «첫 번째»와 «가장 �
 - **라이선스**: tree-sitter 코어는 MIT이고 주요 grammar들도 permissive다(MIT·Apache-2.0·BSD·ISC). **grammar마다 개별 확인**하고 copyleft는 채택하지 않는다. 바이너리에 링크되어 배포물에 들어가므로 [third-party-licenses.md](third-party-licenses.md)가 attribution을 소유한다.
 - **지원 언어는 열린 집합이 아니다.** grammar마다 `parser.c`가 붙어 바이너리가 커지므로 **번들할 언어를 명시 목록으로 관리**하고, 추가는 크기 영향과 함께 판단한다. 목록과 추가 절차는 [네이티브 편집기 구현 계획](plans/native-editor.md)가 소유한다.
 - **grammar가 없으면 무색이다**(§5). 자체 lexer fallback을 두지 않는다.
+- **일반 본문의 색 조회는 실제 렌더 예산으로 묶는다.** `diff_frame.sideMetrics`의 화면 행과 호출자가 가진 실제 행 저장소 용량에서 `viewport.logicalLineBudget`이 논리 줄 상한을 구한다. 접히면 렌더 축으로 조회하고, 색 배열의 첨자도 같은 축을 유지한다. 이 상한은 모델 편집·검색·명령의 범위를 제한하지 않는다. 기하를 받지 않는 IME 투영·병합 호출은 기존 창을 유지한다. semantic/inlay의 요청 미리 읽기는 `syntaxColors`의 기존 예산으로 따로 계산하며 본문 색 조회량에 연결하지 않는다. 구체적인 검증은 [본문 색 조회 계획](plans/editor-visible-color-window.md)을 따른다.
 - **파서를 신뢰 입력으로 다루지 않는다.** grammar는 제3자 C 코드이고 문서 내용은 적대적일 수 있다(§3.8) — 파싱 대상 크기·시간 상한을 두고, 파서 실패가 편집기를 죽이지 않게 격리한다. §3.0의 큰 파일 축소 단계에 **파싱 중단**이 포함된다.
 
 #### 5.1a 같은 낱말 강조 — 검색과 다른 축 (2026-09-23)

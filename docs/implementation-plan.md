@@ -85,6 +85,7 @@ macOS 로컬 shell 1개 surface
 - [괄호 부분 수집의 앞 형제 탐색](plans/editor-bracket-range-cursor.md) — 오류 부모와 cursor 불일치를 기존 순회로 보호하는 후보. Debug·ReleaseFast 집중 검사와 다섯 결함 주입을 통과했으며 112프로세스 교차 실측을 완료했다. 전체 경계·문서/config와 PR #4598 필수 CI를 통과했다. 실제 main의 전체 트리 일치와 집중/문서 48개 빌드 단계도 확인했다.
 - [최신 메인의 편집·프레임 비용 재귀속](plans/editor-current-frame-attribution.md) — #4598 실제 main에서 남은 입력·프레임 비용과 호출 수를 다시 측정한다. 제품 변경 없이 별도 성능/정확성 모집단과 다섯 독립 가설을 확인한다.
 - [본문 색 조회와 실제 표시 범위](plans/editor-visible-color-range.md) — 최대 256논리줄 조회와 실제 표시 범위를 먼저 재현·측정하고 색/레이아웃 보존 여부로 제품 변경을 판단한다.
+- [실제 렌더 범위에 맞춘 본문 색 조회](plans/editor-visible-color-window.md)
 - [캐시 경로의 원격 커밋 검증](plans/editor-scm-cache-path-test.md) — 정상 캐시 저장소를 허용하면서 실제 로컬 메시지 경로 유출을 거절한다.
 - [pane 프레임 준비 비용 귀속](plans/editor-pane-frame-attribution.md) — 편집과 프레임을 분리해 기하·표식·장식·고정 머리줄의 중첩 비용을 관측한다.
 - [구문 Provider 편집 비용 귀속](plans/editor-provider-edit-attribution.md) — 파싱·변경 범위·트리 이동과 실제 뷰별 호출 수를 분리해 다음 개선의 근거를 만든다.

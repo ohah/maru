@@ -1663,7 +1663,8 @@ action(`⌘.` 메뉴·저장 시)만 맡고, 그 밖의 기능(호버·완성·�
 현재 문서 version과 요청 seq를 검증하며, `ServerCancelled(-32802)`의 `data.retriggerRequest=true`에만 자동 재요청한다.
 L2의 `lsp_requests.DiagnosticRetry`가 120ms부터 최대 2초까지 backoff하고 편집·refresh·정상 응답·재시작·문서 퇴역은 예약을 비운다.
 영구 오류·재요청 금지·잘못된 취소 data는 반복하지 않는다. 요청 준비/큐 전송/진단 적용의 할당 실패도 backoff 뒤 다시 묻는다.
-진단은 L2에서 새 목록과 메시지 저장소를 먼저 준비하고 성공할 때만 교체한다. push도 같은 원자적 게시를 사용하되,
+진단은 L2에서 새 목록과 메시지 저장소를 먼저 준비한 뒤 빌린 뷰 캐시를 비우고 교체한다.
+캐시는 곧바로 다시 합치며 합치기 할당 실패는 dirty를 유지해 다음 프레임에 재시도한다. push도 같은 원자적 게시를 사용하되,
 push-only 서버의 할당 실패에 지원하지 않는 pull을 보내지는 않는다. 재현은 [Rust 진단 조사](../tools/editor-lsp-real/rust-diagnostics.md),
 검증은 `test-editor-rust-pull`이 소유한다. 실행·저장·신뢰 정책은 그대로다.
 

@@ -188,10 +188,16 @@ Draft 주요 CI의 생략과 로컬 통과를 구분하며, 위 로그는 로컬
 `RDP3`는 dirty 응답 뒤 새 요청을 준비하다 첫 할당이 실패하면 재시도 예약이 사라지는 것을 재현했다.
 수정 전 실패 로그는 `~/.cache/maru-agent-artifacts/lsp-hostile-five-20261026/round1-before.log`에 보존했다.
 
-L2 `position.replaceDiagnostics`가 목록과 메시지 저장소를 먼저 완성하고 함께 교체한다.
+L2 `position.prepareDiagnostics`가 목록과 메시지 저장소를 먼저 완성하고 `DiagnosticBatch.install`이 소유권을 교체한다.
 실패는 이전 목록·메시지 포인터와 수신 카운터를 그대로 유지한다. push도 같은 게시 함수를 사용한다.
 pull의 요청 준비·큐 전송·게시 준비 실패는 기존 backoff로 다시 묻고,
 push-only 서버에는 지원하지 않는 pull을 보내지 않는다.
 일반 pull과 장벽 pull의 OOM 뒤 실제 재전송·새 진단 수신까지 검사한다.
 수정 후 `test-editor-rust-pull`은 순수 31개/제품 11개(모듈 참조 포함)다.
 서로 다른 다섯 검증 관점의 최종 결과는 PR에 기록한다.
+
+게시 보강 뒤 `RDP2`에서 병합 캐시가 해제된 메시지를 계속 가리키는 경계도 재현했다.
+준비된 배치가 성공했을 때 빌린 캐시를 먼저 비우고 소유권을 교체한 뒤 즉시 재병합한다.
+`RDP4`는 캐시 병합 OOM이 dirty 표시를 잃는 것을 재현했다. L2 `diagnostic.mergeSources`는
+출력 용량을 먼저 확보한 뒤 합치고, adapter는 성공했을 때만 dirty를 해제해 프레임 재시도를 유지한다.
+이 경계까지 포함한 현재 명령은 순수 31개/제품 12개(모듈 참조 포함)다.

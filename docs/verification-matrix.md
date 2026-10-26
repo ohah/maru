@@ -5224,7 +5224,7 @@ EOF·UTF-8/UTF-16 범위, gopls 활성화 옵션, refresh 및 유실 응답 복�
 
 Rust는 pull 진단을 협상하고 현재 문서 version/seq에 맞는 결과만 적용한다.
 provider 부재의 push fallback과 다른 서버의 push를 유지하며 협상된 pull은 늦은 push보다 우선한다.
-`test-editor-rust-pull`: 31개 순수/11개 제품 테스트(모듈 참조 포함). 취소 재요청의 명시적 opt-in,
+`test-editor-rust-pull`: 31개 순수/12개 제품 테스트(모듈 참조 포함). 취소 재요청의 명시적 opt-in,
 backoff·시간 역행·오버플로·타이머 중복, 초기 접속·refresh·지난 seq/version·해소·다른 열린 문서 의존성을 검사한다.
 51개 Python 증거 검사에는 push 없는 실제 pull 판정과 잘못된 URI/협상/취소/unchanged 거부를 포함한다.
 실제 SDK 결과와 서로 다른 적대 조건은 [조사·수정 검증](../tools/editor-lsp-real/rust-diagnostics.md)을 따른다.

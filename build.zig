@@ -2119,6 +2119,11 @@ pub fn build(b: *std.Build) void {
     const run_backup_store_tests = b.addRunArtifact(backup_store_tests);
     run_backup_store_tests.addArg("--maru-expect-tests=35"); // 2 aggregation blocks + 31 native tests + 2 pure policy tests
     backup_store_step.dependOn(&run_backup_store_tests.step);
+    const typography_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows typography"} });
+    const run_typography_tests = b.addRunArtifact(typography_tests);
+    run_typography_tests.addArg("--maru-expect-tests=7");
+    b.step("test-windows-typography", "Verify native feature controls and COM failure ownership").dependOn(&run_typography_tests.step);
+
     const font_variant_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows font variants"} });
     const run_font_variant_tests = b.addRunArtifact(font_variant_tests);
     run_font_variant_tests.addArg("--maru-expect-tests=8");

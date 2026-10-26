@@ -38,6 +38,7 @@ pub const Error = error{
     FallbackFailed,
     FormatFailed,
     LayoutFailed,
+    TypographyFailed,
     DrawFailed,
     /// `anchor = .tail`(앞을 잘라 `…` 를 앞에 둔다)은 DirectWrite 에 없다 — 손으로 잘라야 한다.
     /// **조용히 뒤를 자르지 않는다**: 입력 줄은 caret 이 끝에 있어 앞을 잘라야 방금 친 글자가 보인다
@@ -63,6 +64,15 @@ fn check(hr: HRESULT, e: Error) Error!void {
 
 pub const GlyphRecord = seam.GlyphRecord;
 pub const Request = seam.Request;
+const typography = @import("dwrite_typography.zig");
+pub const NativeTypography = typography.Typography;
+pub const AppliedTypographyRange = typography.AppliedRange;
+pub const ShapeOptions = struct {
+    /// Keep native defaults unless the terminal explicitly disables liga/clig/calt.
+    ligatures: bool = true,
+    /// Native property readback is opt-in; regular shaping makes no extra query.
+    typography_readback: ?*AppliedTypographyRange = null,
+};
 
 pub const ShapeResult = struct { count: usize = 0, overflow: bool = false, primary_found: bool = false };
 
@@ -604,7 +614,12 @@ pub const Shaper = struct {
 
     /// 한 줄을 셰이핑해 `out` 에 채운다.
     pub fn shape(self: *Shaper, req: Request, out: []GlyphRecord) Error!ShapeResult {
+        return self.shapeWithOptions(req, out, .{});
+    }
+
+    pub fn shapeWithOptions(self: *Shaper, req: Request, out: []GlyphRecord, options: ShapeOptions) Error!ShapeResult {
         if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        if (options.typography_readback) |readback| readback.* = .{};
         if (req.text.len == 0) return .{ .primary_found = true };
         shape_calls += 1;
         // **앞을 자르는 말줄임은 아직 없다.** 조용히 뒤를 자르면 입력 줄에서 사용자가 자기 입력을 못 본다.
@@ -688,6 +703,25 @@ pub const Shaper = struct {
         const layout = layout_raw orelse return error.LayoutFailed;
         defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(layout)));
 
+        var disabled: ?NativeTypography = null;
+        defer if (disabled) |*owned| owned.deinit();
+        if (!options.ligatures) {
+            disabled = NativeTypography.createDisabled(@ptrCast(self.factory)) catch {
+                last_hresult_value = typography.lastHresult();
+                return error.TypographyFailed;
+            };
+            disabled.?.apply(@ptrCast(layout), @intCast(wlen)) catch {
+                last_hresult_value = typography.lastHresult();
+                return error.TypographyFailed;
+            };
+        }
+
+        if (options.typography_readback) |readback| {
+            readback.* = NativeTypography.rangeAt(@ptrCast(layout), @intCast(wlen - 1)) catch {
+                last_hresult_value = typography.lastHresult();
+                return error.TypographyFailed;
+            };
+        }
         var collector = Collector{ .stage = out, .allocator = self.allocator };
         defer collector.deinit();
         var renderer = TextRenderer{ .vtable = &TextRenderer.instance, .collector = &collector };

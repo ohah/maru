@@ -952,3 +952,20 @@ SGR bold/italic 조합별 face bank와 아틀라스 ID를 연결하고, 시작�
 진단으로 보존한다. `tools/windows/check-font-variants.py`는 이 fixture의 소유자·실행 파일과
 DLL 해시·bundled provider·행 픽셀을 검사한다. 합자·다른 설정 런타임·최종 설치 완료의
 증거로 확대하지 않는다. 근거: `.zig-cache/windows-font-variant-binding.json`.
+
+
+### Windows 리거처 — Native typography 제어 (중간 단계)
+
+DirectWrite shapeWithOptions에 liga/clig/calt 제어를 추가했다. 기존 shape의 기본값과
+공통 요청 스키마는 보존한다. COM 부분 생성·feature 추가·정상 종료의 소유권을 검사하며,
+범위는 UTF-16 단위로 적용한다. 선택적 GetTypography readback으로 실제 마지막 단위의
+적용 범위를 확인한다. 글리프 비교만으로 빠져나간 scalar-count 변이는 이 조회로 거부했다.
+다섯 compiled 변이와 복원 Debug/ReleaseFast 각 15개를 통과했다. 최신 일반 빌드·관련
+기능·교차 컴파일·전체 경계 272개도 통과했다. 기존 실제 앱의 스타일 편집 5개를 재실행해
+적용 5건·font/resize/input/grid 오류 0·exit0을 확인했다. 이 회귀는 리거처 토글 검증과
+구분한다. 이 단계는 사용자 토글의 터미널 적용 완료가 아니다. 근거는
+`.zig-cache/windows-typography-binding.json`에 묶었다.
+
+후속 순서는 줄/스타일 run 구성과 UTF-16 클러스터의 고정 셀 매핑, 커서·스타일 경계에서의
+합자 분리, renderer frame 연결과 live font.ligatures, 실제 앱 on/off 픽셀 대조다.
+부분 버퍼·fallback·allocation 실패와 다중 스타일/그리드 보존도 같은 경로에서 검증한다.

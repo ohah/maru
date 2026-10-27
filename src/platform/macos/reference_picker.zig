@@ -59,6 +59,8 @@ fn fitTail(allocator: std.mem.Allocator, text: []const u8, max_cols: usize) ![]u
 }
 
 pub const Picker = struct {
+    /// Result identity changes on clear/build, never on a query-only filter.
+    result_generation: u64 = 1,
     all: std.ArrayList(Row) = .empty,
     /// 필터를 통과한 행의 `all` 첨자 — 팔레트의 윈도잉은 이 길이를 본다.
     shown: std.ArrayList(usize) = .empty,
@@ -74,6 +76,7 @@ pub const Picker = struct {
     }
 
     pub fn clear(self: *Picker, allocator: std.mem.Allocator) void {
+        self.result_generation +|= 1;
         for (self.all.items) |r| {
             allocator.free(r.title);
             allocator.free(r.binding);
@@ -93,9 +96,21 @@ pub const Picker = struct {
 
     /// 쿼리로 좁힌다 — 제목·보조 텍스트에 바이트 부분일치 + ASCII 접기(심볼 피커와 같은 것). 빈 쿼리는 전부.
     pub fn applyFilter(self: *Picker, allocator: std.mem.Allocator, query: []const u8) error{OutOfMemory}!void {
+        try self.prepareFilter(allocator);
+        self.applyPreparedFilter(query);
+    }
+
+    /// Capacity admission preserves the old visible list on failure.
+    pub fn prepareFilter(self: *Picker, allocator: std.mem.Allocator) error{OutOfMemory}!void {
+        try self.shown.ensureTotalCapacity(allocator, self.all.items.len);
+    }
+
+    /// The caller holds the result set stable until this nonallocating publication.
+    pub fn applyPreparedFilter(self: *Picker, query: []const u8) void {
+        std.debug.assert(self.shown.capacity >= self.all.items.len);
         self.shown.clearRetainingCapacity();
         for (self.all.items, 0..) |r, i| {
-            if (symbol_picker.containsFoldAscii(r.title, query) or symbol_picker.containsFoldAscii(r.binding, query)) try self.shown.append(allocator, i);
+            if (symbol_picker.containsFoldAscii(r.title, query) or symbol_picker.containsFoldAscii(r.binding, query)) self.shown.appendAssumeCapacity(i);
         }
     }
 };

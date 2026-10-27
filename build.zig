@@ -2167,6 +2167,10 @@ pub fn build(b: *std.Build) void {
     const run_positioned_glyph_tests = b.addRunArtifact(positioned_glyph_tests);
     run_positioned_glyph_tests.addArg("--maru-expect-tests=15");
     b.step("test-positioned-glyph", "Verify positioned terminal ink through shared atlas and pixel DTOs").dependOn(&run_positioned_glyph_tests.step);
+    const shaping_run_tests = addProjectTest(b, .{ .root_module = positioned_glyph_tests.root_module, .filters = &.{"shaping run"} });
+    const run_shaping_run_tests = b.addRunArtifact(shaping_run_tests);
+    run_shaping_run_tests.addArg("--maru-expect-tests=8");
+    b.step("test-shaping-runs", "Verify shared native style keys and lossless UTF16 ownership preparation").dependOn(&run_shaping_run_tests.step);
     const positioned_frame_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows positioned terminal"} });
     const run_positioned_frame_tests = b.addRunArtifact(positioned_frame_tests);
     run_positioned_frame_tests.addArg("--maru-expect-tests=8");

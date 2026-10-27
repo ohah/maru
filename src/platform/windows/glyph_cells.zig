@@ -10,6 +10,13 @@ pub const Span = struct { col: u16, width: u16 };
 pub const Error = error{ UnknownSource, InvalidTextRange, InvalidCells };
 
 pub fn span(units: []const Cell, source: Source) Error!Span {
+    return spanOwners(units, source);
+}
+
+/// Borrow the shared prepared text's richer owners directly. Only column and
+/// width are used here; keeping this projection allocation-free avoids a second
+/// UTF-16 ownership buffer drifting from the native shaper's input.
+pub fn spanOwners(units: anytype, source: Source) Error!Span {
     if (!source.known) return error.UnknownSource;
     const start: usize = source.utf16_start;
     const length: usize = source.utf16_length;

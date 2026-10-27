@@ -10,18 +10,30 @@ test "Windows glyph sources native clusters map onto fixed cells including fallb
     defer shaper.destroy();
     var glyphs: [32]native.GlyphRecord = undefined;
     var sources: [32]native.GlyphSource = undefined;
-    const request: native.Request = .{ .text = "A\u{1f600}\u{1100}\u{1161}\u{11a8}=>", .family = "Fira Code", .fallback_csv = "", .size_px = 22 };
+    const cells = [_]maru.renderer.draw_list.DrawCell{
+        .{ .row = 0, .col = 10, .codepoint = 'A' },
+        .{ .row = 0, .col = 11, .width = 2, .codepoint = 0x1f600 },
+        .{ .row = 0, .col = 13, .width = 2, .codepoint = 0x1100, .grapheme_count = 2 },
+        .{ .row = 0, .col = 15, .codepoint = '=' },
+        .{ .row = 0, .col = 16, .codepoint = '>' },
+    };
+    var prepared = try maru.renderer.shaping_runs.prepare(std.testing.allocator, &cells, &.{ 0x1161, 0x11a8 });
+    defer prepared.deinit(std.testing.allocator);
+    const request: native.Request = .{ .text = prepared.utf8, .family = "Fira Code", .fallback_csv = "", .size_px = 22 };
     const shaped = try shaper.shapeWithOptions(request, &glyphs, .{ .glyph_sources = &sources });
     try std.testing.expect(shaped.primary_found and !shaped.overflow and shaped.count > 0);
     // Independent fixture: one ASCII, a surrogate pair, a three-unit NFD
     // grapheme, then two operators. Cell count is seven, text length eight.
     const columns = [_]u16{ 10, 11, 11, 13, 13, 13, 15, 16 };
     const widths = [_]u2{ 1, 2, 2, 2, 2, 2, 1, 1 };
-    var units: [8]native.Utf16Cell = undefined;
     var seen: [8]bool = @splat(false);
-    for (&units, columns, widths) |*unit, col, width| unit.* = .{ .col = col, .width = width };
+    try std.testing.expectEqual(@as(usize, 8), prepared.utf16_owners.len);
+    for (prepared.utf16_owners, columns, widths) |owner, col, width| {
+        try std.testing.expectEqual(col, owner.col);
+        try std.testing.expectEqual(width, owner.width);
+    }
     for (sources[0..shaped.count]) |item| {
-        const mapped = try native.glyphCellSpan(&units, item);
+        const mapped = try native.preparedGlyphCellSpan(prepared.utf16_owners, item);
         const first = item.utf16_start;
         const last = first + item.utf16_length - 1;
         @memset(seen[first .. last + 1], true);

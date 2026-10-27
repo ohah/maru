@@ -1116,3 +1116,35 @@ run 준비·native raster origin·native 셰이핑 결과 연결과 실제 앱 �
 근거는 `.zig-cache/positioned-terminal-font-app-regression.json`과
 `.zig-cache/positioned-terminal-popup-app-regression.json`이다. HWND/PID/바이너리
 검증을 거친 synthetic 입력이며 물리 키보드·IME 또는 합자 표시 완료를 뜻하지 않는다.
+
+### 공통 native run 입력 준비 (2026-10-28)
+
+`renderer.shaping_runs`가 기존 CoreText의 bold/italic/visible-cursor 키와
+wide 셀 커서 판정을 소유한다. macOS Zig 어댑터도 이 키를 사용하고 C는 비트만
+해석한다. C 셀 ABI는 그대로다. 이어질 Windows run producer가 사용할 `prepare`는
+연속된 한 행을 UTF-8과 UTF-16 단위별 원래 셀 소유권으로 바꾼다. emoji의 surrogate
+두 단위와 NFD/ZWJ의 추가 scalar를 같은 셀에 유지하며, 잘못된 scalar·pool 범위·
+행 불연속·폭·셀 경계를 할당 전에 거절한다. 두 버퍼는 실패 시 함께 회수한다.
+
+`zig build test-shaping-runs`의 원본 8개는 Debug·ReleaseFast를 통과했다.
+독립 소스 사본에서 hidden cursor, wide cursor, italic bit, grapheme tail,
+surrogate owner, 할당 실패 회수의 compiled 결함 6개를 모두 runtime에서 검출했다.
+근거는 `.zig-cache/shaping-run-adversarial.json`이다. Clang raw token으로 실제 C
+선언·enum·decoder를 추출한 검사는 65,536개 style 값이 기존 해석과 같음을 확인하고
+bold/italic/cursor 비트 누락 결함 3개를 검출했다
+(`.zig-cache/coretext-style-decoder.json`). 이는 macOS CoreText runtime 검증이 아니다.
+Windows terminal producer는 아직 이 준비 함수를 호출하지 않으며, native raster
+origin·셰이핑 연결·실제 앱의 합자 on/off 픽셀 검증은 계속 남아 있다.
+
+같은 단계의 native 연결 검사는 `prepare`의 실제 UTF-8을 DirectWrite에 넘기고
+같은 UTF-16 owner 배열을 `preparedGlyphCellSpan`으로 직접 읽는다. 별도 owner 복사 없이
+emoji·NFD·합자 후보의 native source span을 독립 셀 fixture와 비교한다.
+`test-windows-glyph-sources` 8개를 Debug·ReleaseFast에서 통과했고, 셀 위치 이동·wide
+폭 손실·grapheme tail 누락·surrogate owner 누락·native span 폭 손실의 compiled 결함
+5개를 native runtime 검사에서 검출했다
+(`.zig-cache/windows-prepared-native-adversarial.json`). 이는 준비→native shape→셀 범위의
+연결 검사이며 일반 앱의 terminal producer 연결 또는 합자 픽셀 검증을 대신하지 않는다.
+
+같은 변경의 일반 Windows Debug 앱 빌드, `check-targets`, 전체 `check-boundaries`가
+종료 코드 0으로 통과했다. 문서 링크·코드 좌표 검사와 Zig fmt·diff 공백 검사도 통과했다.
+로그는 `.zig-cache/shaping-runs-{app-build,cross,boundaries}.log`에 보존한다.

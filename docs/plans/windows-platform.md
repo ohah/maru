@@ -1227,3 +1227,30 @@ italic slant 손실·명시 weight 전달 누락·명시 slant 전달 누락·�
 272개(4묶음 × 68개)를 통과했고, 소스·HEAD 불변을 확인했다
 (`.zig-cache/run-faces-gates-20261028/result.json`). 최종 입력은
 `.zig-cache/run-faces-binding.json`에서 변형·대조군 및 빌드 입력과 대조한다.
+
+### Windows registry face의 스타일 bank raster 연결 (2026-10-28)
+
+`NeutralRasterizer.registry_face_policy`의 기본값은 기존 measured chrome의 primary
+bank다. 새 terminal run은 `terminal_style`을 명시해 bold/italic의 별도 family bank에서
+PostScript 이름을 찾고 같은 bank에서 bitmap을 굽는다. bank가 없으면 primary로 조용히
+바꾸지 않고 RasterizerFailed로 거절한다. registry ID 해석과 합성 코드포인트 우선순위는
+기존대로 유지한다. 공통 `shaping_runs.faceKey`는 macOS styleKey와 Windows 셀 shaper·
+registry raster의 bold/italic 키를 함께 소유한다.
+
+`test-windows-registry-raster` 7개와 공통 입력 8개를 확인했다. 별도 Consolas/Courier New/
+Times New Roman family의 네 스타일 bitmap이 legacy bank와 일치하고, registry ID
+1·2·41 충돌, 기존 measured 기본값, 누락 bank 오류와 합성 ink 우선순위를 검사했다.
+primary 강제 선택·다른 bank의 이름 조회·measured 기본값 변경·누락 bank의 primary
+대체·registry에서 합성 ink 건너뛰기의 compiled 결함 5개를 모두 runtime 검출했다.
+원본 Debug·ReleaseFast 대조군도 각각 7개를 통과했다
+(`.zig-cache/windows-registry-raster-adversarial.json`). 첫 Debug 대조군은 캐시의 test.exe가
+없어 실행하지 못했으며 통과로 세지 않는다. 소스와 복제본의 SHA를 다시 확인하고 새
+로컬 캐시 세대에서 원본 대조군을 실행했다. 이전 실패는 previous_controls와 원래 로그에
+보존한다. 이 정책의 terminal producer 연결과 실제 앱 합자 픽셀 검증은 아직 남아 있다.
+
+일반 Debug 앱 빌드·집중 5개 묶음·문서·교차 타깃은 새 캐시에서 통과했다. 이후 cold
+캐시의 경계 컴파일은 NoSpaceLeft로 실패했으며 통과로 세지 않는다. 소스·HEAD 불변을
+확인하고 공간을 확보한 뒤 기존 캐시에서 4묶음을 직렬 재검증해 전체 272개(각 68개)를
+통과했다. 원래 실패와 최종 결과는 `.zig-cache/registry-raster-gates-20261028/result.json`의
+previous_boundaries·checks.boundaries 및 별도 cold-boundary-attempts.json에 보존한다.
+최종 소스 입력은 `.zig-cache/registry-raster-binding.json`으로 대조한다.

@@ -2160,6 +2160,10 @@ pub fn build(b: *std.Build) void {
     const run_run_face_tests = b.addRunArtifact(run_face_tests);
     run_run_face_tests.addArg("--maru-expect-tests=7");
     b.step("test-windows-run-faces", "Verify native terminal run face selection").dependOn(&run_run_face_tests.step);
+    const registry_raster_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows registry raster"} });
+    const run_registry_raster_tests = b.addRunArtifact(registry_raster_tests);
+    run_registry_raster_tests.addArg("--maru-expect-tests=7");
+    b.step("test-windows-registry-raster", "Verify styled registry face raster selection").dependOn(&run_registry_raster_tests.step);
     const frame_snapshot_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"frame snapshot"} });
     const run_frame_snapshot_tests = b.addRunArtifact(frame_snapshot_tests);
     run_frame_snapshot_tests.addArg("--maru-expect-tests=33");

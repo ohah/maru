@@ -16,11 +16,16 @@ pub fn atCursor(cell: draw.DrawCell, cursor: terminal.Cursor) bool {
     return cursor.col >= cell.col and @as(u32, cursor.col) < @as(u32, cell.col) + width;
 }
 
+/// Shared bold/italic face index for shaping and native raster banks.
+pub fn faceKey(style: terminal.Style) u2 {
+    const key: u16 = (if (style.bold) bold_bit else 0) | (if (style.italic) italic_bit else 0);
+    return @intCast(key);
+}
+
 /// This is the existing native face/cursor key, not a paint-style key. Native
 /// adapters decode these bits rather than reconstructing cursor-hit policy.
 pub fn styleKey(cell: draw.DrawCell, cursor: terminal.Cursor) u16 {
-    return (if (cell.style.bold) bold_bit else 0) |
-        (if (cell.style.italic) italic_bit else 0) |
+    return @as(u16, faceKey(cell.style)) |
         (if (atCursor(cell, cursor)) cursor_bit else 0);
 }
 

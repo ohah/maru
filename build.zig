@@ -7039,6 +7039,15 @@ pub fn build(b: *std.Build) void {
     run_semantic_recovery_product.addArg("--maru-expect-tests=7");
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_semantic_recovery_product.addArg("--maru-expect-passed=7");
     semantic_recovery_step.dependOn(&run_semantic_recovery_product.step);
+    const parse_host_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"parse runtime host"} });
+    const run_parse_host = b.addRunArtifact(parse_host_tests);
+    run_parse_host.setCwd(b.path("."));
+    // macOS 전용 import의 익명 초기화 3개는 다른 플랫폼에서 수집되지 않는다.
+    run_parse_host.addArg(if (target.result.os.tag == .macos) "--maru-expect-tests=6" else "--maru-expect-tests=3");
+    run_parse_host.addArg(if (target.result.os.tag == .macos) "--maru-expect-passed=6" else "--maru-expect-passed=1");
+    b.step("test-editor-parse-host", "Verify closed AppSession parse document reclamation").dependOn(&run_parse_host.step);
+    test_step.dependOn(&run_parse_host.step);
+    macos_only_test_step.dependOn(&run_parse_host.step);
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
     run_editor_tests.step.dependOn(&install_fake_lsp.step);
@@ -7093,6 +7102,43 @@ pub fn build(b: *std.Build) void {
     // (`TS1 chrome.tab-style=underline` …). 편집기 필터에 `"TS"`를 적으면 **그쪽이 골라져 초록이
     // 되는데** 구문 판정자는 한 개도 안 돈다 — `CRT`·`LANG`이 낸 거짓 초록과 정확히 같은 모양이다.
     if (target.result.os.tag == .macos) {
+        const parse_runtime_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/app_session/editor/parse/dispatch.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "syntax", .module = syntax_mod } },
+        });
+        const parse_main_probe = b.addExecutable(.{
+            .name = "maru-parse-main-queue",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/editor-parse-runtime/native.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{ .{ .name = "parse", .module = parse_runtime_mod }, .{ .name = "maru", .module = maru_mod } },
+            }),
+        });
+        parse_main_probe.root_module.addCSourceFile(.{ .file = b.path("tools/editor-parse-runtime/main_queue.m"), .flags = &.{} });
+        parse_main_probe.root_module.linkFramework("CoreFoundation", .{});
+        const run_parse_main = b.addRunArtifact(parse_main_probe);
+        run_parse_main.has_side_effects = true;
+        b.step("test-editor-parse-main-queue", "Run actual Apple main queue parse delivery and document release").dependOn(&run_parse_main.step);
+        test_step.dependOn(&run_parse_main.step);
+        macos_only_test_step.dependOn(&run_parse_main.step);
+        const parse_runtime_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/app_session/editor/parse/judges.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "syntax", .module = syntax_mod } },
+        }) });
+        const run_parse_runtime = b.addRunArtifact(parse_runtime_tests);
+        run_parse_runtime.addArg("--maru-expect-tests=6");
+        run_parse_runtime.addArg("--maru-expect-passed=6");
+        b.step("test-editor-parse-runtime", "Verify main-owned parse document lifetimes").dependOn(&run_parse_runtime.step);
+        test_step.dependOn(&run_parse_runtime.step);
+        macos_only_test_step.dependOn(&run_parse_runtime.step);
         const parse_worker_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/app_session/editor/parse/worker.zig"),
             .target = target,
@@ -7125,7 +7171,13 @@ pub fn build(b: *std.Build) void {
         const run_parse_measure = b.addRunArtifact(parse_measure);
         run_parse_measure.addArg("--maru-expect-tests=1");
         b.step("measure-editor-parse-incremental", "Measure explicit incremental parse handoff").dependOn(&run_parse_measure.step);
-        const parse_worker_tests = addProjectTest(b, .{ .root_module = parse_worker_mod, .filters = &.{"parse worker"} });
+        const parse_worker_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/app_session/editor/parse/worker_judges.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "syntax", .module = syntax_mod } },
+        }), .filters = &.{"parse worker"} });
         const run_parse_worker = b.addRunArtifact(parse_worker_tests);
         run_parse_worker.addArg("--maru-expect-tests=19");
         run_parse_worker.addArg("--maru-expect-passed=19");

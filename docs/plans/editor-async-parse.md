@@ -1,6 +1,6 @@
 # 구문 파싱 비동기화 검토안
 
-상태: **요청 수락·native 서비스와 명시적 증분 인계 구현, UI 연결 전 검토**. 현재 메인 스레드의 점진 파싱 정책은 유지한다.
+상태: **메인 큐·문서 수명 소유자 구현, 일반 입력·표시 연결 전 검토**. 현재 메인 스레드의 점진 파싱 정책은 유지한다.
 
 ## 문제와 근거
 
@@ -294,7 +294,7 @@ native 핸들을 해제한 뒤 메인에서 두 Snapshot과 Job을 회수한다.
 
 [증분 실행·결함 대조와 실측](../../tools/editor-parse-incremental/README.md)은 전체 C 노드 좌표를
 cold 결과와 비교한다. 서비스 완료 경과와 메인 submit 비용을 구분하며 GUI 입력 지연으로 확대하지 않는다.
-UI 연결 전 완료 wake·소비처 수명·실제 입력 지연 검증은 남아 있다.
+완료 wake와 문서 수명은 아래 runtime으로 연결했다. 소비처 설치와 실제 입력 지연 검증은 남아 있다.
 
 ### 완료 통지 기반
 
@@ -306,7 +306,28 @@ native 퇴역 뒤의 Snapshot 반환 모두 통지를 요청한다. `notificatio
 메인 drain은 `beginDrain`으로 먼저 재무장하고 `reap`과 `take` 반복을 수행한다. 이 순서여야 처리
 도중 생긴 완료가 다음 turn을 예약할 수 있다. stopping 이후 새 통지 예약은 하지 않지만, 앞서 예약된 함수는 join 중 끝날 수 있다. join 뒤 남은
 Snapshot을 메인에서 회수한다. 지연된 외부 전달은 서비스 포인터를 보관하지 않고 현재 소유자를
-다시 찾아야 한다. 실제 OS dispatch·AppSession 조회와 표시 설치는 아직 연결하지 않았다.
+다시 찾아야 한다. 실제 OS dispatch와 AppSession 닫기는 아래 runtime으로 연결했다. 표시 설치는 아직 연결하지 않았다.
 
 [통지 계약과 검증](../../tools/editor-parse-notify/README.md)은 native callback·합치기·재무장·퇴역·
 종료를 검사한다. 이 통과가 실제 GUI wake나 늦은 OS callback의 E2E 증거는 아니다.
+
+## 메인 큐와 문서 수명 연결
+
+`editor/parse/dispatch.zig`는 메인 소유 Runtime을 지연 생성한다. `wake.zig`는 기존
+`maru_macos_dispatch_main`으로 전달하고, payload에 창·문서·Service 포인터를 넣지 않는다.
+종료는 전역 소유자를 먼저 내린 뒤 join한다. 늦은 전달은 현재 소유자를 다시 조회한다.
+
+Runtime의 Entry는 Registry request lease를 붙든다. Job의 메인 전용 연결 목록은 대기·실행·완료·
+퇴역 중인 작업을 모두 추적하며, 새 원문과 증분 기준 Snapshot을 메인에서 반환한 뒤에만 빠진다.
+마지막 뷰가 닫히면 취소·퇴역을 요청하고 실제 반환까지 문서를 유지한다. 일반 창 닫기는 이를
+기다리지 않는다. 확정 Quit과 테스트의 마지막 AppSession 정산은 allocator 반환 전에 join한다.
+Job당 포인터 둘과 문서당 선택적 Gate 포인터를 추가하며 새 고정 메모리 상한은 도입하지 않는다.
+
+요청 Gate는 Runtime이 아닌 Registry 문서가 지연 할당해 소유한다. 같은 문서에서 Runtime을
+재생성하거나 뷰가 없어도 read lease로 보존하면 serial이 이어진다. 실제 문서 파괴 때만 해제한다.
+`ready`는 현재 요청·실제 revision·뷰 존재·grammar·language를 다시 확인한다. 이전 완료는
+명시적 증분 기준으로만 남길 수 있고 낡은 offset을 현재 결과로 공개하지 않는다.
+
+[실행 검증](../../tools/editor-parse-runtime/README.md)은 runtime·실제 AppSession 파괴와
+production-mode Apple main queue를 구분한다. 일반 편집기의 입력·렌더 파싱 경로는 유지한다.
+완료의 뷰 설치·캐시 무효화, 준비 실패 UX와 실제 IME/GUI 지연은 다음 단계다.

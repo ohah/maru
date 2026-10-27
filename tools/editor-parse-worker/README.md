@@ -65,4 +65,6 @@ native 서비스 target은 macOS에서 실행한다. 새 외부 output과 기존
 멀티 문서 대규모 공정성·race detector·C 내부 malloc 실패는 후속이다. 기존 4MiB 파싱 제한을
 그대로 따르며 새 문서 크기/메모리 제한이나 사용자 실패 알림 정책을 도입하지 않는다.
 
-완료 통지의 선택적 hook과 재무장 순서는 [추가 계약](../editor-parse-notify/README.md)을 따른다. 실제 OS dispatch는 후속이다.
+완료 통지의 선택적 hook과 재무장 순서는 [추가 계약](../editor-parse-notify/README.md)을 따른다. 실제 OS dispatch는 위 후속 runtime에서 연결한다.
+
+후속 [메인 큐·문서 수명 연결](../editor-parse-runtime/README.md)은 실제 Apple 전달과 AppSession 파괴를 별도로 검증한다. 위 독립 서비스 검증의 범위를 GUI/IME 검증으로 확대하지 않는다.

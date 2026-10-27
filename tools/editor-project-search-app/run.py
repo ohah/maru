@@ -75,7 +75,12 @@ def main():
     args = parser.parse_args()
     if (args.save_as_only or args.save_as_name != DEFAULT_NAME or args.save_as_existing_target or args.save_as_overwrite_choice != "accept" or args.save_as_filename_input != "ax") and not args.save_as_command:
         parser.error("Save As lifecycle options require --save-as-command")
-    if args.save_as_only and (args.matrix or args.physical_ime or args.native_close_save or args.untitled_save_benchmark or args.replace_preview or args.replace_batch):
+    if args.save_as_only and any((
+        args.matrix, args.physical_ime, args.native_close_save, args.untitled_save_benchmark,
+        args.unicode_field, args.disk_files, args.narrow_hidden, args.replace_preview,
+        args.replace_apply, args.replace_disk_apply, args.replace_ime_refuse,
+        args.replace_batch, args.replace_batch_save_retry,
+    )):
         parser.error("Save As-only must run independently of other GUI scenes")
     if (args.save_as_name != DEFAULT_NAME or args.save_as_existing_target or args.save_as_filename_input != "ax") and not args.native_panel_capture_app:
         parser.error("Native Save As lifecycle cases require a capture app")

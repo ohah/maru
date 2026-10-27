@@ -5047,7 +5047,7 @@ pub fn build(b: *std.Build) void {
     // 무엇으로 대신할지와 함께 정할 일이라 이 슬라이스에서 하지 않는다.
     const posix_host_tests = target.result.os.tag != .windows;
 
-    const save_as_gui_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/editor-project-search-app", "-p", "test_save_as_lifecycle.py" });
+    const save_as_gui_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/editor-project-search-app", "-p", "test_save_as_*.py" });
     save_as_gui_controls.setCwd(b.path("."));
     save_as_gui_controls.has_side_effects = true;
     b.step("test-save-as-gui-oracles", "Validate independent native Save As lifecycle evidence controls").dependOn(&save_as_gui_controls.step);

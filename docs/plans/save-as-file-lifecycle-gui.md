@@ -41,7 +41,7 @@ Return과 workspace 이름 변경을 검증했다. 그 문서의 「Save As 파�
 기존 검색 도구는 ASCII Save As 대조군에서도 검색 입력 단계에서 기다려 저장에 도달하지 못했다.
 실패한 실행은 `~/Library/Caches/maru-verification/save-as-lifecycle-20261027-control`에 보존한다.
 저장 검증은 `--save-as-only`로 사유 root 준비 뒤 바로 Save As 단계로 들어가며 검색 검증 완료를 주장하지 않는다.
-기존 검색 실행의 기본 동작은 유지한다.
+기존 검색 실행의 기본 동작은 유지한다. 저장 전용 모드에 검색·치환·다른 GUI 장면 옵션 13개를 섞으면 사본 생성·빌드·앱 실행 전에 거절한다.
 
 추가 옵션은 `--save-as-name`(단일 사유 파일명), `--save-as-existing-target`(고정 sentinel 사전 생성),
 `--save-as-overwrite-choice accept|cancel`, `--save-as-filename-input ax|korean|hanja`다.

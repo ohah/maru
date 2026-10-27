@@ -1,6 +1,6 @@
 # 구문 파싱 비동기화 검토안
 
-상태: **요청 수락·native 서비스 기반 구현, UI 연결 전 검토**. 현재 메인 스레드의 점진 파싱 정책은 유지한다.
+상태: **요청 수락·native 서비스와 명시적 증분 인계 구현, UI 연결 전 검토**. 현재 메인 스레드의 점진 파싱 정책은 유지한다.
 
 ## 문제와 근거
 
@@ -251,7 +251,7 @@ Tree-sitter progress 콜백에 장벽을 넣는다. 진입 전/후 취소, 정�
 [서비스 구현과 실행 명령](../../tools/editor-parse-worker/README.md)은 실제 스레드·큐·C progress 취소를
 사용한다. UI·AppSession·완료 wake에는 아직 연결하지 않았다. 기존 제품의 점진 파싱 정책은 유지한다.
 스레드 오케스트레이션은 native 호스트 계층의 `editor/parse/worker.zig`에 두고, 입력 수락은 L2 Gate,
-실제 파싱과 요청별 atomic 취소 저장소는 `syntax` 모듈의 `Provider.initCancellable`이 담당한다.
+실제 파싱과 요청별 atomic 취소 저장소는 `syntax` 모듈의 `Provider.initCancellable`·`onEditCancellable`이 담당한다.
 
 `submit`은 준비 전에 새 입력을 선언한다. 성공 때만 Snapshot을 가져가고 준비 실패 때는 caller가
 Snapshot을 계속 소유한다. 준비 실패가 나도 이전 Gate 증명과 같은 문서의 이전 실행은 취소한다.
@@ -270,9 +270,28 @@ provider는 release 전까지만 빌린다. 파서·트리 해제는 워커, 원
 이 메서드는 내부의 동기 종료 API이며 실제 창/앱 종료를 어떻게 지연할지 결정한 것이 아니다.
 
 집중 실행은 실제 C 콜백 장벽과 준비/본문 복사 OOM, 문서 격리, 완료 뒤 취소, 결과 보유, 종료 회수를
-검사한다. 원래 Provider 회귀 98개와 production-mode 최소 실행도 대조한다. 다섯 실제 코드 결함은
+검사한다. Provider 회귀와 production-mode cold→증분 실행도 대조한다. 다섯 실제 코드 결함은
 정상 대조군과 구분해 탐지한다. C 내부 malloc 실패·실제 UI/IME·wake·공유 뷰 참조 수명·대규모
 메모리/지연 실측·race detector는 아직 미검증이다. 기존 제한 외의 새 예산이나 사용자 실패 UX는 정하지 않았다.
 
-현재 서비스는 cold parse만 수행하며 이전 트리/편집 범위의 증분 인계는 아직 없다. UI 연결 전에
-증분 인계와 실제 완료/입력 지연을 검증해야 하며, 기반 서비스의 통과를 성능 개선으로 일반화하지 않는다.
+### 명시적 증분 인계
+
+`submit`은 기존 cold 경로다. `submitFrom`은 호출 동안만 기준 `Completion`을 빌리고, 같은 문서 신원·
+문법 identity/generation·실제 언어의 ready 트리만 `Provider.copyReady`로 복사한다. 메인은 독립 native
+핸들 준비와 `Snapshot.clone` 참조 유지만 한다. 복사 실패나 기준 불일치는 cold 경로를 사용한다.
+성공 후 caller는 기준 Completion을 즉시 반환할 수 있다. 기준 Snapshot allocator도 최종 reap까지 유지한다.
+새 요청의 필수 준비 실패는 기존과 같이 Gate를 무효화하고 caller가 새 Snapshot을 계속 소유한다.
+
+워커는 이전·새 원문을 복사하고 기존 `edit_ops.reloadChange`로 UTF-8 경계를 보존한 단일 편집 범위를
+계산한다. `syntax.pointAt`은 LF 행·byte 열을 계산하며 CRLF 원문을 정규화하지 않는다. 동일 byte면
+복사 트리를 그대로 사용한다. 편집이 있으면 독립 핸들에서 `onEditCancellable`을 실행한다. 중단 시에는
+이동된 이전 트리가 남을 수 있으므로 `ParseStatus.done`을 확인한다. tree가 있다는 이유로 성공 처리하지 않는다.
+
+`Completion.mode`는 cold/incremental/reused를, `basis`는 실제 사용한 이전 Request를 돌려준다.
+변경 범위를 부분 재사용하려는 소비자는 표시 중인 이전 판과 이 기준이 같은지 별도로 증명해야 한다.
+서비스는 UI 설치나 캐시 provenance를 대신하지 않는다. 기준 트리를 가진 대기 요청도 워커에서
+native 핸들을 해제한 뒤 메인에서 두 Snapshot과 Job을 회수한다. 숨은 이전 트리 캐시는 두지 않는다.
+
+[증분 실행·결함 대조와 실측](../../tools/editor-parse-incremental/README.md)은 전체 C 노드 좌표를
+cold 결과와 비교한다. 서비스 완료 경과와 메인 submit 비용을 구분하며 GUI 입력 지연으로 확대하지 않는다.
+UI 연결 전 완료 wake·소비처 수명·실제 입력 지연 검증은 남아 있다.

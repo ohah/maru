@@ -745,11 +745,11 @@ pub fn build(b: *std.Build) void {
     }
     const project_search_tests = addProjectTest(b, .{ .root_module = project_search_module });
     const run_project_search_tests = b.addRunArtifact(project_search_tests);
-    // registry를 경유해 구문 계보의 발급·판정 검사도 이 집계에 포함된다.
-    run_project_search_tests.addArg("--maru-expect-tests=298");
+    // registry를 경유해 구문 계보와 Buffer의 Snapshot clone 검사도 이 집계에 포함된다.
+    run_project_search_tests.addArg("--maru-expect-tests=299");
     b.step("test-editor-project-search", "Run project search protocol and argv judges").dependOn(&run_project_search_tests.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
-        run_project_search_tests.addArg("--maru-expect-passed=297"); // Windows 전용 경로 비교 1개는 의도적으로 건너뛴다.
+        run_project_search_tests.addArg("--maru-expect-passed=298"); // Windows 전용 경로 비교 1개는 의도적으로 건너뛴다.
         macos_only_test_step.dependOn(&run_project_search_tests.step);
     }
     const ripgrep_prepare = b.addSystemCommand(&.{ "python3", "tools/build-ripgrep.py", "--output", "zig-out/ripgrep" });
@@ -6941,6 +6941,10 @@ pub fn build(b: *std.Build) void {
         // 돈다** — `editor_judges.zig` 에 import 하면 「모듈 경로 밖」이라 컴파일이 막힌다.
         .filters = &.{ "LANG", "MOT", "CLIP", "PAIR", "DLT", "BUF", "OCC", "FND", "HL", "DGC", "DGT", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "TXE", "WSE", "CPL", "SEM", "FRG", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CT", "CASE", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "session.editor.", "session.syntax_theme.", "platform.cell_text.", "session.repo_path." },
     });
+    const snapshot_clone_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"snapshot clone"} });
+    const run_snapshot_clone = b.addRunArtifact(snapshot_clone_tests);
+    run_snapshot_clone.addArg("--maru-expect-tests=29");
+    b.step("test-editor-snapshot-clone", "Verify independent retained editor snapshots").dependOn(&run_snapshot_clone.step);
     const history_step_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{".test.HST"} });
     const run_history_step = b.addRunArtifact(history_step_tests);
     run_history_step.addArg("--maru-expect-tests=33");
@@ -6984,10 +6988,20 @@ pub fn build(b: *std.Build) void {
         b.step("test-editor-parse-worker-native", "Run production-mode native parse service").dependOn(&run_parse_native.step);
         test_step.dependOn(&run_parse_native.step);
         macos_only_test_step.dependOn(&run_parse_native.step);
+        const parse_measure = addProjectTest(b, .{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/editor-parse-incremental/measure.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "worker", .module = parse_worker_mod }, .{ .name = "maru", .module = maru_mod }, .{ .name = "syntax", .module = syntax_mod } },
+        }) });
+        const run_parse_measure = b.addRunArtifact(parse_measure);
+        run_parse_measure.addArg("--maru-expect-tests=1");
+        b.step("measure-editor-parse-incremental", "Measure explicit incremental parse handoff").dependOn(&run_parse_measure.step);
         const parse_worker_tests = addProjectTest(b, .{ .root_module = parse_worker_mod, .filters = &.{"parse worker"} });
         const run_parse_worker = b.addRunArtifact(parse_worker_tests);
-        run_parse_worker.addArg("--maru-expect-tests=9");
-        run_parse_worker.addArg("--maru-expect-passed=9");
+        run_parse_worker.addArg("--maru-expect-tests=14");
+        run_parse_worker.addArg("--maru-expect-passed=14");
         b.step("test-editor-parse-worker", "Verify native parse queue ownership and cancellation").dependOn(&run_parse_worker.step);
         test_step.dependOn(&run_parse_worker.step);
         macos_only_test_step.dependOn(&run_parse_worker.step);

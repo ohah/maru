@@ -405,6 +405,11 @@ pub const Snapshot = struct {
         self.* = undefined;
     }
 
+    /// O(1)로 읽기 전용 판의 독립 참조를 만든다. 각 소유자가 한 번씩 deinit한다.
+    pub fn clone(self: Snapshot) Snapshot {
+        return .{ .allocator = self.allocator, .root = retain(self.root) };
+    }
+
     pub fn byteLen(self: Snapshot) usize {
         return self.root.bytes;
     }
@@ -1045,4 +1050,17 @@ test "BUF13: 부분 복사가 경계를 정확히 집는다" {
     const empty = try buf.copyRange(testing.allocator, 4, 4);
     defer testing.allocator.free(empty);
     try testing.expectEqual(@as(usize, 0), empty.len);
+}
+
+test "snapshot clone 원본 버퍼와 먼저 뜬 판 종료 뒤에도 내용을 보존한다" {
+    const a = std.testing.allocator;
+    var source = try Buffer.init(a, "가나다\r\nsecond");
+    var first = source.snapshot();
+    var second = first.clone();
+    defer second.deinit();
+    source.deinit();
+    first.deinit();
+    const bytes = try second.copyRange(a, 0, second.byteLen());
+    defer a.free(bytes);
+    try std.testing.expectEqualStrings("가나다\r\nsecond", bytes);
 }

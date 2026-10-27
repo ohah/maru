@@ -21,7 +21,7 @@ native 서비스 target은 macOS에서 실행한다. 새 외부 output과 기존
 - `submit`은 `Gate.begin`을 먼저 수행한다. 성공할 때만 Snapshot을 가져가며 실패 시 caller가 계속 소유한다.
 - 같은 문서 신원의 대기는 최신 하나만 남긴다. 새 요청은 아직 빌리지 않은 이전 완료도 퇴역시킨다.
   다른 문서의 대기는 유지하며 대기 순서는 FIFO다. 교체된 요청은 뒤로 들어간다.
-- `cancelDocument` 전에 caller가 Gate를 무효화한다. 실행 중에는 취소 플래그만 저장한다. 준비되지 않은
+- `cancelDocument` 전에 caller가 Gate를 무효화한다. 실행 중에는 취소 플래그만 저장한다. native 기준 핸들이 없는
   대기는 메인에서 회수할 수 있지만 C 호출 중인 작업은 실제 반환 전까지 해제하지 않는다.
 - `take`의 Completion은 복사하지 않는다. `accept`는 성공한 결과만 Gate에 넘기며, 현재 실패 결과는
   Gate의 수락 가능성만 지운다. 설치와 parser/tree provenance는 별도 책임이다.
@@ -40,22 +40,24 @@ native 서비스 target은 macOS에서 실행한다. 새 외부 output과 기존
 
 ## 검증
 
-실제 스레드와 C 콜백 장벽으로 집중 판정 9개를 실행한다. 최신 교체, 문서 격리, 준비 OOM,
+실제 스레드와 C 콜백 장벽으로 집중 판정 14개를 실행한다. 최신 교체, 문서 격리, 준비 OOM,
 본문 복사 OOM, 완료 후 취소, 빌린 결과와 종료, 실행·대기의 종료 정산, 빈 입력/미지원,
 미수령 완료의 퇴역을 확인한다. 테스트에서만 Provider 소유 객체의 생성/해제 스레드와 회수 횟수를
 계수하고, worker copy allocator의 실제 할당/해제 byte도 비교한다. C 내부 malloc 전체 원장을 센 것은 아니다.
 
 실제 production-mode 실행은 테스트 전용 gate/audit 필드가 없는 서비스에서 요청·C 파싱·수락·반환·종료를
-수행한다. 기존 구문 파서 판정 98개도 별도로 대조한다. UI는 열지 않는다.
+수행한다. 기존 구문 파서 판정과 증분 중단/좌표 oracle 대조도 별도로 대조한다. UI는 열지 않는다.
 
 독립 사본에서 native 취소 무시, 이전 대기 유지, 복사 OOM 오분류, 이전 완료 유지,
 준비 OOM에서 이전 Gate 복원 다섯 코드를 실제로 컴파일해 assertion 실패를 요구한다.
-정상 소스는 전후에 9개 모두 통과해야 하며 컴파일 실패는 탐지로 세지 않는다.
+현재 정상 소스는 전후에 14개 모두 통과해야 하며 컴파일 실패는 탐지로 세지 않는다.
 증거는 `/Users/yoonhb/.cache/maru-agent-artifacts/parse-worker-review-2/`의 source·변형 소스·
-실행 바이너리·로그·runner·result.json에 보존한다. 수집 기준 Git ID와 실제 source inventory를 구분한다.
+실행 바이너리·로그·runner·result.json에 보존한다. 이 자료는 당시 9개 판정자의 실행 기록이며, 현재 소스의 재실행 기록과 구분한다.
+수집 기준 Git ID와 실제 source inventory를 구분한다.
 
-현재 요청은 cold parse한다. 이전 트리·편집 범위의 증분 인계는 아직 구현하지 않았다.
-따라서 서비스 동작 검증을 총 파싱 시간 단축이나 제품 입력 지연 개선으로 해석하지 않는다.
+`submit`은 cold parse를 유지한다. `submitFrom`은 독립 native 핸들과 Snapshot 참조를 준비해
+명시적 증분 인계를 수행한다. [추가 계약·검증·실측](../editor-parse-incremental/README.md)을 따른다.
+따라서 서비스 동작 검증을 제품 입력 지연 개선으로 해석하지 않는다.
 
 ## 미검증 범위
 

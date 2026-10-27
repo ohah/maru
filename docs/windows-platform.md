@@ -649,7 +649,7 @@ Win32 메시지를 그 명령으로 **번역하는 것뿐**이고, 메인 스레
 | `WM_LBUTTONUP` | 3 (up) | `select_extend_or_collapse{row, col}` |
 | 같은 자리 2연타(`ClickTracker`) | 4 | `select_word{row, col, separators}` |
 | 같은 자리 3연타(`ClickTracker`) | 5 | `select_line{row}` |
-| `WM_RBUTTONDOWN`/`UP` | — | `input.right-click` 이 정한다(기본 `paste`. `menu` 는 미구현이라 세기만 한다) |
+| `WM_RBUTTONDOWN`/`UP` | — | `input.right-click` 이 정한다(기본 `paste`, `menu`는 터미널 Copy/Paste 팝업). 터미널 마우스 리포팅이 활성화되면 리포팅이 우선한다. |
 | `WM_MBUTTONDOWN`/`UP` | — | 리포팅 중일 때만 — **로컬 선택은 좌버튼뿐이다** |
 | `WM_MOUSEWHEEL` | — | `scroll{lines}` 또는 alt 화면이면 화살표 키 |
 | `WM_MOUSEHWHEEL` | — | 편집기 가로 스크롤(`first_col`). 터미널에는 가로 축이 없어 버린다 |
@@ -873,7 +873,7 @@ arena에서 **빌린다** — 먼저 해제하면 dangling이다. 이것이 `loa
 | config | 우클릭 결과 |
 |---|---|
 | 없음(기본 `paste`) | `pastes=1 paste_bytes=21` |
-| `input.right-click = menu` | `pastes=0`, `right_click_menus_todo=1` |
+| `input.right-click = menu` | 터미널 Copy/Paste 팝업 표시, 선택 전 `pastes=0`. 현재 실제 앱 검증은 아래 Terminal clipboard popup integration 절을 따른다. |
 
 | config | 여러 줄 붙여넣기(개행 = 즉시 실행 트리거) |
 |---|---|
@@ -12756,8 +12756,11 @@ or keyboard dismissal; capture loss clears that gesture. The dedicated gate is
 `zig build test-terminal-clipboard-popup`. Host input and GPU paint wiring share
 the existing native clipboard path. Native caption/resize hit-testing yields to
 the popup, and focus loss revokes it even if focus returns within the same event
-poll. Live validation is in progress; the historical `right_click_menus_todo`
-counter is not completion proof.
+poll. The installed preview passed twelve owned-window application checks, including
+actual Copy/Paste, dismissal and focus transfer; see the 2026-10-28 verification
+record below. These checks use synthetic HWND input, not physical mouse input.
+The historical `right_click_menus_todo` counter is not completion proof. This
+terminal popup does not establish sidebar, tab or file-tree context-menu support.
 
 The app-level Copy check also exposed an existing terminal selection bug: cell
 lookup used absolute client pixels after sidebar/titlebar layout moved the terminal.

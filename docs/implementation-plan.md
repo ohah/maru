@@ -1756,3 +1756,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [참조 결과 피커 IME 문맥](plans/reference-picker-ime.md): 참조/구현/타입 정의/선언 검색의 범위 편집·결과 세대·필터 실패 원자성과 후보 Return 격리.
 
 - [복구 목록 피커 IME 문맥](plans/recovery-picker-ime.md): 범위 교체·읽기 전용 열거와 조합 유지·필터 실패 원자성·후보 Return 복구 격리.
+
+- [신뢰·환경 이름 목록 피커 IME 문맥](plans/trust-picker-ime.md): 두 모드의 읽기/관리 경계를 유지하는 범위 편집·원자적 필터·후보 Return 격리.

@@ -73591,3 +73591,620 @@ test "recovery picker IME host real directory discovery preserves an in flight c
     try testing.expectEqualStrings("", fx.session.chrome_host.recovery_picker.input.query.items);
     try testing.expectEqualStrings("ㅎ", fx.session.chrome_host.recovery_picker.input.preedit.items);
 }
+
+fn trustImeFixture(fx: *PaneFixture, mode: trust_ui.Mode) !void {
+    const state = &fx.session.editor_trust_list;
+    state.mode = mode;
+    for (0..50) |i| {
+        const text = try std.fmt.allocPrint(testing.allocator, "target{d:0>2}", .{i});
+        errdefer testing.allocator.free(text);
+        try state.items.append(testing.allocator, .{ .text = text });
+    }
+    fx.session.chrome_host.trust_picker.show();
+    trust_ui.recompute(fx.session);
+}
+
+test "trust picker IME host trust mode replace a middle UTF16 range" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]trust_ui.Mode{.trust}) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        try trustImeFixture(&fx, mode);
+        const field = &fx.session.chrome_host.trust_picker.input;
+        try field.query.appendSlice(testing.allocator, "a😀z");
+        fx.session.imeBegin();
+        if (!@import("../chrome_ime.zig").insert(fx.session, "韓", .{ .location = 1, .length = 2 })) fx.session.imeInsert("韓");
+        fx.session.imeEnd(null);
+        try testing.expectEqualStrings("a韓z", field.query.items);
+    }
+}
+test "trust picker IME host environment mode replace a middle UTF16 range" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]trust_ui.Mode{.env_names}) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        try trustImeFixture(&fx, mode);
+        const field = &fx.session.chrome_host.trust_picker.input;
+        try field.query.appendSlice(testing.allocator, "a😀z");
+        fx.session.imeBegin();
+        if (!@import("../chrome_ime.zig").insert(fx.session, "韓", .{ .location = 1, .length = 2 })) fx.session.imeInsert("韓");
+        fx.session.imeEnd(null);
+        try testing.expectEqualStrings("a韓z", field.query.items);
+    }
+}
+
+test "trust picker IME host explicit empty range deletes only the selected word" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "", .{ .location = 1, .length = 2 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("az", field.query.items);
+}
+
+test "trust picker IME host empty callback without range keeps query" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "abc");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("abc", field.query.items);
+}
+
+test "trust picker IME host surrogate split rejects the whole key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "韓", .{ .location = 2, .length = 1 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("a😀z", field.query.items);
+}
+
+test "trust picker IME host invalid UTF8 rejects the whole key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "\xff", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "trust picker IME host NFD is preserved verbatim" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "한", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("한", field.query.items);
+}
+
+test "trust picker IME host outside key range callback keeps suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    _ = ime.insert(fx.session, "韓", .{ .location = 1, .length = 2 });
+    try testing.expectEqualStrings("a韓z", field.query.items);
+}
+
+test "trust picker IME host preview preserves query rows selection and document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    trust_ui.recompute(fx.session);
+    fx.session.chrome_host.trust_picker.selected = 37;
+    const rev = fx.term.rt.editorDocument().opened.?.file.revision;
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "韓", .{ .location = 1, .length = 0 }, .{ .location = 0, .length = 6 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("target", field.query.items);
+    try testing.expectEqualStrings("韓", field.preedit.items);
+    try testing.expectEqual(@as(usize, 50), fx.session.editor_trust_list.shown.items.len);
+    try testing.expectEqual(@as(usize, 37), fx.session.chrome_host.trust_picker.selected);
+    try testing.expectEqual(rev, fx.term.rt.editorDocument().opened.?.file.revision);
+}
+
+test "trust picker IME host candidate Return is consumed without opening management" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "韓", .{ .location = 1, .length = 0 }, .{ .location = 0, .length = 6 });
+    fx.session.imeEnd(null);
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "韓", null);
+    try testing.expect(ime.end(fx.session, .{ .key = .enter }));
+    fx.session.imeEnd(null);
+    try testing.expect(fx.session.chrome_host.trust_picker.open);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+}
+
+test "trust picker IME host independent Return can reach the existing accept path" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    _ = field;
+    fx.session.imeBegin();
+    try testing.expect(!ime.end(fx.session, .{ .key = .enter }));
+    fx.session.imeEnd(null);
+}
+
+test "trust picker IME host reopen rejects old callbacks" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    fx.session.chrome_host.trust_picker.hide();
+    fx.session.chrome_host.trust_picker.show();
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("", field.query.items);
+    try testing.expect(fx.session.chrome_host.trust_picker.open);
+}
+
+test "trust picker IME host sequence exhaustion closes append fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.trust_picker_ime.sequence = @as(u64, 1) << 51;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(.{ .key = .{ .char = 'x' } });
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "trust picker IME host lifecycle exhaustion closes append fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.chrome_host.trust_picker.ime_generation = std.math.maxInt(u64);
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(.{ .key = .{ .char = 'x' } });
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "trust picker IME host bootstrap has no owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    _ = field;
+    const saved = fx.session.surface_initialized;
+    fx.session.surface_initialized = false;
+    defer fx.session.surface_initialized = saved;
+    try testing.expect(ime.generation(fx.session) == null);
+}
+
+test "trust picker IME host empty topology has no owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    _ = field;
+    const saved = fx.session.tabs.items.len;
+    fx.session.tabs.items.len = 0;
+    defer fx.session.tabs.items.len = saved;
+    try testing.expect(ime.generation(fx.session) == null);
+}
+
+test "trust picker IME host terminal pin has priority" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    _ = field;
+    fx.session.ime_terminal_target_id = fx.term.surfaceId();
+    defer fx.session.ime_terminal_target_id = null;
+    try testing.expect(ime.generation(fx.session) == null);
+    try testing.expect(!ime.insert(fx.session, "late", null));
+}
+
+test "trust picker IME host accepted query publishes staged rows" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    trust_ui.recompute(fx.session);
+    fx.session.chrome_host.trust_picker.selected = 37;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "target4", .{ .location = 0, .length = 6 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("target4", field.query.items);
+    try testing.expectEqual(@as(usize, 10), fx.session.editor_trust_list.shown.items.len);
+    try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.trust_picker.selected);
+}
+
+test "trust picker IME host snapshot allocation failure preserves the previous input" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    fx.session.allocator = testing.allocator;
+    try testing.expectEqualStrings("target", field.query.items);
+}
+
+test "trust picker IME host failed key recovers for a following valid key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "bad", .{ .location = 2, .length = 1 });
+    fx.session.imeEnd(null);
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "韓", .{ .location = 1, .length = 2 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("a韓z", field.query.items);
+}
+
+test "trust picker IME host every native key allocation failure preserves visible results" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../trust_picker_ime.zig");
+    var observed_failure = false;
+    for (0..256) |index| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        try trustImeFixture(&fx, .trust);
+        const field = &fx.session.chrome_host.trust_picker.input;
+        try field.query.appendSlice(testing.allocator, "target");
+        trust_ui.recompute(fx.session);
+        fx.session.chrome_host.trust_picker.selected = 37;
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
+        fx.session.allocator = failing.allocator();
+        fx.session.imeBegin();
+        _ = ime.insert(fx.session, "target4", .{ .location = 0, .length = 6 });
+        fx.session.imeEnd(null);
+        fx.session.allocator = testing.allocator;
+        if (failing.has_induced_failure) {
+            observed_failure = true;
+            try testing.expectEqualStrings("target", field.query.items);
+            try testing.expectEqual(@as(usize, 50), fx.session.editor_trust_list.shown.items.len);
+            try testing.expectEqual(@as(usize, 37), fx.session.chrome_host.trust_picker.selected);
+        } else {
+            try testing.expect(observed_failure);
+            try testing.expectEqualStrings("target4", field.query.items);
+            try testing.expectEqual(@as(usize, 10), fx.session.editor_trust_list.shown.items.len);
+            return;
+        }
+    }
+    return error.AllocationControlNeverSucceeded;
+}
+
+test "trust picker IME host cancel restores the original word and suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "a한z");
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 1 });
+    fx.session.imeEnd(null);
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "", .{ .location = 0, .length = 0 }, null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("a한z", field.query.items);
+    try testing.expectEqual(@as(usize, 0), field.preedit.items.len);
+}
+
+test "trust picker IME host dynamic text remains longer than Session Dock budget" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    var text: [500]u8 = undefined;
+    @memset(&text, 'x');
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, &text, null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings(&text, fx.session.chrome_host.trust_picker.input.query.items);
+}
+
+test "trust picker IME host old callback cannot write a new palette" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    fx.session.imeBegin();
+    fx.session.chrome_host.trust_picker.hide();
+    fx.session.chrome_host.palette.show();
+    try fx.session.chrome_host.palette.input.query.appendSlice(testing.allocator, "destination");
+    try testing.expect(@import("../chrome_ime.zig").insert(fx.session, "late", null));
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("destination", fx.session.chrome_host.palette.input.query.items);
+}
+
+test "trust picker IME host out of bounds replacement rejects the key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "lost", .{ .location = 900, .length = 1 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "trust picker IME host invalid second callback rolls back the entire key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    trust_ui.recompute(fx.session);
+    fx.session.chrome_host.trust_picker.selected = 37;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "target4", .{ .location = 0, .length = 6 });
+    _ = ime.insert(fx.session, "\xff", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("target", field.query.items);
+    try testing.expectEqual(@as(usize, 50), fx.session.editor_trust_list.shown.items.len);
+    try testing.expectEqual(@as(usize, 37), fx.session.chrome_host.trust_picker.selected);
+}
+
+test "trust picker IME host composition admission publishes the filtered results once" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    trust_ui.recompute(fx.session);
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "target4", .{ .location = 7, .length = 0 }, .{ .location = 0, .length = 6 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("target", field.query.items);
+    try testing.expect(ime.commitAll(fx.session));
+    try testing.expectEqualStrings("target4", field.query.items);
+    try testing.expectEqual(@as(usize, 10), fx.session.editor_trust_list.shown.items.len);
+    try testing.expect(ime.commitAll(fx.session));
+}
+
+test "trust picker IME host mode transition rejects callbacks from the previous owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "x", null);
+    fx.session.editor_trust_list.mode = .env_names;
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "trust picker IME host native filter OOM preserves prompt rows selection and scroll" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]trust_ui.Mode{ .trust, .env_names }) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        try trustImeFixture(&fx, mode);
+        const field = &fx.session.chrome_host.trust_picker.input;
+        try field.query.appendSlice(testing.allocator, "target");
+        trust_ui.recompute(fx.session);
+        fx.session.chrome_host.trust_picker.selected = 37;
+        fx.session.editor_trust_list.scroll.offset_y_px = 200;
+        const prompt = fx.session.chrome_host.trust_picker.prompt;
+        fx.session.imeBegin();
+        _ = @import("../trust_picker_ime.zig").insert(fx.session, "target4", .{ .location = 0, .length = 6 });
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        fx.session.allocator = failing.allocator();
+        fx.session.imeEnd(null);
+        fx.session.allocator = testing.allocator;
+        try testing.expectEqualStrings("target", field.query.items);
+        try testing.expectEqual(@as(usize, 50), fx.session.editor_trust_list.shown.items.len);
+        try testing.expectEqual(@as(usize, 37), fx.session.chrome_host.trust_picker.selected);
+        try testing.expectEqual(@as(u32, 200), fx.session.editor_trust_list.scroll.offset_y_px);
+        try testing.expectEqualStrings(prompt, fx.session.chrome_host.trust_picker.prompt);
+    }
+}
+
+test "trust picker IME host candidate Return never opens management or closes either mode" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]trust_ui.Mode{ .trust, .env_names }) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        try trustImeFixture(&fx, mode);
+        const generation = trust_store.generation();
+        fx.session.imeBegin();
+        _ = @import("../trust_picker_ime.zig").insert(fx.session, "target4", null);
+        fx.session.imeEnd(.{ .key = .enter });
+        try testing.expect(fx.session.chrome_host.trust_picker.open);
+        try testing.expect(!fx.session.chrome_host.confirm.open);
+        try testing.expectEqual(generation, trust_store.generation());
+    }
+}
+
+test "trust picker IME host independent environment Return only closes and keeps trust unchanged" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .env_names);
+    const generation = trust_store.generation();
+    fx.session.imeBegin();
+    fx.session.imeEnd(.{ .key = .enter });
+    try testing.expect(!fx.session.chrome_host.trust_picker.open);
+    try testing.expect(!fx.session.chrome_host.confirm.open);
+    try testing.expectEqual(generation, trust_store.generation());
+}
+
+test "trust picker IME host independent trust Return opens current decision management without granting" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    // Test builds disable filesystem trust persistence unless an explicit private root is set.
+    testing.allocator.free(fx.session.editor_trust_list.items.items[0].text);
+    fx.session.editor_trust_list.items.items[0].text = try testing.allocator.dupe(u8, "/fixture/target00");
+    const key: maru.session.editor.lsp.trust.Key = .{ .volume = 0, .path = "/fixture/target00" };
+    fx.session.editor_trust_list.items.items[0].decision = .allow; // Opening snapshot may be stale.
+    _ = trust_store.decide(testing.io, .{ .source = .manage }, key, .deny);
+    const generation = trust_store.generation();
+    fx.session.imeBegin();
+    fx.session.imeEnd(.{ .key = .enter });
+    try testing.expect(!fx.session.chrome_host.trust_picker.open);
+    try testing.expect(fx.session.chrome_host.confirm.open);
+    try testing.expectEqual(lsp_client.ManageAction.forget, fx.session.editor_lsp.manage_primary);
+    try testing.expectEqual(generation, trust_store.generation());
+    try testing.expectEqual(maru.session.editor.lsp.trust.Decision.deny, trust_store.get(key).?);
+}
+
+test "trust picker IME host empty and pending snapshots have an owner without a document dependency" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var terminal_found = false;
+    for (pane_ops.activePane(fx.session).terms.items, 0..) |term, index| {
+        if (term.kind != .terminal) continue;
+        fx.session.focusTerm(index);
+        terminal_found = true;
+        break;
+    }
+    try testing.expect(terminal_found);
+    fx.session.editor_trust_list.mode = .env_names;
+    fx.session.editor_trust_list.env_pending = true;
+    fx.session.chrome_host.trust_picker.show();
+    trust_ui.recompute(fx.session);
+    const ime = @import("../trust_picker_ime.zig");
+    try testing.expect(ime.generation(fx.session) != null);
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "query", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("query", fx.session.chrome_host.trust_picker.input.query.items);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_trust_list.shown.items.len);
+}
+
+test "trust picker IME host NFD comparison preserves original query and rendered remote matching" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const item = &fx.session.editor_trust_list.items.items[0];
+    testing.allocator.free(item.text);
+    item.text = try testing.allocator.dupe(u8, "/fixture/한");
+    item.dest = try testing.allocator.dupe(u8, "HOST");
+    fx.session.imeBegin();
+    _ = @import("../trust_picker_ime.zig").insert(fx.session, "한", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("한", fx.session.chrome_host.trust_picker.input.query.items);
+    try testing.expectEqualSlices(usize, &.{0}, fx.session.editor_trust_list.shown.items);
+    fx.session.imeBegin();
+    _ = @import("../trust_picker_ime.zig").insert(fx.session, "host:", .{ .location = 0, .length = 3 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualSlices(usize, &.{0}, fx.session.editor_trust_list.shown.items);
+}
+
+test "trust picker IME host legacy filter failure leaves no actionable trust row" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    trust_ui.recompute(fx.session);
+    fx.session.allocator = testing.allocator;
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_trust_list.shown.items.len);
+    const generation = trust_store.generation();
+    trust_ui.accept(fx.session);
+    try testing.expect(fx.session.chrome_host.trust_picker.open);
+    try testing.expect(!fx.session.chrome_host.confirm.open);
+    try testing.expectEqual(generation, trust_store.generation());
+}
+
+test "trust picker IME host external trust decisions do not replace the opening snapshot owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const generation = ime.generation(fx.session);
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null);
+    _ = trust_store.decide(testing.io, .{ .source = .manage }, .{ .volume = 7, .path = "/fixture/peer" }, .deny);
+    fx.session.imeEnd(null);
+    try testing.expectEqual(generation, ime.generation(fx.session));
+    try testing.expectEqualStrings("한", fx.session.chrome_host.trust_picker.input.preedit.items);
+    try testing.expectEqual(@as(usize, 50), fx.session.editor_trust_list.shown.items.len);
+}

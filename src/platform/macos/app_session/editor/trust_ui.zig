@@ -124,41 +124,66 @@ pub fn recompute(self: *AppSession) void {
     refresh(self);
 }
 
-fn refresh(self: *AppSession) void {
+pub const PreparedFilter = struct {
+    filter: chrome.components.trust_filter.Plan,
+    prompt: maru.i18n.Key,
+    pub fn deinit(self: *PreparedFilter, a: std.mem.Allocator) void {
+        self.filter.deinit(a);
+    }
+};
+
+/// Prepare before changing any visible query/result state. The native transaction
+/// rejects OOM; the legacy caller retains its existing raw-comparison fallback.
+pub fn prepareFilter(self: *AppSession, query: []const u8, legacy_fallback: bool) !PreparedFilter {
     const state = &self.editor_trust_list;
-    const picker = &self.chrome_host.trust_picker;
-    state.shown.clearRetainingCapacity();
-    state.shown.ensureTotalCapacity(self.allocator, state.items.items.len) catch {
-        picker.setResultCount(0);
-        self.metal_dirty = true;
-        return;
-    };
-    // 조합 중 한글을 붙여 거른다. 메모리가 모자라면 입력 그대로 거른다(전부 보이는 것보다 낫다).
-    const composed = maru.grapheme.composeHangul(self.allocator, picker.input.query.items) catch null;
-    defer if (composed) |q| self.allocator.free(q);
-    const q = composed orelse picker.input.query.items;
+    var prepared: PreparedFilter = .{ .filter = try chrome.components.trust_filter.Plan.init(self.allocator, state.items.items.len, query, legacy_fallback), .prompt = .lsp_trust_list_prompt };
+    errdefer prepared.deinit(self.allocator);
     const home = std.mem.span(std.c.getenv("HOME") orelse "");
     for (state.items.items, 0..) |it, i| {
-        if (q.len == 0 or std.ascii.findIgnoreCase(it.text, q) != null) {
-            state.shown.appendAssumeCapacity(i);
+        if (state.mode != .trust) {
+            prepared.filter.consider(i, it.text, null);
             continue;
         }
-        if (state.mode != .trust) continue;
         // 보이는 그대로(`~/…`·원격은 `목적지:경로` — `rows`)로도 거른다 — 사용자는 화면의 이름을 친다.
         var shown_buf: [std.fs.max_path_bytes + trust.max_dest_bytes + 1]u8 = undefined;
         const shown = if (it.dest.len > 0)
             lsp_client.trustKeyLabel(.{ .volume = it.volume, .path = it.text, .dest = it.dest }, &shown_buf)
         else
             app_session_mod.homeTilde(it.text, home, &shown_buf);
-        if (std.ascii.findIgnoreCase(shown, q) != null) state.shown.appendAssumeCapacity(i);
+        prepared.filter.consider(i, it.text, shown);
     }
-    picker.setResultCount(state.shown.items.len);
     const empty = state.items.items.len == 0;
-    picker.prompt = maru.i18n.t(switch (state.mode) {
+    prepared.prompt = switch (state.mode) {
         .trust => if (empty) .lsp_trust_list_empty else .lsp_trust_list_prompt,
         .env_names => if (state.env_pending) .lsp_env_list_pending else if (empty) .lsp_env_list_empty else .lsp_env_list_prompt,
-    });
+    };
+    return prepared;
+}
+
+pub fn publishFilter(self: *AppSession, prepared: *PreparedFilter, reset: bool) void {
+    const state = &self.editor_trust_list;
+    const picker = &self.chrome_host.trust_picker;
+    std.mem.swap(std.ArrayList(usize), &state.shown, &prepared.filter.shown);
+    if (reset) {
+        picker.selected = 0;
+        state.scroll = .{};
+        state.followed = null;
+    }
+    picker.setResultCount(state.shown.items.len);
+    picker.prompt = maru.i18n.t(prepared.prompt);
     self.metal_dirty = true;
+}
+
+fn refresh(self: *AppSession) void {
+    var prepared = prepareFilter(self, self.chrome_host.trust_picker.input.query.items, true) catch {
+        // Preserve the legacy failure contract: no displayed row is actionable.
+        self.editor_trust_list.shown.clearRetainingCapacity();
+        self.chrome_host.trust_picker.setResultCount(0);
+        self.metal_dirty = true;
+        return;
+    };
+    defer prepared.deinit(self.allocator);
+    publishFilter(self, &prepared, false);
 }
 
 /// 고른 저장소의 관리 상자를 띄운다(목록은 닫는다 — 상자는 하나뿐이다). 환경 목록은 읽기 전용이라 닫기만 한다.

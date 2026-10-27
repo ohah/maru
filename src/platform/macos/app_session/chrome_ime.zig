@@ -6,6 +6,7 @@ const app = @import("../app_session.zig");
 const dock = @import("agent_dock.zig");
 pub const Range = maru.inline_text_input.Range;
 const Context = maru.inline_text_input.Context;
+const trust_ime = @import("trust_picker_ime.zig");
 const recovery_ime = @import("recovery_picker_ime.zig");
 const reference_ime = @import("reference_picker_ime.zig");
 const symbol_ime = @import("symbol_picker_ime.zig");
@@ -50,6 +51,7 @@ pub const Projection = union(enum) {
 };
 
 pub fn generation(self: *app.AppSession) ?u64 {
+    if (trust_ime.generation(self)) |token| return token;
     if (recovery_ime.generation(self)) |token| return token;
     if (reference_ime.generation(self)) |token| return token;
     if (symbol_ime.generation(self)) |token| return token;
@@ -66,6 +68,7 @@ pub fn generation(self: *app.AppSession) ?u64 {
     return fixedGeneration(self);
 }
 pub fn projection(self: *app.AppSession) ?Projection {
+    if (trust_ime.projection(self)) |context| return .{ .dynamic = context };
     if (recovery_ime.projection(self)) |context| return .{ .dynamic = context };
     if (reference_ime.projection(self)) |context| return .{ .dynamic = context };
     if (symbol_ime.projection(self)) |context| return .{ .dynamic = context };
@@ -87,7 +90,7 @@ fn fixedGeneration(self: *app.AppSession) ?u64 {
     if (self.ime_terminal_target_id != null or self.inputFocus() != .agent_session_search) return null;
     if (self.ime_search_owner) |owner| if (owner != self.agent_session_search_generation) return null;
     const token = self.agent_session_search_generation;
-    return if (token < (@as(u64, 1) << 51)) token else null;
+    return if (token < (@as(u64, 1) << 50)) token else null;
 }
 
 fn fixedProjection(self: *app.AppSession) ?*Context {
@@ -141,10 +144,11 @@ fn publish(self: *app.AppSession, context: *Context) void {
 pub fn insert(self: *app.AppSession, bytes: []const u8, replacement: ?Range) bool {
     // Test the pinned source before considering the current destination. An old
     // palette/search callback must never become a fresh address-field write.
-    if (recovery_ime.stale(self) or reference_ime.stale(self) or symbol_ime.stale(self) or activity_ime.stale(self) or inspector_ime.stale(self) or scm_ime.stale(self) or sidebar_ime.stale(self) or project_ime.stale(self) or find_ime.stale(self) or settings_ime.stale(self) or field_ime.stale(self) or
+    if (trust_ime.stale(self) or recovery_ime.stale(self) or reference_ime.stale(self) or symbol_ime.stale(self) or activity_ime.stale(self) or inspector_ime.stale(self) or scm_ime.stale(self) or sidebar_ime.stale(self) or project_ime.stale(self) or find_ime.stale(self) or settings_ime.stale(self) or field_ime.stale(self) or
         self.palette_ime_owner != null and palette_ime.generation(self) == null or
         self.ime_search_owner != null and fixedGeneration(self) == null) return true;
 
+    if (trust_ime.insert(self, bytes, replacement)) return true;
     if (recovery_ime.insert(self, bytes, replacement)) return true;
     if (reference_ime.insert(self, bytes, replacement)) return true;
     if (symbol_ime.insert(self, bytes, replacement)) return true;
@@ -173,10 +177,11 @@ pub fn insert(self: *app.AppSession, bytes: []const u8, replacement: ?Range) boo
 pub fn marked(self: *app.AppSession, bytes: []const u8, selected: Range, replacement: ?Range) bool {
     // Test the pinned source before considering the current destination. An old
     // palette/search callback must never become a fresh address-field write.
-    if (recovery_ime.stale(self) or reference_ime.stale(self) or symbol_ime.stale(self) or activity_ime.stale(self) or inspector_ime.stale(self) or scm_ime.stale(self) or sidebar_ime.stale(self) or project_ime.stale(self) or find_ime.stale(self) or settings_ime.stale(self) or field_ime.stale(self) or
+    if (trust_ime.stale(self) or recovery_ime.stale(self) or reference_ime.stale(self) or symbol_ime.stale(self) or activity_ime.stale(self) or inspector_ime.stale(self) or scm_ime.stale(self) or sidebar_ime.stale(self) or project_ime.stale(self) or find_ime.stale(self) or settings_ime.stale(self) or field_ime.stale(self) or
         self.palette_ime_owner != null and palette_ime.generation(self) == null or
         self.ime_search_owner != null and fixedGeneration(self) == null) return true;
 
+    if (trust_ime.marked(self, bytes, selected, replacement)) return true;
     if (recovery_ime.marked(self, bytes, selected, replacement)) return true;
     if (reference_ime.marked(self, bytes, selected, replacement)) return true;
     if (symbol_ime.marked(self, bytes, selected, replacement)) return true;
@@ -203,6 +208,7 @@ pub fn marked(self: *app.AppSession, bytes: []const u8, selected: Range, replace
 }
 
 pub fn begin(self: *app.AppSession) void {
+    trust_ime.begin(self);
     recovery_ime.begin(self);
     reference_ime.begin(self);
     symbol_ime.begin(self);
@@ -221,6 +227,7 @@ pub fn begin(self: *app.AppSession) void {
 }
 
 pub fn end(self: *app.AppSession, event: ?maru.terminal.KeyEvent) bool {
+    if (trust_ime.end(self, event)) return true;
     if (recovery_ime.end(self, event)) return true;
     if (reference_ime.end(self, event)) return true;
     if (symbol_ime.end(self, event)) return true;

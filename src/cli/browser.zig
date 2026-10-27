@@ -1119,7 +1119,8 @@ fn parseNetworkRequestArgs(rest: []const []const u8) ParseError!NetworkRequestCm
             if (n == 0 or n > max_network_body_read) return error.InvalidBodyBytes;
             cmd.max_bytes = n;
         } else if (matchOpt(a, "--out")) {
-            const v = try optValue(rest, &i, "--out");
+            // 재검증 3 차 뒤 N-i3: 맨 끝의 값 없는 `--out` 도 exec·screenshot 처럼 「--out needs a value」(전에는 「the option needs a value」).
+            const v = optValue(rest, &i, "--out") catch return error.MissingOutValue;
             if (v.len == 0) return error.MissingOutValue;
             cmd.out = v;
         } else if (std.mem.startsWith(u8, a, "-")) {
@@ -4584,6 +4585,7 @@ test "W9d② 재검증 3 차 N-h2: exec·screenshot 의 빈 --out(`--out \"\"`·
     try testing.expectError(error.MissingOutValue, parse(&.{ "screenshot", "--surface", "1", "--out", "" }));
     try testing.expectError(error.MissingOutValue, parse(&.{ "screenshot", "--surface", "1", "--out=" }));
     try testing.expectError(error.MissingOutValue, parse(&.{ "network-request", "--surface", "3", "--req", "7", "--out", "" }));
+    try testing.expectError(error.MissingOutValue, parse(&.{ "network-request", "--surface", "3", "--req", "7", "--out" })); // N-i3: 맨 끝
 }
 
 test "W9d②: 요청 모양 — browser.networkRecord {id, on}, 본문은 body·body_offset·body_max_bytes(주지 않은 것은 싣지 않는다)" {

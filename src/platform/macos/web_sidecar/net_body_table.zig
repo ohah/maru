@@ -83,12 +83,18 @@ pub const cef_grace_us: i64 = 250_000;
 pub const unclaimed_expiry_us: i64 = 3_000_000;
 /// 재검증 2–9 회차 WB: 성공으로 끝난 요청의 CEF 끝이 늦어도 이만큼 안에는 왔다(`Table.mayOwn` — CEF 의 끝은 렌더러의 `loadingFinished` 보다 먼저다).
 pub const end_slack_us: i64 = 20_000;
-/// 재검증 3 차 WB-4: 응답을 아직 보지 못한 열린 CDP 요청의 CEF 기록(있다면)은 늦어도 기준 시각 뒤 이만큼 안에 시작했다고 본다(`Table.recordDue`
-/// — 가정: J1 에서 CEF IO 는 CDP 시작보다 0.09–6.3 ms 뒤였다). 그동안 그 요청의 기록이 아직 올 수 있어, 그 기록이 오면 판정이 바뀌는 같은 열쇠의
-/// 요청은 정하지 않고 기다린다(`tryDecide`). 이보다 늦게 시작하는 기록(렌더러가 늦춘 낮은 우선의 자원 — 실제 사이트의 짝 간격은 1.66 s 까지였다)은
-/// 가정 밖이다(문서의 남는 틈). 250 ms(`cef_grace_us`)로 두면 같은 주소 요청이 잦은 페이지에서 뒤 요청이 이어 와 기다림이 시한에 닿아 본문을
-/// 잃었다(퍼즈 heavy-page 3.46 → 4.40 %).
+/// 재검증 3 차 WB-4: 「막」 의 폭 — CEF 가 막 실패로 끝낸 기록(`markPending` — 그 주인이 곧 실패를 알린다), 막 시작한 기록(`ensureYoung` — 그
+/// CDP 요청이 아직 알려지지 않았을 수 있다), 그 둘이 만든 갈림의 기다림(`cef_grace_us` 더하기). 재검증 3 차 뒤 WB-5: 전에는 응답 전의 열린
+/// 요청의 기록도 기준 시각 뒤 이만큼 안에 시작했다고 봤다(J1 의 0.09–6.3 ms) — 서비스 워커는 페이지 요청을 얼마든지 늦게 넘기거나 캐시로 늦게
+/// 답한다(검증 v20i-swlag·swsyn 100·300 ms 에서 틀린 본문 8·7·5·6/20). 이제 그 요청은 응답(또는 창 끝)까지 기록이 올 수 있는 것으로 친다
+/// (`Table.recordDue`).
 pub const record_lag_us: i64 = 60_000;
+/// 재검증 3 차 뒤 WB-5: 같은 열쇠의 다른 요청(응답 전)의 기록이 정해지기를 판정이 기다리는 시한(끝을 본 때부터) — 넘기면 본문 없이. 응답 전의
+/// 요청은 창 끝(`window_after_us`)까지 기록이 올 수 있어 그만큼이다.
+pub const split_wait_us: i64 = 2_000_000;
+/// 재검증 3 차 뒤: 끝난 짝 없는 기록을 판정을 기다리며 남겨 두는 가장 긴 때(CEF 끝부터) — 판정의 시한(`split_wait_us`)·짝 없는 시한·본문 호출의
+/// 시한을 모두 넘는다. 이것이 지나면 미루지 않고 끝낸다.
+pub const record_hard_expiry_us: i64 = 10_000_000;
 /// 자리가 날 때까지 기다리는 본문의 시한 — 다음 문서로 옮기면 본문이 사라진다(J4).
 pub const waiting_expiry_us: i64 = 3_000_000;
 /// W9d② 적대 리뷰 3 회차 S1: 보낸 `getResponseBody` 의 답을 기다리는 시한 — 넘기면 그 본문은 `unavailable` 로 끝내고 자리를 놓는다(늦은 답은
@@ -240,7 +246,18 @@ fn redecodeCandidate(mime_full: []const u8) bool {
     const mime = std.mem.trim(u8, mime_full[0..semi], " \t");
     if (!std.ascii.startsWithIgnoreCase(mime, "text/")) return false;
     for ([_][]const u8{ "text/html", "text/javascript", "text/ecmascript" }) |t| if (std.ascii.eqlIgnoreCase(mime, t)) return false;
-    return true;
+    // 재검증 3 차 뒤 D-I2·N-i2: `text/xml` 은 Chromium 이 XML 로 풀었다(선언·BOM, 없으면 UTF-8) — windows-1252 로 되돌리지 않는다(`sniffedMime`).
+    return !sniffedMime(mime_full);
+}
+
+/// 재검증 3 차 뒤 D-I1·D-I2: Chromium 이 헤더에 charset 이 없을 때 본문을 보고 인코딩을 고르는 MIME — HTML(`<meta>` 앞 훑기는 `<head>` 끝까지·
+/// XML 선언)과 XML 무리(`text/xml`·`application/xml`·`application/xhtml+xml`·`image/svg+xml`·`*+xml` — XML 선언). maru 는 받은 바이트를
+/// 보지 못해 그 고름이 맞았는지 가르지 못한다(같은 길이면 크기로도 못 가른다).
+fn sniffedMime(mime_full: []const u8) bool {
+    const semi = std.mem.indexOfScalar(u8, mime_full, ';') orelse mime_full.len;
+    const mime = std.mem.trim(u8, mime_full[0..semi], " \t");
+    for ([_][]const u8{ "text/html", "text/xml", "application/xml", "application/xhtml+xml", "image/svg+xml" }) |t| if (std.ascii.eqlIgnoreCase(mime, t)) return true;
+    return mime.len > 4 and std.ascii.endsWithIgnoreCase(mime, "+xml");
 }
 
 /// 응답 Content-Type 의 charset 갈래 — Chromium 이 그 글을 푼 방법에 맞춘다(W9d② 재검증 15 회차 D-G1: 전에는 `charset=` 부분 글을 찾아 UTF-8 이
@@ -566,11 +583,12 @@ pub fn decodeResult(gpa: std.mem.Allocator, ok: bool, json: []const u8, mime: []
         // 최종 재검증 D-B1: `charset=utf-8` 이어도 같다; 재검증 15 회차 D-G1: 모르는 이름표의 ASCII 글도). 받은 바이트도, fetch 가 읽은 글도 아니다. 다른 charset 을 선언한 글(Latin-1·EUC-KR)은
         // 그 charset 으로 푼 것이 XHR 이 읽은 글이라 표시하지 않는다.
         flags.chromium_decoded = true;
-    } else if (charset == .none and !isAscii(bytes) and htmlMetaNotUtf8(mime, bytes)) {
-        // W9d② 재검증 3 차 D-H1: 헤더에 charset 이 없는 `text/html` 이 `<meta charset>`(또는 `http-equiv` 의 content)로 UTF-8 아닌 인코딩을
-        // 밝혔다 — Chromium 은 그것으로 풀었고 fetch·XHR 은 UTF-8 로 읽는다(실측: gb18030 의 `ñ中文` 61 바이트가 61 바이트 글로 와 길이로는
-        // 가르지 못했다). 받은 바이트를 되찾을 길이 없으니(그 인코딩의 표가 없다) 표시만 한다. 고른 까닭: 첫 1024 바이트만 보는 값싼 훑기이고
-        // (HTML 의 앞 훑기와 같은 넓이), ASCII 아닌 글자가 있을 때만 — ASCII 글은 어느 인코딩으로 읽어도 같다.
+    } else if (charset == .none and !isAscii(bytes) and sniffedMime(mime)) {
+        // 재검증 3 차 뒤 D-I1·D-I2(정직하게 실패 — 그 전의 D-H1 은 `text/html` 의 앞 1024 바이트에서 `<meta>` 를 훑었다): 헤더에 charset 이 없는
+        // HTML·XML 무리는 Chromium 이 본문의 선언(`<head>` 끝까지의 `<meta>`·XML 선언)으로 인코딩을 고른다. 그 선언은 1024 바이트 밖에도 있고
+        // (실측: 1100 바이트의 `<title>` 뒤·`<link>` 40 개 뒤·1.1 KiB 주석 뒤·DOCTYPE 앞의 `<?xml … encoding="euc-kr"?>`), 받은 바이트를 보지 못하는
+        // maru 는 그 고름을 확인하지 못한다 — 훑기를 넓히는 대신 ASCII 아닌 글에 늘 표시한다(주석·스크립트 안의 `charset=` 를 읽던 거짓 표시 N-i1 도
+        // 없어진다). 대가: 맞게 풀린 UTF-8 HTML·XML 도 「다를 수 있다」 표시를 단다(검증자의 흔한 꼴 36 개 중 15 개).
         flags.chromium_decoded = true;
     }
     if (bytes.len > msg.max_net_body_bytes) {
@@ -592,47 +610,6 @@ fn redecodeWanted(charset: Charset, mime: []const u8) bool {
         .unknown => true,
         .utf8, .other => false,
     };
-}
-
-/// W9d② 재검증 3 차 D-H1: `text/html` 글의 앞 1024 바이트에 UTF-8 아닌 인코딩을 밝힌 `<meta>` 가 있는가 — `<meta charset=…>` 이나
-/// `<meta http-equiv=… content="…; charset=…">`(태그 안의 첫 `charset=`). HTML 처럼 UTF-16 이름표는 UTF-8 로 치고(밝혀도 UTF-8 로 푼다), 표에 없는
-/// 이름표는 그 선언을 버리고 다음 것을 본다. 받은 글은 이미 풀린 글이지만 선언은 ASCII 라 어느 인코딩으로 풀어도 같은 글자다.
-fn htmlMetaNotUtf8(mime: []const u8, text: []const u8) bool {
-    const semi = std.mem.indexOfScalar(u8, mime, ';') orelse mime.len;
-    if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, mime[0..semi], " \t"), "text/html")) return false;
-    const head = text[0..@min(text.len, 1024)];
-    var at: usize = 0;
-    while (std.ascii.findIgnoreCasePos(head, at, "<meta")) |open| {
-        const close = std.mem.indexOfScalarPos(u8, head, open, '>') orelse head.len;
-        const tag = head[open..close];
-        at = close;
-        var k: usize = 0;
-        while (std.ascii.findIgnoreCasePos(tag, k, "charset")) |c| {
-            k = c + "charset".len;
-            var i = k;
-            while (i < tag.len and std.ascii.isWhitespace(tag[i])) i += 1;
-            if (i >= tag.len or tag[i] != '=') continue;
-            i += 1;
-            while (i < tag.len and (std.ascii.isWhitespace(tag[i]) or tag[i] == '"' or tag[i] == '\'')) i += 1;
-            const start = i;
-            while (i < tag.len and !std.ascii.isWhitespace(tag[i]) and std.mem.indexOfScalar(u8, "\"';>/", tag[i]) == null) i += 1;
-            const label = tag[start..i];
-            switch (charsetOfLabel(label)) {
-                .none, .unknown => continue,
-                .utf8 => return false,
-                .other => return !utf16Label(label),
-            }
-        }
-    }
-    return false;
-}
-
-/// UTF-16BE·UTF-16LE 의 이름표(Encoding Standard) — HTML 의 `<meta>` 는 이것을 UTF-8 로 바꾼다.
-fn utf16Label(label: []const u8) bool {
-    for ([_][]const u8{ "unicodefffe", "utf-16be", "csunicode", "iso-10646-ucs-2", "ucs-2", "unicode", "unicodefeff", "utf-16", "utf-16le" }) |l| {
-        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, label, " \t\n\x0c\r"), l)) return true;
-    }
-    return false;
 }
 
 fn isAscii(b: []const u8) bool {
@@ -919,6 +896,9 @@ const Cdp = struct {
     tainted: bool = false,
     /// 재검증 3 차 LB-1: CDP `loaderId` 의 해시(0 = 모른다) — 이 요청을 낸 문서(`Tab.loaders`·`crossesDoc`).
     loader: u64 = 0,
+    /// 재검증 3 차 뒤 PF-2: `decidePending` 한 바퀴 안에서 짝 없이 놓았다 — 맞추기·주인 찾기는 건너뛰고 바퀴 끝에 한 번에 지운다(하나씩 지우면
+    /// 요청 수천 개의 목록을 그때마다 당겼다).
+    gone: bool = false,
 
     fn key(self: *const Cdp) Key {
         return .{ .url = self.key_url, .method = self.key_method, .sw = self.sw };
@@ -1166,6 +1146,14 @@ pub const Table = struct {
         cache_valid: bool = false,
         cache_tab: usize = 0,
         cache_key: Key = .{ .url = 0, .method = 0, .sw = false },
+        /// 재검증 3 차 뒤 PF-2: `tryDecide` 가 맞추기에서 아무것도 갖지 않은 요청 하나만 뺐다(`t.cdp` 자리 — 짝 없이 시한) — `decidePending` 이
+        /// 맞추기를 다시 하지 않고 그 자리만 지운다(`dropBareFromCache`). 아니면 `none`.
+        removed_bare: usize = std.math.maxInt(usize),
+        /// 재검증 3 차 뒤 PF-2: 왼쪽 짝이 없는(기록이 아직 오지 않은 것으로 보인) 응답 없이 실패하지 않은 요청의 맞추기 자리(차례대로 —
+        /// `ensureArrays`) — `tryDecide` 의 `held` 가 「뒤 요청의 기록으로 설명되는가」 를 이것만 훑는다(전에는 뒤 요청을 모두 — 쥔 기록마다).
+        unpaired: std.ArrayList(usize) = .empty,
+        /// 재검증 3 차 뒤 PF-2: 맞추기를 처음부터 한 수(시험이 값의 꼴을 본다).
+        match_runs: u64 = 0,
         extra: std.ArrayList(u64) = .empty,
         /// 5 회차 A1: 왼쪽 맞추기에서 응답 없이 실패한 요청이 집은 후보(후보 자리마다).
         taken: std.ArrayList(bool) = .empty,
@@ -1197,6 +1185,7 @@ pub const Table = struct {
             self.lo_pos.deinit(gpa);
             for (&self.right_young) |*a| a.deinit(gpa);
             self.pend.deinit(gpa);
+            self.unpaired.deinit(gpa);
             self.taken_lo.deinit(gpa);
             self.extra.deinit(gpa);
         }
@@ -1676,6 +1665,9 @@ pub const Table = struct {
             .response => |v| {
                 const i = cdpIndex(t, v.rid) orelse return;
                 const r = &t.cdp.items[i];
+                // 재검증 3 차 뒤: 끝을 본 뒤의 늦은 응답은 버린다 — 정하는 중인 요청의 갈래·시각을 바꾸면 그 요청이 맞추기에서 빠졌다(혼돈 퍼즈: 판정이
+                // 제 자리를 못 찾았다).
+                if (r.state == .finished or r.state == .failed) return;
                 r.sw = v.from_sw;
                 r.responded = true;
                 r.sw_off_network = v.from_sw and !std.mem.eql(u8, v.sw_source, "network");
@@ -1696,11 +1688,13 @@ pub const Table = struct {
             },
             .from_cache => |v| {
                 const i = cdpIndex(t, v.rid) orelse return;
+                if (t.cdp.items[i].state != .open) return; // 끝을 본 뒤의 늦은 알림(위와 같다)
                 t.cdp.items[i].state = .cached;
             },
             .finished => |v| {
                 const i = cdpIndex(t, v.rid) orelse return;
                 const r = &t.cdp.items[i];
+                if (r.state == .finished or r.state == .failed) return; // 두 번째 끝은 버린다
                 if (r.state == .cached or r.prefetch or !r.has_key or r.sw_off_network) {
                     // CEF 가 보지 못한 요청(메모리 캐시·추측 미리 받기 — J1·J3; 서비스 워커가 네트워크 밖에서 준 응답 — 4 회차 SW1)
                     _ = t.cdp.orderedRemove(i);
@@ -1713,6 +1707,7 @@ pub const Table = struct {
             .failed => |v| {
                 const i = cdpIndex(t, v.rid) orelse return;
                 const r = &t.cdp.items[i];
+                if (r.state == .finished or r.state == .failed) return; // 두 번째 끝은 버린다
                 if (r.state == .cached or r.prefetch or !r.has_key or r.sw_off_network) {
                     _ = t.cdp.orderedRemove(i);
                     return;
@@ -1721,7 +1716,9 @@ pub const Table = struct {
                 r.done_at = @max(now_us, 1);
                 // 5 회차 A1: 실패의 시각은 CDP 의 것(UI 가 받은 때는 늦다 — 응답 시각과 같은 검사).
                 r.failed_at = @max(cdpTime(v.ts_us, now_us), 1);
-                try self.tryDecide(gpa, t, i, now_us);
+                // 재검증 3 차 뒤 PF-2: 응답 없이 실패한 요청(abort — 본문이 없다)은 다음 주기·물 높이(`decidePending`)가 한꺼번에 정한다 — 사건마다
+                // 같은 주소 무리를 다시 맞추면 abort 수천 개가 UI 스레드를 세웠다(검증: 실패 사건 3960 개에 ReleaseFast 1.3 s). 늦어야 한 주기다.
+                if (!failedBare(r)) try self.tryDecide(gpa, t, i, now_us);
             },
         }
     }
@@ -1796,7 +1793,7 @@ pub const Table = struct {
         sc.reqs.clearRetainingCapacity();
         for (t.cdp.items, 0..) |o, j| {
             // 서비스 워커가 네트워크 밖에서 준 응답(4 회차 SW1)은 어느 기록도 가져가지 않는다 — 그 워커의 기록은 이 요청의 차례에 남아 갈림을 보인다.
-            if (o.state == .cached or o.prefetch or !o.has_key or o.sw_off_network) continue;
+            if (o.gone or o.state == .cached or o.prefetch or !o.has_key or o.sw_off_network) continue;
             if (o.key_url != key.url or o.key_method != key.method) continue;
             if (o.sw != key.sw and o.responded) continue;
             try sc.reqs.append(gpa, j);
@@ -1809,7 +1806,8 @@ pub const Table = struct {
                 return x < y or (x == y and a < b);
             }
         };
-        std.mem.sort(usize, sc.reqs.items, ReqCtx{ .cdp = t.cdp.items }, ReqCtx.lessThan);
+        // 재검증 3 차 뒤 PF-2: `t.cdp` 는 대개 이미 기준 시각 차례다 — 차례면 정렬하지 않는다.
+        if (!std.sort.isSorted(usize, sc.reqs.items, ReqCtx{ .cdp = t.cdp.items }, ReqCtx.lessThan)) std.mem.sort(usize, sc.reqs.items, ReqCtx{ .cdp = t.cdp.items }, ReqCtx.lessThan);
         // 같은 열쇠의 짝 없는 CEF 시작 — IO 시각 차례.
         sc.cands.clearRetainingCapacity();
         for (t.cands.items, 0..) |c, ci| if (!c.claimed and c.key.eql(key)) try sc.cands.append(gpa, ci);
@@ -1821,21 +1819,47 @@ pub const Table = struct {
                 return x < y or (x == y and a < b);
             }
         };
-        std.mem.sort(usize, sc.cands.items, CandCtx{ .cands = t.cands.items }, CandCtx.lessThan);
+        if (!std.sort.isSorted(usize, sc.cands.items, CandCtx{ .cands = t.cands.items }, CandCtx.lessThan)) std.mem.sort(usize, sc.cands.items, CandCtx{ .cands = t.cands.items }, CandCtx.lessThan);
         const reqs = sc.reqs.items;
         const cands = sc.cands.items;
         try sc.left.resize(gpa, reqs.len);
         try sc.taken.resize(gpa, cands.len);
         @memset(sc.taken.items, false);
         var pos: usize = 0;
+        // 재검증 3 차 뒤 PF-2: 응답 없이 실패한 요청(차례를 밀지 않는다)은 저마다 `pos` 부터 다시 훑었다 — abort 수천 개면 요청 × 기록. 그런
+        // 요청에게 앞으로도 짝일 수 없는 기록(집혔다·CEF 가 성공으로 끝냈다·창 앞 — 요청은 기준 시각 차례라 창의 앞 끝은 늘기만 한다)이 앞에서부터
+        // 이어진 자리(`bare_from`)는 건너뛰고, 창 끝을 넘으면 멈춘다(기록은 IO 시각 차례). 고른 짝은 같다.
+        var bare_from: usize = 0;
         for (reqs, 0..) |j, q| {
             sc.left.items[q] = none;
             const o = &t.cdp.items[j];
+            if (failedBare(o)) {
+                const lo_t = o.anchor() - window_before_us;
+                const hi_t = o.anchor() + window_after_us;
+                bare_from = @max(bare_from, pos);
+                var p = bare_from;
+                while (p < cands.len) : (p += 1) {
+                    const c = &t.cands.items[cands[p]];
+                    if (sc.taken.items[p] or c.t_io_us < lo_t or (c.ended_at != 0 and !c.cef_failed and !c.lost)) {
+                        if (p == bare_from) bare_from += 1;
+                        continue;
+                    }
+                    if (c.t_io_us > hi_t) {
+                        p = cands.len;
+                        break;
+                    }
+                    if (compatible(o, c)) break;
+                }
+                if (p == cands.len) continue;
+                sc.left.items[q] = p;
+                sc.taken.items[p] = true;
+                continue;
+            }
             var p = pos;
             while (p < cands.len and (sc.taken.items[p] or !compatible(o, &t.cands.items[cands[p]]))) p += 1;
             if (p == cands.len) continue;
             sc.left.items[q] = p;
-            if (failedBare(o)) sc.taken.items[p] = true else pos = p + 1;
+            pos = p + 1;
         }
     }
 
@@ -1897,12 +1921,30 @@ pub const Table = struct {
         try sc.taken_lo.resize(gpa, cands.len);
         @memset(sc.taken_lo.items, false);
         var pos: usize = 0;
+        var bare_from: usize = 0; // 재검증 3 차 뒤 PF-2: `matchLeft` 와 같다
         for (reqs, 0..) |j, q| {
             sc.left_lo.items[q] = none;
             sc.lo_pos.items[q] = none;
             const o = &t.cdp.items[j];
             var p = pos;
-            while (p < cands.len and (sc.taken_lo.items[p] or !compatible(o, &t.cands.items[cands[p]]))) p += 1;
+            if (failedBare(o)) {
+                const lo_t = o.anchor() - window_before_us;
+                const hi_t = o.anchor() + window_after_us;
+                bare_from = @max(bare_from, pos);
+                p = bare_from;
+                while (p < cands.len) : (p += 1) {
+                    const c = &t.cands.items[cands[p]];
+                    if (sc.taken_lo.items[p] or c.t_io_us < lo_t or (c.ended_at != 0 and !c.cef_failed and !c.lost)) {
+                        if (p == bare_from) bare_from += 1;
+                        continue;
+                    }
+                    if (c.t_io_us > hi_t) {
+                        p = cands.len;
+                        break;
+                    }
+                    if (compatible(o, c)) break;
+                }
+            } else while (p < cands.len and (sc.taken_lo.items[p] or !compatible(o, &t.cands.items[cands[p]]))) p += 1;
             if (p == cands.len) continue;
             sc.lo_pos.items[q] = p;
             if (failedBare(o)) {
@@ -1945,19 +1987,23 @@ pub const Table = struct {
     }
 
     /// 재검증 3 차 LB-1: 맞추기 자리 `x` 의 요청의 기록이 늦어도 있을 후보 자리 — 기록이 올 수 있는 다른 요청을 뺀 오른쪽 짝(`right_fut`), 그것이
-    /// 없으면(이 요청도 기록이 아직 올 수 있어 빠졌다) 오른쪽 짝, 그것도 없으면 왼쪽 짝(`tryDecide` 의 범위).
+    /// 없으면(이 요청이 가장 늦을 수 있는 맞추기에서 아무것도 갖지 않았다 — 기록이 아직 올 수 있거나 결과를 모르는 기록을 쥔 abort) 차례의 끝:
+    /// 그 요청의 기록은 어느 뒤 기록이든 될 수 있다. 재검증 3 차 뒤 WB-5: 전에는 오른쪽 짝·왼쪽 짝으로 좁혀, 응답을 기다리는 열린 요청의 제 기록을
+    /// abort 의 시한 끝이 끝낼 때 그 요청을 놓지 않았다 — 그 요청이 뒤 기록을 가져가 같은 주소 요청들이 한 칸씩 밀렸다(퍼즈 spa-json).
     fn rangeEnd(sc: *const Scratch, x: usize) usize {
         const none = std.math.maxInt(usize);
         if (sc.right_fut.items[x] != none) return sc.right_fut.items[x];
-        if (sc.right.items[x] != none) return sc.right.items[x];
-        return sc.left.items[x];
+        return if (sc.cands.items.len > 0) sc.cands.items.len - 1 else none;
     }
 
     /// 재검증 3 차 WB-4: 요청 `o` 의 CEF 기록(있다면)이 늦어도 시작한 IO 시각 — 응답을 봤으면 그때(제 기록은 응답 앞이다), 응답 없이 끝났으면 그
-    /// 끝(실패 시각), 다시 시작한 요청은 끝을 본 때, 아직 열려 있고 응답도 없으면 기준 시각 + `record_lag_us`(J1 — 가정). 창 끝을 넘지 않는다.
+    /// 끝(실패 시각), 다시 시작한 요청은 끝을 본 때, 창 끝을 넘지 않는다. 재검증 3 차 뒤 WB-5: 아직 열려 있고 응답도 없으면 창 끝(전에는 기준
+    /// 시각 + `record_lag_us` — 가정이었다: 서비스 워커가 늦게 넘긴 요청의 기록은 100 ms·300 ms 늦었다). 창 끝 뒤에는 새 기록이 그 요청의 것일
+    /// 수 없다 — 기록 없는 응답 전 요청(서비스 워커가 2 초 넘게 늦게 캐시로 답한다)만 남는 틈이다.
     fn recordDue(o: *const Cdp) i64 {
+        const end = o.anchor() + window_after_us;
         const due = if (o.restart_ts_us != 0)
-            (if (o.done_at != 0) o.done_at else o.anchor() + record_lag_us)
+            (if (o.done_at != 0) o.done_at else end)
         else if (o.responded_at != 0)
             o.responded_at
         else if (o.failed_at != 0)
@@ -1965,8 +2011,8 @@ pub const Table = struct {
         else if (o.done_at != 0)
             o.done_at
         else
-            o.anchor() + record_lag_us;
-        return @min(due, o.anchor() + window_after_us);
+            end;
+        return @min(due, end);
     }
 
     /// 재검증 3 차 WB-4: 요청 `o` 의 CEF 기록이 아직 올 수 있다(물 높이가 `recordDue` 에 닿지 않았다).
@@ -2006,6 +2052,7 @@ pub const Table = struct {
             if (hit) return;
         }
         try self.matchLeft(gpa, t, key);
+        sc.match_runs += 1;
         try self.markPending(gpa, t, now_us);
         var shared = true;
         for (sc.reqs.items, 0..) |j, q| if (j == i and sc.pend.items[q]) {
@@ -2013,6 +2060,8 @@ pub const Table = struct {
             shared = false;
         };
         try self.matchRight(gpa, t, &sc.right, false, std.math.maxInt(i64));
+        sc.unpaired.clearRetainingCapacity();
+        for (sc.reqs.items, sc.left.items, 0..) |j, l, q| if (l == std.math.maxInt(usize) and !failedBare(&t.cdp.items[j])) try sc.unpaired.append(gpa, q);
         // 기록을 가졌는지 모르는 요청이 없으면(대개) 가장 이를·늦을 수 있는 맞추기는 왼쪽·오른쪽 그대로다.
         const unsure = for (sc.reqs.items, sc.pend.items) |j, pd| {
             if (pd or failedBare(&t.cdp.items[j])) break true;
@@ -2091,6 +2140,11 @@ pub const Table = struct {
             for (reqs, 0..) |j, q| if (j == i) {
                 me = q;
             };
+            if (me == none) {
+                // 맞추기에 들지 않는 요청(위의 늦은 사건 버리기로 끝난 요청에는 생기지 않는다 — 지키는 길): 짝을 정할 수 없다 — 놓는다.
+                _ = t.cdp.orderedRemove(i);
+                return;
+            }
             // 재검증 2–9 회차 WB-3 · 재검증 3 차 LB-1: 차례가 이 요청 앞인 열린 앞 문서의 요청(새 문서 알림 앞에 보냈다 — CDP 끝이 오지 않는다)이 새
             // 문서 뒤에 시작한 기록을 왼쪽 짝으로 쥔다 — 그 요청은 CEF 에 닿지 않아 제 기록이 없을 수 있다(문서가 떠나며 끊겼다). 그러면 두 맞추기가
             // 함께 한 칸씩 밀려 이 요청의 짝이 남의 기록이다(검증 WB-3: 다시 불러온 문서의 두 같은 주소 요청). 전에는 이 요청을 `ambiguous` 로 정했고
@@ -2122,7 +2176,14 @@ pub const Table = struct {
             const left = sc.left.items[me];
             if (left == none) {
                 // 짝이 아직 오지 않았다(CEF 기록은 10 ms 묶음) — 시한이 지나면 CEF 가 보지 못한 요청으로 놓는다(본문 없음, maru 에 기록도 없다).
-                if (now_us - r.done_at >= cef_grace_us) _ = t.cdp.orderedRemove(i);
+                if (now_us - r.done_at >= cef_grace_us) {
+                    if (sc.cache_on) {
+                        // `decidePending` 안 — 표시만 하고 바퀴 끝에 지운다. 어느 맞추기에서도 기록을 갖지 않았으면 다른 요청의 짝은 그대로다(PF-2 —
+                        // 나눠 쓰는 맞추기에서 그 자리만 지운다).
+                        t.cdp.items[i].gone = true;
+                        sc.removed_bare = if (sc.left_lo.items[me] == none and sc.right.items[me] == none and sc.right_fut.items[me] == none) i else std.math.maxInt(usize) - 1;
+                    } else _ = t.cdp.orderedRemove(i);
+                }
                 return;
             }
             const ci = cands[left];
@@ -2171,13 +2232,17 @@ pub const Table = struct {
                 if (definite(&t.cdp.items[j], y, t.doc_at)) continue;
                 if (lp < left) {
                     held = true;
-                    continue;
+                    break;
                 }
                 if (!compatible(&r, y)) continue;
-                const explained = for (reqs[me + 1 ..], sc.left.items[me + 1 ..]) |k, kl| {
-                    if (kl == none and !failedBare(&t.cdp.items[k]) and compatible(&t.cdp.items[k], y)) break true;
+                // 재검증 3 차 뒤 PF-2: 뒤 요청 가운데 짝 없는 것만 본다(`unpaired` — 전에는 뒤 요청을 모두 훑어 쥔 기록마다 O(요청)).
+                const explained = for (sc.unpaired.items) |kq| {
+                    if (kq > me and compatible(&t.cdp.items[reqs[kq]], y)) break true;
                 } else false;
-                if (!explained) held = true;
+                if (!explained) {
+                    held = true;
+                    break;
+                }
             };
             if (held and now_us - r.done_at < cef_grace_us) return;
             if (r.state == .finished) {
@@ -2207,7 +2272,7 @@ pub const Table = struct {
             // 두 맞추기가 같은 기록을 주지만 뒤 요청의 기록이 오면 갈릴 수 있다 — 그 기록을 기다린다(시한 뒤에는 맞추기를 의심하는 쪽으로).
             var pending_split = false;
             if (right == left and (right_fut != left or sc.left_lo.items[me] != left)) {
-                if (now_us - r.done_at < cef_grace_us + record_lag_us) return;
+                if (now_us - r.done_at < split_wait_us) return;
                 pending_split = true;
             }
             var ambiguous = false;
@@ -2306,7 +2371,7 @@ pub const Table = struct {
         const one = cd[0].group(cd[cd.len - 1]) == .eq;
         for (t.cdp.items, 0..) |o, j| {
             if (one and (o.key_url != cd[0].url or o.key_method != cd[0].method)) continue;
-            if (o.state == .cached or o.prefetch or !o.has_key or o.sw_off_network) continue;
+            if (o.gone or o.state == .cached or o.prefetch or !o.has_key or o.sw_off_network) continue;
             for ([_]bool{ false, true }) |sw| {
                 if (o.sw != sw and o.responded) continue;
                 const x: GroupItem = .{ .url = o.key_url, .method = o.key_method, .sw = sw, .t = o.anchor(), .idx = j };
@@ -2422,7 +2487,11 @@ pub const Table = struct {
                 const top = ioUpper(o);
                 var p = GroupItem.lowerBound(cd, .{ .url = x.url, .method = x.method, .sw = x.sw, .t = x.t - window_before_us, .idx = 0 });
                 while (p < cd.len and cd[p].group(x) == .eq and cd[p].t <= top) : (p += 1) {
-                    if (self.mayOwn(o, &t.cands.items[cd[p].idx])) sc.drop_cand.items[cd[p].idx] = false;
+                    const c = &t.cands.items[cd[p].idx];
+                    // 재검증 3 차 뒤: 미루기에도 끝이 있다(`record_hard_expiry_us`) — 판정이 어떤 까닭으로 오지 않아도 기록은 끝난다(끝 없는 `pending` 을
+                    // 남기지 않는다 — 스모크 w9d-body 의 끝나지 않은 본문을 막는 그물).
+                    if (now_us - c.ended_at >= record_hard_expiry_us) continue;
+                    if (self.mayOwn(o, c)) sc.drop_cand.items[cd[p].idx] = false;
                 }
             }
             // (나) 시한 전의 끊김마다 열린 주인일 수 있는 요청을 둘까지 센다(기록의 창 — 기준 시각이 `[IO − window_after_us, IO + window_before_us]`).
@@ -2622,15 +2691,67 @@ pub const Table = struct {
             sc.cache_on = false;
             sc.cache_valid = false;
         }
+        // 바퀴 끝에 짝 없이 놓은 요청(`gone`)을 한 번에 지운다(차례는 그대로).
+        defer {
+            var kept: usize = 0;
+            for (0..t.cdp.items.len) |j| {
+                if (t.cdp.items[j].gone) continue;
+                if (kept != j) t.cdp.items[kept] = t.cdp.items[j];
+                kept += 1;
+            }
+            t.cdp.shrinkRetainingCapacity(kept);
+        }
         var i: usize = 0;
         while (i < t.cdp.items.len) {
             const before = t.cdp.items.len;
             const cands_before = t.cands.items.len;
             const acts_before = self.actions.items.len;
-            if (t.cdp.items[i].state == .finished or t.cdp.items[i].state == .failed) try self.tryDecide(gpa, t, i, now_us);
+            sc.removed_bare = std.math.maxInt(usize);
+            const o = &t.cdp.items[i];
+            if (!o.gone and (o.state == .finished or o.state == .failed)) try self.tryDecide(gpa, t, i, now_us);
             // 표가 바뀌었으면 맞추기를 다시 한다(판정·놓기·뺀 요청 — 끝을 냈거나 목록이 줄었다; 짝 하나를 빼도 다른 요청의 오른쪽 짝이 옮길 수 있다).
-            if (t.cdp.items.len != before or t.cands.items.len != cands_before or self.actions.items.len != acts_before) sc.cache_valid = false;
+            // 재검증 3 차 뒤 PF-2: 맞추기에서 아무것도 갖지 않은 요청 하나만 놓았으면 다른 요청의 짝은 그대로다 — 그 자리만 지운다(검증 PF-2: CEF 에
+            // 닿지 않은 abort 수천 개가 한 주기에 하나씩 놓이며 그때마다 같은 주소 무리를 다시 맞췄다 — ReleaseFast 한 주기 0.6–1.1 s).
+            const same = t.cdp.items.len == before and t.cands.items.len == cands_before and self.actions.items.len == acts_before;
+            if (sc.removed_bare != std.math.maxInt(usize)) {
+                if (same and sc.cache_valid and sc.removed_bare < t.cdp.items.len) self.dropBareFromCache(sc.removed_bare) else sc.cache_valid = false;
+            } else if (!same) sc.cache_valid = false;
             if (t.cdp.items.len == before) i += 1;
+        }
+    }
+
+    /// 재검증 3 차 뒤 PF-2: 나눠 쓰는 맞추기에서 `t.cdp` 자리 `gone` 의 요청을 지운다(그 요청은 어느 맞추기에서도 기록을 갖지 않았다 — 왼쪽·
+    /// 오른쪽·가장 이를·늦을 수 있는 짝이 모두 없다(`tryDecide` 가 확인했다) — 다른 요청의 짝과 기록 쪽 배열은 그대로). 그 요청은 `gone` 으로
+    /// 남아 있다(`t.cdp` 자리는 그대로) — 맞추기 자리만 한 칸 당긴다.
+    fn dropBareFromCache(self: *Table, gone: usize) void {
+        const sc = &self.scratch;
+        var q: usize = std.math.maxInt(usize);
+        for (sc.reqs.items, 0..) |j, x| if (j == gone) {
+            q = x;
+        };
+        if (q == std.math.maxInt(usize)) {
+            sc.cache_valid = false;
+            return;
+        }
+        _ = sc.reqs.orderedRemove(q);
+        _ = sc.left.orderedRemove(q);
+        _ = sc.right.orderedRemove(q);
+        _ = sc.right_fut.orderedRemove(q);
+        _ = sc.left_lo.orderedRemove(q);
+        _ = sc.lo_pos.orderedRemove(q);
+        _ = sc.pend.orderedRemove(q);
+        if (sc.young_n != std.math.maxInt(usize)) for (sc.right_young[0..sc.young_n]) |*a| {
+            _ = a.orderedRemove(q);
+        };
+        var k: usize = 0;
+        while (k < sc.unpaired.items.len) {
+            const kq = &sc.unpaired.items[k];
+            if (kq.* == q) {
+                _ = sc.unpaired.orderedRemove(k);
+                continue;
+            }
+            if (kq.* > q) kq.* -= 1;
+            k += 1;
         }
     }
 
@@ -2897,10 +3018,10 @@ test "W9d②: 결과 풀기 — JSON 글, base64(글이면 글·아니면 바이
         defer gpa_t.free(f.bytes);
         try testing.expect(f.flags.chromium_decoded);
         try testing.expectEqualStrings("café", f.bytes);
-        // HTML 은 되돌리지 않는다(J11 — 맞게 풀렸다).
+        // HTML 은 되돌리지 않는다(J11 — 맞게 풀렸다). 재검증 3 차 뒤 D-I1: 헤더 charset 이 없으면 본문의 선언을 따랐을 수 있어 표시한다.
         const g = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153\",\"base64Encoded\":false}", "text/html", .none, 0);
         defer gpa_t.free(g.bytes);
-        try testing.expect(!g.flags.redecoded and !g.flags.chromium_decoded);
+        try testing.expect(!g.flags.redecoded and g.flags.chromium_decoded);
     }
     {
         // W9d② 20 회 검증 15 회차 D1: `FF FE 7B 22 6B 22 3A 22 C0 80 22 7D`(12 바이트) JSON 을 Chromium 이 UTF-16 으로 풀어 15 바이트 글이 왔다 — 표시.
@@ -3666,7 +3787,10 @@ test "W9d② 적대 리뷰 1 회차 재현 RV2: 페이지의 CDP 가 보지 못�
     try h.finish(5, "1.51", 3_020_100);
     try h.respond(5, "1.50", "application/json", 10, 3_021_000);
     try h.finish(5, "1.50", 3_021_100);
-    try testing.expectEqualSlices(u64, &.{ 4032, 4031 }, h.fetchedRequests(&buf));
+    // 재검증 3 차 뒤 WB-5: 1.51 은 1.50(응답 전)의 기록이 정해질 때까지 기다렸다가 다음 주기에 정한다.
+    try h.table.tick(gpa_t, 3_030_000);
+    try h.drain();
+    try testing.expectEqualSlices(u64, &.{ 4031, 4032 }, h.fetchedRequests(&buf));
     // 같은 주소의 CDP 요청이라도 창 밖(3 초 뒤 — 이 요청의 후보를 가져갈 수 없다)이면 가져갈 쪽으로 세지 않는다: 워커 후보 하나가 남는다 → 모호.
     _ = try h.cand(5, 4051, "http://127.0.0.1/rv/echo3?5", 7_000_300, .{}); // w
     _ = try h.cand(5, 4052, "http://127.0.0.1/rv/echo3?5", 7_001_000, .{}); // 페이지
@@ -4010,8 +4134,13 @@ test "W9d② 적대 리뷰 2 회차: 맞추기의 차례와 갈래 — 뒤 요�
         _ = try h.cand(5, 512, u, 2_001_300, .{});
         try h.respond(5, "b.r", "application/json", 9, 2_029_000);
         try h.finish(5, "b.r", 2_030_000);
-        // 재검증 3 차: b.s(응답 전)의 기록이 아직 올 수 있는 동안(기준 + 60 ms)은 b.r 이 512 를 가질 수도 있어 기다린다.
+        // 재검증 3 차: b.s(응답 전)의 기록이 아직 올 수 있는 동안은 b.r 이 512 를 가질 수도 있어 기다린다. 재검증 3 차 뒤 WB-5: 그 동안은 기준 +
+        // 60 ms 가 아니라 b.s 의 응답까지다(기록이 얼마나 늦을지는 페이지·서비스 워커가 정한다).
         try h.table.tick(gpa_t, 2_070_000);
+        try h.drain();
+        try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "b.r"));
+        try h.respond(5, "b.s", "application/json", 9, 2_200_000);
+        try h.table.tick(gpa_t, 2_200_000);
         try h.drain();
         try testing.expectEqual(@as(?u64, 511), fetchedFor(&h, "b.r"));
     }
@@ -4027,8 +4156,12 @@ test "W9d② 적대 리뷰 2 회차: 맞추기의 차례와 갈래 — 뒤 요�
         _ = try h.cand(5, 522, u, 3_001_300, .{ .sw = true });
         try sw_resp(&h, "c.r", 3_019_000);
         try h.finish(5, "c.r", 3_020_000);
-        // 재검증 3 차: 앞 요청(응답 전)의 기록이 아직 올 수 있는 동안(기준 + 60 ms)은 기다린다.
+        // 재검증 3 차: 앞 요청(응답 전)의 기록이 아직 올 수 있는 동안은 기다린다 — 재검증 3 차 뒤 WB-5: 그 요청의 응답까지.
         try h.table.tick(gpa_t, 3_070_000);
+        try h.drain();
+        try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "c.r"));
+        try sw_resp(&h, "c.o", 3_300_000);
+        try h.table.tick(gpa_t, 3_300_000);
         try h.drain();
         try testing.expectEqual(@as(?u64, 522), fetchedFor(&h, "c.r"));
     }
@@ -4106,7 +4239,11 @@ test "W9d② 적대 리뷰 2 회차: 갈린 맞추기 — 갈린 뒤 요청도 a
         _ = try h.cand(5, 562, u, 7_001_300, .{ .attr = 2 });
         try h.respond(5, "g.1", "application/json", 9, 7_029_000);
         try h.finish(5, "g.1", 7_030_000);
-        try h.table.tick(gpa_t, 7_070_000); // 재검증 3 차: g.2(응답 전)의 기록이 아직 올 수 있는 동안은 기다린다
+        try h.table.tick(gpa_t, 7_070_000); // 재검증 3 차: g.2(응답 전)의 기록이 아직 올 수 있는 동안은 기다린다(재검증 3 차 뒤 WB-5: 그 응답까지)
+        try h.drain();
+        try testing.expect(h.ended.get(561) == null);
+        try h.respond(5, "g.2", "application/json", 9, 7_100_000);
+        try h.table.tick(gpa_t, 7_100_000);
         try h.drain();
         try testing.expect(stateIs(&h, 561, .ambiguous));
     }
@@ -4779,15 +4916,19 @@ test "W9d② 적대 리뷰 5 회차 A1: CEF 에 닿지 않은 abort 가 끝을 �
     // 고치기 전: x.7 이 771 을, p.7 이 q.7 의 773 을 집어 p.7 의 본문이 q.7 의 기록에 붙었다.
     try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
     h.table.cefEnd(5, 771, 5_012_000);
-    // 재검증 3 차: q.7(응답 전)의 기록이 아직 올 수 있는 동안(기준 + 60 ms)은 p.7 이 그 기록을 가질 수도 있어 기다린다.
+    // 재검증 3 차: q.7(응답 전)의 기록이 아직 올 수 있는 동안은 p.7 이 그 기록을 가질 수도 있어 기다린다(재검증 3 차 뒤 WB-5: q.7 의 응답까지).
     try h.table.tick(gpa_t, 5_065_000);
+    try h.drain();
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.7"));
+    try h.respond(5, "q.7", "application/json", 9, 5_070_000);
+    try h.flushed(5_070_500, 5_070_500);
+    try h.table.tick(gpa_t, 5_071_000);
     try h.drain();
     // 771 이 성공으로 끝났다 — x.7 은 그것을 놓고 773 을 집지만 차례를 밀지 않는다: p.7 은 곧 771.
     try testing.expectEqual(@as(?u64, 771), fetchedFor(&h, "p.7"));
-    try h.respond(5, "q.7", "application/json", 9, 5_030_000);
-    try h.finish(5, "q.7", 5_031_000);
-    h.table.cefEnd(5, 773, 5_033_000);
-    try h.table.tick(gpa_t, 5_040_000);
+    try h.finish(5, "q.7", 5_072_000);
+    h.table.cefEnd(5, 773, 5_073_000);
+    try h.table.tick(gpa_t, 5_080_000);
     try h.drain();
     try testing.expectEqual(@as(?u64, 773), fetchedFor(&h, "q.7"));
     try h.table.tick(gpa_t, 5_000_300 + cef_grace_us + 1);
@@ -4931,6 +5072,9 @@ test "W9d② 적대 리뷰 5 회차 A1: 물 높이는 CDP 의 실패 시각까�
     h.table.cefEndAs(5, 781, 3_000_350, false);
     try h.flushed(3_000_400, 3_000_400); // 물 높이 — CDP 실패 시각(3_000_300) 뒤, UI 가 받은 때(3_000_500) 앞
     try h.ev(5, .{ .failed = .{ .rid = "a.0", .ts_us = 3_000_300 } }, 3_000_500);
+    // 재검증 3 차 뒤 PF-2: 응답 없이 실패한 요청은 다음 주기가 정한다 — 물 높이는 그대로(3_000_400)여도 곧.
+    try h.table.tickAt(gpa_t, 3_000_550, 3_000_400);
+    try h.drain();
     try testing.expect(stateIs(&h, 781, .request_failed));
 }
 
@@ -5929,7 +6073,7 @@ fn win1252Text(gpa: std.mem.Allocator, raw: []const u8) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-test "W9d② 재검증 3 차 D-H1·D-H2: 실측 꼴마다 — 모르는 이름표의 같은 길이 글·UTF-8 아닌 <meta> 의 HTML 은 표시, Chromium 과 갈리는 Content-Type 은 unknown 으로 되돌려 받은 바이트, 맞는 글은 그대로" {
+test "W9d② 재검증 3 차 D-H1·D-H2·D-I1·D-I2: 실측 꼴마다 — 모르는 이름표의 같은 길이 글·헤더 charset 없는 HTML·XML 무리의 ASCII 아닌 글은 표시, Chromium 과 갈리는 Content-Type 은 unknown 으로 되돌려 받은 바이트, 맞는 글은 그대로" {
     const u8_raw = "caf\u{e9} \u{ac00}\u{b098} \u{2713} \u{1F600}"; // 21 바이트
     const u8l_raw = "caf\u{e9} na\u{ef}ve"; // 12 바이트
     const u16eq_le = "\xff\xfe\x00\xac\x98\xb0"; // UTF-16LE BOM + 「가나」 — Chromium 은 「가나」 6 바이트로 푼다
@@ -5953,14 +6097,28 @@ test "W9d② 재검증 3 차 D-H1·D-H2: 실측 꼴마다 — 모르는 이름�
         .{ .name = "gb_html_ne", .ct = "text/html", .mime = "text/html", .raw = "<!doctype html><meta charset=gb18030><title>g</title>\xd6\xd0\xce\xc4", .how = .text, .text = "<!doctype html><meta charset=gb18030><title>g</title>\u{4e2d}\u{6587}", .out = .marked },
         .{ .name = "http-equiv gb2312", .ct = "text/html", .mime = "text/html", .raw = "x", .how = .text, .text = "<html><head><META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=gb2312\">\u{4e2d}", .out = .marked },
         .{ .name = "meta single-quoted euc-kr", .ct = "text/html", .mime = "text/html", .raw = "x", .how = .text, .text = "<meta charset='euc-kr'>" ++ gana, .out = .marked },
-        // 대조(HTML): UTF-8 <meta>·UTF-16 <meta>(HTML 은 UTF-8 로 바꾼다)·모르는 이름표(버린다)·헤더 charset 이 앞선다·1024 바이트 밖·ASCII 글·`charset` 이 이름표가 아닌 글
-        .{ .name = "html_none_meta8", .ct = "text/html", .mime = "text/html", .raw = html8, .out = .exact },
-        .{ .name = "meta utf-16", .ct = "text/html", .mime = "text/html", .raw = "<meta charset=utf-16>" ++ u8_raw, .out = .exact },
-        .{ .name = "meta unknown label", .ct = "text/html", .mime = "text/html", .raw = "<meta charset=x-bogus>" ++ u8_raw, .out = .exact },
+        // 재검증 3 차 뒤 D-I1·D-I2: 헤더에 charset 이 없는 HTML·XML 무리의 ASCII 아닌 글은 선언과 상관없이 늘 표시 — Chromium 은 본문의 선언(1024
+        // 바이트 밖의 <meta>·XML 선언)을 따르고 maru 는 받은 바이트를 보지 못한다(전의 앞 1024 바이트 <meta> 훑기는 밖의 선언을 놓치고 주석 안의
+        // `charset=` 에 속았다 — N-i1). 맞게 풀린 UTF-8 도 표시한다(대가).
+        .{ .name = "html_none_meta8", .ct = "text/html", .mime = "text/html", .raw = html8, .out = .marked },
+        .{ .name = "meta utf-16", .ct = "text/html", .mime = "text/html", .raw = "<meta charset=utf-16>" ++ u8_raw, .out = .marked },
+        .{ .name = "meta unknown label", .ct = "text/html", .mime = "text/html", .raw = "<meta charset=x-bogus>" ++ u8_raw, .out = .marked },
+        .{ .name = "meta past 1024", .ct = "text/html", .mime = "text/html", .raw = "<p>" ++ dots ++ "<meta charset=euc-kr>" ++ u8_raw, .out = .marked },
+        .{ .name = "meta word charset", .ct = "text/html", .mime = "text/html", .raw = "<meta name=description content=\"charset handling\">" ++ u8_raw, .out = .marked },
+        .{ .name = "D-I1 meta after 1100 B title", .ct = "text/html", .mime = "text/html", .raw = "x", .how = .text, .text = "<!doctype html><html><head><title>" ++ dots ++ dots[0..70] ++ "</title><meta charset=\"euc-kr\"></head><body>\u{3b1}\u{3b2}</body></html>", .out = .marked },
+        .{ .name = "D-I1 xml decl in html", .ct = "text/html", .mime = "text/html", .raw = "x", .how = .text, .text = "<?xml version=\"1.0\" encoding=\"euc-kr\"?><!DOCTYPE html><p>\u{3b1}\u{3b2}</p>", .out = .marked },
+        .{ .name = "N-i1 comment meta", .ct = "text/html", .mime = "text/html", .raw = "<!-- <meta charset=\"iso-8859-1\"> --><meta charset=utf-8>" ++ u8_raw, .out = .marked },
+        .{ .name = "D-I2 application/xml prolog", .ct = "application/xml", .mime = "application/xml", .raw = "x", .how = .text, .text = "<?xml version=\"1.0\" encoding=\"euc-kr\"?><r>\u{3b1}\u{3b2}\u{3b3}\u{3b4}</r>", .out = .marked },
+        .{ .name = "D-I2 svg", .ct = "image/svg+xml", .mime = "image/svg+xml", .raw = "<svg><text>" ++ u8_raw ++ "</text></svg>", .out = .marked },
+        .{ .name = "D-I2 xhtml", .ct = "application/xhtml+xml", .mime = "application/xhtml+xml", .raw = "<html>" ++ u8_raw ++ "</html>", .out = .marked },
+        .{ .name = "D-I2 atom +xml", .ct = "application/atom+xml", .mime = "application/atom+xml", .raw = "<feed>" ++ u8_raw ++ "</feed>", .out = .marked },
+        .{ .name = "N-i2 text/xml (no re-decoding)", .ct = "text/xml", .mime = "text/xml", .raw = "<r>" ++ u8_raw ++ "</r>", .out = .marked },
+        .{ .name = "N-i2 text/xml Latin-1 range (no re-decoding)", .ct = "text/xml", .mime = "text/xml", .raw = "<r>caf\xc3\xa9</r>", .out = .marked },
+        // 대조(HTML·XML): 헤더 charset 이 앞선다(선언은 보지 않는다)·ASCII 글은 어느 인코딩이든 같다
         .{ .name = "html_hdr8_metakr", .ct = "text/html; charset=utf-8", .mime = "text/html", .raw = html_metakr8, .out = .exact },
-        .{ .name = "meta past 1024", .ct = "text/html", .mime = "text/html", .raw = "<p>" ++ dots ++ "<meta charset=euc-kr>" ++ u8_raw, .out = .exact },
+        .{ .name = "xml_hdr8", .ct = "application/xml; charset=utf-8", .mime = "application/xml", .raw = "<?xml version=\"1.0\" encoding=\"euc-kr\"?><r>" ++ u8_raw ++ "</r>", .out = .exact },
         .{ .name = "meta ascii body", .ct = "text/html", .mime = "text/html", .raw = "<meta charset=gb18030>plain", .out = .exact },
-        .{ .name = "meta word charset", .ct = "text/html", .mime = "text/html", .raw = "<meta name=description content=\"charset handling\">" ++ u8_raw, .out = .exact },
+        .{ .name = "xml ascii body", .ct = "application/xml", .mime = "application/xml", .raw = "<r>plain</r>", .out = .exact },
         // D-H2: Chromium 이 갈리게 읽어 windows-1252 로 푼 꼴 9 개 — unknown 이라 되돌려 받은 바이트(전에는 앞 헤더의 EUC-KR 을 따라 깨진 글이 표시 없이)
         .{ .name = "ctl_first_kr", .ct = "text/plain; charset=lat\x01in1; charset=euc-kr", .mime = "text/plain", .raw = u8_raw, .how = .w1252, .out = .redecoded },
         .{ .name = "del_first_kr", .ct = "text/plain; charset=euc\x7fkr; charset=euc-kr", .mime = "text/plain", .raw = u8_raw, .how = .w1252, .out = .redecoded },
@@ -5984,7 +6142,7 @@ test "W9d② 재검증 3 차 D-H1·D-H2: 실측 꼴마다 — 모르는 이름�
         .{ .name = "lab_trailsemi", .ct = "text/plain;charset=utf-8;", .mime = "text/plain", .raw = u8_raw, .out = .exact },
         .{ .name = "comma_bogus_then8", .ct = "text/plain; charset=x-bogus-maru, text/plain; charset=utf-8", .mime = "text/plain", .raw = u8_raw, .out = .exact },
         .{ .name = "dup_diff", .ct = "text/plain; charset=euc-kr\napplication/json", .mime = "application/json", .raw = u8_raw, .out = .exact },
-        .{ .name = "comma_u8_html", .ct = "text/plain; charset=utf-8, text/html", .mime = "text/html", .raw = u8_raw, .out = .exact },
+        .{ .name = "comma_u8_html", .ct = "text/plain; charset=utf-8, text/html", .mime = "text/html", .raw = u8_raw, .out = .marked }, // 본질이 바뀌어 charset 을 버린다 — charset 없는 HTML
         .{ .name = "q_lead_u8", .ct = "text/plain; charset=\" utf-8\"", .mime = "text/plain", .raw = u8_raw, .out = .exact },
         .{ .name = "sp_q_u8", .ct = "text/plain; charset= \"utf-8\"", .mime = "text/plain", .raw = u8_raw, .out = .exact },
         .{ .name = "sp_q_u8json", .ct = "application/json; charset= \"utf-8\"", .mime = "application/json", .raw = u8_raw, .out = .exact },
@@ -6023,6 +6181,15 @@ test "W9d② 재검증 3 차 D-H1·D-H2: 실측 꼴마다 — 모르는 이름�
         }
     }
     try testing.expectEqual(@as(usize, 0), bad);
+    // N-i2: 받은 수를 모를 때(0)도 `text/xml` 을 windows-1252 로 되돌리지 않는다 — Chromium 은 UTF-8 로 풀었다(「Ã©」 는 페이지가 받은 글이다;
+    // 되돌리면 「é」 로 바꿨다). 받은 수를 알면 길이가 달라 어느 쪽이든 표시만 된다 — 이 꼴만 둘을 가른다.
+    const xml_moji = "<r>\u{c3}\u{a9}</r>";
+    const json_moji = try std.json.Stringify.valueAlloc(gpa_t, .{ .body = xml_moji, .base64Encoded = false }, .{});
+    defer gpa_t.free(json_moji);
+    const dm = try decodeResult(gpa_t, true, json_moji, "text/xml", charsetOf("text/xml"), 0);
+    defer gpa_t.free(dm.bytes);
+    try testing.expect(dm.state == .captured and !dm.flags.redecoded and dm.flags.chromium_decoded);
+    try testing.expectEqualStrings(xml_moji, dm.bytes);
 }
 
 test "W9d② 재검증 3 차 D-H2: charsetOf — `/` 가 든 값을 Fetch 가 읽지 못하거나 첫 charset 에 제어 글자면 unknown, `/` 없는 값·`*/*` 는 둘 다 버린다, `=` 뒤 공백의 따옴표 값은 Chromium 처럼 푼다" {
@@ -7026,6 +7193,9 @@ test "W9d② v20g A WB-1 (fixed): MED-2 ends the in-between record of a live req
     try h.finish(5, "d", T + 3_600_000);
     try h.table.tickAt(gpa_t, T + 3_610_000, T + 3_610_000);
     try h.drain();
+    // 재검증 3 차 뒤 WB-5: E(응답 전)의 기록은 그 창 끝(T + 3.64 s)까지 올 수 있다 — D 는 그때까지 기다린다.
+    try testing.expectEqual(@as(?u64, null), gFetchedFor(&h, "d"));
+    _ = try gTicks(&h, T + 3_620_000, T + 3_700_000);
     const d_got = gFetchedFor(&h, "d");
     std.debug.print("\n[v20g WB-1] B's record(2) ended {?} at A's decision · D (own record 4) fetched for record {?} · ends 3 {?} 5 {?}\n", .{ b_rec_end, d_got, h.ended.get(3), h.ended.get(5) });
     try testing.expectEqual(@as(?u64, 4), d_got); // the WB rule: B left with its record, D gets its own
@@ -7664,14 +7834,266 @@ fn pfCheck(io_max: i64, n: usize, eligible: [5]usize, bound_bp: [5]usize) !void 
     }
 }
 
-test "W9d② 재검증 3 차 퍼즈: 실측 꼴 다섯(IO 가 CDP 시작 −2..+6 ms) — 틀린 본문 0, 잃은 본문의 율은 같은 씨앗의 e9ba4f018 이하, 끝 하나, 한가해짐" {
-    // e9ba4f018: 271/11614(2.33 %)·609/17684(3.44 %)·107/5529(1.94 %)·19/6478(0.29 %)·1014/16479(6.15 %) — 만분율 올림.
-    try pfCheck(6_000, 200, .{ 11614, 17684, 5529, 6478, 16479 }, .{ 234, 345, 194, 30, 616 });
+test "W9d② 재검증 3 차 퍼즈: 실측 꼴 다섯(IO 가 CDP 시작 −2..+6 ms) — 틀린 본문 0, 잃은 본문의 율 상한, 끝 하나, 한가해짐" {
+    // 재검증 3 차 뒤 WB-5: 응답 전의 열린 요청은 응답(또는 창 끝)까지 「기록이 아직 올 수 있다」 — 같은 주소의 앞 요청은 그동안 기다리고(시한
+    // `split_wait_us`) 넘기면 본문 없이. 잃은 본문(만분율): 0e5012175 213·340·181·21·601 → 371·408·187·36·634(e9ba4f018 234·345·194·30·616).
+    try pfCheck(6_000, 200, .{ 11614, 17684, 5529, 6478, 16479 }, .{ 371, 408, 187, 36, 634 });
 }
 
-test "W9d② 재검증 3 차 퍼즈: IO 가 CDP 시작보다 50 ms 까지 늦은 실측 꼴 다섯(WB-4 — 뒤 요청의 기록이 늦다, `record_lag_us` 안) — 틀린 본문 0, 잃은 본문은 e9ba4f018 의 율 + 0.1 %p 이하" {
-    // e9ba4f018: 119/5821(2.04 %, 틀림 7)·314/8816(3.56 %)·6/2531(0.24 %, 틀림 1)·2/3201(0.06 %, 틀림 1)·850/8175(10.40 %, 틀림 82) — 만분율 올림 + 10.
-    try pfCheck(50_000, 100, .{ 5821, 8816, 2531, 3201, 8175 }, .{ 215, 367, 34, 17, 1050 });
+test "W9d② 재검증 3 차 퍼즈: IO 가 CDP 시작보다 50 ms 까지 늦은 실측 꼴 다섯(WB-4 — 뒤 요청의 기록이 늦다) — 틀린 본문 0, 잃은 본문의 율 상한" {
+    // e9ba4f018: 119/5821(2.04 %, 틀림 7)·314/8816(3.56 %)·6/2531(0.24 %, 틀림 1)·2/3201(0.06 %, 틀림 1)·850/8175(10.40 %, 틀림 82).
+    // 0e5012175(만분율): 195·357·20·4·1041 → 360·385·20·7·1051.
+    try pfCheck(50_000, 100, .{ 5821, 8816, 2531, 3201, 8175 }, .{ 360, 385, 20, 7, 1051 });
+}
+
+test "W9d② 재검증 3 차 뒤 WB-5 퍼즈: IO 가 CDP 시작보다 300 ms·1.6 s 까지 늦은 꼴 다섯(60 ms 가정 밖 — 서비스 워커가 늦게 넘긴 요청) — 틀린 본문 0" {
+    // 0e5012175 의 틀린 본문: 300 ms 1·2·0·0·166, 1.6 s 371·85·0·0·1110 — 60 ms 뒤에는 응답 전의 요청도 제 기록을 가졌다고 봤다.
+    // 잃은 본문(만분율) 300 ms 313·506·11·0·1274 → 511·536·11·0·1276, 1.6 s 1526·925·40·210·2764 → 1579·914·40·210·2781.
+    try pfCheck(300_000, 100, .{ 5821, 8816, 1895, 3002, 8175 }, .{ 511, 536, 11, 0, 1276 });
+    try pfCheck(1_600_000, 100, .{ 5821, 8816, 1502, 1434, 8175 }, .{ 1579, 914, 40, 210, 2781 });
+}
+
+/// 재검증 3 차 뒤 WB-5(검증자 v20i A 의 P-i): 서비스 워커가 같은 주소를 제 fetch 로 먼저 받고(CDP 가 보지 못한 기록 X — 차례 맨 앞), 페이지의
+/// R1 은 곧 넘기고, 1 ms 뒤의 R2 는 `lag` 뒤에 넘긴다(`syn` 이면 넘기지 않고 Cache Storage 로 답한다 — 기록 없음). R1·R2 가 본문을 받은 기록
+/// (`out` — 0 = 받지 않았다)을 준다. R1 의 제 기록은 2, R2 는 3.
+fn wb5Run(lag: i64, syn: bool, out: *[2]u64) !void {
+    var h: H = .{ .sync = false };
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const u = "https://p.test/i";
+    const t0: i64 = 10_000_000;
+    const sw_resp = struct {
+        fn f(hh: *H, rid: []const u8, src: []const u8, ts: i64, now: i64) !void {
+            try hh.ev(5, .{ .response = .{ .rid = rid, .mime = "application/json", .from_sw = true, .sw_source = src, .charset = .other, .ts_us = ts } }, now);
+            try hh.ev(5, .{ .data = .{ .rid = rid, .bytes = 9 } }, now);
+        }
+    }.f;
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "r1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 } }, t0 + 200);
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "r2", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 + 1_000 } }, t0 + 1_200);
+    _ = try h.cand(5, 1, u, t0 + 500, .{ .sw = true }); // X — 워커 제 fetch
+    _ = try h.cand(5, 2, u, t0 + 1_100, .{ .sw = true }); // R1 을 넘겼다
+    try h.flushed(t0 + 2_000, t0 + 2_000);
+    try sw_resp(&h, "r1", "network", t0 + 4_000, t0 + 4_200);
+    h.table.cefEndReceived(5, 1, t0 + 4_500, true, 10);
+    h.table.cefEndReceived(5, 2, t0 + 4_600, true, 10);
+    try h.flushed(t0 + 5_000, t0 + 5_000);
+    try h.finish(5, "r1", t0 + 5_000);
+    var now: i64 = t0 + 10_000;
+    var r2_done = false;
+    while (now < t0 + 4_000_000) : (now += 10_000) {
+        if (!r2_done and now >= t0 + 1_000 + lag) {
+            r2_done = true;
+            if (syn) {
+                try sw_resp(&h, "r2", "cache-storage", now - 1_000, now);
+                try h.finish(5, "r2", now);
+            } else {
+                _ = try h.cand(5, 3, u, t0 + 1_000 + lag, .{ .sw = true });
+                try h.flushed(now, now);
+                try sw_resp(&h, "r2", "network", now + 2_000, now + 2_500);
+                h.table.cefEndReceived(5, 3, now + 2_600, true, 10);
+                try h.flushed(now + 3_000, now + 3_000);
+                try h.finish(5, "r2", now + 3_000);
+            }
+        }
+        try h.table.tickAt(gpa_t, now, now);
+        try h.drain();
+    }
+    out.* = .{ fetchedFor(&h, "r1") orelse 0, fetchedFor(&h, "r2") orelse 0 };
+}
+
+test "W9d② 재검증 3 차 뒤 WB-5(P-i): 서비스 워커가 같은 주소를 먼저 받고 뒤 요청을 20 ms–1 s 늦게 넘기거나 캐시로 늦게 답해도 앞 요청의 본문은 워커의 기록에 붙지 않는다" {
+    for ([_]i64{ 20_000, 59_000, 61_000, 100_000, 300_000, 1_000_000 }) |lag| {
+        for ([_]bool{ false, true }) |syn| {
+            var o: [2]u64 = undefined;
+            try wb5Run(lag, syn, &o);
+            errdefer std.debug.print("[WB-5] lag {d} ms syn {}: r1 fetched for {d} (own 2), r2 for {d} (own 3)\n", .{ @divTrunc(lag, 1000), syn, o[0], o[1] });
+            // 0e5012175: 60 ms 넘게 늦으면 r1 의 본문을 X(1)에 붙였다. 이제 r1 은 r2 의 기록이 정해질 때까지 기다리고 X 가 갈림을 보여 본문 없이.
+            try testing.expect(o[0] == 0 or o[0] == 2);
+            try testing.expect(o[1] == 0 or o[1] == 3);
+        }
+    }
+}
+
+test "W9d② 재검증 3 차 뒤 PF-2: 같은 주소 GET 60·곧 abort 한 fetch 3000(CEF 에 닿지 않는다)·뒤의 느린 GET 60 — 실패 사건은 맞추기를 하지 않고, 한 주기가 abort 를 놓으며 맞추기를 다시 하지 않는다" {
+    var h: H = .{ .sync = false };
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const u = "https://p.test/hostile";
+    const t0: i64 = 10_000_000;
+    var rb: [16]u8 = undefined;
+    var req: u64 = 1;
+    for (0..60) |k| {
+        const ts = t0 + @as(i64, @intCast(k)) * 10;
+        try h.sent(5, try std.fmt.bufPrint(&rb, "g{d}", .{k}), u, ts, ts + 5);
+        _ = try h.cand(5, req, u, ts + 100, .{});
+        req += 1;
+    }
+    for (0..3000) |k| {
+        const ts = t0 + 1_000 + @as(i64, @intCast(k)) * 10;
+        try h.sent(5, try std.fmt.bufPrint(&rb, "f{d}", .{k}), u, ts, ts + 5);
+    }
+    // 앞 GET 은 모두 성공으로 끝났다 — abort 의 짝일 수 없다(응답 없이 실패한 요청은 성공으로 끝난 기록을 갖지 않는다).
+    for (0..60) |k| {
+        h.table.cefEndReceived(5, 1 + k, t0 + 40_000, true, 10);
+        try h.respond(5, try std.fmt.bufPrint(&rb, "g{d}", .{k}), "application/json", 9, t0 + 39_000);
+        try h.finish(5, try std.fmt.bufPrint(&rb, "g{d}", .{k}), t0 + 40_000);
+    }
+    try h.flushed(t0 + 50_000, t0 + 50_000);
+    try h.drain();
+    const runs0 = h.table.scratch.match_runs;
+    // abort 의 CDP 실패(시각은 물 높이 앞 — 곧 정할 수 있다).
+    for (0..3000) |k| try h.ev(5, .{ .failed = .{ .rid = try std.fmt.bufPrint(&rb, "f{d}", .{k}), .ts_us = t0 + 45_000 } }, t0 + 60_000 + @as(i64, @intCast(k)));
+    // 실패 사건마다 맞추지 않는다(전에는 3000 번 — 같은 주소 무리 3060 개를 그때마다).
+    try testing.expectEqual(runs0, h.table.scratch.match_runs);
+    // 느린 GET 60(창 밖 — abort 의 짝일 수 없다).
+    for (0..60) |k| {
+        const ts = t0 + 2_500_000 + @as(i64, @intCast(k)) * 10;
+        try h.sent(5, try std.fmt.bufPrint(&rb, "s{d}", .{k}), u, ts, ts + 5);
+        _ = try h.cand(5, req, u, ts + 100, .{});
+        req += 1;
+    }
+    // 시한 뒤 한 주기: abort 3000 은 짝 없이 놓인다 — 그때마다 맞추기를 다시 하지 않는다(전에는 abort 마다 — ReleaseFast 한 주기 0.6–1.1 s).
+    const runs1 = h.table.scratch.match_runs;
+    try h.table.tickAt(gpa_t, t0 + 2_600_000, t0 + 2_600_000);
+    try h.drain();
+    errdefer std.debug.print("[PF-2] match runs in the release tick: {d}, cdp left {d}\n", .{ h.table.scratch.match_runs - runs1, h.table.tabOf(5).?.cdp.items.len });
+    try testing.expect(h.table.scratch.match_runs - runs1 <= 10);
+    var bare: usize = 0;
+    for (h.table.tabOf(5).?.cdp.items) |o| if (Table.failedBare(&o)) {
+        bare += 1;
+    };
+    try testing.expectEqual(@as(usize, 0), bare);
+    try testing.expectEqual(@as(usize, 60), h.table.tabOf(5).?.cdp.items.len);
+}
+
+// ── 재검증 3 차 뒤: 사건이 멎은 뒤 주기만으로 모든 기록이 끝나는가(혼돈 퍼즈) ──
+// 시험이 증명하는 것: 사건의 차례가 어떻든(늦은 응답·두 번째 끝·끝 뒤의 캐시 알림·ExtraInfo 먼저·물 높이 늦음·새 문서·버려진 끝·답 없는 본문
+// 호출) 사건이 멎으면 주기(`tickAt`)만으로 CEF 시작마다 끝이 꼭 하나 오고 표가 한가해진다. 왜 중요한가 — 끝이 오지 않으면 maru 는 그 본문을
+// 영영 `pending` 으로 보인다(스모크 w9d-body 의 실패 꼴). 이 퍼즈가 찾은 것: 끝을 본 뒤에 온 응답이 그 요청을 맞추기에서 빼 판정이 제 자리를
+// 못 찾았다(Debug 는 멈춤 — 범위 밖 읽기, ReleaseFast 는 정의되지 않은 동작).
+fn chaosRun(seed: u64, stats: *[4]usize) !void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rnd = prng.random();
+    var h: H = .{ .sync = rnd.boolean() };
+    defer h.deinit();
+    const b: BrowserId = 5;
+    _ = try h.table.start(gpa_t, b, 1);
+    const urls = [_][]const u8{ "https://c.test/a", "https://c.test/b", "https://c.test/c.png" };
+    const mimes = [_][]const u8{ "application/json", "text/javascript", "image/png", "text/html" };
+    var now: i64 = 1_000_000;
+    var next_req: u64 = 1;
+    var rb: [16][12]u8 = undefined;
+    var rids: [16][]const u8 = undefined;
+    var nrid: usize = 0;
+    const steps = rnd.intRangeAtMost(usize, 5, 60);
+    var pend_fetch: std.ArrayList(i32) = .empty;
+    defer pend_fetch.deinit(gpa_t);
+    var seen_fetch: usize = 0;
+    for (0..steps) |_| {
+        now += rnd.intRangeAtMost(i64, 0, 40_000);
+        const k = rnd.uintLessThan(u8, 16);
+        const u = urls[rnd.uintLessThan(usize, urls.len)];
+        switch (k) {
+            0, 1 => { // CDP will_be_sent (new rid)
+                if (nrid < rids.len) {
+                    rids[nrid] = std.fmt.bufPrint(&rb[nrid], "r{d}", .{nrid}) catch unreachable;
+                    try h.ev(b, .{ .will_be_sent = .{ .rid = rids[nrid], .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = now - rnd.intRangeAtMost(i64, 0, 3_000), .loader = rnd.uintLessThan(u64, 3) } }, now);
+                    nrid += 1;
+                }
+            },
+            2, 3 => { // CEF begin
+                _ = try h.cand(b, next_req, u, now - rnd.intRangeAtMost(i64, -6_000, 3_000), .{ .sw = rnd.uintLessThan(u8, 8) == 0, .attr = if (rnd.uintLessThan(u8, 8) == 0) 2 else 1, .cover_pending = rnd.uintLessThan(u8, 10) == 0 });
+                next_req += 1;
+            },
+            4 => if (next_req > 1) { // CEF end (random record)
+                h.table.cefEndReceived(b, rnd.intRangeLessThan(u64, 1, next_req), now, rnd.uintLessThan(u8, 4) != 0, rnd.uintLessThan(u64, 3));
+            },
+            5, 6 => if (nrid > 0) { // response
+                const r = rids[rnd.uintLessThan(usize, nrid)];
+                const sw = rnd.uintLessThan(u8, 8) == 0;
+                try h.ev(b, .{ .response = .{ .rid = r, .mime = mimes[rnd.uintLessThan(usize, mimes.len)], .from_sw = sw, .sw_source = if (sw and rnd.boolean()) "cache-storage" else "network", .charset = .other, .ts_us = now - rnd.intRangeAtMost(i64, 0, 2_000), .has_extra_info = rnd.boolean() } }, now);
+                try h.ev(b, .{ .data = .{ .rid = r, .bytes = rnd.uintLessThan(u64, 3) * 7 } }, now);
+            },
+            7, 8 => if (nrid > 0) try h.ev(b, .{ .finished = .{ .rid = rids[rnd.uintLessThan(usize, nrid)] } }, now),
+            9 => if (nrid > 0) try h.ev(b, .{ .failed = .{ .rid = rids[rnd.uintLessThan(usize, nrid)], .ts_us = now - rnd.intRangeAtMost(i64, 0, 1_000) } }, now),
+            10 => if (nrid > 0) try h.ev(b, .{ .extra_info = .{ .rid = rids[rnd.uintLessThan(usize, nrid)], .credentialed = rnd.boolean() } }, now),
+            11 => if (nrid > 0 and rnd.uintLessThan(u8, 3) == 0) try h.ev(b, .{ .from_cache = .{ .rid = rids[rnd.uintLessThan(usize, nrid)] } }, now),
+            12 => h.table.documentStarted(b, now),
+            13 => try h.flushed(now - rnd.intRangeAtMost(i64, 0, 20_000), now),
+            14 => {
+                try h.table.tickAt(gpa_t, now, now - rnd.intRangeAtMost(i64, 0, 20_000));
+                try h.drain();
+            },
+            else => if (next_req > 1 and rnd.uintLessThan(u8, 4) == 0) h.table.cefLost(b, rnd.intRangeLessThan(u64, 1, next_req), now),
+        }
+        while (seen_fetch < h.fetches.items.len) : (seen_fetch += 1) try pend_fetch.append(gpa_t, h.fetches.items[seen_fetch].fetch.id);
+        // 본문 호출의 답 — 몇은 끝내 오지 않는다(시한).
+        while (pend_fetch.items.len > 0 and rnd.uintLessThan(u8, 3) == 0) {
+            const id = pend_fetch.swapRemove(rnd.uintLessThan(usize, pend_fetch.items.len));
+            if (rnd.uintLessThan(u8, 5) == 0) continue;
+            if (h.table.takeInflight(id)) |f| {
+                try h.noteEnd(f.request, .captured);
+                try h.table.bodyDone(gpa_t, f, now);
+                try h.drain();
+            }
+        }
+    }
+    // CEF 끝은 모두 온다(앱이 본 「done」 — 실패의 꼴 그대로).
+    for (1..next_req) |r| h.table.cefEndReceived(b, r, now + 1_000, true, 10);
+    // 사건이 멎었다 — 주기만 30 초.
+    var t = now + 50_000;
+    while (t < now + 30_000_000) : (t += 50_000) {
+        try h.table.tickAt(gpa_t, t, t);
+        try h.drain();
+        while (seen_fetch < h.fetches.items.len) : (seen_fetch += 1) {}
+    }
+    stats[0] += 1;
+    var stuck: usize = 0;
+    for (1..next_req) |r| {
+        const want = h.attempts.get(r) orelse continue;
+        if (endCount(&h, r) != want) stuck += 1;
+    }
+    if (h.table.busy()) stats[2] += 1;
+    if (stuck > 0) {
+        stats[1] += 1;
+        if (stats[3] == 0) stats[3] = seed;
+    }
+}
+
+test "W9d② 재검증 3 차 뒤: 혼돈 퍼즈 — 사건이 멎으면 주기만으로 시작마다 끝 하나, 한가해짐(늦은 응답·두 번째 끝·끝 뒤 캐시 알림 포함)" {
+    var stats: [4]usize = @splat(0);
+    const n = 3000;
+    for (0..n) |s| try chaosRun(0xc4a05000 + s, &stats);
+    errdefer std.debug.print("[chaos] runs {d} stuck {d} busy {d} first seed {d}\n", .{ stats[0], stats[1], stats[2], stats[3] });
+    try testing.expectEqual(@as(usize, n), stats[0]);
+    try testing.expectEqual(@as(usize, 0), stats[1]);
+    try testing.expectEqual(@as(usize, 0), stats[2]);
+}
+
+test "W9d② 재검증 3 차 뒤: 끝을 본 뒤의 늦은 응답·두 번째 끝·캐시 알림은 버린다 — 판정은 제 자리를 찾고 끝은 하나" {
+    var h: H = .{ .sync = false }; // 끝을 본 때 물 높이는 아직 그 앞이다 — 판정이 늦은 사건들 뒤에 온다
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const u = "https://l.test/late";
+    try h.sent(5, "l.1", u, 1_000_000, 1_000_100);
+    _ = try h.cand(5, 1, u, 1_000_300, .{});
+    try h.finish(5, "l.1", 1_010_000); // 응답 없이 끝(제 기록은 아직 끝나지 않았다)
+    // 늦은 응답 — 서비스 워커의 캐시 갈래로 알리면 전에는 그 요청이 맞추기에서 빠져 판정이 제 자리를 찾지 못했다(범위 밖 읽기).
+    try h.ev(5, .{ .response = .{ .rid = "l.1", .mime = "application/json", .from_sw = true, .sw_source = "cache-storage", .charset = .other } }, 1_011_000);
+    try h.ev(5, .{ .failed = .{ .rid = "l.1", .ts_us = 1_011_500 } }, 1_012_000);
+    try h.ev(5, .{ .from_cache = .{ .rid = "l.1" } }, 1_012_500);
+    h.table.cefEnd(5, 1, 1_013_000);
+    var t: i64 = 1_020_000;
+    // 본문 호출의 답은 오지 않는다 — 시한(`fetch_timeout_us`) 뒤 `unavailable`.
+    while (t < 1_020_000 + fetch_timeout_us + 500_000) : (t += 50_000) {
+        try h.table.tick(gpa_t, t);
+        try h.drain();
+    }
+    // 짝은 제 기록이었다(본문을 받으러 갔다 — 늦은 사건에 흔들려 놓이지 않았다), 답이 없어 시한에 `unavailable` 하나.
+    try testing.expectEqual(@as(usize, 1), h.fetches.items.len);
+    try testing.expect(stateIs(&h, 1, .unavailable));
+    try testing.expectEqual(@as(u32, 1), endCount(&h, 1));
+    try testing.expect(!h.table.busy());
 }
 
 // ── 재검증 3 차: 검증자 v20h A 의 결정적 재현(P-a·P-b·P-c·P-d·P-f·P-g·P-h) ─────────────────────────────────────────────────────────────
@@ -7913,8 +8335,9 @@ test "W9d② 재검증 3 차 LB-1(P-a·P-b): 같은 주소 무리에서 기록 �
         }
         try rv3Ticks(&h, t0 + 1_050_000, t0 + 5_000_000);
         try testing.expectEqual(@as(usize, 0), rv3_wrong);
-        try testing.expectEqual(@as(usize, 3), rv3_own);
-        try testing.expect(stateIs(&h, 3, .ambiguous));
+        // 재검증 3 차 뒤 WB-5: C 는 A·B(응답 전)의 기록이 정해질 때까지 기다린다 — 그 사이 A·B 가 제 기록으로 정해져 보이는 규칙이 다른 기록이
+        // 창에 남지 않으니 C 도 제 본문(전에는 C 만 `ambiguous`).
+        try testing.expectEqual(@as(usize, 4), rv3_own);
     }
 }
 

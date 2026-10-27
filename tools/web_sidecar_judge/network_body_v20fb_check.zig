@@ -10,7 +10,10 @@
 //!   v20f-15-dh*  (re-verification 3, D-H1·D-H2) a UTF-16 BOM body as long as the received bytes under an unknown label and a gb18030
 //!               `<meta>` HTML page: marked; headers Chromium reads differently from the Fetch parser (a control byte in the first charset,
 //!               a second Content-Type `text/plain(x)`·`text/plai{n}`·`text/plain x`·`text/plain@`·`application/json (v2)`): re-decoded to the
-//!               received bytes; `text/plain(x); charset=utf-8`: marked (N-h4); `charset= "utf-8"` and a UTF-8 `<meta>`: exact and unmarked
+//!               received bytes; `text/plain(x); charset=utf-8`: marked (N-h4); `charset= "utf-8"`: exact and unmarked
+//!   v20f-15-di*  (after re-verification 3, D-I1·D-I2) HTML/XML-family bodies with no header charset and non-ASCII text are marked — a
+//!               `<meta>` after 1100 bytes, an XML declaration before the DOCTYPE, `application/xml`·`image/svg+xml`·`application/xhtml+xml`
+//!               declarations, `text/xml` UTF-8 (and a UTF-8 `<meta>` page — the cost); with a header charset: exact and unmarked
 //!   v20f-14-*   V1 at the wire: agent tab with the switch off (any_host, full=false) — own first-site responses kept, other sites and hops to
 //!               them stripped and not captured; agent navigation to the other site; narrowing (user drove) hides the other site again
 //!   v20f-12-*   switch toggled every 70 ms between full and any_host+full=false (the V1 path) with a new session per off
@@ -75,6 +78,13 @@ const dh_u16eq = "\xff\xfe\x00\xac\x98\xb0";
 /// D-H1: `<meta charset=gb18030>` + 「ñ中文」 — 61 bytes, and the gb18030 reading is 61 bytes of UTF-8 too.
 const dh_gb_html = "<!doctype html><meta charset=gb18030><title>g</title>\x81\x30\x8a\x39\xd6\xd0\xce\xc4";
 const dh_u8_html = "<!doctype html><meta charset=utf-8><title>u</title>" ++ dg_u8;
+// re-verification 3, after: a declaration Chromium follows beyond 1024 bytes / an XML declaration (EUC-KR "αβγδ" — 8 bytes, as long as its UTF-8)
+const di_gk = "\xa5\xe1\xa5\xe2\xa5\xe3\xa5\xe4";
+const di_pad: [1100]u8 = @splat('t');
+const di_html_late = "<!doctype html><html><head><title>" ++ di_pad ++ "</title><meta charset=\"euc-kr\"></head><body>" ++ di_gk ++ "</body></html>";
+const di_html_xmldecl = "<?xml version=\"1.0\" encoding=\"euc-kr\"?>\n<!DOCTYPE html><html><body>" ++ di_gk ++ "</body></html>";
+const di_xml = "<?xml version=\"1.0\" encoding=\"euc-kr\"?><r>" ++ di_gk ++ "</r>";
+const di_xml8 = "<?xml version=\"1.0\" encoding=\"utf-8\"?><r>" ++ dg_u8 ++ "</r>";
 const br_bytes = [_]u8{ 143, 11, 128, 123, 34, 98, 114, 34, 58, 34, 98, 114, 111, 116, 108, 105, 45, 98, 111, 100, 121, 45, 234, 176, 128, 34, 125, 3 };
 
 const Mode = enum { plain, cache, etag, chunked };
@@ -143,7 +153,16 @@ const enc_cases = [_]EncCase{
     .{ .name = "dh1-u16eq-jsonbogus", .ctype = "application/json; charset=x-bogus-maru", .body = dh_u16eq, .raw = dh_u16eq, .expect = .marked },
     .{ .name = "dh1-u16eq-txtbogus", .ctype = "text/plain; charset=x-bogus-maru", .body = dh_u16eq, .raw = dh_u16eq, .expect = .marked },
     .{ .name = "dh1-gbhtml", .ctype = "text/html", .body = dh_gb_html, .raw = dh_gb_html, .expect = .marked },
-    .{ .name = "dh1-meta8html", .ctype = "text/html", .body = dh_u8_html, .raw = dh_u8_html, .expect = .exact_noflag },
+    // re-verification 3, after (D-I1/D-I2): HTML/XML-family bodies without a header charset are marked whenever they hold non-ASCII text —
+    // Chromium decodes them by a declaration maru cannot check (beyond 1024 bytes, XML declarations); correct UTF-8 is marked too (the cost)
+    .{ .name = "dh1-meta8html", .ctype = "text/html", .body = dh_u8_html, .raw = dh_u8_html, .expect = .marked },
+    .{ .name = "di1-meta-late-kr", .ctype = "text/html", .body = di_html_late, .raw = di_html_late, .expect = .marked },
+    .{ .name = "di1-xmldecl-html-kr", .ctype = "text/html", .body = di_html_xmldecl, .raw = di_html_xmldecl, .expect = .marked },
+    .{ .name = "di2-xml-kr", .ctype = "application/xml", .body = di_xml, .raw = di_xml, .expect = .marked },
+    .{ .name = "di2-svg-kr", .ctype = "image/svg+xml", .body = di_xml, .raw = di_xml, .expect = .marked },
+    .{ .name = "di2-xhtml-kr", .ctype = "application/xhtml+xml", .body = di_xml, .raw = di_xml, .expect = .marked },
+    .{ .name = "di2-textxml-u8", .ctype = "text/xml", .body = di_xml8, .raw = di_xml8, .expect = .marked },
+    .{ .name = "di2-xml-hdr8", .ctype = "application/xml; charset=utf-8", .body = di_xml8, .raw = di_xml8, .expect = .exact_noflag },
     .{ .name = "dh2-ctlfirst-kr", .ctype = "text/plain; charset=lat\x01in1; charset=euc-kr", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
     .{ .name = "dh2-delfirst-kr", .ctype = "text/plain; charset=euc\x7fkr; charset=euc-kr", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },
     .{ .name = "dh2-ctlfirst-json", .ctype = "application/json; charset=x\x01; charset=euc-kr", .body = dg_u8, .raw = dg_u8, .expect = .exact_redecoded },

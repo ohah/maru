@@ -1,6 +1,6 @@
 # 참조 결과 피커 IME 범위 문맥
 
-상태: 범위 덧붙임 실패 재현과 수정 완료. 집중 호스트 42개와 제품 변이 5종·정상/원복 대조군 통과. 전체 게이트와 실제 입력 검증을 진행 중이다.
+상태: 범위 덧붙임 실패 재현과 수정 완료. 집중 호스트 42개와 제품 변이 5종·정상/원복 대조군 통과. 전체 ABI·경계·Swift·문서와 실제 입력·PNG/OCR 검증까지 통과했다.
 
 ## 보존할 계약
 
@@ -64,5 +64,19 @@ commitAll 실패의 preedit 보존을 포함한다. 심볼 IME 회귀도 통과�
 후보 선택까지 revision 0·focus 0·history 0·PTY 0, 별도 Return 뒤 focus 34·history 1,
 `/` 뒤 revision 1·focus 35·PTY 0이었다. 입력 소스 복원과 디스크 원본 보존도 통과했다.
 고정 앱 hash는 `77fb241ce9fec9206b862e5ceddff4707fc0d44e446e5593335f850bb4c0f3d6`이며,
-화면 기록 조회가 false여서 PNG/OCR은 정확한 앱의 권한 허용을 기다린다.
+최초 화면 기록 조회가 false였으며 권한 허용 뒤 같은 앱으로 PNG/OCR까지 통과했다.
 진단 결과는 `../maru-reference-picker-ime-os-20261027/diagnostic-2/`에 있다.
+
+## 최종 검증 결과
+
+전체 ABI 7,139개 중 7,020 통과·119 skip·0 실패. 경계·Swift·문서·fmt/diff 검사도 통과했다.
+고정 앱의 `live-2`는 서로 다른 후보창 5개의 PNG/hash/크기·창 lifecycle과 독립 Vision OCR
+(각 6행 이상)을 통과했다. `candidate_capture_verifier=passed`다. 후보 취소·韓 선택·별도 Enter
+이동·실제 `/` 에디터 입력, 입력 소스 복원과 디스크 원본 보존도 통과했다.
+
+첫 live는 macOS의 직접 화면 접근 추가 확인창으로 전경이 빠져 HID_owner에서 중단됐다.
+이미 요청한 동일 앱 화면 접근 범위의 확인창을 허용한 뒤 앱/서명 변경 없이 재실행해 통과했고,
+중단된 실행을 통과 증거로 넣지 않는다. 원시 창·PNG·키 receipt·manifest·제품 Metal 캡처와
+독립 OCR 로그는 `../maru-reference-picker-ime-os-20261027/live-2/`에 있다.
+실제 입력은 references 모드로 수행했다. 나머지 세 명령 kind의 공유 편집 동작은 호스트 검사 범위다.
+실제 LSP 서버 전송이나 다른 picker/터미널 복귀까지 입증했다고 부르지 않는다.

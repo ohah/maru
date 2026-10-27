@@ -17,16 +17,31 @@ pub fn main() !void {
         snapshot.deinit();
         return err;
     };
-    const deadline = std.Io.Clock.awake.now(threaded.io()).nanoseconds + 10_000_000_000;
+    var first = try wait(&service, threaded.io());
+    var first_open = true;
+    defer if (first_open) first.release();
+    if (first.outcome() != .ready or !first.accept(&gate) or first.provider().?.tree == null) return error.UnexpectedResult;
+    _ = try source.insert(6, "changed_");
+    var next = source.snapshot();
+    var updated = input;
+    updated.revision += 1;
+    _ = service.submitFrom(&gate, updated, &next, .zig, &first) catch |err| {
+        next.deinit();
+        return err;
+    };
+    // submitFrom이 독립 참조를 준비했으므로 원본 결과를 곧바로 반납해도 된다.
+    first.release();
+    first_open = false;
+    var second = try wait(&service, threaded.io());
+    defer second.release();
+    if (second.outcome() != .ready or !second.accept(&gate) or second.mode() != .incremental or second.basis() == null) return error.UnexpectedResult;
+    std.debug.print("PARSE_WORKER_NATIVE cold=1 incremental=1 accepted=2\n", .{});
+}
+fn wait(service: *worker.Service, io: std.Io) !worker.Completion {
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 10_000_000_000;
     while (true) {
-        if (service.take()) |value| {
-            var result = value;
-            defer result.release();
-            if (result.outcome() != .ready or !result.accept(&gate) or result.provider().?.tree == null) return error.UnexpectedResult;
-            std.debug.print("PARSE_WORKER_NATIVE ready=1 accepted=1\n", .{});
-            break;
-        }
-        if (std.Io.Clock.awake.now(threaded.io()).nanoseconds > deadline) return error.Timeout;
+        if (service.take()) |value| return value;
+        if (std.Io.Clock.awake.now(io).nanoseconds > deadline) return error.Timeout;
         std.Thread.yield() catch {};
     }
 }

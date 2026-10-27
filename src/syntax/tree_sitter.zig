@@ -476,15 +476,6 @@ fn predicatePasses(query: *c.TSQuery, steps: []const c.TSQueryPredicateStep, mat
 
 // ── provider(§5.3) ─────────────────────────────────────────────────────────────
 
-/// **트리를 들고 있는** 하이라이트 제공자. 한 문서에 하나다.
-///
-/// **왜 함수 하나로 안 되는가 — 실측이 그렇게 말했다.** `highlightsInRange`는 부를 때마다 문서를
-/// 다시 판다. 154KB 소스에서 전체 쿼리가 10ms, 창으로 좁히면 5ms인데 **그 5ms가 파싱이다**
-/// (`ReleaseFast`). 창으로 좁히는 것만으로는 스크롤이 매번 5ms를 낸다 — 스크롤은 편집보다 잦다.
-/// 트리를 살려 두면 스크롤은 쿼리만 내고 파싱은 **문서가 바뀔 때만** 든다.
-///
-/// `onEdit`은 `ts_tree_edit` 뒤 옛 트리로 증분 파싱하고, 예산이 끝나면 다음 프레임에 재개한다.
-/// 전체 교체는 `setSource`로 구분한다. 고정 헤더 집계 사본에도 같은 편집 좌표를 적용한다.
 /// 작업이 소유하고 실제 C 호출 반환까지 보존하는 취소 저장소다.
 /// 요청은 협력적이다. true 저장만으로 parser나 입력을 해제하면 안 된다.
 pub const Cancellation = struct {
@@ -494,6 +485,7 @@ pub const Cancellation = struct {
     pub const TestGate = struct {
         entered: std.atomic.Value(bool) = .init(false),
         released: std.atomic.Value(bool) = .init(false),
+        abort: bool = false,
         pub fn release(self: *TestGate) void {
             self.released.store(true, .release);
         }
@@ -510,6 +502,29 @@ pub const Cancellation = struct {
     }
 };
 
+// Tree-sitter의 point는 LF 행과 byte 열이다. CRLF 원문도 정규화하지 않는다.
+pub fn pointAt(bytes: []const u8, end: usize) Point {
+    var point: Point = .{ .row = 0, .column = 0 };
+    for (bytes[0..end]) |byte| {
+        if (byte == '\n') {
+            point.row += 1;
+            point.column = 0;
+        } else point.column += 1;
+    }
+    return point;
+}
+
+pub const testing = if (@import("builtin").is_test) @import("testing/tree.zig") else struct {};
+
+/// **트리를 들고 있는** 하이라이트 제공자. 한 문서에 하나다.
+///
+/// **왜 함수 하나로 안 되는가 — 실측이 그렇게 말했다.** `highlightsInRange`는 부를 때마다 문서를
+/// 다시 판다. 154KB 소스에서 전체 쿼리가 10ms, 창으로 좁히면 5ms인데 **그 5ms가 파싱이다**
+/// (`ReleaseFast`). 창으로 좁히는 것만으로는 스크롤이 매번 5ms를 낸다 — 스크롤은 편집보다 잦다.
+/// 트리를 살려 두면 스크롤은 쿼리만 내고 파싱은 **문서가 바뀔 때만** 든다.
+///
+/// `onEdit`은 `ts_tree_edit` 뒤 옛 트리로 증분 파싱하고, 예산이 끝나면 다음 프레임에 재개한다.
+/// 전체 교체는 `setSource`로 구분한다. 고정 헤더 집계 사본에도 같은 편집 좌표를 적용한다.
 pub const Provider = struct {
     parser: *c.TSParser,
     tree: ?*c.TSTree = null,
@@ -744,7 +759,10 @@ pub const Provider = struct {
         const st = state orelse return false;
         const ctx: *ParseCtx = @ptrCast(@alignCast(st.*.payload.?));
         if (ctx.cancellation) |token| {
-            if (@import("builtin").is_test) if (token.gate) |gate| gate.wait();
+            if (@import("builtin").is_test) if (token.gate) |gate| {
+                gate.wait();
+                if (gate.abort) return true;
+            };
             if (token.isRequested()) return true;
         }
         if (ctx.budget_ns == 0) return false;
@@ -868,10 +886,23 @@ pub const Provider = struct {
     /// 갈래다: 여는 파싱이 끊긴 채로 백업 복원이 문서 전체를 갈아 끼운다. 예산을 든 증분이 끊긴 뒤 다음 편집이 오는 경우도
     /// 같다(반쯤 판 것은 **편집 전** 내용이다) — 둘 다 `SYN41` 이 잰다.
     pub fn onEditBudgeted(self: *Provider, source: []const u8, e: Edit, budget_ns: u64) void {
+        _ = self.editCancellable(source, e, budget_ns, null);
+    }
+
+    /// 독립 핸들에서만 편집한다. 중단 시 이전 트리가 남으므로 tree 유무 대신 상태를 확인한다.
+    pub fn onEditCancellable(self: *Provider, source: []const u8, e: Edit, token: *const Cancellation) ParseStatus {
+        return self.editCancellable(source, e, 0, token);
+    }
+
+    fn editCancellable(self: *Provider, source: []const u8, e: Edit, budget_ns: u64, token: ?*const Cancellation) ParseStatus {
         c.ts_parser_reset(self.parser);
         const old_tree = self.tree orelse {
-            _ = self.setSourceBudgeted(source, budget_ns);
-            return;
+            if (token) |value| {
+                _ = self.setSourceBudgeted("", 0);
+                if (source.len == 0 or source.len > max_parse_bytes) return .done;
+                return self.parseCancellable(source, null, budget_ns, value);
+            }
+            return self.setSourceBudgeted(source, budget_ns);
         };
         if (source.len == 0 or source.len > max_parse_bytes) {
             self.sticky_summary.invalidate();
@@ -880,7 +911,7 @@ pub const Provider = struct {
             self.tree_gen += 1;
             self.changed_all = true;
             self.fold_changes_before = null;
-            return;
+            return .done;
         }
         var edit: c.TSInputEdit = .{
             .start_byte = e.start_byte,
@@ -892,7 +923,7 @@ pub const Provider = struct {
         };
         self.sticky_summary.edit(&edit);
         c.ts_tree_edit(old_tree, &edit);
-        _ = self.parseBudgeted(source, old_tree, budget_ns);
+        return self.parseCancellable(source, old_tree, budget_ns, token);
     }
 
     /// 판 문서의 줄 수(트리 뿌리의 끝 행 + 1). **트리가 없으면 0**이다.
@@ -5452,4 +5483,34 @@ test "bracket range cursor native 모든 Zig 할당 실패도 순차 판정과 �
         }
     }
     try std.testing.expect(reached_success);
+}
+
+test "SYN incremental oracle는 같은 노드 모양의 잘못된 byte와 point도 거절한다" {
+    var original = Provider.init("pub fn first() void {}\n", .zig, 0) orelse return error.NoProvider;
+    defer original.deinit();
+    var moved = original.copyReady(.zig) orelse return error.NoCopy;
+    defer moved.deinit();
+    try std.testing.expect(testing.equal(original.tree.?, moved.tree.?) != null);
+    const edit: c.TSInputEdit = .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = 1, .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 0 }, .new_end_point = .{ .row = 0, .column = 1 } };
+    c.ts_tree_edit(moved.tree.?, &edit);
+    try std.testing.expect(testing.equal(original.tree.?, moved.tree.?) == null);
+}
+
+test "SYN incremental 중단은 이전 트리가 남아도 pending이다" {
+    const a = std.testing.allocator;
+    const tail = "pub fn tail() void {}\n";
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(a);
+    for (0..3000) |_| try source.appendSlice(a, "const n = 1;\n");
+    const prefix = source.items.len;
+    try source.appendSlice(a, tail);
+    var original = Provider.init(tail, .zig, 0) orelse return error.NoProvider;
+    defer original.deinit();
+    var moved = original.copyReady(.zig) orelse return error.NoCopy;
+    defer moved.deinit();
+    var token: Cancellation = .{};
+    token.request();
+    const edit: Edit = .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = @intCast(prefix), .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 0 }, .new_end_point = .{ .row = 3000, .column = 0 } };
+    try std.testing.expectEqual(Provider.ParseStatus.pending, moved.onEditCancellable(source.items, edit, &token));
+    try std.testing.expect(moved.tree != null);
 }

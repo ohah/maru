@@ -1,6 +1,6 @@
 # 검증 매트릭스
 
-native 파싱 서비스는 `test-editor-parse-worker`와 `test-editor-parse-worker-native`가 실제 스레드·C 취소·준비/본문 복사 실패·회수와 production-mode 실행을 검사한다. macOS 기본 test·macOS 게이트에 포함하며 [결함 대조](../tools/editor-parse-worker/README.md)는 별도 실행한다. 실제 UI·wake·IME 연결 검증은 아니다.
+native 파싱 서비스와 명시적 증분 인계는 `test-editor-parse-worker`와 `test-editor-parse-worker-native`가 실제 스레드·C 취소·준비/본문 복사 실패·회수와 production-mode 실행을 검사한다. macOS 기본 test·macOS 게이트에 포함하며 [결함 대조](../tools/editor-parse-worker/README.md)는 별도 실행한다. 증분 결과·동일 본문 재사용·기준 격리·중단·원본 조기 반환·기준 복사 OOM과 전체 C 좌표도 대조한다. [실측과 독립 결함 대조](../tools/editor-parse-incremental/README.md)는 별도 실행이다. 실제 UI·wake·IME 연결 검증은 아니다.
 
 파싱 요청 수락 코어는 `test-editor-parse-request`가 입력 신원·언어 판·요청 번호와 단계별 단발 수락을 검사한다. 기본 `zig build test`에 포함되며, [실제 결함 대조](../tools/editor-parse-request/README.md)는 별도 opt-in 실행이다. 제품 워커·UI에 연결된 상태는 아니다.
 

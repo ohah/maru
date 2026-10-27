@@ -48,7 +48,7 @@ def main():
     native_baseline = native.read_text()
     mutants = {
         'native_cancel_ignored': (NATIVE, '            if (token.isRequested()) return true;', '            _ = token.isRequested();'),
-        'waiting_not_replaced': (LEAF, '            if (std.meta.eql(job.tag.input.document, document)) self.returned.push(job) else kept.push(job);', '            kept.push(job);'),
+        'waiting_not_replaced': (LEAF, '                if (job.basis != null) self.retiring.push(job) else self.returned.push(job);', '                kept.push(job);'),
         'copy_oom_status': (LEAF, '            self.outcome = .out_of_memory;', '            self.outcome = .unavailable;'),
         'old_completion_kept': (LEAF, '            if (std.meta.eql(old.tag.input.document, input.document)) state_for_retire.retiring.push(old) else kept.push(old);', '            kept.push(old);'),
         'prepare_rollback': (LEAF, '        const job = self.state.allocator.create(Job) catch |err| {\n            _ = gate.abandon(tag);', '        const job = self.state.allocator.create(Job) catch |err| {\n            gate.* = previous;'),
@@ -77,7 +77,7 @@ def main():
             with (out / (name + '.log')).open('xb') as log:
                 result = subprocess.run(command, cwd=source, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=600)
             text = (out / (name + '.log')).read_text()
-            binaries = re.findall(r'info\(verbose\): (\S+/test) --maru-expect-tests=9', text)
+            binaries = re.findall(r'info\(verbose\): (\S+/test) --maru-expect-tests=14', text)
             if not binaries:
                 raise RuntimeError('no actual test execution: ' + name)
             binary = Path(binaries[-1])
@@ -87,7 +87,7 @@ def main():
             if name in mutants:
                 if result.returncode == 0 or not re.search(r'FAIL \(Test(?:UnexpectedResult|ExpectedEqual)\)', text):
                     raise RuntimeError('semantic fault not detected: ' + name)
-            elif result.returncode or 'All 9 tests passed.' not in text:
+            elif result.returncode or 'All 14 tests passed.' not in text:
                 raise RuntimeError('normal control failed: ' + name)
             results.append({'name': name, 'returncode': result.returncode, 'source_sha256': sha(leaf),
                             'native_sha256': sha(native), 'binary_sha256': sha(archive), 'log_sha256': sha(out / (name + '.log'))})

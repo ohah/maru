@@ -295,3 +295,18 @@ native 핸들을 해제한 뒤 메인에서 두 Snapshot과 Job을 회수한다.
 [증분 실행·결함 대조와 실측](../../tools/editor-parse-incremental/README.md)은 전체 C 노드 좌표를
 cold 결과와 비교한다. 서비스 완료 경과와 메인 submit 비용을 구분하며 GUI 입력 지연으로 확대하지 않는다.
 UI 연결 전 완료 wake·소비처 수명·실제 입력 지연 검증은 남아 있다.
+
+### 완료 통지 기반
+
+`Options.notify`는 소유자 포인터 없이 워커에서 메인 작업을 예약하는 선택적 함수다. 결과 게시와
+native 퇴역 뒤의 Snapshot 반환 모두 통지를 요청한다. `notification_pending`이 이미 올라가 있으면
+추가 예약을 합친다. callback은 큐 mutex 밖에서 실행하고 메인 처리의 완료를 기다리지 않는다.
+함수는 worker join까지, 이미 예약된 전달 저장소는 서비스와 독립적으로 유지한다.
+
+메인 drain은 `beginDrain`으로 먼저 재무장하고 `reap`과 `take` 반복을 수행한다. 이 순서여야 처리
+도중 생긴 완료가 다음 turn을 예약할 수 있다. stopping 이후 새 통지 예약은 하지 않지만, 앞서 예약된 함수는 join 중 끝날 수 있다. join 뒤 남은
+Snapshot을 메인에서 회수한다. 지연된 외부 전달은 서비스 포인터를 보관하지 않고 현재 소유자를
+다시 찾아야 한다. 실제 OS dispatch·AppSession 조회와 표시 설치는 아직 연결하지 않았다.
+
+[통지 계약과 검증](../../tools/editor-parse-notify/README.md)은 native callback·합치기·재무장·퇴역·
+종료를 검사한다. 이 통과가 실제 GUI wake나 늦은 OS callback의 E2E 증거는 아니다.

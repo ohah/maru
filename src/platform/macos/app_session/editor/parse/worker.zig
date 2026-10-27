@@ -19,6 +19,9 @@ pub const TestAudit = struct {
     wrong_thread: std.atomic.Value(bool) = .init(false),
 };
 pub const Options = struct {
+    /// 워커에서 메인 작업을 예약만 한다. 소유자 포인터를 캡처하거나 메인 처리를 기다리지 않는다.
+    /// 함수는 join까지 유지하며, 이미 예약된 전달의 저장소는 서비스와 독립적으로 유지한다.
+    notify: ?*const fn () void = null,
     /// 워커에서만 호출한다. allocator의 저장소는 Service 종료까지 유지한다.
     copy_allocator: std.mem.Allocator = std.heap.page_allocator,
     audit: if (builtin.is_test) ?*TestAudit else void = if (builtin.is_test) null else {},
@@ -128,7 +131,18 @@ const State = struct {
     active: ?*Job = null,
     held: usize = 0,
     stopping: bool = false,
+    notification_pending: std.atomic.Value(bool) = .init(false),
 
+    // 큐 게시 뒤 호출한다. callback을 실행하는 동안 큐 mutex를 잡지 않는다.
+    fn notifyMainLocked(self: *State) void {
+        if (self.stopping) return;
+        const notify = self.options.notify orelse return;
+        if (self.notification_pending.swap(true, .acq_rel)) return;
+        const io_value = self.io();
+        self.mutex.unlock(io_value);
+        notify();
+        self.mutex.lockUncancelable(io_value);
+    }
     fn recordNative(self: *State, created: bool) void {
         if (builtin.is_test) if (self.options.audit) |audit| {
             if (created) _ = audit.created.fetchAdd(1, .monotonic) else _ = audit.destroyed.fetchAdd(1, .monotonic);
@@ -178,6 +192,7 @@ const State = struct {
                 self.mutex.lockUncancelable(io_value);
                 self.returned.push(job);
                 self.changed.broadcast(io_value);
+                self.notifyMainLocked();
                 continue;
             }
             if (self.stopping) break;
@@ -190,6 +205,7 @@ const State = struct {
                 if (job.cancellation.isRequested()) job.outcome = .cancelled;
                 if (self.stopping) self.retiring.push(job) else self.completed.push(job);
                 self.changed.broadcast(io_value);
+                self.notifyMainLocked();
                 continue;
             }
             self.changed.waitUncancelable(io_value, &self.mutex);
@@ -312,6 +328,12 @@ pub const Service = struct {
         state.changed.signal(io_value);
         state.mutex.unlock(io_value);
         self.reap();
+    }
+    /// 메인 drain의 맨 앞에서 호출한 뒤 reap과 take 반복을 수행한다.
+    /// 먼저 재무장하므로 drain 도중 생긴 완료/퇴역은 다음 통지를 예약할 수 있다.
+    /// 통지는 서비스 포인터를 담지 않으므로 caller는 늦은 통지에서 현재 소유자를 다시 찾는다.
+    pub fn beginDrain(self: *Service) bool {
+        return self.state.notification_pending.swap(false, .acq_rel);
     }
     pub fn take(self: *Service) ?Completion {
         const state = self.state;
@@ -826,4 +848,161 @@ test "parse worker 기준 원문 복사 OOM도 원본과 native 핸들을 보존
     try std.testing.expectEqual(Outcome.out_of_memory, failed.outcome());
     try std.testing.expect(!failed.accept(&gate));
     try expectTree(&first, "pub fn first() void {}\n", .zig);
+}
+
+// OS main queue 대신 원자적 통지만 기록한다. 첫 검사는 mutex 해제 상태도 별도로 계측한다.
+var notice_count: std.atomic.Value(usize) = .init(0);
+var notice_main: std.Thread.Id = undefined;
+var notice_wrong_thread: std.atomic.Value(bool) = .init(false);
+var notice_locked: std.atomic.Value(bool) = .init(false);
+var notice_inspect: ?*State = null;
+fn recordNotice() void {
+    if (std.Thread.getCurrentId() == notice_main) notice_wrong_thread.store(true, .release);
+    if (notice_inspect) |state| {
+        if (state.mutex.tryLock()) state.mutex.unlock(state.io()) else notice_locked.store(true, .release);
+    }
+    _ = notice_count.fetchAdd(1, .release);
+}
+fn resetNotices() void {
+    notice_main = std.Thread.getCurrentId();
+    notice_count.store(0, .release);
+    notice_wrong_thread.store(false, .release);
+    notice_locked.store(false, .release);
+    notice_inspect = null;
+}
+fn waitNotices(count: usize) !void {
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5_000_000_000;
+    while (notice_count.load(.acquire) < count) {
+        try std.testing.expect(std.Io.Clock.awake.now(std.testing.io).nanoseconds < deadline);
+        std.Thread.yield() catch {};
+    }
+}
+fn waitCompleted(service: *Service, count: usize) void {
+    const state = service.state;
+    state.mutex.lockUncancelable(state.io());
+    defer state.mutex.unlock(state.io());
+    while (true) {
+        var found: usize = 0;
+        var next = state.completed.first;
+        while (next) |job| : (next = job.next) found += 1;
+        if (found >= count) return;
+        state.changed.waitUncancelable(state.io(), &state.mutex);
+    }
+}
+test "parse worker 완료 통지는 mutex 밖 워커에서 게시 뒤 전달한다" {
+    resetNotices();
+    var source = try buffer.Buffer.init(std.testing.allocator, "const n = 1;");
+    defer source.deinit();
+    var service = try Service.init(std.testing.allocator, .{ .notify = recordNotice });
+    defer {
+        service.deinit() catch unreachable;
+        notice_inspect = null;
+    }
+    notice_inspect = service.state;
+    var gate: request.Gate = .{};
+    _ = try testQueue(&service, &gate, test_input, source, null);
+    try waitNotices(1);
+    try std.testing.expect(!notice_wrong_thread.load(.acquire));
+    try std.testing.expect(!notice_locked.load(.acquire));
+    try std.testing.expect(service.beginDrain());
+    service.reap();
+    var result = service.take() orelse return error.TestUnexpectedResult;
+    defer result.release();
+    try std.testing.expect(result.accept(&gate));
+}
+test "parse worker 여러 문서 완료는 drain 전 통지 하나로 합친다" {
+    resetNotices();
+    var source = try buffer.Buffer.init(std.testing.allocator, "const n = 1;");
+    defer source.deinit();
+    var service = try Service.init(std.testing.allocator, .{ .notify = recordNotice });
+    defer service.deinit() catch unreachable;
+    var gates = [_]request.Gate{ .{}, .{} };
+    for (&gates, 0..) |*gate, i| {
+        var input = test_input;
+        input.document.slot += @intCast(i);
+        _ = try testQueue(&service, gate, input, source, null);
+    }
+    // 세 번째 C 호출 장벽까지 진행하면 앞선 두 통지 callback도 실제 반환한 상태다.
+    var blocker = try largeTestBuffer(std.testing.allocator);
+    defer blocker.deinit();
+    var pause: syntax.Cancellation.TestGate = .{};
+    defer pause.release();
+    var third_gate: request.Gate = .{};
+    var third_input = test_input;
+    third_input.document.slot += 2;
+    _ = try testQueue(&service, &third_gate, third_input, blocker, &pause);
+    try waitEntered(&pause);
+    waitCompleted(&service, 2);
+    try waitNotices(1);
+    try std.testing.expectEqual(@as(usize, 1), notice_count.load(.acquire));
+    try std.testing.expect(service.beginDrain());
+    for (&gates) |*gate| {
+        var result = service.take() orelse return error.TestUnexpectedResult;
+        defer result.release();
+        try std.testing.expect(result.accept(gate));
+    }
+    pause.release();
+    var third = testTake(&service);
+    defer third.release();
+    try std.testing.expect(third.accept(&third_gate));
+}
+test "parse worker drain 재무장 뒤 새 완료는 별도 통지를 전달한다" {
+    resetNotices();
+    var source = try buffer.Buffer.init(std.testing.allocator, "const n = 1;");
+    defer source.deinit();
+    var service = try Service.init(std.testing.allocator, .{ .notify = recordNotice });
+    defer service.deinit() catch unreachable;
+    var gate: request.Gate = .{};
+    _ = try testQueue(&service, &gate, test_input, source, null);
+    try waitNotices(1);
+    try std.testing.expect(service.beginDrain());
+    var first = service.take() orelse return error.TestUnexpectedResult;
+    defer first.release();
+    try std.testing.expect(first.accept(&gate));
+    var input = test_input;
+    input.document.slot += 1;
+    var other: request.Gate = .{};
+    _ = try testQueue(&service, &other, input, source, null);
+    try waitNotices(2);
+    try std.testing.expect(service.beginDrain());
+    var second = service.take() orelse return error.TestUnexpectedResult;
+    defer second.release();
+    try std.testing.expect(second.accept(&other));
+}
+test "parse worker native 퇴역 반환도 tick 없이 메인 회수를 깨운다" {
+    resetNotices();
+    var source = try buffer.Buffer.init(std.testing.allocator, "const n = 1;");
+    defer source.deinit();
+    var audit: TestAudit = .{ .main_thread = std.Thread.getCurrentId() };
+    var service = try Service.init(std.testing.allocator, .{ .notify = recordNotice, .audit = &audit });
+    defer service.deinit() catch unreachable;
+    var gate: request.Gate = .{};
+    _ = try testQueue(&service, &gate, test_input, source, null);
+    try waitNotices(1);
+    try std.testing.expect(service.beginDrain());
+    var result = service.take() orelse return error.TestUnexpectedResult;
+    result.release();
+    try waitNotices(2);
+    try std.testing.expect(service.beginDrain());
+    service.reap();
+    try std.testing.expectEqual(@as(usize, 1), audit.reclaimed.load(.acquire));
+    try std.testing.expect(service.take() == null);
+}
+test "parse worker 종료는 미전달 완료를 회수하고 추가 통지를 만들지 않는다" {
+    resetNotices();
+    var source = try buffer.Buffer.init(std.testing.allocator, "const n = 1;");
+    defer source.deinit();
+    var audit: TestAudit = .{ .main_thread = std.Thread.getCurrentId() };
+    var service = try Service.init(std.testing.allocator, .{ .notify = recordNotice, .audit = &audit });
+    var open = true;
+    defer if (open) service.deinit() catch unreachable;
+    var gate: request.Gate = .{};
+    _ = try testQueue(&service, &gate, test_input, source, null);
+    try waitNotices(1);
+    try std.testing.expect(service.beginDrain());
+    try service.deinit();
+    open = false;
+    try std.testing.expectEqual(@as(usize, 1), notice_count.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), audit.reclaimed.load(.acquire));
+    try std.testing.expectEqual(audit.created.load(.acquire), audit.destroyed.load(.acquire));
 }

@@ -7016,8 +7016,8 @@ pub fn build(b: *std.Build) void {
         b.step("measure-editor-parse-incremental", "Measure explicit incremental parse handoff").dependOn(&run_parse_measure.step);
         const parse_worker_tests = addProjectTest(b, .{ .root_module = parse_worker_mod, .filters = &.{"parse worker"} });
         const run_parse_worker = b.addRunArtifact(parse_worker_tests);
-        run_parse_worker.addArg("--maru-expect-tests=14");
-        run_parse_worker.addArg("--maru-expect-passed=14");
+        run_parse_worker.addArg("--maru-expect-tests=19");
+        run_parse_worker.addArg("--maru-expect-passed=19");
         b.step("test-editor-parse-worker", "Verify native parse queue ownership and cancellation").dependOn(&run_parse_worker.step);
         test_step.dependOn(&run_parse_worker.step);
         macos_only_test_step.dependOn(&run_parse_worker.step);

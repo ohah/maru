@@ -6945,8 +6945,40 @@ pub fn build(b: *std.Build) void {
     // **`TS*`로 짓지 않았다.** 그 이름은 `app_session.zig`의 chrome 탭 스타일 판정자가 이미 쓴다
     // (`TS1 chrome.tab-style=underline` …). 편집기 필터에 `"TS"`를 적으면 **그쪽이 골라져 초록이
     // 되는데** 구문 판정자는 한 개도 안 돈다 — `CRT`·`LANG`이 낸 거짓 초록과 정확히 같은 모양이다.
+    if (target.result.os.tag == .macos) {
+        const parse_worker_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/app_session/editor/parse/worker.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "syntax", .module = syntax_mod } },
+        });
+        const parse_worker_native = b.addExecutable(.{
+            .name = "maru-parse-worker-native",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/editor-parse-worker/native.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{ .{ .name = "worker", .module = parse_worker_mod }, .{ .name = "maru", .module = maru_mod } },
+            }),
+        });
+        const run_parse_native = b.addRunArtifact(parse_worker_native);
+        run_parse_native.has_side_effects = true;
+        b.step("test-editor-parse-worker-native", "Run production-mode native parse service").dependOn(&run_parse_native.step);
+        test_step.dependOn(&run_parse_native.step);
+        macos_only_test_step.dependOn(&run_parse_native.step);
+        const parse_worker_tests = addProjectTest(b, .{ .root_module = parse_worker_mod, .filters = &.{"parse worker"} });
+        const run_parse_worker = b.addRunArtifact(parse_worker_tests);
+        run_parse_worker.addArg("--maru-expect-tests=9");
+        run_parse_worker.addArg("--maru-expect-passed=9");
+        b.step("test-editor-parse-worker", "Verify native parse queue ownership and cancellation").dependOn(&run_parse_worker.step);
+        test_step.dependOn(&run_parse_worker.step);
+        macos_only_test_step.dependOn(&run_parse_worker.step);
+    }
     const syntax_tests = addProjectTest(b, .{ .root_module = syntax_mod });
     const run_syntax_tests = b.addRunArtifact(syntax_tests);
+    b.step("test-syntax", "Run syntax provider regression judges").dependOn(&run_syntax_tests.step);
     run_syntax_tests.setCwd(b.path("."));
     editor_test_step.dependOn(&run_syntax_tests.step);
     // `test`에도 건다 — 편집기 스텝은 되먹임용이고, 합류 게이트는 이쪽이다.

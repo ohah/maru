@@ -485,6 +485,31 @@ fn predicatePasses(query: *c.TSQuery, steps: []const c.TSQueryPredicateStep, mat
 ///
 /// `onEdit`은 `ts_tree_edit` 뒤 옛 트리로 증분 파싱하고, 예산이 끝나면 다음 프레임에 재개한다.
 /// 전체 교체는 `setSource`로 구분한다. 고정 헤더 집계 사본에도 같은 편집 좌표를 적용한다.
+/// 작업이 소유하고 실제 C 호출 반환까지 보존하는 취소 저장소다.
+/// 요청은 협력적이다. true 저장만으로 parser나 입력을 해제하면 안 된다.
+pub const Cancellation = struct {
+    requested: std.atomic.Value(bool) = .init(false),
+    gate: if (@import("builtin").is_test) ?*TestGate else void = if (@import("builtin").is_test) null else {},
+
+    pub const TestGate = struct {
+        entered: std.atomic.Value(bool) = .init(false),
+        released: std.atomic.Value(bool) = .init(false),
+        pub fn release(self: *TestGate) void {
+            self.released.store(true, .release);
+        }
+        fn wait(self: *TestGate) void {
+            self.entered.store(true, .release);
+            while (!self.released.load(.acquire)) std.Thread.yield() catch {};
+        }
+    };
+    pub fn request(self: *Cancellation) void {
+        self.requested.store(true, .release);
+    }
+    pub fn isRequested(self: *const Cancellation) bool {
+        return self.requested.load(.acquire);
+    }
+};
+
 pub const Provider = struct {
     parser: *c.TSParser,
     tree: ?*c.TSTree = null,
@@ -551,6 +576,15 @@ pub const Provider = struct {
         }
         var self: Provider = .{ .parser = parser, .slot = slot };
         _ = self.setSourceBudgeted(source, budget_ns);
+        return self;
+    }
+
+    /// 독립 작업용 cold parse. token과 source는 이 호출이 반환할 때까지 살아 있어야 한다.
+    /// 중단되면 tree가 없으며 caller가 취소와 native 실패를 구분해 정리한다.
+    pub fn initCancellable(source: []const u8, lang: Language, token: *const Cancellation) ?Provider {
+        var self = Provider.init("", lang, 0) orelse return null;
+        if (source.len > 0 and source.len <= max_parse_bytes)
+            _ = self.parseCancellable(source, null, 0, token);
         return self;
     }
 
@@ -653,8 +687,12 @@ pub const Provider = struct {
     /// 하나이고 그것은 `TSInput`(콜백)만 받는다 — 문자열 변형이 없다. 그래서 슬라이스를 한 번에
     /// 돌려주는 reader를 얹는다(조각내지 않는다 — 우리 버퍼는 이미 연속이다).
     fn parseBudgeted(self: *Provider, source: []const u8, old_tree: ?*c.TSTree, budget_ns: u64) ParseStatus {
+        return self.parseCancellable(source, old_tree, budget_ns, null);
+    }
+
+    fn parseCancellable(self: *Provider, source: []const u8, old_tree: ?*c.TSTree, budget_ns: u64, token: ?*const Cancellation) ParseStatus {
         self.budget_ns = budget_ns;
-        var ctx: ParseCtx = .{ .source = source, .deadline_ns = monotonicNs() + budget_ns, .budget_ns = budget_ns };
+        var ctx: ParseCtx = .{ .source = source, .deadline_ns = monotonicNs() + budget_ns, .budget_ns = budget_ns, .cancellation = token };
         const input: c.TSInput = .{
             .payload = &ctx,
             .read = readSlice,
@@ -684,6 +722,7 @@ pub const Provider = struct {
         source: []const u8,
         deadline_ns: u64,
         budget_ns: u64,
+        cancellation: ?*const Cancellation = null,
     };
 
     /// 슬라이스를 통째로 돌려주는 reader. 끝을 넘으면 길이 0 — tree-sitter가 그것을 EOF로 읽는다.
@@ -704,6 +743,10 @@ pub const Provider = struct {
     fn onProgress(state: [*c]c.TSParseState) callconv(.c) bool {
         const st = state orelse return false;
         const ctx: *ParseCtx = @ptrCast(@alignCast(st.*.payload.?));
+        if (ctx.cancellation) |token| {
+            if (@import("builtin").is_test) if (token.gate) |gate| gate.wait();
+            if (token.isRequested()) return true;
+        }
         if (ctx.budget_ns == 0) return false;
         return monotonicNs() >= ctx.deadline_ns;
     }

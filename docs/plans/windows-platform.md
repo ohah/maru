@@ -1065,3 +1065,54 @@ RTL도 텍스트 범위로 매핑하며, 미확인 소스·빈/초과 범위·�
 통과로 세지 않는다. 캐시 파일은 삭제하지 않고 완료된 출력의 실제 할당량을 확인해
 압축했다. 이 변경은 아직 terminal frame 입력을 바꾸지 않으므로 새 합자 UI/E2E
 완료를 주장하지 않는다.
+
+### Windows positioned terminal ink 연결 — 진행 중
+
+셰이핑 레코드와 `GlyphRun`에 선택적 소수점 픽셀 오프셋을 보존하고, 공통 renderer의
+`positionedGlyph`가 기존 `GpuGlyph` DTO로 투영하도록 준비했다. 위치는 raster cache
+신원에 포함하지 않으므로 같은 글리프가 이동해도 슬롯을 재사용한다. raster 사각형은
+셀 advance가 아니라 atlas slot 크기를 사용하며, 컬러 표식과 atlas 재정규화를 보존한다.
+기존 정수 셀 투영은 positioned 레코드를 명시적으로 거부한다. 기존 `NativeMetalCell`
+ABI의 필드·크기를 바꾸지 않는다.
+
+`zig build test-positioned-glyph`는 현재 15개 검사다. 레코드 위치·가로/세로 오프셋·
+raster 폭·컬러 표식과 잘못된 경로 수락에 더해 배경 중복·선택 배경의 뒤늦은 덮기·
+wide 커서·커서의 동반 글리프 누락·pane 원점·conceal 노출 등 compiled 결함 13개를
+검출하고 Debug·ReleaseFast 대조를 통과했다. 근거는
+`.zig-cache/positioned-layer-adversarial.json`이다. 기존/새 metal-frame 회귀 98개도
+통과했다(`.zig-cache/positioned-layer-legacy-regression.log`).
+
+공통 `PositionedTerminalFrame`은 base → ink → overlays → cursor_ink를 분리하고,
+Windows 앱 루프는 위치가 있는 프레임에만 이 경로를 사용한다. 네 스트림의 상한을
+함께 예약해 이후 chrome의 `appendAssumeCapacity`까지 보존한다. 각 글리프는 배경을
+재도색하지 않으며 블록 커서는 wide 셀의 동반 글리프를 모두 다시 그린다. `conceal`은
+기존 셀과 positioned 양쪽에서 커서 색으로 다시 드러내지 않는다. Windows 변환은
+배경 sentinel을 atlas (0,0) 샘플로 바꾸지 않고, 음수 GPOS overhang을 pane 경계에서
+UV와 함께 자른다. append 실패는 호출자 배열의 기존 prefix를 보존한다.
+
+`zig build test-windows-positioned-frame`은 native 8개와 clip 3개를 실행한다.
+실제 D3D11 backbuffer를 staging texture로 읽어 같은 사각형의 두 mask가 남기는
+빨강·초록과 파랑 배경·흰 바깥 픽셀을 확인하고 BMP를 저장했다. 이 검사는 숨겨진
+소유 창의 GPU 합성이며 데스크톱 입력·전체 앱/합자 검증과 구분한다. 전달 순서·부분
+append rollback·pane 누출·sentinel·stale UV·잘못된 메트릭·clip UV의 native compiled
+결함 7개를 검출하고 Debug·ReleaseFast 원본을 통과했다. sentinel 변형은 실제 GPU
+픽셀 검사도 거절했다. 근거는 `.zig-cache/windows-positioned-native-adversarial.json`과
+`.zig-cache/windows-positioned-frame-debug.log`다.
+
+최초 rollback 삭제 변형은 제자리 remap 때문에 메모리 실패 검사를 빠져나갔다.
+resize/remap을 거부하는 allocator로 재할당을 강제하고, 일부 append 후 실제 실패를
+목격했는지도 확인하도록 보강한 뒤 새 사본에서 7개 전체를 다시 실행했다. 이전 시도는
+`.zig-cache/windows-positioned-native-dff58608618b440cbdbb52d1867ab093/invalidated-attempt.json`에
+실패 증거로 보존한다. 아직 terminal frame은 positioned 레코드를 생성하지 않는다.
+run 준비·native raster origin·native 셰이핑 결과 연결과 실제 앱 합자 on/off 픽셀 검증은
+계속 남아 있다.
+
+위 staged 소스는 일반 Debug 앱 빌드·Debug 집중 14개 묶음·문서 검사·교차 컴파일·
+전체 경계 272개를 통과했다. `.zig-cache/positioned-terminal-gates-20261028/result.json`은
+검증 중 HEAD·추적 소스 불변도 확인한다. 동일 실행 파일 SHA-256
+`a3a67fd1a20ca42e58d8c504c8ab7a9ed8ad9702432419fd18578010bd0d0524`의 실제 앱에서
+폰트 변경/복원 5개와 터미널 메뉴 12개를 재실행하고 캡처·정상 종료를 확인했다.
+메뉴 검사는 원래 빈 클립보드를 복원했다. 앱의 표시 드라이버는 `hardware`다.
+근거는 `.zig-cache/positioned-terminal-font-app-regression.json`과
+`.zig-cache/positioned-terminal-popup-app-regression.json`이다. HWND/PID/바이너리
+검증을 거친 synthetic 입력이며 물리 키보드·IME 또는 합자 표시 완료를 뜻하지 않는다.

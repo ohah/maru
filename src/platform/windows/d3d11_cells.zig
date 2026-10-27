@@ -877,6 +877,55 @@ pub fn clipCellVertical(c: Cell, min_y: f32, max_y: f32) ?Cell {
     return out;
 }
 
+/// Positioned terminal ink can overhang any edge of its pane. Reuse the same
+/// UV-preserving clipping rule on both axes instead of stretching clipped ink.
+pub fn clipCellRect(c: Cell, viewport: [4]f32) ?Cell {
+    for (c.rect) |value| if (!std.math.isFinite(value)) return null;
+    for (viewport) |value| if (!std.math.isFinite(value)) return null;
+    if (c.rect[2] <= 0 or c.rect[3] <= 0 or viewport[2] <= 0 or viewport[3] <= 0) return null;
+    if (!std.math.isFinite(c.rect[0] + c.rect[2]) or !std.math.isFinite(c.rect[1] + c.rect[3])) return null;
+    const right = viewport[0] + viewport[2];
+    const bottom = viewport[1] + viewport[3];
+    if (!std.math.isFinite(right) or !std.math.isFinite(bottom)) return null;
+    var swapped = c;
+    swapped.rect = .{ c.rect[1], c.rect[0], c.rect[3], c.rect[2] };
+    swapped.uv = .{ c.uv[1], c.uv[0], c.uv[3], c.uv[2] };
+    const horizontal = clipCellVertical(swapped, viewport[0], right) orelse return null;
+    var restored = horizontal;
+    restored.rect = .{ horizontal.rect[1], horizontal.rect[0], horizontal.rect[3], horizontal.rect[2] };
+    restored.uv = .{ horizontal.uv[1], horizontal.uv[0], horizontal.uv[3], horizontal.uv[2] };
+    return clipCellVertical(restored, viewport[1], bottom);
+}
+
+test "positioned terminal clip keeps both axes and UV subrect aligned" {
+    const cell: Cell = .{ .rect = .{ 5, 10, 20, 40 }, .uv = .{ 0.0, 0.0, 1.0, 1.0 }, .fg = .{ 1, 1, 1, 1 }, .bg = .{ 0, 0, 0, 0 } };
+    const clipped = clipCellRect(cell, .{ 10, 20, 10, 20 }).?;
+    try std.testing.expectEqual([4]f32{ 10, 20, 10, 20 }, clipped.rect);
+    try std.testing.expectEqual([4]f32{ 0.25, 0.25, 0.75, 0.75 }, clipped.uv);
+    try std.testing.expectEqual(cell, clipCellRect(cell, .{ 0, 0, 100, 100 }).?);
+    var solid = cell;
+    solid.uv = .{ -1, -1, -1, -1 };
+    try std.testing.expectEqual(solid.uv, clipCellRect(solid, .{ 10, 20, 10, 20 }).?.uv);
+}
+
+test "positioned terminal clip rejects empty disjoint and nonfinite rectangles" {
+    const cell: Cell = .{ .rect = .{ 5, 10, 20, 40 }, .uv = .{ 0, 0, 1, 1 }, .fg = .{ 1, 1, 1, 1 }, .bg = .{ 0, 0, 0, 0 } };
+    for ([_][4]f32{ .{ 25, 10, 10, 10 }, .{ 0, 50, 10, 10 }, .{ 5, 10, 0, 10 }, .{ 5, 10, 10, -1 }, .{ std.math.nan(f32), 0, 1, 1 }, .{ 0, 0, std.math.inf(f32), 1 } }) |viewport|
+        try std.testing.expect(clipCellRect(cell, viewport) == null);
+    var invalid = cell;
+    invalid.rect[0] = std.math.inf(f32);
+    try std.testing.expect(clipCellRect(invalid, .{ 0, 0, 100, 100 }) == null);
+}
+
+test "positioned terminal clip preserves original paint geometry and color atlas coordinates" {
+    const cell: Cell = .{ .rect = .{ 5, 10, 20, 40 }, .uv = .{ 2, 0, 3, 1 }, .fg = .{ 1, 1, 1, 1 }, .bg = .{ 0, 0, 0, 0 }, .paint_rect = .{ 5, 10, 20, 40 }, .shape = .{ 3, 3, 3, 3 }, .paint_info = .{ 2, 0, 0, 0 } };
+    const clipped = clipCellRect(cell, .{ 10, 20, 10, 20 }).?;
+    try std.testing.expectEqual([4]f32{ 2.25, 0.25, 2.75, 0.75 }, clipped.uv);
+    try std.testing.expectEqual(cell.paint_rect, clipped.paint_rect);
+    try std.testing.expectEqual(cell.shape, clipped.shape);
+    try std.testing.expectEqual(cell.paint_info, clipped.paint_info);
+}
+
 test "clipCellVertical: 아래를 자르면 v1 이 같은 비율로 올라간다" {
     const c: Cell = .{
         .rect = .{ 10, 100, 8, 20 },

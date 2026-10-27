@@ -49,6 +49,39 @@ pub const FrameBuilder = struct {
     }
 };
 
+/// Consume the shared ordered packet in one append transaction. Clipping occurs
+/// after native/pixel projection so a negative GPOS offset cannot paint chrome.
+pub fn appendPositionedFrame(
+    allocator: std.mem.Allocator,
+    cells: *std.ArrayList(d3d11_cells.Cell),
+    frame: metal_frame.PositionedTerminalFrame,
+    cell_w: u32,
+    cell_h: u32,
+    atlas_w: u32,
+    atlas_h: u32,
+    viewport: [4]f32,
+) !void {
+    if (cell_w == 0 or cell_h == 0 or atlas_w == 0 or atlas_h == 0) return error.InvalidFrameMetrics;
+    const original_len = cells.items.len;
+    errdefer cells.shrinkRetainingCapacity(original_len);
+    for (frame.base) |native| {
+        const clipped = d3d11_cells.clipCellRect(cellFromNative(native, cell_w, cell_h, atlas_w, atlas_h), viewport) orelse continue;
+        try cells.append(allocator, clipped);
+    }
+    for (frame.ink) |glyph| {
+        const clipped = d3d11_cells.clipCellRect(cellFromGpuGlyph(glyph, atlas_w, atlas_h), viewport) orelse continue;
+        try cells.append(allocator, clipped);
+    }
+    for (frame.overlays) |native| {
+        const clipped = d3d11_cells.clipCellRect(cellFromNative(native, cell_w, cell_h, atlas_w, atlas_h), viewport) orelse continue;
+        try cells.append(allocator, clipped);
+    }
+    for (frame.cursor_ink) |glyph| {
+        const clipped = d3d11_cells.clipCellRect(cellFromGpuGlyph(glyph, atlas_w, atlas_h), viewport) orelse continue;
+        try cells.append(allocator, clipped);
+    }
+}
+
 /// 한 프레임이 실제로 무엇을 만들었는지. **셋을 갈라 센다** — 합쳐 세면 폰트 경로가 죽어도 합성 글리프가
 /// 수를 채워 성공처럼 보인다(W7.2b·W7.3에서 같은 함정을 두 번 겪었다).
 pub const FrameCounts = struct {
@@ -140,7 +173,9 @@ pub fn cellFromNative(
             @floatFromInt(cell_w * width_cells),
             @floatFromInt(cell_h),
         },
-        .uv = d3d11_cells.uvFromAtlasRect(
+        // Background/cursor sentinels are not an atlas sample at pixel (0,0).
+        // That texel can contain ink, which would replace a solid fill with it.
+        .uv = if (native.u0 < 0 or native.atlas_width_px == 0 or native.atlas_height_px == 0) .{ -1, -1, -1, -1 } else d3d11_cells.uvFromAtlasRect(
             native.atlas_x_px,
             native.atlas_y_px,
             native.atlas_width_px,

@@ -61,6 +61,7 @@ test {
     _ = win_layout_resize;
     _ = @import("platform/windows/terminal/typography_test.zig");
     _ = @import("platform/windows/terminal/glyph_sources_test.zig");
+    _ = @import("platform/windows/terminal/positioned_frame_test.zig");
     // Cross-target tests must compile the native adapter as well as the common worker.
     if (comptime builtin.os.tag == .macos) _ = @import("platform/macos/file_tree_remote.zig").transport;
     _ = editor_document;
@@ -14320,13 +14321,29 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (colors.selection != null) selection_frames += 1;
 
         // ⑶ 중립 투영 → D3D11 셀.
-        const native = try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(
+        var positioned_terminal: ?maru.renderer.metal_frame.PositionedTerminalFrame = null;
+        for (tick.frame.render_frame.glyph_quad_frame.glyphs) |glyph| {
+            if (glyph.run.placement == null) continue;
+            positioned_terminal = try maru.renderer.metal_frame.buildPositionedTerminalFrame(
+                allocator,
+                tick.frame.render_frame.glyph_quad_frame,
+                tick.frame.render_frame.draw_list.cells,
+                colors,
+                cell_w,
+                cell_h,
+                geom.terminal.x,
+                geom.terminal.y,
+            );
+            break;
+        }
+        defer if (positioned_terminal) |*positioned| positioned.deinit(allocator);
+        const native = if (positioned_terminal) |positioned| positioned.base else try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(
             allocator,
             tick.frame.render_frame.glyph_quad_frame,
             tick.frame.render_frame.draw_list.cells,
             colors,
         );
-        defer allocator.free(native);
+        defer if (positioned_terminal == null) allocator.free(native);
         // **터미널을 자기 사각형에 놓는다**(§2m.31). 원점을 안 찍으면 도크가 있어도 터미널이 창
         // 왼쪽 위에서 시작해 도크 밑으로 깔린다.
         maru.renderer.metal_frame.setCellsPaneOrigin(native, geom.terminal.x, geom.terminal.y);
@@ -14398,7 +14415,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             }
         }
         cells.clearRetainingCapacity();
-        try cells.ensureTotalCapacity(allocator, native.len + dock_cells.items.len + sidebar_cells.items.len + titlebar_cells.items.len);
+        // The positioned packet adds ink and cursor streams after its base.
+        // Reserve them before subsequent chrome appendAssumeCapacity calls too.
+        const terminal_cell_capacity = if (positioned_terminal) |positioned|
+            positioned.base.len + positioned.ink.len + positioned.overlays.len + positioned.cursor_ink.len
+        else
+            native.len;
+        try cells.ensureTotalCapacity(allocator, terminal_cell_capacity + dock_cells.items.len + sidebar_cells.items.len + titlebar_cells.items.len);
         // **사이드바·도크가 먼저다** — 그리는 순서가 z 순서이고, 터미널 글자가 그 배경에 덮이면 안 된다.
         cells.appendSliceAssumeCapacity(sidebar_cells.items);
         // Titlebar switcher cells are composited after the titlebar background below.
@@ -14650,6 +14673,11 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 rebuildDockAll(allocator, &dock_cells, geom, renderer_state, builder, dock_rows.items, chrome_cell_w, chrome_cell_h, pipeline, &atlas_w, &atlas_h, &dock_region_uploads, &dock_cells_outside, dock_scroll_px, &dock_scroll_shift, &dock_draw_start, &dock_tree_top_px, &dock_top_spill, &dock_bottom_spill, &dock_rows_drawn, &dock_tree_frame, dock_view, &chrome_tokens, &view_bar_frame, &view_bar_glyph_top, .{ .state = &scm_state, .opts = scm_opts, .built = &scm_built, .clip = &scm_clip, .scroll = &scm_scroll, .viewport_h = &scm_scroll_view_h, .max_offset = &scm_scroll_max }, .{ .state = &agent_state, .opts = agent_opts, .built = &agent_built, .clip = &agent_clip, .scroll = &agent_scroll, .viewport_h = &agent_scroll_view_h, .max_offset = &agent_scroll_max }) catch {};
                 rebuildSidebarCells(allocator, &sidebar_cells, geom, titlebar_px, sidebar_w, chrome_cell_w, chrome_cell_h, sidebar_cards.items, sidebarActiveSlot(sidebar_cards.items, active_view), &chrome_tokens, renderer_state, builder, pipeline, &atlas_w, &atlas_h, &sidebar_uploads, &sidebar_glyphs, &sidebar_outside, &sidebar_frame, &sidebar_header_frame, &sidebar_header_h, &sidebar_header_icon_band, &sidebar_header_icon_glyphs, &sidebar_header_search_glyphs, &sidebar_header_outside, &sidebar_card_over_header, &sidebar_cells_clipped, &sidebar_cards_visible, &sidebar_header_drawn, sidebar_hover_slot, sidebar_hover_header, sidebar_scroll_px, &sidebar_first_visible, &sidebar_first_band_y, &sidebar_partial, &sidebar_active_band_y, &sidebar_card_cols, &sidebar_card_columns, searchDisplay(allocator, &search_display, &search), search_focused) catch {};
             }
+        } else if (positioned_terminal) |positioned| {
+            try win32_terminal.appendPositionedFrame(allocator, &cells, positioned, cell_w, cell_h, atlas_w, atlas_h, .{
+                @floatFromInt(geom.terminal.x), @floatFromInt(geom.terminal.y),
+                @floatFromInt(geom.terminal.w), @floatFromInt(geom.terminal.h),
+            });
         } else for (native) |n| cells.appendAssumeCapacity(win32_terminal.cellFromNative(n, cell_w, cell_h, atlas_w, atlas_h));
         // **여기까지가 터미널이다.** 아래 침범 판정이 이 구간만 봐야 한다 — 띠를 함께 세면 띠가 창
         // 폭을 가로지르고 `y=0` 에서 시작하므로 **두 판정이 영원히 0 이 아니게 되어 죽는다**

@@ -9,7 +9,7 @@
 //!   자기 값으로 다시 넣고(중복 키는 첫 항목이 이기므로 부모 것을 먼저 뺀다) `TERM_PROGRAM_VERSION` 은 넣지 않는다. 언어 서버는
 //!   터미널 안이 아니다.
 //! - `TERMINFO` — 바깥 터미널의 terminfo DB. 우리 `TERM` 을 엉뚱한 곳에서 찾는다.
-//! - `CLICOLOR_FORCE`·`FORCE_COLOR` — 런처·CI 가 남긴 색 강제 override. maru 는 색 capability 를 `TERM`/`COLORTERM` 으로만
+//! - `NO_COLOR`·`CLICOLOR_FORCE`·`FORCE_COLOR` — 런처·CI 가 남긴 색 비활성화/강제 override. maru 는 색 capability 를 `TERM`/`COLORTERM` 으로만
 //!   알린다.
 //! - `MARU_PANE_ID`·`MARU_HOOK_INSTANCE`·`MARU_HOOK_PANE` — 컨트롤 플레인 self selector·에이전트 훅 로그 경로(docs/agent-hooks.md
 //!   §4). 물려받으면 다른 surface 를 자기로 오인하고 다른 인스턴스의 로그에 쓴다.
@@ -18,10 +18,10 @@
 const std = @import("std");
 
 pub const terminal_session_keys = [_][]const u8{
-    "TERM",                                    "COLORTERM",      "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
-    "TERMINFO",                                "CLICOLOR_FORCE", "FORCE_COLOR",  "MARU_PANE_ID",
-    "MARU_HOOK_INSTANCE",                      "MARU_HOOK_PANE", "TMUX",         "TMUX_PANE",
-    @import("agent_log_format.zig").local_env,
+    "TERM",         "COLORTERM",                               "TERM_PROGRAM",   "TERM_PROGRAM_VERSION",
+    "NO_COLOR",     "TERMINFO",                                "CLICOLOR_FORCE", "FORCE_COLOR",
+    "MARU_PANE_ID", "MARU_HOOK_INSTANCE",                      "MARU_HOOK_PANE", "TMUX",
+    "TMUX_PANE",    @import("agent_log_format.zig").local_env,
 };
 
 /// 환경 항목(`KEY=VALUE`)의 키. `=` 가 없으면 `null`. Windows 의 `=C:=C:\work` 처럼 이름이 `=` 로 시작하는 항목은 키가 빈다.
@@ -55,4 +55,8 @@ test "inherited_env: 목록의 키는 떨구고 접두만 같은 키·값 속 �
     try std.testing.expect(!isTerminalSession("term=x", false));
     try std.testing.expect(isTerminalSession("term=x", true));
     try std.testing.expect(isTerminalSession("Tmux_Pane=%1", true));
+    try std.testing.expect(isTerminalSession("NO_COLOR=", false));
+    try std.testing.expect(isTerminalSession("no_color=1", true));
+    try std.testing.expect(!isTerminalSession("no_color=1", false));
+    try std.testing.expect(!isTerminalSession("NO_COLORFUL=1", false));
 }

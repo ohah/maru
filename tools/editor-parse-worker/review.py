@@ -49,7 +49,7 @@ def main():
     mutants = {
         'native_cancel_ignored': (NATIVE, '            if (token.isRequested()) return true;', '            _ = token.isRequested();'),
         'waiting_not_replaced': (LEAF, '                if (job.basis != null) self.retiring.push(job) else self.returned.push(job);', '                kept.push(job);'),
-        'copy_oom_status': (LEAF, '            self.outcome = .out_of_memory;', '            self.outcome = .unavailable;'),
+        'copy_oom_status': (LEAF, '        const bytes = self.snapshot.copyRange(allocator, 0, self.snapshot.byteLen()) catch {\n            self.outcome = .out_of_memory;', '        const bytes = self.snapshot.copyRange(allocator, 0, self.snapshot.byteLen()) catch {\n            self.outcome = .unavailable;'),
         'old_completion_kept': (LEAF, '            if (std.meta.eql(old.tag.input.document, input.document)) state_for_retire.retiring.push(old) else kept.push(old);', '            kept.push(old);'),
         'prepare_rollback': (LEAF, '        const job = self.state.allocator.create(Job) catch |err| {\n            _ = gate.abandon(tag);', '        const job = self.state.allocator.create(Job) catch |err| {\n            gate.* = previous;'),
     }

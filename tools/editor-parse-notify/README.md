@@ -32,3 +32,5 @@ python3 tools/editor-parse-notify/review.py --output /tmp/new-parse-notify --dep
 제품 지연/RSS 예산은 미검증이다. 사용자 파싱 실패 정책과 새 메모리 한도를 정하지 않는다.
 
 실행 증거는 `/Users/yoonhb/.cache/maru-agent-artifacts/parse-notify-main-review/`에 원본/변형 소스·실행 바이너리·로그·해시 원장으로 보존한다. 정상 전후 대조와 다섯 assertion 실패를 확인했다. 수집 기준 Git ID와 실제 작업 소스 inventory는 구분하며, 최종 소스도 inventory와 대조한다. 집중 ReleaseFast 및 production-mode 실행 로그는 `parse-notify-main-release.log`다.
+
+후속 [메인 큐·문서 수명 연결](../editor-parse-runtime/README.md)은 실제 Apple 전달과 AppSession 파괴를 별도로 검증한다. 위 독립 서비스 검증의 범위를 GUI/IME 검증으로 확대하지 않는다.

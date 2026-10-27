@@ -32,7 +32,7 @@
 - `mise exec -- zig build test-editor-bracket-range-cursor test-editor-bracket-range-cursor-product -j2`: 범위 수집의 독립 전체 순회·오류 복구·cursor 불일치·할당 실패와 제품 색/탐색·Undo/Redo를 검사한다. `-Doptimize=ReleaseFast`도 지원한다. [계획과 재현](plans/editor-bracket-range-cursor.md)을 따른다.
 - pane 프레임 준비 비용: [사본 실행·집계·독립 손상 검증 명령](../tools/editor-pane-measure/results.md). 제품을 바꾸지 않으며 pane 내부 호출만 센다.
 - `mise exec -- zig build test-editor-snapshot-clone -j2`: 원본 버퍼·최초 Snapshot 종료 뒤 복사 Snapshot의 독립 참조를 검사한다. 증분 인계 실측·결함 대조는 [별도 명령](../tools/editor-parse-incremental/README.md)을 따른다.
-- 파싱 완료 통지: [hook·재무장·퇴역 통지 검증](../tools/editor-parse-notify/README.md). 실제 OS main queue·UI에는 연결하지 않았다.
+- 파싱 완료 통지: [hook·재무장·퇴역 통지 검증](../tools/editor-parse-notify/README.md). 실제 main queue·문서 수명 연결은 다음 runtime 검증을 따른다.
 - native 파싱 서비스: `mise exec -- zig build test-editor-parse-worker test-editor-parse-worker-native test-syntax -j2`(macOS). 실제 큐·취소·자원 반환과 production-mode 실행을 [검증](../tools/editor-parse-worker/README.md)한다. UI에는 연결하지 않았다.
 - 파싱 요청 수락 문턱: `mise exec -- zig build test-editor-parse-request -j2`. `begin`·준비 후 `publish`·현재 결과의 단발 `accept`·닫기/고갈 무효화를 검사한다. [실제 Zig 결함 대조](../tools/editor-parse-request/README.md)를 따른다.
 - 파싱 결과 인계 기계: `mise exec -- zig build test-editor-syntax-stamp test-editor-shared-parse-core test-editor-shared-parse-product -j2`. [검증 범위와 제품 연결 조건](plans/editor-shared-parse-reuse.md)을 따른다.
@@ -2205,3 +2205,5 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 신뢰·환경 이름 목록 IME: `mise exec -- zig build test-trust-picker-ime -j2`는 두 모드의 범위·owner·실패 원자성과
 후보 Return/관리·닫기 경계를 확인한다. 실제 후보창과 사용자 신뢰/환경을 쓰지 않는 격리 절차는
 [구현 계획](plans/trust-picker-ime.md)을 따른다.
+
+- 파싱 main queue·문서 수명: `mise exec -- zig build test-editor-parse-runtime test-editor-parse-host test-editor-parse-main-queue -j2`(macOS). [실행 범위와 결함 대조](../tools/editor-parse-runtime/README.md). 일반 입력·표시 경로 전환 전 단계다.

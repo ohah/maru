@@ -84,6 +84,8 @@ pub fn contentHash(bytes: []const u8) u64 {
 /// 구문 강조 색(§5.3 1층). **`syntax` 모듈이 여기서 처음 제품에 들어온다** — 그 전까지는
 /// 모듈만 서 있고 부르는 코드가 없어 exe에 링크되지 않았다.
 pub const syntax_color = @import("syntax.zig");
+/// 완료 전달과 문서 수명의 내부 연결 API. 기본 입력 파싱 전환은 후속이다.
+pub const parse_runtime = @import("parse/dispatch.zig");
 pub const diagnostics = @import("diagnostics.zig");
 pub const lsp_client = @import("lsp.zig");
 const trust_store = @import("trust_store.zig");
@@ -2579,6 +2581,7 @@ pub const Prepared = struct {
         }
         if (self.recovery) |owner| owner.release();
         _ = @constCast(self.lease.owner).release(self.lease) catch unreachable;
+        @import("parse/dispatch.zig").viewsChanged();
         self.* = undefined;
     }
 };
@@ -10506,6 +10509,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
         if (term.rt.editor_recovery) |owner| owner.release();
         term.rt.editor_recovery = null;
         _ = @constCast(lease.owner).release(lease) catch unreachable;
+        @import("parse/dispatch.zig").viewsChanged();
     } else {
         term.rt.editor_unattached_document.clear(self.allocator);
     }
@@ -74421,4 +74425,66 @@ test "CMPAT resolve commit preserves input across late, stale, error and cancell
         }
         try testing.expectEqual(@as(u64, 0), s.editor_completion.accepted_on_timeout);
     }
+}
+
+test "parse runtime host 창 파괴 뒤에도 main 전달이 문서만 회수한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const parse = parse_runtime;
+    // 다른 창을 남겨 테스트 전용 마지막 창 cleanup이 아닌 실제 view 반납 경로를 지난다.
+    var remaining = try PaneFixture.init(testing.allocator);
+    defer remaining.deinit(testing.allocator);
+    var closing = try PaneFixture.init(testing.allocator);
+    var open = true;
+    defer {
+        if (open) closing.deinit(testing.allocator);
+    }
+    const lease = closing.term.rt.editor_document_lease.?;
+    const identity = lease.owner.identity(lease).?;
+    const owner = @constCast(lease.owner);
+    const grammar: parse.request.Grammar = .{ .identity = 1, .generation = 0 };
+    _ = try parse.submit(lease, grammar, .zig);
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 10_000_000_000;
+    while (parse.ready(identity, grammar, .zig) == null) {
+        try testing.expect(std.Io.Clock.awake.now(testing.io).nanoseconds < deadline);
+        _ = parse.wake.deliverForTest();
+        std.Thread.yield() catch {};
+    }
+    closing.deinit(testing.allocator);
+    open = false;
+    try testing.expect(parse.ready(identity, grammar, .zig) == null);
+    while (owner.slots.items[identity.slot].document != null) {
+        try testing.expect(std.Io.Clock.awake.now(testing.io).nanoseconds < deadline);
+        _ = parse.wake.deliverForTest();
+        std.Thread.yield() catch {};
+    }
+    try testing.expect(parse.lastPollThread() == null); // 모두 회수한 runtime도 내려갔다.
+    parse.wake.request();
+    try testing.expect(parse.wake.deliverForTest());
+    try testing.expect(parse.ready(identity, grammar, .zig) == null);
+}
+
+test "parse runtime host 마지막 fixture는 allocator 반납 전에 파싱 소유자를 정산한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const parse = parse_runtime;
+    var fixture = try PaneFixture.init(testing.allocator);
+    var open = true;
+    defer {
+        if (open) fixture.deinit(testing.allocator);
+    }
+    const lease = fixture.term.rt.editor_document_lease.?;
+    const identity = lease.owner.identity(lease).?;
+    const grammar: parse.request.Grammar = .{ .identity = 1, .generation = 0 };
+    _ = try parse.submit(lease, grammar, .zig);
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 10_000_000_000;
+    while (parse.ready(identity, grammar, .zig) == null) {
+        try testing.expect(std.Io.Clock.awake.now(testing.io).nanoseconds < deadline);
+        _ = parse.wake.deliverForTest();
+        std.Thread.yield() catch {};
+    }
+    parse.wake.request();
+    fixture.deinit(testing.allocator);
+    open = false;
+    try testing.expect(parse.lastPollThread() == null);
+    try testing.expect(parse.wake.deliverForTest());
+    try testing.expect(parse.ready(identity, grammar, .zig) == null);
 }

@@ -24978,6 +24978,8 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
+        // 일반 창 닫기는 main queue에서 회수한다. 확정 Quit/fixture 종료는 allocator보다 먼저 정산한다.
+        if (live_app_sessions == 1 and (builtin.is_test or appQuitting())) @import("app_session/editor/parse/dispatch.zig").shutdown();
         @import("app_session/find_ime.zig").finish(self);
         self.inspector.deinit(self.allocator);
         @import("app_session/editor/save/as.zig").windowClosing(self);

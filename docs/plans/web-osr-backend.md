@@ -2006,12 +2006,21 @@ W9d① 적대 리뷰 후 — 같은 id 다시 시작(2026-10-16 — W9d② 측�
   문서·첫 사이트·initiator)이 다르면 짝을 지어도 본문을 붙이지 않는다(`ambiguous`). 기록하는 탭의 문 넘김은 IO 스레드가 그 주소의 해시를 남긴다(표지 상자가
   넘치면 그 창 전체가 모호하다). 문에서 기록하는 탭을 빼는 길은 고르지 않았다 — 쏟아짐 문이 그대로여야 한다.
 - **상한**: CDP 의 자원 상한은 스크립트·스타일에 듣지 않았고(11.2 MB 가 왔다) Latin-1 밖 글자가 하나라도 있으면 글을 UTF-16 으로 센다(J4) — 그래서 우리
-  상한(1 MiB)을 `dataReceived` 합(풀어 낸 크기와 꼭 같았다)으로 **받기 전에** 보고, `maxResourceBufferSize` 는 2 MiB(1 MiB 면 0.6 MB JSON 이 밀렸다),
+  상한(1 MiB)을 `dataReceived` 합(풀어 낸 크기와 꼭 같았다)으로 **받기 전에** 보고, 받은 뒤에는 **싣는 글**(UTF-8 글 — 바이너리면 바이트)로 한 번
+  더 본다(재검증 4 차 뒤 B16-1 — 작성자 선택: 상한은 그대로, 설명을 「받은 바이트와 푼 글 둘 다 1 MiB」 로 맞췄다. Chromium 이 푼 글은 받은 바이트보다
+  커질 수 있어 — windows-1252 는 0x80 넘는 바이트마다, EUC-KR 한글은 2 → 3 바이트 — 받은 1,000,000 바이트(é 10 %)가 글 1,100,000 바이트로,
+  EUC-KR 750,000 바이트가 1,125,000 바이트로 `over_cap` 이다(검증자 `vs-w1252-1000k`·`vs-kr-750k`). 받은 바이트로만 보고 글을 더 싣는 길은 고르지
+  않았다: wire 의 본문 조각·크기 검사(`net_fields.checkBodyData`·`checkBodyEnd` — 1 MiB), 앱의 본문 하나 상한(`web_osr_network.max_body_bytes`),
+  보내는 줄의 본문 몫(`out_queue.body_capacity` 2 MiB — 3 MiB 글은 늘 `busy`)이 모두 이 수로 셈해 셋을 함께 바꿔야 하고, 탭 8 MiB 링에 든 본문
+  수가 줄어든다. `body_decoded_size` 는 받은 바이트와 넘친 글 중 큰 것이다 — CLI 도 그렇게 말한다), `maxResourceBufferSize` 는 2 MiB(1 MiB 면 0.6 MB JSON 이 밀렸다),
   `maxTotalBufferSize` 8 MiB. 본문은 다음 문서로 옮기면 사라지므로(J4) `loadingFinished` 에서 곧 받으러 간다(기다림은 3 초까지 — 넘으면 `busy`).
 - `maxPostDataSize` 는 **1**(0 은 「상한 없음」 — J10). 요청 본문은 적지 않는다.
 - **자격 증명(UB1)**: CDP `requestWillBeSentExtraInfo` 로 가른다 — 실제로 실린 쿠키(`associatedCookies` 의 막지 않은 것)·`Authorization`(인증 캐시의 Basic 도
   — CEF 의 헤더 다발은 보이지 않는다, J12), CEF 헤더의 `Cookie`·`Authorization` 과 OR. ExtraInfo 가 없으면(서비스 워커·메모리 캐시) 실린 것으로 친다.
-- **글 풀기**: charset 없는 `text/*`(HTML·JavaScript 빼고)의 UTF-8 은 Chromium 이 windows-1252 로 풀어 깨져 온다(J11) — windows-1252 로 되돌려 UTF-8 이면
+- **글 풀기**: charset 없는 `text/*`(HTML·JavaScript·JSON 빼고 — 재검증 4 차 뒤 B15-2: Blink 의 JavaScript MIME 목록(WHATWG 「JavaScript MIME type
+  essence」 — `text/x-javascript`·`text/jscript`·`text/javascript1.0`–`1.5`·`text/livescript`·`text/x-ecmascript`…)과 JSON MIME(`text/json`·`*+json`)은
+  Chromium 이 UTF-8 로 푼다, 실측 `vj-xjs-u8` 등 — 이 목록을 잘못 넓혀도 windows-1252 로 푼 ASCII 아닌 글은 받은 바이트보다 길어 아래 길이 견주기가
+  표시한다)의 UTF-8 은 Chromium 이 windows-1252 로 풀어 깨져 온다(J11) — windows-1252 로 되돌려 UTF-8 이면
   그것을 싣고(`redecoded`), 아니면 「Chromium 이 푼 그대로」 표시(`chromium_decoded`). 글 MIME 인데 base64 로 온 것(잘못된 UTF-8 JSON·charset 없는 EUC-KR)은
   풀어 UTF-8 이면 글, 아니면 바이너리(`binary` — CLI 는 `--out` 으로만, MCP 도 `out`).
   charset 은 Content-Type 을 Fetch 의 「extract a MIME type」 으로 읽는다(재검증 15 회차 D-G1 — 전에는 첫 `charset=` 부분 글을 찾아 UTF-8 이 아니면 모두
@@ -2036,10 +2045,25 @@ W9d① 적대 리뷰 후 — 같은 id 다시 시작(2026-10-16 — W9d② 측�
   D-H1 은 앞 1024 바이트의 `<meta>` 만 훑어 그 밖을 놓쳤고 주석·스크립트 안의 `charset=` 를 읽어 맞는 글에 표시했다(N-i1) — 훑기를 빼고 이 규칙
   하나로 바꿨다(`text/xml` 도 windows-1252 로 되돌리지 않는다 — N-i2). 대가: 맞게 풀린 UTF-8 HTML·XML 도 표시한다 — 검증자의 흔한 꼴 36 개 중
   15 개(본문 30/72, 전에는 1/36; 헤더 charset 이 있는 HTML·XML·JSON·JS·글은 그대로 표시 없음).
+  **스크립트·스타일시트(재검증 4 차 뒤 B15-1·B15-2 — 작성자 결정, 「틀린 글을 표시 없이 내보내지 않는다」 가 먼저)**: 페이지가 `<script src>`·
+  `<link rel=stylesheet>` 로 불러온 글(CDP 자원 종류 `Script`·`Stylesheet`)은 헤더에 charset 이 없으면 Chromium 이 MIME 의 기본이 아니라 **문서의
+  인코딩**·`<script charset>`·`@charset` 으로 푼다(실측: EUC-KR 문서의 스크립트·`<script charset=euc-kr>` 의 그리스 글 「αβγδ」 는 8 바이트 = UTF-8
+  8 바이트라 표시 없이 나갔다 — `vj-js-docgk`·`vj-js-attrgk`; UTF-8 문서의 `text/css` 는 맞게 풀렸는데 windows-1252 되돌리기가 실패해 거짓 표시 —
+  `vj-css-u8`, nginx·Apache 의 기본 `text/css` 라 `font-family:"맑은 고딕"`·`content:"→"` 가 모두). 같은 주소를 fetch·XHR 로 받으면 MIME 의 기본이라
+  (`dg1-csscs`) 주소가 아니라 종류로 가른다(`ResKind` — `requestWillBeSent`·`responseReceived` 의 `type`, 응답의 것이 앞선다). 그 둘의 ASCII 아닌
+  글은 MIME 와 상관없이 UTF-8 로 풀린 근거가 있을 때만 표시하지 않는다(`subresourceUtf8`): 글의 UTF-8 길이가 받은 바이트 수와 꼭 같고(한 바이트
+  인코딩으로 푼 0x80 넘는 바이트는 늘 길어진다), U+0800–U+FFFF 글자(U+FFFD 빼고)가 하나라도 있으며(EUC-KR·GBK·Big5·Shift_JIS 의 두 바이트 글자가
+  그 범위로 풀리면 한 바이트 길어진다), 스타일시트가 UTF-8 아닌 `@charset` 으로 시작하지 않는다. 지시서의 방향(스타일시트는 길이로만)을 따르지 않은
+  까닭: EUC-KR 문서의 스타일시트(`vj-css-docgk`)도 같은 길이의 그리스 글이라 길이만으로는 스크립트의 B15-1 과 같은 틀린 글이 새로 생긴다.
+  스크립트를 「ASCII 아닌 글은 늘 표시」 로 하지 않은 까닭: 맞게 풀린 UTF-8 스크립트(한글·기호·CJK 가 든 번들)가 모두 거짓 표시를 단다 — 세 바이트
+  글자는 그 둘을 가르는 근거다. 대가: 맞는 UTF-8 인데 ASCII 밖 글자가 모두 U+0080–U+07FF(라틴 악센트·그리스·키릴·히브리·아랍)인 스크립트·
+  스타일시트와 받은 수를 모르는 것은 표시한다(`vk-js-u8lat`).
   **표시하지 못하는 꼴(한 곳에 적는다)**: maru 는 받은 바이트를 보지 못한다(CDP 는 Chromium 이 푼 글을 준다) — 그래서 Chromium 의 풀이가 틀렸는데
   그 글의 UTF-8 길이가 받은 수와 꼭 같으면 가르지 못한다: charset 이 없거나 UTF-8 로 선언한 비 HTML·XML 본문의 UTF-16 BOM(`FF FE 00 AC 98 B0` →
-  「가나」 6 바이트 — 재검증 3 차 D-H1 의 틈), 그리고 위 무리 밖의 MIME 를 Chromium 이 다른 근거(BOM 등)로 고른 글. 맞는 쪽의 거짓 표시는
-  UTF-8 BOM(N-2)·헤더를 Chromium 과 다르게 읽는 꼴(N-h4)·위 HTML·XML 무리다. 그 밖의 알고 둔 CLI 꼴: 이름이 빈칸으로 끝나는 `--out`(`adir/. ` —
+  「가나」 6 바이트 — 재검증 3 차 D-H1 의 틈), 위 무리 밖의 MIME 를 Chromium 이 다른 근거(BOM 등)로 고른 글, 그리고 스크립트·스타일시트에서
+  줄어드는 꼴(GB18030 의 네 바이트 글자·ISO-2022-JP 의 전환열·UTF-16 BOM)이 세 바이트 글자로 길어진 만큼을 우연히 메운 글과 EUC-JP 의 세 바이트
+  JIS X 0212 글자(세 바이트 → 세 바이트)·두 바이트로 풀리는 글자뿐인 글(재검증 4 차 뒤 B15). 맞는 쪽의 거짓 표시는
+  UTF-8 BOM(N-2)·헤더를 Chromium 과 다르게 읽는 꼴(N-h4)·위 HTML·XML 무리·ASCII 밖 글자가 U+0800 아래뿐인 UTF-8 스크립트·스타일시트(B15)다. 그 밖의 알고 둔 CLI 꼴: 이름이 빈칸으로 끝나는 `--out`(`adir/. ` —
   확인 줄에 빈칸이 보이지 않는다, N-i4)·두 번 준 `--offset` 은 뒤 것(N-i5 — 이 PR 전부터).
 - **렌더러 죽음**: 보낸 `getResponseBody` 는 다음 이동까지 답이 없다(J5) — `renderer_gone` 에서 곧 `detached` 로 끝낸다. 렌더러가 바뀌거나 다시 떠도 다시 켤
   필요가 없다(J5). `Network.disable` 의 답은 쏟아짐 뒤로 2.8 초 늦을 수 있어(J6) **보낼 때** 세대를 바꾼다.
@@ -2686,3 +2710,67 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
       못했다), 두 번째 `finished` 버리기 빼기(끝난 요청의 끝 시각을 늦출 뿐 — 시험의 판정은 같았다), 놓는 요청을 늘 「짝 없음」 으로 치기(`removed_bare` — 왼쪽 짝
       없이 다른 맞추기의 짝만 가진 요청을 시한에 놓는 꼴을 시험이 만들지 않는다; 열린 일), 맞추기에 들지 않는 요청 놓기 빼기(늦은 사건 버리기 뒤로는
       닿지 않는 지키는 길).
+  - **재검증 4 차 뒤**(2026-10-27 — f79afd6e7 을 검증자 둘이 다시: A 2·3·4·5·6·8·9·19 회차 `scratchpad/w9d2_v20j/ROUNDS_A.md`·B 10·15·16 회차
+    `ROUNDS_B.md`, 재현 시험·판정 `refs/wip/w9d2-v20j-a`·`-b`. 기록은 스크래치패드라 지워질 수 있어 요지를 여기 둔다):
+    - **R6-1(HIGH — 틀린 본문, 실측 40/40)** 서비스 워커가 같은 주소 두 페이지 요청의 fetch 를 거꾸로 하면(P1 을 늦게 `fetch(e.request)`) 두 본문이
+      맞바뀌었다 — 워커 갈래(`Key.sw`)의 CEF 기록 차례는 워커 스레드의 것이지 페이지의 CDP 시작 차례가 아닌데 맞추기(`matchLeft`·`matchRight`)가
+      J2(같은 열쇠의 IO 는 CDP 시작 차례)를 가정해, 두 기록이 두 응답보다 앞에 시작하면 네 맞추기가 같은 뒤바뀐 짝을 줬다(`v20j-swrev-*`; `body-r4-sw-mixed`
+      의 간헐 80 중 2 도 이 기제). **R6-2·R6-3(MED — 틀린 본문, 20/20)** 출처 `network`(`serviceWorkerResponseSource`)는 「워커가 네트워크에서 받았다」
+      일 뿐 「이 주소를」 이 아니다 — 워커가 P1 에 다른 주소를 fetch 해 답하면 P1 의 본문이 같은 주소 P2 의 워커 기록에(`swalt`), 페이지 요청 하나뿐이어도
+      워커가 같은 주소를 제 갱신 fetch 로 따로 받으면 그 갱신 기록에(`swalt1`) 붙었다. 셋 다 0e5012175 에서도 같다(이번 고침의 회귀가 아니다).
+      고침(조정자 결정 — 「틀린 본문 0 이 잃는 본문보다 먼저」, 워커 갈래는 차례 가정을 쓰지 않는다): 워커가 넘긴 응답(`from_sw`·출처 `network`)의 요청은
+      짝이 **하나로** 정해질 때만 본문을 붙인다(`swUnique`) — ① 같은 열쇠의 짝 없는 기록 가운데 그 요청과 짝일 수 있는 것이 꼭 하나, ② 그 기록과 짝일 수
+      있는 같은 주소·메서드의 다른 요청(워커 갈래이거나 응답 전)이 없다, ③ 그 요청의 창(기준 − 5 ms .. 응답 때)에 시작한 **다른 주소**의 워커 기록이 모두
+      그 주소의 CDP 요청(열린 것·워커가 답한 것)으로 설명된다. 셋째는 조정자 원칙(①②)에 더했다 — R6-3 은 요청 하나·기록 하나라 ①② 로는 막지 못한다.
+      응답 지문(상태·길이)은 쓰지 않는다(같아도 내용이 다를 수 있다). 아니면 그 기록들을 모두 `ambiguous` 로 끝내고 주인일 수 있는 요청을 모두 맞추기에서
+      뺀다(맞추기를 의심하는 길 — 남은 요청이 남은 기록과 「유일」 해 보이지 않게). 처음 판(③ 을 열린 요청으로만 설명)은 네트워크 밖에서 답한 워커
+      요청(캐시·`new Response`·다시 싸기)이 끝나면 목록에서 빠져 그 워커가 같은 주소를 네트워크로 받은 기록(stale-while-revalidate)이 설명되지 않아
+      곁의 워커 요청이 모두 본문을 잃었다 — 워커가 답한 최근 요청 128 개를 출처와 상관없이 탭에 남겨(`Tab.sw_seen`) 설명에 쓴다(잊으면 설명되지 않는
+      쪽 — 잃을 뿐). 남는 틈: 워커가 요청 P 에 다른 주소 v 로 답했는데 그 v 를 워커를 거친 다른 페이지 요청도 같은 때 받고, 워커가 P 의 주소를 따로 한 번
+      받은 꼴.
+      **대가(잃는 워커 본문 — 실제 CEF, f79afd6e7 + 판정만 → 고친 뒤)**: `body-r4-sw-mixed` 그대로 넘긴 워커 기록 40 → 0(한 묶음에 같은 주소 워커
+      요청이 둘 — `ambiguous`; 놓은 페이지 기록 40 은 그대로 — 판정 기대를 바꿨다), `body-r5-sw-dedupe` 15 → 0, `body-r5-sw-two-tabs-A` 90 → 2,
+      `body-r5-sw-update` 163 → 150, `v20a-r6-sw-modified-request-passthrough`·`sw-post-passthrough` 20 → 0(같은 판의 `/x` 를 워커가 `/y` 로 답한다 —
+      설명되지 않는 워커 기록이 창에 있다: ③), `v20a-r6-sw-network-fail-fallback` 본문 0 은 같고 끝이 `unmatched` 20 → `ambiguous` 10·`unmatched` 10,
+      `v20j-swmix` 그대로 넘긴 본문 400/400(10 판) → 0/1600(40 판). 그대로인 것: `body-service-worker`·`sw-swr`(2)·`navpreload-fetch`(20)·
+      `redirect-follow`(15)·`http-cache`(15)·`two-tabs-B`(59), `v20f-r6-sw-delayed-passthrough`, `v20i-swlag-*` p2 14·14·13 → 14·14·14,
+      `v20a-r2-*`(전용·공유 워커는 서비스 워커 갈래가 아니다). 순수 시험 하나의 기대도 바꿨다(「적대 리뷰 2 회차: 맞추기의 차례와 갈래」 의 서비스 워커
+      갈래 — 같은 주소 워커 요청 둘·기록 둘의 c.r 은 이제 본문 없이 `ambiguous`).
+    - **R19-1(LOW — 값)** `split_wait_us` 2 s 동안 기다리는 요청마다 주기마다 `reqs` 를 훑었다(`tryDecide` 의 `me` 찾기·`ensureArrays` 의 나눠 쓰기 확인·
+      `held` 훑기 — 같은 주소 N 개면 주기마다 O(N²), N=4095 Debug 112 ms/주기·ReleaseFast 25 ms). 고침: `ensureArrays` 가 자리 색인(`pos_of`)·`held` 의
+      후보(결과를 모르는 기록을 쥔 응답 없이 실패한 요청 — `bare_held`, 대개 비었다)·WB-3 의 가장 앞 자리(`first_cross`)를 한 번에 만든다(`dropBareFromCache`
+      도 함께 당긴다). 기다리는 주기는 N=4095 Debug 스레드 CPU 평균 0.8 ms(가장 무거운 것도 40 ms 아래 — 시험이 단언한다). 남은 것: 2 s 뒤 N 개가 한
+      주기에 함께 정해지는 판정 주기는 그대로다(판정마다 표가 바뀌어 맞추기를 다시 한다 — Debug 1.2 s, 검증자의 ReleaseFast 212 ms; 같은 주소 4095 개가
+      2 초 안에 끝나는 꼴에서 한 번).
+    - **B15-1(LOW — 틀린 글이 표시 없이)·B15-2(LOW — 맞는 글에 표시)** 위 「글 풀기」 의 「스크립트·스타일시트」(`ResKind`·`subresourceUtf8`, Blink 의
+      JavaScript·JSON MIME 은 되돌리지 않는다). 지시서의 방향과 다른 것: 스타일시트를 길이로만 가르면 EUC-KR 문서의 CSS(`vj-css-docgk`)가 B15-1 과 같은
+      틀린 글이 된다 — 스크립트와 같은 근거(같은 길이 + 세 바이트 글자 + UTF-8 아닌 `@charset` 없음)로 가른다.
+    - **B16-1(LOW)** 위 「상한」(작성자 선택 — 상한은 그대로, 「받은 바이트와 푼 글 둘 다 1 MiB」 로 설명을 맞췄다: `decodeResult` 주석·control-plane
+      문서·MCP 설명 둘·CLI 의 over_cap 줄 「…counts both the received bytes and the decoded text; this is the larger」). 판정 `vs-w1252-1000k`·`vs-kr-750k`
+      는 `over_cap`·글의 크기(1,100,000·1,125,000)를 기대한다.
+    - **B10-1(LOW — 이 PR 전부터)** `--out <폴더를 가리키는 링크>` 가 링크를 지운 자리에 파일을 썼고 파일 링크도 일반 파일로 바뀌었다(rename 은 마지막
+      조각의 링크를 따르지 않는다). 고침: 마지막 조각이 링크면 쓰지 않는다 — 폴더를 가리키면 「the path is a directory」, 그 밖(파일·끊긴 링크)은 「the path
+      is a symbolic link」(가리키는 파일에 쓰는 길은 고르지 않았다 — `--out` 이 남의 파일을 덮는 길이 생긴다). 가운데 조각의 링크는 따른다. screenshot·
+      exec·network-request 의 `--out` 이 모두 `publishResult` 를 거쳐 같은 규칙이다. 「W9d② v20 A R10」 시험의 기대(링크를 일반 파일로 바꾼다)를 바꿨다.
+      **B10-2(NIT)** 파일 밑 경로(NotDir)·NUL 경로(BadPathName — MCP 의 `out` 으로만)에 그 까닭의 글.
+    - **스모크 판단**: 검증자 B 의 앱 CDP 스모크(f79afd6e7 + 판정 탐침) 세 판 중 둘이 실패했다(「the pane script did not finish」·「the Chromium tab was
+      not hidden by the new tab」). 멈춤이 아니라 늦음이다 — 숨은 탭 사례의 호출이 30 초 시한(-32004)에 쌓였고(1 판: 30 초 넘는 호출 합 384 초), 그 판들의
+      1 분 load 는 57–60(통과한 판 25–28)이며 숨긴 페이지 **자신의** `visibilitychange` 요청도 숨긴 동안 오지 않았다(렌더러 자체가 돌지 않았다 —
+      maru 의 DevTools 길이 아니다). 이 PR 의 본문 기록이 닿는 구간이 아니라고 본다. origin/main 대조는 아직이다(디스크·부하).
+    - **남긴 시험·판정**: 순수 — 검증자 A 의 R6-1·R6-2·R6-3(이제 통과)·R9-1(넓힌 혼돈 퍼즈 3000)·R19-1(값 탐침을 단언으로), 워커 기록 설명(`sw_seen`)
+      한 쌍, 글 풀기 넷(스크립트·스타일시트 표, JS·JSON MIME 과 지킴, 자원 종류가 보낸 호출까지, 글로 넘친 상한). CLI — B10 시험(관찰을 단언으로). 판정 —
+      `--review-body-v20fb` 의 `vj-*`·`vjl-*`·`vju-*`·`vs-*`·`vk-*`(기대를 고친 뒤로), `--review-body-v20fa` 의 `v20j-swrev-*`·`swalt-*`·`swalt1-*`·`swmix`.
+      순수 시험 215 개.
+    - **검증(고친 코드)**: 순수 215 통과(Debug), CLI·session 830 통과·1 건너뜀, `mise run` 게이트 일곱(fmt-check·check-task-split·check-doc-links·
+      check-doc-line-refs·check-boundaries·check-targets·web-sidecar) 통과. 판정(실제 CEF 154, 디버그 빌드): `--network-body` 92/0, `--review-body-v20a`
+      35/0, `--review-body-v20b` 42/0, `--review-body-v20fa` 61/0(`v20j-swrev-*`·`swalt-*`·`swalt1-*` 틀린 본문 0 — 고치기 전 40/40·20/20·20/20),
+      `--review-body-v20fb` 332/0(`V20F_HOSTLOG=1`; 검증자 B 의 `vj-*`·`vs-*` 와 `vk-*` 모두), `v20j-swmix` 40 판 × 20 을 CPU 부하(`yes` ×14 — 1 분 load
+      49–70) 아래 두 번 틀린 본문 0. `test-macos-app-host-abi` 는 앱 쪽을 바꾸지 않아 돌리지 않았다.
+      변이(이 작업 트리 밖의 detached 사본에서, 실패 수로, 매번 되돌림 확인) 27 중 RED 26: 글 풀기 열둘(세 바이트 근거 빼기·자원 종류 갈래 빼기·
+      길이 근거 빼기·`@charset` 확인 빼기·U+FFFD 를 근거로 치기·JS MIME 목록 빼기·`+json` 빼기·`Stylesheet` 종류 빼기·응답의 종류 무시·기다림과 보낸
+      호출에 종류를 싣지 않기 둘 — 실패 1 씩, 상한을 받은 바이트로만 3), CLI 여섯(링크 확인 빼기 2·폴더 링크도 「링크다」 1·링크를 따라 stat 2·NotDir 글
+      1·BadPathName 글 1·over_cap 글 1), R6 넷(`swUnique` 끄기 5·셋째 조건 빼기 2·`sw_seen` 빼기 1·함께 끝낼 기록을 끝내지 않기 1), R19 넷(나눠 쓰기
+      확인을 늘 빗나가게 2 — PF-2·R19-1 값 단언·`bare_held` 를 비우기 2·`first_cross` 끄기 6·`dropBareFromCache` 가 자리 색인을 당기지 않기 — Debug 범위
+      검사로 끝 하나 퍼즈가 멈췄다). 살아남은 하나: `swUnique` 의 둘째 조건(그 기록과 짝일 수 있는 다른 요청) 빼기 — 다른 요청이 그 기록과 짝일 수
+      있는 꼴은 그 요청의 제 기록도 이 요청의 창(응답 앞)에 들어 첫째 조건(기록이 꼭 하나)이 먼저 걸리거나, 그 요청이 다른 주소로 답받아 제 기록이
+      없으면 셋째 조건(설명되지 않는 다른 주소 워커 기록)이 걸린다 — 시험이 둘째만 걸리는 꼴을 만들지 못했다(지키는 조건으로 둔다).

@@ -2180,7 +2180,7 @@ fn renderNetworkBody(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std
     else
         null;
     if (hint) |h| try w.writeAll(h) else try writePageText(gpa, w, body, false);
-    if (intField(result.get("body_decoded_size"))) |n| try w.print(" ({d} bytes — over the 1 MiB body limit)", .{n});
+    if (intField(result.get("body_decoded_size"))) |n| try w.print(" ({d} bytes — over the 1 MiB body limit, which counts both the received bytes and the decoded text; this is the larger)", .{n});
     if (intField(result.get("body_size"))) |n| {
         try w.print(" · {d} bytes · ", .{n});
         try writePageText(gpa, w, strField(result.get("body_encoding")), false);
@@ -4618,7 +4618,7 @@ test "W9d②: 본문 렌더 — 글은 줄바꿈을 남기고 ESC·양방향 글
     try testing.expect(std.mem.indexOf(u8, out.written(), "body: hidden — this response carried another site's cookies or login: navigate the tab to that site, then maru browser get-cookies asks for its cookie permission") != null);
     out.clearRetainingCapacity();
     try testing.expect(try renderResponse(testing.allocator, head ++ "\"body_state\":\"over_cap\",\"body_decoded_size\":2097152}}", .network_request, &out.writer));
-    try testing.expect(std.mem.indexOf(u8, out.written(), "body: over_cap (2097152 bytes — over the 1 MiB body limit)\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "body: over_cap (2097152 bytes — over the 1 MiB body limit, which counts both the received bytes and the decoded text; this is the larger)\n") != null);
     // 같은 번호 다시 시작(W9d① 적대 리뷰 후 × W9d②) — 앞 시도의 본문은 남지 않았다, 다시 시도는 새 req.
     out.clearRetainingCapacity();
     try testing.expect(try renderResponse(testing.allocator, head ++ "\"body_state\":\"restarted\"}}", .network_request, &out.writer));

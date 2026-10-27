@@ -572,12 +572,16 @@ fn validateJsonSlice(allocator: std.mem.Allocator, bytes: []const u8) bool {
 /// 검증된 결과를 `target`에 **0600 원자적으로** 공개한다(검증-전-미노출 보존). 임시 파일 핸들이 write-only여도(macOS)
 /// 되읽지 않으므로 무방. `.replace=true`+`Atomic.replace`라 기존 target을 **덮어쓴다**(폴링/재실행 정상화 —
 /// 옛 `.link` no-clobber 회귀 수정). caller가 에러를 사용자 메시지로 매핑.
-/// `--out` 을 쓰지 못한 까닭의 글(W9d② 재검증 N-g2: 없는 폴더·폴더인 대상도 「atomically」 로만 말했다) — 흔한 둘은 그 까닭을, 그 밖은 전처럼.
+/// `--out` 을 쓰지 못한 까닭의 글(W9d② 재검증 N-g2: 없는 폴더·폴더인 대상도 「atomically」 로만 말했다) — 흔한 것은 그 까닭을, 그 밖은 전처럼.
+/// 재검증 4 차 뒤 B10-1·B10-2: 심볼릭 링크인 대상, 파일 밑의 경로(`afile/x` — NotDir), 쓸 수 없는 이름(NUL — MCP 의 `out` 으로만 온다).
 fn publishErrorText(err: anyerror) []const u8 {
     return switch (err) {
         error.FileNotFound => "cannot write the output file: its directory does not exist",
         error.IsDir => "cannot write the output file: the path is a directory",
         error.DirectoryPath => "cannot write the output file: the path names a directory (it ends with /, . or ..)",
+        error.OutputIsSymLink => "cannot write the output file: the path is a symbolic link",
+        error.NotDir => "cannot write the output file: a part of its directory path is not a directory",
+        error.BadPathName => "cannot write the output file: the path is not a valid file name",
         else => "cannot publish the output file atomically",
     };
 }
@@ -609,6 +613,16 @@ fn publishResult(dir: std.Io.Dir, io: std.Io, target: []const u8, bytes: []const
         const st = dir.statFile(io, target, .{}) catch return error.DirectoryPath;
         return if (st.kind == .directory) error.IsDir else error.DirectoryPath;
     }
+    // 재검증 4 차 뒤 B10-1: 마지막 조각이 심볼릭 링크면 쓰지 않는다 — rename 은 링크를 따르지 않아 링크를 지운 자리에 파일을 썼다(폴더를 가리키는
+    // 링크는 진짜 폴더처럼 거절되지 않고 사라졌다). 폴더를 가리키면 폴더처럼, 그 밖(파일·없는 대상)은 「링크다」 — 링크를 바꾸지도, 가리키는 파일을
+    // 덮지도 않는다(가리키는 파일에 쓰는 길은 고르지 않았다 — `--out` 이 남의 파일을 덮는 길이 생긴다). 가운데 조각의 링크(`<링크된 폴더>/x`)는
+    // 그대로 따른다. 확인과 rename 사이에 링크로 바뀌는 경쟁은 같은 사용자의 일이라 막지 않는다.
+    if (dir.statFile(io, target, .{ .follow_symlinks = false })) |lst| {
+        if (lst.kind == .sym_link) {
+            const st = dir.statFile(io, target, .{}) catch return error.OutputIsSymLink;
+            return if (st.kind == .directory) error.IsDir else error.OutputIsSymLink;
+        }
+    } else |_| {}
     var af = try dir.createFileAtomic(io, target, .{
         .permissions = std.Io.File.Permissions.fromMode(0o600),
         .replace = true,
@@ -1223,20 +1237,22 @@ test "W9d② v20 A R10: --out 은 조각 사이에 글·바이너리가 바뀌�
     }
 }
 
-test "W9d② v20 A R10: --out 의 공개는 0600 이고, 대상이 심볼릭 링크면 링크 자리를 바꾼다 — 가리키던 파일은 그대로" {
+test "W9d② v20 A R10(재검증 4 차 뒤 B10-1 로 바꿈): --out 의 공개는 0600 이고, 대상이 심볼릭 링크면 쓰지 않는다 — 링크도 가리키던 파일도 그대로" {
     if (!@hasDecl(std.Io.File.Permissions, "toMode")) return error.SkipZigTest;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "victim", .data = "KEEP" });
     try tmp.dir.symLink(io, "victim", "link", .{});
-    try publishResult(tmp.dir, io, "link", "BODY");
+    try std.testing.expectError(error.OutputIsSymLink, publishResult(tmp.dir, io, "link", "BODY"));
     var buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("KEEP", try tmp.dir.readFile(io, "victim", &buf));
-    try std.testing.expectEqualStrings("BODY", try tmp.dir.readFile(io, "link", &buf));
     const st = try tmp.dir.statFile(io, "link", .{ .follow_symlinks = false });
-    try std.testing.expectEqual(std.Io.File.Kind.file, st.kind);
-    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
+    try std.testing.expectEqual(std.Io.File.Kind.sym_link, st.kind);
+    try publishResult(tmp.dir, io, "plain", "BODY");
+    const sp = try tmp.dir.statFile(io, "plain", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(std.Io.File.Kind.file, sp.kind);
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), sp.permissions.toMode() & 0o777);
 }
 
 test "W9d② 재검증 N-g2: --out 이 없는 폴더·폴더인 대상이면 그 까닭을 말한다(아무것도 쓰지 않는다), 그 밖의 실패는 전의 글" {
@@ -1401,4 +1417,53 @@ test "W9d② v20f 16: --out boundaries (N4) — exact sizes end, short and long 
             },
         }
     }
+}
+
+// 재검증 4 차 뒤 B10-1·B10-2(검증자 B R10 의 관찰 시험을 단언으로): screenshot·exec·network-request 의 `--out` 은 모두 `publishResult` 를 거친다
+// (`run.zig` 의 세 부름) — 셋이 같은 규칙이다.
+test "W9d② 재검증 4 차 뒤 B10-1·B10-2: --out 이 심볼릭 링크(폴더·파일·끊긴 것)면 쓰지 않고 그 까닭을, 파일 밑·NUL 경로도 그 까닭을 — 아무것도 바꾸지 않는다" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "adir", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "afile", .data = "KEEP" });
+    try tmp.dir.symLink(io, "adir", "ldir", .{ .is_directory = true });
+    try tmp.dir.symLink(io, "afile", "lfile", .{});
+    try tmp.dir.symLink(io, "missing", "ldead", .{});
+    try tmp.dir.symLink(io, "ldir", "lldir", .{ .is_directory = true });
+    const is_dir = "cannot write the output file: the path is a directory";
+    const is_link = "cannot write the output file: the path is a symbolic link";
+    for ([_]struct { path: []const u8, text: []const u8 }{
+        .{ .path = "ldir", .text = is_dir },
+        .{ .path = "lldir", .text = is_dir },
+        .{ .path = "ldir/", .text = is_dir },
+        .{ .path = "lfile", .text = is_link },
+        .{ .path = "ldead", .text = is_link },
+        .{ .path = "afile/x", .text = "cannot write the output file: a part of its directory path is not a directory" },
+        .{ .path = "a\x00b", .text = "cannot write the output file: the path is not a valid file name" },
+    }) |case| {
+        const err = if (publishResult(tmp.dir, io, case.path, "BODY")) |_| {
+            std.debug.print("B10: {s} was written\n", .{case.path});
+            return error.TestUnexpectedResult;
+        } else |e| e;
+        errdefer std.debug.print("B10: {s} -> {s}\n", .{ case.path, @errorName(err) });
+        try std.testing.expectEqualStrings(case.text, publishErrorText(err));
+    }
+    // 아무것도 바뀌지 않았다 — 링크는 링크, 폴더는 비었고, 파일은 그대로, 다른 이름은 없다.
+    for ([_][]const u8{ "ldir", "lfile", "ldead", "lldir" }) |l| {
+        const st = try tmp.dir.statFile(io, l, .{ .follow_symlinks = false });
+        try std.testing.expectEqual(std.Io.File.Kind.sym_link, st.kind);
+    }
+    var sub = (try tmp.dir.openDir(io, "adir", .{ .iterate = true })).iterate();
+    try std.testing.expect((try sub.next(io)) == null);
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("KEEP", try tmp.dir.readFile(io, "afile", &buf));
+    var names: usize = 0;
+    var it = (try tmp.dir.openDir(io, ".", .{ .iterate = true })).iterate();
+    while (try it.next(io)) |_| names += 1;
+    try std.testing.expectEqual(@as(usize, 6), names);
+    // 가운데 조각의 링크는 따른다 — 링크된 폴더 안에는 쓴다.
+    try publishResult(tmp.dir, io, "ldir/x.json", "B");
+    try std.testing.expectEqualStrings("B", try tmp.dir.readFile(io, "adir/x.json", &buf));
 }

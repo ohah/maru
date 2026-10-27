@@ -4,7 +4,8 @@
 //!   body-r4-sw-swr        서비스 워커의 stale-while-revalidate(캐시로 답하고 같은 주소를 네트워크로 받아 캐시를 고친다) — 같은 주소 차례로 20 번 ×2
 //!                         (고치기 전 틀림 38/40 — 페이지의 응답 출처 `cache-storage` 를 보고 워커 기록에 붙이지 않는다)
 //!   body-r4-sw-synth      서비스 워커가 네트워크로 받은 뒤 `new Response` 로 바꿔 답한다(고치기 전 틀림 15/15)
-//!   body-r4-sw-mixed      같은 주소를 서비스 워커가 그대로 넘김(pass-through)·놓음(fallback) 섞어 한꺼번에 — 그대로 넘긴 워커 기록은 모두 제 본문
+//!   body-r4-sw-mixed      같은 주소를 서비스 워커가 그대로 넘김(pass-through)·놓음(fallback) 섞어 한꺼번에 — 놓은 페이지 기록은 모두 제 본문, 그대로
+//!                         넘긴 워커 기록은 둘이라 짝이 하나로 정해지지 않아 `ambiguous`(재검증 4 차 뒤 R6-1 — 전에는 제 본문)
 //!   body-r4-frames        같은 주소를 주 프레임·같은 출처 iframe·다른 사이트 iframe 이 한꺼번에
 //!   body-r4-cache         디스크 캐시·304 다시 확인·prefetch·preload 가 같은 주소의 네트워크 요청과 섞임(prefetch 는 `no_body` 가 아니다 — N1)
 //!   body-r4-spa           SPA 꼴(서로 다른 JSON 동시·같은 주소 동시·폴링·이미지·같은 주소 POST 둘·캐시되는 설정·관계없는 fetch 를 하는 워커) — 잡은 비율,
@@ -478,8 +479,10 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const done = r.pumpTitle(rec_tab, "mixdone", 20_000);
         r.pump(4000);
         const t = tally(&r, rec_tab, at, "/rv4/sw/pt?", null);
-        // 그대로 넘긴 워커 기록(출처 network)은 여전히 제 본문을 받는다 — 서비스 워커 갈래를 닫지 않았다.
-        report(done and t.wrong == 0 and t.sw > 0 and t.sw_captured == t.sw, "body-r4-sw-mixed", lineOf(&t, &detail, &sl));
+        // 재검증 4 차 뒤 R6-1(기대를 바꿈 — 대가): 한 묶음에 같은 주소를 그대로 넘긴 워커 요청이 둘이라 워커 갈래의 짝이 하나로 정해지지 않는다
+        // (워커 기록 차례는 페이지의 시작 차례가 아니다 — 거꾸로 넘기면 맞바뀐다) — 그대로 넘긴 워커 기록은 본문 없이 `ambiguous`, 놓은(fallback)
+        // 페이지 기록은 모두 제 본문. 전에는 워커 기록도 모두 제 본문을 받았다(차례가 맞은 판 — 검증자 A 의 다른 작업 트리 80 중 2 는 틀렸다).
+        report(done and t.wrong == 0 and t.sw > 0 and t.sw_captured == 0 and t.ambiguous == t.sw and t.own == t.total - t.sw, "body-r4-sw-mixed", lineOf(&t, &detail, &sl));
     }
     // ── 프레임 ──
     {

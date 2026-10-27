@@ -5752,3 +5752,38 @@ archive는 실제 GitHub 보존 표본이 아니다. 병합 뒤 첫 protected `v
 
 실제 old binary E2E 없이 unit round-trip만 통과한 상태는 codec 구현으로만 표시한다. 실제 app update 뒤 session 유지
 완료 판정은 U5 제품 경계에서만 한다.
+
+
+## 2026-10-27 GUI 재연결과 Debug 배포 회귀
+
+공증된 앱 교체 후 기존 29개 runtime을 소유한 host가 `restore stage failed: stage=activate err=DeadlineExceeded`
+후 `rollback-current`로 복귀했다. GUI는 inner hello backoff의 `transient_timeout`에서 outer reconnect를 즉시
+종료했고, `HostSet`이 host ID를 이번 실행 전체에서 제외해 새 ready publication도 재검사하지 않았다.
+새 host spawn과 workspace 첫 창의 `PersistentRuntimeUnavailable`가 이어졌다. 저장 파일의 incomplete-restore
+보존 latch는 정상 동작했고, GUI 재실행으로 이전 runtime에 다시 연결됐다.
+
+이 경로는 `connectUpgradingHostWith`에서 socket connect·hello·대기 전체에 하나의 absolute deadline을 공유한다.
+일시 handshake 실패, inner timeout, manifest 교체는 그 deadline 안에서만 재시도한다. 권한·wire·protocol·OOM
+실패는 즉시 반환한다. reconnect 예산은 target pause 5초 + rollback reader 복원 5초 + 부팅/handshake 여유 5초이며,
+제품 pause 상한 5초는 변경하지 않았다. inner timeout 횟수와 outer 횟수를 곱해 수 분 대기로 늘리지 않는다.
+`HostSet.addAtPublication`은 실패한 manifest publication 시각을 기억하고, `blocks`는 더 새로운 publication에서만
+재검사를 허용한다. held owner lease·ready·호환 wire·spawn capability 검사와 target build ID 검증은 그대로 둔다.
+
+`restore prepared`는 역할·runtime 수·경과 및 남은 예산을 남기고, `checkRoleDeadlineAt`은 실제 시간 초과 경계를
+기록한다. target과 rollback의 시한을 다시 시작하거나 무결성 검증을 생략하지 않는다.
+
+동일 predecessor에서 29개 PTY 및 각각 512줄 이력으로 검사한 ReleaseFast 후보는 epoch 0→1, 같은
+host/child PID, 화면 표식 보존, 이후 입력과 종료를 검증했다. 초기 Debug 측정의 epoch 불일치는 pending
+선임자에 너무 일찍 재연결한 false negative일 수도 있어, 그 값만으로 rollback이라고 판정하지 않는다.
+실제 사용자 host의 DeadlineExceeded/rollback은 별도 보존 로그에서 확인했다. 이제 `upgradeStatusUntil`로
+같은 deadline 안에서 pending과 terminal 결과를 구분한다.
+두 target의 host 코드 차이는 관측/복구 보완을 포함하므로 최적화 모드만 바꾼 완전한 단일 변수 벤치마크로
+주장하지 않는다. 기존 앱의 CPU sample에서도 Debug BLAKE3 검증 경로가 hot stack으로 확인됐다.
+배포 산출물은 `zig build -Doptimize=ReleaseFast macos-app-bundle`로 만들며, 기본 Debug 산출물을 배포로 쓰지 않는다.
+
+검증: `zig build test-session-host-upgrade-recovery test-upgrade-scan-policy` 및
+`test-session-host-signed-upgrade -Dsession-host-signed-upgrade-runtime-count=29`.
+서명된 외부 실행 파일은 N-1/current 옵션으로 명시하며, 반드시 `/tmp` 아래의 별도 owned root를 사용한다.
+`MARU_SIGNED_UPGRADE_HISTORY_LINES=512`는 fixture에 이력을 추가한다(0..512). 이 harness는 parent와 child 모두
+동일한 namespace override를 사용하고 초기 manifest 게시/교체를 bounded retry하며, sh의 bash 실행 이름도
+허용하되 PID·입출력·화면·exit=23 증명을 유지한다. 사용자 live host에는 이 검증을 실행하지 않는다.

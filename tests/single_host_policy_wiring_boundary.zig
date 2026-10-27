@@ -116,10 +116,10 @@ test "세션 호스트 하나 — 업그레이드가 실패해도 살아 있는 
 
     // ②-c 이번 스캔이 붙지 못했거나 시간 초과로 끝난 host 는 재사용 판정이 다시 붙어 보지 않는다(같은 대기 두 번 방지).
     const scan = try fnBody(src, "tryUpgradeExistingHost");
-    try expectCount(scan, "unreachable_hosts.add(host_id);", 4, "스캔이 기록하는 자리");
-    try expectCount(scan, "if (reconnectTimedOut(reconnected)) unreachable_hosts.add(host_id);", 2, "재연결 시간 초과 기록");
-    _ = try expectOnce(scan, "else { unreachable_hosts.add(host_id); continue; },", "연결 실패 기록");
-    _ = try expectOnce(scan, "client.deinit(); unreachable_hosts.add(host_id); const reconnected = reconnectUpgradedHost(", "prepare 전송 오류 기록");
+    try expectCount(scan, "unreachable_hosts.addAtPublication(host_id, candidate.published_ns);", 4, "스캔이 기록하는 자리");
+    try expectCount(scan, "if (reconnectTimedOut(reconnected)) unreachable_hosts.addAtPublication(host_id, candidate.published_ns);", 2, "재연결 시간 초과 기록");
+    _ = try expectOnce(scan, "else { unreachable_hosts.addAtPublication(host_id, candidate.published_ns); continue; },", "연결 실패 기록");
+    _ = try expectOnce(scan, "client.deinit(); unreachable_hosts.addAtPublication(host_id, candidate.published_ns); const reconnected = reconnectUpgradedHost(", "prepare 전송 오류 기록");
     _ = try expectOnce(try fnBody(src, "reconnectTimedOut"), ".upgrade_failed => |failed| failed.failure == .reconnect,", "시간 초과 판정");
 
     // ③ 판정은 순수 leaf 가 한다. 매니페스트를 관측으로 옮기고, lease 는 세 값 그대로(`unknown` 을 held 로 접지 않는다).
@@ -129,7 +129,7 @@ test "세션 호스트 하나 — 업그레이드가 실패해도 살아 있는 
     _ = try expectOnce(reuse, ".same_wire = manifest.protocol_major == protocol.version_major and manifest.screen_codec_version == screen_stream.codec_version,", "wire 관측");
     _ = try expectOnce(reuse, ".ready = manifest.lifecycle == .ready,", "lifecycle 관측");
     _ = try expectOnce(reuse, ".published_ns = manifestPublishedNs(session_dir, host_id),", "게시 시각");
-    _ = try expectOnce(reuse, ".unreachable_this_launch = unreachable_hosts.contains(host_id),", "이번 실행에 못 붙은 host");
+    _ = try expectOnce(reuse, ".unreachable_this_launch = unreachable_hosts.blocks(host_id, manifestPublishedNs(session_dir, host_id)),", "이번 실행에 못 붙은 host");
     // 재사용한 연결은 판정이 고른 그 host 의 것이고, 「옛 build」 여부는 leaf 의 판정(`reusedPreviousBuild`)이 정한다.
     _ = try expectOnce(reuse, ".reuse => |host_id| reuse: { const client = prober.client orelse unreachable; const previous_build = single_host_policy.reusedPreviousBuild(client.build_id, current_build_id);", "재사용 연결과 옛 build 판정");
     _ = try expectOnce(reuse, "break :reuse .{ .reuse = .{ .client = client, .previous_build = previous_build } };", "옛 build 사실 전달");

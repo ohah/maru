@@ -147,6 +147,7 @@ fn runImpl(
     precommit_fault: ?*PrecommitFaultPlan,
     postcommit_fault: ?*PostcommitFaultPlan,
 ) !void {
+    const restore_started_ns = std.Io.Clock.awake.now(io).nanoseconds;
     // 복원은 다섯 단계인데 실패하면 호출자에는 에러 이름 하나만 올라간다. 2026-09-05 에 3 일 넘게
     // 살아 있던 host 가 `InvalidValue` 로 죽고 세션 22 개를 잃었을 때, 남은 단서는 그 이름뿐이라 어느
     // 단계였는지 끝내 특정하지 못했다 — 이름만으로는 후보가 여러 단계에 걸쳐 있다. 그래서 단계마다
@@ -196,6 +197,12 @@ fn runImpl(
     armed_active = false;
     defer validated.deinit();
 
+    host_log.line("restore prepared: role={s} runtimes={d} elapsed_ms={d} remaining_ms={d}", .{
+        @tagName(invocation.role),
+        validated.state.host.runtimes.len,
+        @divTrunc(std.Io.Clock.awake.now(io).nanoseconds - restore_started_ns, std.time.ns_per_ms),
+        @divTrunc((try validated.deadline(io)).remainingNs(), std.time.ns_per_ms),
+    });
     var rollback_allowed = invocation.role == .target;
     activateValidated(
         allocator,
@@ -271,7 +278,7 @@ fn activateValidated(
     postcommit_fault: ?*PostcommitFaultPlan,
 ) !void {
     const deadline = try validated.deadline(io);
-    try checkRoleDeadline(invocation.role, deadline);
+    try checkRoleDeadlineAt(invocation.role, deadline, "before_adoption");
     var inherited_close = try validated.prepareInheritedClose();
     const session_dir = try allocator.dupeSentinel(u8, invocation.session_dir, 0);
     defer allocator.free(session_dir);
@@ -331,7 +338,7 @@ fn activateValidated(
         try manager.prepareRestoredGraph(&validated.state.host);
     defer graph.discard();
     if (precommit_fault) |fault| try fault.failAfter(.after_restored_graph);
-    try checkRoleDeadline(invocation.role, deadline);
+    try checkRoleDeadlineAt(invocation.role, deadline, "after_restored_graph");
     const reader_deadline = try readerPreparationDeadline(
         io,
         invocation.role,
@@ -499,7 +506,7 @@ fn activateValidated(
     try prepared_authority.restoreAuthorityGeneration(restored_authority_generation);
     if (precommit_fault) |fault| try fault.failAfter(.after_prepared_authority);
 
-    try checkRoleDeadline(invocation.role, deadline);
+    try checkRoleDeadlineAt(invocation.role, deadline, "before_reader_wait");
     try lifetime_owner.revalidatePath(owner_path);
     if (!server.revalidateBoundIdentity() or
         !rollback_authority.revalidate())
@@ -531,7 +538,7 @@ fn activateValidated(
     var validated_graph = try graph.revalidateAll();
     if (precommit_fault) |fault| try fault.failAfter(.after_graph_revalidate);
     try adoption.get().revalidate(session_dir);
-    try checkRoleDeadline(invocation.role, deadline);
+    try checkRoleDeadlineAt(invocation.role, deadline, "before_ready_commit");
 
     var authority = activateReadyWithPrecommitFault(
         &prepared_authority,
@@ -712,6 +719,13 @@ fn writeTestActivationMarker(attempt_id: u128) !void {
 
 fn checkDeadline(deadline: upgrade_deadline.Deadline) !void {
     if (deadline.expired()) return error.DeadlineExceeded;
+}
+
+fn checkRoleDeadlineAt(role: entrypoint.RestoreRole, deadline: upgrade_deadline.Deadline, stage: []const u8) !void {
+    checkRoleDeadline(role, deadline) catch |err| {
+        host_log.line("restore deadline exceeded: role={s} stage={s}", .{ @tagName(role), stage });
+        return err;
+    };
 }
 
 fn checkRoleDeadline(

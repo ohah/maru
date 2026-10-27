@@ -8991,8 +8991,8 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"세션 호스트 하나"},
         });
         const run_single_host_tests = b.addRunArtifact(single_host_tests);
-        run_single_host_tests.addArg("--maru-expect-tests=3");
-        run_single_host_tests.addArg("--maru-expect-passed=3");
+        run_single_host_tests.addArg("--maru-expect-tests=4");
+        run_single_host_tests.addArg("--maru-expect-passed=4");
         single_host_policy_step.dependOn(&run_single_host_tests.step);
     }
     const single_host_wiring_tests = addProjectTest(b, .{
@@ -9008,6 +9008,23 @@ pub fn build(b: *std.Build) void {
     run_single_host_wiring.setCwd(b.path("."));
     single_host_policy_step.dependOn(&run_single_host_wiring.step);
     boundary_step.dependOn(single_host_policy_step);
+
+    const upgrade_reconnect_policy_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/host_connect.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+        .filters = &.{"upgrade recovery shares one deadline"},
+    });
+    const run_upgrade_reconnect_policy = b.addRunArtifact(upgrade_reconnect_policy_tests);
+    run_upgrade_reconnect_policy.addArg("--maru-expect-tests=1");
+    const upgrade_recovery_step = b.step("test-session-host-upgrade-recovery", "Keep upgrade reconnect bounded and allow a fresh rollback-ready host publication");
+    upgrade_recovery_step.dependOn(&run_upgrade_reconnect_policy.step);
+    upgrade_recovery_step.dependOn(single_host_policy_step);
+    boundary_step.dependOn(upgrade_recovery_step);
 
     // codex 공유 데몬이 돌린 훅 이벤트를 **파일 이름(pane)이 아니라 세션 id 로** 귀속하는가(2026-10-04: 같은 폴더의 codex
     // 두 pane 이 사이드바에서 뒤바뀌었다 — 데몬이 먼저 뜬 pane 의 env 로 남의 세션 훅을 그 pane 파일에 적었다). 판정·표식·

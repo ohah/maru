@@ -29,6 +29,7 @@
 - `mise exec -- zig build test-editor-shared-bracket-edit test-editor-shared-bracket-edit-product -j2`: 공유 편집 후 완료한 괄호 목록의 독립 재사용·실패 복귀·색/탐색과 실제 분할 입력·Undo/Redo를 검증한다.
 - `mise exec -- zig build test-editor-bracket-range-cursor test-editor-bracket-range-cursor-product -j2`: 범위 수집의 독립 전체 순회·오류 복구·cursor 불일치·할당 실패와 제품 색/탐색·Undo/Redo를 검사한다. `-Doptimize=ReleaseFast`도 지원한다. [계획과 재현](plans/editor-bracket-range-cursor.md)을 따른다.
 - pane 프레임 준비 비용: [사본 실행·집계·독립 손상 검증 명령](../tools/editor-pane-measure/results.md). 제품을 바꾸지 않으며 pane 내부 호출만 센다.
+- native 파싱 서비스: `mise exec -- zig build test-editor-parse-worker test-editor-parse-worker-native test-syntax -j2`(macOS). 실제 큐·취소·자원 반환과 production-mode 실행을 [검증](../tools/editor-parse-worker/README.md)한다. UI에는 연결하지 않았다.
 - 파싱 요청 수락 문턱: `mise exec -- zig build test-editor-parse-request -j2`. `begin`·준비 후 `publish`·현재 결과의 단발 `accept`·닫기/고갈 무효화를 검사한다. [실제 Zig 결함 대조](../tools/editor-parse-request/README.md)를 따른다.
 - 파싱 결과 인계 기계: `mise exec -- zig build test-editor-syntax-stamp test-editor-shared-parse-core test-editor-shared-parse-product -j2`. [검증 범위와 제품 연결 조건](plans/editor-shared-parse-reuse.md)을 따른다.
 - 변경 범위의 복사 계보: `mise exec -- zig build test-editor-change-origin test-editor-change-origin-product -j2`. [계보 발급·재사용 조건과 남은 실측](plans/editor-shared-change-origin.md)을 따른다. 제품 검사는 macOS 전용이다.

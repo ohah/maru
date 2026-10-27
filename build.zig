@@ -2340,6 +2340,21 @@ pub fn build(b: *std.Build) void {
     const address_field_ime_step = b.step("test-address-field-ime", "Validate address-field native IME ranges and pinned owner lifetime");
     address_field_ime_step.dependOn(&run_address_ime.step);
 
+    const trust_picker_ime_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{ "trust picker IME host", "ABI v192 early app log" },
+    });
+    const run_trust_picker_ime = b.addRunArtifact(trust_picker_ime_tests);
+    run_trust_picker_ime.addArg("--maru-expect-tests=42");
+    run_trust_picker_ime.setCwd(b.path("."));
+    const trust_picker_ime_step = b.step("test-trust-picker-ime", "Validate trust and environment-name picker IME boundaries");
+    trust_picker_ime_step.dependOn(&run_trust_picker_ime.step);
+    const trust_ime_artifact_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/trust-picker-ime", "-p", "test_*.py" });
+    trust_ime_artifact_controls.setCwd(b.path("."));
+    trust_ime_artifact_controls.has_side_effects = true;
+    trust_picker_ime_step.dependOn(&trust_ime_artifact_controls.step);
+    if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_trust_picker_ime.step);
+
     const recovery_picker_ime_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
         .filters = &.{"recovery picker IME host"},
@@ -5033,6 +5048,7 @@ pub fn build(b: *std.Build) void {
     const posix_host_tests = target.result.os.tag != .windows;
 
     const test_step = b.step("test", "Run all Zig tests");
+    test_step.dependOn(&trust_ime_artifact_controls.step);
     test_step.dependOn(&recovery_ime_artifact_controls.step);
     test_step.dependOn(&reference_ime_artifact_controls.step);
     test_step.dependOn(&symbol_ime_artifact_controls.step);
@@ -5041,6 +5057,15 @@ pub fn build(b: *std.Build) void {
 
     test_step.dependOn(&run_inspector_rules.step);
     inline for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
+        const trust_model_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
+            .filters = &.{"trust picker IME model"},
+        });
+        const run_trust_models = b.addRunArtifact(trust_model_tests);
+        run_trust_models.addArg("--maru-expect-tests=13");
+        trust_picker_ime_step.dependOn(&run_trust_models.step);
+        test_step.dependOn(&run_trust_models.step);
+
         const recovery_model_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
             .filters = &.{"recovery picker IME model"},

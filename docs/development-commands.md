@@ -2191,3 +2191,7 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 복구 목록 검색 IME: `mise exec -- zig build test-recovery-picker-ime -j2`는 범위·세대·목록 갱신·OOM과
 실제 private 백업의 후보 Return/별도 Return 경계를 검사한다. 중립 모델은 Debug/ReleaseFast 각각 실행한다.
 제품 변이와 실제 OS 입력/후보창 검증은 [구현 계획](plans/recovery-picker-ime.md)을 따른다.
+
+신뢰·환경 이름 목록 IME: `mise exec -- zig build test-trust-picker-ime -j2`는 두 모드의 범위·owner·실패 원자성과
+후보 Return/관리·닫기 경계를 확인한다. 실제 후보창과 사용자 신뢰/환경을 쓰지 않는 격리 절차는
+[구현 계획](plans/trust-picker-ime.md)을 따른다.

@@ -47,6 +47,7 @@ pub const ChromeProps = props.ChromeProps;
 pub const Tokens = tokens.Tokens;
 
 pub const components = struct {
+    pub const trust_filter = @import("chrome/components/trust_filter.zig");
     pub const inspector = @import("chrome/components/inspector.zig");
     pub const project_search = @import("chrome/components/project_search.zig");
     pub const outline = @import("chrome/components/outline.zig");

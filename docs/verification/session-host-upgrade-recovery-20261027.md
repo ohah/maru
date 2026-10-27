@@ -154,3 +154,9 @@ are in `pty_reader.appendResponseBounded`, outside the changed environment filte
 The whole installed-app visual result still requires approval and a new launch after
 this color fix is signed and notarized. Already-running monochrome providers retain
 their old process environment until they are relaunched.
+
+History check: `5c26659f6` (2026-06-18) fixed the same missing gray composer symptom
+by filtering CLICOLOR_FORCE/FORCE_COLOR, but did not filter NO_COLOR. The common-list
+extraction `58b2abd06` (2026-10-08) retained that omission. The observed October 27
+incident is a launcher-triggered exposure of this older omission, not evidence that
+the current upgrade patch removed a previously present NO_COLOR filter.

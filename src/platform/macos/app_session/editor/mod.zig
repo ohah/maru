@@ -72262,3 +72262,647 @@ test "symbol picker IME host dynamic text remains longer than Session Dock budge
     fx.session.imeEnd(null);
     try testing.expectEqualStrings(&text, fx.session.chrome_host.symbol_picker.input.query.items);
 }
+
+fn referenceImeFixture(fx: *PaneFixture) !void {
+    const reference_picker = @import("../../reference_picker.zig");
+    try symbolPreviewFixture(fx);
+    const path = fx.term.rt.editorDocument().path orelse return error.MissingPath;
+    var locs: [50]reference_picker.Loc = undefined;
+    for (&locs, 0..) |*loc, i| loc.* = .{ .path = path, .line = @intCast(i * 2), .character = 0 };
+    const Reader = struct {
+        pub fn read(_: *@This(), _: []const u8) ?[]const u8 {
+            return null;
+        }
+    };
+    var reader: Reader = .{};
+    try reference_picker.build(testing.allocator, &locs, .{ .root = "", .current_path = path, .current_content = fx.term.rt.editorDocument().opened.?.file.content, .row_cols = 56, .outside_title = "outside" }, &reader, &fx.session.reference_picker_rows);
+    fx.session.chrome_host.reference_picker.show();
+    fx.session.chrome_host.reference_picker.setResultCount(fx.session.reference_picker_rows.shown.items.len);
+}
+
+test "reference picker IME host middle UTF16 range replaces the word" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    try fx.session.chrome_host.reference_picker.input.query.appendSlice(testing.allocator, "a😀z");
+    fx.session.imeBegin();
+    if (!@import("../chrome_ime.zig").insert(fx.session, "韓", .{ .location = 1, .length = 2 })) fx.session.imeInsert("韓");
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("a韓z", fx.session.chrome_host.reference_picker.input.query.items);
+}
+
+test "reference picker IME host explicit empty range deletes only the selected word" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "", .{ .location = 1, .length = 2 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("az", field.query.items);
+}
+
+test "reference picker IME host empty callback without range keeps query" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "abc");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("abc", field.query.items);
+}
+
+test "reference picker IME host surrogate split rejects the whole key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "韓", .{ .location = 2, .length = 1 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("a😀z", field.query.items);
+}
+
+test "reference picker IME host invalid UTF8 rejects the whole key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "\xff", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "reference picker IME host NFD is preserved verbatim" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "한", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("한", field.query.items);
+}
+
+test "reference picker IME host outside key range callback keeps suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    _ = ime.insert(fx.session, "韓", .{ .location = 1, .length = 2 });
+    try testing.expectEqualStrings("a韓z", field.query.items);
+}
+
+test "reference picker IME host preview preserves query rows selection and document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    references_client.recompute(fx.session);
+    fx.session.chrome_host.reference_picker.selected = 37;
+    const rev = fx.term.rt.editorDocument().opened.?.file.revision;
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "韓", .{ .location = 1, .length = 0 }, .{ .location = 0, .length = 6 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("target", field.query.items);
+    try testing.expectEqualStrings("韓", field.preedit.items);
+    try testing.expectEqual(@as(usize, 50), fx.session.reference_picker_rows.shown.items.len);
+    try testing.expectEqual(@as(usize, 37), fx.session.chrome_host.reference_picker.selected);
+    try testing.expectEqual(rev, fx.term.rt.editorDocument().opened.?.file.revision);
+}
+
+test "reference picker IME host candidate Return is consumed without navigation" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "韓", .{ .location = 1, .length = 0 }, .{ .location = 0, .length = 6 });
+    fx.session.imeEnd(null);
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "韓", null);
+    try testing.expect(ime.end(fx.session, .{ .key = .enter }));
+    fx.session.imeEnd(null);
+    try testing.expect(fx.session.chrome_host.reference_picker.open);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+}
+
+test "reference picker IME host independent Return can reach the existing accept path" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    _ = field;
+    fx.session.imeBegin();
+    try testing.expect(!ime.end(fx.session, .{ .key = .enter }));
+    fx.session.imeEnd(null);
+}
+
+test "reference picker IME host reopen rejects old callbacks" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    fx.session.chrome_host.reference_picker.hide();
+    fx.session.chrome_host.reference_picker.show();
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("", field.query.items);
+    try testing.expect(fx.session.chrome_host.reference_picker.open);
+}
+
+test "reference picker IME host kind change rejects an in flight key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "x", null);
+    fx.session.editor_references.waiting_kind = .implementation;
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "reference picker IME host revision change rejects an in flight key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "x", null);
+    fx.term.rt.editorDocument().opened.?.file.revision += 1;
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "reference picker IME host result clear rejects the previous key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "x", null);
+    fx.session.reference_picker_rows.clear(testing.allocator);
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "reference picker IME host sequence exhaustion closes append fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.reference_picker_ime.sequence = @as(u64, 1) << 52;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(.{ .key = .{ .char = 'x' } });
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "reference picker IME host lifecycle exhaustion closes append fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.chrome_host.reference_picker.ime_generation = std.math.maxInt(u64);
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(.{ .key = .{ .char = 'x' } });
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "reference picker IME host bootstrap has no owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    _ = field;
+    const saved = fx.session.surface_initialized;
+    fx.session.surface_initialized = false;
+    defer fx.session.surface_initialized = saved;
+    try testing.expect(ime.generation(fx.session) == null);
+}
+
+test "reference picker IME host empty topology has no owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    _ = field;
+    const saved = fx.session.tabs.items.len;
+    fx.session.tabs.items.len = 0;
+    defer fx.session.tabs.items.len = saved;
+    try testing.expect(ime.generation(fx.session) == null);
+}
+
+test "reference picker IME host terminal pin has priority" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    _ = field;
+    fx.session.ime_terminal_target_id = fx.term.surfaceId();
+    defer fx.session.ime_terminal_target_id = null;
+    try testing.expect(ime.generation(fx.session) == null);
+    try testing.expect(!ime.insert(fx.session, "late", null));
+}
+
+test "reference picker IME host accepted query publishes staged rows" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    references_client.recompute(fx.session);
+    fx.session.chrome_host.reference_picker.selected = 37;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "target4", .{ .location = 0, .length = 6 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("target4", field.query.items);
+    try testing.expectEqual(@as(usize, 10), fx.session.reference_picker_rows.shown.items.len);
+    try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.reference_picker.selected);
+}
+
+test "reference picker IME host snapshot allocation failure preserves the previous input" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    fx.session.allocator = testing.allocator;
+    try testing.expectEqualStrings("target", field.query.items);
+}
+
+test "reference picker IME host failed key recovers for a following valid key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "bad", .{ .location = 2, .length = 1 });
+    fx.session.imeEnd(null);
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "韓", .{ .location = 1, .length = 2 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("a韓z", field.query.items);
+}
+
+test "reference picker IME host every native key allocation failure preserves visible results" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../reference_picker_ime.zig");
+    var observed_failure = false;
+    for (0..256) |index| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        try referenceImeFixture(&fx);
+        const field = &fx.session.chrome_host.reference_picker.input;
+        try field.query.appendSlice(testing.allocator, "target");
+        references_client.recompute(fx.session);
+        fx.session.chrome_host.reference_picker.selected = 37;
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
+        fx.session.allocator = failing.allocator();
+        fx.session.imeBegin();
+        _ = ime.insert(fx.session, "target4", .{ .location = 0, .length = 6 });
+        fx.session.imeEnd(null);
+        fx.session.allocator = testing.allocator;
+        if (failing.has_induced_failure) {
+            observed_failure = true;
+            try testing.expectEqualStrings("target", field.query.items);
+            try testing.expectEqual(@as(usize, 50), fx.session.reference_picker_rows.shown.items.len);
+            try testing.expectEqual(@as(usize, 37), fx.session.chrome_host.reference_picker.selected);
+        } else {
+            try testing.expect(observed_failure);
+            try testing.expectEqualStrings("target4", field.query.items);
+            try testing.expectEqual(@as(usize, 10), fx.session.reference_picker_rows.shown.items.len);
+            return;
+        }
+    }
+    return error.AllocationControlNeverSucceeded;
+}
+
+test "reference picker IME host cancel restores the original word and suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "a한z");
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 1 });
+    fx.session.imeEnd(null);
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "", .{ .location = 0, .length = 0 }, null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("a한z", field.query.items);
+    try testing.expectEqual(@as(usize, 0), field.preedit.items.len);
+}
+
+test "reference picker IME host dynamic text remains longer than Session Dock budget" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    var text: [500]u8 = undefined;
+    @memset(&text, 'x');
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, &text, null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings(&text, fx.session.chrome_host.reference_picker.input.query.items);
+}
+
+test "reference picker IME host filter capacity failure preserves query shown and selection" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "target37");
+    references_client.recompute(fx.session);
+    const rows = &fx.session.reference_picker_rows;
+    const precise = try testing.allocator.dupe(usize, rows.shown.items);
+    rows.shown.deinit(testing.allocator);
+    rows.shown = .fromOwnedSlice(precise);
+    fx.session.imeBegin();
+    _ = @import("../reference_picker_ime.zig").insert(fx.session, "target4", .{ .location = 0, .length = 8 });
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    fx.session.imeEnd(null);
+    fx.session.allocator = testing.allocator;
+    try testing.expect(failing.has_induced_failure);
+    try testing.expectEqualStrings("target37", field.query.items);
+    try testing.expectEqualSlices(usize, &.{37}, rows.shown.items);
+    try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.reference_picker.selected);
+}
+
+test "reference picker IME host result generation exhaustion closes append fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    fx.session.reference_picker_rows.result_generation = std.math.maxInt(u64);
+    fx.session.imeBegin();
+    _ = @import("../reference_picker_ime.zig").insert(fx.session, "late", null);
+    fx.session.imeEnd(.{ .key = .{ .char = 'x' } });
+    try testing.expectEqualStrings("", fx.session.chrome_host.reference_picker.input.query.items);
+}
+
+test "reference picker IME host old callback cannot write a new palette" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    fx.session.imeBegin();
+    fx.session.chrome_host.reference_picker.hide();
+    fx.session.chrome_host.palette.show();
+    try fx.session.chrome_host.palette.input.query.appendSlice(testing.allocator, "destination");
+    try testing.expect(@import("../chrome_ime.zig").insert(fx.session, "late", null));
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("destination", fx.session.chrome_host.palette.input.query.items);
+}
+test "reference picker IME host legacy filter OOM preserves shown indices" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    _ = ime;
+    try field.query.appendSlice(testing.allocator, "target37");
+    references_client.recompute(fx.session);
+    const rows = &fx.session.reference_picker_rows;
+    const exact = try testing.allocator.dupe(usize, rows.shown.items);
+    rows.shown.deinit(testing.allocator);
+    rows.shown = .fromOwnedSlice(exact);
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, rows.applyFilter(failing.allocator(), "target"));
+    try testing.expectEqualSlices(usize, &.{37}, rows.shown.items);
+}
+
+test "reference picker IME host query filtering never changes result identity" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    _ = ime;
+    _ = field;
+    const rows = &fx.session.reference_picker_rows;
+    const first = rows.result_generation;
+    try rows.applyFilter(testing.allocator, "target37");
+    try testing.expectEqual(first, rows.result_generation);
+    rows.clear(testing.allocator);
+    try testing.expect(rows.result_generation > first);
+    rows.result_generation = std.math.maxInt(u64);
+    rows.clear(testing.allocator);
+    try testing.expectEqual(std.math.maxInt(u64), rows.result_generation);
+}
+
+test "reference picker IME host ignored LSP reply keeps the active input transaction" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    const generation = fx.session.reference_picker_rows.result_generation;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "target4", .{ .location = 0, .length = 6 });
+    fx.session.editor_references.waiting = true;
+    fx.session.editor_references.waiting_seq = 123;
+    fx.session.editor_references.waiting_kind = .references;
+    references_client.onLocationsResponse(fx.session, .references, 123, null, false);
+    fx.session.imeEnd(null);
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_references.dropped_behind_overlay);
+    try testing.expectEqual(generation, fx.session.reference_picker_rows.result_generation);
+    try testing.expectEqualStrings("target4", field.query.items);
+    try testing.expectEqual(@as(usize, 10), fx.session.reference_picker_rows.shown.items.len);
+}
+
+test "reference picker IME host all four location kinds retain native range editing" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    for ([_]maru.session.editor.lsp.rpc.LocationKind{ .references, .implementation, .type_definition, .declaration }) |kind| {
+        fx.session.editor_references.waiting_kind = kind;
+        field.query.clearRetainingCapacity();
+        try field.query.appendSlice(testing.allocator, "a😀z");
+        fx.session.imeBegin();
+        _ = ime.insert(fx.session, "韓", .{ .location = 1, .length = 2 });
+        fx.session.imeEnd(null);
+        try testing.expectEqualStrings("a韓z", field.query.items);
+    }
+}
+
+test "reference picker IME host new result lifecycle cannot be overwritten by an old key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "x", null);
+    fx.session.reference_picker_rows.clear(testing.allocator);
+    fx.session.chrome_host.reference_picker.show();
+    try field.query.appendSlice(testing.allocator, "new result");
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("new result", field.query.items);
+    try testing.expectEqual(@as(usize, 0), fx.session.reference_picker_rows.shown.items.len);
+}
+
+test "reference picker IME host out of bounds replacement rejects the key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "lost", .{ .location = 900, .length = 1 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "reference picker IME host invalid second callback rolls back the entire key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    references_client.recompute(fx.session);
+    fx.session.chrome_host.reference_picker.selected = 37;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "target4", .{ .location = 0, .length = 6 });
+    _ = ime.insert(fx.session, "\xff", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("target", field.query.items);
+    try testing.expectEqual(@as(usize, 50), fx.session.reference_picker_rows.shown.items.len);
+    try testing.expectEqual(@as(usize, 37), fx.session.chrome_host.reference_picker.selected);
+}
+
+test "reference picker IME host composition admission publishes the filtered results once" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    references_client.recompute(fx.session);
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "target4", .{ .location = 7, .length = 0 }, .{ .location = 0, .length = 6 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("target", field.query.items);
+    try testing.expect(ime.commitAll(fx.session));
+    try testing.expectEqualStrings("target4", field.query.items);
+    try testing.expectEqual(@as(usize, 10), fx.session.reference_picker_rows.shown.items.len);
+    try testing.expect(ime.commitAll(fx.session));
+}
+
+test "reference picker IME host failed composition admission retains the marked preview" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try referenceImeFixture(&fx);
+    const ime = @import("../reference_picker_ime.zig");
+    const field = &fx.session.chrome_host.reference_picker.input;
+    try field.query.appendSlice(testing.allocator, "target37");
+    references_client.recompute(fx.session);
+    const rows = &fx.session.reference_picker_rows;
+    const exact = try testing.allocator.dupe(usize, rows.shown.items);
+    rows.shown.deinit(testing.allocator);
+    rows.shown = .fromOwnedSlice(exact);
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "target4", .{ .location = 7, .length = 0 }, .{ .location = 0, .length = 8 });
+    fx.session.imeEnd(null);
+    fx.session.imeBegin();
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    const admitted = ime.commitAll(fx.session);
+    fx.session.allocator = testing.allocator;
+    fx.session.imeEnd(null);
+    try testing.expect(!admitted);
+    try testing.expectEqualStrings("target37", field.query.items);
+    try testing.expectEqualStrings("target4", field.preedit.items);
+    try testing.expectEqualSlices(usize, &.{37}, rows.shown.items);
+}

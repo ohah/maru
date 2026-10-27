@@ -2178,3 +2178,8 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 심볼 피커 실제 입력/후보창: `python3 tools/symbol-picker-ime/run.py --output <new-external-dir>`.
 `--mode diagnostic`은 실제 HID·문서/이동 상태만 검사하며 PNG/OCR 완료로 계산하지 않는다.
 `--app <fixed-app>/Contents/MacOS/maru-macos-app`으로 권한을 허용한 고정 앱을 재사용한다.
+
+참조 결과 피커 IME: `mise exec -- zig build test-reference-picker-ime -j2`는 범위·결과 owner·OOM과 독립 기록 손상 검사를 실행한다.
+제품 변이는 `python3 tools/reference-picker-ime/mutations.py --output <new-external-dir>`로 격리 검증한다.
+실제 입력/후보창은 `python3 tools/reference-picker-ime/run.py --output <new-external-dir>`를 쓰고,
+`--mode diagnostic`은 PNG/OCR 통과로 계산하지 않는다. `--app <fixed-app>/Contents/MacOS/maru-macos-app`으로 앱을 고정한다.

@@ -4,6 +4,33 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const native = maru.dwrite_shape;
 
+test "Windows glyph sources native clusters map onto fixed cells including fallback graphemes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var shaper = try native.Shaper.create(std.testing.allocator);
+    defer shaper.destroy();
+    var glyphs: [32]native.GlyphRecord = undefined;
+    var sources: [32]native.GlyphSource = undefined;
+    const request: native.Request = .{ .text = "A\u{1f600}\u{1100}\u{1161}\u{11a8}=>", .family = "Fira Code", .fallback_csv = "", .size_px = 22 };
+    const shaped = try shaper.shapeWithOptions(request, &glyphs, .{ .glyph_sources = &sources });
+    try std.testing.expect(shaped.primary_found and !shaped.overflow and shaped.count > 0);
+    // Independent fixture: one ASCII, a surrogate pair, a three-unit NFD
+    // grapheme, then two operators. Cell count is seven, text length eight.
+    const columns = [_]u16{ 10, 11, 11, 13, 13, 13, 15, 16 };
+    const widths = [_]u2{ 1, 2, 2, 2, 2, 2, 1, 1 };
+    var units: [8]native.Utf16Cell = undefined;
+    var seen: [8]bool = @splat(false);
+    for (&units, columns, widths) |*unit, col, width| unit.* = .{ .col = col, .width = width };
+    for (sources[0..shaped.count]) |item| {
+        const mapped = try native.glyphCellSpan(&units, item);
+        const first = item.utf16_start;
+        const last = first + item.utf16_length - 1;
+        @memset(seen[first .. last + 1], true);
+        try std.testing.expectEqual(columns[first], mapped.col);
+        try std.testing.expectEqual(@as(u16, columns[last] + widths[last] - columns[first]), mapped.width);
+    }
+    for (seen) |covered| try std.testing.expect(covered);
+}
+
 fn span(source: native.GlyphSource, start: u32, length: u32, head: u32) !void {
     try std.testing.expect(source.known);
     try std.testing.expectEqual(start, source.utf16_start);

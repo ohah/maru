@@ -71,6 +71,9 @@ pub const AppliedTypographyRange = typography.AppliedRange;
 const glyph_sources = @import("glyph_sources.zig");
 pub const GlyphSource = glyph_sources.Source;
 pub const mapGlyphSources = glyph_sources.assign;
+const cell_mapping = @import("glyph_cells.zig");
+pub const Utf16Cell = cell_mapping.Cell;
+pub const glyphCellSpan = cell_mapping.span;
 pub const ShapeOptions = struct {
     /// Keep native defaults unless the terminal explicitly disables liga/clig/calt.
     ligatures: bool = true,

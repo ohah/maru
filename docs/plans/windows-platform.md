@@ -1037,3 +1037,31 @@ Windows 셸에서 작업표시줄 고정을 완료하고, 고정 바로가기의
 설치본과 대조했다. `.zig-cache/installed-formatted-preview-pin.json`이 해당 증거다.
 터미널 우클릭 메뉴의 기본값은 계속 `paste`이며 `input.right-click = menu`로 켠다.
 다른 영역의 메뉴와 터미널 합자·전체 IME 등 남은 Windows 범위는 계속 진행한다.
+
+### Windows UTF-16 글리프 범위의 셀 매핑 — 중간 단계
+
+`platform/windows/glyph_cells.zig`는 준비된 run의 UTF-16 단위별 셀 신원을 받아
+DirectWrite 클러스터가 덮는 논리 열과 폭을 계산한다. 서러게이트·NFD·fallback이
+같은 셀을 여러 번 가리켜도 셀 폭을 중복해서 세지 않는다. glyph 순서가 뒤집힌
+RTL도 텍스트 범위로 매핑하며, 미확인 소스·빈/초과 범위·셀 간격/겹침/역행·
+일관되지 않은 그래핌 폭·마지막 열 초과를 거부한다. 할당이나 출력 버퍼 쓰기는 없다.
+
+`zig build test-windows-glyph-sources`는 기존 native 검사에 실제 이모지·NFD·
+합자의 셀 매핑 검사를 더한 8개와 순수 매핑 6개를 함께 실행한다. 순수 매핑에
+6개 compiled 결함을 주입해 각각 거절하고 Debug·ReleaseFast 원본 대조를 통과했다.
+증거는 `.zig-cache/windows-glyph-cell-adversarial.json`과
+`.zig-cache/windows-glyph-cell-native.log`다. 아직 terminal frame은 이 함수를
+사용하지 않는다. run 구성·native 위치/GPOS 투영·배경/커서 정합과 live 합자 토글·
+실제 앱 픽셀 비교를 연결해야 하며 이 단계만으로 합자 표시 완료로 보지 않는다.
+
+최종 매핑 소스의 일반 Debug 빌드·ReleaseFast 집중 12개 묶음·교차 컴파일·전체 경계
+272개와 문서 링크/코드 좌표 검사를 통과했다. 근거는
+`.zig-cache/glyph-cell-fast-gates-20261028/result.json`과
+`.zig-cache/glyph-cell-documentation-checks.log`다. 순수 매핑 6개의 Debug·ReleaseFast
+대조와 native 매핑의 집중 검증은 위 증거를 따른다. 전체 Debug 집중 검사는
+디스크 부족으로 실패했고, 직후 재시도에서도 캐시가 가리키는 테스트 실행 파일이
+없어 중단됐다. `.zig-cache/glyph-cell-gates-20261028`과
+`.zig-cache/glyph-cell-serial-gates-20261028`의 실패 기록은 보존하며 전체 Debug 집중
+통과로 세지 않는다. 캐시 파일은 삭제하지 않고 완료된 출력의 실제 할당량을 확인해
+압축했다. 이 변경은 아직 terminal frame 입력을 바꾸지 않으므로 새 합자 UI/E2E
+완료를 주장하지 않는다.

@@ -63,6 +63,8 @@ const Report = struct {
     selected_kind: u8 = 0,
     additional_before_enter: usize = 0,
     accepted_after_resolve: u64 = 0,
+    accepted_on_timeout: u64 = 0,
+    enter_to_accept_ms: u64 = 0,
     undo_before: usize = 0,
     undo_after: usize = 0,
     undo_after_undo: usize = 0,
@@ -215,10 +217,14 @@ fn steps(s: *host.AppSession, main: *host.Term, c: Case, r: *Report, paint: Pain
     if (!found) return error.AutoImportCompletionMissing;
     r.undo_before = main.rt.editorDocument().history.undo_len;
     const resolved = s.editor_completion.accepted_after_resolve;
+    const timed_out = s.editor_completion.accepted_on_timeout;
+    const entered_ms = s.awakeMs();
     if (!completion.handleKey(s, .enter, .{})) return error.CompletionEnterNotHandled;
     deadline = s.awakeMs() + c.timeout_ms;
     while (s.editor_completion.active and s.awakeMs() < deadline) pump(s);
     r.accepted_after_resolve = s.editor_completion.accepted_after_resolve - resolved;
+    r.accepted_on_timeout = s.editor_completion.accepted_on_timeout - timed_out;
+    r.enter_to_accept_ms = s.awakeMs() -| entered_ms;
     r.after_completion = try s.allocator.dupe(u8, content(main));
     if (std.mem.indexOf(u8, content(main), c.import_marker) == null or std.mem.indexOf(u8, content(main), c.expected_usage) == null) return error.AutoImportNotApplied;
     r.undo_after = main.rt.editorDocument().history.undo_len;

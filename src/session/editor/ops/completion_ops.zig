@@ -14,6 +14,10 @@ const Change = delta.Change;
 const Selection = selection.Selection;
 const Span = completion.Span;
 
+/// Pending Enter requires every additional edit; ordinary preview-era acceptance
+/// retains its existing conservative additional-edit filtering.
+pub const CommitMode = enum { ordinary, atomic };
+
 pub const Accept = struct {
     /// 적용할 정렬된 변경 — additional(받으면) + 자리마다 넣을 글. undo 하나다.
     changes: text_edits.Changes,
@@ -48,6 +52,7 @@ pub fn planAccept(
     additional: []const Change,
     same_version: bool,
     extras: []const Selection,
+    mode: CommitMode,
 ) !Accept {
     const caret = @min(caret_in, content.len);
     var start = word_start;
@@ -61,6 +66,9 @@ pub fn planAccept(
             allow = false;
         };
     }
+    // A pending transaction cannot degrade into a primary-only edit when an
+    // additional edit no longer has a valid basis.
+    if (mode == .atomic and !allow and additional.len > 0) return error.StaleAdditional;
     var others: std.ArrayList(Span) = .empty;
     defer others.deinit(allocator);
     for (extras) |e| try others.append(allocator, .{ .start = e.start(), .end = e.end() });
@@ -101,7 +109,7 @@ const testing = std.testing;
 test "planAccept — 다른 커서도 같은 접두사를 덮고 caret 은 자리마다 넣은 글 끝이다 (§8.2g-f)" {
     const a = testing.allocator;
     const content = "fo x\nfo y\n";
-    var plan = try planAccept(a, content, 2, 0, null, "foo", &.{}, true, &.{Selection.at(7)});
+    var plan = try planAccept(a, content, 2, 0, null, "foo", &.{}, true, &.{Selection.at(7)}, .ordinary);
     defer plan.deinit(a);
     try testing.expectEqual(@as(usize, 2), plan.site_count);
     try testing.expectEqual(@as(usize, 2), plan.changes.items.len);
@@ -112,11 +120,11 @@ test "planAccept — 응답 뒤 문서가 바뀌면 낱말 뒤로 걸치는 addi
     const a = testing.allocator;
     const content = "import\nfo\n";
     const imports = [_]Change{.{ .start = 0, .end = 0, .text = "use x;\n" }};
-    var keep = try planAccept(a, content, 9, 7, null, "foo", &imports, false, &.{});
+    var keep = try planAccept(a, content, 9, 7, null, "foo", &imports, false, &.{}, .ordinary);
     defer keep.deinit(a);
     try testing.expect(keep.allow);
     const late = [_]Change{.{ .start = 8, .end = 9, .text = "!" }};
-    var drop = try planAccept(a, content, 9, 7, null, "foo", &late, false, &.{});
+    var drop = try planAccept(a, content, 9, 7, null, "foo", &late, false, &.{}, .ordinary);
     defer drop.deinit(a);
     try testing.expect(!drop.allow);
     try testing.expectEqual(@as(usize, 1), drop.changes.items.len);
@@ -126,8 +134,118 @@ test "planAccept — additional 과 겹치는 다른 커서만 놓는다" {
     const a = testing.allocator;
     const content = "ab\nfo\n";
     const imports = [_]Change{.{ .start = 0, .end = 2, .text = "AB" }};
-    var plan = try planAccept(a, content, 5, 3, null, "foo", &imports, true, &.{Selection.at(1)});
+    var plan = try planAccept(a, content, 5, 3, null, "foo", &imports, true, &.{Selection.at(1)}, .ordinary);
     defer plan.deinit(a);
     try testing.expectEqual(@as(usize, 1), plan.site_count);
     try testing.expectEqual(@as(usize, 2), plan.changes.items.len); // import + primary
+}
+
+/// Resolve 뒤의 확정은 Enter 때 문맥에만 적용한다. 서버의 재분석이나
+/// 사용자 입력이 끝나는 시각에 따라 다른 편집을 만들지 않도록 하는 계약이다.
+pub const PendingContext = struct {
+    surface: u64,
+    document: usize,
+    revision: u64,
+    primary: Selection,
+    extras: []const Selection,
+};
+pub const PendingCompletion = struct {
+    context: PendingContext,
+    started_ms: u64,
+};
+pub const pending_timeout_ms: u64 = 5_000;
+pub const PendingDecision = enum { wait, apply, cancel };
+
+/// 시간이 다 되면 원문을 보존한다. 응답이 tick보다 먼저 와도 같은 시한을
+/// 검사하며, 같은 글로 Undo한 문서도 revision이 다르면 별개의 문맥이다.
+pub fn pendingDecision(p: PendingCompletion, current: ?PendingContext, now_ms: u64, response: bool) PendingDecision {
+    const c = current orelse return .cancel;
+    const old = p.context;
+    if (now_ms < p.started_ms or now_ms - p.started_ms >= pending_timeout_ms) return .cancel;
+    if (c.surface != old.surface or c.document != old.document or c.revision != old.revision or
+        !std.meta.eql(c.primary, old.primary) or c.extras.len != old.extras.len) return .cancel;
+    for (c.extras, old.extras) |a, b| if (!std.meta.eql(a, b)) return .cancel;
+    return if (response) .apply else .wait;
+}
+
+test "CPLpending resolve atomic commit — normal, old timeout and deadline boundaries" {
+    const t = std.testing;
+    const c: PendingContext = .{ .surface = 7, .document = 11, .revision = 2, .primary = Selection.at(10), .extras = &.{} };
+    const p: PendingCompletion = .{ .context = c, .started_ms = 100 };
+    for ([_]u64{ 100, 399, 400, 401, 2600, 5099 }) |now| {
+        try t.expectEqual(PendingDecision.wait, pendingDecision(p, c, now, false));
+        try t.expectEqual(PendingDecision.apply, pendingDecision(p, c, now, true));
+    }
+    for ([_]u64{ 99, 5100, 5101, std.math.maxInt(u64) }) |now| {
+        try t.expectEqual(PendingDecision.cancel, pendingDecision(p, c, now, false));
+        try t.expectEqual(PendingDecision.cancel, pendingDecision(p, c, now, true));
+    }
+}
+
+test "CPLpending rejects changed document and every selection field" {
+    const t = std.testing;
+    const c: PendingContext = .{ .surface = 7, .document = 11, .revision = 2, .primary = Selection.at(10), .extras = &.{Selection.at(3)} };
+    const p: PendingCompletion = .{ .context = c, .started_ms = 100 };
+    try t.expectEqual(PendingDecision.cancel, pendingDecision(p, null, 101, true));
+    // These are distinct invalidation paths, rather than repeated time trials.
+    for (0..20) |i| {
+        var changed = c;
+        var extra = [_]Selection{Selection.at(3)};
+        switch (i) {
+            0 => changed.surface += 1,
+            1 => changed.document += 1,
+            2 => changed.revision += 1,
+            3 => changed.primary.anchor_start += 1,
+            4 => changed.primary.anchor_end += 1,
+            5 => changed.primary.focus += 1,
+            6 => changed.primary.goal = .{ .col = 4 },
+            7 => changed.primary.anchor_goal = .{ .row_col = 2 },
+            8 => changed.extras = &.{},
+            9 => {
+                extra[0].focus += 1;
+                changed.extras = &extra;
+            },
+            10 => {
+                extra[0].anchor_start += 1;
+                changed.extras = &extra;
+            },
+            11 => {
+                extra[0].anchor_end += 1;
+                changed.extras = &extra;
+            },
+            12 => changed.primary.kind = .word,
+            13 => {
+                extra[0].kind = .line;
+                changed.extras = &extra;
+            },
+            14 => {
+                extra[0].goal = .{ .col = 1 };
+                changed.extras = &extra;
+            },
+            15 => {
+                extra[0].anchor_goal = .{ .col = 1 };
+                changed.extras = &extra;
+            },
+            16 => changed.extras = &.{ Selection.at(3), Selection.at(4) },
+            17 => changed.revision = 0,
+            18 => changed.document = 0,
+            19 => changed.surface = 0,
+            else => unreachable,
+        }
+        try t.expectEqual(PendingDecision.cancel, pendingDecision(p, changed, 101, true));
+        try t.expectEqual(PendingDecision.cancel, pendingDecision(p, changed, 101, false));
+        try t.expectEqual(PendingDecision.apply, pendingDecision(p, c, 101, true));
+    }
+}
+
+test "CPLpending atomic plan rejects dropping a required additional edit" {
+    const content = "prefix pr\ntail";
+    const late = [_]Change{.{ .start = 10, .end = 10, .text = "import" }};
+    try std.testing.expectError(error.StaleAdditional, planAccept(std.testing.allocator, content, 9, 7, null, "printf", &late, false, &.{}, .atomic));
+    var ordinary = try planAccept(std.testing.allocator, content, 9, 7, null, "printf", &late, false, &.{}, .ordinary);
+    defer ordinary.deinit(std.testing.allocator);
+    try std.testing.expect(!ordinary.allow);
+    var same = try planAccept(std.testing.allocator, content, 9, 7, null, "printf", &late, true, &.{}, .atomic);
+    defer same.deinit(std.testing.allocator);
+    try std.testing.expect(same.allow);
 }

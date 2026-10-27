@@ -871,11 +871,11 @@ rename) tick 이 오버레이를 짓기 전에 세 헬퍼를 닫는다(VS Code �
 **닫지 않는 두 갈래**(같은 날 적대적 검증): ⑴ **지나가는 토스트는 닫는 이유가 아니다** — 닫는 판정은 `anyModalOverlayOpen`(토스트 제외)이다.
 타이핑 중 비동기 토스트 하나에 완성 목록이 닫히면 안 된다(VS Code 도 알림에 목록을 안 닫는다 · `HELP12`). 그리지 않는 판정과 호버를 묻지 않는 판정은
 토스트를 포함한 채다. ⑵ **확정 보류(§8.2g-b `pending_accept`) 중인 자동완성은 닫지 않는다** — 사용자가 Enter 로 고른 것이라 닫으면 그 확정이
-사라졌다(첫 구현의 결함). 오버레이가 없을 때와 똑같이 끝낸다: 응답이 오면 additional 과 함께 넣고(`HELP10`), `resolve_wait_ms` 를 넘기면
-`acceptPendingOnTimeout` 이 additional 없이 넣는다 — 그 시간 초과는 `refresh` 안에만 있어 오버레이 아래에서는 닿지 않았으므로 tick 도 같은 함수를
-부른다(`HELP11`). 다른 에디터와의 비교: VS Code·Zed 는 본문을 즉시 넣고 additional 을 나중에 넣어(되돌리기는 둘 다 한 번으로 묶는다) 보류 구간이
-없다. Maru 의 「짧게 기다렸다 한 번에」는 그 사이 위치가 밀릴 일이 없어 안전하고, 대가는 미리 풀기(`resolveHighlighted`)가 못 따라온 드문 Enter 의
-300 ms 이하 기다림이다 — 그래서 확정 방식은 바꾸지 않았다.
+사라졌다(첫 구현의 결함). 응답이 오면 additional과 함께 한 번에 넣고(`HELP10`), 최종 5초 시한을 넘기면
+`acceptPendingOnTimeout`이 본문·Undo를 보존하고 취소한다(`HELP11`). 오버레이 아래에서도 tick이 같은 판정을 부른다.
+Enter 때 문서 revision과 선택을 고정하고, 그 뒤 편집·선택 변경·오류·취소에는 적용하지 않는다.
+초기 분석 중 resolve가 늦어지는 실제 Rust 사례에서 300ms 뒤 이름만 넣던 경로가 import를 잃고 분석 재시도를 유발했다.
+사용자 승인(2026-10-27)으로 부분 확정을 제거했다. [원자적 완성 확정 계약](editor-completion-commit.md)을 따른다.
 
 **포커스 없는 찾기 막대와는 함께 그린다(2026-10-10).** 헬퍼는 다른 오버레이가 그려지면 안 그려졌는데, 찾기 막대는 입력 포커스를 뺀 채 열려 있을
 수 있다. 실제 경로는 **찾기를 연 채 프로젝트 검색 도크를 열고(⇧⌘F) 도크 검색 입력에서 Esc 를 누르거나 결과를 여는 것**이다 — 도크를 열면 찾기
@@ -919,14 +919,14 @@ resolve** 해 확정 때는 대개 끝나 있다 → 같은 방식. ⑤ 단어 �
 | **출처 병합** | 서버가 있으면 LSP 항목 + 버퍼 단어, 없으면 버퍼 단어만. 같은 label(대소문자 그대로)은 LSP 것이 이긴다. 버퍼 단어의 `sortText` 는 `~`+단어(LSP 뒤), kind 는 `text` | ui §8.2 「에디터가 병합한다」 |
 | **트리거** | 서버 없이도 식별자 글자면 연다(설정 `editor.quick-suggestions`). 서버 트리거 글자·`⌃Space` 는 그대로. 서버가 없으면 요청 없이 **그 자리에서** 목록이 선다(`isIncomplete` 는 없다) | |
 | **fuzzy** | 접두사 문자들이 `filterText` 에 **순서대로 부분열**로 있으면 후보. 점수 = 정확한 접두사(대소문자까지) > 접두사(무시) > 낱말 경계(`_`·camelCase) 일치 > 연속 일치 > 나머지; 같은 점수는 `sortText`, 그다음 label. 빈 접두사는 전부 | VS Code 의 순서와 같은 축 |
-| **resolve** | `completionProvider.resolveProvider` 면 **강조된 항목**(선택이 바뀔 때·목록이 열릴 때)을 `completionItem/resolve`(id `9e8+seq`, 항목 JSON 그대로)로 미리 푼다. 응답의 `additionalTextEdits`·`insertText`/`textEdit`·`detail` 을 항목에 합친다. 확정 때 아직 안 풀렸으면 응답을 기다렸다 **한 번에** 적용한다(undo 하나) — 300 ms 안에 안 오면 additional 없이 적용하고 센다. 낡은 seq·다른 항목의 응답은 버린다 | 위 ④ · §3.6 |
+| **resolve** | `completionProvider.resolveProvider` 면 **강조된 항목**(선택이 바뀔 때·목록이 열릴 때)을 `completionItem/resolve`(id `9e8+seq`, 항목 JSON 그대로)로 미리 푼다. 응답의 `additionalTextEdits`·`insertText`/`textEdit`·`detail` 을 항목에 합친다. 확정 때 아직 안 풀렸으면 응답을 기다렸다 **한 번에** 적용한다(undo 하나).Enter 때 문서·revision·선택을 고정하며 변경·오류·취소 또는 최종 5초 시한에는 원문을 보존한다. 낡은 seq·다른 항목의 응답은 버린다 | 위 ④ · §3.6 |
 | **kind** | LSP `CompletionItemKind` → 한 글자(`f` 함수/메서드/생성자, `v` 변수/필드/상수, `t` 타입(클래스·구조체·인터페이스·enum), `k` 키워드, `m` 모듈, `s` 스니펫, `p` 속성, `w` 버퍼 단어, ` ` 그 밖) — label 앞 열. **§8.2g-e 부터 화면에는 글자 대신 그 글자가 고르는 아이콘**(글자는 플랫폼↔컴포넌트 사이 값으로 남는다) | VS Code 의 아이콘 자리 |
 | **하지 않는 것** | 스니펫·경로 완성 · ghost text · 문서 패널(resolve 의 `documentation` 은 받아 두기만) · §5.3 트리 토큰 경계 · commitCharacters | 다음 |
 
 **관측점**: `CPL4`(순수: 버퍼 단어 수집 — 순서·중복·숫자 시작·상한·치는 낱말 제외) · `CPL5`(순수: 병합 — 같은 label 은 LSP 승·sortText·kind) · `CPL6`(순수: fuzzy — 부분열·
 점수 순서·①-a 의 대소문자 우선이 그대로) · `CPL7`(순수: kind 글자) · `LSJ12`(순수: resolve 요청·capability·응답 합치기) · `CMP3`(제품 경계: 서버 없는 파일 —
 타이핑으로 버퍼 단어 목록이 뜨고 좁혀지고 확정된다) · `CMP4`(제품 경계: 가짜 서버 — 강조 시 resolve → 확정은 undo 하나; 확정 때 미해결이면 응답 뒤 한 번에; `RESOLVESTALL`
-이면 300 ms 뒤 additional 없이; 병합 목록에서 같은 label 은 LSP 것).
+이면 시한 뒤 원문·Undo 보존; 병합 목록에서 같은 label 은 LSP 것).
 
 **구현이 계약에 되먹인 것.** ① **fuzzy 는 서버가 준 목록 안에서만** — 서버는 제 필터로 거른 목록을 낸다(clangd 실측: `prf`·`prtf` 에 `printf` 를 내지
 않았다). 버퍼 단어는 우리가 전부 들고 있으므로 fuzzy 가 온전히 닿는다(캡처: `prf` → `w prefer_tab`). 서버 목록에 fuzzy 를 더 넓히려면 서버에 다시
@@ -950,7 +950,7 @@ resolve** 해 확정 때는 대개 끝나 있다 → 같은 방식. ⑤ 단어 �
 - **A13** 같은 점수면 짧은 filter 우선 — `CPL6` 에 `a_b` › `a_b_long`.
 - **B6** 열릴 때 강조 항목을 미리 푼다 — `CMP4` 가 키 없이 나간 resolve 를 센다(가짜 서버는 치는 낱말 `laz` 자체도 내고 그것이 첫 행이다).
 - **B9** 풀린 항목은 다시 묻지 않는다 — `↓↓` 뒤 요청 수 그대로.
-- **B17** 타임아웃 300 ms — 기다리는 동안 프레임을 돌려 0 ms 면 응답보다 먼저 additional 없이 들어가는 것을 잡고, 경과는 상수가 아니라 **300 리터럴**로 잰다(상수를 되비추면 어떤 값이든 초록).
+- **B17** 과거 300ms 부분 확정은 2026-10-27에 제거했다. `CMP4`·`CPLpending`은 옛 300ms 경계의 원문 보존과 최종 5초 경계의 취소를 독립 리터럴로 검사한다.
 - **B19** 접두사가 바뀌어 강조가 옮겨지면 키 없이 푼다 — `laz` → `y` 로 lazy_import 만 남을 때 resolve 가 나간다.
 - **B23/B23v** `words_only` 는 서버 목록이 설 때 지운다 — 처음엔 `hide` 와 `onResponse` 둘에 있어 판정자가 어느 쪽도 못 봤다 → `installItems` 하나로 모으고 앞 흔적을 심어 잰다.
 - **B18** 타임아웃 뒤 `resolved` 표시 = 죽은 코드(accept 는 안 보고 hide 가 비운다) → 제거. **B25** words_only 의 isIncomplete 가드 = 죽은 가드(`incomplete=false` 로 선다) → 제거. **B21** Enter 의 둘째 `resolve_item == idx` = 첫 가드가 보장 → 제거(첫 가드를 빼면 죽는다 — B26).

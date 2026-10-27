@@ -1,4 +1,6 @@
 # 개발 명령
+- [원자적 자동완성 확정](editor-completion-commit.md): `mise exec -- zig build test-editor-completion-contract test-editor-completion test-editor-completion-overlays -j2`.
+
 
 최신 편집 비용의 재측정은 [현재 메인 귀속 계획](plans/editor-current-frame-attribution.md)을 따른다.
 `python3 tools/editor-frame-measure/test_summary.py`와 `python3 tools/editor-storage-measure/test_summary.py`는

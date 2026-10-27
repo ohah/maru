@@ -8,7 +8,7 @@ pub fn main() !void {
     defer threaded.deinit();
     var source = try maru.session.editor.buffer.Buffer.init(allocator, "const native = 1;\n");
     defer source.deinit();
-    var service = try worker.Service.init(allocator, .{});
+    var service = try worker.Service.init(allocator, .{ .notify = notify });
     defer service.deinit() catch unreachable;
     var gate: maru.session.editor.syntax.request.Gate = .{};
     var snapshot = source.snapshot();
@@ -40,8 +40,17 @@ pub fn main() !void {
 fn wait(service: *worker.Service, io: std.Io) !worker.Completion {
     const deadline = std.Io.Clock.awake.now(io).nanoseconds + 10_000_000_000;
     while (true) {
-        if (service.take()) |value| return value;
+        if (pending.swap(false, .acq_rel)) {
+            _ = service.beginDrain();
+            service.reap();
+            if (service.take()) |value| return value;
+        }
         if (std.Io.Clock.awake.now(io).nanoseconds > deadline) return error.Timeout;
         std.Thread.yield() catch {};
     }
+}
+
+var pending: std.atomic.Value(bool) = .init(false);
+fn notify() void {
+    pending.store(true, .release);
 }

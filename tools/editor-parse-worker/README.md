@@ -40,7 +40,7 @@ native 서비스 target은 macOS에서 실행한다. 새 외부 output과 기존
 
 ## 검증
 
-실제 스레드와 C 콜백 장벽으로 집중 판정 14개를 실행한다. 최신 교체, 문서 격리, 준비 OOM,
+실제 스레드와 C 콜백 장벽으로 집중 판정 19개를 실행한다. 최신 교체, 문서 격리, 준비 OOM,
 본문 복사 OOM, 완료 후 취소, 빌린 결과와 종료, 실행·대기의 종료 정산, 빈 입력/미지원,
 미수령 완료의 퇴역을 확인한다. 테스트에서만 Provider 소유 객체의 생성/해제 스레드와 회수 횟수를
 계수하고, worker copy allocator의 실제 할당/해제 byte도 비교한다. C 내부 malloc 전체 원장을 센 것은 아니다.
@@ -50,7 +50,7 @@ native 서비스 target은 macOS에서 실행한다. 새 외부 output과 기존
 
 독립 사본에서 native 취소 무시, 이전 대기 유지, 복사 OOM 오분류, 이전 완료 유지,
 준비 OOM에서 이전 Gate 복원 다섯 코드를 실제로 컴파일해 assertion 실패를 요구한다.
-현재 정상 소스는 전후에 14개 모두 통과해야 하며 컴파일 실패는 탐지로 세지 않는다.
+현재 정상 소스는 전후에 19개 모두 통과해야 하며 컴파일 실패는 탐지로 세지 않는다.
 증거는 `/Users/yoonhb/.cache/maru-agent-artifacts/parse-worker-review-2/`의 source·변형 소스·
 실행 바이너리·로그·runner·result.json에 보존한다. 이 자료는 당시 9개 판정자의 실행 기록이며, 현재 소스의 재실행 기록과 구분한다.
 수집 기준 Git ID와 실제 source inventory를 구분한다.
@@ -64,3 +64,5 @@ native 서비스 target은 macOS에서 실행한다. 새 외부 output과 기존
 실제 창 닫기·앱 종료·wake 배선·렌더·IME·공유 뷰의 복사 트리 참조·성능/메모리 예산·
 멀티 문서 대규모 공정성·race detector·C 내부 malloc 실패는 후속이다. 기존 4MiB 파싱 제한을
 그대로 따르며 새 문서 크기/메모리 제한이나 사용자 실패 알림 정책을 도입하지 않는다.
+
+완료 통지의 선택적 hook과 재무장 순서는 [추가 계약](../editor-parse-notify/README.md)을 따른다. 실제 OS dispatch는 후속이다.

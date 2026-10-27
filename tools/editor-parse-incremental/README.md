@@ -28,7 +28,7 @@ python3 tools/editor-parse-incremental/run.py --output /tmp/new-incremental-meas
 검사와 production-mode 실행은 기본 test·macOS 게이트에 포함된다. Snapshot clone도 기존 editor
 core 실행에 포함되며 별도 집중 target을 제공한다. 실측 target은 opt-in이다.
 
-서비스 14개·Provider 100개와 Snapshot clone의 실제 실행을 확인한다. 서비스 검사는 한글 NFD·emoji·
+서비스 19개·Provider 100개와 Snapshot clone의 실제 실행을 확인한다. 서비스 검사는 한글 NFD·emoji·
 CRLF·여러 곳의 편집·동일 본문·빈 문서 전환/복구·다른 문서/문법/언어·기준 조기 반환·대기 교체·기준 원문 복사 OOM을
 포함한다. 전체 C 노드 종류·구조·필드·byte/point·오류 플래그를 cold 파싱과 비교한다. 내부 변경 플래그는
 동일성 조건이 아니다. 원본 트리는 worker 편집 중에도 별도 cold 결과와 비교한다.
@@ -43,7 +43,7 @@ CRLF·여러 곳의 편집·동일 본문·빈 문서 전환/복구·다른 문�
 - UTF-8 byte 열을 잘못 계산
 - 대기 기준 native 핸들을 메인에서 해제
 
-정상 소스는 전후에 서비스 14개를 모두 통과해야 한다. 컴파일 오류는 탐지로 세지 않는다.
+정상 소스는 전후에 서비스 19개를 모두 통과해야 한다. 컴파일 오류는 탐지로 세지 않는다.
 좌표 결함의 최초 주입은 전체 트리 비교만으로 탐지되지 않았다. 넓은 재파싱이 잘못된 편집 좌표를
 덮을 수 있어서, CRLF·한글·emoji의 입력 point 계약을 별도로 확인하도록 보강했다.
 
@@ -67,3 +67,5 @@ C 내부 malloc 실패 전수·race detector·실제 wake/IME·표시 설치·�
 대규모 공정성·RSS 예산은 검증하지 않는다. 기준 핸들 복사 실패 주입도 C allocator를 대체한 것이
 아니다. 기존 `max_parse_bytes` 외의 새 예산이나 사용자 실패 UX를 추가하지 않는다.
 최종 결과와 아티팩트 경로는 [실측 기록](results.md)을 따른다.
+
+완료 통지의 선택적 hook과 재무장 순서는 [추가 계약](../editor-parse-notify/README.md)을 따른다. 실제 OS dispatch는 후속이다.

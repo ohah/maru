@@ -103,6 +103,16 @@ extension MaruAppHostController {
             guard let panel = editorSaveAsPanels.values.first else { EditorSaveAsRun.next = now + 0.02; return }
             guard panel.nameFieldStringValue == "save-as-source.txt" else { finish(false, "panel_name"); return }
             guard panel.sheetParent === window else { finish(false, "panel_owner"); return }
+            guard let original = ProcessInfo.processInfo.environment["MARU_NATIVE_EDITOR"],
+                  let directory = panel.directoryURL,
+                  directory.resolvingSymlinksInPath().standardizedFileURL.path == URL(fileURLWithPath:original).deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path
+            else { finish(false,"panel_directory");return }
+            if let output = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_OUTPUT"] {
+                do {
+                    let record:[String:Any] = ["pid":getpid(),"window_id":window.windowNumber,"panel_id":panel.windowNumber,"name_before":panel.nameFieldStringValue,"directory":directory.path]
+                    try JSONSerialization.data(withJSONObject:record,options:[.sortedKeys]).write(to:URL(fileURLWithPath:output).appendingPathComponent("save-as-panel-state.json"),options:.atomic)
+                } catch { finish(false,"panel_record");return }
+            }
             guard let root = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_OUTPUT"] else { finish(false, "output_directory"); return }
             if ProcessInfo.processInfo.environment["MARU_NATIVE_PANEL_CAPTURE_EXTERNAL"] == "1" {
                 let directory = URL(fileURLWithPath: root)
@@ -150,7 +160,7 @@ extension MaruAppHostController {
                 return
             }
             guard let panel = editorSaveAsPanels.values.first else { finish(false); return }
-            panel.nameFieldStringValue = "save-as-destination.txt"
+            panel.nameFieldStringValue = ProcessInfo.processInfo.environment["MARU_EDITOR_SAVE_AS_NAME"] ?? "save-as-destination.txt"
             // ok의 중첩 이벤트에서 아직 미접수인 요청을 완료로 검사하지 않는다.
             EditorSaveAsRun.confirming = true
             panel.ok(nil)

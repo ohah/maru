@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """격리한 실제 macOS 앱에서 프로젝트 검색 입력·클릭과 Metal 화면을 검증한다."""
+from dataclasses import asdict
 import argparse
 import hashlib
 import json
@@ -18,6 +19,7 @@ def replace_once(text, old, new):
 
 
 from untitled_oracle import parse_metrics, parse_build_mode
+from save_as_lifecycle import Case, DEFAULT_NAME, SENTINEL, png_proof, verify as verify_save_as
 
 
 def sha(path):
@@ -42,6 +44,11 @@ def main():
     parser.add_argument("--untitled-bytes", type=int, default=65536)
     parser.add_argument("--untitled-delay-ms", type=int, default=0)
     parser.add_argument("--save-as-command", action="store_true")
+    parser.add_argument("--save-as-only", action="store_true", help="Run Save As without the unrelated project-search scene")
+    parser.add_argument("--save-as-name", default=DEFAULT_NAME)
+    parser.add_argument("--save-as-existing-target", action="store_true")
+    parser.add_argument("--save-as-overwrite-choice", choices=("accept", "cancel"), default="accept")
+    parser.add_argument("--save-as-filename-input", choices=("ax", "korean", "hanja"), default="ax")
     parser.add_argument("--save-as-physical-ime", action="store_true")
     parser.add_argument("--save-as-scenario", choices=("save", "cancel", "edit-during-write"), default="save")
     parser.add_argument("--native-panel-capture-app", type=Path,
@@ -66,6 +73,18 @@ def main():
     parser.add_argument("--optimize", choices=("Debug", "ReleaseFast"), default="Debug")
     parser.add_argument("--app", type=Path, help="이 하네스로 빌드한 앱을 재사용한다")
     args = parser.parse_args()
+    if (args.save_as_only or args.save_as_name != DEFAULT_NAME or args.save_as_existing_target or args.save_as_overwrite_choice != "accept" or args.save_as_filename_input != "ax") and not args.save_as_command:
+        parser.error("Save As lifecycle options require --save-as-command")
+    if args.save_as_only and (args.matrix or args.physical_ime or args.native_close_save or args.untitled_save_benchmark or args.replace_preview or args.replace_batch):
+        parser.error("Save As-only must run independently of other GUI scenes")
+    if (args.save_as_name != DEFAULT_NAME or args.save_as_existing_target or args.save_as_filename_input != "ax") and not args.native_panel_capture_app:
+        parser.error("Native Save As lifecycle cases require a capture app")
+    try:
+        save_case = Case(args.save_as_name, args.save_as_scenario, args.save_as_existing_target, args.save_as_overwrite_choice, args.save_as_filename_input, args.save_as_physical_ime)
+    except ValueError as error:
+        parser.error(str(error))
+    if args.save_as_scenario == "edit-during-write" and save_case.cancelled:
+        parser.error("Writer-edit scenario requires an accepted destination")
     if args.untitled_save_benchmark and (args.save_as_command or args.native_close_save or args.matrix or args.physical_ime or args.replace_preview or args.unicode_field):
         parser.error("Untitled benchmark must run without other GUI scenarios")
     if not args.untitled_save_benchmark and (args.untitled_bytes != 65536 or args.untitled_delay_ms != 0):
@@ -129,6 +148,7 @@ def main():
         names += ("src/platform/macos/app_session/editor/untitled_save.zig", "src/platform/macos/app_session/editor/save/as.zig", "src/platform/macos/app_session/editor/save/destination.zig", "src/platform/macos/app_session/editor/save/worker.zig", "src/session/editor/ops/save_ops.zig")
     if args.save_as_command:
         names += ("src/platform/macos/app_session/editor/save/as.zig", "src/platform/macos/app_session/editor/save/queue.zig", "src/platform/macos/app_session/editor/save/destination.zig", "src/platform/macos/app_session/editor/lsp.zig", "src/config/action.zig", "src/config/keybinding.zig", "src/platform/macos/app_host_abi.h", "src/platform/macos/app_host_abi.zig", "tools/editor-project-search-app/save-as.swift.inc", "tools/editor-project-search-app/save-as.zig.inc")
+        names += ("tools/editor-project-search-app/save-as-filename.swift.inc", "tools/editor-project-search-app/save_as_lifecycle.py")
     if args.native_close_save:
         names += ("src/platform/macos/app_session/editor/save/close.zig", "src/platform/macos/app_session/editor/format.zig")
     print(root, flush=True)
@@ -137,6 +157,8 @@ def main():
         if app.name != "maru-macos-app":
             parser.error("Expected the GUI maru-macos-app binary")
         source = app.parents[4]
+        if args.save_as_only and "MARU_EDITOR_SAVE_AS_ONLY" not in (source / "src/platform/macos/MaruAppHost.swift").read_text():
+            parser.error("This app lacks independent Save As startup; build a new validation app")
         if args.save_as_scenario == "edit-during-write" and "fn saveAsWriteGate(" not in (source / "src/platform/macos/app_session/editor/local_save.zig").read_text():
             parser.error("This app lacks the writer gate; build a new Save As verification app")
         if args.save_as_physical_ime and "SAVE_AS_IME marked=true" not in (source / "src/platform/macos/MaruAppHost.swift").read_text():
@@ -176,6 +198,7 @@ def main():
             observer.write_text(observer.read_text() + "\n" + (source / "tools/editor-project-search-app/save-as.zig.inc").read_text())
             driver = replace_once(driver, "        let now = ProcessInfo.processInfo.systemUptime\n        guard now >= EditorProjectSearchRun.next", "        if EditorProjectSearchRun.stage == 81 { maybeRunSaveAsCommand(); return }\n        let now = ProcessInfo.processInfo.systemUptime\n        guard now >= EditorProjectSearchRun.next")
             driver = replace_once(driver, "            if !matrix { finish(true); return }", "            if ProcessInfo.processInfo.environment[\"MARU_EDITOR_SAVE_AS_COMMAND\"] == \"1\" { EditorProjectSearchRun.stage = 81; return }\n            if !matrix { finish(true); return }")
+            driver = replace_once(driver, "        if EditorProjectSearchRun.stage == 81 { maybeRunSaveAsCommand(); return }", "        if ProcessInfo.processInfo.environment[\"MARU_EDITOR_SAVE_AS_ONLY\"] == \"1\" && EditorProjectSearchRun.stage == 0 {\n            guard editorProjectSearchProbe(0) == 1 else { return }\n            EditorProjectSearchRun.stage = 81; return\n        }\n        if EditorProjectSearchRun.stage == 81 { maybeRunSaveAsCommand(); return }")
             driver += "\n" + (source / "tools/editor-project-search-app/save-as.swift.inc").read_text()
         if args.untitled_save_benchmark:
             observer.write_text(observer.read_text() + "\n" + (source / "tools/editor-project-search-app/untitled-save.zig.inc").read_text())
@@ -250,6 +273,7 @@ def main():
     (root / "config").write_text("session.keep-alive-after-quit = false\n")
     project = root / "project"
     project.mkdir()
+    destination = project / save_case.name
     document = project / "symbols.zig"
     document.write_text("pub const Widget = struct {\n    pub fn first() void {}\n    pub fn second() void {}\n};\n\n" + "".join(f"pub fn sample{i:02}() void {{\n    const value = {i};\n    _ = value;\n}}\n\n" for i in range(args.count)))
     for index in range(args.disk_files):
@@ -264,6 +288,9 @@ def main():
     peer_original = b"pub fn sample_peer() void {}\n" + (b"//" + b"x" * args.batch_peer_bytes + b"\n" if args.batch_peer_bytes else b"")
     original = document.read_bytes()
     disk_originals = {p: p.read_bytes() for p in project.glob("disk*.txt")}
+    if args.save_as_command:
+        if destination.exists(): raise RuntimeError("Save As destination collides with another fixture")
+        if save_case.existing: destination.write_bytes(SENTINEL)
     other = root / "other-project"
     other.mkdir()
     (other / "fresh.txt").write_text("sample fresh\n")
@@ -284,6 +311,10 @@ def main():
     if args.native_close_save: env["MARU_EDITOR_NATIVE_CLOSE_SAVE"] = "1"
     if args.save_as_command: env["MARU_EDITOR_SAVE_AS_COMMAND"] = "1"
     env["MARU_EDITOR_SAVE_AS_SCENARIO"] = args.save_as_scenario
+    if args.save_as_command:
+        env["MARU_EDITOR_SAVE_AS_ONLY"] = "1" if args.save_as_only else "0"
+        env["MARU_EDITOR_SAVE_AS_NAME"] = save_case.name
+        env["MARU_EDITOR_SAVE_AS_OVERWRITE"] = save_case.overwrite
     if args.save_as_physical_ime: env["MARU_EDITOR_SAVE_AS_PHYSICAL_IME"] = "1"
     if args.native_panel_capture_app: env["MARU_NATIVE_PANEL_CAPTURE_EXTERNAL"] = "1"
     env["MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY"] = "1" if args.replace_batch_save_retry else "0"
@@ -293,6 +324,13 @@ def main():
         main.write_text((repo / "src/platform/macos/SessionHostInputSourcePolicy.swift").read_text() + "\n" +
                         (source / "tools/editor-project-search-app/hid.swift.inc").read_text())
         subprocess.run(["swiftc", str(main), "-o", str(root / "hid")], check=True, timeout=60)
+    if args.save_as_command and args.native_panel_capture_app:
+        native_source = root / "filename-driver"
+        native_source.mkdir()
+        (native_source / "main.swift").write_text((repo / "tools/editor-project-search-app/save-as-filename.swift.inc").read_text())
+        with (root / "filename-driver-build.log").open("wb") as native_log:
+            subprocess.run(["swiftc", str(repo / "src/platform/macos/SessionHostInputSourcePolicy.swift"), str(native_source / "main.swift"), "-o", str(root / "filename-driver-bin")], stdout=native_log, stderr=subprocess.STDOUT, check=True, timeout=60)
+            subprocess.run(["swiftc", str(repo / "src/platform/macos/SessionHostInputSourcePolicy.swift"), str(repo / "src/platform/macos/SessionHostInputSourceRestore.swift"), "-o", str(root / "filename-source-restore")], stdout=native_log, stderr=subprocess.STDOUT, check=True, timeout=60)
     if args.native_panel_capture_app:
         state = native_session_state()
         (root / "session-state.json").write_text(json.dumps({"state": state}) + "\n")
@@ -331,28 +369,23 @@ def main():
                         pending.replace(artifacts / "save-as-panel.png")
                         panel_captured = True
                 if args.native_panel_capture_app and not panel_confirmed and (artifacts / "save-as-confirm-request").exists():
-                    # 대상 프로세스의 실제 sheet 필드와 Save 버튼만 접근성 API로 조작한다.
-                    script = '''on run arguments
-tell application "System Events"
-set targetProcess to first process whose unix id is (item 1 of arguments as integer)
-set frontmost of targetProcess to true
-repeat 50 times
-if exists window 1 of targetProcess then
-if exists sheet 1 of window 1 of targetProcess then exit repeat
-end if
-delay 0.1
-end repeat
-set paneGroup to splitter group 1 of sheet 1 of window 1 of targetProcess
-if value of text field 1 of paneGroup is not "save-as-source.txt" then error "Unexpected Save As filename"
-if item 2 of arguments is "cancel" then
-click button "Cancel" of paneGroup
-else
-set value of text field 1 of paneGroup to "save-as-destination.txt"
-click button "Save" of paneGroup
-end if
-end tell
-end run'''
-                    subprocess.run(["osascript", "-e", script, str(child.pid), args.save_as_scenario], check=True, timeout=15)
+                    target = json.loads((artifacts / "save-as-panel-request.json").read_text())
+                    # Operate only this process's source-name field and Save As buttons.
+                    native = subprocess.run([str(root / "filename-driver-bin"), str(child.pid), save_case.name, save_case.scenario,
+                        "1" if save_case.existing else "0", save_case.input_mode, str(artifacts / "filename-source.json"),
+                        str(args.native_panel_capture_app.resolve()), str(target.get("panel_id", target["window_id"])), str(artifacts)],
+                        env=env, capture_output=True, text=True, timeout=45)
+                    (artifacts / "save-as-action.stderr").write_text(native.stderr)
+                    if native.returncode: raise RuntimeError("Native Save As action failed: " + native.stderr[-1000:])
+                    action = json.loads(native.stdout)
+                    (artifacts / "save-as-action.json").write_text(json.dumps(action,indent=2)+"\n")
+                    status = json.loads(Path("/tmp/maru-screen-capture-status.json").read_text())
+                    bound = [w for w in status.get("windows",[]) if w["id"] == target.get("panel_id", target["window_id"])]
+                    if len(bound) != 1: raise RuntimeError("Native captured panel identity is unavailable")
+                    proof = dict(window_id=bound[0]["id"],owner_pid=bound[0]["pid"])
+                    for label in ("save-as-panel","save-as-name") + (("save-as-overwrite",) if action["replace_seen"] else ()):
+                        proof[label] = png_proof(artifacts / (label+".png"))
+                    (artifacts / "save-as-capture-proof.json").write_text(json.dumps(proof,indent=2)+"\n")
                     (artifacts / "save-as-confirm-sent").write_text("native-accessibility\n")
                     panel_confirmed = True
                 if hid is not None and hid.poll() not in (None, 0):
@@ -376,13 +409,17 @@ end run'''
                 hid.wait(timeout=30)
             if hid_log is not None:
                 hid_log.close()
+            if (artifacts / "filename-source.json").exists():
+                restored = subprocess.run([str(root / "filename-source-restore"), str(artifacts / "filename-source.json")],capture_output=True,text=True,timeout=15)
+                (artifacts / "filename-source-fallback.json").write_text(json.dumps(dict(exit=restored.returncode))+"\n")
+                if restored.returncode: raise RuntimeError("Filename input source restoration was not admitted")
     transcript = (root / "app.log").read_text()
     # 재시도 시나리오는 치환된 본문을 저장한 채 종료한다. 기대값은 Plan 대신 fixture 원문에서 계산한다.
     expected_bytes = lambda data: data.replace(b"sample", b"renamed") if args.replace_batch_save_retry else data
     if (code != 0 or "EDITOR_PROJECT_SEARCH_FINISH passed=true" not in transcript or
         any(peer.read_bytes() != expected_bytes(peer_original) for peer in peers) or document.read_bytes() != expected_bytes(original) or any(p.read_bytes() != expected_bytes(data) for p, data in disk_originals.items())):
         raise RuntimeError("Product verification failed; inspect app.log")
-    expected = ("before", "query", "results", "query-selection", "navigated", "bottom-scrolled", "cancelled")
+    expected = () if args.save_as_only else ("before", "query", "results", "query-selection", "navigated", "bottom-scrolled", "cancelled")
     if args.disk_files:
         expected += ("disk-navigated",)
     if args.physical_ime:
@@ -421,15 +458,15 @@ end run'''
         if args.save_as_scenario != "save" and "SAVE_AS_HISTORY undo=true redo=true" not in transcript:
             raise RuntimeError("Save As lifecycle scenario did not verify Undo/Redo")
         saved = "foo한".encode() if args.save_as_physical_ime else b"foo!"
-        wanted = (("source", b"foo"),) if args.save_as_scenario == "cancel" else (("source", b"foo"), ("destination", saved))
+        wanted = (("save-as-source.txt", b"foo"),) if save_case.cancelled else (("save-as-source.txt", b"foo"), (save_case.name, saved))
         if args.save_as_physical_ime:
             expected += ("save-as-ime-marked",)
             if "SAVE_AS_IME marked=true" not in transcript or "source_restore=restored original=" not in (root / "hid.log").read_text():
                 raise RuntimeError("Missing real marked-text or input source restoration evidence")
         for name, data in wanted:
-            if (project / ("save-as-" + name + ".txt")).read_bytes() != data:
+            if (project / name).read_bytes() != data:
                 raise RuntimeError("Save As disk bytes differ: " + name)
-        if args.save_as_scenario == "cancel" and (project / "save-as-destination.txt").exists():
+        if save_case.cancelled and not save_case.existing and destination.exists():
             raise RuntimeError("Cancelled Save As created a destination")
         if args.save_as_scenario == "edit-during-write":
             if (artifacts / "save-as-writer-entered").read_bytes() != b"foo!":
@@ -448,9 +485,9 @@ end run'''
         if ppm.exists():
             subprocess.run(["sips", "-s", "format", "png", str(ppm), "--out", str(ppm.with_suffix(".png"))], check=True, stdout=subprocess.DEVNULL, timeout=30)
     match = re.search(r"SEARCH_METRICS first_ns=(\d+) complete_ns=(\d+) tick_max_ns=(\d+) cancel_call_ns=(\d+) cancel_retire_ns=(\d+)", transcript)
-    if match is None or not samples:
+    if (match is None and not args.save_as_only) or not samples:
         raise RuntimeError("Missing product timing/RSS evidence")
-    metrics = dict(zip(("first_result_ns", "completion_ns", "main_search_tick_max_ns", "cancel_call_ns", "cancel_retire_ns"), map(int, match.groups())))
+    metrics = {} if match is None else dict(zip(("first_result_ns", "completion_ns", "main_search_tick_max_ns", "cancel_call_ns", "cancel_retire_ns"), map(int, match.groups())))
     metrics["peak_rss_bytes"] = max(sample["rss_bytes"] for sample in samples)
     metrics["pane_build_ns"] = [int(value) for value in re.findall(r"SEARCH_PANE_BUILD elapsed_ns=(\d+)", transcript)]
     for label in ("CAPTURE", "PREPARE", "APPLY", "SAVE"):
@@ -491,6 +528,17 @@ end run'''
                 "binary_sha256": sha(args.native_panel_capture_app / "Contents/MacOS/capture"),
                 "request": json.loads((artifacts / "save-as-panel-request.json").read_text()),
             }
+    if args.save_as_command and args.native_panel_capture_app:
+        report["save_as_case"] = asdict(save_case)
+        report["save_as_lifecycle"] = verify_save_as(root, save_case, child.pid)
+        report["save_as_only"] = args.save_as_only
+        report["project_search_executed"] = not args.save_as_only
+        if args.save_as_only: report["matches"] = None
+        if save_case.input_mode != "ax":
+            report["limits"] = "Filename uses real Korean/Hanja CGEvent keys and source restoration; ASCII extension uses AX; shortcut uses AppKit NSEvent; no VoiceOver proof"
+        report["harness_sha256"]["save_as_lifecycle.py"] = sha(repo / "tools/editor-project-search-app/save_as_lifecycle.py")
+        report["harness_sha256"]["save-as-filename.swift.inc"] = sha(repo / "tools/editor-project-search-app/save-as-filename.swift.inc")
+        (root / "save-as-lifecycle.json").write_text(json.dumps(report["save_as_lifecycle"],indent=2)+"\n")
     (root / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     print(root / "manifest.json", flush=True)
 

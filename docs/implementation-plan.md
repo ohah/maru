@@ -1760,3 +1760,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [신뢰·환경 이름 목록 피커 IME 문맥](plans/trust-picker-ime.md): 두 모드의 읽기/관리 경계를 유지하는 범위 편집·원자적 필터·후보 Return 격리.
 
 - [Save As 파일 수명 실제 GUI 검증](plans/save-as-file-lifecycle-gui.md): 기존 조합 저장 증거와 최근 rename 증거를 구분하고 native 파일명·덮어쓰기·취소·원본 보존을 검증.
+
+- [이름 없는 문서 첫 저장 IME 실제 GUI 검증](plans/untitled-first-save-ime-gui.md): 후보 Enter·별도 저장 확정·취소·충돌·쓰기 실패와 본문 보존.

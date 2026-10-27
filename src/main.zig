@@ -62,6 +62,7 @@ test {
     _ = @import("platform/windows/terminal/typography_test.zig");
     _ = @import("platform/windows/terminal/glyph_sources_test.zig");
     _ = @import("platform/windows/terminal/raster_origin_test.zig");
+    _ = @import("platform/windows/terminal/run_faces_test.zig");
     _ = @import("platform/windows/terminal/positioned_frame_test.zig");
     // Cross-target tests must compile the native adapter as well as the common worker.
     if (comptime builtin.os.tag == .macos) _ = @import("platform/macos/file_tree_remote.zig").transport;

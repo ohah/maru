@@ -22,6 +22,10 @@ run = "zig build test-shaping-runs"
 description = "Verify native glyph bitmap origins and clipping"
 run = "zig build test-windows-raster-origin"
 
+[tasks.test-windows-run-faces]
+description = "Verify native terminal run face selection"
+run = "zig build test-windows-run-faces"
+
 [tasks.e2e]
 description = "Run headless E2E tests"
 run = "zig build test-e2e"

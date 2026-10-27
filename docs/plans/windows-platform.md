@@ -1204,3 +1204,26 @@ terminal producer에 연결하지 않았으며 합자 표시 또는 앱 픽셀 �
 272개(4묶음 × 68개)를 통과했고, 실행 중 소스·HEAD 불변을 확인했다
 (`.zig-cache/frame-snapshot-gates-20261028/result.json`). 최종 입력 해시와 변형/대조군
 결과는 `.zig-cache/frame-snapshot-binding.json`으로 대조한다.
+
+### Windows native run의 face 선택 (2026-10-28)
+
+`dwrite_shape.ShapeOptions.face_style`은 terminal run이 regular/bold/italic/bold-italic
+전체 face를 명시할 수 있게 한다. 생략하면 기존 chrome `Request.weight`와 upright
+동작을 그대로 사용한다. 명시한 regular도 semibold 요청보다 우선한다. Windows의
+weight/slant 숫자 변환은 기존 `dwrite_font.FaceStyle`이 소유하며 셀 raster face 선택과
+run의 CreateTextFormat 호출이 같은 메서드를 사용한다. 공통 Request weight enum이나
+macOS 인터페이스를 바꾸지 않는다.
+
+`test-windows-run-faces`의 7개는 Debug·ReleaseFast에서 통과했다. 실제 Consolas와
+bundled JetBrains Mono의 네 face 각각에서 shaped PostScript 이름·glyph ID를 raster
+bank와 대조하고 네 신원이 서로 다름도 확인했다. 독립적인 native trait 숫자 검사와
+명시 옵션의 우선순위·생략 옵션의 기존 semibold 동작도 검사했다. bold weight 손실·
+italic slant 손실·명시 weight 전달 누락·명시 slant 전달 누락·생략 옵션의 request weight
+손실의 compiled 결함 5개를 모두 runtime 검출했다
+(`.zig-cache/windows-run-faces-adversarial.json`). 실제 terminal producer는 아직 이
+옵션을 호출하지 않으며 새 run의 앱 표시 또는 합자 픽셀 검증을 대신하지 않는다.
+
+같은 staged 소스의 일반 Debug 앱 빌드·관련 집중 5개 묶음·문서·교차 타깃과 전체 경계
+272개(4묶음 × 68개)를 통과했고, 소스·HEAD 불변을 확인했다
+(`.zig-cache/run-faces-gates-20261028/result.json`). 최종 입력은
+`.zig-cache/run-faces-binding.json`에서 변형·대조군 및 빌드 입력과 대조한다.

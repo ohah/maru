@@ -29,7 +29,7 @@ fn setOnClose(file: std.Io.File, enabled: bool) Error!void {
     const result = w.ntdll.NtSetInformationFile(file.handle, &status, &info, @sizeOf(@TypeOf(info)), .DispositionEx);
     if (result == .NOT_SUPPORTED and enabled) return markOwnedForDeletion(file.handle);
     if (result != .SUCCESS) {
-        if (builtin.is_test) std.debug.print("on_close enabled={} status=0x{X}\n", .{ enabled, @intFromEnum(result) });
+        if (builtin.is_test) std.debug.print("on_close enabled={} status=0x{X}\n", .{ enabled, @backingInt(result) });
         return error.DispositionFailed;
     }
 }

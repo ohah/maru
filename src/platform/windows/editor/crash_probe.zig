@@ -233,7 +233,7 @@ fn worker(init: std.process.Init, path: []const u8, checkpoint: Checkpoint, body
 fn stop(io: std.Io, checkpoint: Checkpoint) noreturn {
     var buffer: [32]u8 = undefined;
     var output: std.Io.File.Writer = .init(.stdout(), io, &buffer);
-    output.interface.writeByte(@intFromEnum(checkpoint) + 1) catch std.process.exit(74);
+    output.interface.writeByte(@backingInt(checkpoint) + 1) catch std.process.exit(74);
     output.interface.flush() catch std.process.exit(74);
     while (true) Sleep(1000);
 }
@@ -355,7 +355,7 @@ fn waitCheckpoint(child: *std.process.Child, checkpoint: Checkpoint) !void {
         // https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-peeknamedpipe
         if (!PeekNamedPipe(pipe.handle, &marker, 1, &count, &available, null).toBool()) return error.CheckpointPipeFailed;
         if (available != 0) {
-            if (count != 1 or available != 1 or marker != @intFromEnum(checkpoint) + 1 or WaitForSingleObject(handle, 0) != 258) return error.BadCheckpointMarker;
+            if (count != 1 or available != 1 or marker != @backingInt(checkpoint) + 1 or WaitForSingleObject(handle, 0) != 258) return error.BadCheckpointMarker;
             return;
         }
         if (WaitForSingleObject(handle, 0) != 258) return error.WorkerExitedBeforeCheckpoint;

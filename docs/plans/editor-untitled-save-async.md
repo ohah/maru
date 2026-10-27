@@ -190,3 +190,10 @@ main actor가 정산하고 하네스가 5ms 간격으로 관측하므로 전체 
 대조해 복구 저장 2곳과 언어별 들여쓰기 안내선 2곳에 완료 대기를 반영했다. 이 두 소비자
 회귀도 `test-editor-first-save-async`에 포함해 첫 저장 경합만 통과하고 누락하지 않도록 했다.
 기존 실패 로그에는 이후 30분 job 시간 초과도 있으므로 성공한 CI로 취급하지 않는다.
+
+## 첫 저장 이름 입력의 실제 IME 후속 검증
+
+위 성능 실측의 모델 begin/setText/commit 증거와 별개로, 실제 한글·한자 이름 입력·후보 Return과
+저장 Return 분리·취소·충돌 수락/거부·쓰기 권한 오류의 GUI/파일 검증은
+[첫 저장 IME 실제 GUI 검증](untitled-first-save-ime-gui.md)에서 완료했다.
+본문·dirty·pending·Undo/Redo와 실제 파일 bytes를 대조했으며 원격·VoiceOver는 별도 범위다.

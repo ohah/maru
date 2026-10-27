@@ -629,6 +629,15 @@ pub const FaceStyle = enum(u2) {
     bold,
     italic,
     bold_italic,
+
+    /// Both cell raster selection and run shaping use the same native traits.
+    pub fn nativeWeight(self: FaceStyle) u32 {
+        return if (self == .bold or self == .bold_italic) 700 else font_weight_normal;
+    }
+
+    pub fn nativeStyle(self: FaceStyle) u32 {
+        return if (self == .italic or self == .bold_italic) 2 else font_style_normal;
+    }
 };
 
 pub const Rasterizer = struct {
@@ -794,7 +803,7 @@ pub const Rasterizer = struct {
         defer d3d11.releaseOpt(family);
 
         var font: ?*IDWriteFont = null;
-        if (d3d11.failed(family.?.vtable.GetFirstMatchingFont(family.?, if (style == .bold or style == .bold_italic) 700 else font_weight_normal, font_stretch_normal, if (style == .italic or style == .bold_italic) 2 else font_style_normal, &font))) return null;
+        if (d3d11.failed(family.?.vtable.GetFirstMatchingFont(family.?, style.nativeWeight(), font_stretch_normal, style.nativeStyle(), &font))) return null;
         defer d3d11.releaseOpt(font);
 
         var f: ?*IDWriteFontFace = null;

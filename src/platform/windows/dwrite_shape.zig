@@ -76,6 +76,9 @@ pub const Utf16Cell = cell_mapping.Cell;
 pub const preparedGlyphCellSpan = cell_mapping.spanOwners;
 pub const glyphCellSpan = cell_mapping.span;
 pub const ShapeOptions = struct {
+    /// Terminal runs choose a complete face, overriding the chrome weight. Null
+    /// preserves the existing Request.weight and upright chrome behavior.
+    face_style: ?dwrite_font.FaceStyle = null,
     /// Keep native defaults unless the terminal explicitly disables liga/clig/calt.
     ligatures: bool = true,
     /// Native property readback is opt-in; regular shaping makes no extra query.
@@ -708,7 +711,9 @@ pub const Shaper = struct {
         var fmt_raw: ?*IDWriteTextFormat = null;
         const create_format: *const fn (*IDWriteFactory2, [*:0]const u16, ?*anyopaque, UINT, UINT, UINT, f32, [*:0]const u16, *?*IDWriteTextFormat) callconv(abi.winapi) HRESULT =
             @ptrCast(@alignCast(self.factory.vtable.head[15]));
-        try check(create_format(self.factory, @ptrCast(&primary_w), format_collection, @backingInt(req.weight), 0, 5, req.size_px, locale, &fmt_raw), error.FormatFailed);
+        const format_weight = if (options.face_style) |style| style.nativeWeight() else @backingInt(req.weight);
+        const format_style = if (options.face_style) |style| style.nativeStyle() else 0;
+        try check(create_format(self.factory, @ptrCast(&primary_w), format_collection, format_weight, format_style, 5, req.size_px, locale, &fmt_raw), error.FormatFailed);
         const fmt = fmt_raw orelse return error.FormatFailed;
         defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(fmt)));
 

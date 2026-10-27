@@ -336,6 +336,77 @@ fn serveOne(conn: c_int) void {
         "setTimeout(function(){var f=document.createElement('iframe');f.src='/v20h/fi?'+location.search.slice(1);document.body.appendChild(f)},30);setTimeout(function(){document.title='fpdone'},2500)</script></body>");
     if (std.mem.eql(u8, path, "/v20h/fi")) return reply(conn, html, "<!doctype html><title>fi</title><script>" ++ read_js ++
         "var u='/v20h/e?k='+location.search.slice(1);if(location.search.indexOf('ns')<0)W=function(u,w){return F(u,{headers:{'x-who':w}})};parent.postMessage('go','*');setTimeout(function(){W(u,'C')},2)</script>fi");
+    // ── 재검증 3 차 뒤(스모크 w9d-body 의 꼴): 쿠키를 심는 localhost 문서에서 127.0.0.1 문서로 옮기고, 새 문서가 그림·다른 사이트의 쿠키 실린
+    // 스크립트·JSON 셋(그중 2 MiB 하나)을 곧 받는다 — 끝난 요청이 `pending` 에 머물면 안 된다.
+    if (std.mem.eql(u8, path, "/v20i/ck")) return replyC(conn, "200 OK", html, "Set-Cookie: vck=1; Path=/\r\n", "<!doctype html><title>ckdone</title>ck");
+    if (std.mem.eql(u8, path, "/v20i/pic.png")) return reply(conn, "image/png", "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89");
+    if (std.mem.eql(u8, path, "/v20i/cred.js")) return reply(conn, "application/javascript", "window.vcred=1;");
+    if (std.mem.eql(u8, path, "/v20i/c.json")) return data(conn, head, 0, 0);
+    if (std.mem.eql(u8, path, "/v20i/big.json")) return reply(conn, "application/json", size_body);
+    if (std.mem.eql(u8, path, "/v20i/bp")) {
+        var pb: [1024]u8 = undefined;
+        return reply(conn, html, std.fmt.bufPrint(&pb, "<!doctype html><title>bp</title><img src=\"/v20i/pic.png{s}\"><script src=\"http://localhost:{d}/v20i/cred.js{s}\"></script><script>{s}" ++
+            "F('/v20i/c.json{s}');F('/v20i/big.json{s}');setTimeout(function(){{document.title='bpdone'}},1500)</script>bp", .{ query, port, query, read_js, query, query }) catch return);
+    }
+
+    // ── 재검증 3 차 뒤(검증자 v20i A 의 탐침 — WB-5·PF-2·잃음): 서비스 워커·abort 무리·IO 부하·빨리 떠나기·앞 문서의 fetch ──
+    // SW: /v20i/sw/x?k=K&d=D — p1: the SW first fetches the same URL itself (x-who X, CDP-invisible), then passes p1 through;
+    // p2: passes through after D ms (CEF record late); s2: answers itself after D ms (no CEF record).
+    if (std.mem.eql(u8, path, "/v20i/sw/sw.js")) return reply(conn, "application/javascript", "self.addEventListener('install',function(e){self.skipWaiting()});self.addEventListener('activate',function(e){e.waitUntil(clients.claim())});" ++
+        "self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(u.pathname!='/v20i/sw/x')return;var w=e.request.headers.get('x-who')||'';var d=+(u.searchParams.get('d')||0);" ++
+        "if(w=='p1'){fetch(u.href,{headers:{'x-who':'X'},cache:'no-store'}).catch(function(){});e.respondWith(fetch(e.request));return}" ++
+        "if(w=='p2'){e.respondWith(new Promise(function(res){setTimeout(function(){res(fetch(e.request))},d)}));return}" ++
+        "if(w=='s2'){e.respondWith(new Promise(function(res){setTimeout(function(){res(new Response('{\"n\":\"syn\"}',{headers:{'content-type':'application/json'}}))},d)}));return}})");
+    if (std.mem.eql(u8, path, "/v20i/sw/x")) return data(conn, head, 0, 0);
+    if (std.mem.eql(u8, path, "/v20i/sw/p")) return reply(conn, html, "<!doctype html><title>swp</title><script>" ++ read_js ++
+        "function reg(next){navigator.serviceWorker.register('/v20i/sw/sw.js',{scope:'/v20i/sw/'}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}setTimeout(next,300)})}" ++
+        "var P=new URLSearchParams(location.search);var D=+(P.get('d')||0);var M=P.get('m')||'p2';var K=P.get('k')||'';var R=+(P.get('r')||20);var j=0;" ++
+        "function step(){if(j>=R){setTimeout(function(){document.title='swpdone'},1500);return}var u='/v20i/sw/x?k='+K+'_'+j+'&d='+D;j++;W(u,'p1');setTimeout(function(){W(u,M)},1);setTimeout(step,D+600)}reg(step)</script>swp");
+
+    // hostile: D (x-who d, 300 ms), F (aborted at once — before CEF), E (x-who e, 3 s) of one URL in one task.
+    if (std.mem.eql(u8, path, "/v20i/h")) {
+        const who = whoOf(head);
+        return data(conn, head, if (std.mem.eql(u8, who, "e")) 3000 else if (std.mem.eql(u8, who, "d")) 300 else 0, 0);
+    }
+    if (std.mem.eql(u8, path, "/v20i/hp")) return reply(conn, html, "<!doctype html><title>hp</title><script>" ++ read_js ++
+        "var P=new URLSearchParams(location.search);var ND=+(P.get('d')||60),NF=+(P.get('f')||3900),NE=+(P.get('e')||60),R=+(P.get('r')||3);var K=P.get('k')||'';var j=0;" ++
+        "function round(){if(j>=R){setTimeout(function(){document.title='hpdone'},5000);return}var u='/v20i/h?k='+K+'_'+j;j++;" ++
+        "for(var i=0;i<ND;i++)W(u,'d');for(var i=0;i<NF;i++){var c=new AbortController();F(u,{headers:{'x-who':'f'},cache:'no-store',signal:c.signal});c.abort()}for(var i=0;i<NE;i++)W(u,'e');setTimeout(round,7000)}setTimeout(round,500)</script>hp");
+    // IO load: a worker fetches u (X), then the page fires p1, N distinct fetches, p2 (both same URL as X).
+    if (std.mem.eql(u8, path, "/v20i/l")) return data(conn, head, 0, 0);
+    if (std.mem.eql(u8, path, "/v20i/lw.js")) return reply(conn, "application/javascript", "onmessage=function(e){fetch(e.data,{headers:{'x-who':'X'},cache:'no-store'}).then(function(r){return r.text()}).catch(function(){});postMessage(1)}");
+    if (std.mem.eql(u8, path, "/v20i/lp")) return reply(conn, html, "<!doctype html><title>lp</title><script>" ++ read_js ++
+        "var P=new URLSearchParams(location.search);var N=+(P.get('n')||200);var K=P.get('k')||'';var R=+(P.get('r')||10);var j=0;var u='';var w=new Worker('/v20i/lw.js');" ++
+        "w.onmessage=function(){W(u,'p1');for(var i=0;i<N;i++)W('/v20/d?lz'+K+'_'+j+'_'+i,'z');W(u,'p2');setTimeout(round,1500)};" ++
+        "function round(){if(j>=R){setTimeout(function(){document.title='lpdone'},3000);return}u='/v20i/l?k='+K+'_'+j;j++;w.postMessage(u)}setTimeout(round,300)</script>lp");
+    // navigate-quickly: a (fast) and b (slow 2 s) of one URL, then the page navigates X ms after a resolves.
+    if (std.mem.eql(u8, path, "/v20i/q")) {
+        const who = whoOf(head);
+        return data(conn, head, if (std.mem.eql(u8, who, "b")) 2000 else 0, 0);
+    }
+    if (std.mem.eql(u8, path, "/v20i/qp")) return reply(conn, html, "<!doctype html><title>qp</title><script>" ++ read_js ++
+        "var P=new URLSearchParams(location.search);var X=+(P.get('x')||0);var u='/v20i/q?k='+P.get('k');setTimeout(function(){W(u,'a').then(function(){setTimeout(function(){location.href='/v20/blank?qdone'},X)});setTimeout(function(){W(u,'b')},1)},200)</script>qp");
+    // unload / pagehide fetches of the old document (sent after the doc notice?) + reloaded document's n1/n2 of the same URL.
+    if (std.mem.eql(u8, path, "/v20i/g")) {
+        const who = whoOf(head);
+        const d: u64 = if (std.mem.eql(u8, who, "o")) 3000 else if (std.mem.eql(u8, who, "n1")) 100 else if (std.mem.eql(u8, who, "n2")) 1500 else 0;
+        return data(conn, head, d, 0);
+    }
+    if (std.mem.eql(u8, path, "/v20i/gp")) return reply(conn, html, "<!doctype html><title>igp</title><script>" ++ read_js ++
+        "var P=new URLSearchParams(location.search);var k=P.get('k');var m=P.get('m');var u='/v20i/g?k='+k;" ++
+        "if(!sessionStorage.getItem('i'+k)){sessionStorage.setItem('i'+k,'1');" ++
+        "if(m=='unload'){addEventListener('unload',function(){for(var i=0;i<3;i++)W(u,'o')});setTimeout(function(){location.reload()},50)}" ++
+        "else if(m=='hidecut'){addEventListener('pagehide',function(){for(var i=0;i<3;i++){var c=new AbortController();F(u,{headers:{'x-who':'o'},cache:'no-store',signal:c.signal});}});setTimeout(function(){location.reload()},50)}" ++
+        "else if(m=='bf'){W(u,'o');setTimeout(function(){location.href='/v20i/gb?k='+k},50)}" ++
+        "else if(m=='docopen'){W(u,'o');setTimeout(function(){document.open();document.write('<title>igp<\\/title><script>'+document.getElementById('rj').textContent+'<\\/script>');document.close()},50)}" ++
+        "}else{W(u,'n1');setTimeout(function(){W(u,'n2')},5);setTimeout(function(){document.title='igdone'},2500)}</script>" ++
+        "<script id=rj type=text/plain>function F(u,o){return fetch(u,o).then(function(r){return r.text()}).catch(function(){})}function W(u,w){return F(u,{headers:{'x-who':w},cache:'no-store'})}var u='/v20i/g?k='+new URLSearchParams(location.search).get('k');W(u,'n1');setTimeout(function(){W(u,'n2')},5);setTimeout(function(){document.title='igdone'},2500)</script>igp");
+    // bfcache: B fires o (slow) and goes back — the restored page fires n1/n2 in pageshow(persisted).
+    if (std.mem.eql(u8, path, "/v20i/gb")) return reply(conn, html, "<!doctype html><title>igb</title><script>" ++ read_js ++
+        "var u='/v20i/g?k='+new URLSearchParams(location.search).get('k');setTimeout(function(){W(u,'o');history.back()},100)</script>igb");
+    if (std.mem.eql(u8, path, "/v20i/bfa")) return reply(conn, html, "<!doctype html><title>bfa</title><script>" ++ read_js ++
+        "var k=new URLSearchParams(location.search).get('k');var u='/v20i/g?k='+k;addEventListener('pageshow',function(e){if(e.persisted){W(u,'n1');setTimeout(function(){W(u,'n2')},5);setTimeout(function(){document.title='igdone'},2500)}" ++
+        "else if(sessionStorage.getItem('b'+k)){document.title='igdone'}else{sessionStorage.setItem('b'+k,'1');setTimeout(function(){location.href='/v20i/gb?k='+k},300)}});</script>bfa");
     return reply(conn, "text/plain", "x");
 }
 
@@ -1103,6 +1174,59 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         var sl2: [400]u8 = undefined;
         report(all.wrong == 0 and ec.missing == 0 and ec.doubled == 0, "v20g-r2-worker-same-url-concurrency", std.fmt.bufPrint(&detail, "{s} | {s} | {s} | {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), std.mem.sliceTo(&line[3], 0), std.mem.sliceTo(&line[4], 0), std.mem.sliceTo(&line[5], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..all.notes_len] }) catch "");
     }
+    // ══ 재검증 3 차 뒤(스모크 w9d-body 의 꼴): 쿠키를 심는 localhost 문서 → 127.0.0.1 문서(다른 사이트 — 새 렌더러)가 곧 받는 그림·다른 사이트의
+    // 쿠키 실린 스크립트·JSON 둘(하나는 2 MiB). 통과 조건: 모든 시작에 끝이 하나(8 초 안 — `pending` 에 머물지 않는다), 그림은 not_text, 스크립트와
+    // 작은 JSON 은 captured, 큰 JSON 은 over_cap. ══
+    if (enabled("v20i")) {
+        const rounds: usize = 20;
+        if (size_body.len == 0) {
+            size_body = try gpa.alloc(u8, 2 * 1024 * 1024);
+            @memset(size_body, 'a');
+            @memcpy(size_body[0..6], "{\"a\":\"");
+            @memcpy(size_body[size_body.len - 2 ..], "\"}");
+        }
+        var missing: usize = 0;
+        var doubled: usize = 0;
+        var good: [4]usize = @splat(0);
+        var bad_txt: [1500]u8 = undefined;
+        var bn: usize = 0;
+        for (0..rounds) |round| {
+            var nb: [160]u8 = undefined;
+            const url = std.fmt.bufPrint(&nb, "http://localhost:{d}/v20i/ck?{d}x{d}", .{ port, round, session }) catch "";
+            try navigateUrl(&r, rec_tab, url);
+            _ = r.pumpTitle(rec_tab, "ckdone", 10_000);
+            const at = r.begins.items.len;
+            var pb: [96]u8 = undefined;
+            try r.navigate(rec_tab, std.fmt.bufPrint(&pb, "/v20i/bp?i{d}x{d}", .{ round, session }) catch "");
+            _ = r.pumpTitle(rec_tab, "bpdone", 15_000);
+            var waited: u32 = 0;
+            while (waited < 8_000 and endCheck(&r, rec_tab, at).missing > 0) : (waited += 250) r.pump(250);
+            const ec = endCheck(&r, rec_tab, at);
+            missing += ec.missing;
+            doubled += ec.doubled;
+            const want = [_]struct { []const u8, msg.NetBodyState }{ .{ "/v20i/pic.png", .not_text }, .{ "/v20i/cred.js", .captured }, .{ "/v20i/c.json", .captured }, .{ "/v20i/big.json", .over_cap } };
+            for (want, 0..) |w, wi| {
+                var found = false;
+                for (r.begins.items[at..]) |b| if (b.browser == rec_tab and std.mem.indexOf(u8, b.url, w[0]) != null) {
+                    found = true;
+                    const x = r.body(rec_tab, b.request);
+                    if (x.ends == 1 and x.state == w[1]) good[wi] += 1 else {
+                        const piece = std.fmt.bufPrint(bad_txt[bn..], " [round {d} {s} req {d} ends {d} state {s}]", .{ round, w[0], b.request, x.ends, if (x.ends > 0) @tagName(x.state) else "pending" }) catch "";
+                        bn += piece.len;
+                    }
+                    break;
+                };
+                if (!found) {
+                    const piece = std.fmt.bufPrint(bad_txt[bn..], " [round {d} {s} no begin]", .{ round, w[0] }) catch "";
+                    bn += piece.len;
+                }
+            }
+        }
+        const ok = missing == 0 and doubled == 0 and good[0] == rounds and good[1] == rounds and good[2] == rounds and good[3] == rounds;
+        report(ok, "v20i-xsite-nav-body-page", std.fmt.bufPrint(&detail, "{d} rounds (localhost cookie page → 127.0.0.1 page): png not_text {d} · cross-site credentialed script captured {d} · json captured {d} · 2 MiB json over_cap {d} · no end {d} · several ends {d}{s}", .{ rounds, good[0], good[1], good[2], good[3], missing, doubled, bad_txt[0..bn] }) catch "");
+        try r.navigate(rec_tab, "/v20/blank?v20i");
+        r.pump(2000);
+    }
     // ══ 재검증 3 차(v20h A): WB-4 꼬리 — 워커 기록이 a 앞에, 빠른 b, b 바로 뒤 d(그 CEF 기록이 b 의 응답 뒤에 닿을 수 있다) ══
     if (enabled("h2tail")) {
         inline for (.{ .{ "g1", "1", "0.3" }, .{ "g2", "2", "0.3" }, .{ "g3", "3", "0.3" }, .{ "e10", "2", "1.0" }, .{ "e15", "2", "1.5" }, .{ "e20", "2", "2.0" }, .{ "e25", "2", "2.5" }, .{ "e35", "2", "3.5" } }) |gv| {
@@ -1130,9 +1254,10 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     }
     // ══ 재검증 3 차(v20h A): 새 문서의 첫 요청이 알림보다 먼저 나간다(LB-1 — loader 로 가른다) · 같은 사이트 iframe 이 주 프레임과 같은 주소를
     // 받는다(보이는 규칙만 다른 짝은 그 짝만 본문 없이). `ns` 는 캐시를 거치지 않아 셋이 동시다(N-4). 통과 조건: 틀린 본문 0·끝 하나, 그리고
-    // h9early·h9nsearly 는 제 본문이 거의 모두(60 중 57 이상 — 1c8e95230 은 h9nsearly 30/60), h2nsiframe 은 주 프레임 A·B·D 가 거의 모두(60 중 57
-    // 이상 — 1c8e95230 은 0/60). ══
-    inline for (.{ .{ "h9early", "/v20h/ep?", "epdone", [_][]const u8{ "a", "b", "c" }, "abc" }, .{ "h2iframe", "/v20h/fp?", "fpdone", [_][]const u8{ "A", "B", "C", "D" }, "" }, .{ "h9nsearly", "/v20h/ep?ns", "epdone", [_][]const u8{ "a", "b", "c" }, "abc" }, .{ "h2nsiframe", "/v20h/fp?ns", "fpdone", [_][]const u8{ "A", "B", "C", "D" }, "ABD" } }) |c| {
+    // h9early·h9nsearly 는 제 본문이 거의 모두(60 중 57 이상 — 1c8e95230 은 h9nsearly 30/60), h2nsiframe 은 네 요청 가운데 판마다 하나까지만 잃는다
+    // (80 중 57 이상 — 1c8e95230 은 주 프레임 0/60). 재검증 3 차 뒤 WB-5: 보이는 규칙이 다른 C·D 의 둘 중 먼저 정하는 쪽이 `ambiguous` 다 — 응답 전의
+    // A·B 를 기다리게 되자 C 가 아니라 D 가 잃는다(전에는 주 프레임 A·B·D 60/60·C 0, 이제 A·B·C 60/60·D 0). ══
+    inline for (.{ .{ "h9early", "/v20h/ep?", "epdone", [_][]const u8{ "a", "b", "c" }, "abc", 0 }, .{ "h2iframe", "/v20h/fp?", "fpdone", [_][]const u8{ "A", "B", "C", "D" }, "", 0 }, .{ "h9nsearly", "/v20h/ep?ns", "epdone", [_][]const u8{ "a", "b", "c" }, "abc", 0 }, .{ "h2nsiframe", "/v20h/fp?ns", "fpdone", [_][]const u8{ "A", "B", "C", "D" }, "ABCD", 1 } }) |c| {
         if (enabled(c[0])) {
             const whos = c[3];
             const rounds: usize = 20;
@@ -1182,12 +1307,196 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
                 ln += piece.len;
                 if (std.mem.indexOf(u8, c[4], w) != null) want_own += own[wi];
             }
-            const need: usize = if (c[4].len == 0) 0 else c[4].len * rounds - 3;
+            const need: usize = if (c[4].len == 0) 0 else (c[4].len - c[5]) * rounds - 3;
             var t2: Tally = .{};
             t2.states = other_states;
             report(wrong == 0 and missing == 0 and doubled == 0 and want_own >= need, "v20h-" ++ c[0], std.fmt.bufPrint(&detail, "{d} rounds · {s}WRONG {d} · no end {d} · several ends {d} · own of {s} {d} (need {d}) · states{s} · per round (o own, a ambiguous, x other){s}", .{ rounds, lnb[0..ln], wrong, missing, doubled, if (c[4].len == 0) "-" else c[4], want_own, need, stateLine(&t2, &sl), rounds_txt[0..rn] }) catch "");
             try r.navigate(rec_tab, "/v20/blank?h");
             r.pump(4000);
         }
+    }
+
+    // ══ 재검증 3 차 뒤: 검증자 v20i A 의 판정(WB-5 — 서비스 워커가 늦게 넘긴·늦게 답한 같은 주소 요청, PF-2 — abort 무리, IO 부하, 빨리 떠나기,
+    // 앞 문서의 unload·pagehide fetch). 실제 사이트(`V20I_SITES`)·bfcache·document.open 꼴은 `X_V20I=1` 일 때만(이 OSR 탭에서 기록이 생기지
+    // 않았다 — 검증 「Not verified」). ══
+    {
+        // SW late record / slow SW-synthesised answer (assumption: CEF IO ≤ 60 ms after the CDP start).
+        inline for (.{ .{ "swlag-d20", "p2", "20" }, .{ "swlag-d100", "p2", "100" }, .{ "swlag-d300", "p2", "300" }, .{ "swsyn-d20", "s2", "20" }, .{ "swsyn-d100", "s2", "100" }, .{ "swsyn-d300", "s2", "300" } }) |c| if (enabled("v20i-" ++ c[0])) {
+            // 항목마다 새 세션으로 다시 켠다 — 앞 항목(IO 부하 1500)이 쏟아짐 밸브로 기록을 멈출 수 있다(`recording_stopped`).
+            session += 1;
+            try r.host.send(.{ .net_record = .{ .browser = rec_tab, .on = true, .session = session } });
+            r.pump(300);
+            const at = r.begins.items.len;
+            var pb: [128]u8 = undefined;
+            try r.navigate(rec_tab, std.fmt.bufPrint(&pb, "/v20i/sw/p?k={s}x{d}&m={s}&d={s}&r=20", .{ c[0], session, c[1], c[2] }) catch "");
+            const done = r.pumpTitle(rec_tab, "swpdone", 60_000);
+            r.pump(2000);
+            var waited: u32 = 0;
+            while (waited < 8_000 and endCheck(&r, rec_tab, at).missing > 0) : (waited += 500) r.pump(500);
+            const all = tally(&r, rec_tab, at, "/v20i/sw/x?", null);
+            var line: [3][200]u8 = @splat(@splat(0));
+            for ([_][]const u8{ "X", "p1", c[1] }, 0..) |w, wi| {
+                const t = tally(&r, rec_tab, at, "/v20i/sw/x?", w);
+                var s3: [200]u8 = undefined;
+                _ = std.fmt.bufPrint(line[wi][0..199], "{s}: {d} own {d} amb {d} wrong {d}{s}", .{ w, t.total, t.own, t.ambiguous, t.wrong, stateLine(&t, &s3) }) catch "";
+            }
+            const ec = endCheck(&r, rec_tab, at);
+            var el: [600]u8 = undefined;
+            var sl2: [400]u8 = undefined;
+            report(done and all.wrong == 0 and ec.missing == 0 and ec.doubled == 0, "v20i-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 700)] }) catch "");
+            try r.navigate(rec_tab, "/v20/blank?swi");
+            r.pump(2000);
+        };
+        // IO load between p1 and p2.
+        inline for (.{ .{ "load-n100", "100" }, .{ "load-n400", "400" }, .{ "load-n1500", "1500" } }) |c| if (enabled("v20i-" ++ c[0])) {
+            // 항목마다 새 세션으로 다시 켠다 — 앞 항목(IO 부하 1500)이 쏟아짐 밸브로 기록을 멈출 수 있다(`recording_stopped`).
+            session += 1;
+            try r.host.send(.{ .net_record = .{ .browser = rec_tab, .on = true, .session = session } });
+            r.pump(300);
+            const at = r.begins.items.len;
+            var pb: [128]u8 = undefined;
+            try r.navigate(rec_tab, std.fmt.bufPrint(&pb, "/v20i/lp?k={s}x{d}&n={s}&r=10", .{ c[0], session, c[1] }) catch "");
+            const done = r.pumpTitle(rec_tab, "lpdone", 90_000);
+            r.pump(2000);
+            var waited: u32 = 0;
+            while (waited < 10_000 and endCheck(&r, rec_tab, at).missing > 0) : (waited += 500) r.pump(500);
+            const all = tally(&r, rec_tab, at, "/v20i/l?", null);
+            var line: [3][200]u8 = @splat(@splat(0));
+            for ([_][]const u8{ "X", "p1", "p2" }, 0..) |w, wi| {
+                const t = tally(&r, rec_tab, at, "/v20i/l?", w);
+                var s3: [200]u8 = undefined;
+                _ = std.fmt.bufPrint(line[wi][0..199], "{s}: {d} own {d} amb {d} wrong {d}{s}", .{ w, t.total, t.own, t.ambiguous, t.wrong, stateLine(&t, &s3) }) catch "";
+            }
+            const ec = endCheck(&r, rec_tab, at);
+            var el: [600]u8 = undefined;
+            var sl2: [400]u8 = undefined;
+            report(done and all.wrong == 0 and ec.missing == 0 and ec.doubled == 0, "v20i-" ++ c[0], std.fmt.bufPrint(&detail, "10 rounds{s}: {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 700)] }) catch "");
+            try r.navigate(rec_tab, "/v20/blank?li");
+            r.pump(3000);
+        };
+        // navigate-quickly: a's body after the page leaves X ms after a resolved.
+        inline for (.{ .{ "navq-x0", "0" }, .{ "navq-x20", "20" }, .{ "navq-x50", "50" }, .{ "navq-x100", "100" }, .{ "navq-x300", "300" } }) |c| if (enabled("v20i-" ++ c[0])) {
+            // 항목마다 새 세션으로 다시 켠다 — 앞 항목(IO 부하 1500)이 쏟아짐 밸브로 기록을 멈출 수 있다(`recording_stopped`).
+            session += 1;
+            try r.host.send(.{ .net_record = .{ .browser = rec_tab, .on = true, .session = session } });
+            r.pump(300);
+            var own_a: usize = 0;
+            var wrong: usize = 0;
+            var missing: usize = 0;
+            var doubled: usize = 0;
+            var st: [16]usize = @splat(0);
+            for (0..20) |round| {
+                const at = r.begins.items.len;
+                var pb: [128]u8 = undefined;
+                try r.navigate(rec_tab, std.fmt.bufPrint(&pb, "/v20i/qp?k={s}_{d}x{d}&x={s}", .{ c[0], round, session, c[1] }) catch "");
+                _ = r.pumpTitle(rec_tab, "blank", 6_000);
+                r.pump(2500);
+                var waited: u32 = 0;
+                while (waited < 4_000 and endCheck(&r, rec_tab, at).missing > 0) : (waited += 500) r.pump(500);
+                const ta = tally(&r, rec_tab, at, "/v20i/q?", "a");
+                const all = tally(&r, rec_tab, at, "/v20i/q?", null);
+                own_a += ta.own;
+                wrong += all.wrong;
+                for (ta.states, 0..) |n, si| st[si] += n;
+                const ec = endCheck(&r, rec_tab, at);
+                missing += ec.missing;
+                doubled += ec.doubled;
+            }
+            var t2: Tally = .{};
+            t2.states = st;
+            report(wrong == 0 and missing == 0 and doubled == 0, "v20i-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds, navigate {s} ms after a resolved: a own {d}/20 · a states{s} · all WRONG {d} · no end {d} · several ends {d}", .{ c[1], own_a, stateLine(&t2, &sl), wrong, missing, doubled }) catch "");
+        };
+
+        // real sites (V20I_SITES=url,url…): body_expected begins and their end states (loss rates; no wrong-body oracle).
+        if (enabled("v20i-sites") and std.c.getenv("X_V20I") != null) if (std.c.getenv("V20I_SITES")) |sites_z| {
+            var it = std.mem.splitScalar(u8, std.mem.span(sites_z), ',');
+            while (it.next()) |site| {
+                if (site.len == 0) continue;
+                const at = r.begins.items.len;
+                try navigateUrl(&r, rec_tab, site);
+                r.pump(15_000);
+                try r.navigate(rec_tab, "/v20/blank?site");
+                r.pump(5_000);
+                const ec = endCheck(&r, rec_tab, at);
+                var el: [600]u8 = undefined;
+                var sl2: [400]u8 = undefined;
+                var cap: usize = 0;
+                for (r.begins.items[at..]) |b| if (b.browser == rec_tab and b.expected) {
+                    const x = r.body(rec_tab, b.request);
+                    if (x.ends >= 1 and x.state == .captured) cap += 1;
+                };
+                report(ec.missing == 0 and ec.doubled == 0, "v20i-sites", std.fmt.bufPrint(&detail, "{s}: captured {d} · {s}", .{ site, cap, endLine(&ec, &el, &sl2) }) catch "");
+            }
+        };
+
+        if (enabled("v20i-hostile")) {
+            // 항목마다 새 세션으로 다시 켠다 — 앞 항목(IO 부하 1500)이 쏟아짐 밸브로 기록을 멈출 수 있다(`recording_stopped`).
+            session += 1;
+            try r.host.send(.{ .net_record = .{ .browser = rec_tab, .on = true, .session = session } });
+            r.pump(300);
+            const at = r.begins.items.len;
+            var pb: [160]u8 = undefined;
+            const qs = if (std.c.getenv("V20I_HOSTILE_Q")) |q| std.mem.span(q) else "d=60&f=3900&e=60&r=3";
+            try r.navigate(rec_tab, std.fmt.bufPrint(&pb, "/v20i/hp?k=h{d}&{s}", .{ session, qs }) catch "");
+            const done = r.pumpTitle(rec_tab, "hpdone", 60_000);
+            r.pump(4000);
+            const all = tally(&r, rec_tab, at, "/v20i/h?", null);
+            const ec = endCheck(&r, rec_tab, at);
+            var el: [600]u8 = undefined;
+            var sl2: [400]u8 = undefined;
+            report(done and all.wrong == 0 and ec.missing == 0 and ec.doubled == 0, "v20i-hostile", std.fmt.bufPrint(&detail, "{s}{s}: CEF records {d} own {d} amb {d} WRONG {d} · {s}", .{ qs, if (done) "" else " (NOT DONE)", all.total, all.own, all.ambiguous, all.wrong, endLine(&ec, &el, &sl2) }) catch "");
+            try r.navigate(rec_tab, "/v20/blank?hi");
+            r.pump(2000);
+        }
+        // old-document fetches around the switch (unload / pagehide abort / bfcache / document.open) + n1/n2 of the same URL.
+        inline for (.{ .{ "gunload", "unload", "/v20i/gp?", false }, .{ "ghidecut", "hidecut", "/v20i/gp?", false }, .{ "gbf", "bf", "/v20i/bfa?", true }, .{ "gdocopen", "docopen", "/v20i/gp?", true } }) |c| if (enabled("v20i-" ++ c[0]) and (!c[3] or std.c.getenv("X_V20I") != null)) {
+            // 항목마다 새 세션으로 다시 켠다 — 앞 항목(IO 부하 1500)이 쏟아짐 밸브로 기록을 멈출 수 있다(`recording_stopped`).
+            session += 1;
+            try r.host.send(.{ .net_record = .{ .browser = rec_tab, .on = true, .session = session } });
+            r.pump(300);
+            var own: [3]usize = @splat(0);
+            var tot: [3]usize = @splat(0);
+            var wrong: usize = 0;
+            var missing: usize = 0;
+            var doubled: usize = 0;
+            var rounds_txt: [400]u8 = undefined;
+            var rn: usize = 0;
+            var notes: [700]u8 = undefined;
+            var nn: usize = 0;
+            for (0..10) |round| {
+                var kb: [64]u8 = undefined;
+                const key = std.fmt.bufPrint(&kb, "{s}{d}x{d}", .{ c[0], round, session }) catch "";
+                const at = r.begins.items.len;
+                var pb: [128]u8 = undefined;
+                try r.navigate(rec_tab, std.fmt.bufPrint(&pb, "{s}k={s}&m={s}", .{ c[2], key, c[1] }) catch "");
+                _ = r.pumpTitle(rec_tab, "igdone", 12_000);
+                r.pump(1500);
+                var waited: u32 = 0;
+                while (waited < 6_000 and endCheck(&r, rec_tab, at).missing > 0) : (waited += 500) r.pump(500);
+                var nb: [96]u8 = undefined;
+                const needle = std.fmt.bufPrint(&nb, "/v20i/g?k={s}", .{key}) catch "";
+                const all = tally(&r, rec_tab, at, needle, null);
+                wrong += all.wrong;
+                if (all.wrong > 0 and nn < 600) {
+                    const piece = std.fmt.bufPrint(notes[nn..], "{s}", .{all.notes[0..@min(all.notes_len, 600 - nn)]}) catch "";
+                    nn += piece.len;
+                }
+                const ec = endCheck(&r, rec_tab, at);
+                missing += ec.missing;
+                doubled += ec.doubled;
+                var mark: [3]u8 = @splat('.');
+                for ([_][]const u8{ "o", "n1", "n2" }, 0..) |w, wi| {
+                    const t = tally(&r, rec_tab, at, needle, w);
+                    own[wi] += t.own;
+                    tot[wi] += t.total;
+                    mark[wi] = if (t.wrong > 0) 'W' else if (t.own > 0) 'o' else if (t.ambiguous > 0) 'a' else if (t.total == 0) '-' else 'x';
+                }
+                const piece = std.fmt.bufPrint(rounds_txt[rn..], " {s}", .{mark[0..]}) catch "";
+                rn += piece.len;
+            }
+            report(wrong == 0 and missing == 0 and doubled == 0, "v20i-" ++ c[0], std.fmt.bufPrint(&detail, "10 rounds · o own {d}/{d} · n1 own {d}/{d} · n2 own {d}/{d} · WRONG {d} · no end {d} · several ends {d} · per round (o n1 n2){s}{s}", .{ own[0], tot[0], own[1], tot[1], own[2], tot[2], wrong, missing, doubled, rounds_txt[0..rn], notes[0..nn] }) catch "");
+            try r.navigate(rec_tab, "/v20/blank?gi");
+            r.pump(2000);
+        };
     }
 }

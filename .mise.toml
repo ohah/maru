@@ -26,6 +26,10 @@ run = "zig build test-windows-raster-origin"
 description = "Verify native terminal run face selection"
 run = "zig build test-windows-run-faces"
 
+[tasks.test-windows-registry-raster]
+description = "Verify styled registry face raster selection"
+run = "zig build test-windows-registry-raster"
+
 [tasks.e2e]
 description = "Run headless E2E tests"
 run = "zig build test-e2e"

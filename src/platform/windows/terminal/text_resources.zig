@@ -168,8 +168,13 @@ test "Windows text resources retiring old owner preserves prepared builder" {
 }
 
 fn variantInkHash(resources: *TextResources, style: maru.terminal.Style, registry: ?*const maru.renderer.FontIdentityRegistry, override_id: ?u32) !u64 {
+    return variantInkHashWithPolicy(resources, style, registry, override_id, null);
+}
+
+fn variantInkHashWithPolicy(resources: *TextResources, style: maru.terminal.Style, registry: ?*const maru.renderer.FontIdentityRegistry, override_id: ?u32, policy: ?maru.win32_text.RegistryFacePolicy) !u64 {
     var builder = resources.builder();
     builder.rasterizer.registry = registry;
+    if (policy) |p| builder.rasterizer.registry_face_policy = p;
     const shaped = builder.shaper.shape(.{ .row = 0, .col = 0, .codepoint = 'M', .style = style });
     const id = override_id orelse shaped.font_id;
     const key: maru.renderer.glyph_layout.GlyphCacheKey = .{ .font_id = id, .glyph_id = shaped.glyph_id, .font_size_px = 22, .device_scale = 1 };
@@ -186,6 +191,95 @@ fn variantInkHash(resources: *TextResources, style: maru.terminal.Style, registr
     });
     try std.testing.expect(result.non_clear_pixels > 0);
     return std.hash.Wyhash.hash(0, pixels);
+}
+
+fn registryStyleHash(resources: *TextResources, style: maru.terminal.Style, prefill: usize) !u64 {
+    var registry = maru.renderer.FontIdentityRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    for (0..prefill) |i| {
+        var name: [64]u8 = undefined;
+        _ = try registry.intern(.{ .postscript_name = try std.fmt.bufPrint(&name, "unused-registry-{d}", .{i}) });
+    }
+    const key: usize = maru.renderer.shaping_runs.faceKey(style);
+    const bank = if (key == 0) resources.raster else resources.variants[key - 1].?;
+    const choice = bank.glyphFor('M') orelse return error.TestUnexpectedResult;
+    const ps = bank.face_ps_names[choice.face_index][0..bank.face_ps_name_len[choice.face_index]];
+    const id = try registry.intern(.{ .postscript_name = ps });
+    return variantInkHashWithPolicy(resources, style, &registry, id, .terminal_style);
+}
+
+test "Windows registry raster style banks preserve actual pixels for separate families" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var resources = try TextResources.initConfigured(std.testing.allocator, .{ .family = "Consolas", .family_bold = "Courier New", .family_italic = "Times New Roman", .size = 22 });
+    defer resources.deinit();
+    for ([_]maru.terminal.Style{ .{}, .{ .bold = true }, .{ .italic = true }, .{ .bold = true, .italic = true } }) |style| {
+        const expected = try variantInkHash(&resources, style, null, null);
+        try std.testing.expectEqual(expected, try registryStyleHash(&resources, style, 0));
+    }
+}
+
+test "Windows registry raster id collisions cannot select an encoded terminal bank" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var resources = try TextResources.initConfigured(std.testing.allocator, .{ .family = "Consolas", .family_bold = "Courier New", .size = 22 });
+    defer resources.deinit();
+    const style: maru.terminal.Style = .{ .bold = true };
+    const expected = try variantInkHash(&resources, style, null, null);
+    for ([_]usize{ 0, 1, 40 }) |prefill| try std.testing.expectEqual(expected, try registryStyleHash(&resources, style, prefill));
+}
+
+test "Windows registry raster default measured policy does not require a terminal style bank" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var resources = try TextResources.initConfigured(std.testing.allocator, .{ .family = "Consolas", .size = 22 });
+    defer resources.deinit();
+    const saved = resources.variants[0];
+    resources.variants[0] = null;
+    defer resources.variants[0] = saved;
+    var registry = maru.renderer.FontIdentityRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    const ps = resources.raster.face_ps_names[0][0..resources.raster.face_ps_name_len[0]];
+    const id = try registry.intern(.{ .postscript_name = ps });
+    const expected = try variantInkHash(&resources, .{}, null, null);
+    try std.testing.expectEqual(expected, try variantInkHash(&resources, .{ .bold = true }, &registry, id));
+}
+
+test "Windows registry raster missing opted in bank fails instead of substituting primary" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var resources = try TextResources.initConfigured(std.testing.allocator, .{ .family = "Consolas", .size = 22 });
+    defer resources.deinit();
+    const saved = resources.variants[0];
+    resources.variants[0] = null;
+    defer resources.variants[0] = saved;
+    var registry = maru.renderer.FontIdentityRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    const ps = resources.raster.face_ps_names[0][0..resources.raster.face_ps_name_len[0]];
+    const id = try registry.intern(.{ .postscript_name = ps });
+    try std.testing.expectError(error.RasterizerFailed, variantInkHashWithPolicy(&resources, .{ .bold = true }, &registry, id, .terminal_style));
+}
+
+test "Windows registry raster synthesized ink precedes registry and bank resolution" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var resources = try TextResources.initConfigured(std.testing.allocator, .{ .family = "Consolas", .size = 22 });
+    defer resources.deinit();
+    var registry = maru.renderer.FontIdentityRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    const id = try registry.intern(.{ .postscript_name = "unavailable-face" });
+    var adapter = resources.builder().rasterizer;
+    adapter.registry = &registry;
+    adapter.registry_face_policy = .terminal_style;
+    adapter.variants = @splat(null);
+    const w: u16 = @intCast(resources.raster.metrics.width_px);
+    const h: u16 = @intCast(resources.raster.metrics.height_px);
+    const pixels = try std.testing.allocator.alloc(u8, @as(usize, w) * h * 4);
+    defer std.testing.allocator.free(pixels);
+    @memset(pixels, 0);
+    const key: maru.renderer.glyph_layout.GlyphCacheKey = .{ .font_id = id, .glyph_id = 0, .font_size_px = 22, .device_scale = 1 };
+    const result = try adapter.rasterize(.{
+        .run = .{ .row = 0, .col = 0, .cell_width = 1, .codepoint = 0x2500, .font_id = id, .glyph_id = 0, .style = .{ .bold = true }, .cache_key = key },
+        .slot = .{ .id = 1, .key = key, .x_px = 0, .y_px = 0, .width_px = w, .height_px = h, .upload_bytes = pixels.len, .generation = 1 },
+        .pixels = pixels,
+        .bytes_per_row = @as(usize, w) * 4,
+    });
+    try std.testing.expect(result.non_clear_pixels > 0);
 }
 
 test "Windows font variants render four native faces with distinct atlas identities" {

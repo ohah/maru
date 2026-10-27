@@ -5322,8 +5322,8 @@ PNG/OCR은 고정된 앱의 화면 기록 권한과 독립 후보창 기록을 �
 
 ## 참조 결과 피커 IME 문맥
 
-구현·검증 중: `test-reference-picker-ime`의 호스트 42개는 네 명령 kind·범위·preview/확정·결과 세대·
+구현·검증 완료: `test-reference-picker-ime`의 호스트 42개는 네 명령 kind·범위·preview/확정·결과 세대·
 문서 전환·할당 실패의 query/목록/선택 보존을 검사한다. 기존 filter API도 실패 원자성을 공유한다.
 `tools/reference-picker-ime`의 실제 두벌식·후보 취소 5회·한자 선택·별도 Enter 이동·에디터 복귀 진단이 통과했다.
-OS 후보창 PNG/hash/OCR은 고정 앱의 화면 기록 권한을 기다리며 진단 통과와 구분한다.
+같은 고정 앱에서 서로 다른 후보창 5개의 PNG/hash/독립 OCR도 통과했다. 실제 OS 실행은 references 모드이며 나머지 명령 kind는 공유 호스트 검사로 검증했다.
 위치 응답을 공급하는 fixture는 실제 LSP 서버 통신 검증이 아니다. [계획과 결과](plans/reference-picker-ime.md)를 따른다.

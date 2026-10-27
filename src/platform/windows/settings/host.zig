@@ -219,7 +219,10 @@ pub const Host = struct {
             self.wheel_acc.reset();
             self.form.state.scroll = .{};
             self.form.state.followed_selected = null;
-        } else if (intent == .close) { self.wheel_acc.reset(); self.scrollbar.hide(); }
+        } else if (intent == .close) {
+            self.wheel_acc.reset();
+            self.scrollbar.hide();
+        }
     }
     pub fn wheel(self: *Host, delta: i32, lines_per_notch: u32, horizontal: bool, raw_props: maru.chrome.props.ChromeProps, tokens: *const maru.chrome.Tokens) void {
         var props = raw_props;
@@ -274,7 +277,10 @@ pub const Host = struct {
         const f = try self.form.frame(a, self.cfg.*);
         widget.ensureSelectedVisible(&self.form.state, f.sections, f.rows, props, tokens);
         try widget.view(&self.form.state, f.sections, f.rows, f.dropdown, props, tokens, a, ops);
-        if (self.job != null or self.form.state.dropdown.open or self.form.state.picking) { self.scrollbar.hide(); return; }
+        if (self.job != null or self.form.state.dropdown.open or self.form.state.picking) {
+            self.scrollbar.hide();
+            return;
+        }
         if (widget.scrollView(&self.form.state, f.sections, f.rows, props, tokens)) |view| {
             try self.scrollbar.publish(view, props.metrics.cell_height_px, tokens, a, ops);
         } else self.scrollbar.hide();
@@ -525,13 +531,17 @@ fn scrollbarTestDown(host: *Host, at_bottom: bool) void {
     host.pointer(.{ .phase = .down, .x_px = g.track_x + g.track_w / 2, .y_px = if (at_bottom) g.track_y + g.track_h - 1 else g.thumb_y + g.thumb_h / 2 }, wheel_test_props, &tk);
 }
 test "Windows settings scrollbar paints published overflow only" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
-    const a = arena.allocator(); var cfg: maru.config.Config = .{}; var host = try wheelTestHost(a, &cfg);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(a, &cfg);
     const ops = try scrollbarTestDraw(&host, a, wheel_test_props);
     try std.testing.expectEqual(@as(usize, 3), host.scrollbar.count);
     try std.testing.expect(host.scrollbar.geometry != null);
-    try std.testing.expect(ops.len >= 2 and ops[ops.len-1] == .quad and ops[ops.len-2] == .quad);
-    host.form.state.startSearch(); for ("__no_setting__") |cp| host.form.state.appendSearchCp(cp);
+    try std.testing.expect(ops.len >= 2 and ops[ops.len - 1] == .quad and ops[ops.len - 2] == .quad);
+    host.form.state.startSearch();
+    for ("__no_setting__") |cp| host.form.state.appendSearchCp(cp);
     _ = try scrollbarTestDraw(&host, a, wheel_test_props);
     try std.testing.expectEqual(@as(usize, 0), host.scrollbar.count);
     try std.testing.expect(host.scrollbar.geometry == null);
@@ -544,12 +554,15 @@ test "Windows settings scrollbar paint allocation failure retires hit targets" {
     const tk = wheelTestTokens();
     try std.testing.expectError(error.OutOfMemory, bar.publish(.{
         .viewport = .{ .x = 100, .y = 100, .w = 200, .h = 100 },
-        .total = 100, .visible = 5, .win_start = 0,
+        .total = 100,
+        .visible = 5,
+        .win_start = 0,
     }, 20, &tk, failing.allocator(), &ops));
     try std.testing.expectEqual(@as(usize, 0), bar.count);
     try std.testing.expect(bar.geometry == null and !bar.drag.active);
     try std.testing.expectEqual(@as(usize, 0), ops.items.len);
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     var cfg: maru.config.Config = .{};
     var host = try wheelTestHost(arena.allocator(), &cfg);
     _ = try scrollbarTestDraw(&host, arena.allocator(), wheel_test_props);
@@ -560,9 +573,13 @@ test "Windows settings scrollbar paint allocation failure retires hit targets" {
     try std.testing.expectEqual(@as(usize, 0), host.scrollbar.count);
 }
 test "Windows settings scrollbar track jump uses final release coordinate" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
-    const a = arena.allocator(); var cfg: maru.config.Config = .{}; var host = try wheelTestHost(a, &cfg);
-    _ = try scrollbarTestDraw(&host, a, wheel_test_props); const g = host.scrollbar.geometry.?;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(a, &cfg);
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props);
+    const g = host.scrollbar.geometry.?;
     scrollbarTestDown(&host, true);
     try std.testing.expect(host.scrollbar.drag.active and host.form.state.scroll.offset_y_px > 0);
     const tk = wheelTestTokens();
@@ -571,9 +588,14 @@ test "Windows settings scrollbar track jump uses final release coordinate" {
     try std.testing.expect(!host.scrollbar.drag.active and host.scrollbar.interaction.capture == null);
 }
 test "Windows settings scrollbar ignores unrelated release and coalesces movement" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
-    const a = arena.allocator(); var cfg: maru.config.Config = .{}; var host = try wheelTestHost(a, &cfg);
-    _ = try scrollbarTestDraw(&host, a, wheel_test_props); const g = host.scrollbar.geometry.?; const tk = wheelTestTokens();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(a, &cfg);
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props);
+    const g = host.scrollbar.geometry.?;
+    const tk = wheelTestTokens();
     // The reserved gutter edge is outside the narrow painted thumb, but is
     // still a published track action and must acquire typed capture.
     host.pointer(.{ .phase = .down, .x_px = g.hit_x + 0.5, .y_px = g.thumb_y + g.thumb_h / 2 }, wheel_test_props, &tk);
@@ -582,33 +604,53 @@ test "Windows settings scrollbar ignores unrelated release and coalesces movemen
     try std.testing.expect(host.scrollbar.drag.active);
     host.pointer(.{ .phase = .move, .x_px = g.track_x, .y_px = g.track_y + g.track_h }, wheel_test_props, &tk);
     try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
-    host.tick(); try std.testing.expect(host.form.state.scroll.offset_y_px > 0);
+    host.tick();
+    try std.testing.expect(host.form.state.scroll.offset_y_px > 0);
     host.pointer(.{ .phase = .up, .x_px = -100, .y_px = -100 }, wheel_test_props, &tk);
     try std.testing.expectEqual(@as(u32, 0), host.form.state.scroll.offset_y_px);
     try std.testing.expect(host.form.state.open);
 }
 test "Windows settings scrollbar cancels on owner changes" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
-    const a = arena.allocator(); var cfg: maru.config.Config = .{}; var host = try wheelTestHost(a, &cfg);
-    _ = try scrollbarTestDraw(&host, a, wheel_test_props); scrollbarTestDown(&host, false);
-    host.cancelGestures(); try std.testing.expect(!host.scrollbar.drag.active);
-    _ = try scrollbarTestDraw(&host, a, wheel_test_props); scrollbarTestDown(&host, false);
-    host.key(.{ .key = .{ .char = '/' } }); try std.testing.expect(!host.scrollbar.drag.active);
-    _ = try scrollbarTestDraw(&host, a, wheel_test_props); scrollbarTestDown(&host, false);
-    host.form.state.dropdown.open = true; host.tick(); try std.testing.expect(!host.scrollbar.drag.active);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(a, &cfg);
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props);
+    scrollbarTestDown(&host, false);
+    host.cancelGestures();
+    try std.testing.expect(!host.scrollbar.drag.active);
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props);
+    scrollbarTestDown(&host, false);
+    host.key(.{ .key = .{ .char = '/' } });
+    try std.testing.expect(!host.scrollbar.drag.active);
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props);
+    scrollbarTestDown(&host, false);
+    host.form.state.dropdown.open = true;
+    host.tick();
+    try std.testing.expect(!host.scrollbar.drag.active);
     host.form.state.dropdown.open = false;
-    _ = try scrollbarTestDraw(&host, a, wheel_test_props); scrollbarTestDown(&host, false);
-    host.toggle(); try std.testing.expect(!host.scrollbar.drag.active and !host.form.state.open);
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props);
+    scrollbarTestDown(&host, false);
+    host.toggle();
+    try std.testing.expect(!host.scrollbar.drag.active and !host.form.state.open);
 }
 test "Windows settings scrollbar carries scroll redraw but cancels resized geometry" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
-    const a = arena.allocator(); var cfg: maru.config.Config = .{}; var host = try wheelTestHost(a, &cfg);
-    _ = try scrollbarTestDraw(&host, a, wheel_test_props); const g = host.scrollbar.geometry.?; const tk = wheelTestTokens();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cfg: maru.config.Config = .{};
+    var host = try wheelTestHost(a, &cfg);
+    _ = try scrollbarTestDraw(&host, a, wheel_test_props);
+    const g = host.scrollbar.geometry.?;
+    const tk = wheelTestTokens();
     scrollbarTestDown(&host, false);
-    host.pointer(.{ .phase = .move, .x_px = g.track_x, .y_px = g.track_y + g.track_h }, wheel_test_props, &tk); host.tick();
+    host.pointer(.{ .phase = .move, .x_px = g.track_x, .y_px = g.track_y + g.track_h }, wheel_test_props, &tk);
+    host.tick();
     _ = try scrollbarTestDraw(&host, a, wheel_test_props);
     try std.testing.expect(host.scrollbar.drag.active and host.scrollbar.interaction.capture != null);
-    var resized = wheel_test_props; resized.metrics.backing_width_px += 200;
+    var resized = wheel_test_props;
+    resized.metrics.backing_width_px += 200;
     _ = try scrollbarTestDraw(&host, a, resized);
     try std.testing.expect(!host.scrollbar.drag.active and host.scrollbar.interaction.capture == null);
 }
@@ -619,12 +661,16 @@ test "Windows settings composition paints preview at the only active caret" {
     const a = arena.allocator();
     const tk = wheelTestTokens();
     var state: widget.State = .{};
-    state.show(); state.startSearch(); state.appendSearchCp('.'); state.enterEdit("a");
+    state.show();
+    state.startSearch();
+    state.appendSearchCp('.');
+    state.enterEdit("a");
     state.setEditPreedit("\xea\xb0\x80");
     const rows = [_]widget.FieldRow{.{ .label = "value", .kind = .{ .text = "" } }};
     var ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
     try widget.view(&state, &.{}, &rows, &.{}, wheel_test_props, &tk, a, &ops);
-    var cursors: usize = 0; var preview = false;
+    var cursors: usize = 0;
+    var preview = false;
     const caret = widget.editCaretRect(&state, &.{}, &rows, wheel_test_props, &tk).?;
     for (ops.items) |op| {
         if (op == .fill and op.fill.role == .cursor) cursors += 1;
@@ -643,38 +689,53 @@ test "Windows settings composition paints preview at the only active caret" {
 test "Windows settings composition routes preview without changing the filter" {
     var cfg: maru.config.Config = .{};
     var host: Host = .{ .a = std.testing.allocator, .config_arena = std.testing.allocator, .io = std.testing.io, .cfg = &cfg, .path = null };
-    host.form.state.show(); host.form.state.startSearch(); host.form.state.appendSearchCp('.'); host.form.state.enterEdit("old");
-    var bytes = [_]u8{0xea, 0xb0, 0x80};
-    host.preedit(&bytes); bytes[0] = 0;
+    host.form.state.show();
+    host.form.state.startSearch();
+    host.form.state.appendSearchCp('.');
+    host.form.state.enterEdit("old");
+    var bytes = [_]u8{ 0xea, 0xb0, 0x80 };
+    host.preedit(&bytes);
+    bytes[0] = 0;
     try std.testing.expectEqualStrings("\xea\xb0\x80", host.form.state.editPreedit());
     try std.testing.expectEqualStrings("", host.form.state.searchPreedit());
     try std.testing.expectEqualStrings(".", host.form.state.searchQuery());
     try std.testing.expectEqualStrings("old", host.form.state.editText());
-    host.form.state.cancelEdit(); host.preedit("search");
+    host.form.state.cancelEdit();
+    host.preedit("search");
     try std.testing.expectEqualStrings("", host.form.state.editPreedit());
     try std.testing.expectEqualStrings("search", host.form.state.searchPreedit());
 }
 test "Windows settings composition cancels and commits without replaying preview" {
     var state: widget.State = .{};
-    state.show(); state.enterEdit("old"); state.setEditPreedit("pending"); state.cancelEdit(); state.enterEdit("new");
+    state.show();
+    state.enterEdit("old");
+    state.setEditPreedit("pending");
+    state.cancelEdit();
+    state.enterEdit("new");
     try std.testing.expectEqualStrings("", state.editPreedit());
-    state.setEditPreedit("\xea\xb0\x80"); state.appendEditCp(0xAC00);
+    state.setEditPreedit("\xea\xb0\x80");
+    state.appendEditCp(0xAC00);
     try std.testing.expectEqualStrings("new\xea\xb0\x80", state.editText());
     try std.testing.expectEqualStrings("", state.editPreedit());
-    state.setEditPreedit("pending"); state.hide(); state.show(); state.enterEdit("next");
+    state.setEditPreedit("pending");
+    state.hide();
+    state.show();
+    state.enterEdit("next");
     try std.testing.expectEqualStrings("", state.editPreedit());
 }
 test "Windows settings composition bounds UTF8 and rejects invalid previews" {
     var state: widget.State = .{};
-    state.show(); state.enterEdit("");
+    state.show();
+    state.enterEdit("");
     var long: [36]u8 = undefined;
-    for (0..12) |i| @memcpy(long[i*3..][0..3], "\xea\xb0\x80");
+    for (0..12) |i| @memcpy(long[i * 3 ..][0..3], "\xea\xb0\x80");
     state.setEditPreedit(&long);
     try std.testing.expectEqual(@as(usize, 30), state.editPreedit().len);
     _ = try std.unicode.Utf8View.init(state.editPreedit());
     state.setEditPreedit(&.{0xff});
     try std.testing.expectEqualStrings("", state.editPreedit());
-    state.cancelEdit(); state.setEditPreedit("inactive");
+    state.cancelEdit();
+    state.setEditPreedit("inactive");
     try std.testing.expectEqualStrings("", state.editPreedit());
 }
 test "Windows settings composition does not draw past the field edge" {
@@ -682,7 +743,9 @@ test "Windows settings composition does not draw past the field edge" {
     defer arena.deinit();
     const tk = wheelTestTokens();
     var state: widget.State = .{};
-    state.show(); state.enterEdit("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); state.setEditPreedit("\xea\xb0\x80");
+    state.show();
+    state.enterEdit("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    state.setEditPreedit("\xea\xb0\x80");
     const rows = [_]widget.FieldRow{.{ .label = "value", .kind = .{ .text = "" } }};
     var ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
     try widget.view(&state, &.{}, &rows, &.{}, wheel_test_props, &tk, arena.allocator(), &ops);
@@ -703,7 +766,9 @@ fn inlineCaretMatchesPaint(kind: widget.FieldRow.Kind) !void {
     var ops: std.ArrayList(maru.chrome.draw.Op) = .empty;
     try widget.view(&state, &.{}, &rows, &.{}, wheel_test_props, &tk, a, &ops);
     var painted: ?maru.chrome.draw.Rect = null;
-    for (ops.items) |op| if (op == .fill and op.fill.role == .cursor) { painted = op.fill.rect; };
+    for (ops.items) |op| if (op == .fill and op.fill.role == .cursor) {
+        painted = op.fill.rect;
+    };
     try std.testing.expect(painted != null);
     try std.testing.expectEqualDeep(painted.?, widget.editCaretRect(&state, &.{}, &rows, wheel_test_props, &tk).?);
 }
@@ -742,7 +807,10 @@ test "Windows settings inline IME editor takes precedence over retained search" 
     host.form.state.startSearch();
     host.form.state.appendSearchCp('.');
     const f = try host.form.frame(a, cfg);
-    for (f.rows, 0..) |row, i| if (row.kind == .number) { host.form.state.selected = i; break; } else continue;
+    for (f.rows, 0..) |row, i| if (row.kind == .number) {
+        host.form.state.selected = i;
+        break;
+    } else continue;
     widget.ensureSelectedVisible(&host.form.state, f.sections, f.rows, wheel_test_props, &tk);
     host.form.state.enterEdit("12");
     const rect = widget.editCaretRect(&host.form.state, f.sections, f.rows, wheel_test_props, &tk).?;

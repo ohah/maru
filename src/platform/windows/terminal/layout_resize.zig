@@ -334,7 +334,6 @@ test "Windows layout retry unknown and detached surfaces never remain queued" {
     try std.testing.expect(!try retry.pump(&f.runtime, &f.surface, std.math.maxInt(i128), std.testing.io));
 }
 
-
 test "Windows layout retry notice clears once after full recovery" {
     var notice: RecoveryNotice = .{};
     notice.begin();
@@ -377,7 +376,6 @@ test "Windows layout retry notice cannot clear a newer font preparation failure"
     try std.testing.expect(!notice.recovered(false, false, false, true));
     try std.testing.expect(!notice.recovered(false, false, true, true));
 }
-
 
 test "Windows layout retry reader receives latest report only after transport success" {
     const f = try Fixture.init();

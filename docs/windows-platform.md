@@ -13143,3 +13143,10 @@ DLL·host가 일치하며, 이 설치 변경 전후 실행 파일도 동일하�
 다른 원문·DLL 누락·host 누락의 다섯 실제 빌드 산출물을 거절하고 복구 산출물을 확인했다.
 근거는 `.zig-cache/conpty-license-package-adversarial.json`이다. 전체 Windows 지원,
 터미널 합자 연결, 작업표시줄 고정과 남은 영역별 기능은 계속 미완료다.
+
+리베이스 뒤 형식 검사에 걸린 Windows 프리뷰 관련 Zig 파일 10개는 Zig 0.17 포매터로
+정리했다. 컴파일러 tokenizer로 공백/주석과 닫는 괄호 앞 선택적 쉼표를 제외한 토큰을
+대조했다. 포매터가 수행한 `@intFromEnum` → `@backingInt` 갱신도 따로 기록하고,
+signed/unsigned 경계·비열거 값·Windows NTSTATUS의 반환 타입과 값을 비교했다.
+총 11개 검사가 통과했다. 엄격한 원본 토큰 비교에서 발견된 이름/쉼표 차이와 허용한
+변환 범위는 `.zig-cache/latest-main-format-token-proof.json`에 보존한다.

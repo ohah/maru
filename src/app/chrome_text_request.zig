@@ -306,12 +306,16 @@ test "prepareRequest releases every failed allocation prefix" {
 fn allocationFailureRequest(allocator: std.mem.Allocator) !void {
     const runs: [24]chrome.draw.Run = @splat(.{ .text = "owned text" });
     const ops = [_]chrome.draw.Op{.{ .text = .{
-        .origin = .{ .x = 0, .y = 0 }, .runs = &runs,
-        .role = .surface_fg, .text_role = .body, .max_cols = 20,
+        .origin = .{ .x = 0, .y = 0 },
+        .runs = &runs,
+        .role = .surface_fg,
+        .text_role = .body,
+        .max_cols = 20,
     } }};
     const tk = std.mem.zeroes(chrome.Tokens);
     var request = try prepareRequest(allocator, 11, &ops, &tk, 8, .{
-        .family = "primary", .fallback = "fallback",
+        .family = "primary",
+        .fallback = "fallback",
     });
     defer request.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 24), request.runs.len);

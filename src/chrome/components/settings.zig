@@ -1038,7 +1038,9 @@ pub fn editCaretRect(state: *const State, sections: []const []const u8, rows: []
     };
     return .{
         .x = start + @as(i32, @intCast(overlay_input.displayCols(state.editText()) * l.box.cw)),
-        .y = ctrl.y, .w = l.box.cw, .h = l.box.ch,
+        .y = ctrl.y,
+        .w = l.box.cw,
+        .h = l.box.ch,
     };
 }
 

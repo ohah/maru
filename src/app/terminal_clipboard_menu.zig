@@ -72,7 +72,9 @@ pub const Popup = struct {
         const items = labels();
         const hit = menu.itemAt(&self.state, &items, props, event.x_px, event.y_px);
         switch (event.phase) {
-            .move => if (hit) |row| { self.state.selected = row; },
+            .move => if (hit) |row| {
+                self.state.selected = row;
+            },
             .down => {
                 if (event.button != .left) {
                     self.dismiss();

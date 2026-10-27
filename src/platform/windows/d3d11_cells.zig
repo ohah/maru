@@ -156,7 +156,7 @@ pub fn paintCell(visible: [4]f32, original: [4]f32, start: [4]f32, end: ?[4]f32,
         // A missing direction is a solid declaration, as on the Metal host.
         if (direction != .solid and original[2] > 0 and original[3] > 0) {
             cell.fill_end = last;
-            cell.paint_info[0] = @floatFromInt(@intFromEnum(direction));
+            cell.paint_info[0] = @floatFromInt(@backingInt(direction));
         }
     }
     return cell;

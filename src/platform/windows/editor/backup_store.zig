@@ -302,7 +302,7 @@ pub const Store = struct {
         var status: w.IO_STATUS_BLOCK = undefined;
         const result = w.ntdll.NtSetInformationFile(file.handle, &status, rename_buffer.ptr, @intCast(rename_buffer.len), .Rename);
         if (result != .SUCCESS) {
-            if (builtin.is_test) std.debug.print("backup rename status=0x{X}\n", .{@intFromEnum(result)});
+            if (builtin.is_test) std.debug.print("backup rename status=0x{X}\n", .{@backingInt(result)});
             return error.BackupPublishFailed;
         }
     }

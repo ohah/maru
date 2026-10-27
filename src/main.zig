@@ -5993,7 +5993,6 @@ fn prepareLiveFontEditor(a: std.mem.Allocator, host: EditorHost, file: *OpenFile
     }
 }
 
-
 // Keep the native fixture hidden: these tests exercise real DirectWrite/D3D
 // preparation without stealing focus from a running user application.
 const LiveFontEditorFixture = struct {
@@ -7155,7 +7154,9 @@ const ChromeTextScope = struct {
         state.text_config.cell_height_px = @intCast(ch);
         return .{ .state = state, .previous = previous };
     }
-    fn deinit(self: ChromeTextScope) void { self.state.text_config = self.previous; }
+    fn deinit(self: ChromeTextScope) void {
+        self.state.text_config = self.previous;
+    }
     fn builder(raw: win32_terminal.FrameBuilder) win32_terminal.FrameBuilder {
         var result = raw;
         result.rasterizer.font_size_pt = chrome_font_px;
@@ -12111,8 +12112,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 settings_host.form.state.setMessage(maru.i18n.t(.app_font_apply_failed));
                 break :font_apply;
             };
-            var next_render = windows_renderer_resources.RendererResources.init(allocator, present.device, present.context, cfg.font.size,
-                .{ .advance_width_px = next_w, .glyph_width_px = next_spacing.glyph_width_px, .height_px = next_h }, .{}) catch |err| {
+            var next_render = windows_renderer_resources.RendererResources.init(allocator, present.device, present.context, cfg.font.size, .{ .advance_width_px = next_w, .glyph_width_px = next_spacing.glyph_width_px, .height_px = next_h }, .{}) catch |err| {
                 font_apply_errors += 1;
                 settings_host.form.state.setMessage(maru.i18n.t(.app_font_apply_failed));
                 stderr.print("  warning: font renderer preparation failed({s})\n", .{@errorName(err)}) catch {};
@@ -12782,9 +12782,17 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     } else if (m.kind == .wheel or m.kind == .wheel_h) {
                         settings_host.wheel(m.wheel_delta, wheel_lines_per_notch, m.kind == .wheel_h, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens), &chrome_tokens);
                     } else settings_host.pointer(.{
-                        .phase = switch (m.kind) { .moved => .move, .left_down, .right_down, .middle_down => .down, else => .up },
-                        .button = switch (m.kind) { .left_down, .left_up, .moved => .left, else => .other },
-                        .x_px = @floatFromInt(m.x_px), .y_px = @floatFromInt(m.y_px),
+                        .phase = switch (m.kind) {
+                            .moved => .move,
+                            .left_down, .right_down, .middle_down => .down,
+                            else => .up,
+                        },
+                        .button = switch (m.kind) {
+                            .left_down, .left_up, .moved => .left,
+                            else => .other,
+                        },
+                        .x_px = @floatFromInt(m.x_px),
+                        .y_px = @floatFromInt(m.y_px),
                     }, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens), &chrome_tokens);
                     window.setInputOverlay(settings_host.ownsInput(), .retain_on_blur);
                     continue;
@@ -12805,7 +12813,8 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             .middle_down, .middle_up => .other,
                             else => .left,
                         },
-                        .x_px = @floatFromInt(m.x_px), .y_px = @floatFromInt(m.y_px),
+                        .x_px = @floatFromInt(m.x_px),
+                        .y_px = @floatFromInt(m.y_px),
                     }, confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens), clipboard_host.current(active_view == .terminal));
                     window.setInputOverlay(settings_host.ownsInput() or terminal_popup.state.open or terminal_popup.swallow_left_up, if (settings_host.ownsInput()) .retain_on_blur else .dismiss_on_blur);
                     if (popup_result.request) |request| terminal_menu_actions += @intFromBool(try clipboard_host.perform(request, active_view == .terminal));
@@ -14202,11 +14211,16 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 break :blk .{ .row = active.core.screen.cursor.row, .col = active.core.screen.cursor.col };
             };
             const settings_caret = settings_host.imeCaret(
-                confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens), &chrome_tokens,
+                confirmProps(client_w, client_h, chrome_cell_w, chrome_cell_h, sidebar_w, &chrome_tokens),
+                &chrome_tokens,
             );
             const caret: maru.session.mouse_coordinates.ImeCaret = settings_caret orelse .{
-                .row = cur.row, .col = cur.col, .cell_w = cell_w, .cell_h = cell_h,
-                .origin_x = geom.terminal.x, .origin_y = geom.terminal.y,
+                .row = cur.row,
+                .col = cur.col,
+                .cell_w = cell_w,
+                .cell_h = cell_h,
+                .origin_x = geom.terminal.x,
+                .origin_y = geom.terminal.y,
             };
             const changed = last_ime_caret == null or !std.meta.eql(last_ime_caret.?, caret);
             if (changed) {
@@ -20079,7 +20093,9 @@ fn appendSolidRects(
         try out.append(a, d3d11_cells.paintCell(
             .{ @floatFromInt(x0 + @as(i32, @intCast(origin_x))), @floatFromInt(y0 + @as(i32, @intCast(origin_y))), @floatFromInt(x1 - x0), @floatFromInt(y1 - y0) },
             .{ @floatFromInt(rect.x + @as(i32, @intCast(origin_x))), @floatFromInt(rect.y + @as(i32, @intCast(origin_y))), @floatFromInt(rect.w), @floatFromInt(rect.h) },
-            d3d11_cells.colorFromArgb(sr.argb), null, .solid,
+            d3d11_cells.colorFromArgb(sr.argb),
+            null,
+            .solid,
             .{ @floatFromInt(sr.radii[0]), @floatFromInt(sr.radii[1]), @floatFromInt(sr.radii[2]), @floatFromInt(sr.radii[3]) },
         ));
     }
@@ -20095,8 +20111,10 @@ test "Windows paint rebase preserves shared solids and gradient geometry" {
     defer cells.deinit(a);
     var q: maru.chrome.draw.Op.Quad = .{
         .rect = .{ .x = 10, .y = 20, .w = 100, .h = 60 },
-        .fill_role = .surface_bg, .border_role = .focus_accent,
-        .border_widths = .{ 1, 2, 3, 4 }, .corner_radii = .{ 8, 8, 8, 8 },
+        .fill_role = .surface_bg,
+        .border_role = .focus_accent,
+        .border_widths = .{ 1, 2, 3, 4 },
+        .corner_radii = .{ 8, 8, 8, 8 },
     };
     // Rounded opaque borders must retain main's outer plate and inset fill.
     try appendPaintOps(a, &.{.{ .quad = q }}, &tk, 300, 200, 0, 0, &cells);
@@ -20104,14 +20122,19 @@ test "Windows paint rebase preserves shared solids and gradient geometry" {
     try std.testing.expectEqual([4]f32{ 14, 21, 94, 56 }, cells.items[1].rect);
     try std.testing.expectEqual([4]f32{ 4, 4, 4, 4 }, cells.items[1].shape);
     // Transparent fills cannot use the opaque plate; independent border alpha survives.
-    cells.clearRetainingCapacity(); q.alpha = 0; q.border_alpha = 255;
+    cells.clearRetainingCapacity();
+    q.alpha = 0;
+    q.border_alpha = 255;
     try appendPaintOps(a, &.{.{ .quad = q }}, &tk, 300, 200, 0, 0, &cells);
     try std.testing.expectEqual(@as(usize, 5), cells.items.len);
     try std.testing.expectEqual(@as(f32, 0), cells.items[0].bg[3]);
     try std.testing.expectEqual(@as(f32, 1), cells.items[1].bg[3]);
     // Clipping a gradient must preserve its original endpoints.
-    cells.clearRetainingCapacity(); q.alpha = 255; q.border_role = null;
-    q.gradient = .horizontal; q.fill_role_end = .focus_accent;
+    cells.clearRetainingCapacity();
+    q.alpha = 255;
+    q.border_role = null;
+    q.gradient = .horizontal;
+    q.fill_role_end = .focus_accent;
     q.clip = .{ .x = 40, .y = 30, .w = 20, .h = 15 };
     try appendPaintOps(a, &.{.{ .quad = q }}, &tk, 300, 200, 0, 0, &cells);
     try std.testing.expectEqual(@as(usize, 1), cells.items.len);
@@ -20128,7 +20151,8 @@ test "Windows paint rebase preserves shared solids and gradient geometry" {
     try std.testing.expectEqual(@as(f32, 0), cells.items[2].paint_info[0]);
     // A solid with an empty clip must not cover the previously painted background.
     cells.clearRetainingCapacity();
-    var solid = q; solid.gradient = .solid;
+    var solid = q;
+    solid.gradient = .solid;
     solid.clip = .{ .x = 10, .y = 20, .w = 0, .h = 60 };
     try appendPaintOps(a, &.{.{ .quad = solid }}, &tk, 300, 200, 0, 0, &cells);
     try std.testing.expectEqual(@as(usize, 0), cells.items.len);
@@ -20139,7 +20163,8 @@ test "Windows paint rebase preserves shared solids and gradient geometry" {
     try std.testing.expectEqual([4]f32{ 47, 39, 20, 15 }, cells.items[0].rect);
     try std.testing.expectEqual([4]f32{ 17, 29, 100, 60 }, cells.items[0].paint_rect);
     // Modal padding expands the first panel before native gradient lowering.
-    cells.clearRetainingCapacity(); q.clip = null;
+    cells.clearRetainingCapacity();
+    q.clip = null;
     const panel = q.visibleRect(tk.space.modal_padding_px);
     try appendConfirmSolids(a, &.{.{ .quad = q }}, &tk, 300, 200, &cells);
     try std.testing.expectEqual(@as(usize, 1), cells.items.len);
@@ -22971,7 +22996,6 @@ test "Windows editor host dock launcher paint survives collapsed content without
     try std.testing.expectEqual(collapsed_len + 1, cells.items.len);
 }
 
-
 test "Terminal clipboard popup native caption ownership prevents click through and resize cursor" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var window: win32_window.Window = .{
@@ -22994,7 +23018,6 @@ test "Terminal clipboard popup native caption ownership prevents click through a
     try std.testing.expect(window.wantsHorizontalCursor(400, 300, true));
 }
 
-
 test "Terminal clipboard popup client coordinates map to rendered terminal after chrome offsets" {
     const Case = struct { point: maru.session.mouse_coordinates.Point, x: u32, y: u32, relative: maru.session.mouse_coordinates.Point, cell: maru.session.mouse_coordinates.Cell };
     const cases = [_]Case{
@@ -23015,14 +23038,17 @@ test "Terminal clipboard popup client coordinates map to rendered terminal after
 test "Windows settings focus transient menu dismisses immediately" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator };
-    w.setInputOverlay(true, .dismiss_on_blur); w.noteFocusLoss();
+    w.setInputOverlay(true, .dismiss_on_blur);
+    w.noteFocusLoss();
     try std.testing.expect(!w.input_overlay_open);
     try std.testing.expectEqual(@as(u64, 1), w.focus_loss_serial);
 }
 test "Windows settings focus retained modal still owns caption and resize" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator, .titlebar_strip_px = 38, .titlebar_client_left_px = 180, .caption_buttons_px = 138, .horizontal_resize_rect = .{ .left = 390, .top = 38, .right = 410, .bottom = 680 } };
-    w.setInputOverlay(true, .retain_on_blur); w.noteFocusLoss(); w.noteFocusLoss();
+    w.setInputOverlay(true, .retain_on_blur);
+    w.noteFocusLoss();
+    w.noteFocusLoss();
     const rect: @TypeOf(w.windowRect()) = .{ .left = 0, .top = 0, .right = 1000, .bottom = 700 };
     try std.testing.expect(w.input_overlay_open);
     try std.testing.expectEqual(@as(isize, 1), w.hitTestFrame(rect, 500, 16));
@@ -23032,14 +23058,17 @@ test "Windows settings focus retained modal still owns caption and resize" {
 test "Windows settings focus closing clears retained policy" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator };
-    w.setInputOverlay(true, .retain_on_blur); w.setInputOverlay(false, .retain_on_blur);
+    w.setInputOverlay(true, .retain_on_blur);
+    w.setInputOverlay(false, .retain_on_blur);
     try std.testing.expectEqual(win32_window.OverlayFocusPolicy.dismiss_on_blur, w.overlay_focus_policy);
     try std.testing.expect(!w.input_overlay_open);
 }
 test "Windows settings focus switching to a menu replaces old policy" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     var w: win32_window.Window = .{ .hwnd = @ptrFromInt(1), .allocator = std.testing.allocator };
-    w.setInputOverlay(true, .retain_on_blur); w.setInputOverlay(true, .dismiss_on_blur); w.noteFocusLoss();
+    w.setInputOverlay(true, .retain_on_blur);
+    w.setInputOverlay(true, .dismiss_on_blur);
+    w.noteFocusLoss();
     try std.testing.expect(!w.input_overlay_open);
 }
 test "Windows settings focus loss generation wraps without reviving overlay" {

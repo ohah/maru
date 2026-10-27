@@ -100,16 +100,14 @@ pub fn buildFrameAfterDrainWithRasterizer(
     // I/O–렌더 스레딩 분리(docs/io-render-threading.md): 코어 읽기(renderSnapshot→buildDrawList,
     // 코어 메모리를 DrawList로 복사)는 **락 아래**, shaping(buildFrameFromDrawList — DrawList 복사본만
     // 봄)은 **락 밖**. PR3에서 리더의 core.write가 렌더 shaping에 안 막히게 한다.
-    active.lockCore(io);
-    const list_or = renderer.buildDrawList(allocator, active.renderSnapshot());
-    active.unlockCore(io);
-    var list = try list_or;
+    const snapshot = try @import("frame_snapshot.zig").capture(allocator, active, io, .normal);
+    var list = snapshot.draw_list;
     errdefer list.deinit(allocator);
     const render_frame = try renderer_state.buildFrameFromDrawListWithRasterizer(allocator, list, shaper, rasterizer);
 
     return .{
         .surface_id = active.id,
-        .size = active.core.size,
+        .size = render_frame.draw_list.size,
         .process_state = active.process_state,
         .drain_summary = drain_summary,
         .render_frame = render_frame,

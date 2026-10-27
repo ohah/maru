@@ -10,6 +10,18 @@ run = "zig build"
 description = "Run Zig tests"
 run = "zig build test"
 
+[tasks.test-frame-snapshot]
+description = "Verify owned frame inputs and snapshot metadata"
+run = "zig build test-frame-snapshot"
+
+[tasks.test-shaping-runs]
+description = "Verify shared native shaping inputs"
+run = "zig build test-shaping-runs"
+
+[tasks.test-windows-raster-origin]
+description = "Verify native glyph bitmap origins and clipping"
+run = "zig build test-windows-raster-origin"
+
 [tasks.e2e]
 description = "Run headless E2E tests"
 run = "zig build test-e2e"

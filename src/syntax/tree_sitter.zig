@@ -570,6 +570,9 @@ pub const Provider = struct {
         /// 실제 C 범위 계산과 증명된 값 가져오기를 구분한다. 포화돼도 입력은 계속한다.
         calculated_change_ranges: u64 = 0,
         reused_change_ranges: u64 = 0,
+        /// `symbolForNode` 가 이름 끝·본문 끝까지 채운 심볼 수. 끝을 고르는 형제·부모 조회가 여기 있다 — 존재만 세는
+        /// 고정 머리줄 요약은 이것을 늘리지 않는다(`symbolName`).
+        symbol_values: u64 = 0,
     };
 
     /// 지금 트리의 노드 수(`ts_node_descendant_count` — 뿌리 포함). 트리가 없으면 0. 판정자가 「트리 전체를 걸었나」를 견준다.
@@ -969,10 +972,9 @@ pub const Provider = struct {
     pub const symbol_depth_limit: usize = 64;
 
     /// 이름·범위·언어 규칙은 전체 목록과 창 조상이 같은 출처를 사용한다.
-    fn symbolForNode(self: *const Provider, node: c.TSNode, depth: u16) ?Symbol {
-        if (!hasKind(self.slot.symbol_kinds, c.ts_node_type(node)) or !isSymbolWorthy(node)) return null;
-        const name = symbolNameNode(node);
-        if (c.ts_node_is_null(name)) return null;
+    fn symbolForNode(self: *Provider, node: c.TSNode, depth: u16) ?Symbol {
+        const name = self.symbolName(node) orelse return null;
+        self.stats.symbol_values +|= 1;
         return .{
             .name_start = c.ts_node_start_byte(name),
             .name_end = qualifiedNameEnd(name),
@@ -982,6 +984,17 @@ pub const Provider = struct {
             .depth = depth,
             .kind = std.mem.span(c.ts_node_type(node)),
         };
+    }
+
+    /// 심볼이 되는지와 그 이름 노드. `symbolForNode` 가 null 을 내는 조건은 이것뿐이다 — 이름 끝·본문 끝은 값만 고른다.
+    /// 존재만 세는 요약은 이것만 부른다. 끝을 고르는 형제·부모 조회는 부모를 뿌리에서 다시 찾는데, 편집을 받은 옛 트리에서 지운 노드는
+    /// 0폭이고 tree-sitter 는 0폭 노드의 부모를 그 byte 에 닿는 자식마다 재귀로 찾는다(`node.c` `ts_node_child_with_descendant`).
+    /// 큰 삭제는 그런 노드 수백 개를 한 byte 에 쌓는다 — 1.1 MB Swift 의 1/3 을 지운 뒤 한 번의 요약이 2.1 초였다.
+    fn symbolName(self: *const Provider, node: c.TSNode) ?c.TSNode {
+        if (!hasKind(self.slot.symbol_kinds, c.ts_node_type(node)) or !isSymbolWorthy(node)) return null;
+        const name = symbolNameNode(node);
+        if (c.ts_node_is_null(name)) return null;
+        return name;
     }
 
     /// 창 위쪽 몇 줄의 끝점에서 고정 머리줄 후보만 모은다. 반환값은 파일 전체의 심볼 존재 여부다.
@@ -995,6 +1008,9 @@ pub const Provider = struct {
             pub const depth_limit = symbol_depth_limit;
             pub fn symbol(ctx: @This(), node: c.TSNode) ?Symbol {
                 return ctx.provider.symbolForNode(node, 0);
+            }
+            pub fn isSymbol(ctx: @This(), node: c.TSNode) bool {
+                return ctx.provider.symbolName(node) != null;
             }
             pub fn inGap(ctx: @This(), node: c.TSNode, offset: u32) ?c.TSNode {
                 const next = c.ts_node_first_named_child_for_byte(node, offset);
@@ -4539,6 +4555,56 @@ fn stickyChangeAllocationJudge(a: std.mem.Allocator, fallback: bool) !void {
 test "sticky changes 차용과 자체 비교의 모든 할당 실패 뒤 재시도가 집계를 보존한다" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, stickyChangeAllocationJudge, .{false});
     try std.testing.checkAllAllocationFailures(std.testing.allocator, stickyChangeAllocationJudge, .{true});
+}
+
+// 큰 삭제를 받은 옛 트리에서 지운 선언은 0폭으로 한 byte 에 쌓인다. 요약이 그 노드마다 심볼 값을 채우면(끝을 고르는 형제·부모 조회)
+// 1.1 MB Swift 의 1/3 을 지운 뒤 한 프레임이 3 초였다. 시간 대신 일의 모양을 본다 — 요약은 지운 범위를 걷되 값은 조상 사슬에서만 채우고,
+// 집계는 전체 목록과 같아야 한다. 지운 것을 되돌린 뒤도 같다.
+test "sticky changes 큰 삭제 뒤 요약은 존재만 세고 심볼 값은 조상 사슬에서만 채운다" {
+    const a = std.testing.allocator;
+    inline for (.{
+        .{ Language.swift, "class A {\n", " func f{d}() -> Int {{\n  return 1\n }}\n", "}\n" },
+        .{ Language.zig, "const A = struct {\n", " fn f{d}() void {{\n  return;\n }}\n", "};\n" },
+        .{ Language.typescript, "class A {\n", " f{d}(): number {{\n  return 1;\n }}\n", "}\n" },
+        .{ Language.dart, "class A {\n", " int f{d}() {{\n  return 1;\n }}\n", "}\n" },
+        .{ Language.c, "", "int f{d}(void) {{\n return 1;\n}}\n", "" },
+        .{ Language.python, "class A:\n", " def f{d}(self):\n  return 1\n", "" },
+    }) |case| {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(a);
+        try text.appendSlice(a, case[1]);
+        for (0..600) |i| try text.print(a, case[2], .{i});
+        try text.appendSlice(a, case[3]);
+        var p = Provider.init(text.items, case[0], 0) orelse return error.NoProvider;
+        defer p.deinit();
+        var out: std.ArrayList(Provider.Symbol) = .empty;
+        defer out.deinit(a);
+        var full: std.ArrayList(Provider.Symbol) = .empty;
+        defer full.deinit(a);
+        // 첫 집계는 트리 전체를 센다(재구축). 여기도 값은 조상 사슬에서만 채운다.
+        try std.testing.expect(try p.stickySymbols(a, &.{@intCast(text.items.len / 2)}, &out));
+        try std.testing.expect(p.sticky_work.rebuild_nodes > 2000);
+        try std.testing.expect(p.stats.symbol_values > 0 and p.stats.symbol_values <= 2 * p.sticky_work.ancestor_nodes);
+        const removed = try a.dupe(u8, text.items[text.items.len / 3 .. (text.items.len * 2) / 3]);
+        defer a.free(removed);
+        const lo = text.items.len / 3;
+        for (0..2) |round| {
+            if (round == 0) try stickyChangeEdit(&p, &text, lo, lo + removed.len, "") else try stickyChangeEdit(&p, &text, lo, lo, removed);
+            const work = p.sticky_work;
+            const values = p.stats.symbol_values;
+            try std.testing.expect(try p.stickySymbols(a, &.{@intCast(lo)}, &out));
+            // 변경 범위로 고쳤다 — 재구축으로 돌아가면 이 판정자가 잴 것이 없다. 걸은 노드는 지운(되살린) 선언 200개의 몫이다.
+            try std.testing.expectEqual(work.rebuild_nodes, p.sticky_work.rebuild_nodes);
+            try std.testing.expect(p.sticky_work.summary_nodes - work.summary_nodes > 2000);
+            // 값은 조상 사슬만 채운다. 사슬의 노드마다 많아야 두 번이다(사슬 수집·깊이 매기기).
+            const filled = p.stats.symbol_values - values;
+            try std.testing.expect(filled > 0);
+            try std.testing.expect(filled <= 2 * (p.sticky_work.ancestor_nodes - work.ancestor_nodes));
+            try p.symbolsChecked(a, &full);
+            try std.testing.expectEqual(full.items.len, p.sticky_summary.count);
+            try std.testing.expect(full.items.len >= @as(usize, if (round == 0) 400 else 600));
+        }
+    }
 }
 
 fn foldCacheLines(source: []const u8) !std.ArrayList(FoldCacheLine) {

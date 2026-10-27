@@ -114,7 +114,7 @@ fn fullCount(tree: *c.TSTree, adapter: anytype, work: *Work) usize {
     var count: usize = 0;
     while (true) {
         work.rebuild_nodes +|= 1;
-        if (adapter.symbol(c.ts_tree_cursor_current_node(&cursor)) != null) count += 1;
+        if (adapter.isSymbol(c.ts_tree_cursor_current_node(&cursor))) count += 1;
         if (c.ts_tree_cursor_goto_first_child(&cursor)) continue;
         while (true) {
             if (c.ts_tree_cursor_goto_next_sibling(&cursor)) break;
@@ -132,7 +132,7 @@ fn touched(allocator: std.mem.Allocator, tree: *c.TSTree, lo: u32, hi: u32, adap
         const node = c.ts_tree_cursor_current_node(&cursor);
         work.summary_nodes +|= 1;
         if (c.ts_node_end_byte(node) >= lo and c.ts_node_start_byte(node) <= hi) {
-            if (adapter.symbol(node) != null) try out.put(allocator, node, {});
+            if (adapter.isSymbol(node)) try out.put(allocator, node, {});
             const child = if (lo == 0) c.ts_tree_cursor_goto_first_child(&cursor) else c.ts_tree_cursor_goto_first_child_for_byte(&cursor, lo - 1) >= 0;
             if (child) continue;
         }

@@ -6758,8 +6758,8 @@ pub fn build(b: *std.Build) void {
     b.step("test-editor-shared-parse-core", "Compare imported parsed trees with independent native parses").dependOn(&run_parse_reuse.step);
     const sticky_change_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"sticky changes"} });
     const run_sticky_changes = b.addRunArtifact(sticky_change_tests);
-    run_sticky_changes.addArg("--maru-expect-tests=6");
-    run_sticky_changes.addArg("--maru-expect-passed=6");
+    run_sticky_changes.addArg("--maru-expect-tests=7");
+    run_sticky_changes.addArg("--maru-expect-passed=7");
     test_step.dependOn(&run_sticky_changes.step);
     b.step("test-editor-sticky-changes", "Verify sticky summary reuse of retained native changes").dependOn(&run_sticky_changes.step);
     const sticky_snapshot_tests = addProjectTest(b, .{ .root_module = syntax_mod, .filters = &.{"sticky snapshot"} });

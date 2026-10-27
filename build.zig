@@ -2162,6 +2162,10 @@ pub fn build(b: *std.Build) void {
     const run_raster_origin_tests = b.addRunArtifact(raster_origin_tests);
     run_raster_origin_tests.addArg("--maru-expect-tests=7");
     b.step("test-windows-raster-origin", "Verify native glyph bitmap origins and clipping").dependOn(&run_raster_origin_tests.step);
+    const frame_snapshot_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"frame snapshot"} });
+    const run_frame_snapshot_tests = b.addRunArtifact(frame_snapshot_tests);
+    run_frame_snapshot_tests.addArg("--maru-expect-tests=33");
+    b.step("test-frame-snapshot", "Verify owned frame inputs and snapshot metadata").dependOn(&run_frame_snapshot_tests.step);
     const glyph_cell_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/platform/windows/glyph_cells.zig"),
         .target = target,

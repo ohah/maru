@@ -21,6 +21,7 @@ pub const headless_demo = @import("app/headless_demo.zig");
 pub const fixture_script = @import("app/fixture_script.zig");
 pub const frame_loop = @import("app/frame_loop.zig");
 pub const host = @import("app/host.zig");
+pub const frame_snapshot = @import("app/frame_snapshot.zig");
 /// 키 이벤트 → 크롬 위젯 키 이벤트의 표(호스트 공통 — layering §3.5).
 pub const chrome_key = @import("app/chrome_key.zig");
 pub const label = @import("app/label.zig");

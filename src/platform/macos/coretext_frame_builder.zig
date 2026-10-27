@@ -64,16 +64,14 @@ pub const CoreTextFrameBuilder = struct {
         // I/O–렌더 스레딩 분리(docs/io-render-threading.md): 코어 읽기(renderSnapshot→buildDrawList,
         // 코어 메모리를 DrawList로 복사)는 **락 아래**, CoreText shaping(buildFromDrawList — DrawList
         // 복사본만 봄)은 **락 밖**. PR3에서 리더의 core.write가 CoreText shaping에 안 막히게 한다.
-        active.lockCore(io);
-        const list_or = renderer.buildDrawListWithUnfocused(allocator, active.renderSnapshot(), self.cursor_unfocused);
-        active.unlockCore(io);
-        const draw_list = try list_or;
+        const snapshot = try app.frame_snapshot.capture(allocator, active, io, self.cursor_unfocused);
+        const draw_list = snapshot.draw_list;
         // buildFromDrawList가 draw_list 소유권을 가져간다(실패 시 정리, 성공 시 RenderFrame으로 이동).
         const render_frame = try self.buildFromDrawList(allocator, draw_list, renderer_state);
 
         return .{
             .surface_id = active.id,
-            .size = active.core.size,
+            .size = render_frame.draw_list.size,
             .process_state = active.process_state,
             .drain_summary = drain_summary,
             .render_frame = render_frame,
@@ -93,14 +91,12 @@ pub const CoreTextFrameBuilder = struct {
         io: std.Io,
     ) !ShapedPane {
         const active = app_window.active() orelse return error.NoActiveSurface;
-        active.lockCore(io);
-        const list_or = renderer.buildDrawListWithUnfocused(allocator, active.renderSnapshot(), self.cursor_unfocused);
+        const snapshot = try app.frame_snapshot.capture(allocator, active, io, self.cursor_unfocused);
         // renderSnapshot이 뷰포트 합성에 실제로 쓴 view_offset을 **같은 락 아래**에서 같이 읽는다 — 호출자(app_session
         // 투영 게이트)가 "이 프레임이 그린 스크롤 위치"를 정확히 기록해, gate-read와 render-read 사이 리더 스크롤로
         // 어긋나는 read/render TOCTOU(스크롤 stale 재발) 없이 다음 tick의 재투영 여부를 판정한다.
-        const rendered_view_offset = active.core.view_offset;
-        active.unlockCore(io);
-        const draw_list = try list_or;
+        const rendered_view_offset = snapshot.view_offset;
+        const draw_list = snapshot.draw_list;
         var pane = try self.shapeOnly(allocator, draw_list, font_registry);
         pane.view_offset = rendered_view_offset;
         return pane;

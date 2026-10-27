@@ -1178,3 +1178,29 @@ terminal producer에 연결하지 않았으며 합자 표시 또는 앱 픽셀 �
 전체 경계 272개(4묶음 × 68개)가 모두 통과했다. 실행 중 소스·HEAD 불변도 확인했다
 (`.zig-cache/raster-origin-gates-20261028/result.json`). 이 단계는 설치본을 갱신하거나
 새 원점 경로의 실제 앱 합자 표시를 검증한 단계가 아니다.
+
+### 공통 프레임 스냅샷 복사 경계 (2026-10-28)
+
+`app.frame_snapshot.capture`는 Surface lock 아래에서 owned DrawList와 같은 시점의
+스크롤 offset을 복사하고 성공·실패 모두 잠금을 해제한다. 공통 host의 Windows/fake
+경로와 macOS CoreText build·shape-only가 이 경계를 사용한다. 두 host의 AppHostFrame
+크기도 셰이핑 뒤 살아 있는 core가 아니라 결과 DrawList에서 가져온다. 실제 코어를
+셰이핑 callback 안에서 resize하는 검사가 프레임 내용과 메타데이터의 일치를 확인한다.
+
+할당 실패 검사는 기존 `buildDrawListWithUnfocused`의 소유권 이전 도중 누수를 발견했다.
+셀·overlay를 toOwnedSlice로 옮긴 뒤 다음 버퍼 할당에 실패하면 앞선 버퍼를 회수하지
+못했다. 각 이전 버퍼에 errdefer를 두어 반환 직전까지 정리를 보장했다. unfocused
+정책은 기존대로 원본 cursor 메타데이터를 유지하고 overlay에만 반영한다.
+
+`test-frame-snapshot`은 새 검사 5개와 aggregation을 포함한 33개를 Debug·ReleaseFast에서
+통과했다. viewport 대신 활성 화면 사용·scroll provenance 손실·unfocused 무시·unlock
+누락·이전 버퍼 누수·셰이핑 뒤 live core 크기 재조회의 compiled 결함 6개를 새 사본에서
+모두 runtime 검출했다(`.zig-cache/frame-snapshot-adversarial.json`). 첫 사본은 검증 도구가
+동일 대입 두 곳을 구분하지 못해 마지막 변형 전 중단했으며 완료로 세지 않는다
+(`.zig-cache/frame-snapshot-native-c66a063c7d84459aacde8edd0e335193/invalidated-attempt.json`).
+이 단계도 Windows native terminal run producer 또는 실제 앱 합자 표시 연결은 아니다.
+
+최종 staged 소스는 일반 Debug 앱 빌드·관련 집중 7개 묶음·문서·교차 타깃과 전체 경계
+272개(4묶음 × 68개)를 통과했고, 실행 중 소스·HEAD 불변을 확인했다
+(`.zig-cache/frame-snapshot-gates-20261028/result.json`). 최종 입력 해시와 변형/대조군
+결과는 `.zig-cache/frame-snapshot-binding.json`으로 대조한다.

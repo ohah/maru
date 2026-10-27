@@ -4565,6 +4565,8 @@ test "sticky changes 큰 삭제 뒤 요약은 존재만 세고 심볼 값은 조
     inline for (.{
         .{ Language.swift, "class A {\n", " func f{d}() -> Int {{\n  return 1\n }}\n", "}\n" },
         .{ Language.zig, "const A = struct {\n", " fn f{d}() void {{\n  return;\n }}\n", "};\n" },
+        // 이름 없는 `test {}` 는 종류는 맞고 이름이 없다 — 존재 판정이 이름 확인을 빠뜨리면 전체 목록보다 많이 센다.
+        .{ Language.zig, "const A = struct {\n", " test {{\n  _ = 1;\n }}\n fn f{d}() void {{}}\n", "};\n" },
         .{ Language.typescript, "class A {\n", " f{d}(): number {{\n  return 1;\n }}\n", "}\n" },
         .{ Language.dart, "class A {\n", " int f{d}() {{\n  return 1;\n }}\n", "}\n" },
         .{ Language.c, "", "int f{d}(void) {{\n return 1;\n}}\n", "" },

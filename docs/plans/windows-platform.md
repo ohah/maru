@@ -1148,3 +1148,33 @@ emoji·NFD·합자 후보의 native source span을 독립 셀 fixture와 비교�
 같은 변경의 일반 Windows Debug 앱 빌드, `check-targets`, 전체 `check-boundaries`가
 종료 코드 0으로 통과했다. 문서 링크·코드 좌표 검사와 Zig fmt·diff 공백 검사도 통과했다.
 로그는 `.zig-cache/shaping-runs-{app-build,cross,boundaries}.log`에 보존한다.
+
+### Windows native bitmap 원점 (2026-10-28)
+
+`dwrite_font.Rasterizer.rasterizeGlyphAtOrigin`은 bitmap 안의 baseline x/y를 명시적으로
+받는다. 기존 `rasterizeGlyphAtSize`는 x=0과 기존 baseline 계산으로 위임하므로 기존
+셀 경로의 잉크는 유지한다. Windows producer는 이후 padding을 예약하고 quad에 그
+역변환을 적용해 음수 bearing을 보존할 수 있다. 이는 DirectWrite의 native 원점
+입력이며 공통 GPOS/frame 위치를 비트맵에 굽는 정책을 추가한 것은 아니다.
+잘못된 비유한 원점·크기와 stride/길이를 native 호출 전에 거절하고, native bounds와
+texture byte 수 산술도 검사한다.
+
+`test-windows-raster-origin`의 native 7개는 Debug·ReleaseFast에서 통과했다.
+가로·세로 정수 이동의 모든 RGBA 픽셀, 기존 wrapper의 동일성, italic `j`의 음수
+bearing이 padding으로 살아나는 것과 경계 밖 클리핑, 잘못된 입력에서 목적지 보존을
+확인했다. 가로 원점 누락·세로 원점 누락·legacy 1픽셀 이동·음수 bearing 삭제·짧은
+행 stride 허용의 compiled 결함 5개를 모두 runtime에서 검출했다
+(`.zig-cache/windows-raster-origin-adversarial.json`). 새 원점 함수는 아직 일반 앱의
+terminal producer에 연결하지 않았으며 합자 표시 또는 앱 픽셀 검증 완료가 아니다.
+
+검토 중 기존 wrapper가 크기를 검증하기 전에 baseline을 정수 메트릭으로 바꾸는
+순서 문제를 발견했다. wrapper 입구에서도 NaN·무한대·0·음수를 먼저 거절하도록
+고친 뒤 새 사본에서 결함 5개와 Debug·ReleaseFast 원본을 모두 다시 실행했다.
+기존 `test-windows-font-variants` 8개도 통과해 네 face·별도 family·fallback·실패 시
+소유권·실제 bundled style 렌더링을 재확인했다
+(`.zig-cache/raster-origin-font-regression.log`).
+
+최종 staged 소스의 일반 Debug 앱 빌드·관련 Debug 집중 5개 묶음·문서·교차 타깃과
+전체 경계 272개(4묶음 × 68개)가 모두 통과했다. 실행 중 소스·HEAD 불변도 확인했다
+(`.zig-cache/raster-origin-gates-20261028/result.json`). 이 단계는 설치본을 갱신하거나
+새 원점 경로의 실제 앱 합자 표시를 검증한 단계가 아니다.

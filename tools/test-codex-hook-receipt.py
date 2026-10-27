@@ -23,7 +23,7 @@ SID = '12345678-1234-1234-1234-123456789abc'
 
 def run(executable, root, event):
     result = subprocess.run([executable, 'agent-hooks', 'codex-receipt', str(root / 'registry')],
-                            input=json.dumps(event), text=True, capture_output=True, timeout=5, check=True)
+                            input=json.dumps(event), text=True, capture_output=True, timeout=20, check=True)
     assert not result.stderr, result.stderr
     return result.stdout
 

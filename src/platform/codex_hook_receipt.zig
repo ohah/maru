@@ -1,8 +1,10 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const receipt = @import("../session/codex_hook_receipt.zig");
 const private_dir = @import("agent_log_record.zig");
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, directory: []const u8, stdout: *std.Io.Writer) !void {
+    if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.UnsupportedPlatform;
     var bytes: [32768]u8 = undefined;
     var read_buffer: [1024]u8 = undefined;
     var input = std.Io.File.Reader.init(.stdin(), io, &read_buffer);

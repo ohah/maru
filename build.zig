@@ -2149,8 +2149,16 @@ pub fn build(b: *std.Build) void {
     backup_store_step.dependOn(&run_backup_store_tests.step);
     const glyph_source_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows glyph sources"} });
     const run_glyph_source_tests = b.addRunArtifact(glyph_source_tests);
-    run_glyph_source_tests.addArg("--maru-expect-tests=7");
-    b.step("test-windows-glyph-sources", "Verify native UTF16 cluster sources and borrowed buffer bounds").dependOn(&run_glyph_source_tests.step);
+    run_glyph_source_tests.addArg("--maru-expect-tests=8");
+    const glyph_source_step = b.step("test-windows-glyph-sources", "Verify native UTF16 cluster sources and borrowed buffer bounds");
+    glyph_source_step.dependOn(&run_glyph_source_tests.step);
+    const glyph_cell_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/platform/windows/glyph_cells.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const run_glyph_cell_tests = b.addRunArtifact(glyph_cell_tests);
+    glyph_source_step.dependOn(&run_glyph_cell_tests.step);
 
     const typography_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows typography"} });
     const run_typography_tests = b.addRunArtifact(typography_tests);

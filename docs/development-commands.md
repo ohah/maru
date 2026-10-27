@@ -2068,6 +2068,14 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 - `python3 tools/rename-ime/run.py --output <새 외부 경로> --mode diagnostic`: 사본 앱을 빌드하고 실제 키 입력·후보 취소/선택·별도 Return 이름 확정·터미널 복귀를 확인한다. 화면 픽셀 통과를 뜻하지 않는다.
 - 같은 앱에 `--app <고정 실행 파일> --mode live`를 쓰면 서로 다른 후보창 5개와 PNG/OCR을 추가 검사한다. workspace 이름 변경 장면이며 Save As 파일 생성 GUI를 대신하지 않는다.
 
+### Save As 파일명·파일 생성 GUI
+
+- `mise exec -- zig build test-save-as-gui-oracles -j2`: 파일·모델·native action·캡처 기록을 독립 대조하는 검사기의 정상/손상 대조군이다. 실제 GUI를 실행하지 않는다.
+- `python3 tools/editor-project-search-app/run.py --save-as-command --save-as-only --native-panel-capture-app "/Users/yoonhb/Applications/Maru Screen Capture.app" --output <새 외부 경로>`: 사본 앱으로 이름 있는 문서의 native 저장 대화상자와 실제 파일 생성을 확인한다. 캡처 앱은 별도로 빌드·화면 기록 허용된 앱을 지정한다.
+- `--app <이 하네스로 빌드한 실행 파일>`로 같은 앱을 재사용한다. `--save-as-name 한.txt --save-as-filename-input korean` 또는 `--save-as-name 韓.txt --save-as-filename-input hanja`는 실제 두벌식 키 입력과 한자 확정을 확인한다. ASCII 확장자는 AX로 붙이며 Save As 단축키는 AppKit 이벤트다.
+- `--save-as-existing-target`은 기존 목적지에 sentinel을 만들고 Replace 확인을 수락한다. `--save-as-overwrite-choice cancel`은 Replace를 거부한 뒤 저장 대화상자도 취소한다. `--save-as-scenario cancel`은 곧바로 저장 대화상자를 취소한다.
+- 원본 bytes·목적지 bytes·문서 경로·dirty·pending·Undo/Redo를 각각 확인한다. `--save-as-only`는 프로젝트 검색 장면을 실행하지 않으며 검색 성능 수치를 만들지 않는다. 상세 범위와 한계는 [계획](plans/save-as-file-lifecycle-gui.md)을 따른다.
+
 ### 시맨틱 토큰 서버 호환성
 
 `mise exec -- zig build test-editor-semantic-recovery -j2`는 EOF·UTF-8/UTF-16 범위, gopls 활성화 옵션, 응답 유실·늦은 seq·refresh를 검사한다. 중립 31개(행동 3개)와 macOS 제품 7개(SMT 행동 3개)를 강제한다. `tools/editor-theme-gallery/run_lsp.py`의 실제 서버 캡처로 색 결과를 별도로 확인한다.

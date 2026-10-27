@@ -1758,3 +1758,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [복구 목록 피커 IME 문맥](plans/recovery-picker-ime.md): 범위 교체·읽기 전용 열거와 조합 유지·필터 실패 원자성·후보 Return 복구 격리.
 
 - [신뢰·환경 이름 목록 피커 IME 문맥](plans/trust-picker-ime.md): 두 모드의 읽기/관리 경계를 유지하는 범위 편집·원자적 필터·후보 Return 격리.
+
+- [Save As 파일 수명 실제 GUI 검증](plans/save-as-file-lifecycle-gui.md): 기존 조합 저장 증거와 최근 rename 증거를 구분하고 native 파일명·덮어쓰기·취소·원본 보존을 검증.

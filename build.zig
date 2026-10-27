@@ -2158,6 +2158,10 @@ pub fn build(b: *std.Build) void {
     run_glyph_source_tests.addArg("--maru-expect-tests=8");
     const glyph_source_step = b.step("test-windows-glyph-sources", "Verify native UTF16 cluster sources and borrowed buffer bounds");
     glyph_source_step.dependOn(&run_glyph_source_tests.step);
+    const raster_origin_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows raster origin"} });
+    const run_raster_origin_tests = b.addRunArtifact(raster_origin_tests);
+    run_raster_origin_tests.addArg("--maru-expect-tests=7");
+    b.step("test-windows-raster-origin", "Verify native glyph bitmap origins and clipping").dependOn(&run_raster_origin_tests.step);
     const glyph_cell_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/platform/windows/glyph_cells.zig"),
         .target = target,

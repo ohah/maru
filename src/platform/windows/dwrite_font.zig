@@ -43,6 +43,7 @@ pub const Error = error{
     AnalysisFailed,
     TextureFailed,
     BufferTooSmall,
+    InvalidRasterGeometry,
     OutOfMemory,
 };
 
@@ -1206,8 +1207,33 @@ pub const Rasterizer = struct {
         pixels: []u8,
         scratch: []u8,
     ) Error!u32 {
-        if (bytes_per_row < @as(usize, cell_w) * 4) return error.BufferTooSmall;
-        if (pixels.len < bytes_per_row * cell_h) return error.BufferTooSmall;
+        // Validate before baseline metrics convert the size to integer pixels.
+        if (!std.math.isFinite(em_size_px) or em_size_px <= 0) return error.InvalidRasterGeometry;
+        return self.rasterizeGlyphAtOrigin(choice, em_size_px, cell_w, cell_h, 0, glyphBaselineForSize(self.design, em_size_px, cell_h), bytes_per_row, pixels, scratch);
+    }
+
+    /// The caller reserves bitmap padding and positions the quad by its inverse.
+    /// Moving the baseline inside that bitmap retains negative glyph bearings;
+    /// shaping offsets remain frame placement rather than being baked into ink.
+    pub fn rasterizeGlyphAtOrigin(
+        self: *Rasterizer,
+        choice: GlyphChoice,
+        em_size_px: f32,
+        cell_w: u32,
+        cell_h: u32,
+        baseline_x: f32,
+        baseline_y: f32,
+        bytes_per_row: usize,
+        pixels: []u8,
+        scratch: []u8,
+    ) Error!u32 {
+        if (!std.math.isFinite(em_size_px) or em_size_px <= 0 or
+            !std.math.isFinite(baseline_x) or !std.math.isFinite(baseline_y) or
+            cell_w > std.math.maxInt(i32) or cell_h > std.math.maxInt(i32))
+            return error.InvalidRasterGeometry;
+        const row_bytes = std.math.mul(usize, cell_w, 4) catch return error.BufferTooSmall;
+        const pixel_bytes = std.math.mul(usize, bytes_per_row, cell_h) catch return error.BufferTooSmall;
+        if (bytes_per_row < row_bytes or pixels.len < pixel_bytes) return error.BufferTooSmall;
         if (choice.face_index >= self.face_count) return error.FontFaceFailed;
         const use_face = self.faces[choice.face_index] orelse return error.FontFaceFailed;
         var glyph = [_]u16{choice.glyph_id};
@@ -1231,20 +1257,22 @@ pub const Rasterizer = struct {
             null,
             rendering_mode_natural_symmetric,
             measuring_mode_natural,
-            0,
-            glyphBaselineForSize(self.design, em_size_px, cell_h),
+            baseline_x,
+            baseline_y,
             &analysis,
         ), error.AnalysisFailed);
         defer d3d11.releaseOpt(@as(?*anyopaque, @ptrCast(analysis)));
 
         var bounds: Rect = undefined;
         try check(analysis.?.vtable.GetAlphaTextureBounds(analysis.?, texture_cleartype_3x1, &bounds), error.TextureFailed);
-        const bw = bounds.right - bounds.left;
-        const bh = bounds.bottom - bounds.top;
+        const bw = std.math.sub(i32, bounds.right, bounds.left) catch return error.InvalidRasterGeometry;
+        const bh = std.math.sub(i32, bounds.bottom, bounds.top) catch return error.InvalidRasterGeometry;
         // 잉크가 없으면 빈 사각형이 온다(공백·제어문자). 오류가 아니다.
         if (bw <= 0 or bh <= 0) return 0;
 
-        const need = @as(usize, @intCast(bw)) * @as(usize, @intCast(bh)) * cleartype_bytes_per_pixel;
+        const area = std.math.mul(usize, @intCast(bw), @intCast(bh)) catch return error.BufferTooSmall;
+        const need = std.math.mul(usize, area, cleartype_bytes_per_pixel) catch return error.BufferTooSmall;
+        if (need > std.math.maxInt(u32)) return error.BufferTooSmall;
         if (scratch.len < need) return error.BufferTooSmall;
         @memset(scratch[0..need], 0);
         try check(analysis.?.vtable.CreateAlphaTexture(analysis.?, texture_cleartype_3x1, &bounds, scratch.ptr, @intCast(need)), error.TextureFailed);

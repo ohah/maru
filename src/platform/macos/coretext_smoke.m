@@ -1018,10 +1018,8 @@ static bool maru_shape_cache_emit(
 /// run 을 가르는 키. face(bold/italic)와 **커서 여부**를 함께 담는다 — 커서 칸을 별도 run 으로 떼어야
 /// 그 칸만 합자 없이 셰이핑할 수 있다(`MaruDrawCellCursorBit` 주석). 0~7.
 static int maru_style_index_for_cell(MaruCoreTextDrawCell cell) {
-    const bool want_bold = (cell.style_flags & MaruDrawCellBoldBit) != 0;
-    const bool want_italic = (cell.style_flags & MaruDrawCellItalicBit) != 0;
-    const bool at_cursor = (cell.style_flags & MaruDrawCellCursorBit) != 0;
-    return (want_bold ? 1 : 0) | (want_italic ? 2 : 0) | (at_cursor ? 4 : 0);
+    // Zig's renderer.shaping_runs owns the key. This adapter only decodes it.
+    return cell.style_flags & (MaruDrawCellBoldBit | MaruDrawCellItalicBit | MaruDrawCellCursorBit);
 }
 
 /// style index 에서 face 부분만(0~3). 커서 슬롯도 폰트는 같은 face 를 쓴다.

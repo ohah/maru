@@ -5311,9 +5311,9 @@ PNG/OCR은 고정된 앱의 화면 기록 권한과 독립 후보창 기록을 �
 
 ## 심볼 피커 IME 문맥
 
-구현·일부 검증 완료: `test-symbol-picker-ime`는 파일/형제 범위 검색의 중간 교체, Unicode,
+구현·검증 완료: `test-symbol-picker-ime`는 파일/형제 범위 검색의 중간 교체, Unicode,
 후보 Return, 문서/범위/열기 owner, 할당 실패 시 query·결과·선택 보존을 검사한다.
 실제 AppKit/Metal callback 회귀는 `tools/symbol-preview-app`으로 구분한다.
-OS 후보창 PNG/OCR은 고정 앱의 화면 기록 권한을 기다린다. `tools/symbol-picker-ime`의 실제
-두벌식·후보 취소 5회·한자 확정·별도 Return 이동·에디터 복귀 진단은 통과했다.
+`tools/symbol-picker-ime`의 실제 두벌식·후보 취소 5회·한자 확정·별도 Return 이동·에디터 복귀와
+서로 다른 후보창 5개의 PNG/hash/독립 OCR 검증이 통과했다. 입력 소스 복원과 디스크 원본 보존도 확인했다.
 [계획과 결과](plans/symbol-picker-ime.md)를 따른다.

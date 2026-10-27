@@ -2915,6 +2915,41 @@ pub fn build(b: *std.Build) void {
     run_inspector_rules.setCwd(b.path("."));
     inspector_step.dependOn(&run_inspector_rules.step);
 
+    const agent_resume_identity_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{ "RB2-", "Codex resume identity", "훅 Term 은 두 소스를 함께" },
+    });
+    const agent_identity_fixture = b.addExecutable(.{
+        .name = "agent-identity-worker",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    agent_identity_fixture.root_module.addCSourceFile(.{ .file = b.path("tests/fixtures/agent_identity_worker.c"), .flags = &.{} });
+    const run_agent_resume_identity = b.addSystemCommand(&.{"/usr/bin/env"});
+    run_agent_resume_identity.addPrefixedArtifactArg("MARU_AGENT_IDENTITY_FIXTURE=", agent_identity_fixture);
+    run_agent_resume_identity.addArtifactArg(agent_resume_identity_tests);
+    run_agent_resume_identity.setCwd(b.path("."));
+    run_agent_resume_identity.setEnvironmentVariable("MARU_TEST_KEEP_ONLY_PREFIX", "app_session.test.RB2-,app_session.test.Codex resume identity,app_session.test.훅 Term 은 두 소스를 함께");
+    run_agent_resume_identity.addArg("--maru-expect-passed=24");
+    b.step("test-agent-resume-identity", "Verify provider identity isolation during agent checkpoint and restore").dependOn(&run_agent_resume_identity.step);
+
+    const codex_receipt_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/session/codex_hook_receipt.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const run_codex_receipt_tests = b.addRunArtifact(codex_receipt_tests);
+    const receipt_step = b.step("test-codex-hook-receipt", "Verify session-scoped Codex hook receipts");
+    receipt_step.dependOn(&run_codex_receipt_tests.step);
+    const receipt_probe = b.addSystemCommand(&.{ "python3", "tools/test-codex-hook-receipt.py" });
+    receipt_probe.addArtifactArg(exe);
+    receipt_probe.setCwd(b.path("."));
+    receipt_step.dependOn(&receipt_probe.step);
+
+    const hook_session_attribution_probe = b.addSystemCommand(&.{ "python3", "tools/test-agent-hook-session-attribution.py" });
+    hook_session_attribution_probe.addArtifactArg(exe);
+    hook_session_attribution_probe.setCwd(b.path("."));
+    b.step("test-agent-hook-session-attribution", "Install and execute hooks with isolated synthetic session metadata").dependOn(&hook_session_attribution_probe.step);
+
     const test_macos_app_host_abi_step = b.step("test-macos-app-host-abi", "Run macOS Swift/Zig app host ABI contract tests");
     test_macos_app_host_abi_step.dependOn(&ime_ack_host.step);
     // 종료·창 닫기·Dock 다시 열기의 실제 Swift 본문(창 0 개 앱 LW1 × 다운로드 유지 W10c/W10e × 대화상자 보류 W6k — 두 갈래를 손으로 합친 자리).
@@ -8811,8 +8846,8 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"codex 데몬 귀속"},
         });
         const run_codex_daemon_tests = b.addRunArtifact(codex_daemon_tests);
-        run_codex_daemon_tests.addArg("--maru-expect-tests=6");
-        run_codex_daemon_tests.addArg("--maru-expect-passed=6");
+        run_codex_daemon_tests.addArg("--maru-expect-tests=9");
+        run_codex_daemon_tests.addArg("--maru-expect-passed=9");
         codex_daemon_step.dependOn(&run_codex_daemon_tests.step);
         // check-boundaries 는 Debug 로만 돈다(`boundary_step` 선언 위 규칙) — ReleaseFast 사본은 이 전용 step 에만 남는다.
         if (codex_daemon_optimize == .debug) boundary_step.dependOn(&run_codex_daemon_tests.step);

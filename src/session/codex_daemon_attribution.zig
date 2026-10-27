@@ -190,9 +190,12 @@ pub const Candidate = struct {
     id: u64,
     /// 이번 프롬프트가 그 Term 화면에 보이는가. 프롬프트 이벤트가 아니면 쓰지 않는다.
     shows_prompt: bool = false,
+    /// A provider-tagged identity or saved resume target already identifies this session.
+    owns_session: bool = false,
 };
 
 pub const Input = struct {
+    candidates_complete: bool = true,
     /// 이미 묶인 Term(살아 있고 codex 가 도는 것만 — 호출자가 확인한다).
     bound: ?u64 = null,
     /// 같은 cwd 에서 codex 가 도는 로컬 Term.
@@ -211,6 +214,8 @@ pub const Input = struct {
 pub const Reason = enum {
     /// codex 가 도는 로컬 Term 이 하나도 없다(데몬이 maru 밖 클라이언트의 세션을 돌리는 경우 포함).
     no_candidate,
+    identity_not_unique,
+    candidate_overflow,
     /// 후보가 여럿인데 아직 프롬프트가 안 왔다(세션 시작·이어 하기 직후).
     ambiguous_before_prompt,
     /// 후보가 여럿인데 프롬프트가 짧다.
@@ -228,7 +233,16 @@ pub const Decision = union(enum) {
 
 /// 판정. 순서가 곧 계약이다 — 묶인 세션이 먼저, 후보 하나, 프롬프트 유일 일치, 그 밖은 버림.
 pub fn decide(in: Input) Decision {
+    if (!in.candidates_complete) return .{ .drop = .candidate_overflow };
+    // Rebuild lost in-memory bindings from exact identities before consulting cwd or screen text.
+    var owner: ?u64 = null;
+    for (in.any_cwd) |candidate| {
+        if (!candidate.owns_session) continue;
+        if (owner != null) return .{ .drop = .identity_not_unique };
+        owner = candidate.id;
+    }
     if (in.bound) |t| return .{ .route = .{ .target = t, .bind = false } };
+    if (owner) |id| return .{ .route = .{ .target = id, .bind = true } };
     // 같은 cwd 후보가 없으면 cwd 를 안 보는 후보로 **같은 규칙**을 돌린다.
     const pool = if (in.candidates.len != 0) in.candidates else in.any_cwd;
     if (pool.len == 0) return .{ .drop = .no_candidate };
@@ -290,16 +304,24 @@ pub const Bindings = struct {
         session_len: u8 = 0,
         target: u64 = 0,
         used: u64 = 0,
+        recovery_blocked: bool = false,
     };
 
     entries: [capacity]Entry = @as([capacity]Entry, @splat(.{})),
     clock: u64 = 0,
+    /// Once a restart fence is evicted, cached identities cannot safely rebuild ownership.
+    identity_recovery_overflow: bool = false,
+
+    pub fn canRecoverIdentity(self: *Bindings, session: []const u8) bool {
+        const entry = self.find(session) orelse return !self.identity_recovery_overflow;
+        return !entry.recovery_blocked;
+    }
 
     pub fn lookup(self: *Bindings, session: []const u8) ?u64 {
         const e = self.find(session) orelse return null;
         self.clock += 1;
         e.used = self.clock;
-        return e.target;
+        return if (e.recovery_blocked) null else e.target;
     }
 
     /// 묶음을 쓸 수 있으면 그 Term 을 준다(판정 ⑴). 못 쓰면 **풀고** null — 호출자는 새로 판정한다.
@@ -307,14 +329,18 @@ pub const Bindings = struct {
     /// - `session_start`: 그 세션이 (다시) 시작됐다(`sessionRestarted`). 묶음을 믿지 않는다 — B 에서 돌던 세션 S 를
     ///   C 가 `codex resume S` 로 열면 S 의 첫 이벤트가 `SessionStart` 이고, 옛 묶음을 쓰면 S 가 B 로 간다.
     /// - `live`: 지금 codex 가 도는 로컬 Term(`eligible`). 그 안에 없으면 그 Term 은 닫혔거나 codex 를 벗어났다.
+    pub fn invalidate(self: *Bindings, session: []const u8) void {
+        self.store(session, 0, true);
+    }
+
     pub fn resolve(self: *Bindings, session: []const u8, session_start: bool, live: []const Candidate) ?u64 {
         if (session_start) {
-            self.unbind(session);
+            self.invalidate(session);
             return null;
         }
         const target = self.lookup(session) orelse return null;
         for (live) |c| if (c.id == target) return target;
-        self.unbind(session);
+        self.invalidate(session);
         return null;
     }
 
@@ -324,14 +350,19 @@ pub const Bindings = struct {
     /// 세션은 하나뿐이고(`/new` 는 새 세션으로 갈아탄다), 옛 묶음을 남기면 그 옛 세션을 다른 pane 이 이어 열 때(`resume`)
     /// 그 이벤트가 이 Term 으로 온다.
     pub fn bind(self: *Bindings, session: []const u8, target: u64) void {
+        self.store(session, target, false);
+    }
+
+    fn store(self: *Bindings, session: []const u8, target: u64, recovery_blocked: bool) void {
         if (session.len == 0 or session.len > max_session_bytes) return;
         self.clock += 1;
         for (&self.entries) |*e| {
-            if (e.session_len != 0 and e.target == target and
+            if (!recovery_blocked and !e.recovery_blocked and e.session_len != 0 and e.target == target and
                 !std.mem.eql(u8, e.session[0..e.session_len], session)) e.session_len = 0;
         }
         if (self.find(session)) |e| {
             e.target = target;
+            e.recovery_blocked = recovery_blocked;
             e.used = self.clock;
             return;
         }
@@ -343,9 +374,11 @@ pub const Bindings = struct {
             }
             if (e.used < slot.used) slot = e;
         }
+        if (slot.session_len != 0 and slot.recovery_blocked) self.identity_recovery_overflow = true;
         @memcpy(slot.session[0..session.len], session);
         slot.session_len = @intCast(session.len);
         slot.target = target;
+        slot.recovery_blocked = recovery_blocked;
         slot.used = self.clock;
     }
 
@@ -356,7 +389,7 @@ pub const Bindings = struct {
     /// 그 Term 이 닫혔거나 codex 를 벗어났다 — 그 Term 에 묶인 세션을 모두 푼다.
     pub fn dropTarget(self: *Bindings, target: u64) void {
         for (&self.entries) |*e| {
-            if (e.session_len != 0 and e.target == target) e.session_len = 0;
+            if (!e.recovery_blocked and e.session_len != 0 and e.target == target) e.session_len = 0;
         }
     }
 
@@ -559,4 +592,37 @@ test "codex 데몬 귀속: 후보 자격은 로컬 codex 터미널만, 같은 cw
     try testing.expect(!log.first(a));
     try testing.expect(!log.first(c));
     try testing.expect(log.first(dropKey("S1", .prompt_too_short)));
+}
+
+test "codex 데몬 귀속: exact saved identity survives ambiguous cwd and short prompts" {
+    const owners = [_]Candidate{ .{ .id = 1 }, .{ .id = 2, .owns_session = true } };
+    const got = decide(.{ .any_cwd = &owners, .candidates = &.{.{ .id = 1 }}, .prompt_event = true });
+    try std.testing.expectEqual(@as(u64, 2), got.route.target);
+    try std.testing.expect(got.route.bind);
+    const duplicate = [_]Candidate{ .{ .id = 1, .owns_session = true }, .{ .id = 2, .owns_session = true } };
+    try std.testing.expectEqual(Reason.identity_not_unique, decide(.{ .any_cwd = &duplicate }).drop);
+}
+
+test "codex 데몬 귀속: review 2 duplicate identities override a remembered binding" {
+    const duplicate = [_]Candidate{ .{ .id = 1, .owns_session = true }, .{ .id = 2, .owns_session = true } };
+    const got = decide(.{ .bound = 1, .any_cwd = &duplicate });
+    try std.testing.expect(got == .drop);
+    try std.testing.expectEqual(Reason.identity_not_unique, got.drop);
+}
+
+test "codex 데몬 귀속: review 3 bounded memory cannot resurrect discarded restart fences" {
+    var bindings: Bindings = .{};
+    var buf: [32]u8 = undefined;
+    for (0..Bindings.capacity + 1) |i| {
+        const sid = try std.fmt.bufPrint(&buf, "restart-{d}", .{i});
+        bindings.invalidate(sid);
+    }
+    try testing.expect(!bindings.canRecoverIdentity("restart-0"));
+    try testing.expect(!bindings.canRecoverIdentity("previously-unknown"));
+    bindings.bind("freshly-proven", 42);
+    try testing.expect(bindings.canRecoverIdentity("freshly-proven"));
+    try testing.expectEqual(@as(?u64, 42), bindings.lookup("freshly-proven"));
+    const got = decide(.{ .bound = 42, .candidates_complete = false });
+    try testing.expect(got == .drop);
+    try testing.expectEqual(Reason.candidate_overflow, got.drop);
 }

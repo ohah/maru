@@ -1008,6 +1008,18 @@ pub const PtySession = struct {
         return judge(procargs_buf[0..size]);
     }
 
+    /// Copies a parsed argv identity before the tick-local sysctl buffer is reused.
+    pub fn processArgumentIdentity(pid: i32, parse: *const fn ([]const u8) ?[]const u8, out: []u8) ?[]const u8 {
+        if (pid <= 0) return null;
+        var mib = [_]c_int{ ctl_kern, kern_procargs2, pid };
+        var size: usize = procargs_buf.len;
+        if (sysctl(&mib, mib.len, &procargs_buf, &size, null, 0) != 0) return null;
+        const value = parse(procargs_buf[0..size]) orelse return null;
+        if (value.len > out.len) return null;
+        @memcpy(out[0..value.len], value);
+        return out[0..value.len];
+    }
+
     /// `pid` 의 **시작 시각**(µs, epoch). pid 재사용을 가르는 데 쓴다 — 같은 pid 라도 시작 시각이 다르면 다른 프로세스다.
     /// 없는 pid·권한 밖이면 null.
     pub fn processStartMicros(pid: i32) ?u64 {
@@ -1032,26 +1044,35 @@ pub const PtySession = struct {
     /// 값은 `out`에 복사해 슬라이스로 돌려준다(정적 procargs_buf를 가리키지 않게 — 다음 호출이 덮는다).
     /// **틱 스레드 전용**(procargs_buf 공유).
     pub fn agentSessionIdentity(agent_pid: i32, key: []const u8, out: []u8) ?[]const u8 {
+        return agentSessionIdentityExcluding(agent_pid, key, out, null);
+    }
+
+    /// Exclude shared worker subtrees whose children do not belong to this terminal.
+    pub fn agentSessionIdentityExcluding(agent_pid: i32, key: []const u8, out: []u8, exclude: ?*const fn ([]const u8) bool) ?[]const u8 {
         if (agent_pid <= 0 or out.len == 0) return null;
         // **손자까지 본다.** claude는 단일 프로세스라 도구 자식이 직속이지만, codex는 npm wrapper를 거쳐
         // (node wrapper → rust 바이너리) 도구 자식이 **손자**가 될 수 있다 — 한 단계만 보면 그 provider에서
         // 통째로 무동작이 된다. 깊이 2면 관측된 모든 배치를 덮고, 프로세스 수가 적어(에이전트당 한 자릿수)
         // 비용도 무시할 만하다.
-        if (scanChildrenForEnv(agent_pid, key, out)) |found| return found;
+        if (scanChildrenForEnv(agent_pid, key, out, exclude)) |found| return found;
         var top: [64]c_int = undefined;
         const top_count = proc_listchildpids(@intCast(agent_pid), &top, @intCast(@sizeOf(@TypeOf(top))));
         if (top_count > 0) {
             const n: usize = @min(@as(usize, @intCast(top_count)), top.len);
             for (top[0..n]) |kid| {
                 if (kid <= 0) continue;
-                if (scanChildrenForEnv(kid, key, out)) |found| return found;
+                if (exclude) |judge| {
+                    // Unknown process identity cannot authorize scanning a potentially shared worker.
+                    if (judgeProcessArgs(kid, judge) orelse true) continue;
+                }
+                if (scanChildrenForEnv(kid, key, out, exclude)) |found| return found;
             }
         }
         return null;
     }
 
     /// `ppid`의 **직속 자식**만 훑어 `key=` 환경변수를 찾는다(agentSessionIdentity의 한 단계).
-    fn scanChildrenForEnv(ppid: i32, key: []const u8, out: []u8) ?[]const u8 {
+    fn scanChildrenForEnv(ppid: i32, key: []const u8, out: []u8, exclude: ?*const fn ([]const u8) bool) ?[]const u8 {
         var kids: [64]c_int = undefined;
         // **반환값은 자식 개수다 — 바이트가 아니다.** 형제 API(`proc_listpids`·`proc_listpgrppids`)가 바이트를
         // 돌려주므로 나누고 싶어지지만, 실측하면 `ret=2, buf=[2397, 1862]`처럼 개수와 pid가 정확히 맞는다
@@ -1064,9 +1085,11 @@ pub const PtySession = struct {
             var mib = [_]c_int{ ctl_kern, kern_procargs2, kid };
             var size: usize = procargs_buf.len;
             if (sysctl(&mib, mib.len, &procargs_buf, &size, null, 0) != 0) continue;
+            if (exclude) |judge| if (judge(procargs_buf[0..size])) continue;
             const value = parseEnvValue(procargs_buf[0..size], key) orelse continue;
-            const n = @min(value.len, out.len);
-            @memcpy(out[0..n], value[0..n]);
+            if (value.len > out.len) continue;
+            const n = value.len;
+            @memcpy(out[0..n], value);
             return out[0..n];
         }
         return null;

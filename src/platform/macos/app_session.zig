@@ -45068,13 +45068,16 @@ test "RB2-6 이어갈 에이전트는 로컬·종류·신원·비원격·비묘�
     const term = pane_ops.activePane(session).activeTerm();
 
     term.agent_kind = .claude;
-    term.hook.transcript.setIdentity(rb2_claude_id);
+    term.hook.transcript.setProviderIdentity(.claude, rb2_claude_id);
     const got = agent_ops.resumableAgentOf(session, term) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(maru.session.agent_session_archive.Provider.claude, got.provider);
     try std.testing.expectEqualStrings(rb2_claude_id, got.session_id);
     term.agent_kind = .codex;
-    try std.testing.expectEqual(maru.session.agent_session_archive.Provider.codex, agent_ops.resumableAgentOf(session, term).?.provider);
+    try std.testing.expect(agent_ops.resumableAgentOf(session, term) == null);
+    term.hook.transcript.setProviderIdentity(.codex, rb2_codex_id);
+    try std.testing.expectEqualStrings(rb2_codex_id, agent_ops.resumableAgentOf(session, term).?.session_id);
     term.agent_kind = .claude;
+    term.hook.transcript.setProviderIdentity(.claude, rb2_claude_id);
 
     // 조건을 하나씩 깬다 — 각각 혼자서 값을 없애야 한다.
     term.agent_kind = .none;
@@ -45096,14 +45099,342 @@ test "RB2-6 이어갈 에이전트는 로컬·종류·신원·비원격·비묘�
     try std.testing.expect(agent_ops.resumableAgentOf(session, term) == null);
     term.rt.ended_placeholder = false;
 
-    term.hook.transcript.setIdentity("-rf"); // 인자 파서가 플래그로 읽는 모양 — 실행 인자가 될 수 없다
+    term.hook.transcript.setProviderIdentity(.claude, "-rf"); // 인자 파서가 플래그로 읽는 모양 — 실행 인자가 될 수 없다
     try std.testing.expect(agent_ops.resumableAgentOf(session, term) == null);
     term.hook.transcript.setIdentity("");
     try std.testing.expect(agent_ops.resumableAgentOf(session, term) == null);
 
     // 대조군: 다 되돌리면 다시 있다(위의 null 들이 다른 이유로 난 것이 아니다).
-    term.hook.transcript.setIdentity(rb2_claude_id);
+    term.hook.transcript.setProviderIdentity(.claude, rb2_claude_id);
     try std.testing.expect(agent_ops.resumableAgentOf(session, term) != null);
+}
+
+test "Codex resume identity: delayed Claude hooks cannot be checkpointed as Codex" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    const term = pane_ops.activePane(session).activeTerm();
+    term.agent_kind = .codex;
+    const event = maru.session.agent_hook_event;
+    _ = agent_ops.testApplyHookEvent(session, term, event.parseLine(
+        "claude\t{\"hook_event_name\":\"SessionStart\",\"session_id\":\"" ++ rb2_claude_id ++ "\"}",
+    ).?);
+    try std.testing.expect(term.hook.transcript.identity_provider == null);
+    try std.testing.expect(agent_ops.resumableAgentOf(session, term) == null);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const captured = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
+    try std.testing.expect(captured.tabs[0].panes[0].surfaces[0].agent_resume == null);
+    _ = agent_ops.testApplyHookEvent(session, term, event.parseLine(
+        "codex\t{\"hook_event_name\":\"SessionStart\",\"session_id\":\"" ++ rb2_codex_id ++ "\"}",
+    ).?);
+    try std.testing.expectEqualStrings(rb2_codex_id, agent_ops.resumableAgentOf(session, term).?.session_id);
+}
+
+test "Codex resume identity: shared daemon reconnects the exact saved target before prompt matching" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    const pane = pane_ops.activePane(session);
+    const first = pane.activeTerm();
+    const second = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+    {
+        errdefer term_ops.destroyTerm(session, second);
+        try pane.terms.append(a, second);
+    }
+    first.agent_kind = .codex;
+    second.agent_kind = .codex;
+    agent_ops.rememberSavedResume(second, .{ .provider = .codex, .session_id = rb2_codex_id });
+    const pid: u32 = @intCast(std.c.getpid());
+    const started = maru.pty.PtySession.processStartMicros(@intCast(pid)) orelse return error.TestUnexpectedResult;
+    session.codex_daemon_parents.remember(pid, started, true);
+    var ev = maru.session.agent_hook_event.parseLine(
+        "codex\t{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"" ++ rb2_codex_id ++ "\",\"prompt\":\"계속\"}",
+    ).?;
+    ev.hook_ppid = pid;
+    try std.testing.expectEqual(.elsewhere, agent_ops.routeHookEvent(session, first, ev));
+    try std.testing.expectEqualStrings("", first.hook.transcript.identity());
+    try std.testing.expectEqualStrings(rb2_codex_id, second.hook.transcript.identity());
+    try std.testing.expectEqualStrings(rb2_codex_id, agent_ops.resumableAgentOf(session, second).?.session_id);
+}
+
+test "Codex resume identity: review 1 moved session cannot resurrect its previous owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    const pane = pane_ops.activePane(session);
+    const first = pane.activeTerm();
+    const second = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+    {
+        errdefer term_ops.destroyTerm(session, second);
+        try pane.terms.append(a, second);
+    }
+    first.agent_kind = .codex;
+    second.agent_kind = .codex;
+    first.hook.transcript.setProviderIdentity(.codex, rb2_codex_id);
+    agent_ops.rememberSavedResume(second, .{ .provider = .codex, .session_id = rb2_codex_id });
+    try std.testing.expect(agent_ops.resumableAgentOf(session, first) == null);
+    try std.testing.expect(agent_ops.resumableAgentOf(session, second) == null);
+    agent_ops.rememberSavedResume(second, null);
+    session.codex_daemon_bindings.bind(rb2_codex_id, first.surfaceId());
+    const pid: u32 = @intCast(std.c.getpid());
+    session.codex_daemon_parents.remember(pid, maru.pty.PtySession.processStartMicros(@intCast(pid)).?, true);
+    var ev: maru.session.agent_hook_event.Event = .{
+        .provider = "codex",
+        .session_id = rb2_codex_id,
+        .hook_ppid = pid,
+        .kind = .session_start,
+        .source = "resume",
+    };
+    try std.testing.expectEqual(.dropped, agent_ops.routeHookEvent(session, first, ev));
+    ev.kind = .user_prompt_submit;
+    ev.text = "계속";
+    try std.testing.expectEqual(.dropped, agent_ops.routeHookEvent(session, first, ev));
+    try std.testing.expectEqualStrings("", second.hook.transcript.identity());
+    try std.testing.expect(agent_ops.resumableAgentOf(session, first) == null);
+    session.codex_daemon_bindings.bind(rb2_codex_id, second.surfaceId());
+    second.hook.transcript.setProviderIdentity(.codex, rb2_codex_id);
+    try std.testing.expect(agent_ops.resumableAgentOf(session, first) == null);
+    try std.testing.expectEqualStrings(rb2_codex_id, agent_ops.resumableAgentOf(session, second).?.session_id);
+    // Two live claims invalidate even the remembered binding and neither may be saved.
+    try std.testing.expectEqual(.dropped, agent_ops.routeHookEvent(session, first, ev));
+    try std.testing.expect(agent_ops.resumableAgentOf(session, first) == null);
+    try std.testing.expect(agent_ops.resumableAgentOf(session, second) == null);
+}
+
+test "Codex resume identity: review 3 candidate overflow cannot hide a duplicate owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    const pane = pane_ops.activePane(session);
+    const first = pane.activeTerm();
+    first.agent_kind = .codex;
+    first.hook.transcript.setProviderIdentity(.codex, rb2_codex_id);
+    for (0..16) |i| {
+        const term = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 20, .rows = 4 }, 16, "cat", "/bin/cat");
+        {
+            errdefer term_ops.destroyTerm(session, term);
+            try pane.terms.append(a, term);
+        }
+        term.agent_kind = .codex;
+        if (i == 15) term.hook.transcript.setProviderIdentity(.codex, rb2_codex_id);
+    }
+    const pid: u32 = @intCast(std.c.getpid());
+    session.codex_daemon_parents.remember(pid, maru.pty.PtySession.processStartMicros(@intCast(pid)).?, true);
+    const ev: maru.session.agent_hook_event.Event = .{
+        .provider = "codex",
+        .session_id = rb2_codex_id,
+        .hook_ppid = pid,
+        .kind = .user_prompt_submit,
+        .text = "계속",
+    };
+    try std.testing.expectEqual(.dropped, agent_ops.routeHookEvent(session, first, ev));
+}
+
+test "Codex resume identity: review 4 oversized identities must not become shorter executable ids" {
+    var cache: maru.session.agent_transcript.Cache = .{};
+    const exact: [maru.session.agent_transcript.max_identity_bytes]u8 = @splat('x');
+    cache.setProviderIdentity(.codex, &exact);
+    try std.testing.expectEqual(exact.len, cache.identity().len);
+    const oversized: [maru.session.agent_transcript.max_identity_bytes + 1]u8 = @splat('x');
+    cache.setProviderIdentity(.codex, &oversized);
+    try std.testing.expectEqual(@as(usize, 0), cache.identity().len);
+    try std.testing.expect(cache.identity_provider == null);
+}
+
+test "Codex resume identity: review 5 late provider events cannot erase a known id and unknown ids require evidence" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    const pane = pane_ops.activePane(session);
+    const first = pane.activeTerm();
+    const second = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+    {
+        errdefer term_ops.destroyTerm(session, second);
+        try pane.terms.append(a, second);
+    }
+    first.agent_kind = .codex;
+    second.agent_kind = .codex;
+    first.hook.transcript.setProviderIdentity(.codex, rb2_codex_id);
+    _ = agent_ops.testApplyHookEvent(session, first, .{
+        .provider = "claude",
+        .kind = .session_start,
+        .session_id = rb2_claude_id,
+    });
+    try std.testing.expectEqualStrings(rb2_codex_id, first.hook.transcript.identity());
+    try std.testing.expectEqualStrings(rb2_codex_id, agent_ops.resumableAgentOf(session, first).?.session_id);
+
+    first.hook.transcript.setIdentity("");
+    const pid: u32 = @intCast(std.c.getpid());
+    session.codex_daemon_parents.remember(pid, maru.pty.PtySession.processStartMicros(@intCast(pid)).?, true);
+    var ev: maru.session.agent_hook_event.Event = .{
+        .provider = "codex",
+        .kind = .session_start,
+        .session_id = "new-unknown-session",
+        .hook_ppid = pid,
+        .source = "startup",
+    };
+    try std.testing.expectEqual(.dropped, agent_ops.routeHookEvent(session, first, ev));
+    ev.kind = .user_prompt_submit;
+    ev.text = "ok";
+    try std.testing.expectEqual(.dropped, agent_ops.routeHookEvent(session, first, ev));
+    try std.testing.expect(agent_ops.resumableAgentOf(session, first) == null);
+    try std.testing.expect(agent_ops.resumableAgentOf(session, second) == null);
+    // Once a sufficiently long prompt identifies exactly one terminal, the same session becomes resumable.
+    const surface = session.term_backend.surfaceFor(first.rt.handle) orelse return error.TestUnexpectedResult;
+    ev.text = "unique prompt only in the first terminal 2026";
+    try surface.core.write(ev.text);
+    try std.testing.expectEqual(.here, agent_ops.routeHookEvent(session, first, ev));
+    _ = agent_ops.testApplyHookEvent(session, first, ev);
+    try std.testing.expectEqualStrings(ev.session_id, agent_ops.resumableAgentOf(session, first).?.session_id);
+    try std.testing.expect(agent_ops.resumableAgentOf(session, second) == null);
+}
+
+test "Codex resume identity: review 6 invalidating ownership must dirty the saved checkpoint" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    const pane = pane_ops.activePane(session);
+    const first = pane.activeTerm();
+    const second = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+    {
+        errdefer term_ops.destroyTerm(session, second);
+        try pane.terms.append(a, second);
+    }
+    first.agent_kind = .codex;
+    second.agent_kind = .codex;
+    first.hook.transcript.setProviderIdentity(.codex, rb2_codex_id);
+    const previous = app_runtime.workspace_checkpoint;
+    defer app_runtime.workspace_checkpoint = previous;
+    app_runtime.workspace_checkpoint = .{};
+    try app_runtime.workspace_checkpoint.arm(.{ .debounce_ns = 500_000_000, .retry_initial_ns = 1_000_000_000, .retry_max_ns = 30_000_000_000 }, false);
+    session.workspace_checkpoint_mutations_enabled = true;
+    defer session.workspace_checkpoint_mutations_enabled = false;
+    const before = app_runtime.workspace_checkpoint.change_revision;
+    const pid: u32 = @intCast(std.c.getpid());
+    session.codex_daemon_parents.remember(pid, maru.pty.PtySession.processStartMicros(@intCast(pid)).?, true);
+    const ev: maru.session.agent_hook_event.Event = .{ .provider = "codex", .session_id = rb2_codex_id, .hook_ppid = pid, .kind = .session_start, .source = "resume" };
+    try std.testing.expectEqual(.dropped, agent_ops.routeHookEvent(session, first, ev));
+    try std.testing.expect(app_runtime.workspace_checkpoint.change_revision > before);
+    const changed = app_runtime.workspace_checkpoint.change_revision;
+    try std.testing.expectEqual(.dropped, agent_ops.routeHookEvent(session, first, ev));
+    try std.testing.expectEqual(changed, app_runtime.workspace_checkpoint.change_revision);
+}
+
+test "Codex resume identity: review 7 a remote hook identity cannot own local daemon events" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    const pane = pane_ops.activePane(session);
+    const first = pane.activeTerm();
+    const second = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+    {
+        errdefer term_ops.destroyTerm(session, second);
+        try pane.terms.append(a, second);
+    }
+    first.agent_kind = .codex;
+    first.agent_kind_from_hook = true;
+    first.hook.transcript.setProviderIdentity(.codex, rb2_codex_id);
+    second.agent_kind = .codex;
+    const pid: u32 = @intCast(std.c.getpid());
+    session.codex_daemon_parents.remember(pid, maru.pty.PtySession.processStartMicros(@intCast(pid)).?, true);
+    const ev: maru.session.agent_hook_event.Event = .{ .provider = "codex", .session_id = rb2_codex_id, .hook_ppid = pid, .kind = .user_prompt_submit, .text = "ok" };
+    try std.testing.expectEqual(.elsewhere, agent_ops.routeHookEvent(session, first, ev));
+    try std.testing.expectEqualStrings(rb2_codex_id, second.hook.transcript.identity());
+    try std.testing.expect(agent_ops.resumableAgentOf(session, first) == null);
+}
+
+test "Codex resume identity: review 8 an unreadable hook parent is not proof of a local event" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    const term = pane_ops.activePane(session).activeTerm();
+    term.agent_kind = .codex;
+    var ev: maru.session.agent_hook_event.Event = .{ .provider = "codex", .kind = .session_start, .session_id = rb2_codex_id };
+    for ([_]u32{ 0x7fffffff, 0xffffffff }) |pid| {
+        ev.hook_ppid = pid;
+        try std.testing.expectEqual(.dropped, agent_ops.routeHookEvent(session, term, ev));
+    }
+    ev.hook_ppid = 0;
+    try std.testing.expectEqual(.here, agent_ops.routeHookEvent(session, term, ev));
+    var id_buf: [32]u8 = undefined;
+    for (0..maru.session.codex_daemon_attribution.Bindings.capacity + 1) |i| {
+        session.codex_daemon_bindings.invalidate(try std.fmt.bufPrint(&id_buf, "expired-{d}", .{i}));
+    }
+    try std.testing.expect(!session.codex_daemon_bindings.canRecoverIdentity(rb2_codex_id));
+    ev.hook_ppid = @intCast(std.c.getpid());
+    try std.testing.expectEqual(.here, agent_ops.routeHookEvent(session, term, ev));
+    _ = agent_ops.testApplyHookEvent(session, term, ev);
+    try std.testing.expectEqualStrings(rb2_codex_id, agent_ops.resumableAgentOf(session, term).?.session_id);
+}
+
+test "Codex resume identity: review 9 invalid hook ids cannot mix new content into the old session" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    const term = pane_ops.activePane(session).activeTerm();
+    term.agent_kind = .codex;
+    term.hook.transcript.setProviderIdentity(.codex, rb2_codex_id);
+    term.hook.transcript.owned.setPrompt("safe prompt");
+    const oversized: [maru.session.agent_transcript.max_identity_bytes + 1]u8 = @splat('x');
+    for ([_][]const u8{ &oversized, "-flag", "bad/id", "\\u0000" }) |invalid| {
+        _ = agent_ops.testApplyHookEvent(session, term, .{ .provider = "codex", .kind = .user_prompt_submit, .session_id = invalid, .text = "unrelated prompt" });
+        try std.testing.expectEqualStrings(rb2_codex_id, term.hook.transcript.identity());
+        try std.testing.expectEqualStrings("safe prompt", term.hook.transcript.prompt());
+        try std.testing.expectEqual(@as(u64, 0), term.hook.turn_seq);
+    }
+}
+
+test "Codex resume identity: shared worker descendants cannot supply a terminal identity" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const fixture = std.c.getenv("MARU_AGENT_IDENTITY_FIXTURE") orelse return error.SkipZigTest;
+    var pty = try maru.pty.PtySession.spawn(std.testing.allocator, .{
+        .command = std.mem.span(fixture),
+        .size = .{ .cols = 20, .rows = 4 },
+    });
+    defer pty.deinit();
+    var buf: [64]u8 = undefined;
+    var found = false;
+    for (0..100) |_| {
+        if (maru.pty.PtySession.agentSessionIdentity(pty.childPid(), "MARU_RESUME_TEST_ID", &buf)) |value| {
+            try std.testing.expectEqualStrings("other-session", value);
+            found = true;
+            break;
+        }
+        std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
+    }
+    try std.testing.expect(found);
+    var tiny: [3]u8 = undefined;
+    try std.testing.expect(maru.pty.PtySession.agentSessionIdentity(pty.childPid(), "MARU_RESUME_TEST_ID", &tiny) == null);
+    const Worker = struct {
+        fn matches(raw: []const u8) bool {
+            return std.mem.indexOf(u8, raw, "maru-shared-worker") != null;
+        }
+    };
+    try std.testing.expect(maru.pty.PtySession.agentSessionIdentityExcluding(
+        pty.childPid(),
+        "MARU_RESUME_TEST_ID",
+        &buf,
+        &Worker.matches,
+    ) == null);
 }
 
 test "RB2-7 캡처는 이어갈 에이전트를 복사해 싣는다 — Term 의 신원이 바뀌어도 캡처는 그대로다" {
@@ -45114,13 +45445,13 @@ test "RB2-7 캡처는 이어갈 에이전트를 복사해 싣는다 — Term 의
     defer session.deinit();
     const term = pane_ops.activePane(session).activeTerm();
     term.agent_kind = .claude;
-    term.hook.transcript.setIdentity(rb2_claude_id);
+    term.hook.transcript.setProviderIdentity(.claude, rb2_claude_id);
 
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const captured = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
     // checkpoint 는 캡처 뒤 백그라운드에서 직렬화한다 — Term 버퍼를 빌렸다면 이 덮어쓰기가 캡처를 바꾼다.
-    term.hook.transcript.setIdentity("ffffffff-ffff-4fff-8fff-ffffffffffff");
+    term.hook.transcript.setProviderIdentity(.claude, "ffffffff-ffff-4fff-8fff-ffffffffffff");
     const ar = captured.tabs[0].panes[0].surfaces[0].agent_resume orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(rb2_claude_id, ar.session_id);
     const text = try maru.session.workspace.serialize(arena.allocator(), .{ .windows = &.{captured} });
@@ -45612,7 +45943,7 @@ test "RB2-14 보류 신원: 살아 있는 신원이 없을 때만 저장 파일�
     agent_ops.noteAgentKind(session, term, .claude, false); // 없음 → claude: 보류 신원을 지우지 않는다
     try std.testing.expectEqualStrings(rb2_claude_id, agent_ops.resumableAgentOf(session, term).?.session_id);
     // 살아 있는 신원이 이긴다.
-    term.hook.transcript.setIdentity("ffffffff-ffff-4fff-8fff-ffffffffffff");
+    term.hook.transcript.setProviderIdentity(.claude, "ffffffff-ffff-4fff-8fff-ffffffffffff");
     try std.testing.expectEqualStrings("ffffffff-ffff-4fff-8fff-ffffffffffff", agent_ops.resumableAgentOf(session, term).?.session_id);
     // 에이전트가 끝나면 신원도 보류 신원도 버린다 — 같은 칸에서 새로 띄운 세션이 옛 id 로 저장되면 안 된다.
     agent_ops.noteAgentKind(session, term, .none, false);
@@ -45621,7 +45952,7 @@ test "RB2-14 보류 신원: 살아 있는 신원이 없을 때만 저장 파일�
     try std.testing.expect(agent_ops.resumableAgentOf(session, term) == null);
     // 다른 종류로 바뀌어도 버린다(claude 의 id 를 codex 로 저장하면 안 된다).
     agent_ops.rememberSavedResume(term, .{ .provider = .claude, .session_id = rb2_claude_id });
-    term.hook.transcript.setIdentity(rb2_claude_id);
+    term.hook.transcript.setProviderIdentity(.claude, rb2_claude_id);
     agent_ops.noteAgentKind(session, term, .codex, false);
     try std.testing.expectEqualStrings("", term.hook.transcript.identity());
     try std.testing.expect(agent_ops.resumableAgentOf(session, term) == null);
@@ -104470,4 +104801,92 @@ test "inspector search IME host terminal pin retains callback routing priority" 
     try std.testing.expect(!chrome_ops.marked(self, "한", .{ .location = 1, .length = 0 }, null));
     try std.testing.expectEqualStrings("old", inspectorIMEQueryForTest(self));
     self.ime_terminal_target_id = null;
+}
+
+test "Codex resume identity: receipt separates identical prompts and moves exact owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    const pane = pane_ops.activePane(session);
+    const first = pane.activeTerm();
+    const second = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+    {
+        errdefer term_ops.destroyTerm(session, second);
+        try pane.terms.append(a, second);
+    }
+    first.agent_kind = .codex;
+    second.agent_kind = .codex;
+    const module = maru.session.codex_hook_receipt;
+    const receipt = module.parse(module.prefix ++ rb2_codex_id ++ ":0123456789abcdef0123456789abcdef:100!").?;
+    agent_ops.applyCodexHookReceipt(session, first, receipt);
+    try std.testing.expectEqualStrings(rb2_codex_id, agent_ops.resumableAgentOf(session, first).?.session_id);
+    // Copying an already-consumed valid marker to another terminal is not a move.
+    agent_ops.applyCodexHookReceipt(session, second, receipt);
+    try std.testing.expectEqual(first.surfaceId(), session.codex_daemon_bindings.lookup(rb2_codex_id).?);
+    try std.testing.expect(agent_ops.resumableAgentOf(session, second) == null);
+    // SessionStart can be observed after its TUI output; the same valid receipt repairs it.
+    session.codex_daemon_bindings.invalidate(rb2_codex_id);
+    agent_ops.applyCodexHookReceipt(session, second, receipt);
+    try std.testing.expectEqualStrings("", second.hook.transcript.identity());
+    agent_ops.applyCodexHookReceipt(session, first, receipt);
+    try std.testing.expectEqualStrings(rb2_codex_id, agent_ops.resumableAgentOf(session, first).?.session_id);
+    var moved = receipt;
+    moved.issued = 200;
+    agent_ops.applyCodexHookReceipt(session, second, moved);
+    try std.testing.expectEqualStrings("", first.hook.transcript.identity());
+    try std.testing.expect(agent_ops.resumableAgentOf(session, first) == null);
+    try std.testing.expectEqualStrings(rb2_codex_id, agent_ops.resumableAgentOf(session, second).?.session_id);
+    // A previous session's delayed receipt cannot replace the new one.
+    const old = module.parse(module.prefix ++ rb2_claude_id ++ ":0123456789abcdef0123456789abcdef:150!").?;
+    agent_ops.applyCodexHookReceipt(session, second, old);
+    try std.testing.expectEqualStrings(rb2_codex_id, agent_ops.resumableAgentOf(session, second).?.session_id);
+}
+
+test "Codex resume identity: cached daemon rejoin reads explicit UUID from the client once" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const fixture = std.c.getenv("MARU_AGENT_IDENTITY_FIXTURE") orelse return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const absolute = fixture_buf[0..try std.Io.Dir.cwd().realPathFile(io, std.mem.span(fixture), &fixture_buf)];
+    try tmp.dir.symLink(io, absolute, "codex", .{});
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const command = try std.fmt.allocPrint(a, "{s}/codex", .{root});
+    defer a.free(command);
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    session.loaded_config.config.sidebar.agent_hooks = true;
+    const pane = pane_ops.activePane(session);
+    const term = pane.activeTerm();
+    var pty = try maru.pty.PtySession.spawn(a, .{ .command = command, .args = &.{ "resume", rb2_codex_id }, .size = .{ .cols = 40, .rows = 10 } });
+    defer pty.deinit();
+    const pid = pty.childPid();
+    var process: maru.pty.types.ForegroundProcessName = .{ .pid = pid, .len = 5 };
+    @memcpy(process.bytes[0..5], "codex");
+    try term.rt.observation.foreground_processes.append(a, process);
+    term.agent_kind = .codex;
+    var id_buf: [64]u8 = undefined;
+    var ready = false;
+    for (0..100) |_| {
+        if (maru.pty.PtySession.processArgumentIdentity(pid, &maru.session.codex_hook_receipt.resumeFromProcArgs, &id_buf)) |id| {
+            try std.testing.expectEqualStrings(rb2_codex_id, id);
+            ready = true;
+            break;
+        }
+        try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    }
+    try std.testing.expect(ready);
+    agent_ops.pollAgentConsumer(session, term, false, true);
+    try std.testing.expectEqualStrings(rb2_codex_id, agent_ops.resumableAgentOf(session, term).?.session_id);
+    // A newer /new receipt wins; subsequent polls never reread the old resume argv.
+    const newer = maru.session.codex_hook_receipt.Receipt{ .session = rb2_claude_id, .issued = term.codex_receipt_issued + 1, .text = "" };
+    agent_ops.applyCodexHookReceipt(session, term, newer);
+    agent_ops.pollAgentConsumer(session, term, false, true);
+    try std.testing.expectEqualStrings(rb2_claude_id, agent_ops.resumableAgentOf(session, term).?.session_id);
 }

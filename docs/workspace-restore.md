@@ -508,6 +508,34 @@ read-old/write-new 방식이므로 한 번 저장하면 자연스럽게 사라�
 
 ### 에이전트 이어가기 — `agent-resume`
 
+2026-10-27: 신원 캐시는 ID와 보고한 provider를 함께 보관한다. 프로세스 종류와 provider가 다르면 그 ID를
+checkpoint에 싣지 않는다(늦게 도착한 Claude 훅의 UUID를 Codex ID로 저장하던 회귀). Codex 자식 env를 읽을 때는
+공유 app-server 데몬과 그 자손을 제외한다. 그 자손의 `CODEX_THREAD_ID`는 다른 터미널의 세션일 수 있다.
+공유 데몬의 메모리상 귀속이 없더라도 기존의 provider가 맞는 신원 또는 보류된 Codex resume ID가 정확히 하나면
+후속 이벤트를 다시 연결한다. `SessionStart`는 기존 소유자가 바뀔 수 있어 이 단축 경로를 쓰지 않는다.
+새 세션의 ID를 한 번도 확보하지 못했고 cwd·프롬프트도 모호한 경우는 계속 추측하지 않는다. 공유 데몬은 유지한다.
+적대적 검증 후에는 `SessionStart`로 무효화된 ID를 후속 이벤트나 checkpoint에서 이전 소유자에게 다시 붙이지
+않는다. 중복 신원·잘린 후보 목록은 기존 묶음보다 먼저 거부한다. 무효화는 저장을 한 번 예약하고, 같은 이벤트의
+반복은 추가 저장을 예약하지 않는다. 잘린 ID나 다른 provider의 늦은 훅은 기존 신원·대화를 덮지 못한다.
+
+검증은 `zig build test-agent-resume-identity test-codex-daemon-attribution test-agent-hook-session-attribution`으로
+재현한다. 10회 검증 범위는 아래와 같다. 1~9는 실패를 재현한 뒤 수정했으며, 10은 훅 정보의 한계와 대조군을 확인했다.
+
+| 회차 | 반례 또는 확인 범위 |
+| --- | --- |
+| 1 | 다른 터미널에서 resume한 세션의 이전 소유자가 후속 이벤트와 저장에서 부활함 |
+| 2 | 중복 ID보다 메모리 묶음을 먼저 신뢰함; 이벤트 전 checkpoint 중복도 검사 |
+| 3 | 17번째 후보의 중복을 놓침; 무효화 기억의 상한 이후에도 이전 귀속을 재사용하지 않는지 확인 |
+| 4 | 캐시와 자식 env에서 긴 ID를 잘라 별개 ID로 만듦 |
+| 5 | 늦은 다른 provider 훅이 정상 ID를 지움; 미확보 ID가 유일한 프롬프트로 확정되는 대조군 |
+| 6 | 귀속 무효화 뒤 checkpoint 갱신이 빠짐; 반복 이벤트는 저장을 반복하지 않음 |
+| 7 | 원격 출처의 신원을 로컬 데몬 후보로 사용함 |
+| 8 | 읽을 수 없는 훅 부모를 비데몬으로 단정함; 확인된 비데몬 훅은 새 증거로 복구 가능 |
+| 9 | 거절된 ID의 프롬프트·상태가 기존 세션에 섞임 |
+| 10 | 격리 설정에 훅을 설치·실행해 ID 수신과 터미널 귀속이 별개임을 확인 |
+
+
+
 - **저장**: `surface` 줄의 scalar `agent-resume="<provider>:<session-id>"`. provider는 `claude`·`codex`. 다음을
   **모두** 만족할 때만 싣고, 아니면 키를 생략한다.
   - 그 Term의 포그라운드에서 **로컬** claude·codex가 돌고 있다(`agent_kind`).
@@ -849,3 +877,10 @@ bump·migration 이 아니라 위 「헤더 정책」을 따르고, 필요하면
 
 이 목록은 [영속 터미널 세션 호스트](persistent-session-host.md#14-무인-tdde2e성능-gate)의 TDD 층과 함께 적용한다.
 수동 창 조작만 가능한 항목은 구현 완료로 세지 않으며 자동 runner가 없으면 해당 phase를 미완료로 둔다.
+
+
+Codex 공유 데몬의 터미널 귀속은 이제 `SessionStart` 훅이 해당 TUI에 반환하는 receipt를 추가로 사용한다.
+최신 비공개 토큰과 현재 프로세스 시작 시각을 검증한 뒤 ID를 terminal에 결속하고 checkpoint를 갱신한다.
+같은 cwd·짧거나 같은 프롬프트도 이 경로에서는 구분한다. 공유 데몬은 유지하며 `--no-daemon`을 강제하지 않는다.
+실행 중인 이전 훅, 원격 Codex, receipt 관측 실패 등에는 기존의 보수적 판정을 유지한다.
+자세한 출력 형식과 적대적 검증 3회는 [agent-hooks.md](agent-hooks.md)의 훅 receipt 절을 참조한다.

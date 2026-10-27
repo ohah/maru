@@ -3091,7 +3091,15 @@ fn hookConversationText(buf: []u8, scratch: []u8, raw: []const u8) []const u8 {
 /// **어떤 이벤트가 무엇을 트리거하는가** 뿐이다.)
 pub fn testApplyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) Applied {
     comptime std.debug.assert(builtin.is_test);
-    return applyHookEvent(self, term, ev);
+    // Hand-built legacy fixtures bypass parseLine, which supplies the provider
+    // in production. Supply the observed provider without weakening production.
+    var fixture = ev;
+    if (fixture.provider.len == 0) fixture.provider = switch (term.agent_kind) {
+        .claude => "claude",
+        .codex => "codex",
+        .none => "",
+    };
+    return applyHookEvent(self, term, fixture);
 }
 
 test "Codex 질문 훅은 제품 배지를 입력 대기로 세우고 답변 뒤 푼다" {

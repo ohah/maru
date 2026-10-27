@@ -30276,19 +30276,33 @@ test "훅 캡처: 셸 구간이 Pre 로 열리고 Post 로 닫히며 턴 끝이 
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .session_id = "S-br", .tool_name = "Bash", .tool_use_id = "toolu_bg", .duration_ms = 30 });
     try std.testing.expect(session.turn_captures.openTurn("S-br").?.shell.busy());
 
-    // ③b 닫을 이벤트가 세트에 있는 provider 에서만 연다(`closesShellBrackets`). codex 는 AT3b-2 로 `PostToolUse`
-    // 가 들어와 **열리고 닫힌다**; 세트에 없는 provider(모르는 표식)는 열지도 않는다 — 열면 턴 전체가 구간이 된다.
+    // ③b 다른 provider의 늦은 이벤트는 이 Claude 턴에 섞이지 않는다.
+    // Codex의 정상 열기/닫기는 아래 별도 Term에서 대조한다.
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "codex", .session_id = "S-br", .tool_name = "Bash", .tool_command = "ls", .tool_use_id = "exec-codex-1" });
     try std.testing.expectEqual(@as(usize, 2), session.turn_captures.openTurn("S-br").?.shell.sealed().len);
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .provider = "codex", .session_id = "S-br", .tool_name = "Bash", .tool_use_id = "exec-codex-1" });
-    try std.testing.expectEqual(@as(usize, 3), session.turn_captures.openTurn("S-br").?.shell.sealed().len);
+    try std.testing.expectEqual(@as(usize, 2), session.turn_captures.openTurn("S-br").?.shell.sealed().len);
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "mimo-code", .session_id = "S-br", .tool_name = "Bash", .tool_command = "ls", .tool_use_id = "x-1" });
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .provider = "mimo-code", .session_id = "S-br", .tool_name = "Bash", .tool_use_id = "x-1" });
-    try std.testing.expectEqual(@as(usize, 3), session.turn_captures.openTurn("S-br").?.shell.sealed().len);
+    try std.testing.expectEqual(@as(usize, 2), session.turn_captures.openTurn("S-br").?.shell.sealed().len);
 
     // ④ `Monitor` 는 셸 수에는 들지만 구간은 안 연다 — 닫을 신호(`Post`)가 그 matcher 에 없다.
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .session_id = "S-br", .tool_name = "Monitor", .tool_command = "tail -f x", .tool_use_id = "toolu_m" });
-    try std.testing.expectEqual(@as(u32, 6), session.turn_captures.openTurn("S-br").?.shell_calls); // a·b·bg·codex·mimo·m
+    try std.testing.expectEqual(@as(u32, 4), session.turn_captures.openTurn("S-br").?.shell_calls); // a·b·bg·m — codex·mimo는 다른 provider
+
+    // Positive control: the same Codex events open/close its own provider's slot.
+    const pane = tab_ops.activeTab(session).panes.items[0];
+    const codex = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+    {
+        errdefer term_ops.destroyTerm(session, codex);
+        try pane.terms.append(allocator, codex);
+    }
+    codex.agent_kind = .codex;
+    _ = agent_ops.testApplyHookEvent(session, codex, .{ .kind = .session_start, .provider = "codex", .session_id = "S-codex-br" });
+    _ = agent_ops.testApplyHookEvent(session, codex, .{ .kind = .pre_tool_use, .provider = "codex", .session_id = "S-codex-br", .tool_name = "Bash", .tool_command = "ls", .tool_use_id = "exec-own-1" });
+    try std.testing.expect(session.turn_captures.openTurn("S-codex-br").?.shell.busy());
+    _ = agent_ops.testApplyHookEvent(session, codex, .{ .kind = .post_tool_use, .provider = "codex", .session_id = "S-codex-br", .tool_name = "Bash", .tool_use_id = "exec-own-1" });
+    try std.testing.expectEqual(@as(usize, 1), session.turn_captures.openTurn("S-codex-br").?.shell.sealed().len);
 
     // ⑤ 게이트: **열기는 backlog 뒤, 닫기는 backlog 앞.** 회전본 tail 의 Post 가 살아 있는 파일에서 연
     // 구간을 닫아야 한다 — 같은 게이트에 두면 그 구간은 영영 안 닫힌다.
@@ -30299,11 +30313,11 @@ test "훅 캡처: 셸 구간이 Pre 로 열리고 Post 로 닫히며 턴 끝이 
     term.hook.backlog_catchup = false;
     {
         const open = session.turn_captures.openTurn("S-br").?;
-        try std.testing.expectEqual(@as(usize, 4), open.shell.sealed().len); // a·b·codex·d — old 는 열리지 않았다
-        try std.testing.expectEqual(@as(u32, 7), open.shell_calls); // a·b·bg·codex·mimo·m·d — backlog 의 Pre 는 세지도 않는다(AT4)
+        try std.testing.expectEqual(@as(usize, 3), open.shell.sealed().len); // a·b·d — old 는 열리지 않았다
+        try std.testing.expectEqual(@as(u32, 5), open.shell_calls); // a·b·bg·m·d — backlog 의 Pre 는 세지도 않는다(AT4)
         // 짝 없는 Post(backlog 에서 건너뛴 Pre 의 것)는 무시하고 센다.
         _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .session_id = "S-br", .tool_name = "Bash", .tool_use_id = "toolu_old" });
-        try std.testing.expectEqual(@as(u32, 2), open.shell.unmatched); // mimo 의 Post + old
+        try std.testing.expectEqual(@as(u32, 1), open.shell.unmatched); // old — 다른 provider의 mimo Post는 전체 거부
         try std.testing.expect(!open.shell.overflow);
     }
 
@@ -30312,7 +30326,7 @@ test "훅 캡처: 셸 구간이 Pre 로 열리고 Post 로 닫히며 턴 끝이 
     try std.testing.expect(id != 0);
     const sealed = session.turn_captures.sealedTurn(id) orelse return error.NoSealedTurn;
     try std.testing.expect(!sealed.shell.busy());
-    try std.testing.expectEqual(@as(usize, 5), sealed.shell.sealed().len); // a·b·codex·d + 배경
+    try std.testing.expectEqual(@as(usize, 4), sealed.shell.sealed().len); // a·b·d + 배경
     for (sealed.shell.sealed()) |iv| {
         try std.testing.expect(iv.end_ms >= iv.start_ms);
         try std.testing.expect(iv.end_ms > 1_577_836_800_000); // 2020-01-01 — monotonic 시계면 여기서 죽는다

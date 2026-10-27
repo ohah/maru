@@ -911,3 +911,26 @@ test "CPL9 documentation — 문자열·MarkupContent.value·없음·그 밖(무
     applyResolved(&l.items[0], r.value); // 이미 있던 것도 응답이 이긴다
     try testing.expectEqualStrings("later", l.items[0].documentation.?);
 }
+
+/// A failed resolve is not permission to commit an incomplete item.
+pub fn resolvedItemValid(result: ?std.json.Value) bool {
+    const value = result orelse return false;
+    if (value != .object) return false;
+    const label = value.object.get("label") orelse return false;
+    if (label != .string) return false;
+    if (value.object.get("additionalTextEdits")) |ad| {
+        if (ad != .array and ad != .null) return false;
+    }
+    return true;
+}
+
+test "CPLpending malformed resolve cannot release a pending Enter" {
+    for ([_][]const u8{ "null", "[]", "{}", "{\"label\":1}", "{\"label\":\"x\",\"additionalTextEdits\":42}" }) |input| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, input, .{});
+        defer parsed.deinit();
+        try std.testing.expect(!resolvedItemValid(parsed.value));
+    }
+    var valid = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "{\"label\":\"x\",\"additionalTextEdits\":[]}", .{});
+    defer valid.deinit();
+    try std.testing.expect(resolvedItemValid(valid.value));
+}

@@ -109,13 +109,17 @@ pub const State = struct {
     /// 확정이 기다리는 항목(`items` 첨자) — `pending_accept` 와 함께 선다.
     pending_item: ?usize = null,
     pending_since_ms: u64 = 0,
+    pending_snapshot: ?completion_ops.PendingCompletion = null,
+    pending_extras: []editor_selection.Selection = &.{},
     /// 서버 없이 버퍼 단어만으로 열렸다(재요청·resolve 없음).
     words_only: bool = false,
     /// 판정자 관측.
     opened_count: u64 = 0,
     resolved_count: u64 = 0,
     accepted_after_resolve: u64 = 0,
+    /// Kept as an observation that must remain zero: timeout never inserts text.
     accepted_on_timeout: u64 = 0,
+    cancelled_pending: u64 = 0,
     docs_toggles: u64 = 0,
     words_opened: u64 = 0,
     closed_empty: u64 = 0,
@@ -135,6 +139,9 @@ pub const State = struct {
         for (self.items.items) |*it| it.deinit(allocator);
         self.items.clearRetainingCapacity();
         self.order.clearRetainingCapacity();
+        if (self.pending_extras.len > 0) allocator.free(self.pending_extras);
+        self.pending_extras = &.{};
+        self.pending_snapshot = null;
         self.pending_item = null; // 첨자가 가리키던 항목이 사라졌다
         self.rows.clearRetainingCapacity();
         self.match_buf.clearRetainingCapacity();
@@ -408,9 +415,23 @@ pub fn onResolveResponse(self: *AppSession, seq: u32, result: ?std.json.Value, e
     const st = &self.editor_completion;
     if (!st.resolve_waiting or seq != st.resolve_seq) return;
     st.resolve_waiting = false;
-    if (!st.active or st.resolve_item >= st.items.items.len) return;
+    if (!st.active or st.resolve_item >= st.items.items.len) {
+        if (st.pending_accept) cancel(self);
+        return;
+    }
     const term = visibleEditorTerm(self, st.surface_id) orelse return;
     const doc = term.rt.editorDocument().opened orelse return;
+    if (st.pending_accept and (pendingDecision(self, true) != .apply or st.pending_item != st.resolve_item)) {
+        st.cancelled_pending += 1;
+        cancel(self);
+        return;
+    }
+    // Errors/null are not a resolved item. In particular they cannot release a
+    // pending Enter as an import-less edit. A later user action may retry.
+    if (!completion.resolvedItemValid(result)) {
+        if (st.pending_accept) cancel(self);
+        return;
+    }
     var item = &st.items.items[st.resolve_item];
     item.resolved = true;
     if (result) |r| if (r == .object) {
@@ -418,20 +439,30 @@ pub fn onResolveResponse(self: *AppSession, seq: u32, result: ?std.json.Value, e
         var view: completion.Item = .{ .label = item.label, .filter = item.filter, .sort = item.sort, .insert = item.insert };
         completion.applyResolved(&view, r);
         if (view.additional) |ad| {
+            const changes = lsp.text_edits.toChanges(self.allocator, .{ .array = .{ .items = ad, .capacity = ad.len, .allocator = self.allocator, .pointer_stability = .{} } }, doc.file.content, doc.file.lines, enc) catch {
+                cancel(self);
+                return;
+            };
             item.additional.deinit(self.allocator);
-            item.additional = lsp.text_edits.toChanges(self.allocator, .{ .array = .{ .items = ad, .capacity = ad.len, .allocator = self.allocator, .pointer_stability = .{} } }, doc.file.content, doc.file.lines, enc) catch .{};
+            item.additional = changes;
         }
         if (!std.mem.eql(u8, view.insert, item.insert)) {
             if (self.allocator.dupe(u8, view.insert)) |ni| {
                 self.allocator.free(item.insert);
                 item.insert = ni;
-            } else |_| {}
+            } else |_| {
+                cancel(self);
+                return;
+            }
         }
         if (view.documentation) |d| if (!std.mem.eql(u8, d, item.documentation)) { // 같으면 안 바꾼다 — 바꿔도 누수는 아니다(적대적 7회차 E5: 등가)
             if (self.allocator.dupe(u8, d)) |nd| {
                 if (item.documentation.len > 0) self.allocator.free(item.documentation);
                 item.documentation = nd;
-            } else |_| {}
+            } else |_| {
+                cancel(self);
+                return;
+            }
         };
         if (view.detail) |d| if (!std.mem.eql(u8, d, item.detail)) {
             if (self.allocator.dupe(u8, d)) |nd| {
@@ -445,30 +476,45 @@ pub fn onResolveResponse(self: *AppSession, seq: u32, result: ?std.json.Value, e
                     hide(self);
                     return;
                 }
-            } else |_| {}
+            } else |_| {
+                cancel(self);
+                return;
+            }
         };
         st.resolved_count += 1;
     };
     if (st.pending_accept) {
         st.pending_accept = false;
-        st.accepted_after_resolve += 1;
+        const before = st.accepted;
         accept(self);
+        if (st.accepted != before) st.accepted_after_resolve += 1;
     } else {
         resolveHighlighted(self, term);
     }
 }
 
-/// 접두사로 다시 좁힌다. `force` 면 접두사가 같아도 다시(목록이 갈아 끼워졌다). 결과가 0 이면 false(호출자가 닫는다).
-/// **확정 보류가 시간을 넘겼으면 additional 없이 지금 확정한다**(§8.2g-b — 응답을 `resolve_wait_ms` 까지만 기다린다). 확정했으면 true.
-/// `refresh` 와 tick 이 함께 부른다 — `refresh` 는 다른 오버레이가 없을 때만(포커스 없는 찾기 막대만 있을 때도) 불려, 오버레이 아래에서 보류된 확정은 이 시간 초과에 닿지 않았다
-/// (`AppSession.closeEditorHelpersBehindOverlay`).
-pub fn acceptPendingOnTimeout(self: *AppSession) bool {
+/// The adapter only captures host-owned identity. All lifetime/deadline decisions
+/// live in L2, so a different host cannot accidentally choose a partial commit.
+fn pendingContext(self: *AppSession) ?completion_ops.PendingContext {
     const st = &self.editor_completion;
-    if (!st.pending_accept or self.awakeMs() -| st.pending_since_ms < resolve_wait_ms) return false;
-    st.pending_accept = false;
-    st.resolve_waiting = false;
-    st.accepted_on_timeout += 1;
-    accept(self); // `resolved` 표시는 안 한다 — accept 는 그 플래그를 안 보고 hide 가 항목을 비운다(적대적 2회차 B18: 죽은 표시였다)
+    const term = visibleEditorTerm(self, st.surface_id) orelse return null;
+    const doc = term.rt.editorDocument();
+    const opened = doc.opened orelse return null;
+    return .{ .surface = st.surface_id, .document = @intFromPtr(doc), .revision = opened.file.revision, .primary = term.rt.editor_selection orelse return null, .extras = term.rt.editor_extra_selections };
+}
+
+fn pendingDecision(self: *AppSession, response: bool) completion_ops.PendingDecision {
+    const st = &self.editor_completion;
+    const snapshot = st.pending_snapshot orelse return .cancel;
+    return completion_ops.pendingDecision(snapshot, pendingContext(self), self.awakeMs(), response);
+}
+
+/// Historical name retained for the tick/SDK adapters. Expiry now cancels the
+/// transaction without editing; no timeout is permission to drop an import.
+pub fn acceptPendingOnTimeout(self: *AppSession) bool {
+    if (!self.editor_completion.pending_accept or pendingDecision(self, false) != .cancel) return false;
+    self.editor_completion.cancelled_pending += 1;
+    cancel(self);
     return true;
 }
 
@@ -666,6 +712,10 @@ pub fn handleKey(self: *AppSession, key: maru.terminal.input.Key, mods: maru.ter
         cancel(self);
         return false;
     }
+    if (st.pending_accept and key != .enter and key != .tab) {
+        cancel(self);
+        return key == .escape;
+    }
     switch (key) {
         .arrow_up => {
             self.chrome_host.suggest_box.move(-1, st.order.items.len);
@@ -703,9 +753,23 @@ pub fn handleKey(self: *AppSession, key: maru.terminal.input.Key, mods: maru.ter
                 if (st.resolve_waiting) {
                     st.pending_accept = true;
                     st.pending_item = idx; // 고른 **항목**을 쥔다 — 기다리는 동안 치면 다시 좁히며 선택이 preselect 로 돌아갔다(적대적 8회차)
+                    const context = pendingContext(self) orelse {
+                        cancel(self);
+                        return true;
+                    };
+                    const extras = self.allocator.dupe(editor_selection.Selection, context.extras) catch {
+                        cancel(self);
+                        return true;
+                    };
+                    st.pending_extras = extras;
                     st.pending_since_ms = self.awakeMs();
+                    var snapshot_context = context;
+                    snapshot_context.extras = extras;
+                    st.pending_snapshot = .{ .context = snapshot_context, .started_ms = st.pending_since_ms };
                     return true;
                 }
+                cancel(self);
+                return true;
             }
             accept(self);
             return true;
@@ -740,8 +804,12 @@ pub fn mouseDown(self: *AppSession, x_px: f64, y_px: f64) bool {
                 const ch: f64 = @floatFromInt(@max(p.metrics.cell_height_px, 1));
                 const row: usize = @intFromFloat((y_px - y0) / ch);
                 const start = @min(box.scroll, st.rows.items.len -| @min(st.rows.items.len, suggest_box.max_rows));
+                if (st.pending_accept) {
+                    cancel(self);
+                    return true;
+                }
                 box.selected = @min(start + row, st.order.items.len - 1);
-                accept(self);
+                _ = handleKey(self, .enter, .{});
                 return true;
             }
         }
@@ -756,6 +824,7 @@ pub fn mouseDown(self: *AppSession, x_px: f64, y_px: f64) bool {
 pub fn accept(self: *AppSession) void {
     const st = &self.editor_completion;
     defer hide(self);
+    if (st.pending_snapshot != null and pendingDecision(self, true) != .apply) return;
     // 나가 있는 요청(isIncomplete 로 다시 물은 것)은 버린다 — 그 응답이 확정 뒤에 목록을 다시 열었다(`hide` 는 대기를 안 지운다 — 적대적 5회차).
     st.waiting = false;
     st.dirty = false;
@@ -773,7 +842,7 @@ pub fn accept(self: *AppSession) void {
     // 가 덮는 글과 같으면 그만큼 덮는다 — VS Code `snippetSession` 의 규칙), additional(자동 import)은 **한 번**, 전부 한 편집 =
     // undo 하나, caret 은 자리마다 넣은 글 끝. 예전에는 다른 커서를 접어 버렸다(첫 조각은 primary 만이었다).
     const same_version = term.rt.editorDocument().notifications.lsp_version == st.response_version;
-    var plan = completion_ops.planAccept(self.allocator, doc.file.content, sel.focus, st.word_start, item.edit_start, item.insert, item.additional.items, same_version, term.rt.editor_extra_selections) catch return;
+    var plan = completion_ops.planAccept(self.allocator, doc.file.content, sel.focus, st.word_start, item.edit_start, item.insert, item.additional.items, same_version, term.rt.editor_extra_selections, if (st.pending_snapshot != null) .atomic else .ordinary) catch return;
     defer plan.deinit(self.allocator);
     if (!plan.allow and item.additional.items.len > 0) st.dropped_additional += 1;
     const changes = &plan.changes;
@@ -800,7 +869,7 @@ pub fn accept(self: *AppSession) void {
     self.metal_dirty = true;
 }
 
-pub const resolve_wait_ms: u64 = 300;
+pub const resolve_wait_ms: u64 = completion_ops.pending_timeout_ms;
 
 /// 문서 편집 하나가 지났다(`shared_edit.applyPrepared` — 편집은 모두 여기를 지난다) — 목록이 들고 있는 **편집 전 offset** 을 편집 후 축으로 민다
 /// (§8.2g-f, `delta.mapOffset`). primary 의 caret 에서 치는 글자는 낱말 시작 뒤라 그대로이고, **앞쪽 커서**에서 친 글자만큼 밀린다. 같은 문서의 다른 뷰
@@ -821,6 +890,13 @@ pub fn noteDocumentEdit(self: *AppSession, term: *Term, d: maru.session.editor.d
     if (!st.active) return;
     const owner = visibleEditorTerm(self, st.surface_id) orelse return;
     if (owner.rt.editorDocument() != doc) return;
+    if (st.pending_accept) {
+        cancel(self);
+        return;
+    }
+    // A prefetch also belongs to the pre-edit document. Enter will issue a new
+    // seq instead of committing a response calculated for the previous text.
+    st.resolve_waiting = false;
     // 낱말 시작 **앞을 지우며 걸치는** 편집이면 닫는다 — 트리거 글자(`.`)를 지운 것이다(`mapOffset` 은 구간 끝을 밀기만 해 낱말 시작이 caret 에
     // 붙어 살아남았다 — 적대적 3회차). 예전에는 `caret < word_start` 로 닫혔다.
     for (d.changes) |c| if (c.start < st.word_start and c.end >= st.word_start) {

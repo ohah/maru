@@ -1,4 +1,6 @@
 # 검증 매트릭스
+- [원자적 자동완성 확정](editor-completion-commit.md): `mise exec -- zig build test-editor-completion-contract test-editor-completion test-editor-completion-overlays -j2`.
+
 
 파싱 서비스의 완료 통지 hook은 합치기·재무장·mutex 밖 전달·퇴역 회수·종료를 검사한다. [독립 결함 대조](../tools/editor-parse-notify/README.md)를 따르며 실제 OS main queue와 AppSession 설치는 미연결이다.
 

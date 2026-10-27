@@ -26566,7 +26566,7 @@ test "CMP12 자동완성 ①-f — 버린 응답은 같은 트리거로 다시 �
         }
     }.f);
     try testing.expect(!s.editor_completion.active); // 버렸다 — 예전에는 같은 접두사로 다시 열렸다
-    // ③ 한 칸 띄고 `p` 로 다시 열어 resolve 안 된 `printf` 를 Enter(확정 대기) — 그 사이 `r` 을 쳐도 다시 묻지 않고, 확정이 들어간다.
+    // ③ 한 칸 띄고 `p` 로 다시 열어 resolve 안 된 `printf` 를 Enter(확정 대기) — 그 사이 `r` 을 치면 이전 확정을 취소하고 새 제안은 별도로 처리한다.
     try testing.expect(insertText(s, term, " p"));
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
     try frame(s, leaf, term);
@@ -26578,25 +26578,16 @@ test "CMP12 자동완성 ①-f — 버린 응답은 같은 트리거로 다시 �
     s.chrome_host.suggest_box.selected = pick orelse return error.NoPrintfRow;
     try pressKey(&fx, .enter, .{});
     try testing.expect(s.editor_completion.pending_accept); // resolve 를 기다린다
-    const sent_pending = s.editor_lsp.sent_completions;
     try testing.expect(insertText(s, term, "r"));
-    try frame(s, leaf, term);
-    try testing.expectEqual(sent_pending, s.editor_lsp.sent_completions); // 기다리는 동안 다시 묻지 않았다
-    var spins: usize = 0;
-    while (s.editor_completion.active and spins < 400) : (spins += 1) {
-        _ = pumpLspUntil(&fx, 10, ctx, struct {
-            fn f(c: Ctx) bool {
-                return !c.fx.session.editor_completion.active;
-            }
-        }.f);
-        try frame(s, leaf, term);
-    }
-    try testing.expect(!s.editor_completion.active);
+    try testing.expect(!s.editor_completion.pending_accept);
+    try testing.expect(s.editor_completion.pending_snapshot == null);
+    try pressKey(&fx, .escape, .{}); // 추가 입력의 새 제안도 닫는다.
+    lsp_client.pump(s); // 이전 resolve가 와도 이미 취소한 Enter는 적용하지 않는다.
     const doc = term.rt.editorDocument().opened.?.file.content;
-    try testing.expect(std.mem.endsWith(u8, doc[0..term.rt.editor_selection.?.focus], " printf")); // 기다리던 확정이 들어갔다(`pr` → printf)
+    try testing.expect(std.mem.endsWith(u8, doc[0..term.rt.editor_selection.?.focus], " pr"));
 }
 
-test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(additional 이 온다) 확정은 undo 하나; 확정 때 미해결이면 응답 뒤 한 번에; RESOLVESTALL 이면 300 ms 뒤 additional 없이; 병합 목록에서 같은 label 은 LSP 것 (제품 경계, §8.2g-b)" {
+test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(additional 이 온다) 확정은 undo 하나; 확정 때 미해결이면 응답 뒤 한 번에; RESOLVESTALL 이면 시한 뒤 원문 보존; 병합 목록에서 같은 label 은 LSP 것 (제품 경계, §8.2g-b)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -26771,6 +26762,14 @@ test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(add
         }
         try pressKey(&fx, .enter, .{});
         try testing.expect(s.editor_completion.pending_accept);
+        const unchanged = try allocator.dupe(u8, content(term));
+        defer allocator.free(unchanged);
+        const unchanged_undo = term.rt.editorDocument().history.undo_len;
+        // Verify the former partial-commit boundary before the final deadline.
+        s.editor_completion.pending_snapshot.?.started_ms -|= 301;
+        try testing.expect(!completion_client.acceptPendingOnTimeout(s));
+        try testing.expectEqualStrings(unchanged, content(term));
+        s.editor_completion.pending_snapshot.?.started_ms -|= 5_000;
         const start = s.awakeMs();
         while (s.editor_completion.active and s.awakeMs() - start < 3000) {
             lsp_client.pump(s);
@@ -26778,11 +26777,9 @@ test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(add
             _ = usleep(5_000);
         }
         try testing.expect(!s.editor_completion.active);
-        try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted_on_timeout);
-        try testing.expect(s.awakeMs() - start >= 300); // 계약의 300 ms — 상수를 되비추지 않는다(적대적 2회차 B17)
-        try testing.expect(std.mem.indexOf(u8, content(term), "  lazy_import\n") != null);
-        try testing.expect(std.mem.indexOf(u8, content(term), "lazy.h") == null);
-        s.dispatchAppAction(.editor_undo);
+        try testing.expectEqual(@as(u64, 0), s.editor_completion.accepted_on_timeout);
+        try testing.expectEqualStrings(unchanged, content(term));
+        try testing.expectEqual(unchanged_undo, term.rt.editorDocument().history.undo_len);
         try clearRange(s, term, line3, 3);
         try removeMarkerHover(s, term, "// RESOLVESTALL\n");
     }
@@ -64781,7 +64778,7 @@ test "HELP10 확정 보류 중에 메뉴바로 팔레트를 열어도 — 사용
     try testing.expect(s.chrome_host.palette.open); // 팔레트는 그대로
 }
 
-test "HELP11 확정 보류 중에 팔레트를 열었는데 서버가 답하지 않으면 — 오버레이 아래에서도 300 ms 뒤 additional 없이 들어간다 (제품 경계, §8.2g-b)" {
+test "HELP11 확정 보류 중에 팔레트를 열었는데 서버가 답하지 않으면 — 오버레이 아래에서도 시한 뒤 원문을 보존한다 (제품 경계, §8.2g-b)" {
     // 시간 초과 확정은 `refresh` 안에만 있었는데 `refresh` 는 다른 오버레이가 없을 때만(포커스 없는 찾기 막대만 있을 때도) 불린다 — 그래서 tick 도
     // 같은 함수를 부른다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -64796,15 +64793,15 @@ test "HELP11 확정 보류 중에 팔레트를 열었는데 서버가 답하지 
     _ = try s.tick();
     // ★ 보류는 tick 뒤에도 산다 — 서버가 답하지 않으므로(`RESOLVESTALL`) 이 순서는 결정적이다. 예전 구현은 여기서 `hide` 로 지웠다.
     try testing.expect(s.editor_completion.pending_accept and s.editor_completion.active);
+    s.editor_completion.pending_snapshot.?.started_ms -|= 5_000;
     while (s.editor_completion.active and s.awakeMs() - start < 3000) {
         lsp_client.pump(s);
         _ = try s.tick();
         _ = usleep(5_000);
     }
     try testing.expect(!s.editor_completion.active);
-    try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted_on_timeout);
-    try testing.expect(s.awakeMs() - start >= 250); // 기다렸다(보류를 곧바로 버리거나 넣지 않았다)
-    try testing.expect(std.mem.indexOf(u8, h.content(), "  lazy_import\n") != null);
+    try testing.expectEqual(@as(u64, 0), s.editor_completion.accepted_on_timeout);
+    try testing.expect(std.mem.indexOf(u8, h.content(), "  laz\n") != null);
     try testing.expect(std.mem.indexOf(u8, h.content(), "lazy.h") == null);
     try testing.expect(s.chrome_host.palette.open);
 }
@@ -65179,7 +65176,7 @@ test "FINDH4 완성 목록이 찾기 막대와 함께 열린 채 찾기 입력�
     try testing.expect(!s.editor_completion.active and !s.chrome_host.suggest_box.open);
 }
 
-test "FINDH5 확정 보류 중에 찾기를 열면(입력에 포커스) — 그 프레임이 보류를 지우지 않고 300 ms 뒤 additional 없이 들어간다 (제품 경계, §8.2g-b)" {
+test "FINDH5 확정 보류 중에 찾기를 열면(입력에 포커스) — 그 프레임이 보류를 지우지 않고 시한 뒤 원문을 보존한다 (제품 경계, §8.2g-b)" {
     // 적대적 검증 2026-10-10: 「찾기 막대뿐이면 헬퍼도 그린다」 게이트가 포커스 있는 찾기·확인창에서도 열려 `refresh` 가 불리면, 그 안의
     // `editorHelpersSuppressed` 가 목록을 닫으며 tick 이 일부러 남겨 둔 확정 보류(⑵)까지 지웠다 — Enter 로 고른 항목이 사라졌다. HELP11 은
     // 팔레트(뒤에 모여 게이트를 닫는다)로만 쟀고 프레임도 짓지 않아 못 봤다. 여기서는 tick 뒤마다 프레임(prep)을 짓는다.
@@ -65196,6 +65193,7 @@ test "FINDH5 확정 보류 중에 찾기를 열면(입력에 포커스) — 그 
     _ = try s.tick();
     try h.frame();
     try testing.expect(s.editor_completion.pending_accept and s.editor_completion.active); // ★ 프레임이 보류를 지우지 않았다
+    s.editor_completion.pending_snapshot.?.started_ms -|= 5_000;
     while (s.editor_completion.active and s.awakeMs() - start < 3000) {
         lsp_client.pump(s);
         _ = try s.tick();
@@ -65203,8 +65201,8 @@ test "FINDH5 확정 보류 중에 찾기를 열면(입력에 포커스) — 그 
         _ = usleep(5_000);
     }
     try testing.expect(!s.editor_completion.active);
-    try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted_on_timeout);
-    try testing.expect(std.mem.indexOf(u8, h.content(), "  lazy_import\n") != null);
+    try testing.expectEqual(@as(u64, 0), s.editor_completion.accepted_on_timeout);
+    try testing.expect(std.mem.indexOf(u8, h.content(), "  laz\n") != null);
 }
 
 test "FINDH7 포커스 없는 찾기 막대를 누르면(패딩 띠 포함) — 클릭이 막대 뒤 편집기로 내려가지 않고 찾기 입력이 포커스를 받는다, 막대 밖은 편집기 것이다 (제품 경계)" {
@@ -74207,4 +74205,114 @@ test "trust picker IME host external trust decisions do not replace the opening 
     try testing.expectEqual(generation, ime.generation(fx.session));
     try testing.expectEqualStrings("한", fx.session.chrome_host.trust_picker.input.preedit.items);
     try testing.expectEqual(@as(usize, 50), fx.session.editor_trust_list.shown.items.len);
+}
+test "CMPAT resolve commit preserves input across late, stale, error and cancellation paths" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const response = "{\"label\":\"lazy_import\",\"additionalTextEdits\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"newText\":\"#include \\\"lazy.h\\\"\\n\"}]}";
+    for (0..19) |attack| {
+        var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+        defer h.deinit(allocator);
+        try h.init(allocator, pending_doc ++ "// RESOLVESTALL\n");
+        const s = h.fx.session;
+        try pendingAcceptFixture(&h);
+        const before = try allocator.dupe(u8, h.content());
+        defer allocator.free(before);
+        const undo_before = h.term.rt.editorDocument().history.undo_len;
+        const seq = s.editor_completion.resolve_seq;
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+        const valid = attack < 3 or attack == 17;
+        switch (attack) {
+            0 => { // A response beyond the old 300ms cutoff still commits atomically.
+                s.editor_completion.pending_snapshot.?.started_ms -|= 1_200;
+                try testing.expect(!completion_client.acceptPendingOnTimeout(s));
+                try testing.expectEqualStrings(before, h.content());
+            },
+            1 => { // Another request must neither apply nor cancel this transaction.
+                completion_client.onResolveResponse(s, seq + 1, parsed.value, .utf8);
+                try testing.expect(s.editor_completion.pending_accept);
+            },
+            2 => { // Repeated Enter cannot move the deadline or insert a second edit.
+                const started = s.editor_completion.pending_snapshot.?.started_ms;
+                try pressKey(&h.fx, .enter, .{});
+                try testing.expectEqual(started, s.editor_completion.pending_snapshot.?.started_ms);
+            },
+            3 => {
+                try pressKey(&h.fx, .escape, .{});
+            },
+            4 => {
+                try pressKey(&h.fx, .arrow_left, .{});
+            },
+            5 => {
+                s.editor_completion.pending_snapshot.?.started_ms -|= 5_000;
+            },
+            6 => {
+                h.term.rt.editorDocument().opened.?.file.revision += 1;
+            },
+            7 => {
+                h.term.rt.editor_selection.?.focus -= 1;
+            },
+            8 => {
+                completion_client.onResolveResponse(s, seq, null, .utf8);
+            },
+            9 => {
+                completion_client.hide(s);
+            },
+            10 => {
+                s.editor_completion.resolve_item = s.editor_completion.items.items.len;
+            },
+            11 => {
+                s.editor_completion.pending_item = null;
+            },
+            12 => {
+                parsed.value.object.getPtr("additionalTextEdits").?.* = .{ .integer = 42 };
+            },
+            13 => {
+                parsed.value.object.getPtr("additionalTextEdits").?.array.items[0].object.getPtr("range").?.* = .null;
+            },
+            14 => {
+                h.term.rt.editor_extra_selections = try allocator.dupe(maru.session.editor.selection.Selection, &.{maru.session.editor.selection.Selection.at(1)});
+            },
+            15 => {
+                h.term.rt.editor_extra_selections = try allocator.dupe(maru.session.editor.selection.Selection, &.{maru.session.editor.selection.Selection.at(1)});
+                s.editor_completion.pending_accept = false;
+                s.editor_completion.pending_snapshot = null;
+                s.editor_completion.pending_item = null;
+                var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+                s.allocator = failing.allocator();
+                defer s.allocator = allocator;
+                try testing.expect(completion_client.handleKey(s, .enter, .{}));
+                try testing.expect(failing.has_induced_failure);
+            },
+            16 => {
+                var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+                s.allocator = failing.allocator();
+                defer s.allocator = allocator;
+                completion_client.onResolveResponse(s, seq, parsed.value, .utf8);
+                try testing.expect(failing.has_induced_failure);
+            },
+            17 => {
+                completion_client.onResolveResponse(s, seq, parsed.value, .utf8);
+            },
+            18 => {
+                s.editor_completion.response_version = 0;
+                const edit = &parsed.value.object.getPtr("additionalTextEdits").?.array.items[0];
+                edit.object.getPtr("range").?.object.getPtr("start").?.object.getPtr("line").?.* = .{ .integer = 4 };
+                edit.object.getPtr("range").?.object.getPtr("end").?.object.getPtr("line").?.* = .{ .integer = 4 };
+            },
+            else => unreachable,
+        }
+        completion_client.onResolveResponse(s, seq, parsed.value, .utf8);
+        if (valid) {
+            try testing.expect(std.mem.startsWith(u8, h.content(), "#include \"lazy.h\"\n"));
+            try testing.expectEqual(undo_before + 1, h.term.rt.editorDocument().history.undo_len);
+            s.dispatchAppAction(.editor_undo);
+            try testing.expectEqualStrings(before, h.content());
+        } else {
+            try testing.expectEqualStrings(before, h.content());
+            try testing.expectEqual(undo_before, h.term.rt.editorDocument().history.undo_len);
+        }
+        try testing.expectEqual(@as(u64, 0), s.editor_completion.accepted_on_timeout);
+    }
 }

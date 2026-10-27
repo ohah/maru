@@ -52,6 +52,7 @@ pub const components = struct {
     pub const outline = @import("chrome/components/outline.zig");
     pub const overlay_input = @import("chrome/components/overlay_input.zig");
     pub const activity_search_ime = @import("chrome/components/activity_search_ime.zig");
+    pub const recovery_filter = @import("chrome/components/recovery_filter.zig");
     pub const overlay_input_ime = @import("chrome/components/overlay_input_ime.zig"); // find·palette 공유 기반(컴포넌트 아님)
     pub const text_field_ime = @import("chrome/components/text_field_ime.zig");
     pub const text_field = @import("chrome/components/text_field.zig");

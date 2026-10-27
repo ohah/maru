@@ -361,7 +361,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // ABI 243: native activity-search projection and input ownership.
 // v244: symbol picker native range ownership and atomic filtered row admission.
 // v245: reference picker range transactions and result-set ownership.
-pub const abi_version: u32 = 245;
+// v246: recovery picker range transactions and atomic normalized filter publication.
+pub const abi_version: u32 = 246;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -6791,6 +6792,7 @@ pub const AppSession = struct {
     /// 아니라 사이드바 상주 — sidebar_search_active일 때 키/IME가 여기로 라우팅되고, 카드 목록을 이름·브랜치·폴더로
     /// 필터링한다(visible_slots). Esc로 종료, Enter로 첫 매칭 세션 이동. P3.
     sidebar_search_input: chrome.components.overlay_input.OverlayInput = .{},
+    recovery_picker_ime: @import("app_session/recovery_picker_ime.zig").State = .{},
     reference_picker_ime: @import("app_session/reference_picker_ime.zig").State = .{},
     symbol_picker_ime: @import("app_session/symbol_picker_ime.zig").State = .{},
     sidebar_ime: @import("app_session/sidebar_ime.zig").State = .{},
@@ -16762,10 +16764,7 @@ pub const AppSession = struct {
             .find => return @import("app_session/find_ime.zig").commitAll(self),
             .palette => return @import("app_session/palette_ime.zig").commitAll(self),
             .symbol_picker => return @import("app_session/symbol_picker_ime.zig").commitAll(self),
-            .recovery_picker => if (self.chrome_host.recovery_picker.input.commitPreedit(self.allocator)) {
-                editor_ops.recovery_ui.recompute(self);
-                self.metal_dirty = true;
-            },
+            .recovery_picker => return @import("app_session/recovery_picker_ime.zig").commitAll(self),
             .trust_picker => if (self.chrome_host.trust_picker.input.commitPreedit(self.allocator)) {
                 editor_ops.trust_ui.recompute(self);
                 self.metal_dirty = true;
@@ -25382,6 +25381,7 @@ pub const AppSession = struct {
         self.web_nav_action_pending = null; // Phase 7e-3: nav 버튼 클릭 pending(POD, heap 없음 — 같은 대칭 규율)
         self.rename_ime.deinit(self.allocator);
         self.rename_input.deinit(self.allocator); // 인라인 rename 입력(query/preedit) heap 해제
+        self.recovery_picker_ime.deinit(self.allocator);
         self.reference_picker_ime.deinit(self.allocator);
         self.symbol_picker_ime.deinit(self.allocator);
         self.sidebar_ime.deinit(self.allocator);

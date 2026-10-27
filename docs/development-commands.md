@@ -2186,3 +2186,8 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 제품 변이는 `python3 tools/reference-picker-ime/mutations.py --output <new-external-dir>`로 격리 검증한다.
 실제 입력/후보창은 `python3 tools/reference-picker-ime/run.py --output <new-external-dir>`를 쓰고,
 `--mode diagnostic`은 PNG/OCR 통과로 계산하지 않는다. `--app <fixed-app>/Contents/MacOS/maru-macos-app`으로 앱을 고정한다.
+
+
+복구 목록 검색 IME: `mise exec -- zig build test-recovery-picker-ime -j2`는 범위·세대·목록 갱신·OOM과
+실제 private 백업의 후보 Return/별도 Return 경계를 검사한다. 중립 모델은 Debug/ReleaseFast 각각 실행한다.
+제품 변이와 실제 OS 입력/후보창 검증은 [구현 계획](plans/recovery-picker-ime.md)을 따른다.

@@ -1,6 +1,6 @@
 # 편집 한 번의 메인 스레드 비용 계획
 
-상태: EW0 완료(계측 — 원인 확정), EW1 구현, [EW2 제품 연결](editor-incremental-folds.md) 머지 완료, [EW3 비용 분리](editor-storage-cost-measurement.md) 완료·제품 변경 보류(2026-10-22 사용자 결정 — 「원인을 계측으로 하나씩 확정하는 계획부터」). 배치 원칙(파싱은 메인에서 프레임 예산으로
+상태: EW0 완료(계측 — 원인 확정), EW1 구현, [EW2 제품 연결](editor-incremental-folds.md) 머지 완료, [EW3 비용 분리](editor-storage-cost-measurement.md) 완료·제품 변경 보류(2026-10-22 사용자 결정 — 「원인을 계측으로 하나씩 확정하는 계획부터」). 2026-10-27 재측정에서 드러난 큰 삭제 뒤 멈춤(고정 머리줄 요약)을 [고쳤다](#큰-삭제-뒤-고정-머리줄-요약-2026-10-27). 배치 원칙(파싱은 메인에서 프레임 예산으로
 끊는다 — 워커가 아니다)은 [편집기 층](../native-editor-layering.md) §2.1·§2.1a 가 소유하고, 이 문서는 **편집 한 번 뒤의 메인 스레드 비용**의
 실측·원인·조각·검증을 소유한다.
 
@@ -204,3 +204,47 @@ Provider가 마지막 집계 트리의 참조 계수 사본과 심볼 개수를 
 합성 문서의 헤더 조상 방문은 각각 13·23·26, 변경 범위 방문은 8·12·14, 재구축은 모두 0이었다.
 접힘 승격의 전체 순회는 여전히 남고 큰 Swift 원문은 60 fps의 16.7 ms보다 길다. EW1을 편집 비용
 문제 전체의 해결로 해석하지 않는다. 이후 EW2를 제품에 연결했고, [EW3 비용 분리](editor-storage-cost-measurement.md)로 저장소 재구축의 실제 몫을 확인했다.
+
+## 큰 삭제 뒤 고정 머리줄 요약 (2026-10-27)
+
+EW1~EW3 뒤 main `b99dbfd50`에서 처음 실측(2026-10-22)과 같은 임시 판정자로 다시 쟀다. 편집 한 번과 그 뒤 pane 프레임 하나이고,
+ReleaseFast·같은 바이너리 3회다. 한 글자 입력은 `build.zig` 19.5 → 7.35 ms, `MaruAppHost.swift` 28.6 → 6.85 ms로 줄었다(합 중앙값).
+글자당 심볼 순회는 0, 접힘 순회는 6~16 노드였다. 그런데 **파일의 1/3을 지운 직후 프레임**은 나빠졌다. Swift는 3.13~3.16 초로 세 번 다
+재현됐고, 다른 파일도 36~54 ms였다(10-22에는 3.6~18.9 ms).
+
+**원인.** `sample`의 거의 전부가 `sticky.compute` → `symbols.Summary.hasSymbols` → `touched` → `symbolForNode` →
+`ts_node_child_with_descendant`였다. 임시 계측으로 갈라 보니 2.15 초 전부가 **편집을 받은 옛 트리** 쪽 `touched`였다(새 트리 쪽은 4 ms).
+옛 트리에서 지운 노드는 0폭이 된다. tree-sitter는 0폭 노드의 부모를 그 byte에 닿는 자식마다 재귀로 찾는다
+(MIT 소스 `lib/src/node.c` `ts_node_child_with_descendant`의 `is_empty` 갈래). 요약은 지운 노드마다 `symbolForNode`를 불렀고,
+`symbolForNode`는 이름 끝·본문 끝을 고르려고 형제·부모를 조회한다. 같은 byte에 그런 노드가 수백 개 쌓이면 조회가 폭주한다.
+실제 파일에서 옛 코드의 요약 한 번은 삭제 크기에 따라 초선형으로 늘었다(Swift 약 120 KB 삭제 111~209 ms, 380 KB 2.15 초).
+되살림은 0폭 노드가 없어 차이가 없었다.
+
+**수정.** 존재 판정을 `Provider.symbolName`(종류·`isSymbolWorthy`·이름 노드)으로 떼었다. `symbolForNode`는 그것을 거쳐 값을 채우고,
+요약(`touched`·`fullCount`)은 adapter의 `isSymbol`로 그것만 부른다. `symbolForNode`가 null을 내는 조건은 이것뿐이라 집계 의미는 같다.
+
+**검증.**
+- 판정자 `sticky changes 큰 삭제 뒤 요약은 존재만 세고 심볼 값은 조상 사슬에서만 채운다`: 여섯 언어 일곱 사례(이름 없는 Zig `test {}` 포함)로 다음을 단언한다.
+  - 재구축 없이 고친다.
+  - 지운 범위를 걷는다.
+  - `Stats.symbol_values`(`symbolForNode`가 값을 채운 수)는 조상 사슬 몫만 는다.
+  - 집계가 전체 목록과 같다. 지운 것을 되살린 뒤도 같다.
+- 변이 여섯:
+  - `touched`·`fullCount`를 옛 호출로 되돌림.
+  - `isSymbol`이 `symbolForNode`를 직접 부름.
+  - 항상 참.
+  - 이름 확인 누락.
+  - 카운터 삭제.
+
+  이 판정자가 모두 잡았다. 이름 확인 누락은 이름 없는 사례를 더한 뒤에야 잡혔다.
+- 실제 파일 다섯 × 삭제 세 종 × 지움·되살림 30경우에서 요약 집계가 전체 목록과 같았다. 요약 한 번은 0.3~16 ms였다.
+
+| 1/3 지운 직후 프레임 | main `b99dbfd50` | 수정 뒤 |
+| --- | ---: | ---: |
+| `web/src/viewer.ts` | 54 ms | 4.1 ms |
+| `android_app_host.c` | 36 ms | 5.8 ms |
+| `build.zig` | 38 ms | 23 ms |
+| `MaruAppHost.swift` | 3,160 ms | 28.9 ms |
+
+다른 파일의 36~54 ms도 같은 원인이었다. 처음엔 `sample`에서 고정 머리줄 쪽 표본이 적어 별개라고 봤는데, 수정 뒤 제품 경로 실측에서 함께 사라졌다.
+한 글자 입력은 바뀌지 않았다(Swift 6.8 ms, `build.zig` 7.6 ms). 이 숫자도 로컬 실행이며 AppKit 입력에서 화면 표시까지의 지연이나 출하 예산은 아니다.

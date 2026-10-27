@@ -1699,6 +1699,12 @@ pub fn build(b: *std.Build) void {
     const run_search_case_fold_tests = b.addRunArtifact(search_case_fold_tests);
     run_search_case_fold_tests.addArg("--maru-expect-tests=25"); // SCF1~3과 익명 import 판정자 22개.
     b.step("test-search-case-fold", "Run Unicode search folding judges").dependOn(&run_search_case_fold_tests.step);
+    const terminal_environment_tests = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{ "EnvStorage", "inherited_env:" },
+    });
+    const run_terminal_environment = b.addRunArtifact(terminal_environment_tests);
+    b.step("test-terminal-environment", "Verify inherited launcher color and terminal environment isolation").dependOn(&run_terminal_environment.step);
     const parse_request_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"parse request gate"} });
     const run_parse_request = b.addRunArtifact(parse_request_tests);
     run_parse_request.addArg("--maru-expect-tests=36");

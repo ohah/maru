@@ -2521,14 +2521,16 @@ test "EnvStorage forces TERM_PROGRAM to maru (자기 이름 — 부모 값 덮�
     try std.testing.expectEqual(@as(usize, 0), tpv_count); // 부모 VERSION은 strip하고 주입 안 함
 }
 
-test "EnvStorage strips launcher color-force overrides (CLICOLOR_FORCE/FORCE_COLOR)" {
+test "EnvStorage strips launcher color overrides (NO_COLOR/CLICOLOR_FORCE/FORCE_COLOR)" {
     // 런처(빌드 도구·CI·부모 셸)가 남긴 색-강제 override는 supports-color류(codex 등)가 env_force_color로
     // 먼저 평가해 색 레벨을 강제(흔히 basic 16색)하므로 COLORTERM=truecolor를 무시한다 → truecolor 꺼짐
     // (실측: `zig build`로 띄운 maru에서 상속된 CLICOLOR_FORCE=1 때문에 codex 입력창 회색 컴포저가 안 그려짐).
     // maru는 색 capability를 COLORTERM/TERM으로만 알리므로 이 force 변수를 자식 env에 넘기지 않는다.
+    _ = setenv("NO_COLOR", "1", 1);
     _ = setenv("CLICOLOR_FORCE", "1", 1);
     _ = setenv("FORCE_COLOR", "1", 1);
     defer {
+        _ = unsetenv("NO_COLOR");
         _ = unsetenv("CLICOLOR_FORCE");
         _ = unsetenv("FORCE_COLOR");
     }
@@ -2538,10 +2540,22 @@ test "EnvStorage strips launcher color-force overrides (CLICOLOR_FORCE/FORCE_COL
     var i: usize = 0;
     while (envp[i]) |entry| : (i += 1) {
         const slice = std.mem.span(entry);
+        try std.testing.expect(!std.mem.startsWith(u8, slice, "NO_COLOR="));
         try std.testing.expect(!std.mem.startsWith(u8, slice, "CLICOLOR_FORCE="));
         try std.testing.expect(!std.mem.startsWith(u8, slice, "FORCE_COLOR="));
     }
     try std.testing.expect(i >= 2); // 나머지 부모 env는 그대로 물려받았다
+}
+
+test "EnvStorage preserves intentional NO_COLOR in explicit env and config overrides" {
+    var explicit = try EnvStorage.init(std.testing.allocator, &.{"NO_COLOR=1"}, &.{}, "xterm-256color", null, null, null, null);
+    defer explicit.deinit();
+    try std.testing.expectEqualStrings("NO_COLOR=1", std.mem.span(explicit.envpPtr()[0].?));
+    var configured = try EnvStorage.init(std.testing.allocator, &.{}, &.{"NO_COLOR=1"}, "xterm-256color", null, null, null, null);
+    defer configured.deinit();
+    const value = envValueCount(&configured, "NO_COLOR=");
+    try std.testing.expectEqual(@as(usize, 1), value.count);
+    try std.testing.expectEqualStrings("1", value.last.?);
 }
 
 test "EnvStorage strips the outer multiplexer identity (TMUX/TMUX_PANE)" {
@@ -2603,7 +2617,7 @@ test "EnvStorage parent snapshot preserves caller environment while applying Mar
     var storage = try EnvStorage.initWithParentSnapshot(
         std.testing.allocator,
         &.{},
-        &.{ "MARU_TEST_GUI_ENV=fresh", "MARU_PANE_ID=7", "TERM=stale", "FORCE_COLOR=1" },
+        &.{ "MARU_TEST_GUI_ENV=fresh", "MARU_PANE_ID=7", "TERM=stale", "FORCE_COLOR=1", "NO_COLOR=1" },
         &.{},
         "xterm-256color",
         "maru",
@@ -2617,6 +2631,7 @@ test "EnvStorage parent snapshot preserves caller environment while applying Mar
     try std.testing.expectEqualStrings("fresh", envValueCount(&storage, "MARU_TEST_GUI_ENV=").last.?);
     try std.testing.expectEqualStrings("xterm-256color", envValueCount(&storage, "TERM=").last.?);
     try std.testing.expectEqual(@as(usize, 0), envValueCount(&storage, "FORCE_COLOR=").count);
+    try std.testing.expectEqual(@as(usize, 0), envValueCount(&storage, "NO_COLOR=").count);
     try std.testing.expectEqual(@as(usize, 0), envValueCount(&storage, "MARU_PANE_ID=").count);
 }
 

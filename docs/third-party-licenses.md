@@ -4,6 +4,11 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 
 > 빌드/실행에만 쓰고 산출물에 **포함하지 않는** dev/test 의존성(libvterm·libghostty-vt 등)은 여기 대상이 아니다 — [project-rules.md](project-rules.md) §의존성, [references.md](references.md) 참고. 이 문서는 **배포물(`.app`/`.dmg`)에 실제로 들어가는** 자산만 다룬다.
 
+Windows 번들 ConPTY `1.24.260710001`의 `conpty.dll`·`OpenConsole.exe`는 Microsoft Corporation의
+MIT 라이선스다. 원문은 [assets/windows/conpty/LICENSE](../assets/windows/conpty/LICENSE), 출처와
+고정 SHA-256은 [번들 설명](../assets/windows/conpty/README.md)에 둔다. Windows 설치 산출물에는
+`licenses/ConPTY-MIT.txt`를 함께 넣는다. 사용자 시스템의 ConPTY로 실행하는 경우에는 해당 바이너리를 재배포하지 않는다.
+
 ## 번들 코드 라이브러리
 
 바이너리에 링크되어 배포물에 포함되는 제3자 코드다. **폰트와 달리 원본 무수정 재배포가 아니라 컴파일 산출물이 들어가므로**, 라이선스 전문을 앱 리소스에 동봉하고 attribution을 유지한다.

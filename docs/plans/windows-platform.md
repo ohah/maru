@@ -992,3 +992,21 @@ Evidence: `.zig-cache/windows-glyph-source-binding.json`.
 Terminal fixed-cell run construction, cursor/style boundary splitting, renderer
 integration and live `font.ligatures` on/off pixel checks remain pending. Source
 metadata completion alone does not prove terminal ligature rendering.
+
+### 2026-10-28 리베이스 검증과 배포 고지
+
+최신 확인 main `7ffec126d`로 리베이스했다. 앞선 Git 이동 경로 fixup과 Windows 마커 검사
+수 수정은 각각 원인 커밋에 반영했다. 중간 두 지점의 빌드·집중·교차·경계 272개와
+Git 워커 compiled 결함 주입 5개/복구 대조군을 확인했다. 최신 리베이스 코드
+`ac8c185ec`도 일반 빌드·관련 검사·교차 컴파일·경계 272개를 통과했다.
+
+설정 검색 IME와 Windows 인라인 조합 표시를 함께 보존했고, 해당 경로의 compiled 결함
+주입 6개 및 복구 Debug·ReleaseFast 검사를 통과했다. 동일 바이너리의 실제 앱 폰트
+변경·복원 5개는 정상 종료와 GPU 행 비교를 확인했다. IMM 조합과 후보 위치 진단은
+부분 증거이며, 준비 단계/foreground 소유권 때문에 전체 후보 선택 완료로 기록하지 않는다.
+
+프리뷰에는 ConPTY의 Microsoft MIT 원문도 동봉한다. 라이선스 누락·오배치·잘못된 원문,
+DLL 누락과 host 누락을 실제 빌드 산출물 5개로 검출하고 복구를 확인했다. 이 변경은
+설치 파일 목록만 바꾸며, 실행 파일은 리베이스 회귀 검사 바이너리와 같다. 증거 경로와
+미검증 범위는 [Windows 계약의 해당 절](../windows-platform.md#2026-10-28-main-반영과-프리뷰-패키지)을 따른다.
+남은 Windows 기능과 최종 PR/설치 검증의 범위는 축소하지 않는다.

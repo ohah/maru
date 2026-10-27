@@ -13117,3 +13117,29 @@ Evidence: `.zig-cache/windows-glyph-source-binding.json`.
 Terminal fixed-cell run construction, cursor/style boundary splitting, renderer
 integration and live `font.ligatures` on/off pixel checks remain pending. Source
 metadata completion alone does not prove terminal ligature rendering.
+
+### 2026-10-28 main 반영과 프리뷰 패키지
+
+`7ffec126d`를 기준으로 Windows 작업을 다시 리베이스했다. Git 워커 이동의 상대 경로 수정은
+이동 커밋에 합쳤고, Windows 마커 검사 114개/다른 플랫폼의 기존 107개 조건은 검사 인자가
+활성화되는 커밋에 반영했다. 이력 정리 전후 기능 파일은 같으며 검사 수 한 줄만 달라졌다.
+두 중간 커밋에서 일반 빌드·집중 검사·교차 컴파일·경계 272개를 확인했고, Git 워커의
+다섯 compiled 결함 주입과 복구 대조군도 통과했다.
+
+최종 리베이스 코드 `ac8c185ec`의 일반 빌드·관련 기능·교차 컴파일·경계 272개가 통과했다.
+충돌한 설정 검색 IME와 Windows 인라인 편집 경로를 함께 보존했다. 조합 표시/UTF-8/편집
+트랜잭션의 여섯 compiled 결함 주입을 검출했고 복구 Debug·ReleaseFast 대조군도 통과했다.
+동일 실행 파일의 실제 앱 폰트 변경·복원 다섯 경우는 GPU 행 비교와 정상 종료를 확인했다.
+근거는 `.zig-cache/latest-main-rebase-gates-20261028/result.json`,
+`.zig-cache/latest-main-settings-composition-adversarial.json`,
+`.zig-cache/latest-main-font-app-regression-20261028.json`이다.
+
+실제 IMM 조합 표시와 편집 칸 아래 후보창은 진단에서 확인했으나, 준비 단계 불안정성과
+앱 밖 창으로의 foreground 이동으로 전체 후보 선택 검사는 완료되지 않았다. 입력 소유권
+가드를 완화하지 않았으며 이 기록을 물리 키보드/전체 IME 완료 증거로 쓰지 않는다.
+
+ConPTY MIT 원문을 `licenses/ConPTY-MIT.txt`로 동봉한다. 고정 NuGet 원본과 저장소의
+DLL·host가 일치하며, 이 설치 변경 전후 실행 파일도 동일하다. 원문 누락·잘못된 위치·
+다른 원문·DLL 누락·host 누락의 다섯 실제 빌드 산출물을 거절하고 복구 산출물을 확인했다.
+근거는 `.zig-cache/conpty-license-package-adversarial.json`이다. 전체 Windows 지원,
+터미널 합자 연결, 작업표시줄 고정과 남은 영역별 기능은 계속 미완료다.

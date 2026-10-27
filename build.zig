@@ -854,12 +854,20 @@ pub fn build(b: *std.Build) void {
         const dll = "assets/windows/conpty/x64/conpty.dll";
         const host = "assets/windows/conpty/x64/OpenConsole.exe";
         const io = b.graph.io;
+        var installs_conpty = false;
         if (b.root.access(io, dll, .{})) |_| {
             b.getInstallStep().dependOn(&b.addInstallBinFile(b.path(dll), "conpty.dll").step);
+            installs_conpty = true;
         } else |_| {}
         if (b.root.access(io, host, .{})) |_| {
             b.getInstallStep().dependOn(&b.addInstallBinFile(b.path(host), "x64/OpenConsole.exe").step);
+            installs_conpty = true;
         } else |_| {}
+        // Every redistributed Microsoft binary carries its upstream MIT notice.
+        // Missing notices must fail packaging instead of silently disappearing.
+        if (installs_conpty) {
+            b.getInstallStep().dependOn(&b.addInstallBinFile(b.path("assets/windows/conpty/LICENSE"), "licenses/ConPTY-MIT.txt").step);
+        }
     }
 
     const run_step = b.step("run", "Run the development CLI");
@@ -1973,7 +1981,9 @@ pub fn build(b: *std.Build) void {
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
     const settings_edit_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/app/settings/edit.zig"), .target = target, .optimize = optimize,
+        .root_source_file = b.path("src/app/settings/edit.zig"),
+        .target = target,
+        .optimize = optimize,
     }) });
     const run_settings_edit_tests = b.addRunArtifact(settings_edit_tests);
     run_settings_edit_tests.addArg("--maru-expect-tests=5");
@@ -2042,7 +2052,6 @@ pub fn build(b: *std.Build) void {
     const chrome_lowering_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"app.chrome_draw_lowering"} });
     const chrome_lowering_step = b.step("test-chrome-draw-lowering", "Verify portable semantic draw projection and paint ordering");
     chrome_lowering_step.dependOn(&b.addRunArtifact(chrome_lowering_tests).step);
-
 
     if (target.result.os.tag == .windows) {
         // This focused gate checks the shared-solid/native-gradient merge without a GPU device.

@@ -6637,11 +6637,16 @@ pub fn register(b: *std.Build, ctx: Context) void {
             "session-host-signed-upgrade-output",
             "Absolute absent canonical leaf for one signed upgrade run",
         ) orelse "";
+        const signed_runtime_count_option = b.option(
+            []const u8,
+            "session-host-signed-upgrade-runtime-count",
+            "Real isolated PTY count for the signed upgrade gate (1..255)",
+        ) orelse "1";
         run_signed_upgrade_e2e.addArgs(&.{
             signed_n1_exe_option,
             signed_current_exe_option,
             if (signed_upgrade_output_option.len == 0) rootPath(b, "zig-out/session-host-signed-upgrade/summary.json") else signed_upgrade_output_option,
-            "1",
+            signed_runtime_count_option,
             signed_release_test_uuid_option,
             if (signed_upgrade_root_option.len == 0) rootPath(b, "zig-out/session-host-signed-upgrade/run-root") else signed_upgrade_root_option,
         });

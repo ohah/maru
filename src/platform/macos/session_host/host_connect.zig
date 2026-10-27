@@ -356,7 +356,7 @@ fn findManifestHostForBuild(
 }
 
 /// exec 뒤 재연결 예산. host의 pause budget(`upgrade_limits.pause_budget_ms` = 5s)**만으로는 부족하다** — 그 뒤에
-/// 새 이미지 부팅·handoff 복원·manifest 재게시가 이어지고, 그동안 manifest lifecycle이 `.restoring`이라 어떤 스캔도
+/// target 실패 시 rollback 이미지 복원·manifest 재게시도 이어지고, 그동안 manifest lifecycle이 `.restoring`이라 어떤 스캔도
 /// (`findCurrentManifestHost`도 `isUpgradeCandidate`도 `.ready`만 센다) 이 host를 기다려 주지 않는다.
 ///
 /// 여기서 일찍 포기하면 **같은 build_id host가 둘** 남는다: exec된 쪽이 사용자 PTY를 전부 들고 있고, 새로 spawn된
@@ -364,7 +364,11 @@ fn findManifestHostForBuild(
 /// 이 경로가 막으려던 고아화를 그대로 재생산하며, 스스로 회복되지도 않는다. 넉넉히 잡는 대신 치르는 비용은
 /// **업그레이드가 실패했을 때의 대기**뿐이라, 잃는 쪽이 훨씬 싼 비대칭이다.
 const upgrade_reconnect_delay_ms: u32 = 20;
-const upgrade_reconnect_attempts: usize = 500; // × 20ms = 10s (pause budget 5s + 부팅·복원 여유)
+// A failed target can consume its full pause budget before the rollback image
+// gets a separate full reader-preparation budget. Keep GUI reconnect alive for
+// both phases plus one budget for loader/handshake scheduling; PTY pause limits
+// themselves remain unchanged.
+const upgrade_reconnect_attempts: usize = @intCast(3 * @import("upgrade_limits.zig").pause_budget_ms / upgrade_reconnect_delay_ms);
 
 /// Structured logging and the UI notice share this exact bounded value. Formatting a second model
 /// here would let the two surfaces disagree about whether the old PTYs were migrated.
@@ -388,6 +392,74 @@ pub fn upgradedHostMatches(restored_build_id: ?[]const u8, target_build_id: []co
     return std.mem.eql(u8, restored, target_build_id);
 }
 
+const UpgradeConnectOps = struct {
+    context: *anyopaque,
+    attempt: *const fn (*anyopaque, client_deadline.AbsoluteDeadline) Outcome,
+    wait: *const fn (*anyopaque, u32) void,
+};
+
+fn retryUpgradeConnection(reason: FailureReason) bool {
+    return switch (reason) {
+        .startup_timeout, .invalid_manifest, .host_gone, .stale_manifest, .handshake_failed, .transient_timeout => true,
+        else => false,
+    };
+}
+
+/// One absolute budget is shared by connect, hello and all retries. An inner
+/// transient timeout must neither end the upgrade wait early nor multiply it.
+fn connectUpgradingHostWith(deadline: client_deadline.AbsoluteDeadline, ops: UpgradeConnectOps) Outcome {
+    while (deadline.remainingNs() > 0) {
+        var result = ops.attempt(ops.context, deadline);
+        if (deadline.remainingNs() <= 0) {
+            if (result == .connected) result.connected.deinit();
+            return .{ .failed = .transient_timeout };
+        }
+        switch (result) {
+            .connected => return result,
+            .failed => |reason| if (!retryUpgradeConnection(reason)) return result,
+        }
+        const remaining = deadline.remainingNs();
+        if (remaining <= 0) break;
+        const delay_ms: u32 = @intCast(@min(upgrade_reconnect_delay_ms, @max(1, @divFloor(remaining, std.time.ns_per_ms))));
+        ops.wait(ops.context, delay_ms);
+    }
+    return .{ .failed = .transient_timeout };
+}
+
+fn connectUpgradingHost(allocator: std.mem.Allocator, base_cache_dir: []const u8, host_id: u128, target_build_id: []const u8, attempt_id: u128) Outcome {
+    const Adapter = struct {
+        allocator: std.mem.Allocator,
+        base: []const u8,
+        id: u128,
+        target: []const u8,
+        attempt_id: u128,
+        fn attempt(raw: *anyopaque, deadline: client_deadline.AbsoluteDeadline) Outcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            var result = connectExistingHostUntil(self.allocator, self.base, self.id, attach_phase_deadline.PhaseDeadline.fromAbsolute(.connect_hello, deadline));
+            if (result == .connected and !upgradedHostMatches(result.connected.build_id, self.target)) {
+                const report = result.connected.upgradeStatusUntil(self.attempt_id, deadline) catch |err| {
+                    result.connected.deinit();
+                    return .{ .failed = if (err == error.DeadlineExceeded) .deadline_exceeded else .handshake_failed };
+                };
+                // accepted can race the old listener's final turn. A successful
+                // hello from a pending predecessor is not a rolled-back target.
+                if (report == null or report.?.status == .pending) {
+                    result.connected.deinit();
+                    return .{ .failed = .startup_timeout };
+                }
+            }
+            return result;
+        }
+        fn wait(_: *anyopaque, delay_ms: u32) void {
+            _ = usleep(delay_ms * 1000);
+        }
+    };
+    var adapter: Adapter = .{ .allocator = allocator, .base = base_cache_dir, .id = host_id, .target = target_build_id, .attempt_id = attempt_id };
+    const deadline = client_deadline.AbsoluteDeadline.after(std.Io.Threaded.global_single_threaded.io(), @as(i128, upgrade_reconnect_attempts) * upgrade_reconnect_delay_ms * std.time.ns_per_ms) catch
+        return .{ .failed = .deadline_exceeded };
+    return connectUpgradingHostWith(deadline, .{ .context = &adapter, .attempt = Adapter.attempt, .wait = Adapter.wait });
+}
+
 /// exec 뒤 같은 host_id로 다시 붙되, **정말 새 이미지로 바뀌었는지 확인한다.** 실패하면 `.failed` — 호출자는
 /// 살아 있는 host 를 재사용하고(`reuseLiveHost`), 그런 host 가 없을 때만 새 host 를 spawn한다.
 ///
@@ -405,10 +477,7 @@ fn reconnectUpgradedHost(
     target_build_id: []const u8,
     attempt_id: u128,
 ) UpgradeReconnect {
-    var restored = switch (connectNewHostWithBackoff(allocator, base_cache_dir, host_id, .{
-        .connect_attempts = upgrade_reconnect_attempts,
-        .connect_delay_ms = upgrade_reconnect_delay_ms,
-    })) {
+    var restored = switch (connectUpgradingHost(allocator, base_cache_dir, host_id, target_build_id, attempt_id)) {
         .connected => |client| client,
         // 재연결조차 못 했으면 물어볼 상대가 없다. host가 exec 도중 죽었을 수도, 아직 restoring일 수도 있다.
         .failed => |reason| {
@@ -569,7 +638,7 @@ fn tryUpgradeExistingHost(
             .failed => |reason| if (reason == .out_of_memory)
                 return .{ .failed = reason }
             else {
-                unreachable_hosts.add(host_id);
+                unreachable_hosts.addAtPublication(host_id, candidate.published_ns);
                 continue;
             },
         };
@@ -596,7 +665,7 @@ fn tryUpgradeExistingHost(
             // exec한다. 그때 다른 host로 스캔을 이어 가면 이미 교체 중인 host를 두고 또 다른 host를 흔든다 —
             // 재연결로 결과를 확인하고, 아니면 여기서 끝낸다(`prepare_transport_error` 는 언제나 멈춤).
             client.deinit();
-            unreachable_hosts.add(host_id);
+            unreachable_hosts.addAtPublication(host_id, candidate.published_ns);
             const reconnected = reconnectUpgradedHost(allocator, base_cache_dir, host_id, target_build_id, attempt_id);
             if (settleUpgrade(&scan, .prepare_transport_error, reconnected)) |done| return done;
             continue;
@@ -609,7 +678,7 @@ fn tryUpgradeExistingHost(
             // host가 응답을 전량 보낸 뒤 이 connection을 닫고 exec한다 — 같은 host_id로 다시 붙어 결과를 확정한다.
             .accepted_reconnect_required => {
                 const reconnected = reconnectUpgradedHost(allocator, base_cache_dir, host_id, target_build_id, attempt_id);
-                if (reconnectTimedOut(reconnected)) unreachable_hosts.add(host_id);
+                if (reconnectTimedOut(reconnected)) unreachable_hosts.addAtPublication(host_id, candidate.published_ns);
                 if (settleUpgrade(&scan, resolutionAfterReconnect(reconnected), reconnected)) |done| return done;
             },
             // host가 이미 끝난 attempt를 보고했다 — `AttemptReason`이 왜 못 바꿨는지 말해 준다. 이 값을 버리면
@@ -617,7 +686,7 @@ fn tryUpgradeExistingHost(
             .completed => |report| {
                 if (report.status == .committed) {
                     const reconnected = reconnectUpgradedHost(allocator, base_cache_dir, host_id, target_build_id, attempt_id);
-                    if (reconnectTimedOut(reconnected)) unreachable_hosts.add(host_id);
+                    if (reconnectTimedOut(reconnected)) unreachable_hosts.addAtPublication(host_id, candidate.published_ns);
                     if (settleUpgrade(&scan, .{ .completed = .committed }, reconnected)) |done| return done;
                     continue;
                 }
@@ -650,7 +719,7 @@ fn tryUpgradeExistingHost(
 
 const UpgradeScan = upgrade_scan_policy.Scan(UpgradeNotice);
 
-/// exec 뒤 재연결이 **붙지 못하고** 끝났는가(최대 10 s 를 이미 기다렸다). 재사용 판정이 이 host 에 다시 붙어 보지 않게 한다.
+/// exec 뒤 재연결이 **붙지 못하고** 끝났는가(공유 deadline의 최대 15 s 를 이미 기다렸다). 재사용 판정이 이 host 에 다시 붙어 보지 않게 한다.
 fn reconnectTimedOut(result: UpgradeReconnect) bool {
     return switch (result) {
         .connected => false,
@@ -710,7 +779,7 @@ fn reuseLiveHost(
                     },
                     .current_build = if (current_build_id) |id| std.mem.eql(u8, manifest.build_id, id) else false,
                     .published_ns = manifestPublishedNs(session_dir, host_id),
-                    .unreachable_this_launch = unreachable_hosts.contains(host_id),
+                    .unreachable_this_launch = unreachable_hosts.blocks(host_id, manifestPublishedNs(session_dir, host_id)),
                 };
                 observation_count += 1;
             }
@@ -2907,4 +2976,51 @@ test "image channel host_connect: 제품 GUI 연결(새 탭·복원·재접속)�
         const deadline = try client_deadline.AbsoluteDeadline.after(io, 2 * std.time.ns_per_s);
         try (try ImageAdvertRecorder.record(&server, deadlineConnectAttempt, .{ @as(*anyopaque, @ptrFromInt(1)), allocator, endpoint, client_mod.ConnectionProfile.cli_probe, client_image_channel.Request.advertise, protocol.version_major, deadline })).expectPlain();
     }
+}
+
+test "upgrade recovery shares one deadline through transient hello failures" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const Fixture = struct {
+        now: i128 = 0,
+        calls: usize = 0,
+        waits: usize = 0,
+        reason: FailureReason = .transient_timeout,
+        fn nowNs(raw: *anyopaque) i128 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.now;
+        }
+        fn attempt(raw: *anyopaque, deadline: client_deadline.AbsoluteDeadline) Outcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            std.debug.assert(deadline.expires_at_ns == 100 * std.time.ns_per_ms);
+            self.calls += 1;
+            self.now += 30 * std.time.ns_per_ms;
+            return .{ .failed = self.reason };
+        }
+        fn wait(raw: *anyopaque, ms: u32) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.waits += 1;
+            self.now += @as(i128, ms) * std.time.ns_per_ms;
+        }
+    };
+    for ([_]FailureReason{ .transient_timeout, .handshake_failed, .stale_manifest, .startup_timeout, .host_gone, .invalid_manifest }) |reason| {
+        var f: Fixture = .{ .reason = reason };
+        const deadline = client_deadline.AbsoluteDeadline.fromInjected(.{ .context = &f, .now_ns = Fixture.nowNs }, 100 * std.time.ns_per_ms);
+        const result = connectUpgradingHostWith(deadline, .{ .context = &f, .attempt = Fixture.attempt, .wait = Fixture.wait });
+        try testing.expectEqual(FailureReason.transient_timeout, result.failed);
+        try testing.expectEqual(@as(usize, 2), f.calls);
+        try testing.expectEqual(@as(i128, 100 * std.time.ns_per_ms), f.now);
+    }
+    for ([_]FailureReason{ .unauthorized, .endpoint_denied, .incompatible_version, .out_of_memory, .protocol_error, .deadline_exceeded, .resource_exhausted }) |reason| {
+        var f: Fixture = .{ .reason = reason };
+        const deadline = client_deadline.AbsoluteDeadline.fromInjected(.{ .context = &f, .now_ns = Fixture.nowNs }, 100 * std.time.ns_per_ms);
+        const result = connectUpgradingHostWith(deadline, .{ .context = &f, .attempt = Fixture.attempt, .wait = Fixture.wait });
+        try testing.expectEqual(reason, result.failed);
+        try testing.expectEqual(@as(usize, 1), f.calls);
+        try testing.expectEqual(@as(usize, 0), f.waits);
+    }
+    var expired: Fixture = .{ .now = 100 * std.time.ns_per_ms };
+    const deadline = client_deadline.AbsoluteDeadline.fromInjected(.{ .context = &expired, .now_ns = Fixture.nowNs }, expired.now);
+    try testing.expectEqual(FailureReason.transient_timeout, connectUpgradingHostWith(deadline, .{ .context = &expired, .attempt = Fixture.attempt, .wait = Fixture.wait }).failed);
+    try testing.expectEqual(@as(usize, 0), expired.calls);
+    try testing.expectEqual(@as(usize, 0), expired.waits);
 }

@@ -8,6 +8,8 @@ const std = @import("std");
 const c = std.c;
 const posix = std.posix;
 const session_host = @import("session_host");
+extern "c" fn setenv([*:0]const u8, [*:0]const u8, c_int) c_int;
+extern "c" fn unsetenv([*:0]const u8) c_int;
 
 const connect_attempts: usize = 500;
 const marker_attempts: usize = 240;
@@ -213,6 +215,21 @@ fn run(
     const socket_path = try session_host.short_endpoint.socketPathUnder(&socket_buf, base, host_id);
     _ = c.unlink(socket_path.ptr);
 
+    // Descriptor validation and the child must use the same isolated endpoint
+    // namespace. Setting only the child's environment rejects its own manifest.
+    const prior_root = if (c.getenv(session_host.short_endpoint.root_override_env)) |value|
+        try allocator.dupeSentinel(u8, std.mem.span(value), 0)
+    else
+        null;
+    defer if (prior_root) |value| allocator.free(value);
+    if (setenv(session_host.short_endpoint.root_override_env, base.ptr, 1) != 0) return error.TempDirectoryFailed;
+    defer {
+        if (prior_root) |value| {
+            _ = setenv(session_host.short_endpoint.root_override_env, value.ptr, 1);
+        } else {
+            _ = unsetenv(session_host.short_endpoint.root_override_env);
+        }
+    }
     const supervised_pid = try session_host.launcher.spawnSessionHostSupervisedForTest(
         allocator,
         base,
@@ -300,7 +317,26 @@ fn run(
     prepare_client.deinit();
     prepare_open = false;
 
-    var after = try connectExact(allocator, base, host_id);
+    var after = blk: {
+        var tries: usize = 0;
+        while (tries < connect_attempts) : (tries += 1) {
+            var peer = try connectExact(allocator, base, host_id);
+            if (peer.build_id) |id| if (std.mem.eql(u8, id, target_build_id)) break :blk peer;
+            const report = peer.upgradeStatus(attempt_id) catch {
+                peer.deinit();
+                _ = usleep(poll_delay_us);
+                continue;
+            };
+            if (report) |status| if (status.status != .pending) {
+                std.debug.print("signed upgrade terminal result: status={s} reason={s}\n", .{ @tagName(status.status), @tagName(status.reason) });
+                peer.deinit();
+                return error.UpgradeNotCommitted;
+            };
+            peer.deinit();
+            _ = usleep(poll_delay_us);
+        }
+        return error.UpgradeStatusTimeout;
+    };
     defer after.deinit();
     const host_pid_after = try peerPid(after.fd);
     if (host_pid_after != host_pid_before) return error.HostPidChanged;
@@ -382,12 +418,17 @@ fn buildRuntimeSpawnParams(allocator: std.mem.Allocator, index: usize) ![]u8 {
     var exit_buf: [96]u8 = undefined;
     const ready = try runtimeMarker(&ready_buf, "READY", index);
     const marker_exit = try runtimeMarker(&exit_buf, "EXIT_23", index);
+    const raw_history = if (c.getenv("MARU_SIGNED_UPGRADE_HISTORY_LINES")) |raw| std.mem.span(raw) else "0";
+    const history_lines = std.fmt.parseInt(u16, raw_history, 10) catch return error.InvalidHistoryLines;
+    if (history_lines > 512) return error.InvalidHistoryLines;
     const command = try std.fmt.allocPrint(
         allocator,
-        "/bin/stty -echo || exit 70; printf '{s}'; " ++
+        "/bin/stty -echo || exit 70; i=0; while [ \"$i\" -lt {d} ]; do " ++
+            "printf '%s\\n' '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'; " ++
+            "i=$((i+1)); done; printf '{s}'; " ++
             "while IFS= read -r line; do if [ \"$line\" = '{s}' ]; then exit 23; fi; " ++
             "printf '%s\\r\\n' \"$line\"; done",
-        .{ ready, marker_exit },
+        .{ history_lines, ready, marker_exit },
     );
     defer allocator.free(command);
     var out: std.Io.Writer.Allocating = .init(allocator);
@@ -395,8 +436,8 @@ fn buildRuntimeSpawnParams(allocator: std.mem.Allocator, index: usize) ![]u8 {
     var json: std.json.Stringify = .{ .writer = &out.writer };
     try json.write(.{
         .argv = &[_][]const u8{ "/bin/sh", "-c", command },
-        .cols = 80,
-        .rows = 12,
+        .cols = @as(u16, if (history_lines > 0) 138 else 80),
+        .rows = @as(u16, if (history_lines > 0) 69 else 12),
     });
     return out.toOwnedSlice();
 }
@@ -512,8 +553,13 @@ fn connectExact(
         switch (session_host.host_connect.connectExistingHost(allocator, base, host_id)) {
             .connected => |client| return client,
             .failed => |reason| switch (reason) {
-                .startup_timeout, .handshake_failed => {},
-                else => return error.HostConnectFailed,
+                // This harness just forked a supervised child. Before its first
+                // publication, no manifest is a startup race, not proof of loss.
+                .startup_timeout, .handshake_failed, .host_gone, .transient_timeout, .stale_manifest, .invalid_manifest => {},
+                else => {
+                    std.debug.print("signed host connection failed: reason={s}\n", .{@tagName(reason)});
+                    return error.HostConnectFailed;
+                },
             },
         }
         _ = usleep(poll_delay_us);
@@ -657,9 +703,18 @@ fn waitForProcessName(pid: c.pid_t, expected: []const u8) !void {
     while (attempt < marker_attempts) : (attempt += 1) {
         var name_buf: [256]u8 = undefined;
         const count = proc_name(pid, &name_buf, name_buf.len);
-        if (count > 0 and std.mem.eql(u8, name_buf[0..@intCast(count)], expected)) return;
+        if (count > 0) {
+            const actual = name_buf[0..@intCast(count)];
+            // /bin/sh may run as bash after the predecessor's shell integration.
+            // PID continuity, input markers and exit=23 below remain mandatory.
+            if (std.mem.eql(u8, actual, expected) or
+                (std.mem.eql(u8, expected, "sh") and std.mem.eql(u8, actual, "bash"))) return;
+        }
         _ = usleep(poll_delay_us);
     }
+    var final_name: [256]u8 = undefined;
+    const n = proc_name(pid, &final_name, final_name.len);
+    if (n > 0) std.debug.print("signed runtime process mismatch: pid={d} expected={s} actual={s}\n", .{ pid, expected, final_name[0..@intCast(n)] });
     return error.RuntimeProcessMismatch;
 }
 

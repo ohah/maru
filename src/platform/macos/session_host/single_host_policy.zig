@@ -39,8 +39,8 @@ pub const Observation = struct {
     current_build: bool,
     /// 매니페스트가 마지막으로 게시된 시각(birth time, ns). 못 읽으면 `null`.
     published_ns: ?i128,
-    /// 이번 실행의 업그레이드 스캔이 이 host 에 붙지 못했거나 응답·재연결이 시간 초과로 끝났다(`HostSet`). 다시 붙어
-    /// 보면 같은 대기(최악 수십 초)를 **메인 스레드에서 한 번 더** 치르므로 붙어 보지 않고 뺀다.
+    /// 이 manifest publication에서 이미 연결 실패를 관측했다(`HostSet.blocks`). 같은 상태의 반복 대기는
+    /// 피하지만 rollback이 더 새로운 ready manifest를 게시하면 fresh probe를 허용한다.
     unreachable_this_launch: bool = false,
 };
 
@@ -49,11 +49,31 @@ pub const Observation = struct {
 pub const HostSet = struct {
     ids: [max_candidates]u128 = undefined,
     len: usize = 0,
+    failed_publications: [max_candidates]?i128 = @splat(null),
 
     pub fn add(self: *HostSet, host_id: u128) void {
-        if (self.contains(host_id) or self.len == self.ids.len) return;
+        self.addAtPublication(host_id, null);
+    }
+
+    pub fn addAtPublication(self: *HostSet, host_id: u128, published_ns: ?i128) void {
+        if (std.mem.indexOfScalar(u128, self.ids[0..self.len], host_id)) |index| {
+            self.failed_publications[index] = published_ns;
+            return;
+        }
+        if (self.len == self.ids.len) return;
         self.ids[self.len] = host_id;
+        self.failed_publications[self.len] = published_ns;
         self.len += 1;
+    }
+
+    /// Failure describes one published host state, not this host ID forever.
+    /// Only a strictly newer atomic publication permits one fresh probe; ready,
+    /// lease and wire gates still apply. Unknown timestamps remain excluded.
+    pub fn blocks(self: *const HostSet, host_id: u128, published_ns: ?i128) bool {
+        const index = std.mem.indexOfScalar(u128, self.ids[0..self.len], host_id) orelse return false;
+        const failed = self.failed_publications[index] orelse return true;
+        const current = published_ns orelse return true;
+        return current <= failed;
     }
 
     pub fn contains(self: *const HostSet, host_id: u128) bool {
@@ -283,4 +303,35 @@ test "세션 호스트 하나 — 매니페스트 판정과 spawn 계약" {
     try testing.expect(reusedPreviousBuild(null, "sha256:aa"));
     try testing.expect(reusedPreviousBuild("sha256:aa", null));
     try testing.expect(reusedPreviousBuild(null, null));
+}
+
+test "세션 호스트 하나 — rollback ready publication invalidates only the stale failed probe" {
+    var failed: HostSet = .{};
+    failed.addAtPublication(7, 100);
+    try testing.expect(failed.blocks(7, 100));
+    try testing.expect(failed.blocks(7, 99));
+    try testing.expect(failed.blocks(7, null));
+    try testing.expect(!failed.blocks(8, 100));
+    try testing.expect(!failed.blocks(7, 101));
+    var recovered = live(7, 101);
+    recovered.unreachable_this_launch = failed.blocks(7, recovered.published_ns);
+    var good: FakeProber = .{ .results = &.{.{ .host_id = 7, .probe = .reusable }} };
+    try testing.expectEqualDeep(Decision{ .reuse = 7 }, choose(&.{recovered}, &good));
+    try testing.expectEqual(@as(usize, 1), good.probed_count);
+    // Republishing alone cannot bypass a held lease, ready state or wire check.
+    for (0..4) |i| {
+        var candidate = recovered;
+        if (i == 0) candidate.lease = .free;
+        if (i == 1) candidate.ready = false;
+        if (i == 2) candidate.same_wire = false;
+        if (i == 3) candidate.lease = .unknown;
+        var never: FakeProber = .{ .results = &.{} };
+        _ = choose(&.{candidate}, &never);
+        try testing.expectEqual(@as(usize, 0), never.probed_count);
+    }
+    // A failed fresh probe blocks that publication too; this is not a retry loop.
+    failed.addAtPublication(7, 101);
+    try testing.expect(failed.blocks(7, 101));
+    failed.add(9);
+    try testing.expect(failed.blocks(9, 999));
 }

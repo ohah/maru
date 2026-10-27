@@ -11801,6 +11801,17 @@ pub const Client = struct {
     }
 
     pub fn upgradeStatus(self: *Client, attempt_id: u128) ClientError!?upgrade_wire.AttemptReport {
+        return self.upgradeStatusWithDeadline(attempt_id, null) catch |err| switch (err) {
+            error.DeadlineExceeded => unreachable,
+            else => |client_err| client_err,
+        };
+    }
+
+    pub fn upgradeStatusUntil(self: *Client, attempt_id: u128, deadline: client_deadline.AbsoluteDeadline) DeadlineClientError!?upgrade_wire.AttemptReport {
+        return self.upgradeStatusWithDeadline(attempt_id, deadline);
+    }
+
+    fn upgradeStatusWithDeadline(self: *Client, attempt_id: u128, deadline: ?client_deadline.AbsoluteDeadline) DeadlineClientError!?upgrade_wire.AttemptReport {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
         var attempt_buf: [32]u8 = undefined;
@@ -11810,7 +11821,10 @@ pub const Client = struct {
         defer out.deinit();
         var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
         js.write(.{ .attempt_id = attempt }) catch return error.OutOfMemory;
-        const response = try self.call("host.upgrade.status", out.written());
+        const response = if (deadline) |absolute|
+            try self.callUntil("host.upgrade.status", out.written(), absolute)
+        else
+            try self.call("host.upgrade.status", out.written());
         defer self.allocator.free(response);
         if (parseAttemptStatus(response)) |report| return report;
         if (responseHasTypedError(response)) return null;

@@ -584,6 +584,46 @@ pub fn buildNativeCellsSplit(
     draw_cells: []const renderer.DrawCell,
     colors: CellColors,
 ) !BuiltCells {
+    // A native cell cannot carry signed fractional glyph offsets. Reject the
+    // wrong route rather than silently rounding or dropping shaping positions.
+    for (frame.glyphs) |glyph| if (glyph.run.placement != null)
+        return error.PositionedGlyphRequiresPixelPath;
+    return buildNativeCellLayer(allocator, frame, draw_cells, colors, .legacy);
+}
+
+const CellLayer = enum { legacy, positioned_base, positioned_overlays };
+
+fn backgroundCell(cell: renderer.DrawCell, colors: CellColors) ?NativeMetalCell {
+    const background = if (highlightBg(colors, cell.row, cell.col)) |hl|
+        0xFF00_0000 | packRgb(hl)
+    else
+        packBackground(cell.style, colors);
+    if (background == 0) return null;
+    return .{
+        .row = cell.row,
+        .col = cell.col,
+        .width = cell.width,
+        .codepoint = cell.codepoint,
+        .slot_id = 0,
+        .atlas_x_px = 0,
+        .atlas_y_px = 0,
+        .atlas_width_px = 0,
+        .atlas_height_px = 0,
+        .u0 = -1,
+        .v0 = -1,
+        .u1 = -1,
+        .v1 = -1,
+        .background = background,
+    };
+}
+
+fn buildNativeCellLayer(
+    allocator: std.mem.Allocator,
+    frame: renderer.GlyphQuadFrame,
+    draw_cells: []const renderer.DrawCell,
+    colors: CellColors,
+    layer: CellLayer,
+) !BuiltCells {
     // [진단] 한 프레임의 셀 배열 생성 총합. replace 가 pane 마다 부르므로 여기서 누적해야 합이 나온다.
     const t_cells0 = diagNow();
     defer diag_replace_cells_ns += diagNow() - t_cells0;
@@ -600,7 +640,7 @@ pub fn buildNativeCellsSplit(
     // 한 번 더 더해 두 pass(2.6 밑줄 + 3 커서)가 같은 예산을 다투지 않게 한다. hollow 커서는 한 overlay가
     // 4변(상·하·좌·우) cell을 내므로 overlay당 최악 4 cell로 예산을 잡는다(block 2 + 여유 — 과할당은 작다).
     // 0) 선택·검색 하이라이트 배경은 **격자 기반**이라 예산도 그 범위로 잡는다(아래 0) 참조).
-    const highlight_cells: usize = highlightBudget(colors, frame.size);
+    const highlight_cells: usize = if (layer == .positioned_overlays) 0 else highlightBudget(colors, frame.size);
     try cells.ensureTotalCapacity(allocator, frame.glyphs.len + draw_cells.len + 4 * frame.overlays.len + hover_cells + highlight_cells);
 
     // 0) **선택·검색 하이라이트 배경 — 격자 기반(커서와 같은 부류).**
@@ -652,10 +692,18 @@ pub fn buildNativeCellsSplit(
         }
     }
 
+    // Positioned ink follows this entire base pass. Paint nonblank backgrounds
+    // here as well: no individual combining glyph may repaint its cell background.
+    if (layer == .positioned_base) for (draw_cells) |cell| {
+        if (cell.codepoint == ' ' or cell.codepoint == 0) continue;
+        if (backgroundCell(cell, colors)) |background| cells.appendAssumeCapacity(background);
+    };
+
     // 1) ink가 있는 glyph cell. 전경색 + (있으면) 배경색을 같이 싣는다. blank cell도
     //    GlyphQuadFrame에 들어올 수 있으므로 그릴 게 없는 space는 여기서 제외하고, 배경이
     //    있는 space는 아래 2)에서 배경 전용 cell로 처리한다.
-    for (frame.glyphs) |glyph| {
+    for (if (layer == .positioned_overlays) &.{} else frame.glyphs) |glyph| {
+        if (glyph.run.placement != null) continue;
         if (glyph.run.codepoint == ' ') continue;
         // 이 셀에 실제로 칠해지는 배경(하이라이트가 있으면 그 색) — 배경 packing과 **대비 하한 판정**이
         // 같은 색을 본다(하한이 셀 배경만 보면 하이라이트 위 글자가 도리어 안 읽히게 된다 — code-review).
@@ -688,34 +736,13 @@ pub fn buildNativeCellsSplit(
     //    space(0x20, Cell 기본값/erase 결과)이거나 미기록(0)이라 shaper가 glyph로 만들지 않으므로
     //    1)에서 빠진다. 두 코드포인트를 모두 잡아 BCE 배경이 유실되지 않게 한다(non-space 글자는
     //    1)이 glyph와 함께 배경을 싣는다).
-    for (draw_cells) |cell| {
+    for (if (layer == .positioned_overlays) &.{} else draw_cells) |cell| {
         if (cell.codepoint != ' ' and cell.codepoint != 0) continue;
-        const background = if (highlightBg(colors, cell.row, cell.col)) |hl|
-            0xFF00_0000 | packRgb(hl)
-        else
-            packBackground(cell.style, colors);
-        if (background == 0) continue;
-        cells.appendAssumeCapacity(.{
-            .row = cell.row,
-            .col = cell.col,
-            .width = cell.width,
-            .codepoint = cell.codepoint,
-            .slot_id = 0,
-            .atlas_x_px = 0,
-            .atlas_y_px = 0,
-            .atlas_width_px = 0,
-            .atlas_height_px = 0,
-            .u0 = -1.0,
-            .v0 = -1.0,
-            .u1 = -1.0,
-            .v1 = -1.0,
-            .foreground = 0,
-            .background = background,
-        });
+        if (backgroundCell(cell, colors)) |background| cells.appendAssumeCapacity(background);
     }
 
     // 2.5) Cmd+hover 중인 URL 범위에 전경색 밑줄을 긋는다(텍스트 밑줄과 같은 가는 kind=9 부분 사각형 재사용).
-    if (colors.hover_link) |span| {
+    if (if (layer == .positioned_base) null else colors.hover_link) |span| {
         const underline_color = 0xFF00_0000 | packRgb(colors.default_fg);
         // 행 범위도 grid 안으로 clamp(예약 용량은 cols-기준이므로 row가 넘쳐도 안전하지만, 좌표를
         // 화면 안으로 묶어 둔다). end.col은 cols-1로 clamp해 행당 예약 용량(cols)을 못 넘게 한다 —
@@ -758,7 +785,7 @@ pub fn buildNativeCellsSplit(
     //      그려야 하므로(colors.cursor null인 smoke 포함) 별도 pass다. wide 글자는 base 칸에만 — 셰이더가
     //      width로 두 칸 폭의 선을 그린다. dim(SGR 2)이면 effectiveLineColor가 전경처럼 배경 쪽으로
     //      흐린다(packForeground와 같은 규칙).
-    for (frame.overlays) |overlay| switch (overlay) {
+    for (if (layer == .positioned_base) &.{} else frame.overlays) |overlay| switch (overlay) {
         .line => |l| {
             if (l.row >= frame.size.rows or l.col >= frame.size.cols) continue;
             cells.appendAssumeCapacity(.{
@@ -822,7 +849,7 @@ pub fn buildNativeCellsSplit(
     //    배경을 커서 색으로 채우고, 그 자리에 glyph가 있으면 같은 glyph를 배경색(cursor.text)으로 다시
     //    그려 글자가 커서 위에서 반전돼 보이게 한다(글자를 가리지 않음). 빈 cell이면 sentinel UV로 커서
     //    색 블록만 칠한다. colors.cursor가 null이면(glyph-atlas readback 검증 smoke) 통째로 건너뛴다.
-    if (colors.cursor) |cursor_colors| {
+    if (if (layer == .positioned_base) null else colors.cursor) |cursor_colors| {
         const cursor_bg = 0xFF00_0000 | packRgb(cursor_colors.block);
         for (frame.overlays) |overlay| {
             const cur = switch (overlay) {
@@ -892,6 +919,7 @@ pub fn buildNativeCellsSplit(
             var glyph_at_cursor: ?renderer.GlyphQuad = null;
             var glyph_col = cur.col;
             for (frame.glyphs) |glyph| {
+                if (glyph.run.placement != null or !cursorCanPaintGlyph(glyph)) continue;
                 if (glyph.run.row == cur.row and glyph.run.col == cur.col and glyph.run.codepoint != ' ') {
                     glyph_at_cursor = glyph;
                     break;
@@ -901,6 +929,7 @@ pub fn buildNativeCellsSplit(
             // 안 그러면 1칸 솔리드 블록이 wide glyph의 오른쪽 절반만 덮어 글자가 쪼개져 보인다.
             if (glyph_at_cursor == null and cur.col > 0) {
                 for (frame.glyphs) |glyph| {
+                    if (glyph.run.placement != null or !cursorCanPaintGlyph(glyph)) continue;
                     if (glyph.run.row == cur.row and glyph.run.col == cur.col - 1 and
                         glyph.run.cell_width == 2 and glyph.run.codepoint != ' ')
                     {
@@ -932,10 +961,19 @@ pub fn buildNativeCellsSplit(
                     .background = cursor_bg,
                 });
             } else {
+                var cursor_col = cur.col;
+                var cursor_width: u16 = 1;
+                for (frame.glyphs) |glyph| {
+                    if ((glyph.run.placement != null or !cursorCanPaintGlyph(glyph)) and positionedGlyphAtCursor(glyph, cur)) {
+                        cursor_col = glyph.run.col;
+                        cursor_width = glyph.run.cell_width;
+                        break;
+                    }
+                }
                 cells.appendAssumeCapacity(.{
                     .row = cur.row,
-                    .col = cur.col,
-                    .width = 1,
+                    .col = cursor_col,
+                    .width = cursor_width,
                     .codepoint = ' ',
                     .slot_id = 0,
                     .atlas_x_px = 0,
@@ -1104,6 +1142,359 @@ pub const GpuGlyph = extern struct {
     // 0=ordinary measured text, 6=independent Inspector scene; C ABI raw tags.
     layer: u32,
 };
+
+/// Project terminal ink through the existing free-pixel DTO. The caller paints
+/// cell backgrounds separately; baking background into each mark would erase
+/// earlier ink when a cluster contains more than one glyph. The atlas slot has
+/// already fixed raster extents, independently of the terminal's cell advance.
+pub fn positionedGlyph(
+    glyph: renderer.GlyphQuad,
+    cell_width_px: u32,
+    cell_height_px: u32,
+    origin_x: u32,
+    origin_y: u32,
+    colors: CellColors,
+) error{ InvalidGlyphPlacement, MissingGlyphPlacement }!GpuGlyph {
+    const placement = glyph.run.placement orelse return error.MissingGlyphPlacement;
+    if (cell_width_px == 0 or cell_height_px == 0 or
+        !std.math.isFinite(placement.x_offset_px) or !std.math.isFinite(placement.y_offset_px))
+        return error.InvalidGlyphPlacement;
+    const x: f32 = @as(f32, @floatFromInt(@as(u64, origin_x) + @as(u64, glyph.run.col) * cell_width_px)) + placement.x_offset_px;
+    const y: f32 = @as(f32, @floatFromInt(@as(u64, origin_y) + @as(u64, glyph.run.row) * cell_height_px)) + placement.y_offset_px;
+    if (!std.math.isFinite(x) or !std.math.isFinite(y)) return error.InvalidGlyphPlacement;
+    return .{
+        .x = x,
+        .y = y,
+        .w = @floatFromInt(glyph.slot.width_px),
+        .h = @floatFromInt(glyph.slot.height_px),
+        .atlas_x_px = glyph.slot.x_px,
+        .atlas_y_px = glyph.slot.y_px,
+        .atlas_width_px = glyph.slot.width_px,
+        .atlas_height_px = glyph.slot.height_px,
+        .u0 = colorUv(glyph.uv.u0, glyph.run.cache_key.color_glyph_kind),
+        .v0 = glyph.uv.v0,
+        .u1 = colorUv(glyph.uv.u1, glyph.run.cache_key.color_glyph_kind),
+        .v1 = glyph.uv.v1,
+        .foreground = packGlyphForeground(glyph.run.style, colors, glyph.run.codepoint, highlightBg(colors, glyph.run.row, glyph.run.col)),
+        .layer = 0,
+    };
+}
+
+fn positionedGlyphAtCursor(glyph: renderer.GlyphQuad, cursor: renderer.draw_list.CursorOverlay) bool {
+    return glyph.run.row == cursor.row and cursor.col >= glyph.run.col and
+        @as(u32, cursor.col) < @as(u32, glyph.run.col) + glyph.run.cell_width;
+}
+
+fn cursorCanPaintGlyph(glyph: renderer.GlyphQuad) bool {
+    // Cursor text color must never override SGR conceal and reveal hidden ink.
+    return !glyph.run.style.conceal;
+}
+
+/// Ordered layers keep cell paint and shaped ink independent without changing
+/// NativeMetalCell's ABI. Draw base, ink, overlays, then cursor_ink in that order.
+pub const PositionedTerminalFrame = struct {
+    base: []NativeMetalCell,
+    ink: []GpuGlyph,
+    overlays: []NativeMetalCell,
+    cursor_ink: []GpuGlyph,
+
+    pub fn deinit(self: *PositionedTerminalFrame, allocator: std.mem.Allocator) void {
+        allocator.free(self.base);
+        allocator.free(self.ink);
+        allocator.free(self.overlays);
+        allocator.free(self.cursor_ink);
+        self.* = undefined;
+    }
+};
+
+pub fn buildPositionedTerminalFrame(
+    allocator: std.mem.Allocator,
+    frame: renderer.GlyphQuadFrame,
+    draw_cells: []const renderer.DrawCell,
+    colors: CellColors,
+    cell_width_px: u32,
+    cell_height_px: u32,
+    origin_x: u32,
+    origin_y: u32,
+) !PositionedTerminalFrame {
+    const base = try buildNativeCellLayer(allocator, frame, draw_cells, colors, .positioned_base);
+    errdefer allocator.free(base.cells);
+    const overlays = try buildNativeCellLayer(allocator, frame, draw_cells, colors, .positioned_overlays);
+    errdefer allocator.free(overlays.cells);
+    var ink: std.ArrayList(GpuGlyph) = .empty;
+    defer ink.deinit(allocator);
+    var cursor_ink: std.ArrayList(GpuGlyph) = .empty;
+    defer cursor_ink.deinit(allocator);
+    for (frame.glyphs) |glyph| {
+        if (glyph.run.placement == null) continue;
+        const projected = try positionedGlyph(glyph, cell_width_px, cell_height_px, origin_x, origin_y, colors);
+        try ink.append(allocator, projected);
+        if (if (cursorCanPaintGlyph(glyph)) colors.cursor else null) |cursor_colors| {
+            for (frame.overlays) |overlay| {
+                const cursor = switch (overlay) {
+                    .cursor => |value| value,
+                    else => continue,
+                };
+                if (!cursor.visible or cursor.hollow or cursor.shape != .block or !positionedGlyphAtCursor(glyph, cursor)) continue;
+                var cursor_glyph = projected;
+                cursor_glyph.foreground = packRgb(cursor_colors.text);
+                try cursor_ink.append(allocator, cursor_glyph);
+                break;
+            }
+        }
+    }
+    const owned_ink = try ink.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_ink);
+    const owned_cursor_ink = try cursor_ink.toOwnedSlice(allocator);
+    setCellsPaneOrigin(base.cells, origin_x, origin_y);
+    setCellsPaneOrigin(overlays.cells, origin_x, origin_y);
+    return .{ .base = base.cells, .ink = owned_ink, .overlays = overlays.cells, .cursor_ink = owned_cursor_ink };
+}
+
+fn positionedColors() CellColors {
+    return .{ .default_fg = .{ .r = 200, .g = 210, .b = 220 } };
+}
+
+fn positionedFixture() renderer.GlyphQuad {
+    const key: renderer.glyph_layout.GlyphCacheKey = .{ .font_id = 1, .glyph_id = 3, .font_size_px = 16, .device_scale = 1 };
+    return .{
+        .run = .{ .row = 1, .col = 2, .cell_width = 1, .codepoint = 'A', .font_id = 1, .glyph_id = 3, .cache_key = key, .placement = .{ .x_offset_px = -0.75, .y_offset_px = 2.5 } },
+        .slot = .{ .id = 9, .key = key, .x_px = 3, .y_px = 5, .width_px = 17, .height_px = 21, .upload_bytes = 1428, .generation = 1 },
+        .uv = .{ .u0 = 0.25, .v0 = 0.125, .u1 = 0.5, .v1 = 0.75 },
+    };
+}
+
+const PositionedScene = struct {
+    glyphs: [2]renderer.GlyphQuad,
+    cells: [1]renderer.DrawCell,
+    overlays: [1]renderer.DrawOverlay,
+
+    fn init() PositionedScene {
+        var first = positionedFixture();
+        first.run.cell_width = 2;
+        first.run.codepoint = 0xac00;
+        var second = first;
+        second.run.glyph_id = 4;
+        second.run.codepoint = 0x301;
+        second.run.placement = .{ .x_offset_px = -2.25, .y_offset_px = -1.5 };
+        return .{
+            .glyphs = .{ first, second },
+            .cells = .{.{ .row = 1, .col = 2, .width = 2, .codepoint = 0xac00, .style = .{ .background = .{ .rgb = .{ .r = 10, .g = 20, .b = 30 } } } }},
+            .overlays = .{.{ .cursor = .{ .row = 1, .col = 3 } }},
+        };
+    }
+
+    fn frame(self: *PositionedScene) renderer.GlyphQuadFrame {
+        return .{ .size = .{ .cols = 8, .rows = 2 }, .cursor = .{}, .dirty = null, .glyphs = &self.glyphs, .overlays = &self.overlays, .stats = .{ .glyph_count = 2, .uv_count = 2 } };
+    }
+
+    fn colors() CellColors {
+        return .{ .default_fg = .{ .r = 200, .g = 210, .b = 220 }, .cursor = .{ .block = .{ .r = 0, .g = 255, .b = 0 }, .text = .{ .r = 0, .g = 0, .b = 0 } } };
+    }
+};
+
+test "positioned glyph layers paint a background once and restore every wide cluster glyph over the cursor" {
+    var scene = PositionedScene.init();
+    var result = try buildPositionedTerminalFrame(std.testing.allocator, scene.frame(), &scene.cells, PositionedScene.colors(), 10, 18, 100, 20);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), result.base.len);
+    try std.testing.expectEqual(@as(u32, 0xff0a141e), result.base[0].background);
+    try std.testing.expectEqual(@as(u32, 0), result.base[0].slot_id);
+    try std.testing.expectEqual(@as(u32, 100), result.base[0].origin_x);
+    try std.testing.expectEqual(@as(u32, 20), result.base[0].origin_y);
+    try std.testing.expectEqual(@as(usize, 2), result.ink.len);
+    try std.testing.expectEqual(@as(usize, 1), result.overlays.len);
+    try std.testing.expectEqual(@as(u16, 2), result.overlays[0].col);
+    try std.testing.expectEqual(@as(u16, 2), result.overlays[0].width);
+    try std.testing.expectEqual(@as(u32, 100), result.overlays[0].origin_x);
+    try std.testing.expectEqual(@as(u32, 20), result.overlays[0].origin_y);
+    try std.testing.expectEqual(@as(u32, 0xff00ff00), result.overlays[0].background);
+    try std.testing.expectEqual(@as(usize, 2), result.cursor_ink.len);
+    for (result.ink, result.cursor_ink) |normal, cursor| {
+        try std.testing.expectEqual(normal.x, cursor.x);
+        try std.testing.expectEqual(normal.y, cursor.y);
+        try std.testing.expectEqual(normal.atlas_x_px, cursor.atlas_x_px);
+        try std.testing.expectEqual(@as(u32, 0), cursor.foreground);
+    }
+}
+
+test "positioned glyph layers do not invert ink for bar underline hollow or hidden cursors" {
+    for (0..4) |mode| {
+        var scene = PositionedScene.init();
+        const cursor = &scene.overlays[0].cursor;
+        switch (mode) {
+            0 => cursor.shape = .bar,
+            1 => cursor.shape = .underline,
+            2 => cursor.hollow = true,
+            else => cursor.visible = false,
+        }
+        var result = try buildPositionedTerminalFrame(std.testing.allocator, scene.frame(), &scene.cells, PositionedScene.colors(), 10, 18, 0, 0);
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 2), result.ink.len);
+        try std.testing.expectEqual(@as(usize, 0), result.cursor_ink.len);
+        try std.testing.expectEqual(@as(usize, if (mode == 2) 4 else if (mode == 3) 0 else 1), result.overlays.len);
+    }
+}
+
+test "positioned glyph layers keep trimmed selection paint before ink and out of the overlay pass" {
+    var scene = PositionedScene.init();
+    var colors = PositionedScene.colors();
+    colors.selection = .{ .start = .{ .row = 1, .col = 2 }, .end = .{ .row = 1, .col = 6 } };
+    var result = try buildPositionedTerminalFrame(std.testing.allocator, scene.frame(), &scene.cells, colors, 10, 18, 0, 0);
+    defer result.deinit(std.testing.allocator);
+    for (2..7) |column| {
+        var painted = false;
+        for (result.base) |cell| {
+            if (cell.row == 1 and cell.col <= column and column < @as(u32, cell.col) + cell.width) {
+                try std.testing.expectEqual(@as(u32, 0xff334455), cell.background);
+                painted = true;
+            }
+        }
+        try std.testing.expect(painted);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.overlays.len);
+    try std.testing.expectEqual(@as(usize, 2), result.ink.len);
+}
+
+test "positioned glyph layers retain legacy synthetic ink without duplicating it in overlays" {
+    var scene = PositionedScene.init();
+    scene.glyphs[1].run.placement = null;
+    scene.glyphs[1].run.col = 5;
+    scene.glyphs[1].run.cell_width = 1;
+    scene.glyphs[1].run.codepoint = 0x2500;
+    var result = try buildPositionedTerminalFrame(std.testing.allocator, scene.frame(), &scene.cells, PositionedScene.colors(), 10, 18, 0, 0);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), result.base.len);
+    try std.testing.expectEqual(@as(u16, 5), result.base[1].col);
+    try std.testing.expectEqual(@as(u32, 9), result.base[1].slot_id);
+    try std.testing.expectEqual(@as(usize, 1), result.ink.len);
+    try std.testing.expectEqual(@as(usize, 1), result.overlays.len);
+    try std.testing.expectEqual(@as(usize, 1), result.cursor_ink.len);
+}
+
+test "positioned glyph layers keep concealed ink hidden under block cursors in both paths" {
+    var scene = PositionedScene.init();
+    for (&scene.glyphs) |*glyph| glyph.run.style.conceal = true;
+    var positioned = try buildPositionedTerminalFrame(std.testing.allocator, scene.frame(), &scene.cells, PositionedScene.colors(), 10, 18, 0, 0);
+    defer positioned.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), positioned.cursor_ink.len);
+    try std.testing.expectEqual(@as(usize, 1), positioned.overlays.len);
+    try std.testing.expectEqual(@as(u32, 0), positioned.overlays[0].slot_id);
+    for (&scene.glyphs) |*glyph| glyph.run.placement = null;
+    const legacy = try buildNativeCellsSplit(std.testing.allocator, scene.frame(), &scene.cells, PositionedScene.colors());
+    defer std.testing.allocator.free(legacy.cells);
+    try std.testing.expectEqual(@as(usize, 1), legacy.cursor_cells);
+    try std.testing.expectEqual(@as(u32, 0), legacy.cells[legacy.cells.len - 1].slot_id);
+    try std.testing.expectEqual(@as(u16, 2), legacy.cells[legacy.cells.len - 1].width);
+}
+
+fn positionedAllocationProbe(allocator: std.mem.Allocator) !void {
+    var scene = PositionedScene.init();
+    var result = try buildPositionedTerminalFrame(allocator, scene.frame(), &scene.cells, PositionedScene.colors(), 10, 18, 0, 0);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), result.ink.len);
+    try std.testing.expectEqual(@as(usize, 2), result.cursor_ink.len);
+}
+
+test "positioned glyph layers release all earlier buffers at every allocation failure prefix" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, positionedAllocationProbe, .{});
+}
+
+test "positioned glyph layers reject nonfinite ink after base preparation without mutating input" {
+    var scene = PositionedScene.init();
+    scene.glyphs[1].run.placement.?.x_offset_px = std.math.inf(f32);
+    const original = scene;
+    try std.testing.expectError(error.InvalidGlyphPlacement, buildPositionedTerminalFrame(std.testing.allocator, scene.frame(), &scene.cells, PositionedScene.colors(), 10, 18, 0, 0));
+    try std.testing.expectEqualDeep(original, scene);
+}
+
+test "positioned glyph offsets survive shaped records atlas and quad preparation without changing raster identity" {
+    const a = std.testing.allocator;
+    const records = [_]renderer.ShapedGlyphRecord{
+        .{ .row = 1, .col = 2, .codepoint = 'A', .font_id = 1, .glyph_id = 3, .placement = .{ .x_offset_px = -0.75, .y_offset_px = 2.5 } },
+        .{ .row = 1, .col = 3, .codepoint = 'A', .font_id = 1, .glyph_id = 3, .placement = .{ .x_offset_px = 4.25, .y_offset_px = -3.5 } },
+    };
+    var shaped = try renderer.buildGlyphRunListFromShapedRecords(a, &records, .{});
+    defer shaped.deinit(a);
+    var state = renderer.RendererState.init(a, .{});
+    defer state.deinit();
+    var frame = try renderer.glyph_frame.prepareGlyphFrame(a, shaped.runs, &state.atlas);
+    defer frame.deinit(a);
+    var quads = try renderer.glyph_quads.buildGlyphQuadFrame(a, frame, .{ .width_px = state.atlas.config.atlas_width_px, .height_px = state.atlas.config.atlas_height_px });
+    defer quads.deinit(a);
+    try std.testing.expectEqual(@as(usize, 2), quads.glyphs.len);
+    try std.testing.expectEqual(quads.glyphs[0].slot.id, quads.glyphs[1].slot.id);
+    const first = try positionedGlyph(quads.glyphs[0], 10, 18, 100, 20, positionedColors());
+    const second = try positionedGlyph(quads.glyphs[1], 10, 18, 100, 20, positionedColors());
+    try std.testing.expectEqual(@as(f32, 119.25), first.x);
+    try std.testing.expectEqual(@as(f32, 40.5), first.y);
+    try std.testing.expectEqual(@as(f32, 134.25), second.x);
+    try std.testing.expectEqual(@as(f32, 34.5), second.y);
+}
+
+test "positioned glyph uses fractional signed offsets and atlas raster extents rather than grid span" {
+    const projected = try positionedGlyph(positionedFixture(), 10, 18, 100, 20, positionedColors());
+    try std.testing.expectEqual(@as(f32, 119.25), projected.x);
+    try std.testing.expectEqual(@as(f32, 40.5), projected.y);
+    try std.testing.expectEqual(@as(f32, 17), projected.w);
+    try std.testing.expectEqual(@as(f32, 21), projected.h);
+}
+
+test "positioned glyph preserves atlas pixels and color sentinel for later atlas growth" {
+    var glyph = positionedFixture();
+    glyph.run.cache_key.color_glyph_kind = .color;
+    var projected = [_]GpuGlyph{try positionedGlyph(glyph, 10, 18, 0, 0, positionedColors())};
+    try std.testing.expectEqual(@as(f32, 2.25), projected[0].u0);
+    try std.testing.expectEqual(@as(f32, 2.5), projected[0].u1);
+    renormalizeGpuGlyphUvs(&projected, 64, 128);
+    try std.testing.expectEqual(@as(f32, 2) + 3.0 / 64.0, projected[0].u0);
+    try std.testing.expectEqual(@as(f32, 2) + 20.0 / 64.0, projected[0].u1);
+    try std.testing.expectEqual(@as(f32, 5.0 / 128.0), projected[0].v0);
+    try std.testing.expectEqual(@as(f32, 26.0 / 128.0), projected[0].v1);
+}
+
+test "positioned glyph rejects nonfinite offsets and zero cell metrics before GPU emission" {
+    for ([_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) }) |bad| {
+        var glyph = positionedFixture();
+        glyph.run.placement.?.x_offset_px = bad;
+        try std.testing.expectError(error.InvalidGlyphPlacement, positionedGlyph(glyph, 10, 18, 0, 0, positionedColors()));
+        glyph = positionedFixture();
+        glyph.run.placement.?.y_offset_px = bad;
+        try std.testing.expectError(error.InvalidGlyphPlacement, positionedGlyph(glyph, 10, 18, 0, 0, positionedColors()));
+    }
+    try std.testing.expectError(error.InvalidGlyphPlacement, positionedGlyph(positionedFixture(), 0, 18, 0, 0, positionedColors()));
+    try std.testing.expectError(error.InvalidGlyphPlacement, positionedGlyph(positionedFixture(), 10, 0, 0, 0, positionedColors()));
+}
+
+test "positioned glyph keeps legacy grid records explicitly separate" {
+    var glyph = positionedFixture();
+    var glyphs = [_]renderer.GlyphQuad{glyph};
+    const frame: renderer.GlyphQuadFrame = .{
+        .size = .{ .cols = 8, .rows = 2 },
+        .cursor = .{},
+        .dirty = null,
+        .glyphs = &glyphs,
+        .overlays = &.{},
+        .stats = .{ .glyph_count = 1, .uv_count = 1 },
+    };
+    try std.testing.expectError(error.PositionedGlyphRequiresPixelPath, buildNativeCellsSplit(std.testing.allocator, frame, &.{}, positionedColors()));
+    glyph.run.placement = null;
+    try std.testing.expectError(error.MissingGlyphPlacement, positionedGlyph(glyph, 10, 18, 0, 0, positionedColors()));
+    var shaped = try renderer.buildGlyphRunListFromShapedRecords(std.testing.allocator, &.{.{ .col = 0, .codepoint = 'A', .font_id = 1, .glyph_id = 3 }}, .{});
+    defer shaped.deinit(std.testing.allocator);
+    try std.testing.expect(shaped.runs.glyphs[0].placement == null);
+}
+
+test "positioned glyph origin arithmetic does not wrap at u32 panel or cell extents" {
+    var glyph = positionedFixture();
+    glyph.run.col = 65534;
+    glyph.run.row = 65534;
+    glyph.run.placement = .{};
+    const max = std.math.maxInt(u32);
+    const projected = try positionedGlyph(glyph, max, max, max, max, positionedColors());
+    try std.testing.expectEqual(@as(f32, 281470681743360), projected.x);
+    try std.testing.expectEqual(@as(f32, 281470681743360), projected.y);
+}
 
 /// kitty graphics 이미지 한 placement의 GPU 드로우 프리미티브(K2). chrome GpuQuad와 같은 결의 별개
 /// 파이프라인(textured quad)이고, 셀 그리드와 무관하게 backing 픽셀 사각형으로 그린다. 좌표·UV는

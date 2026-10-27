@@ -2159,6 +2159,26 @@ pub fn build(b: *std.Build) void {
     }) });
     const run_glyph_cell_tests = b.addRunArtifact(glyph_cell_tests);
     glyph_source_step.dependOn(&run_glyph_cell_tests.step);
+    const positioned_glyph_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/renderer.zig"),
+        .target = target,
+        .optimize = optimize,
+    }), .filters = &.{"positioned glyph"} });
+    const run_positioned_glyph_tests = b.addRunArtifact(positioned_glyph_tests);
+    run_positioned_glyph_tests.addArg("--maru-expect-tests=15");
+    b.step("test-positioned-glyph", "Verify positioned terminal ink through shared atlas and pixel DTOs").dependOn(&run_positioned_glyph_tests.step);
+    const positioned_frame_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows positioned terminal"} });
+    const run_positioned_frame_tests = b.addRunArtifact(positioned_frame_tests);
+    run_positioned_frame_tests.addArg("--maru-expect-tests=8");
+    const positioned_frame_step = b.step("test-windows-positioned-frame", "Verify positioned terminal packet order clipping and append ownership");
+    positioned_frame_step.dependOn(&run_positioned_frame_tests.step);
+    const positioned_clip_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/platform/windows/d3d11_cells.zig"),
+        .target = target,
+        .optimize = optimize,
+    }), .filters = &.{"positioned terminal"} });
+    const run_positioned_clip_tests = b.addRunArtifact(positioned_clip_tests);
+    positioned_frame_step.dependOn(&run_positioned_clip_tests.step);
 
     const typography_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows typography"} });
     const run_typography_tests = b.addRunArtifact(typography_tests);

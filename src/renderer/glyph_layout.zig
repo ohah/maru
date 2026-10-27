@@ -94,6 +94,13 @@ pub const GlyphCacheKey = struct {
     color_glyph_kind: ColorGlyphKind = .monochrome,
 };
 
+/// Native shaping can place several glyphs inside one fixed terminal cell.
+/// Position is frame data, not raster identity: moving a mark must reuse its ink.
+pub const GlyphPlacement = struct {
+    x_offset_px: f32 = 0,
+    y_offset_px: f32 = 0,
+};
+
 pub const GlyphRun = struct {
     row: u16,
     col: u16,
@@ -105,6 +112,7 @@ pub const GlyphRun = struct {
     replacement: bool = false,
     style: terminal.Style = .{},
     cache_key: GlyphCacheKey,
+    placement: ?GlyphPlacement = null,
 };
 
 pub const GlyphRunList = struct {

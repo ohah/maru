@@ -5047,12 +5047,17 @@ pub fn build(b: *std.Build) void {
     // 무엇으로 대신할지와 함께 정할 일이라 이 슬라이스에서 하지 않는다.
     const posix_host_tests = target.result.os.tag != .windows;
 
+    const first_save_ime_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/untitled-save-ime", "-p", "test_*.py" });
+    first_save_ime_controls.setCwd(b.path("."));
+    first_save_ime_controls.has_side_effects = true;
+    b.step("test-untitled-save-ime-oracles", "Validate independent first-save IME state and file evidence controls").dependOn(&first_save_ime_controls.step);
     const save_as_gui_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/editor-project-search-app", "-p", "test_save_as_*.py" });
     save_as_gui_controls.setCwd(b.path("."));
     save_as_gui_controls.has_side_effects = true;
     b.step("test-save-as-gui-oracles", "Validate independent native Save As lifecycle evidence controls").dependOn(&save_as_gui_controls.step);
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&save_as_gui_controls.step);
+    test_step.dependOn(&first_save_ime_controls.step);
     test_step.dependOn(&trust_ime_artifact_controls.step);
     test_step.dependOn(&recovery_ime_artifact_controls.step);
     test_step.dependOn(&reference_ime_artifact_controls.step);

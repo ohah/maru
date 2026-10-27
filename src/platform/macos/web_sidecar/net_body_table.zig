@@ -240,12 +240,41 @@ pub fn lowPriority(kind: []const u8) bool {
     return false;
 }
 
+/// 재검증 4 차 뒤 B15-1·B15-2: 글을 푸는 규칙이 MIME 가 아니라 자원 종류로 갈리는 CDP `type` — 페이지가 `<script src>`(`Script`)·
+/// `<link rel=stylesheet>`(`Stylesheet`)로 불러온 글은 Chromium 이 헤더에 charset 이 없으면 **문서의 인코딩**·`<script charset>`·`@charset` 으로
+/// 푼다(MIME 의 기본이 아니다 — 실측 `v20f-15-vj-js-docgk`·`vj-js-attrgk`·`vj-css-u8`). 같은 주소를 fetch·XHR 로 받으면 MIME 의 기본이다(`dg1-csscs`)
+/// — 그래서 주소가 아니라 종류로 가른다.
+pub const ResKind = enum(u2) {
+    other,
+    script,
+    stylesheet,
+};
+
+pub fn resKind(kind: []const u8) ResKind {
+    if (std.mem.eql(u8, kind, "Script")) return .script;
+    if (std.mem.eql(u8, kind, "Stylesheet")) return .stylesheet;
+    return .other;
+}
+
 /// windows-1252 로 되돌려 볼 MIME 인가(J11 — charset 없는 `text/plain` 이 깨져 왔다; HTML·JavaScript·JSON 은 맞게 풀렸다).
+///
+/// 재검증 4 차 뒤 B15-2: Chromium 의 DevTools 는 charset 없는 JavaScript·JSON MIME 를 UTF-8 로 푼다(Blink `IsSupportedJavaScriptMIMEType` —
+/// WHATWG 「JavaScript MIME type essence」 목록 — 과 `IsJSONMimeType`; 실측 `text/x-javascript`·`text/jscript`·`text/javascript1.5`·`text/json`) —
+/// 전에는 `text/javascript`·`text/ecmascript` 만 빼 나머지의 맞는 UTF-8 글에 거짓 `chromium_decoded` 가 붙었다. 이 목록을 잘못 넓혀도 틀린 글이
+/// 표시 없이 나가지 않는다 — windows-1252 로 푼 ASCII 아닌 글은 늘 받은 바이트보다 길어 아래 길이 견주기가 표시한다.
+const js_json_text_mimes = [_][]const u8{
+    "text/javascript",    "text/ecmascript",    "text/javascript1.0", "text/javascript1.1", "text/javascript1.2", "text/javascript1.3",
+    "text/javascript1.4", "text/javascript1.5", "text/jscript",       "text/livescript",    "text/x-ecmascript",  "text/x-javascript",
+    "text/json",
+};
+
 fn redecodeCandidate(mime_full: []const u8) bool {
     const semi = std.mem.indexOfScalar(u8, mime_full, ';') orelse mime_full.len;
     const mime = std.mem.trim(u8, mime_full[0..semi], " \t");
     if (!std.ascii.startsWithIgnoreCase(mime, "text/")) return false;
-    for ([_][]const u8{ "text/html", "text/javascript", "text/ecmascript" }) |t| if (std.ascii.eqlIgnoreCase(mime, t)) return false;
+    if (std.ascii.eqlIgnoreCase(mime, "text/html")) return false;
+    for (js_json_text_mimes) |t| if (std.ascii.eqlIgnoreCase(mime, t)) return false;
+    if (std.ascii.endsWithIgnoreCase(mime, "+json")) return false; // `IsJSONMimeType` 의 `+json`
     // 재검증 3 차 뒤 D-I2·N-i2: `text/xml` 은 Chromium 이 XML 로 풀었다(선언·BOM, 없으면 UTF-8) — windows-1252 로 되돌리지 않는다(`sniffedMime`).
     return !sniffedMime(mime_full);
 }
@@ -535,7 +564,15 @@ pub const Decoded = struct {
 /// 수가 같다. BOM 으로 UTF-8 을 알아본 본문(Chromium 이 맞게 풀었다 — BOM 세 바이트와 여러 바이트 글자만큼 수가 다르다)은 이것으로 걸러져
 /// 그대로 둔다(전에는 「Ã©」 같은 글을 담은 그런 본문을 「é」 로 바꿨다). 남는 틈: 받은 바이트를 모를 때(0)는 수를 보지 않는다. 진짜
 /// Latin-1 본문 안의 「Ã©」 꼴 바이트는 UTF-8 로 맞아 되돌린다 — fetch·XHR 은 charset 없는 글을 UTF-8 로 읽으므로 그것이 페이지가 읽은 글이다.
-pub fn decodeResult(gpa: std.mem.Allocator, ok: bool, json: []const u8, mime: []const u8, charset: Charset, raw_size: u64) std.mem.Allocator.Error!Decoded {
+///
+/// `kind` 는 CDP 자원 종류(`ResKind` — 재검증 4 차 뒤 B15): 헤더 charset 이 없는 스크립트·스타일시트는 `subresourceUtf8` 로 가른다.
+///
+/// 상한(재검증 4 차 뒤 B16-1 — 작성자 선택): 1 MiB 는 **싣는 글**(UTF-8 글, 바이너리면 바이트)의 상한이다 — 받은 바이트(Σ `dataReceived`)도 따로
+/// 1 MiB 로 먼저 막는다(`decide`). wire 의 본문 조각·크기 검사(`net_fields.checkBodyData`·`checkBodyEnd`), 앱의 본문 하나 상한(`web_osr_network.
+/// max_body_bytes`), 보내는 줄의 본문 몫(`out_queue.body_capacity` 2 MiB)이 모두 이 수로 셈하므로 글을 더 담으려면 그 셋을 함께 바꿔야 한다
+/// — 그래서 Chromium 이 푼 글이 커져(windows-1252 는 0x80 넘는 바이트마다, EUC-KR 한글은 2 → 3 바이트) 넘친 본문은 받은 바이트가 1 MiB 아래여도
+/// `over_cap` 이고, 알리는 크기는 둘 중 큰 것(`over_bytes`)이다.
+pub fn decodeResult(gpa: std.mem.Allocator, ok: bool, json: []const u8, mime: []const u8, charset: Charset, raw_size: u64, kind: ResKind) std.mem.Allocator.Error!Decoded {
     if (!ok) return .{ .state = .unavailable };
     const parsed = std.json.parseFromSlice(struct { body: []const u8 = "", base64Encoded: bool = false }, gpa, json, .{ .ignore_unknown_fields = true }) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -565,6 +602,10 @@ pub fn decodeResult(gpa: std.mem.Allocator, ok: bool, json: []const u8, mime: []
     if (v.base64Encoded) {
         // 글 MIME 인데 base64 로 왔다(잘못된 UTF-8 JSON·charset 없는 EUC-KR — J11): UTF-8 이면 글, 아니면 바이트 그대로.
         if (!std.unicode.utf8ValidateSlice(bytes)) flags.binary = true;
+    } else if (!isAscii(bytes) and charset == .none and kind != .other) {
+        // 재검증 4 차 뒤 B15-1·B15-2: 페이지가 불러온 스크립트·스타일시트(헤더 charset 없음)는 Chromium 이 문서 인코딩·`<script charset>`·
+        // `@charset` 으로 풀었다 — MIME 의 기본(windows-1252 되돌리기)도 길이만도 맞지 않는다. UTF-8 로 풀린 근거가 없으면 표시한다.
+        if (!subresourceUtf8(bytes, raw_size, kind)) flags.chromium_decoded = true;
     } else if (!isAscii(bytes) and redecodeWanted(charset, mime)) {
         // charset 없는 text/*·모르는 charset 이름표의 글을 Chromium 이 windows-1252 로 풀었다(J11·D-G1) — 되돌려 UTF-8 이면 그것이 페이지가 받은 글이다.
         const back = try gpa.alloc(u8, bytes.len);
@@ -612,6 +653,29 @@ fn redecodeWanted(charset: Charset, mime: []const u8) bool {
     };
 }
 
+/// 재검증 4 차 뒤 B15-1·B15-2(작성자 결정 — 「틀린 글을 표시 없이 내보내지 않는다」 가 먼저): 헤더 charset 이 없는 스크립트·스타일시트의 ASCII
+/// 아닌 글(`text`)이 받은 바이트를 UTF-8 로 푼 그대로라고 볼 근거가 있나. 근거는 둘 다여야 한다:
+/// - 글의 UTF-8 길이가 받은 바이트 수(`raw_size` — 0 = 모른다면 근거 없음)와 꼭 같다. 한 바이트 인코딩(windows-125x·ISO-8859-x·KOI8…)으로 푼
+///   0x80 넘는 바이트는 늘 UTF-8 두 바이트 넘게 되어 길이가 달라진다.
+/// - U+0800–U+FFFF(UTF-8 세 바이트, U+FFFD 는 빼고) 글자가 하나라도 있다. EUC-KR·GBK·Big5·Shift_JIS 의 두 바이트 글자가 그 범위로 풀리면
+///   한 바이트 길어지고(Shift_JIS 의 한 바이트 반각 가나는 두 바이트 길어진다), 줄어드는 꼴(GB18030 의 네 바이트·ISO-2022-JP 의 전환열·UTF-16)이 우연히 메우지
+///   않는 한 길이가 같을 수 없다. 그리스·키릴 문자처럼 두 바이트로 풀리는 글자뿐이면(EUC-KR 「αβγδ」 8 바이트 = UTF-8 8 바이트 — B15-1) 가르지 못해
+///   표시한다.
+/// - 스타일시트가 `@charset "<UTF-8 아닌 이름표>";` 로 시작하면 Chromium 은 그것으로 풀었다 — 근거 없음.
+/// 대가: 맞게 풀린 UTF-8 글인데 ASCII 밖 글자가 모두 U+0080–U+07FF(라틴 악센트·그리스·키릴·히브리·아랍)인 스크립트·스타일시트는 표시한다.
+/// 남는 틈(표시 없이 틀릴 수 있다): 위 줄어드는 꼴이 우연히 길이를 맞춘 글, EUC-JP 의 세 바이트 JIS X 0212 글자뿐인 글.
+fn subresourceUtf8(text: []const u8, raw_size: u64, kind: ResKind) bool {
+    if (raw_size == 0 or raw_size != text.len) return false;
+    if (kind == .stylesheet and std.mem.startsWith(u8, text, "@charset \"")) {
+        const rest = text["@charset \"".len..];
+        const end = std.mem.indexOfScalar(u8, rest, '"') orelse return false;
+        if (charsetOfLabel(rest[0..end]) != .utf8) return false;
+    }
+    var it = (std.unicode.Utf8View.init(text) catch return false).iterator();
+    while (it.nextCodepoint()) |cp| if (cp >= 0x800 and cp <= 0xFFFF and cp != 0xFFFD) return true;
+    return false;
+}
+
 fn isAscii(b: []const u8) bool {
     for (b) |c| if (c >= 0x80) return false;
     return true;
@@ -644,13 +708,14 @@ pub const Event = union(enum) {
     /// `Network.requestWillBeSent` — 리다이렉트 홉이면 `redirect`(열쇠는 첫 주소의 것). `low` 는 자원 종류가 기다림의 뒤 차례(`lowPriority` —
     /// W9d② 적대 리뷰 5 회차 A2).
     /// `loader` 는 CDP `loaderId` 의 해시(0 = 없다 — worker 의 요청은 빈 글): 그 요청을 낸 문서(재검증 3 차 LB-1 — `Table.crossesDoc`).
-    will_be_sent: struct { rid: []const u8, url_hash: u64, method_hash: u64, ts_us: i64, redirect: bool = false, prefetch: bool = false, low: bool = false, loader: u64 = 0 },
+    /// `res_kind` 는 글 풀기가 갈리는 자원 종류(`ResKind` — 재검증 4 차 뒤 B15).
+    will_be_sent: struct { rid: []const u8, url_hash: u64, method_hash: u64, ts_us: i64, redirect: bool = false, prefetch: bool = false, low: bool = false, loader: u64 = 0, res_kind: ResKind = .other },
     /// `Network.requestWillBeSentExtraInfo` — 실제로 실린 쿠키(막히지 않은 것)·인증 헤더가 있었나.
     extra_info: struct { rid: []const u8, credentialed: bool },
     /// `Network.responseReceived` — `has_extra_info` 는 이 요청의 ExtraInfo 가 오거나 왔다는 Chromium 의 알림(`hasExtraInfo`).
     /// `ts_us` 는 CDP `timestamp`(µs — 0 = 모른다; W9d② 적대 리뷰 3 회차 P1 의 `bound`). `sw_source` 는 서비스 워커가 준 응답의 출처
     /// (`response.serviceWorkerResponseSource` — `network`·`http-cache`·`cache-storage`·`fallback-code`, 없으면 빈 글; W9d② 적대 리뷰 4 회차 SW1).
-    response: struct { rid: []const u8, mime: []const u8, from_sw: bool, charset: Charset, prefetch: bool = false, has_extra_info: bool = false, ts_us: i64 = 0, sw_source: []const u8 = "", low: bool = false },
+    response: struct { rid: []const u8, mime: []const u8, from_sw: bool, charset: Charset, prefetch: bool = false, has_extra_info: bool = false, ts_us: i64 = 0, sw_source: []const u8 = "", low: bool = false, res_kind: ResKind = .other },
     /// `Network.dataReceived` — 풀어 낸 바이트.
     data: struct { rid: []const u8, bytes: u64 },
     /// `Network.requestServedFromCache` — 메모리 캐시: CEF 는 이 요청을 보지 못한다(J1).
@@ -763,6 +828,7 @@ pub fn parseEvent(method: []const u8, v: std.json.Value) ?Event {
             .prefetch = std.mem.eql(u8, kind, "Prefetch"),
             .low = lowPriority(kind),
             .loader = loaderHash(str(v, "loaderId")),
+            .res_kind = resKind(kind),
         } };
     }
     if (std.mem.eql(u8, method, "Network.requestWillBeSentExtraInfo")) {
@@ -793,6 +859,7 @@ pub fn parseEvent(method: []const u8, v: std.json.Value) ?Event {
             .has_extra_info = boolean(v, "hasExtraInfo"),
             .ts_us = cdpMicros(v),
             .low = lowPriority(str(v, "type")),
+            .res_kind = resKind(str(v, "type")),
         } };
     }
     if (std.mem.eql(u8, method, "Network.loadingFinished")) return .{ .finished = .{ .rid = rid } };
@@ -881,6 +948,8 @@ const Cdp = struct {
     failed_at: i64 = 0,
     /// W9d② 적대 리뷰 5 회차 A2: 자원 종류가 기다림의 뒤 차례(`lowPriority` — requestWillBeSent 나 responseReceived 의 `type`).
     low: bool = false,
+    /// 재검증 4 차 뒤 B15: 글 풀기가 갈리는 자원 종류(`ResKind` — 응답의 `type` 이 있으면 그것, 없으면 요청의 것).
+    res_kind: ResKind = .other,
     /// W9d② 적대 리뷰 3 회차 P1: 응답(`responseReceived`)의 시각(CDP `timestamp` — 맞아 보이지 않으면 UI 가 받은 때; 마지막 다시 시작 뒤 — 0 = 아직). 응답은 요청이 나간 뒤에 오고 요청은 CEF 의
     /// `on_before_resource_load`(제 기록의 IO 시각) 뒤에 나간다 — 그래서 제 CEF 기록의 IO 시각은 이 값보다 앞이다(`bound`).
     responded_at: i64 = 0,
@@ -1008,6 +1077,7 @@ const Waiting = struct {
     credentialed: bool,
     /// 5 회차 A2: 차례가 뒤(`lowPriority`) — 기다림은 앞 차례 모두 뒤에 이것들(차례마다 들어온 차례).
     low: bool = false,
+    res_kind: ResKind = .other,
 };
 
 /// 보낸 `getResponseBody` 하나.
@@ -1020,6 +1090,8 @@ pub const Inflight = struct {
     mime: [msg.max_net_mime_bytes]u8 = undefined,
     mime_len: u8 = 0,
     charset: Charset,
+    /// 재검증 4 차 뒤 B15: 글 풀기가 갈리는 자원 종류(`decodeResult`).
+    res_kind: ResKind = .other,
     credentialed: bool,
     /// 보낸 UI 시각 — 답이 `fetch_timeout_us` 안에 오지 않으면 `unavailable` 로 끝낸다(W9d② 적대 리뷰 3 회차 S1).
     sent_at: i64 = 0,
@@ -1030,6 +1102,10 @@ pub const Inflight = struct {
 };
 
 const DropMark = struct { url: u64, t_us: i64 };
+
+/// 재검증 4 차 뒤 R6: 서비스 워커가 답한 CDP 요청 하나(`Tab.sw_seen` — 주소·메서드 해시와 기준 시각; 주소 0 = 빈 자리).
+const SwSeen = struct { url: u64 = 0, method: u64 = 0, at: i64 = 0 };
+pub const max_sw_seen: usize = 128;
 
 /// 재검증 3 차 LB-1: 문서 loader 하나와 그 loader 로 보낸 가장 늦은 요청의 기준 시각(`Tab.loaders`).
 const LoaderSeen = struct { loader: u64 = 0, last_ts: i64 = 0 };
@@ -1087,6 +1163,11 @@ pub const Tab = struct {
     /// loader 로 알림 뒤에 보낸 요청이 있으면 새 문서의 것이다(`crossesDoc` — 실제 CEF: 새 문서의 첫 요청은 20 번 중 15–19 번 알림보다 0.2–0.6 ms 먼저
     /// 나갔다).
     loaders: [max_loaders]LoaderSeen = @splat(.{}),
+    /// 재검증 4 차 뒤 R6: 서비스 워커가 답한 최근 CDP 요청(출처를 가리지 않는다 — 캐시·만든 응답도; 고리 — 넘치면 가장 오래된 것을 덮는다).
+    /// 네트워크 밖에서 답한 요청은 끝나면 맞추기 목록에서 빠지지만 그 워커가 같은 주소를 네트워크로 받았을 수 있다(stale-while-revalidate·다시 싸기)
+    /// — 그 워커 기록은 「설명되는」 기록이다(`swUnique` 의 셋째 조건). 덮여 잊으면 설명되지 않는 쪽으로 치우친다(본문을 잃을 뿐).
+    sw_seen: [max_sw_seen]SwSeen = @splat(.{}),
+    sw_seen_next: usize = 0,
 
     pub fn recording(self: *const Tab) bool {
         return self.session != 0 and !self.paused;
@@ -1167,6 +1248,16 @@ pub const Table = struct {
         drop_cdp: std.ArrayList(bool) = .empty,
         /// 본문 없이 끝낼 기록 자리(`tryDecide` — 모호한 판정의 짝과 사이 후보).
         recs: std.ArrayList(usize) = .empty,
+        /// 재검증 4 차 뒤 R19-1: `t.cdp` 자리 → 맞추기 자리(`reqs` — 없으면 `none`). `ensureArrays` 가 만든다 — `tryDecide` 의 `me` 찾기와 맞추기
+        /// 나눠 쓰기의 확인이 요청마다 `reqs` 를 훑었다(같은 주소 N 개가 `split_wait_us` 2 s 를 기다리면 주기마다 O(N²)).
+        pos_of: std.ArrayList(usize) = .empty,
+        /// 재검증 4 차 뒤 R19-1: CEF 끝이 아직인(`definite` 아님) 기록을 왼쪽 짝으로 쥔 응답 없이 실패한 요청의 맞추기 자리(차례대로) — `held` 가
+        /// 이것만 훑는다(대개 비었다; 전에는 요청마다 `reqs` 전체).
+        bare_held: std.ArrayList(usize) = .empty,
+        /// 재검증 4 차 뒤 R19-1: 새 문서를 건너 남의 기록을 쥔 열린 앞 문서 요청(`tryDecide` 의 WB-3 빼기)의 가장 앞 맞추기 자리(`none` = 없다).
+        first_cross: usize = std.math.maxInt(usize),
+        /// 재검증 4 차 뒤 R6: 서비스 워커 갈래의 짝이 유일하지 않을 때 함께 끝낼 기록 자리(`t.cands`).
+        sw_recs: std.ArrayList(usize) = .empty,
 
         fn deinit(self: *Scratch, gpa: std.mem.Allocator) void {
             self.all_reqs.deinit(gpa);
@@ -1174,6 +1265,9 @@ pub const Table = struct {
             self.drop_cand.deinit(gpa);
             self.drop_cdp.deinit(gpa);
             self.recs.deinit(gpa);
+            self.pos_of.deinit(gpa);
+            self.bare_held.deinit(gpa);
+            self.sw_recs.deinit(gpa);
             self.index.deinit(gpa);
             self.taken.deinit(gpa);
             self.reqs.deinit(gpa);
@@ -1621,6 +1715,7 @@ pub const Table = struct {
                         r.has_key = true;
                         r.prefetch = r.prefetch or v.prefetch;
                         r.low = r.low or v.low;
+                        r.res_kind = v.res_kind;
                         r.sends = 1;
                         r.last_url = v.url_hash;
                         r.loader = v.loader;
@@ -1641,7 +1736,7 @@ pub const Table = struct {
                 const rid = Rid.init(v.rid) orelse return;
                 if (t.cdp.items.len >= max_cdp) dropOldestCdp(gpa, t, v.ts_us);
                 noteLoader(t, v.loader, v.ts_us);
-                try t.cdp.append(gpa, .{ .rid = rid, .key_url = v.url_hash, .key_method = v.method_hash, .ts_us = v.ts_us, .prefetch = v.prefetch, .has_key = true, .last_url = v.url_hash, .low = v.low, .loader = v.loader });
+                try t.cdp.append(gpa, .{ .rid = rid, .key_url = v.url_hash, .key_method = v.method_hash, .ts_us = v.ts_us, .prefetch = v.prefetch, .has_key = true, .last_url = v.url_hash, .low = v.low, .loader = v.loader, .res_kind = v.res_kind });
             },
             .extra_info => |v| {
                 const i = cdpIndex(t, v.rid) orelse blk: {
@@ -1670,12 +1765,17 @@ pub const Table = struct {
                 if (r.state == .finished or r.state == .failed) return;
                 r.sw = v.from_sw;
                 r.responded = true;
+                if (v.from_sw and r.has_key) {
+                    t.sw_seen[t.sw_seen_next] = .{ .url = r.key_url, .method = r.key_method, .at = r.anchor() };
+                    t.sw_seen_next = (t.sw_seen_next + 1) % max_sw_seen;
+                }
                 r.sw_off_network = v.from_sw and !std.mem.eql(u8, v.sw_source, "network");
                 // 제 기록의 IO 시각은 응답보다 앞이다 — CDP 의 응답 시각(같은 시계 — J1)이 맞아 보이면(UI 가 받은 때 앞 2 초 안) 그것, 아니면 UI 가
                 // 받은 때(늦은 쪽 — 기다림이 조금 길 뿐 틀리지 않는다).
                 if (r.responded_at == 0) r.responded_at = @max(cdpTime(v.ts_us, now_us), 1);
                 if (v.prefetch) r.prefetch = true;
                 r.low = r.low or v.low;
+                if (v.res_kind != .other) r.res_kind = v.res_kind;
                 r.has_extra_info = v.has_extra_info;
                 const m = v.mime[0..@min(v.mime.len, r.mime.len)];
                 @memcpy(r.mime[0..m.len], m);
@@ -1757,6 +1857,54 @@ pub const Table = struct {
         if (o.responded_at != 0) return c.t_io_us <= o.responded_at;
         if (o.state == .failed) return !known_ok;
         if (o.state == .finished and c.t_io_us > o.done_at) return false;
+        return true;
+    }
+
+    /// 맞추기에 드는 CDP 요청인가(메모리 캐시·추측 미리 받기·자리만 잡은 것·서비스 워커가 네트워크 밖에서 준 응답·놓인 것은 아니다).
+    fn matchable(o: *const Cdp) bool {
+        return !(o.gone or o.state == .cached or o.prefetch or !o.has_key or o.sw_off_network);
+    }
+
+    /// 재검증 4 차 뒤 R6-1·R6-2·R6-3(조정자 결정 — 이 PR 의 불변식 「틀린 본문 0 이 잃는 본문보다 먼저」): 서비스 워커가 넘긴 응답(`from_sw` —
+    /// 출처 `network`)의 요청 `r`(`t.cdp` 자리 `i`)의 짝이 차례와 상관없이 **하나로** 정해지는가. 워커 갈래(`Key.sw`)의 CEF 기록 차례는 워커
+    /// 스레드의 것이지 페이지의 CDP 시작 차례가 아니다(J2 는 서지 않는다 — 워커가 두 요청을 거꾸로 넘기면 네 맞추기가 함께 뒤바뀐 짝을 줬다,
+    /// 실제 CEF swrev 40/40), 그리고 출처 `network` 는 「워커가 네트워크에서 받았다」 일 뿐 「이 주소를」 이 아니다(다른 주소로 답했을 수 있다 —
+    /// swalt·swalt1 20/20). 그래서 셋 모두일 때만 정한다:
+    ///   1. 같은 열쇠의 짝 없는 기록 가운데 `r` 와 짝일 수 있는 것(`compatible`)이 꼭 하나다.
+    ///   2. 그 기록과 짝일 수 있는 같은 주소·메서드의 다른 요청(워커 갈래이거나 아직 응답이 없는)이 없다.
+    ///   3. `r` 의 창(기준 시각 − 5 ms .. 응답 때)에 시작한, **다른 주소**의 워커 기록 가운데 그 주소의 CDP 요청(열린 것·워커가 답한 것 — 네트워크
+    ///      밖에서 답해 목록에서 빠진 것은 `Tab.sw_seen`)으로 설명되지 않는 것(워커가 스스로 받은 것 — `r` 에 다른 주소로 답한 기록일 수 있다)이
+    ///      없다. 이것이 없으면 R6-3(워커가 다른 주소로 답하고 같은 주소를 제 갱신 fetch 로 받았다 — 요청 하나·기록 하나)을 가르지 못한다.
+    /// 응답 지문(상태·길이)은 쓰지 않는다 — 같아도 내용이 다를 수 있다. 아니면 부른 쪽이 그 기록들을 `ambiguous` 로 끝내고 주인일 수 있는
+    /// 요청을 모두 맞추기에서 뺀다(남은 요청이 남은 기록과 「유일」 해 보이지 않게). 대가: 같은 주소를 겹쳐 받는 워커 요청, 워커가 스스로 다른
+    /// 주소를 받는 동안(갱신·미리 받기·통계)의 워커 요청은 본문을 잃는다. 남는 틈: 워커가 `r` 에 다른 주소 v 로 답했는데 그 v 를 페이지도 같은
+    /// 때 받아(그 기록이 v 의 CDP 요청으로 설명된다) 워커가 같은 주소를 따로 한 번 받은 꼴.
+    fn swUnique(t: *const Tab, i: usize, r: *const Cdp) bool {
+        const key = r.key();
+        var only: ?*const Candidate = null;
+        for (t.cands.items) |*c| {
+            if (c.claimed or !c.key.eql(key) or !compatible(r, c)) continue;
+            if (only != null) return false;
+            only = c;
+        }
+        const c0 = only orelse return false;
+        for (t.cdp.items, 0..) |*o, j| {
+            if (j == i or !matchable(o) or o.key_url != key.url or o.key_method != key.method or (!o.sw and o.responded)) continue;
+            if (compatible(o, c0)) return false;
+        }
+        const lo = r.anchor() - window_before_us;
+        const hi = ioUpper(r);
+        for (t.cands.items) |*c| {
+            if (c.claimed or !c.key.sw or c.key.eql(key) or c.t_io_us < lo or c.t_io_us > hi) continue;
+            const explained = for (t.cdp.items) |*o| {
+                if (!matchable(o) or o.key_url != c.key.url or o.key_method != c.key.method or (!o.sw and o.responded)) continue;
+                if (feasible(o, c)) break true;
+            } else for (t.sw_seen) |w| {
+                // 네트워크 밖에서 답해 목록에서 빠진 워커 요청도 그 주소의 워커 기록을 설명한다(`Tab.sw_seen`).
+                if (w.url == c.key.url and w.method == c.key.method and c.t_io_us >= w.at - window_before_us and c.t_io_us <= w.at + window_after_us) break true;
+            } else false;
+            if (!explained) return false;
+        }
         return true;
     }
 
@@ -2046,13 +2194,15 @@ pub const Table = struct {
     fn ensureArrays(self: *Table, gpa: std.mem.Allocator, t: *Tab, key: Key, i: usize, now_us: i64) std.mem.Allocator.Error!void {
         const sc = &self.scratch;
         if (sc.cache_on and sc.cache_valid and sc.cache_tab == @intFromPtr(t) and sc.cache_key.eql(key)) {
-            const hit = for (sc.reqs.items, 0..) |j, q| {
-                if (j == i) break !sc.pend.items[q];
-            } else false;
-            if (hit) return;
+            // 재검증 4 차 뒤 R19-1: 자리 색인으로(전에는 `reqs` 를 훑었다).
+            const q = if (i < sc.pos_of.items.len) sc.pos_of.items[i] else std.math.maxInt(usize);
+            if (q != std.math.maxInt(usize) and !sc.pend.items[q]) return;
         }
         try self.matchLeft(gpa, t, key);
         sc.match_runs += 1;
+        try sc.pos_of.resize(gpa, t.cdp.items.len);
+        @memset(sc.pos_of.items, std.math.maxInt(usize));
+        for (sc.reqs.items, 0..) |j, q| sc.pos_of.items[j] = q;
         try self.markPending(gpa, t, now_us);
         var shared = true;
         for (sc.reqs.items, 0..) |j, q| if (j == i and sc.pend.items[q]) {
@@ -2080,6 +2230,17 @@ pub const Table = struct {
             @memset(sc.taken_lo.items, false);
         }
         sc.young_n = std.math.maxInt(usize); // `ensureYoung` 가 처음 쓸 때 만든다
+        // 재검증 4 차 뒤 R19-1: 판정하는 요청과 상관없는 두 훑기를 한 번에 — `held` 의 후보(결과를 모르는 기록을 쥔 응답 없이 실패한 요청)와 WB-3 의
+        // 새 문서를 건너 쥔 앞 문서 요청(가장 앞 자리).
+        sc.bare_held.clearRetainingCapacity();
+        sc.first_cross = std.math.maxInt(usize);
+        for (sc.reqs.items, sc.left.items, 0..) |j, lp, q| {
+            if (lp == std.math.maxInt(usize)) continue;
+            const o = &t.cdp.items[j];
+            const c = &t.cands.items[sc.cands.items[lp]];
+            if (failedBare(o) and !definite(o, c, t.doc_at)) try sc.bare_held.append(gpa, q);
+            if (t.doc_at != 0 and sc.first_cross == std.math.maxInt(usize) and o.state == .open and !(c.cef_failed and c.ended_at != 0) and crossesDoc(t, o, c.t_io_us)) sc.first_cross = q;
+        }
         sc.cache_valid = sc.cache_on and shared;
         sc.cache_tab = @intFromPtr(t);
         sc.cache_key = key;
@@ -2136,10 +2297,8 @@ pub const Table = struct {
             try self.ensureArrays(gpa, t, key, i, now_us);
             const reqs = sc.reqs.items;
             const cands = sc.cands.items;
-            var me: usize = none;
-            for (reqs, 0..) |j, q| if (j == i) {
-                me = q;
-            };
+            // 재검증 4 차 뒤 R19-1: 자리 색인(`ensureArrays`).
+            const me: usize = if (i < sc.pos_of.items.len) sc.pos_of.items[i] else none;
             if (me == none) {
                 // 맞추기에 들지 않는 요청(위의 늦은 사건 버리기로 끝난 요청에는 생기지 않는다 — 지키는 길): 짝을 정할 수 없다 — 놓는다.
                 _ = t.cdp.orderedRemove(i);
@@ -2152,7 +2311,7 @@ pub const Table = struct {
             // 빼고 다시 맞춘다 — 그 요청의 본문은 어차피 없다(앞 문서 — CDP 끝이 오지 않는다). CEF 가 실패·취소로 끝낸 기록은 빼고 본다 — 대개 끊긴
             // 앞 문서 요청 제 기록이고(경계 앞 5 ms 안이면 넓힌 경계에 걸린다 — 실제 CEF `v20g-r9-gap-*`), 성공한 요청의 짝이 아니라 본문이 붙을 일이
             // 없다. 새 문서의 요청인 것을 loader 로 아는 요청은 빼지 않는다(`crossesDoc`).
-            if (t.doc_at != 0) {
+            if (t.doc_at != 0 and sc.first_cross < me) {
                 try sc.drop_cdp.resize(gpa, t.cdp.items.len);
                 @memset(sc.drop_cdp.items, false);
                 var any = false;
@@ -2226,10 +2385,12 @@ pub const Table = struct {
             // 쥔 기록이 뒤에 있고 차례가 이 요청 뒤인 요청 가운데 아직 짝이 없는(기록이 오지 않은 것으로 보인) 요청이 그 기록과 짝일 수 있으면 그
             // 요청의 기록으로 본다(abort 의 다시 받기와 같은 주소의 다른 요청 — 5 회차 A1 의 꼴, 그 요청은 실패한 요청이 놓으면 그 기록을 받는다).
             var held = false;
-            if (!failedBare(&r)) for (reqs, sc.left.items) |j, lp| {
-                if (j == i or lp == none or lp == left or !failedBare(&t.cdp.items[j])) continue;
+            // 재검증 4 차 뒤 R19-1: 그런 요청만(`bare_held` — `ensureArrays` 가 모았다; 전에는 요청마다 `reqs` 전체).
+            if (!failedBare(&r)) for (sc.bare_held.items) |bq| {
+                const j = reqs[bq];
+                const lp = sc.left.items[bq];
+                if (j == i or lp == left) continue;
                 const y = &t.cands.items[cands[lp]];
-                if (definite(&t.cdp.items[j], y, t.doc_at)) continue;
                 if (lp < left) {
                     held = true;
                     break;
@@ -2275,6 +2436,9 @@ pub const Table = struct {
                 if (now_us - r.done_at < split_wait_us) return;
                 pending_split = true;
             }
+            // 재검증 4 차 뒤 R6: 서비스 워커가 넘긴 응답은 짝이 하나로 정해질 때만(`swUnique`) — 아니면 맞추기를 의심하는 쪽으로(그 기록들을 끝내고
+            // 주인일 수 있는 요청을 모두 뺀다).
+            const sw_unsure = r.sw and r.responded and !swUnique(t, i, &r);
             var ambiguous = false;
             // 보이는 규칙(프레임·첫 사이트·initiator)이 다른 후보가 이 요청의 창 안에 있다.
             for (cands) |o| if (o != ci and t.cands.items[o].attr != t.cands.items[ci].attr and compatible(&r, &t.cands.items[o])) {
@@ -2293,7 +2457,7 @@ pub const Table = struct {
                 };
             }
             // 맞추기를 의심할 까닭 — 이 요청의 왼쪽 짝이 제 것이라는 보장이 없다.
-            var doubt = late or held or pending_split;
+            var doubt = late or held or pending_split or sw_unsure;
             if (t.drop_overflow_until != 0 and ts - window_before_us <= t.drop_overflow_until) doubt = true;
             // 최종 재검증 D-B: 자리 상한의 묶음 놓기가 놓은 요청의 기록이 이 요청의 창에 들 수 있다(`Tab.cdp_drop_until`).
             if (t.cdp_drop_until != 0 and ts - window_before_us <= t.cdp_drop_until) doubt = true;
@@ -2319,12 +2483,19 @@ pub const Table = struct {
             const extra_hi = if (split) hi + 1 else 0;
             sc.extra.clearRetainingCapacity();
             for (cands[extra_lo..extra_hi]) |x| if (x != ci) try sc.extra.append(gpa, t.cands.items[x].request);
+            // 재검증 4 차 뒤 R6: 워커 갈래의 짝이 하나로 정해지지 않으면 이 요청과 짝일 수 있는 같은 열쇠의 기록을 모두 함께 끝낸다.
+            sc.sw_recs.clearRetainingCapacity();
+            if (sw_unsure) for (cands, 0..) |x, p| if (x != ci and (p < extra_lo or p >= extra_hi) and compatible(&r, &t.cands.items[x])) {
+                try sc.extra.append(gpa, t.cands.items[x].request);
+                try sc.sw_recs.append(gpa, x);
+            };
             const cand = t.cands.items[ci];
             if (ambiguous and doubt) {
                 // 맞추기를 의심한다 — 끝내는 기록(이 요청의 짝과 사이 후보)의 주인일 수 있는 요청을 모두 뺀다(재검증 2–9 회차 WB 의 규칙).
                 try sc.recs.resize(gpa, extra_hi - extra_lo + 1);
                 for (cands[extra_lo..extra_hi], 0..) |x, n| sc.recs.items[n] = x;
                 sc.recs.items[extra_hi - extra_lo] = ci;
+                try sc.recs.appendSlice(gpa, sc.sw_recs.items);
                 try self.retireOwnersOf(gpa, t, sc.recs.items);
             }
             _ = t.cdp.orderedRemove(i);
@@ -2557,7 +2728,7 @@ pub const Table = struct {
         flags = .{ .credentialed = cred };
         // 받으러 간다 — 자리가 없으면 잠시 기다린다(넘치면 busy).
         t.cands.items[ci].claimed = true;
-        var w: Waiting = .{ .request = cand.request, .rid = r.rid, .since = now_us, .bytes = r.data_bytes, .charset = r.charset, .credentialed = cred, .low = r.low };
+        var w: Waiting = .{ .request = cand.request, .rid = r.rid, .since = now_us, .bytes = r.data_bytes, .charset = r.charset, .credentialed = cred, .low = r.low, .res_kind = r.res_kind };
         @memcpy(w.mime[0..r.mime_len], r.mime[0..r.mime_len]);
         w.mime_len = r.mime_len;
         // 5 회차 A2: 기다림이 찼으면(탭 128·전체 512) 차례가 뒤인 가장 새 기다림을 내주고(앞 차례가 들어올 때만), 그것도 없으면 이것이 `busy`.
@@ -2630,7 +2801,7 @@ pub const Table = struct {
             self.global_bytes.tokens -= need;
             const id = self.next_id;
             self.next_id = if (self.next_id + 1 >= id_end) id_base else self.next_id + 1;
-            var f: Inflight = .{ .id = id, .browser = t.browser, .session = t.session, .request = w.request, .decoded = w.bytes, .charset = w.charset, .credentialed = w.credentialed, .sent_at = @max(now_us, 1) };
+            var f: Inflight = .{ .id = id, .browser = t.browser, .session = t.session, .request = w.request, .decoded = w.bytes, .charset = w.charset, .res_kind = w.res_kind, .credentialed = w.credentialed, .sent_at = @max(now_us, 1) };
             @memcpy(f.mime[0..w.mime_len], w.mime[0..w.mime_len]);
             f.mime_len = w.mime_len;
             try self.inflight.append(gpa, f);
@@ -2734,6 +2905,13 @@ pub const Table = struct {
             return;
         }
         _ = sc.reqs.orderedRemove(q);
+        // 재검증 4 차 뒤 R19-1: 자리 색인·`held` 후보·WB-3 자리도 한 칸 당긴다(지운 요청은 왼쪽 짝이 없어 그 둘에 들지 않았다).
+        sc.pos_of.items[gone] = std.math.maxInt(usize);
+        for (sc.reqs.items[q..], q..) |j, x| sc.pos_of.items[j] = x;
+        for (sc.bare_held.items) |*bq| if (bq.* > q) {
+            bq.* -= 1;
+        };
+        if (sc.first_cross != std.math.maxInt(usize) and sc.first_cross > q) sc.first_cross -= 1;
         _ = sc.left.orderedRemove(q);
         _ = sc.right.orderedRemove(q);
         _ = sc.right_fut.orderedRemove(q);
@@ -2958,7 +3136,7 @@ test "W9d②: MIME 가르기 — 글(text/*·JSON·XML·JS·+json·+xml), 글 �
 
 test "W9d②: 결과 풀기 — JSON 글, base64(글이면 글·아니면 바이너리), 빈 본문, 실패·모양이 틀린 결과, charset 없는 text/plain 의 windows-1252 되돌리기" {
     {
-        const d = try decodeResult(gpa_t, true, "{\"body\":\"{\\\"a\\\":\\\"\\uD55C\\\"}\",\"base64Encoded\":false}", "application/json", .none, 0);
+        const d = try decodeResult(gpa_t, true, "{\"body\":\"{\\\"a\\\":\\\"\\uD55C\\\"}\",\"base64Encoded\":false}", "application/json", .none, 0, .other);
         defer gpa_t.free(d.bytes);
         try testing.expectEqual(State.captured, d.state);
         try testing.expectEqualStrings("{\"a\":\"한\"}", d.bytes);
@@ -2966,30 +3144,30 @@ test "W9d②: 결과 풀기 — JSON 글, base64(글이면 글·아니면 바이
     }
     {
         // 잘못된 UTF-8 JSON 은 base64 로 온다(J11) — 바이트 그대로, 바이너리 표시.
-        const d = try decodeResult(gpa_t, true, "{\"body\":\"/wB7\",\"base64Encoded\":true}", "application/json", .other, 0);
+        const d = try decodeResult(gpa_t, true, "{\"body\":\"/wB7\",\"base64Encoded\":true}", "application/json", .other, 0, .other);
         defer gpa_t.free(d.bytes);
         try testing.expect(d.state == .captured and d.flags.binary);
         try testing.expectEqualSlices(u8, &.{ 0xff, 0x00, 0x7b }, d.bytes);
     }
     {
         // 글인 base64 는 글.
-        const d = try decodeResult(gpa_t, true, "{\"body\":\"7ZWc\",\"base64Encoded\":true}", "text/plain", .other, 0);
+        const d = try decodeResult(gpa_t, true, "{\"body\":\"7ZWc\",\"base64Encoded\":true}", "text/plain", .other, 0, .other);
         defer gpa_t.free(d.bytes);
         try testing.expect(d.state == .captured and !d.flags.binary);
         try testing.expectEqualStrings("한", d.bytes);
     }
     {
         // UTF-8 「한」(ED 95 9C) 을 windows-1252 로 푼 깨진 글 「í•œ」 — 되돌린다.
-        const d = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153 ok\",\"base64Encoded\":false}", "text/plain", .none, 0);
+        const d = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153 ok\",\"base64Encoded\":false}", "text/plain", .none, 0, .other);
         defer gpa_t.free(d.bytes);
         try testing.expect(d.state == .captured and d.flags.redecoded);
         try testing.expectEqualStrings("한 ok", d.bytes);
         // W9d② 적대 리뷰 1 회차: 받은 바이트 수(Σ dataReceived)를 알면 windows-1252 로 읽은 글자 수와 같을 때만 되돌린다 — 「한 ok」 는 6 바이트.
-        const same = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153 ok\",\"base64Encoded\":false}", "text/plain", .none, 6);
+        const same = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153 ok\",\"base64Encoded\":false}", "text/plain", .none, 6, .other);
         defer gpa_t.free(same.bytes);
         try testing.expect(same.flags.redecoded);
         // BOM 으로 UTF-8 을 알아본 본문 — Chromium 이 맞게 풀었다(글 「Ã©」 는 원래 C3 83 C2 A9 에 BOM 셋, 7 바이트): 되돌리지 않는다(「é」 로 바꾸지 않는다).
-        const bom = try decodeResult(gpa_t, true, "{\"body\":\"\\u00c3\\u00a9\",\"base64Encoded\":false}", "text/plain", .none, 7);
+        const bom = try decodeResult(gpa_t, true, "{\"body\":\"\\u00c3\\u00a9\",\"base64Encoded\":false}", "text/plain", .none, 7, .other);
         defer gpa_t.free(bom.bytes);
         try testing.expect(!bom.flags.redecoded and bom.flags.chromium_decoded);
         try testing.expectEqualStrings("Ã©", bom.bytes);
@@ -3001,48 +3179,48 @@ test "W9d②: 결과 풀기 — JSON 글, base64(글이면 글·아니면 바이
         try big.appendSlice(gpa_t, "{\"body\":\"");
         for (0..400 * 1024) |_| try big.appendSlice(gpa_t, "\\u20ac");
         try big.appendSlice(gpa_t, "\",\"base64Encoded\":false}");
-        const o = try decodeResult(gpa_t, true, big.items, "text/plain", .none, 400 * 1024);
+        const o = try decodeResult(gpa_t, true, big.items, "text/plain", .none, 400 * 1024, .other);
         try testing.expectEqual(State.over_cap, o.state);
         try testing.expectEqual(@as(u64, 3 * 400 * 1024), o.over_bytes);
     }
     {
         // charset 이 있으면 되돌리지 않는다. 되돌릴 수 없는 글(표에 없는 글자)은 표시만.
-        const d = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153\",\"base64Encoded\":false}", "text/plain", .other, 0);
+        const d = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153\",\"base64Encoded\":false}", "text/plain", .other, 0, .other);
         defer gpa_t.free(d.bytes);
         try testing.expect(!d.flags.redecoded and !d.flags.chromium_decoded);
-        const e = try decodeResult(gpa_t, true, "{\"body\":\"\\uD55C\",\"base64Encoded\":false}", "text/plain", .none, 0);
+        const e = try decodeResult(gpa_t, true, "{\"body\":\"\\uD55C\",\"base64Encoded\":false}", "text/plain", .none, 0, .other);
         defer gpa_t.free(e.bytes);
         try testing.expect(e.flags.chromium_decoded and !e.flags.redecoded);
         // 라틴 글이 우연히 UTF-8 이 되지 않으면(é 하나) 그대로 — 표시만.
-        const f = try decodeResult(gpa_t, true, "{\"body\":\"caf\\u00e9\",\"base64Encoded\":false}", "text/csv", .none, 0);
+        const f = try decodeResult(gpa_t, true, "{\"body\":\"caf\\u00e9\",\"base64Encoded\":false}", "text/csv", .none, 0, .other);
         defer gpa_t.free(f.bytes);
         try testing.expect(f.flags.chromium_decoded);
         try testing.expectEqualStrings("café", f.bytes);
         // HTML 은 되돌리지 않는다(J11 — 맞게 풀렸다). 재검증 3 차 뒤 D-I1: 헤더 charset 이 없으면 본문의 선언을 따랐을 수 있어 표시한다.
-        const g = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153\",\"base64Encoded\":false}", "text/html", .none, 0);
+        const g = try decodeResult(gpa_t, true, "{\"body\":\"\\u00ed\\u2022\\u0153\",\"base64Encoded\":false}", "text/html", .none, 0, .other);
         defer gpa_t.free(g.bytes);
         try testing.expect(!g.flags.redecoded and g.flags.chromium_decoded);
     }
     {
         // W9d② 20 회 검증 15 회차 D1: `FF FE 7B 22 6B 22 3A 22 C0 80 22 7D`(12 바이트) JSON 을 Chromium 이 UTF-16 으로 풀어 15 바이트 글이 왔다 — 표시.
-        const utf16 = try decodeResult(gpa_t, true, "{\"body\":\"\\u227b\\u226b\\u223a\\u80c0\\u7d22\",\"base64Encoded\":false}", "application/json", .none, 12);
+        const utf16 = try decodeResult(gpa_t, true, "{\"body\":\"\\u227b\\u226b\\u223a\\u80c0\\u7d22\",\"base64Encoded\":false}", "application/json", .none, 12, .other);
         defer gpa_t.free(utf16.bytes);
         try testing.expect(utf16.state == .captured and utf16.flags.chromium_decoded and !utf16.flags.redecoded and !utf16.flags.binary);
         // 대조: 같은 수(UTF-8 JSON — 여러 바이트 글자 포함), 수를 모름, charset 있음은 표시하지 않는다.
-        const same = try decodeResult(gpa_t, true, "{\"body\":\"{\\\"k\\\":\\\"\\uD55C\\\"}\",\"base64Encoded\":false}", "application/json", .none, 11);
+        const same = try decodeResult(gpa_t, true, "{\"body\":\"{\\\"k\\\":\\\"\\uD55C\\\"}\",\"base64Encoded\":false}", "application/json", .none, 11, .other);
         defer gpa_t.free(same.bytes);
         try testing.expect(!same.flags.chromium_decoded);
-        const unknown = try decodeResult(gpa_t, true, "{\"body\":\"\\u227b\",\"base64Encoded\":false}", "application/json", .none, 0);
+        const unknown = try decodeResult(gpa_t, true, "{\"body\":\"\\u227b\",\"base64Encoded\":false}", "application/json", .none, 0, .other);
         defer gpa_t.free(unknown.bytes);
         try testing.expect(!unknown.flags.chromium_decoded);
-        const cs = try decodeResult(gpa_t, true, "{\"body\":\"\\uD55C\",\"base64Encoded\":false}", "application/json", .other, 2);
+        const cs = try decodeResult(gpa_t, true, "{\"body\":\"\\uD55C\",\"base64Encoded\":false}", "application/json", .other, 2, .other);
         defer gpa_t.free(cs.bytes);
         try testing.expect(!cs.flags.chromium_decoded);
         // 최종 재검증 D-B1: `charset=utf-8` 을 선언해도 BOM 이 앞서 UTF-16 으로 풀린다 — 표시. 대조: UTF-8 선언에 같은 수는 표시하지 않는다.
-        const u8cs = try decodeResult(gpa_t, true, "{\"body\":\"\\u227b\\u226b\\u223a\\u80c0\\u7d22\",\"base64Encoded\":false}", "application/json", .utf8, 12);
+        const u8cs = try decodeResult(gpa_t, true, "{\"body\":\"\\u227b\\u226b\\u223a\\u80c0\\u7d22\",\"base64Encoded\":false}", "application/json", .utf8, 12, .other);
         defer gpa_t.free(u8cs.bytes);
         try testing.expect(u8cs.flags.chromium_decoded and !u8cs.flags.redecoded);
-        const u8same = try decodeResult(gpa_t, true, "{\"body\":\"\\uD55C ok\",\"base64Encoded\":false}", "text/plain", .utf8, 6);
+        const u8same = try decodeResult(gpa_t, true, "{\"body\":\"\\uD55C ok\",\"base64Encoded\":false}", "text/plain", .utf8, 6, .other);
         defer gpa_t.free(u8same.bytes);
         try testing.expect(!u8same.flags.chromium_decoded and !u8same.flags.redecoded);
         try testing.expectEqualStrings("한 ok", u8same.bytes);
@@ -3052,10 +3230,10 @@ test "W9d②: 결과 풀기 — JSON 글, base64(글이면 글·아니면 바이
     try testing.expectEqual(Charset.utf8, charsetOf("text/plain;charset=\"utf8\"; foo=bar"));
     try testing.expectEqual(Charset.other, charsetOf("text/plain; charset=iso-8859-1"));
     try testing.expectEqual(Charset.other, charsetOf("text/plain; charset=utf-16"));
-    try testing.expectEqual(State.no_body, (try decodeResult(gpa_t, true, "{\"body\":\"\",\"base64Encoded\":false}", "text/plain", .other, 0)).state);
-    try testing.expectEqual(State.unavailable, (try decodeResult(gpa_t, false, "{\"code\":-32000}", "text/plain", .other, 0)).state);
-    try testing.expectEqual(State.unavailable, (try decodeResult(gpa_t, true, "[1]", "text/plain", .other, 0)).state);
-    try testing.expectEqual(State.unavailable, (try decodeResult(gpa_t, true, "{\"body\":\"!!!\",\"base64Encoded\":true}", "image/png", .other, 0)).state);
+    try testing.expectEqual(State.no_body, (try decodeResult(gpa_t, true, "{\"body\":\"\",\"base64Encoded\":false}", "text/plain", .other, 0, .other)).state);
+    try testing.expectEqual(State.unavailable, (try decodeResult(gpa_t, false, "{\"code\":-32000}", "text/plain", .other, 0, .other)).state);
+    try testing.expectEqual(State.unavailable, (try decodeResult(gpa_t, true, "[1]", "text/plain", .other, 0, .other)).state);
+    try testing.expectEqual(State.unavailable, (try decodeResult(gpa_t, true, "{\"body\":\"!!!\",\"base64Encoded\":true}", "image/png", .other, 0, .other)).state);
     var cp: [8]u8 = undefined;
     try testing.expectEqualSlices(u8, &.{ 0x80, 0xe9, 0x9f }, toCp1252("€éŸ", &cp).?);
     try testing.expect(toCp1252("한", &cp) == null);
@@ -4163,7 +4341,11 @@ test "W9d② 적대 리뷰 2 회차: 맞추기의 차례와 갈래 — 뒤 요�
         try sw_resp(&h, "c.o", 3_300_000);
         try h.table.tick(gpa_t, 3_300_000);
         try h.drain();
-        try testing.expectEqual(@as(?u64, 522), fetchedFor(&h, "c.r"));
+        // 재검증 4 차 뒤 R6-1(기대를 바꿈 — 대가): 워커 갈래의 기록 차례는 페이지의 시작 차례가 아니다(워커가 두 요청을 거꾸로 넘기면 맞바뀐다) —
+        // 같은 주소 워커 요청 둘·기록 둘이면 짝이 하나로 정해지지 않아 둘 다 본문 없이(전에는 522 를 받았다).
+        try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "c.r"));
+        try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(521));
+        try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(522));
     }
     {
         // 앞 요청이 서비스 워커가 아닌 응답을 받았으면(다른 갈래) 서비스 워커 갈래의 맞추기에 넣지 않는다 — 뒤 요청은 제 기록을 받는다.
@@ -5869,7 +6051,7 @@ test "W9d② v20f 15: V4 boundaries — received size ±1 marks, equal or unknow
         .{ .json = "{\"body\":\"7ZWc\",\"base64Encoded\":true}", .mime = "application/json", .charset = .none, .raw = 99, .mark = false },
     };
     for (cases, 0..) |c, i| {
-        const d = try decodeResult(gpa_t, true, c.json, c.mime, c.charset, c.raw);
+        const d = try decodeResult(gpa_t, true, c.json, c.mime, c.charset, c.raw, .other);
         defer gpa_t.free(d.bytes);
         errdefer std.debug.print("v20f 15 case {d}: state={s} chromium_decoded={} redecoded={}\n", .{ i, @tagName(d.state), d.flags.chromium_decoded, d.flags.redecoded });
         try testing.expectEqual(c.state, d.state);
@@ -5882,7 +6064,7 @@ test "W9d② v20f 15: V4 boundaries — received size ±1 marks, equal or unknow
     try big.appendSlice(gpa_t, "{\"body\":\"");
     for (0..(msg.max_net_body_bytes / 3 + 1)) |_| try big.appendSlice(gpa_t, "\\u227b");
     try big.appendSlice(gpa_t, "\",\"base64Encoded\":false}");
-    const o = try decodeResult(gpa_t, true, big.items, "application/json", .none, 1000);
+    const o = try decodeResult(gpa_t, true, big.items, "application/json", .none, 1000, .other);
     defer gpa_t.free(o.bytes);
     try testing.expectEqual(State.over_cap, o.state);
     try testing.expect(o.over_bytes > msg.max_net_body_bytes);
@@ -6042,7 +6224,7 @@ test "W9d② 재검증 15 회차 D-G1: decodeResult 의 갈래 — 빈·모르�
     var bad: usize = 0;
     for (rows) |r| {
         const semi = std.mem.indexOfAny(u8, r.ct, ";\n") orelse r.ct.len;
-        const d = try decodeResult(gpa_t, true, r.json, r.ct[0..semi], charsetOf(r.ct), r.raw);
+        const d = try decodeResult(gpa_t, true, r.json, r.ct[0..semi], charsetOf(r.ct), r.raw, .other);
         defer gpa_t.free(d.bytes);
         const fine = d.state == .captured and switch (r.out) {
             .exact => !d.flags.redecoded and !d.flags.chromium_decoded and std.mem.eql(u8, d.bytes, good),
@@ -6167,7 +6349,7 @@ test "W9d② 재검증 3 차 D-H1·D-H2·D-I1·D-I2: 실측 꼴마다 — 모르
         const json = try std.json.Stringify.valueAlloc(gpa_t, .{ .body = text, .base64Encoded = false }, .{});
         defer gpa_t.free(json);
         const raw_size: u64 = if (std.mem.eql(u8, r.raw, "x")) text.len else r.raw.len;
-        const d = try decodeResult(gpa_t, true, json, r.mime, charsetOf(r.ct), raw_size);
+        const d = try decodeResult(gpa_t, true, json, r.mime, charsetOf(r.ct), raw_size, .other);
         defer gpa_t.free(d.bytes);
         const fine = d.state == .captured and switch (r.out) {
             .exact => !d.flags.redecoded and !d.flags.chromium_decoded and std.mem.eql(u8, d.bytes, r.raw),
@@ -6186,7 +6368,7 @@ test "W9d② 재검증 3 차 D-H1·D-H2·D-I1·D-I2: 실측 꼴마다 — 모르
     const xml_moji = "<r>\u{c3}\u{a9}</r>";
     const json_moji = try std.json.Stringify.valueAlloc(gpa_t, .{ .body = xml_moji, .base64Encoded = false }, .{});
     defer gpa_t.free(json_moji);
-    const dm = try decodeResult(gpa_t, true, json_moji, "text/xml", charsetOf("text/xml"), 0);
+    const dm = try decodeResult(gpa_t, true, json_moji, "text/xml", charsetOf("text/xml"), 0, .other);
     defer gpa_t.free(dm.bytes);
     try testing.expect(dm.state == .captured and !dm.flags.redecoded and dm.flags.chromium_decoded);
     try testing.expectEqualStrings(xml_moji, dm.bytes);
@@ -8455,5 +8637,620 @@ test "W9d② 재검증 3 차 퍼즈: 큰 퍼즈가 찾은 씨앗(IO 50 ms) — C
         try testing.expectEqual(@as(usize, 1), st.scenarios);
         try testing.expectEqual(@as(usize, 0), st.wrong);
         try testing.expectEqual(@as(usize, 0), st.missing_end);
+    }
+}
+
+// ── W9d② 재검증 4 차 뒤 — 검증자 B 15·16 회차(스크립트·스타일시트의 글 풀기, JS·JSON MIME, 글로 넘친 상한) ─────────────────────────────────
+
+test "W9d② 재검증 4 차 뒤 B15-1·B15-2: 헤더 charset 없는 스크립트·스타일시트 — 문서 인코딩으로 푼 같은 길이 글은 표시, UTF-8 근거(같은 길이 + 세 바이트 글자)가 있으면 그대로, 같은 MIME 를 fetch 로 받으면 전처럼" {
+    const gk_text = "var s=\"\u{3b1}\u{3b2}\u{3b3}\u{3b4}\";"; // EUC-KR A5 E1… 를 문서 인코딩으로 푼 글 — 받은 바이트와 같은 길이
+    const gk_raw_len: u64 = ("var s=\"".len + 8 + 2);
+    const kr_text = "var s=\"\u{ac00}\u{b098}\";"; // EUC-KR 「가나」 4 바이트 → 6 바이트
+    const u8_js = "var s=\"\u{d55c}\u{2192} caf\u{e9}\";"; // 맞는 UTF-8 — 세 바이트 글자가 있다
+    const u8_lat = "var s=\"caf\u{e9} na\u{ef}ve\";"; // 맞는 UTF-8 — 두 바이트 글자뿐(대가: 표시)
+    const css_u8 = "/*caf\u{e9} \u{2713}*/"; // 실측 vj-css-u8
+    const css_gk = "/*\u{3b1}\u{3b2}\u{3b3}\u{3b4}*/";
+    const Out = enum { exact, redecoded, marked };
+    const R = struct { name: []const u8, kind: ResKind, mime: []const u8, ct: []const u8 = "", text: []const u8, raw: ?u64 = null, out: Out, want: ?[]const u8 = null };
+    const rows = [_]R{
+        // B15-1: 문서 인코딩(EUC-KR)·<script charset=euc-kr> 로 푼 그리스 글 — 길이가 받은 바이트와 같아도 표시
+        .{ .name = "js docgk", .kind = .script, .mime = "text/javascript", .text = gk_text, .raw = gk_raw_len, .out = .marked },
+        .{ .name = "js docgk application/javascript", .kind = .script, .mime = "application/javascript", .text = gk_text, .raw = gk_raw_len, .out = .marked },
+        .{ .name = "js docgk text/plain", .kind = .script, .mime = "text/plain", .text = gk_text, .raw = gk_raw_len, .out = .marked },
+        .{ .name = "js kr (longer)", .kind = .script, .mime = "text/javascript", .text = kr_text, .raw = kr_text.len - 2, .out = .marked },
+        .{ .name = "js u8 unknown size", .kind = .script, .mime = "text/javascript", .text = u8_js, .raw = 0, .out = .marked },
+        .{ .name = "js u8 lat (cost)", .kind = .script, .mime = "text/javascript", .text = u8_lat, .out = .marked },
+        .{ .name = "js only fffd", .kind = .script, .mime = "text/javascript", .text = "x=\"\u{fffd}\u{e9}\"", .out = .marked },
+        .{ .name = "js supplementary only", .kind = .script, .mime = "text/javascript", .text = "x=\"\u{1f600}\"", .out = .marked },
+        .{ .name = "js ascii size differs", .kind = .script, .mime = "text/javascript", .text = "var a=1;", .raw = 18, .out = .marked },
+        // 맞는 UTF-8(근거 있음) — 그대로, 표시 없음(MIME 가 무엇이든 — 종류가 정한다)
+        .{ .name = "js u8", .kind = .script, .mime = "text/javascript", .text = u8_js, .out = .exact },
+        .{ .name = "js u8 text/plain", .kind = .script, .mime = "text/plain", .text = u8_js, .out = .exact },
+        .{ .name = "js ascii", .kind = .script, .mime = "text/javascript", .text = "var a=1;", .out = .exact },
+        // 헤더 charset 이 있으면 종류와 상관없이 전의 규칙(Chromium 도 헤더를 앞세운다)
+        .{ .name = "js hdr euc-kr", .kind = .script, .mime = "text/javascript", .ct = "text/javascript; charset=euc-kr", .text = gk_text, .raw = gk_raw_len, .out = .exact, .want = gk_text },
+        .{ .name = "js hdr utf-8", .kind = .script, .mime = "text/javascript", .ct = "text/javascript; charset=utf-8", .text = u8_lat, .out = .exact },
+        // B15-2: 스타일시트 — windows-1252 로 되돌리지 않는다(맞는 UTF-8 CSS 의 거짓 표시), 근거가 없으면 표시(문서 인코딩의 그리스 글)
+        .{ .name = "css u8", .kind = .stylesheet, .mime = "text/css", .text = css_u8, .out = .exact },
+        .{ .name = "css hangul font", .kind = .stylesheet, .mime = "text/css", .text = "a{font-family:\"\u{b9d1}\u{c740} \u{ace0}\u{b515}\"}", .out = .exact },
+        .{ .name = "css docgk", .kind = .stylesheet, .mime = "text/css", .text = css_gk, .out = .marked },
+        .{ .name = "css @charset euc-kr", .kind = .stylesheet, .mime = "text/css", .text = "@charset \"euc-kr\";/*\u{2192}*/", .out = .marked },
+        .{ .name = "css @charset unclosed", .kind = .stylesheet, .mime = "text/css", .text = "@charset \"utf-8;/*\u{2192}*/", .out = .marked },
+        .{ .name = "css @charset utf-8", .kind = .stylesheet, .mime = "text/css", .text = "@charset \"UTF-8\";/*\u{2192}*/", .out = .exact },
+        .{ .name = "css w1252 moji", .kind = .stylesheet, .mime = "text/css", .text = "/*caf\u{c3}\u{a9}*/", .raw = 9, .out = .marked },
+        // 대조: 같은 CSS 를 fetch 로 받았다(종류 other) — 전처럼 windows-1252 로 되돌린다(dg1-csscs)
+        .{ .name = "fetch css w1252", .kind = .other, .mime = "text/css", .text = "/*caf\u{c3}\u{a9}*/", .raw = 9, .out = .redecoded, .want = "/*caf\u{e9}*/" },
+        .{ .name = "fetch css u8 (marked as before)", .kind = .other, .mime = "text/css", .text = css_u8, .out = .marked },
+    };
+    var bad: usize = 0;
+    for (rows) |r| {
+        const json = try std.json.Stringify.valueAlloc(gpa_t, .{ .body = r.text, .base64Encoded = false }, .{});
+        defer gpa_t.free(json);
+        const raw = r.raw orelse r.text.len;
+        const d = try decodeResult(gpa_t, true, json, r.mime, charsetOf(r.ct), raw, r.kind);
+        defer gpa_t.free(d.bytes);
+        const want = r.want orelse r.text;
+        const fine = d.state == .captured and switch (r.out) {
+            .exact => !d.flags.redecoded and !d.flags.chromium_decoded and std.mem.eql(u8, d.bytes, want),
+            .redecoded => d.flags.redecoded and !d.flags.chromium_decoded and std.mem.eql(u8, d.bytes, want),
+            .marked => d.flags.chromium_decoded and !d.flags.redecoded,
+        };
+        if (!fine) {
+            std.debug.print("B15 [{s}]: {s} redecoded={} chromium_decoded={} len {d} (raw {d}), want {s}\n", .{ r.name, @tagName(d.state), d.flags.redecoded, d.flags.chromium_decoded, d.bytes.len, raw, @tagName(r.out) });
+            bad += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), bad);
+}
+
+test "W9d② 재검증 4 차 뒤 B15-2: Blink 의 JavaScript·JSON MIME(charset 없음)는 windows-1252 로 되돌리지 않는다 — 맞는 UTF-8 은 그대로, windows-1252 로 푼 글이 오더라도 길이로 표시(틀린 글이 표시 없이 나가지 않는다)" {
+    const u8_text = "x=\"caf\u{e9} \u{2713}\"";
+    const moji = "x=\"caf\u{c3}\u{a9}\""; // 「café」 의 UTF-8 을 windows-1252 로 읽은 글
+    for ([_][]const u8{ "text/javascript", "text/ecmascript", "text/javascript1.0", "text/javascript1.5", "text/jscript", "text/livescript", "text/x-ecmascript", "text/x-javascript", "TEXT/X-JavaScript", "text/json", "text/vnd.maru+json", "text/x-javascript; charset=" }) |mime| {
+        errdefer std.debug.print("B15-2 mime {s}\n", .{mime});
+        try testing.expect(!redecodeCandidate(mime));
+        const j1 = try std.json.Stringify.valueAlloc(gpa_t, .{ .body = u8_text, .base64Encoded = false }, .{});
+        defer gpa_t.free(j1);
+        const d = try decodeResult(gpa_t, true, j1, mime, charsetOf(mime), u8_text.len, .other);
+        defer gpa_t.free(d.bytes);
+        try testing.expect(d.state == .captured and !d.flags.chromium_decoded and !d.flags.redecoded);
+        try testing.expectEqualStrings(u8_text, d.bytes);
+        // 지킴: Chromium 이 이 MIME 를 windows-1252 로 풀었다고 해도 길이가 달라 표시된다.
+        const j2 = try std.json.Stringify.valueAlloc(gpa_t, .{ .body = moji, .base64Encoded = false }, .{});
+        defer gpa_t.free(j2);
+        const m = try decodeResult(gpa_t, true, j2, mime, charsetOf(mime), moji.len - 2, .other);
+        defer gpa_t.free(m.bytes);
+        try testing.expect(m.state == .captured and m.flags.chromium_decoded and !m.flags.redecoded);
+    }
+    // 대조: 다른 글 MIME 는 전처럼 되돌린다.
+    for ([_][]const u8{ "text/plain", "text/css", "text/csv", "text/x-json-not", "text/javascript2" }) |mime| {
+        errdefer std.debug.print("B15-2 control {s}\n", .{mime});
+        try testing.expect(redecodeCandidate(mime));
+        const j = try std.json.Stringify.valueAlloc(gpa_t, .{ .body = moji, .base64Encoded = false }, .{});
+        defer gpa_t.free(j);
+        const d = try decodeResult(gpa_t, true, j, mime, .none, moji.len - 2, .other);
+        defer gpa_t.free(d.bytes);
+        try testing.expect(d.state == .captured and d.flags.redecoded);
+        try testing.expectEqualStrings("x=\"caf\u{e9}\"", d.bytes);
+    }
+}
+
+test "W9d② 재검증 4 차 뒤 B15: 자원 종류는 requestWillBeSent·responseReceived 의 type 에서 골라 기다림·보낸 호출까지 간다(응답의 것이 앞선다)" {
+    const P = struct {
+        fn kindOf(method: []const u8, json: []const u8) !ResKind {
+            const p = try std.json.parseFromSlice(std.json.Value, gpa_t, json, .{});
+            defer p.deinit();
+            const e = parseEvent(method, p.value) orelse return error.NoEvent;
+            return switch (e) {
+                .will_be_sent => |v| v.res_kind,
+                .response => |v| v.res_kind,
+                else => error.NoEvent,
+            };
+        }
+    };
+    try testing.expectEqual(ResKind.script, try P.kindOf("Network.requestWillBeSent", "{\"requestId\":\"1\",\"timestamp\":1,\"type\":\"Script\",\"request\":{\"url\":\"u\",\"method\":\"GET\"}}"));
+    try testing.expectEqual(ResKind.stylesheet, try P.kindOf("Network.requestWillBeSent", "{\"requestId\":\"1\",\"timestamp\":1,\"type\":\"Stylesheet\",\"request\":{\"url\":\"u\",\"method\":\"GET\"}}"));
+    try testing.expectEqual(ResKind.other, try P.kindOf("Network.requestWillBeSent", "{\"requestId\":\"1\",\"timestamp\":1,\"type\":\"Fetch\",\"request\":{\"url\":\"u\",\"method\":\"GET\"}}"));
+    try testing.expectEqual(ResKind.other, try P.kindOf("Network.requestWillBeSent", "{\"requestId\":\"1\",\"timestamp\":1,\"type\":\"script\",\"request\":{\"url\":\"u\",\"method\":\"GET\"}}"));
+    try testing.expectEqual(ResKind.stylesheet, try P.kindOf("Network.responseReceived", "{\"requestId\":\"1\",\"type\":\"Stylesheet\",\"response\":{\"mimeType\":\"text/css\",\"headers\":{}}}"));
+    try testing.expectEqual(ResKind.other, try P.kindOf("Network.responseReceived", "{\"requestId\":\"1\",\"response\":{\"mimeType\":\"text/css\",\"headers\":{}}}"));
+
+    var h: H = .{};
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const t: i64 = 10_000_000;
+    const Row = struct { url: []const u8, rid: []const u8, req: u64, sent: ResKind, resp: ResKind, want: ResKind };
+    const rows = [_]Row{
+        .{ .url = "https://a.test/s.js", .rid = "k.1", .req = 1, .sent = .script, .resp = .other, .want = .script },
+        .{ .url = "https://a.test/c.css", .rid = "k.2", .req = 2, .sent = .stylesheet, .resp = .stylesheet, .want = .stylesheet },
+        .{ .url = "https://a.test/d.json", .rid = "k.3", .req = 3, .sent = .other, .resp = .other, .want = .other },
+        .{ .url = "https://a.test/e.js", .rid = "k.4", .req = 4, .sent = .other, .resp = .script, .want = .script },
+    };
+    for (rows, 0..) |r, i| {
+        const at = t + @as(i64, @intCast(i)) * 1000;
+        _ = try h.cand(5, r.req, r.url, at, .{});
+        try h.ev(5, .{ .will_be_sent = .{ .rid = r.rid, .url_hash = hashUrl8(r.url), .method_hash = hashMethod("GET"), .ts_us = at - 10, .res_kind = r.sent } }, at);
+        try h.ev(5, .{ .extra_info = .{ .rid = r.rid, .credentialed = false } }, at);
+        try h.ev(5, .{ .response = .{ .rid = r.rid, .mime = "text/plain", .from_sw = false, .charset = .none, .res_kind = r.resp } }, at);
+        try h.ev(5, .{ .data = .{ .rid = r.rid, .bytes = 10 } }, at);
+        try h.finish(5, r.rid, at);
+        // 하나씩 보내고 돌려받는다(탭의 보낸 호출 자리는 둘).
+        const act = h.fetches.items[h.fetches.items.len - 1];
+        const f = h.table.takeInflight(act.fetch.id).?;
+        errdefer std.debug.print("B15 kind row {d}: got {s}\n", .{ i, @tagName(f.res_kind) });
+        try testing.expectEqual(r.req, f.request);
+        try testing.expectEqual(r.want, f.res_kind);
+        try h.table.bodyDone(gpa_t, f, at + 10);
+        try h.drain();
+    }
+    try testing.expectEqual(rows.len, h.fetches.items.len);
+}
+
+test "W9d② 재검증 4 차 뒤 B16-1: 상한은 싣는 글 — 받은 바이트가 1 MiB 아래여도 Chromium 이 푼 글이 넘치면 over_cap 이고 그 크기는 글의 것, 꼭 1 MiB 인 글은 잡는다" {
+    // windows-1252 글 1,000,000 바이트(é 10 %) — 검증자의 vs-w1252-1000k: 글은 1,100,000 바이트.
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa_t);
+    try text.appendNTimes(gpa_t, 'a', 900_000);
+    for (0..100_000) |_| try text.appendSlice(gpa_t, "\u{e9}");
+    for ([_]struct { body: []const u8, raw: u64, want: State, size: u64 }{
+        .{ .body = text.items, .raw = 1_000_000, .want = .over_cap, .size = 1_100_000 },
+        // 글이 꼭 1 MiB 면 잡는다(표시 — 길이가 받은 수와 다르다)
+        .{ .body = text.items[text.items.len - msg.max_net_body_bytes ..], .raw = msg.max_net_body_bytes - 100_000, .want = .captured, .size = msg.max_net_body_bytes },
+    }) |c| {
+        const json = try std.json.Stringify.valueAlloc(gpa_t, .{ .body = c.body, .base64Encoded = false }, .{});
+        defer gpa_t.free(json);
+        const d = try decodeResult(gpa_t, true, json, "text/plain", .none, c.raw, .other);
+        defer gpa_t.free(d.bytes);
+        errdefer std.debug.print("B16-1: {s} over_bytes {d} len {d}\n", .{ @tagName(d.state), d.over_bytes, d.bytes.len });
+        try testing.expectEqual(c.want, d.state);
+        if (c.want == .over_cap) {
+            try testing.expectEqual(c.size, d.over_bytes);
+            try testing.expect(d.over_bytes > c.raw);
+        } else try testing.expectEqual(c.size, @as(u64, d.bytes.len));
+    }
+}
+
+// ── 재검증 4 차 뒤: 검증자 v20j A 의 재현(시험만 — 제품 코드는 그대로) ─────────────────────────────────────────────────────────────
+
+/// v20j A R6-1: 서비스 워커가 같은 주소의 두 페이지 요청(P1 → P2 차례)을 거꾸로 넘긴다 — P1 을 `sw_delay` 늦게 fetch(e.request) 하고 P2 는 곧.
+/// 서버가 느려(`server_ms`) 두 워커 기록(R2 먼저, R1 뒤)이 모두 두 응답보다 앞에 시작한다. `p2_first` 면 P2 가 먼저 응답·끝난다.
+/// 돌려주는 것: P1·P2 가 받으러 간 CEF 기록 번호(0 = 본문 없음). 제 기록은 P1 → 1, P2 → 2.
+fn v20jSwReorder(sw_delay: i64, server: i64, p2_first: bool, out: *[2]u64) !void {
+    var h: H = .{ .sync = false };
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const u = "https://sw.test/x";
+    const t0: i64 = 10_000_000;
+    const sw_resp = struct {
+        fn f(hh: *H, rid: []const u8, ts: i64, now: i64) !void {
+            try hh.ev(5, .{ .response = .{ .rid = rid, .mime = "application/json", .from_sw = true, .sw_source = "network", .charset = .other, .ts_us = ts } }, now);
+            try hh.ev(5, .{ .data = .{ .rid = rid, .bytes = 9 } }, now);
+        }
+    }.f;
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "P1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 } }, t0 + 200);
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "P2", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 + 1_000 } }, t0 + 1_200);
+    out.* = .{ 0, 0 };
+    var now: i64 = t0 + 10_000;
+    var r1 = false;
+    var r2 = false;
+    var p1 = false;
+    var p2 = false;
+    // 워커의 fetch: P2 의 것(R2)은 곧, P1 의 것(R1)은 `sw_delay` 뒤. 각 응답은 그 fetch + `server` 에 오고 곧 끝난다(P2 먼저면 P1 의 응답은 조금 더 늦게).
+    const r2_at = t0 + 3_000;
+    const r1_at = t0 + sw_delay;
+    const p2_resp = if (p2_first) r2_at + server else r1_at + server + 40_000;
+    const p1_resp = if (p2_first) @max(r1_at + server, p2_resp + 40_000) else r1_at + server;
+    while (now < t0 + 8_000_000) : (now += 10_000) {
+        if (!r2 and now >= r2_at) {
+            r2 = true;
+            _ = try h.cand(5, 2, u, r2_at, .{ .sw = true });
+        }
+        if (!r1 and now >= r1_at) {
+            r1 = true;
+            _ = try h.cand(5, 1, u, r1_at, .{ .sw = true });
+        }
+        try h.flushed(now, now);
+        if (!p2 and now >= p2_resp) {
+            p2 = true;
+            h.table.cefEndReceived(5, 2, now - 2_000, true, 9);
+            try sw_resp(&h, "P2", now - 1_000, now);
+            try h.finish(5, "P2", now + 500);
+        }
+        if (!p1 and now >= p1_resp) {
+            p1 = true;
+            h.table.cefEndReceived(5, 1, now - 2_000, true, 9);
+            try sw_resp(&h, "P1", now - 1_000, now);
+            try h.finish(5, "P1", now + 500);
+        }
+        try h.table.tickAt(gpa_t, now + 600, now + 600);
+        try h.drain();
+        v20jNoteFetches(&h, out);
+    }
+    try testing.expectEqual(@as(u32, 1), endCount(&h, 1));
+    try testing.expectEqual(@as(u32, 1), endCount(&h, 2));
+}
+
+/// 보낸 본문 호출마다(그 호출이 아직 inflight 일 때) CDP rid 가 P1·P2 면 그 CEF 기록 번호를 `out` 에 적는다.
+fn v20jNoteFetches(h: *H, out: *[2]u64) void {
+    for (h.fetches.items) |a| for (h.table.inflight.items) |f| if (f.id == a.fetch.id) {
+        if (a.fetch.rid.eql("P1")) out[0] = f.request;
+        if (a.fetch.rid.eql("P2")) out[1] = f.request;
+    };
+}
+
+test "W9d② v20j A R6-1: 서비스 워커가 같은 주소 두 요청을 거꾸로 넘기고 서버가 느리면(두 워커 기록이 두 응답 앞) 본문이 남의 기록에 붙는다" {
+    var wrong: usize = 0;
+    for ([_]i64{ 20_000, 100_000, 300_000 }) |d| for ([_]i64{ 400_000, 900_000 }) |srv| for ([_]bool{ false, true }) |p2f| {
+        var o: [2]u64 = undefined;
+        try v20jSwReorder(d, srv, p2f, &o);
+        const bad = (o[0] != 0 and o[0] != 1) or (o[1] != 0 and o[1] != 2);
+        if (bad) wrong += 1;
+        std.debug.print("[v20j R6-1] sw delay {d} ms server {d} ms p2 first {}: P1 → {d} (own 1), P2 → {d} (own 2){s}\n", .{ @divTrunc(d, 1000), @divTrunc(srv, 1000), p2f, o[0], o[1], if (bad) "  WRONG" else "" });
+    };
+    try testing.expectEqual(@as(usize, 0), wrong);
+}
+
+/// v20j A R6-2: 서비스 워커가 P1 에는 다른 주소를 fetch 해 답하고(출처 `network` — CDP 신호로 빠지지 않는다, 제 주소의 CEF 기록이 없다) 같은
+/// 주소의 P2 는 그대로 넘긴다(R2). 서버가 느려 R2 가 P1 의 응답보다 앞에 시작한다. `p2_first` 면 P2 가 먼저 끝난다. 돌려주는 것: P1·P2 가 받으러
+/// 간 CEF 기록 번호(0 = 본문 없음). P1 의 다른 주소 기록은 3(다른 열쇠).
+fn v20jSwAlt(server: i64, p2_first: bool, out: *[2]u64) !void {
+    var h: H = .{ .sync = false };
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const u = "https://sw.test/data";
+    const alt = "https://sw.test/data?fresh=1";
+    const t0: i64 = 10_000_000;
+    const sw_resp = struct {
+        fn f(hh: *H, rid: []const u8, ts: i64, now: i64) !void {
+            try hh.ev(5, .{ .response = .{ .rid = rid, .mime = "application/json", .from_sw = true, .sw_source = "network", .charset = .other, .ts_us = ts } }, now);
+            try hh.ev(5, .{ .data = .{ .rid = rid, .bytes = 9 } }, now);
+        }
+    }.f;
+    out.* = .{ 0, 0 };
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "P1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 } }, t0 + 200);
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "P2", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 + 1_000 } }, t0 + 1_200);
+    _ = try h.cand(5, 3, alt, t0 + 2_000, .{ .sw = true }); // 워커가 P1 을 위해 받은 다른 주소
+    _ = try h.cand(5, 2, u, t0 + 3_000, .{ .sw = true }); // P2 를 그대로 넘겼다
+    try h.flushed(t0 + 4_000, t0 + 4_000);
+    const p1_at = t0 + server + if (p2_first) @as(i64, 40_000) else 0;
+    const p2_at = t0 + server + if (p2_first) @as(i64, 0) else 40_000;
+    var now: i64 = t0 + 10_000;
+    var p1 = false;
+    var p2 = false;
+    while (now < t0 + 4_000_000) : (now += 10_000) {
+        try h.flushed(now, now);
+        if (!p1 and now >= p1_at) {
+            p1 = true;
+            h.table.cefEndReceived(5, 3, now - 2_000, true, 9);
+            try sw_resp(&h, "P1", now - 1_000, now);
+            try h.finish(5, "P1", now + 500);
+        }
+        if (!p2 and now >= p2_at) {
+            p2 = true;
+            h.table.cefEndReceived(5, 2, now - 2_000, true, 9);
+            try sw_resp(&h, "P2", now - 1_000, now);
+            try h.finish(5, "P2", now + 500);
+        }
+        try h.table.tickAt(gpa_t, now + 600, now + 600);
+        try h.drain();
+        v20jNoteFetches(&h, out);
+    }
+}
+
+test "W9d② v20j A R6-2: 서비스 워커가 P1 에 다른 주소를 fetch 해 답하면(출처 network) P1 의 본문이 같은 주소 P2 의 워커 기록에 붙는다" {
+    var wrong: usize = 0;
+    for ([_]i64{ 50_000, 400_000 }) |srv| for ([_]bool{ false, true }) |p2f| {
+        var o: [2]u64 = undefined;
+        try v20jSwAlt(srv, p2f, &o);
+        const bad = o[0] != 0 or (o[1] != 0 and o[1] != 2);
+        if (bad) wrong += 1;
+        std.debug.print("[v20j R6-2] server {d} ms p2 first {}: P1 → {d} (own: none — its record 3 is another URL), P2 → {d} (own 2){s}\n", .{ @divTrunc(srv, 1000), p2f, o[0], o[1], if (bad) "  WRONG" else "" });
+    };
+    try testing.expectEqual(@as(usize, 0), wrong);
+}
+
+/// v20j A R9-1: 혼돈 퍼즈를 넓힌 것 — 두 탭, 같은 rid 로 다시 보냄(리다이렉트 홉·같은 주소 다시 시작 — 끝을 본 뒤에도), 같은 번호의 CEF 다시 시작
+/// (`restartCand`), 설정 끔의 덮기(`cefRedirect`·`cefCovered`), 문 넘김 표지·표지 넘침, 기록이 버려짐(하나·모두), 끄기·다시 켜기·렌더러 죽음·닫힘,
+/// 쏟아짐 밸브. 사건이 멎으면 주기만 30 초 — 시작마다 끝 하나·한가해짐(Debug 의 범위 검사가 UB 를 잡는다).
+fn v20jChaos(seed: u64, stats: *[4]usize) !void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rnd = prng.random();
+    var h: H = .{ .sync = rnd.boolean() };
+    defer h.deinit();
+    const tabs = [_]BrowserId{ 5, 6 };
+    var session: u32 = 1;
+    for (tabs) |b| _ = try h.table.start(gpa_t, b, session);
+    const urls = [_][]const u8{ "https://c.test/a", "https://c.test/b", "https://c.test/c.png" };
+    const mimes = [_][]const u8{ "application/json", "text/javascript", "image/png", "text/html" };
+    var now: i64 = 1_000_000;
+    var next_req: u64 = 1;
+    var rb: [24][12]u8 = undefined;
+    var rids: [24][]const u8 = undefined;
+    var rtab: [24]BrowserId = undefined;
+    var nrid: usize = 0;
+    var req_tab: [256]BrowserId = undefined;
+    const steps = rnd.intRangeAtMost(usize, 5, 90);
+    var pend_fetch: std.ArrayList(i32) = .empty;
+    defer pend_fetch.deinit(gpa_t);
+    var seen_fetch: usize = 0;
+    for (0..steps) |_| {
+        now += rnd.intRangeAtMost(i64, 0, 40_000);
+        const k = rnd.uintLessThan(u8, 26);
+        const u = urls[rnd.uintLessThan(usize, urls.len)];
+        const b = tabs[rnd.uintLessThan(usize, tabs.len)];
+        switch (k) {
+            0, 1 => if (nrid < rids.len) { // CDP will_be_sent (new rid)
+                rids[nrid] = std.fmt.bufPrint(&rb[nrid], "r{d}", .{nrid}) catch unreachable;
+                rtab[nrid] = b;
+                try h.ev(b, .{ .will_be_sent = .{ .rid = rids[nrid], .url_hash = hashUrl8(u), .method_hash = hashMethod(if (rnd.uintLessThan(u8, 6) == 0) "POST" else "GET"), .ts_us = now - rnd.intRangeAtMost(i64, 0, 3_000), .loader = rnd.uintLessThan(u64, 3), .low = rnd.boolean() } }, now);
+                nrid += 1;
+            },
+            2, 3 => if (next_req < req_tab.len) { // CEF begin
+                req_tab[next_req] = b;
+                _ = try h.cand(b, next_req, u, now - rnd.intRangeAtMost(i64, -6_000, 3_000), .{ .sw = rnd.uintLessThan(u8, 8) == 0, .attr = if (rnd.uintLessThan(u8, 8) == 0) 2 else 1, .cover_pending = rnd.uintLessThan(u8, 10) == 0, .method = if (rnd.uintLessThan(u8, 6) == 0) "POST" else "GET" });
+                next_req += 1;
+            },
+            4 => if (next_req > 1) { // CEF end (random record)
+                const r = rnd.intRangeLessThan(u64, 1, next_req);
+                h.table.cefEndReceived(req_tab[r], r, now, rnd.uintLessThan(u8, 4) != 0, rnd.uintLessThan(u64, 3));
+            },
+            5, 6 => if (nrid > 0) { // response
+                const x = rnd.uintLessThan(usize, nrid);
+                const sw = rnd.uintLessThan(u8, 8) == 0;
+                try h.ev(rtab[x], .{ .response = .{ .rid = rids[x], .mime = mimes[rnd.uintLessThan(usize, mimes.len)], .from_sw = sw, .sw_source = if (sw and rnd.boolean()) "cache-storage" else "network", .charset = .other, .ts_us = now - rnd.intRangeAtMost(i64, 0, 2_000), .has_extra_info = rnd.boolean() } }, now);
+                try h.ev(rtab[x], .{ .data = .{ .rid = rids[x], .bytes = rnd.uintLessThan(u64, 3) * 7 } }, now);
+            },
+            7, 8 => if (nrid > 0) {
+                const x = rnd.uintLessThan(usize, nrid);
+                try h.ev(rtab[x], .{ .finished = .{ .rid = rids[x] } }, now);
+            },
+            9 => if (nrid > 0) {
+                const x = rnd.uintLessThan(usize, nrid);
+                try h.ev(rtab[x], .{ .failed = .{ .rid = rids[x], .ts_us = now - rnd.intRangeAtMost(i64, 0, 1_000) } }, now);
+            },
+            10 => if (nrid > 0) {
+                const x = rnd.uintLessThan(usize, nrid);
+                try h.ev(rtab[x], .{ .extra_info = .{ .rid = rids[x], .credentialed = rnd.boolean() } }, now);
+            },
+            11 => if (nrid > 0 and rnd.uintLessThan(u8, 3) == 0) {
+                const x = rnd.uintLessThan(usize, nrid);
+                try h.ev(rtab[x], .{ .from_cache = .{ .rid = rids[x] } }, now);
+            },
+            12 => h.table.documentStarted(b, now),
+            13 => try h.flushed(now - rnd.intRangeAtMost(i64, 0, 20_000), now),
+            14 => {
+                try h.table.tickAt(gpa_t, now, now - rnd.intRangeAtMost(i64, 0, 20_000));
+                try h.drain();
+            },
+            15 => if (next_req > 1 and rnd.uintLessThan(u8, 4) == 0) {
+                const r = rnd.intRangeLessThan(u64, 1, next_req);
+                h.table.cefLost(req_tab[r], r, now);
+            },
+            16 => if (nrid > 0) { // 같은 rid 로 다시 보냄 — 같은 주소(다시 시작)나 다른 주소(리다이렉트 홉), 끝을 본 뒤에도
+                const x = rnd.uintLessThan(usize, nrid);
+                const same = rnd.boolean();
+                const uu = if (same) u else urls[rnd.uintLessThan(usize, urls.len)];
+                try h.ev(rtab[x], .{ .will_be_sent = .{ .rid = rids[x], .url_hash = hashUrl8(uu), .method_hash = hashMethod("GET"), .ts_us = now - rnd.intRangeAtMost(i64, 0, 2_000), .redirect = !same or rnd.boolean() } }, now);
+            },
+            17 => if (next_req > 1) { // 같은 번호의 CEF 다시 시작
+                const r = rnd.intRangeLessThan(u64, 1, next_req);
+                _ = try h.cand(req_tab[r], r, u, now - rnd.intRangeAtMost(i64, -3_000, 3_000), .{ .sw = rnd.uintLessThan(u8, 8) == 0 });
+            },
+            18 => if (next_req > 1) {
+                const r = rnd.intRangeLessThan(u64, 1, next_req);
+                if (rnd.boolean()) h.table.cefRedirect(req_tab[r], r, rnd.boolean()) else h.table.cefCovered(req_tab[r], r, rnd.boolean());
+            },
+            19 => if (rnd.uintLessThan(u8, 4) == 0) h.table.noteDropOverflow(b, now) else h.table.noteDrop(b, hashUrl8(u), now - rnd.intRangeAtMost(i64, 0, 3_000)),
+            20 => if (rnd.uintLessThan(u8, 6) == 0) h.table.cefLostAll(b, now),
+            21 => if (rnd.uintLessThan(u8, 4) == 0) { // 다시 켬(새 세션 — 앞 세션의 것은 recording_stopped)
+                session += 1;
+                _ = try h.table.start(gpa_t, b, session);
+                try h.drain();
+            },
+            22 => if (rnd.uintLessThan(u8, 6) == 0) {
+                try h.table.stop(gpa_t, b);
+                try h.drain();
+                if (rnd.boolean()) {
+                    session += 1;
+                    _ = try h.table.start(gpa_t, b, session);
+                }
+            },
+            23 => if (rnd.uintLessThan(u8, 5) == 0) {
+                try h.table.rendererGone(gpa_t, b);
+                try h.drain();
+            },
+            24 => if (rnd.uintLessThan(u8, 8) == 0) {
+                try h.table.closed(gpa_t, b);
+                try h.drain();
+                session += 1;
+                _ = try h.table.start(gpa_t, b, session);
+            },
+            else => if (rnd.uintLessThan(u8, 10) == 0) { // 쏟아짐 — 같은 초에 5001 개를 두 초
+                for (0..2) |sec| {
+                    const base = (@divFloor(now, 1_000_000) + @as(i64, @intCast(sec)) + 1) * 1_000_000;
+                    for (0..flood_events_per_s + 1) |_| try h.table.cdpEvent(gpa_t, b, null, base + 10);
+                }
+                now = (@divFloor(now, 1_000_000) + 3) * 1_000_000;
+                try h.drain();
+            },
+        }
+        while (seen_fetch < h.fetches.items.len) : (seen_fetch += 1) try pend_fetch.append(gpa_t, h.fetches.items[seen_fetch].fetch.id);
+        while (pend_fetch.items.len > 0 and rnd.uintLessThan(u8, 3) == 0) {
+            const id = pend_fetch.swapRemove(rnd.uintLessThan(usize, pend_fetch.items.len));
+            if (rnd.uintLessThan(u8, 5) == 0) continue;
+            if (h.table.takeInflight(id)) |f| {
+                try h.noteEnd(f.request, .captured);
+                try h.table.bodyDone(gpa_t, f, now);
+                try h.drain();
+            }
+        }
+    }
+    for (1..next_req) |r| h.table.cefEndReceived(req_tab[r], r, now + 1_000, true, 10);
+    var t = now + 50_000;
+    while (t < now + 30_000_000) : (t += 50_000) {
+        try h.table.tickAt(gpa_t, t, t);
+        try h.drain();
+        while (seen_fetch < h.fetches.items.len) : (seen_fetch += 1) {}
+    }
+    stats[0] += 1;
+    var stuck: usize = 0;
+    for (1..next_req) |r| {
+        const want = h.attempts.get(r) orelse continue;
+        if (endCount(&h, r) != want) stuck += 1;
+    }
+    if (h.table.busy()) stats[2] += 1;
+    if (stuck > 0) {
+        stats[1] += 1;
+        if (stats[3] == 0) stats[3] = seed;
+    }
+}
+
+test "W9d② v20j A R9-1: 넓힌 혼돈 퍼즈 — 두 탭·rid 다시 보냄·CEF 다시 시작·덮기·표지·끄기/켜기/죽음/닫힘·쏟아짐: 시작마다 끝 하나, 한가해짐" {
+    var stats: [4]usize = @splat(0);
+    const n: usize = if (std.c.getenv("V20J_CHAOS_N")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 3000 else 3000;
+    const base: u64 = if (std.c.getenv("V20J_CHAOS_BASE")) |v| std.fmt.parseInt(u64, std.mem.span(v), 10) catch 0x7a1c0000 else 0x7a1c0000;
+    for (0..n) |s| v20jChaos(base + s, &stats) catch |err| {
+        std.debug.print("[v20j chaos] seed {d}: {s}\n", .{ base + s, @errorName(err) });
+        return err;
+    };
+    std.debug.print("[v20j chaos] runs {d} stuck {d} busy {d} first seed {d}\n", .{ stats[0], stats[1], stats[2], stats[3] });
+    try testing.expectEqual(@as(usize, 0), stats[1]);
+    try testing.expectEqual(@as(usize, 0), stats[2]);
+}
+
+// 재검증 4 차 뒤 R19-1(검증자 A 의 값 탐침을 단언으로): 주기마다의 일은 기다리는 요청 수에 비례한다 — 전에는 요청마다 `reqs` 를 훑어(`me`·`held`)
+// N=4095 에 Debug 112 ms/주기였다. 스레드 CPU 시간으로 재 부하에 덜 흔들린다.
+test "W9d② v20j A R19-1: split_wait 의 값 — 응답을 기다리는 같은 주소 요청 하나 뒤의 끝난 같은 주소 GET N 개가 2 초 기다리는 동안 주기마다 드는 시간이 N 에 비례한다(N=4095 의 가장 무거운 주기 40 ms 아래)" {
+    for ([_]usize{ 512, 2048, 4095 }) |n| {
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        const url = "http://127.0.0.1/v20j/same";
+        var rb: [24]u8 = undefined;
+        const t0: i64 = 10_000_000;
+        // S: 응답을 기다린다(기록은 왔다 — 응답이 없어 2 초 동안 「기록이 아직 올 수 있는」 요청).
+        try h.table.cdpEvent(gpa_t, 5, .{ .will_be_sent = .{ .rid = "S", .url_hash = hashUrl8(url), .method_hash = hashMethod("GET"), .ts_us = t0 } }, t0);
+        _ = try h.table.cefBegin(gpa_t, 5, .{ .request = 1, .key = .{ .url = hashUrl8(url), .method = hashMethod("GET"), .sw = false }, .t_io_us = t0 + 50, .attr = 1 });
+        for (0..n) |i| {
+            const ts: i64 = t0 + 1 + @as(i64, @intCast(i));
+            const rid = try std.fmt.bufPrint(&rb, "f.{d}", .{i});
+            try h.table.cdpEvent(gpa_t, 5, .{ .will_be_sent = .{ .rid = rid, .url_hash = hashUrl8(url), .method_hash = hashMethod("GET"), .ts_us = ts } }, ts);
+            _ = try h.table.cefBegin(gpa_t, 5, .{ .request = 100 + i, .key = .{ .url = hashUrl8(url), .method = hashMethod("GET"), .sw = false }, .t_io_us = ts + 50, .attr = 1 });
+        }
+        const fin: i64 = t0 + 20_000;
+        for (0..n) |i| {
+            const rid = try std.fmt.bufPrint(&rb, "f.{d}", .{i});
+            h.table.cefEnd(5, 100 + i, fin - 1_000);
+            h.table.cef_seen_us = fin;
+            try h.table.cdpEvent(gpa_t, 5, .{ .response = .{ .rid = rid, .mime = "application/json", .from_sw = false, .charset = .other, .ts_us = fin - 500 } }, fin);
+            try h.table.cdpEvent(gpa_t, 5, .{ .finished = .{ .rid = rid } }, fin);
+        }
+        var worst: u64 = 0;
+        var wait_worst: u64 = 0;
+        var total: u64 = 0;
+        var ticks: usize = 0;
+        var decided_at: i64 = 0;
+        var now = fin + 50_000;
+        while (now < fin + 3_000_000) : (now += 50_000) {
+            const pre = h.table.actions.items.len;
+            const a = clock_gettime_nsec_np(16); // CLOCK_THREAD_CPUTIME_ID
+            try h.table.tickAt(gpa_t, now, now);
+            const b = clock_gettime_nsec_np(16);
+            const produced = h.table.actions.items.len > pre;
+            worst = @max(worst, b - a);
+            if (decided_at == 0 and !produced) wait_worst = @max(wait_worst, b - a);
+            total += b - a;
+            if (b - a > 5_000_000) std.debug.print("\n    [v20j R19-1] n={d} tick at +{d} ms: {d} us (ends so far {d})", .{ n, @divTrunc(now - fin, 1000), (b - a) / 1000, h.table.actions.items.len });
+            ticks += 1;
+            if (decided_at == 0 and produced) decided_at = now;
+            // 받으러 간 호출은 곧 답한다(자리를 비워 다음 기다림이 나간다).
+            var list: std.ArrayList(Action) = .empty;
+            defer list.deinit(gpa_t);
+            h.table.swapActions(&list);
+            for (list.items) |x| switch (x) {
+                .fetch => |f| if (h.table.takeInflight(f.id)) |ff| try h.table.bodyDone(gpa_t, ff, now),
+                else => {},
+            };
+        }
+        std.debug.print("\n[v20j R19-1] n={d}: first decision {d} ms after the finishes · {d} ticks · worst tick {d} us · total {d} us", .{ n, @divTrunc(decided_at - fin, 1000), ticks, worst / 1000, total / 1000 });
+        // 기다리는 동안의 주기(판정 주기는 끝을 N 개 내니 따로) — 판정 전 주기들의 가장 무거운 것.
+        try testing.expect(decided_at > fin + 1_500_000); // 기다림이 실제로 있었다(주기 수십 개)
+        if (n == 4095) try testing.expect(wait_worst < 40_000_000);
+    }
+    std.debug.print("\n", .{});
+}
+
+test "W9d② v20j A R6-3: 페이지 요청 하나 — 워커가 다른 주소로 답하고(출처 network) 같은 주소를 제 갱신 fetch 로 따로 받으면(CDP 가 보지 못한다) 그 갱신 기록에 페이지의 본문이 붙는다" {
+    var wrong: usize = 0;
+    for ([_]i64{ 50_000, 400_000 }) |srv| {
+        var h: H = .{ .sync = false };
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        const u = "https://sw.test/feed";
+        const alt = "https://sw.test/feed?fresh=1";
+        const t0: i64 = 10_000_000;
+        try h.ev(5, .{ .will_be_sent = .{ .rid = "P1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 } }, t0 + 200);
+        _ = try h.cand(5, 3, alt, t0 + 2_000, .{ .sw = true }); // 워커가 P1 에 답하려고 받은 다른 주소
+        _ = try h.cand(5, 4, u, t0 + 2_500, .{ .sw = true }); // 워커 제 갱신 fetch(같은 주소 — CDP 에 없다)
+        var out: [2]u64 = .{ 0, 0 };
+        var now: i64 = t0 + 10_000;
+        var done = false;
+        while (now < t0 + 3_000_000) : (now += 10_000) {
+            try h.flushed(now, now);
+            if (!done and now >= t0 + srv) {
+                done = true;
+                h.table.cefEndReceived(5, 3, now - 2_000, true, 9);
+                h.table.cefEndReceived(5, 4, now - 1_500, true, 9);
+                try h.ev(5, .{ .response = .{ .rid = "P1", .mime = "application/json", .from_sw = true, .sw_source = "network", .charset = .other, .ts_us = now - 1_000 } }, now);
+                try h.ev(5, .{ .data = .{ .rid = "P1", .bytes = 9 } }, now);
+                try h.finish(5, "P1", now + 500);
+            }
+            try h.table.tickAt(gpa_t, now + 600, now + 600);
+            try h.drain();
+            v20jNoteFetches(&h, &out);
+        }
+        const bad = out[0] != 0;
+        if (bad) wrong += 1;
+        std.debug.print("[v20j R6-3] server {d} ms: P1 → {d} (own: none — its record 3 is another URL; 4 is the worker's own refresh){s}\n", .{ @divTrunc(srv, 1000), out[0], if (bad) "  WRONG" else "" });
+    }
+    try testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test "W9d② 재검증 4 차 뒤 R6: 워커가 그대로 넘긴 요청 하나는 제 본문 — 곁의 워커 요청이 캐시로 답하고 같은 주소를 네트워크로 다시 받아도(stale-while-revalidate — 그 기록은 설명된다), 설명되지 않는 다른 주소의 워커 기록이 창에 있으면 본문 없이" {
+    for ([_]bool{ true, false }) |with_swr| {
+        var h: H = .{ .sync = false };
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        const u = "https://sw.test/api";
+        const v = "https://sw.test/style.css";
+        const t0: i64 = 10_000_000;
+        // P(u): 워커가 그대로 넘긴다(기록 1). V(v): 워커가 캐시로 답하고 v 를 네트워크로 다시 받는다(기록 2 — CDP 에는 V 만 보인다).
+        try h.ev(5, .{ .will_be_sent = .{ .rid = "P", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 } }, t0 + 100);
+        if (with_swr) try h.ev(5, .{ .will_be_sent = .{ .rid = "V", .url_hash = hashUrl8(v), .method_hash = hashMethod("GET"), .ts_us = t0 + 500 } }, t0 + 600);
+        _ = try h.cand(5, 1, u, t0 + 1_000, .{ .sw = true });
+        _ = try h.cand(5, 2, v, t0 + 2_000, .{ .sw = true });
+        try h.flushed(t0 + 3_000, t0 + 3_000);
+        if (with_swr) {
+            try h.ev(5, .{ .response = .{ .rid = "V", .mime = "text/css", .from_sw = true, .sw_source = "cache-storage", .charset = .other, .ts_us = t0 + 4_000 } }, t0 + 4_100);
+            try h.finish(5, "V", t0 + 4_200);
+        }
+        h.table.cefEndReceived(5, 1, t0 + 40_000, true, 9);
+        try h.flushed(t0 + 41_000, t0 + 41_000);
+        try h.ev(5, .{ .response = .{ .rid = "P", .mime = "application/json", .from_sw = true, .sw_source = "network", .charset = .other, .ts_us = t0 + 41_000 } }, t0 + 41_100);
+        try h.ev(5, .{ .data = .{ .rid = "P", .bytes = 9 } }, t0 + 41_100);
+        try h.finish(5, "P", t0 + 41_200);
+        var now: i64 = t0 + 50_000;
+        while (now < t0 + 3_000_000) : (now += 50_000) {
+            try h.flushed(now, now);
+            try h.table.tickAt(gpa_t, now, now);
+            try h.drain();
+        }
+        errdefer std.debug.print("R6 swr={}: P fetched {?d} · rec1 {?s}\n", .{ with_swr, fetchedFor(&h, "P"), if (h.ended.get(1)) |x| @tagName(x) else null });
+        if (with_swr) {
+            try testing.expectEqual(@as(?u64, 1), fetchedFor(&h, "P"));
+        } else {
+            try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "P"));
+            try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(1));
+        }
     }
 }

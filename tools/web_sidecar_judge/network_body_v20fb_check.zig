@@ -99,9 +99,17 @@ const Expect = enum {
     marked,
     /// a declared charset Chromium and XHR both honour: captured as Chromium decoded it, no mark of any kind
     declared_noflag,
+    /// v20j B R15: unmarked text must be the bytes, what fetch read, or `alt` (what XHR / the declared charset reads) — anything else is wrong
+    no_wrong,
+    /// v20j B R15: a WHATWG label maru calls `other` (never marked) — unmarked text must not be the windows-1252 reading of the bytes (that is
+    /// Chromium not knowing the label: XHR then reads UTF-8, so the text is neither the bytes nor what the page read)
+    not_w1252,
+    /// 재검증 4 차 뒤 B16-1(작성자 선택 — 상한은 싣는 글): received bytes under 1 MiB whose decoded text is over it — `over_cap` with the text size
+    over_cap_text,
 };
-const EncCase = struct { name: []const u8, ctype: []const u8, body: []const u8, raw: []const u8, extra: []const u8 = "", mode: Mode = .plain, expect: Expect, twice: bool = false };
-const enc_cases = [_]EncCase{
+const Via = enum { fetch, encj, encu };
+const EncCase = struct { name: []const u8, ctype: []const u8, body: []const u8, raw: []const u8, extra: []const u8 = "", mode: Mode = .plain, expect: Expect, twice: bool = false, alt: []const u8 = "", via: Via = .fetch };
+const enc_cases_base = [_]EncCase{
     .{ .name = "u16cs", .ctype = "application/json; charset=utf-8", .body = utf16le_json, .raw = utf16le_json, .expect = .flag_or_exact },
     .{ .name = "u16plaincs", .ctype = "text/plain; charset=utf-8", .body = utf16le_ascii, .raw = utf16le_ascii, .expect = .flag_or_exact },
     .{ .name = "u16be", .ctype = "application/json", .body = utf16be_json, .raw = utf16be_json, .expect = .flag_or_exact },
@@ -177,7 +185,116 @@ const enc_cases = [_]EncCase{
     .{ .name = "dh2-spq-u8", .ctype = "text/plain; charset= \"utf-8\"", .body = dg_u8, .raw = dg_u8, .expect = .exact_noflag },
 };
 
+// ── v20j B R15 (W9d② 재검증 4 차 뒤 검증자 B): labels, whitespace in quoted labels, comma-joined values, script/style decoded by the document ──
+/// 5 bytes every non-windows-1252 WHATWG encoding reads differently from windows-1252 (D0 for windows-1254/1258).
+const vj_body = "\xe0\xa4\xb0\xa1\xd0";
+/// EUC-KR 「가나」 and its UTF-8.
+const vj_kr8 = "\xea\xb0\x80\xeb\x82\x98";
+const vj_gk8 = "\xce\xb1\xce\xb2\xce\xb3\xce\xb4"; // αβγδ in UTF-8 (8 bytes — as long as the EUC-KR di_gk)
+const vj_js_gk = "var s=\"" ++ di_gk ++ "\";";
+const vj_js_gk8 = "var s=\"" ++ vj_gk8 ++ "\";";
+const vj_css_gk = "/*" ++ di_gk ++ "*/";
+const vj_css_gk8 = "/*" ++ vj_gk8 ++ "*/";
+const vj_css_u8 = "/*caf\xc3\xa9 \xe2\x9c\x93*/";
+/// 재검증 4 차 뒤 B15: UTF-8 scripts / a stylesheet a UTF-8 page loads, and an EUC-KR page's script with Hangul.
+const vk_js_u8 = "var s=\"\xed\x95\x9c\xe2\x86\x92 caf\xc3\xa9\";"; // 한→ café
+const vk_js_u8lat = "var s=\"caf\xc3\xa9 na\xc3\xafve\";";
+const vk_css_u8kr = "a{font-family:\"\xeb\xa7\x91\xec\x9d\x80 \xea\xb3\xa0\xeb\x94\x95\"}"; // 맑은 고딕
+const vk_js_kr = "var s=\"\xb0\xa1\xb3\xaa\";"; // EUC-KR 가나
+const vs_1m_1: [1024 * 1024 - 1]u8 = @splat('a');
+const vs_1m_html = "<!doctype html><p>caf\xc3\xa9" ++ (@as([1024 * 1024 - 23]u8, @splat(0x61)));
+const vs_1m_ff: [1024 * 1024]u8 = @splat(0xff);
+const vs_1m1_ff: [1024 * 1024 + 1]u8 = @splat(0xff);
+const vs_w1252 = @as([900_000]u8, @splat(0x61)) ++ @as([100_000]u8, @splat(0xe9));
+/// filled by `startServer` (EUC-KR 「가」 × 375,000)
+var vs_kr: [750_000]u8 = undefined;
+/// WHATWG labels maru files under `other` whose encoding is not windows-1252 (the windows-1252 group is left out — it reads the same).
+const vj_other_labels = [_][]const u8{
+    "866",             "cp866",              "csibm866",        "ibm866",           "csisolatin2",     "iso-8859-2",     "iso-ir-101",          "iso8859-2",    "iso88592",        "iso_8859-2",
+    "iso_8859-2:1987", "l2",                 "latin2",          "csisolatin3",      "iso-8859-3",      "iso-ir-109",     "iso8859-3",           "iso88593",     "iso_8859-3",      "iso_8859-3:1988",
+    "l3",              "latin3",             "csisolatin4",     "iso-8859-4",       "iso-ir-110",      "iso8859-4",      "iso88594",            "iso_8859-4",   "iso_8859-4:1988", "l4",
+    "latin4",          "csisolatincyrillic", "cyrillic",        "iso-8859-5",       "iso-ir-144",      "iso8859-5",      "iso88595",            "iso_8859-5",   "iso_8859-5:1988", "arabic",
+    "asmo-708",        "csiso88596e",        "csiso88596i",     "csisolatinarabic", "ecma-114",        "iso-8859-6",     "iso-8859-6-e",        "iso-8859-6-i", "iso-ir-127",      "iso8859-6",
+    "iso88596",        "iso_8859-6",         "iso_8859-6:1987", "csisolatingreek",  "ecma-118",        "elot_928",       "greek",               "greek8",       "iso-8859-7",      "iso-ir-126",
+    "iso8859-7",       "iso88597",           "iso_8859-7",      "iso_8859-7:1987",  "sun_eu_greek",    "csiso88598e",    "csisolatinhebrew",    "hebrew",       "iso-8859-8",      "iso-8859-8-e",
+    "iso-ir-138",      "iso8859-8",          "iso88598",        "iso_8859-8",       "iso_8859-8:1988", "visual",         "csiso88598i",         "iso-8859-8-i", "logical",         "csisolatin6",
+    "iso-8859-10",     "iso-ir-157",         "iso8859-10",      "iso885910",        "l6",              "latin6",         "iso-8859-13",         "iso8859-13",   "iso885913",       "iso-8859-14",
+    "iso8859-14",      "iso885914",          "csisolatin9",     "iso-8859-15",      "iso8859-15",      "iso885915",      "iso_8859-15",         "l9",           "iso-8859-16",     "cskoi8r",
+    "koi",             "koi8",               "koi8-r",          "koi8_r",           "koi8-ru",         "koi8-u",         "csmacintosh",         "mac",          "macintosh",       "x-mac-roman",
+    "dos-874",         "iso-8859-11",        "iso8859-11",      "iso885911",        "tis-620",         "windows-874",    "cp1250",              "windows-1250", "x-cp1250",        "cp1251",
+    "windows-1251",    "x-cp1251",           "cp1253",          "windows-1253",     "x-cp1253",        "cp1254",         "csisolatin5",         "iso-8859-9",   "iso-ir-148",      "iso8859-9",
+    "iso88599",        "iso_8859-9",         "iso_8859-9:1989", "l5",               "latin5",          "windows-1254",   "x-cp1254",            "cp1255",       "windows-1255",    "x-cp1255",
+    "cp1256",          "windows-1256",       "x-cp1256",        "cp1257",           "windows-1257",    "x-cp1257",       "cp1258",              "windows-1258", "x-cp1258",        "x-mac-cyrillic",
+    "x-mac-ukrainian", "chinese",            "csgb2312",        "csiso58gb231280",  "gb2312",          "gb_2312",        "gb_2312-80",          "gbk",          "iso-ir-58",       "x-gbk",
+    "gb18030",         "big5",               "big5-hkscs",      "cn-big5",          "csbig5",          "x-x-big5",       "cseucpkdfmtjapanese", "euc-jp",       "x-euc-jp",        "csiso2022jp",
+    "iso-2022-jp",     "csshiftjis",         "ms932",           "ms_kanji",         "shift-jis",       "shift_jis",      "sjis",                "windows-31j",  "x-sjis",          "cseuckr",
+    "csksc56011987",   "euc-kr",             "iso-ir-149",      "korean",           "ks_c_5601-1987",  "ks_c_5601-1989", "ksc5601",             "ksc_5601",     "windows-949",     "csiso2022kr",
+    "hz-gb-2312",      "iso-2022-cn",        "iso-2022-cn-ext", "iso-2022-kr",      "replacement",     "unicodefffe",    "utf-16be",            "csunicode",    "iso-10646-ucs-2", "ucs-2",
+    "unicode",         "unicodefeff",        "utf-16",          "utf-16le",         "x-user-defined",
+};
+const vj_utf8_labels = [_][]const u8{ "unicode-1-1-utf-8", "unicode11utf8", "unicode20utf8", "utf-8", "utf8", "x-unicode20utf8", "UTF-8", "Utf8" };
+const v20j_cases = blk: {
+    @setEvalBranchQuota(200_000);
+    var list: []const EncCase = &.{
+        // whitespace inside a quoted label: Fetch's 「get an encoding」 strips it, Chromium's label map may not
+        .{ .name = "vj-qsp-kr", .ctype = "text/plain; charset=\" euc-kr\"", .body = dg_euckr, .raw = dg_euckr, .expect = .no_wrong, .alt = vj_kr8 },
+        .{ .name = "vj-qtr-kr", .ctype = "text/plain; charset=\"euc-kr \"", .body = dg_euckr, .raw = dg_euckr, .expect = .no_wrong, .alt = vj_kr8 },
+        .{ .name = "vj-qtab-kr", .ctype = "text/plain; charset=\"\teuc-kr\"", .body = dg_euckr, .raw = dg_euckr, .expect = .no_wrong, .alt = vj_kr8 },
+        .{ .name = "vj-qsp-jsonkr", .ctype = "application/json; charset=\" euc-kr\"", .body = dg_euckr, .raw = dg_euckr, .expect = .no_wrong, .alt = vj_kr8 },
+        .{ .name = "vj-qsp-u8", .ctype = "text/plain; charset=\" utf-8\"", .body = dg_u8, .raw = dg_u8, .expect = .no_wrong },
+        .{ .name = "vj-qtr-u8json", .ctype = "application/json; charset=\"utf-8 \"", .body = dg_u8, .raw = dg_u8, .expect = .no_wrong },
+        // comma-joined values in one header (Fetch splits them; does Chromium?)
+        .{ .name = "vj-comma-u8kr", .ctype = "text/plain; charset=utf-8, text/plain; charset=euc-kr", .body = dg_euckr, .raw = dg_euckr, .expect = .no_wrong, .alt = vj_kr8 },
+        .{ .name = "vj-comma-krinh", .ctype = "text/plain; charset=euc-kr, text/plain", .body = dg_euckr, .raw = dg_euckr, .expect = .no_wrong, .alt = vj_kr8 },
+        .{ .name = "vj-comma-kru8", .ctype = "text/plain; charset=euc-kr, text/plain; charset=utf-8", .body = dg_u8, .raw = dg_u8, .expect = .no_wrong },
+        .{ .name = "vj-comma-star", .ctype = "text/plain; charset=euc-kr, */*; charset=utf-8", .body = dg_euckr, .raw = dg_euckr, .expect = .no_wrong, .alt = vj_kr8 },
+        .{ .name = "vj-star-kr", .ctype = "*/*; charset=euc-kr", .body = dg_euckr, .raw = dg_euckr, .expect = .no_wrong, .alt = vj_kr8 },
+        .{ .name = "vj-dup-emptyu", .ctype = "text/plain; charset=euc-kr", .extra = "Content-Type: text/plain; charset=\r\n", .body = dg_euckr, .raw = dg_euckr, .expect = .no_wrong, .alt = vj_kr8 },
+        .{ .name = "vj-qcomma", .ctype = "text/plain; charset=\"euc-kr,utf-8\"", .body = dg_u8, .raw = dg_u8, .expect = .no_wrong },
+        .{ .name = "vj-c1", .ctype = "text/plain", .body = "\xc3\x81\xc3\x8d\xc5\x90\xc3\x9d", .raw = "\xc3\x81\xc3\x8d\xc5\x90\xc3\x9d", .expect = .exact_redecoded },
+        // MIME types Chromium's DevTools reads as UTF-8 (JavaScript / JSON) but maru re-decodes as `text/*`: a false mark at most
+        // 재검증 4 차 뒤 B15-2: now exact without a mark (Blink's JavaScript / JSON MIME types are not re-decoded)
+        .{ .name = "vj-xjs-u8", .ctype = "text/x-javascript", .body = dg_u8, .raw = dg_u8, .expect = .exact_noflag },
+        .{ .name = "vj-jscript-u8", .ctype = "text/jscript", .body = dg_u8, .raw = dg_u8, .expect = .exact_noflag },
+        .{ .name = "vj-textjson-u8", .ctype = "text/json", .body = dg_u8, .raw = dg_u8, .expect = .exact_noflag },
+        .{ .name = "vj-js15-u8", .ctype = "text/javascript1.5", .body = dg_u8, .raw = dg_u8, .expect = .exact_noflag },
+        .{ .name = "vj-xsl-u8", .ctype = "text/xsl", .body = dg_u8, .raw = dg_u8, .expect = .no_wrong },
+        .{ .name = "vj-xjs-moji", .ctype = "text/x-javascript", .body = "x=\"\xc3\x83\xc2\xa9\"", .raw = "x=\"\xc3\x83\xc2\xa9\"", .expect = .exact_noflag },
+        // a script / stylesheet the page loads, decoded by the document's encoding (EUC-KR page) — Greek in EUC-KR is as long as its UTF-8
+        // 재검증 4 차 뒤 B15-1: marked (decoded by the document / `<script charset>` — same length, no UTF-8 evidence); B15-2: the UTF-8 stylesheet is exact
+        .{ .name = "vj-js-docgk", .ctype = "text/javascript", .body = vj_js_gk, .raw = vj_js_gk, .expect = .marked, .via = .encj },
+        .{ .name = "vj-js-attrgk", .ctype = "text/javascript", .body = vj_js_gk, .raw = vj_js_gk, .expect = .marked, .via = .encu },
+        .{ .name = "vj-css-docgk", .ctype = "text/css", .body = vj_css_gk, .raw = vj_css_gk, .expect = .marked, .via = .encj },
+        .{ .name = "vj-css-u8", .ctype = "text/css", .body = vj_css_u8, .raw = vj_css_u8, .expect = .exact_noflag, .via = .encu },
+        // 재검증 4 차 뒤 B15: a UTF-8 page's `<script src>` — with a three-byte character it is exact; Latin-1-range only it is marked (the cost)
+        .{ .name = "vk-js-u8", .ctype = "text/javascript", .body = vk_js_u8, .raw = vk_js_u8, .expect = .exact_noflag, .via = .encu },
+        .{ .name = "vk-js-u8lat", .ctype = "text/javascript", .body = vk_js_u8lat, .raw = vk_js_u8lat, .expect = .marked, .via = .encu },
+        .{ .name = "vk-css-u8kr", .ctype = "text/css", .body = vk_css_u8kr, .raw = vk_css_u8kr, .expect = .exact_noflag, .via = .encu },
+        // an EUC-KR page's script with Hangul (longer when decoded) — marked by the size, as before
+        .{ .name = "vk-js-dockr", .ctype = "text/javascript", .body = vk_js_kr, .raw = vk_js_kr, .expect = .marked, .via = .encj },
+        // v20j B R16: size boundaries on the decode paths — 0, 1 MiB − 1, an HTML page at the cap, base64 at and over the cap, and text that grows
+        // past 1 MiB when Chromium decodes bodies under the cap (windows-1252 with 10 % high bytes, declared EUC-KR)
+        .{ .name = "vs-0", .ctype = "text/plain", .body = "", .raw = "", .expect = .no_wrong },
+        .{ .name = "vs-1m-1", .ctype = "text/plain", .body = &vs_1m_1, .raw = &vs_1m_1, .expect = .exact_noflag },
+        .{ .name = "vs-1m-html", .ctype = "text/html", .body = vs_1m_html, .raw = vs_1m_html, .expect = .marked },
+        .{ .name = "vs-1m-ff", .ctype = "application/json", .body = &vs_1m_ff, .raw = &vs_1m_ff, .expect = .no_wrong },
+        .{ .name = "vs-1m1-ff", .ctype = "application/json", .body = &vs_1m1_ff, .raw = &vs_1m1_ff, .expect = .no_wrong },
+        .{ .name = "vs-w1252-1000k", .ctype = "text/plain", .body = &vs_w1252, .raw = &vs_w1252, .expect = .over_cap_text },
+        .{ .name = "vs-kr-750k", .ctype = "text/plain; charset=euc-kr", .body = &vs_kr, .raw = &vs_kr, .expect = .over_cap_text },
+        .{ .name = "vj-css-charsetgk", .ctype = "text/css", .body = "@charset \"euc-kr\";" ++ vj_css_gk, .raw = "@charset \"euc-kr\";" ++ vj_css_gk, .expect = .marked, .via = .encu },
+    };
+    for (vj_other_labels) |l| list = list ++ &[_]EncCase{.{ .name = "vjl-" ++ l, .ctype = "text/plain; charset=" ++ l, .body = vj_body, .raw = vj_body, .expect = .not_w1252 }};
+    for (vj_utf8_labels) |l| list = list ++ &[_]EncCase{.{ .name = "vju-" ++ l, .ctype = "text/plain; charset=" ++ l, .body = dg_u8, .raw = dg_u8, .expect = .no_wrong }};
+    const out: [list.len]EncCase = list[0..list.len].*;
+    break :blk out;
+};
+const enc_cases = enc_cases_base ++ v20j_cases;
+
 fn startServer() !void {
+    for (0..vs_kr.len / 2) |i| {
+        vs_kr[2 * i] = 0xb0;
+        vs_kr[2 * i + 1] = 0xa1;
+    }
     const fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return error.SocketFailed;
     var addr: SockaddrIn = .{ .addr = std.mem.nativeToBig(u32, 0x7f000001) };
@@ -323,7 +440,7 @@ fn serveOne(conn: c_int) void {
         return reply(conn, "text/plain", "?");
     }
     if (std.mem.eql(u8, path, "/f/encp")) {
-        var pb: [4096]u8 = undefined;
+        var pb: [32768]u8 = undefined;
         var n: usize = 0;
         const Ap = struct {
             fn put(buf: []u8, at: *usize, t: []const u8) void {
@@ -333,11 +450,11 @@ fn serveOne(conn: c_int) void {
             }
         };
         Ap.put(&pb, &n, "<!doctype html><title>e</title><script>" ++ read_js ++ "var L=[");
-        for (enc_cases) |c| {
+        for (enc_cases) |c| if (c.via == .fetch) {
             Ap.put(&pb, &n, "'");
             Ap.put(&pb, &n, c.name);
             Ap.put(&pb, &n, "',");
-        }
+        };
         for (enc_cases) |c| if (c.twice) {
             Ap.put(&pb, &n, "'");
             Ap.put(&pb, &n, c.name);
@@ -348,6 +465,9 @@ fn serveOne(conn: c_int) void {
             "F('/f/enc?'+x).then(function(){setTimeout(step,80)})}setTimeout(step,200)</script>e");
         return reply(conn, html, pb[0..n]);
     }
+    // v20j B R15: an EUC-KR page whose script / stylesheet carry no charset, and a UTF-8 page with a `<script charset>` and stylesheets
+    if (std.mem.eql(u8, path, "/f/encj")) return reply(conn, "text/html; charset=euc-kr", "<!doctype html><title>j</title><link rel=stylesheet href=\"/f/enc?vj-css-docgk\"><script src=\"/f/enc?vj-js-docgk\"></script><script src=\"/f/enc?vk-js-dockr\"></script><script>setTimeout(function(){document.title='jdone'},1500)</script>j");
+    if (std.mem.eql(u8, path, "/f/encu")) return reply(conn, html, "<!doctype html><title>u</title><link rel=stylesheet href=\"/f/enc?vj-css-u8\"><link rel=stylesheet href=\"/f/enc?vj-css-charsetgk\"><script charset=\"euc-kr\" src=\"/f/enc?vj-js-attrgk\"></script><script src=\"/f/enc?vk-js-u8\"></script><script src=\"/f/enc?vk-js-u8lat\"></script><link rel=stylesheet href=\"/f/enc?vk-css-u8kr\"><script>setTimeout(function(){document.title='udone'},1500)</script>u");
     // ── 14: V1 at the wire ──
     if (std.mem.eql(u8, path, "/f/v1p")) return reply(conn, html, "<!doctype html><title>v1</title><script>" ++ read_js ++
         "var P=location.port;var L=['/f/d?v1own','http://localhost:'+P+'/f/d?v1cross','/f/r?to=http://localhost:'+P+'/f/d?v1o2c','http://localhost:'+P+'/f/r?to=http://127.0.0.1:'+P+'/f/d?v1c2o','/f/d?v1own2'];" ++
@@ -463,7 +583,7 @@ const Run = struct {
                 g.value_ptr.* += 1;
             },
             .title_changed => |v| self.titles.put(self.gpa, v.browser, self.gpa.dupe(u8, v.text) catch &.{}) catch {},
-            else => {},
+            else => |mm| if (std.c.getenv("V20J_DBG") != null) (if (mm == .failure) std.debug.print("v20j dbg failure: {s} {s}\n", .{ @tagName(mm.failure.code), mm.failure.detail }) else std.debug.print("v20j dbg msg: {s}\n", .{@tagName(mm)})),
         }
     }
 
@@ -605,6 +725,21 @@ fn pageRead(out: []u8, bytes: []const u8) []const u8 {
     return out[0..n];
 }
 
+/// v20j B R15: the windows-1252 reading of `bytes` as UTF-8 (the five undefined bytes stay their C1 code points, like Chromium's decoder).
+fn w1252(out: []u8, bytes: []const u8) []const u8 {
+    const high = [32]u21{
+        0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008D, 0x017D, 0x008F,
+        0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178,
+    };
+    var n: usize = 0;
+    for (bytes) |b| {
+        const cp: u21 = if (b >= 0x80 and b < 0xA0) high[b - 0x80] else b;
+        if (n + 4 > out.len) break;
+        n += std.unicode.utf8Encode(cp, out[n..]) catch break;
+    }
+    return out[0..n];
+}
+
 /// All begins of this tab after `at` whose URL ends with `needle`, in order.
 fn recordsOf(r: *Run, browser: u64, at: usize, needle: []const u8, out: []*Body) []*Body {
     var n: usize = 0;
@@ -659,11 +794,18 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const on = try record(&r, tab_enc, session);
         const at = r.begins.items.len;
         try r.navigate(tab_enc, "/f/encp");
-        const done = r.pumpTitle(tab_enc, "edone", 30_000);
+        var done = r.pumpTitle(tab_enc, "edone", 90_000);
+        r.pump(1500);
+        try r.navigate(tab_enc, "/f/encj");
+        done = r.pumpTitle(tab_enc, "jdone", 15_000) and done;
+        r.pump(800);
+        try r.navigate(tab_enc, "/f/encu");
+        done = r.pumpTitle(tab_enc, "udone", 15_000) and done;
         r.pump(1500);
         var pb: [200]u8 = undefined;
         var rb: [256]u8 = undefined;
         var line: [1500]u8 = undefined;
+        var wb: [256]u8 = undefined;
         for (enc_cases) |c| {
             var nb: [64]u8 = undefined;
             const needle = std.fmt.bufPrint(&nb, "/f/enc?{s}", .{c.name}) catch continue;
@@ -690,6 +832,13 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
                     .exact_redecoded => this_ok = this_ok and cap and exact and !marked,
                     .marked => this_ok = this_ok and cap and x.flags.chromium_decoded and !x.flags.redecoded,
                     .declared_noflag => this_ok = this_ok and cap and !marked and !x.flags.redecoded,
+                    .no_wrong => if (cap and !marked and !exact and !as_page and !(c.alt.len > 0 and std.mem.eql(u8, d, c.alt))) {
+                        this_ok = false;
+                    },
+                    .not_w1252 => if (cap and !marked and std.mem.eql(u8, d, w1252(&wb, c.raw))) {
+                        this_ok = false;
+                    },
+                    .over_cap_text => this_ok = this_ok and x.state == .over_cap and x.decoded > c.raw.len and x.decoded > msg.max_net_body_bytes and d.len == 0,
                 }
                 if (!this_ok) ok = false;
                 const piece = std.fmt.bufPrint(line[ln..], " [#{d} {s} chromium_decoded={} binary={} redecoded={} size={d} decoded={d} exact={} as_page_read={} 「{s}」]", .{ k + 1, stateName(x), x.flags.chromium_decoded, x.flags.binary, x.flags.redecoded, d.len, x.decoded, exact, as_page, printable(&pb, d) }) catch "";

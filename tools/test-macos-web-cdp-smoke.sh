@@ -1606,7 +1606,7 @@ grep -q "^surface $(sed -n 's/^opened \([0-9]*\) .*/\1/p' "$out/bd-open") .*◉ 
 grep -q '(recording response bodies: on)' "$out/bd-list" || bbad "the network list did not say the tab records bodies ($(tr '\n' ' ' < "$out/bd-list" | cut -c1-600))"
 grep -q '^rc=0$' "$out/bd-c" && grep -q '^body: captured · 25 bytes · utf-8' "$out/bd-c" && grep -qxF 'body text: {"chunked":["one","two"]}' "$out/bd-c" \
     || bbad "the chunked JSON body was not captured as it was sent ($(tr '\n' ' ' < "$out/bd-c") · $(cat "$out/bd-reqs"))"
-grep -q '^body: over_cap ([0-9]* bytes — over the 1 MiB body limit)' "$out/bd-big" || bbad "a 2 MiB JSON body was not over_cap ($(tr '\n' ' ' < "$out/bd-big"))"
+grep -q '^body: over_cap ([0-9]* bytes — over the 1 MiB body limit' "$out/bd-big" || bbad "a 2 MiB JSON body was not over_cap ($(tr '\n' ' ' < "$out/bd-big"))"
 grep -q '^body: not_text$' "$out/bd-pic" || bbad "a PNG body was not not_text ($(tr '\n' ' ' < "$out/bd-pic"))"
 grep -q '^rc=1$' "$out/bd-bin" && grep -q 'binary body — write it with --out' "$out/bd-bin" || bbad "a binary body was printed without --out ($(tr '\n' ' ' < "$out/bd-bin"))"
 grep -q '^rc=0$' "$out/bd-binout" && [ "$(cat "$out/bd-bin-head")" = 7b2262696e223a228081fe227d ] || bbad "the binary body was not written with --out ($(tr '\n' ' ' < "$out/bd-binout") · head $(cat "$out/bd-bin-head"))"

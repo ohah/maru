@@ -362,6 +362,27 @@ fn serveOne(conn: c_int) void {
         "function reg(next){navigator.serviceWorker.register('/v20i/sw/sw.js',{scope:'/v20i/sw/'}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}setTimeout(next,300)})}" ++
         "var P=new URLSearchParams(location.search);var D=+(P.get('d')||0);var M=P.get('m')||'p2';var K=P.get('k')||'';var R=+(P.get('r')||20);var j=0;" ++
         "function step(){if(j>=R){setTimeout(function(){document.title='swpdone'},1500);return}var u='/v20i/sw/x?k='+K+'_'+j+'&d='+D;j++;W(u,'p1');setTimeout(function(){W(u,M)},1);setTimeout(step,D+600)}reg(step)</script>swp");
+    // ── 재검증 4 차 뒤(검증자 v20j A R6-1): 서비스 워커가 같은 주소 두 요청을 거꾸로 넘긴다 — p1 은 D ms 뒤 fetch(e.request), p2 는 곧. 서버는
+    // S ms 뒤에 답한다(두 워커 기록이 두 응답보다 앞에 시작한다).
+    if (std.mem.eql(u8, path, "/v20j/sw/sw.js")) return reply(conn, "application/javascript", "self.addEventListener('install',function(e){self.skipWaiting()});self.addEventListener('activate',function(e){e.waitUntil(clients.claim())});" ++
+        "self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(u.pathname!='/v20j/sw/x')return;var w=e.request.headers.get('x-who')||'';var d=+(u.searchParams.get('d')||0);" ++
+        "if(w=='p1'){e.respondWith(new Promise(function(res){setTimeout(function(){res(fetch(e.request))},d)}));return}" ++
+        "if(w=='a1'){e.respondWith(fetch(u.href+'&alt=1',{headers:{'x-who':'A'},cache:'no-store'}));return}" ++
+        "if(w=='a3'){fetch(u.href,{headers:{'x-who':'X'},cache:'no-store'}).catch(function(){});e.respondWith(fetch(u.href+'&alt=1',{headers:{'x-who':'A'},cache:'no-store'}));return}" ++
+        "e.respondWith(fetch(e.request))})");
+    if (std.mem.eql(u8, path, "/v20j/sw/x")) return data(conn, head, qnum(target, "s="), 0);
+    // 검증자 v20j A(조정자 요청): `--network` 의 body-r4-sw-mixed 꼴 — 같은 주소를 서비스 워커가 놓음(fb)·그대로 넘김(pt) 섞어 한꺼번에(fb·pt·fb·pt).
+    if (std.mem.eql(u8, path, "/v20j/mx/sw.js")) return reply(conn, "application/javascript", "self.addEventListener('install',function(e){self.skipWaiting()});self.addEventListener('activate',function(e){e.waitUntil(clients.claim())});" ++
+        "self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(u.pathname!='/v20j/mx/pt')return;if(e.request.headers.get('x-mode')=='fb')return;e.respondWith(fetch(e.request))})");
+    if (std.mem.eql(u8, path, "/v20j/mx/pt")) return data(conn, head, 0, 0);
+    if (std.mem.eql(u8, path, "/v20j/mx/p")) return reply(conn, html, "<!doctype html><title>mx</title><script>function F(u,o){return fetch(u,o).then(function(r){return r.text()}).catch(function(){})}" ++
+        "function reg(next){navigator.serviceWorker.register('/v20j/mx/sw.js',{scope:'/v20j/mx/'}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}setTimeout(next,200)})}" ++
+        "var P=new URLSearchParams(location.search);var K=P.get('k')||'';var k=0;function step(){if(k>=20){document.title='mxdone';return}var u='/v20j/mx/pt?'+K+'_'+k;k++;" ++
+        "F(u,{headers:{'x-mode':'fb','x-who':'fb'}});F(u,{headers:{'x-who':'pt'}});F(u,{headers:{'x-mode':'fb','x-who':'fb'}});F(u,{headers:{'x-who':'pt'}});setTimeout(step,200)}reg(step)</script>mx");
+    if (std.mem.eql(u8, path, "/v20j/sw/p")) return reply(conn, html, "<!doctype html><title>swj</title><script>" ++ read_js ++
+        "function reg(next){navigator.serviceWorker.register('/v20j/sw/sw.js',{scope:'/v20j/sw/'}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}setTimeout(next,300)})}" ++
+        "var P=new URLSearchParams(location.search);var D=+(P.get('d')||0);var S=+(P.get('s')||0);var K=P.get('k')||'';var R=+(P.get('r')||20);var FW=P.get('f')||'p1';var j=0;" ++
+        "function step(){if(j>=R){setTimeout(function(){document.title='swjdone'},1500);return}var u='/v20j/sw/x?k='+K+'_'+j+'&d='+D+'&s='+S;j++;W(u,FW);if(P.get('n2')!='0')setTimeout(function(){W(u,'p2')},1);setTimeout(step,D+S+600)}reg(step)</script>swj");
 
     // hostile: D (x-who d, 300 ms), F (aborted at once — before CEF), E (x-who e, 3 s) of one URL in one task.
     if (std.mem.eql(u8, path, "/v20i/h")) {
@@ -1347,6 +1368,76 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             try r.navigate(rec_tab, "/v20/blank?swi");
             r.pump(2000);
         };
+        // 재검증 4 차 뒤(검증자 v20j A R6-1): 워커가 같은 주소 두 요청을 거꾸로 넘기고 서버가 느리다.
+        // `swalt-*`: 워커가 첫 요청(a1)에는 다른 주소(&alt=1)를 fetch 해 답한다(출처 network — 제 주소의 기록이 없다), p2 는 그대로 넘긴다.
+        inline for (.{ .{ "swrev-d20-s400", "20", "400", "p1" }, .{ "swrev-d100-s400", "100", "400", "p1" }, .{ "swrev-d300-s600", "300", "600", "p1" }, .{ "swrev-d50-s0", "50", "0", "p1" }, .{ "swalt-s400", "0", "400", "a1" }, .{ "swalt-s50", "0", "50", "a1" }, .{ "swalt1-s400", "0", "400&n2=0", "a3" }, .{ "swalt1-s50", "0", "50&n2=0", "a3" } }) |c| if (enabled("v20j-" ++ c[0])) {
+            session += 1;
+            try r.host.send(.{ .net_record = .{ .browser = rec_tab, .on = true, .session = session } });
+            r.pump(300);
+            const at = r.begins.items.len;
+            var pb: [128]u8 = undefined;
+            try r.navigate(rec_tab, std.fmt.bufPrint(&pb, "/v20j/sw/p?k={s}x{d}&d={s}&s={s}&f={s}&r=20", .{ c[0], session, c[1], c[2], c[3] }) catch "");
+            const done = r.pumpTitle(rec_tab, "swjdone", 90_000);
+            r.pump(2000);
+            var waited: u32 = 0;
+            while (waited < 10_000 and endCheck(&r, rec_tab, at).missing > 0) : (waited += 500) r.pump(500);
+            const all = tally(&r, rec_tab, at, "/v20j/sw/x?", null);
+            var line: [2][200]u8 = @splat(@splat(0));
+            for ([_][]const u8{ c[3], "p2" }, 0..) |w, wi| {
+                const t = tally(&r, rec_tab, at, "/v20j/sw/x?", w);
+                var s3: [200]u8 = undefined;
+                _ = std.fmt.bufPrint(line[wi][0..199], "{s}: {d} own {d} amb {d} wrong {d}{s}", .{ w, t.total, t.own, t.ambiguous, t.wrong, stateLine(&t, &s3) }) catch "";
+            }
+            const ec = endCheck(&r, rec_tab, at);
+            var el: [600]u8 = undefined;
+            var sl2: [400]u8 = undefined;
+            report(done and all.wrong == 0 and ec.missing == 0 and ec.doubled == 0, "v20j-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
+            try r.navigate(rec_tab, "/v20/blank?swj");
+            r.pump(2000);
+        };
+        // 검증자 v20j A(조정자 요청): body-r4-sw-mixed 꼴을 여러 판(`V20J_MIX_LOADS` — 기본 40 판 × 20 묶음).
+        if (enabled("v20j-swmix")) {
+            const loads: usize = if (std.c.getenv("V20J_MIX_LOADS")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 40 else 40;
+            var wrong: usize = 0;
+            var sw_total: usize = 0;
+            var sw_own: usize = 0;
+            var missing: usize = 0;
+            var doubled: usize = 0;
+            var bad_loads: usize = 0;
+            var notes: [1500]u8 = undefined;
+            var nn: usize = 0;
+            var st: [16]usize = @splat(0);
+            for (0..loads) |load| {
+                session += 1;
+                try r.host.send(.{ .net_record = .{ .browser = rec_tab, .on = true, .session = session } });
+                r.pump(300);
+                const at = r.begins.items.len;
+                var pb: [128]u8 = undefined;
+                try r.navigate(rec_tab, std.fmt.bufPrint(&pb, "/v20j/mx/p?k=L{d}x{d}", .{ load, session }) catch "");
+                const done = r.pumpTitle(rec_tab, "mxdone", 30_000);
+                r.pump(3000);
+                const all = tally(&r, rec_tab, at, "/v20j/mx/pt?", null);
+                const pt = tally(&r, rec_tab, at, "/v20j/mx/pt?", "pt");
+                const ec = endCheck(&r, rec_tab, at);
+                wrong += all.wrong;
+                sw_total += pt.total;
+                sw_own += pt.own;
+                missing += ec.missing;
+                doubled += ec.doubled;
+                for (all.states, 0..) |x, si| st[si] += x;
+                if (!done or all.wrong > 0) {
+                    bad_loads += 1;
+                    const piece = std.fmt.bufPrint(notes[nn..], " [load {d} done {} begins from {d}: wrong {d}{s}]", .{ load, done, at, all.wrong, all.notes[0..@min(all.notes_len, 300)] }) catch "";
+                    nn += piece.len;
+                }
+                std.debug.print("v20j-swmix load {d}: wrong {d} pt own {d}/{d}\n", .{ load, all.wrong, pt.own, pt.total });
+                try r.navigate(rec_tab, "/v20/blank?mx");
+                r.pump(500);
+            }
+            var t2: Tally = .{};
+            t2.states = st;
+            report(wrong == 0 and missing == 0 and doubled == 0 and bad_loads == 0, "v20j-swmix", std.fmt.bufPrint(&detail, "{d} loads × 20: WRONG {d} · pass-through own {d}/{d} · no end {d} · several ends {d} · states{s}{s}", .{ loads, wrong, sw_own, sw_total, missing, doubled, stateLine(&t2, &sl), notes[0..nn] }) catch "");
+        }
         // IO load between p1 and p2.
         inline for (.{ .{ "load-n100", "100" }, .{ "load-n400", "400" }, .{ "load-n1500", "1500" } }) |c| if (enabled("v20i-" ++ c[0])) {
             // 항목마다 새 세션으로 다시 켠다 — 앞 항목(IO 부하 1500)이 쏟아짐 밸브로 기록을 멈출 수 있다(`recording_stopped`).

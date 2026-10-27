@@ -369,7 +369,7 @@ fn onDetached(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_brow
 /// 받은 결과를 풀어 보낸다 — 잡았으면 조각들과 끝(보내는 줄에 자리가 없으면 `busy`), 아니면 끝 하나.
 fn sendBody(f: table_mod.Inflight, ok: bool, json: []const u8) void {
     var flags: msg.NetBodyFlags = .{ .credentialed = f.credentialed };
-    var d = table_mod.decodeResult(gpa, ok, json, f.mimeSlice(), f.charset, f.decoded) catch table_mod.Decoded{ .state = .busy };
+    var d = table_mod.decodeResult(gpa, ok, json, f.mimeSlice(), f.charset, f.decoded, f.res_kind) catch table_mod.Decoded{ .state = .busy };
     d.state = table.emptyBodyState(f, d.state); // 4 회차 N1: 빈 본문인데 CEF 는 바이트를 받았다 — `unavailable`
     defer if (d.bytes.len > 0) gpa.free(d.bytes);
     // 넘쳤으면 넘친 글의 크기까지(windows-1252 로 푼 글은 받은 바이트보다 클 수 있다 — 상태와 크기가 엇갈리지 않게).

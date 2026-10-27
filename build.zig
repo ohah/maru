@@ -2340,6 +2340,21 @@ pub fn build(b: *std.Build) void {
     const address_field_ime_step = b.step("test-address-field-ime", "Validate address-field native IME ranges and pinned owner lifetime");
     address_field_ime_step.dependOn(&run_address_ime.step);
 
+    const recovery_picker_ime_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"recovery picker IME host"},
+    });
+    const run_recovery_picker_ime = b.addRunArtifact(recovery_picker_ime_tests);
+    run_recovery_picker_ime.addArg("--maru-expect-tests=41");
+    run_recovery_picker_ime.setCwd(b.path("."));
+    const recovery_picker_ime_step = b.step("test-recovery-picker-ime", "Validate recovery picker IME and source preservation");
+    recovery_picker_ime_step.dependOn(&run_recovery_picker_ime.step);
+    const recovery_ime_artifact_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/recovery-picker-ime", "-p", "test_*.py" });
+    recovery_ime_artifact_controls.setCwd(b.path("."));
+    recovery_ime_artifact_controls.has_side_effects = true;
+    recovery_picker_ime_step.dependOn(&recovery_ime_artifact_controls.step);
+    if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_recovery_picker_ime.step);
+
     const reference_picker_ime_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
         .filters = &.{"reference picker IME host"},
@@ -4983,6 +4998,7 @@ pub fn build(b: *std.Build) void {
     const posix_host_tests = target.result.os.tag != .windows;
 
     const test_step = b.step("test", "Run all Zig tests");
+    test_step.dependOn(&recovery_ime_artifact_controls.step);
     test_step.dependOn(&reference_ime_artifact_controls.step);
     test_step.dependOn(&symbol_ime_artifact_controls.step);
     test_step.dependOn(&activity_ime_artifact_controls.step);
@@ -4990,6 +5006,14 @@ pub fn build(b: *std.Build) void {
 
     test_step.dependOn(&run_inspector_rules.step);
     inline for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
+        const recovery_model_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
+            .filters = &.{"recovery picker IME model"},
+        });
+        const run_recovery_models = b.addRunArtifact(recovery_model_tests);
+        run_recovery_models.addArg("--maru-expect-tests=11");
+        recovery_picker_ime_step.dependOn(&run_recovery_models.step);
+        test_step.dependOn(&run_recovery_models.step);
         const address_model_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
             .filters = &.{"address IME"},

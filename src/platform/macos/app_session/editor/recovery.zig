@@ -49,41 +49,81 @@ pub fn tick(self: *AppSession) void {
     if (self.editor_recovery.catalog.?.tick(self.editor_documents)) refresh(self);
 }
 
-pub fn recompute(self: *AppSession) void {
-    self.chrome_host.recovery_picker.selected = 0;
-    self.editor_recovery.scroll = .{};
-    self.editor_recovery.followed = null;
-    refresh(self);
+pub const PreparedFilter = struct {
+    filter: chrome.components.recovery_filter.Plan,
+    prompt: maru.i18n.Key,
+    pub fn deinit(self: *PreparedFilter, allocator: std.mem.Allocator) void {
+        self.filter.deinit(allocator);
+    }
+};
+
+/// Prepare the existing normalized comparison without changing input or UI state.
+/// Discovery may append between keys; a synchronous preparation reads its latest rows.
+pub fn prepareFilter(self: *AppSession, raw_query: []const u8) !PreparedFilter {
+    const state = &self.editor_recovery;
+    const catalog = &(state.catalog orelse return error.NoCatalog);
+    const picker = &self.chrome_host.recovery_picker;
+    var prepared: PreparedFilter = .{ .filter = try chrome.components.recovery_filter.Plan.init(self.allocator, catalog.candidates.items.len, raw_query), .prompt = .editor_recovery_prompt };
+    errdefer prepared.deinit(self.allocator);
+    var name_buf: [maru.session.editor.backup.max_file_name_len]u8 = undefined;
+    var selected_name: []const u8 = "";
+    if (picker.selected < state.shown.items.len) {
+        const index = state.shown.items[picker.selected];
+        if (index < catalog.candidates.items.len) {
+            const name = catalog.candidates.items[index].name();
+            @memcpy(name_buf[0..name.len], name);
+            selected_name = name_buf[0..name.len];
+        }
+    }
+    for (catalog.candidates.items, 0..) |*candidate, i| {
+        prepared.filter.consider(i, candidate.name(), candidate.label, self.editor_documents.usesBackupName(candidate.name()), selected_name);
+    }
+    prepared.prompt = if (catalog.failure != null) .editor_recovery_partial else if (!catalog.complete) .editor_recovery_scanning else if (prepared.filter.shown.items.len == 0) .editor_recovery_empty else .editor_recovery_prompt;
+    return prepared;
 }
 
-fn refresh(self: *AppSession) void {
+/// Publish only a complete result. Same-catalog refresh follows the selected identity;
+/// changing the committed query keeps the existing reset-to-first-row policy.
+pub fn publishFilter(self: *AppSession, prepared: *PreparedFilter, reset: bool) void {
     const state = &self.editor_recovery;
-    const catalog = &(state.catalog orelse return);
     const picker = &self.chrome_host.recovery_picker;
-    // 용량부터 확보해야 OOM에서 이전 선택이 다른 후보를 가리키지 않는다.
-    state.shown.ensureTotalCapacity(self.allocator, catalog.candidates.items.len) catch {
-        state.filter_failed = true;
-        picker.prompt = maru.i18n.t(.editor_recovery_partial);
-        self.metal_dirty = true;
-        return;
-    };
+    const old_selected = picker.selected;
+    std.mem.swap(std.ArrayList(usize), &state.shown, &prepared.filter.shown);
     state.filter_failed = false;
-    const query = maru.grapheme.composeHangul(self.allocator, picker.input.query.items) catch {
-        state.filter_failed = true;
-        picker.prompt = maru.i18n.t(.editor_recovery_partial);
-        self.metal_dirty = true;
-        return;
-    };
-    defer self.allocator.free(query);
-    state.shown.clearRetainingCapacity();
-    for (catalog.candidates.items, 0..) |*candidate, i| {
-        if (self.editor_documents.usesBackupName(candidate.name())) continue;
-        if (query.len == 0 or std.ascii.findIgnoreCase(candidate.label, query) != null or std.ascii.findIgnoreCase(candidate.name(), query) != null)
-            state.shown.appendAssumeCapacity(i);
+    if (reset) {
+        picker.selected = 0;
+        state.scroll = .{};
+        state.followed = null;
     }
     picker.setResultCount(state.shown.items.len);
-    picker.prompt = maru.i18n.t(if (catalog.failure != null) .editor_recovery_partial else if (!catalog.complete) .editor_recovery_scanning else if (state.shown.items.len == 0) .editor_recovery_empty else .editor_recovery_prompt);
+    if (!reset) {
+        if (prepared.filter.selected) |selected| picker.selected = selected;
+        if (picker.selected != old_selected) state.followed = null;
+    }
+    picker.prompt = maru.i18n.t(prepared.prompt);
     self.metal_dirty = true;
+}
+
+fn update(self: *AppSession, reset: bool) void {
+    if (self.editor_recovery.catalog == null) return;
+    var prepared = prepareFilter(self, self.chrome_host.recovery_picker.input.query.items) catch {
+        // Legacy discovery failure stays visible and cannot become a restore grant.
+        self.editor_recovery.filter_failed = true;
+        self.chrome_host.recovery_picker.prompt = maru.i18n.t(.editor_recovery_partial);
+        self.metal_dirty = true;
+        return;
+    };
+    defer prepared.deinit(self.allocator);
+    publishFilter(self, &prepared, reset);
+}
+
+pub fn recompute(self: *AppSession) void {
+    update(self, true);
+}
+
+/// Same-catalog discovery progress must not interrupt a live IME composition.
+pub fn refresh(self: *AppSession) void {
+    update(self, false);
 }
 
 pub fn accept(self: *AppSession) void {

@@ -266,9 +266,18 @@ pub fn wordStart(content: []const u8, caret: usize) usize {
 }
 
 /// 응답(`editor_lsp` 가 부른다). 낡은 seq 는 버린다. 목록을 복사해 들고 접두사로 좁혀 연다(0 이면 닫힌 채).
-pub fn onResponse(self: *AppSession, seq: u32, result: ?std.json.Value, enc: lsp.rpc.PositionEncoding) void {
+pub fn onResponse(self: *AppSession, origin: *editor_lsp.Client, seq: u32, result: ?std.json.Value) void {
+    const enc = origin.encoding;
     const st = &self.editor_completion;
     if (!st.waiting or seq != st.waiting_seq) return;
+    const request_term = visibleEditorTerm(self, st.waiting_surface) orelse {
+        st.waiting = false;
+        hide(self);
+        return;
+    };
+    // Request IDs are scoped to a server connection, not the AppSession.
+    // A late response from another primary client must not release this wait.
+    if (editor_lsp.readyClientFor(self, request_term) != origin) return;
     st.waiting = false;
     defer if (st.dirty) {
         st.dirty = false;
@@ -401,25 +410,29 @@ fn resolveHighlighted(self: *AppSession, term: *Term) void {
     const idx = st.order.items[pick];
     const item = st.items.items[idx];
     if (item.resolved or item.raw.len == 0) return;
-    const seq = editor_lsp.requestCompletionResolve(self, term, item.raw) orelse {
-        st.items.items[idx].resolved = true; // 못 보내면 그대로 쓴다 — 동작상 등가(Enter 는 어차피 다시 못 보내고 적용한다), 강조마다 되묻지 않게 하는 표시(적대적 2회차 B10)
-        return;
-    };
+    // A failed prefetch remains unresolved. Otherwise the next Enter could
+    // bypass the atomic wait and insert a primary edit without its import.
+    const seq = editor_lsp.requestCompletionResolve(self, term, item.raw) orelse return;
     st.resolve_waiting = true;
     st.resolve_seq = seq;
     st.resolve_item = idx;
 }
 
 /// resolve 응답(`editor_lsp` 가 부른다) — 그 항목에 합치고, 확정이 기다리고 있었으면 지금 적용한다.
-pub fn onResolveResponse(self: *AppSession, seq: u32, result: ?std.json.Value, enc: lsp.rpc.PositionEncoding) void {
+pub fn onResolveResponse(self: *AppSession, origin: *editor_lsp.Client, seq: u32, result: ?std.json.Value) void {
+    const enc = origin.encoding;
     const st = &self.editor_completion;
     if (!st.resolve_waiting or seq != st.resolve_seq) return;
+    const term = visibleEditorTerm(self, st.surface_id) orelse {
+        cancel(self);
+        return;
+    };
+    if (editor_lsp.readyClientFor(self, term) != origin) return;
     st.resolve_waiting = false;
     if (!st.active or st.resolve_item >= st.items.items.len) {
         if (st.pending_accept) cancel(self);
         return;
     }
-    const term = visibleEditorTerm(self, st.surface_id) orelse return;
     const doc = term.rt.editorDocument().opened orelse return;
     if (st.pending_accept and (pendingDecision(self, true) != .apply or st.pending_item != st.resolve_item)) {
         st.cancelled_pending += 1;
@@ -500,7 +513,7 @@ fn pendingContext(self: *AppSession) ?completion_ops.PendingContext {
     const term = visibleEditorTerm(self, st.surface_id) orelse return null;
     const doc = term.rt.editorDocument();
     const opened = doc.opened orelse return null;
-    return .{ .surface = st.surface_id, .document = @intFromPtr(doc), .revision = opened.file.revision, .primary = term.rt.editor_selection orelse return null, .extras = term.rt.editor_extra_selections };
+    return .{ .surface = st.surface_id, .document = @intFromPtr(doc), .revision = opened.file.revision, .target_epoch = doc.save_target_epoch, .primary = term.rt.editor_selection orelse return null, .extras = term.rt.editor_extra_selections };
 }
 
 fn pendingDecision(self: *AppSession, response: bool) completion_ops.PendingDecision {

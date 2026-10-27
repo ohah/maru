@@ -843,6 +843,25 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // Windows ships the same native parsers/decoder as the macOS bundle. Reuse
+    // their pinned upstream notices instead of maintaining another license list.
+    if (target.result.os.tag == .windows) {
+        const native_notices = [_]struct { file: []const u8, path: ?std.Build.LazyPath }{
+            .{ .file = "Maru-LICENSE", .path = b.path("LICENSE") },
+            .{ .file = "tree-sitter-LICENSE", .path = ts_core_license },
+            .{ .file = "wuffs-LICENSE", .path = wuffs_license },
+            .{ .file = "pcre2-LICENCE.md", .path = pcre2_license },
+            .{ .file = "Unicode-LICENSE.txt", .path = b.path("assets/unicode/LICENSE.txt") },
+            .{ .file = "octicons-LICENSE.txt", .path = b.path("assets/icons/LICENSE-octicons.txt") },
+        };
+        for (native_notices) |notice| {
+            if (notice.path) |path| b.getInstallStep().dependOn(&b.addInstallBinFile(path, b.fmt("licenses/{s}", .{notice.file})).step);
+        }
+        for (grammar_licenses.items) |notice| {
+            b.getInstallStep().dependOn(&b.addInstallBinFile(notice.path, b.fmt("licenses/{s}", .{notice.file})).step);
+        }
+    }
+
     // W7.6: 번들 ConPTY. **인박스 conhost 가 낡으면 없는 기능이 있다**(마우스 리포팅 — 계약 §4.3).
     // 배치는 NuGet 패키지의 `build/native/*.targets` 가 정한 그대로다: `conpty.dll` 은 실행 파일 옆,
     // `OpenConsole.exe` 는 아키텍처 하위 폴더. **틀리면 conpty.dll 이 시스템 conhost 로 조용히

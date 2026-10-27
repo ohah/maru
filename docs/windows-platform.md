@@ -13150,3 +13150,20 @@ DLL·host가 일치하며, 이 설치 변경 전후 실행 파일도 동일하�
 signed/unsigned 경계·비열거 값·Windows NTSTATUS의 반환 타입과 값을 비교했다.
 총 11개 검사가 통과했다. 엄격한 원본 토큰 비교에서 발견된 이름/쉼표 차이와 허용한
 변환 범위는 `.zig-cache/latest-main-format-token-proof.json`에 보존한다.
+
+형식 정리 커밋 `ab394c205`의 일반 빌드·집중 검사·교차 컴파일·경계 272개도 통과했다.
+해당 실행 파일로 폰트 변경·복원 5개와 터미널 우클릭 메뉴의 표시·Copy/Paste·취소·
+포커스 이동 등 12개 실제 앱 검사를 통과했다. 후자는 `input.right-click = menu`인
+격리 설정과 synthetic HWND 입력을 사용했고, 원래 비어 있던 클립보드를 복구했다.
+`paste` 기본값을 변경하거나 다른 영역의 메뉴 완료를 뜻하지 않는다. 형식 정리 뒤의
+설정 조합 경로도 compiled 결함 주입 6개와 복구 Debug·ReleaseFast를 다시 통과했다.
+근거는 `.zig-cache/formatted-main-rebase-gates-20261028/result.json`,
+`.zig-cache/formatted-main-font-app-regression.json`,
+`.zig-cache/formatted-main-terminal-popup-complete.json`,
+`.zig-cache/formatted-main-settings-composition-adversarial.json`이다.
+
+Windows 설치에는 기존 정적 링크 코드·자산의 고지 36개를 동봉한다. macOS 번들이 쓰는
+tree-sitter 코어/grammar·wuffs·PCRE2의 고정 원문을 재사용하고 Maru·Unicode·Octicons·
+ConPTY 원문도 포함한다. 각 파일을 고정 의존성 또는 저장소 원본과 대조했다. 원문 누락·
+오배치·다른 원문 대체 등 7개 실제 빌드 산출물을 거절하고, 복구 패키지의 고지와 실행 파일
+일치를 확인했다. 근거는 `.zig-cache/windows-native-notices-adversarial.json`이다.

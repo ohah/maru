@@ -82,20 +82,20 @@ test "codex 데몬 귀속 — 배치 루프는 판정을 지나서만 적용하�
 
     // ⑵ 판정의 입구: 데몬이 돌린 이벤트가 아니면 예전 그대로(`.here`), 맞으면 순수 판정 **한 번**을 지난다.
     const route = try fnBody(src, "routeHookEvent");
-    const gate = try expectOnce(route, "if (!attr.isDaemonEvent(ev.provider, hookParentIsDaemon(self, ev))) return .here;", "데몬 게이트");
+    const gate = try expectOnce(route, "if (!attr.isDaemonEvent(ev.provider, parent_is_daemon)) return .here;", "데몬 게이트");
     // 데몬 판정은 훅이 실은 `$PPID` 의 argv 로 한다 — 제어 터미널 같은 대리 증거가 아니다(첫 판의 오판).
     const parent = try fnBody(src, "hookParentIsDaemon");
     _ = try expectOnce(parent, "if (ev.hook_ppid == 0 or !std.mem.eql(u8, ev.provider, attr.daemon_provider)) return false;", "칸 없는 옛 줄");
-    _ = try expectOnce(parent, "maru.pty.PtySession.judgeProcessArgs(pid, &attr.isManagedDaemonArgs) orelse return false;", "argv 판정");
+    _ = try expectOnce(parent, "maru.pty.PtySession.judgeProcessArgs(pid, &attr.isManagedDaemonArgs) orelse return null;", "argv 판정");
     // 판정 기억의 키는 (pid, 시작 시각) — pid 만이면 재사용된 pid 에 옛 판정이 붙는다.
-    const started_at = try expectOnce(parent, "const started = maru.pty.PtySession.processStartMicros(pid) orelse return false;", "시작 시각");
+    const started_at = try expectOnce(parent, "const started = maru.pty.PtySession.processStartMicros(pid) orelse return null;", "시작 시각");
     const lookup_at = try expectOnce(parent, "if (self.codex_daemon_parents.lookup(ev.hook_ppid, started)) |known| return known;", "판정 조회");
     _ = try expectOnce(parent, "self.codex_daemon_parents.remember(ev.hook_ppid, started, verdict);", "판정 기억");
     if (!(started_at < lookup_at)) return error.WiringChanged;
 
     // 후보 자격은 순수 층이 정하고, 세 사실을 **그 Term 에서** 읽어 넘긴다 — 원격 칸이 빠지면 원격 pane 이 후보가 된다.
-    const eligible_at = try expectOnce(route, "if (!attr.eligible(.{ .terminal = t.kind == .terminal, .codex = t.agent_kind == .codex, .remote = isRemoteAgentPane(t) })) continue;", "후보 자격");
-    const any_at = try expectOnce(route, "any_cwd[any_count] = .{ .id = t.surfaceId() };", "cwd 무관 후보");
+    const eligible_at = try expectOnce(route, "if (!attr.eligible(.{ .terminal = t.kind == .terminal and !t.rt.ended_placeholder, .codex = t.agent_kind == .codex, .remote = isRemoteAgentPane(t) or t.agent_kind_from_hook or app_session_mod.termCwdIsRemote(t) })) continue;", "후보 자격");
+    const any_at = try expectOnce(route, "any_cwd[any_count] = .{ .id = t.surfaceId(),", "cwd 무관 후보");
     if (!(eligible_at < any_at)) return error.WiringChanged;
     // 묶음은 그 목록으로 살아 있는지 보고, SessionStart 면 버린다 — 그 판정은 순수 층(`Bindings.resolve`)에 있다.
     // 다시 판정할지는 이벤트 종류와 **source** 둘로 정한다 — compact 의 SessionStart 에 묶음을 풀면 그 턴의 끝이 버려진다.
@@ -114,7 +114,7 @@ test "codex 데몬 귀속 — 배치 루프는 판정을 지나서만 적용하�
     // 판정 앞에서 `.here` 로 빠지는 길은 게이트 하나뿐이다 — 그 밖의 조기 `.here` 는 판정 우회다.
     try expectCount(route[0..decide_at], "return .here", 1, "판정 앞의 .here");
     // 버림은 어느 Term 에도 적용하지 않는다. 이 Term 에 적용하는 것은 판정이 이 Term 을 가리킬 때뿐이다.
-    _ = try expectOnce(route, ".drop => |reason| { noteDaemonDrop(self, sid, reason); return .dropped; },", "버림 갈래");
+    _ = try expectOnce(route, ".drop => |reason| { if (reason == .identity_not_unique or reason == .candidate_overflow) self.codex_daemon_bindings.invalidate(sid); if (recovery_was_allowed and !self.codex_daemon_bindings.canRecoverIdentity(sid)) self.workspaceChanged(.agent_session); noteDaemonDrop(self, sid, reason); return .dropped; },", "버림 갈래");
     _ = try expectOnce(route, "if (r.target == term.surfaceId()) return .here;", "이 Term 갈래");
     _ = try expectOnce(route, "if (r.bind) self.codex_daemon_bindings.bind(sid, r.target);", "묶음");
     _ = try expectOnce(route[decide_at..], ".bound = bound,", "판정의 묶음 입력");

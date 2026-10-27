@@ -355,3 +355,5 @@ test {
 
 pub const agent_log_profile = @import("session/agent_log_profile.zig");
 pub const agent_stream_mixed = @import("session/agent_stream_mixed.zig");
+
+pub const codex_hook_receipt = @import("session/codex_hook_receipt.zig");

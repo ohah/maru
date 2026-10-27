@@ -111,3 +111,5 @@ test "windowsShellKindOf: 모든 변형이 같은 이름으로 옮겨진다" {
 
 /// 저장 실행 방식과 무관한 실패 안내 정책.
 pub const editor_save_notice = @import("editor_save_notice.zig");
+
+pub const codex_hook_receipt = @import("platform/codex_hook_receipt.zig");

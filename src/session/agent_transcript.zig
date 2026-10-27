@@ -164,6 +164,8 @@ pub const max_name_bytes: usize = 512;
 /// 세션 신원 문자열 상한(uuid 36자 + 여유).
 pub const max_identity_bytes: usize = 64;
 
+pub const IdentityProvider = enum { claude, codex };
+
 pub const Cache = struct {
     name: [max_name_bytes]u8 = undefined,
     name_len: usize = 0,
@@ -171,6 +173,7 @@ pub const Cache = struct {
     /// 그때만 활동 상관 폴백을 쓴다(§7.2). 이 값이 있으면 파일 선택에 추측이 없다.
     identity_buf: [max_identity_bytes]u8 = undefined,
     identity_len: usize = 0,
+    identity_provider: ?IdentityProvider = null,
     /// 마지막으로 **읽어서 파싱한** 파일 mtime. 그대로면 다시 읽지 않는다(계약 4).
     read_mtime_ns: i96 = 0,
     /// 마지막 폴링 시각(awake ms) — throttle.
@@ -188,9 +191,16 @@ pub const Cache = struct {
     }
 
     pub fn setIdentity(self: *Cache, value: []const u8) void {
-        const n = @min(value.len, self.identity_buf.len);
+        // Session identities are keys: truncation would produce a different executable target.
+        const n = if (value.len <= self.identity_buf.len) value.len else 0;
         @memcpy(self.identity_buf[0..n], value[0..n]);
         self.identity_len = n;
+        self.identity_provider = null;
+    }
+
+    pub fn setProviderIdentity(self: *Cache, provider: IdentityProvider, value: []const u8) void {
+        self.setIdentity(value);
+        if (self.identity_len > 0) self.identity_provider = provider;
     }
 
     pub fn setFileName(self: *Cache, name: []const u8) void {

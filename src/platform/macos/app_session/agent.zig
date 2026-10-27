@@ -841,13 +841,39 @@ pub fn resumableAgentOf(self: *AppSession, term: *Term) ?maru.session.workspace.
         .none => return null,
     };
     if (term.agent_kind_from_hook or isRemoteAgentPane(term) or app_session_mod.termCwdIsRemote(term)) return null;
-    const live = primaryHookSlot(self, term).transcript.identity();
+    const cache = &primaryHookSlot(self, term).transcript;
+    const expected: maru.session.agent_transcript.IdentityProvider = switch (provider) {
+        .claude => .claude,
+        .codex => .codex,
+    };
+    // Never combine a process provider with an identity reported by another provider.
+    const live = if (cache.identity_provider == expected) cache.identity() else "";
     // **살아 있는 신원이 이긴다.** 아직 없으면(훅이 다시 알려 주기 전) 저장 파일이 알던 보류 신원을 싣는다 — 같은
     // 종류일 때만. 안 그러면 그 사이 찍힌 checkpoint 가 파일이 알던 값을 지운다.
     const id: []const u8 = if (live.len > 0) live else if (term.rt.saved_resume_provider == provider)
         term.rt.saved_resume_id_buf[0..term.rt.saved_resume_id_len]
     else
         "";
+    if (provider == .codex) {
+        if (!self.codex_daemon_bindings.canRecoverIdentity(id)) return null;
+        if (self.codex_daemon_bindings.lookup(id)) |owner| {
+            if (owner != term.surfaceId()) return null;
+        } else {
+            // Checkpoint capture also needs uniqueness before any new hook arrives.
+            for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |other| {
+                if (other == term or other.agent_kind != .codex or other.rt.ended_placeholder or
+                    other.agent_kind_from_hook or isRemoteAgentPane(other) or app_session_mod.termCwdIsRemote(other)) continue;
+                const other_cache = &other.hook.transcript;
+                const other_id = if (other_cache.identity_provider == .codex and other_cache.identity().len > 0)
+                    other_cache.identity()
+                else if (other.rt.saved_resume_provider == .codex)
+                    other.rt.saved_resume_id_buf[0..other.rt.saved_resume_id_len]
+                else
+                    "";
+                if (std.mem.eql(u8, id, other_id)) return null;
+            };
+        }
+    }
     const out: maru.session.workspace.AgentResume = .{ .provider = provider, .session_id = id };
     return if (out.valid()) out else null;
 }
@@ -1154,6 +1180,8 @@ pub fn noteAgentKind(self: *AppSession, term: *Term, kind: AgentKind, displayed:
     const prev = term.agent_kind;
     term.agent_kind = kind;
     if (kind == prev) return;
+    term.codex_receipt_issued = 0;
+    term.codex_launch_started_us = 0;
     // **에이전트가 끝나거나 다른 종류로 바뀌면 그 세션의 신원을 버린다**(RB2 코드 리뷰). 신원은 종류가 바뀌어도
     // 남도록 설계됐는데(`Cache.reset` 은 신원을 안 지운다), 그러면 같은 칸에서 새로 띄운 세션이 **옛 세션의 id** 로
     // 저장돼 재부팅 뒤 엉뚱한 대화를 이어간다. 없음 → 에이전트는 지우지 않는다 — 훅의 `SessionStart` 가 프로세스
@@ -1347,7 +1375,7 @@ pub fn adoptFallbackImageSource(term: *Term) void {
 pub fn agentIdentityFromChildEnv(self: *AppSession, term: *Term, key: []const u8, buf: []u8) ?[]const u8 {
     _ = self;
     const pid = agentProcessPid(term.rt.observation.foreground_processes.items, term.agent_kind) orelse return null;
-    return maru.pty.PtySession.agentSessionIdentity(pid, key, buf);
+    return maru.pty.PtySession.agentSessionIdentityExcluding(pid, key, buf, if (term.agent_kind == .codex) &maru.session.codex_daemon_attribution.isManagedDaemonArgs else null);
 }
 
 /// claude 상태줄 훅이 적어둔 per-pane 신원 파일을 읽는다(§7.2.2 — 옵션 보강).
@@ -2093,11 +2121,17 @@ pub fn refreshAgentSessionIdentity(self: *AppSession, term: *Term) void {
     var buf: [maru.session.agent_transcript.max_identity_bytes]u8 = undefined;
     const value = agentIdentityFromChildEnv(self, term, key, &buf) orelse
         agentIdentityFromStatuslineFile(self, term, &buf) orelse return;
+    if (!agent_session_archive.isResumableSessionId(value)) return;
     const cache = &term.hook.transcript;
-    if (std.mem.eql(u8, cache.identity(), value)) return;
+    const provider: maru.session.agent_transcript.IdentityProvider = switch (term.agent_kind) {
+        .claude => .claude,
+        .codex => .codex,
+        .none => return,
+    };
+    if (cache.identity_provider == provider and std.mem.eql(u8, cache.identity(), value)) return;
     // 신원이 바뀌었다 = 다른 세션이다. 옛 대화가 새 세션 행에 남지 않게 매핑을 통째로 버린다.
     cache.reset();
-    cache.setIdentity(value);
+    cache.setProviderIdentity(provider, value);
     self.metal_dirty = true;
     self.workspaceChanged(.agent_session); // RB2: 저장되는 `agent-resume` 의 신원이 바뀌었다
 }
@@ -2128,8 +2162,14 @@ fn adoptHookSessionIdentity(self: *AppSession, slot: *HookSlot, ev: maru.session
     // 실측(2026-08-24, 이 기계의 훅 로그 5,221 이벤트)에서는 `session_id` 가 **전부 36바이트 UUID** 라
     // 이 가지가 밟힌 적이 없다. 그럼에도 남기는 이유는 밟혔을 때의 오염이 **조용하기** 때문이다.
     if (value.len == 0 or value.len > tr.max_identity_bytes) return;
+    const provider: tr.IdentityProvider = if (std.mem.eql(u8, ev.provider, "claude"))
+        .claude
+    else if (std.mem.eql(u8, ev.provider, "codex"))
+        .codex
+    else
+        return;
     const cache = &slot.transcript;
-    if (std.mem.eql(u8, cache.identity(), value)) return;
+    if (cache.identity_provider == provider and std.mem.eql(u8, cache.identity(), value)) return;
     // 신원이 바뀌었다 = 다른 세션이다(`/clear`). 옛 대화가 새 세션 행에 남지 않게 매핑을 통째로 버린다 —
     // 관측 경로와 **같은 판단**이다.
     //
@@ -2140,7 +2180,7 @@ fn adoptHookSessionIdentity(self: *AppSession, slot: *HookSlot, ev: maru.session
     // 무효다.
     self.turn_captures.dropOpen(self.allocator, cache.identity());
     cache.reset();
-    cache.setIdentity(value);
+    cache.setProviderIdentity(provider, value);
     self.metal_dirty = true;
     self.workspaceChanged(.agent_session); // RB2: 저장되는 `agent-resume` 의 신원이 바뀌었다
 }
@@ -2329,7 +2369,10 @@ pub fn pollAgentConsumer(self: *AppSession, term: *Term, displayed: bool, observ
             // codex 공유 데몬 재배정도 이 Term 을 떠난다 — 남기면 이 pane 에서 다음에 뜨는 codex 가 옛 세션의 묶음을
             // 이어받고, 파일 없는 Term 이 훅 모드에 붙박인다.
             term.agent_hook_routed = false;
-            self.codex_daemon_bindings.dropTarget(term.surfaceId());
+            // A verified receipt remains authoritative without a pane-local log
+            // (the shared daemon may still write to a closed donor pane).
+            if (term.agent_kind != .codex or term.codex_receipt_issued == 0)
+                self.codex_daemon_bindings.dropTarget(term.surfaceId());
             // 자식 셈도 버린다. 남기면 훅 모드로 돌아온 뒤 첫 lead `Stop` 이 «자식이 남았다» 로 읽혀
             // 배지가 안 풀린다(다음 프롬프트가 셈을 지울 때까지).
             term.hook.progress.reset();
@@ -2344,8 +2387,84 @@ pub fn pollAgentConsumer(self: *AppSession, term: *Term, displayed: bool, observ
             }
         },
     }
+    if (observation_current) pollCodexHookReceipt(self, term);
     // **배지로 나갈 값은 여기서만 정해진다**(§1.6-⑴). 위 두 경로는 각자 자기 자리에만 썼다.
     arbitrateAgentState(self, term, displayed);
+}
+
+/// Receipts are returned by Codex to its own client, so no daemon pane env is used.
+/// Rechecking the registry prevents a previous client reclaiming a resumed session.
+fn pollCodexHookReceipt(self: *AppSession, term: *Term) void {
+    if (!is_macos or !self.loaded_config.config.sidebar.agent_hooks or term.agent_kind != .codex or
+        term.agent_kind_from_hook or isRemoteAgentPane(term) or app_session_mod.termCwdIsRemote(term) or term.rt.ended_placeholder) return;
+    const pid = agentProcessPid(term.rt.observation.foreground_processes.items, .codex) orelse return;
+    const started = maru.pty.PtySession.processStartMicros(pid) orelse return;
+    if (term.codex_launch_started_us != started) {
+        term.codex_launch_started_us = started;
+        // A shared daemon can rejoin a cached thread without another SessionStart.
+        // Read explicit resume UUID once per client process, before /new can occur.
+        if (term.codex_receipt_issued == 0 and term.hook.transcript.identity_provider != .codex) {
+            var id_buf: [64]u8 = undefined;
+            if (maru.pty.PtySession.processArgumentIdentity(pid, &maru.session.codex_hook_receipt.resumeFromProcArgs, &id_buf)) |id| {
+                applyCodexHookReceipt(self, term, .{ .session = id, .issued = started * 1000, .text = "" });
+            }
+        }
+    }
+    const screen = self.backendFor(term).dumpRecentText(term.rt.handle, self.allocator, 100, 65536) catch return;
+    defer self.allocator.free(screen);
+    var compact: [65536]u8 = undefined;
+    const module = maru.session.codex_hook_receipt;
+    const base = hookCacheBase(self.allocator) orelse return;
+    defer self.allocator.free(base);
+    const path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ base, module.dirname }) catch return;
+    defer self.allocator.free(path);
+    const dir = maru.agent_log_record.openPrivateDirectory(self.io, path) catch return;
+    defer dir.close(self.io);
+    if (module.scan(self.io, dir, screen, started, term.codex_receipt_issued, &compact)) |value|
+        applyCodexHookReceipt(self, term, value);
+}
+
+pub fn applyCodexHookReceipt(self: *AppSession, term: *Term, value: maru.session.codex_hook_receipt.Receipt) void {
+    if (term.agent_kind != .codex or term.agent_kind_from_hook or isRemoteAgentPane(term) or app_session_mod.termCwdIsRemote(term) or
+        term.rt.ended_placeholder or value.issued < term.codex_receipt_issued) return;
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |other| {
+        if (other != term and other.agent_kind == .codex and !other.agent_kind_from_hook and !isRemoteAgentPane(other) and
+            other.codex_receipt_issued >= value.issued and other.hook.transcript.identity_provider == .codex and
+            std.mem.eql(u8, other.hook.transcript.identity(), value.session)) return;
+    };
+    const cache = &term.hook.transcript;
+    const owner = self.codex_daemon_bindings.lookup(value.session);
+    if (owner) |id| if (id != term.surfaceId()) {
+        if (term_ops.termBySurfaceId(self, id)) |previous| {
+            // A copied, already-consumed screen marker cannot transfer ownership.
+            if (previous.codex_receipt_issued >= value.issued) return;
+        }
+    };
+    const changed = cache.identity_provider != .codex or !std.mem.eql(u8, cache.identity(), value.session);
+    if (changed) {
+        cache.reset();
+        cache.setProviderIdentity(.codex, value.session);
+    }
+    // A session resumed in another terminal must lose its old cached claim too;
+    // otherwise duplicate-identity protection would reject the verified owner.
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |other| {
+        if (other == term or other.agent_kind != .codex or isRemoteAgentPane(other) or other.agent_kind_from_hook or
+            app_session_mod.termCwdIsRemote(other)) continue;
+        if ((other.hook.transcript.identity_provider == .codex and std.mem.eql(u8, other.hook.transcript.identity(), value.session)) or
+            (other.rt.saved_resume_provider == .codex and std.mem.eql(u8, other.rt.saved_resume_id_buf[0..other.rt.saved_resume_id_len], value.session)))
+        {
+            other.hook.transcript.reset();
+            other.hook.transcript.setIdentity("");
+            rememberSavedResume(other, null);
+        }
+    };
+    term.codex_receipt_issued = value.issued;
+    // This also restores the binding if SessionStart was read after the screen.
+    self.codex_daemon_bindings.bind(value.session, term.surfaceId());
+    if (changed or owner == null or owner.? != term.surfaceId()) {
+        self.workspaceChanged(.agent_session);
+        self.metal_dirty = true;
+    }
 }
 
 /// 훅이 이 pane 의 로그를 **한 번이라도 썼는지** 본다(계약 §1.2의 유일한 동적 입력).
@@ -2767,22 +2886,37 @@ pub const HookRoute = enum {
 /// 물려받은 값이라, 여기서 `adoptHookSessionIdentity` 로 흘리면 남의 세션이 이 pane 에 붙는다(2026-10-04 실측).
 pub fn routeHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) HookRoute {
     const attr = maru.session.codex_daemon_attribution;
-    if (!attr.isDaemonEvent(ev.provider, hookParentIsDaemon(self, ev))) return .here;
+    const parent_is_daemon = hookParentIsDaemon(self, ev) orelse return .dropped;
+    if (!attr.isDaemonEvent(ev.provider, parent_is_daemon)) return .here;
 
     var sid_buf: [attr.Bindings.max_session_bytes + 1]u8 = undefined;
     const sid = maru.session.agent_hook_event.decodeInto(&sid_buf, ev.session_id);
-    if (sid.len == 0 or sid.len > attr.Bindings.max_session_bytes) return .dropped;
+    if (sid.len > attr.Bindings.max_session_bytes or !agent_session_archive.isResumableSessionId(sid)) return .dropped;
+    const recovery_was_allowed = self.codex_daemon_bindings.canRecoverIdentity(sid);
 
     // ⑴ codex 가 도는 로컬 Term 전부(`any_cwd`). 자격은 순수 층이 정한다(`eligible` — 원격 pane 은 아니다). 필드 읽기뿐이라
     // 이벤트마다 모아도 싸다 — 묶음이 살아 있는지도 이 목록으로 본다.
     var any_cwd: [16]attr.Candidate = undefined;
     var any_count: usize = 0;
+    var candidates_complete = true;
     collect: for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |t| {
-                if (any_count == any_cwd.len) break :collect;
-                if (!attr.eligible(.{ .terminal = t.kind == .terminal, .codex = t.agent_kind == .codex, .remote = isRemoteAgentPane(t) })) continue;
-                any_cwd[any_count] = .{ .id = t.surfaceId() };
+                if (!attr.eligible(.{ .terminal = t.kind == .terminal and !t.rt.ended_placeholder, .codex = t.agent_kind == .codex, .remote = isRemoteAgentPane(t) or t.agent_kind_from_hook or app_session_mod.termCwdIsRemote(t) })) continue;
+                if (any_count == any_cwd.len) {
+                    candidates_complete = false;
+                    break :collect;
+                }
+                const cache = &t.hook.transcript;
+                const live_matches = cache.identity_provider == .codex and std.mem.eql(u8, cache.identity(), sid);
+                const saved_matches = cache.identity().len == 0 and t.rt.saved_resume_provider == .codex and
+                    std.mem.eql(u8, t.rt.saved_resume_id_buf[0..t.rt.saved_resume_id_len], sid);
+                any_cwd[any_count] = .{
+                    .id = t.surfaceId(),
+                    // A new SessionStart may move the conversation to another terminal. Do not
+                    // resurrect the previous owner's binding; later events can use exact identity.
+                    .owns_session = !attr.sessionRestarted(ev.kind == .session_start, ev.source) and (live_matches or saved_matches),
+                };
                 any_count += 1;
             }
         }
@@ -2791,6 +2925,9 @@ pub fn routeHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hoo
     // ⑵ 이미 묶인 세션 — 묶인 Term 이 아직 그 목록에 있고 세션이 다시 시작된 것이 아닐 때만(`Bindings.resolve`). 턴 도중
     // 자동 압축의 `SessionStart`(source=compact)는 다시 시작이 아니다(`sessionRestarted`).
     const bound = self.codex_daemon_bindings.resolve(sid, attr.sessionRestarted(ev.kind == .session_start, ev.source), any_cwd[0..any_count]);
+    if (!self.codex_daemon_bindings.canRecoverIdentity(sid)) {
+        for (any_cwd[0..any_count]) |*candidate| candidate.owns_session = false;
+    }
 
     // ⑶ 같은 cwd 후보. 어느 목록을 쓸지는 순수 층이 정한다(같은 cwd 가 비면 cwd 무관 — `codex -C <dir>`). 묶인 세션이면
     // 모을 필요가 없다 — cwd 조회는 Term 관측을 새로 고치므로 이벤트마다 하지 않는다.
@@ -2833,6 +2970,7 @@ pub fn routeHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hoo
     }
 
     const decision = attr.decide(.{
+        .candidates_complete = candidates_complete,
         .bound = bound,
         .candidates = candidates[0..count],
         .any_cwd = any_cwd[0..any_count],
@@ -2841,6 +2979,8 @@ pub fn routeHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hoo
     });
     switch (decision) {
         .drop => |reason| {
+            if (reason == .identity_not_unique or reason == .candidate_overflow) self.codex_daemon_bindings.invalidate(sid);
+            if (recovery_was_allowed and !self.codex_daemon_bindings.canRecoverIdentity(sid)) self.workspaceChanged(.agent_session);
             noteDaemonDrop(self, sid, reason);
             return .dropped;
         },
@@ -2857,13 +2997,13 @@ pub fn routeHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hoo
 /// 훅을 띄운 프로세스(`maru_hook_ppid`)가 codex 공유 데몬인가. argv 읽기(sysctl)는 프로세스마다 한 번이다 — 판정을
 /// (pid, 시작 시각)으로 기억한다(`ParentVerdicts` — pid 만이면 재사용된 pid 에 옛 판정이 붙는다). 칸이 없는 옛 줄·이미
 /// 사라진 pid 는 «아니다»(= 예전 규칙)로 접는다.
-fn hookParentIsDaemon(self: *AppSession, ev: maru.session.agent_hook_event.Event) bool {
+fn hookParentIsDaemon(self: *AppSession, ev: maru.session.agent_hook_event.Event) ?bool {
     const attr = maru.session.codex_daemon_attribution;
     if (ev.hook_ppid == 0 or !std.mem.eql(u8, ev.provider, attr.daemon_provider)) return false;
-    const pid = std.math.cast(i32, ev.hook_ppid) orelse return false;
-    const started = maru.pty.PtySession.processStartMicros(pid) orelse return false;
+    const pid = std.math.cast(i32, ev.hook_ppid) orelse return null;
+    const started = maru.pty.PtySession.processStartMicros(pid) orelse return null;
     if (self.codex_daemon_parents.lookup(ev.hook_ppid, started)) |known| return known;
-    const verdict = maru.pty.PtySession.judgeProcessArgs(pid, &attr.isManagedDaemonArgs) orelse return false;
+    const verdict = maru.pty.PtySession.judgeProcessArgs(pid, &attr.isManagedDaemonArgs) orelse return null;
     self.codex_daemon_parents.remember(ev.hook_ppid, started, verdict);
     return verdict;
 }
@@ -3367,7 +3507,35 @@ fn strongerState(a: maru.session.agent_observer.State, b: maru.session.agent_obs
 /// 화면 관측)은 그대로 `term` 에서 읽는다.
 fn applyHookEventTo(self: *AppSession, term: *Term, slot: *HookSlot, ev: maru.session.agent_hook_event.Event) Applied {
     const mode_mod = maru.session.agent_hook_mode;
+    // Local process observation names the provider. A delayed hook from the previous
+    // provider must not replace its identity, conversation, progress, or image source.
+    if (!isRemoteAgentPane(term) and !term.agent_kind_from_hook and ev.provider.len > 0) {
+        const expected = switch (term.agent_kind) {
+            .claude => "claude",
+            .codex => "codex",
+            .none => "",
+        };
+        if (expected.len > 0 and !std.mem.eql(u8, expected, ev.provider)) return .{};
+    }
     if (mode_mod.ignoresEvent(&slot.progress, ev)) return .{};
+    if (ev.session_id.len > 0) {
+        var identity_buf: [maru.session.agent_transcript.max_identity_bytes + 1]u8 = undefined;
+        const identity = maru.session.agent_hook_event.decodeInto(&identity_buf, ev.session_id);
+        if (identity.len > maru.session.agent_transcript.max_identity_bytes or
+            !agent_session_archive.isResumableSessionId(identity)) return .{};
+        // A verified non-daemon hook is fresh per-terminal evidence, even if the
+        // bounded shared-daemon restart history has disabled cache-only recovery.
+        if (std.mem.eql(u8, ev.provider, "codex") and ev.hook_ppid != 0 and
+            !isRemoteAgentPane(term) and !term.agent_kind_from_hook and
+            mode_mod.carriesSessionIdentity(ev) and hookParentIsDaemon(self, ev) == false)
+        {
+            const owner = self.codex_daemon_bindings.lookup(identity);
+            if (owner == null or owner.? != term.surfaceId()) {
+                self.codex_daemon_bindings.bind(identity, term.surfaceId());
+                self.workspaceChanged(.agent_session);
+            }
+        }
+    }
     // A terminal event from a different session cannot close the currently open lead.
     if (slot.progress.turn_open and slot.transcript.identity().len != 0 and ev.agent_id.len == 0 and
         ev.session_id.len != 0 and (ev.kind == .stop or ev.kind == .stop_failure or ev.kind == .interrupt))
@@ -3387,9 +3555,12 @@ fn applyHookEventTo(self: *AppSession, term: *Term, slot: *HookSlot, ev: maru.se
     // 판정자: `app_session.zig` 「신원은 payload 가 정한다」 블록의 마지막 두 단언.
     var identity_before_buf: [maru.session.agent_transcript.max_identity_bytes]u8 = undefined;
     const identity_before_len = slot.transcript.identity().len;
+    const identity_provider_before = slot.transcript.identity_provider;
     @memcpy(identity_before_buf[0..identity_before_len], slot.transcript.identity());
     adoptHookSessionIdentity(self, slot, ev);
-    if (!std.mem.eql(u8, identity_before_buf[0..identity_before_len], slot.transcript.identity())) {
+    if (identity_provider_before != slot.transcript.identity_provider or
+        !std.mem.eql(u8, identity_before_buf[0..identity_before_len], slot.transcript.identity()))
+    {
         // Learning a previously unknown identity is not a session switch: keep its live children.
         slot.progress.adoptSession(ev);
         slot.notice.clear();

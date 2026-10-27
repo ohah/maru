@@ -14419,6 +14419,11 @@ fn runAgentHooks(
     var rest: std.ArrayList([]const u8) = .empty;
     defer rest.deinit(allocator);
     while (args.next()) |a| try rest.append(allocator, a);
+    if (rest.items.len == 2 and std.mem.eql(u8, rest.items[0], "codex-receipt")) {
+        if (builtin.os.tag == .macos or builtin.os.tag == .linux)
+            try maru.codex_hook_receipt.run(io, allocator, rest.items[1], stdout);
+        return;
+    }
     if (rest.items.len != 0 and std.mem.eql(u8, rest.items[0], "record")) {
         const record_args = rest.items[1..];
         if (record_args.len == 1 and (std.mem.eql(u8, record_args[0], "--help") or std.mem.eql(u8, record_args[0], "-h"))) {

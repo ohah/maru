@@ -242,6 +242,8 @@ pub fn Model(comptime Rt: type) type {
             /// 먼저 뜬 pane 의 파일에 모든 세션을 적으므로 나중 pane 의 파일은 영영 안 생긴다 — 이 값이 없으면 그 pane 은
             /// 재배정을 받아도 다음 tick 에 «파일 없음» 으로 관측 모드로 떨어진다. 에이전트가 떠나면(관측 모드) 내린다.
             agent_hook_routed: bool = false,
+            codex_receipt_issued: u64 = 0,
+            codex_launch_started_us: u64 = 0,
             /// 커서가 읽고 있는 파일의 inode. **회전을 크기만으로 판정하면 놓친다** — 같은 크기로 갈린
             /// 파일이 있으면 옛 오프셋으로 새 내용을 읽어 줄 가운데부터 파싱한다(`resetIfRotated` 계약).
             agent_hook_cursor_inode: u64 = 0,

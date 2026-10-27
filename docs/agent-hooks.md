@@ -1551,6 +1551,15 @@ env(`MARU_HOOK_INSTANCE`·`MARU_HOOK_PANE`)를 물려받는다. 그래서 나중
 | 같은 cwd 후보가 없음(`codex -C <dir>`) | cwd 무관하게 codex 가 도는 로컬 Term 으로 위 규칙을 그대로 — 하나면 그 Term |
 | codex 가 도는 로컬 Term 이 아예 없음 | 붙이지 않는다 |
 
+2026-10-27 보완: 후보를 모두 수집하지 못하면 `candidate_overflow`로 버린다. 같은 ID를 주장하는 후보가 둘이면
+기존 묶음이 있어도 `identity_not_unique`로 버리고 그 ID의 기존 귀속도 무효화한다. 메모리 묶음이 없을 때는
+provider가 Codex로 확인된 캐시 신원 또는 복원이 보류한 Codex ID를 대조해, 정확히 하나일 때 후속 이벤트를
+다시 묶는다. 단 `SessionStart`로 무효화된 이전 소유자 정보는 **이후 이벤트에서도** 재사용하지 않는다.
+새 cwd·유일한 프롬프트 또는 확인된 비데몬 로컬 훅으로 귀속을 다시 증명해야 한다. 무효화 기억이 상한을 넘어
+밀려나면 캐시만으로 복구하는 경로를 접고, 새로 증명된 묶음은 계속 쓴다. 귀속이 무효화되면 checkpoint도 갱신한다.
+훅 부모를 읽지 못한 경우는 비데몬으로 단정하지 않고 버린다. 자식 env 스캔은 공유 데몬의 subtree를 제외한다.
+원격 출처·원격 cwd·종료 placeholder는 로컬 후보가 아니며, 잘못된 ID의 이벤트는 대화·상태도 갱신하지 않는다.
+
 **한 Term 에는 세션 하나만 묶인다.** 새 세션을 묶으면 그 Term 에 묶여 있던 다른 세션은 풀린다(`/new`). 그래서 B 에서
 돌던 S 를 C 가 `codex resume S` 로 열어도 S 의 이벤트가 B 로 가지 않는다 — S 의 `SessionStart` 가 묶음도 버린다.
 
@@ -1560,11 +1569,11 @@ env(`MARU_HOOK_INSTANCE`·`MARU_HOOK_PANE`)를 물려받는다. 그래서 나중
 으로 훅 모드에 남고, 에이전트가 떠나면 그 표식과 묶음이 함께 풀린다. 원래 파일이 따라잡기(backlog) 중이면 재배정도
 따라잡기로 적용한다(알림·before 사본·턴 열림 시각을 «지금» 으로 찍지 않는다). 회전본 건지기도 같은 귀속을 지난다.
 
-**한계.**
+**기존 프롬프트 귀속 경로의 한계(아래의 검증된 receipt가 없는 경우).**
 
 - 같은 폴더의 두 pane 에 **같은 프롬프트**를 넣으면 가릴 수 없다. 짧은 프롬프트(「계속」·`/new`)도 마찬가지다.
-- 후보 목록은 **16 개**까지만 모은다. codex 가 도는 로컬 Term 이 16 개를 넘으면 목록 밖 Term 에 묶인 세션은 «떠난 Term»
-  으로 보여 묶음이 풀리고, 그 뒤 이벤트는 다시 판정된다(대개 버려진다).
+- 후보 목록은 **16 개**까지만 모은다. 로컬 Codex가 17개 이상이면 잘린 목록에서 유일성을 단정하지 않고
+  해당 이벤트를 `candidate_overflow`로 버린다. 화면 관측은 유지한다.
 - 화면 비교는 프롬프트 앞 **4096 B**(이스케이프를 푼 뒤, 공백을 뺀 값)와 각 후보 화면의 **마지막 48 행**만 본다. 긴
   프롬프트가 48 행을 넘게 접히거나 그 사이 출력에 밀려 올라가면 일치하지 않아 버려진다.
 - 첫 프롬프트 전의 이벤트(세션 시작)와 화면에 프롬프트가 안 보이는 이어 하기는, 같은 cwd 에 codex pane 이 여럿이면
@@ -1574,9 +1583,62 @@ env(`MARU_HOOK_INSTANCE`·`MARU_HOOK_PANE`)를 물려받는다. 그래서 나중
   관측 모드로 내려가 그 파일을 더는 안 읽는다) 다른 pane 들의 세션 이벤트가 아무도 안 읽는 파일로 간다. 데몬은 살아 있어
   새 codex 를 띄워도 그 파일에 계속 적힌다.
 - 원격(ssh) codex 는 아직 이 규칙을 안 탄다 — 원격 데몬도 첫 클라이언트의 `LC_MARU_PANE`·`TMUX_PANE` 을 물려받는다.
-- **정확한 해법은 둘뿐이다**: codex 가 훅에 클라이언트 신원을 실어 주거나(#48500 의 제안), 사용자가 `codex --no-daemon`
-  으로 pane 마다 따로 띄우는 것. 후자는 메모리를 더 쓰고 codex 의 백그라운드 기능이 그 세션을 못 본다(Orca #23900).
-  maru 는 데몬을 강제로 끄지 않는다.
+- 직접 귀속하려면 codex가 훅에 클라이언트 신원을 제공하거나(#48500의 제안), pane마다 `codex --no-daemon`으로
+  실행할 수 있다(Orca #23900). 별도로 훅의 `systemMessage`를 해당 TUI에서 읽는 경로도 아래 실험에서 확인했다.
+  Maru는 데몬을 강제로 끄지 않는다.
+
+### 2026-10-27 훅으로 세션 ID를 확보할 수 있는가
+
+`SessionStart`·`UserPromptSubmit` 훅은 이미 `session_id`를 전달한다. 이 기기의 기존 Maru 훅 설치와 trust 기록을
+확인했고, 별도 `CODEX_HOME`에 실제 Maru CLI로 훅을 설치한 뒤 생성된 셸 명령에 합성 이벤트를 넣어 검증했다.
+두 ID는 모두 보존되지만 같은 데몬 env를 주면 같은 pane 파일에 기록된다. env를 구분한 대조군은 다른 파일을
+만든다. 사용자 설정은 변경하지 않았다. 이 실험은 훅 설치·기록 경로의 검증이며, 실제 Codex TUI 두 개를
+재시작한 제품 E2E는 아니다. 재현: `zig build test-agent-hook-session-attribution`.
+
+[공식 훅 문서](https://learn.chatgpt.com/docs/hooks)는 ID·cwd를 정의하지만 현재 common input에는 클라이언트의
+터미널 식별자가 없다. 따라서 훅 설치만 추가하는 것은 공유 데몬의 귀속 문제를 해결하지 않는다.
+[공식 명령 문서](https://learn.chatgpt.com/docs/developer-commands)는 `/status`의 chat ID 확인과 `/statusline`의
+session ID 표시를 지원한다. 터미널 자체의 상태줄 ID를 훅 ID와 대조하는 방식은 보완 경로가 될 수 있지만,
+Maru의 상태줄 파서·자동 설정 변경은 이번 수정에 포함하지 않았다.
+
+추가로 설치된 Codex 0.164.0을 별도 `CODEX_HOME`과 공유 app-server, 두 PTY로 실행했다.
+`SessionStart` 훅이 반환한 `systemMessage`의 `MARU_HOOK_BIND:<session_id>`가 해당 TUI의 실제 출력에
+나타나는 것을 확인했다. 따라서 훅으로 받은 ID를 화면을 통해 터미널에 연결하는 경로는 가능하다.
+OSC 제어문자는 출력에서 제거되므로 보이지 않는 OSC 전달 방식은 동작하지 않았다. 클라이언트별
+`-c hooks.SessionStart` 및 `shell_environment_policy.set`도 이 버전에서 훅의 터미널별 환경을 분리하지 못했다.
+이제 설치된 Codex 훅은 `SessionStart`에서 `maru agent-hooks codex-receipt <registry>`를 호출한다.
+기존 pane env 선택보다 먼저 실행하므로 데몬을 처음 실행한 pane이 닫혀도 ID 전달이 가능하다.
+CLI는 UUID 형식의 ID를 검증하고 임의 128비트 토큰과 발급 시각을 0700 디렉터리의 0600 파일에 atomic write한 뒤,
+`systemMessage`로 반환한다. 사용자에게 `Maru session connected: MARU_SESSION_V1:...` 확인 메시지가 보인다.
+Maru는 해당 로컬 Codex의 최근 100행(최대 64KiB)에서 줄바꿈을 복원하고 비공개 registry의 최신 토큰과 대조한다.
+현재 TUI 프로세스보다 오래된 메시지, 변조된 토큰, 이전 발급 메시지는 거부한다. 검증한 ID로 provider와 terminal을
+함께 결속하고 workspace checkpoint를 갱신한다. 세션이 다른 terminal에서 새 receipt로 이어지면 이전 terminal의
+캐시·보류 resume ID를 비운다. 이미 소비한 receipt를 다른 terminal에 복사해도 소유권을 옮기지 않는다.
+이 토큰은 같은 UID의 악성 프로세스를 막는 보안 경계가 아니다.
+공유 데몬에 이미 살아 있는 thread를 다시 붙일 때는 Codex 0.164.0이 `SessionStart`를 다시 실행하지 않는 것도
+실제 세 번째 TUI로 확인했다. 이 경우는 로컬 TUI 자신의 `codex resume <UUID>` argv를 프로세스 시작 시각과 함께
+한 번만 읽어 결속한다. 데몬의 argv/env가 아니며 `--last`나 알 수 없는 옵션 문법은 추측하지 않는다.
+후속 `/new`의 새 receipt가 이 증거를 대체하며 이전 launch argv를 다시 읽어 ID를 되돌리지 않는다.
+
+### 훅 연결 구현 후 적대적 검증 3회
+
+1. 실제 Codex 0.164.0 두 TUI를 하나의 별도 app-server에 동시에 연결했다. 동일 cwd·동일 `계속` 프롬프트·
+   동일 상속 pane env에서도 각 PTY가 서로 다른 세션 ID와 registry와 일치하는 receipt를 받았다.
+   모델 provider는 localhost:9이며 유료 API를 사용하지 않고 사용자 Codex 설정·공유 데몬을 변경하지 않았다.
+2. `SessionStart`의 resume에서는 새 토큰이 이전 토큰을 대체하는지 확인했다. 실제 cached rejoin에는 훅이
+   재실행되지 않아, 해당 TUI의 명시적 resume UUID를 읽는 보완 경로와 커널 argv 추출 테스트를 추가했다. 앱 판정에서는 ID 이동 후 이전 terminal의
+   캐시가 남는 결함을 발견해 ID와 보류 resume 정보를 함께 지웠다. 늦게 읽힌 `SessionStart` 뒤에는 동일한 유효
+   receipt로 결속을 복구한다. 복사된 동일 receipt는 결속이 무효화된 사이에도 다른 terminal로 이전하지 않는다.
+3. 위조·잘린 토큰, 경로 삽입 ID, 잘못된 이벤트, registry symlink, 이전 프로세스 메시지, 좁은 화면의 줄바꿈,
+   새 세션 뒤 지연된 옛 receipt를 거부하는지 검사했다. receipt가 없는 관측 모드에서 매번 결속을 지우는 문제도
+   수정해 검증된 결속은 로컬 Codex가 유지되는 동안 보존한다.
+
+재현: `zig build test-codex-hook-receipt test-agent-resume-identity test-codex-daemon-attribution
+ test-agent-hook-session-attribution`; 실제 두 TUI 검증: `python3 tools/test-codex-hook-receipt.py zig-out/bin/maru --live`.
+기존 실행의 훅 명령이 메모리에 남아 있다면 새 `SessionStart`에서 갱신된 훅이 실행되어야 한다. 새 TUI에서
+아직 세션 자체가 생성되지 않은 첫 입력 전에는 저장할 ID가 없다. receipt가 관측 전에 100행 밖으로 밀렸거나
+훅을 껐거나 원격 Codex라면 이 연결을 확정하지 않으며 기존 보수적 귀속 경로가 적용된다.
+
 
 ## 5. 설치와 제거
 

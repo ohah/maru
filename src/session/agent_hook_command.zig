@@ -549,7 +549,27 @@ pub fn buildInstalled(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
     defer allocator.free(native_local);
     const native_remote = (try log_profile.dirAlloc(allocator, home, .remote, .v2)) orelse return error.InvalidLogDirectory;
     defer allocator.free(native_remote);
-    try buildTransition(out, allocator, provider, local_dir, remote_dir, .{ .local = native_local, .remote = native_remote }, executable);
+    // Keep legacy golden commands stable; only installed Codex hooks emit receipts.
+    var command: std.ArrayListUnmanaged(u8) = .empty;
+    defer command.deinit(allocator);
+    try buildTransition(&command, allocator, provider, local_dir, remote_dir, .{ .local = native_local, .remote = native_remote }, executable);
+    if (!std.mem.eql(u8, provider, "codex")) {
+        try out.appendSlice(allocator, command.items);
+        return;
+    }
+    const after_read = "IFS= read -r mh_p || :; while IFS= read -r mh_x; do :; done; ";
+    const at = (std.mem.indexOf(u8, command.items, after_read) orelse unreachable) + after_read.len;
+    try out.appendSlice(allocator, command.items[0..at]);
+    const base = (try hookCacheBaseAlloc(allocator, home)) orelse return error.InvalidLogDirectory;
+    defer allocator.free(base);
+    const registry = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ base, @import("codex_hook_receipt.zig").dirname });
+    defer allocator.free(registry);
+    try out.appendSlice(allocator, "case \"$mh_p\" in *'\"SessionStart\"'*) printf '%s\\n' \"$mh_p\" | ");
+    try appendQuoted(out, allocator, executable);
+    try out.appendSlice(allocator, " agent-hooks codex-receipt ");
+    try appendQuoted(out, allocator, registry);
+    try out.appendSlice(allocator, " 2>/dev/null || : ;; esac; ");
+    try out.appendSlice(allocator, command.items[at..]);
 }
 
 fn appendTransitionRoot(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, legacy: []const u8, native: []const u8, env: []const u8) !void {

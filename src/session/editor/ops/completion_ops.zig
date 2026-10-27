@@ -146,6 +146,7 @@ pub const PendingContext = struct {
     surface: u64,
     document: usize,
     revision: u64,
+    target_epoch: u64,
     primary: Selection,
     extras: []const Selection,
 };
@@ -162,7 +163,7 @@ pub fn pendingDecision(p: PendingCompletion, current: ?PendingContext, now_ms: u
     const c = current orelse return .cancel;
     const old = p.context;
     if (now_ms < p.started_ms or now_ms - p.started_ms >= pending_timeout_ms) return .cancel;
-    if (c.surface != old.surface or c.document != old.document or c.revision != old.revision or
+    if (c.surface != old.surface or c.document != old.document or c.revision != old.revision or c.target_epoch != old.target_epoch or
         !std.meta.eql(c.primary, old.primary) or c.extras.len != old.extras.len) return .cancel;
     for (c.extras, old.extras) |a, b| if (!std.meta.eql(a, b)) return .cancel;
     return if (response) .apply else .wait;
@@ -170,7 +171,7 @@ pub fn pendingDecision(p: PendingCompletion, current: ?PendingContext, now_ms: u
 
 test "CPLpending resolve atomic commit — normal, old timeout and deadline boundaries" {
     const t = std.testing;
-    const c: PendingContext = .{ .surface = 7, .document = 11, .revision = 2, .primary = Selection.at(10), .extras = &.{} };
+    const c: PendingContext = .{ .surface = 7, .document = 11, .revision = 2, .target_epoch = 1, .primary = Selection.at(10), .extras = &.{} };
     const p: PendingCompletion = .{ .context = c, .started_ms = 100 };
     for ([_]u64{ 100, 399, 400, 401, 2600, 5099 }) |now| {
         try t.expectEqual(PendingDecision.wait, pendingDecision(p, c, now, false));
@@ -184,11 +185,11 @@ test "CPLpending resolve atomic commit — normal, old timeout and deadline boun
 
 test "CPLpending rejects changed document and every selection field" {
     const t = std.testing;
-    const c: PendingContext = .{ .surface = 7, .document = 11, .revision = 2, .primary = Selection.at(10), .extras = &.{Selection.at(3)} };
+    const c: PendingContext = .{ .surface = 7, .document = 11, .revision = 2, .target_epoch = 1, .primary = Selection.at(10), .extras = &.{Selection.at(3)} };
     const p: PendingCompletion = .{ .context = c, .started_ms = 100 };
     try t.expectEqual(PendingDecision.cancel, pendingDecision(p, null, 101, true));
     // These are distinct invalidation paths, rather than repeated time trials.
-    for (0..20) |i| {
+    for (0..21) |i| {
         var changed = c;
         var extra = [_]Selection{Selection.at(3)};
         switch (i) {
@@ -230,6 +231,7 @@ test "CPLpending rejects changed document and every selection field" {
             17 => changed.revision = 0,
             18 => changed.document = 0,
             19 => changed.surface = 0,
+            20 => changed.target_epoch += 1,
             else => unreachable,
         }
         try t.expectEqual(PendingDecision.cancel, pendingDecision(p, changed, 101, true));

@@ -925,6 +925,7 @@ pub fn resolvedItemValid(result: ?std.json.Value) bool {
 }
 
 test "CPLpending malformed resolve cannot release a pending Enter" {
+    try std.testing.expect(!resolvedItemValid(null));
     for ([_][]const u8{ "null", "[]", "{}", "{\"label\":1}", "{\"label\":\"x\",\"additionalTextEdits\":42}" }) |input| {
         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, input, .{});
         defer parsed.deinit();

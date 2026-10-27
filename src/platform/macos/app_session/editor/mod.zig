@@ -25772,7 +25772,7 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
     try testing.expect(insertText(s, term, "a"));
     try testing.expectEqual(sent_wait, s.editor_lsp.sent_completions);
     try testing.expect(s.editor_completion.dirty);
-    completion_client.onResponse(s, 55, null, .utf8);
+    completion_client.onResponse(s, lsp_client.readyClientFor(s, term) orelse return error.NoReadyClient, 55, null);
     try testing.expectEqual(sent_wait + 1, s.editor_lsp.sent_completions);
     try testing.expect(s.editor_completion.waiting and !s.editor_completion.dirty);
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
@@ -25849,7 +25849,7 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
     // ⑽ 낡은 seq 는 버린다.
     s.editor_completion.waiting = true;
     s.editor_completion.waiting_seq = 99;
-    completion_client.onResponse(s, 98, null, .utf8);
+    completion_client.onResponse(s, lsp_client.readyClientFor(s, term) orelse return error.NoReadyClient, 98, null);
     try testing.expect(s.editor_completion.waiting and !s.editor_completion.active);
     s.editor_completion.waiting = false;
 }
@@ -26786,7 +26786,7 @@ test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(add
     // ⑸ 낡은 resolve seq 는 버린다.
     s.editor_completion.resolve_waiting = true;
     s.editor_completion.resolve_seq = 77;
-    completion_client.onResolveResponse(s, 76, null, .utf8);
+    completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, term) orelse return error.NoReadyClient, 76, null);
     try testing.expect(s.editor_completion.resolve_waiting);
     s.editor_completion.resolve_waiting = false;
 }
@@ -26964,11 +26964,11 @@ test "RLC1 definition null notice acknowledgement unblocks real completion state
     const def = @import("definition.zig");
     const comp = @import("completion.zig");
     const a = testing.allocator;
-    var fx = try PaneFixture.init(a);
-    defer fx.deinit(a);
-    const s = fx.session;
-    const t = fx.term;
-    s.loaded_config.config.lsp.enabled = false;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(a) };
+    defer h.deinit(a);
+    try h.init(a, helper_doc);
+    const s = h.fx.session;
+    const t = h.term;
     s.surface_initialized = true;
     s.backing_width_px = 1200;
     s.backing_height_px = 800;
@@ -26999,7 +26999,11 @@ test "RLC1 definition null notice acknowledgement unblocks real completion state
     s.editor_completion.waiting_seq = 8;
     s.editor_completion.waiting_surface = t.surface.id;
     s.editor_completion.asked_word_start = caret - "probe_resul".len;
-    comp.onResponse(s, 8, parsed.value, .utf8);
+    const owner = lsp_client.readyClientFor(s, t) orelse return error.NoReadyClient;
+    // This judge isolates notice acknowledgement and the list response; resolve
+    // lifecycle is covered by CMPAT with a resolve-capable server.
+    owner.completion_triggers.resolve = false;
+    comp.onResponse(s, owner, 8, parsed.value);
     const leaf = activeLeafRectForTest(s) orelse return error.NoRealLspGeometry;
     var frame = appendPaneFrame(s, leaf, t) orelse return error.RealLspDidNotDraw;
     frame.dl.deinit(a);
@@ -74206,11 +74210,110 @@ test "trust picker IME host external trust decisions do not replace the opening 
     try testing.expectEqualStrings("한", fx.session.chrome_host.trust_picker.input.preedit.items);
     try testing.expectEqual(@as(usize, 50), fx.session.editor_trust_list.shown.items.len);
 }
+test "CMPATORIGIN resolve from another primary client cannot commit an equal seq" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(testing.allocator) };
+    defer h.deinit(testing.allocator);
+    try h.init(testing.allocator, pending_doc ++ "// RESOLVESTALL\n");
+    const s = h.fx.session;
+    try pendingAcceptFixture(&h);
+    const owner = lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient;
+    // Borrowed descriptor models a response on a different primary connection;
+    // no process or owned storage is created or destroyed by this descriptor.
+    var foreign = owner.*;
+    foreign.root = @constCast("other-workspace");
+    const before = try testing.allocator.dupe(u8, h.content());
+    defer testing.allocator.free(before);
+    const undo_before = h.term.rt.editorDocument().history.undo_len;
+    const seq = s.editor_completion.resolve_seq;
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"label\":\"lazy_import\",\"additionalTextEdits\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"newText\":\"#include \\\"lazy.h\\\"\\n\"}]}", .{});
+    defer parsed.deinit();
+    completion_client.onResolveResponse(s, &foreign, seq, parsed.value);
+    try testing.expectEqualStrings(before, h.content());
+    try testing.expect(s.editor_completion.pending_accept and s.editor_completion.resolve_waiting);
+    try testing.expectEqual(undo_before, h.term.rt.editorDocument().history.undo_len);
+    completion_client.onResolveResponse(s, owner, seq, parsed.value);
+    try testing.expect(std.mem.startsWith(u8, h.content(), "#include \"lazy.h\"\n"));
+    try testing.expectEqual(undo_before + 1, h.term.rt.editorDocument().history.undo_len);
+    s.dispatchAppAction(.editor_undo);
+    try testing.expectEqualStrings(before, h.content());
+}
+
+test "CMPATORIGIN completion from another primary client cannot clear an equal seq" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(testing.allocator) };
+    defer h.deinit(testing.allocator);
+    try h.init(testing.allocator, pending_doc);
+    const s = h.fx.session;
+    const owner = lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient;
+    var foreign = owner.*;
+    foreign.root = @constCast("other-workspace");
+    completion_client.hide(s);
+    s.editor_completion.waiting = true;
+    s.editor_completion.waiting_seq = 77;
+    s.editor_completion.waiting_surface = h.term.surface.id;
+    completion_client.onResponse(s, &foreign, 77, null);
+    try testing.expect(s.editor_completion.waiting);
+    completion_client.onResponse(s, owner, 77, null);
+    try testing.expect(!s.editor_completion.waiting);
+}
+
+test "CMPATSEND failed prefetch stays unresolved and Enter retries or cancels without editing" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for (0..2) |retry_fails| {
+        var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+        defer h.deinit(allocator);
+        try h.init(allocator, pending_doc ++ "// RESOLVESTALL\n");
+        const s = h.fx.session;
+        try pendingAcceptFixture(&h);
+        const before = try allocator.dupe(u8, h.content());
+        defer allocator.free(before);
+        const undo_before = h.term.rt.editorDocument().history.undo_len;
+        const st = &s.editor_completion;
+        st.pending_accept = false;
+        st.pending_item = null;
+        st.pending_snapshot = null;
+        st.resolve_waiting = false;
+        const chosen_row = s.chrome_host.suggest_box.selected;
+        try testing.expectEqual(st.order.items.len - 1, chosen_row);
+        s.chrome_host.suggest_box.selected = (chosen_row + st.order.items.len - 1) % st.order.items.len;
+        {
+            var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+            s.allocator = failing.allocator();
+            defer s.allocator = allocator;
+            try testing.expect(completion_client.handleKey(s, .arrow_down, .{}));
+            try testing.expect(failing.has_induced_failure);
+        }
+        if (retry_fails == 1) {
+            var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+            s.allocator = failing.allocator();
+            defer s.allocator = allocator;
+            try testing.expect(completion_client.handleKey(s, .enter, .{}));
+            try testing.expect(failing.has_induced_failure);
+        } else try testing.expect(completion_client.handleKey(s, .enter, .{}));
+        try testing.expectEqualStrings(before, h.content());
+        try testing.expectEqual(undo_before, h.term.rt.editorDocument().history.undo_len);
+        if (retry_fails == 1) {
+            try testing.expect(!st.active and !st.pending_accept);
+        } else {
+            try testing.expect(st.pending_accept);
+            var parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"label\":\"lazy_import\",\"additionalTextEdits\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"newText\":\"#include \\\"lazy.h\\\"\\n\"}]}", .{});
+            defer parsed.deinit();
+            completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient, st.resolve_seq, parsed.value);
+            try testing.expect(std.mem.startsWith(u8, h.content(), "#include \"lazy.h\"\n"));
+            try testing.expectEqual(undo_before + 1, h.term.rt.editorDocument().history.undo_len);
+            s.dispatchAppAction(.editor_undo);
+            try testing.expectEqualStrings(before, h.content());
+        }
+    }
+}
+
 test "CMPAT resolve commit preserves input across late, stale, error and cancellation paths" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     const response = "{\"label\":\"lazy_import\",\"additionalTextEdits\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"newText\":\"#include \\\"lazy.h\\\"\\n\"}]}";
-    for (0..19) |attack| {
+    for (0..20) |attack| {
         var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
         defer h.deinit(allocator);
         try h.init(allocator, pending_doc ++ "// RESOLVESTALL\n");
@@ -74230,7 +74333,7 @@ test "CMPAT resolve commit preserves input across late, stale, error and cancell
                 try testing.expectEqualStrings(before, h.content());
             },
             1 => { // Another request must neither apply nor cancel this transaction.
-                completion_client.onResolveResponse(s, seq + 1, parsed.value, .utf8);
+                completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient, seq + 1, parsed.value);
                 try testing.expect(s.editor_completion.pending_accept);
             },
             2 => { // Repeated Enter cannot move the deadline or insert a second edit.
@@ -74254,7 +74357,7 @@ test "CMPAT resolve commit preserves input across late, stale, error and cancell
                 h.term.rt.editor_selection.?.focus -= 1;
             },
             8 => {
-                completion_client.onResolveResponse(s, seq, null, .utf8);
+                completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient, seq, null);
             },
             9 => {
                 completion_client.hide(s);
@@ -74289,11 +74392,11 @@ test "CMPAT resolve commit preserves input across late, stale, error and cancell
                 var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
                 s.allocator = failing.allocator();
                 defer s.allocator = allocator;
-                completion_client.onResolveResponse(s, seq, parsed.value, .utf8);
+                completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient, seq, parsed.value);
                 try testing.expect(failing.has_induced_failure);
             },
             17 => {
-                completion_client.onResolveResponse(s, seq, parsed.value, .utf8);
+                completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient, seq, parsed.value);
             },
             18 => {
                 s.editor_completion.response_version = 0;
@@ -74301,9 +74404,12 @@ test "CMPAT resolve commit preserves input across late, stale, error and cancell
                 edit.object.getPtr("range").?.object.getPtr("start").?.object.getPtr("line").?.* = .{ .integer = 4 };
                 edit.object.getPtr("range").?.object.getPtr("end").?.object.getPtr("line").?.* = .{ .integer = 4 };
             },
+            19 => {
+                h.term.rt.editorDocument().invalidateSaveTarget();
+            },
             else => unreachable,
         }
-        completion_client.onResolveResponse(s, seq, parsed.value, .utf8);
+        completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient, seq, parsed.value);
         if (valid) {
             try testing.expect(std.mem.startsWith(u8, h.content(), "#include \"lazy.h\"\n"));
             try testing.expectEqual(undo_before + 1, h.term.rt.editorDocument().history.undo_len);

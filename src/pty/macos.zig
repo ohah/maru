@@ -1507,16 +1507,60 @@ const ResolvedTerm = struct { term: []const u8, terminfo_dir: ?[]const u8 };
 // 소스를 maru 자기 캐시(`~/.cache/maru/terminfo`)에 (없으면) 컴파일하고, xterm-maru가 해석되면
 // TERM=xterm-maru + TERMINFO=캐시로 쓴다 — 로컬 프로그램이 설치 없이 찾는다(비침습: ~/.terminfo 안 건드림).
 // tic이 없거나 컴파일 실패면 xterm-256color로 폴백 → 로컬이 절대 안 깨진다(Ghostty Exec.zig 동작 비교).
-// 프로세스 1회만 판정해 캐시한다(이후 spawn은 재사용 — 가벼운 race는 무해, 결과 동일). dir은 프로세스
+// 이후 spawn은 디스크의 항목이 남아 있을 때만 재사용한다. 캐시 정리 후에도 프로세스가 살아 있으면
+// 사라진 TERMINFO를 새 셸에 넘겨 zle 재표시가 깨질 수 있다. dir은 프로세스
 // 동안 모든 spawn이 env에 쓰므로 page_allocator로 의도적 leak(작은 문자열).
 var g_resolved_term: ?ResolvedTerm = null;
 
 fn resolveTerm(term: []const u8) ResolvedTerm {
     if (!std.mem.eql(u8, term, terminfo_cache.term_name)) return .{ .term = term, .terminfo_dir = null };
-    if (g_resolved_term) |r| return r;
+    if (g_resolved_term) |r| {
+        if (resolvedTerminfoReadable(r)) return r;
+    }
     const r = computeMaruTerminfo();
     g_resolved_term = r;
     return r;
+}
+
+fn resolvedTerminfoReadable(resolved: ResolvedTerm) bool {
+    const dir = resolved.terminfo_dir orelse return true; // Standard TERM fallback has no private cache.
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    // tic uses either hexadecimal or character subdirectories depending on ncurses.
+    for ([_][]const u8{ "78/xterm-maru", "x/xterm-maru" }) |entry| {
+        const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}", .{ dir, entry }, 0) catch return false;
+        if (std.c.access(path.ptr, std.posix.R_OK) == 0) return true;
+    }
+    return false;
+}
+
+test "cached terminfo is invalidated after its entry or directory disappears" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/terminfo", .{tmp.sub_path});
+    defer std.testing.allocator.free(dir);
+    const resolved = ResolvedTerm{ .term = "xterm-maru", .terminfo_dir = dir };
+    try std.testing.expect(!resolvedTerminfoReadable(resolved));
+    for ([_][]const u8{ "78", "x" }) |subdir| {
+        const entry = try std.fmt.allocPrint(std.testing.allocator, "terminfo/{s}/xterm-maru", .{subdir});
+        defer std.testing.allocator.free(entry);
+        try tmp.dir.createDirPath(std.testing.io, std.fs.path.dirname(entry).?);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = entry, .data = "compiled entry" });
+        try std.testing.expect(resolvedTerminfoReadable(resolved));
+        try tmp.dir.deleteFile(std.testing.io, entry);
+        try std.testing.expect(!resolvedTerminfoReadable(resolved));
+    }
+    try tmp.dir.deleteTree(std.testing.io, "terminfo");
+    try std.testing.expect(!resolvedTerminfoReadable(resolved));
+    const compile_command = try terminfo_cache.autoCompileCommand(std.testing.allocator, dir, terminfo_cache.version());
+    defer std.testing.allocator.free(compile_command);
+    try std.testing.expectEqual(@as(c_int, 0), macos_spawn.runShell(compile_command.ptr));
+    try std.testing.expect(resolvedTerminfoReadable(resolved));
+    try tmp.dir.deleteTree(std.testing.io, "terminfo");
+    try std.testing.expect(!resolvedTerminfoReadable(resolved));
+    try std.testing.expectEqual(@as(c_int, 0), macos_spawn.runShell(compile_command.ptr));
+    try std.testing.expect(resolvedTerminfoReadable(resolved));
+    try std.testing.expect(resolvedTerminfoReadable(.{ .term = "xterm-256color", .terminfo_dir = null }));
 }
 
 fn computeMaruTerminfo() ResolvedTerm {

@@ -1563,6 +1563,42 @@ test "EnvStorage cached terminfo is invalidated after its entry or directory dis
     try std.testing.expect(resolvedTerminfoReadable(.{ .term = "xterm-256color", .terminfo_dir = null }));
 }
 
+test "EnvStorage resolves a deleted process-cached entry before publishing the next shell environment" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/private terminfo 'cache'", .{tmp.sub_path});
+    defer std.testing.allocator.free(dir);
+    const previous = g_resolved_term;
+    defer g_resolved_term = previous;
+    // A retained process result must be revalidated, even when the directory still exists.
+    try tmp.dir.createDirPath(std.testing.io, "private terminfo 'cache'/78");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "private terminfo 'cache'/78/xterm-maru", .data = "cached" });
+    g_resolved_term = .{ .term = "xterm-maru", .terminfo_dir = dir };
+    try std.testing.expectEqualStrings(dir, resolveTerm("xterm-maru").terminfo_dir.?);
+    try tmp.dir.deleteFile(std.testing.io, "private terminfo 'cache'/78/xterm-maru");
+    var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-maru", null, null, null, null);
+    defer storage.deinit();
+    const resolved = g_resolved_term.?;
+    try std.testing.expect(resolvedTerminfoReadable(resolved));
+    if (resolved.terminfo_dir) |current| {
+        try std.testing.expect(!std.mem.eql(u8, dir, current));
+    } else {
+        try std.testing.expectEqualStrings("xterm-256color", resolved.term);
+    }
+    var term_seen = false;
+    for (storage.strings) |entry| {
+        if (std.mem.startsWith(u8, entry, "TERM=")) {
+            term_seen = true;
+            try std.testing.expectEqualStrings(resolved.term, entry[5..]);
+        }
+        if (std.mem.startsWith(u8, entry, "TERMINFO=")) {
+            try std.testing.expectEqualStrings(resolved.terminfo_dir orelse return error.TestUnexpectedResult, entry[9..]);
+        }
+    }
+    try std.testing.expect(term_seen);
+}
+
 fn computeMaruTerminfo() ResolvedTerm {
     const fallback = ResolvedTerm{ .term = "xterm-256color", .terminfo_dir = null };
     const page = std.heap.page_allocator;

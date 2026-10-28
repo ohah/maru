@@ -19,6 +19,7 @@ CASES=('hanja','korean','cancel','server-error','stale')
 SENTINEL=base.SENTINEL
 MAIN='int base(void) { return 41; }\nint baseline = 0;\n'
 OTHER='int consume(void) { return base(); }\n'
+PREFIX='/* 한😀 */ '
 LOCAL='// local change\n'
 BODY=MAIN.encode()
 
@@ -38,8 +39,11 @@ def validate_diagnostic(report,artifact_root=None):
         proxy=json.loads(regular(root/'proxy.json'))
         need(proxy.get('argv')==[server['path'],'--background-index','--log=verbose'],'clangd launch argv')
         need(not any(k.startswith('MARU_FAKE_') for k in proxy.get('server_environment',{})),'controlled environment in real case')
-    other_text=('int base(void);\n' if real else '')+OTHER
-    original=('// RENAMEFAIL\n' if scene=='server-error' else '')+MAIN
+    unicode_prefix=case.get('unicode_prefix',False)
+    need(type(unicode_prefix) is bool and (not unicode_prefix or real),'unicode prefix mode')
+    prefix=PREFIX if unicode_prefix else ''
+    other_text=(prefix+'int base(void);\n' if real else '')+prefix+OTHER
+    original=('// RENAMEFAIL\n' if scene=='server-error' else '')+prefix+MAIN
     need(case['scenario']==scene and case['main']==original and case['other']==other_text,'fixture')
     name='base한' if scene=='korean' else 'base韓';applied=scene in ('hanja','korean')
     rows=report['observations'];initial=rows[0];surface=initial['surface_id']
@@ -91,7 +95,7 @@ def validate_diagnostic(report,artifact_root=None):
     need(len(opens)==1 and opens[0]['uri']==main_uri and opens[0]['text']==original and type(opens[0]['version']) is int and opens[0]['version']==ready[0]['document_version'],'opened document/version')
     if requests:
         request=requests[0];need(type(request['id']) is int and request['params']['newName']==name and request['params']['textDocument']['uri']==main_uri,'rename request payload')
-        need(request['params']['position']==dict(line=1 if scene=='server-error' else 0,character=4),'rename position')
+        need(wire_oracle.offset(original,request['params']['position'],encoding)==original.encode().index(b'base'),'rename position')
         responses=[r['message'] for r in records if r['direction']=='server' and r['message'].get('id')==request['id']]
         need(len(responses)==1,'rename response')
         if scene=='server-error':need(isinstance(responses[0].get('error'),dict),'server error missing')
@@ -138,7 +142,7 @@ def validate_diagnostic(report,artifact_root=None):
         if scene=='stale':
             invalid=[r for r in rows if r['name']=='invalidated'];need(len(invalid)==1 and invalid[0]['document_version']>ready[0]['document_version'],'stale invalidation absent')
     need(regular(root/'project/main.c').decode()==original and regular(root/'project/other.c').decode()==other_text,'final disk')
-    return dict(passed=True,scenario=scene,rename_requests=len(requests),workspace_undo=applied,captures=captures,server=kind,server_scope='local clangd SDK' if real else 'controlled fixture, not SDK')
+    return dict(passed=True,scenario=scene,rename_requests=len(requests),workspace_undo=applied,captures=captures,server=kind,unicode_prefix=unicode_prefix,position_encoding=encoding,server_scope='local clangd SDK' if real else 'controlled fixture, not SDK')
 
 
 def validate(*args,**kwargs):raise ValueError('No shared live/OCR claim for this scene')

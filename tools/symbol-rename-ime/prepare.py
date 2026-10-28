@@ -28,7 +28,8 @@ def prepare(repo,snapshot):
     driver=once(driver,old,new)
     driver=once(driver,'    private var firstSaveCase:', '''    private var symbolBody: String {
         let body="int base(void) { return 41; }\\nint baseline = 0;\\n"
-        return firstSaveCase == "server-error" ? "// RENAMEFAIL\\n"+body : body
+        let prefix=ProcessInfo.processInfo.environment["MARU_SYMBOL_UNICODE"] == "1" ? "/* 한😀 */ " : ""
+        return firstSaveCase == "server-error" ? "// RENAMEFAIL\\n"+prefix+body : prefix+body
     }
     private var firstSaveCase:''')
     driver=once(driver,'"surface_id":paletteIMEWitness(34),','"surface_id":paletteIMEWitness(34), "rename_sent":paletteIMEWitness(40), "rename_done":paletteIMEWitness(41), "rename_error":paletteIMEWitness(42), "refused_stale":paletteIMEWitness(43), "document_version":paletteIMEWitness(45), "undo_len":paletteIMEWitness(46),')

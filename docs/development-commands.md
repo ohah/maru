@@ -2078,6 +2078,7 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 
 실제 서버는 같은 명령에 `--clangd /absolute/path/to/clangd`를 명시해 opt-in한다. 자동 설치 없이
 `hanja`·`korean`·`cancel`·`stale`를 지원하며 제어 서버 증거와 구분한다.
+같은 줄의 한글·이모지 앞 위치 검증은 `--unicode-prefix`를 더하며 새 prefix-aware 사본 앱을 사용한다.
 
 ### 파일 탐색기 이름 변경 IME GUI
 

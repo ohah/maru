@@ -11,6 +11,13 @@
 //!   swcdp-detach-close     탭 닫힘(`destroy_browser`)
 //!   swcdp-detach-crash     렌더러 죽음(`Page.crash`) — host 가 살아 있고(공격 2 A11), 새 문서에서 다시 건다(다시 살려 둔다)
 //! 켬 실패·등록 실패의 길은 실제 CEF 에서 낼 수 없어 순수 시험(`net_body_table` 의 `.detach_workers`)이 덮는다.
+//!
+//! 짝(S3a — W ↔ CEF 기록): host 진단 로그(`MARU_WEB_TEST_BODY_LOG` — `sw-wresp … xs=<워커가 받은 응답의 X-Served>`·`sw-pair … req=<기록>
+//! wrid=<워커 요청>`)와 판정자가 받은 그 기록의 응답 머리 `X-Served` 를 견준다(서버 셈이 참값 — 공격 3 M7).
+//!   swcdp-pair            그대로 넘김 60 동시(다른 주소)·같은 주소 둘씩 20 판·거꾸로 넘김(앞 요청을 100 ms 늦춤) 20 판·메모 + 갱신·fetch 뒤
+//!                         대체 + 페이지도 대체 주소 — 틀린 짝 0, 짝 수
+//!   swcdp-pair-scopes     같은 출처 두 범위 SW(페이지 SW1·iframe SW2)가 같은 주소를 0–9 ms 차로 80 번 — 다른 타깃이 섞이면 짝을 맺지 않는다
+//!                         (틀린 짝 0)
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -98,6 +105,22 @@ const swd_js = "fetch('/swd/boot?t='+Date.now(),{cache:'no-store'}).catch(functi
 const reg_js = "function reg(next){navigator.serviceWorker.register('/swd/sw.js',{scope:'/swd/'}).then(function(){return navigator.serviceWorker.ready}).then(function(){" ++
     "if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}next()})}";
 
+/// 짝 판정의 워커: x-who 로 꼴을 고른다.
+const swp_js = "self.addEventListener('install',function(){self.skipWaiting()});self.addEventListener('activate',function(e){e.waitUntil(clients.claim())});" ++
+    "var M={};function N(u,w){return fetch(u,{headers:{'x-who':w},cache:'no-store'})}" ++
+    "self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(u.pathname!='/swp/x')return;var w=e.request.headers.get('x-who')||'';" ++
+    "if(w=='rev'){e.respondWith(new Promise(function(r){setTimeout(function(){r(fetch(e.request))},100)}));return}" ++
+    "if(w=='m1'){e.respondWith(fetch(e.request).then(function(r){M[u.href]=r.clone();return r}));return}" ++
+    "if(w=='m2e'){var c=M[u.href];if(c){N(u.href,'X').catch(function(){});e.respondWith(c.clone());return}}" ++
+    "if(w=='f1'){e.respondWith(fetch(e.request).then(function(r){return r.text().then(function(){return N(u.href+'&fb=1','F')})}));return}" ++
+    "e.respondWith(fetch(e.request))});";
+/// 둘째 범위(`/swp/q/`)의 워커 — 같은 주소(`/swp/x`)를 제 이름으로 받는다.
+const swq_js = "self.addEventListener('install',function(){self.skipWaiting()});self.addEventListener('activate',function(e){e.waitUntil(clients.claim())});" ++
+    "self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(u.pathname=='/swp/q/go'){var r=u.searchParams.get('r');e.respondWith(fetch('/swp/x?k=same&r='+r,{headers:{'x-who':'S2'},cache:'no-store'}));return}});";
+const swp_page_js = "function W(u,w){return fetch(u,{headers:{'x-who':w},cache:'no-store'}).then(function(r){return r.text()}).catch(function(){})}" ++
+    "function S(ms){return new Promise(function(r){setTimeout(r,ms)})}" ++
+    "function reg(s,sc){return navigator.serviceWorker.register(s,{scope:sc}).then(function(){return navigator.serviceWorker.ready})}";
+
 fn serveOne(conn: c_int) void {
     defer _ = std.c.close(conn);
     var buf: [8192]u8 = undefined;
@@ -130,7 +153,24 @@ fn serveOne(conn: c_int) void {
     if (std.mem.eql(u8, path, "/swd/flood")) return reply(conn, html, "", "<!doctype html><title>fl</title><script>" ++
         "var t0=performance.now();var n=0;function burst(){for(var i=0;i<400;i++){fetch('data:application/json,'+(n++)).then(function(r){return r.text()}).catch(function(){})}" ++
         "if(performance.now()-t0<5000)setTimeout(burst,0);else document.title='fldone'}setTimeout(burst,200)</script>fl");
-    if (std.mem.eql(u8, path, "/swd/x")) {
+    if (std.mem.eql(u8, path, "/swp/sw.js")) return reply(conn, "text/javascript", "", swp_js);
+    if (std.mem.eql(u8, path, "/swp/q/sw2.js")) return reply(conn, "text/javascript", "", swq_js);
+    if (std.mem.eql(u8, path, "/swp/p")) return reply(conn, html, "", "<!doctype html><title>p</title><script>" ++ swp_page_js ++
+        "reg('/swp/sw.js','/swp/').then(async function(){if(!navigator.serviceWorker.controller){location.reload();return}" ++
+        "var B=[];for(var i=0;i<60;i++)B.push(W('/swp/x?k=b'+i,'pt'));await Promise.all(B);" ++
+        "for(var j=0;j<20;j++){await Promise.all([W('/swp/x?k=d'+j,'pt'),W('/swp/x?k=d'+j,'pt')]);await S(30)}" ++
+        "for(var j=0;j<20;j++){await Promise.all([W('/swp/x?k=r'+j,'rev'),S(20).then(function(){return W('/swp/x?k=r'+j,'pt')})]);await S(30)}" ++
+        "for(var j=0;j<10;j++){await W('/swp/x?k=m'+j,'m1');await S(100);await W('/swp/x?k=m'+j,'m2e');await S(50)}" ++
+        "for(var j=0;j<10;j++){await Promise.all([W('/swp/x?k=f'+j,'f1'),W('/swp/x?k=f'+j+'&fb=1','pt')]);await S(30)}" ++
+        "await S(1500);document.title='pdone'})</script>p");
+    // 두 범위: 페이지는 SW1(`/swp/`)이, iframe 은 SW2(`/swp/q/`)가 다스린다 — 같은 주소를 거의 함께.
+    if (std.mem.eql(u8, path, "/swp/o")) return reply(conn, html, "", "<!doctype html><title>o</title><script>" ++ swp_page_js ++
+        "reg('/swp/sw.js','/swp/').then(function(){return reg('/swp/q/sw2.js','/swp/q/')}).then(async function(){if(!navigator.serviceWorker.controller){location.reload();return}" ++
+        "var f=document.createElement('iframe');await new Promise(function(res){f.onload=res;f.src='/swp/q/i';document.body.appendChild(f)});await S(500);" ++
+        "for(var r=0;r<80;r++){var g=Math.floor(Math.random()*10);await Promise.all([W('/swp/x?k=same&r='+r,'pt'),S(g).then(function(rr){return function(){return f.contentWindow.fetch('/swp/q/go?r='+rr,{cache:'no-store'}).then(function(x){return x.text()}).catch(function(){})}}(r))]);await S(20)}" ++
+        "await S(1500);document.title='odone'})</script>o");
+    if (std.mem.eql(u8, path, "/swp/q/i")) return reply(conn, html, "", "<!doctype html><title>i</title>i");
+    if (std.mem.eql(u8, path, "/swp/x") or std.mem.eql(u8, path, "/swd/x")) {
         const n = counter.fetchAdd(1, .monotonic);
         var bb: [64]u8 = undefined;
         var eb: [64]u8 = undefined;
@@ -151,9 +191,23 @@ const Run = struct {
     titles: std.AutoHashMapUnmanaged(u64, []u8) = .empty,
     gone: std.AutoHashMapUnmanaged(u64, void) = .empty,
     closed: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    /// 기록 번호 → 그 응답의 X-Served(서버 셈 — 짝의 참값).
+    served: std.AutoHashMapUnmanaged(u64, u64) = .empty,
+    /// 기록 번호 → 서비스 워커 갈래인가.
+    sw_begin: std.AutoHashMapUnmanaged(u64, void) = .empty,
 
     fn take(self: *Run, m: msg.Message) void {
         switch (m) {
+            .net_begin => |v| if (v.flags.service_worker) {
+                self.sw_begin.put(self.gpa, v.request, {}) catch {};
+            },
+            .net_response => |v| {
+                var it = net_fields.HeaderIterator.init(v.headers);
+                while (it.next()) |hh| if (std.ascii.eqlIgnoreCase(hh.name, "x-served")) {
+                    const n = std.fmt.parseInt(u64, hh.value, 10) catch continue;
+                    self.served.put(self.gpa, v.request, n) catch {};
+                };
+            },
             .net_record_state => |v| {
                 self.states.put(self.gpa, v.browser, v.status) catch {};
                 self.state_log.append(self.gpa, .{ .browser = v.browser, .session = v.session, .status = v.status }) catch {};
@@ -275,11 +329,13 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     const flag_off = if (std.c.getenv("SWCDP_FLAG")) |v| std.mem.eql(u8, std.mem.span(v), "0") else false;
     env_buf[env_n] = if (flag_off) "MARU_WEB_SW_CDP=0" else "MARU_WEB_SW_CDP=1";
     env_n += 1;
-    if (std.c.getenv("MARU_WEB_TEST_BODY_LOG") != null) {
-        env_buf[env_n] = "MARU_WEB_TEST_BODY_LOG=1";
-        env_n += 1;
-    }
-    const stderr_path: ?[:0]const u8 = if (std.c.getenv("SWCDP_HOST_STDERR")) |p| std.mem.span(p) else null;
+    env_buf[env_n] = "MARU_WEB_TEST_BODY_LOG=1";
+    env_n += 1;
+    var sp_buf: [1100]u8 = undefined;
+    const stderr_path: ?[:0]const u8 = if (std.c.getenv("SWCDP_HOST_STDERR")) |p| std.mem.span(p) else blk: {
+        const eq = std.mem.indexOfScalar(u8, profile_arg, '=') orelse break :blk null;
+        break :blk std.fmt.bufPrintSentinel(&sp_buf, "{s}_host.log", .{profile_arg[eq + 1 ..]}, 0) catch null;
+    };
     var host = try Host.spawnWith(host_path, profile_arg, stderr_path, env_buf[0..env_n]);
     var host_alive = true;
     defer if (host_alive) {
@@ -292,6 +348,22 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     try openTab(&r, tab_b);
     var session: u32 = 10;
 
+    if (enabled("pair")) {
+        inline for (.{ .{ "pair", "/swp/p", "pdone" }, .{ "pair-scopes", "/swp/o", "odone" } }) |c| if (enabled(c[0])) {
+            session += 1;
+            const on = recordOn(&r, tab_a, session);
+            const log_at = logSize(stderr_path);
+            try r.navigate(tab_a, c[1]);
+            const done = r.pumpTitle(tab_a, c[2], 120_000);
+            r.pump(3000);
+            const p = pairCheck(&r, gpa, stderr_path, log_at);
+            report(on and done and p.log_ok and p.wrong == 0 and p.pairs > 0, "swcdp-" ++ c[0], std.fmt.bufPrint(&detail, "{s}: pairs {d} · correct {d} · WRONG {d} · W without X-Served {d} · record without X-Served {d} · service-worker records {d}{s}", .{ if (done) "done" else "NOT DONE", p.pairs, p.correct, p.wrong, p.no_w, p.no_rec, r.sw_begin.count(), if (p.log_ok) "" else " · NO HOST LOG (set SWCDP_HOST_STDERR and MARU_WEB_TEST_BODY_LOG=1)" }) catch "");
+            try r.host.send(.{ .net_record = .{ .browser = tab_a, .on = false, .session = 0 } });
+            r.pump(500);
+            try r.navigate(tab_a, "/blank");
+            r.pump(500);
+        };
+    }
     if (enabled("detach-control")) {
         session += 1;
         const armed = try armA(&r, session);
@@ -379,4 +451,77 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     host.send(.shutdown) catch {};
     host_alive = false;
     _ = host.wait(wait_ms);
+}
+
+fn logSize(path: ?[:0]const u8) usize {
+    const p = path orelse return 0;
+    const fd = std.c.open(p, .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
+    if (fd < 0) return 0;
+    defer _ = std.c.close(fd);
+    const end = std.c.lseek(fd, 0, std.c.SEEK.END);
+    return if (end < 0) 0 else @intCast(end);
+}
+
+const PairResult = struct { log_ok: bool = false, pairs: usize = 0, correct: usize = 0, wrong: usize = 0, no_w: usize = 0, no_rec: usize = 0 };
+
+fn field(line: []const u8, key: []const u8) ?[]const u8 {
+    const at = std.mem.indexOf(u8, line, key) orelse return null;
+    const rest = line[at + key.len ..];
+    const end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+    return rest[0..end];
+}
+
+/// host 로그의 `log_at` 뒤에서 짝 줄을 읽어 참값(기록의 X-Served == 그 W 가 받은 응답의 X-Served)과 견준다.
+fn pairCheck(r: *Run, gpa: std.mem.Allocator, path: ?[:0]const u8, log_at: usize) PairResult {
+    var res: PairResult = .{};
+    const p = path orelse return res;
+    const fd = std.c.open(p, .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
+    if (fd < 0) return res;
+    defer _ = std.c.close(fd);
+    var all: std.ArrayList(u8) = .empty;
+    defer all.deinit(gpa);
+    var buf: [65536]u8 = undefined;
+    _ = std.c.lseek(fd, @intCast(log_at), std.c.SEEK.SET);
+    while (true) {
+        const n = std.c.read(fd, &buf, buf.len);
+        if (n <= 0) break;
+        all.appendSlice(gpa, buf[0..@intCast(n)]) catch break;
+    }
+    res.log_ok = std.mem.indexOf(u8, all.items, "sw-") != null;
+    // 워커 요청(표 이름 `w<타깃>:<rid>`) → X-Served.
+    var wxs: std.StringHashMapUnmanaged(u64) = .empty;
+    defer wxs.deinit(gpa);
+    var it = std.mem.splitScalar(u8, all.items, '\n');
+    while (it.next()) |line| {
+        if (std.mem.indexOf(u8, line, "sw-wresp ") == null) continue;
+        const t = field(line, " t=") orelse continue;
+        const rid = field(line, " rid=") orelse continue;
+        const xs = field(line, " xs=") orelse continue;
+        const n = std.fmt.parseInt(u64, xs, 10) catch continue;
+        // 표 이름과 같은 꼴로(`w<타깃의 아래 32 비트>:<rid>` — 타깃은 epoch 를 더하지 않은 첫 판으로 본다).
+        const tv = std.fmt.parseInt(u64, t, 16) catch continue;
+        var kb: [96]u8 = undefined;
+        const key = std.fmt.bufPrint(&kb, "w{x}:{s}", .{ @as(u32, @truncate(tv)), rid }) catch continue;
+        wxs.put(gpa, gpa.dupe(u8, key) catch continue, n) catch {};
+    }
+    var it2 = std.mem.splitScalar(u8, all.items, '\n');
+    while (it2.next()) |line| {
+        if (std.mem.indexOf(u8, line, "sw-pair ") == null) continue;
+        const req_s = field(line, " req=") orelse continue;
+        const wrid = field(line, " wrid=") orelse continue;
+        const req = std.fmt.parseInt(u64, req_s, 10) catch continue;
+        res.pairs += 1;
+        const w = wxs.get(wrid) orelse {
+            res.no_w += 1;
+            continue;
+        };
+        const rec = r.served.get(req) orelse {
+            res.no_rec += 1;
+            continue;
+        };
+        if (w == rec) res.correct += 1 else res.wrong += 1;
+    }
+    var kit = wxs.keyIterator();
+    while (kit.next()) |k| gpa.free(k.*);
+    return res;
 }

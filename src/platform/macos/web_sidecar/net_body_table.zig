@@ -73,6 +73,8 @@ const msg = protocol.message;
 const BrowserId = msg.BrowserId;
 const State = msg.NetBodyState;
 const Flags = msg.NetBodyFlags;
+/// 재검증 5 차 S3: 서비스 워커 CDP 로 잇기(계획 「서비스 워커 갈래 새 설계」 — τ 색인·짝·VS).
+pub const sw_mod = @import("net_body_sw.zig");
 
 pub const max_tabs = @import("registry.zig").capacity;
 /// CDP 시작보다 CEF 시작이 이만큼 앞이어도 후보다(J1: CDP 가 늘 0.09–6.3 ms 먼저였다 — 거꾸로 온 것도 받는다).
@@ -154,6 +156,11 @@ pub const max_young: usize = 8;
 pub const max_doc_starts: usize = 16;
 /// `getResponseBody` 번호 대역 — 다른 DevTools 사용처와 겹치지 않는다(J13: 권한 0 부터·알림 20000 부터·`devtools_table` [1<<29, 1<<30)·미디어 메뉴
 /// [1<<30, 2^31)).
+/// 재검증 5 차 S3b: 서비스 워커가 답한 페이지 응답 P 를 잇기를 기다리는 시한(P 의 끝부터) — W·짝·설명되지 않은 기록·CEF 끝을 기다린다.
+/// 지나면 잇지 않는다(가리킨 기록은 `ambiguous`). 시한은 잃는 양만 정한다 — 건전성은 기준이 정한다(공격 2 A4).
+pub const sw_link_wait_us: i64 = 2_000_000;
+/// 탭마다 잇기를 기다리는 P 수 — 넘치면 가장 오래된 것을 잇지 않고 놓는다.
+pub const max_sw_pages: usize = 128;
 pub const id_base: i32 = 1 << 28;
 pub const id_end: i32 = 1 << 29;
 pub const max_rid_bytes: usize = 64;
@@ -711,13 +718,15 @@ pub const Event = union(enum) {
     /// W9d② 적대 리뷰 5 회차 A2).
     /// `loader` 는 CDP `loaderId` 의 해시(0 = 없다 — worker 의 요청은 빈 글): 그 요청을 낸 문서(재검증 3 차 LB-1 — `Table.crossesDoc`).
     /// `res_kind` 는 글 풀기가 갈리는 자원 종류(`ResKind` — 재검증 4 차 뒤 B15).
-    will_be_sent: struct { rid: []const u8, url_hash: u64, method_hash: u64, ts_us: i64, redirect: bool = false, prefetch: bool = false, low: bool = false, loader: u64 = 0, res_kind: ResKind = .other },
+    /// `doc` 는 `documentURL` 의 출처 해시(0 = 모른다 — 재검증 5 차 S3b 의 C0).
+    will_be_sent: struct { rid: []const u8, url_hash: u64, method_hash: u64, ts_us: i64, redirect: bool = false, prefetch: bool = false, low: bool = false, loader: u64 = 0, res_kind: ResKind = .other, doc: u64 = 0 },
     /// `Network.requestWillBeSentExtraInfo` — 실제로 실린 쿠키(막히지 않은 것)·인증 헤더가 있었나.
     extra_info: struct { rid: []const u8, credentialed: bool },
     /// `Network.responseReceived` — `has_extra_info` 는 이 요청의 ExtraInfo 가 오거나 왔다는 Chromium 의 알림(`hasExtraInfo`).
     /// `ts_us` 는 CDP `timestamp`(µs — 0 = 모른다; W9d② 적대 리뷰 3 회차 P1 의 `bound`). `sw_source` 는 서비스 워커가 준 응답의 출처
     /// (`response.serviceWorkerResponseSource` — `network`·`http-cache`·`cache-storage`·`fallback-code`, 없으면 빈 글; W9d② 적대 리뷰 4 회차 SW1).
-    response: struct { rid: []const u8, mime: []const u8, from_sw: bool, charset: Charset, prefetch: bool = false, has_extra_info: bool = false, ts_us: i64 = 0, sw_source: []const u8 = "", low: bool = false, res_kind: ResKind = .other },
+    /// 재검증 5 차 S3b: `tau` 는 `response.responseTime`(µs — `sw_mod.tauMicros`, 0 = 없다), `status` 는 상태.
+    response: struct { rid: []const u8, mime: []const u8, from_sw: bool, charset: Charset, prefetch: bool = false, has_extra_info: bool = false, ts_us: i64 = 0, sw_source: []const u8 = "", low: bool = false, res_kind: ResKind = .other, tau: i64 = 0, status: u16 = 0 },
     /// `Network.dataReceived` — 풀어 낸 바이트.
     data: struct { rid: []const u8, bytes: u64 },
     /// `Network.requestServedFromCache` — 메모리 캐시: CEF 는 이 요청을 보지 못한다(J1).
@@ -812,6 +821,67 @@ fn cdpMicros(v: std.json.Value) i64 {
     return @intFromFloat(t * 1e6);
 }
 
+fn statusOf(v: std.json.Value) u16 {
+    const s = number(v, "response.status") orelse return 0;
+    if (!(s >= 0 and s < 1000)) return 0;
+    return @intFromFloat(s);
+}
+
+/// 재검증 5 차 S3b(C0): 주소의 출처(`scheme://host[:port]` — 사용자 정보 없이, `net_policy.originOf`)의 해시 — 0 = 모른다(`about:`·`data:`
+/// 등). CDP 와 CEF 의 주소는 둘 다 GURL 이 고친 꼴이고 `network.mainFrameAddress` 도 같은 꼴의 출처를 낸다.
+pub fn originHash(url: []const u8) u64 {
+    var ob: [512]u8 = undefined;
+    const o = protocol.net_policy.originOf(url, &ob);
+    if (o.len == 0) return 0;
+    return @max(1, std.hash.Wyhash.hash(0x0419, o));
+}
+
+/// 재검증 5 차 S3: 서비스 워커 세션의 사건(원시 관찰자로 온다 — `net_body.onRaw`).
+pub const WorkerEvent = union(enum) {
+    /// `requestWillBeSent` — 리다이렉트 홉이면 그 홉 응답의 τ(`redirectResponse.responseTime`).
+    sent: struct { rid: []const u8, url_hash: u64, method_hash: u64, ts_us: i64, redirect: bool = false, hop_tau: i64 = 0, excluded: bool = false },
+    /// `responseReceived` — `start_us` 는 `timing.requestTime`(µs — requestWillBeSent 를 잃었을 때의 시작, PHASE0 b), `url_hash` 는 응답 주소.
+    response: struct { rid: []const u8, ts_us: i64 = 0, tau: i64 = 0, disk: bool = false, status: u16 = 0, excluded: bool = false, start_us: i64 = 0, url_hash: u64 = 0 },
+    failed: struct { rid: []const u8, ts_us: i64 = 0 },
+};
+
+/// 워커 세션의 사건 하나(쓰는 것만 — 아니면 null). 글 칸은 `v` 를 빌린다.
+pub fn parseWorkerEvent(method: []const u8, v: std.json.Value) ?WorkerEvent {
+    const rid = str(v, "requestId");
+    if (rid.len == 0) return null;
+    if (std.mem.eql(u8, method, "Network.requestWillBeSent")) {
+        const ts = number(v, "timestamp") orelse return null;
+        const url = str(v, "request.url");
+        const m = str(v, "request.method");
+        const redirect = getPath(v, "redirectResponse") != null;
+        return .{ .sent = .{
+            .rid = rid,
+            .url_hash = hashUrl8(url),
+            .method_hash = hashMethod(m),
+            .ts_us = @intFromFloat(ts * 1e6),
+            .redirect = redirect,
+            .hop_tau = if (redirect) sw_mod.tauMicros(number(v, "redirectResponse.responseTime")) else 0,
+            .excluded = sw_mod.excluded(rid, m, str(v, "type"), url, false),
+        } };
+    }
+    if (std.mem.eql(u8, method, "Network.responseReceived")) {
+        const url = str(v, "response.url");
+        const rt = number(v, "response.timing.requestTime");
+        return .{ .response = .{
+            .rid = rid,
+            .ts_us = cdpMicros(v),
+            .tau = sw_mod.tauMicros(number(v, "response.responseTime")),
+            .disk = boolean(v, "response.fromDiskCache"),
+            .status = statusOf(v),
+            .excluded = sw_mod.excluded(rid, "", str(v, "type"), url, boolean(v, "response.fromServiceWorker")),
+            .start_us = if (rt) |x| (if (x > 0 and x < 1e12) @as(i64, @intFromFloat(x * 1e6)) else 0) else 0,
+            .url_hash = hashUrl8(url),
+        } };
+    }
+    if (std.mem.eql(u8, method, "Network.loadingFailed")) return .{ .failed = .{ .rid = rid, .ts_us = cdpMicros(v) } };
+    return null;
+}
+
 /// 푼 params 에서 사건 하나(모르는 메서드·모양이면 null). 글 칸은 `v` 를 빌린다.
 pub fn parseEvent(method: []const u8, v: std.json.Value) ?Event {
     const rid = str(v, "requestId");
@@ -831,6 +901,7 @@ pub fn parseEvent(method: []const u8, v: std.json.Value) ?Event {
             .low = lowPriority(kind),
             .loader = loaderHash(str(v, "loaderId")),
             .res_kind = resKind(kind),
+            .doc = originHash(str(v, "documentURL")),
         } };
     }
     if (std.mem.eql(u8, method, "Network.requestWillBeSentExtraInfo")) {
@@ -862,6 +933,8 @@ pub fn parseEvent(method: []const u8, v: std.json.Value) ?Event {
             .ts_us = cdpMicros(v),
             .low = lowPriority(str(v, "type")),
             .res_kind = resKind(str(v, "type")),
+            .tau = sw_mod.tauMicros(number(v, "response.responseTime")),
+            .status = statusOf(v),
         } };
     }
     if (std.mem.eql(u8, method, "Network.loadingFinished")) return .{ .finished = .{ .rid = rid } };
@@ -906,6 +979,9 @@ pub const Candidate = struct {
     /// 재검증 3 차 N-3: 이 기록을 집었던 판정이 본문 없이 끝났거나 이 기록을 쥘 수 있던 요청이 맞추기에서 빠졌다 — 짝 없이 시한으로 끝나면
     /// `unmatched`(「다른 프로세스 iframe·worker」)가 아니라 `ambiguous` 다(`expireRecords`).
     hint: bool = false,
+    /// 재검증 5 차 S3b: 워커 W 와 짝이 되어 그 응답을 받은 페이지 P 를 기다린다 — 이 시각까지(0 = 기다리지 않는다). 지나면 `unmatched`(어느
+    /// 페이지도 그 응답을 받지 않았다 — 워커의 갱신·미리 받기·다른 주소로 바꾼 응답).
+    link_until: i64 = 0,
 };
 
 const CdpState = enum { open, finished, failed, cached };
@@ -970,6 +1046,16 @@ const Cdp = struct {
     /// 재검증 3 차 뒤 PF-2: `decidePending` 한 바퀴 안에서 짝 없이 놓았다 — 맞추기·주인 찾기는 건너뛰고 바퀴 끝에 한 번에 지운다(하나씩 지우면
     /// 요청 수천 개의 목록을 그때마다 당겼다).
     gone: bool = false,
+    /// 재검증 5 차 S3: 서비스 워커 세션의 요청(W — 서비스 워커 갈래 기록의 쌍둥이). `wtarget` 은 타깃·epoch 의 열쇠(`sw_mod.targetKey`).
+    worker: bool = false,
+    wtarget: u64 = 0,
+    wkey: sw_mod.WKey = .{ .target = 0, .rid = 0 },
+    /// 재검증 5 차 S3b: 서비스 워커가 답한 페이지 응답(P) — τ·출처·상태, 요청 문서의 출처(C0).
+    sw_page: bool = false,
+    tau: i64 = 0,
+    src: sw_mod.Src = .none,
+    status: u16 = 0,
+    doc: u64 = 0,
 
     fn key(self: *const Cdp) Key {
         return .{ .url = self.key_url, .method = self.key_method, .sw = self.sw };
@@ -1104,6 +1190,7 @@ pub const Inflight = struct {
 };
 
 const DropMark = struct { url: u64, t_us: i64 };
+const SwRec = struct { request: u64, t_io_us: i64 };
 
 /// 재검증 3 차 LB-1: 문서 loader 하나와 그 loader 로 보낸 가장 늦은 요청의 기준 시각(`Tab.loaders`).
 const LoaderSeen = struct { loader: u64 = 0, last_ts: i64 = 0 };
@@ -1161,12 +1248,22 @@ pub const Tab = struct {
     /// loader 로 알림 뒤에 보낸 요청이 있으면 새 문서의 것이다(`crossesDoc` — 실제 CEF: 새 문서의 첫 요청은 20 번 중 15–19 번 알림보다 0.2–0.6 ms 먼저
     /// 나갔다).
     loaders: [max_loaders]LoaderSeen = @splat(.{}),
+    /// 재검증 5 차 S3(C3b′): 아직 설명되지 않은 서비스 워커 갈래 기록(번호·IO 시각) — W 와 짝이 되거나(어느 탭에서든) 워커 요청이 실패로 정하면
+    /// 빠진다. 설명되지 않은 채 끝나면 그 시각이 어둠이 된다(`sw_dark_from`).
+    swrec: std.ArrayList(SwRec) = .empty,
+    /// 재검증 5 차 S3(C3b′): 이 단조 시각 뒤에 응답한 P 는 잇지 않는다 — 설명되지 않은 서비스 워커 갈래 기록이 끝났거나 문이 요청을 넘겼다(갈래를
+    /// 모른다). 기록을 다시 켤 때까지 줄지 않는다(메모는 언제든 나올 수 있다 — 구간으로 줄일 수 없다).
+    sw_dark_from: i64 = std.math.maxInt(i64),
+    /// 재검증 5 차 S3b: 잇기를 기다리는 P(끝난 페이지 응답 — 서비스 워커가 답했다).
+    swp: std.ArrayList(Cdp) = .empty,
 
     pub fn recording(self: *const Tab) bool {
         return self.session != 0 and !self.paused;
     }
 
     fn deinit(self: *Tab, gpa: std.mem.Allocator) void {
+        self.swrec.deinit(gpa);
+        self.swp.deinit(gpa);
         self.cdp_drop_marks.deinit(gpa);
         self.cands.deinit(gpa);
         self.cdp.deinit(gpa);
@@ -1186,6 +1283,9 @@ pub const Action = union(enum) {
     /// (`net_body.detachWorkers` — 걸어 둔 auto-attach 를 끈다). 떼지 않으면 그 출처의 서비스 워커가 탭이 닫힐 때까지 놀아도 멈추지 않는다.
     /// 기록이 멈추는 모든 길이 이 일을 낸다: 끔·켬 실패·등록 실패(`stop`), 다시 켬(`start`), 쏟아짐 밸브, 렌더러 죽음, 탭 닫힘·DevTools 떨어짐.
     detach_workers: struct { browser: BrowserId, why: DetachWhy },
+    /// 재검증 5 차 S3: 진단만(`MARU_WEB_TEST_BODY_LOG`) — W(워커 requestId 의 해시)와 기록이 짝이 되었다 / P 의 잇기 판정의 까닭.
+    sw_paired: struct { browser: BrowserId, request: u64, wrid: Rid },
+    sw_note: struct { browser: BrowserId, request: u64, prid: Rid, reason: sw_mod.Reason },
 };
 
 /// 재검증 5 차 S1: 떼는 까닭 — 닫힘이면 보낼 곳이 없다(세션이 이미 죽었다), 렌더러 죽음이면 새 문서에서 다시 건다.
@@ -1203,6 +1303,15 @@ pub const Table = struct {
     /// 상자의 차례가 곧 시각의 차례다 — 그래서 시작 하나가 오면 그보다 앞서 찍힌 것은 모두 왔고(`cefBegin`), 상자가 비었으면 지금까지 모두
     /// 왔다(`cefSeen`·`tickAt`). 상자는 모든 브라우저가 함께 쓰므로 하나다.
     cef_seen_us: i64 = 0,
+    /// 재검증 5 차 S3: 서비스 워커 갈래 기록의 쌍둥이가 워커 W 다(워커 세션을 붙일 때 — `net_body` 의 플래그). 거짓이면 S0 의 길(페이지 요청이
+    /// 쌍둥이, 늘 의심해 `ambiguous`).
+    sw_twin_worker: bool = false,
+    /// 재검증 5 차 S3b: 짝이 된 기록에 그 응답을 받은 P 의 본문을 잇는다(C0–C7′). 거짓이면(S3a) 짝이 서도 `ambiguous`.
+    sw_link_body: bool = false,
+    /// 재검증 5 차 S3: τ 색인·짝·VS(탭 사이에 나눈다 — K3).
+    link: sw_mod.Link = .{},
+    /// 재검증 5 차 S3b(C0): 탭마다 맨 위 문서의 출처 해시와 그것이 바뀐 단조 시각 — 기록과 무관하게(켜기 전에 연 문서도) 적는다.
+    tops: [max_tabs]struct { browser: BrowserId = 0, origin: u64 = 0, since: i64 = 0 } = @splat(.{}),
 
     const Scratch = struct {
         reqs: std.ArrayList(usize) = .empty,
@@ -1286,6 +1395,7 @@ pub const Table = struct {
     };
 
     pub fn deinit(self: *Table, gpa: std.mem.Allocator) void {
+        self.link.deinit(gpa);
         for (&self.tabs) |*t| t.deinit(gpa);
         self.inflight.deinit(gpa);
         self.actions.deinit(gpa);
@@ -1310,7 +1420,31 @@ pub const Table = struct {
     }
 
     fn emit(self: *Table, gpa: std.mem.Allocator, a: Action) std.mem.Allocator.Error!void {
+        if (a == .end) self.swEnded(a.end.browser, a.end.request);
         try self.actions.append(gpa, a);
+    }
+
+    /// 재검증 5 차 S3(C3b′): 기록이 끝났다 — 설명되지 않은 서비스 워커 갈래 기록이면 그 시작이 어둠이 된다(어느 탭에서든 짝이 되었으면 설명됨).
+    fn swEnded(self: *Table, browser: BrowserId, request: u64) void {
+        const t = self.tabOf(browser) orelse return;
+        for (t.swrec.items, 0..) |r, k| if (r.request == request) {
+            if (!self.link.isExplained(request)) t.sw_dark_from = @min(t.sw_dark_from, r.t_io_us);
+            _ = t.swrec.swapRemove(k);
+            return;
+        };
+    }
+
+    /// 재검증 5 차 S3: 이 기록은 설명되었다(짝이 된 W·실패로 정한 W).
+    fn swExplain(t: *Tab, request: u64) void {
+        for (t.swrec.items, 0..) |r, k| if (r.request == request) {
+            _ = t.swrec.swapRemove(k);
+            return;
+        };
+    }
+
+    /// 재검증 5 차 S3(C3b′): 그 탭을 이 시각부터 어둠으로(문 넘김·넘침 — 갈래를 모른다).
+    fn swDark(self: *const Table, t: *Tab, at: i64) void {
+        if (self.sw_twin_worker) t.sw_dark_from = @min(t.sw_dark_from, at);
     }
 
     /// 쌓인 일을 `out`(빈 목록)과 바꿔 가져간다 — 일을 하는 동안 표가 새 일을 쌓아도 가져간 목록은 그대로다(부른 쪽이 비우고 다시 부른다).
@@ -1327,6 +1461,9 @@ pub const Table = struct {
         if (self.tabOf(browser)) |t| {
             try self.finishAll(gpa, t, .recording_stopped);
             try self.emit(gpa, .{ .detach_workers = .{ .browser = browser, .why = .restart } });
+            t.swrec.clearRetainingCapacity();
+            t.swp.clearRetainingCapacity();
+            t.sw_dark_from = std.math.maxInt(i64);
             t.session = session;
             t.paused = false;
             t.flood_over = 0;
@@ -1350,6 +1487,8 @@ pub const Table = struct {
         try self.emit(gpa, .{ .detach_workers = .{ .browser = browser, .why = .stop } });
         t.deinit(gpa);
         t.* = .{};
+        self.link.forgetTab(browser);
+        if (!self.anyRecording()) self.link.clear();
     }
 
     /// 렌더러가 죽었다(J5 — 보낸 호출은 다음 이동까지 답이 없다): 그 탭의 것을 모두 `detached` 로 끝낸다. 기록은 그대로다(다시 켜지 않아도
@@ -1422,6 +1561,8 @@ pub const Table = struct {
         cand.ended_at = 0;
         cand.prev_t_io_us = prev;
         try t.cands.append(gpa, cand);
+        // 재검증 5 차 S3(C3b′): 서비스 워커 갈래 기록은 W 가 설명할 때까지 적어 둔다.
+        if (self.sw_twin_worker and cand.key.sw) try t.swrec.append(gpa, .{ .request = cand.request, .t_io_us = cand.t_io_us });
         return true;
     }
 
@@ -1480,6 +1621,7 @@ pub const Table = struct {
             c.ended_at = @max(now_us, 1);
             c.cef_failed = !ok;
             c.cef_received = received;
+            if (c.link_until != 0) c.link_until = c.ended_at + unclaimed_expiry_us; // 재검증 5 차 S3b: P 를 기다리는 시한은 끝부터
             if (c.cover_pending) {
                 c.cover_pending = false;
                 c.covered = false;
@@ -1497,12 +1639,14 @@ pub const Table = struct {
         } else t.drop_len += 1;
         t.drops[t.drop_next] = .{ .url = url_hash, .t_us = t_us };
         t.drop_next = (t.drop_next + 1) % max_drop_marks;
+        self.swDark(t, t_us); // 재검증 5 차 S3(C3b′ — 공격 3 M3): 넘긴 요청의 갈래를 모른다
     }
 
     /// 표지를 남길 자리가 없었다(IO 스레드의 상자가 찼다) — 이 시각까지의 창은 모두 모호하다.
     pub fn noteDropOverflow(self: *Table, browser: BrowserId, t_us: i64) void {
         const t = self.tabOf(browser) orelse return;
         t.drop_overflow_until = @max(t.drop_overflow_until, t_us);
+        self.swDark(t, t_us);
     }
 
     /// W9d② 적대 리뷰 5 회차 C1: 넘김 상자가 넘쳐 이 요청의 시작 아닌 기록(리다이렉트·응답·끝)이 버려졌다 — 짝이 없는 후보면 끝난 것으로 치고
@@ -1663,7 +1807,7 @@ pub const Table = struct {
         const ix = self.scratch.index.items;
         const ts = o.anchor();
         for ([_]bool{ false, true }) |sw| {
-            if (o.responded and sw != o.sw) continue;
+            if (!self.inBranch(o, sw)) continue;
             const head = CandKey.lowerBound(ix, .{ .url = o.key_url, .method = o.key_method, .sw = sw, .t_io = std.math.minInt(i64) });
             if (head == ix.len or ix[head].url != o.key_url or ix[head].method != o.key_method or ix[head].sw != sw) continue;
             if (ix[head].restart) return true;
@@ -1700,6 +1844,90 @@ pub const Table = struct {
             return true;
         }
         return false;
+    }
+
+    /// 재검증 5 차 S3: 서비스 워커 세션의 사건 하나(`wtarget` 은 타깃·epoch 의 열쇠 — `sw_mod.targetKey`). 쏟아짐은 부른 쪽이 `cdpEvent(null)` 로
+    /// 센다. W 는 서비스 워커 갈래 기록의 쌍둥이로 맞추기에 들고(빼는 꼴은 τ 색인에만 — 공격 1 H2), 짝은 W 의 응답 때 정한다(공격 3 H3).
+    pub fn workerEvent(self: *Table, gpa: std.mem.Allocator, browser: BrowserId, wtarget: u64, ev: WorkerEvent, now_us: i64) std.mem.Allocator.Error!void {
+        const t = self.tabOf(browser) orelse return;
+        if (!t.recording()) return;
+        var rb: [max_rid_bytes]u8 = undefined;
+        switch (ev) {
+            .sent => |v| {
+                const key: sw_mod.WKey = .{ .target = wtarget, .rid = sw_mod.hashId(v.rid) };
+                if (v.redirect) {
+                    if (v.hop_tau != 0) try self.link.noteHop(gpa, key, v.hop_tau);
+                    return;
+                }
+                if (v.excluded or !self.sw_twin_worker) return;
+                const rid = workerRid(&rb, wtarget, v.rid) orelse return;
+                if (cdpIndex(t, rid.slice()) != null) return;
+                if (t.cdp.items.len >= max_cdp) dropOldestCdp(gpa, t, v.ts_us);
+                try t.cdp.append(gpa, .{ .rid = rid, .key_url = v.url_hash, .key_method = v.method_hash, .ts_us = v.ts_us, .sw = true, .responded = true, .has_key = true, .last_url = v.url_hash, .worker = true, .wtarget = wtarget, .wkey = key });
+            },
+            .response => |v| {
+                const key: sw_mod.WKey = .{ .target = wtarget, .rid = sw_mod.hashId(v.rid) };
+                try self.link.noteResponse(gpa, key, v.tau, v.disk, v.excluded, v.status);
+                if (v.excluded or !self.sw_twin_worker) return;
+                const rid = workerRid(&rb, wtarget, v.rid) orelse return;
+                const i = cdpIndex(t, rid.slice()) orelse blk: {
+                    // 시작(requestWillBeSent)을 잃었다(스크립트를 평가하는 동안 낸 요청 — PHASE0 b) — `timing.requestTime` 과 응답 주소로 세운다
+                    // (리다이렉트한 요청이면 열쇠가 첫 주소가 아니라 짝이 없다 — 그 기록은 설명되지 않아 어둠, 잃는 쪽).
+                    if (v.start_us == 0 or v.url_hash == 0) return;
+                    if (t.cdp.items.len >= max_cdp) dropOldestCdp(gpa, t, v.start_us);
+                    try t.cdp.append(gpa, .{ .rid = rid, .key_url = v.url_hash, .key_method = hashMethod("GET"), .ts_us = v.start_us, .sw = true, .responded = true, .has_key = true, .last_url = v.url_hash, .worker = true, .wtarget = wtarget, .wkey = key });
+                    break :blk t.cdp.items.len - 1;
+                };
+                const r = &t.cdp.items[i];
+                if (r.state != .open) return;
+                r.responded_at = @max(cdpTime(v.ts_us, now_us), 1);
+                r.status = v.status;
+                // 짝은 응답 때 정한다 — 끝(`loadingFinished`)은 워커가 본문을 읽지 않으면 오지 않는다(공격 3 H3).
+                r.state = .finished;
+                r.done_at = @max(now_us, 1);
+                try self.tryDecide(gpa, t, i, now_us);
+            },
+            .failed => |v| {
+                const rid = workerRid(&rb, wtarget, v.rid) orelse return;
+                const i = cdpIndex(t, rid.slice()) orelse return;
+                const r = &t.cdp.items[i];
+                if (r.state != .open) return;
+                r.state = .failed;
+                r.done_at = @max(now_us, 1);
+                r.failed_at = @max(cdpTime(v.ts_us, now_us), 1);
+                if (!failedBare(r)) try self.tryDecide(gpa, t, i, now_us);
+            },
+        }
+    }
+
+    /// 워커 요청의 표 자리 이름 — 페이지 요청의 requestId 와 겹치지 않게(`w<타깃>:<requestId>`).
+    fn workerRid(buf: *[max_rid_bytes]u8, wtarget: u64, rid: []const u8) ?Rid {
+        const s = std.fmt.bufPrint(buf, "w{x}:{s}", .{ @as(u32, @truncate(wtarget)), rid }) catch return null;
+        return Rid.init(s);
+    }
+
+    /// 재검증 5 차 S3b(C0): 그 탭의 맨 위 문서의 주소가 바뀌었다(`network.mainFrameAddress`) — 출처가 바뀌면 그 시각을 적는다.
+    pub fn topOrigin(self: *Table, browser: BrowserId, origin: u64, now_us: i64) void {
+        if (browser == 0) return;
+        const slot = for (&self.tops) |*x| {
+            if (x.browser == browser) break x;
+        } else for (&self.tops) |*x| {
+            if (x.browser == 0) break x;
+        } else return;
+        if (slot.browser == browser and slot.origin == origin) return;
+        slot.* = .{ .browser = browser, .origin = origin, .since = now_us };
+    }
+
+    /// 탭이 닫혔다 — 맨 위 출처를 잊는다.
+    pub fn forgetTop(self: *Table, browser: BrowserId) void {
+        for (&self.tops) |*x| if (x.browser == browser) {
+            x.* = .{};
+        };
+    }
+
+    fn topOf(self: *const Table, browser: BrowserId) struct { origin: u64, since: i64 } {
+        for (self.tops) |x| if (x.browser == browser) return .{ .origin = x.origin, .since = x.since };
+        return .{ .origin = 0, .since = 0 };
     }
 
     /// CDP `Network.*` 사건 하나(`now_us` 는 UI 시각). 메서드를 표가 쓰지 않아도 쏟아짐을 세려고 부른다(`ev` 가 null).
@@ -1741,7 +1969,7 @@ pub const Table = struct {
                 const rid = Rid.init(v.rid) orelse return;
                 if (t.cdp.items.len >= max_cdp) dropOldestCdp(gpa, t, v.ts_us);
                 noteLoader(t, v.loader, v.ts_us);
-                try t.cdp.append(gpa, .{ .rid = rid, .key_url = v.url_hash, .key_method = v.method_hash, .ts_us = v.ts_us, .prefetch = v.prefetch, .has_key = true, .last_url = v.url_hash, .low = v.low, .loader = v.loader, .res_kind = v.res_kind });
+                try t.cdp.append(gpa, .{ .rid = rid, .key_url = v.url_hash, .key_method = v.method_hash, .ts_us = v.ts_us, .prefetch = v.prefetch, .has_key = true, .last_url = v.url_hash, .low = v.low, .loader = v.loader, .res_kind = v.res_kind, .doc = v.doc });
             },
             .extra_info => |v| {
                 const i = cdpIndex(t, v.rid) orelse blk: {
@@ -1771,6 +1999,15 @@ pub const Table = struct {
                 r.sw = v.from_sw;
                 r.responded = true;
                 r.sw_off_network = v.from_sw and !std.mem.eql(u8, v.sw_source, "network");
+                // 재검증 5 차 S3: 워커 W 가 쌍둥이면 서비스 워커가 답한 페이지 요청은 어느 갈래의 맞추기에도 들지 않는다(제 기록이 없다) — 끝나면
+                // 잇기를 기다린다(S3b). 공격 3 H2: 넓히는 것은 이것뿐 — 두 방향 맞추기·물 높이는 그대로.
+                if (v.from_sw and self.sw_twin_worker) {
+                    r.sw_off_network = true;
+                    r.sw_page = true;
+                    r.tau = v.tau;
+                    r.src = sw_mod.srcOf(v.sw_source);
+                    r.status = v.status;
+                }
                 // 제 기록의 IO 시각은 응답보다 앞이다 — CDP 의 응답 시각(같은 시계 — J1)이 맞아 보이면(UI 가 받은 때 앞 2 초 안) 그것, 아니면 UI 가
                 // 받은 때(늦은 쪽 — 기다림이 조금 길 뿐 틀리지 않는다).
                 if (r.responded_at == 0) r.responded_at = @max(cdpTime(v.ts_us, now_us), 1);
@@ -1866,6 +2103,14 @@ pub const Table = struct {
         return !(o.gone or o.state == .cached or o.prefetch or !o.has_key or o.sw_off_network);
     }
 
+    /// 요청이 그 갈래(서비스 워커 갈래 `sw`)의 맞추기에 드는가. 재검증 5 차 S3: 워커 W 가 쌍둥이면 서비스 워커 갈래에는 워커 요청만, 페이지 갈래에는
+    /// 페이지 요청만(응답 전이면 갈래를 모른다 — 페이지 갈래에만; 서비스 워커가 답한 페이지 요청은 어느 갈래에도 제 기록이 없다). 아니면(S0)
+    /// 응답 전의 요청은 두 갈래 모두, 응답 뒤는 그 갈래만.
+    fn inBranch(self: *const Table, o: *const Cdp, sw: bool) bool {
+        if (self.sw_twin_worker) return o.worker == sw;
+        return !(o.responded and o.sw != sw);
+    }
+
     /// 응답 없이 실패한 요청(다시 시작 아님) — CEF 에 닿지 않았을 수 있다(abort). 5 회차 A1: 맞추기의 차례를 밀지 않는다(`tryDecide`).
     fn failedBare(o: *const Cdp) bool {
         return o.state == .failed and o.responded_at == 0 and o.restart_ts_us == 0;
@@ -1901,7 +2146,7 @@ pub const Table = struct {
             // 서비스 워커가 네트워크 밖에서 준 응답(4 회차 SW1)은 어느 기록도 가져가지 않는다 — 그 워커의 기록은 이 요청의 차례에 남아 갈림을 보인다.
             if (o.gone or o.state == .cached or o.prefetch or !o.has_key or o.sw_off_network) continue;
             if (o.key_url != key.url or o.key_method != key.method) continue;
-            if (o.sw != key.sw and o.responded) continue;
+            if (!self.inBranch(&o, key.sw)) continue;
             try sc.reqs.append(gpa, j);
         }
         const ReqCtx = struct {
@@ -2399,7 +2644,13 @@ pub const Table = struct {
             // 수 있다(재검증 5 차 K1·K2·K3 — 짝이 하나로 보여도 틀렸다, 실제 CEF 40/40·40/40). 그래서 늘 맞추기를 의심하는 쪽으로: 이 요청과 짝일 수
             // 있는 같은 열쇠의 기록을 모두 `ambiguous` 로 끝내고 주인일 수 있는 요청을 모두 뺀다. 전에 쓰던 `swUnique`(재검증 4 차 뒤 R6)는 걷었다 —
             // 그 셋째 조건이 판정마다 기록 × 요청을 훑었다(K4). 워커 CDP 로 잇는 길은 계획 v2 의 S1–S3b.
-            const sw_unsure = r.sw and r.responded;
+            const sw_unsure = !self.sw_twin_worker and r.sw and r.responded;
+            // 재검증 5 차 S3(C5 — 공격 3 H1·공격 2 A2): 다른 SW 타깃의 같은 열쇠 워커 요청이 이 기록과 짝일 수 있으면 의심한다 — 관(타깃)이 다르면
+            // CDP 시작 차례와 CEF IO 차례가 뒤집힌다(실측 706/26 541 — 관 하나 안은 0/14 221).
+            const cross_target = r.worker and for (reqs) |j| {
+                const o = &t.cdp.items[j];
+                if (j != i and o.worker and o.wtarget != r.wtarget and compatible(o, &t.cands.items[ci])) break true;
+            } else false;
             var ambiguous = false;
             // 보이는 규칙(프레임·첫 사이트·initiator)이 다른 후보가 이 요청의 창 안에 있다.
             for (cands) |o| if (o != ci and t.cands.items[o].attr != t.cands.items[ci].attr and compatible(&r, &t.cands.items[o])) {
@@ -2418,7 +2669,7 @@ pub const Table = struct {
                 };
             }
             // 맞추기를 의심할 까닭 — 이 요청의 왼쪽 짝이 제 것이라는 보장이 없다.
-            var doubt = late or held or pending_split or sw_unsure;
+            var doubt = late or held or pending_split or sw_unsure or cross_target;
             if (t.drop_overflow_until != 0 and ts - window_before_us <= t.drop_overflow_until) doubt = true;
             // 최종 재검증 D-B: 자리 상한의 묶음 놓기가 놓은 요청의 기록이 이 요청의 창에 들 수 있다(`Tab.cdp_drop_until`).
             if (t.cdp_drop_until != 0 and ts - window_before_us <= t.cdp_drop_until) doubt = true;
@@ -2505,7 +2756,7 @@ pub const Table = struct {
             if (one and (o.key_url != cd[0].url or o.key_method != cd[0].method)) continue;
             if (o.gone or o.state == .cached or o.prefetch or !o.has_key or o.sw_off_network) continue;
             for ([_]bool{ false, true }) |sw| {
-                if (o.sw != sw and o.responded) continue;
+                if (!self.inBranch(&o, sw)) continue;
                 const x: GroupItem = .{ .url = o.key_url, .method = o.key_method, .sw = sw, .t = o.anchor(), .idx = j };
                 const p = GroupItem.lowerBound(cd, .{ .url = x.url, .method = x.method, .sw = x.sw, .t = std.math.minInt(i64), .idx = 0 });
                 if (p == cd.len or cd[p].group(x) != .eq) continue;
@@ -2672,6 +2923,7 @@ pub const Table = struct {
     fn decide(self: *Table, gpa: std.mem.Allocator, t: *Tab, ci: usize, cand: Candidate, r: Cdp, ambiguous: bool, now_us: i64) std.mem.Allocator.Error!void {
         // 실린 자격 증명(UB1): ExtraInfo 가 알렸거나, 보낸 홉마다의 것이 다 오지 않았으면 실린 것으로 친다(J12 — 서비스 워커·메모리 캐시엔 없다;
         // W9d② 적대 리뷰 1 회차 LOW-3 — 뒤 홉의 것이 늦을 수 있다), CEF 헤더에 있으면 실렸다.
+        if (r.worker) return self.decideWorker(gpa, t, ci, cand, r, ambiguous, now_us);
         const cred = r.credentialed or r.extras < r.sends or cand.cef_credentialed;
         var flags: Flags = .{ .credentialed = cred };
         const end = struct {
@@ -2711,6 +2963,37 @@ pub const Table = struct {
         } else t.waiting.items.len;
         try t.waiting.insert(gpa, at, w);
         try self.pump(gpa, t, now_us);
+    }
+
+    /// 재검증 5 차 S3: 워커 W 의 판정(W 의 응답 때 — 공격 3 H3). 짝이 서면 그 기록은 설명되고(어느 탭에서든), S3b 면 그 응답을 받은 P 를 기다린다
+    /// (`link_until`), S3a 면 본문 없이 `ambiguous`. 의심한 판정은 그 W 를 나쁜 것으로(가리킨 P 는 `ambiguous`) — 끝낸 기록은 설명되지 않아
+    /// 어둠이 된다(`swEnded`). 워커 요청이 응답 없이 실패했으면 그 기록은 실패로 끝나고 설명된다.
+    fn decideWorker(self: *Table, gpa: std.mem.Allocator, t: *Tab, ci: usize, cand: Candidate, r: Cdp, ambiguous: bool, now_us: i64) std.mem.Allocator.Error!void {
+        if (ambiguous) {
+            self.link.noteBad(r.wkey);
+            try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = cand.request, .state = .ambiguous, .flags = .{ .credentialed = cand.cef_credentialed } } });
+            _ = t.cands.orderedRemove(ci);
+            return;
+        }
+        if (r.state == .failed) {
+            swExplain(t, cand.request);
+            try self.link.notePair(gpa, r.wkey, cand.request);
+            self.link.noteBad(r.wkey);
+            try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = cand.request, .state = .request_failed, .flags = .{ .credentialed = cand.cef_credentialed } } });
+            _ = t.cands.orderedRemove(ci);
+            return;
+        }
+        try self.link.notePair(gpa, r.wkey, cand.request);
+        swExplain(t, cand.request);
+        try self.emit(gpa, .{ .sw_paired = .{ .browser = t.browser, .request = cand.request, .wrid = r.rid } });
+        if (!self.sw_link_body) {
+            try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = cand.request, .state = .ambiguous, .flags = .{ .credentialed = cand.cef_credentialed } } });
+            _ = t.cands.orderedRemove(ci);
+            return;
+        }
+        const c = &t.cands.items[ci];
+        c.claimed = true;
+        c.link_until = if (c.ended_at != 0) c.ended_at + unclaimed_expiry_us else now_us + record_hard_expiry_us;
     }
 
     /// 모든 탭의 기다림 수(5 회차 A2 — 전체 상한).
@@ -3010,7 +3293,7 @@ const H = struct {
             .end => |e| try self.noteEnd(e.request, e.state),
             .fetch => try self.fetches.append(gpa_t, a),
             .pause => self.paused += 1,
-            .detach_workers => {},
+            .detach_workers, .sw_paired, .sw_note => {},
         };
     }
 
@@ -9473,4 +9756,70 @@ test "W9d② 재검증 5 차 S1: 기록이 멈추거나 새로 시작하는 모�
     try t.closed(gpa_t, 5);
     t.swapActions(&list);
     try testing.expectEqual(@as(usize, 1), detachCount(list.items, 5, .closed));
+}
+
+// ── 재검증 5 차 S3: 워커 W 가 쌍둥이(짝은 W 의 응답 때·같은 타깃만)와 τ 로 잇기(C0–C7′) ──
+
+const sw_origin = "https://sw.test";
+/// 시험의 벽시계 = 단조 + 이 값(µs).
+const sw_wall_off: i64 = 1_700_000_000_000_000;
+
+fn swSetup(h: *H, b: BrowserId, link_body: bool) !void {
+    h.table.sw_twin_worker = true;
+    h.table.sw_link_body = link_body;
+    _ = try h.table.start(gpa_t, b, 1);
+    try h.drain();
+    h.table.link.raiseVisible(b, sw_wall_off + 1_000);
+    h.table.topOrigin(b, originHash(sw_origin), 1);
+}
+
+fn wev(h: *H, b: BrowserId, target: u64, e: WorkerEvent, now: i64) !void {
+    if (h.sync) h.table.cef_seen_us = @max(h.table.cef_seen_us, now);
+    try h.table.workerEvent(gpa_t, b, target, e, now);
+    try h.drain();
+}
+
+/// W 하나: 시작(IO 앞 0.2 ms)·응답(τ = 응답 때의 벽시계).
+fn wFetch(h: *H, b: BrowserId, target: u64, rid: []const u8, url: []const u8, start: i64, resp: i64, opts: struct { disk: bool = false, status: u16 = 200, tau: ?i64 = null, sent: bool = true }) !void {
+    if (opts.sent) try wev(h, b, target, .{ .sent = .{ .rid = rid, .url_hash = hashUrl8(url), .method_hash = hashMethod("GET"), .ts_us = start } }, start + 50);
+    try wev(h, b, target, .{ .response = .{ .rid = rid, .ts_us = resp, .tau = opts.tau orelse resp + sw_wall_off, .disk = opts.disk, .status = opts.status, .start_us = start, .url_hash = hashUrl8(url) } }, resp + 50);
+}
+
+/// 페이지 P(서비스 워커가 답했다): 시작·응답(τ·출처)·받기·끝.
+fn pFetch(h: *H, b: BrowserId, rid: []const u8, url: []const u8, start: i64, resp: i64, tau: i64, opts: struct { src: []const u8 = "network", status: u16 = 200, doc: []const u8 = sw_origin ++ "/app", bytes: u64 = 9 }) !void {
+    try h.ev(b, .{ .will_be_sent = .{ .rid = rid, .url_hash = hashUrl8(url), .method_hash = hashMethod("GET"), .ts_us = start, .doc = originHash(opts.doc) } }, start + 30);
+    try h.ev(b, .{ .response = .{ .rid = rid, .mime = "application/json", .from_sw = true, .charset = .other, .sw_source = opts.src, .ts_us = resp, .tau = tau, .status = opts.status } }, resp + 30);
+    try h.ev(b, .{ .data = .{ .rid = rid, .bytes = opts.bytes } }, resp + 40);
+    try h.finish(b, rid, resp + 60);
+}
+
+fn swRun(h: *H, from: i64, to: i64) !void {
+    var now = from;
+    while (now < to) : (now += 50_000) {
+        try h.flushed(now, now);
+        try h.table.tickAt(gpa_t, now, now);
+        try h.drain();
+    }
+}
+
+test "W9d② 재검증 5 차 S3a: 워커 W 가 서비스 워커 갈래 기록의 쌍둥이 — 짝은 W 의 응답 때 서고(본문은 아직 S0 — ambiguous), 페이지 요청은 서비스 워커 갈래 맞추기에 들지 않는다" {
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, false);
+    const u = sw_origin ++ "/api/a";
+    const t0: i64 = 10_000_000;
+    // 페이지 요청(응답 전 — 전에는 서비스 워커 갈래의 기록도 가져갈 수 있었다)과 워커의 그대로 넘김.
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "p.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0, .doc = originHash(sw_origin) } }, t0 + 30);
+    _ = try h.cand(5, 701, u, t0 + 400, .{ .sw = true });
+    try wFetch(&h, 5, 1, "7.1", u, t0 + 200, t0 + 9_000, .{});
+    // 짝은 W 의 응답 때 — S3a 는 본문을 잇지 않아 곧 ambiguous(설명된 기록 — 어둠이 아니다).
+    try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(701));
+    try testing.expect(h.table.link.isExplained(701));
+    try testing.expectEqual(std.math.maxInt(i64), h.table.tabOf(5).?.sw_dark_from);
+    try pFetch(&h, 5, "p.1", u, t0, t0 + 9_500, t0 + 9_000 + sw_wall_off, .{});
+    try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
+    // 끝이 오지 않는 워커 요청(본문을 읽지 않았다)도 짝은 응답 때 선다(공격 3 H3).
+    _ = try h.cand(5, 702, u, t0 + 20_400, .{ .sw = true });
+    try wFetch(&h, 5, 1, "7.2", u, t0 + 20_200, t0 + 29_000, .{});
+    try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(702));
 }

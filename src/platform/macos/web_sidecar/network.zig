@@ -147,6 +147,7 @@ pub fn mainFrameAddress(id: BrowserId, url: [*c]const c.cef_string_t) void {
     doLock();
     state.setTopOrigin(id, origin);
     doUnlock();
+    net_body.topOrigin(id, origin); // 재검증 5 차 S3b(C0): 서비스 워커가 답한 응답은 맨 위 출처의 문서 것만 잇는다
 }
 
 /// 주 프레임에 새 문서가 시작됐다(UI 스레드 `on_load_start`·오류 페이지 — `page_started`·`error_page` 를 보내기 전에). 그 뒤에 보내는 앞 문서

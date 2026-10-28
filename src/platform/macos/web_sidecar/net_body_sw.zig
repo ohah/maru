@@ -257,13 +257,18 @@ pub fn tauMicros(ms: ?f64) i64 {
     return @intFromFloat(@round(v * 1000.0));
 }
 
+/// 타깃·epoch 의 열쇠(타깃이 다시 뜨면 requestId 가 다시 쓰일 수 있다 — 공격 2 A13).
+pub fn targetKey(target: u64, epoch: u32) u64 {
+    return target +% @as(u64, epoch) *% 0x9E37_79B9_7F4A_7C15;
+}
+
 /// 워커 요청 하나의 열쇠 — (타깃·epoch, requestId). 같은 서비스 워커의 사건이 탭마다 세션으로 따로 와도 하나다(실측 r1 — 같은 requestId).
 pub const WKey = struct {
     target: u64,
     rid: u64,
 
     pub fn of(target: u64, epoch: u32, rid: []const u8) WKey {
-        return .{ .target = target +% @as(u64, epoch) *% 0x9E37_79B9_7F4A_7C15, .rid = hashId(rid) };
+        return .{ .target = targetKey(target, epoch), .rid = hashId(rid) };
     }
 };
 

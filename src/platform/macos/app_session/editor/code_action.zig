@@ -23,6 +23,7 @@ const pane_ops = @import("../pane.zig");
 const settings_ops = @import("../settings.zig");
 const term_ops = @import("../term.zig");
 const lsp = maru.session.editor.lsp;
+const response_owner = maru.session.editor.lsp_response_owner;
 
 /// 메뉴 항목 상한. **버퍼 크기가 아니라 이 메뉴가 스스로 정한 상한**이다(버퍼는 `ctx_menu_buf_len`
 /// 이고 이보다 크다). 예전엔 `ctx_menu_count` 가 두 뜻을 겸해 「버퍼 크기」라고 적혀 있었는데,
@@ -66,6 +67,10 @@ pub const State = struct {
     pending: std.ArrayList(Owned) = .empty,
     resolve_waiting: bool = false,
     resolve_seq: u32 = 0,
+    resolve_owner: ?response_owner.Owner = null,
+    // A later menu request may replace snaps while this chosen action resolves.
+    resolve_snaps: [64]editor_wse.VersionSnap = undefined,
+    resolve_snaps_len: usize = 0,
     resolve_exe: []const u8 = "",
     /// 요청 시점의 열린 문서 revision(§8.2f 검증).
     snaps: [64]editor_wse.VersionSnap = undefined,
@@ -264,14 +269,41 @@ pub fn accept(self: *AppSession, index: usize) void {
     st.resolve_waiting = true;
     st.resolve_seq = seq;
     st.resolve_exe = item.exe;
+    st.resolve_owner = resolveOwner(term);
+    st.resolve_snaps_len = st.snaps_len;
+    @memcpy(st.resolve_snaps[0..st.resolve_snaps_len], st.snaps[0..st.snaps_len]);
+}
+
+fn resolveOwner(term: *Term) ?response_owner.Owner {
+    if (term.kind != .editor or term.rt.editorDocument().opened == null) return null;
+    const doc = term.rt.editorDocument();
+    return .{ .surface = term.surface.id, .document = @intFromPtr(doc), .target_epoch = doc.save_target_epoch };
 }
 
 /// resolve 응답 — `edit` 을 같은 길로. 늦게 온 응답이라 알림은 `showResponseNotice` 로(사용자가 그사이 연 오버레이를 닫지 않는다).
 pub fn onResolveResponse(self: *AppSession, c: *editor_lsp.Client, seq: u32, result: ?std.json.Value, is_error: bool, error_message: ?[]const u8) void {
     const st = &self.editor_code_action;
     if (!st.resolve_waiting or seq != st.resolve_seq or !std.mem.eql(u8, c.server.exe, st.resolve_exe)) return;
+    const loc = if (st.resolve_owner) |owner| term_ops.findTermWhere(self, owner.surface, struct {
+        fn pred(want: u64, t: *Term) bool {
+            return t.kind == .editor and t.surface.id == want;
+        }
+    }.pred) else null;
+    const term = if (loc) |found| found.pane.terms.items[found.term_index] else null;
+    const current = if (term) |t| resolveOwner(t) else null;
+    const same_client = if (term) |t| editor_lsp.docClientByExe(self, t, st.resolve_exe) == c else false;
+    switch (response_owner.decide(st.resolve_waiting, st.resolve_seq, seq, st.resolve_owner, current, same_client)) {
+        .ignore => return,
+        .cancel => {
+            st.resolve_waiting = false;
+            st.resolve_owner = null;
+            return;
+        },
+        .accept => {},
+    }
     const enc = c.encoding;
     st.resolve_waiting = false;
+    st.resolve_owner = null;
     if (is_error) {
         st.notified_error += 1;
         self.showResponseNotice(.ca_error, &.{.{ .s = error_message orelse "" }});
@@ -289,7 +321,7 @@ pub fn onResolveResponse(self: *AppSession, c: *editor_lsp.Client, seq: u32, res
         return;
     };
     st.resolved += 1;
-    applyEdit(self, edit, enc);
+    applyEdit(self, edit, enc, st.resolve_snaps[0..st.resolve_snaps_len]);
 }
 
 /// 항목 JSON 텍스트의 `edit` 을 적용한다 — 그 항목을 낸 서버의 위치 인코딩으로.
@@ -298,12 +330,12 @@ fn applyRaw(self: *AppSession, raw: []const u8, enc: lsp.rpc.PositionEncoding) v
     defer parsed.deinit();
     if (parsed.value != .object) return;
     const edit = parsed.value.object.get("edit") orelse return;
-    applyEdit(self, edit, enc);
+    applyEdit(self, edit, enc, self.editor_code_action.snaps[0..self.editor_code_action.snaps_len]);
 }
 
 /// 편집 적용 + 결과 알림. 알림은 `showResponseNotice` — resolve 응답(늦게 온다)에서도 오고, 메뉴에서 고른 직후(메뉴는 이미 닫혔다)에는
 /// 판정이 거짓이라 `showNotice` 와 같다.
-fn applyEdit(self: *AppSession, edit: std.json.Value, enc: lsp.rpc.PositionEncoding) void {
+fn applyEdit(self: *AppSession, edit: std.json.Value, enc: lsp.rpc.PositionEncoding, expected: []const editor_wse.VersionSnap) void {
     const st = &self.editor_code_action;
     var parsed = lsp.workspace_edit.parse(self.allocator, edit) catch |err| switch (err) {
         error.Unsupported, error.Malformed => {
@@ -314,7 +346,7 @@ fn applyEdit(self: *AppSession, edit: std.json.Value, enc: lsp.rpc.PositionEncod
         error.OutOfMemory => return,
     };
     defer parsed.deinit(self.allocator);
-    switch (editor_wse.apply(self, parsed, enc, st.snaps[0..st.snaps_len])) {
+    switch (editor_wse.apply(self, parsed, enc, expected)) {
         .applied => |n| {
             st.applied += 1;
             self.showResponseNotice(.ca_applied, &.{.{ .d = @intCast(n) }});

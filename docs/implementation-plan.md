@@ -1770,3 +1770,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [심볼 rename 응답 출처와 문서 수명](plans/rename-response-origin.md): 서버별 같은 seq의 교차 응답 격리와 요청 문서 수명 검사.
 
 - [코드 액션 응답의 문서 소유](plans/code-action-response-origin.md): 같은 실행 파일·번호를 쓰는 다른 root의 목록 응답 격리.
+
+- [코드 액션 resolve의 출처와 수명](plans/code-action-resolve-origin.md): 선택 당시 문서 신원과 지연 응답의 서버 격리.

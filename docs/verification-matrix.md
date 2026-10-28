@@ -1,4 +1,9 @@
 # 검증 매트릭스
+
+- 원격 pane 선택: `mise exec -- zig build test-remote-pane-selection-contract test-remote-pane-selection -j2`
+  및 ReleaseFast. 순수 계약과 AppSession 사이드바 마우스 경로에서 같은 시각의 클릭·시계 역행·후속 이벤트·
+  surface 격리·퇴역·없는 pane·LRU 퇴출을 검사한다. 물리 GUI·실제 SSH/tmux는 이 검증 범위 밖이다.
+
 - [원자적 자동완성 확정](editor-completion-commit.md): `mise exec -- zig build test-editor-completion-contract test-editor-completion test-editor-completion-overlays -j2`.
 
 

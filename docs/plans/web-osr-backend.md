@@ -2807,3 +2807,12 @@ W9d② 20 회 적대 검증(2026-10-21 — PR 규칙의 20 회, 검증자 둘: 1
       Cache Storage·만든 응답·출처 없음은 전처럼 짝이 아니다(`unmatched`). 판정: 서비스 워커 갈래의 기록은 본문 없이(`sw captured 0` —
       `body-service-worker` 는 `ambiguous` 하나), 틀린 본문 0 은 그대로. v20k 시험 K1–K4 와 고친 기대 다섯(차례와 갈래·SW1b·SW1 열린 캐시 요청·R6)은
       「본문 없음」 을 단언한다. 이 판이 뒤 단계가 실패할 때 물러설 자리다.
+    - **S1(길 닦기 — 구현, 런타임 플래그 `MARU_WEB_SW_CDP=1` 일 때만 붙인다)**: `net_body_sw.zig`(세션 표·세대·원시 메시지 가르기 — 끝이 꼭
+      `,"sessionId":"<16 진>"}` 이고 표에 있는 세션만 가로챈다), `net_body.zig`(원시 관찰자 `onRaw`·`onTarget`·`armWorkers`·`detachWorkers`),
+      `net_body_table`(기록이 멈추거나 새로 시작하는 모든 길이 `.detach_workers` 일을 낸다 — `stop`·`start`(다시 켬)·밸브·렌더러 죽음·닫힘; 켬
+      실패·등록 실패는 `stop` 을 탄다), `devtools_table.forbiddenMethod` 에 `Target.*`(`getTargetInfo`·`getTargets`·`activateTarget` 은 받는다).
+      워커 사건도 그 탭의 쏟아짐 밸브에 센다. 렌더러가 죽으면 떼고 새 문서에서 다시 건다(기록은 이어진다 — J5). 본문 동작은 그대로다.
+      판정 `--review-body-swcdp`(`network_body_swcdp_check.zig` — 워커가 시작마다 `/swd/boot` 를 부르고, 길마다 40 초 놀린 뒤 기록하지 않는 탭이
+      범위 안으로 옮겨 다시 떴는지 본다) 6/6(load 30–40): 기록 중에는 살아 있다(boot 그대로 — 플래그가 듣는다), 끔·두 번 켬 뒤 끔·밸브·렌더러
+      죽음·탭 닫힘은 멈췄다, 두 번 켬(떼고 다시 건다)과 렌더러 죽음 뒤 새 문서(다시 건다)는 살아 있다. 죽은 렌더러의 탭에 `setAutoAttach{false}` 를
+      보내도 host 가 살았다(공격 2 A11 — 실측). 순수 224(`net_body_sw` 셋·떼기의 길·`Target.*` 막기).

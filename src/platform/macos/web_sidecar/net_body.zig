@@ -12,6 +12,13 @@
 //! - 본문 frame 은 보내는 줄에 본문 하나의 자리를 먼저 잡는다(`events.Writer.reserveBody`) — 없으면 `busy`(maru 가 읽지 않는 동안 UI 스레드가
 //!   서지 않는다 — J7).
 //! - 시각은 mach_absolute_time 의 µs — Chromium 의 TimeTicks(CDP `timestamp`)와 같은 시계다(J1). `network.zig` 의 IO 스레드도 이것으로 찍는다.
+//! - 재검증 5 차 S1(서비스 워커 갈래 새 설계 — docs/plans/web-osr-backend.md): 런타임 플래그 `MARU_WEB_SW_CDP=1` 이면 `Network.enable` 의
+//!   **성공 답 뒤에** 페이지 세션에 `Target.setAutoAttach{autoAttach, flatten, waitForDebuggerOnStart:false, filter:[service_worker]}` 를 걸고
+//!   붙는 서비스 워커 세션마다 `Network.enable{0, 0, maxPostDataSize 1}`(본문을 받지 않는다 — 공격 2 A9). 그 세션의 사건은 원시 관찰자
+//!   (`on_dev_tools_message`)로만 온다(실측 p1 — CEF 파서는 sessionId 메시지를 넘기지 않는다) — 끝이 sessionId 인 메시지만 가로채고(표에 있는
+//!   세션이면 1) 나머지는 CEF 에 맡긴다. 워커 사건도 그 탭의 쏟아짐 밸브에 센다. 기록이 멈추는 모든 길(표의 `.detach_workers`)에서
+//!   `setAutoAttach{autoAttach:false}` — 떼지 않으면 그 출처의 서비스 워커가 놀아도 멈추지 않는다(실측 75 초). `waitForDebuggerOnStart` 는 늘
+//!   거짓(참이면 전용 워커·재시작한 서비스 워커가 멈췄다). 본문 동작은 아직 바뀌지 않는다(S3 에서 잇는다).
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -23,12 +30,17 @@ const registry_mod = @import("registry.zig");
 const table_mod = @import("net_body_table.zig");
 const events = @import("events.zig");
 const network = @import("network.zig"); // W9d② 적대 리뷰 3 회차 P1: CEF 기록의 물 높이(`cefWatermark`)
+const sw_mod = @import("net_body_sw.zig"); // 재검증 5 차 S1: 서비스 워커 세션의 표
 
 const msg = protocol.message;
 const BrowserId = msg.BrowserId;
 const gpa = std.heap.c_allocator;
 
 var table: table_mod.Table = .{};
+/// 재검증 5 차 S1: 붙은 서비스 워커 세션·세대(`net_body_sw`).
+var sw: sw_mod.Sw = .{};
+/// 재검증 5 차 S1: 서비스 워커 세션을 붙이는가(`MARU_WEB_SW_CDP=1` — 이 단계는 끈 채 들인다).
+var sw_cdp = false;
 var registrations: [registry_mod.capacity]?struct { cef_id: c_int, browser: BrowserId, reg: [*c]c.cef_registration_t } = @splat(null);
 var observer: c.cef_dev_tools_message_observer_t = undefined;
 var ready = false;
@@ -73,8 +85,10 @@ fn init() void {
     if (ready) return;
     ready = true;
     debug_log = std.c.getenv("MARU_WEB_TEST_BODY_LOG") != null;
+    if (std.c.getenv("MARU_WEB_SW_CDP")) |v| sw_cdp = std.mem.eql(u8, std.mem.span(v), "1");
     observer = object.zeroed(c.cef_dev_tools_message_observer_t);
     object.staticRefCounted(&observer.base);
+    observer.on_dev_tools_message = &onRaw;
     observer.on_dev_tools_event = &onEvent;
     observer.on_dev_tools_method_result = &onResult;
     observer.on_dev_tools_agent_detached = &onDetached;
@@ -183,9 +197,11 @@ pub fn cefEnd(browser: BrowserId, request: u64, ok: bool, received: u64) void {
 
 /// 주 프레임에 새 문서가 시작됐다(`network.documentStarted` — UI 스레드). W9d② 20 회 검증 N1: 앞 문서와 함께 끊긴 요청은 CDP 끝이 오지 않는다 —
 /// 표가 그 후보를 곧 `unavailable` 로 끝낸다(주기 task 가 돌고 있으면 — 후보가 있으면 돈다).
+/// 재검증 5 차 S1: 렌더러가 죽어 서비스 워커 세션을 뗐으면(기록은 이어진다 — J5) 새 문서에서 다시 건다.
 pub fn documentStarted(browser: BrowserId) void {
     dbg("doc-start b={d} t={d}", .{ browser, machUs() });
     table.documentStarted(browser, machUs());
+    if (sw_cdp and table.recording(browser) and sw.takeRearm(browser)) armWorkers(browser);
 }
 
 /// `network.zig` 의 보내는 task 가 상자를 비웠다 — CEF 기록이 IO 시각 `seen_us` 까지 모두 표에 닿았다(W9d② 적대 리뷰 3 회차 P1). 제 기록을
@@ -290,9 +306,15 @@ fn onEvent(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser
     defer object.releaseArg(browser);
     if (browser == null) return;
     const id = browserOfCef(browser.*.get_identifier.?(browser)) orelse return;
-    if (!table.recording(id)) return;
     var mb: [64]u8 = undefined;
     const method = library.readString(api(), method_s, &mb);
+    // 재검증 5 차 S1: 페이지 세션의 Target 사건(서비스 워커 세션이 붙고 떨어진다) — 기록이 멈춘(밸브) 탭에 온 것도 본다(곧 뗀다).
+    if (std.mem.startsWith(u8, method, "Target.")) {
+        const p: []const u8 = if (params != null) @as([*]const u8, @ptrCast(params.?))[0..params_size] else "";
+        onTarget(id, method, p);
+        return;
+    }
+    if (!table.recording(id)) return;
     if (!std.mem.startsWith(u8, method, "Network.")) return; // Page.* 도 온다(권한이 Page.enable 을 건다 — J7)
     const p: []const u8 = if (params != null) @as([*]const u8, @ptrCast(params.?))[0..params_size] else "";
     const now = machUs();
@@ -342,6 +364,9 @@ fn onResult(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browse
                 table.stop(gpa, s.browser) catch {};
                 runActions();
                 refreshAny();
+            } else if (sw_cdp and t.?.recording()) {
+                // 재검증 5 차 S1(공격 2 A1): auto-attach 는 켬의 **성공 답 뒤에만** — 켬이 실패하면 걸지 않는다.
+                armWorkers(s.browser);
             }
         }
         return;
@@ -411,6 +436,7 @@ fn runActions() void {
         table.swapActions(&list);
         if (list.items.len == 0) return;
         for (list.items) |a| switch (a) {
+            .detach_workers => |d| detachWorkers(d.browser, d.why),
             .end => |e| {
                 dbg("end req={d} state={s}", .{ e.request, @tagName(e.state) });
                 writer().send(.{ .net_body_end = .{ .browser = e.browser, .session = e.session, .request = e.request, .state = e.state, .flags = e.flags, .decoded = e.decoded } }) catch {};
@@ -463,4 +489,121 @@ fn tick(_: [*c]c.cef_task_t) callconv(.c) void {
     table.tickAt(gpa, machUs(), network.cefWatermark()) catch {};
     runActions();
     ensureTick();
+}
+
+// ── 재검증 5 차 S1: 서비스 워커 세션(계획 「서비스 워커 갈래 새 설계」) ─────────────────────────────────────────────────
+
+/// 벽시계 µs(`responseTime` 과 같은 시계 — C3a 는 벽시계끼리만 견준다).
+fn wallUs() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
+    return @as(i64, ts.sec) * 1_000_000 + @divTrunc(@as(i64, ts.nsec), 1000);
+}
+
+/// 그 탭의 페이지 세션에 서비스 워커 auto-attach 를 건다(걸었으면 다시 보내지 않는다).
+fn armWorkers(browser: BrowserId) void {
+    const entry = browsers.state.registry.byId(browser) orelse return;
+    if (!sw.arm(browser)) return;
+    dbg("sw-arm b={d}", .{browser});
+    sendCdp(entry, "Target.setAutoAttach", "{\"autoAttach\":true,\"waitForDebuggerOnStart\":false,\"flatten\":true,\"filter\":[{\"type\":\"service_worker\",\"exclude\":false},{\"exclude\":true}]}", browser, 0, false);
+}
+
+/// 표의 `.detach_workers` — 그 탭의 서비스 워커 세션을 모두 떼고 세대를 올린다. 걸려 있었으면 `setAutoAttach{autoAttach:false}`(실측: 답보다
+/// 먼저 붙은 세션마다 `detachedFromTarget` 이 오고 +28 초에 워커가 멈췄다). 닫힘·DevTools 떨어짐은 보낼 곳이 없다. 렌더러 죽음은 새 문서에서
+/// 다시 건다(`documentStarted`).
+fn detachWorkers(browser: BrowserId, why: table_mod.DetachWhy) void {
+    const was = sw.detachAll(browser);
+    dbg("sw-detach b={d} why={s} armed={}", .{ browser, @tagName(why), was });
+    if (why == .renderer_gone and was) sw.setRearm(browser);
+    if (why == .closed) {
+        sw.forget(browser);
+        return;
+    }
+    if (!was) return;
+    const entry = browsers.state.registry.byId(browser) orelse return;
+    sendCdp(entry, "Target.setAutoAttach", "{\"autoAttach\":false,\"waitForDebuggerOnStart\":false}", browser, 0, false);
+}
+
+/// 세션 하나에 명령을 보낸다(번호는 본문 호출과 같은 대역 — 답은 원시 관찰자로 온다).
+fn sendSession(browser: BrowserId, sid: []const u8, method: []const u8, params: []const u8) i32 {
+    const entry = browsers.state.registry.byId(browser) orelse return 0;
+    const b: [*c]c.cef_browser_t = @ptrCast(@alignCast(entry.handle));
+    const host = b.*.get_host.?(b);
+    if (host == null) return 0;
+    defer object.release(host);
+    const id = nextId();
+    var jb: [512]u8 = undefined;
+    const json = std.fmt.bufPrint(&jb, "{{\"id\":{d},\"sessionId\":\"{s}\",\"method\":\"{s}\",\"params\":{s}}}", .{ id, sid, method, params }) catch return 0;
+    _ = host.*.send_dev_tools_message.?(host, json.ptr, json.len);
+    return id;
+}
+
+fn detachSession(browser: BrowserId, sid: []const u8) void {
+    const entry = browsers.state.registry.byId(browser) orelse return;
+    var pb: [160]u8 = undefined;
+    const params = std.fmt.bufPrint(&pb, "{{\"sessionId\":\"{s}\"}}", .{sid}) catch return;
+    sendCdp(entry, "Target.detachFromTarget", params, browser, 0, false);
+}
+
+/// 페이지 세션의 `Target.attachedToTarget`·`detachedFromTarget`.
+fn onTarget(browser: BrowserId, method: []const u8, p: []const u8) void {
+    const attached = std.mem.eql(u8, method, "Target.attachedToTarget");
+    if (!attached and !std.mem.eql(u8, method, "Target.detachedFromTarget")) return;
+    var parsed = std.json.parseFromSlice(std.json.Value, gpa, p, .{}) catch return;
+    defer parsed.deinit();
+    const v = parsed.value;
+    if (v != .object) return;
+    const sid_v = v.object.get("sessionId") orelse return;
+    if (sid_v != .string) return;
+    const sid = sid_v.string;
+    if (!attached) {
+        dbg("sw-detached b={d} sid={s}", .{ browser, sid });
+        sw.detached(sid);
+        return;
+    }
+    var kind: []const u8 = "";
+    var target_id: []const u8 = "";
+    if (v.object.get("targetInfo")) |ti| if (ti == .object) {
+        if (ti.object.get("type")) |x| if (x == .string) {
+            kind = x.string;
+        };
+        if (ti.object.get("targetId")) |x| if (x == .string) {
+            target_id = x.string;
+        };
+    };
+    // 기록하는 탭이고 걸어 둔 auto-attach 의 서비스 워커면 둔다 — 아니면(밸브로 멈춤·떼는 중·옛 세대·다른 꼴) 곧 뗀다(공격 2 A1).
+    const keep = sw_cdp and table.recording(browser) and std.mem.eql(u8, kind, "service_worker") and sw.attached(browser, sid, target_id) == .keep;
+    dbg("sw-attached b={d} sid={s} type={s} target={s} keep={}", .{ browser, sid, kind, target_id, keep });
+    if (!keep) return detachSession(browser, sid);
+    const eid = sendSession(browser, sid, "Network.enable", "{\"maxTotalBufferSize\":0,\"maxResourceBufferSize\":0,\"maxPostDataSize\":1}");
+    sw.noteEnable(sid, eid);
+    // waitForDebuggerOnStart 는 거짓이라 기다리는 것이 없다 — CEF 가 바뀌어도 멈추지 않게 놓는다(해가 없다).
+    _ = sendSession(browser, sid, "Runtime.runIfWaitingForDebugger", "{}");
+}
+
+/// 원시 관찰자 — 서비스 워커 세션의 메시지(끝이 sessionId)만 가로챈다. 페이지 세션의 것은 0 을 돌려 CEF 가 풀게 한다(`onEvent`·`onResult`).
+fn onRaw(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t, message: ?*const anyopaque, size: usize) callconv(.c) c_int {
+    defer object.releaseArg(browser);
+    if (browser == null or message == null) return 0;
+    const m = @as([*]const u8, @ptrCast(message.?))[0..size];
+    const sid = sw_mod.sessionTail(m) orelse return 0;
+    // 모르는·옛 세대의 세션도 삼킨다 — CEF 파서는 어차피 넘기지 않는다(실측 p1 0/285).
+    const s = sw.live(sid) orelse return 1;
+    const id = browserOfCef(browser.*.get_identifier.?(browser)) orelse return 1;
+    if (s.browser != id) return 1;
+    if (sw_mod.resultId(m)) |rid| {
+        const ok = sw_mod.resultOk(m);
+        _ = sw.result(sid, rid, ok, wallUs());
+        dbg("sw-result b={d} sid={s} id={d} ok={}", .{ id, sid, rid, ok });
+        return 1;
+    }
+    const method = sw_mod.eventMethod(m) orelse return 1;
+    if (std.mem.eql(u8, method, "Inspector.targetReloadedAfterCrash") or std.mem.eql(u8, method, "Inspector.targetCrashed")) sw.reloaded(sid);
+    if (debug_log) dbg("sw-ev b={d} sid={s} epoch={d} method={s} t={d} head={s}", .{ id, sid, s.epoch, method, machUs(), m[0..@min(m.len, 240)] });
+    // 쏟아짐 밸브는 워커 사건도 센다(공격 2 A9 — 같은 사건이 기록하는 탭마다 온다).
+    if (table.recording(id)) {
+        table.cdpEvent(gpa, id, null, machUs()) catch {};
+        runActions();
+    }
+    return 1;
 }

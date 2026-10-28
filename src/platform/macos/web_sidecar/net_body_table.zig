@@ -1182,7 +1182,14 @@ pub const Action = union(enum) {
     end: struct { browser: BrowserId, session: u32, request: u64, state: State, flags: Flags = .{}, decoded: u64 = 0 },
     /// 쏟아짐 밸브가 그 탭의 기록을 멈췄다 — `Network.disable` 을 보내고 maru 에 알린다.
     pause: struct { browser: BrowserId, session: u32 },
+    /// 재검증 5 차 S1(서비스 워커 갈래 새 설계 — 공격 2 A1): 그 탭의 기록이 멈추거나 새로 시작한다 — 붙은 서비스 워커 세션을 모두 뗀다
+    /// (`net_body.detachWorkers` — 걸어 둔 auto-attach 를 끈다). 떼지 않으면 그 출처의 서비스 워커가 탭이 닫힐 때까지 놀아도 멈추지 않는다.
+    /// 기록이 멈추는 모든 길이 이 일을 낸다: 끔·켬 실패·등록 실패(`stop`), 다시 켬(`start`), 쏟아짐 밸브, 렌더러 죽음, 탭 닫힘·DevTools 떨어짐.
+    detach_workers: struct { browser: BrowserId, why: DetachWhy },
 };
+
+/// 재검증 5 차 S1: 떼는 까닭 — 닫힘이면 보낼 곳이 없다(세션이 이미 죽었다), 렌더러 죽음이면 새 문서에서 다시 건다.
+pub const DetachWhy = enum { stop, restart, pause, renderer_gone, closed };
 
 pub const Table = struct {
     tabs: [max_tabs]Tab = @splat(.{}),
@@ -1319,6 +1326,7 @@ pub const Table = struct {
         if (session == 0) return false;
         if (self.tabOf(browser)) |t| {
             try self.finishAll(gpa, t, .recording_stopped);
+            try self.emit(gpa, .{ .detach_workers = .{ .browser = browser, .why = .restart } });
             t.session = session;
             t.paused = false;
             t.flood_over = 0;
@@ -1339,6 +1347,7 @@ pub const Table = struct {
     pub fn stop(self: *Table, gpa: std.mem.Allocator, browser: BrowserId) std.mem.Allocator.Error!void {
         const t = self.tabOf(browser) orelse return;
         try self.finishAll(gpa, t, .recording_stopped);
+        try self.emit(gpa, .{ .detach_workers = .{ .browser = browser, .why = .stop } });
         t.deinit(gpa);
         t.* = .{};
     }
@@ -1348,12 +1357,14 @@ pub const Table = struct {
     pub fn rendererGone(self: *Table, gpa: std.mem.Allocator, browser: BrowserId) std.mem.Allocator.Error!void {
         const t = self.tabOf(browser) orelse return;
         try self.finishAll(gpa, t, .detached);
+        try self.emit(gpa, .{ .detach_workers = .{ .browser = browser, .why = .renderer_gone } });
     }
 
     /// 브라우저가 닫힌다 — `detached` 로 끝내고 자리를 비운다.
     pub fn closed(self: *Table, gpa: std.mem.Allocator, browser: BrowserId) std.mem.Allocator.Error!void {
         const t = self.tabOf(browser) orelse return;
         try self.finishAll(gpa, t, .detached);
+        try self.emit(gpa, .{ .detach_workers = .{ .browser = browser, .why = .closed } });
         t.deinit(gpa);
         t.* = .{};
     }
@@ -1684,6 +1695,7 @@ pub const Table = struct {
         if (t.flood_count == flood_events_per_s + 1 and t.flood_over + 1 >= flood_seconds) {
             try self.finishAll(gpa, t, .recording_stopped);
             t.paused = true;
+            try self.emit(gpa, .{ .detach_workers = .{ .browser = t.browser, .why = .pause } });
             try self.emit(gpa, .{ .pause = .{ .browser = t.browser, .session = t.session } });
             return true;
         }
@@ -2998,6 +3010,7 @@ const H = struct {
             .end => |e| try self.noteEnd(e.request, e.state),
             .fetch => try self.fetches.append(gpa_t, a),
             .pause => self.paused += 1,
+            .detach_workers => {},
         };
     }
 
@@ -9393,4 +9406,71 @@ test "W9d② v20k K4·5 차 S0: 값 — 서비스 워커가 그대로 넘긴 다
         try testing.expectEqual(n, amb);
     }
     std.debug.print("\n", .{});
+}
+
+// ── 재검증 5 차 S1: 떼기의 길(공격 2 A1) ──
+
+fn detachCount(list: []const Action, browser: BrowserId, why: DetachWhy) usize {
+    var n: usize = 0;
+    for (list) |a| switch (a) {
+        .detach_workers => |d| if (d.browser == browser and d.why == why) {
+            n += 1;
+        },
+        else => {},
+    };
+    return n;
+}
+
+test "W9d② 재검증 5 차 S1: 기록이 멈추거나 새로 시작하는 모든 길이 서비스 워커 세션을 떼라는 일을 낸다 — 끔·켬 실패·등록 실패·다시 켬·쏟아짐 밸브·렌더러 죽음·닫힘" {
+    var t: Table = .{};
+    defer t.deinit(gpa_t);
+    var list: std.ArrayList(Action) = .empty;
+    defer list.deinit(gpa_t);
+    // 끔(켬 실패·등록 실패도 `stop` 을 탄다 — net_body.record·onResult).
+    _ = try t.start(gpa_t, 5, 1);
+    try t.stop(gpa_t, 5);
+    t.swapActions(&list);
+    try testing.expectEqual(@as(usize, 1), detachCount(list.items, 5, .stop));
+    list.clearRetainingCapacity();
+    // 기록하지 않던 탭의 끔은 뗄 것이 없다(걸지 않았다 — 일은 내도 net_body 가 걸린 것만 뗀다).
+    try t.stop(gpa_t, 5);
+    t.swapActions(&list);
+    try testing.expectEqual(@as(usize, 0), list.items.len);
+    // 켠 채 다시 켬 — 앞 세션의 세션을 떼고(새 켬 답 뒤에 다시 건다).
+    _ = try t.start(gpa_t, 5, 1);
+    _ = try t.start(gpa_t, 5, 2);
+    t.swapActions(&list);
+    try testing.expectEqual(@as(usize, 1), detachCount(list.items, 5, .restart));
+    list.clearRetainingCapacity();
+    // 렌더러 죽음 — 기록은 이어진다(J5).
+    try t.rendererGone(gpa_t, 5);
+    t.swapActions(&list);
+    try testing.expectEqual(@as(usize, 1), detachCount(list.items, 5, .renderer_gone));
+    try testing.expect(t.recording(5));
+    list.clearRetainingCapacity();
+    // 쏟아짐 밸브 — 떼기가 멈춤 알림보다 먼저.
+    var now: i64 = 10_000_000;
+    var paused = false;
+    while (!paused and now < 20_000_000) : (now += 100) {
+        try t.cdpEvent(gpa_t, 5, null, now);
+        for (t.actions.items) |a| if (a == .pause) {
+            paused = true;
+        };
+    }
+    try testing.expect(paused);
+    t.swapActions(&list);
+    try testing.expectEqual(@as(usize, 1), detachCount(list.items, 5, .pause));
+    var first_detach: usize = 0;
+    var first_pause: usize = 0;
+    for (list.items, 0..) |a, i| switch (a) {
+        .detach_workers => first_detach = i,
+        .pause => first_pause = i,
+        else => {},
+    };
+    try testing.expect(first_detach < first_pause);
+    list.clearRetainingCapacity();
+    // 닫힘(탭 닫힘·DevTools 떨어짐).
+    try t.closed(gpa_t, 5);
+    t.swapActions(&list);
+    try testing.expectEqual(@as(usize, 1), detachCount(list.items, 5, .closed));
 }

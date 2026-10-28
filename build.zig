@@ -7149,8 +7149,8 @@ pub fn build(b: *std.Build) void {
             .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "syntax", .module = syntax_mod } },
         }) });
         const run_parse_runtime = b.addRunArtifact(parse_runtime_tests);
-        run_parse_runtime.addArg("--maru-expect-tests=8");
-        run_parse_runtime.addArg("--maru-expect-passed=8");
+        run_parse_runtime.addArg("--maru-expect-tests=10");
+        run_parse_runtime.addArg("--maru-expect-passed=10");
         b.step("test-editor-parse-runtime", "Verify main-owned parse document lifetimes").dependOn(&run_parse_runtime.step);
         test_step.dependOn(&run_parse_runtime.step);
         macos_only_test_step.dependOn(&run_parse_runtime.step);

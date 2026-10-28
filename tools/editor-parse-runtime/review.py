@@ -19,7 +19,7 @@ def main():
     p = argparse.ArgumentParser()
     for name in ('output','deps','cache'):
         p.add_argument('--'+name, type=Path, required=True)
-    p.add_argument("--scope", choices=("lifetime", "observation"), default="lifetime")
+    p.add_argument("--scope", choices=("lifetime", "observation", "leases"), default="lifetime")
     args = p.parse_args()
     out, deps = args.output.resolve(), args.deps.resolve()
     if out.exists() or out == ROOT or ROOT in out.parents or not deps.is_dir():
@@ -55,7 +55,17 @@ def main():
             'revision_ignored': (RUNTIME, 'opened.file.revision == tag.input.revision', '(opened.file.revision == tag.input.revision or true)'),
             'retry_keeps_failure': (RUNTIME, '        value.outcome = null;', '        // 결함 주입: 이전 완료 상태 보존'),
         }
+    if args.scope == "leases":
+        mutants = {
+            'job_reference_missing': (WORKER, '        self.job.main_refs = refs;', '        _ = refs;'),
+            'total_reference_missing': (WORKER, '        state.held = held;', '        _ = held;'),
+            'retired_before_last_return': (WORKER, 'if (self.job.main_refs == 0) state.retiring.push(self.job);', 'state.retiring.push(self.job);'),
+            'shutdown_ignores_consumer': (RUNTIME, 'if (self.service.heldCount() != owned) return error.ResultsHeld;', 'if (self.service.heldCount() != owned and false) return error.ResultsHeld;'),
+            'acquire_ignores_current_input': (RUNTIME, 'const current = self.ready(identity, grammar, language) orelse return null;', 'const current = if (self.find(identity)) |entry| if (entry.current) |*value| value else return null else return null; _ = grammar; _ = language;'),
+        }
     command = ['mise','exec','--','zig','build','test-editor-parse-runtime','test-editor-parse-host','test-editor-parse-main-queue','--cache-dir',str(args.cache.resolve()),'-j2','--verbose']
+    if args.scope == "leases":
+        command.insert(command.index('--cache-dir'), 'test-editor-parse-worker')
     env = dict(os.environ, ZIG_LOCAL_PKG_DIR=str(deps))
     rows = []
     try:
@@ -71,9 +81,9 @@ def main():
             with log.open('xb') as stream:
                 result = subprocess.run(command,cwd=source,env=env,stdout=stream,stderr=subprocess.STDOUT,timeout=900)
             text = log.read_text()
-            tests = list(dict.fromkeys(re.findall(r'info\(verbose\): [^\n]*?(\S+/test) --maru-expect-tests=(?:6|8)',text)))
+            tests = list(dict.fromkeys(re.findall(r'info\(verbose\): [^\n]*?(\S+/test) --maru-expect-tests=(?:6|10|19)',text)))
             natives = re.findall(r'info\(verbose\): (\S+/maru-parse-main-queue)\s*$',text,re.M)
-            if len(tests)!=2 or not natives: raise RuntimeError('missing actual executions: '+name)
+            if len(tests)!=(3 if args.scope == 'leases' else 2) or not natives: raise RuntimeError('missing actual executions: '+name)
             archived = {}
             for i, binary in enumerate(tests+[natives[-1]]):
                 path = Path(binary)
@@ -82,10 +92,12 @@ def main():
                 shutil.copy2(path,target)
                 archived[target.name] = sha(target)
             if name in mutants:
-                if result.returncode==0 or not re.search(r'FAIL \(Test(?:UnexpectedResult|ExpectedEqual)\)',text):
+                if result.returncode==0 or not re.search(r'FAIL \(Test(?:UnexpectedResult|ExpectedEqual|ExpectedError)\)',text):
                     raise RuntimeError('semantic fault survived: '+name)
-            elif result.returncode or (text.count('All 6 tests passed.')!=1 or text.count('All 8 tests passed.')!=1) or 'PARSE_MAIN_QUEUE accepted=2 main_thread=1 closed_document_reaped=1 late_delivery=1' not in text:
+            elif result.returncode or (text.count('All 6 tests passed.')!=1 or text.count('All 10 tests passed.')!=1) or 'PARSE_MAIN_QUEUE accepted=2 main_thread=1 closed_document_reaped=1 late_delivery=1' not in text:
                 raise RuntimeError('normal control failed: '+name)
+            if args.scope == 'leases' and name.startswith('control') and (text.count('All 19 tests passed.') != 1 or 'retained_result=1' not in text):
+                raise RuntimeError('missing retained-result control: '+name)
             rows.append(dict(name=name,returncode=result.returncode,source_sha256=source_hash,binaries=archived,log_sha256=sha(log)))
             for file,content in baseline.items(): (source/file).write_text(content)
     finally:

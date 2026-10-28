@@ -2227,3 +2227,5 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 - 파싱 main queue·문서 수명: `mise exec -- zig build test-editor-parse-runtime test-editor-parse-host test-editor-parse-main-queue -j2`(macOS). [실행 범위와 결함 대조](../tools/editor-parse-runtime/README.md). 일반 입력·표시 경로 전환 전 단계다.
 
 - 파싱 요청 상태 조회 검증: `python3 tools/editor-parse-runtime/review.py --scope observation --output <새 외부 경로> --deps <기존 의존성 경로> --cache <외부 캐시>`. 일반 입력 경로 전환 없이 대기·실패·재시도·옛 결과 차단을 검사한다.
+
+- 파싱 결과 보유·반환: `python3 tools/editor-parse-runtime/review.py --scope leases --output <새 외부 경로> --deps <기존 의존성 경로> --cache <외부 캐시>`. 소비자 반환 전 퇴역·종료와 현재 입력 검증을 실제 worker C 장벽 및 Apple 전달로 검사한다.

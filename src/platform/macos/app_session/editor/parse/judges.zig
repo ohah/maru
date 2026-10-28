@@ -48,7 +48,7 @@ test "parse runtime 마지막 뷰가 닫혀도 실제 Snapshot 반환까지 문�
     }
     const identity = docs.identity(view).?;
     var owner = try Runtime.init(a, .{});
-    defer owner.deinit();
+    defer owner.deinit() catch unreachable;
     _ = try owner.submit(view, grammar, .zig);
     try waitReady(&owner, identity);
     const pin = owner.entries.items[0].lease;
@@ -80,7 +80,7 @@ test "parse runtime 새 요청 없이 본문이 바뀌어도 이전 완료를 �
     defer _ = docs.release(view) catch unreachable;
     const identity = docs.identity(view).?;
     var owner = try Runtime.init(a, .{});
-    defer owner.deinit();
+    defer owner.deinit() catch unreachable;
     _ = try owner.submit(view, grammar, .zig);
     waitCompletion(&owner);
     try edit(&docs, view);
@@ -104,7 +104,7 @@ test "parse runtime 공유 뷰 하나의 닫기는 파싱을 취소하지 않고
     defer _ = docs.release(second) catch unreachable;
     const identity = docs.identity(first).?;
     var owner = try Runtime.init(a, .{});
-    defer owner.deinit();
+    defer owner.deinit() catch unreachable;
     const prior = try owner.submit(first, grammar, .zig);
     try waitReady(&owner, identity);
     try std.testing.expect(!try docs.release(first));
@@ -131,7 +131,7 @@ test "parse runtime Job 준비 OOM은 이전 수락을 숨기고 본문과 이�
     const identity = docs.identity(view).?;
     var failing = std.testing.FailingAllocator.init(a, .{});
     var owner = try Runtime.init(failing.allocator(), .{});
-    defer owner.deinit();
+    defer owner.deinit() catch unreachable;
     _ = try owner.submit(view, grammar, .zig);
     try waitReady(&owner, identity);
     failing.fail_index = failing.alloc_index;
@@ -209,7 +209,7 @@ test "parse runtime 최초 문서 등록 OOM은 request 참조를 남기지 않�
     }
     var failing = std.testing.FailingAllocator.init(a, .{});
     var owner = try Runtime.init(failing.allocator(), .{});
-    defer owner.deinit();
+    defer owner.deinit() catch unreachable;
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(error.OutOfMemory, owner.submit(view, grammar, .zig));
     try std.testing.expectEqual(@as(usize, 0), owner.entries.items.len);
@@ -261,7 +261,7 @@ test "parse runtime 실패 완료와 게시 대기를 구분하고 같은 입력
     const identity = docs.identity(view).?;
     var copies = std.testing.FailingAllocator.init(std.heap.page_allocator, .{ .fail_index = 0 });
     var owner = try Runtime.init(a, .{ .copy_allocator = copies.allocator() });
-    defer owner.deinit();
+    defer owner.deinit() catch unreachable;
     try std.testing.expect(owner.observe(identity, grammar, .zig) == .none);
     const first = try owner.submit(view, grammar, .zig);
     try std.testing.expectEqual(first, owner.observe(identity, grammar, .zig).pending);
@@ -295,7 +295,7 @@ test "parse runtime 늦은 취소 완료는 같은 본문의 새 언어 설정 �
     const identity = docs.identity(view).?;
     var copies: CopyBarrier = .{};
     var owner = try Runtime.init(a, .{ .copy_allocator = copies.allocator() });
-    defer owner.deinit();
+    defer owner.deinit() catch unreachable;
     defer copies.released.store(true, .release);
     defer copies.first_released.store(true, .release);
     _ = try owner.submit(view, grammar, .zig);
@@ -323,4 +323,81 @@ test "parse runtime 늦은 취소 완료는 같은 본문의 새 언어 설정 �
         std.Thread.yield() catch {};
     }
     try std.testing.expect(owner.observe(identity, grammar, .zig) == .none);
+}
+
+// 잘못 수락하는 결함에서도 반환한 참조를 먼저 정산해 검사 실패의 누수와 섞이지 않게 한다.
+fn expectNoAcquire(owner: *Runtime, identity: registry.DocumentIdentity, g: dispatch.request.Grammar, language: syntax.Language) !void {
+    var result = try owner.acquire(identity, g, language);
+    const rejected = result == null;
+    if (result) |*held| held.release();
+    try std.testing.expect(rejected);
+}
+test "parse runtime 보유한 이전 결과는 새 결과 설치와 종료 거절 뒤에도 살아 있다" {
+    var docs: registry.Registry = .{ .allocator = a };
+    defer docs.deinit() catch unreachable;
+    const view = try document(&docs);
+    defer _ = docs.release(view) catch unreachable;
+    const identity = docs.identity(view).?;
+    var owner = try Runtime.init(a, .{});
+    defer owner.deinit() catch unreachable;
+    try expectNoAcquire(&owner, identity, grammar, .zig);
+    const first = try owner.submit(view, grammar, .zig);
+    try waitReady(&owner, identity);
+    var held = (try owner.acquire(identity, grammar, .zig)).?;
+    var live = true;
+    defer if (live) held.release();
+    try std.testing.expectError(error.ResultsHeld, owner.canDeinit());
+    try std.testing.expectError(error.ResultsHeld, owner.deinit());
+    try std.testing.expectEqual(first, owner.ready(identity, grammar, .zig).?.tag());
+    const old_tree = held.provider().?.tree.?;
+    var cold = syntax.Provider.init(docs.get(view).?.opened.?.file.content, .zig, 0).?;
+    defer cold.deinit();
+    try edit(&docs, view);
+    try expectNoAcquire(&owner, identity, grammar, .zig);
+    const latest = try owner.submit(view, grammar, .zig);
+    try waitReady(&owner, identity);
+    try std.testing.expectEqual(latest, owner.ready(identity, grammar, .zig).?.tag());
+    try std.testing.expectEqual(first, held.tag());
+    try std.testing.expect(syntax.testing.equal(cold.tree.?, old_tree) != null);
+    var wrong = grammar;
+    wrong.generation += 1;
+    try expectNoAcquire(&owner, identity, wrong, .zig);
+    try expectNoAcquire(&owner, identity, grammar, .json);
+    held.release();
+    live = false;
+}
+test "parse runtime 마지막 뷰가 닫혀도 소비자 반환 전에는 문서와 종료 소유자를 지킨다" {
+    var docs: registry.Registry = .{ .allocator = a };
+    defer docs.deinit() catch unreachable;
+    const view = try document(&docs);
+    var open = true;
+    defer {
+        if (open) _ = docs.release(view) catch unreachable;
+    }
+    const identity = docs.identity(view).?;
+    var owner = try Runtime.init(a, .{});
+    defer owner.deinit() catch unreachable;
+    _ = try owner.submit(view, grammar, .zig);
+    try waitReady(&owner, identity);
+    var held = (try owner.acquire(identity, grammar, .zig)).?;
+    var live = true;
+    defer if (live) held.release();
+    const keeper = owner.entries.items[0].lease;
+    _ = try docs.release(view);
+    open = false;
+    owner.sweep();
+    try std.testing.expectError(error.ResultsHeld, owner.canDeinit());
+    try std.testing.expectError(error.ResultsHeld, owner.deinit());
+    try std.testing.expect(docs.get(keeper) != null);
+    try expectNoAcquire(&owner, identity, grammar, .zig);
+    try std.testing.expect(held.provider() != null);
+    held.release();
+    live = false;
+    const deadline = now() + 10_000_000_000;
+    while (docs.get(keeper) != null) {
+        try std.testing.expect(now() < deadline);
+        owner.poll();
+        std.Thread.yield() catch {};
+    }
+    try owner.canDeinit();
 }

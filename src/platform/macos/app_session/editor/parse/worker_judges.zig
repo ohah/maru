@@ -201,12 +201,64 @@ test "parse worker 실행과 대기가 있어도 종료는 모든 소유 자료�
     defer other.deinit();
     var service = try Service.init(a, .{});
     defer service.deinit() catch unreachable;
+    // 작은 결과를 세 소비자가 보유하고, 다음 C 작업을 멈춰 퇴역 큐 공개 시점을 판정한다.
+    var initial_gate: request.Gate = .{};
+    var initial_input = test_input;
+    initial_input.document.slot += 2;
+    _ = try testQueue(&service, &initial_gate, initial_input, other, null);
+    const original = testTake(&service);
+    var handles = [_]Completion{ original, try original.retain(), try original.retain() };
+    var live = [_]bool{ true, true, true };
+    defer for (&handles, live) |*handle, active| {
+        if (active) handle.release();
+    };
+    const refs_after_retain = original.job.main_refs;
+    const held_after_retain = service.heldCount();
+    // 잘못된 참조 수를 주입한 실행도 보유 핸들 세 개를 안전하게 반납한 뒤 실패를 보고한다.
+    original.job.main_refs = 3;
+    service.state.held = 3;
+    try std.testing.expectEqual(@as(usize, 3), refs_after_retain);
+    try std.testing.expectEqual(@as(usize, 3), held_after_retain);
+    original.job.main_refs = std.math.maxInt(usize);
+    const overflow_refs = original.retain();
+    original.job.main_refs = 3;
+    try std.testing.expectError(error.ReferenceOverflow, overflow_refs);
+    try std.testing.expectEqual(@as(usize, 3), service.heldCount());
+    service.state.held = std.math.maxInt(usize);
+    const overflow_held = original.retain();
+    service.state.held = 3;
+    try std.testing.expectError(error.ReferenceOverflow, overflow_held);
+    try std.testing.expectEqual(@as(usize, 3), original.job.main_refs);
     var pause: syntax.Cancellation.TestGate = .{};
     defer pause.release();
     var gate_a: request.Gate = .{};
     var gate_b: request.Gate = .{};
     _ = try testQueue(&service, &gate_a, test_input, first, &pause);
     try waitEntered(&pause);
+    handles[0].release();
+    live[0] = false;
+    handles[1].release();
+    live[1] = false;
+    try std.testing.expectEqual(@as(usize, 1), original.job.main_refs);
+    {
+        const state = service.state;
+        const io = worker.testing.io(state);
+        state.mutex.lockUncancelable(io);
+        defer state.mutex.unlock(io);
+        const premature = state.retiring.first != null;
+        // C 작업 장벽이 있으므로 잘못 게시한 노드는 아직 워커가 만지지 않았다. 검사 실패의 cleanup만 복구한다.
+        if (premature) state.retiring = .{};
+        try std.testing.expect(!premature);
+    }
+    handles[2].release();
+    live[2] = false;
+    {
+        const state = service.state;
+        const io = worker.testing.io(state);
+        state.mutex.lockUncancelable(io);
+        defer state.mutex.unlock(io);
+        try std.testing.expect(state.retiring.first == original.job);
+    }
     first.deinit();
     first_open = false;
     var input = test_input;

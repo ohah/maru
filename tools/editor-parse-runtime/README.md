@@ -68,3 +68,27 @@ acquire의 다섯 실제 결함을 컴파일·실행한다. runtime 10개·host 
 전달을 요구한다. worker C 장벽 아래에서 큐 게시를 검사하고, 잘못된 참조 수와 조기 게시를 주입한
 경우에도 테스트 cleanup만 복구해 assertion 결과와 별개 누수/이중 해제를 섞지 않는다.
 Apple probe의 `retained_result=1`은 실제 메인 큐 수락 후 보유 중 종료 거절·반환 후 종료 증거다.
+
+## 실제 구문 뷰 상태 설치
+
+`prepareView`는 결과 보유와 독립 native 복사를 준비하고 `installView`는 실제 view lease와
+현재 요청을 다시 검증해 syntax.State에 이동한다. 캐시를 무효화하되 배열 용량을 유지하고,
+기존 뷰 native 자원 → 완료 보유 참조 순서로 반환한다. legacy provider는 교체하지 않는다.
+일반 입력과 렌더 경로 전환·설치 뒤의 접힘 표/심볼 피커/redraw는 후속이다.
+
+```sh
+mise exec -- zig build test-editor-parse-view test-editor-parse-runtime test-editor-parse-host test-editor-parse-main-queue -j2
+python3 tools/editor-parse-runtime/review.py --scope view --output /tmp/new-parse-view --deps /path/to/deps --cache /path/to/cache
+```
+
+전용 target은 실제 뷰 상태 검사 4개와 root 초기화 1개(5개)를 실행한다. 색과 전체 native 노드
+좌표를 cold 결과와 대조하고 실제 접힘·괄호·심볼 캐시를 채운 뒤 교체를 검사한다. 준비 뒤 같은
+본문 재요청·편집·다른 문서/참조와 legacy/빈 문서, split 보유와 overflow도 검사한다.
+`--scope view`는 낡은 준비 설치·Provider 얕은 복사·잘못된 입력 stamp·괄호 무효화 누락·뷰 반환
+누락을 실제 컴파일·실행한다. 잘못된 얕은 복사/반환 누락에서는 테스트 cleanup만 복구해
+검사 실패와 이중 해제·누수를 섞지 않는다. 컴파일 실패를 탐지로 세지 않는다.
+
+Runtime native 모듈은 `editor/parse.zig`를, 판정은 `editor/parse_test.zig`를 루트로 사용한다.
+기존 구현 폴더를 유지하면서 같은 editor의 syntax.State를 상대 import할 수 있는 모듈 경계다.
+Apple probe의 `installed_view=1`은 실제 메인 큐 완료 뒤 설치·뷰 보유 중 종료 거절·반환 후 종료를
+검사하며 제품 화면/HID·IME의 시각 증거는 아니다. native malloc 실패 전수 검증도 아니다.

@@ -13,13 +13,15 @@ WORKER = 'src/platform/macos/app_session/editor/parse/worker.zig'
 RUNTIME = 'src/platform/macos/app_session/editor/parse/runtime.zig'
 DISPATCH = 'src/platform/macos/app_session/editor/parse/dispatch.zig'
 REGISTRY = 'src/session/editor/document_registry.zig'
+VIEW = 'src/platform/macos/app_session/editor/parse/view.zig'
+COLORS = 'src/platform/macos/app_session/editor/syntax.zig'
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 def main():
     p = argparse.ArgumentParser()
     for name in ('output','deps','cache'):
         p.add_argument('--'+name, type=Path, required=True)
-    p.add_argument("--scope", choices=("lifetime", "observation", "leases"), default="lifetime")
+    p.add_argument("--scope", choices=("lifetime", "observation", "leases", "view"), default="lifetime")
     args = p.parse_args()
     out, deps = args.output.resolve(), args.deps.resolve()
     if out.exists() or out == ROOT or ROOT in out.parents or not deps.is_dir():
@@ -36,10 +38,11 @@ def main():
         shutil.copy2(item,target)
         if name.startswith('src/') or name in ('build.zig','build.zig.zon','tools/simple_test_runner.zig'):
             inventory[name] = sha(item)
-    for name in (WORKER,RUNTIME,DISPATCH,REGISTRY):
+    leaves = (WORKER,RUNTIME,DISPATCH,REGISTRY) + ((VIEW,COLORS) if args.scope == "view" else ())
+    for name in leaves:
         if name not in inventory: raise RuntimeError('stage new source first: '+name)
     (source/'zig-pkg').symlink_to(deps, target_is_directory=True)
-    baseline = {name:(source/name).read_text() for name in (WORKER,RUNTIME,DISPATCH,REGISTRY)}
+    baseline = {name:(source/name).read_text() for name in leaves}
     mutants = {
         'keeper_released_before_reap': (WORKER,'if (std.meta.eql(job.tag.input.document, document)) return true;','if (std.meta.eql(job.tag.input.document, document)) return false;'),
         'stale_revision_accepted': (RUNTIME,'opened.file.revision == tag.input.revision','(opened.file.revision == tag.input.revision or true)'),
@@ -63,7 +66,18 @@ def main():
             'shutdown_ignores_consumer': (RUNTIME, 'if (self.service.heldCount() != owned) return error.ResultsHeld;', 'if (self.service.heldCount() != owned and false) return error.ResultsHeld;'),
             'acquire_ignores_current_input': (RUNTIME, 'const current = self.ready(identity, grammar, language) orelse return null;', 'const current = if (self.find(identity)) |entry| if (entry.current) |*value| value else return null else return null; _ = grammar; _ = language;'),
         }
+    if args.scope == "view":
+        mutants = {
+            'stale_preparation_installed': (VIEW, 'if (!std.meta.eql(current.tag(), held.tag())) return false;', 'if (!std.meta.eql(current.tag(), held.tag()) and false) return false;'),
+            'provider_shallow_copy': (VIEW, 'source.copyReady(language) orelse return error.NativeCopyFailed', 'source.*'),
+            'wrong_input_stamp': (COLORS, '.document = input.document, .revision = input.revision, .provider_identity', '.document = input.document, .revision = input.revision +| 1, .provider_identity'),
+            'bracket_cache_not_invalidated': (COLORS, '        self.folds.invalidate();\n        self.brackets.invalidate();', '        self.folds.invalidate();\n        // 결함 주입: 이전 괄호 캐시를 현재로 오인'),
+            'view_reference_not_returned': (COLORS, '        if (self.parse_result) |*result| result.release();', '        // 결함 주입: 뷰 완료 보유 참조 반환 누락'),
+        }
     command = ['mise','exec','--','zig','build','test-editor-parse-runtime','test-editor-parse-host','test-editor-parse-main-queue','--cache-dir',str(args.cache.resolve()),'-j2','--verbose']
+    if args.scope == "view":
+        command.insert(command.index('--cache-dir'), 'test-editor-parse-view')
+        command.insert(command.index('--cache-dir'), 'test-editor-parse-view-regression')
     if args.scope == "leases":
         command.insert(command.index('--cache-dir'), 'test-editor-parse-worker')
     env = dict(os.environ, ZIG_LOCAL_PKG_DIR=str(deps))
@@ -81,9 +95,9 @@ def main():
             with log.open('xb') as stream:
                 result = subprocess.run(command,cwd=source,env=env,stdout=stream,stderr=subprocess.STDOUT,timeout=900)
             text = log.read_text()
-            tests = list(dict.fromkeys(re.findall(r'info\(verbose\): [^\n]*?(\S+/test) --maru-expect-tests=(?:6|10|19)',text)))
+            tests = list(dict.fromkeys(re.findall(r'info\(verbose\): [^\n]*?(\S+/test) --maru-expect-tests=(?:5|6|10|19|35)',text)))
             natives = re.findall(r'info\(verbose\): (\S+/maru-parse-main-queue)\s*$',text,re.M)
-            if len(tests)!=(3 if args.scope == 'leases' else 2) or not natives: raise RuntimeError('missing actual executions: '+name)
+            if len(tests)!=(4 if args.scope == 'view' else 3 if args.scope == 'leases' else 2) or not natives: raise RuntimeError('missing actual executions: '+name)
             archived = {}
             for i, binary in enumerate(tests+[natives[-1]]):
                 path = Path(binary)
@@ -98,6 +112,8 @@ def main():
                 raise RuntimeError('normal control failed: '+name)
             if args.scope == 'leases' and name.startswith('control') and (text.count('All 19 tests passed.') != 1 or 'retained_result=1' not in text):
                 raise RuntimeError('missing retained-result control: '+name)
+            if args.scope == 'view' and name.startswith('control') and (text.count('All 5 tests passed.') != 1 or text.count('All 35 tests passed.') != 1 or 'installed_view=1' not in text):
+                raise RuntimeError('missing actual view executions: '+name)
             rows.append(dict(name=name,returncode=result.returncode,source_sha256=source_hash,binaries=archived,log_sha256=sha(log)))
             for file,content in baseline.items(): (source/file).write_text(content)
     finally:

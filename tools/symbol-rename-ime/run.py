@@ -10,20 +10,22 @@ import subprocess
 import sys
 from prepare import load,prepare
 from server import describe_clangd,prepare_clangd
-from verify import CASES,SENTINEL,MAIN,OTHER,validate,validate_diagnostic
+from verify import CASES,SENTINEL,MAIN,OTHER,PREFIX,validate,validate_diagnostic
 
 HERE=Path(__file__).resolve().parent;REPO=HERE.parents[1]
 shared=load('symbol_first_save_runner',REPO/'tools/untitled-save-ime/run.py')
 base_launch=shared.base_launch
 
 
-def run(app,output,scene,capture_app,fake,server=None):
+def run(app,output,scene,capture_app,fake,server=None,unicode_prefix=False):
     def launch(binary,env,gui,**kwargs):
         root=Path(env['MARU_PALETTE_IME']);project=root/'project'
         subprocess.run(['/usr/bin/git','init','-q',str(project)],check=True,
             env=dict(PATH=os.environ['PATH'],HOME=str(root/'home'),GIT_CONFIG_NOSYSTEM='1'),timeout=15)
-        main=('// RENAMEFAIL\n' if scene=='server-error' else '')+MAIN
-        (project/'main.c').write_text(main);(project/'other.c').write_text(('int base(void);\n' if server else '')+OTHER)
+        prefix=PREFIX if unicode_prefix else ''
+        main=('// RENAMEFAIL\n' if scene=='server-error' else '')+prefix+MAIN
+        other=(prefix+'int base(void);\n' if server else '')+prefix+OTHER
+        (project/'main.c').write_text(main);(project/'other.c').write_text(other)
         if server:
             if describe_clangd(server['path'])!=server:raise ValueError('clangd changed before launch')
             prepare_clangd(project)
@@ -44,8 +46,8 @@ def run(app,output,scene,capture_app,fake,server=None):
         wrapper.chmod(0o700)
         config=Path(env['MARU_CONFIG']);config.write_text(config.read_text()+
             'lsp.enabled = true\nlsp.shell-environment = false\nlsp.repository-environment = false\nworkspace.restore = false\n')
-        env.update(MARU_NATIVE_EDITOR=str((project/'main.c').resolve()),MARU_LSP_SERVER_OVERRIDE=str(wrapper))
-        (root/'case.json').write_text(json.dumps(dict(scenario=scene,main=main,other=('int base(void);\n' if server else '')+OTHER,root=str(project.resolve()),server=server or {'kind':'controlled'}),ensure_ascii=False)+'\n')
+        env.update(MARU_NATIVE_EDITOR=str((project/'main.c').resolve()),MARU_LSP_SERVER_OVERRIDE=str(wrapper),MARU_SYMBOL_UNICODE='1' if unicode_prefix else '0')
+        (root/'case.json').write_text(json.dumps(dict(scenario=scene,main=main,other=other,unicode_prefix=unicode_prefix,root=str(project.resolve()),server=server or {'kind':'controlled'}),ensure_ascii=False)+'\n')
         return base_launch(binary,env,gui,**kwargs)
     shared.base_launch=launch
     files=('run.py','server.py','prepare.py','probe.zig.inc','finish.swift.inc','verify.py')
@@ -66,8 +68,10 @@ def main():
     p.add_argument('--app',type=Path);p.add_argument('--case',choices=CASES,default='hanja')
     p.add_argument('--capture-app',type=Path,default=Path.home()/'Applications/Maru Screen Capture.app')
     p.add_argument('--clangd',type=Path,help='explicit local clangd executable; no automatic install')
+    p.add_argument('--unicode-prefix',action='store_true',help='Korean and non-BMP comment before symbols; clangd only')
     p.add_argument('--prepare-only',action='store_true');args=p.parse_args();out=args.output.resolve()
     server=describe_clangd(args.clangd) if args.clangd else None
+    if args.unicode_prefix and not server:p.error('--unicode-prefix requires --clangd')
     if server and args.case=='server-error':p.error('forced server-error is a controlled-server case')
     if out.exists() or out.is_relative_to(REPO.resolve()):p.error('a new external output directory is required')
     if not args.capture_app.is_dir():p.error('an existing authorized capture app is required')
@@ -80,7 +84,7 @@ def main():
     fake=out/'fake-lsp'
     if not server:
         with (out/'fake-build.log').open('w') as log:subprocess.run(['mise','exec','--','zig','build-exe','tools/fake_lsp.zig','-lc','-O','Debug','-femit-bin='+str(fake)],cwd=REPO,stdout=log,stderr=subprocess.STDOUT,check=True)
-    print(json.dumps(run(app,out,args.case,args.capture_app,fake,server),ensure_ascii=False))
+    print(json.dumps(run(app,out,args.case,args.capture_app,fake,server,args.unicode_prefix),ensure_ascii=False))
 
 
 if __name__=='__main__':main()

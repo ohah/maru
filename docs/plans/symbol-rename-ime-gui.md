@@ -98,3 +98,31 @@ capability 및 changes/documentChanges 대조군을 확인했다. 새 판정 다
 성공은 `...-control-v3`에 보존한다. 이전 제어 서버의 다섯 장면도 최신 검사기로 별도 재검사한다.
 실제 SDK는 opt-in이고 SDK 없는 기본 테스트에 실행/다운로드를 추가하지 않는다. 다른 SDK, 원격,
 비ASCII 원문 위치 전체와 후보 OCR/VoiceOver 검증은 이번 범위에 포함하지 않는다.
+
+## 후속: 비ASCII 원문 위치 (완료)
+
+실제 clangd opt-in에 `--unicode-prefix`를 추가한다. 정의와 닫힌 파일의 선언/호출 앞 같은 줄에
+`/* 한😀 */ ` 주석을 두어 UTF-8 byte·Unicode scalar·UTF-16 code unit 위치가 모두 달라지게 한다.
+원문 이름 `base`와 실제 한글/한자 newName은 그대로 유지한다. 실제 서버가 협상한 위치 단위에서
+요청 위치를 독립 byte offset으로 해석하고, 응답 편집도 기존 독립 적용으로 검증한다. UTF-8/UTF-16
+합성 대조군은 별도로 두며 실제 SDK가 협상하지 않은 단위를 실제 GUI 증거로 주장하지 않는다.
+private driver만 같은 prefix를 인지하도록 빌드하며 제품 소스/ABI·Unicode 저장 정책은 바꾸지 않는다.
+정상 ASCII 경로·두 파일 적용/저장·Undo와 취소/stale 회귀를 유지한다.
+
+
+새 private 앱의 전체 빌드 후 실제 clangd로 한자/한글 적용·취소·stale와 ASCII 정상 대조의 다섯 장면이
+통과했다. 실제 협상 결과는 기본 UTF-16이며, prefix 뒤 심볼의 요청 character는 14다. 같은 자리는
+UTF-8 byte 18, Unicode scalar 13이므로 잘못된 단위가 우연히 같은 자리로 통과하지 않는다.
+응답의 정의·선언·호출 세 편집을 독립 적용하고 두 파일 저장·Workspace Undo 복원을 확인했다.
+조합 중 문서/version/이력 불변, 후보 Return 무송신, 취소/stale 무송신과 원문 보존도 확인했다.
+적용·Undo Metal PNG를 직접 확인했고 새 제품 결함은 발견되지 않았다.
+
+UTF-8/UTF-16의 합법 응답 양식과 네 장면 정상 대조, 서로 다른 Unicode 손상 조건 20개를 통과했다.
+단위 혼동·surrogate 분할·주석 편집·prefix 소실·디스크 불일치·잘못된 encoding은 거부한다.
+모드·요청 위치·조기 본문·응답 적용·Undo 판정을 제거한 컴파일 가능한 검사기 사본 다섯도 모두
+실패했고 원본 전후 대조군은 통과했다. 합성 UTF-8은 실제 SDK의 UTF-8 협상 증거가 아니다.
+
+증거는 `~/Library/Caches/maru-verification/symbol-rename-unicode-20261028-final-*`, `...-matrix.json`,
+`...-independent-final.json`, `...-mutations`, `...-app-build.log`에 보존한다. 이전 실제 SDK 네 장면과
+제어 서버 다섯 장면도 최신 검사기로 각각 재검사했다. 구현은 opt-in 검증 도구/private driver에만
+있으며 제품 소스/ABI는 바뀌지 않았다. 비ASCII 원문 전체나 모든 SDK/플랫폼의 완료를 뜻하지 않는다.

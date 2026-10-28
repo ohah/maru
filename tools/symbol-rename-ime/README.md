@@ -73,3 +73,21 @@ SDK가 한 파일만 반환하거나 분석에 실패하면 성공으로 완화�
 ASCII 원문 구간과 한글/한자 newName을 확인했으며 모든 Unicode 위치·다른 SDK 버전/원격까지
 검증한 것으로 해석하지 않는다. 장면 준비·trust 승인·stale 편집·Workspace Undo의 fixture 호출은
 물리 키 입력과 구분한다.
+
+
+## Unicode 원문 위치
+
+`--clangd`와 함께 `--unicode-prefix`를 지정하면 정의·선언·호출 앞 같은 줄에 `/* 한😀 */ `를 넣는다.
+이 모드는 새 prefix-aware private 앱을 빌드한 뒤 그 고정 앱을 재사용한다. 이전 ASCII 전용 앱을
+지정하면 본문 불변 검사에서 실패한다. `--app` 없이 처음 실행하면 해당 앱을 빌드한다.
+
+```sh
+python3 tools/symbol-rename-ime/run.py --clangd /absolute/path/to/clangd \
+  --unicode-prefix --output <새 외부 경로> --case hanja
+```
+
+실제 clangd가 사용하는 기본 UTF-16에서 요청 character 14를 확인했다. 같은 위치의 UTF-8 바이트는
+18, Unicode scalar는 13이다. 원본 요청을 독립 byte offset으로 해석하고 실제 응답도 원문에 적용한다.
+두 파일의 주석·`baseline`을 보존하며 정의·선언·호출만 변경하고 저장/Undo를 확인한다.
+실제 네 장면과 ASCII 대조가 통과했다. 합성 검사는 UTF-8/UTF-16 양쪽을 다루지만 실제 SDK가
+협상하지 않은 단위의 물리 GUI 증거로 세지 않는다. Unicode 정규화·모든 grapheme/스크립트 검증은 아니다.

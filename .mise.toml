@@ -10,6 +10,26 @@ run = "zig build"
 description = "Run Zig tests"
 run = "zig build test"
 
+[tasks.test-frame-snapshot]
+description = "Verify owned frame inputs and snapshot metadata"
+run = "zig build test-frame-snapshot"
+
+[tasks.test-shaping-runs]
+description = "Verify shared native shaping inputs"
+run = "zig build test-shaping-runs"
+
+[tasks.test-windows-raster-origin]
+description = "Verify native glyph bitmap origins and clipping"
+run = "zig build test-windows-raster-origin"
+
+[tasks.test-windows-run-faces]
+description = "Verify native terminal run face selection"
+run = "zig build test-windows-run-faces"
+
+[tasks.test-windows-registry-raster]
+description = "Verify styled registry face raster selection"
+run = "zig build test-windows-registry-raster"
+
 [tasks.e2e]
 description = "Run headless E2E tests"
 run = "zig build test-e2e"
@@ -606,3 +626,11 @@ run = "zig build test-editor-project-search-owner"
 [tasks.test-macos-project-search-worker]
 description = "실제 프로젝트 검색 worker·불변 문서·취소·부분 결과 검증"
 run = "zig build test-macos-project-search-worker"
+
+[tasks.test-windows-run-frame]
+description = "Verify native terminal shaping to atlas frames"
+run = "zig build test-windows-run-frame"
+
+[tasks.test-windows-run-allocation-path]
+description = "Compare native frame output across allocation strategies"
+run = "zig build test-windows-run-allocation-path"

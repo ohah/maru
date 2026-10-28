@@ -378,20 +378,7 @@ pub fn refreshSettingsFieldCount(self: *AppSession) void {
 /// 짧은 쿼리라고 특별히 더 늘지는 않는다(≤3자 +15.7%로 전체와 같다).
 /// 그것을 감수하는 이유는, "결과가 조금 많다" 와 "선택이 조용히 다른 키로 미끄러진다" 가 같은 무게가 아니기
 /// 때문이다. 부수 효과로 **영어 이름으로도 찾을 수 있다**(한국어 화면에서 `language` 로 `ui.language` 를).
-pub fn settingsRowMatches(doc_key: ?maru.i18n.Key, label: []const u8, key: []const u8, query: []const u8) bool {
-    if (query.len == 0) return true;
-    if (std.ascii.findIgnoreCase(key, query) != null) return true;
-    // 키가 있으면 **모든 언어**를 본다. 없으면(환경변수 이름·chord 표기처럼 번역 대상이 아닌 라벨) 그 라벨
-    // 하나만 보는데, 그런 라벨은 애초에 언어를 안 타므로 판정도 언어 독립이다.
-    if (doc_key) |dk| {
-        inline for (@import("type_info_fields").enumFields(maru.i18n.Lang)) |lf| {
-            const sentence = maru.i18n.tIn(@field(maru.i18n.Lang, lf.name), dk);
-            if (std.ascii.findIgnoreCase(sentence, query) != null) return true;
-        }
-        return false;
-    }
-    return std.ascii.findIgnoreCase(label, query) != null;
-}
+pub const settingsRowMatches = maru.app.settings_model.settingsRowMatches;
 
 /// 언어 드롭다운의 표시 목록. **`Preference` 선언 순서 그대로** 만든다 — 팝업 선택은 인덱스로
 /// 적용되므로(`enumIndex`·`dropdown.show(len, cur_idx)`) 이 순서가 스키마의 변형 순서와 어긋나면
@@ -405,23 +392,7 @@ fn uiLanguageVariants(arena: std.mem.Allocator) ![]const []const u8 {
 
 /// 섹션 표시 라벨. null=스키마 섹션 미지정 그룹("기타"). 표시 문자열은 `i18n` 이 소유하므로
 /// **현재 UI 언어를 따른다** — 예전에는 여기서 한국어 리터럴을 직접 돌려줬다.
-pub fn settingsSectionLabel(sec: ?config_mod.Section) []const u8 {
-    const s = sec orelse return maru.i18n.t(.set_section_other);
-    return maru.i18n.t(switch (s) {
-        .app => .set_section_app,
-        .font => .set_section_font,
-        .theme => .set_section_theme,
-        .cursor => .set_section_cursor,
-        .window => .set_section_window,
-        .input => .set_section_input,
-        .terminal => .set_section_terminal,
-        .workspace => .set_section_workspace,
-        .quick_terminal => .set_section_quick_terminal,
-        .sidebar => .set_section_sidebar,
-        .global_hotkey => .set_section_global_hotkey,
-        .editor => .set_section_editor,
-    });
-}
+pub const settingsSectionLabel = maru.app.settings_model.settingsSectionLabel;
 
 /// 이 섹션에 보일 행이 하나라도 있는가(좌측 네비에 그 섹션을 넣을지 판정).
 ///
@@ -429,27 +400,14 @@ pub fn settingsSectionLabel(sec: ?config_mod.Section) []const u8 {
 /// 동어반복이라 지워졌다(키 존재와 무관하게 늘 같은 답을 냈다). 지금 `chrome.theme`·`chrome.preset` 이
 /// 안 보이는 이유는 그 필터가 아니라 **스키마에 없어서**이고, 되살아남을 막는 것은 실제 행 목록을 훑는
 /// 테스트다. 지운 메커니즘을 설명하는 주석이 남아 있으면 다음 사람이 없는 방어를 믿는다.
-pub fn settingsSectionHasField(bools: []const config_mod.schema.BoolField, nums: []const config_mod.schema.NumberField, enums: []const config_mod.schema.EnumField, texts: []const config_mod.schema.TextField, colors: []const config_mod.schema.ColorField, sec: ?config_mod.Section) bool {
-    // `.global_hotkey`는 schema 필드가 없는 특수 섹션이라 강제로 목록에 넣는다(전역 단축키 녹음 행만 — theme의
-    // palette·input의 keybind 특수 행 패턴처럼 currentSectionFields가 행을 합성한다). 좌측 네비에 항상 보여야 한다.
-    if (sec == .global_hotkey) return true;
-    for (bools) |b| if (b.section == sec) return true;
-    for (nums) |n| if (n.section == sec) return true;
-    for (enums) |e| if (e.section == sec) return true;
-    for (texts) |t| if (t.section == sec) return true;
-    for (colors) |c| if (c.section == sec) return true;
-    return false;
-}
+pub const settingsSectionHasField = maru.app.settings_model.settingsSectionHasField;
 
 /// config 스키마의 **현재 섹션** 필드를 세팅 폼 행으로 빌드한다(메타가 곧 UI, config-gui §2·§4). 라벨=meta.doc
-/// (없으면 키), 값=현재 raw config. buildPaletteRows의 settings 짝 — arena 소유. macOS 전용.
+/// (없으면 키), 값=현재 raw config. buildPaletteRows의 settings 짝 — arena 소유. 검색·라벨 규칙은 공통 설정 모델을 사용한다.
 /// 교차 검색(cross)일 때 행 라벨 앞에 섹션명을 붙인다(`<섹션> › <라벨>`) — 결과가 어느 섹션 설정인지 보이게.
 /// 빈 쿼리(현재 섹션만)면 라벨 그대로. 모든 행 종류(scalar=필드 .section, palette=.theme·keybind=.input·global=
 /// .global_hotkey)가 이 단일 헬퍼를 거쳐 접두 규칙이 한 곳. 단일 출처: docs/config-gui.md §6.8.
-pub fn settingsRowLabel(arena: std.mem.Allocator, cross: bool, section: ?config_mod.Section, label: []const u8) ![]const u8 {
-    if (!cross) return label;
-    return std.fmt.allocPrint(arena, "{s} › {s}", .{ settingsSectionLabel(section), label });
-}
+pub const settingsRowLabel = maru.app.settings_model.settingsRowLabel;
 
 pub fn buildSettingsDefaults(arena: std.mem.Allocator) !SettingsDefaults {
     const def = config_mod.Config{};

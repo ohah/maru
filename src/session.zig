@@ -175,6 +175,7 @@ pub const surface = @import("session/surface.zig");
 pub const window = @import("session/window.zig");
 pub const core_command = @import("session/core_command.zig");
 /// 터미널 마우스의 수정자 규칙 — 비트의 뜻과 셀렉션 override·블록 선택·리포트 command 마스킹(호스트 공통, layering §3.5).
+pub const mouse_coordinates = @import("session/mouse_coordinates.zig");
 pub const mouse_rules = @import("session/mouse_rules.zig");
 
 /// N1: 네이티브 편집기 L2 문서 모델(docs/native-editor-document-model.md §3). 위치 정본은 UTF-8 byte offset이고
@@ -196,6 +197,9 @@ pub const editor = struct {
         pub const origin = @import("session/editor/syntax/origin.zig");
         pub const request = @import("session/editor/syntax/request.zig");
     };
+    pub const save_request = @import("session/editor/save_request.zig");
+    pub const view_navigation = @import("session/editor/view_navigation.zig");
+    pub const edit_commands = @import("session/editor/edit_commands.zig");
     pub const shared_edit = @import("session/editor/shared_edit.zig");
     pub const workspace_state = @import("session/editor/workspace_state.zig");
     /// 줄 조작의 순수 판정(§3.9a — L4 에서 옮겼다, 이식 계획 D1 이동 단계 1). `ops/` 폴더는 OS 를 안 부른다

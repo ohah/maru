@@ -42,11 +42,12 @@ pub const button_wheel_down: u8 = 65;
 /// `WM_MOUSEWHEEL`의 한 눈금. Win32 상수 `WHEEL_DELTA`.
 pub const wheel_delta: i32 = 120;
 
-/// 셀 좌표. 중립 `SelectAt`/`SelectStart`와 같은 모양이다.
-pub const Cell = struct { row: u16, col: u16 };
-
-/// 클라이언트 좌표. **부호 있는 16비트**다.
-pub const Point = struct { x: i32, y: i32 };
+// The session layer owns geometry; this adapter only decodes native messages.
+const coordinates = @import("../../maru.zig").session.mouse_coordinates;
+pub const Cell = coordinates.Cell;
+pub const Point = coordinates.Point;
+pub const pointRelativeTo = coordinates.pointRelativeTo;
+pub const cellFromPixel = coordinates.cellFromPixel;
 
 /// 마우스 메시지의 `lParam`에서 좌표를 꺼낸다.
 ///
@@ -66,31 +67,6 @@ pub fn pointFromLparam(lparam: isize) Point {
 pub fn wheelDeltaFromWparam(wparam: usize) i32 {
     const high: u16 = @truncate(wparam >> 16);
     return @as(i16, @bitCast(high));
-}
-
-/// 픽셀을 셀로 바꾼다. **격자 안으로 clamp한다.**
-///
-/// 드래그 중 포인터가 창 밖으로 나가도 선택이 끊기면 안 된다 — `SetCapture` 때문에 창 밖 좌표가 계속
-/// 오고(음수도 온다), 거기서 `null`을 내면 가장자리에서 선택이 멈춘다. 가장자리 셀로 접는 것이 맞다.
-///
-/// `cell_w`·`cell_h`가 0이면 나눗셈이 못 서므로 `null`이다(폰트가 아직 안 섰을 때 — §2e의 `cellsForClient`와
-/// 같은 이유·같은 처리).
-pub fn cellFromPixel(
-    x_px: i32,
-    y_px: i32,
-    cell_w: u32,
-    cell_h: u32,
-    cols: u16,
-    rows: u16,
-) ?Cell {
-    if (cell_w == 0 or cell_h == 0) return null;
-    if (cols == 0 or rows == 0) return null;
-
-    const col_raw: i64 = @divFloor(@as(i64, x_px), @as(i64, cell_w));
-    const row_raw: i64 = @divFloor(@as(i64, y_px), @as(i64, cell_h));
-    const col = std.math.clamp(col_raw, 0, @as(i64, cols) - 1);
-    const row = std.math.clamp(row_raw, 0, @as(i64, rows) - 1);
-    return .{ .row = @intCast(row), .col = @intCast(col) };
 }
 
 /// 셀의 **왼쪽 아래** 픽셀. `cellFromPixel`의 역방향이다.
@@ -140,34 +116,7 @@ pub const blockSelection = mouse_rules.blockSelection;
 ///
 /// **나머지를 버리지 않는다.** `WM_MOUSEWHEEL`은 보통 `WHEEL_DELTA`(120)의 배수를 주지만 정밀 터치패드는
 /// 그보다 작은 값을 보낸다 — 버리면 **작은 스크롤이 통째로 사라진다**(느린 스크롤이 아예 안 먹는 증상).
-pub const WheelAccumulator = struct {
-    remainder: i32 = 0,
-
-    /// 이번 메시지의 `delta`를 넣고 **완성된 눈금 수**를 받는다. 남은 것은 다음 호출로 넘어간다.
-    ///
-    /// **줄 수가 아니라 눈금을 돌려준다.** 둘은 쓰임이 다르다 — 마우스 리포팅은 xterm 규약상 **눈금당
-    /// 한 번**이고, 사용자 설정(`SPI_GETWHEELSCROLLLINES`)은 **로컬 스크롤백**이 한 눈금에 몇 줄을 움직일지
-    /// 정하는 값이다. 여기서 미리 곱해 버리면 리포팅 쪽이 그 배수만큼 부풀어 TUI 가 한 번 굴림에 열 칸씩
-    /// 튄다(이 기계 설정이 10 이다).
-    pub fn feed(self: *WheelAccumulator, delta: i32) i32 {
-        self.remainder += delta;
-        const notches = @divTrunc(self.remainder, wheel_delta);
-        self.remainder -= notches * wheel_delta;
-        return notches;
-    }
-
-    /// 눈금 수를 **로컬 스크롤백**의 줄 수로 바꾼다. 0이면 사용자가 "스크롤 안 함"으로 둔 것이라 0줄이다
-    /// (그 설정을 우리가 뒤집지 않는다). 리포팅에는 쓰지 않는다.
-    pub fn linesForNotches(notches: i32, lines_per_notch: u32) i32 {
-        if (lines_per_notch == 0) return 0;
-        return notches * @as(i32, @intCast(@min(lines_per_notch, 255)));
-    }
-
-    /// 방향이 바뀌거나 포커스를 잃으면 누적을 버린다 — 반대로 굴린 나머지가 남아 다음 스크롤을 갉는다.
-    pub fn reset(self: *WheelAccumulator) void {
-        self.remainder = 0;
-    }
-};
+pub const WheelAccumulator = @import("../../maru.zig").session.input_math.WheelAccumulator;
 
 /// 연타 종류. 중립 `kind` 규약(1=down, 2=drag, 3=up, 4=double, 5=triple)에서 down 계열만 가른다.
 pub const ClickKind = enum(u8) { single = 1, double = 4, triple = 5 };

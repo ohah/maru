@@ -272,13 +272,21 @@ pub fn buildDrawListWithUnfocused(
         }
     }
 
+    // Each toOwnedSlice moves ownership out of its ArrayList. A later move can
+    // still fail, so retain cleanup for already moved buffers until publication.
+    const owned_cells = try cells.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_cells);
+    const owned_overlays = try overlays.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_overlays);
+    const owned_pool = try grapheme_pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
     return .{
         .size = snapshot.size,
         .cursor = snapshot.cursor,
         .dirty = snapshot.dirty,
-        .cells = try cells.toOwnedSlice(allocator),
-        .overlays = try overlays.toOwnedSlice(allocator),
-        .grapheme_pool = try grapheme_pool.toOwnedSlice(allocator),
+        .cells = owned_cells,
+        .overlays = owned_overlays,
+        .grapheme_pool = owned_pool,
     };
 }
 

@@ -75,7 +75,7 @@ pub const Check = struct {
 
 /// 취소 뒤 worker의 마지막 해제까지 테스트 allocator 결산을 미룬다. 제품 종료는 기다리지 않는다.
 pub fn quietForTest(io: std.Io) void {
-    const timeout = @import("../../../detached_worker_wait.zig").timeout_ns;
+    const timeout = maru.app.detached_worker_wait.timeout_ns;
     const deadline = std.Io.Clock.awake.now(io).nanoseconds + timeout;
     while (outstandingWorkers() != 0) {
         if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return;

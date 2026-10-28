@@ -103,9 +103,11 @@ pub fn prepareMultiPaneGlyphFrame(
     }
     for (accums, lists) |*a, list| {
         a.* = .{ .stats = baseStats(list) };
+        // The first reserve may succeed while the second fails. Include this
+        // initialized pane in cleanup before either fallible allocation.
+        inited += 1;
         try a.prepared.ensureTotalCapacity(allocator, list.glyphs.len);
         try a.uploads.ensureTotalCapacity(allocator, list.glyphs.len);
-        inited += 1;
     }
 
     var attempt: u8 = 0;

@@ -11,6 +11,13 @@
 | 크기 | 110 KB + 1.07 MB = 1.12 MB |
 | 최소 OS | Windows 10.0.17763.0 이상(패키지 설명) |
 
+원문 라이선스는 [LICENSE](LICENSE)에 보존한다. NuGet 패키지의 MIT 선언과
+Microsoft Terminal의 [고정 원문](https://github.com/microsoft/terminal/blob/d4d59fa3395012ca37ba12665da4ec11c7dcf9cb/LICENSE)을 대조했다.
+`zig build`는 Windows 바이너리를 설치할 때 `licenses/ConPTY-MIT.txt`도 동봉한다.
+NuGet 원본 SHA-256은 `175640566a3b59c4b132070ee96c2c77e5ab7edd2e92732a5eb3610bbf63d90e`,
+라이선스 원문 SHA-256은 `5d177f23ecfeb0ea8e050b6a5a16355e1ae9a0b286436ca8f83ed08b3795be6b`다.
+패키지의 x64 DLL·host와 저장소의 두 파일은 바이트 단위로 일치한다.
+
 ## 왜 들고 다니는가
 
 **인박스 `conhost.exe`가 낡으면 기능이 없다.** 이 저장소의 개발 기계는 conhost `10.0.19041.4522`인데,
@@ -33,6 +40,7 @@ NuGet 패키지의 `build/native/*.targets`가 정한 그대로다:
   maru.exe
   conpty.dll          ← 실행 파일 **옆**
   x64/OpenConsole.exe ← 아키텍처 하위 폴더
+  licenses/ConPTY-MIT.txt ← Microsoft 저작권·MIT 원문
 ```
 
 `conpty.dll`은 `OpenConsole.exe`를 못 찾으면 **시스템 `conhost.exe`로 조용히 되돌아간다** — 배치가

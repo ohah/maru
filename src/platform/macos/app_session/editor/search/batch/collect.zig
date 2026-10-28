@@ -79,7 +79,7 @@ pub const State = struct {
     fn closeVerifier(self: *State) void {
         if (self.verifier) |*job| {
             // 테스트에서는 숨겨진 마지막 worker 참조도 결산 전에 놓는다. 제품은 기다리지 않는다.
-            if (@import("builtin").is_test) if (job.active) |active| @import("../../../../detached_worker_wait.zig").quietState(active, self.io);
+            if (@import("builtin").is_test) if (job.active) |active| maru.app.detached_worker_wait.quietState(active, self.io);
             job.deinit();
             self.verifier = null;
         }

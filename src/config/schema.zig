@@ -145,7 +145,10 @@ fn parseAndSet(
             // "절대경로" 규칙을 파일 로드에도 적용해 드리프트를 막는다(config-gui.md §1). execve는 tilde 확장을 안 하고
             // 상대경로는 자식 cwd에 의존하므로 절대경로만 유효하다. forgiving: diagnostic + 기본값 유지(빈 값=자동 셸).
             if (comptime meta.abs_path) {
-                if (!std.fs.path.isAbsolute(trimmed)) {
+                // tryParseFor may validate another platform's config in tests;
+                // use the same OS argument as separator normalization below.
+                const absolute = if (os_tag == .windows) std.fs.path.isAbsoluteWindows(trimmed) else std.fs.path.isAbsolutePosix(trimmed);
+                if (!absolute) {
                     try diags.append(a, .{ .line = line_no, .message = full_key ++ "는 실행 파일 절대경로여야 함(~·상대경로 무시 — 기본 셸 사용)" });
                     return;
                 }

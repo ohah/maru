@@ -9,9 +9,9 @@
 const array_repeat = @import("array_repeat");
 
 const std = @import("std");
-const detached_worker_wait = @import("detached_worker_wait.zig");
+const detached_worker_wait = maru.app.detached_worker_wait;
 const builtin = @import("builtin");
-const maru = @import("maru");
+const maru = @import("../maru.zig");
 const archive = maru.session.agent_session_archive;
 const detail = maru.session.agent_session_archive_detail;
 const scan_backend = @import("agent_session_archive_backend.zig");
@@ -24,6 +24,7 @@ pub const Source = struct {
     source_path: []u8,
     inode: std.Io.File.INode,
     device: u64,
+    origin: ?scan_backend.source_identity.Identity = null,
 
     pub fn deinit(self: *Source, allocator: std.mem.Allocator) void {
         allocator.free(self.source_path);
@@ -37,6 +38,7 @@ pub const Result = struct {
     request_id: u64,
     state: State,
     detail: ?detail.Detail = null,
+    origin: ?scan_backend.source_identity.Identity = null,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         if (self.detail) |*parsed| parsed.deinit(allocator);
@@ -207,6 +209,9 @@ fn readSource(state: *WorkerState, source: Source, request_id: u64) Result {
     defer file.close(state.io);
     const stat = file.stat(state.io) catch return .{ .request_id = request_id, .state = .unavailable };
     if (stat.kind != .file) return .{ .request_id = request_id, .state = .unavailable };
+    const origin = scan_backend.source_identity.capture(file) catch return .{ .request_id = request_id, .state = .unavailable };
+    if (!scan_backend.source_identity.same(origin, source.origin))
+        return .{ .request_id = request_id, .state = .stale };
     if (stat.inode != source.inode or openedDevice(file) != source.device)
         return .{ .request_id = request_id, .state = .stale };
     const size: usize = @intCast(stat.size);
@@ -219,32 +224,73 @@ fn readSource(state: *WorkerState, source: Source, request_id: u64) Result {
         return .{ .request_id = request_id, .state = .unavailable };
     errdefer parsed.deinit(state.allocator);
     redactTurns(state.allocator, &parsed);
-    return .{ .request_id = request_id, .state = .ready, .detail = parsed };
+    return .{ .request_id = request_id, .state = .ready, .detail = parsed, .origin = origin };
 }
 
 /// Detail text crosses the worker/main boundary only after the repository-wide
 /// sensitive-content guard and PII anonymizer.  Ambiguous sensitive text is
 /// replaced rather than partially shown; tool payloads never reach this point.
+// Keep all known identity aliases: Git Bash HOME may differ from USERPROFILE.
+const IdentityEnv = struct {
+    values: [4]?[]u8 = .{ null, null, null, null },
+    const keys = [_][:0]const u8{ "HOME", "USERPROFILE", "USER", "USERNAME" };
+
+    fn load(allocator: std.mem.Allocator) !IdentityEnv {
+        return loadWith(allocator, maru.os_env.allocValueChecked);
+    }
+
+    fn loadWith(allocator: std.mem.Allocator, comptime read: anytype) !IdentityEnv {
+        var identity: IdentityEnv = .{};
+        errdefer identity.deinit(allocator);
+        for (keys, 0..) |key, i| identity.values[i] = try read(allocator, key);
+        return identity;
+    }
+
+    fn deinit(self: *IdentityEnv, allocator: std.mem.Allocator) void {
+        for (self.values) |value| if (value) |owned| allocator.free(owned);
+        self.* = .{};
+    }
+};
+
+fn hideTurn(allocator: std.mem.Allocator, turn: *detail.Turn) void {
+    allocator.free(turn.text);
+    turn.text = &.{};
+    turn.redacted = true;
+}
+
 fn redactTurns(allocator: std.mem.Allocator, parsed: *detail.Detail) void {
-    const home = if (std.c.getenv("HOME")) |value| std.mem.span(value) else null;
-    const username = if (std.c.getenv("USER")) |value| std.mem.span(value) else null;
+    redactTurnsLoaded(allocator, parsed, IdentityEnv.load(allocator));
+}
+
+fn redactTurnsLoaded(allocator: std.mem.Allocator, parsed: *detail.Detail, loaded: anyerror!IdentityEnv) void {
+    var identity = loaded catch {
+        // Missing aliases are safe; failure to read them must not publish raw text.
+        for (parsed.turns.items) |*turn| hideTurn(allocator, turn);
+        return;
+    };
+    defer identity.deinit(allocator);
+    redactTurnsWith(allocator, parsed, identity);
+}
+
+fn redactTurnsWith(allocator: std.mem.Allocator, parsed: *detail.Detail, identity: IdentityEnv) void {
     for (parsed.turns.items) |*turn| {
-        // 가려야 하는 턴은 **플래그만** 세우고 문장은 안 만든다. 이 함수는 떼어낸 워커에서 돌고, 여기서
-        // `i18n.t()` 로 만든 문장은 그 시점의 언어에 얼어붙어 캐시된다 — 사용자가 나중에 화면 언어를
-        // 바꾸면 이 줄만 옛 언어로 남아 계약 §5.2 를 깬다. 문구는 그리는 쪽(UI 스레드)이 키에서 푼다.
         if (redact.hasSensitiveContent(turn.text)) {
-            allocator.free(turn.text);
-            turn.text = &.{};
-            turn.redacted = true;
+            hideTurn(allocator, turn);
             continue;
         }
-        const next = redact.anonymizeAlloc(allocator, turn.text, .{ .home = home, .username = username }) catch continue;
+        const homes = [_][]const u8{ identity.values[0] orelse "", identity.values[1] orelse "" };
+        const usernames = [_][]const u8{ identity.values[2] orelse "", identity.values[3] orelse "" };
+        const next = redact.anonymizeAlloc(allocator, turn.text, .{ .homes = &homes, .usernames = &usernames }) catch {
+            hideTurn(allocator, turn);
+            continue;
+        };
         allocator.free(turn.text);
         turn.text = next;
     }
 }
 
 fn openedDevice(file: std.Io.File) u64 {
+    if (comptime builtin.os.tag == .windows) return (scan_backend.source_identity.capture(file) catch return std.math.maxInt(u64)).?.volume;
     if (comptime builtin.os.tag != .macos) return 0;
     var stat: std.posix.Stat = undefined;
     if (std.c.fstat(file.handle, &stat) != 0) return std.math.maxInt(u64);
@@ -283,6 +329,9 @@ test "상세 backend: 게이트에 세워 둔 워커는 deinit 이 거두고 나
     const dir_path = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
     const source_path = try std.fs.path.join(allocator, &.{ dir_path, "detail.jsonl" });
     const stat = try std.Io.Dir.cwd().statFile(io, source_path, .{});
+    const probe = try std.Io.Dir.cwd().openFile(io, source_path, .{ .follow_symlinks = false });
+    const origin = try scan_backend.source_identity.capture(probe);
+    probe.close(io);
 
     var backend = try Backend.init(allocator, io);
     backend.setTestGate(true);
@@ -290,7 +339,8 @@ test "상세 backend: 게이트에 세워 둔 워커는 deinit 이 거두고 나
         .provider = .codex,
         .source_path = source_path,
         .inode = stat.inode,
-        .device = 0,
+        .device = if (origin) |id| id.volume else 0,
+        .origin = origin,
     }, 1));
 
     // 워커가 게이트에 **실제로 도착할 때까지** 기다린다 — 여기서 그 스레드는 확실히 살아 있다.
@@ -369,4 +419,94 @@ test "detail worker redacts sensitive turns before publication" {
     // 가릴 필요가 없는 턴은 익명화만 거치고 플래그가 안 선다.
     try std.testing.expect(!parsed.turns.items[1].redacted);
     try std.testing.expectEqualStrings("at /Users/user/project", parsed.turns.items[1].text);
+}
+
+test "detail worker identity aliases redact Windows Unicode home and username" {
+    const Reader = struct {
+        fn read(a: std.mem.Allocator, key: [:0]const u8) !?[]u8 {
+            const value: []const u8 = if (std.mem.eql(u8, key, "HOME")) "D:/Profiles/gitlogin" else if (std.mem.eql(u8, key, "USERPROFILE")) "E:\\Homes\\사적인폴더" else if (std.mem.eql(u8, key, "USER")) "gitlogin" else if (std.mem.eql(u8, key, "USERNAME")) "홍길동" else return null;
+            return try a.dupe(u8, value);
+        }
+    };
+    var identity = try IdentityEnv.loadWith(std.testing.allocator, Reader.read);
+    defer identity.deinit(std.testing.allocator);
+    var parsed = try detail.parseTail(std.testing.allocator, .codex,
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"gitlogin D:/Profiles/gitlogin/project 홍길동 E:\\Homes\\사적인폴더\\project"}}
+    , true);
+    defer parsed.deinit(std.testing.allocator);
+    redactTurnsWith(std.testing.allocator, &parsed, identity);
+    try std.testing.expect(!parsed.turns.items[0].redacted);
+    try std.testing.expectEqualStrings("user D:/Profiles/user/project user E:\\Homes\\user\\project", parsed.turns.items[0].text);
+}
+
+test "detail worker anonymizer allocation failure removes raw transcript" {
+    var parsed = try detail.parseTail(std.testing.allocator, .codex,
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"ordinary fixture transcript"}}
+    , true);
+    defer parsed.deinit(std.testing.allocator);
+    var denied = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    redactTurnsWith(denied.allocator(), &parsed, .{});
+    try std.testing.expect(parsed.turns.items[0].redacted);
+    try std.testing.expectEqualStrings("", parsed.turns.items[0].text);
+}
+
+test "detail worker environment lookup failure never publishes raw transcript" {
+    var parsed = try detail.parseTail(std.testing.allocator, .codex,
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"ordinary private fixture"}}
+    , true);
+    defer parsed.deinit(std.testing.allocator);
+    redactTurnsLoaded(std.testing.allocator, &parsed, error.OutOfMemory);
+    try std.testing.expect(parsed.turns.items[0].redacted);
+    try std.testing.expectEqualStrings("", parsed.turns.items[0].text);
+}
+
+test "detail worker partial environment lookup failure frees captured identity" {
+    const Reader = struct {
+        fn read(a: std.mem.Allocator, key: [:0]const u8) !?[]u8 {
+            if (std.mem.eql(u8, key, "HOME")) return try a.dupe(u8, "/home/fixture");
+            return error.OutOfMemory;
+        }
+    };
+    try std.testing.expectError(error.OutOfMemory, IdentityEnv.loadWith(std.testing.allocator, Reader.read));
+}
+
+test "agent_session_archive_detail_backend Windows disclosure rejects missing and forged full identities before parsing" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "detail.jsonl", .data = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Verified identity fixture\"}}\n" });
+    var path_buffer: [4096]u8 = undefined;
+    const dir_path = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
+    const path = try std.fs.path.join(a, &.{ dir_path, "detail.jsonl" });
+    defer a.free(path);
+    const probe = try tmp.dir.openFile(io, "detail.jsonl", .{ .follow_symlinks = false });
+    const stat = try probe.stat(io);
+    const origin = try scan_backend.source_identity.capture(probe);
+    probe.close(io);
+    var backend = try Backend.init(a, io);
+    defer backend.deinit();
+    var source: Source = .{ .provider = .codex, .source_path = path, .inode = stat.inode, .device = origin.?.volume, .origin = origin };
+    var ready = readSource(backend.state.?, source, 1);
+    defer ready.deinit(a);
+    try std.testing.expectEqual(State.ready, ready.state);
+    try std.testing.expect(scan_backend.source_identity.same(origin, ready.origin));
+    source.origin = null;
+    var missing = readSource(backend.state.?, source, 2);
+    defer missing.deinit(a);
+    try std.testing.expectEqual(State.stale, missing.state);
+    try std.testing.expect(missing.detail == null);
+    source.origin = origin;
+    source.origin.?.file[15] ^= 1;
+    var forged = readSource(backend.state.?, source, 3);
+    defer forged.deinit(a);
+    try std.testing.expectEqual(State.stale, forged.state);
+    try std.testing.expect(forged.detail == null);
+    source.origin = origin;
+    source.origin.?.volume ^= 1;
+    var foreign = readSource(backend.state.?, source, 4);
+    defer foreign.deinit(a);
+    try std.testing.expectEqual(State.stale, foreign.state);
+    try std.testing.expect(foreign.detail == null);
 }

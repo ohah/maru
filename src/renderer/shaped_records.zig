@@ -19,7 +19,9 @@ pub const ShapedGlyphRecord = struct {
     raster_font_size_milli: u16 = 0,
     raster_width_px: u16 = 0,
     raster_height_px: u16 = 0,
+    raster_origin: ?glyph_layout.GlyphRasterOrigin = null,
     drawable: bool = true,
+    placement: ?glyph_layout.GlyphPlacement = null,
 };
 
 pub const ShapedGlyphRunList = struct {
@@ -98,6 +100,7 @@ pub fn buildGlyphRunListFromShapedRecordsWithSurface(
             .fallback = record.fallback,
             .replacement = record.replacement,
             .style = record.style,
+            .placement = record.placement,
             .cache_key = .{
                 .font_id = record.font_id,
                 // 합성 glyph(box/block/Powerline)은 네이티브 셰이퍼(coretext_smoke.m)가 폰트 글리프 유무와 무관하게
@@ -117,6 +120,7 @@ pub fn buildGlyphRunListFromShapedRecordsWithSurface(
                 .raster_font_size_milli = record.raster_font_size_milli,
                 .raster_width_px = record.raster_width_px,
                 .raster_height_px = record.raster_height_px,
+                .raster_origin = record.raster_origin,
                 .style = flags,
                 .color_glyph_kind = record.color_glyph_kind,
             },

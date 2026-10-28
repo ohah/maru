@@ -98,6 +98,9 @@ pub const BundledFont = struct {
     /// `assets/fonts/<dir>/<dir>-Regular.ttf`. **구분자는 `/`** 다 — DirectWrite 도 CoreText 도 받는다
     /// (`path_shape` 의 중립 경로 규약과 같다).
     regular_rel: []const u8,
+    /// Available real faces, in regular/bold/italic/bold-italic order. Missing
+    /// variants are explicit: Fira Code ships regular and bold only.
+    variant_rels: [4]?[]const u8,
 };
 
 /// 번들 폰트의 단일 출처. `assets/fonts/<dir>/`·docs/third-party-licenses.md 와 **수동 동기화**한다.
@@ -116,6 +119,12 @@ pub const bundled_fonts = blk: {
             .family = row[0],
             .dir = row[1],
             .regular_rel = "assets/fonts/" ++ row[1] ++ "/" ++ row[1] ++ "-Regular.ttf",
+            .variant_rels = .{
+                "assets/fonts/" ++ row[1] ++ "/" ++ row[1] ++ "-Regular.ttf",
+                "assets/fonts/" ++ row[1] ++ "/" ++ row[1] ++ "-Bold.ttf",
+                if (std.mem.eql(u8, row[1], "FiraCode")) null else "assets/fonts/" ++ row[1] ++ "/" ++ row[1] ++ "-Italic.ttf",
+                if (std.mem.eql(u8, row[1], "FiraCode")) null else "assets/fonts/" ++ row[1] ++ "/" ++ row[1] ++ "-BoldItalic.ttf",
+            },
         };
     }
     break :blk out;
@@ -155,6 +164,14 @@ test "bundled_fonts: 목록과 파생 이름 목록이 어긋나지 않는다" {
     try testing.expectEqual(bundled_fonts.len, bundled_font_families.len);
     for (bundled_fonts, bundled_font_families) |f, name| {
         try testing.expectEqualStrings(f.family, name);
+        try testing.expectEqualStrings(f.regular_rel, f.variant_rels[0].?);
+        try testing.expect(f.variant_rels[1] != null);
+        try testing.expectEqual(!std.mem.eql(u8, f.family, "Fira Code"), f.variant_rels[2] != null);
+        try testing.expectEqual(f.variant_rels[2] != null, f.variant_rels[3] != null);
+        for (f.variant_rels) |optional| if (optional) |path| {
+            try testing.expect(std.mem.startsWith(u8, path, "assets/fonts/"));
+            try testing.expect(std.mem.indexOfScalar(u8, path, '\\') == null);
+        };
         // 경로는 항상 같은 모양이다 — 한 항목이라도 다르면 부르는 쪽이 조용히 못 찾는다.
         try testing.expect(std.mem.startsWith(u8, f.regular_rel, "assets/fonts/"));
         try testing.expect(std.mem.endsWith(u8, f.regular_rel, "-Regular.ttf"));

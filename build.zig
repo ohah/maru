@@ -813,11 +813,24 @@ pub fn build(b: *std.Build) void {
         }),
     });
     support.attachArrayRepeatImports(b, exe.root_module);
+    const native_run_api = Translator.init(b.dependency("translate_c", .{}), .{
+        .name = "maru-native-run-api",
+        .c_source_file = b.path("src/native_shaping_run.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    exe.root_module.addImport("native_shaping_run_c", native_run_api.mod);
 
     // W7.1: Win32 창은 user32/gdi32를 부른다. `extern "user32"`만으로는 이 exe에 import가 안 붙어
     // 호출이 조용히 실패한다(실측: `RegisterClassExW`도 시스템 `STATIC` 클래스 `CreateWindowExW`도
     // null/0을 내면서 `GetLastError`는 0이었다 — "함수가 아예 안 돈" 모양이다). 명시적으로 링크한다.
     if (target.result.os.tag == .windows) {
+        // Embed the desktop icon so installation and window creation do not depend on loose files.
+        exe.root_module.addWin32ResourceFile(.{
+            .file = b.path("src/platform/windows/app.rc"),
+            .include_paths = &.{b.path("assets/icon")},
+        });
         exe.root_module.linkSystemLibrary("user32", .{});
         exe.root_module.linkSystemLibrary("gdi32", .{});
         // W7.2a: D3D11 표시 경로. `extern "d3d11"`/`extern "dxgi"`만으로는 import가 안 붙는다 —
@@ -828,12 +841,34 @@ pub fn build(b: *std.Build) void {
         exe.root_module.linkSystemLibrary("dwrite", .{});
         // W7.4c: IME 조합 문자열(`ImmGetCompositionStringW`).
         exe.root_module.linkSystemLibrary("imm32", .{});
+        // Archive reveal selects a Shell PIDL from its COM-initialized worker.
+        exe.root_module.linkSystemLibrary("shell32", .{});
+        exe.root_module.linkSystemLibrary("ole32", .{});
     }
     if (target.result.os.tag == .macos) {
         linkSessionHostNotificationAdapter(b, exe, macos_sdk);
     }
 
     b.installArtifact(exe);
+
+    // Windows ships the same native parsers/decoder as the macOS bundle. Reuse
+    // their pinned upstream notices instead of maintaining another license list.
+    if (target.result.os.tag == .windows) {
+        const native_notices = [_]struct { file: []const u8, path: ?std.Build.LazyPath }{
+            .{ .file = "Maru-LICENSE", .path = b.path("LICENSE") },
+            .{ .file = "tree-sitter-LICENSE", .path = ts_core_license },
+            .{ .file = "wuffs-LICENSE", .path = wuffs_license },
+            .{ .file = "pcre2-LICENCE.md", .path = pcre2_license },
+            .{ .file = "Unicode-LICENSE.txt", .path = b.path("assets/unicode/LICENSE.txt") },
+            .{ .file = "octicons-LICENSE.txt", .path = b.path("assets/icons/LICENSE-octicons.txt") },
+        };
+        for (native_notices) |notice| {
+            if (notice.path) |path| b.getInstallStep().dependOn(&b.addInstallBinFile(path, b.fmt("licenses/{s}", .{notice.file})).step);
+        }
+        for (grammar_licenses.items) |notice| {
+            b.getInstallStep().dependOn(&b.addInstallBinFile(notice.path, b.fmt("licenses/{s}", .{notice.file})).step);
+        }
+    }
 
     // W7.6: 번들 ConPTY. **인박스 conhost 가 낡으면 없는 기능이 있다**(마우스 리포팅 — 계약 §4.3).
     // 배치는 NuGet 패키지의 `build/native/*.targets` 가 정한 그대로다: `conpty.dll` 은 실행 파일 옆,
@@ -846,12 +881,20 @@ pub fn build(b: *std.Build) void {
         const dll = "assets/windows/conpty/x64/conpty.dll";
         const host = "assets/windows/conpty/x64/OpenConsole.exe";
         const io = b.graph.io;
+        var installs_conpty = false;
         if (b.root.access(io, dll, .{})) |_| {
             b.getInstallStep().dependOn(&b.addInstallBinFile(b.path(dll), "conpty.dll").step);
+            installs_conpty = true;
         } else |_| {}
         if (b.root.access(io, host, .{})) |_| {
             b.getInstallStep().dependOn(&b.addInstallBinFile(b.path(host), "x64/OpenConsole.exe").step);
+            installs_conpty = true;
         } else |_| {}
+        // Every redistributed Microsoft binary carries its upstream MIT notice.
+        // Missing notices must fail packaging instead of silently disappearing.
+        if (installs_conpty) {
+            b.getInstallStep().dependOn(&b.addInstallBinFile(b.path("assets/windows/conpty/LICENSE"), "licenses/ConPTY-MIT.txt").step);
+        }
     }
 
     const run_step = b.step("run", "Run the development CLI");
@@ -1687,6 +1730,16 @@ pub fn build(b: *std.Build) void {
     const test_cli_relay_step = b.step("test-cli-relay", "Run the `maru control --stdio` relay tests only");
     test_cli_relay_step.dependOn(&run_cli_relay_tests.step);
 
+    // The common archive workers must remain runnable after leaving macOS paths.
+    const archive_worker_tests = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{ "agent_session_archive_backend", "agent_session_archive_detail_backend", "os_env", "redact" },
+    });
+    const run_archive_worker_tests = b.addRunArtifact(archive_worker_tests);
+    run_archive_worker_tests.addArg("--maru-expect-tests=64"); // 35 worker/privacy/identity judges and 29 anonymous aggregation blocks
+    run_archive_worker_tests.setCwd(b.path("."));
+    b.step("test-agent-archive-workers", "Verify shared archive worker ownership and history reads").dependOn(&run_archive_worker_tests.step);
+
     const core_tests = addProjectTest(b, .{
         .root_module = maru_mod,
     });
@@ -1903,6 +1956,14 @@ pub fn build(b: *std.Build) void {
         // **테스트가 아니라 실행 파일로 컴파일한다.** 테스트 빌드는 test 블록이 참조하는 것만 분석하므로
         // `main()`과 그 아래(호스트 게이트·경로 정책)가 통째로 빠진다 — 실측: `main.zig`에 macOS 전용 타입
         // 오류를 심고 테스트 빌드로 돌리면 **통과한다.** 실행 파일은 `main`이 진입점이라 반드시 분석된다.
+        const cross_native_run_api = Translator.init(b.dependency("translate_c", .{}), .{
+            .name = b.fmt("maru-native-run-api-{s}", .{triple}),
+            .c_source_file = b.path("src/native_shaping_run.h"),
+            .target = cross_target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        cross_exe_mod.addImport("native_shaping_run_c", cross_native_run_api.mod);
         const cross_exe = b.addExecutable(.{ .name = b.fmt("maru-check-{s}", .{triple}), .root_module = cross_exe_mod });
         if (cross_target.result.os.tag == .macos) {
             // `check-targets` 검사 범위는 Zig의 타깃별 API 표면이다. 빌드 호스트에 Apple SDK가
@@ -1920,12 +1981,366 @@ pub fn build(b: *std.Build) void {
         // **Run 은 안 만든다**(이 게이트의 규칙 그대로). 컴파일만 하면 이 계열은 전부 잡힌다.
         const cross_exe_tests = addProjectTest(b, .{ .root_module = cross_exe_mod });
         check_targets_step.dependOn(&cross_exe_tests.step);
+        if (cross_target.result.os.tag == .macos) {
+            // The release parent intentionally has no live maru host graph.
+            // Compile its isolated producer with only bounded I/O + wire names;
+            // compiling main alone would miss a broken named-module seam here.
+            const isolated_bounded = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
+                .target = cross_target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            const isolated_preparation = session_host_release_gates.notificationRuntimePreparationModule(b, cross_target, optimize, isolated_bounded);
+            const isolated_preparation_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/session_host_release_adapter_notification_runtime_preparation.zig"),
+                    .target = cross_target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "release_adapter_notification_runtime_preparation", .module = isolated_preparation }},
+                }),
+            });
+            check_targets_step.dependOn(&isolated_preparation_tests.step);
+        }
     }
 
     const exe_tests = addProjectTest(b, .{
         .root_module = exe.root_module,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
+    const settings_edit_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/app/settings/edit.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const run_settings_edit_tests = b.addRunArtifact(settings_edit_tests);
+    run_settings_edit_tests.addArg("--maru-expect-tests=5");
+    b.step("test-settings-edit", "Verify settings edit identity and rollback ownership").dependOn(&run_settings_edit_tests.step);
+    if (target.result.os.tag == .windows) {
+        const detent_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{ "WheelAccumulator:", "linesForNotches:" } });
+        const run_detent_tests = b.addRunArtifact(detent_tests);
+        run_detent_tests.addArg("--maru-expect-tests=30"); // Two legacy adapter judges and 28 aggregation blocks.
+        b.step("test-windows-wheel-detents", "Verify existing wheel adapter contracts after sharing arithmetic").dependOn(&run_detent_tests.step);
+    }
+    const settings_focus_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings focus"} });
+    const run_settings_focus_tests = b.addRunArtifact(settings_focus_tests);
+    run_settings_focus_tests.addArg("--maru-expect-tests=7"); // Five native focus judges and two root aggregation blocks.
+    b.step("test-windows-settings-focus", "Verify retained and transient native overlay focus ownership").dependOn(&run_settings_focus_tests.step);
+    const ime_ui_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows IME UI"} });
+    const run_ime_ui_tests = b.addRunArtifact(ime_ui_tests);
+    run_ime_ui_tests.addArg("--maru-expect-tests=7"); // Five IME ownership judges and two root blocks.
+    b.step("test-windows-ime-ui", "Verify application composition ownership without suppressing native candidates").dependOn(&run_ime_ui_tests.step);
+    const shell_refresh_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows shell refresh"} });
+    const run_shell_refresh_tests = b.addRunArtifact(shell_refresh_tests);
+    run_shell_refresh_tests.addArg("--maru-expect-tests=7"); // Five shell refresh judges and two root blocks.
+    b.step("test-windows-shell-refresh", "Verify settings refresh future Windows shell launches").dependOn(&run_shell_refresh_tests.step);
+    const text_resource_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows text resources"} });
+    const run_text_resource_tests = b.addRunArtifact(text_resource_tests);
+    run_text_resource_tests.addArg("--maru-expect-tests=7");
+    b.step("test-windows-text-resources", "Verify native font resource staging and failure ownership").dependOn(&run_text_resource_tests.step);
+    const renderer_resource_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows renderer resources"} });
+    const run_renderer_resource_tests = b.addRunArtifact(renderer_resource_tests);
+    run_renderer_resource_tests.addArg("--maru-expect-tests=7");
+    b.step("test-windows-renderer-resources", "Verify CPU font identity and GPU atlas preparation ownership").dependOn(&run_renderer_resource_tests.step);
+    const font_spacing_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"font spacing"} });
+    const run_font_spacing_tests = b.addRunArtifact(font_spacing_tests);
+    run_font_spacing_tests.addArg("--maru-expect-tests=33"); // Five spacing judges plus 28 library import blocks.
+    b.step("test-font-spacing", "Verify shared line height and natural glyph/grid spacing").dependOn(&run_font_spacing_tests.step);
+    const settings_text_path_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings text paths"} });
+    const run_settings_text_path_tests = b.addRunArtifact(settings_text_path_tests);
+    run_settings_text_path_tests.addArg("--maru-expect-tests=7"); // Five text boundary judges and two root blocks.
+    b.step("test-windows-settings-text-paths", "Verify GUI text uses config path validation and ownership").dependOn(&run_settings_text_path_tests.step);
+    const settings_rollback_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings rollback"} });
+    const run_settings_rollback_tests = b.addRunArtifact(settings_rollback_tests);
+    run_settings_rollback_tests.addArg("--maru-expect-tests=7");
+    b.step("test-windows-settings-rollback", "Verify cancellation retires unpreviewed text and restores actual previews").dependOn(&run_settings_rollback_tests.step);
+    const settings_wheel_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings wheel"} });
+    const run_settings_wheel_tests = b.addRunArtifact(settings_wheel_tests);
+    run_settings_wheel_tests.addArg("--maru-expect-tests=8"); // Six wheel judges and two root aggregation blocks.
+    b.step("test-windows-settings-wheel", "Verify settings wheel capture and fractional scrolling").dependOn(&run_settings_wheel_tests.step);
+    const settings_scrollbar_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings scrollbar"} });
+    const run_settings_scrollbar_tests = b.addRunArtifact(settings_scrollbar_tests);
+    run_settings_scrollbar_tests.addArg("--maru-expect-tests=8"); // Six scrollbar judges and two root aggregation blocks.
+    b.step("test-windows-settings-scrollbar", "Verify published settings scrollbar paint and capture lifecycle").dependOn(&run_settings_scrollbar_tests.step);
+    const windows_settings_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows settings"} });
+    const run_windows_settings_tests = b.addRunArtifact(windows_settings_tests);
+    run_windows_settings_tests.addArg("--maru-expect-tests=51"); // Eleven candidate, five rollback, six wheel, five focus, fifteen IME, six scrollbar, concurrent writers and two root blocks.
+    b.step("test-windows-settings", "Verify Windows settings candidate validation").dependOn(&run_windows_settings_tests.step);
+    const settings_form_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Settings form"} });
+    const run_settings_form_tests = b.addRunArtifact(settings_form_tests);
+    run_settings_form_tests.addArg("--maru-expect-tests=35"); // Seven form judges and 28 anonymous aggregation blocks.
+    b.step("test-settings-form", "Verify schema settings rows and edit requests").dependOn(&run_settings_form_tests.step);
+    const settings_model_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Settings model"} });
+    const run_settings_model_tests = b.addRunArtifact(settings_model_tests);
+    run_settings_model_tests.addArg("--maru-expect-tests=33"); // Five model judges and 28 transitive anonymous aggregation blocks.
+    b.step("test-settings-model", "Verify portable settings search and section identity").dependOn(&run_settings_model_tests.step);
+    const chrome_request_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"prepareRequest"} });
+    const chrome_request_step = b.step("test-chrome-text-request", "Verify owned portable chrome text requests and allocation failures");
+    chrome_request_step.dependOn(&b.addRunArtifact(chrome_request_tests).step);
+    const chrome_lowering_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"app.chrome_draw_lowering"} });
+    const chrome_lowering_step = b.step("test-chrome-draw-lowering", "Verify portable semantic draw projection and paint ordering");
+    chrome_lowering_step.dependOn(&b.addRunArtifact(chrome_lowering_tests).step);
+
+    if (target.result.os.tag == .windows) {
+        // This focused gate checks the shared-solid/native-gradient merge without a GPU device.
+        const paint_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows paint rebase"} });
+        const paint_step = b.step("test-windows-paint", "Verify Windows solid and gradient lowering contracts");
+        paint_step.dependOn(&b.addRunArtifact(paint_tests).step);
+    }
+
+    const internal_contract_tests = addProjectTest(b, .{
+        .root_module = exe.root_module,
+        .filters = &.{"CLI internal contract"},
+    });
+    const terminal_popup_tests = addProjectTest(b, .{
+        .root_module = exe.root_module,
+        .filters = &.{"Terminal clipboard popup"},
+    });
+    const run_terminal_popup_tests = b.addRunArtifact(terminal_popup_tests);
+    run_terminal_popup_tests.addArg("--maru-expect-tests=14"); // Nine controller judges, caption/clipboard/pixel-coordinate ownership, and two root aggregation blocks.
+    b.step("test-terminal-clipboard-popup", "Verify terminal clipboard popup target and input ownership").dependOn(&run_terminal_popup_tests.step);
+    const run_internal_contract_tests = b.addRunArtifact(internal_contract_tests);
+    run_internal_contract_tests.addArg("--maru-expect-tests=4"); // 2 root aggregation blocks, wire ABI, native/dispatcher agreement
+    const internal_contract_step = b.step("test-cli-internal-contract", "Verify shared hidden CLI command contracts across platform adapters");
+    internal_contract_step.dependOn(&run_internal_contract_tests.step);
+    const save_request_tests = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{"Editor save request"},
+    });
+    const run_save_request_tests = b.addRunArtifact(save_request_tests);
+    run_save_request_tests.addArg("--maru-expect-tests=52"); // 28 aggregate blocks, 23 save-image cases and main target-invalidation regression
+    const save_request_step = b.step("test-editor-save-request", "Verify owned save images and document completion CAS");
+    save_request_step.dependOn(&run_save_request_tests.step);
+    const navigation_tests = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{"Editor navigation"},
+    });
+    const navigation_step = b.step("test-editor-navigation", "Verify readonly and editable view selection navigation");
+    const run_navigation_tests = b.addRunArtifact(navigation_tests);
+    run_navigation_tests.addArg("--maru-expect-tests=33"); // 28 aggregation blocks and 5 behavioral tests
+    navigation_step.dependOn(&run_navigation_tests.step);
+    const edit_command_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"Editor commands"} });
+    const edit_command_step = b.step("test-editor-commands", "Verify atomic native editing, shared-view publication and history");
+    const run_edit_command_tests = b.addRunArtifact(edit_command_tests);
+    run_edit_command_tests.addArg("--maru-expect-tests=41"); // 28 aggregation blocks and 13 behavioral tests
+    edit_command_step.dependOn(&run_edit_command_tests.step);
+    const editor_input_tests = addProjectTest(b, .{
+        .root_module = exe.root_module,
+        .filters = &.{"Windows editor input"},
+    });
+    const editor_input_step = b.step("test-win32-editor-input", "Verify Windows editor key mapping, copy and selection paint projection");
+    const run_editor_input_tests = b.addRunArtifact(editor_input_tests);
+    run_editor_input_tests.addArg("--maru-expect-tests=9"); // 3 aggregation blocks and 6 behavioral tests
+    editor_input_step.dependOn(&run_editor_input_tests.step);
+    const file_open_tests = addProjectTest(b, .{
+        .root_module = exe.root_module,
+        .filters = &.{"Windows file open"},
+    });
+    const file_open_test_step = b.step("test-win32-file-open", "Verify file-open outcomes, localized notices and allocation-failure ownership");
+    file_open_test_step.dependOn(&b.addRunArtifact(file_open_tests).step);
+
+    const safe_save_tests = addProjectTest(b, .{
+        .root_module = exe.root_module,
+        .filters = &.{"Windows safe save"},
+    });
+    const run_safe_save_tests = b.addRunArtifact(safe_save_tests);
+    run_safe_save_tests.addArg("--maru-expect-tests=63"); // 2 aggregation blocks, 16 stage, 9 metadata, 7 security, 2 audit-scope, 27 transaction tests; identity is owned by maru below
+    const safe_save_step = b.step("test-win32-safe-save", "Verify native editor save path and original-file preservation");
+    safe_save_step.dependOn(&run_safe_save_tests.step);
+    const document_grant_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows document grant"} });
+    const document_grant_step = b.step("test-win32-document-grant", "Verify native read identity and document-bound save authority");
+    const run_document_grant_tests = b.addRunArtifact(document_grant_tests);
+    run_document_grant_tests.addArg("--maru-expect-tests=19"); // 2 aggregation blocks and 17 native authority/publication tests
+    document_grant_step.dependOn(&run_document_grant_tests.step);
+    const save_controller_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows save controller"} });
+    const save_controller_step = b.step("test-win32-save-controller", "Verify Windows save ownership, native decisions and failure settlement");
+    const run_save_controller_tests = b.addRunArtifact(save_controller_tests);
+    run_save_controller_tests.addArg("--maru-expect-tests=33"); // 2 aggregation blocks and 31 actual native controller tests
+    save_controller_step.dependOn(&run_save_controller_tests.step);
+    const backup_store_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor backup"} });
+    const backup_store_step = b.step("test-win32-editor-backup", "Verify private native recovery storage and restored document authority");
+    const run_backup_store_tests = b.addRunArtifact(backup_store_tests);
+    run_backup_store_tests.addArg("--maru-expect-tests=35"); // 2 aggregation blocks + 31 native tests + 2 pure policy tests
+    backup_store_step.dependOn(&run_backup_store_tests.step);
+    const glyph_source_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows glyph sources"} });
+    const run_glyph_source_tests = b.addRunArtifact(glyph_source_tests);
+    run_glyph_source_tests.addArg("--maru-expect-tests=8");
+    const glyph_source_step = b.step("test-windows-glyph-sources", "Verify native UTF16 cluster sources and borrowed buffer bounds");
+    glyph_source_step.dependOn(&run_glyph_source_tests.step);
+    const raster_origin_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows raster origin"} });
+    const run_raster_origin_tests = b.addRunArtifact(raster_origin_tests);
+    run_raster_origin_tests.addArg("--maru-expect-tests=7");
+    b.step("test-windows-raster-origin", "Verify native glyph bitmap origins and clipping").dependOn(&run_raster_origin_tests.step);
+    const allocation_path_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows run frame allocation path"} });
+    const run_allocation_path_tests = b.addRunArtifact(allocation_path_tests);
+    run_allocation_path_tests.addArg("--maru-expect-tests=3");
+    b.step("test-windows-run-allocation-path", "Compare native frame output across allocation strategies").dependOn(&run_allocation_path_tests.step);
+    const run_frame_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows run frame"} });
+    const run_native_frame_tests = b.addRunArtifact(run_frame_tests);
+    run_native_frame_tests.addArg("--maru-expect-tests=14");
+    b.step("test-windows-run-frame", "Verify native terminal shaping to atlas frames").dependOn(&run_native_frame_tests.step);
+    const run_face_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows run faces"} });
+    const run_run_face_tests = b.addRunArtifact(run_face_tests);
+    run_run_face_tests.addArg("--maru-expect-tests=7");
+    b.step("test-windows-run-faces", "Verify native terminal run face selection").dependOn(&run_run_face_tests.step);
+    const registry_raster_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows registry raster"} });
+    const run_registry_raster_tests = b.addRunArtifact(registry_raster_tests);
+    run_registry_raster_tests.addArg("--maru-expect-tests=7");
+    b.step("test-windows-registry-raster", "Verify styled registry face raster selection").dependOn(&run_registry_raster_tests.step);
+    const frame_snapshot_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"frame snapshot"} });
+    const run_frame_snapshot_tests = b.addRunArtifact(frame_snapshot_tests);
+    run_frame_snapshot_tests.addArg("--maru-expect-tests=33");
+    b.step("test-frame-snapshot", "Verify owned frame inputs and snapshot metadata").dependOn(&run_frame_snapshot_tests.step);
+    const glyph_cell_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/platform/windows/glyph_cells.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const run_glyph_cell_tests = b.addRunArtifact(glyph_cell_tests);
+    glyph_source_step.dependOn(&run_glyph_cell_tests.step);
+    const positioned_glyph_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/renderer.zig"),
+        .target = target,
+        .optimize = optimize,
+    }), .filters = &.{"positioned glyph"} });
+    const run_positioned_glyph_tests = b.addRunArtifact(positioned_glyph_tests);
+    run_positioned_glyph_tests.addArg("--maru-expect-tests=15");
+    b.step("test-positioned-glyph", "Verify positioned terminal ink through shared atlas and pixel DTOs").dependOn(&run_positioned_glyph_tests.step);
+    const shaping_run_tests = addProjectTest(b, .{ .root_module = positioned_glyph_tests.root_module, .filters = &.{"shaping run"} });
+    const run_shaping_run_tests = b.addRunArtifact(shaping_run_tests);
+    run_shaping_run_tests.addArg("--maru-expect-tests=8");
+    b.step("test-shaping-runs", "Verify shared native style keys and lossless UTF16 ownership preparation").dependOn(&run_shaping_run_tests.step);
+    const positioned_frame_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows positioned terminal"} });
+    const run_positioned_frame_tests = b.addRunArtifact(positioned_frame_tests);
+    run_positioned_frame_tests.addArg("--maru-expect-tests=8");
+    const positioned_frame_step = b.step("test-windows-positioned-frame", "Verify positioned terminal packet order clipping and append ownership");
+    positioned_frame_step.dependOn(&run_positioned_frame_tests.step);
+    const positioned_clip_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/platform/windows/d3d11_cells.zig"),
+        .target = target,
+        .optimize = optimize,
+    }), .filters = &.{"positioned terminal"} });
+    const run_positioned_clip_tests = b.addRunArtifact(positioned_clip_tests);
+    positioned_frame_step.dependOn(&run_positioned_clip_tests.step);
+
+    const typography_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows typography"} });
+    const run_typography_tests = b.addRunArtifact(typography_tests);
+    run_typography_tests.addArg("--maru-expect-tests=7");
+    b.step("test-windows-typography", "Verify native feature controls and COM failure ownership").dependOn(&run_typography_tests.step);
+
+    const font_variant_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows font variants"} });
+    const run_font_variant_tests = b.addRunArtifact(font_variant_tests);
+    run_font_variant_tests.addArg("--maru-expect-tests=8");
+    b.step("test-windows-font-variants", "Verify native styled faces, atlas identity and owner rollback").dependOn(&run_font_variant_tests.step);
+
+    const layout_retry_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows layout retry"} });
+    const run_layout_retry_tests = b.addRunArtifact(layout_retry_tests);
+    run_layout_retry_tests.addArg("--maru-expect-tests=13");
+    b.step("test-windows-layout-retry", "Verify latest layout retry and bounded recovery").dependOn(&run_layout_retry_tests.step);
+
+    const layout_resize_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows layout resize"} });
+    const run_layout_resize_tests = b.addRunArtifact(layout_resize_tests);
+    run_layout_resize_tests.addArg("--maru-expect-tests=7"); // Two root blocks and five layout/transport checks.
+    b.step("test-windows-layout-resize", "Verify retained terminal layout without dead PTY calls").dependOn(&run_layout_resize_tests.step);
+
+    const live_font_editor_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows live font"} });
+    const run_live_font_editor_tests = b.addRunArtifact(live_font_editor_tests);
+    run_live_font_editor_tests.addArg("--maru-expect-tests=7"); // 2 aggregation blocks + 5 native preparation tests
+    b.step("test-windows-live-font-editor", "Verify staged editor fonts preserve active views on success and failure").dependOn(&run_live_font_editor_tests.step);
+
+    const editor_host_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor host"} });
+    const editor_host_step = b.step("test-win32-editor-host", "Verify app-owned native save grants and capability refusal");
+    const run_editor_host_tests = b.addRunArtifact(editor_host_tests);
+    run_editor_host_tests.addArg("--maru-expect-tests=98"); // 2 aggregation blocks + 84 native tests + 12 pure policies
+    editor_host_step.dependOn(&run_editor_host_tests.step);
+    const directory_watch_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor directory watch"} });
+    const directory_watch_step = b.step("test-win32-editor-watch", "Verify asynchronous native directory notification ownership");
+    const run_directory_watch_tests = b.addRunArtifact(directory_watch_tests);
+    run_directory_watch_tests.addArg("--maru-expect-tests=21"); // 2 aggregation blocks + 19 native/queue/failure tests
+    directory_watch_step.dependOn(&run_directory_watch_tests.step);
+    const backup_worker_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows recovery backup worker"} });
+    const backup_worker_step = b.step("test-win32-backup-worker", "Verify immutable recovery jobs and current native cleanup approval");
+    const run_backup_worker_tests = b.addRunArtifact(backup_worker_tests);
+    run_backup_worker_tests.addArg("--maru-expect-tests=23"); // 2 aggregation blocks + 12 ownership/IO tests + 9 app tests
+    backup_worker_step.dependOn(&run_backup_worker_tests.step);
+    const editor_read_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows editor file read worker"} });
+    const editor_read_step = b.step("test-win32-editor-read", "Verify native worker read ownership, sharing fences and stale result tickets");
+    const run_editor_read_tests = b.addRunArtifact(editor_read_tests);
+    run_editor_read_tests.addArg("--maru-expect-tests=11"); // 2 aggregation blocks + 8 native tests + 1 pure policy
+    editor_read_step.dependOn(&run_editor_read_tests.step);
+    const save_prepare_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows save preparation worker"} });
+    const save_prepare_step = b.step("test-win32-save-prepare", "Verify worker-owned native save preparation and final document validation");
+    const run_save_prepare_tests = b.addRunArtifact(save_prepare_tests);
+    run_save_prepare_tests.addArg("--maru-expect-tests=9"); // 2 aggregation blocks + 7 native tests
+    save_prepare_step.dependOn(&run_save_prepare_tests.step);
+    const save_settle_mod = b.createModule(.{
+        .root_source_file = b.path("src/platform/windows/save_settle_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+    });
+    const save_settle_tests = addProjectTest(b, .{ .root_module = save_settle_mod, .filters = &.{"Windows save settlement worker"} });
+    const save_settle_step = b.step("test-win32-save-settle", "Verify worker rollback and native outcome ownership without document callbacks");
+    const run_save_settle_tests = b.addRunArtifact(save_settle_tests);
+    run_save_settle_tests.addArg("--maru-expect-tests=8"); // seven actual native ownership/settlement tests
+    save_settle_step.dependOn(&run_save_settle_tests.step);
+    const save_cleanup_mod = b.createModule(.{
+        .root_source_file = b.path("src/platform/windows/save_cleanup_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+    });
+    const save_cleanup_tests = addProjectTest(b, .{ .root_module = save_cleanup_mod, .filters = &.{"Windows save cleanup worker"} });
+    const save_cleanup_step = b.step("test-win32-save-cleanup", "Verify confirmed native cleanup ownership and immutable completion images");
+    const run_save_cleanup_tests = b.addRunArtifact(save_cleanup_tests);
+    run_save_cleanup_tests.addArg("--maru-expect-tests=11"); // ten actual native cleanup/ownership tests
+    save_cleanup_step.dependOn(&run_save_cleanup_tests.step);
+    const save_commit_mod = b.createModule(.{
+        .root_source_file = b.path("src/platform/windows/save_commit_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "maru", .module = maru_mod }},
+    });
+    const save_commit_tests = addProjectTest(b, .{ .root_module = save_commit_mod, .filters = &.{"Windows save commit worker"} });
+    const save_commit_step = b.step("test-win32-save-commit", "Verify fenced native commit votes and cancellation ownership without Registry on worker");
+    const run_save_commit_tests = b.addRunArtifact(save_commit_tests);
+    run_save_commit_tests.addArg("--maru-expect-tests=8"); // seven actual native handshake/ownership tests
+    save_commit_step.dependOn(&run_save_commit_tests.step);
+    // Keep Windows worker registration distinct from the portable CLI open tests.
+    const win32_editor_open_mod = b.createModule(.{
+        .root_source_file = b.path("src/platform/windows/editor_open_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "syntax", .module = syntax_mod } },
+    });
+    const win32_editor_open_tests = addProjectTest(b, .{ .root_module = win32_editor_open_mod, .filters = &.{"Windows initial open worker"} });
+    const editor_open_step = b.step("test-win32-editor-open", "Verify initial read and capability worker ownership without Registry callbacks");
+    const run_win32_editor_open_tests = b.addRunArtifact(win32_editor_open_tests);
+    run_win32_editor_open_tests.addArg("--maru-expect-tests=20");
+    editor_open_step.dependOn(&run_win32_editor_open_tests.step);
+    const save_crash_step = b.step("test-win32-save-crash", "Kill separate native save processes and verify disk durability and metadata");
+    if (target.result.os.tag == .windows) {
+        const save_crash_probe = b.addExecutable(.{
+            .name = "maru-win32-save-crash-probe",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/windows/save_crash_probe.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        const run_save_crash = b.addRunArtifact(save_crash_probe);
+        run_save_crash.setCwd(b.path("."));
+        save_crash_step.dependOn(&run_save_crash.step);
+    }
+    const relative_file_tests = addProjectTest(b, .{
+        .root_module = maru_mod,
+        .filters = &.{ "Windows safe save", "Windows relative read" },
+    });
+    const run_relative_file_tests = b.addRunArtifact(relative_file_tests);
+    run_relative_file_tests.addArg("--maru-expect-tests=39"); // 28 aggregation blocks, 5 save paths, 3 read paths and 3 full identity judges
+    safe_save_step.dependOn(&run_relative_file_tests.step);
 
     const macos_coretext_font_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
@@ -5362,6 +5777,21 @@ pub fn build(b: *std.Build) void {
         b.step("perf-editor-recovery-reservation", "Measure reservation candidates without process startup in the timed region").dependOn(&perf_reservation.step);
     }
 
+    test_step.dependOn(save_request_step);
+    test_step.dependOn(navigation_step);
+    test_step.dependOn(edit_command_step);
+    test_step.dependOn(document_grant_step);
+    test_step.dependOn(editor_open_step);
+    test_step.dependOn(save_controller_step);
+    test_step.dependOn(save_commit_step);
+    test_step.dependOn(backup_store_step);
+    test_step.dependOn(editor_host_step);
+    test_step.dependOn(directory_watch_step);
+    test_step.dependOn(backup_worker_step);
+    test_step.dependOn(editor_read_step);
+    test_step.dependOn(save_crash_step);
+    test_step.dependOn(editor_input_step);
+    test_step.dependOn(&run_internal_contract_tests.step);
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_syntax_stamp.step);
     test_step.dependOn(&run_parse_request.step);
@@ -5393,18 +5823,14 @@ pub fn build(b: *std.Build) void {
     //
     // 그래서 이 파일만 도는 산출물을 따로 세워 `test` 에 매단다. macOS 에서는 `app_session` 경로와
     // 중복이지만(같은 테스트가 두 번 돈다) 그 비용이 "Windows 갈래가 검증 없이 남는 것" 보다 싸다.
-    // 파일 위치가 `platform/macos/` 인 것은 이제 이름과 안 맞는다 — 옮기는 것은 소비자가 생기는
-    // W8.2 와 함께 볼 일이다.
+    // Both hosts now share the app-layer worker; filter its judges from the facade module.
     const file_tree_backend_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/platform/macos/file_tree_backend.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{.{ .name = "maru", .module = maru_mod }},
-        }),
+        .root_module = maru_mod,
+        .filters = &.{"app.file_tree_backend"},
     });
     const run_file_tree_backend_tests = b.addRunArtifact(file_tree_backend_tests);
+    run_file_tree_backend_tests.addArg("--maru-expect-tests=50"); // 22 worker tests (including main's growing-file hash judge) + 28 aggregate blocks
+    run_file_tree_backend_tests.setCwd(b.path("."));
     test_step.dependOn(&run_file_tree_backend_tests.step);
     // 원격 매핑(RF2b)처럼 이 파일만 도는 반복 작업이 생겨 이름을 붙였다 — `zig build test` 전체(12 분)를
     // 돌리지 않고 이 축만 잰다.
@@ -5452,7 +5878,7 @@ pub fn build(b: *std.Build) void {
     attachPngCodec(b, marker_preview_tests.root_module); // maru 루트를 세우는 자리는 전부 이걸 부른다(위 주석)
     marker_preview_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_marker_preview_tests = b.addRunArtifact(marker_preview_tests);
-    run_marker_preview_tests.addArg("--maru-expect-tests=107"); // 실측(2026-10-11, main 기준 rebase): 이름에 `context_menu` 가 든 W6c② `session.web_osr_context_menu` 10 + 나머지 97(이 그래프의 이름 없는 블록 23 포함 — 아래 내역은 그 전 것이라 합이 맞지 않는다) · MP1 31 + 도크 점프 5 + CSP1(popup_box) 9 + context_menu 10 + dropdown 6 회귀 + 이름 없는 블록 + CSP1(popup_box) 7 + context_menu 회귀 10 + 이름 없는 블록 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다) + i18n 문구 구분 1
+    run_marker_preview_tests.addArg(if (target.result.os.tag == .windows) "--maru-expect-tests=114" else "--maru-expect-tests=107"); // 실측(2026-10-11, main 기준 rebase): 이름에 `context_menu` 가 든 W6c② `session.web_osr_context_menu` 10 + 나머지 97(이 그래프의 이름 없는 블록 23 포함 — 아래 내역은 그 전 것이라 합이 맞지 않는다) · MP1 31 + 도크 점프 5 + CSP1(popup_box) 9 + context_menu 10 + dropdown 6 회귀 + 이름 없는 블록 + CSP1(popup_box) 7 + context_menu 회귀 10 + 이름 없는 블록 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다) + i18n 문구 구분 1
     b.step("test-marker-preview", "Run the terminal image-marker preview core judges only (MP1 filter)").dependOn(&run_marker_preview_tests.step);
 
     // 색 구성 통지(DECSET 2031 / DSR 996)의 코어 판정자만 — 위 `test-marker-preview` 와 같은 이유(변이 한 개에 전체 test 6 분을 안 쓴다).
@@ -5548,25 +5974,24 @@ pub fn build(b: *std.Build) void {
     // 이 스텝이 없던 동안 워커 갈래가 **통째로 무판정**이었다(적대적 검증 2회차: 조상을 현재 것 자리에
     // 싣는 변이 따위 여섯이 전부 살아남았다).
     const merge_stage_e2e_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/platform/macos/git_backend.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "maru", .module = maru_mod },
-                .{ .name = "syntax", .module = syntax_mod },
-            },
-        }),
+        .root_module = maru_mod,
         .filters = &.{ "S3a end-to-end", "S4 end-to-end" },
     });
     const run_merge_stage_e2e = b.addRunArtifact(merge_stage_e2e_tests);
-    run_merge_stage_e2e.setCwd(b.path(".")); // 임시 저장소는 워크트리 밖 `$TMPDIR` 에 만든다(`git_backend.tmpRepoPath`)
-    run_merge_stage_e2e.addArg("--maru-expect-tests=9");
+    run_merge_stage_e2e.setCwd(b.path(".")); // Windows fixtures use the workspace cache; POSIX keeps unique TMPDIR directories.
+    run_merge_stage_e2e.addArg("--maru-expect-tests=37");
     // ⚠️ **그리고 실제로 돌았는가.** 이 판정자들은 git 이 없으면 `SkipZigTest` 로 나간다 — 컴파일 수만
     // 세면 하네스가 조용히 안 서도 초록이다(이 저장소가 가장 나쁘다고 적어 둔 실패 모드).
-    run_merge_stage_e2e.addArg("--maru-expect-passed=9");
+    // The POSIX shell-wrapper fault fixture skips on Windows; eight native Git cases still run.
+    run_merge_stage_e2e.addArg(if (target.result.os.tag == .windows) "--maru-expect-passed=36" else "--maru-expect-passed=37");
     b.step("test-merge-stages-e2e", "Run the merge-stage (S3a) end-to-end judges on a real conflicted repo").dependOn(&run_merge_stage_e2e.step);
+    const native_worktree_tests = addProjectTest(b, .{
+        .root_module = merge_stage_e2e_tests.root_module,
+        .filters = &.{"Windows worktree"},
+    });
+    const run_native_worktree_tests = b.addRunArtifact(native_worktree_tests);
+    run_native_worktree_tests.addArg("--maru-expect-tests=29");
+    b.step("test-win32-worktree", "Verify native Windows Git worktree reads").dependOn(&run_native_worktree_tests.step);
 
     // 소스 컨트롤 **행 동작 규칙**만(S1 — 충돌 행은 스테이지가 아니라 해결이다). 같은 이유로 maru
     // 그래프에 필터를 건다: 이 판정자들은 `test-editor` 그래프에 **없어서**(실측 2026-09-12) 그 이름만
@@ -5889,25 +6314,25 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(noteSkippedStep(b, "win32_process 단위 테스트", "Windows 호스트 전용 — CreateProcessW + 익명 파이프를 실제로 돌린다 (docs/windows-platform.md §2m.8)"));
     }
 
-    // 크롬 텍스트 셰이핑의 **Windows 종단**. `system_text.zig` 의 macOS 테스트들은 CoreText 를 링크하는
-    // 아티팩트 안에 있어서 Windows 에서는 하나도 안 돈다 — 이 스텝이 없으면 이음매 배선이 컴파일만 되고
-    // **실행된 적이 없는** 상태로 남는다(실측으로 그랬다: 배선 직후 `zig build test` 에 system_text 테스트가
-    // 한 줄도 안 나왔다). DirectWrite 를 실제로 부르므로 Windows 호스트에서만 건다.
-    if (target.result.os.tag == .windows) {
+    // Shared artifact tests use the facade as their actual root so child-file
+    // tests are discovered. The native DirectWrite case skips on other hosts.
+    {
         const chrome_system_text_win_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                // 루트는 얇은 shim 이다 — 그 파일을 직접 루트로 걸면 모듈 경로가
-                // `src/platform/macos/chrome/` 이 되어 `../../../*.zig` 가 모듈 밖이 된다.
-                .root_source_file = b.path("src/chrome_system_text_win_test_root.zig"),
+                .root_source_file = b.path("src/maru.zig"),
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
             }),
+            .filters = &.{"chrome artifact:"},
         });
-        test_step.dependOn(&b.addRunArtifact(chrome_system_text_win_tests).step);
-    } else {
-        test_step.dependOn(noteSkippedStep(b, "크롬 셰이핑 Windows 종단", "Windows 호스트 전용 — DirectWrite 를 실제로 불러 글리프를 잰다 (docs/windows-platform.md §2m.18)"));
+        attachPngCodec(b, chrome_system_text_win_tests.root_module);
+        chrome_system_text_win_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+        const run_chrome_system_text_win_tests = b.addRunArtifact(chrome_system_text_win_tests);
+        run_chrome_system_text_win_tests.addArg("--maru-expect-tests=40"); // 28 aggregation blocks and 12 artifact tests, including native DirectWrite.
+        if (target.result.os.tag == .windows) test_step.dependOn(&run_chrome_system_text_win_tests.step);
+        b.step("test-chrome-artifact", "Verify shared chrome artifact ownership, placement and native shaping").dependOn(&run_chrome_system_text_win_tests.step);
     }
     // exe(src/main.zig)는 control plane CLI가 unix domain socket과 POSIX 파일 모드(0600)를 직접 쓴다. 한때
     // 그래서 macOS에서만 걸었지만, W2가 그 자리들을 **호스트 OS 게이트**로 접어(컨트롤 소켓 → "인스턴스 없음",
@@ -11798,9 +12223,16 @@ pub fn build(b: *std.Build) void {
         release_version_step.dependOn(&release_tag_check.step);
     }
 
-    const github_release_publication_contract = b.addSystemCommand(&.{ "sh", "tools/test-github-release-publication.sh" });
+    // Source-only contract: run through Zig on every host without requiring a POSIX shell.
+    const github_release_publication_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/release_workflow/publication.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const github_release_publication_contract = b.addRunArtifact(github_release_publication_tests);
     github_release_publication_contract.setCwd(b.path("."));
-    github_release_publication_contract.stdio = .inherit;
     const github_release_publication_step = b.step("check-github-release-publication", "Check draft-first GitHub release publication");
     github_release_publication_step.dependOn(&github_release_publication_contract.step);
     test_step.dependOn(&github_release_publication_contract.step);

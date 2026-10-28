@@ -649,7 +649,7 @@ Win32 메시지를 그 명령으로 **번역하는 것뿐**이고, 메인 스레
 | `WM_LBUTTONUP` | 3 (up) | `select_extend_or_collapse{row, col}` |
 | 같은 자리 2연타(`ClickTracker`) | 4 | `select_word{row, col, separators}` |
 | 같은 자리 3연타(`ClickTracker`) | 5 | `select_line{row}` |
-| `WM_RBUTTONDOWN`/`UP` | — | `input.right-click` 이 정한다(기본 `paste`. `menu` 는 미구현이라 세기만 한다) |
+| `WM_RBUTTONDOWN`/`UP` | — | `input.right-click` 이 정한다(기본 `paste`, `menu`는 터미널 Copy/Paste 팝업). 터미널 마우스 리포팅이 활성화되면 리포팅이 우선한다. |
 | `WM_MBUTTONDOWN`/`UP` | — | 리포팅 중일 때만 — **로컬 선택은 좌버튼뿐이다** |
 | `WM_MOUSEWHEEL` | — | `scroll{lines}` 또는 alt 화면이면 화살표 키 |
 | `WM_MOUSEHWHEEL` | — | 편집기 가로 스크롤(`first_col`). 터미널에는 가로 축이 없어 버린다 |
@@ -873,7 +873,7 @@ arena에서 **빌린다** — 먼저 해제하면 dangling이다. 이것이 `loa
 | config | 우클릭 결과 |
 |---|---|
 | 없음(기본 `paste`) | `pastes=1 paste_bytes=21` |
-| `input.right-click = menu` | `pastes=0`, `right_click_menus_todo=1` |
+| `input.right-click = menu` | 터미널 Copy/Paste 팝업 표시, 선택 전 `pastes=0`. 현재 실제 앱 검증은 아래 Terminal clipboard popup integration 절을 따른다. |
 
 | config | 여러 줄 붙여넣기(개행 = 즉시 실행 트리거) |
 |---|---|
@@ -9004,6 +9004,184 @@ divider 가 10px 막대로 그려지고 작업영역 10px 를 먹었으며, 누�
 | **W8.6** | **웹 패널** — WebView2 + DirectComposition. **§8 의 합성 모델 결정이 선행이다** | 결정 대기 |
 
 **웹 패널을 마지막에 두는 이유**는 그것만 미결 결정에 걸려 있기 때문이다 — 앞의 다섯을 막지 않는다.
+### 2m.115 릴리스 publication 판정도 셸 없이 돈다 (W8.24, 2026-10-03)
+
+`zig build check-github-release-publication`은 이제 `tests/release_workflow/publication.zig`를
+실행한다. 기존 스크립트의 legacy writer 부재·local action 호출 수·단계 순서·덮어쓰기 금지·토큰
+배치·tag-only 서명·외부 Action SHA 및 개수·checkout credential 보존 금지를 유지했다.
+실제 GitHub 릴리스를 만들지 않고 저장소 파일만 읽는다. 기본 `test`도 같은 판정에 연결한다.
+
+Windows Zig 0.16.0에서 정상 입력은 exit 0이다. 적대적 검증 5회는 각각 checkout을 mutable tag로
+변경, 수동 서명 trigger 추가, `--clobber` 추가, draft 단계 제거, `GH_TOKEN` 하나 제거다.
+다섯 변이 모두 exit 1이고, 매회 원본 바이트를 복원한 뒤 최종 정상 입력은 다시 exit 0이다.
+옛 스크립트는 제거해 판정의 두 사본을 남기지 않았다. W8.24의 셸 동작 자체를 재는 두 판정과
+다른 Windows 지원 잔여 항목은 아직 완료되지 않았다.
+
+전체 `check-boundaries`를 Windows에서 실행하는 중, `handoff_codec.zig`의 측정 보조 함수가
+`std.c.clock_gettime`을 직접 불러 컴파일이 실패하는 것도 발견했다. 제품 codec과 판정 범위는
+그대로 두고 측정 시계만 `std.Io.Clock.awake.now(std.testing.io)`로 바꿨다.
+`zig build test-handoff-scrollback-budget`은 Windows에서 exact-count 5/5 통과했다.
+원격 감시 모듈의 POSIX 프로세스/파이프 타입도 별도의 기존 Windows 컴파일 실패로 발견했고,
+그 수정과 검증은 아래 2m.116에 기록했다.
+
+### 2m.116 원격 감시 상태 판정은 Windows에서도 실행한다 (2026-10-03)
+
+`WatchStream.pid`를 기존 중립 `pty.ChildPid` 계약으로 바꿨다. POSIX 타입은 그대로이며,
+Windows libc의 HANDLE 타입을 비활성 채널의 PID 0으로 초기화하던 컴파일 실패가 사라졌다.
+POSIX 정리 함수를 Windows에서 실제 호출하면 명시적으로 panic한다. Windows 원격 감시
+프로세스 구현을 대신하거나 성공으로 처리하지 않는다.
+
+`zig build test-remote-watch-module`은 Windows에서 전체 11개 판정을 컴파일하고 상태·출력
+판정 8개를 통과한다. POSIX 파이프/실물 sshd 통합 판정 3개는 Windows에서 SKIP이고,
+POSIX에서는 기존 실행을 유지한다. 적대적 검증 5회는 영구 오류를 일시 오류로 변경,
+루트 오류의 의미 제거, pause 시 backoff 제거, pause 시 root 기억 제거, 알 수 없는 출력을
+change로 인정하는 변이였다. 다섯 변이는 컴파일 성공 뒤 행동 판정에서 각각 실패했다.
+원본 복원 뒤 정상 입력은 exit 0이다. 첫 탐색의 미사용 인자 컴파일 오류는 이 5회에 세지 않았다.
+
+### 2m.117 편집기 세로 막대를 실제로 잡을 수 있다 (W8.17⒞ 후속, 2026-10-03)
+
+기존 중립 frame은 이미 세로 막대와 기하를 만들고 있었지만 Windows 입력은 가로 막대만 받았다.
+세로 입력을 `scroll_area.Drag`에 배선하고 양쪽 축 모두 down 시점에 그린 기하를 사용한다.
+이미 잡은 드래그는 caption·sidebar·dock 영역 판정보다 먼저 처리한다. release의 마지막 좌표는
+프레임 tick에 반영한 뒤 해제하며, 파일/뷰가 바뀌면 이전 드래그를 취소한다.
+세로 상한도 frame의 `max_offset_px`에서 읽어 가로 막대가 먹는 높이를 빼먹지 않는다.
+
+`zig build win32-terminal-smoke`의 실제 Win32 창에서 적대적 시나리오 5개가 통과했다:
+thumb 드래그와 화면 digest 변화, track 끝 클릭과 정확한 끝 도달, move 없이 release만 하는
+플릭, pane 밖 위쪽 release와 위치 0 clamp, 드래그 도중 터미널로 전환하고 capture 취소.
+다섯 판정 중 하나라도 실패하면 스모크 자체가 오류로 종료한다. 모든 각본은 `smoke`로 가른다.
+기존 스핀 790의 휠 판정은 현재 25줄뿐인 YAML 파일에 기대어 scroll_ok=false였으므로,
+이미 열린 충분히 긴 문서에서 휠을 재는 늦은 단계로 옮겼다. 0→30행 이동과 digest 변화로 통과한다.
+
+별도로 agent snapshot 판정은 worker 완료 전에 고정 스핀에서 읽은 값을, 나중에 받은
+publication ack와 합치고 있었다. 측정은 요청한 snapshot의 실제 publication 직후로 옮겼다.
+편집·safe-save·외부 파일 감시·키보드 이동·wrap은 이 변경의 완료 범위에 포함하지 않는다.
+최신 제품 스모크에서 위 5개·휠 스크롤·agent snapshot 정리는 모두 통과했다.
+`sidebar_clip`·`dock_clamp` 판정은 실패가 남아 전체 Windows 제품 검증 통과로 보고하지 않는다.
+Windows의 `zig build check-boundaries -j4`와 `zig build check-targets -j2`는 exit 0이었다.
+
+### 2m.118 Sidebar clip·dock clamp 판정 입력과 측정 시점 수정 (2026-10-03)
+
+기존 `sidebar_clip` 판정은 트랙의 임의 비율 0.37을 눌렀다. 카드가 일부 잘려도 그 부분이
+여백이면 글리프는 하나도 잘리지 않아 `partial>0, clipped=0`이었다. 이미 그려진 첫 글리프의
+실제 사각형으로 스크롤을 정해 그 글리프 절반이 헤더 경계를 넘도록 바꿨다. 정상 입력에서
+`partial=36, clipped=15, over_header=0`을 관측했다. 실제 clip 구현은 그대로다.
+
+`dock_clamp`는 고정 스핀에서 읽은 행 목록이 유효하지 않았고, 초기 스크롤이 0이라는 가정 때문에
+접을 폴더를 화면 밖으로 밀기도 했다. 그런데 `toggleTreeRow` 계약을 다시 확인하니 접기는
+비동기 스캔을 제출하지 않고 행 목록을 즉시 갱신했다. 따라서 scan completion을 기다리는 방식도
+맞지 않았다. 같은 제품 토글 경로로 기억해 둔 폴더 경로를 접고, 실제 frame clamp와 redraw 뒤
+상태를 측정하도록 바꿨다. 판정 입력도 행 수·폴더 자식 수·휠 설정에 기대지 않도록 접기 전 실제
+스크롤 상한으로 이동시킨다. 큰 폴더를 고른다는 가정 대신 두 행만 줄어도 상한 축소를 시험한다.
+
+clip 적대적 검증 5회는 clip origin +1px, 높이 +1px, UV 보정 제거, 완전히 가려진 셀 유지,
+부분적으로 보이는 셀 제거다. `zig test src/platform/windows/d3d11_cells.zig --test-filter clipCell`의
+행동 판정에서 다섯 변이를 모두 거부했고, 원본 바이트 복원 뒤 2/2 통과했다. 빌드와 소스 변이의
+동시 읽기 가능성을 배제하기 위해 복원 후 제품 스모크를 별도 `.zig-cache/windows-verified`에서
+다시 빌드했다. 최종 소스에서는 baseline → clamp 변이 → 원복 순서로 제품 스모크를 직렬 실행했다.
+정상·원복은 모두 `rows 86→34, off 1097→109, max_after=109, drawn=29, draw_start=5/5`로
+통과했다. clamp 대입을 `@max(dock_scroll_px, dock_max)`로 바꾸자 `off=1097, drawn=0`으로
+실패했고, `ChromeScrollVerificationFailed`와 exit 1을 반환했다. 이 두 판정은 이제 false를
+출력하고 exit 0으로 끝내지 않는다. 다른 미검증 항목까지 통과했다는 뜻은 아니다: 같은 실행의
+`agent_detail_scroll`은 `judgeable=false`여서 여전히 검증되지 않았다.
+
+### 2m.119 D3D11 그라디언트 채움과 원래 paint geometry (2026-10-03)
+
+W8.21⒞의 quad 채움은 이제 Windows에서도 세로(top→bottom)·가로(left→right) 두 색으로
+그린다. 방향만 있고 끝 색이 없으면 macOS `chrome_draw_lowering`처럼 solid로 접는다.
+`Cell`의 글리프 필드를 재활용하지 않고 `fill_end`, `paint_rect`, `paint_info`를 추가했다.
+인스턴스 stride는 80→128 bytes이고, 필드 오프셋·입력 레이아웃을 컴파일 때 함께 검사한다.
+기존 글리프 셀은 새 필드 기본값 0을 쓰므로 기존 atlas·coverage 규약을 유지한다.
+
+clip은 viewport와 quad 자체 clip의 교집합이다. GPU에는 잘린 표시 사각과 원래 paint 사각을
+별도로 보내므로, clip 시작점에서 그라디언트가 다시 시작하지 않고 둥근 모서리도 원래 위치에
+남는다. 보간은 HLSL `lerp`이며 색 양 끝 모두 quad의 alpha를 따른다.
+
+검증: `zig test src/platform/windows/d3d11_cells.zig --test-filter paintCell`의 행동 판정에
+원래 사각을 표시 사각으로 치환·방향 뒤집기·끝 색을 시작 색으로 치환·끝 알파를 1로 치환·
+끝 색 누락에도 방향 켜기의 변이 5개를 순차 적용했다. 다섯 회 모두 FAIL, 원본 바이트 복원 뒤
+1/1 통과했다. 실제 `d3d11-cells-smoke`는 hardware driver에서 240 frame을 present했다.
+고정 fixture 세 개(세로·가로·잘린 가로)를 실제 MaruWindowClass의 PrintWindow 캡처로 확인했고,
+7개 픽셀을 예상 보간 값 ±3으로 대조해 모두 통과했다. 잘린 가로의 첫 샘플은 RGB 190,0,64로
+원래 구간의 1/4 지점이며, 빨강으로 다시 시작하지 않았다.
+
+이는 채움의 증거다. gradient와 border를 함께 선언한 quad의 border 경로는 아직 기존 solid-only
+분기를 쓴다. 둥근 border의 정확한 표현까지 완료했다고 주장하지 않는다. 추가 대조에서 기존
+Windows 테두리 fallback이 폭 배열을 `[top,bottom,left,right]`로 읽는 오류도 확인했다. 공유 계약은
+`[top,right,bottom,left]`이고, 이 순서·독립 border alpha·gradient+border 조합을 다음 수정에서 함께
+처리한다. GPU fixture는 셀 파이프라인을 직접 쓰므로 chrome op lowering까지의 픽셀 검증은
+그 다음 fixture에서 연결해야 한다.
+
+최종 소스 검증: `win32-terminal-smoke`, `check-targets -j2`, `check-doc-links`,
+`check-boundaries -j4` 모두 exit 0. D3D11 셀 단위 판정 7/7, smoke 단계 경계 1/1도 통과했다.
+터미널 스모크의 editor vertical drag 5개·sidebar clip·dock clamp는 모두 true였다.
+`agent_detail_scroll`은 여전히 judgeable=false이므로 이 항목의 완료 증거로 쓰지 않는다.
+
+### 2m.120 Gradient border를 같은 GPU quad에서 그린다 (2026-10-03)
+
+§2m.119의 남은 border를 채움과 같은 셰이더에서 합성한다. 공유 `draw.Quad`의
+`border_widths=[top,right,bottom,left]`와 `border_alpha orelse alpha`를 그대로 내린다.
+기존 사각 넷 fallback은 순서를 `[top,bottom,left,right]`로 잘못 읽었고, 코드 순서상
+border 셀을 채움보다 먼저 넣었다. 이 fallback을 제거해 fill이 stroke를 뒤에서 덮는 경로도 없앴다.
+끝 색이 없어 solid로 접힌 선언에도 border가 유지된다.
+
+원래 paint 사각을 기준으로 각 변까지 거리를 계산하므로 한 변만 지정하면 다른 변에 새 stroke를
+만들지 않는다. clip으로 생긴 경계에도 stroke와 radius를 새로 만들지 않는다. 채움·테두리 RGB
+혼합은 macOS quad와 같은 sRGB↔linear 변환으로 하고, alpha는 독립적으로 혼합한다.
+누락된 border role은 폭도 0으로 만든다. 재사용된 셀에서 role을 제거했을 때도 이전 stroke를
+지우도록 `withBorder`를 수정했고, 수정 전 FAIL·수정 후 PASS로 확인했다.
+
+`Cell`은 border 폭·색 필드를 추가해 **160 bytes**다(초기 80의 두 배). 기존 glyph 인스턴스도 같은
+stride를 쓰는 비용이 있으며, offset·input layout·stride는 컴파일 단언이 지킨다. 여기서 성능
+예산 통과나 전용 quad pipeline 최적화까지 했다고 주장하지 않는다.
+
+실제 픽셀 fixture는 이제 `paintCell` 직접 호출 대신 제품 `appendPaintOps`의 chrome op lowering을
+쓴다. 실제 hardware D3D11 창의 캡처를 `tools/windows/check-paint-pixels.ps1`로 검사한다.
+client origin은 DPI·창 테두리에 따라 달라지므로 명시적으로 넘긴다(이번 캡처는 X=8, Y=31).
+`capture-window.ps1 -TargetProcessId`는 변이 실행의 소유 프로세스만 캡처하도록 추가했다.
+
+적대적 검증 5회는 **실제 셰이더**에 bottom 폭의 슬롯 오독·right 거리 방향 오독·독립 alpha 제거·
+원래 paint 사각 대신 잘린 표시 사각 사용·stroke RGB 무시를 넣었다. 각 변이는 정상 컴파일·
+240 frame present·소유 창 캡처 뒤 픽셀 판정에서 exit 1이었다. 네 번째의 첫 시도는 없는 필드를
+참조한 shader compile 실패여서 세지 않았고, 정상 컴파일되는 변이로 다시 확인했다.
+원본 소스·실행 파일 복원 뒤 초기 24개 샘플이 통과했다. 이어 rounded corner·누락 role·반투명
+border·면적 0 clip을 추가한 **최종 28개 샘플** 모두 통과했고, 셀 단위 판정 8/8·smoke 단계
+경계 1/1도 통과했다. 최종 소스의 `win32-terminal-smoke`, `check-targets -j2`,
+`check-doc-links`, `check-boundaries -j4`도 모두 exit 0이었다. 기존 editor drag 5개·sidebar clip·
+dock clamp는 true였고, `agent_detail_scroll`은 여전히 judgeable=false여서 완료 증거로 쓰지 않는다.
+
+### 2m.121 파일 열기 실패를 Notice로 알린다 (2026-10-03)
+
+W8.21⒜의 조용한 거절을 기존 `chrome.components.notice`에 연결한다. 지원하지 않는 종류·웹 패널 필요·읽기 실패(권한/4 MiB 상한)·메모리 부족을 서로 다른 영어/한국어 정적 문자열로 알린다. 실패 경로가 트리 행 문자열을 빌리거나 추가 할당을 요구하지 않는다. 성공한 파일에는 Notice를 열지 않는다.
+
+입력 순서는 Confirm → Notice → 검색/편집기/도크/터미널이다. Notice를 닫는 키는 셸로 보내지 않고, IME preedit도 전달하지 않는다. 마우스는 네이티브 캡션 버튼을 처리한 뒤 차단하므로 최소화·최대화·닫기는 사용할 수 있지만 덮인 앱 컨트롤은 누를 수 없다. 에디터 막대의 캡처도 Notice를 여는 순간 끝낸다. 렌더는 기존 Notice view의 ops를 Confirm과 공유하는 Windows modal lowering에 전달한다.
+
+함께 드러난 할당 실패 누수를 고쳤다. `openFileFor`는 error union 대신 tagged outcome을 반환하므로 기존 `errdefer`는 `.out_of_memory` 반환에 실행되지 않았다. 이제 소유권 이전 여부를 따라 text·path·line 배열·start 배열을 해제한다. `zig build test-win32-file-open`은 실제 임시 파일의 모든 할당 실패 prefix, 읽기 실패/상한/종류 구분과 두 언어 문구를 검증한다. 작업 트리 파일에 쓰지 않는다.
+
+제품 스모크는 실제 `.md` 행 클릭 → Notice의 메시지/그려진 cell·glyph → 다른 세션 카드 클릭 차단 → 터미널 위 문자키 닫기와 PTY 전달 차단을 관찰한다. `notice_ok=false`이면 `error.FileOpenNoticeVerificationFailed`로 종료한다. 원래 마우스 검증은 현재 세션 카드를 눌러 차단 제거 변이를 놓쳤다. 다른 세션을 대상으로 하고 실제 `sidebar_card_clicks`도 비교해 화면 변화만으로 판정하던 빈틈을 닫았다.
+
+적대적 검증은 안내 제거·오류 이유 바꿈·키 라우팅 제거·포인터 차단 제거·렌더 제거의 컴파일 가능한 제품 변이 다섯 가지를 각각 실제 창에서 실행한다. 다섯 변이가 모두 동작 판정에 거부되고 원복 스모크가 통과한 로그를 완료 근거로 삼는다. 컴파일 오류로 끝난 시도는 횟수에 넣지 않는다. `--hold-notice-ms`는 실제 Notice glyph가 present된 뒤 선택적으로 멈추는 캡처용 옵션이며 기본값 0이다.
+
+편집/safe-save·외부 변경 감시, 연 파일 수 상한, 모달 위치 비교, 웹 패널과 다른 Windows 잔여 항목은 이 변경으로 완료 처리하지 않는다.
+
+### 2m.122 편집 문서 소유권과 Windows 코드 위치 (2026-10-03)
+
+W8.17 편집·저장의 선행 작업으로 Windows 파일 뷰의 text/path를 앱 수명의 `document_registry.Registry` view lease에서 빌린다. 정본은 L2 `EditableFile`과 `document_state.State`가 소유하고 구문 provider·표시 줄·오프셋·스크롤은 Windows view에 남는다. 닫기와 앱 종료는 view 캐시를 해제한 뒤 lease를 놓는다. 파일 읽기 실패부터 Registry 게시까지 모든 할당 실패 prefix를 검사한다.
+
+BOM은 `FileFormat`에 보존하고 내용 오프셋에서는 제외한다. CRLF와 혼합 줄바꿈을 원형대로 보존하며 표시 줄과 문서 offset은 기존 LineIndex에서 가져온다. 이전 폭 계산은 긴 첫 줄이 폭 상한에 닿으면 루프를 끝내 뒤쪽 start 배열을 초기화하지 않았다. 이제 폭 계산만 상한에서 멈추고 모든 줄 start를 만든다. 실제 임시 파일로 BOM·CRLF·한글·상한보다 긴 첫 줄·뒤쪽 줄·dirty 초기값·본문과 경로 소유자·close 후 lease 무효화를 검증한다.
+
+코드는 `platform/windows/editor/document.zig`로 분리한다. 테스트 namespace를 root에서 명시적으로 참조해 이동 뒤에도 `test-win32-file-open`이 여섯 테스트를 실제 실행한다. 제품 변이 5회(줄 start 오염·줄바꿈 표시 유출·잘못된 saved hash·저장 계약 연결 전 writable 허용·폭 상한 조기 break)를 모두 거부하고 원복은 통과했다. 현재 편집기는 계속 읽기 전용이며 이 항목은 편집/safe-save 완료가 아니다. 사용자는 기존 safe-save 계약을 유지한 Windows 네이티브 저장 구현을 승인했다. 네이티브 저장·입력·undo·dirty 닫기·외부 변경 감시는 계속 구현한다.
+
+### 2m.123 Native save의 핸들 기준 경로 순회 (2026-10-03)
+
+Windows safe-save의 첫 I/O 단계는 `platform/windows/editor/path.zig`다. 사용자가 고른 root directory handle을 기준으로 각 segment를 `NtCreateFile(RootDirectory, FILE_OPEN_REPARSE_POINT)`로 열고 attribute-tag를 조회해 reparse point를 거부한다. 빈 요소·절대/장치 경로·`.`/`..`·ADS의 colon·NUL은 syscall 전에 거부한다. NT의 `.` 이름은 `OBJECT_NAME_INVALID`로 실측되어 선택된 root는 빈 relative name으로 다시 연다. directory는 `FILE_LIST_DIRECTORY`, leaf는 `FILE_READ_DATA`를 써서 같은 bit의 의미를 구분한다. API 근거는 [Microsoft NtCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile)이다.
+
+`Pinned`가 root부터 모든 중간 directory handle을 보관하며 directory는 `FILE_SHARE_DELETE`를 허용하지 않는다. 저장 호출은 commit까지 그 수명을 유지해야 한다. leaf의 reparse/type/link count도 조회하고, 원본과 연결된 다른 이름을 조용히 끊지 않도록 link count가 1이 아니면 `HardLinked`를 반환한다. pinned parent와 original handle을 저장 단계에 넘긴다. 실패와 정상 해제는 모든 allocator prefix와 handle을 정산한다. 각 OutOfMemory prefix 뒤에는 native DELETE-access open 성공도 검사해 heap 누수뿐 아니라 남은 kernel handle 잠금까지 판정한다. Win32 fixture 호출 규약은 기존 `windows/abi.zig`를 사용한다.
+
+`test-win32-safe-save`는 실제 임시 NTFS root에서 경로 거절, 부모 pin/해제, 할당 실패 전수, hard link와 junction을 검증한다. junction은 [Microsoft REPARSE_DATA_BUFFER](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_reparse_data_buffer)의 mount-point 형식과 `FSCTL_SET_REPARSE_POINT`로 만들며 shell·관리자 권한·symlink developer mode에 의존하지 않는다. root 밖 fixture가 읽히거나 변하지 않았는지도 검사한다.
+
+부모 rename만 보던 초기 판정은 SHARE_DELETE 허용 변이를 놓쳤다. 다른 열린 descendant도 rename을 막을 수 있기 때문이다. 이제 같은 부모에 `DELETE` 권한으로 실제 native handle을 열어 pin 중 `STATUS_SHARING_VIOLATION`, 해제 후 `STATUS_SUCCESS`를 확인한다. traversal/ADS 허용·부모 delete 공유·junction follow·hard link 허용의 다섯 제품 변이가 모두 실패하고 원복 7/7 통과했다. 현재 단계는 파일 본문을 쓰지 않으며 GUI 저장 완료가 아니다. metadata 보존·temp/write/flush·CAS/commit·failure cleanup과 GUI 저장 연결은 계속 구현한다.
+
 ## 3. 셸과 셸 통합
 
 ### 3.1 셸 티어
@@ -10420,3 +10598,2750 @@ WebView2에는 대응물이 없다. UDF는 항상 생기고 지울 수 있을 �
 > 기본값은 PowerShell(§3.1a), 바꾸는 수단은 `shell.windows-shell`(종류)·`shell.command[.windows]`(경로),
 > config의 OS 분기는 **일반 메커니즘**(키 접미)으로 넣었다. 그 셋의 우선순위와 규칙은 §3.1a와
 > [configuration.md](configuration.md) "OS별 값"이 소유한다.
+
+
+### main 재기반 — Zig 0.17 및 공용 이미지 채널 판정 (2026-10-25)
+
+Zig 0.17의 배열 곱 제거에 맞춰 Windows scrollbar probe의 bool 배열을 `@splat`으로
+초기화한다. 세션 호스트의 공용 타입 반사와 이미지 채널 fake는 Windows에서도 컴파일하므로,
+`std.c.fd_t`가 HANDLE인 Windows에는 `INVALID_HANDLE_VALUE`를 쓰고 POSIX에는 기존 -1을
+유지한다. 실제 POSIX socket 지원 범위를 넓히는 변경은 아니다. `test-client-poison-names`와
+`test-image-channel`을 Windows Zig 0.17로 실행해 검사 수를 줄이지 않고 통과했다.
+
+### main rebase: shared solid geometry and native gradients (2026-10-25)
+
+The gradient commit retains main's `chrome.solid_rects` lowering for solid operations:
+rounded opaque borders use the shared outer plate and inset fill, and transparent
+fills preserve independent border alpha. Gradient cells keep the original paint
+rectangle while clipping only their visible rectangle. Modal panels expand through
+`Quad.visibleRect` before either path; mixed solid/gradient operations retain draw order.
+
+`zig build test-windows-paint` exercises five regression cases: rounded asymmetric
+borders, transparent fill with opaque border, clipped gradient endpoints, mixed paint
+ordering, and padded gradient modal geometry. This is a CPU lowering gate; it does
+not claim GPU pixel or physical-input validation. The focused gate passed on Windows
+with Zig 0.17.0; full boundary validation runs at this rebased commit before continuing.
+
+The following border rebase commit also applies each solid quad's clip after shared
+flattening. Empty clips emit no cells; visible rectangles and original rounded-corner
+rectangles remain distinct, including nonzero host origins. `test-windows-paint`
+adds empty-solid-clip and translated-solid-clip regressions. Shared border geometry
+is retained rather than replaced by the older Windows-only edge approximation.
+
+The document-lease rebase preserves main's `syntax.languageFor` mapping in the new
+Windows document module instead of reintroducing reflected enum tables. Four search
+workers added on main (preview, disk apply, batch collection and mixed preparation)
+now consume `maru.app.detached_worker_wait` after the shared lifecycle module moves
+out of the macOS folder. File-open ownership, allocation-failure and BOM/CRLF tests
+passed together with the Windows paint regression gate at this commit.
+
+The archive-worker rebase scans both `src/platform/macos` and `src/app` in the
+detached-worker quiescence judge; neither root is removed to make the move pass.
+The scanner retains Zig 0.17 array initialization. Focused archive tests compiled
+43 cases (15 worker cases and 28 anonymous aggregation blocks), yielding 39 passed,
+4 platform skips and no failures on Windows. The registered expected count is 43;
+Windows runner argument parsing currently bypasses that numeric guard, so actual
+output was inspected explicitly. macOS runtime verification remains separate.
+The standalone quiescence judge and Windows paint regression gate also passed.
+
+### 2m.124 공통 파일 트리 worker의 macOS 경로 결합 해소 (2026-10-03)
+
+사용자가 요청한 폴더 결합 정리로 worker를 `src/app/file_tree_backend.zig`로 옮겼다.
+공통 worker는 OS SSH 구현을 직접 import하지 않고 `RemoteTransport`를 초기화 시 받는다.
+macOS host는 `platform/macos/file_tree_remote.zig`의 기존 전송을 주입하고,
+Windows는 기존 로컬 파일 트리 경로를 같은 `maru.app` 타입으로 소비한다.
+전송 없는 원격 submit은 거절하며 local scan으로 바꾸지 않는다.
+Windows 파일 identity·교체·링크·핸들 수명 판정자는 그대로 실행되고,
+추가 전송 판정자는 실제 worker의 비동기 결과와 path 소유권을 확인한다.
+42개 등록 중 Windows 33 pass·9 skip, 실행 동작을 깨뜨린 변이 5개 모두 검출·복구 통과.
+Git·텍스트 adapter와 safe-save 전체는 완료되지 않았다.
+
+The file-tree-worker rebase preserves main's concurrent-growing-file hash test and
+adds the transport capability tests without dropping either side. The focused
+Windows build compiled 50 cases: 22 worker judges and 28 aggregation blocks, with
+40 passed and 10 platform skips. Remote-tree routing, scan identity, build-graph
+inventory, and Windows paint checks passed. Reusing `maru_mod` removes one dedicated
+module and one maru import pair; the existing main inventories were decremented
+for that removal rather than replaced by the older branch totals.
+
+Subsequent local rebase verification runs all four existing `boundary-shard=i/4`
+partitions concurrently, each with two jobs. An aggregate is successful only when
+all four processes exit zero, all four shard manifests agree on the total, and
+the selected-step counts sum to that total. This changes local orchestration only;
+no boundary registration, test, or default CI execution is removed.
+
+### 2m.125 Windows safe-save의 미공개 native staging 파일 (2026-10-03)
+
+`platform/windows/editor/stage.zig`가 고정된 부모 handle 아래에 임시 파일을 만든다.
+[Microsoft NtCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile)의
+`RootDirectory`·`FILE_CREATE`·동기 nonalert·`FILE_OPEN_REPARSE_POINT`·`FILE_DELETE_ON_CLOSE`를 사용한다.
+파일 이름은 secure random 128bit이며 충돌은 최대 16번 다시 시도한다. 다른 reader/writer/delete
+handle과 공유하지 않고, 기존 파일을 여는 OPEN_IF/overwrite fallback은 없다.
+미공개 파일의 정리는 경로 delete가 아니라 소유한 kernel handle의 close다. 이름 소유권을 만드는
+할당이 실패해도 handle을 닫아 파일을 정리한다. 부모 pin은 staging과 향후 commit 동안 유지한다.
+
+본문은 positional write와 정확한 setLength로 교체한 뒤 sync한다. 짧게 다시 쓰면 이전 꼬리를
+남기지 않는다. 실제 파일의 sync endpoint만 실패시키는 fault injection은 오류가 호출자로
+전파되고 원본 내용이 유지되며 미공개 파일이 정리됨을 확인한다. metadata 복사에 필요한
+READ_CONTROL·WRITE_DAC·WRITE_OWNER·READ_EA·WRITE_EA는 생성 handle에서 요청하고 실제
+FileAccessInformation으로 grant를 확인한다. **이것은 메타데이터 복사 완료가 아니다.**
+ACL/owner·부가 stream·속성의 실제 보존, 원본 충돌 검사와 publish/rollback은 다음 단계다.
+
+`test-win32-safe-save`는 13개 등록(익명 2·path 5·stage 6)을 강제하며 Windows 13/13 통과했다.
+충돌 파일을 OPEN_IF로 열기·DELETE_ON_CLOSE 제거·잘못된 본문 길이·sync 생략·metadata 권한
+누락의 다섯 제품 변이가 모두 실행 판정에서 실패했고 정확한 원본 bytes 복구 후 통과했다.
+여전히 GUI save는 연결되지 않았고 Windows 편집기를 저장 가능하다고 표시하지 않는다.
+
+
+### 2m.126 Windows safe-save의 읽을 수 있는 메타데이터 복사 (2026-10-03)
+
+`platform/windows/editor/metadata.zig`는 미공개 staging 파일에 owner·group·DACL,
+EA와 부가 stream을 복사한다. [Microsoft BackupRead](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-backupread)와
+[BackupWrite](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-backupwrite)의
+동기 handle·security 처리·context abort 계약을 따른다. ReOpenFile은 원본 handle의
+객체를 다시 열고 데이터 쓰기와 삭제 공유를 차단한다. 속성 변경 권한은 이 공유 차단과
+별개이므로 복사 전후 ChangeTime·LastWriteTime·속성·크기·link 수를 확인한다.
+
+실제 Windows 파일에서 보호된 DACL·owner/group SID·EA 값·생성 시각·숨김 속성과
+두 부가 stream을 비교한다. 128KiB를 넘는 stream은 64KiB 버퍼 경계를 넘겨 검증한다.
+복원 도중 두 번째 native write를 실패시키는 판정자는 두 backup context의 abort,
+원본 보존과 미공개 파일 정리를 확인한다. namespace record와 경로를 포함한 stream 이름은 거절한다.
+
+**전체 메타데이터 보존이나 저장 완료를 뜻하지 않는다.** audit SACL은
+ACCESS_SYSTEM_SECURITY가 없으면 backup API가 생략한다. 결과의 `audit_complete`는 false이며
+publish 허가로 사용할 수 없다. 압축·희소·암호화·읽기 전용 파일과 미지원 stream은
+별도 구현이 필요해 현재 복사를 거절한다. 최종 CAS·교체·rollback·GUI 저장 연결과
+실앱 편집→저장→재열기 검증은 남아 있다.
+
+
+### 2m.127 Git 임시 index 정리의 공통 계층 이동 (2026-10-03)
+
+Git 작업자와 macOS 세션이 공유하는 index 수명 코드를 `app/turn_index_cache.zig`로
+옮겼다. 두 소비자는 `maru.app.turn_index_cache`를 사용한다. 정리 규칙은 유지한다:
+정해진 접두의 일반 파일만 대상으로 하며, 오래된 파일만 지우고 스윕은 프로세스당 한 번이다.
+Windows에서 실제 파일을 사용하는 기존 네 판정자가 모두 통과했다. 접두 반전·시간 경계 변경·
+반복 스윕·스윕 삭제 실패·닫기 삭제 생략의 다섯 변이는 모두 실행 판정에서 실패했고,
+원본 bytes 복구 뒤 네 판정자가 다시 통과했다. Git 작업자 본체와 POSIX 안전 열기의 분리는 남아 있다.
+
+
+### 2m.128 텍스트 요청을 네이티브 셰이핑과 분리 (2026-10-03)
+
+`app/chrome_text_request.zig`가 owned Request·Face·run 선택·폭 예산·요청 복사를 소유한다.
+네이티브 system_text는 같은 타입과 함수를 사용하며 draw lowering은 이 공통 모듈을 직접
+참조한다. CoreText shape/resolve는 아직 macOS adapter에 남아 있다. 기존 요청 생성 판정자
+세 개가 통과했다(프로젝트 모듈을 사용하는 실행에서는 익명 집계 21개를 포함해 24/24).
+아이콘 선택·폭 계산·화면 위 run 누락·family 복사·빈 icon-in-rect 누락의 다섯 컴파일 가능한
+변이가 모두 실행 판정에서 실패했고 정확한 bytes 복구 후 통과했다. 컴파일 오류 시도는 제외했다.
+
+실제 Windows SCM 창 스모크는 240프레임을 표시하고 파일명 4/4·행 hit 4/4·접기·선택·
+hover·press 검사를 통과했다. 앱 빌드·플랫폼 대상·문서 링크·전체 경계 검사는 통과했다.
+이것은 편집/저장 실앱 검증이 아니다. draw lowering의 물리 위치와 네이티브 텍스트 adapter의
+추가 분리, Git 작업자 본체, 최종 safe-save와 GUI 저장 연결은 남아 있다.
+
+The chrome-request extraction preserves main's append-failure ownership fix:
+a copied run is released if inserting it into the owned request fails. All other
+request fields, face ownership, and semantic run selection match the existing
+main implementation. `test-chrome-text-request` adds allocation-failure-prefix
+coverage to the existing Korean/SVG, scrolled-origin and owned-face tests. The
+focused Windows run passed 32 selected cases. Removing the copied-run cleanup
+produced MemoryLeak; restoring it returned the gate to green. This validates the
+portable request layer, not macOS CoreText runtime shaping.
+
+
+### 2m.129 draw lowering의 공통 런타임 이동 (2026-10-03)
+
+`app/chrome_draw_lowering.zig`가 semantic ops를 renderer-neutral DrawList·glyph placement·
+background quad로 투영한다. main·macOS AppSession·Chrome Lab은 같은 `maru.app` 구현을
+참조한다. 네이티브 셰이핑 호출은 없다. cluster 방출 allowlist의 경로를 옮겼고 공통 텍스트
+요청과 lowering을 번역 문자열 검사 범위에도 넣어 이동으로 방어가 사라지지 않게 했다.
+
+기존 lowering 판정자 16개가 통과했다(익명 집계 포함 37/37). 텍스트 아래 layer·소수점 origin·
+독립 border alpha·gradient 방향·호출자의 quad layer를 깨뜨린 다섯 변이가 모두 실행 판정에서
+실패했고 정확한 bytes 복구 후 다시 통과했다. native system_text의 추가 분리와 Git 작업자,
+전체 safe-save·편집 입력·GUI 저장·실앱 저장 검증은 아직 진행 대상이다.
+
+The draw-lowering rebase retains Chrome Lab's Metal lowering import while routing
+semantic draw projection through `maru.app.chrome_draw_lowering`. The focused
+Windows gate now compiles 44 cases (16 lowering cases plus 28 aggregation blocks).
+Five independent behavioral mutations were rejected: text layer policy, fractional
+pixel origin, independent border alpha, gradient direction, and caller quad layer.
+Each was restored before the next mutation; the final original source passed all
+44 cases. Portable text request and Windows paint regressions also passed.
+
+
+### 2m.130 Git diff의 Windows 네이티브 읽기와 공유 경로 권위 (2026-10-03)
+
+editor/path의 handle-relative 구현을 `platform/windows/relative_file.zig`로 옮겼다.
+저장은 기존 single-link 제약을 유지하며 `openRead`는 hard-linked regular file을 읽는다.
+둘 다 각 요소의 reparse point를 거절하고 부모 directory handle을 읽기/저장 동안 고정한다.
+Git worktree 읽기는 Windows에서 이 경로를 사용하고, POSIX는 기존 no-follow descriptor 읽기를
+유지한다. 없는 파일은 NotFound로 구분하며 Windows byte 수집은 16MiB를 초과하지 않는다.
+
+경로 테스트가 named module 이동 때문에 main artifact에서 빠지는 것을 발견해 별도 facade
+artifact로 복구했다. safe-save 게이트는 main 14/14(집계 2·stage 6·metadata 6), facade 29/29
+(집계 21·기존 저장 경로 5·새 읽기 경로 3)을 실행한다. 별도 Git native read 판정자는 실제
+한글 파일·없는 파일·traversal 거절·16MiB 상한을 검사해 통과했다. Windows runner는 현재
+expect-tests 인자를 읽지 않으므로 이 수는 실제 실행 출력으로 확인했다.
+
+hard link 읽기 거절·부모 delete 공유·reparse 판정 생략·없는 파일 오분류·잘림 표시 제거의
+다섯 컴파일 가능한 변이가 모두 실행 판정에서 실패했고 정확한 bytes 복구 후 두 게이트가
+통과했다. Git 작업자 본체의 공통 계층 이동, 최종 safe-save publish/rollback·GUI 편집/저장과
+실앱 저장 검증은 여전히 진행 대상이다.
+
+The native-worktree rebase passed the Windows native read test, 14 stage/metadata
+cases and 36 shared facade/path cases (28 aggregation blocks plus 8 path cases).
+The facade expected count is updated to 36 for main's module graph. Five behavioral
+mutations were rejected at runtime: refusing readable hard links, sharing parent
+delete access, skipping reparse rejection, misclassifying missing files, and losing
+the truncation flag. Both native gates passed after each source was restored.
+
+### 2m.131 Git 작업자의 공통 도메인과 이식 가능한 병합 fixture (2026-10-03)
+
+Git 작업자는 `app/git/backend.zig`, 임시 index 수명은 `app/git/index_cache.zig`에 둔다.
+협력 구현을 도메인 namespace로 묶는 project-structure 규칙을 따른다. 기존 `maru.app` facade
+이름은 유지하며 main·macOS 세션·병합·저장 충돌·턴 영속 소비자가 같은 작업자를 사용한다.
+POSIX no-follow 열기는 `platform/posix/safe_open.zig`가 소유하고 Windows는 native handle 경로를 쓴다.
+
+병합 fixture의 경로 조회·파일 쓰기·대기는 이식 가능한 I/O를 사용한다. Windows fixture Git은
+기존 CreateProcess 캡처로 실행한다. 임시 저장소 삭제는 resolve한 절대 대상이 현재 workspace의
+.zig-cache 안쪽인지 확인한 뒤 native I/O로 수행한다. fixture는 core.autocrlf=false로 원문 LF를
+유지한다. 프로덕션 executable 선택 계약은 바꾸지 않았다.
+
+Windows에서 8개 병합 판정자가 실행돼 통과했다(집계 21 포함 29 pass·1 skip). POSIX 셸 래퍼로
+실패를 주입하는 한 fixture는 Windows 대안이 아직 없다. 조상 판 배치·빈 조상·add/add·잘림 표시·
+꼬리 배치의 다섯 제품 변이가 실행 판정에서 실패했고 원본 복구 뒤 통과했다.
+전체 safe-save publish/rollback·GUI 편집/저장·실앱 저장 검증은 여전히 진행 대상이다.
+
+Git 쓰기 fixture도 공통 실행 경로를 사용해 Windows에서 POSIX spawn을 참조하지 않는다.
+Linux stdin은 socketpair와 send(MSG_NOSIGNAL)을 사용하고 macOS는 기존 pipe의
+F_SETNOSIGPIPE를 유지한다. Linux send(2)의 per-call 신호 억제와 EPIPE 계약을 따른다
+(https://man7.org/linux/man-pages/man2/send.2.html). 전역 SIGPIPE 처분은 바꾸지 않는다.
+
+Rebase verification on Zig 0.17: the shared Git merge gate compiled 37 cases
+(28 aggregation blocks and nine named cases): 36 passed and one POSIX-only
+wrapper case skipped on Windows. Native worktree reads passed all 29 cases.
+All five runtime mutations (base side, empty base, add/add, truncation and tail
+batch) failed as expected; the restored merge gate passed. Thirteen release
+build bindings now point at platform/posix/safe_open.zig after its move.
+
+### 2m.132 공통 chrome 텍스트 요청의 할당 실패 정리 (2026-10-03)
+
+run 배열의 공간을 먼저 확보한 뒤 텍스트를 복사한다. 기존 순서는 복사 성공 후 배열 확장 실패 때
+복사본을 잃었다. 24개 run으로 여러 배열 확장을 유발하고 모든 할당 실패 지점을 검사한 테스트가
+수정 전 누수를 재현했으며 수정 후 25개 판정이 통과했다. 누수 재발·폭 계산·화면 위 run 누락·
+family 혼동·빈 icon 누락의 다섯 실행 변이가 실패했고 원본 복구 후 통과했다.
+
+### 2m.133 전체 보안 설명자 복제의 명시적 권한과 검증 (2026-10-03)
+
+`platform/windows/editor/security.zig`는 열린 원본의 전체 보안 설명자를 보관한다.
+Microsoft SECURITY_INFORMATION의 BACKUP_SECURITY_INFORMATION 계약을 따른다:
+owner/group/DACL뿐 아니라 전체 SACL을 조회하려면 READ_CONTROL과 ACCESS_SYSTEM_SECURITY가,
+복원에는 WRITE_DAC·WRITE_OWNER·ACCESS_SYSTEM_SECURITY가 필요하다.
+[공식 보안 정보 계약](https://learn.microsoft.com/en-us/windows/win32/secauthz/security-information)과
+[공식 Native 조회 계약](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-zwquerysecurityobject)을 근거로 한다.
+NtQuerySecurityObject가 반환한 self-relative 설명자를 RtlValidRelativeSecurityDescriptor로 검사하고,
+DACL·SACL 각각의 protected/unprotected 상태를 명시해 복원한다. 원본을 복원 전후에 다시 조회하고
+임시 파일의 복원 결과도 비교한다. 핸들은 경로를 다시 열지 않는 ReOpenFile로 얻고 모든 실패 때 닫는다.
+
+`metadata.cloneComplete`는 이 snapshot을 readable 복제 전후에 적용한다. 전체 보안 권한이 없으면
+readable-only로 낮추지 않고 실패한다. 프로세스 권한을 자동으로 올리거나 토큰 권한을 변경하지 않는다.
+실제 Windows 검증에서는 audit authority가 없어 거절됐고 원본과 빈 임시 파일이 보존됐다.
+권한을 가진 환경에서 실제 audit SACL 복원이 성공하는 것은 아직 입증하지 못했다.
+권한·상속 보호·원본 변경·복원 비교·할당 정리는 I/O 오류 주입과 실제 Windows 설명자 검증으로 확인했다.
+다섯 실행 변이가 실패했고 복구 후 root-main 22개와 native 경로 29개 판정이 통과했다.
+홀수 크기 선행 할당을 둔 고정 버퍼 테스트가 snapshot 복사의 정렬 누락을 재현했다.
+복사본은 이제 4바이트 정렬로 할당하고 소유 타입에도 정렬을 유지한다. Native 열기·조회에서
+접근 거절/권한 부족만 SecurityUnavailable로 분류하며 그 밖의 실패는 별도 오류로 보존한다.
+이것은 미게시 임시 파일 단계이며 최종 publish/rollback, GUI 저장, 실앱 저장 검증은 남아 있다.
+
+### 2m.134 교체 전 임시 파일 핸들 유지와 취소 정리의 실제 Windows 검증 (2026-10-03)
+
+`editor/stage.zig`에 교체 단계가 사용할 비공개 Native primitive를 둔다. 자동 삭제 상태 해제,
+메타데이터 전용 핸들 유지, 열린 객체에 대한 삭제를 실제 파일로 검사한다.
+[FILE_DISPOSITION_INFORMATION_EX](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-_file_disposition_information_ex)의 ON_CLOSE 계약을 근거로 한다.
+이 환경에서는 자동 삭제 해제는 됐지만 재설정은 STATUS_NOT_SUPPORTED였다. 취소 때 이 상태만
+열린 소유 객체의 명시적 삭제 예약으로 처리한다. readonly 속성도 소유 객체의 삭제 옵션으로 처리하며
+원본 속성을 바꾸지 않는다. 취소·정리는 경로 이름으로 임의 파일을 지우지 않는다.
+
+임시 파일의 데이터 핸들과 마지막 metadata 핸들을 닫아도 해제된 자동 삭제가 재발하지 않았다.
+metadata 핸들을 유지한 채 교체에 필요한 독점 read/write/delete 핸들도 열렸다.
+소유 파일을 다른 이름으로 옮기고 이전 이름에 경쟁 파일을 둔 뒤 객체 핸들로 정리하면 경쟁 파일은 보존됐다.
+ON_CLOSE 누락·취소 DELETE 누락·readonly 처리 누락·witness에 데이터 접근 추가·객체 DELETE 누락의
+다섯 실행 변이가 실패했고 복구 후 root-main 27개와 native 경로 29개 판정이 통과했다.
+공유 모드를 0으로 바꾼 metadata-only 변이는 살아남았으며 위 다섯 검출 횟수에 포함하지 않는다.
+이 primitive는 아직 runtime 저장 경로에 연결하지 않았다. 원본 동일성 검증·실제 교체·조건부 롤백·
+GUI 편집/저장·실앱 저장 검증은 남아 있다.
+
+### 2m.135 실제 보호된 감사 SACL 복원과 스레드 권한 복원 검증 (2026-10-03)
+
+§2m.133에서 남긴 실제 감사 SACL 성공 검증을 완료했다. 이 Windows 계정에는
+SeSecurityPrivilege가 할당되어 있으나 비활성 상태였다. `editor/audit_scope.zig`는
+현재 토큰을 복제하고 그 복제본에서만 할당된 권한을 활성화한다. 프로세스 토큰은 수정하지 않는다.
+[DuplicateTokenEx](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-duplicatetokenex),
+[AdjustTokenPrivileges](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-adjusttokenprivileges),
+[SetThreadToken](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadtoken)의 계약을 따른다.
+범위를 종료할 때 이전 스레드 토큰을 복원하며 다른 스레드에서 종료하려는 호출은 거절한다.
+현재 이 범위는 네이티브 검증 fixture에서만 사용한다. 런타임 저장에 자동 권한 활성화를 연결하지 않았다.
+
+실제 파일에 protected audit SACL을 설정하고 `metadata.cloneComplete`로 미공개 임시 파일에
+복제한 뒤 ACL 바이트를 조회해 비교했다. 프로세스 권한의 전후 동일성과 중첩 범위에서
+직전 impersonation 토큰의 정확한 복원도 확인했다. 권한이 할당되지 않은 환경은 성공으로
+간주하지 않고 관련 네이티브 판정을 skip한다.
+권한 비활성·primary 토큰 사용·이전 토큰 복원 누락·잘못된 권한 조정 대상·impersonation 권한 누락의
+다섯 실행 변이는 모두 실패했다. 원본 복구 후 root-main 30개와 native 경로 29개 판정이 통과했다.
+최종 파일 교체·조건부 롤백·GUI 편집/저장·실앱 저장 검증은 계속 남아 있다.
+
+### 2m.136 교체 전 객체 동일성의 전체 파일 ID 검증 (2026-10-03)
+
+`editor/identity.zig`는 열린 핸들에서 FileIdInfo를 조회하고 볼륨 일련번호와 128비트 식별자
+전체를 함께 비교한다. [FILE_ID_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info)와
+[GetFileInformationByHandleEx](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfileinformationbyhandleex)의
+공식 계약을 따른다. 조회 실패를 동일한 객체로 간주하지 않는다. `metadata.Source`의 이전
+64비트 내부 index 저장을 대체했으며 복제 전후 안정성 검사에 객체 동일성을 포함했다.
+
+실제 파일을 이름 변경한 뒤 이전 이름에 경쟁 파일을 생성해, 원래 핸들과 새 이름의 핸들은
+같은 객체이고 경쟁 파일은 다른 객체임을 확인했다. 식별자 16바이트 각각과 볼륨의 상위 비트
+차이를 검사하며 잘못된 핸들의 조회 실패도 검사한다. 저장된 식별자가 다르면 메타데이터 복제
+전에 거절하고 원본과 빈 임시 파일이 보존되는 것도 확인했다.
+볼륨 무시·64비트 절단·잘못된 정보 class·조회 실패 수락·원본 동일성 검사 누락의
+다섯 실행 변이를 검출했다. 복구 후 root-main 34개와 native 경로 29개 판정이 통과했다.
+이 검사는 핸들 객체의 동일성을 보장하며 경로 이름의 현재 대상 비교를 대신하지 않는다.
+실제 교체·조건부 롤백과 GUI 저장 연결은 계속 남아 있다.
+
+### 2m.137 교체 준비 객체의 핸들 소유권 이전과 취소 (2026-10-03)
+
+Stage 생성 시 READ_CONTROL·WRITE_DAC·READ_ATTRIBUTES를 가진 metadata-only 제어 핸들을
+미리 확보한다. 원본 ACL을 복사한 뒤 새 권한을 얻으려 하지 않으며 기존 데이터 핸들의 독점성을
+유지한다. `Stage.handoff`는 전체 파일 ID를 저장하고 자동 삭제를 해제한 뒤 데이터 핸들을 닫고
+이름 할당과 제어 핸들을 `Prepared`에 이전한다. 자동 삭제 해제 뒤에는 실패 가능한 연산을
+두지 않는다. 준비 실패는 기존 Stage의 제어 핸들과 자동 삭제 소유권을 유지한다.
+`Prepared.cancel`은 저장된 객체 ID를 확인하고 그 객체의 삭제를 예약한다.
+취소 실패 때 소유권을 유지해 재시도할 수 있으며 경로 문자열로 경쟁 파일을 삭제하지 않는다.
+Native 삭제 계약과 witness 접근 권한의 근거는 §2m.134와 같다.
+
+실제 파일 DELETE와 부모 DELETE_CHILD가 모두 거절되면 삭제 권한의 재열기가 실패했다.
+독점 데이터 핸들을 유지한 채 DELETE를 다시 여는 사전 확인도 sharing violation으로 거절됐다.
+따라서 취소의 ACCESS_DENIED 때는 미리 확보한 WRITE_DAC로 **소유한 후보 객체에만** 보호된
+정리용 DACL을 설정하고 삭제를 다시 시도한다. 이 DACL은 DELETE·SYNCHRONIZE·READ_ATTRIBUTES를
+허용하며 데이터 접근은 허용하지 않는다. 원본·부모·경쟁 파일의 ACL은 수정하지 않는다.
+[Native 보안 설정 계약](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-zwsetsecurityobject)에
+따라 이미 열린 핸들의 WRITE_DAC 권한으로 적용한다. 다른 종류의 오류는 ACL을 바꾸지 않고 반환한다.
+실제 양쪽 삭제 거절 상태에서 준비 후 취소가 성공했고, 기존 독점 교체 핸들 열기도 계속 성공했다.
+
+실제 독점 교체 핸들 열기, 이전 이름의 경쟁 파일 보존, 실패 100회 후 프로세스 핸들 개수 동일,
+ID 불일치 거절 후 취소 재시도를 확인했다. 오류 주입 첫 실행에서는 의도적 witness 누수가
+fixture의 재귀 정리를 멈추게 했다. 해당 프로세스를 종료하고 원본을 복구했으며 이 실행은
+검출 횟수에서 제외했다. fixture는 이제 누수를 보고할 때 재귀 정리를 생략하고 디렉터리
+핸들을 닫는다. 정상 구현의 정리는 계속 수행한다.
+최종 코드에서 WRITE_DAC 권한 누락·정리 DELETE 권한 누락·정리 SYNCHRONIZE 누락·데이터 핸들
+유지·취소 ID 검사 누락의 다섯 실행 변이는 모두 런타임 실패로 검출했다(판정 실패 또는 정리 실패 panic).
+컴파일에서만 거절된 변이는 제외하고 실행 가능한 형태로 수정해 다시 검증했다.
+복구 후 root-main 39개와 native 경로 29개 판정이 통과했다.
+Prepared는 아직 미공개 후보만 소유하며 최종 publish/조건부 롤백과 GUI 저장은 연결하지 않았다.
+
+### 2m.138 공통 Chrome 텍스트 아티팩트와 Windows 호출 경로 정리 (2026-10-03)
+
+혼합 system_text의 소유권·배치·clip·registry 해석·GPU DTO 변환을 `src/app/chrome_text.zig`로
+이동했다. Windows SCM·에이전트 표면과 main은 공통 facade를 소비하고 macOS 경로를 import하지 않는다.
+CoreText 호출과 macOS 캐시 검증은 native adapter에 유지한다. 연결은
+[레이어링과 이식성](layering-and-portability.md) §3.4.3이 소유한다.
+§2m.18의 얇은 Windows/macOS 경로 test shim은 제거하고 facade root에서 실제 공통 판정자를 실행한다.
+
+기존 단일 run 함수는 run 배열을 요청 소유권에 맞게 할당하지 않았고, native Windows 갈래의
+토큰 줄 높이는 배율 1000으로 고정되어 있었다. run 배열과 문자열의 모든 할당 실패 prefix를 검사하며
+토큰·device 셀 메트릭을 구분하는 공통 정책으로 1.5배 native glyph 줄 높이도 확인한다.
+배율 누락·overhang 누락·이어지는 run의 advance 누락·부분 요청 정리 누락·stack run 배열 사용의
+다섯 실행 변이는 모두 런타임 실패로 검출했다. 원본 복구 후 33개 판정이 통과했다.
+실제 macOS CoreText 실행은 이 Windows 호스트에서 검증하지 못했다.
+전체 build·check-targets·check-doc-links·check-boundaries가 통과했다. Windows SCM 실창에서
+240프레임을 표시했고 이름 10/10·행 hit 10/10·접기·선택·hover·누름 판정이 통과했다.
+Windows 최종 저장·롤백·GUI 저장 연결·실앱 저장 검증은 계속 남아 있다.
+
+### 2m.139 권한 없는 감사 SACL 보존의 native TxF 조사 (2026-10-03)
+
+`python tools/windows/probe-safe-save-txf.py`는 Python 표준 라이브러리만 사용하는
+Windows 전용 opt-in 조사 도구다. 저장소 `.zig-cache`의 고유 임시 디렉터리에만 파일을 만든다.
+fixture 설정·검사 때만 복제 thread token의 이미 할당된 SeSecurityPrivilege를 켜고,
+실제 쓰기 때는 원래 token으로 돌아온다. 쓰기 직전 감사 SACL 조회가 실제로 거절되는지 검사한다.
+
+이 호스트에서 commit·rollback·외부 쓰기·이름 변경·삭제의 다섯 상황을 실행했다.
+commit 전 독자는 원래 내용을 보았고 commit 후 새 내용을 보았다. rollback 후에는 원래 내용이
+남았다. 외부 세 종류의 변경은 ERROR_SHARING_VIOLATION으로 거절됐다.
+보호된 실제 감사 SACL을 포함한 owner/group/DACL/SACL 보안 서술자 전체, 128비트 파일 ID와
+volume ID, named stream이 동일함을 확인했다. 종료한 transaction의 핸들은 재사용하지 않고
+일반 핸들로 다시 열어 ID를 검사한다.
+첫 데이터 쓰기 전에도 외부 이름 변경이 ERROR_SHARING_VIOLATION으로 거절됨을 확인했다.
+
+일반 비트랜잭션 쓰기·commit 대신 rollback·truncate 누락·감사 ACE 변경·named stream 손실을
+주입한 다섯 실행 변이는 모두 assertion 실패로 검출했다. 원본 복구 후 다섯 상황이 다시 통과했다.
+이는 조사 도구의 판정력 검증이며 제품 저장 경로의 다섯 변이 검증으로 대신 세지 않는다.
+
+[Microsoft의 CreateFileTransactedW 계약](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createfiletransactedw)은
+TxF 대안을 강하게 권고하고 향후 Windows 제공을 보장하지 않는다. 이 조사는 기본 저장 전략을
+변경하지 않는다. NTFS 이외 파일 시스템·원격 경로 지원, pinned parent 상대 열기, commit 실패의
+결과 판별, 충돌 CAS, 충돌 후 조건부 rollback 및 crash 복구는 증명하지 않았다.
+앱에는 이 도구를 연결하지 않았고 GUI 편집·저장·재열기 검증도 계속 남아 있다.
+
+### 2m.140 Windows 문서 revision과 실제 편집기 페인트 갱신 (2026-10-03)
+
+Windows 문서 뷰는 L2 Registry lease로 본문을 빌리며, L2 편집은 평탄화된 메모리를 교체한다.
+`OpenFile.refresh`는 본문 소비 전에 revision을 확인하고 줄 슬라이스·정확한 CRLF 시작 offset·최대 표시 폭·
+native syntax provider를 갱신한다. 이전 캐시를 먼저 무효화하여 할당 실패 뒤 해제된 본문을 읽지 않는다.
+실패한 캐시는 revision을 게시하지 않고 다음 프레임에 재시도한다. 본문이 사라지면 빈 캐시와
+명시적인 오류를 반환한다. 사이드바 이름도 현재 Registry 경로에서 읽는다.
+
+`attach`는 독립 view lease와 파생 캐시만 만들고 본문 소유권은 L2에 유지한다. 두 뷰는 별도로
+갱신하며 각자의 스크롤을 유지한다. 초기 열기와 재구축은 같은 Projection 구현을 쓴다.
+초기 Registry 생성 실패 때 이미 만든 native syntax provider도 정리한다.
+본문을 소비하는 제품 `buildComposedEditor`와 구문 색 계산이 먼저 refresh를 호출한다.
+GUI 입력을 붙일 때도 hit-test·선택·복사 등 모든 본문 소비 전에 같은 계약을 지켜야 한다.
+
+`zig build test-win32-file-open`의 13개 판정이 통과했다. UTF-8/CRLF 수정, revision이 같을 때 무할당,
+두 재구축 할당 실패점과 재시도, 복수 뷰와 원본 lease 해제, attach 파생 캐시 전체 할당 실패 prefix,
+실제 tree-sitter 구문 변경, 본문 제거를 검사한다. revision 무시·실패 시 텍스트 유지·revision 조기 게시·
+구문 스팬 유지·잘못된 lease 종류의 다섯 실행 변이를 모두 런타임 실패로 검출했고 복구 후 통과했다.
+
+`zig-out/bin/maru.exe win32-editor-document-smoke`는 사용자 파일·config를 변경하지 않는 메모리 fixture를
+실제 DirectWrite/D3D 창에 표시한다. 제품 페인트 진입점을 그대로 호출하며 별도 refresh로 대신하지 않는다.
+수정 전 revision 0/3줄/dirty=false, 수정 후 revision 1/4줄/dirty=true,
+역연산 후 revision 2/3줄/dirty=false에서 총 60프레임을 표시했다. glyph는 25→35→25개였고
+그림 digest는 수정 후 바뀌고 역연산 후 원래 값으로 돌아왔다. 줄 오프셋과 본문 포인터도 현재 L2와 비교한다.
+페인트 refresh 두 곳을 모두 제거한 추가 실행 변이는 실제 창에서 StaleEditorProjection으로 검출했다.
+일반 제품 루프의 `win32-terminal-smoke`도 종료 코드 0과 2,582프레임으로 완료했다.
+파일 열기, 편집기 236프레임의 pane 밖 셀 0, 스크롤 그림 변경, 첫 화면과 스크롤 뒤 구문 색 판정이
+통과했다. 파일 활성 상태의 키·세션 추가 두 판정은 이번 실행에서 unjudgeable이므로 통과로 세지 않는다.
+
+일반 파일 열기는 여전히 read_only=true다. 이 스모크는 L2 편집 연산과 실제 렌더 연결을 검증하며
+키 입력·IME·선택 UX·undo 그룹·디스크 저장·dirty-close를 증명하지 않는다.
+revision 변경 때 syntax를 통째로 다시 파는 비용도 남아 있다. 최종 저장·입력 연결·실앱 저장 검증은 계속 진행한다.
+
+### 2m.141 실험적 Windows 저장 트랜잭션과 채택 전 검증 (2026-10-03)
+
+`src/platform/windows/editor/transaction.zig`는 테스트 집계에만 연결한 실험적 local NTFS 구현이다.
+일반 앱 저장의 기본 backend로 채택하지 않았다. pinned 부모 핸들에서 얻은 volume-GUID 경로는
+CreateFileTransactedW의 전송 경로로만 사용한다. basename 검증, 원본과 열린 파일의 전체 ID 비교,
+pinned 디렉터리의 reparse 속성 확인, 실제 부모 핸들 상대 재열기의 ID 비교를 거친 뒤 원본 raw hash와
+호출자의 읽기 상한을 검사한다. 쓰기 전에 실패하면 본문을 변경하지 않는다.
+
+쓰기·길이 조정·flush 중 실패하면 poisoned 상태로 남겨 commit을 거절한다. commit 요청 전에는
+[Microsoft SDK 지침](https://learn.microsoft.com/en-us/windows/win32/fileio/programming-considerations-for-transacted-fileio-)
+대로 transacted 파일 핸들을 닫는다. 실제 파일 fixture에서 이 핸들을 닫은 뒤에도 commit 전 외부 쓰기가
+거절되는지 확인했다. commit 실패는 CommitUncertain으로 반환하고 성공이나 자동 재시도로 처리하지 않는다.
+rollback 실패도 호출자에게 알리며 close는 보유 핸들을 해제한다. 이 초기 구현에 없던 열린 KTM 핸들의
+결과 조회와 terminal 결정 반영은 후속 §2m.142에서 구현했다.
+
+`test-win32-safe-save`의 집계 50개와 native 경로 29개가 통과했다. 신규 transaction 판정은 11개다.
+짧은 본문으로 정확히 교체, commit 전 기존 본문 유지, rollback, 바뀐 hash, 같은 본문의 다른 파일 ID,
+flush 실패, 주입한 commit 실패, 외부 쓰기 거절, 할당 실패 prefix, 크기 상한과 ADS basename 거절을 검사한다.
+보호된 감사 SACL fixture에서는 복제 토큰의 감사 권한을 비활성화하여 보안 정보 읽기 실패를 확인한 상태에서
+저장했고, 권한을 복구한 뒤 owner/group/DACL/SACL 전체 바이트와 ADS 보존을 비교했다.
+보안 snapshot의 backup-intent 핸들이 남아 있으면 실제 native 열기가 6800으로 실패한다.
+이 경우 SourceBusy를 반환하며 권한이나 공유 규칙을 완화하지 않는다.
+
+ID 검사 무시, raw hash 검사 무시, commit 실패 수용, flush 이전 prepared 게시,
+basename 검증과 부모 핸들 상대 binding 검사를 함께 제거한 다섯 실행 변이를 모두 런타임 실패로 검출했다.
+원복 후 정상 집계가 다시 통과했다. 경로 변이는 두 검증을 함께 제거한 판정이며 각 검증의 독립 충분성을
+증명하는 판정으로 세지 않는다.
+
+[CreateFileTransactedW 계약](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createfiletransactedw)의
+대안 권고와 파일 시스템 제약은 그대로 적용된다. capability 확인, crash 복구,
+조상 reparse 변경 경쟁의 결정적 native 판정과 전체 safe-save 계약 검증이 남아 있다.
+GUI 키보드·IME 편집, 저장, 재열기 실앱 검증도 남아 있으므로 W8.17 완료로 세지 않는다.
+
+Rebase verification: the disabled-audit transaction fixture opens a fresh pinned
+file after disabling the duplicate token privilege. Reopening the file object
+created while that privilege was enabled retained its earlier authority on this
+host, so the old fixture did not establish audit-query denial. The fresh handle
+uses a direct GetFileSecurityW SACL query to prove ordinary audit access is denied.
+The backup snapshot adapter is deliberately not used for this denial verdict:
+its backup-information request and reopened object may have different authority.
+Transactional writing preserves the complete descriptor and named stream.
+All 50 native save cases pass.
+
+### 2m.142 저장 오류 응답과 KTM의 실제 결정을 구분한다 (2026-10-03)
+
+`Transaction.queryOutcome`는 열린 KTM 핸들에
+[GetTransactionInformation](https://learn.microsoft.com/en-us/windows/win32/api/ktmw32/nf-ktmw32-gettransactioninformation)을
+호출한다. 반환값은 SDK의
+[TRANSACTION_OUTCOME](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ne-winnt-transaction_outcome)
+1/2/3을 각각 undetermined/committed/aborted로 해석한다. 조회 실패와 미지의 값은 오류이고,
+닫힌 핸들은 호출하지 않는다. 조회만으로 로컬 phase나 쓰기 허가를 바꾸지 않는다.
+
+`reconcile`은 uncertain 상태에만 적용한다. native terminal 결정이면 committed/rolled_back으로
+반영하고, undetermined면 uncertain을 유지하여 쓰기·commit 재시도를 계속 거절한다.
+uncertain 상태의 rollback은 먼저 실제 결과를 조회한다. 이미 committed면 rollback을 거절하고,
+이미 aborted면 추가 요청 없이 확정한다. close도 결과를 조회한 뒤 terminal 결정에는 rollback을
+요청하지 않는다. 조회나 rollback 오류가 나더라도 close는 핸들을 해제하며 오류를 호출자에게 전달한다.
+따라서 close 자체를 저장 성공이나 원본 유지의 증거로 사용하지 않는다.
+
+신규 native 판정 5개를 더해 `test-win32-safe-save` 집계 55개와 경로 29개가 통과했다.
+실제 commit 뒤 false 응답 주입, 실제 rollback 뒤 false 응답 주입은 명시적인 reconcile과 close
+두 경로를 검사했다. 실제 KTM rollback 뒤 제품 commit을 요청하면 Windows 오류 6704로 실패하며,
+조회는 aborted를 반환하고 원본은 유지됐다. 실패·미지의 조회 값은 uncertain을 유지하고,
+pending 조회는 재시도 허가가 되지 않는다. Native 조회 자체의 invalid-handle 실패도 검사한다.
+기존 실제 파일 테스트에 active/prepared/committed/aborted 조회와 닫힌 상태 거절 판정을 추가했다.
+
+pending을 committed로 해석, committed를 aborted로 해석, 조회 오류를 committed로 처리,
+미지의 값을 committed로 처리, close의 결과 조회 제거라는 다섯 실행 변이를 모두 런타임 실패로 검출했고
+원복 후 정상 집계가 통과했다. 이 검증은 살아 있는 KTM 핸들의 실제 결정 반영을 증명한다.
+프로세스 종료 후 복구, 모든 실패 타이밍의 결과 확정, L2 revision 저장 ack와 GUI 연결은 아직 증명하지 않았다.
+일반 파일은 계속 읽기 전용이며 실앱 키보드·IME 편집→저장→재열기 검증은 남아 있다.
+
+### 2m.143 Windows dispatcher의 macOS 폴더 결합을 wire 계약으로 분리 (2026-10-03)
+
+`cli/internal_contract.zig`가 hidden session-host/notification child 명령 이름과 notification receipt
+schema의 단일 출처다. Windows dispatcher는 이 공통 계약을 읽는다. macOS entrypoint import는
+comptime macOS 갈래에만 남기며, POSIX 절대 경로와 descriptor 슬롯 grammar도 그 adapter에 유지한다.
+notification release 부모에는 전체 maru 대신 순수 계약 모듈만 주입했다. 기존 macOS 상수 파일은 제거했고,
+Windows SCM·에이전트 표면의 이미 이동한 Chrome 계약에 관한 낡은 경로 설명도 수정했다.
+
+`test-cli-internal-contract`의 root 집계 2개와 실제 판정 2개가 Windows에서 통과했다.
+기존 child wire ABI와 native launcher/dispatcher의 같은 command 값을 검사하며 기본 `test`에 연결한다.
+실제 exe에서 `__session-host`는 macOS-only 오류, `__notification-release-runtime`은 기존 무출력 오류,
+알 수 없는 명령은 기존 usage 오류로 종료됐다. 사용자 파일이나 native host를 만들지 않았다.
+
+session command 이름, notification command 이름, receipt schema, Windows 계약 연결, native parser 계약
+연결을 바꾸는 다섯 변이를 모두 런타임 실패로 검출했다. 그중 command/Windows 연결 변이 세 개는
+실제 exe의 canonical command가 unknown command로 바뀌는 것도 확인했다. 원복 후 unit/build/CLI가 통과했다.
+`check-targets`는 macOS release 부모와 같은 생성자로 만든 독립 module graph의 native 판정도 컴파일한다.
+해당 생성자의 순수 계약 모듈 주입을 제거한 추가 변이는 native 생산자의 module 누락 오류로 검출했고,
+원복 후 교차 컴파일이 통과했다. 이 컴파일 변이는 앞의 다섯 런타임 변이와 별도로 센다.
+실제 macOS child 실행을 Windows에서 검증한 것으로 세지 않는다.
+Windows persistent host 지원, 안전 저장·편집 입력·GUI 저장·재열기 등 남은 항목은 계속 진행 대상이다.
+
+최종 CLI 판정 4개, safe-save 55개와 경로 29개, build/check-targets/check-doc-links/check-boundaries가
+통과했다. 실제 DirectWrite/D3D editor document smoke도 60프레임에서 수정·역연산 뒤 그림과 revision
+변화를 확인했다. 이는 일반 파일의 키보드·IME 편집과 디스크 저장 검증을 대신하지 않는다.
+
+### 2m.144 부모 pin과 같은 file ID만으로는 reparse 전환을 막지 않는다 (2026-10-03)
+
+사용자 파일과 분리한 native 임시 fixture에서 grant와 nested 부모를 LIST/READ_ATTRIBUTES/SYNCHRONIZE,
+share READ/WRITE로 고정하고 원본 leaf는 같은 접근과 share READ/WRITE/DELETE로 열었다.
+부모의 volume-GUID 전송 경로를 먼저 얻은 뒤 원본을 grant 밖의 별도 fixture 폴더로 옮겨 부모를 비웠다.
+그 부모에 mount-point reparse tag를 설정할 수 있었다. 고정한 부모 핸들에서도 변경된 tag가 관측됐다.
+앞서 얻은 GUID 경로로 CreateFileTransactedW를 호출하면 grant 밖의 이동된 원본을 열었고,
+전체 volume/128-bit ID는 처음 열린 원본과 동일했다. 본문을 쓰지 않고 rollback했으며 fixture를 정리했다.
+
+이는 file ID 비교만으로 grant 안의 이름 권위를 증명할 수 없다는 native 재현이다.
+현재 제품 구현의 부모 tag 확인과 부모 핸들 상대 binding 검사를 우회한 조사이며,
+제품 구현에서 저장이 허용됐다는 판정으로 세지 않는다. 다음 단계는 이 시퀀스를 제품 begin 경로의
+결정적 native fixture로 연결하고, 지속·일시적인 tag 전환 및 열린 transaction의 namespace fence를 검사하는 것이다.
+
+근거는 [reparse 조작 계약](https://learn.microsoft.com/en-us/windows/win32/fileio/reparse-point-operations)과
+[MS-FSA FSCTL_SET_REPARSE_POINT](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/4aeefef8-92c3-4abc-af7a-a610caf8a165)이다.
+후자는 directory가 비어 있어야 함을 명시한다. 이 재현은 original leaf를 먼저 이동시켜 그 조건을 만족했다.
+Native 권한·공유 규칙을 완화하거나 사용자 경로를 변경하지 않았다. 최종 저장 계약과 GUI 채택은 계속 진행 대상이다.
+
+### 2m.145 실제 begin 경로의 같은-ID namespace 경쟁 판정 (2026-10-04)
+
+§2m.144의 native 조사 시퀀스를 실제 `Transaction.beginExperimental`과 같은 구현의
+compile-time fixture로 연결했다. 제품 호출은 빈 hook 타입을 쓰며 runtime hook이나 다른 open API를
+설치하지 않는다. fixture는 실제 부모 pin·CreateFileTransactedW·전체 ID·binding 검사를 수행한다.
+모든 변경 경로는 별도의 임시 root 안에 있다. junction tag는 recursive cleanup 전에 제거한다.
+
+실제 판정 세 개에서 GUID transport가 grant 밖으로 이동한 원본을 열고 전체 ID도 동일함을 확인했다.
+지속 junction은 부모 tag 검사에서 `NamespaceChanged`로 거부됐다. 열린 직후 tag를 지운 일시적
+junction은 실제 부모 핸들 상대 reopen의 `NotFound`로 거부됐다. tag를 지운 뒤 원본을 grant 안 이름으로
+되돌리려는 MoveFileW도 첫 쓰기 전에 sharing violation(32)으로 거부됐다. 모두 외부 fixture 원본 bytes를
+그대로 유지했다. ID만으로 이름 권위를 판단하거나 tag가 없다는 이유로 저장을 허용할 수 없다.
+
+원본 ID·disk hash·실패 commit·flush 전 prepared·namespace guard를 각각 훼손한 다섯 변이를
+런타임 실패로 검출하고 원복 후 safe-save 58개와 경로 29개가 통과했다. 추가로 binding 검사만 제거해도
+일시적 같은-ID junction 판정이 실패함을 확인했다. 이 추가 변이는 앞의 다섯 회와 별도로 센다.
+실험적 TxF 경로의 제한된 경쟁 시퀀스 검증이며, capability·crash 복구·모든 실패 타이밍·L2 저장 ack와
+일반 키보드/IME 편집→디스크 저장→재열기 연결은 계속 진행 대상이다.
+
+### 2m.146 L2 저장 요청과 native 결정의 연결 (2026-10-04)
+
+플랫폼 공통 `session.editor.save_request`에 owned 이미지와 문서 완료 정책을 추가했다.
+request lease, opened epoch, 요청 순서, editor/persisted revision과 body/raw disk 해시를 함께 검증한다.
+호스트 byte 상한을 BOM까지 포함해 할당 전에 검사한다. 원본 file ID·grant·native I/O는 L4 책임을 유지한다.
+공통 파일에는 macOS host나 Windows ABI 의존성이 없다.
+
+실험적 `Transaction.writeDocument`는 main-thread 문서 권위를 쓰기 전에 재검사하고,
+native begin이 확인한 source 지문과 요청의 raw image 지문이 맞을 때만 정확한 이미지 bytes를 쓴다.
+native transaction은 쓴 request lease·순서·raw 해시를 기억한다. `acknowledgeDocument`는
+다른 요청과 일반 byte write를 거부하며 native committed일 때만 L2의 저장 축을 갱신한다.
+prepared는 저장 완료가 아니다. uncertain은 실제 결과 조회 전 재저장을 막고,
+rolled_back은 dirty와 디스크 지문을 보존한다. 새 disk 관측 때문에 ack가 거절돼도 확인된 결과의
+자기 uncertainty는 해제하며 다른 요청의 uncertainty는 해제하지 않는다.
+
+공통 판정 11개에서 저장 중 추가 편집/undo clean, BOM/raw 지문, 같은 이미지의 늦은 ack,
+disk/경로 변경, opened lifetime 교체, 마지막 뷰 닫기, 모든 할당 실패, readonly/remote/상한,
+쓰기 전 권위, uncertain 재시도 차단과 확인된 결과의 정산을 검증했다.
+실제 Windows 판정 세 개는 BOM/CRLF bytes의 commit과 추가 편집 dirty,
+rollback 원본 보존, 실제 commit의 응답 유실 뒤 KTM 재조회 전후 ack 차이를 검사했다.
+safe-save는 기존 경로 판정을 포함해 root 61개이며 별도 경로 판정 29개를 유지한다.
+
+공통 정책에서 현재 본문으로 clean 처리·BOM 없는 disk 해시·disk CAS 생략·늦은 ack 허용·
+lifetime 확인 생략의 다섯 변이를 runtime 실패로 검출했다. uncertainty 게시 생략 변이는 별도로 검출했다.
+native 연결에서도 prepared를 saved로 처리·uncertain을 saved로 처리·다른 요청 ack 허용·
+source 지문 생략·image 지문 생략의 다섯 변이를 검출했다. 쓰기 전 문서 권위 생략은 별도 변이로 검출했다.
+모든 변이는 원복 후 정상 판정을 재실행했다.
+
+일반 GUI 저장은 활성화하지 않았다. capability·crash 복구·실패 타이밍 전체·일반 키보드/IME 입력·
+dirty-close·외부 감시와 편집→디스크 저장→재열기 실앱 연결은 계속 진행 대상이다.
+
+Main-rebase integration: owned save requests also capture State.save_target_epoch.
+Main target invalidation rejects both old write permits and old completion callbacks
+even if path and body are unchanged. A saturated target epoch refuses new requests.
+The regression failed before this binding and passes after it. The save-request
+gate now uses the shared facade root so main backup dependencies stay inside the
+module boundary: 40 compiled cases (28 aggregation blocks, 12 save-request cases).
+
+### 2m.147 읽기 전용 파일의 키보드 커서·선택·복사 연결 (2026-10-04)
+
+일반 파일 뷰의 `applyKey`를 앱 키 라우팅에 연결했다. 좌우·Ctrl+좌우·Home/End·Ctrl+Home/End,
+Shift 선택 확장, Ctrl+A/C를 받으며 release와 Alt 조합은 이동시키지 않는다.
+기존 Win32 번역이 Ctrl+Shift 일부를 command+shift로 표현하므로 control/command를 함께 받는다.
+modal/search/dock 우선순위는 유지하고 파일 뷰의 미지원 키와 오류도 셸로 넘기지 않는다.
+
+L2 `view_navigation`은 뷰별 selection 배열을 소유한다. 좌우는 기존 중립 grapheme 분절을 사용하고,
+CRLF를 한 번에 넘는다. 역방향 선택은 고정 끝을 유지하며 일반 좌우는 먼저 선택을 접는다.
+Home은 기존 smart-home 규칙을 재사용한다. 커서의 줄 추종에 쓰는 viewport 높이는 frame의
+같은 `sideProps` 기하에서 얻는다. 픽셀 caret 위치는 frame의 byte-offset API가 계산한다.
+
+Windows selection projection은 재사용 버퍼를 문서 행 번호로 제공한다. 기존 fixture의
+viewport-relative 선택 행 전달도 문서 행으로 고쳤다. 이전 viewport의 선택과 이전 caret 행은
+buffer 재할당 전에 지워서 OOM 뒤 dangling slice가 남지 않는다. 선택 전에는 행 버퍼를 만들지 않는다.
+여러 커서의 빈 선택은 같은 줄을 한 번 복사하고, 선택 복사는 원본 CRLF bytes를 보존한다.
+
+`test-editor-navigation`은 aggregation 포함 26개(행동 5개), `test-win32-editor-input`은 8개
+(행동 5개)다. NFD/emoji, CRLF, 역방향 anchor, 병합/뷰 독립성, 모든 복사/투영 할당 실패,
+스크롤 후 행 대응을 검증한다. 실제 창 fixture는 WM_KEYDOWN 6개를 제품 `applyKey`와 같은
+paint 경로에 보내 caret과 scrolled selection을 7프레임 표현하고 body/revision/dirty 불변을 검사했다.
+기존 변경/undo fixture 60프레임도 유지했다. 수정키는 중립 이벤트 판정이며 물리 수정키 검증으로 세지 않는다.
+전체 앱의 modal/dock 라우팅과 OS clipboard roundtrip을 이 fixture가 증명한다고 주장하지 않는다.
+
+scalar 오른쪽 이동·CRLF 분리·anchor 손실·viewport 행 오인·실제 창 키 누락의 다섯 변이를
+각각 runtime 실패로 검출하고 byte 단위 원복 후 정상 판정을 다시 실행했다.
+
+일반 문서는 계속 읽기 전용이다. 쓰기/IME/undo와 GUI safe-save, dirty-close, 외부 감시,
+edit→disk→reopen 전체 앱 판정이 남아 있다. 위아래/마우스 선택·가로 caret 추종·랩 토글도
+남아 있으며, 긴 단일 행에서 backward grapheme 탐색 비용과 문서 행 projection 메모리 예산은
+후속 검증 대상이다. W8.17 전체 완료로 세지 않는다.
+
+Main-rebase navigation gate: 33 compiled cases (28 aggregation blocks and five
+behavioral navigation cases), plus eight Windows input/projection cases. The
+expected count follows main rather than the earlier 21-block module graph.
+
+### 2m.148 준비 후 문서 권한 변경을 native 커밋 전에 거절 (2026-10-04)
+
+`writeDocument`의 권한 검사만으로는 준비 후 경로/readonly/disk/lifetime 변경을 막을 수 없었다.
+`commitDocument`는 쓴 request lease·순서·이미지 지문을 먼저 확인하고 source/image 지문과
+L2 `validateForWrite`를 native 파일 핸들을 닫기 직전에 재검사한다. 일반 byte `commit`은
+document-bound prepared transaction을 거절하므로 이 검사를 우회하지 못한다.
+ack도 같은 request binding helper를 사용한다. 이후 편집 revision은 허용하고 실제로 쓴
+owned 이미지의 revision만 저장 완료로 반영한다. 기존 lost-reply/uncertain 정산 계약은 유지한다.
+
+실제 준비된 TxF 쓰기 뒤 경로 변경·readonly 전환·새 disk 관측·opened 재열기·다른 요청의
+uncertain 상태를 각각 판정했다. 거절 직후 phase는 prepared, 파일 fence는 열린 상태,
+KTM 결과는 미결이며 일반 파일에서 읽은 원본은 그대로였다. 명시적 rollback 뒤 원본과
+미저장 편집도 유지했다. 다른 요청/generic commit 우회와 준비 후 source/image 변조도 검사한다.
+
+Native safe-save root는 66개(새 실제 파일 판정 5개), 경로 판정은 29개다.
+generic 우회 허용·request binding 제거·최종 문서 권한 검사 제거·source 확인 제거·image 확인
+제거의 다섯 변이를 모두 runtime 실패로 검출하고 byte 단위 원복 후 정상 판정을 재실행했다.
+
+이 경로는 계속 실험적 local NTFS 구현이다. grant/file identity의 문서 연결, capability,
+crash 복구와 전체 실패 타이밍, 일반 편집/GUI 저장·dirty-close·감시·edit→disk→reopen은
+남아 있다. 일반 문서의 읽기 전용 상태를 해제하거나 W8.17 완료로 세지 않는다.
+
+### 2m.149 Windows 편집 입력과 공통 Undo/Redo (2026-10-04)
+
+`session/editor/edit_commands.zig`가 삽입·grapheme 삭제·Undo/Redo를 소유한다.
+호스트는 연결된 뷰 전체와 단조 시각을 제공하며, 명령 계층은 OS·창·렌더러를 호출하지 않는다.
+선택과 history 게시에 필요한 할당을 본문 변경 전에 준비하고, 성공 뒤 반대 뷰의 선택을
+delta로 매핑한다. 500ms 그룹·2048개 상한·멀티 커서와 primary를 보존한다.
+원래 편집한 뷰가 닫혔으면 실행 중인 뷰에 history 선택을 복원한다.
+
+Windows의 writable 문서는 문자·Tab·줄바꿈 형식을 보존하는 Enter·Backspace·Delete·
+Undo/Redo를 이 경로로 보낸다. 일반 사용자 파일의 `read_only`는 계속 유지한다.
+동일 경로라도 다른 DocumentHandle의 뷰에는 편집을 게시하지 않는다.
+
+`test-editor-commands` 28개와 Windows 입력 판정 9개가 통과했다. 삽입과 Undo의
+할당 실패 prefix에서 본문·revision·선택·history 불변을 확인했다.
+실제 Windows 창 fixture는 WM_CHAR/WM_KEYDOWN 7개와 공통 history 명령 6개로
+두 뷰의 26개 프레임을 검사했다. NFD 한글 삭제·CRLF·BOM 보존과 마지막 clean 상태를
+확인했으며 revision은 18이다. 기존 문서/탐색 67개 프레임도 유지한다.
+
+적대적 검증 5회는 Redo 무효화 제거, 반대 뷰 매핑 제거, primary 복원 손실,
+할당 전 history pop, 창 문자 입력 누락을 각각 실행 중 검출했다. 원복 뒤 재검증했다.
+상위 read-only 검사만 제거한 추가 변이는 하위 문서 검사 때문에 쓰기를 허용하지 않았으며,
+이 방어 중복 관찰은 검출 5회에 포함하지 않는다.
+
+이 fixture는 일반 파일의 디스크 저장·재열기나 물리 키보드 IME 판정이 아니다.
+일반 파일 편집 활성화·GUI native save·capability/crash 복구·dirty-close·외부 감시,
+IME preedit/replacement·paste·자동 들여쓰기·word 삭제와 뷰 입력/성능 예산은 남아 있다.
+W8.17은 계속 진행 중이다.
+
+Main-rebase edit-command gate: 35 compiled cases (28 aggregation blocks and
+seven editing/history cases). Native editor smoke passed typing, selection,
+shared history and 60 document frames; this is an isolated fixture, not the
+final installed application acceptance run.
+
+### 2m.150 최초 읽기 원본과 문서 수명을 묶은 native grant (2026-10-04)
+
+`platform/windows/editor/document_grant.zig`는 선택된 루트와 상대 경로로 읽은 원본의
+volume + 128-bit file ID, raw disk 지문, 문서 Registry/Handle/epoch와 경로를 함께 보관한다.
+문서 본문은 같은 읽기 핸들에서 얻은 바이트로 생성한다. 동일 경로·동일 내용의 다른 문서나
+다른 Registry, 새 opened lifetime과 변경된 문서 경로의 요청은 native 쓰기 전에 거절한다.
+같은 바이트로 이름이 교체돼도 최초 원본 ID를 새 ID로 바꾸어 승인하지 않는다.
+
+선택한 루트는 [DuplicateHandle](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle)의
+SAME_ACCESS 복제 핸들로 독립 소유한다. 원본 객체는
+[OpenFileById](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-openfilebyid)의
+ExtendedFileIdType(전체 128-bit selector)·속성 조회 전용 witness로 유지한다. 열기 뒤 volume과
+128-bit ID 모두 최초 읽기에 비교하며, 지원되지 않을 때 legacy 64-bit로 폴백하지 않는다.
+읽기 중에는 [ReOpenFile](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile)의
+쓰기 공유 제한을 적용한다. 편집 수명 동안 부모 DELETE-sharing pin을 유지하지 않는다.
+저장 시도는 상대 이름을 다시 pin하고 최초 ID와 비교한 뒤 transaction을 시작하며,
+커밋 직전에도 grant 안 이름을 다시 pin한다. Attempt 종료는 native transaction을 먼저
+정산하고 부모 핸들을 해제한다. 문서 grant와 저장 시도의 allocator 실패 prefix를 각각 검증한다.
+
+`test-win32-document-grant` 14개(aggregation 2개 + 실제 native 판정 12개)가 Debug·ReleaseFast에서 통과했다.
+원래 view를 닫은 뒤 요청 저장, 선택 루트의 호출자 핸들 종료, 동일 바이트의 원본 교체,
+다른 문서/Registry/lifetime/경로와 다른 native 파일의 커밋 거절, 읽기 상한과 열린 writer,
+준비 할당 실패의 문서/핸들 정산을 검사한다. 원본 witness를 유지한 채 일반 부모 rename과
+원래 grant-relative 이름이 없는 동안 저장 거절, 이름 복원 뒤 저장 준비를 검증한다.
+부모 DELETE-access probe는 편집 중 SUCCESS,
+저장 중 SHARING_VIOLATION, 시도 종료/준비 실패 뒤 SUCCESS다.
+
+실제 Windows 창 fixture는 이제 새 임시 파일을 grant로 연다. 기존 입력·history 26프레임
+뒤 추가 WM_CHAR로 편집하고 native commit/ack, 디스크 BOM·CRLF 바이트 확인과 일반
+`openFileFor`를 통한 독립 문서 재열기/paint 3프레임을 검증한다. persisted revision 19와
+clean 상태를 확인했다. 기존 문서/탐색 67프레임과 합쳐 96프레임이다. 원래 뷰는 재열기 시
+살아 있으며 저장은 fixture에서 직접 호출한다. 일반 Ctrl+S·dirty-close나 물리 IME 판정이 아니다.
+
+적대적 검증 5회는 Registry, DocumentHandle, epoch, 경로와 최종 native 파일 ID 검사를
+각각 제거해 실행 중 실패를 확인했다. 부모 수명 분리와 full-ID witness 적용 뒤 같은 다섯 변이를 다시 실행했고,
+원복한 14개 판정·빌드·실제 창 저장/재열기도 통과했다.
+
+이 witness 선택의 근거는 실제 NTFS rename 검사다. 이름으로 다시 연 원본 핸들은 부모 pin을
+해제하고 속성 조회 전용으로 줄여도 containing-directory rename을 AccessDenied로 막았다.
+ID로 연 원본 witness는 같은 전체 ID를 유지하면서 일반 rename을 허용한다. 독립 native probe와
+제품 14개 gate의 실제 rename 판정으로 확인했다. 원본 ID 재사용 방지는 핸들 수명으로 유지한다.
+실험적 local NTFS/TxF의 capability·crash 복구와 전체 실패 타이밍, 일반 편집/저장 controller,
+dirty-close·감시·물리 IME는 계속 남아 있다. 일반 사용자 파일은 읽기 전용이며 W8.17은 진행 중이다.
+
+### 2m.151 Windows 저장 컨트롤러의 소유권과 결과 정산 (2026-10-04)
+
+`platform/windows/editor/save_controller.zig`의 Controller가 문서 grant를 이동 소유하고,
+한 번에 하나의 owned Request와 native Attempt를 보관한다. 준비 중인 저장이 있으면
+두 번째 요청은 새 sequence를 발급하기 전에 SaveBusy다. 본문이 더 편집돼도 저장 이미지는
+바뀌지 않으며, 저장된 이미지의 revision/hash만 ack하고 이후 본문은 dirty로 남긴다.
+
+쓰기·최종 권한 거절은 실제 rollback으로 정산한다. 부분 쓰기는 complete native image에
+binding되지 않았어도 확정 rollback 뒤 owned 요청을 abort한다. 커밋/rollback의 미확정
+응답은 이미지·lease·native 핸들을 유지하고 L2 재저장을 차단한다. KTM 재조회가 실패하거나
+undetermined면 소유권을 버리지 않는다. 종료도 이를 확인하기 전에는 SaveUncertain으로
+거절한다. 이미 커밋된 결과의 응답만 유실됐으면 abort 요청도 실제 committed 결과로 정산한다.
+
+Receipt는 native committed/aborted와 document acknowledgment_error/cleanup_error를
+구분한다. 문서 경로나 lifetime이 바뀌어 ack가 거절돼도 실제 native commit을 rollback이나
+저장 실패로 바꾸어 표시하지 않는다. 확정 결과의 정산 뒤 pending과 요청 lease를 해제한다.
+Controller를 이동하거나 원래 view를 닫아도 보유 요청은 같은 문서를 대상으로 한다.
+
+`test-win32-save-controller`는 aggregation 2개와 실제 native 판정 13개, 합계 15개다.
+실제 부분 쓰기 rollback, 실제 commit 응답 유실 뒤 재조회, 실제 KTM undetermined 상태의
+종료 거절, rollback 응답 실패와 query 응답 유실 후 재시도, 최종 readonly 거절/재저장,
+나중 편집의 dirty 유지, stale ack 분리, 마지막 view 종료와 Controller 이동을 검사한다.
+준비 및 commit-time allocation failure prefix마다 이미지/lease/부모 fence 정산과 원본 바이트
+보존을 확인한다. Fault는 compile-time native boundary에만 있으며 제품 런타임 switch는 없다.
+
+적대적 검증 5회는 busy 거절 제거, uncertainty 표시 제거, undetermined의 committed 취급,
+현재 본문 hash로 ack, 거절된 commit의 abort 누락을 각각 실행 중 검출했다. 원복 후
+15개 판정·빌드·실제 창 재검증이 통과했다. 실제 창 fixture의 기존 96개 프레임과
+native 저장/일반 재열기는 이제 이 Controller를 호출하며 receipt의 committed/revision 19/
+sequence 1/idle을 확인한다. 저장 호출은 fixture 직접 호출이고 원래 view는 살아 있다.
+
+일반 파일은 계속 읽기 전용이다. GUI Ctrl+S·dirty-close·감시·물리 IME와 capability/crash
+복구, 비동기 I/O/GUI notice 배선은 남아 있다. 이 Controller는 현재 main-thread native 호출을
+정산하는 실험적 경계이며 GUI 저장 활성화나 W8.17 완료를 뜻하지 않는다.
+
+### 2m.152 저장 프로세스를 실제로 강제 종료한다 (2026-10-04)
+
+`zig build test-win32-save-crash`는 앱에 설치하지 않는 별도 native 판정 실행 파일을
+만든다. 부모가 독점 생성한 무작위 cache 디렉터리에서 worker를 실행하고, 실제 작업을
+마친 checkpoint byte를 익명 pipe로 확인한 뒤 TerminateProcess로 종료한다. 준비가
+끝나기 전에 고정 sleep으로 죽이지 않으며, 10초 deadline으로 checkpoint와 종료를
+감시한다. 종료 요청 후 process object가 signaled이고 지정 exit code인지 확인해야
+디스크를 판정한다. worker의 Zig defer/명시적 rollback은 실행되지 않는다.
+
+checkpoint는 transaction open, 실제 부분 쓰기/EOF 변경/flush, 완전한 이미지 준비,
+transacted file close 뒤 KTM 요청 전, native commit 뒤 문서 ack 전, Controller 정산 뒤의
+6개다. BOM/CRLF를 가진 원본에 짧은 내용과 더 긴 한글 내용을 각각 저장해 총 12개
+프로세스를 종료한다. 첫 네 지점은 원본 바이트, 뒤 두 지점은 정확한 새 저장 바이트가
+남아야 한다. 부모가 독립적으로 volume/128-bit file ID·생성 시각·파일 속성·owner/group/
+DACL과 별도 named stream을 비교하고, 새 grant/controller의 준비·abort와 원본 유지로
+죽은 worker의 writer/parent fence가 남지 않았는지 확인한다. audit SACL 판정은 기존
+native safe-save gate가 계속 소유한다. 삭제는 새로 만든 알려진 파일과 빈 디렉터리뿐이다.
+
+Debug와 ReleaseFast에서 12개 모두 통과했다. 적대적 검증 5회는 실제 body write 누락,
+EOF 조정 누락, KTM 호출 없이 성공 반환, 커밋 뒤 named stream 삭제, 같은 바이트의 다른
+file ID로 교체를 각각 컴파일 후 실행 중 거부했다. 앞 세 변이는 제품 transaction 코드,
+뒤 두 변이는 판정 worker의 실제 파일 손상이다. 전수 소스 바이트 원복 뒤 두 모드를
+재검증했다. 가짜 commit은 native outcome 조회로, 파일 교체는 full ID 비교로 검출한다.
+
+Windows API 근거는 Microsoft의 [TerminateProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess),
+[PeekNamedPipe](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-peeknamedpipe),
+[TxF 작업 모델](https://learn.microsoft.com/en-us/windows/win32/fileio/how-to-use-transactional-ntfs)이다.
+마지막 transacted handle의 종료/commit 결정과 디스크 결과를 실제로 대조하는 local NTFS
+프로세스 종료 검증이며, 전원 장애·OS crash·커밋 syscall 내부의 모든 실패 타이밍을
+증명하지 않는다. 미저장 본문 백업/재시작 복원, 저장 기능 capability, 일반 GUI 저장·닫기·
+외부 감시·물리 IME도 계속 남아 있다. 일반 파일은 읽기 전용이며 W8.17은 진행 중이다.
+
+Main-rebase spawn boundary: the crash probe has one counted spawn exception for
+its standalone Windows-only test executable. It is not installed or linked into
+the application and receives no image-channel descriptors. App spawn rules and
+their exact inventory remain enforced by spawn_cloexec_axis.
+
+### 2m.153 Windows 미저장 백업 저장소와 복원 경계 (2026-10-04)
+
+`platform/windows/editor/backup_store.zig`는 공통 `session.editor.backup`의 포맷·이름을 그대로
+사용한다. `user_paths.editorBackupPathFor`는 Windows에서 `%LOCALAPPDATA%/maru/editor-backups`,
+macOS에서 Application Support를 고른다. Windows 구분자는 기존 공통 normalizer로 정규화하고,
+LOCALAPPDATA가 없거나 상대 경로면 macOS/HOME/cache로 폴백하지 않는다. 환경 읽기와 실제
+기본 위치 연결은 host가 소유한다. 현재 앱 사용자 백업 위치를 열거나 변경하지 않는다.
+
+Store는 host가 고른 parent 아래 한 basename을 native handle-relative로 연다. 현재 process
+TokenUser SID를 owner와 유일한 FILE_ALL_ACCESS ACE로 넣은 protected DACL을 디렉터리·파일
+**생성 시점에** 공급한다. 기존 넓은 권한은 자동으로 고치지 않고 PrivatePermissions로 거절한다.
+읽기·쓰기·삭제 전에 owner/DACL과 root reparse tag를 다시 확인하며, record의 reparse/hard link도
+거절한다. root의 rename/delete 방지는 sharing fence다. parent DELETE 접근까지 요청하면 내부
+rename target open이 STATUS_SHARING_VIOLATION으로 막혔으므로 그 접근은 요청하지 않는다.
+
+백업 본문만 별도 private stage에 write-all/정확한 EOF/flush하고, 같은 pinned root의 counted name에
+native Rename으로 원자 교체한다. 원본 문서 파일은 건드리지 않는다. 실패는 stage의 열린 객체에
+disposition을 설정해 정리하며, 정리 실패도 BackupCleanupFailed로 반환한다. 읽기는 bounded
+handle read 후 공통 parser와 정확한 문서 신원·UTF-8·본문 상한을 검사한다. 손상/다른 신원 레코드는
+삭제하지 않는다. path·untitled·remote 레코드를 저장하며, 현재 restorePath는 열린 로컬 path 문서를
+한 normal edit로 복원하고 모든 live view의 선택을 함께 이동한다. readonly·다른 경로·중복 view를
+거절하고 OOM 때 본문/기록/지문/선택을 유지한다. 백업의 옛 disk_hash를 복원한 뒤 첫 save CAS가
+실제 외부 디스크 변경을 거절한다. undo는 현재 디스크 내용으로 돌아간다.
+
+`test-win32-editor-backup`은 aggregation 2개·native storage/recovery 14개·양 OS 경로 정책 1개,
+합계 17개다. write/read/restore 할당 실패 prefix, 실제 부분 쓰기, DACL 변경, 실제 hard link와 열린
+root의 실제 junction 변경을 검사했다. 적대적 검증 5회는 root privacy 검사 제거·record 신원 검사
+제거·UTF-8 검사 제거·옛 fingerprint 복원 누락·실패 stage 정리 누락을 각각 컴파일 후 runtime에서
+검출했다. 소스는 바이트 단위로 원복했다.
+
+`test-win32-save-crash`에 backup worker 2개를 더했다(기존 save worker 12개와 별도다). dirty 본문을
+실제 백업에 쓴 뒤 TerminateProcess로 죽이고 부모가 새 Store/Registry/grant로 복원한다. 원본이
+변하지 않았으면 explicit native save 뒤 clean/backup drop, 바뀌었으면 SourceChanged/dirty 유지/
+backup 유지와 외부 바이트 보존을 확인한다. 실제 Windows 창 fixture는 기존 96 프레임에 두 view의
+복원 paint 2개와 undo paint 2개를 더해 총 100 프레임을 검증한다. fixture 직접 호출이며 물리 IME나
+일반 재시작 UI 판정은 아니다.
+
+검증 중 Windows simple test runner가 count 인자를 무시하던 결함도 고쳤다. UTF-16 allocating
+iterator로 expected compiled/passed count를 읽으며, 잘못된 개수 두 종류와 잘못된 숫자 형식을
+별도 실제 실행으로 거절했다. WASI 정책은 유지한다.
+
+API 근거는 Microsoft의 [security descriptors](https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptors),
+[GetTokenInformation](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation),
+[FILE_RENAME_INFORMATION](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)이다.
+일반 앱의 기본 백업 root 연결·debounce/종료 flush·복원 알림·purge·사라진 원본/untitled/remote 복원,
+stage 쓰기 도중 프로세스 종료의 잔여 파일 정리와 전원 장애 검증은 남아 있다. 일반 사용자 파일은
+읽기 전용이다. capability·GUI Ctrl+S/dirty-close/감시·비동기 I/O와 물리 IME도 계속 진행한다.
+
+The Windows test runner now enforces compiled/passed count options. The Git
+merge gate expects 36 passes plus one POSIX-wrapper skip on Windows; other
+hosts still require 37 passes. The standalone crash probe adds its second
+counted spawn for backup-recovery workers; application spawn policy is unchanged.
+
+### 2m.154 — Windows 백업 수명주기와 입력 통지
+
+`backup_store.identity/noteEdit/maintain`가 네이티브 저장소 위의 문서별 백업 상태를 관리한다.
+Windows `OpenFile.applyKey`는 성공한 본문 revision 변경만 통지한다. 선택 이동·복사·readonly 입력은
+시계를 다시 설정하지 않는다. remote 신원이 local staging 경로보다 먼저이며, shared L2 record와
+2초 debounce를 그대로 사용한다. 같은 문서의 뷰별 사본으로 상태를 나누지 않는다.
+
+`maintain(..., shutdown=false)`는 만기가 지난 문서 하나만 시도한다. 실패도 한 프레임의 몫이다.
+`shutdown=true`는 만기를 기다리지 않고 distinct State 전부를 시도한다. 같은 문서를 여러 뷰가
+가리켜도 실패 후 재시도를 그 flush 안에서 중복 실행하지 않는다. 보고값은 attempted/failed와
+첫 native 오류이며, 쓰기·삭제 실패는 pending과 다음 만기를 유지한다. 성공 전 on_disk를 거짓으로
+바꾸거나 실패를 성공으로 알리지 않는다. clean이면 기존 레코드를 실제 삭제한 뒤 상태를 정리한다.
+상한 초과는 paused를 남기고 마지막 백업을 보존하며, 이후 축소 편집이 다시 만기를 세운다.
+
+집중 gate는 22개(집계 2 + native 19 + 경로 정책 1)다. 추가 native 판정 5개는 만기 재설정,
+프레임 제한과 종료 전 전체 flush, 실제 ACL 실패 뒤 재시도/뷰 중복, clean 삭제 실패, 상한 pause와
+축소 후 재개를 검사한다. 이 다섯 규칙을 각각 제거한 변형은 컴파일 후 runtime 실패로 검출됐고,
+정확한 원복 후 Debug 22개가 통과했다. crash worker도 만기 전 shutdown 유지보수를 호출한다.
+
+일반 앱의 기본 root 생성/소유와 frame/종료 호출, 복원 알림 및 삭제 lifecycle의 앱 연결은 아직
+남아 있다. 입력 통지와 유지보수 API가 존재한다는 것으로 일반 앱 자동 백업을 완료로 간주하지 않는다.
+일반 사용자 파일의 editable grant/GUI 저장·닫기·감시·물리 IME와 다른 W8/W9 잔여도 진행 중이다.
+
+### 2m.155 — 기본 백업 root의 native 소유와 앱 frame/종료 연결
+
+`backup_store.LocalData`가 `%LOCALAPPDATA%/maru/editor-backups`를 선택하고 상위 폴더 핸들을 소유한다.
+Drive absolute 또는 complete UNC root에서 시작해 각 구성요소를 counted handle-relative open으로
+열며, reparse point와 `..`/ADS/NUL을 거절한다. Drive 없는 rooted 경로와 device namespace도
+거절한다. 기존 LOCALAPPDATA 구성요소는 만들지 않는다. 마지막 `maru` 부모만 필요하면 만들고,
+기존 config 부모의 ACL은 바꾸지 않는다. 최종 `editor-backups`에만 current-user protected ACL을
+적용한다. 기존 넓은 백업 ACL은 고치지 않고 거절한다. 부모는 delete sharing 없이 보유하고,
+teardown은 store와 모든 부모 핸들/할당을 해제한다. OOM도 같은 정산을 거친다.
+
+일반 Windows `runWin32Terminal`의 frame 경로가 `runFileBackups`를 호출하고, teardown defer는
+뷰/문서 lease 해제보다 먼저 shutdown flush를 호출한다. pending이 없거나 만기 전이면 default
+폴더를 열지 않는다. 환경변수 읽기는 host에 있으며 HOME/cache/macOS 경로로 fallback하지 않는다.
+Root 열기나 작업 목록 할당이 실패하면 pending을 보존하고 다음 만기를 세운다. native 유지보수의
+오류도 warning으로 관측된다. 문서별 마지막 기록을 teardown에서 암묵적으로 지우지 않는다.
+
+집중 판정은 27개(집계 2 + native 24 + 경로 정책 1)다. 추가 5개는 private root 생성/재열기,
+상위 폴더 실제 rename fence와 해제, 실제 중간 junction, malformed root와 broad ACL,
+전 할당 실패 prefix의 핸들 해제를 검사한다. Native 경로의 reparse/ACL/절대 root/선택 폴더/상한
+전달을 각각 깨뜨린 5개 변형이 runtime 실패로 검출됐고 원복 후 27개가 통과했다.
+
+실제 창 fixture는 명시적 disposable LOCALAPPDATA base로 앱과 같은 helper를 부른다. 만기 전
+lazy owner가 없다는 것, 만기 전 shutdown flush, shared view의 한 문서 처리, due frame write와
+clean undo 뒤 실제 record 삭제를 검증한다. 출력은 `editor_backup_lifecycle_smoke_ok=true`이고,
+paint는 기존 100 프레임이다. 별도 helper 변형 5개(종료/frame 처리 무효화, 문서 목록 누락,
+shutdown 전달 오류, 이른 root open)는 실제 창 실행에서 검출됐다. 원복 후 창도 통과했다.
+이는 같은 helper의 실제 native/창 검증이며 일반 dirty 앱 종료·재실행 UI를 완료로 간주하지 않는다.
+
+검증 중 D: 공간 부족이 드러났다. 공간 부족 및 변형 자체의 컴파일 오류는 적대적 성공으로 세지
+않았다. source와 proof log를 보존하고 재생성 가능한 compiled 파일만 정리한 뒤 다시 실행했다.
+실제 UNC share의 권한/이동 경쟁, 복원 알림·accepted-close 삭제·용량 pause의 상태바 표시,
+missing/untitled/remote revival·stage 중단 정리·capability·GUI Ctrl+S/dirty-close/watch와 물리 IME는
+남아 있다. 일반 사용자 파일은 아직 readonly이며 W8.17 및 전체 Windows 작업은 진행 중이다.
+
+### 2m.156 — 미정 저장 뒤 clean처럼 보이는 Undo의 백업 보존
+
+실제 native commit의 응답을 잃었거나 KTM 결과가 미정인 상태에서 Undo로 이전 saved hash에
+돌아오면 `isDirty()`만으로는 디스크와 같음을 증명할 수 없다. 기존 유지보수는 이 경우 레코드를
+삭제했다. 실제 committed-lost-reply와 undetermined 거래를 사용하는 두 판정에서 삭제를 재현했다.
+이제 `uncertain_sequence`가 있으면 clean처럼 보이는 현재 본문도 원래 disk_hash와 함께 보존한다.
+백업 I/O는 미정 sequence를 지우거나 native 결정을 추측하지 않는다.
+
+Controller는 정상 ack/abort 정산 뒤 `noteDecision`을 호출한다. 이때 본문 revision이 바뀌지 않아도
+새 saved hash/disk_hash에 맞춰 유지보수를 예약한다. 실제 commit 확정 뒤 Undo 본문은 dirty이고
+백업 지문은 확정한 commit의 지문으로 갱신한다. 실제 rollback 확정 뒤 clean이면 레코드를 삭제한다.
+Ack가 거절됐을 때는 이 완료 통지를 하지 않는다. `noteDecision`은 readonly record 정리도 예약하지만
+원본 쓰기 권한을 부여하지 않는다. 백업/작업이 없는 clean 문서는 새 root 접근을 예약하지 않는다.
+
+집중 gate는 30개(집계 2 + native 26 + 순수 정책 2)다. 미정 clean 판정, 결정 뒤 재예약, 불필요한
+clean root 예약, record identity, 실패 stage 정리를 각각 깨뜨린 5개 변형이 runtime 실패로 검출됐고
+정확한 원복 후 Debug 30개가 통과했다. 기존 native controller gate의 선택 개수 15는 그대로다.
+Prepare 이후 편집을 포함한 더 넓은 crash 시점, 일반 dirty 앱 재실행/복원·닫기·저장 UI 및 물리 IME는
+계속 검증한다. 일반 파일의 readonly 제한과 W8.17 진행 상태는 유지한다.
+
+### 2m.157 — prepare 이후 Undo와 저장 이미지 수명
+
+실제 native prepare 후 commit 전 Undo로 이전 saved hash에 돌아오는 경우에도 백업 삭제를
+재현했다. `uncertain_sequence`만으로는 아직 미정 결과가 발생하지 않은 저장 이미지를 보호하지
+못한다. L2 `Request`가 `persistence.live_save_images`를 epoch별로 추적하고 Windows 백업은
+그 count가 0이며 미정 sequence도 없는 clean 문서만 삭제한다. 모든 fallible 준비 성공 뒤 count를
+증가시키고 이미지 deinit 때 자기 epoch의 하나만 해제한다. 겹치는 요청·완료 후 아직 살아 있는
+이미지·reload와 구 epoch 해제·상한·전 할당 실패를 따로 검사한다. Dirty 및 saved hash 계약은
+바꾸지 않는다. Controller는 정산한 이미지 해제 뒤 유지보수를 예약해 불필요한 clean root 생성도
+피한다. 미정 결과의 native 소유와 종료 거절 계약은 그대로다.
+
+집중 gate는 shared request 14개, Windows backup 32개다. 실제 prepare→Undo→commit 행은 현재
+본문과 확정 disk_hash를 보존하고 prepare→Undo→abort 행은 확정 이후에만 clean record를 삭제한다.
+이는 준비된 저장의 본문 수명 보호이며 일반 editable 파일 UI, 물리 IME, 더 넓은 process crash
+시점과 중단 stage 복구까지 완료로 주장하지 않는다.
+
+이미지 보호를 무시하는 clean 삭제, epoch 구분 없는 이미지 해제, 이미지 count 미해제, reload count
+미초기화, 결정 뒤 재예약 누락의 다섯 변형이 컴파일 후 runtime 실패로 검출됐다. epoch 변형은
+보호 수 1 대신 0을 검출한 뒤 cleanup assertion으로 종료했다. 컴파일 실패를 성공으로 세지 않았고,
+정확한 byte 원복 뒤 shared 14개와 native backup 32개가 다시 통과했다.
+
+### 2m.158 — 일반 파일의 native 저장 소유권과 기존 백업 복원
+
+L4 `platform/windows/editor/file_host.zig`의 `Book`이 앱 수명 동안 문서별 grant와
+controller를 소유한다. `document.zig`는 view를 붙이고 `main.zig`는 열기·저장·닫기를
+연결한다. 공유 L2 문서 모델에 Windows 폴더나 API를 넣지 않는다. 일반 파일은 실제
+선택한 handle의 NTFS·transaction 지원·쓰기 가능 여부와 무수정 native rollback probe가
+통과할 때 editable이며, capability가 없으면 기존 readonly 열기로 돌아간다.
+Volume 판정 API의 근거는 [Microsoft GetVolumeInformationByHandleW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumeinformationbyhandlew)다.
+
+파일 안의 Ctrl+S는 기존 resolver의 unbind와 rebind를 존중해 native controller로 보낸다.
+마지막 dirty view 또는 창을 닫을 때 저장·버리기·취소를 묻는다. 공유 peer 닫기는 암묵적으로
+저장하지 않으며, prepared/uncertain 소유권이 남으면 teardown을 거절한다. 대상은 배열
+index가 아니라 registry·view id·문서 generation으로 식별한다. 충돌 또는 저장 실패는
+본문과 복구 레코드를 유지한다. 일반 파일 열기는 LOCALAPPDATA의 기존 private root를
+생성 없이 확인하고, 존재하는 레코드를 편집 전에 복원한다. 읽기 실패는 readonly로 제한해
+읽지 못한 레코드를 덮지 않는다. 복원은 기존 disk hash를 유지하고 비모달 상태표시를 사용한다.
+
+집중 host gate 18개는 일반 reopen 복원·외부 변경 CAS, close 선택과 peer 수명, capability,
+할당 실패를 검사한다. Backup gate는 기존 root 무생성 조회 두 행을 더해 34개다.
+Volume guard·peer grant·dirty acceptance·prepared teardown·view capability, cancel·record
+삭제·peer 암묵 저장·save 선택·stable target의 10개 변형은 모두 컴파일 후 runtime 실패로
+검출됐고 정확한 원복 뒤 host 18개가 통과했다. 실제 창의 앱 저장 경로 판정과 물리
+키보드/IME, 일반 앱 프로세스 종료·재실행, 감시·비동기 I/O 및 더 넓은 crash 시점은 별도
+검증 대상이다. W8.17 전체 완료를 뜻하지 않는다.
+
+실제 창 후속 판정은 세 버튼을 D3D11로 그린 뒤 창 Enter/Escape 이벤트로 저장·버리기·취소
+intent를 확인했다(`editor_close_modal_smoke_ok=true`, 3 cases). 물리 입력은 아니다. 외부
+PNG capture는 창 handle을 찾지 못해 두 실행 모두 0장으로 끝났다. 시각 확인은 미검증이며
+UI 완료 주장은 보류한다.
+
+포커스 버튼 실제 PNG 확인에서 라벨이 버튼 위로 이동해 사라지는 결함을 발견했다. 원인은
+modal text를 셀 row/col로 절삭하면서 pixel fill과 origin이 갈린 것이었다. 기존 공유
+RichTextArtifact의 placement와 Windows cellFromGpuGlyph를 사용해 정확한 origin과 색상을
+보존한다. 후속 capture는 process-owned 실제 Maru 창을 선택해 PNG를 확보했고 저장 라벨이
+버튼 안에서 보임을 확인했다. 가로·세로 origin 1px 이동, 라벨 색 변경, 같은 행 span 혼용,
+첫 라벨 glyph 누락의 다섯 변형이 모두 빌드 후 실제 창에서 EditorCloseLabel 오류로 검출됐다.
+공유 lowering 원본을 정확히 복구한 뒤 실제 창의 세 선택이 다시 통과했다. 물리 입력과
+일반 앱 프로세스 종료·재실행은 여전히 남아 있다.
+
+### 2m.159 — 일반 앱 프로세스 종료·재실행과 복원 안내 우선순위
+
+실험 전용 document smoke가 아닌 `win32-terminal`을 별도 LOCALAPPDATA와 임시 cwd로
+실행했다. 파일 탐색기의 실제 행 클릭으로 fixture를 열고 창 WM_CHAR로 편집했다. 미저장
+WM_CLOSE의 취소는 본문·복구 레코드·프로세스를 유지했다. 다시 저장을 선택하면 실제 앱이
+종료됐고 원본은 BOM·CRLF를 유지한 Xbase였다. 새 프로세스로 실행해 같은 파일을 선택한
+화면에서 저장 내용을 확인했다. 이후 Y 편집과 debounce 백업을 확인하고 테스트 앱만
+강제 종료했다. 새 프로세스에서 파일을 다시 선택하자 YXbase가 복원됐으며 원본은 Xbase
+그대로였다. 재실행의 열린 파일 목록 자동 복원이나 물리 키보드/IME를 뜻하지 않는다.
+
+복원된 문서의 원본을 외부에서 바꾼 뒤 저장 후 닫기는 실제 충돌 notice와 함께 거부됐고
+앱·본문·레코드를 유지했다. 안내를 닫고 버리기를 선택하면 앱이 종료됐고 외부 원본은
+그대로, 해당 복구 레코드만 제거됐다. 실제 화면은 `.zig-cache/editor-app-restart-*/`의
+reopened·recovered-notice·conflict-notice PNG와 임시 데이터에 기록했다.
+
+이 검증에서 긴 cwd가 복원 상태 항목을 밀어내는 결함을 발견했다. `recoveredStatusItems`는
+첫 복원에서 기존 항목을 뒤로 한 번 이동하고 복원 안내를 먼저 둔다. 다음 복원은 같은
+항목만 갱신하며 base 항목·순서와 bounded capacity를 보존한다. 이는 기존 좌측 비모달
+안내 조립의 수정이며 W8.19 우측 묶음 전체 구현을 뜻하지 않는다. Host gate는 순수 정책
+한 행을 더해 19개다. 안내 우선순위 누락·base 항목 유실·반복 이동·빈 라벨·잘못된 capacity
+거절의 다섯 변형이 컴파일 후 runtime 실패로 검출됐고 byte 원복 후 Debug/ReleaseFast
+각각 19개가 통과했다. 감시·비동기 I/O 및 물리 입력·더 넓은 crash 범위는 계속 남아 있다.
+
+### 2m.160 — handle-bound 비동기 디렉터리 알림 소유권
+
+Windows L4 editor/directory_watch.zig는 선택한 디렉터리 handle에 상대적인 빈 counted name으로
+같은 객체의 비동기 handle을 열고 full 128-bit identity를 대조한다. ReOpenFile의 directory
+재열기는 실제 ACCESS_DENIED로 실패했고 native 상대 이름 `.`은 OBJECT_NAME_INVALID였다.
+문자열 pathname으로 재열어 경합을 숨기지 않는다. 감시는 현재 디렉터리만 대상으로 하며
+FILE_NAME·DIR_NAME·ATTRIBUTES·SIZE·LAST_WRITE 알림을 사용한다. OVERLAPPED와 16 KiB
+aligned buffer는 heap의 고정 주소에 있고 완료 뒤 먼저 재등록한 후 hint를 반환한다.
+
+근거는 [Microsoft ReadDirectoryChangesW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-readdirectorychangesw),
+[CancelIoEx](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex)다.
+알림 내용·개수는 파일 변경의 정합성 근거가 아니며 0-byte overflow 완료도 재검증 hint다.
+Cancel 요청 자체는 완료가 아니므로 destroy는 native 완료/취소 결과를 확인한 뒤에만
+buffer·event·handle을 해제한다. 미확정 completion 오류는 owner를 해제하지 않고 반환한다.
+
+집중 gate는 aggregation 2개·native 5개, 총 7개다. idle poll과 cancel drain, 생성/수정 후
+rearm, 호출자 handle 종료, copied owner/겹치는 arm 거절, directory 이동 뒤 같은 객체의
+알림을 검증한다. 가짜 idle hint·rearm 누락·copied poll 허용·완료 hint 누락·delete sharing
+누락의 다섯 변형은 컴파일 후 runtime 실패로 검출됐고 byte 원복 뒤 Debug/ReleaseFast
+각각 7개가 통과했다. 현재는 알림 transport이며 앱의 directory grouping/cap·debounce와
+identity/hash 재검증·clean 최소 edit·dirty 선택 UI 연결은 후속이다. 외부 감시 완료로 세지 않는다.
+
+### 2m.161 — 디렉터리 identity 공유와 독립 구독 수명
+
+같은 full directory identity는 하나의 native watcher를 공유한다. 각 acquire는 별도
+증가 번호를 가진 구독을 발급하므로 이미 해제한 구독으로 다른 문서의 감시를 끊을 수 없다.
+상한은 문서 수가 아니라 서로 다른 디렉터리 수에 적용하며 최대 64개다. 마지막 구독은
+native 취소 완료를 확인한 뒤 제거하고, 정리 실패 시 아직 살아 있는 소유권을 보존한다.
+변경 hint는 마지막 알림 이후 200 ms에 group identity로 발행한다. poll은 파일 읽기나
+hash 계산을 수행하지 않는다. 오류도 group별로 전달하며 순회 시작점을 이동한다.
+
+실제 native 취소 뒤 재등록은 알림 공백을 고려한 전체 재검증 hint를 내고, 할당 실패
+prefix에서도 pending buffer와 handle을 남기지 않는다. 집중 gate는 aggregation 2개와
+native 12개, 총 14개다. 다섯 group 변형(중복 감시, 상한 무시, foreign owner 허용,
+구독 번호 재사용, debounce 생략)은 컴파일 후 runtime 실패로 검출됐고 원본 byte 복원 뒤
+Debug/ReleaseFast 각각 14개가 통과했다. 파일 생성·쓰기의 연속 알림을 같은 논리 시각에
+먼저 소비한 뒤 quiet-period 경계를 검사한다. 앱 연결과 identity/hash 재검증, clean 최소
+edit 및 dirty 선택 UI는 여전히 후속이며 외부 변경 감시 전체 완료로 세지 않는다.
+
+### 2m.162 — 복구 문서의 앱 목록 등록을 열기 전에 확보
+
+일반 파일 선택과 native host fixture가 같은 openAppFileInto를 사용한다. 기존 경로는
+문서를 연 뒤 목록 append가 실패하면 accepted=false로 닫았다. 복구된 문서는 이미 dirty여서
+이 정리 호출이 DirtyDocument로 거부되고 unreachable에 도달할 수 있었다. 이제 목록의
+추가 slot을 먼저 확보하고 열기·복구가 성공하면 할당 없는 append로 소유권을 전달한다.
+slot 할당 실패는 파일 열기, native grant 발행, 백업 조회 전에 out_of_memory로 반환한다.
+
+실제 private 백업이 있는 문서에서 목록 할당을 실패시켜 등록·grant·backup owner가
+변하지 않는지 검사하고, 재시도로 정확히 한 뷰를 등록해 dirty 본문·CRLF·원본 disk_hash와
+백업 레코드가 유지되는지 확인한다. 원본 BOM/CRLF bytes도 실패 및 복원 전후 동일하다.
+host gate는 aggregation 2·native 15·pure 3, 총 20개이며 Debug/ReleaseFast가 통과했다.
+늦은 slot 확보, 잘못된 실패 tag, 복원 직후 백업 조기 삭제, 복원 생략, disk_hash 교체의
+다섯 변형은 컴파일 후 runtime 실패로 검출됐다. byte 원복 후 두 모드 각각 20개가 통과했다.
+실패한 컴파일 변형은 적대적 검증 횟수에서 제외했다. 새 일반 앱의 별도 LOCALAPPDATA
+fixture에서 파일 선택·X 편집·닫기 취소 후 원본 BOM/CRLF와 백업 유지를 확인했다. 레코드가
+생긴 테스트 프로세스만 강제 종료하고 새 앱에서 같은 파일을 선택해 Xbase와 복원 안내를
+확인했다. 저장 후 닫기는 BOM+Xbase+CRLF를 남기고 앱 종료·백업 삭제까지 확인했다.
+이는 posted window 이벤트 검사이며 물리 키보드/IME 검증은 아니다. 감시 앱 연결도 남아 있다.
+
+### 2m.163 — native 재검증 읽기 작업자와 앱 grant 경계
+
+Windows L4 editor/file_read_worker.zig는 한 Reader당 pending 또는 미소비 결과 한 개만
+허용한다. 선택한 root handle과 counted 상대 이름을 독립 소유하고, 경로 순회·파일 읽기·raw
+hash는 detached 스레드에서 수행한다. 본문은 최대 4 MiB, 이름은 std.fs.max_path_bytes로
+제한한다. 작업자는 Registry나 본문을 빌리지 않고 자체 I/O provider를 스레드에서 소유한다.
+제품 deinit은 참조만 놓으며 마지막 참조가 native handle·이름·미소비 이미지를 정리한다.
+테스트 deinit은 기존 detached_worker_wait의 참조 수명 대기로 allocator 결산 전에 정산한다.
+
+상대 순회로 연 원본의 full identity를 기존 grant와 비교한 뒤 같은 객체를 READ 공유만
+허용해 재연다. 읽기 동안 write/delete 접근을 거절하므로 BOM 포함 raw bytes의 snapshot을
+얻는다. [Microsoft ReOpenFile](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile)의
+sharing 계약과 [DuplicateHandle](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle)의
+객체 복제 계약을 기반으로 한다. 실제 NTFS에서 native 상대 open 핸들의 재열기와 경쟁
+write/delete 거절을 검사했다. 같은 bytes로 바꾼 다른 file ID는 갱신 기준으로 채택하지 않는다.
+
+결과 ticket은 비재사용 source scope, 문서 slot/generation·epoch·revision·disk_hash를
+담는다. Reader도 비재사용 owner와 요청 sequence를 검사하고 deinit 뒤 옛 결과를 거절한다.
+Book.submitRead/acceptsRead는 현재 view/grant/경로와 pending save를 검사한다. Registry를
+같은 주소에 다시 만들어 나머지 ticket 축이 모두 같아도 옛 scope 결과는 통과하지 않는다.
+읽기 완료만으로 공유 문서·saved hash·disk hash를 바꾸지 않는다.
+
+test-win32-editor-read는 aggregation 2·native 8·pure 1, 총 11개이며 기본 test에 연결된다.
+host gate는 읽기 admission/완료 세 행을 더해 23개(aggregation 2·native 18·pure 3)다.
+각각 Debug/ReleaseFast가 통과했다. 작업자 다섯 변형(identity 무시, write/delete 공유,
+정확한 byte 상한 거절, 옛 sequence 허용, foreign reader 허용)과 Book 다섯 변형(prepared
+읽기 허용, epoch/경로 검사 제거, revision 무시, source scope 무시)이 모두 컴파일 후
+runtime 실패로 검출됐다. 두 소스의 byte 원복과 두 모드의 정상 실행을 확인했다.
+
+실제 Windows 창 fixture는 프레임을 poll/paint하면서 앱 grant의 작업 결과를 받고 raw bytes와
+현재 ticket을 확인한다. 기존 편집·native 저장·복구·닫기 스모크도 함께 실행한다. 이 경로는
+worker/app grant의 연결이며 일반 앱의 directory hint→읽기 예약·결과 적용, clean 최소 edit,
+dirty 선택 UI는 아직 연결 전이다. 전체 외부 감시·비동기 저장 완료로 세지 않는다.
+
+### 2m.164 — 실제 부모 폴더 구독과 살아 있는 문서 배분
+
+`Book.subscribeWatch`는 기존 app grant의 lifetime/path/저장 상태를 확인한 뒤
+handle-relative로 파일을 pin하고 전체 identity를 비교한다. 비재귀 감시 대상은 volume root가
+아니라 `Pinned.parent()`다. `Groups.receives`는 directory 알림을 개별 구독에 매핑하므로
+같은 폴더의 서로 다른 lease도 받으며 해제된 lease·다른 owner·재사용 전 group을 거절한다.
+중첩 폴더의 실제 외부 쓰기와 native 구독 해제·cap·identity 변경을 검사했다. 당시 watch 14개,
+host 24개의 Debug/ReleaseFast와 각각 다섯 compiled runtime mutation 검출이 통과했다.
+
+### 2m.165 — clean 외부 변경을 공유 편집 이력으로 게시
+
+`edit_commands.acceptExternal`은 동일 prefix/suffix 사이를 완전한 UTF-8 scalar 경계에서
+한 번 교체한다. 각 view의 현재 selection을 매핑하고 독립 Undo entry를 추가하므로 이전
+이력을 버리지 않는다. 새 변경과 마찬가지로 기존 redo 분기는 정리한다. 포맷만 바뀌면 본문
+이력을 추가하지 않는다. dirty·live save image·uncertain save는 자동 적용하지 않는다.
+본문·selection·이력·BOM/개행 속성·logical saved hash·raw disk hash를 할당 실패에 대해
+함께 보존한다. 입력이 현재 flat storage를 빌린 경우도 hash를 게시 전에 계산해 보호한다.
+`OpenFile.acceptExternal`은 registry와 generational document가 같은 peer만 모은다.
+공통 명령 32개·당시 host 25개·다섯 runtime mutation과 실제 창의 외부 내용 표시 2프레임,
+커서·Undo 검사가 통과했다. 이 fixture만으로 일반 앱 예약 완료를 주장하지 않았다.
+
+### 2m.166 — 일반 앱의 자동 감시와 단일 읽기 예약
+
+일반 `win32-terminal` 프레임 루프가 `external_changes.Coordinator.tick`을 호출한다.
+새 editable view의 실제 부모 폴더 구독과 최초 읽기를 예약해 open→구독 사이 공백을
+재검증한다. directory hint를 live lease에 배분한 뒤 한 번에 하나의 worker 읽기를 예약한다.
+문서 배열의 이동 가능한 포인터를 보관하지 않는다. view가 닫히면 구독을 해제하며 worker가
+늦게 끝나도 이전 lease 결과를 적용하지 않는다. worker는 취소된 owner와 별도로 native
+root/name/I/O를 소유한 채 종료·정산한다.
+
+현재 ticket을 거절한 결과는 다시 예약한다. SourceBusy·SaveBusy·일시적 할당 실패는 200ms
+뒤 재시도하며, cap 또는 영구 실패는 해당 구독을 중단하고 번역된 안내를 표시한다. 원래
+fingerprint와 실제 raw hash가 같을 때만 self-write로 접는다. clean은 공통 편집 경로로
+갱신하고 dirty는 본문·저장 기준을 유지해 안내한다. 동일 hash의 dirty 안내는 합친다.
+기존 notice/confirm이 열려 있으면 새 안내는 binding에 보관하며 닫힌 문서의 안내는 버린다.
+
+최초 구독의 할당 실패도 기존 읽기 결과를 계속 정산한 뒤 200ms 뒤 재시도한다. binding과
+native group 구독 allocation prefix에서 실패 시 미게시·소유권 정산과 실제 재시도를 검사한다.
+host 32개(aggregation 2·native 27·pure 3)의 Debug/ReleaseFast와 다섯 compiled runtime
+mutation 검출이 통과했다. 변형은 native hint 누락·hash 무관 self-write 무시·stale ticket 허용·
+구독 해제 누락·재시도 deadline 무시를 다룬다. 소스는 byte 단위로 원복했다. 실제 일반 앱의
+임시 파일이 외부 내용으로 자동 갱신되는 것과 dirty 본문 보존·저장 충돌 거절·외부 원본을
+유지한 버리기 종료를 확인했다. 창 메시지로 입력했으며 물리 키보드·IME 검증은 아니다.
+
+dirty reload/keep/compare 선택 UI, 비동기 저장·초기 open, read-only/untitled/remote 감시와
+volume unmount·sleep/wake의 전체 soak는 아직 남아 있다. 실패한 구독은 파일을 닫았다 다시
+열어 재시도한다. 이 단계는 모든 외부 감시 시나리오 또는 전체 Windows 지원의 완료가 아니다.
+
+### 2m.167 — dirty 외부 변경의 비교·계속 편집·다시 불러오기
+
+일반 앱의 dirty 감시 알림은 공통 네 자리 confirm으로 연결된다. 기본 Enter는 비교이며,
+계속 편집·다시 불러오기·취소가 별도 자리다. 계속 편집과 Esc는 본문이나 저장 기준을
+바꾸지 않는다. 따라서 다음 저장도 외부 변경을 감지하고 덮어쓰기를 거절한다.
+
+비교와 다시 불러오기는 알림의 옛 bytes를 사용하지 않고 같은 단일 reader에서 새 읽기를
+우선 예약한다. 닫힌 lease는 버리고, 읽는 동안 revision이 바뀌면 200ms 뒤 재시도한다.
+완료 이미지는 host에 소유권을 넘기고 적용 직전에 ticket을 다시 검증한다. 비교는 현재
+편집본과 디스크 UTF-8 본문을 각각 복사하고 공통 diff의 행 대응·원래 줄 번호·추가/삭제
+색으로 표시한다. BOM은 본문에서 제거하되 CRLF/LF와 마지막 개행 차이는 비교에 남긴다.
+filler에는 번호가 없다. 비교 화면은 읽기 전용이며 Esc로 돌아간다. 세로 휠은 공유하고
+가로 휠은 포인터가 있는 쪽을 움직인다. 비교 준비 중 할당 실패는 원본 문서를 바꾸지 않는다.
+
+명시적 다시 불러오기는 dirty guard만 승인하며 readonly·live save·uncertain save·UTF-8
+검증을 유지한다. 공통 최소 replacement와 하나의 Undo entry로 게시하므로 Undo하면
+편집본을 복구할 수 있고 이전 이력도 남는다. logical saved hash와 raw disk hash를 함께
+갱신한다. 자동 clean 적용은 여전히 dirty 문서를 거절한다.
+
+공통 명령 34개와 host 35개의 Debug/ReleaseFast가 통과했다. 모델·선택 예약·비교 소유권
+각 경로에서 다섯 compiled runtime mutation을 검출하고 byte 단위로 원복했다. 실제 일반
+앱에서 네 자리 모달·읽기 전용 좌우 비교·Esc 복귀·최신 디스크 reload와 clean 종료,
+계속 편집 후 저장 거절·외부 원본 보존·명시적 discard 종료를 확인했다. posted 창 메시지
+검증이며 물리 키보드·IME는 아니다.
+
+저장 시점의 Compare/Overwrite/Reload 선택은 아직 별도 작업이다. 비교의 scrollbar drag,
+매우 긴 줄과 창 축소에 대한 전체 UX 검증, 비동기 저장·초기 open, readonly/untitled/remote
+감시와 volume unmount·sleep/wake soak도 남아 있다. 전체 Windows 지원은 완료되지 않았다.
+
+### 2m.168 — 저장 충돌의 명시적 덮어쓰기와 선택 취소
+
+저장 단축키와 Save-close의 외부 변경 충돌은 Compare/Overwrite/Reload/Cancel로 연결한다.
+기본 Enter는 비교다. 감시 알림의 같은 alternate 자리는 계속 편집으로 유지한다. 비교나
+취소는 원래 닫기 요청을 이어가지 않는다. 성공한 덮어쓰기·reload는 원래 generational
+file/window 닫기 대상을 다시 승인하며, 다른 문서의 다음 충돌은 새 선택으로 처리한다.
+
+`Request.beginOverwrite`는 문서의 이전 `expected_disk_hash`를 유지하고, 새로 관측한
+raw fingerprint만 `overwrite_disk_hash`에 담는다. `expectedSourceHash`는 native CAS의
+피연산자다. document ack CAS는 이전 문서 기준을 계속 검사하므로 실패·abort 전에
+saved hash나 disk hash를 미리 바꾸지 않는다. 성공한 ack는 저장 이미지의 본문을 기준으로
+갱신하며 뒤에 생긴 편집은 dirty로 남긴다.
+
+`Book.overwrite`는 현재 reader의 이미지·scope·lease·epoch·revision·fingerprint를 검증하고
+controller에 관측 raw hash를 넘긴다. grant의 최초 파일 identity와 경로 검증, native
+transaction의 원본/메타데이터 보호는 그대로다. 읽은 뒤 디스크가 다시 바뀌면 native CAS가
+거절한다. hash만 바꿔 재시도하거나 새 파일 identity를 저장 권한으로 삼지 않는다.
+
+선택 읽기 중에는 번역된 대기 안내와 Esc 취소를 제공하고 키·마우스 입력을 잠근다. 따라서
+GUI 입력이 승인 당시 본문을 바꾸지 않는다. queued·active·completed 선택을 exact lease로
+취소한다. active 취소는 action만 철회하며 worker의 핸들을 버리지 않는다. 늦은 결과를
+정산한 뒤 새 선택을 예약하고, 완료 이미지 취소는 소유 bytes를 정리한다. 창 닫기는 먼저
+대기 선택을 취소하고 정상 dirty-close 계약으로 돌아간다.
+
+공통 저장 요청 16개와 host 39개의 Debug/ReleaseFast가 통과했다. 덮어쓰기 모델/native CAS와
+선택 취소에서 각각 다섯 compiled runtime mutation을 검출하고 원본을 byte 단위로 복원했다.
+기존 native safe-save 66개·grant 14개·controller 15개도 통과했다. 실제 일반 앱에서
+Overwrite가 BOM/CRLF 편집본을 저장하고 닫기를 이어가는 것, Compare의 비파괴 표시,
+Reload 후 외부 원본을 유지한 종료를 확인했다. 실제 writable handle을 유지한 읽기 대기 중
+추가 입력이 차단되고 Esc 후 writer가 풀려도 late overwrite/close가 발생하지 않는 것도
+확인했다. posted 창 메시지 검증이며 물리 키보드·IME는 아니다.
+
+덮어쓰기 선택과 WM_CLOSE를 같은 프레임에 넣는 실앱 검증에서, 이전 alternate가 새 닫기
+모달의 Discard로 처리되는 문제를 재현했다. `beginFileClose`가 queued action을 폐기하고
+새 Save/Discard/Cancel 역할을 세우도록 수정했다. 기존 Compare/Overwrite/Reload/Cancel
+선택의 폐기와 새 라벨·포커스를 검사하고 다섯 runtime mutation을 검출했다. 같은 이벤트를
+다시 보내면 앱과 편집본·외부 디스크가 유지되며 새 선택을 요구한다. 이후 명시적 overwrite가
+정상 저장/닫기를 이어가는 것까지 실제 창에서 확인했다.
+
+실제 native 쓰기·commit과 최초 open의 I/O는 아직 UI 스레드에 있다. 이를 옮기는 작업,
+다중 파일 닫기의 전체 GUI 시나리오와 물리 입력·IME, 비교 scrollbar/크기 변경의 전체 UX,
+readonly/untitled/remote 감시 및 나머지 Windows 플랫폼 구현은 계속 남아 있다.
+
+### 2m.169 — 불변 저장 이미지와 문서 검증 경계
+
+`save_request.Image`는 원본 Request가 살아 있는 동안 빌리는 불변 bytes와 lease·epoch·sequence·
+raw hash·native source hash를 담는다. Registry를 조회하거나 문서에 쓰지 않고 native source와
+checksum을 검사한다. `Request.imageForWrite`는 메인 스레드에서 기존 문서 권한을 검증한 뒤
+이미지를 내보낸다. 순수 `image`는 완료 결과 대조에도 사용하며 commit 권한을 발급하지 않는다.
+
+Transaction은 준비한 이미지의 full lease·epoch·sequence·raw hash를 저장하고 commit/ack의
+요청과 대조한다. commit 직전의 기존 main-thread 문서 검증과 grant의 경로·identity 검증은
+유지한다. epoch를 바꾼 요청의 commit과 ack 거절도 실제 native transaction에서 검사한다.
+공통 gate는 18개로 늘었고 Debug/ReleaseFast에서 통과했다. native safe-save 66개도 두 모드에서
+통과했다. source hash·checksum·epoch·sequence·lease 검사 제거의 다섯 변형은 컴파일 성공 후
+runtime에서 모두 검출했으며 원본 bytes를 복원했다.
+
+이 경계 분리는 worker 이관의 선행 작업이다. 아직 native 쓰기·commit은 UI 스레드에 있으며
+worker 소유권·main-thread commit 승인 왕복과 최초 open의 비동기화는 이어서 구현한다.
+
+### 2m.170 — worker 소유의 native 저장 준비
+
+`save_prepare_worker.Worker`는 main-thread grant/request 검증 뒤 bytes·상대 이름을 복사하고
+선택한 root handle을 duplicate한다. job과 I/O provider는 worker가 소유한다. 문서 Registry나
+살아 있는 Request를 worker에서 조회하지 않으며 이미지의 lease는 opaque 비교 토큰이다.
+최대 4 MiB, 단일 pending/unconsumed 슬롯과 주소 안정 검사를 적용한다. 실패한 admission은
+게시하지 않고 모든 복사본·handle을 정리한다.
+
+worker는 handle-relative 경로를 다시 pin하고 최초 full identity와 raw source hash를 확인한
+뒤 실제 TxF 쓰기·flush를 수행한다. `Transaction.prepareImage`는 불변 이미지만 다루며
+generic commit 우회를 허용하지 않는다. 결과로 bytes와 pinned attempt의 소유권을 이동한다.
+`Prepared.commit`은 main-thread 원래 grant와 현재 Request를 다시 검증하고 기존 commit
+경로로 들어간다. 준비 취소·늦은 미소비 결과는 native cleanup을 수행하고 문서 ack를 하지 않는다.
+정리의 native 실패를 성공한 저장이나 rollback 증거로 삼지 않는다.
+
+새 `test-win32-save-prepare` 9개(aggregation 2·native 7)는 Debug/ReleaseFast에서 통과했다.
+다른 thread ID에서 실제 준비, 준비 중 원본 디스크 유지, 최종 read-only 권한 거절,
+원래 Request 해제 후 bytes/name 소유권, 추가 편집의 dirty 유지, 미소비 결과의 정리와
+admission 할당 실패 prefix를 검사한다. 최초 identity·source hash·checksum·copied owner·
+크기 상한의 다섯 변형과 실패 보존 제거의 추가 변형을 컴파일 후 runtime에서 검출하고 원본 bytes를 복원했다.
+
+native attempt를 얻은 뒤에는 할당하지 않는다. 쓰기 실패도 `Prepared.preparation_error`와
+실제 poisoned/active attempt를 결과로 전달하고 commit을 거절한다. main-thread controller가
+원래 transaction으로 rollback을 정산할 수 있으며, worker가 실패 결과를 버려 native 소유권을
+잃지 않는다. 실제 partial write 후 undetermined native outcome과 poisoned phase가 유지되고
+명시적 rollback 뒤 aborted로 바뀌는 것을 검사한다.
+
+이 worker는 아직 일반 앱의 SaveController/UI에 연결 전이다. commit·취소 후 완료 결과를
+비동기로 정산하는 승인 왕복과 일반 앱 배선을 이어서 구현한다. 완료 결과를 main thread에서
+닫으면 native 정리가 동기로 실행될 수 있다. 최초 open 비동기화와 나머지 Windows 범위도 남아 있다.
+
+### 2m.171 — controller의 비동기 준비 소유권과 취소 정산
+
+`Controller.prepareAsync`와 `prepareOverwriteAsync`가 Request를 보유하고 별도 heap의
+`Preparation`에서 저장 worker를 시작한다. controller 배열이 이동해도 worker 주소는 유지된다.
+`preparing` 동안 두 번째 준비·commit·직접 abort·deinit은 SaveBusy로 거절한다. `cancelPreparation`은
+취소 의사만 기록하며 문서 이미지와 슬롯을 즉시 해제하지 않는다.
+
+`pollPreparation`은 아직 결과가 없으면 즉시 null을 반환한다. 결과의 native attempt와 worker
+이미지를 Pending으로 이동하고 Request 토큰과 현재 grant/문서 권한을 다시 검증한다.
+준비 실패나 권한 변경은 기존 abort 정산으로 들어간다. rollback을 확인하지 못하면
+Request·native image·transaction을 모두 보유한다. 취소한 이미지에는 SaveCancelled를 보존하여
+나중에 commit으로 되살리지 않는다. confirmed abort/commit 이후 두 이미지 할당을 정리한다.
+원본 해시 관측과 document CAS는 덮어쓰기에서도 계속 분리하며 ack 전 저장 기준을 바꾸지 않는다.
+
+`test-win32-save-controller`는 23개(aggregation 2·native 21)로 늘었고 Debug/ReleaseFast에서
+통과했다. 실제 controller 재배치, 추가 편집의 dirty 유지, 취소 후 native ownership drain,
+source 실패 후 재시도, 권한 철회, 미확정 rollback의 이미지 보유와 취소 후 commit 거절,
+admission 할당 prefix 및 stale/fresh overwrite source CAS를 검사한다. preparing 상태 숨김,
+취소 무시, ready grant 검증 제거, 취소 commit guard 제거와 rollback 실패를 취소 완료로
+오인하는 다섯 변형을 컴파일 후 runtime에서 검출하고 원본 bytes를 복원했다. worker 9개도
+두 모드에서 통과했다.
+
+아직 일반 앱의 Book/UI 저장 진입점은 동기 API를 사용한다. 완료 poll의 native abort와
+commit·정산도 main thread에서 실행되므로 전체 비동기 저장 완료로 세지 않는다. 이 I/O의
+worker 이관과 승인 왕복, 일반 앱 저장·닫기 연결 및 초기 open 비동기화를 이어서 구현한다.
+
+
+### 2m.172 — 일반 앱의 비동기 저장 준비와 저장 후 닫기
+
+일반 앱 Ctrl+S와 Save-close는 Book.beginSave로 준비 worker를 시작하고 프레임에서
+Book.pollSave를 확인한다. 진행 중에는 키·마우스 입력을 제한하고 Esc는 취소를 요청한다.
+닫기는 committed receipt와 성공한 문서 ack를 확인한 뒤 이어간다. 취소·실패·미확정
+rollback은 닫기 성공으로 취급하지 않는다. 여러 파일은 한 문서씩 준비하도록 예약한다.
+
+host gate 47개(aggregation 2·native 38·pure 7)가 Debug/ReleaseFast에서 통과했다.
+clean 저장 생략, 추가 편집 dirty 보존, 취소 후 disk/backup 보존, source 변경 거절,
+controller 배열 이동과 lease 격리, receipt 이후 닫기와 ack 실패의 닫기 거절을 검사한다.
+clean guard·취소·ack guard·committed guard·닫기 소유권 반환을 제거한 다섯 변형을
+컴파일 성공 후 runtime에서 검출하고 원본 bytes를 복원했다. controller 23개도 통과했다.
+
+격리한 실제 일반 앱에서 대상 창의 입력 큐로 Ctrl+S와 Save-close를 실행하여 BOM·CRLF
+보존 및 저장 후 프로세스 종료를 확인했다. 이는 물리 키보드·IME 검증이 아니다.
+native commit/abort/reconcile/cleanup과 명시적 충돌 overwrite는 아직 main thread에서
+실행한다. 최초 open 비동기화와 다중 파일 닫기의 충돌·취소·할당 실패 GUI 검증은 남아 있다.
+
+다중 파일의 정상 Save-close도 별도 격리한 실제 앱에서 확인했다. 두 문서를 각각 수정한 뒤
+창 닫기의 Save를 선택하여 두 디스크 본문과 프로세스 종료를 대조했다. 첫 문서의 BOM·CRLF와
+둘째 문서의 LF가 모두 보존됐다. 창이 가려져도 대상 HWND의 PrintWindow 캡처로 두 번째
+편집본과 닫기 선택창을 확인했다. 정상 성공 경로의 증거이며 충돌·취소 전체 조합을 대신하지 않는다.
+
+### 2m.173 — native rollback과 outcome 조회 worker
+
+`save_settle_worker.Worker`는 준비 결과의 native attempt와 독립 이미지 전체를 이동받아
+다른 스레드에서 rollback 또는 reconcile을 실행한다. Registry나 Request를 조회하지 않는다.
+실패에도 이미지·handle·native phase·오류를 모두 돌려주며 unknown을 aborted로 바꾸지 않는다.
+단일 결과 슬롯과 고정 주소를 지키고 완료됐어도 미소비 결과가 있으면 deinit을 거절한다.
+admission 할당/스레드 시작 실패는 원래 caller 소유권을 유지한다. worker 결과 자체는 문서 ack가 아니다.
+
+`test-win32-save-settle`의 native 테스트 7개가 Debug/ReleaseFast에서 통과했다.
+실제 다른 thread의 rollback과 원본 디스크 보존, copied/busy owner 거절, 실패 후 실제 재시도,
+unknown outcome 유지, 실제 commit 뒤 유실 응답의 committed 조회, admission 할당 실패와
+main Request 해제 뒤 독립 이미지 소유권을 검사한다. aborted/unknown 분류 변조,
+실제 rollback 생략, 실패 삼키기와 준비 오류 유실의 다섯 변형을 컴파일 후 runtime에서
+검출하고 원본 bytes를 복원했다. 컴파일 실패만 난 변형은 검출 횟수에 포함하지 않았다.
+
+이 worker의 controller/일반 앱 연결은 이어서 구현한다. 현재 일반 앱의 취소 rollback과
+commit·cleanup은 여전히 main thread이고 native commit 승인 왕복·초기 open 이관도 남아 있다.
+
+### 2m.174 — controller의 비동기 rollback/outcome 소유권
+
+`Controller.abortAsync`·`reconcileAsync`는 고정 주소의 settlement owner를 만든 뒤 native
+attempt와 독립 이미지를 worker로 이동한다. Request는 controller에 남고 settling 동안
+두 번째 준비·commit·직접 abort/reconcile·deinit을 거절한다. 기존 동기 준비 결과는 admission
+전에 native 이미지를 복사한다. admission 실패는 원래 pending 소유권을 유지한다.
+
+`pollSettlement`는 결과 전 즉시 null을 반환한다. 결과의 attempt/image를 다시 보유하고
+unknown이면 문서 uncertainty를 표시하여 재시도와 닫기를 막는다. known native decision
+뒤에만 main-thread ack/abort·정리로 들어간다. 실제 유실 commit은 committed로 정산하며
+rollback으로 표시하지 않는다. controller가 이동해도 worker 주소와 Request 소유권은 유지된다.
+
+controller gate는 28개(aggregation 2·native 26)로 늘었고 Debug/ReleaseFast에서 통과했다.
+새 다섯 테스트는 pending 문서 유지·busy guard, controller 이동, unknown 이미지 보유/실제
+rollback 재시도, 실제 commit의 유실 응답과 admission 할당 prefix를 검사한다. unknown 성공
+오인, committed를 aborted로 표시, 문서 uncertainty 생략 및 rollback/reconcile action 교환의
+다섯 변형을 컴파일 후 runtime에서 검출하고 원본을 복원했다. settlement worker 7개도 두 모드에서 통과했다.
+
+일반 앱 Book/UI는 아직 이 settlement API 연결 전이다. 앱의 취소·reconcile 연결과
+native commit 승인 왕복·cleanup·초기 open 이관 및 나머지 Windows 범위는 이어서 구현한다.
+
+### 2m.175 — 일반 앱의 취소 rollback과 미확정 결과 조회 연결
+
+Book/UI는 준비 완료를 `pollPreparationForApp`으로 받고 취소·준비 오류의 rollback을 worker에
+예약한다. settling 동안 슬롯과 Request를 유지하고 이후 프레임의 `pollSettlement` 결과로
+정산한다. 준비의 권한 오류도 confirmed abort 뒤에 보고하며 취소가 이미 committed된 결과를
+aborted로 바꾸지 않는다. explicit cancel은 진행 중인 조회에도 의사를 기록한다.
+
+unknown 조회는 200ms 뒤 재시도하고 해당 문서의 uncertainty/native 이미지 소유권을 유지한다.
+Esc는 backoff를 기다리지 않고 rollback을 요청한다. 반복 Esc는 이미 소유한 native job을
+교체하지 않는다. known committed 결과는 문서 ack를 거치며 confirmed abort만 취소 UI로 반환한다.
+
+host gate 51개(aggregation 2·native 42·pure 7)와 controller 28개가 Debug/ReleaseFast에서
+통과했다. 추가 host 검사는 취소의 슬롯/이미지 유지·반복 Esc, 권한 오류의 정산 순서,
+unknown backoff와 explicit cancel, 실제 유실 commit 뒤 취소의 committed receipt를 검사한다.
+동기 poll 우회, committed의 false cancel, 준비 오류 숨김, backoff 제거와 cancel marker 제거의
+다섯 변형을 컴파일 후 runtime에서 검출하고 원본 bytes를 복원했다.
+
+격리한 실제 앱에서 BOM·CRLF의 1,870,003-byte 문서를 편집하고 대상 키 큐의 Ctrl+S/Esc로
+취소했다. 디스크 전체가 원본과 같고 편집본은 유지됐다. 이어 추가 편집과 Save-close에서
+두 편집을 포함한 1,870,005-byte 본문·BOM/CRLF와 프로세스 종료를 확인했다. 가려진 창의
+캡처는 대상 HWND PrintWindow를 사용했다. 이는 물리 키보드/IME 검증이 아니다.
+
+native commit와 그 실패 경로의 즉시 abort, final handle cleanup, 명시적 conflict overwrite와
+초기 open은 아직 main-thread I/O다. 이 승인 왕복·worker 이관과 나머지 Windows 범위는 계속 진행한다.
+
+### 2m.176 — 확정 결과의 native 정리와 완료 이미지 worker
+
+`save_cleanup_worker.Worker`는 terminal local phase의 독립 준비 결과를 이동받는다.
+메인 grant의 arena를 worker에서 해제하지 않도록 이미지와 pinned buffers의 SMP allocator
+소유권을 요구한다. 자체 I/O provider로 실제 KTM outcome을 다시 조회하며 local phase만으로
+핸들을 닫거나 committed 결과를 만들지 않는다. unknown/query 실패는 전체 attempt/image와
+uncertain phase를 반환한다. committed 이미지는 native binding과 checksum도 다시 검사한다.
+
+known native decision 뒤 native handle/pinned buffer 정리를 worker에서 실행한다. released
+결과는 handle을 노출하지 않고 독립 이미지·실제 outcome·cleanup 오류를 반환한다. cleanup
+오류는 committed를 aborted로 바꾸지 않는다. native phase가 closed가 아니면 소유권을 반환한다.
+worker는 Registry나 Request를 조회하지 않으며 결과도 문서 ack가 아니다. main owner는
+이미지 토큰과 현재 Request를 대조하고 완료를 정산해야 한다. 미소비 결과가 있으면 deinit을 거절한다.
+
+`test-win32-save-cleanup` native 10개가 Debug/ReleaseFast에서 통과했다. 다른 thread에서
+실제 committed/aborted handle 정리와 디스크 보존, 가짜 terminal phase의 실제 unknown,
+query 실패/재시도, 정리 응답 오류 보존, committed 이미지 변조 거절, allocator 소유권,
+admission 할당 실패·busy/copied owner와 Request 해제 뒤 독립 이미지를 검사한다.
+false abort·unknown close·allocator guard 제거·cleanup 오류 유실·checksum 검사 제거의
+다섯 변형을 컴파일 후 runtime에서 검출하고 원본 bytes를 복원했다.
+
+이 worker의 controller/앱 연결은 후속 작업이다. 일반 앱의 native commit·그 실패의 즉시
+abort·final cleanup·conflict overwrite·초기 open I/O와 물리 입력/IME 및 나머지 Windows 범위는 계속 남아 있다.
+
+### 2m.177 — 요청에 묶인 최종 main-thread commit 승인 값
+
+공통 `save_request.CommitApproval`은 최종 주소에 발급하는 한 번의 승인 값이다. 발급 시
+`Request.approveCommit`가 현재 문서 수명·경로·쓰기 권한·uncertainty와 native source hash/
+checksum을 검증한다. 실패는 destination을 바꾸지 않는다. 값은 bytes를 빌리지 않고
+full lease·epoch·sequence·disk hash·expected native source hash와 host scope를 보유한다.
+
+`consume`은 발급된 원래 주소·미소비 상태·동일한 nonzero scope와 전체 요청 binding을
+검사한다. 복사본·다른 native job scope·변조한 lease/epoch/sequence/hash/source와 재사용을
+거절하며 실패한 consume은 승인을 소비하지 않는다. Registry를 조회하거나 문서 ack를 하지 않는다.
+host는 scope를 재사용하지 않고 native binding fence를 먼저 확보해야 한다. 최종 발급부터
+native 결과까지 Request와 문서 수명·경로·권한을 보유/제한하는 연결도 host 책임이다.
+
+공통 요청 gate는 23개로 늘었고 Debug/ReleaseFast에서 통과했다. 새 다섯 검사는 권한 철회와
+미게시 실패, final address/scope/one-use, 전체 binding, source/checksum·epoch·uncertainty,
+빌린 bytes 없는 메타데이터를 검사한다. copied address·one-use·scope·binding·현재 권한
+검사를 제거한 다섯 변형을 컴파일 후 runtime에서 검출하고 원본 bytes를 복원했다.
+
+이 값은 아직 native commit 진입점이나 일반 앱에 연결 전이다. 기존 native commit의 live
+권한 검증과 generic byte API 우회 거절은 그대로 유지한다. native worker의 binding-ready/
+main-thread 승인 왕복과 문서 변경 제한·취소 경합·정리 연결, 나머지 Windows 범위는 계속 진행한다.
+
+### 2m.178 — controller와 일반 앱의 native 정리 결과 정산
+
+`Controller.cleanupAsync`는 SMP 소유의 terminal attempt/image를 정리 worker에 넘기고
+원래 Request는 main thread에 유지한다. `cleaning` 동안 commit·abort·새 준비·shutdown은
+busy로 거절하며, admission 실패는 native 소유권을 바꾸지 않는다. `pollCleanup`은 retained
+결과를 원래 pending으로 되돌린다. released 결과는 실제 native outcome과 요청 binding을
+대조한 뒤 main thread에서 문서 CAS와 backup 정산을 수행한다. cleanup 오류와 문서 ack
+오류는 native commit/abort decision과 구분한다. 추가 편집이나 저장 후 권한 변경은 이미
+committed인 원래 이미지의 정산을 막지 않으며, 오래된 disk CAS는 저장 완료 처리를 거절한다.
+
+controller gate 33개가 Debug/ReleaseFast에서 통과했다. 추가 다섯 native 검사는 Request
+수명/busy, rollback의 dirty 보존, later edit/permission, stale disk ack, admission 실패 후
+재시도를 증명한다. false abort·rollback ack·ack 오류 은폐·현재 본문으로 잘못 rebase·잘못된
+receipt sequence의 다섯 compiled runtime 변형을 검출하고 원본 bytes를 복원했다.
+
+일반 앱의 `commitForApp`와 `pollSettlementForApp`도 terminal cleanup을 worker에 넘긴다.
+정리 admission/query 실패는 terminal 소유권을 유지하고 `finishing`/`uncertain`에서 재시도한다.
+`cleaning` 중 반복 Esc는 기존 job을 바꾸지 않는다. 실제 commit은 늦은 취소에도 committed
+receipt로 정산하고, confirmed abort 뒤에만 취소/원래 오류를 보고한다. 최종 grant 검증 실패는
+rollback worker와 cleanup worker를 거친 뒤 오류를 보고한다. committed cleanup의 stale disk
+CAS는 native commit과 별도 acknowledgment 오류를 반환한다.
+
+host gate 56개 Debug/ReleaseFast와 sync commit cleanup·sync settlement cleanup·정리 중
+취소 busy·committed의 가짜 cancel·권한 오류 조기 보고의 다섯 compiled runtime mutation
+검출이 통과했다. 원본 bytes를 복원하고 controller 33개도 두 optimize 모드에서 재검증했다.
+최종 native commit/경로 재검증은 아직 main thread에서 실행한다. 승인 왕복과 conflict
+overwrite·초기 open I/O 이관, 물리 입력/IME와 나머지 Windows 범위는 계속 남아 있다.
+
+실제 제품 exe의 격리된 두 파일을 각각 편집하고 WM_CLOSE의 Save를 선택해 두 문서 모두
+저장한 뒤 프로세스가 종료되는 것을 확인했다. 첫 파일은 `EF BB BF 58 62 61 73 65 0D 0A`,
+두 번째는 `59 73 65 63 6F 6E 64 0A`의 전체 bytes로 BOM/CRLF와 LF 보존을 검증했다.
+입력은 소유 HWND에 synthetic WM_CHAR/WM_CLOSE/WM_KEYDOWN을 주입했으며 물리 입력/IME
+검증으로 세지 않는다. 코드 hash·fixture·캡처와 byte proof는 private cache에 보관한다.
+
+### 2m.179 — native commit 승인 왕복과 일반 앱 연결
+
+`save_commit_worker`는 SMP 소유의 prepared attempt/image를 받아 선택 root의 복제 handle과
+relative name을 보유한다. worker가 fresh root-relative 파일을 열고 처음 읽은 full identity와
+native 이미지 binding/source/checksum을 검사한 뒤 ready를 게시한다. 그 fence는 main-thread
+최종 승인과 실제 native commit이 끝날 때까지 유지한다. main owner의 `approve`만 현재
+Grant/Request 권한을 확인하고 non-reused scope와 final-address 승인 값을 게시한다.
+
+worker는 Registry를 조회하지 않고 `Transaction.commitApproved`에서 이미지 binding/checksum과
+일회성 승인을 소비한 뒤 기존 KTM commit을 실행한다. generic byte API의 문서 저장 우회는
+계속 거절한다. 취소와 worker의 실행 시작은 atomic vote로 경합한다. 실행 시작 전 취소는
+prepared 소유권을 반환하며, 시작 뒤 취소는 실제 native 결과를 기다려야 한다. 응답 유실은
+uncertain phase의 전체 attempt/image를 반환하고 문서 ack를 하지 않는다. 동기화 provider는
+job과 함께 고정하고 main의 결과 소비까지 유지해 승인 게시 중 provider가 파괴되지 않는다.
+
+`test-win32-save-commit` native 7개가 Debug/ReleaseFast에서 통과했다. 최종 권한·scope,
+취소/늦은 취소, copied/busy owner, 다른 equal-byte 파일의 namespace fence, 실제 commit
+응답 유실과 scope exhaustion을 검사한다. final authority·native scope·fresh name identity·
+copied owner·late cancel 검사를 깨뜨린 다섯 compiled runtime 변형을 검출하고 원본을 복원했다.
+namespace 변형은 기다리기 timeout 대신 실제 승인 왕복과 native decision으로 검출한다.
+
+일반 앱의 `commitForApp`는 이제 native commit worker를 시작한다. `committing` 동안
+controller의 다른 native 작업과 shutdown은 busy로 거절한다. `pollCommit`만 main에서
+최종 승인을 게시하며, 승인 실패는 primary 오류를 보존하고 worker를 취소한 뒤 rollback과
+cleanup을 거친다. native committed는 늦은 취소에도 cleanup/ack로 진행하고 uncertain은
+전체 소유권을 복원해 실제 결과 조회로 넘긴다. 어떤 단계도 callback 소실을 abort로 세지 않는다.
+
+앱의 pending-save 키/마우스 경계와 Book의 read/release/teardown busy 경계가 승인부터 결과까지
+문서 수명·경로·권한 변경을 제한한다. main에서 Request를 계속 소유하므로 worker는 Registry에
+접근하지 않는다. host 61개·controller 33개·commit worker 7개가 Debug/ReleaseFast에서
+통과했다. 앱의 sync commit 우회·최종 권한 생략·primary 오류 유실·committed의 가짜 cancel·
+committing cleanup busy 생략의 다섯 compiled runtime 변형도 검출하고 원본 bytes를 복원했다.
+앱 연결의 전체 gate·실앱 검증을 이어가며, conflict overwrite·초기 open I/O 이관과 물리 입력/IME,
+나머지 Windows 지원 범위도 계속 남아 있다.
+
+§2m.179의 새 제품 exe에서도 실제 앱을 검증했다. 1,870,003-byte BOM/CRLF 파일을
+편집해 소유 HWND에 Ctrl+S/Esc를 연속 주입하고 원본 전체 bytes가 보존되는 것을 확인했다.
+추가 편집 후 Save-close는 `BOM + XY + base-line CRLF × 170000`의 1,870,005 bytes로
+정확히 저장하고 프로세스를 종료했다. 별도 두 문서 Save-close도 `BOM + Xbase CRLF`와
+`Ysecond LF`의 전체 bytes 및 프로세스 종료로 확인했다. 입력은 synthetic 메시지 주입이며
+물리 키보드/IME로 세지 않는다. 두 fixture의 코드 hash·byte proof·캡처는 private cache에 보관한다.
+
+### 2m.180 — 명시적 덮어쓰기의 비동기 저장 연결
+
+`Book.beginOverwrite`는 현재 Reader scope·ticket·문서 revision과 최초 identity에 맞는
+새 native 읽기만 수락한다. 읽은 raw hash를 `prepareOverwriteAsync`에 넘기고, 기존 문서의
+saved hash/disk CAS는 실제 commit/ack까지 유지한다. 읽기 이미지 bytes를 빌리지 않으므로
+admission 뒤 Completion/Reader를 해제해도 저장의 독립 이미지와 native 소유권은 유지된다.
+
+일반 앱의 overwrite 선택도 pending-save 흐름으로 들어가 준비·commit·rollback·조회·정리를
+worker에서 실행한다. Save-close intent는 실제 committed receipt까지 보유하며 읽기 완료나
+준비 시작만으로 닫기를 승인하지 않는다. 그 뒤 native 변경은 원래 SourceChanged 충돌로
+되돌리고 취소/권한 철회는 confirmed abort 뒤에 보고한다. 기존 동기 API는 별도 호출자를
+위해 유지하며 일반 앱의 overwrite 선택에서는 호출하지 않는다.
+
+host gate 66개가 Debug/ReleaseFast에서 통과했다. 추가 다섯 native 검사는 독립 이미지와
+old CAS, stale read admission 거절, 읽기 뒤 native 변경, 취소의 외부 bytes 보존, final vote의
+권한 재검증을 증명한다. wrong source·stale read 수락·disk CAS 조기 rebase·취소 무시·final
+permission 생략의 다섯 compiled runtime 변형을 검출하고 원본 source bytes를 복원했다.
+새 제품 exe의 실앱에서도 편집 중 외부 변경을 감지한 뒤 Save-close의 충돌 선택에서
+Overwrite를 실행했다. 외부 bytes 대신 편집 내용 `BOM + Xbase CRLF`가 정확히 저장되고
+프로세스가 정상 종료했다. 소유 HWND에 synthetic 메시지를 주입한 검증이며 물리 입력/IME로
+세지 않는다. 코드 hash·전체 byte proof·선택 화면 캡처는 private cache에 보관한다.
+전체 gate를 이어서 검증하며 초기 open I/O 이관, 물리 입력/IME와 나머지 Windows 범위는 남아 있다.
+
+### 2m.181 — 초기 native 읽기와 문서 등록의 소유권 분리
+
+`native_open.Snapshot`이 선택 root의 독립 handle·상대 경로·최초 full identity·원본
+bytes와 raw hash를 소유한다. 경로 탐색·identity witness·공유 제한 snapshot 읽기는
+Registry를 참조하지 않는다. `Grant.publishOpen`은 앱 소유 스레드에서 raw image를 검증하고
+본문과 문서 CAS를 등록한다. 모든 fallible 등록 뒤에만 native 소유권을 소비하며 실패하면
+호출자가 원래 Snapshot을 계속 소유한다. 본문 자원과 native 자원의 allocator도 따로 보유한다.
+
+기존 동기 open은 이 두 경계를 순서대로 호출한다. 초기 열기의 실제 worker 연결과 capability
+probe·UTF-8 처리 이관은 후속이며 이번 분리만으로 UI 스레드 I/O 제거를 주장하지 않는다.
+권한 gate 19개가 Debug/ReleaseFast에서 통과했고 raw image 검증 생략·decoded hash를
+disk CAS로 사용·소비된 owner 수락·read limit 생략·쓰기 공유 허용의 다섯 compiled runtime
+변형을 검출했다. 각 변형 뒤 원본 bytes를 복원했다. 부정 검증에서 예기치 않은 성공 또는
+조기 assertion 실패가 생겨도 native grant와 view 참조를 정리하도록 기존 테스트도 보강했다.
+
+### 2m.182 — 초기 읽기·capability probe worker
+
+capability probe를 Snapshot의 native 경계로 옮겼다. Book도 문서 등록 전에 선택 volume,
+fresh 상대 경로와 최초 identity·raw source hash를 검사하고 쓰기 없는 KTM rollback·aborted
+조회·handle 정리를 끝낸다. Windows 절대 경로의 root 판정은 동기/worker 경로가 공유한다.
+
+`open_worker.Worker`는 독립 경로 bytes와 heap Job을 소유하고 자체 I/O context에서 초기
+읽기와 probe를 실행한다. Registry나 borrowed 문서 포인터가 없다. 취소는 실제 작업 종료까지
+Job을 유지하며 active 취소는 Snapshot을 worker에서 정리한다. native 완료 뒤 late 취소도
+앱의 결과 인수 전에 표시하고, 이미 만들어진 Snapshot의 명시적 정리 소유권을 반환한다.
+복사된 Worker나 다른 스레드는 취소·인수·해제를 할 수 없다. done publication은 worker I/O
+정리 뒤의 마지막 Job 접근이며 인수는 acquire 뒤 한 번만 가능하다.
+
+worker 6개가 Debug/ReleaseFast에서 통과했다. 실제 파일/KTM에서 off-owner 실행, 원본 전체
+bytes 보존, active/late 취소, copied owner, 읽기 상한과 readonly capability 거절을 검사했다.
+probe 생략·active 취소 무시·late 취소 무시·copied owner 허용·admission 상한 생략의 다섯
+compiled runtime 변형을 검출하고 원본 bytes를 복원했다. 일반 앱의 파일 클릭은 아직 동기
+경로를 쓰며 worker 결과의 앱 등록/readonly fallback·UTF-8 처리·닫기 배선은 이어서 진행한다.
+
+### 2m.183 — 초기 worker의 읽기 전용 열기와 문서 해석
+
+`startForApp`은 파일 kind를 먼저 판정하고 text만 worker에 맡긴다. 저장 capability가 없으면
+같은 Windows 절대 경로 정책과 읽기 상한 안에서 읽기 전용 이미지를 만든다. writable grant는
+만들지 않으며 OOM은 읽기 전용 fallback으로 바꾸지 않는다. 기존 strict `start`는 capability
+실패를 오류로 반환하는 계약을 유지한다.
+
+writable/readonly 양쪽의 UTF-8 검증·BOM 제외 본문·줄바꿈 해석은 worker에서 수행한다.
+Result의 Document는 함께 소유한 raw bytes만 빌린다. readonly 이미지는 독립 경로·원본
+bytes·BOM을 포함한 raw hash를 유지한다. 취소와 Result 정리 시 native/readonly 소유권 및
+borrowed Document를 함께 정리한다. UTF-8 아닌 입력은 문서나 native 권한을 게시하지 않는다.
+
+worker 11개가 Debug/ReleaseFast에서 통과했다. readonly BOM/raw CAS, 잘못된 UTF-8,
+mixed line ending 원본 보존, OOM의 fallback 금지와 readonly 읽기 상한·web kind 판정을
+추가했다. OOM fallback 허용·UTF-8 검사 생략·readonly 권한 철회·decoded hash 사용·fallback
+읽기 상한 생략의 다섯 compiled runtime 변형을 검출하고 worker/core 원본 bytes를 복원했다.
+일반 앱 파일 클릭의 worker 연결과 결과 등록·닫기 배선은 계속 남아 있으며 기존 동기 경로는
+아직 문서 준비를 UI 스레드에서 수행한다.
+
+### 2m.184 — 일반 앱의 초기 worker 결과 등록과 닫기 연결
+
+`Book.admitOpen`은 취소·실패·중복 소비와 미확인 capability를 거절한다. writable 결과는
+controller 슬롯을 먼저 예약하고 독립 문서/권한으로 등록한다. readonly 결과도 raw hash를
+검사해 읽기 전용 문서를 만들며 save grant를 얻지 않는다. 등록 할당 실패는 결과를 보존하고,
+성공 뒤만 raw 소유권과 borrowed Document를 소비한다. probe 재시도는 이전 성공 표시를
+먼저 지우므로 실패한 재검증이 기존 permit을 되살리지 않는다.
+
+일반 파일 클릭은 이제 `startForApp`으로 읽기/probe/readonly fallback을 제출한다. 프레임은
+queued Esc·닫기를 처리한 뒤 완료 결과를 등록하고 뷰를 붙인다. 읽기 중 키와 앱 마우스
+동작은 차단하되 caption·resize는 유지한다. 창 닫기는 job을 취소하고 실제 drain 뒤 기존
+dirty-close 절차로 돌아간다. 앱 종료 경로도 독립 job을 정산한다. 뷰 슬롯 예약은 등록/복구보다
+앞서며, 복구가 dirty를 만들기 전에 게시 공간을 확보한다. 초기 lease는 뷰 부착 뒤 해제한다.
+
+host 77개가 Debug/ReleaseFast에서 통과했다. worker 결과 해제 뒤 실제 native save,
+cancel/capability 거절, readonly raw CAS와 save 권한 부재, 등록 실패 소유권, probe 재시도,
+앱 뷰 예약·단일 참조·복구·OOM을 검사했다. Book의 cancel·capability·readonly·raw CAS·조기
+소비와 앱의 cancellation 유실·예약 순서·초기 lease 누수·복구 생략·OOM 오분류를 각각 다섯
+compiled runtime 변형으로 검출했다. 모든 원본 bytes를 복원하고 재검증했다.
+
+새 제품 exe의 실제 앱에서 비동기 파일 열기→편집→Save-close가 `BOM + Xbase CRLF`를
+정확히 저장하고 정상 종료했다. 별도 readonly 파일은 입력 시도 뒤 본문과 원본 bytes를
+유지하며 종료했다. 1,870,003-byte 파일 클릭과 WM_CLOSE를 대기 없이 연속 주입한 경우도
+원본 전체 bytes와 정상 종료를 확인했다. 소유 HWND에 synthetic 메시지를 주입한 검증이며
+물리 입력/IME로 세지 않는다. 코드 hash·byte proof·캡처는 private cache에 보관한다.
+
+초기 filesystem 읽기/probe와 worker 문서 해석은 연결됐지만 게시 시 L2 문서 생성의 UTF-8
+재검사·buffer/line index와 뷰/syntax 준비, 복구 저장소 읽기는 아직 UI 스레드에 있다. 이 CPU/
+복구 I/O 이관과 sleep/unmount·물리 입력/IME, 나머지 Windows 지원 범위는 계속 남아 있다.
+
+### 2m.185 — 초기 본문 버퍼·줄 인덱스의 worker 준비
+
+초기 worker는 raw 이미지 외에 독립 소유 `EditableFile`을 준비한다. UTF-8 해석과 rope,
+평탄 본문, 줄 인덱스 생성은 worker에서 수행하며 Registry나 view를 빌리지 않는다.
+Book은 본문·포맷·readonly 속성을 raw 이미지의 해석과 대조하고 준비한 본문을 재생성하지
+않고 등록한다. 파일 내부 allocator는 thread-safe SMP이며 path/history는 앱 allocator를
+유지한다. Registry 등록 또는 grant 참조 할당 실패는 준비 파일과 native snapshot을 결과에
+남긴다. 성공 뒤만 준비 파일 소유권을 소비하며 취소/미소비 결과는 파일과 raw 이미지를 정리한다.
+
+worker 11개·grant 19개·host 78개가 Debug/ReleaseFast에서 통과했다. 준비 본문 주소의
+보존, 결과 정리 뒤 편집/실제 저장과 등록 할당 실패 소유권, 변경된 본문·포맷·권한 및 누락된
+준비 파일 거절을 검사했다. 본문·포맷·권한 대조 생략, UI 본문 재생성, readonly 준비 권한
+철회를 각각 compiled runtime 변형으로 검출했다. 다섯 회 모두 원본 bytes를 복원했다.
+
+새 제품의 실제 앱에서 열기→편집→Save-close의 전체 `BOM + Xbase CRLF` bytes와 정상
+종료를 확인했다. 소유 HWND의 synthetic 입력이며 물리 입력/IME 증거로 세지 않는다.
+Registry 등록 시 hash/본문 대조, view/syntax CPU 준비와 복구 저장소 읽기는 아직 앱 스레드에
+있다. 이 잔여 비용 및 전체 Windows 지원 범위를 계속 진행한다.
+
+### 2m.186 — 초기 복구 읽기와 pinned 저장소 인계
+
+일반 앱 파일 클릭은 `startForAppWithRecovery`로 기존 private 저장소의 열기·읽기·파싱도
+worker에서 수행한다. 없는 저장소는 만들지 않으며 unreadable record는 absence로 접지
+않는다. OOM은 열기 실패, 그 외 복구 실패는 기존 원본 readonly 보호로 이어진다. 복구
+레코드는 raw bytes와 parsed identity를 독립 소유하고 기존 disk CAS를 보존한다.
+
+복구 키는 트리 입력이 아니라 native snapshot의 문서 경로다. 실앱 재열기에서 트리의 `/`와
+native 경로 구분자 차이로 레코드를 놓치는 문제를 검출해 수정했다. 기존 백업 포맷과 키는
+바꾸지 않는다. 레코드가 있는 경우 pinned LocalData도 함께 반환하여 첫 저장/닫기에서
+백업을 정리할 수 있게 한다. 앱의 복구 적용은 worker 결과를 사용하며 저장소를 다시 읽지
+않는다. 늦은 취소와 미소비 결과는 record·store·native snapshot을 정산한다.
+
+worker 15개·host 80개가 Debug/ReleaseFast에서 통과했다. 독립 record 수명·late 취소,
+absence의 무생성, malformed record, separator가 다른 native key, 복구 후 외부 변경의
+old CAS 거절과 첫 Save-close의 store 인계/레코드 삭제를 검사했다. 트리 키 조회·오류
+무시·없는 store 생성·store 인계 생략·disk CAS 재설정을 다섯 compiled runtime 변형으로
+검출하고 원본 bytes를 복원해 재검증했다.
+
+새 격리 실앱에서 dirty backup 생성 뒤 소유 process를 강제 종료하고 재시작했다. 파일
+클릭으로 `Xbase`와 복구 표시가 나타났고 첫 Save-close가 정확한 `BOM + Xbase CRLF`를
+저장하고 정상 종료하며 백업을 지웠다. HWND synthetic 입력이며 물리 입력/IME로 세지
+않는다. 실패했던 초기 GUI 시도는 성공 증거로 사용하지 않는다.
+
+복구의 이력 적용과 view/syntax CPU 준비, 게시 시 hash/본문 대조 및 기존 주기적 백업
+쓰기·닫기 정리는 아직 앱 스레드다. 이 비용과 sleep/unmount·물리 입력/IME, 나머지 Windows
+지원 범위를 계속 진행한다.
+
+### 2m.187 — 초기 view projection·syntax의 독립 worker 준비
+
+`prepared_view`는 Registry 없이 본문을 빌리는 행 배열·시작 offset·최대 표시 폭과 독립
+syntax parser/tree를 준비한다. 초기 worker가 이 캐시를 만들며 같은 projection/언어 매핑을
+앱의 이후 rebuild도 사용한다. 앱은 현재 본문 allocation·길이·revision을 대조하고 view
+lease 확보 뒤만 캐시를 소비한다. 없는/stale 캐시는 파일 열기 실패이며 UI에서 조용히
+다시 준비하지 않는다. 취소/미소비/OOM은 캐시와 파일을 정산한다.
+
+초기 projection 배열의 allocator는 view에 인계된다. navigation·색 표시 scratch는 기존
+앱 allocator를 유지하고 편집/복구 뒤 refresh는 이전 배열·parser를 폐기한 뒤 앱 캐시로
+재구축한다. attach 실패는 본문 lease 해제 전에 borrowed 캐시를 정리한다. syntax 준비
+실패의 기존 monochrome 정책과 parse 크기 제한은 유지한다.
+
+worker 19개·host 82개가 Debug/ReleaseFast에서 통과했다. UTF-8/CRLF 행·표시 폭,
+다른 allocation/revision 거절, 부분 배열 할당 실패, worker parser의 main-thread highlight
+조회, 행 배열/parser/tree 주소 보존과 결과 해제 뒤 편집/refresh를 검사했다. 본문 결합·
+revision 검사·표시 폭·parser 인계·캐시 소비를 각각 깨뜨린 다섯 compiled runtime 변형을
+검출했다. C 소유권을 의도적으로 누락한 negative case도 정리 뒤 실패하도록 했다.
+
+새 실앱에서 Zig 구문 색 표시, 편집, Save-close의 exact `Xconst value = 1; CRLF`와 정상
+종료를 확인했고 옆의 BOM/CRLF 파일은 유지됐다. 소유 HWND의 synthetic 입력이며 물리
+입력/IME로 세지 않는다. 복구의 이력 적용과 그 뒤 view/syntax rebuild, 이후 편집 rebuild,
+게시 시 hash/본문 대조 및 주기적 backup write/close 정리는 여전히 앱 스레드다. 전체 잔여
+Windows 범위는 계속 진행한다.
+
+
+### 2m.188 — 파일 트리의 Windows 재귀 변경 감시
+
+파일 트리의 초기 검증된 디렉터리 handle에 상대적으로 재귀 알림을 등록하고,
+앱 루프가 완료 알림을 소비한다. native 소유자는 `platform/windows/directory_watch.zig`,
+전체 volume/128-bit file ID는 `platform/windows/file_identity.zig`에 둔다. 기존 editor
+진입점은 이 구현을 re-export하며 문서별 감시는 기존 nonrecursive 모드를 유지한다.
+Microsoft ReadDirectoryChangesW의 subtree 옵션과 zero-byte overflow 정책을 따른다.
+알림 payload는 목록의 권위가 아니며 200ms debounce 뒤 펼친 디렉터리를 기존 worker에서
+새로 열거한다. 재스캔 예약이 OOM으로 실패하면 dirty hint를 보존해 재시도한다.
+매 프레임 제출은 하나로 제한하고 backend가 바쁘면 just-taken 요청을 할당 없이
+대기열 선두로 되돌린다. 폴더 토글도 같은 제출 경로를 사용해 busy 때 요청을 잃지 않는다.
+
+`test-win32-editor-watch` 18개가 Debug/ReleaseFast에서 통과했다. 재귀 옵션 해제,
+반환 요청의 순서 변경, active/queued 중복 거절 누락, re-arm 누락의 다섯
+compiled runtime 변형을 검출했다. NTFS의 상위 디렉터리 메타데이터 알림 때문에
+단순 nested create만으로는 재귀 옵션을 구분하지 못했다. 판정자는 완료된 I/O의
+buffer를 re-arm 전에 읽어 깊은 기존 파일의 정확한 이름을 확인하며 제품은 계속
+payload를 해석하지 않는다.
+
+실제 Windows 앱의 소유 HWND를 캡처해 루트 파일 생성/삭제, 폴더 펼치기,
+펼친 폴더의 파일 추가/삭제가 재시작 없이 반영되고 펼침 상태가 유지됨을 확인했다.
+테스트 앱 PID 27492은 정상 종료했다. 물리 입력·IME, sleep/unmount·root 교체
+장기 soak 및 원격 감시는 이 관측의 범위가 아니다.
+
+Windows 단독 worker 판정자와 crash probe의 모듈 루트는 platform/windows의
+얇은 aggregation/entry 파일이다. 공용 native import가 editor 밖으로 이동해도
+모듈 경계를 벗어나지 않는다. aggregation test 하나가 추가되어 open 20개,
+settle 8개, cleanup 11개, commit 8개이며 의미 있는 기존 판정자는 유지한다.
+
+같은 경로는 active worker 또는 미소비 directory 결과가 있으면 재제출을 거절한다.
+다른 경로의 기존 4-slot 병렬성은 유지하며 local/remote namespace는 섞지 않는다.
+queued 결과는 실제 native worker로 확인하고 reserved active slot은 판정자에서
+직접 모델링한다. backend의 active path는 결과 발행과 같은 mutex 안에서 제거하며
+job 할당/spawn 실패도 슬롯을 되돌린다. 이 opt-in API는 Windows 앱이 사용하고
+기존 macOS·remote submit API의 중복 정책은 바꾸지 않는다.
+
+
+### 2m.189 — 주기적 복구 백업의 native worker 연결
+
+일반 앱 루프의 주기적 백업을 `editor/backup_worker.zig`에 연결했다. 본문/신원 사본과
+문서 lease·epoch·revision·saved/raw hash·save issued/uncertain/live-image 및 백업 시점을
+고정한다. Registry는 앱만 접근하며 worker는 SMP 배열과 pinned store의 immutable
+policy/handle 값으로 private root 열기·레코드 encode/write/flush/publish/drop을 수행한다.
+기존 root는 실제 완료까지 빌리고, 새 root는 worker에서 열어 앱에 인계한다.
+
+2초 debounce, 한 worker/문서씩, 기존 store의 실제 크기 상한과 pause/기존 레코드 보존을
+유지한다. 시작/쓰기 실패는 pending과 2초 재시도를 남기며 동기 fallback은 없다.
+stale write receipt도 같은 key의 실제 on-disk 상태를 반영하지만 최신 문서를 완료로
+표시하지 않는다. clean 삭제는 queued 입력과 실제 save 결과 뒤의 한 번짜리 앱 승인을
+기다린다. epoch/revision/CAS/새 save 이미지가 바뀌면 거절한다. teardown은 미승인 drop을
+거절하고 실제 종료 뒤만 body/문서 lease/root를 정리한다.
+
+백업 중 창 닫기는 보존해 완료 뒤 처리한다. clean 파일 닫기는 중복을 제거한 FIFO에
+보관하고, 그 사이 새 편집이 생겼으면 저장 확인을 새로 요구한다. Cancel은 즉시 처리하며
+close/save-close 의도가 남아 있으면 다음 주기적 job을 시작하지 않는다.
+
+`test-win32-backup-worker` 15개가 Debug/ReleaseFast에서 통과했다. frozen 본문,
+stale epoch/revision/CAS, old raw hash의 레코드, 실제 worker thread와 private root 인계,
+실패/backoff/no sync fallback, unknown/live-save clean undo 보존, 삭제 승인/거절,
+pause 및 소유권/부분 할당 실패와 앱 debounce/close 보존을 검사한다. 본문·epoch·raw CAS·
+실패 ack·uncertain clean 판정을 깨뜨린 다섯 compiled runtime 변형을 검출하고 원본을 복원했다.
+
+실제 앱 PID 16112에서 자동 백업의 exact `Xbase CRLF`와 원본 BOM/base/CRLF 보존을 확인한
+뒤 private fixture 앱만 강제 종료했다. PID 48976으로 재시작해 파일 클릭 후 복구 본문과
+안내를 캡처했고 첫 Save-close에서 exact BOM/Xbase/CRLF, 정상 종료 및 백업 삭제를 확인했다.
+첫 입력 시 활성 화면이 터미널로 바뀐 시도는 성공 증거에서 제외했다. 입력은 synthetic
+owned HWND이며 물리 입력/IME 검증이 아니다.
+
+본문 hash/copy와 복구 이력/후속 projection CPU는 아직 앱에 있다. 명시적 close의
+backup drop, shutdown의 최종 일괄 flush와 owner/드문 extra-root handle 정리도 아직
+동기 경로다. 이 절은 주기적 I/O의 이관만 기록하며 전체 잔여 Windows 범위를 완료로 보지 않는다.
+
+
+### §2m.190 Windows 파일 트리 스캔 실패의 원자성 및 재시도
+
+네이티브 목록을 전부 EntryInput으로 변환한 뒤에만 Tree의 staged snapshot을 적용한다.
+변환 OOM을 부분 목록 성공으로 취급하지 않는다. 실패한 scan/result/apply는 기존 노드를
+보존하고 loading을 해제하며 200ms 후 expanded root를 다시 스캔한다. 재시도는 native
+watcher 설치 여부와 독립적이다. snapshot 적용 후 행 투영 OOM은 이미 교체된 노드를
+가리키는 이전 행을 재사용하지 않고 불완전한 행을 비운 뒤 다시 스캔한다.
+
+`test-win32-editor-watch` 21개가 Debug/ReleaseFast에서 통과했다. 새 검증은 변환 OOM의
+기존 목록 보존과 정상 재적용, 실패 응답과 성공 응답의 변환 OOM 뒤 retry,
+행 투영 OOM의 안전한 폐기를 포함한다.
+부분 변환 성공, retry 소실, recursive 감시, queue 순서, rearm을 깨뜨린 5개 compiled
+runtime 변형 모두 검출하고 원본을 복원했다. 지속적인 권한 오류·root 교체의 사용자
+표시 및 장기 soak는 별도 잔여 항목이다. 이번 실패 주입은 테스트 allocator 경로이며
+실앱의 강제 OOM을 재현했다고 주장하지 않는다.
+
+
+### §2m.191 Windows 종료 flush의 worker 연결
+
+실앱 종료 defer는 주기적 in-flight job을 실제 결과까지 drain한 다음, 아직 backup_dirty인
+문서를 한 번씩 worker에 제출한다. 종료에는 debounce를 적용하지 않는다. clean 삭제는
+최신 packet 검증과 vote를 거치고 실제 완료 뒤에만 문서 lease/root를 해제한다.
+실패는 보고하고 다음 문서로 진행하며 동기 store.write fallback이나 무한 재시도를 하지 않는다.
+
+`test-win32-backup-worker` 16개가 Debug/ReleaseFast에서 통과했다. 종료 flush 테스트는
+미래 debounce를 가진 Xbase/CRLF를 즉시 백업하고 원본 BOM/base/CRLF를 보존하며
+완료 시 pending job이 없는지 확인한다. 종료 debounce 복원·flush 생략·본문 손상·epoch
+검증 제거·uncertain clean 판정 손상의 다섯 compiled runtime 결함을 검출한 뒤 원본을 복원했다.
+이는 앱이 호출하는 동일 종료 helper와 네이티브 저장 검증이며 실앱 crash 종료는 flush를
+실행하지 않으므로 이 테스트의 대체 증거로 주장하지 않는다. 명시적 close의 backup 삭제와
+owner/드문 extra-root handle 정리는 아직 동기다. 전체 Windows 지원의 완료를 의미하지 않는다.
+
+
+### §2m.192 Windows 종료 backup root handle 정리
+
+종료의 모든 백업 job을 drain한 뒤 LocalData.deinitOnWorker가 별도 스레드에서 private
+store 및 선택된 부모 chain의 native handle을 닫는다. join 완료 후 부모 handle 배열은
+원래 allocator 스레드에서 해제한다. spawn 실패는 owner를 그대로 보존하고 보고하며
+동기 native close fallback을 실행하지 않는다. 종료에는 실제 완료를 기다리며 프레임용
+비동기 cleanup API라고 주장하지 않는다.
+
+`test-win32-editor-backup` 35개가 Debug/ReleaseFast에서 통과했다. 새 native 테스트는
+worker thread ID와 store·모든 부모 handle의 INVALID_HANDLE 결과를 확인한다.
+store close 누락·부모 close 누락·잘못된 thread ID·hardlink guard 제거·record identity
+검사 누락의 다섯 compiled runtime 변형을 검출하고 원본을 복원했다. 명시적 close의
+backup 삭제, 프레임 중 드문 extra-root 정리 및 종료 메모리 capture CPU는 아직 남아 있다.
+
+
+### §2m.193 Windows extra-root의 비동기 cleanup 단계
+
+백업 job이 root를 만든 사이 앱이 이미 다른 owner를 보유하면 finish는 redundant root의
+cleanup worker를 시작하고 null을 반환한다. 프레임에서 native close나 join을 하지 않는다.
+독립 SMP owner와 기존 job/request lease를 실제 cleanup 완료까지 유지하고 acquire한
+최종 결과로만 revision/epoch/CAS를 다시 검증한다. 기존 앱 owner를 교체하지 않는다.
+cleanup spawn 실패는 root와 receipt를 보존하고 실제 awake clock의 200ms backoff 후
+재시도한다. 종료 drain도 같은 clock을 사용하므로 고정 now 인자 때문에 재시도가 멈추지 않는다.
+
+`test-win32-backup-worker` 18개가 Debug/ReleaseFast에서 통과했다. 새 native 테스트는
+첫 poll의 pending, 유지된 owner, worker cleanup ID와 닫힌 extra handle, cleanup 중
+revision 변경 및 spawn 실패의 lease/root 보존·backoff·실제 후속 완료를 확인한다.
+close 누락·backoff 제거·동기 조기 ack·epoch/CAS guard 제거의 다섯 compiled runtime
+변형을 검출하고 원본을 복원했다. 컴파일 단계에서 막힌 재귀 ack 변형은 횟수에서 제외했다.
+명시적 파일 닫기의 백업 삭제와 capture/후속 projection CPU 등 전체 잔여 Windows 범위는
+계속 남아 있다. 이 절은 강제 실패를 실제 앱 GUI에서 재현했다고 주장하지 않는다.
+
+
+### §2m.194 Windows clean close/Save-close의 백업 삭제 worker 연결
+
+clean sidebar X는 공통 pending close FIFO로 들어가고, clean window close도 같은 승인
+경로를 지난다. Save-close의 저장 worker 완료 후 prepareCleanCloseBackup이 첫 native
+삭제를 debounce 없이 시작한다. 문서와 request lease는 실제 drop 완료까지 살아 있고
+마지막 close 승인에는 native store fallback이 필요 없다. 여러 문서의 window close는
+한 문서씩 처리한다. 공유 문서의 마지막 view가 아니면 백업을 삭제하지 않는다.
+
+대기 중 키·IME·앱 마우스 입력을 막되 caption 제어를 유지한다. Esc는 pending close와
+보류된 window close를 취소한다. 새 window intent는 이전 file wait를 대체한다. 실패한
+native 삭제는 view/backup 보호를 유지하고 기존 close intent를 종료해 새 요청을 요구한다.
+대기·backoff는 프레임의 render/present를 건너뛰는 busy loop를 만들지 않는다.
+
+`test-win32-backup-worker` 20개가 Debug/ReleaseFast에서 통과했다. 새 native 테스트는
+pending/lease 보존, 다른 thread의 실제 삭제, future debounce 우회, store 없이 최종 view
+해제, dirty/누락 root 거절과 원본 BOM/CRLF를 검사한다. 조기 승인·dirty 승인·epoch/CAS
+제거·uncertain clean 판정 손상의 다섯 compiled runtime 변형을 검출하고 복원했다.
+최종 실제 앱 PID 12964에서 Xbase/CRLF 자동 백업 및 원본 BOM/base/CRLF를 확인한 뒤
+WM_CLOSE/Save로 exact BOM/Xbase/CRLF 저장, 백업 삭제와 exit code 0을 확인했다.
+synthetic owned HWND 증거이며 물리 입력/IME·강제 native 실패 GUI 증거로 세지 않는다.
+Discard의 dirty backup 삭제는 아직 기존 동기 경로다. 전체 잔여 Windows 범위는 완료로
+보지 않으며 capture/후속 projection CPU·플랫폼 결합과 장기 검증도 계속 남아 있다.
+
+
+### §2m.195 Windows Discard의 dirty 백업 삭제 worker 연결
+
+prepareFileCloseBackup은 clean/Save-close와 Discard를 구분한다. Discard packet은
+본문 복사·hash 없이 신원/epoch/revision/CAS와 persistence 상태를 캡처하고 별도 한 번의
+voteDiscard 승인을 기다린다. 일반 clean vote는 이를 승인할 수 없다. Main의 현재 pending
+Discard와 동일 packet의 최신 결합, unknown/live-save 부재를 확인한 뒤 native drop한다.
+거절/버전 변경은 기존 레코드를 보존한다. 승인 후 늦은 편집도 실패 receipt로 이전 close
+intent를 종료하여 새 승인을 요구한다. 이전 요청으로 새 버전을 자동 Discard하지 않는다.
+
+실제 삭제가 끝나도 dirty 본문이 살아 있으면 backup_dirty를 재설정한다. 이후 취소된
+close는 보호를 재시작할 수 있고, 실제 승인한 close만 문서를 해제하며 이 플래그를 정리한다.
+원본 문서에는 쓰지 않는다. 명시적 GUI Discard도 이제 native 삭제를 프레임에서 실행하지
+않으며 실패 시 문서와 보호를 유지한다. 동기 approveFileClose API는 기존 fixture 계약이다.
+
+`test-win32-backup-worker` 22개가 Debug/ReleaseFast에서 통과했다. false consent와 stale
+true consent의 실제 레코드 보존, 실제 삭제와 cancelled protection, 승인 뒤 실제 Y 편집의
+XYbase/CRLF 유지·StaleDocument receipt·원본 보존을 확인한다. consent/binding 제거,
+취소 보호 재설정 제거, 삭제 대신 write, stale intent 실패 제거의 다섯 compiled runtime
+변형을 검출하고 원본을 복원했다. 최종 실제 앱 PID 49900에서 Xbase/CRLF 자동 백업 후
+WM_CLOSE/Discard로 원본 exact BOM/base/CRLF, 백업 삭제 및 exit code 0을 수집했다.
+synthetic owned HWND이며 물리 IME·장기 soak나 강제 stale GUI 재현 증거로 세지 않는다.
+전체 Windows 잔여에는 후속 편집/복구 CPU·플랫폼 결합·키바인딩/브라우저/SSH 등이 남아 있다.
+
+
+### §2m.196 Windows 저장 pending 중 caption 마우스 제어
+
+mouse의 pending_save 차단을 caption hit 처리 뒤로 옮겼다. native 최소화·최대화·닫기
+경로는 유지하고 편집기/앱 영역 입력은 계속 차단한다. save/close/open busy 마우스는
+이전 편집기 가로·세로 스크롤바 capture와 release 플래그를 해제하므로 삼켜진 release가
+끝나지 않은 drag를 남기지 않는다. 기존 종료 진단에 caption_save_clicks를 추가했다.
+
+최종 실앱 PID 50912에서 실제 Ctrl+S와 caption 닫기 메시지를 연속 전달했다. 저장 pending
+중 처리된 caption_save_clicks=1, 본문을 유지한 close 확인창을 관찰했고 Save 이후
+exact BOM/Xbase/CRLF, 백업 삭제와 exit code 0을 확인했다. synthetic owned HWND이며
+물리 IME·모든 caption/drag 조합의 장기 검증 증거로 세지 않는다.
+
+승인·binding 제거, cancel rearm 제거, 삭제 대신 write, stale intent 실패 제거의 기존
+다섯 compiled runtime 변형을 최종 코드에서 다시 검출했다. 이 다섯은 저장/닫기의
+보호 계약 검사이며 caption 위치 자체의 변형 검사라고 주장하지 않는다. 복원 후
+backup worker 22개가 Debug/ReleaseFast에서 통과했다. caption 순서는 실앱 pending
+계측으로 검증하며 단순 순서 조건을 복사한 unit test를 추가하지 않았다.
+전체 잔여 Windows 지원·후속 편집/복구 CPU와 플랫폼 결합 범위는 계속 남아 있다.
+
+### §2m.197 Windows 파일 편집 중 focused close 단축키
+
+기존 resolver의 close_focused 액션을 파일 편집 경로에서 처리한다. Windows 기본
+Ctrl+Shift+W는 공통 command+W 바인딩을 사용하며 Ctrl+W 셸 입력과 명시적
+unbind·재바인딩·release 소유권을 보존한다. 사이드바 X와 같은 닫기 요청 함수를
+사용해 dirty 문서는 새 확인을 받고 clean 요청은 중복 없는 FIFO에서 재검증한다.
+다른 전역 액션 및 비교 패널의 단축키 연결은 여전히 후속 범위다.
+
+실앱 PID 13352에서 단축키로 닫기 확인, 취소 후 Xbase 유지, 다시 Save하여
+파일만 닫히고 터미널 유지, exact BOM/Xbase/CRLF와 정상 종료 코드 0을 확인했다.
+owned HWND 합성 입력이며 물리 키보드·IME 장기 검증으로 세지 않는다. dispatch
+차단·resolver 무시·이전 consent 유지·중복 요청·dirty 확인 누락의 다섯 compiled
+runtime 변형을 검출했다. 복원 후 host 83개와 backup worker 23개가 Debug와
+ReleaseFast에서 통과했다.
+
+### §2m.198 Windows 터미널 focused close와 파일에서 터미널 복귀
+
+터미널 close_focused 액션을 실제 닫기 요청으로 연결했다. 사이드바 X와 키보드는
+stable surface ID를 같은 입력 배치의 요청에 넣고, 배치 뒤에 ID를 다시 풀어 기존
+closeWinSession을 실행한다. 실행 중이면 확인을 받고 마지막 세션은 caption과 같은
+창 닫기 경로로 넘어가 미저장 파일의 저장·취소 계약을 유지한다. 같은 활성 터미널
+카드 클릭을 거르던 조건도 파일 화면에서는 전환을 허용하도록 수정했다.
+
+실앱 PID 30124에서 파일→이미 활성 터미널 복귀, 마지막 세션 닫기 Cancel 후 Xbase
+유지, 다시 Save 후 exact BOM/Xbase/CRLF와 해당 PID exit code 0을 확인했다.
+PID 46540에서 두 세션의 busy 확인 Cancel은 둘 다 유지하고 Confirm은 선택한 것만
+제거함을 관찰했으며 마지막 단축키 종료도 exit code 0이었다. owned HWND 합성 입력이며
+물리 키보드·장기 IME 증거로 세지 않는다. PID 44788의 첫 시도는 복귀 버그로 파일만
+닫혔으므로 터미널 종료 증거에서 제외했다. 격리 폴더의 전체 화면 스모크는 필요한
+파일·목록이 없어 일부 판정 불가와 실패였고 전체 통과로 세지 않는다.
+
+실제 ConPTY 네 세션 테스트는 busy 승인, 닫힌 routing 제거, stable ID 재해석,
+탭 목록·활성 세션 정합성과 마지막 세션 보호를 확인한다. 승인 제거·detach 누락·
+active 보정 누락·탭 삭제 누락·ID 색인 오염의 다섯 compiled runtime 변형을 검출했다.
+컴파일 실패인 초기 detach 변형은 제외했고, 세 세션에서 살아남은 active 변형은
+네 세션의 중간 활성 선택으로 강화해 검출했다. 복원 후 host 84개 Debug/ReleaseFast가
+통과했다. 단축키/마지막 창 연결 자체는 위 실앱 증거로 검증하며 다섯 변형이 그 입력
+연결을 직접 검사한다고 주장하지 않는다. 다른 전역 액션과 플랫폼 결합은 남아 있다.
+
+### §2m.199 Windows 새 터미널 단축키와 공통 생성 경로
+
+Windows 기본 Ctrl+Shift+T(new_term)를 터미널 및 파일 편집 경로에서 실제 생성에
+연결했다. 상단 +와 키보드는 같은 요청 처리와 terminal/session_actions.zig의
+spawnFocused를 사용한다. 최신 활성 core 크기는 lock 아래에서 읽고, 생성 상한을
+먼저 검사하며 Native admission 성공 후에만 활성 탭과 파일/터미널 view를 바꾼다.
+기존 Windows 평면 목록에 new_tab을 new_term으로 임의 합치지 않았다. 워크스페이스
+계층과 다른 전역 액션은 남은 범위다. Native 생성 자체의 UI 스레드 배치도 그대로다.
+
+실제 ConPTY 테스트는 resize 후 새 core 크기, 살아 있는 기존 routing, 서로 다른 ID,
+생성 상한과 실제 SpawnFailed 후 목록/선택/파일 view 보존을 확인한다. 포커스·view·
+최신 크기·상한·실패 전 view publication의 다섯 compiled runtime 변형을 검출했고
+복원 후 host 86개가 Debug/ReleaseFast에서 통과했다. resolver release·unbind·rebind와
+new_tab 구분도 검사한다. 다섯 변형은 생성 계약이며 키 입력 연결 자체는 실앱 증거다.
+
+실앱 PID 45336에서 파일 편집→Ctrl+Shift+T→session 2, 파일 복귀 Xbase 유지,
+파일에서 +→session 3, 터미널에서 Ctrl+Shift+T→session 4를 관찰했다. Save 종료 후
+exact BOM/Xbase/CRLF와 해당 PID exit code 0을 확인했다. 종료 직후 capture는 사라진
+창과 경합하여 실패했으므로 증거에서 제외했다. owned HWND 합성 입력이며 물리 입력·
+모든 resize/장기 IME 조합의 검증으로 세지 않는다.
+
+### §2m.200 Windows 터미널 세션 소유권의 플랫폼 폴더 경계
+
+main.zig의 WinSession·spawnWinSession·closeWinSession·stable ID 조회 실제 구현을
+platform/windows/terminal/session.zig로 이동했다. 기존 Main 호출 이름과 타입은 alias/
+얇은 wrapper로 유지하고 공통 core config는 compile-time callback으로 전달한다.
+ConPTY 생성, heap 고정 surface, Native admission rollback, runtime routing 해제와
+탭/활성 보정이 같은 Windows 책임 파일에 있다. public facade 경로·새 runtime 의존성·
+기존 확인 계약은 변경하지 않는다. 모든 main/platform 결합을 정리했다고 주장하지 않는다.
+
+이동한 파일에 승인 제거·detach 누락·활성 보정 누락·탭 삭제 누락·ID 색인 오염의
+다섯 compiled runtime 변형을 넣어 실제 ConPTY 소유권 테스트가 모두 검출함을 확인했다.
+복원 후 기존 host 86개가 Debug/ReleaseFast에서 통과했다. 실앱 PID 44080에서
+파일 Xbase 편집→새 터미널, busy close Cancel 유지와 Confirm 후 선택 세션 제거,
+파일 Xbase 보존 및 마지막 터미널의 미저장 창 보호를 관찰했다. Save 후 exact
+BOM/Xbase/CRLF와 해당 PID exit code 0을 확인했다. owned HWND 합성 입력이며
+물리 키보드/IME·긴 시간 경합 증거로 세지 않는다. 워크스페이스 계층, 다른 전역 액션,
+후속 편집/복구 CPU와 전체 플랫폼 결합 범위는 계속 남아 있다.
+
+### §2m.201 Windows 에이전트 상세의 UTF-8 환경과 개인정보 가림
+
+상세 worker의 POSIX HOME/USER·ANSI getenv 의존을 제거했다. os_env의 checked 소유
+API로 HOME/USERPROFILE와 USER/USERNAME을 모두 읽고, 익명화는 모든 alias의 가장
+긴 일치값부터 한 번에 처리한다. 알려진 홈 끝 구분자와 Windows Users 경로도 처리한다.
+환경 읽기/변환·익명화 할당 실패 시 원문을 계속 표시하지 않고 redacted 빈 턴으로 남긴다.
+기존 선택적 allocValue API의 missing/failure 폴백은 유지한다. Windows host가 버리던
+redacted 플래그를 공통 Turn DTO에 전달하고 paint가 현재 언어의 안내 문구를 고른다.
+
+Windows profile·username 누락, 짧은 alias 우선, 익명화 OOM 원문 유지, 환경 OOM을
+missing으로 접는 다섯 compiled runtime 변형을 검출했다. 복원 후 archive/privacy
+52개 중 48개 통과·기존 macOS 전용 4개 제외가 Debug/ReleaseFast에서 동일했다.
+추가 paint 보호 제거 변형도 검출했고 복원한 Chrome UI는 1061개 통과·기존 6개 제외였다.
+같은 DTO를 영어→한국어로 paint할 때 raw fixture가 나오지 않고 현재 번역이 나옴을 검사했다.
+
+최종 실앱 PID 50524의 private HOME/USERPROFILE와 합성 Codex 로그에서 한글 이름·
+중첩된 두 home 폴더와 부모 계정이 user로 바뀌고 secret 대신 [sensitive content hidden]이 표시됨을 확인했다.
+해당 PID 정상 종료 코드 0을 수집했다. 실제 provider/private 이력이나 실제 토큰은 쓰지
+않았으며 owned HWND 합성 입력이다. 같은 앱의 오른쪽 dock divider 폭 조절은 동작했다.
+사용자가 확인한 왼쪽 sidebar 폭 조절 미구현과 resize cursor 미연결을 후속으로 잡는다.
+로그 보기·resume·live focus 버튼 연결과 전체 잔여 Windows 지원은 계속 남아 있다.
+
+## §2m.202 — Windows sidebar 폭·resize cursor·상단 도크 아이콘
+
+Windows sidebar의 고정 폭을 right-edge 드래그로 바꿨다. grab offset을 보존하고 120~480pt와
+header 13cell 최소 폭을 적용한다. macOS 신호등 여백은 Windows에 복사하지 않는다.
+terminal grid·sidebar·titlebar·status/dock geometry를 함께 갱신하며 captured move/up을
+caption보다 먼저 처리한다. modal/open/save가 시작되면 두 divider gesture를 취소한다.
+새 resize band gesture는 scrollbar보다 먼저 판정하되 기존 capture는 뺏지 않는다.
+
+`src/platform/windows/chrome/sidebar.zig`가 폭 정책과 config worker를 소유한다. release만
+저장하고 연속 요청은 최종 폭으로 coalesce한다. 읽기·부분 직렬화·flush/sync·atomic replace는
+worker에서 수행하고 종료 때 drain한다. 주석·미파싱 키를 보존하며 이미 Windows suffix가
+있으면 `sidebar.width.windows`만 바꾼다. editor safe-save의 ACL/CAS 계약과 config atomic
+write는 별개다. config의 동시 외부 편집 CAS는 추가하지 않았다.
+
+사용자 요청대로 explorer/SCM/agent/gallery switcher를 `— □ ×`와 같은 titlebar 줄의 caption
+버튼 왼쪽에 배치했다. 공통 slot geometry를 paint/hit에 사용하고 titlebar 배경 다음에 합성한다.
+switcher는 HTCLIENT, 남은 빈 곳은 창 이동 영역이다. 본문은 제거한 옛 switcher 높이만큼
+확장하며 좁은 창에는 반쯤 표시하지 않고 전 슬롯을 숨긴다. 전체 DPI 지원은 기존 후속 범위다.
+
+cursor의 베이스는 Microsoft Learn
+[Setting the Cursor Image](https://learn.microsoft.com/en-us/windows/win32/learnwin32/setting-the-cursor-image)다.
+HTCLIENT의 WM_SETCURSOR에서 LoadCursorW/SetCursor·IDC_SIZEWE를 사용하고 nonclient는
+DefWindowProc에 맡긴다. native window가 owned hit rect 두 개를 보관하며 capture move에서도
+모양을 유지한다. macOS API/폴더를 Windows 호출 경로에 끌어오지 않는다.
+
+5개 compiled runtime 변형(client guard 제거·capture 소유 가드 제거·grab offset 반전·
+Windows override 무시·switcher를 caption 밑으로 이동)을 모두 검출했다. 복원 후 Debug와
+ReleaseFast host 91개가 통과했다. atomic config·oversize 원문 보존·최종 폭 drain·caption-line
+geometry·좁은 창의 전체 숨김도 검사했다.
+
+최종 실앱 PID 52140의 private config/HOME·owned HWND에서 양쪽 경계 cursor 핸들은
+IDC_SIZEWE, 본문은 IDC_ARROW임을 GetCursorInfo로 확인했다. sidebar 180→300→320,
+상단 줄에서 capture release, Windows override만 320 저장, 주석/base/다른 키 보존과 상단
+agent 아이콘의 뷰 전환을 확인했다. 재시작 PID 47940에서 320 폭을 확인했고 두 PID의 정상
+종료 코드 0을 수집했다. 중간 재시작 PID 51024는 종료 watcher가 close 전에 timeout되어
+exit0 증거로 세지 않았고 fresh 재시작으로 다시 확인했다. 자동 HWND 입력/짧은 포인터 검사이며
+물리 입력 장기 soak로 세지 않는다. 전체 잔여 Windows 기능·agent resume/reveal/live 버튼은 남아 있다.
+
+## §2m.203 — sidebar config 입력·출력 크기 경계
+
+loader의 1MiB 한계에 맞춰 config writer가 입력은 정확히 1MiB까지 받고, 부분 갱신한
+결과도 1MiB 이하인지 atomic file 생성 전에 검사한다. std.Io.Limit은 도달해도 거부하므로
+입력에는 한계+1을 넘긴다. 누락 키를 추가해 출력이 커지는 경우에는 StreamTooLong을
+반환하고 원본을 보존한다. 이전 코드가 한계 바로 아래 원문에 키를 추가해 unreadable
+config를 만드는 실패를 실제 native 테스트로 재현했다.
+
+출력 guard 제거·입력 exclusive 한계 회귀·Windows override 무시·주석 버림·폭 검증 제거의
+다섯 compiled runtime 변형을 검출했다. 복원 후 host 91개 Debug/ReleaseFast가 통과했다.
+private 실앱 PID 41632에서 정확히 1MiB인 기존 Windows 폭 키 갱신을 확인했다. PID 51216은
+키 append로 한계를 넘는 요청을 실제 worker가 거부하고 원본 바이트를 보존했다. 두 PID
+정상 종료 코드 0을 수집했다. 실제 사용자 config는 쓰지 않았고 테스트의 private config는
+원래 상태로 복구했다. 에이전트 도크 버튼은 아직 비활성이다. 다음 단계는 Windows archive
+snapshot의 device=0 fallback을 full native identity와 교체 검증으로 바꾸는 것이다.
+
+
+## §2m.204 — Windows archive 원본 식별과 로그 선택
+
+Windows discovery·reader·cache·partial snapshot·detail·card에 volume serial과 128-bit
+FileIdInfo를 같은 핸들에서 얻어 전달한다. 상위 8바이트·volume·missing identity까지 대조하며
+조회 실패를 device=0 또는 null로 대체하지 않는다. POSIX의 기존 inode/device 계약은 유지한다.
+네이티브 파일 식별은 maru facade가 한 번 소유하고 editor와 recursive watcher가 같은 타입을
+사용한다. 공통 archive DTO는 primitive 값만 보관한다.
+식별 타입의 단일 소유에 따라 기존 safe-save identity 판정 3개는 root artifact에서 maru
+artifact로 이동한다. 전체 95개는 유지하고 각 집계 한계를 66/29에서 63/32로 맞춘다.
+
+상세가 ready이고 원본 증명이 일치할 때만 로그 보기 버튼을 켠다. Windows 전용
+`platform/windows/agents/reveal.zig` worker는 경로를 소유하고 no-follow regular-file 핸들로
+identity를 다시 확인한다. COM STA·SHParseDisplayName·SHOpenFolderAndSelectItems의 PIDL
+경로로 부모 폴더에서 파일을 선택하며, 명령 문자열을 만들지 않는다. busy 중복 요청은 거부하고
+receipt의 request/card identity가 맞을 때만 상태를 갱신한다. 종료는 worker를 drain한다.
+재검증 핸들은 Shell 호출까지 유지하지만, Shell의 namespace 경로 선택 자체가 원자적 CAS라고
+주장하지 않는다. resume와 live focus는 계속 비활성이다.
+
+베이스는 Microsoft Learn의 [FILE_ID_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info),
+[SHParseDisplayName](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shparsedisplayname),
+[SHOpenFolderAndSelectItems](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shopenfolderandselectitems)다.
+SDK Shell32/Ole32 링크만 추가하며 새 runtime package는 없다.
+
+상위 ID 절단·volume 무시·cache identity 무시·detail 검증 제거·Shell 직전 검증 제거의
+5개 compiled runtime 변형을 검출했다. 복원한 archive 56개(Windows 52 pass/4 기존 macOS skip),
+host 94개가 Debug/ReleaseFast에서 통과했다. 이후 §2m.205의 host 추가로 최종 집계는 98개다.
+private 실앱 PID 18808의 실제 버튼에서 합성 로그를 탐색기가 선택한 HWND와 경로를 수집했고,
+같은 PID의 정상 종료 코드 0을 확인했다. 실제 provider 실행이나 사용자 기록 공개는 하지 않았다.
+
+## §2m.205 — 상단 오른쪽 도크 열기·닫기 버튼
+
+사용자 요청에 따라 `— □ ×` 왼쪽에 항상 남는 오른쪽 pane 버튼을 추가했다. 그 왼쪽에는 기존
+네 가지 도크 뷰 아이콘을 놓고, 숨긴 도크에서도 launcher를 HTCLIENT로 유지한다. 좁은 창에는
+sidebar와 caption 영역을 침범하지 않는다. geometry와 press/release 취소 규칙은
+`platform/windows/chrome/dock.zig`가 소유한다. 도크 종류와 드래그한 폭은 유지하고, 열기·닫기는
+기존 resize 경로로 모든 terminal grid와 chrome을 갱신한다. 키보드의 도크 소유권은 놓으며
+기록 스캔은 접을 때 취소하고 agent 도크를 다시 열 때 새 스캔을 요청한다.
+
+기존 macOS `activateFilePanelDockControl`의 collapse/expand·focus release 의미를 따르되,
+Windows의 caption 버튼 위치에 맞춰 배치한다. 새로운 키보드 단축키를 뜻하지 않는다.
+
+caption 겹침·좁은 창 제한 제거·우측 hit 경계 확장·소유하지 않은 release·capture 취소 무시의
+5개 compiled runtime 변형을 검출했다. 복원한 host 98개 Debug/ReleaseFast가 통과했다.
+실앱 PID 18808에서 16회의 toggle, 버튼 밖 release 취소, agent 뷰·400px 폭 유지,
+최종 terminal 870×935/grid 96×49, grid mismatch 0·dock rebuild failure 0과 exit0을 확인했다.
+DwmFlush 뒤 CAPTUREBLT desktop 캡처로 agent 도크를 6회 반복 검사했으며 매회 terminal ink
+579픽셀·sidebar active 색 64가 유지됐다. GDI PrintWindow/동기화 없는 캡처의 빈 영역은 증거에서
+제외했다. 자동 HWND 입력과 짧은 실제 렌더 검사이며 물리 마우스 장기 soak로 세지 않는다.
+
+
+§2m.205의 마지막 실앱 검증에서 launcher press를 caption 위에서 release하면 minimize가
+실행되는 결함을 PID 12624에서 재현했다. launcher의 capture가 caption routing보다 먼저
+release를 소유하도록 수정했다. 최종 PID 3680은 같은 drag에서 IsIconic=false·visible=true,
+caption click 0·launcher toggle 8회·400px 도크 유지·grid mismatch 0·exit0을 확인했다.
+같은 PID의 Shell 로그 선택과 DwmFlush/CAPTUREBLT 캡처 6회도 확인했다.
+
+기존 캐시를 쓴 전체 경계 검사는 C 드라이브 공간 0으로 LLVM 출력 생성/실행 파일 찾기가
+실패했다. 종료된 fixture는 총 200KB여서 충분하지 않았다. 이 작업의 전용 NTFS 빌드 캐시를
+삭제하지 않고 압축해 공간을 확보했고, 최종 빌드와 검증은 별도 전용 캐시에서 실행한다.
+
+### Windows application icon
+
+The Windows executable embeds resource 1 from `src/platform/windows/app.rc`.
+`assets/icon/Maru.ico` contains the existing desktop PNG representations (32, 64,
+128 and 256 pixels), packed losslessly from `Maru.icns` by
+`python tools/windows/generate-app-icon.py`. No new renderer or runtime dependency
+is introduced. The native window class loads both icon sizes from that resource
+with shared system ownership, so window teardown never destroys shared icons.
+The executable can be moved or renamed without a loose icon file. Consumers that
+embed the window module without the application resource retain the system fallback.
+
+The isolated icon build passed with Zig 0.17.0. A copied standalone executable
+loaded both class icons and passed 11 gradient sample and cross-axis checks; the
+smoke exited successfully. After the main rebase, the full Windows executable
+repeated the native class-icon and 11 screen-pixel checks with exit 0. Five damaged
+PE resource variants (missing group, wrong group ID, missing image, changed image
+and changed dimensions) were rejected while the original executable stayed intact.
+Final installation and taskbar pinning remain separate from this artifact check.
+
+### Sidebar release endpoint
+
+Sidebar resize now applies the `left_up` coordinate through the same layout path
+as a move before persisting the final width. Previously a release without a move
+saved the old width; mixed native pointer/message input also saved 392px for a
+400px release. Reducing nonclient frame refreshes did not solve that defect and
+that experimental change was removed. The final endpoint fix passed 20 native
+window scenarios, including missing/queued moves, reverse motion, grab offsets,
+clamps, capture cancellation and duplicate releases. The original mixed-pointer
+reproduction now saves exactly 400px. Shared config values, comments and unknown
+keys remain intact.
+
+`python tools/windows/check-sidebar-release.py --state <private-fixture-state.json>
+--exe <fixture-maru.exe> --output <evidence.json>` replays those scenarios. The
+caller must launch an isolated cache fixture, with the sentinel config described
+in the tool header. It verifies the process executable and window owner before
+injecting events; this is message-based application E2E, not physical mouse proof.
+
+### Terminal clipboard popup integration
+
+Windows reuses the shared chrome context-menu component for the same Copy/Paste
+terminal menu as macOS. `input.right-click = menu` selects that behavior; the
+existing default `paste` and terminal mouse-reporting precedence remain intact.
+The common application controller owns a stable surface ID, consumes popup input,
+requires matching pointer press/release, and cancels on target changes or higher
+overlays. Clipboard actions stay in the platform host and paste uses the existing
+protection/bracketed-paste path. A held pointer release remains owned after outside
+or keyboard dismissal; capture loss clears that gesture. The dedicated gate is
+`zig build test-terminal-clipboard-popup`. Host input and GPU paint wiring share
+the existing native clipboard path. Native caption/resize hit-testing yields to
+the popup, and focus loss revokes it even if focus returns within the same event
+poll. The installed preview passed twelve owned-window application checks, including
+actual Copy/Paste, dismissal and focus transfer; see the 2026-10-28 verification
+record below. These checks use synthetic HWND input, not physical mouse input.
+The historical `right_click_menus_todo` counter is not completion proof. This
+terminal popup does not establish sidebar, tab or file-tree context-menu support.
+
+The app-level Copy check also exposed an existing terminal selection bug: cell
+lookup used absolute client pixels after sidebar/titlebar layout moved the terminal.
+`win32_mouse.pointRelativeTo` now subtracts the rendered terminal origin before
+selection, wheel-cell lookup and pixel mouse reports. Signed captures are retained
+with wide subtraction and saturation. The old app issued word selections but copied
+zero bytes; the corrected app must pass the same visible-word clipboard check.
+
+### Windows 설정 화면 연결 — 진행 중
+
+`windows/settings/host.zig`가 공통 schema 폼을 Windows 키·포인터·GPU draw 경로에 연결한다.
+`Ctrl+,`는 기존 resolver의 `toggle_settings`를 따르며, 톱니바퀴는 같은 화면을 연다.
+버튼은 눌림과 릴리스가 맞아야 열리고 모달 바깥 클릭의 남은 릴리스도 모달이 소유한다.
+
+미리보기는 config 메모리만 바꾸고 취소하면 소유한 원본 키/값으로 복원한다. 확정은
+작업 스레드가 원본 파일의 해당 키만 갱신하여 주석·알 수 없는 키를 유지한다.
+저장 실패는 편집을 유지한다. 사이드바 저장과의 프로세스 내부 경쟁은 공통 쓰기 잠금으로
+직렬화한다. 외부 작성자와의 경쟁까지 보장한다는 뜻은 아니다.
+
+`test-windows-settings` 20개는 집계 2·값 검증 6·휠 6·포커스 5·동시 부분 쓰기 1개다.
+`tools/windows/check-settings.py`는 소유 PID/HWND와 바이너리 해시를 확인한 격리 앱에서 실행한다.
+설정 저장·실패 복구·취소·입력 소유권을 확인하며 실제 물리 키보드나 IME 후보창 검증을 대신하지 않는다.
+현재 라이브 연결은 일부 입력 정책과 OSC52 읽기 정책이다. 폰트·색상·언어 등 전체 런타임 적용,
+외부 변경 reload, 기본값/합성 행과 다른 입력란·편집기의 IME는 아직 완료되지 않았다.
+
+Windows 설정의 세로 휠은 공통 `settings.scrollByRows`로 전달한다. 120-unit 눈금의 나머지는
+`session.input_math.WheelAccumulator`가 보존하며 Win32 어댑터도 같은 수학을 재사용한다.
+가로 축은 세로 누적에 섞지 않고 자식 드롭다운·색 선택기·저장 중에는 배경 폼을 움직이지 않는다.
+검색·섹션 전환은 누적값·스크롤 위치·선택 추적을 함께 초기화한다. 첫 draw 전에 들어온 휠도
+다음 draw의 선택 추적에 의해 취소되지 않는다. 큰 델타와 줄 수 계산은 넓은 정수에서 포화한다.
+`test-windows-settings-wheel`은 집계 2와 동작 6개, `test-windows-wheel-detents`는 기존 어댑터
+동작 2개와 집계 28개를 확인한다. `tools/windows/check-settings-scroll.py`는 실제 폼의 픽셀
+이동·축 분리·다시 열기·검색 변경을 검사하며 두 이전 바이너리의 실패 모드도 분리해 기록한다.
+
+네이티브 입력 오버레이는 `Window.setInputOverlay`로 열림과 포커스 정책을 함께 발행한다.
+설정창은 `retain_on_blur`, 일시적인 우클릭 메뉴는 `dismiss_on_blur`다. 닫으면 유지 정책도
+초기화한다. 포커스 손실의 세대 번호는 손실/복귀가 한 poll 안에 와도 남으며, 설정의 남은
+바깥 클릭 릴리스·색 선택 드래그·휠 잔량은 이벤트 루프에서 취소한다.
+`retained_overlay_blurs`/`dismissed_overlay_blurs`는 네이티브 콜백 안에서 처리 직후 상태를 센다.
+`test-windows-settings-focus`는 집계 2와 네이티브 정책 5개를 검사한다.
+`tools/windows/check-settings-focus.py`는 소유한 입력 큐 사이의 실제 keyboard focus 전환을
+검사한다. 전역 foreground 활성화·물리 Alt+Tab·키보드·IME 검증으로 계산하지 않는다.
+설정/검색/편집기의 텍스트 포커스별 IME 위치·조합 처리는 여전히 후속 작업이다.
+
+설정 스크롤바는 `settings.scrollView`의 뷰포트와 공용 ScrollArea 트리에서 발행한다. 거터 16px는
+모든 설정 그리기·포인터·휠·IME 기하에 같은 값으로 예약한다. 트랙은 거터 전체를 그리기/캡처
+사각으로 발행하고, thumb은 공용 메트릭(8px, 최소 24px)을 쓴다. 휠과 드래그는 같은 폼 offset을
+변경한다. 공용 interaction capture와 ScrollArea.Drag가 세대·좌표·tick 누적을 소유한다.
+이동 메시지가 없는 up도 마지막 좌표를 반영하고 다른 버튼의 up은 캡처를 끊지 않는다.
+검색·섹션·닫기·포커스/캡처 손실·크기 변경·다른 모달·저장/자식 UI는 캡처를 취소한다.
+스크롤 중의 같은 트랙 재발행만 carry하며, 트랙/범위/크기가 달라지면 취소한다.
+폼/스크롤바 paint 할당 실패는 이전 hit target도 비운다.
+`test-windows-settings-scrollbar`는 집계 2와 동작 6개다. 실제 앱 검사는
+`check-settings-scroll.py --scrollbar --inline-caret`이며, 이전 바이너리 대조는
+`--scrollbar-control`(미표시)과 `--gutter-control`(거터 캡처 누락)로 구분한다.
+
+설정 **검색란**의 IMM 위치 요청은 `settings.searchCaretRect`의 공용 그리기 좌표를 사용한다.
+확정 문자는 표시 셀 폭으로 이동하고 조합 미리보기는 조합 시작 위치를 유지한다. 창 크기·셀 크기
+변경은 기존 IME 캐시 키에 반영하며 검색 종료 시 터미널 위치 요청으로 돌아간다.
+`test-windows-settings`의 검색 caret 검사 5개는 닫힘/비검색/선택기 소유권, 좌표 변환,
+한글 표시 폭, 조합과 확정, 크기 변경을 다룬다. `ime_settings_caret_updates`는 위치 **요청** 수이며
+실제 OS 후보창 표시나 물리 IME 입력의 증거가 아니다. 설정 필드 편집·다른 검색란·편집기의
+텍스트 입력과 IME 대상 연결은 여전히 남아 있다.
+
+일반 설정 필드 편집의 위치 요청은 공용 `settings.editCaretRect`를 사용한다. 숫자 박스의 한 칸
+패딩·텍스트/폰트·색상 스와치 접두를 실제 그리기와 맞추고, 닫힘·비편집·범위 밖·보이지 않는
+행·별도 색 선택기에는 해당 caret을 발행하지 않는다. 검색 필터를 유지한 편집은 검색란보다
+편집란이 우선이다. Windows 검사 5개는 실제 draw op의 caret과 위치 계약을 비교한다.
+`check-settings-scroll.py --inline-caret`는 숫자 편집 열기/취소와 위치 요청 소유권을 확인한다.
+일반 필드 조합 미리보기는 확정값과 분리된 UTF-8 버퍼에 보관하고 편집 caret부터 필드 우단까지
+그린다. 검색 필터를 유지한 편집 중에는 검색란 커서를 숨긴다. 취소·새 편집·확정 문자 입력은
+남은 미리보기를 비우며, 검색/섹션으로 소유권을 옮기면 이전 폼 트랜잭션도 정리한다.
+`test-windows-settings`의 조합 검사 5개와 `test-settings-form`의 소유권 전환 검사가 이 계약을
+다룬다. `--double-caret-control --inline-caret`는 이전 바이너리의 중복 커서를 화면으로 재현한다.
+색 선택기 내부 hex 편집과 물리 IME 후보창은 아직 후속 작업이다.
+
+앱이 조합을 그리는 입력 영역에서는 `Window.setAppDrawnPreedit`가 기본 IME 조합창을 숨긴다.
+`WM_IME_SETCONTEXT`의 `ISC_SHOWUICOMPOSITIONWINDOW`만 지우고 후보·가이드 옵션은 보존하며,
+`WM_IME_STARTCOMPOSITION`도 앱이 처리한다. 확정 문자열은 기존 DefWindowProc → WM_CHAR 경로를
+유지한다. 근거는 [Microsoft WM_IME_SETCONTEXT](https://learn.microsoft.com/en-us/windows/win32/intl/wm-ime-setcontext)와
+[WM_IME_STARTCOMPOSITION](https://learn.microsoft.com/en-us/windows/win32/intl/wm-ime-startcomposition)다.
+논리 포커스가 한 HWND 안에서 바뀌면 마지막 원본 UI 옵션으로 기본 IME를 갱신한다. 직접 그리기가
+연결되지 않은 파일 편집기·색 선택기 내부 입력은 기본 조합창을 유지한다. 숨겨진 agent 검색 포커스는
+소유권을 얻지 않는다. `test-windows-ime-ui`는 집계 2 + 정책 검사 5개다.
+`tools/windows/check-settings-ime.py`는 격리 앱을 마우스 SendInput으로 활성화하고 foreground와
+keyboard focus를 확인한 뒤 실제 한국어 IME에 scan code를 보낸다. 조합 픽셀 변화와 앱/기본 조합창의
+소유권, 정상 종료·설정 보존·셸 입력 격리를 확인한다. `--native-ui-control`은 이전 기본 조합창의
+실패 대조다. `--candidates`는 실제 한자 후보창이 입력란 아래에 나타나고, 첫 후보를 선택하면
+커서가 정확히 한 글자(두 셀)만 이동하는지 추가로 검사한다. 셀 폭은 초기 caret 픽셀에서 구하므로
+중복 확정/숫자 키 누출은 다른 이동량으로 검출된다. 창 활성화는 터미널 선택을 건드리지 않는
+캡션 클릭으로 한다. 이 검사는 설정 입력란 하나의 OS 경로이며 물리 입력·다른 입력 영역의 전체
+IME 검증을 대신하지 않는다.
+
+Windows 설정에서 셸을 바꾼 뒤 새 터미널을 만들 때, 시작 시의 `spawn_opts`가 계속 쓰이던 누락을
+수정한다. `SpawnOptions.refreshShell`은 기존 `pty.resolveShell` 계약(절대경로·존재 검사·기본 tier)을
+그대로 사용하고 명령·인자·shell config 미러를 함께 갱신한다. 설정 변경/미리보기 롤백이 통지되면
+다음 spawn용 옵션만 갱신하며 이미 실행 중인 자식과 셀/격자 크기는 바꾸지 않는다.
+`test-windows-shell-refresh`와 `tools/windows/check-settings-shell.py`가 이 경계를 검사한다.
+셸 인자 합성 행·GUI 항목별 리셋과 나머지 설정의 라이브 적용은 이 수정의 완료 범위에 포함하지 않는다.
+
+Windows 설정의 text/color 후보는 공용 `config.schema.tryParseFor(.windows, …)`를 사용한다. 파일 로더가 진단 후 무시하는
+상대 명령 경로를 GUI만 저장하던 차이를 없애기 위해, GUI는 진단이 하나라도 생기면 저장 요청을 거부한다.
+문자열은 config arena에 소유시키고 경로로 표시된 필드만 Windows 구분자를 정규화한다. 일반 폰트명 등의
+역슬래시는 그대로 유지한다. `test-windows-settings-text-paths`와 실제 앱 검사는 거부·재시도·소유권을
+검사한다. 숫자의 GUI 범위, enum 정책, 실행 파일 존재 여부의 기존 폴백과 OS 접미 쓰기/리셋은 바꾸지 않는다.
+
+취소는 새 값 저장과 다르다. 미리보기를 적용하지 않은 인라인 편집은 거래만 종료하고 config를 건드리지
+않는다. 원래의 빈 자동 셸 설정을 새 text처럼 재검증해 취소가 실패하던 문제를 막는다. 미리보기를 실제로
+적용한 세대만 원래 값을 재적용하며, 저장 시작/쓰기 실패 뒤에도 취소할 수 있도록 세대를 유지한다.
+성공한 저장 또는 미리보기 복원에서만 해당 세대를 종료한다. `test-windows-settings-rollback`이 이 경계를 검사한다.
+
+공용 `tryParseFor`의 절대경로 검사도 전달받은 OS를 사용한다. 호스트 OS를 그대로 사용하면 Windows에서
+POSIX 설정을 검사할 때 드라이브 경로가 잘못 통과하고, POSIX에서 Windows 어댑터를 검사할 때 정상 경로가
+거부된다. 구분자 정규화와 같은 OS 인자를 쓰며 native OS의 기존 경로 판정 정책은 유지한다.
+
+Windows 터미널의 기본 폰트 자원은 `terminal/text_resources.zig`가 DirectWrite rasterizer와 ClearType
+scratch를 함께 소유한다. 생성 중 scratch 할당에 실패하면 새 rasterizer도 해제하며, 준비는 기존 자원을
+수정하지 않는다. builder는 해당 heap 자원을 빌린다. 라이브 변경은 renderer/font identity/atlas·캐시와
+기하를 함께 준비한 뒤 게시해야 하므로 이 소유자만 교체해서는 안 된다. 설정 변경 경로는 아래 준비·게시 절차를 사용한다.
+
+`terminal/renderer_resources.zig`는 CPU RendererState의 font identity/atlas와 GPU CellPipeline을 함께
+준비하고 해제한다. 디바이스와 context는 Present에서 빌리며 소유자가 직접 해제하지 않는다. 명시적 셀
+메트릭을 좁은 타입으로 바꾸기 전에 검증하고 자연 글리프 폭을 grid advance와 별도로 유지한다. 시작 경로의
+frame loop는 소유자의 state 필드를 참조한다. 새 세대를 게시하기 전에는 기존 아틀라스를 참조하는
+sidebar/dock/status/editor draw list도 재생성해야 하며, 이 준비만으로 live font 적용 완료를 뜻하지 않는다.
+
+
+Windows의 `family`·`fallback`·`size`·`line-height`·`letter-spacing` 변경은 별도 font/renderer 세대와
+sidebar/dock/status/titlebar 캐시를 준비한 뒤 게시한다. 준비 중 atlas가 자라면 캐시를 다시 만들며,
+수렴하지 않거나 준비에 실패하면 이전 자원을 유지하고 설정 화면에 실패를 표시한다. 활성 편집기는
+같은 문서의 독립 view lease에서 syntax/selection 캐시를 준비하고, 비교 화면은 양쪽 본문과 헤더를
+준비한다. 준비 실패가 활성 뷰의 선택·스크롤·undo를 변경해서는 안 된다. 게시 뒤에는 기존 편집기
+scrollbar hit geometry를 폐기한다. 실제 편집기·비교 화면의 전환과 다섯 준비 실패 경로는 아래 범위에서
+확인했으며 모든 입력 모드·도크 상태의 전체 검증으로 계산하지 않는다.
+
+Chrome은 semantic 14px 메트릭을 유지하고 터미널 셀은 공용 `renderer/font_spacing.zig` 계산을 쓴다.
+음수 자간에서도 자연 글리프 폭을 보존한다. DirectWrite baseline은 각 run의 요청 크기로 구하고
+여분의 행 높이를 중앙에 배치한다. 터미널의 큰 baseline으로 작은 UI 글자를 잘라내지 않는다.
+`test-font-spacing`은 집계 28 + 계산 5개이고, `test-windows-text-resources`는 큰 터미널 face에서
+작은 UI run의 실제 잉크와 baseline도 검사한다.
+
+게시 뒤 각 terminal surface의 기존 `resizeWithCell` 계약으로 코어 메트릭/격자와 PTY 크기를
+갱신한다. 이 API는 코어를 먼저 변경한 뒤 PTY를 갱신하므로 PTY 오류까지 포함하는 다중 세션 원자적
+롤백을 보장하지 않는다. 해당 오류는 별도로 세고 사용자에게 표시한다. `font_applied` 진단은 실제
+코어 잠금 아래의 셀·격자를 기록한다. `tools/windows/check-live-font.py`는 격리 HWND에서 설정을
+일곱 번 변경하고 독립 캡처의 cursor 크기, 코어 격자, 셸 입력 격리와 정상 종료를 확인한다.
+이 검사는 물리 입력이나 모든 폰트 속성·모든 편집기 경로의 검증을 대신하지 않는다. variant/ligature,
+설정 재로드와 미리보기 실패/복원 검증을 마치기 전에는 폰트 지원 전체 완료로 계산하지 않는다.
+
+
+`test-windows-live-font-editor`는 집계 2 + native 준비 검사 5개다. 숨긴 자체 Win32/D3D 창에서
+활성 viewport/selection·stale projection 보존, 편집기/비교 양쪽 글리프 준비와 할당 실패를 검사한다.
+각 실패 prefix는 새 fixture에서 실행하며 임시 할당의 전량 해제와 문서 lease 수를 확인한다.
+선택적 syntax coloring이 OOM에서 plain text로 떨어지는 기존 정책은 허용한다. 서로 다른 실행의
+할당 수를 같다고 가정하지 않고 실패가 더 이상 주입되지 않는 prefix까지 검사한다.
+
+이 검사에서 공용 glyph frame의 부분 초기화 누수를 발견했다. prepared 배열 할당 뒤 uploads
+할당이 실패할 때 현재 pane이 정리 범위에서 빠졌으므로, 초기화 직후 정리 범위에 등록하도록 고쳤다.
+실제 편집기 앱 검사에서는 가는 caret이 본문 글리프에 가려지는 문제도 확인했다. bar/underline
+caret은 텍스트 뒤에 다시 그리며 block은 대조색 글자가 보이도록 기존 뒤쪽 층을 유지한다.
+`tools/windows/check-live-font.py --editor`는 자체 fixture 파일을 열고 caret 높이와 한 글자 이동 폭을 캡처로 재며
+원본 파일 불변·셸 입력 격리·정상 종료를 요구한다. 실제 앱 통과 여부는 해당 산출물로 별도 판정한다.
+
+
+폰트 게시 뒤 기존 scrollbar 기하가 폐기되므로, 준비 뷰도 실제 첫 프레임과 같은 visible-row clamp와
+기존 가로 상한을 사용한다. 축소로 위쪽 행이 새로 보이면 그 행의 글리프까지 준비한다. native 준비
+검사는 앞 행의 고유 글리프가 새 atlas에 들어갔는지 확인한다. `tools/windows/check-live-font.py --editor-scrolled`는
+자체 100행 파일의 맨 아래에서 시작해 같은 일곱 변경을 검사한다.
+
+캐시 교체는 각 소유 필드를 명시적으로 교체한다. main의 동적 @field 접근은 external reflection
+경계가 허용하지 않으므로 목록을 반사로 순회하지 않으며, 모든 필드의 타입/포인터 대응은 컴파일러가
+검사한다. 기존 session-host reflection 원장을 넓히는 방식으로 이 경계를 우회하지 않는다.
+
+
+실제 비교 화면의 family/fallback 포함 일곱 변경은 영문·한글 본문을 양쪽에 두고 확인했다. 외부 변경
+디스크 이미지는 그대로 유지하고, 비교를 연 격리 문서의 미저장 편집만 폐기한 뒤 정상 종료한다.
+별도 private 바이너리 다섯 개는 text/renderer/sidebar/dock/editor 준비에서 한 번씩 OOM을 낸다.
+각 사례는 이전 caret·잠근 코어 메트릭/격자와 sidebar/dock 픽셀 보존, 정상 변경·원복 재시도와 종료를
+확인한다. 제품 소스에 failpoint를 추가하지 않는다. 주입 없는 정상 실행 파일은 이 실패 유지 판정에서
+거부되어야 한다. 이는 준비 실패 경로이며, 게시 후 PTY 실패의 다중 세션 rollback 증거가 아니다.
+
+격리 실행 파일에도 같은 해시의 번들 폰트를 둔다. 실행 파일을 더 깊은 cache 폴더에 두면 개발용 상위
+경로 탐색만으로 저장소 폰트에 닿지 않아 시스템 폴백이 선택될 수 있다. 기본 caption 높이도 달라지므로
+화면 판정은 고정 y=38 대신 어두운 본문 시작 위치를 찾는다. 실제 34px caption의 17px caret을 잘라
+13px로 재던 판정을 수정했고 기존 실제 캡처 14건과 일치하는지도 확인했다.
+
+
+Windows에서 종료된 로컬 터미널도 레이아웃의 표시 대상이다. `terminal/layout_resize.zig`는 runtime
+resize가 ProcessExited를 반환할 때만 표시용 core를 잠그고 reflow/셀 메트릭을 맞춘다. 응답은 받을
+PTY가 없어 비운다. 종료 상태와 runtime의 input/resize 거부는 유지하며 UnknownSurface·살아 있는
+PTY 오류를 숨기지 않는다. 창 크기 변경과 글꼴 게시가 같은 함수를 사용한다. macOS 호스트의 기존
+표시 크기 책임과 같으며 Windows 코드에서 macOS 구현을 호출하지 않는다.
+
+`test-windows-layout-resize`(집계 2 + 검사 5)는 live 전달·종료/read_error 표시·미전달 응답·0 픽셀
+보존과 다른 오류 반환을 검사한다. 다섯 compiled runtime 변이와 복원 Debug/ReleaseFast를 확인했다.
+실제 종료 세션의 일곱 글꼴 변경과 종료/실행 세션 혼합의 다섯 변경도 확인했다. 진단의 `process`
+필드는 잠근 코어 메트릭과 함께 해당 surface 상태를 기록한다. `check-live-font.py --ended`는 자식
+cmd 부재와 실제 exited 상태, 커서/코어 크기·격자, 종료를 함께 요구한다. 일반 resize 오류의 재시도와
+다중 세션 원자적 rollback을 새로 보장하는 것은 아니다.
+
+
+### Windows terminal layout retry (implementation and native recovery verified)
+
+Each Windows session owns one latest layout request. Failed PTY resize or core
+allocation is retried on the awake clock, starting at 50 ms and capped at 1 s.
+A new grid supersedes the old request while retaining pending font cell metrics;
+session destruction removes the request. Exited surfaces use retained-display
+resize without calling the dead transport, and unknown surfaces are not retried.
+Both window layout and live font publication submit through this path.
+
+The Windows session retains the retry obligation after a transport failure.
+The stateless runtime retry entry regenerates the latest report under the
+core lock and delivers it only after PTY resize succeeds; it does not expose the
+failed report to the reader early. Notification allocation and writes retain
+their existing best-effort semantics. `test-windows-layout-retry` selects five
+retry scenarios, five recovery-warning scenarios, one reader ordering scenario
+and the two main import tests. Five distinct compiled mutants
+were rejected, and restored Debug/ReleaseFast each passed all 14 retry/retained
+display tests. The current normal build passed the focused matrix, cross-target
+compilation and all 272 boundary gates. Native normal regressions passed seven
+ended-session font changes and five mixed live/ended-session changes.
+
+A separate private binary failed exactly one transport resize after the core had
+changed. The ordinary frame pump recovered without another layout request:
+core and the backend's stored size both became 37x21 and pending was false.
+All seven font changes then completed, with one expected resize error, zero
+shell-input/grid/dock errors and native exit0. Backend stored size is not an
+independent kernel query. The tracked sources and normal binary were restored;
+normal PE bytes match the tested normal copy except timestamp/build-id.
+Evidence for that snapshot is in `.zig-cache/windows-layout-retry-binding.json`.
+Recovery warning ownership now resets for every new font preparation, is revoked
+when another message replaces it, and clears only after all retries settle with
+the configured font applied and no permanent error. A later session's retryable
+failure cannot hide an earlier permanent failure. Direct and reader-path tests
+assert exact CSI 48 bytes, no pre-success delivery, and no duplicate report.
+Five warning mutations and restored Debug/ReleaseFast 20-case controls passed;
+the updated build, focused tests, cross compilation and all 272 boundary gates
+also passed. The normal native app completed seven font changes with zero resize
+errors. A private one-shot transport failure recovered and cleared exactly its
+warning (message length zero, ownership/pending/permanent flags false), followed
+by seven successful font changes and native exit0. The recovered settings screen
+was captured and visually inspected. The prior native log without warning clear
+and six malformed clear acknowledgements were rejected by the observation oracle.
+The normal code and binary were restored; only PE timestamp/build-id may differ.
+The current evidence is `.zig-cache/windows-layout-notice-binding.json`.
+This does not complete all Windows settings support or replace the installed app.
+
+
+### Windows native bold/italic faces (implemented; native terminal verified)
+
+The Windows text owner now stages regular, bold, italic and bold-italic face
+banks together, and passes those same banks to the cell shaper and rasterizer.
+The terminal font ID encodes both bank and fallback index, so identical glyph
+numbers from different native faces cannot share an atlas identity. Measured
+chrome resolves its registry IDs through the regular bank and keeps its existing
+PostScript identity path. The regular face still owns grid/chrome metrics.
+
+Host config policy follows FontConfig: family-bold overrides bold and combined
+bold-italic, family-italic overrides italic alone. Missing overrides return to
+the actual primary family. Startup and live font replacement use the same staged
+owner; preparation failure retires only the candidate banks. Ligature shaping is
+still separate work. No new runtime dependency or system font installation is
+introduced.
+
+DirectWrite selection uses the requested native weight/style through
+[GetFirstMatchingFont](https://learn.microsoft.com/en-us/windows/win32/api/dwrite/nf-dwrite-idwritefontfamily-getfirstmatchingfont).
+Faces reporting nonzero
+[GetSimulations](https://learn.microsoft.com/en-us/windows/win32/api/dwrite/nf-dwrite-idwritefontface-getsimulations)
+are rejected in favor of an unsimulated fallback. The existing trusted asset
+search roots apply to every bundled style file. The shared bundled catalog lists
+the 18 existing TTF assets, explicitly omitting Fira Code italic variants, and
+Windows registers all listed files instead of Regular alone. Distribution must
+retain those existing style files along with their existing licenses.
+
+`test-windows-font-variants` selects two aggregation blocks and six native
+checks: distinct real glyph pixels/IDs, override precedence and stable grid,
+invalid overrides and CJK fallback, allocation rollback, measured-ID isolation,
+and default bundled families. JetBrains Mono and Jetendard were absent from the
+system collection in the observed run, while all four bundled styles rendered
+distinct pixels. Six compiled mutants, including restoring Regular-only bundle
+registration, were rejected; restored Debug/ReleaseFast each passed 15 variant
+and text-owner tests. The current normal build, focused matrix, cross-target
+compilation and all 272 boundary gates also passed.
+
+The actual app displayed four distinct SGR rows. Five live edits changed only the
+expected rows: bold and combined, italic alone, bold restoration, italic
+restoration, and an invalid bold-family fallback. The regular row and cell metrics
+remained unchanged. There were five font applications, zero font/resize/input/grid
+errors, and native exit0. `tools/windows/check-font-variants.py` replays this owned
+fixture check, verifies executable/ConPTY hashes and provider selection, and saves
+GPU row hashes and captures. It uses synthetic HWND settings input.
+
+The fixture must include the already-shipped conpty.dll and x64/OpenConsole.exe;
+copying only maru.exe selected the system provider and produced two unique rows
+(italic matched regular). The same executable with the pinned pair selected
+bundled and produced four. A pre-change executable with that same pair was also
+correctly rejected. This records provider behavior rather than claiming raw PTY
+byte capture. Evidence: `.zig-cache/windows-font-variant-binding.json`.
+Ligatures, further settings runtime wiring and final installation remain separate.
+
+
+### Native DirectWrite typography control (terminal integration in progress)
+
+`dwrite_shape.Shaper.shapeWithOptions` can now disable the optional liga/clig/calt
+features. The existing `shape` entry keeps native defaults and makes no typography
+object or readback query. This is a Windows backend option, not a change to the
+common text-shaper request or the settings GUI's terminal behavior.
+
+`dwrite_typography.zig` owns the caller's COM reference, including a partial
+creation failure and every AddFontFeature prefix. Layout application uses the
+full UTF-16 code-unit range; required ligatures and kerning remain untouched.
+The interface slots and feature/range ABI sizes are compile-time checked. APIs:
+[CreateTypography](https://learn.microsoft.com/en-us/windows/win32/api/dwrite/nf-dwrite-idwritefactory-createtypography),
+[SetTypography](https://learn.microsoft.com/en-us/windows/win32/api/dwrite/nf-dwrite-idwritetextlayout-settypography).
+
+An opt-in readback uses
+[GetTypography](https://learn.microsoft.com/en-us/windows/win32/api/dwrite/nf-dwrite-idwritetextlayout-gettypography)
+at the final UTF-16 unit. It releases the acquired COM reference and records the
+actual effective range. Glyph-only comparisons initially failed to distinguish
+a scalar-count mutation: script itemization/feature boundaries can make a tail
+look unligated without complete range coverage. Native property readback rejects
+that mutation without requiring queries on the ordinary rendering path.
+
+`test-windows-typography` selects two import blocks plus five tests covering native
+feature descriptors, Fira Code contextual operators against isolated glyphs,
+Hangul/surrogate-prefix range coverage, toggles/overflow/empty/default behavior,
+and COM failure/success ownership. Five compiled mutants were rejected, and
+restored Debug/ReleaseFast each passed 15 typography/font-variant tests. The
+current normal build, focused matrix, cross-target compilation and all 272
+boundary gates passed. An owned actual app with the shipped ConPTY pair repeated
+five existing live style edits: five applications, zero font/resize/input/grid
+errors and native exit0. This checks existing UI behavior, not terminal ligature
+on/off. Evidence is `.zig-cache/windows-typography-binding.json`.
+Terminal run construction,
+cluster-to-cell mapping, cursor/style boundaries and the live ligatures toggle
+remain to be connected and verified in the actual app.
+
+
+### Windows native glyph source metadata — intermediate step
+
+DirectWrite can optionally return a parallel source record for each glyph. Records
+retain the UTF-16 text span, cluster head, native baseline/GPOS offsets and bidi
+level. The allocation-free inversion handles multi-unit/multi-glyph clusters and
+reversed/reordered maps; malformed maps fail explicitly and short borrowed buffers
+return overflow without writing their canaries. The existing common shape request
+and the default rendering path retain their behavior.
+
+Six compiled fault injections were rejected: lost text origin, truncated spans,
+orphan cluster glyphs, lost fallback-run origin, lost global glyph head and skipped
+source-buffer bounds. Restored Debug/ReleaseFast controls each passed 22 tests.
+The normal build, focused gates, cross-target compilation and all 272 boundaries
+passed with unchanged implementation hashes. A copied native app with the pinned
+ConPTY pair passed five live font-style edits with GPU row comparisons and exit 0.
+Those synthetic-window checks are regression evidence, not physical-input proof.
+Evidence: `.zig-cache/windows-glyph-source-binding.json`.
+
+Terminal fixed-cell run construction, cursor/style boundary splitting, renderer
+integration and live `font.ligatures` on/off pixel checks remain pending. Source
+metadata completion alone does not prove terminal ligature rendering.
+
+### 2026-10-28 main 반영과 프리뷰 패키지
+
+`7ffec126d`를 기준으로 Windows 작업을 다시 리베이스했다. Git 워커 이동의 상대 경로 수정은
+이동 커밋에 합쳤고, Windows 마커 검사 114개/다른 플랫폼의 기존 107개 조건은 검사 인자가
+활성화되는 커밋에 반영했다. 이력 정리 전후 기능 파일은 같으며 검사 수 한 줄만 달라졌다.
+두 중간 커밋에서 일반 빌드·집중 검사·교차 컴파일·경계 272개를 확인했고, Git 워커의
+다섯 compiled 결함 주입과 복구 대조군도 통과했다.
+
+최종 리베이스 코드 `ac8c185ec`의 일반 빌드·관련 기능·교차 컴파일·경계 272개가 통과했다.
+충돌한 설정 검색 IME와 Windows 인라인 편집 경로를 함께 보존했다. 조합 표시/UTF-8/편집
+트랜잭션의 여섯 compiled 결함 주입을 검출했고 복구 Debug·ReleaseFast 대조군도 통과했다.
+동일 실행 파일의 실제 앱 폰트 변경·복원 다섯 경우는 GPU 행 비교와 정상 종료를 확인했다.
+근거는 `.zig-cache/latest-main-rebase-gates-20261028/result.json`,
+`.zig-cache/latest-main-settings-composition-adversarial.json`,
+`.zig-cache/latest-main-font-app-regression-20261028.json`이다.
+
+실제 IMM 조합 표시와 편집 칸 아래 후보창은 진단에서 확인했으나, 준비 단계 불안정성과
+앱 밖 창으로의 foreground 이동으로 전체 후보 선택 검사는 완료되지 않았다. 입력 소유권
+가드를 완화하지 않았으며 이 기록을 물리 키보드/전체 IME 완료 증거로 쓰지 않는다.
+
+ConPTY MIT 원문을 `licenses/ConPTY-MIT.txt`로 동봉한다. 고정 NuGet 원본과 저장소의
+DLL·host가 일치하며, 이 설치 변경 전후 실행 파일도 동일하다. 원문 누락·잘못된 위치·
+다른 원문·DLL 누락·host 누락의 다섯 실제 빌드 산출물을 거절하고 복구 산출물을 확인했다.
+근거는 `.zig-cache/conpty-license-package-adversarial.json`이다. 전체 Windows 지원,
+터미널 합자 연결, 작업표시줄 고정과 남은 영역별 기능은 계속 미완료다.
+
+리베이스 뒤 형식 검사에 걸린 Windows 프리뷰 관련 Zig 파일 10개는 Zig 0.17 포매터로
+정리했다. 컴파일러 tokenizer로 공백/주석과 닫는 괄호 앞 선택적 쉼표를 제외한 토큰을
+대조했다. 포매터가 수행한 `@intFromEnum` → `@backingInt` 갱신도 따로 기록하고,
+signed/unsigned 경계·비열거 값·Windows NTSTATUS의 반환 타입과 값을 비교했다.
+총 11개 검사가 통과했다. 엄격한 원본 토큰 비교에서 발견된 이름/쉼표 차이와 허용한
+변환 범위는 `.zig-cache/latest-main-format-token-proof.json`에 보존한다.
+
+형식 정리 커밋 `ab394c205`의 일반 빌드·집중 검사·교차 컴파일·경계 272개도 통과했다.
+해당 실행 파일로 폰트 변경·복원 5개와 터미널 우클릭 메뉴의 표시·Copy/Paste·취소·
+포커스 이동 등 12개 실제 앱 검사를 통과했다. 후자는 `input.right-click = menu`인
+격리 설정과 synthetic HWND 입력을 사용했고, 원래 비어 있던 클립보드를 복구했다.
+`paste` 기본값을 변경하거나 다른 영역의 메뉴 완료를 뜻하지 않는다. 형식 정리 뒤의
+설정 조합 경로도 compiled 결함 주입 6개와 복구 Debug·ReleaseFast를 다시 통과했다.
+근거는 `.zig-cache/formatted-main-rebase-gates-20261028/result.json`,
+`.zig-cache/formatted-main-font-app-regression.json`,
+`.zig-cache/formatted-main-terminal-popup-complete.json`,
+`.zig-cache/formatted-main-settings-composition-adversarial.json`이다.
+
+Windows 설치에는 기존 정적 링크 코드·자산의 고지 36개를 동봉한다. macOS 번들이 쓰는
+tree-sitter 코어/grammar·wuffs·PCRE2의 고정 원문을 재사용하고 Maru·Unicode·Octicons·
+ConPTY 원문도 포함한다. 각 파일을 고정 의존성 또는 저장소 원본과 대조했다. 원문 누락·
+오배치·다른 원문 대체 등 7개 실제 빌드 산출물을 거절하고, 복구 패키지의 고지와 실행 파일
+일치를 확인했다. 근거는 `.zig-cache/windows-native-notices-adversarial.json`이다.
+
+
+### Native single-run frame producer (work in progress)
+
+`terminal/run_frame.zig` now builds real atlas uploads from DirectWrite run
+records. Clipped cell masks include their local baseline in cache identity;
+placement remains separate. Positive advance offsets follow native run direction
+and positive ascender offsets move upward, following Microsoft's
+[DWRITE_GLYPH_OFFSET contract](https://learn.microsoft.com/en-us/windows/win32/api/dwrite/ns-dwrite-dwrite_glyph_offset).
+Each clipped mask uses the target cell style, preserving cell color boundaries.
+The optional explicit-origin raster mode is supported by Windows; the existing
+CoreText raster adapter explicitly rejects it instead of silently ignoring it.
+
+`zig build test-windows-run-frame` compares actual ligature-on/off atlas ink,
+checks glyph IDs against a separate native shaping call, and requires shifted
+ligature origins. Five compiled runtime mutations (disabled ligatures, zero X,
+zero Y, wrong glyph ID, omitted ink) were rejected after strengthening two
+initially escaping assertions. Restored controls and the registry-raster,
+raster-origin and shared shaping-run gates passed. Local evidence is
+`.zig-cache/run-frame-adversarial.json`; it is not an installed-app claim.
+
+The strict `buildRun` entry accepts one contiguous row/face/cursor run and
+rejects mixed or synthesized input. The whole-frame `build` entry is described
+below. FrameBuilder integration is described below; real application validation
+is required before installing this generation for users.
+
+The native run-frame gate also exhausts output-allocation failure points with
+`std.testing.checkAllAllocationFailures` and checks nonfinite-origin rejection,
+signed-zero canonicalization and fractional-origin preservation. Native font
+resources and renderer state use the control allocator; this proves producer
+output cleanup, not every DirectWrite or registry allocation failure.
+
+
+### Whole-frame native run partitioning (work in progress)
+
+The Windows producer now partitions complete DrawLists before native shaping.
+Row, adjacency (including zero-width normalization), and face/cursor key checks
+live in the OS-independent `src/native_shaping_run.h` leaf. The original
+CoreText loop and the Windows adapter both call this predicate; the build uses
+the existing pinned C translator for Zig consumption, with no new dependency.
+Native buffer capacity limits remain adapter-specific. Synthesized geometry is
+isolated before Windows font shaping and uses normalized zero font/glyph IDs.
+
+The whole-frame fixture covers two rows, a column gap, bold and italic banks,
+a visible cursor, box geometry and wide Korean fallback. Output-allocation
+failures are exhausted across successive native runs, with no partial frame
+publication. This is a native frame test, not a GUI or macOS runtime check.
+The separate `buildRun` entry retains strict single-run validation. The app
+FrameBuilder is now connected as described below; installation requires
+application validation.
+
+Five compiled runtime boundary mutations were rejected (row, face/cursor key,
+adjacency, zero-width normalization, synthesized-run isolation), with passing
+normal controls before and after restoration. Local evidence is
+`.zig-cache/whole-frame-adversarial.json`. The same header also passed a native
+C compilation/execution control including unsigned overflow. Focused native
+frame, registry-raster, shared shaping-run and documentation gates passed.
+
+
+### Empty input and missing native glyphs
+
+The strict native-run entry now accepts an empty DrawList without indexing its
+first cell. The whole-frame path follows the existing Windows cell-shaper
+missing-glyph policy (`win32_text.Shaper.shape`): publish a blank replacement
+record with explicit fallback/replacement accounting instead of aborting the
+entire frame. Every terminal cell covered by the missing cluster gets its own
+record, preserving paint styles and avoiding a large cluster-to-u3 narrowing.
+The rasterizer's existing glyph-zero rule keeps these records blank.
+
+The actual native fixture includes U+10FFFF (not covered by its fonts), verifies
+the zero glyph and replacement accounting, and exhausts output-allocation
+failures. Five compiled/runtime mutations (removed empty guard, frame abort,
+dropped record, hidden replacement count, corrupted missing glyph ID) were
+rejected; the empty-guard mutation is a runtime bounds panic. The restored
+control passed all ten aggregated tests. Local evidence is
+`.zig-cache/missing-empty-adversarial.json`; this is not an installed-app test.
+
+
+### Native run application wiring (work in progress)
+
+Configured Windows text resources now own a heap-stable native shaper generation
+with its own fallback string and ligature setting. Moving or replacing the
+resource value does not invalidate the borrowed FrameBuilder context. The
+existing per-cell chrome shaper remains available on the same builder.
+`FrameBuilder.buildDrawList` dispatches terminal frames through this generation.
+`host.buildFrameAfterDrainWithDrawListBuilder` retains the shared owned snapshot
+and core-lock boundary; the previous per-cell host API delegates through the same
+seam. Each injected builder consumes the DrawList even on failure.
+
+Live font equality now includes ligatures, so changing that setting stages the
+same generation/renderer/layout transaction as other font changes. Native
+generation allocation-prefix tests verify shaper/context cleanup and copied
+fallback ownership. The whole-frame output allocation test keeps one native
+resource generation fixed: recreating native resources on every failing prefix
+produced nondeterministic allocation counts in the initial integration attempt.
+That failed attempt remains in `.zig-cache/native-app-wire-first.log`.
+
+Five compiled/runtime mutations were rejected: disabled native dispatch, forced
+ligatures off, lost fallback, missing shaper failure cleanup and ignored live
+ligature changes. Restored controls passed all thirteen aggregated run-frame
+tests; the shared frame-snapshot gate and a normal Windows app build passed.
+Evidence is `.zig-cache/native-wire-adversarial.json`. Private app E2E below
+does not prove installation, physical input or rendering parity for all scripts.
+
+
+The private native-run app passed all five live font-variant settings changes
+and exited normally (0). Actual GPU row pixels showed changes only in the
+expected regular/bold/italic/bold-italic rows; the checker also captured six
+frames. Font apply errors, resize errors, grid mismatches, dock rebuild failures
+and settings input leaking into the shell were all zero. The app used its shipped
+ConPTY pair and isolated profile. Evidence is `.zig-cache/native-run-font-app.json`;
+the staged executable and dependency hashes are in
+`.zig-cache/native-run-preview-20261028/binary.json`. This is synthetic HWND
+input into a real app; the user's installed preview was not replaced.
+
+The same staged native-run binary also passed all twelve terminal clipboard
+popup checks, including actual OS Copy/Paste, native focus transfer, dismissal
+and protected multiline paste. Its owned app exited 0 and the original empty
+clipboard was restored. Evidence is `.zig-cache/native-run-popup-app.json`.
+Sidebar/tab/file-tree context menus remain separate requirements.
+
+The first application integration cross-target run failed: native run-frame
+tests lacked the existing Windows-only early-return guard, and cross main
+modules lacked the shared-header translator import. Both wiring sites were
+corrected; `.zig-cache/native-wire-final-gates.log` retains the failed attempt.
+The recovery run is `.zig-cache/native-wire-cross-recovery.log`; its completion
+must be checked separately before treating cross-target validation as passed.
+
+The recovery cross-target command completed with exit 0, including Windows,
+macOS and Linux compile-only branches, thirteen native run-frame tests, the
+thirty-three aggregated frame-snapshot tests and documentation gates. The
+aggregate receipt is `.zig-cache/native-wire-verification.json`. Full boundary
+gates still need to be rerun after application integration; the earlier four
+shards predate these host/resource changes.
+
+
+### Deterministic output-allocation failure injection
+
+The initial optimized run failed with `NondeterministicMemoryUsage` in the
+whole-frame failure-prefix test (`.zig-cache/native-wire-releasefast.log`).
+A backing-allocator trace then compared sixteen identical frames with remapping
+allowed and sixteen with remapping disabled. Native glyph/upload/pixel counts
+and the complete raster hash were identical in all thirty-two frames. With
+remapping allowed, fresh allocations varied from 41 to 42 (79 successful remaps
+across sixteen frames); disabling it produced exactly 46 fresh allocations per
+frame and no successful remaps. Evidence is
+`.zig-cache/native-allocation-path-trace.log`.
+
+The output fault-prefix tests now reject in-place resize/remap in their backing
+allocator, forcing allocate/copy/free and exposing every exercised growth as
+a numbered allocation failure. This changes test injection, not production
+allocation policy, and does not swallow or retry the nondeterministic result.
+The normal remap-on/off control remains as
+`zig build test-windows-run-allocation-path`; it requires identical native output
+and deterministic allocation counts in the remap-off path. Native-generation
+allocation tests remain separate. These probes cover exercised paths, not
+unreached native overflow/reallocation branches or arbitrary COM failures.
+
+The UTF-8 private-app ligature check also passed five live toggles: only the
+arrow row changed, plain text and synthesized geometry stayed stable, and
+returning to enabled restored the original pixels. Font apply/resize errors,
+grid mismatches, dock rebuild failures and leaked shell input were zero; exit
+was 0. Evidence is `.zig-cache/native-run-ligature-utf8-app.json`. Visual review
+confirmed the Korean syllable and combining dot. The earlier unforced-encoding
+fixture is retained with an explicit coverage exclusion, not counted as valid
+NFD rendering. ConPTY scalar normalization is not established by these images.
+
+The final allocation-recovery generation passed all four boundary shards with
+source hashes unchanged (`.zig-cache/native-wire-final-boundaries-20261028/result.json`),
+Debug/ReleaseFast fourteen-test controls, five compiled/runtime faults and
+restoration, shared snapshot/registry raster/documentation and cross-target
+gates. Subsequent test-source and shared-header formatting changes normalize CRLF to LF;
+`.zig-cache/native-wire-post-boundary-format.json` records exact byte equivalence
+under that normalization. Focused tests and documentation checks are rerun after
+formatting. Installation and the remaining Windows feature scope remain separate.

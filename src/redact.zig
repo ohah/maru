@@ -89,6 +89,9 @@ pub const AnonymizeOptions = struct {
     home: ?[]const u8 = null,
     /// 정확 치환할 유저명(예: env USER "alice") — 단어 경계에서 "user"로. null이면 생략.
     username: ?[]const u8 = null,
+    /// Match all environment aliases together; longest identities win.
+    homes: []const []const u8 = &.{},
+    usernames: []const []const u8 = &.{},
 };
 
 /// bytes의 PII/인프라를 일반화한 새 문자열(호출자 소유). 홈 경로 세그먼트·IPv4·`user@host.domain`·알려진 유저명을
@@ -106,12 +109,10 @@ fn anonymizeInto(w: *std.Io.Writer, bytes: []const u8, opts: AnonymizeOptions) !
         const word_start = i == 0 or !isIdentByte(bytes[i - 1]);
 
         // 1a. 알려진 홈 경로 정확 치환(비표준 HOME도 커버): "/opt/me" → "/opt/user".
-        if (opts.home) |home| {
-            if (home.len > 0 and std.mem.startsWith(u8, bytes[i..], home)) {
-                try writeHomeReplacement(w, home);
-                i += home.len;
-                continue;
-            }
+        if (longestPrefix(bytes[i..], opts.home, opts.homes, false)) |home| {
+            try writeHomeReplacement(w, home, opts);
+            i += home.len;
+            continue;
         }
         // 1b. 일반 홈 세그먼트: "/Users/<X>" · "/home/<X>" → ".../user"(다른 유저 홈).
         if (matchHomeSeg(bytes, i)) |m| {
@@ -136,16 +137,15 @@ fn anonymizeInto(w: *std.Io.Writer, bytes: []const u8, opts: AnonymizeOptions) !
                 continue;
             }
         }
-        // 4. 알려진 유저명(단어 경계) → user.
-        if (word_start) {
-            if (opts.username) |u| {
-                if (u.len > 0 and std.mem.startsWith(u8, bytes[i..], u) and
-                    (i + u.len >= bytes.len or !isIdentByte(bytes[i + u.len])))
-                {
-                    try w.writeAll("user");
-                    i += u.len;
-                    continue;
-                }
+        // 4. 알려진 유저명(단어 경계) → user. A drive letter is path syntax,
+        // even when the account name is the same single letter.
+        const drive_prefix = bytes.len - i >= 3 and std.ascii.isAlphabetic(bytes[i]) and bytes[i + 1] == ':' and
+            (bytes[i + 2] == '/' or bytes[i + 2] == '\\');
+        if (word_start and !drive_prefix) {
+            if (longestPrefix(bytes[i..], opts.username, opts.usernames, true)) |username| {
+                try w.writeAll("user");
+                i += username.len;
+                continue;
             }
         }
         try w.writeByte(bytes[i]);
@@ -153,25 +153,48 @@ fn anonymizeInto(w: *std.Io.Writer, bytes: []const u8, opts: AnonymizeOptions) !
     }
 }
 
+// Short aliases must not rewrite a longer known identity before it is matched.
+fn longestPrefix(bytes: []const u8, primary: ?[]const u8, aliases: []const []const u8, word_end: bool) ?[]const u8 {
+    var best: ?[]const u8 = null;
+    if (primary) |raw| {
+        const value = if (word_end) raw else std.mem.trimEnd(u8, raw, "/\\");
+        if (prefixMatches(bytes, value, word_end)) best = value;
+    }
+    for (aliases) |raw| {
+        const value = if (word_end) raw else std.mem.trimEnd(u8, raw, "/\\");
+        if (best != null and best.?.len >= value.len) continue;
+        if (prefixMatches(bytes, value, word_end)) best = value;
+    }
+    return best;
+}
+
+fn prefixMatches(bytes: []const u8, value: []const u8, word_end: bool) bool {
+    if (!word_end and value.len == 2 and std.ascii.isAlphabetic(value[0]) and value[1] == ':') return false;
+    return value.len > 0 and std.mem.startsWith(u8, bytes, value) and
+        (!word_end or value.len >= bytes.len or !isIdentByte(bytes[value.len]));
+}
+
 /// home("/Users/alice")의 마지막 세그먼트를 "user"로: "/Users/alice" → "/Users/user".
-fn writeHomeReplacement(w: *std.Io.Writer, home: []const u8) !void {
-    const slash = std.mem.lastIndexOfScalar(u8, home, '/') orelse {
+fn writeHomeReplacement(w: *std.Io.Writer, home: []const u8, opts: AnonymizeOptions) std.Io.Writer.Error!void {
+    const slash = std.mem.lastIndexOfAny(u8, home, "/\\") orelse {
         try w.writeAll("user");
         return;
     };
-    try w.writeAll(home[0 .. slash + 1]);
+    // A custom HOME may sit beneath another known home; sanitize that parent too.
+    // Parent prefixes are strictly shorter, so known-home recursion terminates.
+    try anonymizeInto(w, home[0 .. slash + 1], opts);
     try w.writeAll("user");
 }
 
 /// 경로 세그먼트 종료 문자(다음 컴포넌트 '/' 또는 공백/따옴표/제어) — 유저명 세그먼트의 끝.
 fn isPathStop(b: u8) bool {
-    return b == '/' or b == ' ' or b == '\t' or b == '\n' or b == '\r' or b == '"' or b == 0;
+    return b == '/' or b == '\\' or b == ' ' or b == '\t' or b == '\n' or b == '\r' or b == '"' or b == 0;
 }
 
 const HomeSeg = struct { prefix: []const u8, consumed: usize };
 
 fn matchHomeSeg(bytes: []const u8, i: usize) ?HomeSeg {
-    const prefixes = [_][]const u8{ "/Users/", "/home/" };
+    const prefixes = [_][]const u8{ "/Users/", "/home/", "\\Users\\" };
     for (prefixes) |p| {
         if (!std.mem.startsWith(u8, bytes[i..], p)) continue;
         const seg_start = i + p.len;
@@ -281,4 +304,45 @@ test "guardFixture: 민감 데이터가 있는 plain 텍스트는 거부, clean�
     try std.testing.expectError(error.SensitiveContent, guardFixture("$ export API_TOKEN=sk-live-abc"));
     try std.testing.expectError(error.SensitiveContent, guardFixture("run --api-key sk-live-xyz"));
     try guardFixture("$ ls -la /home/user\nregular output"); // 통과
+}
+
+test "anonymizeAlloc preserves Windows path structure while masking other users" {
+    const a = std.testing.allocator;
+    const result = try anonymizeAlloc(a, "at C:\\Users\\홍길동\\project and D:/Users/other/project", .{});
+    defer a.free(result);
+    try std.testing.expectEqualStrings("at C:\\Users\\user\\project and D:/Users/user/project", result);
+}
+
+test "anonymizeAlloc aliases match the longest Unicode identity before short prefixes" {
+    const a = std.testing.allocator;
+    const result = try anonymizeAlloc(a, "at D:/alice/project 홍길동 홍", .{ .homes = &.{ "D:/a", "D:/alice" }, .usernames = &.{ "홍", "홍길동" } });
+    defer a.free(result);
+    try std.testing.expectEqualStrings("at D:/user/project user user", result);
+}
+
+test "anonymizeAlloc trailing home separator never preserves private folder" {
+    const a = std.testing.allocator;
+    const result = try anonymizeAlloc(a, "at E:\\Homes\\사적인폴더\\project", .{ .home = "E:\\Homes\\사적인폴더\\" });
+    defer a.free(result);
+    try std.testing.expectEqualStrings("at E:\\Homes\\user\\project", result);
+}
+
+test "anonymizeAlloc nested known homes never expose the parent account" {
+    const a = std.testing.allocator;
+    const out = try anonymizeAlloc(a, "at C:\\Users\\fixture\\bash-home\\project", .{
+        .homes = &.{ "C:\\Users\\fixture\\bash-home", "C:\\Users\\fixture" },
+        .usernames = &.{"fixture"},
+    });
+    defer a.free(out);
+    try std.testing.expectEqualStrings("at C:\\Users\\user\\user\\project", out);
+}
+
+test "anonymizeAlloc preserves drive syntax when account is a single letter" {
+    const a = std.testing.allocator;
+    const out = try anonymizeAlloc(a, "C at C:\\Users\\C\\bash-home\\project", .{
+        .homes = &.{ "C:\\Users\\C\\bash-home", "C:\\Users\\C" },
+        .usernames = &.{"C"},
+    });
+    defer a.free(out);
+    try std.testing.expectEqualStrings("user at C:\\Users\\user\\user\\project", out);
 }

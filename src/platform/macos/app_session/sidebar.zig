@@ -3331,17 +3331,8 @@ pub fn applyFontSpacing(
     letter_spacing_pt: f32,
     scale_milli: u32,
 ) struct { advance_width_px: u32, glyph_width_px: u32, height_px: u32 } {
-    const height_px: u32 = @intFromFloat(@round(@as(f32, @floatFromInt(base_height_px)) * line_height));
-    // 논리 pt → backing px(분수 scale 그대로). padding px 환산(× scale_milli / 1000)과 같은 방식.
-    const spacing_px: f32 = letter_spacing_pt * @as(f32, @floatFromInt(scale_milli)) / 1000.0;
-    // i64로 가산해(음수 spacing) 1px 미만이면 1로 saturate — 0폭이면 grid가 div-by-cell에서 폭주한다.
-    const width_i: i64 = @as(i64, base_width_px) + @as(i64, @intFromFloat(@round(spacing_px)));
-    const advance_width_px: u32 = @intCast(@max(@as(i64, 1), width_i));
-    // **자간은 grid advance(셀 간격)만 바꾸고, 글리프 비트맵 폭은 자연폭(base) 그대로 둔다.** 음수 자간이 slot을
-    // 좁혀 일반 글자가 "셀보다 넓다"로 오판→축소+ink세로중앙(글자마다 세로 흔들림)되던 버그를 끊는다(code-review).
-    // 즉 글리프 래스터·atlas slot·화면 quad 폭 = glyph_width_px(자연), 셀 배치 step = advance_width_px(자간 반영).
-    // Ghostty도 일반 텍스트를 자연 bearing으로 두고 셀폭 조정은 배치에만 적용한다(face.zig "left-aligned within the cell").
-    return .{ .advance_width_px = advance_width_px, .glyph_width_px = base_width_px, .height_px = height_px };
+    const result = maru.renderer.font_spacing.apply(base_width_px, base_height_px, line_height, letter_spacing_pt, scale_milli);
+    return .{ .advance_width_px = result.advance_width_px, .glyph_width_px = result.glyph_width_px, .height_px = result.height_px };
 }
 
 /// **사이드바 검색이 열려 있을 때**의 PageUp/PageDown/Home/End — 카드 목록을 굴린다.

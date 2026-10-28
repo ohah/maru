@@ -2,6 +2,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 #include <stdint.h>
+#include "../../native_shaping_run.h"
 #include <stddef.h>
 #include "main_queue.c.inc"
 #include <mach/mach_time.h>
@@ -1018,10 +1019,8 @@ static bool maru_shape_cache_emit(
 /// run 을 가르는 키. face(bold/italic)와 **커서 여부**를 함께 담는다 — 커서 칸을 별도 run 으로 떼어야
 /// 그 칸만 합자 없이 셰이핑할 수 있다(`MaruDrawCellCursorBit` 주석). 0~7.
 static int maru_style_index_for_cell(MaruCoreTextDrawCell cell) {
-    const bool want_bold = (cell.style_flags & MaruDrawCellBoldBit) != 0;
-    const bool want_italic = (cell.style_flags & MaruDrawCellItalicBit) != 0;
-    const bool at_cursor = (cell.style_flags & MaruDrawCellCursorBit) != 0;
-    return (want_bold ? 1 : 0) | (want_italic ? 2 : 0) | (at_cursor ? 4 : 0);
+    // Zig's renderer.shaping_runs owns the key. This adapter only decodes it.
+    return cell.style_flags & (MaruDrawCellBoldBit | MaruDrawCellItalicBit | MaruDrawCellCursorBit);
 }
 
 /// style index 에서 face 부분만(0~3). 커서 슬롯도 폰트는 같은 face 를 쓴다.
@@ -1911,10 +1910,9 @@ void maru_macos_coretext_shape_draw_list(
                     const MaruCoreTextDrawCell prev = cells[run_end - 1];
                     // 셀이 실제로 화면에서 이어져 있어야 한 문자열로 묶을 수 있다. wide 셀은 자기 폭만큼
                     // 열을 차지하므로 그만큼 건너뛴 열이 다음 셀이어야 한다(width 0은 1열로 본다).
-                    const uint32_t prev_advance = prev.width == 0 ? 1u : (uint32_t)prev.width;
-                    if (cur.row != prev.row) break;
-                    if ((uint32_t)prev.col + prev_advance != (uint32_t)cur.col) break;
-                    if (maru_style_index_for_cell(cur) != style_index) break;
+                    if (!maru_native_run_continues(prev.row, prev.col, prev.width,
+                            maru_style_index_for_cell(prev), cur.row, cur.col,
+                            maru_style_index_for_cell(cur))) break;
                     if (run_end - cell_index >= MARU_SHAPE_RUN_MAX_CELLS) break;
                 }
                 if (!maru_append_cell_units(cur, grapheme_pool, grapheme_pool_len,

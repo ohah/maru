@@ -53,7 +53,7 @@ const inventory = [_]Entry{
         .why = "타입 정의와 그 축의 소유자 — 노드 필드·비교·기록·이전 규칙(`Node.inheritIdentityFrom`). 노드를 새로 만드는 네 자리(복제·스냅샷 이전·root 재구성·root 트랜잭션)는 그 함수 **하나**를 지나므로 축이 늘어도 여기만 는다.",
     },
     .{
-        .path = "src/platform/macos/file_tree_backend.zig",
+        .path = "src/app/file_tree_backend.zig",
         .count = 1,
         .why = "`fstat` 축을 **만드는 유일한 자리** — 디렉터리 스캔과 root 검증이 열린 핸들에서 잰다.",
     },
@@ -65,6 +65,7 @@ const inventory = [_]Entry{
 };
 
 const scan_roots = [_][]const u8{
+    "src/app",
     "src/session",
     "src/platform/macos",
     "src/platform/macos/app_session",

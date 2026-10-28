@@ -6680,6 +6680,18 @@ pub fn build(b: *std.Build) void {
         run_code_action_origin_tests.addArg("--maru-expect-passed=10");
         macos_only_test_step.dependOn(&run_code_action_origin_tests.step);
     }
+
+    const command_boundary_core = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"CME"} });
+    const run_command_boundary_core = b.addRunArtifact(command_boundary_core);
+    run_command_boundary_core.addArg("--maru-expect-tests=34");
+    run_command_boundary_core.addArg("--maru-expect-passed=34");
+    b.step("test-editor-command-line-contract", "Run wrap affinity policy and renderer contracts").dependOn(&run_command_boundary_core.step);
+    const command_boundary_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.MOV12 ", ".test.MOV13 ", ".test.MOV14 ", ".test.MOV20 ", ".test.MOV21 " } });
+    const run_command_boundary = b.addRunArtifact(command_boundary_tests);
+    run_command_boundary.setCwd(b.path("."));
+    run_command_boundary.addArg("--maru-expect-tests=9");
+    if (target.result.os.tag == .macos) run_command_boundary.addArg("--maru-expect-passed=9");
+    b.step("test-editor-command-line-boundaries", "Run command arrow logical and wrapped line boundary regressions").dependOn(&run_command_boundary.step);
     const completion_overlay_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.HELP10 ", ".test.HELP11 ", ".test.FINDH5 " } });
     const run_completion_overlays = b.addRunArtifact(completion_overlay_tests);
     run_completion_overlays.setCwd(b.path("."));

@@ -5346,3 +5346,14 @@ PNG/OCR은 고정된 앱의 화면 기록 권한과 독립 후보창 기록을 �
 완료 트리의 뷰 설치는 `test-editor-parse-view`가 공유 뷰/split·캐시 무효화·현재 요청 재검증·legacy/빈 문서·참조 overflow를 검사한다. 실제 구문 색과 전체 native 노드 좌표를 cold 결과와 대조하고 Apple main queue의 `installed_view=1`로 설치·보유·종료 순서를 확인한다. [독립 실제 결함 대조](../tools/editor-parse-runtime/README.md)의 `--scope view`를 따르며 GUI/IME·일반 입력 경로 전환 완료로 확대하지 않는다.
 
 공유 파싱 요청의 ensure는 같은 문서/판/언어 설정 재사용과 다른 문서·revision·native 언어 변경의 새 게시를 검사한다. 실패 완료 재사용과 마지막 뷰 닫기 후 같은 identity 재요청은 read lease·보유 결과로 문서를 유지한 상태에서 대조한다. [독립 결함 대조](../tools/editor-parse-runtime/README.md)의 `--scope sharing`은 Runtime 12개·host 6개와 Apple shared_request=1을 요구한다. UI 재시도 정책 승인이나 화면 활성화 증거는 아니다.
+
+## 편집기 Cmd+화살표 줄 경계
+
+`mise exec -- zig build test-editor-command-line-contract test-editor-command-line-boundaries -j2`와
+`-Doptimize=ReleaseFast`로 순수 계약 34개(직접 회귀 6개 포함), macOS 제품 검사 9개(직접 회귀 5개 포함)를 실행한다.
+선택 개수와 실제 통과 개수를 가드한다. LF·CRLF·빈 줄·공백 줄·한글/이모지,
+자동 줄바꿈 경계의 도착 방향, Shift 왕복, 세로 이동 후 End, 다중 caret 병합,
+세 가지 caret 모양·화면 밖 경계·block 글자 반전을 검사한다.
+UI 오라클은 격리한 Code - OSS의 실제 키 입력과 상태 표시줄이며, 해당 구현 소스는 복사하지 않는다.
+제품 AppKit 키 이벤트와 Metal readback의 수정 전후 PNG는 PR에 첨부한다.
+물리 HID 입력이나 모든 VS Code 커서 명령의 동등성을 이 검사로 주장하지 않는다.

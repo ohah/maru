@@ -142,6 +142,10 @@ pub const ColumnAnchor = struct {
 /// 저장하는 것은 **anchor 범위 + focus 점**이고, 실제 선택 범위는 그 둘에서 **파생**한다(`start`/`end`).
 /// VSCode가 `selection`을 `selectionStart`와 `position`에서 계산하는 것과 같다 — 파생으로 두면
 /// 드래그 방향이 바뀔 때 상태를 고쳐 쓸 필요가 없다.
+/// One byte offset at a soft wrap can mean either adjacent visual row.
+/// Keep this separate from goal columns, which belong to vertical movement.
+pub const WrapAffinity = enum { next_row, prev_row };
+
 pub const Selection = struct {
     /// anchor 범위의 시작. 단순 클릭이면 `anchor_end`와 같다.
     ///
@@ -153,6 +157,7 @@ pub const Selection = struct {
     anchor_end: usize,
     /// 움직이는 끝(caret이 있는 쪽).
     focus: usize,
+    wrap_affinity: WrapAffinity = .next_row,
     kind: AnchorKind = .simple,
     /// focus 쪽 목표 열.
     goal: Goal = .none,
@@ -393,6 +398,7 @@ pub fn mergeOverlapping(items: []Selection, primary: usize) struct { len: usize,
     const p_anchor_start = items[primary].anchor_start;
     const p_anchor_end = items[primary].anchor_end;
     const p_focus = items[primary].focus;
+    const p_affinity = items[primary].wrap_affinity;
 
     std.mem.sort(Selection, items, {}, lessByStart);
 
@@ -404,7 +410,7 @@ pub fn mergeOverlapping(items: []Selection, primary: usize) struct { len: usize,
     while (read < items.len) : (read += 1) {
         const cur = items[read];
         const is_primary = cur.anchor_start == p_anchor_start and
-            cur.anchor_end == p_anchor_end and cur.focus == p_focus;
+            cur.anchor_end == p_anchor_end and cur.focus == p_focus and cur.wrap_affinity == p_affinity;
 
         if (write > 0 and items[write - 1].mergesWith(cur)) {
             const prev = items[write - 1];
@@ -413,12 +419,15 @@ pub fn mergeOverlapping(items: []Selection, primary: usize) struct { len: usize,
             // 방향은 **살아남은 쪽**의 것을 쓴다 — 병합 결과의 caret이 어디 있어야 하는지는 정할 수
             // 없고, 임의로 뒤집으면 다음 shift+이동이 반대로 간다.
             const reversed = prev.isReversed();
+            const merged_focus = if (reversed) lo else hi;
+            const primary_here = is_primary or (primary_found and new_primary == write - 1);
             items[write - 1] = .{
                 // 병합 결과의 anchor는 **점**이다. 원래 잡았던 단어/줄 경계는 이미 의미를 잃었다 —
                 // 합쳐진 범위는 그 어느 단어와도 대응하지 않는다.
                 .anchor_start = if (reversed) hi else lo,
                 .anchor_end = if (reversed) hi else lo,
-                .focus = if (reversed) lo else hi,
+                .focus = merged_focus,
+                .wrap_affinity = if (primary_here and merged_focus == p_focus) p_affinity else if (merged_focus == prev.focus) prev.wrap_affinity else cur.wrap_affinity,
                 .kind = .simple,
                 // 목표 열도 버린다. 병합된 범위의 그것은 어느 쪽 것도 맞지 않는다.
                 .goal = .none,
@@ -1057,4 +1066,17 @@ test "RowPos: 사전식 순서 — 행이 먼저고 그 다음이 byte" {
     try t.expect(RowPos.eql(RowPos.min(a, b), a));
     try t.expect(RowPos.eql(RowPos.max(a, b), b));
     try t.expect(!RowPos.lessThan(a, a));
+}
+
+test "CME24 overlapping carets retain the primary visual side of the same byte" {
+    for ([_]WrapAffinity{ .next_row, .prev_row }) |side| {
+        var primary = Selection.at(8);
+        primary.wrap_affinity = side;
+        var other = Selection.at(8);
+        other.wrap_affinity = if (side == .prev_row) .next_row else .prev_row;
+        var items = [_]Selection{ other, primary };
+        const merged = mergeOverlapping(&items, 1);
+        try testing.expectEqual(@as(usize, 1), merged.len);
+        try testing.expectEqual(side, items[merged.primary].wrap_affinity);
+    }
 }

@@ -44,13 +44,11 @@ pub const Motion = enum {
 };
 
 /// 행 경계 offset 을 **어느 행의 것으로 읽을지**(§4 이음매). 행 경계 offset 은 「앞 행의 끝」이기도 하고 「뒤 행의 머리」이기도
-/// 한데 우리 모델에서는 같은 byte 하나라, **묻는 질문이 정한다**.
-pub const SeamSide = enum {
-    /// **뒤 행 머리**로 읽는다 — `⌘←` 가 "이 행의 첫 글자가 어디냐"를 물을 때.
-    next_row,
-    /// **앞 행 끝**으로 읽는다 — `⌘→` 가 "이미 이 행 끝이냐"를 물을 때.
-    prev_row,
-};
+/// 한데 우리 모델에서는 같은 byte 하나라, **selection이 보존한 시각 방향으로 정한다**.
+pub const SeamSide = selection.WrapAffinity;
+
+/// Offset and its visual side must travel together across a soft wrap.
+pub const Target = struct { offset: usize, affinity: selection.WrapAffinity = .next_row };
 
 /// 화면·구문 트리에 묻는 질의(호출자가 답한다). 답을 모르면 `null` — 그때는 논리 줄로 떨어진다(**오늘과 같은 동작**이라
 /// 잃는 것이 없다. 모를 때 추측해 두 번째 규칙을 만들지 않는다).
@@ -63,19 +61,24 @@ pub const Oracle = struct {
     /// caret 이 든 **시각 행**의 원본 byte 범위. 랩이 꺼졌거나 확실히 모르면 `null`.
     rowSpan: *const fn (ctx: *const anyopaque, focus: usize, seam: SeamSide) ?motion.VisualRow,
     /// 랩이 켜졌을 때 **한 시각 행** 위/아래로 옮긴 offset(목표 열을 행 축으로 되쓴다). 랩이 꺼졌거나 스냅숏 밖이면 `null`.
-    visualMove: *const fn (ctx: *const anyopaque, focus: usize, goal: *selection.Goal, down: bool) ?usize,
+    visualMove: *const fn (ctx: *const anyopaque, focus: usize, affinity: selection.WrapAffinity, goal: *selection.Goal, down: bool) ?Target,
     /// 괄호 짝(§3.9c — 강조 §5.1b 와 같은 출처). 짝이 없으면 `null`.
     bracketTarget: *const fn (ctx: *const anyopaque, from: usize) ?usize,
 };
 
 /// 한 커서를 옮긴 결과 offset. **선택을 어떻게 다룰지는 호출자가 정한다**(Shift 여부).
 pub fn movedOffset(content: []const u8, lines: LineIndex, sel: Selection, how: Motion, goal: *selection.Goal, o: Oracle) usize {
+    return movedTarget(content, lines, sel, how, goal, o).offset;
+}
+
+pub fn movedTarget(content: []const u8, lines: LineIndex, sel: Selection, how: Motion, goal: *selection.Goal, o: Oracle) Target {
     const focus = @min(sel.focus, content.len);
     const line_idx = lines.lineAt(focus);
-    const line = lines.line(line_idx) orelse return focus;
+    const line = lines.line(line_idx) orelse return .{ .offset = focus };
     const map = o.map;
 
-    return switch (how) {
+    var affinity: selection.WrapAffinity = .next_row;
+    const offset = switch (how) {
         // **가로 이동은 목표 열을 버린다**(§3.2) — 남기면 다음 세로 이동이 편집 전 열로 튄다.
         .char_left => blk: {
             goal.* = .none;
@@ -108,16 +111,17 @@ pub fn movedOffset(content: []const u8, lines: LineIndex, sel: Selection, how: M
         // **한 번 더 누르면 넓어진다** — 단계는 `motion.zig` 의 `lineStartScope` 가 소유한다.
         .row_then_line_start => blk: {
             goal.* = .none;
-            if (o.rowSpan(o.ctx, focus, .next_row)) |row| {
+            if (o.rowSpan(o.ctx, focus, sel.wrap_affinity)) |row| {
                 if (motion.lineStartScope(content, line, focus, row) == .row)
                     break :blk motion.rowStartSmart(content, line, row);
             }
             break :blk motion.lineStartSmart(content, line, focus);
         },
         .row_then_line_end => blk: {
-            if (o.rowSpan(o.ctx, focus, .prev_row)) |row| {
+            if (o.rowSpan(o.ctx, focus, sel.wrap_affinity)) |row| {
                 if (motion.lineEndScope(line, focus, row) == .row) {
                     goal.* = .none;
+                    if (row.end < line.contentEnd()) affinity = .prev_row;
                     break :blk motion.rowEnd(line, row);
                 }
             }
@@ -156,7 +160,10 @@ pub fn movedOffset(content: []const u8, lines: LineIndex, sel: Selection, how: M
             // 이동은 `null`이라 아래 논리 줄 경로로 떨어지고, caret 노출이 스크롤을 따라오게 하므로
             // 다음 눌림에는 다시 시각 축으로 돈다.
             if (how == .line_up or how == .line_down) {
-                if (o.visualMove(o.ctx, focus, goal, how == .line_down)) |v| break :blk v;
+                if (o.visualMove(o.ctx, focus, sel.wrap_affinity, goal, how == .line_down)) |v| {
+                    affinity = v.affinity;
+                    break :blk v.offset;
+                }
             }
             const step: usize = switch (how) {
                 .line_up, .line_down => 1,
@@ -172,6 +179,7 @@ pub fn movedOffset(content: []const u8, lines: LineIndex, sel: Selection, how: M
             break :blk motion.offsetForGoal(content, dest, goal.*, map);
         },
     };
+    return .{ .offset = offset, .affinity = affinity };
 }
 
 /// 커서 집합 — 제품은 primary 를 단수 필드에 들므로 그 인덱스를 함께 낸다.
@@ -201,6 +209,7 @@ pub fn moveAll(content: []const u8, lines: LineIndex, primary: Selection, extras
 
 fn stepOne(content: []const u8, lines: LineIndex, sel: Selection, how: Motion, extend: bool, jump: ?usize, jumped: bool, o: Oracle, moved_any: *bool) Selection {
     var goal = sel.goal;
+    var affinity: selection.WrapAffinity = .next_row;
     const off = if (jumped) blk: {
         // 도착이 없으면 **앞쪽 끝으로 접힌다**(VS Code 가 `position` = 선택 시작을 돌려준다). 가로 이동이라 목표 열을 버린다.
         goal = .none;
@@ -211,13 +220,18 @@ fn stepOne(content: []const u8, lines: LineIndex, sel: Selection, how: Motion, e
         // ([2,4] 에서 → 가 5). 가로 이동이라 목표 열을 버린다.
         goal = .none;
         break :blk if (how == .char_left) @min(sel.start(), content.len) else @min(sel.end(), content.len);
-    } else movedOffset(content, lines, sel, how, &goal, o);
+    } else blk: {
+        const target = movedTarget(content, lines, sel, how, &goal, o);
+        affinity = target.affinity;
+        break :blk target.offset;
+    };
     var next = if (extend)
         Selection.fromAnchorRange(sel.anchorLo(), sel.anchorHi(), off, sel.kind)
     else
         Selection.at(off);
     next.goal = goal;
-    if (off != sel.focus or (!extend and !sel.isEmpty())) moved_any.* = true;
+    next.wrap_affinity = affinity;
+    if (affinity != sel.wrap_affinity or off != sel.focus or (!extend and !sel.isEmpty())) moved_any.* = true;
     return next;
 }
 
@@ -243,7 +257,8 @@ pub fn planAddVertically(allocator: std.mem.Allocator, content: []const u8, line
         // **anchor 와 focus 를 각자의 목표 열로 옮긴다** — 하나만 옮기면 선택이 찌그러진다. 세로 이동과 같은
         // `movedOffset` 이다(랩이면 시각 행, 아니면 논리 줄, 문서 끝은 clamp) — 그 규칙을 두 번째로 적으면 둘이 갈린다.
         var focus_goal = sel.goal;
-        const new_focus = movedOffset(content, lines, sel, how, &focus_goal, o);
+        const focus_target = movedTarget(content, lines, sel, how, &focus_goal, o);
+        const new_focus = focus_target.offset;
         const anchor_lo = sel.anchorLo();
         var anchor_goal = sel.anchor_goal;
         const new_anchor = if (anchor_lo == sel.focus)
@@ -258,6 +273,7 @@ pub fn planAddVertically(allocator: std.mem.Allocator, content: []const u8, line
         if (new_focus == sel.focus and new_anchor == anchor_lo) continue;
         // `kind` 는 승계하지 않는다(§3.2b) — 한 줄 위에 같은 낱말이 있을 이유가 없다.
         var copy = Selection.fromPoints(new_anchor, new_focus);
+        copy.wrap_affinity = focus_target.affinity;
         copy.goal = focus_goal; // 옮기며 세운 목표 열을 사본이 이어받는다(§3.2)
         copy.anchor_goal = anchor_goal;
         buf.append(allocator, copy) catch break;
@@ -432,7 +448,7 @@ const plain = struct {
     fn rowSpan(_: *const anyopaque, _: usize, _: SeamSide) ?motion.VisualRow {
         return null;
     }
-    fn visualMove(_: *const anyopaque, _: usize, _: *selection.Goal, _: bool) ?usize {
+    fn visualMove(_: *const anyopaque, _: usize, _: selection.WrapAffinity, _: *selection.Goal, _: bool) ?Target {
         return null;
     }
     fn bracketTarget(_: *const anyopaque, _: usize) ?usize {
@@ -553,4 +569,36 @@ test "wordOrLineRange·widenedFocus·spansLines" {
     try testing.expectEqual(@as(usize, 7), widenedFocus(content, lines, word, 5));
     try testing.expect(!spansLines(content, lines, &.{ Selection.fromPoints(0, 3), Selection.at(9) }));
     try testing.expect(spansLines(content, lines, &.{ Selection.at(0), Selection.fromPoints(5, 10) }));
+}
+
+test "CME22 command edges preserve wrap affinity and shift anchors without crossing physical lines" {
+    const src = "    abcdefghijklmnopqrst\nnext\n";
+    var index = try line_index.build(std.testing.allocator, src);
+    defer index.deinit();
+    const Rows = struct {
+        fn span(_: *const anyopaque, focus: usize, side: SeamSide) ?motion.VisualRow {
+            if (focus >= 24) return null;
+            const piece = if (side == .prev_row and focus > 0 and focus % 8 == 0) (focus - 1) / 8 else focus / 8;
+            return .{ .start = piece * 8, .end = @min(piece * 8 + 8, 24) };
+        }
+    };
+    var o = plain.oracle();
+    o.rowSpan = Rows.span;
+    for ([_]usize{ 8, 16 }) |seam| {
+        var goal: selection.Goal = .none;
+        const entry = Selection.at(seam);
+        const current = movedTarget(src, index, entry, .row_then_line_end, &goal, o);
+        try std.testing.expectEqual(@min(seam + 8, 24), current.offset);
+        var previous = entry;
+        previous.wrap_affinity = .prev_row;
+        const extended = movedTarget(src, index, previous, .row_then_line_end, &goal, o);
+        try std.testing.expectEqual(@as(usize, 24), extended.offset);
+        var extras = [_]Selection{Selection.at(25)};
+        const primary = moveAll(src, index, entry, &extras, .row_then_line_end, true, null, o).?;
+        try std.testing.expectEqual(seam, primary.anchorLo());
+        try std.testing.expectEqual(current.offset, primary.focus);
+        try std.testing.expectEqual(current.affinity, primary.wrap_affinity);
+        try std.testing.expectEqual(@as(usize, 29), extras[0].focus);
+        try std.testing.expectEqual(selection.Goal.none, primary.goal);
+    }
 }

@@ -122,6 +122,13 @@ pub const default_max_columns: u32 = 100_000;
 /// 그대로 쓰는데, 가로 스크롤 상한을 세는 쪽이 다른 값을 쓰면 가장 긴 줄의 끝에 못 닿는다.
 pub const default_tab_width: u8 = 4;
 
+/// Read-only visual affinity for a caret at a soft wrap. Ordinary callers can
+/// omit it; offsets then belong to the following row as before.
+pub const CaretAffinity = struct {
+    ctx: *const anyopaque,
+    beforeWrap: *const fn (*const anyopaque, usize, u32) bool,
+};
+
 pub const Props = struct {
     /// **줄마다의 전개 시작 힌트**(`lines` 와 같은 축, 짧아도 된다). 가로로 민 상태에서 전개가
     /// 앞을 다시 걷지 않게 한다 — 그 비용은 화면 폭이 아니라 **밀린 거리**에 비례한다.
@@ -233,6 +240,7 @@ pub const Props = struct {
     /// 두 곳에 생긴다 — §5.4가 *"view와 hitTest가 하나의 픽셀-레이아웃 소스를 공유한다"*를 MUST로
     /// 둔 자리이고, 이 슬라이스가 실제로 그 두 번째 출처를 지었다가 걷어냈다.
     carets: ?[]const []const u32 = null,
+    caret_affinity: ?CaretAffinity = null,
     /// 지금 커서를 그릴 순간인가(blink). 세션의 `blink_visible`이 그대로 온다 —
     /// rename·검색 caret이 쓰는 값과 같은 것이라 **깜빡임 위상이 화면 안에서 하나다.**
     caret_visible: bool = true,
@@ -746,8 +754,10 @@ fn buildStaged(props: Props, scratch: Scratch, stages: ?*B2Stages) Written {
     // 쪽만 알기 때문이다(§4 세로 축) — 둘이 각자 세면 랩된 줄에서 번호가 본문과 어긋난다.
     var n: usize = 0;
     var caret_cols_used: usize = 0;
+    var caret_upstream_used: usize = 0;
     while (n < scratch.content_rows.len and props.first_line + n < props.lines.len) : (n += 1) {
         const li = props.first_line + n;
+        const caret_columns = caretColsFor(props, scratch.caret_cols, &caret_cols_used, &caret_upstream_used, li);
         scratch.content_rows[n] = .{
             .bytes = props.lines[li],
             // **짧은 배열을 허용한다** — 없으면 힌트 없이 처음부터 걷는다(답은 같고 비용만 다르다).
@@ -756,7 +766,8 @@ fn buildStaged(props: Props, scratch: Scratch, stages: ?*B2Stages) Written {
             .widget = widgetAt(props, li),
             // **짧은 배열을 허용한다** — 없는 줄은 무색이다(위 `line_colors` 계약).
             .colors = if (li < props.line_colors.len) props.line_colors[li] else &.{},
-            .caret_cols = caretColsFor(props, scratch.caret_cols, &caret_cols_used, li),
+            .caret_cols = caret_columns.normal,
+            .caret_upstream_cols = caret_columns.upstream,
             .inlays = props.line_inlays.at(li),
         };
     }
@@ -1560,7 +1571,7 @@ fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map
         // `row.screen_row`가 아닌 이유는 그 값이 이 배열의 인덱스와 다를 수 있어서다.
         const y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px);
         for (offsets) |off| {
-            const at = caretOnRow(props, layout, row, idx, line, off) orelse continue;
+            const at = caretOnRow(props, layout, row, followingStart(visual, i), idx, line, off) orelse continue;
             if (n >= out.len) {
                 op_truncated.* = true;
                 return n;
@@ -1568,7 +1579,8 @@ fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map
             const col = at.col;
             const on_screen = at.on_screen;
             const x = props.rect.x +
-                @as(i32, @intCast((@as(u32, layout.contentLeft()) + on_screen) * props.cell_w_px));
+                @as(i32, @intCast((@as(u32, layout.contentLeft()) + on_screen) * props.cell_w_px)) +
+                (if (at.right_edge) @as(i32, @intCast(props.cell_w_px -| @min(caret_width_px, props.cell_w_px))) else 0);
             // **`block`·`underline`은 글자 폭을 덮는다** — 한글·이모지는 두 칸이라 한 칸만 칠하면
             // 글자의 절반에 걸친다. 폭은 `stepColumn`이 준다(§5.4 — 열 산술의 단일 출처. 여기서
             // `2`를 다시 세면 탭·위험 문자에서 본문과 갈린다).
@@ -1578,19 +1590,20 @@ fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map
             };
             // 화면 오른쪽 끝을 넘지 않게 자른다 — 넘으면 이웃 pane 위로 번진다.
             const span = @min(cells, layout.content.width - on_screen);
+            const width_px = if (at.right_edge) @as(u32, @min(caret_width_px, props.cell_w_px)) else span * props.cell_w_px;
             // **불투명하게 그린다.** 띠·검색은 글자를 읽어야 해서 알파로 얹지만, 커서는 그 자리에
             // 글자가 없거나(막대 — 글자 **사이**다) 본문이 그 글자를 배경색으로 그린다(`block`).
             // 반투명하게 두면 배경색이 비쳐 흐릿해진다.
             out[n] = .{
                 .quad = .{
                     .rect = switch (props.caret_shape) {
-                        .bar => .{ .x = x, .y = y, .w = caret_width_px, .h = props.cell_h_px },
-                        .block => .{ .x = x, .y = y, .w = span * props.cell_w_px, .h = props.cell_h_px },
+                        .bar => .{ .x = x, .y = y, .w = if (at.right_edge) width_px else caret_width_px, .h = props.cell_h_px },
+                        .block => .{ .x = x, .y = y, .w = width_px, .h = props.cell_h_px },
                         // **글자 밑에 붙인다** — 셀 아래쪽 `caret_width_px`만큼.
                         .underline => .{
                             .x = x,
                             .y = y + @as(i32, @intCast(props.cell_h_px -| caret_width_px)),
-                            .w = span * props.cell_w_px,
+                            .w = width_px,
                             .h = caret_width_px,
                         },
                     },
@@ -1605,12 +1618,35 @@ fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map
 
 /// caret 하나가 **이 시각 행에** 서는가 — 서면 그 열(`col`, 줄 기준)과 화면 열(`on_screen`, 본문 기준). 랩이면 조각마다, 아니면 가로로 보이는
 /// 폭 안일 때만 선다. **caret 그리기와 현재 줄 강조(§5.1b)가 같이 쓴다** — 랩 경계에서 둘이 다른 행을 고르면 상자와 caret 이 갈린다.
-fn caretOnRow(props: Props, layout: geometry.Layout, row: visual_map.VisualRow, idx: usize, line: []const u8, off: u32) ?struct { col: u32, on_screen: u32 } {
-    const col = columnOfOffset(line, props.tab_width, off, row.start_col + layout.content.width, props.line_inlays.at(idx));
-    if (col < row.start_col) return null; // 이 행보다 앞이다(랩)
+fn beforeWrap(props: Props, idx: usize, off: u32) bool {
+    if (!props.wrap) return false;
+    const affinity = props.caret_affinity orelse return false;
+    return affinity.beforeWrap(affinity.ctx, idx, off);
+}
+
+fn followingStart(visual: []const visual_map.VisualRow, i: usize) ?u32 {
+    if (i + 1 < visual.len and visual[i + 1].kind == .text and visual[i + 1].line == visual[i].line)
+        return visual[i + 1].start_col;
+    return null;
+}
+
+fn caretOnRow(props: Props, layout: geometry.Layout, row: visual_map.VisualRow, next_start: ?u32, idx: usize, line: []const u8, off: u32) ?struct { col: u32, on_screen: u32, right_edge: bool } {
+    if (off < row.start_byte) return null;
+    const offsets = [_]u32{off};
+    var columns: [1]u32 = undefined;
+    if (content.columnsAtOffsetsWithFrom(line, props.tab_width, &offsets, &columns, row.start_col + layout.content.width, props.line_inlays.at(idx), .{ .byte = row.start_byte, .col = row.start_byte_col }) == 0) return null;
+    const col = columns[0];
+    const previous = beforeWrap(props, idx, off);
+    if (col < row.start_col) return null;
+    if (previous and row.piece > 0 and col == row.start_col) return null;
+    if (next_start) |end| {
+        if (col > end or (col == end and !previous)) return null;
+    }
     const on_screen = col - row.start_col;
-    if (on_screen >= layout.content.width) return null; // 이 행보다 뒤다
-    return .{ .col = col, .on_screen = on_screen };
+    if (on_screen > layout.content.width) return null;
+    const right_edge = on_screen == layout.content.width;
+    if (right_edge and (!props.wrap or layout.content.width == 0 or (!previous and off < line.len))) return null;
+    return .{ .col = col, .on_screen = if (right_edge) on_screen - 1 else on_screen, .right_edge = right_edge };
 }
 
 /// **현재 줄 강조**(visual-mapping §5.1b) — caret 이 선 시각 행마다 2px 테두리 상자(채움 없음). `line`·`all` 의 본문 상자는 선택이 전부 비었을
@@ -1638,7 +1674,7 @@ fn paintLineHighlight(props: Props, layout: geometry.Layout, visual: []const vis
         if (offsets.len == 0) continue;
         const here = if (!props.wrap) true else blk: {
             for (offsets) |off| {
-                if (caretOnRow(props, layout, row, idx, props.lines[idx], off) != null) break :blk true;
+                if (caretOnRow(props, layout, row, followingStart(visual, i), idx, props.lines[idx], off) != null) break :blk true;
             }
             break :blk false;
         };
@@ -1810,7 +1846,7 @@ fn paintWhitespace(props: Props, layout: geometry.Layout, visual: []const visual
                 // 걸으므로 행 끝을 넘는 자리는 모이지 않는다). 뜻으로 둔다 — 「기호는 제 행 칸에만」.
                 if (col < r.start_col or col >= r.row_end) continue;
                 while (ci < block_carets.len and block_carets[ci] < off) ci += 1;
-                if (ci < block_carets.len and block_carets[ci] == off) {
+                if (ci < block_carets.len and block_carets[ci] == off and !(beforeWrap(props, idx, off) and col == r.start_col and visual[r.visual].piece > 0)) {
                     if (run_n > 0) n += emitWhitespace(props, out[n..], run_col, y, whitespace_dots[run_n - 1 ..][0..1], run_n, op_truncated);
                     run_n = 0;
                     continue;
@@ -1918,24 +1954,28 @@ pub const bracket_match_alpha: u8 = 0x1a;
 /// 안 보이는 순간이면 빈 조각이다 — 그때는 본문이 반전할 것이 없다.
 ///
 /// **열 변환은 `columnOfOffset` 하나가 한다**(§5.4). 여기서 다시 세면 탭스톱 규칙이 두 곳에 생긴다.
-fn caretColsFor(props: Props, store: []u32, used: *usize, line_idx: usize) []const u32 {
-    if (props.caret_shape != .block or !props.caret_visible) return &.{};
-    const rows = props.carets orelse return &.{};
-    if (line_idx >= rows.len) return &.{};
-    const offsets = rows[line_idx];
-    if (offsets.len == 0) return &.{};
-    const line = if (line_idx < props.lines.len) props.lines[line_idx] else return &.{};
-
+const CaretColumns = struct { normal: []const u32 = &.{}, upstream: []const u32 = &.{} };
+fn caretColsFor(props: Props, store: []u32, used: *usize, upstream_used: *usize, line_idx: usize) CaretColumns {
+    if (props.caret_shape != .block or !props.caret_visible) return .{};
+    const rows = props.carets orelse return .{};
+    if (line_idx >= rows.len or line_idx >= props.lines.len) return .{};
+    const line = props.lines[line_idx];
     const start = used.*;
-    for (offsets) |off| {
-        if (used.* >= store.len) break; // 저장소 끝 — 남은 커서는 반전 없이 사각만 그려진다
-        // **줄 끝의 커서는 반전할 글자가 없다.** 빈 칸을 반전 목록에 넣으면 다음 줄의 훑기가
-        // 헛돌 뿐이라 아예 안 넣는다.
+    const upstream_end = store.len - upstream_used.*;
+    for (rows[line_idx]) |off| {
         if (off >= line.len) continue;
-        store[used.*] = columnOfOffset(line, props.tab_width, off, std.math.maxInt(u32), props.line_inlays.at(line_idx));
+        const upstream = beforeWrap(props, line_idx, off);
+        const needed: usize = if (upstream) 2 else 1;
+        if (store.len - upstream_used.* - used.* < needed) break;
+        const col = columnOfOffset(line, props.tab_width, off, std.math.maxInt(u32), props.line_inlays.at(line_idx));
+        store[used.*] = col;
         used.* += 1;
+        if (upstream) {
+            upstream_used.* += 1;
+            store[store.len - upstream_used.*] = col;
+        }
     }
-    return store[start..used.*];
+    return .{ .normal = store[start..used.*], .upstream = store[store.len - upstream_used.* .. upstream_end] };
 }
 
 /// 줄 안 byte offset이 몇 열인가. `columnsAtOffsets`를 하나짜리로 부르는 얇은 감쌈이다 —
@@ -7646,4 +7686,43 @@ test "FND39 현재 여러 줄 매치는 모든 조각을 우선하고 인접 매
     const end_at_zero = CurrentMatch{ .line = 0, .start = 0, .end_line = 1, .end_byte = 0 };
     try testing.expect(!end_at_zero.includes(1, 0));
     try testing.expect(!props.search_current.?.includes(1, 1));
+}
+
+test "CME20 wrap affinity paints exactly one caret on the intended row for every shape" {
+    const line = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
+    const Affinity = struct {
+        fn before(ctx: *const anyopaque, _: usize, _: u32) bool {
+            return @as(*const bool, @ptrCast(@alignCast(ctx))).*;
+        }
+    };
+    for ([_]CaretShape{ .bar, .block, .underline }) |shape| {
+        for ([_]bool{ false, true }) |before| {
+            var buffers: TestBuffers = .{};
+            var props = testProps(&.{line}, true);
+            props.caret_shape = shape;
+            const layout = layoutOf(props);
+            const offset: u32 = layout.content.width;
+            props.carets = &.{&.{offset}};
+            props.caret_affinity = .{ .ctx = &before, .beforeWrap = Affinity.before };
+            const written = build(props, buffers.scratch());
+            var count: usize = 0;
+            for (buffers.ops[0..written.ops]) |op| {
+                if (op != .quad or op.quad.fill_role != .cursor) continue;
+                count += 1;
+                const expected_y: i32 = (if (before) @as(i32, 0) else @as(i32, props.cell_h_px)) + (if (shape == .underline) @as(i32, @intCast(props.cell_h_px -| caret_width_px)) else 0);
+                try testing.expectEqual(expected_y, op.quad.rect.y);
+                const right = @as(i32, @intCast((@as(u32, layout.contentLeft()) + layout.content.width) * props.cell_w_px));
+                try testing.expect(op.quad.rect.x + @as(i32, @intCast(op.quad.rect.w)) <= right);
+            }
+            try testing.expectEqual(@as(usize, 1), count);
+            props.visible_rows = 1;
+            props.rect.h = props.cell_h_px;
+            const clipped = build(props, buffers.scratch());
+            var clipped_count: usize = 0;
+            for (buffers.ops[0..clipped.ops]) |op| {
+                if (op == .quad and op.quad.fill_role == .cursor) clipped_count += 1;
+            }
+            try testing.expectEqual(@as(usize, if (before) 1 else 0), clipped_count);
+        }
+    }
 }

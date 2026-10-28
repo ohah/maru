@@ -2663,6 +2663,9 @@ const TermRuntime = struct {
     editor_caret_rows: [][]const u32 = &.{},
     /// 위 배열이 가리키는 저장소. 커서 하나가 한 자리이므로 **커서 수**만큼이면 된다.
     editor_caret_buf: []u32 = &.{},
+    /// Sorted document offsets whose caret belongs to the preceding wrapped row.
+    editor_caret_before_wrap: []u32 = &.{},
+    editor_caret_before_wrap_len: usize = 0,
     /// **검색 결과**를 줄별 범위로 자른 것(§5.1). `editor_selection_marks`와 자리도 축도 같고
     /// **저장소 크기만 다르다** — 선택은 이어진 하나라 줄마다 최대 하나지만, 매치는 한 줄에
     /// 여럿이다. 그 하나 때문에 선택 저장소를 재사용하지 않는다(`buf[i..i+1]`로 자르는 그 구조가

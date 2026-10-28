@@ -977,6 +977,7 @@ fn caretShape(self: *AppSession) chrome_editor.frame.CaretShape {
 
 /// 커서에서 나오는 본문 장식(§5.1b) — `buildPaneOps` 가 frame 에 그대로 옮긴다. 기본값은 「없음」이다(비교 뷰·상태 줄).
 pub const Decorations = struct {
+    caret_affinity: ?chrome_editor.frame.CaretAffinity = null,
     line_highlight: chrome_editor.frame.LineHighlight = .none,
     selection_empty: bool = true,
     active_line: ?usize = null,
@@ -1027,7 +1028,7 @@ fn paneDecorations(self: *AppSession, term: *Term) Decorations {
         break :blk sticky_client.visibleOf(if (term.rt.editor_visible_lines.len > 0) term.rt.editor_visible_numbers else &.{}, doc_line, axis_len);
     };
     const gw = guides_client.window(self, term);
-    return .{ .line_highlight = mode, .selection_empty = empty, .active_line = active, .bracket_marks = brackets_client.marks(self, term), .indent_guides = gw.win, .guide_unit = gw.unit, .render_whitespace = whitespaceModeFor(self) };
+    return .{ .caret_affinity = .{ .ctx = term, .beforeWrap = caretBeforeWrap }, .line_highlight = mode, .selection_empty = empty, .active_line = active, .bracket_marks = brackets_client.marks(self, term), .indent_guides = gw.win, .guide_unit = gw.unit, .render_whitespace = whitespaceModeFor(self) };
 }
 
 pub fn buildPaneOps(
@@ -1106,7 +1107,7 @@ pub fn buildPaneOps(
     // (2026-08-14 실측). 열 수·스크롤바 gutter를 **이 사각으로** 계산해야 막대가 뷰 밖으로 안 밀린다.
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
-    const side: diff_frame.Side = .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .occurrence_marks = occurrence_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .line_inlays = line_inlays, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{}, .sticky = sticky, .line_highlight = deco.line_highlight, .selection_empty = deco.selection_empty, .active_line = deco.active_line, .bracket_marks = deco.bracket_marks, .indent_guides = deco.indent_guides, .guide_unit = deco.guide_unit, .render_whitespace = deco.render_whitespace };
+    const side: diff_frame.Side = .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .occurrence_marks = occurrence_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .line_inlays = line_inlays, .carets = carets, .caret_affinity = deco.caret_affinity, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{}, .sticky = sticky, .line_highlight = deco.line_highlight, .selection_empty = deco.selection_empty, .active_line = deco.active_line, .bracket_marks = deco.bracket_marks, .indent_guides = deco.indent_guides, .guide_unit = deco.guide_unit, .render_whitespace = deco.render_whitespace };
     const shared: diff_frame.Shared = .{ .first_line = first_line, .first_piece = first_piece, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px };
     // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
     // px→셀로 바꾼다)에 여백이 먹히지 않는다 — 여백은 호출자가 **pane 원점**에 걸고, 배경은
@@ -3622,6 +3623,24 @@ pub fn copySelection(self: *AppSession) bool {
 /// (뒤로 끌면 focus가 앞쪽이다).
 ///
 /// 저장소는 `Term.rt`가 들고 재사용한다(프레임마다 잡지 않는다 — 마크가 그러듯).
+// The renderer borrows this read-only cache for the current frame. A binary
+// lookup avoids scanning all selections once for every caret in a large set.
+fn caretBeforeWrap(ctx: *const anyopaque, line_idx: usize, byte: u32) bool {
+    const term: *const Term = @ptrCast(@alignCast(ctx));
+    if (term.rt.editor_symbol_preview_drawing) return false;
+    const doc = term.rt.editorDocument().opened orelse return false;
+    const line = visibleDocLine(doc, term.rt.editor_visible_numbers, term.rt.editor_visible_lines, line_idx) orelse return false;
+    const off = line.start + @min(@as(usize, byte), line.contentLen());
+    const positions = term.rt.editor_caret_before_wrap[0..term.rt.editor_caret_before_wrap_len];
+    var lo: usize = 0;
+    var hi = positions.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (positions[mid] < off) lo = mid + 1 else hi = mid;
+    }
+    return lo < positions.len and positions[lo] == off;
+}
+
 fn buildCaretRows(self: *AppSession, term: *Term) ?[]const []const u32 {
     // 미리보기는 줄 강조의 위치만 제공한다. 실제 caret 그리기는 호출자가 끈다.
     var iter = if (term.rt.editor_symbol_preview_drawing)
@@ -3637,12 +3656,19 @@ fn buildCaretRows(self: *AppSession, term: *Term) ?[]const []const u32 {
     const lines_len = if (visible.len > 0) visible.len else term.rt.editor_lines.len;
     if (lines_len == 0) return null;
 
-    if (term.rt.editor_caret_rows.len < lines_len or term.rt.editor_caret_buf.len < cursor_count) {
+    if (term.rt.editor_caret_rows.len < lines_len or term.rt.editor_caret_buf.len < cursor_count or term.rt.editor_caret_before_wrap.len < cursor_count) {
         const grown_rows = self.allocator.alloc([]const u32, lines_len) catch return null;
         const grown_buf = self.allocator.alloc(u32, cursor_count) catch {
             self.allocator.free(grown_rows);
             return null;
         };
+        const grown_before = self.allocator.alloc(u32, cursor_count) catch {
+            self.allocator.free(grown_rows);
+            self.allocator.free(grown_buf);
+            return null;
+        };
+        if (term.rt.editor_caret_before_wrap.len > 0) self.allocator.free(term.rt.editor_caret_before_wrap);
+        term.rt.editor_caret_before_wrap = grown_before;
         if (term.rt.editor_caret_rows.len > 0) self.allocator.free(term.rt.editor_caret_rows);
         if (term.rt.editor_caret_buf.len > 0) self.allocator.free(term.rt.editor_caret_buf);
         term.rt.editor_caret_rows = grown_rows;
@@ -3656,12 +3682,18 @@ fn buildCaretRows(self: *AppSession, term: *Term) ?[]const []const u32 {
     // 그것을 단언한다), 커서 추가 순서로 채우면 그 계약이 깨진다. 띠 쪽에서 겪은 그 결함이다.
     var focuses = buf;
     var n: usize = 0;
+    term.rt.editor_caret_before_wrap_len = 0;
     while (iter.next()) |sel| {
+        if (sel.wrap_affinity == .prev_row) {
+            term.rt.editor_caret_before_wrap[term.rt.editor_caret_before_wrap_len] = @intCast(@min(sel.focus, doc.file.content.len));
+            term.rt.editor_caret_before_wrap_len += 1;
+        }
         focuses[n] = @intCast(@min(sel.focus, doc.file.content.len));
         n += 1;
     }
     focuses = focuses[0..n];
     std.mem.sort(u32, focuses, {}, std.sort.asc(u32));
+    std.mem.sort(u32, term.rt.editor_caret_before_wrap[0..term.rt.editor_caret_before_wrap_len], {}, std.sort.asc(u32));
 
     // 줄과 커서가 둘 다 문서 순서이므로 함께 걷는다(띠와 같은 병합 훑기).
     var first: usize = 0;
@@ -3920,9 +3952,10 @@ pub fn restoreScrollAnchor(self: *AppSession, term: *Term, saved: ?ScrollAnchor,
 /// 다시 시각 축으로 돈다. **모를 때 추측해 두 번째 규칙을 만드는 것보다 낫다.**
 ///
 /// **이음매(`assoc`)를 여기서 정한다**(§4 — 그동안 "부수효과"로 남아 있던 자리): 목표 열이 행
-/// 경계에 정확히 걸리면 **뒤 행의 머리**를 고른다. `paintCarets`의 열 거르기가 이미 그렇게 그리고
-/// 있었고(그래서 화면과 일치한다), CM6의 `assoc = 1`과도 같다.
-fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, goal: *editor_selection.Goal, down: bool) ?usize {
+/// 경계에서는 selection의 시각 방향을 읽는다. 보통은 뒤 행 머리이며 줄 끝 이동으로 도착한
+/// `prev_row`는 앞 행 끝이다. caret 그리기도 같은 상태를 읽는다. 예전에는 뒤 행으로만 그리고
+/// 있었으므로 이동 결과와 그리기가 서로 다른 행을 가리킬 수 있었다.
+fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, affinity: editor_selection.WrapAffinity, goal: *editor_selection.Goal, down: bool) ?cursor_ops.Target {
     // **랩이 꺼졌으면 논리 줄 경로로 보낸다.** 그때 조각은 줄과 1:1이라 두 경로가 **같은 답**을
     // 내므로(뮤턴트로 확인 — 이 분기를 지워도 아무 판정자가 안 깨진다) 정답 문제가 아니라
     // **의존성 문제**다: 시각 경로는 렌더 스냅숏을 읽으므로, 굳이 랩도 아닌데 그것에 기대면
@@ -3957,7 +3990,8 @@ fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, goal: *editor_se
         if (vr.line != screen_line) continue;
         if (vr.start_col <= col) here = i else break;
     }
-    const cur = here orelse return null;
+    var cur = here orelse return null;
+    if (affinity == .prev_row and cur > 0 and snap[cur].start_col == col and snap[cur - 1].line == screen_line) cur -= 1;
     const target = if (down) cur + 1 else (if (cur == 0) return null else cur - 1);
     if (target >= snap.len) return null; // 화면 밖 — 논리 줄로 떨어진다
 
@@ -3982,7 +4016,12 @@ fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, goal: *editor_se
         .row_col => |v| v, // 이미 행 축이다 — 다시 빼지 않는다
     };
     goal.* = .{ .row_col = within };
-    return dest_line.start + map.offsetOf(map.ctx, dest_text, dest.start_col +| within);
+    const offset = dest_line.start + map.offsetOf(map.ctx, dest_text, dest.start_col +| within);
+    const end = if (target + 1 < snap.len and snap[target + 1].line == dest.line)
+        dest_line.start + map.offsetOf(map.ctx, dest_text, snap[target + 1].start_col)
+    else
+        dest_line.contentEnd();
+    return .{ .offset = offset, .affinity = if (offset == end and end < dest_line.contentEnd()) .prev_row else .next_row };
 }
 
 /// 행 경계 offset 을 **어느 행의 것으로 읽을지**(§4 이음매) — L2 `cursor_ops.SeamSide`.
@@ -3997,10 +4036,8 @@ const SeamSide = cursor_ops.SeamSide;
 /// **`start_byte` 를 안 쓴다**: 쪼개진 탭에서 조각 시작이 cluster 안쪽일 수 있어 그 cluster 시작을
 /// 가리킨다(`visual_map.zig` 의 그 필드 주석). `start_col` + `offsetOf` 가 화면과 같은 출처다.
 ///
-/// **이음매를 호출자가 고른다**(`seam`) — 행 경계 offset 은 「앞 행의 끝」이기도 하고 「뒤 행의
-/// 머리」이기도 한데, 우리 모델에서는 **같은 byte 하나**라 스스로 구별이 안 된다(VS Code 는 view
-/// position 이 둘이라 구별한다). 어느 쪽인지는 **묻는 질문이 정한다**: `⌘←` 는 "이 행의 첫 글자가
-/// 어디냐"를 묻고, `⌘→` 는 "이미 이 행 끝이냐"를 묻는다. 한쪽에 맞추면 다른 쪽이 틀린다.
+/// 이음매는 호출자가 selection의 `wrap_affinity`로 넘긴다. 같은 byte가 앞 행 끝과 뒤 행
+/// 머리를 함께 나타내므로, 키 종류가 아니라 실제 도착한 쪽을 읽어야 한다.
 fn visualRowSpan(self: *AppSession, term: *Term, focus: usize, seam: SeamSide) ?editor_motion.VisualRow {
     // **가드 모양은 `movedVisualRow` 와 같지만 무게가 다르다**(적대적 검증 2026-09-25 MA7).
     // 그쪽 주석은 「랩이 아니면 조각이 줄과 1:1이라 두 경로가 같은 답을 내므로 **정답 문제가 아니라
@@ -4099,9 +4136,9 @@ const MotionQuery = struct {
         const q: *const MotionQuery = @ptrCast(@alignCast(ctx));
         return visualRowSpan(q.self, q.term, focus, seam);
     }
-    fn visualMove(ctx: *const anyopaque, focus: usize, goal: *editor_selection.Goal, down: bool) ?usize {
+    fn visualMove(ctx: *const anyopaque, focus: usize, affinity: editor_selection.WrapAffinity, goal: *editor_selection.Goal, down: bool) ?cursor_ops.Target {
         const q: *const MotionQuery = @ptrCast(@alignCast(ctx));
-        return movedVisualRow(q.self, q.term, focus, goal, down);
+        return movedVisualRow(q.self, q.term, focus, affinity, goal, down);
     }
     // 강조(§5.1b)와 **같은 출처**다 — 트리가 있으면 트리(문자열·주석 속 괄호가 빠진다), 없으면 글자 훑기.
     fn bracketTarget(ctx: *const anyopaque, from: usize) ?usize {
@@ -4761,6 +4798,7 @@ pub fn editorImeCaretRect(self: *AppSession, term: *Term) ?chrome_draw.Rect {
 
 fn projectedDecorations(self: *AppSession, term: *Term, v: preedit_view.View, a: std.mem.Allocator, caret: usize) Decorations {
     var deco = paneDecorations(self, term);
+    deco.caret_affinity = null; // The preedit projection has its own cursor coordinate.
     deco.active_line = if (v.point(caret)) |p| p.row else null;
     deco.selection_empty = if (preeditSelected(term)) |selection| selection.start == selection.end else if (term.rt.editor_selection) |selection| selection.isEmpty() else true;
     deco.bracket_marks = preedit_view.marks(v, a, term.rt.editor_visible_numbers, deco.bracket_marks, null) catch null;
@@ -10224,6 +10262,9 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
     if (term.rt.editor_caret_buf.len > 0) self.allocator.free(term.rt.editor_caret_buf);
     term.rt.editor_caret_rows = &.{};
     term.rt.editor_caret_buf = &.{};
+    self.allocator.free(term.rt.editor_caret_before_wrap);
+    term.rt.editor_caret_before_wrap = &.{};
+    term.rt.editor_caret_before_wrap_len = 0;
 
     if (term.rt.editor_find_marks.len > 0) self.allocator.free(term.rt.editor_find_marks);
     if (term.rt.editor_find_mark_buf.len > 0) self.allocator.free(term.rt.editor_find_mark_buf);
@@ -74609,4 +74650,86 @@ test "RNM12 same sequence from another client cannot settle a rename request" {
     rename_client.onResponse(s, client, seq, null, true, "duplicate error");
     try testing.expectEqual(@as(u64, 1), s.editor_rename.notified_error);
     s.chrome_host.notice.dismiss();
+}
+
+test "MOV20 command arrows distinguish entering a wrap seam from reaching the preceding row end" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try lineEdgeFixture(&fx, testing.allocator, "mov20.txt");
+    const doc = term.rt.editorDocument().opened.?;
+    const line = doc.file.lines.line(0).?;
+    const text = doc.file.content[line.start..line.contentEnd()];
+    const rows = term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len];
+    try testing.expect(rows.len >= 4);
+    var pcm = productColumnMap(term);
+    const map = pcm.map();
+    const start = line.start + map.offsetOf(map.ctx, text, rows[1].start_col);
+    const end = line.start + map.offsetOf(map.ctx, text, rows[2].start_col);
+    // A model-position jump (and Down to the row start) enters the following
+    // visual row. Command+Right must reach that row's end, not the logical EOL.
+    term.rt.editor_selection = editor_selection.Selection.at(start);
+    try pressKey(&fx, .arrow_right, .{ .command = true });
+    try testing.expectEqual(end, term.rt.editor_selection.?.focus);
+    try testing.expectEqual(editor_selection.WrapAffinity.prev_row, term.rt.editor_selection.?.wrap_affinity);
+    fx.session.loaded_config.config.editor.cursor_shape = .bar;
+    fx.session.blink_visible = false;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var hidden = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+    hidden.dl.deinit(testing.allocator);
+    const base = try quadSnapshot(testing.allocator, fx.session);
+    defer testing.allocator.free(base);
+    fx.session.blink_visible = true;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var shown = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+    shown.dl.deinit(testing.allocator);
+    const cursor = try quadsAddedSince(testing.allocator, base, fx.session);
+    defer testing.allocator.free(cursor);
+    try testing.expectEqual(@as(usize, 1), cursor.len);
+    try testing.expectEqual(@as(f32, @floatFromInt(term.rt.editor_hit_geom.body_y + term.rt.editor_hit_geom.cell_h_px)), cursor[0].y);
+    // End -> Home stays in that same visual row; another End then End expands.
+    try pressKey(&fx, .arrow_left, .{ .command = true });
+    try testing.expectEqual(start, term.rt.editor_selection.?.focus);
+    try pressKey(&fx, .arrow_right, .{ .command = true, .shift = true });
+    try testing.expectEqual(start, term.rt.editor_selection.?.anchorLo());
+    try testing.expectEqual(end, term.rt.editor_selection.?.focus);
+    try pressKey(&fx, .arrow_left, .{ .command = true, .shift = true });
+    try testing.expect(term.rt.editor_selection.?.isEmpty());
+    try testing.expectEqual(start, term.rt.editor_selection.?.focus);
+    try pressKey(&fx, .arrow_right, .{ .command = true });
+    try pressKey(&fx, .arrow_right, .{ .command = true });
+    try testing.expectEqual(line.contentEnd(), term.rt.editor_selection.?.focus);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try pressKey(&fx, .arrow_down, .{});
+    try testing.expectEqual(start, term.rt.editor_selection.?.focus);
+    try pressKey(&fx, .arrow_right, .{ .command = true });
+    try testing.expectEqual(end, term.rt.editor_selection.?.focus);
+}
+
+test "MOV21 command arrows stay inside physical LF CRLF blank and Unicode lines" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_][]const u8{ "first\n    alpha beta\ntail\n", "first\r\n    alpha beta\r\ntail\r\n", "first\n\ntail\n", "first\n    \ntail\n", "first\n    한글 😀 end\ntail\n" }) |text| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try undoFixture(&fx, testing.allocator, "mov21.txt", text);
+        term.rt.editor_wrap = false;
+        const doc = term.rt.editorDocument().opened.?;
+        const line = doc.file.lines.line(1).?;
+        term.rt.editor_selection = editor_selection.Selection.at(line.start);
+        for (0..3) |_| {
+            try pressKey(&fx, .arrow_right, .{ .command = true });
+            try testing.expectEqual(line.contentEnd(), term.rt.editor_selection.?.focus);
+        }
+        try pressKey(&fx, .arrow_left, .{ .command = true });
+        var first = line.start;
+        while (first < line.contentEnd() and (text[first] == ' ' or text[first] == '\t')) first += 1;
+        const home = if (first == line.contentEnd()) line.start else first;
+        try testing.expectEqual(home, term.rt.editor_selection.?.focus);
+        try pressKey(&fx, .arrow_left, .{ .command = true });
+        try testing.expectEqual(line.start, term.rt.editor_selection.?.focus);
+        term.rt.editor_selection = editor_selection.Selection.at(line.start);
+        try pressKey(&fx, .arrow_right, .{ .command = true, .shift = true });
+        try testing.expectEqual(line.start, term.rt.editor_selection.?.start());
+        try testing.expectEqual(line.contentEnd(), term.rt.editor_selection.?.end());
+    }
 }

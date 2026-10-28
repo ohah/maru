@@ -5047,6 +5047,10 @@ pub fn build(b: *std.Build) void {
     // 무엇으로 대신할지와 함께 정할 일이라 이 슬라이스에서 하지 않는다.
     const posix_host_tests = target.result.os.tag != .windows;
 
+    const file_tree_ime_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/file-tree-rename-ime", "-p", "test_*.py" });
+    file_tree_ime_controls.setCwd(b.path("."));
+    file_tree_ime_controls.has_side_effects = true;
+    b.step("test-file-tree-rename-ime-oracles", "Validate file-tree rename IME identity and disk evidence").dependOn(&file_tree_ime_controls.step);
     const first_save_ime_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/untitled-save-ime", "-p", "test_*.py" });
     first_save_ime_controls.setCwd(b.path("."));
     first_save_ime_controls.has_side_effects = true;
@@ -5058,6 +5062,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&save_as_gui_controls.step);
     test_step.dependOn(&first_save_ime_controls.step);
+    test_step.dependOn(&file_tree_ime_controls.step);
     test_step.dependOn(&trust_ime_artifact_controls.step);
     test_step.dependOn(&recovery_ime_artifact_controls.step);
     test_step.dependOn(&reference_ime_artifact_controls.step);
@@ -5431,12 +5436,12 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
         }),
-        .filters = &.{"RF5a"},
+        .filters = &.{ "RF5a", "selection follows identity and falls back after rebuild", "all navigation intents use actionable rows and tree hierarchy" },
     });
     attachPngCodec(b, file_tree_model_tests.root_module);
     file_tree_model_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_file_tree_model_tests = b.addRunArtifact(file_tree_model_tests);
-    run_file_tree_model_tests.addArg("--maru-expect-tests=24"); // 이름 있는 셋 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
+    run_file_tree_model_tests.addArg("--maru-expect-tests=34"); // 이름 있는 여섯 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
     b.step("test-file-tree-model", "Run the pure file tree model unit tests only (RF5a filter)").dependOn(&run_file_tree_model_tests.step);
 
     // 터미널 마커 이미지 프리뷰의 **순수 코어**만(MP1) — 스테이징 맵·관찰·화면 마커 스캐너.

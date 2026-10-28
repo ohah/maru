@@ -14,7 +14,7 @@ pub fn decide(waiting: bool, expected_seq: u32, seq: u32, expected: ?Owner, curr
     return .accept;
 }
 
-test "rename response owner isolates server sequence collisions and document lifetimes" {
+test "LSP response owner isolates server sequence collisions and document lifetimes" {
     const t = std.testing;
     const owner: Owner = .{ .surface = 2, .document = 100, .target_epoch = 7 };
     try t.expectEqual(Decision.accept, decide(true, 1, 1, owner, owner, true));

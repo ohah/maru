@@ -1156,6 +1156,11 @@ Overlap 으로 만들어 다른 커서가 전부 사라짐 · import 와 겹치�
 범위가 바뀌고 undo 하나·기록; lazy 를 고르면 resolve → edit 적용; `Esc`·바깥 클릭 닫힘; 문맥 없는 자리(`NOACT`)는 알림; 낡은 revision 전체 거부; resolve
 오류 알림; 낡은 seq) · `CA2`(capability 없음).
 
+**지연 resolve의 신원.** 항목 선택 때의 surface·문서 객체·저장 대상 epoch와 revision 스냅샷을 별도로
+보존한다. 다음 목록이 메뉴의 surface나 스냅샷을 바꿔도 선택한 작업에는 그 값을 쓰지 않는다.
+동일 exe/seq만으로 정산하지 않고 선택 문서의 해당 Client에서 온 응답인지 확인한다. 무효 문서의
+결과는 적용하지 않는다. [resolve 출처 계획](plans/code-action-resolve-origin.md)이 검증 범위를 기록한다.
+
 ### 8.2i LSP 2단 ⑧ — semantic tokens 2층 (2026-09-20, 계획 공격 뒤의 결정)
 
 **계획 공격이 드러낸 것.** ① visual-mapping §5 가 층 구조를 이미 계약해 뒀다 — 구문 트리(즉시·항상) 위에 LSP semantic tokens(지연 도착·의미

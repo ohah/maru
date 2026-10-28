@@ -2248,3 +2248,5 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 ### 코드 액션 응답 출처
 
 `mise exec -- zig build test-editor-code-action-origins test-editor-save-pipeline -j2` — 같은 exe/seq의 다른 root 응답 격리와 주/보조 서버 합산·resolve·저장 회귀. [계획](plans/code-action-response-origin.md)을 따른다.
+
+- 코드 액션 resolve 출처·수명: `mise exec -- zig build test-editor-code-action-origins test-editor-workspace-edit -j2`; 공유 순수 판정은 `mise exec -- zig test src/session/editor/ops/lsp_response_owner.zig`. [계획](plans/code-action-resolve-origin.md)을 따른다.

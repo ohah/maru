@@ -219,7 +219,7 @@ pub const editor = struct {
     /// 커서 이동·추가·토글·고르기의 순수 판정(§3.2 — 화면·구문 트리 질의는 `Oracle` 로 받는다. 이동 단계 4).
     pub const cursor_ops = @import("session/editor/ops/cursor_ops.zig");
     /// LSP 요청 규율의 순수 판정(물을 때인가 · 응답 받기 · 실패 뒤 다시 — 다섯 클라이언트 공통, 결함 11 의 후속 이동).
-    pub const rename_response = @import("session/editor/ops/rename_response.zig");
+    pub const lsp_response_owner = @import("session/editor/ops/lsp_response_owner.zig");
     pub const lsp_requests = @import("session/editor/ops/lsp_requests.zig");
     /// N2: 열/블록 선택의 **파생**(§3.2a — 사각형 하나를 줄마다 selection 으로 푼다). `selection` 이
     /// 원본(`ColumnAnchor`)을 들고 이쪽이 그것을 배열로 편다. `ColumnMap` 을 주입받아 **chrome 을

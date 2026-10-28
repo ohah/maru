@@ -28398,7 +28398,24 @@ test "CA1 code action — ⌘. 로 진단 자리의 fix 와 lazy 가 메뉴에(c
     try pressKey(&fx, .enter, .{});
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_code_action_resolves);
     try testing.expect(s.editor_code_action.resolve_waiting);
+    // An unrelated root can use the same executable and resolve sequence.
+    const resolve_seq = s.editor_code_action.resolve_seq;
+    for ([_]bool{ true, false }) |is_error| {
+        code_action_client.onResolveResponse(s, &foreign_client, resolve_seq, null, is_error, "foreign resolve error");
+        try testing.expect(s.editor_code_action.resolve_waiting);
+        try testing.expectEqual(@as(u64, 0), s.editor_code_action.notified_error);
+        try testing.expectEqual(@as(u64, 0), s.editor_code_action.notified_none);
+        try testing.expectEqualStrings("int x;\nint y;\n", content(term));
+    }
+
+    const menu_surface = s.editor_code_action.surface_id;
+    const menu_snaps_len = s.editor_code_action.snaps_len;
+    // Model publication of another menu without changing the chosen action.
+    s.editor_code_action.surface_id = std.math.maxInt(u64);
+    s.editor_code_action.snaps_len = 0;
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    s.editor_code_action.surface_id = menu_surface;
+    s.editor_code_action.snaps_len = menu_snaps_len;
     try testing.expectEqual(@as(u64, 1), s.editor_code_action.resolved);
     try testing.expectEqualStrings("// lazy\nint x;\nint y;\n", content(term));
     s.chrome_host.notice.dismiss();
@@ -28526,6 +28543,26 @@ test "CA1 code action — ⌘. 로 진단 자리의 fix 와 lazy 가 메뉴에(c
     code_action_client.onResolveResponse(s, cl, 76, null, false, null);
     try testing.expect(s.editor_code_action.resolve_waiting);
     s.editor_code_action.resolve_waiting = false;
+    const owner_doc = term.rt.editorDocument();
+    const epoch = owner_doc.save_target_epoch;
+    const notices = s.editor_code_action.notified_none;
+    const errors = s.editor_code_action.notified_error;
+    for (0..3) |probe| {
+        s.editor_code_action.resolve_waiting = true;
+        s.editor_code_action.resolve_seq = 88;
+        s.editor_code_action.resolve_owner = .{ .surface = term.surface.id, .document = @intFromPtr(owner_doc), .target_epoch = epoch };
+        switch (probe) {
+            0 => owner_doc.save_target_epoch = epoch + 1,
+            1 => s.editor_code_action.resolve_owner.?.document += 1,
+            else => s.editor_code_action.resolve_owner.?.surface = std.math.maxInt(u64),
+        }
+        code_action_client.onResolveResponse(s, cl, 88, null, false, null);
+        try testing.expect(!s.editor_code_action.resolve_waiting);
+        try testing.expectEqual(notices, s.editor_code_action.notified_none);
+        try testing.expectEqual(errors, s.editor_code_action.notified_error);
+        try testing.expectEqualStrings("int x;\nint y;\n", content(term));
+        owner_doc.save_target_epoch = epoch;
+    }
 }
 
 // 빠른 수정 메뉴는 ⌘. 를 누른 순간이 아니라 **응답이 도착한 순간** 열린다 — 기다리는 사이 사용자가 알림 패널을 열면 메뉴가 그 패널과
@@ -63522,10 +63559,16 @@ test "EDPS11 저장된 경로 철자로 필터링해도 열린 모델 신원과 
 test "LATE3 정의·포맷·빠른 수정 적용의 늦은 응답이 사용자가 그사이 연 오버레이를 닫지 않는다 — 정의는 버리고, 적용의 알림은 닫힌 뒤로 미루며, 알림 패널은 밀려나지 않는다 (제품 경계, §8.2a·§8.2c·§8.2e·§8.2h)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
-    var fx = try PaneFixture.init(allocator);
-    defer fx.deinit(allocator);
-    // 설치된 언어 서버의 신뢰 확인창이 이 입력 판정의 키를 가로채면 안 된다.
-    fx.session.loaded_config.config.lsp.enabled = false;
+    // Use a real owned fake-server connection so the injected response has a
+    // valid document owner. Disabling LSP and inventing a client no longer models
+    // a response that can reach the late-notice path.
+    var h: RenameFx = .{ .fx = try PaneFixture.init(allocator) };
+    h.init(allocator) catch |err| {
+        h.fx.deinit(allocator);
+        return err;
+    };
+    defer h.deinit(allocator);
+    const fx = &h.fx;
     const s = fx.session;
     // 응답은 직접 넣는다 — 「기다리는 중에 사용자가 무엇을 열었나」만 바꾸고 나머지는 같다. 예전에는 넷 모두
     // 「정의 없음」 알림(`showNotice` → `dismissMessageOverlays`·`cancelPendingClose`)이 닫거나 취소했다.
@@ -63644,18 +63687,28 @@ test "LATE3 정의·포맷·빠른 수정 적용의 늦은 응답이 사용자�
 
     // ⑺ 빠른 수정 resolve — 「없습니다」 알림.
     const resolveNone = struct {
-        fn f(ss: *AppSession) void {
+        fn f(ss: *AppSession, source: *Term) !void {
             const seq = Seq.next();
-            ss.editor_code_action.resolve_waiting = true;
-            ss.editor_code_action.resolve_seq = seq;
-            ss.editor_code_action.resolve_exe = "fake-resolver";
-            var cl_root = [_]u8{'/'};
-            var cl: lsp_client.Client = .{ .root = &cl_root, .server = .{ .exe = "fake-resolver", .args = &.{}, .language_id = "", .install = "" }, .encoding = .utf8 };
-            code_action_client.onResolveResponse(ss, &cl, seq, null, false, null);
+            const client = lsp_client.readyClientFor(ss, source) orelse return error.ResolveFixtureClientMissing;
+            const doc = source.rt.editorDocument();
+            const st = &ss.editor_code_action;
+            st.resolve_waiting = true;
+            st.resolve_seq = seq;
+            st.resolve_exe = client.server.exe;
+            st.resolve_owner = .{ .surface = source.surface.id, .document = @intFromPtr(doc), .target_epoch = doc.save_target_epoch };
+            // A foreign response must not bypass provenance just because an
+            // overlay is open. The matching response then exercises deferral.
+            var foreign = client.*;
+            foreign.docs = .empty;
+            const deferred = ss.response_notices_deferred;
+            code_action_client.onResolveResponse(ss, &foreign, seq, null, false, null);
+            try testing.expect(st.resolve_waiting);
+            try testing.expectEqual(deferred, ss.response_notices_deferred);
+            code_action_client.onResolveResponse(ss, client, seq, null, false, null);
         }
     }.f;
     s.dispatchAppAction(.toggle_settings);
-    resolveNone(s);
+    try resolveNone(s, h.term);
     try testing.expect(s.chrome_host.settings.open and !s.chrome_host.notice.open);
     try testing.expectEqual(@as(u64, 3), s.response_notices_deferred);
     s.dismissMessageOverlays();
@@ -63666,7 +63719,7 @@ test "LATE3 정의·포맷·빠른 수정 적용의 늦은 응답이 사용자�
     s.chrome_host.notice.dismiss();
     // ⑺' 알림 패널만 열려 있으면 미루지 않는다.
     @import("../notification.zig").openNotificationPanel(s);
-    resolveNone(s);
+    try resolveNone(s, h.term);
     try testing.expect(s.chrome_host.notice.open and s.chrome_host.notifications.open);
     try testing.expectEqual(@as(u64, 3), s.response_notices_deferred);
     s.chrome_host.notice.dismiss();

@@ -18,7 +18,7 @@ const pane_ops = @import("../pane.zig");
 const settings_ops = @import("../settings.zig");
 const term_ops = @import("../term.zig");
 const lsp = maru.session.editor.lsp;
-const response_owner = maru.session.editor.rename_response;
+const response_owner = maru.session.editor.lsp_response_owner;
 
 /// 인라인 rename 의 심볼 대상 — 어느 문서의 어느 자리(낱말 시작)인가, 그리고 열 때의 revision(모달이라 바뀔 일은 없지만 대조한다).
 pub const Target = struct {

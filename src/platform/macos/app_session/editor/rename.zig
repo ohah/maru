@@ -18,6 +18,7 @@ const pane_ops = @import("../pane.zig");
 const settings_ops = @import("../settings.zig");
 const term_ops = @import("../term.zig");
 const lsp = maru.session.editor.lsp;
+const response_owner = maru.session.editor.rename_response;
 
 /// 인라인 rename 의 심볼 대상 — 어느 문서의 어느 자리(낱말 시작)인가, 그리고 열 때의 revision(모달이라 바뀔 일은 없지만 대조한다).
 pub const Target = struct {
@@ -31,6 +32,7 @@ pub const Target = struct {
 pub const State = struct {
     waiting: bool = false,
     waiting_seq: u32 = 0,
+    owner: ?response_owner.Owner = null,
     /// 요청 시점의 열린 문서 revision 들(§8.2f 검증) — 응답 때 대조한다. 상한 넘는 문서는 「없음」으로 남아 편집 전일 때만 통과.
     snaps: [64]editor_wse.VersionSnap = undefined,
     snaps_len: usize = 0,
@@ -99,15 +101,35 @@ pub fn commit(self: *AppSession, t: Target, new_name: []const u8) void {
     };
     st.waiting = true;
     st.waiting_seq = seq;
+    st.owner = ownerFor(term);
     st.sent_count += 1;
     snapshotVersions(self);
 }
 
+fn ownerFor(term: *Term) ?response_owner.Owner {
+    if (term.kind != .editor or term.rt.editorDocument().opened == null) return null;
+    const doc = term.rt.editorDocument();
+    return .{ .surface = term.surface.id, .document = @intFromPtr(doc), .target_epoch = doc.save_target_epoch };
+}
+
 /// rename 응답(`editor_lsp` 가 부른다). 낡은 seq 는 버린다. 오류 응답은 알림(서버 message).
-pub fn onResponse(self: *AppSession, seq: u32, result: ?std.json.Value, is_error: bool, error_message: ?[]const u8, enc: lsp.rpc.PositionEncoding) void {
+pub fn onResponse(self: *AppSession, origin: *editor_lsp.Client, seq: u32, result: ?std.json.Value, is_error: bool, error_message: ?[]const u8) void {
+    const enc = origin.encoding;
     const st = &self.editor_rename;
-    if (!st.waiting or seq != st.waiting_seq) return;
+    const term = if (st.owner) |owner| termFor(self, owner.surface) else null;
+    const current = if (term) |t| ownerFor(t) else null;
+    const same_client = if (term) |t| editor_lsp.readyClientFor(self, t) == origin else false;
+    switch (response_owner.decide(st.waiting, st.waiting_seq, seq, st.owner, current, same_client)) {
+        .ignore => return,
+        .cancel => {
+            st.waiting = false;
+            st.owner = null;
+            return;
+        },
+        .accept => {},
+    }
     st.waiting = false;
+    st.owner = null;
     if (is_error) {
         st.notified_error += 1;
         self.showResponseNotice(.rn_error, &.{.{ .s = error_message orelse "" }});

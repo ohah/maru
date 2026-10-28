@@ -2020,7 +2020,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
             },
             .rename => |seq| {
                 self.editor_lsp.received_renames += 1;
-                editor_rename.onResponse(self, seq, if (r.is_error) null else r.result, r.is_error, r.error_message, c.encoding);
+                editor_rename.onResponse(self, c, seq, if (r.is_error) null else r.result, r.is_error, r.error_message);
             },
             .formatting => |seq| {
                 self.editor_lsp.received_formattings += 1;

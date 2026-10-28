@@ -6645,7 +6645,7 @@ pub fn build(b: *std.Build) void {
     const workspace_edit_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.RNM", ".test.WEOOM", ".test.SHVIEW18", ".test.CA1 ", ".test.CA2 " } });
     const run_workspace_edit = b.addRunArtifact(workspace_edit_tests);
     run_workspace_edit.setCwd(b.path("."));
-    run_workspace_edit.addArg("--maru-expect-tests=20");
+    run_workspace_edit.addArg("--maru-expect-tests=21");
     run_workspace_edit.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-workspace-edit", "Run WorkspaceEdit preparation and rename regressions").dependOn(&run_workspace_edit.step);
     const completion_overlay_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.HELP10 ", ".test.HELP11 ", ".test.FINDH5 " } });

@@ -48,7 +48,10 @@ Ghostty와 같은 방식을 쓴다(`src/termio/Exec.zig` 동작 비교): terminf
 **자동 컴파일**(`tic`)해 `TERMINFO`를 거기로 가리킨다(`pty/macos.zig`의 `resolveTerm`). `~/.terminfo`나
 시스템을 안 건드리는 **비침습** 방식이고,
 `tic`이 없거나 컴파일이 실패하면 `xterm-256color`로 **자동 폴백**해 로컬이 절대 안 깨진다. 프로세스당
-1회만 컴파일해 캐시한다.
+첫 판정 결과를 프로세스에서 재사용하되, 새 셸마다 컴파일된 항목이 읽히는지 확인한다.
+실행 중 캐시 정리나 `maru terminfo --clear`로 항목이 사라지면 다음 spawn에서 다시 컴파일하고,
+실패하면 표준 TERM으로 폴백한다. 기존 셸은 이미 읽은 terminfo를 사용하지만 새 셸은 디스크에서
+읽으므로, 삭제된 경로를 그대로 전달하면 새 셸에서만 프롬프트·입력 재표시가 깨질 수 있다.
 
 캐시 staleness는 버전 마커로 자동 처리한다: 캐시에 embed 내용의 지문(`.maru-version`)을 함께 적고, spawn
 때 지문이 일치하고 xterm-maru가 해석될 때만 재컴파일을 건너뛴다 — maru 업데이트로 terminfo 캡이 바뀌면

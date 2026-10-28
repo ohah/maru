@@ -25,6 +25,11 @@ pub fn ready(identity: registry.DocumentIdentity, grammar: request.Grammar, lang
     if (active) |*owner| return owner.ready(identity, grammar, language);
     return null;
 }
+/// 알림·재시도는 호출자의 정책이다. 현재 요청의 게시·완료 사실만 조회한다.
+pub fn observe(identity: registry.DocumentIdentity, grammar: request.Grammar, language: syntax.Language) runtime.Observation {
+    if (active) |*owner| return owner.observe(identity, grammar, language);
+    return .none;
+}
 pub fn poll() void {
     if (active) |*owner| {
         owner.poll();

@@ -19,6 +19,7 @@ def main():
     p = argparse.ArgumentParser()
     for name in ('output','deps','cache'):
         p.add_argument('--'+name, type=Path, required=True)
+    p.add_argument("--scope", choices=("lifetime", "observation"), default="lifetime")
     args = p.parse_args()
     out, deps = args.output.resolve(), args.deps.resolve()
     if out.exists() or out == ROOT or ROOT in out.parents or not deps.is_dir():
@@ -46,6 +47,14 @@ def main():
         'drain_not_rearmed': (RUNTIME,'_ = self.service.beginDrain();','_ = self.service.state.notification_pending.load(.acquire);'),
         'closed_view_not_cancelled': (DISPATCH,'        owner.sweep();','        if (owner.entries.items.len == 0) owner.sweep();'),
     }
+    if args.scope == "observation":
+        mutants = {
+            'failure_discarded': (RUNTIME, 'if (entry.gate.abandon(value.tag())) entry.outcome = value.outcome();', '_ = entry.gate.abandon(value.tag());'),
+            'stale_failure_overwrites': (RUNTIME, 'if (entry.gate.abandon(value.tag())) entry.outcome = value.outcome();', '_ = entry.gate.abandon(value.tag()); entry.outcome = value.outcome();'),
+            'grammar_ignored': (RUNTIME, 'or !std.meta.eql(tag.input.grammar, grammar)', 'or (!std.meta.eql(tag.input.grammar, grammar) and false)'),
+            'revision_ignored': (RUNTIME, 'opened.file.revision == tag.input.revision', '(opened.file.revision == tag.input.revision or true)'),
+            'retry_keeps_failure': (RUNTIME, '        value.outcome = null;', '        // 결함 주입: 이전 완료 상태 보존'),
+        }
     command = ['mise','exec','--','zig','build','test-editor-parse-runtime','test-editor-parse-host','test-editor-parse-main-queue','--cache-dir',str(args.cache.resolve()),'-j2','--verbose']
     env = dict(os.environ, ZIG_LOCAL_PKG_DIR=str(deps))
     rows = []
@@ -62,7 +71,7 @@ def main():
             with log.open('xb') as stream:
                 result = subprocess.run(command,cwd=source,env=env,stdout=stream,stderr=subprocess.STDOUT,timeout=900)
             text = log.read_text()
-            tests = list(dict.fromkeys(re.findall(r'info\(verbose\): [^\n]*?(\S+/test) --maru-expect-tests=6',text)))
+            tests = list(dict.fromkeys(re.findall(r'info\(verbose\): [^\n]*?(\S+/test) --maru-expect-tests=(?:6|8)',text)))
             natives = re.findall(r'info\(verbose\): (\S+/maru-parse-main-queue)\s*$',text,re.M)
             if len(tests)!=2 or not natives: raise RuntimeError('missing actual executions: '+name)
             archived = {}
@@ -75,7 +84,7 @@ def main():
             if name in mutants:
                 if result.returncode==0 or not re.search(r'FAIL \(Test(?:UnexpectedResult|ExpectedEqual)\)',text):
                     raise RuntimeError('semantic fault survived: '+name)
-            elif result.returncode or text.count('All 6 tests passed.')!=2 or 'PARSE_MAIN_QUEUE accepted=2 main_thread=1 closed_document_reaped=1 late_delivery=1' not in text:
+            elif result.returncode or (text.count('All 6 tests passed.')!=1 or text.count('All 8 tests passed.')!=1) or 'PARSE_MAIN_QUEUE accepted=2 main_thread=1 closed_document_reaped=1 late_delivery=1' not in text:
                 raise RuntimeError('normal control failed: '+name)
             rows.append(dict(name=name,returncode=result.returncode,source_sha256=source_hash,binaries=archived,log_sha256=sha(log)))
             for file,content in baseline.items(): (source/file).write_text(content)

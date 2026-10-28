@@ -137,6 +137,7 @@ test "parse runtime Job 준비 OOM은 이전 수락을 숨기고 본문과 이�
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(error.OutOfMemory, owner.submit(view, grammar, .zig));
     try std.testing.expect(owner.ready(identity, grammar, .zig) == null);
+    try std.testing.expect(owner.observe(identity, grammar, .zig) == .none);
     try std.testing.expectEqualStrings("// 한글 😀\r\nconst first = 1;\n", docs.get(view).?.opened.?.file.content);
     try std.testing.expectEqual(@as(u64, 0), docs.get(view).?.opened.?.file.revision);
     try std.testing.expectEqual(@as(usize, 0), docs.get(view).?.history.undo_len);
@@ -221,4 +222,105 @@ test "parse runtime 최초 문서 등록 OOM은 request 참조를 남기지 않�
     try std.testing.expectEqual(@as(usize, 0), owner.entries.items.len);
     try std.testing.expect(try docs.release(view));
     open = false;
+}
+
+// 두 원문 복사를 따로 멈춰 이전 실행의 취소 완료와 새 요청 대기를 결정적으로 분리한다.
+const CopyBarrier = struct {
+    calls: usize = 0,
+    first_entered: std.atomic.Value(bool) = .init(false),
+    first_released: std.atomic.Value(bool) = .init(false),
+    entered: std.atomic.Value(bool) = .init(false),
+    released: std.atomic.Value(bool) = .init(false),
+    fn allocator(self: *CopyBarrier) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
+    }
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const self: *CopyBarrier = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        if (self.calls == 1) {
+            self.first_entered.store(true, .release);
+            while (!self.first_released.load(.acquire)) std.Thread.yield() catch {};
+            return null;
+        }
+        if (self.calls == 2) {
+            self.entered.store(true, .release);
+            while (!self.released.load(.acquire)) std.Thread.yield() catch {};
+        }
+        return std.heap.page_allocator.rawAlloc(len, alignment, ret);
+    }
+    fn free(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        std.heap.page_allocator.rawFree(memory, alignment, ret);
+    }
+};
+// 실패 자료는 완료 큐를 실제로 지나며, 표시·재시도 UX 없이 현재 시도의 사실만 검사한다.
+test "parse runtime 실패 완료와 게시 대기를 구분하고 같은 입력 재시도는 옛 실패를 지운다" {
+    var docs: registry.Registry = .{ .allocator = a };
+    defer docs.deinit() catch unreachable;
+    const view = try document(&docs);
+    defer _ = docs.release(view) catch unreachable;
+    const identity = docs.identity(view).?;
+    var copies = std.testing.FailingAllocator.init(std.heap.page_allocator, .{ .fail_index = 0 });
+    var owner = try Runtime.init(a, .{ .copy_allocator = copies.allocator() });
+    defer owner.deinit();
+    try std.testing.expect(owner.observe(identity, grammar, .zig) == .none);
+    const first = try owner.submit(view, grammar, .zig);
+    try std.testing.expectEqual(first, owner.observe(identity, grammar, .zig).pending);
+    waitCompletion(&owner);
+    owner.poll();
+    try std.testing.expect(owner.observe(identity, grammar, .zig) == .finished);
+    const failed = owner.observe(identity, grammar, .zig).finished;
+    try std.testing.expectEqual(first, failed.tag);
+    try std.testing.expectEqual(dispatch.worker.Outcome.out_of_memory, failed.outcome);
+    try std.testing.expect(owner.ready(identity, grammar, .zig) == null);
+    var other = grammar;
+    other.generation += 1;
+    try std.testing.expect(owner.observe(identity, other, .zig) == .none);
+    try std.testing.expect(owner.observe(identity, grammar, .json) == .none);
+    // worker가 실패한 copy 호출에서 이미 반환했다. 다음 시도 전까지만 allocator 설정을 고친다.
+    copies.fail_index = std.math.maxInt(usize);
+    const next = try owner.submit(view, grammar, .zig);
+    try std.testing.expect(next.serial > first.serial);
+    try std.testing.expect(owner.observe(identity, grammar, .zig) == .pending);
+    try std.testing.expectEqual(next, owner.observe(identity, grammar, .zig).pending);
+    try waitReady(&owner, identity);
+    try std.testing.expectEqual(dispatch.worker.Outcome.ready, owner.observe(identity, grammar, .zig).finished.outcome);
+    try edit(&docs, view);
+    try std.testing.expect(owner.observe(identity, grammar, .zig) == .none);
+}
+test "parse runtime 늦은 취소 완료는 같은 본문의 새 언어 설정 요청을 덮어쓰지 않는다" {
+    var docs: registry.Registry = .{ .allocator = a };
+    defer docs.deinit() catch unreachable;
+    const view = try document(&docs);
+    defer _ = docs.release(view) catch unreachable;
+    const identity = docs.identity(view).?;
+    var copies: CopyBarrier = .{};
+    var owner = try Runtime.init(a, .{ .copy_allocator = copies.allocator() });
+    defer owner.deinit();
+    defer copies.released.store(true, .release);
+    defer copies.first_released.store(true, .release);
+    _ = try owner.submit(view, grammar, .zig);
+    const deadline = now() + 10_000_000_000;
+    while (!copies.first_entered.load(.acquire)) {
+        try std.testing.expect(now() < deadline);
+        std.Thread.yield() catch {};
+    }
+    var changed = grammar;
+    changed.generation += 1;
+    const latest = try owner.submit(view, changed, .zig);
+    copies.first_released.store(true, .release);
+    while (!copies.entered.load(.acquire)) {
+        try std.testing.expect(now() < deadline);
+        std.Thread.yield() catch {};
+    }
+    owner.poll();
+    const observed = owner.observe(identity, changed, .zig);
+    try std.testing.expect(observed == .pending);
+    try std.testing.expectEqual(latest, observed.pending);
+    copies.released.store(true, .release);
+    while (owner.ready(identity, changed, .zig) == null) {
+        try std.testing.expect(now() < deadline);
+        owner.poll();
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expect(owner.observe(identity, grammar, .zig) == .none);
 }

@@ -10,7 +10,7 @@ mise exec -- zig build test-editor-parse-runtime test-editor-parse-host test-edi
 python3 tools/editor-parse-runtime/review.py --output /tmp/new-parse-runtime --deps /path/to/deps --cache /path/to/cache
 ```
 
-Runtime 판정 6개는 마지막 뷰·실제 revision·공유 뷰·할당 실패·동일 문서 재생성 serial·늦은 전달을
+Runtime 판정 8개는 마지막 뷰·실제 revision·공유 뷰·할당 실패·동일 문서 재생성 serial·늦은 전달을
 검사한다. AppSession 판정 target은 실제 창 소유자 파괴 2개와 기존 익명 초기화 4개다.
 Linux에서는 macOS 전용 익명 초기화 3개가 빠져 총 3개를 수집하고, 실제 창 수명 2개는 skip한다.
 플랫폼별 정확한 개수를 검사해 target 누락을 허용하지 않는다.
@@ -30,3 +30,20 @@ Linux에서는 macOS 전용 익명 초기화 3개가 빠져 총 3개를 수집�
 일반 편집기의 입력·렌더 경로는 아직 전환하지 않았다. 뷰별 캐시 설치·실제 GUI/IME·입력 지연·
 race detector·C malloc 실패 전수 검증은 이 결과에 포함하지 않는다.
 준비 실패는 내부 호출자에게 오류를 반환하며 본문·Undo를 바꾸거나 동기 파싱으로 우회하지 않는다.
+
+## 화면 연결 전 상태 조회
+
+`dispatch.observe`/`Runtime.observe`는 현재 문서·본문 판·언어 설정에 해당하는 게시 대기와
+실패를 포함한 완료를 구분한다. 완료 값은 Request와 Outcome 값만 보유하며 트리나 Job을 빌리지 않는다.
+`submit` 준비 실패는 오류 반환과 `none`으로 표시하며 자동 재시도하지 않는다.
+호출자가 알림·재시도를 결정하기 위한 기반이고 일반 입력·표시 경로는 전환하지 않았다.
+
+```sh
+python3 tools/editor-parse-runtime/review.py --scope observation --output /tmp/new-parse-observation --deps /path/to/deps --cache /path/to/cache
+```
+
+실패 버리기·옛 실패의 새 요청 덮어쓰기·grammar 무시·revision 무시·재시도에서 옛 실패 보존의
+다섯 실제 결함을 컴파일한다. 옛 완료 검사는 이전 작업과 새 작업의 실제 copy allocator를 각각 장벽으로 멈춰
+완료 순서를 결정한다. 고정 sleep이나 경쟁이 우연히 일어났다는 추정에 의존하지 않는다.
+기본 `--scope lifetime`은 기존 수명 결함 대조를 유지한다. 두 모드 모두 runtime 8개·host 6개와
+실제 Apple 전달 실행을 요구한다. UI·알림 정책은 별도다.

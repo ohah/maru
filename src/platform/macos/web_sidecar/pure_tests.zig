@@ -16,5 +16,6 @@ test {
     _ = @import("console_gate.zig");
     _ = @import("net_gate.zig");
     _ = @import("net_body_table.zig");
+    _ = @import("net_body_sw.zig");
     _ = @import("out_queue.zig");
 }

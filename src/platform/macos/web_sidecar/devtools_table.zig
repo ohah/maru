@@ -57,8 +57,17 @@ pub const BeginError = error{ Busy, Duplicate, Forbidden };
 /// maru 를 거쳐 오는 호출이 부를 수 없는 메서드(W9d② — J4·J6·J13): `Network.enable`·`Network.disable` 은 본문 기록이 건 버퍼 상한을 바꾸거나
 /// (disable 뒤 enable {} 이면 12 MB 본문이 돌아왔다 — J4-D) 기록을 말없이 끈다(J6). `Fetch.*` 는 요청을 가로채 바꾼다(막기·가짜 응답은 따로
 /// 묻는 W9d③·④ 의 몫이다). 세션이 하나라 이 호출과 sidecar 의 기록이 같은 Network 도메인을 쓴다.
+///
+/// 재검증 5 차 S1(서비스 워커 갈래 새 설계 — 공격 2 A7·A16): `Target.*` 도 막는다 — 같은 세션에 sidecar 가 서비스 워커 auto-attach 를 건다.
+/// 떼면(`setAutoAttach`·`detachFromTarget`) 워커 사건이 말없이 끊기고, `waitForDebuggerOnStart` 를 켜면 전용 워커·재시작한 서비스 워커가
+/// 멈춘다(실측 PHASE0 b), 다른 탭·브라우저 전체를 본다(`setDiscoverTargets`). 읽기만 하는 `getTargetInfo`(localStorage 의 출처 확인 —
+/// `web_cdp_storage.zig`)·`getTargets`·`activateTarget` 은 받는다.
 pub fn forbiddenMethod(method: []const u8) bool {
     if (std.mem.eql(u8, method, "Network.enable") or std.mem.eql(u8, method, "Network.disable")) return true;
+    if (std.mem.startsWith(u8, method, "Target.")) {
+        for ([_][]const u8{ "Target.getTargetInfo", "Target.getTargets", "Target.activateTarget" }) |ok| if (std.mem.eql(u8, method, ok)) return false;
+        return true;
+    }
     return std.mem.startsWith(u8, method, "Fetch.");
 }
 pub const AddResult = union(enum) {
@@ -331,4 +340,11 @@ test "W9d②: Network.enable·Network.disable·Fetch.* 는 보내지 않는다(�
     _ = try t.begin(.{ .browser = 1, .call = 2, .method = "Network.getCookies", .params_size = 0 }, 0);
     try std.testing.expect(!forbiddenMethod("Network.enableX"));
     try std.testing.expect(!forbiddenMethod("NetworkX.enable"));
+}
+
+test "W9d② 재검증 5 차 S1: Target.* 는 보내지 않는다(서비스 워커 세션을 떼거나 멈추게 한다) — getTargetInfo·getTargets·activateTarget 은 받는다" {
+    for ([_][]const u8{ "Target.setAutoAttach", "Target.autoAttachRelated", "Target.attachToTarget", "Target.attachToBrowserTarget", "Target.detachFromTarget", "Target.sendMessageToTarget", "Target.setDiscoverTargets", "Target.exposeDevToolsProtocol", "Target.createTarget", "Target.closeTarget", "Target.createBrowserContext", "Target.disposeBrowserContext", "Target.setRemoteLocations", "Target.somethingNew" }) |m| {
+        try std.testing.expect(forbiddenMethod(m));
+    }
+    for ([_][]const u8{ "Target.getTargetInfo", "Target.getTargets", "Target.activateTarget", "TargetX.setAutoAttach", "Page.crash" }) |m| try std.testing.expect(!forbiddenMethod(m));
 }

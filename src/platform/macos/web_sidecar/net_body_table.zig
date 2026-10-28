@@ -32,7 +32,9 @@
 //! W9d② 적대 리뷰 4 회차: (SW1) 서비스 워커가 준 응답은 그 출처(`serviceWorkerResponseSource`)가 `network` 일 때만 서비스 워커 갈래의 기록과
 //! 맞춘다 — Cache Storage·HTTP 캐시·워커가 만든 응답·출처 없음은 CEF 가 보지 못한 응답으로 친다(`Cdp.sw_off_network` — 캐시로 답하며 같은 주소를
 //! 다시 받는 워커의 기록에 캐시의 옛 본문이 붙었다). (N1) CDP 의 빈 본문인데 CEF 끝이 바이트를 알렸으면 `unavailable`(`emptyBodyState`).
-//! 본문 수의 버스트는 60(`tab_bodies_burst` — 초당 20 은 그대로).
+//! 본문 수의 버스트는 60(`tab_bodies_burst` — 초당 20 은 그대로). 재검증 5 차 S0(사용자 결정 2026-10-28): 그대로 넘긴 것(`network`)도 짝이 서면
+//! 본문 없이 `ambiguous` 다 — 워커가 메모해 둔 앞 응답·다른 주소·다른 탭의 메모로 답하면 짝이 하나로 보여도 틀렸다(K1·K2·K3). 워커 CDP 로
+//! 잇는 길은 docs/plans/web-osr-backend.md 「서비스 워커 갈래 새 설계」.
 //! W9d② 적대 리뷰 5 회차: (A1) 응답 없이 실패한 요청은 CEF 가 실패·취소로 끝낸 기록만 제 것으로 정한다 — 끝이 아직이면 기다리고(시한까지),
 //! CEF 가 성공으로 끝낸 기록은 IO 시각과 무관하게 갖지 않는다. 실패 시각은 CDP `loadingFailed.timestamp`(`Cdp.failed_at` — 응답 시각과 같은
 //! 검사), 그런 요청이 결과를 모르는 기록을 쥔 동안 뒤 요청은 정하지 않는다. (A2) 기다림은 탭 128·전체 512 이고 차례가 있다 — 스크립트·스타일·
@@ -1103,10 +1105,6 @@ pub const Inflight = struct {
 
 const DropMark = struct { url: u64, t_us: i64 };
 
-/// 재검증 4 차 뒤 R6: 서비스 워커가 답한 CDP 요청 하나(`Tab.sw_seen` — 주소·메서드 해시와 기준 시각; 주소 0 = 빈 자리).
-const SwSeen = struct { url: u64 = 0, method: u64 = 0, at: i64 = 0 };
-pub const max_sw_seen: usize = 128;
-
 /// 재검증 3 차 LB-1: 문서 loader 하나와 그 loader 로 보낸 가장 늦은 요청의 기준 시각(`Tab.loaders`).
 const LoaderSeen = struct { loader: u64 = 0, last_ts: i64 = 0 };
 
@@ -1163,11 +1161,6 @@ pub const Tab = struct {
     /// loader 로 알림 뒤에 보낸 요청이 있으면 새 문서의 것이다(`crossesDoc` — 실제 CEF: 새 문서의 첫 요청은 20 번 중 15–19 번 알림보다 0.2–0.6 ms 먼저
     /// 나갔다).
     loaders: [max_loaders]LoaderSeen = @splat(.{}),
-    /// 재검증 4 차 뒤 R6: 서비스 워커가 답한 최근 CDP 요청(출처를 가리지 않는다 — 캐시·만든 응답도; 고리 — 넘치면 가장 오래된 것을 덮는다).
-    /// 네트워크 밖에서 답한 요청은 끝나면 맞추기 목록에서 빠지지만 그 워커가 같은 주소를 네트워크로 받았을 수 있다(stale-while-revalidate·다시 싸기)
-    /// — 그 워커 기록은 「설명되는」 기록이다(`swUnique` 의 셋째 조건). 덮여 잊으면 설명되지 않는 쪽으로 치우친다(본문을 잃을 뿐).
-    sw_seen: [max_sw_seen]SwSeen = @splat(.{}),
-    sw_seen_next: usize = 0,
 
     pub fn recording(self: *const Tab) bool {
         return self.session != 0 and !self.paused;
@@ -1765,10 +1758,6 @@ pub const Table = struct {
                 if (r.state == .finished or r.state == .failed) return;
                 r.sw = v.from_sw;
                 r.responded = true;
-                if (v.from_sw and r.has_key) {
-                    t.sw_seen[t.sw_seen_next] = .{ .url = r.key_url, .method = r.key_method, .at = r.anchor() };
-                    t.sw_seen_next = (t.sw_seen_next + 1) % max_sw_seen;
-                }
                 r.sw_off_network = v.from_sw and !std.mem.eql(u8, v.sw_source, "network");
                 // 제 기록의 IO 시각은 응답보다 앞이다 — CDP 의 응답 시각(같은 시계 — J1)이 맞아 보이면(UI 가 받은 때 앞 2 초 안) 그것, 아니면 UI 가
                 // 받은 때(늦은 쪽 — 기다림이 조금 길 뿐 틀리지 않는다).
@@ -1863,49 +1852,6 @@ pub const Table = struct {
     /// 맞추기에 드는 CDP 요청인가(메모리 캐시·추측 미리 받기·자리만 잡은 것·서비스 워커가 네트워크 밖에서 준 응답·놓인 것은 아니다).
     fn matchable(o: *const Cdp) bool {
         return !(o.gone or o.state == .cached or o.prefetch or !o.has_key or o.sw_off_network);
-    }
-
-    /// 재검증 4 차 뒤 R6-1·R6-2·R6-3(조정자 결정 — 이 PR 의 불변식 「틀린 본문 0 이 잃는 본문보다 먼저」): 서비스 워커가 넘긴 응답(`from_sw` —
-    /// 출처 `network`)의 요청 `r`(`t.cdp` 자리 `i`)의 짝이 차례와 상관없이 **하나로** 정해지는가. 워커 갈래(`Key.sw`)의 CEF 기록 차례는 워커
-    /// 스레드의 것이지 페이지의 CDP 시작 차례가 아니다(J2 는 서지 않는다 — 워커가 두 요청을 거꾸로 넘기면 네 맞추기가 함께 뒤바뀐 짝을 줬다,
-    /// 실제 CEF swrev 40/40), 그리고 출처 `network` 는 「워커가 네트워크에서 받았다」 일 뿐 「이 주소를」 이 아니다(다른 주소로 답했을 수 있다 —
-    /// swalt·swalt1 20/20). 그래서 셋 모두일 때만 정한다:
-    ///   1. 같은 열쇠의 짝 없는 기록 가운데 `r` 와 짝일 수 있는 것(`compatible`)이 꼭 하나다.
-    ///   2. 그 기록과 짝일 수 있는 같은 주소·메서드의 다른 요청(워커 갈래이거나 아직 응답이 없는)이 없다.
-    ///   3. `r` 의 창(기준 시각 − 5 ms .. 응답 때)에 시작한, **다른 주소**의 워커 기록 가운데 그 주소의 CDP 요청(열린 것·워커가 답한 것 — 네트워크
-    ///      밖에서 답해 목록에서 빠진 것은 `Tab.sw_seen`)으로 설명되지 않는 것(워커가 스스로 받은 것 — `r` 에 다른 주소로 답한 기록일 수 있다)이
-    ///      없다. 이것이 없으면 R6-3(워커가 다른 주소로 답하고 같은 주소를 제 갱신 fetch 로 받았다 — 요청 하나·기록 하나)을 가르지 못한다.
-    /// 응답 지문(상태·길이)은 쓰지 않는다 — 같아도 내용이 다를 수 있다. 아니면 부른 쪽이 그 기록들을 `ambiguous` 로 끝내고 주인일 수 있는
-    /// 요청을 모두 맞추기에서 뺀다(남은 요청이 남은 기록과 「유일」 해 보이지 않게). 대가: 같은 주소를 겹쳐 받는 워커 요청, 워커가 스스로 다른
-    /// 주소를 받는 동안(갱신·미리 받기·통계)의 워커 요청은 본문을 잃는다. 남는 틈: 워커가 `r` 에 다른 주소 v 로 답했는데 그 v 를 페이지도 같은
-    /// 때 받아(그 기록이 v 의 CDP 요청으로 설명된다) 워커가 같은 주소를 따로 한 번 받은 꼴.
-    fn swUnique(t: *const Tab, i: usize, r: *const Cdp) bool {
-        const key = r.key();
-        var only: ?*const Candidate = null;
-        for (t.cands.items) |*c| {
-            if (c.claimed or !c.key.eql(key) or !compatible(r, c)) continue;
-            if (only != null) return false;
-            only = c;
-        }
-        const c0 = only orelse return false;
-        for (t.cdp.items, 0..) |*o, j| {
-            if (j == i or !matchable(o) or o.key_url != key.url or o.key_method != key.method or (!o.sw and o.responded)) continue;
-            if (compatible(o, c0)) return false;
-        }
-        const lo = r.anchor() - window_before_us;
-        const hi = ioUpper(r);
-        for (t.cands.items) |*c| {
-            if (c.claimed or !c.key.sw or c.key.eql(key) or c.t_io_us < lo or c.t_io_us > hi) continue;
-            const explained = for (t.cdp.items) |*o| {
-                if (!matchable(o) or o.key_url != c.key.url or o.key_method != c.key.method or (!o.sw and o.responded)) continue;
-                if (feasible(o, c)) break true;
-            } else for (t.sw_seen) |w| {
-                // 네트워크 밖에서 답해 목록에서 빠진 워커 요청도 그 주소의 워커 기록을 설명한다(`Tab.sw_seen`).
-                if (w.url == c.key.url and w.method == c.key.method and c.t_io_us >= w.at - window_before_us and c.t_io_us <= w.at + window_after_us) break true;
-            } else false;
-            if (!explained) return false;
-        }
-        return true;
     }
 
     /// 응답 없이 실패한 요청(다시 시작 아님) — CEF 에 닿지 않았을 수 있다(abort). 5 회차 A1: 맞추기의 차례를 밀지 않는다(`tryDecide`).
@@ -2436,9 +2382,12 @@ pub const Table = struct {
                 if (now_us - r.done_at < split_wait_us) return;
                 pending_split = true;
             }
-            // 재검증 4 차 뒤 R6: 서비스 워커가 넘긴 응답은 짝이 하나로 정해질 때만(`swUnique`) — 아니면 맞추기를 의심하는 쪽으로(그 기록들을 끝내고
-            // 주인일 수 있는 요청을 모두 뺀다).
-            const sw_unsure = r.sw and r.responded and !swUnique(t, i, &r);
+            // 재검증 5 차 S0(사용자 결정 2026-10-28 — 서비스 워커 갈래 새 설계의 체크포인트): 서비스 워커가 답한 페이지 응답은 서비스 워커 갈래의
+            // 어느 기록의 응답인지 페이지 CDP 와 CEF 만으로는 증명할 길이 없다 — 워커가 메모해 둔 앞 응답·다른 주소의 fetch·다른 탭의 메모로 답할
+            // 수 있다(재검증 5 차 K1·K2·K3 — 짝이 하나로 보여도 틀렸다, 실제 CEF 40/40·40/40). 그래서 늘 맞추기를 의심하는 쪽으로: 이 요청과 짝일 수
+            // 있는 같은 열쇠의 기록을 모두 `ambiguous` 로 끝내고 주인일 수 있는 요청을 모두 뺀다. 전에 쓰던 `swUnique`(재검증 4 차 뒤 R6)는 걷었다 —
+            // 그 셋째 조건이 판정마다 기록 × 요청을 훑었다(K4). 워커 CDP 로 잇는 길은 계획 v2 의 S1–S3b.
+            const sw_unsure = r.sw and r.responded;
             var ambiguous = false;
             // 보이는 규칙(프레임·첫 사이트·initiator)이 다른 후보가 이 요청의 창 안에 있다.
             for (cands) |o| if (o != ci and t.cands.items[o].attr != t.cands.items[ci].attr and compatible(&r, &t.cands.items[o])) {
@@ -2483,7 +2432,7 @@ pub const Table = struct {
             const extra_hi = if (split) hi + 1 else 0;
             sc.extra.clearRetainingCapacity();
             for (cands[extra_lo..extra_hi]) |x| if (x != ci) try sc.extra.append(gpa, t.cands.items[x].request);
-            // 재검증 4 차 뒤 R6: 워커 갈래의 짝이 하나로 정해지지 않으면 이 요청과 짝일 수 있는 같은 열쇠의 기록을 모두 함께 끝낸다.
+            // 재검증 4 차 뒤 R6·5 차 S0: 서비스 워커가 답한 응답이면 이 요청과 짝일 수 있는 같은 열쇠의 기록을 모두 함께 끝낸다.
             sc.sw_recs.clearRetainingCapacity();
             if (sw_unsure) for (cands, 0..) |x, p| if (x != ci and (p < extra_lo or p >= extra_hi) and compatible(&r, &t.cands.items[x])) {
                 try sc.extra.append(gpa, t.cands.items[x].request);
@@ -4348,7 +4297,8 @@ test "W9d② 적대 리뷰 2 회차: 맞추기의 차례와 갈래 — 뒤 요�
         try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(522));
     }
     {
-        // 앞 요청이 서비스 워커가 아닌 응답을 받았으면(다른 갈래) 서비스 워커 갈래의 맞추기에 넣지 않는다 — 뒤 요청은 제 기록을 받는다.
+        // 앞 요청이 서비스 워커가 아닌 응답을 받았으면(다른 갈래) 서비스 워커 갈래의 맞추기에 넣지 않는다 — 뒤 요청의 짝은 제 기록이다. 재검증 5 차
+        // S0(기대를 바꿈): 서비스 워커가 답한 응답은 짝이 서도 본문 없이(`ambiguous`) — 앞 요청의 기록(531)은 건드리지 않는다.
         var h: H = .{};
         defer h.deinit();
         _ = try h.table.start(gpa_t, 5, 1);
@@ -4360,7 +4310,9 @@ test "W9d② 적대 리뷰 2 회차: 맞추기의 차례와 갈래 — 뒤 요�
         _ = try h.cand(5, 532, u, 4_001_300, .{ .sw = true });
         try sw_resp(&h, "d.r", 4_019_000);
         try h.finish(5, "d.r", 4_020_000);
-        try testing.expectEqual(@as(?u64, 532), fetchedFor(&h, "d.r"));
+        try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "d.r"));
+        try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(532));
+        try testing.expect(h.ended.get(531) == null);
     }
 }
 
@@ -4768,8 +4720,9 @@ test "W9d② 적대 리뷰 4 회차 SW1: 서비스 워커가 Cache Storage 로 �
 }
 
 // SW1b·출처 없음: 워커가 네트워크로 받은 뒤 `new Response(...)` 로 바꿔 답했다(출처 `fallback-code`), HTTP 캐시의 것, 출처를 알리지 않은 응답 —
-// 모두 네트워크 응답이 아니다(닫힌 쪽). 대조: 출처가 `network` 면(그대로 넘김) 그 워커 기록의 본문을 받는다.
-test "W9d② 적대 리뷰 4 회차 SW1b: 서비스 워커가 만든 응답·HTTP 캐시의 것·출처를 모르는 것도 워커 기록에 붙이지 않는다, 네트워크에서 받은 응답(그대로 넘김)만 붙인다" {
+// 모두 네트워크 응답이 아니다(닫힌 쪽). 대조: 출처가 `network` 면(그대로 넘김) 짝은 그 워커 기록이다 — 재검증 5 차 S0(기대를 바꿈): 그래도 본문은
+// 붙이지 않는다(`ambiguous` — 워커가 어느 fetch 의 응답으로 답했는지 페이지 CDP 로는 모른다).
+test "W9d② 적대 리뷰 4 회차 SW1b·5 차 S0: 서비스 워커가 만든 응답·HTTP 캐시의 것·출처를 모르는 것은 워커 기록의 짝이 아니다(unmatched), 네트워크에서 받은 응답(그대로 넘김)은 짝이지만 본문 없이(ambiguous)" {
     const u = "https://app.test/sw/syn";
     for ([_][]const u8{ "fallback-code", "http-cache", "", "network" }, 0..) |source, n| {
         var h: H = .{};
@@ -4782,7 +4735,8 @@ test "W9d② 적대 리뷰 4 회차 SW1b: 서비스 워커가 만든 응답·HTT
         try h.finish(5, "s.1", base + 9_100);
         var buf: [4]u64 = undefined;
         if (std.mem.eql(u8, source, "network")) {
-            try testing.expectEqualSlices(u64, &.{9100 + n}, h.fetchedRequests(&buf));
+            try testing.expectEqual(@as(usize, 0), h.fetchedRequests(&buf).len);
+            try testing.expect(stateIs(&h, 9100 + n, .ambiguous));
         } else {
             try testing.expectEqual(@as(usize, 0), h.fetches.items.len);
             h.table.cefEnd(5, 9100 + n, base + 20_000);
@@ -4816,8 +4770,9 @@ test "W9d② 적대 리뷰 4 회차 SW1: 그대로 넘긴 요청과 캐시로 �
 }
 
 // 캐시로 답한 요청(A — 기록이 없는 캐시 적중)이 아직 열린 동안 같은 주소를 그대로 넘긴 요청(P)이 끝난다: A 는 어느 기록도 가져가지 않으므로 P 는
-// 곧 제 기록(p)을 받는다(A 를 맞추기에 넣으면 — A 의 응답이 p 의 시작 뒤라 p 는 A 의 짝일 수 있다 — A 가 p 를 가져가 P 는 기다리다 본문을 잃었다).
-// 캐시로 답한 요청이 실패로 끝나도(읽는 중 끊김) 아무 기록에도 닿지 않고 놓인다.
+// 곧 제 기록(p)과 짝이 된다(A 를 맞추기에 넣으면 — A 의 응답이 p 의 시작 뒤라 p 는 A 의 짝일 수 있다 — A 가 p 를 가져가 P 는 기다리다 짝을 잃었다).
+// 재검증 5 차 S0(기대를 바꿈): 짝은 곧 서지만 서비스 워커가 답한 응답이라 본문 없이(`ambiguous`) 곧 끝난다. 캐시로 답한 요청이 실패로 끝나도
+// (읽는 중 끊김) 아무 기록에도 닿지 않고 놓인다.
 test "W9d② 적대 리뷰 4 회차 SW1: 캐시로 답해 아직 열린 요청은 같은 주소의 그대로 넘긴 요청의 기록을 가져가지 않는다, 실패로 끝나도 놓인다" {
     const u = "https://app.test/sw/open";
     var h: H = .{};
@@ -4829,12 +4784,13 @@ test "W9d② 적대 리뷰 4 회차 SW1: 캐시로 답해 아직 열린 요청�
     try swResponse(&h, "a.1", "cache-storage", 1_005_000); // 응답은 왔고 끝은 아직
     try swResponse(&h, "p.1", "network", 1_010_000);
     try h.finish(5, "p.1", 1_011_000);
-    try testing.expectEqual(@as(?u64, 9251), fetchedFor(&h, "p.1"));
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.1"));
+    try testing.expect(stateIs(&h, 9251, .ambiguous));
     try h.ev(5, .{ .failed = .{ .rid = "a.1" } }, 1_012_000);
     try testing.expectEqual(@as(usize, 0), h.table.tabOf(5).?.cdp.items.len);
     try h.table.tick(gpa_t, 1_012_000 + cef_grace_us);
     try h.drain();
-    try testing.expectEqual(@as(u32, 0), endCount(&h, 9251)); // 보낸 호출은 그대로 — 실패한 A 가 끝내지 않았다
+    try testing.expectEqual(@as(u32, 1), endCount(&h, 9251)); // 끝은 하나 — 실패한 A 가 다시 끝내지 않았다
 }
 
 test "W9d② 적대 리뷰 4 회차 SW1: responseReceived 의 serviceWorkerResponseSource 를 읽는다(없으면 빈 글)" {
@@ -9216,7 +9172,8 @@ test "W9d② v20j A R6-3: 페이지 요청 하나 — 워커가 다른 주소로
     try testing.expectEqual(@as(usize, 0), wrong);
 }
 
-test "W9d② 재검증 4 차 뒤 R6: 워커가 그대로 넘긴 요청 하나는 제 본문 — 곁의 워커 요청이 캐시로 답하고 같은 주소를 네트워크로 다시 받아도(stale-while-revalidate — 그 기록은 설명된다), 설명되지 않는 다른 주소의 워커 기록이 창에 있으면 본문 없이" {
+// 재검증 5 차 S0(기대를 바꿈): 전에는 곁의 워커 기록이 「설명되면」(`sw_seen`) P 가 제 본문을 받았다 — 이제 서비스 워커가 답한 응답은 늘 본문 없이.
+test "W9d② 재검증 4 차 뒤 R6·5 차 S0: 워커가 그대로 넘긴 요청 하나도 본문 없이(ambiguous) — 곁의 워커 요청이 캐시로 답하고 같은 주소를 네트워크로 다시 받든(stale-while-revalidate), 설명되지 않는 다른 주소의 워커 기록이 창에 있든" {
     for ([_]bool{ true, false }) |with_swr| {
         var h: H = .{ .sync = false };
         defer h.deinit();
@@ -9246,11 +9203,194 @@ test "W9d② 재검증 4 차 뒤 R6: 워커가 그대로 넘긴 요청 하나는
             try h.drain();
         }
         errdefer std.debug.print("R6 swr={}: P fetched {?d} · rec1 {?s}\n", .{ with_swr, fetchedFor(&h, "P"), if (h.ended.get(1)) |x| @tagName(x) else null });
-        if (with_swr) {
-            try testing.expectEqual(@as(?u64, 1), fetchedFor(&h, "P"));
-        } else {
-            try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "P"));
-            try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(1));
-        }
+        try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "P"));
+        try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(1));
     }
+}
+
+// ── 검증자 v20k(41b519323 의 고침을 공격 — 그때 제품 코드는 그대로). 재검증 5 차 S0 뒤에는 서비스 워커가 답한 응답에 본문을 붙이지 않으니 셋 다
+// 어느 요청도 본문을 받으러 가지 않는다(틀린 본문 0 — 잃는 쪽) ──
+
+fn v20kNote(h: *H, rid: []const u8, got: *?u64) void {
+    if (got.* != null) return;
+    for (h.fetches.items) |a| if (a.fetch.rid.eql(rid)) {
+        for (h.table.inflight.items) |f| if (f.id == a.fetch.id and f.browser == a.fetch.browser) {
+            got.* = f.request;
+        };
+    };
+}
+
+fn v20kRun(h: *H, from: i64, to: i64, rids: []const []const u8, got: []?u64) !void {
+    var now = from;
+    while (now < to) : (now += 20_000) {
+        try h.flushed(now, now);
+        try h.table.tickAt(gpa_t, now, now);
+        try h.drain();
+        for (rids, 0..) |r, k| v20kNote(h, r, &got[k]);
+    }
+}
+
+test "W9d② v20k K1: 워커가 메모리에 남긴 앞 응답(출처 network)으로 답하며 같은 주소를 갱신 fetch 로 받으면 — 갱신 기록에 본문이 붙나" {
+    var wrong: usize = 0;
+    var fetched_any: usize = 0;
+    for ([_]i64{ 1_000, 3_000 }) |resp_after| {
+        var h: H = .{ .sync = false };
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        const u = "https://sw.test/api/feed";
+        const t0: i64 = 10_000_000;
+        // P1: 워커가 그대로 넘긴다(기록 1) — 응답을 메모리에 남긴다.
+        try h.ev(5, .{ .will_be_sent = .{ .rid = "P1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 } }, t0 + 100);
+        _ = try h.cand(5, 1, u, t0 + 1_000, .{ .sw = true });
+        h.table.cefEndReceived(5, 1, t0 + 40_000, true, 9);
+        try h.flushed(t0 + 41_000, t0 + 41_000);
+        try h.ev(5, .{ .response = .{ .rid = "P1", .mime = "application/json", .from_sw = true, .sw_source = "network", .charset = .other, .ts_us = t0 + 41_000 } }, t0 + 41_100);
+        try h.ev(5, .{ .data = .{ .rid = "P1", .bytes = 9 } }, t0 + 41_100);
+        try h.finish(5, "P1", t0 + 41_200);
+        var got: [2]?u64 = .{ null, null };
+        try v20kRun(&h, t0 + 60_000, t0 + 500_000, &.{ "P1", "P2" }, &got);
+        // P2(500 ms 뒤): 워커가 갱신 fetch(기록 2)를 먼저 내고 메모리의 응답(P1 의 것)으로 곧 답한다.
+        const t1 = t0 + 500_000;
+        try h.ev(5, .{ .will_be_sent = .{ .rid = "P2", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t1 } }, t1 + 100);
+        _ = try h.cand(5, 2, u, t1 + 600, .{ .sw = true });
+        try h.flushed(t1 + 700, t1 + 700);
+        try h.ev(5, .{ .response = .{ .rid = "P2", .mime = "application/json", .from_sw = true, .sw_source = "network", .charset = .other, .ts_us = t1 + resp_after } }, t1 + resp_after + 100);
+        try h.ev(5, .{ .data = .{ .rid = "P2", .bytes = 9 } }, t1 + resp_after + 100);
+        try h.finish(5, "P2", t1 + resp_after + 200);
+        h.table.cefEndReceived(5, 2, t1 + 60_000, true, 9);
+        try v20kRun(&h, t1 + 5_000, t1 + 4_000_000, &.{ "P1", "P2" }, &got);
+        const bad = got[1] != null;
+        if (bad) wrong += 1;
+        if (h.fetches.items.len != 0) fetched_any += 1;
+        std.debug.print("[v20k K1] resp +{d} us: P1 → {?d} (own 1), P2 → {?d} (own: none — body is P1's memo; record 2 is the refresh){s} · rec2 {?s}\n", .{ resp_after, got[0], got[1], if (bad) "  WRONG" else "", if (h.ended.get(2)) |x| @tagName(x) else null });
+    }
+    try testing.expectEqual(@as(usize, 0), wrong);
+    try testing.expectEqual(@as(usize, 0), fetched_any); // 5 차 S0: 메모의 원본(P1)도 본문 없이
+}
+
+test "W9d② v20k K2: 워커가 제 주소를 받은 뒤 다른 주소 fb 로 답하고(실패 대체 꼴) 페이지도 fb 를 워커를 거쳐 받으면 — 제 주소 기록에 본문이 붙나(문서의 「남는 틈」)" {
+    var h: H = .{ .sync = false };
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    const u = "https://sw.test/img/2.png";
+    const fb = "https://sw.test/img/placeholder.png";
+    const t0: i64 = 10_000_000;
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "P", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 } }, t0 + 100);
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "F", .url_hash = hashUrl8(fb), .method_hash = hashMethod("GET"), .ts_us = t0 + 200 } }, t0 + 300);
+    _ = try h.cand(5, 1, u, t0 + 1_000, .{ .sw = true }); // 워커가 P 의 주소를 받는다(404 — CEF 는 성공)
+    _ = try h.cand(5, 3, fb, t0 + 1_200, .{ .sw = true }); // 페이지의 F 를 워커가 그대로 넘긴다
+    try h.flushed(t0 + 2_000, t0 + 2_000);
+    h.table.cefEndReceived(5, 1, t0 + 30_000, true, 5);
+    h.table.cefEndReceived(5, 3, t0 + 32_000, true, 7);
+    _ = try h.cand(5, 2, fb, t0 + 31_000, .{ .sw = true }); // 워커가 P 에 답하려고 받은 fb
+    try h.flushed(t0 + 33_000, t0 + 33_000);
+    try h.ev(5, .{ .response = .{ .rid = "F", .mime = "image/svg+xml", .from_sw = true, .sw_source = "network", .charset = .none, .ts_us = t0 + 33_000 } }, t0 + 33_100);
+    try h.ev(5, .{ .data = .{ .rid = "F", .bytes = 7 } }, t0 + 33_100);
+    try h.finish(5, "F", t0 + 33_200);
+    h.table.cefEndReceived(5, 2, t0 + 60_000, true, 7);
+    try h.flushed(t0 + 61_000, t0 + 61_000);
+    try h.ev(5, .{ .response = .{ .rid = "P", .mime = "image/svg+xml", .from_sw = true, .sw_source = "network", .charset = .none, .ts_us = t0 + 61_000 } }, t0 + 61_100);
+    try h.ev(5, .{ .data = .{ .rid = "P", .bytes = 7 } }, t0 + 61_100);
+    try h.finish(5, "P", t0 + 61_200);
+    var got: [2]?u64 = .{ null, null };
+    try v20kRun(&h, t0 + 70_000, t0 + 4_000_000, &.{ "P", "F" }, &got);
+    const bad = got[0] != null and got[0] != 2;
+    std.debug.print("[v20k K2] P → {?d} (own: record 2 — the fallback fetch; 1 is its own URL's 404), F → {?d} (own 3){s}\n", .{ got[0], got[1], if (bad) "  WRONG" else "" });
+    try testing.expect(!bad);
+    try testing.expectEqual(@as(usize, 0), h.fetches.items.len); // 5 차 S0
+}
+
+test "W9d② v20k K3: 두 탭 — 탭 A 의 P(/a)에 워커가 /v 로 답하고(A 는 /v 도 받는다), 탭 B 의 Q(/a)는 그대로 넘긴다(워커 기록은 두 탭 모두에 붙는다)" {
+    var h: H = .{ .sync = false };
+    defer h.deinit();
+    _ = try h.table.start(gpa_t, 5, 1);
+    _ = try h.table.start(gpa_t, 6, 1);
+    const a = "https://sw.test/a";
+    const v = "https://sw.test/v";
+    const t0: i64 = 10_000_000;
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "V", .url_hash = hashUrl8(v), .method_hash = hashMethod("GET"), .ts_us = t0 } }, t0 + 100);
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "P", .url_hash = hashUrl8(a), .method_hash = hashMethod("GET"), .ts_us = t0 + 200 } }, t0 + 300);
+    try h.ev(6, .{ .will_be_sent = .{ .rid = "Q", .url_hash = hashUrl8(a), .method_hash = hashMethod("GET"), .ts_us = t0 + 300 } }, t0 + 400);
+    for ([_]BrowserId{ 5, 6 }) |b| {
+        _ = try h.cand(b, 1, v, t0 + 1_000, .{ .sw = true }); // V 의 것
+        _ = try h.cand(b, 2, v, t0 + 1_100, .{ .sw = true }); // 워커가 P 에 답하려고 받은 /v
+        _ = try h.cand(b, 3, a, t0 + 1_200, .{ .sw = true }); // 탭 B 의 Q 의 것
+    }
+    try h.flushed(t0 + 2_000, t0 + 2_000);
+    for ([_]BrowserId{ 5, 6 }) |b| for ([_]u64{ 1, 2, 3 }) |q| h.table.cefEndReceived(b, q, t0 + 40_000, true, 9);
+    try h.flushed(t0 + 41_000, t0 + 41_000);
+    for ([_]struct { BrowserId, []const u8 }{ .{ 5, "V" }, .{ 5, "P" }, .{ 6, "Q" } }) |x| {
+        try h.ev(x[0], .{ .response = .{ .rid = x[1], .mime = "application/json", .from_sw = true, .sw_source = "network", .charset = .other, .ts_us = t0 + 41_000 } }, t0 + 41_100);
+        try h.ev(x[0], .{ .data = .{ .rid = x[1], .bytes = 9 } }, t0 + 41_100);
+        try h.finish(x[0], x[1], t0 + 41_200);
+    }
+    var got: [3]?u64 = .{ null, null, null };
+    try v20kRun(&h, t0 + 50_000, t0 + 4_000_000, &.{ "V", "P", "Q" }, &got);
+    const bad = got[1] != null and got[1] != 2;
+    std.debug.print("[v20k K3] tab A: V → {?d} (own 1), P → {?d} (own 2 — the /v the worker fetched){s}; tab B: Q → {?d} (own 3)\n", .{ got[0], got[1], if (bad) "  WRONG" else "", got[2] });
+    try testing.expect(!bad);
+    try testing.expectEqual(@as(usize, 0), h.fetches.items.len); // 5 차 S0
+}
+
+test "W9d② v20k K4·5 차 S0: 값 — 서비스 워커가 그대로 넘긴 다른 주소 요청 N 개(같은 창)가 한꺼번에 끝나도(전에는 swUnique 의 셋째 조건이 판정마다 기록 × 요청을 훑었다) 판정은 주소마다, 본문은 없다" {
+    const ns_env = std.c.getenv("V20K_K4_N");
+    const ns: []const usize = if (ns_env != null) &.{std.fmt.parseInt(usize, std.mem.span(ns_env.?), 10) catch 512} else &.{ 128, 512, 1024 };
+    for (ns) |n| {
+        var h: H = .{};
+        defer h.deinit();
+        _ = try h.table.start(gpa_t, 5, 1);
+        var rb: [24]u8 = undefined;
+        var ub: [64]u8 = undefined;
+        const t0: i64 = 10_000_000;
+        for (0..n) |i| {
+            const ts: i64 = t0 + 1 + @as(i64, @intCast(i));
+            const rid = try std.fmt.bufPrint(&rb, "s.{d}", .{i});
+            const u = try std.fmt.bufPrint(&ub, "https://sw.test/img/{d}.png", .{i});
+            try h.table.cdpEvent(gpa_t, 5, .{ .will_be_sent = .{ .rid = rid, .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = ts } }, ts);
+            _ = try h.table.cefBegin(gpa_t, 5, .{ .request = 100 + i, .key = .{ .url = hashUrl8(u), .method = hashMethod("GET"), .sw = true }, .t_io_us = ts + 50, .attr = 1 });
+        }
+        const fin: i64 = t0 + 400_000;
+        const a = clock_gettime_nsec_np(16);
+        for (0..n) |i| {
+            const rid = try std.fmt.bufPrint(&rb, "s.{d}", .{i});
+            h.table.cefEndReceived(5, 100 + i, fin - 1_000, true, 9);
+            h.table.cef_seen_us = fin;
+            try h.table.cdpEvent(gpa_t, 5, .{ .response = .{ .rid = rid, .mime = "application/json", .from_sw = true, .sw_source = "network", .charset = .other, .ts_us = fin - 500 } }, fin);
+            try h.table.cdpEvent(gpa_t, 5, .{ .data = .{ .rid = rid, .bytes = 9 } }, fin);
+            try h.table.cdpEvent(gpa_t, 5, .{ .finished = .{ .rid = rid } }, fin);
+        }
+        const b = clock_gettime_nsec_np(16);
+        var worst: u64 = 0;
+        var total: u64 = b - a;
+        var now = fin + 50_000;
+        var own: usize = 0;
+        var wrong: usize = 0;
+        var amb: usize = 0;
+        while (now < fin + 3_000_000) : (now += 50_000) {
+            const c0 = clock_gettime_nsec_np(16);
+            try h.table.tickAt(gpa_t, now, now);
+            const c1 = clock_gettime_nsec_np(16);
+            worst = @max(worst, c1 - c0);
+            total += c1 - c0;
+            var list: std.ArrayList(Action) = .empty;
+            defer list.deinit(gpa_t);
+            h.table.swapActions(&list);
+            for (list.items) |x| switch (x) {
+                .fetch => |f| if (h.table.takeInflight(f.id)) |ff| {
+                    const want = 100 + (std.fmt.parseInt(usize, f.rid.slice()[2..], 10) catch 0);
+                    if (ff.request == want) own += 1 else wrong += 1;
+                    try h.table.bodyDone(gpa_t, ff, now);
+                },
+                .end => |e| if (e.state == .ambiguous) {
+                    amb += 1;
+                },
+                else => {},
+            };
+        }
+        std.debug.print("\n[v20k K4] n={d}: finish loop {d} us (events) · worst tick {d} us · total {d} us · own {d} wrong {d}", .{ n, (b - a) / 1000, worst / 1000, total / 1000, own, wrong });
+        try testing.expectEqual(@as(usize, 0), wrong);
+        try testing.expectEqual(@as(usize, 0), own); // 5 차 S0: 본문 없이(ambiguous)
+        try testing.expectEqual(n, amb);
+    }
+    std.debug.print("\n", .{});
 }

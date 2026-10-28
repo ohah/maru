@@ -582,6 +582,9 @@ fn publishErrorText(err: anyerror) []const u8 {
         error.OutputIsSymLink => "cannot write the output file: the path is a symbolic link",
         error.NotDir => "cannot write the output file: a part of its directory path is not a directory",
         error.BadPathName => "cannot write the output file: the path is not a valid file name",
+        // W9d② 재검증 5 차 R10: 긴 이름·권한도 그 까닭을(전에는 「atomically」 — 쓰기 방식의 탓처럼 읽혔다).
+        error.NameTooLong => "cannot write the output file: a name in the path is too long",
+        error.AccessDenied, error.PermissionDenied => "cannot write the output file: permission denied",
         else => "cannot publish the output file atomically",
     };
 }
@@ -1267,7 +1270,8 @@ test "W9d② 재검증 N-g2: --out 이 없는 폴더·폴더인 대상이면 그
     try std.testing.expectEqualStrings("cannot write the output file: the path is a directory", publishErrorText(dir_target));
     var it = (try tmp.dir.openDir(io, "target", .{ .iterate = true })).iterate();
     try std.testing.expect((try it.next(io)) == null);
-    try std.testing.expectEqualStrings("cannot publish the output file atomically", publishErrorText(error.AccessDenied));
+    try std.testing.expectEqualStrings("cannot write the output file: permission denied", publishErrorText(error.AccessDenied));
+    try std.testing.expectEqualStrings("cannot publish the output file atomically", publishErrorText(error.NoSpaceLeft));
 }
 
 test "W9d② 재검증 3 차 N-h1·N-h3: --out 이 `<폴더>/.`·`.`·`..`·`/`·`<폴더>/` 면 「폴더다」, 없는 `<새이름>/`·`<파일>/` 이면 「폴더를 뜻한다」 — 멈추지 않고 아무것도 남기지 않는다" {
@@ -1466,4 +1470,36 @@ test "W9d② 재검증 4 차 뒤 B10-1·B10-2: --out 이 심볼릭 링크(폴더
     // 가운데 조각의 링크는 따른다 — 링크된 폴더 안에는 쓴다.
     try publishResult(tmp.dir, io, "ldir/x.json", "B");
     try std.testing.expectEqualStrings("B", try tmp.dir.readFile(io, "adir/x.json", &buf));
+}
+
+test "W9d② 재검증 5 차 R10(v20k): --out 공격 — 링크 고리·긴 이름·링크된 폴더 밑의 링크·끊긴 가운데 링크·폴더 링크 뒤 /. — 저마다 까닭의 글, 가리키는 파일은 그대로" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "adir", .default_dir);
+    try tmp.dir.symLink(io, "loop", "loop", .{});
+    try tmp.dir.symLink(io, "adir", "ldir", .{ .is_directory = true });
+    try tmp.dir.writeFile(io, .{ .sub_path = "adir/f", .data = "KEEP" });
+    try tmp.dir.symLink(io, "f", "adir/lf", .{});
+    try tmp.dir.symLink(io, "nowhere", "ldead", .{});
+    var long: [300]u8 = undefined;
+    @memset(&long, 'a');
+    const cases = [_]struct { []const u8, []const u8 }{
+        .{ "loop", "cannot write the output file: the path is a symbolic link" },
+        .{ "ldir/lf", "cannot write the output file: the path is a symbolic link" },
+        .{ "ldead/x", "cannot write the output file: its directory does not exist" },
+        .{ "ldir/.", "cannot write the output file: the path is a directory" },
+        .{ "ldir/..", "cannot write the output file: the path is a directory" },
+        .{ "ldir/./lf", "cannot write the output file: the path is a symbolic link" },
+        // 재검증 5 차 R10: 긴 이름은 그 까닭(전에는 「atomically」).
+        .{ long[0..], "cannot write the output file: a name in the path is too long" },
+        .{ "adir/f/", "cannot write the output file: the path names a directory (it ends with /, . or ..)" },
+    };
+    for (cases) |c| {
+        const e = if (publishResult(tmp.dir, io, c[0], "BODY")) |_| return error.TestUnexpectedResult else |e| e;
+        try std.testing.expectEqualStrings(c[1], publishErrorText(e));
+    }
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("KEEP", try tmp.dir.readFile(io, "adir/f", &buf));
 }

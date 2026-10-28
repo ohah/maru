@@ -311,7 +311,7 @@ fn contextResourceRequestHandler(_: [*c]c.cef_request_context_handler_t, browser
     } else false;
     doUnlock();
     if (n != 0 and !admitted) {
-        if (net_body.any_recording.load(.acquire)) markDrop(targets[0..n], request);
+        if (net_body.any_recording.load(.acquire)) markDropKind(targets[0..n], request, gate_answer.cap);
         postFlush();
     }
     return if (admitted) &rrh else null;
@@ -323,13 +323,18 @@ fn contextResourceRequestHandler(_: [*c]c.cef_request_context_handler_t, browser
 // 탭은 넘침으로 알린다(표가 그 탭의 넘침을 모르면 짝이 맞게 보일 수 있다).
 
 fn markDrop(targets: []const BrowserId, request: [*c]c.cef_request_t) void {
+    markDropKind(targets, request, false);
+}
+
+/// `sw_cap` — 서비스 워커 몫이 차서 넘겼다(재검증 5 차 (B) — 본문 표는 탭 전체를 어둠으로 치지 않는다).
+fn markDropKind(targets: []const BrowserId, request: [*c]c.cef_request_t, sw_cap: bool) void {
     const raw = request.*.get_url.?(request);
     defer if (raw != null) api().string_userfree_utf16_free(raw);
     const hash = body_table.hashUrl16(units(raw));
     doLock();
     defer doUnlock();
     // 잠금 아래에서 찍는다 — 표지의 차례가 시각의 차례라 물 높이(`cefWatermark`)가 남은 표지의 가장 이른 시각으로 정해진다(W9d② 적대 리뷰 3 회차).
-    state.markDrop(targets, hash, net_body.machUs());
+    state.markDropKind(targets, hash, net_body.machUs(), sw_cap);
 }
 
 // ── IO 스레드: 처리기 콜백 → 기록 ─────────────────────────────────────────────────────────────────────
@@ -703,7 +708,7 @@ fn watchView(browser: BrowserId) ?gate.Watch {
 fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
     flush_posted.store(false, .release);
     var taken: std.ArrayList(*Event) = .empty;
-    var drops: [gate.capacity]struct { browser: BrowserId, count: u32 } = undefined;
+    var drops: [gate.capacity]struct { browser: BrowserId, count: u32, sw_cap: u32 } = undefined;
     var drop_count: usize = 0;
     var marks: [gate.max_drop_marks]gate.DropMark = undefined;
     var overflowed: [gate.max_targets]BrowserId = @splat(0);
@@ -715,15 +720,16 @@ fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
     std.mem.swap(std.ArrayList(*Event), &queue, &taken);
     // 꺼낸 때 — 이 앞에 찍힌 것은 모두 꺼냈다(아래에서 표에 넘긴 뒤 물 높이로 알린다).
     const swapped_us = net_body.machUs();
-    for (&state.watches) |*w| if (w.on and w.dropped != 0) {
-        drops[drop_count] = .{ .browser = w.browser, .count = w.dropped };
+    for (&state.watches) |*w| if (w.on and (w.dropped != 0 or w.dropped_sw_cap != 0)) {
+        drops[drop_count] = .{ .browser = w.browser, .count = w.dropped, .sw_cap = w.dropped_sw_cap };
         drop_count += 1;
         w.dropped = 0;
+        w.dropped_sw_cap = 0;
     };
     doUnlock();
     defer taken.deinit(std.heap.c_allocator);
-    for (drops[0..drop_count]) |d| browsers.state.writer.send(.{ .net_dropped = .{ .browser = d.browser, .count = d.count } }) catch {};
-    for (marks[0..mark_len]) |m| net_body.noteDrop(m.browser, m.url_hash, m.t_us);
+    for (drops[0..drop_count]) |d| browsers.state.writer.send(.{ .net_dropped = .{ .browser = d.browser, .count = d.count, .sw_inflight_cap = d.sw_cap } }) catch {};
+    for (marks[0..mark_len]) |m| net_body.noteDropKind(m.browser, m.url_hash, m.t_us, m.sw_cap);
     for (overflowed) |b| if (b != 0) net_body.noteDropOverflow(b, net_body.machUs());
     for (taken.items) |e| {
         for (e.targets[0..e.target_count], 0..) |b, i| send(e, b, i);

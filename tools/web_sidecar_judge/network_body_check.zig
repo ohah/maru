@@ -527,8 +527,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
                 sw_flag = b.sw;
             };
         };
-        // 재검증 5 차 S0(기대를 바꿈 — 서비스 워커 갈래 새 설계의 체크포인트): 워커가 그대로 넘긴 응답도 본문 없이 `ambiguous` 하나(짝은 선다).
-        report(hasState(data, .ambiguous) and sw_flag and data.?.data.items.len == 0, "body-service-worker", std.fmt.bufPrint(&detail, "끝 {s} · 본문 {d} 바이트 · 서비스 워커 갈래 {}", .{ stateName(data), if (data) |d| d.data.items.len else 0, sw_flag }) catch "");
+        // 재검증 5 차 S3b(기대를 되돌림): 워커가 그대로 넘긴 응답 — 페이지가 받은 본문을 워커 fetch 의 기록에 잇는다(τ — 계획 C0–C7′).
+        report(hasState(data, .captured) and sw_flag and std.mem.eql(u8, data.?.data.items, "{\"sw\":\"body\"}"), "body-service-worker", std.fmt.bufPrint(&detail, "끝 {s} · 본문 {d} 바이트 · 서비스 워커 갈래 {}", .{ stateName(data), if (data) |d| d.data.items.len else 0, sw_flag }) catch "");
     }
 
     // ── UB1: 다른 사이트에서 쿠키가 실린 스크립트 ──

@@ -2177,6 +2177,9 @@ test "W9d①: 네트워크 메시지 여섯이 왕복하고 방향이 맞다 —
     try std.testing.expectEqual(@as(i32, -3), e.error_code);
     try std.testing.expectEqual(@as(u64, 1 << 40), e.received);
     try std.testing.expectEqual(@as(u32, 9), (try roundTrip(.{ .net_dropped = .{ .browser = 7, .count = 9 } })).net_dropped.count);
+    // W9d② 재검증 5 차 (B): 서비스 워커 몫으로 넘긴 수만 있어도 된다(둘 다 0 은 아니다).
+    const swd = (try roundTrip(.{ .net_dropped = .{ .browser = 7, .count = 0, .sw_inflight_cap = 4 } })).net_dropped;
+    try std.testing.expect(swd.count == 0 and swd.sw_inflight_cap == 4);
     const watch = (try roundTrip(.{ .net_watch = .{ .browser = 7, .on = true, .full = false, .host_count = 4, .hosts = .{ "a.test", "b.test", "127.0.0.1", "localhost" } } })).net_watch;
     try std.testing.expect(watch.on and !watch.full and !watch.any_host);
     // W9d① 적대 리뷰 3 회차: 어느 호스트든 grant 는 제 칸으로 — 사이트에 묶인 호스트와 함께 온다.

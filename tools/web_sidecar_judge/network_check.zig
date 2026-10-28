@@ -12,7 +12,9 @@
 //!   net-userinfo-full 설정 켬: 주소의 사용자 정보(`user:pass@`)가 보인다
 //!   net-service-worker 서비스 워커가 다스리는 페이지의 fetch 는 브라우저가 없는 요청으로 와(공유 context 처리기) 그 출처를 연 지켜보는 탭에
 //!                     `service_worker` 로 붙는다
-//!   net-flood         3000 요청을 쏟으면 문이 대부분을 넘기고(`net_dropped`) 적은 수는 버스트 근처다
+//!   net-flood         3000 요청을 쏟으면 문이 대부분을 넘기고(`net_dropped`) 적은 수는 버스트 근처다 — 이 페이지는 앞 사례의 서비스 워커가
+//!                     다스려(범위 `/n/`) 쏟은 요청이 서비스 워커 갈래로 간다. W9d② 재검증 5 차 (B) 부터 그 갈래의 동시 몫으로 넘긴 것은
+//!                     `sw_inflight_cap` 으로 따로 온다 — 넘긴 수는 둘의 합
 //!   net-watch-off     지켜보기를 끄면 그 뒤 요청은 오지 않는다
 //! W9d① 적대 리뷰 1 회차(리뷰가 더한 판정 — 이름 `R9d1-*`):
 //!   R9d1-sw-cross-tab-on   설정 켬: 지켜보지 않는 탭(사용자의 grant 없는 탭)이 같은 출처에서 보낸 서비스 워커 fetch 도 지켜보는 탭에
@@ -230,6 +232,8 @@ const Rec = struct {
     outcome: msg.NetOutcome = .success,
     error_code: i32 = 0,
     count: u32 = 0,
+    /// W9d② 재검증 5 차 (B): 그중 서비스 워커 몫이 차서 넘긴 수(`net_dropped.sw_inflight_cap`).
+    sw_cap: u32 = 0,
 
     fn header(self: *const Rec, name: []const u8) ?[]const u8 {
         var it = net_fields.HeaderIterator.init(.{ .count = self.header_count, .bytes = self.headers });
@@ -259,7 +263,7 @@ const Run = struct {
             .net_redirect => |v| .{ .tag = .net_redirect, .browser = v.browser, .request = v.request, .hop = v.flags, .status = v.status, .url = self.dupe(v.url), .host = self.dupe(v.host), .headers = self.dupe(v.headers.bytes), .header_count = v.headers.count },
             .net_response => |v| .{ .tag = .net_response, .browser = v.browser, .request = v.request, .hop = v.flags, .status = v.status, .headers = self.dupe(v.headers.bytes), .header_count = v.headers.count },
             .net_end => |v| .{ .tag = .net_end, .browser = v.browser, .request = v.request, .outcome = v.outcome, .error_code = v.error_code },
-            .net_dropped => |v| .{ .tag = .net_dropped, .browser = v.browser, .request = 0, .count = v.count },
+            .net_dropped => |v| .{ .tag = .net_dropped, .browser = v.browser, .request = 0, .count = v.count +| v.sw_inflight_cap, .sw_cap = v.sw_inflight_cap },
             .browser_created => |id| blk: {
                 if (slot(id)) |i| self.created[i] = true;
                 break :blk null;
@@ -697,13 +701,17 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         r.pump(6000);
         var begins: usize = 0;
         var dropped: u64 = 0;
+        var sw_cap: u64 = 0;
         for (r.recs.items[at..]) |rec| {
             if (rec.browser != watched) continue;
             if (rec.tag == .net_begin and std.mem.indexOf(u8, rec.url, "/n/f?") != null) begins += 1;
-            if (rec.tag == .net_dropped) dropped += rec.count;
+            if (rec.tag == .net_dropped) {
+                dropped += rec.count;
+                sw_cap += rec.sw_cap;
+            }
         }
         const served = flood_served.load(.monotonic);
-        report(dropped > 1000 and begins <= 800 and begins >= 100, "net-flood", std.fmt.bufPrint(&detail, "서버가 받은 {d} · 적은 요청 {d} · 넘긴 수 {d}", .{ served, begins, dropped }) catch "");
+        report(dropped > 1000 and begins <= 800 and begins >= 100, "net-flood", std.fmt.bufPrint(&detail, "서버가 받은 {d} · 적은 요청 {d} · 넘긴 수 {d}(그중 서비스 워커 몫 {d})", .{ served, begins, dropped, sw_cap }) catch "");
     }
     // ── R9d1(리뷰): 탭을 건너는 서비스 워커 요청 — 켬·끔 ──
     // 지켜보는 탭은 127.0.0.1 에 있고 /n/sw-page 의 서비스 워커가 /n/ 을 다스린다. 지켜보지 않는 탭(사용자의 grant 없는 탭)이 그 범위의

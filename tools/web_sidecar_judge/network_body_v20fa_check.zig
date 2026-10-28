@@ -180,6 +180,9 @@ fn serveOne(conn: c_int) void {
     var lb: [512]u8 = undefined;
     if (std.mem.eql(u8, method, "OPTIONS")) return replyC(conn, "204 No Content", "text/plain", "Access-Control-Allow-Headers: x-who, content-type\r\nAccess-Control-Allow-Methods: GET, POST, HEAD\r\n", "");
     if (std.mem.eql(u8, path, "/v20/blank")) return reply(conn, html, "<!doctype html><title>blank</title>blank");
+    // 재검증 5 차 (B): 사례 사이에 서비스 워커를 푼다 — 기록 중에는 maru 가 워커를 붙잡아 두어 워커가 본문을 읽지 않은 fetch(갱신 X)가 끝나지
+    // 않고 서비스 워커 몫(동시 128)을 쥔다. 등록을 지우면 다스릴 페이지가 없는 워커는 멈추고 그 fetch 도 끊긴다(다음 사례는 새로 등록한다).
+    if (std.mem.eql(u8, path, "/v20/swfree")) return reply(conn, html, "<!doctype html><title>swfree</title><script>navigator.serviceWorker.getRegistrations().then(function(rs){return Promise.all(rs.map(function(r){return r.unregister()}))}).then(function(){document.title='swfreed'})</script>free");
     if (std.mem.eql(u8, path, "/v20/d")) return data(conn, head, qnum(target, "d="), qnum(target, "h="));
     // ── r1: 설정 끔·어느 호스트든 — 덮기의 표 ──
     if (std.mem.eql(u8, path, "/v20f/r1/c2u")) return replyC(conn, "302 Found", "text/plain", std.fmt.bufPrint(&lb, "Location: http://localhost:{d}/v20/d{s}\r\n", .{ port, query }) catch return, "");
@@ -725,6 +728,13 @@ fn endLine(c: *const EndCheck, buf: []u8, sl: []u8) []const u8 {
     return std.fmt.bufPrint(buf, "body_expected begins {d} · no end {d} · several ends {d} · data after end {d} · states{s}", .{ c.expected, c.missing, c.doubled, c.after_end, stateLine(&t, sl) }) catch "";
 }
 
+/// 재검증 5 차 (B): 등록을 지워 서비스 워커를 푼다(`/v20/swfree`).
+fn freeWorkers(r: *Run) !void {
+    try r.navigate(rec_tab, "/v20/swfree");
+    _ = r.pumpTitle(rec_tab, "swfreed", 10_000);
+    r.pump(1500);
+}
+
 fn enabled(name: []const u8) bool {
     const only = std.c.getenv("V20F_ONLY") orelse return true;
     return std.mem.indexOf(u8, std.mem.span(only), name) != null;
@@ -818,7 +828,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     var lb: [4000]u8 = undefined;
     var ub: [256]u8 = undefined;
     const body_log = std.c.getenv("V20F_BODY_LOG") != null;
-    const log_env: []const [*:0]const u8 = if (body_log) &.{"MARU_WEB_TEST_BODY_LOG=1"} else &.{};
+    // 재검증 5 차 S3b: 서비스 워커 잇기의 까닭 줄만(`MARU_WEB_TEST_SW_NOTES` — 사건마다의 줄 없이).
+    const sw_notes_env = std.c.getenv("MARU_WEB_TEST_SW_NOTES") != null;
+    const log_env: []const [*:0]const u8 = if (body_log and sw_notes_env) &.{ "MARU_WEB_TEST_BODY_LOG=1", "MARU_WEB_TEST_SW_NOTES=1" } else if (body_log) &.{"MARU_WEB_TEST_BODY_LOG=1"} else if (sw_notes_env) &.{"MARU_WEB_TEST_SW_NOTES=1"} else &.{};
     const stderr_path: ?[:0]const u8 = if (std.c.getenv("V20F_HOST_STDERR")) |p| std.mem.span(p) else null;
     var host = try Host.spawnWith(host_path, profile_arg, stderr_path, log_env);
     defer {
@@ -1069,7 +1081,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         var ok = done;
         inline for (.{ "/v20f/sw/dl?d=0&", "/v20f/sw/dl?d=1500&", "/v20f/sw/dl?d=2500&" }) |nd| {
             const t = tally(&r, rec_tab, at, nd, null);
-            if (t.wrong != 0 or t.sw_captured != 0 or t.no_end != 0 or t.multi_end != 0) ok = false; // 5 차 S0: 서비스 워커 갈래는 본문 없이
+            if (t.wrong != 0 or t.sw_captured * 10 < t.total * 8 or t.no_end != 0 or t.multi_end != 0) ok = false; // 5 차 S3b: 늦게 넘겨도 W 의 시작으로 짝 — 제 본문(실측 8/8)
             const piece = std.fmt.bufPrint(detail[dn..], " [{s}: {s}]", .{ nd, lineOf(&t, &lb, &sl) }) catch "";
             dn += piece.len;
         }
@@ -1389,7 +1401,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             const ec = endCheck(&r, rec_tab, at);
             var el: [600]u8 = undefined;
             var sl2: [400]u8 = undefined;
-            report(done and all.wrong == 0 and all.sw_captured == 0 and ec.missing == 0 and ec.doubled == 0, "v20i-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 700)] }) catch "");
+            report(done and all.wrong == 0 and all.sw_captured >= (if (comptime std.mem.eql(u8, c[1], "p2")) @as(usize, 30) else 15) and ec.missing == 0 and ec.doubled == 0, "v20i-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 700)] }) catch "");
+            try freeWorkers(&r);
             try r.navigate(rec_tab, "/v20/blank?swi");
             r.pump(2000);
         };
@@ -1416,7 +1429,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             const ec = endCheck(&r, rec_tab, at);
             var el: [600]u8 = undefined;
             var sl2: [400]u8 = undefined;
-            report(done and all.wrong == 0 and all.sw_captured == 0 and ec.missing == 0 and ec.doubled == 0, "v20j-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
+            report(done and all.wrong == 0 and all.sw_captured >= (if (comptime std.mem.startsWith(u8, c[0], "swalt1")) @as(usize, 15) else 30) and ec.missing == 0 and ec.doubled == 0, "v20j-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
+            try freeWorkers(&r);
             try r.navigate(rec_tab, "/v20/blank?swj");
             r.pump(2000);
         };
@@ -1443,7 +1457,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             const ec = endCheckOf(&r, rec_tab, at, comptime std.mem.eql(u8, c[2], "m2l"));
             var el: [600]u8 = undefined;
             var sl2: [400]u8 = undefined;
-            report(done and all.wrong == 0 and all.sw_captured == 0 and ec.missing == 0 and ec.doubled == 0, "v20k-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), std.mem.sliceTo(&line[3], 0), std.mem.sliceTo(&line[4], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
+            report(done and all.wrong == 0 and all.sw_captured >= (if (comptime std.mem.eql(u8, c[2], "fb")) @as(usize, 36) else 18) and ec.missing == 0 and ec.doubled == 0, "v20k-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), std.mem.sliceTo(&line[3], 0), std.mem.sliceTo(&line[4], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
+            try freeWorkers(&r);
             try r.navigate(rec_tab, "/v20/blank?swq");
             r.pump(2000);
         };
@@ -1488,7 +1503,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             }
             var t2: Tally = .{};
             t2.states = st;
-            report(wrong == 0 and sw_own == 0 and missing == 0 and doubled == 0 and bad_loads == 0, "v20j-swmix", std.fmt.bufPrint(&detail, "{d} loads × 20: WRONG {d} · pass-through own {d}/{d} · no end {d} · several ends {d} · states{s}{s}", .{ loads, wrong, sw_own, sw_total, missing, doubled, stateLine(&t2, &sl), notes[0..nn] }) catch "");
+            report(wrong == 0 and sw_own * 10 >= sw_total * 9 and missing == 0 and doubled == 0 and bad_loads == 0, "v20j-swmix", std.fmt.bufPrint(&detail, "{d} loads × 20: WRONG {d} · pass-through own {d}/{d} · no end {d} · several ends {d} · states{s}{s}", .{ loads, wrong, sw_own, sw_total, missing, doubled, stateLine(&t2, &sl), notes[0..nn] }) catch "");
         }
         // IO load between p1 and p2.
         inline for (.{ .{ "load-n100", "100" }, .{ "load-n400", "400" }, .{ "load-n1500", "1500" } }) |c| if (enabled("v20i-" ++ c[0])) {

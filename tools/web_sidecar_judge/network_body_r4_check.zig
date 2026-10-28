@@ -440,14 +440,15 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     try host.send(.{ .net_record = .{ .browser = rec_tab, .on = true, .session = 1 } });
     _ = r.waitFor(5000, rec_tab, hasState);
 
-    // ── 서비스 워커 ── 재검증 5 차 S0(기대를 더함): 서비스 워커 갈래 기록은 본문 없이(`sw captured 0`) — 틀린 본문 0 은 그대로.
+    // ── 서비스 워커 ── 재검증 5 차 S3b: 그대로 넘긴 fetch 의 기록에는 페이지가 받은 본문을 잇는다(Cache Storage·만든 응답은 잇지 않는다) —
+    // 틀린 본문 0, 아래 끝은 실측(S3b — swr 2·late 1·mixed 40).
     {
         const at = r.begins.items.len;
         try r.navigate(rec_tab, "/rv4/sw/swr");
         const done = r.pumpTitle(rec_tab, "swrdone", 30_000);
         r.pump(4000);
         const ta = tally(&r, rec_tab, at, "/rv4/sw/d", null);
-        report(done and ta.wrong == 0 and ta.sw_captured == 0, "body-r4-sw-swr", lineOf(&ta, &detail, &sl));
+        report(done and ta.wrong == 0 and ta.sw_captured >= 1 and ta.sw_captured <= 2, "body-r4-sw-swr", lineOf(&ta, &detail, &sl));
     }
     {
         const at = r.begins.items.len;
@@ -455,7 +456,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const done = r.pumpTitle(rec_tab, "latedone", 20_000);
         r.pump(4000);
         const t = tally(&r, rec_tab, at, "/rv4/sw/late", null);
-        report(done and t.wrong == 0 and t.sw_captured == 0, "body-r4-sw-cache-then-update-control", lineOf(&t, &detail, &sl));
+        report(done and t.wrong == 0 and t.sw_captured <= 1, "body-r4-sw-cache-then-update-control", lineOf(&t, &detail, &sl));
     }
     {
         const at = r.begins.items.len;
@@ -479,10 +480,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const done = r.pumpTitle(rec_tab, "mixdone", 20_000);
         r.pump(4000);
         const t = tally(&r, rec_tab, at, "/rv4/sw/pt?", null);
-        // 재검증 4 차 뒤 R6-1(기대를 바꿈 — 대가): 한 묶음에 같은 주소를 그대로 넘긴 워커 요청이 둘이라 워커 갈래의 짝이 하나로 정해지지 않는다
-        // (워커 기록 차례는 페이지의 시작 차례가 아니다 — 거꾸로 넘기면 맞바뀐다) — 그대로 넘긴 워커 기록은 본문 없이 `ambiguous`, 놓은(fallback)
-        // 페이지 기록은 모두 제 본문. 전에는 워커 기록도 모두 제 본문을 받았다(차례가 맞은 판 — 검증자 A 의 다른 작업 트리 80 중 2 는 틀렸다).
-        report(done and t.wrong == 0 and t.sw > 0 and t.sw_captured == 0 and t.ambiguous == t.sw and t.own == t.total - t.sw, "body-r4-sw-mixed", lineOf(&t, &detail, &sl));
+        // 재검증 5 차 S3b(기대를 바꿈): 워커 W 가 쌍둥이라 같은 주소의 그대로 넘긴 워커 기록도 짝이 하나로 정해진다(관 하나 안의 차례) — 모두 제
+        // 본문(실측 40/40). 놓은(fallback) 페이지 기록도 모두 제 본문.
+        report(done and t.wrong == 0 and t.sw > 0 and t.sw_captured * 10 >= t.sw * 9 and t.own == t.total - (t.sw - t.sw_captured), "body-r4-sw-mixed", lineOf(&t, &detail, &sl));
     }
     // ── 프레임 ──
     {

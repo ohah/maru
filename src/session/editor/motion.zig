@@ -85,7 +85,7 @@ pub fn lineStartSmart(bytes: []const u8, line: line_index.Line, offset: usize) u
     const content_end = line.contentEnd();
     var first = line.start;
     while (first < content_end and (bytes[first] == ' ' or bytes[first] == '\t')) first += 1;
-    if (offset == first) return line.start;
+    if (first == content_end or offset == first) return line.start;
     return first;
 }
 
@@ -170,9 +170,8 @@ pub fn rowStartSmart(bytes: []const u8, line: line_index.Line, row: VisualRow) u
 
 /// 행 **끝**. `lineEndScope` 가 `.row` 를 냈을 때의 착지점이다.
 ///
-/// **이음매가 `movedVisualRow` 와 반대다**(의도): 그쪽은 목표 열이 경계에 걸리면 **뒤 행 머리**를
-/// 고르는데(세로 이동은 "어느 행에 서는가" 를 묻는다), ⌘→ 는 **앞 행 끝**을 원한다. 같은 offset 을
-/// 두 질문이 다르게 부르는 것이라 한쪽에 맞추면 다른 쪽이 틀린다.
+/// 착지 offset이 다음 행 머리와 겹치면 호출자는 `prev_row` affinity도 보존한다.
+/// 세로 이동과 caret 그리기는 같은 affinity를 읽어 도착한 화면 행을 유지한다.
 pub fn rowEnd(line: line_index.Line, row: VisualRow) usize {
     return @min(row.end, line.contentEnd());
 }
@@ -580,4 +579,11 @@ test "MOT6: 탭이 있는 줄에서도 열이 화면과 같은 규칙으로 센�
     try testing.expectEqual(tabbed.start + 1, offsetForGoal(s, tabbed, .{ .col = 4 }, map));
     // 0열은 탭 **앞**이다 — 탭 한 칸이 여러 열을 먹어도 시작 자리는 그대로다.
     try testing.expectEqual(tabbed.start, offsetForGoal(s, tabbed, .{ .col = 0 }, map));
+}
+
+test "CME25 smart Home keeps whitespace-only physical lines at column zero" {
+    for ([_][]const u8{ "    ", "\t\t", " \t " }) |text| {
+        const line: line_index.Line = .{ .start = 0, .end_with_ending = text.len, .ending = .none };
+        for (0..text.len + 1) |offset| try testing.expectEqual(@as(usize, 0), lineStartSmart(text, line, offset));
+    }
 }

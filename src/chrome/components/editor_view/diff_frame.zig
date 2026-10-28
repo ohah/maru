@@ -50,6 +50,7 @@ pub const Side = struct {
     /// 이미 있었고 **없던 것은 열마다 값을 받을 자리**였다. 모양(`caret_shape`)과 깜빡임
     /// (`caret_visible`)은 좌우가 같아야 하므로 `Shared`에 남는다.
     carets: ?[]const []const u32 = null,
+    caret_affinity: ?frame.CaretAffinity = null,
 
     /// 그 열의 행마다 **검색 결과**(§5.1)와 그 중 현재 매치. 단일 편집기만 채운다 —
     /// 비교 뷰 검색은 어느 쪽을 검색하는지부터 정해야 하고, 그것은 가로 스크롤·히트테스트가
@@ -354,6 +355,7 @@ pub fn sideProps(side: Side, shared: Shared, rect: draw.Rect, background: ?draw.
         .visible_rows = m.visible_rows,
         .wrap = shared.wrap,
         .carets = side.carets,
+        .caret_affinity = side.caret_affinity,
         .caret_visible = shared.caret_visible,
         .caret_shape = shared.caret_shape,
         .tab_width = shared.tab_width,

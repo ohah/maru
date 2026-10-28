@@ -69,6 +69,8 @@ pub const Row = struct {
     /// **열 기준이다**(byte가 아니다) — `colors`와 같은 축이다. 이 모듈이 보는 본문은 탭이 전개된
     /// 사본이라 원본 byte offset이 안 맞는다.
     caret_cols: []const u32 = &.{},
+    /// Carets attached to the previous view row must not invert the next row glyph.
+    caret_upstream_cols: []const u32 = &.{},
     /// **이 줄의 전개를 여기서 시작해도 된다**(`null` = 처음부터). 호출자가 줄마다 캐시해 둔
     /// 열→byte 체크포인트 중 `first_col` 이하인 마지막 것이다 — 그래야 전개 비용이 **밀린 거리가
     /// 아니라 화면 폭**에 비례한다. 규칙과 조건은 `Seek` 가 소유한다.
@@ -176,6 +178,14 @@ const WroteRuns = struct { n: usize, collapsed: bool = false };
 
 /// `writeRuns` + **힌트 칸**(§4.1h) — 그 칸은 구문 색이 무엇이든 `syntax_comment` 로 낸다(caret 반전이 그 위에 선다).
 fn writeRunsWith(text: []const u8, start_col: u32, colors: []const ColorSpan, caret_cols: []const u32, inlay_cols: []const InlayCols, out_runs: []draw.Run) WroteRuns {
+    return writeRunsWithAffinity(text, start_col, colors, caret_cols, &.{}, inlay_cols, out_runs);
+}
+
+fn writeRunsWithAffinity(text: []const u8, start_col: u32, colors: []const ColorSpan, all_carets: []const u32, upstream: []const u32, inlay_cols: []const InlayCols, out_runs: []draw.Run) WroteRuns {
+    var first: usize = 0;
+    if (std.mem.indexOfScalar(u32, upstream, start_col) != null)
+        while (first < all_carets.len and all_carets[first] <= start_col) : (first += 1) {};
+    const caret_cols = all_carets[first..];
     if (out_runs.len == 0) return .{ .n = 0, .collapsed = text.len > 0 };
     // **색이 없고 반전할 칸도 없으면 한 run이다.** 흔한 경우(grammar 없음·무색 줄, 막대 커서)라
     // 걷지 않고 빠져나간다.
@@ -554,7 +564,7 @@ pub fn build(
             }
 
             const run_start = run_used;
-            const wrote = writeRunsWith(text, @max(src_col, start_col), row.colors, row.caret_cols, inlay_cols.slice(), runs[run_used..]);
+            const wrote = writeRunsWithAffinity(text, @max(src_col, start_col), row.colors, row.caret_cols, row.caret_upstream_cols, inlay_cols.slice(), runs[run_used..]);
             run_used += wrote.n;
             if (wrote.collapsed) truncated_rows += 1; // 글자는 다 나오지만 색이 번졌다 — 역시 절단이다
             const run_slice = runs[run_start..run_used];
@@ -1059,6 +1069,13 @@ pub fn rowEndByte(bytes: []const u8, tab_width: u16, start_byte: usize, start_by
 
 /// `columnsAtOffsets` + 가상 텍스트(§4.1h): byte b 의 열은 b 앞에 선 힌트 **뒤**(글리프 열)다. `inlays` 가 비면 옛 길과 같다.
 pub fn columnsAtOffsetsWith(bytes: []const u8, tab_width: u16, offsets: []align(1) const u32, out: []align(1) u32, stop_col: u32, inlays: []const Inlay) void {
+    _ = columnsAtOffsetsWithFrom(bytes, tab_width, offsets, out, stop_col, inlays, .{ .byte = 0, .col = 0 });
+}
+
+/// Return how many offsets were actually reached before the column budget.
+/// The remaining outputs keep the established clamped-column behavior, but a
+/// caret must not confuse a clipped distant offset with this row's end.
+pub fn columnsAtOffsetsWithFrom(bytes: []const u8, tab_width: u16, offsets: []align(1) const u32, out: []align(1) u32, stop_col: u32, inlays: []const Inlay, seek: Seek) usize {
     // **계약을 지키지 않으면 소리 내어 죽는다.** 오름차순이 아니면 이 함수는 틀린 열을 조용히 내고,
     // 강조가 엉뚱한 글자 위에 선다 — 크래시도 테스트 실패도 없이 화면만 틀린다. 지금 유일한 생산자
     // (`session/editor/intraline`)는 이 성질을 무작위 테스트로 지키지만, `row_marks`에 다른 생산자가
@@ -1069,12 +1086,12 @@ pub fn columnsAtOffsetsWith(bytes: []const u8, tab_width: u16, offsets: []align(
     // **화면 오른쪽 끝을 넘으면 멈춘다.** `expandTabs`가 훑는 범위에 상한을 둔 것과 같은 이유다 —
     // 없으면 minified JS처럼 한 줄이 수 MB인 파일에서 화면 밖까지 끝까지 지나간다. 위치가 오름차순
     // 이므로 그 뒤는 전부 화면 밖이고, 남은 자리에는 상한 열을 채워 호출자가 잘라 내게 한다.
-    var col: u32 = 0;
-    var i: usize = 0;
+    var col: u32 = seek.col;
+    var i: usize = @min(seek.byte, bytes.len);
     var next: usize = 0;
     var next_inlay: usize = 0;
-    col += inlayColsAt(inlays, &next_inlay, 0);
-    while (next < offsets.len and offsets[next] <= 0) : (next += 1) out[next] = col;
+    col += inlayColsAt(inlays, &next_inlay, i);
+    while (next < offsets.len and offsets[next] <= i) : (next += 1) out[next] = col;
     while (i < bytes.len and next < offsets.len) {
         const s = stepColumn(bytes, i, col, tab_width); // 규칙은 한 곳에만 있다
         i = s.next_byte;
@@ -1083,8 +1100,10 @@ pub fn columnsAtOffsetsWith(bytes: []const u8, tab_width: u16, offsets: []align(
         while (next < offsets.len and offsets[next] <= i) : (next += 1) out[next] = col;
         if (col >= stop_col) break;
     }
+    const reached = next;
     // 줄 끝(또는 화면 끝)을 넘는 위치는 그 열이다.
     while (next < offsets.len) : (next += 1) out[next] = col;
+    return reached;
 }
 
 /// 탭을 다음 탭스톱까지의 공백으로 편다.
@@ -3718,4 +3737,24 @@ test "CTR3 위젯 글자를 못 실어도 절단으로 센다 — 그 아래 본
     const rows = [_]Row{ .{ .bytes = "a" }, .{ .bytes = "b", .widget = .{ .text = "Accept Current" } } };
     const w = build(testProps(layout, &rows), &ops, &scratch, &runs, &vrows);
     try testing.expectEqual(@as(usize, 2), w.truncated_rows); // 위젯 하나 + 본문 행 하나
+}
+
+test "CME21 upstream block caret does not invert the following row glyph" {
+    var runs: [8]draw.Run = undefined;
+    const at_seam = writeRunsWithAffinity("abc", 5, &.{}, &.{5}, &.{5}, &.{}, &runs);
+    try testing.expectEqual(@as(usize, 1), at_seam.n);
+    try testing.expect(runs[0].role == null);
+    const inside = writeRunsWithAffinity("abc", 4, &.{}, &.{5}, &.{5}, &.{}, &runs);
+    try testing.expect(inside.n > 1);
+    try testing.expect(runs[1].role != null);
+}
+
+test "CME23 bounded column lookup distinguishes a reached seam from a clipped offset" {
+    var cols: [1]u32 = undefined;
+    const reached = columnsAtOffsetsWithFrom("abcdefghijklmnop", 4, &.{8}, &cols, 8, &.{}, .{ .byte = 4, .col = 4 });
+    try std.testing.expectEqual(@as(usize, 1), reached);
+    try std.testing.expectEqual(@as(u32, 8), cols[0]);
+    const clipped = columnsAtOffsetsWithFrom("abcdefghijklmnop", 4, &.{12}, &cols, 8, &.{}, .{ .byte = 4, .col = 4 });
+    try std.testing.expectEqual(@as(usize, 0), clipped);
+    try std.testing.expectEqual(@as(u32, 8), cols[0]);
 }

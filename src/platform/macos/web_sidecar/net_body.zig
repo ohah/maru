@@ -41,6 +41,8 @@ var table: table_mod.Table = .{};
 var sw: sw_mod.Sw = .{};
 /// 재검증 5 차 S1: 서비스 워커 세션을 붙이는가(`MARU_WEB_SW_CDP=1` — 이 단계는 끈 채 들인다).
 var sw_cdp = false;
+/// 재검증 5 차 S3: 짝이 된 기록에 P 의 본문을 잇는가(S3a 는 거짓 — 짝만 정하고 본문은 S0 그대로).
+const sw_link = false;
 var registrations: [registry_mod.capacity]?struct { cef_id: c_int, browser: BrowserId, reg: [*c]c.cef_registration_t } = @splat(null);
 var observer: c.cef_dev_tools_message_observer_t = undefined;
 var ready = false;
@@ -86,6 +88,9 @@ fn init() void {
     ready = true;
     debug_log = std.c.getenv("MARU_WEB_TEST_BODY_LOG") != null;
     if (std.c.getenv("MARU_WEB_SW_CDP")) |v| sw_cdp = std.mem.eql(u8, std.mem.span(v), "1");
+    // 재검증 5 차 S3: 워커 세션을 붙이면 서비스 워커 갈래 기록의 쌍둥이는 워커 W 다. 본문을 잇는 것(S3b)은 `sw_link`.
+    table.sw_twin_worker = sw_cdp;
+    table.sw_link_body = sw_cdp and sw_link;
     observer = object.zeroed(c.cef_dev_tools_message_observer_t);
     object.staticRefCounted(&observer.base);
     observer.on_dev_tools_message = &onRaw;
@@ -145,6 +150,8 @@ pub fn record(v: msg.NetRecord) void {
         return;
     }
     refreshAny();
+    // 재검증 5 차 S3(C3a): 이 기록이 보는 응답은 켠 뒤의 것 — 벽시계로 적는다(붙는 워커 세션마다 다시 올린다).
+    table.link.raiseVisible(v.browser, wallUs());
     sendCdp(entry, "Network.enable", "{\"maxResourceBufferSize\":2097152,\"maxTotalBufferSize\":8388608,\"maxPostDataSize\":1}", v.browser, v.session, true);
     ensureTick();
 }
@@ -157,6 +164,7 @@ pub fn rendererGone(browser: BrowserId) void {
 
 /// 브라우저가 닫힌다(`browser_closed` 보다 먼저) — 기다리던 본문은 `detached`, 등록을 놓는다.
 pub fn browserClosed(cef_id: c_int, browser: BrowserId) void {
+    table.forgetTop(browser);
     table.closed(gpa, browser) catch {};
     runActions();
     unregister(cef_id);
@@ -437,6 +445,8 @@ fn runActions() void {
         if (list.items.len == 0) return;
         for (list.items) |a| switch (a) {
             .detach_workers => |d| detachWorkers(d.browser, d.why),
+            .sw_paired => |p| dbg("sw-pair b={d} req={d} wrid={s}", .{ p.browser, p.request, p.wrid.slice() }),
+            .sw_note => |p| dbg("sw-note b={d} req={d} prid={s} reason={s}", .{ p.browser, p.request, p.prid.slice(), @tagName(p.reason) }),
             .end => |e| {
                 dbg("end req={d} state={s}", .{ e.request, @tagName(e.state) });
                 writer().send(.{ .net_body_end = .{ .browser = e.browser, .session = e.session, .request = e.request, .state = e.state, .flags = e.flags, .decoded = e.decoded } }) catch {};
@@ -591,9 +601,12 @@ fn onRaw(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t
     const s = sw.live(sid) orelse return 1;
     const id = browserOfCef(browser.*.get_identifier.?(browser)) orelse return 1;
     if (s.browser != id) return 1;
+    table.link.clockSample(wallUs(), machUs());
     if (sw_mod.resultId(m)) |rid| {
         const ok = sw_mod.resultOk(m);
         _ = sw.result(sid, rid, ok, wallUs());
+        // 재검증 5 차 S3(C3a): 워커 세션의 enable 답 — 이 뒤에 워커에 닿은 응답만 보인다(새 타깃마다 VS 를 올린다 — 공격 1 M5).
+        if (ok and rid == s.enable_id and table.recording(id)) table.link.raiseVisible(id, s.enabled_wall_us);
         dbg("sw-result b={d} sid={s} id={d} ok={}", .{ id, sid, rid, ok });
         return 1;
     }
@@ -602,8 +615,44 @@ fn onRaw(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t
     if (debug_log) dbg("sw-ev b={d} sid={s} epoch={d} method={s} t={d} head={s}", .{ id, sid, s.epoch, method, machUs(), m[0..@min(m.len, 240)] });
     // 쏟아짐 밸브는 워커 사건도 센다(공격 2 A9 — 같은 사건이 기록하는 탭마다 온다).
     if (table.recording(id)) {
-        table.cdpEvent(gpa, id, null, machUs()) catch {};
+        const now = machUs();
+        table.cdpEvent(gpa, id, null, now) catch {};
+        // 재검증 5 차 S3: 쓰는 사건만 푼다(요청·응답·실패 — 받기·ExtraInfo 는 풀지 않는다).
+        if (table.recording(id) and (std.mem.eql(u8, method, "Network.requestWillBeSent") or std.mem.eql(u8, method, "Network.responseReceived") or std.mem.eql(u8, method, "Network.loadingFailed"))) {
+            workerEvent(id, s, method, m, now);
+        }
         runActions();
+        ensureTick();
     }
     return 1;
+}
+
+/// 재검증 5 차 S3: 워커 세션의 사건을 풀어 표에 준다.
+fn workerEvent(id: BrowserId, s: *const sw_mod.Session, method: []const u8, m: []const u8, now: i64) void {
+    var parsed = std.json.parseFromSlice(std.json.Value, gpa, m, .{}) catch return;
+    defer parsed.deinit();
+    if (parsed.value != .object) return;
+    const params = parsed.value.object.get("params") orelse return;
+    const ev = table_mod.parseWorkerEvent(method, params) orelse return;
+    if (debug_log) switch (ev) {
+        .sent => |v| dbg("sw-wsent b={d} t={x} rid={s} url={x} ts={d} redirect={} excl={}", .{ id, s.target, v.rid, v.url_hash, v.ts_us, v.redirect, v.excluded }),
+        .response => |v| {
+            // 판정자 진단: 워커가 받은 응답의 서버 셈(X-Served) — 짝 정확도를 서버 참값으로 견준다(S3a).
+            var xs: []const u8 = "";
+            if (params == .object) if (params.object.get("response")) |r| if (r == .object) if (r.object.get("headers")) |h| if (h == .object) {
+                var it = h.object.iterator();
+                while (it.next()) |kv| if (std.ascii.eqlIgnoreCase(kv.key_ptr.*, "x-served") and kv.value_ptr.* == .string) {
+                    xs = kv.value_ptr.string;
+                };
+            };
+            dbg("sw-wresp b={d} t={x} rid={s} tau={d} disk={} status={d} excl={} xs={s} now={d}", .{ id, s.target, v.rid, v.tau, v.disk, v.status, v.excluded, xs, now });
+        },
+        .failed => |v| dbg("sw-wfail b={d} rid={s}", .{ id, v.rid }),
+    };
+    table.workerEvent(gpa, id, sw_mod.targetKey(s.target, s.epoch), ev, now) catch {};
+}
+
+/// 재검증 5 차 S3b(C0): 맨 위 문서의 출처(`network.mainFrameAddress` — `scheme://host[:port]`).
+pub fn topOrigin(browser: BrowserId, origin: []const u8) void {
+    table.topOrigin(browser, if (origin.len == 0) 0 else table_mod.originHash(origin), machUs());
 }

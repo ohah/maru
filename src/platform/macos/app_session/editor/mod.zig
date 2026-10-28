@@ -28339,6 +28339,26 @@ test "CA1 code action — ⌘. 로 진단 자리의 fix 와 lazy 가 메뉴에(c
     term.rt.editor_selection = .{ .anchor_start = 1, .anchor_end = 1, .focus = 1 };
     try pressKey(&fx, .{ .char = '.' }, .{ .command = true });
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_code_actions);
+    // Same executable and sequence from another root must not consume this wait.
+    // The normal response remains queued in the actual fake server process.
+    const original_client = lsp_client.readyClientFor(s, term).?;
+    var foreign_client = original_client.*;
+    foreign_client.root = @constCast("/foreign-code-action-root");
+    foreign_client.docs = .empty;
+    const foreign_action = try std.json.parseFromSlice(std.json.Value, allocator, "[{\"title\":\"foreign fix\",\"edit\":{\"changes\":{}}}]", .{});
+    defer foreign_action.deinit();
+    const request_seq = s.editor_code_action.waits[0].seq;
+    for ([_]bool{ true, false }) |is_error| {
+        code_action_client.onResponse(s, &foreign_client, request_seq, foreign_action.value, is_error, "foreign error");
+        try testing.expect(s.editor_code_action.waiting);
+        try testing.expect(!s.editor_code_action.waits[0].done);
+        try testing.expectEqual(@as(u64, 0), s.editor_code_action.first_answer_ms);
+        try testing.expect(!s.editor_code_action.any_error);
+        try testing.expectEqual(@as(usize, 0), s.editor_code_action.pending.items.len);
+        try testing.expect(!s.code_action_menu and !s.chrome_host.notice.open);
+        try testing.expectEqualStrings("int x;\nint y;\n", content(term));
+    }
+
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
     try testing.expect(s.code_action_menu and s.chrome_host.context_menu.open);
     try testing.expectEqual(@as(u64, 1), s.editor_code_action.opened_count);

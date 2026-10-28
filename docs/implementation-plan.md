@@ -1768,3 +1768,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [LSP 심볼 이름 변경 IME 실제 GUI 검증](plans/symbol-rename-ime-gui.md): 후보 Enter·별도 요청 확정·적용·취소·서버 오류·stale 문서 보존. 제어 서버 5개 장면과 실제 clangd의 한자/한글·취소·stale GUI를 각각 검증. 같은 줄 한글·이모지 앞 UTF-16 위치와 ASCII 정상 대조도 검증.
 
 - [심볼 rename 응답 출처와 문서 수명](plans/rename-response-origin.md): 서버별 같은 seq의 교차 응답 격리와 요청 문서 수명 검사.
+
+- [코드 액션 응답의 문서 소유](plans/code-action-response-origin.md): 같은 실행 파일·번호를 쓰는 다른 root의 목록 응답 격리.

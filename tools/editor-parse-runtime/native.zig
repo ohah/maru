@@ -31,6 +31,15 @@ pub fn main() !void {
         maru_parse_run_main_turn();
     }
     if (parse.lastPollThread().? != std.Thread.getCurrentId()) return error.WrongThread;
+    var retained = (try parse.acquire(old_identity, grammar, .zig)).?;
+    var retained_live = true;
+    defer if (retained_live) retained.release();
+    if (parse.tryShutdown()) |_| return error.ShutdownIgnoredConsumer else |err| {
+        if (err != error.ResultsHeld) return err;
+    }
+    if (parse.ready(old_identity, grammar, .zig) == null or retained.provider() == null) return error.LostRetainedResult;
+    retained.release();
+    retained_live = false;
     // 큐에 실제 OS 전달을 남기고 소유자와 원래 registry를 먼저 종료한다.
     parse.wake.request();
     parse.shutdown();
@@ -75,5 +84,5 @@ pub fn main() !void {
     if (!saw_busy) return error.KeeperReleasedEarly;
     parse.shutdown();
     maru_parse_run_main_turn(); // 늦게 남은 전달은 현재 소유자 없음으로 끝난다.
-    std.debug.print("PARSE_MAIN_QUEUE accepted=2 main_thread=1 closed_document_reaped=1 late_delivery=1\n", .{});
+    std.debug.print("PARSE_MAIN_QUEUE accepted=2 main_thread=1 closed_document_reaped=1 late_delivery=1 retained_result=1\n", .{});
 }

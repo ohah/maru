@@ -25,6 +25,11 @@ pub fn ready(identity: registry.DocumentIdentity, grammar: request.Grammar, lang
     if (active) |*owner| return owner.ready(identity, grammar, language);
     return null;
 }
+/// 현재 결과를 보유한 소비자는 종료 전에 release해야 한다. 내부 트리 포인터를 저장하지 않는다.
+pub fn acquire(identity: registry.DocumentIdentity, grammar: request.Grammar, language: syntax.Language) error{ReferenceOverflow}!?worker.Completion {
+    if (active) |*owner| return owner.acquire(identity, grammar, language);
+    return null;
+}
 /// 알림·재시도는 호출자의 정책이다. 현재 요청의 게시·완료 사실만 조회한다.
 pub fn observe(identity: registry.DocumentIdentity, grammar: request.Grammar, language: syntax.Language) runtime.Observation {
     if (active) |*owner| return owner.observe(identity, grammar, language);
@@ -43,10 +48,17 @@ pub fn viewsChanged() void {
         if (owner.entries.items.len == 0) shutdown();
     }
 }
-pub fn shutdown() void {
-    var owner = active orelse return;
+/// 소비자가 결과를 보유하면 소유자를 그대로 남겨 반환 후 종료할 수 있게 한다.
+pub fn tryShutdown() error{ResultsHeld}!void {
+    if (active == null) return;
+    try active.?.canDeinit();
+    var owner = active.?;
     active = null;
-    owner.deinit();
+    owner.deinit() catch unreachable;
+}
+/// 기존 앱 종료 경로는 모든 소비자의 반환을 먼저 끝내야 한다.
+pub fn shutdown() void {
+    tryShutdown() catch unreachable;
 }
 pub fn lastPollThread() ?std.Thread.Id {
     return if (active) |owner| owner.last_poll_thread else null;

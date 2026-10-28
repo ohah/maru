@@ -87,6 +87,12 @@ pub const Runtime = struct {
             !std.meta.eql(current.tag().input.grammar, grammar)) return null;
         return current;
     }
+    /// 현재 결과를 보유한다. 이후 새 결과로 교체돼도 이 핸들의 자원은 release까지 살아 있다.
+    /// 사용 시점의 본문 판 검증은 소비자의 책임이며, 종료 전에 반드시 반환해야 한다.
+    pub fn acquire(self: *Runtime, identity: registry.DocumentIdentity, grammar: request.Grammar, language: syntax.Language) error{ReferenceOverflow}!?worker.Completion {
+        const current = self.ready(identity, grammar, language) orelse return null;
+        return try current.retain();
+    }
     /// 완료가 없는 것과 실패 완료를 구분한다. 실패 결과도 본문·언어·요청 판이 맞을 때만 공개한다.
     /// 준비 오류는 submit의 오류 반환으로만 전달하며 작업이 게시되지 않았으므로 none이다.
     pub fn observe(self: *Runtime, identity: registry.DocumentIdentity, grammar: request.Grammar, language: syntax.Language) Observation {
@@ -150,7 +156,16 @@ pub const Runtime = struct {
             _ = @constCast(removed.lease.owner).release(removed.lease) catch unreachable;
         }
     }
-    pub fn deinit(self: *Runtime) void {
+    /// 거절할 때 Gate·현재 결과·문서 lease를 바꾸지 않는다. UI 대기나 강제 회수로 우회하지 않는다.
+    pub fn canDeinit(self: *const Runtime) error{ResultsHeld}!void {
+        var owned: usize = 0;
+        for (self.entries.items) |entry| if (entry.current != null) {
+            owned += 1;
+        };
+        if (self.service.heldCount() != owned) return error.ResultsHeld;
+    }
+    pub fn deinit(self: *Runtime) error{ResultsHeld}!void {
+        try self.canDeinit();
         for (self.entries.items) |*entry| {
             entry.gate.invalidate();
             if (entry.current) |*current| current.release();

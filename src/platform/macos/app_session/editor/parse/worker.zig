@@ -34,6 +34,7 @@ const Basis = struct {
 const Job = struct {
     next: ?*Job = null,
     // 메인만 읽고 고친다. worker의 큐 이동 중에도 실제 Snapshot 반환까지 작업이 살아 있음을 보인다.
+    main_refs: usize = 0, // 메인 소비자가 반환할 때까지 native 퇴역을 막는다.
     main_prev: ?*Job = null,
     main_next: ?*Job = null,
     tag: request.Request,
@@ -246,12 +247,27 @@ pub const Completion = struct {
         }
         return gate.accept(self.job.tag);
     }
+    /// 메인 전용 보유 참조다. 트리를 복사하거나 할당하지 않고 같은 불변 결과의 수명을 늘린다.
+    /// 반환한 핸들은 정확히 한 번 release한다. 참조가 있어도 최신 본문의 결과라는 뜻은 아니다.
+    pub fn retain(self: Completion) error{ReferenceOverflow}!Completion {
+        const state = self.state;
+        const io_value = state.io();
+        state.mutex.lockUncancelable(io_value);
+        defer state.mutex.unlock(io_value);
+        const refs = std.math.add(usize, self.job.main_refs, 1) catch return error.ReferenceOverflow;
+        const held = std.math.add(usize, state.held, 1) catch return error.ReferenceOverflow;
+        self.job.main_refs = refs;
+        state.held = held;
+        return self;
+    }
     pub fn release(self: *Completion) void {
         const state = self.state;
         const io_value = state.io();
         state.mutex.lockUncancelable(io_value);
+        std.debug.assert(self.job.main_refs != 0 and state.held != 0);
         state.held -= 1;
-        state.retiring.push(self.job);
+        self.job.main_refs -= 1;
+        if (self.job.main_refs == 0) state.retiring.push(self.job);
         state.changed.signal(io_value);
         state.mutex.unlock(io_value);
         self.* = undefined;
@@ -357,6 +373,8 @@ pub const Service = struct {
         defer state.mutex.unlock(io_value);
         const job = state.completed.pop() orelse return null;
         state.held += 1;
+        std.debug.assert(job.main_refs == 0);
+        job.main_refs = 1;
         return .{ .state = state, .job = job };
     }
     /// 네이티브 자원은 이미 워커가 해제했다. 원본 allocator와 노드는 메인에서만 회수한다.
@@ -383,6 +401,10 @@ pub const Service = struct {
             if (job.main_next) |next| next.main_prev = job.main_prev;
             state.allocator.destroy(job);
         }
+    }
+    /// 메인 소유 Runtime이 자기 완료 참조와 외부 소비자의 참조를 구분할 때 쓴다.
+    pub fn heldCount(self: *const Service) usize {
+        return self.state.held;
     }
     /// 빌려 간 결과가 남으면 서비스는 그대로 살아 있고 caller가 release 후 다시 시도한다.
     pub fn deinit(self: *Service) error{ResultsHeld}!void {

@@ -2980,6 +2980,19 @@ pub fn build(b: *std.Build) void {
     hook_session_attribution_probe.setCwd(b.path("."));
     b.step("test-agent-hook-session-attribution", "Install and execute hooks with isolated synthetic session metadata").dependOn(&hook_session_attribution_probe.step);
 
+    const remote_pane_order_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"RA7select"} });
+    const run_remote_pane_order = b.addRunArtifact(remote_pane_order_tests);
+    run_remote_pane_order.addArg("--maru-expect-tests=32");
+    run_remote_pane_order.addArg("--maru-expect-passed=32");
+    b.step("test-remote-pane-selection-contract", "Run remote pane selection ordering contract").dependOn(&run_remote_pane_order.step);
+    const remote_pane_selection_tests = addProjectTest(b, .{ .root_module = macos_app_host_abi_tests.root_module, .filters = &.{"훅 원격 프레임: pane 슬롯이 둘이면 사이드바에 pane 행이 서고, 클릭은 그 pane 의 세션을 최근 세션으로 (RA7)"} });
+    const run_remote_pane_selection = b.addRunArtifact(remote_pane_selection_tests);
+    run_remote_pane_selection.setCwd(b.path("."));
+    run_remote_pane_selection.addArg("--maru-expect-tests=6");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos)
+        run_remote_pane_selection.addArg("--maru-expect-passed=6");
+    b.step("test-remote-pane-selection", "Run remote pane sidebar selection regression").dependOn(&run_remote_pane_selection.step);
+
     const test_macos_app_host_abi_step = b.step("test-macos-app-host-abi", "Run macOS Swift/Zig app host ABI contract tests");
     test_macos_app_host_abi_step.dependOn(&ime_ack_host.step);
     // 종료·창 닫기·Dock 다시 열기의 실제 Swift 본문(창 0 개 앱 LW1 × 다운로드 유지 W10c/W10e × 대화상자 보류 W6k — 두 갈래를 손으로 합친 자리).

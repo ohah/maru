@@ -1,4 +1,11 @@
 # 개발 명령
+
+### 원격 pane 대표 선택
+
+`mise exec -- zig build test-remote-pane-selection-contract test-remote-pane-selection -j2`와
+`-Doptimize=ReleaseFast`는 같은 밀리초의 연속 클릭, 클릭 시계 역행, 이후 이벤트의 대표 승계,
+surface 격리·퇴역·없는 pane, 가득 찬 테이블의 선택과 퇴출을 검사한다. 제품 검사는 사이드바의
+실제 마우스 경로와 최근 세션·대표 슬롯의 일치를 확인한다. 실제 tmux/SSH나 물리 GUI 검증은 포함하지 않는다.
 - [원자적 자동완성 확정](editor-completion-commit.md): `mise exec -- zig build test-editor-completion-contract test-editor-completion test-editor-completion-overlays -j2`.
 
 

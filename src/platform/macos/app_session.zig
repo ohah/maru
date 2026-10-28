@@ -28489,129 +28489,133 @@ test "훅 원격 프레임: tmux pane 둘은 슬롯 둘 — 배지는 하나라�
 // 행을 안 편다(에이전트 행이 곧 그 pane).
 test "훅 원격 프레임: pane 슬롯이 둘이면 사이드바에 pane 행이 서고, 클릭은 그 pane 의 세션을 최근 세션으로 (RA7)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const a = std.testing.allocator;
-    test_config_text = agent_hooks_on_config;
-    defer test_config_text = "";
+    // Exercise normal event times and a clock ahead of the click clock.
+    // The second case makes a stale representative deterministic.
+    for ([_]u64{ 0, std.math.maxInt(u64) - 500 }) |clock_base| {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const a = std.testing.allocator;
+        test_config_text = agent_hooks_on_config;
+        defer test_config_text = "";
 
-    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
-    try session.init(io, a, .{
-        .abi_version = abi_version,
-        .cols = 20,
-        .rows = 5,
-        .queue_capacity = 16,
-        .command_kind = @backingInt(CommandKind.controlled_smoke),
-    });
-    defer session.deinit();
-    session.window_focused = false;
-    _ = try session.resize(1400, 900, 1000);
+        var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+        try session.init(io, a, .{
+            .abi_version = abi_version,
+            .cols = 20,
+            .rows = 5,
+            .queue_capacity = 16,
+            .command_kind = @backingInt(CommandKind.controlled_smoke),
+        });
+        defer session.deinit();
+        session.window_focused = false;
+        _ = try session.resize(1400, 900, 1000);
 
-    const term = pane_ops.activePane(&session).activeTerm();
-    var ch = maru.session.remote_agent_stream.Channel.init(0);
-    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
-    term.agent_remote_channel = ch;
-    const nonce = "4331_7";
-    @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
-    term.agent_remote_nonce_len = nonce.len;
-    term.rt.observation.ssh_remote_dest_present = true;
+        const term = pane_ops.activePane(&session).activeTerm();
+        var ch = maru.session.remote_agent_stream.Channel.init(0);
+        _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+        term.agent_remote_channel = ch;
+        const nonce = "4331_7";
+        @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
+        term.agent_remote_nonce_len = nonce.len;
+        term.rt.observation.ssh_remote_dest_present = true;
 
-    const Row = chrome.components.sidebar.Row;
-    const countPaneRows = struct {
-        fn f(rows: []const Row) usize {
-            var n: usize = 0;
-            for (rows) |r| if (r == .agent_pane) {
-                n += 1;
-            };
-            return n;
-        }
-    }.f;
+        const Row = chrome.components.sidebar.Row;
+        const countPaneRows = struct {
+            fn f(rows: []const Row) usize {
+                var n: usize = 0;
+                for (rows) |r| if (r == .agent_pane) {
+                    n += 1;
+                };
+                return n;
+            }
+        }.f;
 
-    // pane 하나 — 행을 안 편다.
-    agent_ops.consumeRemoteAgentLines(&session, term, &.{
-        "{\"nonce\":\"4331_7\",\"pane\":\"%12\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-A\\\",\\\"prompt\\\":\\\"A 의 일\\\"}\"}",
-    }, 100);
-    try sidebar_ops.rebuildSidebar(&session);
-    try std.testing.expectEqual(@as(usize, 0), countPaneRows(session.sidebar_rows.items));
+        // pane 하나 — 행을 안 편다.
+        agent_ops.consumeRemoteAgentLines(&session, term, &.{
+            "{\"nonce\":\"4331_7\",\"pane\":\"%12\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-A\\\",\\\"prompt\\\":\\\"A 의 일\\\"}\"}",
+        }, clock_base + 100);
+        try sidebar_ops.rebuildSidebar(&session);
+        try std.testing.expectEqual(@as(usize, 0), countPaneRows(session.sidebar_rows.items));
 
-    // pane 둘 — 이름 순(`%3` 이 `%12` 앞) 으로 두 행. **두 번째 pane 의 첫 이벤트는 프롬프트만**이라 에이전트 행의 줄 수(응답
-    // 없음 = 그대로)는 안 변한다 — 그러면 pane 행 수 비교만이 낡음을 잡는다(뮤턴트 M2: 그 비교를 지우면 여기서 0 행).
-    agent_ops.consumeRemoteAgentLines(&session, term, &.{
-        "{\"nonce\":\"4331_7\",\"pane\":\"%3\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-B\\\",\\\"prompt\\\":\\\"B 의 일\\\"}\"}",
-    }, 200);
-    // **재투영은 낡음 판정이 스스로 건다** — 손으로 `rebuildSidebar` 를 부르면 실기에서 행이 영영 안 서던 결함(두 번째 pane 의
-    // 첫 이벤트가 온 tick 에 재투영이 없었다)을 못 본다. 2 pane e2e 가 그것을 잡았다.
-    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
-    try std.testing.expectEqual(@as(usize, 2), countPaneRows(session.sidebar_rows.items));
-    for (session.sidebar_rows.items) |r| if (r == .agent_pane) try std.testing.expectEqual(@as(u8, 1), r.agent_pane.lines); // 둘 다 아직 응답이 없다
+        // pane 둘 — 이름 순(`%3` 이 `%12` 앞) 으로 두 행. **두 번째 pane 의 첫 이벤트는 프롬프트만**이라 에이전트 행의 줄 수(응답
+        // 없음 = 그대로)는 안 변한다 — 그러면 pane 행 수 비교만이 낡음을 잡는다(뮤턴트 M2: 그 비교를 지우면 여기서 0 행).
+        agent_ops.consumeRemoteAgentLines(&session, term, &.{
+            "{\"nonce\":\"4331_7\",\"pane\":\"%3\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-B\\\",\\\"prompt\\\":\\\"B 의 일\\\"}\"}",
+        }, clock_base + 200);
+        // **재투영은 낡음 판정이 스스로 건다** — 손으로 `rebuildSidebar` 를 부르면 실기에서 행이 영영 안 서던 결함(두 번째 pane 의
+        // 첫 이벤트가 온 tick 에 재투영이 없었다)을 못 본다. 2 pane e2e 가 그것을 잡았다.
+        sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+        try std.testing.expectEqual(@as(usize, 2), countPaneRows(session.sidebar_rows.items));
+        for (session.sidebar_rows.items) |r| if (r == .agent_pane) try std.testing.expectEqual(@as(u8, 1), r.agent_pane.lines); // 둘 다 아직 응답이 없다
 
-    // A 의 턴 끝 — A 가 대표가 되며 에이전트 행(1→2)과 A 의 pane 행(1→2)이 **함께** 낡는다(어느 비교든 잡는다).
-    agent_ops.consumeRemoteAgentLines(&session, term, &.{
-        "{\"nonce\":\"4331_7\",\"pane\":\"%12\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"S-A\\\",\\\"last_assistant_message\\\":\\\"A 끝\\\"}\"}",
-    }, 300);
-    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
-    // B 의 턴 끝 — 대표가 A(응답 있음, 2줄) 에서 B(응답 있음, 2줄) 로 바뀌므로 **에이전트 행 줄 수는 그대로**고 B 의 pane 행만
-    // 1→2 다. 이번엔 `.agent_pane` 줄 수 비교만이 낡음을 잡는다(뮤턴트 M7: 그 비교를 지우면 B 행이 1줄로 남는다).
-    agent_ops.consumeRemoteAgentLines(&session, term, &.{
-        "{\"nonce\":\"4331_7\",\"pane\":\"%3\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"S-B\\\",\\\"last_assistant_message\\\":\\\"B 끝\\\"}\"}",
-    }, 400);
-    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
-    const rows = session.sidebar_rows.items;
-    try std.testing.expectEqual(@as(usize, 2), countPaneRows(rows));
-    var first: ?usize = null;
-    for (rows, 0..) |r, i| if (r == .agent_pane and first == null) {
-        first = i;
-    };
-    const p0 = rows[first.?].agent_pane;
-    const p1 = rows[first.? + 1].agent_pane;
-    try std.testing.expectEqualStrings("%3", p0.name[0..p0.name_len]);
-    try std.testing.expectEqualStrings("%12", p1.name[0..p1.name_len]);
-    try std.testing.expectEqual(@as(u8, 2), p0.lines); // B 의 응답
-    try std.testing.expectEqual(@as(u8, 2), p1.lines); // A 의 응답
-    try std.testing.expect(p1.last); // 마지막 pane 행이 묶음의 끝
-    try std.testing.expect(!rows[first.? - 1].agent.last); // 에이전트 행은 더 이상 마지막이 아니다
-    // 행이 인덱스 경로로 Term 을 가리킨다(클릭 라우팅).
-    try std.testing.expect(chrome.components.sidebar.agentAt(rows, first.?) != null);
-    try std.testing.expectEqualStrings("%3", chrome.components.sidebar.paneNameAt(rows, first.?).?);
+        // A 의 턴 끝 — A 가 대표가 되며 에이전트 행(1→2)과 A 의 pane 행(1→2)이 **함께** 낡는다(어느 비교든 잡는다).
+        agent_ops.consumeRemoteAgentLines(&session, term, &.{
+            "{\"nonce\":\"4331_7\",\"pane\":\"%12\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"S-A\\\",\\\"last_assistant_message\\\":\\\"A 끝\\\"}\"}",
+        }, clock_base + 300);
+        sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+        // B 의 턴 끝 — 대표가 A(응답 있음, 2줄) 에서 B(응답 있음, 2줄) 로 바뀌므로 **에이전트 행 줄 수는 그대로**고 B 의 pane 행만
+        // 1→2 다. 이번엔 `.agent_pane` 줄 수 비교만이 낡음을 잡는다(뮤턴트 M7: 그 비교를 지우면 B 행이 1줄로 남는다).
+        agent_ops.consumeRemoteAgentLines(&session, term, &.{
+            "{\"nonce\":\"4331_7\",\"pane\":\"%3\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"S-B\\\",\\\"last_assistant_message\\\":\\\"B 끝\\\"}\"}",
+        }, clock_base + 400);
+        sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+        const rows = session.sidebar_rows.items;
+        try std.testing.expectEqual(@as(usize, 2), countPaneRows(rows));
+        var first: ?usize = null;
+        for (rows, 0..) |r, i| if (r == .agent_pane and first == null) {
+            first = i;
+        };
+        const p0 = rows[first.?].agent_pane;
+        const p1 = rows[first.? + 1].agent_pane;
+        try std.testing.expectEqualStrings("%3", p0.name[0..p0.name_len]);
+        try std.testing.expectEqualStrings("%12", p1.name[0..p1.name_len]);
+        try std.testing.expectEqual(@as(u8, 2), p0.lines); // B 의 응답
+        try std.testing.expectEqual(@as(u8, 2), p1.lines); // A 의 응답
+        try std.testing.expect(p1.last); // 마지막 pane 행이 묶음의 끝
+        try std.testing.expect(!rows[first.? - 1].agent.last); // 에이전트 행은 더 이상 마지막이 아니다
+        // 행이 인덱스 경로로 Term 을 가리킨다(클릭 라우팅).
+        try std.testing.expect(chrome.components.sidebar.agentAt(rows, first.?) != null);
+        try std.testing.expectEqualStrings("%3", chrome.components.sidebar.paneNameAt(rows, first.?).?);
 
-    // A 가 다음 턴을 연다 — A 는 running, 응답은 비고(1줄), 대표는 A.
-    agent_ops.consumeRemoteAgentLines(&session, term, &.{
-        "{\"nonce\":\"4331_7\",\"pane\":\"%12\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-A\\\",\\\"prompt\\\":\\\"A 의 다음 일\\\"}\"}",
-    }, 500);
-    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
-    try std.testing.expectEqual(@as(u8, 1), session.sidebar_rows.items[first.? + 1].agent_pane.lines);
-    try std.testing.expectEqualStrings("S-A", agent_ops.primaryHookSlot(&session, term).transcript.identity()); // 마지막 이벤트가 %12
+        // A 가 다음 턴을 연다 — A 는 running, 응답은 비고(1줄), 대표는 A.
+        agent_ops.consumeRemoteAgentLines(&session, term, &.{
+            "{\"nonce\":\"4331_7\",\"pane\":\"%12\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-A\\\",\\\"prompt\\\":\\\"A 의 다음 일\\\"}\"}",
+        }, clock_base + 500);
+        sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+        try std.testing.expectEqual(@as(u8, 1), session.sidebar_rows.items[first.? + 1].agent_pane.lines);
+        try std.testing.expectEqualStrings("S-A", agent_ops.primaryHookSlot(&session, term).transcript.identity()); // 마지막 이벤트가 %12
 
-    // 클릭: 대표 슬롯이 그 pane 으로 바뀌고(대화 줄), «최근 세션» 이 그 pane 의 세션이 된다 — 에이전트 탭이 그 링을 본다.
-    agent_ops.rememberPaneSession(&session, p0.tab, p0.pane, p0.term, "%3");
-    try std.testing.expectEqualStrings("S-B", agent_ops.primaryHookSlot(&session, term).transcript.identity());
-    try std.testing.expectEqualStrings("S-B", session.last_agent_session orelse "");
-    agent_ops.rememberPaneSession(&session, p1.tab, p1.pane, p1.term, "%12");
-    try std.testing.expectEqualStrings("S-A", session.last_agent_session orelse "");
+        // 클릭: 대표 슬롯이 그 pane 으로 바뀌고(대화 줄), «최근 세션» 이 그 pane 의 세션이 된다 — 에이전트 탭이 그 링을 본다.
+        agent_ops.rememberPaneSession(&session, p0.tab, p0.pane, p0.term, "%3");
+        try std.testing.expectEqualStrings("S-B", agent_ops.primaryHookSlot(&session, term).transcript.identity());
+        try std.testing.expectEqualStrings("S-B", session.last_agent_session orelse "");
+        agent_ops.rememberPaneSession(&session, p1.tab, p1.pane, p1.term, "%12");
+        try std.testing.expectEqualStrings("S-A", session.last_agent_session orelse "");
 
-    // **실제 마우스 경로**로도 같다 — 그리고 pane 행은 ✕ 가 없으니 ✕ 자리(오른쪽 끝)를 눌러도 Term 이 닫히지 않고
-    // 그 pane 의 세션이 최근 세션이 된다(`pane_name == null and 닫기영역` 조건 — 지우면 pane 행 클릭이 Term 을 닫는다).
-    const terms_before = pane_ops.activePane(&session).terms.items.len;
-    const close_x: f64 = sidebar_ops.sidebarColumns(&session).?.closeXRange(session.cell_width_px).start;
-    const rowY = struct {
-        fn f(s: *AppSession, row: usize) f64 {
-            const m = sidebar_ops.sidebarMetrics(s);
-            const top = chrome.components.sidebar.rowTop(s.sidebar_rows.items, row, s.sidebar_header_height_px, m, 0);
-            return @floatFromInt(top + @as(i64, @intCast(chrome.components.sidebar.rowHeight(s.sidebar_rows.items[row], m) / 2)));
-        }
-    }.f;
-    session.mouse(1, close_x, rowY(&session, first.?), 0, 0); // %3 행(첫 pane 행)의 ✕ 자리
-    session.mouse(3, close_x, rowY(&session, first.?), 0, 0);
-    try std.testing.expectEqual(terms_before, pane_ops.activePane(&session).terms.items.len); // 안 닫혔다
-    try std.testing.expectEqualStrings("S-B", session.last_agent_session orelse ""); // %3 = S-B
-    try std.testing.expectEqualStrings("S-B", agent_ops.primaryHookSlot(&session, term).transcript.identity());
+        // **실제 마우스 경로**로도 같다 — 그리고 pane 행은 ✕ 가 없으니 ✕ 자리(오른쪽 끝)를 눌러도 Term 이 닫히지 않고
+        // 그 pane 의 세션이 최근 세션이 된다(`pane_name == null and 닫기영역` 조건 — 지우면 pane 행 클릭이 Term 을 닫는다).
+        const terms_before = pane_ops.activePane(&session).terms.items.len;
+        const close_x: f64 = sidebar_ops.sidebarColumns(&session).?.closeXRange(session.cell_width_px).start;
+        const rowY = struct {
+            fn f(s: *AppSession, row: usize) f64 {
+                const m = sidebar_ops.sidebarMetrics(s);
+                const top = chrome.components.sidebar.rowTop(s.sidebar_rows.items, row, s.sidebar_header_height_px, m, 0);
+                return @floatFromInt(top + @as(i64, @intCast(chrome.components.sidebar.rowHeight(s.sidebar_rows.items[row], m) / 2)));
+            }
+        }.f;
+        session.mouse(1, close_x, rowY(&session, first.?), 0, 0); // %3 행(첫 pane 행)의 ✕ 자리
+        session.mouse(3, close_x, rowY(&session, first.?), 0, 0);
+        try std.testing.expectEqual(terms_before, pane_ops.activePane(&session).terms.items.len); // 안 닫혔다
+        try std.testing.expectEqualStrings("S-B", session.last_agent_session orelse ""); // %3 = S-B
+        try std.testing.expectEqualStrings("S-B", agent_ops.primaryHookSlot(&session, term).transcript.identity());
 
-    // pane 행의 그리기 텍스트: 이름 + 상태 문구(그 슬롯의 상태 — B 는 idle, A 는 running), 2줄째는 응답.
-    const status_b = try sidebar_ops.paneStatusLineOwned(&session, &session.remote_agent_panes.find(term.surfaceId(), "%3").?.slot);
-    defer a.free(status_b);
-    try std.testing.expect(std.mem.indexOf(u8, status_b, maru.i18n.t(.sb_agent_idle)) != null);
-    const status_a = try sidebar_ops.paneStatusLineOwned(&session, &session.remote_agent_panes.find(term.surfaceId(), "%12").?.slot);
-    defer a.free(status_a);
-    try std.testing.expect(std.mem.indexOf(u8, status_a, maru.i18n.t(.sb_agent_idle)) == null);
+        // pane 행의 그리기 텍스트: 이름 + 상태 문구(그 슬롯의 상태 — B 는 idle, A 는 running), 2줄째는 응답.
+        const status_b = try sidebar_ops.paneStatusLineOwned(&session, &session.remote_agent_panes.find(term.surfaceId(), "%3").?.slot);
+        defer a.free(status_b);
+        try std.testing.expect(std.mem.indexOf(u8, status_b, maru.i18n.t(.sb_agent_idle)) != null);
+        const status_a = try sidebar_ops.paneStatusLineOwned(&session, &session.remote_agent_panes.find(term.surfaceId(), "%12").?.slot);
+        defer a.free(status_a);
+        try std.testing.expect(std.mem.indexOf(u8, status_a, maru.i18n.t(.sb_agent_idle)) == null);
+    }
 }
 
 // [RA7 가지치기] **원격이 「지금 있는 pane 은 이것뿐」이라 말하면 나머지는 사라진다.** 그전까지 테이블에는

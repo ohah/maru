@@ -27,7 +27,7 @@ pub const Entry = struct {
     slot: HookSlot = .{},
     /// 마지막으로 쓰인 순서(단조 증가). 0이면 빈 자리다 — 시계가 아니라 카운터인 이유는 `RingMap` 과 같다.
     used: u64 = 0,
-    /// 마지막 이벤트를 받은 시각(awake ms). 「가장 최근 pane」 을 고르는 잣대 — 대화 줄·집계의 동률 해소.
+    /// 마지막 이벤트/선택 시각(awake ms). 같은 시각이면 used 순서로 대표 pane을 고른다.
     last_event_ms: u64 = 0,
 
     pub fn paneName(self: *const Entry) []const u8 {
@@ -172,6 +172,16 @@ pub const Table = struct {
                 (e.last_event_ms == best.?.last_event_ms and e.used > best.?.used)) best = e;
         }
         return best;
+    }
+
+    /// 클릭도 하나의 사용이다. 같은 밀리초의 클릭은 시각만 덮으면 옛 used 동률 해소에 져서
+    /// 최근 세션과 대표 pane이 갈린다. 기존 슬롯만 사용 순서까지 올리고, 시각이 뒤로 가도
+    /// 현재 대표보다 앞에 오게 한다. 다음 같은 시각의 이벤트는 다시 slotFor 순서로 이긴다.
+    pub fn select(self: *Table, surface_id: u64, pane: []const u8, now_ms: u64) bool {
+        if (self.find(surface_id, pane) == null) return false;
+        const latest_ms = self.latestFor(surface_id).?.last_event_ms;
+        _ = self.slotFor(surface_id, pane, @max(now_ms, latest_ms));
+        return true;
     }
 
     pub fn countFor(self: *Table, surface_id: u64) usize {
@@ -332,4 +342,68 @@ test "pane 테이블: 가장 최근 pane 은 마지막 이벤트 시각으로 �
     t.dropSurface(7);
     try testing.expectEqual(@as(usize, 0), t.countFor(7));
     try testing.expectEqual(@as(u32, 0), t.evicted);
+}
+
+test "RA7select same-clock clicks select either pane and the next event wins" {
+    for ([_]u64{ 0, 1, 500, std.math.maxInt(u64) }) |now| {
+        var t: Table = .{};
+        _ = t.slotFor(7, "%3", now).?;
+        _ = t.slotFor(7, "%12", now).?;
+        try testing.expect(t.select(7, "%3", now));
+        try testing.expectEqualStrings("%3", t.latestFor(7).?.paneName());
+        try testing.expect(t.select(7, "%12", now));
+        try testing.expectEqualStrings("%12", t.latestFor(7).?.paneName());
+        _ = t.slotFor(7, "%3", now).?;
+        try testing.expectEqualStrings("%3", t.latestFor(7).?.paneName());
+    }
+}
+
+test "RA7select clock regression preserves event precedence and surface isolation" {
+    for ([_]u64{ 0, 20, 49, 50, 51 }) |click_ms| {
+        var t: Table = .{};
+        _ = t.slotFor(7, "%3", 10).?;
+        _ = t.slotFor(7, "%12", 50).?;
+        _ = t.slotFor(8, "%9", 100).?;
+        try testing.expect(t.select(7, "%3", click_ms));
+        try testing.expectEqualStrings("%3", t.latestFor(7).?.paneName());
+        try testing.expectEqual(@as(u64, 100), t.find(8, "%9").?.last_event_ms);
+        try testing.expectEqualStrings("%9", t.latestFor(8).?.paneName());
+        // An older event still does not displace a newer representative.
+        _ = t.slotFor(7, "%12", 1).?;
+        try testing.expectEqualStrings("%3", t.latestFor(7).?.paneName());
+    }
+}
+
+test "RA7select missing or retired panes preserve selection and counters" {
+    var t: Table = .{};
+    _ = t.slotFor(7, "%3", 10).?;
+    const before_tick = t.tick;
+    for ([_][]const u8{ "", "%4", "%30" }) |pane| {
+        try testing.expect(!t.select(7, pane, 20));
+        try testing.expectEqual(before_tick, t.tick);
+        try testing.expectEqual(@as(u32, 0), t.evicted);
+        try testing.expectEqualStrings("%3", t.latestFor(7).?.paneName());
+        try testing.expectEqual(@as(u64, 10), t.latestFor(7).?.last_event_ms);
+    }
+    try testing.expect(!t.select(8, "%3", 20));
+    try testing.expectEqual(before_tick, t.tick);
+    try testing.expectEqual(@as(u32, 0), t.evicted);
+    try testing.expectEqualStrings("%3", t.latestFor(7).?.paneName());
+    try testing.expectEqual(@as(u64, 10), t.latestFor(7).?.last_event_ms);
+    t.dropSurface(7);
+    const retired_tick = t.tick;
+    try testing.expect(!t.select(7, "%3", 20));
+    try testing.expectEqual(retired_tick, t.tick);
+    try testing.expectEqual(@as(usize, 0), t.countFor(7));
+    try testing.expectEqual(@as(u32, 0), t.evicted);
+}
+
+test "RA7select full table selection protects its pane from eviction" {
+    var t: Table = .{};
+    for (0..max_panes) |i| _ = t.slotFor(@intCast(i + 1), "%0", 10).?;
+    try testing.expect(t.select(1, "%0", 10));
+    _ = t.slotFor(100, "%0", 10).?;
+    try testing.expect(t.find(1, "%0") != null);
+    try testing.expect(t.find(2, "%0") == null);
+    try testing.expectEqual(@as(usize, 1), t.evictedFor(2));
 }

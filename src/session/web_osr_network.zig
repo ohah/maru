@@ -149,6 +149,11 @@ pub const Hop = struct {
     time_ms: u64,
 };
 
+/// W9d② 재검증 5 차 (B): 넘긴 수의 표지인가(`dropped` 나 `dropped_sw_cap` 이 0 이 아니다).
+fn isMarker(e: *const Entry) bool {
+    return e.dropped != 0 or e.dropped_sw_cap != 0;
+}
+
 pub const Entry = struct {
     /// 에이전트에게 보이는 번호(`req` — 탭마다 1 부터, 다시 쓰지 않는다). CEF 번호는 2^64 근처라(이동 요청) JSON 수로 쓰지 않는다.
     seq: u64,
@@ -156,6 +161,9 @@ pub const Entry = struct {
     request: u64 = 0,
     /// sidecar 가 넘긴 요청 수의 표지면 0 이 아니다(그 밖 칸은 비었다).
     dropped: u32 = 0,
+    /// W9d② 재검증 5 차 (B): 같은 표지의 서비스 워커 몫(`sw_inflight_cap`)으로 넘긴 서비스 워커 갈래 요청 수 — 표지는 `dropped` 나 이것이
+    /// 0 이 아니다(`isMarker`).
+    dropped_sw_cap: u32 = 0,
     flags: msg.NetFlags = .{},
     resource_type: u8 = 0,
     method: []u8 = &.{},
@@ -742,18 +750,24 @@ pub const Ring = struct {
 
     /// sidecar 가 넘긴 요청 수 — 마지막이 표지면 거기에 더한다(쏟아질 때 표지가 요청을 밀어내지 않게).
     pub fn addDropped(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, count: u32) std.mem.Allocator.Error!void {
-        if (count == 0) return;
+        return self.addDroppedKinds(gpa, budget, count, 0);
+    }
+
+    /// W9d② 재검증 5 차 (B): 넘긴 수와 서비스 워커 몫으로 넘긴 수를 함께(같은 표지 — 까닭은 따로 센다).
+    pub fn addDroppedKinds(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, count: u32, sw_cap: u32) std.mem.Allocator.Error!void {
+        if (count == 0 and sw_cap == 0) return;
         if (self.entries.backPtr()) |last| {
-            if (last.dropped != 0) {
+            if (isMarker(last)) {
                 last.dropped +|= count;
+                last.dropped_sw_cap +|= sw_cap;
                 return;
             }
         }
         if (!self.makeRoom(gpa, budget, entry_overhead, 0)) {
-            self.unrecorded +|= count;
+            self.unrecorded +|= count +| sw_cap;
             return;
         }
-        try self.entries.pushBack(gpa, .{ .seq = self.next_seq, .dropped = count, .summary_bytes = entry_overhead });
+        try self.entries.pushBack(gpa, .{ .seq = self.next_seq, .dropped = count, .dropped_sw_cap = sw_cap, .summary_bytes = entry_overhead });
         self.next_seq += 1;
         self.charge(budget, entry_overhead, 0);
     }
@@ -1001,7 +1015,7 @@ pub const Ring = struct {
         const start = self.startFor(who);
         if (seq == 0 or seq >= self.next_seq or seq < start) return error.UnknownRequest;
         const e = self.entryBySeq(seq) orelse return error.Evicted;
-        if (e.dropped != 0 or !topCovered(view, e) or hiddenIframe(view, e) or sharedServiceWorker(view, e)) return error.UnknownRequest;
+        if (isMarker(e) or !topCovered(view, e) or hiddenIframe(view, e) or sharedServiceWorker(view, e)) return error.UnknownRequest;
         const body = self.bodyView(bq, view);
         var aw: std.Io.Writer.Allocating = .init(out);
         defer aw.deinit();
@@ -1144,6 +1158,7 @@ fn writeList(ring: *Ring, w: *std.Io.Writer, start: u64, view: View, q: Query, b
     var s: std.json.Stringify = .{ .writer = w, .options = .{} };
     var hidden_before: usize = 0;
     var dropped: u64 = 0;
+    var dropped_sw_cap: u64 = 0;
     var iframes_hidden: usize = 0;
     var other_top_hidden: usize = 0;
     var sw_hidden: usize = 0;
@@ -1161,11 +1176,12 @@ fn writeList(ring: *Ring, w: *std.Io.Writer, start: u64, view: View, q: Query, b
         i -= 1;
         const e = ring.entries.atPtr(i);
         if (e.seq < start) {
-            if (e.dropped == 0) hidden_before += 1;
+            if (!isMarker(e)) hidden_before += 1;
             continue;
         }
-        if (e.dropped != 0) {
+        if (isMarker(e)) {
             dropped += e.dropped;
+            dropped_sw_cap += e.dropped_sw_cap;
             continue;
         }
         if (!Ring.topCovered(view, e)) {
@@ -1198,6 +1214,11 @@ fn writeList(ring: *Ring, w: *std.Io.Writer, start: u64, view: View, q: Query, b
     }
     try s.objectField("dropped");
     try s.write(dropped);
+    if (dropped_sw_cap != 0) {
+        // W9d② 재검증 5 차 (B): 기록 중 붙잡아 둔 서비스 워커가 끝내지 않은 fetch 로 서비스 워커 몫이 차서 적지 않은 서비스 워커 요청.
+        try s.objectField("dropped_sw_inflight_cap");
+        try s.write(dropped_sw_cap);
+    }
     if (!view.full) {
         try s.objectField("cross_site_iframe_hidden");
         try s.write(iframes_hidden);
@@ -1746,6 +1767,26 @@ test "W9d①: sidecar 가 넘긴 수는 표지로 — 잇단 표지는 합치고
     defer p8.deinit();
     try testing.expectEqual(@as(i64, 4), p8.value.object.get("dropped").?.integer);
     try testing.expectEqual(@as(i64, 1), p8.value.object.get("hidden_before_grant").?.integer);
+}
+
+test "W9d② 재검증 5 차 (B): 서비스 워커 몫으로 넘긴 수는 까닭을 따로(`dropped_sw_inflight_cap`) — 같은 표지에 합치고, 없으면 칸도 없다, 그 표지는 자세히로 열 수 없다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    try t.ring.addDroppedKinds(testing.allocator, &t.budget, 0, 5);
+    try t.ring.addDroppedKinds(testing.allocator, &t.budget, 2, 1);
+    try t.begin(1, "https://a.test/", .{});
+    const p = try t.listJson(7, .{}, .{});
+    defer p.deinit();
+    try testing.expectEqual(@as(i64, 2), p.value.object.get("dropped").?.integer);
+    try testing.expectEqual(@as(i64, 6), p.value.object.get("dropped_sw_inflight_cap").?.integer);
+    var u: T = .{};
+    defer u.deinit();
+    u.ring.noteReader(7, true);
+    try u.ring.addDropped(testing.allocator, &u.budget, 3);
+    const q = try u.listJson(7, .{}, .{});
+    defer q.deinit();
+    try testing.expect(q.value.object.get("dropped_sw_inflight_cap") == null);
 }
 
 test "W9d①: 보이는 칸의 판 — 설정 켬·끔 × 덮임·다른 사이트 × 다른 사이트 iframe × 서비스 워커" {

@@ -161,6 +161,8 @@ pub const max_doc_starts: usize = 16;
 pub const sw_link_wait_us: i64 = 2_000_000;
 /// 탭마다 잇기를 기다리는 P 수 — 넘치면 가장 오래된 것을 잇지 않고 놓는다.
 pub const max_sw_pages: usize = 128;
+/// 창이 지나 놓은 열린 페이지 요청을 기억하는 수(`Tab.d3_ring`).
+pub const d3_ring_len: usize = 64;
 pub const id_base: i32 = 1 << 28;
 pub const id_end: i32 = 1 << 29;
 pub const max_rid_bytes: usize = 64;
@@ -1251,11 +1253,20 @@ pub const Tab = struct {
     /// 재검증 5 차 S3(C3b′): 아직 설명되지 않은 서비스 워커 갈래 기록(번호·IO 시각) — W 와 짝이 되거나(어느 탭에서든) 워커 요청이 실패로 정하면
     /// 빠진다. 설명되지 않은 채 끝나면 그 시각이 어둠이 된다(`sw_dark_from`).
     swrec: std.ArrayList(SwRec) = .empty,
+    /// `swrec` 의 아직 설명되지 않은 것(번호 → IO 시각)과 차례 목록의 앞 끝(값 — 공격 3 M8: 판정마다 O(1)·끝마다 O(1)). `swrec` 은 IO 시각
+    /// 차례다(CEF 시작은 넘김 상자의 차례 = IO 시각의 차례 — 물 높이와 같은 근거).
+    swpend: std.AutoHashMapUnmanaged(u64, i64) = .empty,
+    swrec_head: usize = 0,
     /// 재검증 5 차 S3(C3b′): 이 단조 시각 뒤에 응답한 P 는 잇지 않는다 — 설명되지 않은 서비스 워커 갈래 기록이 끝났거나 문이 요청을 넘겼다(갈래를
     /// 모른다). 기록을 다시 켤 때까지 줄지 않는다(메모는 언제든 나올 수 있다 — 구간으로 줄일 수 없다).
     sw_dark_from: i64 = std.math.maxInt(i64),
     /// 재검증 5 차 S3b: 잇기를 기다리는 P(끝난 페이지 응답 — 서비스 워커가 답했다).
     swp: std.ArrayList(Cdp) = .empty,
+    /// 재검증 5 차 S3b: 창이 지나 놓은 열린 페이지 요청(D3 — 짝이 될 기록이 없다) — 서비스 워커가 2 초 넘게 늦게 답하면 그 응답이 이것으로 다시
+    /// 산다(서비스 워커가 답한 페이지 요청은 제 기록이 없어 늘 놓였다 — 판정 v20f-r6 d=2500 8/8). 고리(넘치면 가장 오래된 것을 덮는다).
+    d3_ring: [d3_ring_len]Cdp = undefined,
+    d3_len: usize = 0,
+    d3_next: usize = 0,
 
     pub fn recording(self: *const Tab) bool {
         return self.session != 0 and !self.paused;
@@ -1263,6 +1274,7 @@ pub const Tab = struct {
 
     fn deinit(self: *Tab, gpa: std.mem.Allocator) void {
         self.swrec.deinit(gpa);
+        self.swpend.deinit(gpa);
         self.swp.deinit(gpa);
         self.cdp_drop_marks.deinit(gpa);
         self.cands.deinit(gpa);
@@ -1427,19 +1439,13 @@ pub const Table = struct {
     /// 재검증 5 차 S3(C3b′): 기록이 끝났다 — 설명되지 않은 서비스 워커 갈래 기록이면 그 시작이 어둠이 된다(어느 탭에서든 짝이 되었으면 설명됨).
     fn swEnded(self: *Table, browser: BrowserId, request: u64) void {
         const t = self.tabOf(browser) orelse return;
-        for (t.swrec.items, 0..) |r, k| if (r.request == request) {
-            if (!self.link.isExplained(request)) t.sw_dark_from = @min(t.sw_dark_from, r.t_io_us);
-            _ = t.swrec.swapRemove(k);
-            return;
-        };
+        const kv = t.swpend.fetchRemove(request) orelse return;
+        if (!self.link.isExplained(request)) t.sw_dark_from = @min(t.sw_dark_from, kv.value);
     }
 
     /// 재검증 5 차 S3: 이 기록은 설명되었다(짝이 된 W·실패로 정한 W).
     fn swExplain(t: *Tab, request: u64) void {
-        for (t.swrec.items, 0..) |r, k| if (r.request == request) {
-            _ = t.swrec.swapRemove(k);
-            return;
-        };
+        _ = t.swpend.remove(request);
     }
 
     /// 재검증 5 차 S3(C3b′): 그 탭을 이 시각부터 어둠으로(문 넘김·넘침 — 갈래를 모른다).
@@ -1462,8 +1468,12 @@ pub const Table = struct {
             try self.finishAll(gpa, t, .recording_stopped);
             try self.emit(gpa, .{ .detach_workers = .{ .browser = browser, .why = .restart } });
             t.swrec.clearRetainingCapacity();
+            t.swpend.clearRetainingCapacity();
+            t.swrec_head = 0;
             t.swp.clearRetainingCapacity();
             t.sw_dark_from = std.math.maxInt(i64);
+            t.d3_len = 0;
+            t.d3_next = 0;
             t.session = session;
             t.paused = false;
             t.flood_over = 0;
@@ -1523,7 +1533,7 @@ pub const Table = struct {
         }
         for (t.waiting.items) |w| try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = w.request, .state = state } });
         t.waiting.clearRetainingCapacity();
-        for (t.cands.items) |c| if (!c.claimed) try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = c.request, .state = state } });
+        for (t.cands.items) |c| if (!c.claimed or c.link_until != 0) try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = c.request, .state = state } });
         t.cands.clearRetainingCapacity();
         t.cdp.clearRetainingCapacity();
         t.inflight = 0;
@@ -1562,7 +1572,10 @@ pub const Table = struct {
         cand.prev_t_io_us = prev;
         try t.cands.append(gpa, cand);
         // 재검증 5 차 S3(C3b′): 서비스 워커 갈래 기록은 W 가 설명할 때까지 적어 둔다.
-        if (self.sw_twin_worker and cand.key.sw) try t.swrec.append(gpa, .{ .request = cand.request, .t_io_us = cand.t_io_us });
+        if (self.sw_twin_worker and cand.key.sw) {
+            try t.swrec.append(gpa, .{ .request = cand.request, .t_io_us = cand.t_io_us });
+            try t.swpend.put(gpa, cand.request, cand.t_io_us);
+        }
         return true;
     }
 
@@ -1631,6 +1644,15 @@ pub const Table = struct {
 
     /// 문이 그 탭의 요청을 넘겼다(IO 시각·주소 해시) — 그 창 안의 같은 주소 짝은 모호하다.
     pub fn noteDrop(self: *Table, browser: BrowserId, url_hash: u64, t_us: i64) void {
+        self.noteDropKind(browser, url_hash, t_us, false);
+    }
+
+    /// 재검증 5 차 S3b (B): `sw_cap` — 서비스 워커 몫(`net_gate.max_sw_in_flight`)이 차서 넘긴 서비스 워커 갈래 요청. 그 창의 같은 주소 짝은
+    /// 여느 넘김처럼 모호하게 친다(넘긴 기록의 W 가 같은 열쇠의 남의 기록을 가져가지 않게 — 맞추기 쪽). 탭 전체를 어둠(C3b′)으로는 치지 않는다:
+    /// 몫이 차는 것은 워커가 끝내지 않는 fetch 를 쥐었을 때라 어둠으로 치면 그 뒤 그 탭의 서비스 워커 본문을 다시 켤 때까지 모두 잃는다. 넘긴
+    /// 기록의 W 가 보이면 짝이 없어 그 W 를 가리킨 P 는 잇지 않는다(`unpaired`) — 남는 것은 「넘긴 기록 ∧ 그 W 를 잃음(A2 깨짐) ∧ 보이는 다른 W 와
+    /// µs τ 충돌」(계획 v2 G2 와 같은 꼴).
+    pub fn noteDropKind(self: *Table, browser: BrowserId, url_hash: u64, t_us: i64, sw_cap: bool) void {
         const t = self.tabOf(browser) orelse return;
         if (!t.recording()) return;
         if (t.drop_len == max_drop_marks) {
@@ -1639,7 +1661,7 @@ pub const Table = struct {
         } else t.drop_len += 1;
         t.drops[t.drop_next] = .{ .url = url_hash, .t_us = t_us };
         t.drop_next = (t.drop_next + 1) % max_drop_marks;
-        self.swDark(t, t_us); // 재검증 5 차 S3(C3b′ — 공격 3 M3): 넘긴 요청의 갈래를 모른다
+        if (!sw_cap) self.swDark(t, t_us); // 재검증 5 차 S3(C3b′ — 공격 3 M3): 넘긴 요청의 갈래를 모른다
     }
 
     /// 표지를 남길 자리가 없었다(IO 스레드의 상자가 찼다) — 이 시각까지의 창은 모두 모호하다.
@@ -1991,7 +2013,18 @@ pub const Table = struct {
                 if (v.credentialed) t.cdp.items[i].credentialed = true;
             },
             .response => |v| {
-                const i = cdpIndex(t, v.rid) orelse return;
+                const i = cdpIndex(t, v.rid) orelse blk: {
+                    // 재검증 5 차 S3b: 서비스 워커가 늦게 답한 페이지 요청 — 창이 지나 놓았다면 되살린다(서비스 워커가 답한 응답만 — 어느 갈래의
+                    // 맞추기에도 들지 않으니 남의 기록을 가져가지 않는다).
+                    if (!(v.from_sw and self.sw_twin_worker)) return;
+                    const k = for (t.d3_ring[0..t.d3_len], 0..) |*o, n| {
+                        if (o.rid.eql(v.rid)) break n;
+                    } else return;
+                    if (t.cdp.items.len >= max_cdp) dropOldestCdp(gpa, t, now_us);
+                    try t.cdp.append(gpa, t.d3_ring[k]);
+                    t.d3_ring[k].rid = Rid.init("-").?; // 같은 칸으로 두 번 되살리지 않는다
+                    break :blk t.cdp.items.len - 1;
+                };
                 const r = &t.cdp.items[i];
                 // 재검증 3 차 뒤: 끝을 본 뒤의 늦은 응답은 버린다 — 정하는 중인 요청의 갈래·시각을 바꾸면 그 요청이 맞추기에서 빠졌다(혼돈 퍼즈: 판정이
                 // 제 자리를 못 찾았다).
@@ -2033,6 +2066,19 @@ pub const Table = struct {
                 const i = cdpIndex(t, v.rid) orelse return;
                 const r = &t.cdp.items[i];
                 if (r.state == .finished or r.state == .failed) return; // 두 번째 끝은 버린다
+                if (r.sw_page and self.sw_link_body and r.has_key and r.state == .open) {
+                    // 재검증 5 차 S3b: 서비스 워커가 답한 페이지 응답 — 잇기를 기다린다(C0–C7′ — `swLinkPending`).
+                    var p = r.*;
+                    p.state = .finished;
+                    p.done_at = @max(now_us, 1);
+                    _ = t.cdp.orderedRemove(i);
+                    if (t.swp.items.len >= max_sw_pages) _ = t.swp.orderedRemove(0);
+                    try t.swp.append(gpa, p);
+                    // 이 P 만 곧 본다(앞의 것은 주기가 본다 — 끝마다 모두 보면 N²).
+                    const last = t.swp.items.len - 1;
+                    if (try self.swLinkOne(gpa, t, last, now_us, self.swPendingMin(t))) _ = t.swp.orderedRemove(last);
+                    return;
+                }
                 if (r.state == .cached or r.prefetch or !r.has_key or r.sw_off_network) {
                     // CEF 가 보지 못한 요청(메모리 캐시·추측 미리 받기 — J1·J3; 서비스 워커가 네트워크 밖에서 준 응답 — 4 회차 SW1)
                     _ = t.cdp.orderedRemove(i);
@@ -2090,7 +2136,8 @@ pub const Table = struct {
     fn compatible(o: *const Cdp, c: *const Candidate) bool {
         if (!feasible(o, c)) return false;
         const known_ok = c.ended_at != 0 and !c.cef_failed and !c.lost;
-        if (o.state == .finished and c.ended_at != 0 and c.cef_failed) return false;
+        // 재검증 5 차 S3: 워커 W 는 응답 때 정한다(끝을 기다리지 않는다) — 머리 뒤 끊긴 fetch 의 기록은 CEF 가 실패로 끝내도 그 W 의 것이다.
+        if (o.state == .finished and !o.worker and c.ended_at != 0 and c.cef_failed) return false;
         if (o.restart_ts_us != 0) return true; // 다시 시작한 시도와만 짓는다(`feasible`) — 시각의 차례는 실측과 다르다(`bound`)
         if (o.responded_at != 0) return c.t_io_us <= o.responded_at;
         if (o.state == .failed) return !known_ok;
@@ -2680,6 +2727,8 @@ pub const Table = struct {
                 doubt = true;
             };
             if (doubt or r.tainted or t.cands.items[ci].lost) ambiguous = true;
+            // 재검증 5 차 S3: 진단 — 워커 W 의 짝을 의심한 까닭.
+            if (r.worker and ambiguous) try self.emit(gpa, .{ .sw_note = .{ .browser = t.browser, .request = t.cands.items[ci].request, .prid = r.rid, .reason = if (cross_target) .w_cross_target else if (split) .w_split else if (late) .w_late else if (held) .w_held else if (pending_split) .w_pending_split else .w_doubt } });
             if (ambiguous) {
                 try sc.drop_cdp.resize(gpa, t.cdp.items.len);
                 @memset(sc.drop_cdp.items, false);
@@ -2697,7 +2746,9 @@ pub const Table = struct {
             for (cands[extra_lo..extra_hi]) |x| if (x != ci) try sc.extra.append(gpa, t.cands.items[x].request);
             // 재검증 4 차 뒤 R6·5 차 S0: 서비스 워커가 답한 응답이면 이 요청과 짝일 수 있는 같은 열쇠의 기록을 모두 함께 끝낸다.
             sc.sw_recs.clearRetainingCapacity();
-            if (sw_unsure) for (cands, 0..) |x, p| if (x != ci and (p < extra_lo or p >= extra_hi) and compatible(&r, &t.cands.items[x])) {
+            // 재검증 5 차 S3(C5): 다른 타깃이 섞였으면 이 W 와 짝일 수 있는 같은 열쇠의 기록도 모두(남은 기록이 주인 없이 남아 설명되지 않은 채 끝나지
+            // 않게 — 그 기록들은 보이는 W 들의 것이다).
+            if (sw_unsure or cross_target) for (cands, 0..) |x, p| if (x != ci and (p < extra_lo or p >= extra_hi) and compatible(&r, &t.cands.items[x])) {
                 try sc.extra.append(gpa, t.cands.items[x].request);
                 try sc.sw_recs.append(gpa, x);
             };
@@ -3215,6 +3266,18 @@ pub const Table = struct {
             }
             // 끝난 CDP 요청(짝을 기다린다) — 앞에서부터.
             try self.decidePending(gpa, t, now_us);
+            // 재검증 5 차 S3b: 잇기를 기다리는 P, 그리고 P 를 기다리다 시한이 지난 기록(어느 페이지도 그 응답을 받지 않았다 — `unmatched`).
+            try self.swLinkPending(gpa, t, now_us);
+            var ci: usize = 0;
+            while (ci < t.cands.items.len) {
+                const c = t.cands.items[ci];
+                if (c.link_until != 0 and now_us >= c.link_until) {
+                    try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = c.request, .state = .unmatched, .flags = .{ .credentialed = c.cef_credentialed } } });
+                    _ = t.cands.orderedRemove(ci);
+                    continue;
+                }
+                ci += 1;
+            }
             // 짝 없는 기록의 끝 — 그 기록의 주인(왼쪽 짝인 열린 CDP 요청)도 함께 뺀다(재검증 2–9 회차 WB — `expireRecords`).
             try self.expireRecords(gpa, t, now_us);
             // D3: 끝이 오지 않을 열린 CDP 요청(창이 지났고 짝이 될 수 없다 — `cdpWindowPassed`·`cdpMayPair`)을 놓는다. 후보를 끝낸 뒤에 본다(방금
@@ -3227,7 +3290,15 @@ pub const Table = struct {
                 try self.buildCandIndex(gpa, t);
                 var kept: usize = 0;
                 for (0..t.cdp.items.len) |o| {
-                    if (self.cdpWindowPassed(&t.cdp.items[o], now_us) and !self.cdpMayPair(&t.cdp.items[o])) continue;
+                    if (self.cdpWindowPassed(&t.cdp.items[o], now_us) and !self.cdpMayPair(&t.cdp.items[o])) {
+                        const x = t.cdp.items[o];
+                        if (self.sw_twin_worker and !x.worker and !x.responded and x.state == .open) {
+                            t.d3_ring[t.d3_next] = x;
+                            t.d3_next = (t.d3_next + 1) % d3_ring_len;
+                            t.d3_len = @min(t.d3_len + 1, d3_ring_len);
+                        }
+                        continue;
+                    }
                     if (kept != o) t.cdp.items[kept] = t.cdp.items[o];
                     kept += 1;
                 }
@@ -3239,9 +3310,135 @@ pub const Table = struct {
         }
     }
 
+    /// 재검증 5 차 S3b: 잇기를 기다리는 P 를 앞에서부터 본다(계획 v2 §3 — C0–C7′).
+    fn swLinkPending(self: *Table, gpa: std.mem.Allocator, t: *Tab, now_us: i64) std.mem.Allocator.Error!void {
+        // 바퀴마다 한 번 — 잇기는 기록을 설명할 뿐이라 그 사이 값은 늘기만 한다(이 값은 닫힌 쪽).
+        const pmin = self.swPendingMin(t);
+        var k: usize = 0;
+        while (k < t.swp.items.len) {
+            if (try self.swLinkOne(gpa, t, k, now_us, pmin)) {
+                _ = t.swp.orderedRemove(k);
+                continue;
+            }
+            k += 1;
+        }
+    }
+
+    fn swNote(self: *Table, gpa: std.mem.Allocator, t: *Tab, p: *const Cdp, q: u64, reason: sw_mod.Reason) std.mem.Allocator.Error!void {
+        try self.emit(gpa, .{ .sw_note = .{ .browser = t.browser, .request = q, .prid = p.rid, .reason = reason } });
+    }
+
+    /// P 가 가리켰지만 잇지 못했다 — 그 기록(아직 본문을 잇지 않았으면)을 `ambiguous` 로 끝낸다(C7′: 이미 이은 기록은 그대로).
+    fn swPointedAmbiguous(self: *Table, gpa: std.mem.Allocator, t: *Tab, q: u64) std.mem.Allocator.Error!void {
+        if (q == 0) return;
+        for (t.cands.items, 0..) |c, ci| if (c.request == q) {
+            if (c.claimed and c.link_until == 0) return; // 받으러 갔다
+            try self.emit(gpa, .{ .end = .{ .browser = t.browser, .session = t.session, .request = q, .state = .ambiguous, .flags = .{ .credentialed = c.cef_credentialed } } });
+            _ = t.cands.orderedRemove(ci);
+            return;
+        };
+    }
+
+    /// 재검증 5 차 S3b(C3b′): 아직 설명되지 않은 서비스 워커 갈래 기록의 가장 이른 IO 시각(없으면 최대) — 그 사이 다른 탭에서 설명된 것은 뺀다.
+    /// 판정마다가 아니라 바퀴마다 한 번(공격 3 M8 — 판정마다 훑으면 같은 창 N 개에서 N²).
+    fn swPendingMin(self: *Table, t: *Tab) i64 {
+        while (t.swrec_head < t.swrec.items.len) {
+            const r = t.swrec.items[t.swrec_head];
+            const pend = t.swpend.get(r.request);
+            // 앞 끝이 설명되었거나(어느 탭에서든) 끝났다(그때 어둠이 섰다) — 넘긴다. 같은 번호의 다시 시작은 새 칸이다(IO 시각이 다르다).
+            if (pend == null or pend.? != r.t_io_us or self.link.isExplained(r.request)) {
+                if (pend != null and pend.? == r.t_io_us) _ = t.swpend.remove(r.request);
+                t.swrec_head += 1;
+                continue;
+            }
+            return r.t_io_us;
+        }
+        // 다 넘겼다 — 목록을 비운다.
+        t.swrec.clearRetainingCapacity();
+        t.swrec_head = 0;
+        return std.math.maxInt(i64);
+    }
+
+    /// P 하나 — 정했으면 참(목록에서 뺀다). `pending_min` 은 `swPendingMin`.
+    fn swLinkOne(self: *Table, gpa: std.mem.Allocator, t: *Tab, k: usize, now_us: i64, pending_min: i64) std.mem.Allocator.Error!bool {
+        const p = t.swp.items[k];
+        const over = now_us - p.done_at >= sw_link_wait_us;
+        // C0: 그 요청을 낸 문서가 맨 위 문서와 같은 출처이고 요청 뒤로 맨 위 출처가 바뀌지 않았다(다른 출처 iframe 의 서비스 워커는 붙지도, 그
+        // 기록이 이 탭에 붙지도 않을 수 있다 — 공격 1 M4·공격 2 A5).
+        const top = self.topOf(t.browser);
+        if (top.origin == 0 or p.doc != top.origin or top.since > p.ts_us) {
+            try self.swNote(gpa, t, &p, 0, .frame_origin);
+            return true;
+        }
+        const v = self.link.decide(t.browser, p.tau, p.src);
+        switch (v) {
+            .skip => return true,
+            .wait => {
+                if (!over) return false;
+                try self.swNote(gpa, t, &p, 0, if (self.link.taus.contains(p.tau)) .unpaired else .no_worker);
+                return true;
+            },
+            .ambiguous => |a| {
+                try self.swNote(gpa, t, &p, a.q, a.reason);
+                try self.swPointedAmbiguous(gpa, t, a.q);
+                return true;
+            },
+            .link => |x| {
+                // C3b′: P 의 응답 앞에 시작한 서비스 워커 갈래 기록이 모두 와 있고(물 높이) 모두 설명되었다(어둠이 없다).
+                if (self.cef_seen_us < p.responded_at) {
+                    if (!over) return false;
+                    try self.swNote(gpa, t, &p, x.q, .unexplained);
+                    try self.swPointedAmbiguous(gpa, t, x.q);
+                    return true;
+                }
+                if (t.sw_dark_from <= p.responded_at) {
+                    try self.swNote(gpa, t, &p, x.q, .dark);
+                    try self.swPointedAmbiguous(gpa, t, x.q);
+                    return true;
+                }
+                if (pending_min <= p.responded_at) {
+                    if (!over) return false;
+                    try self.swNote(gpa, t, &p, x.q, .unexplained);
+                    try self.swPointedAmbiguous(gpa, t, x.q);
+                    return true;
+                }
+                // C6·C7′: 그 기록이 이 탭에 있고(탭 사이 사본 — 같은 번호), 아직 잇지 않았고, CEF 가 성공으로 끝냈고, 상태가 같다.
+                const ci = for (t.cands.items, 0..) |c, n| {
+                    if (c.request == x.q) break n;
+                } else {
+                    try self.swNote(gpa, t, &p, x.q, .not_in_tab);
+                    return true;
+                };
+                const c = t.cands.items[ci];
+                if (c.claimed and c.link_until == 0) return true; // C7′ — 이미 이었다(같은 바이트)
+                if (x.status != p.status) {
+                    try self.swNote(gpa, t, &p, x.q, .status);
+                    try self.swPointedAmbiguous(gpa, t, x.q);
+                    return true;
+                }
+                if (c.ended_at == 0) {
+                    if (!over) return false;
+                    try self.swNote(gpa, t, &p, x.q, .record_failed);
+                    try self.swPointedAmbiguous(gpa, t, x.q);
+                    return true;
+                }
+                if (c.cef_failed or c.lost) {
+                    try self.swNote(gpa, t, &p, x.q, .record_failed);
+                    try self.swPointedAmbiguous(gpa, t, x.q);
+                    return true;
+                }
+                t.cands.items[ci].claimed = true;
+                t.cands.items[ci].link_until = 0;
+                swExplain(t, x.q);
+                try self.decide(gpa, t, ci, t.cands.items[ci], p, false, now_us);
+                return true;
+            },
+        }
+    }
+
     /// 아직 할 일이 있는가(주기 task 를 이어 걸지).
     pub fn busy(self: *const Table) bool {
-        for (&self.tabs) |*t| if (t.browser != 0 and (t.cands.items.len > 0 or t.cdp.items.len > 0 or t.waiting.items.len > 0)) return true;
+        for (&self.tabs) |*t| if (t.browser != 0 and (t.cands.items.len > 0 or t.cdp.items.len > 0 or t.waiting.items.len > 0 or t.swp.items.len > 0)) return true;
         return self.inflight.items.len > 0;
     }
 };
@@ -3260,6 +3457,8 @@ const H = struct {
     attempts: std.AutoHashMapUnmanaged(u64, u32) = .empty,
     ends: usize = 0,
     fetches: std.ArrayList(Action) = .empty,
+    /// 재검증 5 차 S3b: 보낸 호출의 번호 → 그 기록(보낸 때 — 시한으로 `inflight` 에서 빠진 뒤에도 본다).
+    fetched_req: std.AutoHashMapUnmanaged(i32, u64) = .empty,
     paused: usize = 0,
     /// CDP 사건마다 그때까지의 CEF 기록이 모두 왔다고 친다(IO 상자가 빈 때 — 시험이 후보를 사건 차례대로 곧 넘긴다). 제 기록이 CDP 끝보다
     /// 늦게 오는 꼴(W9d② 적대 리뷰 3 회차 P1)을 보는 시험은 끄고 물 높이를 손으로 올린다(`flushed`·`tick`).
@@ -3271,11 +3470,12 @@ const H = struct {
         self.end_counts.deinit(gpa_t);
         self.attempts.deinit(gpa_t);
         self.fetches.deinit(gpa_t);
+        self.fetched_req.deinit(gpa_t);
     }
 
     /// 끝 하나를 센다 — 그 번호의 적은 시도 수(`cand` 를 거치지 않은 시작은 하나로 친다)보다 많으면 실패(끝은 시도마다 꼭 하나).
     fn noteEnd(self: *H, request: u64, state: State) !void {
-        if (g_debug_seed != 0) std.debug.print("    end rec {d} {s}\n", .{ request, @tagName(state) });
+        if (g_debug_seed != 0 or std.c.getenv("SW_TEST_LOG") != null) std.debug.print("    end rec {d} {s}\n", .{ request, @tagName(state) });
         const gop = try self.end_counts.getOrPut(gpa_t, request);
         if (!gop.found_existing) gop.value_ptr.* = 0;
         gop.value_ptr.* += 1;
@@ -3291,9 +3491,14 @@ const H = struct {
         self.table.swapActions(&list);
         for (list.items) |a| switch (a) {
             .end => |e| try self.noteEnd(e.request, e.state),
-            .fetch => try self.fetches.append(gpa_t, a),
+            .fetch => |f| {
+                try self.fetches.append(gpa_t, a);
+                for (self.table.inflight.items) |x| if (x.id == f.id) try self.fetched_req.put(gpa_t, f.id, x.request);
+            },
             .pause => self.paused += 1,
-            .detach_workers, .sw_paired, .sw_note => {},
+            .detach_workers => {},
+            .sw_paired => |x| if (std.c.getenv("SW_TEST_LOG") != null) std.debug.print("    sw-pair req {d} w {s}\n", .{ x.request, x.wrid.slice() }),
+            .sw_note => |x| if (std.c.getenv("SW_TEST_LOG") != null) std.debug.print("    sw-note req {d} p {s} {s}\n", .{ x.request, x.prid.slice(), @tagName(x.reason) }),
         };
     }
 
@@ -4388,6 +4593,7 @@ test "W9d② 적대 리뷰 2 회차 재현 F3: A→B→A 로 돌아온 요청의
 fn fetchedFor(h: *H, rid: []const u8) ?u64 {
     for (h.fetches.items) |a| if (a.fetch.rid.eql(rid)) {
         for (h.table.inflight.items) |f| if (f.id == a.fetch.id) return f.request;
+        if (h.fetched_req.get(a.fetch.id)) |q| return q;
     };
     return null;
 }
@@ -9799,6 +10005,13 @@ fn swRun(h: *H, from: i64, to: i64) !void {
         try h.flushed(now, now);
         try h.table.tickAt(gpa_t, now, now);
         try h.drain();
+        // 보낸 호출은 곧 답한다(자리를 비운다 — 그 기록은 `fetched_req` 에 남는다).
+        while (h.table.inflight.items.len > 0) {
+            const f = h.table.takeInflight(h.table.inflight.items[0].id) orelse continue;
+            try h.noteEnd(f.request, .captured);
+            try h.table.bodyDone(gpa_t, f, now);
+            try h.drain();
+        }
     }
 }
 
@@ -9822,4 +10035,485 @@ test "W9d② 재검증 5 차 S3a: 워커 W 가 서비스 워커 갈래 기록의
     _ = try h.cand(5, 702, u, t0 + 20_400, .{ .sw = true });
     try wFetch(&h, 5, 1, "7.2", u, t0 + 20_200, t0 + 29_000, .{});
     try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(702));
+}
+test "W9d② 재검증 5 차 S3b: τ 로 잇는다 — 그대로 넘김은 제 본문, 메모 복제(K1)는 원본 기록에만(갱신 기록은 unmatched), fetch 뒤 대체(K2)는 대체 fetch 의 기록에" {
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    const u = sw_origin ++ "/api/feed";
+    const fb = sw_origin ++ "/img/fb";
+    const t0: i64 = 10_000_000;
+    // F1: 그대로 넘김(메모해 둔다).
+    _ = try h.cand(5, 801, u, t0 + 400, .{ .sw = true });
+    try wFetch(&h, 5, 1, "7.1", u, t0 + 200, t0 + 9_000, .{});
+    h.table.cefEndReceived(5, 801, t0 + 9_500, true, 9);
+    try pFetch(&h, 5, "p.1", u, t0, t0 + 9_200, t0 + 9_000 + sw_wall_off, .{});
+    try swRun(&h, t0 + 10_000, t0 + 200_000);
+    try testing.expectEqual(@as(?u64, 801), fetchedFor(&h, "p.1"));
+    // K1: 갱신 fetch X(본문을 읽지 않아 끝이 없다)를 내고 메모(F1 의 응답)로 답한다.
+    const t1 = t0 + 500_000;
+    _ = try h.cand(5, 802, u, t1 + 400, .{ .sw = true });
+    try wFetch(&h, 5, 1, "7.2", u, t1 + 200, t1 + 5_000, .{});
+    try pFetch(&h, 5, "p.2", u, t1, t1 + 1_000, t0 + 9_000 + sw_wall_off, .{});
+    // K2: P(제 주소 404 를 받은 뒤 fb 로 답함)와 페이지가 직접 받는 fb(pf).
+    _ = try h.cand(5, 803, sw_origin ++ "/img/2", t1 + 10_400, .{ .sw = true });
+    try wFetch(&h, 5, 1, "7.3", sw_origin ++ "/img/2", t1 + 10_200, t1 + 12_000, .{ .status = 404 });
+    h.table.cefEndReceived(5, 803, t1 + 12_500, true, 5);
+    _ = try h.cand(5, 804, fb, t1 + 13_400, .{ .sw = true }); // 워커의 대체 fetch(F)
+    try wFetch(&h, 5, 1, "7.4", fb, t1 + 13_200, t1 + 15_000, .{});
+    h.table.cefEndReceived(5, 804, t1 + 15_500, true, 7);
+    _ = try h.cand(5, 805, fb, t1 + 14_400, .{ .sw = true }); // pf 의 그대로 넘김
+    try wFetch(&h, 5, 1, "7.5", fb, t1 + 14_200, t1 + 16_000, .{});
+    h.table.cefEndReceived(5, 805, t1 + 16_500, true, 7);
+    try pFetch(&h, 5, "p.3", sw_origin ++ "/img/2", t1 + 10_000, t1 + 15_200, t1 + 15_000 + sw_wall_off, .{});
+    try pFetch(&h, 5, "p.4", fb, t1 + 14_000, t1 + 16_200, t1 + 16_000 + sw_wall_off, .{});
+    try swRun(&h, t1 + 20_000, t1 + 12_000_000);
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.2")); // 메모 — 원본 801 은 이미 이었다(C7′)
+    try testing.expectEqual(@as(?State, .unmatched), h.ended.get(802)); // 갱신 기록 — 어느 페이지도 그 응답을 받지 않았다
+    try testing.expectEqual(@as(?u64, 804), fetchedFor(&h, "p.3")); // 대체 fetch 의 기록
+    try testing.expectEqual(@as(?u64, 805), fetchedFor(&h, "p.4"));
+    try testing.expectEqual(@as(?State, .unmatched), h.ended.get(803)); // 404 원본
+}
+
+test "W9d② 재검증 5 차 S3b: 다른 탭(K3) — W 를 한 탭의 세션만 봤어도 다른 탭의 P 는 제 탭의 사본 기록에 잇는다(설명은 탭 사이)" {
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    _ = try h.table.start(gpa_t, 6, 1);
+    try h.drain();
+    h.table.link.raiseVisible(6, sw_wall_off + 1_000);
+    h.table.topOrigin(6, originHash(sw_origin), 1);
+    const u = sw_origin ++ "/memo";
+    const t0: i64 = 10_000_000;
+    for ([_]BrowserId{ 5, 6 }) |b| _ = try h.cand(b, 901, u, t0 + 400, .{ .sw = true });
+    // 탭 5 의 세션만 W 를 본다(탭 6 은 나중에 붙었다).
+    try wFetch(&h, 5, 1, "7.1", u, t0 + 200, t0 + 9_000, .{});
+    h.table.cefEndReceived(5, 901, t0 + 9_500, true, 9);
+    h.table.cefEndReceived(6, 901, t0 + 9_500, true, 9);
+    try pFetch(&h, 6, "q.1", u, t0 + 100_000, t0 + 101_000, t0 + 9_000 + sw_wall_off, .{});
+    try swRun(&h, t0 + 110_000, t0 + 12_000_000);
+    var got6: ?u64 = null;
+    for (h.fetches.items) |a| if (a.fetch.browser == 6 and a.fetch.rid.eql("q.1")) {
+        got6 = h.fetched_req.get(a.fetch.id);
+    };
+    try testing.expectEqual(@as(?u64, 901), got6);
+}
+
+test "W9d② 재검증 5 차 S3b: C3a·C3b′ — 기록 전 메모는 ambiguous, W 가 오지 않은 기록이 끝나면 그 뒤 P 는 어둠, 응답 앞의 기록이 설명되기를 기다린다" {
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    const u = sw_origin ++ "/x";
+    const t0: i64 = 10_000_000;
+    // 기록 전 메모(τ < VS) — W 가 없다.
+    try pFetch(&h, 5, "p.0", u, t0, t0 + 1_000, sw_wall_off + 500, .{});
+    // 기다림: P 의 응답 앞에 시작한 기록(그 W 는 아직) — P 는 기다린다, W 가 오면 잇는다.
+    _ = try h.cand(5, 1001, u, t0 + 20_400, .{ .sw = true });
+    try wev(&h, 5, 1, .{ .sent = .{ .rid = "7.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 + 20_200 } }, t0 + 20_250);
+    h.table.cefEndReceived(5, 1001, t0 + 22_000, true, 9);
+    try pFetch(&h, 5, "p.1", u, t0 + 20_000, t0 + 21_000, t0 + 20_900 + sw_wall_off, .{});
+    try swRun(&h, t0 + 30_000, t0 + 200_000);
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.1"));
+    // 늦게 온 W(바쁜 루프로 늦췄다 — 공격 1 H1).
+    try wev(&h, 5, 1, .{ .response = .{ .rid = "7.1", .ts_us = t0 + 20_900, .tau = t0 + 20_900 + sw_wall_off, .status = 200 } }, t0 + 1_400_000);
+    try swRun(&h, t0 + 1_400_000, t0 + 1_600_000);
+    try testing.expectEqual(@as(?u64, 1001), fetchedFor(&h, "p.1"));
+    // 어둠: W 가 끝내 오지 않은 기록(A2 가 깨졌다 — 그 응답으로 메모할 수 있다)이 시한으로 끝나면 그 뒤에 응답한 P 는 잇지 않는다.
+    const t1 = t0 + 2_000_000;
+    _ = try h.cand(5, 1002, u, t1 + 400, .{ .sw = true });
+    h.table.cefEndReceived(5, 1002, t1 + 2_000, true, 9);
+    try swRun(&h, t1 + 10_000, t1 + 3_500_000);
+    try testing.expectEqual(@as(?State, .unmatched), h.ended.get(1002));
+    try testing.expect(h.table.tabOf(5).?.sw_dark_from <= t1 + 400);
+    const t2 = t1 + 4_000_000;
+    _ = try h.cand(5, 1003, u, t2 + 400, .{ .sw = true });
+    try wFetch(&h, 5, 1, "7.3", u, t2 + 200, t2 + 9_000, .{});
+    h.table.cefEndReceived(5, 1003, t2 + 9_500, true, 9);
+    try pFetch(&h, 5, "p.3", u, t2, t2 + 9_200, t2 + 9_000 + sw_wall_off, .{});
+    try swRun(&h, t2 + 10_000, t2 + 12_000_000);
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.3"));
+    try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(1003));
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.0"));
+}
+
+test "W9d② 재검증 5 차 S3b: C4·C5 — 다른 타깃의 같은 주소는 ambiguous(관 차례가 뒤집힌다), 늦춘 W 와 µs 가 같은 W 는 독, preload 는 남의 기록을 설명하지 못한다, http-cache 는 ambiguous" {
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    const u = sw_origin ++ "/same";
+    const t0: i64 = 10_000_000;
+    // 두 타깃(갱신 V1·V2) 이 같은 주소를 거의 함께 — CEF 차례가 CDP 차례와 거꾸로.
+    _ = try h.cand(5, 1101, u, t0 + 600, .{ .sw = true }); // B 의 것
+    _ = try h.cand(5, 1102, u, t0 + 700, .{ .sw = true }); // A 의 것
+    try wev(&h, 5, 1, .{ .sent = .{ .rid = "a.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 + 200 } }, t0 + 250);
+    try wev(&h, 5, 2, .{ .sent = .{ .rid = "b.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 + 210 } }, t0 + 260);
+    try wev(&h, 5, 1, .{ .response = .{ .rid = "a.1", .ts_us = t0 + 9_000, .tau = t0 + 9_000 + sw_wall_off, .status = 200 } }, t0 + 9_050);
+    try wev(&h, 5, 2, .{ .response = .{ .rid = "b.1", .ts_us = t0 + 9_100, .tau = t0 + 9_100 + sw_wall_off, .status = 200 } }, t0 + 9_150);
+    for ([_]u64{ 1101, 1102 }) |q| h.table.cefEndReceived(5, q, t0 + 9_600, true, 9);
+    try pFetch(&h, 5, "p.1", u, t0, t0 + 9_300, t0 + 9_000 + sw_wall_off, .{});
+    try swRun(&h, t0 + 10_000, t0 + 12_000_000);
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.1"));
+    try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(1101));
+    try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(1102));
+    // http-cache 출처 — 가리킨 W 의 기록도 ambiguous.
+    var g: H = .{};
+    defer g.deinit();
+    try swSetup(&g, 5, true);
+    _ = try g.cand(5, 1201, u, t0 + 400, .{ .sw = true });
+    try wFetch(&g, 5, 1, "7.1", u, t0 + 200, t0 + 9_000, .{ .disk = true, .tau = 5_000 + sw_wall_off + 1_000 });
+    g.table.cefEndReceived(5, 1201, t0 + 9_500, true, 9);
+    // (VS 보다 늦은 원본 τ — 디스크 적중이 원본 τ 를 지닌다.)
+    try pFetch(&g, 5, "p.1", u, t0, t0 + 9_200, 5_000 + sw_wall_off + 1_000, .{ .src = "http-cache" });
+    try swRun(&g, t0 + 10_000, t0 + 12_000_000);
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&g, "p.1"));
+    try testing.expectEqual(@as(?State, .ambiguous), g.ended.get(1201));
+    // preload(빼는 꼴) — 붙지 않은 다른 범위 SW 의 같은 주소 기록이 있어도 preload W 는 그것을 설명하지 않는다.
+    var p: H = .{};
+    defer p.deinit();
+    try swSetup(&p, 5, true);
+    _ = try p.cand(5, 1301, u, t0 + 400, .{ .sw = true }); // 붙지 않은 SW 의 같은 주소 기록
+    try wev(&p, 5, 1, .{ .sent = .{ .rid = "preload-1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 + 200, .excluded = true } }, t0 + 250);
+    try wev(&p, 5, 1, .{ .response = .{ .rid = "preload-1", .ts_us = t0 + 9_000, .tau = t0 + 9_000 + sw_wall_off, .status = 200, .excluded = true } }, t0 + 9_050);
+    p.table.cefEndReceived(5, 1301, t0 + 9_600, true, 9);
+    try pFetch(&p, 5, "p.1", u, t0 + 100_000, t0 + 101_000, t0 + 9_000 + sw_wall_off, .{});
+    try swRun(&p, t0 + 110_000, t0 + 12_000_000);
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&p, "p.1"));
+    try testing.expect(p.ended.get(1301) != null and p.ended.get(1301).? != .captured);
+}
+
+test "W9d② 재검증 5 차 S3b: C0·C6 — 다른 출처 문서의 P 는 잇지 않는다, 상태가 다르면 ambiguous, CEF 가 실패로 끝낸 기록에는 잇지 않는다" {
+    const u = sw_origin ++ "/c";
+    const t0: i64 = 10_000_000;
+    inline for (.{ .{ "https://sub.sw.test/frame", 200, true }, .{ sw_origin ++ "/app", 500, true }, .{ sw_origin ++ "/app", 200, false } }) |c| {
+        var h: H = .{};
+        defer h.deinit();
+        try swSetup(&h, 5, true);
+        _ = try h.cand(5, 1401, u, t0 + 400, .{ .sw = true });
+        try wFetch(&h, 5, 1, "7.1", u, t0 + 200, t0 + 9_000, .{});
+        h.table.cefEndReceived(5, 1401, t0 + 9_500, c[2], 9);
+        try pFetch(&h, 5, "p.1", u, t0, t0 + 9_200, t0 + 9_000 + sw_wall_off, .{ .doc = c[0], .status = c[1] });
+        try swRun(&h, t0 + 10_000, t0 + 12_000_000);
+        try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.1"));
+        try testing.expect(h.ended.get(1401) != null and h.ended.get(1401).? != .captured);
+    }
+}
+
+test "W9d② 재검증 5 차 S3b: 떼기·다시 켬 — 다시 켜면 설명되지 않은 기록·어둠·기다리는 P 를 비운다" {
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    h.table.noteDrop(5, hashUrl8(sw_origin ++ "/x"), 5_000);
+    try testing.expectEqual(@as(i64, 5_000), h.table.tabOf(5).?.sw_dark_from);
+    _ = try h.table.start(gpa_t, 5, 2);
+    try h.drain();
+    try testing.expectEqual(std.math.maxInt(i64), h.table.tabOf(5).?.sw_dark_from);
+    try h.table.stop(gpa_t, 5);
+    try h.drain();
+    try testing.expectEqual(@as(usize, 0), h.table.link.ws.count());
+}
+
+// ── 재검증 5 차 S3b: 맞물린 표의 세계 모의기 퍼즈(공격 3 M6 — 참은 「붙은 본문 id == 그 기록 제 fetch 의 본문 id」) ──
+// 세계: SW 타깃 둘(관마다 FIFO, 관 사이는 IO 늦음 0–3 ms 무작위 — 차례가 뒤집힌다), fetch 마다 CEF 기록과 본문 id, W 사건(시작을 잃기·
+// 응답을 잃기(A2 깨짐)·늦추기), 디스크 적중(같은 τ 다른 본문 — HEAD·Range), preload(빼는 꼴 — 기록 없음), 끝 없는 기록(본문을 읽지 않음),
+// µs τ 충돌. 페이지 P 는 받은 응답 아무것(그대로·복제·메모 — 여러 번)·기록 전 메모·만든 응답·Cache Storage·http-cache 로 답받는다.
+// 모의기는 A1(복제는 τ·본문을 지닌다, 만든 응답은 새 τ)·A3(fetch 마다 기록)·A4′(관 안 FIFO)를 규칙으로 품는다 — 퍼즈는 그 위의 틀린 본문을 본다.
+
+const SwWorld = struct {
+    const Fetch = struct { q: u64, url: u64, target: u64, start: i64, io: i64, resp: i64, tau: i64, body: u64, disk: bool, excl: bool, ended: bool, w_sent: bool, w_resp: bool, w_delay: i64, rid: [16]u8, rid_len: u8 };
+};
+
+test "W9d② 재검증 5 차 S3b 퍼즈: 맞물린 표 — 이은 본문은 늘 그 기록 제 fetch 의 본문이다, 끝은 기록마다 하나" {
+    const seeds: usize = if (std.c.getenv("SW_FUZZ_SEEDS")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 300 else 300;
+    var wrong: usize = 0;
+    var links: usize = 0;
+    var p_total: usize = 0;
+    var dark_rounds: usize = 0;
+    const seed_from: usize = if (std.c.getenv("SW_FUZZ_FROM")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 0 else 0;
+    for (seed_from..seed_from + seeds) |seed| {
+        var prng = std.Random.DefaultPrng.init(0x53b0_0000 + seed);
+        const rnd = prng.random();
+        var h: H = .{ .sync = false };
+        defer h.deinit();
+        try swSetup(&h, 5, true);
+        var fs: std.ArrayList(SwWorld.Fetch) = .empty;
+        defer fs.deinit(gpa_t);
+        var bodies: std.AutoHashMapUnmanaged(u64, u64) = .empty; // 기록 번호 → 본문 id
+        defer bodies.deinit(gpa_t);
+        var pbody: std.StringHashMapUnmanaged(u64) = .empty; // P rid → 본문 id
+        defer {
+            var it = pbody.keyIterator();
+            while (it.next()) |k| gpa_t.free(k.*);
+            pbody.deinit(gpa_t);
+        }
+        const lose_resp = rnd.uintLessThan(u8, 4) == 0; // 이 판은 A2 를 깨뜨린다
+        const urls = [_][]const u8{ sw_origin ++ "/a", sw_origin ++ "/b", sw_origin ++ "/c", sw_origin ++ "/d", sw_origin ++ "/e", sw_origin ++ "/f" };
+        const n_f = 6 + rnd.uintLessThan(usize, 18);
+        var t: i64 = 10_000_000;
+        var next_body: u64 = 1;
+        var last_io = [_]i64{ 0, 0, 0 };
+        for (0..n_f) |k| {
+            t += @as(i64, rnd.uintLessThan(u32, 4_000));
+            const target: u64 = if (rnd.uintLessThan(u8, 4) == 0) 2 else 1;
+            const ui = rnd.uintLessThan(usize, urls.len);
+            // 관 안 FIFO: 같은 타깃의 IO 는 앞 IO 뒤.
+            var io = t + 200 + @as(i64, rnd.uintLessThan(u32, if (target == 2) 3_000 else 300));
+            io = @max(io, last_io[target] + 1);
+            last_io[target] = io;
+            const resp = io + 1_000 + @as(i64, rnd.uintLessThan(u32, 20_000));
+            const kind = rnd.uintLessThan(u8, 12);
+            const disk = kind == 0 and k > 0;
+            var tau = resp + sw_wall_off;
+            if (disk) tau = fs.items[rnd.uintLessThan(usize, fs.items.len)].tau; // 디스크 적중 — 원본 τ(다른 본문)
+            if (kind == 1 and k > 0) tau = fs.items[rnd.uintLessThan(usize, fs.items.len)].tau; // µs 충돌
+            var f: SwWorld.Fetch = .{ .q = 2000 + k, .url = hashUrl8(urls[ui]), .target = target, .start = t, .io = io, .resp = resp, .tau = tau, .body = next_body, .disk = disk, .excl = kind == 2, .ended = rnd.uintLessThan(u8, 6) != 0, .w_sent = rnd.uintLessThan(u8, 8) != 0, .w_resp = !(lose_resp and rnd.uintLessThan(u8, 5) == 0), .w_delay = if (rnd.uintLessThan(u8, 6) == 0) @as(i64, rnd.uintLessThan(u32, 1_800_000)) else 0, .rid = undefined, .rid_len = 0 };
+            next_body += 1;
+            const rs = try std.fmt.bufPrint(&f.rid, "{s}{d}", .{ if (f.excl) "preload-" else "w.", k });
+            f.rid_len = @intCast(rs.len);
+            try fs.append(gpa_t, f);
+            if (!f.excl) try bodies.put(gpa_t, f.q, f.body);
+        }
+        // 사건을 시각 차례로: CEF 시작(기록 — preload 는 없다)·W 시작·W 응답·CEF 끝.
+        const Ev = struct { at: i64, kind: u8, i: usize };
+        var evs: std.ArrayList(Ev) = .empty;
+        defer evs.deinit(gpa_t);
+        for (fs.items, 0..) |f, i| {
+            if (!f.excl) try evs.append(gpa_t, .{ .at = f.io, .kind = 0, .i = i });
+            if (f.w_sent) try evs.append(gpa_t, .{ .at = f.start + 50, .kind = 1, .i = i });
+            if (f.w_resp) try evs.append(gpa_t, .{ .at = f.resp + 50 + f.w_delay, .kind = 2, .i = i });
+            if (f.ended and !f.excl) try evs.append(gpa_t, .{ .at = f.resp + 3_000, .kind = 3, .i = i });
+        }
+        // 페이지 P: 받은 응답을 아무 P 에(복제·메모 — 같은 것을 여러 번도), 기록 전 메모·만든 응답·Cache Storage.
+        const n_p = 4 + rnd.uintLessThan(usize, 12);
+        const Pg = struct { rid: [12]u8, rid_len: u8, start: i64, resp: i64, tau: i64, src: []const u8, body: u64 };
+        var ps: std.ArrayList(Pg) = .empty;
+        defer ps.deinit(gpa_t);
+        for (0..n_p) |k| {
+            const f = fs.items[rnd.uintLessThan(usize, fs.items.len)];
+            const kind = rnd.uintLessThan(u8, 10);
+            var pg: Pg = .{ .rid = undefined, .rid_len = 0, .start = f.start - 100, .resp = f.resp + 10 + @as(i64, rnd.uintLessThan(u32, 600_000)), .tau = f.tau, .src = if (f.disk) "http-cache" else "network", .body = f.body };
+            if (kind == 0) {
+                pg.tau = sw_wall_off + 500; // 기록 전 메모
+                pg.body = 999_000 + k;
+            } else if (kind == 1) {
+                pg.src = "fallback-code";
+                pg.tau = pg.resp + sw_wall_off;
+                pg.body = 998_000 + k;
+            } else if (kind == 2) {
+                pg.src = "cache-storage";
+            }
+            const rs = try std.fmt.bufPrint(&pg.rid, "p.{d}", .{k});
+            pg.rid_len = @intCast(rs.len);
+            pg.start = @min(pg.start, pg.resp - 1);
+            try ps.append(gpa_t, pg);
+            try pbody.put(gpa_t, try gpa_t.dupe(u8, rs), pg.body);
+            try evs.append(gpa_t, .{ .at = pg.resp, .kind = 4, .i = ps.items.len - 1 });
+        }
+        std.mem.sort(Ev, evs.items, {}, struct {
+            fn lt(_: void, a: Ev, b: Ev) bool {
+                return a.at < b.at or (a.at == b.at and a.kind < b.kind);
+            }
+        }.lt);
+        var now: i64 = 0;
+        var seen_fetch: usize = 0;
+        const Chk = struct {
+            fn run(hh: *H, from: *usize, at: i64, bod: *std.AutoHashMapUnmanaged(u64, u64), pb: *std.StringHashMapUnmanaged(u64), sd: usize, lk: *usize, wr: *usize) !void {
+                while (from.* < hh.fetches.items.len) : (from.* += 1) {
+                    const a = hh.fetches.items[from.*];
+                    const inf = hh.table.takeInflight(a.fetch.id) orelse continue;
+                    lk.* += 1;
+                    const want = bod.get(inf.request) orelse 0;
+                    const got = pb.get(a.fetch.rid.slice()) orelse 1;
+                    if (want != got) {
+                        wr.* += 1;
+                        std.debug.print("\n[S3b fuzz WRONG] seed {d}: P {s} body {d} → record {d} (its fetch body {d})", .{ sd, a.fetch.rid.slice(), got, inf.request, want });
+                    }
+                    try hh.noteEnd(inf.request, .captured); // net_body 가 본문의 끝을 보낸다(`sendBody`)
+                    try hh.table.bodyDone(gpa_t, inf, at);
+                    try hh.drain();
+                }
+            }
+        };
+        for (evs.items) |e| {
+            now = @max(now, e.at);
+            switch (e.kind) {
+                0 => {
+                    const f = fs.items[e.i];
+                    _ = try h.table.cefBegin(gpa_t, 5, .{ .request = f.q, .key = .{ .url = f.url, .method = hashMethod("GET"), .sw = true }, .t_io_us = f.io, .attr = 1 });
+                },
+                1 => {
+                    const f = fs.items[e.i];
+                    try h.table.workerEvent(gpa_t, 5, f.target, .{ .sent = .{ .rid = f.rid[0..f.rid_len], .url_hash = f.url, .method_hash = hashMethod("GET"), .ts_us = f.start, .excluded = f.excl } }, now);
+                },
+                2 => {
+                    const f = fs.items[e.i];
+                    try h.table.workerEvent(gpa_t, 5, f.target, .{ .response = .{ .rid = f.rid[0..f.rid_len], .ts_us = f.resp, .tau = f.tau, .disk = f.disk, .status = 200, .excluded = f.excl, .start_us = f.start, .url_hash = f.url } }, now);
+                },
+                3 => h.table.cefEndReceived(5, fs.items[e.i].q, now, true, 9),
+                4 => {
+                    const p = ps.items[e.i];
+                    const rid = p.rid[0..p.rid_len];
+                    try h.table.cdpEvent(gpa_t, 5, .{ .will_be_sent = .{ .rid = rid, .url_hash = hashUrl8(sw_origin ++ "/page"), .method_hash = hashMethod("GET"), .ts_us = p.start, .doc = originHash(sw_origin) } }, now);
+                    try h.table.cdpEvent(gpa_t, 5, .{ .response = .{ .rid = rid, .mime = "application/json", .from_sw = true, .charset = .other, .sw_source = p.src, .ts_us = p.resp, .tau = p.tau, .status = 200 } }, now);
+                    try h.table.cdpEvent(gpa_t, 5, .{ .data = .{ .rid = rid, .bytes = 9 } }, now);
+                    try h.table.cdpEvent(gpa_t, 5, .{ .finished = .{ .rid = rid } }, now + 1);
+                    p_total += 1;
+                },
+                else => {},
+            }
+            // 물 높이는 지난 IO 까지(상자가 비었다).
+            try h.table.cefSeen(gpa_t, now, now);
+            try h.drain();
+            try Chk.run(&h, &seen_fetch, now, &bodies, &pbody, seed, &links, &wrong);
+        }
+        var tt = now;
+        while (tt < now + 16_000_000) : (tt += 50_000) {
+            try h.table.tickAt(gpa_t, tt, tt);
+            try h.drain();
+            try Chk.run(&h, &seen_fetch, tt, &bodies, &pbody, seed, &links, &wrong);
+        }
+        if (h.table.tabOf(5).?.sw_dark_from != std.math.maxInt(i64)) dark_rounds += 1;
+        // 끝은 기록마다 하나(끝나지 않은 것도 없다 — 시한).
+        for (fs.items) |f| if (!f.excl and f.ended) {
+            if (h.end_counts.get(f.q) == null) {
+                std.debug.print("\n[S3b fuzz] seed {d}: record {d} has no end", .{ seed, f.q });
+                return error.TestUnexpectedResult;
+            }
+        };
+    }
+    std.debug.print("\n[S3b fuzz] seeds {d} · pages {d} · linked {d} · WRONG {d} · rounds gone dark {d}\n", .{ seeds, p_total, links, wrong, dark_rounds });
+    try testing.expectEqual(@as(usize, 0), wrong);
+    // 이 세계는 일부러 거칠다(판의 1/4 은 W 응답을 잃고, 1/6 은 W 를 1.8 s 까지 늦추고, 두 타깃·적은 주소) — 대개 어둠으로 잃는다. 잇기가
+    // 아예 죽지 않았는지만 본다(잃는 양은 실제 CEF 판정이 잰다).
+    try testing.expect(links * 6 >= seeds);
+}
+
+test "W9d② 재검증 5 차 S3b 값: 그대로 넘긴 다른 주소 요청 N 개(같은 창)의 W·P 가 한꺼번에 — 짝·잇기의 값(공격 3 M8 — ReleaseFast N 2047(CDP 자리 4096 을 W·P 가 채운다) 합 ≤ 150 ms)" {
+    const n_env = std.c.getenv("SW_COST_N");
+    const n: usize = if (n_env) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 512 else 512;
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    var rb: [24]u8 = undefined;
+    var ub: [64]u8 = undefined;
+    const t0: i64 = 10_000_000;
+    for (0..n) |i| {
+        const ts: i64 = t0 + 1 + @as(i64, @intCast(i));
+        const u = try std.fmt.bufPrint(&ub, sw_origin ++ "/img/{d}.png", .{i});
+        _ = try h.table.cefBegin(gpa_t, 5, .{ .request = 100 + i, .key = .{ .url = hashUrl8(u), .method = hashMethod("GET"), .sw = true }, .t_io_us = ts + 50, .attr = 1 });
+        const wr = try std.fmt.bufPrint(&rb, "w.{d}", .{i});
+        try h.table.workerEvent(gpa_t, 5, 1, .{ .sent = .{ .rid = wr, .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = ts } }, ts + 10);
+        const pr = try std.fmt.bufPrint(&rb, "p.{d}", .{i});
+        try h.table.cdpEvent(gpa_t, 5, .{ .will_be_sent = .{ .rid = pr, .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = ts - 1, .doc = originHash(sw_origin) } }, ts + 10);
+    }
+    const fin: i64 = t0 + 400_000;
+    const a = clock_gettime_nsec_np(16);
+    for (0..n) |i| {
+        const ts: i64 = t0 + 1 + @as(i64, @intCast(i));
+        h.table.cef_seen_us = fin;
+        const wr = try std.fmt.bufPrint(&rb, "w.{d}", .{i});
+        try h.table.workerEvent(gpa_t, 5, 1, .{ .response = .{ .rid = wr, .ts_us = fin - 500, .tau = ts + 300_000 + sw_wall_off, .status = 200 } }, fin);
+        h.table.cefEndReceived(5, 100 + i, fin, true, 9);
+        const pr = try std.fmt.bufPrint(&rb, "p.{d}", .{i});
+        try h.table.cdpEvent(gpa_t, 5, .{ .response = .{ .rid = pr, .mime = "application/json", .from_sw = true, .charset = .other, .sw_source = "network", .ts_us = fin - 400, .tau = ts + 300_000 + sw_wall_off, .status = 200 } }, fin);
+        try h.table.cdpEvent(gpa_t, 5, .{ .data = .{ .rid = pr, .bytes = 9 } }, fin);
+        try h.table.cdpEvent(gpa_t, 5, .{ .finished = .{ .rid = pr } }, fin);
+    }
+    const b = clock_gettime_nsec_np(16);
+    var worst: u64 = 0;
+    var total: u64 = b - a;
+    var own: usize = 0;
+    var wrong: usize = 0;
+    var now = fin + 50_000;
+    while (now < fin + 3_000_000) : (now += 50_000) {
+        const c0 = clock_gettime_nsec_np(16);
+        try h.table.tickAt(gpa_t, now, now);
+        const c1 = clock_gettime_nsec_np(16);
+        worst = @max(worst, c1 - c0);
+        total += c1 - c0;
+        var list: std.ArrayList(Action) = .empty;
+        defer list.deinit(gpa_t);
+        h.table.swapActions(&list);
+        for (list.items) |x| switch (x) {
+            .fetch => |f| if (h.table.takeInflight(f.id)) |ff| {
+                const want = 100 + (std.fmt.parseInt(usize, f.rid.slice()[2..], 10) catch 0);
+                if (ff.request == want) own += 1 else wrong += 1;
+                try h.table.bodyDone(gpa_t, ff, now);
+            },
+            else => {},
+        };
+    }
+    std.debug.print("\n[S3b cost] n={d}: events {d} us · worst tick {d} us · total {d} us · own {d} wrong {d}\n", .{ n, (b - a) / 1000, worst / 1000, total / 1000, own, wrong });
+    try testing.expectEqual(@as(usize, 0), wrong);
+    // W·P 는 탭의 CDP 자리(4096)를 함께 쓴다 — 넘치면 묶음으로 놓아(D-B 표지) 그 창은 본문 없이(잃는 쪽).
+    if (n <= 2047) try testing.expect(own > 0);
+    // W·P 는 탭의 CDP 자리(4096)를 함께 쓴다 — 2047 쌍이 자리를 다 채운다.
+    if (@import("builtin").mode == .fast and n >= 2047) try testing.expect(total < 150_000_000);
+}
+
+test "W9d② 재검증 5 차 S3b (B): 서비스 워커 몫으로 넘긴 기록 — 탭을 어둠으로 치지 않고, 그 W 를 가리킨 P 는 잇지 않으며(짝 없음), 같은 주소의 남의 기록을 가져가지 않는다; 다른 주소의 잇기는 그대로" {
+    const t0: i64 = 10_000_000;
+    const u = sw_origin ++ "/held";
+    const v = sw_origin ++ "/other";
+    {
+        // 넘김 표지의 종류: 몫이 차서 넘긴 것은 어둠이 아니다, 여느 넘김은 어둠이다.
+        var h: H = .{};
+        defer h.deinit();
+        try swSetup(&h, 5, true);
+        h.table.noteDropKind(5, hashUrl8(u), t0, true);
+        try testing.expectEqual(std.math.maxInt(i64), h.table.tabOf(5).?.sw_dark_from);
+        h.table.noteDropKind(5, hashUrl8(u), t0 + 1, false);
+        try testing.expectEqual(t0 + 1, h.table.tabOf(5).?.sw_dark_from);
+    }
+    {
+        // W 의 기록이 몫이 차서 넘겨졌다 — P 는 그 W 를 가리키지만 짝이 없어 잇지 않는다. 같은 탭의 다른 주소 fetch 는 그대로 잇는다.
+        var h: H = .{};
+        defer h.deinit();
+        try swSetup(&h, 5, true);
+        h.table.noteDropKind(5, hashUrl8(u), t0 + 400, true);
+        try wFetch(&h, 5, 1, "7.1", u, t0 + 200, t0 + 9_000, .{});
+        try pFetch(&h, 5, "p.1", u, t0, t0 + 9_200, t0 + 9_000 + sw_wall_off, .{});
+        _ = try h.cand(5, 1501, v, t0 + 20_400, .{ .sw = true });
+        try wFetch(&h, 5, 1, "7.2", v, t0 + 20_200, t0 + 29_000, .{});
+        h.table.cefEndReceived(5, 1501, t0 + 29_500, true, 9);
+        try pFetch(&h, 5, "p.2", v, t0 + 20_000, t0 + 29_200, t0 + 29_000 + sw_wall_off, .{});
+        try swRun(&h, t0 + 30_000, t0 + 12_000_000);
+        try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.1"));
+        try testing.expectEqual(@as(?u64, 1501), fetchedFor(&h, "p.2"));
+        try testing.expectEqual(std.math.maxInt(i64), h.table.tabOf(5).?.sw_dark_from);
+    }
+    {
+        // W 의 기록이 넘겨졌고 창 안에 같은 주소의 기록이 하나 더 있다(보이지 않는 워커 fetch 의 것) — W 가 그것을 제 짝으로 가져가지 않는다.
+        var h: H = .{};
+        defer h.deinit();
+        try swSetup(&h, 5, true);
+        h.table.noteDropKind(5, hashUrl8(u), t0 + 400, true);
+        _ = try h.cand(5, 1601, u, t0 + 900, .{ .sw = true }); // 남의 것
+        try wFetch(&h, 5, 1, "7.1", u, t0 + 200, t0 + 9_000, .{});
+        h.table.cefEndReceived(5, 1601, t0 + 9_500, true, 9);
+        try pFetch(&h, 5, "p.1", u, t0, t0 + 9_200, t0 + 9_000 + sw_wall_off, .{});
+        try swRun(&h, t0 + 10_000, t0 + 12_000_000);
+        try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.1"));
+        try testing.expect(h.ended.get(1601) != null and h.ended.get(1601).? != .captured);
+    }
+}
+
+test "W9d② 재검증 5 차 S3b: 서비스 워커가 2 초 넘게 늦게 답한 페이지 요청 — 창이 지나 놓였어도 그 응답으로 되살아나 잇는다(v20f-r6 d=2500)" {
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    const u = sw_origin ++ "/slow";
+    const t0: i64 = 10_000_000;
+    try h.ev(5, .{ .will_be_sent = .{ .rid = "p.1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0, .doc = originHash(sw_origin) } }, t0 + 30);
+    // 워커는 2.5 초 뒤에 받는다 — 그동안 페이지 요청은 짝이 될 기록이 없어 놓인다.
+    try swRun(&h, t0 + 50_000, t0 + 2_600_000);
+    try testing.expectEqual(@as(?usize, null), Table.cdpIndex(h.table.tabOf(5).?, "p.1"));
+    const t1 = t0 + 2_600_000;
+    _ = try h.cand(5, 1701, u, t1 + 400, .{ .sw = true });
+    try wFetch(&h, 5, 1, "7.1", u, t1 + 200, t1 + 9_000, .{});
+    h.table.cefEndReceived(5, 1701, t1 + 9_500, true, 9);
+    try h.ev(5, .{ .response = .{ .rid = "p.1", .mime = "application/json", .from_sw = true, .charset = .other, .sw_source = "network", .ts_us = t1 + 9_200, .tau = t1 + 9_000 + sw_wall_off, .status = 200 } }, t1 + 9_230);
+    try h.ev(5, .{ .data = .{ .rid = "p.1", .bytes = 9 } }, t1 + 9_240);
+    try h.finish(5, "p.1", t1 + 9_260);
+    try swRun(&h, t1 + 10_000, t1 + 3_000_000);
+    try testing.expectEqual(@as(?u64, 1701), fetchedFor(&h, "p.1"));
 }

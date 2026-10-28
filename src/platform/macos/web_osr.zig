@@ -5379,7 +5379,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .net_redirect => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.redirect(gpa, &net_budget, v) catch {},
         .net_response => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.response(gpa, &net_budget, v) catch {},
         .net_end => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.end(v),
-        .net_dropped => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.addDropped(gpa, &net_budget, v.count) catch {},
+        .net_dropped => |v| if (surfaces.getPtr(v.browser)) |s| if (s.net_on) s.network.addDroppedKinds(gpa, &net_budget, v.count, v.sw_inflight_cap) catch {},
         // W9d②: 본문 — 이 탭에 매긴 세션의 것만(끈 뒤에 오는 옛 세션의 끝도 받는다 — 기다리던 기록의 상태를 정한다).
         // 지운 뒤(`rec_floor`)의 옛 세션 frame 은 받지 않는다(W9d② 적대 리뷰 1 회차 LOW-2). 앱 상한은 본문을 가장 많이 쥔 탭부터 낸다
         // (`makeAppBodyRoom`) — 링이 받을 조각(기다리는 기록·이어지는 오프셋·본문 상한 안)일 때만: 받지 않을 조각 때문에 다른 탭의 본문을 버리지

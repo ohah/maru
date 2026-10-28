@@ -672,7 +672,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     var detail: [4000]u8 = undefined;
     var sl: [400]u8 = undefined;
     var lb: [4000]u8 = undefined;
-    const log_env: []const [*:0]const u8 = if (std.c.getenv("MARU_WEB_TEST_BODY_LOG") != null) &.{"MARU_WEB_TEST_BODY_LOG=1"} else &.{};
+    // 재검증 5 차 S3b: 서비스 워커 잇기의 까닭 줄만(`MARU_WEB_TEST_SW_NOTES` — 사건마다의 줄 없이).
+    const sw_notes_env = std.c.getenv("MARU_WEB_TEST_SW_NOTES") != null;
+    const log_env: []const [*:0]const u8 = if (std.c.getenv("MARU_WEB_TEST_BODY_LOG") != null and sw_notes_env) &.{ "MARU_WEB_TEST_BODY_LOG=1", "MARU_WEB_TEST_SW_NOTES=1" } else if (std.c.getenv("MARU_WEB_TEST_BODY_LOG") != null) &.{"MARU_WEB_TEST_BODY_LOG=1"} else if (sw_notes_env) &.{"MARU_WEB_TEST_SW_NOTES=1"} else &.{};
     var host = try Host.spawnWith(host_path, profile_arg, null, log_env);
     var host_alive = true;
     defer if (host_alive) {
@@ -855,6 +857,11 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
 
     // ══ r6: 서비스 워커 ══
     if (enabled("r6")) {
+        // 재검증 5 차 S3b: 새 기록 세션으로 — 앞 항목(r4 의 IO 부하)이 넘김 상자를 넘쳐 그 기록 세션은 어둠이다(C3b′ — 기록을 다시 켤 때까지
+        // 서비스 워커 본문을 잇지 않는다; 실측: r4 뒤의 r6 은 mod·post 모두 ambiguous 20, r6 만이면 captured 20).
+        session += 1;
+        try r.host.send(.{ .net_record = .{ .browser = rec_tab, .on = true, .session = session } });
+        r.pump(300);
         const at = r.begins.items.len;
         try r.navigate(rec_tab, "/v20/sw/p");
         const done = r.pumpTitle(rec_tab, "swdone", 40_000);
@@ -865,7 +872,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         };
         inline for (.{ .{ "/v20/sw/fail", "v20a-r6-sw-network-fail-fallback" }, .{ "/v20/sw/mod", "v20a-r6-sw-modified-request-passthrough" }, .{ "/v20/sw/post", "v20a-r6-sw-post-passthrough" }, .{ "/v20/sw/wrap", "v20a-r6-sw-rewrapped-response" }, .{ "/v20/sw/x", "v20a-r6-sw-respond-with-other-url" }, .{ "/v20/sw/y", "v20a-r6-sw-other-url-direct" } }) |c| {
             const t = tally(&r, rec_tab, at, c[0], null);
-            report(done and t.wrong == 0 and t.sw_captured == 0 and t.no_end == 0 and t.multi_end == 0 and fb_leak == 0, c[1], std.fmt.bufPrint(&detail, "{s} · FALLBACK bodies sent {d}", .{ lineOf(&t, &lb, &sl), fb_leak }) catch "");
+            // 재검증 5 차 S3b: 그대로 넘긴 것(mod·post)과 페이지도 받은 다른 주소(y)는 서비스 워커 fetch 의 기록에 잇는다 — 실측 20/20(아래 끝 18).
+            const want_sw: usize = if (comptime std.mem.eql(u8, c[0], "/v20/sw/mod") or std.mem.eql(u8, c[0], "/v20/sw/post") or std.mem.eql(u8, c[0], "/v20/sw/y")) 18 else 0;
+            report(done and t.wrong == 0 and t.sw_captured >= want_sw and t.no_end == 0 and t.multi_end == 0 and fb_leak == 0, c[1], std.fmt.bufPrint(&detail, "{s} · FALLBACK bodies sent {d}", .{ lineOf(&t, &lb, &sl), fb_leak }) catch "");
         }
     }
 

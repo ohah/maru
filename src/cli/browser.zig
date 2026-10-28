@@ -2063,6 +2063,7 @@ fn renderNetwork(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.
     if (intField(result.get("hidden_before_grant"))) |n| if (n > 0) try w.print("({d} earlier request{s} hidden — made before your permission)\n", .{ n, if (n == 1) "" else "s" });
     if (intField(result.get("hidden_other_site_pages"))) |n| if (n > 0) try w.print("({d} request{s} hidden — made while the tab showed a site your permission does not cover)\n", .{ n, if (n == 1) "" else "s" });
     if (intField(result.get("dropped"))) |n| if (n > 0) try w.print("({d} request{s} not recorded — the page made them faster than maru keeps)\n", .{ n, if (n == 1) "" else "s" });
+    if (intField(result.get("dropped_sw_inflight_cap"))) |n| if (n > 0) try w.print("({d} service-worker request{s} not recorded — sw_inflight_cap: while recording, the site's service workers held too many unfinished fetches)\n", .{ n, if (n == 1) "" else "s" });
     if (intField(result.get("cross_site_iframe_hidden"))) |n| if (n > 0) try w.print("({d} request{s} from cross-site iframes hidden — browser.agent-network-full is off)\n", .{ n, if (n == 1) "" else "s" });
     if (intField(result.get("service_worker_shared_hidden"))) |n| if (n > 0) try w.print("({d} service-worker request{s} hidden — a tab without permission shows the same site and browser.agent-network-full is off)\n", .{ n, if (n == 1) "" else "s" });
     // 커서가 있으면 그것을 권한다 — 새 요청이 와도 다음 쪽이 밀리지 않는다(F7).

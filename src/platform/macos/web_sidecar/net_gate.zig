@@ -31,6 +31,11 @@ pub const max_in_flight: usize = 512;
 /// 탭 하나가 쥘 수 있는 몫(W9d① 적대 리뷰 1 회차 F9 — 끝나지 않는 요청을 쏟는 탭 하나가 512 를 다 쥐면 다른 지켜보는 탭과 서비스 워커
 /// 요청이 아무것도 적히지 않았다). 넷이 모여야 전체가 찬다.
 pub const max_in_flight_per_tab: usize = 128;
+/// 재검증 5 차 S3b(사용자 결정 (B) 2026-10-28): 서비스 워커 갈래 요청(브라우저가 없는 요청)의 몫 — 페이지 요청의 `max_in_flight`·
+/// `max_in_flight_per_tab` 을 차지하지 않는다. 기록하는 동안 maru 의 DevTools 가 서비스 워커를 붙잡아 두어 워커가 본문을 읽지 않은 fetch 는
+/// 기록 중 끝나지 않는다(실측: 판정 v20fa 의 갱신 fetch 가 사례마다 20 개씩 남아 128 에 닿자 그 탭의 페이지 요청까지 적히지 않았다). 몫이
+/// 차면 그 뒤 서비스 워커 갈래 요청은 적지 않고 수만 센다(`Watch.dropped_sw_cap` — maru 의 `dropped_sw_inflight_cap`).
+pub const max_sw_in_flight: usize = 128;
 /// IO → UI 넘김 상자의 상한 — 개수와 바이트. 넘치면 그 기록은 버리고 수를 센다.
 pub const max_queue_events: usize = 4096;
 pub const max_queue_bytes: usize = 8 * 1024 * 1024;
@@ -45,7 +50,8 @@ pub const max_drop_marks: usize = 256;
 
 /// W9d②: 놓친 시작 하나(붙일 탭·온 주소의 해시·IO 시각 — 잠금 아래에서 찍는다: 표지의 차례가 시각의 차례라 물 높이가 남은 표지의 가장 이른
 /// 시각으로 정해진다, W9d② 적대 리뷰 3 회차).
-pub const DropMark = struct { browser: BrowserId, url_hash: u64, t_us: i64 };
+/// `sw_cap` — 서비스 워커 몫이 차서 넘긴 것(본문 표는 그 창의 같은 주소 짝만 모호하게 치고 탭 전체를 어둠으로 치지 않는다).
+pub const DropMark = struct { browser: BrowserId, url_hash: u64, t_us: i64, sw_cap: bool = false };
 
 /// W9d② 적대 리뷰 5 회차 C1: 넘김 상자가 넘쳐 버린 시작 아닌 기록(리다이렉트·응답·끝)의 표지 자리 — 넘치면 그 탭은 넘침으로(그 탭의 짝 없는
 /// 후보 모두 — `net_body_table.cefLostAll`).
@@ -92,6 +98,8 @@ pub const Watch = struct {
     in_flight: u16 = 0,
     /// 문에서 넘긴 수(UI 스레드가 `net_dropped` 로 보내고 비운다).
     dropped: u32 = 0,
+    /// 재검증 5 차 S3b (B): 서비스 워커 몫(`max_sw_in_flight`)이 차서 넘긴 서비스 워커 갈래 요청 수(붙일 탭마다 — `net_dropped.sw_inflight_cap`).
+    dropped_sw_cap: u32 = 0,
     /// 켤 때마다 새 값(W9d① 적대 리뷰 2 회차 N4) — 요청이 이 값을 쥐고, 껐다 켠 뒤 끝나는 옛 요청은 새 지켜보기의 몫을 돌려받지 않는다.
     generation: u32 = 0,
 
@@ -176,10 +184,11 @@ pub const Track = struct {
 };
 
 /// `State.admitServiceWorker` 의 답 — 그 출처를 연 지켜보는 탭 수와 문을 지났는가.
-pub const ServiceWorkerAdmit = struct { targets: usize, admitted: bool };
+/// `cap` — 서비스 워커 몫이 차서 넘겼다(`max_sw_in_flight`).
+pub const ServiceWorkerAdmit = struct { targets: usize, admitted: bool, cap: bool = false };
 
 /// `State.startServiceWorker` 의 답 — 붙일 탭 수와 잡은 자리(못 잡았으면 null).
-pub const ServiceWorkerStart = struct { targets: usize, track: ?*Track };
+pub const ServiceWorkerStart = struct { targets: usize, track: ?*Track, cap: bool = false };
 
 pub const State = struct {
     watches: [capacity]Watch = @splat(.{}),
@@ -191,8 +200,10 @@ pub const State = struct {
     sw_path: Bucket = .{ .tokens = global_burst },
     /// 지켜보기를 켤 때마다 오른다(`Watch.generation`).
     next_generation: u32 = 0,
-    tracks: [max_in_flight]Track = @splat(.{}),
+    tracks: [max_in_flight + max_sw_in_flight]Track = @splat(.{}),
+    /// 페이지 요청(탭 몫)의 수 — 서비스 워커 갈래 요청은 `sw_in_flight`.
     in_flight: usize = 0,
+    sw_in_flight: usize = 0,
     queue_events: usize = 0,
     queue_bytes: usize = 0,
     /// W9d②: 놓친 시작의 표지(본문 표가 그 창의 같은 주소 짝을 모호하게 친다 — `net_body_table.noteDrop`). 넘치면 그 탭을 `drop_marks_overflowed` 에.
@@ -307,10 +318,25 @@ pub const State = struct {
         return true;
     }
 
-    /// 서비스 워커 길의 양동이와 동시 요청 수 — `admitServiceWorker` 가 출처를 맞춘 뒤에만 부른다.
+    /// 서비스 워커 길의 양동이와 동시 요청 수 — `admitServiceWorker` 가 출처를 맞춘 뒤에만 부른다. 재검증 5 차 (B): 동시 요청은 서비스 워커 몫
+    /// (`max_sw_in_flight`)만 본다 — 페이지 요청이 몫을 다 써도 닫히지 않고, 서비스 워커 갈래가 몫을 다 써도 페이지 요청은 닫히지 않는다.
     pub fn admitServiceWorkerPath(self: *State, now_us: i64) bool {
-        if (self.in_flight >= max_in_flight) return false;
+        if (self.sw_in_flight >= max_sw_in_flight) return false;
         return self.sw_path.take(global_rate, global_burst, now_us);
+    }
+
+    /// 탭·전체의 초당 양동이만(동시 요청 수는 보지 않는다 — 서비스 워커 갈래는 제 몫이 있다).
+    fn admitRate(self: *State, w: *Watch, now_us: i64) bool {
+        if (!w.bucket.take(tab_rate, tab_burst, now_us)) {
+            w.dropped +|= 1;
+            return false;
+        }
+        if (!self.global.take(global_rate, global_burst, now_us)) {
+            w.bucket.refund(tab_burst);
+            w.dropped +|= 1;
+            return false;
+        }
+        return true;
     }
 
     /// 서비스 워커 요청(브라우저가 없는 요청)의 문(IO 스레드) — `initiator` 는 앞부분만 바꾼 출처. 그 출처를 연 지켜보는 탭을 `out` 에 채우고
@@ -320,11 +346,18 @@ pub const State = struct {
         const n = self.serviceWorkerTargets(initiator, out);
         if (n == 0) return .{ .targets = 0, .admitted = false };
         const first = self.watchOf(out[0]) orelse return .{ .targets = 0, .admitted = false };
+        if (self.sw_in_flight >= max_sw_in_flight) {
+            // 재검증 5 차 (B): 서비스 워커 몫이 찼다 — 붙일 탭마다 따로 센다(잃은 까닭 `sw_inflight_cap`).
+            for (out[0..n]) |b| if (self.watchOf(b)) |w| {
+                w.dropped_sw_cap +|= 1;
+            };
+            return .{ .targets = n, .admitted = false, .cap = true };
+        }
         if (!self.admitServiceWorkerPath(now_us)) {
             self.countServiceWorkerDrop(out[0..n], null);
             return .{ .targets = n, .admitted = false };
         }
-        if (!self.admit(first, now_us)) {
+        if (!self.admitRate(first, now_us)) {
             self.sw_path.refund(global_burst); // 거절한 요청은 이 길의 몫을 쓰지 않았다(W9d① 적대 리뷰 3 회차 S1)
             self.countServiceWorkerDrop(out[0..n], first); // 첫 탭은 `admit` 이 셌다
             return .{ .targets = n, .admitted = false };
@@ -351,9 +384,9 @@ pub const State = struct {
     /// 거절하면 쓴 몫(이 길·첫 탭·전체)을 모두 되돌리고 붙일 탭마다 넘긴 수를 센다(S1 — 전에는 첫 탭만 셌고 몫은 그대로 썼다).
     pub fn startServiceWorker(self: *State, initiator: []const u8, request: u64, now_us: i64, out: *[max_targets]BrowserId) ServiceWorkerStart {
         const a = self.admitServiceWorker(initiator, now_us, out);
-        if (!a.admitted) return .{ .targets = a.targets, .track = null };
+        if (!a.admitted) return .{ .targets = a.targets, .track = null, .cap = a.cap };
         const first = self.watchOf(out[0]).?; // `admitServiceWorker` 가 방금 찾았다(같은 잠금)
-        const t = self.track(request, first) orelse {
+        const t = self.trackServiceWorker(request, first) orelse {
             self.sw_path.refund(global_burst);
             first.bucket.refund(tab_burst);
             self.global.refund(global_burst);
@@ -401,8 +434,20 @@ pub const State = struct {
         return null;
     }
 
+    /// 재검증 5 차 (B): 서비스 워커 갈래 요청의 자리 — 서비스 워커 몫으로 센다(탭 몫·페이지 전체 몫은 쓰지 않는다). 꽉 찼으면 null.
+    pub fn trackServiceWorker(self: *State, request: u64, first: *Watch) ?*Track {
+        if (self.find(request)) |t| return t;
+        if (self.sw_in_flight >= max_sw_in_flight) return null;
+        for (&self.tracks) |*t| if (t.request == 0) {
+            t.* = .{ .request = request, .owner = first.browser, .owner_generation = first.generation, .service_worker = true };
+            self.sw_in_flight += 1;
+            return t;
+        };
+        return null;
+    }
+
     pub fn find(self: *State, request: u64) ?*Track {
-        if (request == 0 or self.in_flight == 0) return null;
+        if (request == 0 or self.in_flight + self.sw_in_flight == 0) return null;
         for (&self.tracks) |*t| if (t.request == request) return t;
         return null;
     }
@@ -411,6 +456,11 @@ pub const State = struct {
     /// (적대 리뷰 2 회차 N4 — 옛 요청이 끝나며 새 몫을 깎아 탭이 128 을 넘겨 쥐었다).
     pub fn untrack(self: *State, t: *Track) void {
         if (t.request == 0) return;
+        if (t.service_worker) {
+            t.* = .{};
+            self.sw_in_flight -|= 1;
+            return;
+        }
         if (self.watchOf(t.owner)) |w| if (w.generation == t.owner_generation) {
             w.in_flight -|= 1;
         };
@@ -434,9 +484,14 @@ pub const State = struct {
     /// W9d②: 놓친 시작의 표지를 붙일 탭마다 남긴다(`url_hash` — 온 주소의 해시, `t_us` — 잠금 아래에서 찍은 IO 시각). 자리가 없으면 그 탭은
     /// 넘침으로(본문 표가 그 시각까지의 창을 모두 모호하게 친다 — 잊은 표지가 짝을 맞게 보이게 하지 않는다).
     pub fn markDrop(self: *State, targets: []const BrowserId, url_hash: u64, t_us: i64) void {
+        self.markDropKind(targets, url_hash, t_us, false);
+    }
+
+    /// `sw_cap` — 서비스 워커 몫이 차서 넘긴 것(`DropMark.sw_cap`).
+    pub fn markDropKind(self: *State, targets: []const BrowserId, url_hash: u64, t_us: i64, sw_cap: bool) void {
         for (targets) |b| {
             if (self.drop_mark_len < max_drop_marks) {
-                self.drop_marks[self.drop_mark_len] = .{ .browser = b, .url_hash = url_hash, .t_us = t_us };
+                self.drop_marks[self.drop_mark_len] = .{ .browser = b, .url_hash = url_hash, .t_us = t_us, .sw_cap = sw_cap };
                 self.drop_mark_len += 1;
             } else for (&self.drop_marks_overflowed) |*o| if (o.* == 0 or o.* == b) {
                 o.* = b;
@@ -733,8 +788,11 @@ test "W9d① 적대 리뷰 1 회차 곁가지: 서비스 워커 길의 양동이
     }
     try testing.expectEqual(@as(usize, @intFromFloat(global_burst)), ok);
     try testing.expect(s.admitServiceWorkerPath(1_001_000)); // 1 ms 뒤 두 개가 찬다
+    // 재검증 5 차 (B): 페이지 요청의 몫이 차도 서비스 워커 길은 열려 있고, 서비스 워커 몫이 차면 닫힌다.
     s.in_flight = max_in_flight;
-    try testing.expect(!s.admitServiceWorkerPath(5_000_000));
+    try testing.expect(s.admitServiceWorkerPath(5_000_000));
+    s.sw_in_flight = max_sw_in_flight;
+    try testing.expect(!s.admitServiceWorkerPath(6_000_000));
 }
 
 // ── W9d① 적대 리뷰 2 회차 재현(리뷰가 남긴 R9d2-G1·G2 — 붙여 실패를 본 뒤 고쳤다. G2 는 출처를 받는 새 문으로 옮겼다) ──
@@ -990,4 +1048,53 @@ test "W9d② 20 회 검증 1 회차 D1: 리다이렉트·응답은 시작의 첫
     // 묶인 grant 만 있는 탭은 첫 사이트와 무관하다(그대로).
     try testing.expect(s.setWatch(2, 12, true, false, false, &.{"shop.test"}));
     try testing.expectEqual(@as(u8, 0), s.stamp(&.{2}, "127.0.0.1", "127.0.0.1").covered);
+}
+
+test "W9d② 재검증 5 차 S3b (B): 서비스 워커 몫은 따로 — 워커가 끝내지 않는 fetch 로 몫을 다 써도 그 탭의 페이지 요청은 적히고, 몫이 차면 그 뒤 워커 갈래 요청은 붙일 탭마다 따로 센다(넘김 표지는 sw_cap), 끝나면 몫이 돌아온다" {
+    var s: State = .{};
+    try testing.expect(s.setWatch(1, 11, true, true, false, &.{}));
+    try testing.expect(s.setWatch(2, 12, true, true, false, &.{}));
+    s.setTopOrigin(1, "https://sw.test");
+    s.setTopOrigin(2, "https://sw.test");
+    var out: [max_targets]BrowserId = undefined;
+    var now: i64 = 1_000_000;
+    var r: u64 = 1;
+    // 워커가 본문을 읽지 않는 fetch 를 끝없이 연다 — 몫(128)에서 멈춘다.
+    var held: usize = 0;
+    for (0..1000) |_| {
+        const a = s.startServiceWorker("https://sw.test", r, now, &out);
+        if (a.track != null) held += 1;
+        r += 1;
+        now += 20_000;
+    }
+    try testing.expectEqual(max_sw_in_flight, held);
+    try testing.expectEqual(max_sw_in_flight, s.sw_in_flight);
+    try testing.expectEqual(@as(usize, 0), s.in_flight);
+    try testing.expectEqual(@as(u16, 0), s.watchByCef(11).?.in_flight); // 탭 몫은 그대로
+    try testing.expectEqual(@as(u32, 1000 - max_sw_in_flight), s.watchByCef(11).?.dropped_sw_cap);
+    try testing.expectEqual(@as(u32, 1000 - max_sw_in_flight), s.watchByCef(12).?.dropped_sw_cap);
+    try testing.expectEqual(@as(u32, 0), s.watchByCef(11).?.dropped); // 다른 까닭의 넘김과 섞이지 않는다
+    const capped = s.startServiceWorker("https://sw.test", r, now, &out);
+    try testing.expect(capped.track == null and capped.cap and capped.targets == 2);
+    // 그 탭의 페이지 요청은 여전히 적힌다(탭 몫 128 을 다 쓸 때까지).
+    const w = s.watchByCef(11).?;
+    var pages: usize = 0;
+    for (0..max_in_flight_per_tab) |_| {
+        if (s.startTab(w, r, now)) |_| pages += 1;
+        r += 1;
+        now += 20_000;
+    }
+    try testing.expectEqual(max_in_flight_per_tab, pages);
+    // 워커 요청 하나가 끝나면 몫이 돌아온다.
+    s.untrack(s.find(1).?);
+    try testing.expectEqual(max_sw_in_flight - 1, s.sw_in_flight);
+    try testing.expect(s.startServiceWorker("https://sw.test", r, now, &out).track != null);
+    // 넘김 표지의 종류.
+    s.markDropKind(&.{1}, 0x9, 7, true);
+    s.markDrop(&.{1}, 0xa, 8);
+    var marks: [max_drop_marks]DropMark = undefined;
+    var over: [max_targets]BrowserId = undefined;
+    const n = s.takeDropMarks(&marks, &over);
+    try testing.expectEqual(@as(usize, 2), n);
+    try testing.expect(marks[0].sw_cap and !marks[1].sw_cap);
 }

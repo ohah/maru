@@ -331,6 +331,13 @@ pub const Reason = enum {
     record_failed,
     /// C0 — 다른 출처 문서의 요청.
     frame_origin,
+    /// 진단(표의 W 판정) — 워커 W 의 짝을 의심했다: 다른 타깃·두 맞추기 갈림·물 높이 시한·실패한 요청이 쥔 기록·뒤 요청의 기록 기다림 시한·그 밖.
+    w_cross_target,
+    w_split,
+    w_late,
+    w_held,
+    w_pending_split,
+    w_doubt,
 };
 
 pub const Verdict = union(enum) {

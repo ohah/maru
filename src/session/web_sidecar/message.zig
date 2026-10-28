@@ -1299,8 +1299,11 @@ pub const NetEnd = struct {
 
 pub const NetDropped = struct {
     browser: BrowserId,
-    /// 0 이 아니다.
+    /// 문이 넘긴 요청 수(쏟아짐·동시 요청 상한·넘김 상자). `count` 와 `sw_inflight_cap` 이 둘 다 0 은 아니다.
     count: u32,
+    /// W9d② 재검증 5 차 (B): 서비스 워커 몫(sidecar `net_gate.max_sw_in_flight`)이 차서 적지 않은 서비스 워커 갈래 요청 수 — 기록 중 maru 가
+    /// 붙잡아 둔 서비스 워커가 본문을 읽지 않은 fetch 는 끝나지 않아 몫을 쥔다(maru 의 `dropped_sw_inflight_cap`).
+    sw_inflight_cap: u32 = 0,
 };
 
 pub const NetWatch = struct {

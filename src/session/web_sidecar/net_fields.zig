@@ -408,14 +408,15 @@ pub fn readEnd(cursor: *ReadCursor) Error!message.NetEnd {
 }
 
 pub fn writeDropped(cursor: *Cursor, v: message.NetDropped) Error!void {
-    if (v.count == 0) return error.InvalidNetwork;
+    if (v.count == 0 and v.sw_inflight_cap == 0) return error.InvalidNetwork;
     try fields.writeBrowser(cursor, v.browser);
     try cursor.writeU32(v.count);
+    try cursor.writeU32(v.sw_inflight_cap);
 }
 
 pub fn readDropped(cursor: *ReadCursor) Error!message.NetDropped {
-    const v: message.NetDropped = .{ .browser = try fields.readBrowser(cursor), .count = try cursor.readU32() };
-    if (v.count == 0) return error.InvalidNetwork;
+    const v: message.NetDropped = .{ .browser = try fields.readBrowser(cursor), .count = try cursor.readU32(), .sw_inflight_cap = try cursor.readU32() };
+    if (v.count == 0 and v.sw_inflight_cap == 0) return error.InvalidNetwork;
     return v;
 }
 

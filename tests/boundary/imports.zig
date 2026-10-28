@@ -1309,6 +1309,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             .containers = &.{ "Client", "EndedPurgeScratch", "PreparedEndedPurgeInventory" },
             .optional_containers = &.{ "PreparedEndedPurgeCommit", "ClientOperationFence" },
             .allowed = &.{
+                // Upgrade recovery adds a deadline-aware status entry and its shared guarded implementation.
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "upgradeStatusUntil" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "upgradeStatusWithDeadline" },
                 // Retirement validates retained catchup backing separately from fresh adoption.
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightRetirementDestination" },
                 // 이미지 채널 앱 쪽 수립(IC2b, 2026-10-11): 채널 모듈 import, Client 의 채널 필드, hello_ack 뒤 수립·abandon 한 곳,

@@ -369,6 +369,11 @@ fn serveOne(conn: c_int) void {
         "if(w=='p1'){e.respondWith(new Promise(function(res){setTimeout(function(){res(fetch(e.request))},d)}));return}" ++
         "if(w=='a1'){e.respondWith(fetch(u.href+'&alt=1',{headers:{'x-who':'A'},cache:'no-store'}));return}" ++
         "if(w=='a3'){fetch(u.href,{headers:{'x-who':'X'},cache:'no-store'}).catch(function(){});e.respondWith(fetch(u.href+'&alt=1',{headers:{'x-who':'A'},cache:'no-store'}));return}" ++
+        // v20k(검증자): m1 은 그대로 넘기며 응답을 메모리에 남기고, m2 는 그 남긴 응답(출처 network)으로 답하며 같은 주소를 갱신 fetch(X)로 받는다 —
+        // m2e 는 갱신을 먼저, m2l 은 답한 뒤 80 ms 에. f1 은 제 주소를 받은 뒤 다른 주소(&fb=1 — F)로 답한다(실패 대체 꼴).
+        "if(w=='m1'){e.respondWith(fetch(e.request).then(function(r){self.M=self.M||{};self.M[u.href]=r.clone();return r}));return}" ++
+        "if(w=='m2e'||w=='m2l'){var c=(self.M||{})[u.href];if(c){var g=function(){return fetch(u.href,{headers:{'x-who':'X'},cache:'no-store'}).catch(function(){})};if(w=='m2e')g();else setTimeout(g,80);e.respondWith(c.clone());return}}" ++
+        "if(w=='f1'){e.respondWith(fetch(e.request).then(function(r){return r.text().then(function(){return fetch(u.href+'&fb=1',{headers:{'x-who':'F'},cache:'no-store'})})}));return}" ++
         "e.respondWith(fetch(e.request))})");
     if (std.mem.eql(u8, path, "/v20j/sw/x")) return data(conn, head, qnum(target, "s="), 0);
     // 검증자 v20j A(조정자 요청): `--network` 의 body-r4-sw-mixed 꼴 — 같은 주소를 서비스 워커가 놓음(fb)·그대로 넘김(pt) 섞어 한꺼번에(fb·pt·fb·pt).
@@ -379,6 +384,12 @@ fn serveOne(conn: c_int) void {
         "function reg(next){navigator.serviceWorker.register('/v20j/mx/sw.js',{scope:'/v20j/mx/'}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}setTimeout(next,200)})}" ++
         "var P=new URLSearchParams(location.search);var K=P.get('k')||'';var k=0;function step(){if(k>=20){document.title='mxdone';return}var u='/v20j/mx/pt?'+K+'_'+k;k++;" ++
         "F(u,{headers:{'x-mode':'fb','x-who':'fb'}});F(u,{headers:{'x-who':'pt'}});F(u,{headers:{'x-mode':'fb','x-who':'fb'}});F(u,{headers:{'x-who':'pt'}});setTimeout(step,200)}reg(step)</script>mx");
+    if (std.mem.eql(u8, path, "/v20j/sw/q")) return reply(conn, html, "<!doctype html><title>swq</title><script>" ++ read_js ++
+        "function reg(next){navigator.serviceWorker.register('/v20j/sw/sw.js',{scope:'/v20j/sw/'}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}setTimeout(next,300)})}" ++
+        "var P=new URLSearchParams(location.search);var S=+(P.get('s')||0);var K=P.get('k')||'';var R=+(P.get('r')||20);var MO=P.get('mo')||'m2e';var j=0;" ++
+        "function step(){if(j>=R){setTimeout(function(){document.title='swqdone'},1500);return}var u='/v20j/sw/x?k='+K+'_'+j+'&s='+S;j++;" ++
+        "if(MO=='fb'){W(u,'f1');W(u+'&fb=1','pf');setTimeout(step,2*S+800);return}" ++
+        "W(u,'m1').then(function(){setTimeout(function(){W(u,MO)},300)});setTimeout(step,2*S+1200)}reg(step)</script>swq");
     if (std.mem.eql(u8, path, "/v20j/sw/p")) return reply(conn, html, "<!doctype html><title>swj</title><script>" ++ read_js ++
         "function reg(next){navigator.serviceWorker.register('/v20j/sw/sw.js',{scope:'/v20j/sw/'}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}setTimeout(next,300)})}" ++
         "var P=new URLSearchParams(location.search);var D=+(P.get('d')||0);var S=+(P.get('s')||0);var K=P.get('k')||'';var R=+(P.get('r')||20);var FW=P.get('f')||'p1';var j=0;" ++
@@ -455,6 +466,8 @@ const Body = struct {
     ct_visible: bool = false,
     redirects: usize = 0,
     redirect_ct_hidden: usize = 0,
+    /// 재검증 5 차 S0: CEF 의 끝(`net_end`)을 봤다 — 끝나지 않은 요청의 본문은 `pending` 이 참이다.
+    cef_end: bool = false,
 };
 
 const Run = struct {
@@ -531,6 +544,9 @@ const Run = struct {
                 b.data_session_max = @max(b.data_session_max, v.session);
                 if (b.ends > 0) b.data_after_end += 1;
                 if (v.offset == b.data.items.len) b.data.appendSlice(self.gpa, v.bytes) catch {} else b.gap = true;
+            },
+            .net_end => |v| {
+                self.body(v.browser, v.request).cef_end = true;
             },
             .net_body_end => |v| {
                 const b = self.body(v.browser, v.request);
@@ -610,6 +626,8 @@ const Tally = struct {
     no_end: usize = 0,
     multi_end: usize = 0,
     after_end: usize = 0,
+    /// 재검증 5 차 S0: 서비스 워커 갈래(`NetFlags.service_worker`) 기록에 붙은 본문 수.
+    sw_captured: usize = 0,
     states: [16]usize = @splat(0),
     notes: [900]u8 = undefined,
     notes_len: usize = 0,
@@ -642,6 +660,7 @@ fn tally(r: *Run, browser: u64, at: usize, needle: []const u8, who: ?[]const u8)
         if (b.expected and x.ends == 0) t.no_end += 1;
         if (x.ends > 1) t.multi_end += 1;
         t.after_end += x.data_after_end;
+        if (x.ends >= 1 and x.state == .captured and b.flags.service_worker) t.sw_captured += 1;
         if (x.ends >= 1 and x.state == .captured) {
             if (x.xbody.len == 0) {
                 t.unknown += 1;
@@ -672,12 +691,18 @@ fn stateLine(t: *const Tally, buf: []u8) []const u8 {
 }
 
 fn lineOf(t: *const Tally, buf: []u8, sl: []u8) []const u8 {
-    return std.fmt.bufPrint(buf, "CEF requests {d} (body_expected {d}) · own {d} · WRONG {d} · captured w/o X-Body {d} · ambiguous {d} · other {d} · no end {d} · several ends {d} · data after end {d} · states{s} ·{s}", .{ t.total, t.expected, t.own, t.wrong, t.unknown, t.ambiguous, t.other, t.no_end, t.multi_end, t.after_end, stateLine(t, sl), t.notes[0..t.notes_len] }) catch "";
+    return std.fmt.bufPrint(buf, "CEF requests {d} (body_expected {d}) · own {d} (sw {d}) · WRONG {d} · captured w/o X-Body {d} · ambiguous {d} · other {d} · no end {d} · several ends {d} · data after end {d} · states{s} ·{s}", .{ t.total, t.expected, t.own, t.sw_captured, t.wrong, t.unknown, t.ambiguous, t.other, t.no_end, t.multi_end, t.after_end, stateLine(t, sl), t.notes[0..t.notes_len] }) catch "";
 }
 
 /// 기대한 시작(body_expected)마다 끝이 꼭 하나인가 — `at` 부터 그 탭의 것.
 const EndCheck = struct { expected: usize = 0, missing: usize = 0, doubled: usize = 0, after_end: usize = 0, states: [16]usize = @splat(0) };
 fn endCheck(r: *Run, browser: u64, at: usize) EndCheck {
+    return endCheckOf(r, browser, at, false);
+}
+
+/// 재검증 5 차 S0: `ended_only` 면 CEF 가 끝내지 않은 요청(워커가 받은 응답을 읽지 않고 쥔 갱신 fetch — 그 요청은 정말 끝나지 않았다, 본문은
+/// `pending`)은 「끝 없음」 으로 세지 않는다.
+fn endCheckOf(r: *Run, browser: u64, at: usize, ended_only: bool) EndCheck {
     var c: EndCheck = .{};
     var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
     defer seen.deinit(r.gpa);
@@ -686,7 +711,7 @@ fn endCheck(r: *Run, browser: u64, at: usize) EndCheck {
         seen.put(r.gpa, b.request, {}) catch {};
         c.expected += 1;
         const x = r.body(browser, b.request);
-        if (x.ends == 0) c.missing += 1;
+        if (x.ends == 0 and (!ended_only or x.cef_end)) c.missing += 1;
         if (x.ends > 1) c.doubled += 1;
         c.after_end += x.data_after_end;
         if (x.ends >= 1) c.states[@backingInt(x.state)] += 1;
@@ -1044,7 +1069,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         var ok = done;
         inline for (.{ "/v20f/sw/dl?d=0&", "/v20f/sw/dl?d=1500&", "/v20f/sw/dl?d=2500&" }) |nd| {
             const t = tally(&r, rec_tab, at, nd, null);
-            if (t.wrong != 0 or t.no_end != 0 or t.multi_end != 0) ok = false;
+            if (t.wrong != 0 or t.sw_captured != 0 or t.no_end != 0 or t.multi_end != 0) ok = false; // 5 차 S0: 서비스 워커 갈래는 본문 없이
             const piece = std.fmt.bufPrint(detail[dn..], " [{s}: {s}]", .{ nd, lineOf(&t, &lb, &sl) }) catch "";
             dn += piece.len;
         }
@@ -1364,7 +1389,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             const ec = endCheck(&r, rec_tab, at);
             var el: [600]u8 = undefined;
             var sl2: [400]u8 = undefined;
-            report(done and all.wrong == 0 and ec.missing == 0 and ec.doubled == 0, "v20i-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 700)] }) catch "");
+            report(done and all.wrong == 0 and all.sw_captured == 0 and ec.missing == 0 and ec.doubled == 0, "v20i-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 700)] }) catch "");
             try r.navigate(rec_tab, "/v20/blank?swi");
             r.pump(2000);
         };
@@ -1391,8 +1416,35 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             const ec = endCheck(&r, rec_tab, at);
             var el: [600]u8 = undefined;
             var sl2: [400]u8 = undefined;
-            report(done and all.wrong == 0 and ec.missing == 0 and ec.doubled == 0, "v20j-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
+            report(done and all.wrong == 0 and all.sw_captured == 0 and ec.missing == 0 and ec.doubled == 0, "v20j-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
             try r.navigate(rec_tab, "/v20/blank?swj");
+            r.pump(2000);
+        };
+        // 검증자 v20k: 메모리에 남긴 응답으로 답하며 같은 주소를 갱신(m2e·m2l), 제 주소를 받은 뒤 다른 주소로 답하고 그 주소를 페이지도 받음(fb).
+        inline for (.{ .{ "swmemo-e-s0", "0", "m2e" }, .{ "swmemo-e-s300", "300", "m2e" }, .{ "swmemo-l-s0", "0", "m2l" }, .{ "swfb-s0", "0", "fb" }, .{ "swfb-s300", "300", "fb" } }) |c| if (enabled("v20k-" ++ c[0])) {
+            session += 1;
+            try r.host.send(.{ .net_record = .{ .browser = rec_tab, .on = true, .session = session } });
+            r.pump(300);
+            const at = r.begins.items.len;
+            var pb: [128]u8 = undefined;
+            try r.navigate(rec_tab, std.fmt.bufPrint(&pb, "/v20j/sw/q?k={s}x{d}&s={s}&mo={s}&r=20", .{ c[0], session, c[1], c[2] }) catch "");
+            const done = r.pumpTitle(rec_tab, "swqdone", 120_000);
+            r.pump(2000);
+            var waited: u32 = 0;
+            while (waited < 10_000 and endCheck(&r, rec_tab, at).missing > 0) : (waited += 500) r.pump(500);
+            const all = tally(&r, rec_tab, at, "/v20j/sw/x?", null);
+            var line: [5][200]u8 = @splat(@splat(0));
+            for ([_][]const u8{ "m1", "X", "f1", "F", "pf" }, 0..) |w, wi| {
+                const t = tally(&r, rec_tab, at, "/v20j/sw/x?", w);
+                var s3: [200]u8 = undefined;
+                _ = std.fmt.bufPrint(line[wi][0..199], "{s}: {d} own {d} amb {d} wrong {d}{s}", .{ w, t.total, t.own, t.ambiguous, t.wrong, stateLine(&t, &s3) }) catch "";
+            }
+            // 재검증 5 차 S0: m2l 의 갱신 fetch 는 워커가 응답을 읽지 않고 쥔다 — CEF 가 끝내지 않아 그 본문은 `pending` 이 참(끝 없음으로 세지 않는다).
+            const ec = endCheckOf(&r, rec_tab, at, comptime std.mem.eql(u8, c[2], "m2l"));
+            var el: [600]u8 = undefined;
+            var sl2: [400]u8 = undefined;
+            report(done and all.wrong == 0 and all.sw_captured == 0 and ec.missing == 0 and ec.doubled == 0, "v20k-" ++ c[0], std.fmt.bufPrint(&detail, "20 rounds{s}: {s} | {s} | {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ if (done) "" else " (NOT DONE)", std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), std.mem.sliceTo(&line[3], 0), std.mem.sliceTo(&line[4], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..@min(all.notes_len, 900)] }) catch "");
+            try r.navigate(rec_tab, "/v20/blank?swq");
             r.pump(2000);
         };
         // 검증자 v20j A(조정자 요청): body-r4-sw-mixed 꼴을 여러 판(`V20J_MIX_LOADS` — 기본 40 판 × 20 묶음).
@@ -1436,7 +1488,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             }
             var t2: Tally = .{};
             t2.states = st;
-            report(wrong == 0 and missing == 0 and doubled == 0 and bad_loads == 0, "v20j-swmix", std.fmt.bufPrint(&detail, "{d} loads × 20: WRONG {d} · pass-through own {d}/{d} · no end {d} · several ends {d} · states{s}{s}", .{ loads, wrong, sw_own, sw_total, missing, doubled, stateLine(&t2, &sl), notes[0..nn] }) catch "");
+            report(wrong == 0 and sw_own == 0 and missing == 0 and doubled == 0 and bad_loads == 0, "v20j-swmix", std.fmt.bufPrint(&detail, "{d} loads × 20: WRONG {d} · pass-through own {d}/{d} · no end {d} · several ends {d} · states{s}{s}", .{ loads, wrong, sw_own, sw_total, missing, doubled, stateLine(&t2, &sl), notes[0..nn] }) catch "");
         }
         // IO load between p1 and p2.
         inline for (.{ .{ "load-n100", "100" }, .{ "load-n400", "400" }, .{ "load-n1500", "1500" } }) |c| if (enabled("v20i-" ++ c[0])) {

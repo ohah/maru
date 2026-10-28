@@ -440,14 +440,14 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     try host.send(.{ .net_record = .{ .browser = rec_tab, .on = true, .session = 1 } });
     _ = r.waitFor(5000, rec_tab, hasState);
 
-    // ── 서비스 워커 ──
+    // ── 서비스 워커 ── 재검증 5 차 S0(기대를 더함): 서비스 워커 갈래 기록은 본문 없이(`sw captured 0`) — 틀린 본문 0 은 그대로.
     {
         const at = r.begins.items.len;
         try r.navigate(rec_tab, "/rv4/sw/swr");
         const done = r.pumpTitle(rec_tab, "swrdone", 30_000);
         r.pump(4000);
         const ta = tally(&r, rec_tab, at, "/rv4/sw/d", null);
-        report(done and ta.wrong == 0, "body-r4-sw-swr", lineOf(&ta, &detail, &sl));
+        report(done and ta.wrong == 0 and ta.sw_captured == 0, "body-r4-sw-swr", lineOf(&ta, &detail, &sl));
     }
     {
         const at = r.begins.items.len;
@@ -455,7 +455,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const done = r.pumpTitle(rec_tab, "latedone", 20_000);
         r.pump(4000);
         const t = tally(&r, rec_tab, at, "/rv4/sw/late", null);
-        report(done and t.wrong == 0, "body-r4-sw-cache-then-update-control", lineOf(&t, &detail, &sl));
+        report(done and t.wrong == 0 and t.sw_captured == 0, "body-r4-sw-cache-then-update-control", lineOf(&t, &detail, &sl));
     }
     {
         const at = r.begins.items.len;
@@ -471,7 +471,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const done = r.pumpTitle(rec_tab, "syndone", 20_000);
         r.pump(4000);
         const t = tally(&r, rec_tab, at, "/rv4/sw/syn", null);
-        report(done and t.wrong == 0, "body-r4-sw-synth", lineOf(&t, &detail, &sl));
+        report(done and t.wrong == 0 and t.sw_captured == 0, "body-r4-sw-synth", lineOf(&t, &detail, &sl));
     }
     {
         const at = r.begins.items.len;

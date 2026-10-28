@@ -518,6 +518,8 @@ const Tally = struct {
     no_end: usize = 0,
     multi_end: usize = 0,
     after_end: usize = 0,
+    /// 재검증 5 차 S0: 서비스 워커 갈래(`NetFlags.service_worker`) 기록에 붙은 본문 수.
+    sw_captured: usize = 0,
     states: [16]usize = @splat(0),
     notes: [900]u8 = undefined,
     notes_len: usize = 0,
@@ -550,6 +552,7 @@ fn tally(r: *Run, browser: u64, at: usize, needle: []const u8, who: ?[]const u8)
         if (b.expected and x.ends == 0) t.no_end += 1;
         if (x.ends > 1) t.multi_end += 1;
         t.after_end += x.data_after_end;
+        if (x.ends >= 1 and x.state == .captured and b.flags.service_worker) t.sw_captured += 1;
         if (x.ends >= 1 and x.state == .captured) {
             if (x.xbody.len == 0) {
                 t.unknown += 1;
@@ -580,7 +583,7 @@ fn stateLine(t: *const Tally, buf: []u8) []const u8 {
 }
 
 fn lineOf(t: *const Tally, buf: []u8, sl: []u8) []const u8 {
-    return std.fmt.bufPrint(buf, "CEF requests {d} (body_expected {d}) · own {d} · WRONG {d} · captured w/o X-Body {d} · ambiguous {d} · other {d} · no end {d} · several ends {d} · data after end {d} · states{s} ·{s}", .{ t.total, t.expected, t.own, t.wrong, t.unknown, t.ambiguous, t.other, t.no_end, t.multi_end, t.after_end, stateLine(t, sl), t.notes[0..t.notes_len] }) catch "";
+    return std.fmt.bufPrint(buf, "CEF requests {d} (body_expected {d}) · own {d} (sw {d}) · WRONG {d} · captured w/o X-Body {d} · ambiguous {d} · other {d} · no end {d} · several ends {d} · data after end {d} · states{s} ·{s}", .{ t.total, t.expected, t.own, t.sw_captured, t.wrong, t.unknown, t.ambiguous, t.other, t.no_end, t.multi_end, t.after_end, stateLine(t, sl), t.notes[0..t.notes_len] }) catch "";
 }
 
 /// 기대한 시작(body_expected)마다 끝이 꼭 하나인가 — `at` 부터 그 탭의 것.
@@ -862,7 +865,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         };
         inline for (.{ .{ "/v20/sw/fail", "v20a-r6-sw-network-fail-fallback" }, .{ "/v20/sw/mod", "v20a-r6-sw-modified-request-passthrough" }, .{ "/v20/sw/post", "v20a-r6-sw-post-passthrough" }, .{ "/v20/sw/wrap", "v20a-r6-sw-rewrapped-response" }, .{ "/v20/sw/x", "v20a-r6-sw-respond-with-other-url" }, .{ "/v20/sw/y", "v20a-r6-sw-other-url-direct" } }) |c| {
             const t = tally(&r, rec_tab, at, c[0], null);
-            report(done and t.wrong == 0 and t.no_end == 0 and t.multi_end == 0 and fb_leak == 0, c[1], std.fmt.bufPrint(&detail, "{s} · FALLBACK bodies sent {d}", .{ lineOf(&t, &lb, &sl), fb_leak }) catch "");
+            report(done and t.wrong == 0 and t.sw_captured == 0 and t.no_end == 0 and t.multi_end == 0 and fb_leak == 0, c[1], std.fmt.bufPrint(&detail, "{s} · FALLBACK bodies sent {d}", .{ lineOf(&t, &lb, &sl), fb_leak }) catch "");
         }
     }
 

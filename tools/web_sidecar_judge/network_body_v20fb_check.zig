@@ -106,8 +106,12 @@ const Expect = enum {
     not_w1252,
     /// 재검증 4 차 뒤 B16-1(작성자 선택 — 상한은 싣는 글): received bytes under 1 MiB whose decoded text is over it — `over_cap` with the text size
     over_cap_text,
+    /// 재검증 5 차 B15-3: a documented gap (plan 「표시하지 못하는 꼴」) — the record must end once; unmarked text that is neither the bytes nor
+    /// what the page read is reported as `gap` (maru cannot see the received bytes — Chromium's decoding of a shrinking encoding can match their
+    /// length), not as a failure
+    known_gap,
 };
-const Via = enum { fetch, encj, encu };
+const Via = enum { fetch, encj, encu, encx };
 const EncCase = struct { name: []const u8, ctype: []const u8, body: []const u8, raw: []const u8, extra: []const u8 = "", mode: Mode = .plain, expect: Expect, twice: bool = false, alt: []const u8 = "", via: Via = .fetch };
 const enc_cases_base = [_]EncCase{
     .{ .name = "u16cs", .ctype = "application/json; charset=utf-8", .body = utf16le_json, .raw = utf16le_json, .expect = .flag_or_exact },
@@ -281,6 +285,13 @@ const v20j_cases = blk: {
         .{ .name = "vs-1m1-ff", .ctype = "application/json", .body = &vs_1m1_ff, .raw = &vs_1m1_ff, .expect = .no_wrong },
         .{ .name = "vs-w1252-1000k", .ctype = "text/plain", .body = &vs_w1252, .raw = &vs_w1252, .expect = .over_cap_text },
         .{ .name = "vs-kr-750k", .ctype = "text/plain; charset=euc-kr", .body = &vs_kr, .raw = &vs_kr, .expect = .over_cap_text },
+        // 검증자 v20k(재검증 5 차 B15-3 — 문서의 「표시하지 못하는 꼴」): a `<script charset>` in a shrinking encoding whose decoded text is
+        // exactly as long as the bytes and holds a three-byte character — GB18030 four-byte + two-byte, ISO-2022-JP escapes, UTF-16LE, EUC-JP
+        // JIS X 0212 Latin + kanji. maru cannot tell them from UTF-8 (it never sees the bytes) — reported, not failed
+        .{ .name = "vk2-js-gb", .ctype = "text/javascript", .body = "var s=\"\xd6\xd0\x81\x32\xce\x39\";", .raw = "var s=\"\xd6\xd0\x81\x32\xce\x39\";", .expect = .known_gap, .via = .encx },
+        .{ .name = "vk2-js-2022", .ctype = "text/javascript", .body = "var s=\"\x1b\x24\x42\x34\x41\x3b\x7a\x32\x3e\x4c\x3e\x38\x72\x4a\x38\x1b\x28\x42\";", .raw = "var s=\"\x1b\x24\x42\x34\x41\x3b\x7a\x32\x3e\x4c\x3e\x38\x72\x4a\x38\x1b\x28\x42\";", .expect = .known_gap, .via = .encx },
+        .{ .name = "vk2-js-eucjp", .ctype = "text/javascript", .body = "var s=\"\xb4\xc1\x8f\xaa\xa1\";", .raw = "var s=\"\xb4\xc1\x8f\xaa\xa1\";", .expect = .known_gap, .via = .encx },
+        .{ .name = "vk2-js-u16", .ctype = "text/javascript", .body = "\x61\x00\x62\x00\x00\xac\x98\xb0", .raw = "\x61\x00\x62\x00\x00\xac\x98\xb0", .expect = .known_gap, .via = .encx },
         .{ .name = "vj-css-charsetgk", .ctype = "text/css", .body = "@charset \"euc-kr\";" ++ vj_css_gk, .raw = "@charset \"euc-kr\";" ++ vj_css_gk, .expect = .marked, .via = .encu },
     };
     for (vj_other_labels) |l| list = list ++ &[_]EncCase{.{ .name = "vjl-" ++ l, .ctype = "text/plain; charset=" ++ l, .body = vj_body, .raw = vj_body, .expect = .not_w1252 }};
@@ -467,6 +478,7 @@ fn serveOne(conn: c_int) void {
     }
     // v20j B R15: an EUC-KR page whose script / stylesheet carry no charset, and a UTF-8 page with a `<script charset>` and stylesheets
     if (std.mem.eql(u8, path, "/f/encj")) return reply(conn, "text/html; charset=euc-kr", "<!doctype html><title>j</title><link rel=stylesheet href=\"/f/enc?vj-css-docgk\"><script src=\"/f/enc?vj-js-docgk\"></script><script src=\"/f/enc?vk-js-dockr\"></script><script>setTimeout(function(){document.title='jdone'},1500)</script>j");
+    if (std.mem.eql(u8, path, "/f/encx")) return reply(conn, html, "<!doctype html><title>x</title><script charset=\"gb18030\" src=\"/f/enc?vk2-js-gb\"></script><script charset=\"iso-2022-jp\" src=\"/f/enc?vk2-js-2022\"></script><script charset=\"euc-jp\" src=\"/f/enc?vk2-js-eucjp\"></script><script charset=\"utf-16le\" src=\"/f/enc?vk2-js-u16\"></script><script>setTimeout(function(){document.title='xdone'},1500)</script>x");
     if (std.mem.eql(u8, path, "/f/encu")) return reply(conn, html, "<!doctype html><title>u</title><link rel=stylesheet href=\"/f/enc?vj-css-u8\"><link rel=stylesheet href=\"/f/enc?vj-css-charsetgk\"><script charset=\"euc-kr\" src=\"/f/enc?vj-js-attrgk\"></script><script src=\"/f/enc?vk-js-u8\"></script><script src=\"/f/enc?vk-js-u8lat\"></script><link rel=stylesheet href=\"/f/enc?vk-css-u8kr\"><script>setTimeout(function(){document.title='udone'},1500)</script>u");
     // ── 14: V1 at the wire ──
     if (std.mem.eql(u8, path, "/f/v1p")) return reply(conn, html, "<!doctype html><title>v1</title><script>" ++ read_js ++
@@ -801,6 +813,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         r.pump(800);
         try r.navigate(tab_enc, "/f/encu");
         done = r.pumpTitle(tab_enc, "udone", 15_000) and done;
+        r.pump(800);
+        try r.navigate(tab_enc, "/f/encx");
+        done = r.pumpTitle(tab_enc, "xdone", 15_000) and done;
         r.pump(1500);
         var pb: [200]u8 = undefined;
         var rb: [256]u8 = undefined;
@@ -839,9 +854,11 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
                         this_ok = false;
                     },
                     .over_cap_text => this_ok = this_ok and x.state == .over_cap and x.decoded > c.raw.len and x.decoded > msg.max_net_body_bytes and d.len == 0,
+                    .known_gap => {},
                 }
                 if (!this_ok) ok = false;
-                const piece = std.fmt.bufPrint(line[ln..], " [#{d} {s} chromium_decoded={} binary={} redecoded={} size={d} decoded={d} exact={} as_page_read={} 「{s}」]", .{ k + 1, stateName(x), x.flags.chromium_decoded, x.flags.binary, x.flags.redecoded, d.len, x.decoded, exact, as_page, printable(&pb, d) }) catch "";
+                const gap = c.expect == .known_gap and cap and !marked and !exact and !as_page;
+                const piece = std.fmt.bufPrint(line[ln..], " [#{d} {s} chromium_decoded={} binary={} redecoded={} size={d} decoded={d} exact={} as_page_read={}{s} 「{s}」]", .{ k + 1, stateName(x), x.flags.chromium_decoded, x.flags.binary, x.flags.redecoded, d.len, x.decoded, exact, as_page, if (gap) " gap(documented)" else "", printable(&pb, d) }) catch "";
                 ln += piece.len;
             }
             var nn: [64]u8 = undefined;

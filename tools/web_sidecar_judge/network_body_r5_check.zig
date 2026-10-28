@@ -580,16 +580,16 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         report(done and p_failed == 0 and p_wrong == 0, "body-r5-abort-refetch-many", std.fmt.bufPrint(&detail, "refetch requests {d} · own {d} · request_failed {d} (sync/microtask/timeout0 = {d}/{d}/{d}; of them abort never reached CEF {d}) · wrong {d} · other {d} · URLs whose abort never reached CEF {d}/150 ·{s}", .{ p_total, p_own, p_failed, by_kind[0], by_kind[1], by_kind[2], single_failed, p_wrong, p_other, single, kb[0..kn] }) catch "");
     }
 
-    // ── 서비스 워커 ──
+    // ── 서비스 워커 ── 재검증 5 차 S0(기대를 더함): 서비스 워커 갈래 기록은 본문 없이(`sw captured 0`) — 틀린 본문 0 은 그대로.
     if (enabled("navpreload")) {
         const at = r.begins.items.len;
         try r.navigate(rec_tab, "/rv5/sw/navp");
         const done = r.pumpTitle(rec_tab, "nvdone", 40_000);
         r.pump(4000);
         const a = tally(&r, rec_tab, at, "/rv5/sw/nav/doc?p", null);
-        report(done and a.wrong == 0, "body-r5-sw-navpreload-preload", lineOf(&a, &detail, &sl));
+        report(done and a.wrong == 0 and a.sw_captured == 0, "body-r5-sw-navpreload-preload", lineOf(&a, &detail, &sl));
         const b = tally(&r, rec_tab, at, "/rv5/sw/nav/doc?f", null);
-        report(done and b.wrong == 0, "body-r5-sw-navpreload-fetch", lineOf(&b, &detail, &sl));
+        report(done and b.wrong == 0 and b.sw_captured == 0, "body-r5-sw-navpreload-fetch", lineOf(&b, &detail, &sl));
     }
     if (enabled("other")) {
         const at = r.begins.items.len;
@@ -597,7 +597,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const done = r.pumpTitle(rec_tab, "odone", 30_000);
         r.pump(4000);
         const t = tally(&r, rec_tab, at, "/rv5/sw/o?", null);
-        report(done and t.wrong == 0, "body-r5-sw-other-url", lineOf(&t, &detail, &sl));
+        report(done and t.wrong == 0 and t.sw_captured == 0, "body-r5-sw-other-url", lineOf(&t, &detail, &sl));
     }
     if (enabled("redirect")) {
         const at = r.begins.items.len;
@@ -605,9 +605,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const done = r.pumpTitle(rec_tab, "rdone", 30_000);
         r.pump(4000);
         const f = tally(&r, rec_tab, at, "/rv5/sw/r?f", null);
-        report(done and f.wrong == 0, "body-r5-sw-redirect-follow", lineOf(&f, &detail, &sl));
+        report(done and f.wrong == 0 and f.sw_captured == 0, "body-r5-sw-redirect-follow", lineOf(&f, &detail, &sl));
         const m = tally(&r, rec_tab, at, "/rv5/sw/r?m", null);
-        report(done and m.wrong == 0, "body-r5-sw-redirect-manual", lineOf(&m, &detail, &sl));
+        report(done and m.wrong == 0 and m.sw_captured == 0, "body-r5-sw-redirect-manual", lineOf(&m, &detail, &sl));
     }
     if (enabled("httpcache")) {
         const at = r.begins.items.len;
@@ -615,7 +615,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const done = r.pumpTitle(rec_tab, "hcdone", 30_000);
         r.pump(4000);
         const t = tally(&r, rec_tab, at, "/rv5/sw/hc?", null);
-        report(done and t.wrong == 0, "body-r5-sw-http-cache", lineOf(&t, &detail, &sl));
+        report(done and t.wrong == 0 and t.sw_captured == 0, "body-r5-sw-http-cache", lineOf(&t, &detail, &sl));
     }
     if (enabled("dedupe")) {
         const at = r.begins.items.len;
@@ -623,7 +623,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const done = r.pumpTitle(rec_tab, "dddone", 30_000);
         r.pump(4000);
         const t = tally(&r, rec_tab, at, "/rv5/sw/dd?", null);
-        report(done and t.wrong == 0, "body-r5-sw-dedupe", lineOf(&t, &detail, &sl));
+        report(done and t.wrong == 0 and t.sw_captured == 0, "body-r5-sw-dedupe", lineOf(&t, &detail, &sl));
     }
     if (enabled("twotabs")) {
         const at = r.begins.items.len;
@@ -638,7 +638,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             const a2 = tally(&r, c[0], at, "/rv5/sw/hold?", "A2");
             const bb = tally(&r, c[0], at, "/rv5/sw/hold?", "B");
             var lb: [4000]u8 = undefined;
-            report(done and t.wrong == 0, c[1], std.fmt.bufPrint(&detail, "by who: A1 own/amb/other {d}/{d}/{d} · A2 own/amb/other {d}/{d}/{d} · B own/amb/other {d}/{d}/{d} · all: {s}", .{ a1.own, a1.ambiguous, a1.other, a2.own, a2.ambiguous, a2.other, bb.own, bb.ambiguous, bb.other, lineOf(&t, &lb, &sl) }) catch "");
+            report(done and t.wrong == 0 and t.sw_captured == 0, c[1], std.fmt.bufPrint(&detail, "by who: A1 own/amb/other {d}/{d}/{d} · A2 own/amb/other {d}/{d}/{d} · B own/amb/other {d}/{d}/{d} · all: {s}", .{ a1.own, a1.ambiguous, a1.other, a2.own, a2.ambiguous, a2.other, bb.own, bb.ambiguous, bb.other, lineOf(&t, &lb, &sl) }) catch "");
         }
         try r.navigate(tab_b, "/rv5/blank?b");
         r.pump(500);
@@ -649,7 +649,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const done = r.pumpTitle(rec_tab, "updone", 40_000);
         r.pump(4000);
         const t = tally(&r, rec_tab, at, "/rv5/sw/u?", null);
-        report(done and t.wrong == 0, "body-r5-sw-update", lineOf(&t, &detail, &sl));
+        report(done and t.wrong == 0 and t.sw_captured == 0, "body-r5-sw-update", lineOf(&t, &detail, &sl));
     }
     // ── 적대 탭 ──
     if (enabled("hostile")) {

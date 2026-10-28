@@ -522,12 +522,13 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         var data: ?*Body = null;
         var sw_flag = false;
         for (r.begins.items[at..]) |b| if (std.mem.indexOf(u8, b.url, "/b/sw/data.json") != null) {
-            for (r.bodies.items) |*x| if (x.request == b.request and x.ends == 1 and x.state == .captured) {
+            for (r.bodies.items) |*x| if (x.request == b.request) {
                 data = x;
                 sw_flag = b.sw;
             };
         };
-        report(data != null and std.mem.eql(u8, data.?.data.items, "{\"sw\":\"body\"}"), "body-service-worker", std.fmt.bufPrint(&detail, "본문 {s} · 서비스 워커 갈래 {}", .{ if (data) |d| d.data.items else "(없음)", sw_flag }) catch "");
+        // 재검증 5 차 S0(기대를 바꿈 — 서비스 워커 갈래 새 설계의 체크포인트): 워커가 그대로 넘긴 응답도 본문 없이 `ambiguous` 하나(짝은 선다).
+        report(hasState(data, .ambiguous) and sw_flag and data.?.data.items.len == 0, "body-service-worker", std.fmt.bufPrint(&detail, "끝 {s} · 본문 {d} 바이트 · 서비스 워커 갈래 {}", .{ stateName(data), if (data) |d| d.data.items.len else 0, sw_flag }) catch "");
     }
 
     // ── UB1: 다른 사이트에서 쿠키가 실린 스크립트 ──

@@ -2076,6 +2076,9 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 - `python3 tools/symbol-rename-ime/run.py --output <새 외부 경로> --case hanja`: 실제 후보 입력 뒤 별도 Enter에서만 rename 요청을 보내는지, 두 파일 적용·저장·Workspace Undo를 검증한다. `korean`, `cancel`, `server-error`, `stale`도 별도 실행한다.
 - `--app <고정 사본 실행 파일>`로 앱을 재사용한다. 서버는 기존 제어용 fake LSP 프로세스이며 실제 SDK 검증으로 주장하지 않는다. 격리·wire·독립 재검증과 한계는 [도구](../tools/symbol-rename-ime/README.md)와 [계획](plans/symbol-rename-ime-gui.md)을 따른다.
 
+실제 서버는 같은 명령에 `--clangd /absolute/path/to/clangd`를 명시해 opt-in한다. 자동 설치 없이
+`hanja`·`korean`·`cancel`·`stale`를 지원하며 제어 서버 증거와 구분한다.
+
 ### 파일 탐색기 이름 변경 IME GUI
 
 - `mise exec -- zig build test-file-tree-model test-file-tree-rename-ime-oracles -j2`: 로딩 중 선택 신원 보존·실제 부재/접힘 fallback·사용자 선택 유지와 독립 파일 증거 검사기를 확인한다.

@@ -15,10 +15,22 @@ fn allocator() std.mem.Allocator {
 }
 /// 내부 연결 API다. 일반 편집기의 기존 점진 파싱 경로는 아직 이 API로 전환하지 않는다.
 pub fn submit(source: registry.Lease, grammar: request.Grammar, language: syntax.Language) !request.Request {
+    const owner = try getOrStart();
+    return owner.submit(source, grammar, language) catch |err| {
+        if (owner.entries.items.len == 0) shutdown();
+        return err;
+    };
+}
+fn getOrStart() !*runtime.Runtime {
     if (!builtin.is_test and builtin.os.tag != .macos) return error.UnsupportedPlatform;
     if (active == null) active = try runtime.Runtime.init(allocator(), .{ .notify = wake.request });
-    return active.?.submit(source, grammar, language) catch |err| {
-        if (active.?.entries.items.len == 0) shutdown();
+    return &active.?;
+}
+/// 같은 문서 판을 보는 뷰는 새 작업을 게시하지 않는다. 강제 재시도는 submit으로 분리한다.
+pub fn ensure(source: registry.Lease, grammar: request.Grammar, language: syntax.Language) !runtime.Submission {
+    const owner = try getOrStart();
+    return owner.ensure(source, grammar, language) catch |err| {
+        if (owner.entries.items.len == 0) shutdown();
         return err;
     };
 }

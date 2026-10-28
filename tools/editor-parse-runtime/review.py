@@ -21,7 +21,7 @@ def main():
     p = argparse.ArgumentParser()
     for name in ('output','deps','cache'):
         p.add_argument('--'+name, type=Path, required=True)
-    p.add_argument("--scope", choices=("lifetime", "observation", "leases", "view"), default="lifetime")
+    p.add_argument("--scope", choices=("lifetime", "observation", "leases", "view", "sharing"), default="lifetime")
     args = p.parse_args()
     out, deps = args.output.resolve(), args.deps.resolve()
     if out.exists() or out == ROOT or ROOT in out.parents or not deps.is_dir():
@@ -74,6 +74,14 @@ def main():
             'bracket_cache_not_invalidated': (COLORS, '        self.folds.invalidate();\n        self.brackets.invalidate();', '        self.folds.invalidate();\n        // 결함 주입: 이전 괄호 캐시를 현재로 오인'),
             'view_reference_not_returned': (COLORS, '        if (self.parse_result) |*result| result.release();', '        // 결함 주입: 뷰 완료 보유 참조 반환 누락'),
         }
+    if args.scope == "sharing":
+        mutants = {
+            'shared_input_resubmitted': (RUNTIME, 'return .{ .tag = tag, .published = false };', 'if (false) return .{ .tag = tag, .published = false };'),
+            'revision_not_in_key': (RUNTIME, 'std.meta.eql(tag.input, input)', 'blk: { var key = input; key.revision = tag.input.revision; break :blk std.meta.eql(tag.input, key); }'),
+            'grammar_not_in_key': (RUNTIME, 'std.meta.eql(tag.input, input)', 'blk: { var key = input; key.grammar = tag.input.grammar; break :blk std.meta.eql(tag.input, key); }'),
+            'language_not_in_key': (RUNTIME, 'entry.language == language and shareable(entry, tag)', '(entry.language == language or true) and shareable(entry, tag)'),
+            'closed_attempt_preserved': (RUNTIME, '            entry.latest = null;\n            entry.outcome = null;\n            entry.gate.invalidate();', '            entry.gate.invalidate();'),
+        }
     command = ['mise','exec','--','zig','build','test-editor-parse-runtime','test-editor-parse-host','test-editor-parse-main-queue','--cache-dir',str(args.cache.resolve()),'-j2','--verbose']
     if args.scope == "view":
         command.insert(command.index('--cache-dir'), 'test-editor-parse-view')
@@ -95,7 +103,7 @@ def main():
             with log.open('xb') as stream:
                 result = subprocess.run(command,cwd=source,env=env,stdout=stream,stderr=subprocess.STDOUT,timeout=900)
             text = log.read_text()
-            tests = list(dict.fromkeys(re.findall(r'info\(verbose\): [^\n]*?(\S+/test) --maru-expect-tests=(?:5|6|10|19|35)',text)))
+            tests = list(dict.fromkeys(re.findall(r'info\(verbose\): [^\n]*?(\S+/test) --maru-expect-tests=(?:5|6|12|19|35)',text)))
             natives = re.findall(r'info\(verbose\): (\S+/maru-parse-main-queue)\s*$',text,re.M)
             if len(tests)!=(4 if args.scope == 'view' else 3 if args.scope == 'leases' else 2) or not natives: raise RuntimeError('missing actual executions: '+name)
             archived = {}
@@ -108,12 +116,14 @@ def main():
             if name in mutants:
                 if result.returncode==0 or not re.search(r'FAIL \(Test(?:UnexpectedResult|ExpectedEqual|ExpectedError)\)',text):
                     raise RuntimeError('semantic fault survived: '+name)
-            elif result.returncode or (text.count('All 6 tests passed.')!=1 or text.count('All 10 tests passed.')!=1) or 'PARSE_MAIN_QUEUE accepted=2 main_thread=1 closed_document_reaped=1 late_delivery=1' not in text:
+            elif result.returncode or (text.count('All 6 tests passed.')!=1 or text.count('All 12 tests passed.')!=1) or 'PARSE_MAIN_QUEUE accepted=2 main_thread=1 closed_document_reaped=1 late_delivery=1' not in text:
                 raise RuntimeError('normal control failed: '+name)
             if args.scope == 'leases' and name.startswith('control') and (text.count('All 19 tests passed.') != 1 or 'retained_result=1' not in text):
                 raise RuntimeError('missing retained-result control: '+name)
             if args.scope == 'view' and name.startswith('control') and (text.count('All 5 tests passed.') != 1 or text.count('All 35 tests passed.') != 1 or 'installed_view=1' not in text):
                 raise RuntimeError('missing actual view executions: '+name)
+            if args.scope == 'sharing' and name.startswith('control') and 'shared_request=1' not in text:
+                raise RuntimeError('missing actual shared-request delivery: '+name)
             rows.append(dict(name=name,returncode=result.returncode,source_sha256=source_hash,binaries=archived,log_sha256=sha(log)))
             for file,content in baseline.items(): (source/file).write_text(content)
     finally:

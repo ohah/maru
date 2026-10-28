@@ -25,12 +25,16 @@ pub fn main() !void {
     }
     defer parse.shutdown();
     const old_identity = first.identity(old_view).?;
-    _ = try parse.submit(old_view, grammar, .zig);
+    const initial = try parse.ensure(old_view, grammar, .zig);
+    const duplicate = try parse.ensure(old_view, grammar, .zig);
+    if (!initial.published or duplicate.published or !std.meta.eql(initial.tag, duplicate.tag)) return error.DuplicateParseRequest;
     while (parse.ready(old_identity, grammar, .zig) == null) {
         if (std.Io.Clock.awake.now(threaded.io()).nanoseconds > deadline) return error.Timeout;
         maru_parse_run_main_turn();
     }
     if (parse.lastPollThread().? != std.Thread.getCurrentId()) return error.WrongThread;
+    const reused = try parse.ensure(old_view, grammar, .zig);
+    if (reused.published or !std.meta.eql(reused.tag, initial.tag)) return error.ReadyNotShared;
     var installed: parse.view.State = .{};
     var installed_live = true;
     defer if (installed_live) installed.deinit(a);
@@ -101,5 +105,5 @@ pub fn main() !void {
     if (!saw_busy) return error.KeeperReleasedEarly;
     parse.shutdown();
     maru_parse_run_main_turn(); // 늦게 남은 전달은 현재 소유자 없음으로 끝난다.
-    std.debug.print("PARSE_MAIN_QUEUE accepted=2 main_thread=1 closed_document_reaped=1 late_delivery=1 retained_result=1 installed_view=1\n", .{});
+    std.debug.print("PARSE_MAIN_QUEUE accepted=2 main_thread=1 closed_document_reaped=1 late_delivery=1 retained_result=1 installed_view=1 shared_request=1\n", .{});
 }

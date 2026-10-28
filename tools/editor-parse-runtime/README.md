@@ -10,7 +10,7 @@ mise exec -- zig build test-editor-parse-runtime test-editor-parse-host test-edi
 python3 tools/editor-parse-runtime/review.py --output /tmp/new-parse-runtime --deps /path/to/deps --cache /path/to/cache
 ```
 
-Runtime 판정 10개는 마지막 뷰·실제 revision·공유 뷰·할당 실패·동일 문서 재생성 serial·늦은 전달을
+Runtime 판정 12개는 마지막 뷰·실제 revision·공유 뷰·할당 실패·동일 문서 재생성 serial·늦은 전달을
 검사한다. AppSession 판정 target은 실제 창 소유자 파괴 2개와 기존 익명 초기화 4개다.
 Linux에서는 macOS 전용 익명 초기화 3개가 빠져 총 3개를 수집하고, 실제 창 수명 2개는 skip한다.
 플랫폼별 정확한 개수를 검사해 target 누락을 허용하지 않는다.
@@ -45,7 +45,7 @@ python3 tools/editor-parse-runtime/review.py --scope observation --output /tmp/n
 실패 버리기·옛 실패의 새 요청 덮어쓰기·grammar 무시·revision 무시·재시도에서 옛 실패 보존의
 다섯 실제 결함을 컴파일한다. 옛 완료 검사는 이전 작업과 새 작업의 실제 copy allocator를 각각 장벽으로 멈춰
 완료 순서를 결정한다. 고정 sleep이나 경쟁이 우연히 일어났다는 추정에 의존하지 않는다.
-기본 `--scope lifetime`은 기존 수명 결함 대조를 유지한다. 두 모드 모두 runtime 10개·host 6개와
+기본 `--scope lifetime`은 기존 수명 결함 대조를 유지한다. 두 모드 모두 runtime 12개·host 6개와
 실제 Apple 전달 실행을 요구한다. UI·알림 정책은 별도다.
 
 ## 소비자 보유 참조
@@ -64,7 +64,7 @@ python3 tools/editor-parse-runtime/review.py --scope leases --output /tmp/new-pa
 ```
 
 Job 참조 증가 누락·전체 참조 증가 누락·마지막 반환 전 퇴역·종료 가드 제거·현재 입력 검사 없는
-acquire의 다섯 실제 결함을 컴파일·실행한다. runtime 10개·host 6개·worker 19개와 실제 Apple
+acquire의 다섯 실제 결함을 컴파일·실행한다. runtime 12개·host 6개·worker 19개와 실제 Apple
 전달을 요구한다. worker C 장벽 아래에서 큐 게시를 검사하고, 잘못된 참조 수와 조기 게시를 주입한
 경우에도 테스트 cleanup만 복구해 assertion 결과와 별개 누수/이중 해제를 섞지 않는다.
 Apple probe의 `retained_result=1`은 실제 메인 큐 수락 후 보유 중 종료 거절·반환 후 종료 증거다.
@@ -92,3 +92,24 @@ Runtime native 모듈은 `editor/parse.zig`를, 판정은 `editor/parse_test.zig
 기존 구현 폴더를 유지하면서 같은 editor의 syntax.State를 상대 import할 수 있는 모듈 경계다.
 Apple probe의 `installed_view=1`은 실제 메인 큐 완료 뒤 설치·뷰 보유 중 종료 거절·반환 후 종료를
 검사하며 제품 화면/HID·IME의 시각 증거는 아니다. native malloc 실패 전수 검증도 아니다.
+
+## 공유 입력의 요청 재사용
+
+`ensure`는 같은 문서 identity·revision·grammar 설정·native language의 게시 요청을
+재사용한다. pending/ready/실패 완료 모두 새 게시 없이 tag를 반환하며 `published=false`다.
+이미 완료된 입력의 재사용은 알림을 다시 보내지 않으므로 새 뷰는 observe/prepareView도 확인한다.
+같은 입력을 강제로 다시 시도하는 기존 submit과 구분한다. 준비 오류는 submit과 같은 오류로
+반환하며 이 API가 UI 재시도 시점을 정하지는 않는다.
+
+```sh
+python3 tools/editor-parse-runtime/review.py --scope sharing --output /tmp/new-parse-sharing --deps /path/to/deps --cache /path/to/cache
+```
+
+Runtime 12개는 공유 뷰의 pending/ready 재사용을 할당이 실패하도록 설정한 상태에서도 확인한다.
+독립 문서·revision/설정/native 언어 변경은 새 게시를 요구한다. 실제 복사 OOM 후 같은 입력의
+실패를 재사용하고, 소비자가 옛 결과를 보유해 Entry가 살아 있는 동안 마지막 뷰를 닫고 다시 열면
+새 요청이 게시되는지도 검사한다. Apple probe의 shared_request=1은 실제 main queue의 대기·
+완료 재사용 뒤 기존 설치·반환 경로가 정상임을 뜻한다.
+
+다섯 실제 결함은 공유 입력 재게시·revision 무시·grammar 무시·native 언어 무시·닫힌 시도의
+실패 유지다. 정상 전후 대조와 실행 assertion을 요구하며, 일반 입력·실패 알림 정책은 별도다.

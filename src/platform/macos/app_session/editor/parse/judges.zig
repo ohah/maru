@@ -401,3 +401,81 @@ test "parse runtime 마지막 뷰가 닫혀도 소비자 반환 전에는 문서
     }
     try owner.canDeinit();
 }
+
+test "parse runtime 공유 뷰의 같은 입력은 대기와 완료 모두 할당 없이 같은 요청을 재사용한다" {
+    var docs: registry.Registry = .{ .allocator = a };
+    defer docs.deinit() catch unreachable;
+    const first = try document(&docs);
+    defer _ = docs.release(first) catch unreachable;
+    const second = try docs.retain(first, .view);
+    defer _ = docs.release(second) catch unreachable;
+    const other = try document(&docs);
+    defer _ = docs.release(other) catch unreachable;
+    var allocations = std.testing.FailingAllocator.init(a, .{});
+    var owner = try Runtime.init(allocations.allocator(), .{});
+    defer owner.deinit() catch unreachable;
+    const initial = try owner.ensure(first, grammar, .zig);
+    try std.testing.expect(initial.published);
+    allocations.fail_index = allocations.alloc_index;
+    const pending = owner.ensure(second, grammar, .zig) catch return error.TestUnexpectedResult;
+    try std.testing.expect(!pending.published);
+    try std.testing.expectEqual(initial.tag, pending.tag);
+    try waitReady(&owner, docs.identity(first).?);
+    const complete = owner.ensure(second, grammar, .zig) catch return error.TestUnexpectedResult;
+    try std.testing.expect(!complete.published);
+    try std.testing.expectEqual(initial.tag, complete.tag);
+    try std.testing.expect(!allocations.has_induced_failure);
+    allocations.fail_index = std.math.maxInt(usize);
+    const independent = try owner.ensure(other, grammar, .zig);
+    try std.testing.expect(independent.published);
+    try std.testing.expect(!std.meta.eql(independent.tag.input.document, initial.tag.input.document));
+    var changed = grammar;
+    changed.generation += 1;
+    const settings = try owner.ensure(second, changed, .zig);
+    try std.testing.expect(settings.published and settings.tag.serial > initial.tag.serial);
+    const language = try owner.ensure(first, changed, .json);
+    try std.testing.expect(language.published and language.tag.serial > settings.tag.serial);
+    try edit(&docs, first);
+    const revision = try owner.ensure(second, changed, .json);
+    try std.testing.expect(revision.published and revision.tag.input.revision > language.tag.input.revision);
+}
+test "parse runtime 공유 실패는 재게시하지 않고 마지막 뷰 닫기 뒤 같은 문서를 새로 요청한다" {
+    var docs: registry.Registry = .{ .allocator = a };
+    defer docs.deinit() catch unreachable;
+    const source = try document(&docs);
+    var open = true;
+    defer {
+        if (open) _ = docs.release(source) catch unreachable;
+    }
+    const reader = try docs.retain(source, .read);
+    defer _ = docs.release(reader) catch unreachable;
+    var copies = std.testing.FailingAllocator.init(std.heap.page_allocator, .{});
+    var owner = try Runtime.init(a, .{ .copy_allocator = copies.allocator() });
+    defer owner.deinit() catch unreachable;
+    _ = try owner.ensure(source, grammar, .zig);
+    try waitReady(&owner, docs.identity(source).?);
+    var old = (try owner.acquire(docs.identity(source).?, grammar, .zig)).?;
+    var old_live = true;
+    defer if (old_live) old.release();
+    copies.fail_index = copies.alloc_index;
+    const retry = try owner.submit(source, grammar, .zig);
+    waitCompletion(&owner);
+    owner.poll();
+    try std.testing.expectEqual(dispatch.worker.Outcome.out_of_memory, owner.observe(docs.identity(source).?, grammar, .zig).finished.outcome);
+    const failed = try owner.ensure(source, grammar, .zig);
+    try std.testing.expect(!failed.published);
+    try std.testing.expectEqual(retry, failed.tag);
+    copies.fail_index = std.math.maxInt(usize);
+    _ = try docs.release(source);
+    open = false;
+    owner.sweep();
+    try std.testing.expectError(error.NoViews, owner.ensure(reader, grammar, .zig));
+    try std.testing.expectError(error.StaleReference, owner.ensure(source, grammar, .zig));
+    const restored = try docs.retain(reader, .view);
+    defer _ = docs.release(restored) catch unreachable;
+    const reopened = try owner.ensure(restored, grammar, .zig);
+    try std.testing.expect(reopened.published and reopened.tag.serial > retry.serial);
+    try waitReady(&owner, docs.identity(restored).?);
+    old.release();
+    old_live = false;
+}

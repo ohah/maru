@@ -10136,6 +10136,61 @@ test "W9d② 재검증 5 차 S3b: C3a·C3b′ — 기록 전 메모는 ambiguous
     try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.0"));
 }
 
+test "W9d② 재검증 5 차 변이: C3b′ 의 물 높이 — CEF 기록이 P 의 응답 때까지 다 오기 전에는 잇지 않는다(늦게 온 설명되지 않은 기록이 P 를 어둠으로 만든다)" {
+    var h: H = .{};
+    defer h.deinit();
+    h.sync = false; // 물 높이는 아래에서 손으로 올린다
+    try swSetup(&h, 5, true);
+    const u = sw_origin ++ "/wm";
+    const t0: i64 = 10_000_000;
+    _ = try h.cand(5, 1401, u, t0 + 400, .{ .sw = true });
+    try wFetch(&h, 5, 1, "7.1", u, t0 + 200, t0 + 9_000, .{});
+    h.table.cefEndReceived(5, 1401, t0 + 9_100, true, 9);
+    try pFetch(&h, 5, "p.1", u, t0, t0 + 9_300, t0 + 9_000 + sw_wall_off, .{});
+    // 짝의 끝(t0 + 9.1 ms)까지는 왔지만 물 높이(t0 + 9.2 ms)가 P 의 응답 때(t0 + 9.3 ms)에 못 미친다 — 기다린다.
+    try h.table.tickAt(gpa_t, t0 + 10_000, t0 + 9_200);
+    try h.drain();
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.1"));
+    // 상자에 남아 있던 서비스 워커 갈래 기록(W 가 없다 — 설명되지 않는다)이 물 높이 뒤·P 의 응답 앞 IO 시각으로 늦게 온다.
+    _ = try h.cand(5, 1402, sw_origin ++ "/other", t0 + 9_250, .{ .sw = true });
+    h.table.cefEndReceived(5, 1402, t0 + 9_700, true, 9);
+    try swRun(&h, t0 + 20_000, t0 + 12_000_000);
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.1"));
+    try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(1401));
+}
+
+test "W9d② 재검증 5 차 변이: C3b′ 의 열린 기록 — P 의 응답 앞에 시작해 아직 끝나지 않은 설명되지 않은 기록이 있으면 잇지 않는다" {
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    const u = sw_origin ++ "/open";
+    const t0: i64 = 10_000_000;
+    // W 가 없는 서비스 워커 갈래 기록 — 아직 끝나지 않았다(어둠은 끝날 때 선다).
+    _ = try h.cand(5, 1501, sw_origin ++ "/other", t0 + 300, .{ .sw = true });
+    _ = try h.cand(5, 1502, u, t0 + 400, .{ .sw = true });
+    try wFetch(&h, 5, 1, "7.1", u, t0 + 200, t0 + 9_000, .{});
+    h.table.cefEndReceived(5, 1502, t0 + 9_600, true, 9);
+    try pFetch(&h, 5, "p.1", u, t0, t0 + 9_300, t0 + 9_000 + sw_wall_off, .{});
+    try swRun(&h, t0 + 10_000, t0 + 12_000_000);
+    try testing.expectEqual(@as(?u64, null), fetchedFor(&h, "p.1"));
+    try testing.expectEqual(@as(?State, .ambiguous), h.ended.get(1502));
+}
+
+test "W9d② 재검증 5 차 변이: 빼는 꼴의 W(preload)는 시작 때부터 서비스 워커 갈래 맞추기에 들지 않는다 — 같은 주소의 워커 fetch 가 제 기록과 짝이 되어 P 가 잇는다" {
+    var h: H = .{};
+    defer h.deinit();
+    try swSetup(&h, 5, true);
+    const u = sw_origin ++ "/pl";
+    const t0: i64 = 10_000_000;
+    _ = try h.cand(5, 1601, u, t0 + 400, .{ .sw = true });
+    try wev(&h, 5, 1, .{ .sent = .{ .rid = "preload-1", .url_hash = hashUrl8(u), .method_hash = hashMethod("GET"), .ts_us = t0 + 150, .excluded = true } }, t0 + 160);
+    try wFetch(&h, 5, 1, "7.1", u, t0 + 200, t0 + 9_000, .{});
+    h.table.cefEndReceived(5, 1601, t0 + 9_600, true, 9);
+    try pFetch(&h, 5, "p.1", u, t0, t0 + 9_300, t0 + 9_000 + sw_wall_off, .{});
+    try swRun(&h, t0 + 10_000, t0 + 12_000_000);
+    try testing.expectEqual(@as(?u64, 1601), fetchedFor(&h, "p.1"));
+}
+
 test "W9d② 재검증 5 차 S3b: C4·C5 — 다른 타깃의 같은 주소는 ambiguous(관 차례가 뒤집힌다), 늦춘 W 와 µs 가 같은 W 는 독, preload 는 남의 기록을 설명하지 못한다, http-cache 는 ambiguous" {
     var h: H = .{};
     defer h.deinit();

@@ -19,6 +19,7 @@ pub const ShapedGlyphRecord = struct {
     raster_font_size_milli: u16 = 0,
     raster_width_px: u16 = 0,
     raster_height_px: u16 = 0,
+    raster_origin: ?glyph_layout.GlyphRasterOrigin = null,
     drawable: bool = true,
     placement: ?glyph_layout.GlyphPlacement = null,
 };
@@ -119,6 +120,7 @@ pub fn buildGlyphRunListFromShapedRecordsWithSurface(
                 .raster_font_size_milli = record.raster_font_size_milli,
                 .raster_width_px = record.raster_width_px,
                 .raster_height_px = record.raster_height_px,
+                .raster_origin = record.raster_origin,
                 .style = flags,
                 .color_glyph_kind = record.color_glyph_kind,
             },

@@ -206,7 +206,21 @@ pub const NeutralRasterizer = struct {
             self.raster.em_size_px; // 크기를 안 준 호출자(기존 스모크) — 예전 동작 그대로
 
         const raster = self.rasterForStyle(request.run.font_id, request.run.style) orelse return error.RasterizerFailed;
-        const n = raster.rasterizeGlyphAtSize(
+        const n = if (request.run.cache_key.raster_origin) |origin| raster.rasterizeGlyphAtOrigin(
+            .{ .face_index = face_index, .glyph_id = glyph_id },
+            em_px,
+            w,
+            h,
+            origin.x(),
+            origin.y(),
+            request.bytes_per_row,
+            request.pixels,
+            self.scratch,
+        ) catch |err| switch (err) {
+            error.BufferTooSmall => return error.RasterByteCountMismatch,
+            error.InvalidRasterGeometry => return error.InvalidRasterOrigin,
+            else => return error.RasterizerFailed,
+        } else raster.rasterizeGlyphAtSize(
             .{ .face_index = face_index, .glyph_id = glyph_id },
             em_px,
             w,

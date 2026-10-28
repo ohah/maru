@@ -2,6 +2,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 #include <stdint.h>
+#include "../../native_shaping_run.h"
 #include <stddef.h>
 #include "main_queue.c.inc"
 #include <mach/mach_time.h>
@@ -1909,10 +1910,9 @@ void maru_macos_coretext_shape_draw_list(
                     const MaruCoreTextDrawCell prev = cells[run_end - 1];
                     // 셀이 실제로 화면에서 이어져 있어야 한 문자열로 묶을 수 있다. wide 셀은 자기 폭만큼
                     // 열을 차지하므로 그만큼 건너뛴 열이 다음 셀이어야 한다(width 0은 1열로 본다).
-                    const uint32_t prev_advance = prev.width == 0 ? 1u : (uint32_t)prev.width;
-                    if (cur.row != prev.row) break;
-                    if ((uint32_t)prev.col + prev_advance != (uint32_t)cur.col) break;
-                    if (maru_style_index_for_cell(cur) != style_index) break;
+                    if (!maru_native_run_continues(prev.row, prev.col, prev.width,
+                            maru_style_index_for_cell(prev), cur.row, cur.col,
+                            maru_style_index_for_cell(cur))) break;
                     if (run_end - cell_index >= MARU_SHAPE_RUN_MAX_CELLS) break;
                 }
                 if (!maru_append_cell_units(cur, grapheme_pool, grapheme_pool_len,

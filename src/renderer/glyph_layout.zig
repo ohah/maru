@@ -64,6 +64,27 @@ test "TextLayoutConfig.slotCellWidthPx: 합성/notdef=grid advance, 폰트 글�
     try std.testing.expectEqual(@as(u16, 10), c2.slotCellWidthPx(0));
 }
 
+/// A baseline inside a clipped bitmap changes its pixels and therefore its
+/// cache identity. Store finite float bits so hashing preserves subpixel values.
+/// This is independent of GlyphPlacement, which moves an already rastered mask.
+pub const GlyphRasterOrigin = struct {
+    x_bits: u32,
+    y_bits: u32,
+
+    pub fn fromPixels(x_value: f32, y_value: f32) error{InvalidRasterOrigin}!GlyphRasterOrigin {
+        if (!std.math.isFinite(x_value) or !std.math.isFinite(y_value)) return error.InvalidRasterOrigin;
+        return .{ .x_bits = @bitCast(if (x_value == 0) @as(f32, 0) else x_value), .y_bits = @bitCast(if (y_value == 0) @as(f32, 0) else y_value) };
+    }
+
+    pub fn x(self: GlyphRasterOrigin) f32 {
+        return @bitCast(self.x_bits);
+    }
+
+    pub fn y(self: GlyphRasterOrigin) f32 {
+        return @bitCast(self.y_bits);
+    }
+};
+
 pub const GlyphCacheKey = struct {
     font_id: FontId,
     glyph_id: GlyphId,
@@ -90,6 +111,7 @@ pub const GlyphCacheKey = struct {
     // 다른 slot이어야 한다(findSlot의 std.meta.eql이 새 필드를 자동으로 포함).
     raster_width_px: u16 = 0,
     raster_height_px: u16 = 0,
+    raster_origin: ?GlyphRasterOrigin = null,
     style: RasterStyleFlags = .{},
     color_glyph_kind: ColorGlyphKind = .monochrome,
 };

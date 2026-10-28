@@ -19,6 +19,7 @@ pub const TextResources = struct {
     raster: *maru.dwrite_font.Rasterizer,
     scratch: []u8,
     variants: [3]?*maru.dwrite_font.Rasterizer = @splat(null),
+    native: ?*@import("native_run_owner.zig").Owner = null,
 
     /// Preparation does not touch the currently displayed font or atlas. A live
     /// replacement must also stage renderer/cache/layout state before publishing
@@ -52,10 +53,12 @@ pub const TextResources = struct {
                 self.variants[i] = try maru.dwrite_font.Rasterizer.createStyled(a, self.raster.family, font.fallback, font.size, style);
             }
         }
+        self.native = try @import("native_run_owner.zig").Owner.create(a, font.fallback, font.ligatures);
         return self;
     }
 
     pub fn deinit(self: *TextResources) void {
+        if (self.native) |native| native.destroy();
         for (self.variants) |r| if (r) |face| face.destroy();
         self.allocator.free(self.scratch);
         self.raster.destroy();
@@ -64,6 +67,7 @@ pub const TextResources = struct {
 
     pub fn builder(self: *const TextResources) maru.win32_terminal.FrameBuilder {
         return .{
+            .native = if (self.native) |native| native.builder() else null,
             .shaper = .{ .raster = self.raster, .variants = self.variants },
             .rasterizer = .{ .raster = self.raster, .variants = self.variants, .scratch = self.scratch },
         };

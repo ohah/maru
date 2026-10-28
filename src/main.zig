@@ -63,6 +63,7 @@ test {
     _ = @import("platform/windows/terminal/glyph_sources_test.zig");
     _ = @import("platform/windows/terminal/raster_origin_test.zig");
     _ = @import("platform/windows/terminal/run_faces_test.zig");
+    _ = @import("platform/windows/terminal/run_frame_test.zig");
     _ = @import("platform/windows/terminal/positioned_frame_test.zig");
     // Cross-target tests must compile the native adapter as well as the common worker.
     if (comptime builtin.os.tag == .macos) _ = @import("platform/macos/file_tree_remote.zig").transport;
@@ -7297,8 +7298,18 @@ const LiveFontUi = struct {
 
 fn sameLiveFont(a: maru.config.theme.FontConfig, b: maru.config.theme.FontConfig) bool {
     return a.size == b.size and a.line_height == b.line_height and a.letter_spacing == b.letter_spacing and
+        a.ligatures == b.ligatures and
         std.mem.eql(u8, a.family, b.family) and std.mem.eql(u8, a.fallback, b.fallback) and
         std.mem.eql(u8, a.family_bold, b.family_bold) and std.mem.eql(u8, a.family_italic, b.family_italic);
+}
+
+test "Windows run frame live font comparison includes ligature changes" {
+    var first: maru.config.theme.FontConfig = .{};
+    var second = first;
+    second.ligatures = !first.ligatures;
+    try std.testing.expect(!sameLiveFont(first, second));
+    first.ligatures = second.ligatures;
+    try std.testing.expect(sameLiveFont(first, second));
 }
 
 fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer, max_spins: ?usize, smoke_opts: TerminalSmokeOpts) !void {

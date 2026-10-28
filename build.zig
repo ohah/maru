@@ -813,6 +813,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     support.attachArrayRepeatImports(b, exe.root_module);
+    const native_run_api = Translator.init(b.dependency("translate_c", .{}), .{
+        .name = "maru-native-run-api",
+        .c_source_file = b.path("src/native_shaping_run.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    exe.root_module.addImport("native_shaping_run_c", native_run_api.mod);
 
     // W7.1: Win32 창은 user32/gdi32를 부른다. `extern "user32"`만으로는 이 exe에 import가 안 붙어
     // 호출이 조용히 실패한다(실측: `RegisterClassExW`도 시스템 `STATIC` 클래스 `CreateWindowExW`도
@@ -1954,6 +1962,14 @@ pub fn build(b: *std.Build) void {
         // **테스트가 아니라 실행 파일로 컴파일한다.** 테스트 빌드는 test 블록이 참조하는 것만 분석하므로
         // `main()`과 그 아래(호스트 게이트·경로 정책)가 통째로 빠진다 — 실측: `main.zig`에 macOS 전용 타입
         // 오류를 심고 테스트 빌드로 돌리면 **통과한다.** 실행 파일은 `main`이 진입점이라 반드시 분석된다.
+        const cross_native_run_api = Translator.init(b.dependency("translate_c", .{}), .{
+            .name = b.fmt("maru-native-run-api-{s}", .{triple}),
+            .c_source_file = b.path("src/native_shaping_run.h"),
+            .target = cross_target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        cross_exe_mod.addImport("native_shaping_run_c", cross_native_run_api.mod);
         const cross_exe = b.addExecutable(.{ .name = b.fmt("maru-check-{s}", .{triple}), .root_module = cross_exe_mod });
         if (cross_target.result.os.tag == .macos) {
             // `check-targets` 검사 범위는 Zig의 타깃별 API 표면이다. 빌드 호스트에 Apple SDK가
@@ -2162,6 +2178,14 @@ pub fn build(b: *std.Build) void {
     const run_raster_origin_tests = b.addRunArtifact(raster_origin_tests);
     run_raster_origin_tests.addArg("--maru-expect-tests=7");
     b.step("test-windows-raster-origin", "Verify native glyph bitmap origins and clipping").dependOn(&run_raster_origin_tests.step);
+    const allocation_path_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows run frame allocation path"} });
+    const run_allocation_path_tests = b.addRunArtifact(allocation_path_tests);
+    run_allocation_path_tests.addArg("--maru-expect-tests=3");
+    b.step("test-windows-run-allocation-path", "Compare native frame output across allocation strategies").dependOn(&run_allocation_path_tests.step);
+    const run_frame_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows run frame"} });
+    const run_native_frame_tests = b.addRunArtifact(run_frame_tests);
+    run_native_frame_tests.addArg("--maru-expect-tests=14");
+    b.step("test-windows-run-frame", "Verify native terminal shaping to atlas frames").dependOn(&run_native_frame_tests.step);
     const run_face_tests = addProjectTest(b, .{ .root_module = exe.root_module, .filters = &.{"Windows run faces"} });
     const run_run_face_tests = b.addRunArtifact(run_face_tests);
     run_run_face_tests.addArg("--maru-expect-tests=7");

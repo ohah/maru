@@ -5334,8 +5334,10 @@ PNG/OCR은 고정된 앱의 화면 기록 권한과 독립 후보창 기록을 �
 같은 고정 앱에서 서로 다른 후보창 5개의 PNG/hash/독립 OCR도 통과했다. 실제 OS 실행은 references 모드이며 나머지 명령 kind는 공유 호스트 검사로 검증했다.
 위치 응답을 공급하는 fixture는 실제 LSP 서버 통신 검증이 아니다. [계획과 결과](plans/reference-picker-ime.md)를 따른다.
 
-파싱 Runtime의 상태 조회는 현재 판의 대기·실패 완료와 준비 오류를 구분한다. `test-editor-parse-runtime` 10개는 실제 copy OOM·재요청·늦은 실패 장벽을 포함하며, [관측 결함 대조](../tools/editor-parse-runtime/README.md)의 `--scope observation`을 별도로 실행한다. 일반 입력·표시·알림 정책 검증은 아니다.
+파싱 Runtime의 상태 조회는 현재 판의 대기·실패 완료와 준비 오류를 구분한다. `test-editor-parse-runtime` 12개는 실제 copy OOM·재요청·늦은 실패 장벽을 포함하며, [관측 결함 대조](../tools/editor-parse-runtime/README.md)의 `--scope observation`을 별도로 실행한다. 일반 입력·표시·알림 정책 검증은 아니다.
 
 파싱 완료 보유 API는 이전 판 보유 중 새 결과 교체·마지막 뷰 닫기·소비자 보유 중 종료 거절을 검사한다. worker C 장벽으로 마지막 참조 반환만 퇴역을 게시하는지 확인하며, Apple probe의 `retained_result=1`은 실제 전달 후 보유·종료 순서 검증이다. [실제 결함 대조](../tools/editor-parse-runtime/README.md)의 `--scope leases`를 따르고 실제 GUI 소비자 연결 완료로 해석하지 않는다.
 
 완료 트리의 뷰 설치는 `test-editor-parse-view`가 공유 뷰/split·캐시 무효화·현재 요청 재검증·legacy/빈 문서·참조 overflow를 검사한다. 실제 구문 색과 전체 native 노드 좌표를 cold 결과와 대조하고 Apple main queue의 `installed_view=1`로 설치·보유·종료 순서를 확인한다. [독립 실제 결함 대조](../tools/editor-parse-runtime/README.md)의 `--scope view`를 따르며 GUI/IME·일반 입력 경로 전환 완료로 확대하지 않는다.
+
+공유 파싱 요청의 ensure는 같은 문서/판/언어 설정 재사용과 다른 문서·revision·native 언어 변경의 새 게시를 검사한다. 실패 완료 재사용과 마지막 뷰 닫기 후 같은 identity 재요청은 read lease·보유 결과로 문서를 유지한 상태에서 대조한다. [독립 결함 대조](../tools/editor-parse-runtime/README.md)의 `--scope sharing`은 Runtime 12개·host 6개와 Apple shared_request=1을 요구한다. UI 재시도 정책 승인이나 화면 활성화 증거는 아니다.

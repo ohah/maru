@@ -11,6 +11,8 @@ pub const Observation = union(enum) {
     pending: request.Request,
     finished: struct { tag: request.Request, outcome: worker.Outcome },
 };
+/// published는 이번 호출이 새 작업을 게시했는지다. tag 자체는 자원을 보유하지 않는다.
+pub const Submission = struct { tag: request.Request, published: bool };
 const Entry = struct {
     lease: registry.Lease,
     identity: registry.DocumentIdentity,
@@ -34,15 +36,37 @@ pub const Runtime = struct {
         for (self.entries.items) |*entry| if (std.meta.eql(entry.identity, identity)) return entry;
         return null;
     }
+    fn currentInput(source: registry.Lease, grammar: request.Grammar) !request.Input {
+        const state = source.owner.get(source) orelse return error.StaleReference;
+        const opened = state.opened orelse return error.NotOpened;
+        if (source.owner.viewCount(source).? == 0) return error.NoViews;
+        return .{ .document = source.owner.identity(source).?, .revision = opened.file.revision, .grammar = grammar };
+    }
+    fn shareable(entry: *const Entry, tag: request.Request) bool {
+        if (entry.gate.wanted) |wanted| return std.meta.eql(wanted, tag) and
+            (entry.gate.phase == .awaiting or entry.gate.phase == .consumed);
+        // 실패도 게시된 시도의 완료다. 같은 입력의 자동 재시도로 실패를 지우지 않는다.
+        return entry.outcome != null and entry.outcome.? != .ready;
+    }
+    /// 공유 뷰의 같은 입력은 이미 게시한 요청을 재사용한다. 강제 재시도는 기존 submit을 쓴다.
+    /// 준비 오류는 기존 submit 오류로 반환하며, 호출자가 재시도 시점을 정한다.
+    pub fn ensure(self: *Runtime, source: registry.Lease, grammar: request.Grammar, language: syntax.Language) !Submission {
+        std.debug.assert(std.Thread.getCurrentId() == self.main_thread);
+        const input = try currentInput(source, grammar);
+        if (self.find(input.document)) |entry| if (entry.latest) |tag| {
+            if (std.meta.eql(tag.input, input) and entry.language == language and shareable(entry, tag)) {
+                return .{ .tag = tag, .published = false };
+            }
+        };
+        return .{ .tag = try self.submit(source, grammar, language), .published = true };
+    }
     /// 내부 준비 실패는 caller로 반환한다. 본문/Undo를 수정하거나 동기 파싱으로 우회하지 않는다.
     pub fn submit(self: *Runtime, source: registry.Lease, grammar: request.Grammar, language: syntax.Language) !request.Request {
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread);
+        const input = try currentInput(source, grammar);
         const owner = @constCast(source.owner);
-        const state = owner.get(source) orelse return error.StaleReference;
-        const opened = state.opened orelse return error.NotOpened;
-        if (owner.viewCount(source).? == 0) return error.NoViews;
-        const identity = owner.identity(source).?;
-        const revision = opened.file.revision;
+        const opened = owner.get(source).?.opened.?;
+        const identity = input.document;
         var entry = self.find(identity);
         const added = entry == null;
         if (added) {
@@ -65,7 +89,6 @@ pub const Runtime = struct {
         value.outcome = null;
         var snapshot = opened.file.snapshot();
         errdefer snapshot.deinit();
-        const input: request.Input = .{ .document = identity, .revision = revision, .grammar = grammar };
         const tag = if (value.current) |*previous|
             try self.service.submitFrom(value.gate, input, &snapshot, language, previous)
         else
@@ -144,6 +167,9 @@ pub const Runtime = struct {
                 i += 1;
                 continue;
             }
+            // 같은 문서를 read lease로 다시 열어도 닫힌 시도의 완료/실패를 새 뷰에 재사용하지 않는다.
+            entry.latest = null;
+            entry.outcome = null;
             entry.gate.invalidate();
             self.service.cancelDocument(entry.identity);
             if (entry.current) |*current| current.release();

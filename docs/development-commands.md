@@ -2235,3 +2235,5 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 - 파싱 결과 보유·반환: `python3 tools/editor-parse-runtime/review.py --scope leases --output <새 외부 경로> --deps <기존 의존성 경로> --cache <외부 캐시>`. 소비자 반환 전 퇴역·종료와 현재 입력 검증을 실제 worker C 장벽 및 Apple 전달로 검사한다.
 
 - 완료 트리의 뷰 설치: `mise exec -- zig build test-editor-parse-view -j2`(macOS)는 제품 상태 4개·root 초기화 1개를 실행한다. 독립 결함 대조는 `tools/editor-parse-runtime/review.py --scope view`를 따른다. 일반 입력·화면 배선 전환 검증과는 구분한다.
+
+- 공유 파싱 요청: `tools/editor-parse-runtime/review.py --scope sharing`은 Runtime 12개·host 6개와 실제 Apple 전달에서 동일 입력 재사용·입력 변경 게시·닫기 뒤 재요청을 검사한다. 새 외부 output/deps/cache 인자는 기존 runtime 안내를 따른다.

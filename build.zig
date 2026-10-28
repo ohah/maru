@@ -6661,6 +6661,16 @@ pub fn build(b: *std.Build) void {
     run_workspace_edit.addArg("--maru-expect-tests=21");
     run_workspace_edit.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-workspace-edit", "Run WorkspaceEdit preparation and rename regressions").dependOn(&run_workspace_edit.step);
+    const code_action_origin_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.CA1 ", ".test.CA2 ", ".test.ASB3 ", ".test.ASB4 ", ".test.ASB6 " } });
+    const run_code_action_origin_tests = b.addRunArtifact(code_action_origin_tests);
+    run_code_action_origin_tests.setCwd(b.path("."));
+    run_code_action_origin_tests.addArg("--maru-expect-tests=9");
+    run_code_action_origin_tests.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-code-action-origins", "Verify code action origin isolation and primary/auxiliary aggregation").dependOn(&run_code_action_origin_tests.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_code_action_origin_tests.addArg("--maru-expect-passed=9");
+        macos_only_test_step.dependOn(&run_code_action_origin_tests.step);
+    }
     const completion_overlay_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.HELP10 ", ".test.HELP11 ", ".test.FINDH5 " } });
     const run_completion_overlays = b.addRunArtifact(completion_overlay_tests);
     run_completion_overlays.setCwd(b.path("."));

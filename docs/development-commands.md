@@ -2244,3 +2244,7 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 - 완료 트리의 뷰 설치: `mise exec -- zig build test-editor-parse-view -j2`(macOS)는 제품 상태 4개·root 초기화 1개를 실행한다. 독립 결함 대조는 `tools/editor-parse-runtime/review.py --scope view`를 따른다. 일반 입력·화면 배선 전환 검증과는 구분한다.
 
 - 공유 파싱 요청: `tools/editor-parse-runtime/review.py --scope sharing`은 Runtime 12개·host 6개와 실제 Apple 전달에서 동일 입력 재사용·입력 변경 게시·닫기 뒤 재요청을 검사한다. 새 외부 output/deps/cache 인자는 기존 runtime 안내를 따른다.
+
+### 코드 액션 응답 출처
+
+`mise exec -- zig build test-editor-code-action-origins test-editor-save-pipeline -j2` — 같은 exe/seq의 다른 root 응답 격리와 주/보조 서버 합산·resolve·저장 회귀. [계획](plans/code-action-response-origin.md)을 따른다.

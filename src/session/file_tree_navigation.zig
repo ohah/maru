@@ -74,6 +74,20 @@ pub const Selection = struct {
             self.clear();
             return null;
         };
+        // An expanded parent that is still scanning cannot establish absence. Rename/create
+        // completion may already have reserved a new identity while these rows still contain
+        // its old name. Keep the reservation until that nearest parent's listing settles;
+        // exact matches, collapsed parents and completed missing listings retain their rules.
+        const fallback = rows[resolved];
+        const loading_parent = switch (fallback) {
+            .root => |row| row.expanded and row.loading,
+            .directory => |row| row.expanded and row.loading,
+            else => false,
+        };
+        if (loading_parent) if (file_tree.rowIdentity(fallback)) |ancestor| {
+            if (wanted.kind != .recent_file and ancestor.path.len < wanted.path.len and
+                file_tree.Tree.pathWithinRoot(wanted.path, ancestor.path)) return null;
+        };
         _ = self.set(rows, resolved);
         return resolved;
     }
@@ -214,4 +228,61 @@ test "scroll into view keeps selection inside viewport" {
     try std.testing.expectEqual(@as(usize, 4), scrollIntoView(4, 7, 5));
     try std.testing.expectEqual(@as(usize, 5), scrollIntoView(4, 9, 5));
     try std.testing.expectEqual(@as(usize, 4), scrollIntoView(4, 99, 0));
+}
+
+test "RF5a async selection retains a missing identity only while its visible parent loads" {
+    var selection: Selection = .{};
+    var root_loading = test_rows[0];
+    root_loading.root.loading = true;
+    const loading = [_]file_tree.Row{root_loading};
+    try std.testing.expect(selection.setIdentity(.file, "/repo/base韓", 1));
+    const reserved_generation = selection.generation;
+    try std.testing.expectEqual(@as(?usize, null), selection.reconcile(&loading));
+    try std.testing.expectEqualStrings("/repo/base韓", selection.path().?);
+    try std.testing.expectEqual(reserved_generation, selection.generation);
+
+    // The exact new row wins even if its parent still has another scan in flight.
+    var renamed = test_rows[4];
+    renamed.file.path = "/repo/base韓";
+    const arrived = [_]file_tree.Row{ root_loading, renamed };
+    try std.testing.expectEqual(@as(?usize, 1), selection.reconcile(&arrived));
+    try std.testing.expectEqual(reserved_generation, selection.generation);
+
+    // A completed scan that really lacks the file retains the ordinary fallback.
+    try std.testing.expectEqual(@as(?usize, 0), selection.reconcile(&.{test_rows[0]}));
+    try std.testing.expectEqualStrings("/repo", selection.path().?);
+
+    // A collapsed parent is a visibility decision, even if an old scan is running.
+    var collapsed = root_loading;
+    collapsed.root.expanded = false;
+    try std.testing.expect(selection.setIdentity(.file, "/repo/base韓", 1));
+    try std.testing.expectEqual(@as(?usize, 0), selection.reconcile(&.{collapsed}));
+
+    // Only the deepest visible ancestor establishes whether that child's listing is ready.
+    try std.testing.expect(selection.setIdentity(.file, "/repo/docs/new", 2));
+    try std.testing.expectEqual(@as(?usize, 1), selection.reconcile(&.{ root_loading, test_rows[1] }));
+    var directory_loading = test_rows[1];
+    directory_loading.directory.loading = true;
+    try std.testing.expect(selection.setIdentity(.file, "/repo/docs/new", 2));
+    const nested_generation = selection.generation;
+    try std.testing.expectEqual(@as(?usize, null), selection.reconcile(&.{ test_rows[0], directory_loading }));
+    try std.testing.expectEqual(nested_generation, selection.generation);
+
+    // Explicit user selection during loading must not be stolen when the new file arrives.
+    try std.testing.expect(selection.set(&test_rows, 4));
+    try std.testing.expectEqual(@as(?usize, 2), selection.reconcile(&.{ root_loading, renamed, test_rows[4] }));
+    try std.testing.expectEqualStrings("/repo/z.md", selection.path().?);
+
+    // A similarly prefixed path and a changed kind are not a missing descendant.
+    try std.testing.expect(selection.setIdentity(.file, "/repo-other/new", 1));
+    try std.testing.expectEqual(@as(?usize, 0), selection.reconcile(&loading));
+    try std.testing.expect(selection.setIdentity(.file, "/repo", 0));
+    try std.testing.expectEqual(@as(?usize, 0), selection.reconcile(&loading));
+
+    // Recent-list absence is independent of a project scan, and removing all roots clears selection.
+    try std.testing.expect(selection.setIdentity(.recent_file, "/repo/new", 1));
+    try std.testing.expectEqual(@as(?usize, 0), selection.reconcile(&loading));
+    try std.testing.expect(selection.setIdentity(.file, "/repo/new", 1));
+    try std.testing.expectEqual(@as(?usize, null), selection.reconcile(&.{}));
+    try std.testing.expectEqual(@as(?[]const u8, null), selection.path());
 }

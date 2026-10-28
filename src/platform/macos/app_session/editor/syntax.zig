@@ -23,6 +23,7 @@ const syntax_capture = maru.session.syntax_capture;
 const editor_language = maru.session.editor.language;
 const bracket_colors = maru.session.editor.bracket_colors;
 const editor_brackets = maru.session.editor.brackets;
+const parse_worker = @import("parse/worker.zig");
 const origin_model = maru.session.editor.syntax.origin;
 
 const OriginState = struct {
@@ -69,6 +70,8 @@ pub const ColorBufs = struct {
 pub const State = struct {
     /// grammar가 없거나 파서를 못 세우면 `null`이고, 그러면 이 문서는 끝까지 무색이다(§5).
     provider: ?syntax.Provider = null,
+    /// 불변 완료를 지키는 참조. 뷰의 cursor·캐시·트리를 모두 놓은 뒤 마지막에 반환한다.
+    parse_result: ?parse_worker.Completion = null,
     /// 완료한 입력만 증명한다. 직접 변경/재개에서 버리고 C 자원은 계속 이 뷰가 소유한다.
     input_stamp: ?maru.session.editor.syntax_stamp.Stamp = null,
     // 터미널마다 큰 증명 값을 얹지 않는다. 편집 뷰가 필요할 때 만들며 OOM은 최적화만 포기한다.
@@ -121,6 +124,44 @@ pub const State = struct {
         return path;
     }
 
+    /// parse/view의 현재 판 검증과 native 복사 준비가 끝난 뒤에만 호출한다.
+    /// legacy 트리는 완료 보유 참조가 없어 최종 해제 스레드를 보장할 수 없으므로 여기서 교체하지 않는다.
+    pub fn installCompleted(self: *State, next_provider: *?syntax.Provider, next_result: *?parse_worker.Completion) error{LegacyProvider}!void {
+        if (self.provider != null and self.parse_result == null) return error.LegacyProvider;
+        std.debug.assert(next_result.* != null and next_result.*.?.outcome() == .ready);
+        clearInputProofs(self);
+        // cursor와 캐시가 별도 native 참조를 가진다. 기존 보유 참조를 반환하기 전에 모두 놓는다.
+        self.folds.invalidate();
+        self.brackets.invalidate();
+        self.brackets.leaves.clearRetainingCapacity();
+        self.bracket_toks.clearRetainingCapacity();
+        self.bracket_info.clearRetainingCapacity();
+        self.bracket_scratch.clearRetainingCapacity();
+        self.bracket_navigation.entries.clearRetainingCapacity();
+        self.bracket_resolved = null;
+        self.symbols.clearRetainingCapacity();
+        self.crumb.clearRetainingCapacity();
+        self.crumb_bounds.clearRetainingCapacity();
+        self.crumb_syms.clearRetainingCapacity();
+        self.bufs.spans.clearRetainingCapacity();
+        self.bufs.byte_spans.clearRetainingCapacity();
+        self.bufs.line_bounds.clearRetainingCapacity();
+        self.minimap_bufs.spans.clearRetainingCapacity();
+        self.minimap_bufs.byte_spans.clearRetainingCapacity();
+        self.minimap_bufs.line_bounds.clearRetainingCapacity();
+        if (self.provider) |*old| old.deinit();
+        if (self.parse_result) |*old| old.release();
+        self.provider = next_provider.*;
+        self.parse_result = next_result.*;
+        next_provider.* = null;
+        next_result.* = null;
+        self.pending = false;
+        if (self.provider) |*provider| {
+            const input = self.parse_result.?.tag().input;
+            self.input_stamp = .{ .document = input.document, .revision = input.revision, .provider_identity = @intFromPtr(provider.parser), .tree_generation = provider.tree_gen };
+        }
+    }
+
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         clearInputProofs(self);
         self.folds.deinit(allocator);
@@ -130,6 +171,7 @@ pub const State = struct {
         self.bracket_scratch.deinit(allocator);
         self.bracket_navigation.deinit(allocator);
         if (self.provider) |*p| p.deinit();
+        if (self.parse_result) |*result| result.release();
         self.bufs.deinit(allocator);
         self.minimap_bufs.deinit(allocator);
         self.symbols.deinit(allocator);
@@ -205,7 +247,18 @@ pub fn openBudgeted(source: []const u8, g: editor_language.Grammar, budget_ns: u
 /// 공유 뷰의 준비 스냅샷은 각 뷰가 따로 소유한다. 부가 캐시의 OOM으로 분할을 거절하지 않는다.
 pub fn prepareSharedSnapshot(source: *const State, allocator: std.mem.Allocator, g: editor_language.Grammar) ?*State {
     if (source.pending) return null;
-    const original = if (source.provider) |*p| p else return null;
+    // 빈 비동기 문서는 tree/parser 사본이 없어도 완료 참조가 있다. split을 legacy 경로로 돌리지 않는다.
+    if (source.provider == null) {
+        const held = source.parse_result orelse return null;
+        const next = allocator.create(State) catch return null;
+        next.* = .{};
+        next.parse_result = held.retain() catch {
+            allocator.destroy(next);
+            return null;
+        };
+        return next;
+    }
+    const original = &source.provider.?;
     // 입장 공간을 먼저 확보하여 wrapper OOM에서는 native 자원을 만들지 않는다.
     const next = allocator.create(State) catch return null;
     next.* = .{ .provider = original.copyReady(syntaxLanguage(g)) };
@@ -213,6 +266,14 @@ pub fn prepareSharedSnapshot(source: *const State, allocator: std.mem.Allocator,
         allocator.destroy(next);
         return null;
     };
+    // 완료에서 설치한 뷰를 split해도 원본 Job의 마지막 참조를 메인에 남기지 않는다.
+    if (source.parse_result) |held| {
+        next.parse_result = held.retain() catch {
+            next.deinit(allocator);
+            allocator.destroy(next);
+            return null;
+        };
+    }
     // 실제 복사한 입력 판만 옮기고, 계보 메타데이터는 받는 뷰의 allocator로 따로 소유한다.
     if (source.input_stamp) |stamp| if (matchesInput(source, stamp.document, stamp.revision)) {
         next.input_stamp = .{ .document = stamp.document, .revision = stamp.revision, .provider_identity = @intFromPtr(provider.parser), .tree_generation = provider.tree_gen };
@@ -242,6 +303,7 @@ pub fn resumeParse(self: *State, source: []const u8) bool {
         self.pending = false;
         return false;
     };
+    std.debug.assert(self.parse_result == null); // 완료에서 온 뷰 트리는 메인에서 변경하지 않는다.
     const status = p.setSourceBudgeted(source, frame_parse_budget_ns);
     self.pending = status == .pending;
     return self.pending;
@@ -305,6 +367,7 @@ pub fn reparse(self: *State, source: []const u8) void {
 }
 
 fn reparseFromReady(self: *State, source: []const u8, ready: ?*const syntax.Provider, trace: ?*UpdateTrace) void {
+    std.debug.assert(self.parse_result == null);
     clearInputProofs(self);
     const p = if (self.provider) |*provider| provider else return;
     self.folds.invalidate();
@@ -329,6 +392,7 @@ pub fn onEditSpan(
 }
 
 fn onEditSpanFromReady(self: *State, allocator: std.mem.Allocator, source: []const u8, e: EditSpan, lines_after: maru.session.editor.line_index.LineIndex, ready: ?*const State, trace: ?*UpdateTrace) void {
+    std.debug.assert(self.parse_result == null);
     clearInputProofs(self);
     const p = if (self.provider) |*provider| provider else return;
     // 옛 끝 행·열은 색 질의용 파싱의 기존 근사다. 접힘 캐시는 이 좌표로 행을 밀지 않는다.

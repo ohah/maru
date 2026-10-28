@@ -1,5 +1,14 @@
 # 개발 명령
 
+### 원격 pane 대표 선택
+
+`mise exec -- zig build test-remote-pane-selection-contract test-remote-pane-selection -j2`와
+`-Doptimize=ReleaseFast`는 같은 밀리초의 연속 클릭, 클릭 시계 역행, 이후 이벤트의 대표 승계,
+surface 격리·퇴역·없는 pane, 가득 찬 테이블의 선택과 퇴출을 검사한다. 제품 검사는 사이드바의
+실제 마우스 경로와 최근 세션·대표 슬롯의 일치를 확인한다. 실제 tmux/SSH나 물리 GUI 검증은 포함하지 않는다.
+- [원자적 자동완성 확정](editor-completion-commit.md): `mise exec -- zig build test-editor-completion-contract test-editor-completion test-editor-completion-overlays -j2`.
+
+
 최신 편집 비용의 재측정은 [현재 메인 귀속 계획](plans/editor-current-frame-attribution.md)을 따른다.
 `python3 tools/editor-frame-measure/test_summary.py`와 `python3 tools/editor-storage-measure/test_summary.py`는
 구간 버전·혼합 기록·호출 누락·시간 포함과 기존 저장소 판정을 검사한다.
@@ -30,7 +39,7 @@
 - `mise exec -- zig build test-editor-bracket-range-cursor test-editor-bracket-range-cursor-product -j2`: 범위 수집의 독립 전체 순회·오류 복구·cursor 불일치·할당 실패와 제품 색/탐색·Undo/Redo를 검사한다. `-Doptimize=ReleaseFast`도 지원한다. [계획과 재현](plans/editor-bracket-range-cursor.md)을 따른다.
 - pane 프레임 준비 비용: [사본 실행·집계·독립 손상 검증 명령](../tools/editor-pane-measure/results.md). 제품을 바꾸지 않으며 pane 내부 호출만 센다.
 - `mise exec -- zig build test-editor-snapshot-clone -j2`: 원본 버퍼·최초 Snapshot 종료 뒤 복사 Snapshot의 독립 참조를 검사한다. 증분 인계 실측·결함 대조는 [별도 명령](../tools/editor-parse-incremental/README.md)을 따른다.
-- 파싱 완료 통지: [hook·재무장·퇴역 통지 검증](../tools/editor-parse-notify/README.md). 실제 OS main queue·UI에는 연결하지 않았다.
+- 파싱 완료 통지: [hook·재무장·퇴역 통지 검증](../tools/editor-parse-notify/README.md). 실제 main queue·문서 수명 연결은 다음 runtime 검증을 따른다.
 - native 파싱 서비스: `mise exec -- zig build test-editor-parse-worker test-editor-parse-worker-native test-syntax -j2`(macOS). 실제 큐·취소·자원 반환과 production-mode 실행을 [검증](../tools/editor-parse-worker/README.md)한다. UI에는 연결하지 않았다.
 - 파싱 요청 수락 문턱: `mise exec -- zig build test-editor-parse-request -j2`. `begin`·준비 후 `publish`·현재 결과의 단발 `accept`·닫기/고갈 무효화를 검사한다. [실제 Zig 결함 대조](../tools/editor-parse-request/README.md)를 따른다.
 - 파싱 결과 인계 기계: `mise exec -- zig build test-editor-syntax-stamp test-editor-shared-parse-core test-editor-shared-parse-product -j2`. [검증 범위와 제품 연결 조건](plans/editor-shared-parse-reuse.md)을 따른다.
@@ -2068,6 +2077,36 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 - `python3 tools/rename-ime/run.py --output <새 외부 경로> --mode diagnostic`: 사본 앱을 빌드하고 실제 키 입력·후보 취소/선택·별도 Return 이름 확정·터미널 복귀를 확인한다. 화면 픽셀 통과를 뜻하지 않는다.
 - 같은 앱에 `--app <고정 실행 파일> --mode live`를 쓰면 서로 다른 후보창 5개와 PNG/OCR을 추가 검사한다. workspace 이름 변경 장면이며 Save As 파일 생성 GUI를 대신하지 않는다.
 
+### LSP 심볼 이름 변경 IME GUI
+
+- `mise exec -- zig build test-symbol-rename-ime-oracles test-editor-workspace-edit test-inline-rename-ime -j2`: 독립 증거 검사기와 기존 WorkspaceEdit/공용 rename 회귀를 확인한다.
+- `python3 tools/symbol-rename-ime/run.py --output <새 외부 경로> --case hanja`: 실제 후보 입력 뒤 별도 Enter에서만 rename 요청을 보내는지, 두 파일 적용·저장·Workspace Undo를 검증한다. `korean`, `cancel`, `server-error`, `stale`도 별도 실행한다.
+- `--app <고정 사본 실행 파일>`로 앱을 재사용한다. 서버는 기존 제어용 fake LSP 프로세스이며 실제 SDK 검증으로 주장하지 않는다. 격리·wire·독립 재검증과 한계는 [도구](../tools/symbol-rename-ime/README.md)와 [계획](plans/symbol-rename-ime-gui.md)을 따른다.
+
+실제 서버는 같은 명령에 `--clangd /absolute/path/to/clangd`를 명시해 opt-in한다. 자동 설치 없이
+`hanja`·`korean`·`cancel`·`stale`를 지원하며 제어 서버 증거와 구분한다.
+같은 줄의 한글·이모지 앞 위치 검증은 `--unicode-prefix`를 더하며 새 prefix-aware 사본 앱을 사용한다.
+
+### 파일 탐색기 이름 변경 IME GUI
+
+- `mise exec -- zig build test-file-tree-model test-file-tree-rename-ime-oracles -j2`: 로딩 중 선택 신원 보존·실제 부재/접힘 fallback·사용자 선택 유지와 독립 파일 증거 검사기를 확인한다.
+- `python3 tools/file-tree-rename-ime/run.py --output <새 외부 경로> --case hanja`: 사본 앱에서 실제 한자 후보 취소/선택·별도 Enter rename·새 트리 선택·원본 bytes/inode를 확인한다. `korean`, `cancel`, `collision`, `write-failure`도 각각 실행한다.
+- `--app <고정 사본 실행 파일>` 재사용, 화면 캡처·복사본 identity 판정과 한계는 [도구 설명](../tools/file-tree-rename-ime/README.md)과 [계획](plans/file-tree-rename-ime-gui.md)을 따른다.
+
+### 이름 없는 문서 첫 저장 IME GUI
+
+- `mise exec -- zig build test-untitled-save-ime-oracles test-editor-first-save-async test-editor-untitled test-inline-rename-ime -j2`: 독립 증거 검사기와 기존 첫 저장·공용 rename 입력 회귀를 검사한다.
+- `python3 tools/untitled-save-ime/run.py --output <새 외부 경로> --case hanja`: 사본 앱으로 후보 선택 Return·별도 저장 Return과 실제 한자 파일 생성을 검증한다. `korean`, `cancel`, `overwrite`, `reject`, `write-failure`도 각각 별도 실행한다.
+- `--app <고정 사본 실행 파일>`로 같은 앱을 재사용한다. 기존 화면 캡처 앱·사유 쓰기 실패 폴더·증거와 한계는 [도구 명령](../tools/untitled-save-ime/README.md)과 [계획](plans/untitled-first-save-ime-gui.md)을 따른다.
+
+### Save As 파일명·파일 생성 GUI
+
+- `mise exec -- zig build test-save-as-gui-oracles -j2`: 파일·모델·native action·캡처 기록을 독립 대조하는 검사기의 정상/손상 대조군이다. 실제 GUI를 실행하지 않는다.
+- `python3 tools/editor-project-search-app/run.py --save-as-command --save-as-only --native-panel-capture-app "/Users/yoonhb/Applications/Maru Screen Capture.app" --output <새 외부 경로>`: 사본 앱으로 이름 있는 문서의 native 저장 대화상자와 실제 파일 생성을 확인한다. 캡처 앱은 별도로 빌드·화면 기록 허용된 앱을 지정한다.
+- `--app <이 하네스로 빌드한 실행 파일>`로 같은 앱을 재사용한다. `--save-as-name 한.txt --save-as-filename-input korean` 또는 `--save-as-name 韓.txt --save-as-filename-input hanja`는 실제 두벌식 키 입력과 한자 확정을 확인한다. ASCII 확장자는 AX로 붙이며 Save As 단축키는 AppKit 이벤트다.
+- `--save-as-existing-target`은 기존 목적지에 sentinel을 만들고 Replace 확인을 수락한다. `--save-as-overwrite-choice cancel`은 Replace를 거부한 뒤 저장 대화상자도 취소한다. `--save-as-scenario cancel`은 곧바로 저장 대화상자를 취소한다.
+- 원본 bytes·목적지 bytes·문서 경로·dirty·pending·Undo/Redo를 각각 확인한다. `--save-as-only`는 프로젝트 검색 장면을 실행하지 않으며 검색 성능 수치를 만들지 않는다. 상세 범위와 한계는 [계획](plans/save-as-file-lifecycle-gui.md)을 따른다.
+
 ### 시맨틱 토큰 서버 호환성
 
 `mise exec -- zig build test-editor-semantic-recovery -j2`는 EOF·UTF-8/UTF-16 범위, gopls 활성화 옵션, 응답 유실·늦은 seq·refresh를 검사한다. 중립 31개(행동 3개)와 macOS 제품 7개(SMT 행동 3개)를 강제한다. `tools/editor-theme-gallery/run_lsp.py`의 실제 서버 캡처로 색 결과를 별도로 확인한다.
@@ -2191,3 +2230,21 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 복구 목록 검색 IME: `mise exec -- zig build test-recovery-picker-ime -j2`는 범위·세대·목록 갱신·OOM과
 실제 private 백업의 후보 Return/별도 Return 경계를 검사한다. 중립 모델은 Debug/ReleaseFast 각각 실행한다.
 제품 변이와 실제 OS 입력/후보창 검증은 [구현 계획](plans/recovery-picker-ime.md)을 따른다.
+
+신뢰·환경 이름 목록 IME: `mise exec -- zig build test-trust-picker-ime -j2`는 두 모드의 범위·owner·실패 원자성과
+후보 Return/관리·닫기 경계를 확인한다. 실제 후보창과 사용자 신뢰/환경을 쓰지 않는 격리 절차는
+[구현 계획](plans/trust-picker-ime.md)을 따른다.
+
+- 파싱 main queue·문서 수명: `mise exec -- zig build test-editor-parse-runtime test-editor-parse-host test-editor-parse-main-queue -j2`(macOS). [실행 범위와 결함 대조](../tools/editor-parse-runtime/README.md). 일반 입력·표시 경로 전환 전 단계다.
+
+- 파싱 요청 상태 조회 검증: `python3 tools/editor-parse-runtime/review.py --scope observation --output <새 외부 경로> --deps <기존 의존성 경로> --cache <외부 캐시>`. 일반 입력 경로 전환 없이 대기·실패·재시도·옛 결과 차단을 검사한다.
+
+- 파싱 결과 보유·반환: `python3 tools/editor-parse-runtime/review.py --scope leases --output <새 외부 경로> --deps <기존 의존성 경로> --cache <외부 캐시>`. 소비자 반환 전 퇴역·종료와 현재 입력 검증을 실제 worker C 장벽 및 Apple 전달로 검사한다.
+
+- 완료 트리의 뷰 설치: `mise exec -- zig build test-editor-parse-view -j2`(macOS)는 제품 상태 4개·root 초기화 1개를 실행한다. 독립 결함 대조는 `tools/editor-parse-runtime/review.py --scope view`를 따른다. 일반 입력·화면 배선 전환 검증과는 구분한다.
+
+- 공유 파싱 요청: `tools/editor-parse-runtime/review.py --scope sharing`은 Runtime 12개·host 6개와 실제 Apple 전달에서 동일 입력 재사용·입력 변경 게시·닫기 뒤 재요청을 검사한다. 새 외부 output/deps/cache 인자는 기존 runtime 안내를 따른다.
+
+### 코드 액션 응답 출처
+
+`mise exec -- zig build test-editor-code-action-origins test-editor-save-pipeline -j2` — 같은 exe/seq의 다른 root 응답 격리와 주/보조 서버 합산·resolve·저장 회귀. [계획](plans/code-action-response-origin.md)을 따른다.

@@ -33,6 +33,10 @@ const Basis = struct {
 };
 const Job = struct {
     next: ?*Job = null,
+    // 메인만 읽고 고친다. worker의 큐 이동 중에도 실제 Snapshot 반환까지 작업이 살아 있음을 보인다.
+    main_refs: usize = 0, // 메인 소비자가 반환할 때까지 native 퇴역을 막는다.
+    main_prev: ?*Job = null,
+    main_next: ?*Job = null,
     tag: request.Request,
     snapshot: buffer.Snapshot,
     language: syntax.Language,
@@ -130,6 +134,7 @@ const State = struct {
     returned: List = .{},
     active: ?*Job = null,
     held: usize = 0,
+    main_live: ?*Job = null, // 메인 소유 전체 작업 목록. 추가 할당 없이 수명을 추적한다.
     stopping: bool = false,
     notification_pending: std.atomic.Value(bool) = .init(false),
 
@@ -242,12 +247,27 @@ pub const Completion = struct {
         }
         return gate.accept(self.job.tag);
     }
+    /// 메인 전용 보유 참조다. 트리를 복사하거나 할당하지 않고 같은 불변 결과의 수명을 늘린다.
+    /// 반환한 핸들은 정확히 한 번 release한다. 참조가 있어도 최신 본문의 결과라는 뜻은 아니다.
+    pub fn retain(self: Completion) error{ReferenceOverflow}!Completion {
+        const state = self.state;
+        const io_value = state.io();
+        state.mutex.lockUncancelable(io_value);
+        defer state.mutex.unlock(io_value);
+        const refs = std.math.add(usize, self.job.main_refs, 1) catch return error.ReferenceOverflow;
+        const held = std.math.add(usize, state.held, 1) catch return error.ReferenceOverflow;
+        self.job.main_refs = refs;
+        state.held = held;
+        return self;
+    }
     pub fn release(self: *Completion) void {
         const state = self.state;
         const io_value = state.io();
         state.mutex.lockUncancelable(io_value);
+        std.debug.assert(self.job.main_refs != 0 and state.held != 0);
         state.held -= 1;
-        state.retiring.push(self.job);
+        self.job.main_refs -= 1;
+        if (self.job.main_refs == 0) state.retiring.push(self.job);
         state.changed.signal(io_value);
         state.mutex.unlock(io_value);
         self.* = undefined;
@@ -311,6 +331,9 @@ pub const Service = struct {
             }
         }
         const state = self.state;
+        job.main_next = state.main_live;
+        if (state.main_live) |head| head.main_prev = job;
+        state.main_live = job;
         const io_value = state.io();
         state.mutex.lockUncancelable(io_value);
         state.waiting.push(job);
@@ -318,6 +341,14 @@ pub const Service = struct {
         state.changed.signal(io_value);
         state.mutex.unlock(io_value);
         return tag;
+    }
+    /// 메인 전용 수명 조회다. 실행/퇴역 중이거나 caller가 보유한 완료도 Snapshot 반환 전까지 포함한다.
+    pub fn hasJobs(self: *const Service, document: Identity) bool {
+        var next = self.state.main_live;
+        while (next) |job| : (next = job.main_next) {
+            if (std.meta.eql(job.tag.input.document, document)) return true;
+        }
+        return false;
     }
     /// Gate의 입력 무효화는 caller가 먼저 한다. 이 메서드는 자원 회수의 완료를 뜻하지 않는다.
     pub fn cancelDocument(self: *Service, document: Identity) void {
@@ -342,6 +373,8 @@ pub const Service = struct {
         defer state.mutex.unlock(io_value);
         const job = state.completed.pop() orelse return null;
         state.held += 1;
+        std.debug.assert(job.main_refs == 0);
+        job.main_refs = 1;
         return .{ .state = state, .job = job };
     }
     /// 네이티브 자원은 이미 워커가 해제했다. 원본 allocator와 노드는 메인에서만 회수한다.
@@ -363,8 +396,15 @@ pub const Service = struct {
                 std.debug.assert(base.provider == null);
                 base.snapshot.deinit();
             }
+            // 두 Snapshot의 allocator 사용이 모두 끝난 뒤에만 문서 keeper의 해제를 허용한다.
+            if (job.main_prev) |previous| previous.main_next = job.main_next else state.main_live = job.main_next;
+            if (job.main_next) |next| next.main_prev = job.main_prev;
             state.allocator.destroy(job);
         }
+    }
+    /// 메인 소유 Runtime이 자기 완료 참조와 외부 소비자의 참조를 구분할 때 쓴다.
+    pub fn heldCount(self: *const Service) usize {
+        return self.state.held;
     }
     /// 빌려 간 결과가 남으면 서비스는 그대로 살아 있고 caller가 release 후 다시 시도한다.
     pub fn deinit(self: *Service) error{ResultsHeld}!void {
@@ -383,6 +423,7 @@ pub const Service = struct {
         state.mutex.unlock(io_value);
         state.thread.?.join();
         self.reap();
+        std.debug.assert(state.main_live == null);
         const allocator = state.allocator;
         state.threaded.deinit();
         allocator.destroy(state);
@@ -390,619 +431,9 @@ pub const Service = struct {
     }
 };
 
-const test_input: request.Input = .{ .document = .{ .owner = 1, .slot = 2, .generation = 3 }, .revision = 1, .grammar = .{ .identity = @backingInt(syntax.Language.zig), .generation = 0 } };
-fn testQueue(service: *Service, gate: *request.Gate, input: request.Input, source: buffer.Buffer, pause: ?*syntax.Cancellation.TestGate) !request.Request {
-    var snapshot = source.snapshot();
-    errdefer snapshot.deinit();
-    return service.submitImpl(gate, input, &snapshot, .zig, null, pause);
-}
-fn waitReady(service: *Service) void {
-    const state = service.state;
-    const io_value = state.io();
-    state.mutex.lockUncancelable(io_value);
-    defer state.mutex.unlock(io_value);
-    while (state.completed.first == null) state.changed.waitUncancelable(io_value, &state.mutex);
-}
-fn testTake(service: *Service) Completion {
-    waitReady(service);
-    return service.take().?;
-}
-fn waitEntered(pause: *syntax.Cancellation.TestGate) !void {
-    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 10_000_000_000;
-    while (!pause.entered.load(.acquire)) {
-        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds > deadline) return error.CallbackNotEntered;
-        std.Thread.yield() catch {};
-    }
-}
-fn largeTestBuffer(a: std.mem.Allocator) !buffer.Buffer {
-    var text: std.ArrayList(u8) = .empty;
-    defer text.deinit(a);
-    for (0..3000) |_| try text.appendSlice(a, "const item = 1;\n");
-    return buffer.Buffer.init(a, text.items);
-}
-
-test "parse worker 최신 대기만 유지하고 실행 중인 이전 요청은 C 반환까지 보존한다" {
-    const a = std.testing.allocator;
-    var first = try largeTestBuffer(a);
-    defer first.deinit();
-    var second = try buffer.Buffer.init(a, "const second = 2;\n");
-    defer second.deinit();
-    var latest = try buffer.Buffer.init(a, "const latest = 3;\n");
-    defer latest.deinit();
-    var audit: TestAudit = .{ .main_thread = std.Thread.getCurrentId() };
-    var copies = std.testing.FailingAllocator.init(std.heap.page_allocator, .{});
-    {
-        var service = try Service.init(a, .{ .audit = &audit, .copy_allocator = copies.allocator() });
-        defer service.deinit() catch unreachable;
-        var pause: syntax.Cancellation.TestGate = .{};
-        defer pause.release();
-        var gate: request.Gate = .{};
-        _ = try testQueue(&service, &gate, test_input, first, &pause);
-        try waitEntered(&pause);
-        var input = test_input;
-        input.revision += 1;
-        _ = try testQueue(&service, &gate, input, second, null);
-        input.revision += 1;
-        const tag = try testQueue(&service, &gate, input, latest, null);
-        service.reap(); // 교체된 미실행 노드의 snapshot은 메인에서 회수한다.
-        pause.release();
-        var old = testTake(&service);
-        defer old.release();
-        try std.testing.expectEqual(Outcome.cancelled, old.outcome());
-        try std.testing.expect(!old.accept(&gate));
-        var current = testTake(&service);
-        defer current.release();
-        try std.testing.expectEqual(tag, current.tag());
-        try std.testing.expectEqual(Outcome.ready, current.outcome());
-        try std.testing.expect(current.accept(&gate));
-        try std.testing.expect(!current.accept(&gate));
-        try std.testing.expect(current.provider().?.tree != null);
-        const bytes = try current.job.snapshot.copyRange(a, 0, current.job.snapshot.byteLen());
-        defer a.free(bytes);
-        try std.testing.expectEqualStrings("const latest = 3;\n", bytes);
-        try std.testing.expect(service.take() == null);
-    }
-    try std.testing.expectEqual(@as(usize, 0), audit.cancelled_with_tree.load(.acquire));
-    try std.testing.expectEqual(audit.created.load(.acquire), audit.destroyed.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 3), audit.reclaimed.load(.acquire));
-    try std.testing.expect(!audit.wrong_thread.load(.acquire));
-    try std.testing.expectEqual(copies.allocated_bytes, copies.freed_bytes);
-}
-
-test "parse worker 한 문서 취소는 다른 문서 대기를 지우지 않는다" {
-    const a = std.testing.allocator;
-    var first = try largeTestBuffer(a);
-    defer first.deinit();
-    var other = try buffer.Buffer.init(a, "const other = 7;\n");
-    defer other.deinit();
-    var service = try Service.init(a, .{});
-    defer service.deinit() catch unreachable;
-    var pause: syntax.Cancellation.TestGate = .{};
-    defer pause.release();
-    var gate_a: request.Gate = .{};
-    var gate_b: request.Gate = .{};
-    _ = try testQueue(&service, &gate_a, test_input, first, &pause);
-    try waitEntered(&pause);
-    var input = test_input;
-    input.document.owner += 1;
-    _ = try testQueue(&service, &gate_b, input, other, null);
-    gate_a.invalidate();
-    service.cancelDocument(test_input.document);
-    pause.release();
-    var cancelled = testTake(&service);
-    defer cancelled.release();
-    try std.testing.expectEqual(Outcome.cancelled, cancelled.outcome());
-    var ready = testTake(&service);
-    defer ready.release();
-    try std.testing.expect(ready.accept(&gate_b));
-    try std.testing.expectEqual(input.document, ready.tag().input.document);
-}
-
-test "parse worker 준비 할당 실패는 snapshot을 가져가지 않고 이전 수락을 지운다" {
-    const a = std.testing.allocator;
-    var source = try buffer.Buffer.init(a, "const saved = 1;");
-    defer source.deinit();
-    var failing = std.testing.FailingAllocator.init(a, .{});
-    var service = try Service.init(failing.allocator(), .{});
-    defer service.deinit() catch unreachable;
-    var gate: request.Gate = .{};
-    const old_tag = try testQueue(&service, &gate, test_input, source, null);
-    var old = testTake(&service);
-    defer old.release();
-    try std.testing.expect(old.accept(&gate));
-    var input = test_input;
-    input.revision += 1;
-    var snapshot = source.snapshot();
-    var owns_snapshot = true;
-    defer if (owns_snapshot) snapshot.deinit();
-    failing.fail_index = failing.alloc_index;
-    if (service.submit(&gate, input, &snapshot, .zig)) |_| {
-        owns_snapshot = false;
-        return error.ExpectedAllocationFailure;
-    } else |err| try std.testing.expect(err == error.OutOfMemory);
-    try std.testing.expect(!gate.isCurrent(old_tag));
-    try std.testing.expectEqual(source.byteLen(), snapshot.byteLen());
-}
-
-test "parse worker 본문 복사 OOM은 실패 결과로 반환하고 원본 snapshot을 회수한다" {
-    const a = std.testing.allocator;
-    var source = try buffer.Buffer.init(a, "const n = 1;");
-    defer source.deinit();
-    var failing = std.testing.FailingAllocator.init(std.heap.page_allocator, .{ .fail_index = 0 });
-    var service = try Service.init(a, .{ .copy_allocator = failing.allocator() });
-    defer service.deinit() catch unreachable;
-    var gate: request.Gate = .{};
-    _ = try testQueue(&service, &gate, test_input, source, null);
-    var result = testTake(&service);
-    defer result.release();
-    try std.testing.expectEqual(Outcome.out_of_memory, result.outcome());
-    try std.testing.expect(!result.accept(&gate));
-    try std.testing.expect(result.provider() == null);
-}
-
-test "parse worker 결과를 빌린 동안 종료는 거절하고 반환 뒤 종료한다" {
-    const a = std.testing.allocator;
-    var source = try buffer.Buffer.init(a, "const n = 1;");
-    defer source.deinit();
-    var audit: TestAudit = .{ .main_thread = std.Thread.getCurrentId() };
-    var copies = std.testing.FailingAllocator.init(std.heap.page_allocator, .{});
-    var service = try Service.init(a, .{ .audit = &audit, .copy_allocator = copies.allocator() });
-    var service_open = true;
-    defer if (service_open) {
-        service.deinit() catch unreachable;
-    };
-    var gate: request.Gate = .{};
-    _ = try testQueue(&service, &gate, test_input, source, null);
-    var result = testTake(&service);
-    var result_open = true;
-    defer if (result_open) result.release();
-    try std.testing.expectError(error.ResultsHeld, service.deinit());
-    try std.testing.expect(result.provider().?.tree != null);
-    result.release();
-    result_open = false;
-    try service.deinit();
-    service_open = false;
-    try std.testing.expectEqual(@as(usize, 1), audit.created.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 1), audit.destroyed.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 1), audit.reclaimed.load(.acquire));
-    try std.testing.expect(!audit.wrong_thread.load(.acquire));
-    try std.testing.expect(copies.allocated_bytes > 0);
-    try std.testing.expectEqual(copies.allocated_bytes, copies.freed_bytes);
-}
-
-test "parse worker 실행과 대기가 있어도 종료는 모든 소유 자료를 회수한다" {
-    const a = std.testing.allocator;
-    var first = try largeTestBuffer(a);
-    var first_open = true;
-    defer if (first_open) first.deinit();
-    var other = try buffer.Buffer.init(a, "const other = 7;");
-    defer other.deinit();
-    var service = try Service.init(a, .{});
-    defer service.deinit() catch unreachable;
-    var pause: syntax.Cancellation.TestGate = .{};
-    defer pause.release();
-    var gate_a: request.Gate = .{};
-    var gate_b: request.Gate = .{};
-    _ = try testQueue(&service, &gate_a, test_input, first, &pause);
-    try waitEntered(&pause);
-    first.deinit();
-    first_open = false;
-    var input = test_input;
-    input.document.slot += 1;
-    _ = try testQueue(&service, &gate_b, input, other, null);
-    pause.release();
-}
-
-test "parse worker 빈 입력과 미지원 언어를 구분한다" {
-    const a = std.testing.allocator;
-    var service = try Service.init(a, .{});
-    defer service.deinit() catch unreachable;
-    var gate: request.Gate = .{};
-    for ([_]syntax.Language{ .zig, .other }) |language| {
-        var source = try buffer.Buffer.init(a, if (language == .zig) "" else "text");
-        defer source.deinit();
-        var snapshot = source.snapshot();
-        var input = test_input;
-        input.grammar.identity = @backingInt(language);
-        _ = service.submit(&gate, input, &snapshot, language) catch |err| {
-            snapshot.deinit();
-            return err;
-        };
-        var result = testTake(&service);
-        defer result.release();
-        try std.testing.expectEqual(if (language == .zig) Outcome.ready else Outcome.unavailable, result.outcome());
-        try std.testing.expectEqual(language == .zig, result.accept(&gate));
-    }
-}
-
-test "parse worker 완료 후에도 take 전 취소된 결과를 수락하지 않는다" {
-    const a = std.testing.allocator;
-    var source = try buffer.Buffer.init(a, "const n = 1;");
-    defer source.deinit();
-    var service = try Service.init(a, .{});
-    defer service.deinit() catch unreachable;
-    var gate: request.Gate = .{};
-    _ = try testQueue(&service, &gate, test_input, source, null);
-    waitReady(&service);
-    gate.invalidate();
-    service.cancelDocument(test_input.document);
-    var result = service.take().?;
-    defer result.release();
-    try std.testing.expectEqual(Outcome.cancelled, result.outcome());
-    try std.testing.expect(!result.accept(&gate));
-    try std.testing.expect(result.provider() == null);
-}
-
-test "parse worker 새 입력은 아직 빌리지 않은 이전 완료도 퇴역시킨다" {
-    const a = std.testing.allocator;
-    var source = try buffer.Buffer.init(a, "const n = 1;");
-    defer source.deinit();
-    var service = try Service.init(a, .{});
-    defer service.deinit() catch unreachable;
-    var gate: request.Gate = .{};
-    const old = try testQueue(&service, &gate, test_input, source, null);
-    waitReady(&service);
-    var input = test_input;
-    input.revision += 1;
-    const latest = try testQueue(&service, &gate, input, source, null);
-    var result = testTake(&service);
-    defer result.release();
-    try std.testing.expect(old.serial != result.tag().serial);
-    try std.testing.expectEqual(latest, result.tag());
-    try std.testing.expect(result.accept(&gate));
-    try std.testing.expect(service.take() == null);
-}
-
-fn testQueueFrom(service: *Service, gate: *request.Gate, input: request.Input, source: buffer.Buffer, base: *const Completion, pause: ?*syntax.Cancellation.TestGate) !request.Request {
-    var snapshot = source.snapshot();
-    errdefer snapshot.deinit();
-    return service.submitImpl(gate, input, &snapshot, .zig, base, pause);
-}
-fn expectTree(result: *const Completion, source: []const u8, language: syntax.Language) !void {
-    var cold = syntax.Provider.init(source, language, 0) orelse return error.NoProvider;
-    defer cold.deinit();
-    try std.testing.expect(syntax.testing.equal(cold.tree.?, result.provider().?.tree.?) != null);
-}
-
-test "parse worker 증분과 같은 본문 재사용은 cold 전체 노드와 같고 원본은 불변이다" {
-    // 넓은 재파싱은 잘못된 편집 point를 덮을 수 있으므로 입력 좌표 계약도 따로 대조한다.
-    try std.testing.expectEqual(syntax.Point{ .row = 1, .column = 7 }, syntax.pointAt("a\r\n가😀", 10));
-    try std.testing.expectEqual(syntax.Point{ .row = 0, .column = 2 }, syntax.pointAt("a\r\n가😀", 2));
-    const a = std.testing.allocator;
-    const before = "// 가 😀\r\npub fn first() void {\r\n const s = \"가\"; _ = s;\r\n}\r\n";
-    const after = "// 가 😁\r\npub fn second() void {\r\n const s = \"각\"; _ = s;\r\n}\r\npub fn tail() void {}\r\n";
-    var source_a = try buffer.Buffer.init(a, before);
-    defer source_a.deinit();
-    var source_b = try buffer.Buffer.init(a, after);
-    defer source_b.deinit();
-    var service = try Service.init(a, .{});
-    defer service.deinit() catch unreachable;
-    var gate: request.Gate = .{};
-    const tag_a = try testQueue(&service, &gate, test_input, source_a, null);
-    var first = testTake(&service);
-    defer first.release();
-    try std.testing.expect(first.accept(&gate));
-    var input = test_input;
-    input.revision += 1;
-    const tag_b = try testQueueFrom(&service, &gate, input, source_b, &first, null);
-    var next = testTake(&service);
-    defer next.release();
-    try std.testing.expectEqual(Mode.incremental, next.mode());
-    try std.testing.expectEqual(tag_a, next.basis().?);
-    try std.testing.expect(next.accept(&gate));
-    try expectTree(&next, after, .zig);
-    try expectTree(&first, before, .zig);
-    input.revision += 1;
-    _ = try testQueueFrom(&service, &gate, input, source_b, &next, null);
-    var same = testTake(&service);
-    defer same.release();
-    try std.testing.expectEqual(Mode.reused, same.mode());
-    try std.testing.expectEqual(tag_b, same.basis().?);
-    try std.testing.expect(same.accept(&gate));
-    try expectTree(&same, after, .zig);
-    var empty = try buffer.Buffer.init(a, "");
-    defer empty.deinit();
-    input.revision += 1;
-    _ = try testQueueFrom(&service, &gate, input, empty, &same, null);
-    var cleared = testTake(&service);
-    defer cleared.release();
-    try std.testing.expectEqual(Mode.incremental, cleared.mode());
-    try std.testing.expect(cleared.accept(&gate));
-    try std.testing.expect(cleared.provider().?.tree == null);
-    input.revision += 1;
-    _ = try testQueueFrom(&service, &gate, input, source_b, &cleared, null);
-    var restored = testTake(&service);
-    defer restored.release();
-    try std.testing.expectEqual(Mode.cold, restored.mode());
-    try std.testing.expect(restored.basis() == null);
-    try std.testing.expect(restored.accept(&gate));
-    try expectTree(&restored, after, .zig);
-}
-
-test "parse worker 증분 native 중단은 남은 이전 트리를 성공으로 공개하지 않는다" {
-    const a = std.testing.allocator;
-    const before = "pub fn first() void {}\n";
-    var source_a = try buffer.Buffer.init(a, before);
-    defer source_a.deinit();
-    var source_b = try largeTestBuffer(a);
-    defer source_b.deinit();
-    var service = try Service.init(a, .{});
-    defer service.deinit() catch unreachable;
-    var pause: syntax.Cancellation.TestGate = .{ .abort = true };
-    defer pause.release();
-    var gate: request.Gate = .{};
-    _ = try testQueue(&service, &gate, test_input, source_a, null);
-    var first = testTake(&service);
-    defer first.release();
-    var input = test_input;
-    input.revision += 1;
-    _ = try testQueueFrom(&service, &gate, input, source_b, &first, &pause);
-    try waitEntered(&pause);
-    try expectTree(&first, before, .zig); // 다른 핸들의 ts_tree_edit 뒤, C가 아직 반환하지 않은 시점이다.
-    pause.release();
-    var stopped = testTake(&service);
-    defer stopped.release();
-    try std.testing.expectEqual(Outcome.unavailable, stopped.outcome());
-    try std.testing.expect(!stopped.accept(&gate));
-    try std.testing.expect(stopped.provider() == null);
-}
-
-test "parse worker 문서와 문법 판 및 언어가 다른 기준은 cold로 처리한다" {
-    const a = std.testing.allocator;
-    var source = try buffer.Buffer.init(a, "pub fn first() void {}\n");
-    defer source.deinit();
-    var service = try Service.init(a, .{});
-    defer service.deinit() catch unreachable;
-    var gate: request.Gate = .{};
-    _ = try testQueue(&service, &gate, test_input, source, null);
-    var first = testTake(&service);
-    defer first.release();
-    for (0..3) |kind| {
-        var input = test_input;
-        var language: syntax.Language = .zig;
-        if (kind == 0) input.document.generation += 1;
-        if (kind == 1) input.grammar.generation += 1;
-        if (kind == 2) {
-            language = .json;
-            input.grammar.identity = @backingInt(language);
-        }
-        var snapshot = source.snapshot();
-        _ = service.submitFrom(&gate, input, &snapshot, language, &first) catch |err| {
-            snapshot.deinit();
-            return err;
-        };
-        var result = testTake(&service);
-        defer result.release();
-        try std.testing.expectEqual(Mode.cold, result.mode());
-        try std.testing.expect(result.basis() == null);
-        try std.testing.expect(result.accept(&gate));
-    }
-}
-
-test "parse worker 증분 대기 교체와 기준 반환 뒤에도 복사 핸들을 워커가 회수한다" {
-    const a = std.testing.allocator;
-    var source = try buffer.Buffer.init(a, "pub fn first() void {}\n");
-    defer source.deinit();
-    var next_source = try buffer.Buffer.init(a, "pub fn last() void { const x = 2; _ = x; }\n");
-    defer next_source.deinit();
-    var blocker = try largeTestBuffer(a);
-    defer blocker.deinit();
-    var audit: TestAudit = .{ .main_thread = std.Thread.getCurrentId() };
-    var copies = std.testing.FailingAllocator.init(std.heap.page_allocator, .{});
-    {
-        var service = try Service.init(a, .{ .audit = &audit, .copy_allocator = copies.allocator() });
-        defer service.deinit() catch unreachable;
-        var pause: syntax.Cancellation.TestGate = .{};
-        defer pause.release();
-        var gate: request.Gate = .{};
-        _ = try testQueue(&service, &gate, test_input, source, null);
-        var first = testTake(&service);
-        var first_open = true;
-        defer if (first_open) first.release();
-        var other_gate: request.Gate = .{};
-        var other_input = test_input;
-        other_input.document.owner += 1;
-        _ = try testQueue(&service, &other_gate, other_input, blocker, &pause);
-        try waitEntered(&pause);
-        var input = test_input;
-        input.revision += 1;
-        _ = try testQueueFrom(&service, &gate, input, next_source, &first, null);
-        input.revision += 1;
-        const latest = try testQueueFrom(&service, &gate, input, next_source, &first, null);
-        first.release();
-        first_open = false;
-        pause.release();
-        var other = testTake(&service);
-        defer other.release();
-        try std.testing.expect(other.accept(&other_gate));
-        var result = testTake(&service);
-        defer result.release();
-        try std.testing.expectEqual(latest, result.tag());
-        try std.testing.expectEqual(Mode.incremental, result.mode());
-        try std.testing.expect(result.accept(&gate));
-        try expectTree(&result, "pub fn last() void { const x = 2; _ = x; }\n", .zig);
-    }
-    try std.testing.expectEqual(audit.created.load(.acquire), audit.destroyed.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 4), audit.reclaimed.load(.acquire));
-    try std.testing.expect(!audit.wrong_thread.load(.acquire));
-    try std.testing.expectEqual(copies.allocated_bytes, copies.freed_bytes);
-}
-
-test "parse worker 기준 원문 복사 OOM도 원본과 native 핸들을 보존해 회수한다" {
-    const a = std.testing.allocator;
-    var source = try buffer.Buffer.init(a, "pub fn first() void {}\n");
-    defer source.deinit();
-    var failing = std.testing.FailingAllocator.init(std.heap.page_allocator, .{});
-    var service = try Service.init(a, .{ .copy_allocator = failing.allocator() });
-    defer service.deinit() catch unreachable;
-    var gate: request.Gate = .{};
-    _ = try testQueue(&service, &gate, test_input, source, null);
-    var first = testTake(&service);
-    defer first.release();
-    failing.fail_index = failing.alloc_index + 1;
-    var input = test_input;
-    input.revision += 1;
-    _ = try testQueueFrom(&service, &gate, input, source, &first, null);
-    var failed = testTake(&service);
-    defer failed.release();
-    try std.testing.expectEqual(Outcome.out_of_memory, failed.outcome());
-    try std.testing.expect(!failed.accept(&gate));
-    try expectTree(&first, "pub fn first() void {}\n", .zig);
-}
-
-// OS main queue 대신 원자적 통지만 기록한다. 첫 검사는 mutex 해제 상태도 별도로 계측한다.
-var notice_count: std.atomic.Value(usize) = .init(0);
-var notice_main: std.Thread.Id = undefined;
-var notice_wrong_thread: std.atomic.Value(bool) = .init(false);
-var notice_locked: std.atomic.Value(bool) = .init(false);
-var notice_inspect: ?*State = null;
-fn recordNotice() void {
-    if (std.Thread.getCurrentId() == notice_main) notice_wrong_thread.store(true, .release);
-    if (notice_inspect) |state| {
-        if (state.mutex.tryLock()) state.mutex.unlock(state.io()) else notice_locked.store(true, .release);
-    }
-    _ = notice_count.fetchAdd(1, .release);
-}
-fn resetNotices() void {
-    notice_main = std.Thread.getCurrentId();
-    notice_count.store(0, .release);
-    notice_wrong_thread.store(false, .release);
-    notice_locked.store(false, .release);
-    notice_inspect = null;
-}
-fn waitNotices(count: usize) !void {
-    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5_000_000_000;
-    while (notice_count.load(.acquire) < count) {
-        try std.testing.expect(std.Io.Clock.awake.now(std.testing.io).nanoseconds < deadline);
-        std.Thread.yield() catch {};
-    }
-}
-fn waitCompleted(service: *Service, count: usize) void {
-    const state = service.state;
-    state.mutex.lockUncancelable(state.io());
-    defer state.mutex.unlock(state.io());
-    while (true) {
-        var found: usize = 0;
-        var next = state.completed.first;
-        while (next) |job| : (next = job.next) found += 1;
-        if (found >= count) return;
-        state.changed.waitUncancelable(state.io(), &state.mutex);
-    }
-}
-test "parse worker 완료 통지는 mutex 밖 워커에서 게시 뒤 전달한다" {
-    resetNotices();
-    var source = try buffer.Buffer.init(std.testing.allocator, "const n = 1;");
-    defer source.deinit();
-    var service = try Service.init(std.testing.allocator, .{ .notify = recordNotice });
-    defer {
-        service.deinit() catch unreachable;
-        notice_inspect = null;
-    }
-    notice_inspect = service.state;
-    var gate: request.Gate = .{};
-    _ = try testQueue(&service, &gate, test_input, source, null);
-    try waitNotices(1);
-    try std.testing.expect(!notice_wrong_thread.load(.acquire));
-    try std.testing.expect(!notice_locked.load(.acquire));
-    try std.testing.expect(service.beginDrain());
-    service.reap();
-    var result = service.take() orelse return error.TestUnexpectedResult;
-    defer result.release();
-    try std.testing.expect(result.accept(&gate));
-}
-test "parse worker 여러 문서 완료는 drain 전 통지 하나로 합친다" {
-    resetNotices();
-    var source = try buffer.Buffer.init(std.testing.allocator, "const n = 1;");
-    defer source.deinit();
-    var service = try Service.init(std.testing.allocator, .{ .notify = recordNotice });
-    defer service.deinit() catch unreachable;
-    var gates = [_]request.Gate{ .{}, .{} };
-    for (&gates, 0..) |*gate, i| {
-        var input = test_input;
-        input.document.slot += @intCast(i);
-        _ = try testQueue(&service, gate, input, source, null);
-    }
-    // 세 번째 C 호출 장벽까지 진행하면 앞선 두 통지 callback도 실제 반환한 상태다.
-    var blocker = try largeTestBuffer(std.testing.allocator);
-    defer blocker.deinit();
-    var pause: syntax.Cancellation.TestGate = .{};
-    defer pause.release();
-    var third_gate: request.Gate = .{};
-    var third_input = test_input;
-    third_input.document.slot += 2;
-    _ = try testQueue(&service, &third_gate, third_input, blocker, &pause);
-    try waitEntered(&pause);
-    waitCompleted(&service, 2);
-    try waitNotices(1);
-    try std.testing.expectEqual(@as(usize, 1), notice_count.load(.acquire));
-    try std.testing.expect(service.beginDrain());
-    for (&gates) |*gate| {
-        var result = service.take() orelse return error.TestUnexpectedResult;
-        defer result.release();
-        try std.testing.expect(result.accept(gate));
-    }
-    pause.release();
-    var third = testTake(&service);
-    defer third.release();
-    try std.testing.expect(third.accept(&third_gate));
-}
-test "parse worker drain 재무장 뒤 새 완료는 별도 통지를 전달한다" {
-    resetNotices();
-    var source = try buffer.Buffer.init(std.testing.allocator, "const n = 1;");
-    defer source.deinit();
-    var service = try Service.init(std.testing.allocator, .{ .notify = recordNotice });
-    defer service.deinit() catch unreachable;
-    var gate: request.Gate = .{};
-    _ = try testQueue(&service, &gate, test_input, source, null);
-    try waitNotices(1);
-    try std.testing.expect(service.beginDrain());
-    var first = service.take() orelse return error.TestUnexpectedResult;
-    defer first.release();
-    try std.testing.expect(first.accept(&gate));
-    var input = test_input;
-    input.document.slot += 1;
-    var other: request.Gate = .{};
-    _ = try testQueue(&service, &other, input, source, null);
-    try waitNotices(2);
-    try std.testing.expect(service.beginDrain());
-    var second = service.take() orelse return error.TestUnexpectedResult;
-    defer second.release();
-    try std.testing.expect(second.accept(&other));
-}
-test "parse worker native 퇴역 반환도 tick 없이 메인 회수를 깨운다" {
-    resetNotices();
-    var source = try buffer.Buffer.init(std.testing.allocator, "const n = 1;");
-    defer source.deinit();
-    var audit: TestAudit = .{ .main_thread = std.Thread.getCurrentId() };
-    var service = try Service.init(std.testing.allocator, .{ .notify = recordNotice, .audit = &audit });
-    defer service.deinit() catch unreachable;
-    var gate: request.Gate = .{};
-    _ = try testQueue(&service, &gate, test_input, source, null);
-    try waitNotices(1);
-    try std.testing.expect(service.beginDrain());
-    var result = service.take() orelse return error.TestUnexpectedResult;
-    result.release();
-    try waitNotices(2);
-    try std.testing.expect(service.beginDrain());
-    service.reap();
-    try std.testing.expectEqual(@as(usize, 1), audit.reclaimed.load(.acquire));
-    try std.testing.expect(service.take() == null);
-}
-test "parse worker 종료는 미전달 완료를 회수하고 추가 통지를 만들지 않는다" {
-    resetNotices();
-    var source = try buffer.Buffer.init(std.testing.allocator, "const n = 1;");
-    defer source.deinit();
-    var audit: TestAudit = .{ .main_thread = std.Thread.getCurrentId() };
-    var service = try Service.init(std.testing.allocator, .{ .notify = recordNotice, .audit = &audit });
-    var open = true;
-    defer if (open) service.deinit() catch unreachable;
-    var gate: request.Gate = .{};
-    _ = try testQueue(&service, &gate, test_input, source, null);
-    try waitNotices(1);
-    try std.testing.expect(service.beginDrain());
-    try service.deinit();
-    open = false;
-    try std.testing.expectEqual(@as(usize, 1), notice_count.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 1), audit.reclaimed.load(.acquire));
-    try std.testing.expectEqual(audit.created.load(.acquire), audit.destroyed.load(.acquire));
-}
+// 내부 판정자는 별도 root에 있다. 앱에서 import해도 test 집계가 늘지 않는다.
+pub const testing = if (builtin.is_test) struct {
+    pub const WorkerState = State;
+    pub const submit = Service.submitImpl;
+    pub const io = State.io;
+} else struct {};

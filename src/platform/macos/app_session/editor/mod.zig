@@ -84,6 +84,8 @@ pub fn contentHash(bytes: []const u8) u64 {
 /// 구문 강조 색(§5.3 1층). **`syntax` 모듈이 여기서 처음 제품에 들어온다** — 그 전까지는
 /// 모듈만 서 있고 부르는 코드가 없어 exe에 링크되지 않았다.
 pub const syntax_color = @import("syntax.zig");
+/// 완료 전달과 문서 수명의 내부 연결 API. 기본 입력 파싱 전환은 후속이다.
+pub const parse_runtime = @import("parse/dispatch.zig");
 pub const diagnostics = @import("diagnostics.zig");
 pub const lsp_client = @import("lsp.zig");
 const trust_store = @import("trust_store.zig");
@@ -2579,6 +2581,7 @@ pub const Prepared = struct {
         }
         if (self.recovery) |owner| owner.release();
         _ = @constCast(self.lease.owner).release(self.lease) catch unreachable;
+        @import("parse/dispatch.zig").viewsChanged();
         self.* = undefined;
     }
 };
@@ -10506,6 +10509,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
         if (term.rt.editor_recovery) |owner| owner.release();
         term.rt.editor_recovery = null;
         _ = @constCast(lease.owner).release(lease) catch unreachable;
+        @import("parse/dispatch.zig").viewsChanged();
     } else {
         term.rt.editor_unattached_document.clear(self.allocator);
     }
@@ -25418,7 +25422,7 @@ test "RNM1 심볼 이름 바꾸기 — F2 로 낱말이 씨앗인 상자, 이름
     // ⑻ 낡은 seq 는 버린다.
     s.editor_rename.waiting = true;
     s.editor_rename.waiting_seq = 99;
-    rename_client.onResponse(s, 98, null, false, null, .utf8);
+    rename_client.onResponse(s, lsp_client.readyClientFor(s, term).?, 98, null, false, null);
     try testing.expect(s.editor_rename.waiting);
     s.editor_rename.waiting = false;
 }
@@ -25772,7 +25776,7 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
     try testing.expect(insertText(s, term, "a"));
     try testing.expectEqual(sent_wait, s.editor_lsp.sent_completions);
     try testing.expect(s.editor_completion.dirty);
-    completion_client.onResponse(s, 55, null, .utf8);
+    completion_client.onResponse(s, lsp_client.readyClientFor(s, term) orelse return error.NoReadyClient, 55, null);
     try testing.expectEqual(sent_wait + 1, s.editor_lsp.sent_completions);
     try testing.expect(s.editor_completion.waiting and !s.editor_completion.dirty);
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
@@ -25849,7 +25853,7 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
     // ⑽ 낡은 seq 는 버린다.
     s.editor_completion.waiting = true;
     s.editor_completion.waiting_seq = 99;
-    completion_client.onResponse(s, 98, null, .utf8);
+    completion_client.onResponse(s, lsp_client.readyClientFor(s, term) orelse return error.NoReadyClient, 98, null);
     try testing.expect(s.editor_completion.waiting and !s.editor_completion.active);
     s.editor_completion.waiting = false;
 }
@@ -26566,7 +26570,7 @@ test "CMP12 자동완성 ①-f — 버린 응답은 같은 트리거로 다시 �
         }
     }.f);
     try testing.expect(!s.editor_completion.active); // 버렸다 — 예전에는 같은 접두사로 다시 열렸다
-    // ③ 한 칸 띄고 `p` 로 다시 열어 resolve 안 된 `printf` 를 Enter(확정 대기) — 그 사이 `r` 을 쳐도 다시 묻지 않고, 확정이 들어간다.
+    // ③ 한 칸 띄고 `p` 로 다시 열어 resolve 안 된 `printf` 를 Enter(확정 대기) — 그 사이 `r` 을 치면 이전 확정을 취소하고 새 제안은 별도로 처리한다.
     try testing.expect(insertText(s, term, " p"));
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
     try frame(s, leaf, term);
@@ -26578,25 +26582,16 @@ test "CMP12 자동완성 ①-f — 버린 응답은 같은 트리거로 다시 �
     s.chrome_host.suggest_box.selected = pick orelse return error.NoPrintfRow;
     try pressKey(&fx, .enter, .{});
     try testing.expect(s.editor_completion.pending_accept); // resolve 를 기다린다
-    const sent_pending = s.editor_lsp.sent_completions;
     try testing.expect(insertText(s, term, "r"));
-    try frame(s, leaf, term);
-    try testing.expectEqual(sent_pending, s.editor_lsp.sent_completions); // 기다리는 동안 다시 묻지 않았다
-    var spins: usize = 0;
-    while (s.editor_completion.active and spins < 400) : (spins += 1) {
-        _ = pumpLspUntil(&fx, 10, ctx, struct {
-            fn f(c: Ctx) bool {
-                return !c.fx.session.editor_completion.active;
-            }
-        }.f);
-        try frame(s, leaf, term);
-    }
-    try testing.expect(!s.editor_completion.active);
+    try testing.expect(!s.editor_completion.pending_accept);
+    try testing.expect(s.editor_completion.pending_snapshot == null);
+    try pressKey(&fx, .escape, .{}); // 추가 입력의 새 제안도 닫는다.
+    lsp_client.pump(s); // 이전 resolve가 와도 이미 취소한 Enter는 적용하지 않는다.
     const doc = term.rt.editorDocument().opened.?.file.content;
-    try testing.expect(std.mem.endsWith(u8, doc[0..term.rt.editor_selection.?.focus], " printf")); // 기다리던 확정이 들어갔다(`pr` → printf)
+    try testing.expect(std.mem.endsWith(u8, doc[0..term.rt.editor_selection.?.focus], " pr"));
 }
 
-test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(additional 이 온다) 확정은 undo 하나; 확정 때 미해결이면 응답 뒤 한 번에; RESOLVESTALL 이면 300 ms 뒤 additional 없이; 병합 목록에서 같은 label 은 LSP 것 (제품 경계, §8.2g-b)" {
+test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(additional 이 온다) 확정은 undo 하나; 확정 때 미해결이면 응답 뒤 한 번에; RESOLVESTALL 이면 시한 뒤 원문 보존; 병합 목록에서 같은 label 은 LSP 것 (제품 경계, §8.2g-b)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -26771,6 +26766,14 @@ test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(add
         }
         try pressKey(&fx, .enter, .{});
         try testing.expect(s.editor_completion.pending_accept);
+        const unchanged = try allocator.dupe(u8, content(term));
+        defer allocator.free(unchanged);
+        const unchanged_undo = term.rt.editorDocument().history.undo_len;
+        // Verify the former partial-commit boundary before the final deadline.
+        s.editor_completion.pending_snapshot.?.started_ms -|= 301;
+        try testing.expect(!completion_client.acceptPendingOnTimeout(s));
+        try testing.expectEqualStrings(unchanged, content(term));
+        s.editor_completion.pending_snapshot.?.started_ms -|= 5_000;
         const start = s.awakeMs();
         while (s.editor_completion.active and s.awakeMs() - start < 3000) {
             lsp_client.pump(s);
@@ -26778,18 +26781,16 @@ test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(add
             _ = usleep(5_000);
         }
         try testing.expect(!s.editor_completion.active);
-        try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted_on_timeout);
-        try testing.expect(s.awakeMs() - start >= 300); // 계약의 300 ms — 상수를 되비추지 않는다(적대적 2회차 B17)
-        try testing.expect(std.mem.indexOf(u8, content(term), "  lazy_import\n") != null);
-        try testing.expect(std.mem.indexOf(u8, content(term), "lazy.h") == null);
-        s.dispatchAppAction(.editor_undo);
+        try testing.expectEqual(@as(u64, 0), s.editor_completion.accepted_on_timeout);
+        try testing.expectEqualStrings(unchanged, content(term));
+        try testing.expectEqual(unchanged_undo, term.rt.editorDocument().history.undo_len);
         try clearRange(s, term, line3, 3);
         try removeMarkerHover(s, term, "// RESOLVESTALL\n");
     }
     // ⑸ 낡은 resolve seq 는 버린다.
     s.editor_completion.resolve_waiting = true;
     s.editor_completion.resolve_seq = 77;
-    completion_client.onResolveResponse(s, 76, null, .utf8);
+    completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, term) orelse return error.NoReadyClient, 76, null);
     try testing.expect(s.editor_completion.resolve_waiting);
     s.editor_completion.resolve_waiting = false;
 }
@@ -26967,11 +26968,11 @@ test "RLC1 definition null notice acknowledgement unblocks real completion state
     const def = @import("definition.zig");
     const comp = @import("completion.zig");
     const a = testing.allocator;
-    var fx = try PaneFixture.init(a);
-    defer fx.deinit(a);
-    const s = fx.session;
-    const t = fx.term;
-    s.loaded_config.config.lsp.enabled = false;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(a) };
+    defer h.deinit(a);
+    try h.init(a, helper_doc);
+    const s = h.fx.session;
+    const t = h.term;
     s.surface_initialized = true;
     s.backing_width_px = 1200;
     s.backing_height_px = 800;
@@ -27002,7 +27003,11 @@ test "RLC1 definition null notice acknowledgement unblocks real completion state
     s.editor_completion.waiting_seq = 8;
     s.editor_completion.waiting_surface = t.surface.id;
     s.editor_completion.asked_word_start = caret - "probe_resul".len;
-    comp.onResponse(s, 8, parsed.value, .utf8);
+    const owner = lsp_client.readyClientFor(s, t) orelse return error.NoReadyClient;
+    // This judge isolates notice acknowledgement and the list response; resolve
+    // lifecycle is covered by CMPAT with a resolve-capable server.
+    owner.completion_triggers.resolve = false;
+    comp.onResponse(s, owner, 8, parsed.value);
     const leaf = activeLeafRectForTest(s) orelse return error.NoRealLspGeometry;
     var frame = appendPaneFrame(s, leaf, t) orelse return error.RealLspDidNotDraw;
     frame.dl.deinit(a);
@@ -28334,6 +28339,26 @@ test "CA1 code action — ⌘. 로 진단 자리의 fix 와 lazy 가 메뉴에(c
     term.rt.editor_selection = .{ .anchor_start = 1, .anchor_end = 1, .focus = 1 };
     try pressKey(&fx, .{ .char = '.' }, .{ .command = true });
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_code_actions);
+    // Same executable and sequence from another root must not consume this wait.
+    // The normal response remains queued in the actual fake server process.
+    const original_client = lsp_client.readyClientFor(s, term).?;
+    var foreign_client = original_client.*;
+    foreign_client.root = @constCast("/foreign-code-action-root");
+    foreign_client.docs = .empty;
+    const foreign_action = try std.json.parseFromSlice(std.json.Value, allocator, "[{\"title\":\"foreign fix\",\"edit\":{\"changes\":{}}}]", .{});
+    defer foreign_action.deinit();
+    const request_seq = s.editor_code_action.waits[0].seq;
+    for ([_]bool{ true, false }) |is_error| {
+        code_action_client.onResponse(s, &foreign_client, request_seq, foreign_action.value, is_error, "foreign error");
+        try testing.expect(s.editor_code_action.waiting);
+        try testing.expect(!s.editor_code_action.waits[0].done);
+        try testing.expectEqual(@as(u64, 0), s.editor_code_action.first_answer_ms);
+        try testing.expect(!s.editor_code_action.any_error);
+        try testing.expectEqual(@as(usize, 0), s.editor_code_action.pending.items.len);
+        try testing.expect(!s.code_action_menu and !s.chrome_host.notice.open);
+        try testing.expectEqualStrings("int x;\nint y;\n", content(term));
+    }
+
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
     try testing.expect(s.code_action_menu and s.chrome_host.context_menu.open);
     try testing.expectEqual(@as(u64, 1), s.editor_code_action.opened_count);
@@ -64781,7 +64806,7 @@ test "HELP10 확정 보류 중에 메뉴바로 팔레트를 열어도 — 사용
     try testing.expect(s.chrome_host.palette.open); // 팔레트는 그대로
 }
 
-test "HELP11 확정 보류 중에 팔레트를 열었는데 서버가 답하지 않으면 — 오버레이 아래에서도 300 ms 뒤 additional 없이 들어간다 (제품 경계, §8.2g-b)" {
+test "HELP11 확정 보류 중에 팔레트를 열었는데 서버가 답하지 않으면 — 오버레이 아래에서도 시한 뒤 원문을 보존한다 (제품 경계, §8.2g-b)" {
     // 시간 초과 확정은 `refresh` 안에만 있었는데 `refresh` 는 다른 오버레이가 없을 때만(포커스 없는 찾기 막대만 있을 때도) 불린다 — 그래서 tick 도
     // 같은 함수를 부른다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -64796,15 +64821,15 @@ test "HELP11 확정 보류 중에 팔레트를 열었는데 서버가 답하지 
     _ = try s.tick();
     // ★ 보류는 tick 뒤에도 산다 — 서버가 답하지 않으므로(`RESOLVESTALL`) 이 순서는 결정적이다. 예전 구현은 여기서 `hide` 로 지웠다.
     try testing.expect(s.editor_completion.pending_accept and s.editor_completion.active);
+    s.editor_completion.pending_snapshot.?.started_ms -|= 5_000;
     while (s.editor_completion.active and s.awakeMs() - start < 3000) {
         lsp_client.pump(s);
         _ = try s.tick();
         _ = usleep(5_000);
     }
     try testing.expect(!s.editor_completion.active);
-    try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted_on_timeout);
-    try testing.expect(s.awakeMs() - start >= 250); // 기다렸다(보류를 곧바로 버리거나 넣지 않았다)
-    try testing.expect(std.mem.indexOf(u8, h.content(), "  lazy_import\n") != null);
+    try testing.expectEqual(@as(u64, 0), s.editor_completion.accepted_on_timeout);
+    try testing.expect(std.mem.indexOf(u8, h.content(), "  laz\n") != null);
     try testing.expect(std.mem.indexOf(u8, h.content(), "lazy.h") == null);
     try testing.expect(s.chrome_host.palette.open);
 }
@@ -65179,7 +65204,7 @@ test "FINDH4 완성 목록이 찾기 막대와 함께 열린 채 찾기 입력�
     try testing.expect(!s.editor_completion.active and !s.chrome_host.suggest_box.open);
 }
 
-test "FINDH5 확정 보류 중에 찾기를 열면(입력에 포커스) — 그 프레임이 보류를 지우지 않고 300 ms 뒤 additional 없이 들어간다 (제품 경계, §8.2g-b)" {
+test "FINDH5 확정 보류 중에 찾기를 열면(입력에 포커스) — 그 프레임이 보류를 지우지 않고 시한 뒤 원문을 보존한다 (제품 경계, §8.2g-b)" {
     // 적대적 검증 2026-10-10: 「찾기 막대뿐이면 헬퍼도 그린다」 게이트가 포커스 있는 찾기·확인창에서도 열려 `refresh` 가 불리면, 그 안의
     // `editorHelpersSuppressed` 가 목록을 닫으며 tick 이 일부러 남겨 둔 확정 보류(⑵)까지 지웠다 — Enter 로 고른 항목이 사라졌다. HELP11 은
     // 팔레트(뒤에 모여 게이트를 닫는다)로만 쟀고 프레임도 짓지 않아 못 봤다. 여기서는 tick 뒤마다 프레임(prep)을 짓는다.
@@ -65196,6 +65221,7 @@ test "FINDH5 확정 보류 중에 찾기를 열면(입력에 포커스) — 그 
     _ = try s.tick();
     try h.frame();
     try testing.expect(s.editor_completion.pending_accept and s.editor_completion.active); // ★ 프레임이 보류를 지우지 않았다
+    s.editor_completion.pending_snapshot.?.started_ms -|= 5_000;
     while (s.editor_completion.active and s.awakeMs() - start < 3000) {
         lsp_client.pump(s);
         _ = try s.tick();
@@ -65203,8 +65229,8 @@ test "FINDH5 확정 보류 중에 찾기를 열면(입력에 포커스) — 그 
         _ = usleep(5_000);
     }
     try testing.expect(!s.editor_completion.active);
-    try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted_on_timeout);
-    try testing.expect(std.mem.indexOf(u8, h.content(), "  lazy_import\n") != null);
+    try testing.expectEqual(@as(u64, 0), s.editor_completion.accepted_on_timeout);
+    try testing.expect(std.mem.indexOf(u8, h.content(), "  laz\n") != null);
 }
 
 test "FINDH7 포커스 없는 찾기 막대를 누르면(패딩 띠 포함) — 클릭이 막대 뒤 편집기로 내려가지 않고 찾기 입력이 포커스를 받는다, 막대 밖은 편집기 것이다 (제품 경계)" {
@@ -73590,4 +73616,944 @@ test "recovery picker IME host real directory discovery preserves an in flight c
     fx.session.imeEnd(null);
     try testing.expectEqualStrings("", fx.session.chrome_host.recovery_picker.input.query.items);
     try testing.expectEqualStrings("ㅎ", fx.session.chrome_host.recovery_picker.input.preedit.items);
+}
+
+fn trustImeFixture(fx: *PaneFixture, mode: trust_ui.Mode) !void {
+    const state = &fx.session.editor_trust_list;
+    state.mode = mode;
+    for (0..50) |i| {
+        const text = try std.fmt.allocPrint(testing.allocator, "target{d:0>2}", .{i});
+        errdefer testing.allocator.free(text);
+        try state.items.append(testing.allocator, .{ .text = text });
+    }
+    fx.session.chrome_host.trust_picker.show();
+    trust_ui.recompute(fx.session);
+}
+
+test "trust picker IME host trust mode replace a middle UTF16 range" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]trust_ui.Mode{.trust}) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        try trustImeFixture(&fx, mode);
+        const field = &fx.session.chrome_host.trust_picker.input;
+        try field.query.appendSlice(testing.allocator, "a😀z");
+        fx.session.imeBegin();
+        if (!@import("../chrome_ime.zig").insert(fx.session, "韓", .{ .location = 1, .length = 2 })) fx.session.imeInsert("韓");
+        fx.session.imeEnd(null);
+        try testing.expectEqualStrings("a韓z", field.query.items);
+    }
+}
+test "trust picker IME host environment mode replace a middle UTF16 range" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]trust_ui.Mode{.env_names}) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        try trustImeFixture(&fx, mode);
+        const field = &fx.session.chrome_host.trust_picker.input;
+        try field.query.appendSlice(testing.allocator, "a😀z");
+        fx.session.imeBegin();
+        if (!@import("../chrome_ime.zig").insert(fx.session, "韓", .{ .location = 1, .length = 2 })) fx.session.imeInsert("韓");
+        fx.session.imeEnd(null);
+        try testing.expectEqualStrings("a韓z", field.query.items);
+    }
+}
+
+test "trust picker IME host explicit empty range deletes only the selected word" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "", .{ .location = 1, .length = 2 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("az", field.query.items);
+}
+
+test "trust picker IME host empty callback without range keeps query" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "abc");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("abc", field.query.items);
+}
+
+test "trust picker IME host surrogate split rejects the whole key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "韓", .{ .location = 2, .length = 1 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("a😀z", field.query.items);
+}
+
+test "trust picker IME host invalid UTF8 rejects the whole key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "\xff", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "trust picker IME host NFD is preserved verbatim" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "한", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("한", field.query.items);
+}
+
+test "trust picker IME host outside key range callback keeps suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    _ = ime.insert(fx.session, "韓", .{ .location = 1, .length = 2 });
+    try testing.expectEqualStrings("a韓z", field.query.items);
+}
+
+test "trust picker IME host preview preserves query rows selection and document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    trust_ui.recompute(fx.session);
+    fx.session.chrome_host.trust_picker.selected = 37;
+    const rev = fx.term.rt.editorDocument().opened.?.file.revision;
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "韓", .{ .location = 1, .length = 0 }, .{ .location = 0, .length = 6 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("target", field.query.items);
+    try testing.expectEqualStrings("韓", field.preedit.items);
+    try testing.expectEqual(@as(usize, 50), fx.session.editor_trust_list.shown.items.len);
+    try testing.expectEqual(@as(usize, 37), fx.session.chrome_host.trust_picker.selected);
+    try testing.expectEqual(rev, fx.term.rt.editorDocument().opened.?.file.revision);
+}
+
+test "trust picker IME host candidate Return is consumed without opening management" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "韓", .{ .location = 1, .length = 0 }, .{ .location = 0, .length = 6 });
+    fx.session.imeEnd(null);
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "韓", null);
+    try testing.expect(ime.end(fx.session, .{ .key = .enter }));
+    fx.session.imeEnd(null);
+    try testing.expect(fx.session.chrome_host.trust_picker.open);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+}
+
+test "trust picker IME host independent Return can reach the existing accept path" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    _ = field;
+    fx.session.imeBegin();
+    try testing.expect(!ime.end(fx.session, .{ .key = .enter }));
+    fx.session.imeEnd(null);
+}
+
+test "trust picker IME host reopen rejects old callbacks" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    fx.session.chrome_host.trust_picker.hide();
+    fx.session.chrome_host.trust_picker.show();
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("", field.query.items);
+    try testing.expect(fx.session.chrome_host.trust_picker.open);
+}
+
+test "trust picker IME host sequence exhaustion closes append fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.trust_picker_ime.sequence = @as(u64, 1) << 51;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(.{ .key = .{ .char = 'x' } });
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "trust picker IME host lifecycle exhaustion closes append fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.chrome_host.trust_picker.ime_generation = std.math.maxInt(u64);
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(.{ .key = .{ .char = 'x' } });
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "trust picker IME host bootstrap has no owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    _ = field;
+    const saved = fx.session.surface_initialized;
+    fx.session.surface_initialized = false;
+    defer fx.session.surface_initialized = saved;
+    try testing.expect(ime.generation(fx.session) == null);
+}
+
+test "trust picker IME host empty topology has no owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    _ = field;
+    const saved = fx.session.tabs.items.len;
+    fx.session.tabs.items.len = 0;
+    defer fx.session.tabs.items.len = saved;
+    try testing.expect(ime.generation(fx.session) == null);
+}
+
+test "trust picker IME host terminal pin has priority" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    _ = field;
+    fx.session.ime_terminal_target_id = fx.term.surfaceId();
+    defer fx.session.ime_terminal_target_id = null;
+    try testing.expect(ime.generation(fx.session) == null);
+    try testing.expect(!ime.insert(fx.session, "late", null));
+}
+
+test "trust picker IME host accepted query publishes staged rows" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    trust_ui.recompute(fx.session);
+    fx.session.chrome_host.trust_picker.selected = 37;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "target4", .{ .location = 0, .length = 6 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("target4", field.query.items);
+    try testing.expectEqual(@as(usize, 10), fx.session.editor_trust_list.shown.items.len);
+    try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.trust_picker.selected);
+}
+
+test "trust picker IME host snapshot allocation failure preserves the previous input" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    fx.session.allocator = testing.allocator;
+    try testing.expectEqualStrings("target", field.query.items);
+}
+
+test "trust picker IME host failed key recovers for a following valid key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "a😀z");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "bad", .{ .location = 2, .length = 1 });
+    fx.session.imeEnd(null);
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "韓", .{ .location = 1, .length = 2 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("a韓z", field.query.items);
+}
+
+test "trust picker IME host every native key allocation failure preserves visible results" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ime = @import("../trust_picker_ime.zig");
+    var observed_failure = false;
+    for (0..256) |index| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        try trustImeFixture(&fx, .trust);
+        const field = &fx.session.chrome_host.trust_picker.input;
+        try field.query.appendSlice(testing.allocator, "target");
+        trust_ui.recompute(fx.session);
+        fx.session.chrome_host.trust_picker.selected = 37;
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
+        fx.session.allocator = failing.allocator();
+        fx.session.imeBegin();
+        _ = ime.insert(fx.session, "target4", .{ .location = 0, .length = 6 });
+        fx.session.imeEnd(null);
+        fx.session.allocator = testing.allocator;
+        if (failing.has_induced_failure) {
+            observed_failure = true;
+            try testing.expectEqualStrings("target", field.query.items);
+            try testing.expectEqual(@as(usize, 50), fx.session.editor_trust_list.shown.items.len);
+            try testing.expectEqual(@as(usize, 37), fx.session.chrome_host.trust_picker.selected);
+        } else {
+            try testing.expect(observed_failure);
+            try testing.expectEqualStrings("target4", field.query.items);
+            try testing.expectEqual(@as(usize, 10), fx.session.editor_trust_list.shown.items.len);
+            return;
+        }
+    }
+    return error.AllocationControlNeverSucceeded;
+}
+
+test "trust picker IME host cancel restores the original word and suffix" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "a한z");
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "韓", .{ .location = 1, .length = 0 }, .{ .location = 1, .length = 1 });
+    fx.session.imeEnd(null);
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "", .{ .location = 0, .length = 0 }, null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("a한z", field.query.items);
+    try testing.expectEqual(@as(usize, 0), field.preedit.items.len);
+}
+
+test "trust picker IME host dynamic text remains longer than Session Dock budget" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    var text: [500]u8 = undefined;
+    @memset(&text, 'x');
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, &text, null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings(&text, fx.session.chrome_host.trust_picker.input.query.items);
+}
+
+test "trust picker IME host old callback cannot write a new palette" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    fx.session.imeBegin();
+    fx.session.chrome_host.trust_picker.hide();
+    fx.session.chrome_host.palette.show();
+    try fx.session.chrome_host.palette.input.query.appendSlice(testing.allocator, "destination");
+    try testing.expect(@import("../chrome_ime.zig").insert(fx.session, "late", null));
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("destination", fx.session.chrome_host.palette.input.query.items);
+}
+
+test "trust picker IME host out of bounds replacement rejects the key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "lost", .{ .location = 900, .length = 1 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "trust picker IME host invalid second callback rolls back the entire key" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    trust_ui.recompute(fx.session);
+    fx.session.chrome_host.trust_picker.selected = 37;
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "target4", .{ .location = 0, .length = 6 });
+    _ = ime.insert(fx.session, "\xff", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("target", field.query.items);
+    try testing.expectEqual(@as(usize, 50), fx.session.editor_trust_list.shown.items.len);
+    try testing.expectEqual(@as(usize, 37), fx.session.chrome_host.trust_picker.selected);
+}
+
+test "trust picker IME host composition admission publishes the filtered results once" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "target");
+    trust_ui.recompute(fx.session);
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "target4", .{ .location = 7, .length = 0 }, .{ .location = 0, .length = 6 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("target", field.query.items);
+    try testing.expect(ime.commitAll(fx.session));
+    try testing.expectEqualStrings("target4", field.query.items);
+    try testing.expectEqual(@as(usize, 10), fx.session.editor_trust_list.shown.items.len);
+    try testing.expect(ime.commitAll(fx.session));
+}
+
+test "trust picker IME host mode transition rejects callbacks from the previous owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const field = &fx.session.chrome_host.trust_picker.input;
+    try field.query.appendSlice(testing.allocator, "old");
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "x", null);
+    fx.session.editor_trust_list.mode = .env_names;
+    _ = ime.insert(fx.session, "late", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("old", field.query.items);
+}
+
+test "trust picker IME host native filter OOM preserves prompt rows selection and scroll" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]trust_ui.Mode{ .trust, .env_names }) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        try trustImeFixture(&fx, mode);
+        const field = &fx.session.chrome_host.trust_picker.input;
+        try field.query.appendSlice(testing.allocator, "target");
+        trust_ui.recompute(fx.session);
+        fx.session.chrome_host.trust_picker.selected = 37;
+        fx.session.editor_trust_list.scroll.offset_y_px = 200;
+        const prompt = fx.session.chrome_host.trust_picker.prompt;
+        fx.session.imeBegin();
+        _ = @import("../trust_picker_ime.zig").insert(fx.session, "target4", .{ .location = 0, .length = 6 });
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        fx.session.allocator = failing.allocator();
+        fx.session.imeEnd(null);
+        fx.session.allocator = testing.allocator;
+        try testing.expectEqualStrings("target", field.query.items);
+        try testing.expectEqual(@as(usize, 50), fx.session.editor_trust_list.shown.items.len);
+        try testing.expectEqual(@as(usize, 37), fx.session.chrome_host.trust_picker.selected);
+        try testing.expectEqual(@as(u32, 200), fx.session.editor_trust_list.scroll.offset_y_px);
+        try testing.expectEqualStrings(prompt, fx.session.chrome_host.trust_picker.prompt);
+    }
+}
+
+test "trust picker IME host candidate Return never opens management or closes either mode" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]trust_ui.Mode{ .trust, .env_names }) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        try trustImeFixture(&fx, mode);
+        const generation = trust_store.generation();
+        fx.session.imeBegin();
+        _ = @import("../trust_picker_ime.zig").insert(fx.session, "target4", null);
+        fx.session.imeEnd(.{ .key = .enter });
+        try testing.expect(fx.session.chrome_host.trust_picker.open);
+        try testing.expect(!fx.session.chrome_host.confirm.open);
+        try testing.expectEqual(generation, trust_store.generation());
+    }
+}
+
+test "trust picker IME host independent environment Return only closes and keeps trust unchanged" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .env_names);
+    const generation = trust_store.generation();
+    fx.session.imeBegin();
+    fx.session.imeEnd(.{ .key = .enter });
+    try testing.expect(!fx.session.chrome_host.trust_picker.open);
+    try testing.expect(!fx.session.chrome_host.confirm.open);
+    try testing.expectEqual(generation, trust_store.generation());
+}
+
+test "trust picker IME host independent trust Return opens current decision management without granting" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    // Test builds disable filesystem trust persistence unless an explicit private root is set.
+    testing.allocator.free(fx.session.editor_trust_list.items.items[0].text);
+    fx.session.editor_trust_list.items.items[0].text = try testing.allocator.dupe(u8, "/fixture/target00");
+    const key: maru.session.editor.lsp.trust.Key = .{ .volume = 0, .path = "/fixture/target00" };
+    fx.session.editor_trust_list.items.items[0].decision = .allow; // Opening snapshot may be stale.
+    _ = trust_store.decide(testing.io, .{ .source = .manage }, key, .deny);
+    const generation = trust_store.generation();
+    fx.session.imeBegin();
+    fx.session.imeEnd(.{ .key = .enter });
+    try testing.expect(!fx.session.chrome_host.trust_picker.open);
+    try testing.expect(fx.session.chrome_host.confirm.open);
+    try testing.expectEqual(lsp_client.ManageAction.forget, fx.session.editor_lsp.manage_primary);
+    try testing.expectEqual(generation, trust_store.generation());
+    try testing.expectEqual(maru.session.editor.lsp.trust.Decision.deny, trust_store.get(key).?);
+}
+
+test "trust picker IME host empty and pending snapshots have an owner without a document dependency" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var terminal_found = false;
+    for (pane_ops.activePane(fx.session).terms.items, 0..) |term, index| {
+        if (term.kind != .terminal) continue;
+        fx.session.focusTerm(index);
+        terminal_found = true;
+        break;
+    }
+    try testing.expect(terminal_found);
+    fx.session.editor_trust_list.mode = .env_names;
+    fx.session.editor_trust_list.env_pending = true;
+    fx.session.chrome_host.trust_picker.show();
+    trust_ui.recompute(fx.session);
+    const ime = @import("../trust_picker_ime.zig");
+    try testing.expect(ime.generation(fx.session) != null);
+    fx.session.imeBegin();
+    _ = ime.insert(fx.session, "query", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("query", fx.session.chrome_host.trust_picker.input.query.items);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_trust_list.shown.items.len);
+}
+
+test "trust picker IME host NFD comparison preserves original query and rendered remote matching" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const item = &fx.session.editor_trust_list.items.items[0];
+    testing.allocator.free(item.text);
+    item.text = try testing.allocator.dupe(u8, "/fixture/한");
+    item.dest = try testing.allocator.dupe(u8, "HOST");
+    fx.session.imeBegin();
+    _ = @import("../trust_picker_ime.zig").insert(fx.session, "한", null);
+    fx.session.imeEnd(null);
+    try testing.expectEqualStrings("한", fx.session.chrome_host.trust_picker.input.query.items);
+    try testing.expectEqualSlices(usize, &.{0}, fx.session.editor_trust_list.shown.items);
+    fx.session.imeBegin();
+    _ = @import("../trust_picker_ime.zig").insert(fx.session, "host:", .{ .location = 0, .length = 3 });
+    fx.session.imeEnd(null);
+    try testing.expectEqualSlices(usize, &.{0}, fx.session.editor_trust_list.shown.items);
+}
+
+test "trust picker IME host legacy filter failure leaves no actionable trust row" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    trust_ui.recompute(fx.session);
+    fx.session.allocator = testing.allocator;
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_trust_list.shown.items.len);
+    const generation = trust_store.generation();
+    trust_ui.accept(fx.session);
+    try testing.expect(fx.session.chrome_host.trust_picker.open);
+    try testing.expect(!fx.session.chrome_host.confirm.open);
+    try testing.expectEqual(generation, trust_store.generation());
+}
+
+test "trust picker IME host external trust decisions do not replace the opening snapshot owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try trustImeFixture(&fx, .trust);
+    const ime = @import("../trust_picker_ime.zig");
+    const generation = ime.generation(fx.session);
+    fx.session.imeBegin();
+    _ = ime.marked(fx.session, "한", .{ .location = 1, .length = 0 }, null);
+    _ = trust_store.decide(testing.io, .{ .source = .manage }, .{ .volume = 7, .path = "/fixture/peer" }, .deny);
+    fx.session.imeEnd(null);
+    try testing.expectEqual(generation, ime.generation(fx.session));
+    try testing.expectEqualStrings("한", fx.session.chrome_host.trust_picker.input.preedit.items);
+    try testing.expectEqual(@as(usize, 50), fx.session.editor_trust_list.shown.items.len);
+}
+test "CMPATORIGIN resolve from another primary client cannot commit an equal seq" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(testing.allocator) };
+    defer h.deinit(testing.allocator);
+    try h.init(testing.allocator, pending_doc ++ "// RESOLVESTALL\n");
+    const s = h.fx.session;
+    try pendingAcceptFixture(&h);
+    const owner = lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient;
+    // Borrowed descriptor models a response on a different primary connection;
+    // no process or owned storage is created or destroyed by this descriptor.
+    var foreign = owner.*;
+    foreign.root = @constCast("other-workspace");
+    const before = try testing.allocator.dupe(u8, h.content());
+    defer testing.allocator.free(before);
+    const undo_before = h.term.rt.editorDocument().history.undo_len;
+    const seq = s.editor_completion.resolve_seq;
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"label\":\"lazy_import\",\"additionalTextEdits\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"newText\":\"#include \\\"lazy.h\\\"\\n\"}]}", .{});
+    defer parsed.deinit();
+    completion_client.onResolveResponse(s, &foreign, seq, parsed.value);
+    try testing.expectEqualStrings(before, h.content());
+    try testing.expect(s.editor_completion.pending_accept and s.editor_completion.resolve_waiting);
+    try testing.expectEqual(undo_before, h.term.rt.editorDocument().history.undo_len);
+    completion_client.onResolveResponse(s, owner, seq, parsed.value);
+    try testing.expect(std.mem.startsWith(u8, h.content(), "#include \"lazy.h\"\n"));
+    try testing.expectEqual(undo_before + 1, h.term.rt.editorDocument().history.undo_len);
+    s.dispatchAppAction(.editor_undo);
+    try testing.expectEqualStrings(before, h.content());
+}
+
+test "CMPATORIGIN completion from another primary client cannot clear an equal seq" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(testing.allocator) };
+    defer h.deinit(testing.allocator);
+    try h.init(testing.allocator, pending_doc);
+    const s = h.fx.session;
+    const owner = lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient;
+    var foreign = owner.*;
+    foreign.root = @constCast("other-workspace");
+    completion_client.hide(s);
+    s.editor_completion.waiting = true;
+    s.editor_completion.waiting_seq = 77;
+    s.editor_completion.waiting_surface = h.term.surface.id;
+    completion_client.onResponse(s, &foreign, 77, null);
+    try testing.expect(s.editor_completion.waiting);
+    completion_client.onResponse(s, owner, 77, null);
+    try testing.expect(!s.editor_completion.waiting);
+}
+
+test "CMPATSEND failed prefetch stays unresolved and Enter retries or cancels without editing" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for (0..2) |retry_fails| {
+        var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+        defer h.deinit(allocator);
+        try h.init(allocator, pending_doc ++ "// RESOLVESTALL\n");
+        const s = h.fx.session;
+        try pendingAcceptFixture(&h);
+        const before = try allocator.dupe(u8, h.content());
+        defer allocator.free(before);
+        const undo_before = h.term.rt.editorDocument().history.undo_len;
+        const st = &s.editor_completion;
+        st.pending_accept = false;
+        st.pending_item = null;
+        st.pending_snapshot = null;
+        st.resolve_waiting = false;
+        const chosen_row = s.chrome_host.suggest_box.selected;
+        try testing.expectEqual(st.order.items.len - 1, chosen_row);
+        s.chrome_host.suggest_box.selected = (chosen_row + st.order.items.len - 1) % st.order.items.len;
+        {
+            var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+            s.allocator = failing.allocator();
+            defer s.allocator = allocator;
+            try testing.expect(completion_client.handleKey(s, .arrow_down, .{}));
+            try testing.expect(failing.has_induced_failure);
+        }
+        if (retry_fails == 1) {
+            var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+            s.allocator = failing.allocator();
+            defer s.allocator = allocator;
+            try testing.expect(completion_client.handleKey(s, .enter, .{}));
+            try testing.expect(failing.has_induced_failure);
+        } else try testing.expect(completion_client.handleKey(s, .enter, .{}));
+        try testing.expectEqualStrings(before, h.content());
+        try testing.expectEqual(undo_before, h.term.rt.editorDocument().history.undo_len);
+        if (retry_fails == 1) {
+            try testing.expect(!st.active and !st.pending_accept);
+        } else {
+            try testing.expect(st.pending_accept);
+            var parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"label\":\"lazy_import\",\"additionalTextEdits\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"newText\":\"#include \\\"lazy.h\\\"\\n\"}]}", .{});
+            defer parsed.deinit();
+            completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient, st.resolve_seq, parsed.value);
+            try testing.expect(std.mem.startsWith(u8, h.content(), "#include \"lazy.h\"\n"));
+            try testing.expectEqual(undo_before + 1, h.term.rt.editorDocument().history.undo_len);
+            s.dispatchAppAction(.editor_undo);
+            try testing.expectEqualStrings(before, h.content());
+        }
+    }
+}
+
+test "CMPAT resolve commit preserves input across late, stale, error and cancellation paths" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const response = "{\"label\":\"lazy_import\",\"additionalTextEdits\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"newText\":\"#include \\\"lazy.h\\\"\\n\"}]}";
+    for (0..20) |attack| {
+        var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+        defer h.deinit(allocator);
+        try h.init(allocator, pending_doc ++ "// RESOLVESTALL\n");
+        const s = h.fx.session;
+        try pendingAcceptFixture(&h);
+        const before = try allocator.dupe(u8, h.content());
+        defer allocator.free(before);
+        const undo_before = h.term.rt.editorDocument().history.undo_len;
+        const seq = s.editor_completion.resolve_seq;
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response, .{});
+        defer parsed.deinit();
+        const valid = attack < 3 or attack == 17;
+        switch (attack) {
+            0 => { // A response beyond the old 300ms cutoff still commits atomically.
+                s.editor_completion.pending_snapshot.?.started_ms -|= 1_200;
+                try testing.expect(!completion_client.acceptPendingOnTimeout(s));
+                try testing.expectEqualStrings(before, h.content());
+            },
+            1 => { // Another request must neither apply nor cancel this transaction.
+                completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient, seq + 1, parsed.value);
+                try testing.expect(s.editor_completion.pending_accept);
+            },
+            2 => { // Repeated Enter cannot move the deadline or insert a second edit.
+                const started = s.editor_completion.pending_snapshot.?.started_ms;
+                try pressKey(&h.fx, .enter, .{});
+                try testing.expectEqual(started, s.editor_completion.pending_snapshot.?.started_ms);
+            },
+            3 => {
+                try pressKey(&h.fx, .escape, .{});
+            },
+            4 => {
+                try pressKey(&h.fx, .arrow_left, .{});
+            },
+            5 => {
+                s.editor_completion.pending_snapshot.?.started_ms -|= 5_000;
+            },
+            6 => {
+                h.term.rt.editorDocument().opened.?.file.revision += 1;
+            },
+            7 => {
+                h.term.rt.editor_selection.?.focus -= 1;
+            },
+            8 => {
+                completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient, seq, null);
+            },
+            9 => {
+                completion_client.hide(s);
+            },
+            10 => {
+                s.editor_completion.resolve_item = s.editor_completion.items.items.len;
+            },
+            11 => {
+                s.editor_completion.pending_item = null;
+            },
+            12 => {
+                parsed.value.object.getPtr("additionalTextEdits").?.* = .{ .integer = 42 };
+            },
+            13 => {
+                parsed.value.object.getPtr("additionalTextEdits").?.array.items[0].object.getPtr("range").?.* = .null;
+            },
+            14 => {
+                h.term.rt.editor_extra_selections = try allocator.dupe(maru.session.editor.selection.Selection, &.{maru.session.editor.selection.Selection.at(1)});
+            },
+            15 => {
+                h.term.rt.editor_extra_selections = try allocator.dupe(maru.session.editor.selection.Selection, &.{maru.session.editor.selection.Selection.at(1)});
+                s.editor_completion.pending_accept = false;
+                s.editor_completion.pending_snapshot = null;
+                s.editor_completion.pending_item = null;
+                var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+                s.allocator = failing.allocator();
+                defer s.allocator = allocator;
+                try testing.expect(completion_client.handleKey(s, .enter, .{}));
+                try testing.expect(failing.has_induced_failure);
+            },
+            16 => {
+                var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+                s.allocator = failing.allocator();
+                defer s.allocator = allocator;
+                completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient, seq, parsed.value);
+                try testing.expect(failing.has_induced_failure);
+            },
+            17 => {
+                completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient, seq, parsed.value);
+            },
+            18 => {
+                s.editor_completion.response_version = 0;
+                const edit = &parsed.value.object.getPtr("additionalTextEdits").?.array.items[0];
+                edit.object.getPtr("range").?.object.getPtr("start").?.object.getPtr("line").?.* = .{ .integer = 4 };
+                edit.object.getPtr("range").?.object.getPtr("end").?.object.getPtr("line").?.* = .{ .integer = 4 };
+            },
+            19 => {
+                h.term.rt.editorDocument().invalidateSaveTarget();
+            },
+            else => unreachable,
+        }
+        completion_client.onResolveResponse(s, lsp_client.readyClientFor(s, h.term) orelse return error.NoReadyClient, seq, parsed.value);
+        if (valid) {
+            try testing.expect(std.mem.startsWith(u8, h.content(), "#include \"lazy.h\"\n"));
+            try testing.expectEqual(undo_before + 1, h.term.rt.editorDocument().history.undo_len);
+            s.dispatchAppAction(.editor_undo);
+            try testing.expectEqualStrings(before, h.content());
+        } else {
+            try testing.expectEqualStrings(before, h.content());
+            try testing.expectEqual(undo_before, h.term.rt.editorDocument().history.undo_len);
+        }
+        try testing.expectEqual(@as(u64, 0), s.editor_completion.accepted_on_timeout);
+    }
+}
+
+test "parse runtime host 창 파괴 뒤에도 main 전달이 문서만 회수한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const parse = parse_runtime;
+    // 다른 창을 남겨 테스트 전용 마지막 창 cleanup이 아닌 실제 view 반납 경로를 지난다.
+    var remaining = try PaneFixture.init(testing.allocator);
+    defer remaining.deinit(testing.allocator);
+    var closing = try PaneFixture.init(testing.allocator);
+    var open = true;
+    defer {
+        if (open) closing.deinit(testing.allocator);
+    }
+    const lease = closing.term.rt.editor_document_lease.?;
+    const identity = lease.owner.identity(lease).?;
+    const owner = @constCast(lease.owner);
+    const grammar: parse.request.Grammar = .{ .identity = 1, .generation = 0 };
+    _ = try parse.submit(lease, grammar, .zig);
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 10_000_000_000;
+    while (parse.ready(identity, grammar, .zig) == null) {
+        try testing.expect(std.Io.Clock.awake.now(testing.io).nanoseconds < deadline);
+        _ = parse.wake.deliverForTest();
+        std.Thread.yield() catch {};
+    }
+    closing.deinit(testing.allocator);
+    open = false;
+    try testing.expect(parse.ready(identity, grammar, .zig) == null);
+    while (owner.slots.items[identity.slot].document != null) {
+        try testing.expect(std.Io.Clock.awake.now(testing.io).nanoseconds < deadline);
+        _ = parse.wake.deliverForTest();
+        std.Thread.yield() catch {};
+    }
+    try testing.expect(parse.lastPollThread() == null); // 모두 회수한 runtime도 내려갔다.
+    parse.wake.request();
+    try testing.expect(parse.wake.deliverForTest());
+    try testing.expect(parse.ready(identity, grammar, .zig) == null);
+}
+
+test "parse runtime host 마지막 fixture는 allocator 반납 전에 파싱 소유자를 정산한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const parse = parse_runtime;
+    var fixture = try PaneFixture.init(testing.allocator);
+    var open = true;
+    defer {
+        if (open) fixture.deinit(testing.allocator);
+    }
+    const lease = fixture.term.rt.editor_document_lease.?;
+    const identity = lease.owner.identity(lease).?;
+    const grammar: parse.request.Grammar = .{ .identity = 1, .generation = 0 };
+    _ = try parse.submit(lease, grammar, .zig);
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 10_000_000_000;
+    while (parse.ready(identity, grammar, .zig) == null) {
+        try testing.expect(std.Io.Clock.awake.now(testing.io).nanoseconds < deadline);
+        _ = parse.wake.deliverForTest();
+        std.Thread.yield() catch {};
+    }
+    parse.wake.request();
+    fixture.deinit(testing.allocator);
+    open = false;
+    try testing.expect(parse.lastPollThread() == null);
+    try testing.expect(parse.wake.deliverForTest());
+    try testing.expect(parse.ready(identity, grammar, .zig) == null);
+}
+
+test "RNM12 same sequence from another client cannot settle a rename request" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: RenameFx = .{ .fx = try PaneFixture.init(allocator) };
+    h.init(allocator) catch |err| {
+        h.fx.deinit(allocator);
+        return err;
+    };
+    defer h.deinit(allocator);
+    const s = h.fx.session;
+    const term = h.term;
+    try h.renameTo(5, "renamed");
+    try testing.expect(s.editor_rename.waiting);
+    const seq = s.editor_rename.waiting_seq;
+    const owner = s.editor_rename.owner.?;
+    const client = lsp_client.readyClientFor(s, term).?;
+    // Equal server/root/process metadata is not connection identity. This is a
+    // controller injection, not evidence of a second actual server process.
+    var foreign = client.*;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"changes\":{}}", .{});
+    defer parsed.deinit();
+    for ([_]bool{ true, false }) |is_error| {
+        rename_client.onResponse(s, &foreign, seq, parsed.value, is_error, "foreign error");
+        try testing.expect(s.editor_rename.waiting);
+        try testing.expectEqual(@as(u64, 0), s.editor_rename.notified_error);
+        try testing.expectEqual(@as(u64, 0), s.editor_rename.notified_done);
+        try testing.expectEqualStrings(RenameFx.r_text, h.content());
+        try testing.expect(!s.chrome_host.notice.open);
+    }
+    rename_client.onResponse(s, client, seq + 1, null, true, "old error");
+    try testing.expect(s.editor_rename.waiting);
+    // Save As can preserve surface and body version while replacing the target.
+    term.rt.editorDocument().save_target_epoch += 1;
+    rename_client.onResponse(s, client, seq, parsed.value, false, null);
+    try testing.expect(!s.editor_rename.waiting);
+    try testing.expectEqualStrings(RenameFx.r_text, h.content());
+    try testing.expect(!s.chrome_host.notice.open);
+    term.rt.editorDocument().save_target_epoch = owner.target_epoch;
+    // A matching origin still settles normally, and duplicate/late errors do not.
+    s.editor_rename.owner = owner;
+    s.editor_rename.waiting = true;
+    rename_client.onResponse(s, client, seq, null, true, "own error");
+    try testing.expect(!s.editor_rename.waiting);
+    try testing.expectEqual(@as(u64, 1), s.editor_rename.notified_error);
+    rename_client.onResponse(s, client, seq, null, true, "duplicate error");
+    try testing.expectEqual(@as(u64, 1), s.editor_rename.notified_error);
+    s.chrome_host.notice.dismiss();
 }

@@ -960,7 +960,7 @@ pub fn rememberPaneSession(self: *AppSession, tab_index: usize, pane_index: usiz
     const entry = self.remote_agent_panes.findMut(term.surfaceId(), pane_name) orelse return;
     git_ops.rememberAgentSession(self, entry.slot.transcript.identity());
     // 대표 슬롯도 이 pane 으로 — 대화 줄·활성 세션이 클릭한 pane 을 따르게 «가장 최근» 으로 올린다.
-    entry.last_event_ms = self.awakeMs();
+    _ = self.remote_agent_panes.select(term.surfaceId(), pane_name, self.awakeMs());
     self.metal_dirty = true;
 }
 

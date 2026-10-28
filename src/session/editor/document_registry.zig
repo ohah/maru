@@ -1,6 +1,7 @@
 //! 주소 안정 문서 슬롯과 참조 수명. 메인 스레드 전용이며 registry는 참조가 살아 있는 동안 이동하지 않는다.
 //! 닫기 승인·provider 취소·백업 삭제는 coordinator의 책임이다. 참조 해제는 그 정산 뒤에만 호출한다.
 const std = @import("std");
+const syntax_request = @import("syntax/request/gate.zig");
 const document_state = @import("document_state.zig");
 const history_links = @import("history/links.zig");
 
@@ -24,6 +25,8 @@ const Document = struct {
     refs: std.ArrayList(Reference),
     // State 교체·Undo·같은 본문 복원으로 번호가 되감기지 않도록 registry 문서가 소유한다.
     syntax_origin_last: u64 = 0,
+    // runtime을 다시 만들어도 같은 문서 identity의 요청 번호를 되감지 않는다. 사용 전에는 할당하지 않는다.
+    syntax_request_gate: ?*syntax_request.Gate = null,
 };
 const Slot = struct { generation: u64 = 1, document: ?*Document = null };
 
@@ -140,6 +143,16 @@ pub const Registry = struct {
         return doc.resource_allocator;
     }
 
+    /// lease가 살아 있는 동안만 빌린다. worker에 넘기지 않는 문서 수명의 main 수락 상태다.
+    pub fn syntaxRequestGate(self: *Registry, lease: Lease) Error!*syntax_request.Gate {
+        const doc = self.find(lease) orelse return error.StaleReference;
+        if (doc.syntax_request_gate) |gate| return gate;
+        const gate = try self.allocator.create(syntax_request.Gate);
+        gate.* = .{};
+        doc.syntax_request_gate = gate;
+        return gate;
+    }
+
     pub fn viewCount(self: *const Registry, lease: Lease) ?usize {
         const doc = self.find(lease) orelse return null;
         var count: usize = 0;
@@ -166,6 +179,7 @@ pub const Registry = struct {
         if (lease.kind == .view and views == 0) self.links.closeDocument(lease.document);
         if (doc.refs.items.len != 0) return false;
         doc.state.clear(doc.resource_allocator);
+        if (doc.syntax_request_gate) |gate| self.allocator.destroy(gate);
         doc.refs.deinit(self.allocator);
         self.allocator.destroy(doc);
         const slot = &self.slots.items[lease.document.slot];

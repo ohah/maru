@@ -391,6 +391,11 @@ pane 의 에이전트 세션을 «최근 세션» 으로 기억해(`rememberPane
 그 pane 으로 옮겨 대화 줄이 따라온다. pane 행에는 ✕ 가 없다 — ✕ 자리를 눌러도 Term 이 닫히지 않는다(pane 하나를 닫는 것은
 Term 을 닫는 것이 아니다). ✕ 판정을 끄는 기준은 **행 종류**(`isPaneRow`)지 이름이 아니다 — 이름 없는 고지 행도 같은 규칙을 탄다.
 
+대표 선택은 `remote_pane_table.Table.select`가 기존 슬롯의 시각과 사용 순서를 함께 갱신한다.
+같은 밀리초에 여러 pane을 눌러도 마지막 클릭이 대표가 되며, 클릭 시계가 앞선 이벤트보다 작으면
+현재 대표 시각을 유지한 채 사용 순서로 선택한다. 다음 같은 시각의 이벤트는 새 사용 순서로 대표를
+바꿀 수 있다. 없는 pane이나 퇴역한 surface를 선택해도 슬롯을 새로 만들지 않는다.
+
 ## 6. 렌더 경계
 
 현재 `buildSidebarDrawList`는 `names`/`branch_lines`/`path_lines`/`status_lines` **고정 4배열**을 row 인덱스로 병렬

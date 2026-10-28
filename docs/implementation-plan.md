@@ -1756,3 +1756,17 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [참조 결과 피커 IME 문맥](plans/reference-picker-ime.md): 참조/구현/타입 정의/선언 검색의 범위 편집·결과 세대·필터 실패 원자성과 후보 Return 격리.
 
 - [복구 목록 피커 IME 문맥](plans/recovery-picker-ime.md): 범위 교체·읽기 전용 열거와 조합 유지·필터 실패 원자성·후보 Return 복구 격리.
+
+- [신뢰·환경 이름 목록 피커 IME 문맥](plans/trust-picker-ime.md): 두 모드의 읽기/관리 경계를 유지하는 범위 편집·원자적 필터·후보 Return 격리.
+
+- [Save As 파일 수명 실제 GUI 검증](plans/save-as-file-lifecycle-gui.md): 기존 조합 저장 증거와 최근 rename 증거를 구분하고 native 파일명·덮어쓰기·취소·원본 보존을 검증.
+
+- [이름 없는 문서 첫 저장 IME 실제 GUI 검증](plans/untitled-first-save-ime-gui.md): 후보 Enter·별도 저장 확정·취소·충돌·쓰기 실패와 본문 보존.
+
+- [파일 탐색기 이름 변경 IME 실제 GUI 검증](plans/file-tree-rename-ime-gui.md): 후보 Return·별도 rename 확정·취소·충돌·권한 실패와 원본 identity 보존.
+
+- [LSP 심볼 이름 변경 IME 실제 GUI 검증](plans/symbol-rename-ime-gui.md): 후보 Enter·별도 요청 확정·적용·취소·서버 오류·stale 문서 보존. 제어 서버 5개 장면과 실제 clangd의 한자/한글·취소·stale GUI를 각각 검증. 같은 줄 한글·이모지 앞 UTF-16 위치와 ASCII 정상 대조도 검증.
+
+- [심볼 rename 응답 출처와 문서 수명](plans/rename-response-origin.md): 서버별 같은 seq의 교차 응답 격리와 요청 문서 수명 검사.
+
+- [코드 액션 응답의 문서 소유](plans/code-action-response-origin.md): 같은 실행 파일·번호를 쓰는 다른 root의 목록 응답 격리.

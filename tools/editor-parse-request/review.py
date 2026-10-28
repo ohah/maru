@@ -10,7 +10,7 @@ import shutil
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
-LEAF = 'src/session/editor/syntax/request.zig'
+LEAF = 'src/session/editor/syntax/request/gate.zig'
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()

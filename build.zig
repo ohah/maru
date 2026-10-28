@@ -2346,6 +2346,21 @@ pub fn build(b: *std.Build) void {
     const address_field_ime_step = b.step("test-address-field-ime", "Validate address-field native IME ranges and pinned owner lifetime");
     address_field_ime_step.dependOn(&run_address_ime.step);
 
+    const trust_picker_ime_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{ "trust picker IME host", "ABI v192 early app log" },
+    });
+    const run_trust_picker_ime = b.addRunArtifact(trust_picker_ime_tests);
+    run_trust_picker_ime.addArg("--maru-expect-tests=42");
+    run_trust_picker_ime.setCwd(b.path("."));
+    const trust_picker_ime_step = b.step("test-trust-picker-ime", "Validate trust and environment-name picker IME boundaries");
+    trust_picker_ime_step.dependOn(&run_trust_picker_ime.step);
+    const trust_ime_artifact_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/trust-picker-ime", "-p", "test_*.py" });
+    trust_ime_artifact_controls.setCwd(b.path("."));
+    trust_ime_artifact_controls.has_side_effects = true;
+    trust_picker_ime_step.dependOn(&trust_ime_artifact_controls.step);
+    if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_trust_picker_ime.step);
+
     const recovery_picker_ime_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
         .filters = &.{"recovery picker IME host"},
@@ -2970,6 +2985,19 @@ pub fn build(b: *std.Build) void {
     hook_session_attribution_probe.addArtifactArg(exe);
     hook_session_attribution_probe.setCwd(b.path("."));
     b.step("test-agent-hook-session-attribution", "Install and execute hooks with isolated synthetic session metadata").dependOn(&hook_session_attribution_probe.step);
+
+    const remote_pane_order_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"RA7select"} });
+    const run_remote_pane_order = b.addRunArtifact(remote_pane_order_tests);
+    run_remote_pane_order.addArg("--maru-expect-tests=32");
+    run_remote_pane_order.addArg("--maru-expect-passed=32");
+    b.step("test-remote-pane-selection-contract", "Run remote pane selection ordering contract").dependOn(&run_remote_pane_order.step);
+    const remote_pane_selection_tests = addProjectTest(b, .{ .root_module = macos_app_host_abi_tests.root_module, .filters = &.{"훅 원격 프레임: pane 슬롯이 둘이면 사이드바에 pane 행이 서고, 클릭은 그 pane 의 세션을 최근 세션으로 (RA7)"} });
+    const run_remote_pane_selection = b.addRunArtifact(remote_pane_selection_tests);
+    run_remote_pane_selection.setCwd(b.path("."));
+    run_remote_pane_selection.addArg("--maru-expect-tests=6");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos)
+        run_remote_pane_selection.addArg("--maru-expect-passed=6");
+    b.step("test-remote-pane-selection", "Run remote pane sidebar selection regression").dependOn(&run_remote_pane_selection.step);
 
     const test_macos_app_host_abi_step = b.step("test-macos-app-host-abi", "Run macOS Swift/Zig app host ABI contract tests");
     test_macos_app_host_abi_step.dependOn(&ime_ack_host.step);
@@ -5038,7 +5066,28 @@ pub fn build(b: *std.Build) void {
     // 무엇으로 대신할지와 함께 정할 일이라 이 슬라이스에서 하지 않는다.
     const posix_host_tests = target.result.os.tag != .windows;
 
+    const symbol_rename_ime_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/symbol-rename-ime", "-p", "test_*.py" });
+    symbol_rename_ime_controls.setCwd(b.path("."));
+    symbol_rename_ime_controls.has_side_effects = true;
+    b.step("test-symbol-rename-ime-oracles", "Validate symbol rename IME request, wire and document evidence").dependOn(&symbol_rename_ime_controls.step);
+    const file_tree_ime_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/file-tree-rename-ime", "-p", "test_*.py" });
+    file_tree_ime_controls.setCwd(b.path("."));
+    file_tree_ime_controls.has_side_effects = true;
+    b.step("test-file-tree-rename-ime-oracles", "Validate file-tree rename IME identity and disk evidence").dependOn(&file_tree_ime_controls.step);
+    const first_save_ime_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/untitled-save-ime", "-p", "test_*.py" });
+    first_save_ime_controls.setCwd(b.path("."));
+    first_save_ime_controls.has_side_effects = true;
+    b.step("test-untitled-save-ime-oracles", "Validate independent first-save IME state and file evidence controls").dependOn(&first_save_ime_controls.step);
+    const save_as_gui_controls = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/editor-project-search-app", "-p", "test_save_as_*.py" });
+    save_as_gui_controls.setCwd(b.path("."));
+    save_as_gui_controls.has_side_effects = true;
+    b.step("test-save-as-gui-oracles", "Validate independent native Save As lifecycle evidence controls").dependOn(&save_as_gui_controls.step);
     const test_step = b.step("test", "Run all Zig tests");
+    test_step.dependOn(&save_as_gui_controls.step);
+    test_step.dependOn(&first_save_ime_controls.step);
+    test_step.dependOn(&file_tree_ime_controls.step);
+    test_step.dependOn(&symbol_rename_ime_controls.step);
+    test_step.dependOn(&trust_ime_artifact_controls.step);
     test_step.dependOn(&recovery_ime_artifact_controls.step);
     test_step.dependOn(&reference_ime_artifact_controls.step);
     test_step.dependOn(&symbol_ime_artifact_controls.step);
@@ -5047,6 +5096,15 @@ pub fn build(b: *std.Build) void {
 
     test_step.dependOn(&run_inspector_rules.step);
     inline for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
+        const trust_model_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
+            .filters = &.{"trust picker IME model"},
+        });
+        const run_trust_models = b.addRunArtifact(trust_model_tests);
+        run_trust_models.addArg("--maru-expect-tests=13");
+        trust_picker_ime_step.dependOn(&run_trust_models.step);
+        test_step.dependOn(&run_trust_models.step);
+
         const recovery_model_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{ .root_source_file = b.path("src/chrome.zig"), .target = target, .optimize = mode }),
             .filters = &.{"recovery picker IME model"},
@@ -5402,12 +5460,12 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
         }),
-        .filters = &.{"RF5a"},
+        .filters = &.{ "RF5a", "selection follows identity and falls back after rebuild", "all navigation intents use actionable rows and tree hierarchy" },
     });
     attachPngCodec(b, file_tree_model_tests.root_module);
     file_tree_model_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_file_tree_model_tests = b.addRunArtifact(file_tree_model_tests);
-    run_file_tree_model_tests.addArg("--maru-expect-tests=24"); // 이름 있는 셋 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
+    run_file_tree_model_tests.addArg("--maru-expect-tests=34"); // 이름 있는 여섯 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
     b.step("test-file-tree-model", "Run the pure file tree model unit tests only (RF5a filter)").dependOn(&run_file_tree_model_tests.step);
 
     // 터미널 마커 이미지 프리뷰의 **순수 코어**만(MP1) — 스테이징 맵·관찰·화면 마커 스캐너.
@@ -6211,7 +6269,7 @@ pub fn build(b: *std.Build) void {
         // 에 걸리므로 `"app_session.editor.mod."` 한 줄이 그 파일을 통째로 고른다. 이름 접두들은 다른
         // 모듈에 흩어진 판정자를 마저 긁으려고 남긴다. 대가는 시간이다 — 실측 75초 → 97초
         // (판정자 1,519 → 1,850). 그 대가로 「있는데 안 도는」 판정자가 사라진다.
-        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "SAV", "RFP", "REF", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.mod.", "app_session.editor.hover.", "app_session.editor.diff.", "app_session.editor.recovery_store.", "app_session.editor.discovery.", ".test.OUTLINE" },
+        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "SAV", "RFP", "REF", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.mod.", "app_session.editor.hover.", "app_session.editor.diff.", "app_session.editor.recovery_store.", "app_session.editor.discovery.", "app_session.editor.parse.view_judges.", ".test.OUTLINE" },
     });
     // 아웃라인의 중립 범위·Chrome 기하와 제품 문서 수명을 모두 실행한다.
     const outline_pure_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
@@ -6606,13 +6664,45 @@ pub fn build(b: *std.Build) void {
     const workspace_edit_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.RNM", ".test.WEOOM", ".test.SHVIEW18", ".test.CA1 ", ".test.CA2 " } });
     const run_workspace_edit = b.addRunArtifact(workspace_edit_tests);
     run_workspace_edit.setCwd(b.path("."));
-    run_workspace_edit.addArg("--maru-expect-tests=20");
+    run_workspace_edit.addArg("--maru-expect-tests=21");
     run_workspace_edit.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-workspace-edit", "Run WorkspaceEdit preparation and rename regressions").dependOn(&run_workspace_edit.step);
-    const completion_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CMP"} });
+    const code_action_origin_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.CA1 ", ".test.CA2 ", ".test.ASB3 ", ".test.ASB4 ", ".test.ASB6 " } });
+    const run_code_action_origin_tests = b.addRunArtifact(code_action_origin_tests);
+    run_code_action_origin_tests.setCwd(b.path("."));
+    run_code_action_origin_tests.addArg("--maru-expect-tests=9");
+    run_code_action_origin_tests.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-code-action-origins", "Verify code action origin isolation and primary/auxiliary aggregation").dependOn(&run_code_action_origin_tests.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_code_action_origin_tests.addArg("--maru-expect-passed=9");
+        macos_only_test_step.dependOn(&run_code_action_origin_tests.step);
+    }
+    const completion_overlay_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.HELP10 ", ".test.HELP11 ", ".test.FINDH5 " } });
+    const run_completion_overlays = b.addRunArtifact(completion_overlay_tests);
+    run_completion_overlays.setCwd(b.path("."));
+    run_completion_overlays.addArg("--maru-expect-tests=7");
+    run_completion_overlays.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-completion-overlays", "Run pending completion through palette and find overlays").dependOn(&run_completion_overlays.step);
+    const pending_completion_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{"CPLpending"} });
+    const run_pending_completion = b.addRunArtifact(pending_completion_tests);
+    run_pending_completion.addArg("--maru-expect-tests=32");
+    b.step("test-editor-completion-contract", "Run atomic completion context and deadline contract").dependOn(&run_pending_completion.step);
+    const completion_origin_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CMPATORIGIN "} });
+    const run_completion_origin = b.addRunArtifact(completion_origin_tests);
+    run_completion_origin.setCwd(b.path("."));
+    run_completion_origin.addArg("--maru-expect-tests=6");
+    run_completion_origin.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-completion-origin", "Reject colliding completion IDs from a different primary client").dependOn(&run_completion_origin.step);
+    const completion_send_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CMPATSEND "} });
+    const run_completion_send = b.addRunArtifact(completion_send_tests);
+    run_completion_send.setCwd(b.path("."));
+    run_completion_send.addArg("--maru-expect-tests=5");
+    run_completion_send.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-completion-send-failure", "Reject partial completion after a failed resolve prefetch").dependOn(&run_completion_send.step);
+    const completion_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.CMP", ".test.RLC1 " } });
     const run_completion = b.addRunArtifact(completion_tests);
     run_completion.setCwd(b.path("."));
-    run_completion.addArg("--maru-expect-tests=16");
+    run_completion.addArg("--maru-expect-tests=21");
     run_completion.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-completion", "Run editor completion product regressions").dependOn(&run_completion.step);
     const save_conflict_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.C0a", ".test.C1a-", ".test.C1b-" } });
@@ -6993,6 +7083,15 @@ pub fn build(b: *std.Build) void {
     run_semantic_recovery_product.addArg("--maru-expect-tests=7");
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_semantic_recovery_product.addArg("--maru-expect-passed=7");
     semantic_recovery_step.dependOn(&run_semantic_recovery_product.step);
+    const parse_host_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"parse runtime host"} });
+    const run_parse_host = b.addRunArtifact(parse_host_tests);
+    run_parse_host.setCwd(b.path("."));
+    // macOS 전용 import의 익명 초기화 3개는 다른 플랫폼에서 수집되지 않는다.
+    run_parse_host.addArg(if (target.result.os.tag == .macos) "--maru-expect-tests=6" else "--maru-expect-tests=3");
+    run_parse_host.addArg(if (target.result.os.tag == .macos) "--maru-expect-passed=6" else "--maru-expect-passed=1");
+    b.step("test-editor-parse-host", "Verify closed AppSession parse document reclamation").dependOn(&run_parse_host.step);
+    test_step.dependOn(&run_parse_host.step);
+    macos_only_test_step.dependOn(&run_parse_host.step);
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
     run_editor_tests.step.dependOn(&install_fake_lsp.step);
@@ -7047,6 +7146,57 @@ pub fn build(b: *std.Build) void {
     // (`TS1 chrome.tab-style=underline` …). 편집기 필터에 `"TS"`를 적으면 **그쪽이 골라져 초록이
     // 되는데** 구문 판정자는 한 개도 안 돈다 — `CRT`·`LANG`이 낸 거짓 초록과 정확히 같은 모양이다.
     if (target.result.os.tag == .macos) {
+        const parse_runtime_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/app_session/editor/parse.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "syntax", .module = syntax_mod } },
+        });
+        const parse_main_probe = b.addExecutable(.{
+            .name = "maru-parse-main-queue",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/editor-parse-runtime/native.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{ .{ .name = "parse", .module = parse_runtime_mod }, .{ .name = "maru", .module = maru_mod } },
+            }),
+        });
+        parse_main_probe.root_module.addCSourceFile(.{ .file = b.path("tools/editor-parse-runtime/main_queue.m"), .flags = &.{} });
+        parse_main_probe.root_module.linkFramework("CoreFoundation", .{});
+        const run_parse_main = b.addRunArtifact(parse_main_probe);
+        run_parse_main.has_side_effects = true;
+        b.step("test-editor-parse-main-queue", "Run actual Apple main queue parse delivery and document release").dependOn(&run_parse_main.step);
+        test_step.dependOn(&run_parse_main.step);
+        macos_only_test_step.dependOn(&run_parse_main.step);
+        const parse_runtime_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/app_session/editor/parse_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "syntax", .module = syntax_mod } },
+        }), .filters = &.{"parse runtime"} });
+        const run_parse_runtime = b.addRunArtifact(parse_runtime_tests);
+        run_parse_runtime.addArg("--maru-expect-tests=12");
+        run_parse_runtime.addArg("--maru-expect-passed=12");
+        b.step("test-editor-parse-runtime", "Verify main-owned parse document lifetimes").dependOn(&run_parse_runtime.step);
+        test_step.dependOn(&run_parse_runtime.step);
+        macos_only_test_step.dependOn(&run_parse_runtime.step);
+        const parse_view_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"parse view install"} });
+        const run_parse_view = b.addRunArtifact(parse_view_tests);
+        run_parse_view.addArg("--maru-expect-tests=5");
+        run_parse_view.addArg("--maru-expect-passed=5");
+        b.step("test-editor-parse-view", "Verify completed parse installation into view state").dependOn(&run_parse_view.step);
+        test_step.dependOn(&run_parse_view.step);
+        macos_only_test_step.dependOn(&run_parse_view.step);
+        const parse_view_regressions = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"app_session.editor.syntax."} });
+        const run_parse_view_regressions = b.addRunArtifact(parse_view_regressions);
+        run_parse_view_regressions.addArg("--maru-expect-tests=35");
+        run_parse_view_regressions.addArg("--maru-expect-passed=35");
+        b.step("test-editor-parse-view-regression", "Run existing view syntax regressions").dependOn(&run_parse_view_regressions.step);
+        test_step.dependOn(&run_parse_view_regressions.step);
+        macos_only_test_step.dependOn(&run_parse_view_regressions.step);
         const parse_worker_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/app_session/editor/parse/worker.zig"),
             .target = target,
@@ -7079,7 +7229,13 @@ pub fn build(b: *std.Build) void {
         const run_parse_measure = b.addRunArtifact(parse_measure);
         run_parse_measure.addArg("--maru-expect-tests=1");
         b.step("measure-editor-parse-incremental", "Measure explicit incremental parse handoff").dependOn(&run_parse_measure.step);
-        const parse_worker_tests = addProjectTest(b, .{ .root_module = parse_worker_mod, .filters = &.{"parse worker"} });
+        const parse_worker_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/app_session/editor/parse/worker_judges.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "syntax", .module = syntax_mod } },
+        }), .filters = &.{"parse worker"} });
         const run_parse_worker = b.addRunArtifact(parse_worker_tests);
         run_parse_worker.addArg("--maru-expect-tests=19");
         run_parse_worker.addArg("--maru-expect-passed=19");

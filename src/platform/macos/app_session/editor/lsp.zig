@@ -1988,10 +1988,10 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
             },
             .completion => |seq| {
                 self.editor_lsp.received_completions += 1;
-                editor_completion.onResponse(self, seq, if (r.is_error) null else r.result, c.encoding);
+                editor_completion.onResponse(self, c, seq, if (r.is_error) null else r.result);
             },
             // error 응답은 result 가 없다(JSON-RPC) — `is_error` 가드는 둘을 함께 실은 서버에 대한 방어(적대적 3회차 C2: 등가).
-            .completion_resolve => |seq| editor_completion.onResolveResponse(self, seq, if (r.is_error) null else r.result, c.encoding),
+            .completion_resolve => |seq| editor_completion.onResolveResponse(self, c, seq, if (r.is_error) null else r.result),
             .semantic_tokens => |seq| {
                 self.editor_lsp.received_semantic += 1;
                 // 어느 문서의 것인지는 seq 로 — 문서마다 대기 seq 하나(§8.2i).
@@ -2020,7 +2020,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
             },
             .rename => |seq| {
                 self.editor_lsp.received_renames += 1;
-                editor_rename.onResponse(self, seq, if (r.is_error) null else r.result, r.is_error, r.error_message, c.encoding);
+                editor_rename.onResponse(self, c, seq, if (r.is_error) null else r.result, r.is_error, r.error_message);
             },
             .formatting => |seq| {
                 self.editor_lsp.received_formattings += 1;

@@ -1,10 +1,17 @@
 # 검증 매트릭스
 
-파싱 서비스의 완료 통지 hook은 합치기·재무장·mutex 밖 전달·퇴역 회수·종료를 검사한다. [독립 결함 대조](../tools/editor-parse-notify/README.md)를 따르며 실제 OS main queue와 AppSession 설치는 미연결이다.
+- 원격 pane 선택: `mise exec -- zig build test-remote-pane-selection-contract test-remote-pane-selection -j2`
+  및 ReleaseFast. 순수 계약과 AppSession 사이드바 마우스 경로에서 같은 시각의 클릭·시계 역행·후속 이벤트·
+  surface 격리·퇴역·없는 pane·LRU 퇴출을 검사한다. 물리 GUI·실제 SSH/tmux는 이 검증 범위 밖이다.
 
-native 파싱 서비스와 명시적 증분 인계는 `test-editor-parse-worker`와 `test-editor-parse-worker-native`가 실제 스레드·C 취소·준비/본문 복사 실패·회수와 production-mode 실행을 검사한다. macOS 기본 test·macOS 게이트에 포함하며 [결함 대조](../tools/editor-parse-worker/README.md)는 별도 실행한다. 증분 결과·동일 본문 재사용·기준 격리·중단·원본 조기 반환·기준 복사 OOM과 전체 C 좌표도 대조한다. [실측과 독립 결함 대조](../tools/editor-parse-incremental/README.md)는 별도 실행이다. 실제 UI·wake·IME 연결 검증은 아니다.
+- [원자적 자동완성 확정](editor-completion-commit.md): `mise exec -- zig build test-editor-completion-contract test-editor-completion test-editor-completion-overlays -j2`.
 
-파싱 요청 수락 코어는 `test-editor-parse-request`가 입력 신원·언어 판·요청 번호와 단계별 단발 수락을 검사한다. 기본 `zig build test`에 포함되며, [실제 결함 대조](../tools/editor-parse-request/README.md)는 별도 opt-in 실행이다. 제품 워커·UI에 연결된 상태는 아니다.
+
+파싱 서비스의 완료 통지 hook은 합치기·재무장·mutex 밖 전달·퇴역 회수·종료를 검사한다. [독립 결함 대조](../tools/editor-parse-notify/README.md)를 따르며 실제 OS main queue와 AppSession 수명 연결은 [runtime 검증](../tools/editor-parse-runtime/README.md)이 담당한다. 표시 설치는 미연결이다.
+
+native 파싱 서비스와 명시적 증분 인계는 `test-editor-parse-worker`와 `test-editor-parse-worker-native`가 실제 스레드·C 취소·준비/본문 복사 실패·회수와 production-mode 실행을 검사한다. macOS 기본 test·macOS 게이트에 포함하며 [결함 대조](../tools/editor-parse-worker/README.md)는 별도 실행한다. 증분 결과·동일 본문 재사용·기준 격리·중단·원본 조기 반환·기준 복사 OOM과 전체 C 좌표도 대조한다. [실측과 독립 결함 대조](../tools/editor-parse-incremental/README.md)는 별도 실행이다. 실제 UI·IME 연결 검증은 아니다.
+
+파싱 요청 수락 코어는 `test-editor-parse-request`가 입력 신원·언어 판·요청 번호와 단계별 단발 수락을 검사한다. 기본 `zig build test`에 포함되며, [실제 결함 대조](../tools/editor-parse-request/README.md)는 별도 opt-in 실행이다. native 워커와 Runtime에서 사용하며 일반 입력·표시 경로는 미전환이다.
 
 [최신 메인 비용 재귀속](plans/editor-current-frame-attribution.md)은 제품 소스 변경 없이 성능 600입력과 정확성 200입력을 대조했다.
 프레임 schema 1/2 판정 13개와 저장소 판정 10개를 통과했다. 옛 원시 기록 800개는 읽기
@@ -5331,3 +5338,11 @@ PNG/OCR은 고정된 앱의 화면 기록 권한과 독립 후보창 기록을 �
 `tools/reference-picker-ime`의 실제 두벌식·후보 취소 5회·한자 선택·별도 Enter 이동·에디터 복귀 진단이 통과했다.
 같은 고정 앱에서 서로 다른 후보창 5개의 PNG/hash/독립 OCR도 통과했다. 실제 OS 실행은 references 모드이며 나머지 명령 kind는 공유 호스트 검사로 검증했다.
 위치 응답을 공급하는 fixture는 실제 LSP 서버 통신 검증이 아니다. [계획과 결과](plans/reference-picker-ime.md)를 따른다.
+
+파싱 Runtime의 상태 조회는 현재 판의 대기·실패 완료와 준비 오류를 구분한다. `test-editor-parse-runtime` 12개는 실제 copy OOM·재요청·늦은 실패 장벽을 포함하며, [관측 결함 대조](../tools/editor-parse-runtime/README.md)의 `--scope observation`을 별도로 실행한다. 일반 입력·표시·알림 정책 검증은 아니다.
+
+파싱 완료 보유 API는 이전 판 보유 중 새 결과 교체·마지막 뷰 닫기·소비자 보유 중 종료 거절을 검사한다. worker C 장벽으로 마지막 참조 반환만 퇴역을 게시하는지 확인하며, Apple probe의 `retained_result=1`은 실제 전달 후 보유·종료 순서 검증이다. [실제 결함 대조](../tools/editor-parse-runtime/README.md)의 `--scope leases`를 따르고 실제 GUI 소비자 연결 완료로 해석하지 않는다.
+
+완료 트리의 뷰 설치는 `test-editor-parse-view`가 공유 뷰/split·캐시 무효화·현재 요청 재검증·legacy/빈 문서·참조 overflow를 검사한다. 실제 구문 색과 전체 native 노드 좌표를 cold 결과와 대조하고 Apple main queue의 `installed_view=1`로 설치·보유·종료 순서를 확인한다. [독립 실제 결함 대조](../tools/editor-parse-runtime/README.md)의 `--scope view`를 따르며 GUI/IME·일반 입력 경로 전환 완료로 확대하지 않는다.
+
+공유 파싱 요청의 ensure는 같은 문서/판/언어 설정 재사용과 다른 문서·revision·native 언어 변경의 새 게시를 검사한다. 실패 완료 재사용과 마지막 뷰 닫기 후 같은 identity 재요청은 read lease·보유 결과로 문서를 유지한 상태에서 대조한다. [독립 결함 대조](../tools/editor-parse-runtime/README.md)의 `--scope sharing`은 Runtime 12개·host 6개와 Apple shared_request=1을 요구한다. UI 재시도 정책 승인이나 화면 활성화 증거는 아니다.

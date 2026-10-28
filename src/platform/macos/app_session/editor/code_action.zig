@@ -138,6 +138,17 @@ pub fn quickFix(self: *AppSession) bool {
 pub fn onResponse(self: *AppSession, c: *editor_lsp.Client, seq: u32, result: ?std.json.Value, is_error: bool, error_message: ?[]const u8) void {
     const st = &self.editor_code_action;
     if (!st.waiting) return;
+    // Executable names and sequences are shared across roots. Only a client
+    // that owns this document may settle a slot (primary or auxiliary).
+    // Keep the host identity lookup here; findDoc uses the shared document lease.
+    const loc = term_ops.findTermWhere(self, st.waiting_surface, struct {
+        fn pred(want: u64, t: *Term) bool {
+            return t.kind == .editor and t.surface.id == want;
+        }
+    }.pred) orelse return;
+    const term = loc.pane.terms.items[loc.term_index];
+    if (c.findDoc(term) == null) return;
+
     const w = for (st.waits[0..st.waits_len], 0..) |*w, i| {
         if (!w.done and w.seq == seq and std.mem.eql(u8, w.exe, c.server.exe)) break .{ w, i };
     } else return;

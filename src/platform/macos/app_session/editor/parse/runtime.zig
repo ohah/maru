@@ -5,12 +5,20 @@ const syntax = @import("syntax");
 const worker = @import("worker.zig");
 const registry = maru.session.editor.document_registry;
 const request = maru.session.editor.syntax.request;
+/// 표시·재시도 정책을 정하지 않고 현재 요청의 사실만 돌려준다.
+pub const Observation = union(enum) {
+    none,
+    pending: request.Request,
+    finished: struct { tag: request.Request, outcome: worker.Outcome },
+};
 const Entry = struct {
     lease: registry.Lease,
     identity: registry.DocumentIdentity,
     gate: *request.Gate,
     language: syntax.Language,
     current: ?worker.Completion = null,
+    latest: ?request.Request = null,
+    outcome: ?worker.Outcome = null,
 };
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
@@ -52,13 +60,18 @@ pub const Runtime = struct {
         };
         const value = entry.?;
         value.language = language;
+        // 같은 본문 재시도도 새 시도다. 준비 실패에 이전 완료 상태를 다시 공개하지 않는다.
+        value.latest = null;
+        value.outcome = null;
         var snapshot = opened.file.snapshot();
         errdefer snapshot.deinit();
         const input: request.Input = .{ .document = identity, .revision = revision, .grammar = grammar };
-        return if (value.current) |*previous|
-            self.service.submitFrom(value.gate, input, &snapshot, language, previous)
+        const tag = if (value.current) |*previous|
+            try self.service.submitFrom(value.gate, input, &snapshot, language, previous)
         else
-            self.service.submit(value.gate, input, &snapshot, language);
+            try self.service.submit(value.gate, input, &snapshot, language);
+        value.latest = tag;
+        return tag;
     }
     fn matches(entry: *const Entry, tag: request.Request) bool {
         const state = entry.lease.owner.get(entry.lease) orelse return false;
@@ -73,6 +86,15 @@ pub const Runtime = struct {
         if (!entry.gate.isCurrent(current.tag()) or !matches(entry, current.tag()) or entry.language != language or
             !std.meta.eql(current.tag().input.grammar, grammar)) return null;
         return current;
+    }
+    /// 완료가 없는 것과 실패 완료를 구분한다. 실패 결과도 본문·언어·요청 판이 맞을 때만 공개한다.
+    /// 준비 오류는 submit의 오류 반환으로만 전달하며 작업이 게시되지 않았으므로 none이다.
+    pub fn observe(self: *Runtime, identity: registry.DocumentIdentity, grammar: request.Grammar, language: syntax.Language) Observation {
+        const entry = self.find(identity) orelse return .none;
+        const tag = entry.latest orelse return .none;
+        if (!matches(entry, tag) or entry.language != language or !std.meta.eql(tag.input.grammar, grammar)) return .none;
+        if (entry.outcome) |outcome| return .{ .finished = .{ .tag = tag, .outcome = outcome } };
+        return .{ .pending = tag };
     }
     pub fn poll(self: *Runtime) void {
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread);
@@ -90,12 +112,19 @@ pub const Runtime = struct {
                 value.release();
                 continue;
             }
+            if (value.outcome() != .ready) {
+                // 낡은 실패가 새 요청의 대기를 소비하거나 원인을 덮어쓰면 안 된다.
+                if (entry.gate.abandon(value.tag())) entry.outcome = value.outcome();
+                value.release();
+                continue;
+            }
             if (!value.accept(entry.gate)) {
                 value.release();
                 continue;
             }
             if (entry.current) |*old| old.release();
             entry.current = value;
+            entry.outcome = .ready;
         }
         self.sweep();
     }

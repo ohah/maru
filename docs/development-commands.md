@@ -2070,6 +2070,12 @@ LSPE2는 빈 서버 override로 서버 부재를 명시하고, LSPE19는 기존 
 - `python3 tools/rename-ime/run.py --output <새 외부 경로> --mode diagnostic`: 사본 앱을 빌드하고 실제 키 입력·후보 취소/선택·별도 Return 이름 확정·터미널 복귀를 확인한다. 화면 픽셀 통과를 뜻하지 않는다.
 - 같은 앱에 `--app <고정 실행 파일> --mode live`를 쓰면 서로 다른 후보창 5개와 PNG/OCR을 추가 검사한다. workspace 이름 변경 장면이며 Save As 파일 생성 GUI를 대신하지 않는다.
 
+### 파일 탐색기 이름 변경 IME GUI
+
+- `mise exec -- zig build test-file-tree-model test-file-tree-rename-ime-oracles -j2`: 로딩 중 선택 신원 보존·실제 부재/접힘 fallback·사용자 선택 유지와 독립 파일 증거 검사기를 확인한다.
+- `python3 tools/file-tree-rename-ime/run.py --output <새 외부 경로> --case hanja`: 사본 앱에서 실제 한자 후보 취소/선택·별도 Enter rename·새 트리 선택·원본 bytes/inode를 확인한다. `korean`, `cancel`, `collision`, `write-failure`도 각각 실행한다.
+- `--app <고정 사본 실행 파일>` 재사용, 화면 캡처·복사본 identity 판정과 한계는 [도구 설명](../tools/file-tree-rename-ime/README.md)과 [계획](plans/file-tree-rename-ime-gui.md)을 따른다.
+
 ### 이름 없는 문서 첫 저장 IME GUI
 
 - `mise exec -- zig build test-untitled-save-ime-oracles test-editor-first-save-async test-editor-untitled test-inline-rename-ime -j2`: 독립 증거 검사기와 기존 첫 저장·공용 rename 입력 회귀를 검사한다.

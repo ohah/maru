@@ -1762,3 +1762,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [Save As 파일 수명 실제 GUI 검증](plans/save-as-file-lifecycle-gui.md): 기존 조합 저장 증거와 최근 rename 증거를 구분하고 native 파일명·덮어쓰기·취소·원본 보존을 검증.
 
 - [이름 없는 문서 첫 저장 IME 실제 GUI 검증](plans/untitled-first-save-ime-gui.md): 후보 Enter·별도 저장 확정·취소·충돌·쓰기 실패와 본문 보존.
+
+- [파일 탐색기 이름 변경 IME 실제 GUI 검증](plans/file-tree-rename-ime-gui.md): 후보 Return·별도 rename 확정·취소·충돌·권한 실패와 원본 identity 보존.

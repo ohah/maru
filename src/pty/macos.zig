@@ -1533,7 +1533,7 @@ fn resolvedTerminfoReadable(resolved: ResolvedTerm) bool {
     return false;
 }
 
-test "cached terminfo is invalidated after its entry or directory disappears" {
+test "EnvStorage cached terminfo is invalidated after its entry or directory disappears" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

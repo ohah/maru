@@ -1,7 +1,8 @@
-"""Independent controlled-server GUI/wire/model/disk oracle; not real SDK evidence."""
+"""Independent GUI/wire/model/disk oracle with explicit controlled/clangd provenance."""
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 import stat
 
@@ -27,8 +28,19 @@ def validate_diagnostic(report,artifact_root=None):
     scene=report['scenario'];need(scene in CASES and report['mode']=='diagnostic','scene')
     need(type(report['pid']) is int and report['pid']>0 and report['source_restored'] is True,'process/source')
     root=Path(artifact_root or report['root']);case=json.loads(regular(root/'case.json'))
+    server=case.get('server',{'kind':'controlled'});kind=server.get('kind')
+    need(kind in ('controlled','clangd'),'server kind')
+    real=kind=='clangd'
+    if real:
+        need(scene!='server-error' and isinstance(server.get('version'),str) and 'clangd version' in server['version'],'clangd provenance')
+        need(Path(server.get('path','')).is_absolute() and isinstance(server.get('sha256'),str) and re.fullmatch('[0-9a-f]{64}',server['sha256']) is not None,'clangd fingerprint')
+        need(json.loads(regular(root/'server.json'))==server,'server manifest mismatch')
+        proxy=json.loads(regular(root/'proxy.json'))
+        need(proxy.get('argv')==[server['path'],'--background-index','--log=verbose'],'clangd launch argv')
+        need(not any(k.startswith('MARU_FAKE_') for k in proxy.get('server_environment',{})),'controlled environment in real case')
+    other_text=('int base(void);\n' if real else '')+OTHER
     original=('// RENAMEFAIL\n' if scene=='server-error' else '')+MAIN
-    need(case['scenario']==scene and case['main']==original and case['other']==OTHER,'fixture')
+    need(case['scenario']==scene and case['main']==original and case['other']==other_text,'fixture')
     name='base한' if scene=='korean' else 'base韓';applied=scene in ('hanja','korean')
     rows=report['observations'];initial=rows[0];surface=initial['surface_id']
     need(type(surface) is int and surface>0,'surface')
@@ -60,7 +72,13 @@ def validate_diagnostic(report,artifact_root=None):
     need(len(initializations)==1,'initialization count')
     init_id=initializations[0]['id']
     capabilities=[r['message']['result']['capabilities'] for r in records if r['direction']=='server' and r['message'].get('id')==init_id and 'result' in r['message']]
-    need(len(capabilities)==1 and capabilities[0].get('renameProvider') is True,'rename capability')
+    need(len(capabilities)==1,'initialization response count')
+    provider=capabilities[0].get('renameProvider')
+    need(provider is True or (real and isinstance(provider,dict)),'rename capability')
+    if real:
+        infos=[r['message']['result'].get('serverInfo') for r in records if r['direction']=='server' and r['message'].get('id')==init_id and 'result' in r['message']]
+        need(len(infos)==1 and isinstance(infos[0],dict) and infos[0].get('name')=='clangd' and isinstance(infos[0].get('version'),str),'clangd identity')
+        need(server['version'].splitlines()[0] in infos[0]['version'],'clangd wire version')
     encoding=capabilities[0].get('positionEncoding','utf-16');need(encoding in ('utf-8','utf-16'),'position encoding')
     requests=[r['message'] for r in records if r['direction']=='client' and r['message'].get('method')=='textDocument/rename']
     need(all(row.get('direction') in ('client','server') and isinstance(row.get('message'),dict) and row['message'].get('jsonrpc')=='2.0' for row in records),'wire shape')
@@ -79,11 +97,12 @@ def validate_diagnostic(report,artifact_root=None):
         if scene=='server-error':need(isinstance(responses[0].get('error'),dict),'server error missing')
         else:
             result=responses[0].get('result');need(isinstance(result,dict),'workspace edit missing')
+            need(('changes' in result)!=('documentChanges' in result),'ambiguous workspace edit')
             edits={}
             if 'changes' in result:
-                need(scene=='hanja','unexpected edit shape');edits=result['changes']
+                need(real or scene=='hanja','unexpected edit shape');edits=result['changes']
             else:
-                need(scene=='korean' and isinstance(result.get('documentChanges'),list),'documentChanges shape')
+                need((real or scene=='korean') and isinstance(result.get('documentChanges'),list),'documentChanges shape')
                 for item in result['documentChanges']:
                     need('kind' not in item and isinstance(item.get('textDocument'),dict),'resource operation')
                     td=item['textDocument'];need(td['uri'] not in edits,'duplicate document')
@@ -92,8 +111,8 @@ def validate_diagnostic(report,artifact_root=None):
                     edits[td['uri']]=item['edits']
             need(set(edits)=={main_uri,other_uri},'unowned/missing edits')
             renamed_main=original.replace(' base(', ' '+name+'(')
-            renamed_other=OTHER.replace('base()',name+'()')
-            for uri,before,after in ((main_uri,original,renamed_main),(other_uri,OTHER,renamed_other)):
+            renamed_other=other_text.replace('base(',name+'(')
+            for uri,before,after in ((main_uri,original,renamed_main),(other_uri,other_text,renamed_other)):
                 need(wire_oracle.apply_edits(before,edits[uri],encoding)==after,'wire edit differs')
     model=json.loads(regular(root/'model.json'))
     def common(m):
@@ -107,19 +126,19 @@ def validate_diagnostic(report,artifact_root=None):
         need(first['body']==renamed_main and first['main_disk']==renamed_main and first['other_disk']==renamed_other and first['dirty'] is False,'applied content/save')
         need(first['version']>ready[0]['document_version'] and model['version']>first['version'], 'apply/Undo version')
         need(first['applied_files']==first['saved_files']==2 and first['undo_len']==1 and first['done']==1 and first['undone_files']==0,'applied history/counts')
-        need(model['body']==original and model['main_disk']==original and model['other_disk']==OTHER and model['dirty'] is False and model['undo_len']==first['undo_len']+1 and model['undone_files']==2,'workspace Undo')
+        need(model['body']==original and model['main_disk']==original and model['other_disk']==other_text and model['dirty'] is False and model['undo_len']==first['undo_len']+1 and model['undone_files']==2,'workspace Undo')
         need(model['applied_files']==model['saved_files']==4 and model['done']==1 and model['errors']==model['refused_stale']==0, 'Undo bookkeeping')
         need(sum(r['name']=='applied' for r in rows)==sum(r['name']=='undone' for r in rows)==1,'applied/undone stage')
     else:
         need(not(root/'applied.json').exists() and model['applied_files']==model['saved_files']==model['undone_files']==0,'unexpected apply')
         wanted=LOCAL+original if scene=='stale' else original
-        need(model['body']==wanted and model['main_disk']==original and model['other_disk']==OTHER and model['dirty'] is (scene=='stale'),'preserved document')
+        need(model['body']==wanted and model['main_disk']==original and model['other_disk']==other_text and model['dirty'] is (scene=='stale'),'preserved document')
         need(model['undo_len']==int(scene=='stale') and model['version']>=ready[0]['document_version'], 'preserved history/version')
         need(model['errors']==int(scene=='server-error') and model['refused_stale']==int(scene=='stale'),'error/refusal')
         if scene=='stale':
             invalid=[r for r in rows if r['name']=='invalidated'];need(len(invalid)==1 and invalid[0]['document_version']>ready[0]['document_version'],'stale invalidation absent')
-    need(regular(root/'project/main.c').decode()==original and regular(root/'project/other.c').decode()==OTHER,'final disk')
-    return dict(passed=True,scenario=scene,rename_requests=len(requests),workspace_undo=applied,captures=captures,server='controlled fixture, not SDK')
+    need(regular(root/'project/main.c').decode()==original and regular(root/'project/other.c').decode()==other_text,'final disk')
+    return dict(passed=True,scenario=scene,rename_requests=len(requests),workspace_undo=applied,captures=captures,server=kind,server_scope='local clangd SDK' if real else 'controlled fixture, not SDK')
 
 
 def validate(*args,**kwargs):raise ValueError('No shared live/OCR claim for this scene')

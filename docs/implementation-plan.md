@@ -1765,4 +1765,4 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 
 - [파일 탐색기 이름 변경 IME 실제 GUI 검증](plans/file-tree-rename-ime-gui.md): 후보 Return·별도 rename 확정·취소·충돌·권한 실패와 원본 identity 보존.
 
-- [LSP 심볼 이름 변경 IME 실제 GUI 검증](plans/symbol-rename-ime-gui.md): 후보 Enter·별도 요청 확정·적용·취소·서버 오류·stale 문서 보존.
+- [LSP 심볼 이름 변경 IME 실제 GUI 검증](plans/symbol-rename-ime-gui.md): 후보 Enter·별도 요청 확정·적용·취소·서버 오류·stale 문서 보존. 제어 서버 5개 장면과 실제 clangd의 한자/한글·취소·stale GUI를 각각 검증.

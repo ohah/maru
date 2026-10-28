@@ -66,3 +66,35 @@ private fixture의 PendingConfirm/키 타입을 실제 API에 맞췄다. 신뢰 
 `...-oracle-mutations`에 사본과 결과를 보존한다. 합성 대조/검사기 결함 주입은 실제 GUI/제품 결함 주입이 아니다.
 기존 WorkspaceEdit·rename 회귀, private 앱 전체 빌드, Python 문법·Zig 형식·문서 링크 검사도 통과했다.
 재실행·독립 검사 명령은 [도구 설명](../../tools/symbol-rename-ime/README.md)을 따른다.
+
+## 후속: 실제 clangd GUI 연결 (완료)
+
+기존 제어 서버 장면은 그대로 유지하고, 명시적 `--clangd /absolute/path` opt-in을 추가한다.
+자동 설치 없이 로컬 SDK 바이너리·버전·해시를 기록하고 같은 raw proxy와 실제 HID 경로를 사용한다.
+사유 프로젝트에 명시적인 함수 선언이 있는 두 C11 파일의 compilation database를 두어 닫힌 파일의 참조도 서버가
+인덱싱할 수 있게 한다. 실제 서버 준비/분석 지연이나 응답 실패는 성공으로 완화하지 않고 보존한다.
+실제 한자/한글 적용·취소·stale와 두 파일 저장/Undo를 확인하며, 강제 서버 오류는 기존 제어 장면에만 둔다.
+검사기는 서버가 보낸 renameProvider의 합법적인 bool/options 형태와 WorkspaceEdit 양식을 읽되,
+정확한 요청 이름·두 소유 URI·응답의 독립 적용·버퍼/디스크/Undo 검사를 유지한다. 실제 SDK의 서버 식별과
+실행 지문은 제어 서버와 명시적으로 구분하며 다른 SDK/원격/모든 Unicode 범위로 확대하지 않는다.
+
+
+Apple clangd 17.0.0(clang-1700.6.3.2) 고정 실행 파일로 실제 한자·한글 적용, 취소, stale의 네 장면을
+통과했다. 후보 선택 Return에는 요청이 없고 별도 Enter에서만 정확한 newName 한 건이 나갔다.
+실제 서버가 반환한 두 파일의 선언·정의·호출을 독립 적용해 버퍼/디스크와 대조했고 제품 Workspace
+Undo 뒤 두 파일 복원을 확인했다. 취소와 stale는 wire에서도 요청 0건이다. 새 제품 결함은 발견되지 않았다.
+기존 고정 instrumented 앱을 재사용했으며 제품 소스/ABI는 변경하지 않았다.
+
+최초 실패는 한 파일만 반환한 서버 응답을 두 파일 성공으로 처리하지 않고 보존한 결과다. canonical
+compilation database 경로로 바꾸니 배경 인덱싱이 시작됐고, 닫힌 C11 파일에 명시적인 함수 선언을
+추가하니 두 파일 편집 응답이 나왔다. 제품 저장/Undo 정책을 바꾸거나 판정의 두 파일 조건을 낮추지 않았다.
+근거는 [clangd 인덱스 설계](https://clangd.llvm.org/design/indexing.html)와 해당 실행의 서버 stderr/wire다.
+서버 provenance와 실행 argv·편집 양식/두 파일 저장·복원의 서로 다른 손상 20개, 합법 bool/options
+capability 및 changes/documentChanges 대조군을 확인했다. 새 판정 다섯을 제거한 Python 사본도 모두
+실패했고 원본 전후 대조는 통과했다. 이는 합성/검사기 변이이며 제품 결함 주입으로 세지 않는다.
+
+새 증거는 `~/Library/Caches/maru-verification/symbol-rename-real-20261028-final-*`와 `...-matrix.json`,
+`...-independent-final.json`, `...-mutations`에 둔다. 실패는 `...-control`과 `...-control-v2`, 최초 통제
+성공은 `...-control-v3`에 보존한다. 이전 제어 서버의 다섯 장면도 최신 검사기로 별도 재검사한다.
+실제 SDK는 opt-in이고 SDK 없는 기본 테스트에 실행/다운로드를 추가하지 않는다. 다른 SDK, 원격,
+비ASCII 원문 위치 전체와 후보 OCR/VoiceOver 검증은 이번 범위에 포함하지 않는다.

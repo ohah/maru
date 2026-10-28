@@ -48,3 +48,28 @@ PY
 
 합성 기록 손상 및 검사기 판정 제거 사본은 실제 GUI나 제품 결함 주입으로 세지 않는다.
 상세 계획·실행 결과와 한계는 [계획](../../docs/plans/symbol-rename-ime-gui.md)을 따른다.
+
+## 실제 clangd opt-in
+
+```sh
+python3 tools/symbol-rename-ime/run.py --clangd /absolute/path/to/clangd \
+  --app <고정 snapshot의 maru-macos-app> --output <새 외부 경로> --case hanja
+```
+
+`--clangd`를 명시하면 fake 서버를 빌드하지 않는다. 이미 설치된 로컬 실행 파일만 사용하며 자동
+설치는 없다. `hanja`, `korean`, `cancel`, `stale`를 지원한다. 강제 `server-error`는 제어 서버 전용이다.
+실제 서버의 경로·버전·SHA-256을 시작 전/종료 후 비교하고 case/server manifest에 기록한다.
+원본 wire의 serverInfo와 실제 실행 proxy argv를 함께 검사한다. 이 기록은 서명된 원격 attestation이
+아니며 재검사 시 현재 SDK를 재실행하지 않는다.
+
+fixture의 두 C11 파일에는 호환되는 명시적 함수 선언이 있고 compilation database의 경로는 canonical
+절대 경로다. 선언·정의·닫힌 파일의 호출이 모두 바뀌어야 통과한다. main의 `baseline`은 그대로다.
+SDK가 한 파일만 반환하거나 분석에 실패하면 성공으로 완화하지 않는다. 초기 `/tmp` alias 경로와
+암시적 선언으로 생긴 실패 기록은 보존했다. compilation database와 배경 인덱스의 관계는
+[clangd 설계 문서](https://clangd.llvm.org/design/indexing.html)를 따른다.
+
+실제 Apple clangd 17.0.0에서 네 장면이 통과했다. 이는 이전 제어 서버 장면과 별도 증거다.
+앱 자체 제품 코드는 그대로이며 앞선 고정 instrumented 앱을 재사용했다. UTF-16 기본 위치 단위의
+ASCII 원문 구간과 한글/한자 newName을 확인했으며 모든 Unicode 위치·다른 SDK 버전/원격까지
+검증한 것으로 해석하지 않는다. 장면 준비·trust 승인·stale 편집·Workspace Undo의 fixture 호출은
+물리 키 입력과 구분한다.

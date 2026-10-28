@@ -34,6 +34,7 @@ test "LOOP1 빠른 고리가 편집기 영역 모듈을 통째로 고른다 — 
     const required = [_][]const u8{
         "\"app_session.editor.mod.\"", // editor/mod.zig — 제품 진입 파일 전체
         "\"app_session.editor.hover.\"", // editor/hover.zig — 호버 문장(진단 i18n) 판정자
+        "\"app_session.editor.parse.view_judges.\"", // 완료 트리 설치와 뷰 자원 반환
         "\"app_session.editor.diff.\"", // editor/diff.zig — 비교 파일 전체
         "\"session.editor.\"", // selection.zig·motion.zig 등 L2 순수 모듈
         "\"platform.cell_text.\"", // 밴드 라벨·마디 열 범위
@@ -65,6 +66,7 @@ test {
     _ = @import("app_session/editor/search/batch/disk.zig");
     _ = @import("app_session/editor/mod.zig");
     _ = @import("app_session/editor/syntax.zig");
+    _ = @import("app_session/editor/parse/view_judges.zig");
     _ = @import("app_session/editor/diff.zig");
     _ = @import("app_session/editor/discovery.zig");
     _ = @import("symbol_picker.zig");

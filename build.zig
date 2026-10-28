@@ -6250,7 +6250,7 @@ pub fn build(b: *std.Build) void {
         // 에 걸리므로 `"app_session.editor.mod."` 한 줄이 그 파일을 통째로 고른다. 이름 접두들은 다른
         // 모듈에 흩어진 판정자를 마저 긁으려고 남긴다. 대가는 시간이다 — 실측 75초 → 97초
         // (판정자 1,519 → 1,850). 그 대가로 「있는데 안 도는」 판정자가 사라진다.
-        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "SAV", "RFP", "REF", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.mod.", "app_session.editor.hover.", "app_session.editor.diff.", "app_session.editor.recovery_store.", "app_session.editor.discovery.", ".test.OUTLINE" },
+        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "SAV", "RFP", "REF", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.mod.", "app_session.editor.hover.", "app_session.editor.diff.", "app_session.editor.recovery_store.", "app_session.editor.discovery.", "app_session.editor.parse.view_judges.", ".test.OUTLINE" },
     });
     // 아웃라인의 중립 범위·Chrome 기하와 제품 문서 수명을 모두 실행한다.
     const outline_pure_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
@@ -7118,7 +7118,7 @@ pub fn build(b: *std.Build) void {
     // 되는데** 구문 판정자는 한 개도 안 돈다 — `CRT`·`LANG`이 낸 거짓 초록과 정확히 같은 모양이다.
     if (target.result.os.tag == .macos) {
         const parse_runtime_mod = b.createModule(.{
-            .root_source_file = b.path("src/platform/macos/app_session/editor/parse/dispatch.zig"),
+            .root_source_file = b.path("src/platform/macos/app_session/editor/parse.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -7142,18 +7142,32 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_parse_main.step);
         macos_only_test_step.dependOn(&run_parse_main.step);
         const parse_runtime_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
-            .root_source_file = b.path("src/platform/macos/app_session/editor/parse/judges.zig"),
+            .root_source_file = b.path("src/platform/macos/app_session/editor/parse_test.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{ .{ .name = "maru", .module = maru_mod }, .{ .name = "syntax", .module = syntax_mod } },
-        }) });
+        }), .filters = &.{"parse runtime"} });
         const run_parse_runtime = b.addRunArtifact(parse_runtime_tests);
         run_parse_runtime.addArg("--maru-expect-tests=10");
         run_parse_runtime.addArg("--maru-expect-passed=10");
         b.step("test-editor-parse-runtime", "Verify main-owned parse document lifetimes").dependOn(&run_parse_runtime.step);
         test_step.dependOn(&run_parse_runtime.step);
         macos_only_test_step.dependOn(&run_parse_runtime.step);
+        const parse_view_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"parse view install"} });
+        const run_parse_view = b.addRunArtifact(parse_view_tests);
+        run_parse_view.addArg("--maru-expect-tests=5");
+        run_parse_view.addArg("--maru-expect-passed=5");
+        b.step("test-editor-parse-view", "Verify completed parse installation into view state").dependOn(&run_parse_view.step);
+        test_step.dependOn(&run_parse_view.step);
+        macos_only_test_step.dependOn(&run_parse_view.step);
+        const parse_view_regressions = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"app_session.editor.syntax."} });
+        const run_parse_view_regressions = b.addRunArtifact(parse_view_regressions);
+        run_parse_view_regressions.addArg("--maru-expect-tests=35");
+        run_parse_view_regressions.addArg("--maru-expect-passed=35");
+        b.step("test-editor-parse-view-regression", "Run existing view syntax regressions").dependOn(&run_parse_view_regressions.step);
+        test_step.dependOn(&run_parse_view_regressions.step);
+        macos_only_test_step.dependOn(&run_parse_view_regressions.step);
         const parse_worker_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/app_session/editor/parse/worker.zig"),
             .target = target,

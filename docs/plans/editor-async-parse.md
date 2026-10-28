@@ -389,3 +389,42 @@ Runtime 검증 10개는 이전 판 보유 중 새 결과 교체와 마지막 뷰
 기존 worker 19개 중 실행/대기 종료 검사는 C 장벽으로 워커를 멈추고 세 참조의 마지막 반환만
 퇴역을 게시하는지 검사한다. 실제 Apple main queue probe도 소비자 보유 중 종료 거절과 반환 후
 종료를 실행한다. 이 증거는 실제 GUI 소비자 설치나 IME 지연 측정으로 확대하지 않는다.
+
+## 뷰 구문 상태 설치 API
+
+`dispatch.prepareView`는 현재 완료를 보유하고 뷰 전용 parser/트리 복사를 먼저 준비한다.
+`dispatch.installView`는 설치 직전에 실제 view lease·문서 identity·현재 요청 번호와
+본문/언어 판을 다시 검증한다. 준비 뒤 같은 본문을 다시 요청했어도 이전 요청 번호는 거절한다.
+거절은 대상 상태를 바꾸지 않으며 준비한 자원은 Prepared.deinit으로 반환한다.
+
+성공하면 실제 `syntax.State`에 provider와 완료 보유 참조를 이동하고 새 parser·tree generation으로
+input stamp를 발급한다. 이전 접힘 tree·괄호 순회기와 판정·심볼/breadcrumb·색 스팬을 먼저
+무효화한다. 배열 용량과 괄호 순회 예산은 유지하되 이전 판의 부분 변경 범위는 재사용하지 않는다.
+이전 뷰의 native 자원을 모두 놓은 뒤 보유 참조를 반환해 워커의 최종 해제 경계를 지킨다.
+`State.deinit`도 같은 반환 순서를 따르고 `prepareSharedSnapshot`은 완료 보유 참조를 별도로
+retain한다. split 준비에서 보유 수가 넘치면 새 복사만 정산하고 기존 뷰는 보존한다.
+
+완료 보유 참조가 없는 기존 legacy provider는 `LegacyProvider`로 교체를 거절한다. 그 native 자원의
+마지막 참조가 워커에 있다는 증명이 없기 때문이다. 일반 입력 경로 전환 때는 신규·복원 뷰의
+초기 생성부터 비동기 상태로 연결해야 하며, 기존 동기 diff/merge 등은 별도로 유지한다.
+빈 문서는 tree가 없을 수 있으므로 메인 재파싱 없이 완료 참조로 설치 여부를 판정한다.
+메인 소비 트리는 불변이며 legacy 편집·재개 진입점에는 혼용을 잡는 Debug assertion을 둔다.
+
+native 실행 모듈의 진입점은 `editor/parse.zig`, Runtime 판정 진입점은 `editor/parse_test.zig`다.
+Zig의 모듈 루트를 editor에 두어 `parse` 하위 API가 같은 뷰의 `syntax.zig`를 참조할 수 있게 한다.
+구현은 기존 `editor/parse/`에 유지한다. 판정은 이름 필터와 정확한 개수로 기존 구문 테스트와 구분한다.
+
+`test-editor-parse-view`는 제품 상태 검사 4개와 root 초기화 1개를 수집한다. 공유 뷰·split,
+같은 판 재요청·편집 뒤 도착·잘못된 view/read lease·legacy 보존·빈 문서·참조 overflow와
+실제 색·전체 C 노드 좌표를 cold 결과와 대조한다. 64회 반복 교체에서도 색·좌표와 보유 수를 대조한다. 실제 Apple 전달 probe의 `installed_view=1`은
+메인 큐 완료 뒤 뷰 설치와 뷰 보유 중 종료 거절·반환 후 종료를 확인한다.
+
+이 단계는 설치 API 연결이다. 일반 입력·IME를 워커 요청으로 전환하거나 설치 후의 실제
+접힘 표 재구성·열린 심볼 피커 갱신·redraw를 아직 활성화하지 않는다. 설치 준비 실패에서
+상태를 보존하는 것은 낡은 offset을 새 본문에 사용할 허가가 아니다. 입력 전환 시 현재 판의
+pending/실패 소비 규칙과 뷰 정산을 함께 연결한 뒤 GUI·IME 지연과 화면을 검증해야 한다.
+
+화면 활성화 시에는 첫 완료 이전의 비동기 대기도 별도로 구분해 legacy `resumeParse`에
+넘기지 않아야 한다. native 복사 등 설치 준비 실패는 해당 뷰의 오류이며 다른 공유 뷰나
+Runtime의 파싱 성공을 무효화하지 않는다. 반복 프레임의 자동 재시도를 막을 기록도 뷰와
+요청 번호에 묶어야 한다. 이 표시·재시도 UX는 아직 적용하지 않았다.

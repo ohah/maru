@@ -5,6 +5,7 @@ const maru = @import("maru");
 const syntax = @import("syntax");
 pub const runtime = @import("runtime.zig");
 pub const worker = @import("worker.zig");
+pub const view = @import("view.zig");
 pub const wake = @import("wake.zig");
 pub const registry = maru.session.editor.document_registry;
 pub const request = maru.session.editor.syntax.request;
@@ -34,6 +35,16 @@ pub fn acquire(identity: registry.DocumentIdentity, grammar: request.Grammar, la
 pub fn observe(identity: registry.DocumentIdentity, grammar: request.Grammar, language: syntax.Language) runtime.Observation {
     if (active) |*owner| return owner.observe(identity, grammar, language);
     return .none;
+}
+/// 기존 상태를 건드리기 전에 보유 참조와 독립 native 복사를 준비한다.
+pub fn prepareView(identity: registry.DocumentIdentity, grammar: request.Grammar, language: syntax.Language) error{ ReferenceOverflow, NativeCopyFailed }!?view.Prepared {
+    if (active) |*owner| return view.prepare(owner, identity, grammar, language);
+    return null;
+}
+/// 호출자가 준비 후 입력·언어·뷰를 바꿀 수 있으므로 설치 직전에 다시 검증한다.
+pub fn installView(prepared: *view.Prepared, target: *view.State, lease: registry.Lease, grammar: request.Grammar, language: syntax.Language) error{LegacyProvider}!bool {
+    if (active) |*owner| return prepared.install(owner, target, lease, grammar, language);
+    return false;
 }
 pub fn poll() void {
     if (active) |*owner| {

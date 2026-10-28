@@ -830,7 +830,22 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
     const body_log = std.c.getenv("V20F_BODY_LOG") != null;
     // 재검증 5 차 S3b: 서비스 워커 잇기의 까닭 줄만(`MARU_WEB_TEST_SW_NOTES` — 사건마다의 줄 없이).
     const sw_notes_env = std.c.getenv("MARU_WEB_TEST_SW_NOTES") != null;
-    const log_env: []const [*:0]const u8 = if (body_log and sw_notes_env) &.{ "MARU_WEB_TEST_BODY_LOG=1", "MARU_WEB_TEST_SW_NOTES=1" } else if (body_log) &.{"MARU_WEB_TEST_BODY_LOG=1"} else if (sw_notes_env) &.{"MARU_WEB_TEST_SW_NOTES=1"} else &.{};
+    // 진단: `MARU_WEB_SW_CDP=0` 을 넘기면 워커 CDP 를 끈 채로 돈다(서비스 워커 갈래 본문은 S0 처럼 잃는다 — 기대값은 켠 판의 것이라 SW 사례는 실패한다).
+    var env_buf: [3][*:0]const u8 = undefined;
+    var env_n: usize = 0;
+    if (body_log) {
+        env_buf[env_n] = "MARU_WEB_TEST_BODY_LOG=1";
+        env_n += 1;
+    }
+    if (sw_notes_env) {
+        env_buf[env_n] = "MARU_WEB_TEST_SW_NOTES=1";
+        env_n += 1;
+    }
+    if (std.c.getenv("MARU_WEB_SW_CDP")) |v| if (std.mem.eql(u8, std.mem.span(v), "0")) {
+        env_buf[env_n] = "MARU_WEB_SW_CDP=0";
+        env_n += 1;
+    };
+    const log_env: []const [*:0]const u8 = env_buf[0..env_n];
     const stderr_path: ?[:0]const u8 = if (std.c.getenv("V20F_HOST_STDERR")) |p| std.mem.span(p) else null;
     var host = try Host.spawnWith(host_path, profile_arg, stderr_path, log_env);
     defer {
@@ -1233,7 +1248,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         report(all.wrong == 0 and ec.missing == 0 and ec.doubled == 0, "v20g-r2-worker-same-url-concurrency", std.fmt.bufPrint(&detail, "{s} | {s} | {s} | {s} | {s} | {s} · all WRONG {d} · {s}{s}", .{ std.mem.sliceTo(&line[0], 0), std.mem.sliceTo(&line[1], 0), std.mem.sliceTo(&line[2], 0), std.mem.sliceTo(&line[3], 0), std.mem.sliceTo(&line[4], 0), std.mem.sliceTo(&line[5], 0), all.wrong, endLine(&ec, &el, &sl2), all.notes[0..all.notes_len] }) catch "");
     }
     // ══ 재검증 3 차 뒤(스모크 w9d-body 의 꼴): 쿠키를 심는 localhost 문서 → 127.0.0.1 문서(다른 사이트 — 새 렌더러)가 곧 받는 그림·다른 사이트의
-    // 쿠키 실린 스크립트·JSON 둘(하나는 2 MiB). 통과 조건: 모든 시작에 끝이 하나(8 초 안 — `pending` 에 머물지 않는다), 그림은 not_text, 스크립트와
+    // 쿠키 실린 스크립트·JSON 둘(하나는 2 MiB). 통과 조건: CEF 가 끝낸 시작마다 끝이 하나(8 초 안 — `pending` 에 머물지 않는다 — CEF 가 끝내지
+    // 않은 것은 앞 문서의 favicon 만 받는다, 재검증 5 차 S4), 그림은 not_text, 스크립트와
     // 작은 JSON 은 captured, 큰 JSON 은 over_cap. ══
     if (enabled("v20i")) {
         const rounds: usize = 20;
@@ -1245,6 +1261,10 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         }
         var missing: usize = 0;
         var doubled: usize = 0;
+        // 재검증 5 차 S4: CEF 가 끝을 주지 않은 기록(본문의 끝도 낼 수 없다). 실측: 앞 문서(localhost)의 favicon 이 다음 문서(127.0.0.1)가 시작한 뒤에야
+        // 시작하면 CEF 가 그 요청을 끝내지 않는다(탭을 닫을 때 `detached`) — 그 꼴만 받고, 다른 기록이 그러면 실패.
+        var cef_held_favicon: usize = 0;
+        var cef_held_other: usize = 0;
         var good: [4]usize = @splat(0);
         var bad_txt: [1500]u8 = undefined;
         var bn: usize = 0;
@@ -1259,9 +1279,19 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             _ = r.pumpTitle(rec_tab, "bpdone", 15_000);
             var waited: u32 = 0;
             while (waited < 8_000 and endCheck(&r, rec_tab, at).missing > 0) : (waited += 250) r.pump(250);
-            const ec = endCheck(&r, rec_tab, at);
+            const ec = endCheckOf(&r, rec_tab, at, true);
             missing += ec.missing;
             doubled += ec.doubled;
+            // 끝이 없는 기록이 무엇인가(주소·갈래·CEF 의 끝).
+            if (endCheck(&r, rec_tab, at).missing > 0) for (r.begins.items[at..]) |mb| if (mb.browser == rec_tab and mb.expected) {
+                const x = r.body(rec_tab, mb.request);
+                if (x.ends != 0) continue;
+                if (!x.cef_end) {
+                    if (std.mem.endsWith(u8, mb.url, "/favicon.ico")) cef_held_favicon += 1 else cef_held_other += 1;
+                }
+                const piece = std.fmt.bufPrint(bad_txt[bn..], " [round {d} NO END req {d} {s} sw {} main {} cef_end {}]", .{ round, mb.request, mb.url[0..@min(mb.url.len, 60)], mb.flags.service_worker, mb.flags.main_frame, x.cef_end }) catch "";
+                bn += piece.len;
+            };
             const want = [_]struct { []const u8, msg.NetBodyState }{ .{ "/v20i/pic.png", .not_text }, .{ "/v20i/cred.js", .captured }, .{ "/v20i/c.json", .captured }, .{ "/v20i/big.json", .over_cap } };
             for (want, 0..) |w, wi| {
                 var found = false;
@@ -1280,8 +1310,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
                 }
             }
         }
-        const ok = missing == 0 and doubled == 0 and good[0] == rounds and good[1] == rounds and good[2] == rounds and good[3] == rounds;
-        report(ok, "v20i-xsite-nav-body-page", std.fmt.bufPrint(&detail, "{d} rounds (localhost cookie page → 127.0.0.1 page): png not_text {d} · cross-site credentialed script captured {d} · json captured {d} · 2 MiB json over_cap {d} · no end {d} · several ends {d}{s}", .{ rounds, good[0], good[1], good[2], good[3], missing, doubled, bad_txt[0..bn] }) catch "");
+        const ok = missing == 0 and doubled == 0 and cef_held_other == 0 and good[0] == rounds and good[1] == rounds and good[2] == rounds and good[3] == rounds;
+        report(ok, "v20i-xsite-nav-body-page", std.fmt.bufPrint(&detail, "{d} rounds (localhost cookie page → 127.0.0.1 page): png not_text {d} · cross-site credentialed script captured {d} · json captured {d} · 2 MiB json over_cap {d} · no end {d} · several ends {d} · no CEF end: previous page's favicon {d}, other {d}{s}", .{ rounds, good[0], good[1], good[2], good[3], missing, doubled, cef_held_favicon, cef_held_other, bad_txt[0..bn] }) catch "");
         try r.navigate(rec_tab, "/v20/blank?v20i");
         r.pump(2000);
     }

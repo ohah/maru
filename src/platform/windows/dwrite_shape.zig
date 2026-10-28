@@ -933,6 +933,9 @@ pub const Shaper = struct {
                 };
                 if (c.sources) |sources| {
                     var source = sources[run.glyph_start + i];
+                    source.ink_known = has_metrics;
+                    source.ink_left_px = if (has_metrics) @as(f32, @floatFromInt(m.left_side_bearing)) * req.size_px / upem else 0;
+                    source.ink_right_px = if (has_metrics) @as(f32, @floatFromInt(@as(i64, m.advance_width) - m.right_side_bearing)) * req.size_px / upem else 0;
                     if (source.known) source.cluster_glyph_start = @intCast(run_out_start + source.cluster_glyph_start - run.glyph_start);
                     sources[n] = source;
                 }

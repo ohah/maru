@@ -11,6 +11,8 @@ const bytes_per_pixel: usize = 4;
 pub const GlyphRasterError = error{
     InvalidGlyphIndex,
     InvalidGlyphBitmapSize,
+    InvalidRasterOrigin,
+    UnsupportedRasterOrigin,
     RasterizerFailed,
     RasterByteCountOverflow,
     RasterByteCountMismatch,

@@ -56,6 +56,9 @@ pub const CoreTextGlyphRasterizer = struct {
         // FontId -> PostScript name 조회와 C ABI 호출을 맡아, 이후 제품 renderer도 같은
         // GlyphRasterRequest 계약만 소비하게 만든다.
         if (request.pixels.len == 0) return error.RasterizerFailed;
+        // The existing CoreText bridge owns its own fit/baseline policy. Reject
+        // the optional clipped-mask mode until that bridge explicitly supports it.
+        if (request.run.cache_key.raster_origin != null) return error.UnsupportedRasterOrigin;
         // 합성 대상(box·block·Powerline·Braille·Legacy Computing 모자이크/wedge/삼각형/대각선)은 폰트 글리프
         // 대신 코드포인트로 직접 그린다 — 슬롯이 cell 크기라 셀에 꽉 차 이음매 없이 타일링/연결(폰트 글리프는
         // 셀에 안 맞아 gap·흐림·끊김). 합성 dispatch 단일 출처 renderer.synthesizeGlyph를 폰트 경로 전에 호출.

@@ -883,8 +883,7 @@ PTY를 갱신하므로 PTY 실패까지 포함하는 다중 세션 원자적 rol
 작은 caption 높이를 고정 y=38로 재어 caret을 자르던 판정기도 수정했다. 실제 34px caption 캡처는
 13px 오측정 대신 코어와 같은 17px를 재며, 기존 실제 캡처 14건의 측정값도 보존한다.
 
-남은 범위는 ligatures,
-외부 config reload와 나머지 설정 연결이다. 전체 Windows 지원과 최종 설치본 반영은 아직 완료가 아니다.
+남은 범위는 외부 config reload와 나머지 설정 연결이다. 합자 라이브 적용은 아래 native run 연결 기록을 따른다. 전체 Windows 지원과 최종 설치본 반영은 아직 완료가 아니다.
 
 
 ### 종료된 로컬 터미널의 표시 크기 (구현·실앱 검증)
@@ -1254,3 +1253,31 @@ primary 강제 선택·다른 bank의 이름 조회·measured 기본값 변경·
 통과했다. 원래 실패와 최종 결과는 `.zig-cache/registry-raster-gates-20261028/result.json`의
 previous_boundaries·checks.boundaries 및 별도 cold-boundary-attempts.json에 보존한다.
 최종 소스 입력은 `.zig-cache/registry-raster-binding.json`으로 대조한다.
+
+
+### Windows native terminal run 앱 연결과 실앱 검증
+
+단일 셀 셰이핑 대신 DirectWrite run/cluster/GPOS 결과로 전체 터미널 프레임을 만든다.
+행·셀 간격·face/cursor 분할은 공통 헤더를 기존 CoreText와 Windows가 같이 호출한다.
+비트맵 내부 baseline은 cache 신원이고, 이미 만든 비트맵의 화면 placement와 구분한다.
+빈 입력과 누락 글리프를 처리하고, 누락은 기존 Windows 정책대로 blank replacement로 센다.
+공통 host snapshot 경계에서 빌더를 주입하며, 설정 세대가 native shaper·fallback 복사본·
+ligatures를 힙에 소유해 리소스 이동 후에도 빌더가 유효하다. live 비교에 ligatures를 포함했다.
+
+각 구현 단계의 compiled/runtime 결함 5개와 원본 복원 대조를 확인했다. native run-frame
+게이트는 현재 14개 집계 검사이고 snapshot 게이트는 33개다. 실제 별도 앱에서 글꼴
+변형 변경 5건·터미널 우클릭 메뉴 12건·합자 전환 5건을 통과하고 정상 종료했다.
+합자 전환은 화살표 행만 바뀌고 일반/NFD 시험/합성 선 행은 유지되는 GPU 픽셀 비교다.
+초기 PowerShell 출력 인코딩이 NFD 행을 훼손한 기록은 NFD 정상 증거에서 제외하고
+UTF-8 출력으로 다시 확인했다. ConPTY의 scalar 정규화와 물리 입력/IME는 별도다.
+
+ReleaseFast에서 할당 실패 검사 횟수가 달라지는 문제를 재현했다. 32프레임의 native
+픽셀 해시는 같았고 backing allocator의 remap 허용 시 41~42회, 거부 시 46회 고정이었다.
+실패 주입에서만 allocate/copy/free를 강제하며 정상 remap-on/off 출력 비교도 유지한다.
+제품의 할당 방식은 바꾸지 않는다. 진단과 실패 원문은 windows-platform 본문을 따른다.
+
+근거는 `.zig-cache/native-wire-adversarial.json`, `.zig-cache/native-run-font-app.json`,
+`.zig-cache/native-run-popup-app.json`, `.zig-cache/native-run-ligature-utf8-app.json`,
+`.zig-cache/native-wire-cross-recovery.log`, `.zig-cache/native-allocation-path-trace.log`다.
+통합 후 네 경계 샤드는 코드 해시 보존 상태에서 통과했다. 이후 할당 검사 수정도 Debug·ReleaseFast 14개, 적대적 변이 5개와
+정상 복원, 교차 타깃·문서·전체 네 경계 샤드 재검증을 통과했다. 전체 Windows 기능과 설치본 갱신의 완료를 뜻하지 않는다.

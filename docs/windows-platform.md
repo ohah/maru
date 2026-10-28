@@ -13170,3 +13170,178 @@ tree-sitter 코어/grammar·wuffs·PCRE2의 고정 원문을 재사용하고 Mar
 ConPTY 원문도 포함한다. 각 파일을 고정 의존성 또는 저장소 원본과 대조했다. 원문 누락·
 오배치·다른 원문 대체 등 7개 실제 빌드 산출물을 거절하고, 복구 패키지의 고지와 실행 파일
 일치를 확인했다. 근거는 `.zig-cache/windows-native-notices-adversarial.json`이다.
+
+
+### Native single-run frame producer (work in progress)
+
+`terminal/run_frame.zig` now builds real atlas uploads from DirectWrite run
+records. Clipped cell masks include their local baseline in cache identity;
+placement remains separate. Positive advance offsets follow native run direction
+and positive ascender offsets move upward, following Microsoft's
+[DWRITE_GLYPH_OFFSET contract](https://learn.microsoft.com/en-us/windows/win32/api/dwrite/ns-dwrite-dwrite_glyph_offset).
+Each clipped mask uses the target cell style, preserving cell color boundaries.
+The optional explicit-origin raster mode is supported by Windows; the existing
+CoreText raster adapter explicitly rejects it instead of silently ignoring it.
+
+`zig build test-windows-run-frame` compares actual ligature-on/off atlas ink,
+checks glyph IDs against a separate native shaping call, and requires shifted
+ligature origins. Five compiled runtime mutations (disabled ligatures, zero X,
+zero Y, wrong glyph ID, omitted ink) were rejected after strengthening two
+initially escaping assertions. Restored controls and the registry-raster,
+raster-origin and shared shaping-run gates passed. Local evidence is
+`.zig-cache/run-frame-adversarial.json`; it is not an installed-app claim.
+
+The strict `buildRun` entry accepts one contiguous row/face/cursor run and
+rejects mixed or synthesized input. The whole-frame `build` entry is described
+below. FrameBuilder integration is described below; real application validation
+is required before installing this generation for users.
+
+The native run-frame gate also exhausts output-allocation failure points with
+`std.testing.checkAllAllocationFailures` and checks nonfinite-origin rejection,
+signed-zero canonicalization and fractional-origin preservation. Native font
+resources and renderer state use the control allocator; this proves producer
+output cleanup, not every DirectWrite or registry allocation failure.
+
+
+### Whole-frame native run partitioning (work in progress)
+
+The Windows producer now partitions complete DrawLists before native shaping.
+Row, adjacency (including zero-width normalization), and face/cursor key checks
+live in the OS-independent `src/native_shaping_run.h` leaf. The original
+CoreText loop and the Windows adapter both call this predicate; the build uses
+the existing pinned C translator for Zig consumption, with no new dependency.
+Native buffer capacity limits remain adapter-specific. Synthesized geometry is
+isolated before Windows font shaping and uses normalized zero font/glyph IDs.
+
+The whole-frame fixture covers two rows, a column gap, bold and italic banks,
+a visible cursor, box geometry and wide Korean fallback. Output-allocation
+failures are exhausted across successive native runs, with no partial frame
+publication. This is a native frame test, not a GUI or macOS runtime check.
+The separate `buildRun` entry retains strict single-run validation. The app
+FrameBuilder is now connected as described below; installation requires
+application validation.
+
+Five compiled runtime boundary mutations were rejected (row, face/cursor key,
+adjacency, zero-width normalization, synthesized-run isolation), with passing
+normal controls before and after restoration. Local evidence is
+`.zig-cache/whole-frame-adversarial.json`. The same header also passed a native
+C compilation/execution control including unsigned overflow. Focused native
+frame, registry-raster, shared shaping-run and documentation gates passed.
+
+
+### Empty input and missing native glyphs
+
+The strict native-run entry now accepts an empty DrawList without indexing its
+first cell. The whole-frame path follows the existing Windows cell-shaper
+missing-glyph policy (`win32_text.Shaper.shape`): publish a blank replacement
+record with explicit fallback/replacement accounting instead of aborting the
+entire frame. Every terminal cell covered by the missing cluster gets its own
+record, preserving paint styles and avoiding a large cluster-to-u3 narrowing.
+The rasterizer's existing glyph-zero rule keeps these records blank.
+
+The actual native fixture includes U+10FFFF (not covered by its fonts), verifies
+the zero glyph and replacement accounting, and exhausts output-allocation
+failures. Five compiled/runtime mutations (removed empty guard, frame abort,
+dropped record, hidden replacement count, corrupted missing glyph ID) were
+rejected; the empty-guard mutation is a runtime bounds panic. The restored
+control passed all ten aggregated tests. Local evidence is
+`.zig-cache/missing-empty-adversarial.json`; this is not an installed-app test.
+
+
+### Native run application wiring (work in progress)
+
+Configured Windows text resources now own a heap-stable native shaper generation
+with its own fallback string and ligature setting. Moving or replacing the
+resource value does not invalidate the borrowed FrameBuilder context. The
+existing per-cell chrome shaper remains available on the same builder.
+`FrameBuilder.buildDrawList` dispatches terminal frames through this generation.
+`host.buildFrameAfterDrainWithDrawListBuilder` retains the shared owned snapshot
+and core-lock boundary; the previous per-cell host API delegates through the same
+seam. Each injected builder consumes the DrawList even on failure.
+
+Live font equality now includes ligatures, so changing that setting stages the
+same generation/renderer/layout transaction as other font changes. Native
+generation allocation-prefix tests verify shaper/context cleanup and copied
+fallback ownership. The whole-frame output allocation test keeps one native
+resource generation fixed: recreating native resources on every failing prefix
+produced nondeterministic allocation counts in the initial integration attempt.
+That failed attempt remains in `.zig-cache/native-app-wire-first.log`.
+
+Five compiled/runtime mutations were rejected: disabled native dispatch, forced
+ligatures off, lost fallback, missing shaper failure cleanup and ignored live
+ligature changes. Restored controls passed all thirteen aggregated run-frame
+tests; the shared frame-snapshot gate and a normal Windows app build passed.
+Evidence is `.zig-cache/native-wire-adversarial.json`. Private app E2E below
+does not prove installation, physical input or rendering parity for all scripts.
+
+
+The private native-run app passed all five live font-variant settings changes
+and exited normally (0). Actual GPU row pixels showed changes only in the
+expected regular/bold/italic/bold-italic rows; the checker also captured six
+frames. Font apply errors, resize errors, grid mismatches, dock rebuild failures
+and settings input leaking into the shell were all zero. The app used its shipped
+ConPTY pair and isolated profile. Evidence is `.zig-cache/native-run-font-app.json`;
+the staged executable and dependency hashes are in
+`.zig-cache/native-run-preview-20261028/binary.json`. This is synthetic HWND
+input into a real app; the user's installed preview was not replaced.
+
+The same staged native-run binary also passed all twelve terminal clipboard
+popup checks, including actual OS Copy/Paste, native focus transfer, dismissal
+and protected multiline paste. Its owned app exited 0 and the original empty
+clipboard was restored. Evidence is `.zig-cache/native-run-popup-app.json`.
+Sidebar/tab/file-tree context menus remain separate requirements.
+
+The first application integration cross-target run failed: native run-frame
+tests lacked the existing Windows-only early-return guard, and cross main
+modules lacked the shared-header translator import. Both wiring sites were
+corrected; `.zig-cache/native-wire-final-gates.log` retains the failed attempt.
+The recovery run is `.zig-cache/native-wire-cross-recovery.log`; its completion
+must be checked separately before treating cross-target validation as passed.
+
+The recovery cross-target command completed with exit 0, including Windows,
+macOS and Linux compile-only branches, thirteen native run-frame tests, the
+thirty-three aggregated frame-snapshot tests and documentation gates. The
+aggregate receipt is `.zig-cache/native-wire-verification.json`. Full boundary
+gates still need to be rerun after application integration; the earlier four
+shards predate these host/resource changes.
+
+
+### Deterministic output-allocation failure injection
+
+The initial optimized run failed with `NondeterministicMemoryUsage` in the
+whole-frame failure-prefix test (`.zig-cache/native-wire-releasefast.log`).
+A backing-allocator trace then compared sixteen identical frames with remapping
+allowed and sixteen with remapping disabled. Native glyph/upload/pixel counts
+and the complete raster hash were identical in all thirty-two frames. With
+remapping allowed, fresh allocations varied from 41 to 42 (79 successful remaps
+across sixteen frames); disabling it produced exactly 46 fresh allocations per
+frame and no successful remaps. Evidence is
+`.zig-cache/native-allocation-path-trace.log`.
+
+The output fault-prefix tests now reject in-place resize/remap in their backing
+allocator, forcing allocate/copy/free and exposing every exercised growth as
+a numbered allocation failure. This changes test injection, not production
+allocation policy, and does not swallow or retry the nondeterministic result.
+The normal remap-on/off control remains as
+`zig build test-windows-run-allocation-path`; it requires identical native output
+and deterministic allocation counts in the remap-off path. Native-generation
+allocation tests remain separate. These probes cover exercised paths, not
+unreached native overflow/reallocation branches or arbitrary COM failures.
+
+The UTF-8 private-app ligature check also passed five live toggles: only the
+arrow row changed, plain text and synthesized geometry stayed stable, and
+returning to enabled restored the original pixels. Font apply/resize errors,
+grid mismatches, dock rebuild failures and leaked shell input were zero; exit
+was 0. Evidence is `.zig-cache/native-run-ligature-utf8-app.json`. Visual review
+confirmed the Korean syllable and combining dot. The earlier unforced-encoding
+fixture is retained with an explicit coverage exclusion, not counted as valid
+NFD rendering. ConPTY scalar normalization is not established by these images.
+
+The final allocation-recovery generation passed all four boundary shards with
+source hashes unchanged (`.zig-cache/native-wire-final-boundaries-20261028/result.json`),
+Debug/ReleaseFast fourteen-test controls, five compiled/runtime faults and
+restoration, shared snapshot/registry raster/documentation and cross-target
+gates. Subsequent test-source and shared-header formatting changes normalize CRLF to LF;
+`.zig-cache/native-wire-post-boundary-format.json` records exact byte equivalence
+under that normalization. Focused tests and documentation checks are rerun after
+formatting. Installation and the remaining Windows feature scope remain separate.

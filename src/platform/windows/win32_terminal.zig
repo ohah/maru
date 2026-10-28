@@ -25,9 +25,24 @@ const metal_frame = renderer.metal_frame;
 ///
 /// 셰이퍼와 래스터라이저를 **함께** 든다 — 둘이 같은 `Rasterizer`(face 체인)를 보아야 `font_id` 결정이
 /// 어긋나지 않는다(`win32_text.zig` doc).
+/// Context is heap-stable and owned by the configured text-resource generation.
+/// build_fn always consumes its DrawList, including error returns.
+pub const NativeDrawListBuilder = struct {
+    context: *anyopaque,
+    build_fn: *const fn (*anyopaque, std.mem.Allocator, renderer.DrawList, *renderer.RendererState, win32_text.Shaper, win32_text.NeutralRasterizer) anyerror!renderer.RenderFrame,
+};
+
 pub const FrameBuilder = struct {
     shaper: win32_text.Shaper,
     rasterizer: win32_text.NeutralRasterizer,
+    native: ?NativeDrawListBuilder = null,
+
+    pub fn buildDrawList(self: FrameBuilder, allocator: std.mem.Allocator, list: renderer.DrawList, state: *renderer.RendererState) !renderer.RenderFrame {
+        if (self.native) |native| return native.build_fn(native.context, allocator, list, state, self.shaper, self.rasterizer);
+        var owned = list;
+        errdefer owned.deinit(allocator);
+        return state.buildFrameFromDrawListWithRasterizer(allocator, list, self.shaper, self.rasterizer);
+    }
 
     pub fn build(
         self: FrameBuilder,
@@ -37,12 +52,11 @@ pub const FrameBuilder = struct {
         drain_summary: maru.app.runtime_pump.DrainSummary,
         io: std.Io,
     ) !host.AppHostFrame {
-        return host.buildFrameAfterDrainWithRasterizer(
+        return host.buildFrameAfterDrainWithDrawListBuilder(
             allocator,
             app_window,
             renderer_state,
-            self.shaper,
-            self.rasterizer,
+            self,
             drain_summary,
             io,
         );

@@ -626,3 +626,11 @@ run = "zig build test-editor-project-search-owner"
 [tasks.test-macos-project-search-worker]
 description = "실제 프로젝트 검색 worker·불변 문서·취소·부분 결과 검증"
 run = "zig build test-macos-project-search-worker"
+
+[tasks.test-windows-run-frame]
+description = "Verify native terminal shaping to atlas frames"
+run = "zig build test-windows-run-frame"
+
+[tasks.test-windows-run-allocation-path]
+description = "Compare native frame output across allocation strategies"
+run = "zig build test-windows-run-allocation-path"

@@ -13,6 +13,9 @@ pub const Source = struct {
     advance_offset: f32 = 0,
     ascender_offset: f32 = 0,
     bidi_level: u32 = 0,
+    ink_known: bool = false,
+    ink_left_px: f32 = 0,
+    ink_right_px: f32 = 0,
 };
 
 pub const Error = error{ BufferTooSmall, InvalidClusterMap };

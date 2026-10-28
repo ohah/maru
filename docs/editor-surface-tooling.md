@@ -717,6 +717,12 @@ revision 은 `documentChanges` 의 `version` 이 있을 때만 검사한다(clan
 | **알림** | 성공 「{0}개 파일에서 이름을 바꿨습니다」 · 서버 오류 「이름을 바꿀 수 없습니다 — {0}」(서버 message) · 낡음 「문서가 바뀌어 결과를 버렸습니다」 · root 밖 「루트 밖 파일이 있어 적용하지 않습니다 — {0}」 · 거부 「적용할 수 없는 편집입니다 — {0}」(파일 연산·겹침·읽기 전용·읽기 실패) · 되돌림 「{0}개 파일의 이름 바꾸기를 되돌렸습니다」 · 되돌릴 것 없음 | |
 | **하지 않는 것** | `prepareRename` · 미리보기 · `⌘Z` 에서 여러 파일 확인창 · 「이 파일만 되돌리기」 · redo · `CreateFile`/`RenameFile`/`DeleteFile` · 서버 발 `workspace/applyEdit`(§8.1 기본 거부 그대로) · code action · `annotations`/`changeAnnotations` | 다음 조각 |
 
+**응답의 출처와 수명.** 요청 번호는 서버별 연결에 속하므로 같은 seq만으로 다른 Client의 응답을
+받지 않는다. 라우터가 넘긴 실제 Client가 요청 문서의 현재 primary Client와 같아야 하며 surface·문서
+객체·저장 대상 epoch도 같아야 한다. 살아 있는 요청의 다른 Client 응답은 대기/알림/편집을 바꾸지 않는다.
+문서가 닫히거나 Save As로 대상이 바뀌면 낡은 대기를 취소하고 결과를 적용하지 않는다. 실제 판정과
+증거 범위는 [응답 출처 계획](plans/rename-response-origin.md)을 따른다.
+
 **할당 실패 보존.** 준비 실패는 오류로 반환하며 본문·선택·revision·기존 Undo/Redo와 이전 작업 기록을 보존한다.
 기록 경로·역연산·저장 bytes도 반영 전에 준비하므로, 편집 뒤 기록 할당 실패로 되돌릴 수 없는 적용을 남기지 않는다.
 `undo_workspace_edit`도 같은 정본의 공유 뷰를 한 번만 적용한다. 동일 본문 편집의 revision·Undo 계약은 유지한다.

@@ -20,7 +20,7 @@ mutations=[
  ('mode_owner_ignored',host,'.mode = state.mode','.mode = .trust'),
  ('candidate_return_leaks',host,'return result.consumed or s.transaction.rejected;','return if (key == .enter) false else result.consumed or s.transaction.rejected;'),
  ('environment_prompt_consumes_line','src/i18n.zig','"LSP environment variable names"','"Environment variables passed to language servers (names only)"'),
- ('ABI_contract_drift','src/platform/macos/app_session.zig','pub const abi_version: u32 = 247;','pub const abi_version: u32 = 246;'),
+ ('ABI_contract_drift','src/platform/macos/app_session.zig','pub const abi_version: u32 = 248;','pub const abi_version: u32 = 247;'),
 ]
 results=[]
 def run(name):

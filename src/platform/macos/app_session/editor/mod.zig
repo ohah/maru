@@ -25422,7 +25422,7 @@ test "RNM1 심볼 이름 바꾸기 — F2 로 낱말이 씨앗인 상자, 이름
     // ⑻ 낡은 seq 는 버린다.
     s.editor_rename.waiting = true;
     s.editor_rename.waiting_seq = 99;
-    rename_client.onResponse(s, 98, null, false, null, .utf8);
+    rename_client.onResponse(s, lsp_client.readyClientFor(s, term).?, 98, null, false, null);
     try testing.expect(s.editor_rename.waiting);
     s.editor_rename.waiting = false;
 }
@@ -74487,4 +74487,53 @@ test "parse runtime host 마지막 fixture는 allocator 반납 전에 파싱 소
     try testing.expect(parse.lastPollThread() == null);
     try testing.expect(parse.wake.deliverForTest());
     try testing.expect(parse.ready(identity, grammar, .zig) == null);
+}
+
+test "RNM12 same sequence from another client cannot settle a rename request" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: RenameFx = .{ .fx = try PaneFixture.init(allocator) };
+    h.init(allocator) catch |err| {
+        h.fx.deinit(allocator);
+        return err;
+    };
+    defer h.deinit(allocator);
+    const s = h.fx.session;
+    const term = h.term;
+    try h.renameTo(5, "renamed");
+    try testing.expect(s.editor_rename.waiting);
+    const seq = s.editor_rename.waiting_seq;
+    const owner = s.editor_rename.owner.?;
+    const client = lsp_client.readyClientFor(s, term).?;
+    // Equal server/root/process metadata is not connection identity. This is a
+    // controller injection, not evidence of a second actual server process.
+    var foreign = client.*;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"changes\":{}}", .{});
+    defer parsed.deinit();
+    for ([_]bool{ true, false }) |is_error| {
+        rename_client.onResponse(s, &foreign, seq, parsed.value, is_error, "foreign error");
+        try testing.expect(s.editor_rename.waiting);
+        try testing.expectEqual(@as(u64, 0), s.editor_rename.notified_error);
+        try testing.expectEqual(@as(u64, 0), s.editor_rename.notified_done);
+        try testing.expectEqualStrings(RenameFx.r_text, h.content());
+        try testing.expect(!s.chrome_host.notice.open);
+    }
+    rename_client.onResponse(s, client, seq + 1, null, true, "old error");
+    try testing.expect(s.editor_rename.waiting);
+    // Save As can preserve surface and body version while replacing the target.
+    term.rt.editorDocument().save_target_epoch += 1;
+    rename_client.onResponse(s, client, seq, parsed.value, false, null);
+    try testing.expect(!s.editor_rename.waiting);
+    try testing.expectEqualStrings(RenameFx.r_text, h.content());
+    try testing.expect(!s.chrome_host.notice.open);
+    term.rt.editorDocument().save_target_epoch = owner.target_epoch;
+    // A matching origin still settles normally, and duplicate/late errors do not.
+    s.editor_rename.owner = owner;
+    s.editor_rename.waiting = true;
+    rename_client.onResponse(s, client, seq, null, true, "own error");
+    try testing.expect(!s.editor_rename.waiting);
+    try testing.expectEqual(@as(u64, 1), s.editor_rename.notified_error);
+    rename_client.onResponse(s, client, seq, null, true, "duplicate error");
+    try testing.expectEqual(@as(u64, 1), s.editor_rename.notified_error);
+    s.chrome_host.notice.dismiss();
 }

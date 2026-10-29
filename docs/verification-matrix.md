@@ -5395,3 +5395,17 @@ macOS에서는 제품 6개와 초기화 4개, 다른 플랫폼에서는 7개 수
 `tools/editor-parse-runtime/review.py --scope input`은 실제 결함 다섯 개와 정상 전후 대조군을
 컴파일·실행한다. [제품 연결 계약](plans/editor-async-parse.md#제품-화면-연결)을 따른다.
 모델 preedit 검사를 실제 OS IME 또는 GUI 지연 개선량으로 해석하지 않는다.
+
+## Chromium role 로케이터 테스트 응답 수명
+
+긴 접근성 이름 fixture는 콜백 반환 후 `Op.feed`가 소비할 때까지 JSON 바이트가 유효해야 한다.
+콜백 안의 배열 결합 결과를 slice로 반환하던 fixture를 모듈 상수로 옮겼다.
+기존 정확한 실패 테스트는 Debug에서는 통과했지만 ReleaseFast에서는 `malformed DevTools result`로 실패했다.
+수정 후 아래 명령으로 op와 그 전이 의존성 전체를 검사한다(`-ODebug`도 실행한다).
+
+```sh
+mise exec -- zig test -OReleaseFast --dep array_repeat -Mroot=src/platform/macos/web_cdp_ops.zig -Marray_repeat=src/compat/array_repeat.zig
+```
+
+이 검사는 가짜 DevTools 응답의 수명·상한 거절·UTF-8 이름 자르기·객체 묶음 반환을 확인한다.
+실제 Chromium이나 물리 GUI를 실행한 증거로 취급하지 않는다. 제품 동작과 공개 API는 바꾸지 않는다.

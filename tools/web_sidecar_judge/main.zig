@@ -52,6 +52,7 @@ const network_body_r4_check = @import("network_body_r4_check.zig"); // W9d② �
 const network_body_r5_check = @import("network_body_r5_check.zig"); // W9d② 적대 리뷰 5 회차
 const network_body_v20a_check = @import("network_body_v20a_check.zig"); // W9d② 적대적 검증 20 회 중 1–10(A)
 const network_body_swcdp_check = @import("network_body_swcdp_check.zig"); // W9d② 서비스 워커 갈래 새 설계(재검증 5 차)
+const network_body_v20l_check = @import("network_body_v20l_check.zig"); // 탐침: 재검증 5 차 적대 검증 11–20 회차
 const network_body_v20fa_check = @import("network_body_v20fa_check.zig"); // W9d② 최종 재검증 1–10 회차(검증자 v20f A)
 const network_body_v20fb_check = @import("network_body_v20fb_check.zig"); // W9d② 최종 재검증 11–20 회차(검증자 v20f B)
 const network_body_v20b_check = @import("network_body_v20b_check.zig"); // W9d② 적대 검증 11–20 회차
@@ -163,6 +164,17 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         var pb: [1024]u8 = undefined;
         const prof = std.fmt.bufPrintSentinel(&pb, "--profile-dir={s}/netbody_v20a", .{std.mem.span(argv[3])}, 0) catch return 2;
         network_body_v20a_check.run(&reportText, host, prof) catch |err| report(false, "network-body-v20a", "{s}", .{@errorName(err)});
+        return if (failures == 0) 0 else 1;
+    }
+    // 탐침(재검증 5 차 적대 검증 11–20 회차 — `V20L_ONLY`).
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--review-body-v20l")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        var pb: [1024]u8 = undefined;
+        const prof = std.fmt.bufPrintSentinel(&pb, "--profile-dir={s}/netbody_v20l", .{std.mem.span(argv[3])}, 0) catch return 2;
+        network_body_v20l_check.run(&reportText, host, prof) catch |err| report(false, "network-body-v20l", "{s}", .{@errorName(err)});
         return if (failures == 0) 0 else 1;
     }
     // W9d② 서비스 워커 CDP 판정(`swcdp-*` — 따로만: `--review-body-swcdp`, 고른 항목은 `SWCDP_ONLY`; 재검증 5 차).

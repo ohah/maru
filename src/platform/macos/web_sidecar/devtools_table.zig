@@ -60,16 +60,30 @@ pub const BeginError = error{ Busy, Duplicate, Forbidden };
 ///
 /// 재검증 5 차 S1(서비스 워커 갈래 새 설계 — 공격 2 A7·A16): `Target.*` 도 막는다 — 같은 세션에 sidecar 가 서비스 워커 auto-attach 를 건다.
 /// 떼면(`setAutoAttach`·`detachFromTarget`) 워커 사건이 말없이 끊기고, `waitForDebuggerOnStart` 를 켜면 전용 워커·재시작한 서비스 워커가
-/// 멈춘다(실측 PHASE0 b), 다른 탭·브라우저 전체를 본다(`setDiscoverTargets`). 읽기만 하는 `getTargetInfo`(localStorage 의 출처 확인 —
-/// `web_cdp_storage.zig`)·`getTargets`·`activateTarget` 은 받는다.
+/// 멈춘다(실측 PHASE0 b), 다른 탭·브라우저 전체를 본다(`setDiscoverTargets`). maru 가 쓰는 꼴 하나 — 인자 없는 `getTargetInfo`(그 탭 자신의
+/// 주소: localStorage 의 출처 확인 — `web_cdp_storage.zig` 가 `{}` 로 보낸다)만 받는다(`targetParamsAllowed`). 재검증 6 차 F11: 전에는
+/// `getTargets`·`activateTarget`·`targetId` 를 준 `getTargetInfo` 도 받아, 이 길을 쓰는 쪽이 다른 탭(사용자 탭 포함)의 주소와 다른 사이트 서비스
+/// 워커의 스크립트 주소를 보고 다른 탭을 앞으로 올릴 수 있었다(v20l r11 실측 — 지금은 에이전트가 메서드를 고를 길이 없어 해가 없었다).
 pub fn forbiddenMethod(method: []const u8) bool {
     if (std.mem.eql(u8, method, "Network.enable") or std.mem.eql(u8, method, "Network.disable")) return true;
-    if (std.mem.startsWith(u8, method, "Target.")) {
-        for ([_][]const u8{ "Target.getTargetInfo", "Target.getTargets", "Target.activateTarget" }) |ok| if (std.mem.eql(u8, method, ok)) return false;
-        return true;
-    }
+    if (std.mem.startsWith(u8, method, "Target.")) return !std.mem.eql(u8, method, target_info_method);
     return std.mem.startsWith(u8, method, "Fetch.");
 }
+
+const target_info_method = "Target.getTargetInfo";
+
+/// 재검증 6 차 F11: `Target.getTargetInfo` 는 인자가 없을 때만(빈 값 또는 빈 객체 `{}` — 공백은 받는다) — `targetId` 를 주면 다른 탭을 본다.
+/// 다른 메서드는 여기서 보지 않는다(참). 인자 글 전체가 오기 전(`begin`)에는 크기로만 거른다(`target_params_max`).
+pub fn targetParamsAllowed(method: []const u8, params: []const u8) bool {
+    if (!std.mem.eql(u8, method, target_info_method)) return true;
+    const p = std.mem.trim(u8, params, " \t\r\n");
+    if (p.len == 0) return true;
+    if (p[0] != '{' or p[p.len - 1] != '}') return false;
+    return std.mem.trim(u8, p[1 .. p.len - 1], " \t\r\n").len == 0;
+}
+
+/// 인자 없는 `getTargetInfo` 의 인자 글이 가질 수 있는 크기의 위 끝(공백을 넉넉히) — 넘으면 `begin` 에서 곧 막는다.
+const target_params_max: u32 = 64;
 pub const AddResult = union(enum) {
     /// 모르는 호출 — 버린다(이미 실패로 답했다).
     unknown,
@@ -106,6 +120,7 @@ pub const Table = struct {
     /// 새 호출의 자리를 잡는다. 메서드 이름·크기는 wire 가 검사했다.
     pub fn begin(self: *Table, value: message.DevtoolsCall, now_ms: i64) BeginError!*Call {
         if (forbiddenMethod(value.method)) return error.Forbidden;
+        if (std.mem.eql(u8, value.method, target_info_method) and value.params_size > target_params_max) return error.Forbidden;
         if (self.find(value.browser, value.call) != null) return error.Duplicate;
         var of_browser: usize = 0;
         for (self.slots) |s| if (s) |v| if (v.browser == value.browser) {
@@ -146,6 +161,7 @@ pub const Table = struct {
             if (!try std.json.validate(gpa, params)) return error.InvalidParams;
             if (!protocol.fields.jsonDepthWithin(params, message.max_devtools_params_depth)) return error.InvalidParams;
         }
+        if (!targetParamsAllowed(c.method(), params)) return error.InvalidParams; // 재검증 6 차 F11
         c.kick = std.mem.eql(u8, c.method(), message.devtools_kick_method) and std.mem.eql(u8, params, message.devtools_kick_params);
         const id = self.takeId();
         const json = if (params.len == 0)
@@ -342,9 +358,26 @@ test "W9d②: Network.enable·Network.disable·Fetch.* 는 보내지 않는다(�
     try std.testing.expect(!forbiddenMethod("NetworkX.enable"));
 }
 
-test "W9d② 재검증 5 차 S1: Target.* 는 보내지 않는다(서비스 워커 세션을 떼거나 멈추게 한다) — getTargetInfo·getTargets·activateTarget 은 받는다" {
-    for ([_][]const u8{ "Target.setAutoAttach", "Target.autoAttachRelated", "Target.attachToTarget", "Target.attachToBrowserTarget", "Target.detachFromTarget", "Target.sendMessageToTarget", "Target.setDiscoverTargets", "Target.exposeDevToolsProtocol", "Target.createTarget", "Target.closeTarget", "Target.createBrowserContext", "Target.disposeBrowserContext", "Target.setRemoteLocations", "Target.somethingNew" }) |m| {
+test "W9d② 재검증 5 차 S1·6 차 F11: Target.* 는 보내지 않는다(서비스 워커 세션을 떼거나 멈추게 하고 다른 탭을 본다) — maru 가 쓰는 인자 없는 getTargetInfo 하나만 받는다" {
+    for ([_][]const u8{ "Target.setAutoAttach", "Target.autoAttachRelated", "Target.attachToTarget", "Target.attachToBrowserTarget", "Target.detachFromTarget", "Target.sendMessageToTarget", "Target.setDiscoverTargets", "Target.exposeDevToolsProtocol", "Target.createTarget", "Target.closeTarget", "Target.createBrowserContext", "Target.disposeBrowserContext", "Target.setRemoteLocations", "Target.somethingNew", "Target.getTargets", "Target.activateTarget", "Target.getTargetInfoX", "Target.getBrowserContexts" }) |m| {
         try std.testing.expect(forbiddenMethod(m));
     }
-    for ([_][]const u8{ "Target.getTargetInfo", "Target.getTargets", "Target.activateTarget", "TargetX.setAutoAttach", "Page.crash" }) |m| try std.testing.expect(!forbiddenMethod(m));
+    for ([_][]const u8{ "Target.getTargetInfo", "TargetX.setAutoAttach", "Page.crash" }) |m| try std.testing.expect(!forbiddenMethod(m));
+    // 인자: 없음·빈 객체만(maru 의 `web_cdp_storage` 는 `{}`).
+    for ([_][]const u8{ "", "{}", " { } ", "{\n}" }) |p| try std.testing.expect(targetParamsAllowed("Target.getTargetInfo", p));
+    for ([_][]const u8{ "{\"targetId\":\"A\"}", "{\"targetId\":\"\"}", "{\"x\":1}", "[]", "null" }) |p| try std.testing.expect(!targetParamsAllowed("Target.getTargetInfo", p));
+    try std.testing.expect(targetParamsAllowed("Page.navigate", "{\"url\":\"x\"}"));
+    // 실제 길: targetId 를 준 호출은 보내지 않고(`InvalidParams` — invalid_request), 큰 인자는 자리도 잡지 않는다, 빈 객체는 보낸다.
+    var t: Table = .{};
+    defer t.deinit(std.testing.allocator);
+    const leak = "{\"targetId\":\"ABCDEF\"}";
+    const c = try t.begin(.{ .browser = 1, .call = 1, .method = "Target.getTargetInfo", .params_size = leak.len }, 0);
+    _ = t.addData(std.testing.allocator, .{ .browser = 1, .call = 1, .bytes = leak });
+    try std.testing.expectError(error.InvalidParams, t.buildMessage(std.testing.allocator, c));
+    try std.testing.expectError(error.Forbidden, t.begin(.{ .browser = 1, .call = 2, .method = "Target.getTargetInfo", .params_size = 4096 }, 0));
+    const ok = try t.begin(.{ .browser = 1, .call = 3, .method = "Target.getTargetInfo", .params_size = 2 }, 0);
+    _ = t.addData(std.testing.allocator, .{ .browser = 1, .call = 3, .bytes = "{}" });
+    const json = try t.buildMessage(std.testing.allocator, ok);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"method\":\"Target.getTargetInfo\",\"params\":{}") != null);
 }

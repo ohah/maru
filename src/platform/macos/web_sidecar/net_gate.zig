@@ -35,7 +35,11 @@ pub const max_in_flight_per_tab: usize = 128;
 /// `max_in_flight_per_tab` 을 차지하지 않는다. 기록하는 동안 maru 의 DevTools 가 서비스 워커를 붙잡아 두어 워커가 본문을 읽지 않은 fetch 는
 /// 기록 중 끝나지 않는다(실측: 판정 v20fa 의 갱신 fetch 가 사례마다 20 개씩 남아 128 에 닿자 그 탭의 페이지 요청까지 적히지 않았다). 몫이
 /// 차면 그 뒤 서비스 워커 갈래 요청은 적지 않고 수만 센다(`Watch.dropped_sw_cap` — maru 의 `dropped_sw_inflight_cap`).
-pub const max_sw_in_flight: usize = 128;
+/// 재검증 6 차 F14a: 몫은 탭마다(`max_sw_in_flight_per_tab` — 요청을 붙일 첫 탭, 곧 그 서비스 워커의 출처를 맨 위에 연 지켜보는 탭) 나누고
+/// 전체는 그 넷(W9d① 의 페이지 요청과 같은 꼴 — 넷이 모여야 전체가 찬다). 전에는 sidecar 전체에 하나라 기록하지 않는 다른 출처 탭의 워커가
+/// 끝나지 않는 fetch 128 개를 쥐면 지켜보는 **모든** 탭의 서비스 워커 갈래 요청이 목록과 본문에서 사라졌다(W9d① F9 가 페이지 요청에서 막은 꼴).
+pub const max_sw_in_flight_per_tab: usize = 128;
+pub const max_sw_in_flight: usize = 4 * max_sw_in_flight_per_tab;
 /// IO → UI 넘김 상자의 상한 — 개수와 바이트. 넘치면 그 기록은 버리고 수를 센다.
 pub const max_queue_events: usize = 4096;
 pub const max_queue_bytes: usize = 8 * 1024 * 1024;
@@ -96,6 +100,8 @@ pub const Watch = struct {
     bucket: Bucket = .{ .tokens = tab_burst },
     /// 이 탭 몫으로 쥔 요청 수(`max_in_flight_per_tab`).
     in_flight: u16 = 0,
+    /// 재검증 6 차 F14a: 이 탭 몫으로 쥔 서비스 워커 갈래 요청 수(`max_sw_in_flight_per_tab` — 이 탭이 첫 대상인 요청).
+    sw_in_flight: u16 = 0,
     /// 문에서 넘긴 수(UI 스레드가 `net_dropped` 로 보내고 비운다).
     dropped: u32 = 0,
     /// 재검증 5 차 S3b (B): 서비스 워커 몫(`max_sw_in_flight`)이 차서 넘긴 서비스 워커 갈래 요청 수(붙일 탭마다 — `net_dropped.sw_inflight_cap`).
@@ -184,7 +190,7 @@ pub const Track = struct {
 };
 
 /// `State.admitServiceWorker` 의 답 — 그 출처를 연 지켜보는 탭 수와 문을 지났는가.
-/// `cap` — 서비스 워커 몫이 차서 넘겼다(`max_sw_in_flight`).
+/// `cap` — 서비스 워커 몫이 차서 넘겼다(첫 대상 탭의 `max_sw_in_flight_per_tab` 이나 전체 `max_sw_in_flight` — 재검증 6 차 F14a).
 pub const ServiceWorkerAdmit = struct { targets: usize, admitted: bool, cap: bool = false };
 
 /// `State.startServiceWorker` 의 답 — 붙일 탭 수와 잡은 자리(못 잡았으면 null).
@@ -320,9 +326,15 @@ pub const State = struct {
 
     /// 서비스 워커 길의 양동이와 동시 요청 수 — `admitServiceWorker` 가 출처를 맞춘 뒤에만 부른다. 재검증 5 차 (B): 동시 요청은 서비스 워커 몫
     /// (`max_sw_in_flight`)만 본다 — 페이지 요청이 몫을 다 써도 닫히지 않고, 서비스 워커 갈래가 몫을 다 써도 페이지 요청은 닫히지 않는다.
+    /// 탭마다의 몫(재검증 6 차 F14a)은 부른 쪽이 첫 대상 탭으로 본다(`swCapped`).
     pub fn admitServiceWorkerPath(self: *State, now_us: i64) bool {
         if (self.sw_in_flight >= max_sw_in_flight) return false;
         return self.sw_path.take(global_rate, global_burst, now_us);
+    }
+
+    /// 재검증 6 차 F14a: 서비스 워커 몫이 찼는가 — 전체(`max_sw_in_flight`) 또는 첫 대상 탭의 것(`max_sw_in_flight_per_tab`).
+    fn swCapped(self: *const State, first: *const Watch) bool {
+        return self.sw_in_flight >= max_sw_in_flight or first.sw_in_flight >= max_sw_in_flight_per_tab;
     }
 
     /// 탭·전체의 초당 양동이만(동시 요청 수는 보지 않는다 — 서비스 워커 갈래는 제 몫이 있다).
@@ -346,8 +358,9 @@ pub const State = struct {
         const n = self.serviceWorkerTargets(initiator, out);
         if (n == 0) return .{ .targets = 0, .admitted = false };
         const first = self.watchOf(out[0]) orelse return .{ .targets = 0, .admitted = false };
-        if (self.sw_in_flight >= max_sw_in_flight) {
-            // 재검증 5 차 (B): 서비스 워커 몫이 찼다 — 붙일 탭마다 따로 센다(잃은 까닭 `sw_inflight_cap`).
+        if (self.swCapped(first)) {
+            // 재검증 5 차 (B): 서비스 워커 몫이 찼다 — 붙일 탭마다 따로 센다(잃은 까닭 `sw_inflight_cap`). 재검증 6 차 F14a: 몫은 첫 대상 탭의 것과
+            // 전체 — 다른 출처 탭의 워커가 제 몫을 다 써도 이 출처의 요청은 닫히지 않는다.
             for (out[0..n]) |b| if (self.watchOf(b)) |w| {
                 w.dropped_sw_cap +|= 1;
             };
@@ -435,12 +448,14 @@ pub const State = struct {
     }
 
     /// 재검증 5 차 (B): 서비스 워커 갈래 요청의 자리 — 서비스 워커 몫으로 센다(탭 몫·페이지 전체 몫은 쓰지 않는다). 꽉 찼으면 null.
+    /// 재검증 6 차 F14a: 첫 대상 탭의 서비스 워커 몫으로도 센다(끝나면 그 탭의 세대가 같을 때만 돌려준다 — 페이지 요청과 같다, 2 회차 N4).
     pub fn trackServiceWorker(self: *State, request: u64, first: *Watch) ?*Track {
         if (self.find(request)) |t| return t;
-        if (self.sw_in_flight >= max_sw_in_flight) return null;
+        if (self.swCapped(first)) return null;
         for (&self.tracks) |*t| if (t.request == 0) {
             t.* = .{ .request = request, .owner = first.browser, .owner_generation = first.generation, .service_worker = true };
             self.sw_in_flight += 1;
+            first.sw_in_flight += 1;
             return t;
         };
         return null;
@@ -457,6 +472,9 @@ pub const State = struct {
     pub fn untrack(self: *State, t: *Track) void {
         if (t.request == 0) return;
         if (t.service_worker) {
+            if (self.watchOf(t.owner)) |w| if (w.generation == t.owner_generation) {
+                w.sw_in_flight -|= 1;
+            };
             t.* = .{};
             self.sw_in_flight -|= 1;
             return;
@@ -1067,12 +1085,12 @@ test "W9d② 재검증 5 차 S3b (B): 서비스 워커 몫은 따로 — 워커�
         r += 1;
         now += 20_000;
     }
-    try testing.expectEqual(max_sw_in_flight, held);
-    try testing.expectEqual(max_sw_in_flight, s.sw_in_flight);
+    try testing.expectEqual(max_sw_in_flight_per_tab, held); // 재검증 6 차 F14a: 첫 대상 탭(1)의 몫
+    try testing.expectEqual(max_sw_in_flight_per_tab, s.sw_in_flight);
     try testing.expectEqual(@as(usize, 0), s.in_flight);
     try testing.expectEqual(@as(u16, 0), s.watchByCef(11).?.in_flight); // 탭 몫은 그대로
-    try testing.expectEqual(@as(u32, 1000 - max_sw_in_flight), s.watchByCef(11).?.dropped_sw_cap);
-    try testing.expectEqual(@as(u32, 1000 - max_sw_in_flight), s.watchByCef(12).?.dropped_sw_cap);
+    try testing.expectEqual(@as(u32, 1000 - max_sw_in_flight_per_tab), s.watchByCef(11).?.dropped_sw_cap);
+    try testing.expectEqual(@as(u32, 1000 - max_sw_in_flight_per_tab), s.watchByCef(12).?.dropped_sw_cap);
     try testing.expectEqual(@as(u32, 0), s.watchByCef(11).?.dropped); // 다른 까닭의 넘김과 섞이지 않는다
     const capped = s.startServiceWorker("https://sw.test", r, now, &out);
     try testing.expect(capped.track == null and capped.cap and capped.targets == 2);
@@ -1087,7 +1105,7 @@ test "W9d② 재검증 5 차 S3b (B): 서비스 워커 몫은 따로 — 워커�
     try testing.expectEqual(max_in_flight_per_tab, pages);
     // 워커 요청 하나가 끝나면 몫이 돌아온다.
     s.untrack(s.find(1).?);
-    try testing.expectEqual(max_sw_in_flight - 1, s.sw_in_flight);
+    try testing.expectEqual(max_sw_in_flight_per_tab - 1, s.sw_in_flight);
     try testing.expect(s.startServiceWorker("https://sw.test", r, now, &out).track != null);
     // 넘김 표지의 종류.
     s.markDropKind(&.{1}, 0x9, 7, true);
@@ -1097,4 +1115,75 @@ test "W9d② 재검증 5 차 S3b (B): 서비스 워커 몫은 따로 — 워커�
     const n = s.takeDropMarks(&marks, &over);
     try testing.expectEqual(@as(usize, 2), n);
     try testing.expect(marks[0].sw_cap and !marks[1].sw_cap);
+}
+
+// ── 재검증 6 차(적대 검증 11–20 회차 v20l 의 결함) ──
+
+test "재검증 6 차 F14a(탐침 v20l D2): 서비스 워커 몫은 탭마다 — 다른 출처 탭의 워커가 끝나지 않는 fetch 로 제 몫 128 을 다 써도 이 탭의 서비스 워커 갈래 요청은 적히고 넘긴 수는 그 탭에만, 넷이 모여야 전체 512 가 찬다" {
+    var s: State = .{};
+    try testing.expect(s.setWatch(1, 11, true, true, false, &.{}));
+    try testing.expect(s.setWatch(2, 12, true, true, false, &.{}));
+    s.setTopOrigin(1, "https://hog.test");
+    s.setTopOrigin(2, "https://victim.test");
+    var out: [max_targets]BrowserId = undefined;
+    var now: i64 = 1_000_000;
+    var r: u64 = 1;
+    for (0..max_sw_in_flight_per_tab) |_| {
+        try testing.expect(s.startServiceWorker("https://hog.test", r, now, &out).track != null);
+        r += 1;
+        now += 20_000;
+    }
+    // 쥔 탭은 제 몫에서 멈춘다 — 넘긴 수는 그 탭에만.
+    const h = s.startServiceWorker("https://hog.test", r, now, &out);
+    try testing.expect(h.track == null and h.cap and h.targets == 1 and out[0] == 1);
+    r += 1;
+    // 다른 출처 탭의 서비스 워커 갈래 요청은 적힌다(전에는 sidecar 전체 몫 하나라 여기서 넘겼다 — v20l r14-cap 실측 0 개).
+    const v = s.startServiceWorker("https://victim.test", r, now, &out);
+    try testing.expect(v.track != null and !v.cap and v.targets == 1 and out[0] == 2);
+    r += 1;
+    try testing.expectEqual(@as(u32, 0), s.watchByCef(12).?.dropped_sw_cap);
+    try testing.expectEqual(@as(u32, 1), s.watchByCef(11).?.dropped_sw_cap);
+    try testing.expectEqual(@as(u16, max_sw_in_flight_per_tab), s.watchByCef(11).?.sw_in_flight);
+    try testing.expectEqual(@as(u16, 1), s.watchByCef(12).?.sw_in_flight);
+    // 끝나면 그 탭의 몫으로 돌아온다.
+    s.untrack(s.find(1).?);
+    try testing.expectEqual(@as(u16, max_sw_in_flight_per_tab - 1), s.watchByCef(11).?.sw_in_flight);
+    try testing.expect(s.startServiceWorker("https://hog.test", r, now, &out).track != null);
+    r += 1;
+    // 전체 512 — 넷이 모이면(W9d① 의 페이지 요청과 같은 꼴) 다른 탭도 닫힌다.
+    const hogs = [_][]const u8{ "https://hog2.test", "https://hog3.test", "https://hog4.test" };
+    for (hogs, 0..) |o, i| {
+        try testing.expect(s.setWatch(3 + i, @intCast(13 + i), true, true, false, &.{}));
+        s.setTopOrigin(3 + i, o);
+        for (0..max_sw_in_flight_per_tab) |_| {
+            now += 20_000;
+            if (s.sw_in_flight == max_sw_in_flight) break;
+            try testing.expect(s.startServiceWorker(o, r, now, &out).track != null);
+            r += 1;
+        }
+    }
+    try testing.expectEqual(max_sw_in_flight, s.sw_in_flight);
+    now += 20_000;
+    const full = s.startServiceWorker("https://victim.test", r, now, &out);
+    try testing.expect(full.track == null and full.cap);
+    try testing.expectEqual(@as(u32, 1), s.watchByCef(12).?.dropped_sw_cap);
+}
+
+test "재검증 6 차 F14a: 서비스 워커 몫도 세대를 본다 — 지켜보기를 껐다 켠 뒤 옛 요청이 끝나도 새 지켜보기의 몫을 깎지 않고, 전체 몫은 돌려준다" {
+    var s: State = .{};
+    try testing.expect(s.setWatch(1, 11, true, true, false, &.{}));
+    s.setTopOrigin(1, "https://sw.test");
+    var out: [max_targets]BrowserId = undefined;
+    try testing.expect(s.startServiceWorker("https://sw.test", 5, 1_000_000, &out).track != null);
+    try testing.expect(s.setWatch(1, 11, false, true, false, &.{}));
+    try testing.expect(s.setWatch(1, 11, true, true, false, &.{}));
+    s.setTopOrigin(1, "https://sw.test");
+    try testing.expect(s.startServiceWorker("https://sw.test", 6, 1_100_000, &out).track != null);
+    try testing.expectEqual(@as(u16, 1), s.watchByCef(11).?.sw_in_flight);
+    s.untrack(s.find(5).?); // 옛 세대 — 새 몫은 그대로
+    try testing.expectEqual(@as(u16, 1), s.watchByCef(11).?.sw_in_flight);
+    try testing.expectEqual(@as(usize, 1), s.sw_in_flight);
+    s.untrack(s.find(6).?);
+    try testing.expectEqual(@as(u16, 0), s.watchByCef(11).?.sw_in_flight);
+    try testing.expectEqual(@as(usize, 0), s.sw_in_flight);
 }

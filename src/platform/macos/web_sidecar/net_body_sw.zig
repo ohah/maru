@@ -26,6 +26,14 @@ pub const max_tabs = @import("registry.zig").capacity;
 /// 붙은 워커 세션 수 상한(sidecar 전체) — 기록하는 탭 × 그 출처의 서비스 워커. 넘치면 새 세션은 곧 뗀다(그 워커의 W 는 보이지 않는다 —
 /// 잇기는 그 탭을 어둠으로 친다, S3b).
 pub const max_sessions: usize = 64;
+/// 재검증 6 차 F14c: 탭 하나가 쥘 수 있는 세션 수 — 넷이 모여야 전체가 찬다(W9d① 의 동시 요청과 같은 꼴). 전에는 한 탭(서비스 워커가 많은
+/// 출처)이 64 를 다 쥐면 그 뒤 기록을 켠 다른 탭의 세션은 모두 곧 떼어져 그 탭의 서비스 워커 본문을 모두 잃었다(v20l r14-many — 70 개 중 64).
+pub const max_sessions_per_tab: usize = 16;
+/// 재검증 6 차 F13: 탭의 맨 위 출처가 아닌 워커 세션(다른 출처 iframe 의 워커·이동 전후)을 떼기까지 기다리는 때(단조 µs). 곧 떼지 않는 까닭:
+/// 이동하는 탭에 새 출처의 워커가 붙는 사건과 맨 위 주소가 바뀌는 사건(`on_address_change`)은 차례가 정해지지 않았다 — 먼저 붙은 새 출처의
+/// 워커를 곧 떼면 다시 붙을 때까지 그 출처의 W 를 잃어 서비스 워커 갈래 기록이 설명되지 않는다(어둠). 기다리는 동안 맨 위 출처가 그 워커의
+/// 것이 되면 남긴다(`retarget`).
+pub const foreign_grace_us: i64 = 3_000_000;
 pub const max_sid_bytes: usize = 64;
 
 /// 원시 메시지 끝의 `,"sessionId":"…"}` 에서 sessionId(16 진 글자 1..64)를 꺼낸다. 아니면 null — 페이지 세션의 메시지다.
@@ -94,6 +102,13 @@ pub const Session = struct {
     enable_id: i64 = 0,
     /// `Network.enable` 성공 답을 받은 벽시계(µs — 0 = 아직). 이 뒤에 워커에 닿은 응답만 보인다(S3b 의 C3a).
     enabled_wall_us: i64 = 0,
+    /// 재검증 6 차 F13: 워커 스크립트 주소의 출처 해시(`net_body_table.originHash` — 0 = 모른다)와, 그 탭의 맨 위 출처가 아니게 된 단조 시각
+    /// (0 = 맨 위 출처의 워커). 0 이 아니면 `foreign_grace_us` 뒤에 뗀다(`takeForeign`).
+    origin: u64 = 0,
+    foreign_since: i64 = 0,
+    /// 재검증 6 차 F13·D1: 남의 출처였다가 맨 위 출처의 것이 된 단조 시각(0 = 붙을 때부터 맨 위 출처의 것). 그 앞에 시작한 이 세션의 W 는
+    /// 제 기록이 이 탭에 없을 수 있어(문은 그때의 맨 위 출처로 붙일 탭을 골랐다) 맞추기에 넣지 않는다(`Table.workerEventFrom`).
+    own_since: i64 = 0,
 
     pub fn sidSlice(self: *const Session) []const u8 {
         return self.sid[0..self.sid_len];
@@ -116,9 +131,17 @@ pub const Sw = struct {
     sessions: [max_sessions]Session = @splat(.{}),
     tabs: [max_tabs]TabState = @splat(.{}),
 
+    /// 그 탭의 자리(없으면 null). 자리를 잡는 것은 `arm` 하나다 — 재검증 6 차(F16 과 같은 꼴): 전에는 묻기만 하는 길(끔의 `detachAll` 등)도
+    /// 자리를 잡아, 기록을 끈 뒤 닫힌 탭(표에 없어 닫힘의 떼기 일이 오지 않는다)의 자리가 남았다 — 32 번이면 새 탭에 붙이기를 걸지 못했다.
     fn tab(self: *Sw, browser: BrowserId) ?*TabState {
         if (browser == 0) return null;
         for (&self.tabs) |*t| if (t.browser == browser) return t;
+        return null;
+    }
+
+    fn tabOrNew(self: *Sw, browser: BrowserId) ?*TabState {
+        if (self.tab(browser)) |t| return t;
+        if (browser == 0) return null;
         for (&self.tabs) |*t| if (t.browser == 0) {
             t.* = .{ .browser = browser };
             return t;
@@ -131,9 +154,18 @@ pub const Sw = struct {
         return t.armed;
     }
 
+    /// 자리를 쥔 탭 수(시험이 새는 자리를 본다).
+    pub fn tabCount(self: *const Sw) usize {
+        var n: usize = 0;
+        for (self.tabs) |t| if (t.browser != 0) {
+            n += 1;
+        };
+        return n;
+    }
+
     /// `Network.enable` 성공 답 — 붙이기를 건다(보낼 것이면 참; 이미 걸었으면 거짓).
     pub fn arm(self: *Sw, browser: BrowserId) bool {
-        const t = self.tab(browser) orelse return false;
+        const t = self.tabOrNew(browser) orelse return false;
         if (t.armed) return false;
         t.armed = true;
         t.rearm_on_doc = false;
@@ -141,7 +173,7 @@ pub const Sw = struct {
     }
 
     /// 페이지 세션의 `Target.attachedToTarget`(서비스 워커) — 붙인 탭이면 세션을 적고 `keep`(부른 쪽이 그 세션에 `Network.enable`), 아니면
-    /// `detach`(부른 쪽이 `Target.detachFromTarget`). 자리가 없어도 `detach`.
+    /// `detach`(부른 쪽이 `Target.detachFromTarget`). 자리가 없어도(전체 `max_sessions`·그 탭 `max_sessions_per_tab` — 재검증 6 차 F14c) `detach`.
     pub fn attached(self: *Sw, browser: BrowserId, sid: []const u8, target_id: []const u8) Attach {
         const t = self.tab(browser) orelse return .detach;
         if (!t.armed or sid.len == 0 or sid.len > max_sid_bytes) return .detach;
@@ -150,6 +182,9 @@ pub const Sw = struct {
             if (s.browser == browser) return .keep;
             return .detach;
         }
+        // 탭 몫은 맨 위 출처의 세션만 센다 — 떼기를 기다리는 남의 출처 세션(이동 전 출처의 워커 — `foreign_grace_us`)이 몫을 쥐면 옮겨 간
+        // 출처의 워커가 붙지 못했다(v20l r14-many 실측: 워커 70 개 출처에서 옮긴 탭).
+        if (self.ownCount(browser) >= max_sessions_per_tab) return .detach;
         for (&self.sessions) |*s| if (s.browser == 0) {
             s.* = .{ .browser = browser, .target = hashId(target_id), .gen = t.gen };
             @memcpy(s.sid[0..sid.len], sid);
@@ -157,6 +192,57 @@ pub const Sw = struct {
             return .keep;
         };
         return .detach;
+    }
+
+    /// 재검증 6 차 F13: 붙은 세션의 출처(워커 스크립트 주소의 출처 해시)를 적고 그 탭의 맨 위 출처 `top` 과 견준다 — 같으면 참(맨 위 출처의
+    /// 워커), 아니면 `foreign_since` 를 세운다(부른 쪽이 `foreign_grace_us` 뒤에 뗀다 — `takeForeign`). 모르는 출처(0)는 늘 남의 것이다.
+    pub fn noteOrigin(self: *Sw, sid: []const u8, origin: u64, top: u64, now_us: i64) bool {
+        const s = self.find(sid) orelse return false;
+        s.origin = origin;
+        const own = origin != 0 and origin == top;
+        if (own and s.foreign_since != 0) s.own_since = @max(now_us, 1);
+        s.foreign_since = if (own) 0 else if (s.foreign_since != 0) s.foreign_since else @max(now_us, 1);
+        return own;
+    }
+
+    pub fn isForeign(self: *Sw, sid: []const u8) bool {
+        const s = self.find(sid) orelse return false;
+        return s.foreign_since != 0;
+    }
+
+    /// 재검증 6 차 F13: 그 탭의 맨 위 출처가 `top` 으로 바뀌었다 — 세션마다 다시 견준다. 맨 위 출처의 것이 아니게 된 세션(앞 문서 출처의
+    /// 워커)은 `foreign_since` 를 세우고, 맨 위 출처의 것이 된 세션(이동 중 주소가 바뀌기 전에 붙은 새 출처의 워커)은 풀어 그 enable 답의
+    /// 벽시계(아직이면 0) 중 최대를 돌려준다 — 부른 쪽이 그 탭의 VS 를 올린다(남의 출처인 동안에는 올리지 않았다).
+    pub fn retarget(self: *Sw, browser: BrowserId, top: u64, now_us: i64) i64 {
+        var raise: i64 = 0;
+        for (&self.sessions) |*s| if (s.browser == browser) {
+            const own = s.origin != 0 and s.origin == top;
+            if (own and s.foreign_since != 0) {
+                s.foreign_since = 0;
+                s.own_since = @max(now_us, 1);
+                raise = @max(raise, s.enabled_wall_us);
+            } else if (!own and s.foreign_since == 0) s.foreign_since = @max(now_us, 1);
+        };
+        return raise;
+    }
+
+    /// 재검증 6 차 F13: 시한(`foreign_grace_us`)이 지난 남의 출처 세션 하나를 표에서 빼 돌려준다(부른 쪽이 떼고 null 까지 되풀이).
+    pub fn takeForeign(self: *Sw, now_us: i64) ?Session {
+        for (&self.sessions) |*s| if (s.browser != 0 and s.foreign_since != 0 and now_us - s.foreign_since >= foreign_grace_us) {
+            const out = s.*;
+            s.* = .{};
+            return out;
+        };
+        return null;
+    }
+
+    /// 아직 떼지 않은 남의 출처 세션 중 가장 이른 `foreign_since`(없으면 null — 부른 쪽이 다음 확인을 건다).
+    pub fn nextForeign(self: *const Sw) ?i64 {
+        var at: ?i64 = null;
+        for (self.sessions) |s| if (s.browser != 0 and s.foreign_since != 0) {
+            at = if (at) |a| @min(a, s.foreign_since) else s.foreign_since;
+        };
+        return at;
     }
 
     /// 이 세션으로 보낸 `Network.enable` 의 번호를 적는다.
@@ -228,6 +314,15 @@ pub const Sw = struct {
         };
     }
 
+    /// 맨 위 출처의 세션 수(떼기를 기다리는 남의 출처 세션은 빼고 — 탭 몫).
+    pub fn ownCount(self: *const Sw, browser: BrowserId) usize {
+        var n: usize = 0;
+        for (self.sessions) |s| if (s.browser == browser and s.browser != 0 and s.foreign_since == 0) {
+            n += 1;
+        };
+        return n;
+    }
+
     pub fn sessionCount(self: *const Sw, browser: BrowserId) usize {
         var n: usize = 0;
         for (self.sessions) |s| if (s.browser != 0 and (browser == 0 or s.browser == browser)) {
@@ -273,8 +368,9 @@ pub const WKey = struct {
 };
 
 /// 워커 요청을 맞추기·「설명」 에서 빼는가(공격 1 H2·공격 3 M1): 브라우저가 낸 navigation preload(`preload-N`), 워커가 받은 응답이 다시 서비스
-/// 워커의 것(race 라우트), preflight(OPTIONS·`Preflight`), http(s) 밖의 주소(`data:`·`blob:`), 워커 스크립트(sw.js·importScripts — CEF 기록이
-/// 없다, PHASE0 d). 이것들은 서비스 워커 갈래 CEF 기록이 없다 — 맞추기에 넣으면 남의 기록을 가져가거나 「설명」 한다. τ 색인에는 남긴다(빼면 같은
+/// 워커의 것(race 라우트), preflight(OPTIONS·`Preflight`), http(s) 밖의 주소(`data:`·`blob:`), 워커 스크립트(sw.js·importScripts). 이것들은 대개
+/// 서비스 워커 갈래 CEF 기록이 없다(PHASE0 d) — 맞추기에 넣으면 남의 기록을 가져가거나 「설명」 한다. 재검증 6 차 D4: 새 워커의 importScripts·
+/// module import 와 명시 OPTIONS 는 기록이 생긴다(1–10 회차 4 회차 실측) — 맞추기에는 넣지 않고 그 기록을 설명만 한다(`explainable`). τ 색인에는 남긴다(빼면 같은
 /// τ 의 다른 W 가 「꼭 하나」 로 보인다).
 pub fn excluded(rid: []const u8, method: []const u8, kind: []const u8, url: []const u8, from_sw: bool) bool {
     if (std.mem.startsWith(u8, rid, "preload-")) return true;
@@ -283,6 +379,16 @@ pub fn excluded(rid: []const u8, method: []const u8, kind: []const u8, url: []co
     if (std.mem.eql(u8, kind, "Script")) return true;
     if (!(std.ascii.startsWithIgnoreCase(url, "http://") or std.ascii.startsWithIgnoreCase(url, "https://"))) return true;
     return false;
+}
+
+/// 재검증 6 차 D4: 빼는 꼴 가운데 CEF 서비스 워커 갈래 기록이 생기는 것 — 새 워커의 `importScripts`·module `import`(`type:Script` — 1–10 회차
+/// 4 회차 실측, PHASE0 d 와 다르다)와 명시 `OPTIONS` fetch(사전 요청 `Preflight` 는 아니다). 짝은 맺지 않되 그 기록을 「설명」 해 탭을 어둠으로
+/// 치지 않는다(`net_body_table.explainExcluded`). preload·워커가 받은 서비스 워커 응답·http(s) 밖은 아니다.
+pub fn explainable(rid: []const u8, method: []const u8, kind: []const u8, url: []const u8, from_sw: bool) bool {
+    if (std.mem.startsWith(u8, rid, "preload-") or from_sw) return false;
+    if (!(std.ascii.startsWithIgnoreCase(url, "http://") or std.ascii.startsWithIgnoreCase(url, "https://"))) return false;
+    if (std.mem.eql(u8, kind, "Preflight")) return false;
+    return std.mem.eql(u8, kind, "Script") or std.mem.eql(u8, method, "OPTIONS");
 }
 
 pub const W = struct {
@@ -338,6 +444,10 @@ pub const Reason = enum {
     w_held,
     w_pending_split,
     w_doubt,
+    /// 재검증 6 차 D1: 같은 열쇠에 제 기록이 없는 W 가 남는다(맞추기에 든 W 가 기록보다 많다 — 기록 전에 나간 fetch 가 남의 기록을 가져가 한 칸씩
+    /// 밀린 꼴) / 시작을 잃은 W(`timing.requestTime` — IO 뒤)와 시작이 보인 W(IO 앞)가 2 ms 안이라 차례를 믿지 못한다(1–10 회차 R10-a).
+    w_surplus,
+    w_clock,
 };
 
 pub const Verdict = union(enum) {
@@ -356,6 +466,8 @@ pub const max_ws: usize = 16_384;
 pub const evict_batch: usize = 1_024;
 /// C3a 의 여유(벽시계 µs) — 붙는 답과 τ 를 같은 벽시계로 재니 0 이어도 되지만 닫힌 쪽으로 둔다.
 pub const visible_margin_us: i64 = 1_000;
+/// 재검증 6 차: 벽시계의 느린 흐름으로 치는 빠르기의 위 끝(ppm — BSD `adjtime` 의 slew 상한 500 ppm). 이보다 빨리 뒤로 간 것만 뛰기로 친다.
+pub const slew_ppm: i64 = 500;
 
 pub const Link = struct {
     ws: std.AutoHashMapUnmanaged(WKey, W) = .empty,
@@ -373,6 +485,8 @@ pub const Link = struct {
     /// 보다 커진다).
     off_max: i64 = std.math.minInt(i64),
     back_max: i64 = 0,
+    /// 마지막 표본의 단조 시각(재검증 6 차 — 기준 `off_max` 를 느린 흐름만큼 따라 내린다).
+    last_mono: i64 = 0,
 
     pub fn deinit(self: *Link, gpa: std.mem.Allocator) void {
         self.ws.deinit(gpa);
@@ -382,10 +496,22 @@ pub const Link = struct {
         self.explained.deinit(gpa);
     }
 
-    /// 시계 표본(벽 − 단조) — 사건마다 부른다. 뒤로 뛴 폭을 쌓는다(줄지 않는다).
+    /// 시계 표본(벽 − 단조) — 사건마다 부른다. 뒤로 뛴 폭의 최대를 남긴다(줄지 않는다).
+    /// 재검증 6 차: 느린 흐름(NTP 의 slew — 벽시계가 단조보다 조금 느리게 간다, 실측 −27 ppm)은 뒤로 뛴 것이 아니다 — 흐르는 벽시계에서도 옛 응답의
+    /// τ 는 지금의 벽시계보다 작다(C3a 가 막는 것은 「뒤로 뛰기 앞의 메모 τ 가 VS 보다 크다」 뿐). 전에는 그 흐름이 기준(`off_max`)과의 차로 끝없이
+    /// 쌓여(시간당 약 0.1 초) sidecar 가 오래 돌수록 붙은 직후의 응답이 모두 C3a 로 버려졌다(판정 `v20l-ctrl`: 12 분 뒤 20/20 → 0/20). 그래서
+    /// 기준을 `slew_ppm` 만큼 따라 내리고, 그보다 빠르게 내려간 폭(뛰기·표본 사이의 지연)만 남긴다.
     pub fn clockSample(self: *Link, wall_us: i64, mono_us: i64) void {
         const off = wall_us - mono_us;
-        if (off > self.off_max) self.off_max = off;
+        if (self.off_max == std.math.minInt(i64)) {
+            self.off_max = off;
+            self.last_mono = mono_us;
+            return;
+        }
+        const dt = @max(mono_us - self.last_mono, 0);
+        self.last_mono = @max(self.last_mono, mono_us);
+        const allowed = @divTrunc(@min(dt, std.math.maxInt(i64) / slew_ppm) * slew_ppm, 1_000_000);
+        self.off_max = @max(off, self.off_max - allowed);
         self.back_max = @max(self.back_max, self.off_max - off);
     }
 
@@ -492,6 +618,17 @@ pub const Link = struct {
         return self.explained.contains(q);
     }
 
+    /// C3a(τ 가 VS 앞) — 잇지 않는다. 재검증 6 차 F16b: 그래도 τ 로 W 와 그 짝을 찾아 가리킨 기록을 `ambiguous` 로 끝낸다(C7′ — 「P 가 가리켰지만
+    /// 잇지 못했다」; 전에는 q 없이 끝내 그 기록이 시한 뒤 `unmatched`, 곧 「어느 페이지도 받지 않았다」 로 보였다). W 는 보였는데 짝이 아직이면
+    /// 짝이 설 때까지 기다린다(시한이 지나면 부른 쪽이 q 없이 놓는다 — 잃는 쪽). 어느 길도 잇지 않는다.
+    fn beforeVisible(self: *const Link, tau: i64) Verdict {
+        const none: Verdict = .{ .ambiguous = .{ .reason = .before_visible } };
+        const e = self.taus.get(tau) orelse return none;
+        const w = self.ws.get(e.nd_key orelse e.first) orelse return none;
+        if (w.pair == 0) return if (w.excluded or w.bad or e.hop) none else .wait;
+        return .{ .ambiguous = .{ .reason = .before_visible, .q = w.pair } };
+    }
+
     /// C1·C2·C3a·C4·C5 — P(그 탭 `browser`)를 어느 W·기록에 잇는가. C0·C3b′·C6·C7′ 은 부른 쪽(표).
     pub fn decide(self: *const Link, browser: BrowserId, tau: i64, src: Src) Verdict {
         switch (src) {
@@ -506,7 +643,7 @@ pub const Link = struct {
             .network => {},
         }
         if (tau == 0) return .skip; // C2
-        if (tau < self.visibleSince(browser)) return .{ .ambiguous = .{ .reason = .before_visible } }; // C3a
+        if (tau < self.visibleSince(browser)) return self.beforeVisible(tau); // C3a
         if (tau <= self.horizon) return .{ .ambiguous = .{ .reason = .horizon } };
         const e = self.taus.get(tau) orelse return .wait; // W 가 아직(시한 뒤 `no_worker`)
         if (e.hop) return .{ .ambiguous = .{ .reason = .hop } };
@@ -574,20 +711,109 @@ test "S1: 붙이기는 켬 답 뒤에만 — 걸지 않은 탭에 온 세션은 
     try testing.expectEqual(@as(usize, 0), sw.sessionCount(5));
 }
 
-test "S1: 자리 상한 — 넘치면 새 세션은 떼고, 다시 뜬 타깃은 epoch 를 올린다, 떨어진 세션은 지운다" {
+test "S1: 자리 상한 — 넘치면 새 세션은 떼고(탭마다 16·전체 64 — 재검증 6 차 F14c), 다시 뜬 타깃은 epoch 를 올린다, 떨어진 세션은 지운다" {
     var sw: Sw = .{};
-    try testing.expect(sw.arm(5));
     var buf: [8]u8 = undefined;
-    for (0..max_sessions) |i| {
-        const sid = try std.fmt.bufPrint(&buf, "{X:0>4}", .{i});
-        try testing.expectEqual(Attach.keep, sw.attached(5, sid, "T"));
+    // 탭 넷이 16 씩 — 다섯째 탭은 전체가 차 뗀다. 한 탭이 16 을 넘겨 쥐지 못해 다른 탭이 제 몫을 쓴다.
+    for (0..4) |b| {
+        try testing.expect(sw.arm(5 + b));
+        for (0..max_sessions_per_tab) |i| {
+            const sid = try std.fmt.bufPrint(&buf, "{X:0>4}", .{b * 100 + i});
+            try testing.expectEqual(Attach.keep, sw.attached(5 + b, sid, "T"));
+        }
+        try testing.expectEqual(Attach.detach, sw.attached(5 + b, "EEEEE", "T"));
     }
+    try testing.expectEqual(max_sessions, sw.sessionCount(0));
+    try testing.expect(sw.arm(9));
+    try testing.expectEqual(Attach.detach, sw.attached(9, "DDDDD", "T"));
     try testing.expectEqual(Attach.detach, sw.attached(5, "FFFFF", "T"));
     sw.detached("0000");
     try testing.expectEqual(Attach.keep, sw.attached(5, "FFFFF", "T"));
     sw.reloaded("FFFFF");
     try testing.expectEqual(@as(u32, 1), sw.find("FFFFF").?.epoch);
     try testing.expect(!sw.result("0000", 1, true, 5)); // 지운 세션의 답은 모른다
+    // 재검증 6 차: 남의 출처가 된 세션(떼기를 기다린다)은 탭 몫에 세지 않는다 — 옮겨 간 출처의 워커가 붙는다(전체 자리가 있으면).
+    var m: Sw = .{};
+    try testing.expect(m.arm(5));
+    for (0..max_sessions_per_tab) |i| {
+        const sid = try std.fmt.bufPrint(&buf, "{X:0>4}", .{i});
+        try testing.expectEqual(Attach.keep, m.attached(5, sid, "T"));
+        _ = m.noteOrigin(sid, 0x11, 0x11, 10);
+    }
+    try testing.expectEqual(Attach.detach, m.attached(5, "CCCCC", "T"));
+    _ = m.retarget(5, 0x77, 1_000);
+    try testing.expectEqual(Attach.keep, m.attached(5, "CCCCC", "T"));
+    try testing.expectEqual(@as(usize, 1), m.ownCount(5));
+}
+
+test "재검증 6 차 F13: 맨 위 출처가 아닌 워커 세션은 시한 뒤 뗀다 — 맨 위 출처가 그 워커의 것이 되면 남기고 그때 VS 를 올릴 값을 준다, 떠난 출처의 워커는 시한을 세운다" {
+    var sw: Sw = .{};
+    const o1: u64 = 0x11;
+    const o2: u64 = 0x22;
+    const x2: u64 = 0x33;
+    try testing.expect(sw.arm(5));
+    // 맨 위 출처(o1)의 워커 — 남긴다.
+    try testing.expectEqual(Attach.keep, sw.attached(5, "A1", "T1"));
+    try testing.expect(sw.noteOrigin("A1", o1, o1, 1_000));
+    // iframe 출처(같은 사이트·다른 출처 o2, 다른 사이트 x2)의 워커 — 붙지만 남의 것.
+    try testing.expectEqual(Attach.keep, sw.attached(5, "B2", "T2"));
+    try testing.expect(!sw.noteOrigin("B2", o2, o1, 2_000));
+    try testing.expectEqual(Attach.keep, sw.attached(5, "C3", "T3"));
+    try testing.expect(!sw.noteOrigin("C3", x2, o1, 2_500));
+    // 출처를 모르는 워커도 남의 것.
+    try testing.expectEqual(Attach.keep, sw.attached(5, "D4", "T4"));
+    try testing.expect(!sw.noteOrigin("D4", 0, o1, 2_600));
+    try testing.expect(sw.isForeign("B2") and !sw.isForeign("A1"));
+    try testing.expectEqual(@as(?i64, 2_000), sw.nextForeign());
+    // 시한 전에는 떼지 않는다.
+    try testing.expect(sw.takeForeign(2_000 + foreign_grace_us - 1) == null);
+    // 시한 뒤 — 남의 것만, 하나씩.
+    var gone: usize = 0;
+    while (sw.takeForeign(2_600 + foreign_grace_us)) |x| {
+        try testing.expect(!std.mem.eql(u8, x.sidSlice(), "A1"));
+        gone += 1;
+    }
+    try testing.expectEqual(@as(usize, 3), gone);
+    try testing.expectEqual(@as(usize, 1), sw.sessionCount(5));
+    try testing.expect(sw.nextForeign() == null);
+    // 이동 중: 새 출처(o2)의 워커가 주소가 바뀌기 전에 붙는다 — 남의 것으로 시작해 enable 답이 온다.
+    try testing.expectEqual(Attach.keep, sw.attached(5, "E5", "T5"));
+    try testing.expect(!sw.noteOrigin("E5", o2, o1, 10_000));
+    sw.noteEnable("E5", 9);
+    _ = sw.result("E5", 9, true, 7_777);
+    // 주소가 바뀐다(o1 → o2): E5 는 풀려 그 enable 답으로 VS 를 올리고, 앞 문서 출처의 A1 은 시한을 세운다.
+    try testing.expectEqual(@as(i64, 7_777), sw.retarget(5, o2, 10_500));
+    try testing.expect(!sw.isForeign("E5") and sw.isForeign("A1"));
+    try testing.expectEqual(@as(?i64, 10_500), sw.nextForeign());
+    // 시한 안에 o1 로 돌아오면 A1 도 다시 남긴다(올릴 enable 답이 없으면 0).
+    try testing.expectEqual(@as(i64, 0), sw.retarget(5, o1, 11_000));
+    try testing.expect(!sw.isForeign("A1") and sw.isForeign("E5"));
+    // 다른 탭의 세션은 건드리지 않는다.
+    try testing.expect(sw.arm(6));
+    try testing.expectEqual(Attach.keep, sw.attached(6, "F6", "T1"));
+    try testing.expect(sw.noteOrigin("F6", o2, o2, 12_000));
+    _ = sw.retarget(5, x2, 12_000);
+    try testing.expect(!sw.isForeign("F6"));
+}
+
+test "재검증 6 차(F16 과 같은 꼴): 묻기만 하는 길은 탭 자리를 잡지 않는다 — 기록을 끈 뒤 닫힌 탭(닫힘의 떼기가 오지 않는다)의 자리가 남지 않는다" {
+    var sw: Sw = .{};
+    var b: BrowserId = 1;
+    while (b <= 200) : (b += 1) {
+        // 끈 탭·기록한 적 없는 탭에 온 묻기·떼기.
+        _ = sw.detachAll(b);
+        _ = sw.armed(b);
+        _ = sw.takeRearm(b);
+        sw.setRearm(b);
+        try testing.expectEqual(Attach.detach, sw.attached(b, "AA", "T"));
+    }
+    try testing.expectEqual(@as(usize, 0), sw.tabCount());
+    // 기록한 탭은 끈 뒤에도 자리가 남는다(세대) — 닫힘(`forget`)이 비운다.
+    try testing.expect(sw.arm(7));
+    _ = sw.detachAll(7);
+    try testing.expectEqual(@as(usize, 1), sw.tabCount());
+    sw.forget(7);
+    try testing.expectEqual(@as(usize, 0), sw.tabCount());
 }
 
 const gpa_t = std.testing.allocator;
@@ -642,6 +868,50 @@ test "S2 C3a: 붙기 전에 받은 응답(메모)은 ambiguous — VS 는 새 �
     try testing.expectEqual(Reason.before_visible, l.decide(5, 6_000_000 + visible_margin_us, .network).ambiguous.reason);
     l.forgetTab(5);
     try testing.expectEqual(Reason.before_visible, l.decide(5, 9_000_000_000, .network).ambiguous.reason);
+}
+
+test "재검증 6 차 F16b: C3a(VS 앞 τ)도 τ 로 W 의 짝을 찾아 그 기록을 ambiguous 로 — 짝이 아직이면 기다리고, 어느 길도 잇지 않는다" {
+    var l: Link = .{};
+    defer l.deinit(gpa_t);
+    l.raiseVisible(5, 9_000_000);
+    const k = WKey.of(1, 0, "1.1");
+    try l.noteResponse(gpa_t, k, 5_000_000, false, false, 200);
+    // W 는 보였는데 짝이 아직 — 기다린다(잇지 않는다).
+    try testing.expectEqual(Verdict.wait, l.decide(5, 5_000_000, .network));
+    try l.notePair(gpa_t, k, 44);
+    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .before_visible, .q = 44 } }, l.decide(5, 5_000_000, .network));
+    // W 가 없는 τ — q 없이.
+    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .before_visible } }, l.decide(5, 5_000_001, .network));
+    // 빼는 꼴·나쁜 W 는 짝이 없어도 기다리지 않는다.
+    const e = WKey.of(1, 0, "preload-1");
+    try l.noteResponse(gpa_t, e, 6_000_000, false, true, 200);
+    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .before_visible } }, l.decide(5, 6_000_000, .network));
+    const bw = WKey.of(1, 0, "2.2");
+    try l.noteResponse(gpa_t, bw, 6_500_000, false, false, 200);
+    l.noteBad(bw);
+    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .before_visible } }, l.decide(5, 6_500_000, .network));
+    // VS 가 없는 탭(기록하지 않는다)도 같다.
+    try testing.expectEqual(Verdict{ .ambiguous = .{ .reason = .before_visible, .q = 44 } }, l.decide(6, 5_000_000, .network));
+}
+
+test "재검증 6 차: 벽시계의 느린 흐름(slew)은 뒤로 뛴 폭으로 쌓이지 않는다 — 한 시간 −27 ppm 이 흘러도 VS 는 그대로, 뛰기는 남는다" {
+    var l: Link = .{};
+    defer l.deinit(gpa_t);
+    const wall0: i64 = 1_700_000_000_000_000;
+    var mono: i64 = 1_000_000;
+    // 1 초마다 한 표본, 한 시간 — 벽시계가 단조보다 27 ppm 느리다(실측).
+    for (0..3600) |k| {
+        const elapsed = @as(i64, @intCast(k)) * 1_000_000;
+        l.clockSample(wall0 + elapsed - @divTrunc(elapsed * 27, 1_000_000), mono + elapsed);
+    }
+    try testing.expect(l.back_max < 1_000); // 전에는 약 97 ms
+    // 이제 벽시계가 뒤로 2 초 뛴다 — 남는다(줄지 않는다).
+    mono += 3600 * 1_000_000;
+    l.clockSample(wall0 + 3600 * 1_000_000 - 97_200 - 2_000_000, mono + 1_000);
+    try testing.expect(l.back_max >= 1_999_000);
+    const after = l.back_max;
+    for (1..100) |k| l.clockSample(wall0 + 3600 * 1_000_000 - 97_200 - 2_000_000 + @as(i64, @intCast(k)) * 1_000_000, mono + 1_000 + @as(i64, @intCast(k)) * 1_000_000);
+    try testing.expectEqual(after, l.back_max);
 }
 
 test "S2 C4: τ 가 꼭 하나 — 같은 τ 의 디스크 아닌 W 둘은 영영 독, 디스크 적중은 걸러 네트워크 W 를, 홉 τ·빼는 꼴·나쁜 W·지평은 ambiguous, W·짝이 아직이면 기다린다" {

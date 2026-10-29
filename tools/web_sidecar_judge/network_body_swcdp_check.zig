@@ -30,6 +30,9 @@
 //!   swcdp-body-cache      Cache Storage(stale-while-revalidate·만든 응답을 put)·만든 응답(`new Response`) — 그 기록에 본문을 붙이지 않는다
 //!   swcdp-body-hb         HTTP 캐시의 같은 항목 HEAD 적중(같은 τ·빈 본문)으로 답하고 바쁜 루프로 W 를 1.5 s 늦춘다(공격 1 H1) — 틀림 0
 //!   swcdp-body-scopes     두 범위 SW 가 같은 주소를 함께(공격 3 H1) — 틀림 0
+//!   swcdp-body-xtarget    페이지가 SW1 을 거쳐 받는 주소를 SW2 가 메시지로 같은 때 받는다 300 판(재검증 6 차 — v20l r20b: CEF 차례와 CDP 차례가
+//!                         뒤집히는 판이 대부분이다) — 틀림 0. C5 의 「다른 타깃」 의심(`cross_target`)을 끄면 틀린 본문이 나온다(변이 J-C5-cross-target)
+//! 재검증 6 차 F20a: 본문 꼴마다 서비스 워커 갈래 기록 수의 아래 끝을 단언한다(기록이 하나도 없는 빈 판이 통과하지 않게 — 변이 M-nosw).
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -150,8 +153,11 @@ const swp_js = "self.addEventListener('install',function(){self.skipWaiting()});
     "e.respondWith(fetch(e.request))});";
 /// 둘째 범위(`/swp/q/`)의 워커 — 같은 주소(`/swp/x`)를 제 이름으로 받는다.
 const swq_js = "self.addEventListener('install',function(){self.skipWaiting()});self.addEventListener('activate',function(e){e.waitUntil(clients.claim())});" ++
-    "self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(u.pathname=='/swp/q/go'){var r=u.searchParams.get('r');e.respondWith(fetch('/swp/x?k=same&r='+r,{headers:{'x-who':'S2'},cache:'no-store'}));return}});";
+    "self.addEventListener('fetch',function(e){var u=new URL(e.request.url);if(u.pathname=='/swp/q/go'){var r=u.searchParams.get('r');e.respondWith(fetch('/swp/x?k=same&r='+r,{headers:{'x-who':'S2'},cache:'no-store'}));return}});" ++
+    // 재검증 6 차(v20l r20b): 메시지로 같은 주소를 받는다 — 페이지가 SW1 을 거쳐 받는 것과 같은 때.
+    "self.addEventListener('message',function(e){var d=e.data||{};if(d.op=='same'){e.waitUntil(fetch('/swp/x?k='+d.k+'&r='+d.r,{headers:{'x-who':'S2m'},cache:'no-store'}).then(function(r){return r.text()}).catch(function(){}))}});";
 const swp_page_js = "function W(u,w){return fetch(u,{headers:{'x-who':w},cache:'no-store'}).then(function(r){return r.text()}).catch(function(){})}" ++
+    "function act(r){return new Promise(function(res){var w=r.installing||r.waiting||r.active;if(w&&w.state=='activated')return res(w);w.addEventListener('statechange',function(){if(w.state=='activated')res(w)})})}" ++
     "function S(ms){return new Promise(function(r){setTimeout(r,ms)})}" ++
     "function reg(s,sc){return navigator.serviceWorker.register(s,{scope:sc}).then(function(){return navigator.serviceWorker.ready})}";
 
@@ -204,6 +210,12 @@ fn serveOne(conn: c_int) void {
         "for(var r=0;r<80;r++){var g=Math.floor(Math.random()*10);await Promise.all([W('/swp/x?k=same&r='+r,'pt'),S(g).then(function(rr){return function(){return f.contentWindow.fetch('/swp/q/go?r='+rr,{cache:'no-store'}).then(function(x){return x.text()}).catch(function(){})}}(r))]);await S(20)}" ++
         "await S(1500);document.title='odone'})</script>o");
     if (std.mem.eql(u8, path, "/swp/q/i")) return reply(conn, html, "", "<!doctype html><title>i</title>i");
+    // 재검증 6 차(v20l r20b): 두 타깃이 같은 때 같은 주소 — 페이지는 SW1 을 거쳐, SW2 는 메시지로.
+    if (std.mem.eql(u8, path, "/swp/s2b")) return reply(conn, html, "", "<!doctype html><title>s2b</title><script>" ++ swp_page_js ++
+        "var P=new URLSearchParams(location.search);var R=+P.get('r');var K=P.get('k');" ++
+        "reg('/swp/sw.js','/swp/').then(function(){return navigator.serviceWorker.register('/swp/q/sw2.js',{scope:'/swp/q/'})}).then(act).then(async function(w2){if(!navigator.serviceWorker.controller){location.reload();return}await S(800);" ++
+        "for(var r=0;r<R;r++){w2.postMessage({op:'same',k:K,r:r});await W('/swp/x?k='+K+'&r='+r,'pt');await S(25)}" ++
+        "await S(2500);document.title='s2done'})</script>s2b");
     // 본문 꼴(S4): `/swp/b?c=<꼴>&k=<판 열쇠>`.
     if (std.mem.eql(u8, path, "/swp/b")) return reply(conn, html, "", "<!doctype html><title>b</title><script>" ++ swp_page_js ++
         "var P=new URLSearchParams(location.search);var C=P.get('c');var K=P.get('k');" ++
@@ -238,6 +250,7 @@ fn serveOne(conn: c_int) void {
         if (!head) writeAll(conn, body_s);
         return;
     }
+    if (v20lServe(conn, req, target, path)) return;
     return reply(conn, "text/plain", "", "?");
 }
 
@@ -468,11 +481,14 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         r.pump(4000);
         const t = tally(&r, tab_a, at);
         var lb2: [600]u8 = undefined;
-        const ok = on and done and t.wrong == 0 and t.no_end == 0 and t.multi_end == 0 and switch (comptime c[0]) {
-            // 그대로 넘김·거꾸로 넘김·K1·K2 는 잡는다(잃는 양의 회귀를 막는 아래 끝).
+        // 재검증 6 차 F20a: 서비스 워커 갈래 기록 수의 아래 끝(판의 fetch 수 — 하나도 적히지 않은 빈 판이 통과하지 않게).
+        const sw_min: usize = comptime if (std.mem.eql(u8, c, "pass")) 100 else if (std.mem.eql(u8, c, "rev")) 40 else if (std.mem.eql(u8, c, "k1")) 40 else if (std.mem.eql(u8, c, "k2")) 60 else if (std.mem.eql(u8, c, "cache")) 30 else 15;
+        const ok = on and done and t.wrong == 0 and t.no_end == 0 and t.multi_end == 0 and t.sw >= sw_min and switch (comptime c[0]) {
+            // 그대로 넘김·거꾸로 넘김·K1·K2 는 잡는다(잃는 양의 회귀를 막는 아래 끝). Cache Storage 의 stale-while-revalidate 첫 받기(10)도.
             'p' => t.sw_own >= 90,
             'r' => t.sw_own >= 30,
             'k' => if (comptime std.mem.eql(u8, c, "k1")) t.sw_own >= 15 else t.sw_own >= 30,
+            'c' => t.sw_own >= 8,
             else => true,
         } and (if (comptime std.mem.eql(u8, c, "cache")) t.forged == 0 else true) and
             // K1 의 갱신 fetch(20)만 워커가 쥔다 — 그 밖의 꼴에서 쥔 것이 있으면 판정이 끝을 놓쳤다.
@@ -499,7 +515,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const tb = tally(&r, tab_b, at);
         var la: [600]u8 = undefined;
         var lbb: [600]u8 = undefined;
-        report(on_a and on_b and da and db and ta.wrong == 0 and tb.wrong == 0 and ta.no_end == 0 and tb.no_end == 0 and ta.held == 0 and tb.held == 0, "swcdp-body-k3", std.fmt.bufPrint(&detail, "tab A: {s} || tab B: {s}", .{ bodyLine(&ta, da, &la), bodyLine(&tb, db, &lbb) }) catch "");
+        // 재검증 6 차 F20a: 탭마다 서비스 워커 갈래 기록 10 과 제 본문의 아래 끝(다른 탭의 메모가 기록을 잃는 회귀를 놓치지 않게).
+        report(on_a and on_b and da and db and ta.wrong == 0 and tb.wrong == 0 and ta.no_end == 0 and tb.no_end == 0 and ta.held == 0 and tb.held == 0 and ta.sw >= 10 and tb.sw >= 10 and ta.sw_own >= 8 and tb.sw_own >= 8, "swcdp-body-k3", std.fmt.bufPrint(&detail, "tab A: {s} || tab B: {s}", .{ bodyLine(&ta, da, &la), bodyLine(&tb, db, &lbb) }) catch "");
         for ([_]u64{ tab_a, tab_b }) |b| try r.host.send(.{ .net_record = .{ .browser = b, .on = false, .session = 0 } });
         r.pump(500);
         try r.navigate(tab_a, "/blank");
@@ -515,7 +532,25 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         r.pump(4000);
         const t = tally(&r, tab_a, at);
         var lb2: [600]u8 = undefined;
-        report(on and done and t.wrong == 0 and t.no_end == 0 and t.held == 0, "swcdp-body-scopes", bodyLine(&t, done, &lb2));
+        report(on and done and t.wrong == 0 and t.no_end == 0 and t.held == 0 and t.sw >= 160, "swcdp-body-scopes", bodyLine(&t, done, &lb2));
+        try r.host.send(.{ .net_record = .{ .browser = tab_a, .on = false, .session = 0 } });
+        r.pump(500);
+        try r.navigate(tab_a, "/blank");
+        r.pump(500);
+    }
+    if (enabled("body-xtarget")) {
+        // 재검증 6 차(v20l r20b): 두 타깃이 같은 주소를 같은 때 — 대부분의 판에서 CEF 차례와 CDP 차례가 뒤집힌다(실측 81–86 %). 기준은 틀림 0(두
+        // 타깃이 섞인 짝은 의심해 `ambiguous`), `cross_target` 을 끄면 틀린 본문이 나왔다(실측 6/300).
+        session += 1;
+        const on = recordOn(&r, tab_a, session);
+        const at = r.begins.items.len;
+        var pb: [96]u8 = undefined;
+        try r.navigate(tab_a, std.fmt.bufPrint(&pb, "/swp/s2b?r=300&k=x{d}", .{session}) catch "");
+        const done = r.pumpTitle(tab_a, "s2done", 180_000);
+        r.pump(4000);
+        const t = tally(&r, tab_a, at);
+        var lb2: [600]u8 = undefined;
+        report(on and done and t.wrong == 0 and t.no_end == 0 and t.held == 0 and t.multi_end == 0 and t.sw >= 600, "swcdp-body-xtarget", bodyLine(&t, done, &lb2));
         try r.host.send(.{ .net_record = .{ .browser = tab_a, .on = false, .session = 0 } });
         r.pump(500);
         try r.navigate(tab_a, "/blank");
@@ -605,6 +640,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         report(armed and closed and x.probed and x.stopped, "swcdp-detach-close", std.fmt.bufPrint(&detail, "closed {} · {s}", .{ closed, idleLine(x, &lb) }) catch "");
         try openTab(&r, tab_a);
     }
+    try v20lRun(&r, report, &session);
     host.send(.shutdown) catch {};
     host_alive = false;
     _ = host.wait(wait_ms);
@@ -683,14 +719,14 @@ fn pairCheck(r: *Run, gpa: std.mem.Allocator, path: ?[:0]const u8, log_at: usize
     return res;
 }
 
-const Tally = struct { total: usize = 0, sw: usize = 0, sw_own: usize = 0, page_own: usize = 0, wrong: usize = 0, forged: usize = 0, no_end: usize = 0, held: usize = 0, multi_end: usize = 0, states: [16]usize = @splat(0), notes: [600]u8 = undefined, notes_len: usize = 0 };
+const Tally = struct { total: usize = 0, sw: usize = 0, sw_own: usize = 0, page_own: usize = 0, wrong: usize = 0, forged: usize = 0, no_end: usize = 0, held: usize = 0, multi_end: usize = 0, states: [16]usize = @splat(0), notes: [1200]u8 = undefined, notes_len: usize = 0 };
 
 /// `at` 부터 그 탭의 `/swp/x`·`/swp/c` 기록 — 잡은 본문이 그 기록 제 응답의 셈(X-Body)과 다르면 틀린 본문.
 fn tally(r: *Run, browser: u64, at: usize) Tally {
     var t: Tally = .{};
     var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
     defer seen.deinit(r.gpa);
-    for (r.begins.items[at..]) |b| if (b.browser == browser and (std.mem.indexOf(u8, b.url, "/swp/x") != null or std.mem.indexOf(u8, b.url, "/swp/c") != null)) {
+    for (r.begins.items[at..]) |b| if (b.browser == browser and (std.mem.indexOf(u8, b.url, "/swp/x") != null or std.mem.indexOf(u8, b.url, "/swp/c") != null or v20lTallied(b.url))) {
         if (seen.contains(b.request)) continue;
         seen.put(r.gpa, b.request, {}) catch {};
         const x = r.body(browser, b.request);
@@ -703,6 +739,8 @@ fn tally(r: *Run, browser: u64, at: usize) Tally {
         }
         if (x.ends > 1) t.multi_end += 1;
         if (x.ends == 1) t.states[@backingInt(x.state)] += 1;
+        // v20l: 기록마다 한 줄(`V20L_DUMP`) — 회차 분석용.
+        if (std.c.getenv("V20L_DUMP") != null) std.debug.print("V20L-REC b={d} req={d} sw={} url={s} ends={d} state={s} who={s} xbody={s} got={s}\n", .{ browser, b.request, b.sw, b.url[@min(b.url.len, std.mem.indexOf(u8, b.url, "/sw") orelse 0)..], x.ends, if (x.ends > 0) @tagName(x.state) else "-", x.xwho, x.xbody, x.data.items[0..@min(x.data.items.len, 24)] });
         if (x.ends >= 1 and x.state == .captured) {
             if (std.mem.indexOf(u8, x.data.items, "forged") != null) t.forged += 1;
             var want: [64]u8 = undefined;
@@ -728,4 +766,415 @@ fn bodyLine(t: *const Tally, done: bool, buf: []u8) []const u8 {
         n += piece.len;
     };
     return std.fmt.bufPrint(buf, "{s}records {d} (service worker {d}) · own body: service worker {d}, page {d} · WRONG {d} · forged {d} · no end {d} · held by the worker (no CEF end) {d} · several ends {d} · states{s}{s}", .{ if (done) "" else "NOT DONE · ", t.total, t.sw, t.sw_own, t.page_own, t.wrong, t.forged, t.no_end, t.held, t.multi_end, sl[0..n], t.notes[0..t.notes_len] }) catch "";
+}
+
+// ── v20l(W9d② 재검증 5 차 최종 코드 검증 1–10 회차 탐침 — `SWCDP_ONLY=v20l-…`) ─────────────────────────────────────────────
+//
+// 참값은 위와 같다(기록 제 응답 머리의 `X-Body`). 꼴은 `/swv/` 범위의 워커 하나(`swv_js`)가 x-who(또는 `?w=`)로 고른다.
+//   v20l-pre    (3 회차) 기록 전에 나간 워커 fetch W1(제 기록이 없다)을 기록 뒤의 페이지 요청이 같이 쓰고(in-flight 묶기 — `co`), 기록을 켠 직후
+//               워커 세션이 붙기 전에 같은 주소 W2 가 나간다(requestWillBeSent 를 잃을 수 있다). 키 여덟 × 판 다섯, W2 는 신호 뒤 0–20 ms.
+//   v20l-tog    (3 회차) 같은 꼴을 끔 → 곧 다시 켬으로.
+//   v20l-rng    (1 회차) HTTP 캐시 항목에 대해 워커가 Range(같은 τ 의 디스크 적중)·그대로 적중·no-cache 재검증(304)으로 답한다 — 원본 기록은
+//               페이지에 넘기지 않은 워커의 데우기 fetch 라 P 를 기다린다.
+//   v20l-redir  (1 회차) 302 를 따라간 워커 fetch 와 페이지가 같은 끝 주소를 함께.
+//   v20l-xo     (2 회차) 다른 출처(localhost) no-cors(JSON — ORB·CSS)·cors(사전 요청), 다른 출처 iframe 의 워커, 같은 출처 iframe.
+//   v20l-c4     (4 회차) navigation preload 를 respondWith, importScripts·module worker 의 스크립트와 같은 주소, 명시 OPTIONS.
+//   v20l-upd    (5 회차) update()+skipWaiting+claim 을 되풀이하며 새 판의 맨 위 fetch 메모와 같은 주소를 함께.
+//   v20l-tabs   (6 회차) 두 탭 + 같은 출처 iframe 이 같은 주소를 그대로 넘김·묶기로 함께.
+//   v20l-rst    (10 회차) ServiceWorker.stopAllWorkers 뒤 다시 뜬 워커의 맨 위 fetch(시작을 잃을 수 있다)와 같은 주소의 그대로 넘김을 함께.
+//   v20l-cap    (8 회차) 워커가 읽지 않는 fetch 로 서비스 워커 몫을 채우고 하나씩 풀며 같은 주소 둘씩, 페이지 갈래 요청.
+//   v20l-detach (7 회차) 켬·끔을 빠르게 열 번(답을 기다리지 않는다), 켬 직후 끔 — 그 뒤 놀리면 워커가 멈추나.
+//   v20l-vsleak (7 회차) 기록하던 탭 33 개를 끄지 않고 닫은 뒤(앱의 `destroy` 꼴) 새 탭의 그대로 넘김 — `v20l-ctrl` 은 닫기 없는 대조.
+// 재검증 6 차부터 고친 뒤의 기준이다: 모두 틀린 본문 0(`v20l-pre`·`-tog` 는 D1 — 전에는 WRONG 5+2), `v20l-cap` 은 몫이 풀린 뒤 같은 주소 둘씩의
+// 본문(D3 — 전에는 탭이 어둠이라 0), `v20l-vsleak`·`-ctrl` 은 새 탭의 본문(D2·F16, C3a 의 흐름 고침 — 오래 돈 sidecar 에서도).
+
+const swv_js = "self.addEventListener('install',function(){self.skipWaiting()});" ++
+    "self.addEventListener('activate',function(e){e.waitUntil(clients.claim().then(function(){if(self.registration.navigationPreload)return self.registration.navigationPreload.enable()}))});" ++
+    "var IF={};var HOLD=[];var TOP=fetch('/swv/x?k=top',{headers:{'x-who':'TOP'},cache:'no-store'});TOP.catch(function(){});" ++
+    "self.addEventListener('fetch',function(e){var q=e.request;var u=new URL(q.url);var w=q.headers.get('x-who')||u.searchParams.get('w')||'';" ++
+    "if(q.mode=='navigate'){if(u.pathname=='/swv/nav')e.respondWith(e.preloadResponse.then(function(r){return r||fetch(q)}));return}" ++
+    "if(u.origin!=self.location.origin){e.respondWith(fetch(q));return}" ++
+    "if(u.pathname.indexOf('/swv/')!=0)return;" ++
+    "if(w=='co'){var k=u.href;if(!IF[k]){IF[k]=fetch(k,{headers:{'x-who':'W1','x-d':q.headers.get('x-d')||'0'},cache:'no-store'}).then(function(r){setTimeout(function(){delete IF[k]},0);return r})}e.respondWith(IF[k].then(function(r){return r.clone()}));return}" ++
+    "if(w=='top'){e.respondWith(TOP.then(function(r){return r.clone()}));return}" ++
+    "if(w=='warm'){e.respondWith(fetch(u.href,{headers:{'x-who':'WARM'}}).then(function(r){return r.text()}).then(function(){return new Response('{\"n\":\"warm\"}',{headers:{'content-type':'application/json'}})}));return}" ++
+    "if(w=='rng'){e.respondWith(fetch(u.href,{headers:{'x-who':'RNG','Range':'bytes=0-4'}}));return}" ++
+    "if(w=='hit'){e.respondWith(fetch(u.href,{headers:{'x-who':'HIT'}}));return}" ++
+    "if(w=='rv'){e.respondWith(fetch(u.href,{headers:{'x-who':'RV'},cache:'no-cache'}));return}" ++
+    "if(w=='hold'){e.respondWith(fetch(u.href,{headers:{'x-who':'HOLD'},cache:'no-store'}).then(function(r){HOLD.push(r);return new Response('held')}));return}" ++
+    "if(w=='rel1'){var r1=HOLD.shift();if(r1){try{r1.body.cancel()}catch(x){}}e.respondWith(new Response('rel1'));return}" ++
+    "if(w=='rel'){HOLD.forEach(function(r){try{r.body.cancel()}catch(x){}});HOLD=[];e.respondWith(new Response('rel'));return}" ++
+    "e.respondWith(fetch(q))});";
+/// importScripts 를 하는 워커(범위 `/swv/i/`) — 맨 위에서 `?r=` 의 열쇠로.
+fn swvImportJs(buf: []u8, key: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "importScripts('/swv/x?k={s}imp&js=1');self.addEventListener('install',function(){{self.skipWaiting()}});", .{key}) catch "";
+}
+fn swvModuleJs(buf: []u8, key: []const u8) []const u8 {
+    return std.fmt.bufPrint(buf, "import '/swv/x?k={s}mod&js=1';self.addEventListener('install',function(){{self.skipWaiting()}});", .{key}) catch "";
+}
+var swv_upd = std.atomic.Value(u64).init(0);
+var sig = std.atomic.Value(u64).init(0);
+var lh_buf: [64]u8 = undefined;
+
+const swv_page_js = "function W(u,w){return fetch(u,{headers:{'x-who':w},cache:'no-store'}).then(function(r){return r.text()}).catch(function(){})}" ++
+    "function F(u,h,o){var x={headers:h||{},cache:'no-store'};if(o)for(var k in o)x[k]=o[k];return fetch(u,x).then(function(r){return r.text()}).catch(function(){})}" ++
+    "function S(ms){return new Promise(function(r){setTimeout(r,ms)})}" ++
+    "function SIG(n){return fetch('/swvsig?n='+n,{cache:'no-store'}).then(function(r){return r.text()})}" ++
+    "function reg(s,sc,o){var x={scope:sc};if(o)x.type=o;return navigator.serviceWorker.register(s,x).then(function(){return navigator.serviceWorker.ready})}" ++
+    "var P=new URLSearchParams(location.search);var C=P.get('c');var K=P.get('k');var N=+(P.get('n')||0);var LH='http://localhost:'+location.port;";
+
+const swv_page_body = "reg('/swv/sw.js','/swv/').then(async function(){if(!navigator.serviceWorker.controller){location.reload();return}" ++
+    // 3 회차: 기록 전 W1(묶기) → 신호 → W2(0–20 ms 뒤, 서버 1.6 s) → 250 ms 뒤 기록 뒤의 페이지 요청이 W1 을 같이 쓴다.
+    "if(C=='pre'||C=='tog'){var D=[0,1,2,3,5,8,12,20];var A=[];for(var i=0;i<8;i++)A.push(F('/swv/x?k='+K+'q'+i,{'x-who':'co','x-d':'900'}));document.title='p0';await SIG(N);var B=[];" ++
+    "D.forEach(function(d,i){B.push(S(d).then(function(){return F('/swv/x?k='+K+'q'+i,{'x-who':'pt','x-d':'1600'})}))});await S(250);for(var i=0;i<8;i++)B.push(F('/swv/x?k='+K+'q'+i,{'x-who':'co'}));await Promise.all(A.concat(B));await S(1500)}" ++
+    "if(C=='pt'){var B=[];for(var i=0;i<20;i++)B.push(W('/swv/x?k='+K+'b'+i,'pt'));await Promise.all(B)}" ++
+    "if(C=='rng'){for(var j=0;j<10;j++){var cu='/swv/c?k='+K+'g'+j;await W(cu,'warm');await W(cu,'rng');await W(cu,'hit');await W(cu,'rv');await S(50)}}" ++
+    "if(C=='redir'){for(var j=0;j<15;j++){await Promise.all([W('/swv/r?k='+K+'r'+j,'pt'),W('/swv/x?k='+K+'r'+j+'&rd=1','pt')]);await S(30)}}" ++
+    "if(C=='xo'){var f=document.createElement('iframe');var fd=new Promise(function(res){addEventListener('message',function(m){if(m.data=='ifdone')res()})});f.src=LH+'/swv/if?k='+K;document.body.appendChild(f);" ++
+    "var g=document.createElement('iframe');var gd=new Promise(function(res){addEventListener('message',function(m){if(m.data=='frdone')res()})});g.src='/swv/p?c=frame&k='+K;document.body.appendChild(g);" ++
+    "for(var j=0;j<15;j++){await Promise.all([F(LH+'/swv/x?k='+K+'o'+j+'&w=pt',{},{mode:'no-cors'}),F(LH+'/swv/x?k='+K+'s'+j+'&w=pt&css=1',{},{mode:'no-cors'}),F(LH+'/swv/x?k='+K+'c'+j,{'x-who':'pt'},{mode:'cors'}),W('/swv/x?k='+K+'f'+j,'pt'),W('/swv/x?k='+K+'f'+j,'co')]);await S(30)}" ++
+    "await Promise.race([Promise.all([fd,gd]),S(20000)])}" ++
+    "if(C=='frame'){await S(300);for(var j=0;j<15;j++){await Promise.all([W('/swv/x?k='+K+'f'+j,'pt'),W('/swv/x?k='+K+'f'+j,'co')]);await S(30)}parent.postMessage('frdone','*');return}" ++
+    "if(C=='c4'){for(var j=0;j<5;j++){var f=document.createElement('iframe');await new Promise(function(res){f.onload=res;f.src='/swv/nav?k='+K+'n'+j;document.body.appendChild(f)});await S(50)}" ++
+    "for(var j=0;j<3;j++){var ik=K+'i'+j;var ip=reg('/swv/i/sw.js?r='+ik,'/swv/i/').catch(function(){});await Promise.all([W('/swv/x?k='+ik+'imp&js=1','pt'),W('/swv/x?k='+ik+'imp&js=1','pt'),ip]);" ++
+    "var mk=K+'m'+j;var mp=reg('/swv/m/sw.mjs?r='+mk,'/swv/m/','module').catch(function(){});await Promise.all([W('/swv/x?k='+mk+'mod&js=1','pt'),W('/swv/x?k='+mk+'mod&js=1','pt'),mp]);await S(100)}" ++
+    "for(var j=0;j<10;j++){await Promise.all([F('/swv/x?k='+K+'opt'+j,{'x-who':'pt'},{method:'OPTIONS'}),W('/swv/x?k='+K+'opt'+j,'pt')]);await S(30)}" ++
+    "var rs=await navigator.serviceWorker.getRegistrations();for(var x of rs){if(x.scope.indexOf('/swv/i/')>0||x.scope.indexOf('/swv/m/')>0)await x.unregister()}}" ++
+    "if(C=='tabs'){var g=document.createElement('iframe');var gd=new Promise(function(res){addEventListener('message',function(m){if(m.data=='frdone')res()})});document.title='p0';await SIG(N);g.src='/swv/p?c=frame&k='+K+'t';document.body.appendChild(g);" ++
+    "for(var j=0;j<15;j++){await Promise.all([W('/swv/x?k='+K+'tf'+j,'pt'),W('/swv/x?k='+K+'tf'+j,'pt'),W('/swv/x?k='+K+'tf'+j,'co'),W('/swv/x?k='+K+'tf'+j,'co')]);await S(30)}await Promise.race([gd,S(20000)])}" ++
+    "if(C=='rst'){document.title='p0';for(var t=1;t<=200;t++){await SIG(N+t);await Promise.all([W('/swv/x?k=top','top'),W('/swv/x?k=top','pt'),W('/swv/x?k=top','top')]);document.title='r'+t}}" ++
+    "if(C=='cap'){var H=[];for(var i=0;i<140;i++)H.push(W('/swv/x?k='+K+'h'+i,'hold'));await Promise.all(H);await S(300);" ++
+    "for(var j=0;j<12;j++){await W('/swv/x?k=rel1','rel1');await S(50);await Promise.all([W('/swv/x?k='+K+'p'+j,'pt'),W('/swv/x?k='+K+'p'+j,'pt'),F('/swvpage?k='+K+'g'+j,{})]);await S(30)}" ++
+    "await W('/swv/x?k=rel','rel');await S(300);for(var j=0;j<10;j++){await Promise.all([W('/swv/x?k='+K+'a'+j,'pt'),W('/swv/x?k='+K+'a'+j,'pt')]);await S(30)}}" ++
+    "await S(1500);document.title='bdone'})";
+
+const swv_u_js_head = "self.addEventListener('install',function(){self.skipWaiting()});self.addEventListener('activate',function(e){e.waitUntil(clients.claim())});" ++
+    "var TOP=fetch('/swv/x?k=utop',{headers:{'x-who':'UTOP'},cache:'no-store'});TOP.catch(function(){});" ++
+    "self.addEventListener('fetch',function(e){var q=e.request;var u=new URL(q.url);var w=q.headers.get('x-who')||'';if(u.pathname.indexOf('/swv/x')!=0)return;" ++
+    "if(w=='top'){e.respondWith(TOP.then(function(r){return r.clone()}));return}e.respondWith(fetch(q))});";
+const swv_u_page = "<!doctype html><title>u</title><script>" ++ swv_page_js ++
+    "reg('/swv/u/sw.js','/swv/u/').then(async function(rg){if(!navigator.serviceWorker.controller){location.reload();return}" ++
+    "for(var j=0;j<15;j++){rg.update().catch(function(){});await Promise.all([W('/swv/x?k=utop','top'),W('/swv/x?k=utop','pt'),W('/swv/x?k='+K+'u'+j,'pt'),W('/swv/x?k='+K+'u'+j,'pt'),S(150).then(function(){return W('/swv/x?k=utop','top')})]);await S(250)}" ++
+    "await S(1500);document.title='bdone'})</script>u";
+const swv_if_page = "<!doctype html><title>if</title><script>" ++ swv_page_js ++
+    "reg('/swv/sw.js','/swv/').then(async function(){if(!navigator.serviceWorker.controller){location.reload();return}" ++
+    "for(var j=0;j<15;j++){await Promise.all([W('/swv/x?k='+K+'f'+j,'pt'),W('/swv/x?k='+K+'f'+j,'co')]);await S(30)}parent.postMessage('ifdone','*')}).catch(function(){parent.postMessage('ifdone','*')})</script>if";
+
+fn v20lTallied(url: []const u8) bool {
+    for ([_][]const u8{ "/swv/x", "/swv/c", "/swv/r", "/swv/nav", "/swvpage" }) |p| if (std.mem.indexOf(u8, url, p) != null) return true;
+    return false;
+}
+
+fn queryValue(target: []const u8, name: []const u8) []const u8 {
+    const qi = std.mem.indexOfScalar(u8, target, '?') orelse return "";
+    var it = std.mem.splitScalar(u8, target[qi + 1 ..], '&');
+    while (it.next()) |kv| {
+        const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
+        if (std.mem.eql(u8, kv[0..eq], name)) return kv[eq + 1 ..];
+    }
+    return "";
+}
+
+fn sleepMs(ms: u64) void {
+    os.sleepMs(@intCast(ms));
+}
+
+/// 셈을 실은 JSON 응답(`X-Body` 가 참값). `x-d`·`d` 만큼 늦게 답한다.
+fn v20lCounted(conn: c_int, req: []const u8, target: []const u8, status: []const u8, extra_in: []const u8) void {
+    const d_h = headerValue(req, "x-d");
+    const d_s = if (d_h.len > 0) d_h else queryValue(target, "d");
+    const d = std.fmt.parseInt(u64, d_s, 10) catch 0;
+    if (d > 0) sleepMs(d);
+    const n = counter.fetchAdd(1, .monotonic);
+    var bb: [64]u8 = undefined;
+    var eb: [400]u8 = undefined;
+    const ctype: []const u8 = if (queryValue(target, "css").len > 0) "text/css" else if (queryValue(target, "js").len > 0) "text/javascript" else "application/json";
+    const body_s: []const u8 = if (queryValue(target, "js").len > 0) (std.fmt.bufPrint(&bb, "var n={d};", .{n}) catch "") else (std.fmt.bufPrint(&bb, "{{\"n\":\"{d}\"}}", .{n}) catch "");
+    const extra = std.fmt.bufPrint(&eb, "{s}Access-Control-Allow-Origin: *\r\nX-Served: {d}\r\nX-Body: {d}\r\nX-Who: {s}\r\n", .{ extra_in, n, n, headerValue(req, "x-who") }) catch "";
+    var hb: [1024]u8 = undefined;
+    writeAll(conn, std.fmt.bufPrint(&hb, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n{s}Connection: close\r\n\r\n", .{ status, ctype, body_s.len, extra }) catch return);
+    if (!std.mem.startsWith(u8, req, "HEAD ")) writeAll(conn, body_s);
+}
+
+fn v20lServe(conn: c_int, req: []const u8, target: []const u8, path: []const u8) bool {
+    if (std.mem.eql(u8, path, "/swv/sw.js")) {
+        reply(conn, "text/javascript", "", swv_js);
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swv/u/sw.js")) {
+        // 가져갈 때마다 다른 판(update 가 새 판을 깐다).
+        var b: [2048]u8 = undefined;
+        const s = std.fmt.bufPrint(&b, "{s}//v={d}\n", .{ swv_u_js_head, swv_upd.fetchAdd(1, .monotonic) }) catch "";
+        replyStatus(conn, "200 OK", "text/javascript", "", s);
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swv/i/sw.js")) {
+        var b: [512]u8 = undefined;
+        reply(conn, "text/javascript", "", swvImportJs(&b, queryValue(target, "r")));
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swv/m/sw.mjs")) {
+        var b: [512]u8 = undefined;
+        reply(conn, "text/javascript", "", swvModuleJs(&b, queryValue(target, "r")));
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swvsig")) {
+        const want = std.fmt.parseInt(u64, queryValue(target, "n"), 10) catch 0;
+        var waited: u32 = 0;
+        while (sig.load(.monotonic) < want and waited < 60_000) : (waited += 1) sleepMs(1);
+        reply(conn, "text/plain", "Access-Control-Allow-Origin: *\r\n", "go");
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swv/p")) {
+        reply(conn, html, "", "<!doctype html><title>v</title><script>" ++ swv_page_js ++ swv_page_body ++ "</script>v");
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swv/u/p")) {
+        reply(conn, html, "", swv_u_page);
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swv/if")) {
+        reply(conn, html, "", swv_if_page);
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swv/nav")) {
+        // 이동(preload)의 본문도 셈 JSON 꼴(text/html) — 참값을 같은 꼴로 본다.
+        const n = counter.fetchAdd(1, .monotonic);
+        var bb: [64]u8 = undefined;
+        var eb: [200]u8 = undefined;
+        replyStatus(conn, "200 OK", html, std.fmt.bufPrint(&eb, "X-Served: {d}\r\nX-Body: {d}\r\nX-Who: {s}\r\n", .{ n, n, if (headerValue(req, "service-worker-navigation-preload").len > 0) "PRELOAD" else "NAV" }) catch "", std.fmt.bufPrint(&bb, "{{\"n\":\"{d}\"}}", .{n}) catch "");
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swv/r")) {
+        var lb: [300]u8 = undefined;
+        replyStatus(conn, "302 Found", "text/plain", std.fmt.bufPrint(&lb, "Location: /swv/x?k={s}&rd=1\r\n", .{queryValue(target, "k")}) catch "", "");
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swv/x") or std.mem.eql(u8, path, "/swvpage")) {
+        if (std.mem.startsWith(u8, req, "OPTIONS ") and headerValue(req, "access-control-request-method").len > 0) {
+            writeAll(conn, "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return true;
+        }
+        v20lCounted(conn, req, target, "200 OK", "Cache-Control: no-store\r\n");
+        return true;
+    }
+    if (std.mem.eql(u8, path, "/swv/c")) {
+        // HTTP 캐시에 남는 응답 — 검증자·Accept-Ranges(캐시가 Range 를 제 항목으로 답할 수 있게). 재검증은 304(X-Body 는 보내지 않는다 —
+        // 합친 머리가 캐시의 X-Body 를 그대로 지닌다).
+        if (headerValue(req, "if-none-match").len > 0) {
+            writeAll(conn, "HTTP/1.1 304 Not Modified\r\nETag: \"v20l\"\r\nCache-Control: max-age=600\r\nX-Who-304: 1\r\nConnection: close\r\n\r\n");
+            return true;
+        }
+        if (headerValue(req, "range").len > 0) {
+            // 네트워크로 온 Range — 제 셈의 JSON 전체를 206 으로(제 기록의 참값이 그대로 맞는다).
+            v20lCounted(conn, req, target, "206 Partial Content", "Cache-Control: no-store\r\nContent-Range: bytes 0-9/10\r\n");
+            return true;
+        }
+        v20lCounted(conn, req, target, "200 OK", "Cache-Control: max-age=600\r\nETag: \"v20l\"\r\nLast-Modified: Mon, 26 Oct 2026 00:00:00 GMT\r\nAccept-Ranges: bytes\r\n");
+        return true;
+    }
+    return false;
+}
+
+fn v20lCase(r: *Run, report: Report, session: *u32, comptime name: []const u8, path: []const u8, title: []const u8, ms: u32) !void {
+    session.* += 1;
+    const on = recordOn(r, tab_a, session.*);
+    const at = r.begins.items.len;
+    try r.navigate(tab_a, path);
+    const done = r.pumpTitle(tab_a, title, ms);
+    r.pump(4000);
+    const t = tally(r, tab_a, at);
+    var lb2: [2000]u8 = undefined;
+    // 재검증 6 차 D3: 몫 넘김으로 의심해 끝낸 기록은 설명된 것 — 몫이 풀린 뒤의 같은 주소 둘씩(20)은 제 본문을 잡는다(전에는 탭이 어둠이라 0).
+    const own_min: usize = if (comptime std.mem.eql(u8, name, "v20l-cap")) 15 else 0;
+    report(on and done and t.wrong == 0 and t.multi_end == 0 and t.sw_own >= own_min, name, bodyLine(&t, done, &lb2));
+    try r.host.send(.{ .net_record = .{ .browser = tab_a, .on = false, .session = 0 } });
+    r.pump(500);
+    try r.navigate(tab_a, "/blank");
+    r.pump(500);
+}
+
+fn v20lRun(r: *Run, report: Report, session: *u32) !void {
+    var detail: [6000]u8 = undefined;
+    var pb: [160]u8 = undefined;
+    // 3 회차: 기록 전 W1 + 붙기 전 W2.
+    inline for (.{ "v20l-pre", "v20l-tog" }) |name| if (enabled(name)) {
+        const tog = comptime std.mem.eql(u8, name, "v20l-tog");
+        var tot: Tally = .{};
+        var lines: std.ArrayList(u8) = .empty;
+        defer lines.deinit(r.gpa);
+        var all_done = true;
+        for (0..5) |trial| {
+            session.* += 1;
+            const n = sig.load(.monotonic) + 1;
+            if (tog) _ = recordOn(r, tab_a, session.*);
+            const at = r.begins.items.len;
+            try r.navigate(tab_a, std.fmt.bufPrint(&pb, "/swv/p?c={s}&k={s}{d}x{d}&n={d}", .{ if (tog) "tog" else "pre", name[5..], session.*, trial, n }) catch "");
+            const p0 = r.pumpTitle(tab_a, "p0", 30_000);
+            r.pump(300);
+            if (tog) {
+                try r.host.send(.{ .net_record = .{ .browser = tab_a, .on = false, .session = 0 } });
+                session.* += 1;
+            }
+            // 켬(답을 기다리지 않는다)과 함께 신호 — 페이지가 곧 W2 를 낸다.
+            _ = r.states.remove(tab_a);
+            try r.host.send(.{ .net_record = .{ .browser = tab_a, .on = true, .session = session.* } });
+            sig.store(n, .monotonic);
+            const done = r.pumpTitle(tab_a, "bdone", 60_000);
+            r.pump(4000);
+            const t = tally(r, tab_a, at);
+            all_done = all_done and p0 and done;
+            tot.total += t.total;
+            tot.sw += t.sw;
+            tot.sw_own += t.sw_own;
+            tot.wrong += t.wrong;
+            tot.no_end += t.no_end;
+            tot.held += t.held;
+            tot.multi_end += t.multi_end;
+            for (t.states, 0..) |c, i| tot.states[i] += c;
+            var lb2: [2000]u8 = undefined;
+            lines.print(r.gpa, " || trial {d}: {s}", .{ trial, bodyLine(&t, done, &lb2) }) catch {};
+            try r.host.send(.{ .net_record = .{ .browser = tab_a, .on = false, .session = 0 } });
+            r.pump(500);
+            try r.navigate(tab_a, "/blank");
+            r.pump(500);
+        }
+        var lt: [2000]u8 = undefined;
+        report(all_done and tot.wrong == 0 and tot.multi_end == 0, name, std.fmt.bufPrint(&detail, "total: {s}{s}", .{ bodyLine(&tot, all_done, &lt), lines.items[0..@min(lines.items.len, 1400)] }) catch "");
+    };
+    if (enabled("v20l-rng")) try v20lCase(r, report, session, "v20l-rng", std.fmt.bufPrint(&pb, "/swv/p?c=rng&k=g{d}", .{session.*}) catch "", "bdone", 60_000);
+    if (enabled("v20l-redir")) try v20lCase(r, report, session, "v20l-redir", std.fmt.bufPrint(&pb, "/swv/p?c=redir&k=r{d}", .{session.*}) catch "", "bdone", 60_000);
+    if (enabled("v20l-xo")) try v20lCase(r, report, session, "v20l-xo", std.fmt.bufPrint(&pb, "/swv/p?c=xo&k=o{d}", .{session.*}) catch "", "bdone", 90_000);
+    if (enabled("v20l-c4")) try v20lCase(r, report, session, "v20l-c4", std.fmt.bufPrint(&pb, "/swv/p?c=c4&k=c{d}", .{session.*}) catch "", "bdone", 90_000);
+    if (enabled("v20l-upd")) try v20lCase(r, report, session, "v20l-upd", std.fmt.bufPrint(&pb, "/swv/u/p?k=u{d}", .{session.*}) catch "", "bdone", 90_000);
+    if (enabled("v20l-tabs")) {
+        session.* += 1;
+        const on_a = recordOn(r, tab_a, session.*);
+        session.* += 1;
+        const on_b = recordOn(r, tab_b, session.*);
+        const at = r.begins.items.len;
+        const n = sig.load(.monotonic) + 1;
+        const k = session.*;
+        try r.navigate(tab_a, std.fmt.bufPrint(&pb, "/swv/p?c=tabs&k=t{d}&n={d}", .{ k, n }) catch "");
+        const pa = r.pumpTitle(tab_a, "p0", 30_000);
+        try r.navigate(tab_b, std.fmt.bufPrint(&pb, "/swv/p?c=tabs&k=t{d}&n={d}", .{ k, n }) catch "");
+        const pbb = r.pumpTitle(tab_b, "p0", 30_000);
+        sig.store(n, .monotonic);
+        var da = r.pumpTitle(tab_a, "bdone", 90_000);
+        const db = r.pumpTitle(tab_b, "bdone", 90_000);
+        if (!da) da = r.pumpTitle(tab_a, "bdone", 1000);
+        r.pump(4000);
+        const ta = tally(r, tab_a, at);
+        const tb = tally(r, tab_b, at);
+        var la: [2000]u8 = undefined;
+        var lbb: [2000]u8 = undefined;
+        report(on_a and on_b and pa and pbb and da and db and ta.wrong == 0 and tb.wrong == 0 and ta.multi_end == 0 and tb.multi_end == 0, "v20l-tabs", std.fmt.bufPrint(&detail, "tab A: {s} || tab B: {s}", .{ bodyLine(&ta, da, &la), bodyLine(&tb, db, &lbb) }) catch "");
+        for ([_]u64{ tab_a, tab_b }) |b| try r.host.send(.{ .net_record = .{ .browser = b, .on = false, .session = 0 } });
+        r.pump(500);
+        try r.navigate(tab_a, "/blank");
+        try r.navigate(tab_b, "/blank");
+        r.pump(500);
+    }
+    if (enabled("v20l-rst")) {
+        session.* += 1;
+        const on = recordOn(r, tab_a, session.*);
+        const at = r.begins.items.len;
+        const n0 = sig.load(.monotonic);
+        try r.navigate(tab_a, std.fmt.bufPrint(&pb, "/swv/p?c=rst&k=s{d}&n={d}", .{ session.*, n0 }) catch "");
+        const p0 = r.pumpTitle(tab_a, "p0", 30_000);
+        try r.host.send(.{ .devtools_call = .{ .browser = tab_a, .call = 7001, .method = "ServiceWorker.enable", .params_size = 0 } });
+        r.pump(500);
+        var ok_trials: usize = 0;
+        const rst_n: usize = if (std.c.getenv("V20L_RST")) |v| (std.fmt.parseInt(usize, std.mem.span(v), 10) catch 12) else 12;
+        for (1..rst_n + 1) |t| {
+            try r.host.send(.{ .devtools_call = .{ .browser = tab_a, .call = @intCast(7100 + t), .method = "ServiceWorker.stopAllWorkers", .params_size = 0 } });
+            r.pump(400);
+            sig.store(n0 + t, .monotonic);
+            var tb: [8]u8 = undefined;
+            if (r.pumpTitle(tab_a, std.fmt.bufPrint(&tb, "r{d}", .{t}) catch "", 15_000)) ok_trials += 1;
+            r.pump(2600); // 같은 주소(`/swv/x?k=top`)의 창(2 s)을 넘겨 판을 가른다
+        }
+        r.pump(4000);
+        const t = tally(r, tab_a, at);
+        var lb2: [2000]u8 = undefined;
+        report(on and p0 and ok_trials == rst_n and t.wrong == 0 and t.multi_end == 0, "v20l-rst", std.fmt.bufPrint(&detail, "restarts {d}/{d} · {s}", .{ ok_trials, rst_n, bodyLine(&t, true, &lb2) }) catch "");
+        try r.host.send(.{ .net_record = .{ .browser = tab_a, .on = false, .session = 0 } });
+        r.pump(500);
+        try r.navigate(tab_a, "/blank");
+        r.pump(500);
+    }
+    if (enabled("v20l-cap")) try v20lCase(r, report, session, "v20l-cap", std.fmt.bufPrint(&pb, "/swv/p?c=cap&k=h{d}", .{session.*}) catch "", "bdone", 90_000);
+    if (enabled("v20l-vsleak")) {
+        // 7 회차: 기록하던 탭을 끄지 않고 닫기를 33 번(registry 32 넘게) — 그 뒤 새 탭의 서비스 워커 본문이 잡히나(VS 자리).
+        var closed_n: usize = 0;
+        for (0..33) |i| {
+            const id: u64 = 500 + i;
+            try openTab(r, id);
+            session.* += 1;
+            _ = recordOn(r, id, session.*);
+            try r.host.send(.{ .destroy_browser = id });
+            const Closed = struct {
+                fn got(x: *Run, bid: u64) bool {
+                    return x.closed.contains(bid);
+                }
+            };
+            if (r.waitFor(5000, id, Closed.got)) closed_n += 1;
+        }
+        const id_new: u64 = 600;
+        try openTab(r, id_new);
+        session.* += 1;
+        const on = recordOn(r, id_new, session.*);
+        const at = r.begins.items.len;
+        _ = r.titles.remove(id_new);
+        var u: [256]u8 = undefined;
+        try r.host.send(.{ .navigate = .{ .browser = id_new, .url = try std.fmt.bufPrint(&u, "http://127.0.0.1:{d}/swv/p?c=pt&k=vl{d}", .{ port, session.* }) } });
+        const done = r.pumpTitle(id_new, "bdone", 60_000);
+        r.pump(4000);
+        const t = tally(r, id_new, at);
+        var lb2: [2000]u8 = undefined;
+        report(on and done and closed_n == 33 and t.wrong == 0 and t.sw_own > 0, "v20l-vsleak", std.fmt.bufPrint(&detail, "closed while recording {d}/33 · new tab: {s}", .{ closed_n, bodyLine(&t, done, &lb2) }) catch "");
+        try r.host.send(.{ .net_record = .{ .browser = id_new, .on = false, .session = 0 } });
+        r.pump(300);
+        try r.host.send(.{ .destroy_browser = id_new });
+        r.pump(500);
+    }
+    if (enabled("v20l-ctrl")) {
+        // 대조: 같은 새 탭 꼴을 닫기 없이.
+        const id_new: u64 = 700;
+        try openTab(r, id_new);
+        session.* += 1;
+        const on = recordOn(r, id_new, session.*);
+        const at = r.begins.items.len;
+        _ = r.titles.remove(id_new);
+        var u: [256]u8 = undefined;
+        try r.host.send(.{ .navigate = .{ .browser = id_new, .url = try std.fmt.bufPrint(&u, "http://127.0.0.1:{d}/swv/p?c=pt&k=vc{d}", .{ port, session.* }) } });
+        const done = r.pumpTitle(id_new, "bdone", 60_000);
+        r.pump(4000);
+        const t = tally(r, id_new, at);
+        var lb2: [2000]u8 = undefined;
+        report(on and done and t.wrong == 0 and t.sw_own > 0, "v20l-ctrl", bodyLine(&t, done, &lb2));
+        try r.host.send(.{ .net_record = .{ .browser = id_new, .on = false, .session = 0 } });
+        r.pump(300);
+        try r.host.send(.{ .destroy_browser = id_new });
+        r.pump(500);
+    }
+    if (enabled("v20l-detach")) {
+        // 켬·끔 열 번(답을 기다리지 않는다) → 끔, 켬 직후 끔 — 그 뒤 놀리면 멈춰야 한다.
+        session.* += 1;
+        const armed = try armA(r, session.*);
+        for (0..10) |i| {
+            session.* += 1;
+            try r.host.send(.{ .net_record = .{ .browser = tab_a, .on = true, .session = session.* } });
+            r.pump(@intCast(2 + i * 3));
+            try r.host.send(.{ .net_record = .{ .browser = tab_a, .on = false, .session = 0 } });
+            r.pump(@intCast(1 + i));
+        }
+        session.* += 1;
+        try r.host.send(.{ .net_record = .{ .browser = tab_a, .on = true, .session = session.* } });
+        try r.host.send(.{ .net_record = .{ .browser = tab_a, .on = false, .session = 0 } });
+        r.pump(1500);
+        const x = try idleThenProbe(r);
+        var lb: [400]u8 = undefined;
+        report(armed and x.probed and x.stopped, "v20l-detach", std.fmt.bufPrint(&detail, "flap ×10 then on+off at once: {s}", .{idleLine(x, &lb)}) catch "");
+    }
 }

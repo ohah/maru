@@ -138,6 +138,12 @@ fn finish(self: *AppSession, late: bool) void {
 pub fn tick(self: *AppSession, now_ms: u64) void {
     const st = &self.editor_save_actions;
     if (!st.active or now_ms < st.deadline_ms) return;
+    // The original view may have closed while the server was silent. Finish still
+    // wakes deferred saves, but there is no live save to describe to another view.
+    if (editorTerm(self, st.surface) == null) {
+        finish(self, true);
+        return;
+    }
     st.timeouts += 1;
     self.showResponseNotice(.csa_timeout, &.{});
     finish(self, true);

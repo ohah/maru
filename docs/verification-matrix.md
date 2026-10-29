@@ -1,5 +1,9 @@
 # 검증 매트릭스
 
+저장·정의 응답의 출처와 수명은 `mise exec -- zig build test-editor-save-pipeline test-editor-definition-origins -j2`로 검증한다.
+실제 fake subprocess의 두 root 요청 충돌, Save As 선행 저장과 닫힌 원본의 알림을 검사하며,
+직접 응답 주입·기존 방어의 소스 감사·미검증 경계는 [감사 계획](plans/lsp-save-and-response-audit.md)을 따른다.
+
 - 원격 pane 선택: `mise exec -- zig build test-remote-pane-selection-contract test-remote-pane-selection -j2`
   및 ReleaseFast. 순수 계약과 AppSession 사이드바 마우스 경로에서 같은 시각의 클릭·시계 역행·후속 이벤트·
   surface 격리·퇴역·없는 pane·LRU 퇴출을 검사한다. 물리 GUI·실제 SSH/tmux는 이 검증 범위 밖이다.

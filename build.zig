@@ -6652,11 +6652,11 @@ pub fn build(b: *std.Build) void {
     const save_pipeline_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.FOS", ".test.CSA", ".test.EXFB" } });
     const run_save_pipeline = b.addRunArtifact(save_pipeline_tests);
     run_save_pipeline.setCwd(b.path("."));
-    run_save_pipeline.addArg("--maru-expect-tests=10");
+    run_save_pipeline.addArg("--maru-expect-tests=12");
     run_save_pipeline.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-save-pipeline", "Run formatting and code action save pipeline judges").dependOn(&run_save_pipeline.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
-        run_save_pipeline.addArg("--maru-expect-passed=10");
+        run_save_pipeline.addArg("--maru-expect-passed=12");
         macos_only_test_step.dependOn(&run_save_pipeline.step);
     }
     const backup_restore_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.U4b", ".test.U4c", ".test.U4d", "app_session.editor.recovery_store.test.editor recovery restore" } });
@@ -6670,6 +6670,16 @@ pub fn build(b: *std.Build) void {
     run_workspace_edit.addArg("--maru-expect-tests=21");
     run_workspace_edit.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-workspace-edit", "Run WorkspaceEdit preparation and rename regressions").dependOn(&run_workspace_edit.step);
+    const definition_origin_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.GOTO", ".test.LATE3 " } });
+    const run_definition_origins = b.addRunArtifact(definition_origin_tests);
+    run_definition_origins.setCwd(b.path("."));
+    run_definition_origins.addArg("--maru-expect-tests=8");
+    run_definition_origins.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-definition-origins", "Verify definition response ownership and navigation controls").dependOn(&run_definition_origins.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_definition_origins.addArg("--maru-expect-passed=8");
+        macos_only_test_step.dependOn(&run_definition_origins.step);
+    }
     const code_action_origin_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.CA1 ", ".test.CA2 ", ".test.ASB3 ", ".test.ASB4 ", ".test.ASB6 ", ".test.LATE3 " } });
     const run_code_action_origin_tests = b.addRunArtifact(code_action_origin_tests);
     run_code_action_origin_tests.setCwd(b.path("."));

@@ -14,10 +14,13 @@ const editor_ops = @import("mod.zig");
 const editor_lsp = @import("lsp.zig");
 const pane_ops = @import("../pane.zig");
 const lsp = maru.session.editor.lsp;
+const response_owner = maru.session.editor.lsp_response_owner;
+const term_ops = @import("../term.zig");
 
 pub const State = struct {
     waiting: bool = false,
     waiting_seq: u32 = 0,
+    owner: ?response_owner.Owner = null,
     /// 판정자 관측: 이동한 횟수 · 알림을 낸 횟수(없음·root 밖).
     navigated: u64 = 0,
     notified_none: u64 = 0,
@@ -50,7 +53,35 @@ fn gotoDefinitionAt(self: *AppSession, term: *Term, offset: usize) bool {
     const seq = editor_lsp.requestDefinition(self, term, offset) orelse return false;
     st.waiting = true;
     st.waiting_seq = seq;
+    st.owner = ownerFor(term);
     return true;
+}
+
+fn ownerFor(term: *Term) ?response_owner.Owner {
+    if (term.kind != .editor or term.rt.editorDocument().opened == null) return null;
+    const doc = term.rt.editorDocument();
+    return .{ .surface = term.surface.id, .document = @intFromPtr(doc), .target_epoch = doc.save_target_epoch };
+}
+
+/// A seq belongs to its server connection and original document lifetime.
+pub fn onClientResponse(self: *AppSession, origin: *editor_lsp.Client, seq: u32, target: ?lsp.rpc.Target) void {
+    const st = &self.editor_definition;
+    const loc = if (st.owner) |owner| term_ops.findTermWhere(self, owner.surface, struct {
+        fn matches(surface: u64, term: *Term) bool {
+            return term.surface.id == surface and term.kind == .editor;
+        }
+    }.matches) else null;
+    const term = if (loc) |found| found.pane.terms.items[found.term_index] else null;
+    const current = if (term) |t| ownerFor(t) else null;
+    const same_client = if (term) |t| editor_lsp.readyClientFor(self, t) == origin else false;
+    switch (response_owner.decide(st.waiting, st.waiting_seq, seq, st.owner, current, same_client)) {
+        .ignore => return,
+        .cancel => {
+            st.waiting = false;
+            return;
+        },
+        .accept => onDefinitionResponse(self, seq, target, origin.encoding),
+    }
 }
 
 /// definition 응답(`editor_lsp` 가 부른다). 지금 기다리는 seq 가 아니면 버린다.

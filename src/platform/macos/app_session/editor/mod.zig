@@ -22297,6 +22297,76 @@ test "DSY10 심볼 2층 — 1층이 비는 문서에서도 피커가 선다(주�
     try testing.expect(s.chrome_host.symbol_picker.open); // 1층만 보면 「심볼 없음」으로 안 열린다
 }
 
+// Two real subprocess connections both issue definition seq=1. A must not settle B's wait.
+test "GOTO3 definition sequence collision between roots preserves the latest request" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.openRepo(allocator, "first.c", "int a;\nint b;\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    try testing.expect(f.ready());
+    const ss = f.fx.session;
+    try f.fx.dir.dir.createDirPath(testing.io, "nested/.git");
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "nested/second.c", .data = "int c;\nint d;\n" });
+    const path = try std.fs.path.join(allocator, &.{ f.root_buf[0..f.root_len], "nested/second.c" });
+    defer allocator.free(path);
+    const second = (try pane_ops.openFileTermInActivePane(ss, path, .text)).term;
+    try testing.expect(pumpLspUntil(&f.fx, 3000, second, struct {
+        fn ready(t: *Term) bool {
+            return t.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.ready));
+    try testing.expect(lsp_client.readyClientFor(ss, f.term).? != lsp_client.readyClientFor(ss, second).?);
+    f.term.rt.editor_selection = editor_selection.Selection.at(0);
+    second.rt.editor_selection = editor_selection.Selection.at(0);
+    const pane = pane_ops.activePane(ss);
+    pane.active_term = std.mem.indexOfScalar(*Term, pane.terms.items, f.term).?;
+    try testing.expect(definition_client.gotoDefinitionAtCaret(ss));
+    const first_seq = ss.editor_definition.waiting_seq;
+    // No response pumping between requests: both real replies are pending when B becomes current.
+    pane.active_term = std.mem.indexOfScalar(*Term, pane.terms.items, second).?;
+    try testing.expect(definition_client.gotoDefinitionAtCaret(ss));
+    try testing.expectEqual(first_seq, ss.editor_definition.waiting_seq);
+    const received = ss.editor_lsp.received_definitions;
+    try testing.expect(pumpLspUntil(&f.fx, 3000, ss, struct {
+        fn done(s: *AppSession) bool {
+            return s.editor_lsp.received_definitions >= 2;
+        }
+    }.done));
+    try testing.expectEqual(received + 2, ss.editor_lsp.received_definitions);
+    try testing.expectEqual(@as(u64, 1), ss.editor_definition.navigated);
+    try testing.expectEqualStrings(path, pane_ops.activePane(ss).activeTerm().rt.editorDocument().path.?);
+
+    // Controller-level negative controls: a foreign empty/error-like result must
+    // neither clear B's wait nor publish a no-definition notice.
+    try testing.expect(definition_client.gotoDefinitionAtCaret(ss));
+    const seq = ss.editor_definition.waiting_seq;
+    const none = ss.editor_definition.notified_none;
+    const ca = lsp_client.readyClientFor(ss, f.term).?;
+    const cb = lsp_client.readyClientFor(ss, second).?;
+    definition_client.onClientResponse(ss, cb, seq + 1, null);
+    try testing.expect(ss.editor_definition.waiting);
+    definition_client.onClientResponse(ss, ca, seq, null);
+    try testing.expect(ss.editor_definition.waiting);
+    try testing.expectEqual(none, ss.editor_definition.notified_none);
+    definition_client.onClientResponse(ss, ca, seq, .{ .uri = "file:///outside.c", .line = 0, .character = 0 });
+    try testing.expect(ss.editor_definition.waiting);
+    try testing.expectEqual(@as(u64, 0), ss.editor_definition.notified_outside);
+    definition_client.onClientResponse(ss, cb, seq, null);
+    try testing.expect(!ss.editor_definition.waiting);
+    try testing.expectEqual(none + 1, ss.editor_definition.notified_none);
+    definition_client.onClientResponse(ss, cb, seq, null);
+    try testing.expectEqual(none + 1, ss.editor_definition.notified_none);
+
+    // Closing the original source cancels the request without touching the survivor.
+    try testing.expect(definition_client.gotoDefinitionAtCaret(ss));
+    const closed_seq = ss.editor_definition.waiting_seq;
+    term_ops.closeTermAt(ss, ss.app_window.active_tab, pane, std.mem.indexOfScalar(*Term, pane.terms.items, second).?);
+    definition_client.onClientResponse(ss, cb, closed_seq, null);
+    try testing.expect(!ss.editor_definition.waiting);
+    try testing.expectEqual(none + 1, ss.editor_definition.notified_none);
+    try testing.expectEqual(@as(u64, 1), ss.editor_definition.navigated);
+}
+
 test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목으로 caret 을 옮기고 되돌아가기 표식을 쌓는다; ⌃-/⌃⇧- 로 뒤로·앞으로; 다른 파일은 열어서; root 밖·없음은 알림; 낡은 응답은 버린다 (제품 경계, §8.2c·§5.2)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -24969,6 +25039,76 @@ test "FOS1 저장 시 포맷 — ⌘S 가 포맷을 먼저 적용하고(되돌�
     lsp_client.pump(s);
     try testing.expect(!s.editor_format.then_save);
     try testing.expectEqualStrings("FMTSTALL /*a*/ int g;\n", try disk.read(&f.fx, "g.c"));
+}
+
+// Exercise the real save command and fake subprocess, rather than changing an epoch by hand.
+test "CSA3 Save As waits for prior code action and formatting saves before adopting its target" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for ([_]bool{ true, false }) |actions| {
+        const source = if (actions) "CASTALL UNORGANIZED  x;\n" else "FMTSTALL  x;\n";
+        const expected = if (actions) "CASTALL UNORGANIZED x;\n" else source;
+        var f = (try SmtFixture.open(allocator, "prior.c", source)) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        defer saveAsCleanupForTest();
+        try testing.expect(f.ready());
+        const ss = f.fx.session;
+        ss.loaded_config.config.editor.code_actions_on_save = if (actions) "source.organizeImports" else "";
+        ss.loaded_config.config.editor.format_on_save = true;
+        const epoch = f.term.rt.editorDocument().save_target_epoch;
+        save_actions.saveCommand(ss, f.term);
+        try testing.expect(if (actions) ss.editor_save_actions.active else ss.editor_format.waiting);
+        const target = try std.fs.path.join(allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+        defer allocator.free(target);
+        _ = try saveAsSelectForTest(&f.fx, f.term, target);
+        const actor = @import("save/as.zig");
+        actor.poll();
+        try testing.expectEqual(epoch, f.term.rt.editorDocument().save_target_epoch);
+        try testing.expectEqualStrings(f.path, f.term.rt.editorDocument().path.?);
+        try testing.expectError(error.FileNotFound, f.fx.dir.dir.openFile(testing.io, "after.c", .{}));
+        // A second CmdS is deferred by the selected Save As, not sent to the old target.
+        const requests = ss.editor_lsp.sent_code_actions;
+        save_actions.saveCommand(ss, f.term);
+        try testing.expectEqual(requests, ss.editor_lsp.sent_code_actions);
+        const Ctx = struct { s: *AppSession, actions: bool };
+        try testing.expect(pumpLspUntil(&f.fx, 5000, Ctx{ .s = ss, .actions = actions }, struct {
+            fn done(c: Ctx) bool {
+                if (c.actions and c.s.editor_save_actions.active) c.s.editor_save_actions.deadline_ms = 0;
+                if (!c.actions and c.s.editor_format.waiting) c.s.editor_format.save_deadline_ms = 0;
+                @import("save/as.zig").poll();
+                return !c.s.editor_save_actions.active and !c.s.editor_format.waiting and
+                    @import("save/as.zig").pending() == 0 and @import("save/dispatch.zig").requestCount() == 0;
+            }
+        }.done));
+        try testing.expectEqual(epoch + 1, f.term.rt.editorDocument().save_target_epoch);
+        try testing.expectEqualStrings(target, f.term.rt.editorDocument().path.?);
+        try batchApplyDisk(&f.fx, "prior.c", expected);
+        try batchApplyDisk(&f.fx, "after.c", expected);
+    }
+}
+
+// Closing a clean source while its real server stalls must not notify another document.
+test "CSA2 closed save action timeout does not publish a notice in another document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.open(allocator, "closed.c", "CASTALL UNORGANIZED\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    try testing.expect(f.ready());
+    const s = f.fx.session;
+    s.loaded_config.config.editor.code_actions_on_save = "source.organizeImports";
+    s.loaded_config.config.editor.format_on_save = false;
+    save_actions.saveCommand(s, f.term);
+    try testing.expect(s.editor_save_actions.active);
+    const pane = pane_ops.activePane(s);
+    const idx = std.mem.indexOfScalar(*Term, pane.terms.items, f.term) orelse return error.NoTerm;
+    term_ops.closeTermAt(s, s.app_window.active_tab, pane, idx);
+    const before = try allocator.dupe(u8, s.chrome_host.notice.message);
+    defer allocator.free(before);
+    s.editor_save_actions.deadline_ms = 0;
+    save_actions.tick(s, 1);
+    try testing.expect(!s.editor_save_actions.active);
+    try testing.expectEqualStrings(before, s.chrome_host.notice.message);
+    try batchApplyDisk(&f.fx, "closed.c", "CASTALL UNORGANIZED\n");
 }
 
 test "CSA1 저장 시 code action — ⌘S 가 설정한 kind 를 순서대로 묻고(only·triggerKind 2) 그 문서에 적용한 뒤 포맷·저장; 하위 kind 는 들고 다른 kind 는 거름, edit 없으면 resolve, 다른 파일을 고치면 건너뛰고 알림, 겹침은 거부, 시한·낡은 revision 은 남은 것을 건너뛰고 저장, 빈 설정은 곧바로 저장 (제품 경계, §8.2s)" {

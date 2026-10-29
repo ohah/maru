@@ -23,6 +23,7 @@ const Allowed = struct { path: []const u8, count: usize, why: []const u8 };
 const allowed = [_]Allowed{
     .{ .path = "src/pty/macos_spawn.zig", .count = 1, .why = "헬퍼 자신 — CLOEXEC_DEFAULT 를 켜고 stdio 만 넘긴다" },
     .{ .path = "src/main.zig", .count = 4, .why = "`maru` CLI 프로세스(`maru terminfo` 의 `system` 선언 하나·호출 셋) — 이미지 채널을 협상하지 않아 받은 fd 가 없다" },
+    .{ .path = "src/platform/agent_hook_guard.zig", .count = 1, .why = "`maru agent-hooks guard` CLI 전용 — main.zig에서만 import하며 이미지 채널을 협상하지 않는다. 전용 자식 그룹의 deadline 감시에 표준 spawn을 쓴다" },
     .{ .path = "src/platform/macos/app_instance_lease.zig", .count = 1, .why = "CLOEXEC 자식 상속 회귀 테스트 전용 — test body 가 만든 fork 자식에서만 `system` 으로 exec 한다" },
 };
 
@@ -177,10 +178,23 @@ test "spawn cloexec axis: no app code spawns outside the CLOEXEC_DEFAULT helper"
     try std.testing.expect(paths.items.len > 100);
 
     var failed = false;
+    var hook_guard_imports: usize = 0;
     var seen: [allowed.len]bool = @splat(false);
     for (paths.items) |path| {
         const source = try readZigFileZ(allocator, io, path);
         defer allocator.free(source);
+        // This exception is valid only in the separate CLI process. Shared app modules may not import it.
+        var tokens = std.zig.Tokenizer.init(source);
+        while (true) {
+            const token = tokens.next();
+            if (token.tag == .eof) break;
+            if (token.tag != .string_literal) continue;
+            const text = source[token.loc.start..token.loc.end];
+            if (!std.mem.endsWith(u8, text, "agent_hook_guard.zig\"")) continue;
+            hook_guard_imports += 1;
+            try std.testing.expectEqualStrings("src/main.zig", path);
+            try std.testing.expectEqualStrings("\"platform/agent_hook_guard.zig\"", text);
+        }
         const count = countSpawnCalls(source);
         var expected: usize = 0;
         var why: []const u8 = "";
@@ -205,6 +219,7 @@ test "spawn cloexec axis: no app code spawns outside the CLOEXEC_DEFAULT helper"
         failed = true;
         std.debug.print("\n[spawn cloexec 축] 재고의 {s} 가 없다 — 재고를 고쳐라.\n", .{entry.path});
     };
+    try std.testing.expectEqual(@as(usize, 1), hook_guard_imports);
     try std.testing.expect(!failed);
 }
 

@@ -1265,6 +1265,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         // 시작하면 CEF 가 그 요청을 끝내지 않는다(탭을 닫을 때 `detached`) — 그 꼴만 받고, 다른 기록이 그러면 실패.
         var cef_held_favicon: usize = 0;
         var cef_held_other: usize = 0;
+        // 재검증 6 차(v20l 20 회차): 그 완화는 판마다 앞 문서(localhost)의 favicon **하나**만 받는다 — 둘 이상이거나 다른 출처의 favicon 이면 실패.
+        var favicon_over: usize = 0;
         var good: [4]usize = @splat(0);
         var bad_txt: [1500]u8 = undefined;
         var bn: usize = 0;
@@ -1283,15 +1285,21 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             missing += ec.missing;
             doubled += ec.doubled;
             // 끝이 없는 기록이 무엇인가(주소·갈래·CEF 의 끝).
+            var round_favicon: usize = 0;
             if (endCheck(&r, rec_tab, at).missing > 0) for (r.begins.items[at..]) |mb| if (mb.browser == rec_tab and mb.expected) {
                 const x = r.body(rec_tab, mb.request);
                 if (x.ends != 0) continue;
                 if (!x.cef_end) {
-                    if (std.mem.endsWith(u8, mb.url, "/favicon.ico")) cef_held_favicon += 1 else cef_held_other += 1;
+                    if (std.mem.endsWith(u8, mb.url, "/favicon.ico")) {
+                        cef_held_favicon += 1;
+                        round_favicon += 1;
+                        if (!std.mem.startsWith(u8, mb.url, "http://localhost:")) favicon_over += 1;
+                    } else cef_held_other += 1;
                 }
                 const piece = std.fmt.bufPrint(bad_txt[bn..], " [round {d} NO END req {d} {s} sw {} main {} cef_end {}]", .{ round, mb.request, mb.url[0..@min(mb.url.len, 60)], mb.flags.service_worker, mb.flags.main_frame, x.cef_end }) catch "";
                 bn += piece.len;
             };
+            if (round_favicon > 1) favicon_over += round_favicon - 1;
             const want = [_]struct { []const u8, msg.NetBodyState }{ .{ "/v20i/pic.png", .not_text }, .{ "/v20i/cred.js", .captured }, .{ "/v20i/c.json", .captured }, .{ "/v20i/big.json", .over_cap } };
             for (want, 0..) |w, wi| {
                 var found = false;
@@ -1310,8 +1318,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
                 }
             }
         }
-        const ok = missing == 0 and doubled == 0 and cef_held_other == 0 and good[0] == rounds and good[1] == rounds and good[2] == rounds and good[3] == rounds;
-        report(ok, "v20i-xsite-nav-body-page", std.fmt.bufPrint(&detail, "{d} rounds (localhost cookie page → 127.0.0.1 page): png not_text {d} · cross-site credentialed script captured {d} · json captured {d} · 2 MiB json over_cap {d} · no end {d} · several ends {d} · no CEF end: previous page's favicon {d}, other {d}{s}", .{ rounds, good[0], good[1], good[2], good[3], missing, doubled, cef_held_favicon, cef_held_other, bad_txt[0..bn] }) catch "");
+        // 끝 없음(`missing`)은 CEF 가 끝낸 기록만 센다(`endCheckOf(.., true)`) — CEF 가 끝내지 않은 것은 판마다 앞 문서 favicon 하나까지만 받는다.
+        const ok = missing == 0 and doubled == 0 and cef_held_other == 0 and favicon_over == 0 and good[0] == rounds and good[1] == rounds and good[2] == rounds and good[3] == rounds;
+        report(ok, "v20i-xsite-nav-body-page", std.fmt.bufPrint(&detail, "{d} rounds (localhost cookie page → 127.0.0.1 page): png not_text {d} · cross-site credentialed script captured {d} · json captured {d} · 2 MiB json over_cap {d} · no end {d} · several ends {d} · no CEF end: previous page's favicon {d} (over one per round or not the previous page's {d}), other {d}{s}", .{ rounds, good[0], good[1], good[2], good[3], missing, doubled, cef_held_favicon, favicon_over, cef_held_other, bad_txt[0..bn] }) catch "");
         try r.navigate(rec_tab, "/v20/blank?v20i");
         r.pump(2000);
     }

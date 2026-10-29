@@ -20,6 +20,11 @@
 //!   `setAutoAttach{autoAttach:false}` — 떼지 않으면 그 출처의 서비스 워커가 놀아도 멈추지 않는다(실측 75 초). `waitForDebuggerOnStart` 는 늘
 //!   거짓(참이면 전용 워커·재시작한 서비스 워커가 멈췄다). 워커 W 는 서비스 워커 갈래 기록의 쌍둥이이고(짝은 W 의 응답 때), 서비스 워커가
 //!   답한 페이지 응답 P 의 본문은 τ(`responseTime`)로 W 와 그 기록에 잇는다(`net_body_table.swLinkOne` — C0–C7′).
+//! - 재검증 6 차 F13: auto-attach 는 그 탭의 **프레임들의 출처**의 서비스 워커를 붙인다(다른 출처 iframe 의 워커가 기록 중 다시 뜨면 — 다른
+//!   사이트도). 붙인 세션마다 워커 스크립트 주소의 출처를 맨 위 출처와 견주어, 다르면 `net_body_sw.foreign_grace_us` 뒤에 뗀다(`foreignCheck` —
+//!   C0 가 어차피 그 워커의 W 로 본문을 잇지 않으니 잃는 것이 없다; 곧 떼지 않는 까닭은 이동 중 새 출처의 워커가 주소 바뀜보다 먼저 붙을 수
+//!   있어서다). 맨 위 출처가 이동으로 바뀌면(`topOrigin`) 앞 출처의 세션도 같은 시한 뒤에 떼고, 새 출처의 것이 된 세션은 남겨 그때 VS 를
+//!   올린다. 그래서 기록 중 살아 있는 워커는 「그 탭이 보이는 출처의 서비스 워커」 다(사용자 결정 ② 의 범위).
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -107,6 +112,9 @@ fn init() void {
     sw_task = object.zeroed(c.cef_task_t);
     object.staticRefCounted(&sw_task.base);
     sw_task.execute = &swFlush;
+    foreign_task = object.zeroed(c.cef_task_t);
+    object.staticRefCounted(&foreign_task.base);
+    foreign_task.execute = &foreignCheck;
 }
 
 fn api() *const library.Api {
@@ -147,6 +155,9 @@ pub fn record(v: msg.NetRecord) void {
         return;
     }
     const ok = table.start(gpa, v.browser, v.session) catch false;
+    // 재검증 6 차 D1: 이 세션의 시작 — 그 앞의 IO 시각의 기록은 적지 않고 그 앞에 시작한 워커 W 는 맞추기에 넣지 않는다(기록 전에 나간 fetch 가
+    // 기록 뒤 같은 주소 fetch 의 기록을 가져갔다).
+    if (ok) table.markStarted(v.browser, machUs());
     runActions();
     if (!ok or !register(entry)) {
         clearControl(v.browser);
@@ -174,6 +185,9 @@ pub fn browserClosed(cef_id: c_int, browser: BrowserId) void {
     table.forgetTop(browser);
     table.closed(gpa, browser) catch {};
     runActions();
+    // 재검증 6 차(F16 과 같은 꼴): 기록을 끈 뒤 닫힌 탭은 표에 없어 닫힘의 떼기 일(`.detach_workers` closed)이 오지 않는다 — 서비스 워커 표의
+    // 자리(세대)를 여기서 비운다(남으면 32 번 뒤 새 탭에 붙이기를 걸지 못했다).
+    sw.forget(browser);
     unregister(cef_id);
     clearControl(browser);
     refreshAny();
@@ -611,6 +625,7 @@ fn onTarget(browser: BrowserId, method: []const u8, p: []const u8) void {
     }
     var kind: []const u8 = "";
     var target_id: []const u8 = "";
+    var url: []const u8 = "";
     if (v.object.get("targetInfo")) |ti| if (ti == .object) {
         if (ti.object.get("type")) |x| if (x == .string) {
             kind = x.string;
@@ -618,11 +633,20 @@ fn onTarget(browser: BrowserId, method: []const u8, p: []const u8) void {
         if (ti.object.get("targetId")) |x| if (x == .string) {
             target_id = x.string;
         };
+        if (ti.object.get("url")) |x| if (x == .string) {
+            url = x.string;
+        };
     };
     // 기록하는 탭이고 걸어 둔 auto-attach 의 서비스 워커면 둔다 — 아니면(밸브로 멈춤·떼는 중·옛 세대·다른 꼴) 곧 뗀다(공격 2 A1).
     const keep = sw_cdp and table.recording(browser) and std.mem.eql(u8, kind, "service_worker") and sw.attached(browser, sid, target_id) == .keep;
-    dbg("sw-attached b={d} sid={s} type={s} target={s} keep={}", .{ browser, sid, kind, target_id, keep });
-    if (!keep) return detachSession(browser, sid);
+    if (!keep) {
+        dbg("sw-attached b={d} sid={s} type={s} target={s} keep=false", .{ browser, sid, kind, target_id });
+        return detachSession(browser, sid);
+    }
+    // 재검증 6 차 F13: 워커 스크립트 주소의 출처가 맨 위 출처가 아니면(다른 출처 iframe 의 워커·이동 중) 시한 뒤 뗀다(`foreignCheck`).
+    const own = sw.noteOrigin(sid, table_mod.originHash(url), table.topOriginOf(browser), machUs());
+    dbg("sw-attached b={d} sid={s} type={s} target={s} keep=true own={} url={s}", .{ browser, sid, kind, target_id, own, url[0..@min(url.len, 160)] });
+    if (!own) ensureForeignCheck();
     const eid = sendSession(browser, sid, "Network.enable", "{\"maxTotalBufferSize\":0,\"maxResourceBufferSize\":0,\"maxPostDataSize\":1}");
     sw.noteEnable(sid, eid);
     // waitForDebuggerOnStart 는 거짓이라 기다리는 것이 없다 — CEF 가 바뀌어도 멈추지 않게 놓는다(해가 없다).
@@ -643,8 +667,10 @@ fn onRaw(_: [*c]c.cef_dev_tools_message_observer_t, browser: [*c]c.cef_browser_t
     if (sw_mod.resultId(m)) |rid| {
         const ok = sw_mod.resultOk(m);
         _ = sw.result(sid, rid, ok, wallUs());
-        // 재검증 5 차 S3(C3a): 워커 세션의 enable 답 — 이 뒤에 워커에 닿은 응답만 보인다(새 타깃마다 VS 를 올린다 — 공격 1 M5).
-        if (ok and rid == s.enable_id and table.recording(id)) table.link.raiseVisible(id, s.enabled_wall_us);
+        // 재검증 5 차 S3(C3a): 워커 세션의 enable 답 — 이 뒤에 워커에 닿은 응답만 보인다(새 타깃마다 VS 를 올린다 — 공격 1 M5). 재검증 6 차 F13:
+        // 맨 위 출처가 아닌 워커는 올리지 않는다 — 그 탭의 P(맨 위 출처 문서의 것 — C0)는 맨 위 출처의 워커만 답한다. 맨 위 출처의 것이 되면
+        // 그때 올린다(`topOrigin`).
+        if (ok and rid == s.enable_id and table.recording(id) and s.foreign_since == 0) table.link.raiseVisible(id, s.enabled_wall_us);
         dbg("sw-result b={d} sid={s} id={d} ok={}", .{ id, sid, rid, ok });
         return 1;
     }
@@ -687,10 +713,42 @@ fn workerEvent(id: BrowserId, s: *const sw_mod.Session, method: []const u8, m: [
         },
         .failed => |v| dbg("sw-wfail b={d} rid={s}", .{ id, v.rid }),
     };
-    table.workerEvent(gpa, id, sw_mod.targetKey(s.target, s.epoch), ev, now) catch {};
+    // 재검증 6 차 F13·D1: 남의 출처 세션의 W 는 맞추기에 넣지 않는다(문이 그 출처의 기록을 이 탭에 붙이지 않았다 — 제 기록이 없는 W 가 같은 주소의
+    // 기록을 가져간다), 맨 위 출처의 것이 된 세션은 그 뒤에 시작한 W 만.
+    const from: i64 = if (s.foreign_since != 0) std.math.maxInt(i64) else s.own_since;
+    table.workerEventFrom(gpa, id, sw_mod.targetKey(s.target, s.epoch), ev, now, from) catch {};
 }
 
 /// 재검증 5 차 S3b(C0): 맨 위 문서의 출처(`network.mainFrameAddress` — `scheme://host[:port]`).
 pub fn topOrigin(browser: BrowserId, origin: []const u8) void {
-    table.topOrigin(browser, if (origin.len == 0) 0 else table_mod.originHash(origin), machUs());
+    const h = if (origin.len == 0) 0 else table_mod.originHash(origin);
+    table.topOrigin(browser, h, machUs());
+    // 재검증 6 차 F13: 붙은 워커 세션을 새 맨 위 출처와 다시 견준다 — 앞 출처의 것은 시한 뒤 떼고, 새 출처의 것이 된 세션(주소가 바뀌기 전에
+    // 붙었다)은 남기며 그 enable 답으로 VS 를 올린다(남의 출처인 동안에는 올리지 않았다).
+    if (!ready) return;
+    const raise = sw.retarget(browser, h, machUs());
+    if (raise != 0 and table.recording(browser)) table.link.raiseVisible(browser, raise);
+    dbg("sw-retarget b={d} origin={x} raise={d}", .{ browser, h, raise });
+    ensureForeignCheck();
+}
+
+/// 재검증 6 차 F13: 맨 위 출처가 아닌 워커 세션을 시한 뒤 뗀다 — 가장 이른 시한에 맞춰 다음 확인을 건다.
+var foreign_task: c.cef_task_t = undefined;
+var foreign_posted = false;
+
+fn ensureForeignCheck() void {
+    if (foreign_posted) return;
+    const at = sw.nextForeign() orelse return;
+    const wait_ms = @divTrunc(@max(at + sw_mod.foreign_grace_us - machUs(), 0), 1000) + 1;
+    foreign_posted = api().post_delayed_task(c.TID_UI, &foreign_task, wait_ms) != 0;
+}
+
+fn foreignCheck(_: [*c]c.cef_task_t) callconv(.c) void {
+    foreign_posted = false;
+    const now = machUs();
+    while (sw.takeForeign(now)) |x| {
+        dbg("sw-foreign-detach b={d} sid={s} origin={x}", .{ x.browser, x.sidSlice(), x.origin });
+        detachSession(x.browser, x.sidSlice());
+    }
+    ensureForeignCheck();
 }

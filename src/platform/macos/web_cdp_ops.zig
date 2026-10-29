@@ -2942,8 +2942,13 @@ fn costlyPage(method: []const u8, params: []const u8) Reply {
     return rolePage(method, params);
 }
 
+// Reply borrows these bytes until feed consumes them after this callback returns.
+// A concatenation inside the callback can create a temporary array whose slice
+// escapes the stack; the module-level initializer gives the fixture static storage.
+const long_name_ax = "{\"nodes\":[{\"ignored\":false,\"name\":{\"value\":\"" ++ array_repeat.repeat("é", 200) ++ "\"},\"backendDOMNodeId\":31}]}";
+
 fn longNamePage(method: []const u8, params: []const u8) Reply {
-    if (std.mem.eql(u8, method, "Accessibility.queryAXTree")) return .{ .ok = "{\"nodes\":[{\"ignored\":false,\"name\":{\"value\":\"" ++ array_repeat.repeat("é", 200) ++ "\"},\"backendDOMNodeId\":31}]}" };
+    if (std.mem.eql(u8, method, "Accessibility.queryAXTree")) return .{ .ok = long_name_ax };
     return rolePage(method, params);
 }
 

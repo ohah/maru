@@ -2031,23 +2031,23 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
             .signature => |seq| {
                 self.editor_lsp.received_signatures += 1;
                 const view: ?lsp.rpc.SignatureView = if (r.is_error) null else lsp.rpc.signatureView(r.result, c.encoding);
-                editor_signature.onResponse(self, seq, view);
+                editor_signature.onClientResponse(self, c, seq, view);
             },
             .references => |seq| {
                 self.editor_lsp.received_references += 1;
-                editor_references.onLocationsResponse(self, .references, seq, if (r.is_error) null else r.result, r.is_error and lsp.rpc.isRetryableError(r.error_code));
+                editor_references.onClientResponse(self, c, .references, seq, if (r.is_error) null else r.result, r.is_error and lsp.rpc.isRetryableError(r.error_code));
             },
             .implementation => |seq| {
                 self.editor_lsp.received_references += 1;
-                editor_references.onLocationsResponse(self, .implementation, seq, if (r.is_error) null else r.result, r.is_error and lsp.rpc.isRetryableError(r.error_code));
+                editor_references.onClientResponse(self, c, .implementation, seq, if (r.is_error) null else r.result, r.is_error and lsp.rpc.isRetryableError(r.error_code));
             },
             .type_definition => |seq| {
                 self.editor_lsp.received_references += 1;
-                editor_references.onLocationsResponse(self, .type_definition, seq, if (r.is_error) null else r.result, r.is_error and lsp.rpc.isRetryableError(r.error_code));
+                editor_references.onClientResponse(self, c, .type_definition, seq, if (r.is_error) null else r.result, r.is_error and lsp.rpc.isRetryableError(r.error_code));
             },
             .declaration => |seq| {
                 self.editor_lsp.received_references += 1;
-                editor_references.onLocationsResponse(self, .declaration, seq, if (r.is_error) null else r.result, r.is_error and lsp.rpc.isRetryableError(r.error_code));
+                editor_references.onClientResponse(self, c, .declaration, seq, if (r.is_error) null else r.result, r.is_error and lsp.rpc.isRetryableError(r.error_code));
             },
             .definition => |seq| {
                 self.editor_lsp.received_definitions += 1;

@@ -296,6 +296,66 @@ try:
     assert moved.stdout != lifetime.stdout
     run_transition(local_identity | {'MARU_AGENT_LOG_FORMAT': '2'}, command=moved.stdout.decode())
     assert payload(native_target) == (before[0], before[1] + b'claude\t{}\n' * 3)
+    # Exercise the actual installed command, not just the unguarded projection fixture.
+    installed_home = directory("installed-home")
+    installed_local = installed_home / '.cache/maru/agent-turn-events-v2/inst'
+    installed_local.mkdir(parents=True, mode=0o700)
+    installed_remote = installed_home / '.cache/maru/remote-agent-events-v2'
+    installed_remote.mkdir(parents=True, mode=0o700)
+    generated, _ = invoke([driver, str(root), 'hook-installed', cli, 'claude', str(installed_home),
+                           str(roots[0]), str(roots[1])])
+    installed_command = generated.stdout.decode()
+    assert ' agent-hooks guard ' in installed_command
+    installed_env = {'MARU_HOOK_INSTANCE': 'inst', 'MARU_HOOK_PANE': 'a', 'MARU_AGENT_LOG_FORMAT': '2'}
+    invoke(['/bin/sh', '-c', installed_command], b'{"hook_event_name":"UserPromptSubmit"}\n',
+           extra=installed_env, silent=True)
+    assert payload(installed_local / 'a.ndjson')[1] == b'claude\t{"hook_event_name":"UserPromptSubmit"}\n'
+    # The guard must preserve Codex's intentional SessionStart receipt on stdout.
+    codex, _ = invoke([driver, str(root), 'hook-installed', cli, 'codex', str(installed_home),
+                       str(roots[0]), str(roots[1])])
+    start_record = b'{"hook_event_name":"SessionStart","session_id":"11111111-2222-3333-4444-555555555555"}\n'
+    codex_start, _ = invoke(['/bin/sh', '-c', codex.stdout.decode()], start_record,
+                            extra=installed_env | {'MARU_HOOK_PANE': 'b'})
+    assert b'MARU_SESSION_V1:' in codex_start.stdout, codex_start.stdout
+    assert payload(installed_local / 'b.ndjson')[1].startswith(b'codex\t')
+    for size in (2_000_000, 8_000_000):
+        huge = json.dumps(dict(hook_event_name='UserPromptSubmit', prompt='x' * size)).encode() + b'\n'
+        _, elapsed = invoke(['/bin/sh', '-c', installed_command], huge, extra=installed_env, silent=True)
+        assert elapsed < 2, (size, elapsed)
+    # A provider may leave stdin open after the first JSON line. Draining must still be bounded.
+    pending = subprocess.Popen(['/bin/sh', '-c', installed_command], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env | installed_env)
+    started = time.monotonic()
+    try:
+        pending.stdin.write(b'{"hook_event_name":"UserPromptSubmit"}\n')
+        pending.stdin.flush()
+        assert pending.wait(timeout=2) == 0
+        assert time.monotonic() - started < 2
+        assert not pending.stdout.read() and not pending.stderr.read()
+    finally:
+        if pending.poll() is None:
+            pending.kill()
+        pending.communicate()
+    # Lock contention must consume the SAME budget as shell parsing.
+    holder = subprocess.Popen([driver, str(installed_remote), 'hold'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    try:
+        assert holder.stdout.readline() == b'ready\n'
+        large = json.dumps(dict(hook_event_name='UserPromptSubmit', prompt='x' * 2_000_000)).encode() + b'\n'
+        _, elapsed = invoke(['/bin/sh', '-c', installed_command], large,
+                            extra={'LC_MARU_PANE': 'a', 'LC_MARU_LOG_FORMAT': '2'}, silent=True)
+        assert elapsed < 2, elapsed
+        assert not (installed_remote / 'a.ndjson').exists()
+    finally:
+        holder.kill()
+        holder.communicate(timeout=3)
+    # Reap the shell AND its blocked descendants; no background sleeper may survive the guard.
+    child_pid_file = root / 'guard-child.pid'
+    _, elapsed = invoke([cli, 'agent-hooks', 'guard',
+                         f"/bin/sleep 30 & echo $! > '{child_pid_file}'; wait"], silent=True)
+    assert elapsed < 2, elapsed
+    descendant = int(child_pid_file.read_text())
+    state = subprocess.run(['/bin/ps', '-p', str(descendant), '-o', 'stat='], capture_output=True).stdout.strip()
+    assert not state or state.startswith(b'Z'), state
     baseline = []
     native_command, legacy_command = hook(local), hook(local, native=False)
     for i in range(8):
@@ -307,8 +367,11 @@ try:
         calls.append(elapsed)
     assert (local / 'inst' / '5.ndjson').read_bytes() == b'claude\t{}\n' * 8
     assert max(calls) < 2, calls
+    guarded_calls = [row['seconds'] for row in results
+                     if any(' agent-hooks guard ' in arg for arg in row.get('argv', []))]
     summary = dict(cases=len(results), native_hook_median_seconds=statistics.median(calls),
                    native_hook_max_seconds=max(calls), legacy_hook_median_seconds=statistics.median(baseline),
+                   guarded_hook_max_seconds=max(guarded_calls), overall_hook_budget_ms=1500,
                    uid_rejection_tested=os.geteuid() == 0,
                    unspecified_format_is_legacy=True)
     (output / 'summary.json').write_text(json.dumps(summary, indent=2))

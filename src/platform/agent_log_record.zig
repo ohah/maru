@@ -6,6 +6,8 @@ const writer = @import("agent_log_writer.zig");
 const cli = @import("../cli/agent_log_record.zig");
 const event = @import("../session/agent_hook_event.zig");
 
+pub const guard = @import("agent_hook_guard.zig");
+
 pub fn openPrivateDirectory(io: std.Io, path: []const u8) !std.Io.Dir {
     return openDirectory(io, path, false, false);
 }

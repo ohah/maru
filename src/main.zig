@@ -14419,6 +14419,11 @@ fn runAgentHooks(
     var rest: std.ArrayList([]const u8) = .empty;
     defer rest.deinit(allocator);
     while (args.next()) |a| try rest.append(allocator, a);
+    if (rest.items.len != 0 and std.mem.eql(u8, rest.items[0], "guard")) {
+        // Best-effort telemetry must never turn timeout, child failure or spawn failure into a provider hook error.
+        maru.agent_log_record.guard.run(io, rest.items[1..]) catch {};
+        return;
+    }
     if (rest.items.len == 2 and std.mem.eql(u8, rest.items[0], "codex-receipt")) {
         if (builtin.os.tag == .macos or builtin.os.tag == .linux)
             try maru.codex_hook_receipt.run(io, allocator, rest.items[1], stdout);

@@ -6670,6 +6670,16 @@ pub fn build(b: *std.Build) void {
     run_workspace_edit.addArg("--maru-expect-tests=21");
     run_workspace_edit.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-workspace-edit", "Run WorkspaceEdit preparation and rename regressions").dependOn(&run_workspace_edit.step);
+    const signature_restart_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.SIGR", ".test.SIG1 ", ".test.SIG2 ", ".test.SIG3 ", ".test.SIG4 ", ".test.ASB1 ", ".test.LSPB1 " } });
+    const run_signature_restart = b.addRunArtifact(signature_restart_tests);
+    run_signature_restart.setCwd(b.path("."));
+    run_signature_restart.addArg("--maru-expect-tests=14");
+    run_signature_restart.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-signature-restart", "Verify signature wait recovery after primary server shutdown").dependOn(&run_signature_restart.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_signature_restart.addArg("--maru-expect-passed=14");
+        macos_only_test_step.dependOn(&run_signature_restart.step);
+    }
     const read_origin_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.SIG1 ", ".test.SIG2 ", ".test.SIG3 ", ".test.SIG4 ", ".test.REF", ".test.LATE2 " } });
     const run_read_origins = b.addRunArtifact(read_origin_tests);
     run_read_origins.setCwd(b.path("."));

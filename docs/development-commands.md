@@ -1,5 +1,9 @@
 # 개발 명령
 
+`mise exec -- zig build test-editor-signature-restart -j2`는 서버 종료·재시작과 LSP 재활성화 뒤
+시그니처 대기 복구를 검사한다. 다른 primary/auxiliary와 호버 소유권은
+[서버 종료 복구 계획](plans/lsp-signature-restart.md)의 대조를 따른다.
+
 `mise exec -- zig build test-editor-read-origins -j2`는 시그니처·참조 계열의 주 서버 충돌,
 실제 Surface 전환과 Save As 뒤 응답/재시도 및 기존 정상 헬퍼를 검사한다.
 [응답 소유 계획](plans/lsp-signature-reference-origins.md)에 직접 주입과 실제 서버 증거의 경계를 적는다.

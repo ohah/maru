@@ -103,6 +103,19 @@ fn ask(self: *AppSession, term: *Term, kind: lsp.rpc.SignatureTriggerKind, trigg
     return true;
 }
 
+/// A stopped connection cannot answer. Release only its source's wait, leaving
+/// an unrelated primary/auxiliary connection and a hover-owned box untouched.
+pub fn onClientStopped(self: *AppSession, origin: *editor_lsp.Client, term: *Term) void {
+    const st = &self.editor_signature;
+    if (!st.waiting or st.waiting_surface != term.surface.id) return;
+    const same_client = origin.role == .primary and editor_lsp.boundClientFor(self, term) == origin;
+    // A stop applies to all requests on the connection, not one response seq.
+    switch (response_owner.decide(true, st.waiting_seq, st.waiting_seq, st.owner, ownerFor(term), same_client)) {
+        .ignore => return,
+        .cancel, .accept => hide(self),
+    }
+}
+
 fn ownerFor(term: *Term) ?response_owner.Owner {
     if (term.kind != .editor or term.rt.editorDocument().opened == null) return null;
     const doc = term.rt.editorDocument();

@@ -22858,6 +22858,219 @@ test "SIG4 actual Save As invalidates signature location responses and scheduled
     }
 }
 
+// Kill only this fixture's fake subprocess. A new ready PID must accept a fresh
+// manual request even when the old process never answered the previous request.
+test "SIGR1 signature request recovers after real server death and restart" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for (0..3) |mode| {
+        var f = (try SmtFixture.openRepo(allocator, "restart.c", if (mode == 2) "add(\n" else "add( // SIGSTALL\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        try testing.expect(f.ready());
+        const ss = f.fx.session;
+        f.term.rt.editor_selection = editor_selection.Selection.at(4);
+        try testing.expect(signature_client.triggerManual(ss));
+        if (mode == 2) {
+            try testing.expect(pumpLspUntil(&f.fx, 1500, ss, struct {
+                fn active(s: *AppSession) bool {
+                    return s.editor_signature.active;
+                }
+            }.active));
+            f.term.rt.editor_selection = editor_selection.Selection.at(f.term.rt.editorDocument().opened.?.file.content.len);
+            try testing.expect(insertText(ss, f.term, "SIGSTALL"));
+            f.term.rt.editor_selection = editor_selection.Selection.at(4);
+            try testing.expect(signature_client.triggerManual(ss));
+        }
+        if (mode != 0) {
+            try testing.expect(signature_client.triggerManual(ss));
+            try testing.expect(ss.editor_signature.dirty);
+        }
+        const seq = ss.editor_signature.waiting_seq;
+        const sent = ss.editor_lsp.sent_signatures;
+        const pid = lsp_client.readyClientFor(ss, f.term).?.proc.?.pid;
+        try testing.expect(pid > 0);
+        try testing.expectEqual(@as(c_int, 0), std.c.kill(pid, std.c.SIG.KILL));
+        try testing.expect(pumpLspUntil(&f.fx, 3000, ss, struct {
+            fn down(s: *AppSession) bool {
+                return (clientByExe(s, "clangd") orelse return false).phase == .restarting;
+            }
+        }.down));
+        try testing.expect(lsp_client.readyClientFor(ss, f.term) == null);
+        try testing.expect(lsp_client.boundClientFor(ss, f.term) == clientByExe(ss, "clangd"));
+        try testing.expect(!signature_client.triggerManual(ss)); // no request permission while disconnected
+        try testing.expectEqual(sent, ss.editor_lsp.sent_signatures);
+        try testing.expect(!ss.editor_signature.waiting and !ss.editor_signature.dirty);
+        try removeMarkerHover(ss, f.term, "SIGSTALL");
+        f.term.rt.editor_selection = editor_selection.Selection.at(4);
+        clientByExe(ss, "clangd").?.retry_at_ms = 0; // explicit backoff clock seam
+        const Ctx = struct { s: *AppSession, term: *Term, old_pid: std.c.pid_t };
+        try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .s = ss, .term = f.term, .old_pid = pid }, struct {
+            fn restarted(c: Ctx) bool {
+                const current = lsp_client.readyClientFor(c.s, c.term) orelse return false;
+                return current.proc.?.pid != c.old_pid;
+            }
+        }.restarted));
+        try testing.expect(signature_client.triggerManual(ss));
+        try testing.expectEqual(sent + 1, ss.editor_lsp.sent_signatures);
+        try testing.expect(ss.editor_signature.waiting_seq > seq);
+        try testing.expect(!ss.editor_signature.dirty);
+        try testing.expect(pumpLspUntil(&f.fx, 1500, ss, struct {
+            fn active(s: *AppSession) bool {
+                return s.editor_signature.active and !s.editor_signature.waiting;
+            }
+        }.active));
+        try testing.expect(std.mem.indexOf(u8, signature_client.lines(ss)[0].text, "int add") != null);
+    }
+}
+
+// Real foreign-primary shutdown and hover ownership are distinct from response routing.
+test "SIGR2 primary shutdown isolates the waiting source and leaves a different hover owner visible" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for ([_]bool{ false, true }) |owns_wait| {
+        var f = (try SmtFixture.openRepo(allocator, "first.c", "add( // SIGSTALL\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        try testing.expect(f.ready());
+        const ss = f.fx.session;
+        const second = try openSecondReadRootForTest(&f, "add( // SIGSTALL\n");
+        try testing.expect(term_ops.activateSurfaceById(ss, f.term.surface.id));
+        try testing.expect(signature_client.triggerManual(ss));
+        signature_client.hide(ss);
+        const waiting = if (owns_wait) f.term else second;
+        try testing.expect(term_ops.activateSurfaceById(ss, waiting.surface.id));
+        try testing.expect(signature_client.triggerManual(ss));
+        try testing.expect(signature_client.triggerManual(ss));
+        const seq = ss.editor_signature.waiting_seq;
+        const ca = lsp_client.readyClientFor(ss, f.term).?;
+        const cb = lsp_client.readyClientFor(ss, second).?;
+        if (!owns_wait) {
+            try testing.expectEqual(seq, ca.signature_seq); // actual requests collide across roots
+            signature_client.onClientStopped(ss, ca, second); // correct surface, wrong connection
+            try testing.expect(ss.editor_signature.waiting and ss.editor_signature.dirty);
+            signature_client.onClientStopped(ss, cb, f.term); // correct connection, wrong surface
+            try testing.expect(ss.editor_signature.waiting and ss.editor_signature.dirty);
+        }
+        try testing.expect(term_ops.activateSurfaceById(ss, second.surface.id));
+        second.rt.editor_selection = editor_selection.Selection.at(1);
+        {
+            var draw = appendPaneFrame(ss, f.leaf, second) orelse return error.EditorPaneDidNotDraw;
+            draw.dl.deinit(allocator);
+        }
+        try testing.expect(hover_client.showAtCaret(ss));
+        try testing.expect(pumpLspUntil(&f.fx, 1500, ss, struct {
+            fn opened(session: *AppSession) bool {
+                return session.chrome_host.hover_box.open;
+            }
+        }.opened));
+        try testing.expect(!ss.editor_signature.active);
+        const hover_opened = ss.editor_hover.opened_count;
+        const primary_pid = cb.proc.?.pid;
+        try testing.expectEqual(@as(c_int, 0), std.c.kill(ca.proc.?.pid, std.c.SIG.KILL));
+        const Ctx = struct { s: *AppSession, term: *Term };
+        try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .s = ss, .term = f.term }, struct {
+            fn down(c: Ctx) bool {
+                return (lsp_client.boundClientFor(c.s, c.term) orelse return false).phase == .restarting;
+            }
+        }.down));
+        try testing.expectEqual(!owns_wait, ss.editor_signature.waiting);
+        try testing.expectEqual(!owns_wait, ss.editor_signature.dirty);
+        try testing.expectEqual(seq, ss.editor_signature.waiting_seq);
+        try testing.expect(ss.chrome_host.hover_box.open);
+        try testing.expectEqual(second.surface.id, ss.editor_hover.shown_surface);
+        try testing.expectEqual(hover_opened, ss.editor_hover.opened_count);
+        try testing.expect(hover_client.lines(ss).len > 0);
+        try testing.expectEqual(primary_pid, lsp_client.readyClientFor(ss, second).?.proc.?.pid);
+        signature_client.onClientStopped(ss, ca, f.term); // replay cannot disturb the current hover
+        try testing.expect(ss.chrome_host.hover_box.open);
+        try testing.expectEqual(!owns_wait, ss.editor_signature.waiting);
+    }
+}
+
+// A real auxiliary process owns this same document but never owns its signature wait.
+test "SIGR3 auxiliary process death cannot cancel its primary document signature" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.openRepo(allocator, "source.py", "add( # SIGSTALL\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    try f.fx.dir.dir.createDirPath(testing.io, ".venv/bin");
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "pyproject.toml", .data = "[tool.ruff.lint]\nselect = [\"F\"]\n" });
+    {
+        var fake_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const fake = (try fakeLspAbs(&fake_buf)) orelse return error.SkipZigTest;
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, fake, allocator, .limited(64 << 20));
+        defer allocator.free(bytes);
+        try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = ".venv/bin/ruff", .data = bytes });
+        try f.fx.dir.dir.setFilePermissions(testing.io, ".venv/bin/ruff", @fromBackingInt(@intCast(0o755)), .{});
+    }
+    try testing.expect(f.ready());
+    const ss = f.fx.session;
+    const Ctx = struct { s: *AppSession, term: *Term };
+    try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .s = ss, .term = f.term }, struct {
+        fn ready(c: Ctx) bool {
+            const aux = clientByExe(c.s, "ruff") orelse return false;
+            return aux.role == .auxiliary and aux.phase == .ready and aux.proc != null and aux.findDoc(c.term) != null;
+        }
+    }.ready));
+    f.term.rt.editor_selection = editor_selection.Selection.at(4);
+    try testing.expect(signature_client.triggerManual(ss));
+    try testing.expect(signature_client.triggerManual(ss));
+    const seq = ss.editor_signature.waiting_seq;
+    const primary = lsp_client.readyClientFor(ss, f.term).?;
+    const primary_pid = primary.proc.?.pid;
+    const aux = clientByExe(ss, "ruff").?;
+    try testing.expect(primary.role == .primary and aux.role == .auxiliary);
+    try testing.expectEqual(@as(c_int, 0), std.c.kill(aux.proc.?.pid, std.c.SIG.KILL));
+    try testing.expect(pumpLspUntil(&f.fx, 3000, ss, struct {
+        fn down(s: *AppSession) bool {
+            return (clientByExe(s, "ruff") orelse return false).phase == .restarting;
+        }
+    }.down));
+    try testing.expect(ss.editor_signature.waiting and ss.editor_signature.dirty);
+    try testing.expectEqual(seq, ss.editor_signature.waiting_seq);
+    try testing.expect(!ss.editor_signature.active);
+    try testing.expectEqual(primary_pid, lsp_client.readyClientFor(ss, f.term).?.proc.?.pid);
+}
+
+// stopAll detaches proc before freeing clients; enabled=false must not hide the ownership lookup.
+test "SIGR4 disabling and reenabling LSP releases the old signature without a manual Escape" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for ([_]bool{ false, true }) |dirty| {
+        var f = (try SmtFixture.openRepo(allocator, "toggle.c", "add( // SIGSTALL\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        try testing.expect(f.ready());
+        const ss = f.fx.session;
+        f.term.rt.editor_selection = editor_selection.Selection.at(4);
+        try testing.expect(signature_client.triggerManual(ss));
+        if (dirty) try testing.expect(signature_client.triggerManual(ss));
+        const pid = lsp_client.readyClientFor(ss, f.term).?.proc.?.pid;
+        const sent = ss.editor_lsp.sent_signatures;
+        ss.loaded_config.config.lsp.enabled = false;
+        lsp_client.pump(ss);
+        try testing.expectEqual(@as(usize, 0), ss.editor_lsp.clients.items.len);
+        try testing.expect(!ss.editor_signature.waiting and !ss.editor_signature.dirty);
+        try testing.expect(lsp_client.readyClientFor(ss, f.term) == null);
+        try testing.expect(!signature_client.triggerManual(ss));
+        try testing.expectEqual(sent, ss.editor_lsp.sent_signatures);
+        try removeMarkerHover(ss, f.term, "SIGSTALL");
+        f.term.rt.editor_selection = editor_selection.Selection.at(4);
+        ss.loaded_config.config.lsp.enabled = true;
+        const Ctx = struct { s: *AppSession, term: *Term, old_pid: std.c.pid_t };
+        try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .s = ss, .term = f.term, .old_pid = pid }, struct {
+            fn ready(c: Ctx) bool {
+                return (lsp_client.readyClientFor(c.s, c.term) orelse return false).proc.?.pid != c.old_pid;
+            }
+        }.ready));
+        try testing.expect(signature_client.triggerManual(ss));
+        try testing.expectEqual(sent + 1, ss.editor_lsp.sent_signatures);
+        try testing.expect(pumpLspUntil(&f.fx, 1500, ss, struct {
+            fn active(s: *AppSession) bool {
+                return s.editor_signature.active and !s.editor_signature.waiting;
+            }
+        }.active));
+    }
+}
+
 test "SIG1 시그니처 힌트 — `(` 를 치면 열리고 첫 파라미터가 accent, `,` 로 둘째, `)` 로 닫힘; Esc·명령·caret 이동 재요청·끄면 명령만·호버가 안 열림·낡은 응답 (제품 경계, §8.2d)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

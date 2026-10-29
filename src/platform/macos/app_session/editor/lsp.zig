@@ -2052,7 +2052,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
             .definition => |seq| {
                 self.editor_lsp.received_definitions += 1;
                 const target: ?lsp.rpc.Target = if (r.is_error) null else lsp.rpc.definitionTarget(r.result);
-                editor_definition.onDefinitionResponse(self, seq, target, c.encoding);
+                editor_definition.onClientResponse(self, c, seq, target);
             },
             .diagnostic => |seq| onPullDiagnosticsWithRetry(self, c, seq, if (r.is_error) null else r.result, r.diagnostic_retrigger),
             .hover => |seq| {

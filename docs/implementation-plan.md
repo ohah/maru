@@ -1772,3 +1772,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [코드 액션 응답의 문서 소유](plans/code-action-response-origin.md): 같은 실행 파일·번호를 쓰는 다른 root의 목록 응답 격리.
 
 - [코드 액션 resolve의 출처와 수명](plans/code-action-resolve-origin.md): 선택 당시 문서 신원과 지연 응답의 서버 격리.
+
+- [저장 수명과 LSP 응답 감사](plans/lsp-save-and-response-audit.md): 선행 저장/Save As 장벽, 닫힌 요청과 읽기 응답의 출처 점검.

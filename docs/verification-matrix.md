@@ -5368,7 +5368,7 @@ PNG/OCR은 고정된 앱의 화면 기록 권한과 독립 후보창 기록을 �
 비동기 파싱 실패의 자동 재초기화 차단은 요청 API에 구현했다. Runtime 12개는 준비/분석 OOM,
 revision 변경·공유 뷰 차단, 다른 문서 격리, 명시적 재시도·문법 키 변경·재열기와 Runtime 재생성의
 실제 수명을 검사한다. [독립 결함 대조](../tools/editor-parse-runtime/README.md)의 `--scope recovery`를 따른다.
-일반 입력 화면 전환·팔레트 재분석 명령·뷰 설치 실패 후 표시·IME 검증은 후속이다.
+일반 입력 화면 전환·팔레트 재분석·뷰별 실패 중단은 아래 제품 연결 검사를 따른다. OS IME와 모델 검사는 구분한다.
 
 ## 편집기 Cmd+화살표 줄 경계
 
@@ -5380,3 +5380,14 @@ revision 변경·공유 뷰 차단, 다른 문서 격리, 명시적 재시도·�
 UI 오라클은 격리한 Code - OSS의 실제 키 입력과 상태 표시줄이며, 해당 구현 소스는 복사하지 않는다.
 제품 AppKit 키 이벤트와 Metal readback의 수정 전후 PNG는 PR에 첨부한다.
 물리 HID 입력이나 모든 VS Code 커서 명령의 동등성을 이 검사로 주장하지 않는다.
+
+
+## 일반 편집기 비동기 구문 입력
+
+`test-editor-parse-input`은 실제 기본 생성·연속 편집·Undo·공유 뷰 설치·접힘·심볼 갱신과
+copy OOM 뒤 편집 보존/자동 재시도 금지/명시적 복구를 검사한다. 독립 뷰 참조 overflow,
+지원 문법↔일반 텍스트, 마지막 창 종료와 늦은 wake, 비교·병합 legacy 전환도 포함한다.
+macOS에서는 제품 6개와 초기화 4개, 다른 플랫폼에서는 7개 수집 중 제품 6개를 제외한다.
+`tools/editor-parse-runtime/review.py --scope input`은 실제 결함 다섯 개와 정상 전후 대조군을
+컴파일·실행한다. [제품 연결 계약](plans/editor-async-parse.md#제품-화면-연결)을 따른다.
+모델 preedit 검사를 실제 OS IME 또는 GUI 지연 개선량으로 해석하지 않는다.

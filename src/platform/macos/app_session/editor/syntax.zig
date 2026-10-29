@@ -68,7 +68,8 @@ pub const ColorBufs = struct {
 };
 
 pub const State = struct {
-    /// grammar가 없거나 파서를 못 세우면 `null`이고, 그러면 이 문서는 끝까지 무색이다(§5).
+    async_view: maru.session.editor.syntax.control.Control = .{},
+    /// 준비 중·미지원·분석 실패면 null이다. 일반 문서는 완료 설치나 명시적 재분석으로만 복구한다.
     provider: ?syntax.Provider = null,
     /// 불변 완료를 지키는 참조. 뷰의 cursor·캐시·트리를 모두 놓은 뒤 마지막에 반환한다.
     parse_result: ?parse_worker.Completion = null,
@@ -80,7 +81,7 @@ pub const State = struct {
     folds: syntax.FoldCache = .{},
 
     /// 파싱이 **예산에 끊겨 남아 있는가**(§2.1a). 참인 동안 프레임마다 `resumeParse`가 이어 판다.
-    /// 그 사이 이 문서는 무색이거나(전체 파싱) 직전 색이다(증분).
+    /// 비동기 상태는 메인에서 재개하지 않고 완료 사건을 기다린다. 그 동안 옛 트리는 조회하지 않는다.
     pending: bool = false,
 
     /// 색 버퍼 — 본문 창의 것. **미니맵 창은 자기 것을 따로 든다**(`minimap_bufs`): 같은 프레임에 두 창의 색을
@@ -129,6 +130,21 @@ pub const State = struct {
     pub fn installCompleted(self: *State, next_provider: *?syntax.Provider, next_result: *?parse_worker.Completion) error{LegacyProvider}!void {
         if (self.provider != null and self.parse_result == null) return error.LegacyProvider;
         std.debug.assert(next_result.* != null and next_result.*.?.outcome() == .ready);
+        self.discardCompleted();
+        self.provider = next_provider.*;
+        self.parse_result = next_result.*;
+        next_provider.* = null;
+        next_result.* = null;
+        self.pending = false;
+        if (self.provider) |*provider| {
+            const input = self.parse_result.?.tag().input;
+            self.input_stamp = .{ .document = input.document, .revision = input.revision, .provider_identity = @intFromPtr(provider.parser), .tree_generation = provider.tree_gen };
+        }
+    }
+
+    /// cursor·캐시를 먼저 비우고 완료의 마지막 native 참조는 worker에 돌려준다.
+    pub fn discardCompleted(self: *State) void {
+        std.debug.assert(self.provider == null or self.parse_result != null);
         clearInputProofs(self);
         // cursor와 캐시가 별도 native 참조를 가진다. 기존 보유 참조를 반환하기 전에 모두 놓는다.
         self.folds.invalidate();
@@ -151,15 +167,9 @@ pub const State = struct {
         self.minimap_bufs.line_bounds.clearRetainingCapacity();
         if (self.provider) |*old| old.deinit();
         if (self.parse_result) |*old| old.release();
-        self.provider = next_provider.*;
-        self.parse_result = next_result.*;
-        next_provider.* = null;
-        next_result.* = null;
-        self.pending = false;
-        if (self.provider) |*provider| {
-            const input = self.parse_result.?.tag().input;
-            self.input_stamp = .{ .document = input.document, .revision = input.revision, .provider_identity = @intFromPtr(provider.parser), .tree_generation = provider.tree_gen };
-        }
+        self.provider = null;
+        self.parse_result = null;
+        self.pending = true;
     }
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
@@ -236,7 +246,7 @@ pub fn open(source: []const u8, g: editor_language.Grammar) State {
     return openBudgeted(source, g, frame_parse_budget_ns);
 }
 
-/// 파싱 예산을 지정해 연다. 제품은 `open`(프레임 예산)만 쓴다 — 이 문은 **캡처 하네스의 판정자**가
+/// 동기 비교·병합과 대조군의 파싱 예산을 지정한다. 일반 비동기 문서는 이 함수를 호출하지 않는다. **캡처 하네스의 판정자**는 이를 써서
 /// 「예산 안에 못 끝내는 기계」를 기계 속도에 안 기대고 결정적으로 만들려고 있다.
 pub fn openBudgeted(source: []const u8, g: editor_language.Grammar, budget_ns: u64) State {
     var st: State = .{ .provider = syntax.Provider.init(source, syntaxLanguage(g), budget_ns) };
@@ -252,6 +262,8 @@ pub fn prepareSharedSnapshot(source: *const State, allocator: std.mem.Allocator,
         const held = source.parse_result orelse return null;
         const next = allocator.create(State) catch return null;
         next.* = .{};
+        next.async_view = source.async_view;
+        next.async_view.disabled = null;
         next.parse_result = held.retain() catch {
             allocator.destroy(next);
             return null;
@@ -274,6 +286,8 @@ pub fn prepareSharedSnapshot(source: *const State, allocator: std.mem.Allocator,
             return null;
         };
     }
+    next.async_view = source.async_view;
+    next.async_view.disabled = null;
     // 실제 복사한 입력 판만 옮기고, 계보 메타데이터는 받는 뷰의 allocator로 따로 소유한다.
     if (source.input_stamp) |stamp| if (matchesInput(source, stamp.document, stamp.revision)) {
         next.input_stamp = .{ .document = stamp.document, .revision = stamp.revision, .provider_identity = @intFromPtr(provider.parser), .tree_generation = provider.tree_gen };

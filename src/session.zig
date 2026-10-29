@@ -195,6 +195,7 @@ pub const editor = struct {
     pub const syntax = struct {
         pub const origin = @import("session/editor/syntax/origin.zig");
         pub const request = @import("session/editor/syntax/request.zig");
+        pub const control = @import("session/editor/syntax/control.zig");
     };
     pub const shared_edit = @import("session/editor/shared_edit.zig");
     pub const workspace_state = @import("session/editor/workspace_state.zig");

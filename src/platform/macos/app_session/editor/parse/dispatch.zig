@@ -10,10 +10,17 @@ pub const wake = @import("wake.zig");
 pub const registry = maru.session.editor.document_registry;
 pub const request = maru.session.editor.syntax.request;
 var active: ?runtime.Runtime = null;
+var completed: ?*const fn () void = null;
+
+/// 도착 시 살아 있는 창을 다시 조회하는 정적 함수만 등록한다. 창 포인터를 보관하지 않는다.
+pub fn onCompleted(callback: ?*const fn () void) void {
+    completed = callback;
+}
+
 fn allocator() std.mem.Allocator {
     return if (builtin.is_test) std.testing.allocator else std.heap.smp_allocator;
 }
-/// 내부 연결 API다. 일반 편집기의 기존 점진 파싱 경로는 아직 이 API로 전환하지 않는다.
+/// 명시적 재분석 요청이다. 일반 입력의 동일 요청 재사용은 ensure가 담당한다.
 pub fn submit(source: registry.Lease, grammar: request.Grammar, language: syntax.Language) !request.Request {
     _ = try runtime.Runtime.automaticDisabled(source, grammar, language);
     const owner = getOrStart() catch |err| {
@@ -74,6 +81,14 @@ pub fn poll() void {
         // 문서가 모두 회수됐다면 native 작업도 없다. 닫기에서 실행 중 worker를 동기 대기하지 않는다.
         if (owner.entries.items.len == 0) shutdown();
     }
+    if (completed) |callback| callback();
+}
+pub fn invalidate(source: registry.Lease) void {
+    if (source.owner.syntaxRecovery(source)) |recovery| recovery.disabled = null;
+    if (active) |*owner| {
+        owner.invalidate(source);
+        if (owner.entries.items.len == 0) shutdown();
+    }
 }
 pub fn viewsChanged() void {
     if (active) |*owner| {
@@ -92,6 +107,14 @@ pub fn tryShutdown() error{ResultsHeld}!void {
 /// 기존 앱 종료 경로는 모든 소비자의 반환을 먼저 끝내야 한다.
 pub fn shutdown() void {
     tryShutdown() catch unreachable;
+}
+/// 제품 Service를 그대로 쓰고 테스트에서만 평탄화 allocator를 교체한다.
+pub fn startForTest(options: worker.Options) !void {
+    if (!builtin.is_test) @compileError("test-only parse service configuration");
+    try tryShutdown();
+    var configured = options;
+    configured.notify = wake.request;
+    active = try runtime.Runtime.init(std.testing.allocator, configured);
 }
 pub fn lastPollThread() ?std.Thread.Id {
     return if (active) |owner| owner.last_poll_thread else null;

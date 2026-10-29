@@ -134,6 +134,9 @@ final class EditorIMESmokeDriver {
             failures.append("editor_timeout"); restoreInputSource(view: view); finish(); return
         }
         guard editorPresent else { return }
+        // 디버그 파일 열기는 PTY surface 초기화보다 빠를 수 있다. editor 존재만으로는
+        // 입력을 받을 수 없으므로 실제 IME target이 준비된 뒤 시작한다(초기 caret은 없어도 된다).
+        if step == 0 && view.controller?.editorIMEState() == nil { return }
         if live { tickLive(view: view, window: window); return }
         switch step {
         case 0:

@@ -21,7 +21,7 @@ def main():
     p = argparse.ArgumentParser()
     for name in ('output','deps','cache'):
         p.add_argument('--'+name, type=Path, required=True)
-    p.add_argument("--scope", choices=("lifetime", "observation", "leases", "view", "sharing", "reasons", "recovery"), default="lifetime")
+    p.add_argument("--scope", choices=("lifetime", "observation", "leases", "view", "sharing", "reasons", "recovery", "input"), default="lifetime")
     args = p.parse_args()
     out, deps = args.output.resolve(), args.deps.resolve()
     if out.exists() or out == ROOT or ROOT in out.parents or not deps.is_dir():
@@ -39,6 +39,8 @@ def main():
         if name.startswith('src/') or name in ('build.zig','build.zig.zon','tools/simple_test_runner.zig'):
             inventory[name] = sha(item)
     leaves = (WORKER,RUNTIME,DISPATCH,REGISTRY) + ((VIEW,COLORS) if args.scope == "view" else ())
+    if args.scope == "input":
+        leaves += ("src/platform/macos/app_session.zig", "src/platform/macos/app_session/editor/mod.zig", "src/session/editor/syntax/control.zig")
     for name in leaves:
         if name not in inventory: raise RuntimeError('stage new source first: '+name)
     (source/'zig-pkg').symlink_to(deps, target_is_directory=True)
@@ -98,7 +100,17 @@ def main():
             'manual_restart_keeps_disabled': (RUNTIME, '        recovery.disabled = null;', '        if (recovery.disabled == null) recovery.disabled = null;'),
             'changed_grammar_still_disabled': (REGISTRY, 'std.meta.eql(disabled, key)', '(std.meta.eql(disabled, key) or true)'),
         }
+    if args.scope == "input":
+        mutants = {
+            'product_stays_synchronous': ('src/platform/macos/app_session.zig', 'editor_syntax_async: bool = true,', 'editor_syntax_async: bool = false,'),
+            'typing_skips_request': ('src/platform/macos/app_session/editor/mod.zig', '        parse_client.refresh(self, term);\n        return;', '        if (false) parse_client.refresh(self, term);\n        return;'),
+            'completion_skips_views': (DISPATCH, 'if (completed) |callback| callback();', 'if (completed) |callback| { if (false) callback(); }'),
+            'typing_retries_failed_view': ('src/session/editor/syntax/control.zig', 'if (!std.meta.eql(failed, key)) self.disabled = null;', 'if (!std.meta.eql(failed, key) or true) self.disabled = null;'),
+            'picker_keeps_pending_rows': ('src/platform/macos/app_session/editor/mod.zig', 'if (self.chrome_host.symbol_picker.open) recomputeSymbolPicker(self);', 'if (self.chrome_host.symbol_picker.open and false) recomputeSymbolPicker(self);'),
+        }
     command = ['mise','exec','--','zig','build','test-editor-parse-runtime','test-editor-parse-host','test-editor-parse-main-queue','--cache-dir',str(args.cache.resolve()),'-j2','--verbose']
+    if args.scope == "input":
+        command.insert(command.index('--cache-dir'), 'test-editor-parse-input')
     if args.scope == "view":
         command.insert(command.index('--cache-dir'), 'test-editor-parse-view')
         command.insert(command.index('--cache-dir'), 'test-editor-parse-view-regression')
@@ -119,9 +131,9 @@ def main():
             with log.open('xb') as stream:
                 result = subprocess.run(command,cwd=source,env=env,stdout=stream,stderr=subprocess.STDOUT,timeout=900)
             text = log.read_text()
-            tests = list(dict.fromkeys(re.findall(r'info\(verbose\): [^\n]*?(\S+/test) --maru-expect-tests=(?:5|6|12|19|35)',text)))
+            tests = list(dict.fromkeys(re.findall(r'info\(verbose\): [^\n]*?(\S+/test) --maru-expect-tests=(?:5|6|10|12|19|35)',text)))
             natives = re.findall(r'info\(verbose\): (\S+/maru-parse-main-queue)\s*$',text,re.M)
-            if len(tests)!=(4 if args.scope == 'view' else 3 if args.scope in ('leases', 'reasons') else 2) or not natives: raise RuntimeError('missing actual executions: '+name)
+            if len(tests)!=(4 if args.scope == 'view' else 3 if args.scope in ('leases', 'reasons', 'input') else 2) or not natives: raise RuntimeError('missing actual executions: '+name)
             archived = {}
             for i, binary in enumerate(tests+[natives[-1]]):
                 path = Path(binary)
@@ -138,6 +150,8 @@ def main():
                 raise RuntimeError('missing retained-result control: '+name)
             if args.scope == 'view' and name.startswith('control') and (text.count('All 5 tests passed.') != 1 or text.count('All 35 tests passed.') != 1 or 'installed_view=1' not in text):
                 raise RuntimeError('missing actual view executions: '+name)
+            if args.scope == 'input' and name.startswith('control') and text.count('All 10 tests passed.') != 1:
+                raise RuntimeError('missing actual input executions: '+name)
             if args.scope == 'sharing' and name.startswith('control') and 'shared_request=1' not in text:
                 raise RuntimeError('missing actual shared-request delivery: '+name)
             rows.append(dict(name=name,returncode=result.returncode,source_sha256=source_hash,binaries=archived,log_sha256=sha(log)))

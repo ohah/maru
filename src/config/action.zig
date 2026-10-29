@@ -214,6 +214,8 @@ pub const Action = union(enum) {
     trigger_parameter_hints,
     /// 언어 서버로 문서 전체를 포맷한다(tooling §8.2e — `⇧⌥F`, VS Code `editor.action.formatDocument`). 서버가 없거나 포맷을 못 하면 무동작.
     format_document,
+    /// 비동기 분석을 명시적으로 다시 시작한다. 기본 단축키 없이 팔레트에서 호출한다.
+    reparse_syntax,
     /// 심볼 이름 바꾸기(tooling §8.2f — `F2`, VS Code `editor.action.rename`). caret 아래 낱말을 씨앗으로 상자를 열고 `Enter` 면
     /// `textDocument/rename`. 서버가 없거나 rename 을 못 하면 무동작.
     rename_symbol,
@@ -398,6 +400,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "navigate_forward")) return .navigate_forward;
     if (std.mem.eql(u8, value, "trigger_parameter_hints")) return .trigger_parameter_hints;
     if (std.mem.eql(u8, value, "format_document")) return .format_document;
+    if (std.mem.eql(u8, value, "reparse_syntax")) return .reparse_syntax;
     if (std.mem.eql(u8, value, "rename_symbol")) return .rename_symbol;
     if (std.mem.eql(u8, value, "undo_workspace_edit")) return .undo_workspace_edit;
     if (std.mem.eql(u8, value, "trigger_suggest")) return .trigger_suggest;

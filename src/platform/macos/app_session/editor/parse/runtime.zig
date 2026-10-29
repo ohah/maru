@@ -122,6 +122,19 @@ pub const Runtime = struct {
         value.latest = tag;
         return tag;
     }
+    /// 미지원 언어로의 명시적 전환은 새 파싱 없이 옛 작업과 결과를 무효화한다.
+    pub fn invalidate(self: *Runtime, source: registry.Lease) void {
+        const identity = source.owner.identity(source) orelse return;
+        const entry = self.find(identity) orelse return;
+        entry.gate.invalidate();
+        entry.latest = null;
+        entry.outcome = null;
+        entry.unavailable_reason = null;
+        self.service.cancelDocument(identity);
+        if (entry.current) |*current| current.release();
+        entry.current = null;
+        self.sweep();
+    }
     fn matches(entry: *const Entry, tag: request.Request) bool {
         const state = entry.lease.owner.get(entry.lease) orelse return false;
         const opened = state.opened orelse return false;
@@ -197,7 +210,7 @@ pub const Runtime = struct {
         var i: usize = 0;
         while (i < self.entries.items.len) {
             const entry = &self.entries.items[i];
-            if (entry.lease.owner.viewCount(entry.lease).? != 0) {
+            if (entry.lease.owner.viewCount(entry.lease).? != 0 and (entry.latest != null or entry.current != null)) {
                 i += 1;
                 continue;
             }

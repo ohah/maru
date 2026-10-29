@@ -6670,6 +6670,16 @@ pub fn build(b: *std.Build) void {
     run_workspace_edit.addArg("--maru-expect-tests=21");
     run_workspace_edit.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-workspace-edit", "Run WorkspaceEdit preparation and rename regressions").dependOn(&run_workspace_edit.step);
+    const hover_origin_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.HOVB", ".test.ASB1 ", ".test.SIG1 " } });
+    const run_hover_origins = b.addRunArtifact(hover_origin_tests);
+    run_hover_origins.setCwd(b.path("."));
+    run_hover_origins.addArg("--maru-expect-tests=10");
+    run_hover_origins.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-hover-origins", "Verify hover primary-root isolation and existing helper controls").dependOn(&run_hover_origins.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_hover_origins.addArg("--maru-expect-passed=10");
+        macos_only_test_step.dependOn(&run_hover_origins.step);
+    }
     const definition_origin_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.GOTO", ".test.LATE3 " } });
     const run_definition_origins = b.addRunArtifact(definition_origin_tests);
     run_definition_origins.setCwd(b.path("."));

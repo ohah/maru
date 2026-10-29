@@ -23,6 +23,7 @@ const hover_box = chrome.components.hover_box;
 const diagnostic = maru.session.editor.diagnostic;
 const hover_text = maru.session.editor.hover_text;
 const lsp = maru.session.editor.lsp;
+const response_owner = maru.session.editor.lsp_response_owner;
 
 /// 서버가 있는데 응답이 이 시간 안에 안 오면 진단만으로 연다(§8.2b 「요청」).
 pub const response_timeout_ms: u64 = 2000;
@@ -39,6 +40,7 @@ pub const State = struct {
     // ── 요청 대기 ─────────────────────────────────────────────────────────────
     waiting: bool = false,
     waiting_seq: u32 = 0,
+    owner: ?response_owner.Owner = null,
     waiting_surface: u64 = 0,
     waiting_offset: u32 = 0,
     waiting_since_ms: u64 = 0,
@@ -115,7 +117,13 @@ pub fn tick(self: *AppSession) void {
     const now = self.awakeMs();
     if (st.waiting) {
         if (now -| st.waiting_since_ms >= response_timeout_ms) {
+            const term = waitingTerm(self);
+            const current = if (term) |t| ownerFor(t) else null;
+            // A timeout has no server payload, but still belongs to the original
+            // document. Do not reopen diagnostics for a replaced save target.
+            const decision = response_owner.decide(true, st.waiting_seq, st.waiting_seq, st.owner, current, true);
             st.waiting = false;
+            if (decision != .accept) return;
             openWith(self, st.waiting_surface, st.waiting_offset, null, null, st.waiting_from_pointer);
         }
         return;
@@ -165,6 +173,7 @@ fn begin(self: *AppSession, term: *Term, offset: usize, from_pointer: bool) void
     if (editor_lsp.requestHover(self, term, offset)) |seq| {
         st.waiting = true;
         st.waiting_seq = seq;
+        st.owner = ownerFor(term);
         st.waiting_surface = term.surface.id;
         st.waiting_offset = @intCast(offset);
         st.waiting_since_ms = self.awakeMs();
@@ -172,6 +181,39 @@ fn begin(self: *AppSession, term: *Term, offset: usize, from_pointer: bool) void
         return;
     }
     openWith(self, term.surface.id, @intCast(offset), null, null, from_pointer);
+}
+
+fn ownerFor(term: *Term) ?response_owner.Owner {
+    if (term.kind != .editor or term.rt.editorDocument().opened == null) return null;
+    const doc = term.rt.editorDocument();
+    return .{ .surface = term.surface.id, .document = @intFromPtr(doc), .target_epoch = doc.save_target_epoch };
+}
+
+fn waitingTerm(self: *AppSession) ?*Term {
+    const owner = self.editor_hover.owner orelse return null;
+    const loc = term_ops.findTermWhere(self, owner.surface, struct {
+        fn matches(surface: u64, term: *Term) bool {
+            return term.kind == .editor and term.surface.id == surface;
+        }
+    }.matches) orelse return null;
+    return loc.pane.terms.items[loc.term_index];
+}
+
+/// Request numbers are local to one primary server. A foreign response must not
+/// clear the current wait, even when it contains no hover text.
+pub fn onClientResponse(self: *AppSession, origin: *editor_lsp.Client, seq: u32, markdown: ?[]const u8, range: ?lsp.rpc.Range) void {
+    const st = &self.editor_hover;
+    const term = waitingTerm(self);
+    const current = if (term) |t| ownerFor(t) else null;
+    const same_client = if (term) |t| editor_lsp.readyClientFor(self, t) == origin else false;
+    switch (response_owner.decide(st.waiting, st.waiting_seq, seq, st.owner, current, same_client)) {
+        .ignore => return,
+        .cancel => {
+            st.waiting = false;
+            return;
+        },
+        .accept => onHoverResponse(self, seq, markdown, range, origin.encoding),
+    }
 }
 
 /// hover 응답(`editor_lsp` 가 부른다). 지금 기다리는 seq 가 아니면 버린다.

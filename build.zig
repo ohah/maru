@@ -745,11 +745,11 @@ pub fn build(b: *std.Build) void {
     }
     const project_search_tests = addProjectTest(b, .{ .root_module = project_search_module });
     const run_project_search_tests = b.addRunArtifact(project_search_tests);
-    // registry를 경유해 구문 계보와 Buffer의 Snapshot clone 검사도 이 집계에 포함된다.
-    run_project_search_tests.addArg("--maru-expect-tests=299");
+    // registry를 경유해 구문 계보·Buffer Snapshot clone·Selection 병합(CME24) 검사도 포함된다.
+    run_project_search_tests.addArg("--maru-expect-tests=300");
     b.step("test-editor-project-search", "Run project search protocol and argv judges").dependOn(&run_project_search_tests.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
-        run_project_search_tests.addArg("--maru-expect-passed=298"); // Windows 전용 경로 비교 1개는 의도적으로 건너뛴다.
+        run_project_search_tests.addArg("--maru-expect-passed=299"); // Windows 전용 경로 비교 1개는 의도적으로 건너뛴다.
         macos_only_test_step.dependOn(&run_project_search_tests.step);
     }
     const ripgrep_prepare = b.addSystemCommand(&.{ "python3", "tools/build-ripgrep.py", "--output", "zig-out/ripgrep" });

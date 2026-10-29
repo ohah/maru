@@ -341,6 +341,8 @@ stream 이 떠나면 풀리며 깨운다 — 쥔 한 장이 그 연결의 다른
   표를 복사하므로 그 구간이면 충분하고, 의존 라이브러리 내부의 fork 도 같이 덮인다. exec 완료까지 잠금을 잡으면 느린 spawn 하나가 모든 원격 터미널의 이미지 적용을 멈춘다.
 - `posix_spawn` 계열(Darwin `system()` 포함)은 atfork 를 부르지 않는다 → `POSIX_SPAWN_CLOEXEC_DEFAULT` 를 쓰는 헬퍼를 거치게 하고,
   헬퍼를 거치지 않는 `posix_spawn`·`system` 호출을 문법 자리 판정자로 막는다. Zig 0.17 Darwin의 `std.process.spawn`도 이 계열이며 atfork를 호출하지 않는다. 검색 워커는 `macos_spawn.captureStdout`으로 고정 argv·환경·열린 root handle·stdout pipe를 준비하고 같은 `CLOEXEC_DEFAULT` 경계를 지난다. SSH 전송의 일곱 기동 경로도 `macos_spawn.spawnMapped`로 명시한 stdio만 전달한다. 표준 라이브러리 spawn 참조·namespace 별칭도 같은 판정자가 막는다.
+  `agent_hook_guard`의 표준 spawn 한 곳은 이미지 채널을 열지 않는 `maru agent-hooks guard` CLI 전용 예외다.
+  공유 `agent_log_record`에서 재노출하지 않고 `main.zig`만 직접 import하며, 같은 판정자가 이 단일 진입점과 정확한 spawn 개수를 함께 고정한다.
 - 메인 스레드의 **tick** 은 쓰기 잠금을 **`pthread_rwlock_trywrlock`** 으로만 잡는다. Darwin rwlock 에는 우선순위 상속이 없어, 메인이
   BACKGROUND QoS 의 읽기 보유자를 기다리면 CPU 2 배 부하에서 최악 181 ms 를 멈춘다(실측, 부하 없으면 1.6 ms). 못 잡은 tick 에는
   채널 recvmsg 를 건너뛰고, `image_ref` 를 담은 배치를 만난 **그 스트림의 적용만** 그 배치에서 멈춘다(delta 는 앞 배치에 대한

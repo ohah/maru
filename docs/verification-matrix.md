@@ -1,5 +1,9 @@
 # 검증 매트릭스
 
+`mise exec -- zig build test-editor-hover-origins -j2`는 두 주 서버의 hover seq 충돌,
+실제 Save As 뒤 늦은 내용·timeout, 기존 포인터/진단/시그니처·보조 서버 대조를 검사한다.
+실행 경계와 미검증 범위는 [호버 출처 계획](plans/lsp-hover-response-origin.md)을 따른다.
+
 저장·정의 응답의 출처와 수명은 `mise exec -- zig build test-editor-save-pipeline test-editor-definition-origins -j2`로 검증한다.
 실제 fake subprocess의 두 root 요청 충돌, Save As 선행 저장과 닫힌 원본의 알림을 검사하며,
 직접 응답 주입·기존 방어의 소스 감사·미검증 경계는 [감사 계획](plans/lsp-save-and-response-audit.md)을 따른다.

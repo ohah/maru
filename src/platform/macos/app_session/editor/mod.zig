@@ -19770,6 +19770,128 @@ fn pumpHoverUntil(fx: *PaneFixture, max_ms: u64, ctx: anytype, comptime pred: fn
     return pred(ctx);
 }
 
+// A cancelled hover from another root must not settle the latest root's wait.
+// Both responses use the real subprocess router; MUTEHOVER makes the negative deterministic.
+test "HOVB3 different primary roots cannot settle each other's hover request" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.openRepo(allocator, "first.c", "int a;\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    try testing.expect(f.ready());
+    const ss = f.fx.session;
+    try f.fx.dir.dir.createDirPath(testing.io, "nested/.git");
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "nested/second.c", .data = "int b; // MUTEHOVER\n" });
+    const path = try std.fs.path.join(allocator, &.{ f.root_buf[0..f.root_len], "nested/second.c" });
+    defer allocator.free(path);
+    const second = (try pane_ops.openFileTermInActivePane(ss, path, .text)).term;
+    try testing.expect(pumpLspUntil(&f.fx, 3000, second, struct {
+        fn ready(t: *Term) bool {
+            return t.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.ready));
+    try testing.expect(lsp_client.readyClientFor(ss, f.term).? != lsp_client.readyClientFor(ss, second).?);
+    f.term.rt.editor_selection = editor_selection.Selection.at(1);
+    second.rt.editor_selection = editor_selection.Selection.at(1);
+    const pane = pane_ops.activePane(ss);
+    pane.active_term = std.mem.indexOfScalar(*Term, pane.terms.items, f.term).?;
+    try testing.expect(hover_client.showAtCaret(ss));
+    const first_seq = ss.editor_hover.waiting_seq;
+    hover_client.hide(ss);
+    pane.active_term = std.mem.indexOfScalar(*Term, pane.terms.items, second).?;
+    try testing.expect(hover_client.showAtCaret(ss));
+    try testing.expectEqual(first_seq, ss.editor_hover.waiting_seq);
+    try testing.expect(pumpLspUntil(&f.fx, 1500, ss, struct {
+        fn done(s: *AppSession) bool {
+            return s.editor_lsp.received_hovers >= 1;
+        }
+    }.done));
+    try testing.expect(ss.editor_hover.waiting);
+    try testing.expectEqual(@as(u64, 0), ss.editor_hover.opened_count);
+    try testing.expect(!ss.chrome_host.hover_box.open);
+    const ca = lsp_client.readyClientFor(ss, f.term).?;
+    const cb = lsp_client.readyClientFor(ss, second).?;
+    const seq = ss.editor_hover.waiting_seq;
+    // Direct ingress controls supplement, rather than replace, the subprocess reproduction.
+    hover_client.onClientResponse(ss, cb, seq + 1, "wrong seq", null);
+    try testing.expect(ss.editor_hover.waiting);
+    hover_client.onClientResponse(ss, ca, seq, null, null);
+    try testing.expect(ss.editor_hover.waiting);
+    hover_client.onClientResponse(ss, ca, seq, "foreign hover", null);
+    try testing.expect(ss.editor_hover.waiting);
+    try testing.expectEqual(@as(u64, 0), ss.editor_hover.opened_count);
+    {
+        var draw = appendPaneFrame(ss, f.leaf, second) orelse return error.EditorPaneDidNotDraw;
+        draw.dl.deinit(allocator);
+    }
+    hover_client.onClientResponse(ss, cb, seq, "owner hover", null);
+    try testing.expect(!ss.editor_hover.waiting);
+    try testing.expect(ss.chrome_host.hover_box.open);
+    var saw_owner = false;
+    for (hover_client.lines(ss)) |line| {
+        if (std.mem.eql(u8, line.text, "owner hover")) saw_owner = true;
+        try testing.expect(!std.mem.eql(u8, line.text, "foreign hover"));
+    }
+    try testing.expect(saw_owner);
+    hover_client.hide(ss);
+    hover_client.onClientResponse(ss, cb, seq, "duplicate", null);
+    try testing.expect(!ss.chrome_host.hover_box.open);
+    // An unchanged live source still gets diagnostic-only fallback after its timeout.
+    try testing.expect(hover_client.showAtCaret(ss));
+    ss.editor_hover.waiting_since_ms = 0;
+    hover_client.tick(ss);
+    try testing.expect(!ss.editor_hover.waiting);
+    try testing.expect(ss.chrome_host.hover_box.open);
+    try testing.expectEqual(@as(usize, 2), hover_client.lines(ss).len);
+    hover_client.hide(ss);
+    try testing.expect(hover_client.showAtCaret(ss));
+    const closed_seq = ss.editor_hover.waiting_seq;
+    const opened = ss.editor_hover.opened_count;
+    term_ops.closeTermAt(ss, ss.app_window.active_tab, pane, std.mem.indexOfScalar(*Term, pane.terms.items, second).?);
+    hover_client.onClientResponse(ss, cb, closed_seq, "closed source", null);
+    try testing.expect(!ss.editor_hover.waiting);
+    try testing.expectEqual(opened, ss.editor_hover.opened_count);
+}
+
+// Save As is exercised through its real actor and disk write, not an artificial epoch bump.
+test "HOVB4 Save As invalidates both delayed hover content and diagnostic timeout fallback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for ([_]bool{ false, true }) |timeout| {
+        var f = (try SmtFixture.openRepo(allocator, "before.c", "int a; // MUTEHOVER\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        defer saveAsCleanupForTest();
+        try testing.expect(f.ready());
+        const ss = f.fx.session;
+        f.term.rt.editor_selection = editor_selection.Selection.at(1);
+        try testing.expect(hover_client.showAtCaret(ss));
+        try testing.expect(ss.editor_hover.waiting);
+        const seq = ss.editor_hover.waiting_seq;
+        const origin = lsp_client.readyClientFor(ss, f.term).?;
+        const epoch = f.term.rt.editorDocument().save_target_epoch;
+        const target = try std.fs.path.join(allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+        defer allocator.free(target);
+        _ = try saveAsSelectForTest(&f.fx, f.term, target);
+        try awaitSaveAsForTest();
+        try testing.expectEqual(epoch + 1, f.term.rt.editorDocument().save_target_epoch);
+        try testing.expect(ss.editor_hover.waiting);
+        {
+            var draw = appendPaneFrame(ss, f.leaf, f.term) orelse return error.EditorPaneDidNotDraw;
+            draw.dl.deinit(allocator);
+        }
+        if (timeout) {
+            ss.editor_hover.waiting_since_ms = 0;
+            hover_client.tick(ss);
+        } else {
+            hover_client.onClientResponse(ss, origin, seq, "old target hover", null);
+        }
+        try testing.expect(!ss.editor_hover.waiting);
+        try testing.expect(!ss.chrome_host.hover_box.open);
+        try testing.expectEqual(@as(u64, 0), ss.editor_hover.opened_count);
+        try batchApplyDisk(&f.fx, "before.c", "int a; // MUTEHOVER\n");
+        try batchApplyDisk(&f.fx, "after.c", "int a; // MUTEHOVER\n");
+    }
+}
+
 test "HOVB1 호버 박스 — 포인터가 낱말에 머물면 지연 뒤 요청 → 응답 → 진단 문장 + 서버 마크다운이 낱말 아래 상자로; 낱말 안은 남고 밖은 닫힘; 상자 안 휠은 스크롤; 키·편집이 닫는다; 낡은 응답은 버린다 (제품 경계, §8.2b)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

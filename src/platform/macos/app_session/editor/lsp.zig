@@ -2060,7 +2060,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 const md: ?[]u8 = if (r.is_error) null else lsp.rpc.hoverMarkdown(self.allocator, r.result) catch null;
                 defer if (md) |m| self.allocator.free(m);
                 self.editor_lsp.received_hovers += 1;
-                editor_hover.onHoverResponse(self, seq, md, lsp.rpc.hoverRange(r.result), c.encoding);
+                editor_hover.onClientResponse(self, c, seq, md, lsp.rpc.hoverRange(r.result));
             },
         },
         .notification => |n| {

@@ -3652,6 +3652,9 @@ pub fn build(b: *std.Build) void {
                 "echo '==> codesign app (Developer ID, hardened runtime, timestamp)'; " ++
                 // 중첩 바이너리(형제 maru CLI)를 먼저 개별 서명한다(inside-out) — 번들 서명은 main executable만 봉인하므로
                 // 추가 실행파일은 따로 서명해야 hardened runtime 공증을 통과한다.
+                "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/Helpers/rg; " ++
+                "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/Resources/remote-watch/macos-aarch64/maru-remote-watch; " ++
+                "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/Resources/remote-watch/macos-x86_64/maru-remote-watch; " ++
                 "codesign --force --options runtime --timestamp --entitlements src/platform/macos/MaruMermaidRenderer.entitlements --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/Helpers/MaruMermaidRenderer.app; " ++
                 "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper; " ++
                 "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/MacOS/maru; " ++

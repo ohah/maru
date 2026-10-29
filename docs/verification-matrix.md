@@ -5351,6 +5351,17 @@ PNG/OCR은 고정된 앱의 화면 기록 권한과 독립 후보창 기록을 �
 
 공유 파싱 요청의 ensure는 같은 문서/판/언어 설정 재사용과 다른 문서·revision·native 언어 변경의 새 게시를 검사한다. 실패 완료 재사용과 마지막 뷰 닫기 후 같은 identity 재요청은 read lease·보유 결과로 문서를 유지한 상태에서 대조한다. [독립 결함 대조](../tools/editor-parse-runtime/README.md)의 `--scope sharing`은 Runtime 12개·host 6개와 Apple shared_request=1을 요구한다. UI 재시도 정책 승인이나 화면 활성화 증거는 아니다.
 
+파싱 이용 불가 원인은 `Completion.unavailableReason`과 Runtime 완료 관측이 전달한다.
+기존 워커 19개·Runtime 12개는 빈 입력·미지원 언어·입력 크기 제한·실제 progress 중단 및
+복사 OOM 재시도를 검사한다. [독립 결함 대조](../tools/editor-parse-runtime/README.md)의
+`--scope reasons`는 오분류·원인 누락·취소 뒤 이유 노출을 검사한다. C allocator 고갈과 화면
+알림·일반 입력 연결 검증으로 확대하지 않는다.
+
+비동기 파싱 실패의 자동 재초기화 차단은 요청 API에 구현했다. Runtime 12개는 준비/분석 OOM,
+revision 변경·공유 뷰 차단, 다른 문서 격리, 명시적 재시도·문법 키 변경·재열기와 Runtime 재생성의
+실제 수명을 검사한다. [독립 결함 대조](../tools/editor-parse-runtime/README.md)의 `--scope recovery`를 따른다.
+일반 입력 화면 전환·팔레트 재분석 명령·뷰 설치 실패 후 표시·IME 검증은 후속이다.
+
 ## 편집기 Cmd+화살표 줄 경계
 
 `mise exec -- zig build test-editor-command-line-contract test-editor-command-line-boundaries -j2`와

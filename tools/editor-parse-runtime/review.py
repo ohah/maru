@@ -21,7 +21,7 @@ def main():
     p = argparse.ArgumentParser()
     for name in ('output','deps','cache'):
         p.add_argument('--'+name, type=Path, required=True)
-    p.add_argument("--scope", choices=("lifetime", "observation", "leases", "view", "sharing"), default="lifetime")
+    p.add_argument("--scope", choices=("lifetime", "observation", "leases", "view", "sharing", "reasons", "recovery"), default="lifetime")
     args = p.parse_args()
     out, deps = args.output.resolve(), args.deps.resolve()
     if out.exists() or out == ROOT or ROOT in out.parents or not deps.is_dir():
@@ -52,8 +52,8 @@ def main():
     }
     if args.scope == "observation":
         mutants = {
-            'failure_discarded': (RUNTIME, 'if (entry.gate.abandon(value.tag())) entry.outcome = value.outcome();', '_ = entry.gate.abandon(value.tag());'),
-            'stale_failure_overwrites': (RUNTIME, 'if (entry.gate.abandon(value.tag())) entry.outcome = value.outcome();', '_ = entry.gate.abandon(value.tag()); entry.outcome = value.outcome();'),
+            'failure_discarded': (RUNTIME, '                    entry.outcome = value.outcome();', '                    // 결함 주입: 실패 완료를 버린다'),
+            'stale_failure_overwrites': (RUNTIME, 'if (entry.gate.abandon(value.tag())) {', 'if (entry.gate.abandon(value.tag()) or true) {'),
             'grammar_ignored': (RUNTIME, 'or !std.meta.eql(tag.input.grammar, grammar)', 'or (!std.meta.eql(tag.input.grammar, grammar) and false)'),
             'revision_ignored': (RUNTIME, 'opened.file.revision == tag.input.revision', '(opened.file.revision == tag.input.revision or true)'),
             'retry_keeps_failure': (RUNTIME, '        value.outcome = null;', '        // 결함 주입: 이전 완료 상태 보존'),
@@ -80,13 +80,29 @@ def main():
             'revision_not_in_key': (RUNTIME, 'std.meta.eql(tag.input, input)', 'blk: { var key = input; key.revision = tag.input.revision; break :blk std.meta.eql(tag.input, key); }'),
             'grammar_not_in_key': (RUNTIME, 'std.meta.eql(tag.input, input)', 'blk: { var key = input; key.grammar = tag.input.grammar; break :blk std.meta.eql(tag.input, key); }'),
             'language_not_in_key': (RUNTIME, 'entry.language == language and shareable(entry, tag)', '(entry.language == language or true) and shareable(entry, tag)'),
-            'closed_attempt_preserved': (RUNTIME, '            entry.latest = null;\n            entry.outcome = null;\n            entry.gate.invalidate();', '            entry.gate.invalidate();'),
+            'closed_attempt_preserved': (RUNTIME, '            entry.latest = null;\n            entry.outcome = null;\n            entry.unavailable_reason = null;\n            entry.gate.invalidate();', '            entry.gate.invalidate();'),
+        }
+    if args.scope == "reasons":
+        mutants = {
+            'unsupported_is_native_failure': (WORKER, 'else .unsupported_language;', 'else .native_initialization;'),
+            'limit_is_native_failure': (WORKER, 'self.unavailable_reason = .input_limit;', 'self.unavailable_reason = .native_parse;'),
+            'incomplete_is_normal_limit': (WORKER, 'self.unavailable_reason = .native_parse;', 'self.unavailable_reason = .input_limit;'),
+            'runtime_drops_reason': (RUNTIME, 'entry.unavailable_reason = value.unavailableReason();', 'entry.unavailable_reason = null;'),
+            'cancelled_exposes_reason': (WORKER, 'return if (self.outcome() == .unavailable) self.job.unavailable_reason else null;', 'return self.job.unavailable_reason;'),
+        }
+    if args.scope == "recovery":
+        mutants = {
+            'edit_recreates_failed_engine': (RUNTIME, 'if (source.owner.syntaxRecovery(source).?.blocks(recoveryKey(grammar, language))) return error.AnalysisDisabled;', 'if (source.owner.syntaxRecovery(source).?.blocks(recoveryKey(grammar, language)) and false) return error.AnalysisDisabled;'),
+            'worker_failure_not_latched': (RUNTIME, 'entry.lease.owner.syntaxRecovery(entry.lease).?.disabled = recoveryKey(value.tag().input.grammar, entry.language);', 'if (false) entry.lease.owner.syntaxRecovery(entry.lease).?.disabled = recoveryKey(value.tag().input.grammar, entry.language);'),
+            'preparation_failure_not_latched': (RUNTIME, '        recovery.disabled = recoveryKey(grammar, language);', '        if (recovery.blocks(recoveryKey(grammar, language)) and false) recovery.disabled = recoveryKey(grammar, language);'),
+            'manual_restart_keeps_disabled': (RUNTIME, '        recovery.disabled = null;', '        if (recovery.disabled == null) recovery.disabled = null;'),
+            'changed_grammar_still_disabled': (REGISTRY, 'std.meta.eql(disabled, key)', '(std.meta.eql(disabled, key) or true)'),
         }
     command = ['mise','exec','--','zig','build','test-editor-parse-runtime','test-editor-parse-host','test-editor-parse-main-queue','--cache-dir',str(args.cache.resolve()),'-j2','--verbose']
     if args.scope == "view":
         command.insert(command.index('--cache-dir'), 'test-editor-parse-view')
         command.insert(command.index('--cache-dir'), 'test-editor-parse-view-regression')
-    if args.scope == "leases":
+    if args.scope in ("leases", "reasons"):
         command.insert(command.index('--cache-dir'), 'test-editor-parse-worker')
     env = dict(os.environ, ZIG_LOCAL_PKG_DIR=str(deps))
     rows = []
@@ -105,7 +121,7 @@ def main():
             text = log.read_text()
             tests = list(dict.fromkeys(re.findall(r'info\(verbose\): [^\n]*?(\S+/test) --maru-expect-tests=(?:5|6|12|19|35)',text)))
             natives = re.findall(r'info\(verbose\): (\S+/maru-parse-main-queue)\s*$',text,re.M)
-            if len(tests)!=(4 if args.scope == 'view' else 3 if args.scope == 'leases' else 2) or not natives: raise RuntimeError('missing actual executions: '+name)
+            if len(tests)!=(4 if args.scope == 'view' else 3 if args.scope in ('leases', 'reasons') else 2) or not natives: raise RuntimeError('missing actual executions: '+name)
             archived = {}
             for i, binary in enumerate(tests+[natives[-1]]):
                 path = Path(binary)

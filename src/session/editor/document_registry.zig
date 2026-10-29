@@ -18,6 +18,15 @@ pub const Lease = struct {
     id: u64,
     kind: Kind,
 };
+/// 편집 판과 독립적인 구문 초기화 실패 기록. 준비 OOM에도 남도록 문서에 직접 둔다.
+/// worker나 영속 저장에는 넘기지 않으며 문법 설정 변경·명시적 재분석·재열기로 해제한다.
+pub const SyntaxRecovery = struct {
+    pub const Key = struct { grammar: syntax_request.Grammar, native_language: usize };
+    disabled: ?Key = null,
+    pub fn blocks(self: *const SyntaxRecovery, key: Key) bool {
+        return if (self.disabled) |disabled| std.meta.eql(disabled, key) else false;
+    }
+};
 const Reference = struct { id: u64, kind: Kind };
 const Document = struct {
     state: document_state.State,
@@ -27,6 +36,7 @@ const Document = struct {
     syntax_origin_last: u64 = 0,
     // runtime을 다시 만들어도 같은 문서 identity의 요청 번호를 되감지 않는다. 사용 전에는 할당하지 않는다.
     syntax_request_gate: ?*syntax_request.Gate = null,
+    syntax_recovery: SyntaxRecovery = .{},
 };
 const Slot = struct { generation: u64 = 1, document: ?*Document = null };
 
@@ -108,9 +118,11 @@ pub const Registry = struct {
     /// 기존 참조가 살아 있을 때만 새 수명을 만든다. 실패 시 기존 연결 수는 변하지 않는다.
     pub fn retain(self: *Registry, source: Lease, kind: Kind) Error!Lease {
         const doc = self.find(source) orelse return error.StaleReference;
+        const reopening = kind == .view and self.viewCount(source).? == 0;
         const id = try self.nextId();
         try doc.refs.append(self.allocator, .{ .id = id, .kind = kind });
         self.last_reference = id;
+        if (reopening) doc.syntax_recovery = .{};
         return .{ .owner = self, .document = source.document, .id = id, .kind = kind };
     }
 
@@ -151,6 +163,12 @@ pub const Registry = struct {
         gate.* = .{};
         doc.syntax_request_gate = gate;
         return gate;
+    }
+
+    /// 주소 안정 문서에 붙은 main 전용 실패 상태다. 조회·실패 기록은 할당하지 않는다.
+    pub fn syntaxRecovery(self: *const Registry, lease: Lease) ?*SyntaxRecovery {
+        const doc = self.find(lease) orelse return null;
+        return &doc.syntax_recovery;
     }
 
     pub fn viewCount(self: *const Registry, lease: Lease) ?usize {

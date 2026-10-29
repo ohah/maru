@@ -113,3 +113,35 @@ Runtime 12개는 공유 뷰의 pending/ready 재사용을 할당이 실패하도
 
 다섯 실제 결함은 공유 입력 재게시·revision 무시·grammar 무시·native 언어 무시·닫힌 시도의
 실패 유지다. 정상 전후 대조와 실행 assertion을 요구하며, 일반 입력·실패 알림 정책은 별도다.
+
+## 이용 불가 원인
+
+`Completion.unavailableReason`과 `Runtime.observe().finished.unavailable_reason`은 미지원 문법,
+기존 입력 크기 제한, native 초기화 실패, 취소 없는 분석 미완료를 구분한다. 복사 OOM은 기존
+Outcome을 유지하며 이유는 null이다. 새 시도에서 옛 이유를 지우고, 낡은 실패는 최신 이유를
+덮어쓰지 않는다. 화면 알림이나 재시도 정책을 활성화하는 API는 아니다.
+
+```sh
+python3 tools/editor-parse-runtime/review.py --scope reasons --output /tmp/new-parse-reasons --deps /path/to/deps --cache /path/to/cache
+```
+
+워커 19개·Runtime 12개·호스트 6개와 실제 메인 큐 probe를 실행한다. 미지원 문법·크기 제한·
+progress 중단의 오분류, Runtime 원인 누락, 취소 뒤 옛 원인 노출의 실제 결함을 각각
+컴파일·실행하고 정상 전후 대조군을 요구한다. C allocator 고갈을 직접 재현한 증거는 아니다.
+
+## 실패 후 자동 재초기화 차단
+
+`ensure`는 실패한 문법을 편집 revision 변경만으로 다시 초기화하지 않는다. 문서가 직접 보관하는
+`SyntaxRecovery` 덕분에 공유 뷰와 Runtime 재생성 뒤에도 기록이 남는다. 알려진 실패에서
+`dispatch.ensure`는 worker를 다시 만들기 전에 차단한다. 정상 엔진의 편집 분석은 계속 유지한다.
+명시적 `submit`, 문법 설정/native 언어 변경, 마지막 뷰 닫기 뒤 재열기가 초기화 계기다.
+일반 실패는 로그로 기록하며 토스트를 추가하지 않는다. 실제 팔레트 명령과 입력 화면 전환은 후속이다.
+
+```sh
+python3 tools/editor-parse-runtime/review.py --scope recovery --output /tmp/new-parse-recovery --deps /path/to/deps --cache /path/to/cache
+```
+
+Runtime 12개·호스트 6개와 실제 main queue probe를 실행한다. 실제 copy OOM 뒤 편집·공유 뷰
+차단과 다른 문서 격리, 명시적 재분석·설정 변경·재열기, Entry/Gate 준비 OOM과 Runtime 재생성을
+검사한다. 편집 차단·worker 실패 기록·준비 실패 기록·명시적 해제·문법 키의 다섯 실제 결함을
+컴파일·실행하고 정상 전후 대조군을 요구한다. UI/HID·IME·native malloc 고갈 검증은 아니다.

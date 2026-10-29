@@ -10,6 +10,8 @@ const Identity = maru.session.editor.document_registry.DocumentIdentity;
 
 pub const Mode = enum { cold, incremental, reused };
 pub const Outcome = enum { ready, cancelled, out_of_memory, unavailable };
+/// 정상적인 무색 처리와 실제 native 실패를 UI 정책과 독립적으로 구분한다.
+pub const UnavailableReason = enum { unsupported_language, input_limit, native_initialization, native_parse };
 pub const TestAudit = struct {
     main_thread: std.Thread.Id,
     created: std.atomic.Value(usize) = .init(0),
@@ -42,6 +44,7 @@ const Job = struct {
     language: syntax.Language,
     cancellation: syntax.Cancellation = .{},
     outcome: Outcome = .cancelled,
+    unavailable_reason: ?UnavailableReason = null,
     provider: ?syntax.Provider = null,
     basis: ?Basis = null,
     mode: Mode = .cold,
@@ -50,6 +53,7 @@ const Job = struct {
         if (self.cancellation.isRequested()) return;
         if (self.snapshot.byteLen() > syntax.max_parse_bytes) {
             self.outcome = .unavailable;
+            self.unavailable_reason = .input_limit;
             return;
         }
         const bytes = self.snapshot.copyRange(allocator, 0, self.snapshot.byteLen()) catch {
@@ -86,6 +90,7 @@ const Job = struct {
         } else {
             parsed = syntax.Provider.initCancellable(bytes, self.language, &self.cancellation) orelse {
                 self.outcome = if (self.cancellation.isRequested()) .cancelled else .unavailable;
+                self.unavailable_reason = if (syntax.supportsLanguage(self.language)) .native_initialization else .unsupported_language;
                 return;
             };
             state.recordNative(true);
@@ -97,6 +102,7 @@ const Job = struct {
         };
         if (self.cancellation.isRequested() or !complete) {
             self.outcome = if (self.cancellation.isRequested()) .cancelled else .unavailable;
+            self.unavailable_reason = .native_parse;
             parsed.deinit();
             state.recordNative(false);
             return;
@@ -235,6 +241,10 @@ pub const Completion = struct {
     }
     pub fn outcome(self: Completion) Outcome {
         return self.job.outcome;
+    }
+    /// 완료 후 취소로 바뀐 결과에는 이전 실패 원인을 노출하지 않는다.
+    pub fn unavailableReason(self: Completion) ?UnavailableReason {
+        return if (self.outcome() == .unavailable) self.job.unavailable_reason else null;
     }
     pub fn provider(self: Completion) ?*const syntax.Provider {
         if (self.job.outcome != .ready) return null;

@@ -160,6 +160,11 @@ const Slot = struct {
     lang: Language = .other,
 };
 
+/// 미지원 문법과 native 초기화 실패를 구분하되 지원 목록은 같은 관문에서 판정한다.
+pub fn supportsLanguage(lang: Language) bool {
+    return slotFor(lang) != null;
+}
+
 /// **지원 언어의 관문은 이 함수 하나다.** 처음에는 grammar를 고르는 `switch`와 쿼리 캐시를 고르는
 /// `switch`가 따로 있었는데, 적대적 검증이 그 둘이 **서로 가려 준다**는 것을 보였다 — 앞 관문을
 /// 열어 `.other`도 zig grammar로 파도록 뒤집었는데 뒤 관문이 막아 판정자가 **아무 차이도 못 봤다**

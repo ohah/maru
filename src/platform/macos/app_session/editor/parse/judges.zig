@@ -213,6 +213,10 @@ test "parse runtime 최초 문서 등록 OOM은 request 참조를 남기지 않�
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(error.OutOfMemory, owner.submit(view, grammar, .zig));
     try std.testing.expectEqual(@as(usize, 0), owner.entries.items.len);
+    try std.testing.expect(try Runtime.automaticDisabled(view, grammar, .zig));
+    const before_blocked = failing.alloc_index;
+    try std.testing.expectError(error.AnalysisDisabled, owner.ensure(view, grammar, .zig));
+    try std.testing.expectEqual(before_blocked, failing.alloc_index);
     failing.fail_index = std.math.maxInt(usize);
     // Keeper의 ref 배열 여유를 먼저 준비해 다음 실패가 문서 Gate 할당임을 확정한다.
     const read = try docs.retain(view, .read);
@@ -220,6 +224,11 @@ test "parse runtime 최초 문서 등록 OOM은 request 참조를 남기지 않�
     registry_fail.fail_index = registry_fail.alloc_index;
     try std.testing.expectError(error.OutOfMemory, owner.submit(view, grammar, .zig));
     try std.testing.expectEqual(@as(usize, 0), owner.entries.items.len);
+    try std.testing.expect(try Runtime.automaticDisabled(view, grammar, .zig));
+    try std.testing.expectError(error.AnalysisDisabled, owner.ensure(view, grammar, .zig));
+    try owner.deinit();
+    owner = try Runtime.init(failing.allocator(), .{});
+    try std.testing.expectError(error.AnalysisDisabled, owner.ensure(view, grammar, .zig));
     try std.testing.expect(try docs.release(view));
     open = false;
 }
@@ -263,6 +272,16 @@ test "parse runtime 실패 완료와 게시 대기를 구분하고 같은 입력
     var owner = try Runtime.init(a, .{ .copy_allocator = copies.allocator() });
     defer owner.deinit() catch unreachable;
     try std.testing.expect(owner.observe(identity, grammar, .zig) == .none);
+    // 미지원은 완료 큐를 지나도 native 실패로 바뀌지 않고, 재시도는 이전 이유를 지운다.
+    copies.fail_index = std.math.maxInt(usize);
+    _ = try owner.submit(view, grammar, .other);
+    waitCompletion(&owner);
+    owner.poll();
+    const unsupported = owner.observe(identity, grammar, .other).finished;
+    try std.testing.expectEqual(dispatch.worker.Outcome.unavailable, unsupported.outcome);
+    try std.testing.expectEqual(@as(?dispatch.worker.UnavailableReason, .unsupported_language), unsupported.unavailable_reason);
+    try std.testing.expect(!try Runtime.automaticDisabled(view, grammar, .other));
+    copies.fail_index = copies.alloc_index;
     const first = try owner.submit(view, grammar, .zig);
     try std.testing.expectEqual(first, owner.observe(identity, grammar, .zig).pending);
     waitCompletion(&owner);
@@ -271,6 +290,7 @@ test "parse runtime 실패 완료와 게시 대기를 구분하고 같은 입력
     const failed = owner.observe(identity, grammar, .zig).finished;
     try std.testing.expectEqual(first, failed.tag);
     try std.testing.expectEqual(dispatch.worker.Outcome.out_of_memory, failed.outcome);
+    try std.testing.expectEqual(@as(?dispatch.worker.UnavailableReason, null), failed.unavailable_reason);
     try std.testing.expect(owner.ready(identity, grammar, .zig) == null);
     var other = grammar;
     other.generation += 1;
@@ -465,6 +485,62 @@ test "parse runtime 공유 실패는 재게시하지 않고 마지막 뷰 닫기
     const failed = try owner.ensure(source, grammar, .zig);
     try std.testing.expect(!failed.published);
     try std.testing.expectEqual(retry, failed.tag);
+    copies.fail_index = std.math.maxInt(usize);
+    // 메모리가 회복되어도 revision 변경과 새 분할은 실패한 엔진의 재초기화 계기가 아니다.
+    try std.testing.expect(try Runtime.automaticDisabled(source, grammar, .zig));
+    {
+        const independent = try document(&docs);
+        defer _ = docs.release(independent) catch unreachable;
+        try std.testing.expect((try owner.ensure(independent, grammar, .zig)).published);
+        try waitReady(&owner, docs.identity(independent).?);
+        try std.testing.expect(!try Runtime.automaticDisabled(independent, grammar, .zig));
+    }
+    try edit(&docs, source);
+    const revision = docs.get(source).?.opened.?.file.revision;
+    {
+        const peer = try docs.retain(source, .view);
+        defer _ = docs.release(peer) catch unreachable;
+        try std.testing.expectError(error.AnalysisDisabled, owner.ensure(source, grammar, .zig));
+        try std.testing.expectError(error.AnalysisDisabled, owner.ensure(peer, grammar, .zig));
+        try std.testing.expectEqual(revision, docs.get(source).?.opened.?.file.revision);
+        try std.testing.expectEqual(@as(?dispatch.worker.Completion, null), try owner.acquire(docs.identity(source).?, grammar, .zig));
+    }
+    // 명시적 재분석만 해제한다. 성공한 엔진은 그 뒤의 일반 편집을 계속 분석한다.
+    _ = try owner.submit(source, grammar, .zig);
+    try waitReady(&owner, docs.identity(source).?);
+    try std.testing.expect(!try Runtime.automaticDisabled(source, grammar, .zig));
+    try edit(&docs, source);
+    try std.testing.expect((try owner.ensure(source, grammar, .zig)).published);
+    try waitReady(&owner, docs.identity(source).?);
+    // 문법 설정 세대와 실제 native 언어 변경은 명시적인 초기화 계기다.
+    copies.fail_index = copies.alloc_index;
+    _ = try owner.submit(source, grammar, .zig);
+    waitCompletion(&owner);
+    owner.poll();
+    var settings = grammar;
+    settings.generation += 1;
+    copies.fail_index = std.math.maxInt(usize);
+    const changed_settings = owner.ensure(source, settings, .zig) catch return error.TestUnexpectedResult;
+    try std.testing.expect(changed_settings.published);
+    waitCompletion(&owner);
+    owner.poll();
+    try std.testing.expect(owner.ready(docs.identity(source).?, settings, .zig) != null);
+    copies.fail_index = copies.alloc_index;
+    _ = try owner.submit(source, settings, .zig);
+    waitCompletion(&owner);
+    owner.poll();
+    copies.fail_index = std.math.maxInt(usize);
+    const changed_language = owner.ensure(source, settings, .json) catch return error.TestUnexpectedResult;
+    try std.testing.expect(changed_language.published);
+    waitCompletion(&owner);
+    owner.poll();
+    try std.testing.expect(owner.ready(docs.identity(source).?, settings, .json) != null);
+    // 같은 문법의 실패를 남기고 마지막 뷰를 닫아야 재열기의 초기화도 검사된다.
+    copies.fail_index = copies.alloc_index;
+    _ = try owner.submit(source, grammar, .zig);
+    waitCompletion(&owner);
+    owner.poll();
+    try std.testing.expect(try Runtime.automaticDisabled(source, grammar, .zig));
     copies.fail_index = std.math.maxInt(usize);
     _ = try docs.release(source);
     open = false;

@@ -15,7 +15,11 @@ fn allocator() std.mem.Allocator {
 }
 /// 내부 연결 API다. 일반 편집기의 기존 점진 파싱 경로는 아직 이 API로 전환하지 않는다.
 pub fn submit(source: registry.Lease, grammar: request.Grammar, language: syntax.Language) !request.Request {
-    const owner = try getOrStart();
+    _ = try runtime.Runtime.automaticDisabled(source, grammar, language);
+    const owner = getOrStart() catch |err| {
+        runtime.Runtime.preparationFailed(source, grammar, language, err);
+        return err;
+    };
     return owner.submit(source, grammar, language) catch |err| {
         if (owner.entries.items.len == 0) shutdown();
         return err;
@@ -28,7 +32,13 @@ fn getOrStart() !*runtime.Runtime {
 }
 /// 같은 문서 판을 보는 뷰는 새 작업을 게시하지 않는다. 강제 재시도는 submit으로 분리한다.
 pub fn ensure(source: registry.Lease, grammar: request.Grammar, language: syntax.Language) !runtime.Submission {
-    const owner = try getOrStart();
+    const disabled = try runtime.Runtime.automaticDisabled(source, grammar, language);
+    // 비어 종료된 runtime을 타이핑마다 다시 만들지 않는다. 살아 있는 완료 조회는 기존 owner가 맡는다.
+    if (active == null and disabled) return error.AnalysisDisabled;
+    const owner = getOrStart() catch |err| {
+        runtime.Runtime.preparationFailed(source, grammar, language, err);
+        return err;
+    };
     return owner.ensure(source, grammar, language) catch |err| {
         if (owner.entries.items.len == 0) shutdown();
         return err;

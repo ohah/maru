@@ -272,8 +272,12 @@ test "parse worker 빈 입력과 미지원 언어를 구분한다" {
     var service = try Service.init(a, .{});
     defer service.deinit() catch unreachable;
     var gate: request.Gate = .{};
-    for ([_]syntax.Language{ .zig, .other }) |language| {
-        var source = try buffer.Buffer.init(a, if (language == .zig) "" else "text");
+    const oversized = try a.alloc(u8, syntax.max_parse_bytes + 1);
+    defer a.free(oversized);
+    @memset(oversized, 'x');
+    for (0..3) |kind| {
+        const language: syntax.Language = if (kind == 1) .other else .zig;
+        var source = try buffer.Buffer.init(a, if (kind == 0) "" else if (kind == 1) "text" else oversized);
         defer source.deinit();
         var snapshot = source.snapshot();
         var input = test_input;
@@ -284,8 +288,10 @@ test "parse worker 빈 입력과 미지원 언어를 구분한다" {
         };
         var result = testTake(&service);
         defer result.release();
-        try std.testing.expectEqual(if (language == .zig) Outcome.ready else Outcome.unavailable, result.outcome());
-        try std.testing.expectEqual(language == .zig, result.accept(&gate));
+        try std.testing.expectEqual(if (kind == 0) Outcome.ready else Outcome.unavailable, result.outcome());
+        const expected_reason: ?worker.UnavailableReason = if (kind == 0) null else if (kind == 1) .unsupported_language else .input_limit;
+        try std.testing.expectEqual(expected_reason, result.unavailableReason());
+        try std.testing.expectEqual(kind == 0, result.accept(&gate));
     }
 }
 
@@ -296,15 +302,23 @@ test "parse worker 완료 후에도 take 전 취소된 결과를 수락하지 �
     var service = try Service.init(a, .{});
     defer service.deinit() catch unreachable;
     var gate: request.Gate = .{};
-    _ = try testQueue(&service, &gate, test_input, source, null);
-    waitReady(&service);
-    gate.invalidate();
-    service.cancelDocument(test_input.document);
-    var result = service.take().?;
-    defer result.release();
-    try std.testing.expectEqual(Outcome.cancelled, result.outcome());
-    try std.testing.expect(!result.accept(&gate));
-    try std.testing.expect(result.provider() == null);
+    // 성공뿐 아니라 이미 원인이 기록된 미지원 완료도 취소되면 그 이유를 숨겨야 한다.
+    for ([_]syntax.Language{ .zig, .other }) |language| {
+        var snapshot = source.snapshot();
+        _ = service.submit(&gate, test_input, &snapshot, language) catch |err| {
+            snapshot.deinit();
+            return err;
+        };
+        waitReady(&service);
+        gate.invalidate();
+        service.cancelDocument(test_input.document);
+        var result = service.take().?;
+        defer result.release();
+        try std.testing.expectEqual(Outcome.cancelled, result.outcome());
+        try std.testing.expectEqual(@as(?worker.UnavailableReason, null), result.unavailableReason());
+        try std.testing.expect(!result.accept(&gate));
+        try std.testing.expect(result.provider() == null);
+    }
 }
 
 test "parse worker 새 입력은 아직 빌리지 않은 이전 완료도 퇴역시킨다" {
@@ -417,6 +431,7 @@ test "parse worker 증분 native 중단은 남은 이전 트리를 성공으로 
     var stopped = testTake(&service);
     defer stopped.release();
     try std.testing.expectEqual(Outcome.unavailable, stopped.outcome());
+    try std.testing.expectEqual(worker.UnavailableReason.native_parse, stopped.unavailableReason().?);
     try std.testing.expect(!stopped.accept(&gate));
     try std.testing.expect(stopped.provider() == null);
 }

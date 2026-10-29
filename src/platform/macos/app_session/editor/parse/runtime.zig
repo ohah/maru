@@ -9,7 +9,7 @@ const request = maru.session.editor.syntax.request;
 pub const Observation = union(enum) {
     none,
     pending: request.Request,
-    finished: struct { tag: request.Request, outcome: worker.Outcome },
+    finished: struct { tag: request.Request, outcome: worker.Outcome, unavailable_reason: ?worker.UnavailableReason },
 };
 /// published는 이번 호출이 새 작업을 게시했는지다. tag 자체는 자원을 보유하지 않는다.
 pub const Submission = struct { tag: request.Request, published: bool };
@@ -21,6 +21,7 @@ const Entry = struct {
     current: ?worker.Completion = null,
     latest: ?request.Request = null,
     outcome: ?worker.Outcome = null,
+    unavailable_reason: ?worker.UnavailableReason = null,
 };
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
@@ -42,6 +43,20 @@ pub const Runtime = struct {
         if (source.owner.viewCount(source).? == 0) return error.NoViews;
         return .{ .document = source.owner.identity(source).?, .revision = opened.file.revision, .grammar = grammar };
     }
+    fn recoveryKey(grammar: request.Grammar, language: syntax.Language) registry.SyntaxRecovery.Key {
+        return .{ .grammar = grammar, .native_language = @backingInt(language) };
+    }
+    /// 현재 편집 판이 달라도 같은 문법 초기화 실패는 유지한다. 조회는 새 시도를 만들지 않는다.
+    pub fn automaticDisabled(source: registry.Lease, grammar: request.Grammar, language: syntax.Language) !bool {
+        _ = try currentInput(source, grammar);
+        return source.owner.syntaxRecovery(source).?.blocks(recoveryKey(grammar, language));
+    }
+    /// worker 자체를 세우지 못한 경우도 이미 열린 문서의 무할당 기록으로 남긴다.
+    pub fn preparationFailed(source: registry.Lease, grammar: request.Grammar, language: syntax.Language, err: anyerror) void {
+        const recovery = source.owner.syntaxRecovery(source) orelse return;
+        recovery.disabled = recoveryKey(grammar, language);
+        std.log.scoped(.editor_parse).warn("syntax preparation disabled: {s}", .{@errorName(err)});
+    }
     fn shareable(entry: *const Entry, tag: request.Request) bool {
         if (entry.gate.wanted) |wanted| return std.meta.eql(wanted, tag) and
             (entry.gate.phase == .awaiting or entry.gate.phase == .consumed);
@@ -49,7 +64,7 @@ pub const Runtime = struct {
         return entry.outcome != null and entry.outcome.? != .ready;
     }
     /// 공유 뷰의 같은 입력은 이미 게시한 요청을 재사용한다. 강제 재시도는 기존 submit을 쓴다.
-    /// 준비 오류는 기존 submit 오류로 반환하며, 호출자가 재시도 시점을 정한다.
+    /// 실패한 문법은 편집 판이 바뀌어도 재초기화하지 않는다. 명시적 재시도는 submit을 쓴다.
     pub fn ensure(self: *Runtime, source: registry.Lease, grammar: request.Grammar, language: syntax.Language) !Submission {
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread);
         const input = try currentInput(source, grammar);
@@ -58,12 +73,22 @@ pub const Runtime = struct {
                 return .{ .tag = tag, .published = false };
             }
         };
+        if (source.owner.syntaxRecovery(source).?.blocks(recoveryKey(grammar, language))) return error.AnalysisDisabled;
         return .{ .tag = try self.submit(source, grammar, language), .published = true };
     }
     /// 내부 준비 실패는 caller로 반환한다. 본문/Undo를 수정하거나 동기 파싱으로 우회하지 않는다.
     pub fn submit(self: *Runtime, source: registry.Lease, grammar: request.Grammar, language: syntax.Language) !request.Request {
         std.debug.assert(std.Thread.getCurrentId() == self.main_thread);
         const input = try currentInput(source, grammar);
+        const recovery = source.owner.syntaxRecovery(source).?;
+        // submit은 명시적 초기화 계기다. Entry/Gate 준비부터 실패해도 문서에 기록을 남긴다.
+        recovery.disabled = null;
+        return self.submitPrepared(source, language, input) catch |err| {
+            preparationFailed(source, grammar, language, err);
+            return err;
+        };
+    }
+    fn submitPrepared(self: *Runtime, source: registry.Lease, language: syntax.Language, input: request.Input) !request.Request {
         const owner = @constCast(source.owner);
         const opened = owner.get(source).?.opened.?;
         const identity = input.document;
@@ -87,6 +112,7 @@ pub const Runtime = struct {
         // 같은 본문 재시도도 새 시도다. 준비 실패에 이전 완료 상태를 다시 공개하지 않는다.
         value.latest = null;
         value.outcome = null;
+        value.unavailable_reason = null;
         var snapshot = opened.file.snapshot();
         errdefer snapshot.deinit();
         const tag = if (value.current) |*previous|
@@ -122,7 +148,7 @@ pub const Runtime = struct {
         const entry = self.find(identity) orelse return .none;
         const tag = entry.latest orelse return .none;
         if (!matches(entry, tag) or entry.language != language or !std.meta.eql(tag.input.grammar, grammar)) return .none;
-        if (entry.outcome) |outcome| return .{ .finished = .{ .tag = tag, .outcome = outcome } };
+        if (entry.outcome) |outcome| return .{ .finished = .{ .tag = tag, .outcome = outcome, .unavailable_reason = entry.unavailable_reason } };
         return .{ .pending = tag };
     }
     pub fn poll(self: *Runtime) void {
@@ -143,7 +169,14 @@ pub const Runtime = struct {
             }
             if (value.outcome() != .ready) {
                 // 낡은 실패가 새 요청의 대기를 소비하거나 원인을 덮어쓰면 안 된다.
-                if (entry.gate.abandon(value.tag())) entry.outcome = value.outcome();
+                if (entry.gate.abandon(value.tag())) {
+                    entry.outcome = value.outcome();
+                    entry.unavailable_reason = value.unavailableReason();
+                    if (value.outcome() == .out_of_memory or value.unavailableReason() == .native_initialization or value.unavailableReason() == .native_parse) {
+                        entry.lease.owner.syntaxRecovery(entry.lease).?.disabled = recoveryKey(value.tag().input.grammar, entry.language);
+                        std.log.scoped(.editor_parse).warn("syntax analysis disabled for document {d}: {s}/{s}", .{ entry.identity.slot, @tagName(value.outcome()), if (value.unavailableReason()) |reason| @tagName(reason) else "none" });
+                    }
+                }
                 value.release();
                 continue;
             }
@@ -154,6 +187,7 @@ pub const Runtime = struct {
             if (entry.current) |*old| old.release();
             entry.current = value;
             entry.outcome = .ready;
+            entry.unavailable_reason = null;
         }
         self.sweep();
     }
@@ -170,6 +204,7 @@ pub const Runtime = struct {
             // 같은 문서를 read lease로 다시 열어도 닫힌 시도의 완료/실패를 새 뷰에 재사용하지 않는다.
             entry.latest = null;
             entry.outcome = null;
+            entry.unavailable_reason = null;
             entry.gate.invalidate();
             self.service.cancelDocument(entry.identity);
             if (entry.current) |*current| current.release();

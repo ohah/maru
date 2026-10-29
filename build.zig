@@ -7137,6 +7137,14 @@ pub fn build(b: *std.Build) void {
     b.step("test-editor-parse-host", "Verify closed AppSession parse document reclamation").dependOn(&run_parse_host.step);
     test_step.dependOn(&run_parse_host.step);
     macos_only_test_step.dependOn(&run_parse_host.step);
+    const parse_input_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"ASYNCINPUT"} });
+    const run_parse_input = b.addRunArtifact(parse_input_tests);
+    run_parse_input.setCwd(b.path("."));
+    run_parse_input.addArg(if (target.result.os.tag == .macos) "--maru-expect-tests=10" else "--maru-expect-tests=7");
+    run_parse_input.addArg(if (target.result.os.tag == .macos) "--maru-expect-passed=10" else "--maru-expect-passed=1");
+    b.step("test-editor-parse-input", "Verify actual asynchronous editor input and view completion").dependOn(&run_parse_input.step);
+    test_step.dependOn(&run_parse_input.step);
+    macos_only_test_step.dependOn(&run_parse_input.step);
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
     run_editor_tests.step.dependOn(&install_fake_lsp.step);

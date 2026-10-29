@@ -6274,6 +6274,8 @@ pub const AppSession = struct {
     editor_save_close: ?@import("app_session/editor/save/close.zig").State = null,
     /// 덮어쓰기 확인을 사이에 두고 **고른 이름을 들고 있는 자리**(U2 — 그 타입의 doc).
     pending_untitled_save: editor_untitled_save_ops.Pending = .{},
+    /// 제품은 비동기 구문 경로를 쓴다. 기존 동기 계약 대조군만 생성 전에 명시적으로 바꾼다.
+    editor_syntax_async: bool = true,
     /// LSP seam 1단(§8.2a) — 클라이언트·신뢰 캐시·프롬프트 주인.
     editor_lsp: editor_ops.lsp_client.State = .{},
     /// 호버 박스 상태(tooling §8.2b) — 포인터 정지·요청 대기·열린 줄.
@@ -11873,6 +11875,7 @@ pub const AppSession = struct {
             .navigate_back => _ = editor_ops.navigateBack(self), // §5.2 — 갈 곳이 없으면 무동작
             .navigate_forward => _ = editor_ops.navigateForward(self),
             .trigger_parameter_hints => _ = editor_ops.signature_client.triggerManual(self), // §8.2d
+            .reparse_syntax => _ = editor_ops.parse_client.restart(self),
             .format_document => _ = editor_ops.format_client.formatDocument(self), // §8.2e
             .rename_symbol => _ = editor_ops.rename_client.startAtCaret(self), // §8.2f
             .undo_workspace_edit => editor_ops.rename_client.undoLast(self), // §8.2f
@@ -24981,6 +24984,7 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
+        @import("app_session/editor/parse/client.zig").releaseWindow(self);
         // 일반 창 닫기는 main queue에서 회수한다. 확정 Quit/fixture 종료는 allocator보다 먼저 정산한다.
         if (live_app_sessions == 1 and (builtin.is_test or appQuitting())) @import("app_session/editor/parse/dispatch.zig").shutdown();
         @import("app_session/find_ime.zig").finish(self);

@@ -140,6 +140,7 @@ pub const entries = [_]Entry{
     .{ .action = .navigate_back, .key = "navigate_back", .title = "Editor: Go Back", .search_ko = "편집기 뒤로 이동" },
     .{ .action = .navigate_forward, .key = "navigate_forward", .title = "Editor: Go Forward", .search_ko = "편집기 앞으로 이동" },
     .{ .action = .trigger_parameter_hints, .key = "trigger_parameter_hints", .title = "Editor: Trigger Parameter Hints", .search_ko = "편집기 매개변수 힌트" },
+    .{ .action = .reparse_syntax, .key = "reparse_syntax", .title = "Developer: Reparse Syntax", .search_ko = "개발자 구문 분석 다시 시작 재분석 복구" },
     .{ .action = .format_document, .key = "format_document", .title = "Editor: Format Document", .search_ko = "편집기 문서 서식 정리" },
     .{ .action = .rename_symbol, .key = "rename_symbol", .title = "Editor: Rename Symbol", .search_ko = "편집기 심볼 이름 바꾸기" },
     .{ .action = .undo_workspace_edit, .key = "undo_workspace_edit", .title = "Editor: Undo Last Rename", .search_ko = "편집기 마지막 이름 바꾸기 취소" },

@@ -478,12 +478,11 @@ pub fn poll() void {
                     };
                 };
                 @import("../backup.zig").markClean(session, term, saved, if (op.untitled_number) |number| .{ .untitled = number } else .{ .path = .{ .path = op.source_path.?, .disk_hash = op.source_disk_hash } });
-                term.rt.editor_syntax.deinit(session.allocator);
                 const old = term.rt.editor_grammar;
                 term.rt.editor_grammar = maru.session.editor.language.grammarForPath(prepared.work.?.path);
                 editor.guides_client.onGrammarChanged(term, old);
                 term.rt.editor_syntax_folds_applied = false;
-                term.rt.editor_syntax = editor.syntax_color.open(term.rt.editorDocument().opened.?.file.content, term.rt.editor_grammar);
+                editor.resetSyntaxForGrammar(session, term);
                 _ = @import("../lsp.zig").noteSaved(session, term, saved);
                 if (session.editor_save_close) |*state| if (std.meta.eql(state.identity, identity(op.lease))) {
                     state.epoch = term.rt.editorDocument().save_target_epoch;

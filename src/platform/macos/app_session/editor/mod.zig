@@ -86,6 +86,7 @@ pub fn contentHash(bytes: []const u8) u64 {
 pub const syntax_color = @import("syntax.zig");
 /// 완료 전달과 문서 수명의 내부 연결 API. 기본 입력 파싱 전환은 후속이다.
 pub const parse_runtime = @import("parse/dispatch.zig");
+pub const parse_client = @import("parse/client.zig");
 pub const diagnostics = @import("diagnostics.zig");
 pub const lsp_client = @import("lsp.zig");
 const trust_store = @import("trust_store.zig");
@@ -689,7 +690,34 @@ fn inlayWindow(self: *AppSession, term: *Term) chrome_editor.content.InlayWindow
 /// 만든다**(`installFoldRanges` → `rebuildVisible`). 이 단계가 `syntaxColors` 안에 있을 때는 프레임이 `lines` 를 먼저
 /// 잡고 `buildPaneOps` 인자를 평가하다 여기에 닿아, 방금 놓은 배열을 그대로 그렸다 — **해제된 메모리를 읽었다**
 /// (적대적 검증 2026-09-24: 들여쓰기 범위로 접은 채 파싱이 끝나는 프레임, Debug 에서 `0xaaaa…` 주소 segfault).
+/// 설치 사건은 화면을 무효화한다. 접힘 승격은 다음 프레임에서 줄 배열을 빌리기 전에 수행한다.
+pub fn syntaxDidComplete(self: *AppSession, term: *Term) void {
+    term.rt.editor_syntax_folds_applied = false;
+    if (self.chrome_host.symbol_picker.open) recomputeSymbolPicker(self);
+    self.metal_dirty = true;
+}
+
+pub fn resetSyntaxForGrammar(self: *AppSession, term: *Term) void {
+    if (term.rt.editor_syntax.async_view.enabled) {
+        parse_client.refresh(self, term);
+    } else {
+        term.rt.editor_syntax.deinit(self.allocator);
+        term.rt.editor_syntax = syntax_color.open(term.rt.editorDocument().opened.?.file.content, term.rt.editor_grammar);
+    }
+}
+
+fn retainLegacySyntaxForSpecialView(self: *AppSession, term: *Term) void {
+    if (!term.rt.editor_syntax.async_view.enabled or (term.rt.editor_diff == null and term.rt.editor_merge == null)) return;
+    // 비교·병합의 구문 소비처는 별도 계약이다. 이 전환에서 불변 완료를 직접 편집하지 않는다.
+    term.rt.editor_syntax.deinit(self.allocator);
+    if (term.rt.editorDocument().opened) |doc| term.rt.editor_syntax = syntax_color.open(doc.file.content, term.rt.editor_grammar);
+    if (term.rt.editor_document_lease) |lease| {
+        if (lease.owner.viewCount(lease).? == 1) parse_runtime.invalidate(lease);
+    }
+}
+
 fn advanceSyntax(self: *AppSession, term: *Term) void {
+    retainLegacySyntaxForSpecialView(self, term);
     if (term.rt.editor_diff != null) return;
     const doc = term.rt.editorDocument().opened orelse return;
     if (term.rt.editor_restore != null and workspace_restore.pending(term) == null)
@@ -706,7 +734,7 @@ fn advanceSyntax(self: *AppSession, term: *Term) void {
     // 반환값만 보면 **끝나는 프레임을 놓친다** — 그런데 목록이 채워지는 것이 바로 그 프레임이다
     // (`SP11` 이 그 자리를 잡았다: 훅을 참 갈래에만 두었더니 목록이 영영 비었다).
     const was_pending = term.rt.editor_syntax.pending;
-    if (syntax_color.resumeParse(&term.rt.editor_syntax, doc.file.content)) {
+    if (!term.rt.editor_syntax.async_view.enabled and syntax_color.resumeParse(&term.rt.editor_syntax, doc.file.content)) {
         self.metal_dirty = true;
     }
     // **공통 괄호 목록**(§5.1b·§5.1d) — 색과 강조가 함께 쓴다. 아직 훑는 중이면 다음 프레임을 부른다(파싱과
@@ -721,7 +749,7 @@ fn advanceSyntax(self: *AppSession, term: *Term) void {
     // 기제). 파싱이 끝나는 순간 검색어는 그대로라 아무것도 재필터를 촉발하지 않는다. `pending` 이
     // 풀린 다음 프레임부터는 `was_pending` 이 거짓이라 안 돈다 — 상주 비용이 아니라 **여는 순간의
     // 짧은 창**이다.
-    if (was_pending and self.chrome_host.symbol_picker.open) recomputeSymbolPicker(self);
+    if (!term.rt.editor_syntax.async_view.enabled and was_pending and self.chrome_host.symbol_picker.open) recomputeSymbolPicker(self);
     if (!term.rt.editor_syntax.pending) {
         // **파싱이 끝난 프레임에 접힘을 구문 층으로 덮는다**(§4). 여는 자리에서는 트리가 아직
         // 없을 수 있어(§2.1a) 들여쓰기로 세웠고, 여기가 그 두 번째 갱신 시점이다.
@@ -2784,23 +2812,24 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     term.rt.editor_recovery = prepared.recovery;
     term.rt.editor_lines = prepared.lines;
 
-    // **구문 트리를 여기서 연다**(§5.3). 문서와 수명이 같으므로 `releaseEditorTerm`이 함께 놓는다.
-    // grammar가 없는 언어면 `provider`가 `null`이고 그 문서는 끝까지 무색이다 — 실패가 아니라
-    // 저하다(§5). 여는 값은 문서 크기에 비례하지만(154KB 5ms 실측) **파일당 한 번**이고, 편집은
-    // 증분이라 65µs다.
-    // **한 번 정해 둘이 쓴다** — 구문 강조와 상태바 언어 항목이 **같은 값**을 본다(`status-bar.md`
-    // 「언어 항목」). 상태바가 경로에서 다시 판정하면 출처가 둘이 된다.
-    // **경로가 없으면 문법도 없다**(§3.11 — 문법은 경로에서 나온다). 그 문서는 끝까지 무색이고
-    // 그것은 실패가 아니라 §5 의 **저하**다. 이름이 붙는 순간(U2) 다시 판정한다.
+    // 일반 문서는 파싱하지 않은 비동기 상태로 시작한다. 입력·완료 경로가 같은 문법을 사용한다.
+    // 이름 없는 문서는 문법이 없으며, 첫 저장에서 문법을 정한 뒤 요청을 게시한다.
     term.rt.editor_grammar = if (term.rt.editorDocument().path) |p| maru.session.editor.language.grammarForPath(p) else .none;
     // Prepared가 취소되면 회수하고, 게시되면 이 상태만 인계한다. 작업 버퍼는 뷰끼리 빌리지 않는다.
     if (prepared.syntax_seed) |state| {
         term.rt.editor_syntax = state.*;
         self.allocator.destroy(state);
+    } else if (self.editor_syntax_async) {
+        term.rt.editor_syntax = parse_client.init();
     } else term.rt.editor_syntax = syntax_color.open(
         term.rt.editorDocument().opened.?.file.content,
         term.rt.editor_grammar,
     );
+
+    if (self.editor_syntax_async and !term.rt.editor_syntax.async_view.enabled) {
+        term.rt.editor_syntax.deinit(self.allocator);
+        term.rt.editor_syntax = parse_client.init();
+    }
 
     // **탭 폭을 config에서 받는다**(§9). 아래 파생값(접힘 겹수·`max_cols`)이 이 값에 달렸으므로
     // **그것들을 세기 전에** 넣어야 한다 — 뒤에 넣으면 세터가 방금 센 것을 도로 버린다.
@@ -2860,6 +2889,7 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
         term.rt.editor_syntax_folds_applied = seed.syntax_folds_applied;
         term.rt.editor_guides.guess = seed.indent_guess;
     }
+    parse_client.refresh(self, term);
 }
 
 /// config가 정한 탭 폭(§9 — `editor.tab-width`).
@@ -10056,6 +10086,11 @@ fn rebuildMappedVisible(self: *AppSession, term: *Term) error{OutOfMemory}!void 
 
 /// 줄/선택 게시 순서를 바꾸지 않는다. 먼저 갱신된 어느 뷰라도 완료한 같은 입력이면 빌릴 수 있다.
 fn refreshSyntaxForInput(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) void {
+    retainLegacySyntaxForSpecialView(self, term);
+    if (term.rt.editor_syntax.async_view.enabled) {
+        parse_client.refresh(self, term);
+        return;
+    }
     const state = term.rt.editorDocument();
     const doc = state.opened orelse return;
     const lease = term.rt.editor_document_lease;
@@ -30017,6 +30052,9 @@ const PaneFixture = struct {
     leaf_rect: maru.session.SplitRect = .{ .x = 100, .y = 50, .w = 800, .h = 600 },
 
     fn init(allocator: std.mem.Allocator) !PaneFixture {
+        return initWithSyntax(allocator, false);
+    }
+    pub fn initWithSyntax(allocator: std.mem.Allocator, asynchronous: bool) !PaneFixture {
         const io = std.testing.io;
         // 신뢰 표·도구 환경은 앱 전역이다 — 앞 판정자의 결정·환경이 이 픽스처로 새지 않게 비운다(계획 WT2·WT3b).
         trust_store.setDirForTest(null);
@@ -30039,6 +30077,8 @@ const PaneFixture = struct {
             .command_kind = @backingInt(app_session_mod.CommandKind.controlled_smoke),
         });
         errdefer session.deinit();
+        // 기존 동기 계약 대조군은 명시적으로 선택한다. 비동기 검사는 제품 기본값도 고정한다.
+        if (asynchronous) try testing.expect(session.editor_syntax_async) else session.editor_syntax_async = false;
         session.cell_width_px = 8;
         session.cell_height_px = 16;
         // **padding을 0이 아닌 값으로 둔다.** 0이면 `body`와 `grid`가 같아져 둘 중 무엇을 골라도
@@ -30049,7 +30089,7 @@ const PaneFixture = struct {
         return .{ .session = session, .term = term, .dir = dir };
     }
 
-    fn deinit(self: *PaneFixture, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *PaneFixture, allocator: std.mem.Allocator) void {
         self.session.deinit();
         allocator.destroy(self.session);
         self.dir.cleanup();
@@ -75211,4 +75251,30 @@ test "MOV21 command arrows stay inside physical LF CRLF blank and Unicode lines"
         try testing.expectEqual(line.start, term.rt.editor_selection.?.start());
         try testing.expectEqual(line.contentEnd(), term.rt.editor_selection.?.end());
     }
+}
+
+test "ASYNCINPUT 첫 생성과 연속 입력은 메인 파싱 없이 최신 판만 설치한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/client_judges.zig").typing(PaneFixture);
+}
+test "ASYNCINPUT 공유 뷰의 색 접힘 심볼은 완료 사건에서 갱신한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/client_judges.zig").shared(PaneFixture);
+}
+test "ASYNCINPUT 실패는 편집으로 재시도하지 않고 팔레트 명령만 복구한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/client_judges.zig").failure(PaneFixture);
+}
+test "ASYNCINPUT 설치 실패는 해당 뷰만 중단하고 명시적 재분석으로 해제한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/client_judges.zig").viewFailure(PaneFixture);
+}
+test "ASYNCINPUT 미지원 문법 전환과 종료는 참조와 늦은 전달을 정산한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/client_judges.zig").lifetime(PaneFixture);
+}
+
+test "ASYNCINPUT 병합 전환은 별도 동기 구문 계약을 유지한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/client_judges.zig").special(PaneFixture);
 }

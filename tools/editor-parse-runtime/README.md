@@ -57,7 +57,7 @@ python3 tools/editor-parse-runtime/review.py --scope observation --output /tmp/n
 
 `Runtime.deinit`와 `dispatch.tryShutdown`은 외부 참조가 있으면 ResultsHeld로 거절하며
 현재 Gate·결과·전역 소유자를 보존한다. 기존 `shutdown`은 소비자가 모두 반환됐다는 선행 조건을
-갖는다. 일반 입력/뷰 연결은 아직 이 참조를 사용하지 않는다.
+갖는다. 일반 입력/뷰는 이 참조를 보유하며 AppSession 종료 전에 모두 반환한다.
 
 ```sh
 python3 tools/editor-parse-runtime/review.py --scope leases --output /tmp/new-parse-leases --deps /path/to/deps --cache /path/to/cache
@@ -74,7 +74,7 @@ Apple probe의 `retained_result=1`은 실제 메인 큐 수락 후 보유 중 �
 `prepareView`는 결과 보유와 독립 native 복사를 준비하고 `installView`는 실제 view lease와
 현재 요청을 다시 검증해 syntax.State에 이동한다. 캐시를 무효화하되 배열 용량을 유지하고,
 기존 뷰 native 자원 → 완료 보유 참조 순서로 반환한다. legacy provider는 교체하지 않는다.
-일반 입력과 렌더 경로 전환·설치 뒤의 접힘 표/심볼 피커/redraw는 후속이다.
+일반 입력 연결과 완료 뒤 접힘·심볼 피커·redraw는 `parse/client.zig`가 담당한다. 아래 제품 입력 검사를 따로 실행한다.
 
 ```sh
 mise exec -- zig build test-editor-parse-view test-editor-parse-runtime test-editor-parse-host test-editor-parse-main-queue -j2
@@ -145,3 +145,17 @@ Runtime 12개·호스트 6개와 실제 main queue probe를 실행한다. 실제
 차단과 다른 문서 격리, 명시적 재분석·설정 변경·재열기, Entry/Gate 준비 OOM과 Runtime 재생성을
 검사한다. 편집 차단·worker 실패 기록·준비 실패 기록·명시적 해제·문법 키의 다섯 실제 결함을
 컴파일·실행하고 정상 전후 대조군을 요구한다. UI/HID·IME·native malloc 고갈 검증은 아니다.
+
+## 일반 제품 입력 연결
+
+`test-editor-parse-input`은 macOS 10개(제품 6 + 초기화 4), 다른 플랫폼 7개(제품 제외)를 수집한다.
+테스트용 동기 대조군과 달리 실제 AppSession 기본 모드가 비동기인지 먼저 확인한다.
+완료는 실제 wake 정산으로만 설치하며 프레임 fallback으로 전달 누락을 숨기지 않는다.
+
+```sh
+python3 tools/editor-parse-runtime/review.py --scope input --output /tmp/new-parse-input --deps /path/to/deps --cache /path/to/cache
+```
+
+기본 모드·편집 요청·완료 전달·실패 뷰 재시도·심볼 목록에 실제 결함 다섯 개를 컴파일한다.
+runtime 12개·host 6개·제품 입력 10개와 실제 Apple 전달을 요구한다.
+실제 UI·OS IME와 지연 수치는 별도 제품 앱 실행으로 검증하며, 이 검사를 그 증거로 확대하지 않는다.

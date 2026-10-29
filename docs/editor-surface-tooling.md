@@ -608,6 +608,11 @@ breadcrumb 표시가 같은 함수를 쓰므로 그쪽도 같은 판정이었다
 트리거는 응답 뒤 한 번으로 합치지만, 다른 원본의 트리거는 이전 대기를 취소하고 새로 요청한다.
 닫힌 원본·Save As와 검증 범위는 [응답 소유 계획](plans/lsp-signature-reference-origins.md)을 따른다.
 
+원본 서버가 종료되면 응답이 올 수 없는 시그니처 대기를 놓아 다음 트리거가 새로 요청하도록 한다.
+종료 시에는 proc가 이미 제거됐을 수 있어 ready 조회와 문서 결합 조회를 구분한다. 다른 root·
+보조 서버의 종료와 다른 호버 소유권은 보존한다. [서버 종료 복구](plans/lsp-signature-restart.md)에
+실제 프로세스 재시작과 직접 알림 주입의 증거 경계를 적는다.
+
 **계획 공격이 드러낸 것.** ① [native-editor-ui §8.3](native-editor-ui.md) 은 호버와 시그니처를 **한 박스**로 계약했고 그 박스(`hover_box`)가
 §8.2b 로 섰다 — 새로 서는 것은 「언제 띄우고 무엇을 강조하는가」뿐이다. ② 오버레이 raster 는 run 마다 **색**만 낸다(굵게 없음, `metal_lowering`
 `placeText`) — 활성 파라미터 강조는 색 role 로 한다. ③ 트리거 글자는 서버가 준다(`signatureHelpProvider.triggerCharacters` — clangd 는

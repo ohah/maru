@@ -1703,7 +1703,8 @@ pub fn lowerWaitsInPlace(app_quitting: bool, in_test: bool) bool {
 /// 서버가 내려갔다 — 그 서버의 응답을 기다리던 요청을 놓는다. 응답은 오지 않으므로, 안 놓으면 그 문서의 semantic 색·인레이·
 /// 심볼·접기·같은 낱말 강조·자동완성이 **다시는 요청되지 않는다**(각 모듈은 기다리는 동안 새 요청을 막고, 응답에서만 그 막음을
 /// 푼다). 문서마다 다시 그리는 넷은 `dirty` 로 두어 다음 서버가 뜨면 다시 묻게 하고, 강조는 caret 의 조용 시계가, 자동완성은 다음
-/// 타이핑이 다시 묻는다(시한이 있는 hover·smart select, `hide` 가 푸는 signature, 막지 않는 나머지는 해당 없다).
+/// 타이핑이 다시 묻는다. 시그니처도 응답이 없으면 새 트리거가 dirty로 합쳐지므로 원본 서버의 대기를 hide로 놓는다.
+/// 시한이 있는 hover·smart select와 새 요청을 막지 않는 나머지는 해당 없다.
 fn releaseWaiting(self: *AppSession, c: *Client) void {
     for (c.docs.items) |d| for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
         if (!d.matches(term)) continue;
@@ -1715,6 +1716,8 @@ fn releaseWaiting(self: *AppSession, c: *Client) void {
         release(editor_symbols.gate(&rt.editor_symbols));
         release(editor_fold_lsp.gate(&rt.editor_fold_lsp));
         release(editor_highlight.gate(&rt.editor_highlight));
+        // proc is already detached here. Match the document binding, not ready state.
+        editor_signature.onClientStopped(self, c, term);
         // 자동완성은 세션에 하나 — 기다리던 것이 **이 문서**의 요청일 때만 놓는다(다른 서버의 응답을 버리지 않게).
         const comp = &self.editor_completion;
         if (comp.waiting and comp.waiting_surface == term.surfaceId()) {
@@ -2606,11 +2609,18 @@ fn flushDocument(self: *AppSession, c: *Client, term: *Term) void {
 /// 그 Term 의 문서를 연 **ready** 클라이언트(있으면). 호버(§8.2b)가 「서버가 있는가」를 이것으로 묻는다.
 pub fn readyClientFor(self: *AppSession, term: *Term) ?*Client {
     if (!self.loaded_config.config.lsp.enabled) return null;
+    const c = boundClientFor(self, term) orelse return null;
+    if (c.phase != .ready or c.proc == null) return null;
+    return c;
+}
+
+/// Document binding survives proc detachment until releaseWaiting finishes.
+/// This is a lookup for shutdown ownership, not permission to send a request.
+pub fn boundClientFor(self: *AppSession, term: *Term) ?*Client {
     if (term.kind != .editor or term.rt.editorDocument().opened == null or term.rt.editor_diff != null) return null;
     const server = serverForTerm(self, term) orelse return null;
     const root = rootFor(self, term) orelse return null;
     const c = clientFor(self, root, server) orelse return null;
-    if (c.phase != .ready or c.proc == null) return null;
     if (c.findDoc(term) == null) return null;
     return c;
 }

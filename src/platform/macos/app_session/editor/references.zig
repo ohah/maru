@@ -17,6 +17,7 @@ const pane_ops = @import("../pane.zig");
 const reference_picker = @import("../../reference_picker.zig");
 const lsp = maru.session.editor.lsp;
 const chrome = maru.chrome;
+const response_owner = maru.session.editor.lsp_response_owner;
 
 /// 「지금은 못 답한다」(content modified·server cancelled) 뒤 되묻기 — 간격과 횟수 상한(§8.2l). rust-analyzer 는 작업 공간을 읽는 동안
 /// `-32801` 을 낸다(캡처 실측 — 첫 답이 늘 그것이었다).
@@ -26,6 +27,7 @@ pub const max_retries: u8 = 8;
 pub const State = struct {
     waiting: bool = false,
     waiting_seq: u32 = 0,
+    owner: ?response_owner.Owner = null,
     /// 기다리는 요청의 종류(§8.2m) — 다른 종류의 응답은 같은 seq 라도 버린다(칸이 달라 seq 가 겹칠 수 있다).
     waiting_kind: lsp.rpc.LocationKind = .references,
     /// 되묻기 예약(`retry_at_ms` 에 caret 자리로 다시). 사용자가 새로 부르면 지워진다.
@@ -100,6 +102,7 @@ fn request(self: *AppSession, term: *Term, offset: usize) bool {
     const seq = editor_lsp.requestLocations(self, term, st.waiting_kind, offset) orelse return false;
     st.waiting = true;
     st.waiting_seq = seq;
+    st.owner = ownerFor(term);
     st.enc = (editor_lsp.readyClientFor(self, term) orelse return false).encoding;
     return true;
 }
@@ -111,6 +114,9 @@ pub fn tick(self: *AppSession) void {
     if (self.awakeMs() < st.retry_at_ms) return;
     st.retry_at_ms = 0;
     const term = pane_ops.activePane(self).activeTerm();
+    // Retry belongs to the original active source. Keep its fresh caret behavior,
+    // but never replay the old command into a different document/save target.
+    if (response_owner.decide(true, st.waiting_seq, st.waiting_seq, st.owner, ownerFor(term), true) != .accept) return;
     if (term.kind != .editor or term.rt.editor_diff != null) return;
     const doc = term.rt.editorDocument().opened orelse return;
     const sel = term.rt.editor_selection orelse return;
@@ -139,6 +145,36 @@ const DiskReader = struct {
 /// 행이 쓸 수 있는 표시 폭 — 패널 60 − 행 들여쓰기 2 − 스크롤 gutter 2. 제목과 보조 텍스트의 나눔은 `reference_picker.build` 가 한다.
 fn rowCols() usize {
     return 60 - 2 - 2;
+}
+
+fn ownerFor(term: *Term) ?response_owner.Owner {
+    if (term.kind != .editor or term.rt.editorDocument().opened == null) return null;
+    const doc = term.rt.editorDocument();
+    return .{ .surface = term.surface.id, .document = @intFromPtr(doc), .target_epoch = doc.save_target_epoch };
+}
+
+/// The picker reads the active document's content, so that document must still
+/// be the request's source before any rows, navigation, retry, or notice is built.
+pub fn onClientResponse(self: *AppSession, origin: *editor_lsp.Client, kind: lsp.rpc.LocationKind, seq: u32, result: ?std.json.Value, retryable: bool) void {
+    const st = &self.editor_references;
+    if (kind != st.waiting_kind) {
+        st.dropped_stale += 1;
+        return;
+    }
+    const term = pane_ops.activePane(self).activeTerm();
+    const same_client = editor_lsp.readyClientFor(self, term) == origin;
+    switch (response_owner.decide(st.waiting, st.waiting_seq, seq, st.owner, ownerFor(term), same_client)) {
+        .ignore => {
+            st.dropped_stale += 1;
+            return;
+        },
+        .cancel => {
+            st.waiting = false;
+            st.retry_at_ms = 0;
+            return;
+        },
+        .accept => onLocationsResponse(self, kind, seq, result, retryable),
+    }
 }
 
 /// references 응답(`editor_lsp` 가 부른다). 지금 기다리는 seq 가 아니면 버린다. 되물을 수 있는 오류(`content modified` 등)면 잠시 뒤

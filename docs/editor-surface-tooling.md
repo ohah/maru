@@ -603,6 +603,11 @@ breadcrumb 표시가 같은 함수를 쓰므로 그쪽도 같은 판정이었다
 
 ### 8.2d LSP 2단 ③ — 시그니처 힌트 (2026-09-18, 계획 공격 뒤의 결정)
 
+응답 번호는 서버마다 따로 센다. 현재 대기의 Client와 요청 당시 surface·문서·저장 대상 epoch를
+확인하며, 다른 서버의 빈/본문 응답은 대기를 끝내거나 상자를 닫지 못한다. 같은 원본의 추가
+트리거는 응답 뒤 한 번으로 합치지만, 다른 원본의 트리거는 이전 대기를 취소하고 새로 요청한다.
+닫힌 원본·Save As와 검증 범위는 [응답 소유 계획](plans/lsp-signature-reference-origins.md)을 따른다.
+
 **계획 공격이 드러낸 것.** ① [native-editor-ui §8.3](native-editor-ui.md) 은 호버와 시그니처를 **한 박스**로 계약했고 그 박스(`hover_box`)가
 §8.2b 로 섰다 — 새로 서는 것은 「언제 띄우고 무엇을 강조하는가」뿐이다. ② 오버레이 raster 는 run 마다 **색**만 낸다(굵게 없음, `metal_lowering`
 `placeText`) — 활성 파라미터 강조는 색 role 로 한다. ③ 트리거 글자는 서버가 준다(`signatureHelpProvider.triggerCharacters` — clangd 는
@@ -1293,6 +1298,12 @@ JSON-RPC 프로브): 열면 `cargo check`(rustc) 진단이 오고, 오류를 **�
 - **B3**(includeText 무시)은 처음 「미사용 인자」 컴파일 오류로 죽어 의미 변이로 다시 돌렸다 — `SAV1` 의 `fake: saved 16` 이 잡는다.
 
 ### 8.2l LSP 2단 ⑪ — 참조 피커 (2026-09-21, 계획 공격 뒤의 결정)
+
+결과·알림·재시도 예약을 만들기 전에 요청 종류·seq·Client와 원본 surface·문서·저장 대상 epoch를
+확인한다. 피커는 활성 문서의 본문을 읽으므로 그 활성 원본이 달라지면 응답을 취소한다. 예약된
+재시도도 같은 활성 원본에서만 최신 caret으로 보내고, 문서 전환·닫기·Save As 뒤에는 취소한다.
+다른 문서로 예전 명령을 옮겨 보내지 않는다. §8.2m의 세 명령도 이 경계를 같이 사용한다.
+실행 증거와 미검증 범위는 [응답 소유 계획](plans/lsp-signature-reference-origins.md)을 따른다.
 
 참조·구현·타입 정의·선언 결과 검색은 공용 native IME 범위 문맥을 사용한다.
 확정 query로만 기존 제목/보조 텍스트 필터를 적용하고 preedit는 표시만 한다. 후보 Return은

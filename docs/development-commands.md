@@ -1,5 +1,9 @@
 # 개발 명령
 
+`mise exec -- zig build test-editor-read-origins -j2`는 시그니처·참조 계열의 주 서버 충돌,
+실제 Surface 전환과 Save As 뒤 응답/재시도 및 기존 정상 헬퍼를 검사한다.
+[응답 소유 계획](plans/lsp-signature-reference-origins.md)에 직접 주입과 실제 서버 증거의 경계를 적는다.
+
 `mise exec -- zig build test-editor-hover-origins -j2`는 두 주 서버의 hover seq 충돌,
 실제 Save As 뒤 늦은 내용·timeout, 기존 포인터/진단/시그니처·보조 서버 대조를 검사한다.
 실행 경계와 미검증 범위는 [호버 출처 계획](plans/lsp-hover-response-origin.md)을 따른다.

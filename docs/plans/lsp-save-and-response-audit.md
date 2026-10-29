@@ -35,8 +35,8 @@ Save As에는 이미 `prior_saves`/`ready` 장벽이 있었다. 이를 결함으
 | diagnostic pull | 해당 Client.docs의 pull/barrier seq와 문서 버전 | 기존 방어, 모든 서버 재시작 조합은 미검증 |
 | definition | 이번에 Client·불변 원본 수명 확인 추가 | 실제 두 subprocess seq 충돌 수정, 직접 호출 부정 대조도 추가 |
 | hover | 원 감사 시 Client를 버리는 공백 확인 | [호버 후속](lsp-hover-response-origin.md)에서 실제 주 서버 충돌·Save As timeout 재현과 원본 수명 확인 추가 |
-| signature | 라우터가 Client를 버림, 핸들러는 seq와 보이는 source surface 확인 | 출처 확인 공백. 실제 충돌 및 편집 도중 응답 검증은 후속 |
-| references, implementation, type definition, declaration | kind·seq만 대응, Client와 원본 문서 수명은 미전달 | 출처 확인 공백. 재시도 시 활성 문서를 다시 읽는 경계도 후속 검증 |
+| signature | 원 감사 시 Client를 버리는 공백 확인 | [후속](lsp-signature-reference-origins.md)에서 두 주 서버 충돌·문서 전환·Save As 수명 확인 추가 |
+| references, implementation, type definition, declaration | 원 감사 시 Client·원본 신원 공백 확인 | [후속](lsp-signature-reference-origins.md)에서 네 종류의 주 서버 충돌 및 재시도 원본 확인 추가 |
 
 추가로 push diagnostics는 Client.docs의 URI·문서 대응과 제공된 version을 검사한다.
 version이 생략된 push를 최신 내용으로 증명할 수 있다는 뜻은 아니다. 서버가 먼저 보내는 요청,

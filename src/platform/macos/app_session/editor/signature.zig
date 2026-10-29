@@ -20,12 +20,14 @@ const term_ops = @import("../term.zig");
 const hover_box = chrome.components.hover_box;
 const hover_text = maru.session.editor.hover_text;
 const lsp = maru.session.editor.lsp;
+const response_owner = maru.session.editor.lsp_response_owner;
 
 pub const State = struct {
     /// 상자가 시그니처의 것으로 열려 있다.
     active: bool = false,
     waiting: bool = false,
     waiting_seq: u32 = 0,
+    owner: ?response_owner.Owner = null,
     waiting_surface: u64 = 0,
     /// 응답을 기다리는 동안 다시 물을 일이 생겼다(revision·caret) — 응답 뒤 한 번 더.
     dirty: bool = false,
@@ -83,17 +85,50 @@ fn ask(self: *AppSession, term: *Term, kind: lsp.rpc.SignatureTriggerKind, trigg
     const sel = term.rt.editor_selection orelse return false;
     const focus = @min(sel.focus, doc.file.content.len);
     if (st.waiting) {
-        st.dirty = true; // 응답 뒤 한 번 더 — 요청은 한 번에 하나
-        return true;
+        if (response_owner.decide(true, st.waiting_seq, st.waiting_seq, st.owner, ownerFor(term), true) == .accept) {
+            st.dirty = true; // Same source: one follow-up after its response.
+            return true;
+        }
+        // A new document's trigger must not be folded into the old source's wait.
+        hide(self);
     }
     const seq = editor_lsp.requestSignatureHelp(self, term, focus, kind, trigger_char, is_retrigger) orelse return false;
     st.waiting = true;
     st.waiting_seq = seq;
+    st.owner = ownerFor(term);
     st.waiting_surface = term.surface.id;
     st.asked_version = term.rt.editorDocument().notifications.lsp_version;
     st.asked_focus = focus;
     st.dirty = false;
     return true;
+}
+
+fn ownerFor(term: *Term) ?response_owner.Owner {
+    if (term.kind != .editor or term.rt.editorDocument().opened == null) return null;
+    const doc = term.rt.editorDocument();
+    return .{ .surface = term.surface.id, .document = @intFromPtr(doc), .target_epoch = doc.save_target_epoch };
+}
+
+/// Preserve the wait on a foreign server's empty or nonempty response.
+pub fn onClientResponse(self: *AppSession, origin: *editor_lsp.Client, seq: u32, view: ?lsp.rpc.SignatureView) void {
+    const st = &self.editor_signature;
+    const loc = if (st.owner) |owner| term_ops.findTermWhere(self, owner.surface, struct {
+        fn matches(surface: u64, term: *Term) bool {
+            return term.kind == .editor and term.surface.id == surface;
+        }
+    }.matches) else null;
+    const term = if (loc) |found| found.pane.terms.items[found.term_index] else null;
+    const current = if (term) |t| ownerFor(t) else null;
+    const same_client = if (term) |t| editor_lsp.readyClientFor(self, t) == origin else false;
+    switch (response_owner.decide(st.waiting, st.waiting_seq, seq, st.owner, current, same_client)) {
+        .ignore => return,
+        .cancel => {
+            st.waiting = false;
+            st.dirty = false;
+            return;
+        },
+        .accept => onResponse(self, seq, view),
+    }
 }
 
 /// 응답(`editor_lsp` 가 부른다). 지금 기다리는 seq 가 아니면 버린다. 결과가 없으면 닫는다.

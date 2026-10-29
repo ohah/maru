@@ -1776,3 +1776,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [저장 수명과 LSP 응답 감사](plans/lsp-save-and-response-audit.md): 선행 저장/Save As 장벽, 닫힌 요청과 읽기 응답의 출처 점검.
 
 - [호버 응답의 출처](plans/lsp-hover-response-origin.md): 다른 root의 주 서버 응답과 원본 수명 격리.
+
+- [시그니처·참조 응답의 출처](plans/lsp-signature-reference-origins.md): 다른 주 서버와 재시도 원본 격리.

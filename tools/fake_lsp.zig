@@ -1231,6 +1231,7 @@ fn handleLocationKind(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id:
         };
     };
     const text = docText(req_uri);
+    if (std.mem.indexOf(u8, text, "REFSTALL") != null) return; // same stall contract as references
     if (std.mem.indexOf(u8, text, "REFBUSY") != null) { // 참조와 같은 「지금은 못 답한다」(§8.2m — 되묻기는 종류를 든 채)
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32801), .message = "content modified" } });
         return;
@@ -1901,6 +1902,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             };
         };
         const text = docText(req_uri);
+        if (std.mem.indexOf(u8, text, "SIGSTALL") != null) return; // deterministic delayed-response ownership tests
         const before = lineBefore(text, line_no, character);
         const open_at = std.mem.lastIndexOfScalar(u8, before, '(');
         const closed = if (open_at) |o| std.mem.indexOfScalarPos(u8, before, o, ')') != null else true;

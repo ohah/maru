@@ -22641,6 +22641,223 @@ test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목�
     fx.session.editor_definition.waiting = false;
 }
 
+// A real second primary connection. The caller owns f's root buffer throughout the test.
+fn openSecondReadRootForTest(f: *SmtFixture, source: []const u8) !*Term {
+    try f.fx.dir.dir.createDirPath(testing.io, "nested/.git");
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "nested/second.c", .data = source });
+    const path = try std.fs.path.join(testing.allocator, &.{ f.root_buf[0..f.root_len], "nested/second.c" });
+    defer testing.allocator.free(path);
+    const second = (try pane_ops.openFileTermInActivePane(f.fx.session, path, .text)).term;
+    try testing.expect(pumpLspUntil(&f.fx, 3000, second, struct {
+        fn ready(t: *Term) bool {
+            return t.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.ready));
+    try testing.expect(lsp_client.readyClientFor(f.fx.session, f.term).? != lsp_client.readyClientFor(f.fx.session, second).?);
+    f.term.rt.editor_selection = editor_selection.Selection.at(4);
+    second.rt.editor_selection = editor_selection.Selection.at(4);
+    return second;
+}
+
+// Real activation and two subprocess replies isolate primary-root sequence collisions.
+test "SIG2 cancelled signature from another primary cannot settle the new signature wait" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var f = (try SmtFixture.openRepo(testing.allocator, "first.c", "add(\n")) orelse return error.SkipZigTest;
+    defer f.close(testing.allocator);
+    try testing.expect(f.ready());
+    const ss = f.fx.session;
+    const second = try openSecondReadRootForTest(&f, "add( // SIGSTALL\n");
+    try testing.expect(term_ops.activateSurfaceById(ss, f.term.surface.id));
+    try testing.expect(signature_client.triggerManual(ss));
+    const seq = ss.editor_signature.waiting_seq;
+    signature_client.hide(ss);
+    try testing.expect(term_ops.activateSurfaceById(ss, second.surface.id));
+    try testing.expect(signature_client.triggerManual(ss));
+    try testing.expectEqual(seq, ss.editor_signature.waiting_seq);
+    try testing.expect(pumpLspUntil(&f.fx, 1500, ss, struct {
+        fn done(s: *AppSession) bool {
+            return s.editor_lsp.received_signatures >= 1;
+        }
+    }.done));
+    try testing.expect(ss.editor_signature.waiting);
+    try testing.expect(!ss.editor_signature.active);
+}
+
+// A different live source must start its own request rather than dirtying the old source's request.
+test "SIG3 manual request after actual document activation replaces the previous wait" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var f = (try SmtFixture.openRepo(testing.allocator, "first.c", "add( // SIGSTALL\n")) orelse return error.SkipZigTest;
+    defer f.close(testing.allocator);
+    try testing.expect(f.ready());
+    const ss = f.fx.session;
+    const second = try openSecondReadRootForTest(&f, "add( // SIGSTALL\n");
+    try testing.expect(term_ops.activateSurfaceById(ss, f.term.surface.id));
+    try testing.expect(signature_client.triggerManual(ss));
+    const sent = ss.editor_lsp.sent_signatures;
+    try testing.expect(term_ops.activateSurfaceById(ss, second.surface.id));
+    try testing.expect(signature_client.triggerManual(ss));
+    try testing.expectEqual(sent + 1, ss.editor_lsp.sent_signatures);
+    try testing.expectEqual(second.surface.id, ss.editor_signature.waiting_surface);
+    // Same owner still coalesces repeated triggers into a single follow-up.
+    try testing.expect(signature_client.triggerManual(ss));
+    try testing.expectEqual(sent + 1, ss.editor_lsp.sent_signatures);
+    try testing.expect(ss.editor_signature.dirty);
+    const ca = lsp_client.readyClientFor(ss, f.term).?;
+    const cb = lsp_client.readyClientFor(ss, second).?;
+    const seq = ss.editor_signature.waiting_seq;
+    signature_client.onClientResponse(ss, cb, seq + 1, null);
+    signature_client.onClientResponse(ss, ca, seq, null);
+    signature_client.onClientResponse(ss, ca, seq, .{ .label = "foreign()", .index = 0, .count = 1 });
+    try testing.expect(ss.editor_signature.waiting and ss.editor_signature.dirty);
+    try testing.expect(!ss.editor_signature.active);
+    signature_client.onClientResponse(ss, cb, seq, .{ .label = "owner()", .index = 0, .count = 1 });
+    try testing.expect(ss.editor_signature.active);
+    try testing.expectEqualStrings("owner()", signature_client.lines(ss)[0].text);
+    try testing.expectEqual(sent + 2, ss.editor_lsp.sent_signatures); // exactly one dirty follow-up
+    try testing.expect(ss.editor_signature.waiting and !ss.editor_signature.dirty);
+    const next_seq = ss.editor_signature.waiting_seq;
+    signature_client.onClientResponse(ss, ca, next_seq, null);
+    signature_client.onClientResponse(ss, cb, seq, null); // duplicate older own response
+    try testing.expect(ss.editor_signature.waiting and ss.editor_signature.active);
+    signature_client.onClientResponse(ss, cb, next_seq, null);
+    try testing.expect(!ss.editor_signature.waiting and !ss.editor_signature.active);
+    try testing.expect(signature_client.triggerManual(ss));
+    const closed_seq = ss.editor_signature.waiting_seq;
+    const opened = ss.editor_signature.opened_count;
+    const pane = pane_ops.activePane(ss);
+    term_ops.closeTermAt(ss, ss.app_window.active_tab, pane, std.mem.indexOfScalar(*Term, pane.terms.items, second).?);
+    signature_client.onClientResponse(ss, cb, closed_seq, .{ .label = "closed()", .index = 0, .count = 1 });
+    try testing.expect(!ss.editor_signature.waiting and !ss.editor_signature.dirty);
+    try testing.expectEqual(opened, ss.editor_signature.opened_count);
+}
+
+// All four location methods have separate seq counters, each local to its primary connection.
+test "REF5 primary root isolation applies to references implementation type definition and declaration" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    _ = setenv("MARU_FAKE_LSP_DECLCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_DECLCAP");
+    var f = (try SmtFixture.openRepo(testing.allocator, "first.c", "int a;\na;\na;\n")) orelse return error.SkipZigTest;
+    defer f.close(testing.allocator);
+    try testing.expect(f.ready());
+    const ss = f.fx.session;
+    const second = try openSecondReadRootForTest(&f, "int b; // REFSTALL\nb;\n");
+    for ([_]maru.session.editor.lsp.rpc.LocationKind{ .references, .implementation, .type_definition, .declaration }) |kind| {
+        try testing.expect(term_ops.activateSurfaceById(ss, f.term.surface.id));
+        try testing.expect(references_client.gotoLocationsAtCaret(ss, kind));
+        const seq = ss.editor_references.waiting_seq;
+        try testing.expect(term_ops.activateSurfaceById(ss, second.surface.id));
+        try testing.expect(references_client.gotoLocationsAtCaret(ss, kind));
+        try testing.expectEqual(seq, ss.editor_references.waiting_seq);
+        const received = ss.editor_lsp.received_references;
+        const Ctx = struct { s: *AppSession, received: u64 };
+        try testing.expect(pumpLspUntil(&f.fx, 1500, Ctx{ .s = ss, .received = received }, struct {
+            fn done(c: Ctx) bool {
+                return c.s.editor_lsp.received_references > c.received;
+            }
+        }.done));
+        try testing.expect(ss.editor_references.waiting);
+        try testing.expectEqual(kind, ss.editor_references.waiting_kind);
+        try testing.expect(!ss.chrome_host.reference_picker.open);
+        try testing.expectEqual(@as(u64, 0), ss.editor_references.navigated);
+    }
+    const ca = lsp_client.readyClientFor(ss, f.term).?;
+    const cb = lsp_client.readyClientFor(ss, second).?;
+    const seq = ss.editor_references.waiting_seq;
+    references_client.onClientResponse(ss, cb, .references, seq, null, false); // wrong kind
+    references_client.onClientResponse(ss, cb, .declaration, seq + 1, null, false); // wrong seq
+    references_client.onClientResponse(ss, ca, .declaration, seq, null, false); // foreign empty
+    references_client.onClientResponse(ss, ca, .declaration, seq, null, true); // foreign retry error
+    try testing.expect(ss.editor_references.waiting);
+    try testing.expectEqual(@as(u64, 0), ss.editor_references.retry_at_ms);
+    const none = ss.editor_references.notified_none;
+    references_client.onClientResponse(ss, cb, .declaration, seq, null, false);
+    try testing.expect(!ss.editor_references.waiting);
+    try testing.expectEqual(none + 1, ss.editor_references.notified_none);
+    references_client.onClientResponse(ss, cb, .declaration, seq, null, false); // duplicate
+    try testing.expectEqual(none + 1, ss.editor_references.notified_none);
+    ss.dismissMessageOverlays();
+    try testing.expect(references_client.gotoReferencesAtCaret(ss));
+    const latest = ss.editor_references.waiting_seq;
+    const pane = pane_ops.activePane(ss);
+    term_ops.closeTermAt(ss, ss.app_window.active_tab, pane, std.mem.indexOfScalar(*Term, pane.terms.items, second).?);
+    references_client.onClientResponse(ss, cb, .references, latest, null, true);
+    try testing.expect(!ss.editor_references.waiting);
+    try testing.expectEqual(@as(u64, 0), ss.editor_references.retry_at_ms);
+    try testing.expectEqual(none + 1, ss.editor_references.notified_none);
+}
+
+// A real ContentModified response schedules retry; actual activation must not transfer it to B.
+test "REF6 retry scheduled for one source is cancelled after activating another document" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var f = (try SmtFixture.openRepo(testing.allocator, "first.c", "int a; // REFBUSY\n")) orelse return error.SkipZigTest;
+    defer f.close(testing.allocator);
+    try testing.expect(f.ready());
+    const ss = f.fx.session;
+    const second = try openSecondReadRootForTest(&f, "int b;\n");
+    try testing.expect(term_ops.activateSurfaceById(ss, f.term.surface.id));
+    try testing.expect(references_client.gotoReferencesAtCaret(ss));
+    try testing.expect(pumpLspUntil(&f.fx, 1500, ss, struct {
+        fn done(s: *AppSession) bool {
+            return s.editor_references.retry_at_ms != 0;
+        }
+    }.done));
+    const sent = ss.editor_lsp.sent_references;
+    const retried = ss.editor_references.retried;
+    try testing.expect(term_ops.activateSurfaceById(ss, second.surface.id));
+    ss.editor_references.retry_at_ms = 1;
+    references_client.tick(ss);
+    try testing.expectEqual(sent, ss.editor_lsp.sent_references);
+    try testing.expectEqual(retried, ss.editor_references.retried);
+    try testing.expectEqual(@as(u64, 0), ss.editor_references.retry_at_ms);
+}
+
+// Save target identity is changed by the real actor; both source bytes remain independently checked.
+test "SIG4 actual Save As invalidates signature location responses and scheduled location retry" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for ([_]bool{ false, true }) |retry| {
+        const source = if (retry) "int a; // REFBUSY\n" else "add( // SIGSTALL REFSTALL\n";
+        var f = (try SmtFixture.openRepo(allocator, "before.c", source)) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        defer saveAsCleanupForTest();
+        try testing.expect(f.ready());
+        const ss = f.fx.session;
+        f.term.rt.editor_selection = editor_selection.Selection.at(4);
+        const origin = lsp_client.readyClientFor(ss, f.term).?;
+        if (!retry) try testing.expect(signature_client.triggerManual(ss));
+        try testing.expect(references_client.gotoReferencesAtCaret(ss));
+        if (retry) try testing.expect(pumpLspUntil(&f.fx, 1500, ss, struct {
+            fn done(s: *AppSession) bool {
+                return s.editor_references.retry_at_ms != 0;
+            }
+        }.done));
+        const sig_seq = ss.editor_signature.waiting_seq;
+        const ref_seq = ss.editor_references.waiting_seq;
+        const sent = ss.editor_lsp.sent_references;
+        const epoch = f.term.rt.editorDocument().save_target_epoch;
+        const target = try std.fs.path.join(allocator, &.{ f.root_buf[0..f.root_len], "after.c" });
+        defer allocator.free(target);
+        _ = try saveAsSelectForTest(&f.fx, f.term, target);
+        try awaitSaveAsForTest();
+        try testing.expectEqual(epoch + 1, f.term.rt.editorDocument().save_target_epoch);
+        if (retry) {
+            ss.editor_references.retry_at_ms = 1;
+            references_client.tick(ss);
+            try testing.expectEqual(sent, ss.editor_lsp.sent_references);
+            try testing.expectEqual(@as(u64, 0), ss.editor_references.retry_at_ms);
+        } else {
+            signature_client.onClientResponse(ss, origin, sig_seq, .{ .label = "old target()", .index = 0, .count = 1 });
+            references_client.onClientResponse(ss, origin, .references, ref_seq, null, false);
+            try testing.expect(!ss.editor_signature.waiting and !ss.editor_signature.active);
+            try testing.expect(!ss.editor_references.waiting);
+            try testing.expectEqual(@as(u64, 0), ss.editor_references.notified_none);
+            try testing.expect(!ss.chrome_host.reference_picker.open);
+        }
+        try batchApplyDisk(&f.fx, "before.c", source);
+        try batchApplyDisk(&f.fx, "after.c", source);
+    }
+}
+
 test "SIG1 시그니처 힌트 — `(` 를 치면 열리고 첫 파라미터가 accent, `,` 로 둘째, `)` 로 닫힘; Esc·명령·caret 이동 재요청·끄면 명령만·호버가 안 열림·낡은 응답 (제품 경계, §8.2d)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

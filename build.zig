@@ -6670,6 +6670,16 @@ pub fn build(b: *std.Build) void {
     run_workspace_edit.addArg("--maru-expect-tests=21");
     run_workspace_edit.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-workspace-edit", "Run WorkspaceEdit preparation and rename regressions").dependOn(&run_workspace_edit.step);
+    const read_origin_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.SIG1 ", ".test.SIG2 ", ".test.SIG3 ", ".test.SIG4 ", ".test.REF", ".test.LATE2 " } });
+    const run_read_origins = b.addRunArtifact(read_origin_tests);
+    run_read_origins.setCwd(b.path("."));
+    run_read_origins.addArg("--maru-expect-tests=15");
+    run_read_origins.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-read-origins", "Verify signature and location origin ownership and retry lifetimes").dependOn(&run_read_origins.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_read_origins.addArg("--maru-expect-passed=15");
+        macos_only_test_step.dependOn(&run_read_origins.step);
+    }
     const hover_origin_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.HOVB", ".test.ASB1 ", ".test.SIG1 " } });
     const run_hover_origins = b.addRunArtifact(hover_origin_tests);
     run_hover_origins.setCwd(b.path("."));

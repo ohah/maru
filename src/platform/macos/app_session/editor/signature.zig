@@ -150,8 +150,17 @@ pub fn onResponse(self: *AppSession, seq: u32, view: ?lsp.rpc.SignatureView) voi
     if (!st.waiting or seq != st.waiting_seq) return;
     st.waiting = false;
     const v = view orelse {
+        // An empty result answers the old position only. Preserve the coalesced
+        // trigger before hide clears it, so newer input still gets one request.
+        const followup = st.dirty;
+        const surface = st.waiting_surface;
         if (st.active) st.closed_by_result += 1;
         hide(self);
+        if (followup) {
+            if (visibleEditorTerm(self, surface)) |term| {
+                _ = ask(self, term, .content_change, null, true);
+            }
+        }
         return;
     };
     const term = visibleEditorTerm(self, st.waiting_surface) orelse {

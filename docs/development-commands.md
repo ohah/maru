@@ -3,6 +3,9 @@
 `mise exec -- zig build test-editor-signature-restart -j2`는 서버 종료·재시작과 LSP 재활성화 뒤
 시그니처 대기 복구를 검사한다. 다른 primary/auxiliary와 호버 소유권은
 [서버 종료 복구 계획](plans/lsp-signature-restart.md)의 대조를 따른다.
+같은 gate의 SIGE1/2는 빈 결과 뒤 합쳐진 후속 요청과 취소·가시성·응답 출처를 검사한다.
+현재 16개(제품 행동 12개와 모듈 초기화 4개)이며 ReleaseFast도 실행한다.
+[빈 응답 계획](plans/lsp-signature-empty-followup.md)에 증거 범위를 적는다.
 
 `mise exec -- zig build test-editor-read-origins -j2`는 시그니처·참조 계열의 주 서버 충돌,
 실제 Surface 전환과 Save As 뒤 응답/재시도 및 기존 정상 헬퍼를 검사한다.

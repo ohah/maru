@@ -1780,3 +1780,4 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - [시그니처·참조 응답의 출처](plans/lsp-signature-reference-origins.md): 다른 주 서버와 재시도 원본 격리.
 
 - [서버 종료 뒤 시그니처 복구](plans/lsp-signature-restart.md): 응답이 사라진 대기 해제와 종료 출처 격리.
+- [빈 시그니처 응답의 후속 요청](plans/lsp-signature-empty-followup.md): 대기 중 합쳐진 입력을 빈 결과 뒤에도 요청한다.

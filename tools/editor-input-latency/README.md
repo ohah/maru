@@ -10,6 +10,8 @@ python3 tools/editor-input-latency/suite.py --build <빌드 경로> --output <�
 # 중단 후 같은 설정으로 재개: 위 명령에 --resume 추가
 python3 tools/editor-input-latency/verify.py <개별 묶음 경로: 3000-typing-attempt-0 등>
 python3 -m unittest discover -s tools/editor-input-latency -p 'test_*.py'
+# 동일 fixture·모집단의 전후 비교(두 suite의 원시 증거를 모두 다시 검증)
+python3 tools/editor-input-latency/compare.py --before <이전 suite> --after <수정 후 suite> --output <새 비교 JSON>
 ```
 
 `prepare.py --resume`은 같은 HEAD·기록된 원본/계측 사본의 해시가 일치할 때만 기존 사본을 다시 만든다.
@@ -69,6 +71,8 @@ fixture는 첫 주석에 `x`를 입력하거나 두벌식 `가나 `를 반복한
 ## 완료한 실측
 
 [결과](results.md)와 [기계 판독 집계](results.json)를 함께 보관한다.
+[후속 요청 보존 결과](continuation-results.md)와 [전후 비교](continuation-results.json)는
+같은 fixture·모집단의 두 suite를 `compare.py`로 다시 검증했다.
 `diagnose.py`는 별도 blink 진단을, `review.py`는 원시 자료의 의미 변조 거절을 재현한다.
 최초 측정 커밋의 `prepare.py --continuation-fix`는 당시 실패한 실험 옵션이다.
 제품에 요청 보존이 반영된 뒤에는 중복 패치를 제거했다. 과거 실험 자료의 일반 성능 집계 거절은 유지한다.

@@ -26,6 +26,7 @@ import Carbon.HIToolbox
     static var baselineMemory=[UInt64](repeating:0,count:2)
     static var expected = "", currentExpected = ""
     static var baseline: [UInt64] = []
+    static var latestState: [UInt64] = []
     static var postedAt = 0.0
     static var firstSeen: Double?
     static let ime = env["MARU_LATENCY_FLOW"] == "ime"
@@ -49,8 +50,13 @@ import Carbon.HIToolbox
             view.inputContext?.activate()
         }
         var memory=[UInt64](repeating:0,count:2);latencyMemory(&memory)
-        let value: [String:Any] = ["schema":1,"pid":getpid(),"error":error ?? NSNull(),"restored":restored,"rows":rows,"memory":memory,"baseline_memory":baselineMemory,
+        var value: [String:Any] = ["schema":1,"pid":getpid(),"error":error ?? NSNull(),"restored":restored,"rows":rows,"memory":memory,"baseline_memory":baselineMemory,
           "flow":env["MARU_LATENCY_FLOW"] ?? "typing", "mode":env["MARU_LATENCY_MODE"] ?? "async"]
+        if error != nil {
+            var timing=[UInt64](repeating:0,count:11);latencyPoll(&timing)
+            value["failure_timing"]=timing;value["failure_state"]=latestState;value["failure_before"]=baseline
+            value["failure_line"]=view.attributedSubstring(forProposedRange:NSRange(location:0,length:128),actualRange:nil)?.string.components(separatedBy:"\n").first ?? ""
+        }
         if let path=env["MARU_LATENCY_OUTPUT"], let data=try? JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]) {
             try? data.write(to:URL(fileURLWithPath:path),options:.atomic)
         }
@@ -80,6 +86,7 @@ extension MaruAppHostController {
         }
         guard InputLatency.focus(view,w) else { InputLatency.finish("foreground_or_source_lost",view);return }
         if InputLatency.phase == 2 {
+            var current=[UInt64](repeating:0,count:7);latencyState(session,&current);InputLatency.latestState=current
             var times=[UInt64](repeating:0,count:11);latencyPoll(&times)
             let last=InputLatency.index+1 == Int(InputLatency.env["MARU_LATENCY_EVENTS"] ?? "30")!
             guard now-InputLatency.postedAt < (last ? 120 : 20) else { InputLatency.finish("presentation_timeout",view);return }

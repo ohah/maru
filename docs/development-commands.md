@@ -1,5 +1,10 @@
 # 개발 명령
 
+`mise exec -- zig build test-editor-bracket-continuation -j2`와 `-Doptimize=ReleaseFast`는
+전체 프레임 게시 뒤 괄호 분석의 작업 지속과 완료 뒤 idle을 검증한다. 14개 제품 행동과
+4개 모듈 초기화를 강제하며 비동기·공유·IME preedit·편집/Undo·옵션 전환·빈/미지원 문서를 대조한다.
+[입력 지연 계획](plans/editor-input-latency.md)에 재현과 실제 표시 재측정의 범위를 기록한다.
+
 `mise exec -- zig build test-editor-feature-stop -j2`와 `-Doptimize=ReleaseFast`는
 semantic·inlay·symbols·fold·highlight의 auxiliary/primary 종료, 재시작, disable/enable와
 다른 root 종료를 검사한다. 12개(행동 8개, 초기화 4개)를 강제한다.

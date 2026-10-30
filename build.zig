@@ -7175,6 +7175,14 @@ pub fn build(b: *std.Build) void {
     b.step("test-editor-parse-input", "Verify actual asynchronous editor input and view completion").dependOn(&run_parse_input.step);
     test_step.dependOn(&run_parse_input.step);
     macos_only_test_step.dependOn(&run_parse_input.step);
+    const bracket_continuation_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{"BRCONT"} });
+    const run_bracket_continuation = b.addRunArtifact(bracket_continuation_tests);
+    run_bracket_continuation.setCwd(b.path("."));
+    run_bracket_continuation.addArg(if (target.result.os.tag == .macos) "--maru-expect-tests=18" else "--maru-expect-tests=15");
+    run_bracket_continuation.addArg(if (target.result.os.tag == .macos) "--maru-expect-passed=18" else "--maru-expect-passed=1");
+    b.step("test-editor-bracket-continuation", "Verify continued syntax work survives full frame publication").dependOn(&run_bracket_continuation.step);
+    test_step.dependOn(&run_bracket_continuation.step);
+    macos_only_test_step.dependOn(&run_bracket_continuation.step);
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
     run_editor_tests.step.dependOn(&install_fake_lsp.step);

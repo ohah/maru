@@ -736,6 +736,7 @@ fn advanceSyntax(self: *AppSession, term: *Term) void {
     const was_pending = term.rt.editor_syntax.pending;
     if (!term.rt.editor_syntax.async_view.enabled and syntax_color.resumeParse(&term.rt.editor_syntax, doc.file.content)) {
         self.metal_dirty = true;
+        self.reproject_after_frame = true;
     }
     // **공통 괄호 목록**(§5.1b·§5.1d) — 색과 강조가 함께 쓴다. 아직 훑는 중이면 다음 프레임을 부른다(파싱과
     // 같은 규율 — 안 부르면 idle skip 에서 멈춰 색이 영영 안 온다). 편집 직후의 부분 고침은 편집 통지(`onEditSpan`)가 이미 했다.
@@ -743,7 +744,12 @@ fn advanceSyntax(self: *AppSession, term: *Term) void {
         const cfg = self.loaded_config.config.editor;
         if (!cfg.bracket_pair_colorization and cfg.match_brackets == .never) {
             syntax_color.dropBrackets(&term.rt.editor_syntax, self.allocator);
-        } else if (syntax_color.advanceBrackets(&term.rt.editor_syntax, self.allocator, doc.file.content, cfg.bracket_pair_colorization_independent_pools)) self.metal_dirty = true;
+        } else if (syntax_color.advanceBrackets(&term.rt.editor_syntax, self.allocator, doc.file.content, cfg.bracket_pair_colorization_independent_pools)) {
+            // 이 함수는 전체 프레임을 만드는 도중에 돈다. metal_dirty만 세우면
+            // 같은 tick의 게시 성공 처리가 지운다. 다음 조각의 요청도 함께 보존한다.
+            self.metal_dirty = true;
+            self.reproject_after_frame = true;
+        }
     }
     // **피커가 열려 있고 방금 전까지 파던 중이었으면 목록을 다시 만든다**(§7.5 저하 — 「아직 모른다」의
     // 기제). 파싱이 끝나는 순간 검색어는 그대로라 아무것도 재필터를 촉발하지 않는다. `pending` 이
@@ -76004,4 +76010,91 @@ test "ASYNCINPUT 미지원 문법 전환과 종료는 참조와 늦은 전달을
 test "ASYNCINPUT 병합 전환은 별도 동기 구문 계약을 유지한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     try @import("parse/client_judges.zig").special(PaneFixture);
+}
+
+test "BRCONT 전체 프레임 게시 뒤에도 미완료 괄호의 다음 프레임 요청은 남는다" {
+    // appendPaneFrame만 부르면 게시 뒤 dirty 소거를 건너뛴다. 제품 tick까지 지나야
+    // 외부 입력이나 커서 blink가 없이 다음 조각을 처리할 수 있는지 판정할 수 있다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    var fx = try PaneFixture.init(a);
+    defer fx.deinit(a);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    for (0..1200) |_| try text.appendSlice(a, "const x = f([1], .{2});\n");
+    const term = try openBracketFixture(&fx, a, "continuation.zig", text.items);
+    const st = &term.rt.editor_syntax;
+    syntax_color.dropBrackets(st, a);
+    st.bracket_walk_budget_ns = 1;
+    fx.session.metal_dirty = true;
+    const generation = fx.session.metal_buffer.generation;
+    _ = try fx.session.tick();
+    try testing.expect(fx.session.metal_buffer.generation > generation);
+    try testing.expect(!st.brackets.ready);
+    try testing.expect(fx.session.metal_dirty);
+}
+
+test "BRCONT legacy" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/continuation_judges.zig").exercise(PaneFixture, openBracketFixture, .legacy);
+}
+
+test "BRCONT asynchronous" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/continuation_judges.zig").exercise(PaneFixture, openBracketFixture, .asynchronous);
+}
+
+test "BRCONT shared" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/continuation_judges.zig").exercise(PaneFixture, openBracketFixture, .shared);
+}
+
+test "BRCONT highlight_only" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/continuation_judges.zig").exercise(PaneFixture, openBracketFixture, .highlight_only);
+}
+
+test "BRCONT color_only" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/continuation_judges.zig").exercise(PaneFixture, openBracketFixture, .color_only);
+}
+
+test "BRCONT independent" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/continuation_judges.zig").exercise(PaneFixture, openBracketFixture, .independent);
+}
+
+test "BRCONT preedit" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/continuation_judges.zig").exercise(PaneFixture, openBracketFixture, .preedit);
+}
+
+test "BRCONT edit" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/continuation_judges.zig").exercise(PaneFixture, openBracketFixture, .edit);
+}
+
+test "BRCONT undo" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/continuation_judges.zig").exercise(PaneFixture, openBracketFixture, .undo);
+}
+
+test "BRCONT disabled" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/continuation_judges.zig").exercise(PaneFixture, openBracketFixture, .disabled);
+}
+
+test "BRCONT disable_during" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/continuation_judges.zig").exercise(PaneFixture, openBracketFixture, .disable_during);
+}
+
+test "BRCONT empty" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/continuation_judges.zig").exercise(PaneFixture, openBracketFixture, .empty);
+}
+
+test "BRCONT unsupported" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try @import("parse/continuation_judges.zig").exercise(PaneFixture, openBracketFixture, .unsupported);
 }

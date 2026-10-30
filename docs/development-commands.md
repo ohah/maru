@@ -2276,3 +2276,10 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 - 코드 액션 resolve 출처·수명: `mise exec -- zig build test-editor-code-action-origins test-editor-workspace-edit -j2`; 공유 순수 판정은 `mise exec -- zig test src/session/editor/ops/lsp_response_owner.zig`. [계획](plans/code-action-resolve-origin.md)을 따른다.
 
 - 편집기 Cmd+화살표 줄 경계: `mise exec -- zig build test-editor-command-line-contract test-editor-command-line-boundaries -j2`. 실제 줄바꿈·자동 줄바꿈 경계·caret 그리기를 검증한다. 제품 입력 검사는 macOS 전용이다.
+
+
+## 일반 입력의 실제 표시 지연 비교
+
+ReleaseFast 외부 사본에서 실제 OS HID 게시·문서 판·Metal drawable 표시를 연결한다.
+[준비·실행·완전한 A/B 묶음 검증](../tools/editor-input-latency/README.md)과
+[계획 및 사전 실행 범위](plans/editor-input-latency.md)를 따른다. 제품 소스나 기본 빌드는 바꾸지 않는다.

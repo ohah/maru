@@ -1,7 +1,7 @@
 # 파싱 워커 인계 전 비용 측정
 
 제품 소스는 바꾸지 않고 저장소 밖 사본의 syntax 테스트에 진단을 추가한다.
-[검토안](../../docs/plans/editor-async-parse.md)은 아직 미승인이다. 제품 워커·큐·완료 설치 구현은 없다.
+이 도구는 제품 worker 구현 전 인계 비용을 잰 당시 기록이다. 현재 제품의 worker·완료 설치·일반 입력 연결은 [구현 계획](../../docs/plans/editor-async-parse.md)을, 실제 표시 지연 비교는 [별도 도구](../editor-input-latency/README.md)를 따른다.
 
 ```sh
 python3 tools/editor-async-parse-measure/run.py --output /tmp/new-handoff --deps /path/to/extracted-deps --fixtures /path/to/pinned-fixtures

@@ -175,6 +175,8 @@ jobs:
       # 측정 자료나 SDK 없이 판정기의 타입·계수 계약을 지킨다. native 수집은 로컬 별도 실행이다.
       - name: Native parser evidence contracts
         run: python3 -m unittest discover -s tools/editor-native-parse-measure -p 'test_*.py'
+      - name: Input presentation evidence contracts
+        run: python3 -m unittest discover -s tools/editor-input-latency -p 'test_*.py'
       - name: Native sampling evidence contracts
         run: python3 -m unittest discover -s tools/editor-native-sampling -p 'test_*.py'
       - name: Parser budget evidence contracts

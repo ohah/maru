@@ -6742,6 +6742,16 @@ pub fn build(b: *std.Build) void {
     const run_pending_completion = b.addRunArtifact(pending_completion_tests);
     run_pending_completion.addArg("--maru-expect-tests=32");
     b.step("test-editor-completion-contract", "Run atomic completion context and deadline contract").dependOn(&run_pending_completion.step);
+    const completion_stop_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CMPSTOP"} });
+    const run_completion_stop = b.addRunArtifact(completion_stop_tests);
+    run_completion_stop.setCwd(b.path("."));
+    run_completion_stop.addArg("--maru-expect-tests=7");
+    run_completion_stop.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-completion-stop", "Verify completion wait ownership on server shutdown").dependOn(&run_completion_stop.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_completion_stop.addArg("--maru-expect-passed=7");
+        macos_only_test_step.dependOn(&run_completion_stop.step);
+    }
     const completion_origin_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CMPATORIGIN "} });
     const run_completion_origin = b.addRunArtifact(completion_origin_tests);
     run_completion_origin.setCwd(b.path("."));
@@ -6757,7 +6767,7 @@ pub fn build(b: *std.Build) void {
     const completion_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.CMP", ".test.RLC1 " } });
     const run_completion = b.addRunArtifact(completion_tests);
     run_completion.setCwd(b.path("."));
-    run_completion.addArg("--maru-expect-tests=21");
+    run_completion.addArg("--maru-expect-tests=24");
     run_completion.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-completion", "Run editor completion product regressions").dependOn(&run_completion.step);
     const save_conflict_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.C0a", ".test.C1a-", ".test.C1b-" } });

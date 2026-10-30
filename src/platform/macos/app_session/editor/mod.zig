@@ -26385,6 +26385,173 @@ test "RNM3 심볼 이름 바꾸기 — documentChanges 응답(version 포함)도
     }
 }
 
+test "CMPSTOP1 auxiliary death preserves a primary completion wait" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    for ([_]bool{ false, true }) |dirty| {
+        var f = (try SmtFixture.openRepo(allocator, "source.py", "pr # COMPSTALL\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        try f.fx.dir.dir.createDirPath(testing.io, ".venv/bin");
+        try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "pyproject.toml", .data = "[tool.ruff.lint]\nselect = [\"F\"]\n" });
+        {
+            var fake_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const fake = (try fakeLspAbs(&fake_buf)) orelse return error.SkipZigTest;
+            const bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, fake, allocator, .limited(64 << 20));
+            defer allocator.free(bytes);
+            try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = ".venv/bin/ruff", .data = bytes });
+            try f.fx.dir.dir.setFilePermissions(testing.io, ".venv/bin/ruff", @fromBackingInt(@intCast(0o755)), .{});
+        }
+        try testing.expect(f.ready());
+        const ss = f.fx.session;
+        const Ctx = struct { s: *AppSession, term: *Term };
+        try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .s = ss, .term = f.term }, struct {
+            fn ready(c: Ctx) bool {
+                const aux = clientByExe(c.s, "ruff") orelse return false;
+                return aux.role == .auxiliary and aux.phase == .ready and aux.proc != null and aux.findDoc(c.term) != null;
+            }
+        }.ready));
+        f.term.rt.editor_selection = editor_selection.Selection.at(2);
+        try testing.expect(completion_client.triggerManual(ss));
+        if (dirty) try testing.expect(completion_client.triggerManual(ss));
+        const seq = ss.editor_completion.waiting_seq;
+        const sent = ss.editor_lsp.sent_completions;
+        const primary = lsp_client.readyClientFor(ss, f.term).?;
+        const primary_pid = primary.proc.?.pid;
+        const aux = clientByExe(ss, "ruff").?;
+        completion_client.onResponse(ss, aux, seq, null);
+        try testing.expect(ss.editor_completion.waiting);
+        try testing.expectEqual(dirty, ss.editor_completion.dirty);
+        try testing.expectEqual(@as(c_int, 0), std.c.kill(aux.proc.?.pid, std.c.SIG.KILL));
+        try testing.expect(pumpLspUntil(&f.fx, 3000, ss, struct {
+            fn down(s: *AppSession) bool {
+                return (clientByExe(s, "ruff") orelse return false).phase == .restarting;
+            }
+        }.down));
+        try testing.expect(ss.editor_completion.waiting);
+        try testing.expectEqual(dirty, ss.editor_completion.dirty);
+        try testing.expectEqual(seq, ss.editor_completion.waiting_seq);
+        try testing.expectEqual(sent, ss.editor_lsp.sent_completions);
+        try testing.expectEqual(primary_pid, lsp_client.readyClientFor(ss, f.term).?.proc.?.pid);
+        var reply = try std.json.parseFromSlice(std.json.Value, allocator, "[{\"label\":\"print\",\"insertText\":\"print\"}]", .{});
+        defer reply.deinit();
+        completion_client.onResponse(ss, primary, seq, reply.value);
+        try testing.expect(ss.editor_completion.active);
+        try testing.expectEqual(dirty, ss.editor_completion.waiting);
+        try testing.expect(!ss.editor_completion.dirty);
+        try testing.expectEqual(sent + @as(u64, @intFromBool(dirty)), ss.editor_lsp.sent_completions);
+    }
+}
+
+test "CMPSTOP2 primary death or disable releases completion and permits a fresh request" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |disable| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "restart.c", "print\npr // COMPSTALL\n")) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const ss = f.fx.session;
+        const term = f.term;
+        term.rt.editor_selection = editor_selection.Selection.at(8);
+        try testing.expect(completion_client.triggerManual(ss));
+        try testing.expect(completion_client.triggerManual(ss));
+        const seq = ss.editor_completion.waiting_seq;
+        const sent = ss.editor_lsp.sent_completions;
+        const primary = lsp_client.readyClientFor(ss, term).?;
+        const old_pid = primary.proc.?.pid;
+        if (disable) {
+            ss.loaded_config.config.lsp.enabled = false;
+            lsp_client.pump(ss);
+            // stopAll frees clients. Never use primary after this point.
+        } else {
+            try testing.expectEqual(@as(c_int, 0), std.c.kill(old_pid, std.c.SIG.KILL));
+            try testing.expect(pumpLspUntil(&f.fx, 3000, primary, struct {
+                fn down(c: *lsp_client.Client) bool {
+                    return c.phase == .restarting;
+                }
+            }.down));
+            try testing.expect(lsp_client.readyClientFor(ss, term) == null);
+            try testing.expect(lsp_client.boundClientFor(ss, term) == primary);
+            completion_client.onClientStopped(ss, primary, term); // harmless replay
+            primary.retry_at_ms = 0; // Explicit test clock seam, not wall-clock proof.
+        }
+        try testing.expect(!ss.editor_completion.waiting and !ss.editor_completion.dirty);
+        try testing.expectEqual(seq, ss.editor_completion.waiting_seq);
+        try testing.expectEqual(sent, ss.editor_lsp.sent_completions);
+        try removeMarkerHover(ss, term, "COMPSTALL");
+        term.rt.editor_selection = editor_selection.Selection.at(8);
+        ss.loaded_config.config.lsp.enabled = true;
+        const Ctx = struct { s: *AppSession, term: *Term, pid: std.c.pid_t };
+        try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .s = ss, .term = term, .pid = old_pid }, struct {
+            fn ready(c: Ctx) bool {
+                const current = lsp_client.readyClientFor(c.s, c.term) orelse return false;
+                return current.proc.?.pid != c.pid;
+            }
+        }.ready));
+        try testing.expect(completion_client.triggerManual(ss));
+        try testing.expectEqual(sent + 1, ss.editor_lsp.sent_completions);
+        try testing.expect(pumpLspUntil(&f.fx, 1500, ss, struct {
+            fn shown(s: *AppSession) bool {
+                return s.editor_completion.active and !s.editor_completion.waiting;
+            }
+        }.shown));
+        try testing.expect(ss.editor_completion.order.items.len > 0);
+        try testing.expect(!ss.editor_completion.dirty);
+    }
+}
+
+test "CMPSTOP3 foreign primary stop and mismatched notifications preserve the current completion" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |dirty| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "first.c", "pr // COMPSTALL\n")) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const ss = f.fx.session;
+        const second = try openSecondReadRootForTest(&f, "pr // COMPSTALL\n");
+        f.term.rt.editor_selection = editor_selection.Selection.at(2);
+        second.rt.editor_selection = editor_selection.Selection.at(2);
+        const ca = lsp_client.readyClientFor(ss, f.term).?;
+        const cb = lsp_client.readyClientFor(ss, second).?;
+        try testing.expect(term_ops.activateSurfaceById(ss, f.term.surface.id));
+        try testing.expect(completion_client.triggerManual(ss));
+        completion_client.onResponse(ss, ca, ss.editor_completion.waiting_seq, null); // Settle the priming request.
+        try testing.expect(!ss.editor_completion.waiting);
+        try testing.expect(term_ops.activateSurfaceById(ss, second.surface.id));
+        try testing.expect(completion_client.triggerManual(ss));
+        if (dirty) try testing.expect(completion_client.triggerManual(ss));
+        const seq = ss.editor_completion.waiting_seq;
+        const sent = ss.editor_lsp.sent_completions;
+        try testing.expectEqual(ca.completion_seq, seq); // Real requests collide across roots.
+        const pid_b = cb.proc.?.pid;
+        completion_client.onClientStopped(ss, ca, second); // Same surface, wrong connection.
+        completion_client.onClientStopped(ss, cb, f.term); // Same connection, wrong surface.
+        try testing.expect(ss.editor_completion.waiting);
+        try testing.expectEqual(dirty, ss.editor_completion.dirty);
+        try testing.expectEqual(@as(c_int, 0), std.c.kill(ca.proc.?.pid, std.c.SIG.KILL));
+        try testing.expect(pumpLspUntil(&f.fx, 3000, ca, struct {
+            fn down(c: *lsp_client.Client) bool {
+                return c.phase == .restarting;
+            }
+        }.down));
+        completion_client.onClientStopped(ss, ca, f.term); // Replay of a foreign stop.
+        try testing.expect(ss.editor_completion.waiting);
+        try testing.expectEqual(dirty, ss.editor_completion.dirty);
+        try testing.expectEqual(seq, ss.editor_completion.waiting_seq);
+        try testing.expectEqual(sent, ss.editor_lsp.sent_completions);
+        try testing.expectEqual(pid_b, cb.proc.?.pid);
+        completion_client.onResponse(ss, ca, seq, null);
+        try testing.expect(ss.editor_completion.waiting);
+        // Current primary shutdown must still release that same wait.
+        try testing.expectEqual(@as(c_int, 0), std.c.kill(pid_b, std.c.SIG.KILL));
+        try testing.expect(pumpLspUntil(&f.fx, 3000, cb, struct {
+            fn down(c: *lsp_client.Client) bool {
+                return c.phase == .restarting;
+            }
+        }.down));
+        try testing.expect(!ss.editor_completion.waiting and !ss.editor_completion.dirty);
+        completion_client.onResponse(ss, cb, seq, null);
+        try testing.expectEqual(sent, ss.editor_lsp.sent_completions);
+    }
+}
+
 test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지며 isIncomplete 면 다시 묻고, ↓·Enter 로 고르면 접두사 교체(+import 가 undo 하나); Esc·빈 접두사·낱말 밖 글자·←·클릭은 닫힘; `.` 트리거; 설정 끄면 타이핑만 꺼짐; ⌃Space; 낡은 seq (제품 경계, §8.2g)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

@@ -497,7 +497,7 @@ fn handleRename(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.j
 
 /// `textDocument/completion`(§8.2g 관측점) — 문서의 식별자(중복 없이, 나온 순서 = sortText `0000`~)를 항목으로 내고, 마지막에 `fake_import`
 /// (`textEdit` 로 `[낱말 시작, caret)` 교체 + `additionalTextEdits` 로 첫 줄에 `#include "fake.h"\n`, `preselect`) 를 더한다. **접두사로 거르지
-/// 않는다**(로컬 필터의 관측점). caret 앞 낱말이 2 글자 미만이면 `isIncomplete: true`(재요청의 관측점). 본문에 `NOCOMP` 면 `null`.
+/// 않는다**(로컬 필터의 관측점). caret 앞 낱말이 2 글자 미만이면 `isIncomplete: true`(재요청의 관측점). 본문에 `NOCOMP` 면 `null`, `COMPSTALL` 면 답하지 않는다.
 /// capability `completionProvider{triggerCharacters: ["."]}`(`MARU_FAKE_LSP_NOCOMPCAP=1` 이면 없음).
 fn handleCompletion(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
     var req_uri: []const u8 = "";
@@ -513,6 +513,8 @@ fn handleCompletion(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         };
     };
     const text = docText(req_uri);
+    // Hold only completion; diagnostics and lifecycle messages remain live.
+    if (std.mem.indexOf(u8, text, "COMPSTALL") != null) return;
     if (std.mem.indexOf(u8, text, "NOCOMP") != null) {
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = null });
         return;

@@ -26385,6 +26385,254 @@ test "RNM3 심볼 이름 바꾸기 — documentChanges 응답(version 포함)도
     }
 }
 
+// Exercise each real request path independently: no manually fabricated waiting gate.
+const FeatureStopProbe = enum {
+    semantic,
+    inlay,
+    symbols,
+    fold,
+    highlight,
+
+    fn gate(kind: FeatureStopProbe, t: *Term) maru.session.editor.lsp_requests.Gate {
+        return switch (kind) {
+            .semantic => semantic_client.gate(&t.rt.editor_semantic),
+            .inlay => inlay_client.gate(&t.rt.editor_inlay),
+            .symbols => symbols_client.gate(&t.rt.editor_symbols),
+            .fold => fold_lsp_client.gate(&t.rt.editor_fold_lsp),
+            .highlight => highlight_client.gate(&t.rt.editor_highlight),
+        };
+    }
+
+    fn tick(kind: FeatureStopProbe, s: *AppSession, t: *Term) void {
+        switch (kind) {
+            .semantic => semantic_client.tick(s, t, 0, 1),
+            .inlay => inlay_client.tick(s, t, 0, 1),
+            .symbols => symbols_client.tick(s, t),
+            .fold => fold_lsp_client.tick(s, t),
+            .highlight => highlight_client.tick(s, t),
+        }
+    }
+
+    fn applied(kind: FeatureStopProbe, t: *Term) u64 {
+        return switch (kind) {
+            .semantic => t.rt.editor_semantic.applied,
+            .inlay => t.rt.editor_inlay.applied,
+            .symbols => t.rt.editor_symbols.applied + t.rt.editor_symbols.applied_empty,
+            .fold => t.rt.editor_fold_lsp.applied + t.rt.editor_fold_lsp.applied_empty,
+            .highlight => t.rt.editor_highlight.applied + t.rt.editor_highlight.applied_empty,
+        };
+    }
+
+    fn reply(kind: FeatureStopProbe, s: *AppSession, t: *Term, seq: u32) !void {
+        var value = try std.json.parseFromSlice(std.json.Value, testing.allocator, if (kind == .semantic) "{\"data\":[]}" else "[]", .{});
+        defer value.deinit();
+        switch (kind) {
+            .semantic => semantic_client.onResponse(s, t, seq, value.value, false, .utf16),
+            .inlay => inlay_client.onResponse(s, t, seq, value.value, false, .utf16),
+            .symbols => symbols_client.onResponse(s, t, seq, value.value, false, .utf16),
+            .fold => fold_lsp_client.onResponse(s, t, seq, value.value, false),
+            .highlight => highlight_client.onResponse(s, t, seq, value.value, false, .utf16),
+        }
+    }
+};
+
+const feature_stop_source = "value = value\n# SEMSTALL INLSTALL DSYSTALL FOLDSTALL DHLSTALL\n";
+
+fn prepareFeatureAuxForTest(f: *SmtFixture) !void {
+    try f.fx.dir.dir.createDirPath(testing.io, ".venv/bin");
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "pyproject.toml", .data = "[tool.ruff.lint]\nselect = [\"F\"]\n" });
+    var fake_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&fake_buf)) orelse return error.SkipZigTest;
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, fake, testing.allocator, .limited(64 << 20));
+    defer testing.allocator.free(bytes);
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = ".venv/bin/ruff", .data = bytes });
+    try f.fx.dir.dir.setFilePermissions(testing.io, ".venv/bin/ruff", @fromBackingInt(@intCast(0o755)), .{});
+    try testing.expect(f.ready());
+    const Ctx = struct { s: *AppSession, t: *Term };
+    try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .s = f.fx.session, .t = f.term }, struct {
+        fn ready(c: Ctx) bool {
+            const aux = clientByExe(c.s, "ruff") orelse return false;
+            return aux.role == .auxiliary and aux.phase == .ready and aux.proc != null and aux.findDoc(c.t) != null;
+        }
+    }.ready));
+}
+
+fn featureAuxDeathForTest(kind: FeatureStopProbe) !void {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var f = (try SmtFixture.openRepo(testing.allocator, "source.py", feature_stop_source)) orelse return error.SkipZigTest;
+    defer f.close(testing.allocator);
+    try prepareFeatureAuxForTest(&f);
+    const s = f.fx.session;
+    f.term.rt.editor_selection = editor_selection.Selection.at(2);
+    if (kind == .fold) {
+        var frame = appendPaneFrame(s, f.leaf, f.term) orelse return error.EditorPaneDidNotDraw;
+        frame.dl.deinit(testing.allocator); // Fold response validation consumes the product source-line projection.
+    }
+    const g = kind.gate(f.term);
+    g.clock.* = 0; // Explicit quiet-clock seam; the request itself is real.
+    kind.tick(s, f.term);
+    try testing.expect(g.waiting.*);
+    const seq = g.waiting_seq.*;
+    const version = g.waiting_version.*;
+    const sent = g.sent.*;
+    const clock = g.clock.*;
+    const applied = kind.applied(f.term);
+    const primary_pid = lsp_client.readyClientFor(s, f.term).?.proc.?.pid;
+    try testing.expectEqual(@as(c_int, 0), std.c.kill(clientByExe(s, "ruff").?.proc.?.pid, std.c.SIG.KILL));
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, struct {
+        fn down(ss: *AppSession) bool {
+            return (clientByExe(ss, "ruff") orelse return false).phase == .restarting;
+        }
+    }.down));
+    try testing.expect(g.waiting.*);
+    if (g.dirty) |d| try testing.expect(!d.*);
+    try testing.expectEqual(seq, g.waiting_seq.*);
+    try testing.expectEqual(version, g.waiting_version.*);
+    try testing.expectEqual(clock, g.clock.*);
+    try testing.expectEqual(sent, g.sent.*);
+    try testing.expectEqual(primary_pid, lsp_client.readyClientFor(s, f.term).?.proc.?.pid);
+    try kind.reply(s, f.term, seq); // Direct normal result, not an SDK/wire claim.
+    try testing.expect(!g.waiting.*);
+    try testing.expectEqual(applied + 1, kind.applied(f.term));
+}
+
+test "LSPSTOP1 auxiliary death preserves semantic wait" {
+    try featureAuxDeathForTest(.semantic);
+}
+test "LSPSTOP2 auxiliary death preserves inlay wait" {
+    try featureAuxDeathForTest(.inlay);
+}
+test "LSPSTOP3 auxiliary death preserves symbol wait" {
+    try featureAuxDeathForTest(.symbols);
+}
+test "LSPSTOP4 auxiliary death preserves fold wait" {
+    try featureAuxDeathForTest(.fold);
+}
+test "LSPSTOP5 auxiliary death preserves highlight wait" {
+    try featureAuxDeathForTest(.highlight);
+}
+
+fn startFeatureStopRequestForTest(kind: FeatureStopProbe, f: *SmtFixture, term: *Term) !void {
+    term.rt.editor_selection = editor_selection.Selection.at(2);
+    if (kind == .fold) {
+        var frame = appendPaneFrame(f.fx.session, f.leaf, term) orelse return error.EditorPaneDidNotDraw;
+        frame.dl.deinit(testing.allocator);
+    }
+    kind.gate(term).clock.* = 0; // Explicit quiet-clock seam.
+    kind.tick(f.fx.session, term);
+    try testing.expect(kind.gate(term).waiting.*);
+}
+
+test "LSPSTOP6 primary death releases and restarts every document feature" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (std.enums.values(FeatureStopProbe)) |kind| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "restart.c", feature_stop_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        try startFeatureStopRequestForTest(kind, &f, f.term);
+        const s = f.fx.session;
+        const g = kind.gate(f.term);
+        const seq = g.waiting_seq.*;
+        const sent = g.sent.*;
+        const primary = lsp_client.readyClientFor(s, f.term).?;
+        const old_pid = primary.proc.?.pid;
+        try testing.expectEqual(@as(c_int, 0), std.c.kill(old_pid, std.c.SIG.KILL));
+        try testing.expect(pumpLspUntil(&f.fx, 3000, primary, struct {
+            fn down(c: *lsp_client.Client) bool {
+                return c.phase == .restarting;
+            }
+        }.down));
+        try testing.expect(!g.waiting.*);
+        if (g.dirty) |d| try testing.expect(d.*);
+        try testing.expectEqual(sent, g.sent.*);
+        try testing.expect(lsp_client.readyClientFor(s, f.term) == null);
+        try testing.expect(lsp_client.boundClientFor(s, f.term) == primary);
+        const applied = kind.applied(f.term);
+        try kind.reply(s, f.term, seq); // A late response after stop must be ignored.
+        try testing.expectEqual(applied, kind.applied(f.term));
+        primary.retry_at_ms = 0; // Explicit backoff seam.
+        const Ctx = struct { s: *AppSession, t: *Term, pid: std.c.pid_t };
+        try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .s = s, .t = f.term, .pid = old_pid }, struct {
+            fn ready(c: Ctx) bool {
+                const client = lsp_client.readyClientFor(c.s, c.t) orelse return false;
+                return client.proc.?.pid != c.pid;
+            }
+        }.ready));
+        try startFeatureStopRequestForTest(kind, &f, f.term);
+        try testing.expectEqual(sent + 1, g.sent.*);
+        try testing.expect(g.waiting_seq.* != seq);
+        try kind.reply(s, f.term, seq); // Older seq cannot release the new wait.
+        try testing.expect(g.waiting.*);
+        try kind.reply(s, f.term, g.waiting_seq.*);
+        try testing.expectEqual(applied + 1, kind.applied(f.term));
+    }
+}
+
+test "LSPSTOP7 disable and enable releases every document feature" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (std.enums.values(FeatureStopProbe)) |kind| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "toggle.c", feature_stop_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        try startFeatureStopRequestForTest(kind, &f, f.term);
+        const s = f.fx.session;
+        const g = kind.gate(f.term);
+        const sent = g.sent.*;
+        const old_pid = lsp_client.readyClientFor(s, f.term).?.proc.?.pid;
+        s.loaded_config.config.lsp.enabled = false;
+        lsp_client.pump(s); // stopAll frees Client pointers; retain only PID and Term-owned state.
+        try testing.expect(!g.waiting.*);
+        if (g.dirty) |d| try testing.expect(d.*);
+        try testing.expect(lsp_client.readyClientFor(s, f.term) == null);
+        s.loaded_config.config.lsp.enabled = true;
+        const Ctx = struct { s: *AppSession, t: *Term, pid: std.c.pid_t };
+        try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .s = s, .t = f.term, .pid = old_pid }, struct {
+            fn ready(c: Ctx) bool {
+                const client = lsp_client.readyClientFor(c.s, c.t) orelse return false;
+                return client.proc.?.pid != c.pid;
+            }
+        }.ready));
+        try startFeatureStopRequestForTest(kind, &f, f.term);
+        try testing.expectEqual(sent + 1, g.sent.*);
+        const applied = kind.applied(f.term);
+        try kind.reply(s, f.term, g.waiting_seq.*);
+        try testing.expectEqual(applied + 1, kind.applied(f.term));
+    }
+}
+
+test "LSPSTOP8 foreign primary death preserves every document feature" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (std.enums.values(FeatureStopProbe)) |kind| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "first.c", feature_stop_source)) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        const second = try openSecondReadRootForTest(&f, feature_stop_source);
+        try startFeatureStopRequestForTest(kind, &f, second);
+        const g = kind.gate(second);
+        const seq = g.waiting_seq.*;
+        const version = g.waiting_version.*;
+        const sent = g.sent.*;
+        const primary = lsp_client.readyClientFor(s, f.term).?;
+        const pid_b = lsp_client.readyClientFor(s, second).?.proc.?.pid;
+        try testing.expectEqual(@as(c_int, 0), std.c.kill(primary.proc.?.pid, std.c.SIG.KILL));
+        try testing.expect(pumpLspUntil(&f.fx, 3000, primary, struct {
+            fn down(c: *lsp_client.Client) bool {
+                return c.phase == .restarting;
+            }
+        }.down));
+        try testing.expect(g.waiting.*);
+        if (g.dirty) |d| try testing.expect(!d.*);
+        try testing.expectEqual(seq, g.waiting_seq.*);
+        try testing.expectEqual(version, g.waiting_version.*);
+        try testing.expectEqual(sent, g.sent.*);
+        try testing.expectEqual(pid_b, lsp_client.readyClientFor(s, second).?.proc.?.pid);
+        const applied = kind.applied(second);
+        try kind.reply(s, second, seq);
+        try testing.expectEqual(applied + 1, kind.applied(second));
+    }
+}
+
 test "CMPSTOP1 auxiliary death preserves a primary completion wait" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

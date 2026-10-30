@@ -1711,11 +1711,16 @@ fn releaseWaiting(self: *AppSession, c: *Client) void {
         const rt = &term.rt;
         // 막음 풀기는 L2 `lsp_requests.release` 하나다(`dirty` 가 있는 넷은 다시 묻게 두고, 강조는 caret 의 조용 시계가 다시 묻는다).
         const release = maru.session.editor.lsp_requests.release;
-        release(editor_semantic.gate(&rt.editor_semantic));
-        release(editor_inlay.gate(&rt.editor_inlay));
-        release(editor_symbols.gate(&rt.editor_symbols));
-        release(editor_fold_lsp.gate(&rt.editor_fold_lsp));
-        release(editor_highlight.gate(&rt.editor_highlight));
+        // These gates belong to the primary connection. Sharing a document does
+        // not give an auxiliary's shutdown ownership of the primary's requests.
+        // proc is detached already; the live document binding still identifies it.
+        if (c.role == .primary and boundClientFor(self, term) == c) {
+            release(editor_semantic.gate(&rt.editor_semantic));
+            release(editor_inlay.gate(&rt.editor_inlay));
+            release(editor_symbols.gate(&rt.editor_symbols));
+            release(editor_fold_lsp.gate(&rt.editor_fold_lsp));
+            release(editor_highlight.gate(&rt.editor_highlight));
+        }
         // proc is already detached here. Match the document binding, not ready state.
         editor_signature.onClientStopped(self, c, term);
         // A same-document auxiliary stop must not discard the primary's reply.

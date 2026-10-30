@@ -6742,6 +6742,16 @@ pub fn build(b: *std.Build) void {
     const run_pending_completion = b.addRunArtifact(pending_completion_tests);
     run_pending_completion.addArg("--maru-expect-tests=32");
     b.step("test-editor-completion-contract", "Run atomic completion context and deadline contract").dependOn(&run_pending_completion.step);
+    const feature_stop_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.LSPSTOP"} });
+    const run_feature_stop = b.addRunArtifact(feature_stop_tests);
+    run_feature_stop.setCwd(b.path("."));
+    run_feature_stop.addArg("--maru-expect-tests=12");
+    run_feature_stop.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-feature-stop", "Verify document feature wait ownership on server shutdown").dependOn(&run_feature_stop.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_feature_stop.addArg("--maru-expect-passed=12");
+        macos_only_test_step.dependOn(&run_feature_stop.step);
+    }
     const completion_stop_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.CMPSTOP"} });
     const run_completion_stop = b.addRunArtifact(completion_stop_tests);
     run_completion_stop.setCwd(b.path("."));

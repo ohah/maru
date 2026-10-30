@@ -8,7 +8,7 @@ def once(s,a,b):
     if s.count(a)!=1: raise ValueError('anchor must be unique: '+a[:100])
     return s.replace(a,b)
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--deps',required=True,type=pathlib.Path);p.add_argument('--cache',required=True,type=pathlib.Path);p.add_argument('--resume',action='store_true');p.add_argument('--continuation-fix',action='store_true');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--output',required=True,type=pathlib.Path);p.add_argument('--deps',required=True,type=pathlib.Path);p.add_argument('--cache',required=True,type=pathlib.Path);p.add_argument('--resume',action='store_true');a=p.parse_args()
     out=a.output.resolve();deps=a.deps.resolve()
     if subprocess.run(['git','diff','--quiet','HEAD','--','src','build.zig','build.zig.zon','web'],cwd=ROOT).returncode:p.error('product source must match HEAD')
     if out==ROOT or (out.exists() and not a.resume) or ROOT in out.parents or not deps.is_dir():p.error('new external output and existing dependencies required')
@@ -29,7 +29,6 @@ def main():
         (src/'web/node_modules').symlink_to(ROOT/'web/node_modules',target_is_directory=True)
     if (out/'build.log').exists():shutil.copy2(out/'build.log',out/('build-history-'+str(len(list(out.glob('build-history-*'))))+'.log'))
     names=['src/platform/macos/'+x for x in ['app_session.zig','app_session/debug_fixtures.zig','app_host_abi.zig','MaruAppHost.swift','maru_metal_renderer.m']]
-    if a.continuation_fix:names.append('src/platform/macos/app_session/editor/mod.zig')
     original={n:sha(src/n) for n in names}
     def patch(n,fn):
         path=src/'src/platform/macos'/n;path.write_text(fn(path.read_text()))
@@ -38,9 +37,7 @@ def main():
     patch('app_host_abi.zig',lambda s:s+'\n'+(HERE/'abi.zig.inc').read_text().replace('session_mod.debug_fixtures','@import("app_session/debug_fixtures.zig")'))
     patch('maru_metal_renderer.m',lambda s:once(once(s,'#include <string.h>','#include <string.h>\n'+(HERE/'present.m.inc').read_text()),'    // 두 drawable을 같은 command buffer에 present','    latency_arm(terminal_drawable);\n    // 두 drawable을 같은 command buffer에 present'))
     patch('MaruAppHost.swift',lambda s:once(once(once(once(s,'        if isEditorIMESmokeMode {\n            guard let driver = EditorIMESmokeDriver()', '        if isEditorIMESmokeMode && ProcessInfo.processInfo.environment["MARU_LATENCY_OUTPUT"] == nil {\n            guard let driver = EditorIMESmokeDriver()'),'        maybeRunEditorIMESmoke()\n','        maybeRunEditorIMESmoke()\n        maybeRunInputLatency()\n'),'    override func keyDown(with event: NSEvent) {','    override func keyDown(with event: NSEvent) {\n        latencyKeydown(UInt64(event.keyCode),event.timestamp)'), '        let drew = maru_metal_renderer_draw(', '        var latencyStamp=[UInt64](repeating:0,count:7)\n        latencyFrame(frame.generation,&latencyStamp)\n        latencyMark(latencyStamp)\n        let drew = maru_metal_renderer_draw(')+'\n'+(HERE/'driver.swift.inc').read_text())
-    if a.continuation_fix:
-        patch('app_session/editor/mod.zig',lambda s:once(s,')) self.metal_dirty = true;\n    }\n    // **피커가', ')) { self.metal_dirty = true; self.reproject_after_frame = true; }\n    }\n    // **피커가'))
-    manifest=dict(continuation_fix=a.continuation_fix,optimize='ReleaseFast',head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),original=original,instrumented={n:sha(src/n) for n in names},tools={str(x.relative_to(HERE)):sha(x) for x in HERE.iterdir() if x.is_file()})
+    manifest=dict(optimize='ReleaseFast',head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),original=original,instrumented={n:sha(src/n) for n in names},tools={str(x.relative_to(HERE)):sha(x) for x in HERE.iterdir() if x.is_file()})
     (out/'source.json').write_text(json.dumps(manifest,indent=2))
     env=dict(os.environ,ZIG_LOCAL_PKG_DIR=str(deps))
     with (out/'build.log').open('w') as log:subprocess.run(['mise','exec','--','zig','build','macos-app-bundle','-Doptimize=ReleaseFast','--cache-dir',str(a.cache),'-j2'],cwd=src,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)

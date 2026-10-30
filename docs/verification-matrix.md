@@ -1,5 +1,9 @@
 # 검증 매트릭스
 
+자동완성 서버 종료 출처: `test-editor-completion-stop`은 실제 소유 fixture PID 종료와
+재시작, LSP 끄기·켜기 및 직접 전달하는 잘못된 종료 알림을 대조한다.
+[계획](plans/lsp-completion-stop-origin.md)의 범위이며 SDK/HID/픽셀 증거는 아니다.
+
 `mise exec -- zig build test-editor-signature-restart -j2`는 서버 종료·재시작과 LSP 재활성화 뒤
 시그니처 대기 복구를 검사한다. 다른 primary/auxiliary와 호버 소유권은
 [서버 종료 복구 계획](plans/lsp-signature-restart.md)의 대조를 따른다.

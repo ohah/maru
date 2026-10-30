@@ -265,6 +265,16 @@ pub fn wordStart(content: []const u8, caret: usize) usize {
     return s;
 }
 
+/// A shared document does not make its auxiliary connection the completion owner.
+/// Shutdown has already detached proc, so use the surviving document binding.
+pub fn onClientStopped(self: *AppSession, origin: *editor_lsp.Client, term: *Term) void {
+    const st = &self.editor_completion;
+    if (!st.waiting or st.waiting_surface != term.surfaceId()) return;
+    if (origin.role != .primary or editor_lsp.boundClientFor(self, term) != origin) return;
+    st.waiting = false;
+    st.dirty = false;
+}
+
 /// 응답(`editor_lsp` 가 부른다). 낡은 seq 는 버린다. 목록을 복사해 들고 접두사로 좁혀 연다(0 이면 닫힌 채).
 pub fn onResponse(self: *AppSession, origin: *editor_lsp.Client, seq: u32, result: ?std.json.Value) void {
     const enc = origin.encoding;

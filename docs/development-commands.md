@@ -1,5 +1,10 @@
 # 개발 명령
 
+`mise exec -- zig build test-editor-completion-stop -j2`와 `-Doptimize=ReleaseFast`는
+실제 auxiliary/primary 종료·재시작, LSP 비활성화와 다른 root 종료의 자동완성 대기를 검사한다.
+7개(행동 3개와 모듈 초기화 4개)를 강제하며 직접 주입과 프로세스 종료의 구분은
+[종료 출처 계획](plans/lsp-completion-stop-origin.md)을 따른다.
+
 `mise exec -- zig build test-editor-signature-restart -j2`는 서버 종료·재시작과 LSP 재활성화 뒤
 시그니처 대기 복구를 검사한다. 다른 primary/auxiliary와 호버 소유권은
 [서버 종료 복구 계획](plans/lsp-signature-restart.md)의 대조를 따른다.
@@ -1838,7 +1843,7 @@ Save As를 검사한다. 검색용 `--physical-ime`와 함께 쓰지 않는다. 
 ### 자동완성 확정의 Undo 보존
 
 `mise exec -- zig build test-editor-completion`과 `-Doptimize=ReleaseFast`는
-CMP1~12 제품 판정자와 import 초기화 검사 4개(총 16개)를 실행한다. CMP3는 가득 찬 Undo와
+자동완성 제품 판정자 20개와 import 초기화 검사 4개(총 24개)를 실행한다. CMP3는 가득 찬 Undo와
 기존 Redo 상태에서 확정 중 할당 실패를 순회해 본문·선택·revision·이력 보존을 검사한다.
 실제 OS 입력기 화면 검증은 포함하지 않는다.
 

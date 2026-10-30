@@ -1718,12 +1718,8 @@ fn releaseWaiting(self: *AppSession, c: *Client) void {
         release(editor_highlight.gate(&rt.editor_highlight));
         // proc is already detached here. Match the document binding, not ready state.
         editor_signature.onClientStopped(self, c, term);
-        // 자동완성은 세션에 하나 — 기다리던 것이 **이 문서**의 요청일 때만 놓는다(다른 서버의 응답을 버리지 않게).
-        const comp = &self.editor_completion;
-        if (comp.waiting and comp.waiting_surface == term.surfaceId()) {
-            comp.waiting = false;
-            comp.dirty = false;
-        }
+        // A same-document auxiliary stop must not discard the primary's reply.
+        editor_completion.onClientStopped(self, c, term);
     };
 }
 

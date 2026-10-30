@@ -60,8 +60,8 @@ RSS는 앱 시작부터의 최대값이며 입력 한 번의 추가 할당량이
 문법 분석 시각과 세대 차이는 비슷한데 완료 시간이 blink 주기에 비례했다. 이 workload에서
 괄호 작업 진행이 후속 프레임 공급에 의존한다는 근거다.
 `editor/mod.zig`의 `advanceBrackets`는 미완료 때 `metal_dirty`를 세우지만 전체 프레임 게시 뒤에는
-`reproject_after_frame`이 없는 경우 그 플래그가 지워진다. 다음 작업은 이 연속 요청의 소실을
-제품 판정자로 재현하고 화면 게시와 작업 지속의 계약을 고치는 것이다.
+`reproject_after_frame`이 없는 경우 그 플래그가 지워진다. 이 실측에서 후속 대상으로 고른
+연속 요청 소실의 제품 재현과 수정 결과는 [후속 결과](continuation-results.md)에 기록했다.
 
 외부 사본에서 `reproject_after_frame`도 세우는 단순 변경을 시도했으나 첫 sync 대조군부터
 `presentation_timeout`으로 거절됐다. 앱은 키 이벤트와 프레임을 처리했지만 유효한 표시 표본은 없었다.

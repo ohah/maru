@@ -97,9 +97,12 @@ pub fn exercise(comptime Fixture: type, comptime open: anytype, which: Case) !vo
         var cold = colors.openParsedBudgeted(bytes, term.rt.editor_grammar, 0);
         defer cold.deinit(a);
         try colors.finishBrackets(&cold, a, bytes);
+        // 토큰 위치뿐 아니라 독립 색 풀의 깊이·짝 판정도 같은 옵션으로 대조한다.
+        while (colors.advanceBrackets(&cold, a, bytes, cfg.bracket_pair_colorization_independent_pools)) {}
         const got = colors.bracketMarks(&term.rt.editor_syntax);
         const expected = colors.bracketMarks(&cold);
         try std.testing.expectEqualDeep(expected.toks, got.toks);
+        try std.testing.expectEqualDeep(expected.info, got.info);
     }
     // 마지막 조각 뒤 예약이 남아 무한 재투영하지 않는지 확인한다.
     for (0..3) |_| _ = try fx.session.tick();

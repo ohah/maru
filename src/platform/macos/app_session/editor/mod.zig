@@ -22893,6 +22893,105 @@ test "SIG4 actual Save As invalidates signature location responses and scheduled
     }
 }
 
+// Hold the subprocess response and inject null after newer input, so an old
+// empty result cannot silently consume the current position's coalesced trigger.
+test "SIGE1 empty signature response preserves exactly one coalesced followup" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |was_active| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "empty.c", "add( // SIGSTALL\n")) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const ss = f.fx.session;
+        const term = f.term;
+        term.rt.editor_selection = editor_selection.Selection.at(4);
+        const client = lsp_client.readyClientFor(ss, term).?;
+        try testing.expect(signature_client.triggerManual(ss));
+        if (was_active) {
+            signature_client.onClientResponse(ss, client, ss.editor_signature.waiting_seq, .{ .label = "old()", .index = 0, .count = 1 });
+            try testing.expect(signature_client.triggerManual(ss));
+        }
+        const old_seq = ss.editor_signature.waiting_seq;
+        const sent = ss.editor_lsp.sent_signatures;
+        for (0..3) |_| try testing.expect(signature_client.triggerManual(ss));
+        try testing.expect(insertText(ss, term, "1,")); // Actual edit and trigger while the old position waits.
+        try testing.expectEqual(sent, ss.editor_lsp.sent_signatures);
+        try testing.expect(ss.editor_signature.dirty);
+        signature_client.onClientResponse(ss, client, old_seq, null);
+        try testing.expectEqual(sent + 1, ss.editor_lsp.sent_signatures);
+        try testing.expect(ss.editor_signature.waiting and !ss.editor_signature.dirty);
+        try testing.expectEqual(term.rt.editor_selection.?.focus, ss.editor_signature.asked_focus);
+        try testing.expectEqual(term.rt.editorDocument().notifications.lsp_version, ss.editor_signature.asked_version);
+        try testing.expect(!ss.editor_signature.active);
+        try testing.expect(!ss.chrome_host.hover_box.open);
+        const next_seq = ss.editor_signature.waiting_seq;
+        try testing.expect(next_seq != old_seq);
+        signature_client.onClientResponse(ss, client, old_seq, null);
+        try testing.expect(ss.editor_signature.waiting);
+        try testing.expectEqual(sent + 1, ss.editor_lsp.sent_signatures);
+        signature_client.onClientResponse(ss, client, next_seq, .{ .label = "current()", .index = 0, .count = 1 });
+        try testing.expect(ss.editor_signature.active and !ss.editor_signature.waiting);
+        try testing.expectEqualStrings("current()", signature_client.lines(ss)[0].text);
+        // A final empty result without new triggers closes normally, without a loop.
+        try testing.expect(signature_client.triggerManual(ss));
+        const final_sent = ss.editor_lsp.sent_signatures;
+        signature_client.onClientResponse(ss, client, ss.editor_signature.waiting_seq, null);
+        try testing.expect(!ss.editor_signature.active and !ss.editor_signature.waiting);
+        try testing.expectEqual(final_sent, ss.editor_lsp.sent_signatures);
+    }
+}
+
+test "SIGE2 empty followup respects cancellation visibility and response ownership" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..6) |mode| {
+        var f = (try SmtFixture.openRepo(testing.allocator, "guards.c", "add( // SIGSTALL\n")) orelse return error.SkipZigTest;
+        defer f.close(testing.allocator);
+        try testing.expect(f.ready());
+        const ss = f.fx.session;
+        const second = try openSecondReadRootForTest(&f, "add( // SIGSTALL\n");
+        try testing.expect(term_ops.activateSurfaceById(ss, f.term.surface.id));
+        const client = lsp_client.readyClientFor(ss, f.term).?;
+        const foreign = lsp_client.readyClientFor(ss, second).?;
+        try testing.expect(signature_client.triggerManual(ss));
+        try testing.expect(signature_client.triggerManual(ss));
+        const seq = ss.editor_signature.waiting_seq;
+        const sent = ss.editor_lsp.sent_signatures;
+        switch (mode) {
+            0 => signature_client.noteEscape(ss),
+            1 => try testing.expect(term_ops.activateSurfaceById(ss, second.surface.id)),
+            2 => {
+                signature_client.onClientResponse(ss, foreign, seq, null);
+                try testing.expect(ss.editor_signature.waiting and ss.editor_signature.dirty);
+            },
+            3 => {
+                signature_client.onClientResponse(ss, client, seq + 1, null);
+                try testing.expect(ss.editor_signature.waiting and ss.editor_signature.dirty);
+            },
+            4 => {
+                // A hover-owned box must survive an inactive signature's empty reply.
+                ss.chrome_host.hover_box.show(10, 20, 12);
+            },
+            5 => {
+                ss.loaded_config.config.lsp.enabled = false;
+                lsp_client.pump(ss); // Exercise the actual shutdown/release path before the late response.
+            },
+            else => unreachable,
+        }
+        signature_client.onClientResponse(ss, client, seq, null);
+        if (mode == 2 or mode == 3 or mode == 4) {
+            try testing.expectEqual(sent + 1, ss.editor_lsp.sent_signatures);
+            try testing.expect(ss.editor_signature.waiting and !ss.editor_signature.dirty);
+            signature_client.noteEscape(ss);
+            signature_client.onClientResponse(ss, client, ss.editor_signature.waiting_seq, null);
+            try testing.expectEqual(sent + 1, ss.editor_lsp.sent_signatures);
+        } else {
+            try testing.expectEqual(sent, ss.editor_lsp.sent_signatures);
+        }
+        try testing.expect(!ss.editor_signature.waiting and !ss.editor_signature.dirty);
+        if (mode == 4) try testing.expect(ss.chrome_host.hover_box.open);
+        try testing.expect(!ss.editor_signature.active);
+    }
+}
+
 // Kill only this fixture's fake subprocess. A new ready PID must accept a fresh
 // manual request even when the old process never answered the previous request.
 test "SIGR1 signature request recovers after real server death and restart" {

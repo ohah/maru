@@ -827,6 +827,10 @@ U2 판정자들이 `refreshCaretAnchor`·`buildChromeOverlayPrep` 을 직접 불
 종료 시점에는 proc가 이미 없어 `boundClientFor`로 결합을 확인하며, 새 요청과 응답은
 기존 `readyClientFor` 검사를 유지한다.
 
+semantic·inlay·symbols·fold_lsp·highlight의 문서별 대기도 같은 주 서버 결합을 따른다.
+종료 시 `releaseWaiting`은 primary와 `boundClientFor`의 일치를 확인한 뒤 기존 L2
+`lsp_requests.release`를 호출한다. 다른 root나 auxiliary 종료는 대기를 바꾸지 않는다.
+
 **계획 공격이 드러난 것.** ① 팝업의 **UI 계약은 이미 있다**([native-editor-ui §8.2](native-editor-ui.md) — 공통 규칙 넷 + 로컬 필터·`isIncomplete`·
 「고르면 §3.6 으로」·ghost text 는 별개). 이 절은 그 계약 위에 **언제 묻고·무엇을 어떻게 고르고·어떻게 적용하는가**만 정한다(호버 §8.2b 와
 같은 분업). ② 규칙 4 「목록은 `dropdown.zig` 의 팝업 부분」은 **그대로 쓸 수 없다** — 그 팝업은 enum 값 위젯이라 `_`→`-` 표시 변환, 창 없는

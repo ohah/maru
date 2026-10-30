@@ -1,5 +1,9 @@
 # 검증 매트릭스
 
+문서별 LSP 종료 출처: `test-editor-feature-stop`은 다섯 기능의 실제 요청을 보류한 뒤
+fixture의 auxiliary/primary PID 종료·재시작, LSP 끄기·켜기와 다른 root를 대조한다.
+[계획](plans/lsp-feature-stop-origin.md)의 직접 정상 응답 전달은 SDK/HID/픽셀 증거와 구분한다.
+
 자동완성 서버 종료 출처: `test-editor-completion-stop`은 실제 소유 fixture PID 종료와
 재시작, LSP 끄기·켜기 및 직접 전달하는 잘못된 종료 알림을 대조한다.
 [계획](plans/lsp-completion-stop-origin.md)의 범위이며 SDK/HID/픽셀 증거는 아니다.

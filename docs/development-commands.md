@@ -1,5 +1,10 @@
 # 개발 명령
 
+`mise exec -- zig build test-editor-feature-stop -j2`와 `-Doptimize=ReleaseFast`는
+semantic·inlay·symbols·fold·highlight의 auxiliary/primary 종료, 재시작, disable/enable와
+다른 root 종료를 검사한다. 12개(행동 8개, 초기화 4개)를 강제한다.
+[문서별 종료 출처 계획](plans/lsp-feature-stop-origin.md)에 직접 응답 전달과 실제 PID 종료의 범위를 적는다.
+
 `mise exec -- zig build test-editor-completion-stop -j2`와 `-Doptimize=ReleaseFast`는
 실제 auxiliary/primary 종료·재시작, LSP 비활성화와 다른 root 종료의 자동완성 대기를 검사한다.
 7개(행동 3개와 모듈 초기화 4개)를 강제하며 직접 주입과 프로세스 종료의 구분은

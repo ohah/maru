@@ -36,6 +36,7 @@ pub const cell_text = @import("platform/cell_text.zig");
 pub const dwrite_font = if (builtin.os.tag == .windows) @import("platform/windows/dwrite_font.zig") else struct {};
 /// Win32 calling convention adapter is type-only and portable across artifact roots.
 pub const win32_locale = @import("platform/windows/locale.zig");
+pub const win32_file_dialog = if (builtin.os.tag == .windows) @import("platform/windows/file_dialog/backend.zig") else struct {};
 pub const win32_abi = @import("platform/windows/abi.zig");
 /// One module owns native identity for common archive workers and host adapters.
 pub const win32_file_identity = @import("platform/windows/file_identity.zig");

@@ -512,6 +512,9 @@ pub const Tree = struct {
         for (self.roots.items) |*root| {
             if (!std.mem.eql(u8, root.path, path)) continue;
             root.identity = identity;
+            // Root pins originate from the validated directory's fstat axis.
+            // Protect the first successful scan too, including a failed-scan retry.
+            root.scan_identity = .{ .value = identity };
             return true;
         }
         return false;

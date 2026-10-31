@@ -2006,17 +2006,16 @@ pub fn acceptContextMenu(self: *AppSession) void {
     if (self.file_tree_background_menu) {
         const selected = self.chrome_host.context_menu.selected;
         closeContextMenu(self);
-        switch (selected) {
-            0 => file_panel_ops.requestFilePanelPick(self),
-            1 => file_panel_ops.requestFileTreeRootPick(self, .replace),
-            2 => file_panel_ops.requestFileTreeRootPick(self, .add),
+        if (maru.app.file_tree_context_menu.actionAt(.background, false, selected)) |action| switch (action) {
+            .open_file => file_panel_ops.requestFilePanelPick(self),
+            .open_folder => file_panel_ops.requestFileTreeRootPick(self, .replace),
+            .add_root => file_panel_ops.requestFileTreeRootPick(self, .add),
             else => {},
-        }
+        };
         return;
     }
     if (self.file_tree_context_target) |target| {
         const sel = self.chrome_host.context_menu.selected;
-        const create_allowed = !(target.symlink and (target.row_kind == .root or target.row_kind == .directory));
         self.file_tree_context_target = null;
         self.chrome_host.context_menu.hide();
         if (target.root_generation != self.file_tree.rootGeneration()) {
@@ -2028,22 +2027,20 @@ pub fn acceptContextMenu(self: *AppSession) void {
             return;
         };
         _ = file_panel_ops.setFileTreeSelection(self, current_index);
-        if (target.row_kind == .root) {
-            switch (sel) {
-                0 => file_panel_ops.startFileTreeEdit(self, .create_file),
-                1 => file_panel_ops.startFileTreeEdit(self, .create_directory),
-                2 => file_panel_ops.requestFilePanelPick(self),
-                3 => file_panel_ops.requestFileTreeRootPick(self, .replace),
-                4 => file_panel_ops.requestFileTreeRootPick(self, .add),
-                5 => file_panel_ops.removeFileTreeRoot(self, target.path()),
-                else => {},
-            }
-        } else if (create_allowed and sel == 0) file_panel_ops.startFileTreeEdit(self, .create_file) else if (create_allowed and sel == 1)
-            file_panel_ops.startFileTreeEdit(self, .create_directory)
-        else {
-            const base: usize = if (create_allowed) 2 else 0;
-            if (sel == base) file_panel_ops.startFileTreeEdit(self, .rename) else if (sel == base + 1) file_panel_ops.requestDeleteSelectedFileTreeEntry(self);
-        }
+        const menu = maru.app.file_tree_context_menu;
+        const kind = menu.targetForRow(target.row_kind) orelse return;
+        // Dispatch exactly the catalog that produced the visible rows. A symlink
+        // root omits creation, so its first visible command is Open File.
+        if (menu.actionAt(kind, target.symlink, sel)) |action| switch (action) {
+            .new_file => file_panel_ops.startFileTreeEdit(self, .create_file),
+            .new_folder => file_panel_ops.startFileTreeEdit(self, .create_directory),
+            .rename => file_panel_ops.startFileTreeEdit(self, .rename),
+            .trash => file_panel_ops.requestDeleteSelectedFileTreeEntry(self),
+            .open_file => file_panel_ops.requestFilePanelPick(self),
+            .open_folder => file_panel_ops.requestFileTreeRootPick(self, .replace),
+            .add_root => file_panel_ops.requestFileTreeRootPick(self, .add),
+            .remove_root => file_panel_ops.removeFileTreeRoot(self, target.path()),
+        };
         self.metal_dirty = true;
         return;
     }

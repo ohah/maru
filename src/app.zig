@@ -1,3 +1,4 @@
+pub const file_tree_root_validation = @import("app/file_tree_root_validation.zig");
 pub const language_config = @import("app/language_config.zig");
 pub const cursor_presentation = @import("app/cursor_presentation.zig");
 pub const appearance_config = @import("app/appearance_config.zig");
@@ -12,6 +13,7 @@ pub const chrome_draw_lowering = @import("app/chrome_draw_lowering.zig");
 pub const chrome_text_request = @import("app/chrome_text_request.zig");
 pub const turn_index_cache = @import("app/git/index_cache.zig");
 pub const file_tree_backend = @import("app/file_tree_backend.zig");
+pub const file_tree_context_menu = @import("app/file_tree_context_menu.zig");
 /// Shared archive I/O workers; platform hosts consume the same owner types.
 pub const agent_session_archive_backend = @import("app/agent_session_archive_backend.zig");
 pub const agent_session_archive_detail_backend = @import("app/agent_session_archive_detail_backend.zig");

@@ -6493,7 +6493,6 @@ test "원격 읽기 실패: git 이 없는 것과 연결이 끊긴 것을 가른
     );
 }
 
-
 test "Windows worktree native read returns Unicode content and enforces the byte cap" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const a = std.testing.allocator;
@@ -6518,7 +6517,6 @@ test "Windows worktree native read returns Unicode content and enforces the byte
     try testing.expectEqual(max_output_bytes, capped.bytes.len);
     try testing.expect(capped.truncated);
 }
-
 
 fn fixtureGit(buf: []u8) ?[]const u8 {
     if (comptime builtin.os.tag == .windows) return "git";
@@ -6546,7 +6544,7 @@ fn runQuietWindows(argv: []const []const u8) bool {
         if (argv.len != 3 or !std.mem.eql(u8, argv[1], "-rf")) return false;
         // Resolve both paths before recursive deletion; only this workspace cache is owned.
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = cwd_buf[0..std.Io.Dir.cwd().realPath(testing.io, &cwd_buf) catch return false];
+        const cwd = cwd_buf[0 .. std.Io.Dir.cwd().realPath(testing.io, &cwd_buf) catch return false];
         const cache = std.fs.path.resolve(testing.allocator, &.{ cwd, ".zig-cache" }) catch return false;
         defer testing.allocator.free(cache);
         const target = std.fs.path.resolve(testing.allocator, &.{argv[2]}) catch return false;

@@ -643,12 +643,29 @@ jobs:
             printf 'fence_diagnostic_round=%s\n' "$round"
             zig build test-session-host-release-adapter-profile-authored-attestation-fence -Doptimize=Debug -j3
           done
+      - name: Collect temporary verifier crash diagnosis
+        if: ${{ always() }}
+        run: |
+          mkdir -p zig-out/fence-crashes
+          /usr/bin/log show --last 15m --style compact --predicate 'eventMessage CONTAINS "maru-session-host-profile-authored-attestation-verifier"' > zig-out/fence-system.log 2>&1 || true
+          python3 - <<'PYTHON'
+          import pathlib, shutil, time
+          for root in [pathlib.Path.home() / "Library/Logs/DiagnosticReports", pathlib.Path("/Library/Logs/DiagnosticReports")]:
+              if not root.is_dir():
+                  continue
+              for report in root.rglob("*.ips"):
+                  if "maru-session-host" in report.name and time.time() - report.stat().st_mtime < 1800:
+                      shutil.copy2(report, pathlib.Path("zig-out/fence-crashes") / report.name)
+          PYTHON
       - name: Upload temporary fence diagnosis
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fence-child-errors
-          path: zig-out/fence-child-errors.log
+          path: |
+            zig-out/fence-child-errors.log
+            zig-out/fence-system.log
+            zig-out/fence-crashes
           if-no-files-found: warn
           retention-days: 7
       - name: 저장 전에 캐시를 예산 안으로 줄인다

@@ -806,9 +806,25 @@ fn runCaptureCommon(
     if (!child_reaped and !reapChild(pid, &status)) return error.WaitFailed;
     if (failure) |err| return err;
     const unsigned_status: u32 = @bitCast(status);
-    if (!eof or !c.W.IFEXITED(unsigned_status) or c.W.EXITSTATUS(unsigned_status) != 0)
+    if (!eof or !c.W.IFEXITED(unsigned_status) or c.W.EXITSTATUS(unsigned_status) != 0) {
+        diagnosticTermination(pid, status, eof);
         return error.ChildFailed;
+    }
     return output[0..used];
+}
+
+// Temporary fence diagnosis only: preserve raw child status without changing quiet stdio.
+fn diagnosticTermination(pid: c.pid_t, status: c_int, eof: bool) void {
+    var buffer: [512]u8 = undefined;
+    const raw: u32 = @bitCast(status);
+    const line = std.fmt.bufPrint(&buffer, "component=bounded parent={d} child={d} mode={s} raw_status={d} exited={} exit={d} signaled={} signal={d} eof={}\n", .{
+        c.getpid(), pid, @tagName(@import("builtin").mode), raw, c.W.IFEXITED(raw), c.W.EXITSTATUS(raw), c.W.IFSIGNALED(raw), if (c.W.IFSIGNALED(raw)) @backingInt(c.W.TERMSIG(raw)) else 0, eof,
+    }) catch return;
+    const fd = c.open("zig-out/fence-child-errors.log", .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));
+    if (fd >= 0) {
+        _ = c.write(fd, line.ptr, line.len);
+        _ = c.close(fd);
+    }
 }
 
 fn spawnChild(
@@ -843,17 +859,30 @@ fn childExec(
     max_fd: c_int,
 ) noreturn {
     const stdin_fd = input_fd orelse dev_null;
-    if (c.setpgid(0, 0) != 0 or c.dup2(stdin_fd, 0) < 0 or
-        c.dup2(pipe_fds[1], 1) < 0 or
-        c.dup2(if (stderr_pipe_fds) |fds| fds[1] else if (capture_mode == .merged) pipe_fds[1] else dev_null, 2) < 0) c._exit(126);
-    if (input_fd != null and c.lseek(0, 0, c.SEEK.SET) < 0) c._exit(126);
-    if (directory_fd) |fd| if (c.fchdir(fd) != 0) c._exit(126);
+    if (c.setpgid(0, 0) != 0) diagnosticSetupFailure("setpgid");
+    if (c.dup2(stdin_fd, 0) < 0) diagnosticSetupFailure("dup2-stdin");
+    if (c.dup2(pipe_fds[1], 1) < 0) diagnosticSetupFailure("dup2-stdout");
+    if (c.dup2(if (stderr_pipe_fds) |fds| fds[1] else if (capture_mode == .merged) pipe_fds[1] else dev_null, 2) < 0) diagnosticSetupFailure("dup2-stderr");
+    if (input_fd != null and c.lseek(0, 0, c.SEEK.SET) < 0) diagnosticSetupFailure("lseek");
+    if (directory_fd) |fd| if (c.fchdir(fd) != 0) diagnosticSetupFailure("fchdir");
     var inherited_fd: c_int = 3;
     while (inherited_fd < max_fd) : (inherited_fd += 1) _ = c.close(inherited_fd);
     if (environment) |envp| {
         _ = execve(executable.ptr, argv, envp);
     } else {
         _ = execv(executable.ptr, argv);
+    }
+    diagnosticSetupFailure("exec");
+}
+
+fn diagnosticSetupFailure(stage: []const u8) noreturn {
+    const saved_errno = c._errno().*;
+    var buffer: [256]u8 = undefined;
+    const line = std.fmt.bufPrint(&buffer, "component=child-setup pid={d} parent={d} stage={s} errno={d}\n", .{ c.getpid(), c.getppid(), stage, saved_errno }) catch c._exit(126);
+    const fd = c.open("zig-out/fence-child-errors.log", .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));
+    if (fd >= 0) {
+        _ = c.write(fd, line.ptr, line.len);
+        _ = c.close(fd);
     }
     c._exit(126);
 }

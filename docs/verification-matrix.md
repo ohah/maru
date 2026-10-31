@@ -1,5 +1,9 @@
 # 검증 매트릭스
 
+자동완성 대기 중 원본 전환: `test-editor-completion-source-switch`는 동일 primary의 두 문서와
+다른 root의 실제 두 primary, 명령/타이핑 트리거와 정상 확정/Undo를 대조한다.
+[계획](plans/lsp-completion-source-switch.md)의 순서 제어용 직접 목록 응답을 SDK/HID/픽셀 증거로 확대하지 않는다.
+
 자동완성 상세 요청 종료: `test-editor-completion-resolve-stop`은 실제 fixture PID 종료와
 재시작, LSP 끄기·켜기 및 직접 늦은 응답을 대조한다. 입력·선택·revision·Undo/Redo 보존과
 정상 import 포함 확정/Undo를 [계획](plans/lsp-completion-resolve-stop.md)의 범위로 확인한다.

@@ -2630,7 +2630,7 @@ pub fn reapplyScrollback(self: *AppSession) void {
 /// 지금은 `settingsRowMatches` 가 언어를 안 보므로(그 함수의 계약) 행 집합도 순서도 안 흔들린다 —
 /// 흔들릴 것이 없으므로 붙잡을 것도 없다. 그 성질은 전칭 테스트가 지킨다.
 pub fn reapplyUiLanguage(self: *AppSession) void {
-    maru.i18n.applyPreference(self.loaded_config.config.ui_language);
+    _ = maru.app.language_config.apply(self.loaded_config.config.ui_language);
 }
 
 /// 지금 선택된 행의 config 키를 `buf` 에 **복사해서** 돌려준다.

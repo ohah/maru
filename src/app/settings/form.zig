@@ -12,6 +12,11 @@ pub const Frame = struct {
     rows: []const widget.FieldRow,
     keys: []const []const u8,
     dropdown: []const []const u8,
+    /// Keep storage tokens separate from self-language display names.
+    dropdown_labels: ?[]const []const u8 = null,
+    pub fn displayDropdown(self: Frame) []const []const u8 {
+        return self.dropdown_labels orelse self.dropdown;
+    }
     pub fn key(self: Frame, index: usize) ?[]const u8 {
         return if (index < self.keys.len) self.keys[index] else null;
     }
@@ -59,7 +64,7 @@ pub const Form = struct {
             try append(a, &rows, &keys, field.key, try label(a, field, query), .{ .number = .{ .value = field.value, .min = field.min, .max = field.max } });
         };
         for (enums.items) |field| if (matches(field, selected_section, query)) {
-            try append(a, &rows, &keys, field.key, try label(a, field, query), .{ .dropdown = field.current });
+            try append(a, &rows, &keys, field.key, try label(a, field, query), .{ .dropdown = if (std.mem.eql(u8, field.key, "ui.language")) maru.i18n.preferenceLabel(cfg.ui_language) else field.current });
         };
         for (texts.items) |field| if (matches(field, selected_section, query)) {
             try append(a, &rows, &keys, field.key, try label(a, field, query), .{ .text = field.value });
@@ -73,7 +78,15 @@ pub const Form = struct {
             (try config.schema.enumVariants(a, cfg, keys.items[self.state.selected])) orelse &.{}
         else
             &.{};
-        return .{ .sections = labels.items, .rows = rows.items, .keys = keys.items, .dropdown = variants };
+        const language_variants = if (self.state.dropdown.open and self.state.selected < keys.items.len and std.mem.eql(u8, keys.items[self.state.selected], "ui.language")) blk: {
+            const shown = try a.alloc([]const u8, variants.len);
+            for (variants, 0..) |value, index| {
+                const preference = std.meta.stringToEnum(maru.i18n.Preference, value) orelse return error.InvalidEnum;
+                shown[index] = maru.i18n.preferenceLabel(preference);
+            }
+            break :blk shown;
+        } else null;
+        return .{ .sections = labels.items, .rows = rows.items, .keys = keys.items, .dropdown = variants, .dropdown_labels = language_variants };
     }
 
     pub fn action(self: *Form, a: std.mem.Allocator, cfg: config.Config, f: Frame, intent: widget.Action) !Result {
@@ -95,7 +108,8 @@ pub const Form = struct {
                 const value = switch (row.kind) {
                     .toggle => |v| if (v) "true" else "false",
                     .number => |v| try widget.formatNumberValue(a, v.value),
-                    .dropdown, .text, .font => |v| v,
+                    .dropdown => |v| if (std.mem.eql(u8, key, "ui.language")) @tagName(cfg.ui_language) else v,
+                    .text, .font => |v| v,
                     .color => |v| v.hex,
                     else => return .{},
                 };
@@ -241,4 +255,85 @@ test "Settings form retries a failed boolean write without dropping its original
     try std.testing.expectEqual(first.request.?.generation, retry.request.?.generation);
     try std.testing.expectEqualStrings(first.request.?.value.slice(), retry.request.?.value.slice());
     try std.testing.expect(form.edit.active);
+}
+
+test "Settings form language selected label uses its own language without changing the config" {
+    const old = maru.i18n.lang();
+    defer maru.i18n.setLang(old);
+    maru.i18n.setLang(.en);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var form: Form = .{};
+    setTestQuery(&form, "ui.language");
+    const cfg: config.Config = .{ .ui_language = .ko };
+    const f = try form.frame(arena.allocator(), cfg);
+    try std.testing.expectEqualStrings("ui.language", f.keys[0]);
+    try std.testing.expectEqualStrings("한국어", f.rows[0].kind.dropdown);
+    try std.testing.expectEqual(maru.i18n.Preference.ko, cfg.ui_language);
+}
+test "Settings form language popup separates canonical values from display names" {
+    const old = maru.i18n.lang();
+    defer maru.i18n.setLang(old);
+    maru.i18n.setLang(.en);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var form: Form = .{};
+    setTestQuery(&form, "ui.language");
+    const cfg: config.Config = .{ .ui_language = .en };
+    _ = try form.action(a, cfg, try form.frame(a, cfg), .toggle);
+    const f = try form.frame(a, cfg);
+    try std.testing.expectEqualStrings("auto", f.dropdown[0]);
+    try std.testing.expectEqualStrings("en", f.dropdown[1]);
+    try std.testing.expectEqualStrings("ko", f.dropdown[2]);
+    try std.testing.expectEqualStrings("English", f.displayDropdown()[1]);
+    try std.testing.expectEqualStrings("한국어", f.displayDropdown()[2]);
+}
+test "Settings form language accept persists a token rather than its label" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var form: Form = .{};
+    setTestQuery(&form, "ui.language");
+    const cfg: config.Config = .{ .ui_language = .en };
+    _ = try form.action(a, cfg, try form.frame(a, cfg), .toggle);
+    form.state.dropdown.selected = 2;
+    const result = try form.action(a, cfg, try form.frame(a, cfg), .dropdown_accept);
+    try std.testing.expectEqualStrings("ko", result.request.?.value.slice());
+    try std.testing.expect(result.request.?.persist and result.finish);
+}
+test "Settings form language cancel restores auto token after preview even with a translated label" {
+    const old = maru.i18n.lang();
+    defer maru.i18n.setLang(old);
+    maru.i18n.setLang(.ko);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var form: Form = .{};
+    setTestQuery(&form, "ui.language");
+    var cfg: config.Config = .{ .ui_language = .auto };
+    _ = try form.action(a, cfg, try form.frame(a, cfg), .toggle);
+    form.state.dropdown.selected = 1;
+    const preview = try form.action(a, cfg, try form.frame(a, cfg), .dropdown_preview);
+    try std.testing.expectEqualStrings("en", preview.request.?.value.slice());
+    form.complete(preview.request.?, false, true);
+    cfg.ui_language = .en;
+    const cancel = try form.action(a, cfg, try form.frame(a, cfg), .dropdown_cancel);
+    try std.testing.expectEqualStrings("auto", cancel.request.?.value.slice());
+    try std.testing.expect(!cancel.request.?.persist and cancel.finish);
+}
+test "Settings form other enums keep their original values and display" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var form: Form = .{};
+    setTestQuery(&form, "cursor.shape");
+    const cfg: config.Config = .{};
+    _ = try form.action(a, cfg, try form.frame(a, cfg), .toggle);
+    const f = try form.frame(a, cfg);
+    try std.testing.expect(f.dropdown_labels == null);
+    try std.testing.expectEqualStrings("bar", f.displayDropdown()[1]);
+    form.state.dropdown.selected = 2;
+    const result = try form.action(a, cfg, f, .dropdown_accept);
+    try std.testing.expectEqualStrings("underline", result.request.?.value.slice());
 }

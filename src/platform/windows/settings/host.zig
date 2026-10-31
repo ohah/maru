@@ -212,7 +212,7 @@ pub const Host = struct {
         var arena = std.heap.ArenaAllocator.init(self.a);
         defer arena.deinit();
         const f = self.form.frame(arena.allocator(), self.cfg.*) catch return;
-        const intent = widget.handlePointer(event, f.sections, f.rows, f.dropdown, props, tokens, &self.form.state);
+        const intent = widget.handlePointer(event, f.sections, f.rows, f.displayDropdown(), props, tokens, &self.form.state);
         self.updateScrollContext(intent);
         if (!self.form.state.open and event.phase == .down) self.swallow_left_up = true;
         const result = self.form.action(arena.allocator(), self.cfg.*, f, intent) catch return;
@@ -284,7 +284,7 @@ pub const Host = struct {
         props.metrics.overlay_scroll_gutter_px = settings_scrollbar.metrics.gutterPx();
         const f = try self.form.frame(a, self.cfg.*);
         widget.ensureSelectedVisible(&self.form.state, f.sections, f.rows, props, tokens);
-        try widget.view(&self.form.state, f.sections, f.rows, f.dropdown, props, tokens, a, ops);
+        try widget.view(&self.form.state, f.sections, f.rows, f.displayDropdown(), props, tokens, a, ops);
         if (self.job != null or self.form.state.dropdown.open or self.form.state.picking) {
             self.scrollbar.hide();
             return;

@@ -5910,3 +5910,15 @@ Windows 전용, POSIX 전용, 무조건 절대/상대 판정의 다섯 변이를
 Windows 스크롤백·문자 폭 설정의 진행 상태와 실제 앱 검증 범위는 [Windows 계획](plans/windows-platform.md#2026-11-01-스크롤백문자-폭-설정--검증-중)을 따른다. 집중 게이트는 `test-live-text-config`·`test-windows-settings-shrink`·`test-windows-settings`이며 전체 경계 및 배포 완료를 뜻하지 않는다.
 
 Windows cursor fade의 GPU 합성과 suffix 경계는 `test-windows-positioned-frame`, 공유 시간·포커스 정책은 `test-cursor-presentation`으로 검사한다. [Windows 진행 기록](plans/windows-platform.md)의 실앱·포커스·실패 복구 잔여 범위를 함께 따른다.
+
+### Windows UI 언어 설정
+
+부분 구현. `test-language-config`와 `test-windows-locale`은 기존 i18n 판정에 대한
+호스트 연결, 소유 알림의 언어 전환 및 Windows UTF-16 로케일 태그 경계를 검사한다.
+`test-settings-form`·`test-windows-settings`는 언어 표시명과 저장 토큰의 분리,
+미리보기·취소 및 다른 enum 보존을 검사한다. 각 영역의 독립 결함 5개를 실행으로
+검출했고 정상 Debug·ReleaseFast 대조를 통과했다. 실제 격리 Windows 앱에서 한국어
+저장→영어 미리보기→취소 복원과 `auto` 시작의 OS `ko-KR` 일치를 확인했다.
+전체 경계 4묶음·교차 타깃·문서·wasm 검사도 통과했다. 증거와 실패한 초기 판정의
+제외 이유는 [Windows 진행 기록](plans/windows-platform.md)에 둔다. 최종 설치 갱신,
+외부 설정 reload 및 Windows 전체 설정 연결의 완료를 뜻하지 않는다.

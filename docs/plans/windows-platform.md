@@ -1453,3 +1453,56 @@ SHA-256은 `80b59ad269282795369a336f99053d93d7cef428e251395f8f622f209d9d49cd`다
 1000×640 창으로 실행해 두었고 기존 사용자 창은 종료하지 않았다.
 증거 묶음은 `.zig-cache/appearance-delivery-binding-20261101.json`이다.
 남은 설정·Windows 기능과 실제 OS foreground 전환·macOS 실행 제한은 계속 남아 있다.
+
+### 2026-11-01 Windows 언어 설정 — 연결 중
+
+시작 시 OS 로케일 주입과 `ui.language` 적용이 빠져 있던 경로를 연결했다.
+`GetUserDefaultLocaleName`의 NUL 포함 UTF-16 개수와 실패 0을 검증하고 태그를
+그대로 i18n에 전달한다. 판정은 기존 i18n resolver가 소유한다. 초기 출력 버퍼
+부족 검사는 표준 변환 함수의 용량 가정을 잘못 사용한 패닉을 찾았고, 변환 전에
+UTF-16 유효성과 필요한 UTF-8 용량을 검사하도록 고쳤다. 이 초기 실패는 독립
+결함 검출 횟수로 세지 않는다.
+
+`app.language_config`의 전환 정보를 기존 macOS 호출부도 사용한다. Windows는
+미리보기·확정·취소 때 현재 언어와 캐시된 chrome을 갱신하며, 소유한 채 이전
+번역문과 여전히 일치하는 pending/font 알림만 새 언어로 바꾼다. 다른 오류는
+덮지 않는다. title/status strip도 다시 그리고 실패하면 기존 retry를 유지한다.
+언어 선택은 `English`·`한국어` 표시와 `en`·`ko` 저장값을 분리한다. 원래 값이
+`auto`인 편집도 취소 시 표시명이 아닌 원래 토큰으로 돌아온다. 다른 enum은
+기존 표시와 값을 유지한다.
+
+언어 전환·알림의 다섯 독립 결함과 로케일 어댑터의 다섯 독립 결함은 실제
+컴파일·실행으로 검출했고 원본 Debug·ReleaseFast 검사를 통과했다. 증거는
+`.zig-cache/language-adversarial-20261101/result.json`이다. 표시명 노출·표시명을
+저장함·취소 복원 실패·다른 enum 오분류 등을 깨뜨린 별도 다섯 결함도 검출했고
+복구 후 form 40개·Windows settings 56개가 Debug·ReleaseFast에서 통과했다.
+`.zig-cache/language-labels-adversarial-20261101/result.json`이 해당 증거다.
+
+기본 적용 앱에서 한국어 확정→영어 미리보기→취소 후 한국어 복원을 설정 섹션
+픽셀과 `config_language` 값, 셸 입력 0으로 확인했다. 초기 화면 판정은 기존
+공통/macOS의 고정 영문 `Search`를 번역 대상으로 오인해 실패했으며 보존했다.
+[i18n 범위](../i18n.md)에 따라 번역 대상인 설정 설명·섹션을 판정하고 검색 명령은
+그대로 유지되는지 확인했다. 증거는 `.zig-cache/language-ui-r2-20261101.json`이다.
+이 앱은 표시명 추가 전 버전이며 표시명 추가 후 앱 검증·전체 경계·교차 검사와
+최종 커밋/설치는 아직 남아 있다. 현재 설치본은 기존 `d902c3524`다.
+
+표시명을 추가한 최종 앱에서도 한국어 저장→영어 미리보기→취소 후 한국어 복원을
+다시 통과했다. 선택란과 popup의 `English`·`한국어`를 화면에서 확인했고 저장값은
+`ko`를 유지했다. 증거는 `.zig-cache/language-ui-r3-20261101.json`이다. 같은 앱을
+`auto`로 시작한 별도 검사에서는 실제 Windows API의 `ko-KR`과 `effective=ko`가
+일치했다. `.zig-cache/language-auto-ui-20261101.json`이 해당 증거다. 이 기록의
+입력 설명은 이전 검사의 설명이 남아 있어 startup/실제 API 대조로 정정했고,
+이전 설명도 metadata에 보존했다. 전체 경계·교차·최종 커밋/설치는 아직 남아 있다.
+
+### 2026-11-01 Windows 언어 설정 — 전체 경계 검사
+
+표시명을 포함한 언어 설정 소스로 전체 경계 검사 0/4~3/4를 모두 통과했다.
+교차 타깃·문서 검사와 별도 wasm 빌드도 통과했고, 새 wasm의 SHA-256은 배포본과
+일치했다. 교차 검사 당시의 제품 소스 해시가 유지됐고, 검토한 언어 호출 원장과 문서를 포함한
+전체 경계 검사 입력이 실행 도중 바뀌지 않았음을 확인했다.
+증거는 `.zig-cache/language-boundaries-reviewed-20261101/result.json` 및
+`.zig-cache/language-cross-wasm-20261101/result.json`이다. 교차 컴파일은 macOS/Linux
+앱 실행 증거가 아니다. 앞서 기록한 언어·로케일·표시명 각각의 결함 5개 검출과
+최종 실제 앱 전환/자동 언어 증거를 함께 사용한다. 최종 커밋과 ReleaseFast 설치본
+갱신은 아직 남아 있으며, 현재 설치본은 `d902c3524`다. 우클릭 메뉴의 사이드바·탭·
+파일 트리 연결 및 나머지 Windows 설정·플랫폼 기능도 완료 처리하지 않는다.

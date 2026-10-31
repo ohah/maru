@@ -2553,3 +2553,5 @@ Windows 스크롤백·문자 폭 설정 집중 검사는 `zig build test-live-te
 `zig build test-cursor-presentation`는 커서 깜빡임 조건·포커스 정책·시간 위상·페이드를 검사한다. Windows 실제 커서 픽셀 및 네이티브 포커스 시험을 대신하지 않는다.
 
 `zig build test-native-cell-rect`는 macOS·Windows가 공유하는 커서 변·텍스트 장식선·거터·divider 사각형을 검사한다. `test-windows-positioned-frame`은 Windows 클리핑·suffix·실제 GPU 합성을 함께 확인한다.
+
+`zig build test-language-config test-windows-locale test-settings-form test-windows-settings`는 언어 적용·알림 소유권·OS 로케일의 UTF-16 경계·표시명/저장값 분리를 검사한다. 실제 네이티브 로케일 호출은 Windows에서 실행하고 다른 OS에서는 해당 경우를 건너뛴다.

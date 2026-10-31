@@ -686,3 +686,11 @@ run = "zig build test-cursor-presentation"
 [tasks.test-native-cell-rect]
 description = "Verify shared native cursor and text-decoration pixel geometry"
 run = "zig build test-native-cell-rect"
+
+[tasks.test-language-config]
+description = "Verify shared live language transitions and owned notice translation"
+run = "zig build test-language-config"
+
+[tasks.test-windows-locale]
+description = "Verify bounded native UTF16 locale reads and the actual Windows API"
+run = "zig build test-windows-locale"

@@ -554,22 +554,32 @@ pub fn buildInstalled(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
     defer command.deinit(allocator);
     try buildTransition(&command, allocator, provider, local_dir, remote_dir, .{ .local = native_local, .remote = native_remote }, executable);
     if (!std.mem.eql(u8, provider, "codex")) {
-        try out.appendSlice(allocator, command.items);
+        try appendGuardedInstalled(out, allocator, executable, command.items);
         return;
     }
+    var with_receipt: std.ArrayListUnmanaged(u8) = .empty;
+    defer with_receipt.deinit(allocator);
     const after_read = "IFS= read -r mh_p || :; while IFS= read -r mh_x; do :; done; ";
     const at = (std.mem.indexOf(u8, command.items, after_read) orelse unreachable) + after_read.len;
-    try out.appendSlice(allocator, command.items[0..at]);
+    try with_receipt.appendSlice(allocator, command.items[0..at]);
     const base = (try hookCacheBaseAlloc(allocator, home)) orelse return error.InvalidLogDirectory;
     defer allocator.free(base);
     const registry = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ base, @import("codex_hook_receipt.zig").dirname });
     defer allocator.free(registry);
-    try out.appendSlice(allocator, "case \"$mh_p\" in *'\"SessionStart\"'*) printf '%s\\n' \"$mh_p\" | ");
+    try with_receipt.appendSlice(allocator, "case \"$mh_p\" in *'\"SessionStart\"'*) printf '%s\\n' \"$mh_p\" | ");
+    try appendQuoted(&with_receipt, allocator, executable);
+    try with_receipt.appendSlice(allocator, " agent-hooks codex-receipt ");
+    try appendQuoted(&with_receipt, allocator, registry);
+    try with_receipt.appendSlice(allocator, " 2>/dev/null || : ;; esac; ");
+    try with_receipt.appendSlice(allocator, command.items[at..]);
+    try appendGuardedInstalled(out, allocator, executable, with_receipt.items);
+}
+
+fn appendGuardedInstalled(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, executable: []const u8, script: []const u8) !void {
     try appendQuoted(out, allocator, executable);
-    try out.appendSlice(allocator, " agent-hooks codex-receipt ");
-    try appendQuoted(out, allocator, registry);
-    try out.appendSlice(allocator, " 2>/dev/null || : ;; esac; ");
-    try out.appendSlice(allocator, command.items[at..]);
+    try out.appendSlice(allocator, " agent-hooks guard ");
+    try appendQuoted(out, allocator, script);
+    try out.appendSlice(allocator, " 2>/dev/null || : " ++ marker_comment);
 }
 
 fn appendTransitionRoot(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, legacy: []const u8, native: []const u8, env: []const u8) !void {

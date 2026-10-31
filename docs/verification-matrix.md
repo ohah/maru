@@ -5415,6 +5415,11 @@ macOS에서는 제품 6개와 초기화 4개, 다른 플랫폼에서는 7개 수
 컴파일·실행한다. [제품 연결 계약](plans/editor-async-parse.md#제품-화면-연결)을 따른다.
 모델 preedit 검사를 실제 OS IME 또는 GUI 지연 개선량으로 해석하지 않는다.
 
+외부 고정 주기 ASCII 입력은 [독립 생산자 도구](../tools/editor-input-stream/README.md)로 별도 검증한다.
+키 게시·native 도착·문서 접두부·Metal 표시를 연결하며 메인 정지, 표시 관측 억제,
+입력 ID 누락을 대조한다. SDK 없는 Python 계약은 CI에서 실행한다. 이 기록은 PID 대상 OS 게시이며
+물리 키보드·IME·광학 표시 증거가 아니다.
+
 ## Chromium role 로케이터 테스트 응답 수명
 
 긴 접근성 이름 fixture는 콜백 반환 후 `Op.feed`가 소비할 때까지 JSON 바이트가 유효해야 한다.

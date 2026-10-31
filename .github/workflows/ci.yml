@@ -635,6 +635,13 @@ jobs:
           restore-keys: |
             zig-v2-${{ runner.os }}-sessionhost-debug-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
             zig-v2-${{ runner.os }}-sessionhost-debug-
+      - name: Compare overlapping and ordered process group requests
+        run: |
+          mkdir -p zig-out
+          xcrun clang -O2 -Wall -Wextra tools/session-host/diagnose_setpgid_race.c -o zig-out/fence-setpgid-control
+          for ordering in overlap parent-first child-first child-only; do
+            zig-out/fence-setpgid-control "$ordering" 6000 >> zig-out/fence-setpgid.log
+          done
       - name: Verify session host and live-upgrade fixtures
         run: |
           mkdir -p zig-out
@@ -665,6 +672,7 @@ jobs:
           path: |
             zig-out/fence-child-errors.log
             zig-out/fence-system.log
+            zig-out/fence-setpgid.log
             zig-out/fence-crashes
           if-no-files-found: warn
           retention-days: 7

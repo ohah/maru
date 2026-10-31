@@ -2446,3 +2446,9 @@ python -X utf8 tools/windows/check-osc52-read.py --exe .zig-cache/windows-osc52/
 각 앱은 격리된 프로필·설정·자식과 PID 소유 창을 쓰며, 클립보드 내용을 로그에 남기거나 물리 키·IME 입력을 증명하지 않는다.
 
 Windows 스크롤백·문자 폭 설정 집중 검사는 `zig build test-live-text-config test-windows-settings-shrink test-windows-settings -j2`로 실행한다. 공통 상태 전이, 성공 저장의 단발 축소 권한과 기존 설정 회귀를 검사한다.
+
+`zig build test-live-appearance-config`는 공유 팔레트·기본 색·커서 정책과 reader 명령 수락 재시도를 검사한다. Windows 화면 검증은 별도로 필요하다.
+
+`zig build test-cursor-presentation`는 커서 깜빡임 조건·포커스 정책·시간 위상·페이드를 검사한다. Windows 실제 커서 픽셀 및 네이티브 포커스 시험을 대신하지 않는다.
+
+`zig build test-native-cell-rect`는 macOS·Windows가 공유하는 커서 변·텍스트 장식선·거터·divider 사각형을 검사한다. `test-windows-positioned-frame`은 Windows 클리핑·suffix·실제 GPU 합성을 함께 확인한다.

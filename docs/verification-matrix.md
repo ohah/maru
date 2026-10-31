@@ -5813,3 +5813,5 @@ Windows 전용, POSIX 전용, 무조건 절대/상대 판정의 다섯 변이를
 - `test-input-queue-regression`: 기존 PTY/명령 FIFO 13개와 집계 블록 28개를 실행해 blocking backpressure·부분 consume·포화 후 재개·닫힘 대기 해제·입력 fence를 함께 검사한다. 새 protocol 예약을 사용하지 않는 기존 생산자 계약의 회귀 검사다.
 
 Windows 스크롤백·문자 폭 설정의 진행 상태와 실제 앱 검증 범위는 [Windows 계획](plans/windows-platform.md#2026-11-01-스크롤백문자-폭-설정--검증-중)을 따른다. 집중 게이트는 `test-live-text-config`·`test-windows-settings-shrink`·`test-windows-settings`이며 전체 경계 및 배포 완료를 뜻하지 않는다.
+
+Windows cursor fade의 GPU 합성과 suffix 경계는 `test-windows-positioned-frame`, 공유 시간·포커스 정책은 `test-cursor-presentation`으로 검사한다. [Windows 진행 기록](plans/windows-platform.md)의 실앱·포커스·실패 복구 잔여 범위를 함께 따른다.

@@ -1196,6 +1196,9 @@ pub const PositionedTerminalFrame = struct {
     base: []NativeMetalCell,
     ink: []GpuGlyph,
     overlays: []NativeMetalCell,
+    /// Cursor-only suffix inside overlays. Decorations remain fully opaque
+    /// when the platform composites this suffix and cursor ink separately.
+    cursor_cells: usize = 0,
     cursor_ink: []GpuGlyph,
 
     pub fn deinit(self: *PositionedTerminalFrame, allocator: std.mem.Allocator) void {
@@ -1248,7 +1251,7 @@ pub fn buildPositionedTerminalFrame(
     const owned_cursor_ink = try cursor_ink.toOwnedSlice(allocator);
     setCellsPaneOrigin(base.cells, origin_x, origin_y);
     setCellsPaneOrigin(overlays.cells, origin_x, origin_y);
-    return .{ .base = base.cells, .ink = owned_ink, .overlays = overlays.cells, .cursor_ink = owned_cursor_ink };
+    return .{ .base = base.cells, .ink = owned_ink, .overlays = overlays.cells, .cursor_cells = overlays.cursor_cells, .cursor_ink = owned_cursor_ink };
 }
 
 fn positionedColors() CellColors {
@@ -1310,6 +1313,7 @@ test "positioned glyph layers paint a background once and restore every wide clu
     try std.testing.expectEqual(@as(u32, 20), result.overlays[0].origin_y);
     try std.testing.expectEqual(@as(u32, 0xff00ff00), result.overlays[0].background);
     try std.testing.expectEqual(@as(usize, 2), result.cursor_ink.len);
+    try std.testing.expectEqual(@as(usize, 1), result.cursor_cells);
     for (result.ink, result.cursor_ink) |normal, cursor| {
         try std.testing.expectEqual(normal.x, cursor.x);
         try std.testing.expectEqual(normal.y, cursor.y);

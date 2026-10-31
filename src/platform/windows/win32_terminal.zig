@@ -75,6 +75,20 @@ pub fn appendPositionedFrame(
     atlas_h: u32,
     viewport: [4]f32,
 ) !void {
+    _ = try appendPositionedFrameSplit(allocator, cells, frame, cell_w, cell_h, atlas_w, atlas_h, viewport);
+}
+
+/// Return the clipped cursor suffix length, including reversed positioned ink.
+pub fn appendPositionedFrameSplit(
+    allocator: std.mem.Allocator,
+    cells: *std.ArrayList(d3d11_cells.Cell),
+    frame: metal_frame.PositionedTerminalFrame,
+    cell_w: u32,
+    cell_h: u32,
+    atlas_w: u32,
+    atlas_h: u32,
+    viewport: [4]f32,
+) !usize {
     if (cell_w == 0 or cell_h == 0 or atlas_w == 0 or atlas_h == 0) return error.InvalidFrameMetrics;
     const original_len = cells.items.len;
     errdefer cells.shrinkRetainingCapacity(original_len);
@@ -86,7 +100,14 @@ pub fn appendPositionedFrame(
         const clipped = d3d11_cells.clipCellRect(cellFromGpuGlyph(glyph, atlas_w, atlas_h), viewport) orelse continue;
         try cells.append(allocator, clipped);
     }
-    for (frame.overlays) |native| {
+    if (frame.cursor_cells > frame.overlays.len) return error.InvalidCursorSuffix;
+    const cursor_start = frame.overlays.len - frame.cursor_cells;
+    for (frame.overlays[0..cursor_start]) |native| {
+        const clipped = d3d11_cells.clipCellRect(cellFromNative(native, cell_w, cell_h, atlas_w, atlas_h), viewport) orelse continue;
+        try cells.append(allocator, clipped);
+    }
+    const before_cursor = cells.items.len;
+    for (frame.overlays[cursor_start..]) |native| {
         const clipped = d3d11_cells.clipCellRect(cellFromNative(native, cell_w, cell_h, atlas_w, atlas_h), viewport) orelse continue;
         try cells.append(allocator, clipped);
     }
@@ -94,6 +115,7 @@ pub fn appendPositionedFrame(
         const clipped = d3d11_cells.clipCellRect(cellFromGpuGlyph(glyph, atlas_w, atlas_h), viewport) orelse continue;
         try cells.append(allocator, clipped);
     }
+    return cells.items.len - before_cursor;
 }
 
 /// 한 프레임이 실제로 무엇을 만들었는지. **셋을 갈라 센다** — 합쳐 세면 폰트 경로가 죽어도 합성 글리프가
@@ -181,12 +203,12 @@ pub fn cellFromNative(
     // 폭 0은 "이 칸은 앞 칸의 뒤쪽 절반"이라는 뜻이 아니라 아직 정해지지 않은 값이다 — 1로 접는다.
     const width_cells: u32 = @max(1, native.width);
     return .{
-        .rect = .{
+        .rect = maru.renderer.native_cell_rect.project(native.reserved, .{
             @floatFromInt(native.origin_x + @as(u32, native.col) * cell_w),
             @floatFromInt(native.origin_y + @as(u32, native.row) * cell_h),
             @floatFromInt(cell_w * width_cells),
             @floatFromInt(cell_h),
-        },
+        }, @floatFromInt(cell_w), @floatFromInt(cell_h), 1),
         // Background/cursor sentinels are not an atlas sample at pixel (0,0).
         // That texel can contain ink, which would replace a solid fill with it.
         .uv = if (native.u0 < 0 or native.atlas_width_px == 0 or native.atlas_height_px == 0) .{ -1, -1, -1, -1 } else d3d11_cells.uvFromAtlasRect(

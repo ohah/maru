@@ -14938,12 +14938,7 @@ pub const AppSession = struct {
     fn unfocusedCursorMode(self: *const AppSession) renderer.CursorUnfocused {
         // 모달이 열리면 OS 창이 key여도(window_focused=true) 터미널은 포커스를 잃은 것으로 친다 — 커서를 unfocused
         // 모드(config.cursor.unfocused: hollow/hidden/block)로 그려 모달 중 채운 커서가 활성처럼 보이지 않게 한다.
-        if (self.window_focused and !self.anyOverlayOpen() and !self.force_unfocused_cursor) return .normal;
-        return switch (self.appearance.cursor.unfocused) {
-            .block => .normal,
-            .hollow => .hollow,
-            .hidden => .hidden,
-        };
+        return maru.app.cursor_presentation.unfocusedMode(self.window_focused and !self.force_unfocused_cursor, self.anyOverlayOpen(), self.appearance.cursor.unfocused);
     }
 
     pub fn focusChanged(self: *AppSession, gained: bool) void {
@@ -16507,20 +16502,7 @@ pub const AppSession = struct {
     /// 선형 램프한다(visible 반: 1000→0 사라짐, hidden 반: 0→1000 나타남). fade_ticks==0이면 하드 토글(하위 호환).
     /// fade_ticks는 반주기(half_ticks)로 clamp된다 — 같으면 hold 없는 삼각파. 주사율 무관(ms→tick은 호출처가 환산).
     fn cursorFadeMilliForPhase(ticks_into_half: u32, half_ticks: u32, fade_ticks: u32, visible_half: bool) u32 {
-        const half = @max(half_ticks, @as(u32, 1));
-        const fade = @min(fade_ticks, half); // 페이드는 반주기를 넘지 못함(넘으면 hold 0)
-        if (fade == 0) return if (visible_half) 1000 else 0; // 페이드 끔 = 즉각 on/off
-        const hold = half - fade; // 완전 표시/숨김 유지 tick 수
-        const t = @min(ticks_into_half, half - 1); // 방어적 clamp([0, half))
-        if (visible_half) {
-            if (t < hold) return 1000; // 완전 표시 hold
-            const into = t - hold + 1; // 램프 진행 [1, fade] — 마지막 tick에 정확히 0
-            return 1000 - (1000 * into) / fade; // 1000 → 0 (사라짐)
-        } else {
-            if (t < hold) return 0; // 완전 숨김 hold
-            const into = t - hold + 1; // [1, fade] — 마지막 tick에 정확히 1000(다음 visible 반 시작에 이어짐)
-            return (1000 * into) / fade; // 0 → 1000 (나타남)
-        }
+        return maru.app.cursor_presentation.fadeMilli(ticks_into_half, half_ticks, fade_ticks, visible_half);
     }
 
     /// 커서/오버레이 caret 깜빡임 한 스텝(frame-loop tick마다). 깜빡일 대상이 없으면(steady 커서 + 오버레이 닫힘) 보이는
@@ -16557,8 +16539,7 @@ pub const AppSession = struct {
         // 읽는 게 설정 의미에 맞다: 끈 사람이 vim 모드 전환(DECSCUSR 1/3/5)마다 깜빡임이 되살아나길 원하지 않는다.
         // (maru는 DEC mode 12를 아예 파싱하지 않아 Ghostty의 mode-12 예외는 해당 없음.) `true`면 이 항은 무해한 항등이라
         // DECSCUSR steady(2/4/6)는 그대로 커서를 고정한다.
-        const cursor_blinks = self.appearance.cursor.blink and
-            snap.cursor_blink and snap.cursor_visible and !snap.preedit_present and !self.anyOverlayOpen();
+        const cursor_blinks = maru.app.cursor_presentation.shouldBlink(self.appearance.cursor.blink, snap.cursor_blink, snap.cursor_visible, snap.preedit_present, self.anyOverlayOpen());
         // 텍스트 blink(SGR 5): config text.blink가 켜졌고 보이는 뷰포트에 blink 셀이 있을 때만 위상 진행. viewport_has_blink는
         // need_blink_scan(idle + blink_text)일 때만 스냅샷이 실제 스캔한 값이라, blink_text off면 false로 접혀 안전.
         const text_blinks = self.appearance.blink_text and snap.viewport_has_blink;

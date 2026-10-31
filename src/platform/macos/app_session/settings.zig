@@ -2576,11 +2576,9 @@ pub fn disableFollowSystemTheme(self: *AppSession) void {
 /// core_mutex 아래서 한다(docs/io-render-threading.md PR3 — OSC 4 변경과의 data race 방지). metal_dirty는
 /// 호출자(applyAppearance→applyMetricsPipeline)가 이미 세운다.
 pub fn reapplyConfigPalette(self: *AppSession) void {
-    const palette = self.appearance.theme.palette;
-    const default_colors: maru.session.core_command.DefaultColors = .{
-        .foreground = self.appearance.theme.foreground,
-        .background = self.appearance.theme.background,
-    };
+    const values = maru.app.appearance_config.Values.fromAppearance(self.appearance);
+    const palette = values.palette;
+    const default_colors = values.colors;
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
@@ -2769,11 +2767,7 @@ pub fn fileContentMenuHoldsWebFocus(self: *const AppSession) bool {
 /// (config: block/bar/underline, terminal: block/underline/bar) — `@intFromEnum` 재해석은 bar↔underline을 조용히
 /// 뒤바꾼다. 명시 switch라 어느 쪽에 variant가 늘면 컴파일이 멈춘다(unfocusedCursorMode와 같은 경계 규율).
 pub fn configCursorShape(self: *const AppSession) terminal.CursorShape {
-    return switch (self.appearance.cursor.shape) {
-        .block => .block,
-        .bar => .bar,
-        .underline => .underline,
-    };
+    return maru.app.appearance_config.cursorShape(self.appearance.cursor.shape);
 }
 
 /// config `input.link-detection`을 자동 감지 범위(scopes)로 변환한다. osc8-only=자동 감지 끔(OSC 8 명시 링크만),

@@ -9,6 +9,7 @@ pub const Session = struct {
     pump: maru.app.RuntimeEventPump,
     layout_retry: @import("layout_resize.zig").Retry,
     text_config: maru.app.text_config.State,
+    appearance_config: maru.app.appearance_config.State,
     /// 사이드바 카드에 뜨는 이름. 세션이 소유한다(목록이 커져도 슬라이스가 살아 있어야 한다).
     name: [24]u8,
     name_len: usize,
@@ -72,6 +73,7 @@ pub fn spawn(
     errdefer allocator.destroy(s);
     s.layout_retry = .{};
     s.text_config = .init(maru.app.text_config.Values.fromConfig(opts.cfg));
+    s.appearance_config = .init(maru.app.appearance_config.Values.fromAppearance(opts.appearance));
 
     // **PTY id 는 겹치면 안 된다** — 라우팅이 그 값으로 세션을 가른다.
     //

@@ -2313,3 +2313,10 @@ UTF-16 범위·owner 전환·후보 Return·모든 키 할당 실패의 입력/�
 ReleaseFast 외부 사본에서 실제 OS HID 게시·문서 판·Metal drawable 표시를 연결한다.
 [준비·실행·완전한 A/B 묶음 검증](../tools/editor-input-latency/README.md)과
 [계획 및 사전 실행 범위](plans/editor-input-latency.md)를 따른다. 제품 소스나 기본 빌드는 바꾸지 않는다.
+
+고정 주기의 외부 ASCII 연타는 `prepare.py --stream`으로 별도 사본을 만든 뒤
+`python3 tools/editor-input-stream/run.py --build <사본> --output <새 외부 경로>`로 실행한다.
+`python3 tools/editor-input-stream/verify.py <결과 경로>`로 전체 요청 행렬과 원시 기록을 다시 검사한다.
+`python3 -m unittest discover -s tools/editor-input-stream -p 'test_*.py'`는 SDK 없는 계약 검사다.
+메인 정지·표시 관측 제거·입력 누락 대조와 PID 대상 게시의 한계는
+[독립 생산자 계약](../tools/editor-input-stream/README.md)을 따른다.

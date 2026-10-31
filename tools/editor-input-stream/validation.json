@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "source": "/Users/yoonhb/.cache/maru-agent-artifacts/input-stream-matrix-1/3000-100-typing-0-sync",
+  "source_hashes": {
+    "app.json": "2dc3a522e1242255519da31726bb3863e3a10b1a7bc0da5d79f7ff4cf11ab438",
+    "posts.json": "e4a4746dc3d0e65ef6348f070bdf82f15679b26a01352c1ea61fa8f3821933a1",
+    "record.json": "d6c288c567757ff60bdfd030a1ad79dac7694884d0e30b3e046c1d0041e3f0c1"
+  },
+  "rejected": [
+    {
+      "name": "source-not-restored",
+      "reason": "app failure"
+    },
+    {
+      "name": "foreground-lost",
+      "reason": "app failure"
+    },
+    {
+      "name": "document-tail-invalid",
+      "reason": "document tail"
+    },
+    {
+      "name": "document-prefix-invalid",
+      "reason": "document prefix"
+    },
+    {
+      "name": "key-token-invalid",
+      "reason": "key identity"
+    },
+    {
+      "name": "key-code-invalid",
+      "reason": "key identity"
+    },
+    {
+      "name": "key-missing",
+      "reason": "key admission"
+    },
+    {
+      "name": "key-duplicate",
+      "reason": "key admission"
+    },
+    {
+      "name": "native-arrival-missing",
+      "reason": "input/present clocks"
+    },
+    {
+      "name": "presentation-missing",
+      "reason": "input/present clocks"
+    },
+    {
+      "name": "stale-generation",
+      "reason": "frame prefix"
+    },
+    {
+      "name": "frame-prefix-absent",
+      "reason": "frame prefix"
+    },
+    {
+      "name": "callbacks-pending",
+      "reason": "observer incomplete"
+    },
+    {
+      "name": "final-color-absent",
+      "reason": "final color"
+    },
+    {
+      "name": "actual-mode-wrong",
+      "reason": "final state"
+    },
+    {
+      "name": "actual-view-count-wrong",
+      "reason": "final state"
+    },
+    {
+      "name": "producer-is-app",
+      "reason": "independent producer"
+    },
+    {
+      "name": "schedule-feedback",
+      "reason": "absolute schedule"
+    },
+    {
+      "name": "producer-late",
+      "reason": "producer lateness"
+    },
+    {
+      "name": "post-source-wrong",
+      "reason": "key admission"
+    },
+    {
+      "name": "provider-file-changed",
+      "reason": "provider configuration changed"
+    },
+    {
+      "name": "post-target-wrong",
+      "reason": "key admission"
+    },
+    {
+      "name": "input-count-missing",
+      "reason": "missing input"
+    },
+    {
+      "name": "suppression-in-normal",
+      "reason": "suppression mixed into measurements"
+    }
+  ],
+  "normal_controls": 48
+}

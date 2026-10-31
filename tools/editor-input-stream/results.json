@@ -1,0 +1,805 @@
+{
+  "schema": 1,
+  "protocol": "independent-target-ascii-v1",
+  "root": "/Users/yoonhb/.cache/maru-agent-artifacts/input-stream-matrix-1",
+  "head": "3556d940ffd6e81d597455a6259b8f56f5606d1a",
+  "app_sha256": "69fa9841740299155411503489c7d42f3f1e21fa20c876ec216031c66d2846e6",
+  "producer_sha256": "383c0d0e97c4d87b3ed5992d5147e8a30d4bbc2921c313fe94d484672a039763",
+  "manifest_sha256": "581308a68b7d4b9867c61b0e634bdba47152ee60263cf3d601fd9811517ca4b9",
+  "verifier_sha256": "951f91eddf114636154cca603653337a970e028cb37eaca5cfdb7c4423c6b12a",
+  "summary_tool_sha256": "d1702f3ac39c33d5dbaf0e480f1f57b6563051bf0c5821e2a8175b34f512e2dc",
+  "host": {
+    "macos": "26.5.1",
+    "logical_cpus": 16,
+    "architecture": "arm64"
+  },
+  "processes": 48,
+  "inputs": 1440,
+  "aggregation": "all keys including first; pooled median and nearest-rank p95; no trimming",
+  "conditions": [
+    {
+      "size": 3000,
+      "period_ms": 50,
+      "flow": "shared",
+      "mode": "async",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 55.8815205,
+        "p95": 63.362334,
+        "maximum": 66.627166
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 2.3927085,
+        "p95": 8.516,
+        "maximum": 16.984375
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 54.016062500000004,
+        "p95": 59.805459,
+        "maximum": 60.910875
+      },
+      "coalesced_keys": 0,
+      "final_color_after_last_post_ms": [
+        66.984209,
+        76.700584,
+        70.076
+      ],
+      "max_producer_lateness_ms": 5.649791,
+      "memory_per_process_bytes": [
+        {
+          "peak": 144408576,
+          "baseline_resident": 135299072,
+          "final_resident": 143097856
+        },
+        {
+          "peak": 146243584,
+          "baseline_resident": 135413760,
+          "final_resident": 144965632
+        },
+        {
+          "peak": 147079168,
+          "baseline_resident": 135331840,
+          "final_resident": 145850368
+        }
+      ]
+    },
+    {
+      "size": 3000,
+      "period_ms": 50,
+      "flow": "shared",
+      "mode": "sync",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 30.5825205,
+        "p95": 43.662834,
+        "maximum": 46.123167
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 0.659708,
+        "p95": 5.197667,
+        "maximum": 13.947583
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 29.299124999999997,
+        "p95": 40.172625,
+        "maximum": 42.728042
+      },
+      "coalesced_keys": 0,
+      "final_color_after_last_post_ms": [
+        30.910542,
+        40.662167,
+        27.499292
+      ],
+      "max_producer_lateness_ms": 5.62375,
+      "memory_per_process_bytes": [
+        {
+          "peak": 153354240,
+          "baseline_resident": 144179200,
+          "final_resident": 152403968
+        },
+        {
+          "peak": 144621568,
+          "baseline_resident": 135380992,
+          "final_resident": 143671296
+        },
+        {
+          "peak": 144506880,
+          "baseline_resident": 135200768,
+          "final_resident": 143556608
+        }
+      ]
+    },
+    {
+      "size": 3000,
+      "period_ms": 50,
+      "flow": "typing",
+      "mode": "async",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 45.5968955,
+        "p95": 53.865375,
+        "maximum": 70.124792
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 1.513,
+        "p95": 8.139667,
+        "maximum": 33.844958
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 42.6231045,
+        "p95": 49.555208,
+        "maximum": 58.163542
+      },
+      "coalesced_keys": 0,
+      "final_color_after_last_post_ms": [
+        67.203583,
+        54.9865,
+        48.942541
+      ],
+      "max_producer_lateness_ms": 7.1905,
+      "memory_per_process_bytes": [
+        {
+          "peak": 145457152,
+          "baseline_resident": 134561792,
+          "final_resident": 142770176
+        },
+        {
+          "peak": 147390464,
+          "baseline_resident": 134594560,
+          "final_resident": 144785408
+        },
+        {
+          "peak": 145440768,
+          "baseline_resident": 134709248,
+          "final_resident": 142770176
+        }
+      ]
+    },
+    {
+      "size": 3000,
+      "period_ms": 50,
+      "flow": "typing",
+      "mode": "sync",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 33.1780625,
+        "p95": 45.355209,
+        "maximum": 62.511208
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 0.598958,
+        "p95": 4.737167,
+        "maximum": 36.4685
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 32.465021,
+        "p95": 42.430542,
+        "maximum": 45.446291
+      },
+      "coalesced_keys": 0,
+      "final_color_after_last_post_ms": [
+        27.366875,
+        28.4975,
+        33.8
+      ],
+      "max_producer_lateness_ms": 5.560958,
+      "memory_per_process_bytes": [
+        {
+          "peak": 146522112,
+          "baseline_resident": 134381568,
+          "final_resident": 143982592
+        },
+        {
+          "peak": 147308544,
+          "baseline_resident": 135069696,
+          "final_resident": 144785408
+        },
+        {
+          "peak": 146800640,
+          "baseline_resident": 134578176,
+          "final_resident": 144293888
+        }
+      ]
+    },
+    {
+      "size": 3000,
+      "period_ms": 100,
+      "flow": "shared",
+      "mode": "async",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 51.692688000000004,
+        "p95": 60.796209,
+        "maximum": 63.841625
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 0.6045,
+        "p95": 2.656334,
+        "maximum": 11.575458
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 51.078417,
+        "p95": 59.908,
+        "maximum": 61.203375
+      },
+      "coalesced_keys": 0,
+      "final_color_after_last_post_ms": [
+        72.322459,
+        69.124959,
+        58.667917
+      ],
+      "max_producer_lateness_ms": 5.502208,
+      "memory_per_process_bytes": [
+        {
+          "peak": 146554880,
+          "baseline_resident": 135528448,
+          "final_resident": 145244160
+        },
+        {
+          "peak": 146227200,
+          "baseline_resident": 135135232,
+          "final_resident": 144916480
+        },
+        {
+          "peak": 146325504,
+          "baseline_resident": 135266304,
+          "final_resident": 145162240
+        }
+      ]
+    },
+    {
+      "size": 3000,
+      "period_ms": 100,
+      "flow": "shared",
+      "mode": "sync",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 33.309771,
+        "p95": 41.500083,
+        "maximum": 49.071833
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 0.623542,
+        "p95": 5.163167,
+        "maximum": 15.481917
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 32.5731245,
+        "p95": 40.739334,
+        "maximum": 42.5975
+      },
+      "coalesced_keys": 0,
+      "final_color_after_last_post_ms": [
+        35.3735,
+        35.501208,
+        30.616167
+      ],
+      "max_producer_lateness_ms": 5.548292,
+      "memory_per_process_bytes": [
+        {
+          "peak": 145899520,
+          "baseline_resident": 135168000,
+          "final_resident": 144949248
+        },
+        {
+          "peak": 144785408,
+          "baseline_resident": 135233536,
+          "final_resident": 143835136
+        },
+        {
+          "peak": 145620992,
+          "baseline_resident": 135135232,
+          "final_resident": 144850944
+        }
+      ]
+    },
+    {
+      "size": 3000,
+      "period_ms": 100,
+      "flow": "typing",
+      "mode": "async",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 43.628375,
+        "p95": 52.79,
+        "maximum": 75.417042
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 1.1368545,
+        "p95": 5.37275,
+        "maximum": 33.074292
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 42.419458500000005,
+        "p95": 47.741417,
+        "maximum": 52.007333
+      },
+      "coalesced_keys": 0,
+      "final_color_after_last_post_ms": [
+        60.70975,
+        57.417708,
+        69.480041
+      ],
+      "max_producer_lateness_ms": 5.572041,
+      "memory_per_process_bytes": [
+        {
+          "peak": 145932288,
+          "baseline_resident": 134840320,
+          "final_resident": 143212544
+        },
+        {
+          "peak": 147324928,
+          "baseline_resident": 134610944,
+          "final_resident": 144637952
+        },
+        {
+          "peak": 147783680,
+          "baseline_resident": 134610944,
+          "final_resident": 145178624
+        }
+      ]
+    },
+    {
+      "size": 3000,
+      "period_ms": 100,
+      "flow": "typing",
+      "mode": "sync",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 37.020687,
+        "p95": 46.402208,
+        "maximum": 55.7875
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 0.586646,
+        "p95": 2.241875,
+        "maximum": 16.865375
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 36.354541499999996,
+        "p95": 42.57,
+        "maximum": 45.548167
+      },
+      "coalesced_keys": 0,
+      "final_color_after_last_post_ms": [
+        35.849375,
+        34.840375,
+        35.926084
+      ],
+      "max_producer_lateness_ms": 5.55425,
+      "memory_per_process_bytes": [
+        {
+          "peak": 145031168,
+          "baseline_resident": 134365184,
+          "final_resident": 142524416
+        },
+        {
+          "peak": 145031168,
+          "baseline_resident": 134463488,
+          "final_resident": 142491648
+        },
+        {
+          "peak": 145309696,
+          "baseline_resident": 134692864,
+          "final_resident": 142802944
+        }
+      ]
+    },
+    {
+      "size": 50000,
+      "period_ms": 50,
+      "flow": "shared",
+      "mode": "async",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 104.9701665,
+        "p95": 328.9925,
+        "maximum": 333.53
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 77.4200835,
+        "p95": 285.850583,
+        "maximum": 288.105958
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 30.3136455,
+        "p95": 43.842125,
+        "maximum": 46.90325
+      },
+      "coalesced_keys": 51,
+      "final_color_after_last_post_ms": [
+        869.856958,
+        865.822542,
+        858.728875
+      ],
+      "max_producer_lateness_ms": 5.634125,
+      "memory_per_process_bytes": [
+        {
+          "peak": 332972032,
+          "baseline_resident": 306839552,
+          "final_resident": 318750720
+        },
+        {
+          "peak": 331923456,
+          "baseline_resident": 306774016,
+          "final_resident": 320143360
+        },
+        {
+          "peak": 333955072,
+          "baseline_resident": 307167232,
+          "final_resident": 318783488
+        }
+      ]
+    },
+    {
+      "size": 50000,
+      "period_ms": 50,
+      "flow": "shared",
+      "mode": "sync",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 234.3927915,
+        "p95": 413.959333,
+        "maximum": 562.671167
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 86.5552915,
+        "p95": 180.702417,
+        "maximum": 193.664166
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 140.3591455,
+        "p95": 242.29325,
+        "maximum": 378.255333
+      },
+      "coalesced_keys": 58,
+      "final_color_after_last_post_ms": [
+        154.561333,
+        191.715209,
+        216.149541
+      ],
+      "max_producer_lateness_ms": 5.635084,
+      "memory_per_process_bytes": [
+        {
+          "peak": 477478912,
+          "baseline_resident": 460652544,
+          "final_resident": 472481792
+        },
+        {
+          "peak": 475463680,
+          "baseline_resident": 460636160,
+          "final_resident": 471203840
+        },
+        {
+          "peak": 476643328,
+          "baseline_resident": 460701696,
+          "final_resident": 472563712
+        }
+      ]
+    },
+    {
+      "size": 50000,
+      "period_ms": 50,
+      "flow": "typing",
+      "mode": "async",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 71.824771,
+        "p95": 181.6125,
+        "maximum": 197.594833
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 42.260645999999994,
+        "p95": 143.08525,
+        "maximum": 155.6465
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 29.7327085,
+        "p95": 40.875541,
+        "maximum": 42.908042
+      },
+      "coalesced_keys": 42,
+      "final_color_after_last_post_ms": [
+        818.898208,
+        819.897083,
+        669.483292
+      ],
+      "max_producer_lateness_ms": 5.653291,
+      "memory_per_process_bytes": [
+        {
+          "peak": 320258048,
+          "baseline_resident": 294813696,
+          "final_resident": 304447488
+        },
+        {
+          "peak": 319733760,
+          "baseline_resident": 294600704,
+          "final_resident": 303775744
+        },
+        {
+          "peak": 319717376,
+          "baseline_resident": 294928384,
+          "final_resident": 306872320
+        }
+      ]
+    },
+    {
+      "size": 50000,
+      "period_ms": 50,
+      "flow": "typing",
+      "mode": "sync",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 90.9977915,
+        "p95": 177.063209,
+        "maximum": 265.869333
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 16.391000499999997,
+        "p95": 53.046833,
+        "maximum": 93.345458
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 78.387292,
+        "p95": 130.829875,
+        "maximum": 205.292083
+      },
+      "coalesced_keys": 25,
+      "final_color_after_last_post_ms": [
+        67.201208,
+        122.71475,
+        111.913416
+      ],
+      "max_producer_lateness_ms": 5.628625,
+      "memory_per_process_bytes": [
+        {
+          "peak": 319766528,
+          "baseline_resident": 298385408,
+          "final_resident": 315588608
+        },
+        {
+          "peak": 318685184,
+          "baseline_resident": 298418176,
+          "final_resident": 314458112
+        },
+        {
+          "peak": 319127552,
+          "baseline_resident": 298434560,
+          "final_resident": 314851328
+        }
+      ]
+    },
+    {
+      "size": 50000,
+      "period_ms": 100,
+      "flow": "shared",
+      "mode": "async",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 176.766125,
+        "p95": 336.772375,
+        "maximum": 344.50425
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 145.9636665,
+        "p95": 301.4935,
+        "maximum": 305.70875
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 32.7754165,
+        "p95": 41.545667,
+        "maximum": 45.50425
+      },
+      "coalesced_keys": 53,
+      "final_color_after_last_post_ms": [
+        895.751875,
+        911.945208,
+        1111.836875
+      ],
+      "max_producer_lateness_ms": 5.594583,
+      "memory_per_process_bytes": [
+        {
+          "peak": 334364672,
+          "baseline_resident": 306790400,
+          "final_resident": 319930368
+        },
+        {
+          "peak": 332824576,
+          "baseline_resident": 307642368,
+          "final_resident": 316260352
+        },
+        {
+          "peak": 332873728,
+          "baseline_resident": 306118656,
+          "final_resident": 316489728
+        }
+      ]
+    },
+    {
+      "size": 50000,
+      "period_ms": 100,
+      "flow": "shared",
+      "mode": "sync",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 69.998375,
+        "p95": 83.164792,
+        "maximum": 128.91175
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 0.661188,
+        "p95": 5.8295,
+        "maximum": 12.512167
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 69.447438,
+        "p95": 78.701166,
+        "maximum": 117.99225
+      },
+      "coalesced_keys": 0,
+      "final_color_after_last_post_ms": [
+        74.833833,
+        73.02025,
+        70.493667
+      ],
+      "max_producer_lateness_ms": 5.612167,
+      "memory_per_process_bytes": [
+        {
+          "peak": 477626368,
+          "baseline_resident": 460472320,
+          "final_resident": 472580096
+        },
+        {
+          "peak": 475987968,
+          "baseline_resident": 460095488,
+          "final_resident": 471793664
+        },
+        {
+          "peak": 478461952,
+          "baseline_resident": 460128256,
+          "final_resident": 474300416
+        }
+      ]
+    },
+    {
+      "size": 50000,
+      "period_ms": 100,
+      "flow": "typing",
+      "mode": "async",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 92.4215205,
+        "p95": 181.315208,
+        "maximum": 193.323875
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 54.9784165,
+        "p95": 150.246542,
+        "maximum": 154.032792
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 34.233562500000005,
+        "p95": 42.797416,
+        "maximum": 45.703083
+      },
+      "coalesced_keys": 41,
+      "final_color_after_last_post_ms": [
+        715.284084,
+        728.020958,
+        741.051125
+      ],
+      "max_producer_lateness_ms": 5.75025,
+      "memory_per_process_bytes": [
+        {
+          "peak": 320339968,
+          "baseline_resident": 294846464,
+          "final_resident": 306937856
+        },
+        {
+          "peak": 320356352,
+          "baseline_resident": 294912000,
+          "final_resident": 306970624
+        },
+        {
+          "peak": 322813952,
+          "baseline_resident": 294748160,
+          "final_resident": 310968320
+        }
+      ]
+    },
+    {
+      "size": 50000,
+      "period_ms": 100,
+      "flow": "typing",
+      "mode": "sync",
+      "processes": 3,
+      "post_to_present_ms": {
+        "count": 90,
+        "median": 66.54275,
+        "p95": 76.056375,
+        "maximum": 82.026542
+      },
+      "post_to_native_ms": {
+        "count": 90,
+        "median": 0.6553545000000001,
+        "p95": 3.829292,
+        "maximum": 13.030875
+      },
+      "native_to_present_ms": {
+        "count": 90,
+        "median": 64.60668749999999,
+        "p95": 74.487084,
+        "maximum": 81.414958
+      },
+      "coalesced_keys": 0,
+      "final_color_after_last_post_ms": [
+        74.123208,
+        61.997375,
+        71.414625
+      ],
+      "max_producer_lateness_ms": 5.616417,
+      "memory_per_process_bytes": [
+        {
+          "peak": 311754752,
+          "baseline_resident": 298254336,
+          "final_resident": 307478528
+        },
+        {
+          "peak": 312131584,
+          "baseline_resident": 298614784,
+          "final_resident": 307871744
+        },
+        {
+          "peak": 311885824,
+          "baseline_resident": 298336256,
+          "final_resident": 307642368
+        }
+      ]
+    }
+  ]
+}
